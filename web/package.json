@@ -1,0 +1,29 @@
+{
+  "name": "@agentparty/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentparty/shared": "workspace:*",
+    "@fontsource/jetbrains-mono": "^5.2.5",
+    "@fontsource/permanent-marker": "^5.2.5",
+    "@fontsource/zcool-kuaile": "^5.2.5",
+    "dompurify": "^3.2.6",
+    "highlight.js": "^11.11.1",
+    "marked": "^15.0.12",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.5.2",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.0"
+  }
+}

@@ -4,6 +4,7 @@
   "workspaces": [
     "worker",
     "cli",
-    "shared"
+    "shared",
+    "web"
   ]
 }

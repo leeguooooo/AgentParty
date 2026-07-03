@@ -17,6 +17,14 @@
       "new_sqlite_classes": ["ChannelDO"]
     }
   ],
+  // web 构建产物由 Workers Assets 托管；run_worker_first 保证 API 路径进 worker，
+  // 其余路径（含 /c/:slug 分享链接）直接走 SPA 静态资源，不消耗 worker 调用
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/openapi.json"]
+  },
   "d1_databases": [
     {
       "binding": "DB",

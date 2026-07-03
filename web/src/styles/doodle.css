@@ -1,0 +1,218 @@
+/* ============================================================================
+   AgentParty doodle 皮 — 手法提炼自 blog doodle-shell.css：
+   - 纸白底 + 淡点阵网格
+   - 手绘抖动边框：::before + 不规则 border-radius + filter:url(#wobble)
+     （滤镜静态缓存，内容层 z-index:1 不过滤镜，文字保持锐利）
+   - 偏移实心阴影（5px 6px 0）
+   - 蜡笔色 pill / 状态点
+   配方：doodle 做外壳、mono 做内容。
+   ========================================================================== */
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  margin: 0;
+  background: var(--t-bg);
+  color: var(--t-text);
+  overflow-x: clip;
+  max-width: 100%;
+}
+
+body {
+  font-family: var(--t-sans);
+  font-size: 15px;
+  line-height: 1.6;
+  background-image: radial-gradient(rgba(0, 0, 0, 0.035) 1.3px, transparent 1.3px);
+  background-size: 24px 24px;
+}
+
+::selection { background: var(--d-yellow); }
+
+/* ---- 手绘抖动外框：套在任何无自带 ::before 的元素上 ---- */
+.doodle-frame,
+.d-pill,
+.d-card,
+.d-btn {
+  position: relative;
+  background: var(--t-panel);
+}
+.doodle-frame::before,
+.d-pill::before,
+.d-card::before,
+.d-btn::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border: 2.5px solid var(--d-ink);
+  border-radius: 15px 9px 17px 8px / 9px 16px 8px 15px;
+  filter: url(#wobble);
+  pointer-events: none;
+  z-index: 0;
+}
+.doodle-frame > *,
+.d-pill > *,
+.d-card > *,
+.d-btn > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---- 消息卡片外壳：白面板 + 墨线抖动边框 + 偏移阴影 ---- */
+.d-card {
+  border-radius: 14px 10px 16px 9px / 10px 15px 9px 14px;
+  box-shadow: 5px 6px 0 var(--d-shadow);
+  padding: 14px 16px 15px;
+}
+
+/* ---- 手绘 pill（频道列表项 / presence 胶囊 / 按钮） ---- */
+.d-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--d-marker);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--d-ink);
+  text-decoration: none;
+  padding: 7px 14px 8px;
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+.d-pill:nth-child(odd) { transform: rotate(-1.4deg); }
+.d-pill:nth-child(even) { transform: rotate(1.2deg); }
+.d-pill:hover { transform: translate(-1px, -2px) rotate(0); }
+.d-pill.is-active { background: var(--d-yellow); }
+
+.d-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--d-marker);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--d-ink);
+  border: none;
+  padding: 9px 18px 10px;
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+.d-btn:hover { transform: rotate(-2deg) translateY(-1px); }
+.d-btn--primary { background: var(--d-yellow); }
+
+/* ---- 状态点（presence 蜡笔色映射） ---- */
+.d-dot {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  border: 2px solid var(--d-ink);
+  border-radius: 60% 40% 55% 45%;
+  filter: url(#wobbleHi);
+  background: var(--p-offline);
+}
+.d-dot--working { background: var(--p-working); }
+.d-dot--waiting { background: var(--p-waiting); }
+.d-dot--blocked { background: var(--p-blocked); }
+.d-dot--done { background: var(--p-done); }
+.d-dot--offline { background: var(--p-offline); }
+
+/* ---- 高亮块（黄底 marker 高亮，标题用） ---- */
+.d-hl {
+  background: var(--d-yellow);
+  padding: 0 8px;
+  border-radius: 9px 14px 8px 13px / 13px 8px 14px 9px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* ---- 标题字 ---- */
+.d-title {
+  font-family: var(--d-marker);
+  font-weight: 400;
+  color: var(--d-ink);
+  letter-spacing: 0.5px;
+}
+.d-hand { font-family: var(--d-hand); letter-spacing: 0.5px; }
+
+/* ---- mono 内容（消息正文里的代码、seq、时间戳、提示行） ---- */
+.t-mono { font-family: var(--t-mono); }
+
+.d-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--t-mono);
+  font-size: 12px;
+  color: var(--t-muted);
+}
+
+/* ---- 消息正文（marked 渲染产物）：正文清晰，doodle 只做点缀 ---- */
+.msg-body { color: var(--t-body); font-size: 14.5px; }
+.msg-body > :first-child { margin-top: 6px; }
+.msg-body > :last-child { margin-bottom: 0; }
+.msg-body a { color: var(--d-blue); text-decoration-thickness: 2px; }
+.msg-body pre,
+.msg-body :not(pre) > code {
+  font-family: var(--t-mono);
+  border: 2px solid var(--d-ink);
+  border-radius: 10px 6px 11px 5px / 6px 11px 5px 10px;
+  background: var(--t-panel2);
+}
+.msg-body :not(pre) > code { padding: 0.05em 0.35em; font-size: 0.88em; }
+.msg-body pre {
+  padding: 10px 13px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-x: auto;
+  box-shadow: 4px 5px 0 var(--d-shadow);
+}
+.msg-body pre code { border: none; background: none; padding: 0; }
+.msg-body blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 5px solid var(--d-yellow);
+  background: #fffbe9;
+  border-radius: 4px 12px 12px 4px;
+}
+
+/* ---- status 消息：时间线分隔条样式 ---- */
+.msg-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--t-mono);
+  font-size: 12px;
+  color: var(--t-muted);
+}
+.msg-status::before,
+.msg-status::after {
+  content: "";
+  flex: 1;
+  height: 3px;
+  background: var(--t-faint);
+  border-radius: 3px;
+  filter: url(#wobble);
+}
+
+/* ---- 空状态装饰行 ---- */
+.d-empty {
+  font-family: var(--t-mono);
+  font-size: 13px;
+  color: var(--t-dim);
+  text-align: center;
+  padding: 28px 0;
+}
+.d-empty::before { content: "$ "; color: var(--t-accent); }
+
+/* ---- 墨线粗分隔 ---- */
+.d-rule {
+  height: 4px;
+  background: var(--d-ink);
+  border-radius: 4px;
+  filter: url(#wobble);
+  border: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.001s !important; animation-duration: 0.001s !important; }
+}
