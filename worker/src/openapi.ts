@@ -43,6 +43,38 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/agents": {
+      post: {
+        summary: "mint an agent token from a human account session (owner = caller's account)",
+        security: [{ bearer: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name"],
+                properties: {
+                  name: { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$" },
+                  channel_scope: {
+                    type: "string",
+                    pattern: "^[a-z0-9][a-z0-9-]{0,63}$",
+                    description: "optional: pin the minted agent to a single channel slug",
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": { description: "agent token minted; plaintext returned only once" },
+          "400": { description: "invalid name or channel_scope" },
+          "401": { description: "missing or invalid bearer" },
+          "403": { description: "not a human account session (readonly/agent tokens cannot mint)" },
+          "409": { description: "name already exists" },
+        },
+      },
+    },
     "/api/me": {
       get: {
         summary: "current signed-in identity (name, email, kind, role, owner)",

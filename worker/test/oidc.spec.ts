@@ -140,7 +140,10 @@ describe("oidc end-to-end via SELF.fetch", () => {
   it("GET /api/config exposes the configured issuer + client_id", async () => {
     const res = await SELF.fetch("http://ap.test/api/config");
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ oidc: { issuer: CONFIGURED_ISSUER, client_id: CLIENT_ID } });
+    expect(await res.json()).toEqual({
+      oidc: { issuer: CONFIGURED_ISSUER, client_id: CLIENT_ID },
+      cli_client_id: "agentparty-cli",
+    });
   });
 
   it("accepts an OIDC human end-to-end: list, create channel, post message", async () => {

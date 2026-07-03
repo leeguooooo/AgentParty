@@ -52,9 +52,42 @@ const AP_FORWARD_HEADERS = [
 // 所属人标签：铸造时可选写入，须 header-safe（可打印 ASCII，含空格）以便经 x-ap-owner 转发给 do
 const OWNER_MAX = 128;
 const OWNER_RE = /^[\x20-\x7e]{1,128}$/;
+// CLI 用来跑回环 PKCE 的 public client（account.leeguoo.com 已登记）。CLI 拉 /api/config 得知用哪个
+const CLI_CLIENT_ID = "agentparty-cli";
 
 function errorBody(code: RestErrorCode, message: string) {
   return { error: { code, message } };
+}
+
+// 铸/重铸 token 的落库逻辑（/api/tokens 与 /api/agents 共用）：
+// 同名活 token 冲突返回 conflict；同名已吊销 token 复用行覆盖（owner/channel_scope 一并刷新），
+// 否则插新行。返回一次性明文 token。
+async function persistToken(
+  db: D1Database,
+  opts: { name: string; role: TokenRole; owner: string; channelScope: string | null },
+): Promise<{ token: string } | { conflict: true }> {
+  const existing = await db
+    .prepare("SELECT id, revoked_at FROM tokens WHERE name = ?")
+    .bind(opts.name)
+    .first<{ id: number; revoked_at: number | null }>();
+  if (existing && existing.revoked_at === null) return { conflict: true };
+  const token = randomToken();
+  const hash = await sha256Hex(token);
+  const now = Date.now();
+  if (existing) {
+    await db
+      .prepare(
+        "UPDATE tokens SET hash = ?, role = ?, owner = ?, channel_scope = ?, created_at = ?, revoked_at = NULL WHERE id = ?",
+      )
+      .bind(hash, opts.role, opts.owner, opts.channelScope, now, existing.id)
+      .run();
+  } else {
+    await db
+      .prepare("INSERT INTO tokens (hash, name, role, owner, channel_scope, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(hash, opts.name, opts.role, opts.owner, opts.channelScope, now)
+      .run();
+  }
+  return { token };
 }
 
 const requireAdmin = createMiddleware<AppContext>(async (c, next) => {
@@ -174,10 +207,14 @@ const app = new Hono<AppContext>();
 app.get("/api/health", (c) => c.json({ ok: true }));
 app.get("/openapi.json", (c) => c.json(openapiDocument));
 
-// 公开配置：web 据此决定是否显示 "Sign in with leeguoo"（未配 OIDC 时 oidc:null）
+// 公开配置：web 据此决定是否显示 "Sign in with leeguoo"（未配 OIDC 时 oidc:null）；
+// cli_client_id 供 CLI party login 知道用哪个 public client 跑回环 PKCE（spec §4）
 app.get("/api/config", (c) => {
   const oidc = oidcConfigFromEnv(c.env);
-  return c.json({ oidc: oidc ? { issuer: oidc.issuer, client_id: oidc.clientId } : null });
+  return c.json({
+    oidc: oidc ? { issuer: oidc.issuer, client_id: oidc.clientId } : null,
+    cli_client_id: CLI_CLIENT_ID,
+  });
 });
 
 // 当前登录身份：web topbar 显示 "signed in as <email 或 name>"（spec §10）
@@ -220,30 +257,59 @@ app.post("/api/tokens", requireAdmin, async (c) => {
   if (RESERVED_NAMES.includes(name)) {
     return c.json(errorBody("bad_request", "name is reserved"), 400);
   }
-  const existing = await c.env.DB.prepare("SELECT id, revoked_at FROM tokens WHERE name = ?")
-    .bind(name)
-    .first<{ id: number; revoked_at: number | null }>();
-  if (existing && existing.revoked_at === null) {
+  const result = await persistToken(c.env.DB, { name, role: role as TokenRole, owner, channelScope });
+  if ("conflict" in result) {
     return c.json(errorBody("conflict", "token name already exists, revoke it first"), 409);
   }
-  const token = randomToken();
-  const hash = await sha256Hex(token);
-  const now = Date.now();
-  if (existing) {
-    // 已吊销的同名 token 允许重铸，复用行（owner/channel_scope 一并覆盖，scope 未给则清空）
-    await c.env.DB.prepare(
-      "UPDATE tokens SET hash = ?, role = ?, owner = ?, channel_scope = ?, created_at = ?, revoked_at = NULL WHERE id = ?",
-    )
-      .bind(hash, role, owner, channelScope, now, existing.id)
-      .run();
-  } else {
-    await c.env.DB.prepare(
-      "INSERT INTO tokens (hash, name, role, owner, channel_scope, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-      .bind(hash, name, role, owner, channelScope, now)
-      .run();
+  const { token } = result;
+  return c.json(
+    channelScope !== null ? { token, name, role, owner, channel_scope: channelScope } : { token, name, role, owner },
+    201,
+  );
+});
+
+// 账号维度自助铸 agent token（spec §5.3 / P3）：无需 ADMIN_SECRET，凭 human 账号会话即可铸。
+//   - 须 human 身份且带账号锚点（OIDC 人类，或带 owner 的 human ap_ token）；readonly/agent token 一律 403。
+//   - owner 恒 = 铸造者自己的 principal.account，绝不接受客户端传 owner（否则可冒充他人账号铸 token）。
+//   - role 固定 agent；channel_scope 可选（须合法 slug），用于把外派 agent 限死单频道。
+// ADMIN_SECRET 的 /api/tokens 保留给 CI/bootstrap。
+app.post("/api/agents", requireBearer, async (c) => {
+  const identity = c.get("identity");
+  // readonly/agent token 不能铸；legacy human token（无 account）也不行——无从确定归属账号。
+  // kind 单独判 human 不够：readonly token 的 kind 也是 human，故必须 role === "human"。
+  if (identity.role !== "human" || identity.account == null) {
+    return c.json(
+      errorBody("forbidden", "minting agent tokens requires a human account session (party login)"),
+      403,
+    );
   }
-  return c.json(channelScope !== null ? { token, name, role, owner, channel_scope: channelScope } : { token, name, role, owner }, 201);
+  const body = (await c.req.json().catch(() => null)) as { name?: unknown; channel_scope?: unknown } | null;
+  const name = typeof body?.name === "string" ? body.name : "";
+  if (!NAME_RE.test(name)) {
+    return c.json(errorBody("bad_request", "valid name required"), 400);
+  }
+  if (RESERVED_NAMES.includes(name)) {
+    return c.json(errorBody("bad_request", "name is reserved"), 400);
+  }
+  const channelScope =
+    body?.channel_scope === undefined || body?.channel_scope === null ? null : body.channel_scope;
+  if (channelScope !== null && (typeof channelScope !== "string" || !SLUG_RE.test(channelScope))) {
+    return c.json(errorBody("bad_request", "channel_scope must be a valid channel slug"), 400);
+  }
+  // owner = 铸造者账号（不取客户端值）。铸出的 agent token account 因此 = 铸造者账号，
+  // 与铸造者共享同一账号 → 天然能进铸造者的私有频道（canAccessChannel 账号规则）。
+  const owner = identity.account;
+  const result = await persistToken(c.env.DB, { name, role: "agent", owner, channelScope });
+  if ("conflict" in result) {
+    return c.json(errorBody("conflict", "token name already exists, revoke it first"), 409);
+  }
+  const { token } = result;
+  return c.json(
+    channelScope !== null
+      ? { token, name, role: "agent", owner, channel_scope: channelScope }
+      : { token, name, role: "agent", owner },
+    201,
+  );
 });
 
 app.delete("/api/tokens/:name", requireAdmin, async (c) => {
