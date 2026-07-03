@@ -47,6 +47,7 @@ export interface ChannelInfo {
   title: string | null;
   topic: string | null;
   kind: "standing" | "temp";
+  mode: "normal" | "party";
   created_at: number;
   archived_at: number | null;
   last_message: ChannelLastMessage | null;

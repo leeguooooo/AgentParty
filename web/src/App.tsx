@@ -102,7 +102,13 @@ export function App() {
         </aside>
         <main className="app-main">
           {slug !== null ? (
-            <ChannelPage key={slug} slug={slug} token={token} onAuthFailed={onAuthFailed} />
+            <ChannelPage
+              key={slug}
+              slug={slug}
+              token={token}
+              mode={channels?.find((c) => c.slug === slug)?.mode ?? "normal"}
+              onAuthFailed={onAuthFailed}
+            />
           ) : (
             <Home channels={channels} onOpen={openChannel} />
           )}

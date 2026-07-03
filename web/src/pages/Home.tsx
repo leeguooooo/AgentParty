@@ -27,7 +27,10 @@ export function Home({ channels, onOpen }: Props) {
                 {c.archived_at !== null && <span className="home-card-archived">archived</span>}
                 <PresenceDots channel={c} />
               </header>
-              <h3 className="home-card-title">{c.title ?? c.slug}</h3>
+              <h3 className="home-card-title">
+                {c.title ?? c.slug}
+                {c.mode === "party" && <span className="d-hl party-badge">PARTY</span>}
+              </h3>
               {c.topic !== null && c.topic !== "" && <p className="home-card-topic">{c.topic}</p>}
               {preview !== null && <p className="home-card-last t-mono">{preview}</p>}
             </button>

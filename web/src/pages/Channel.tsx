@@ -11,12 +11,13 @@ import { channelReducer, initialChannelState } from "../state";
 interface Props {
   slug: string;
   token: string;
+  mode: "normal" | "party";
   onAuthFailed(message: string): void;
 }
 
 const MENTION_RE = /@([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
 
-export function ChannelPage({ slug, token, onAuthFailed }: Props) {
+export function ChannelPage({ slug, token, mode, onAuthFailed }: Props) {
   const [state, dispatch] = useReducer(channelReducer, initialChannelState);
   const [draft, setDraft] = useState("");
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -95,7 +96,12 @@ export function ChannelPage({ slug, token, onAuthFailed }: Props) {
 
   return (
     <div className="chan">
-      <PresenceBar presence={state.presence} participants={state.participants} status={state.status} />
+      <PresenceBar
+        presence={state.presence}
+        participants={state.participants}
+        status={state.status}
+        party={mode === "party"}
+      />
       <div className="stream" ref={streamRef} onScroll={onScroll}>
         {state.messages.map((m) => (
           <MessageCard key={m.seq} msg={m} self={state.self} />

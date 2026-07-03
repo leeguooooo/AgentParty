@@ -9,6 +9,7 @@ interface Props {
   presence: Record<string, PresenceEntry>;
   participants: Sender[];
   status: SocketStatus;
+  party?: boolean; // mode=party 的频道在最左挂蜡笔黄 PARTY 徽章
 }
 
 interface Item {
@@ -18,7 +19,7 @@ interface Item {
   ts: number | null;
 }
 
-export function PresenceBar({ presence, participants, status }: Props) {
+export function PresenceBar({ presence, participants, status, party = false }: Props) {
   // 相对时间 30s 刷一次
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -38,6 +39,7 @@ export function PresenceBar({ presence, participants, status }: Props) {
 
   return (
     <div className="presence-bar">
+      {party && <span className="d-hl party-badge">PARTY</span>}
       {items.map((it) => (
         <span key={it.name} className={`d-pill presence-pill${it.state === "blocked" ? " presence-pill--blocked" : ""}`}>
           <span className={`d-dot d-dot--${it.state}`} />
@@ -47,6 +49,9 @@ export function PresenceBar({ presence, participants, status }: Props) {
         </span>
       ))}
       {items.length === 0 && <span className="t-mono presence-empty">nobody here yet</span>}
+      <span className="t-mono presence-count" title="connected participants">
+        {participants.length} in
+      </span>
       <span className="conn t-mono" data-s={status}>
         {status === "open" ? "● live" : `◌ ${status}…`}
       </span>
