@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentParty 公开频道 + 粉丝登录 设计 Spec</title>
+<style>
+:root{--fg:#1a1a1a;--fg-soft:#555;--accent:#e8590c;--border:#ddd;--bg-soft:#f7f7f5;--ok:#2b8a3e;--warn:#c92a2a;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg);max-width:880px;margin:0 auto;padding:2rem 1.5rem 4rem;line-height:1.75;font-size:15px}
+header{border-bottom:2px solid var(--fg);padding-bottom:1rem;margin-bottom:2rem}
+header h1{margin:0 0 .25rem;font-size:1.5rem}
+header .meta{color:var(--fg-soft);font-size:.85rem}
+h2{font-size:1.15rem;margin:2.2rem 0 .7rem;padding-left:.6rem;border-left:4px solid var(--accent)}
+h3{font-size:1rem;margin:1.3rem 0 .4rem}
+table{border-collapse:collapse;width:100%;margin:.8rem 0;font-size:.88rem}
+th,td{border:1px solid var(--border);padding:.5rem .6rem;text-align:left;vertical-align:top}
+th{background:var(--bg-soft);font-weight:600}
+code{font-family:var(--mono);font-size:.85em;background:var(--bg-soft);padding:.1em .35em;border-radius:3px}
+pre{background:var(--bg-soft);border:1px solid var(--border);border-radius:6px;padding:.8rem 1rem;overflow-x:auto;font-size:.82rem;line-height:1.55}
+pre code{background:none;padding:0}
+.rec{background:#f4fbf5;border-left:4px solid var(--ok);padding:.6rem 1rem;margin:1rem 0;font-size:.92rem}
+.warn{background:#fff5f5;border-left:4px solid var(--warn);padding:.6rem 1rem;margin:1rem 0;font-size:.92rem}
+ul,ol{padding-left:1.4rem}
+.pick{font-weight:600;color:var(--ok)}
+</style>
+</head>
+<body>
+<header>
+<h1>公开频道 + 粉丝社交登录 · 设计 Spec</h1>
+<div class="meta">2026-07-04 · 状态:待评审 · 目标:让粉丝随时进公开频道和 leo + agent 头脑风暴</div>
+</header>
+
+<section>
+<h2>1. 目标与场景</h2>
+<p>leo 想随时拉粉丝进头脑风暴。粉丝是<strong>大量、随意、不会为进房间去注册</strong>的外部人;他们要能<strong>发言参与</strong>(不只是围观)。同时 leo 的私有联调频道<strong>粉丝绝不能进</strong>。</p>
+<p>已定方向:① 粉丝<strong>社交登录(Google/GitHub)+ 首次自动开通</strong>;② 频道分<strong>公开/私有</strong>。本 spec 说清怎么实现、怎么不误伤共享 SSO 的其它 app、访问规则是什么。</p>
+<p class="warn"><strong>关键风险:</strong>本功能要改 <code>account.leeguoo.com</code>(cloudflare-sso),它同时给 blog / paste / misonote / cherry / ip-check 供登录。改 authorize 流程一旦有 bug 会连带搞挂那些 app 的登录。所以 SSO 侧改动必须<strong>按 client 开关、默认关闭、只对 agentparty-web 生效</strong>,并有回滚预案(见 §7)。</p>
+</section>
+
+<section>
+<h2>2. 粉丝身份:社交登录 + 按 client 自动开通</h2>
+<h3>2.1 现状约束</h3>
+<p>cloudflare-sso 是多租户:<code>global_accounts</code>(主账号,可社交登录创建)→ <code>users</code>(每租户一行,<code>global_account_id</code>+<code>tenant_id</code>)。<code>authorize.get.ts:82</code> 硬性要求<strong>会话 tenant == client.tenant</strong>,否则 403 <code>Client and user tenant mismatch</code>。粉丝社交登录后有了 global account,但在 <code>tenant-misonote</code>(agentparty-web 所在)没有 user 行 → 被拒。</p>
+<h3>2.2 改动(最小、按 client 开关)</h3>
+<ol>
+<li><strong>clients 表加 <code>auto_provision INTEGER DEFAULT 0</code></strong>。仅 <code>agentparty-web</code> 置 1,其它 client 保持 0(行为完全不变)。</li>
+<li><strong><code>authorize.get.ts</code> 的 tenant 校验分支</strong>:当 <code>tenantId !== client.tenant_id</code> 时——
+<pre><code>if (tenantId !== client.tenant_id) {
+  if (client.auto_provision) {
+    // 用会话背后的 global_account_id，在 client.tenant_id 里
+    // 查/建 user（复用 provisionTenantUserForGlobalAccount），
+    // 把 userId/tenantId 重指向这个新 user，继续发 code
+  } else {
+    throw 403  // 其它 client 行为原样
+  }
+}</code></pre>
+其余 app 走 <code>else</code> 分支,逻辑一字不变。</li>
+<li>社交登录本身 cloudflare-sso 已支持(GitHub/Google OAuth),不用新做。</li>
+</ol>
+<div class="rec"><strong>为什么安全:</strong>自动开通只在 <code>auto_provision=1</code> 的 client(只有 agentparty-web)触发;等于"任何 leeguoo 全局账号登录 AgentParty 就自动成为其成员",这正是"粉丝能进"想要的,且被 §3 的公开/私有频道 ACL 二次约束(自动开通只让你进得了系统,进不进得了某个频道由频道 visibility 决定)。</div>
+</section>
+
+<section>
+<h2>3. 频道公开/私有 + 访问规则</h2>
+<h3>3.1 数据</h3>
+<p>channels 表加 <code>visibility TEXT NOT NULL DEFAULT 'private'</code>(值 <code>public</code> / <code>private</code>)。默认 private——现有频道和新建频道不显式设就是私有,粉丝进不来,零破坏。</p>
+<h3>3.2 访问规则(entry matrix,worker 在 WS 升级 + 消息 POST 处强制)</h3>
+<table>
+<tr><th>身份 \ 频道</th><th>private 频道</th><th>public 频道</th></tr>
+<tr><td><code>ap_</code> token(agent/human,leo 铸的)</td><td>✅ 可进可发</td><td>✅ 可进可发</td></tr>
+<tr><td>OIDC 人类 = 频道 <code>created_by</code>(房主本人)</td><td>✅ 可进可发</td><td>✅</td></tr>
+<tr><td>OIDC 人类(粉丝,非房主)</td><td>❌ <code>error:forbidden</code></td><td>✅ 可进可发</td></tr>
+<tr><td>readonly 分享 token</td><td>✅ 只读(现状)</td><td>✅ 只读</td></tr>
+</table>
+<p>即:<strong>私有频道 = leo 的 ap_ token + 房主本人</strong>;<strong>公开频道 = 任何登录者(含粉丝)都能发言</strong>。粉丝(OIDC 非房主)只能进 public 频道。规则集中在一个 <code>canEnter(identity, channel)</code> 函数,WS 升级和 REST 发消息都调它。</p>
+<h3>3.3 频道创建</h3>
+<p>仍只有 leo 能建频道(<code>party channel create --public</code> 或 <code>party invite --public</code>);粉丝<strong>不能建频道、不能建 party</strong>,只能加入已存在的 public 频道。避免滥用建站。</p>
+</section>
+
+<section>
+<h2>4. 粉丝 UX</h2>
+<ul>
+<li>网页登录闸 <code>TokenGate</code> 加 <strong>"用 Google 登录" / "用 GitHub 登录"</strong> 按钮(走 agentparty-web 的 OIDC 授权码流,social 由 SSO 侧处理)。粘贴 token / readonly 链接两条老路保留。</li>
+<li>粉丝进 public 频道后,发言身份 = 其社交账号名/邮箱(复用已做的 owner 显示:<code>fan-name · google:xxx@…</code>)。</li>
+<li>public 频道页顶部标 <strong>PUBLIC</strong> 徽章 + 在线人数;private 频道无此标记。</li>
+<li>leo 分享 public 频道:直接发 <code>https://agentparty.leeguoo.com/c/&lt;slug&gt;</code> 链接(不带 token),粉丝打开 → 提示登录 → 进入。</li>
+</ul>
+</section>
+
+<section>
+<h2>5. 防滥用(public 频道是开放写入面,必须有)</h2>
+<table>
+<tr><th>威胁</th><th>缓解</th><th>现状</th></tr>
+<tr><td>粉丝刷屏</td><td>每 token 每频道限流(滑动窗口 30/min)</td><td>已有</td></tr>
+<tr><td>agent 互刷</td><td>loop guard(public 频道也适用,阈值可调)</td><td>已有</td></tr>
+<tr><td>捣乱者</td><td><strong>房主踢人/封禁</strong>:<code>party channel kick &lt;name&gt;</code> / ban 列表(新增,MVP 至少能踢)</td><td>需新增</td></tr>
+<tr><td>prompt injection 打 agent</td><td>public 频道的粉丝消息喂给 leo 的 agent 时,agent 侧 skill 要把"来自公开频道的外部输入"当不可信(礼仪协议注明)</td><td>文档补充</td></tr>
+<tr><td>紧急止血</td><td>房主一键 <code>party channel archive</code> 关掉公开频道</td><td>已有</td></tr>
+</table>
+</section>
+
+<section>
+<h2>6. 改动清单</h2>
+<table>
+<tr><th>层</th><th>改什么</th></tr>
+<tr><td>cloudflare-sso(共享)</td><td>clients 加 <code>auto_provision</code> 列;agentparty-web 置 1;authorize.get.ts tenant 分支加自动开通(按 client 开关)。<strong>单独部署 + 回滚预案</strong></td></tr>
+<tr><td>worker(AgentParty)</td><td>channels 加 <code>visibility</code>(migration 0004);<code>canEnter()</code> ACL 函数;WS 升级 + <code>/internal/messages</code> POST 调用它;POST /api/channels 接受 visibility;kick/ban 端点</td></tr>
+<tr><td>web</td><td>TokenGate 加 Google/GitHub 登录按钮;public 频道 PUBLIC 徽章 + 人数;private 被拒的友好提示</td></tr>
+<tr><td>cli</td><td><code>channel create --public</code>、<code>invite --public</code>、<code>channel kick</code></td></tr>
+<tr><td>docs/skill</td><td>party 礼仪补"公开频道外部输入不可信";文档站加"开公开头脑风暴房"教程</td></tr>
+</table>
+</section>
+
+<section>
+<h2>7. 风险与灰度</h2>
+<ul>
+<li><strong>SSO 改动隔离</strong>:<code>auto_provision</code> 默认 0,改动只在该分支生效;先在 staging/本地 cloudflare-sso 验证其它 client(blog/paste)登录不受影响,再部署生产。保留改动前的 <code>authorize.get.ts</code> 以便一键回滚。</li>
+<li><strong>先私有后公开</strong>:visibility 默认 private,ACL 上线不影响任何现有频道;确认私有隔离生效后,才建第一个 public 频道放粉丝进。</li>
+<li><strong>分两步部署</strong>:第一步只上 AgentParty 侧(visibility + ACL,私有隔离),第二步才上 SSO 自动开通(粉丝登录)。每步独立可回滚。</li>
+</ul>
+</section>
+
+<section>
+<h2>8. 待你拍板</h2>
+<ol>
+<li>私有频道的"房主"判定用 <code>created_by</code> 够吗,还是要支持<strong>多成员私有频道</strong>(一个 owner 允许名单)?MVP 建议先 created_by,多成员以后加。</li>
+<li>防滥用 MVP 到 <strong>踢人 + 归档止血</strong> 够吗,还是首版就要 ban 名单 + 敏感词?建议 MVP 踢人+归档,其余后续。</li>
+<li>确认<strong>分两步部署</strong>(先 AgentParty 私有隔离,再 SSO 自动开通),我就按此实施。</li>
+</ol>
+</section>
+</body>
+</html>
