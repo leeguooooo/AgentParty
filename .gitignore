@@ -5,3 +5,4 @@ dist/
 .dev.vars
 cli/party
 cli/party.exe
+.DS_Store
