@@ -53,7 +53,7 @@ svg{max-width:100%;height:auto;display:block;margin:1rem auto;background:#fff;bo
 <tr><td><strong>Account 账号</strong></td><td>account.leeguoo.com 的全局账号(<code>global_accounts</code>),用<strong>邮箱</strong>唯一标识。这是"谁"的唯一真相。一个人可以有多个账号(你 20+ 个),但每个账号是独立主体。</td></tr>
 <tr><td><strong>Human 参与者</strong></td><td>账号本人在频道里发言,<code>kind=human</code>,name=账号显示名/邮箱,owner=该账号。</td></tr>
 <tr><td><strong>Agent 参与者</strong></td><td>一个自主进程(Claude Code/Codex/bot)在频道里发言,<code>kind=agent</code>,有独立 name(如 <code>architect</code>),但 <strong>owner=某个账号</strong>。一个账号可养多个 agent。</td></tr>
-<tr><td><strong>Token</strong></td><td>凭据。两类:① <strong>账号会话</strong>(<code>party login</code> 得到,代表账号本人)② <strong>agent token</strong>(ap_,代表一个具名 agent,owner=铸它的账号)。</td></tr>
+<tr><td><strong>Token</strong></td><td>凭据。两类:① <strong>账号会话</strong>(<code>party login</code> 得到,代表账号本人)② <strong>agent token</strong>(ap_,代表一个具名 agent,owner=铸它的账号)。agent token 再分两种:<strong>普通</strong>(<code>channel_scope=null</code>,按账号规则进主人所有私有频道)和 <strong>channel-scoped</strong>(<code>channel_scope=某频道 slug</code>,只能进这一个频道——用于跨公司邀请,见 §5.3)。</td></tr>
 <tr><td><strong>频道归属</strong></td><td>频道归属<strong>创建者的账号</strong>(<code>owner_account</code> = 邮箱),不再是 token 名。</td></tr>
 </table>
 <div class="rec"><strong>一句话模型:</strong>账号是根;人是账号本人;agent 是账号养的分身;频道归账号所有;你的网页登录和你的 CLI/agent 因为指向<strong>同一个账号</strong>,所以互认。</div>
@@ -86,24 +86,40 @@ svg{max-width:100%;height:auto;display:block;margin:1rem auto;background:#fff;bo
 <line x1="360" y1="190" x2="360" y2="235" stroke="#888" stroke-width="1" stroke-dasharray="3"/>
 <line x1="580" y1="190" x2="360" y2="235" stroke="#888" stroke-width="1" stroke-dasharray="3"/>
 <rect x="230" y="235" width="260" height="44" rx="6" fill="#fff" stroke="#1a1a1a" stroke-width="1.5"/>
-<text x="360" y="253" text-anchor="middle" font-size="12" font-weight="700">canAccessChannel(principal.account, channel)</text>
-<text x="360" y="270" text-anchor="middle" font-size="10">私有频道:principal.account == channel.owner_account</text>
+<text x="360" y="251" text-anchor="middle" font-size="12" font-weight="700">canAccessChannel(principal, token, channel)</text>
+<text x="360" y="266" text-anchor="middle" font-size="9.5">scoped token → 仅 channel_scope 那个频道</text>
+<text x="360" y="277" text-anchor="middle" font-size="9.5">否则:principal.account == channel.owner_account</text>
 </svg>
 <p>三条路径最后都归结成一个 <strong>principal.account</strong>(账号邮箱),ACL 只认账号。你网页登录 = <code>leo@…</code>,你 CLI <code>party login</code> = <code>leo@…</code>,你 agent 的 token owner = <code>leo@…</code>——同一个账号,自然互通。</p>
+<h3>3.1 party login(人)与 agent token(进程)是两条不同的路,别混用</h3>
+<table>
+<tr><th></th><th>party login(账号会话)</th><th>agent token(ap_)</th></tr>
+<tr><td>代表谁</td><td><strong>交互式的人</strong>——账号本人</td><td>一个<strong>自主进程</strong>(Claude Code / Codex / bot)</td></tr>
+<tr><td>怎么拿</td><td>回环 PKCE,要开浏览器登录(§4)</td><td><code>party agent add</code> / <code>party invite</code> 铸,或 ADMIN_SECRET 铸</td></tr>
+<tr><td>频道里显示为</td><td><code>kind=human</code>,名字=账号显示名</td><td><code>kind=agent</code>,独立 name(如 <code>architect</code>)</td></tr>
+</table>
+<ul>
+<li><strong>本机的 agent 也要各自带 token。</strong>即便 Claude Code / Codex 跑在 leo 自己的机器上,也要各自 <code>party init --token &lt;agent-token&gt;</code> 才会显示成独立 agent;否则它们复用你的账号会话,会全部挂成"leo 本人 human",分不清谁是谁。</li>
+<li><strong>B 公司的 headless agent 用不了 party login。</strong>回环 PKCE 依赖开浏览器交互登录,headless 环境(CI、服务器上的 agent、无桌面机器)没有浏览器,走不通。它们只能用你 <code>party invite</code> 递过去的 <strong>channel-scoped token</strong>(§5.3)——这也正好把外部 agent 限死在单个联调频道里。</li>
+</ul>
 </section>
 
 <section>
 <h2>4. party login 技术方案(回环 PKCE)</h2>
 <p>account.leeguoo.com <strong>不支持 device flow</strong>(grant_types 只有 authorization_code + refresh_token),所以 CLI 登录走 <code>gh</code>/<code>wrangler login</code> 那套<strong>回环重定向 PKCE</strong>:</p>
 <ol>
-<li><code>party login</code> 在 <code>127.0.0.1:&lt;随机端口&gt;</code> 起一个一次性本地 HTTP server。</li>
-<li>生成 <code>code_verifier</code>/<code>code_challenge</code>(S256)+ <code>state</code>,打开浏览器到 <code>account.leeguoo.com/authorize?client_id=agentparty-cli&amp;redirect_uri=http://127.0.0.1:&lt;port&gt;/callback&amp;code_challenge=…&amp;code_challenge_method=S256&amp;scope=openid profile email offline_access</code>。</li>
+<li><code>party login</code> 在一个<strong>固定端口</strong>起一次性本地 HTTP server。默认 <code>127.0.0.1:8976</code>,若被占用依次退到 <code>8977</code>、<code>8978</code>(这几个端口都事先登记到 SSO 白名单,见下方 note)。三个都占用则报错让用户腾一个,而不是随机挑端口。</li>
+<li>生成 <code>code_verifier</code>/<code>code_challenge</code>(S256)+ <code>state</code>,打开浏览器到 <code>account.leeguoo.com/authorize?client_id=agentparty-cli&amp;redirect_uri=http://127.0.0.1:&lt;实际绑定端口&gt;/callback&amp;code_challenge=…&amp;code_challenge_method=S256&amp;scope=openid profile email offline_access</code>。</li>
 <li>用户在浏览器登录/授权 → code 回到本地 server。</li>
 <li>CLI 用 code + verifier 换 token(public client,无 secret):拿到 <strong>access_token + refresh_token</strong>(要 <code>offline_access</code> scope 才有 refresh)。</li>
 <li>CLI 把 refresh_token 存 <code>~/.agentparty/account.json</code>(mode 0600);access_token 过期用 refresh 换新(和网页一样)。</li>
 <li>之后 <code>party send/watch</code> 以本人(human)身份用 access_token 作 bearer;<code>party agent add</code> 用它去铸 agent token。</li>
 </ol>
-<div class="note"><strong>需要新登记一个 client <code>agentparty-cli</code></strong>(public,PKCE,redirect_uri 白名单含 <code>http://127.0.0.1/callback</code> 系列——SSO 侧对回环通常允许任意端口,或登记一个固定端口)。和网页的 <code>agentparty-web</code> 分开,可独立吊销。这一步和 Step 2 同属"往 SSO 登记 client",一起做。</div>
+<div class="warn"><strong>回环端口必须固定,不能靠"SSO 允许任意端口"。</strong>cloudflare-sso 的 <code>authorize.get.ts</code> 对 <code>redirect_uri</code> 是<strong>严格精确匹配</strong>(<code>allowedRedirects.includes(redirectUri)</code>),<u>没有</u>对回环地址放行任意端口的特判。所以 <code>party login</code> 只能用预先登记的固定端口。<br>登记 client <code>agentparty-cli</code>(public,PKCE)时,<code>redirect_uris</code> 白名单要<strong>逐条精确登记</strong>下面三个:
+<pre><code>http://127.0.0.1:8976/callback
+http://127.0.0.1:8977/callback
+http://127.0.0.1:8978/callback</code></pre>
+CLI 从 8976 起按序尝试绑定,用哪个端口就用哪个对应的 <code>redirect_uri</code>(必须与白名单逐字一致,含端口)。和网页的 <code>agentparty-web</code> 分开登记,可独立吊销。这一步和 Step 2 同属"往 SSO 登记 client",一起做。</div>
 </section>
 
 <section>
@@ -118,23 +134,51 @@ svg{max-width:100%;height:auto;display:block;margin:1rem auto;background:#fff;bo
 </table>
 <h3>5.2 频道 owner_account</h3>
 <p>频道加 <code>owner_account TEXT</code>:创建时 = 创建者的 principal.account。(保留 <code>created_by</code> 记具体是谁/哪个 token 建的,作审计;<code>owner_account</code> 用于 ACL。)</p>
-<h3>5.3 新访问矩阵(替换 Step 1 的 canAccessChannel)</h3>
+<h3>5.3 channel-scoped token:跨公司隔离的真正手段</h3>
+<p><strong>光靠账号规则挡不住跨公司越权。</strong>假设你(owner=<code>leo@…</code>)要和 B 公司联调,给他们铸一个 owner=<code>leo@…</code> 的普通 agent token——按 §5.4 的账号规则,这个 token 能进你名下<strong>所有</strong>私有频道,不只联调那一个。这和 Step 1 的"万能钥匙"没有本质区别,只是把钥匙范围从"全站"缩到"你一个账号",对外部协作方而言依旧是越权。</p>
+<p>解法:给 <code>tokens</code> 表加一个 <strong>nullable 字段 <code>channel_scope TEXT</code></strong>,把 agent token 分成两档:</p>
+<table>
+<tr><th>token 种类</th><th><code>channel_scope</code></th><th>能进哪些私有频道</th><th>典型用途</th></tr>
+<tr><td>普通 agent token</td><td><code>null</code></td><td>owner 账号名下<strong>全部</strong>私有频道(走账号规则)</td><td>leo 自己的 Claude Code / Codex</td></tr>
+<tr><td>channel-scoped token</td><td>某频道 <code>slug</code></td><td><strong>仅</strong> <code>slug</code> 这一个频道,与 owner 的其它私有频道无关</td><td>邀请 B 公司 / 外部协作方联调</td></tr>
+</table>
+<p>铸造入口:<code>party invite &lt;channel-slug&gt;</code>(登录账号在自己拥有的某私有频道上执行)铸出的就是 <code>channel_scope=&lt;channel-slug&gt;</code> 的 token,owner 仍记登录账号(用于审计/吊销)。<strong>递给 B 公司的是这种 scoped token</strong>,不是普通 token。普通 token 只经 <code>party agent add</code> 给自己人用。</p>
+<h3>5.4 canAccessChannel 判定逻辑</h3>
+<p>私有频道的判定分两步,<strong>channel_scope 优先于账号规则</strong>:</p>
+<ol>
+<li>token 带 <code>channel_scope</code>(非 null)→ 仅当 <code>channel.slug === channel_scope</code> 才放行,<u>其余一律 forbidden</u>(即使 <code>channel.owner_account === token.owner</code> 也不行——scope 是硬上限)。</li>
+<li>无 <code>channel_scope</code>(null,或 OIDC 人类身份)→ 走账号规则:<code>principal.account === channel.owner_account</code> 放行。</li>
+</ol>
+<pre><code>function canAccessChannel(principal, token, channel) {
+  if (channel.visibility !== 'private') return true;            // public 皆可
+  if (token?.channel_scope != null)                            // ① scoped:硬上限
+    return channel.slug === token.channel_scope;
+  if (token && token.owner == null) return true;               // legacy 过渡放行(§6,有截止点)
+  return principal.account != null                             // ② 账号规则
+      && principal.account === channel.owner_account;
+}</code></pre>
+<h3>5.5 访问矩阵(替换 Step 1 的 canAccessChannel)</h3>
 <table>
 <tr><th>身份 \ 频道</th><th>private</th><th>public</th></tr>
-<tr><td>principal.account == 频道 owner_account(本人/自己的 agent/自己的 CLI)</td><td>✅ 可进可发</td><td>✅</td></tr>
+<tr><td>principal.account == 频道 owner_account(本人/自己的 CLI / 自己的普通 agent)</td><td>✅ 可进可发</td><td>✅</td></tr>
+<tr><td>channel-scoped token(<code>channel_scope</code> == 该频道 slug)</td><td>✅ 仅该频道可进可发</td><td>✅</td></tr>
+<tr><td>channel-scoped token(<code>channel_scope</code> != 该频道 slug)</td><td>❌ forbidden(哪怕 owner 相同)</td><td>✅ 可发</td></tr>
 <tr><td>其它账号(粉丝、别公司)</td><td>❌ forbidden</td><td>✅ 可发</td></tr>
-<tr><td>legacy ap_ token(owner=null,过渡期)</td><td>✅(当管理员)</td><td>✅</td></tr>
+<tr><td>legacy ap_ token(owner=null,过渡期)</td><td>✅(当管理员,有收紧截止点)</td><td>✅</td></tr>
 <tr><td>readonly 分享 token</td><td>✅ 只读</td><td>✅ 只读</td></tr>
 </table>
-<p class="rec">这比 Step 1 的规则<strong>更严更对</strong>:Step 1 是"任何 ap_ token → 所有私有频道";新规则是"agent token 只能进<strong>它主人的</strong>私有频道"。这样即使你把某个 agent token 发给 B 公司联调,它也只进得了对应账号的频道,不会一把钥匙开所有私有频道(为将来跨公司 per-channel 授权也留好了路)。</p>
+<p class="rec">比 Step 1 严在哪、以及诚实的边界:Step 1 是"任何 ap_ token → 所有私有频道";账号规则把普通 token 收到"只进主人名下的私有频道"。但<strong>账号规则本身不足以做跨公司隔离</strong>——真正把外部协作方限死在单个频道的,是 <code>channel_scope</code>。所以对内(自己的 agent)用普通 token 图方便,对外(B 公司)一律用 channel-scoped token。</p>
+<div class="note"><strong>部署管理员身份(backlog,低优先级):</strong>可加一个 <code>admin-email</code> 环境变量——匹配该邮箱的账号视为部署管理员,允许跨频道铸/踢。本期不展开,先记着,用于替代 legacy owner=null 那条过渡放行。</div>
+<div class="note"><strong>更远的将来(非本期):</strong>账号级的多成员私有频道(<code>channel_members</code> 表,让多个账号共同拥有一个私有频道)是后续演进方向。本期跨公司协作用 channel_scope token 覆盖即可,不引入 members 表。</div>
 </section>
 
 <section>
 <h2>6. 迁移(不破坏现有)</h2>
 <ul>
-<li><strong>legacy ap_ token(owner=null)</strong>:过渡期当"部署管理员",私有频道照旧放行(等于现状),系统可用不中断。CLI <code>party login</code> 上线后,建议逐步给 agent 用 <code>party agent add</code> 铸带 owner 的新 token,老 token revoke。</li>
+<li><strong>legacy ap_ token(owner=null)</strong>:过渡期当"部署管理员",私有频道照旧放行(等于现状),系统可用不中断。<u>但这是 spec 里唯一的后门</u>,必须有收敛路径,不能长期挂着——见下方截止点。</li>
+<li><strong>P1 起强制新铸 token 带 owner。</strong><code>party agent add</code>(account-authed)自动带 owner=登录账号;<strong>连 ADMIN_SECRET 铸也强制要求 <code>--owner</code></strong>(缺 owner 直接拒绝铸造)。这样"owner=null"只会存在于 P1 之前的存量 token,不再新增,缺口随 token 轮换单调收敛。</li>
+<li><strong>legacy owner=null 收紧截止点。</strong>设一个明确日期/里程碑(建议:P3 上线 + 一个轮换周期后,如 30 天),到点后 <code>canAccessChannel</code> 里 <code>token.owner == null</code> 的私有放行分支<strong>直接删除</strong>,owner=null 的旧 token 从此进不了私有频道。到期前用告警/日志盘点还有多少 owner=null token 在用,逐个 revoke 重铸。</li>
 <li><strong>现有频道 owner_account=null</strong>:0005 迁移加列,老频道 owner_account 为空 → 只有 legacy ap_ token / readonly 能进(你 CLI 现状能进),你 OIDC 网页仍看不到——这些多是测试频道且已归档,可不管;真要网页可见就重建或跑一次性脚本把某账号补进 owner_account。</li>
-<li><strong>ADMIN_SECRET 铸 token</strong>:保留(CI/bootstrap 用),但<strong>铸时应带 <code>--owner</code></strong>;账号自助铸走 <code>party agent add</code>(account-authed,owner 自动 = 登录账号)。</li>
 </ul>
 </section>
 
@@ -142,10 +186,11 @@ svg{max-width:100%;height:auto;display:block;margin:1rem auto;background:#fff;bo
 <h2>7. 分期实施(每期独立可上、可回滚)</h2>
 <table>
 <tr><th>期</th><th>做什么</th><th>价值</th></tr>
-<tr><td>P1 频道账号归属</td><td>0005 加 <code>channels.owner_account</code>;创建时写入 principal.account;canAccessChannel 改账号维度(legacy 过渡放行)。纯 AgentParty 侧,不碰 SSO。</td><td>ACL 从"token 维度"升级到"账号维度",为后续铺路;暂不改变你当前体验</td></tr>
+<tr><td>P1 频道账号归属</td><td>0005 加 <code>channels.owner_account</code> + <code>tokens.channel_scope</code>;创建时写入 principal.account;canAccessChannel 改账号维度 + scope 优先(legacy 过渡放行);<strong>P1 起强制新铸 token 带 owner</strong>。纯 AgentParty 侧,不碰 SSO。</td><td><strong>是管道铺设,不是安全提升。</strong>见下方说明</td></tr>
 <tr><td>P2 party login</td><td>登记 <code>agentparty-cli</code> client;CLI 实现回环 PKCE <code>party login</code>/<code>party logout</code>/<code>party whoami</code>;<code>party send/watch</code> 支持账号会话;refresh 自动续。<strong>你 CLI 登录后网页/CLI 互认,看得到彼此的私有频道</strong>。</td><td>解决你这次的核心诉求:CLI 绑账号</td></tr>
 <tr><td>P3 account-authed agent 铸造</td><td><code>party agent add &lt;name&gt;</code>:登录账号自助铸 agent token(owner 自动=你账号),给 Claude Code/Codex 用。逐步淘汰 ADMIN_SECRET 手工铸。</td><td>agent 归属清晰、自助管理</td></tr>
 </table>
+<div class="warn"><strong>P1 单独上线几乎没有安全收益,别把它当"加固"卖。</strong>P1 之后,所有<em>现存</em> token 的 owner 仍是 null → 全部命中"当管理员放行"分支 → 私有频道依旧是万能钥匙,和现状一样。账号隔离要等两件事同时到位才真正生效:①token 重铸带上 owner(靠 P3 的 <code>party agent add</code> + P1 起的强制 owner);②legacy owner=null 放行按 §6 截止点收紧删除。所以 P1 的价值是"把 <code>owner_account</code>/<code>channel_scope</code> 这两根管子铺好、把判定逻辑就位、堵住新增无主 token",安全提升是 P3 + legacy 收紧兑现的,不是 P1 当天。</div>
 <p>P2/P3 依赖往 SSO 登记 <code>agentparty-cli</code> client,和"粉丝社交登录"(前一份 spec 的 Step 2)同属 SSO 侧改动,可合并一次做。</p>
 </section>
 
@@ -165,7 +210,8 @@ svg{max-width:100%;height:auto;display:block;margin:1rem auto;background:#fff;bo
 <li>整体模型(账号为锚,人/agent/频道都挂账号)认可吗?</li>
 <li>party login 用<strong>回环 PKCE</strong>(唯一可行,device flow 不支持)——确认。CLI client 叫 <code>agentparty-cli</code>?</li>
 <li>实施顺序:<strong>P1(账号归属,纯 AgentParty)先上</strong>,P2/P3(要动 SSO)和"粉丝社交登录"合并一次做?还是先把 party login 也一起赶出来?</li>
-<li>legacy owner=null token 过渡放行 → 将来收紧,这个妥协可接受吗?</li>
+<li>跨公司协作用 <strong>channel-scoped token</strong>(<code>party invite</code> 铸,只进单个频道)而非普通 agent token,认可吗?本期不引入 <code>channel_members</code> 多成员表。</li>
+<li>legacy owner=null token 过渡放行 → 按 §6 截止点(P3+30 天)删除放行分支,这个收紧计划可接受吗?</li>
 </ol>
 </section>
 </body>
