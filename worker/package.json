@@ -4,8 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev": "wrangler-accounts dev",
+    "build:web": "bun run --cwd ../web build",
+    "migrate:remote": "wrangler-accounts d1 migrations apply agentparty --remote",
+    "deploy": "bun run build:web && bun run migrate:remote && bun run verify:remote-schema && wrangler-accounts deploy && bun run smoke:prod",
+    "smoke:prod": "node scripts/smoke-prod.mjs",
+    "verify:remote-schema": "node scripts/verify-remote-schema.mjs",
+    "verify:test-runtime": "node scripts/verify-test-runtime.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

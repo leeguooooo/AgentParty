@@ -1,9 +1,11 @@
 // party send — rest 一次性发消息，成功后推进游标
-import { num, parseArgs, type Parsed } from "../args";
+import { parseArgs, str, strArray, unknownFlagError, valueFlagError, type Parsed } from "../args";
 import { readConfig, resolveChannel, saveCursor, type Config } from "../config";
 import { handleRestError, postMessage } from "../rest";
+import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
 export const sendSpec = { repeatable: ["mention"] };
+const SEND_FLAGS = ["channel", "reply-to", "mention"];
 
 export interface SendInput {
   channel: string;
@@ -14,29 +16,49 @@ export interface SendInput {
 
 export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null> {
   const { positionals, flags } = parsed;
-  let explicit: string | undefined;
-  let text: string | undefined;
-  if (positionals.length >= 2) {
-    explicit = positionals[0];
-    text = positionals[1];
-  } else {
-    text = positionals[0];
+  const unknown = unknownFlagError(flags, SEND_FLAGS);
+  if (unknown !== null) {
+    console.error(unknown);
+    return null;
   }
+  const flagError = valueFlagError(flags, ["channel", "reply-to"], ["mention"]);
+  if (flagError !== null) {
+    console.error(flagError);
+    return null;
+  }
+  const replyTo = parsePositiveIntFlag(str(flags["reply-to"]), "reply-to");
+  if (typeof replyTo === "string") {
+    console.error(replyTo);
+    return null;
+  }
+  const explicit = str(flags.channel);
+  let text = positionals.length > 0 ? positionals.join(" ") : undefined;
   const channel = resolveChannel(explicit);
   if (!channel) {
-    console.error("no channel, pass one or bind with: party init --channel C");
+    console.error("no channel, pass --channel C or bind with: party init --channel C");
+    return null;
+  }
+  if (!isSlug(channel)) {
+    console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
     return null;
   }
   if (text === undefined) {
     console.error("missing message body (use - to read stdin)");
     return null;
   }
-  if (text === "-") text = await Bun.stdin.text();
+  if (text === "-" && (!parsed.terminated || (parsed.terminatedAt ?? 0) > 0)) {
+    text = await Bun.stdin.text();
+  }
+  const mentions = strArray(flags.mention) ?? [];
+  if (mentions.some((mention) => !isName(mention))) {
+    console.error("--mention must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");
+    return null;
+  }
   return {
     channel,
     body: text,
-    mentions: (flags.mention as string[] | undefined) ?? [],
-    replyTo: num(flags["reply-to"]) ?? null,
+    mentions,
+    replyTo: replyTo ?? null,
   };
 }
 

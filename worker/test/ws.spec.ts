@@ -18,13 +18,37 @@ describe("websocket", () => {
       presence: [],
     });
 
+    await ws.nextOfType("participants");
     const other = await seedToken("human");
     const second = await WsClient.open(slug, other.token);
     const welcome2 = await second.nextOfType("welcome");
     expect(welcome2.participants).toContainEqual({ name, kind: "agent" });
     expect(welcome2.participants).toContainEqual({ name: other.name, kind: "human" });
-    ws.close();
+    const update = await ws.nextOfType("participants");
+    expect(update.participants).toContainEqual({ name, kind: "agent" });
+    expect(update.participants).toContainEqual({ name: other.name, kind: "human" });
     second.close();
+    const afterLeave = await ws.nextOfType("participants");
+    expect(afterLeave.participants).toContainEqual({ name, kind: "agent" });
+    expect(afterLeave.participants).not.toContainEqual({ name: other.name, kind: "human" });
+    ws.close();
+  });
+
+  it("accepts browser websocket token through Sec-WebSocket-Protocol", async () => {
+    const { token, name } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const res = await SELF.fetch(`http://ap.test/api/channels/${slug}/ws`, {
+      headers: { upgrade: "websocket", "sec-websocket-protocol": `agentparty, ${token}` },
+    });
+    expect(res.status).toBe(101);
+    expect(res.headers.get("sec-websocket-protocol")).toBe("agentparty");
+    res.webSocket?.accept();
+    res.webSocket?.close();
+
+    const ws = await WsClient.open(slug, token, "protocol");
+    const welcome = await ws.nextOfType("welcome");
+    expect(welcome).toMatchObject({ channel: slug, self: name });
+    ws.close();
   });
 
   it("acks sends with strictly monotonic seq", async () => {
@@ -106,13 +130,64 @@ describe("websocket", () => {
     ws.close();
   });
 
+  it("invalid send payload gets error bad_request", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+    ws.send({
+      type: "send",
+      kind: "message",
+      body: "hi",
+      mentions: Array.from({ length: 51 }, (_, i) => `agent-${i}`),
+      reply_to: null,
+    });
+    const err = await ws.nextOfType("error");
+    expect(err.code).toBe("bad_request");
+    ws.close();
+  });
+
+  it("invalid reply_to gets error bad_request", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+    ws.send({ type: "send", kind: "message", body: "hi", mentions: [], reply_to: 1.5 });
+    expect((await ws.nextOfType("error")).code).toBe("bad_request");
+    ws.send({ type: "send", kind: "message", body: "hi", mentions: [], reply_to: -1 });
+    expect((await ws.nextOfType("error")).code).toBe("bad_request");
+    ws.close();
+  });
+
+  it("malformed ws frames get error bad_request", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+    ws.raw("not-json");
+    expect((await ws.nextOfType("error")).code).toBe("bad_request");
+    ws.raw("123");
+    expect((await ws.nextOfType("error")).code).toBe("bad_request");
+    ws.close();
+  });
+
+  it("binary ws frames get error bad_request", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+    ws.ws.send(new Uint8Array([1, 2, 3]));
+    expect((await ws.nextOfType("error")).code).toBe("bad_request");
+    ws.close();
+  });
+
   it("answers ping with pong", async () => {
     const { token } = await seedToken("agent");
     const slug = await createChannel(token);
     const ws = await WsClient.open(slug, token);
     await ws.nextOfType("welcome");
     ws.raw('{"type":"ping"}');
-    const pong = await ws.next();
+    const pong = await ws.nextOfType("pong");
     expect(pong.type).toBe("pong");
     ws.close();
   });
@@ -147,6 +222,52 @@ describe("websocket", () => {
     })();
     expect(msg.body).toBe("still here");
     bystander.close();
+  });
+
+  it("revoked token cannot keep sending even if kick notification is missed", async () => {
+    const { token, name } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+
+    await env.DB.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ?")
+      .bind(Date.now(), name)
+      .run();
+    ws.send({ type: "send", kind: "message", body: "after revoke", mentions: [], reply_to: null });
+    const err = await ws.nextOfType("error");
+    expect(err.code).toBe("unauthorized");
+    ws.close();
+  });
+
+  it("revoked token cannot keep reading or backfilling even if kick notification is missed", async () => {
+    const victimToken = await seedToken("agent");
+    const senderToken = await seedToken("human");
+    const slug = await createChannel(victimToken.token);
+    const victim = await WsClient.open(slug, victimToken.token);
+    await victim.nextOfType("welcome");
+
+    await env.DB.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ?")
+      .bind(Date.now(), victimToken.name)
+      .run();
+
+    const sent = await SELF.fetch(`http://ap.test/api/channels/${slug}/messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${senderToken.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ kind: "message", body: "private update", mentions: [], reply_to: null }),
+    });
+    expect(sent.status).toBe(200);
+    const err = await victim.nextOfType("error");
+    expect(err.code).toBe("unauthorized");
+
+    const stale = await WsClient.open(slug, senderToken.token);
+    await stale.nextOfType("welcome");
+    await env.DB.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ?")
+      .bind(Date.now(), senderToken.name)
+      .run();
+    stale.send({ type: "hello", since: 0 });
+    expect((await stale.nextOfType("error")).code).toBe("unauthorized");
+    victim.close();
+    stale.close();
   });
 
   it("presence scan marks a silent connection offline", async () => {

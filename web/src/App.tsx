@@ -4,12 +4,15 @@ import { ChannelList } from "./components/ChannelList";
 import { TokenGate } from "./components/TokenGate";
 import {
   AuthError,
+  clearShareToken,
   clearToken,
+  currentShareToken,
   dropUrlToken,
   getToken,
   isShareMode,
   listChannels,
   saveToken,
+  storedToken,
   type ChannelInfo,
 } from "./lib/api";
 import { ChannelPage } from "./pages/Channel";
@@ -25,8 +28,21 @@ export function App() {
 
   // token 失效（401 / ws 被踢 revoked）→ 回登录闸；分享模式先摘掉坏 ?t=
   const onAuthFailed = useCallback((message: string) => {
-    if (isShareMode()) dropUrlToken();
-    else clearToken();
+    if (isShareMode()) {
+      const failed = currentShareToken();
+      clearShareToken();
+      dropUrlToken();
+      const fallback = storedToken();
+      if (fallback !== null && fallback !== failed) {
+        setAuthError(null);
+        setChannels(null);
+        setListError(null);
+        setToken(fallback);
+        return;
+      }
+    } else {
+      clearToken();
+    }
     setAuthError(message);
     setChannels(null);
     setToken(null);
@@ -35,6 +51,8 @@ export function App() {
   useEffect(() => {
     if (token === null) return;
     let alive = true;
+    setChannels(null);
+    setListError(null);
     listChannels(token)
       .then((cs) => {
         if (!alive) return;
@@ -51,6 +69,37 @@ export function App() {
     };
   }, [token, onAuthFailed]);
 
+  useEffect(() => {
+    if (token === null) return;
+    let alive = true;
+    const refresh = () => {
+      if (document.visibilityState === "hidden") return;
+      listChannels(token)
+        .then((cs) => {
+          if (!alive) return;
+          setChannels(cs);
+          setListError(null);
+        })
+        .catch((err: unknown) => {
+          if (!alive) return;
+          if (err instanceof AuthError) onAuthFailed("invalid or revoked token — paste a new one");
+          else setListError("channels failed to load");
+        });
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisible);
+    const timer = window.setInterval(refresh, 60_000);
+    return () => {
+      alive = false;
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.clearInterval(timer);
+    };
+  }, [token, onAuthFailed]);
+
   if (token === null) {
     return (
       <TokenGate
@@ -59,6 +108,8 @@ export function App() {
           // 粘贴登录只在非分享模式落 localStorage；分享模式坏 t 已被摘除
           saveToken(t);
           setAuthError(null);
+          setChannels(null);
+          setListError(null);
           setToken(t);
         }}
       />
@@ -66,7 +117,11 @@ export function App() {
   }
 
   const slug = matchChannel(path);
+  const routeNotFound = path !== "/" && slug === null;
   const openChannel = (s: string) => navigate(`/c/${s}`);
+  const channelPending = slug !== null && channels === null && listError === null;
+  const unknownChannel =
+    slug !== null && channels !== null && !channels.some((c) => c.slug === slug);
 
   return (
     <div className="app">
@@ -89,6 +144,8 @@ export function App() {
             onClick={() => {
               clearToken();
               setAuthError(null);
+              setChannels(null);
+              setListError(null);
               setToken(null);
             }}
           >
@@ -101,12 +158,29 @@ export function App() {
           <ChannelList channels={channels} active={slug} error={listError} onOpen={openChannel} />
         </aside>
         <main className="app-main">
-          {slug !== null ? (
+          {routeNotFound ? (
+            <p className="banner banner--red" role="alert">
+              page not found
+            </p>
+          ) : channelPending ? (
+            <p className="banner" role="status" aria-live="polite">
+              loading channel...
+            </p>
+          ) : slug !== null && channels === null ? (
+            <p className="banner banner--red" role="alert">
+              {listError ?? "channels failed to load"}
+            </p>
+          ) : unknownChannel ? (
+            <p className="banner banner--red" role="alert">
+              channel not found or not available to this token
+            </p>
+          ) : slug !== null ? (
             <ChannelPage
               key={slug}
               slug={slug}
               token={token}
               mode={channels?.find((c) => c.slug === slug)?.mode ?? "normal"}
+              shareMode={isShareMode()}
               onAuthFailed={onAuthFailed}
             />
           ) : (

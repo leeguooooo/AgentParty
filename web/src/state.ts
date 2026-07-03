@@ -1,11 +1,12 @@
 // 频道页状态：协议帧 → React 状态的唯一归约点。
 // 消息按 seq 去重排序；status 帧同时进时间线和 presence 快照；error 帧内联展示不做 toast。
-import type { MsgFrame, PresenceEntry, Sender, ServerFrame } from "@agentparty/shared";
+import type { ChannelMode, MsgFrame, PresenceEntry, Sender, ServerFrame } from "@agentparty/shared";
 import type { FatalReason, SocketStatus } from "./lib/ws";
 
 export interface ChannelState {
   self: string | null;
   participants: Sender[];
+  mode: ChannelMode;
   presence: Record<string, PresenceEntry>;
   messages: MsgFrame[]; // 按 seq 升序、已去重
   status: SocketStatus;
@@ -19,6 +20,7 @@ export interface ChannelState {
 export const initialChannelState: ChannelState = {
   self: null,
   participants: [],
+  mode: "normal",
   presence: {},
   messages: [],
   status: "connecting",
@@ -71,12 +73,15 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
       return {
         ...state,
         self: frame.self,
+        mode: frame.mode ?? state.mode,
         participants: frame.participants,
         presence,
         // welcome 首帧即知角色，readonly 分享链接不闪现输入框（spec §9）
         readonly: frame.role === "readonly" ? true : state.readonly,
       };
     }
+    case "participants":
+      return { ...state, participants: frame.participants };
     case "msg": {
       const next: ChannelState = { ...state, messages: insertMessage(state.messages, frame) };
       // 人类发言重置服务端 loop guard 计数，黄条同步撤下

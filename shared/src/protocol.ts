@@ -15,6 +15,9 @@ export const TEMP_IDLE_ARCHIVE_MS = 14 * 24 * 60 * 60 * 1000;
 export const WEBHOOK_TIMEOUT_MS = 10_000;
 export const WEBHOOK_MAX_RETRIES = 3;
 export const WEBHOOK_RETRY_DELAYS_MS = [60_000, 240_000, 960_000] as const;
+export const MAX_WEBHOOKS_PER_CHANNEL = 20;
+export const MAX_WEBHOOK_QUEUE_ROWS = 200;
+export const WEBHOOK_RETRY_BATCH_SIZE = 25;
 
 // cli 退出码
 export const EXIT_TIMEOUT = 2;
@@ -35,12 +38,15 @@ export type StatusState = "working" | "waiting" | "blocked" | "done";
 export type PresenceState = StatusState | "offline";
 
 export type ErrorCode =
+  | "bad_request"
   | "unauthorized"
   | "rate_limited"
   | "too_large"
   | "loop_guard"
   | "archived"
   | "not_found";
+
+export type RestErrorCode = ErrorCode | "conflict" | "unavailable";
 
 export interface Sender {
   name: string;
@@ -90,11 +96,17 @@ export interface WelcomeFrame {
   type: "welcome";
   channel: string;
   self: string;
+  mode?: ChannelMode;
   /** 连接方 token 的角色；web 据此在首帧就隐藏 readonly 的输入框（spec §9），旧客户端忽略即可 */
   role?: TokenRole;
   participants: Sender[];
   last_seq: number;
   presence: PresenceEntry[];
+}
+
+export interface ParticipantsFrame {
+  type: "participants";
+  participants: Sender[];
 }
 
 export interface MsgFrame {
@@ -135,6 +147,7 @@ export interface PongFrame {
 
 export type ServerFrame =
   | WelcomeFrame
+  | ParticipantsFrame
   | MsgFrame
   | SentFrame
   | PresenceFrame

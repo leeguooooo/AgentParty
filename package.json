@@ -1,6 +1,11 @@
 {
   "name": "agentparty",
   "private": true,
+  "scripts": {
+    "check": "cd cli && bun test && bunx tsc --noEmit && cd ../worker && bun run verify:test-runtime && bunx vitest run && bunx tsc --noEmit && cd ../shared && bunx tsc --noEmit && cd ../web && bunx tsc --noEmit && bunx vite build",
+    "release:verify": "bun run check && cd worker && bun run verify:remote-schema",
+    "release:deploy": "bun run check && cd worker && bun run deploy && bun run verify:remote-schema"
+  },
   "workspaces": [
     "worker",
     "cli",

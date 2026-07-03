@@ -1,10 +1,12 @@
 // party status — 发 status 消息（rest）
 import type { StatusState } from "@agentparty/shared";
-import { parseArgs, str } from "../args";
+import { parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readConfig, resolveChannel, saveCursor } from "../config";
 import { handleRestError, postMessage } from "../rest";
+import { isSlug } from "../validation";
 
 const STATES: StatusState[] = ["working", "waiting", "blocked", "done"];
+const STATUS_FLAGS = ["channel", "note"];
 
 export async function run(argv: string[]): Promise<number> {
   const { positionals, flags } = parseArgs(argv, { aliases: { m: "note" } });
@@ -13,9 +15,23 @@ export async function run(argv: string[]): Promise<number> {
     console.error("no config, run: party init --server URL --token T");
     return 1;
   }
+  const unknown = unknownFlagError(flags, STATUS_FLAGS);
+  if (unknown !== null) {
+    console.error(unknown);
+    return 1;
+  }
   let explicit: string | undefined;
   let state: string | undefined;
-  if (positionals.length >= 2) {
+  const flagError = valueFlagError(flags, ["channel", "note"]);
+  if (flagError !== null) {
+    console.error(flagError);
+    return 1;
+  }
+  const flagChannel = str(flags.channel);
+  if (flagChannel) {
+    explicit = flagChannel;
+    state = positionals[0];
+  } else if (positionals.length >= 2) {
     explicit = positionals[0];
     state = positionals[1];
   } else {
@@ -28,6 +44,10 @@ export async function run(argv: string[]): Promise<number> {
   const channel = resolveChannel(explicit);
   if (!channel) {
     console.error("no channel, pass one or bind with: party init --channel C");
+    return 1;
+  }
+  if (!isSlug(channel)) {
+    console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
     return 1;
   }
   try {

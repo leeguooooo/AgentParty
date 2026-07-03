@@ -1,5 +1,5 @@
 import { env, fetchMock, runInDurableObject } from "cloudflare:test";
-import { WEBHOOK_MAX_RETRIES } from "@agentparty/shared";
+import { MAX_WEBHOOKS_PER_CHANNEL, WEBHOOK_MAX_RETRIES } from "@agentparty/shared";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
 import { api, createChannel, postMessage, seedToken, uniq } from "./helpers";
@@ -107,6 +107,36 @@ describe("webhooks", () => {
       filter: "everything",
     });
     expect(badFilter.status).toBe(400);
+    for (const url of [
+      "http://hooks.test/wake",
+      "https://localhost/wake",
+      "https://localhost./wake",
+      "https://foo.localhost./wake",
+      "https://127.0.0.1/wake",
+      "https://10.0.0.1/wake",
+      "https://0300.0250.0001.0001/wake",
+      "https://169.254.169.254/latest/meta-data",
+      "https://[::1]/wake",
+      "https://[fd00::1]/wake",
+      "https://[fc00::1]/wake",
+      "https://[fe80::1]/wake",
+      "https://[fe81::1]/wake",
+      "https://[febf::1]/wake",
+      "https://[::ffff:127.0.0.1]/wake",
+      "https://[::ffff:169.254.169.254]/wake",
+      "https://user:pass@hooks.test/wake",
+    ]) {
+      const unsafe = await addWebhook(slug, agent.token, { name: "hermes", url, secret: "s" });
+      expect(unsafe.status).toBe(400);
+    }
+    for (const secret of ["has space", "line\nbreak", "line\rbreak", "tab\tbreak", "del\x7f", "非ascii"]) {
+      const unsafe = await addWebhook(slug, agent.token, {
+        name: uniq("hook"),
+        url: "https://hooks.test/wake",
+        secret,
+      });
+      expect(unsafe.status).toBe(400);
+    }
 
     const created = await addWebhook(slug, agent.token, {
       name: "hermes",
@@ -125,6 +155,9 @@ describe("webhooks", () => {
     expect(webhooks).toHaveLength(1);
     expect(webhooks[0]).toMatchObject({ name: "hermes", url: "https://hooks.test/wake", filter: "mentions" });
 
+    const roList = await api(`/api/channels/${slug}/webhooks`, ro.token);
+    expect(roList.status).toBe(403);
+
     const roDelete = await api(`/api/channels/${slug}/webhooks/hermes`, ro.token, { method: "DELETE" });
     expect(roDelete.status).toBe(403);
     const del = await api(`/api/channels/${slug}/webhooks/hermes`, agent.token, { method: "DELETE" });
@@ -135,6 +168,56 @@ describe("webhooks", () => {
       webhooks: unknown[];
     };
     expect(empty.webhooks).toHaveLength(0);
+
+    const maxSecret = "s".repeat(4096);
+    const maxOk = await addWebhook(slug, agent.token, {
+      name: "maxlen",
+      url: "https://hooks.test/wake",
+      secret: maxSecret,
+    });
+    expect(maxOk.status).toBe(201);
+    const tooLong = await addWebhook(slug, agent.token, {
+      name: "toolong",
+      url: "https://hooks.test/wake",
+      secret: "s".repeat(4097),
+    });
+    expect(tooLong.status).toBe(400);
+  });
+
+  it("caps webhook registrations per channel", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    for (let i = 0; i < MAX_WEBHOOKS_PER_CHANNEL; i++) {
+      const res = await addWebhook(slug, token, {
+        name: `hook-${i}`,
+        url: `https://hooks.test/${i}`,
+        secret: "s",
+      });
+      expect(res.status).toBe(201);
+    }
+    const capped = await addWebhook(slug, token, {
+      name: "one-more",
+      url: "https://hooks.test/overflow",
+      secret: "s",
+    });
+    expect(capped.status).toBe(429);
+  });
+
+  it("rejects webhook management after channel archive", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    expect(
+      (await addWebhook(slug, token, { name: "hermes", url: "https://hooks.test/wake", secret: "s" }))
+        .status,
+    ).toBe(201);
+    expect((await api(`/api/channels/${slug}/archive`, token, { method: "POST" })).status).toBe(200);
+
+    expect(
+      (await addWebhook(slug, token, { name: "new-hook", url: "https://hooks.test/new", secret: "s" }))
+        .status,
+    ).toBe(410);
+    expect((await api(`/api/channels/${slug}/webhooks`, token)).status).toBe(410);
+    expect((await api(`/api/channels/${slug}/webhooks/hermes`, token, { method: "DELETE" })).status).toBe(410);
   });
 
   it("mentions filter fires only when mentioned, with bearer auth and a valid hmac signature", async () => {

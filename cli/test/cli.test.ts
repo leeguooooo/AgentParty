@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { workspaceId } from "../src/config";
 import { startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 
 const indexPath = join(import.meta.dir, "..", "src", "index.ts");
@@ -66,4 +67,59 @@ describe("cli subprocess", () => {
     expect(r.code).toBe(2);
     expect(r.stdout.trim()).toBe("TIMEOUT");
   }, 15_000);
+
+  test("watch --channel 优先于绑定频道", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") sock.send(welcomeFrame(0));
+    });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: server.url, token: "ap_tok" }),
+    );
+    const dir = join(home, "state", workspaceId(process.cwd()));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), JSON.stringify({ channel: "dev", cursor: 0 }));
+
+    const r = await runCli(["watch", "--channel", "ops", "--timeout", "1"]);
+    expect(r.code).toBe(2);
+    expect(server.paths).toContain("/api/channels/ops/ws");
+    expect(server.paths).not.toContain("/api/channels/dev/ws");
+  }, 15_000);
+
+  test("watch --channel 缺值不会回退到绑定频道", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") sock.send(welcomeFrame(0));
+    });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: server.url, token: "ap_tok" }),
+    );
+    const dir = join(home, "state", workspaceId(process.cwd()));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), JSON.stringify({ channel: "dev", cursor: 0 }));
+
+    const r = await runCli(["watch", "--channel", "--timeout", "1"]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("--channel requires a value");
+    expect(server.paths).toHaveLength(0);
+  });
+
+  test("watch --timeout 必须是正整数，不会进入阻塞连接", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") sock.send(welcomeFrame(0));
+    });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: server.url, token: "ap_tok" }),
+    );
+    for (const value of ["0", "-1", "1.5", "2147484"]) {
+      const r = await runCli(["watch", "dev", "--timeout", value]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/--timeout must be (a positive integer|<=)/);
+    }
+    expect(server.paths).toHaveLength(0);
+  });
 });

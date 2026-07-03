@@ -1,9 +1,11 @@
 // rest 封装 + token 存取。
-// 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它且不落 localStorage（readonly 分享模式）；
-// 否则用 localStorage 里粘贴过的 token。
+// 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它，并立即从地址栏移除；
+// share token 只放 sessionStorage，本次标签页可刷新，避免长期落 localStorage。
 import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
 
 const TOKEN_KEY = "ap_token";
+const SHARE_TOKEN_KEY = "ap_share_token";
+let activeShareToken: string | null = null;
 
 export class AuthError extends Error {}
 
@@ -11,12 +13,32 @@ export function urlToken(): string | null {
   return new URLSearchParams(window.location.search).get("t");
 }
 
+export function storedToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
 export function isShareMode(): boolean {
-  return urlToken() !== null;
+  return activeShareToken !== null;
+}
+
+export function currentShareToken(): string | null {
+  return activeShareToken;
 }
 
 export function getToken(): string | null {
-  return urlToken() ?? localStorage.getItem(TOKEN_KEY);
+  const queryToken = urlToken();
+  if (queryToken !== null) {
+    activeShareToken = queryToken;
+    sessionStorage.setItem(SHARE_TOKEN_KEY, queryToken);
+    dropUrlToken();
+    return queryToken;
+  }
+  const sessionShareToken = sessionStorage.getItem(SHARE_TOKEN_KEY);
+  if (sessionShareToken !== null) {
+    activeShareToken = sessionShareToken;
+    return sessionShareToken;
+  }
+  return storedToken();
 }
 
 export function saveToken(token: string) {
@@ -25,6 +47,11 @@ export function saveToken(token: string) {
 
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+}
+
+export function clearShareToken() {
+  activeShareToken = null;
+  sessionStorage.removeItem(SHARE_TOKEN_KEY);
 }
 
 // 分享 token 失效时退回粘贴登录：把 ?t= 从地址栏摘掉，避免 getToken 继续命中坏 token

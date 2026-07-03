@@ -31,10 +31,13 @@ export function PresenceBar({ presence, participants, status, party = false }: P
   const items: Item[] = names.map((name) => {
     const entry = presence[name];
     const connected = participants.some((p) => p.name === name);
-    if (entry && !(connected && entry.state === "offline")) {
+    if (!connected) {
+      return { name, state: "offline", note: null, ts: entry?.ts ?? null };
+    }
+    if (entry && entry.state !== "offline") {
       return { name, state: entry.state, note: entry.note, ts: entry.ts };
     }
-    return { name, state: connected ? "online" : "offline", note: null, ts: entry?.ts ?? null };
+    return { name, state: "online", note: null, ts: entry?.ts ?? null };
   });
 
   return (
@@ -48,11 +51,15 @@ export function PresenceBar({ presence, participants, status, party = false }: P
           {it.ts !== null && <span className="t-mono presence-ts">{fmtRel(it.ts)}</span>}
         </span>
       ))}
-      {items.length === 0 && <span className="t-mono presence-empty">nobody here yet</span>}
+      {items.length === 0 && (
+        <span className="t-mono presence-empty" role="status" aria-live="polite">
+          nobody here yet
+        </span>
+      )}
       <span className="t-mono presence-count" title="connected participants">
         {participants.length} in
       </span>
-      <span className="conn t-mono" data-s={status}>
+      <span className="conn t-mono" data-s={status} role="status" aria-live="polite">
         {status === "open" ? "● live" : `◌ ${status}…`}
       </span>
     </div>

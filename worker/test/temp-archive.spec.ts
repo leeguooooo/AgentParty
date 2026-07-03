@@ -22,6 +22,22 @@ async function fireAlarm(slug: string) {
 }
 
 describe("temp channel auto-archive", () => {
+  it("archives an empty temp channel created through REST", async () => {
+    const { token } = await seedToken("human");
+    const slug = await createChannel(token, "temp");
+
+    await injectIdleMs(slug, 1);
+    await new Promise((r) => setTimeout(r, 10));
+    await fireAlarm(slug);
+
+    const rejected = await postMessage(slug, token, "too late");
+    expect(rejected.status).toBe(410);
+    const row = await env.DB.prepare("SELECT archived_at FROM channels WHERE slug = ?")
+      .bind(slug)
+      .first<{ archived_at: number | null }>();
+    expect(row?.archived_at).not.toBeNull();
+  });
+
   it("archives an idle temp channel: kicks ws, rejects sends, writes d1 archived_at, keeps history", async () => {
     const { token } = await seedToken("human");
     const slug = await createChannel(token, "temp");

@@ -75,7 +75,13 @@ export const openapiDocument = {
             },
           },
         },
-        responses: { "201": { description: "created" }, "409": { description: "slug conflict" } },
+        responses: {
+          "201": { description: "created" },
+          "400": { description: "invalid slug/kind/mode" },
+          "403": { description: "readonly token" },
+          "409": { description: "slug conflict" },
+          "503": { description: "temp channel initialization failed" },
+        },
       },
     },
     "/api/channels/{slug}/messages": {
@@ -104,9 +110,17 @@ export const openapiDocument = {
                     required: ["kind", "body"],
                     properties: {
                       kind: { type: "string", enum: ["message"] },
-                      body: { type: "string" },
-                      mentions: { type: "array", items: { type: "string" } },
-                      reply_to: { type: ["integer", "null"] },
+                      body: { type: "string", maxLength: 8192 },
+                      mentions: {
+                        type: "array",
+                        maxItems: 50,
+                        items: {
+                          type: "string",
+                          pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$",
+                        },
+                        description: "JSON-encoded mentions must be <= 4096 bytes",
+                      },
+                      reply_to: { type: ["integer", "null"], minimum: 1 },
                     },
                   },
                   {
@@ -125,7 +139,7 @@ export const openapiDocument = {
         },
         responses: {
           "200": { description: "{seq}" },
-          "403": { description: "readonly token" },
+          "403": { description: "readonly/agent token; reset requires human" },
           "409": { description: "loop guard tripped" },
           "410": { description: "channel archived" },
           "413": { description: "body too large" },
@@ -162,7 +176,11 @@ export const openapiDocument = {
         summary: "list outbound webhooks (secret is never returned)",
         security: [{ bearer: [] }],
         parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "{webhooks:[{name,url,filter,created_at}]}" } },
+        responses: {
+          "200": { description: "{webhooks:[{name,url,filter,created_at}]}" },
+          "403": { description: "readonly token" },
+          "410": { description: "channel archived" },
+        },
       },
       post: {
         summary: "register an outbound webhook (mention wake-up, hmac signed)",
@@ -192,6 +210,7 @@ export const openapiDocument = {
           "201": { description: "registered (same name overwrites)" },
           "400": { description: "invalid name/url/secret/filter" },
           "403": { description: "readonly token" },
+          "410": { description: "channel archived" },
         },
       },
     },
@@ -207,16 +226,28 @@ export const openapiDocument = {
           "200": { description: "removed" },
           "403": { description: "readonly token" },
           "404": { description: "no such webhook" },
+          "410": { description: "channel archived" },
         },
       },
     },
     "/api/channels/{slug}/ws": {
       get: {
-        summary: "websocket upgrade (ndjson frames)",
+        summary: "websocket upgrade (JSON frames)",
         security: [{ bearer: [] }],
         parameters: [
           { name: "slug", in: "path", required: true, schema: { type: "string" } },
-          { name: "t", in: "query", schema: { type: "string" }, description: "token for browsers" },
+          {
+            name: "Sec-WebSocket-Protocol",
+            in: "header",
+            schema: { type: "string" },
+            description: "browser personal token as second protocol value: agentparty, <token>",
+          },
+          {
+            name: "t",
+            in: "query",
+            schema: { type: "string" },
+            description: "share-link token for readonly browser links; write-capable query tokens are rejected",
+          },
         ],
         responses: { "101": { description: "switching protocols" } },
       },

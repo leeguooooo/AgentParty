@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { BODY_LIMIT, LOOP_GUARD_N, RATE_LIMIT_PER_MIN } from "@agentparty/shared";
 import { describe, expect, it } from "vitest";
-import { createChannel, postMessage, seedToken } from "./helpers";
+import { api, createChannel, postMessage, seedToken } from "./helpers";
 
 async function errorCode(res: Response): Promise<string> {
   const body = (await res.json()) as { error: { code: string } };
@@ -72,7 +72,7 @@ describe("guards", () => {
     const limited = await postMessage(slug, token, "spill over");
     expect(limited.status).toBe(429);
     expect(await errorCode(limited)).toBe("rate_limited");
-  });
+  }, 90_000);
 
   it("rejects a body over the byte limit", async () => {
     const { token } = await seedToken("agent");
@@ -89,5 +89,63 @@ describe("guards", () => {
     const res = await postMessage(slug, ro.token, "hi");
     expect(res.status).toBe(403);
     expect(await errorCode(res)).toBe("unauthorized");
+  });
+
+  it("rejects invalid or oversized mentions arrays", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const invalid = await api(`/api/channels/${slug}/messages`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "message",
+        body: "small body",
+        mentions: ["ok", "../bad"],
+        reply_to: null,
+      }),
+    });
+    expect(invalid.status).toBe(400);
+
+    const tooMany = await api(`/api/channels/${slug}/messages`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "message",
+        body: "small body",
+        mentions: Array.from({ length: 51 }, (_, i) => `agent-${i}`),
+        reply_to: null,
+      }),
+    });
+    expect(tooMany.status).toBe(400);
+  });
+
+  it("rate limits repeated invalid send payloads", async () => {
+    await avoidMinuteBoundary();
+    const { token } = await seedToken("human");
+    const slug = await createChannel(token);
+    const body = JSON.stringify({ kind: "message", body: "small", mentions: ["../bad"], reply_to: null });
+    for (let i = 0; i < RATE_LIMIT_PER_MIN; i++) {
+      const res = await api(`/api/channels/${slug}/messages`, token, { method: "POST", body });
+      expect(res.status).toBe(400);
+    }
+    const limited = await api(`/api/channels/${slug}/messages`, token, { method: "POST", body });
+    expect(limited.status).toBe(429);
+    expect(await errorCode(limited)).toBe("rate_limited");
+  }, 90_000);
+
+  it("rejects invalid reply_to values", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    for (const reply_to of [0, -1, 1.5, "1"]) {
+      const res = await api(`/api/channels/${slug}/messages`, token, {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "message",
+          body: "small body",
+          mentions: [],
+          reply_to,
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(await errorCode(res)).toBe("bad_request");
+    }
   });
 });

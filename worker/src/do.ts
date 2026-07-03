@@ -3,11 +3,14 @@ import {
   BODY_LIMIT,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
+  MAX_WEBHOOKS_PER_CHANNEL,
+  MAX_WEBHOOK_QUEUE_ROWS,
   PRESENCE_TIMEOUT_MS,
   RATE_LIMIT_PER_MIN,
   RETAIN_N,
   TEMP_IDLE_ARCHIVE_MS,
   WEBHOOK_MAX_RETRIES,
+  WEBHOOK_RETRY_BATCH_SIZE,
   WEBHOOK_RETRY_DELAYS_MS,
   WEBHOOK_TIMEOUT_MS,
   type ErrorCode,
@@ -27,6 +30,7 @@ interface ConnState {
   name: string;
   kind: SenderKind;
   role: TokenRole;
+  tokenHash: string;
   archived: boolean;
   lastSeen: number;
 }
@@ -35,13 +39,16 @@ interface Identity {
   name: string;
   kind: SenderKind;
   role: TokenRole;
+  tokenHash: string;
 }
 
 type SendOutcome =
   | { ok: true; seq: number; frames: ServerFrame[] }
   | { ok: false; code: ErrorCode; message: string };
+type SendErrorOutcome = Extract<SendOutcome, { ok: false }>;
 
 export const ERROR_STATUS: Record<ErrorCode, number> = {
+  bad_request: 400,
   unauthorized: 403,
   rate_limited: 429,
   too_large: 413,
@@ -54,6 +61,13 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
 export const PRESENCE_SCAN_MS = PRESENCE_TIMEOUT_MS;
 
 const STATUS_STATES: readonly string[] = ["working", "waiting", "blocked", "done"];
+const MENTION_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+const MAX_MENTIONS = 50;
+const MENTIONS_JSON_LIMIT = 4096;
+
+function byteLength(s: string): number {
+  return new TextEncoder().encode(s).byteLength;
+}
 
 // rest body 与 ws send 帧共用的校验（rest 侧无 type 字段）
 function parseSendFrame(input: unknown): SendFrame | null {
@@ -61,10 +75,22 @@ function parseSendFrame(input: unknown): SendFrame | null {
   const f = input as Record<string, unknown>;
   if (f.kind === "message") {
     if (typeof f.body !== "string") return null;
-    const mentions = Array.isArray(f.mentions)
-      ? f.mentions.filter((m): m is string => typeof m === "string")
-      : [];
-    const reply_to = typeof f.reply_to === "number" ? f.reply_to : null;
+    if (f.mentions !== undefined && !Array.isArray(f.mentions)) return null;
+    const mentions = Array.isArray(f.mentions) ? f.mentions : [];
+    if (
+      mentions.length > MAX_MENTIONS ||
+      mentions.some((m) => typeof m !== "string" || !MENTION_NAME_RE.test(m)) ||
+      byteLength(JSON.stringify(mentions)) > MENTIONS_JSON_LIMIT
+    ) {
+      return null;
+    }
+    const reply_to =
+      f.reply_to === undefined || f.reply_to === null
+        ? null
+        : typeof f.reply_to === "number" && Number.isInteger(f.reply_to) && f.reply_to > 0
+          ? f.reply_to
+          : undefined;
+    if (reply_to === undefined) return null;
     return { type: "send", kind: "message", body: f.body, mentions, reply_to };
   }
   if (f.kind === "status") {
@@ -73,10 +99,6 @@ function parseSendFrame(input: unknown): SendFrame | null {
     return { type: "send", kind: "status", state: f.state as StatusState, note };
   }
   return null;
-}
-
-function byteLength(s: string): number {
-  return new TextEncoder().encode(s).byteLength;
 }
 
 async function hmacSha256Hex(secret: string, body: string): Promise<string> {
@@ -162,6 +184,7 @@ export class ChannelDO extends Server<Env> {
       name: h.get("x-ap-name") ?? "",
       kind: h.get("x-ap-kind") === "agent" ? "agent" : "human",
       role: (h.get("x-ap-role") ?? "readonly") as TokenRole,
+      tokenHash: h.get("x-ap-token-hash") ?? "",
       archived: h.get("x-ap-archived") === "1",
       lastSeen: Date.now(),
     };
@@ -179,25 +202,36 @@ export class ChannelDO extends Server<Env> {
       type: "welcome",
       channel: this.name,
       self: state.name,
+      mode: this.getMeta("mode") === "party" ? "party" : "normal",
       role: state.role,
       participants: this.participants(),
       last_seq: this.lastSeq(),
       presence: this.presenceList(),
     });
+    this.broadcastFrame({ type: "participants", participants: this.participants() });
     if ((await this.ctx.storage.getAlarm()) === null) {
       await this.ctx.storage.setAlarm(Date.now() + PRESENCE_SCAN_MS);
     }
   }
 
   async onMessage(connection: Connection<ConnState>, message: WSMessage) {
-    if (typeof message !== "string") return;
+    const badRequest = () =>
+      this.sendFrame(connection, { type: "error", code: "bad_request", message: "invalid frame" });
+    if (typeof message !== "string") {
+      badRequest();
+      return;
+    }
     let raw: unknown;
     try {
       raw = JSON.parse(message);
     } catch {
+      badRequest();
       return;
     }
-    if (typeof raw !== "object" || raw === null) return;
+    if (typeof raw !== "object" || raw === null) {
+      badRequest();
+      return;
+    }
     const frame = raw as Record<string, unknown>;
     let st = connection.state;
     if (!st) return;
@@ -207,6 +241,10 @@ export class ChannelDO extends Server<Env> {
     if (frame.type === "ping") {
       // setWebSocketAutoResponse 只匹配字面 '{"type":"ping"}'，这里兜底其余序列化
       this.sendFrame(connection, { type: "pong" });
+      return;
+    }
+    if (!(await this.isTokenActive(st.tokenHash))) {
+      this.closeRevokedConnection(connection);
       return;
     }
     if (frame.type === "hello") {
@@ -222,16 +260,29 @@ export class ChannelDO extends Server<Env> {
         this.sendFrame(connection, { type: "error", code: "archived", message: "channel is archived" });
         return;
       }
+      const rate = this.consumeRate(st.name, Date.now());
+      if (rate !== null) {
+        this.sendFrame(connection, { type: "error", code: rate.code, message: rate.message });
+        return;
+      }
       const send = parseSendFrame(frame);
-      if (!send) return;
-      const out = this.handleSend({ name: st.name, kind: st.kind, role: st.role }, send);
+      if (!send) {
+        this.sendFrame(connection, { type: "error", code: "bad_request", message: "invalid send payload" });
+        return;
+      }
+      const out = await this.handleSend(
+        { name: st.name, kind: st.kind, role: st.role, tokenHash: st.tokenHash },
+        send,
+        { countRate: false },
+      );
       if (!out.ok) {
         this.sendFrame(connection, { type: "error", code: out.code, message: out.message });
         return;
       }
       // sent 先于广播到达发送方，客户端先推进游标再看到自己的回声
       this.sendFrame(connection, { type: "sent", seq: out.seq });
-      for (const f of out.frames) this.broadcast(JSON.stringify(f));
+      await this.closeInactiveConnections();
+      for (const f of out.frames) this.broadcastFrame(f);
       await this.afterSend(out.frames[0] as MsgFrame);
     }
   }
@@ -243,6 +294,7 @@ export class ChannelDO extends Server<Env> {
       if (other.id !== connection.id && other.state?.name === st.name) return;
     }
     this.markOffline(st.name, Date.now());
+    this.broadcastFrame({ type: "participants", participants: this.participants() });
   }
 
   // alarm 三件套（spec §6/§13）：presence 扫描 → webhook 重试 → temp 归档检查，最后按最近到期时间续排
@@ -279,17 +331,24 @@ export class ChannelDO extends Server<Env> {
       }
       if (gone) this.markOffline(name, now);
     }
+    if (stale.length > 0) {
+      this.broadcastFrame({ type: "participants", participants: this.participants() });
+    }
     return live;
   }
 
   // 队列里到期的重投一轮：成功删行，失败退避 1/4/16 分钟，超过 3 次丢弃并向频道记一条 status
   private async retryWebhooks(now: number) {
+    if (this.isArchived()) return;
     const rows = this.ctx.storage.sql
       .exec(
         `SELECT q.id, q.webhook_name, q.payload, q.attempts, w.url, w.secret
          FROM webhook_queue q LEFT JOIN webhooks w ON w.name = q.webhook_name
-         WHERE q.next_retry_at <= ?`,
+         WHERE q.next_retry_at <= ?
+         ORDER BY q.next_retry_at, q.id
+         LIMIT ?`,
         now,
+        WEBHOOK_RETRY_BATCH_SIZE,
       )
       .toArray();
     for (const row of rows) {
@@ -327,18 +386,29 @@ export class ChannelDO extends Server<Env> {
 
   // temp 频道最后一条消息后闲置超时 → 归档：写 do meta + 回写 d1 archived_at + 踢连接
   private async checkTempArchive(now: number) {
-    if (this.getMeta("ckind") !== "temp" || this.isArchived()) return;
+    const pending = this.getMeta("archive_pending_at");
+    if (this.isArchived()) {
+      if (pending !== null) await this.reconcileD1Archive(Number(pending) || now);
+      return;
+    }
+    if (this.getMeta("ckind") !== "temp") return;
     const idleBasis = this.lastActivityTs();
     if (idleBasis === null || now - idleBasis < this.tempIdleMs()) return;
     this.archiveAndKick();
+    this.setMeta("archive_pending_at", String(now));
+    await this.reconcileD1Archive(now);
+  }
+
+  private async reconcileD1Archive(ts: number) {
     try {
       await this.env.DB.prepare(
         "UPDATE channels SET archived_at = ? WHERE slug = ? AND archived_at IS NULL",
       )
-        .bind(now, this.name)
+        .bind(ts, this.name)
         .run();
+      this.deleteMeta("archive_pending_at");
     } catch {
-      // d1 回写失败不回滚 do 状态；下次 alarm 前 do 已是权威归档态
+      await this.ensureAlarmAt(Date.now() + 60_000);
     }
   }
 
@@ -350,6 +420,7 @@ export class ChannelDO extends Server<Env> {
       .exec("SELECT MIN(next_retry_at) AS t FROM webhook_queue")
       .one();
     if (next.t !== null) candidates.push(Number(next.t));
+    if (this.getMeta("archive_pending_at") !== null) candidates.push(now + 60_000);
     if (this.getMeta("ckind") === "temp" && !this.isArchived()) {
       const basis = this.lastActivityTs();
       if (basis !== null) candidates.push(basis + this.tempIdleMs());
@@ -367,7 +438,7 @@ export class ChannelDO extends Server<Env> {
       ts,
     );
     const frame: PresenceFrame = { type: "presence", name, state: "offline", note: null, ts };
-    this.broadcast(JSON.stringify(frame));
+    this.broadcastFrame(frame);
   }
 
   // worker 每次转发都会带上频道快照头，do 写 meta 缓存（同 archived 的手法）
@@ -412,6 +483,11 @@ export class ChannelDO extends Server<Env> {
       });
       const ok = await this.deliverWebhook(hook.url, hook.secret, payload);
       if (!ok) {
+        const queued = Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM webhook_queue").one().n);
+        if (queued >= MAX_WEBHOOK_QUEUE_ROWS) {
+          this.insertSystemStatus("webhook retry queue is full; dropping failed delivery", now);
+          continue;
+        }
         this.ctx.storage.sql.exec(
           "INSERT INTO webhook_queue (webhook_name, payload, attempts, next_retry_at) VALUES (?, ?, 1, ?)",
           hook.name,
@@ -435,6 +511,7 @@ export class ChannelDO extends Server<Env> {
           authorization: `Bearer ${secret}`,
           "x-agentparty-signature": `hmac-sha256=${signature}`,
         },
+        redirect: "manual",
         signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
       });
       return res.ok;
@@ -466,7 +543,7 @@ export class ChannelDO extends Server<Env> {
       note,
       ts: now,
     };
-    this.broadcast(JSON.stringify(frame));
+    this.broadcastFrame(frame);
   }
 
   // 归档收口：写 meta + 广播 error:archived + 踢连接（手动归档与 temp 自动归档共用）
@@ -518,6 +595,15 @@ export class ChannelDO extends Server<Env> {
         presence: this.presenceList(),
       });
     }
+    if (url.pathname === "/internal/init" && request.method === "POST") {
+      this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
+      if (this.getMeta("ckind") === "temp") {
+        const born = Date.now();
+        this.setMeta("born", String(born));
+        await this.ensureAlarmAt(born + this.tempIdleMs());
+      }
+      return Response.json({ ok: true });
+    }
     if (url.pathname === "/internal/messages" && request.method === "GET") {
       const since = Math.max(toInt(url.searchParams.get("since"), 0), 0);
       const limit = Math.min(Math.max(toInt(url.searchParams.get("limit"), 100), 1), 1000);
@@ -532,6 +618,7 @@ export class ChannelDO extends Server<Env> {
         name: request.headers.get("x-ap-name") ?? "",
         kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
+        tokenHash: request.headers.get("x-ap-token-hash") ?? "",
       };
       let raw: unknown;
       try {
@@ -541,16 +628,24 @@ export class ChannelDO extends Server<Env> {
       }
       const send = parseSendFrame(raw);
       if (!send) {
+        const rate = this.consumeRate(identity.name, Date.now());
+        if (rate !== null) {
+          return Response.json(
+            { error: { code: rate.code, message: rate.message } },
+            { status: ERROR_STATUS[rate.code] },
+          );
+        }
         return Response.json({ error: { code: "bad_request", message: "invalid send payload" } }, { status: 400 });
       }
-      const out = this.handleSend(identity, send);
+      const out = await this.handleSend(identity, send, { countRate: true });
       if (!out.ok) {
         return Response.json(
           { error: { code: out.code, message: out.message } },
           { status: ERROR_STATUS[out.code] },
         );
       }
-      for (const f of out.frames) this.broadcast(JSON.stringify(f));
+      await this.closeInactiveConnections();
+      for (const f of out.frames) this.broadcastFrame(f);
       await this.afterSend(out.frames[0] as MsgFrame);
       return Response.json({ seq: out.seq });
     }
@@ -583,6 +678,16 @@ export class ChannelDO extends Server<Env> {
       ) {
         return Response.json({ error: { code: "bad_request", message: "invalid webhook" } }, { status: 400 });
       }
+      const count = Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM webhooks").one().n);
+      const exists = this.ctx.storage.sql
+        .exec("SELECT name FROM webhooks WHERE name = ?", body.name)
+        .toArray();
+      if (exists.length === 0 && count >= MAX_WEBHOOKS_PER_CHANNEL) {
+        return Response.json(
+          { error: { code: "rate_limited", message: `max ${MAX_WEBHOOKS_PER_CHANNEL} webhooks per channel` } },
+          { status: 429 },
+        );
+      }
       this.ctx.storage.sql.exec(
         `INSERT INTO webhooks (name, url, secret, filter, created_at) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET url = excluded.url, secret = excluded.secret, filter = excluded.filter`,
@@ -612,7 +717,11 @@ export class ChannelDO extends Server<Env> {
     }
     if (url.pathname === "/internal/archive" && request.method === "POST") {
       // do 自己记下归档态（handleSend/onConnect 的权威依据），再踢存活连接
+      this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
+      const ts = toInt(request.headers.get("x-ap-archive-at"), Date.now());
       this.archiveAndKick();
+      this.setMeta("archive_pending_at", String(ts));
+      await this.reconcileD1Archive(ts);
       return Response.json({ ok: true });
     }
     if (url.pathname === "/internal/kick" && request.method === "POST") {
@@ -624,8 +733,7 @@ export class ChannelDO extends Server<Env> {
       }
       for (const connection of this.getConnections<ConnState>()) {
         if (connection.state?.name !== name) continue;
-        this.sendFrame(connection, { type: "error", code: "unauthorized", message: "token revoked" });
-        connection.close(1008, "revoked");
+        this.closeRevokedConnection(connection);
       }
       return Response.json({ ok: true });
     }
@@ -633,12 +741,19 @@ export class ChannelDO extends Server<Env> {
   }
 
   // 校验 → 分配 seq → 落库 → 修剪/presence，返回待广播帧
-  private handleSend(identity: Identity, frame: SendFrame): SendOutcome {
+  private async handleSend(
+    identity: Identity,
+    frame: SendFrame,
+    options: { countRate?: boolean } = {},
+  ): Promise<SendOutcome> {
     if (this.isArchived()) {
       return { ok: false, code: "archived", message: "channel is archived" };
     }
     if (identity.role === "readonly") {
       return { ok: false, code: "unauthorized", message: "readonly token cannot send" };
+    }
+    if (!(await this.isTokenActive(identity.tokenHash))) {
+      return { ok: false, code: "unauthorized", message: "invalid or revoked token" };
     }
     const payload = frame.kind === "message" ? frame.body : frame.note;
     if (byteLength(payload) > BODY_LIMIT) {
@@ -653,34 +768,13 @@ export class ChannelDO extends Server<Env> {
         message: `${guardLimit} consecutive agent messages, waiting for a human`,
       };
     }
-    const sql = this.ctx.storage.sql;
     const now = Date.now();
-    const bucket = Math.floor(now / 60_000);
-    sql.exec("DELETE FROM rate WHERE bucket < ?", bucket - 1);
-    // 滑动窗口：当前 bucket + 上一 bucket 按剩余占比折算，跨分钟边界不翻倍
-    let current = 0;
-    let previous = 0;
-    for (const row of sql
-      .exec("SELECT bucket, count FROM rate WHERE name = ? AND bucket >= ?", identity.name, bucket - 1)
-      .toArray()) {
-      if (Number(row.bucket) === bucket) current = Number(row.count);
-      else previous = Number(row.count);
+    if (options.countRate !== false) {
+      const rate = this.consumeRate(identity.name, now);
+      if (rate !== null) return rate;
     }
-    const windowUsed = current + previous * (1 - (now % 60_000) / 60_000);
-    if (windowUsed >= RATE_LIMIT_PER_MIN) {
-      return {
-        ok: false,
-        code: "rate_limited",
-        message: `over ${RATE_LIMIT_PER_MIN} messages per minute`,
-      };
-    }
-    sql.exec(
-      `INSERT INTO rate (name, bucket, count) VALUES (?, ?, 1)
-       ON CONFLICT(name, bucket) DO UPDATE SET count = count + 1`,
-      identity.name,
-      bucket,
-    );
 
+    const sql = this.ctx.storage.sql;
     const seq = this.lastSeq() + 1;
     const sender = { name: identity.name, kind: identity.kind };
     const msg: MsgFrame =
@@ -743,8 +837,77 @@ export class ChannelDO extends Server<Env> {
     return { ok: true, seq, frames };
   }
 
+  private consumeRate(name: string, now: number): SendErrorOutcome | null {
+    const sql = this.ctx.storage.sql;
+    const bucket = Math.floor(now / 60_000);
+    sql.exec("DELETE FROM rate WHERE bucket < ?", bucket - 1);
+    // 滑动窗口：当前 bucket + 上一 bucket 按剩余占比折算，跨分钟边界不翻倍
+    let current = 0;
+    let previous = 0;
+    for (const row of sql
+      .exec("SELECT bucket, count FROM rate WHERE name = ? AND bucket >= ?", name, bucket - 1)
+      .toArray()) {
+      if (Number(row.bucket) === bucket) current = Number(row.count);
+      else previous = Number(row.count);
+    }
+    const windowUsed = current + previous * (1 - (now % 60_000) / 60_000);
+    if (windowUsed >= RATE_LIMIT_PER_MIN) {
+      return {
+        ok: false,
+        code: "rate_limited",
+        message: `over ${RATE_LIMIT_PER_MIN} messages per minute`,
+      };
+    }
+    sql.exec(
+      `INSERT INTO rate (name, bucket, count) VALUES (?, ?, 1)
+       ON CONFLICT(name, bucket) DO UPDATE SET count = count + 1`,
+      name,
+      bucket,
+    );
+    return null;
+  }
+
+  private broadcastFrame(frame: ServerFrame) {
+    for (const connection of this.getConnections<ConnState>()) {
+      this.sendFrame(connection, frame);
+    }
+  }
+
+  private async closeInactiveConnections() {
+    for (const connection of this.getConnections<ConnState>()) {
+      const st = connection.state;
+      if (!st) continue;
+      if (!(await this.isTokenActive(st.tokenHash))) this.closeRevokedConnection(connection);
+    }
+  }
+
+  private closeRevokedConnection(connection: Connection<ConnState>) {
+    this.sendFrame(connection, { type: "error", code: "unauthorized", message: "token revoked" });
+    connection.close(1008, "revoked");
+  }
+
+  private async isTokenActive(hash: string): Promise<boolean> {
+    if (!hash) return false;
+    try {
+      const row = await this.env.DB.prepare("SELECT id FROM tokens WHERE hash = ? AND revoked_at IS NULL")
+        .bind(hash)
+        .first<{ id: number }>();
+      return row !== null;
+    } catch {
+      return false;
+    }
+  }
+
   private sendFrame(connection: Connection, frame: ServerFrame) {
-    connection.send(JSON.stringify(frame));
+    try {
+      connection.send(JSON.stringify(frame));
+    } catch {
+      try {
+        connection.close(1011, "send failed");
+      } catch {
+        // The runtime may already have detached the socket.
+      }
+    }
   }
 
   private lastSeq(): number {
@@ -780,6 +943,10 @@ export class ChannelDO extends Server<Env> {
       key,
       value,
     );
+  }
+
+  private deleteMeta(key: string) {
+    this.ctx.storage.sql.exec("DELETE FROM meta WHERE key = ?", key);
   }
 
   private presenceList(): PresenceEntry[] {

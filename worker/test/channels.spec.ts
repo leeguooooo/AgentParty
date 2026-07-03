@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { api, postMessage, seedToken, uniq } from "./helpers";
+import { SELF } from "cloudflare:test";
+import { api, createChannel, postMessage, seedToken, uniq, WsClient } from "./helpers";
 
 describe("channels", () => {
   it("creates and lists a channel", async () => {
@@ -76,8 +77,48 @@ describe("channels", () => {
     expect(badKind.status).toBe(400);
   });
 
+  it("403 when readonly token tries to create a channel", async () => {
+    const { token } = await seedToken("readonly");
+    const res = await api("/api/channels", token, {
+      method: "POST",
+      body: JSON.stringify({ slug: uniq("ro"), kind: "standing" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
   it("401 without a token", async () => {
     const res = await api("/api/channels", "");
     expect(res.status).toBe(401);
+  });
+
+  it("query token does not authorize REST, and websocket query auth is readonly-only", async () => {
+    const agent = await seedToken("agent");
+    const ro = await seedToken("readonly");
+    const slug = await createChannel(agent.token);
+
+    const list = await SELF.fetch(`http://ap.test/api/channels?t=${encodeURIComponent(agent.token)}`);
+    expect(list.status).toBe(401);
+
+    const write = await SELF.fetch(
+      `http://ap.test/api/channels/${slug}/messages?t=${encodeURIComponent(agent.token)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind: "message", body: "nope", mentions: [], reply_to: null }),
+      },
+    );
+    expect(write.status).toBe(401);
+
+    const rejectedWs = await SELF.fetch(
+      `http://ap.test/api/channels/${slug}/ws?t=${encodeURIComponent(agent.token)}`,
+      { headers: { upgrade: "websocket" } },
+    );
+    expect(rejectedWs.status).toBe(403);
+
+    const ws = await WsClient.open(slug, ro.token, "query");
+    expect((await ws.nextOfType("welcome")).type).toBe("welcome");
+    ws.send({ type: "send", kind: "message", body: "readonly", mentions: [], reply_to: null });
+    expect((await ws.nextOfType("error")).code).toBe("unauthorized");
+    ws.close();
   });
 });

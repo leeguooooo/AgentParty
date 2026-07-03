@@ -1,5 +1,5 @@
 // ws 客户端：hello/since 补拉 + 断线指数退避重连（1s 起、上限 30s）+ 25s 心跳。
-// 浏览器设不了 Authorization 头，token 走 ?t=（worker extractBearer 已支持）。
+// 浏览器设不了 Authorization 头：个人 token 走 Sec-WebSocket-Protocol，分享链接才走 ?t=。
 import type { ClientFrame, ServerFrame } from "@agentparty/shared";
 
 export type SocketStatus = "connecting" | "open" | "reconnecting" | "closed";
@@ -22,6 +22,10 @@ export interface SocketHandlers {
   onFatal(reason: FatalReason): void;
 }
 
+export interface ChannelSocketOptions {
+  queryToken?: boolean;
+}
+
 export class ChannelSocket {
   private ws: WebSocket | null = null;
   private cursor = 0; // 本地已见最大 seq，重连 hello 用
@@ -36,15 +40,20 @@ export class ChannelSocket {
     private readonly slug: string,
     private readonly token: string,
     private readonly handlers: SocketHandlers,
+    private readonly options: ChannelSocketOptions = {},
   ) {}
 
   connect() {
     if (this.disposed) return;
     this.handlers.onStatus(this.everConnected ? "reconnecting" : "connecting");
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(
-      `${proto}://${location.host}/api/channels/${this.slug}/ws?t=${encodeURIComponent(this.token)}`,
-    );
+    const url =
+      `${proto}://${location.host}/api/channels/${this.slug}/ws` +
+      (this.options.queryToken === true ? `?t=${encodeURIComponent(this.token)}` : "");
+    const ws =
+      this.options.queryToken === true
+        ? new WebSocket(url)
+        : new WebSocket(url, ["agentparty", this.token]);
     this.ws = ws;
 
     let opened = false;

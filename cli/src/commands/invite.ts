@@ -1,5 +1,5 @@
 // party invite — 一条命令建频道 + 铸 token，stdout 打印可整段复制的接入包（需 ADMIN_SECRET）
-import { parseArgs, str } from "../args";
+import { parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readConfig } from "../config";
 import {
   RestError,
@@ -9,8 +9,10 @@ import {
   revokeToken,
   type ChannelMode,
 } from "../rest";
+import { isName, isSlug, normalizeServerUrl } from "../validation";
 
 const USAGE = 'usage: party invite "<title>" [--slug s] [--temp] [--party] [--guest-name bob]';
+const INVITE_FLAGS = ["server", "slug", "guest-name", "temp", "party"];
 
 export function slugifyTitle(title: string): string {
   return title
@@ -21,15 +23,25 @@ export function slugifyTitle(title: string): string {
 
 export async function run(argv: string[]): Promise<number> {
   const { positionals, flags } = parseArgs(argv, { booleans: ["temp", "party"] });
-  const title = positionals[0];
+  const unknown = unknownFlagError(flags, INVITE_FLAGS);
+  if (unknown !== null) {
+    console.error(unknown);
+    return 1;
+  }
+  const flagError = valueFlagError(flags, ["server", "slug", "guest-name"]);
+  if (flagError !== null) {
+    console.error(flagError);
+    return 1;
+  }
+  const title = positionals.join(" ");
   if (!title) {
     console.error(USAGE);
     return 1;
   }
   const cfg = readConfig();
-  const server = (str(flags.server) ?? cfg?.server)?.replace(/\/+$/, "");
+  const server = normalizeServerUrl(str(flags.server) ?? cfg?.server ?? "");
   if (!server) {
-    console.error("no server, run party init or pass --server");
+    console.error("no valid server, run party init or pass --server");
     return 1;
   }
   const adminSecret = process.env.ADMIN_SECRET;
@@ -41,8 +53,17 @@ export async function run(argv: string[]): Promise<number> {
   const slug = str(flags.slug) ?? (slugifyTitle(title) || `party-${Date.now().toString(36)}`);
   const guestName = str(flags["guest-name"]) ?? `${slug}-guest`;
   const shareName = `${slug}-share`;
+  if (!isSlug(slug)) {
+    console.error("slug must match [a-z0-9][a-z0-9-]{0,63}");
+    return 1;
+  }
+  if (!isName(guestName) || !isName(shareName)) {
+    console.error("guest token name must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");
+    return 1;
+  }
   const kind = flags.temp === true ? "temp" : "standing";
   const mode: ChannelMode = flags.party === true ? "party" : "normal";
+  let guestCreated = false;
 
   try {
     // 1. guest agent token —— 重名不静默顶掉现有 guest，让人换名
@@ -56,6 +77,7 @@ export async function run(argv: string[]): Promise<number> {
       }
       throw e;
     }
+    guestCreated = true;
 
     // 2. 建频道（409 = 已存在，复用）
     try {
@@ -97,6 +119,13 @@ channel:  ${slug}  (${kind}${mode === "party" ? " · party" : ""})
 ${line}`);
     return 0;
   } catch (e) {
+    if (guestCreated) {
+      try {
+        await revokeToken(server, adminSecret, guestName);
+      } catch {
+        // best-effort cleanup; surface the original failure below
+      }
+    }
     return handleRestError(e);
   }
 }

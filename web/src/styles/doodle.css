@@ -147,9 +147,20 @@ body {
 }
 
 /* ---- 消息正文（marked 渲染产物）：正文清晰，doodle 只做点缀 ---- */
-.msg-body { color: var(--t-body); font-size: 14.5px; }
+.msg-body {
+  max-width: 100%;
+  min-width: 0;
+  color: var(--t-body);
+  font-size: 14.5px;
+  overflow-wrap: anywhere;
+}
 .msg-body > :first-child { margin-top: 6px; }
 .msg-body > :last-child { margin-bottom: 0; }
+.msg-body p,
+.msg-body li,
+.msg-body blockquote {
+  overflow-wrap: anywhere;
+}
 .msg-body a { color: var(--d-blue); text-decoration-thickness: 2px; }
 .msg-body pre,
 .msg-body :not(pre) > code {
@@ -180,9 +191,14 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   font-family: var(--t-mono);
   font-size: 12px;
   color: var(--t-muted);
+}
+.msg-status > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .msg-status::before,
 .msg-status::after {

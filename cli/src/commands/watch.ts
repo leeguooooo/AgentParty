@@ -1,9 +1,12 @@
 // party watch — 补拉错过消息，阻塞等新消息
 import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_LOOP_GUARD, EXIT_TIMEOUT } from "@agentparty/shared";
-import { num, parseArgs } from "../args";
+import { parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
 import { loadCursor, readConfig, resolveChannel, saveCursor } from "../config";
 import { formatMsg } from "../format";
+import { MAX_TIMEOUT_SEC, isSlug, parsePositiveIntFlag } from "../validation";
+
+const WATCH_FLAGS = ["channel", "timeout", "follow", "mentions-only"];
 
 export interface WatchOptions {
   server: string;
@@ -84,9 +87,28 @@ export async function run(argv: string[]): Promise<number> {
     console.error("no config, run: party init --server URL --token T");
     return 1;
   }
-  const channel = resolveChannel(positionals[0]);
+  const unknown = unknownFlagError(flags, WATCH_FLAGS);
+  if (unknown !== null) {
+    console.error(unknown);
+    return 1;
+  }
+  const flagError = valueFlagError(flags, ["channel", "timeout"]);
+  if (flagError !== null) {
+    console.error(flagError);
+    return 1;
+  }
+  const timeout = parsePositiveIntFlag(str(flags.timeout), "timeout", MAX_TIMEOUT_SEC);
+  if (typeof timeout === "string") {
+    console.error(timeout);
+    return 1;
+  }
+  const channel = resolveChannel(str(flags.channel) ?? positionals[0]);
   if (!channel) {
     console.error("no channel, pass one or bind with: party init --channel C");
+    return 1;
+  }
+  if (!isSlug(channel)) {
+    console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
     return 1;
   }
   return runWatch({
@@ -94,7 +116,7 @@ export async function run(argv: string[]): Promise<number> {
     token: cfg.token,
     channel,
     since: loadCursor(channel),
-    timeoutSec: num(flags.timeout) ?? 240,
+    timeoutSec: timeout ?? 240,
     follow: flags.follow === true,
     mentionsOnly: flags["mentions-only"] === true,
     onCursor: (c) => saveCursor(channel, c),

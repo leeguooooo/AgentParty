@@ -56,6 +56,12 @@ export function startRestMock(handler?: RestHandler): RestMock {
       if (r.method === "GET" && r.path === "/api/channels") {
         return Response.json({ channels: [] });
       }
+      if (r.method === "POST" && /^\/api\/channels\/[^/]+\/messages$/.test(r.path)) {
+        return Response.json({ seq: 1 });
+      }
+      if (r.method === "GET" && /^\/api\/channels\/[^/]+\/messages$/.test(r.path)) {
+        return Response.json({ messages: [] });
+      }
       const wh = r.path.match(/^\/api\/channels\/([^/]+)\/webhooks(?:\/([^/]+))?$/);
       if (wh) {
         const slug = decodeURIComponent(wh[1]!);

@@ -196,7 +196,7 @@ export async function resetGuard(server: string, token: string, slug: string): P
 export function handleRestError(e: unknown): number {
   if (e instanceof RestError) {
     console.error(`error: ${e.code ?? e.status} ${e.message}`);
-    if (e.code === "unauthorized" || e.status === 401) return EXIT_AUTH;
+    if (e.status === 401) return EXIT_AUTH;
     if (e.code === "loop_guard") return EXIT_LOOP_GUARD;
     if (e.code === "archived") return EXIT_ARCHIVED;
     return 1;

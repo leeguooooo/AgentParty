@@ -46,9 +46,32 @@ describe("parseArgs", () => {
     expect(p.flags.note).toBe("one liner");
   });
 
+  test("short value flag does not eat next flag", () => {
+    const p = parseArgs(["working", "-m", "--channel", "ops"], { aliases: { m: "note" } });
+    expect(p.positionals).toEqual(["working"]);
+    expect(p.flags.note).toBe(true);
+    expect(p.flags.channel).toBe("ops");
+  });
+
+  test("-- terminates flags and records literal mode", () => {
+    const p = parseArgs(["--channel", "dev", "--", "-"]);
+    expect(p.flags.channel).toBe("dev");
+    expect(p.positionals).toEqual(["-"]);
+    expect(p.terminated).toBe(true);
+    expect(p.terminatedAt).toBe(0);
+  });
+
+  test("-- after a positional records where termination happened", () => {
+    const p = parseArgs(["-", "--"]);
+    expect(p.positionals).toEqual(["-"]);
+    expect(p.terminated).toBe(true);
+    expect(p.terminatedAt).toBe(1);
+  });
+
   test("flag value may be - (stdin)", () => {
     const p = parseArgs(["--body", "-"]);
     expect(p.flags.body).toBe("-");
+    expect(p.terminated).toBe(false);
   });
 
   test("str/num helpers", () => {

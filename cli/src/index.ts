@@ -7,11 +7,11 @@ usage: party <command> [args]
 
 commands:
   init      --server URL --token T [--channel C]   write config, bind channel (create if missing)
-  send      [channel] <text|-> [--mention name]... [--reply-to seq]
-  watch     [channel] [--timeout 240] [--mentions-only] [--follow]
-  ask       [channel] <text|-> [--timeout 240] [--mention name]... [--mentions-only]
-  status    [channel] working|waiting|blocked|done [-m note]
-  history   [channel] [--since seq] [--limit n]
+  send      <text|-> [--channel C] [--mention name]... [--reply-to seq]
+  watch     [channel|--channel C] [--timeout 240] [--mentions-only] [--follow]
+  ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]
+  status    [channel|--channel C] working|waiting|blocked|done [-m note]
+  history   [channel|--channel C] [--since seq] [--limit n]
   channel   create <slug> [--title t] [--temp] [--party] | list | archive [slug] | reset-guard [slug]
   invite    "<title>" [--slug s] [--temp] [--party] [--guest-name bob]   (ADMIN_SECRET env)
   webhook   add <channel> --name n --url URL --secret S [--filter mentions|all] | remove <channel> --name n | list <channel>

@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [react()],
   build: { outDir: "dist" },
   server: {
-    // 本地联调：wrangler dev 默认 8787
+    // 本地联调：wrangler-accounts dev 默认 8787
     proxy: {
       "/api": { target: "http://localhost:8787", ws: true },
       "/openapi.json": { target: "http://localhost:8787" },

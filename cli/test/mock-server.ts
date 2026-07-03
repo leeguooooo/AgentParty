@@ -11,6 +11,7 @@ export interface MockServer {
   hellos: number[];
   connections: number;
   auths: (string | null)[];
+  paths: string[];
   stop(): void;
 }
 
@@ -23,12 +24,14 @@ export type FrameHandler = (
 export function startMockServer(onFrame: FrameHandler): MockServer {
   const hellos: number[] = [];
   const auths: (string | null)[] = [];
+  const paths: string[] = [];
   let connections = 0;
 
   const server = Bun.serve<{ index: number }>({
     hostname: "127.0.0.1",
     port: 0,
     fetch(req, srv) {
+      paths.push(new URL(req.url).pathname);
       auths.push(req.headers.get("authorization"));
       if (srv.upgrade(req, { data: { index: connections++ } })) return;
       return new Response("expected websocket", { status: 400 });
@@ -50,6 +53,7 @@ export function startMockServer(onFrame: FrameHandler): MockServer {
     url: `http://127.0.0.1:${server.port}`,
     hellos,
     auths,
+    paths,
     get connections() {
       return connections;
     },

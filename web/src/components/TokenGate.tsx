@@ -32,11 +32,17 @@ export function TokenGate({ error, onSubmit }: Props) {
           type="password"
           placeholder="ap_…"
           autoComplete="off"
+          aria-invalid={error !== null}
+          aria-describedby={error !== null ? "ap-token-error" : undefined}
           autoFocus
           value={value}
           onChange={(e) => setValue(e.target.value)}
         />
-        {error !== null && <p className="banner banner--red">{error}</p>}
+        {error !== null && (
+          <p id="ap-token-error" className="banner banner--red" role="alert">
+            {error}
+          </p>
+        )}
         <button className="d-btn d-btn--primary gate-btn" type="submit" disabled={value.trim() === ""}>
           enter the party
         </button>

@@ -12,37 +12,44 @@ interface Props {
   slug: string;
   token: string;
   mode: "normal" | "party";
+  shareMode: boolean;
   onAuthFailed(message: string): void;
 }
 
 const MENTION_RE = /@([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
 
-export function ChannelPage({ slug, token, mode, onAuthFailed }: Props) {
+export function ChannelPage({ slug, token, mode, shareMode, onAuthFailed }: Props) {
   const [state, dispatch] = useReducer(channelReducer, initialChannelState);
   const [draft, setDraft] = useState("");
   const [historyError, setHistoryError] = useState<string | null>(null);
   const sockRef = useRef<ChannelSocket | null>(null);
   const streamRef = useRef<HTMLDivElement | null>(null);
+  const pendingDraftsRef = useRef<string[]>([]);
   const stickBottom = useRef(true);
   const authFailedRef = useRef(onAuthFailed);
   authFailedRef.current = onAuthFailed;
 
   useEffect(() => {
-    const sock = new ChannelSocket(slug, token, {
-      onFrame: (frame) => dispatch({ type: "frame", frame }),
-      onStatus: (status) => dispatch({ type: "status", status }),
-      onFatal: (reason) => {
-        if (reason === "revoked") authFailedRef.current("token revoked — paste a new one");
-        else dispatch({ type: "fatal", reason });
+    const sock = new ChannelSocket(
+      slug,
+      token,
+      {
+        onFrame: (frame) => dispatch({ type: "frame", frame }),
+        onStatus: (status) => dispatch({ type: "status", status }),
+        onFatal: (reason) => {
+          if (reason === "revoked") authFailedRef.current("token revoked — paste a new one");
+          else dispatch({ type: "fatal", reason });
+        },
       },
-    });
+      { queryToken: shareMode },
+    );
     sockRef.current = sock;
     sock.connect();
     return () => {
       sock.dispose();
       sockRef.current = null;
     };
-  }, [slug, token]);
+  }, [slug, token, shareMode]);
 
   // 归档频道 do 在 welcome/补拉前就 1008 踢线，历史回看走 rest 兜底（spec §6「网页仍可回看」）
   useEffect(() => {
@@ -76,9 +83,12 @@ export function ChannelPage({ slug, token, mode, onAuthFailed }: Props) {
     if (el !== null) stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
   }, []);
 
-  // 服务端 sent 确认后才清草稿（失败保留正文）
+  // 服务端 sent 确认后才清对应草稿；用户已输入的新内容不能被旧 ack 清掉。
   useEffect(() => {
-    if (state.lastSentSeq > 0) setDraft("");
+    if (state.lastSentSeq <= 0) return;
+    const submitted = pendingDraftsRef.current.shift();
+    if (submitted === undefined) return;
+    setDraft((current) => (current === submitted ? "" : current));
   }, [state.lastSentSeq]);
 
   const send = useCallback(() => {
@@ -89,10 +99,11 @@ export function ChannelPage({ slug, token, mode, onAuthFailed }: Props) {
       sockRef.current?.send({ type: "send", kind: "message", body, mentions, reply_to: null }) ??
       false;
     // ⌘⏎ 不受按钮 disabled 门控，断线窗口内发送失败要内联提示（草稿保留）
-    if (!ok) dispatch({ type: "send_failed", message: "not connected — message not sent, draft kept" });
+    if (ok) pendingDraftsRef.current.push(draft);
+    else dispatch({ type: "send_failed", message: "not connected — message not sent, draft kept" });
   }, [draft]);
 
-  const canWrite = !state.archived && !state.readonly;
+  const canWrite = state.self !== null && !state.archived && !state.readonly;
 
   return (
     <div className="chan">
@@ -100,25 +111,43 @@ export function ChannelPage({ slug, token, mode, onAuthFailed }: Props) {
         presence={state.presence}
         participants={state.participants}
         status={state.status}
-        party={mode === "party"}
+        party={mode === "party" || state.mode === "party"}
       />
       <div className="stream" ref={streamRef} onScroll={onScroll}>
         {state.messages.map((m) => (
           <MessageCard key={m.seq} msg={m} self={state.self} />
         ))}
-        {state.messages.length === 0 && <p className="d-empty">party watch {slug}</p>}
+        {state.messages.length === 0 && (
+          <p className="d-empty" role="status" aria-live="polite">
+            party watch {slug}
+          </p>
+        )}
       </div>
-      {state.archived && <p className="banner banner--gray">channel archived — read-only from here on</p>}
-      {historyError !== null && <p className="banner banner--red">{historyError}</p>}
+      {state.archived && (
+        <p className="banner banner--gray" role="status" aria-live="polite">
+          channel archived — read-only from here on
+        </p>
+      )}
+      {historyError !== null && (
+        <p className="banner banner--red" role="alert">
+          {historyError}
+        </p>
+      )}
       {state.loopGuard !== null && (
-        <p className="banner banner--yellow">
+        <p className="banner banner--yellow" role="alert">
           loop guard: agents hit the back-and-forth cap — a human message resets it
         </p>
       )}
       {state.readonly && !state.archived && (
-        <p className="banner banner--gray">read-only link — you're watching the party</p>
+        <p className="banner banner--gray" role="status" aria-live="polite">
+          read-only link — you're watching the party
+        </p>
       )}
-      {state.sendError !== null && canWrite && <p className="banner banner--red">{state.sendError}</p>}
+      {state.sendError !== null && canWrite && (
+        <p className="banner banner--red" role="alert">
+          {state.sendError}
+        </p>
+      )}
       {canWrite && (
         <Composer draft={draft} setDraft={setDraft} onSend={send} ready={state.status === "open"} />
       )}

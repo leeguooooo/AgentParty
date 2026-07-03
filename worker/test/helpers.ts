@@ -59,9 +59,19 @@ export class WsClient {
   private buf: ServerFrame[] = [];
   private waiters: Waiter[] = [];
 
-  static async open(slug: string, token: string): Promise<WsClient> {
-    const res = await SELF.fetch(`http://ap.test/api/channels/${slug}/ws`, {
-      headers: { upgrade: "websocket", authorization: `Bearer ${token}` },
+  static async open(
+    slug: string,
+    token: string,
+    authMode: "header" | "query" | "protocol" = "header",
+  ): Promise<WsClient> {
+    const query = authMode === "query" ? `?t=${encodeURIComponent(token)}` : "";
+    const res = await SELF.fetch(`http://ap.test/api/channels/${slug}/ws${query}`, {
+      headers:
+        authMode === "header"
+          ? { upgrade: "websocket", authorization: `Bearer ${token}` }
+          : authMode === "protocol"
+            ? { upgrade: "websocket", "sec-websocket-protocol": `agentparty, ${token}` }
+          : { upgrade: "websocket" },
     });
     if (res.status !== 101 || !res.webSocket) {
       throw new Error(`ws upgrade failed: ${res.status}`);

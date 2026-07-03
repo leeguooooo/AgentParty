@@ -1,8 +1,8 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { LOOP_GUARD_N } from "@agentparty/shared";
 import { describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
-import { api, createChannel, postMessage, seedToken, WsClient } from "./helpers";
+import { ADMIN_HEADERS, api, createChannel, postMessage, seedToken, WsClient } from "./helpers";
 
 async function errorCode(res: Response): Promise<string> {
   const body = (await res.json()) as { error: { code: string } };
@@ -28,6 +28,10 @@ describe("channel lifecycle endpoints", () => {
     const rejected = await postMessage(slug, token, "after");
     expect(rejected.status).toBe(410);
     expect(await errorCode(rejected)).toBe("archived");
+    const row = await env.DB.prepare("SELECT archived_at FROM channels WHERE slug = ?")
+      .bind(slug)
+      .first<{ archived_at: number | null }>();
+    expect(row?.archived_at).not.toBeNull();
 
     // 归档后仍可回看
     const history = await api(`/api/channels/${slug}/messages`, token);
@@ -63,6 +67,45 @@ describe("channel lifecycle endpoints", () => {
     });
   });
 
+  it("archive pending meta reconciles D1 on the next alarm", async () => {
+    const { token } = await seedToken("human");
+    const slug = await createChannel(token);
+    expect((await postMessage(slug, token, "initialize do")).status).toBe(200);
+    const ts = Date.now();
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, async (instance: ChannelDO, state) => {
+      await instance.onRequest(
+        new Request("https://do/internal/archive", {
+          method: "POST",
+          headers: {
+            "x-partykit-room": slug,
+            "x-ap-archive-at": String(ts),
+            "x-ap-mode": "normal",
+            "x-ap-channel-kind": "standing",
+            "x-ap-host": "ap.test",
+          },
+        }),
+      );
+      state.storage.sql.exec(
+        "INSERT INTO meta (key, value) VALUES ('archive_pending_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        String(ts),
+      );
+    });
+    await env.DB.prepare("UPDATE channels SET archived_at = NULL WHERE slug = ?").bind(slug).run();
+
+    await runInDurableObject(stub, async (instance: ChannelDO, state) => {
+      await instance.onAlarm();
+      const pending = state.storage.sql
+        .exec("SELECT value FROM meta WHERE key = 'archive_pending_at'")
+        .toArray();
+      expect(pending).toHaveLength(0);
+    });
+    const row = await env.DB.prepare("SELECT archived_at FROM channels WHERE slug = ?")
+      .bind(slug)
+      .first<{ archived_at: number | null }>();
+    expect(row?.archived_at).toBe(ts);
+  });
+
   it("archive rejects readonly and unknown slug", async () => {
     const agent = await seedToken("agent");
     const ro = await seedToken("readonly");
@@ -73,9 +116,29 @@ describe("channel lifecycle endpoints", () => {
     expect(missing.status).toBe(404);
   });
 
+  it("revocation kicks live sockets even when D1 marks the channel archived", async () => {
+    const { token, name } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+    await env.DB.prepare("UPDATE channels SET archived_at = ? WHERE slug = ?")
+      .bind(Date.now(), slug)
+      .run();
+
+    const revoked = await SELF.fetch(`http://ap.test/api/tokens/${name}`, {
+      method: "DELETE",
+      headers: ADMIN_HEADERS,
+    });
+    expect(revoked.status).toBe(200);
+    const err = await ws.nextOfType("error");
+    expect(err.code).toBe("unauthorized");
+    ws.close();
+  });
+
   it("reset-guard clears a tripped loop guard", async () => {
     const agentA = await seedToken("agent");
     const agentB = await seedToken("agent");
+    const human = await seedToken("human");
     const slug = await createChannel(agentA.token);
     for (let i = 0; i < LOOP_GUARD_N; i++) {
       const res = await postMessage(slug, i % 2 === 0 ? agentA.token : agentB.token, `m${i}`);
@@ -84,7 +147,10 @@ describe("channel lifecycle endpoints", () => {
     const blocked = await postMessage(slug, agentA.token, "blocked");
     expect(blocked.status).toBe(409);
 
-    const reset = await api(`/api/channels/${slug}/reset-guard`, agentA.token, { method: "POST" });
+    const agentReset = await api(`/api/channels/${slug}/reset-guard`, agentA.token, { method: "POST" });
+    expect(agentReset.status).toBe(403);
+
+    const reset = await api(`/api/channels/${slug}/reset-guard`, human.token, { method: "POST" });
     expect(reset.status).toBe(200);
 
     const resumed = await postMessage(slug, agentB.token, "resumed");
