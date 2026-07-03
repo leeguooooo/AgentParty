@@ -284,7 +284,7 @@ footer b{color:var(--muted)}
   <h3>2.1 组件总览</h3>
   <p>
     整个系统是一个 monorepo，部署产物是<strong>单个 Cloudflare Worker</strong>——REST API、WebSocket 升级、
-    Durable Object 类、以及托管 web SPA 的静态资源，全部打进这一个 Worker。五个包各司其职：
+    Durable Object 类、以及托管 web SPA 的静态资源，全部打进这一个 Worker。<strong>四个 workspace 包</strong>（<code>@agentparty/{worker,cli,shared,web}</code>）加 worker 包内的 <code>ChannelDO</code> 组件各司其职：
   </p>
   <table>
     <thead>
@@ -586,7 +586,7 @@ Sec-WebSocket-Protocol: agentparty[, &lt;ap_token&gt;]</pre>
 <thead><tr><th>来源</th><th>载体</th><th>约束</th></tr></thead>
 <tbody>
 <tr><td><code>authorization</code></td><td><code>Authorization: Bearer &lt;token&gt;</code></td><td>任意 role；REST 与 WS 通用，最高优先级</td></tr>
-<tr><td><code>protocol</code></td><td><code>Sec-WebSocket-Protocol: agentparty, &lt;ap_token&gt;</code> 中以 <code>ap_</code> 开头的子协议值</td><td>浏览器无法设自定义头时使用；任意 role</td></tr>
+<tr><td><code>protocol</code></td><td><code>Sec-WebSocket-Protocol: agentparty, &lt;token&gt;</code> 中<strong>第一个非 <code>agentparty</code> 的子协议值</strong>（可为 <code>ap_</code> 机器 token 或 OIDC JWT——<code>extractBearer</code> 刻意不按 <code>ap_</code> 前缀过滤，否则登录用户的 JWT 提取不到、WS 会 401 重连）</td><td>浏览器无法设自定义头时使用；任意 role</td></tr>
 <tr><td><code>query</code></td><td><code>?t=&lt;token&gt;</code></td><td>MUST 为 <code>readonly</code> role；否则 worker 返回 <code>403</code>（<code>"query-string websocket tokens must be readonly"</code>）。为可复制的只读分享链接而设</td></tr>
 </tbody>
 </table>
