@@ -12,6 +12,10 @@ const BACKOFF_MAX_MS = 30_000;
 // do 用 close(1008, reason) 表达终局，这两种不重连
 const FATAL_REASONS: readonly string[] = ["revoked", "archived"];
 
+// 握手阶段被 worker 拒掉（401 吊销等）浏览器只给 1006，连续 N 次握手失败后
+// 用 rest 探测 token 是否还活着，避免拿死 token 无限重连
+const HANDSHAKE_PROBE_AFTER = 3;
+
 export interface SocketHandlers {
   onFrame(frame: ServerFrame): void;
   onStatus(status: SocketStatus): void;
@@ -25,6 +29,7 @@ export class ChannelSocket {
   private pingTimer: number | null = null;
   private reconnectTimer: number | null = null;
   private everConnected = false;
+  private handshakeFails = 0; // 连续「从未 open 就被关」的次数
   private disposed = false;
 
   constructor(
@@ -42,8 +47,11 @@ export class ChannelSocket {
     );
     this.ws = ws;
 
+    let opened = false;
     ws.onopen = () => {
+      opened = true;
       this.everConnected = true;
+      this.handshakeFails = 0;
       this.backoff = BACKOFF_MIN_MS;
       this.handlers.onStatus("open");
       this.send({ type: "hello", since: this.cursor });
@@ -75,9 +83,37 @@ export class ChannelSocket {
         return;
       }
       this.handlers.onStatus("reconnecting");
-      this.reconnectTimer = window.setTimeout(() => this.connect(), this.backoff);
-      this.backoff = Math.min(this.backoff * 2, BACKOFF_MAX_MS);
+      if (!opened && ++this.handshakeFails >= HANDSHAKE_PROBE_AFTER) {
+        void this.probeThenRetry();
+        return;
+      }
+      this.scheduleReconnect();
     };
+  }
+
+  // 握手反复失败：先问 rest 一句 token 还行不行，401 即终局回登录闸；网络问题继续退避
+  private async probeThenRetry() {
+    let revoked = false;
+    try {
+      const res = await fetch("/api/channels", {
+        headers: { authorization: `Bearer ${this.token}` },
+      });
+      revoked = res.status === 401;
+    } catch {
+      // 网络不通，探测不出结论，按普通断线继续退避
+    }
+    if (this.disposed) return;
+    if (revoked) {
+      this.handlers.onStatus("closed");
+      this.handlers.onFatal("revoked");
+      return;
+    }
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect() {
+    this.reconnectTimer = window.setTimeout(() => this.connect(), this.backoff);
+    this.backoff = Math.min(this.backoff * 2, BACKOFF_MAX_MS);
   }
 
   /** 帧发出去返回 true；连接没开返回 false（调用方决定提示） */

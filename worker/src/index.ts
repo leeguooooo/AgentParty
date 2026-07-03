@@ -124,11 +124,32 @@ app.delete("/api/tokens/:name", requireAdmin, async (c) => {
 app.use("/api/channels", requireBearer);
 app.use("/api/channels/*", requireBearer);
 
+// 频道列表页要「最近一条消息 + 参与者状态点」（spec §9 第 1 块），逐 do 聚合 summary
+interface ChannelSummary {
+  last: { sender: string; kind: string; body: string; ts: number } | null;
+  presence: { name: string; state: string; note: string | null; ts: number }[];
+}
+
 app.get("/api/channels", async (c) => {
   const { results } = await c.env.DB.prepare(
     "SELECT slug, title, topic, kind, created_at, archived_at FROM channels ORDER BY created_at, id",
-  ).all();
-  return c.json({ channels: results });
+  ).all<{ slug: string }>();
+  const channels = await Promise.all(
+    results.map(async (row) => {
+      let summary: ChannelSummary = { last: null, presence: [] };
+      try {
+        const stub = await getServerByName(c.env.CHANNELS, row.slug);
+        const res = await stub.fetch(
+          new Request("https://do/internal/summary", { headers: { "x-partykit-room": row.slug } }),
+        );
+        if (res.ok) summary = (await res.json()) as ChannelSummary;
+      } catch {
+        // do 不可达时列表仍可用，摘要降级为空
+      }
+      return { ...row, last_message: summary.last, presence: summary.presence };
+    }),
+  );
+  return c.json({ channels });
 });
 
 app.post("/api/channels", async (c) => {

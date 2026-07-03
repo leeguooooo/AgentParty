@@ -32,12 +32,15 @@ export const initialChannelState: ChannelState = {
 export type ChannelAction =
   | { type: "frame"; frame: ServerFrame }
   | { type: "status"; status: SocketStatus }
-  | { type: "fatal"; reason: FatalReason };
+  | { type: "fatal"; reason: FatalReason }
+  | { type: "send_failed"; message: string }; // 本地发送失败（断线窗口），与 error 帧同走红条
 
 export function channelReducer(state: ChannelState, action: ChannelAction): ChannelState {
   switch (action.type) {
     case "status":
       return { ...state, status: action.status };
+    case "send_failed":
+      return { ...state, sendError: action.message };
     case "fatal":
       // revoked 由页面层接管（回登录闸），这里只处理 archived
       return action.reason === "archived" ? { ...state, archived: true } : state;

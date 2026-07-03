@@ -51,7 +51,9 @@ export const openapiDocument = {
       get: {
         summary: "list channels",
         security: [{ bearer: [] }],
-        responses: { "200": { description: "channel list" } },
+        responses: {
+          "200": { description: "channel list, each with last_message + presence summary" },
+        },
       },
       post: {
         summary: "create a channel",

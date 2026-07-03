@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { api, seedToken, uniq } from "./helpers";
+import { api, postMessage, seedToken, uniq } from "./helpers";
 
 describe("channels", () => {
   it("creates and lists a channel", async () => {
@@ -19,6 +19,38 @@ describe("channels", () => {
     };
     const found = channels.find((c) => c.slug === slug);
     expect(found).toMatchObject({ slug, kind: "temp", archived_at: null });
+  });
+
+  it("list aggregates last message + presence per channel (spec §9 第 1 块)", async () => {
+    const { token, name } = await seedToken("agent");
+    const slug = uniq("ch");
+    const created = await api("/api/channels", token, {
+      method: "POST",
+      body: JSON.stringify({ slug, kind: "standing" }),
+    });
+    expect(created.status).toBe(201);
+
+    // 没消息时摘要为空但字段在
+    let list = await api("/api/channels", token);
+    type Listed = {
+      slug: string;
+      last_message: { sender: string; kind: string; body: string; ts: number } | null;
+      presence: { name: string; state: string }[];
+    };
+    let found = ((await list.json()) as { channels: Listed[] }).channels.find((c) => c.slug === slug);
+    expect(found).toMatchObject({ last_message: null, presence: [] });
+
+    expect((await postMessage(slug, token, "latest news")).status).toBe(200);
+    const status = await api(`/api/channels/${slug}/messages`, token, {
+      method: "POST",
+      body: JSON.stringify({ kind: "status", state: "working", note: "digging" }),
+    });
+    expect(status.status).toBe(200);
+
+    list = await api("/api/channels", token);
+    found = ((await list.json()) as { channels: Listed[] }).channels.find((c) => c.slug === slug);
+    expect(found?.last_message).toMatchObject({ sender: name, kind: "status", body: "digging" });
+    expect(found?.presence).toContainEqual(expect.objectContaining({ name, state: "working" }));
   });
 
   it("409 on slug conflict", async () => {

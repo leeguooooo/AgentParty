@@ -95,6 +95,26 @@
   letter-spacing: 0.5px;
 }
 
+/* 首行：状态点 + 频道名 + 标签；次行：最近一条消息预览 */
+.chan-pill { flex-wrap: wrap; row-gap: 3px; }
+.chan-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.chan-dots { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.chan-last {
+  width: 100%;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--t-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---- presence 条 ---- */
 .presence-bar {
   display: flex;
@@ -298,6 +318,16 @@
 }
 .home-card-topic { margin: 0; font-size: 13px; color: var(--t-muted); }
 .home-card-archived { color: var(--d-red); }
+.home-card-last {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--t-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.home-card .chan-dots { margin-left: auto; }
+.home-card .d-dot { width: 9px; height: 9px; }
 
 /* ---- 窄屏：侧栏横排折叠 ---- */
 @media (max-width: 760px) {

@@ -1,6 +1,8 @@
 // rest 封装 + token 存取。
 // 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它且不落 localStorage（readonly 分享模式）；
 // 否则用 localStorage 里粘贴过的 token。
+import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
+
 const TOKEN_KEY = "ap_token";
 
 export class AuthError extends Error {}
@@ -32,6 +34,14 @@ export function dropUrlToken() {
   history.replaceState(null, "", url.pathname + url.search + url.hash);
 }
 
+// 频道列表页要「最近一条消息 + 参与者状态点」（spec §9 第 1 块），worker 聚合自各 do
+export interface ChannelLastMessage {
+  sender: string;
+  kind: "message" | "status";
+  body: string;
+  ts: number;
+}
+
 export interface ChannelInfo {
   slug: string;
   title: string | null;
@@ -39,6 +49,8 @@ export interface ChannelInfo {
   kind: "standing" | "temp";
   created_at: number;
   archived_at: number | null;
+  last_message: ChannelLastMessage | null;
+  presence: PresenceEntry[];
 }
 
 export async function listChannels(token: string): Promise<ChannelInfo[]> {
@@ -49,4 +61,15 @@ export async function listChannels(token: string): Promise<ChannelInfo[]> {
   if (!res.ok) throw new Error(`GET /api/channels failed (${res.status})`);
   const data = (await res.json()) as { channels: ChannelInfo[] };
   return data.channels;
+}
+
+// 归档频道的 ws 会被 1008 直接踢掉、零补推；网页回看走这条 rest（spec §6）
+export async function fetchMessages(token: string, slug: string, limit = 1000): Promise<MsgFrame[]> {
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/messages?limit=${limit}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/messages failed (${res.status})`);
+  const data = (await res.json()) as { messages: MsgFrame[] };
+  return data.messages;
 }

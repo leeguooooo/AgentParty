@@ -246,6 +246,20 @@ export class ChannelDO extends Server<Env> {
   // worker 转发来的内部 rest
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/internal/summary" && request.method === "GET") {
+      // 频道列表页聚合用：最近一条消息（正文截断）+ presence 快照（spec §9 第 1 块）
+      const rows = this.ctx.storage.sql
+        .exec("SELECT * FROM messages ORDER BY seq DESC LIMIT 1")
+        .toArray();
+      const last = rows.length > 0 ? this.rowToFrame(rows[0]!) : null;
+      return Response.json({
+        last:
+          last === null
+            ? null
+            : { sender: last.sender.name, kind: last.kind, body: last.body.slice(0, 200), ts: last.ts },
+        presence: this.presenceList(),
+      });
+    }
     if (url.pathname === "/internal/messages" && request.method === "GET") {
       const since = Math.max(toInt(url.searchParams.get("since"), 0), 0);
       const limit = Math.min(Math.max(toInt(url.searchParams.get("limit"), 100), 1), 1000);
