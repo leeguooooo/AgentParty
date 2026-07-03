@@ -11,6 +11,10 @@ export class AuthError extends Error {}
 // 私有频道 ACL 拒入（spec §3 访问规则矩阵）：worker 回 403 forbidden / WS 1008 forbidden。
 // 与 AuthError 区分——token 有效，只是这个频道不让进，不该回登录闸。
 export class ForbiddenError extends Error {}
+// 铸 agent token 时同名已存在（worker 409）——上层据此换名重试。
+export class ConflictError extends Error {}
+// 名字非法 / 保留名 / scope 非法（worker 400）——文案层面走内联红字。
+export class ValidationError extends Error {}
 
 export function urlToken(): string | null {
   return new URLSearchParams(window.location.search).get("t");
@@ -112,6 +116,32 @@ export async function listChannels(token: string): Promise<ChannelInfo[]> {
   if (!res.ok) throw new Error(`GET /api/channels failed (${res.status})`);
   const data = (await res.json()) as { channels: ChannelInfo[] };
   return data.channels;
+}
+
+// 频道页「让 agent 加入」：登录人类账号会话铸一枚 channel-scoped 的 agent token（spec §10）。
+// owner 由服务端从会话推导，前端不传。明文 token 仅此一次返回，复制后即无法再取。
+export interface ChannelAgent {
+  token: string;
+  name: string;
+  channel_scope?: string;
+}
+
+export async function createChannelAgent(
+  slug: string,
+  name: string,
+  token: string,
+): Promise<ChannelAgent> {
+  const res = await fetch("/api/agents", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ name, channel_scope: slug }),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("no permission to mint agents here");
+  if (res.status === 409) throw new ConflictError("agent name already exists");
+  if (res.status === 400) throw new ValidationError("invalid agent name");
+  if (!res.ok) throw new Error(`POST /api/agents failed (${res.status})`);
+  return (await res.json()) as ChannelAgent;
 }
 
 // 归档频道的 ws 会被 1008 直接踢掉、零补推；网页回看走这条 rest（spec §6）

@@ -278,6 +278,9 @@ export function App() {
               mode={channels?.find((c) => c.slug === slug)?.mode ?? "normal"}
               isPublic={channels?.find((c) => c.slug === slug)?.visibility === "public"}
               shareMode={isShareMode()}
+              // 只有登录人类账号会话（非只读分享链接）才能铸 agent（worker 要求 role==="human"）
+              canMintAgent={!isShareMode() && me?.role === "human"}
+              agentNamePrefix={(me?.email ?? me?.name ?? slug).split("@")[0] ?? slug}
               onAuthFailed={onAuthFailed}
             />
           ) : (

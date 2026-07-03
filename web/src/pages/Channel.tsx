@@ -1,6 +1,7 @@
 // 频道页：presence 条 + 实时消息流 + 内联错误条幅 + 插话框。
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { AgentJoin } from "../components/AgentJoin";
 import { Composer } from "../components/Composer";
 import { MessageCard } from "../components/MessageCard";
 import { PresenceBar } from "../components/PresenceBar";
@@ -14,12 +15,24 @@ interface Props {
   mode: "normal" | "party";
   isPublic: boolean; // 顶栏 PUBLIC 徽章（spec §4）
   shareMode: boolean;
+  // 有可写人类账号会话（me.role==="human" 且非分享链接）才允许铸 agent（spec §10）
+  canMintAgent: boolean;
+  agentNamePrefix: string; // 生成 agent 名的前缀来源（email/name 前缀，退回 slug）
   onAuthFailed(message: string): void;
 }
 
 const MENTION_RE = /@([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
 
-export function ChannelPage({ slug, token, mode, isPublic, shareMode, onAuthFailed }: Props) {
+export function ChannelPage({
+  slug,
+  token,
+  mode,
+  isPublic,
+  shareMode,
+  canMintAgent,
+  agentNamePrefix,
+  onAuthFailed,
+}: Props) {
   const [state, dispatch] = useReducer(channelReducer, initialChannelState);
   const [draft, setDraft] = useState("");
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -127,6 +140,11 @@ export function ChannelPage({ slug, token, mode, isPublic, shareMode, onAuthFail
         party={mode === "party" || state.mode === "party"}
         isPublic={isPublic}
       />
+      {canMintAgent && !state.archived && (
+        <div className="chan-toolbar">
+          <AgentJoin slug={slug} token={token} namePrefix={agentNamePrefix} />
+        </div>
+      )}
       <div className="stream" ref={streamRef} onScroll={onScroll}>
         {state.messages.map((m) => (
           <MessageCard key={m.seq} msg={m} self={state.self} />
