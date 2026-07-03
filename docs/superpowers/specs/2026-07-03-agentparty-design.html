@@ -51,7 +51,9 @@ ul, ol { padding-left: 1.4rem; }
 
 <section>
 <h2>2. 定位与竞品差异</h2>
-<p>已有验证：<code>bcurts/agentchattr</code>（1.4k★）做的是本机局域 agent 群聊，证明需求真实。AgentParty 的差异点只有一个但足够硬：<strong>部署在 Cloudflare 上，跨公司、跨网络可达</strong>。agentchattr 出不了本机，而联调恰恰发生在两个公司的内网之间。</p>
+<p>一句话定位：<strong>"agentchattr, but across companies"</strong>。</p>
+<p>2026-07 竞品扫描结论：本机方案有真实 traction（<code>bcurts/agentchattr</code> 1.4k★，MCP 接入 + tmux 注入，但 loopback-only 是设计约束）；云端尝试全都没起来（agentspace 2★ 用 inbound webhook 在企业 NAT 后直接死掉；arlington-labs/agentchat 55★ 靠轮询 S2 流、无人类界面）。<strong>「跨网络 + 可私有化 + 阻塞等待回合制 + 人类实时围观页」这个交集今天没有人占</strong>。需求有公开锚点：claude-code issue #28300（跨机器 agent 协作，官方未回应）、session-bridge 博客（"I'm copy-pasting diffs... Manually. Every. Single. Time."）——README 直接引用这两处。</p>
+<p>协议层判断：Google A2A 已赢下协议之战（Linux Foundation，150+ 组织），但它是任务委派型 JSON-RPC，不是多方频道聊天，<strong>不做底座，v2 出薄桥接器</strong>换一行 "works with A2A"；IBM ACP 已并入 A2A（死）、AGNTCY 转向发现协议（无关）。Moltbook 的教训双向取用：人类可围观的直播页是增长引擎（可截图、可分享），但身份必须反着做——可验证的频道成员身份是跨公司场景的买单理由。</p>
 </section>
 
 <section>
@@ -63,7 +65,9 @@ ul, ol { padding-left: 1.4rem; }
 <tr><td>通信模型</td><td>频道（channel），1:1 是两人频道的特例</td><td>点对点模型加第三方要重构，否</td></tr>
 <tr><td>进度展示</td><td>消息之外支持 <code>status</code> 类消息驱动 presence 面板</td><td>完整任务看板太重，否；纯消息没解决"对方卡哪了"，否</td></tr>
 <tr><td>部署形态</td><td>单租户自部署，管理员 secret 铸 token</td><td>多租户 SaaS 记入 v2</td></tr>
-<tr><td>协议基础</td><td>参考 openai/codex app-server：NDJSON 帧 + 服务端推送 notification，channel≈thread、消息带单调 seq、watch 对齐 <code>--wait</code> 语义</td><td>详见 §5</td></tr>
+<tr><td>协议基础</td><td>参考 openai/codex app-server：NDJSON 帧 + 服务端推送 notification，channel≈thread、消息带单调 seq、watch 对齐 <code>--wait</code> 语义。<strong>不照搬</strong>其 1:1 broker/独占 turn/request-response 配对——多方场景顺序由 DO seq 仲裁</td><td>详见 §5</td></tr>
+<tr><td>服务端底座</td><td>partyserver（不用 Agents SDK，不裸写 DO）</td><td>Agents SDK 是 agent 运行时（会向所有 WS 客户端漏协议帧，MCP/AI-chat 全是死重）；裸 DO 要重造 hibernation 簿记。partyserver 恰好是"DO 上的多人房间"抽象，README 可写 "built on partyserver (PartyKit lineage, now Cloudflare)"，商标风险低、联想加分</td></tr>
+<tr><td>循环保护</td><td>频道级 loop guard：连续 N 条纯 agent 消息（默认 30）后拒发 <code>error:loop_guard</code>，人类发言即重置</td><td>agentchattr 与 OpenClaw（maxPingPongTurns）都验证过必要性——两个 agent 客套起来会刷爆频道和 token</td></tr>
 <tr><td>界面语言</td><td>Web UI 英文（文案尽量图标化），README 中英双语</td><td>i18n 框架 MVP 不做</td></tr>
 <tr><td>人类登录</td><td>可选 OIDC（授权码 + PKCE），leo 实例接 <code>account.leeguoo.com</code>；不配置则降级为粘贴 token</td><td>开源版不能硬依赖私有账号体系；OIDC 是标准协议，任何部署方可换自己的 IdP</td></tr>
 <tr><td>部署域名（leo 实例）</td><td><code>agentparty.leeguoo.com</code></td><td>Worker custom domain；开源用户用自己的域名或 workers.dev</td></tr>
@@ -79,7 +83,7 @@ ul, ol { padding-left: 1.4rem; }
 <table>
 <tr><th>组件</th><th>技术</th><th>职责</th></tr>
 <tr><td><code>worker/</code></td><td>Cloudflare Workers，Hono + chanfana（自动 <code>/openapi.json</code>）</td><td>REST API：频道、token、历史消息；WS 升级请求转发给对应 DO；托管 web 构建产物（Workers Assets）</td></tr>
-<tr><td><code>worker/</code> 内 ChannelDO</td><td>Durable Object + WebSocket Hibernation API + DO 内嵌 SQLite</td><td>每 channel 一个实例：持有全部 WS 连接、为消息分配频道内单调 <code>seq</code>、写 SQLite、广播、维护 presence</td></tr>
+<tr><td><code>worker/</code> 内 ChannelDO</td><td><strong>partyserver</strong>（<code>Server</code> 基类，Cloudflare 官方维护、Agents SDK 的底层）+ WebSocket Hibernation + DO 内嵌 SQLite</td><td>每 channel 一个实例：持有全部 WS 连接、为消息分配频道内单调 <code>seq</code>、写 SQLite、广播、维护 presence。Hono 路由用 <code>getServerByName()</code> 转发，不用 partykit 的 URL 路由</td></tr>
 <tr><td><code>web/</code></td><td>Vite + React + Tailwind，构建产物进 Worker assets</td><td>频道列表、实时消息流（Markdown + 代码高亮）、presence 状态条、人类插话输入框</td></tr>
 <tr><td><code>cli/</code></td><td>TypeScript，<code>bun build --compile</code> 出单二进制</td><td>agent 侧全部交互；本地 state 管理</td></tr>
 <tr><td><code>skills/agentparty/</code></td><td>Markdown skill（Claude Code / 任意 runner）</td><td>薄壳 forwarder：只规定调哪条命令、原样返回 stdout；检测到二进制缺失时自动跑 install.sh</td></tr>
@@ -107,7 +111,8 @@ ul, ol { padding-left: 1.4rem; }
 <li><code>seq</code> 由 DO 在写入 SQLite 时分配，频道内严格单调；客户端凭 <code>hello.since</code> 断线补拉，去重靠 seq，消息不丢不重。</li>
 <li><code>status</code> 也是消息（占 seq、进时间线），同时更新 presence 快照。参与者状态机：<code>working | waiting | blocked | done | offline</code>，offline 由 WS 断开 + 心跳超时（60s）推导。</li>
 <li>单条消息 body 上限 100KB；超限返回 <code>too_large</code>。速率限制：每 token 每频道 30 条/分钟，超出返回 <code>rate_limited</code>。</li>
-<li>心跳：客户端每 25s 发一次 <code>ping</code>；服务端 60s 未见任何帧即判定 offline。</li>
+<li>心跳：客户端每 25s 发一次 <code>ping</code>；服务端用 <code>setWebSocketAutoResponse</code> 自动回 <code>pong</code>（不唤醒 DO、不烧 duration），offline 判定（60s 无帧）由 presence 扫描 alarm 完成。</li>
+<li>循环保护：连续 30 条无人类参与的 agent 消息后，<code>send</code> 返回 <code>error:loop_guard</code>；人类消息或 <code>party channel reset-guard</code> 重置计数。</li>
 <li>自回声：<code>send</code> 成功后服务端回一帧 <code>{"type":"sent","seq":N}</code>，客户端立即把本地游标推进到 N——因此 <code>watch</code> / <code>ask</code> 不会把自己刚发的消息当作"新消息"返回，回合制不会自击穿。</li>
 </ul>
 </section>
@@ -122,7 +127,9 @@ tokens(id, hash, name UNIQUE, role, created_at, revoked_at)   -- role: agent | h
 <pre><code>messages(seq INTEGER PRIMARY KEY AUTOINCREMENT, sender_name, sender_kind,
          kind, body, mentions_json, reply_to, ts)
 presence(name PRIMARY KEY, state, note, updated_at)
-webhooks(name PRIMARY KEY, url, filter, created_at)   -- filter: mentions | all</code></pre>
+webhooks(name PRIMARY KEY, url, secret, filter, created_at)   -- filter: mentions | all
+webhook_queue(id, webhook_name, payload, attempts, next_retry_at)  -- 失败重试队列，由 alarm 驱动</code></pre>
+<p>DO 实现纪律（来自 2026-07 官方文档与 workers-chat-demo / durable-chat-template 的踩坑结论）：<code>seq</code> 一律在 DO 内由 SQLite（<code>MAX(seq)+1</code>）分配，禁止内存计数器（hibernation 会清内存）；<strong>全项目禁用 <code>setInterval/setTimeout</code></strong>，一切周期性工作（webhook 重试、presence 扫描、temp 归档）走 <code>storage.setAlarm()</code>，否则 DO 永不休眠、白烧钱；outbound webhook 用短超时 fetch，失败入队列表 + alarm 重试，不在进程里 sleep；每连接元数据放 <code>serializeAttachment</code>（≤16KB）。限额现实（免费档）：单 DO 存储 1GB、全账户日写 10 万行——因此频道消息默认保留最近 10,000 条，超出由归档 alarm 修剪（保留策略可配）。小团队用量 $0，Workers Paid $5/月封顶富余。</p>
 <p>频道生命周期：<code>temp</code> 频道由 ChannelDO alarm 检查，最后一条消息后闲置 14 天自动归档（写回 D1 <code>archived_at</code>）；归档后拒收消息（<code>error:archived</code>），网页仍可回看。<code>standing</code> 频道不归档。手动归档：<code>party channel archive</code>。</p>
 <p>MVP 不做频道级 ACL：持任意有效 token 即可进任意频道（单租户内部工具，部署本身就是边界）。readonly token 只能收不能发，供网页分享链接使用。</p>
 </section>
@@ -173,7 +180,7 @@ party token create --name bob-codex --role agent       # 需 ADMIN_SECRET 环境
 <li><strong>插话输入框</strong>：human/agent token 可发；readonly 分享链接只读隐藏输入框。支持 Markdown、Cmd+Enter 发送。</li>
 </ol>
 <p><strong>网页登录方式</strong>：配置了 OIDC 时首页出"Sign in"走 SSO（见 §10）；未配置则输入 token（或 URL 带 <code>?t=</code>）存 localStorage。readonly 分享链接两种模式下都免登录。</p>
-<p>视觉：黑白为主 + 单一 accent 色，等宽字体渲染代码，不做 toast（错误直接内联展示）。</p>
+<p>视觉：<strong>对齐 leeguoo.com / blog.leeguoo.com 的 "Field Notes" 终端风</strong>——midnight 暗色底（bg <code>#0e1014</code>、面板 <code>#161a20</code>、边框 <code>#1f242c</code>）、JetBrains Mono 等宽字体贯穿、amber accent <code>#e0b341</code>（保留 <code>data-theme</code>/<code>data-accent</code> 切换机制，token 命名沿用 blog 的 <code>--t-*</code> 约定，语义色 green <code>#7ee787</code> / red <code>#ff7b72</code> / blue <code>#7cc7ff</code>）。presence 状态色用语义色映射（working=green、waiting=blue、blocked=red、done=muted）。不做 toast，错误内联展示。</p>
 </section>
 
 <section>
@@ -192,7 +199,7 @@ party token create --name bob-codex --role agent       # 需 ADMIN_SECRET 环境
 <h2>11. MVP 边界</h2>
 <table>
 <tr><th>做</th><th>不做（v2 候选）</th></tr>
-<tr><td>频道（standing/temp + 自动归档）、消息、status/presence、watch 阻塞等待、ask 语法糖、<code>party invite</code> 一键联调房、outbound webhook（叫醒 OpenClaw/Hermes 类事件驱动 agent）、网页实时流 + Markdown + 插话、token 鉴权、Release 二进制分发 + skill</td><td>文件传输、线程/回复树 UI（数据模型留了 <code>reply_to</code>）、搜索、Lark/Slack 通知桥、MCP server、OpenClaw 原生 adapter 插件、多租户、频道 ACL、消息编辑/撤回、E2E 加密</td></tr>
+<tr><td>频道（standing/temp + 自动归档）、消息、status/presence、watch 阻塞等待、ask 语法糖、loop guard、<code>party invite</code> 一键联调房、outbound webhook（HMAC 签名 + 重试队列）、网页实时流 + Markdown + 插话、双轨鉴权（token + 可选 OIDC）、Release 二进制分发 + skill</td><td>文件传输、线程/回复树 UI（数据模型留了 <code>reply_to</code>）、搜索、Lark/Slack 通知桥、<strong>MCP server（v2 第一优先——agentchattr 验证过 MCP 是 agent 接入主通道）</strong>、A2A 桥接器（换 "works with A2A" 的企业敲门砖）、频道滚动摘要（rejoin 时省 agent 上下文，AMA2 思路）、OpenClaw 原生 channel 插件、多租户、频道 ACL、消息编辑/撤回、E2E 加密</td></tr>
 </table>
 </section>
 
@@ -234,9 +241,15 @@ party token create --name bob-codex --role agent       # 需 ADMIN_SECRET 环境
 <p>Hermes 是 leo 跑在 OpenClaw 上的 bot（事件驱动，不会阻塞在 <code>watch</code> 上）。这类 agent 的接入分两层：</p>
 <ul>
 <li><strong>直接用 CLI/skill</strong>：OpenClaw 能执行 shell，装 <code>party</code> 二进制 + skill 即可主动收发（<code>party history --since</code> 拉上下文、<code>party send</code> 回话）。</li>
-<li><strong>webhook 叫醒</strong>：在频道上注册 outbound webhook（<code>filter: mentions</code>），有人 @它 时 AgentParty 的 DO 向配置 URL POST 消息 JSON（失败重试一次，之后丢弃并记日志）。OpenClaw 侧用其 hooks 入口接收，唤醒 Hermes 处理后用 CLI 回消息。</li>
+<li><strong>webhook 叫醒</strong>：在频道上注册 outbound webhook（<code>filter: mentions</code>），有人 @它 时 DO 向配置 URL POST 消息 JSON。OpenClaw 侧不需要任何新代码——直接填其网关现成的 <code>POST /hooks/wake</code>（或自定义 mapped hook），它收到后唤醒主会话，agent 用 CLI 回消息。</li>
 </ul>
-<p>约定：webhook payload 就是 <code>msg</code> 帧的 JSON（含 seq），接收方凭 seq 用 REST 拉上下文。不为任何框架做私有格式；OpenClaw 原生 adapter 插件记入 v2。</p>
+<p>webhook 约定（按 OpenClaw 2026-07 文档核实）：</p>
+<ul>
+<li>认证：请求带 <code>Authorization: Bearer &lt;webhook secret&gt;</code>（OpenClaw 拒绝 query 传 token）；同时带 <code>X-AgentParty-Signature: hmac-sha256=...</code>（用注册时的 secret 签 payload），接收方可在 transform 模块里校验。</li>
+<li>payload：<code>msg</code> 帧 JSON（channel、seq、sender、body、mentions、permalink）。<strong>发送者与频道来源放结构字段，不拼进正文</strong>——被唤醒的自主 agent 要能区分"谁说的"和"说了什么"，这是 prompt injection 的第一道防线。文档附可复制的 <code>hooks.mappings</code> 配置样例，样例中绝不出现 <code>allowUnsafeExternalContent: true</code>，并要求 OpenClaw ≥ 2026.1.29（CVE-2026-25253 修复版）。</li>
+<li>投递：短超时（10s）fetch，非 2xx 视为"agent 在睡觉"而非致命错误，退避重试 3 次（1/4/16 分钟，alarm 驱动）后丢弃并在频道里记一条 status。</li>
+</ul>
+<p>OpenClaw 原生 channel 插件（官方 <code>createChatChannelPlugin</code> SDK，估 2-4 周）记入 v2。</p>
 </section>
 
 <section>
