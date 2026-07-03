@@ -413,3 +413,11 @@
   .chan-pill { width: auto; flex: none; }
   .presence-note { max-width: 120px; }
 }
+
+/* 频道列表「已归档」折叠开关 */
+.side-archived-toggle {
+  width: 100%; text-align: left; background: none; border: none; cursor: pointer;
+  padding: 8px 10px; margin-top: 6px; font-size: 12px; color: var(--ink-faint, #8a8a82);
+  border-radius: 8px;
+}
+.side-archived-toggle:hover { background: rgba(26,26,26,.05); color: var(--ink-soft, #4a4a48); }

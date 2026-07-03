@@ -51,11 +51,14 @@ export function extractBearer(request: Request, options: { allowQueryToken?: boo
     return { token: header.slice(7).trim(), source: "authorization" };
   }
   if (options.allowQueryToken === true) {
+    // 子协议形如 ["agentparty", <token>]；token 既可能是机器 ap_ token，也可能是
+    // 人类 OIDC 的 JWT（eyJ… 开头）。取非 "agentparty" 标记的那段，别按 ap_ 前缀过滤，
+    // 否则登录用户的 JWT 提取不到、WS 一直 401 重连。
     const protocolToken = request.headers
       .get("sec-websocket-protocol")
       ?.split(",")
       .map((part) => part.trim())
-      .find((part) => part.startsWith("ap_"));
+      .find((part) => part.length > 0 && part !== "agentparty");
     if (protocolToken) return { token: protocolToken, source: "protocol" };
   }
   const queryToken = options.allowQueryToken === true ? new URL(request.url).searchParams.get("t") : null;
