@@ -10,7 +10,7 @@ import {
 } from "../rest";
 
 export async function run(argv: string[]): Promise<number> {
-  const { positionals, flags } = parseArgs(argv, { booleans: ["temp"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["temp", "party"] });
   const cfg = readConfig();
   if (!cfg) {
     console.error("no config, run: party init --server URL --token T");
@@ -22,13 +22,14 @@ export async function run(argv: string[]): Promise<number> {
       case "create": {
         const slug = positionals[1];
         if (!slug) {
-          console.error("usage: party channel create <slug> [--title t] [--temp]");
+          console.error("usage: party channel create <slug> [--title t] [--temp] [--party]");
           return 1;
         }
         await createChannel(cfg.server, cfg.token, {
           slug,
           title: str(flags.title),
           kind: flags.temp === true ? "temp" : "standing",
+          mode: flags.party === true ? "party" : "normal",
         });
         console.log(`created ${slug}`);
         return 0;
@@ -37,7 +38,7 @@ export async function run(argv: string[]): Promise<number> {
         const channels = await listChannels(cfg.server, cfg.token);
         for (const c of channels) {
           const state = c.archived_at ? "archived" : "active";
-          console.log(`${c.slug}\t${c.kind}\t${state}\t${c.title ?? ""}`);
+          console.log(`${c.slug}\t${c.kind}\t${c.mode ?? "normal"}\t${state}\t${c.title ?? ""}`);
         }
         return 0;
       }

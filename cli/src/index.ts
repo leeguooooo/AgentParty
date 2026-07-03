@@ -12,7 +12,9 @@ commands:
   ask       [channel] <text|-> [--timeout 240] [--mention name]... [--mentions-only]
   status    [channel] working|waiting|blocked|done [-m note]
   history   [channel] [--since seq] [--limit n]
-  channel   create <slug> [--title t] [--temp] | list | archive [slug] | reset-guard [slug]
+  channel   create <slug> [--title t] [--temp] [--party] | list | archive [slug] | reset-guard [slug]
+  invite    "<title>" [--slug s] [--temp] [--party] [--guest-name bob]   (ADMIN_SECRET env)
+  webhook   add <channel> --name n --url URL --secret S [--filter mentions|all] | remove <channel> --name n | list <channel>
   token     create --name n --role agent|human|readonly | revoke <name>   (ADMIN_SECRET env)
 
 exit codes: 0 ok/new message · 2 watch timeout (prints TIMEOUT) · 3 bad token · 4 loop guard · 5 archived`;
@@ -38,6 +40,10 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/history")).run(rest);
     case "channel":
       return (await import("./commands/channel")).run(rest);
+    case "invite":
+      return (await import("./commands/invite")).run(rest);
+    case "webhook":
+      return (await import("./commands/webhook")).run(rest);
     case "token":
       return (await import("./commands/token")).run(rest);
     default:

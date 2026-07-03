@@ -1,0 +1,22 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`party invite 默认参数：slug 由标题推导，铸 guest+share，输出可粘贴接入包 1`] = `
+"────────────────────────────────────────────────────────────
+AgentParty 接入包 — Fix Login Bug
+────────────────────────────────────────────────────────────
+server:   https://party.example
+channel:  fix-login-bug  (standing)
+
+把下面三步整段发给对方（agent 在终端里跑）：
+
+  1. 确保已安装 party cli
+  2. 接入频道（token 只出现这一次，注意保管）：
+     party init --server https://party.example --token ap_fix-login-bug-guest_secret --channel fix-login-bug
+  3. 开始收发：
+     party watch fix-login-bug --follow
+
+网页只读围观（无需安装，直接开）：
+  https://party.example/c/fix-login-bug?t=ap_fix-login-bug-share_secret
+────────────────────────────────────────────────────────────
+"
+`;

@@ -4,11 +4,15 @@ import {
   EXIT_AUTH,
   EXIT_LOOP_GUARD,
   type ChannelKind,
+  type ChannelMode,
   type MsgFrame,
   type SendMessageFrame,
   type SendStatusFrame,
   type TokenRole,
+  type WebhookFilter,
 } from "@agentparty/shared";
+
+export type { ChannelMode, WebhookFilter };
 
 export class RestError extends Error {
   constructor(
@@ -24,7 +28,14 @@ export interface ChannelInfo {
   slug: string;
   title: string | null;
   kind: ChannelKind;
+  mode?: ChannelMode;
   archived_at: number | null;
+}
+
+export interface WebhookInfo {
+  name: string;
+  url: string;
+  filter: WebhookFilter;
 }
 
 function extractError(status: number, body: unknown, raw: string): RestError {
@@ -88,13 +99,52 @@ export async function listChannels(server: string, token: string): Promise<Chann
 export async function createChannel(
   server: string,
   token: string,
-  body: { slug: string; title?: string; kind: ChannelKind },
+  body: { slug: string; title?: string; kind: ChannelKind; mode?: ChannelMode },
 ): Promise<void> {
   await req(server, "/api/channels", {
     method: "POST",
     headers: bearerJson(token),
     body: JSON.stringify(body),
   });
+}
+
+export async function addWebhook(
+  server: string,
+  token: string,
+  slug: string,
+  body: { name: string; url: string; secret: string; filter: WebhookFilter },
+): Promise<void> {
+  await req(server, `/api/channels/${encodeURIComponent(slug)}/webhooks`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify(body),
+  });
+}
+
+export async function removeWebhook(
+  server: string,
+  token: string,
+  slug: string,
+  name: string,
+): Promise<void> {
+  await req(
+    server,
+    `/api/channels/${encodeURIComponent(slug)}/webhooks/${encodeURIComponent(name)}`,
+    { method: "DELETE", headers: bearerJson(token) },
+  );
+}
+
+export async function listWebhooks(
+  server: string,
+  token: string,
+  slug: string,
+): Promise<WebhookInfo[]> {
+  const body = await req(server, `/api/channels/${encodeURIComponent(slug)}/webhooks`, {
+    headers: bearerJson(token),
+  });
+  if (Array.isArray(body)) return body as WebhookInfo[];
+  const webhooks = (body as Record<string, unknown> | null)?.webhooks;
+  return Array.isArray(webhooks) ? (webhooks as WebhookInfo[]) : [];
 }
 
 export async function fetchMessages(
