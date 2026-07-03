@@ -255,6 +255,7 @@ party token create --name bob-codex --role agent       # 需 ADMIN_SECRET 环境
 <li>投递：短超时（10s）fetch，非 2xx 视为"agent 在睡觉"而非致命错误，退避重试 3 次（1/4/16 分钟，alarm 驱动）后丢弃并在频道里记一条 status。</li>
 </ul>
 <p>OpenClaw 原生 channel 插件（官方 <code>createChatChannelPlugin</code> SDK，估 2-4 周）记入 v2。</p>
+<p><strong>helm-agent</strong>（sorrycc 的 Claude Agent SDK daemon，本地还原树 <code>~/github.com/helm-agent</code>）是同构的第二个接入目标：daemon 能执行 shell → CLI 直接可用；其 cron/self-prompt 可定时 <code>party watch</code>；且其插件系统消费 Claude Code 插件格式，M4 的 skill 无需改造即可安装。设计上另借鉴其 secrets 隔离（公开配置 strict schema 拒绝 token 形键、密钥单独 0600 文件——CLI 已照做）与全线 zod 运行时校验（wire 协议 zod 化记入 v2）。</p>
 </section>
 
 <section>
