@@ -69,6 +69,7 @@ export const openapiDocument = {
                   slug: { type: "string" },
                   title: { type: "string" },
                   kind: { type: "string", enum: ["standing", "temp"] },
+                  mode: { type: "string", enum: ["normal", "party"], default: "normal" },
                 },
               },
             },
@@ -153,6 +154,59 @@ export const openapiDocument = {
           "200": { description: "guard reset" },
           "403": { description: "readonly token" },
           "404": { description: "channel not found" },
+        },
+      },
+    },
+    "/api/channels/{slug}/webhooks": {
+      get: {
+        summary: "list outbound webhooks (secret is never returned)",
+        security: [{ bearer: [] }],
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{webhooks:[{name,url,filter,created_at}]}" } },
+      },
+      post: {
+        summary: "register an outbound webhook (mention wake-up, hmac signed)",
+        security: [{ bearer: [] }],
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name", "url", "secret"],
+                properties: {
+                  name: { type: "string" },
+                  url: { type: "string", format: "uri" },
+                  secret: {
+                    type: "string",
+                    description: "bearer for outgoing posts, also the hmac-sha256 signing key",
+                  },
+                  filter: { type: "string", enum: ["mentions", "all"], default: "mentions" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": { description: "registered (same name overwrites)" },
+          "400": { description: "invalid name/url/secret/filter" },
+          "403": { description: "readonly token" },
+        },
+      },
+    },
+    "/api/channels/{slug}/webhooks/{name}": {
+      delete: {
+        summary: "remove an outbound webhook",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "name", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "removed" },
+          "403": { description: "readonly token" },
+          "404": { description: "no such webhook" },
         },
       },
     },

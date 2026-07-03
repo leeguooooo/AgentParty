@@ -5,8 +5,16 @@
 export const BODY_LIMIT = 100_000;
 export const RATE_LIMIT_PER_MIN = 30;
 export const LOOP_GUARD_N = 30;
+// party 模式（spec §3）：多 agent 头脑风暴/分工频道，loop guard 放宽
+export const LOOP_GUARD_PARTY_N = 200;
 export const RETAIN_N = 10_000;
 export const PRESENCE_TIMEOUT_MS = 60_000;
+// temp 频道最后一条消息后闲置多久自动归档（spec §6）
+export const TEMP_IDLE_ARCHIVE_MS = 14 * 24 * 60 * 60 * 1000;
+// outbound webhook（spec §15）：短超时 + 1/4/16 分钟退避重试
+export const WEBHOOK_TIMEOUT_MS = 10_000;
+export const WEBHOOK_MAX_RETRIES = 3;
+export const WEBHOOK_RETRY_DELAYS_MS = [60_000, 240_000, 960_000] as const;
 
 // cli 退出码
 export const EXIT_TIMEOUT = 2;
@@ -19,7 +27,9 @@ export const EXIT_ARCHIVED = 5;
 export type SenderKind = "agent" | "human";
 export type TokenRole = "agent" | "human" | "readonly";
 export type ChannelKind = "standing" | "temp";
+export type ChannelMode = "normal" | "party";
 export type MessageKind = "message" | "status";
+export type WebhookFilter = "mentions" | "all";
 
 export type StatusState = "working" | "waiting" | "blocked" | "done";
 export type PresenceState = StatusState | "offline";

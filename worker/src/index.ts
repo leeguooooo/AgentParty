@@ -1,5 +1,5 @@
 // worker 入口 — rest 路由 + ws 升级转发
-import type { ChannelKind, TokenRole } from "@agentparty/shared";
+import type { ChannelKind, ChannelMode, TokenRole, WebhookFilter } from "@agentparty/shared";
 import { Hono } from "hono";
 import { createMiddleware } from "hono/factory";
 import { getServerByName } from "partyserver";
@@ -20,6 +20,8 @@ const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ROLES: readonly string[] = ["agent", "human", "readonly"] satisfies TokenRole[];
 const KINDS: readonly string[] = ["standing", "temp"] satisfies ChannelKind[];
+const MODES: readonly string[] = ["normal", "party"] satisfies ChannelMode[];
+const WEBHOOK_FILTERS: readonly string[] = ["mentions", "all"] satisfies WebhookFilter[];
 
 function errorBody(code: string, message: string) {
   return { error: { code, message } };
@@ -47,9 +49,18 @@ const requireBearer = createMiddleware<AppContext>(async (c, next) => {
 
 async function loadChannel(db: D1Database, slug: string) {
   return db
-    .prepare("SELECT slug, kind, archived_at FROM channels WHERE slug = ?")
+    .prepare("SELECT slug, kind, mode, archived_at FROM channels WHERE slug = ?")
     .bind(slug)
-    .first<{ slug: string; kind: string; archived_at: number | null }>();
+    .first<{ slug: string; kind: string; mode: string; archived_at: number | null }>();
+}
+
+// do 侧按 meta 缓存 mode/kind/host（loop guard 分档、temp 归档、webhook permalink 都要用）
+function channelHeaders(channel: { kind: string; mode: string }, requestUrl: string) {
+  return {
+    "x-ap-mode": channel.mode,
+    "x-ap-channel-kind": channel.kind,
+    "x-ap-host": new URL(requestUrl).host,
+  };
 }
 
 const app = new Hono<AppContext>();
@@ -132,7 +143,7 @@ interface ChannelSummary {
 
 app.get("/api/channels", async (c) => {
   const { results } = await c.env.DB.prepare(
-    "SELECT slug, title, topic, kind, created_at, archived_at FROM channels ORDER BY created_at, id",
+    "SELECT slug, title, topic, kind, mode, created_at, archived_at FROM channels ORDER BY created_at, id",
   ).all<{ slug: string }>();
   const channels = await Promise.all(
     results.map(async (row) => {
@@ -154,24 +165,28 @@ app.get("/api/channels", async (c) => {
 
 app.post("/api/channels", async (c) => {
   const body = (await c.req.json().catch(() => null)) as
-    | { slug?: unknown; title?: unknown; kind?: unknown }
+    | { slug?: unknown; title?: unknown; kind?: unknown; mode?: unknown }
     | null;
   const slug = typeof body?.slug === "string" ? body.slug : "";
   const kind = body?.kind === undefined ? "standing" : body.kind;
+  const mode = body?.mode === undefined ? "normal" : body.mode;
   const title = typeof body?.title === "string" ? body.title : null;
   if (!SLUG_RE.test(slug) || typeof kind !== "string" || !KINDS.includes(kind)) {
     return c.json(errorBody("bad_request", "valid slug and kind (standing|temp) required"), 400);
   }
+  if (typeof mode !== "string" || !MODES.includes(mode)) {
+    return c.json(errorBody("bad_request", "mode must be normal or party"), 400);
+  }
   try {
     await c.env.DB.prepare(
-      "INSERT INTO channels (slug, title, kind, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO channels (slug, title, kind, mode, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-      .bind(slug, title, kind, c.get("identity").name, Date.now())
+      .bind(slug, title, kind, mode, c.get("identity").name, Date.now())
       .run();
   } catch {
     return c.json(errorBody("conflict", "slug already exists"), 409);
   }
-  return c.json({ slug, title, kind }, 201);
+  return c.json({ slug, title, kind, mode }, 201);
 });
 
 app.get("/api/channels/:slug/messages", async (c) => {
@@ -206,7 +221,78 @@ app.post("/api/channels/:slug/messages", async (c) => {
         "x-ap-name": identity.name,
         "x-ap-kind": identity.kind,
         "x-ap-role": identity.role,
+        ...channelHeaders(channel, c.req.url),
       },
+    }),
+  );
+});
+
+// outbound webhook 注册 / 列表 / 删除（spec §7/§15），存储在频道 do 里
+app.post("/api/channels/:slug/webhooks", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (c.get("identity").role === "readonly") {
+    return c.json(errorBody("unauthorized", "readonly token cannot manage webhooks"), 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as
+    | { name?: unknown; url?: unknown; secret?: unknown; filter?: unknown }
+    | null;
+  const name = typeof body?.name === "string" ? body.name : "";
+  const url = typeof body?.url === "string" ? body.url : "";
+  const secret = typeof body?.secret === "string" ? body.secret : "";
+  const filter = body?.filter === undefined ? "mentions" : body.filter;
+  let parsed: URL | null = null;
+  try {
+    parsed = new URL(url);
+  } catch {
+    parsed = null;
+  }
+  if (
+    !NAME_RE.test(name) ||
+    !parsed ||
+    (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+    secret.length === 0 ||
+    typeof filter !== "string" ||
+    !WEBHOOK_FILTERS.includes(filter)
+  ) {
+    return c.json(
+      errorBody("bad_request", "name, http(s) url, secret and filter (mentions|all) required"),
+      400,
+    );
+  }
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  return stub.fetch(
+    new Request("https://do/internal/webhooks", {
+      method: "POST",
+      body: JSON.stringify({ name, url, secret, filter }),
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+});
+
+app.get("/api/channels/:slug/webhooks", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  return stub.fetch(
+    new Request("https://do/internal/webhooks", { headers: { "x-partykit-room": slug } }),
+  );
+});
+
+app.delete("/api/channels/:slug/webhooks/:name", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (c.get("identity").role === "readonly") {
+    return c.json(errorBody("unauthorized", "readonly token cannot manage webhooks"), 403);
+  }
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  return stub.fetch(
+    new Request(`https://do/internal/webhooks?name=${encodeURIComponent(c.req.param("name"))}`, {
+      method: "DELETE",
+      headers: { "x-partykit-room": slug },
     }),
   );
 });
@@ -265,6 +351,8 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-name", identity.name);
   fwd.headers.set("x-ap-kind", identity.kind);
   fwd.headers.set("x-ap-role", identity.role);
+  fwd.headers.set("x-ap-mode", channel.mode);
+  fwd.headers.set("x-ap-channel-kind", channel.kind);
   if (channel.archived_at !== null) fwd.headers.set("x-ap-archived", "1");
   return stub.fetch(fwd);
 });

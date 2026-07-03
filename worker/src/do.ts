@@ -1,10 +1,15 @@
-// channel durable object — seq 分配 / 广播 / presence / 补拉 / 各类熔断
+// channel durable object — seq 分配 / 广播 / presence / 补拉 / 各类熔断 / webhook 投递 / temp 归档
 import {
   BODY_LIMIT,
   LOOP_GUARD_N,
+  LOOP_GUARD_PARTY_N,
   PRESENCE_TIMEOUT_MS,
   RATE_LIMIT_PER_MIN,
   RETAIN_N,
+  TEMP_IDLE_ARCHIVE_MS,
+  WEBHOOK_MAX_RETRIES,
+  WEBHOOK_RETRY_DELAYS_MS,
+  WEBHOOK_TIMEOUT_MS,
   type ErrorCode,
   type MsgFrame,
   type PresenceEntry,
@@ -74,6 +79,26 @@ function byteLength(s: string): number {
   return new TextEncoder().encode(s).byteLength;
 }
 
+async function hmacSha256Hex(secret: string, body: string): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(body));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+interface WebhookRow {
+  name: string;
+  url: string;
+  secret: string;
+  filter: string;
+}
+
 function toInt(value: string | null, fallback: number): number {
   const n = Number.parseInt(value ?? "", 10);
   return Number.isFinite(n) ? n : fallback;
@@ -112,6 +137,20 @@ export class ChannelDO extends Server<Env> {
       count INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (name, bucket)
     )`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS webhooks (
+      name TEXT PRIMARY KEY,
+      url TEXT NOT NULL,
+      secret TEXT NOT NULL,
+      filter TEXT NOT NULL DEFAULT 'mentions',
+      created_at INTEGER NOT NULL
+    )`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS webhook_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      webhook_name TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_retry_at INTEGER NOT NULL
+    )`);
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'),
     );
@@ -127,6 +166,8 @@ export class ChannelDO extends Server<Env> {
       lastSeen: Date.now(),
     };
     connection.setState(state);
+    // mode/kind/host 随升级请求进来，写 meta 缓存（同 archived 的手法）
+    this.cacheChannelMeta(h, new URL(ctx.request.url).host);
     // 归档以 do 自己的记录为权威，升级窗口内的快照竞态也拦得住
     if (state.archived) this.setMeta("archived", "1");
     if (state.archived || this.isArchived()) {
@@ -148,7 +189,7 @@ export class ChannelDO extends Server<Env> {
     }
   }
 
-  onMessage(connection: Connection<ConnState>, message: WSMessage) {
+  async onMessage(connection: Connection<ConnState>, message: WSMessage) {
     if (typeof message !== "string") return;
     let raw: unknown;
     try {
@@ -191,6 +232,7 @@ export class ChannelDO extends Server<Env> {
       // sent 先于广播到达发送方，客户端先推进游标再看到自己的回声
       this.sendFrame(connection, { type: "sent", seq: out.seq });
       for (const f of out.frames) this.broadcast(JSON.stringify(f));
+      await this.afterSend(out.frames[0] as MsgFrame);
     }
   }
 
@@ -203,9 +245,17 @@ export class ChannelDO extends Server<Env> {
     this.markOffline(st.name, Date.now());
   }
 
-  // spec §5：60s 无帧（ping 由 auto-response 记时间戳）判 offline，alarm 周期扫描
+  // alarm 三件套（spec §6/§13）：presence 扫描 → webhook 重试 → temp 归档检查，最后按最近到期时间续排
   async onAlarm() {
     const now = Date.now();
+    const live = this.scanPresence(now);
+    await this.retryWebhooks(now);
+    await this.checkTempArchive(now);
+    await this.scheduleNextAlarm(now, live);
+  }
+
+  // spec §5：60s 无帧（ping 由 auto-response 记时间戳）判 offline，返回存活连接数
+  private scanPresence(now: number): number {
     const stale: Connection<ConnState>[] = [];
     let live = 0;
     for (const connection of this.getConnections<ConnState>()) {
@@ -229,7 +279,84 @@ export class ChannelDO extends Server<Env> {
       }
       if (gone) this.markOffline(name, now);
     }
-    if (live > 0) await this.ctx.storage.setAlarm(now + PRESENCE_SCAN_MS);
+    return live;
+  }
+
+  // 队列里到期的重投一轮：成功删行，失败退避 1/4/16 分钟，超过 3 次丢弃并向频道记一条 status
+  private async retryWebhooks(now: number) {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT q.id, q.webhook_name, q.payload, q.attempts, w.url, w.secret
+         FROM webhook_queue q LEFT JOIN webhooks w ON w.name = q.webhook_name
+         WHERE q.next_retry_at <= ?`,
+        now,
+      )
+      .toArray();
+    for (const row of rows) {
+      const id = Number(row.id);
+      // webhook 已被删除，队列残留直接清掉
+      if (row.url === null) {
+        this.ctx.storage.sql.exec("DELETE FROM webhook_queue WHERE id = ?", id);
+        continue;
+      }
+      const ok = await this.deliverWebhook(String(row.url), String(row.secret), String(row.payload));
+      if (ok) {
+        this.ctx.storage.sql.exec("DELETE FROM webhook_queue WHERE id = ?", id);
+        continue;
+      }
+      const attempts = Number(row.attempts) + 1;
+      if (attempts > WEBHOOK_MAX_RETRIES) {
+        this.ctx.storage.sql.exec("DELETE FROM webhook_queue WHERE id = ?", id);
+        this.insertSystemStatus(`webhook ${String(row.webhook_name)} 连续投递失败已停用本条`, now);
+        continue;
+      }
+      this.ctx.storage.sql.exec(
+        "UPDATE webhook_queue SET attempts = ?, next_retry_at = ? WHERE id = ?",
+        attempts,
+        now + this.retryDelay(attempts),
+        id,
+      );
+    }
+  }
+
+  private retryDelay(attempts: number): number {
+    return WEBHOOK_RETRY_DELAYS_MS[
+      Math.min(Math.max(attempts, 1), WEBHOOK_RETRY_DELAYS_MS.length) - 1
+    ] as number;
+  }
+
+  // temp 频道最后一条消息后闲置超时 → 归档：写 do meta + 回写 d1 archived_at + 踢连接
+  private async checkTempArchive(now: number) {
+    if (this.getMeta("ckind") !== "temp" || this.isArchived()) return;
+    const idleBasis = this.lastActivityTs();
+    if (idleBasis === null || now - idleBasis < this.tempIdleMs()) return;
+    this.archiveAndKick();
+    try {
+      await this.env.DB.prepare(
+        "UPDATE channels SET archived_at = ? WHERE slug = ? AND archived_at IS NULL",
+      )
+        .bind(now, this.name)
+        .run();
+    } catch {
+      // d1 回写失败不回滚 do 状态；下次 alarm 前 do 已是权威归档态
+    }
+  }
+
+  // 三个来源里最近的下一个到期时间：presence 扫描 / webhook 重试 / temp 归档
+  private async scheduleNextAlarm(now: number, live: number) {
+    const candidates: number[] = [];
+    if (live > 0) candidates.push(now + PRESENCE_SCAN_MS);
+    const next = this.ctx.storage.sql
+      .exec("SELECT MIN(next_retry_at) AS t FROM webhook_queue")
+      .one();
+    if (next.t !== null) candidates.push(Number(next.t));
+    if (this.getMeta("ckind") === "temp" && !this.isArchived()) {
+      const basis = this.lastActivityTs();
+      if (basis !== null) candidates.push(basis + this.tempIdleMs());
+    }
+    if (candidates.length > 0) {
+      await this.ctx.storage.setAlarm(Math.max(Math.min(...candidates), now + 1000));
+    }
   }
 
   private markOffline(name: string, ts: number) {
@@ -241,6 +368,137 @@ export class ChannelDO extends Server<Env> {
     );
     const frame: PresenceFrame = { type: "presence", name, state: "offline", note: null, ts };
     this.broadcast(JSON.stringify(frame));
+  }
+
+  // worker 每次转发都会带上频道快照头，do 写 meta 缓存（同 archived 的手法）
+  private cacheChannelMeta(h: Headers, host: string | null) {
+    const mode = h.get("x-ap-mode");
+    if (mode === "normal" || mode === "party") this.setMeta("mode", mode);
+    const ckind = h.get("x-ap-channel-kind");
+    if (ckind === "standing" || ckind === "temp") this.setMeta("ckind", ckind);
+    if (host) this.setMeta("host", host);
+  }
+
+  // 消息落库广播之后的副作用：webhook 投递 + temp 归档计时续排
+  private async afterSend(msg: MsgFrame) {
+    await this.dispatchWebhooks(msg);
+    if (this.getMeta("ckind") === "temp" && !this.isArchived()) {
+      await this.ensureAlarmAt(msg.ts + this.tempIdleMs());
+    }
+  }
+
+  // spec §15：对每个 webhook 判 filter → 立即尝试投递，失败入队由 alarm 重试
+  private async dispatchWebhooks(msg: MsgFrame) {
+    // system 帧（webhook 失败通告）不再触发 webhook，防止失败风暴自激
+    if (msg.sender.name === "system") return;
+    const hooks = this.ctx.storage.sql
+      .exec("SELECT name, url, secret, filter FROM webhooks")
+      .toArray()
+      .map((r) => ({
+        name: String(r.name),
+        url: String(r.url),
+        secret: String(r.secret),
+        filter: String(r.filter),
+      })) as WebhookRow[];
+    if (hooks.length === 0) return;
+    const host = this.getMeta("host") ?? "agentparty";
+    const now = Date.now();
+    for (const hook of hooks) {
+      if (hook.filter === "mentions" && !msg.mentions.includes(hook.name)) continue;
+      const payload = JSON.stringify({
+        ...msg,
+        channel: this.name,
+        permalink: `https://${host}/c/${this.name}`,
+      });
+      const ok = await this.deliverWebhook(hook.url, hook.secret, payload);
+      if (!ok) {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO webhook_queue (webhook_name, payload, attempts, next_retry_at) VALUES (?, ?, 1, ?)",
+          hook.name,
+          payload,
+          now + this.retryDelay(1),
+        );
+        await this.ensureAlarmAt(now + this.retryDelay(1));
+      }
+    }
+  }
+
+  // 短超时 POST；Bearer = 注册时的 secret，HMAC 签 payload 供接收方校验（spec §15）
+  private async deliverWebhook(url: string, secret: string, payload: string): Promise<boolean> {
+    try {
+      const signature = await hmacSha256Hex(secret, payload);
+      const res = await fetch(url, {
+        method: "POST",
+        body: payload,
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${secret}`,
+          "x-agentparty-signature": `hmac-sha256=${signature}`,
+        },
+        signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  // 3 次重试全败后向频道插一条 system status，让人看得见投递失败
+  private insertSystemStatus(note: string, now: number) {
+    const seq = this.lastSeq() + 1;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO messages (seq, sender_name, sender_kind, kind, body, mentions_json, reply_to, state, note, ts)
+       VALUES (?, 'system', 'agent', 'status', ?, '[]', NULL, 'blocked', ?, ?)`,
+      seq,
+      note,
+      note,
+      now,
+    );
+    const frame: MsgFrame = {
+      type: "msg",
+      seq,
+      sender: { name: "system", kind: "agent" },
+      kind: "status",
+      body: note,
+      mentions: [],
+      reply_to: null,
+      state: "blocked",
+      note,
+      ts: now,
+    };
+    this.broadcast(JSON.stringify(frame));
+  }
+
+  // 归档收口：写 meta + 广播 error:archived + 踢连接（手动归档与 temp 自动归档共用）
+  private archiveAndKick() {
+    this.setMeta("archived", "1");
+    for (const connection of this.getConnections<ConnState>()) {
+      const st = connection.state;
+      if (st) connection.setState({ ...st, archived: true });
+      this.sendFrame(connection, { type: "error", code: "archived", message: "channel is archived" });
+      connection.close(1008, "archived");
+    }
+  }
+
+  // temp 闲置计时基准：最后一条消息，没消息就用首次见到该频道的时间
+  private lastActivityTs(): number | null {
+    const row = this.ctx.storage.sql.exec("SELECT MAX(ts) AS t FROM messages").one();
+    if (row.t !== null) return Number(row.t);
+    const born = this.getMeta("born");
+    if (born !== null) return Number(born);
+    this.setMeta("born", String(Date.now()));
+    return Date.now();
+  }
+
+  // 测试可经 meta 注入短 TTL
+  private tempIdleMs(): number {
+    const injected = Number(this.getMeta("temp_idle_ms"));
+    return Number.isFinite(injected) && injected > 0 ? injected : TEMP_IDLE_ARCHIVE_MS;
+  }
+
+  private async ensureAlarmAt(ts: number) {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > ts) await this.ctx.storage.setAlarm(ts);
   }
 
   // worker 转发来的内部 rest
@@ -269,6 +527,7 @@ export class ChannelDO extends Server<Env> {
       return Response.json({ messages: rows.map((r) => this.rowToFrame(r)) });
     }
     if (url.pathname === "/internal/messages" && request.method === "POST") {
+      this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
       const identity: Identity = {
         name: request.headers.get("x-ap-name") ?? "",
         kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
@@ -292,7 +551,60 @@ export class ChannelDO extends Server<Env> {
         );
       }
       for (const f of out.frames) this.broadcast(JSON.stringify(f));
+      await this.afterSend(out.frames[0] as MsgFrame);
       return Response.json({ seq: out.seq });
+    }
+    if (url.pathname === "/internal/webhooks" && request.method === "GET") {
+      // 列表不回 secret 明文（spec §7）
+      const webhooks = this.ctx.storage.sql
+        .exec("SELECT name, url, filter, created_at FROM webhooks ORDER BY name")
+        .toArray()
+        .map((r) => ({
+          name: String(r.name),
+          url: String(r.url),
+          filter: String(r.filter),
+          created_at: Number(r.created_at),
+        }));
+      return Response.json({ webhooks });
+    }
+    if (url.pathname === "/internal/webhooks" && request.method === "POST") {
+      // 参数校验在 worker 层完成，do 只做落库（同名覆盖 = 幂等注册）
+      const body = (await request.json().catch(() => null)) as {
+        name?: unknown;
+        url?: unknown;
+        secret?: unknown;
+        filter?: unknown;
+      } | null;
+      if (
+        typeof body?.name !== "string" ||
+        typeof body.url !== "string" ||
+        typeof body.secret !== "string" ||
+        typeof body.filter !== "string"
+      ) {
+        return Response.json({ error: { code: "bad_request", message: "invalid webhook" } }, { status: 400 });
+      }
+      this.ctx.storage.sql.exec(
+        `INSERT INTO webhooks (name, url, secret, filter, created_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET url = excluded.url, secret = excluded.secret, filter = excluded.filter`,
+        body.name,
+        body.url,
+        body.secret,
+        body.filter,
+        Date.now(),
+      );
+      return Response.json({ name: body.name, url: body.url, filter: body.filter }, { status: 201 });
+    }
+    if (url.pathname === "/internal/webhooks" && request.method === "DELETE") {
+      const name = url.searchParams.get("name") ?? "";
+      const existed = this.ctx.storage.sql
+        .exec("SELECT name FROM webhooks WHERE name = ?", name)
+        .toArray();
+      if (existed.length === 0) {
+        return Response.json({ error: { code: "not_found", message: "no such webhook" } }, { status: 404 });
+      }
+      this.ctx.storage.sql.exec("DELETE FROM webhooks WHERE name = ?", name);
+      this.ctx.storage.sql.exec("DELETE FROM webhook_queue WHERE webhook_name = ?", name);
+      return Response.json({ ok: true });
     }
     if (url.pathname === "/internal/reset-guard" && request.method === "POST") {
       this.setMeta("agent_streak", "0");
@@ -300,13 +612,7 @@ export class ChannelDO extends Server<Env> {
     }
     if (url.pathname === "/internal/archive" && request.method === "POST") {
       // do 自己记下归档态（handleSend/onConnect 的权威依据），再踢存活连接
-      this.setMeta("archived", "1");
-      for (const connection of this.getConnections<ConnState>()) {
-        const st = connection.state;
-        if (st) connection.setState({ ...st, archived: true });
-        this.sendFrame(connection, { type: "error", code: "archived", message: "channel is archived" });
-        connection.close(1008, "archived");
-      }
+      this.archiveAndKick();
       return Response.json({ ok: true });
     }
     if (url.pathname === "/internal/kick" && request.method === "POST") {
@@ -338,11 +644,13 @@ export class ChannelDO extends Server<Env> {
     if (byteLength(payload) > BODY_LIMIT) {
       return { ok: false, code: "too_large", message: `body exceeds ${BODY_LIMIT} bytes` };
     }
-    if (identity.kind === "agent" && this.agentStreak() >= LOOP_GUARD_N) {
+    // loop guard 分档（spec §3）：party 频道放宽到 200，阈值按 meta 缓存的 mode 选
+    const guardLimit = this.getMeta("mode") === "party" ? LOOP_GUARD_PARTY_N : LOOP_GUARD_N;
+    if (identity.kind === "agent" && this.agentStreak() >= guardLimit) {
       return {
         ok: false,
         code: "loop_guard",
-        message: `${LOOP_GUARD_N} consecutive agent messages, waiting for a human`,
+        message: `${guardLimit} consecutive agent messages, waiting for a human`,
       };
     }
     const sql = this.ctx.storage.sql;
