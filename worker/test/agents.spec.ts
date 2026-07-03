@@ -61,6 +61,18 @@ describe("POST /api/agents", () => {
     expect(body.role).toBe("agent");
   });
 
+  it("scoped session can only mint tokens for its own channel (no scope escalation)", async () => {
+    const acct = `${uniq("acct")}@leeguoo.com`;
+    const { token: scoped } = await seedToken("human", uniq("bcorp-h"), { owner: acct, channelScope: "collab" });
+    // 无 scope 请求 → 强制继承调用者的 scope，铸不出无 scope（更宽）的 token
+    const r1 = await mintAgent(scoped, { name: uniq("bot") });
+    expect(r1.status).toBe(201);
+    expect(((await r1.json()) as { channel_scope?: string }).channel_scope).toBe("collab");
+    // 请求别的频道 scope → 403，不得放大到其它频道
+    const r2 = await mintAgent(scoped, { name: uniq("bot"), channel_scope: "elsewhere" });
+    expect(r2.status).toBe(403);
+  });
+
   it("rejects an invalid channel_scope", async () => {
     const session = await humanSession();
     const res = await mintAgent(session, { name: uniq("bot"), channel_scope: "Not A Slug" });

@@ -296,17 +296,30 @@ app.post("/api/agents", requireBearer, async (c) => {
   if (channelScope !== null && (typeof channelScope !== "string" || !SLUG_RE.test(channelScope))) {
     return c.json(errorBody("bad_request", "channel_scope must be a valid channel slug"), 400);
   }
+  // scope 继承：channel-scoped 的调用者（如递给 B 公司的 scoped token）只能铸【同一频道 scope】的 agent，
+  // 不得铸出无 scope 或别频道的 token 来放大自己的权限（否则外部方铸个无 scope agent 就进你所有频道）。
+  const callerScope = identity.channel_scope ?? null;
+  let effectiveScope = channelScope;
+  if (callerScope !== null) {
+    if (channelScope !== null && channelScope !== callerScope) {
+      return c.json(
+        errorBody("forbidden", "channel-scoped session can only mint tokens for its own channel"),
+        403,
+      );
+    }
+    effectiveScope = callerScope;
+  }
   // owner = 铸造者账号（不取客户端值）。铸出的 agent token account 因此 = 铸造者账号，
   // 与铸造者共享同一账号 → 天然能进铸造者的私有频道（canAccessChannel 账号规则）。
   const owner = identity.account;
-  const result = await persistToken(c.env.DB, { name, role: "agent", owner, channelScope });
+  const result = await persistToken(c.env.DB, { name, role: "agent", owner, channelScope: effectiveScope });
   if ("conflict" in result) {
     return c.json(errorBody("conflict", "token name already exists, revoke it first"), 409);
   }
   const { token } = result;
   return c.json(
-    channelScope !== null
-      ? { token, name, role: "agent", owner, channel_scope: channelScope }
+    effectiveScope !== null
+      ? { token, name, role: "agent", owner, channel_scope: effectiveScope }
       : { token, name, role: "agent", owner },
     201,
   );
