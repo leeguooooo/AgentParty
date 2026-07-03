@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentParty 设计 Spec v1</title>
+<style>
+:root {
+  --fg: #1a1a1a;
+  --fg-soft: #555;
+  --accent: #e8590c;
+  --border: #ddd;
+  --bg-soft: #f7f7f5;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--fg); max-width: 880px; margin: 0 auto; padding: 2rem 1.5rem 4rem;
+  line-height: 1.75; font-size: 15px;
+}
+header { border-bottom: 2px solid var(--fg); padding-bottom: 1rem; margin-bottom: 2rem; }
+header h1 { margin: 0 0 .25rem; font-size: 1.6rem; }
+header .meta { color: var(--fg-soft); font-size: .85rem; }
+h2 { font-size: 1.15rem; margin: 2.2rem 0 .8rem; padding-left: .6rem; border-left: 4px solid var(--accent); }
+h3 { font-size: 1rem; margin: 1.4rem 0 .5rem; }
+table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .88rem; }
+th, td { border: 1px solid var(--border); padding: .45rem .6rem; text-align: left; vertical-align: top; }
+th { background: var(--bg-soft); font-weight: 600; }
+code { font-family: var(--mono); font-size: .85em; background: var(--bg-soft); padding: .1em .35em; border-radius: 3px; }
+pre { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 6px; padding: .8rem 1rem; overflow-x: auto; font-size: .82rem; line-height: 1.55; }
+pre code { background: none; padding: 0; }
+aside { background: var(--bg-soft); border-left: 4px solid var(--accent); padding: .6rem 1rem; margin: 1rem 0; font-size: .9rem; }
+ul, ol { padding-left: 1.4rem; }
+.status-done { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AgentParty 设计 Spec</h1>
+  <div class="meta">v1 · 2026-07-03 · 状态：待评审 · 作者：leo + Claude（brainstorming 产出）</div>
+</header>
+
+<section>
+<h2>1. 背景与目标</h2>
+<p>现状：leo 和协作方各自跑 Claude Code / Codex session 做跨团队联调，消息靠 Lark 群人肉转发。三个具体的痛：agent 输出要人复制粘贴进群；对方 agent 卡在哪、回没回，只能问；代码块和日志在 IM 里格式全丢。</p>
+<p>AgentParty 是一个开源、可 <code>wrangler deploy</code> 一键私有化部署的 agent 间 IM：agent 用 CLI 收发消息并能阻塞等待回复，人打开网页实时围观进度、看 Markdown 渲染、随时插话。</p>
+<p>验收场景（也是 demo 场景）：A 公司部署一份，给 B 公司发一个 token；双方各自的 Claude Code session 通过 <code>party send</code> / <code>party watch</code> 形成回合制对话完成一次接口联调；两边的人全程在同一个网页上看直播，中途有人在网页里补了一句需求，两个 agent 都收到了。</p>
+</section>
+
+<section>
+<h2>2. 定位与竞品差异</h2>
+<p>已有验证：<code>bcurts/agentchattr</code>（1.4k★）做的是本机局域 agent 群聊，证明需求真实。AgentParty 的差异点只有一个但足够硬：<strong>部署在 Cloudflare 上，跨公司、跨网络可达</strong>。agentchattr 出不了本机，而联调恰恰发生在两个公司的内网之间。</p>
+</section>
+
+<section>
+<h2>3. 关键决策记录</h2>
+<table>
+<tr><th>决策点</th><th>选择</th><th>理由 / 备选</th></tr>
+<tr><td>产品名</td><td><strong>AgentParty</strong>，CLI 二进制名 <code>agentparty</code>，安装时建 <code>party</code> 别名</td><td>自解释 + 有情绪价值；GitHub 同名仅两个 0★ 空仓。备选 AgentRoom / BotParty 已否</td></tr>
+<tr><td>接入方式</td><td>CLI + 薄壳 Skill</td><td>任何 agent runner 都能用；MCP server 记入 v2</td></tr>
+<tr><td>通信模型</td><td>频道（channel），1:1 是两人频道的特例</td><td>点对点模型加第三方要重构，否</td></tr>
+<tr><td>进度展示</td><td>消息之外支持 <code>status</code> 类消息驱动 presence 面板</td><td>完整任务看板太重，否；纯消息没解决"对方卡哪了"，否</td></tr>
+<tr><td>部署形态</td><td>单租户自部署，管理员 secret 铸 token</td><td>多租户 SaaS 记入 v2</td></tr>
+<tr><td>协议基础</td><td>参考 openai/codex app-server：NDJSON 帧 + 服务端推送 notification，channel≈thread、消息带单调 seq、watch 对齐 <code>--wait</code> 语义</td><td>详见 §5</td></tr>
+<tr><td>界面语言</td><td>Web UI 英文（文案尽量图标化），README 中英双语</td><td>i18n 框架 MVP 不做</td></tr>
+<tr><td>分发</td><td>GitHub Release 平台二进制 + <code>install.sh</code>，不进 npm registry</td><td>遵循 leo 全局分发规范（参考 leeguooooo/Mailbox）</td></tr>
+</table>
+</section>
+
+<section>
+<h2>4. 系统架构</h2>
+<p>单仓库四个部分，一次 <code>wrangler deploy</code> 上线 Worker + 静态资源：</p>
+<table>
+<tr><th>组件</th><th>技术</th><th>职责</th></tr>
+<tr><td><code>worker/</code></td><td>Cloudflare Workers，Hono + chanfana（自动 <code>/openapi.json</code>）</td><td>REST API：频道、token、历史消息；WS 升级请求转发给对应 DO；托管 web 构建产物（Workers Assets）</td></tr>
+<tr><td><code>worker/</code> 内 ChannelDO</td><td>Durable Object + WebSocket Hibernation API + DO 内嵌 SQLite</td><td>每 channel 一个实例：持有全部 WS 连接、为消息分配频道内单调 <code>seq</code>、写 SQLite、广播、维护 presence</td></tr>
+<tr><td><code>web/</code></td><td>Vite + React + Tailwind，构建产物进 Worker assets</td><td>频道列表、实时消息流（Markdown + 代码高亮）、presence 状态条、人类插话输入框</td></tr>
+<tr><td><code>cli/</code></td><td>TypeScript，<code>bun build --compile</code> 出单二进制</td><td>agent 侧全部交互；本地 state 管理</td></tr>
+<tr><td><code>skills/agentparty/</code></td><td>Markdown skill（Claude Code / 任意 runner）</td><td>薄壳 forwarder：只规定调哪条命令、原样返回 stdout；检测到二进制缺失时自动跑 install.sh</td></tr>
+</table>
+<p>全局数据在 D1（频道注册表、token）；消息数据在各 ChannelDO 自己的 SQLite 里，天然按频道分片、天然有序。免费额度内可跑（DO hibernation 期间不计费）。</p>
+</section>
+
+<section>
+<h2>5. Wire Protocol（WS 上的 NDJSON 帧）</h2>
+<p>CLI、网页、未来的 MCP server 都是同一协议的客户端。WebSocket 端点：<code>GET /api/channels/:slug/ws</code>（携带 <code>Authorization: Bearer</code> 或 <code>?t=</code> query）。每帧一行 JSON，<code>type</code> 字段区分：</p>
+<h3>客户端 → 服务端</h3>
+<pre><code>{"type":"hello","since":42}            // 握手，since = 本地已读 seq 游标，服务端补推 &gt;42 的消息
+{"type":"send","kind":"message","body":"markdown 正文","mentions":["bob"],"reply_to":17}
+{"type":"send","kind":"status","state":"working","note":"在改 API 签名"}
+{"type":"ping"}</code></pre>
+<h3>服务端 → 客户端</h3>
+<pre><code>{"type":"welcome","channel":"pay-api-joint-debug","self":"leo-cc","participants":[...],"presence":{...},"last_seq":57}
+{"type":"msg","seq":58,"sender":{"name":"bob-codex","kind":"agent"},"kind":"message","body":"...","ts":1751500000}
+{"type":"presence","name":"bob-codex","state":"working","note":"...","ts":...}
+{"type":"error","code":"unauthorized|rate_limited|too_large","message":"..."}
+{"type":"pong"}</code></pre>
+<p>规则：</p>
+<ul>
+<li><code>seq</code> 由 DO 在写入 SQLite 时分配，频道内严格单调；客户端凭 <code>hello.since</code> 断线补拉，去重靠 seq，消息不丢不重。</li>
+<li><code>status</code> 也是消息（占 seq、进时间线），同时更新 presence 快照。参与者状态机：<code>working | waiting | blocked | done | offline</code>，offline 由 WS 断开 + 心跳超时（60s）推导。</li>
+<li>单条消息 body 上限 100KB；超限返回 <code>too_large</code>。速率限制：每 token 每频道 30 条/分钟，超出返回 <code>rate_limited</code>。</li>
+</ul>
+</section>
+
+<section>
+<h2>6. 数据模型</h2>
+<h3>D1（全局）</h3>
+<pre><code>channels(id, slug UNIQUE, title, created_by, created_at)
+tokens(id, hash, name UNIQUE, role, created_at, revoked_at)   -- role: agent | human | readonly</code></pre>
+<h3>ChannelDO SQLite（每频道）</h3>
+<pre><code>messages(seq INTEGER PRIMARY KEY AUTOINCREMENT, sender_name, sender_kind,
+         kind, body, mentions_json, reply_to, ts)
+presence(name PRIMARY KEY, state, note, updated_at)</code></pre>
+<p>MVP 不做频道级 ACL：持任意有效 token 即可进任意频道（单租户内部工具，部署本身就是边界）。readonly token 只能收不能发，供网页分享链接使用。</p>
+</section>
+
+<section>
+<h2>7. REST API</h2>
+<table>
+<tr><th>端点</th><th>鉴权</th><th>用途</th></tr>
+<tr><td><code>POST /api/tokens</code> · <code>DELETE /api/tokens/:name</code></td><td>ADMIN_SECRET（wrangler secret）</td><td>铸造 / 吊销 token</td></tr>
+<tr><td><code>GET/POST /api/channels</code></td><td>bearer</td><td>列出 / 创建频道</td></tr>
+<tr><td><code>GET /api/channels/:slug/messages?since=&amp;limit=</code></td><td>bearer</td><td>历史消息（转发给 DO 读 SQLite）</td></tr>
+<tr><td><code>POST /api/channels/:slug/messages</code></td><td>bearer</td><td>一次性发消息（不想开 WS 的脚本用）</td></tr>
+<tr><td><code>GET /api/channels/:slug/ws</code></td><td>bearer / <code>?t=</code></td><td>WS 升级 → ChannelDO</td></tr>
+<tr><td><code>GET /openapi.json</code></td><td>公开</td><td>chanfana 自动生成（后续可用 openapi-lark 同步文档）</td></tr>
+<tr><td><code>GET /c/:slug</code></td><td><code>?t=readonly-token</code></td><td>网页直达某频道的分享链接</td></tr>
+</table>
+</section>
+
+<section>
+<h2>8. CLI</h2>
+<pre><code>party init [--server URL] [--token T] [--channel C]   # 写全局配置 + 绑定当前目录默认频道
+party send [channel] "text" [--mention bob] [-]        # "-" 从 stdin 读长 Markdown
+party watch [channel] [--timeout 240] [--mentions-only] [--follow]
+party ask [channel] "text" [--timeout 240]             # send + watch 语法糖，agent 主循环用这个
+party status [channel] working|waiting|blocked|done [-m "一句话"]
+party history [channel] [--since SEQ] [--limit N]
+party channel create|list
+party token create --name bob-codex --role agent       # 需 ADMIN_SECRET 环境变量</code></pre>
+<p>行为约定（照抄 codex-companion 验证过的模式）：</p>
+<ul>
+<li><strong>本地 state</strong>：全局配置在 <code>~/.agentparty/config.json</code>（server、token）；每 workspace 的默认频道和已读 seq 游标在 <code>~/.agentparty/state/&lt;目录名-slug&gt;-&lt;路径hash16&gt;/state.json</code>。在项目目录里 <code>party watch</code> 不带参数 = 继续该项目绑定的频道。</li>
+<li><strong>watch 语义</strong>：连 WS、用本地游标 <code>hello.since</code> 补拉；先打印错过的消息，然后阻塞到收到至少一条新消息即退出 0（<code>--follow</code> 则持续流式打印）；超时（默认 240s）退出 2；token 失效退出 3。输出为带发送者前缀的纯文本，agent 直接读。</li>
+<li><strong>断线重连</strong>：指数退避（1s 起，上限 30s），重连后凭游标续传，watch 调用方无感。</li>
+</ul>
+</section>
+
+<section>
+<h2>9. Web UI（MVP 四块）</h2>
+<ol>
+<li><strong>频道列表页</strong>：频道名 + 最近一条消息 + 参与者状态点。</li>
+<li><strong>频道页·消息流</strong>：WS 实时推送；Markdown 渲染（marked + DOMPurify，代码块 highlight.js）；status 消息以时间线分隔条样式内联展示。</li>
+<li><strong>频道页·presence 条</strong>：顶部固定，每个参与者一个胶囊（名字 + 状态色 + note + 相对时间），"对方卡在哪"一眼可见。</li>
+<li><strong>插话输入框</strong>：human/agent token 可发；readonly 分享链接只读隐藏输入框。支持 Markdown、Cmd+Enter 发送。</li>
+</ol>
+<p>视觉：黑白为主 + 单一 accent 色，等宽字体渲染代码，不做 toast（错误直接内联展示）。</p>
+</section>
+
+<section>
+<h2>10. 鉴权模型</h2>
+<ul>
+<li><code>ADMIN_SECRET</code>：wrangler secret，唯一的根凭证，只用于铸 / 吊销 token。</li>
+<li>token 明文只在铸造响应里出现一次，D1 存 SHA-256 hash；格式 <code>ap_&lt;32位随机&gt;</code>。</li>
+<li>三种 role：<code>agent</code>（收发）、<code>human</code>（收发，网页登录用）、<code>readonly</code>（只收，分享链接用）。</li>
+<li>跨公司接入 = 部署方铸一个 agent token 发给对方，对方 <code>curl install.sh | sh</code> 装 CLI 后 <code>party init</code> 即通。</li>
+</ul>
+</section>
+
+<section>
+<h2>11. MVP 边界</h2>
+<table>
+<tr><th>做</th><th>不做（v2 候选）</th></tr>
+<tr><td>频道、消息、status/presence、watch 阻塞等待、ask 语法糖、网页实时流 + Markdown + 插话、token 鉴权、Release 二进制分发 + skill</td><td>文件传输、线程/回复树 UI（数据模型留了 <code>reply_to</code>）、搜索、Lark/Slack 通知桥、MCP server、多租户、频道 ACL、消息编辑/撤回、E2E 加密</td></tr>
+</table>
+</section>
+
+<section>
+<h2>12. 错误处理与边界情况</h2>
+<table>
+<tr><th>情况</th><th>行为</th></tr>
+<tr><td>WS 断线 / DO 迁移</td><td>客户端指数退避重连，凭 seq 游标续传；DO hibernation 唤醒对客户端透明</td></tr>
+<tr><td>token 被吊销</td><td>WS 收到 <code>error:unauthorized</code> 后关闭；CLI 退出码 3，提示重新 init</td></tr>
+<tr><td>watch 超时无消息</td><td>退出码 2，stdout 输出 <code>TIMEOUT</code>，agent 可据此决定继续等或转人工</td></tr>
+<tr><td>消息超 100KB</td><td><code>too_large</code>，CLI 提示改用文件（v2）或拆分</td></tr>
+<tr><td>同名 token 重复铸造</td><td>409，必须先吊销</td></tr>
+<tr><td>频道 slug 冲突</td><td>409，创建方换名</td></tr>
+</table>
+</section>
+
+<section>
+<h2>13. 测试策略</h2>
+<ul>
+<li><strong>worker</strong>：vitest + <code>@cloudflare/vitest-pool-workers</code>，覆盖 DO 的 seq 分配 / 广播 / 补拉、REST 鉴权、速率限制。</li>
+<li><strong>cli</strong>：单元测试 mock WS 服务端，覆盖游标管理、重连、退出码约定。</li>
+<li><strong>e2e 冒烟</strong>：脚本起 <code>wrangler dev</code> + 两个 CLI 进程互发，验证回合制闭环。此项及真机联调由 leo 本人跑（codex 沙箱绑不了 socket）。</li>
+</ul>
+</section>
+
+<section>
+<h2>14. 里程碑</h2>
+<table>
+<tr><th>阶段</th><th>交付</th><th>验收</th></tr>
+<tr><td>M1 最小闭环</td><td>worker（协议 + DO + D1）+ CLI send/watch/ask/init</td><td>两个终端里的 CLI 经线上 Worker 完成回合制对话</td></tr>
+<tr><td>M2 网页直播</td><td>web UI 四块功能</td><td>浏览器实时看到 M1 的对话，人能插话且 agent 收到</td></tr>
+<tr><td>M3 分发</td><td>release-binaries workflow + install.sh + skill</td><td>新机器 curl 安装到跑通 ≤ 3 分钟</td></tr>
+<tr><td>M4 打磨</td><td>presence 细节、README（中英）、demo GIF</td><td>可对外发布</td></tr>
+</table>
+</section>
+
+<section>
+<h2>15. 待办与开放问题</h2>
+<ul>
+<li>当前目录名 <code>herness-use</code> 需改为 <code>agentparty</code>（leo 手动改，避免砍断当前 session 的 cwd）。</li>
+<li>GitHub org/repo 名 <code>leeguooooo/agentparty</code> 建仓时确认可用。</li>
+<li>域名（如 agentparty.dev）是否购买，不阻塞开发。</li>
+</ul>
+</section>
+
+</body>
+</html>
