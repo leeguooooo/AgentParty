@@ -349,7 +349,7 @@
 /* 等宽命令块：长 token 在卡内换行，不撑破移动端 */
 .agent-join-cmd {
   display: flex;
-  align-items: stretch;
+  align-items: flex-start;
   gap: 10px;
   padding: 12px 13px;
   background: var(--t-panel2);
@@ -360,14 +360,15 @@
 .agent-join-cmd-text {
   flex: 1;
   min-width: 0;
+  margin: 0;
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--t-body);
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
-  word-break: break-all;
-  align-self: center;
+  word-break: normal;
 }
-.agent-join-copy { flex: none; align-self: center; font-size: 13px; }
+.agent-join-copy { flex: none; align-self: flex-start; font-size: 13px; }
 .agent-join-warn { margin: 0; }
 .agent-join-hint { margin: 0; font-size: 12px; color: var(--t-dim); }
 .agent-join-hint a { color: var(--d-blue); text-decoration-thickness: 2px; }

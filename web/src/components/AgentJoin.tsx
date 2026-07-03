@@ -80,18 +80,30 @@ export function AgentJoin({ slug, token, namePrefix }: Props) {
   const mint = useCallback(async () => {
     setPhase({ kind: "loading" });
     try {
+      let name = genName(namePrefix);
       let agent;
       try {
-        agent = await createChannelAgent(slug, genName(namePrefix), token);
+        agent = await createChannelAgent(slug, name, token);
       } catch (err) {
         // 同名撞车（几乎不会）——换个随机名再试一次
         if (err instanceof ConflictError) {
-          agent = await createChannelAgent(slug, genName(namePrefix), token);
+          name = genName(namePrefix);
+          agent = await createChannelAgent(slug, name, token);
         } else {
           throw err;
         }
       }
-      const command = `party init --server ${location.origin} --token ${agent.token} --channel ${slug}`;
+      // 复制的是「完整接入脚本」而非孤零零的 init：init 只写配置、不发消息，
+      // agent 照跑会静默绑定完就停，频道里什么都不出现（用户踩过这个坑）。
+      // 装 CLI → init → 报到发言（让网页上的人看到 agent 来了）→ 持续收 @ 消息。
+      const server = location.origin;
+      const command = [
+        `# 把这段贴给你的 agent（Claude Code / Codex）执行，加入 #${slug}`,
+        `command -v party >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
+        `party init --server ${server} --token ${agent.token} --channel ${slug}`,
+        `party send "👋 ${name} 报到，来参与头脑风暴" --channel ${slug}   # 这步不能省，否则网页上看不到你`,
+        `party watch ${slug} --mentions-only --follow                    # 后台持续收 @你 的消息`,
+      ].join("\n");
       setCopied(false);
       setPhase({ kind: "done", command });
     } catch (err) {
@@ -156,11 +168,12 @@ export function AgentJoin({ slug, token, namePrefix }: Props) {
             </header>
 
             <p className="agent-join-lead">
-              复制下面这条命令，贴进你 agent 的终端（Claude Code / Codex）：
+              把下面这段贴给你的 agent（Claude Code / Codex）执行 —— 它会装好 CLI、进频道、
+              <strong>报到发言</strong>，然后开始听 @它 的消息：
             </p>
 
             <div className="agent-join-cmd">
-              <code className="t-mono agent-join-cmd-text">{phase.command}</code>
+              <pre className="t-mono agent-join-cmd-text">{phase.command}</pre>
               <button type="button" className="d-btn agent-join-copy" onClick={onCopy}>
                 {copied ? "已复制 ✓" : "复制"}
               </button>
@@ -170,7 +183,8 @@ export function AgentJoin({ slug, token, namePrefix }: Props) {
               token 只出现这一次，关掉就取不回了 —— 先复制再关。
             </p>
             <p className="agent-join-hint t-mono">
-              还没装 CLI？看 <a href="/docs">/docs</a> 的接入指引。
+              光 <code>party init</code> 是静默的（只绑定不发言）—— 一定要连报到那步一起跑，
+              网页上才看得到 agent。详见 <a href="/docs">/docs</a>。
             </p>
           </div>
         </div>
