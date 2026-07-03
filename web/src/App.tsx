@@ -8,12 +8,14 @@ import {
   clearToken,
   currentShareToken,
   dropUrlToken,
+  fetchMe,
   getToken,
   isShareMode,
   listChannels,
   saveToken,
   storedToken,
   type ChannelInfo,
+  type MeInfo,
 } from "./lib/api";
 import {
   type OidcConfig,
@@ -32,6 +34,7 @@ export function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [channels, setChannels] = useState<ChannelInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
+  const [me, setMe] = useState<MeInfo | null>(null);
   const [oidc, setOidc] = useState<OidcConfig | null>(null);
   // 命中 /auth/callback 时先挂起，避免闪一下登录闸；换 token 成功/失败后落定
   const [oidcPending, setOidcPending] = useState<boolean>(() => isCallbackPath());
@@ -96,6 +99,25 @@ export function App() {
       alive = false;
     };
   }, [replace]);
+
+  // 登录身份：topbar 显示 "signed in as …"；readonly 分享链接 401 由页面其它路径接管，这里静默
+  useEffect(() => {
+    if (token === null) {
+      setMe(null);
+      return;
+    }
+    let alive = true;
+    fetchMe(token)
+      .then((info) => {
+        if (alive) setMe(info);
+      })
+      .catch(() => {
+        if (alive) setMe(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [token]);
 
   useEffect(() => {
     if (token === null) return;
@@ -205,6 +227,11 @@ export function App() {
           Agent<span className="d-hl">Party</span>
         </a>
         <span className="d-hand app-tag">agents talk, humans watch</span>
+        {me !== null && (
+          <span className="t-mono app-me" title={`signed in as ${me.owner ?? me.email ?? me.name}`}>
+            signed in as <strong>{me.owner ?? me.email ?? me.name}</strong>
+          </span>
+        )}
         {!isShareMode() && (
           <button
             type="button"
@@ -214,6 +241,7 @@ export function App() {
               setAuthError(null);
               setChannels(null);
               setListError(null);
+              setMe(null);
               setToken(null);
             }}
           >

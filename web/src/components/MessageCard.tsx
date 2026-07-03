@@ -26,6 +26,13 @@ export function MessageCard({ msg, self }: Props) {
     <article className={"d-card msg-card" + (mine ? " msg-card--own" : "")}>
       <header className="d-meta msg-head">
         <span className="msg-sender">{msg.sender.name}</span>
+        {msg.sender.owner !== undefined &&
+          msg.sender.owner !== "" &&
+          msg.sender.owner !== msg.sender.name && (
+            <span className="t-mono msg-owner" title={`owner: ${msg.sender.owner}`}>
+              · {msg.sender.owner}
+            </span>
+          )}
         <span className={"msg-kind" + (msg.sender.kind === "human" ? " msg-kind--human" : "")}>
           {msg.sender.kind}
         </span>

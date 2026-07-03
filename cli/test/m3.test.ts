@@ -77,8 +77,9 @@ describe("party invite", () => {
 
     // 请求序列：agent token → channel → readonly token
     const tokenReqs = reqsOf(mock, "POST", "/api/tokens");
+    // guest agent token 带 owner（默认 = ASCII 标题当可辨识标签）；share readonly 不带
     expect(tokenReqs.map((t) => t.body)).toEqual([
-      { name: "fix-login-bug-guest", role: "agent" },
+      { name: "fix-login-bug-guest", role: "agent", owner: "Fix Login Bug" },
       { name: "fix-login-bug-share", role: "readonly" },
     ]);
     expect(tokenReqs[0]!.headers["x-admin-secret"]).toBe("s3cret");
@@ -133,8 +134,9 @@ describe("party invite", () => {
     );
     expect(r.code).toBe(0);
     const tokenReqs = reqsOf(mock, "POST", "/api/tokens");
+    // 标题非 ASCII（CJK）→ owner 退回 slug（header-safe）
     expect(tokenReqs.map((t) => t.body)).toEqual([
-      { name: "bob", role: "agent" },
+      { name: "bob", role: "agent", owner: "hotfix" },
       { name: "hotfix-share", role: "readonly" },
     ]);
     expect(reqsOf(mock, "POST", "/api/channels")[0]!.body).toEqual({
@@ -145,6 +147,19 @@ describe("party invite", () => {
     });
     expect(r.stdout).toContain("(temp · party)");
     expect(r.stdout).toContain("--token ap_bob_secret --channel hotfix");
+  });
+
+  test("--owner 覆盖默认标签，只写在 guest agent token 上", async () => {
+    mock = startRestMock();
+    const r = await runCli(
+      ["invite", "Fix Login Bug", "--owner", "leo@leeguoo.com", "--server", mock.url],
+      { ADMIN_SECRET: "s3cret" },
+    );
+    expect(r.code).toBe(0);
+    expect(reqsOf(mock, "POST", "/api/tokens").map((t) => t.body)).toEqual([
+      { name: "fix-login-bug-guest", role: "agent", owner: "leo@leeguoo.com" },
+      { name: "fix-login-bug-share", role: "readonly" },
+    ]);
   });
 
   test("缺 ADMIN_SECRET 退出 1", async () => {
@@ -262,7 +277,7 @@ describe("party invite", () => {
     expect(r.code).toBe(1);
     expect(reqsOf(mock, "DELETE", "/api/tokens/demo-guest").length).toBe(1);
     expect(reqsOf(mock, "POST", "/api/tokens").map((t) => t.body)).toEqual([
-      { name: "demo-guest", role: "agent" },
+      { name: "demo-guest", role: "agent", owner: "demo" },
     ]);
   });
 });
@@ -870,6 +885,40 @@ describe("party token", () => {
     });
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("name must match");
+    expect(mock.requests.length).toBe(0);
+  });
+
+  test("--owner 透传进请求体，缺省不带 owner 键", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const withOwner = await runCli(
+      ["token", "create", "--name", "bot", "--role", "agent", "--owner", "leo@leeguoo.com"],
+      { ADMIN_SECRET: "s" },
+    );
+    expect(withOwner.code).toBe(0);
+    expect(reqsOf(mock, "POST", "/api/tokens")[0]!.body).toEqual({
+      name: "bot",
+      role: "agent",
+      owner: "leo@leeguoo.com",
+    });
+
+    mock.requests.length = 0;
+    const noOwner = await runCli(["token", "create", "--name", "bot2", "--role", "agent"], {
+      ADMIN_SECRET: "s",
+    });
+    expect(noOwner.code).toBe(0);
+    expect(reqsOf(mock, "POST", "/api/tokens")[0]!.body).toEqual({ name: "bot2", role: "agent" });
+  });
+
+  test("非法 owner（非 ASCII）本地拒绝且不发请求", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(
+      ["token", "create", "--name", "bot", "--role", "agent", "--owner", "老板"],
+      { ADMIN_SECRET: "s" },
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("--owner must be printable ascii");
     expect(mock.requests.length).toBe(0);
   });
 });

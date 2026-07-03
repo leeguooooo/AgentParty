@@ -87,7 +87,16 @@ describe("lookupToken OIDC verification", () => {
       role: "human",
       kind: "human",
       hash: "oidc:user-abc",
+      // 所属人：有 email 用 email
+      owner: "u@leeguoo.com",
     });
+  });
+
+  it("falls back owner to sub when the JWT has no email", async () => {
+    const issuer = freshIssuer();
+    mockJwks(issuer);
+    const id = await lookupToken(env.DB, await signJwt(claims(issuer, { email: undefined })), oidc(issuer));
+    expect(id).toMatchObject({ name: "user-abc", email: undefined, owner: "user-abc" });
   });
 
   it("rejects an expired JWT (no JWKS fetch)", async () => {
@@ -139,6 +148,17 @@ describe("oidc end-to-end via SELF.fetch", () => {
 
     const list = await SELF.fetch("http://ap.test/api/channels", { headers: auth });
     expect(list.status).toBe(200);
+
+    // /api/me 暴露登录身份：OIDC 人类 owner = email，name = sub
+    const me = await SELF.fetch("http://ap.test/api/me", { headers: auth });
+    expect(me.status).toBe(200);
+    expect(await me.json()).toEqual({
+      name: "user-abc",
+      email: "u@leeguoo.com",
+      kind: "human",
+      role: "human",
+      owner: "u@leeguoo.com",
+    });
 
     // DO 的 isTokenActive 认 oidc: 前哨（不走 D1 吊销扫描），OIDC 人类可建频道并发消息
     const slug = await createChannel(jwt);

@@ -33,6 +33,16 @@
   color: var(--d-blue);
   font-size: 13px;
 }
+.app-me {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--t-dim);
+  max-width: min(280px, 40vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-me strong { color: var(--t-muted); font-weight: 600; }
 .app-signout {
   margin-left: auto;
   background: none;
@@ -42,6 +52,8 @@
   color: var(--t-dim);
   cursor: pointer;
 }
+/* signed-in 标签在场时，二者靠右并排，仅由 app-me 吃掉伸缩空间 */
+.app-me + .app-signout { margin-left: 12px; }
 .app-signout:hover { color: var(--t-accent); }
 
 .app-shell {
@@ -147,6 +159,16 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.presence-owner {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--t-dim);
+  min-width: 0;
+  max-width: min(140px, 30vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .presence-ts { font-size: 10px; font-weight: 400; color: var(--t-dim); }
 .presence-empty { font-size: 12px; color: var(--t-dim); }
 /* 参与者计数：presence 条右端，连接状态左边 */
@@ -224,6 +246,14 @@
   color: var(--t-dim);
 }
 .msg-kind--human { background: var(--d-blue-soft); border-color: var(--d-blue); color: var(--d-blue); }
+.msg-owner {
+  font-size: 10.5px;
+  color: var(--t-dim);
+  max-width: min(200px, 40vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .msg-mention { color: var(--t-accent); }
 .msg-reply { color: var(--t-dim); }
 .msg-fill { flex: 1; }

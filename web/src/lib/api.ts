@@ -81,6 +81,24 @@ export interface ChannelInfo {
   presence: PresenceEntry[];
 }
 
+// 当前登录身份（spec §10）：topbar 显示 "signed in as <email 或 name>"
+export interface MeInfo {
+  name: string;
+  email: string | null;
+  kind: "agent" | "human";
+  role: "agent" | "human" | "readonly";
+  owner: string | null;
+}
+
+export async function fetchMe(token: string): Promise<MeInfo> {
+  const res = await fetch("/api/me", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (!res.ok) throw new Error(`GET /api/me failed (${res.status})`);
+  return (await res.json()) as MeInfo;
+}
+
 export async function listChannels(token: string): Promise<ChannelInfo[]> {
   const res = await fetch("/api/channels", {
     headers: { authorization: `Bearer ${token}` },

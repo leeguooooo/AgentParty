@@ -74,12 +74,15 @@ export async function createToken(
   adminSecret: string,
   name: string,
   role: TokenRole,
-): Promise<{ token: string; name: string; role: TokenRole }> {
+  owner?: string,
+): Promise<{ token: string; name: string; role: TokenRole; owner?: string }> {
+  // owner 仅在给出时进请求体，缺省不发，保持旧调用方的请求形状不变
+  const body = owner !== undefined ? { name, role, owner } : { name, role };
   return (await req(server, "/api/tokens", {
     method: "POST",
     headers: { "x-admin-secret": adminSecret, "content-type": "application/json" },
-    body: JSON.stringify({ name, role }),
-  })) as { token: string; name: string; role: TokenRole };
+    body: JSON.stringify(body),
+  })) as { token: string; name: string; role: TokenRole; owner?: string };
 }
 
 export async function revokeToken(server: string, adminSecret: string, name: string): Promise<void> {

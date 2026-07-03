@@ -8,6 +8,8 @@ export interface TokenIdentity {
   hash: string;
   // OIDC 人类 token 携带 email；ap_ token 无此字段
   email?: string;
+  // 所属人：机器 ap_ token 取 tokens.owner 列；人类 OIDC token 取 email（退回 sub）。无则省略
+  owner?: string;
 }
 
 export type BearerSource = "authorization" | "protocol" | "query";
@@ -78,12 +80,18 @@ export async function lookupToken(
   }
   const hash = await sha256Hex(token);
   const row = await db
-    .prepare("SELECT name, role FROM tokens WHERE hash = ? AND revoked_at IS NULL")
+    .prepare("SELECT name, role, owner FROM tokens WHERE hash = ? AND revoked_at IS NULL")
     .bind(hash)
-    .first<{ name: string; role: string }>();
+    .first<{ name: string; role: string; owner: string | null }>();
   if (!row) return null;
   const role = row.role as TokenRole;
-  return { name: row.name, role, kind: role === "agent" ? "agent" : "human", hash };
+  return {
+    name: row.name,
+    role,
+    kind: role === "agent" ? "agent" : "human",
+    hash,
+    owner: row.owner ?? undefined,
+  };
 }
 
 // ── OIDC access token（RS256 JWT）验证 ─────────────────────────────────────
@@ -200,11 +208,14 @@ async function verifyOidcToken(token: string, oidc: OidcConfig): Promise<TokenId
   const ok = await crypto.subtle.verify({ name: "RSASSA-PKCS1-v1_5" }, key, signature, signed);
   if (!ok) return null;
   // OIDC 人类：sub 作 name，role/kind=human；hash 用 oidc: 前哨（不落 D1，生命周期归 JWT exp）
+  const email = typeof claims.email === "string" ? claims.email : undefined;
   return {
     name: claims.sub,
-    email: typeof claims.email === "string" ? claims.email : undefined,
+    email,
     role: "human",
     kind: "human",
     hash: `oidc:${claims.sub}`,
+    // 所属人显示：有 email 用 email，否则退回 sub
+    owner: email ?? claims.sub,
   };
 }

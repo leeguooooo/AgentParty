@@ -54,6 +54,8 @@ export type RestErrorCode = ErrorCode | "conflict" | "unavailable";
 export interface Sender {
   name: string;
   kind: SenderKind;
+  /** 所属人：机器 ap_ token 铸造时写入的标签，人类 OIDC token 为其 email。无则省略（旧客户端忽略） */
+  owner?: string;
 }
 
 export interface PresenceEntry {

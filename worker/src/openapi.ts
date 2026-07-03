@@ -27,6 +27,10 @@ export const openapiDocument = {
                 properties: {
                   name: { type: "string" },
                   role: { type: "string", enum: ["agent", "human", "readonly"] },
+                  owner: {
+                    type: "string",
+                    description: "optional owner label (printable ascii, <= 128 chars)",
+                  },
                 },
               },
             },
@@ -36,6 +40,16 @@ export const openapiDocument = {
           "201": { description: "token minted; plaintext returned only once" },
           "401": { description: "invalid admin secret" },
           "409": { description: "name already exists" },
+        },
+      },
+    },
+    "/api/me": {
+      get: {
+        summary: "current signed-in identity (name, email, kind, role, owner)",
+        security: [{ bearer: [] }],
+        responses: {
+          "200": { description: "identity of the bearer token" },
+          "401": { description: "missing or invalid token" },
         },
       },
     },

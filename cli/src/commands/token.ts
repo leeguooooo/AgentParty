@@ -6,7 +6,9 @@ import { createToken, handleRestError, revokeToken } from "../rest";
 import { isName, normalizeServerUrl } from "../validation";
 
 const ROLES: TokenRole[] = ["agent", "human", "readonly"];
-const TOKEN_FLAGS = ["server", "name", "role"];
+const TOKEN_FLAGS = ["server", "name", "role", "owner"];
+const OWNER_MAX = 128;
+const OWNER_RE = /^[\x20-\x7e]{1,128}$/;
 
 export async function run(argv: string[]): Promise<number> {
   const { positionals, flags } = parseArgs(argv);
@@ -15,7 +17,7 @@ export async function run(argv: string[]): Promise<number> {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["server", "name", "role"]);
+  const flagError = valueFlagError(flags, ["server", "name", "role", "owner"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -37,15 +39,20 @@ export async function run(argv: string[]): Promise<number> {
       case "create": {
         const name = str(flags.name);
         const role = str(flags.role) ?? "agent";
+        const owner = str(flags.owner);
         if (!name || !ROLES.includes(role as TokenRole)) {
-          console.error("usage: party token create --name n --role agent|human|readonly");
+          console.error("usage: party token create --name n --role agent|human|readonly [--owner label]");
           return 1;
         }
         if (!isName(name)) {
           console.error("name must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");
           return 1;
         }
-        const res = await createToken(server, adminSecret, name, role as TokenRole);
+        if (owner !== undefined && (owner.length > OWNER_MAX || !OWNER_RE.test(owner))) {
+          console.error(`--owner must be printable ascii, <= ${OWNER_MAX} chars`);
+          return 1;
+        }
+        const res = await createToken(server, adminSecret, name, role as TokenRole, owner);
         // 明文 token 只出现这一次
         console.log(JSON.stringify(res));
         return 0;

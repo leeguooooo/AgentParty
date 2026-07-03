@@ -39,6 +39,7 @@ const AP_FORWARD_HEADERS = [
   "x-ap-name",
   "x-ap-kind",
   "x-ap-role",
+  "x-ap-owner",
   "x-ap-token-hash",
   "x-ap-mode",
   "x-ap-channel-kind",
@@ -46,6 +47,9 @@ const AP_FORWARD_HEADERS = [
   "x-ap-archived",
   "x-ap-archive-at",
 ] as const;
+// 所属人标签：铸造时可选写入，须 header-safe（可打印 ASCII，含空格）以便经 x-ap-owner 转发给 do
+const OWNER_MAX = 128;
+const OWNER_RE = /^[\x20-\x7e]{1,128}$/;
 
 function errorBody(code: RestErrorCode, message: string) {
   return { error: { code, message } };
@@ -164,12 +168,31 @@ app.get("/api/config", (c) => {
   return c.json({ oidc: oidc ? { issuer: oidc.issuer, client_id: oidc.clientId } : null });
 });
 
+// 当前登录身份：web topbar 显示 "signed in as <email 或 name>"（spec §10）
+app.get("/api/me", requireBearer, (c) => {
+  const id = c.get("identity");
+  return c.json({
+    name: id.name,
+    email: id.email ?? null,
+    kind: id.kind,
+    role: id.role,
+    owner: id.owner ?? null,
+  });
+});
+
 app.post("/api/tokens", requireAdmin, async (c) => {
-  const body = (await c.req.json().catch(() => null)) as { name?: unknown; role?: unknown } | null;
+  const body = (await c.req.json().catch(() => null)) as
+    | { name?: unknown; role?: unknown; owner?: unknown }
+    | null;
   const name = typeof body?.name === "string" ? body.name : "";
   const role = typeof body?.role === "string" ? body.role : "";
   if (!NAME_RE.test(name) || !ROLES.includes(role)) {
     return c.json(errorBody("bad_request", "valid name and role (agent|human|readonly) required"), 400);
+  }
+  // owner 可选：给则须 header-safe 且不超长（后续经 x-ap-owner 转发给 do）
+  const owner = body?.owner === undefined || body?.owner === null ? null : body.owner;
+  if (owner !== null && (typeof owner !== "string" || owner.length > OWNER_MAX || !OWNER_RE.test(owner))) {
+    return c.json(errorBody("bad_request", `owner must be printable ascii, <= ${OWNER_MAX} chars`), 400);
   }
   if (RESERVED_NAMES.includes(name)) {
     return c.json(errorBody("bad_request", "name is reserved"), 400);
@@ -184,18 +207,20 @@ app.post("/api/tokens", requireAdmin, async (c) => {
   const hash = await sha256Hex(token);
   const now = Date.now();
   if (existing) {
-    // 已吊销的同名 token 允许重铸，复用行
+    // 已吊销的同名 token 允许重铸，复用行（owner 一并覆盖，未给则清空）
     await c.env.DB.prepare(
-      "UPDATE tokens SET hash = ?, role = ?, created_at = ?, revoked_at = NULL WHERE id = ?",
+      "UPDATE tokens SET hash = ?, role = ?, owner = ?, created_at = ?, revoked_at = NULL WHERE id = ?",
     )
-      .bind(hash, role, now, existing.id)
+      .bind(hash, role, owner, now, existing.id)
       .run();
   } else {
-    await c.env.DB.prepare("INSERT INTO tokens (hash, name, role, created_at) VALUES (?, ?, ?, ?)")
-      .bind(hash, name, role, now)
+    await c.env.DB.prepare(
+      "INSERT INTO tokens (hash, name, role, owner, created_at) VALUES (?, ?, ?, ?, ?)",
+    )
+      .bind(hash, name, role, owner, now)
       .run();
   }
-  return c.json({ token, name, role }, 201);
+  return c.json(owner !== null ? { token, name, role, owner } : { token, name, role }, 201);
 });
 
 app.delete("/api/tokens/:name", requireAdmin, async (c) => {
@@ -342,6 +367,7 @@ app.post("/api/channels/:slug/messages", async (c) => {
         "x-ap-name": identity.name,
         "x-ap-kind": identity.kind,
         "x-ap-role": identity.role,
+        ...(identity.owner ? { "x-ap-owner": identity.owner } : {}),
         "x-ap-token-hash": identity.hash,
         ...channelHeaders(channel, c.req.url),
       },
@@ -497,6 +523,7 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-name", identity.name);
   fwd.headers.set("x-ap-kind", identity.kind);
   fwd.headers.set("x-ap-role", identity.role);
+  if (identity.owner) fwd.headers.set("x-ap-owner", identity.owner);
   fwd.headers.set("x-ap-token-hash", identity.hash);
   fwd.headers.set("x-ap-mode", channel.mode);
   fwd.headers.set("x-ap-channel-kind", channel.kind);

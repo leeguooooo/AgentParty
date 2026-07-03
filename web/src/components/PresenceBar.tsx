@@ -17,6 +17,7 @@ interface Item {
   state: string; // PresenceState | "online"（已连接但还没报过 status）
   note: string | null;
   ts: number | null;
+  owner: string | null; // 所属人：agent 的操作者 / 人类的 email，仅连接中的参与者可知
 }
 
 export function PresenceBar({ presence, participants, status, party = false }: Props) {
@@ -27,26 +28,36 @@ export function PresenceBar({ presence, participants, status, party = false }: P
     return () => clearInterval(t);
   }, []);
 
+  // 所属人只有连接中的参与者带（presence 快照不含 owner），按 name 建索引
+  const byName = new Map(participants.map((p) => [p.name, p]));
   const names = [...new Set([...participants.map((p) => p.name), ...Object.keys(presence)])].sort();
   const items: Item[] = names.map((name) => {
     const entry = presence[name];
-    const connected = participants.some((p) => p.name === name);
+    const owner = byName.get(name)?.owner ?? null;
+    const connected = byName.has(name);
     if (!connected) {
-      return { name, state: "offline", note: null, ts: entry?.ts ?? null };
+      return { name, state: "offline", note: null, ts: entry?.ts ?? null, owner: null };
     }
     if (entry && entry.state !== "offline") {
-      return { name, state: entry.state, note: entry.note, ts: entry.ts };
+      return { name, state: entry.state, note: entry.note, ts: entry.ts, owner };
     }
-    return { name, state: "online", note: null, ts: entry?.ts ?? null };
+    return { name, state: "online", note: null, ts: entry?.ts ?? null, owner };
   });
 
   return (
     <div className="presence-bar">
       {party && <span className="d-hl party-badge">PARTY</span>}
       {items.map((it) => (
-        <span key={it.name} className={`d-pill presence-pill${it.state === "blocked" ? " presence-pill--blocked" : ""}`}>
+        <span
+          key={it.name}
+          className={`d-pill presence-pill${it.state === "blocked" ? " presence-pill--blocked" : ""}`}
+          title={it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name}
+        >
           <span className={`d-dot d-dot--${it.state}`} />
           <span className="presence-name">{it.name}</span>
+          {it.owner !== null && it.owner !== "" && it.owner !== it.name && (
+            <span className="t-mono presence-owner">· {it.owner}</span>
+          )}
           {it.note !== null && it.note !== "" && <span className="t-mono presence-note">{it.note}</span>}
           {it.ts !== null && <span className="t-mono presence-ts">{fmtRel(it.ts)}</span>}
         </span>

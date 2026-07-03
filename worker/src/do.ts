@@ -30,6 +30,7 @@ interface ConnState {
   name: string;
   kind: SenderKind;
   role: TokenRole;
+  owner?: string;
   tokenHash: string;
   archived: boolean;
   lastSeen: number;
@@ -39,6 +40,7 @@ interface Identity {
   name: string;
   kind: SenderKind;
   role: TokenRole;
+  owner?: string;
   tokenHash: string;
 }
 
@@ -135,6 +137,7 @@ export class ChannelDO extends Server<Env> {
       seq INTEGER PRIMARY KEY,
       sender_name TEXT NOT NULL,
       sender_kind TEXT NOT NULL,
+      sender_owner TEXT,
       kind TEXT NOT NULL,
       body TEXT NOT NULL,
       mentions_json TEXT NOT NULL DEFAULT '[]',
@@ -143,6 +146,12 @@ export class ChannelDO extends Server<Env> {
       note TEXT,
       ts INTEGER NOT NULL
     )`);
+    // 历史消息也要带 sender 所属人：给早于本次的 do 表补列（新表已含，重复 ALTER 会抛，吞掉）
+    try {
+      sql.exec("ALTER TABLE messages ADD COLUMN sender_owner TEXT");
+    } catch {
+      // 列已存在
+    }
     sql.exec(`CREATE TABLE IF NOT EXISTS presence (
       name TEXT PRIMARY KEY,
       state TEXT NOT NULL,
@@ -184,6 +193,7 @@ export class ChannelDO extends Server<Env> {
       name: h.get("x-ap-name") ?? "",
       kind: h.get("x-ap-kind") === "agent" ? "agent" : "human",
       role: (h.get("x-ap-role") ?? "readonly") as TokenRole,
+      owner: h.get("x-ap-owner") ?? undefined,
       tokenHash: h.get("x-ap-token-hash") ?? "",
       archived: h.get("x-ap-archived") === "1",
       lastSeen: Date.now(),
@@ -270,7 +280,7 @@ export class ChannelDO extends Server<Env> {
         return;
       }
       const out = await this.handleSend(
-        { name: st.name, kind: st.kind, role: st.role, tokenHash: st.tokenHash },
+        { name: st.name, kind: st.kind, role: st.role, owner: st.owner, tokenHash: st.tokenHash },
         send,
         { countRate: false },
       );
@@ -624,6 +634,7 @@ export class ChannelDO extends Server<Env> {
         name: request.headers.get("x-ap-name") ?? "",
         kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
+        owner: request.headers.get("x-ap-owner") ?? undefined,
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
       };
       let raw: unknown;
@@ -782,7 +793,9 @@ export class ChannelDO extends Server<Env> {
 
     const sql = this.ctx.storage.sql;
     const seq = this.lastSeq() + 1;
-    const sender = { name: identity.name, kind: identity.kind };
+    const sender: Sender = identity.owner
+      ? { name: identity.name, kind: identity.kind, owner: identity.owner }
+      : { name: identity.name, kind: identity.kind };
     const msg: MsgFrame =
       frame.kind === "message"
         ? {
@@ -810,11 +823,12 @@ export class ChannelDO extends Server<Env> {
             ts: now,
           };
     sql.exec(
-      `INSERT INTO messages (seq, sender_name, sender_kind, kind, body, mentions_json, reply_to, state, note, ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (seq, sender_name, sender_kind, sender_owner, kind, body, mentions_json, reply_to, state, note, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
+      identity.owner ?? null,
       msg.kind,
       msg.body,
       JSON.stringify(msg.mentions),
@@ -935,7 +949,9 @@ export class ChannelDO extends Server<Env> {
     const seen = new Map<string, Sender>();
     for (const connection of this.getConnections<ConnState>()) {
       const st = connection.state;
-      if (st?.name && !seen.has(st.name)) seen.set(st.name, { name: st.name, kind: st.kind });
+      if (st?.name && !seen.has(st.name)) {
+        seen.set(st.name, st.owner ? { name: st.name, kind: st.kind, owner: st.owner } : { name: st.name, kind: st.kind });
+      }
     }
     return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -973,7 +989,10 @@ export class ChannelDO extends Server<Env> {
     return {
       type: "msg",
       seq: Number(r.seq),
-      sender: { name: String(r.sender_name), kind: String(r.sender_kind) as SenderKind },
+      sender:
+        r.sender_owner === null || r.sender_owner === undefined
+          ? { name: String(r.sender_name), kind: String(r.sender_kind) as SenderKind }
+          : { name: String(r.sender_name), kind: String(r.sender_kind) as SenderKind, owner: String(r.sender_owner) },
       kind: String(r.kind) as MsgFrame["kind"],
       body: String(r.body),
       mentions: JSON.parse(String(r.mentions_json ?? "[]")) as string[],

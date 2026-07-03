@@ -12,8 +12,11 @@ import {
 } from "../rest";
 import { isName, isSlug, normalizeServerUrl } from "../validation";
 
-const USAGE = 'usage: party invite "<title>" [--slug s] [--temp] [--party] [--guest-name bob]';
-const INVITE_FLAGS = ["server", "slug", "guest-name", "temp", "party"];
+const USAGE =
+  'usage: party invite "<title>" [--slug s] [--temp] [--party] [--guest-name bob] [--owner label]';
+const INVITE_FLAGS = ["server", "slug", "guest-name", "owner", "temp", "party"];
+const OWNER_MAX = 128;
+const OWNER_RE = /^[\x20-\x7e]{1,128}$/;
 
 export function slugifyTitle(title: string): string {
   return title
@@ -29,7 +32,7 @@ export async function run(argv: string[]): Promise<number> {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["server", "slug", "guest-name"]);
+  const flagError = valueFlagError(flags, ["server", "slug", "guest-name", "owner"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -62,6 +65,12 @@ export async function run(argv: string[]): Promise<number> {
     console.error("guest token name must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");
     return 1;
   }
+  // 所属人：--owner 优先；否则用 ASCII 标题当可辨识标签，CJK 等非 ASCII 标题退回 slug（header-safe）
+  const owner = str(flags.owner) ?? (OWNER_RE.test(title) ? title : slug);
+  if (owner.length > OWNER_MAX || !OWNER_RE.test(owner)) {
+    console.error(`--owner must be printable ascii, <= ${OWNER_MAX} chars`);
+    return 1;
+  }
   const kind = flags.temp === true ? "temp" : "standing";
   const mode: ChannelMode = flags.party === true ? "party" : "normal";
   let guestCreated = false;
@@ -70,7 +79,7 @@ export async function run(argv: string[]): Promise<number> {
     // 1. guest agent token —— 重名不静默顶掉现有 guest，让人换名
     let guest: { token: string };
     try {
-      guest = await createToken(server, adminSecret, guestName, "agent");
+      guest = await createToken(server, adminSecret, guestName, "agent", owner);
     } catch (e) {
       if (e instanceof RestError && e.status === 409) {
         console.error(`token ${guestName} 已存在，用 --guest-name 指定其他名字`);
