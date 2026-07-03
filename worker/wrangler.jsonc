@@ -21,9 +21,14 @@
     {
       "binding": "DB",
       "database_name": "agentparty",
-      // 部署前用 `wrangler d1 create agentparty` 替换成真实 id
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "1e52cc2d-e47e-4a0b-8281-81114a5c7e8a",
       "migrations_dir": "migrations"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "agentparty.leeguoo.com",
+      "custom_domain": true
     }
   ]
 }
