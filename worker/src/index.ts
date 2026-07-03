@@ -4,13 +4,21 @@ import type { ChannelKind, ChannelMode, RestErrorCode, TokenRole, WebhookFilter 
 import { Hono } from "hono";
 import { createMiddleware } from "hono/factory";
 import { getServerByName } from "partyserver";
-import { extractBearer, lookupToken, randomToken, sha256Hex, type TokenIdentity } from "./auth";
+import {
+  extractBearer,
+  lookupToken,
+  oidcConfigFromEnv,
+  randomToken,
+  sha256Hex,
+  type TokenIdentity,
+} from "./auth";
 import { ChannelDO } from "./do";
 import { openapiDocument } from "./openapi";
 
 export { ChannelDO };
 
-type AppEnv = Env & { ADMIN_SECRET?: string };
+// OIDC_ISSUER + OIDC_CLIENT_ID 为可选 vars/secrets：都配齐才启用人类网页 OIDC 登录（spec §10）
+type AppEnv = Env & { ADMIN_SECRET?: string; OIDC_ISSUER?: string; OIDC_CLIENT_ID?: string };
 
 type AppContext = {
   Bindings: AppEnv;
@@ -59,7 +67,7 @@ const requireBearer = createMiddleware<AppContext>(async (c, next) => {
         c.req.path.endsWith("/ws") &&
         c.req.header("upgrade")?.toLowerCase() === "websocket",
     });
-    const identity = bearer ? await lookupToken(c.env.DB, bearer.token) : null;
+    const identity = bearer ? await lookupToken(c.env.DB, bearer.token, oidcConfigFromEnv(c.env)) : null;
     if (!identity) {
       return c.json(errorBody("unauthorized", "invalid or revoked token"), 401);
     }
@@ -149,6 +157,12 @@ const app = new Hono<AppContext>();
 
 app.get("/api/health", (c) => c.json({ ok: true }));
 app.get("/openapi.json", (c) => c.json(openapiDocument));
+
+// 公开配置：web 据此决定是否显示 "Sign in with leeguoo"（未配 OIDC 时 oidc:null）
+app.get("/api/config", (c) => {
+  const oidc = oidcConfigFromEnv(c.env);
+  return c.json({ oidc: oidc ? { issuer: oidc.issuer, client_id: oidc.clientId } : null });
+});
 
 app.post("/api/tokens", requireAdmin, async (c) => {
   const body = (await c.req.json().catch(() => null)) as { name?: unknown; role?: unknown } | null;

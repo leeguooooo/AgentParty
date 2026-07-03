@@ -18,6 +18,9 @@ export default defineWorkersConfig(async () => {
             bindings: {
               ADMIN_SECRET: "test-admin-secret",
               TEST_MIGRATIONS: migrations,
+              // 静态启用 OIDC，供 e2e 走 SELF.fetch 验证人类网页登录（未配 OIDC 的降级路径由单元测试覆盖）
+              OIDC_ISSUER: "https://oidc.test",
+              OIDC_CLIENT_ID: "ap-web",
             },
           },
         },

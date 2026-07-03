@@ -1,5 +1,5 @@
 // 应用骨架：登录闸 → 头部 + 左侧频道列表 + 右侧（首页 | 频道页）
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChannelList } from "./components/ChannelList";
 import { TokenGate } from "./components/TokenGate";
 import {
@@ -15,16 +15,26 @@ import {
   storedToken,
   type ChannelInfo,
 } from "./lib/api";
+import {
+  type OidcConfig,
+  beginLogin,
+  completeLogin,
+  fetchOidcConfig,
+  isCallbackPath,
+} from "./lib/oidc";
 import { ChannelPage } from "./pages/Channel";
 import { Home } from "./pages/Home";
 import { matchChannel, useRoute } from "./router";
 
 export function App() {
-  const [path, navigate] = useRoute();
+  const [path, navigate, replace] = useRoute();
   const [token, setToken] = useState<string | null>(() => getToken());
   const [authError, setAuthError] = useState<string | null>(null);
   const [channels, setChannels] = useState<ChannelInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
+  const [oidc, setOidc] = useState<OidcConfig | null>(null);
+  // 命中 /auth/callback 时先挂起，避免闪一下登录闸；换 token 成功/失败后落定
+  const [oidcPending, setOidcPending] = useState<boolean>(() => isCallbackPath());
 
   // token 失效（401 / ws 被踢 revoked）→ 回登录闸；分享模式先摘掉坏 ?t=
   const onAuthFailed = useCallback((message: string) => {
@@ -47,6 +57,45 @@ export function App() {
     setChannels(null);
     setToken(null);
   }, []);
+
+  // 启动时拉一次公开配置决定是否显示 SSO；若正落在 OIDC 回调则就地换 token
+  // ref 守卫：code_verifier 一次性，StrictMode 双跑不得重复兑换 code
+  const callbackHandled = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    fetchOidcConfig().then((cfg) => {
+      if (!alive) return;
+      setOidc(cfg);
+      if (!isCallbackPath() || callbackHandled.current) return;
+      callbackHandled.current = true;
+      if (cfg === null) {
+        setOidcPending(false);
+        setAuthError("sign-in is not configured");
+        replace("/");
+        return;
+      }
+      completeLogin(cfg)
+        .then((accessToken) => {
+          if (!alive) return;
+          saveToken(accessToken);
+          setAuthError(null);
+          setChannels(null);
+          setListError(null);
+          setToken(accessToken);
+          setOidcPending(false);
+          replace("/");
+        })
+        .catch((err: unknown) => {
+          if (!alive) return;
+          setOidcPending(false);
+          setAuthError(err instanceof Error ? err.message : "sign-in failed");
+          replace("/");
+        });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [replace]);
 
   useEffect(() => {
     if (token === null) return;
@@ -100,10 +149,29 @@ export function App() {
     };
   }, [token, onAuthFailed]);
 
+  if (oidcPending) {
+    return (
+      <main className="gate">
+        <h1 className="d-title gate-title">
+          Agent<span className="d-hl">Party</span>
+        </h1>
+        <p className="banner" role="status" aria-live="polite">
+          signing you in...
+        </p>
+      </main>
+    );
+  }
+
   if (token === null) {
     return (
       <TokenGate
         error={authError}
+        oidc={oidc}
+        onSso={() => {
+          if (oidc === null) return;
+          setAuthError(null);
+          beginLogin(oidc).catch(() => setAuthError("could not start sign-in"));
+        }}
         onSubmit={(t) => {
           // 粘贴登录只在非分享模式落 localStorage；分享模式坏 t 已被摘除
           saveToken(t);

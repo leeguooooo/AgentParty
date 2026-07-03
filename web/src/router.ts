@@ -1,7 +1,7 @@
 // 极简 history 路由：/ 与 /c/:slug 两条，导航时保留 ?t=（分享链接直达频道）
 import { useCallback, useEffect, useState } from "react";
 
-export function useRoute(): [string, (to: string) => void] {
+export function useRoute(): [string, (to: string) => void, (to: string) => void] {
   const [path, setPath] = useState(() => location.pathname);
 
   useEffect(() => {
@@ -16,7 +16,13 @@ export function useRoute(): [string, (to: string) => void] {
     setPath(to);
   }, []);
 
-  return [path, navigate];
+  // 替换当前历史项，落到 to 的整串（含 query）——OIDC 回调后清掉 ?code&state 用
+  const replace = useCallback((to: string) => {
+    history.replaceState(null, "", to);
+    setPath(to.split(/[?#]/)[0] ?? to);
+  }, []);
+
+  return [path, navigate, replace];
 }
 
 export function matchChannel(path: string): string | null {

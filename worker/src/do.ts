@@ -894,6 +894,8 @@ export class ChannelDO extends Server<Env> {
 
   private async isTokenActive(hash: string): Promise<boolean> {
     if (!hash) return false;
+    // OIDC 人类 token 不落 D1，无法被吊销扫描；生命周期由 JWT exp 在 worker 边界管辖（spec §10）
+    if (hash.startsWith("oidc:")) return true;
     try {
       const row = await this.env.DB.prepare("SELECT id FROM tokens WHERE hash = ? AND revoked_at IS NULL")
         .bind(hash)

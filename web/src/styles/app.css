@@ -322,6 +322,19 @@
   outline: none;
   box-shadow: 0 0 0 4px var(--d-yellow);
 }
+.gate-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.gate-or {
+  margin: 2px 0;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--t-dim);
+}
 .gate-btn { justify-content: center; }
 .gate-hint {
   margin: 4px 0 0;
