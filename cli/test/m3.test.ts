@@ -190,29 +190,62 @@ describe("party invite", () => {
     expect(r.stderr).toContain("--guest-name");
   });
 
-  test("share token 重名 409 → 撤销重铸，链接照常输出", async () => {
-    let shareCreates = 0;
+  test("已存在频道复用：不撤销已分发只读链接，打印服务器真实 mode 而非本地 flag", async () => {
     mock = startRestMock((req) => {
+      // 建频道已存在 → 409（复用）
+      if (req.method === "POST" && req.path === "/api/channels") {
+        return Response.json({ error: { code: "conflict", message: "exists" } }, { status: 409 });
+      }
+      // 服务器真实频道是 temp·party，本地并未传 --temp --party
+      if (req.method === "GET" && req.path === "/api/channels") {
+        return Response.json({
+          channels: [{ slug: "demo", title: "demo", kind: "temp", mode: "party", archived_at: null }],
+        });
+      }
+      // share token 已存在 → 409
       if (
         req.method === "POST" &&
         req.path === "/api/tokens" &&
         (req.body as { role: string }).role === "readonly"
       ) {
-        shareCreates++;
-        if (shareCreates === 1) {
-          return Response.json(
-            { error: { code: "conflict", message: "token exists" } },
-            { status: 409 },
-          );
-        }
+        return Response.json({ error: { code: "conflict", message: "exists" } }, { status: 409 });
       }
       return undefined;
     });
     const r = await runCli(["invite", "demo", "--server", mock.url], { ADMIN_SECRET: "s" });
     expect(r.code).toBe(0);
-    expect(shareCreates).toBe(2);
-    expect(reqsOf(mock, "DELETE", "/api/tokens/demo-share").length).toBe(1);
-    expect(r.stdout).toContain(`${mock.url}/c/demo?t=ap_demo-share_secret`);
+    // 绝不撤销已分发的只读链接
+    expect(reqsOf(mock, "DELETE", "/api/tokens/demo-share").length).toBe(0);
+    // readonly 只铸一次（返回 409 后不重铸）
+    expect(
+      reqsOf(mock, "POST", "/api/tokens").filter(
+        (t) => (t.body as { role: string }).role === "readonly",
+      ).length,
+    ).toBe(1);
+    // 打印服务器真实 mode（party），而非本地 flag（normal）
+    expect(r.stdout).toContain("(temp · party)");
+    // 提示沿用旧链接，且不再打印新的明文只读 token
+    expect(r.stdout).toContain("沿用已分发的 demo-share 链接");
+    expect(r.stdout).not.toContain("ap_demo-share_secret");
+  });
+
+  test("复用频道但 listChannels 拉取失败：标注 existing channel，不谎报本地 flag", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "POST" && req.path === "/api/channels") {
+        return Response.json({ error: { code: "conflict", message: "exists" } }, { status: 409 });
+      }
+      if (req.method === "GET" && req.path === "/api/channels") {
+        return Response.json({ error: { code: "oops", message: "boom" } }, { status: 500 });
+      }
+      return undefined;
+    });
+    const r = await runCli(["invite", "demo", "--slug", "demo", "--party", "--server", mock.url], {
+      ADMIN_SECRET: "s",
+    });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("(existing channel)");
+    // 不因本地 --party 谎报 party
+    expect(r.stdout).not.toContain("· party");
   });
 
   test("建频道失败时撤销刚铸的 guest token，避免重试卡在 409", async () => {

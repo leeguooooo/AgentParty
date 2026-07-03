@@ -209,9 +209,8 @@ export class ChannelDO extends Server<Env> {
       presence: this.presenceList(),
     });
     this.broadcastFrame({ type: "participants", participants: this.participants() });
-    if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + PRESENCE_SCAN_MS);
-    }
+    // 只前移不后移：即便已有远期 alarm（temp 归档 +14 天 / webhook 重试）也保证 60s presence 扫描
+    await this.ensureAlarmAt(Date.now() + PRESENCE_SCAN_MS);
   }
 
   async onMessage(connection: Connection<ConnState>, message: WSMessage) {
@@ -452,7 +451,8 @@ export class ChannelDO extends Server<Env> {
 
   // 消息落库广播之后的副作用：webhook 投递 + temp 归档计时续排
   private async afterSend(msg: MsgFrame) {
-    await this.dispatchWebhooks(msg);
+    // 首投移出发送关键路径：坏/慢端点不再让每条消息阻塞 N×10s 才返回 seq（DoS 频道）
+    this.ctx.waitUntil(this.dispatchWebhooks(msg));
     if (this.getMeta("ckind") === "temp" && !this.isArchived()) {
       await this.ensureAlarmAt(msg.ts + this.tempIdleMs());
     }
@@ -474,29 +474,35 @@ export class ChannelDO extends Server<Env> {
     if (hooks.length === 0) return;
     const host = this.getMeta("host") ?? "agentparty";
     const now = Date.now();
-    for (const hook of hooks) {
-      if (hook.filter === "mentions" && !msg.mentions.includes(hook.name)) continue;
-      const payload = JSON.stringify({
-        ...msg,
-        channel: this.name,
-        permalink: `https://${host}/c/${this.name}`,
-      });
-      const ok = await this.deliverWebhook(hook.url, hook.secret, payload);
-      if (!ok) {
-        const queued = Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM webhook_queue").one().n);
-        if (queued >= MAX_WEBHOOK_QUEUE_ROWS) {
-          this.insertSystemStatus("webhook retry queue is full; dropping failed delivery", now);
-          continue;
-        }
-        this.ctx.storage.sql.exec(
-          "INSERT INTO webhook_queue (webhook_name, payload, attempts, next_retry_at) VALUES (?, ?, 1, ?)",
-          hook.name,
-          payload,
-          now + this.retryDelay(1),
-        );
-        await this.ensureAlarmAt(now + this.retryDelay(1));
+    // payload 对本条消息的所有 hook 都相同，循环外算一次（hook 不变量）
+    const payload = JSON.stringify({
+      ...msg,
+      channel: this.name,
+      permalink: `https://${host}/c/${this.name}`,
+    });
+    const targets = hooks.filter((h) => h.filter !== "mentions" || msg.mentions.includes(h.name));
+    if (targets.length === 0) return;
+    // 并行投递：一个慢/坏端点不再拖累其余 hook（首投已由 afterSend 的 waitUntil 移出发送关键路径）
+    const results = await Promise.all(
+      targets.map(async (hook) => ({ hook, ok: await this.deliverWebhook(hook.url, hook.secret, payload) })),
+    );
+    let needAlarm = false;
+    for (const { hook, ok } of results) {
+      if (ok) continue;
+      const queued = Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM webhook_queue").one().n);
+      if (queued >= MAX_WEBHOOK_QUEUE_ROWS) {
+        await this.insertSystemStatus("webhook retry queue is full; dropping failed delivery", now);
+        continue;
       }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO webhook_queue (webhook_name, payload, attempts, next_retry_at) VALUES (?, ?, 1, ?)",
+        hook.name,
+        payload,
+        now + this.retryDelay(1),
+      );
+      needAlarm = true;
     }
+    if (needAlarm) await this.ensureAlarmAt(now + this.retryDelay(1));
   }
 
   // 短超时 POST；Bearer = 注册时的 secret，HMAC 签 payload 供接收方校验（spec §15）

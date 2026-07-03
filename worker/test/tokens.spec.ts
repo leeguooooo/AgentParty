@@ -54,6 +54,15 @@ describe("tokens", () => {
     expect(res.status).toBe(404);
   });
 
+  it("rejects reserved names like system so webhooks can't be silenced", async () => {
+    const res = await mint("system", "agent");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: { message?: string } };
+    expect(body.error?.message).toContain("reserved");
+    // 普通名不受影响
+    expect((await mint(uniq("normal"), "agent")).status).toBe(201);
+  });
+
   it("rejects an unknown bearer token", async () => {
     const res = await api("/api/channels", "ap_deadbeefdeadbeefdeadbeefdeadbeef");
     expect(res.status).toBe(401);

@@ -6,6 +6,7 @@ import {
   createChannel,
   createToken,
   handleRestError,
+  listChannels,
   revokeToken,
   type ChannelMode,
 } from "../rest";
@@ -80,31 +81,54 @@ export async function run(argv: string[]): Promise<number> {
     guestCreated = true;
 
     // 2. 建频道（409 = 已存在，复用）
+    let channelReused = false;
     try {
       await createChannel(server, guest.token, { slug, title, kind, mode });
     } catch (e) {
-      if (!(e instanceof RestError && e.status === 409)) throw e;
+      if (e instanceof RestError && e.status === 409) channelReused = true;
+      else throw e;
     }
 
-    // 3. share readonly token —— 已存在则撤销重铸，保证打印出的链接一定可用
-    let share: { token: string };
-    try {
-      share = await createToken(server, adminSecret, shareName, "readonly");
-    } catch (e) {
-      if (e instanceof RestError && e.status === 409) {
-        await revokeToken(server, adminSecret, shareName);
-        share = await createToken(server, adminSecret, shareName, "readonly");
-      } else {
-        throw e;
+    // 打印用的 kind/mode：复用频道时以服务器真实值为准，别拿本地 flag 谎报 party
+    let displayKind: string = kind;
+    let displayMode: ChannelMode | null = mode;
+    if (channelReused) {
+      displayMode = null;
+      try {
+        const channels = await listChannels(server, guest.token);
+        const found = channels.find((ch) => ch.slug === slug);
+        if (found) {
+          displayKind = found.kind;
+          displayMode = found.mode ?? "normal";
+        }
+      } catch {
+        // 拉取失败：displayMode 保持 null → 打印 (existing channel)，不谎报本地 flag
       }
     }
 
+    // 3. share readonly token —— 只在全新频道铸；已存在（409）就【不碰它】，绝不撤销/作废已分发链接
+    let shareToken: string | null = null;
+    try {
+      shareToken = (await createToken(server, adminSecret, shareName, "readonly")).token;
+    } catch (e) {
+      if (!(e instanceof RestError && e.status === 409)) throw e;
+      // 409 = 已存在，沿用旧只读链接，不重铸也不撤销
+    }
+
     const line = "─".repeat(60);
+    const channelDesc =
+      displayMode === null
+        ? "(existing channel)"
+        : `(${displayKind}${displayMode === "party" ? " · party" : ""})`;
+    const webLines =
+      shareToken !== null
+        ? `网页只读围观（无需安装，直接开）：\n  ${server}/c/${slug}?t=${shareToken}`
+        : `网页只读围观：沿用已分发的 ${shareName} 链接（如需新链接先手动撤销）`;
     console.log(`${line}
 AgentParty 接入包 — ${title}
 ${line}
 server:   ${server}
-channel:  ${slug}  (${kind}${mode === "party" ? " · party" : ""})
+channel:  ${slug}  ${channelDesc}
 
 把下面三步整段发给对方（agent 在终端里跑）：
 
@@ -114,8 +138,7 @@ channel:  ${slug}  (${kind}${mode === "party" ? " · party" : ""})
   3. 开始收发：
      party watch ${slug} --follow
 
-网页只读围观（无需安装，直接开）：
-  ${server}/c/${slug}?t=${share.token}
+${webLines}
 ${line}`);
     return 0;
   } catch (e) {

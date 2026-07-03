@@ -1,4 +1,5 @@
 // worker 入口 — rest 路由 + ws 升级转发
+import { RESERVED_NAMES } from "@agentparty/shared";
 import type { ChannelKind, ChannelMode, RestErrorCode, TokenRole, WebhookFilter } from "@agentparty/shared";
 import { Hono } from "hono";
 import { createMiddleware } from "hono/factory";
@@ -25,6 +26,18 @@ const WEBHOOK_FILTERS: readonly string[] = ["mentions", "all"] satisfies Webhook
 const WEBHOOK_URL_MAX = 2048;
 const WEBHOOK_SECRET_MAX = 4096;
 const HEADER_VALUE_RE = /^[\x21-\x7e]+$/;
+// do 无条件信任的内部头清单：ws 升级转发前必须逐个剥离客户端注入值，只认 worker 权威版本
+const AP_FORWARD_HEADERS = [
+  "x-ap-name",
+  "x-ap-kind",
+  "x-ap-role",
+  "x-ap-token-hash",
+  "x-ap-mode",
+  "x-ap-channel-kind",
+  "x-ap-host",
+  "x-ap-archived",
+  "x-ap-archive-at",
+] as const;
 
 function errorBody(code: RestErrorCode, message: string) {
   return { error: { code, message } };
@@ -143,6 +156,9 @@ app.post("/api/tokens", requireAdmin, async (c) => {
   const role = typeof body?.role === "string" ? body.role : "";
   if (!NAME_RE.test(name) || !ROLES.includes(role)) {
     return c.json(errorBody("bad_request", "valid name and role (agent|human|readonly) required"), 400);
+  }
+  if (RESERVED_NAMES.includes(name)) {
+    return c.json(errorBody("bad_request", "name is reserved"), 400);
   }
   const existing = await c.env.DB.prepare("SELECT id, revoked_at FROM tokens WHERE name = ?")
     .bind(name)
@@ -458,8 +474,11 @@ app.get("/api/channels/:slug/ws", async (c) => {
   if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
   const identity = c.get("identity");
   const stub = await getServerByName(c.env.CHANNELS, slug);
-  // do 无条件信任 x-ap-*，只有 worker 能构造到达 do 的请求
+  // new Request(c.req.raw) 会带上客户端所有头：升级请求里任何 x-ap-* 都是客户端注入的，
+  // 先逐个剥离再写 worker 权威值，否则 readonly 能靠 x-ap-archived:1 提权归档活频道、
+  // 靠 x-ap-host 污染 webhook permalink（do 无条件信任 x-ap-*）。
   const fwd = new Request(c.req.raw);
+  for (const h of AP_FORWARD_HEADERS) fwd.headers.delete(h);
   fwd.headers.set("x-partykit-room", slug);
   fwd.headers.set("x-ap-name", identity.name);
   fwd.headers.set("x-ap-kind", identity.kind);
@@ -467,7 +486,9 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-token-hash", identity.hash);
   fwd.headers.set("x-ap-mode", channel.mode);
   fwd.headers.set("x-ap-channel-kind", channel.kind);
-  if (channel.archived_at !== null) fwd.headers.set("x-ap-archived", "1");
+  fwd.headers.set("x-ap-host", new URL(c.req.url).host);
+  // 无条件写：未归档也显式置 "0"，堵住"客户端注入 1、未归档分支不覆盖"的透传
+  fwd.headers.set("x-ap-archived", channel.archived_at !== null ? "1" : "0");
   const upgrade = await stub.fetch(fwd);
   const requestedProtocols = c.req
     .header("sec-websocket-protocol")
