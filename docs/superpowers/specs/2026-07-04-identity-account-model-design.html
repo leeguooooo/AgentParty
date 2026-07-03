@@ -165,9 +165,11 @@ CLI 从 8976 起按序尝试绑定,用哪个端口就用哪个对应的 <code>re
 <tr><td>channel-scoped token(<code>channel_scope</code> != 该频道 slug)</td><td>❌ forbidden(哪怕 owner 相同)</td><td>✅ 可发</td></tr>
 <tr><td>其它账号(粉丝、别公司)</td><td>❌ forbidden</td><td>✅ 可发</td></tr>
 <tr><td>legacy ap_ token(owner=null,过渡期)</td><td>✅(当管理员,有收紧截止点)</td><td>✅</td></tr>
-<tr><td>readonly 分享 token</td><td>✅ 只读</td><td>✅ 只读</td></tr>
+<tr><td><strong>readonly 分享 token(带 channel_scope)</strong></td><td>✅ 只读,仅 scope 那一个频道</td><td>✅ 只读</td></tr>
+<tr><td>readonly token 无 scope(不该再签发)</td><td>❌ 私有一律拒(legacy 过渡期除外)</td><td>✅ 只读</td></tr>
 </table>
-<p class="rec">比 Step 1 严在哪、以及诚实的边界:Step 1 是"任何 ap_ token → 所有私有频道";账号规则把普通 token 收到"只进主人名下的私有频道"。但<strong>账号规则本身不足以做跨公司隔离</strong>——真正把外部协作方限死在单个频道的,是 <code>channel_scope</code>。所以对内(自己的 agent)用普通 token 图方便,对外(B 公司)一律用 channel-scoped token。</p>
+<p class="warn"><strong>readonly 分享 token 必须也带 channel_scope。</strong>复核发现的同源缺口:分享链接本意是给外人看<strong>一个</strong>频道,但若 readonly token 不绑频道,持有者就能只读你<strong>所有</strong>私有频道——这是 §5.3 那个"万能钥匙"的只读版。所以 <code>party invite</code> / 分享链接铸的 readonly token 一律带 <code>channel_scope=该频道</code>;canAccessChannel 的 scope 判定(§5.4 第 2 条)对 readonly 同样先行生效(scope 不匹配即 forbidden,连读都不行)。无 scope 的 readonly token 不再签发,私有频道一律拒(仅 legacy 过渡放行)。</p>
+<p class="rec">比 Step 1 严在哪、以及诚实的边界:Step 1 是"任何 ap_ token → 所有私有频道";账号规则把普通 token 收到"只进主人名下的私有频道"。但<strong>账号规则本身不足以做跨公司隔离</strong>——真正把外部协作方(agent token 或 readonly 链接)限死在单个频道的,都是 <code>channel_scope</code>。所以对内(自己的 agent)用普通 token 图方便,对外(B 公司 / 分享给粉丝看单个私有频道)一律用 channel-scoped token(含 readonly)。</p>
 <div class="note"><strong>部署管理员身份(backlog,低优先级):</strong>可加一个 <code>admin-email</code> 环境变量——匹配该邮箱的账号视为部署管理员,允许跨频道铸/踢。本期不展开,先记着,用于替代 legacy owner=null 那条过渡放行。</div>
 <div class="note"><strong>更远的将来(非本期):</strong>账号级的多成员私有频道(<code>channel_members</code> 表,让多个账号共同拥有一个私有频道)是后续演进方向。本期跨公司协作用 channel_scope token 覆盖即可,不引入 members 表。</div>
 </section>
