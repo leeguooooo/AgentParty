@@ -99,6 +99,14 @@ export interface Identity {
   kind: string;
   role: string;
   owner: string | null;
+  // 权限自省（whoami --caps）：旧 server 无这些字段（可选）
+  channel_scope?: string | null;
+  caps?: {
+    send: boolean;
+    create_channel: boolean;
+    mint_agents: boolean;
+    scoped_to: string | null;
+  };
 }
 
 export async function fetchMe(server: string, token: string): Promise<Identity> {

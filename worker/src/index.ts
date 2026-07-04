@@ -220,12 +220,23 @@ app.get("/api/config", (c) => {
 // 当前登录身份：web topbar 显示 "signed in as <email 或 name>"（spec §10）
 app.get("/api/me", requireBearer, (c) => {
   const id = c.get("identity");
+  // 权限自省（whoami --caps / 网页）：从 role + channel_scope + account 派生，让工具提前知道能干什么
+  const scoped = id.channel_scope != null;
   return c.json({
     name: id.name,
     email: id.email ?? null,
     kind: id.kind,
     role: id.role,
     owner: id.owner ?? null,
+    channel_scope: id.channel_scope ?? null,
+    caps: {
+      send: id.role !== "readonly",
+      // scoped token 不得建频道（会逃出 scope）；readonly 也不行
+      create_channel: id.role !== "readonly" && !scoped,
+      // POST /api/agents 的门：human 账号会话（有 account）才能自助铸 agent
+      mint_agents: id.role === "human" && id.account != null,
+      scoped_to: id.channel_scope ?? null,
+    },
   });
 });
 

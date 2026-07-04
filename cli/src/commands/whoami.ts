@@ -3,10 +3,10 @@ import { parseArgs, unknownFlagError } from "../args";
 import { handleRestError, fetchMe } from "../rest";
 import { resolveAuth } from "../oidc-cli";
 
-const WHOAMI_FLAGS = ["json"];
+const WHOAMI_FLAGS = ["json", "caps"];
 
 export async function run(argv: string[]): Promise<number> {
-  const { flags } = parseArgs(argv, { booleans: ["json"] });
+  const { flags } = parseArgs(argv, { booleans: ["json", "caps"] });
   const unknown = unknownFlagError(flags, WHOAMI_FLAGS);
   if (unknown !== null) {
     console.error(unknown);
@@ -34,6 +34,19 @@ export async function run(argv: string[]): Promise<number> {
     } else {
       const who = me.email ?? me.name;
       console.log(`logged in as ${who} (${me.kind}/${me.role})`);
+      // --caps：把 token 能干什么摊开，免得撞 403 才知道没权限（scoped token 尤其容易懵）
+      if (flags.caps) {
+        const scope = me.channel_scope ?? null;
+        console.log(`  scope: ${scope ?? "none (all channels)"}`);
+        const yn = (b: boolean | undefined) => (b ? "yes" : "no");
+        if (me.caps) {
+          console.log(
+            `  can: send=${yn(me.caps.send)} create-channel=${yn(me.caps.create_channel)} mint-agents=${yn(me.caps.mint_agents)}`,
+          );
+        } else {
+          console.log("  caps: server too old (no caps in /api/me); upgrade server");
+        }
+      }
     }
     return 0;
   } catch (e) {

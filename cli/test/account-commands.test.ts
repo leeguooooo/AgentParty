@@ -156,9 +156,9 @@ describe("whoami", () => {
   });
 
   test("rejects unknown flags", async () => {
-    const code = await whoamiRun(["--caps"]);
+    const code = await whoamiRun(["--bogus"]);
     expect(code).toBe(1);
-    expect(errs.join("\n")).toContain("unknown option --caps");
+    expect(errs.join("\n")).toContain("unknown option --bogus");
   });
 });
 

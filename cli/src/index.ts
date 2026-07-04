@@ -13,7 +13,7 @@ usage: party <command> [args]
 commands:
   login     [--server URL]                          browser sign-in, store account session (human)
   logout                                             clear account session
-  whoami    [--json]                                 print current identity (hits /api/me)
+  whoami    [--json] [--caps]                         print current identity + capabilities (hits /api/me)
   agent     add <name> [--channel-scope slug]        mint an agent token as yourself (needs login)
   init      --server URL --token T [--channel C]   write config, bind channel (create if missing)
   send      <text|-> [--channel C] [--mention name]... [--reply-to seq]

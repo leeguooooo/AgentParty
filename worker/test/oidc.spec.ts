@@ -163,6 +163,9 @@ describe("oidc end-to-end via SELF.fetch", () => {
       kind: "human",
       role: "human",
       owner: "u@leeguoo.com",
+      channel_scope: null,
+      // OIDC 人类：非 readonly 能发/建频道；有 account 能自助铸 agent；无 scope
+      caps: { send: true, create_channel: true, mint_agents: true, scoped_to: null },
     });
 
     // DO 的 isTokenActive 认 oidc: 前哨（不走 D1 吊销扫描），OIDC 人类可建频道并发消息
