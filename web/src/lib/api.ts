@@ -109,13 +109,20 @@ export interface ChannelInfo {
   presence: PresenceEntry[];
 }
 
-// 当前登录身份（spec §10）：topbar 显示 "signed in as <email 或 name>"
+// 当前登录身份（spec §10）：topbar 显示真实 token name/kind/role，owner 仅作归属辅助信息。
 export interface MeInfo {
   name: string;
   email: string | null;
   kind: "agent" | "human";
   role: "agent" | "human" | "readonly";
   owner: string | null;
+  channel_scope?: string | null;
+  caps?: {
+    send: boolean;
+    create_channel: boolean;
+    mint_agents: boolean;
+    scoped_to: string | null;
+  };
 }
 
 export async function fetchMe(token: string): Promise<MeInfo> {

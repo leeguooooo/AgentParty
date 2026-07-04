@@ -32,6 +32,14 @@ import { ChannelPage } from "./pages/Channel";
 import { Home } from "./pages/Home";
 import { matchChannel, useRoute } from "./router";
 
+function meTitle(me: MeInfo): string {
+  const parts = [`token: ${me.name}`, `kind: ${me.kind}`, `role: ${me.role}`];
+  if (me.owner !== null) parts.push(`owner: ${me.owner}`);
+  if (me.email !== null) parts.push(`email: ${me.email}`);
+  if (me.channel_scope != null) parts.push(`scope: ${me.channel_scope}`);
+  return parts.join(" · ");
+}
+
 export function App() {
   const [path, navigate, replace] = useRoute();
   const [token, setToken] = useState<string | null>(() => getToken());
@@ -151,7 +159,7 @@ export function App() {
     };
   }, [replace]);
 
-  // 登录身份：topbar 显示 "signed in as …"；readonly 分享链接 401 由页面其它路径接管，这里静默
+  // 登录身份：topbar 显示 token name/kind/role；readonly 分享链接 401 由页面其它路径接管，这里静默
   useEffect(() => {
     if (token === null) {
       setMe(null);
@@ -308,8 +316,14 @@ export function App() {
           docs ↗
         </a>
         {me !== null && (
-          <span className="t-mono app-me" title={`signed in as ${me.owner ?? me.email ?? me.name}`}>
-            signed in as <strong>{me.owner ?? me.email ?? me.name}</strong>
+          <span className="t-mono app-me" title={meTitle(me)}>
+            <span className="app-me-prefix">token</span>
+            <strong className="app-me-name">{me.name}</strong>
+            <span className={`app-me-chip app-me-chip--${me.kind}`}>{me.kind}</span>
+            <span className="app-me-chip">{me.role}</span>
+            {me.owner !== null && me.owner !== me.name && (
+              <span className="app-me-owner">owner: {me.owner}</span>
+            )}
           </span>
         )}
         {!isShareMode() && (

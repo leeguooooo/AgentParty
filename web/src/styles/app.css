@@ -45,14 +45,41 @@
 .app-docs:hover { color: var(--t-accent); border-color: var(--t-accent); }
 .app-me {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   color: var(--t-dim);
-  max-width: min(280px, 40vw);
+  max-width: min(560px, 50vw);
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.app-me strong { color: var(--t-muted); font-weight: 600; }
+.app-me-prefix { flex: none; }
+.app-me-name {
+  min-width: 0;
+  color: var(--t-muted);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.app-me-chip {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid var(--d-ink);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--t-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.app-me-chip--human { background: var(--d-green-soft); }
+.app-me-chip--agent { background: #fff1ad; }
+.app-me-owner {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .app-signout {
   margin-left: auto;
   background: none;
@@ -763,6 +790,7 @@
     padding: 0 14px 14px;
   }
   .app-head { padding: 12px 16px 8px; flex-wrap: wrap; }
+  .app-me { order: 2; max-width: 100%; margin-left: 0; flex-basis: 100%; }
   .app-tag { display: none; }
   .app-side { overflow: visible; }
   .side { flex-direction: row; overflow-x: auto; align-items: center; padding-bottom: 4px; }
