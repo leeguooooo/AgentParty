@@ -21,6 +21,7 @@ interface Item {
   ts: number | null;
   lastSeen: number | null;
   role: NonNullable<PresenceEntry["role"]> | null;
+  roleSource: NonNullable<PresenceEntry["role_source"]> | null;
   residency: NonNullable<PresenceEntry["residency"]> | null;
   wakeKind: NonNullable<PresenceEntry["wake"]>["kind"] | null;
   wakeVerifiedAt: number | null;
@@ -42,8 +43,9 @@ function hostBadge(item: Item, now: number): string | null {
 }
 
 function roleBadge(item: Item, now: number): string | null {
-  if (item.role === null || item.role === "host") return hostBadge(item, now);
-  return item.role;
+  const badge = item.role === null || item.role === "host" ? hostBadge(item, now) : item.role;
+  if (badge === null) return null;
+  return item.roleSource === "assigned" ? `*${badge}` : badge;
 }
 
 function residencyBadge(item: Item): string | null {
@@ -80,6 +82,7 @@ export function PresenceBar({ presence, participants, status, party = false, isP
     const meta = {
       lastSeen: entry?.last_seen ?? null,
       role: entry?.role ?? null,
+      roleSource: entry?.role_source ?? null,
       residency: entry?.residency ?? null,
       wakeKind: entry?.wake?.kind ?? null,
       wakeVerifiedAt: entry?.wake?.verified_at ?? null,
@@ -106,6 +109,7 @@ export function PresenceBar({ presence, participants, status, party = false, isP
         const titleParts = [
           it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name,
           it.role !== null ? `role: ${it.role}` : null,
+          it.roleSource !== null ? `role source: ${it.roleSource}` : null,
           it.residency !== null ? `residency: ${it.residency}` : null,
           it.wakeKind !== null ? `wake: ${it.wakeKind}` : null,
           it.wakeVerifiedAt !== null ? `wake verified: ${fmtRel(it.wakeVerifiedAt)}` : null,

@@ -43,6 +43,7 @@ export type CaptureKind = "decision" | "requirement" | "bug" | "action-item";
 export type StatusState = "working" | "waiting" | "blocked" | "done";
 export type PresenceState = StatusState | "offline";
 export type CollaborationRole = "host" | "worker" | "reviewer" | "observer";
+export type CollaborationRoleSource = "self" | "assigned";
 export type Residency = "supervised" | "webhook" | "bare" | "human_driven" | "unknown";
 export type WakeKind = "none" | "watch" | "serve" | "webhook";
 
@@ -131,6 +132,7 @@ export interface PresenceEntry {
   last_seen?: number;
   status?: StatusEvent;
   role?: CollaborationRole;
+  role_source?: CollaborationRoleSource;
   residency?: Residency;
   wake?: WakeInfo;
   context?: AgentContext;
@@ -227,6 +229,8 @@ export interface MsgFrame {
   state: StatusState | null;
   note: string | null;
   status: StatusEvent | null;
+  role?: CollaborationRole;
+  role_source?: CollaborationRoleSource;
   completion_artifact?: CompletionArtifact;
   ts: number;
   edited?: true;

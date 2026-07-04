@@ -193,7 +193,11 @@ export const openapiDocument = {
                       scope: { type: "array", items: { type: "string" } },
                       summary_seq: { type: ["integer", "null"], minimum: 1 },
                       blocked_reason: { type: ["string", "null"] },
-                      role: { type: "string", enum: ["host", "worker", "reviewer", "observer"] },
+                      role: {
+                        type: "string",
+                        enum: ["host", "worker", "reviewer", "observer"],
+                        description: "self-asserted collaboration role; moderator assignments override it",
+                      },
                       residency: {
                         type: "string",
                         enum: ["supervised", "webhook", "bare", "human_driven", "unknown"],
@@ -385,6 +389,59 @@ export const openapiDocument = {
         responses: {
           "200": { description: "guard reset" },
           "403": { description: "readonly token" },
+          "404": { description: "channel not found" },
+        },
+      },
+    },
+    "/api/channels/{slug}/roles": {
+      get: {
+        summary: "list moderator-assigned soft collaboration roles",
+        security: [{ bearer: [] }],
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{roles:[{name,role,assigned_by,assigned_at}]}" },
+          "403": { description: "not allowed in this channel" },
+          "404": { description: "channel not found" },
+        },
+      },
+    },
+    "/api/channels/{slug}/roles/{name}": {
+      put: {
+        summary: "assign a soft collaboration role for a channel participant",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "name", in: "path", required: true, schema: { type: "string" } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["role"],
+                properties: { role: { type: "string", enum: ["host", "worker", "reviewer", "observer"] } },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{name,role,assigned_by,assigned_at}" },
+          "403": { description: "only channel moderator can assign roles" },
+          "404": { description: "channel not found" },
+          "410": { description: "channel archived" },
+        },
+      },
+      delete: {
+        summary: "clear a moderator-assigned soft collaboration role",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "name", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "{ok:true}" },
+          "403": { description: "only channel moderator can assign roles" },
           "404": { description: "channel not found" },
         },
       },

@@ -7,6 +7,7 @@ import {
   type CaptureRecord,
   type ChannelKind,
   type ChannelMode,
+  type CollaborationRole,
   type MsgFrame,
   type PresenceEntry,
   type SearchHit,
@@ -48,6 +49,13 @@ export interface WebhookInfo {
   name: string;
   url: string;
   filter: WebhookFilter;
+}
+
+export interface ChannelRoleInfo {
+  name: string;
+  role: CollaborationRole;
+  assigned_by: string;
+  assigned_at: number;
 }
 
 function extractError(status: number, body: unknown, raw: string): RestError {
@@ -319,6 +327,44 @@ export async function listCaptures(
   });
   const captures = (body as Record<string, unknown> | null)?.captures;
   return Array.isArray(captures) ? (captures as CaptureRecord[]) : [];
+}
+
+export async function listChannelRoles(
+  server: string,
+  token: string,
+  slug: string,
+): Promise<ChannelRoleInfo[]> {
+  const body = await req(server, `/api/channels/${encodeURIComponent(slug)}/roles`, {
+    headers: bearerJson(token),
+  });
+  const roles = (body as Record<string, unknown> | null)?.roles;
+  return Array.isArray(roles) ? (roles as ChannelRoleInfo[]) : [];
+}
+
+export async function setChannelRole(
+  server: string,
+  token: string,
+  slug: string,
+  name: string,
+  role: CollaborationRole,
+): Promise<ChannelRoleInfo> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/roles/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: bearerJson(token),
+    body: JSON.stringify({ role }),
+  })) as ChannelRoleInfo;
+}
+
+export async function clearChannelRole(
+  server: string,
+  token: string,
+  slug: string,
+  name: string,
+): Promise<void> {
+  await req(server, `/api/channels/${encodeURIComponent(slug)}/roles/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: bearerJson(token),
+  });
 }
 
 export async function searchMessages(

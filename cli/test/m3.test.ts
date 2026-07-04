@@ -1805,6 +1805,45 @@ describe("party channel reset-guard", () => {
   });
 });
 
+describe("party channel role", () => {
+  test("role set/list/unset 调用频道角色 API", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+
+    const set = await runCli(["channel", "role", "set", "alice", "host", "ops"]);
+    expect(set.code).toBe(0);
+    expect(set.stdout).toContain("assigned alice as host in ops");
+    const setReqs = reqsOf(mock, "PUT", "/api/channels/ops/roles/alice");
+    expect(setReqs.length).toBe(1);
+    expect(setReqs[0]!.body).toEqual({ role: "host" });
+    expect(setReqs[0]!.headers.authorization).toBe("Bearer ap_tok");
+
+    const list = await runCli(["channel", "role", "list", "ops"]);
+    expect(list.code).toBe(0);
+    expect(list.stdout).toContain("alice\thost\towner\t1970-01-01T00:00:00.123Z");
+
+    const unset = await runCli(["channel", "role", "unset", "alice", "ops"]);
+    expect(unset.code).toBe(0);
+    expect(unset.stdout).toContain("cleared role for alice in ops");
+    expect(reqsOf(mock, "DELETE", "/api/channels/ops/roles/alice").length).toBe(1);
+  });
+
+  test("role set validates role and can use bound channel", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    writeWorkspaceState("ops");
+
+    const bad = await runCli(["channel", "role", "set", "alice", "captain"]);
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toContain("role must be host");
+    expect(mock.requests.length).toBe(0);
+
+    const ok = await runCli(["channel", "role", "set", "alice", "reviewer"]);
+    expect(ok.code).toBe(0);
+    expect(reqsOf(mock, "PUT", "/api/channels/ops/roles/alice").length).toBe(1);
+  });
+});
+
 describe("party invite --public", () => {
   test("--public 建 public 频道并在接入包标注", async () => {
     mock = startRestMock();

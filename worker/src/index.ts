@@ -5,6 +5,7 @@ import type {
   CaptureRecord,
   ChannelKind,
   ChannelMode,
+  CollaborationRole,
   MsgFrame,
   RestErrorCode,
   TokenRole,
@@ -41,6 +42,7 @@ const ROLES: readonly string[] = ["agent", "human", "readonly"] satisfies TokenR
 const KINDS: readonly string[] = ["standing", "temp"] satisfies ChannelKind[];
 const MODES: readonly string[] = ["normal", "party"] satisfies ChannelMode[];
 const VISIBILITIES: readonly string[] = ["public", "private"];
+const COLLAB_ROLES: readonly string[] = ["host", "worker", "reviewer", "observer"] satisfies CollaborationRole[];
 const WEBHOOK_FILTERS: readonly string[] = ["mentions", "status", "needs-human", "all"] satisfies WebhookFilter[];
 const CAPTURE_KINDS: readonly string[] = ["decision", "requirement", "bug", "action-item"] satisfies CaptureKind[];
 const WEBHOOK_URL_MAX = 2048;
@@ -193,6 +195,18 @@ function channelHeaders(channel: { kind: string; mode: string }, requestUrl: str
     "x-ap-channel-kind": channel.kind,
     "x-ap-host": new URL(requestUrl).host,
   };
+}
+
+async function loadAssignedRole(db: D1Database, slug: string, name: string): Promise<CollaborationRole | null> {
+  const row = await db
+    .prepare("SELECT role FROM channel_roles WHERE channel_slug = ? AND agent_name = ?")
+    .bind(slug, name)
+    .first<{ role: string }>();
+  return row && COLLAB_ROLES.includes(row.role) ? (row.role as CollaborationRole) : null;
+}
+
+function assignedRoleHeaders(role: CollaborationRole | null): Record<string, string> {
+  return role === null ? {} : { "x-ap-collab-role": role, "x-ap-role-source": "assigned" };
 }
 
 function isPrivateIpv4(host: string): boolean {
@@ -674,6 +688,87 @@ app.post("/api/channels/:slug/captures", async (c) => {
   return c.json(captureRowToRecord(row!), 201);
 });
 
+app.get("/api/channels/:slug/roles", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!canAccessChannel(identity, channel)) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const { results } = await c.env.DB.prepare(
+    "SELECT agent_name AS name, role, assigned_by, assigned_at FROM channel_roles WHERE channel_slug = ? ORDER BY agent_name",
+  )
+    .bind(slug)
+    .all<{ name: string; role: CollaborationRole; assigned_by: string; assigned_at: number }>();
+  return c.json({ roles: results });
+});
+
+app.put("/api/channels/:slug/roles/:name", async (c) => {
+  const slug = c.req.param("slug");
+  const name = c.req.param("name");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can assign roles"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const body = (await c.req.json().catch(() => null)) as { role?: unknown } | null;
+  const role = typeof body?.role === "string" ? body.role : "";
+  if (!NAME_RE.test(name) || !COLLAB_ROLES.includes(role)) {
+    return c.json(errorBody("bad_request", "valid name and role (host|worker|reviewer|observer) required"), 400);
+  }
+  const assignedAt = Date.now();
+  await c.env.DB.prepare(
+    `INSERT INTO channel_roles (channel_slug, agent_name, role, assigned_by, assigned_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(channel_slug, agent_name) DO UPDATE SET
+       role = excluded.role,
+       assigned_by = excluded.assigned_by,
+       assigned_at = excluded.assigned_at`,
+  )
+    .bind(slug, name, role, identity.name, assignedAt)
+    .run();
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  await stub.fetch(
+    new Request("https://do/internal/roles", {
+      method: "POST",
+      body: JSON.stringify({ name, role }),
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+  return c.json({ name, role, assigned_by: identity.name, assigned_at: assignedAt });
+});
+
+app.delete("/api/channels/:slug/roles/:name", async (c) => {
+  const slug = c.req.param("slug");
+  const name = c.req.param("name");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can assign roles"), 403);
+  }
+  if (!NAME_RE.test(name)) {
+    return c.json(errorBody("bad_request", "valid name required"), 400);
+  }
+  await c.env.DB.prepare("DELETE FROM channel_roles WHERE channel_slug = ? AND agent_name = ?")
+    .bind(slug, name)
+    .run();
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  await stub.fetch(
+    new Request("https://do/internal/roles", {
+      method: "POST",
+      body: JSON.stringify({ name, role: null }),
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+  return c.json({ ok: true });
+});
+
 app.post("/api/channels/:slug/messages/:seq/:action", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);
@@ -692,6 +787,7 @@ app.post("/api/channels/:slug/messages/:seq/:action", async (c) => {
     return c.json(errorBody("bad_request", "action must be edit|retract|supersede"), 400);
   }
   const stub = await getServerByName(c.env.CHANNELS, slug);
+  const assignedRole = await loadAssignedRole(c.env.DB, slug, identity.name);
   return stub.fetch(
     new Request(`https://do/internal/messages/${seq}/${action}`, {
       method: "POST",
@@ -705,6 +801,7 @@ app.post("/api/channels/:slug/messages/:seq/:action", async (c) => {
         ...(identity.owner ? { "x-ap-owner": identity.owner } : {}),
         "x-ap-token-hash": identity.hash,
         "x-ap-moderator": isChannelModerator(identity, channel) ? "1" : "0",
+        ...assignedRoleHeaders(assignedRole),
         ...channelHeaders(channel, c.req.url),
       },
     }),
@@ -741,6 +838,7 @@ app.post("/api/channels/:slug/messages", async (c) => {
     return c.json(errorBody("archived", "channel is archived"), 410);
   }
   const stub = await getServerByName(c.env.CHANNELS, slug);
+  const assignedRole = await loadAssignedRole(c.env.DB, slug, identity.name);
   return stub.fetch(
     new Request("https://do/internal/messages", {
       method: "POST",
@@ -753,6 +851,7 @@ app.post("/api/channels/:slug/messages", async (c) => {
         "x-ap-role": identity.role,
         ...(identity.owner ? { "x-ap-owner": identity.owner } : {}),
         "x-ap-token-hash": identity.hash,
+        ...assignedRoleHeaders(assignedRole),
         ...channelHeaders(channel, c.req.url),
       },
     }),
@@ -957,6 +1056,11 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-role", identity.role);
   if (identity.owner) fwd.headers.set("x-ap-owner", identity.owner);
   fwd.headers.set("x-ap-token-hash", identity.hash);
+  const assignedRole = await loadAssignedRole(c.env.DB, slug, identity.name);
+  if (assignedRole !== null) {
+    fwd.headers.set("x-ap-collab-role", assignedRole);
+    fwd.headers.set("x-ap-role-source", "assigned");
+  }
   fwd.headers.set("x-ap-mode", channel.mode);
   fwd.headers.set("x-ap-channel-kind", channel.kind);
   fwd.headers.set("x-ap-host", new URL(c.req.url).host);

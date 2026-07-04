@@ -20,6 +20,7 @@ export function startRestMock(handler?: RestHandler): RestMock {
   const requests: RestRequest[] = [];
   // 有状态 webhook 存储：add 后 list 能查到
   const webhooks = new Map<string, { name: string; url: string; filter: string }[]>();
+  const roles = new Map<string, { name: string; role: string; assigned_by: string; assigned_at: number }[]>();
 
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -77,6 +78,29 @@ export function startRestMock(handler?: RestHandler): RestMock {
       }
       if (r.method === "POST" && /^\/api\/channels\/[^/]+\/reset-guard$/.test(r.path)) {
         return Response.json({ ok: true });
+      }
+      const roleMatch = r.path.match(/^\/api\/channels\/([^/]+)\/roles(?:\/([^/]+))?$/);
+      if (roleMatch) {
+        const slug = decodeURIComponent(roleMatch[1]!);
+        const list = roles.get(slug) ?? [];
+        if (r.method === "GET" && !roleMatch[2]) {
+          return Response.json({ roles: list });
+        }
+        if (r.method === "PUT" && roleMatch[2]) {
+          const name = decodeURIComponent(roleMatch[2]);
+          const role = (body as { role: string }).role;
+          const next = { name, role, assigned_by: "owner", assigned_at: 123 };
+          roles.set(slug, [...list.filter((r) => r.name !== name), next]);
+          return Response.json(next);
+        }
+        if (r.method === "DELETE" && roleMatch[2]) {
+          const name = decodeURIComponent(roleMatch[2]);
+          roles.set(
+            slug,
+            list.filter((r) => r.name !== name),
+          );
+          return Response.json({ ok: true });
+        }
       }
       if (r.method === "GET" && /^\/api\/channels\/[^/]+\/messages$/.test(r.path)) {
         return Response.json({ messages: [] });

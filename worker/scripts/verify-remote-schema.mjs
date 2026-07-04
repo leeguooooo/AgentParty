@@ -20,6 +20,7 @@ const required = {
     "message_body",
     "message_ts",
   ],
+  channel_roles: ["channel_slug", "agent_name", "role", "assigned_by", "assigned_at"],
 };
 
 function run(args) {

@@ -18,6 +18,7 @@ import {
   type ErrorCode,
   type AgentContext,
   type CollaborationRole,
+  type CollaborationRoleSource,
   type CompletionArtifact,
   type MsgFrame,
   type MessageUpdateFrame,
@@ -44,6 +45,8 @@ interface ConnState {
   role: TokenRole;
   owner?: string;
   tokenHash: string;
+  collabRole?: CollaborationRole;
+  collabRoleSource?: CollaborationRoleSource;
   archived: boolean;
   lastSeen: number;
 }
@@ -54,6 +57,8 @@ interface Identity {
   role: TokenRole;
   owner?: string;
   tokenHash: string;
+  collabRole?: CollaborationRole;
+  collabRoleSource?: CollaborationRoleSource;
 }
 
 interface WebhookDeliveryResult {
@@ -82,6 +87,7 @@ export const PRESENCE_SCAN_MS = PRESENCE_TIMEOUT_MS;
 
 const STATUS_STATES: readonly string[] = ["working", "waiting", "blocked", "done"];
 const COLLAB_ROLES: readonly string[] = ["host", "worker", "reviewer", "observer"];
+const ROLE_SOURCES: readonly string[] = ["self", "assigned"];
 const RESIDENCIES: readonly string[] = ["supervised", "webhook", "bare", "human_driven", "unknown"];
 const WAKE_KINDS: readonly string[] = ["none", "watch", "serve", "webhook"];
 const MENTION_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -210,6 +216,12 @@ function parseCollaborationRole(input: unknown): CollaborationRole | undefined |
   if (input === undefined) return undefined;
   if (typeof input !== "string" || !COLLAB_ROLES.includes(input)) return null;
   return input as CollaborationRole;
+}
+
+function parseRoleSource(input: unknown): CollaborationRoleSource | undefined | null {
+  if (input === undefined) return undefined;
+  if (typeof input !== "string" || !ROLE_SOURCES.includes(input)) return null;
+  return input as CollaborationRoleSource;
 }
 
 function parseResidency(input: unknown): Residency | undefined | null {
@@ -402,6 +414,8 @@ export class ChannelDO extends Server<Env> {
       status_summary_seq INTEGER,
       status_blocked_reason TEXT,
       status_context_json TEXT,
+      sender_role TEXT,
+      sender_role_source TEXT,
       completion_artifact_json TEXT,
       original_body TEXT,
       edited_at INTEGER,
@@ -423,6 +437,8 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE messages ADD COLUMN status_summary_seq INTEGER",
       "ALTER TABLE messages ADD COLUMN status_blocked_reason TEXT",
       "ALTER TABLE messages ADD COLUMN status_context_json TEXT",
+      "ALTER TABLE messages ADD COLUMN sender_role TEXT",
+      "ALTER TABLE messages ADD COLUMN sender_role_source TEXT",
       "ALTER TABLE messages ADD COLUMN completion_artifact_json TEXT",
       "ALTER TABLE messages ADD COLUMN original_body TEXT",
       "ALTER TABLE messages ADD COLUMN edited_at INTEGER",
@@ -448,6 +464,7 @@ export class ChannelDO extends Server<Env> {
       status_blocked_reason TEXT,
       status_context_json TEXT,
       role TEXT,
+      role_source TEXT,
       residency TEXT,
       wake_kind TEXT,
       wake_verified_at INTEGER,
@@ -455,6 +472,7 @@ export class ChannelDO extends Server<Env> {
     )`);
     for (const ddl of [
       "ALTER TABLE presence ADD COLUMN role TEXT",
+      "ALTER TABLE presence ADD COLUMN role_source TEXT",
       "ALTER TABLE presence ADD COLUMN residency TEXT",
       "ALTER TABLE presence ADD COLUMN wake_kind TEXT",
       "ALTER TABLE presence ADD COLUMN wake_verified_at INTEGER",
@@ -531,6 +549,8 @@ export class ChannelDO extends Server<Env> {
       role: (h.get("x-ap-role") ?? "readonly") as TokenRole,
       owner: h.get("x-ap-owner") ?? undefined,
       tokenHash: h.get("x-ap-token-hash") ?? "",
+      collabRole: parseCollaborationRole(h.get("x-ap-collab-role") ?? undefined) ?? undefined,
+      collabRoleSource: parseRoleSource(h.get("x-ap-role-source") ?? undefined) ?? undefined,
       archived: h.get("x-ap-archived") === "1",
       lastSeen: Date.now(),
     };
@@ -627,7 +647,15 @@ export class ChannelDO extends Server<Env> {
         return;
       }
       const out = await this.handleSend(
-        { name: st.name, kind: st.kind, role: st.role, owner: st.owner, tokenHash: st.tokenHash },
+        {
+          name: st.name,
+          kind: st.kind,
+          role: st.role,
+          owner: st.owner,
+          tokenHash: st.tokenHash,
+          collabRole: st.collabRole,
+          collabRoleSource: st.collabRoleSource,
+        },
         send,
         { countRate: false },
       );
@@ -1123,6 +1151,8 @@ export class ChannelDO extends Server<Env> {
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
+        collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
+        collabRoleSource: parseRoleSource(request.headers.get("x-ap-role-source") ?? undefined) ?? undefined,
       };
       if (this.isArchived()) {
         return Response.json({ error: { code: "archived", message: "channel is archived" } }, { status: 410 });
@@ -1326,6 +1356,8 @@ export class ChannelDO extends Server<Env> {
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
+        collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
+        collabRoleSource: parseRoleSource(request.headers.get("x-ap-role-source") ?? undefined) ?? undefined,
       };
       let raw: unknown;
       try {
@@ -1405,6 +1437,29 @@ export class ChannelDO extends Server<Env> {
         Date.now(),
       );
       return Response.json({ name: body.name, url: body.url, filter: body.filter }, { status: 201 });
+    }
+    if (url.pathname === "/internal/roles" && request.method === "POST") {
+      const body = (await request.json().catch(() => null)) as { name?: unknown; role?: unknown } | null;
+      const name = typeof body?.name === "string" ? body.name : "";
+      const role = body?.role === null ? null : parseCollaborationRole(body?.role);
+      if (!name || role === undefined) {
+        return Response.json({ error: { code: "bad_request", message: "invalid role assignment" } }, { status: 400 });
+      }
+      if (role === null) {
+        this.ctx.storage.sql.exec(
+          "UPDATE presence SET role = NULL, role_source = NULL WHERE name = ? AND role_source = 'assigned'",
+          name,
+        );
+      } else {
+        this.ctx.storage.sql.exec(
+          "UPDATE presence SET role = ?, role_source = 'assigned' WHERE name = ?",
+          role,
+          name,
+        );
+      }
+      const entry = this.presenceFor(name);
+      if (entry) this.broadcastFrame({ type: "presence", ...entry });
+      return Response.json({ ok: true });
     }
     if (url.pathname === "/internal/webhooks" && request.method === "DELETE") {
       const name = url.searchParams.get("name") ?? "";
@@ -1498,6 +1553,13 @@ export class ChannelDO extends Server<Env> {
             ...(frame.context === undefined ? {} : { context: frame.context }),
           }
         : null;
+    const effectiveRole = identity.collabRole ?? (frame.kind === "status" ? frame.role : undefined);
+    const roleSource: CollaborationRoleSource | undefined =
+      identity.collabRole !== undefined
+        ? "assigned"
+        : frame.kind === "status" && frame.role !== undefined
+          ? "self"
+          : undefined;
     const msg: MsgFrame =
       frame.kind === "message"
         ? {
@@ -1511,6 +1573,8 @@ export class ChannelDO extends Server<Env> {
             state: null,
             note: null,
             status: null,
+            ...(effectiveRole === undefined ? {} : { role: effectiveRole }),
+            ...(roleSource === undefined ? {} : { role_source: roleSource }),
             ...(frame.completion_artifact !== undefined ? { completion_artifact: frame.completion_artifact } : {}),
             ts: now,
           }
@@ -1525,15 +1589,17 @@ export class ChannelDO extends Server<Env> {
             state: frame.state,
             note: frame.note,
             status,
+            ...(effectiveRole === undefined ? {} : { role: effectiveRole }),
+            ...(roleSource === undefined ? {} : { role_source: roleSource }),
             ts: now,
           };
     sql.exec(
       `INSERT INTO messages (
          seq, sender_name, sender_kind, sender_owner, kind, body, mentions_json, reply_to,
          state, note, status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
-         completion_artifact_json, ts
+         sender_role, sender_role_source, completion_artifact_json, ts
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
@@ -1548,6 +1614,8 @@ export class ChannelDO extends Server<Env> {
       status?.summary_seq ?? null,
       status?.blocked_reason ?? null,
       status?.context === undefined ? null : JSON.stringify(status.context),
+      effectiveRole ?? null,
+      roleSource ?? null,
       frame.kind === "message" && frame.completion_artifact !== undefined
         ? JSON.stringify(frame.completion_artifact)
         : null,
@@ -1569,9 +1637,9 @@ export class ChannelDO extends Server<Env> {
       sql.exec(
         `INSERT INTO presence (
            name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
-           status_context_json, role, residency, wake_kind, wake_verified_at, context_json
+           status_context_json, role, role_source, residency, wake_kind, wake_verified_at, context_json
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            state = excluded.state,
            note = excluded.note,
@@ -1581,6 +1649,7 @@ export class ChannelDO extends Server<Env> {
            status_blocked_reason = excluded.status_blocked_reason,
            status_context_json = excluded.status_context_json,
            role = COALESCE(excluded.role, presence.role),
+           role_source = COALESCE(excluded.role_source, presence.role_source),
            residency = COALESCE(excluded.residency, presence.residency),
            wake_kind = CASE WHEN ? THEN excluded.wake_kind ELSE presence.wake_kind END,
            wake_verified_at = CASE WHEN ? THEN excluded.wake_verified_at ELSE presence.wake_verified_at END,
@@ -1593,7 +1662,8 @@ export class ChannelDO extends Server<Env> {
         status?.summary_seq ?? null,
         status?.blocked_reason ?? null,
         status?.context === undefined ? null : JSON.stringify(status.context),
-        frame.role ?? null,
+        effectiveRole ?? null,
+        roleSource ?? null,
         frame.residency ?? null,
         frame.wake?.kind ?? null,
         frame.wake?.verified_at ?? null,
@@ -1764,7 +1834,7 @@ export class ChannelDO extends Server<Env> {
     return this.ctx.storage.sql
       .exec(
         `SELECT name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
-                status_context_json, role, residency, wake_kind, wake_verified_at, context_json
+                status_context_json, role, role_source, residency, wake_kind, wake_verified_at, context_json
          FROM presence ORDER BY name`,
       )
       .toArray()
@@ -1775,7 +1845,7 @@ export class ChannelDO extends Server<Env> {
     const rows = this.ctx.storage.sql
       .exec(
         `SELECT name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
-                status_context_json, role, residency, wake_kind, wake_verified_at, context_json
+                status_context_json, role, role_source, residency, wake_kind, wake_verified_at, context_json
          FROM presence WHERE name = ?`,
         name,
       )
@@ -1804,6 +1874,9 @@ export class ChannelDO extends Server<Env> {
       last_seen: ts,
       ...(status === undefined ? {} : { status }),
       ...(r.role === null || r.role === undefined ? {} : { role: String(r.role) as CollaborationRole }),
+      ...(r.role_source === null || r.role_source === undefined
+        ? {}
+        : { role_source: String(r.role_source) as CollaborationRoleSource }),
       ...(r.residency === null || r.residency === undefined ? {} : { residency: String(r.residency) as Residency }),
       ...(wake === undefined ? {} : { wake }),
       ...(() => {
@@ -1836,6 +1909,12 @@ export class ChannelDO extends Server<Env> {
       state,
       note,
       status,
+      ...(r.sender_role === null || r.sender_role === undefined
+        ? {}
+        : { role: String(r.sender_role) as CollaborationRole }),
+      ...(r.sender_role_source === null || r.sender_role_source === undefined
+        ? {}
+        : { role_source: String(r.sender_role_source) as CollaborationRoleSource }),
       ts,
     };
     const completionArtifact = parseStoredCompletionArtifact(r.completion_artifact_json);

@@ -342,6 +342,91 @@ describe("kick (spec §5)", () => {
   });
 });
 
+describe("channel role assignments (issues #14/#17)", () => {
+  it("moderator-assigned role overrides self-asserted status role in history and presence", async () => {
+    const acct = `${uniq("acct")}@leeguoo.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: acct });
+    const worker = await seedToken("agent", uniq("worker"), { owner: acct });
+    const slug = await makeChannel(owner.token, "private");
+
+    const assign = await api(`/api/channels/${slug}/roles/${worker.name}`, owner.token, {
+      method: "PUT",
+      body: JSON.stringify({ role: "host" }),
+    });
+    expect(assign.status).toBe(200);
+    expect((await assign.json()) as { name: string; role: string }).toMatchObject({
+      name: worker.name,
+      role: "host",
+    });
+
+    const roleList = (await (await api(`/api/channels/${slug}/roles`, owner.token)).json()) as {
+      roles: { name: string; role: string; assigned_by: string }[];
+    };
+    expect(roleList.roles).toContainEqual(
+      expect.objectContaining({ name: worker.name, role: "host", assigned_by: owner.name }),
+    );
+
+    const status = await api(`/api/channels/${slug}/messages`, worker.token, {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "status",
+        state: "working",
+        note: "claiming role from status frame",
+        mentions: [],
+        role: "worker",
+      }),
+    });
+    expect(status.status).toBe(200);
+
+    const history = (await (await api(`/api/channels/${slug}/messages`, owner.token)).json()) as {
+      messages: { role?: string; role_source?: string }[];
+    };
+    expect(history.messages[0]).toMatchObject({ role: "host", role_source: "assigned" });
+
+    const channels = (await (await api("/api/channels", owner.token)).json()) as {
+      channels: { slug: string; presence: { name: string; role?: string; role_source?: string }[] }[];
+    };
+    const found = channels.channels.find((ch) => ch.slug === slug)?.presence.find((p) => p.name === worker.name);
+    expect(found).toMatchObject({ name: worker.name, role: "host", role_source: "assigned" });
+  });
+
+  it("non-moderators cannot assign roles and clearing an assigned role removes the authoritative badge", async () => {
+    const acct = `${uniq("acct")}@leeguoo.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: acct });
+    const worker = await seedToken("agent", uniq("worker"), { owner: acct });
+    const readonly = await seedToken("readonly", uniq("ro"), { owner: acct, channelScope: "placeholder" });
+    const slug = await makeChannel(owner.token, "private");
+
+    const denied = await api(`/api/channels/${slug}/roles/${worker.name}`, readonly.token, {
+      method: "PUT",
+      body: JSON.stringify({ role: "host" }),
+    });
+    expect(denied.status).toBe(403);
+
+    expect(
+      (await api(`/api/channels/${slug}/roles/${worker.name}`, owner.token, {
+        method: "PUT",
+        body: JSON.stringify({ role: "reviewer" }),
+      })).status,
+    ).toBe(200);
+    expect(
+      (await api(`/api/channels/${slug}/messages`, worker.token, {
+        method: "POST",
+        body: JSON.stringify({ kind: "status", state: "working", note: "reviewing", mentions: [] }),
+      })).status,
+    ).toBe(200);
+
+    const cleared = await api(`/api/channels/${slug}/roles/${worker.name}`, owner.token, { method: "DELETE" });
+    expect(cleared.status).toBe(200);
+    const channels = (await (await api("/api/channels", owner.token)).json()) as {
+      channels: { slug: string; presence: { name: string; role?: string; role_source?: string }[] }[];
+    };
+    const found = channels.channels.find((ch) => ch.slug === slug)?.presence.find((p) => p.name === worker.name);
+    expect(found?.role).toBeUndefined();
+    expect(found?.role_source).toBeUndefined();
+  });
+});
+
 // ── webhook 管理仅限房主/ap_（spec §7/§15）── 补 bypass #1：粉丝不得注册/查看/删除 webhook ──
 describe("webhook management is moderator-only (spec §7/§15)", () => {
   const hook = { name: "hermes", url: "https://hooks.test/wake", secret: "s", filter: "mentions" };
