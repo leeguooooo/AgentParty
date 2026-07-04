@@ -76,6 +76,14 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     console.error("missing message body (use - to read stdin)");
     return null;
   }
+  // send footgun 软提示（#6）：无 --channel、≥2 个裸 positional、首个像 slug 且 ≠ 目标频道 →
+  // 很可能误把「send <频道> <正文>」当成了子命令用法（首个词其实被并进了正文，发到了绑定频道）。
+  // 只提示不拦截：消息照发，仅 stderr 一行帮用户下次用 --channel。
+  if (!explicit && !readStdin && positionals.length >= 2 && isSlug(positionals[0]) && positionals[0] !== channel) {
+    console.error(
+      `note: 正发到绑定频道「${channel}」；若想发到「${positionals[0]}」，用：party send --channel ${positionals[0]} "..."（首个词已被当作正文的一部分）`,
+    );
+  }
   const mentions = strArray(flags.mention) ?? [];
   if (mentions.some((mention) => !isName(mention))) {
     console.error("--mention must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");

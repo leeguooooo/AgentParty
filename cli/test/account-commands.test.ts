@@ -85,6 +85,28 @@ describe("send auth precedence", () => {
     const msgReq = mock.requests.find((r) => r.path === "/api/channels/dev/messages");
     expect(msgReq?.auth).toBe("Bearer ap_fallback");
   });
+
+  test("warns on the send-to-channel footgun but still sends to the bound channel", async () => {
+    mock = startOidcMock();
+    writeConfig({ server: mock.url, token: "ap_x" });
+    writeState({ channel: "dev", cursor: 0 });
+
+    // 想发到 ops，误用 `send ops "..."`：ops 被并进正文，实际发到绑定的 dev
+    const code = await sendRun(["ops", "deploy done"]);
+    expect(code).toBe(0);
+    expect(errs.join("\n")).toContain("若想发到「ops」");
+    expect(mock.requests.some((r) => r.path === "/api/channels/dev/messages")).toBe(true);
+  });
+
+  test("no footgun warning for a normal quoted message", async () => {
+    mock = startOidcMock();
+    writeConfig({ server: mock.url, token: "ap_x" });
+    writeState({ channel: "dev", cursor: 0 });
+
+    const code = await sendRun(["hello everyone"]);
+    expect(code).toBe(0);
+    expect(errs.join("\n")).not.toContain("若想发到");
+  });
 });
 
 describe("agent add", () => {
