@@ -2,7 +2,7 @@
 import { homedir } from "node:os";
 import { join, basename } from "node:path";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 export interface Config {
   server: string;
@@ -18,23 +18,46 @@ export function agentpartyHome(): string {
   return process.env.AGENTPARTY_HOME || join(homedir(), ".agentparty");
 }
 
-export function configPath(): string {
+// 全局 config：跨目录默认 + 存量兼容（旧版本只写这里）。
+export function globalConfigPath(): string {
   return join(agentpartyHome(), "config.json");
 }
 
-export function readConfig(): Config | null {
-  try {
-    return JSON.parse(readFileSync(configPath(), "utf8")) as Config;
-  } catch {
-    return null;
-  }
+// workspace 级 config：按 cwd 隔离，与 state 同放（state/<workspaceId>/）。
+// 同机多 session 各在自己目录，token/身份互不覆盖——修「共享 config.json 被后启动的 session 冲掉」。
+// 注：同一目录并发多 session 仍会撞（workspaceId 相同），那种情形用 AGENTPARTY_HOME 硬隔离。
+export function workspaceConfigPath(cwd: string = process.cwd()): string {
+  return join(agentpartyHome(), "state", workspaceId(cwd), "config.json");
 }
 
-export function writeConfig(cfg: Config): void {
-  mkdirSync(agentpartyHome(), { recursive: true });
+// 兼容旧调用：优先返回存在的 workspace 级路径，否则全局路径。
+export function configPath(cwd: string = process.cwd()): string {
+  const ws = workspaceConfigPath(cwd);
+  return existsSync(ws) ? ws : globalConfigPath();
+}
+
+export function readConfig(cwd: string = process.cwd()): Config | null {
+  // workspace 级优先（隔离），无则回退全局（跨目录默认 / 存量）
+  for (const p of [workspaceConfigPath(cwd), globalConfigPath()]) {
+    try {
+      return JSON.parse(readFileSync(p, "utf8")) as Config;
+    } catch {
+      /* 试下一个来源 */
+    }
+  }
+  return null;
+}
+
+export function writeConfig(cfg: Config, cwd: string = process.cwd()): void {
+  const body = JSON.stringify(cfg, null, 2) + "\n";
   // 配置里有 token 明文，收紧到仅属主可读写；对已存在的文件补 chmod
-  writeFileSync(configPath(), JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-  chmodSync(configPath(), 0o600);
+  // 双写：① workspace 级（本目录/session 专属，读取时优先）② 全局（跨目录默认 + 存量兼容）。
+  // 读取偏好 workspace，故全局被并发覆盖也不会串号。
+  for (const p of [workspaceConfigPath(cwd), globalConfigPath()]) {
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, body, { mode: 0o600 });
+    chmodSync(p, 0o600);
+  }
 }
 
 export function slugifyBasename(name: string): string {

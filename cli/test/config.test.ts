@@ -37,6 +37,18 @@ describe("config", () => {
     writeConfig({ server: "https://ap.example.com", token: "ap_x" });
     expect(readConfig()).toEqual({ server: "https://ap.example.com", token: "ap_x" });
   });
+
+  test("workspace configs isolate by cwd; global is the cross-dir fallback", () => {
+    const a = "/tmp/proj-a";
+    const b = "/tmp/proj-b";
+    writeConfig({ server: "s", token: "ap_a" }, a);
+    writeConfig({ server: "s", token: "ap_b" }, b);
+    // 各目录读回自己的 token——同机多 session 不再互相覆盖串号
+    expect(readConfig(a)).toEqual({ server: "s", token: "ap_a" });
+    expect(readConfig(b)).toEqual({ server: "s", token: "ap_b" });
+    // 无 workspace 配置的目录回退到全局（= 最近一次 init 的 ap_b），保「init 一次跨目录可用」
+    expect(readConfig("/tmp/proj-c")).toEqual({ server: "s", token: "ap_b" });
+  });
 });
 
 describe("workspace id", () => {
