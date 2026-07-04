@@ -89,6 +89,54 @@ describe("websocket", () => {
     reader.close();
   });
 
+  it("broadcasts and backfills completion artifacts", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const sender = await WsClient.open(slug, token);
+    await sender.nextOfType("welcome");
+    sender.send({ type: "send", kind: "message", body: "kickoff", mentions: [], reply_to: null });
+    await sender.nextOfType("sent");
+    await sender.nextOfType("msg");
+
+    sender.send({
+      type: "send",
+      kind: "message",
+      body: "final synthesis",
+      mentions: [],
+      reply_to: 1,
+      completion_artifact: {
+        kind: "final_synthesis",
+        kickoff_seq: 1,
+        replies_count: 2,
+        timeout: false,
+        related_issues: [5],
+        related_prs: [8],
+      },
+    });
+    await sender.nextOfType("sent");
+    const echo = await sender.nextOfType("msg");
+    expect(echo).toMatchObject({
+      seq: 2,
+      body: "final synthesis",
+      completion_artifact: {
+        kind: "final_synthesis",
+        kickoff_seq: 1,
+        replies_count: 2,
+        timeout: false,
+        related_issues: [5],
+        related_prs: [8],
+      },
+    });
+    sender.close();
+
+    const reader = await WsClient.open(slug, token);
+    await reader.nextOfType("welcome");
+    reader.send({ type: "hello", since: 1 });
+    const backfilled = await reader.nextOfType("msg");
+    expect(backfilled).toMatchObject({ seq: 2, completion_artifact: { kickoff_seq: 1 } });
+    reader.close();
+  });
+
   it("status occupies a seq, updates presence and broadcasts", async () => {
     const agent = await seedToken("agent");
     const human = await seedToken("human");

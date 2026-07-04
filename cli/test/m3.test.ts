@@ -702,6 +702,67 @@ describe("party status/history channel flag", () => {
     });
   });
 
+  test("history --completion asks server for completion artifacts only", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["history", "dev", "--completion", "--since", "5"]);
+    expect(r.code).toBe(0);
+    const req = reqsOf(mock, "GET", "/api/channels/dev/messages")[0]!;
+    expect(req.query).toMatchObject({ since: "5", completion: "1" });
+  });
+
+  test("complete sends final synthesis artifact", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli([
+      "complete",
+      "final",
+      "synthesis",
+      "--channel",
+      "dev",
+      "--kickoff-seq",
+      "3",
+      "--replies",
+      "0",
+      "--timeout",
+      "--issue",
+      "5",
+      "--pr",
+      "8",
+      "--mention",
+      "alice",
+    ]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("completion seq=1");
+    const req = reqsOf(mock!, "POST", "/api/channels/dev/messages")[0]!;
+    expect(req.body).toEqual({
+      kind: "message",
+      body: "final synthesis",
+      mentions: ["alice"],
+      reply_to: 3,
+      completion_artifact: {
+        kind: "final_synthesis",
+        kickoff_seq: 3,
+        replies_count: 0,
+        timeout: true,
+        related_issues: [5],
+        related_prs: [8],
+      },
+    });
+  });
+
+  test("complete validates kickoff and replies locally", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const missing = await runCli(["complete", "done", "--channel", "dev"]);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("--kickoff-seq is required");
+    const badReplies = await runCli(["complete", "done", "--channel", "dev", "--kickoff-seq", "1", "--replies", "-1"]);
+    expect(badReplies.code).toBe(1);
+    expect(badReplies.stderr).toContain("--replies must be a non-negative integer");
+    expect(reqsOf(mock, "POST", "/api/channels/dev/messages")).toHaveLength(0);
+  });
+
   test("history 整数范围本地校验", async () => {
     mock = startRestMock();
     writeCfg(mock.url);

@@ -49,6 +49,94 @@ describe("history rest", () => {
     expect(limitedBody.messages.map((m) => m.seq)).toEqual([1]);
   });
 
+  it("persists and filters completion artifacts", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    expect((await postMessage(slug, token, "kickoff")).status).toBe(200);
+    const completion = await api(`/api/channels/${slug}/messages`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "message",
+        body: "final synthesis",
+        mentions: [],
+        reply_to: 1,
+        completion_artifact: {
+          kind: "final_synthesis",
+          kickoff_seq: 1,
+          replies_count: 0,
+          timeout: true,
+          related_issues: [5],
+          related_prs: [],
+        },
+      }),
+    });
+    expect(completion.status).toBe(200);
+    expect(((await completion.json()) as { seq: number }).seq).toBe(2);
+
+    const history = await api(`/api/channels/${slug}/messages?since=0`, token);
+    const historyBody = (await history.json()) as { messages: MsgLike[] };
+    expect(historyBody.messages[1]).toMatchObject({
+      seq: 2,
+      body: "final synthesis",
+      reply_to: 1,
+      completion_artifact: {
+        kind: "final_synthesis",
+        kickoff_seq: 1,
+        replies_count: 0,
+        timeout: true,
+        related_issues: [5],
+        related_prs: [],
+      },
+    });
+
+    const filtered = await api(`/api/channels/${slug}/messages?since=0&completion=1`, token);
+    const filteredBody = (await filtered.json()) as { messages: MsgLike[] };
+    expect(filteredBody.messages.map((m) => m.seq)).toEqual([2]);
+  });
+
+  it("rejects invalid completion artifacts", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    expect((await postMessage(slug, token, "kickoff")).status).toBe(200);
+
+    const mismatched = await api(`/api/channels/${slug}/messages`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "message",
+        body: "bad synthesis",
+        mentions: [],
+        reply_to: 1,
+        completion_artifact: {
+          kind: "final_synthesis",
+          kickoff_seq: 2,
+          replies_count: 1,
+          timeout: false,
+          related_issues: [],
+          related_prs: [],
+        },
+      }),
+    });
+    expect(mismatched.status).toBe(400);
+
+    const onStatus = await api(`/api/channels/${slug}/messages`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "status",
+        state: "done",
+        note: "done",
+        completion_artifact: {
+          kind: "final_synthesis",
+          kickoff_seq: 1,
+          replies_count: 1,
+          timeout: false,
+          related_issues: [],
+          related_prs: [],
+        },
+      }),
+    });
+    expect(onStatus.status).toBe(400);
+  });
+
   it("404 on unknown channel", async () => {
     const { token } = await seedToken("agent");
     const res = await api("/api/channels/no-such-channel/messages", token);

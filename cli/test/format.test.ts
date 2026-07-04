@@ -29,4 +29,22 @@ describe("formatMsg", () => {
       "[7] agent-a(agent): hello",
     );
   });
+
+  test("prints completion artifact context", () => {
+    expect(
+      formatMsg(
+        msgFrame({
+          reply_to: 3,
+          completion_artifact: {
+            kind: "final_synthesis",
+            kickoff_seq: 3,
+            replies_count: 0,
+            timeout: true,
+            related_issues: [5],
+            related_prs: [],
+          },
+        }),
+      ),
+    ).toBe("[7] agent-a(agent owner=team-a) {completion}: hello\n    [completion: kickoff=#3 · replies=0 · timeout=true · issues=#5]");
+  });
 });

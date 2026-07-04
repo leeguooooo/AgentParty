@@ -624,6 +624,20 @@
   color: var(--d-rose);
   background: var(--d-rose-soft);
 }
+.msg-completion {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  margin: 6px 0 4px;
+  padding: 3px 8px;
+  border: 1.5px solid var(--d-blue);
+  border-radius: 7px;
+  background: var(--d-blue-soft);
+  color: var(--d-blue);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
 .msg-fill { flex: 1; }
 .msg-retracted {
   margin: 8px 0 4px;

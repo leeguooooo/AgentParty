@@ -8,6 +8,7 @@ function formatSender(m: MsgFrame): string {
 
 export function formatMsg(m: MsgFrame): string {
   const badges = [
+    m.completion_artifact !== undefined ? "completion" : null,
     m.edited ? "edited" : null,
     m.retracted ? "retracted" : null,
     m.supersedes !== undefined ? `supersedes #${m.supersedes}` : null,
@@ -24,6 +25,17 @@ export function formatMsg(m: MsgFrame): string {
   }
   if (m.retracted) return `${prefix}[retracted]`;
   const lines = (m.body ?? "").split("\n");
+  if (m.completion_artifact !== undefined) {
+    const a = m.completion_artifact;
+    const meta = [
+      `kickoff=#${a.kickoff_seq}`,
+      `replies=${a.replies_count}`,
+      `timeout=${a.timeout}`,
+      a.related_issues.length > 0 ? `issues=${a.related_issues.map((n) => `#${n}`).join(",")}` : null,
+      a.related_prs.length > 0 ? `prs=${a.related_prs.map((n) => `#${n}`).join(",")}` : null,
+    ].filter((part): part is string => part !== null);
+    lines.push(`[completion: ${meta.join(" · ")}]`);
+  }
   const rest = lines.slice(1).map((l) => "    " + l);
   return [prefix + (lines[0] ?? ""), ...rest].join("\n");
 }

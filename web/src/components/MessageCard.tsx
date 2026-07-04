@@ -23,6 +23,7 @@ export function MessageCard({ msg, self }: Props) {
     .filter((part): part is string => part !== null)
     .join("\n");
   const revisionBadges = [
+    msg.completion_artifact !== undefined ? "completion" : null,
     msg.edited ? "edited" : null,
     msg.retracted ? "retracted" : null,
     msg.supersedes !== undefined ? `supersedes #${msg.supersedes}` : null,
@@ -54,6 +55,17 @@ export function MessageCard({ msg, self }: Props) {
   }
 
   const mine = self !== null && msg.sender.name === self;
+  const artifact = msg.completion_artifact;
+  const artifactBits =
+    artifact === undefined
+      ? []
+      : [
+          `kickoff #${artifact.kickoff_seq}`,
+          `${artifact.replies_count} replies`,
+          artifact.timeout ? "timeout" : "closed",
+          artifact.related_issues.length > 0 ? `issues ${artifact.related_issues.map((n) => `#${n}`).join(", ")}` : null,
+          artifact.related_prs.length > 0 ? `PRs ${artifact.related_prs.map((n) => `#${n}`).join(", ")}` : null,
+        ].filter((part): part is string => part !== null);
   return (
     <article className={"d-card msg-card" + (mine ? " msg-card--own" : "")} style={hueStyle}>
       <header className="d-meta msg-head">
@@ -82,6 +94,11 @@ export function MessageCard({ msg, self }: Props) {
         <span>#{msg.seq}</span>
         <time>{fmtTime(msg.ts)}</time>
       </header>
+      {artifact !== undefined && (
+        <div className="msg-completion" aria-label="completion artifact">
+          {artifactBits.join(" · ")}
+        </div>
+      )}
       {msg.retracted ? <p className="msg-retracted">message retracted</p> : <Markdown source={msg.body} />}
     </article>
   );

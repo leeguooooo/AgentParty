@@ -244,10 +244,13 @@ export async function fetchMessages(
   slug: string,
   since = 0,
   limit = 100,
+  opts: { completion?: boolean } = {},
 ): Promise<MsgFrame[]> {
+  const params = new URLSearchParams({ since: String(since), limit: String(limit) });
+  if (opts.completion === true) params.set("completion", "1");
   const body = await req(
     server,
-    `/api/channels/${encodeURIComponent(slug)}/messages?since=${since}&limit=${limit}`,
+    `/api/channels/${encodeURIComponent(slug)}/messages?${params.toString()}`,
     { headers: bearerJson(token) },
   );
   const messages = (body as Record<string, unknown> | null)?.messages;

@@ -138,6 +138,7 @@ export interface SendMessageFrame {
   body: string;
   mentions: string[];
   reply_to: number | null;
+  completion_artifact?: CompletionArtifact;
 }
 
 export interface SendStatusFrame {
@@ -192,6 +193,15 @@ export interface StatusEvent {
   updated_at: number;
 }
 
+export interface CompletionArtifact {
+  kind: "final_synthesis";
+  kickoff_seq: number;
+  replies_count: number;
+  timeout: boolean;
+  related_issues: number[];
+  related_prs: number[];
+}
+
 export interface MsgFrame {
   /** status messages are emitted as type:"status" so tools can consume them without text scraping. */
   type: "msg" | "status";
@@ -204,6 +214,7 @@ export interface MsgFrame {
   state: StatusState | null;
   note: string | null;
   status: StatusEvent | null;
+  completion_artifact?: CompletionArtifact;
   ts: number;
   edited?: true;
   edited_at?: number;

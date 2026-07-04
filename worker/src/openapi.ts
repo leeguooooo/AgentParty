@@ -138,6 +138,7 @@ export const openapiDocument = {
           { name: "slug", in: "path", required: true, schema: { type: "string" } },
           { name: "since", in: "query", schema: { type: "integer", default: 0 } },
           { name: "limit", in: "query", schema: { type: "integer", default: 100 } },
+          { name: "completion", in: "query", schema: { type: "string", enum: ["1"] } },
         ],
         responses: { "200": { description: "messages after seq, ordered" } },
       },
@@ -167,6 +168,19 @@ export const openapiDocument = {
                         description: "JSON-encoded mentions must be <= 4096 bytes",
                       },
                       reply_to: { type: ["integer", "null"], minimum: 1 },
+                      completion_artifact: {
+                        type: "object",
+                        description: "final synthesis artifact; reply_to must equal kickoff_seq",
+                        required: ["kind", "kickoff_seq", "replies_count", "timeout"],
+                        properties: {
+                          kind: { type: "string", enum: ["final_synthesis"] },
+                          kickoff_seq: { type: "integer", minimum: 1 },
+                          replies_count: { type: "integer", minimum: 0 },
+                          timeout: { type: "boolean" },
+                          related_issues: { type: "array", items: { type: "integer", minimum: 1 } },
+                          related_prs: { type: "array", items: { type: "integer", minimum: 1 } },
+                        },
+                      },
                     },
                   },
                   {

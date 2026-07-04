@@ -7,8 +7,8 @@ import { formatMsg } from "../format";
 import { isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 import { jsonFrame } from "../json";
 
-const HISTORY_FLAGS = ["channel", "since", "limit", "json"];
-const HELP = `usage: party history [channel|--channel C] [--since seq] [--limit n] [--json]
+const HISTORY_FLAGS = ["channel", "since", "limit", "json", "completion"];
+const HELP = `usage: party history [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]
 
 Fetch recent channel messages over REST.
 
@@ -16,7 +16,8 @@ Options:
   --channel C   read channel C instead of the bound channel
   --since seq   only return messages after seq
   --limit n     maximum messages to return
-  --json        emit structured NDJSON frames`;
+  --json        emit structured NDJSON frames
+  --completion  only return final synthesis completion artifacts`;
 
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
@@ -65,6 +66,7 @@ export async function run(argv: string[]): Promise<number> {
       channel,
       since ?? 0,
       limit ?? 100,
+      { completion: flags.completion === true },
     );
     // --json：每条一行 NDJSON（原始 msg 帧 + schema），供 supervisor/工具消费，免 scrape 人类格式
     for (const m of messages) {

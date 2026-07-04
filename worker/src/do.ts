@@ -17,6 +17,7 @@ import {
   WEBHOOK_TIMEOUT_MS,
   type ErrorCode,
   type CollaborationRole,
+  type CompletionArtifact,
   type MsgFrame,
   type MessageUpdateFrame,
   type PresenceEntry,
@@ -87,6 +88,8 @@ const MAX_MENTIONS = 50;
 const MENTIONS_JSON_LIMIT = 4096;
 const MAX_STATUS_SCOPE = 50;
 const STATUS_SCOPE_JSON_LIMIT = 4096;
+const MAX_COMPLETION_RELATED = 20;
+const COMPLETION_ARTIFACT_JSON_LIMIT = 4096;
 
 function byteLength(s: string): number {
   return new TextEncoder().encode(s).byteLength;
@@ -123,6 +126,55 @@ function parseOptionalPositiveSeq(input: unknown): number | null | undefined {
   if (input === null) return null;
   if (typeof input === "number" && Number.isInteger(input) && input > 0) return input;
   return undefined;
+}
+
+function parsePositiveIntArray(input: unknown): number[] | null {
+  if (input === undefined) return [];
+  if (!Array.isArray(input) || input.length > MAX_COMPLETION_RELATED) return null;
+  const out: number[] = [];
+  for (const item of input) {
+    if (typeof item !== "number" || !Number.isInteger(item) || item <= 0) return null;
+    out.push(item);
+  }
+  return out;
+}
+
+function parseCompletionArtifact(input: unknown, replyTo: number | null): CompletionArtifact | undefined | null {
+  if (input === undefined) return undefined;
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  if (raw.kind !== "final_synthesis") return null;
+  const kickoffSeq = parseOptionalPositiveSeq(raw.kickoff_seq);
+  if (kickoffSeq === undefined || kickoffSeq === null) return null;
+  if (replyTo !== kickoffSeq) return null;
+  if (typeof raw.replies_count !== "number" || !Number.isInteger(raw.replies_count) || raw.replies_count < 0) {
+    return null;
+  }
+  if (typeof raw.timeout !== "boolean") return null;
+  const relatedIssues = parsePositiveIntArray(raw.related_issues);
+  const relatedPrs = parsePositiveIntArray(raw.related_prs);
+  if (relatedIssues === null || relatedPrs === null) return null;
+  const artifact: CompletionArtifact = {
+    kind: "final_synthesis",
+    kickoff_seq: kickoffSeq,
+    replies_count: raw.replies_count,
+    timeout: raw.timeout,
+    related_issues: relatedIssues,
+    related_prs: relatedPrs,
+  };
+  if (byteLength(JSON.stringify(artifact)) > COMPLETION_ARTIFACT_JSON_LIMIT) return null;
+  return artifact;
+}
+
+function parseStoredCompletionArtifact(input: unknown): CompletionArtifact | undefined {
+  if (typeof input !== "string" || input === "") return undefined;
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    const artifact = parseCompletionArtifact(parsed, (parsed as { kickoff_seq?: unknown } | null)?.kickoff_seq as number | null);
+    return artifact ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function parseStoredScope(input: unknown): string[] {
@@ -189,9 +241,19 @@ function parseSendFrame(input: unknown): SendFrame | null {
           ? f.reply_to
           : undefined;
     if (reply_to === undefined) return null;
-    return { type: "send", kind: "message", body: f.body, mentions, reply_to };
+    const completionArtifact = parseCompletionArtifact(f.completion_artifact, reply_to);
+    if (completionArtifact === null) return null;
+    return {
+      type: "send",
+      kind: "message",
+      body: f.body,
+      mentions,
+      reply_to,
+      ...(completionArtifact !== undefined ? { completion_artifact: completionArtifact } : {}),
+    };
   }
   if (f.kind === "status") {
+    if (f.completion_artifact !== undefined) return null;
     if (typeof f.state !== "string" || !STATUS_STATES.includes(f.state)) return null;
     const note = typeof f.note === "string" ? f.note : "";
     const mentions = parseMentions(f.mentions);
@@ -290,6 +352,7 @@ export class ChannelDO extends Server<Env> {
       status_scope_json TEXT,
       status_summary_seq INTEGER,
       status_blocked_reason TEXT,
+      completion_artifact_json TEXT,
       original_body TEXT,
       edited_at INTEGER,
       edited_by TEXT,
@@ -309,6 +372,7 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE messages ADD COLUMN status_scope_json TEXT",
       "ALTER TABLE messages ADD COLUMN status_summary_seq INTEGER",
       "ALTER TABLE messages ADD COLUMN status_blocked_reason TEXT",
+      "ALTER TABLE messages ADD COLUMN completion_artifact_json TEXT",
       "ALTER TABLE messages ADD COLUMN original_body TEXT",
       "ALTER TABLE messages ADD COLUMN edited_at INTEGER",
       "ALTER TABLE messages ADD COLUMN edited_by TEXT",
@@ -959,8 +1023,15 @@ export class ChannelDO extends Server<Env> {
     if (url.pathname === "/internal/messages" && request.method === "GET") {
       const since = Math.max(toInt(url.searchParams.get("since"), 0), 0);
       const limit = Math.min(Math.max(toInt(url.searchParams.get("limit"), 100), 1), 1000);
+      const completionOnly = url.searchParams.get("completion") === "1";
       const rows = this.ctx.storage.sql
-        .exec("SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?", since, limit)
+        .exec(
+          `SELECT * FROM messages
+            WHERE seq > ?${completionOnly ? " AND completion_artifact_json IS NOT NULL" : ""}
+            ORDER BY seq LIMIT ?`,
+          since,
+          limit,
+        )
         .toArray();
       return Response.json({ messages: rows.map((r) => this.rowToFrame(r)) });
     }
@@ -1384,6 +1455,7 @@ export class ChannelDO extends Server<Env> {
             state: null,
             note: null,
             status: null,
+            ...(frame.completion_artifact !== undefined ? { completion_artifact: frame.completion_artifact } : {}),
             ts: now,
           }
         : {
@@ -1402,9 +1474,9 @@ export class ChannelDO extends Server<Env> {
     sql.exec(
       `INSERT INTO messages (
          seq, sender_name, sender_kind, sender_owner, kind, body, mentions_json, reply_to,
-         state, note, status_scope_json, status_summary_seq, status_blocked_reason, ts
+         state, note, status_scope_json, status_summary_seq, status_blocked_reason, completion_artifact_json, ts
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
@@ -1418,6 +1490,9 @@ export class ChannelDO extends Server<Env> {
       status === null ? null : JSON.stringify(status.scope),
       status?.summary_seq ?? null,
       status?.blocked_reason ?? null,
+      frame.kind === "message" && frame.completion_artifact !== undefined
+        ? JSON.stringify(frame.completion_artifact)
+        : null,
       now,
     );
     if (identity.kind === "agent") {
@@ -1697,6 +1772,8 @@ export class ChannelDO extends Server<Env> {
       status,
       ts,
     };
+    const completionArtifact = parseStoredCompletionArtifact(r.completion_artifact_json);
+    if (completionArtifact !== undefined) frame.completion_artifact = completionArtifact;
     if (r.edited_at !== null && r.edited_at !== undefined) {
       frame.edited = true;
       frame.edited_at = Number(r.edited_at);
