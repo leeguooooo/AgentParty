@@ -1,20 +1,21 @@
 // party send — rest 一次性发消息，成功后推进游标
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError, type Parsed } from "../args";
 import { resolveChannel, saveCursor, type Config } from "../config";
-import { resolveAuth } from "../oidc-cli";
-import { handleRestError, postMessage } from "../rest";
+import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
+import { fetchMe, handleRestError, postMessage } from "../rest";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
-export const sendSpec = { repeatable: ["mention"] };
-const SEND_FLAGS = ["channel", "reply-to", "mention"];
-const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--reply-to seq]
+export const sendSpec = { repeatable: ["mention"], booleans: ["debug-auth"] };
+const SEND_FLAGS = ["channel", "reply-to", "mention", "debug-auth"];
+const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--reply-to seq] [--debug-auth]
 
 Send one message to a channel. Use "-" as the body to read stdin.
 
 Options:
   --channel C      send to channel C instead of the bound channel
   --mention name   mention a user or agent; repeatable
-  --reply-to seq   attach this message as a reply to seq`;
+  --reply-to seq   attach this message as a reply to seq
+  --debug-auth     print resolved auth/config source to stderr`;
 
 export interface SendInput {
   channel: string;
@@ -117,14 +118,23 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const cfg = await resolveAuth();
-  if (!cfg) {
+  const auth = await resolveAuthDetailed();
+  if (!auth.server || !auth.token) {
     console.error("no config, run: party login or party init --server URL --token T");
     return 1;
   }
-  const input = await resolveSendInput(parseArgs(argv, sendSpec));
+  const parsed = parseArgs(argv, sendSpec);
+  const input = await resolveSendInput(parsed);
   if (!input) return 1;
-  const result = await doSend(cfg, input);
+  if (parsed.flags["debug-auth"] === true || process.env.AGENTPARTY_DEBUG_AUTH === "1") {
+    try {
+      console.error(formatAuthDebugLine(auth, await fetchMe(auth.server, auth.token)));
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(`${formatAuthDebugLine(auth)} runtime-error=${message}`);
+    }
+  }
+  const result = await doSend({ server: auth.server, token: auth.token }, input);
   if (typeof result === "number") return result;
   console.log(`sent seq=${result.seq}`);
   return 0;

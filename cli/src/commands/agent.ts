@@ -2,7 +2,7 @@
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readAccount } from "../account";
 import { ensureFreshAccess } from "../oidc-cli";
-import { createAgent, handleRestError } from "../rest";
+import { createAgent, handleRestError, RestError } from "../rest";
 import { isName, isSlug } from "../validation";
 
 const AGENT_FLAGS = ["channel-scope"];
@@ -46,17 +46,28 @@ export async function run(argv: string[]): Promise<number> {
   }
   const sess = readAccount();
   if (!sess) {
-    console.error("not logged in, run: party login");
+    console.error("agent add requires a human login; run party login");
+    return 1;
+  }
+  let fresh;
+  try {
+    fresh = await ensureFreshAccess(sess);
+  } catch {
+    console.error("agent add requires a human login; stored account session is expired or invalid; run party login");
     return 1;
   }
   try {
-    const { session, token } = await ensureFreshAccess(sess);
+    const { session, token } = fresh;
     const res = await createAgent(session.server, token, name, channelScope);
     // 明文 token 只出现这一次
     console.log(JSON.stringify(res));
     console.error(`give it to the agent: party init --server ${session.server} --token ${res.token}`);
     return 0;
   } catch (e) {
+    if (e instanceof RestError && (e.status === 401 || e.status === 403)) {
+      console.error("agent add requires a human login; current account cannot mint agents; run party login");
+      return 1;
+    }
     return handleRestError(e);
   }
 }

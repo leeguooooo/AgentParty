@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeAccount } from "../src/account";
-import { writeConfig, writeState } from "../src/config";
+import { tokenFingerprint, writeConfig, writeState } from "../src/config";
 import { run as sendRun } from "../src/commands/send";
 import { run as agentRun } from "../src/commands/agent";
 import { run as whoamiRun } from "../src/commands/whoami";
@@ -107,6 +107,20 @@ describe("send auth precedence", () => {
     expect(code).toBe(0);
     expect(errs.join("\n")).not.toContain("若想发到");
   });
+
+  test("debug-auth prints safe runtime/config source without raw token", async () => {
+    mock = startOidcMock();
+    writeConfig({ server: mock.url, token: "ap_debug_secret" });
+    writeState({ channel: "dev", cursor: 0 });
+
+    const code = await sendRun(["hello", "--channel", "dev", "--debug-auth"]);
+    expect(code).toBe(0);
+    const stderr = errs.join("\n");
+    expect(stderr).toContain("using runtime=fan@example.com (human/human)");
+    expect(stderr).toContain("auth-source=runtime_config");
+    expect(stderr).toContain(`token=${tokenFingerprint("ap_debug_secret")}`);
+    expect(stderr).not.toContain("ap_debug_secret");
+  });
 });
 
 describe("agent add", () => {
@@ -115,7 +129,48 @@ describe("agent add", () => {
     writeConfig({ server: mock.url, token: "ap_x" });
     const code = await agentRun(["add", "botty"]);
     expect(code).toBe(1);
-    expect(errs.join("\n")).toContain("party login");
+    expect(errs.join("\n")).toContain("agent add requires a human login");
+    expect(mock.requests.find((r) => r.path === "/api/agents")).toBeUndefined();
+  });
+
+  test("explains account capability failures separately from runtime token auth", async () => {
+    mock = startOidcMock();
+    liveAccount(mock.url);
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/agents")) {
+        return Response.json({ error: { code: "forbidden", message: "forbidden" } }, { status: 403 });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+    try {
+      liveAccount(mock.url);
+      const code = await agentRun(["add", "botty"]);
+      expect(code).toBe(1);
+      expect(errs.join("\n")).toContain("current account cannot mint agents");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  test("stale account refresh failure tells operator to login again", async () => {
+    mock = startOidcMock({ tokenResponse: () => ({ token_type: "Bearer" }) });
+    writeAccount({
+      server: mock.url,
+      refresh_token: "ref-expired",
+      access_token: "acc-expired",
+      expires_at: nowSec() - 10,
+    });
+
+    const code = await agentRun(["add", "botty"]);
+    expect(code).toBe(1);
+    const stderr = errs.join("\n");
+    expect(stderr).toContain("stored account session is expired or invalid");
+    expect(stderr).toContain("party login");
+    expect(stderr).not.toContain("token endpoint returned no access_token");
+    expect(mock.tokenCalls).toHaveLength(1);
+    expect(mock.requests.find((r) => r.path === "/api/agents")).toBeUndefined();
   });
 
   test("mints agent via /api/agents with account bearer + channel_scope", async () => {
@@ -146,7 +201,11 @@ describe("whoami", () => {
     liveAccount(mock.url);
     const code = await whoamiRun([]);
     expect(code).toBe(0);
-    expect(logs.join("\n")).toContain("fan@example.com");
+    const stdout = logs.join("\n");
+    expect(stdout).toContain("runtime: logged in as fan@example.com");
+    expect(stdout).toContain("account:");
+    expect(stdout).toContain("config:");
+    expect(stdout).toContain("auth-source: account_session");
     expect(mock.requests.some((r) => r.path === "/api/me" && r.auth === "Bearer acc-live")).toBe(true);
   });
 
@@ -171,6 +230,23 @@ describe("whoami", () => {
         create_channel: true,
         mint_agents: true,
         scoped_to: null,
+      },
+      auth_source: "account_session",
+      runtime: {
+        name: "fan@example.com",
+        email: "fan@example.com",
+        kind: "human",
+        role: "human",
+        owner: null,
+        channel_scope: null,
+      },
+      account: {
+        present: true,
+        server: mock.url,
+      },
+      config: {
+        kind: "none",
+        path: null,
       },
     });
     expect(typeof frame.ts).toBe("number");
@@ -200,6 +276,14 @@ describe("whoami", () => {
       type: "whoami",
       logged_in: false,
       server: null,
+      auth_source: "none",
+      account: {
+        present: false,
+      },
+      config: {
+        kind: "none",
+        path: null,
+      },
     });
     expect(typeof frame.ts).toBe("number");
   });

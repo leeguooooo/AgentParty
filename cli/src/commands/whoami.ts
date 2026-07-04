@@ -2,7 +2,7 @@
 import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_LOOP_GUARD } from "@agentparty/shared";
 import { isHelpArg, parseArgs, unknownFlagError } from "../args";
 import { handleRestError, fetchMe, RestError } from "../rest";
-import { resolveAuth } from "../oidc-cli";
+import { resolveAuthDetailed } from "../oidc-cli";
 import { jsonFrame, nowTs } from "../json";
 
 const WHOAMI_FLAGS = ["json", "caps"];
@@ -28,7 +28,7 @@ export async function run(argv: string[]): Promise<number> {
   const json = flags.json === true;
   let auth;
   try {
-    auth = await resolveAuth();
+    auth = await resolveAuthDetailed();
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (json) {
@@ -38,19 +38,55 @@ export async function run(argv: string[]): Promise<number> {
     }
     return 1;
   }
-  if (!auth) {
-    if (json) console.log(JSON.stringify(jsonFrame({ type: "whoami", ts: nowTs(), logged_in: false, server: null })));
-    else console.log("not logged in");
+  if (!auth.server || !auth.token) {
+    if (json) {
+      console.log(JSON.stringify(jsonFrame({
+        type: "whoami",
+        ts: nowTs(),
+        logged_in: false,
+        server: null,
+        auth_source: auth.auth_source,
+        account: auth.account,
+        config: auth.config,
+      })));
+    } else {
+      console.log("runtime: not logged in");
+      console.log(`account: ${auth.account.present ? `${auth.account.email ?? auth.account.sub ?? "present"} present server=${auth.account.server}` : `absent path=${auth.account.path}`}`);
+      console.log(`config: ${auth.config.path ? `${auth.config.kind} ${auth.config.path}` : "none"}`);
+      console.log(`auth-source: ${auth.auth_source}`);
+    }
     return 0;
   }
   try {
     const me = await fetchMe(auth.server, auth.token);
     if (json) {
       // 原样吐 /api/me（name/email/kind/role/owner…），供工具判身份/权限，免解析人类串
-      console.log(JSON.stringify(jsonFrame({ type: "whoami", ts: nowTs(), logged_in: true, server: auth.server, ...me })));
+      console.log(JSON.stringify(jsonFrame({
+        type: "whoami",
+        ts: nowTs(),
+        logged_in: true,
+        server: auth.server,
+        ...me,
+        auth_source: auth.auth_source,
+        runtime: {
+          name: me.name,
+          email: me.email,
+          kind: me.kind,
+          role: me.role,
+          owner: me.owner,
+          channel_scope: me.channel_scope ?? null,
+        },
+        account: auth.account,
+        config: auth.config,
+      })));
     } else {
       const who = me.email ?? me.name;
-      console.log(`logged in as ${who} (${me.kind}/${me.role})`);
+      console.log(`runtime: logged in as ${who} (${me.kind}/${me.role})`);
+      if (me.owner) console.log(`  owner: ${me.owner}`);
+      console.log(`  scope: ${me.channel_scope ?? "none (all channels)"}`);
+      console.log(`account: ${auth.account.present ? `${auth.account.email ?? auth.account.sub ?? "present"} present server=${auth.account.server}` : `absent path=${auth.account.path}`}`);
+      console.log(`config: ${auth.config.path ? `${auth.config.kind} ${auth.config.path} token=${auth.config.token_fingerprint ?? "none"}` : "none"}`);
+      console.log(`auth-source: ${auth.auth_source}`);
       // --caps：把 token 能干什么摊开，免得撞 403 才知道没权限（scoped token 尤其容易懵）
       if (flags.caps) {
         const scope = me.channel_scope ?? null;

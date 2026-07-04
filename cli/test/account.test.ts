@@ -14,6 +14,7 @@ import {
   makeVerifier,
   refreshTokens,
   resolveAuth,
+  resolveAuthDetailed,
 } from "../src/oidc-cli";
 import { createHash } from "node:crypto";
 import { startOidcMock, type OidcMock } from "./oidc-mock";
@@ -143,6 +144,33 @@ describe("resolveAuth precedence", () => {
     });
     const auth = await resolveAuth();
     expect(auth).toEqual({ server: "https://ap.example.com", token: "ap_agent" });
+  });
+
+  test("detailed resolver exposes runtime config source without refreshing stale account", async () => {
+    writeConfig({ server: "https://ap.example.com", token: "ap_agent_secret" });
+    writeAccount({
+      server: "https://issuer.example.com",
+      refresh_token: "ref",
+      access_token: "expired",
+      expires_at: nowSec() - 10,
+      email: "human@example.com",
+    });
+    const auth = await resolveAuthDetailed();
+    expect(auth).toMatchObject({
+      server: "https://ap.example.com",
+      token: "ap_agent_secret",
+      auth_source: "runtime_config",
+      config: {
+        kind: "workspace",
+      },
+      account: {
+        present: true,
+        server: "https://issuer.example.com",
+        email: "human@example.com",
+      },
+    });
+    expect(typeof auth.config.token_fingerprint).toBe("string");
+    expect(auth.config.token_fingerprint!).toMatch(/^sha256:[0-9a-f]{12}$/);
   });
 
   test("falls back to config ap_ token when logged out", async () => {

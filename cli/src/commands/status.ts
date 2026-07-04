@@ -2,16 +2,16 @@
 import type { CollaborationRole, Residency, StatusState, WakeKind } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel, saveCursor } from "../config";
-import { resolveAuth } from "../oidc-cli";
-import { handleRestError, postMessage } from "../rest";
+import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
+import { fetchMe, handleRestError, postMessage } from "../rest";
 import { isName, isSlug } from "../validation";
 
 const STATES: StatusState[] = ["working", "waiting", "blocked", "done"];
 const COLLAB_ROLES: CollaborationRole[] = ["host", "worker", "reviewer", "observer"];
 const RESIDENCIES: Residency[] = ["supervised", "webhook", "bare", "human_driven", "unknown"];
 const WAKE_KINDS: WakeKind[] = ["none", "watch", "serve", "webhook"];
-const STATUS_FLAGS = ["channel", "note", "mention", "role", "residency", "wake-kind"];
-const HELP = `usage: party status [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
+const STATUS_FLAGS = ["channel", "note", "mention", "role", "residency", "wake-kind", "debug-auth"];
+const HELP = `usage: party status [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]... [--debug-auth]
 
 Publish agent status/presence into a channel.
 
@@ -21,7 +21,8 @@ Options:
   --mention name   mention a user or agent; repeatable
   --role role      collaboration role: host|worker|reviewer|observer
   --residency r    wake residency: supervised|webhook|bare|human_driven|unknown
-  --wake-kind k    wake layer kind: none|watch|serve|webhook`;
+  --wake-kind k    wake layer kind: none|watch|serve|webhook
+  --debug-auth     print resolved auth/config source to stderr`;
 
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
@@ -30,10 +31,11 @@ export async function run(argv: string[]): Promise<number> {
   }
   const { positionals, flags } = parseArgs(argv, {
     aliases: { m: "note" },
+    booleans: ["debug-auth"],
     repeatable: ["mention"],
   });
-  const cfg = await resolveAuth();
-  if (!cfg) {
+  const auth = await resolveAuthDetailed();
+  if (!auth.server || !auth.token) {
     console.error("no config, run: party login or party init --server URL --token T");
     return 1;
   }
@@ -93,7 +95,15 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
   try {
-    const { seq } = await postMessage(cfg.server, cfg.token, channel, {
+    if (flags["debug-auth"] === true || process.env.AGENTPARTY_DEBUG_AUTH === "1") {
+      try {
+        console.error(formatAuthDebugLine(auth, await fetchMe(auth.server, auth.token)));
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.error(`${formatAuthDebugLine(auth)} runtime-error=${message}`);
+      }
+    }
+    const { seq } = await postMessage(auth.server, auth.token, channel, {
       kind: "status",
       state: state as StatusState,
       note: str(flags.note) ?? "",

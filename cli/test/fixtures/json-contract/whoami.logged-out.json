@@ -1,5 +1,15 @@
 {
   "schema": "agentparty.v1",
   "type": "whoami",
-  "logged_in": false
+  "logged_in": false,
+  "server": null,
+  "auth_source": "none",
+  "account": {
+    "present": false,
+    "path": "/tmp/agentparty/account.json"
+  },
+  "config": {
+    "kind": "explicit",
+    "path": "/tmp/agentparty/config.json"
+  }
 }

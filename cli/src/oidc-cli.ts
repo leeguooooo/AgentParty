@@ -1,7 +1,7 @@
 // 回环重定向 PKCE 登录流 + 令牌刷新 + bearer 解析（spec §4）
 import { createHash, randomBytes } from "node:crypto";
-import { readAccount, writeAccount, type AccountSession } from "./account";
-import { readConfig } from "./config";
+import { accountPath, readAccount, writeAccount, type AccountSession } from "./account";
+import { readConfigWithSource, type ConfigSourceInfo } from "./config";
 import { fetchPublicConfig } from "./rest";
 
 const SCOPE = "openid profile email offline_access";
@@ -282,21 +282,93 @@ export interface Auth {
   token: string;
 }
 
+export interface AccountInfo {
+  present: boolean;
+  path: string;
+  server?: string;
+  email?: string;
+  sub?: string;
+  expires_at?: number;
+}
+
+export interface ResolvedAuthDetailed {
+  server: string | null;
+  token: string | null;
+  auth_source: "runtime_config" | "account_session" | "none";
+  config: ConfigSourceInfo;
+  account: AccountInfo;
+}
+
+export interface RuntimeIdentityInfo {
+  name?: string | null;
+  kind?: string | null;
+  role?: string | null;
+  owner?: string | null;
+  channel_scope?: string | null;
+}
+
+function accountInfo(sess: AccountSession | null): AccountInfo {
+  if (!sess) return { present: false, path: accountPath() };
+  return {
+    present: true,
+    path: accountPath(),
+    server: sess.server,
+    ...(sess.email !== undefined ? { email: sess.email } : {}),
+    ...(sess.sub !== undefined ? { sub: sess.sub } : {}),
+    ...(sess.expires_at !== undefined ? { expires_at: sess.expires_at } : {}),
+  };
+}
+
 // bearer 解析：显式绑定的 workspace 凭据（party init --token 写的 config.token）优先，
 // 无则回落账号会话（纯 party login 的人类交互场景），自动刷新其 access_token。
 // 关键：agent 用 `party init --token <agent-token>` 接入后必须以「该 agent」的身份发言——
 // 若让残留的人类账号会话顶替，agent 就会以「人」的名义说话，且过期会话还会直接 401
 // （「让 agent 加入」踩过：init 写了 ap_ token，却被旧 account.json 顶掉导致 send 失败）。
 // server 优先 config（频道绑定所在），仅账号会话单独存在时用其 server。
-export async function resolveAuth(): Promise<Auth | null> {
-  const cfg = readConfig();
+export async function resolveAuthDetailed(): Promise<ResolvedAuthDetailed> {
+  const { config: cfg, source } = readConfigWithSource();
   const sess = readAccount();
   const server = cfg?.server ?? sess?.server;
-  if (!server) return null;
-  if (cfg?.token) return { server, token: cfg.token };
+  if (!server) {
+    return { server: null, token: null, auth_source: "none", config: source, account: accountInfo(sess) };
+  }
+  if (cfg?.token) {
+    return {
+      server,
+      token: cfg.token,
+      auth_source: "runtime_config",
+      config: source,
+      account: accountInfo(sess),
+    };
+  }
   if (sess?.refresh_token) {
     const { token } = await ensureFreshAccess(sess);
-    return { server, token };
+    return {
+      server,
+      token,
+      auth_source: "account_session",
+      config: source,
+      account: accountInfo(readAccount() ?? sess),
+    };
   }
-  return null;
+  return { server, token: null, auth_source: "none", config: source, account: accountInfo(sess) };
+}
+
+export async function resolveAuth(): Promise<Auth | null> {
+  const detailed = await resolveAuthDetailed();
+  if (!detailed.server || !detailed.token) return null;
+  return { server: detailed.server, token: detailed.token };
+}
+
+export function formatAuthDebugLine(auth: ResolvedAuthDetailed, runtime?: RuntimeIdentityInfo | null): string {
+  const runtimeLabel = runtime?.name
+    ? `${runtime.name} (${runtime.kind ?? "?"}/${runtime.role ?? "?"})`
+    : auth.auth_source === "none"
+      ? "not-logged-in"
+      : "unverified";
+  const owner = runtime?.owner ? ` owner=${runtime.owner}` : "";
+  const scope = runtime?.channel_scope ? ` scope=${runtime.channel_scope}` : "";
+  const cfg = auth.config.path ? `${auth.config.kind}:${auth.config.path}` : auth.config.kind;
+  const fp = auth.config.token_fingerprint ? ` token=${auth.config.token_fingerprint}` : "";
+  return `using runtime=${runtimeLabel}${owner}${scope} auth-source=${auth.auth_source} config=${cfg}${fp}`;
 }

@@ -305,6 +305,17 @@ describe("party invite", () => {
 });
 
 describe("party init", () => {
+  test("writes config and prints resolved config source plus runtime identity", async () => {
+    mock = startRestMock();
+    const r = await runCli(["init", "--server", mock.url, "--token", "ap_new"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain(`config written for ${mock.url}`);
+    expect(r.stdout).toContain("config: workspace ");
+    expect(r.stdout).toContain("token=sha256:");
+    expect(r.stdout).not.toContain("ap_new");
+    expect(r.stdout).toContain("runtime: agent (agent/agent)");
+  });
+
   test("value flags 缺值不回退旧 config", async () => {
     mock = startRestMock();
     writeCfg("https://old.example");
@@ -600,6 +611,18 @@ describe("party status/history channel flag", () => {
       residency: "human_driven",
       wake: { kind: "none" },
     });
+  });
+
+  test("status debug-auth prints safe runtime/config source without raw token", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["status", "dev", "working", "--debug-auth"]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("using runtime=agent (agent/agent)");
+    expect(r.stderr).toContain("auth-source=runtime_config");
+    expect(r.stderr).toContain("config=global:");
+    expect(r.stderr).toContain("token=sha256:");
+    expect(r.stderr).not.toContain("ap_tok");
   });
 
   test("status rejects invalid collaboration role fields locally", async () => {

@@ -9,6 +9,20 @@ export interface Config {
   token: string;
 }
 
+export type ConfigSourceKind = "explicit" | "workspace" | "global" | "none";
+
+export interface ConfigSourceInfo {
+  kind: ConfigSourceKind;
+  path: string | null;
+  workspace_id?: string;
+  token_fingerprint?: string;
+}
+
+export interface ConfigWithSource {
+  config: Config | null;
+  source: ConfigSourceInfo;
+}
+
 export interface WorkspaceState {
   channel: string;
   cursor: number;
@@ -45,24 +59,49 @@ export function configPath(cwd: string = process.cwd()): string {
   return existsSync(ws) ? ws : globalConfigPath();
 }
 
-export function readConfig(cwd: string = process.cwd()): Config | null {
+export function tokenFingerprint(token: string): string {
+  return `sha256:${createHash("sha256").update(token).digest("hex").slice(0, 12)}`;
+}
+
+function sourceInfo(kind: ConfigSourceKind, path: string | null, cfg: Config | null, cwd: string): ConfigSourceInfo {
+  return {
+    kind,
+    path,
+    ...(kind === "workspace" ? { workspace_id: workspaceId(cwd) } : {}),
+    ...(cfg?.token ? { token_fingerprint: tokenFingerprint(cfg.token) } : {}),
+  };
+}
+
+export function readConfigWithSource(cwd: string = process.cwd()): ConfigWithSource {
   const explicit = explicitConfigPath();
   if (explicit) {
     try {
-      return JSON.parse(readFileSync(explicit, "utf8")) as Config;
+      const cfg = JSON.parse(readFileSync(explicit, "utf8")) as Config;
+      return { config: cfg, source: sourceInfo("explicit", explicit, cfg, cwd) };
     } catch {
-      return null;
+      return { config: null, source: sourceInfo("explicit", explicit, null, cwd) };
     }
   }
-  // workspace 级优先（隔离），无则回退全局（跨目录默认 / 存量）
-  for (const p of [workspaceConfigPath(cwd), globalConfigPath()]) {
-    try {
-      return JSON.parse(readFileSync(p, "utf8")) as Config;
-    } catch {
-      /* 试下一个来源 */
-    }
+
+  const ws = workspaceConfigPath(cwd);
+  try {
+    const cfg = JSON.parse(readFileSync(ws, "utf8")) as Config;
+    return { config: cfg, source: sourceInfo("workspace", ws, cfg, cwd) };
+  } catch {
+    /* 试全局来源 */
   }
-  return null;
+
+  const global = globalConfigPath();
+  try {
+    const cfg = JSON.parse(readFileSync(global, "utf8")) as Config;
+    return { config: cfg, source: sourceInfo("global", global, cfg, cwd) };
+  } catch {
+    return { config: null, source: sourceInfo("none", null, null, cwd) };
+  }
+}
+
+export function readConfig(cwd: string = process.cwd()): Config | null {
+  return readConfigWithSource(cwd).config;
 }
 
 export function writeConfig(cfg: Config, cwd: string = process.cwd()): void {

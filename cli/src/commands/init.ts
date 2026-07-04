@@ -1,7 +1,7 @@
 // party init — 写全局配置 + 绑定当前目录默认频道（不存在则创建）
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
-import { readConfig, readState, writeConfig, writeState } from "../config";
-import { RestError, createChannel, handleRestError, listChannels } from "../rest";
+import { readConfig, readConfigWithSource, readState, writeConfig, writeState } from "../config";
+import { RestError, createChannel, fetchMe, handleRestError, listChannels } from "../rest";
 import { isSlug, normalizeServerUrl } from "../validation";
 
 const INIT_FLAGS = ["server", "token", "channel"];
@@ -72,5 +72,19 @@ export async function run(argv: string[]): Promise<number> {
     writeConfig(cfg);
   }
   console.log(`config written for ${cfg.server}`);
+  const { source } = readConfigWithSource();
+  console.log(
+    `config: ${source.path ? `${source.kind} ${source.path}` : "none"}${source.token_fingerprint ? ` token=${source.token_fingerprint}` : ""}`,
+  );
+  try {
+    const me = await fetchMe(cfg.server, cfg.token);
+    const who = me.email ?? me.name;
+    const owner = me.owner ? ` owner=${me.owner}` : "";
+    const scope = me.channel_scope ? ` scope=${me.channel_scope}` : "";
+    console.log(`runtime: ${who} (${me.kind}/${me.role})${owner}${scope}`);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(`warning: wrote config but could not verify identity: ${message}`);
+  }
   return 0;
 }

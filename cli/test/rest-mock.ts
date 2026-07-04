@@ -59,6 +59,17 @@ export function startRestMock(handler?: RestHandler): RestMock {
       if (r.method === "POST" && /^\/api\/channels\/[^/]+\/messages$/.test(r.path)) {
         return Response.json({ seq: 1 });
       }
+      if (r.method === "GET" && r.path === "/api/me") {
+        return Response.json({
+          name: "agent",
+          email: null,
+          kind: "agent",
+          role: "agent",
+          owner: null,
+          channel_scope: null,
+          caps: { send: true, create_channel: false, mint_agents: false, scoped_to: null },
+        });
+      }
       if (r.method === "POST" && /^\/api\/channels\/[^/]+\/kick$/.test(r.path)) {
         return Response.json({ ok: true });
       }

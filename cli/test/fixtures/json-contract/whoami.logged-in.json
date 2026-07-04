@@ -13,5 +13,24 @@
     "create_channel": true,
     "mint_agents": true,
     "scoped_to": null
+  },
+  "auth_source": "account_session",
+  "runtime": {
+    "name": "fan@example.com",
+    "email": "fan@example.com",
+    "kind": "human",
+    "role": "human",
+    "owner": null,
+    "channel_scope": null
+  },
+  "account": {
+    "present": true,
+    "path": "/tmp/agentparty/account.json",
+    "server": "https://agentparty.example",
+    "expires_at": 1234567890
+  },
+  "config": {
+    "kind": "explicit",
+    "path": "/tmp/agentparty/config.json"
   }
 }

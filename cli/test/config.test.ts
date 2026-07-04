@@ -6,11 +6,13 @@ import { createHash } from "node:crypto";
 import {
   loadCursor,
   readConfig,
+  readConfigWithSource,
   readState,
   resolveChannel,
   saveCursor,
   slugifyBasename,
   statePath,
+  tokenFingerprint,
   workspaceId,
   writeConfig,
   writeState,
@@ -37,6 +39,36 @@ describe("config", () => {
   test("write/read roundtrip", () => {
     writeConfig({ server: "https://ap.example.com", token: "ap_x" });
     expect(readConfig()).toEqual({ server: "https://ap.example.com", token: "ap_x" });
+  });
+
+  test("readConfigWithSource reports workspace source and safe fingerprint", () => {
+    const cwd = "/tmp/project-source";
+    writeConfig({ server: "https://ap.example.com", token: "ap_secret_token" }, cwd);
+    const resolved = readConfigWithSource(cwd);
+    expect(resolved.config).toEqual({ server: "https://ap.example.com", token: "ap_secret_token" });
+    expect(resolved.source).toMatchObject({
+      kind: "workspace",
+      path: join(home, "state", workspaceId(cwd), "config.json"),
+      workspace_id: workspaceId(cwd),
+      token_fingerprint: tokenFingerprint("ap_secret_token"),
+    });
+    expect(JSON.stringify(resolved.source)).not.toContain("ap_secret_token");
+  });
+
+  test("readConfigWithSource reports explicit global and none", () => {
+    expect(readConfigWithSource("/tmp/missing").source).toMatchObject({ kind: "none", path: null });
+
+    writeConfig({ server: "https://ap.example.com", token: "ap_global" }, "/tmp/has-global");
+    const global = readConfigWithSource("/tmp/other");
+    expect(global.source.kind).toBe("global");
+    expect(global.source.path).toBe(join(home, "config.json"));
+
+    process.env.AGENTPARTY_CONFIG = join(home, "explicit.json");
+    writeConfig({ server: "https://ap.example.com", token: "ap_explicit" });
+    const explicit = readConfigWithSource("/tmp/other");
+    expect(explicit.source.kind).toBe("explicit");
+    expect(explicit.source.path).toBe(join(home, "explicit.json"));
+    expect(explicit.source.token_fingerprint).toBe(tokenFingerprint("ap_explicit"));
   });
 
   test("workspace configs isolate by cwd; global is the cross-dir fallback", () => {
