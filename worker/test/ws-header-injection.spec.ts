@@ -26,6 +26,15 @@ async function openRaw(
   return { ws, first };
 }
 
+async function nextRawFrame(ws: WebSocket, type: string): Promise<Record<string, unknown>> {
+  for (;;) {
+    const frame = await new Promise<Record<string, unknown>>((resolve) => {
+      ws.addEventListener("message", (e) => resolve(JSON.parse(e.data as string)), { once: true });
+    });
+    if (frame.type === type) return frame;
+  }
+}
+
 describe("ws upgrade header injection", () => {
   // 修复 2①：客户端伪造 x-ap-archived:1 连未归档频道，不得归档活频道
   it("ignores a client-injected x-ap-archived header on an active channel", async () => {
@@ -88,5 +97,24 @@ describe("ws upgrade header injection", () => {
     const payload = JSON.parse(captured) as { permalink: string };
     expect(payload.permalink).not.toContain("evil.example");
     expect(payload.permalink).toBe(`https://ap.test/c/${slug}`);
+  });
+
+  it("ignores client-injected collaboration role headers", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+
+    const { ws, first } = await openRaw(slug, agent.token, {
+      "x-ap-collab-role": "host",
+      "x-ap-role-source": "assigned",
+    });
+    expect(first.type).toBe("welcome");
+
+    ws.send(JSON.stringify({ type: "send", kind: "status", state: "working", note: "forged host", mentions: [] }));
+    const status = await nextRawFrame(ws, "status");
+    ws.close();
+
+    expect(status).toMatchObject({ type: "status", kind: "status", note: "forged host" });
+    expect(status.role).toBeUndefined();
+    expect(status.role_source).toBeUndefined();
   });
 });

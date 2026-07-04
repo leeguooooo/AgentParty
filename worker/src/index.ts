@@ -60,6 +60,8 @@ const AP_FORWARD_HEADERS = [
   "x-ap-host",
   "x-ap-archived",
   "x-ap-archive-at",
+  "x-ap-collab-role",
+  "x-ap-role-source",
 ] as const;
 // 所属人标签：铸造时可选写入，须 header-safe（可打印 ASCII，含空格）以便经 x-ap-owner 转发给 do
 const OWNER_MAX = 128;

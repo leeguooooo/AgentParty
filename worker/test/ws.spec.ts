@@ -165,6 +165,14 @@ describe("websocket", () => {
       scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
       blocked_reason: "waiting for schema review",
       summary_seq: 42,
+      decision: {
+        kind: "handoff",
+        owner: "evil",
+        decision: "handoff review host",
+        next: "human reviewer owns approval",
+        expires_at: 4_200_000,
+        handoff_to: human.name,
+      },
     });
     const sent = await worker.nextOfType("sent");
     expect(sent.seq).toBe(1);
@@ -189,6 +197,14 @@ describe("websocket", () => {
           workspace_label: "agentparty",
           worktree_label: "agentparty:main",
         },
+        decision: {
+          kind: "handoff",
+          owner: agent.name,
+          decision: "handoff review host",
+          next: "human reviewer owns approval",
+          expires_at: 4_200_000,
+          handoff_to: human.name,
+        },
       },
     });
     const presence = await watcher.nextOfType("presence");
@@ -202,6 +218,14 @@ describe("websocket", () => {
         scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
         blocked_reason: "waiting for schema review",
         summary_seq: 42,
+        decision: {
+          kind: "handoff",
+          owner: agent.name,
+          decision: "handoff review host",
+          next: "human reviewer owns approval",
+          expires_at: 4_200_000,
+          handoff_to: human.name,
+        },
       },
       role: "worker",
       residency: "supervised",
@@ -289,6 +313,11 @@ describe("websocket", () => {
             context: expect.objectContaining({
               config_kind: "explicit",
               workspace_label: "agentparty",
+            }),
+            decision: expect.objectContaining({
+              kind: "handoff",
+              owner: agent.name,
+              handoff_to: human.name,
             }),
           }),
         }),

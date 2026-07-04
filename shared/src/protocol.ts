@@ -46,10 +46,30 @@ export type CollaborationRole = "host" | "worker" | "reviewer" | "observer";
 export type CollaborationRoleSource = "self" | "assigned";
 export type Residency = "supervised" | "webhook" | "bare" | "human_driven" | "unknown";
 export type WakeKind = "none" | "watch" | "serve" | "webhook";
+export type HostDecisionKind = "decision" | "handoff" | "takeover";
 
 export interface WakeInfo {
   kind: WakeKind;
   verified_at?: number;
+}
+
+export interface HostDecision {
+  kind: HostDecisionKind;
+  owner: string;
+  decision: string;
+  next: string | null;
+  expires_at: number | null;
+  handoff_to?: string;
+  takeover_from?: string;
+}
+
+export interface SendHostDecision {
+  kind?: HostDecisionKind;
+  decision: string;
+  next?: string | null;
+  expires_at?: number | null;
+  handoff_to?: string | null;
+  takeover_from?: string | null;
 }
 
 export type ConfigSourceKind = "explicit" | "workspace" | "global" | "none";
@@ -167,6 +187,7 @@ export interface SendStatusFrame {
   residency?: Residency;
   wake?: WakeInfo;
   context?: AgentContext;
+  decision?: SendHostDecision;
 }
 
 export type SendFrame = SendMessageFrame | SendStatusFrame;
@@ -206,6 +227,7 @@ export interface StatusEvent {
   blocked_reason: string | null;
   updated_at: number;
   context?: AgentContext;
+  decision?: HostDecision;
 }
 
 export interface CompletionArtifact {
@@ -269,6 +291,7 @@ export interface PresenceFrame {
   last_seen?: number;
   status?: StatusEvent;
   role?: CollaborationRole;
+  role_source?: CollaborationRoleSource;
   residency?: Residency;
   wake?: WakeInfo;
   context?: AgentContext;

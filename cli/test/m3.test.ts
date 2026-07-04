@@ -611,6 +611,16 @@ describe("party status/history channel flag", () => {
       "human_driven",
       "--wake-kind",
       "none",
+      "--decision-kind",
+      "handoff",
+      "--decision",
+      "handoff release gate",
+      "--next",
+      "reviewer signs off",
+      "--expires-at",
+      "4200000",
+      "--handoff-to",
+      "reviewer-1",
     ]);
     expect(r.code).toBe(0);
     const req = reqsOf(mock, "POST", "/api/channels/dev/messages")[0]!;
@@ -621,6 +631,13 @@ describe("party status/history channel flag", () => {
       role: "host",
       residency: "human_driven",
       wake: { kind: "none" },
+      decision: {
+        kind: "handoff",
+        decision: "handoff release gate",
+        next: "reviewer signs off",
+        expires_at: 4200000,
+        handoff_to: "reviewer-1",
+      },
       context: {
         config_kind: "global",
         config_fingerprint: expect.stringMatching(/^sha256:[0-9a-f]{12}$/),
@@ -650,6 +667,10 @@ describe("party status/history channel flag", () => {
       ["status", "dev", "working", "--role", "agent"],
       ["status", "dev", "working", "--residency", "resident"],
       ["status", "dev", "working", "--wake-kind", "poll"],
+      ["status", "dev", "working", "--decision-kind", "lease"],
+      ["status", "dev", "working", "--decision-kind", "handoff"],
+      ["status", "dev", "working", "--decision", "handoff", "--handoff-to", "bad name"],
+      ["status", "dev", "working", "--decision", "takeover", "--takeover-from", "bad name"],
     ]) {
       const r = await runCli(args);
       expect(r.code).toBe(1);

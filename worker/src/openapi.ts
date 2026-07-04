@@ -209,6 +209,25 @@ export const openapiDocument = {
                           verified_at: { type: "integer" },
                         },
                       },
+                      decision: {
+                        type: "object",
+                        description: "structured host/coordinator decision event; server sets owner from the sender token",
+                        required: ["decision"],
+                        properties: {
+                          kind: { type: "string", enum: ["decision", "handoff", "takeover"], default: "decision" },
+                          decision: { type: "string", maxLength: 500 },
+                          next: { type: ["string", "null"], maxLength: 1000 },
+                          expires_at: { type: ["integer", "null"], minimum: 1 },
+                          handoff_to: {
+                            type: ["string", "null"],
+                            pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$",
+                          },
+                          takeover_from: {
+                            type: ["string", "null"],
+                            pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$",
+                          },
+                        },
+                      },
                       context: {
                         type: "object",
                         description: "safe agent execution context for presence/history audit; never includes raw token or local path",

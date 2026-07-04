@@ -1,5 +1,13 @@
 // party status — 发 status 消息（rest）
-import type { AgentContext, CollaborationRole, Residency, StatusState, WakeKind } from "@agentparty/shared";
+import type {
+  AgentContext,
+  CollaborationRole,
+  HostDecisionKind,
+  Residency,
+  SendHostDecision,
+  StatusState,
+  WakeKind,
+} from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel, saveCursor, workspaceId, workspaceLabel, worktreeLabel } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
@@ -10,6 +18,7 @@ const STATES: StatusState[] = ["working", "waiting", "blocked", "done"];
 const COLLAB_ROLES: CollaborationRole[] = ["host", "worker", "reviewer", "observer"];
 const RESIDENCIES: Residency[] = ["supervised", "webhook", "bare", "human_driven", "unknown"];
 const WAKE_KINDS: WakeKind[] = ["none", "watch", "serve", "webhook"];
+const DECISION_KINDS: HostDecisionKind[] = ["decision", "handoff", "takeover"];
 const STATUS_FLAGS = [
   "channel",
   "note",
@@ -20,6 +29,12 @@ const STATUS_FLAGS = [
   "role",
   "residency",
   "wake-kind",
+  "decision-kind",
+  "decision",
+  "next",
+  "expires-at",
+  "handoff-to",
+  "takeover-from",
   "debug-auth",
 ];
 const HELP = `usage: party status [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]... [--debug-auth]
@@ -37,6 +52,15 @@ Options:
   --role role      collaboration role: host|worker|reviewer|observer
   --residency r    wake residency: supervised|webhook|bare|human_driven|unknown
   --wake-kind k    wake layer kind: none|watch|serve|webhook
+  --decision text  structured host decision/handoff note
+  --decision-kind k
+                   decision type: decision|handoff|takeover
+  --next text      next action for the decision
+  --expires-at N   decision expiry as Unix epoch milliseconds
+  --handoff-to name
+                   agent taking over host/coordinator work
+  --takeover-from name
+                   stale host/coordinator being superseded
   --debug-auth     print resolved auth/config source to stderr`;
 
 function buildContext(auth: Awaited<ReturnType<typeof resolveAuthDetailed>>): AgentContext {
@@ -74,7 +98,21 @@ export async function run(argv: string[]): Promise<number> {
   let state: string | undefined;
   const flagError = valueFlagError(
     flags,
-    ["channel", "note", "summary-seq", "blocked-reason", "role", "residency", "wake-kind"],
+    [
+      "channel",
+      "note",
+      "summary-seq",
+      "blocked-reason",
+      "role",
+      "residency",
+      "wake-kind",
+      "decision-kind",
+      "decision",
+      "next",
+      "expires-at",
+      "handoff-to",
+      "takeover-from",
+    ],
     ["mention", "scope"],
   );
   if (flagError !== null) {
@@ -135,6 +173,49 @@ export async function run(argv: string[]): Promise<number> {
     console.error(`--wake-kind must be one of: ${WAKE_KINDS.join("|")}`);
     return 1;
   }
+  const decisionKind = str(flags["decision-kind"]);
+  if (decisionKind !== undefined && !DECISION_KINDS.includes(decisionKind as HostDecisionKind)) {
+    console.error(`--decision-kind must be one of: ${DECISION_KINDS.join("|")}`);
+    return 1;
+  }
+  const decisionText = str(flags.decision);
+  const next = str(flags.next);
+  const expiresAt = parsePositiveIntFlag(str(flags["expires-at"]), "expires-at");
+  if (typeof expiresAt === "string") {
+    console.error(expiresAt);
+    return 1;
+  }
+  const handoffTo = str(flags["handoff-to"]);
+  if (handoffTo !== undefined && !isName(handoffTo)) {
+    console.error("--handoff-to must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");
+    return 1;
+  }
+  const takeoverFrom = str(flags["takeover-from"]);
+  if (takeoverFrom !== undefined && !isName(takeoverFrom)) {
+    console.error("--takeover-from must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");
+    return 1;
+  }
+  const decisionFlagUsed =
+    decisionKind !== undefined ||
+    next !== undefined ||
+    expiresAt !== undefined ||
+    handoffTo !== undefined ||
+    takeoverFrom !== undefined;
+  if (decisionFlagUsed && decisionText === undefined) {
+    console.error("--decision is required when using decision metadata flags");
+    return 1;
+  }
+  const decision: SendHostDecision | undefined =
+    decisionText === undefined
+      ? undefined
+      : {
+          decision: decisionText,
+          ...(decisionKind !== undefined ? { kind: decisionKind as HostDecisionKind } : {}),
+          ...(next !== undefined ? { next } : {}),
+          ...(expiresAt !== undefined ? { expires_at: expiresAt } : {}),
+          ...(handoffTo !== undefined ? { handoff_to: handoffTo } : {}),
+          ...(takeoverFrom !== undefined ? { takeover_from: takeoverFrom } : {}),
+        };
   try {
     if (flags["debug-auth"] === true || process.env.AGENTPARTY_DEBUG_AUTH === "1") {
       try {
@@ -155,6 +236,7 @@ export async function run(argv: string[]): Promise<number> {
       ...(role !== undefined ? { role: role as CollaborationRole } : {}),
       ...(residency !== undefined ? { residency: residency as Residency } : {}),
       ...(wakeKind !== undefined ? { wake: { kind: wakeKind as WakeKind } } : {}),
+      ...(decision !== undefined ? { decision } : {}),
       context: buildContext(auth),
     });
     saveCursor(channel, seq);
