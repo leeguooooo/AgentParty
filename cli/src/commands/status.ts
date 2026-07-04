@@ -1,7 +1,7 @@
 // party status — 发 status 消息（rest）
-import type { CollaborationRole, Residency, StatusState, WakeKind } from "@agentparty/shared";
+import type { AgentContext, CollaborationRole, Residency, StatusState, WakeKind } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
-import { resolveChannel, saveCursor } from "../config";
+import { resolveChannel, saveCursor, workspaceId, workspaceLabel, worktreeLabel } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, handleRestError, postMessage } from "../rest";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
@@ -38,6 +38,17 @@ Options:
   --residency r    wake residency: supervised|webhook|bare|human_driven|unknown
   --wake-kind k    wake layer kind: none|watch|serve|webhook
   --debug-auth     print resolved auth/config source to stderr`;
+
+function buildContext(auth: Awaited<ReturnType<typeof resolveAuthDetailed>>): AgentContext {
+  const wt = worktreeLabel();
+  return {
+    config_kind: auth.config.kind,
+    ...(auth.config.token_fingerprint !== undefined ? { config_fingerprint: auth.config.token_fingerprint } : {}),
+    workspace_id: workspaceId(),
+    workspace_label: workspaceLabel(),
+    ...(wt !== undefined ? { worktree_label: wt } : {}),
+  };
+}
 
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
@@ -144,6 +155,7 @@ export async function run(argv: string[]): Promise<number> {
       ...(role !== undefined ? { role: role as CollaborationRole } : {}),
       ...(residency !== undefined ? { residency: residency as Residency } : {}),
       ...(wakeKind !== undefined ? { wake: { kind: wakeKind as WakeKind } } : {}),
+      context: buildContext(auth),
     });
     saveCursor(channel, seq);
     console.log(`status seq=${seq}`);

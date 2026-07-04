@@ -190,6 +190,32 @@ export const openapiDocument = {
                       kind: { type: "string", enum: ["status"] },
                       state: { type: "string", enum: ["working", "waiting", "blocked", "done"] },
                       note: { type: "string" },
+                      scope: { type: "array", items: { type: "string" } },
+                      summary_seq: { type: ["integer", "null"], minimum: 1 },
+                      blocked_reason: { type: ["string", "null"] },
+                      role: { type: "string", enum: ["host", "worker", "reviewer", "observer"] },
+                      residency: {
+                        type: "string",
+                        enum: ["supervised", "webhook", "bare", "human_driven", "unknown"],
+                      },
+                      wake: {
+                        type: "object",
+                        properties: {
+                          kind: { type: "string", enum: ["none", "watch", "serve", "webhook"] },
+                          verified_at: { type: "integer" },
+                        },
+                      },
+                      context: {
+                        type: "object",
+                        description: "safe agent execution context for presence/history audit; never includes raw token or local path",
+                        properties: {
+                          config_kind: { type: "string", enum: ["explicit", "workspace", "global", "none"] },
+                          config_fingerprint: { type: "string", example: "sha256:abc123def456" },
+                          workspace_id: { type: "string" },
+                          workspace_label: { type: "string" },
+                          worktree_label: { type: "string" },
+                        },
+                      },
                     },
                   },
                 ],

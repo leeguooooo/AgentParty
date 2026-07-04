@@ -16,6 +16,7 @@ import {
   WEBHOOK_RETRY_DELAYS_MS,
   WEBHOOK_TIMEOUT_MS,
   type ErrorCode,
+  type AgentContext,
   type CollaborationRole,
   type CompletionArtifact,
   type MsgFrame,
@@ -198,6 +199,10 @@ function statusEventFromRow(r: Record<string, unknown>, owner: string, state: St
         ? null
         : String(r.status_blocked_reason),
     updated_at: updatedAt,
+    ...(() => {
+      const context = parseStoredAgentContext(r.status_context_json);
+      return context === undefined ? {} : { context };
+    })(),
   };
 }
 
@@ -224,6 +229,47 @@ function parseWake(input: unknown): WakeInfo | undefined | null {
   return w.verified_at === undefined
     ? { kind: w.kind as WakeKind }
     : { kind: w.kind as WakeKind, verified_at: w.verified_at };
+}
+
+function parseStoredAgentContext(input: unknown): AgentContext | undefined {
+  if (typeof input !== "string" || input === "") return undefined;
+  try {
+    return parseAgentContext(JSON.parse(input) as unknown) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeContextString(input: unknown, max = 160): string | undefined | null {
+  if (input === undefined) return undefined;
+  if (typeof input !== "string") return null;
+  const trimmed = input.trim();
+  if (trimmed === "" || trimmed.length > max) return null;
+  return trimmed;
+}
+
+function parseAgentContext(input: unknown): AgentContext | undefined | null {
+  if (input === undefined) return undefined;
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  const configKind = raw.config_kind;
+  if (configKind !== undefined && !["explicit", "workspace", "global", "none"].includes(String(configKind))) {
+    return null;
+  }
+  const configFingerprint = safeContextString(raw.config_fingerprint, 80);
+  const workspaceId = safeContextString(raw.workspace_id, 128);
+  const workspaceLabel = safeContextString(raw.workspace_label, 80);
+  const worktreeLabel = safeContextString(raw.worktree_label, 120);
+  if (configFingerprint === null || workspaceId === null || workspaceLabel === null || worktreeLabel === null) {
+    return null;
+  }
+  return {
+    ...(configKind === undefined ? {} : { config_kind: String(configKind) as AgentContext["config_kind"] }),
+    ...(configFingerprint === undefined ? {} : { config_fingerprint: configFingerprint }),
+    ...(workspaceId === undefined ? {} : { workspace_id: workspaceId }),
+    ...(workspaceLabel === undefined ? {} : { workspace_label: workspaceLabel }),
+    ...(worktreeLabel === undefined ? {} : { worktree_label: worktreeLabel }),
+  };
 }
 
 // rest body 与 ws send 帧共用的校验（rest 侧无 type 字段）
@@ -264,6 +310,8 @@ function parseSendFrame(input: unknown): SendFrame | null {
     if (residency === null) return null;
     const wake = parseWake(f.wake);
     if (wake === null) return null;
+    const context = parseAgentContext(f.context);
+    if (context === null) return null;
     const scope = parseStatusScope(f.scope);
     if (scope === null) return null;
     const summarySeq = parseOptionalPositiveSeq(f.summary_seq);
@@ -287,6 +335,7 @@ function parseSendFrame(input: unknown): SendFrame | null {
       ...(role !== undefined ? { role } : {}),
       ...(residency !== undefined ? { residency } : {}),
       ...(wake !== undefined ? { wake } : {}),
+      ...(context !== undefined ? { context } : {}),
     };
   }
   return null;
@@ -352,6 +401,7 @@ export class ChannelDO extends Server<Env> {
       status_scope_json TEXT,
       status_summary_seq INTEGER,
       status_blocked_reason TEXT,
+      status_context_json TEXT,
       completion_artifact_json TEXT,
       original_body TEXT,
       edited_at INTEGER,
@@ -372,6 +422,7 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE messages ADD COLUMN status_scope_json TEXT",
       "ALTER TABLE messages ADD COLUMN status_summary_seq INTEGER",
       "ALTER TABLE messages ADD COLUMN status_blocked_reason TEXT",
+      "ALTER TABLE messages ADD COLUMN status_context_json TEXT",
       "ALTER TABLE messages ADD COLUMN completion_artifact_json TEXT",
       "ALTER TABLE messages ADD COLUMN original_body TEXT",
       "ALTER TABLE messages ADD COLUMN edited_at INTEGER",
@@ -395,19 +446,23 @@ export class ChannelDO extends Server<Env> {
       status_scope_json TEXT,
       status_summary_seq INTEGER,
       status_blocked_reason TEXT,
+      status_context_json TEXT,
       role TEXT,
       residency TEXT,
       wake_kind TEXT,
-      wake_verified_at INTEGER
+      wake_verified_at INTEGER,
+      context_json TEXT
     )`);
     for (const ddl of [
       "ALTER TABLE presence ADD COLUMN role TEXT",
       "ALTER TABLE presence ADD COLUMN residency TEXT",
       "ALTER TABLE presence ADD COLUMN wake_kind TEXT",
       "ALTER TABLE presence ADD COLUMN wake_verified_at INTEGER",
+      "ALTER TABLE presence ADD COLUMN context_json TEXT",
       "ALTER TABLE presence ADD COLUMN status_scope_json TEXT",
       "ALTER TABLE presence ADD COLUMN status_summary_seq INTEGER",
       "ALTER TABLE presence ADD COLUMN status_blocked_reason TEXT",
+      "ALTER TABLE presence ADD COLUMN status_context_json TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -1440,6 +1495,7 @@ export class ChannelDO extends Server<Env> {
             summary_seq: frame.summary_seq ?? null,
             blocked_reason: frame.blocked_reason ?? null,
             updated_at: now,
+            ...(frame.context === undefined ? {} : { context: frame.context }),
           }
         : null;
     const msg: MsgFrame =
@@ -1474,9 +1530,10 @@ export class ChannelDO extends Server<Env> {
     sql.exec(
       `INSERT INTO messages (
          seq, sender_name, sender_kind, sender_owner, kind, body, mentions_json, reply_to,
-         state, note, status_scope_json, status_summary_seq, status_blocked_reason, completion_artifact_json, ts
+         state, note, status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
+         completion_artifact_json, ts
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
@@ -1490,6 +1547,7 @@ export class ChannelDO extends Server<Env> {
       status === null ? null : JSON.stringify(status.scope),
       status?.summary_seq ?? null,
       status?.blocked_reason ?? null,
+      status?.context === undefined ? null : JSON.stringify(status.context),
       frame.kind === "message" && frame.completion_artifact !== undefined
         ? JSON.stringify(frame.completion_artifact)
         : null,
@@ -1511,9 +1569,9 @@ export class ChannelDO extends Server<Env> {
       sql.exec(
         `INSERT INTO presence (
            name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
-           role, residency, wake_kind, wake_verified_at
+           status_context_json, role, residency, wake_kind, wake_verified_at, context_json
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            state = excluded.state,
            note = excluded.note,
@@ -1521,10 +1579,12 @@ export class ChannelDO extends Server<Env> {
            status_scope_json = excluded.status_scope_json,
            status_summary_seq = excluded.status_summary_seq,
            status_blocked_reason = excluded.status_blocked_reason,
+           status_context_json = excluded.status_context_json,
            role = COALESCE(excluded.role, presence.role),
            residency = COALESCE(excluded.residency, presence.residency),
            wake_kind = CASE WHEN ? THEN excluded.wake_kind ELSE presence.wake_kind END,
-           wake_verified_at = CASE WHEN ? THEN excluded.wake_verified_at ELSE presence.wake_verified_at END`,
+           wake_verified_at = CASE WHEN ? THEN excluded.wake_verified_at ELSE presence.wake_verified_at END,
+           context_json = COALESCE(excluded.context_json, presence.context_json)`,
         identity.name,
         frame.state,
         frame.note,
@@ -1532,10 +1592,12 @@ export class ChannelDO extends Server<Env> {
         JSON.stringify(status?.scope ?? []),
         status?.summary_seq ?? null,
         status?.blocked_reason ?? null,
+        status?.context === undefined ? null : JSON.stringify(status.context),
         frame.role ?? null,
         frame.residency ?? null,
         frame.wake?.kind ?? null,
         frame.wake?.verified_at ?? null,
+        frame.context === undefined ? null : JSON.stringify(frame.context),
         wakeProvided,
         wakeProvided,
       );
@@ -1702,7 +1764,7 @@ export class ChannelDO extends Server<Env> {
     return this.ctx.storage.sql
       .exec(
         `SELECT name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
-                role, residency, wake_kind, wake_verified_at
+                status_context_json, role, residency, wake_kind, wake_verified_at, context_json
          FROM presence ORDER BY name`,
       )
       .toArray()
@@ -1713,7 +1775,7 @@ export class ChannelDO extends Server<Env> {
     const rows = this.ctx.storage.sql
       .exec(
         `SELECT name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
-                role, residency, wake_kind, wake_verified_at
+                status_context_json, role, residency, wake_kind, wake_verified_at, context_json
          FROM presence WHERE name = ?`,
         name,
       )
@@ -1744,6 +1806,10 @@ export class ChannelDO extends Server<Env> {
       ...(r.role === null || r.role === undefined ? {} : { role: String(r.role) as CollaborationRole }),
       ...(r.residency === null || r.residency === undefined ? {} : { residency: String(r.residency) as Residency }),
       ...(wake === undefined ? {} : { wake }),
+      ...(() => {
+        const context = parseStoredAgentContext(r.context_json);
+        return context === undefined ? {} : { context };
+      })(),
     };
   }
 

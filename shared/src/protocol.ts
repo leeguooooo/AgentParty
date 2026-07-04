@@ -51,6 +51,16 @@ export interface WakeInfo {
   verified_at?: number;
 }
 
+export type ConfigSourceKind = "explicit" | "workspace" | "global" | "none";
+
+export interface AgentContext {
+  config_kind?: ConfigSourceKind;
+  config_fingerprint?: string;
+  workspace_id?: string;
+  workspace_label?: string;
+  worktree_label?: string;
+}
+
 export interface WakeDelivery {
   mention_seq: number;
   target_name: string;
@@ -123,6 +133,7 @@ export interface PresenceEntry {
   role?: CollaborationRole;
   residency?: Residency;
   wake?: WakeInfo;
+  context?: AgentContext;
 }
 
 // ---- 客户端 → 服务端帧 ----
@@ -153,6 +164,7 @@ export interface SendStatusFrame {
   role?: CollaborationRole;
   residency?: Residency;
   wake?: WakeInfo;
+  context?: AgentContext;
 }
 
 export type SendFrame = SendMessageFrame | SendStatusFrame;
@@ -191,6 +203,7 @@ export interface StatusEvent {
   summary_seq: number | null;
   blocked_reason: string | null;
   updated_at: number;
+  context?: AgentContext;
 }
 
 export interface CompletionArtifact {
@@ -254,6 +267,7 @@ export interface PresenceFrame {
   role?: CollaborationRole;
   residency?: Residency;
   wake?: WakeInfo;
+  context?: AgentContext;
 }
 
 export interface ErrorFrame {

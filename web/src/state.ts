@@ -153,6 +153,7 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
             role: frame.role,
             residency: frame.residency,
             wake: frame.wake,
+            context: frame.context,
           },
         },
       };

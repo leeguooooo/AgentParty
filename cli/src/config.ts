@@ -1,6 +1,7 @@
 // 全局配置与 workspace 游标状态
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -135,6 +136,33 @@ export function slugifyBasename(name: string): string {
 export function workspaceId(cwd: string = process.cwd()): string {
   const hash = createHash("sha256").update(cwd).digest("hex").slice(0, 16);
   return `${slugifyBasename(basename(cwd))}-${hash}`;
+}
+
+export function workspaceLabel(cwd: string = process.cwd()): string {
+  return basename(cwd) || "workspace";
+}
+
+function gitOutput(cwd: string, args: string[]): string | null {
+  try {
+    const res = spawnSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      timeout: 1_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    if (res.status !== 0) return null;
+    const out = String(res.stdout).trim();
+    return out === "" ? null : out;
+  } catch {
+    return null;
+  }
+}
+
+export function worktreeLabel(cwd: string = process.cwd()): string | undefined {
+  const root = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
+  if (root === null) return undefined;
+  const branch = gitOutput(cwd, ["branch", "--show-current"]);
+  const head = branch ?? gitOutput(cwd, ["rev-parse", "--short", "HEAD"]);
+  return head === null ? basename(root) : `${basename(root)}:${head}`;
 }
 
 export function statePath(cwd: string = process.cwd()): string {

@@ -155,6 +155,13 @@ describe("websocket", () => {
       role: "worker",
       residency: "supervised",
       wake: { kind: "serve", verified_at: 123 },
+      context: {
+        config_kind: "explicit",
+        config_fingerprint: "sha256:abc123",
+        workspace_id: "agentparty-deadbeef",
+        workspace_label: "agentparty",
+        worktree_label: "agentparty:main",
+      },
       scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
       blocked_reason: "waiting for schema review",
       summary_seq: 42,
@@ -176,6 +183,12 @@ describe("websocket", () => {
         scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
         blocked_reason: "waiting for schema review",
         summary_seq: 42,
+        context: {
+          config_kind: "explicit",
+          config_fingerprint: "sha256:abc123",
+          workspace_label: "agentparty",
+          worktree_label: "agentparty:main",
+        },
       },
     });
     const presence = await watcher.nextOfType("presence");
@@ -193,6 +206,13 @@ describe("websocket", () => {
       role: "worker",
       residency: "supervised",
       wake: { kind: "serve", verified_at: 123 },
+      context: {
+        config_kind: "explicit",
+        config_fingerprint: "sha256:abc123",
+        workspace_id: "agentparty-deadbeef",
+        workspace_label: "agentparty",
+        worktree_label: "agentparty:main",
+      },
     });
 
     worker.send({
@@ -220,6 +240,13 @@ describe("websocket", () => {
       role: "worker",
       residency: "supervised",
       wake: { kind: "none" },
+      context: {
+        config_kind: "explicit",
+        config_fingerprint: "sha256:abc123",
+        workspace_id: "agentparty-deadbeef",
+        workspace_label: "agentparty",
+        worktree_label: "agentparty:main",
+      },
     });
     expect(changedWake.wake).not.toHaveProperty("verified_at");
 
@@ -238,6 +265,11 @@ describe("websocket", () => {
         role: "worker",
         residency: "supervised",
         wake: { kind: "none" },
+        context: expect.objectContaining({
+          config_kind: "explicit",
+          workspace_label: "agentparty",
+          worktree_label: "agentparty:main",
+        }),
       }),
     );
     const history = await SELF.fetch(`http://local/api/channels/${slug}/messages`, {
@@ -254,6 +286,10 @@ describe("websocket", () => {
             scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
             blocked_reason: "waiting for schema review",
             summary_seq: 42,
+            context: expect.objectContaining({
+              config_kind: "explicit",
+              workspace_label: "agentparty",
+            }),
           }),
         }),
       ]),

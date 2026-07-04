@@ -24,6 +24,7 @@ interface Item {
   residency: NonNullable<PresenceEntry["residency"]> | null;
   wakeKind: NonNullable<PresenceEntry["wake"]>["kind"] | null;
   wakeVerifiedAt: number | null;
+  context: PresenceEntry["context"] | null;
   owner: string | null; // 所属人：agent 的操作者 / 人类的 email，仅连接中的参与者可知
 }
 
@@ -82,6 +83,7 @@ export function PresenceBar({ presence, participants, status, party = false, isP
       residency: entry?.residency ?? null,
       wakeKind: entry?.wake?.kind ?? null,
       wakeVerifiedAt: entry?.wake?.verified_at ?? null,
+      context: entry?.context ?? null,
     };
     if (!connected) {
       return { name, state: "offline", note: null, ts: entry?.ts ?? null, owner: null, ...meta };
@@ -107,6 +109,11 @@ export function PresenceBar({ presence, participants, status, party = false, isP
           it.residency !== null ? `residency: ${it.residency}` : null,
           it.wakeKind !== null ? `wake: ${it.wakeKind}` : null,
           it.wakeVerifiedAt !== null ? `wake verified: ${fmtRel(it.wakeVerifiedAt)}` : null,
+          it.context?.config_kind !== undefined ? `config: ${it.context.config_kind}` : null,
+          it.context?.config_fingerprint !== undefined ? `fingerprint: ${it.context.config_fingerprint}` : null,
+          it.context?.workspace_id !== undefined ? `workspace id: ${it.context.workspace_id}` : null,
+          it.context?.workspace_label !== undefined ? `workspace: ${it.context.workspace_label}` : null,
+          it.context?.worktree_label !== undefined ? `worktree: ${it.context.worktree_label}` : null,
           it.lastSeen !== null ? `last seen: ${fmtRel(it.lastSeen)}` : null,
         ].filter((part): part is string => part !== null);
         return (
@@ -134,6 +141,12 @@ export function PresenceBar({ presence, participants, status, party = false, isP
               <span className={`t-mono presence-wake presence-wake--${wakeability.tone}`}>
                 {wakeability.text}
               </span>
+            )}
+            {it.context?.worktree_label !== undefined && (
+              <span className="t-mono presence-context">{it.context.worktree_label}</span>
+            )}
+            {it.context?.config_kind !== undefined && (
+              <span className="t-mono presence-context">cfg:{it.context.config_kind}</span>
             )}
             {it.note !== null && it.note !== "" && <span className="t-mono presence-note">{it.note}</span>}
             {it.ts !== null && <span className="t-mono presence-ts">{fmtRel(it.ts)}</span>}

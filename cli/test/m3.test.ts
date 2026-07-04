@@ -621,7 +621,14 @@ describe("party status/history channel flag", () => {
       role: "host",
       residency: "human_driven",
       wake: { kind: "none" },
+      context: {
+        config_kind: "global",
+        config_fingerprint: expect.stringMatching(/^sha256:[0-9a-f]{12}$/),
+        workspace_id: expect.stringMatching(/^[a-z0-9-]+-[0-9a-f]{16}$/),
+        workspace_label: expect.any(String),
+      },
     });
+    expect((req.body as { context: { worktree_label?: string } }).context.worktree_label).toContain("herness-use:");
   });
 
   test("status debug-auth prints safe runtime/config source without raw token", async () => {
