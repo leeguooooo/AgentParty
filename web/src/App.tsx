@@ -13,6 +13,8 @@ import {
   getToken,
   isShareMode,
   listChannels,
+  readSession,
+  saveSession,
   saveToken,
   storedToken,
   type ChannelInfo,
@@ -24,6 +26,7 @@ import {
   completeLogin,
   fetchOidcConfig,
   isCallbackPath,
+  refreshSession,
 } from "./lib/oidc";
 import { ChannelPage } from "./pages/Channel";
 import { Home } from "./pages/Home";
@@ -40,8 +43,14 @@ export function App() {
   // 命中 /auth/callback 时先挂起，避免闪一下登录闸；换 token 成功/失败后落定
   const [oidcPending, setOidcPending] = useState<boolean>(() => isCallbackPath());
 
-  // token 失效（401 / ws 被踢 revoked）→ 回登录闸；分享模式先摘掉坏 ?t=
-  const onAuthFailed = useCallback((message: string) => {
+  // oidc 配置存 ref，供 onAuthFailed/续期在稳定回调里读到最新值（避免进 effect 依赖引发重跑）
+  const oidcRef = useRef<OidcConfig | null>(null);
+  useEffect(() => {
+    oidcRef.current = oidc;
+  }, [oidc]);
+
+  // 真正踢回登录闸：分享模式先摘掉坏 ?t= 退回粘贴 token，否则清会话
+  const hardLogout = useCallback((message: string) => {
     if (isShareMode()) {
       const failed = currentShareToken();
       clearShareToken();
@@ -62,6 +71,47 @@ export function App() {
     setToken(null);
   }, []);
 
+  // 静默续期（去重）：refresh_token 会轮换，并发续期会互相作废，故全局只跑一枚在途 promise。
+  // 成功 → 落盘新会话 + setToken（触发下游用新 access_token 重连/重拉）；返回新 access_token。
+  const refreshInFlight = useRef<Promise<string> | null>(null);
+  const doRefresh = useCallback((): Promise<string> => {
+    if (refreshInFlight.current) return refreshInFlight.current;
+    const sess = readSession();
+    if (oidcRef.current === null || sess?.refreshToken == null) {
+      return Promise.reject(new Error("no refreshable session"));
+    }
+    const p = refreshSession(oidcRef.current, sess.refreshToken)
+      .then((next) => {
+        saveSession(next);
+        setAuthError(null);
+        setToken(next.accessToken);
+        return next.accessToken;
+      })
+      .finally(() => {
+        refreshInFlight.current = null;
+      });
+    refreshInFlight.current = p;
+    return p;
+  }, []);
+
+  // token 失效（401 / ws 被踢）：OIDC 会话先试静默续期，续到就不掉登录；续不动才真踢回登录闸。
+  const onAuthFailed = useCallback(
+    (message: string) => {
+      const sess = readSession();
+      if (!isShareMode() && sess?.refreshToken != null && oidcRef.current !== null) {
+        doRefresh()
+          .then(() => {
+            setChannels(null);
+            setListError(null);
+          })
+          .catch(() => hardLogout(message));
+        return;
+      }
+      hardLogout(message);
+    },
+    [doRefresh, hardLogout],
+  );
+
   // 启动时拉一次公开配置决定是否显示 SSO；若正落在 OIDC 回调则就地换 token
   // ref 守卫：code_verifier 一次性，StrictMode 双跑不得重复兑换 code
   const callbackHandled = useRef(false);
@@ -79,13 +129,13 @@ export function App() {
         return;
       }
       completeLogin(cfg)
-        .then((accessToken) => {
+        .then((sess) => {
           if (!alive) return;
-          saveToken(accessToken);
+          saveSession(sess); // 存 access + refresh，供静默续期
           setAuthError(null);
           setChannels(null);
           setListError(null);
-          setToken(accessToken);
+          setToken(sess.accessToken);
           setOidcPending(false);
           replace("/");
         })
@@ -119,6 +169,25 @@ export function App() {
       alive = false;
     };
   }, [token]);
+
+  // OIDC access_token 仅 ~10min：到期前 60s 主动续期，标签页长开也不掉登录（"humans watch" 常态）。
+  // 每次 token 变化重排下一次；非 OIDC 会话（粘贴的机器 token）无 refresh，跳过。
+  useEffect(() => {
+    if (oidc === null || token === null) return;
+    const sess = readSession();
+    if (sess?.refreshToken == null || sess.expiresAt == null) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const delayMs = Math.max(0, sess.expiresAt - 60 - nowSec) * 1000;
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      if (!alive) return;
+      doRefresh().catch(() => hardLogout("session expired — please sign in again"));
+    }, delayMs);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [oidc, token, doRefresh, hardLogout]);
 
   useEffect(() => {
     if (token === null) return;

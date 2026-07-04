@@ -2,9 +2,11 @@
 // 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它，并立即从地址栏移除；
 // share token 只放 sessionStorage，本次标签页可刷新，避免长期落 localStorage。
 import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
+import type { WebSession } from "./oidc";
 
 const TOKEN_KEY = "ap_token";
 const SHARE_TOKEN_KEY = "ap_share_token";
+const SESSION_KEY = "ap_oidc_session";
 let activeShareToken: string | null = null;
 
 export class AuthError extends Error {}
@@ -54,6 +56,23 @@ export function saveToken(token: string) {
 
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(SESSION_KEY);
+}
+
+// OIDC 网页会话（access + refresh + 过期），用于静默续期。access_token 镜像到 ap_token，
+// 故 getToken() 取到的仍是当前 access_token；续期后覆盖二者。
+export function saveSession(sess: WebSession) {
+  localStorage.setItem(SESSION_KEY, JSON.stringify(sess));
+  localStorage.setItem(TOKEN_KEY, sess.accessToken);
+}
+
+export function readSession(): WebSession | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    return raw ? (JSON.parse(raw) as WebSession) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function clearShareToken() {
