@@ -1,7 +1,8 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
 import type { PresenceEntry, Sender } from "@agentparty/shared";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
+import { agentHue } from "../lib/agentColor";
 import { fmtRel } from "../lib/time";
 import type { SocketStatus } from "../lib/ws";
 
@@ -54,6 +55,7 @@ export function PresenceBar({ presence, participants, status, party = false, isP
           key={it.name}
           className={`d-pill presence-pill${it.state === "blocked" ? " presence-pill--blocked" : ""}`}
           title={it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name}
+          style={{ "--ah": agentHue(it.name) } as CSSProperties}
         >
           <span className={`d-dot d-dot--${it.state}`} />
           <span className="presence-name">{it.name}</span>

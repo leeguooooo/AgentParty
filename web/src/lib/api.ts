@@ -144,6 +144,32 @@ export async function createChannelAgent(
   return (await res.json()) as ChannelAgent;
 }
 
+// 页面建频道（spec §3.1）：登录人类账号可建公开/私有频道；scoped/readonly token 会被服务端 403。
+// owner_account 由服务端从会话推导。201 只回 {slug,title,kind,mode,visibility}，列表随后刷新补全。
+export interface NewChannel {
+  slug: string;
+  title?: string;
+  mode?: "normal" | "party";
+  visibility?: "public" | "private";
+}
+
+export async function createChannel(
+  token: string,
+  input: NewChannel,
+): Promise<{ slug: string }> {
+  const res = await fetch("/api/channels", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ kind: "standing", ...input }),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("no permission to create channels");
+  if (res.status === 409) throw new ConflictError("slug already exists");
+  if (res.status === 400) throw new ValidationError("invalid channel");
+  if (!res.ok) throw new Error(`POST /api/channels failed (${res.status})`);
+  return (await res.json()) as { slug: string };
+}
+
 // 归档频道的 ws 会被 1008 直接踢掉、零补推；网页回看走这条 rest（spec §6）
 export async function fetchMessages(token: string, slug: string, limit = 1000): Promise<MsgFrame[]> {
   const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/messages?limit=${limit}`, {

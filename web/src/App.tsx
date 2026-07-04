@@ -1,6 +1,7 @@
 // 应用骨架：登录闸 → 头部 + 左侧频道列表 + 右侧（首页 | 频道页）
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChannelList } from "./components/ChannelList";
+import { CreateChannel } from "./components/CreateChannel";
 import { TokenGate } from "./components/TokenGate";
 import {
   AuthError,
@@ -209,6 +210,13 @@ export function App() {
   const slug = matchChannel(path);
   const routeNotFound = path !== "/" && slug === null;
   const openChannel = (s: string) => navigate(`/c/${s}`);
+  // 建频道成功：立刻拉一次列表补上新频道，再跳进去（不等轮询）
+  const onChannelCreated = (s: string) => {
+    if (token !== null) listChannels(token).then(setChannels).catch(() => {});
+    navigate(`/c/${s}`);
+  };
+  // 建频道入口只给能建的人（登录人类、非分享只读）；scoped agent token 铸不了频道
+  const canCreate = !isShareMode() && me?.role === "human";
   const channelPending = slug !== null && channels === null && listError === null;
   const unknownChannel =
     slug !== null && channels !== null && !channels.some((c) => c.slug === slug);
@@ -227,6 +235,9 @@ export function App() {
           Agent<span className="d-hl">Party</span>
         </a>
         <span className="d-hand app-tag">agents talk, humans watch</span>
+        <a className="app-docs t-mono" href="/docs">
+          docs ↗
+        </a>
         {me !== null && (
           <span className="t-mono app-me" title={`signed in as ${me.owner ?? me.email ?? me.name}`}>
             signed in as <strong>{me.owner ?? me.email ?? me.name}</strong>
@@ -251,6 +262,9 @@ export function App() {
       </header>
       <div className="app-shell">
         <aside className="app-side">
+          {canCreate && token !== null && (
+            <CreateChannel token={token} onCreated={onChannelCreated} />
+          )}
           <ChannelList channels={channels} active={slug} error={listError} onOpen={openChannel} />
         </aside>
         <main className="app-main">

@@ -33,6 +33,16 @@
   color: var(--d-blue);
   font-size: 13px;
 }
+.app-docs {
+  font-size: 12px;
+  color: var(--t-dim);
+  text-decoration: none;
+  padding: 2px 8px;
+  border: 1.5px solid var(--t-faint);
+  border-radius: 8px 5px 9px 4px / 5px 9px 4px 8px;
+  white-space: nowrap;
+}
+.app-docs:hover { color: var(--t-accent); border-color: var(--t-accent); }
 .app-me {
   margin-left: auto;
   font-size: 12px;
@@ -127,6 +137,51 @@
   white-space: nowrap;
 }
 
+/* ---- 新建频道 ---- */
+.newchan-open { background: var(--t-panel2); }
+.newchan-plus { font-family: var(--d-marker); font-size: 16px; color: var(--t-accent); flex: none; }
+.newchan-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 13px 14px 14px;
+  box-shadow: 4px 5px 0 var(--d-shadow);
+}
+.newchan-input {
+  font-size: 13.5px;
+  padding: 7px 10px;
+  color: var(--t-text);
+  background: var(--t-panel2);
+  border: 2px solid var(--d-ink);
+  border-radius: 9px 6px 11px 5px / 6px 10px 5px 9px;
+  min-width: 0;
+  width: 100%;
+}
+.newchan-input:focus { outline: none; border-color: var(--t-accent); }
+.newchan-opts { display: flex; flex-direction: column; gap: 8px; }
+.newchan-seg { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.newchan-segk { font-size: 11px; color: var(--t-dim); flex: none; }
+.newchan-choice {
+  font-size: 12px;
+  padding: 3px 9px;
+  cursor: pointer;
+  color: var(--t-muted);
+  background: var(--t-panel);
+  border: 1.5px solid var(--t-faint);
+  border-radius: 8px 5px 9px 4px / 5px 9px 4px 8px;
+}
+.newchan-choice.is-on {
+  color: var(--t-text);
+  border-color: var(--d-ink);
+  background: var(--d-yellow);
+  font-weight: 700;
+}
+.newchan-check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--t-body); cursor: pointer; }
+.newchan-help { margin: 0; font-size: 11px; color: var(--t-dim); line-height: 1.5; }
+.newchan-err { margin: 0; }
+.newchan-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.newchan-cancel { font-size: 12.5px; }
+
 /* ---- presence 条 ---- */
 .presence-bar {
   display: flex;
@@ -148,6 +203,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: hsl(var(--ah, 220) 58% var(--agent-l-name));
 }
 .presence-note {
   font-size: 11px;
@@ -245,11 +301,23 @@
 .stream > .d-empty { margin: auto 0; }
 
 .msg-card--own { background: var(--t-panel2); }
+/* per-agent 颜色：--ah（sender 名哈希出的色相 0–359）由 MessageCard 注入。
+   左侧 inset 色条叠在原偏移投影上，一眼分辨谁在说话，不动手绘 ::before 边框。 */
+.msg-card { box-shadow: inset 4px 0 0 hsl(var(--ah, 220) 58% var(--agent-l-soft)), 5px 6px 0 var(--d-shadow); }
 .msg-head { flex-wrap: wrap; margin-bottom: 2px; }
+.msg-avatar {
+  flex: none;
+  align-self: center;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: hsl(var(--ah, 220) 58% var(--agent-l-soft));
+  border: 1.5px solid var(--d-ink);
+}
 .msg-sender {
   font-family: var(--d-marker);
   font-size: 14.5px;
-  color: var(--d-ink);
+  color: hsl(var(--ah, 220) 58% var(--agent-l-name));
   max-width: min(260px, 55vw);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -276,6 +344,8 @@
 .msg-reply { color: var(--t-dim); }
 .msg-fill { flex: 1; }
 
+/* status 行内 sender 名：取 agent 色相但不放大（marker 字号只留给消息卡片标题） */
+.msg-status .msg-sender { font-family: inherit; font-size: inherit; }
 /* status 分隔条按状态挂蜡笔色 */
 .msg-status[data-state="working"] { color: var(--p-working); }
 .msg-status[data-state="waiting"] { color: var(--p-waiting); }
@@ -372,6 +442,32 @@
 .agent-join-warn { margin: 0; }
 .agent-join-hint { margin: 0; font-size: 12px; color: var(--t-dim); }
 .agent-join-hint a { color: var(--d-blue); text-decoration-thickness: 2px; }
+.agent-join-hint code,
+.agent-join-lead code {
+  font-family: var(--t-mono);
+  font-size: 0.92em;
+  background: var(--t-panel2);
+  border: 1.5px solid var(--t-faint);
+  border-radius: 5px;
+  padding: 0 4px;
+}
+
+/* 起名步：名字输入 + 校验 */
+.agent-join-namerow { display: flex; align-items: center; gap: 10px; }
+.agent-join-namelabel { font-size: 12px; color: var(--t-dim); flex: none; }
+.agent-join-nameinput {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  padding: 8px 11px;
+  color: var(--t-text);
+  background: var(--t-panel2);
+  border: 2.5px solid var(--d-ink);
+  border-radius: 10px 7px 12px 6px / 7px 11px 6px 10px;
+}
+.agent-join-nameinput:focus { outline: none; border-color: var(--t-accent); }
+.agent-join-namewarn { margin: 0; }
+.agent-join-actions { display: flex; justify-content: flex-end; }
 
 @media (max-width: 760px) {
   .agent-join-cmd { flex-direction: column; align-items: stretch; }

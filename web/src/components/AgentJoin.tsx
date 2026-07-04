@@ -1,5 +1,6 @@
-// 频道页「＋ 让 agent 加入」：登录人类点一下，铸一枚 channel-scoped agent token，
-// 弹出手绘浮层，展示可一键复制的接入命令。明文 token 只出现这一次（spec §10）。
+// 频道页「＋ 让 agent 加入」：登录人类先给 agent 起个能认出来的名字（默认 <你>-<频道>，
+// 可改成 drawstyle-review 这类），再铸一枚 channel-scoped agent token，弹出可复制的接入脚本。
+// 明文 token 只出现这一次（spec §10）。名字有意义 = 频道里一眼分清谁的哪个项目，不再是随机后缀。
 import { useCallback, useState } from "react";
 import {
   AuthError,
@@ -17,27 +18,21 @@ interface Props {
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const RESERVED = new Set(["system"]);
-const SUFFIX_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
-function randSuffix(n = 6): string {
-  const buf = new Uint32Array(n);
-  crypto.getRandomValues(buf);
-  let out = "";
-  for (let i = 0; i < n; i++) out += SUFFIX_ALPHABET[buf[i]! % SUFFIX_ALPHABET.length];
-  return out;
-}
-
-// 从前缀 + 6 位随机后缀拼一个必然匹配 NAME_RE、且非保留名的 agent 名。
-function genName(prefix: string): string {
-  let base = prefix
+// 从前缀清洗出一个合法的名字词根（小写、仅 [a-z0-9._-]、去首尾非字母数字）。
+function cleanBase(prefix: string): string {
+  const base = prefix
     .toLowerCase()
     .replace(/[^a-z0-9._-]/g, "")
     .replace(/^[^a-z0-9]+/, "")
     .slice(0, 24);
-  if (base === "") base = "agent";
-  const name = `${base}-${randSuffix()}`;
-  // 前缀被清空成保留名的极端情形（如 "system"）由随机后缀天然打破，这里再兜一层。
-  return NAME_RE.test(name) && !RESERVED.has(name) ? name : `agent-${randSuffix()}`;
+  return base || "agent";
+}
+
+// 默认建议名：<你>-<频道>，直观且大概率唯一；占用了让用户自己改（不再塞随机后缀糊弄）。
+function suggestName(prefix: string, slug: string): string {
+  const name = `${cleanBase(prefix)}-${slug}`.slice(0, 64);
+  return NAME_RE.test(name) && !RESERVED.has(name) ? name : cleanBase(prefix);
 }
 
 // clipboard 优先，失败退回隐藏 textarea + execCommand（http 或旧浏览器兜底）。
@@ -69,57 +64,68 @@ async function copyText(text: string): Promise<boolean> {
 
 type Phase =
   | { kind: "idle" }
+  | { kind: "compose" } // 起名中
   | { kind: "loading" }
-  | { kind: "done"; command: string }
+  | { kind: "done"; name: string; command: string }
   | { kind: "error"; message: string };
 
 export function AgentJoin({ slug, token, namePrefix }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  const [name, setName] = useState("");
+  const [nameErr, setNameErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  const open = useCallback(() => {
+    setName(suggestName(namePrefix, slug));
+    setNameErr(null);
+    setPhase({ kind: "compose" });
+  }, [namePrefix, slug]);
+
+  const close = useCallback(() => {
+    setPhase({ kind: "idle" });
+    setCopied(false);
+    setNameErr(null);
+  }, []);
+
   const mint = useCallback(async () => {
+    const wanted = name.trim();
+    if (!NAME_RE.test(wanted) || RESERVED.has(wanted)) {
+      setNameErr("名字只能用字母/数字/._- ，1–64 位，且不能是 system");
+      return;
+    }
+    setNameErr(null);
     setPhase({ kind: "loading" });
     try {
-      let name = genName(namePrefix);
-      let agent;
-      try {
-        agent = await createChannelAgent(slug, name, token);
-      } catch (err) {
-        // 同名撞车（几乎不会）——换个随机名再试一次
-        if (err instanceof ConflictError) {
-          name = genName(namePrefix);
-          agent = await createChannelAgent(slug, name, token);
-        } else {
-          throw err;
-        }
-      }
-      // 复制的是「完整接入脚本」而非孤零零的 init：init 只写配置、不发消息，
-      // agent 照跑会静默绑定完就停，频道里什么都不出现（用户踩过这个坑）。
-      // 装 CLI → init → 报到发言（让网页上的人看到 agent 来了）→ 持续收 @ 消息。
+      const agent = await createChannelAgent(slug, wanted, token);
       const server = location.origin;
+      // 复制的是完整接入脚本：init 只写配置不发消息，必须带「报到发言」，否则网页上看不到 agent。
       const command = [
         `# 把这段贴给你的 agent（Claude Code / Codex）执行，加入 #${slug}`,
         `command -v party >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
         `party init --server ${server} --token ${agent.token} --channel ${slug}`,
-        `party send "👋 ${name} 报到，来参与头脑风暴" --channel ${slug}   # 这步不能省，否则网页上看不到你`,
+        `party send "👋 ${agent.name} 报到，来参与头脑风暴" --channel ${slug}   # 这步不能省，否则网页上看不到你`,
         `party watch ${slug} --mentions-only --follow                    # 后台持续收 @你 的消息`,
       ].join("\n");
       setCopied(false);
-      setPhase({ kind: "done", command });
+      setPhase({ kind: "done", name: agent.name, command });
     } catch (err) {
+      // 同名占用 → 停在起名步，让用户换个有意义的名字（不静默塞随机后缀）
+      if (err instanceof ConflictError) {
+        setNameErr("这个名字在频道里已被占用，换一个");
+        setPhase({ kind: "compose" });
+        return;
+      }
       const message =
         err instanceof AuthError
           ? "登录已过期，请重新登录后再试"
           : err instanceof ForbiddenError
             ? "你在这个频道没有铸 agent 的权限"
             : err instanceof ValidationError
-              ? "agent 名不合法，请重试"
-              : err instanceof ConflictError
-                ? "名字撞车了，请重试"
-                : "铸 token 失败，请稍后重试";
+              ? "名字不合法，请重试"
+              : "铸 token 失败，请稍后重试";
       setPhase({ kind: "error", message });
     }
-  }, [slug, token, namePrefix]);
+  }, [name, slug, token]);
 
   const onCopy = useCallback(async () => {
     if (phase.kind !== "done") return;
@@ -127,17 +133,12 @@ export function AgentJoin({ slug, token, namePrefix }: Props) {
     setCopied(ok);
   }, [phase]);
 
-  const close = useCallback(() => {
-    setPhase({ kind: "idle" });
-    setCopied(false);
-  }, []);
-
   return (
     <div className="agent-join">
       <button
         type="button"
         className="d-btn d-btn--primary agent-join-btn"
-        onClick={mint}
+        onClick={open}
         disabled={phase.kind === "loading"}
       >
         {phase.kind === "loading" ? "铸 token…" : "＋ 让 agent 加入"}
@@ -149,20 +150,71 @@ export function AgentJoin({ slug, token, namePrefix }: Props) {
         </p>
       )}
 
+      {(phase.kind === "compose" || phase.kind === "loading") && (
+        <div className="agent-join-overlay" role="dialog" aria-modal="true" aria-label="给 agent 起名">
+          <div className="agent-join-scrim" onClick={close} />
+          <div className="d-card agent-join-card">
+            <header className="agent-join-card-head">
+              <h2 className="d-title agent-join-title">
+                让 agent 加入 <span className="d-hl">#{slug}</span>
+              </h2>
+              <button type="button" className="agent-join-close t-mono" onClick={close} aria-label="关闭">
+                ✕
+              </button>
+            </header>
+
+            <p className="agent-join-lead">
+              给它起个<strong>认得出来的名字</strong>——频道里就靠这个分清谁的哪个项目（例：
+              <code>drawstyle-review</code>、<code>leo-debug</code>）：
+            </p>
+
+            <label className="agent-join-namerow">
+              <span className="agent-join-namelabel t-mono">名字</span>
+              <input
+                className="t-mono agent-join-nameinput"
+                value={name}
+                autoFocus
+                spellCheck={false}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && phase.kind === "compose") mint();
+                }}
+                placeholder={`${slug}-review`}
+                disabled={phase.kind === "loading"}
+              />
+            </label>
+            {nameErr !== null && (
+              <p className="banner banner--red agent-join-namewarn" role="alert">
+                {nameErr}
+              </p>
+            )}
+            <p className="agent-join-hint t-mono">
+              owner 会自动记成你的账号；名字只是频道里的显示身份。
+            </p>
+
+            <div className="agent-join-actions">
+              <button
+                type="button"
+                className="d-btn d-btn--primary"
+                onClick={mint}
+                disabled={phase.kind === "loading"}
+              >
+                {phase.kind === "loading" ? "铸 token…" : "生成接入命令"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {phase.kind === "done" && (
         <div className="agent-join-overlay" role="dialog" aria-modal="true" aria-label="接入命令">
           <div className="agent-join-scrim" onClick={close} />
           <div className="d-card agent-join-card">
             <header className="agent-join-card-head">
               <h2 className="d-title agent-join-title">
-                把 agent 拉进 <span className="d-hl">#{slug}</span>
+                <span className="d-hl">{phase.name}</span> 的接入命令
               </h2>
-              <button
-                type="button"
-                className="agent-join-close t-mono"
-                onClick={close}
-                aria-label="关闭"
-              >
+              <button type="button" className="agent-join-close t-mono" onClick={close} aria-label="关闭">
                 ✕
               </button>
             </header>

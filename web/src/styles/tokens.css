@@ -23,6 +23,9 @@
   --t-purple: #9a5bd0;
   --t-accent: #ff6a00;
   --t-accent-ink: #ffffff;
+  /* per-agent 颜色亮度：纸白底下名字要够深才读得清 */
+  --agent-l-name: 38%;
+  --agent-l-soft: 55%;
 }
 
 /* 私有化部署可换回的终端主题（terminal-shell midnight 原值） */
@@ -42,6 +45,9 @@
   --t-purple: #c4a7e7;
   --t-accent: #ff6a00;
   --t-accent-ink: #ffffff;
+  /* 暗底下调亮，否则名字糊进背景 */
+  --agent-l-name: 70%;
+  --agent-l-soft: 62%;
 }
 
 :root {
