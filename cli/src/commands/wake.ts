@@ -85,6 +85,13 @@ function findLinkedAck(messages: MsgFrame[], target: string, mentionSeq: number)
   return null;
 }
 
+function ackFromWakeDelivery(delivery: WakeDelivery | null): { seq: number; evidence: AckEvidence } | null {
+  if (delivery === null) return null;
+  if (delivery.ack_seq !== null) return { seq: delivery.ack_seq, evidence: "reply_to" };
+  if (delivery.resume_seq !== null) return { seq: delivery.resume_seq, evidence: "status.summary_seq" };
+  return null;
+}
+
 function summarizeWakeDelivery(delivery: WakeDelivery | null, adapter: string | null): { ok: boolean | null; adapter: string | null; evidence: string } {
   if (delivery === null) {
     return {
@@ -241,6 +248,8 @@ export async function run(argv: string[]): Promise<number> {
     do {
       if (adapter === "webhook") {
         wakeDelivery = await fetchLatestWebhookDelivery(cfg.server, cfg.token, channel, target, seq);
+        ack = ackFromWakeDelivery(wakeDelivery);
+        if (ack !== null) break;
       }
       ack = findLinkedAck(await fetchMessages(cfg.server, cfg.token, channel, seq, 100), target, seq);
       if (ack !== null) break;

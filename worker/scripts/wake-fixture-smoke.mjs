@@ -223,6 +223,21 @@ async function main() {
     });
 
     const ackEvidence = ack.reply_to === mentionSeq ? "reply_to" : "status.summary_seq";
+    const linkedDelivery = await poll("wake delivery resume link", async () => {
+      const body = await requestJson(
+        "wake deliveries after ack",
+        `/api/channels/${encodeURIComponent(channel)}/wake-deliveries?since=${mentionSeq}&target=${encodeURIComponent(targetName)}&limit=20`,
+        { headers: bearerJson(testerToken) },
+      );
+      return (
+        body.deliveries?.find(
+          (row) =>
+            row.mention_seq === mentionSeq &&
+            row.target_name === targetName &&
+            (row.ack_seq === ack.seq || row.resume_seq === ack.seq),
+        ) ?? null
+      );
+    });
     console.log(
       JSON.stringify({
         ok: true,
@@ -235,6 +250,8 @@ async function main() {
           adapter: delivery.adapter_kind,
           attempt: delivery.attempt,
           http_status: delivery.http_status,
+          ack_seq: linkedDelivery.ack_seq,
+          resume_seq: linkedDelivery.resume_seq,
         },
         agent_resumed: {
           ok: true,

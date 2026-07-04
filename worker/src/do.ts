@@ -1710,6 +1710,7 @@ export class ChannelDO extends Server<Env> {
         : null,
       now,
     );
+    this.linkWakeResume(identity.name, msg);
     if (identity.kind === "agent") {
       this.setMeta("agent_streak", String(this.agentStreak() + 1));
       this.setMeta(this.agentCountKey(identity.name), String(this.agentCount(identity.name) + 1));
@@ -1766,6 +1767,30 @@ export class ChannelDO extends Server<Env> {
       frames.push(entry ? { type: "presence", ...entry } : { type: "presence", name: identity.name, state: frame.state, note: frame.note, ts: now });
     }
     return { ok: true, seq, frames };
+  }
+
+  private linkWakeResume(targetName: string, msg: MsgFrame) {
+    if (msg.reply_to !== null) {
+      this.ctx.storage.sql.exec(
+        `UPDATE wake_delivery_ledger
+            SET ack_seq = COALESCE(ack_seq, ?)
+          WHERE mention_seq = ? AND target_name = ?`,
+        msg.seq,
+        msg.reply_to,
+        targetName,
+      );
+    }
+    const summarySeq = msg.status?.summary_seq ?? null;
+    if (summarySeq !== null) {
+      this.ctx.storage.sql.exec(
+        `UPDATE wake_delivery_ledger
+            SET resume_seq = COALESCE(resume_seq, ?)
+          WHERE mention_seq = ? AND target_name = ?`,
+        msg.seq,
+        summarySeq,
+        targetName,
+      );
+    }
   }
 
   private consumeRate(name: string, now: number): SendErrorOutcome | null {

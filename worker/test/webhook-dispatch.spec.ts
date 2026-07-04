@@ -17,10 +17,10 @@ function sendMessage(slug: string, token: string, body: string, mentions: string
   });
 }
 
-function addWebhook(slug: string, token: string, name: string, url: string) {
+function addWebhook(slug: string, token: string, name: string, url: string, filter = "all") {
   return api(`/api/channels/${slug}/webhooks`, token, {
     method: "POST",
-    body: JSON.stringify({ name, url, secret: "s", filter: "all" }),
+    body: JSON.stringify({ name, url, secret: "s", filter }),
   });
 }
 
@@ -164,6 +164,60 @@ describe("webhook dispatch is off the send path", () => {
       error: null,
       ack_seq: null,
       resume_seq: null,
+    });
+  });
+
+  it("links wake delivery ledger rows to target replies and status resumes", async () => {
+    const { token } = await seedToken("agent");
+    const target = uniq("wake-target");
+    const { token: targetToken } = await seedToken("agent", target);
+    const slug = await createChannel(token);
+    expect((await addWebhook(slug, token, target, "https://resume-ledger.test/wake", "mentions")).status).toBe(201);
+
+    fetchMock.get("https://resume-ledger.test").intercept({ path: "/wake", method: "POST" }).reply(202, "accepted");
+    expect((await sendMessage(slug, token, `@${target} ping`, [target])).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(
+      (
+        await api(`/api/channels/${slug}/messages`, targetToken, {
+          method: "POST",
+          body: JSON.stringify({ kind: "message", body: "ack", mentions: [], reply_to: 1 }),
+        })
+      ).status,
+    ).toBe(200);
+
+    fetchMock.get("https://resume-ledger.test").intercept({ path: "/wake", method: "POST" }).reply(200, "ok");
+    expect((await sendMessage(slug, token, `@${target} status please`, [target])).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(
+      (
+        await api(`/api/channels/${slug}/messages`, targetToken, {
+          method: "POST",
+          body: JSON.stringify({
+            kind: "status",
+            state: "done",
+            note: "resumed",
+            mentions: [],
+            summary_seq: 3,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+
+    expect(await ledgerRows(slug)).toEqual([
+      expect.objectContaining({ mention_seq: 1, target_name: target, ack_seq: 2, resume_seq: null }),
+      expect.objectContaining({ mention_seq: 3, target_name: target, ack_seq: null, resume_seq: 4 }),
+    ]);
+
+    const apiRes = await api(`/api/channels/${slug}/wake-deliveries?since=1&target=${target}`, token);
+    expect(apiRes.status).toBe(200);
+    expect((await apiRes.json()) as { deliveries: unknown[] }).toMatchObject({
+      deliveries: [
+        { mention_seq: 1, target_name: target, ack_seq: 2, resume_seq: null },
+        { mention_seq: 3, target_name: target, ack_seq: null, resume_seq: 4 },
+      ],
     });
   });
 });
