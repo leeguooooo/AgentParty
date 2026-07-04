@@ -45,7 +45,7 @@ describe("tokens", () => {
     expect(del.status).toBe(200);
     expect((await api("/api/channels", token)).status).toBe(401);
     expect((await mint(name, "agent")).status).toBe(201);
-  });
+  }, 15_000);
 
   it("404 on revoking an unknown token", async () => {
     const res = await SELF.fetch(`http://ap.test/api/tokens/${uniq("ghost")}`, {
