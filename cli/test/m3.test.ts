@@ -592,6 +592,39 @@ describe("party status/history channel flag", () => {
     expect(reqsOf(mock, "GET", "/api/channels/ops/messages")).toHaveLength(1);
   });
 
+  test("history --json prints raw messages as NDJSON", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({
+          messages: [
+            {
+              type: "msg",
+              seq: 7,
+              sender: { name: "alice", kind: "agent" },
+              kind: "message",
+              body: "hello",
+              mentions: ["me"],
+              reply_to: null,
+              state: null,
+              note: null,
+              ts: 123,
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["history", "dev", "--json"]);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout.trim())).toMatchObject({
+      type: "msg",
+      seq: 7,
+      body: "hello",
+      mentions: ["me"],
+    });
+  });
+
   test("history 整数范围本地校验", async () => {
     mock = startRestMock();
     writeCfg(mock.url);

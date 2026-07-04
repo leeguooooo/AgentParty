@@ -56,7 +56,8 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         continue;
       }
       if (frame.type === "error") {
-        console.error(`error: ${frame.code} ${frame.message}`);
+        if (o.json) out(JSON.stringify(frame));
+        else console.error(`error: ${frame.code} ${frame.message}`);
         if (frame.code === "unauthorized") code = EXIT_AUTH;
         else if (frame.code === "loop_guard") code = EXIT_LOOP_GUARD;
         else if (frame.code === "archived") code = EXIT_ARCHIVED;

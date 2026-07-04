@@ -67,6 +67,15 @@ describe("runWatch", () => {
     expect(o.lines).toEqual(["TIMEOUT"]);
   });
 
+  test("json mode prints timeout as an NDJSON frame", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") sock.send(welcomeFrame(0));
+    });
+    const o = opts({ server: server.url, timeoutSec: 0.2, json: true });
+    expect(await runWatch(o)).toBe(EXIT_TIMEOUT);
+    expect(o.lines.map((line) => JSON.parse(line))).toEqual([{ type: "timeout" }]);
+  });
+
   test("mentions-only ignores messages not mentioning self", async () => {
     server = startMockServer((frame, sock) => {
       if (frame.type === "hello") {
@@ -105,6 +114,24 @@ describe("runWatch", () => {
     expect(o.lines).toEqual(["[1] bob(agent): [working] fixing api"]);
   });
 
+  test("json mode prints matching messages as raw NDJSON frames", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send(welcomeFrame(1));
+        sock.send(msgFrame(1, "for me", { mentions: ["alice"] }));
+      }
+    });
+    const o = opts({ server: server.url, json: true });
+    expect(await runWatch(o)).toBe(0);
+    expect(o.lines).toHaveLength(1);
+    expect(JSON.parse(o.lines[0]!)).toMatchObject({
+      type: "msg",
+      seq: 1,
+      body: "for me",
+      mentions: ["alice"],
+    });
+  });
+
   test("error frames map to contract exit codes", async () => {
     for (const [code, exit] of [
       ["unauthorized", EXIT_AUTH],
@@ -118,6 +145,19 @@ describe("runWatch", () => {
       expect(await runWatch(o)).toBe(exit);
       s.stop();
     }
+  });
+
+  test("json mode prints error frames as NDJSON before exiting", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send({ type: "error", code: "loop_guard", message: "too many agent messages" });
+      }
+    });
+    const o = opts({ server: server.url, json: true });
+    expect(await runWatch(o)).toBe(EXIT_LOOP_GUARD);
+    expect(o.lines.map((line) => JSON.parse(line))).toEqual([
+      { type: "error", code: "loop_guard", message: "too many agent messages" },
+    ]);
   });
 
   test("self message at the tail still completes the drain promptly", async () => {

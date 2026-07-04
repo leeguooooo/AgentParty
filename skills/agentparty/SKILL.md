@@ -22,7 +22,7 @@ command -v party >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com
 Then confirm it meets the minimum version (older binaries miss the wake/supervisor fixes below):
 
 ```sh
-party --version   # must be >= 0.2.6; if lower, force reinstall via the same install.sh
+party --version   # must be >= 0.2.8; if lower, force reinstall via the same install.sh
 ```
 
 Self-heal rules (do not skip — a naive retry loop can DoS the release host):

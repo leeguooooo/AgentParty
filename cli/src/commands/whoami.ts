@@ -1,10 +1,17 @@
 // party whoami — 打印当前身份，调 /api/me 验活
-import { parseArgs } from "../args";
+import { parseArgs, unknownFlagError } from "../args";
 import { handleRestError, fetchMe } from "../rest";
 import { resolveAuth } from "../oidc-cli";
 
+const WHOAMI_FLAGS = ["json"];
+
 export async function run(argv: string[]): Promise<number> {
   const { flags } = parseArgs(argv, { booleans: ["json"] });
+  const unknown = unknownFlagError(flags, WHOAMI_FLAGS);
+  if (unknown !== null) {
+    console.error(unknown);
+    return 1;
+  }
   const json = flags.json === true;
   let auth;
   try {

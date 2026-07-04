@@ -128,10 +128,37 @@ describe("whoami", () => {
     expect(mock.requests.some((r) => r.path === "/api/me" && r.auth === "Bearer acc-live")).toBe(true);
   });
 
+  test("prints identity as json", async () => {
+    mock = startOidcMock();
+    liveAccount(mock.url);
+    const code = await whoamiRun(["--json"]);
+    expect(code).toBe(0);
+    expect(JSON.parse(logs[0]!)).toMatchObject({
+      logged_in: true,
+      server: mock.url,
+      name: "fan@example.com",
+      email: "fan@example.com",
+      kind: "human",
+      role: "human",
+    });
+  });
+
   test("prints not logged in when no auth", async () => {
     const code = await whoamiRun([]);
     expect(code).toBe(0);
     expect(logs.join("\n")).toContain("not logged in");
+  });
+
+  test("prints not logged in as json", async () => {
+    const code = await whoamiRun(["--json"]);
+    expect(code).toBe(0);
+    expect(JSON.parse(logs[0]!)).toEqual({ logged_in: false });
+  });
+
+  test("rejects unknown flags", async () => {
+    const code = await whoamiRun(["--caps"]);
+    expect(code).toBe(1);
+    expect(errs.join("\n")).toContain("unknown option --caps");
   });
 });
 
