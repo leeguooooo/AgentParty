@@ -32,7 +32,7 @@ const ROLES: readonly string[] = ["agent", "human", "readonly"] satisfies TokenR
 const KINDS: readonly string[] = ["standing", "temp"] satisfies ChannelKind[];
 const MODES: readonly string[] = ["normal", "party"] satisfies ChannelMode[];
 const VISIBILITIES: readonly string[] = ["public", "private"];
-const WEBHOOK_FILTERS: readonly string[] = ["mentions", "all"] satisfies WebhookFilter[];
+const WEBHOOK_FILTERS: readonly string[] = ["mentions", "status", "needs-human", "all"] satisfies WebhookFilter[];
 const WEBHOOK_URL_MAX = 2048;
 const WEBHOOK_SECRET_MAX = 4096;
 const HEADER_VALUE_RE = /^[\x21-\x7e]+$/;
@@ -591,7 +591,7 @@ app.post("/api/channels/:slug/webhooks", async (c) => {
     !WEBHOOK_FILTERS.includes(filter)
   ) {
     return c.json(
-      errorBody("bad_request", "name, https url, secret and filter (mentions|all) required"),
+      errorBody("bad_request", "name, https url, secret and filter (mentions|status|needs-human|all) required"),
       400,
     );
   }

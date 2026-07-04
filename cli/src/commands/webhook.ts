@@ -10,23 +10,25 @@ import {
 } from "../rest";
 import { isName, isSlug } from "../validation";
 
-const FILTERS: WebhookFilter[] = ["mentions", "all"];
+const FILTERS: WebhookFilter[] = ["mentions", "status", "needs-human", "all"];
 const WEBHOOK_FLAGS = ["name", "url", "secret", "filter"];
 const URL_MAX = 2048;
 const SECRET_MAX = 4096;
 const HEADER_VALUE_RE = /^[\x21-\x7e]+$/;
-const HELP = `usage: party webhook add <channel> --name n --url https://... --secret S [--filter mentions|all]
+const HELP = `usage: party webhook add <channel> --name n --url https://... --secret S [--filter mentions|status|needs-human|all]
        party webhook remove <channel> --name n
        party webhook list <channel>
 
 Manage channel webhooks. With --filter mentions, delivery fires only when the
-message mentions the webhook name.
+message mentions the webhook name. With --filter status, delivery fires for all
+status updates. With --filter needs-human, delivery fires for blocked/done and
+loop-guard status updates.
 
 Options:
   --name n              webhook/agent name
   --url URL             HTTPS endpoint
   --secret S            bearer/HMAC secret
-  --filter mentions|all delivery filter (default: mentions)`;
+  --filter mentions|status|needs-human|all delivery filter (default: mentions)`;
 
 function isPrivateIpv4(host: string): boolean {
   const parts = host.split(".");
@@ -150,7 +152,7 @@ export async function run(argv: string[]): Promise<number> {
           !FILTERS.includes(filter as WebhookFilter)
         ) {
           console.error(
-            "usage: party webhook add <channel> --name n --url https://... --secret S [--filter mentions|all]",
+            "usage: party webhook add <channel> --name n --url https://... --secret S [--filter mentions|status|needs-human|all]",
           );
           return 1;
         }

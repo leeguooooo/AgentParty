@@ -31,6 +31,7 @@ import {
   type TokenRole,
   type WakeInfo,
   type WakeKind,
+  type WebhookFilter,
 } from "@agentparty/shared";
 import { Server, type Connection, type ConnectionContext, type WSMessage } from "partyserver";
 
@@ -245,7 +246,7 @@ interface WebhookRow {
   name: string;
   url: string;
   secret: string;
-  filter: string;
+  filter: WebhookFilter;
 }
 
 function toInt(value: string | null, fallback: number): number {
@@ -673,8 +674,8 @@ export class ChannelDO extends Server<Env> {
 
   // spec §15：对每个 webhook 判 filter → 立即尝试投递，失败入队由 alarm 重试
   private async dispatchWebhooks(msg: MsgFrame) {
-    // system 帧（webhook 失败通告）不再触发 webhook，防止失败风暴自激
-    if (msg.sender.name === "system") return;
+    // system 帧默认不触发 webhook，防止失败风暴自激；loop guard 例外，因为它需要唤醒人类。
+    if (msg.sender.name === "system" && !this.isLoopGuardStatus(msg)) return;
     const hooks = this.ctx.storage.sql
       .exec("SELECT name, url, secret, filter FROM webhooks")
       .toArray()
@@ -682,7 +683,7 @@ export class ChannelDO extends Server<Env> {
         name: String(r.name),
         url: String(r.url),
         secret: String(r.secret),
-        filter: String(r.filter),
+        filter: String(r.filter) as WebhookFilter,
       })) as WebhookRow[];
     if (hooks.length === 0) return;
     const host = this.getMeta("host") ?? "agentparty";
@@ -693,7 +694,7 @@ export class ChannelDO extends Server<Env> {
       channel: this.name,
       permalink: `https://${host}/c/${this.name}`,
     });
-    const targets = hooks.filter((h) => h.filter !== "mentions" || msg.mentions.includes(h.name));
+    const targets = hooks.filter((h) => this.shouldDeliverWebhook(h.filter, h.name, msg));
     if (targets.length === 0) return;
     // 并行投递：一个慢/坏端点不再拖累其余 hook（首投已由 afterSend 的 waitUntil 移出发送关键路径）
     const results = await Promise.all(
@@ -726,6 +727,30 @@ export class ChannelDO extends Server<Env> {
       needAlarm = true;
     }
     if (needAlarm) await this.ensureAlarmAt(now + this.retryDelay(1));
+  }
+
+  private shouldDeliverWebhook(filter: WebhookFilter, hookName: string, msg: MsgFrame): boolean {
+    switch (filter) {
+      case "all":
+        return true;
+      case "mentions":
+        return msg.mentions.includes(hookName);
+      case "status":
+        return msg.kind === "status";
+      case "needs-human":
+        return this.isHumanAttentionStatus(msg);
+      default:
+        return false;
+    }
+  }
+
+  private isHumanAttentionStatus(msg: MsgFrame): boolean {
+    if (msg.kind !== "status") return false;
+    return msg.state === "blocked" || msg.state === "done" || this.isLoopGuardStatus(msg);
+  }
+
+  private isLoopGuardStatus(msg: MsgFrame): boolean {
+    return msg.kind === "status" && msg.sender.name === "system" && msg.body.startsWith("loop guard tripped:");
   }
 
   // 短超时 POST；Bearer = 注册时的 secret，HMAC 签 payload 供接收方校验（spec §15）
@@ -787,7 +812,7 @@ export class ChannelDO extends Server<Env> {
   }
 
   // 3 次重试全败后向频道插一条 system status，让人看得见投递失败
-  private insertSystemStatus(note: string, now: number) {
+  private insertSystemStatus(note: string, now: number, notifyWebhooks = false) {
     const seq = this.lastSeq() + 1;
     const status: StatusEvent = {
       owner: "system",
@@ -823,6 +848,7 @@ export class ChannelDO extends Server<Env> {
       ts: now,
     };
     this.broadcastFrame(frame);
+    if (notifyWebhooks) this.ctx.waitUntil(this.dispatchWebhooks(frame));
   }
 
   // 归档收口：写 meta + 广播 error:archived + 踢连接（手动归档与 temp 自动归档共用）
@@ -1364,7 +1390,7 @@ export class ChannelDO extends Server<Env> {
   private alertLoopGuard(message: string) {
     if (this.getMeta("loop_guard_alerted") !== null) return;
     this.setMeta("loop_guard_alerted", "1");
-    this.insertSystemStatus(`loop guard tripped: ${message}`, Date.now());
+    this.insertSystemStatus(`loop guard tripped: ${message}`, Date.now(), true);
   }
 
   private isArchived(): boolean {

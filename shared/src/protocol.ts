@@ -37,7 +37,7 @@ export type TokenRole = "agent" | "human" | "readonly";
 export type ChannelKind = "standing" | "temp";
 export type ChannelMode = "normal" | "party";
 export type MessageKind = "message" | "status";
-export type WebhookFilter = "mentions" | "all";
+export type WebhookFilter = "mentions" | "status" | "needs-human" | "all";
 
 export type StatusState = "working" | "waiting" | "blocked" | "done";
 export type PresenceState = StatusState | "offline";

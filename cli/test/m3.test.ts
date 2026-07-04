@@ -1289,7 +1289,7 @@ describe("party webhook", () => {
     expect(list2.stdout.trim()).toBe("");
   });
 
-  test("add --filter all", async () => {
+  test.each(["status", "needs-human", "all"] as const)("add --filter %s", async (filter) => {
     mock = startRestMock();
     writeCfg(mock.url);
     const r = await runCli([
@@ -1303,10 +1303,10 @@ describe("party webhook", () => {
       "--secret",
       "s",
       "--filter",
-      "all",
+      filter,
     ]);
     expect(r.code).toBe(0);
-    expect((reqsOf(mock, "POST", "/api/channels/dev/webhooks")[0]!.body as { filter: string }).filter).toBe("all");
+    expect((reqsOf(mock, "POST", "/api/channels/dev/webhooks")[0]!.body as { filter: string }).filter).toBe(filter);
   });
 
   test("非法 filter 退出 1", async () => {

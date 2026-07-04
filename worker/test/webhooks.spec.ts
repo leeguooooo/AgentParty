@@ -1,5 +1,5 @@
 import { env, fetchMock, runInDurableObject } from "cloudflare:test";
-import { MAX_WEBHOOKS_PER_CHANNEL, WEBHOOK_MAX_RETRIES } from "@agentparty/shared";
+import { LOOP_GUARD_AGENT_N, MAX_WEBHOOKS_PER_CHANNEL, WEBHOOK_MAX_RETRIES } from "@agentparty/shared";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
 import { api, createChannel, postMessage, seedToken, uniq } from "./helpers";
@@ -52,6 +52,13 @@ function sendMessage(slug: string, token: string, body: string, mentions: string
   return api(`/api/channels/${slug}/messages`, token, {
     method: "POST",
     body: JSON.stringify({ kind: "message", body, mentions, reply_to: null }),
+  });
+}
+
+function sendStatus(slug: string, token: string, state: "working" | "waiting" | "blocked" | "done", note: string) {
+  return api(`/api/channels/${slug}/messages`, token, {
+    method: "POST",
+    body: JSON.stringify({ kind: "status", state, note }),
   });
 }
 
@@ -305,6 +312,122 @@ describe("webhooks", () => {
     });
     expect(headers.authorization).toBe(`Bearer ${secret}`);
     expect(headers["x-agentparty-signature"]).toBe(`hmac-sha256=${await hmacHex(secret, body)}`);
+    expect(await queueRows(slug)).toHaveLength(0);
+  });
+
+  it("status filter delivers status updates but ignores ordinary messages", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    expect(
+      (
+        await addWebhook(slug, token, {
+          name: "ops",
+          url: "https://hooks.test/status-only",
+          secret: "s",
+          filter: "status",
+        })
+      ).status,
+    ).toBe(201);
+
+    expect((await sendMessage(slug, token, "ordinary chatter")).status).toBe(200);
+    expect(await queueRows(slug)).toHaveLength(0);
+
+    let captured: CapturedRequest | null = null;
+    fetchMock
+      .get("https://hooks.test")
+      .intercept({ path: "/status-only", method: "POST" })
+      .reply(200, (opts) => {
+        captured = normalize(opts as { headers?: unknown; body?: unknown });
+        return "ok";
+      });
+    expect((await sendStatus(slug, token, "working", "claiming the status lane")).status).toBe(200);
+
+    expect(captured).not.toBeNull();
+    const payload = JSON.parse((captured as unknown as CapturedRequest).body) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      type: "status",
+      kind: "status",
+      state: "working",
+      note: "claiming the status lane",
+      channel: slug,
+    });
+  });
+
+  it("needs-human filter delivers blocked and done statuses only", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    expect(
+      (
+        await addWebhook(slug, token, {
+          name: "human-ops",
+          url: "https://hooks.test/needs-human",
+          secret: "s",
+          filter: "needs-human",
+        })
+      ).status,
+    ).toBe(201);
+
+    expect((await sendStatus(slug, token, "working", "routine progress")).status).toBe(200);
+    expect((await sendStatus(slug, token, "waiting", "online but idle")).status).toBe(200);
+    expect(await queueRows(slug)).toHaveLength(0);
+
+    const captured: Record<string, unknown>[] = [];
+    fetchMock
+      .get("https://hooks.test")
+      .intercept({ path: "/needs-human", method: "POST" })
+      .reply(200, (opts) => {
+        captured.push(JSON.parse(normalize(opts as { headers?: unknown; body?: unknown }).body) as Record<string, unknown>);
+        return "ok";
+      })
+      .times(2);
+
+    expect((await sendStatus(slug, token, "blocked", "need owner token")).status).toBe(200);
+    expect((await sendStatus(slug, token, "done", "ready for review")).status).toBe(200);
+
+    expect(captured).toHaveLength(2);
+    expect(captured[0]).toMatchObject({ type: "status", state: "blocked", note: "need owner token" });
+    expect(captured[1]).toMatchObject({ type: "status", state: "done", note: "ready for review" });
+  });
+
+  it("needs-human filter delivers loop guard system statuses", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    expect(
+      (
+        await addWebhook(slug, token, {
+          name: "human-ops",
+          url: "https://hooks.test/loop-guard",
+          secret: "s",
+          filter: "needs-human",
+        })
+      ).status,
+    ).toBe(201);
+
+    let captured: CapturedRequest | null = null;
+    fetchMock
+      .get("https://hooks.test")
+      .intercept({ path: "/loop-guard", method: "POST" })
+      .reply(200, (opts) => {
+        captured = normalize(opts as { headers?: unknown; body?: unknown });
+        return "ok";
+      });
+
+    for (let i = 0; i < LOOP_GUARD_AGENT_N; i++) {
+      expect((await sendMessage(slug, token, `guard filler ${i}`)).status).toBe(200);
+    }
+    const blocked = await sendMessage(slug, token, "one too many");
+    expect(blocked.status).toBe(409);
+
+    expect(captured).not.toBeNull();
+    const payload = JSON.parse((captured as unknown as CapturedRequest).body) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      type: "status",
+      kind: "status",
+      state: "blocked",
+      sender: { name: "system", kind: "agent" },
+      channel: slug,
+    });
+    expect(String(payload.body)).toContain("loop guard tripped:");
     expect(await queueRows(slug)).toHaveLength(0);
   });
 

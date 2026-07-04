@@ -265,7 +265,7 @@ export const openapiDocument = {
         },
       },
       post: {
-        summary: "register an outbound webhook (mention wake-up, hmac signed)",
+        summary: "register an outbound webhook (mention/status wake-up, hmac signed)",
         security: [{ bearer: [] }],
         parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
@@ -282,7 +282,11 @@ export const openapiDocument = {
                     type: "string",
                     description: "bearer for outgoing posts, also the hmac-sha256 signing key",
                   },
-                  filter: { type: "string", enum: ["mentions", "all"], default: "mentions" },
+                  filter: {
+                    type: "string",
+                    enum: ["mentions", "status", "needs-human", "all"],
+                    default: "mentions",
+                  },
                 },
               },
             },
