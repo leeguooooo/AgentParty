@@ -18,6 +18,7 @@ import {
   type ErrorCode,
   type CollaborationRole,
   type MsgFrame,
+  type MessageUpdateFrame,
   type PresenceEntry,
   type PresenceFrame,
   type Residency,
@@ -289,6 +290,13 @@ export class ChannelDO extends Server<Env> {
       status_scope_json TEXT,
       status_summary_seq INTEGER,
       status_blocked_reason TEXT,
+      original_body TEXT,
+      edited_at INTEGER,
+      edited_by TEXT,
+      retracted_at INTEGER,
+      retracted_by TEXT,
+      supersedes INTEGER,
+      superseded_by INTEGER,
       ts INTEGER NOT NULL
     )`);
     // 历史消息也要带 sender 所属人：给早于本次的 do 表补列（新表已含，重复 ALTER 会抛，吞掉）
@@ -301,6 +309,13 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE messages ADD COLUMN status_scope_json TEXT",
       "ALTER TABLE messages ADD COLUMN status_summary_seq INTEGER",
       "ALTER TABLE messages ADD COLUMN status_blocked_reason TEXT",
+      "ALTER TABLE messages ADD COLUMN original_body TEXT",
+      "ALTER TABLE messages ADD COLUMN edited_at INTEGER",
+      "ALTER TABLE messages ADD COLUMN edited_by TEXT",
+      "ALTER TABLE messages ADD COLUMN retracted_at INTEGER",
+      "ALTER TABLE messages ADD COLUMN retracted_by TEXT",
+      "ALTER TABLE messages ADD COLUMN supersedes INTEGER",
+      "ALTER TABLE messages ADD COLUMN superseded_by INTEGER",
     ]) {
       try {
         sql.exec(ddl);
@@ -373,6 +388,16 @@ export class ChannelDO extends Server<Env> {
       attempted_at INTEGER NOT NULL,
       ack_seq INTEGER,
       resume_seq INTEGER
+    )`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS message_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      target_seq INTEGER NOT NULL,
+      action TEXT NOT NULL,
+      actor_name TEXT NOT NULL,
+      actor_kind TEXT NOT NULL,
+      old_body TEXT,
+      new_body TEXT,
+      created_at INTEGER NOT NULL
     )`);
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'),
@@ -453,7 +478,16 @@ export class ChannelDO extends Server<Env> {
     if (frame.type === "hello") {
       const since = typeof frame.since === "number" && frame.since > 0 ? Math.floor(frame.since) : 0;
       const rows = this.ctx.storage.sql
-        .exec("SELECT * FROM messages WHERE seq > ? ORDER BY seq", since)
+        .exec(
+          `SELECT * FROM messages
+            WHERE seq > ?
+               OR edited_at IS NOT NULL
+               OR retracted_at IS NOT NULL
+               OR supersedes IS NOT NULL
+               OR superseded_by IS NOT NULL
+            ORDER BY seq`,
+          since,
+        )
         .toArray();
       for (const row of rows) this.sendFrame(connection, this.rowToFrame(row));
       return;
@@ -811,6 +845,19 @@ export class ChannelDO extends Server<Env> {
     }
   }
 
+  private messageUpdate(action: MessageUpdateFrame["action"], actor: Identity, message: MsgFrame, ts: number): MessageUpdateFrame {
+    return {
+      type: "message_update",
+      target_seq: message.seq,
+      action,
+      actor: actor.owner
+        ? { name: actor.name, kind: actor.kind, owner: actor.owner }
+        : { name: actor.name, kind: actor.kind },
+      ts,
+      message,
+    };
+  }
+
   // 3 次重试全败后向频道插一条 system status，让人看得见投递失败
   private insertSystemStatus(note: string, now: number, notifyWebhooks = false) {
     const seq = this.lastSeq() + 1;
@@ -917,6 +964,156 @@ export class ChannelDO extends Server<Env> {
         .toArray();
       return Response.json({ messages: rows.map((r) => this.rowToFrame(r)) });
     }
+    const auditMatch = url.pathname.match(/^\/internal\/messages\/([1-9]\d*)\/audit$/);
+    if (auditMatch && request.method === "GET") {
+      const seq = Number(auditMatch[1]);
+      const rows = this.ctx.storage.sql
+        .exec(
+          `SELECT target_seq, action, actor_name, actor_kind, old_body, new_body, created_at
+             FROM message_audit
+            WHERE target_seq = ?
+            ORDER BY id`,
+          seq,
+        )
+        .toArray()
+        .map((r) => ({
+          target_seq: Number(r.target_seq),
+          action: String(r.action),
+          actor: { name: String(r.actor_name), kind: String(r.actor_kind) },
+          old_body: r.old_body === null ? null : String(r.old_body),
+          new_body: r.new_body === null ? null : String(r.new_body),
+          created_at: Number(r.created_at),
+        }));
+      return Response.json({ audit: rows });
+    }
+    const revisionMatch = url.pathname.match(/^\/internal\/messages\/([1-9]\d*)\/(edit|retract|supersede)$/);
+    if (revisionMatch && request.method === "POST") {
+      this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
+      const seq = Number(revisionMatch[1]);
+      const action = revisionMatch[2] as "edit" | "retract" | "supersede";
+      const identity: Identity = {
+        name: request.headers.get("x-ap-name") ?? "",
+        kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
+        role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
+        owner: request.headers.get("x-ap-owner") ?? undefined,
+        tokenHash: request.headers.get("x-ap-token-hash") ?? "",
+      };
+      if (this.isArchived()) {
+        return Response.json({ error: { code: "archived", message: "channel is archived" } }, { status: 410 });
+      }
+      if (identity.role === "readonly") {
+        return Response.json({ error: { code: "unauthorized", message: "readonly token cannot revise messages" } }, { status: 403 });
+      }
+      if (!(await this.isTokenActive(identity.tokenHash))) {
+        return Response.json({ error: { code: "unauthorized", message: "invalid or revoked token" } }, { status: 401 });
+      }
+      const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+      if (!row) {
+        return Response.json({ error: { code: "not_found", message: `message seq ${seq} not found` } }, { status: 404 });
+      }
+      const isModerator = request.headers.get("x-ap-moderator") === "1";
+      if (String(row.sender_name) !== identity.name && !isModerator) {
+        return Response.json({ error: { code: "forbidden", message: "only the sender or channel moderator can revise this message" } }, { status: 403 });
+      }
+      if (String(row.kind) !== "message") {
+        return Response.json({ error: { code: "bad_request", message: "only message frames can be revised" } }, { status: 400 });
+      }
+      if (row.retracted_at !== null && row.retracted_at !== undefined) {
+        return Response.json({ error: { code: "bad_request", message: "message is already retracted" } }, { status: 400 });
+      }
+      let body: { body?: unknown; mentions?: unknown } | null = null;
+      if (action !== "retract") {
+        body = (await request.json().catch(() => null)) as { body?: unknown; mentions?: unknown } | null;
+        if (body === null || typeof body.body !== "string" || body.body.trim() === "") {
+          return Response.json({ error: { code: "bad_request", message: "body is required" } }, { status: 400 });
+        }
+        if (byteLength(body.body) > BODY_LIMIT) {
+          return Response.json({ error: { code: "too_large", message: `body exceeds ${BODY_LIMIT} bytes` } }, { status: 413 });
+        }
+      }
+      const now = Date.now();
+      const originalBody = row.original_body === null || row.original_body === undefined ? String(row.body) : String(row.original_body);
+      if (action === "edit") {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO message_audit (target_seq, action, actor_name, actor_kind, old_body, new_body, created_at)
+           VALUES (?, 'edit', ?, ?, ?, ?, ?)`,
+          seq,
+          identity.name,
+          identity.kind,
+          String(row.body),
+          body!.body,
+          now,
+        );
+        this.ctx.storage.sql.exec(
+          `UPDATE messages
+              SET body = ?, original_body = COALESCE(original_body, ?), edited_at = ?, edited_by = ?
+            WHERE seq = ?`,
+          body!.body,
+          originalBody,
+          now,
+          identity.name,
+          seq,
+        );
+        const updated = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+        const frame = this.rowToFrame(updated);
+        this.broadcastFrame(this.messageUpdate("edit", identity, frame, now));
+        return Response.json({ message: frame });
+      }
+      if (action === "retract") {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO message_audit (target_seq, action, actor_name, actor_kind, old_body, new_body, created_at)
+           VALUES (?, 'retract', ?, ?, ?, NULL, ?)`,
+          seq,
+          identity.name,
+          identity.kind,
+          String(row.body),
+          now,
+        );
+        this.ctx.storage.sql.exec(
+          `UPDATE messages
+              SET body = '', mentions_json = '[]', original_body = COALESCE(original_body, ?), retracted_at = ?, retracted_by = ?
+            WHERE seq = ?`,
+          originalBody,
+          now,
+          identity.name,
+          seq,
+        );
+        const updated = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+        const frame = this.rowToFrame(updated);
+        this.broadcastFrame(this.messageUpdate("retract", identity, frame, now));
+        return Response.json({ message: frame });
+      }
+
+      const mentions = Array.isArray(body!.mentions) ? body!.mentions.filter((m): m is string => typeof m === "string") : [];
+      const out = await this.handleSend(
+        identity,
+        { type: "send", kind: "message", body: body!.body as string, mentions, reply_to: seq },
+        { countRate: true },
+      );
+      if (!out.ok) {
+        return Response.json({ error: { code: out.code, message: out.message } }, { status: ERROR_STATUS[out.code] });
+      }
+      this.ctx.storage.sql.exec("UPDATE messages SET superseded_by = ? WHERE seq = ?", out.seq, seq);
+      this.ctx.storage.sql.exec("UPDATE messages SET supersedes = ? WHERE seq = ?", seq, out.seq);
+      const oldRow = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+      const newRow = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", out.seq).one();
+      const oldFrame = this.rowToFrame(oldRow);
+      const newFrame = this.rowToFrame(newRow);
+      this.ctx.storage.sql.exec(
+        `INSERT INTO message_audit (target_seq, action, actor_name, actor_kind, old_body, new_body, created_at)
+         VALUES (?, 'supersede', ?, ?, ?, ?, ?)`,
+        seq,
+        identity.name,
+        identity.kind,
+        String(row.body),
+        body!.body,
+        now,
+      );
+      this.broadcastFrame(this.messageUpdate("supersede", identity, oldFrame, now));
+      this.broadcastFrame(newFrame);
+      await this.afterSend(newFrame);
+      return Response.json({ message: newFrame, superseded: oldFrame });
+    }
     if (url.pathname === "/internal/search" && request.method === "GET") {
       const query = (url.searchParams.get("q") ?? "").trim();
       if (query.length === 0) {
@@ -935,6 +1132,7 @@ export class ChannelDO extends Server<Env> {
         .exec(
           `SELECT * FROM messages
             WHERE seq > ?${fromSql}
+              AND retracted_at IS NULL
               AND (
                 lower(body) LIKE ? ESCAPE '\\'
                 OR lower(note) LIKE ? ESCAPE '\\'
@@ -1483,7 +1681,7 @@ export class ChannelDO extends Server<Env> {
       kind === "status" && state !== null
         ? statusEventFromRow(r, String(r.sender_name), state, ts)
         : null;
-    return {
+    const frame: MsgFrame = {
       type: kind === "status" ? "status" : "msg",
       seq: Number(r.seq),
       sender:
@@ -1499,5 +1697,21 @@ export class ChannelDO extends Server<Env> {
       status,
       ts,
     };
+    if (r.edited_at !== null && r.edited_at !== undefined) {
+      frame.edited = true;
+      frame.edited_at = Number(r.edited_at);
+      if (r.edited_by !== null && r.edited_by !== undefined) frame.edited_by = String(r.edited_by);
+    }
+    if (r.retracted_at !== null && r.retracted_at !== undefined) {
+      frame.retracted = true;
+      frame.retracted_at = Number(r.retracted_at);
+      if (r.retracted_by !== null && r.retracted_by !== undefined) frame.retracted_by = String(r.retracted_by);
+    }
+    if (r.supersedes !== null && r.supersedes !== undefined) frame.supersedes = Number(r.supersedes);
+    if (r.superseded_by !== null && r.superseded_by !== undefined) frame.superseded_by = Number(r.superseded_by);
+    if (r.original_body !== null && r.original_body !== undefined) {
+      frame.revision = { original_body: String(r.original_body) };
+    }
+    return frame;
   }
 }

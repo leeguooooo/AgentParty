@@ -47,6 +47,18 @@ export interface Connection {
   readonly cursor: number;
 }
 
+function isRevisionSnapshot(frame: ServerFrame): boolean {
+  if (frame.type !== "msg" && frame.type !== "status") return false;
+  return (
+    frame.edited === true ||
+    frame.retracted === true ||
+    frame.edited_at != null ||
+    frame.retracted_at != null ||
+    frame.supersedes != null ||
+    frame.superseded_by != null
+  );
+}
+
 export function connect(
   server: string,
   token: string,
@@ -141,8 +153,9 @@ export function connect(
           continue;
         }
         if (frame.type === "msg" || frame.type === "status") {
-          if (frame.seq <= cursor || delivered.has(frame.seq)) continue;
-          delivered.add(frame.seq);
+          const revised = isRevisionSnapshot(frame);
+          if (!revised && (frame.seq <= cursor || delivered.has(frame.seq))) continue;
+          if (!revised) delivered.add(frame.seq);
         }
         // 自回声：sent 立即推进游标，自己的消息不会被当成新消息
         if (frame.type === "sent") advance(frame.seq);

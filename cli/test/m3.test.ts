@@ -807,6 +807,70 @@ describe("party status/history channel flag", () => {
     expect(r.stderr).toContain("need a query");
   });
 
+  test("edit retract and supersede call audited revision endpoints", async () => {
+    const revised = {
+      type: "msg",
+      seq: 7,
+      sender: { name: "agent", kind: "agent" },
+      kind: "message",
+      body: "corrected",
+      mentions: [],
+      reply_to: null,
+      state: null,
+      note: null,
+      status: null,
+      ts: 777,
+      edited: true,
+      edited_at: 778,
+      edited_by: "agent",
+      revision: { original_body: "wrong" },
+    };
+    const superseding = { ...revised, seq: 8, body: "replacement", edited: undefined, supersedes: 7 };
+    mock = startRestMock((req) => {
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages/7/edit") {
+        return Response.json({ message: revised });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages/7/retract") {
+        return Response.json({ message: { ...revised, body: "", retracted: true } });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages/7/supersede") {
+        return Response.json({ message: superseding, superseded: { ...revised, superseded_by: 8 } });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    writeWorkspaceState("dev");
+
+    const edit = await runCli(["edit", "7", "corrected", "--json"]);
+    expect(edit.code).toBe(0);
+    expect(JSON.parse(edit.stdout.trim())).toMatchObject({ schema: "agentparty.v1", seq: 7, edited: true });
+    expect(reqsOf(mock, "POST", "/api/channels/dev/messages/7/edit")[0]!.body).toEqual({ body: "corrected" });
+
+    const retract = await runCli(["retract", "7"]);
+    expect(retract.code).toBe(0);
+    expect(retract.stdout).toContain("retracted #7");
+    expect(reqsOf(mock, "POST", "/api/channels/dev/messages/7/retract")).toHaveLength(1);
+
+    const supersede = await runCli(["supersede", "7", "replacement"]);
+    expect(supersede.code).toBe(0);
+    expect(supersede.stdout).toContain("superseded #7 with #8");
+    expect(reqsOf(mock, "POST", "/api/channels/dev/messages/7/supersede")[0]!.body).toEqual({ body: "replacement" });
+  });
+
+  test("edit validates seq and body locally", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    writeWorkspaceState("dev");
+
+    const badSeq = await runCli(["edit", "wat", "body"]);
+    expect(badSeq.code).toBe(1);
+    expect(badSeq.stderr).toContain("seq must be a positive integer");
+
+    const missingBody = await runCli(["supersede", "7"]);
+    expect(missingBody.code).toBe(1);
+    expect(missingBody.stderr).toContain("body is required");
+  });
+
   test("capture creates durable tags, lists them, and prints issue bodies", async () => {
     const capture = {
       type: "capture",

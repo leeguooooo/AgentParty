@@ -81,17 +81,18 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         else code = 1;
         break;
       }
-      if (frame.type !== "msg" && frame.type !== "status") continue;
-      const fromSelf = frame.sender.name === self;
-      const qualifies = !fromSelf && (!o.mentionsOnly || frame.mentions.includes(self));
+      const msg = frame.type === "message_update" ? frame.message : frame;
+      if (msg.type !== "msg" && msg.type !== "status") continue;
+      const fromSelf = msg.sender.name === self;
+      const qualifies = !fromSelf && (!o.mentionsOnly || msg.mentions.includes(self));
       if (qualifies) {
-        out(o.json ? JSON.stringify(jsonFrame(frame as unknown as Record<string, unknown>)) : formatMsg(frame));
+        out(o.json ? JSON.stringify(jsonFrame(frame as unknown as Record<string, unknown>)) : formatMsg(msg));
         printed++;
       }
       // 打印（或有意跳过）之后才推进游标，退出时入队未消费的消息留给下次补拉
-      conn.ack(frame.seq);
+      if (msg.seq > 0) conn.ack(msg.seq);
       // 补拉排空（seq 追平 welcome.last_seq）且已有输出即视为收到新消息；自己的消息也参与排空判定
-      if (!o.follow && printed > 0 && frame.seq >= lastSeq) break;
+      if (!o.follow && printed > 0 && msg.seq >= lastSeq) break;
     }
   } finally {
     if (timer) clearTimeout(timer);

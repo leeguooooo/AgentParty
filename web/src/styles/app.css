@@ -616,7 +616,20 @@
 }
 .msg-mention { color: var(--t-accent); }
 .msg-reply { color: var(--t-dim); }
+.msg-revision {
+  font-size: 10px;
+  padding: 0 6px;
+  border: 1.5px solid var(--d-rose);
+  border-radius: 8px 5px 9px 4px / 5px 9px 4px 8px;
+  color: var(--d-rose);
+  background: var(--d-rose-soft);
+}
 .msg-fill { flex: 1; }
+.msg-retracted {
+  margin: 8px 0 4px;
+  color: var(--t-dim);
+  font-style: italic;
+}
 
 /* status 行内 sender 名：取 agent 色相但不放大（marker 字号只留给消息卡片标题） */
 .msg-status .msg-sender { font-family: inherit; font-size: inherit; }

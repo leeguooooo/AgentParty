@@ -67,6 +67,20 @@ describe("ws client", () => {
     expect(msgs.map((m) => m.body)).toEqual(["broadcast copy", "backfill only"]);
   });
 
+  test("allows revised snapshots for acked seqs after reconnect", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send(welcomeFrame(6));
+        sock.send(msgFrame(6, "edited copy", { edited: true, edited_at: Date.now(), edited_by: "bob" }));
+      }
+    });
+    conn = connect(server.url, "ap_tok", "dev", 6);
+    const frames = await collect(conn, 2, 800, false);
+    const msgs = frames.filter((f) => f.type === "msg") as { seq: number; body: string; edited?: true }[];
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({ seq: 6, body: "edited copy", edited: true });
+  });
+
   test("acked seqs are not redelivered, unacked queued frames dedup after reconnect", async () => {
     server = startMockServer((frame, sock, connIndex) => {
       if (frame.type !== "hello") return;

@@ -205,6 +205,26 @@ export interface MsgFrame {
   note: string | null;
   status: StatusEvent | null;
   ts: number;
+  edited?: true;
+  edited_at?: number;
+  edited_by?: string;
+  retracted?: true;
+  retracted_at?: number;
+  retracted_by?: string;
+  supersedes?: number;
+  superseded_by?: number;
+  revision?: {
+    original_body: string | null;
+  };
+}
+
+export interface MessageUpdateFrame {
+  type: "message_update";
+  target_seq: number;
+  action: "edit" | "retract" | "supersede";
+  actor: Sender;
+  ts: number;
+  message: MsgFrame;
 }
 
 export interface SentFrame {
@@ -239,6 +259,7 @@ export type ServerFrame =
   | WelcomeFrame
   | ParticipantsFrame
   | MsgFrame
+  | MessageUpdateFrame
   | SentFrame
   | PresenceFrame
   | ErrorFrame

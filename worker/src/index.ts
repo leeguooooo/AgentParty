@@ -674,6 +674,60 @@ app.post("/api/channels/:slug/captures", async (c) => {
   return c.json(captureRowToRecord(row!), 201);
 });
 
+app.post("/api/channels/:slug/messages/:seq/:action", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!canAccessChannel(identity, channel)) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const seq = positiveInt(Number(c.req.param("seq")));
+  if (seq === null) return c.json(errorBody("bad_request", "seq must be a positive integer"), 400);
+  const action = c.req.param("action");
+  if (action !== "edit" && action !== "retract" && action !== "supersede") {
+    return c.json(errorBody("bad_request", "action must be edit|retract|supersede"), 400);
+  }
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  return stub.fetch(
+    new Request(`https://do/internal/messages/${seq}/${action}`, {
+      method: "POST",
+      body: action === "retract" ? null : await c.req.text(),
+      headers: {
+        "content-type": "application/json",
+        "x-partykit-room": slug,
+        "x-ap-name": identity.name,
+        "x-ap-kind": identity.kind,
+        "x-ap-role": identity.role,
+        ...(identity.owner ? { "x-ap-owner": identity.owner } : {}),
+        "x-ap-token-hash": identity.hash,
+        "x-ap-moderator": isChannelModerator(identity, channel) ? "1" : "0",
+        ...channelHeaders(channel, c.req.url),
+      },
+    }),
+  );
+});
+
+app.get("/api/channels/:slug/messages/:seq/audit", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!canAccessChannel(c.get("identity"), channel)) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const seq = positiveInt(Number(c.req.param("seq")));
+  if (seq === null) return c.json(errorBody("bad_request", "seq must be a positive integer"), 400);
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  return stub.fetch(
+    new Request(`https://do/internal/messages/${seq}/audit`, {
+      headers: { "x-partykit-room": slug },
+    }),
+  );
+});
+
 app.post("/api/channels/:slug/messages", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);

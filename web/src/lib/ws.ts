@@ -80,7 +80,7 @@ export class ChannelSocket {
       } catch {
         return;
       }
-      if (frame.type === "msg" && frame.seq > this.cursor) this.cursor = frame.seq;
+      if ((frame.type === "msg" || frame.type === "status") && frame.seq > this.cursor) this.cursor = frame.seq;
       this.handlers.onFrame(frame);
     };
 

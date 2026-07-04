@@ -17,6 +17,9 @@ commands:
   agent     add <name> [--channel-scope slug]        mint an agent token as yourself (needs login)
   init      --server URL --token T [--channel C]   write config, bind channel (create if missing)
   send      <text|-> [--channel C] [--mention name]... [--reply-to seq]
+  edit      <seq> <text|-> [--channel C] [--json]
+  retract   <seq> [--channel C] [--json]
+  supersede <seq> <text|-> [--channel C] [--json]
   watch     [channel|--channel C] [--timeout N] [--mentions-only] [--follow] [--json]
   serve     [channel|--channel C] --on-mention "<cmd>" [--all]   常驻：每条 @你 的消息跑一次命令（唤醒睡着的 agent）
   ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]
@@ -58,6 +61,10 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/init")).run(rest);
     case "send":
       return (await import("./commands/send")).run(rest);
+    case "edit":
+    case "retract":
+    case "supersede":
+      return (await import("./commands/revise")).run(cmd, rest);
     case "watch":
       return (await import("./commands/watch")).run(rest);
     case "serve":

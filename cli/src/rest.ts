@@ -254,6 +254,21 @@ export async function fetchMessages(
   return Array.isArray(messages) ? (messages as MsgFrame[]) : [];
 }
 
+export async function reviseMessage(
+  server: string,
+  token: string,
+  slug: string,
+  seq: number,
+  action: "edit" | "retract" | "supersede",
+  body?: { body: string; mentions?: string[] },
+): Promise<{ message: MsgFrame; superseded?: MsgFrame }> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/messages/${seq}/${action}`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: action === "retract" ? undefined : JSON.stringify(body),
+  })) as { message: MsgFrame; superseded?: MsgFrame };
+}
+
 export async function fetchWakeDeliveries(
   server: string,
   token: string,

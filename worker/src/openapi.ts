@@ -193,6 +193,55 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/messages/{seq}/{action}": {
+      post: {
+        summary: "edit, retract, or supersede a retained message with audit trail",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "seq", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
+          { name: "action", in: "path", required: true, schema: { type: "string", enum: ["edit", "retract", "supersede"] } },
+        ],
+        requestBody: {
+          required: false,
+          content: {
+            "text/plain": {
+              schema: {
+                type: "string",
+                maxLength: 8192,
+                description: "required for edit and supersede; omitted for retract",
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{message}; supersede also returns {superseded}" },
+          "400": { description: "invalid seq/action or missing body" },
+          "403": { description: "not author or channel moderator" },
+          "404": { description: "channel or message not found" },
+          "409": { description: "target is already retracted" },
+          "410": { description: "channel archived" },
+          "413": { description: "body too large" },
+          "429": { description: "rate limited while superseding" },
+        },
+      },
+    },
+    "/api/channels/{slug}/messages/{seq}/audit": {
+      get: {
+        summary: "read audit rows for message edits, retractions, and supersedes",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "seq", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
+        ],
+        responses: {
+          "200": { description: "{audit:[{target_seq,action,actor_name,actor_kind,old_body,new_body,created_at}]}" },
+          "400": { description: "invalid seq" },
+          "403": { description: "not allowed in this channel" },
+          "404": { description: "channel not found" },
+        },
+      },
+    },
     "/api/channels/{slug}/captures": {
       get: {
         summary: "list durable captures for decisions, requirements, bugs, and action items",

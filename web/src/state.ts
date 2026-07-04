@@ -65,13 +65,43 @@ function insertMessage(messages: MsgFrame[], msg: MsgFrame): MsgFrame[] {
   let i = messages.length;
   while (i > 0) {
     const prev = messages[i - 1]!;
-    if (prev.seq === msg.seq) return messages; // 重复（补拉 + 广播交叠）
+    if (prev.seq === msg.seq) {
+      // 重复（补拉 + 广播交叠）一般忽略；但修订过的旧 seq 可能是重连补拉，
+      // 需要覆盖本地旧正文，否则错过 message_update 的页面会一直显示 stale 内容。
+      if (isRevisionSnapshot(msg) || isRevisionSnapshot(prev)) {
+        const next = messages.slice();
+        next[i - 1] = msg;
+        return next;
+      }
+      return messages;
+    }
     if (prev.seq < msg.seq) break;
     i--;
   }
   const next = messages.slice();
   next.splice(i, 0, msg);
   return next;
+}
+
+function isRevisionSnapshot(msg: MsgFrame): boolean {
+  return (
+    msg.edited === true ||
+    msg.retracted === true ||
+    msg.edited_at != null ||
+    msg.retracted_at != null ||
+    msg.supersedes != null ||
+    msg.superseded_by != null
+  );
+}
+
+function replaceMessage(messages: MsgFrame[], msg: MsgFrame): MsgFrame[] {
+  let replaced = false;
+  const next = messages.map((prev) => {
+    if (prev.seq !== msg.seq) return prev;
+    replaced = true;
+    return msg;
+  });
+  return replaced ? next : insertMessage(messages, msg);
 }
 
 function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
@@ -107,6 +137,8 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
       }
       return next;
     }
+    case "message_update":
+      return { ...state, messages: replaceMessage(state.messages, frame.message) };
     case "presence":
       return {
         ...state,

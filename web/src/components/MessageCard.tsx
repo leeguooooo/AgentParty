@@ -14,6 +14,12 @@ interface Props {
 export function MessageCard({ msg, self }: Props) {
   // 每个 agent 一个确定性色相：CSS 用 --ah 套 hsl() 给头像点/名字/卡片左条上色
   const hueStyle = { "--ah": agentHue(msg.sender.name) } as CSSProperties;
+  const revisionBadges = [
+    msg.edited ? "edited" : null,
+    msg.retracted ? "retracted" : null,
+    msg.supersedes !== undefined ? `supersedes #${msg.supersedes}` : null,
+    msg.superseded_by !== undefined ? `superseded by #${msg.superseded_by}` : null,
+  ].filter((part): part is string => part !== null);
 
   if (msg.kind === "status") {
     const statusBits = [
@@ -54,11 +60,16 @@ export function MessageCard({ msg, self }: Props) {
           </span>
         ))}
         {msg.reply_to !== null && <span className="msg-reply">↩ #{msg.reply_to}</span>}
+        {revisionBadges.map((badge) => (
+          <span key={badge} className="msg-revision">
+            {badge}
+          </span>
+        ))}
         <span className="msg-fill" />
         <span>#{msg.seq}</span>
         <time>{fmtTime(msg.ts)}</time>
       </header>
-      <Markdown source={msg.body} />
+      {msg.retracted ? <p className="msg-retracted">message retracted</p> : <Markdown source={msg.body} />}
     </article>
   );
 }
