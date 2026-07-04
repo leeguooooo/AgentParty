@@ -729,6 +729,59 @@ describe("party status/history channel flag", () => {
     expect(mock.requests.length).toBe(0);
   });
 
+  test("search filters channel history by body and sender substring", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({
+          messages: [
+            { type: "msg", seq: 1, sender: { name: "alice", kind: "agent" }, kind: "message", body: "deploy the worker", mentions: [], reply_to: null, state: null, note: null, ts: 1 },
+            { type: "msg", seq: 2, sender: { name: "bob", kind: "agent" }, kind: "message", body: "unrelated chatter", mentions: [], reply_to: null, state: null, note: null, ts: 2 },
+            { type: "msg", seq: 3, sender: { name: "deployer", kind: "agent" }, kind: "message", body: "hi", mentions: [], reply_to: null, state: null, note: null, ts: 3 },
+          ],
+        });
+      }
+      return null;
+    });
+    writeCfg(mock.url);
+    writeWorkspaceState("dev");
+    // body 命中 seq1（"deploy"），sender 命中 seq3（"deploy" ⊂ "deployer"）；seq2 不命中
+    const r = await runCli(["search", "deploy"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("alice");
+    expect(r.stdout).toContain("deployer");
+    expect(r.stdout).not.toContain("bob");
+  });
+
+  test("search --json emits agentparty.v1 frames; no match keeps stdout clean", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({
+          messages: [
+            { type: "msg", seq: 5, sender: { name: "x", kind: "agent" }, kind: "message", body: "findme here", mentions: [], reply_to: null, state: null, note: null, ts: 5 },
+          ],
+        });
+      }
+      return null;
+    });
+    writeCfg(mock.url);
+    writeWorkspaceState("dev");
+    const hit = await runCli(["search", "findme", "--json"]);
+    expect(hit.code).toBe(0);
+    expect(JSON.parse(hit.stdout.trim())).toMatchObject({ schema: "agentparty.v1", seq: 5 });
+    const miss = await runCli(["search", "nomatch", "--json"]);
+    expect(miss.code).toBe(0);
+    expect(miss.stdout.trim()).toBe("");
+  });
+
+  test("search requires a query", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    writeWorkspaceState("dev");
+    const r = await runCli(["search"]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("need a query");
+  });
+
   test("digest --json separates mentioned inbox from responded and never infers wake", async () => {
     mock = startRestMock((req) => {
       if (req.method === "GET" && req.path === "/api/channels/dev/messages") {

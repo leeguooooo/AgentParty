@@ -22,6 +22,7 @@ commands:
   ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
   history   [channel|--channel C] [--since seq] [--limit n] [--json]
+  search    <query> [--channel C] [--limit n] [--json]   在频道历史里按子串搜 body/note/sender
   digest    [channel|--channel C] [--since seq|last-seen] [--json]
   wake      test @agent [channel|--channel C] [--timeout N] [--json]
   channel   create <slug> [--title t] [--temp] [--party] [--public] | list | archive [slug] | reset-guard [slug] | kick <name> [slug]
@@ -66,6 +67,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/status")).run(rest);
     case "history":
       return (await import("./commands/history")).run(rest);
+    case "search":
+      return (await import("./commands/search")).run(rest);
     case "digest":
       return (await import("./commands/digest")).run(rest);
     case "wake":
