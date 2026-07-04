@@ -4,13 +4,24 @@ import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError }
 import { resolveChannel, saveCursor } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, handleRestError, postMessage } from "../rest";
-import { isName, isSlug } from "../validation";
+import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
 const STATES: StatusState[] = ["working", "waiting", "blocked", "done"];
 const COLLAB_ROLES: CollaborationRole[] = ["host", "worker", "reviewer", "observer"];
 const RESIDENCIES: Residency[] = ["supervised", "webhook", "bare", "human_driven", "unknown"];
 const WAKE_KINDS: WakeKind[] = ["none", "watch", "serve", "webhook"];
-const STATUS_FLAGS = ["channel", "note", "mention", "role", "residency", "wake-kind", "debug-auth"];
+const STATUS_FLAGS = [
+  "channel",
+  "note",
+  "mention",
+  "scope",
+  "summary-seq",
+  "blocked-reason",
+  "role",
+  "residency",
+  "wake-kind",
+  "debug-auth",
+];
 const HELP = `usage: party status [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]... [--debug-auth]
 
 Publish agent status/presence into a channel.
@@ -19,6 +30,10 @@ Options:
   --channel C      post status in channel C
   -m, --note text  status note
   --mention name   mention a user or agent; repeatable
+  --scope item     claimed file/module/task scope; repeatable
+  --summary-seq N  seq containing the summary/completion artifact
+  --blocked-reason text
+                   structured blocker reason for dispatcher boards
   --role role      collaboration role: host|worker|reviewer|observer
   --residency r    wake residency: supervised|webhook|bare|human_driven|unknown
   --wake-kind k    wake layer kind: none|watch|serve|webhook
@@ -32,7 +47,7 @@ export async function run(argv: string[]): Promise<number> {
   const { positionals, flags } = parseArgs(argv, {
     aliases: { m: "note" },
     booleans: ["debug-auth"],
-    repeatable: ["mention"],
+    repeatable: ["mention", "scope"],
   });
   const auth = await resolveAuthDetailed();
   if (!auth.server || !auth.token) {
@@ -46,7 +61,11 @@ export async function run(argv: string[]): Promise<number> {
   }
   let explicit: string | undefined;
   let state: string | undefined;
-  const flagError = valueFlagError(flags, ["channel", "note", "role", "residency", "wake-kind"], ["mention"]);
+  const flagError = valueFlagError(
+    flags,
+    ["channel", "note", "summary-seq", "blocked-reason", "role", "residency", "wake-kind"],
+    ["mention", "scope"],
+  );
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -79,6 +98,17 @@ export async function run(argv: string[]): Promise<number> {
     console.error("--mention must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");
     return 1;
   }
+  const scope = strArray(flags.scope) ?? [];
+  if (scope.some((item) => item.trim() === "")) {
+    console.error("--scope must not be empty");
+    return 1;
+  }
+  const summarySeq = parsePositiveIntFlag(str(flags["summary-seq"]), "summary-seq");
+  if (typeof summarySeq === "string") {
+    console.error(summarySeq);
+    return 1;
+  }
+  const blockedReason = str(flags["blocked-reason"]);
   const role = str(flags.role);
   if (role !== undefined && !COLLAB_ROLES.includes(role as CollaborationRole)) {
     console.error(`--role must be one of: ${COLLAB_ROLES.join("|")}`);
@@ -108,6 +138,9 @@ export async function run(argv: string[]): Promise<number> {
       state: state as StatusState,
       note: str(flags.note) ?? "",
       mentions,
+      ...(scope.length > 0 ? { scope } : {}),
+      ...(summarySeq !== undefined ? { summary_seq: summarySeq } : {}),
+      ...(blockedReason !== undefined ? { blocked_reason: blockedReason } : {}),
       ...(role !== undefined ? { role: role as CollaborationRole } : {}),
       ...(residency !== undefined ? { residency: residency as Residency } : {}),
       ...(wakeKind !== undefined ? { wake: { kind: wakeKind as WakeKind } } : {}),

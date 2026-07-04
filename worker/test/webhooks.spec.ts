@@ -295,7 +295,7 @@ describe("webhooks", () => {
     const { headers, body } = captured as unknown as CapturedRequest;
     const payload = JSON.parse(body) as Record<string, unknown>;
     expect(payload).toMatchObject({
-      type: "msg",
+      type: "status",
       kind: "status",
       state: "working",
       note: "claimed webhook wake verification",

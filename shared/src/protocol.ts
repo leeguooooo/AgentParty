@@ -72,6 +72,7 @@ export interface PresenceEntry {
   note: string | null;
   ts: number;
   last_seen?: number;
+  status?: StatusEvent;
   role?: CollaborationRole;
   residency?: Residency;
   wake?: WakeInfo;
@@ -98,6 +99,9 @@ export interface SendStatusFrame {
   state: StatusState;
   note: string;
   mentions?: string[];
+  scope?: string[];
+  summary_seq?: number | null;
+  blocked_reason?: string | null;
   role?: CollaborationRole;
   residency?: Residency;
   wake?: WakeInfo;
@@ -130,8 +134,18 @@ export interface ParticipantsFrame {
   participants: Sender[];
 }
 
+export interface StatusEvent {
+  owner: string;
+  state: StatusState;
+  scope: string[];
+  summary_seq: number | null;
+  blocked_reason: string | null;
+  updated_at: number;
+}
+
 export interface MsgFrame {
-  type: "msg";
+  /** status messages are emitted as type:"status" so tools can consume them without text scraping. */
+  type: "msg" | "status";
   seq: number;
   sender: Sender;
   kind: MessageKind;
@@ -140,6 +154,7 @@ export interface MsgFrame {
   reply_to: number | null;
   state: StatusState | null;
   note: string | null;
+  status: StatusEvent | null;
   ts: number;
 }
 
@@ -155,6 +170,7 @@ export interface PresenceFrame {
   note: string | null;
   ts: number;
   last_seen?: number;
+  status?: StatusEvent;
   role?: CollaborationRole;
   residency?: Residency;
   wake?: WakeInfo;

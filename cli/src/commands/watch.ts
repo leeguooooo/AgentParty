@@ -81,7 +81,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         else code = 1;
         break;
       }
-      if (frame.type !== "msg") continue;
+      if (frame.type !== "msg" && frame.type !== "status") continue;
       const fromSelf = frame.sender.name === self;
       const qualifies = !fromSelf && (!o.mentionsOnly || frame.mentions.includes(self));
       if (qualifies) {

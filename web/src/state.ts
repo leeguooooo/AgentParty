@@ -86,7 +86,8 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
     }
     case "participants":
       return { ...state, participants: frame.participants };
-    case "msg": {
+    case "msg":
+    case "status": {
       const next: ChannelState = { ...state, messages: insertMessage(state.messages, frame) };
       // 人类发言重置服务端 loop guard 计数，黄条同步撤下
       if (frame.sender.kind === "human" && frame.kind === "message") next.loopGuard = null;

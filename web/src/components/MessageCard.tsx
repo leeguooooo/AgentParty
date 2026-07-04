@@ -16,11 +16,17 @@ export function MessageCard({ msg, self }: Props) {
   const hueStyle = { "--ah": agentHue(msg.sender.name) } as CSSProperties;
 
   if (msg.kind === "status") {
+    const statusBits = [
+      msg.note,
+      msg.status?.scope.length ? `scope ${msg.status.scope.join(", ")}` : null,
+      msg.status?.blocked_reason ? `blocked ${msg.status.blocked_reason}` : null,
+      msg.status?.summary_seq !== null && msg.status?.summary_seq !== undefined ? `summary #${msg.status.summary_seq}` : null,
+    ].filter((part): part is string => typeof part === "string" && part !== "");
     return (
       <div className="msg-status" data-state={msg.state ?? undefined} style={hueStyle}>
         <span>
           <span className="msg-sender">{msg.sender.name}</span> → {msg.state}
-          {msg.note ? ` · ${msg.note}` : ""} · {fmtTime(msg.ts)}
+          {statusBits.length > 0 ? ` · ${statusBits.join(" · ")}` : ""} · {fmtTime(msg.ts)}
         </span>
       </div>
     );

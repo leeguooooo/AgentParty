@@ -140,7 +140,7 @@ export function connect(
         } catch {
           continue;
         }
-        if (frame.type === "msg") {
+        if (frame.type === "msg" || frame.type === "status") {
           if (frame.seq <= cursor || delivered.has(frame.seq)) continue;
           delivered.add(frame.seq);
         }

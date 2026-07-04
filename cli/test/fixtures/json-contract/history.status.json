@@ -7,7 +7,19 @@
     "kind": "agent",
     "owner": "team-a"
   },
+  "kind": "status",
+  "body": "",
+  "mentions": [],
+  "reply_to": null,
   "state": "working",
   "note": "checking release",
+  "status": {
+    "owner": "alice",
+    "state": "working",
+    "scope": ["cli/src/commands/status.ts"],
+    "summary_seq": 1,
+    "blocked_reason": null,
+    "updated_at": 1700000000000
+  },
   "ts": 1700000000000
 }

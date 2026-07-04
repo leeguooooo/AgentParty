@@ -574,6 +574,14 @@ describe("party status/history channel flag", () => {
       "checking",
       "--mention",
       "dispatcher",
+      "--scope",
+      "worker/src/do.ts",
+      "--scope",
+      "shared/src/protocol.ts",
+      "--blocked-reason",
+      "waiting review",
+      "--summary-seq",
+      "42",
     ]);
     expect(r.code).toBe(0);
     const req = reqsOf(mock, "POST", "/api/channels/ops/messages")[0]!;
@@ -582,6 +590,9 @@ describe("party status/history channel flag", () => {
       state: "working",
       note: "checking",
       mentions: ["dispatcher"],
+      scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
+      blocked_reason: "waiting review",
+      summary_seq: 42,
     });
   });
 

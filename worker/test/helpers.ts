@@ -3,6 +3,14 @@ import { SELF, env } from "cloudflare:test";
 
 export const ADMIN_HEADERS = { "x-admin-secret": "test-admin-secret" };
 
+type FrameOfType<T extends ServerFrame["type"]> = ServerFrame extends infer F
+  ? F extends { type: infer U }
+    ? T extends U
+      ? F
+      : never
+    : never
+  : never;
+
 export function uniq(prefix: string): string {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -130,10 +138,10 @@ export class WsClient {
   async nextOfType<T extends ServerFrame["type"]>(
     type: T,
     timeoutMs = 3000,
-  ): Promise<Extract<ServerFrame, { type: T }>> {
+  ): Promise<FrameOfType<T>> {
     for (;;) {
       const frame = await this.next(timeoutMs);
-      if (frame.type === type) return frame as Extract<ServerFrame, { type: T }>;
+      if (frame.type === type) return frame as FrameOfType<T>;
     }
   }
 

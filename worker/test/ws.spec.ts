@@ -107,23 +107,41 @@ describe("websocket", () => {
       role: "worker",
       residency: "supervised",
       wake: { kind: "serve", verified_at: 123 },
+      scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
+      blocked_reason: "waiting for schema review",
+      summary_seq: 42,
     });
     const sent = await worker.nextOfType("sent");
     expect(sent.seq).toBe(1);
 
-    const msg = await watcher.nextOfType("msg");
+    const msg = await watcher.nextOfType("status");
     expect(msg).toMatchObject({
       seq: 1,
+      type: "status",
       kind: "status",
       state: "working",
       note: "changing api signature",
       mentions: [human.name],
+      status: {
+        owner: agent.name,
+        state: "working",
+        scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
+        blocked_reason: "waiting for schema review",
+        summary_seq: 42,
+      },
     });
     const presence = await watcher.nextOfType("presence");
     expect(presence).toMatchObject({
       name: agent.name,
       state: "working",
       note: "changing api signature",
+      status: {
+        owner: agent.name,
+        state: "working",
+        scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
+        blocked_reason: "waiting for schema review",
+        summary_seq: 42,
+      },
       role: "worker",
       residency: "supervised",
       wake: { kind: "serve", verified_at: 123 },
@@ -139,11 +157,18 @@ describe("websocket", () => {
     });
     const secondSent = await worker.nextOfType("sent");
     expect(secondSent.seq).toBe(2);
-    await watcher.nextOfType("msg");
+    await watcher.nextOfType("status");
     const changedWake = await watcher.nextOfType("presence");
     expect(changedWake).toMatchObject({
       name: agent.name,
       state: "working",
+      status: {
+        owner: agent.name,
+        state: "working",
+        scope: [],
+        blocked_reason: null,
+        summary_seq: null,
+      },
       role: "worker",
       residency: "supervised",
       wake: { kind: "none" },
@@ -157,6 +182,11 @@ describe("websocket", () => {
       expect.objectContaining({
         name: agent.name,
         state: "working",
+        status: expect.objectContaining({
+          owner: agent.name,
+          state: "working",
+          scope: [],
+        }),
         role: "worker",
         residency: "supervised",
         wake: { kind: "none" },
@@ -166,7 +196,19 @@ describe("websocket", () => {
       headers: { authorization: `Bearer ${human.token}` },
     });
     expect((await history.json()) as unknown).toMatchObject({
-      messages: expect.arrayContaining([expect.objectContaining({ kind: "status", mentions: [human.name] })]),
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          type: "status",
+          kind: "status",
+          mentions: [human.name],
+          status: expect.objectContaining({
+            owner: agent.name,
+            scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
+            blocked_reason: "waiting for schema review",
+            summary_seq: 42,
+          }),
+        }),
+      ]),
     });
     watcher.close();
     worker.close();

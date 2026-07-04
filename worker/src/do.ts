@@ -23,6 +23,7 @@ import {
   type Sender,
   type SenderKind,
   type ServerFrame,
+  type StatusEvent,
   type StatusState,
   type TokenRole,
   type WakeInfo,
@@ -73,6 +74,8 @@ const WAKE_KINDS: readonly string[] = ["none", "watch", "serve", "webhook"];
 const MENTION_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const MAX_MENTIONS = 50;
 const MENTIONS_JSON_LIMIT = 4096;
+const MAX_STATUS_SCOPE = 50;
+const STATUS_SCOPE_JSON_LIMIT = 4096;
 
 function byteLength(s: string): number {
   return new TextEncoder().encode(s).byteLength;
@@ -89,6 +92,50 @@ function parseMentions(input: unknown): string[] | null {
     return null;
   }
   return input as string[];
+}
+
+function parseStatusScope(input: unknown): string[] | undefined | null {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input)) return null;
+  if (
+    input.length > MAX_STATUS_SCOPE ||
+    input.some((item) => typeof item !== "string" || item.trim() === "") ||
+    byteLength(JSON.stringify(input)) > STATUS_SCOPE_JSON_LIMIT
+  ) {
+    return null;
+  }
+  return input as string[];
+}
+
+function parseOptionalPositiveSeq(input: unknown): number | null | undefined {
+  if (input === undefined) return undefined;
+  if (input === null) return null;
+  if (typeof input === "number" && Number.isInteger(input) && input > 0) return input;
+  return undefined;
+}
+
+function parseStoredScope(input: unknown): string[] {
+  if (typeof input !== "string" || input === "") return [];
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function statusEventFromRow(r: Record<string, unknown>, owner: string, state: StatusState, updatedAt: number): StatusEvent {
+  return {
+    owner,
+    state,
+    scope: parseStoredScope(r.status_scope_json),
+    summary_seq: r.status_summary_seq === null || r.status_summary_seq === undefined ? null : Number(r.status_summary_seq),
+    blocked_reason:
+      r.status_blocked_reason === null || r.status_blocked_reason === undefined
+        ? null
+        : String(r.status_blocked_reason),
+    updated_at: updatedAt,
+  };
 }
 
 function parseCollaborationRole(input: unknown): CollaborationRole | undefined | null {
@@ -144,12 +191,26 @@ function parseSendFrame(input: unknown): SendFrame | null {
     if (residency === null) return null;
     const wake = parseWake(f.wake);
     if (wake === null) return null;
+    const scope = parseStatusScope(f.scope);
+    if (scope === null) return null;
+    const summarySeq = parseOptionalPositiveSeq(f.summary_seq);
+    if (summarySeq === undefined && f.summary_seq !== undefined) return null;
+    const blockedReason =
+      f.blocked_reason === undefined || f.blocked_reason === null
+        ? undefined
+        : typeof f.blocked_reason === "string"
+          ? f.blocked_reason
+          : null;
+    if (blockedReason === null) return null;
     return {
       type: "send",
       kind: "status",
       state: f.state as StatusState,
       note,
       mentions,
+      ...(scope !== undefined ? { scope } : {}),
+      ...(summarySeq !== undefined ? { summary_seq: summarySeq } : {}),
+      ...(blockedReason !== undefined ? { blocked_reason: blockedReason } : {}),
       ...(role !== undefined ? { role } : {}),
       ...(residency !== undefined ? { residency } : {}),
       ...(wake !== undefined ? { wake } : {}),
@@ -199,6 +260,9 @@ export class ChannelDO extends Server<Env> {
       reply_to INTEGER,
       state TEXT,
       note TEXT,
+      status_scope_json TEXT,
+      status_summary_seq INTEGER,
+      status_blocked_reason TEXT,
       ts INTEGER NOT NULL
     )`);
     // 历史消息也要带 sender 所属人：给早于本次的 do 表补列（新表已含，重复 ALTER 会抛，吞掉）
@@ -207,11 +271,25 @@ export class ChannelDO extends Server<Env> {
     } catch {
       // 列已存在
     }
+    for (const ddl of [
+      "ALTER TABLE messages ADD COLUMN status_scope_json TEXT",
+      "ALTER TABLE messages ADD COLUMN status_summary_seq INTEGER",
+      "ALTER TABLE messages ADD COLUMN status_blocked_reason TEXT",
+    ]) {
+      try {
+        sql.exec(ddl);
+      } catch {
+        // 列已存在
+      }
+    }
     sql.exec(`CREATE TABLE IF NOT EXISTS presence (
       name TEXT PRIMARY KEY,
       state TEXT NOT NULL,
       note TEXT,
       updated_at INTEGER NOT NULL,
+      status_scope_json TEXT,
+      status_summary_seq INTEGER,
+      status_blocked_reason TEXT,
       role TEXT,
       residency TEXT,
       wake_kind TEXT,
@@ -222,6 +300,9 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE presence ADD COLUMN residency TEXT",
       "ALTER TABLE presence ADD COLUMN wake_kind TEXT",
       "ALTER TABLE presence ADD COLUMN wake_verified_at INTEGER",
+      "ALTER TABLE presence ADD COLUMN status_scope_json TEXT",
+      "ALTER TABLE presence ADD COLUMN status_summary_seq INTEGER",
+      "ALTER TABLE presence ADD COLUMN status_blocked_reason TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -611,16 +692,28 @@ export class ChannelDO extends Server<Env> {
   // 3 次重试全败后向频道插一条 system status，让人看得见投递失败
   private insertSystemStatus(note: string, now: number) {
     const seq = this.lastSeq() + 1;
+    const status: StatusEvent = {
+      owner: "system",
+      state: "blocked",
+      scope: [],
+      summary_seq: null,
+      blocked_reason: note,
+      updated_at: now,
+    };
     this.ctx.storage.sql.exec(
-      `INSERT INTO messages (seq, sender_name, sender_kind, kind, body, mentions_json, reply_to, state, note, ts)
-       VALUES (?, 'system', 'agent', 'status', ?, '[]', NULL, 'blocked', ?, ?)`,
+      `INSERT INTO messages (
+         seq, sender_name, sender_kind, kind, body, mentions_json, reply_to,
+         state, note, status_scope_json, status_summary_seq, status_blocked_reason, ts
+       )
+       VALUES (?, 'system', 'agent', 'status', ?, '[]', NULL, 'blocked', ?, '[]', NULL, ?, ?)`,
       seq,
+      note,
       note,
       note,
       now,
     );
     const frame: MsgFrame = {
-      type: "msg",
+      type: "status",
       seq,
       sender: { name: "system", kind: "agent" },
       kind: "status",
@@ -629,6 +722,7 @@ export class ChannelDO extends Server<Env> {
       reply_to: null,
       state: "blocked",
       note,
+      status,
       ts: now,
     };
     this.broadcastFrame(frame);
@@ -868,6 +962,17 @@ export class ChannelDO extends Server<Env> {
     const sender: Sender = identity.owner
       ? { name: identity.name, kind: identity.kind, owner: identity.owner }
       : { name: identity.name, kind: identity.kind };
+    const status: StatusEvent | null =
+      frame.kind === "status"
+        ? {
+            owner: identity.name,
+            state: frame.state,
+            scope: frame.scope ?? [],
+            summary_seq: frame.summary_seq ?? null,
+            blocked_reason: frame.blocked_reason ?? null,
+            updated_at: now,
+          }
+        : null;
     const msg: MsgFrame =
       frame.kind === "message"
         ? {
@@ -880,10 +985,11 @@ export class ChannelDO extends Server<Env> {
             reply_to: frame.reply_to,
             state: null,
             note: null,
+            status: null,
             ts: now,
           }
         : {
-            type: "msg",
+            type: "status",
             seq,
             sender,
             kind: "status",
@@ -892,11 +998,15 @@ export class ChannelDO extends Server<Env> {
             reply_to: null,
             state: frame.state,
             note: frame.note,
+            status,
             ts: now,
           };
     sql.exec(
-      `INSERT INTO messages (seq, sender_name, sender_kind, sender_owner, kind, body, mentions_json, reply_to, state, note, ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (
+         seq, sender_name, sender_kind, sender_owner, kind, body, mentions_json, reply_to,
+         state, note, status_scope_json, status_summary_seq, status_blocked_reason, ts
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
@@ -907,6 +1017,9 @@ export class ChannelDO extends Server<Env> {
       msg.reply_to,
       msg.state,
       msg.note,
+      status === null ? null : JSON.stringify(status.scope),
+      status?.summary_seq ?? null,
+      status?.blocked_reason ?? null,
       now,
     );
     this.setMeta("agent_streak", String(identity.kind === "agent" ? this.agentStreak() + 1 : 0));
@@ -918,12 +1031,18 @@ export class ChannelDO extends Server<Env> {
     if (frame.kind === "status") {
       const wakeProvided = frame.wake !== undefined ? 1 : 0;
       sql.exec(
-        `INSERT INTO presence (name, state, note, updated_at, role, residency, wake_kind, wake_verified_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO presence (
+           name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+           role, residency, wake_kind, wake_verified_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            state = excluded.state,
            note = excluded.note,
            updated_at = excluded.updated_at,
+           status_scope_json = excluded.status_scope_json,
+           status_summary_seq = excluded.status_summary_seq,
+           status_blocked_reason = excluded.status_blocked_reason,
            role = COALESCE(excluded.role, presence.role),
            residency = COALESCE(excluded.residency, presence.residency),
            wake_kind = CASE WHEN ? THEN excluded.wake_kind ELSE presence.wake_kind END,
@@ -932,6 +1051,9 @@ export class ChannelDO extends Server<Env> {
         frame.state,
         frame.note,
         now,
+        JSON.stringify(status?.scope ?? []),
+        status?.summary_seq ?? null,
+        status?.blocked_reason ?? null,
         frame.role ?? null,
         frame.residency ?? null,
         frame.wake?.kind ?? null,
@@ -1063,14 +1185,23 @@ export class ChannelDO extends Server<Env> {
 
   private presenceList(): PresenceEntry[] {
     return this.ctx.storage.sql
-      .exec("SELECT name, state, note, updated_at, role, residency, wake_kind, wake_verified_at FROM presence ORDER BY name")
+      .exec(
+        `SELECT name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+                role, residency, wake_kind, wake_verified_at
+         FROM presence ORDER BY name`,
+      )
       .toArray()
       .map((r) => this.presenceRowToEntry(r));
   }
 
   private presenceFor(name: string): PresenceEntry | null {
     const rows = this.ctx.storage.sql
-      .exec("SELECT name, state, note, updated_at, role, residency, wake_kind, wake_verified_at FROM presence WHERE name = ?", name)
+      .exec(
+        `SELECT name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+                role, residency, wake_kind, wake_verified_at
+         FROM presence WHERE name = ?`,
+        name,
+      )
       .toArray();
     return rows.length > 0 ? this.presenceRowToEntry(rows[0]!) : null;
   }
@@ -1083,12 +1214,18 @@ export class ChannelDO extends Server<Env> {
         : r.wake_verified_at === null || r.wake_verified_at === undefined
           ? { kind: String(r.wake_kind) as WakeKind }
           : { kind: String(r.wake_kind) as WakeKind, verified_at: Number(r.wake_verified_at) };
+    const state = String(r.state) as PresenceEntry["state"];
+    const status =
+      state === "offline"
+        ? undefined
+        : statusEventFromRow(r, String(r.name), state as StatusState, ts);
     return {
       name: String(r.name),
-      state: String(r.state) as PresenceEntry["state"],
+      state,
       note: r.note === null ? null : String(r.note),
       ts,
       last_seen: ts,
+      ...(status === undefined ? {} : { status }),
       ...(r.role === null || r.role === undefined ? {} : { role: String(r.role) as CollaborationRole }),
       ...(r.residency === null || r.residency === undefined ? {} : { residency: String(r.residency) as Residency }),
       ...(wake === undefined ? {} : { wake }),
@@ -1096,20 +1233,29 @@ export class ChannelDO extends Server<Env> {
   }
 
   private rowToFrame(r: Record<string, unknown>): MsgFrame {
+    const kind = String(r.kind) as MsgFrame["kind"];
+    const state = r.state === null ? null : (String(r.state) as StatusState);
+    const note = r.note === null ? null : String(r.note);
+    const ts = Number(r.ts);
+    const status: StatusEvent | null =
+      kind === "status" && state !== null
+        ? statusEventFromRow(r, String(r.sender_name), state, ts)
+        : null;
     return {
-      type: "msg",
+      type: kind === "status" ? "status" : "msg",
       seq: Number(r.seq),
       sender:
         r.sender_owner === null || r.sender_owner === undefined
           ? { name: String(r.sender_name), kind: String(r.sender_kind) as SenderKind }
           : { name: String(r.sender_name), kind: String(r.sender_kind) as SenderKind, owner: String(r.sender_owner) },
-      kind: String(r.kind) as MsgFrame["kind"],
+      kind,
       body: String(r.body),
       mentions: JSON.parse(String(r.mentions_json ?? "[]")) as string[],
       reply_to: r.reply_to === null ? null : Number(r.reply_to),
-      state: r.state === null ? null : (String(r.state) as StatusState),
-      note: r.note === null ? null : String(r.note),
-      ts: Number(r.ts),
+      state,
+      note,
+      status,
+      ts,
     };
   }
 }
