@@ -1,7 +1,7 @@
 // rest 封装 + token 存取。
 // 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它，并立即从地址栏移除；
 // share token 只放 sessionStorage，本次标签页可刷新，避免长期落 localStorage。
-import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
+import type { MsgFrame, PresenceEntry, SearchHit } from "@agentparty/shared";
 import type { WebSession } from "./oidc";
 
 const TOKEN_KEY = "ap_token";
@@ -199,4 +199,25 @@ export async function fetchMessages(token: string, slug: string, limit = 1000): 
   if (!res.ok) throw new Error(`GET /api/channels/${slug}/messages failed (${res.status})`);
   const data = (await res.json()) as { messages: MsgFrame[] };
   return data.messages;
+}
+
+export async function searchMessages(
+  token: string,
+  slug: string,
+  opts: { query: string; from?: string; since?: number; limit?: number },
+  signal?: AbortSignal,
+): Promise<SearchHit[]> {
+  const params = new URLSearchParams({ q: opts.query });
+  if (opts.from !== undefined && opts.from !== "") params.set("from", opts.from);
+  if (opts.since !== undefined) params.set("since", String(opts.since));
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/search?${params.toString()}`, {
+    headers: { authorization: `Bearer ${token}` },
+    signal,
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/search failed (${res.status})`);
+  const data = (await res.json()) as { hits: SearchHit[] };
+  return data.hits;
 }

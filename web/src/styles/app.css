@@ -334,12 +334,17 @@
 }
 .stream > .d-empty { margin: auto 0; }
 
-/* 频道搜索行（#25 web 半边）：客户端过滤消息流 */
+/* 频道搜索行：server-side retained-history search + sender/time filters */
+.chan-search-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 4px 2px;
+}
 .chan-search-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 4px 2px;
 }
 .chan-search {
   flex: 1;
@@ -353,6 +358,41 @@
 }
 .chan-search:focus { outline: none; border-color: var(--t-accent); }
 .chan-search-count { flex: none; font-size: 11px; color: var(--t-dim); white-space: nowrap; }
+.chan-search-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chan-filter-input {
+  flex: 1 1 150px;
+  min-width: 0;
+  max-width: 240px;
+  font-size: 12px;
+  padding: 5px 9px;
+  color: var(--t-text);
+  background: var(--t-panel2);
+  border: 1.5px solid var(--d-ink);
+  border-radius: 8px 6px 9px 7px / 7px 9px 6px 8px;
+}
+.chan-filter-input--short { flex-basis: 90px; max-width: 120px; }
+.chan-filter-input:focus { outline: none; border-color: var(--t-accent); }
+
+.search-hit-card { gap: 7px; }
+.search-hit-field {
+  flex: none;
+  font-size: 11px;
+  color: var(--t-dim);
+  border: 1.5px solid var(--d-ink);
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: var(--t-panel);
+}
+.search-hit-snippet {
+  margin: 0;
+  color: var(--t-text);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
 
 .msg-card--own { background: var(--t-panel2); }
 /* per-agent 颜色：--ah（sender 名哈希出的色相 0–359）由 MessageCard 注入。

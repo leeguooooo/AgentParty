@@ -1,11 +1,15 @@
 // 频道页：presence 条 + 实时消息流 + 内联错误条幅 + 插话框。
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import type { SearchHit } from "@agentparty/shared";
 import { AgentJoin } from "../components/AgentJoin";
 import { Composer } from "../components/Composer";
 import { MessageCard } from "../components/MessageCard";
 import { PresenceBar } from "../components/PresenceBar";
-import { AuthError, ForbiddenError, fetchMessages } from "../lib/api";
+import { AuthError, ForbiddenError, fetchMessages, searchMessages } from "../lib/api";
+import { agentHue } from "../lib/agentColor";
+import { fmtTime } from "../lib/time";
 import { ChannelSocket } from "../lib/ws";
 import { channelReducer, initialChannelState } from "../state";
 
@@ -23,6 +27,40 @@ interface Props {
 
 const MENTION_RE = /@([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
 
+function positiveInt(value: string, fallback: number, max: number): number | null {
+  if (value.trim() === "") return fallback;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > max) return null;
+  return n;
+}
+
+function nonNegativeInt(value: string): number | null {
+  if (value.trim() === "") return 0;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) return null;
+  return n;
+}
+
+function SearchHitCard({ hit }: { hit: SearchHit }) {
+  const hueStyle = { "--ah": agentHue(hit.sender.name) } as CSSProperties;
+  return (
+    <article className="d-card msg-card search-hit-card" style={hueStyle}>
+      <header className="d-meta msg-head">
+        <span className="msg-avatar" aria-hidden="true" />
+        <span className="msg-sender">{hit.sender.name}</span>
+        <span className={"msg-kind" + (hit.sender.kind === "human" ? " msg-kind--human" : "")}>
+          {hit.sender.kind}
+        </span>
+        <span className="search-hit-field">{hit.match_field}</span>
+        <span className="msg-fill" />
+        <span>#{hit.seq}</span>
+        <time>{fmtTime(hit.ts)}</time>
+      </header>
+      <p className="search-hit-snippet">{hit.snippet === "" ? "(empty)" : hit.snippet}</p>
+    </article>
+  );
+}
+
 export function ChannelPage({
   slug,
   token,
@@ -36,6 +74,12 @@ export function ChannelPage({
   const [state, dispatch] = useReducer(channelReducer, initialChannelState);
   const [draft, setDraft] = useState("");
   const [search, setSearch] = useState("");
+  const [searchFrom, setSearchFrom] = useState("");
+  const [searchSince, setSearchSince] = useState("");
+  const [searchLimit, setSearchLimit] = useState("100");
+  const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const sockRef = useRef<ChannelSocket | null>(null);
   const streamRef = useRef<HTMLDivElement | null>(null);
@@ -121,14 +165,66 @@ export function ChannelPage({
 
   const canWrite = state.self !== null && !state.archived && !state.readonly;
 
-  // 频道搜索（#25 web 半边）：客户端子串过滤已加载的消息，body/note/sender 命中。始终可用（含只读/归档回看）。
-  const q = search.trim().toLowerCase();
-  const shown = q
-    ? state.messages.filter((m) => {
-        const text = m.kind === "message" ? m.body : (m.note ?? "");
-        return text.toLowerCase().includes(q) || m.sender.name.toLowerCase().includes(q);
-      })
-    : state.messages;
+  const q = search.trim();
+  const from = searchFrom.trim();
+  const since = nonNegativeInt(searchSince);
+  const limit = positiveInt(searchLimit, 100, 1000);
+  const searchInputError =
+    q !== "" && since === null ? "since must be a non-negative integer" :
+    q !== "" && limit === null ? "limit must be 1..1000" :
+    null;
+  const knownSenders = [
+    ...new Set([
+      ...state.participants.map((p) => p.name),
+      ...Object.keys(state.presence),
+      ...state.messages.map((m) => m.sender.name),
+    ]),
+  ].sort((a, b) => a.localeCompare(b));
+  const senderListId = `senders-${slug}`;
+
+  useEffect(() => {
+    if (q === "") {
+      setSearchHits([]);
+      setSearchLoading(false);
+      setSearchError(null);
+      return;
+    }
+    if (searchInputError !== null || since === null || limit === null) {
+      setSearchHits([]);
+      setSearchLoading(false);
+      setSearchError(null);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setSearchLoading(true);
+      setSearchError(null);
+      searchMessages(
+        token,
+        slug,
+        { query: q, from: from === "" ? undefined : from, since, limit },
+        controller.signal,
+      )
+        .then((hits) => {
+          setSearchHits(hits);
+          setSearchError(null);
+        })
+        .catch((err: unknown) => {
+          if (controller.signal.aborted) return;
+          setSearchHits([]);
+          if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+          else if (err instanceof ForbiddenError) dispatch({ type: "fatal", reason: "forbidden" });
+          else setSearchError("search failed to load");
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setSearchLoading(false);
+        });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [from, limit, q, searchInputError, since, slug, token]);
 
   // 私有频道拒入（spec §3）：ws 已停止重连，给一条友好红条，不留空白 / 不无限转圈
   if (state.forbidden) {
@@ -156,36 +252,89 @@ export function ChannelPage({
         </div>
       )}
       {(state.messages.length > 0 || q !== "") && (
-        <div className="chan-search-row">
-          <input
-            className="t-mono chan-search"
-            type="search"
-            value={search}
-            spellCheck={false}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="🔍 搜本频道消息（正文 / 发送者）"
-            aria-label="search messages"
-          />
+        <div className="chan-search-panel">
+          <div className="chan-search-row">
+            <input
+              className="t-mono chan-search"
+              type="search"
+              value={search}
+              spellCheck={false}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="搜本频道消息"
+              aria-label="search messages"
+            />
+            {q !== "" && (
+              <span className="t-mono chan-search-count">
+                {searchLoading ? "searching" : `${searchHits.length} hits`}
+              </span>
+            )}
+          </div>
           {q !== "" && (
-            <span className="t-mono chan-search-count">{shown.length} 命中</span>
+            <div className="chan-search-filters">
+              <input
+                className="t-mono chan-filter-input"
+                value={searchFrom}
+                spellCheck={false}
+                list={senderListId}
+                onChange={(e) => setSearchFrom(e.target.value)}
+                placeholder="from agent"
+                aria-label="search sender filter"
+              />
+              <datalist id={senderListId}>
+                {knownSenders.map((name) => (
+                  <option key={name} value={name} />
+                ))}
+              </datalist>
+              <input
+                className="t-mono chan-filter-input"
+                type="number"
+                min={0}
+                step={1}
+                value={searchSince}
+                onChange={(e) => setSearchSince(e.target.value)}
+                placeholder="since seq"
+                aria-label="search since sequence"
+              />
+              <input
+                className="t-mono chan-filter-input chan-filter-input--short"
+                type="number"
+                min={1}
+                max={1000}
+                step={1}
+                value={searchLimit}
+                onChange={(e) => setSearchLimit(e.target.value)}
+                placeholder="limit"
+                aria-label="search result limit"
+              />
+            </div>
           )}
         </div>
       )}
       <div className="stream" ref={streamRef} onScroll={onScroll}>
-        {shown.map((m) => (
-          <MessageCard key={m.seq} msg={m} self={state.self} />
-        ))}
-        {state.messages.length === 0 && (
+        {q === ""
+          ? state.messages.map((m) => <MessageCard key={m.seq} msg={m} self={state.self} />)
+          : searchHits.map((hit) => <SearchHitCard key={hit.seq} hit={hit} />)}
+        {state.messages.length === 0 && q === "" && (
           <p className="d-empty" role="status" aria-live="polite">
             party watch {slug}
           </p>
         )}
-        {state.messages.length > 0 && q !== "" && shown.length === 0 && (
+        {q !== "" && !searchLoading && searchHits.length === 0 && searchInputError === null && searchError === null && (
           <p className="d-empty" role="status" aria-live="polite">
             没有匹配「{search.trim()}」的消息
           </p>
         )}
       </div>
+      {searchInputError !== null && (
+        <p className="banner banner--yellow" role="alert">
+          {searchInputError}
+        </p>
+      )}
+      {searchError !== null && searchInputError === null && (
+        <p className="banner banner--red" role="alert">
+          {searchError}
+        </p>
+      )}
       {state.archived && (
         <p className="banner banner--gray" role="status" aria-live="polite">
           channel archived — read-only from here on
