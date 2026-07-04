@@ -2,7 +2,7 @@
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { MsgFrame, SearchHit } from "@agentparty/shared";
+import { buildHostBoard, type HostBoard, type MsgFrame, type SearchHit } from "@agentparty/shared";
 import { AgentJoin } from "../components/AgentJoin";
 import { Composer } from "../components/Composer";
 import { MessageCard } from "../components/MessageCard";
@@ -318,6 +318,62 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
   );
 }
 
+function HostBoardPanel({ board }: { board: HostBoard }) {
+  if (board.hosts.length === 0 && board.recommended_actions.length === 0 && board.conflicts.length === 0) return null;
+
+  return (
+    <section className="host-board-panel" aria-label="host board">
+      <div className="host-board-head">
+        <h2 className="host-board-title">Host Board</h2>
+        <span className="t-mono host-board-count">#{board.last_seq}</span>
+      </div>
+      {board.recommended_actions.length > 0 && (
+        <ol className="host-action-list">
+          {board.recommended_actions.map((action, index) => (
+            <li key={`${action.kind}:${action.target ?? "channel"}:${index}`} className={`host-action host-action--${action.kind}`}>
+              <div className="host-action-head">
+                <span className="t-mono host-action-kind">{action.kind}</span>
+                {action.target !== null && <span className="host-action-target">{action.target}</span>}
+                {action.requires_human && <span className="t-mono host-action-human">human</span>}
+              </div>
+              <p>{action.reason}</p>
+              {action.command !== null && <code>{action.command}</code>}
+            </li>
+          ))}
+        </ol>
+      )}
+      {board.conflicts.length > 0 && (
+        <ol className="host-conflict-list">
+          {board.conflicts.map((conflict) => (
+            <li key={conflict.scope} className="host-conflict">
+              <span className="t-mono host-conflict-scope">{conflict.scope}</span>
+              <span>{conflict.owners.join(" vs ")}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+      {board.hosts.length > 0 && (
+        <div className="host-board-hosts">
+          {board.hosts.map((host) => (
+            <span
+              key={host.name}
+              className={`t-mono host-board-host host-board-host--${host.lease}`}
+              title={[
+                `state: ${host.state}`,
+                `residency: ${host.residency}`,
+                `wake: ${host.wake_kind}`,
+                host.stale_reason !== null ? `reason: ${host.stale_reason}` : null,
+              ].filter((part): part is string => part !== null).join("\n")}
+            >
+              {host.name} · {host.lease}
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function TeamThread({ thread, self }: { thread: TeamMessageThread; self: string | null }) {
   const parentLabel =
     thread.parentAgents.length === 1 ? `parent ${thread.parentAgents[0]}` : `${thread.parentAgents.length} parents`;
@@ -553,6 +609,10 @@ export function ChannelPage({
       }),
     [state.messages, state.participants, state.presence, teamNow],
   );
+  const hostBoard = useMemo(
+    () => buildHostBoard(slug, Object.values(state.presence), state.messages, teamNow),
+    [slug, state.messages, state.presence, teamNow],
+  );
   const agentFilterActive = agentFilter.agents.length > 0;
   const totalInView = q === "" ? state.messages.length : searchHits.length;
   const visibleInView = q === "" ? visibleMessages.length : visibleSearchHits.length;
@@ -657,6 +717,7 @@ export function ChannelPage({
           onClear={clearAgentFilter}
         />
       )}
+      {q === "" && <HostBoardPanel board={hostBoard} />}
       {q === "" && <TeamPanel teams={teamSummaries} />}
       {q === "" && <DecisionPanel messages={state.messages} />}
       {(state.messages.length > 0 || q !== "") && (

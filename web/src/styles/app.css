@@ -709,6 +709,133 @@
   padding: 0 10px;
 }
 
+.host-board-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 4px 4px;
+  border-top: 1px dashed var(--t-faint);
+}
+.host-board-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.host-board-title {
+  margin: 0;
+  font-size: 12px;
+  color: var(--t-muted);
+}
+.host-board-count {
+  font-size: 11px;
+  color: var(--t-dim);
+}
+.host-action-list,
+.host-conflict-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.host-action {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1.5px solid var(--t-faint);
+  border-radius: 8px;
+  background: var(--t-panel2);
+}
+.host-action--clear-loop-guard {
+  border-color: var(--d-yellow);
+  background: #fff1ad;
+}
+.host-action--takeover,
+.host-action--resolve-conflict {
+  border-color: var(--d-blue);
+  background: var(--d-blue-soft);
+}
+.host-action-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 4px;
+}
+.host-action-kind,
+.host-action-human {
+  flex: none;
+  padding: 1px 6px;
+  border: 1.5px solid var(--t-faint);
+  border-radius: 7px;
+  color: var(--t-muted);
+  background: var(--t-panel);
+  font-size: 10px;
+}
+.host-action-target {
+  min-width: 0;
+  font-family: var(--d-marker);
+  font-size: 13px;
+  color: var(--t-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.host-action p {
+  margin: 0;
+  color: var(--t-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.host-action code {
+  display: block;
+  margin-top: 6px;
+  color: var(--t-dim);
+  font-size: 10.5px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.host-conflict {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1.5px dashed var(--d-blue);
+  border-radius: 8px;
+  color: var(--t-muted);
+  background: var(--d-blue-soft);
+  font-size: 12px;
+}
+.host-conflict-scope {
+  flex: none;
+  color: var(--t-text);
+  font-size: 10.5px;
+}
+.host-board-hosts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.host-board-host {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1.5px solid var(--t-faint);
+  border-radius: 999px;
+  color: var(--t-dim);
+  background: var(--t-panel);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.host-board-host--active {
+  border-color: var(--d-green);
+  color: var(--d-green);
+  background: var(--d-green-soft);
+}
+
 .decision-panel {
   display: flex;
   flex-direction: column;

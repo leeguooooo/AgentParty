@@ -333,6 +333,316 @@ export interface MsgFrame {
   };
 }
 
+export interface HostSummary {
+  name: string;
+  lease: HostLeaseState;
+  stale_reason: string | null;
+  state: string;
+  note: string | null;
+  role_source: string | null;
+  residency: Residency | "unknown";
+  wake_kind: WakeKind | "unknown";
+  wake_verified_at: number | null;
+  last_seen: number | null;
+}
+
+export interface ClaimSummary {
+  seq: number;
+  owner: string;
+  state: StatusState;
+  scope: string[];
+  note: string | null;
+  blocked_reason: string | null;
+  summary_seq: number | null;
+  updated_at: number;
+  workflow: StatusWorkflow | null;
+}
+
+export interface DecisionSummary {
+  seq: number;
+  owner: string;
+  kind: HostDecision["kind"];
+  decision: string;
+  next: string | null;
+  expires_at: number | null;
+  handoff_to: string | null;
+  takeover_from: string | null;
+}
+
+export interface ConflictClaimSummary {
+  seq: number;
+  owner: string;
+  state: StatusState;
+  scope: string[];
+}
+
+export interface ConflictSummary {
+  scope: string;
+  owners: string[];
+  claims: ConflictClaimSummary[];
+}
+
+export interface RecommendedAction {
+  kind: "clear-loop-guard" | "takeover" | "assign-host" | "resolve-conflict" | "review-blockers";
+  reason: string;
+  target: string | null;
+  command: string | null;
+  requires_human: boolean;
+}
+
+export interface HostBoard {
+  schema: "agentparty.v1";
+  type: "host_board";
+  channel: string;
+  generated_at: number;
+  last_seq: number;
+  hosts: HostSummary[];
+  open_claims: ClaimSummary[];
+  blockers: ClaimSummary[];
+  conflicts: ConflictSummary[];
+  decisions: DecisionSummary[];
+  recommended_actions: RecommendedAction[];
+}
+
+export function summarizeHosts(presence: PresenceEntry[], now: number): HostSummary[] {
+  return presence
+    .filter((entry) => entry.role === "host")
+    .map((entry) => {
+      const lease = evaluateHostLease(entry, now);
+      return {
+        name: entry.name,
+        lease: lease.lease,
+        stale_reason: lease.reason,
+        state: entry.state,
+        note: entry.note,
+        role_source: entry.role_source ?? null,
+        residency: lease.residency,
+        wake_kind: lease.wake_kind,
+        wake_verified_at: entry.wake?.verified_at ?? null,
+        last_seen: lease.last_seen,
+      };
+    })
+    .sort((a, b) => {
+      if (a.lease !== b.lease) return a.lease === "active" ? -1 : 1;
+      return (b.last_seen ?? 0) - (a.last_seen ?? 0) || a.name.localeCompare(b.name);
+    });
+}
+
+function claimKey(status: StatusEvent): string {
+  return `${status.owner}\0${status.scope.join("\0")}`;
+}
+
+function claimFrom(seq: number, status: StatusEvent): ClaimSummary {
+  return {
+    seq,
+    owner: status.owner,
+    state: status.state,
+    scope: status.scope,
+    note: null,
+    blocked_reason: status.blocked_reason,
+    summary_seq: status.summary_seq,
+    updated_at: status.updated_at,
+    workflow: status.workflow ?? null,
+  };
+}
+
+export function summarizeStatus(messages: MsgFrame[]): {
+  openClaims: ClaimSummary[];
+  blockers: ClaimSummary[];
+  decisions: DecisionSummary[];
+} {
+  const latestClaims = new Map<string, ClaimSummary>();
+  const decisions: DecisionSummary[] = [];
+
+  for (const msg of messages) {
+    if (msg.kind !== "status" || msg.status === null) continue;
+    const status = msg.status;
+    const key = claimKey(status);
+    const claim = { ...claimFrom(msg.seq, status), note: msg.note };
+    if (status.state === "done") latestClaims.delete(key);
+    else latestClaims.set(key, claim);
+
+    if (status.decision !== undefined) {
+      decisions.push({
+        seq: msg.seq,
+        owner: status.decision.owner,
+        kind: status.decision.kind,
+        decision: status.decision.decision,
+        next: status.decision.next,
+        expires_at: status.decision.expires_at,
+        handoff_to: status.decision.handoff_to ?? null,
+        takeover_from: status.decision.takeover_from ?? null,
+      });
+    }
+  }
+
+  const openClaims = [...latestClaims.values()].sort((a, b) => b.seq - a.seq);
+  return {
+    openClaims,
+    blockers: openClaims.filter((claim) => claim.state === "blocked"),
+    decisions: decisions.slice(-8).reverse(),
+  };
+}
+
+function shellWord(s: string): string {
+  return /^[a-zA-Z0-9._:@%+=,/-]+$/.test(s) ? s : JSON.stringify(s);
+}
+
+function isLoopGuardBlocker(claim: ClaimSummary): boolean {
+  const text = `${claim.blocked_reason ?? ""} ${claim.note ?? ""}`.toLowerCase();
+  return claim.owner === "system" && text.includes("loop guard");
+}
+
+function normalizeScope(scope: string): string {
+  return scope.replace(/\/+$/g, "");
+}
+
+function overlapScope(a: string, b: string): string | null {
+  const left = normalizeScope(a);
+  const right = normalizeScope(b);
+  if (left === "" || right === "") return null;
+  if (left === right) return left;
+  if (left.startsWith(`${right}/`)) return right;
+  if (right.startsWith(`${left}/`)) return left;
+  return null;
+}
+
+export function summarizeConflicts(openClaims: ClaimSummary[]): ConflictSummary[] {
+  const groups = new Map<string, Map<string, ConflictClaimSummary>>();
+  for (let i = 0; i < openClaims.length; i += 1) {
+    const left = openClaims[i]!;
+    for (let j = i + 1; j < openClaims.length; j += 1) {
+      const right = openClaims[j]!;
+      if (left.owner === right.owner) continue;
+      for (const leftScope of left.scope) {
+        for (const rightScope of right.scope) {
+          const scope = overlapScope(leftScope, rightScope);
+          if (scope === null) continue;
+          const claims = groups.get(scope) ?? new Map<string, ConflictClaimSummary>();
+          claims.set(`${left.owner}\0${left.seq}`, {
+            seq: left.seq,
+            owner: left.owner,
+            state: left.state,
+            scope: left.scope,
+          });
+          claims.set(`${right.owner}\0${right.seq}`, {
+            seq: right.seq,
+            owner: right.owner,
+            state: right.state,
+            scope: right.scope,
+          });
+          groups.set(scope, claims);
+        }
+      }
+    }
+  }
+
+  return [...groups.entries()]
+    .map(([scope, claims]) => {
+      const sortedClaims = [...claims.values()].sort((a, b) => b.seq - a.seq || a.owner.localeCompare(b.owner));
+      return {
+        scope,
+        owners: [...new Set(sortedClaims.map((claim) => claim.owner))].sort(),
+        claims: sortedClaims,
+      };
+    })
+    .sort((a, b) => a.scope.localeCompare(b.scope));
+}
+
+export function recommendHostActions(
+  channel: string,
+  hosts: HostSummary[],
+  blockers: ClaimSummary[],
+  conflicts: ConflictSummary[],
+): RecommendedAction[] {
+  const actions: RecommendedAction[] = [];
+  if (blockers.some(isLoopGuardBlocker)) {
+    actions.push({
+      kind: "clear-loop-guard",
+      reason: "loop guard is tripped; agent messages are rejected until a human message or owner reset",
+      target: null,
+      command: `party channel reset-guard ${shellWord(channel)}`,
+      requires_human: true,
+    });
+  }
+
+  const activeHosts = hosts.filter((host) => host.lease === "active");
+  const staleHosts = hosts.filter((host) => host.lease === "stale");
+  if (activeHosts.length === 0 && staleHosts.length > 0) {
+    const target = staleHosts[0]!;
+    actions.push({
+      kind: "takeover",
+      reason: `no active resident host; latest host is stale (${target.stale_reason ?? "stale"})`,
+      target: target.name,
+      command: [
+        "party status",
+        shellWord(channel),
+        "working",
+        "-m",
+        shellWord(`takeover host from ${target.name}`),
+        "--role host",
+        "--decision-kind takeover",
+        "--decision",
+        shellWord(`takeover stale host ${target.name}`),
+        "--takeover-from",
+        shellWord(target.name),
+      ].join(" "),
+      requires_human: false,
+    });
+  } else if (hosts.length === 0) {
+    actions.push({
+      kind: "assign-host",
+      reason: "no visible host role in channel presence",
+      target: null,
+      command: `party channel role set <agent-name> host ${shellWord(channel)}`,
+      requires_human: true,
+    });
+  }
+
+  if (conflicts.length > 0) {
+    const conflict = conflicts[0]!;
+    actions.push({
+      kind: "resolve-conflict",
+      reason: `${conflicts.length} overlapping claim scope(s); first ${conflict.scope} claimed by ${conflict.owners.join(", ")}`,
+      target: conflict.owners[0] ?? null,
+      command: null,
+      requires_human: false,
+    });
+  }
+
+  const nonLoopBlockers = blockers.filter((claim) => !isLoopGuardBlocker(claim));
+  if (nonLoopBlockers.length > 0) {
+    actions.push({
+      kind: "review-blockers",
+      reason: `${nonLoopBlockers.length} blocked claim(s) need host triage`,
+      target: nonLoopBlockers[0]!.owner,
+      command: null,
+      requires_human: false,
+    });
+  }
+
+  return actions;
+}
+
+export function buildHostBoard(channel: string, presence: PresenceEntry[], messages: MsgFrame[], now = Date.now()): HostBoard {
+  const status = summarizeStatus(messages);
+  const hosts = summarizeHosts(presence, now);
+  const conflicts = summarizeConflicts(status.openClaims);
+  return {
+    schema: "agentparty.v1",
+    type: "host_board",
+    channel,
+    generated_at: now,
+    last_seq: messages.at(-1)?.seq ?? 0,
+    hosts,
+    open_claims: status.openClaims,
+    blockers: status.blockers,
+    conflicts,
+    decisions: status.decisions,
+    recommended_actions: recommendHostActions(channel, hosts, status.blockers, conflicts),
+  };
+}
+
 export interface MessageUpdateFrame {
   type: "message_update";
   target_seq: number;

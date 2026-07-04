@@ -1007,6 +1007,132 @@ describe("party status/history channel flag", () => {
     expect(frame.recommended_actions[1]!.command).toContain("--takeover-from host-old");
   });
 
+  test("host board detects overlapping claim scopes for coordinator triage", async () => {
+    const now = Date.now();
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels") {
+        return Response.json({
+          channels: [
+            {
+              slug: "dev",
+              title: "Dev",
+              kind: "standing",
+              archived_at: null,
+              presence: [
+                {
+                  name: "host-a",
+                  state: "working",
+                  note: "coordinating",
+                  ts: now - 1000,
+                  last_seen: now - 1000,
+                  role: "host",
+                  role_source: "assigned",
+                  residency: "supervised",
+                  wake: { kind: "serve", verified_at: now - 2000 },
+                },
+              ],
+            },
+          ],
+        });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({
+          messages: [
+            {
+              type: "status",
+              seq: 30,
+              sender: { name: "worker-a", kind: "agent" },
+              kind: "status",
+              body: "working web",
+              mentions: [],
+              reply_to: null,
+              state: "working",
+              note: "working web",
+              status: {
+                owner: "worker-a",
+                state: "working",
+                scope: ["web/src"],
+                summary_seq: null,
+                blocked_reason: null,
+                updated_at: 30_000,
+              },
+              ts: 30_000,
+            },
+            {
+              type: "status",
+              seq: 31,
+              sender: { name: "worker-b", kind: "agent" },
+              kind: "status",
+              body: "working presence",
+              mentions: [],
+              reply_to: null,
+              state: "working",
+              note: "working presence",
+              status: {
+                owner: "worker-b",
+                state: "working",
+                scope: ["web/src/components"],
+                summary_seq: null,
+                blocked_reason: null,
+                updated_at: 31_000,
+              },
+              ts: 31_000,
+            },
+            {
+              type: "status",
+              seq: 32,
+              sender: { name: "worker-c", kind: "agent" },
+              kind: "status",
+              body: "working cli",
+              mentions: [],
+              reply_to: null,
+              state: "working",
+              note: "working cli",
+              status: {
+                owner: "worker-c",
+                state: "working",
+                scope: ["cli/src"],
+                summary_seq: null,
+                blocked_reason: null,
+                updated_at: 32_000,
+              },
+              ts: 32_000,
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["host", "board", "dev", "--json"]);
+    expect(r.code).toBe(0);
+    const frame = JSON.parse(r.stdout.trim()) as {
+      conflicts: Array<{
+        scope: string;
+        owners: string[];
+        claims: Array<{ seq: number; owner: string; state: string; scope: string[] }>;
+      }>;
+      recommended_actions: Array<{ kind: string; target: string | null; reason: string }>;
+    };
+    expect(frame.conflicts).toEqual([
+      {
+        scope: "web/src",
+        owners: ["worker-a", "worker-b"],
+        claims: [
+          { seq: 31, owner: "worker-b", state: "working", scope: ["web/src/components"] },
+          { seq: 30, owner: "worker-a", state: "working", scope: ["web/src"] },
+        ],
+      },
+    ]);
+    expect(frame.recommended_actions).toEqual([
+      expect.objectContaining({
+        kind: "resolve-conflict",
+        target: "worker-a",
+        reason: expect.stringContaining("web/src"),
+      }),
+    ]);
+  });
+
   test("history --completion asks server for completion artifacts only", async () => {
     mock = startRestMock();
     writeCfg(mock.url);
