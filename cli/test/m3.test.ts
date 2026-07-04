@@ -728,6 +728,162 @@ describe("party status/history channel flag", () => {
     expect(r.stderr).toContain("--channel requires a value");
     expect(mock.requests.length).toBe(0);
   });
+
+  test("digest --json separates mentioned inbox from responded and never infers wake", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({
+          messages: [
+            {
+              type: "status",
+              seq: 11,
+              sender: { name: "worker-a", kind: "agent" },
+              kind: "status",
+              body: "working on digest",
+              mentions: [],
+              reply_to: null,
+              state: "working",
+              note: "working on digest",
+              status: {
+                owner: "worker-a",
+                state: "working",
+                scope: ["cli/src/commands/digest.ts"],
+                summary_seq: null,
+                blocked_reason: null,
+                updated_at: 111,
+              },
+              ts: 111,
+            },
+            {
+              type: "msg",
+              seq: 12,
+              sender: { name: "host", kind: "agent" },
+              kind: "message",
+              body: "@agent please review",
+              mentions: ["agent"],
+              reply_to: null,
+              state: null,
+              note: null,
+              status: null,
+              ts: 112,
+            },
+            {
+              type: "status",
+              seq: 13,
+              sender: { name: "agent", kind: "agent" },
+              kind: "status",
+              body: "review done",
+              mentions: [],
+              reply_to: null,
+              state: "done",
+              note: "review done",
+              status: {
+                owner: "agent",
+                state: "done",
+                scope: ["cli/src/commands/digest.ts"],
+                summary_seq: 12,
+                blocked_reason: null,
+                updated_at: 113,
+              },
+              ts: 113,
+            },
+            {
+              type: "msg",
+              seq: 14,
+              sender: { name: "host", kind: "agent" },
+              kind: "message",
+              body: "@agent unacked follow-up",
+              mentions: ["agent"],
+              reply_to: null,
+              state: null,
+              note: null,
+              status: null,
+              ts: 114,
+            },
+            {
+              type: "msg",
+              seq: 15,
+              sender: { name: "agent", kind: "agent" },
+              kind: "message",
+              body: "unrelated note",
+              mentions: [],
+              reply_to: null,
+              state: null,
+              note: null,
+              status: null,
+              ts: 115,
+            },
+            {
+              type: "msg",
+              seq: 16,
+              sender: { name: "host", kind: "agent" },
+              kind: "message",
+              body: "@agent please reply directly",
+              mentions: ["agent"],
+              reply_to: null,
+              state: null,
+              note: null,
+              status: null,
+              ts: 116,
+            },
+            {
+              type: "msg",
+              seq: 17,
+              sender: { name: "agent", kind: "agent" },
+              kind: "message",
+              body: "direct ack",
+              mentions: [],
+              reply_to: 16,
+              state: null,
+              note: null,
+              status: null,
+              ts: 117,
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["digest", "dev", "--since", "10", "--json"]);
+    expect(r.code).toBe(0);
+    const frame = JSON.parse(r.stdout.trim());
+    expect(frame).toMatchObject({
+      schema: "agentparty.v1",
+      type: "digest",
+      channel: "dev",
+      since: 10,
+      last_seq: 17,
+      viewer: "agent",
+      counts: { messages: 7, statuses: 2, inbox_mentions: 1, responded_mentions: 2, wake_invoked: 0, resumed: 0 },
+      wake_contract: {
+        mentioned: "durable inbox item only",
+        wake_invoked: "not inferred by digest",
+        resumed: "requires linked fresh ack/status",
+      },
+    });
+    expect(frame.statuses[0]).toMatchObject({
+      seq: 11,
+      owner: "worker-a",
+      scope: ["cli/src/commands/digest.ts"],
+    });
+    expect(frame.inbox_mentions).toEqual([expect.objectContaining({ seq: 14, from: "host" })]);
+    expect(frame.responded_mentions).toEqual([
+      expect.objectContaining({ seq: 12, response_seq: 13, evidence: "status.summary_seq", wake_invoked: false }),
+      expect.objectContaining({ seq: 16, response_seq: 17, evidence: "reply_to", wake_invoked: false }),
+    ]);
+  });
+
+  test("digest --since last-seen uses the bound channel cursor", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    writeWorkspaceState("dev", 42);
+    const r = await runCli(["digest", "dev", "--since", "last-seen", "--json"]);
+    expect(r.code).toBe(0);
+    expect(reqsOf(mock, "GET", "/api/channels/dev/messages")[0]!.path).toBe("/api/channels/dev/messages");
+    const frame = JSON.parse(r.stdout.trim());
+    expect(frame.since).toBe(42);
+  });
 });
 
 describe("rest error mapping", () => {

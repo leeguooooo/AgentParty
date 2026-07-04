@@ -65,7 +65,7 @@ describe("cli subprocess", () => {
   });
 
   test("json-capable subcommands support --help without auth or config", async () => {
-    for (const cmd of ["whoami", "watch", "history"]) {
+    for (const cmd of ["whoami", "watch", "history", "digest"]) {
       const r = await runCli([cmd, "--help"]);
       expect(r.code, cmd).toBe(0);
       expect(r.stdout, cmd).toContain(`usage: party ${cmd}`);

@@ -80,7 +80,7 @@ function expectContractShape(expected: unknown): unknown {
   }
   if (typeof expected === "string") {
     return expected.startsWith("agentparty.") || expected === "msg" || expected === "status" ||
-        expected === "timeout" || expected === "error" || expected === "whoami"
+        expected === "timeout" || expected === "error" || expected === "whoami" || expected === "digest"
       ? expected
       : expect.any(String);
   }
@@ -154,6 +154,69 @@ describe("json contract fixtures", () => {
     const result = await runCli(["history", "dev", "--json"]);
     expect(result).toMatchObject({ code: 0, stderr: "" });
     expectContract(parseOneLine(result.stdout), fixture("history.status.json"));
+  });
+
+  test("digest --json output matches the agentparty.v1 fixture shape", async () => {
+    restMock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({
+          messages: [
+            {
+              type: "msg",
+              seq: 11,
+              sender: { name: "host", kind: "agent" },
+              kind: "message",
+              body: "@agent done?",
+              mentions: ["agent"],
+              reply_to: null,
+              state: null,
+              note: null,
+              status: null,
+              ts: Date.now(),
+            },
+            {
+              type: "msg",
+              seq: 12,
+              sender: { name: "host", kind: "agent" },
+              kind: "message",
+              body: "@agent later",
+              mentions: ["agent"],
+              reply_to: null,
+              state: null,
+              note: null,
+              status: null,
+              ts: Date.now(),
+            },
+            {
+              type: "status",
+              seq: 13,
+              sender: { name: "agent", kind: "agent" },
+              kind: "status",
+              body: "done",
+              mentions: [],
+              reply_to: null,
+              state: "done",
+              note: "done",
+              status: {
+                owner: "agent",
+                state: "done",
+                scope: ["cli/src/commands/digest.ts"],
+                summary_seq: 11,
+                blocked_reason: null,
+                updated_at: Date.now(),
+              },
+              ts: Date.now(),
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    writeCfg(restMock.url);
+
+    const result = await runCli(["digest", "dev", "--since", "10", "--json"]);
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    expectContract(parseOneLine(result.stdout), fixture("digest.json"));
   });
 
   test("watch --json timeout frames match the agentparty.v1 fixture shape", async () => {
