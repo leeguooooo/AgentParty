@@ -19,7 +19,7 @@ import {
   type AgentFilterMode,
 } from "../lib/filters";
 import { fmtTime } from "../lib/time";
-import { summarizeTeams, type TeamSummary } from "../lib/teams";
+import { groupTeamMessages, summarizeTeams, type TeamMessageThread, type TeamSummary } from "../lib/teams";
 import { ChannelSocket } from "../lib/ws";
 import { channelReducer, initialChannelState } from "../state";
 
@@ -318,6 +318,38 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
   );
 }
 
+function TeamThread({ thread, self }: { thread: TeamMessageThread; self: string | null }) {
+  const parentLabel =
+    thread.parentAgents.length === 1 ? `parent ${thread.parentAgents[0]}` : `${thread.parentAgents.length} parents`;
+  const memberLabel = thread.members.length === 1 ? thread.members[0]! : `${thread.members.length} members`;
+  const title = [
+    `team: ${thread.teamId}`,
+    `root: ${thread.rootAgent}`,
+    parentLabel,
+    `members: ${thread.members.join(", ")}`,
+    `seq: #${thread.firstSeq}..#${thread.lastSeq}`,
+  ].join("\n");
+  return (
+    <details className="team-thread" title={title}>
+      <summary className="team-thread-summary">
+        <span className="team-thread-dot" aria-hidden="true" />
+        <span className="team-thread-name">{thread.teamId}</span>
+        <span className="t-mono team-thread-meta">{memberLabel}</span>
+        <span className="t-mono team-thread-meta">
+          #{thread.firstSeq}..#{thread.lastSeq}
+        </span>
+        <span className="team-thread-fill" />
+        <time className="t-mono">{fmtTime(thread.lastTs)}</time>
+      </summary>
+      <div className="team-thread-messages">
+        {thread.messages.map((message) => (
+          <MessageCard key={message.seq} msg={message} self={self} />
+        ))}
+      </div>
+    </details>
+  );
+}
+
 export function ChannelPage({
   slug,
   token,
@@ -509,6 +541,7 @@ export function ChannelPage({
   ].sort((a, b) => a.localeCompare(b));
   const senderListId = `senders-${slug}`;
   const visibleMessages = useMemo(() => filterByAgent(state.messages, agentFilter), [agentFilter, state.messages]);
+  const visibleTimeline = useMemo(() => groupTeamMessages(visibleMessages), [visibleMessages]);
   const visibleSearchHits = useMemo(() => filterByAgent(searchHits, agentFilter), [agentFilter, searchHits]);
   const teamSummaries = useMemo(
     () =>
@@ -691,7 +724,13 @@ export function ChannelPage({
       )}
       <div className="stream" ref={streamRef} onScroll={onScroll}>
         {q === ""
-          ? visibleMessages.map((m) => <MessageCard key={m.seq} msg={m} self={state.self} />)
+          ? visibleTimeline.map((item) =>
+              item.type === "message" ? (
+                <MessageCard key={item.message.seq} msg={item.message} self={state.self} />
+              ) : (
+                <TeamThread key={item.key + `:${item.firstSeq}-${item.lastSeq}`} thread={item} self={state.self} />
+              ),
+            )
           : visibleSearchHits.map((hit) => <SearchHitCard key={hit.seq} hit={hit} />)}
         {state.messages.length === 0 && q === "" && (
           <p className="d-empty" role="status" aria-live="polite">

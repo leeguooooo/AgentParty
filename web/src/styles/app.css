@@ -645,6 +645,69 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.team-thread {
+  min-width: 0;
+  border: 1.5px solid var(--t-faint);
+  border-radius: 8px;
+  background: var(--t-panel2);
+}
+.team-thread[open] {
+  padding-bottom: 8px;
+}
+.team-thread-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  color: var(--t-muted);
+  cursor: pointer;
+  list-style: none;
+}
+.team-thread-summary::-webkit-details-marker {
+  display: none;
+}
+.team-thread-summary::before {
+  content: "▸";
+  flex: none;
+  color: var(--t-dim);
+  font-size: 11px;
+}
+.team-thread[open] .team-thread-summary::before {
+  content: "▾";
+}
+.team-thread-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--d-ink);
+  background: var(--d-blue-soft);
+}
+.team-thread-name {
+  min-width: 0;
+  font-family: var(--d-marker);
+  font-size: 14px;
+  color: var(--t-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-thread-meta {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--t-dim);
+}
+.team-thread-fill {
+  flex: 1;
+  min-width: 8px;
+}
+.team-thread-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 10px;
+}
 
 .decision-panel {
   display: flex;

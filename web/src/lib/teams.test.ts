@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentLineage, MsgFrame, PresenceEntry, Sender } from "@agentparty/shared";
-import { summarizeTeams } from "./teams";
+import { groupTeamMessages, summarizeTeams } from "./teams";
 
 const NOW = 2_000_000;
 
@@ -113,5 +113,36 @@ describe("team summaries", () => {
     });
 
     expect(teams[0]!.expiresAt).toBe(NOW + 30_000);
+  });
+});
+
+describe("team message grouping", () => {
+  test("folds consecutive child messages from the same team", () => {
+    const items = groupTeamMessages([
+      message("child-a", 1, { sender: sender("child-a", { lineage: lineage({ team_id: "alpha" }) }) }),
+      message("child-b", 2, { sender: sender("child-b", { lineage: lineage({ team_id: "alpha" }) }) }),
+      message("standalone", 3, { sender: sender("standalone") }),
+    ]);
+
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({
+      type: "team_thread",
+      teamId: "alpha",
+      firstSeq: 1,
+      lastSeq: 2,
+      members: ["child-a", "child-b"],
+    });
+    expect(items[1]).toMatchObject({ type: "message" });
+  });
+
+  test("does not fold across standalone messages or different teams", () => {
+    const items = groupTeamMessages([
+      message("child-a", 1, { sender: sender("child-a", { lineage: lineage({ team_id: "alpha" }) }) }),
+      message("human", 2, { sender: sender("human", { kind: "human" }) }),
+      message("child-b", 3, { sender: sender("child-b", { lineage: lineage({ team_id: "alpha" }) }) }),
+      message("child-c", 4, { sender: sender("child-c", { lineage: lineage({ team_id: "beta" }) }) }),
+    ]);
+
+    expect(items.map((item) => item.type)).toEqual(["message", "message", "message", "message"]);
   });
 });

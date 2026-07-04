@@ -31,6 +31,23 @@ export interface TeamSummary {
   members: TeamMemberSummary[];
 }
 
+export interface TeamMessageThread {
+  type: "team_thread";
+  key: string;
+  rootAgent: string;
+  teamId: string;
+  parentAgents: string[];
+  members: string[];
+  messages: MsgFrame[];
+  firstSeq: number;
+  lastSeq: number;
+  lastTs: number;
+}
+
+export type MessageTimelineItem =
+  | { type: "message"; message: MsgFrame }
+  | TeamMessageThread;
+
 interface SummarizeTeamsInput {
   presence: Record<string, PresenceEntry>;
   participants: Sender[];
@@ -58,6 +75,12 @@ const RESIDENCY_RANK: Record<TeamResidency, number> = {
 
 function teamKey(rootAgent: string, teamId: string): string {
   return `${rootAgent}::${teamId}`;
+}
+
+function lineageTeamKey(msg: MsgFrame): string | null {
+  const lineage = msg.sender.lineage;
+  if (lineage === undefined) return null;
+  return teamKey(lineage.root_agent, lineage.team_id);
 }
 
 function newer(a: number | null, b: number | null): number | null {
@@ -188,4 +211,62 @@ export function summarizeTeams({ presence, participants, messages, now = Date.no
       }
       return (b.lastSeen ?? 0) - (a.lastSeen ?? 0) || a.key.localeCompare(b.key);
     });
+}
+
+function toThread(messages: MsgFrame[], key: string): TeamMessageThread {
+  const members = [...new Set(messages.map((msg) => msg.sender.name))].sort((a, b) => a.localeCompare(b));
+  const parentAgents = [
+    ...new Set(
+      messages
+        .map((msg) => msg.sender.lineage?.parent_agent)
+        .filter((parent): parent is string => parent !== undefined),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
+  const first = messages[0]!;
+  const last = messages[messages.length - 1]!;
+  const lineage = first.sender.lineage!;
+  return {
+    type: "team_thread",
+    key,
+    rootAgent: lineage.root_agent,
+    teamId: lineage.team_id,
+    parentAgents,
+    members,
+    messages,
+    firstSeq: first.seq,
+    lastSeq: last.seq,
+    lastTs: last.ts,
+  };
+}
+
+export function groupTeamMessages(messages: MsgFrame[]): MessageTimelineItem[] {
+  const items: MessageTimelineItem[] = [];
+  let pendingKey: string | null = null;
+  let pending: MsgFrame[] = [];
+
+  const flush = () => {
+    if (pending.length === 0) return;
+    if (pendingKey !== null && pending.length > 1) {
+      items.push(toThread(pending, pendingKey));
+    } else {
+      for (const message of pending) items.push({ type: "message", message });
+    }
+    pendingKey = null;
+    pending = [];
+  };
+
+  for (const message of messages) {
+    const key = lineageTeamKey(message);
+    if (key === null) {
+      flush();
+      items.push({ type: "message", message });
+      continue;
+    }
+    if (pendingKey !== key) flush();
+    pendingKey = key;
+    pending.push(message);
+  }
+
+  flush();
+  return items;
 }
