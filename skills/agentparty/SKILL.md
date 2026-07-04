@@ -132,6 +132,18 @@ floods, work-stealing, infinite loops, dropped hand-offs.
    dispatch, or QA task, publish the final synthesis back to the same channel before `status done`
    or a private answer to the human. Keep it to one concise message: decision, rationale,
    next actions, and links/issues/seqs.
+7. **Gate external actions.** Before GitHub issue/PR/release, production webhook/channel writes,
+   or owner-visible public writes, cite a clear host/human decision seq. Without that green light,
+   produce a draft / HTML / patch / files-to-add / suggested commit message instead of doing the
+   live outward action.
+8. **Idle listeners must be visible and quiet.** If online but unassigned, set
+   `status waiting -m "online, unassigned"` so the dispatcher can see you. After a reasonable wait,
+   ping the dispatcher once, then stop nagging. A self-claim must include a concrete non-overlapping
+   scope and `--mention <dispatcher>`; status alone may not wake mention-only hosts.
+9. **Host is a soft lease, not ownership.** A visible host coordinates dispatch, conflict resolution,
+   release gates, and final synthesis. Treat `human_driven` / `bare` hosts as stale-prone; only
+   `supervised` or `webhook` hosts with fresh `last_seen` are active. If the host lease expires,
+   a backup may transparently fail over and should return the baton when the prior host resumes.
 
 ## Exit codes
 

@@ -734,13 +734,14 @@ describe("party status/history channel flag", () => {
       if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
         return Response.json({
           messages: [
-            { type: "msg", seq: 1, sender: { name: "alice", kind: "agent" }, kind: "message", body: "deploy the worker", mentions: [], reply_to: null, state: null, note: null, ts: 1 },
-            { type: "msg", seq: 2, sender: { name: "bob", kind: "agent" }, kind: "message", body: "unrelated chatter", mentions: [], reply_to: null, state: null, note: null, ts: 2 },
-            { type: "msg", seq: 3, sender: { name: "deployer", kind: "agent" }, kind: "message", body: "hi", mentions: [], reply_to: null, state: null, note: null, ts: 3 },
-          ],
-        });
-      }
-      return null;
+              { type: "msg", seq: 1, sender: { name: "alice", kind: "agent" }, kind: "message", body: "deploy the worker", mentions: [], reply_to: null, state: null, note: null, ts: 1 },
+              { type: "msg", seq: 2, sender: { name: "bob", kind: "agent" }, kind: "message", body: "unrelated chatter", mentions: [], reply_to: null, state: null, note: null, ts: 2 },
+              { type: "msg", seq: 3, sender: { name: "deployer", kind: "agent" }, kind: "message", body: "hi", mentions: [], reply_to: null, state: null, note: null, ts: 3 },
+              { type: "msg", seq: 4, sender: { name: "ci-bot", kind: "agent" }, kind: "status", body: "", mentions: [], reply_to: null, state: "working", note: "deploy status", status: { scope: [], blocked_reason: null, summary_seq: null }, ts: 4 },
+            ],
+          });
+        }
+      return undefined;
     });
     writeCfg(mock.url);
     writeWorkspaceState("dev");
@@ -749,7 +750,27 @@ describe("party status/history channel flag", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("alice");
     expect(r.stdout).toContain("deployer");
+    expect(r.stdout).toContain("ci-bot");
     expect(r.stdout).not.toContain("bob");
+  });
+
+  test("search --channel and --limit forward the history window", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/ops/messages") {
+        return Response.json({ messages: [] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    writeWorkspaceState("dev");
+    const r = await runCli(["search", "needle", "--channel", "ops", "--limit", "25"]);
+    expect(r.code).toBe(0);
+    const req = reqsOf(mock, "GET", "/api/channels/ops/messages")[0]!;
+    expect(req.query).toMatchObject({ since: "0", limit: "25" });
+
+    const tooHigh = await runCli(["search", "needle", "--limit", "1001"]);
+    expect(tooHigh.code).toBe(1);
+    expect(tooHigh.stderr).toContain("--limit must be <= 1000");
   });
 
   test("search --json emits agentparty.v1 frames; no match keeps stdout clean", async () => {
@@ -761,7 +782,7 @@ describe("party status/history channel flag", () => {
           ],
         });
       }
-      return null;
+      return undefined;
     });
     writeCfg(mock.url);
     writeWorkspaceState("dev");

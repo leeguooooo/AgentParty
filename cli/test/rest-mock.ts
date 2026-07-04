@@ -2,6 +2,7 @@
 export interface RestRequest {
   method: string;
   path: string;
+  query: Record<string, string>;
   headers: Record<string, string>;
   body: unknown;
 }
@@ -35,6 +36,7 @@ export function startRestMock(handler?: RestHandler): RestMock {
       const r: RestRequest = {
         method: req.method,
         path: u.pathname,
+        query: Object.fromEntries(u.searchParams.entries()),
         headers: Object.fromEntries(req.headers.entries()),
         body,
       };

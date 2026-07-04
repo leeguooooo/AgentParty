@@ -15,7 +15,7 @@ Search a channel's history for messages whose body/note or sender contains <quer
 
 Options:
   --channel C   search channel C instead of the bound channel
-  --limit n     max messages to fetch and scan (default 1000, max 5000)
+  --limit n     max messages to fetch and scan (default 1000, max 1000)
   --json        emit matching messages as agentparty.v1 NDJSON frames`;
 
 export async function run(argv: string[]): Promise<number> {
@@ -45,7 +45,7 @@ export async function run(argv: string[]): Promise<number> {
     console.error("need a query: party search <query> [--channel C]");
     return 1;
   }
-  const limit = parsePositiveIntFlag(str(flags.limit), "limit", 5000);
+  const limit = parsePositiveIntFlag(str(flags.limit), "limit", 1000);
   if (typeof limit === "string") {
     console.error(limit);
     return 1;
