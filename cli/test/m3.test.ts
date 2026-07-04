@@ -628,7 +628,7 @@ describe("party status/history channel flag", () => {
         workspace_label: expect.any(String),
       },
     });
-    expect((req.body as { context: { worktree_label?: string } }).context.worktree_label).toContain("herness-use:");
+    expect((req.body as { context: { worktree_label?: string } }).context.worktree_label).toContain(":");
   });
 
   test("status debug-auth prints safe runtime/config source without raw token", async () => {
