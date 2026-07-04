@@ -221,3 +221,13 @@ export async function searchMessages(
   const data = (await res.json()) as { hits: SearchHit[] };
   return data.hits;
 }
+
+export async function resetGuard(token: string, slug: string): Promise<void> {
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/reset-guard`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/reset-guard failed (${res.status})`);
+}

@@ -1574,6 +1574,28 @@ describe("party channel kick", () => {
   });
 });
 
+describe("party channel reset-guard", () => {
+  test("reset-guard <slug> 调 POST /reset-guard", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "reset-guard", "town-square"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("guard reset town-square");
+    const reqs = reqsOf(mock, "POST", "/api/channels/town-square/reset-guard");
+    expect(reqs.length).toBe(1);
+    expect(reqs[0]!.headers.authorization).toBe("Bearer ap_tok");
+  });
+
+  test("省略 slug 时用绑定频道", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    writeWorkspaceState("ops");
+    const r = await runCli(["channel", "reset-guard"]);
+    expect(r.code).toBe(0);
+    expect(reqsOf(mock, "POST", "/api/channels/ops/reset-guard").length).toBe(1);
+  });
+});
+
 describe("party invite --public", () => {
   test("--public 建 public 频道并在接入包标注", async () => {
     mock = startRestMock();

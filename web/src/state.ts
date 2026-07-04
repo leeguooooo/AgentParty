@@ -37,12 +37,15 @@ export type ChannelAction =
   | { type: "frame"; frame: ServerFrame }
   | { type: "status"; status: SocketStatus }
   | { type: "fatal"; reason: FatalReason }
+  | { type: "guard_reset" }
   | { type: "send_failed"; message: string }; // 本地发送失败（断线窗口），与 error 帧同走红条
 
 export function channelReducer(state: ChannelState, action: ChannelAction): ChannelState {
   switch (action.type) {
     case "status":
       return { ...state, status: action.status };
+    case "guard_reset":
+      return { ...state, loopGuard: null, sendError: null };
     case "send_failed":
       return { ...state, sendError: action.message };
     case "fatal":

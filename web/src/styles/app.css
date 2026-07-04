@@ -586,6 +586,23 @@
 .banner--yellow { background: #fff3c4; }
 .banner--gray { background: #f0efe6; color: var(--t-muted); }
 .banner--red { background: var(--d-red-soft); }
+.guard-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.guard-reset {
+  flex: none;
+  font-size: 12px;
+  padding: 5px 12px 6px;
+  background: var(--d-yellow);
+}
+
+@media (max-width: 760px) {
+  .guard-banner { align-items: stretch; flex-direction: column; }
+  .guard-reset { align-self: flex-start; }
+}
 
 /* ---- 插话框 ---- */
 .composer {

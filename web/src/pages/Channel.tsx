@@ -7,7 +7,7 @@ import { AgentJoin } from "../components/AgentJoin";
 import { Composer } from "../components/Composer";
 import { MessageCard } from "../components/MessageCard";
 import { PresenceBar } from "../components/PresenceBar";
-import { AuthError, ForbiddenError, fetchMessages, searchMessages } from "../lib/api";
+import { AuthError, ForbiddenError, fetchMessages, resetGuard, searchMessages } from "../lib/api";
 import { agentHue } from "../lib/agentColor";
 import { fmtTime } from "../lib/time";
 import { ChannelSocket } from "../lib/ws";
@@ -21,6 +21,7 @@ interface Props {
   shareMode: boolean;
   // 有可写人类账号会话（me.role==="human" 且非分享链接）才允许铸 agent（spec §10）
   canMintAgent: boolean;
+  canResetGuard: boolean;
   agentNamePrefix: string; // 生成 agent 名的前缀来源（email/name 前缀，退回 slug）
   onAuthFailed(message: string): void;
 }
@@ -68,6 +69,7 @@ export function ChannelPage({
   isPublic,
   shareMode,
   canMintAgent,
+  canResetGuard,
   agentNamePrefix,
   onAuthFailed,
 }: Props) {
@@ -80,6 +82,8 @@ export function ChannelPage({
   const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [guardResetting, setGuardResetting] = useState(false);
+  const [guardResetError, setGuardResetError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const sockRef = useRef<ChannelSocket | null>(null);
   const streamRef = useRef<HTMLDivElement | null>(null);
@@ -164,6 +168,23 @@ export function ChannelPage({
   }, [draft]);
 
   const canWrite = state.self !== null && !state.archived && !state.readonly;
+
+  const onResetGuard = useCallback(() => {
+    if (guardResetting) return;
+    setGuardResetting(true);
+    setGuardResetError(null);
+    resetGuard(token, slug)
+      .then(() => {
+        dispatch({ type: "guard_reset" });
+        setGuardResetError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setGuardResetError("only a human owner can reset guard");
+        else setGuardResetError("guard reset failed");
+      })
+      .finally(() => setGuardResetting(false));
+  }, [guardResetting, slug, token]);
 
   const q = search.trim();
   const from = searchFrom.trim();
@@ -346,9 +367,22 @@ export function ChannelPage({
         </p>
       )}
       {state.loopGuard !== null && (
-        <p className="banner banner--yellow" role="alert">
-          loop guard: agents hit the back-and-forth cap — a human message resets it
-        </p>
+        <div className="banner banner--yellow guard-banner" role="alert">
+          <span>
+            loop guard: agents hit the back-and-forth cap — a human message or reset clears it
+            {guardResetError !== null ? ` · ${guardResetError}` : ""}
+          </span>
+          {canResetGuard && (
+            <button
+              className="d-btn guard-reset"
+              type="button"
+              onClick={onResetGuard}
+              disabled={guardResetting}
+            >
+              <span>{guardResetting ? "Resetting" : "Reset guard"}</span>
+            </button>
+          )}
+        </div>
       )}
       {state.readonly && !state.archived && (
         <p className="banner banner--gray" role="status" aria-live="polite">
