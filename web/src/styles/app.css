@@ -197,6 +197,7 @@
   cursor: default;
 }
 .presence-pill--blocked { background: var(--d-red-soft); }
+.presence-pill--active-host { background: var(--d-green-soft); }
 .presence-name {
   max-width: 150px;
   min-width: 0;
@@ -224,6 +225,23 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.presence-role,
+.presence-residency {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid var(--d-ink);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--t-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.presence-role--active {
+  background: var(--d-green);
+  color: #fff;
 }
 .presence-ts { font-size: 10px; font-weight: 400; color: var(--t-dim); }
 .presence-empty { font-size: 12px; color: var(--t-dim); }

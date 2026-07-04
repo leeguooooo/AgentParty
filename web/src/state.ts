@@ -97,7 +97,16 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
         ...state,
         presence: {
           ...state.presence,
-          [frame.name]: { name: frame.name, state: frame.state, note: frame.note, ts: frame.ts },
+          [frame.name]: {
+            name: frame.name,
+            state: frame.state,
+            note: frame.note,
+            ts: frame.ts,
+            last_seen: frame.last_seen,
+            role: frame.role,
+            residency: frame.residency,
+            wake: frame.wake,
+          },
         },
       };
     case "sent":

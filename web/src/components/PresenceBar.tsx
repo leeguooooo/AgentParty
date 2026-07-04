@@ -1,6 +1,6 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
-import type { PresenceEntry, Sender } from "@agentparty/shared";
+import { PRESENCE_TIMEOUT_MS, type PresenceEntry, type Sender } from "@agentparty/shared";
 import { useEffect, useState, type CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
 import { fmtRel } from "../lib/time";
@@ -19,7 +19,35 @@ interface Item {
   state: string; // PresenceState | "online"（已连接但还没报过 status）
   note: string | null;
   ts: number | null;
+  lastSeen: number | null;
+  role: NonNullable<PresenceEntry["role"]> | null;
+  residency: NonNullable<PresenceEntry["residency"]> | null;
+  wakeKind: NonNullable<PresenceEntry["wake"]>["kind"] | null;
   owner: string | null; // 所属人：agent 的操作者 / 人类的 email，仅连接中的参与者可知
+}
+
+function hasActiveHostLease(item: Item, now: number): boolean {
+  const lastSeen = item.lastSeen ?? item.ts;
+  if (item.role !== "host" || lastSeen === null) return false;
+  if (item.residency !== "supervised" && item.residency !== "webhook") return false;
+  if (item.wakeKind === null || item.wakeKind === "none") return false;
+  return item.state !== "offline" && now - lastSeen <= PRESENCE_TIMEOUT_MS;
+}
+
+function hostBadge(item: Item, now: number): string | null {
+  if (item.role !== "host") return null;
+  return hasActiveHostLease(item, now) ? "host" : "host stale";
+}
+
+function roleBadge(item: Item, now: number): string | null {
+  if (item.role === null || item.role === "host") return hostBadge(item, now);
+  return item.role;
+}
+
+function residencyBadge(item: Item): string | null {
+  if (item.residency === null) return null;
+  if (item.residency === "human_driven") return "manual";
+  return item.residency;
 }
 
 export function PresenceBar({ presence, participants, status, party = false, isPublic = false }: Props) {
@@ -29,6 +57,7 @@ export function PresenceBar({ presence, participants, status, party = false, isP
     const t = window.setInterval(() => setTick((n) => n + 1), 30_000);
     return () => clearInterval(t);
   }, []);
+  const now = Date.now();
 
   // 所属人只有连接中的参与者带（presence 快照不含 owner），按 name 建索引
   const byName = new Map(participants.map((p) => [p.name, p]));
@@ -37,35 +66,62 @@ export function PresenceBar({ presence, participants, status, party = false, isP
     const entry = presence[name];
     const owner = byName.get(name)?.owner ?? null;
     const connected = byName.has(name);
+    const meta = {
+      lastSeen: entry?.last_seen ?? null,
+      role: entry?.role ?? null,
+      residency: entry?.residency ?? null,
+      wakeKind: entry?.wake?.kind ?? null,
+    };
     if (!connected) {
-      return { name, state: "offline", note: null, ts: entry?.ts ?? null, owner: null };
+      return { name, state: "offline", note: null, ts: entry?.ts ?? null, owner: null, ...meta };
     }
     if (entry && entry.state !== "offline") {
-      return { name, state: entry.state, note: entry.note, ts: entry.ts, owner };
+      return { name, state: entry.state, note: entry.note, ts: entry.ts, owner, ...meta };
     }
-    return { name, state: "online", note: null, ts: entry?.ts ?? null, owner };
+    return { name, state: "online", note: null, ts: entry?.ts ?? null, owner, ...meta };
   });
 
   return (
     <div className="presence-bar">
       {isPublic && <span className="d-hl public-badge">PUBLIC</span>}
       {party && <span className="d-hl party-badge">PARTY</span>}
-      {items.map((it) => (
-        <span
-          key={it.name}
-          className={`d-pill presence-pill${it.state === "blocked" ? " presence-pill--blocked" : ""}`}
-          title={it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name}
-          style={{ "--ah": agentHue(it.name) } as CSSProperties}
-        >
-          <span className={`d-dot d-dot--${it.state}`} />
-          <span className="presence-name">{it.name}</span>
-          {it.owner !== null && it.owner !== "" && it.owner !== it.name && (
-            <span className="t-mono presence-owner">· {it.owner}</span>
-          )}
-          {it.note !== null && it.note !== "" && <span className="t-mono presence-note">{it.note}</span>}
-          {it.ts !== null && <span className="t-mono presence-ts">{fmtRel(it.ts)}</span>}
-        </span>
-      ))}
+      {items.map((it) => {
+        const badge = roleBadge(it, now);
+        const residency = residencyBadge(it);
+        const activeHost = hasActiveHostLease(it, now);
+        const titleParts = [
+          it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name,
+          it.role !== null ? `role: ${it.role}` : null,
+          it.residency !== null ? `residency: ${it.residency}` : null,
+          it.wakeKind !== null ? `wake: ${it.wakeKind}` : null,
+          it.lastSeen !== null ? `last seen: ${fmtRel(it.lastSeen)}` : null,
+        ].filter((part): part is string => part !== null);
+        return (
+          <span
+            key={it.name}
+            className={
+              `d-pill presence-pill${it.state === "blocked" ? " presence-pill--blocked" : ""}` +
+              `${activeHost ? " presence-pill--active-host" : ""}`
+            }
+            title={titleParts.join(" · ")}
+            style={{ "--ah": agentHue(it.name) } as CSSProperties}
+          >
+            <span className={`d-dot d-dot--${it.state}`} />
+            <span className="presence-name">{it.name}</span>
+            {it.owner !== null && it.owner !== "" && it.owner !== it.name && (
+              <span className="t-mono presence-owner">· {it.owner}</span>
+            )}
+            {badge !== null && (
+              <span className={`t-mono presence-role${activeHost ? " presence-role--active" : ""}`}>
+                {badge}
+              </span>
+            )}
+            {residency !== null && <span className="t-mono presence-residency">{residency}</span>}
+            {it.note !== null && it.note !== "" && <span className="t-mono presence-note">{it.note}</span>}
+            {it.ts !== null && <span className="t-mono presence-ts">{fmtRel(it.ts)}</span>}
+          </span>
+        );
+      })}
       {items.length === 0 && (
         <span className="t-mono presence-empty" role="status" aria-live="polite">
           nobody here yet
