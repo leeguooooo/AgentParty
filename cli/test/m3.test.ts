@@ -729,56 +729,60 @@ describe("party status/history channel flag", () => {
     expect(mock.requests.length).toBe(0);
   });
 
-  test("search filters channel history by body and sender substring", async () => {
+  test("search renders server-side hits", async () => {
     mock = startRestMock((req) => {
-      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+      if (req.method === "GET" && req.path === "/api/channels/dev/search") {
         return Response.json({
-          messages: [
-              { type: "msg", seq: 1, sender: { name: "alice", kind: "agent" }, kind: "message", body: "deploy the worker", mentions: [], reply_to: null, state: null, note: null, ts: 1 },
-              { type: "msg", seq: 2, sender: { name: "bob", kind: "agent" }, kind: "message", body: "unrelated chatter", mentions: [], reply_to: null, state: null, note: null, ts: 2 },
-              { type: "msg", seq: 3, sender: { name: "deployer", kind: "agent" }, kind: "message", body: "hi", mentions: [], reply_to: null, state: null, note: null, ts: 3 },
-              { type: "msg", seq: 4, sender: { name: "ci-bot", kind: "agent" }, kind: "status", body: "", mentions: [], reply_to: null, state: "working", note: "deploy status", status: { scope: [], blocked_reason: null, summary_seq: null }, ts: 4 },
-            ],
-          });
-        }
-      return undefined;
-    });
-    writeCfg(mock.url);
-    writeWorkspaceState("dev");
-    // body 命中 seq1（"deploy"），sender 命中 seq3（"deploy" ⊂ "deployer"）；seq2 不命中
-    const r = await runCli(["search", "deploy"]);
-    expect(r.code).toBe(0);
-    expect(r.stdout).toContain("alice");
-    expect(r.stdout).toContain("deployer");
-    expect(r.stdout).toContain("ci-bot");
-    expect(r.stdout).not.toContain("bob");
-  });
-
-  test("search --channel and --limit forward the history window", async () => {
-    mock = startRestMock((req) => {
-      if (req.method === "GET" && req.path === "/api/channels/ops/messages") {
-        return Response.json({ messages: [] });
+          hits: [
+            { type: "search_hit", channel: "dev", query: "deploy", seq: 4, sender: { name: "ci-bot", kind: "agent" }, kind: "status", match_field: "note", snippet: "deploy status", ts: 4 },
+            { type: "search_hit", channel: "dev", query: "deploy", seq: 3, sender: { name: "deployer", kind: "agent" }, kind: "message", match_field: "sender", snippet: "deployer", ts: 3 },
+            { type: "search_hit", channel: "dev", query: "deploy", seq: 1, sender: { name: "alice", kind: "agent" }, kind: "message", match_field: "body", snippet: "deploy the worker", ts: 1 },
+          ],
+        });
       }
       return undefined;
     });
     writeCfg(mock.url);
     writeWorkspaceState("dev");
-    const r = await runCli(["search", "needle", "--channel", "ops", "--limit", "25"]);
+    const r = await runCli(["search", "deploy"]);
     expect(r.code).toBe(0);
-    const req = reqsOf(mock, "GET", "/api/channels/ops/messages")[0]!;
-    expect(req.query).toMatchObject({ since: "0", limit: "25" });
+    expect(r.stdout).toContain("alice");
+    expect(r.stdout).toContain("deployer");
+    expect(r.stdout).toContain("ci-bot");
+    expect(r.stdout).toContain("[note]");
+    expect(reqsOf(mock, "GET", "/api/channels/dev/search")[0]!.query).toMatchObject({
+      q: "deploy",
+      since: "0",
+      limit: "100",
+    });
+  });
+
+  test("search --channel --from --since and --limit forward server filters", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/ops/search") {
+        return Response.json({ hits: [] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    writeWorkspaceState("dev");
+    const r = await runCli(["search", "needle", "--channel", "ops", "--from", "alice", "--since", "42", "--limit", "25"]);
+    expect(r.code).toBe(0);
+    const req = reqsOf(mock, "GET", "/api/channels/ops/search")[0]!;
+    expect(req.query).toMatchObject({ q: "needle", from: "alice", since: "42", limit: "25" });
 
     const tooHigh = await runCli(["search", "needle", "--limit", "1001"]);
     expect(tooHigh.code).toBe(1);
     expect(tooHigh.stderr).toContain("--limit must be <= 1000");
   });
 
-  test("search --json emits agentparty.v1 frames; no match keeps stdout clean", async () => {
+  test("search --json emits structured search hits; no match keeps stdout clean", async () => {
     mock = startRestMock((req) => {
-      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+      if (req.method === "GET" && req.path === "/api/channels/dev/search") {
+        if (req.query.q === "nomatch") return Response.json({ hits: [] });
         return Response.json({
-          messages: [
-            { type: "msg", seq: 5, sender: { name: "x", kind: "agent" }, kind: "message", body: "findme here", mentions: [], reply_to: null, state: null, note: null, ts: 5 },
+          hits: [
+            { type: "search_hit", channel: "dev", query: "findme", seq: 5, sender: { name: "x", kind: "agent" }, kind: "message", match_field: "body", snippet: "findme here", ts: 5 },
           ],
         });
       }
@@ -788,7 +792,7 @@ describe("party status/history channel flag", () => {
     writeWorkspaceState("dev");
     const hit = await runCli(["search", "findme", "--json"]);
     expect(hit.code).toBe(0);
-    expect(JSON.parse(hit.stdout.trim())).toMatchObject({ schema: "agentparty.v1", seq: 5 });
+    expect(JSON.parse(hit.stdout.trim())).toMatchObject({ schema: "agentparty.v1", type: "search_hit", seq: 5, match_field: "body" });
     const miss = await runCli(["search", "nomatch", "--json"]);
     expect(miss.code).toBe(0);
     expect(miss.stdout.trim()).toBe("");

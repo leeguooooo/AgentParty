@@ -193,6 +193,25 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/search": {
+      get: {
+        summary: "server-side retained history search",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "q", in: "query", required: true, schema: { type: "string" } },
+          { name: "from", in: "query", schema: { type: "string" } },
+          { name: "since", in: "query", schema: { type: "integer", default: 0 } },
+          { name: "limit", in: "query", schema: { type: "integer", default: 100 } },
+        ],
+        responses: {
+          "200": { description: "{hits:[{type,channel,query,seq,sender,kind,match_field,snippet,ts}]}" },
+          "400": { description: "missing q" },
+          "403": { description: "not allowed in this channel" },
+          "404": { description: "channel not found" },
+        },
+      },
+    },
     "/api/channels/{slug}/wake-deliveries": {
       get: {
         summary: "wake adapter delivery ledger",

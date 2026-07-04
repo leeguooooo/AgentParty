@@ -1,0 +1,16 @@
+{
+  "schema": "agentparty.v1",
+  "type": "search_hit",
+  "channel": "dev",
+  "query": "release",
+  "seq": 3,
+  "sender": {
+    "name": "alice",
+    "kind": "agent",
+    "owner": "team-a"
+  },
+  "kind": "status",
+  "match_field": "note",
+  "snippet": "checking release",
+  "ts": 1751620000000
+}

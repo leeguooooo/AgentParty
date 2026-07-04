@@ -81,7 +81,7 @@ function expectContractShape(expected: unknown): unknown {
   if (typeof expected === "string") {
     return expected.startsWith("agentparty.") || expected === "msg" || expected === "status" ||
         expected === "timeout" || expected === "error" || expected === "whoami" ||
-        expected === "digest" || expected === "wake_test"
+        expected === "digest" || expected === "wake_test" || expected === "search_hit"
       ? expected
       : expect.any(String);
   }
@@ -155,6 +155,34 @@ describe("json contract fixtures", () => {
     const result = await runCli(["history", "dev", "--json"]);
     expect(result).toMatchObject({ code: 0, stderr: "" });
     expectContract(parseOneLine(result.stdout), fixture("history.status.json"));
+  });
+
+  test("search --json output matches the agentparty.v1 fixture shape", async () => {
+    restMock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/search") {
+        return Response.json({
+          hits: [
+            {
+              type: "search_hit",
+              channel: "dev",
+              query: "release",
+              seq: 3,
+              sender: { name: "alice", kind: "agent", owner: "team-a" },
+              kind: "status",
+              match_field: "note",
+              snippet: "checking release",
+              ts: Date.now(),
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    writeCfg(restMock.url);
+
+    const result = await runCli(["search", "release", "--channel", "dev", "--json"]);
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    expectContract(parseOneLine(result.stdout), fixture("search-hit.json"));
   });
 
   test("digest --json output matches the agentparty.v1 fixture shape", async () => {

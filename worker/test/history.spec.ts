@@ -9,6 +9,17 @@ interface MsgLike {
   body: string;
 }
 
+interface SearchHitLike {
+  type: string;
+  channel: string;
+  query: string;
+  seq: number;
+  sender: { name: string; kind: string };
+  kind: string;
+  match_field: string;
+  snippet: string;
+}
+
 describe("history rest", () => {
   it("returns messages after since, ordered, with limit", async () => {
     const { token, name } = await seedToken("agent");
@@ -42,6 +53,64 @@ describe("history rest", () => {
     const { token } = await seedToken("agent");
     const res = await api("/api/channels/no-such-channel/messages", token);
     expect(res.status).toBe(404);
+  });
+
+  it("searches retained history server-side with sender and since filters", async () => {
+    const alice = await seedToken("agent", "alice");
+    const bob = await seedToken("agent", "bob");
+    const slug = await createChannel(alice.token);
+    expect((await postMessage(slug, alice.token, "needle from alice")).status).toBe(200);
+    expect((await postMessage(slug, bob.token, "noise from bob")).status).toBe(200);
+    expect(
+      (
+        await api(`/api/channels/${slug}/messages`, bob.token, {
+          method: "POST",
+          body: JSON.stringify({
+            kind: "status",
+            state: "working",
+            note: "needle status from bob",
+            mentions: [],
+            summary_seq: null,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+    expect((await postMessage(slug, bob.token, "needle second from bob")).status).toBe(200);
+
+    const windowed = await api(`/api/channels/${slug}/messages?since=0&limit=1`, alice.token);
+    const windowedBody = (await windowed.json()) as { messages: MsgLike[] };
+    expect(windowedBody.messages.map((m) => m.seq)).toEqual([1]);
+
+    const res = await api(`/api/channels/${slug}/search?q=needle&from=bob&since=1&limit=5`, alice.token);
+    expect(res.status).toBe(200);
+    const { hits } = (await res.json()) as { hits: SearchHitLike[] };
+    expect(hits.map((h) => h.seq)).toEqual([4, 3]);
+    expect(hits[0]).toMatchObject({
+      type: "search_hit",
+      channel: slug,
+      query: "needle",
+      sender: { name: "bob", kind: "agent" },
+      match_field: "body",
+      snippet: "needle second from bob",
+    });
+    expect(hits[1]).toMatchObject({
+      kind: "status",
+      match_field: "note",
+      snippet: "needle status from bob",
+    });
+
+    expect((await postMessage(slug, bob.token, "100% literal")).status).toBe(200);
+    const literal = await api(`/api/channels/${slug}/search?q=${encodeURIComponent("%")}&from=bob`, alice.token);
+    expect(literal.status).toBe(200);
+    const literalBody = (await literal.json()) as { hits: SearchHitLike[] };
+    expect(literalBody.hits.map((h) => h.seq)).toEqual([5]);
+    expect(literalBody.hits[0]).toMatchObject({
+      match_field: "body",
+      snippet: "100% literal",
+    });
+
+    const bad = await api(`/api/channels/${slug}/search`, alice.token);
+    expect(bad.status).toBe(400);
   });
 
   it("archived channel rejects sends over rest and ws", async () => {

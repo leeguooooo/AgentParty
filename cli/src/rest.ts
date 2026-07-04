@@ -7,6 +7,7 @@ import {
   type ChannelMode,
   type MsgFrame,
   type PresenceEntry,
+  type SearchHit,
   type SendMessageFrame,
   type SendStatusFrame,
   type TokenRole,
@@ -266,6 +267,23 @@ export async function fetchWakeDeliveries(
   });
   const deliveries = (body as Record<string, unknown> | null)?.deliveries;
   return Array.isArray(deliveries) ? (deliveries as WakeDelivery[]) : [];
+}
+
+export async function searchMessages(
+  server: string,
+  token: string,
+  slug: string,
+  opts: { query: string; since?: number; limit?: number; from?: string },
+): Promise<SearchHit[]> {
+  const params = new URLSearchParams({ q: opts.query });
+  if (opts.since !== undefined) params.set("since", String(opts.since));
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  if (opts.from !== undefined) params.set("from", opts.from);
+  const body = await req(server, `/api/channels/${encodeURIComponent(slug)}/search?${params.toString()}`, {
+    headers: bearerJson(token),
+  });
+  const hits = (body as Record<string, unknown> | null)?.hits;
+  return Array.isArray(hits) ? (hits as SearchHit[]) : [];
 }
 
 export type MessagePayload = Omit<SendMessageFrame, "type"> | Omit<SendStatusFrame, "type">;

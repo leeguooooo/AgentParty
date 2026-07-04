@@ -62,6 +62,18 @@ export interface WakeDelivery {
   resume_seq: number | null;
 }
 
+export interface SearchHit {
+  type: "search_hit";
+  channel: string;
+  query: string;
+  seq: number;
+  sender: Sender;
+  kind: MessageKind;
+  match_field: "body" | "note" | "sender";
+  snippet: string;
+  ts: number;
+}
+
 export type ErrorCode =
   | "bad_request"
   | "unauthorized"

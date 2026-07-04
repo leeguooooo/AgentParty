@@ -22,7 +22,7 @@ commands:
   ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
   history   [channel|--channel C] [--since seq] [--limit n] [--json]
-  search    <query> [--channel C] [--limit n] [--json]   在频道历史里按子串搜 body/note/sender
+  search    <query> [--channel C] [--from name] [--since seq] [--limit n] [--json]
   digest    [channel|--channel C] [--since seq|last-seen] [--json]
   wake      test @agent [channel|--channel C] [--timeout N] [--json]
   channel   create <slug> [--title t] [--temp] [--party] [--public] | list | archive [slug] | reset-guard [slug] | kick <name> [slug]

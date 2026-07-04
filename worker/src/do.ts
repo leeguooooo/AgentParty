@@ -20,6 +20,7 @@ import {
   type PresenceFrame,
   type Residency,
   type SendFrame,
+  type SearchHit,
   type Sender,
   type SenderKind,
   type ServerFrame,
@@ -248,6 +249,22 @@ interface WebhookRow {
 function toInt(value: string | null, fallback: number): number {
   const n = Number.parseInt(value ?? "", 10);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+function firstMatchingField(frame: MsgFrame, query: string): SearchHit["match_field"] {
+  const q = query.toLowerCase();
+  if (frame.kind === "status" && (frame.note ?? "").toLowerCase().includes(q)) return "note";
+  if (frame.body.toLowerCase().includes(q)) return "body";
+  return "sender";
+}
+
+function snippetFor(frame: MsgFrame, field: SearchHit["match_field"]): string {
+  const text = field === "sender" ? frame.sender.name : field === "note" ? (frame.note ?? "") : frame.body;
+  return text.replace(/\s+/g, " ").trim().slice(0, 220);
 }
 
 export class ChannelDO extends Server<Env> {
@@ -869,6 +886,51 @@ export class ChannelDO extends Server<Env> {
         .exec("SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?", since, limit)
         .toArray();
       return Response.json({ messages: rows.map((r) => this.rowToFrame(r)) });
+    }
+    if (url.pathname === "/internal/search" && request.method === "GET") {
+      const query = (url.searchParams.get("q") ?? "").trim();
+      if (query.length === 0) {
+        return Response.json({ error: { code: "bad_request", message: "q required" } }, { status: 400 });
+      }
+      const since = Math.max(toInt(url.searchParams.get("since"), 0), 0);
+      const limit = Math.min(Math.max(toInt(url.searchParams.get("limit"), 100), 1), 1000);
+      const from = url.searchParams.get("from");
+      const like = `%${escapeLike(query.toLowerCase())}%`;
+      const fromSql = from === null ? "" : " AND sender_name = ?";
+      const args: (number | string)[] =
+        from === null
+          ? [since, like, like, like, limit]
+          : [since, from, like, like, like, limit];
+      const rows = this.ctx.storage.sql
+        .exec(
+          `SELECT * FROM messages
+            WHERE seq > ?${fromSql}
+              AND (
+                lower(body) LIKE ? ESCAPE '\\'
+                OR lower(note) LIKE ? ESCAPE '\\'
+                OR lower(sender_name) LIKE ? ESCAPE '\\'
+              )
+            ORDER BY seq DESC
+            LIMIT ?`,
+          ...args,
+        )
+        .toArray();
+      const hits = rows.map((row) => {
+        const frame = this.rowToFrame(row);
+        const matchField = firstMatchingField(frame, query);
+        return {
+          type: "search_hit",
+          channel: this.name,
+          query,
+          seq: frame.seq,
+          sender: frame.sender,
+          kind: frame.kind,
+          match_field: matchField,
+          snippet: snippetFor(frame, matchField),
+          ts: frame.ts,
+        } satisfies SearchHit;
+      });
+      return Response.json({ hits });
     }
     if (url.pathname === "/internal/wake-deliveries" && request.method === "GET") {
       const since = Math.max(toInt(url.searchParams.get("since"), 0), 0);
