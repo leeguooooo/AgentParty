@@ -216,7 +216,33 @@
   align-items: center;
   gap: 12px;
   padding: 6px 4px 10px;
+  /* chat-first：agent 多时封顶两行高度可滚，别把对话流挤出首屏 */
+  max-height: 96px;
+  overflow-y: auto;
+  flex: none;
 }
+
+/* chat-first：协调/元信息面板默认折叠成一行，消息流才是主视图 */
+.chan-panels {
+  flex: none;
+  margin: 0 4px 2px;
+  border: 2px solid var(--t-faint);
+  border-radius: 10px 7px 12px 6px / 7px 11px 6px 10px;
+  background: var(--t-panel2);
+}
+.chan-panels-summary {
+  cursor: pointer;
+  padding: 7px 12px;
+  font-size: 12px;
+  color: var(--t-dim);
+  list-style: none;
+  user-select: none;
+}
+.chan-panels-summary::-webkit-details-marker { display: none; }
+.chan-panels-summary:hover { color: var(--t-accent); }
+.chan-panels[open] > summary { border-bottom: 1.5px solid var(--t-faint); margin-bottom: 6px; }
+.chan-panels[open] { max-height: 46vh; overflow-y: auto; }
+.chan-panels > *:not(summary) { margin: 6px 10px; }
 .presence-pill {
   max-width: 100%;
   min-width: 0;

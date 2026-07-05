@@ -763,37 +763,43 @@ export function ChannelPage({
           <AgentJoin slug={slug} token={token} namePrefix={agentNamePrefix} />
         </div>
       )}
-      {catchupDigest !== null && catchupDigest.messages > 0 && seenSeq !== null && (
-        <CatchupPanel
-          digest={catchupDigest}
-          seenSeq={seenSeq}
-          latestSeq={lastSeq}
-          onCaughtUp={onCaughtUp}
-        />
-      )}
-      {knownSenders.length > 0 && (
-        <AgentFilterPanel
-          senders={knownSenders}
-          filter={agentFilter}
-          visible={visibleInView}
-          total={totalInView}
-          onMode={setAgentMode}
-          onToggle={toggleAgentFilter}
-          onClear={clearAgentFilter}
-        />
-      )}
-      {q === "" && <HostBoardPanel board={hostBoard} />}
-      {q === "" && <TeamPanel teams={teamSummaries} />}
-      {q === "" && <DecisionPanel messages={state.messages} />}
-      {q === "" && (
-        <CompletionPanel
-          completions={completions}
-          visible={visibleCompletions.length}
-          enabled={completionOnly}
-          onToggle={() => setCompletionOnly((current) => !current)}
-          onJump={jumpToCompletion}
-        />
-      )}
+      {/* chat-first：这些协调/元信息面板默认折叠，避免把核心对话流挤出首屏。展开查看 digest/过滤/host board 等。 */}
+      <details className="chan-panels">
+        <summary className="chan-panels-summary t-mono">
+          ▸ 协调面板 · digest / 过滤 / host board / teams / decisions / completions（默认折叠，点开查看）
+        </summary>
+        {catchupDigest !== null && catchupDigest.messages > 0 && seenSeq !== null && (
+          <CatchupPanel
+            digest={catchupDigest}
+            seenSeq={seenSeq}
+            latestSeq={lastSeq}
+            onCaughtUp={onCaughtUp}
+          />
+        )}
+        {knownSenders.length > 0 && (
+          <AgentFilterPanel
+            senders={knownSenders}
+            filter={agentFilter}
+            visible={visibleInView}
+            total={totalInView}
+            onMode={setAgentMode}
+            onToggle={toggleAgentFilter}
+            onClear={clearAgentFilter}
+          />
+        )}
+        {q === "" && <HostBoardPanel board={hostBoard} />}
+        {q === "" && <TeamPanel teams={teamSummaries} />}
+        {q === "" && <DecisionPanel messages={state.messages} />}
+        {q === "" && (
+          <CompletionPanel
+            completions={completions}
+            visible={visibleCompletions.length}
+            enabled={completionOnly}
+            onToggle={() => setCompletionOnly((current) => !current)}
+            onJump={jumpToCompletion}
+          />
+        )}
+      </details>
       {(state.messages.length > 0 || q !== "") && (
         <div className="chan-search-panel">
           <div className="chan-search-row">
