@@ -1007,6 +1007,104 @@ describe("party status/history channel flag", () => {
     expect(frame.recommended_actions[1]!.command).toContain("--takeover-from host-old");
   });
 
+  test("host board does not recommend guard reset after a human message clears loop guard", async () => {
+    const now = Date.now();
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels") {
+        return Response.json({
+          channels: [
+            {
+              slug: "dev",
+              title: "Dev",
+              kind: "standing",
+              archived_at: null,
+              presence: [
+                {
+                  name: "host-old",
+                  state: "working",
+                  note: "manual host",
+                  ts: now - 120_000,
+                  last_seen: now - 120_000,
+                  role: "host",
+                  role_source: "self",
+                  residency: "human_driven",
+                  wake: { kind: "none" },
+                },
+              ],
+            },
+          ],
+        });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({
+          messages: [
+            {
+              type: "status",
+              seq: 20,
+              sender: { name: "system", kind: "agent" },
+              kind: "status",
+              body: "loop guard",
+              mentions: [],
+              reply_to: null,
+              state: "blocked",
+              note: "loop guard tripped",
+              status: {
+                owner: "system",
+                state: "blocked",
+                scope: [],
+                summary_seq: null,
+                blocked_reason: "loop guard tripped: 200 consecutive agent messages",
+                updated_at: 20_000,
+              },
+              ts: 20_000,
+            },
+            {
+              type: "msg",
+              seq: 21,
+              sender: { name: "leo", kind: "human" },
+              kind: "message",
+              body: "1",
+              mentions: [],
+              reply_to: null,
+              state: null,
+              note: null,
+              status: null,
+              ts: 21_000,
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["host", "board", "dev", "--json"]);
+    expect(r.code).toBe(0);
+    const frame = JSON.parse(r.stdout.trim()) as {
+      blockers: Array<{ owner: string; blocked_reason: string | null }>;
+      hosts: Array<{ name: string; lease: string; stale_reason: string | null }>;
+      recommended_actions: Array<{
+        kind: string;
+        target: string | null;
+        command: string | null;
+        requires_human: boolean;
+      }>;
+    };
+    expect(frame.blockers).toEqual([
+      expect.objectContaining({ owner: "system", blocked_reason: "loop guard tripped: 200 consecutive agent messages" }),
+    ]);
+    expect(frame.hosts).toEqual([
+      expect.objectContaining({ name: "host-old", lease: "stale", stale_reason: "residency=human_driven" }),
+    ]);
+    expect(frame.recommended_actions).toEqual([
+      expect.objectContaining({
+        kind: "takeover",
+        target: "host-old",
+        requires_human: false,
+      }),
+    ]);
+    expect(frame.recommended_actions.some((action) => action.kind === "clear-loop-guard")).toBe(false);
+  });
+
   test("host board detects overlapping claim scopes for coordinator triage", async () => {
     const now = Date.now();
     mock = startRestMock((req) => {

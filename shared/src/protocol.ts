@@ -493,6 +493,14 @@ function isLoopGuardBlocker(claim: ClaimSummary): boolean {
   return claim.owner === "system" && text.includes("loop guard");
 }
 
+function hasHumanMessageAfter(messages: MsgFrame[], seq: number): boolean {
+  return messages.some((message) => message.seq > seq && message.kind === "message" && message.sender.kind === "human" && !message.retracted);
+}
+
+function isActiveLoopGuardBlocker(claim: ClaimSummary, messages: MsgFrame[]): boolean {
+  return isLoopGuardBlocker(claim) && !hasHumanMessageAfter(messages, claim.seq);
+}
+
 function normalizeScope(scope: string): string {
   return scope.replace(/\/+$/g, "");
 }
@@ -554,9 +562,10 @@ export function recommendHostActions(
   hosts: HostSummary[],
   blockers: ClaimSummary[],
   conflicts: ConflictSummary[],
+  messages: MsgFrame[] = [],
 ): RecommendedAction[] {
   const actions: RecommendedAction[] = [];
-  if (blockers.some(isLoopGuardBlocker)) {
+  if (blockers.some((claim) => isActiveLoopGuardBlocker(claim, messages))) {
     actions.push({
       kind: "clear-loop-guard",
       reason: "loop guard is tripped; agent messages are rejected until a human message or owner reset",
@@ -639,7 +648,7 @@ export function buildHostBoard(channel: string, presence: PresenceEntry[], messa
     blockers: status.blockers,
     conflicts,
     decisions: status.decisions,
-    recommended_actions: recommendHostActions(channel, hosts, status.blockers, conflicts),
+    recommended_actions: recommendHostActions(channel, hosts, status.blockers, conflicts, messages),
   };
 }
 
