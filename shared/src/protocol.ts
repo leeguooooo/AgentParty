@@ -404,6 +404,10 @@ export interface HostBoard {
   recommended_actions: RecommendedAction[];
 }
 
+export interface HostBoardOptions {
+  loopGuardActive?: boolean | null;
+}
+
 export function summarizeHosts(presence: PresenceEntry[], now: number): HostSummary[] {
   return presence
     .filter((entry) => entry.role === "host")
@@ -563,9 +567,12 @@ export function recommendHostActions(
   blockers: ClaimSummary[],
   conflicts: ConflictSummary[],
   messages: MsgFrame[] = [],
+  options: HostBoardOptions = {},
 ): RecommendedAction[] {
   const actions: RecommendedAction[] = [];
-  if (blockers.some((claim) => isActiveLoopGuardBlocker(claim, messages))) {
+  const activeLoopGuard =
+    options.loopGuardActive === false ? false : blockers.some((claim) => isActiveLoopGuardBlocker(claim, messages));
+  if (activeLoopGuard) {
     actions.push({
       kind: "clear-loop-guard",
       reason: "loop guard is tripped; agent messages are rejected until a human message or owner reset",
@@ -633,7 +640,13 @@ export function recommendHostActions(
   return actions;
 }
 
-export function buildHostBoard(channel: string, presence: PresenceEntry[], messages: MsgFrame[], now = Date.now()): HostBoard {
+export function buildHostBoard(
+  channel: string,
+  presence: PresenceEntry[],
+  messages: MsgFrame[],
+  now = Date.now(),
+  options: HostBoardOptions = {},
+): HostBoard {
   const status = summarizeStatus(messages);
   const hosts = summarizeHosts(presence, now);
   const conflicts = summarizeConflicts(status.openClaims);
@@ -648,7 +661,7 @@ export function buildHostBoard(channel: string, presence: PresenceEntry[], messa
     blockers: status.blockers,
     conflicts,
     decisions: status.decisions,
-    recommended_actions: recommendHostActions(channel, hosts, status.blockers, conflicts, messages),
+    recommended_actions: recommendHostActions(channel, hosts, status.blockers, conflicts, messages, options),
   };
 }
 

@@ -667,8 +667,8 @@ export function ChannelPage({
     [state.messages, state.participants, state.presence, teamNow],
   );
   const hostBoard = useMemo(
-    () => buildHostBoard(slug, Object.values(state.presence), state.messages, teamNow),
-    [slug, state.messages, state.presence, teamNow],
+    () => buildHostBoard(slug, Object.values(state.presence), state.messages, teamNow, { loopGuardActive: state.loopGuard !== null }),
+    [slug, state.loopGuard, state.messages, state.presence, teamNow],
   );
   const agentFilterActive = agentFilter.agents.length > 0;
   const totalInView = q === "" ? timelineMessages.length : searchHits.length;

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildHostBoard, type MsgFrame, type PresenceEntry } from "@agentparty/shared";
 import { workspaceId } from "../src/config";
 import { handleRestError, RestError } from "../src/rest";
 import { startRestMock, type RestMock, type RestRequest } from "./rest-mock";
@@ -1103,6 +1104,65 @@ describe("party status/history channel flag", () => {
       }),
     ]);
     expect(frame.recommended_actions.some((action) => action.kind === "clear-loop-guard")).toBe(false);
+  });
+
+  test("host board can use live guard state when the local message window missed the clearing human frame", () => {
+    const now = Date.now();
+    const presence: PresenceEntry[] = [
+      {
+        name: "host-old",
+        state: "working",
+        note: "manual host",
+        ts: now - 120_000,
+        last_seen: now - 120_000,
+        role: "host",
+        role_source: "self",
+        residency: "human_driven",
+        wake: { kind: "none" },
+      },
+    ];
+    const messages: MsgFrame[] = [
+      {
+        type: "status",
+        seq: 20,
+        sender: { name: "system", kind: "agent" },
+        kind: "status",
+        body: "loop guard",
+        mentions: [],
+        reply_to: null,
+        state: "blocked",
+        note: "loop guard tripped",
+        status: {
+          owner: "system",
+          state: "blocked",
+          scope: [],
+          summary_seq: null,
+          blocked_reason: "loop guard tripped: 200 consecutive agent messages",
+          updated_at: 20_000,
+        },
+        ts: 20_000,
+      },
+      {
+        type: "msg",
+        seq: 30,
+        sender: { name: "worker-a", kind: "agent" },
+        kind: "message",
+        body: "after guard was cleared elsewhere",
+        mentions: [],
+        reply_to: null,
+        state: null,
+        note: null,
+        status: null,
+        ts: 30_000,
+      },
+    ];
+
+    const board = buildHostBoard("dev", presence, messages, now, { loopGuardActive: false });
+
+    expect(board.blockers).toEqual([
+      expect.objectContaining({ owner: "system", blocked_reason: "loop guard tripped: 200 consecutive agent messages" }),
+    ]);
+    expect(board.recommended_actions.map((action) => action.kind)).toEqual(["takeover"]);
   });
 
   test("host board detects overlapping claim scopes for coordinator triage", async () => {
