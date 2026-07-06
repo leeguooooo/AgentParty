@@ -1830,6 +1830,70 @@ describe("party status/history channel flag", () => {
     expect(reqsOf(mock, "POST", "/api/channels/dev/messages")).toHaveLength(0);
   });
 
+  test("wake test sends to a serve adapter even when residency=bare (empirical, not refused)", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels") {
+        return Response.json({
+          channels: [
+            {
+              slug: "dev",
+              title: null,
+              kind: "standing",
+              archived_at: null,
+              presence: [
+                {
+                  name: "agent",
+                  state: "waiting",
+                  note: null,
+                  ts: 111,
+                  last_seen: 111,
+                  residency: "bare",
+                  wake: { kind: "serve", verified_at: 100 },
+                },
+              ],
+            },
+          ],
+        });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ seq: 20 });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({
+          messages: [
+            {
+              type: "message",
+              seq: 21,
+              sender: { name: "agent", kind: "agent" },
+              kind: "message",
+              body: "on it",
+              mentions: [],
+              reply_to: 20,
+              ts: 112,
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["wake", "test", "@agent", "dev", "--timeout", "1", "--json"]);
+    // serve+bare is a running supervisor: the mention must go out and the linked reply proves health,
+    // instead of being pre-emptively refused as not_auto_wakeable.
+    expect(r.code).toBe(0);
+    const frame = JSON.parse(r.stdout.trim());
+    expect(frame).toMatchObject({
+      type: "wake_test",
+      result: "healthy",
+      presence: { residency: "bare", wake_kind: "serve" },
+      phases: {
+        mention_delivered: { ok: true, seq: 20 },
+        agent_resumed: { ok: true, seq: 21, evidence: "reply_to" },
+      },
+    });
+    expect(reqsOf(mock, "POST", "/api/channels/dev/messages")).toHaveLength(1);
+  });
+
   test("wake test sends to advertised wake adapter and accepts linked status summary as resume", async () => {
     mock = startRestMock((req) => {
       if (req.method === "GET" && req.path === "/api/channels") {

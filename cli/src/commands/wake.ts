@@ -65,8 +65,17 @@ function summarizePresence(p: PresenceEntry | null): WakePresence {
 function notWakeableReason(p: PresenceEntry | null): string | null {
   if (p === null) return "no presence for target";
   if (p.residency === "human_driven") return "target is human-driven; mention is inbox only";
-  if (p.residency === "bare") return "target has bare residency; no wake adapter is advertised";
-  if (p.wake === undefined || p.wake.kind === "none") return "target advertises no wake adapter";
+  // wake_kind is the real capability; residency is a soft hint. If a real adapter is
+  // advertised, send the mention and let the empirical resume/timeout be conclusive —
+  // even when residency=bare. A running `party serve` is a live supervisor whether the
+  // agent labeled itself bare or supervised, so refusing on residency alone would skip a
+  // wake that actually works (issue: serve+bare wrongly judged not_auto_wakeable). Only
+  // refuse when there is genuinely no adapter to invoke.
+  if (p.wake === undefined || p.wake.kind === "none") {
+    return p.residency === "bare"
+      ? "target has bare residency and advertises no wake adapter"
+      : "target advertises no wake adapter";
+  }
   return null;
 }
 
@@ -259,6 +268,16 @@ export async function run(argv: string[]): Promise<number> {
       wakeDelivery = await fetchLatestWebhookDelivery(cfg.server, cfg.token, channel, target, seq);
     }
 
+    // serve/watch are local supervisors reading the channel stream; they filter out the
+    // sender's own messages to avoid self-trigger loops. So a self-test (mentioning your own
+    // agent) always times out even when the supervisor is healthy — spell that out so the next
+    // person doesn't burn a debugging session on it (as happened with serve+bare self-tests).
+    const selfTestProne = adapter === "serve" || adapter === "watch";
+    const timeoutReason = selfTestProne
+      ? "timed out waiting for linked reply_to/status.summary_seq (serve/watch ignore the sender's own messages — if @" +
+        target +
+        " is your own identity, retry from a different one)"
+      : "timed out waiting for linked reply_to/status.summary_seq";
     const frame: WakeTestFrame = {
       type: "wake_test",
       channel,
@@ -272,7 +291,7 @@ export async function run(argv: string[]): Promise<number> {
         wake_invoked: summarizeWakeDelivery(wakeDelivery, adapter),
         agent_resumed: { ok: ack !== null, seq: ack?.seq ?? null, evidence: ack?.evidence ?? null },
       },
-      reason: ack === null ? "timed out waiting for linked reply_to/status.summary_seq" : null,
+      reason: ack === null ? timeoutReason : null,
     };
     if (flags.json === true) console.log(JSON.stringify(jsonFrame(frame)));
     else printHuman(frame);
