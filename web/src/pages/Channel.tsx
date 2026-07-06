@@ -1,6 +1,6 @@
 // 频道页：presence 条 + 实时消息流 + 内联错误条幅 + 插话框。
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { buildHostBoard, type HostBoard, type MsgFrame, type SearchHit } from "@agentparty/shared";
 import { AgentJoin } from "../components/AgentJoin";
@@ -38,6 +38,12 @@ interface Props {
 }
 
 const MENTION_RE = /@([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
+
+// IM 式加载：初始/上翻每页条数，与 DOM 消息窗口上限（贴底时超出即丢最老页，上翻可拉回）
+const PAGE_SIZE = 50;
+const MESSAGE_CAP = 300;
+// 触顶阈值：滚动到离顶部这么近就预取上一页
+const TOP_LOAD_PX = 80;
 
 function positiveInt(value: string, fallback: number, max: number): number | null {
   if (value.trim() === "") return fallback;
@@ -489,8 +495,52 @@ export function ChannelPage({
   const stickBottom = useRef(true);
   const authFailedRef = useRef(onAuthFailed);
   authFailedRef.current = onAuthFailed;
+  // IM 式加载：初始只拉最新一页、ws 从页尾游标接力；触顶上翻加载更早页
+  const [bootstrapped, setBootstrapped] = useState(false); // 初始页已就绪，ws 才连
+  const hasMoreRef = useRef(true); // 还有更早的历史可上翻
+  const loadingOlderRef = useRef(false); // 上翻请求进行中（去抖）
+  const initialCursorRef = useRef(0); // ws hello 的起始游标 = 初始页最后一条 seq
+  const pendingAnchorRef = useRef<{ height: number; top: number } | null>(null); // prepend 前的滚动锚
+  const oldestSeqRef = useRef(0);
+  oldestSeqRef.current = state.messages.length > 0 ? state.messages[0]!.seq : 0;
+
+  // IM 式初始加载：先用 rest 拉最新一页（打开即到底部），把 ws 起始游标 seed 到页尾，
+  // ws 只补拉/直播页尾之后的新消息——不再全量重放整个频道历史。
+  // 归档频道同样被这条覆盖（ws 会被 1008 踢掉，历史靠这页 + 上翻）。
+  useEffect(() => {
+    let alive = true;
+    fetchMessages(token, slug, { before: Number.MAX_SAFE_INTEGER, limit: PAGE_SIZE })
+      .then((msgs) => {
+        if (!alive) return;
+        setHistoryError(null);
+        for (const m of msgs) dispatch({ type: "frame", frame: m }); // 按 seq 去重，与 ws 交叠无害
+        hasMoreRef.current = msgs.length >= PAGE_SIZE;
+        initialCursorRef.current = msgs.length > 0 ? msgs[msgs.length - 1]!.seq : 0;
+        setBootstrapped(true);
+      })
+      .catch((err: unknown) => {
+        if (!alive) return;
+        if (err instanceof AuthError) {
+          authFailedRef.current("token revoked — paste a new one");
+          return;
+        }
+        if (err instanceof ForbiddenError) {
+          dispatch({ type: "fatal", reason: "forbidden" });
+          return;
+        }
+        // 初始页失败：退回 ws 全量重放（since=0），页面仍可用
+        setHistoryError("history failed to load");
+        initialCursorRef.current = 0;
+        hasMoreRef.current = false;
+        setBootstrapped(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [slug, token]);
 
   useEffect(() => {
+    if (!bootstrapped) return;
     const sock = new ChannelSocket(
       slug,
       token,
@@ -502,7 +552,7 @@ export function ChannelPage({
           else dispatch({ type: "fatal", reason });
         },
       },
-      { queryToken: shareMode },
+      { queryToken: shareMode, initialCursor: initialCursorRef.current },
     );
     sockRef.current = sock;
     sock.connect();
@@ -510,28 +560,7 @@ export function ChannelPage({
       sock.dispose();
       sockRef.current = null;
     };
-  }, [slug, token, shareMode]);
-
-  // 归档频道 do 在 welcome/补拉前就 1008 踢线，历史回看走 rest 兜底（spec §6「网页仍可回看」）
-  useEffect(() => {
-    if (!state.archived) return;
-    let alive = true;
-    fetchMessages(token, slug)
-      .then((msgs) => {
-        if (!alive) return;
-        setHistoryError(null);
-        for (const m of msgs) dispatch({ type: "frame", frame: m }); // 按 seq 去重，与 ws 交叠无害
-      })
-      .catch((err: unknown) => {
-        if (!alive) return;
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (err instanceof ForbiddenError) dispatch({ type: "fatal", reason: "forbidden" });
-        else setHistoryError("history failed to load");
-      });
-    return () => {
-      alive = false;
-    };
-  }, [state.archived, slug, token]);
+  }, [slug, token, shareMode, bootstrapped]);
 
   useEffect(() => {
     const onPopState = () => setAgentFilter(parseAgentFilter(window.location.search));
@@ -564,7 +593,24 @@ export function ChannelPage({
   useEffect(() => {
     const el = streamRef.current;
     if (el !== null && stickBottom.current) el.scrollTop = el.scrollHeight;
+    // 贴底时收窄消息窗口：DOM 不挂几千条；被丢弃的最老页上翻会重新拉回
+    if (stickBottom.current && state.messages.length > MESSAGE_CAP + PAGE_SIZE) {
+      dispatch({ type: "trim", keep: MESSAGE_CAP });
+      hasMoreRef.current = true;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSeq]);
+
+  // prepend 老页后的 scroll anchoring：绘制前把 scrollTop 平移新增高度，视口纹丝不动
+  const firstSeq = state.messages.length > 0 ? state.messages[0]!.seq : 0;
+  useLayoutEffect(() => {
+    const anchor = pendingAnchorRef.current;
+    const el = streamRef.current;
+    if (anchor === null || el === null) return;
+    pendingAnchorRef.current = null;
+    el.scrollTop = el.scrollHeight - anchor.height + anchor.top;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firstSeq]);
 
   useEffect(() => {
     if (seenKey === null) return;
@@ -578,10 +624,40 @@ export function ChannelPage({
     setSeenSeq(stored);
   }, [lastSeq, seenKey]);
 
+  // 触顶上翻：拉 before=<已加载最老 seq> 的上一页，并记录滚动锚（useLayoutEffect 恢复）
+  const loadOlder = useCallback(() => {
+    const el = streamRef.current;
+    if (el === null || loadingOlderRef.current || !hasMoreRef.current) return;
+    const oldest = oldestSeqRef.current;
+    if (oldest <= 1) {
+      hasMoreRef.current = false;
+      return;
+    }
+    loadingOlderRef.current = true;
+    pendingAnchorRef.current = { height: el.scrollHeight, top: el.scrollTop };
+    fetchMessages(token, slug, { before: oldest, limit: PAGE_SIZE })
+      .then((msgs) => {
+        if (msgs.length < PAGE_SIZE) hasMoreRef.current = false;
+        if (msgs.length === 0) {
+          pendingAnchorRef.current = null;
+          return;
+        }
+        for (const m of msgs) dispatch({ type: "frame", frame: m });
+      })
+      .catch(() => {
+        pendingAnchorRef.current = null; // 失败不锚定；下次触顶重试
+      })
+      .finally(() => {
+        loadingOlderRef.current = false;
+      });
+  }, [token, slug]);
+
   const onScroll = useCallback(() => {
     const el = streamRef.current;
-    if (el !== null) stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
-  }, []);
+    if (el === null) return;
+    stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+    if (el.scrollTop < TOP_LOAD_PX) loadOlder();
+  }, [loadOlder]);
 
   // 服务端 sent 确认后才清对应草稿；用户已输入的新内容不能被旧 ack 清掉。
   useEffect(() => {
@@ -863,7 +939,8 @@ export function ChannelPage({
           )}
         </div>
       )}
-      <div className="stream" ref={streamRef} onScroll={onScroll}>
+      {/* overflow-anchor:none —— 浏览器原生滚动锚定会和我们手动的 prepend 锚定打架 */}
+      <div className="stream" ref={streamRef} onScroll={onScroll} style={{ overflowAnchor: "none" }}>
         {q === ""
           ? visibleTimeline.map((item) =>
               item.type === "message" ? (

@@ -38,6 +38,23 @@ describe("channel state", () => {
     expect(revised.messages[0]).toMatchObject({ seq: 6, body: "edited", edited: true });
   });
 
+  test("prepending an older page keeps messages sorted and deduped (IM scroll-up)", () => {
+    let s = initialChannelState;
+    for (const seq of [51, 52, 53]) s = channelReducer(s, { type: "frame", frame: msgFrame(seq, `m${seq}`) });
+    // 上翻拉回的老页乱序/交叠 prepend，仍应升序去重
+    for (const seq of [49, 50, 51]) s = channelReducer(s, { type: "frame", frame: msgFrame(seq, `m${seq}`) });
+    expect(s.messages.map((m) => m.seq)).toEqual([49, 50, 51, 52, 53]);
+  });
+
+  test("trim keeps only the newest N messages and is a no-op below the cap", () => {
+    let s = initialChannelState;
+    for (let seq = 1; seq <= 10; seq++) s = channelReducer(s, { type: "frame", frame: msgFrame(seq, `m${seq}`) });
+    const trimmed = channelReducer(s, { type: "trim", keep: 4 });
+    expect(trimmed.messages.map((m) => m.seq)).toEqual([7, 8, 9, 10]);
+    // 低于上限时不动原状态（引用相等，避免无谓重渲染）
+    expect(channelReducer(trimmed, { type: "trim", keep: 4 })).toBe(trimmed);
+  });
+
   test("preserves lineage on incremental presence frames", () => {
     const frame: PresenceFrame = {
       type: "presence",

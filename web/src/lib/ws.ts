@@ -26,6 +26,8 @@ export interface SocketHandlers {
 
 export interface ChannelSocketOptions {
   queryToken?: boolean;
+  /** 初始游标：REST 已加载到的最新 seq。hello 从这里起补拉，不再全量重放（IM 式加载） */
+  initialCursor?: number;
 }
 
 export class ChannelSocket {
@@ -43,7 +45,9 @@ export class ChannelSocket {
     private readonly token: string,
     private readonly handlers: SocketHandlers,
     private readonly options: ChannelSocketOptions = {},
-  ) {}
+  ) {
+    this.cursor = options.initialCursor ?? 0;
+  }
 
   connect() {
     if (this.disposed) return;

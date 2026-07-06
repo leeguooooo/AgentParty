@@ -40,12 +40,17 @@ export type ChannelAction =
   | { type: "status"; status: SocketStatus }
   | { type: "fatal"; reason: FatalReason }
   | { type: "guard_reset" }
-  | { type: "send_failed"; message: string }; // 本地发送失败（断线窗口），与 error 帧同走红条
+  | { type: "send_failed"; message: string } // 本地发送失败（断线窗口），与 error 帧同走红条
+  | { type: "trim"; keep: number }; // IM 窗口上限：贴底时丢弃最老的已加载消息（上翻可重新拉回）
 
 export function channelReducer(state: ChannelState, action: ChannelAction): ChannelState {
   switch (action.type) {
     case "status":
       return { ...state, status: action.status };
+    case "trim":
+      return state.messages.length <= action.keep
+        ? state
+        : { ...state, messages: state.messages.slice(-action.keep) };
     case "guard_reset":
       return { ...state, loopGuard: null, loopGuardBaselineSeq: null, sendError: null };
     case "send_failed":

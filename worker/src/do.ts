@@ -1384,17 +1384,33 @@ export class ChannelDO extends Server<Env> {
     }
     if (url.pathname === "/internal/messages" && request.method === "GET") {
       const since = Math.max(toInt(url.searchParams.get("since"), 0), 0);
+      const before = Math.max(toInt(url.searchParams.get("before"), 0), 0);
       const limit = Math.min(Math.max(toInt(url.searchParams.get("limit"), 100), 1), 1000);
       const completionOnly = url.searchParams.get("completion") === "1";
-      const rows = this.ctx.storage.sql
-        .exec(
-          `SELECT * FROM messages
-            WHERE seq > ?${completionOnly ? " AND completion_artifact_json IS NOT NULL" : ""}
-            ORDER BY seq LIMIT ?`,
-          since,
-          limit,
-        )
-        .toArray();
+      // before 反向分页（IM 上翻加载历史）：返回 seq < before 的最近 limit 条，仍按 seq 升序输出。
+      // 与 since 互斥，before 优先；不带 before 保持原有 since 正向语义。
+      const rows =
+        before > 0
+          ? this.ctx.storage.sql
+              .exec(
+                `SELECT * FROM (
+                   SELECT * FROM messages
+                    WHERE seq < ?${completionOnly ? " AND completion_artifact_json IS NOT NULL" : ""}
+                    ORDER BY seq DESC LIMIT ?
+                 ) ORDER BY seq`,
+                before,
+                limit,
+              )
+              .toArray()
+          : this.ctx.storage.sql
+              .exec(
+                `SELECT * FROM messages
+                  WHERE seq > ?${completionOnly ? " AND completion_artifact_json IS NOT NULL" : ""}
+                  ORDER BY seq LIMIT ?`,
+                since,
+                limit,
+              )
+              .toArray();
       return Response.json({ messages: rows.map((r) => this.rowToFrame(r)) });
     }
     const auditMatch = url.pathname.match(/^\/internal\/messages\/([1-9]\d*)\/audit$/);

@@ -196,9 +196,16 @@ export async function createChannel(
   return (await res.json()) as { slug: string };
 }
 
-// 归档频道的 ws 会被 1008 直接踢掉、零补推；网页回看走这条 rest（spec §6）
-export async function fetchMessages(token: string, slug: string, limit = 1000): Promise<MsgFrame[]> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/messages?limit=${limit}`, {
+// IM 式加载都走这条 rest：初始最新一页（before=MAX_SAFE_INTEGER）、触顶上翻（before=已加载
+// 最老 seq）、归档频道回看（ws 被 1008 踢掉零补推，spec §6）。带 before 反向取最近 limit 条，仍升序返回。
+export async function fetchMessages(
+  token: string,
+  slug: string,
+  opts: { limit?: number; before?: number } = {},
+): Promise<MsgFrame[]> {
+  const params = new URLSearchParams({ limit: String(opts.limit ?? 1000) });
+  if (opts.before !== undefined) params.set("before", String(opts.before));
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/messages?${params.toString()}`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");

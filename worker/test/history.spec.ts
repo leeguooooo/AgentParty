@@ -49,6 +49,35 @@ describe("history rest", () => {
     expect(limitedBody.messages.map((m) => m.seq)).toEqual([1]);
   });
 
+  it("before paginates backwards for IM-style scroll-up (ascending pages)", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    for (let i = 1; i <= 5; i++) {
+      expect((await postMessage(slug, token, `m${i}`)).status).toBe(200);
+    }
+
+    // 最新一页：before 取一个大值 → 最近 2 条，升序
+    const latest = await api(`/api/channels/${slug}/messages?before=9007199254740991&limit=2`, token);
+    expect(latest.status).toBe(200);
+    const latestBody = (await latest.json()) as { messages: MsgLike[] };
+    expect(latestBody.messages.map((m) => m.seq)).toEqual([4, 5]);
+
+    // 上翻一页：before=已加载最老的 seq
+    const older = await api(`/api/channels/${slug}/messages?before=4&limit=2`, token);
+    const olderBody = (await older.json()) as { messages: MsgLike[] };
+    expect(olderBody.messages.map((m) => m.seq)).toEqual([2, 3]);
+
+    // 再上翻：不足一页返回剩余；顶到头返回空
+    const first = await api(`/api/channels/${slug}/messages?before=2&limit=2`, token);
+    expect(((await first.json()) as { messages: MsgLike[] }).messages.map((m) => m.seq)).toEqual([1]);
+    const none = await api(`/api/channels/${slug}/messages?before=1&limit=2`, token);
+    expect(((await none.json()) as { messages: MsgLike[] }).messages).toEqual([]);
+
+    // before 与 since 同给时 before 优先（互斥语义）
+    const both = await api(`/api/channels/${slug}/messages?since=1&before=3&limit=10`, token);
+    expect(((await both.json()) as { messages: MsgLike[] }).messages.map((m) => m.seq)).toEqual([1, 2]);
+  });
+
   it("persists and filters completion artifacts", async () => {
     const { token } = await seedToken("agent");
     const slug = await createChannel(token);
