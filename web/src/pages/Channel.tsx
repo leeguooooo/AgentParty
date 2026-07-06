@@ -545,7 +545,17 @@ export function ChannelPage({
       slug,
       token,
       {
-        onFrame: (frame) => dispatch({ type: "frame", frame }),
+        onFrame: (frame) => {
+          // 窗口下界防御（review P1 双保险）：低于已加载窗口的旧消息/旧修订不进窗口——
+          // 插进去会把上翻分页的 before 起点拽到远古 seq，中段历史被永久跳过。
+          // 上翻时 REST 本来就返回当前正文，丢掉这些帧无信息损失。
+          const floor = oldestSeqRef.current;
+          if (floor > 0) {
+            if ((frame.type === "msg" || frame.type === "status") && frame.seq < floor) return;
+            if (frame.type === "message_update" && frame.message.seq < floor) return;
+          }
+          dispatch({ type: "frame", frame });
+        },
         onStatus: (status) => dispatch({ type: "status", status }),
         onFatal: (reason) => {
           if (reason === "revoked") authFailedRef.current("token revoked — paste a new one");
@@ -634,18 +644,22 @@ export function ChannelPage({
       return;
     }
     loadingOlderRef.current = true;
-    pendingAnchorRef.current = { height: el.scrollHeight, top: el.scrollTop };
     fetchMessages(token, slug, { before: oldest, limit: PAGE_SIZE })
       .then((msgs) => {
         if (msgs.length < PAGE_SIZE) hasMoreRef.current = false;
-        if (msgs.length === 0) {
-          pendingAnchorRef.current = null;
-          return;
-        }
+        if (msgs.length === 0) return;
+        // 锚在 dispatch 前一刻采样（review P2）：请求飞行期间用户可能已滚走/来了新消息，
+        // 用请求发出时的旧锚会把视口拽回触顶位置
+        const now = streamRef.current;
+        if (now !== null) pendingAnchorRef.current = { height: now.scrollHeight, top: now.scrollTop };
         for (const m of msgs) dispatch({ type: "frame", frame: m });
+        // 整页都被去重（firstSeq 没变 → layout effect 不跑）时，别让残锚泄漏到下一次
+        requestAnimationFrame(() => {
+          pendingAnchorRef.current = null;
+        });
       })
       .catch(() => {
-        pendingAnchorRef.current = null; // 失败不锚定；下次触顶重试
+        // 失败不锚定；下次触顶重试
       })
       .finally(() => {
         loadingOlderRef.current = false;

@@ -63,13 +63,16 @@ export class ChannelSocket {
     this.ws = ws;
 
     let opened = false;
+    let helloSent = false;
     ws.onopen = () => {
       opened = true;
       this.everConnected = true;
       this.handshakeFails = 0;
       this.backoff = BACKOFF_MIN_MS;
       this.handlers.onStatus("open");
-      this.send({ type: "hello", since: this.cursor });
+      // hello 等 welcome 到了再发（见 onmessage）：welcome.last_rev_seq 作 since_rev，
+      // 服务端就不会把全部历史修订快照无条件重放进来——IM 窗口模式下，一条被编辑的
+      // 远古消息会被插到窗口最前，导致上翻分页从它往下、中段历史永久跳过（review P1）。
       // 字面量须与 do 的 setWebSocketAutoResponse 配对，不唤醒 do
       this.pingTimer = window.setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send('{"type":"ping"}');
@@ -83,6 +86,12 @@ export class ChannelSocket {
         frame = JSON.parse(ev.data) as ServerFrame;
       } catch {
         return;
+      }
+      if (frame.type === "welcome" && !helloSent) {
+        helloSent = true;
+        // REST 初始页/上翻页携带的就是消息当前状态（含编辑后正文），历史修订无需重放；
+        // 窗口内消息的后续修订走 live message_update。旧服务端无 last_rev_seq → 0 = 旧语义。
+        this.send({ type: "hello", since: this.cursor, since_rev: frame.last_rev_seq ?? 0 });
       }
       if ((frame.type === "msg" || frame.type === "status") && frame.seq > this.cursor) this.cursor = frame.seq;
       this.handlers.onFrame(frame);
