@@ -59,6 +59,13 @@ function isRevisionSnapshot(frame: ServerFrame): boolean {
   );
 }
 
+// 同一条修订的身份指纹：hello 补拉每次重连都会重放全部历史修订快照，靠它在进程内
+// 只递一次；对同一 seq 的「新一次修订」指纹会变，仍然放行。
+function revisionFingerprint(frame: ServerFrame): string {
+  if (frame.type !== "msg" && frame.type !== "status") return "";
+  return [frame.edited_at, frame.retracted_at, frame.supersedes, frame.superseded_by, frame.body].join("|");
+}
+
 export function connect(
   server: string,
   token: string,
@@ -76,6 +83,8 @@ export function connect(
   let cursor = since;
   // 已入队未 ack 的 seq，broadcast 与 hello 补拉重叠时去重
   const delivered = new Set<number>();
+  // 已递过的修订快照 seq → 指纹：跨重连去重（服务端每次 hello 都重放全部历史修订）
+  const deliveredRevisions = new Map<number, string>();
   let closed = false;
   let attempt = 0;
   let ws: WebSocket | null = null;
@@ -174,8 +183,15 @@ export function connect(
         }
         if (frame.type === "msg" || frame.type === "status") {
           const revised = isRevisionSnapshot(frame);
-          if (!revised && (frame.seq <= cursor || delivered.has(frame.seq))) continue;
-          if (!revised) delivered.add(frame.seq);
+          if (revised) {
+            // 修订快照允许穿透 seq 去重（要能展示编辑/撤回），但同一修订只递一次
+            const fp = revisionFingerprint(frame);
+            if (deliveredRevisions.get(frame.seq) === fp) continue;
+            deliveredRevisions.set(frame.seq, fp);
+          } else {
+            if (frame.seq <= cursor || delivered.has(frame.seq)) continue;
+            delivered.add(frame.seq);
+          }
         }
         // 自回声：sent 立即推进游标，自己的消息不会被当成新消息
         if (frame.type === "sent") advance(frame.seq);

@@ -125,6 +125,28 @@ describe("runServe", () => {
     }
   });
 
+  test("replayed revision snapshot of an old mention does not re-trigger the runner", async () => {
+    // 旧 @ 被编辑过 → 服务端每次连接都重放它；runner 只能被真正未消费的新消息触发
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(5, "me"));
+      sock.send(msgFrame(1, "old mention, later edited", { mentions: ["me"], edited: true, edited_at: 111, edited_by: "bob" }));
+      setTimeout(() => sock.send(msgFrame(6, "fresh mention", { mentions: ["me"] })), 30);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 80);
+    });
+    const seen: number[] = [];
+    const o = opts({
+      server: server.url,
+      since: 5,
+      runCommand: async (frame) => {
+        seen.push(frame.seq);
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(seen).toEqual([6]); // 只有 fresh 的 seq=6，重放的 seq=1 不触发
+  });
+
   test("a failing advertise does not crash the server", async () => {
     const s = closeAfterOneMention();
     const seen: number[] = [];

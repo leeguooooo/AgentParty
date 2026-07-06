@@ -182,7 +182,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
       }
       if (frame.type !== "msg") continue;
       const fromSelf = frame.sender.name === self;
-      const qualifies = !fromSelf && (!o.mentionsOnly || frame.mentions.includes(self));
+      // fresh = 游标之上的新消息。历史修订快照会穿透去重被重放（seq 早已消费过），
+      // 它们不是新唤醒——不 fresh 就绝不触发 runner（否则旧 @ 被编辑一次，每次重连都重跑一遍）
+      const fresh = frame.seq > conn.cursor;
+      const qualifies = fresh && !fromSelf && (!o.mentionsOnly || frame.mentions.includes(self));
       if (qualifies) {
         out(`▶ ${formatMsg(frame)}`);
         // 串行：本条命令跑完再消费下一帧（新帧此间缓冲在 FrameQueue），避免并发唤起互相抢

@@ -337,6 +337,33 @@ describe("runWatch", () => {
     expect(JSON.parse(o.lines[0]!)).toMatchObject({ type: "watch_exited", reason: "stream_ended" });
   });
 
+  test("--once ignores replayed revision snapshots and completes only on a fresh message", async () => {
+    // 服务端 hello 补拉会无条件重放被编辑过的历史消息（不受 since 约束）——
+    // 它可以照常打印，但不能算唤醒（曾把新挂上的 --once 立即假唤醒，seq=123 事故）
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send(welcomeFrame(5, "me"));
+        sock.send(msgFrame(1, "ancient but edited", { edited: true, edited_at: 111, edited_by: "bob" }));
+        setTimeout(() => sock.send(msgFrame(6, "fresh wake")), 60);
+      }
+    });
+    const o = opts({ server: server.url, once: true, timeoutSec: 5, since: 5 });
+    expect(await runWatch(o)).toBe(0);
+    // 旧修订照常展示，但完成 --once 的是 fresh 消息
+    expect(o.lines).toEqual(["[1] bob(agent) {edited}: ancient but edited", "[6] bob(agent): fresh wake"]);
+  });
+
+  test("--once with only replayed revisions never completes (times out)", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send(welcomeFrame(5, "me"));
+        sock.send(msgFrame(1, "ancient but edited", { edited: true, edited_at: 111, edited_by: "bob" }));
+      }
+    });
+    const o = opts({ server: server.url, once: true, timeoutSec: 0.3, since: 5 });
+    expect(await runWatch(o)).toBe(EXIT_TIMEOUT);
+  });
+
   test("--once with explicit timeout and no match exits TIMEOUT", async () => {
     server = startMockServer((frame, sock) => {
       if (frame.type === "hello") sock.send(welcomeFrame(0, "me"));

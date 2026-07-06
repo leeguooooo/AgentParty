@@ -96,10 +96,13 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         out(o.json ? JSON.stringify(jsonFrame(frame as unknown as Record<string, unknown>)) : formatMsg(msg));
         printed++;
       }
+      // fresh = 游标之上的新消息。重放的历史修订快照（seq 早已消费过）会穿透去重进来
+      // ——它们可以照常打印（展示编辑是 feature），但绝不能算「唤醒」（曾把 --once 假唤醒）
+      const fresh = msg.seq > conn.cursor;
       // 打印（或有意跳过）之后才推进游标，退出时入队未消费的消息留给下次补拉
       if (msg.seq > 0) conn.ack(msg.seq);
-      // --once：第一条匹配消息即完成——游标已推进，进程退出就是 harness 的唤醒信号
-      if (o.once && qualifies) {
+      // --once：第一条匹配的【新】消息即完成——游标已推进，进程退出就是 harness 的唤醒信号
+      if (o.once && qualifies && fresh) {
         onceDone = true;
         break;
       }
@@ -111,7 +114,10 @@ export async function runWatch(o: WatchOptions): Promise<number> {
     conn.close();
   }
 
-  if (timedOut && (o.follow || printed === 0)) {
+  // 超时判定：--once 只有 onceDone 才算被唤醒（打印过重放的修订快照不算）；
+  // 非 follow/once 沿用「打印过即成功」；follow 超时一律 TIMEOUT
+  const unfulfilled = o.once === true ? !onceDone : printed === 0;
+  if (timedOut && (o.follow || unfulfilled)) {
     out(o.json ? JSON.stringify(jsonFrame({ type: "timeout", channel: o.channel, timeout_sec: o.timeoutSec, ts: nowTs() })) : "TIMEOUT");
     return EXIT_TIMEOUT;
   }

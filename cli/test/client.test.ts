@@ -81,6 +81,27 @@ describe("ws client", () => {
     expect(msgs[0]).toMatchObject({ seq: 6, body: "edited copy", edited: true });
   });
 
+  test("the same revision snapshot replayed on reconnect is delivered once; a NEW revision still passes", async () => {
+    server = startMockServer((frame, sock, connIndex) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(6));
+      // 服务端每次 hello 都会重放历史修订快照（do.ts 补拉不受 since 约束）
+      sock.send(msgFrame(6, "edited once", { edited: true, edited_at: 111, edited_by: "bob" }));
+      if (connIndex === 0) {
+        sock.close(); // 断线重连 → 同一修订又被重放
+      } else {
+        // 重连后又来一次同修订 + 一次「新的」修订（edited_at 变了）
+        setTimeout(() => sock.send(msgFrame(6, "edited twice", { edited: true, edited_at: 222, edited_by: "bob" })), 20);
+      }
+    });
+    conn = connect(server.url, "ap_tok", "dev", 6, { backoffBaseMs: 20 });
+    // 4 帧 = welcome + 首次修订 + 重连 welcome + 新修订（重放的同修订被指纹去重，不占帧）
+    const frames = await collect(conn, 4, 800, false);
+    const msgs = frames.filter((f) => f.type === "msg") as { seq: number; body: string }[];
+    // 同一修订跨重连只递一次；新修订（不同指纹）仍然放行
+    expect(msgs.map((m) => m.body)).toEqual(["edited once", "edited twice"]);
+  });
+
   test("acked seqs are not redelivered, unacked queued frames dedup after reconnect", async () => {
     server = startMockServer((frame, sock, connIndex) => {
       if (frame.type !== "hello") return;
