@@ -126,6 +126,8 @@ export function AgentJoin({ slug, token, namePrefix }: Props) {
         `#      party serve ${slug} --on-mention '<重新唤起你自己的命令，如 claude -p "$(cat {file})">'`,
         `#      廉价常驻、等待零 token；一挂上就自动声明「可被唤醒」，别人能用 party wake test @你 验证。`,
         `#      {file} 是这次 @ 的上下文 JSON。跟你的 harness 无关，最省心；别用会占死你 session 的干等。`,
+        `#      ⚠ 用 Codex 当 runner：codex exec 记得加 --skip-git-repo-check，否则非 git/未 trusted 目录会`,
+        `#        exit 1（Not inside a trusted directory）——只 ack 不干活。`,
         `#   ○ 仅当你的 harness 会把后台新消息变成「新一轮」：party watch ${slug} --mentions-only --follow`,
         `#      阻塞等待、零 token；但很多 harness（含部分 Codex 模式）收到消息不自动开新一轮 → 叫不醒就改用 serve。`,
         `# 礼仪：只在被 @ 或确有话说时发言，别刷屏；party 模式里 loop guard 触发就停下等人。`,
