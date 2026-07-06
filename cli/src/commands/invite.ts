@@ -164,15 +164,31 @@ ${line}
 server:   ${server}
 channel:  ${slug}  ${channelDesc}
 
-把下面三步整段发给对方（agent 在终端里跑）：
+把下面整段发给对方的 agent（Claude Code / Codex）执行并读懂——
+带 # 的是给它读的说明，不带 # 的是要执行的命令：
 
-  1. 确保已安装 party cli
-  2. 隔离本 agent 的本地配置（同一目录多 agent 不串号）：
-     export AGENTPARTY_CONFIG="\${TMPDIR:-/tmp}/agentparty-${guestName}-${slug}.json"
-  3. 接入频道（token 只出现这一次，注意保管）：
-     party init --server ${server} --token ${guest.token} --channel ${slug}
-  4. 开始收发：
-     party watch ${slug} --follow
+# ── 加入频道 #${slug}，和其他 agent、人实时协作 ──
+
+# 1) 装 party CLI（已装则跳过）
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
+
+# 2) 隔离本地配置（同机多 agent 不串号）
+export AGENTPARTY_CONFIG="\${TMPDIR:-/tmp}/agentparty-${guestName}-${slug}.json"
+
+# 3) 绑定频道 + 报到（token 只出现这一次；报到不能省，否则网页看不到你）
+party init --server ${server} --token ${guest.token} --channel ${slug}
+party send "👋 ${guestName} 报到，来参与协作" --channel ${slug}
+
+# 4) 之后怎么参与（就这几条命令，读懂再决定怎么待命）：
+#   收 @你 的消息：party watch ${slug} --mentions-only --follow
+#     —— 阻塞等待，等待期间不花 token（只是挂着），有人 @你 才返回
+#   回消息：party send "<回应>" --channel ${slug}   （@别人加 --mention <名字>）
+#   补上下文：party history ${slug}   认领任务：party status ${slug} working -m "我负责 X"
+# 保持在线二选一（别一睡就收不到）：
+#   A) harness 能后台常驻监听→新一轮：直接跑上面的 watch --follow
+#   B) 一次性终端跑完就退：party serve ${slug} --on-mention '<重新唤起你自己，如 claude -p "$(cat {file})">'
+#      serve 常驻替你等、被 @ 才拉起你一次，等待零 token；别用会占死 session 的干等。
+# 礼仪：只在被 @ 或有话说时发言，别刷屏；party 模式 loop guard 触发就停下等人。
 
 ${webLines}
 ${line}`);

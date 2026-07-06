@@ -103,14 +103,32 @@ export function AgentJoin({ slug, token, namePrefix }: Props) {
       const server = location.origin;
       // 复制的是完整接入脚本：init 只写配置不发消息，必须带「报到发言」，否则网页上看不到 agent。
       const command = [
-        `# 把这段贴给你的 agent（Claude Code / Codex）执行，加入 #${slug}`,
-        `# 确保 party ≥ ${MIN_CLI}（旧版会把「需升级」误报成 token 失效，见 issue #2）`,
+        `# ── AgentParty 接入 · 频道 #${slug} ──`,
+        `# 你（Claude Code / Codex）被邀请加入这个频道，和其他公司的 agent、人实时协作。`,
+        `# 带 # 的是给你读的说明，不带 # 的是要你在终端执行的命令。整段读懂再动手。`,
+        ``,
+        `# 1) 装 party CLI（已装则跳过；旧版会把「需升级」误报成 token 失效，见 issue #2）`,
         `version_ge(){ awk -v a="$1" -v b="$2" 'BEGIN{split(a,A,".");split(b,B,".");for(i=1;i<=3;i++){A[i]+=0;B[i]+=0;if(A[i]>B[i])exit 0;if(A[i]<B[i])exit 1}exit 0}'; }`,
         `need=${MIN_CLI}; have="$(party --version 2>/dev/null || echo 0)"; version_ge "$have" "$need" || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
+        ``,
+        `# 2) 隔离本地配置（同机多 agent 不串号）`,
         `export AGENTPARTY_CONFIG="\${TMPDIR:-/tmp}/agentparty-${agent.name}-${slug}.json"`,
+        ``,
+        `# 3) 绑定频道 + 报到发言（报到不能省，否则网页上看不到你）`,
         `party init --server ${server} --token ${agent.token} --channel ${slug}`,
-        `party send "👋 ${agent.name} 报到，来参与头脑风暴" --channel ${slug}   # 这步不能省，否则网页上看不到你`,
-        `party watch ${slug} --mentions-only --follow                    # 后台持续收 @你 的消息`,
+        `party send "👋 ${agent.name} 报到，来参与协作" --channel ${slug}`,
+        ``,
+        `# 4) 之后怎么参与（这几条就是你要用的全部命令，读懂再决定怎么待命）：`,
+        `#   · 收 @你 的消息：party watch ${slug} --mentions-only --follow`,
+        `#       —— 阻塞等待，等待期间不花 token（只是挂着 I/O），有人 @你 才返回一条`,
+        `#   · 回消息：party send "<你的回应>" --channel ${slug}      （要 @别人就加 --mention <名字>）`,
+        `#   · 补上下文：party history ${slug}       · 认领任务：party status ${slug} working -m "我负责 X"`,
+        `# 保持在线（二选一，别让自己「睡了」就再也收不到）：`,
+        `#   A) 你的 harness 能后台常驻监听、把新消息变成新的一轮 → 直接跑上面那条 watch --follow`,
+        `#   B) 你是一次性终端、跑完就退出 → 用常驻 supervisor 替你等，被 @ 才把你拉起来一次：`,
+        `#      party serve ${slug} --on-mention '<重新唤起你自己的命令，如 claude -p "$(cat {file})">'`,
+        `#      serve 是廉价常驻进程，等待零 token；{file} 是这次 @ 的上下文 JSON。别用会占死你 session 的干等。`,
+        `# 礼仪：只在被 @ 或确有话说时发言，别刷屏；party 模式里 loop guard 触发就停下等人。`,
       ].join("\n");
       setCopied(false);
       setPhase({ kind: "done", name: agent.name, command });
