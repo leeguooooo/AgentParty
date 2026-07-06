@@ -86,6 +86,23 @@ describe("channels", () => {
     expect(res.status).toBe(403);
   });
 
+  it("channel-scoped token can create its own scope channel but not others (issue #31)", async () => {
+    const scope = uniq("scope");
+    const { token } = await seedToken("agent", uniq("guest"), { owner: "leo@x.com", channelScope: scope });
+    // 建自己 scope 的频道：放行（invite 先 mint scoped token 再建同名频道的正常路径）
+    const own = await api("/api/channels", token, {
+      method: "POST",
+      body: JSON.stringify({ slug: scope, kind: "standing" }),
+    });
+    expect(own.status).toBe(201);
+    // 建任意其它频道：仍 403，越不了 scope
+    const other = await api("/api/channels", token, {
+      method: "POST",
+      body: JSON.stringify({ slug: uniq("other"), kind: "standing" }),
+    });
+    expect(other.status).toBe(403);
+  });
+
   it("401 without a token", async () => {
     const res = await api("/api/channels", "");
     expect(res.status).toBe(401);

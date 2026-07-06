@@ -636,10 +636,12 @@ app.post("/api/channels", async (c) => {
   if (c.get("identity").role === "readonly") {
     return c.json(errorBody("unauthorized", "readonly token cannot create channels"), 403);
   }
-  // channel-scoped token 被绑死在单个已存在频道（跨公司邀请用），不得借建频道逃出 scope：
-  // 否则递给外部方的 scoped token 能以房主账号名义创建任意新频道（含 public、抢占 slug）。
-  if (c.get("identity").channel_scope != null) {
-    return c.json(errorBody("forbidden", "channel-scoped token cannot create channels"), 403);
+  // channel-scoped token 只能创建它自己 scope 的那个频道（invite 先 mint scoped token 再建同名频道的正常路径，
+  // 见 issue #31）：创建自己的 scope 不算逃出 scope。仍禁止建任意其它频道——外部方拿到 scoped token 越不了权，
+  // 至多创建它被邀请的那一个 slug，且该 slug 已存在时是 409 no-op，不能以房主账号名义抢占别的 slug / 建 public。
+  const createScope = c.get("identity").channel_scope;
+  if (createScope != null && createScope !== slug) {
+    return c.json(errorBody("forbidden", "channel-scoped token can only create its own scope channel"), 403);
   }
   const now = Date.now();
   const creator = c.get("identity");
