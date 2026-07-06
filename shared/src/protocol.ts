@@ -230,6 +230,12 @@ export function evaluateHostLease(
 export interface HelloFrame {
   type: "hello";
   since: number;
+  /**
+   * 修订游标：客户端已见过的最大 rev_seq。带上它，服务端补拉只重放 rev_seq 更大的
+   * 修订快照（编辑/撤回/超越），而不是把全部历史修订对每次连接无条件重放（issue #33）。
+   * 旧客户端不带 → 服务端保持旧行为（全量重放）。
+   */
+  since_rev?: number;
 }
 
 export interface SendMessageFrame {
@@ -279,6 +285,8 @@ export interface WelcomeFrame {
   loop_guard?: string | null;
   participants: Sender[];
   last_seq: number;
+  /** 频道当前最大修订序号；since=0 全量同步的客户端可直接以此初始化修订游标 */
+  last_rev_seq?: number;
   presence: PresenceEntry[];
 }
 
@@ -332,6 +340,8 @@ export interface MsgFrame {
   retracted_by?: string;
   supersedes?: number;
   superseded_by?: number;
+  /** 该消息最近一次修订的单调序号；客户端据此推进修订游标（hello.since_rev） */
+  rev_seq?: number;
   revision?: {
     original_body: string | null;
   };

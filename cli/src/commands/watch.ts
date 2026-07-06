@@ -2,7 +2,7 @@
 import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_LOOP_GUARD, EXIT_STREAM_ENDED, EXIT_TIMEOUT } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
-import { loadCursor, resolveChannel, saveCursor } from "../config";
+import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } from "../config";
 import { resolveAuth } from "../oidc-cli";
 import { formatMsg } from "../format";
 import { MAX_TIMEOUT_SEC, isSlug, parsePositiveIntFlag } from "../validation";
@@ -34,12 +34,14 @@ export interface WatchOptions {
   token: string;
   channel: string;
   since: number;
+  sinceRev?: number; // 修订游标（hello.since_rev），服务端据此限定修订重放
   timeoutSec: number;
   follow: boolean;
   mentionsOnly: boolean;
   once?: boolean; // 第一条匹配消息后立即退出 0（harness 后台任务的唤醒信号）
   json?: boolean; // 输出 NDJSON 帧而非人类格式，供 supervisor/工具消费
   onCursor?: (cursor: number) => void;
+  onRevCursor?: (revCursor: number) => void;
   out?: (line: string) => void;
   backoffBaseMs?: number;
 }
@@ -53,6 +55,8 @@ export async function runWatch(o: WatchOptions): Promise<number> {
   const out = o.out ?? ((line: string) => console.log(line));
   const conn = connect(o.server, o.token, o.channel, o.since, {
     onCursor: o.onCursor,
+    sinceRev: o.sinceRev,
+    onRevCursor: o.onRevCursor,
     backoffBaseMs: o.backoffBaseMs,
   });
 
@@ -179,11 +183,13 @@ export async function run(argv: string[]): Promise<number> {
     token: cfg.token,
     channel,
     since: loadCursor(channel),
+    sinceRev: loadRevCursor(channel),
     timeoutSec: resolveWatchTimeoutSec(timeout, flags.follow === true || flags.once === true),
     follow: flags.follow === true,
     once: flags.once === true,
     mentionsOnly: flags["mentions-only"] === true,
     json: flags.json === true,
     onCursor: (c) => saveCursor(channel, c),
+    onRevCursor: (r) => saveRevCursor(channel, r),
   });
 }

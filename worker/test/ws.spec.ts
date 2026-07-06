@@ -89,6 +89,55 @@ describe("websocket", () => {
     reader.close();
   });
 
+  it("hello since_rev scopes revision replay; welcome carries last_rev_seq (issue #33)", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const sender = await WsClient.open(slug, token);
+    await sender.nextOfType("welcome");
+    for (let i = 1; i <= 3; i++) {
+      sender.send({ type: "send", kind: "message", body: `m${i}`, mentions: [], reply_to: null });
+      await sender.nextOfType("sent");
+    }
+    sender.close();
+    // 编辑 seq=1 → 分配 rev_seq=1
+    const edited = await api(`/api/channels/${slug}/messages/1/edit`, token, {
+      method: "POST",
+      body: JSON.stringify({ body: "m1 edited" }),
+    });
+    expect(edited.status).toBe(200);
+
+    // 旧客户端（hello 不带 since_rev）：即便 since 追平，被编辑的 seq=1 仍会重放（兼容旧行为）
+    const legacy = await WsClient.open(slug, token);
+    const lw = await legacy.nextOfType("welcome");
+    expect(lw.last_rev_seq).toBe(1);
+    legacy.send({ type: "hello", since: 3 });
+    const replay = await legacy.nextOfType("msg");
+    expect(replay).toMatchObject({ seq: 1, body: "m1 edited", edited: true, rev_seq: 1 });
+    legacy.close();
+
+    // 新客户端 since_rev=0：这次修订（rev_seq=1 > 0）重放一次
+    const fresh = await WsClient.open(slug, token);
+    await fresh.nextOfType("welcome");
+    fresh.send({ type: "hello", since: 3, since_rev: 0 });
+    const once = await fresh.nextOfType("msg");
+    expect(once).toMatchObject({ seq: 1, rev_seq: 1 });
+    fresh.close();
+
+    // 新客户端 since_rev=1（已见过该修订）：不再重放——用一条新消息当栅栏，
+    // 它收到的第一条 msg 必须是栅栏而不是修订快照
+    const caughtUp = await WsClient.open(slug, token);
+    await caughtUp.nextOfType("welcome");
+    caughtUp.send({ type: "hello", since: 3, since_rev: 1 });
+    const fence = await WsClient.open(slug, token);
+    await fence.nextOfType("welcome");
+    fence.send({ type: "send", kind: "message", body: "fence", mentions: [], reply_to: null });
+    await fence.nextOfType("sent");
+    fence.close();
+    const firstMsg = await caughtUp.nextOfType("msg");
+    expect(firstMsg).toMatchObject({ seq: 4, body: "fence" });
+    caughtUp.close();
+  });
+
   it("broadcasts and backfills completion artifacts", async () => {
     const { token } = await seedToken("agent");
     const slug = await createChannel(token);

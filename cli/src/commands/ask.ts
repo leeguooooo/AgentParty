@@ -1,6 +1,6 @@
 // party ask — send + watch 语法糖，agent 主循环用
 import { parseArgs, str, unknownFlagError, valueFlagError } from "../args";
-import { loadCursor, saveCursor } from "../config";
+import { loadCursor, loadRevCursor, saveCursor, saveRevCursor } from "../config";
 import { resolveAuth } from "../oidc-cli";
 import { MAX_TIMEOUT_SEC, parsePositiveIntFlag } from "../validation";
 import { doSend, resolveSendInput, sendSpec } from "./send";
@@ -45,9 +45,11 @@ export async function run(argv: string[]): Promise<number> {
     token: cfg.token,
     channel: input.channel,
     since,
+    sinceRev: loadRevCursor(input.channel),
     timeoutSec: timeoutSec ?? 240,
     follow: false,
     mentionsOnly: parsed.flags["mentions-only"] === true,
     onCursor: (c) => saveCursor(input.channel, c),
+    onRevCursor: (r) => saveRevCursor(input.channel, r),
   });
 }

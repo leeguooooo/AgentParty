@@ -27,6 +27,8 @@ export interface ConfigWithSource {
 export interface WorkspaceState {
   channel: string;
   cursor: number;
+  /** 修订游标：已见过的最大 rev_seq（hello.since_rev），与消息游标并列持久化 */
+  rev_cursor?: number;
 }
 
 export function agentpartyHome(): string {
@@ -200,5 +202,17 @@ export function saveCursor(channel: string, cursor: number, cwd?: string): void 
   const st = readState(cwd);
   if (!st || st.channel !== channel) return;
   if (cursor <= st.cursor) return;
-  writeState({ channel, cursor }, cwd);
+  writeState({ ...st, cursor }, cwd);
+}
+
+export function loadRevCursor(channel: string, cwd?: string): number {
+  const st = readState(cwd);
+  return st && st.channel === channel ? (st.rev_cursor ?? 0) : 0;
+}
+
+export function saveRevCursor(channel: string, revCursor: number, cwd?: string): void {
+  const st = readState(cwd);
+  if (!st || st.channel !== channel) return;
+  if (revCursor <= (st.rev_cursor ?? 0)) return;
+  writeState({ ...st, rev_cursor: revCursor }, cwd);
 }

@@ -665,6 +665,12 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE messages ADD COLUMN retracted_by TEXT",
       "ALTER TABLE messages ADD COLUMN supersedes INTEGER",
       "ALTER TABLE messages ADD COLUMN superseded_by INTEGER",
+      // 修订序号（issue #33）：每次编辑/撤回/超越递增，hello.since_rev 据此限定补拉重放范围
+      "ALTER TABLE messages ADD COLUMN rev_seq INTEGER",
+      // 迁移回填：历史修订行按 seq 赋 rev_seq（幂等，只补 NULL），让升级后的客户端能收到一次再推进游标
+      `UPDATE messages SET rev_seq = seq
+        WHERE rev_seq IS NULL
+          AND (edited_at IS NOT NULL OR retracted_at IS NOT NULL OR supersedes IS NOT NULL OR superseded_by IS NOT NULL)`,
     ]) {
       try {
         sql.exec(ddl);
@@ -799,6 +805,7 @@ export class ChannelDO extends Server<Env> {
       loop_guard: loopGuard,
       participants: this.participants(),
       last_seq: this.lastSeq(),
+      last_rev_seq: this.lastRevSeq(),
       presence: this.presenceList(),
     });
     this.broadcastFrame({ type: "participants", participants: this.participants() });
@@ -841,18 +848,34 @@ export class ChannelDO extends Server<Env> {
     }
     if (frame.type === "hello") {
       const since = typeof frame.since === "number" && frame.since > 0 ? Math.floor(frame.since) : 0;
-      const rows = this.ctx.storage.sql
-        .exec(
-          `SELECT * FROM messages
-            WHERE seq > ?
-               OR edited_at IS NOT NULL
-               OR retracted_at IS NOT NULL
-               OR supersedes IS NOT NULL
-               OR superseded_by IS NOT NULL
-            ORDER BY seq`,
-          since,
-        )
-        .toArray();
+      const sinceRev =
+        typeof frame.since_rev === "number" && frame.since_rev >= 0 ? Math.floor(frame.since_rev) : null;
+      // 带 since_rev 的新客户端：修订快照只重放 rev_seq 更大的那些（issue #33）；
+      // 不带的旧客户端：保持旧行为（全部历史修订每次连接都重放，由客户端自行去重）
+      const rows =
+        sinceRev !== null
+          ? this.ctx.storage.sql
+              .exec(
+                `SELECT * FROM messages
+                  WHERE seq > ?
+                     OR (rev_seq IS NOT NULL AND rev_seq > ?)
+                  ORDER BY seq`,
+                since,
+                sinceRev,
+              )
+              .toArray()
+          : this.ctx.storage.sql
+              .exec(
+                `SELECT * FROM messages
+                  WHERE seq > ?
+                     OR edited_at IS NOT NULL
+                     OR retracted_at IS NOT NULL
+                     OR supersedes IS NOT NULL
+                     OR superseded_by IS NOT NULL
+                  ORDER BY seq`,
+                since,
+              )
+              .toArray();
       for (const row of rows) this.sendFrame(connection, this.rowToFrame(row));
       return;
     }
@@ -1459,12 +1482,13 @@ export class ChannelDO extends Server<Env> {
         );
         this.ctx.storage.sql.exec(
           `UPDATE messages
-              SET body = ?, original_body = COALESCE(original_body, ?), edited_at = ?, edited_by = ?
+              SET body = ?, original_body = COALESCE(original_body, ?), edited_at = ?, edited_by = ?, rev_seq = ?
             WHERE seq = ?`,
           body!.body,
           originalBody,
           now,
           identity.name,
+          this.nextRevSeq(),
           seq,
         );
         const updated = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
@@ -1484,11 +1508,12 @@ export class ChannelDO extends Server<Env> {
         );
         this.ctx.storage.sql.exec(
           `UPDATE messages
-              SET body = '', mentions_json = '[]', original_body = COALESCE(original_body, ?), retracted_at = ?, retracted_by = ?
+              SET body = '', mentions_json = '[]', original_body = COALESCE(original_body, ?), retracted_at = ?, retracted_by = ?, rev_seq = ?
             WHERE seq = ?`,
           originalBody,
           now,
           identity.name,
+          this.nextRevSeq(),
           seq,
         );
         const updated = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
@@ -1506,8 +1531,10 @@ export class ChannelDO extends Server<Env> {
       if (!out.ok) {
         return Response.json({ error: { code: out.code, message: out.message } }, { status: ERROR_STATUS[out.code] });
       }
-      this.ctx.storage.sql.exec("UPDATE messages SET superseded_by = ? WHERE seq = ?", out.seq, seq);
-      this.ctx.storage.sql.exec("UPDATE messages SET supersedes = ? WHERE seq = ?", seq, out.seq);
+      // 同一次超越是一个修订事件：新旧两行共用一个 rev_seq
+      const supersedeRev = this.nextRevSeq();
+      this.ctx.storage.sql.exec("UPDATE messages SET superseded_by = ?, rev_seq = ? WHERE seq = ?", out.seq, supersedeRev, seq);
+      this.ctx.storage.sql.exec("UPDATE messages SET supersedes = ?, rev_seq = ? WHERE seq = ?", seq, supersedeRev, out.seq);
       const oldRow = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
       const newRow = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", out.seq).one();
       const oldFrame = this.rowToFrame(oldRow);
@@ -2058,6 +2085,16 @@ export class ChannelDO extends Server<Env> {
     return Number(row.last);
   }
 
+  // 修订游标（issue #33）：单调修订序号，编辑/撤回/超越各占一号；DO 单线程，MAX+1 足够
+  private lastRevSeq(): number {
+    const row = this.ctx.storage.sql.exec("SELECT COALESCE(MAX(rev_seq), 0) AS last FROM messages").one();
+    return Number(row.last);
+  }
+
+  private nextRevSeq(): number {
+    return this.lastRevSeq() + 1;
+  }
+
   private agentStreak(): number {
     return Number(this.getMeta("agent_streak") ?? "0");
   }
@@ -2243,6 +2280,7 @@ export class ChannelDO extends Server<Env> {
     }
     if (r.supersedes !== null && r.supersedes !== undefined) frame.supersedes = Number(r.supersedes);
     if (r.superseded_by !== null && r.superseded_by !== undefined) frame.superseded_by = Number(r.superseded_by);
+    if (r.rev_seq !== null && r.rev_seq !== undefined) frame.rev_seq = Number(r.rev_seq);
     if (r.original_body !== null && r.original_body !== undefined) {
       frame.revision = { original_body: String(r.original_body) };
     }

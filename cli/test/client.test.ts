@@ -81,6 +81,34 @@ describe("ws client", () => {
     expect(msgs[0]).toMatchObject({ seq: 6, body: "edited copy", edited: true });
   });
 
+  test("sends since_rev in hello and advances the rev cursor from revision frames", async () => {
+    const hellos: Record<string, unknown>[] = [];
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      hellos.push(frame as unknown as Record<string, unknown>);
+      sock.send(welcomeFrame(6));
+      sock.send(msgFrame(6, "edited", { edited: true, edited_at: 111, edited_by: "bob", rev_seq: 5 }));
+    });
+    const revs: number[] = [];
+    conn = connect(server.url, "ap_tok", "dev", 6, { sinceRev: 2, onRevCursor: (r) => revs.push(r) });
+    await collect(conn, 2, 800, false);
+    expect(hellos[0]).toMatchObject({ since: 6, since_rev: 2 });
+    expect(revs).toEqual([5]);
+    expect(conn.revCursor).toBe(5);
+  });
+
+  test("full sync (since=0) adopts welcome.last_rev_seq as the rev cursor", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send({ ...welcomeFrame(3), last_rev_seq: 7 });
+    });
+    const revs: number[] = [];
+    conn = connect(server.url, "ap_tok", "dev", 0, { onRevCursor: (r) => revs.push(r) });
+    await collect(conn, 1, 500, false);
+    expect(revs).toEqual([7]);
+    expect(conn.revCursor).toBe(7);
+  });
+
   test("the same revision snapshot replayed on reconnect is delivered once; a NEW revision still passes", async () => {
     server = startMockServer((frame, sock, connIndex) => {
       if (frame.type !== "hello") return;

@@ -33,6 +33,9 @@ class FrameQueue {
 
 export interface ConnectOptions {
   onCursor?: (cursor: number) => void;
+  /** 修订游标：已见过的最大 rev_seq，随 hello.since_rev 上报，服务端据此限定修订重放（issue #33） */
+  sinceRev?: number;
+  onRevCursor?: (revCursor: number) => void;
   backoffBaseMs?: number;
   backoffMaxMs?: number;
   pingIntervalMs?: number;
@@ -45,6 +48,7 @@ export interface Connection {
   ack(seq: number): void;
   close(): void;
   readonly cursor: number;
+  readonly revCursor: number;
 }
 
 function isRevisionSnapshot(frame: ServerFrame): boolean {
@@ -81,6 +85,14 @@ export function connect(
 
   const queue = new FrameQueue();
   let cursor = since;
+  // 修订游标即时推进（不等 ack）：修订快照是幂等展示事件，收到即视为已见
+  let revCursor = opts.sinceRev ?? 0;
+  const advanceRev = (rev: number) => {
+    if (rev > revCursor) {
+      revCursor = rev;
+      opts.onRevCursor?.(revCursor);
+    }
+  };
   // 已入队未 ack 的 seq，broadcast 与 hello 补拉重叠时去重
   const delivered = new Set<number>();
   // 已递过的修订快照 seq → 指纹：跨重连去重（服务端每次 hello 都重放全部历史修订）
@@ -163,10 +175,12 @@ export function connect(
     } as unknown as string[]);
     const sock = ws;
     let opened = false;
+    let helloSince = 0;
     sock.onopen = () => {
       opened = true;
       attempt = 0;
-      sock.send(JSON.stringify({ type: "hello", since: cursor }));
+      helloSince = cursor;
+      sock.send(JSON.stringify({ type: "hello", since: cursor, since_rev: revCursor }));
       stopPing();
       pingTimer = setInterval(() => {
         if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: "ping" }));
@@ -181,10 +195,21 @@ export function connect(
         } catch {
           continue;
         }
+        // 全量同步（hello since=0）会带上每条消息的当前状态，历史修订无需单独补——
+        // 直接采纳服务端的修订水位，避免下次连接重收一遍
+        if (frame.type === "welcome" && helloSince === 0 && typeof frame.last_rev_seq === "number") {
+          advanceRev(frame.last_rev_seq);
+        }
+        // live 修订广播（message_update）也推进修订游标，重连才不会重收这次修订
+        if (frame.type === "message_update" && typeof frame.message?.rev_seq === "number") {
+          advanceRev(frame.message.rev_seq);
+        }
         if (frame.type === "msg" || frame.type === "status") {
+          if (typeof frame.rev_seq === "number") advanceRev(frame.rev_seq);
           const revised = isRevisionSnapshot(frame);
           if (revised) {
             // 修订快照允许穿透 seq 去重（要能展示编辑/撤回），但同一修订只递一次
+            // （新服务端由 since_rev 精确限定；指纹去重兜底旧服务端的全量重放）
             const fp = revisionFingerprint(frame);
             if (deliveredRevisions.get(frame.seq) === fp) continue;
             deliveredRevisions.set(frame.seq, fp);
@@ -257,6 +282,9 @@ export function connect(
     },
     get cursor() {
       return cursor;
+    },
+    get revCursor() {
+      return revCursor;
     },
   };
 }

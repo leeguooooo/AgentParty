@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
-import { loadCursor, resolveChannel, saveCursor } from "../config";
+import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } from "../config";
 import { formatMsg } from "../format";
 import { resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import { postMessage } from "../rest";
@@ -74,9 +74,11 @@ export interface ServeOptions {
   token: string;
   channel: string;
   since: number;
+  sinceRev?: number; // 修订游标（hello.since_rev）
   cmd: string;
   mentionsOnly: boolean;
   onCursor?: (cursor: number) => void;
+  onRevCursor?: (revCursor: number) => void;
   // 测试注入点：默认用 sh -c 起子进程
   runCommand?: (
     frame: MsgFrame,
@@ -145,7 +147,11 @@ async function defaultRun(
 export async function runServe(o: ServeOptions): Promise<number> {
   const out = o.out ?? ((line: string) => console.error(line));
   const run = o.runCommand ?? defaultRun;
-  const conn = connect(o.server, o.token, o.channel, o.since, { onCursor: o.onCursor });
+  const conn = connect(o.server, o.token, o.channel, o.since, {
+    onCursor: o.onCursor,
+    sinceRev: o.sinceRev,
+    onRevCursor: o.onRevCursor,
+  });
 
   let self = "";
   let code = 0;
@@ -256,9 +262,11 @@ export async function run(argv: string[]): Promise<number> {
     token: auth.token,
     channel,
     since: loadCursor(channel),
+    sinceRev: loadRevCursor(channel),
     cmd,
     mentionsOnly: flags.all !== true,
     onCursor: (c) => saveCursor(channel, c),
+    onRevCursor: (r) => saveRevCursor(channel, r),
     advertise: () => advertiseServeWake(auth, channel),
   });
 }
