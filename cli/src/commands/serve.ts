@@ -1,7 +1,7 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
-import { EXIT_ARCHIVED, EXIT_AUTH, type MsgFrame } from "@agentparty/shared";
+import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, type MsgFrame } from "@agentparty/shared";
 import { unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -149,6 +149,12 @@ export async function runServe(o: ServeOptions): Promise<number> {
     }
   } finally {
     conn.close();
+  }
+  // 帧流意外结束（既非终局 error 也非用户 Ctrl-C）：常驻 supervisor 语义下这是异常终止。
+  // 报机器可读原因 + 非零退出，否则 --on-mention supervisor 会像 watch --follow 一样静默消失（issue #29 同源）。
+  if (code === 0) {
+    out(`serve exited: stream ended unexpectedly`);
+    return EXIT_STREAM_ENDED;
   }
   return code;
 }
