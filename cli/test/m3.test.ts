@@ -110,9 +110,10 @@ describe("party invite", () => {
       `party init --server ${mock.url} --token ap_fix-login-bug-guest_secret --channel fix-login-bug`,
     );
     expect(r.stdout).toContain("party watch fix-login-bug --mentions-only --follow");
-    // 自包含简报要内联教会 agent 待命模型（serve 常驻 + 不花 token），别再是裸 watch
+    // 自包含简报要内联教会 agent 待命模型：serve 为稳·推荐（自动声明可唤醒、零 token），watch 依赖 harness
     expect(r.stdout).toContain("party serve fix-login-bug --on-mention");
-    expect(r.stdout).toContain("不花 token");
+    expect(r.stdout).toContain("零 token");
+    expect(r.stdout).toContain("party wake test @你");
     expect(r.stdout).toContain(`${mock.url}/c/fix-login-bug?t=ap_fix-login-bug-share_secret`);
     // 输出快照（归一化随机端口）
     expect(r.stdout.replaceAll(mock.url, "https://party.example")).toMatchSnapshot();
