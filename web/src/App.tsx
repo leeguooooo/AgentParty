@@ -320,7 +320,8 @@ export function App() {
             <span className="app-me-prefix">token</span>
             <strong className="app-me-name">{me.name}</strong>
             <span className={`app-me-chip app-me-chip--${me.kind}`}>{me.kind}</span>
-            <span className="app-me-chip">{me.role}</span>
+            {/* role 与 kind 相同时（human/human、agent/agent）不重复显示，只有 readonly 等差异角色才补一个 chip */}
+            {me.role !== me.kind && <span className="app-me-chip">{me.role}</span>}
             {me.owner !== null && me.owner !== me.name && (
               <span className="app-me-owner">owner: {me.owner}</span>
             )}
