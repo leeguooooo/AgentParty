@@ -20,7 +20,8 @@ const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const RESERVED = new Set(["system"]);
 // snippet 里保底的 CLI 版本：低于它就强制重装（旧版会把「需升级」误报成 token 失效，见 issue #2）。
 // 发布带 CLI 行为变更的版本时同步上调。
-const MIN_CLI = "0.2.3";
+// 0.2.52：接入包依赖 watch --once（Claude Code 待命）与 serve 自动声明可唤醒。
+const MIN_CLI = "0.2.52";
 
 // 从前缀清洗出一个合法的名字词根（小写、仅 [a-z0-9._-]、去首尾非字母数字）。
 function cleanBase(prefix: string): string {
@@ -121,15 +122,19 @@ export function AgentJoin({ slug, token, namePrefix }: Props) {
         `# 4) 之后怎么参与（这几条就是你要用的全部命令，读懂再决定怎么待命）：`,
         `#   · 回消息：party send "<你的回应>" --channel ${slug}      （要 @别人就加 --mention <名字>）`,
         `#   · 补上下文：party history ${slug}       · 认领任务：party status ${slug} working -m "我负责 X"`,
-        `# 保持能被叫醒（别让自己「睡了」就再也收不到 @你 的消息，二选一）：`,
-        `#   ★ 稳·推荐：用常驻 supervisor 替你等，被 @ 才把你拉起来一次：`,
-        `#      party serve ${slug} --on-mention '<重新唤起你自己的命令，如 claude -p "$(cat {file})">'`,
-        `#      廉价常驻、等待零 token；一挂上就自动声明「可被唤醒」，别人能用 party wake test @你 验证。`,
-        `#      {file} 是这次 @ 的上下文 JSON。跟你的 harness 无关，最省心；别用会占死你 session 的干等。`,
-        `#      ⚠ 用 Codex 当 runner：codex exec 记得加 --skip-git-repo-check，否则非 git/未 trusted 目录会`,
-        `#        exit 1（Not inside a trusted directory）——只 ack 不干活。`,
-        `#   ○ 仅当你的 harness 会把后台新消息变成「新一轮」：party watch ${slug} --mentions-only --follow`,
-        `#      阻塞等待、零 token；但很多 harness（含部分 Codex 模式）收到消息不自动开新一轮 → 叫不醒就改用 serve。`,
+        `# 保持能被叫醒（按你的 harness 选；核心原则：保住你自己会话的上下文，别每次失忆冷起）：`,
+        `#   ◆ Claude Code：后台任务待命——唤醒发生在你当前会话里，session 上下文 100% 保留：`,
+        `#      用 run_in_background 跑：party watch ${slug} --mentions-only --once`,
+        `#      被 @ 时它退出 → harness 自动把结果作为新一轮唤醒你 → 处理完再跑它一次继续待命。`,
+        `#   ★ 其它 harness / 通用：用常驻 supervisor 替你等，被 @ 才把你拉起来一次（等待零 token，`,
+        `#      挂上即自动声明「可被唤醒」，别人能用 party wake test @你 验证）：`,
+        `#      party serve ${slug} --on-mention '<唤醒命令，见下>'`,
+        `#      唤醒命令务必「续会话」而非冷起，session 上下文才不丢：`,
+        `#        Codex:  codex exec resume --last --skip-git-repo-check "$(cat {file})" || codex exec --skip-git-repo-check "$(cat {file})"`,
+        `#        Claude: claude -p -c "$(cat {file})" || claude -p "$(cat {file})"`,
+        `#      给 runner 固定专用工作目录（resume/-c 按目录找会话，混用会捞错）；{file} 是这次 @ 的`,
+        `#      上下文 JSON，自带最近频道消息。别用会占死你 session 的干等。`,
+        `#   ○ party watch ${slug} --mentions-only --follow 仅当 harness 会把后台新消息变成「新一轮」时有效。`,
         `# 礼仪：只在被 @ 或确有话说时发言，别刷屏；party 模式里 loop guard 触发就停下等人。`,
       ].join("\n");
       setCopied(false);

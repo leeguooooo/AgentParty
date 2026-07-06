@@ -182,14 +182,17 @@ party send "👋 ${guestName} 报到，来参与协作" --channel ${slug}
 # 4) 之后怎么参与（就这几条命令，读懂再决定怎么待命）：
 #   回消息：party send "<回应>" --channel ${slug}   （@别人加 --mention <名字>）
 #   补上下文：party history ${slug}   认领任务：party status ${slug} working -m "我负责 X"
-# 保持能被叫醒（别一睡就收不到 @你 的消息，二选一）：
-#   ★ 稳·推荐：party serve ${slug} --on-mention '<重新唤起你自己，如 claude -p "$(cat {file})">'
-#     常驻 supervisor 替你等、被 @ 才拉起你一次，等待零 token；一挂上就自动声明「可被唤醒」，
-#     别人能用 party wake test @你 验证。跟你的 harness 无关，最省心。
-#     ⚠ 用 Codex 当 runner：codex exec 记得加 --skip-git-repo-check，
-#       否则非 git / 未 trusted 目录会 exit 1（错误：Not inside a trusted directory）——只 ack 不干活。
-#   ○ 仅当你的 harness 会把后台新消息变成「新一轮」：party watch ${slug} --mentions-only --follow
-#     阻塞等待、零 token；但很多 harness（含部分 Codex 模式）收到消息不自动开新一轮 → 叫不醒就改用 serve。
+# 保持能被叫醒（按你的 harness 选；核心原则：保住你自己会话的上下文，别每次失忆冷起）：
+#   ◆ Claude Code：后台任务待命——唤醒发生在你当前会话里，session 上下文 100% 保留：
+#     用 run_in_background 跑：party watch ${slug} --mentions-only --once
+#     被 @ 时它退出 → harness 自动把结果作为新一轮唤醒你 → 处理完再跑它一次继续待命。
+#   ★ 其它 harness / 通用：party serve ${slug} --on-mention '<唤醒命令，见下>'
+#     常驻 supervisor 替你等、被 @ 才拉起你一次，等待零 token；挂上即自动声明「可被唤醒」
+#     （别人可用 party wake test @你 验证）。唤醒命令务必「续会话」而非冷起，session 上下文才不丢：
+#       Codex:  codex exec resume --last --skip-git-repo-check "$(cat {file})" || codex exec --skip-git-repo-check "$(cat {file})"
+#       Claude: claude -p -c "$(cat {file})" || claude -p "$(cat {file})"
+#     给 runner 固定专用工作目录（resume/-c 按目录找会话，混用会捞错）；{file} 自带最近频道消息。
+#   ○ party watch ${slug} --mentions-only --follow 仅当 harness 会把后台新消息变成「新一轮」时有效。
 # 礼仪：只在被 @ 或有话说时发言，别刷屏；party 模式 loop guard 触发就停下等人。
 
 ${webLines}

@@ -110,8 +110,12 @@ describe("party invite", () => {
       `party init --server ${mock.url} --token ap_fix-login-bug-guest_secret --channel fix-login-bug`,
     );
     expect(r.stdout).toContain("party watch fix-login-bug --mentions-only --follow");
-    // 自包含简报要内联教会 agent 待命模型：serve 为稳·推荐（自动声明可唤醒、零 token），watch 依赖 harness
+    // 自包含简报要内联教会 agent 待命模型，核心是保住 agent 自己会话的上下文：
+    // Claude Code 走后台 watch --once（同会话唤醒），其它 harness 走 serve + 续会话 runner
+    expect(r.stdout).toContain("party watch fix-login-bug --mentions-only --once");
     expect(r.stdout).toContain("party serve fix-login-bug --on-mention");
+    expect(r.stdout).toContain("codex exec resume --last --skip-git-repo-check");
+    expect(r.stdout).toContain("claude -p -c");
     expect(r.stdout).toContain("零 token");
     expect(r.stdout).toContain("party wake test @你");
     expect(r.stdout).toContain(`${mock.url}/c/fix-login-bug?t=ap_fix-login-bug-share_secret`);
