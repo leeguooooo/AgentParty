@@ -13,6 +13,12 @@ export interface MentionCandidate {
 
 const WAKEABLE: readonly WakeKind[] = ["serve", "watch", "webhook"];
 const STALE_MS = 60_000; // 与 PRESENCE_TIMEOUT_MS 一致：超过即算 recent 而非在线/可唤醒
+// 幽灵清理：只为防止频道长期累积几个月前的一次性 agent。设得宽松——几天前聊过的 agent
+// 仍是合理的 @/唤醒目标，不该被剔。真正的噪声（围观的人类会话）已由 kind/UUID 规则处理。
+const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面才视为幽灵
+// 纯 UUID 名 = 网页登录会话（human）的默认 token 名，永远不是有意义的 @ 目标。
+// 用于过渡期：旧 presence 行还没回填 kind 时，靠名字形状也能把这些围观会话剔掉。
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // 档位：① 在线（当前有 WS 连接） ② 可唤醒（presence 声明了 serve/watch/webhook 且不 stale）
 // ③ 最近活跃（其余 presence）。同名取更高档。
@@ -34,6 +40,8 @@ function tierFor(
 }
 
 // self 从候选里剔掉（@ 自己没意义）。档内按名字排序，档间 online > wakeable > recent。
+// 只把「有意义的 @ 目标」纳入：agent 各档都留；human 只在当前在线时才留（围观的人、尤其是
+// 只有 UUID 名的登录会话，不该冒进候选）；超过 1 天没露面的幽灵 presence 一律剔除。
 export function mentionCandidates(
   participants: Sender[],
   presence: Record<string, PresenceEntry>,
@@ -44,14 +52,24 @@ export function mentionCandidates(
   const kindOf = new Map<string, "agent" | "human">();
   for (const p of participants) kindOf.set(p.name, p.kind);
   for (const [name, p] of Object.entries(presence)) {
-    if (!kindOf.has(name)) kindOf.set(name, p.status?.owner ? "agent" : "agent");
+    if (!kindOf.has(name) && (p.kind === "agent" || p.kind === "human")) kindOf.set(name, p.kind);
   }
+  // kind 已知取 kind；未知（旧 presence 行没回填）时：UUID 名当 human，其余当 agent。
+  const kindFor = (name: string): "agent" | "human" =>
+    kindOf.get(name) ?? (UUID_RE.test(name) ? "human" : "agent");
 
   const names = new Set<string>([...online, ...Object.keys(presence)]);
   const rank: Record<MentionTier, number> = { online: 0, wakeable: 1, recent: 2 };
   return [...names]
     .filter((name) => name !== self && name !== "system")
-    .map((name) => ({ name, kind: kindOf.get(name) ?? "agent", tier: tierFor(name, online, presence, now) }))
+    .map((name) => ({ name, kind: kindFor(name), tier: tierFor(name, online, presence, now) }))
+    .filter((c) => {
+      if (c.tier === "online") return true; // 当前连着的都留（含在线的人类）
+      if (c.kind === "human") return false; // 不在线的人类围观者不作候选
+      const p = presence[c.name];
+      const seen = p?.last_seen ?? p?.ts ?? 0;
+      return now - seen <= DEAD_MS; // 幽灵清理：太久没露面的 agent 也剔除
+    })
     .sort((a, b) => rank[a.tier] - rank[b.tier] || a.name.localeCompare(b.name));
 }
 

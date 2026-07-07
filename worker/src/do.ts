@@ -766,9 +766,11 @@ export class ChannelDO extends Server<Env> {
       wake_kind TEXT,
       wake_verified_at INTEGER,
       context_json TEXT,
-      lineage_json TEXT
+      lineage_json TEXT,
+      kind TEXT
     )`);
     for (const ddl of [
+      "ALTER TABLE presence ADD COLUMN kind TEXT",
       "ALTER TABLE presence ADD COLUMN role TEXT",
       "ALTER TABLE presence ADD COLUMN role_source TEXT",
       "ALTER TABLE presence ADD COLUMN residency TEXT",
@@ -2235,12 +2237,13 @@ export class ChannelDO extends Server<Env> {
       const wakeProvided = frame.wake !== undefined ? 1 : 0;
       sql.exec(
         `INSERT INTO presence (
-           name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+           name, kind, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
            status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at, context_json,
            lineage_json
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
+           kind = excluded.kind,
            state = excluded.state,
            note = excluded.note,
            updated_at = excluded.updated_at,
@@ -2258,6 +2261,7 @@ export class ChannelDO extends Server<Env> {
            context_json = COALESCE(excluded.context_json, presence.context_json),
            lineage_json = excluded.lineage_json`,
         identity.name,
+        identity.kind,
         frame.state,
         frame.note,
         now,
@@ -2478,7 +2482,7 @@ export class ChannelDO extends Server<Env> {
   private presenceList(): PresenceEntry[] {
     return this.ctx.storage.sql
       .exec(
-        `SELECT name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+        `SELECT name, kind, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json
          FROM presence ORDER BY name`,
@@ -2490,7 +2494,7 @@ export class ChannelDO extends Server<Env> {
   private presenceFor(name: string): PresenceEntry | null {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT name, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+        `SELECT name, kind, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json
          FROM presence WHERE name = ?`,
@@ -2515,6 +2519,7 @@ export class ChannelDO extends Server<Env> {
         : statusEventFromRow(r, String(r.name), state as StatusState, ts);
     return {
       name: String(r.name),
+      ...(r.kind === "agent" || r.kind === "human" ? { kind: r.kind as SenderKind } : {}),
       state,
       note: r.note === null ? null : String(r.note),
       ts,

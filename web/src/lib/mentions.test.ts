@@ -35,6 +35,37 @@ describe("mentionCandidates", () => {
     const names = mentionCandidates([], pres, "me", NOW).map((c) => c.name);
     expect(names).toEqual(["x"]);
   });
+
+  test("offline human viewer is excluded (只在线的人类才作候选)", () => {
+    const pres = {
+      bob: presence({ name: "bob", kind: "human" }), // 围观的人，不在线
+      agentx: presence({ name: "agentx", kind: "agent" }),
+    };
+    const names = mentionCandidates([], pres, null, NOW).map((c) => c.name);
+    expect(names).toEqual(["agentx"]); // bob 被剔除
+  });
+
+  test("online human is kept", () => {
+    const participants: Sender[] = [{ name: "alice", kind: "human" }];
+    const pres = { alice: presence({ name: "alice", kind: "human" }) };
+    expect(mentionCandidates(participants, pres, null, NOW).map((c) => c.name)).toEqual(["alice"]);
+  });
+
+  test("bare-UUID session name excluded when offline (旧 presence 行没回填 kind 的兜底)", () => {
+    const uuid = "63ce33fa-6169-4c71-840b-fe6ea1d1162d";
+    const pres = { [uuid]: presence({ name: uuid }) }; // 无 kind：靠名字形状判为 human
+    expect(mentionCandidates([], pres, null, NOW)).toEqual([]);
+  });
+
+  test("recent agent (days old) is kept; only long-dead (>14d) ghost dropped", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const pres = {
+      fresh: presence({ name: "fresh", kind: "agent", last_seen: NOW - 60_000 }),
+      daysold: presence({ name: "daysold", kind: "agent", last_seen: NOW - 4 * DAY }), // 4天前聊过，仍保留
+      ghost: presence({ name: "ghost", kind: "agent", last_seen: NOW - 15 * DAY }), // 15天，剔除
+    };
+    expect(mentionCandidates([], pres, null, NOW).map((c) => c.name).sort()).toEqual(["daysold", "fresh"]);
+  });
 });
 
 describe("activeMentionQuery", () => {

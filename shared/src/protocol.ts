@@ -183,6 +183,9 @@ export interface Sender {
 
 export interface PresenceEntry {
   name: string;
+  // agent / human。@ 补全等需要区分「可 @ 的 agent」和「只是围观的人类会话」。
+  // 旧 worker 响应缺此字段 → undefined，消费方按未知处理（不当人类排除）。
+  kind?: SenderKind;
   state: PresenceState;
   note: string | null;
   ts: number;
