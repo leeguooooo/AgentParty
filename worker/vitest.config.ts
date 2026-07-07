@@ -7,6 +7,10 @@ export default defineWorkersConfig(async () => {
   const migrations = await readD1Migrations(migrationsDir);
   return {
     test: {
+      // 单 workerd 运行时串行跑全部 spec，满载时个别 WS 握手/DO 交互偶发超过默认 5000ms
+      // （非代码 bug，隔离单跑 75ms；见 issue #43）。抬到 20s 消除随机挡发布的假超时。
+      testTimeout: 20_000,
+      hookTimeout: 20_000,
       setupFiles: ["./test/apply-migrations.ts"],
       poolOptions: {
         workers: {
