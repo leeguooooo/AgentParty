@@ -1397,10 +1397,69 @@
 
 /* ---- 插话框 ---- */
 .composer {
+  position: relative;
   display: flex;
   align-items: stretch;
   gap: 12px;
   padding: 2px 6px 6px 2px;
+}
+/* @ 提及补全下拉（issue #39）：浮在插话框上方，doodle 边框，分档徽章 */
+.mention-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 2px;
+  right: 2px;
+  max-width: 380px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  z-index: 20;
+  background: var(--t-panel);
+  border: 2.5px solid var(--d-ink);
+  border-radius: 12px 9px 13px 8px / 9px 12px 8px 13px;
+  box-shadow: 4px 5px 0 var(--d-shadow);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.mention-item.is-active {
+  background: hsl(var(--ah, 220) 58% var(--agent-l-soft));
+}
+.mention-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: hsl(var(--ah, 220) 58% var(--agent-l-name));
+}
+.mention-name {
+  flex: 1;
+  font-size: 13px;
+  color: var(--t-body);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mention-tier {
+  font-size: 11px;
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.mention-tier--online {
+  color: #2e7d46;
+}
+.mention-tier--wakeable {
+  color: var(--t-accent, #b4552d);
+}
+.mention-tier--recent {
+  color: var(--t-muted, #8a8778);
 }
 .composer-input {
   flex: 1;

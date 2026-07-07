@@ -9,6 +9,7 @@ import { MessageCard } from "../components/MessageCard";
 import { PresenceBar } from "../components/PresenceBar";
 import { AuthError, ForbiddenError, fetchMessages, resetGuard, searchMessages } from "../lib/api";
 import { agentHue } from "../lib/agentColor";
+import { mentionCandidates } from "../lib/mentions";
 import { completionMessages } from "../lib/completions";
 import { catchupKey, summarizeCatchup, type CatchupDigest } from "../lib/digest";
 import {
@@ -762,6 +763,11 @@ export function ChannelPage({
     () => buildHostBoard(slug, Object.values(state.presence), state.messages, teamNow, { loopGuardActive: state.loopGuard !== null }),
     [slug, state.loopGuard, state.messages, state.presence, teamNow],
   );
+  // @ 补全候选：participants ∪ presence，分档（在线/可唤醒/最近）。teamNow 30s 刷新驱动 stale 判定。
+  const mentionOptions = useMemo(
+    () => mentionCandidates(state.participants, state.presence, state.self, teamNow),
+    [state.participants, state.presence, state.self, teamNow],
+  );
   const agentFilterActive = agentFilter.agents.length > 0;
   const totalInView = q === "" ? timelineMessages.length : searchHits.length;
   const visibleInView = q === "" ? visibleMessages.length : visibleSearchHits.length;
@@ -1036,7 +1042,13 @@ export function ChannelPage({
         </p>
       )}
       {canWrite && (
-        <Composer draft={draft} setDraft={setDraft} onSend={send} ready={state.status === "open"} />
+        <Composer
+          draft={draft}
+          setDraft={setDraft}
+          onSend={send}
+          ready={state.status === "open"}
+          candidates={mentionOptions}
+        />
       )}
     </div>
   );
