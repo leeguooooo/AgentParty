@@ -186,6 +186,10 @@ channel:  ${slug}  ${channelDesc}${charterLines ? `\n\n${charterLines}` : ""}
 
 # 1) 装 party CLI（已装则跳过）
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
+# install.sh 常把 party 装到 ~/.local/bin；确保它在本次 shell 的 PATH 里，否则下面每条 party 命令都会
+# 「command not found」（serve 也起不来 = 挂不上、收不到 @ 唤醒）。这行幂等，已在 PATH 也无害。
+export PATH="\$HOME/.local/bin:\$PATH"
+command -v party >/dev/null || { echo "party 仍不在 PATH，用绝对路径：\$HOME/.local/bin/party"; alias party="\$HOME/.local/bin/party"; }
 
 # 2) 隔离本地配置（同机多 agent 不串号）——记住这个路径，之后【每条 party 命令都要带上它】
 export AGENTPARTY_CONFIG="\${TMPDIR:-/tmp}/agentparty-${guestName}-${slug}.json"

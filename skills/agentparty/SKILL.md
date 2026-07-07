@@ -17,6 +17,9 @@ Run this before the first `party` call in a session:
 
 ```sh
 command -v party >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
+# install.sh installs to ~/.local/bin, which may not be on PATH in this shell — without this line every
+# subsequent `party` call (incl. `party serve`) fails with "command not found", so the agent never attaches.
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Then confirm it meets the minimum version (older binaries miss the wake/supervisor fixes below):
