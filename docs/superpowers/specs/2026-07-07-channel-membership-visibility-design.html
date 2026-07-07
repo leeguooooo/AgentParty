@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>频道成员体系与可见性切换设计（issue #38）</title>
+<style>
+:root{--fg:#1c1b18;--muted:#6b6a63;--accent:#b4552d;--border:#dedbd0;--bg:#fcfbf4;--code:#f2f0e6}
+*{box-sizing:border-box}
+body{margin:0 auto;max-width:880px;padding:40px 24px 80px;background:var(--bg);color:var(--fg);
+  font:15px/1.75 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+h1{font-size:26px;line-height:1.3;margin:0 0 4px}
+h2{font-size:19px;margin:44px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+h3{font-size:16px;margin:24px 0 8px}
+p{margin:10px 0}
+code{background:var(--code);padding:1px 5px;border-radius:3px;font:13px/1.6 "JetBrains Mono",ui-monospace,monospace}
+pre{background:var(--code);padding:14px 16px;border-radius:6px;overflow-x:auto}
+pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+th,td{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--code)}
+ul,ol{margin:8px 0;padding-left:22px}
+li{margin:4px 0}
+.meta{color:var(--muted);font-size:13px;margin-bottom:28px}
+.meta b{color:var(--fg)}
+.callout{border-left:3px solid var(--accent);background:var(--code);padding:10px 14px;margin:14px 0;border-radius:0 6px 6px 0}
+.anchor{color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+
+<h1>频道成员体系与可见性切换设计</h1>
+<p class="meta">
+  <b>状态</b>：v1（2026-07-07，host 设计） ·
+  <b>issue</b>：leeguooooo/agentparty#38 ·
+  <b>base</b>：<code>bc63b43</code><br>
+  <b>需求</b>：① 私有频道邀请其他用户，share 链接点开即加入 ② public→private ③ private→public
+</p>
+
+<div class="callout">
+一句话：私有频道从「owner 单账号」升级为「owner + 成员账号集合」；<b>join 链接请人、invite 接入包请
+agent</b>，两种链接语义分开；visibility 可双向切换，private→public 必须二段式确认（全部历史将公开）。
+</div>
+
+<h2>① 概述与非目标</h2>
+<p>现状缺口：<code>canAccessChannel</code> v2 的私有判定只有规则⑤ <code>account === owner_account</code>
+（worker/src/acl.ts:35-40）——第二个人类账号无法进入私有频道；现有「share 链接」是 channel-scoped
+readonly token（cli/src/commands/invite.ts:141-149），语义是<b>围观</b>不是加入；visibility 建完即焊死。</p>
+<p><b>非目标</b>：P1 不做成员角色分级（成员≠moderator）、不做加入审批制、不做被邀请通知、不做在线连接的
+即时权限复查（见⑧诚实声明）。</p>
+
+<h2>② 数据模型</h2>
+<pre><code>-- 成员：账号级（principal.account = OIDC email/sub 或 ap_ token 的 owner）
+CREATE TABLE channel_members (
+  channel_slug TEXT NOT NULL,
+  account TEXT NOT NULL,
+  added_by TEXT NOT NULL,          -- 邀请人 account 或 'join-link:<code前8>'
+  added_at INTEGER NOT NULL,
+  PRIMARY KEY (channel_slug, account)
+);
+
+-- 加入链接：可撤销、可过期、可限次
+CREATE TABLE channel_join_links (
+  code TEXT PRIMARY KEY,           -- base64url(128bit) ≈ 22 字符
+  channel_slug TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER,              -- NULL = 不过期
+  max_uses INTEGER,                -- NULL = 不限
+  uses INTEGER NOT NULL DEFAULT 0,
+  revoked_at INTEGER
+);</code></pre>
+<p class="anchor">migration 序号以合入时实际排队为准（#34 spec 已占 0009，#36 已占 0010）。</p>
+
+<h2>③ ACL v3</h2>
+<p><code>canAccessChannel</code>（acl.ts:35-40）追加一条规则，其余全部不变——顺序即语义：</p>
+<pre><code>① public → 放行（不变）
+② channel_scope 非空 → 仅 slug 命中（不变，仍是硬上限——scoped token 即使其 owner 是成员也越不出 scope）
+③ legacy ap_ token → 过渡放行（不变）
+④ 无 scope 的 readonly → 私有一律拒（不变）
+⑤ account === owner_account → 放行（不变）
+⑥ NEW: account ∈ channel_members(slug) → 放行</code></pre>
+<p>工程形态：保持 acl 纯函数——签名增参 <code>isMember: boolean</code>（或 ChannelAcl 增
+<code>viewer_is_member</code>），membership 查询由调用方完成：</p>
+<ul>
+<li>单频道路径（消息/ws/webhook 等所有 <code>loadChannel</code> 调用点，worker/src/index.ts:224-239）：一次
+<code>SELECT 1 FROM channel_members WHERE channel_slug=? AND account=?</code>；可并入 loadChannel 做 LEFT JOIN。</li>
+<li>频道列表（index.ts:598 的 <code>visible = results.filter(...)</code>）：先一次
+<code>SELECT channel_slug FROM channel_members WHERE account=?</code> 取全集，内存判 ∈——不做 N+1。</li>
+</ul>
+<p><code>isChannelModerator</code> 不变：<b>成员不是 moderator</b>，管理操作（成员管理/链接/切换可见性/踢人/归档）仍归 owner 账号。</p>
+
+<h2>④ 邀请与加入</h2>
+<h3>直接邀请（知道对方账号）</h3>
+<table>
+<tr><th>端点</th><th>说明</th></tr>
+<tr><td><code>GET /api/channels/:slug/members</code></td><td>成员列表（moderator 或成员本人可见）</td></tr>
+<tr><td><code>PUT /api/channels/:slug/members/:account</code></td><td>加成员（moderator）；幂等</td></tr>
+<tr><td><code>DELETE /api/channels/:slug/members/:account</code></td><td>移除（moderator）；<b>成员可删自己 = 退出频道</b></td></tr>
+</table>
+<h3>join 链接（不知道/懒得输账号，发链接即可）</h3>
+<table>
+<tr><th>端点</th><th>说明</th></tr>
+<tr><td><code>POST /api/channels/:slug/join-links</code></td><td>body <code>{expires_in_sec?, max_uses?}</code>（moderator）→ <code>{code, url:"https://…/join/&lt;code&gt;"}</code></td></tr>
+<tr><td><code>GET /api/channels/:slug/join-links</code></td><td>列表含 uses/expiry/revoked（moderator）</td></tr>
+<tr><td><code>DELETE /api/channels/:slug/join-links/:code</code></td><td>撤销（moderator）；不影响已加入成员</td></tr>
+<tr><td><code>POST /api/join/:code</code></td><td>接受：校验未撤销/未过期/未超次 → INSERT member（幂等）→ 原子 <code>UPDATE … SET uses=uses+1 WHERE code=? AND revoked_at IS NULL AND (max_uses IS NULL OR uses&lt;max_uses)</code>（看 changes 数防竞争）→ 返回 slug</td></tr>
+</table>
+<div class="callout"><b>关键语义决策：join 链接只对 OIDC 人类身份生效</b>（identity.hash 前缀 <code>oidc:</code>，
+acl.ts:17-19 的判别已存在）。理由：agent 的 ap_ token accept 会把其 owner 整个账号变成员，权限放大且和
+scoped-token 接入语义打架——<b>请 agent 走 party invite 接入包（scoped token），请人走 join 链接</b>，两条路各管各的。
+agent token 调 accept 返回 403 并提示正确姿势。</div>
+<h3>Web /join/&lt;code&gt; 页</h3>
+<p>未登录 → 先走现有 OIDC 登录（回跳带回 code）→ POST accept → 302 到 <code>/c/&lt;slug&gt;</code>。
+失败态（撤销/过期/超次）给明确文案。</p>
+<h3>CLI</h3>
+<pre><code>party channel members &lt;slug&gt;
+party channel invite-member &lt;slug&gt; --account x@y.com
+party channel join-link &lt;slug&gt; [--expires 7d] [--max-uses 10]     # 打印 URL
+party channel join-link revoke &lt;slug&gt; &lt;code&gt;
+party channel leave &lt;slug&gt;                                        # 成员自退</code></pre>
+
+<h2>⑤ 可见性切换</h2>
+<table>
+<tr><th>端点</th><th>语义</th></tr>
+<tr><td><code>PUT /api/channels/:slug/visibility</code></td><td>body <code>{visibility:"public"|"private", confirm?:true}</code>；moderator only</td></tr>
+</table>
+<ul>
+<li><b>private→public：二段式强确认</b>。不带 <code>confirm:true</code> → 409 返回
+<code>{needs_confirm, message_count, earliest_ts}</code>：「切公开后<b>全部历史（N 条，最早 &lt;date&gt;）任何人可读</b>，
+且分享 URL 立即生效」。web 弹确认框、CLI 要求 <code>party channel visibility &lt;slug&gt; public --confirm</code>。</li>
+<li><b>public→private</b>：立即生效，无需 confirm（收紧不泄露）。响应附带提示：最近 30 天发言者中
+「非 owner/非成员/非 scoped」的账号名单（一次消息表聚合），moderator 可据此把该留的加为成员——P1 只给名单不做一键批量。</li>
+<li>切换成功后插 system status 留痕（<code>visibility changed to X by &lt;who&gt;</code>，无 mentions，同 charter 模式），并 bump 该频道 D1 行；<b>不改 mode/kind/owner</b>。</li>
+<li>频道列表/详情天然按新 visibility 过滤（canAccessChannel 每请求实时判定，无缓存失效问题）。</li>
+</ul>
+
+<h2>⑥ Web 触点</h2>
+<ul>
+<li>频道设置抽屉（moderator 可见）：可见性开关（含确认弹窗）、成员列表（加/删）、join 链接管理（生成/复制/撤销，显示 uses）。</li>
+<li><code>/join/&lt;code&gt;</code> 路由页（见④）。</li>
+<li>侧栏频道列表：成为成员的私有频道自动出现（ACL 放行即列出，无需额外逻辑）。</li>
+<li>成员身份标识：频道头 owner 徽章旁 P2 再考虑，P1 不做。</li>
+</ul>
+
+<h2>⑦ 与既有功能的交互</h2>
+<ul>
+<li><b>share readonly 链接不变</b>：仍是 scoped readonly token 围观语义；join 链接是并列新事物。invite 接入包（请 agent）不变。</li>
+<li><b>#34 评审门</b>：成员账号（human 或其名下 agent token）天然满足 reviewer 资格规则（sender/owner 相异性判定不涉及成员表）——私有频道请外部评审员 = 加成员或发 join 链接，正是目标场景。</li>
+<li><b>#36 charter</b>：新成员进频道第一眼读 charter；join 成功页可直接展示 charter（P2 锦上添花）。</li>
+<li>loop guard / workflow guard / wake：与成员无关，不动。</li>
+</ul>
+
+<h2>⑧ 边界与诚实声明</h2>
+<ul>
+<li><b>收紧不即时踢线（P1 已知缺口）</b>：public→private 或移除成员后，<b>已建立的 WS 连接到断线重连才会被拦</b>
+（升级时判定 forbidden，index.ts:502；DO 内每消息只复查 token 存活 do.ts:838-841，不复查频道 ACL）。P2 做
+visibility/成员变化时通知 DO 复查在线连接并 close(1008,"forbidden")。文案里如实告知 moderator。</li>
+<li>legacy 频道（owner_account=null）：legacy admin 过渡规则不变，其成员管理同样走 moderator 判定（即 legacy token 可管）。</li>
+<li>重复 accept 幂等（PRIMARY KEY 冲突按已加入处理，不重复计 uses——先查后插）。</li>
+<li>撤销/过期 join 链接不影响既有成员；成员退出后 scoped token（如有）不受影响（scope 规则独立）。</li>
+<li>owner 不能被移除、不能 leave（先转让 owner——转让是 P2，P1 直接 400）。</li>
+<li>join 链接泄露的补救 = 撤销 + expiry + max_uses 三重；生成时默认建议 7 天 + 不限次（web 默认值）。</li>
+</ul>
+
+<h2>⑨ 分期</h2>
+<ol>
+<li><b>P1</b>：members/join_links 两表 + ACL v3（isMember 入参）+ 成员/链接/accept 端点 + visibility 切换（含二段确认）+ CLI 五条 + web 设置抽屉与 /join 页 + system status 留痕。</li>
+<li><b>P2</b>：在线连接即时复查、owner 转让、成员角色分级、加入审批、被邀请通知（@ 唤醒）、join 成功页展示 charter。</li>
+</ol>
+
+<h2>⑩ 测试清单</h2>
+<ul>
+<li>ACL：成员进私有频道放行 / 移除后拒 / scoped token 越 scope 仍拒（即使 owner 是成员）/ 无 scope readonly 仍拒 / 列表含成员频道且无 N+1（查询计数断言可选）。</li>
+<li>join：accept 成功→成员落表 uses+1 / 重复 accept 幂等不重计 / 过期 410 / 撤销 410 / 超 max_uses 410 / <b>agent token accept 403 且提示走 invite 接入包</b> / 并发 accept 不超卖（原子 UPDATE changes 断言）。</li>
+<li>visibility：private→public 无 confirm 409 带 message_count / 带 confirm 生效且匿名可读历史 / public→private 立即拦新访问 + 返回非成员发言者名单 / 非 moderator 403 / system status 留痕存在。</li>
+<li>成员管理：moderator 增删 / 成员自删（退出）/ 非 moderator 加人 403 / owner 不可被删 400。</li>
+</ul>
+
+<p class="meta" style="margin-top:40px">实施排队：Lane A #34 之后即本单（用户直接需求，优先于 #35/#36）。</p>
+
+</body>
+</html>
