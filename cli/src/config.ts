@@ -29,6 +29,12 @@ export interface WorkspaceState {
   cursor: number;
   /** 修订游标：已见过的最大 rev_seq（hello.since_rev），与消息游标并列持久化 */
   rev_cursor?: number;
+  /**
+   * 面包屑：init 时若用了 AGENTPARTY_CONFIG，把该显式路径记进【cwd 基准】的 state（不受 env 影响）。
+   * 回落用——Claude Code 的 Bash 不跨 turn 保留 export，被唤醒回复轮没了 env 就靠它找回绑定的 agent
+   * config，避免回落到人类账号会话导致冒充/串号（issue #42）。只存路径不存 token，token 仍只在该文件里。
+   */
+  config_path?: string;
 }
 
 export function agentpartyHome(): string {
@@ -99,8 +105,21 @@ export function readConfigWithSource(cwd: string = process.cwd()): ConfigWithSou
     const cfg = JSON.parse(readFileSync(global, "utf8")) as Config;
     return { config: cfg, source: sourceInfo("global", global, cfg, cwd) };
   } catch {
-    return { config: null, source: sourceInfo("none", null, null, cwd) };
+    /* 试面包屑指针 */
   }
+
+  // 面包屑回落（issue #42）：cwd-state 记了 config_path 就顺着找回绑定的 agent config——
+  // 这是 Claude 唤醒回复轮丢了 AGENTPARTY_CONFIG env 后不冒充人类账号的关键兜底。
+  try {
+    const st = JSON.parse(readFileSync(cwdStatePath(cwd), "utf8")) as WorkspaceState;
+    if (st.config_path) {
+      const cfg = JSON.parse(readFileSync(st.config_path, "utf8")) as Config;
+      return { config: cfg, source: sourceInfo("explicit", st.config_path, cfg, cwd) };
+    }
+  } catch {
+    /* 无指针或指向的文件已删 */
+  }
+  return { config: null, source: sourceInfo("none", null, null, cwd) };
 }
 
 export function readConfig(cwd: string = process.cwd()): Config | null {
@@ -171,6 +190,25 @@ export function statePath(cwd: string = process.cwd()): string {
   const explicit = explicitConfigPath();
   if (explicit) return join(dirname(explicit), `${basename(explicit)}.state`, "state.json");
   return join(agentpartyHome(), "state", workspaceId(cwd), "state.json");
+}
+
+// cwd 基准的 state 路径，永远无视 AGENTPARTY_CONFIG——面包屑指针写这里，回复轮（无 env）才找得到。
+export function cwdStatePath(cwd: string = process.cwd()): string {
+  return join(agentpartyHome(), "state", workspaceId(cwd), "state.json");
+}
+
+// init 时把显式 config 路径记进 cwd-state（issue #42）。只在该 state 无 config_path 或指向不同路径时更新。
+export function bindWorkspaceConfigPointer(configPath: string, channel: string, cwd: string = process.cwd()): void {
+  const p = cwdStatePath(cwd);
+  let prev: WorkspaceState | null = null;
+  try {
+    prev = JSON.parse(readFileSync(p, "utf8")) as WorkspaceState;
+  } catch {
+    /* 无既有 cwd-state */
+  }
+  const next: WorkspaceState = { channel, cursor: prev?.cursor ?? 0, ...prev, config_path: configPath };
+  mkdirSync(join(p, ".."), { recursive: true });
+  writeFileSync(p, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
 }
 
 export function readState(cwd: string = process.cwd()): WorkspaceState | null {

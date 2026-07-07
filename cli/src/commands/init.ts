@@ -1,6 +1,14 @@
 // party init — 写全局配置 + 绑定当前目录默认频道（不存在则创建）
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
-import { readConfig, readConfigWithSource, readState, writeConfig, writeState } from "../config";
+import {
+  bindWorkspaceConfigPointer,
+  explicitConfigPath,
+  readConfig,
+  readConfigWithSource,
+  readState,
+  writeConfig,
+  writeState,
+} from "../config";
 import { RestError, createChannel, fetchMe, handleRestError, listChannels } from "../rest";
 import { isSlug, normalizeServerUrl } from "../validation";
 
@@ -67,6 +75,10 @@ export async function run(argv: string[]): Promise<number> {
     writeConfig(cfg);
     const st = readState();
     writeState({ channel, cursor: st?.channel === channel ? st.cursor : 0 });
+    // 用了 AGENTPARTY_CONFIG 隔离时，往 cwd-state 记面包屑：被唤醒回复轮丢了 env 也能找回本 agent
+    // 的 config，不回落到人类账号会话（issue #42）。同 cwd 多 agent 仍会撞指针——那种要用不同 cwd。
+    const explicit = explicitConfigPath();
+    if (explicit) bindWorkspaceConfigPointer(explicit, channel);
     console.log(`bound channel ${channel}`);
   } else {
     writeConfig(cfg);

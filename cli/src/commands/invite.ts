@@ -183,8 +183,12 @@ channel:  ${slug}  ${channelDesc}
 # 1) 装 party CLI（已装则跳过）
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
 
-# 2) 隔离本地配置（同机多 agent 不串号）
+# 2) 隔离本地配置（同机多 agent 不串号）——记住这个路径，之后【每条 party 命令都要带上它】
 export AGENTPARTY_CONFIG="\${TMPDIR:-/tmp}/agentparty-${guestName}-${slug}.json"
+# ⚠ Claude Code 等按轮执行的 harness：不同 turn 是不同 shell，export 不保留！被 @ 唤醒后回复那轮
+#   若不带 AGENTPARTY_CONFIG，party send 会丢掉你的身份（回落到人类账号=冒充，或串到别的 agent）。
+#   所以：① init 已把路径记进本目录，party v0.2.60+ 能自动找回；② 保险起见，回复命令写成
+#   AGENTPARTY_CONFIG="\${TMPDIR:-/tmp}/agentparty-${guestName}-${slug}.json" party send ... 前缀内联。
 
 # 3) 绑定频道 + 报到（token 只出现这一次；报到不能省，否则网页看不到你）
 party init --server ${server} --token ${guest.token} --channel ${slug}

@@ -1,9 +1,26 @@
 // 回环重定向 PKCE 登录流 + 令牌刷新 + bearer 解析（spec §4）
 import { createHash, randomBytes } from "node:crypto";
 import { accountPath, readAccount, writeAccount, type AccountSession } from "./account";
-import { readConfigWithSource, type ConfigSourceInfo } from "./config";
+import { cwdStatePath, readConfigWithSource, type ConfigSourceInfo, type WorkspaceState } from "./config";
 import { fetchPublicConfig } from "./rest";
 import { healServerUrl } from "./validation";
+import { readFileSync } from "node:fs";
+
+// cwd-state 有 config_path 指针、但指向的文件已不在 → 一个「本该是 agent 却丢了 config」的孤儿标记。
+function orphanedAgentPointer(): string | null {
+  try {
+    const st = JSON.parse(readFileSync(cwdStatePath(), "utf8")) as WorkspaceState;
+    if (!st.config_path) return null;
+    try {
+      readFileSync(st.config_path, "utf8");
+      return null; // 文件还在，readConfigWithSource 的面包屑回落已经用它了，不是孤儿
+    } catch {
+      return st.config_path;
+    }
+  } catch {
+    return null;
+  }
+}
 
 const SCOPE = "openid profile email offline_access";
 // 固定回环端口，事先登记到 SSO 白名单；占用则依次退，三个都占用报错（不随机挑端口）
@@ -349,6 +366,16 @@ export async function resolveAuthDetailed(): Promise<ResolvedAuthDetailed> {
     };
   }
   if (sess?.refresh_token) {
+    // 身份误用护栏（issue #42）：config 无 token、正回落到人类账号会话，但 cwd-state 有个指向
+    // 已失效路径的 config_path 面包屑——说明这本该是个 agent，只是丢了它的 config。宁可显著告警，
+    // 避免 agent 静默以人类身份发言（冒充是安全问题）。
+    const orphan = orphanedAgentPointer();
+    if (orphan) {
+      console.error(
+        `⚠ identity would resolve to human account (${sess.email ?? "logged-in user"}), but this workspace was bound to an agent config at ${orphan} which is now missing. ` +
+          `if you are the agent, restore that file or run every command with AGENTPARTY_CONFIG=<path> (issue #42).`,
+      );
+    }
     const { token } = await ensureFreshAccess(sess);
     return {
       server,

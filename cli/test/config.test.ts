@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import {
+  bindWorkspaceConfigPointer,
   loadCursor,
   readConfig,
   readConfigWithSource,
@@ -153,5 +154,25 @@ describe("workspace state", () => {
     expect(resolveChannel(undefined, cwd)).toBe("dev");
     expect(resolveChannel("ops", cwd)).toBe("ops");
     expect(resolveChannel(undefined, "/tmp/unbound")).toBeNull();
+  });
+
+  test("breadcrumb recovers the agent config after AGENTPARTY_CONFIG is lost (issue #42)", () => {
+    const cfgPath = join(home, "agent-cfg.json");
+    // 建立轮：有 env，写隔离 config + cwd 面包屑
+    process.env.AGENTPARTY_CONFIG = cfgPath;
+    writeConfig({ server: "https://agentparty.leeguoo.com", token: "ap_AGENT" }, cwd);
+    bindWorkspaceConfigPointer(cfgPath, "dev", cwd);
+    // 回复轮：env 蒸发（模拟 Claude 新 Bash）——workspace/global 都空，靠面包屑找回 agent token
+    delete process.env.AGENTPARTY_CONFIG;
+    const r = readConfigWithSource(cwd);
+    expect(r.config?.token).toBe("ap_AGENT");
+    expect(r.source.kind).toBe("explicit");
+    expect(r.source.path).toBe(cfgPath);
+  });
+
+  test("breadcrumb pointing to a deleted config yields no config (not a stale one)", () => {
+    bindWorkspaceConfigPointer(join(home, "gone.json"), "dev", cwd);
+    delete process.env.AGENTPARTY_CONFIG;
+    expect(readConfigWithSource(cwd).config).toBeNull();
   });
 });
