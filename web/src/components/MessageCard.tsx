@@ -32,6 +32,28 @@ function workflowBits(msg: MsgFrame): string[] {
   ].filter((part): part is string => part !== null);
 }
 
+function reviewLabel(msg: MsgFrame): string | null {
+  const review = msg.completion_review;
+  if (review === undefined) return null;
+  if (review.state === "pending_review") return "pending review";
+  if (review.state === "approved") return "approved";
+  return "rejected";
+}
+
+function reviewTitle(msg: MsgFrame): string {
+  const review = msg.completion_review;
+  if (review === undefined) return "";
+  return [
+    `review: ${review.state}`,
+    `policy: ${review.policy}`,
+    review.reviewer ? `reviewer: ${review.reviewer.name}` : null,
+    review.reviewed_at ? `reviewed: ${fmtTime(review.reviewed_at)}` : null,
+    review.replaces_seq ? `replaces: #${review.replaces_seq}` : null,
+    review.replaced_by_seq ? `replaced by: #${review.replaced_by_seq}` : null,
+    review.reason ? `reason: ${review.reason}` : null,
+  ].filter((part): part is string => part !== null).join("\n");
+}
+
 export function MessageCard({ msg, self }: Props) {
   // 每个 agent 一个确定性色相：CSS 用 --ah 套 hsl() 给头像点/名字/卡片左条上色
   const hueStyle = { "--ah": agentHue(msg.sender.name) } as CSSProperties;
@@ -57,6 +79,9 @@ export function MessageCard({ msg, self }: Props) {
     msg.supersedes !== undefined ? `supersedes #${msg.supersedes}` : null,
     msg.superseded_by !== undefined ? `superseded by #${msg.superseded_by}` : null,
   ].filter((part): part is string => part !== null);
+  const review = msg.completion_review;
+  const reviewBadge = reviewLabel(msg);
+  const reviewTitleText = reviewTitle(msg);
 
   if (msg.kind === "status") {
     const context = msg.status?.context;
@@ -154,6 +179,11 @@ export function MessageCard({ msg, self }: Props) {
             {badge}
           </span>
         ))}
+        {review !== undefined && reviewBadge !== null && (
+          <span className={`msg-review msg-review--${review.state}`} title={reviewTitleText}>
+            {reviewBadge}
+          </span>
+        )}
         <span className="msg-fill" />
         <span>#{msg.seq}</span>
         <time>{fmtTime(msg.ts)}</time>
@@ -161,6 +191,19 @@ export function MessageCard({ msg, self }: Props) {
       {artifact !== undefined && (
         <div className="msg-completion" aria-label="completion artifact">
           {artifactBits.join(" · ")}
+        </div>
+      )}
+      {review !== undefined && (
+        <div className={`msg-review-detail msg-review-detail--${review.state}`} title={reviewTitleText}>
+          {[
+            review.state === "pending_review"
+              ? `review pending · policy ${review.policy}`
+              : `${review.state} by ${review.reviewer?.name ?? "reviewer"}`,
+            review.reviewed_at ? fmtTime(review.reviewed_at) : null,
+            review.replaces_seq ? `replaces #${review.replaces_seq}` : null,
+            review.replaced_by_seq ? `replaced by #${review.replaced_by_seq}` : null,
+            review.reason ? `reason: ${review.reason}` : null,
+          ].filter((part): part is string => part !== null).join(" · ")}
         </div>
       )}
       {msg.retracted ? <p className="msg-retracted">message retracted</p> : <Markdown source={msg.body} />}
