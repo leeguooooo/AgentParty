@@ -46,8 +46,16 @@ export interface ChannelInfo {
   kind: ChannelKind;
   mode?: ChannelMode;
   visibility?: ChannelVisibility;
+  charter_rev?: number;
   archived_at: number | null;
   presence?: PresenceEntry[];
+}
+
+export interface ChannelCharter {
+  charter: string | null;
+  charter_rev: number;
+  updated_at: number | null;
+  updated_by: string | null;
 }
 
 export interface WebhookInfo {
@@ -245,6 +253,28 @@ export async function listChannels(server: string, token: string): Promise<Chann
   if (Array.isArray(body)) return body as ChannelInfo[];
   const channels = (body as Record<string, unknown> | null)?.channels;
   return Array.isArray(channels) ? (channels as ChannelInfo[]) : [];
+}
+
+export async function fetchChannelCharter(server: string, token: string, slug: string): Promise<ChannelCharter> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/charter`, {
+    headers: bearerJson(token),
+  })) as ChannelCharter;
+}
+
+export async function setChannelCharter(
+  server: string,
+  token: string,
+  slug: string,
+  charter: string,
+  expectedRev?: number,
+): Promise<ChannelCharter> {
+  const body: Record<string, unknown> = { charter };
+  if (expectedRev !== undefined) body.expected_rev = expectedRev;
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/charter`, {
+    method: "PUT",
+    headers: bearerJson(token),
+    body: JSON.stringify(body),
+  })) as ChannelCharter;
 }
 
 export async function createChannel(

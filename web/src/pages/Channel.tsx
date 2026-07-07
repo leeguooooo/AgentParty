@@ -6,9 +6,20 @@ import { buildHostBoard, type HostBoard, type MsgFrame, type SearchHit } from "@
 import { AgentJoin } from "../components/AgentJoin";
 import { VisibilityToggle } from "../components/VisibilityToggle";
 import { Composer } from "../components/Composer";
+import { Markdown } from "../components/Markdown";
 import { MessageCard } from "../components/MessageCard";
 import { PresenceBar } from "../components/PresenceBar";
-import { AuthError, ForbiddenError, fetchMessages, resetGuard, searchMessages } from "../lib/api";
+import {
+  AuthError,
+  type ChannelCharter,
+  ForbiddenError,
+  fetchChannelCharter,
+  fetchMessages,
+  resetGuard,
+  searchMessages,
+  setChannelCharter,
+  ValidationError,
+} from "../lib/api";
 import { agentHue } from "../lib/agentColor";
 import { mentionCandidates } from "../lib/mentions";
 import { completionMessages } from "../lib/completions";
@@ -80,6 +91,102 @@ function writeSeenSeq(key: string, seq: number) {
   } catch {
     // Storage can be unavailable in private contexts; the digest still renders for this session.
   }
+}
+
+function charterSeenKey(slug: string): string {
+  return `ap_charter_seen:${slug}`;
+}
+
+function readSeenCharterRev(slug: string): number {
+  try {
+    const n = Number(localStorage.getItem(charterSeenKey(slug)) ?? "0");
+    return Number.isInteger(n) && n >= 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeSeenCharterRev(slug: string, rev: number) {
+  try {
+    localStorage.setItem(charterSeenKey(slug), String(rev));
+  } catch {
+    // localStorage may be unavailable; the banner still works for this session.
+  }
+}
+
+function CharterBanner({
+  charter,
+  open,
+  canModerate,
+  updated,
+  draft,
+  saving,
+  editing,
+  error,
+  onToggle,
+  onDraft,
+  onEdit,
+  onCancel,
+  onSave,
+}: {
+  charter: ChannelCharter | null;
+  open: boolean;
+  canModerate: boolean;
+  updated: boolean;
+  draft: string;
+  saving: boolean;
+  editing: boolean;
+  error: string | null;
+  onToggle: () => void;
+  onDraft: (value: string) => void;
+  onEdit: () => void;
+  onCancel: () => void;
+  onSave: () => void;
+}) {
+  const hasCharter = Boolean(charter?.charter);
+  if (!hasCharter && !canModerate) return null;
+  return (
+    <section className={"charter-banner" + (updated ? " charter-banner--updated" : "")}>
+      <header className="charter-head">
+        <button className="charter-toggle" type="button" onClick={onToggle} aria-expanded={open}>
+          <span>📌 公告</span>
+          {charter ? <span className="t-mono">rev {charter.charter_rev}</span> : null}
+          {updated ? <span className="charter-updated">已更新</span> : null}
+        </button>
+        {canModerate && (
+          <button className="d-btn charter-edit" type="button" onClick={onEdit}>
+            编辑
+          </button>
+        )}
+      </header>
+      {open && (
+        <div className="charter-body">
+          {canModerate && editing ? (
+            <div className="charter-editor">
+              <textarea
+                className="charter-textarea t-mono"
+                value={draft}
+                onChange={(e) => onDraft(e.target.value)}
+              />
+              <div className="charter-actions">
+                <button className="d-btn d-btn--primary" type="button" disabled={saving} onClick={onSave}>
+                  {saving ? "保存中" : "保存"}
+                </button>
+                <button className="d-btn" type="button" disabled={saving} onClick={onCancel}>
+                  取消
+                </button>
+              </div>
+              {error !== null && <p className="banner banner--red">{error}</p>}
+            </div>
+          ) : hasCharter ? (
+            <Markdown source={charter!.charter!} />
+          ) : (
+            <p className="d-empty">charter not set</p>
+          )}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function AgentFilterPanel({
@@ -490,6 +597,13 @@ export function ChannelPage({
   const [searchError, setSearchError] = useState<string | null>(null);
   const [guardResetting, setGuardResetting] = useState(false);
   const [guardResetError, setGuardResetError] = useState<string | null>(null);
+  const [charter, setCharter] = useState<ChannelCharter | null>(null);
+  const [charterOpen, setCharterOpen] = useState(false);
+  const [charterEditing, setCharterEditing] = useState(false);
+  const [charterDraft, setCharterDraft] = useState("");
+  const [charterSaving, setCharterSaving] = useState(false);
+  const [charterError, setCharterError] = useState<string | null>(null);
+  const [seenCharterRev, setSeenCharterRev] = useState(() => readSeenCharterRev(slug));
   // 可见性可在会话内切换（issue #38 web），本地 state 让顶栏徽章即时反映，无需重载
   const [localPublic, setLocalPublic] = useState(isPublic);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -510,7 +624,29 @@ export function ChannelPage({
   const initialCursorRef = useRef(0); // ws hello 的起始游标 = 初始页最后一条 seq
   const pendingAnchorRef = useRef<{ height: number; top: number } | null>(null); // prepend 前的滚动锚
   const oldestSeqRef = useRef(0);
+  const charterRevRef = useRef(0);
   oldestSeqRef.current = state.messages.length > 0 ? state.messages[0]!.seq : 0;
+  charterRevRef.current = charter?.charter_rev ?? 0;
+
+  const loadCharter = useCallback(() => {
+    return fetchChannelCharter(token, slug)
+      .then((body) => {
+        setCharter(body);
+        setCharterDraft(body.charter ?? "");
+        setCharterError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (!(err instanceof ForbiddenError)) setCharterError("charter failed to load");
+      });
+  }, [slug, token]);
+
+  useEffect(() => {
+    setSeenCharterRev(readSeenCharterRev(slug));
+    setCharterOpen(false);
+    setCharterEditing(false);
+    void loadCharter();
+  }, [loadCharter, slug]);
 
   // IM 式初始加载：先用 rest 拉最新一页（打开即到底部），把 ws 起始游标 seed 到页尾，
   // ws 只补拉/直播页尾之后的新消息——不再全量重放整个频道历史。
@@ -554,6 +690,16 @@ export function ChannelPage({
       token,
       {
         onFrame: (frame) => {
+          if (frame.type === "welcome" && typeof frame.charter_rev === "number" && frame.charter_rev > charterRevRef.current) {
+            void loadCharter();
+          }
+          if (
+            (frame.type === "msg" || frame.type === "status") &&
+            frame.kind === "status" &&
+            (frame.note ?? frame.body).startsWith("charter updated to rev ")
+          ) {
+            void loadCharter();
+          }
           // 窗口下界防御（review P1 双保险）：低于已加载窗口的旧消息/旧修订不进窗口——
           // 插进去会把上翻分页的 before 起点拽到远古 seq，中段历史被永久跳过。
           // 上翻时 REST 本来就返回当前正文，丢掉这些帧无信息损失。
@@ -578,7 +724,7 @@ export function ChannelPage({
       sock.dispose();
       sockRef.current = null;
     };
-  }, [slug, token, shareMode, bootstrapped]);
+  }, [slug, token, shareMode, bootstrapped, loadCharter]);
 
   useEffect(() => {
     const onPopState = () => setAgentFilter(parseAgentFilter(window.location.search));
@@ -702,6 +848,7 @@ export function ChannelPage({
   }, [draft]);
 
   const canWrite = state.self !== null && !state.archived && !state.readonly;
+  const charterUpdated = charter !== null && charter.charter_rev > seenCharterRev;
   const catchupDigest =
     state.self !== null && seenSeq !== null && lastSeq > seenSeq
       ? summarizeCatchup(state.messages, state.self, seenSeq)
@@ -728,6 +875,52 @@ export function ChannelPage({
     if (seenKey !== null) writeSeenSeq(seenKey, lastSeq);
     setSeenSeq(lastSeq);
   }, [lastSeq, seenKey]);
+
+  const toggleCharter = useCallback(() => {
+    setCharterOpen((current) => {
+      const next = !current;
+      if (next && charter !== null) {
+        writeSeenCharterRev(slug, charter.charter_rev);
+        setSeenCharterRev(charter.charter_rev);
+      }
+      return next;
+    });
+  }, [charter, slug]);
+
+  const editCharter = useCallback(() => {
+    setCharterOpen(true);
+    setCharterEditing(true);
+    setCharterDraft(charter?.charter ?? "");
+    setCharterError(null);
+  }, [charter]);
+
+  const cancelCharterEdit = useCallback(() => {
+    setCharterEditing(false);
+    setCharterDraft(charter?.charter ?? "");
+    setCharterError(null);
+  }, [charter]);
+
+  const saveCharter = useCallback(() => {
+    if (charterSaving) return;
+    setCharterSaving(true);
+    setCharterError(null);
+    setChannelCharter(token, slug, charterDraft)
+      .then((body) => {
+        setCharter(body);
+        setCharterDraft(body.charter ?? "");
+        setCharterEditing(false);
+        setCharterOpen(true);
+        writeSeenCharterRev(slug, body.charter_rev);
+        setSeenCharterRev(body.charter_rev);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setCharterError("only moderators or hosts can edit the charter");
+        else if (err instanceof ValidationError) setCharterError("charter must be 16KB or less");
+        else setCharterError("charter save failed");
+      })
+      .finally(() => setCharterSaving(false));
+  }, [charterDraft, charterSaving, slug, token]);
 
   const q = search.trim();
   const from = searchFrom.trim();
@@ -863,7 +1056,7 @@ export function ChannelPage({
       />
       {canMintAgent && !state.archived && (
         <div className="chan-toolbar">
-          <AgentJoin slug={slug} token={token} namePrefix={agentNamePrefix} inviterName={inviterName} />
+          <AgentJoin slug={slug} token={token} namePrefix={agentNamePrefix} inviterName={inviterName} charter={charter} />
           {canModerate && (
             <VisibilityToggle
               slug={slug}
@@ -875,6 +1068,21 @@ export function ChannelPage({
           )}
         </div>
       )}
+      <CharterBanner
+        charter={charter}
+        open={charterOpen}
+        canModerate={canModerate}
+        updated={charterUpdated}
+        draft={charterDraft}
+        saving={charterSaving}
+        editing={charterEditing}
+        error={charterError}
+        onToggle={toggleCharter}
+        onDraft={setCharterDraft}
+        onEdit={editCharter}
+        onCancel={cancelCharterEdit}
+        onSave={saveCharter}
+      />
       {/* chat-first：这些协调/元信息面板默认折叠，避免把核心对话流挤出首屏。展开查看 digest/过滤/host board 等。 */}
       <details className="chan-panels">
         <summary className="chan-panels-summary t-mono">

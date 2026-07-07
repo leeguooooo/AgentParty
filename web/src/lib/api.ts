@@ -106,10 +106,18 @@ export interface ChannelInfo {
   // 当前身份能否管理本频道（转可见性/踢人/归档）。服务端按 isChannelModerator 算好的布尔，
   // 不含 owner 身份本身。旧 worker 缺此字段 → undefined，前端按「不可管理」处理（不渲染管理控件）。
   can_moderate?: boolean;
+  charter_rev?: number;
   created_at: number;
   archived_at: number | null;
   last_message: ChannelLastMessage | null;
   presence: PresenceEntry[];
+}
+
+export interface ChannelCharter {
+  charter: string | null;
+  charter_rev: number;
+  updated_at: number | null;
+  updated_by: string | null;
 }
 
 // 当前登录身份（spec §10）：topbar 显示真实 token name/kind/role，owner 仅作归属辅助信息。
@@ -216,6 +224,29 @@ export async function fetchMessages(
   if (!res.ok) throw new Error(`GET /api/channels/${slug}/messages failed (${res.status})`);
   const data = (await res.json()) as { messages: MsgFrame[] };
   return data.messages;
+}
+
+export async function fetchChannelCharter(token: string, slug: string): Promise<ChannelCharter> {
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/charter`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/charter failed (${res.status})`);
+  return (await res.json()) as ChannelCharter;
+}
+
+export async function setChannelCharter(token: string, slug: string, charter: string): Promise<ChannelCharter> {
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/charter`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ charter }),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 413) throw new ValidationError("charter too large");
+  if (!res.ok) throw new Error(`PUT /api/channels/${slug}/charter failed (${res.status})`);
+  return (await res.json()) as ChannelCharter;
 }
 
 export async function searchMessages(

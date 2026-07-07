@@ -1,5 +1,5 @@
 // worker 入口 — rest 路由 + ws 升级转发
-import { RESERVED_NAMES } from "@agentparty/shared";
+import { CHARTER_LIMIT, RESERVED_NAMES } from "@agentparty/shared";
 import type {
   AgentLineage,
   CaptureKind,
@@ -71,6 +71,7 @@ const AP_FORWARD_HEADERS = [
   "x-ap-completion-review-policy",
   "x-ap-workflow-guard-enabled",
   "x-ap-workflow-guard-limit",
+  "x-ap-charter-rev",
   "x-ap-host",
   "x-ap-archived",
   "x-ap-archive-at",
@@ -85,6 +86,7 @@ const CLI_CLIENT_ID = "agentparty-cli";
 const CAPTURE_NOTE_MAX = 4000;
 const SPAWN_DEFAULT_TTL_SEC = 2 * 60 * 60;
 const SPAWN_MAX_TTL_SEC = 24 * 60 * 60;
+const textEncoder = new TextEncoder();
 
 function errorBody(code: RestErrorCode, message: string) {
   return { error: { code, message } };
@@ -245,7 +247,8 @@ async function loadChannel(db: D1Database, slug: string) {
   return db
     .prepare(
       `SELECT slug, kind, mode, archived_at, created_by, visibility, owner_account,
-              completion_gate, completion_review_policy, workflow_guard_enabled, workflow_guard_limit
+              completion_gate, completion_review_policy, workflow_guard_enabled, workflow_guard_limit,
+              charter, charter_rev, charter_updated_at, charter_updated_by
          FROM channels WHERE slug = ?`,
     )
     .bind(slug)
@@ -261,6 +264,10 @@ async function loadChannel(db: D1Database, slug: string) {
       completion_review_policy: string;
       workflow_guard_enabled: number;
       workflow_guard_limit: number;
+      charter: string | null;
+      charter_rev: number;
+      charter_updated_at: number | null;
+      charter_updated_by: string | null;
     }>();
 }
 
@@ -330,6 +337,7 @@ function channelHeaders(
     completion_review_policy?: string;
     workflow_guard_enabled?: number;
     workflow_guard_limit?: number;
+    charter_rev?: number;
   },
   requestUrl: string,
 ) {
@@ -340,11 +348,18 @@ function channelHeaders(
     "x-ap-completion-review-policy": channel.completion_review_policy ?? "sender",
     "x-ap-workflow-guard-enabled": String(channel.workflow_guard_enabled ?? 1),
     "x-ap-workflow-guard-limit": String(channel.workflow_guard_limit ?? 30),
+    "x-ap-charter-rev": String(channel.charter_rev ?? 0),
     "x-ap-host": new URL(requestUrl).host,
   };
 }
 
 async function canConfigureChannel(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
+  if (isChannelModerator(identity, channel)) return true;
+  return (await loadAssignedRole(db, channel.slug, identity.name)) === "host";
+}
+
+async function canEditCharter(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
+  if (identity.role === "readonly") return false;
   if (isChannelModerator(identity, channel)) return true;
   return (await loadAssignedRole(db, channel.slug, identity.name)) === "host";
 }
@@ -694,8 +709,8 @@ app.get("/api/channels", async (c) => {
   const identity = c.get("identity");
   // created_by / owner_account 仅用于 ACL 判定，不回给客户端（保持列表响应契约不变）
   const { results } = await c.env.DB.prepare(
-    "SELECT slug, title, topic, kind, mode, visibility, created_by, owner_account, created_at, archived_at FROM channels ORDER BY created_at, id",
-  ).all<{ slug: string; visibility: string; created_by: string | null; owner_account: string | null }>();
+    "SELECT slug, title, topic, kind, mode, visibility, created_by, owner_account, created_at, archived_at, charter_rev FROM channels ORDER BY created_at, id",
+  ).all<{ slug: string; visibility: string; created_by: string | null; owner_account: string | null; charter_rev: number }>();
   // 防私有频道泄漏给粉丝（spec §5.5）：无权访问的私有频道连名字都不出现，summary 也不拉。
   // 账号房主 / 自己的 agent / scope 命中的 token / legacy token 照常看到对应私有频道。
   const memberSlugs =
@@ -1022,6 +1037,91 @@ app.put("/api/channels/:slug/visibility", async (c) => {
     visibility,
     changed: true,
     ...(visibility === "private" ? { recent_non_member_speakers: recentSpeakers } : {}),
+  });
+});
+
+app.get("/api/channels/:slug/charter", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  return c.json({
+    charter: channel.charter,
+    charter_rev: channel.charter_rev,
+    updated_at: channel.charter_updated_at,
+    updated_by: channel.charter_updated_by,
+  });
+});
+
+app.put("/api/channels/:slug/charter", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!(await canEditCharter(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "only channel moderators or hosts can edit the charter"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const body = (await c.req.json().catch(() => null)) as { charter?: unknown; expected_rev?: unknown } | null;
+  if (typeof body?.charter !== "string") {
+    return c.json(errorBody("bad_request", "charter must be a string"), 400);
+  }
+  if (textEncoder.encode(body.charter).byteLength > CHARTER_LIMIT) {
+    return c.json(
+      errorBody("too_large", "charter is a pointer document; keep it <= 16KB and link longer repo/docs content"),
+      413,
+    );
+  }
+  const expectedRev =
+    body.expected_rev === undefined
+      ? undefined
+      : typeof body.expected_rev === "number" && Number.isInteger(body.expected_rev) && body.expected_rev >= 0
+        ? body.expected_rev
+        : null;
+  if (expectedRev === null) {
+    return c.json(errorBody("bad_request", "expected_rev must be a non-negative integer"), 400);
+  }
+  const now = Date.now();
+  const updatedBy = identity.name;
+  const result =
+    expectedRev === undefined
+      ? await c.env.DB.prepare(
+          `UPDATE channels
+              SET charter = ?, charter_rev = charter_rev + 1, charter_updated_at = ?, charter_updated_by = ?
+            WHERE slug = ?`,
+        )
+          .bind(body.charter, now, updatedBy, slug)
+          .run()
+      : await c.env.DB.prepare(
+          `UPDATE channels
+              SET charter = ?, charter_rev = charter_rev + 1, charter_updated_at = ?, charter_updated_by = ?
+            WHERE slug = ? AND charter_rev = ?`,
+        )
+          .bind(body.charter, now, updatedBy, slug, expectedRev)
+          .run();
+  if (result.meta.changes === 0) {
+    return c.json(errorBody("conflict", "charter_rev changed; refetch and retry"), 409);
+  }
+  const updated = await loadChannel(c.env.DB, slug);
+  const rev = updated?.charter_rev ?? channel.charter_rev + 1;
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  const res = await stub.fetch(
+    new Request("https://do/internal/charter-rev", {
+      method: "POST",
+      body: JSON.stringify({ rev, updated_by: updatedBy, ts: now }),
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+  if (!res.ok) return c.json(errorBody("unavailable", "charter updated but audit status failed"), 503);
+  return c.json({
+    charter: updated?.charter ?? body.charter,
+    charter_rev: rev,
+    updated_at: now,
+    updated_by: updatedBy,
   });
 });
 
@@ -1709,6 +1809,7 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-completion-review-policy", channel.completion_review_policy);
   fwd.headers.set("x-ap-workflow-guard-enabled", String(channel.workflow_guard_enabled));
   fwd.headers.set("x-ap-workflow-guard-limit", String(channel.workflow_guard_limit));
+  fwd.headers.set("x-ap-charter-rev", String(channel.charter_rev ?? 0));
   fwd.headers.set("x-ap-host", new URL(c.req.url).host);
   // 无条件写：未归档也显式置 "0"，堵住"客户端注入 1、未归档分支不覆盖"的透传
   fwd.headers.set("x-ap-archived", channel.archived_at !== null ? "1" : "0");

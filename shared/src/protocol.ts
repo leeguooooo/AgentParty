@@ -3,6 +3,7 @@
 // ---- 常量 ----
 
 export const BODY_LIMIT = 100_000;
+export const CHARTER_LIMIT = 16_000;
 export const RATE_LIMIT_PER_MIN = 30;
 export const LOOP_GUARD_N = 30;
 export const LOOP_GUARD_AGENT_N = 15;
@@ -298,6 +299,8 @@ export interface WelcomeFrame {
   last_seq: number;
   /** 频道当前最大修订序号；since=0 全量同步的客户端可直接以此初始化修订游标 */
   last_rev_seq?: number;
+  /** 频道公告/用前必读的版本；客户端发现变化后按需 REST 拉全文。 */
+  charter_rev?: number;
   presence: PresenceEntry[];
 }
 

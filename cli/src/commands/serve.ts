@@ -19,12 +19,12 @@ import { connect } from "../client";
 import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } from "../config";
 import { formatMsg } from "../format";
 import { resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
-import { postMessage } from "../rest";
+import { fetchChannelCharter, postMessage, type ChannelCharter } from "../rest";
 import { isSlug } from "../validation";
 import { buildContext } from "./status";
 
 const PROTOCOL_REMINDER =
-  "被 @ 唤起：若这是一个全新会话（你不记得这个频道的前情），先 `party history <channel 字段的频道>` 补齐上下文再动手（下面的 recent 只是最近片段）；若是续上的会话就按你记得的继续。需要产出结论时，先用 `party send --reply-to <seq>` 把 final synthesis 发回频道，再 status done；别只回本地。";
+  "被 @ 唤起：先读本文件 charter 了解频道约定；若发现 charter 与频道现状矛盾，视为一个待办上报。需要更多上下文再 `party history <channel 字段的频道>`；需要产出结论时，先用 `party send --reply-to <seq>` 把 final synthesis 发回频道，再 status done；别只回本地。";
 
 // context file 里附带的最近频道消息条数上限（冷起的 runner 不用先跑 history 也有基本上下文）
 const RECENT_MAX = 20;
@@ -106,7 +106,13 @@ export interface SdkRunnerOptions {
 // 也让 runner 能一次拿全 channel/seq/sender/body/reply_to/recent/protocol_reminder（评审建议）。
 // recent = 触发消息之前、serve 在线期间看到的最近频道消息（含自己/未 @ 的闲聊，正文截断），
 // 让冷起的 runner 开箱有上下文；完整脉络仍以 party history 为准。
-function buildWakeContext(frame: MsgFrame, channel: string, self: string, recent: MsgFrame[]) {
+function buildWakeContext(
+  frame: MsgFrame,
+  channel: string,
+  self: string,
+  recent: MsgFrame[],
+  charter: ChannelCharter | null = null,
+) {
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
   return {
     channel,
@@ -118,6 +124,8 @@ function buildWakeContext(frame: MsgFrame, channel: string, self: string, recent
     mentions: frame.mentions,
     reply_to: frame.seq, // 回这条就 --reply-to 它
     self,
+    charter: charter?.charter ?? null,
+    charter_rev: charter?.charter_rev ?? 0,
     recent: recent.map((m) => ({
       seq: m.seq,
       sender: m.sender.name,
@@ -129,11 +137,17 @@ function buildWakeContext(frame: MsgFrame, channel: string, self: string, recent
   };
 }
 
-export function writeContextFile(frame: MsgFrame, channel: string, self: string, recent: MsgFrame[]): string {
+export function writeContextFile(
+  frame: MsgFrame,
+  channel: string,
+  self: string,
+  recent: MsgFrame[],
+  charter: ChannelCharter | null = null,
+): string {
   const path = join(tmpdir(), `agentparty-serve-${channel}-${frame.seq}.json`);
   writeFileSync(
     path,
-    JSON.stringify(buildWakeContext(frame, channel, self, recent), null, 2) + "\n",
+    JSON.stringify(buildWakeContext(frame, channel, self, recent, charter), null, 2) + "\n",
     { mode: 0o600 },
   );
   return path;
@@ -169,11 +183,13 @@ export interface ServeOptions {
   // 测试注入点：默认用 sh -c 起子进程
   runCommand?: (
     frame: MsgFrame,
-    ctx: { cmd: string; channel: string; self: string; recent: MsgFrame[] },
+    ctx: { cmd: string; channel: string; self: string; recent: MsgFrame[]; charter?: ChannelCharter | null },
   ) => Promise<void>;
   sdkRunner?: SdkRunnerOptions;
   // serve 挂上后声明自己「可被唤醒」的钩子；run() 注入真实实现，测试可省略/替换
   advertise?: () => Promise<void>;
+  charter?: ChannelCharter | null;
+  fetchCharter?: () => Promise<ChannelCharter>;
   // 唤醒间隙发现磁盘装了更新的 party 就自动 re-exec 新版（issue #45）；默认只提示不动。
   autoUpgrade?: boolean;
   upgradeDeps?: UpgradeDeps; // 测试注入版本读取/re-exec
@@ -201,10 +217,10 @@ export async function advertiseServeWake(auth: ResolvedAuthDetailed, channel: st
 // 非零退出：打印 exit code + context file 路径（便于排查），并保留文件；成功则清理。
 async function defaultRun(
   frame: MsgFrame,
-  ctx: { cmd: string; channel: string; self: string; recent: MsgFrame[] },
+  ctx: { cmd: string; channel: string; self: string; recent: MsgFrame[]; charter?: ChannelCharter | null },
 ): Promise<void> {
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
-  const file = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent);
+  const file = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter);
   const cmd = ctx.cmd.includes("{file}") ? ctx.cmd.replaceAll("{file}", file) : ctx.cmd;
   const proc = Bun.spawn(["sh", "-c", cmd], {
     stdin: new TextEncoder().encode(body),
@@ -317,8 +333,14 @@ function parseCodexSessionId(stdout: string): string | null {
   return stdout.match(/session id:\s*([0-9a-fA-F][0-9a-fA-F-]{7,})/i)?.[1] ?? null;
 }
 
-function sdkPrompt(frame: MsgFrame, channel: string, self: string, recent: MsgFrame[]): string {
-  return JSON.stringify(buildWakeContext(frame, channel, self, recent), null, 2) + "\n";
+function sdkPrompt(
+  frame: MsgFrame,
+  channel: string,
+  self: string,
+  recent: MsgFrame[],
+  charter: ChannelCharter | null,
+): string {
+  return JSON.stringify(buildWakeContext(frame, channel, self, recent, charter), null, 2) + "\n";
 }
 
 function sdkThreadId(thread: ThreadLike): string {
@@ -489,7 +511,7 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
 
   const handle = async (
     frame: MsgFrame,
-    ctx: { cmd: string; channel: string; self: string; recent: MsgFrame[] },
+    ctx: { cmd: string; channel: string; self: string; recent: MsgFrame[]; charter?: ChannelCharter | null },
   ): Promise<void> => {
     const started = opts.now?.() ?? Date.now();
     mkdirSync(opts.workdir, { recursive: true });
@@ -507,7 +529,7 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
     try {
       const active = await ensureThread(started);
       threadId = active.session.thread_id;
-      const result = await active.thread.run(sdkPrompt(frame, ctx.channel, ctx.self, ctx.recent), {
+      const result = await active.thread.run(sdkPrompt(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null), {
         sandbox: opts.sandbox ?? "full_access",
       });
       const body = finalText(result);
@@ -580,7 +602,7 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
 
     const repoCwd = await ensureRepo(opts, env);
     const cwd = repoCwd ?? opts.workdir;
-    const contextFile = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent);
+    const contextFile = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null);
     const prompt = readFileSync(contextFile, "utf8");
 
     let run = await runHarness(opts, prompt, oldSid, cwd, env, frame.seq);
@@ -686,6 +708,17 @@ export async function runServe(o: ServeOptions): Promise<number> {
   let self = "";
   let code = 0;
   let advertised = false;
+  let charter: ChannelCharter | null = o.charter ?? null;
+  const refreshCharter = async (reason: string, expectedRev?: number) => {
+    if (!o.fetchCharter) return;
+    if (expectedRev !== undefined && charter !== null && charter.charter_rev >= expectedRev) return;
+    try {
+      charter = await o.fetchCharter();
+    } catch (e) {
+      out(`  charter 刷新失败（${reason}）: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  await refreshCharter("attach");
   // 触发消息之前的最近频道消息（滚动窗口），随 context file 递给 runner
   const recent: MsgFrame[] = [];
   out(
@@ -695,6 +728,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
     for await (const frame of conn.frames) {
       if (frame.type === "welcome") {
         self = frame.self;
+        if (typeof frame.charter_rev === "number") await refreshCharter("welcome", frame.charter_rev);
         // 挂上即声明可唤醒（best-effort，只做一次；重连再收 welcome 不重复刷）
         if (!advertised) {
           advertised = true;
@@ -716,6 +750,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
               : 1;
         break;
       }
+      if (
+        (frame.type === "msg" || frame.type === "status") &&
+        frame.kind === "status" &&
+        (frame.note ?? frame.body).startsWith("charter updated to rev ")
+      ) {
+        const rev = Number((frame.note ?? frame.body).match(/^charter updated to rev (\d+)/)?.[1] ?? "");
+        await refreshCharter("status", Number.isInteger(rev) ? rev : undefined);
+      }
       if (frame.type !== "msg") continue;
       const fromSelf = frame.sender.name === self;
       // fresh = 游标之上的新消息。历史修订快照会穿透去重被重放（seq 早已消费过），
@@ -726,7 +768,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
         out(`▶ ${formatMsg(frame)}`);
         // 串行：本条命令跑完再消费下一帧（新帧此间缓冲在 FrameQueue），避免并发唤起互相抢
         try {
-          await run(frame, { cmd: o.cmd, channel: o.channel, self, recent: recent.slice() });
+          await run(frame, { cmd: o.cmd, channel: o.channel, self, recent: recent.slice(), charter });
         } catch (e) {
           out(`  命令失败: ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -775,6 +817,8 @@ export async function run(argv: string[]): Promise<number> {
     console.error("no config, run: party login or party init --server URL --token T");
     return 1;
   }
+  const server = auth.server;
+  const token = auth.token;
   const unknown = unknownFlagError(flags, SERVE_FLAGS);
   if (unknown !== null) {
     console.error(unknown);
@@ -811,8 +855,8 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
   return runServe({
-    server: auth.server,
-    token: auth.token,
+    server,
+    token,
     channel,
     since: loadCursor(channel),
     sinceRev: loadRevCursor(channel),
@@ -821,11 +865,12 @@ export async function run(argv: string[]): Promise<number> {
     onCursor: (c) => saveCursor(channel, c),
     onRevCursor: (r) => saveRevCursor(channel, r),
     advertise: () => advertiseServeWake(auth, channel),
+    fetchCharter: () => fetchChannelCharter(server, token, channel),
     autoUpgrade: flags["auto-upgrade"] === true,
     builtinRunner: harness
       ? {
-          server: auth.server,
-          token: auth.token,
+          server,
+          token,
           channel,
           harness,
           workdir: expandHomePath(str(flags.workdir) ?? join(homedir(), ".agentparty", "runners", channel)),
@@ -834,8 +879,8 @@ export async function run(argv: string[]): Promise<number> {
       : undefined,
     sdkRunner: useSdkRunner
       ? {
-          server: auth.server,
-          token: auth.token,
+          server,
+          token,
           channel,
           workdir: expandHomePath(str(flags.workdir) ?? join(homedir(), ".agentparty", "runners", channel)),
         }

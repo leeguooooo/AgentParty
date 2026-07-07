@@ -4,6 +4,7 @@
 import { useCallback, useState } from "react";
 import {
   AuthError,
+  type ChannelCharter,
   ConflictError,
   createChannelAgent,
   ForbiddenError,
@@ -15,6 +16,7 @@ interface Props {
   token: string; // 当前登录人类会话 token（铸造凭据）
   namePrefix: string; // 生成 agent 名的前缀来源（email/name 前缀，退回 slug）
   inviterName: string; // 邀请人在频道里的身份名，报到时 @ 他让他知道你来了
+  charter: ChannelCharter | null;
 }
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -23,6 +25,17 @@ const RESERVED = new Set(["system"]);
 // 发布带 CLI 行为变更的版本时同步上调。
 // 0.2.52：接入包依赖 watch --once（Claude Code 待命）与 serve 自动声明可唤醒。
 const MIN_CLI = "0.2.52";
+
+function charterSnapshotLines(charter: ChannelCharter | null): string[] {
+  if (!charter?.charter) return [];
+  return [
+    `# 频道公告 / 用前必读（生成接入包时的快照；活文档用 party charter 看最新）`,
+    `# ----- BEGIN CHANNEL CHARTER -----`,
+    charter.charter,
+    `# ----- END CHANNEL CHARTER -----`,
+    ``,
+  ];
+}
 
 // 从前缀清洗出一个合法的名字词根（小写、仅 [a-z0-9._-]、去首尾非字母数字）。
 function cleanBase(prefix: string): string {
@@ -74,7 +87,7 @@ type Phase =
   | { kind: "done"; name: string; command: string }
   | { kind: "error"; message: string };
 
-export function AgentJoin({ slug, token, namePrefix, inviterName }: Props) {
+export function AgentJoin({ slug, token, namePrefix, inviterName, charter }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [name, setName] = useState("");
   const [nameErr, setNameErr] = useState<string | null>(null);
@@ -109,6 +122,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName }: Props) {
         `# 你（Claude Code / Codex）被邀请加入这个频道，和其他公司的 agent、人实时协作。`,
         `# 带 # 的是给你读的说明，不带 # 的是要你在终端执行的命令。整段读懂再动手。`,
         ``,
+        ...charterSnapshotLines(charter),
         `# 1) 装 party CLI（已装则跳过；旧版会把「需升级」误报成 token 失效，见 issue #2）`,
         `version_ge(){ awk -v a="$1" -v b="$2" 'BEGIN{split(a,A,".");split(b,B,".");for(i=1;i<=3;i++){A[i]+=0;B[i]+=0;if(A[i]>B[i])exit 0;if(A[i]<B[i])exit 1}exit 0}'; }`,
         `need=${MIN_CLI}; have="$(party --version 2>/dev/null || echo 0)"; version_ge "$have" "$need" || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
@@ -164,7 +178,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName }: Props) {
               : "铸 token 失败，请稍后重试";
       setPhase({ kind: "error", message });
     }
-  }, [inviterName, name, slug, token]);
+  }, [charter, inviterName, name, slug, token]);
 
   const onCopy = useCallback(async () => {
     if (phase.kind !== "done") return;

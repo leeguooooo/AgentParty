@@ -928,6 +928,7 @@ export class ChannelDO extends Server<Env> {
       participants: this.participants(),
       last_seq: this.lastSeq(),
       last_rev_seq: this.lastRevSeq(),
+      ...(this.charterRev() > 0 ? { charter_rev: this.charterRev() } : {}),
       presence: this.presenceList(),
     });
     this.broadcastFrame({ type: "participants", participants: this.participants() });
@@ -1228,6 +1229,8 @@ export class ChannelDO extends Server<Env> {
     if (Number.isInteger(workflowGuardLimit) && workflowGuardLimit > 0) {
       this.setMeta("workflow_guard_limit", String(Math.min(workflowGuardLimit, 1000)));
     }
+    const charterRev = Number(h.get("x-ap-charter-rev") ?? "");
+    if (Number.isInteger(charterRev) && charterRev >= 0) this.setMeta("charter_rev", String(charterRev));
     if (host) this.setMeta("host", host);
   }
 
@@ -1436,15 +1439,17 @@ export class ChannelDO extends Server<Env> {
     note: string,
     now: number,
     notifyWebhooks = false,
-    options: { mentions?: string[]; workflow?: StatusWorkflow; broadcast?: boolean } = {},
+    options: { mentions?: string[]; workflow?: StatusWorkflow; broadcast?: boolean; state?: StatusState } = {},
   ): MsgFrame {
     const seq = this.lastSeq() + 1;
+    const state = options.state ?? "blocked";
+    const blockedReason = state === "blocked" ? note : null;
     const status: StatusEvent = {
       owner: "system",
-      state: "blocked",
+      state,
       scope: [],
       summary_seq: null,
-      blocked_reason: note,
+      blocked_reason: blockedReason,
       updated_at: now,
       ...(options.workflow === undefined ? {} : { workflow: options.workflow }),
     };
@@ -1453,12 +1458,13 @@ export class ChannelDO extends Server<Env> {
          seq, sender_name, sender_kind, kind, body, mentions_json, reply_to,
          state, note, status_scope_json, status_summary_seq, status_blocked_reason, status_workflow_json, ts
        )
-       VALUES (?, 'system', 'agent', 'status', ?, ?, NULL, 'blocked', ?, '[]', NULL, ?, ?, ?)`,
+       VALUES (?, 'system', 'agent', 'status', ?, ?, NULL, ?, ?, '[]', NULL, ?, ?, ?)`,
       seq,
       note,
       JSON.stringify(options.mentions ?? []),
+      state,
       note,
-      note,
+      blockedReason,
       options.workflow === undefined ? null : JSON.stringify(options.workflow),
       now,
     );
@@ -1470,7 +1476,7 @@ export class ChannelDO extends Server<Env> {
       body: note,
       mentions: options.mentions ?? [],
       reply_to: null,
-      state: "blocked",
+      state,
       note,
       status,
       ts: now,
@@ -1620,6 +1626,20 @@ export class ChannelDO extends Server<Env> {
       }
       const ts = typeof body?.ts === "number" && Number.isInteger(body.ts) ? body.ts : Date.now();
       this.insertSystemStatus(note, ts);
+      return Response.json({ ok: true });
+    }
+    if (url.pathname === "/internal/charter-rev" && request.method === "POST") {
+      const body = (await request.json().catch(() => null)) as
+        | { rev?: unknown; updated_by?: unknown; ts?: unknown }
+        | null;
+      const rev = typeof body?.rev === "number" && Number.isInteger(body.rev) && body.rev >= 0 ? body.rev : null;
+      if (rev === null) {
+        return Response.json({ error: { code: "bad_request", message: "valid rev required" } }, { status: 400 });
+      }
+      const who = typeof body?.updated_by === "string" && body.updated_by !== "" ? body.updated_by : "unknown";
+      const ts = typeof body?.ts === "number" && Number.isInteger(body.ts) ? body.ts : Date.now();
+      this.setMeta("charter_rev", String(rev));
+      this.insertSystemStatus(`charter updated to rev ${rev} by ${who}`, ts, false, { state: "waiting" });
       return Response.json({ ok: true });
     }
     const auditMatch = url.pathname.match(/^\/internal\/messages\/([1-9]\d*)\/audit$/);
@@ -2823,6 +2843,11 @@ export class ChannelDO extends Server<Env> {
   private getMeta(key: string): string | null {
     const rows = this.ctx.storage.sql.exec("SELECT value FROM meta WHERE key = ?", key).toArray();
     return rows.length > 0 ? String(rows[0]!.value) : null;
+  }
+
+  private charterRev(): number {
+    const raw = Number(this.getMeta("charter_rev") ?? "");
+    return Number.isInteger(raw) && raw > 0 ? raw : 0;
   }
 
   private setMeta(key: string, value: string) {

@@ -55,6 +55,7 @@ describe("cli subprocess", () => {
       "logout",
       "agent",
       "serve",
+      "charter",
     ];
     for (const cmd of commands) {
       const r = await runCli([cmd, "--help"]);
@@ -77,6 +78,12 @@ describe("cli subprocess", () => {
     const r = await runCli(["--version"]);
     expect(r.code).toBe(0);
     expect(r.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  test("charter template works without config", async () => {
+    const r = await runCli(["charter", "template"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("# 本频道用前必读");
   });
 
   test("unknown command exits 1", async () => {

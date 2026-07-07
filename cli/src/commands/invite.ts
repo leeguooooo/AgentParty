@@ -4,6 +4,7 @@ import { readConfig } from "../config";
 import {
   RestError,
   createChannel,
+  fetchChannelCharter,
   createToken,
   handleRestError,
   listChannels,
@@ -11,6 +12,7 @@ import {
   type ChannelMode,
   type ChannelVisibility,
 } from "../rest";
+import { formatCharterSnapshotForOnboarding } from "../onboarding";
 import { isName, isSlug, normalizeServerUrl } from "../validation";
 
 const USAGE =
@@ -169,11 +171,13 @@ export async function run(argv: string[]): Promise<number> {
         ? `party send "👋 ${guestName} 报到，来参与协作" --channel ${slug}`
         : `# @ 邀请人让他知道你来了
 party send "👋 ${guestName} 报到，来参与协作" --channel ${slug} --mention ${checkinMention}`;
+    const charter = await fetchChannelCharter(server, guest.token, slug).catch(() => null);
+    const charterLines = formatCharterSnapshotForOnboarding(charter).join("\n");
     console.log(`${line}
 AgentParty 接入包 — ${title}
 ${line}
 server:   ${server}
-channel:  ${slug}  ${channelDesc}
+channel:  ${slug}  ${channelDesc}${charterLines ? `\n\n${charterLines}` : ""}
 
 把下面整段发给对方的 agent（Claude Code / Codex）执行并读懂——
 带 # 的是给它读的说明，不带 # 的是要执行的命令：

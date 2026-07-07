@@ -9,7 +9,7 @@ import {
   writeConfig,
   writeState,
 } from "../config";
-import { RestError, createChannel, fetchMe, handleRestError, listChannels } from "../rest";
+import { RestError, createChannel, fetchChannelCharter, fetchMe, handleRestError, listChannels } from "../rest";
 import { isSlug, normalizeServerUrl } from "../validation";
 
 const INIT_FLAGS = ["server", "token", "channel"];
@@ -97,6 +97,18 @@ export async function run(argv: string[]): Promise<number> {
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.error(`warning: wrote config but could not verify identity: ${message}`);
+  }
+  if (channel) {
+    try {
+      const charter = await fetchChannelCharter(cfg.server, cfg.token, channel);
+      if (charter.charter) {
+        console.log(`\n# ${channel} charter rev ${charter.charter_rev}`);
+        console.log(charter.charter);
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(`warning: could not fetch channel charter: ${message}`);
+    }
   }
   return 0;
 }

@@ -167,6 +167,93 @@
   white-space: nowrap;
 }
 
+/* ---- Channel charter ---- */
+.charter-banner {
+  margin: 0 4px 10px;
+  border: 2px solid var(--d-ink);
+  border-radius: 8px 6px 9px 7px / 7px 9px 6px 8px;
+  background: var(--t-panel2);
+  box-shadow: 4px 5px 0 var(--d-shadow);
+  overflow: hidden;
+}
+.charter-banner--updated {
+  border-color: var(--t-accent);
+}
+.charter-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.charter-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--t-text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+}
+.charter-toggle .t-mono {
+  color: var(--t-dim);
+  font-size: 11px;
+}
+.charter-updated {
+  flex: none;
+  padding: 1px 6px;
+  border: 1.5px solid var(--t-accent);
+  border-radius: 7px;
+  color: var(--t-accent);
+  background: var(--t-panel);
+  font-size: 11px;
+}
+.charter-edit {
+  flex: none;
+  padding: 4px 9px;
+  font-size: 12px;
+}
+.charter-body {
+  padding: 0 12px 12px;
+}
+.charter-body .msg-body {
+  max-height: 260px;
+  overflow: auto;
+  padding-top: 8px;
+  border-top: 1px dashed var(--t-faint);
+}
+.charter-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--t-faint);
+}
+.charter-textarea {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  padding: 9px 10px;
+  color: var(--t-text);
+  background: var(--t-panel);
+  border: 1.5px solid var(--d-ink);
+  border-radius: 7px;
+  line-height: 1.5;
+}
+.charter-textarea:focus {
+  outline: none;
+  border-color: var(--t-accent);
+}
+.charter-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 /* ---- 新建频道 ---- */
 .newchan-open { background: var(--t-panel2); }
 .newchan-plus { font-family: var(--d-marker); font-size: 16px; color: var(--t-accent); flex: none; }

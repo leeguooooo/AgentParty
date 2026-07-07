@@ -28,6 +28,7 @@ commands:
   ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
   who       [channel|--channel C] [--json]                who is online/wakeable/recent — pick who to --mention
+  charter   [slug] [--json] | set [slug] -f file.md|-m text|- | template
   history   [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]
   search    <query> [--channel C] [--from name] [--since seq] [--limit n] [--json]
   digest    [channel|--channel C] [--since seq|last-seen] [--json]
@@ -86,6 +87,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/status")).run(rest);
     case "who":
       return (await import("./commands/who")).run(rest);
+    case "charter":
+      return (await import("./commands/charter")).run(rest);
     case "history":
       return (await import("./commands/history")).run(rest);
     case "search":
