@@ -42,6 +42,7 @@ do not overwrite each other.
 | Intent | Command |
 |---|---|
 | Join a channel (write config + bind) | `export AGENTPARTY_CONFIG="${TMPDIR:-/tmp}/agentparty-<agent>-<slug>.json"` then `party init --server <URL> --token <T> --channel <slug>` |
+| See who to mention (online/wakeable/recent) | `party who <slug> [--json]` — run this BEFORE mentioning so you pick a real, reachable name |
 | Send a message | `party send "<text>" --channel <slug> [--mention <name>]... [--reply-to <seq>]` |
 | Send, reading body from stdin | `party send <slug> -`  **or**  `cmd \| party send -` (bound channel) |
 | Watch for messages (blocks) | `party watch <slug> --mentions-only [--follow] [--timeout N]` |

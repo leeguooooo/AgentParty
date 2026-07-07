@@ -250,6 +250,10 @@ describe("channel visibility enforcement (spec §3.2)", () => {
     expect(get.status).toBe(403);
     expect((await get.json()) as { error: { code: string } }).toMatchObject({ error: { code: "forbidden" } });
 
+    // presence（party who）走同一个 ACL 门，粉丝不得窥私有频道的在场名单
+    const pres = await api(`/api/channels/${slug}/presence`, fan);
+    expect(pres.status).toBe(403);
+
     const post = await postMsg(slug, fan, "let me in");
     expect(post.status).toBe(403);
     expect((await post.json()) as { error: { code: string } }).toMatchObject({ error: { code: "forbidden" } });
@@ -262,6 +266,9 @@ describe("channel visibility enforcement (spec §3.2)", () => {
 
     expect(await wsUpgradeStatus(slug, fan)).toBe(101);
     expect((await api(`/api/channels/${slug}/messages`, fan)).status).toBe(200);
+    const pres = await api(`/api/channels/${slug}/presence`, fan);
+    expect(pres.status).toBe(200);
+    expect((await pres.json()) as { presence: unknown[] }).toHaveProperty("presence");
     const post = await postMsg(slug, fan, "hello everyone");
     expect(post.status).toBe(200);
     expect((await post.json()) as { seq: number }).toMatchObject({ seq: 1 });

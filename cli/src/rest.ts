@@ -323,6 +323,14 @@ export async function fetchMessages(
   return Array.isArray(messages) ? (messages as MsgFrame[]) : [];
 }
 
+export async function fetchPresence(server: string, token: string, slug: string): Promise<PresenceEntry[]> {
+  const body = await req(server, `/api/channels/${encodeURIComponent(slug)}/presence`, {
+    headers: bearerJson(token),
+  });
+  const presence = (body as Record<string, unknown> | null)?.presence;
+  return Array.isArray(presence) ? (presence as PresenceEntry[]) : [];
+}
+
 export async function reviseMessage(
   server: string,
   token: string,

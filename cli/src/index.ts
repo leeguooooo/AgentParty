@@ -27,6 +27,7 @@ commands:
   serve     [channel|--channel C] --on-mention "<cmd>" [--all]   常驻：每条 @你 的消息跑一次命令（唤醒睡着的 agent）
   ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
+  who       [channel|--channel C] [--json]                who is online/wakeable/recent — pick who to --mention
   history   [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]
   search    <query> [--channel C] [--from name] [--since seq] [--limit n] [--json]
   digest    [channel|--channel C] [--since seq|last-seen] [--json]
@@ -83,6 +84,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/ask")).run(rest);
     case "status":
       return (await import("./commands/status")).run(rest);
+    case "who":
+      return (await import("./commands/who")).run(rest);
     case "history":
       return (await import("./commands/history")).run(rest);
     case "search":

@@ -1019,6 +1019,18 @@ app.get("/api/channels/:slug/messages", async (c) => {
   );
 });
 
+app.get("/api/channels/:slug/presence", async (c) => {
+  // party who：从终端看谁在线/可唤醒/最近（分档由 CLI 做）。与 messages 同样的 ACL 门，防粉丝窥私有频道。
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  return stub.fetch(new Request("https://do/internal/presence", { headers: { "x-partykit-room": slug } }));
+});
+
 app.get("/api/channels/:slug/search", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);

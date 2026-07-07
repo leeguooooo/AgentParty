@@ -1484,6 +1484,10 @@ export class ChannelDO extends Server<Env> {
         presence: this.presenceList(),
       });
     }
+    if (url.pathname === "/internal/presence" && request.method === "GET") {
+      // party who：完整 presence 快照（含 kind/wake/last_seen），供 CLI 分档展示谁在线/可唤醒
+      return Response.json({ presence: this.presenceList() });
+    }
     if (url.pathname === "/internal/init" && request.method === "POST") {
       this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
       if (this.getMeta("ckind") === "temp") {
