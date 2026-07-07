@@ -95,7 +95,8 @@ function isRevisionSnapshot(msg: MsgFrame): boolean {
     msg.edited_at != null ||
     msg.retracted_at != null ||
     msg.supersedes != null ||
-    msg.superseded_by != null
+    msg.superseded_by != null ||
+    msg.completion_review != null
   );
 }
 

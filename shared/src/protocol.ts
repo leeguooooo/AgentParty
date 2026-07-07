@@ -53,6 +53,9 @@ export type WakeKind = "none" | "watch" | "serve" | "webhook";
 export type HostDecisionKind = "decision" | "handoff" | "takeover";
 export type WorkflowKind = "pipeline" | "parallel" | "orchestrator-workers" | "evaluator-optimizer";
 export type HostLeaseState = "active" | "stale";
+export type CompletionGate = "off" | "reviewer";
+export type CompletionReviewState = "pending_review" | "approved" | "rejected";
+export type CompletionReviewPolicy = "sender" | "owner";
 
 export interface WakeInfo {
   kind: WakeKind;
@@ -316,6 +319,17 @@ export interface CompletionArtifact {
   related_prs: number[];
 }
 
+export interface CompletionReview {
+  state: CompletionReviewState;
+  policy: CompletionReviewPolicy;
+  reviewer?: Sender;
+  reviewer_owner?: string;
+  reviewed_at?: number;
+  reason?: string;
+  replaces_seq?: number;
+  replaced_by_seq?: number;
+}
+
 export interface MsgFrame {
   /** status messages are emitted as type:"status" so tools can consume them without text scraping. */
   type: "msg" | "status";
@@ -331,6 +345,7 @@ export interface MsgFrame {
   role?: CollaborationRole;
   role_source?: CollaborationRoleSource;
   completion_artifact?: CompletionArtifact;
+  completion_review?: CompletionReview;
   ts: number;
   edited?: true;
   edited_at?: number;
@@ -682,7 +697,7 @@ export function buildHostBoard(
 export interface MessageUpdateFrame {
   type: "message_update";
   target_seq: number;
-  action: "edit" | "retract" | "supersede";
+  action: "edit" | "retract" | "supersede" | "review";
   actor: Sender;
   ts: number;
   message: MsgFrame;

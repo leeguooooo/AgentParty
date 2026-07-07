@@ -59,7 +59,8 @@ function isRevisionSnapshot(frame: ServerFrame): boolean {
     frame.edited_at != null ||
     frame.retracted_at != null ||
     frame.supersedes != null ||
-    frame.superseded_by != null
+    frame.superseded_by != null ||
+    frame.completion_review != null
   );
 }
 
@@ -67,7 +68,16 @@ function isRevisionSnapshot(frame: ServerFrame): boolean {
 // 只递一次；对同一 seq 的「新一次修订」指纹会变，仍然放行。
 function revisionFingerprint(frame: ServerFrame): string {
   if (frame.type !== "msg" && frame.type !== "status") return "";
-  return [frame.edited_at, frame.retracted_at, frame.supersedes, frame.superseded_by, frame.body].join("|");
+  return [
+    frame.edited_at,
+    frame.retracted_at,
+    frame.supersedes,
+    frame.superseded_by,
+    frame.completion_review?.state,
+    frame.completion_review?.reviewed_at,
+    frame.completion_review?.replaced_by_seq,
+    frame.body,
+  ].join("|");
 }
 
 export function connect(

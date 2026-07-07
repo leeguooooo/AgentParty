@@ -63,6 +63,8 @@ const AP_FORWARD_HEADERS = [
   "x-ap-child-expires-at",
   "x-ap-mode",
   "x-ap-channel-kind",
+  "x-ap-completion-gate",
+  "x-ap-completion-review-policy",
   "x-ap-host",
   "x-ap-archived",
   "x-ap-archive-at",
@@ -224,7 +226,7 @@ const requireBearer = createMiddleware<AppContext>(async (c, next) => {
 async function loadChannel(db: D1Database, slug: string) {
   return db
     .prepare(
-      "SELECT slug, kind, mode, archived_at, created_by, visibility, owner_account FROM channels WHERE slug = ?",
+      "SELECT slug, kind, mode, archived_at, created_by, visibility, owner_account, completion_gate, completion_review_policy FROM channels WHERE slug = ?",
     )
     .bind(slug)
     .first<{
@@ -235,14 +237,18 @@ async function loadChannel(db: D1Database, slug: string) {
       created_by: string | null;
       visibility: string;
       owner_account: string | null;
+      completion_gate: string;
+      completion_review_policy: string;
     }>();
 }
 
 // do 侧按 meta 缓存 mode/kind/host（loop guard 分档、temp 归档、webhook permalink 都要用）
-function channelHeaders(channel: { kind: string; mode: string }, requestUrl: string) {
+function channelHeaders(channel: { kind: string; mode: string; completion_gate?: string; completion_review_policy?: string }, requestUrl: string) {
   return {
     "x-ap-mode": channel.mode,
     "x-ap-channel-kind": channel.kind,
+    "x-ap-completion-gate": channel.completion_gate ?? "off",
+    "x-ap-completion-review-policy": channel.completion_review_policy ?? "sender",
     "x-ap-host": new URL(requestUrl).host,
   };
 }
@@ -1214,6 +1220,8 @@ app.get("/api/channels/:slug/ws", async (c) => {
   }
   fwd.headers.set("x-ap-mode", channel.mode);
   fwd.headers.set("x-ap-channel-kind", channel.kind);
+  fwd.headers.set("x-ap-completion-gate", channel.completion_gate);
+  fwd.headers.set("x-ap-completion-review-policy", channel.completion_review_policy);
   fwd.headers.set("x-ap-host", new URL(c.req.url).host);
   // 无条件写：未归档也显式置 "0"，堵住"客户端注入 1、未归档分支不覆盖"的透传
   fwd.headers.set("x-ap-archived", channel.archived_at !== null ? "1" : "0");

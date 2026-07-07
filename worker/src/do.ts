@@ -21,6 +21,9 @@ import {
   type CollaborationRole,
   type CollaborationRoleSource,
   type CompletionArtifact,
+  type CompletionReview,
+  type CompletionReviewPolicy,
+  type CompletionReviewState,
   type HostDecision,
   type HostDecisionKind,
   type MsgFrame,
@@ -196,6 +199,48 @@ function parseStoredCompletionArtifact(input: unknown): CompletionArtifact | und
   } catch {
     return undefined;
   }
+}
+
+function parseStoredCompletionReview(r: Record<string, unknown>): CompletionReview | undefined {
+  if (r.completion_review_state === null || r.completion_review_state === undefined) return undefined;
+  const state = String(r.completion_review_state) as CompletionReviewState;
+  const policy =
+    r.completion_review_policy === null || r.completion_review_policy === undefined
+      ? "sender"
+      : (String(r.completion_review_policy) as CompletionReviewPolicy);
+  const reviewer =
+    r.completion_reviewed_by === null || r.completion_reviewed_by === undefined
+      ? undefined
+      : {
+          name: String(r.completion_reviewed_by),
+          kind:
+            r.completion_reviewed_by_kind === "human" || r.completion_reviewed_by_kind === "agent"
+              ? (String(r.completion_reviewed_by_kind) as SenderKind)
+              : "agent",
+          ...(r.completion_reviewed_by_owner === null || r.completion_reviewed_by_owner === undefined
+            ? {}
+            : { owner: String(r.completion_reviewed_by_owner) }),
+        };
+  return {
+    state,
+    policy,
+    ...(reviewer === undefined ? {} : { reviewer }),
+    ...(r.completion_reviewed_by_owner === null || r.completion_reviewed_by_owner === undefined
+      ? {}
+      : { reviewer_owner: String(r.completion_reviewed_by_owner) }),
+    ...(r.completion_reviewed_at === null || r.completion_reviewed_at === undefined
+      ? {}
+      : { reviewed_at: Number(r.completion_reviewed_at) }),
+    ...(r.completion_review_reason === null || r.completion_review_reason === undefined
+      ? {}
+      : { reason: String(r.completion_review_reason) }),
+    ...(r.completion_review_replaces_seq === null || r.completion_review_replaces_seq === undefined
+      ? {}
+      : { replaces_seq: Number(r.completion_review_replaces_seq) }),
+    ...(r.completion_review_replaced_by_seq === null || r.completion_review_replaced_by_seq === undefined
+      ? {}
+      : { replaced_by_seq: Number(r.completion_review_replaced_by_seq) }),
+  };
 }
 
 function parseStoredScope(input: unknown): string[] {
@@ -632,6 +677,15 @@ export class ChannelDO extends Server<Env> {
       sender_role TEXT,
       sender_role_source TEXT,
       completion_artifact_json TEXT,
+      completion_review_state TEXT,
+      completion_review_policy TEXT,
+      completion_reviewed_by TEXT,
+      completion_reviewed_by_kind TEXT,
+      completion_reviewed_by_owner TEXT,
+      completion_reviewed_at INTEGER,
+      completion_review_reason TEXT,
+      completion_review_replaces_seq INTEGER,
+      completion_review_replaced_by_seq INTEGER,
       original_body TEXT,
       edited_at INTEGER,
       edited_by TEXT,
@@ -658,6 +712,15 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE messages ADD COLUMN sender_role TEXT",
       "ALTER TABLE messages ADD COLUMN sender_role_source TEXT",
       "ALTER TABLE messages ADD COLUMN completion_artifact_json TEXT",
+      "ALTER TABLE messages ADD COLUMN completion_review_state TEXT",
+      "ALTER TABLE messages ADD COLUMN completion_review_policy TEXT",
+      "ALTER TABLE messages ADD COLUMN completion_reviewed_by TEXT",
+      "ALTER TABLE messages ADD COLUMN completion_reviewed_by_kind TEXT",
+      "ALTER TABLE messages ADD COLUMN completion_reviewed_by_owner TEXT",
+      "ALTER TABLE messages ADD COLUMN completion_reviewed_at INTEGER",
+      "ALTER TABLE messages ADD COLUMN completion_review_reason TEXT",
+      "ALTER TABLE messages ADD COLUMN completion_review_replaces_seq INTEGER",
+      "ALTER TABLE messages ADD COLUMN completion_review_replaced_by_seq INTEGER",
       "ALTER TABLE messages ADD COLUMN original_body TEXT",
       "ALTER TABLE messages ADD COLUMN edited_at INTEGER",
       "ALTER TABLE messages ADD COLUMN edited_by TEXT",
@@ -670,7 +733,8 @@ export class ChannelDO extends Server<Env> {
       // 迁移回填：历史修订行按 seq 赋 rev_seq（幂等，只补 NULL），让升级后的客户端能收到一次再推进游标
       `UPDATE messages SET rev_seq = seq
         WHERE rev_seq IS NULL
-          AND (edited_at IS NOT NULL OR retracted_at IS NOT NULL OR supersedes IS NOT NULL OR superseded_by IS NOT NULL)`,
+          AND (edited_at IS NOT NULL OR retracted_at IS NOT NULL OR supersedes IS NOT NULL OR superseded_by IS NOT NULL
+               OR completion_review_state IS NOT NULL OR completion_review_replaced_by_seq IS NOT NULL)`,
     ]) {
       try {
         sql.exec(ddl);
@@ -872,6 +936,8 @@ export class ChannelDO extends Server<Env> {
                      OR retracted_at IS NOT NULL
                      OR supersedes IS NOT NULL
                      OR superseded_by IS NOT NULL
+                     OR completion_review_state IS NOT NULL
+                     OR completion_review_replaced_by_seq IS NOT NULL
                   ORDER BY seq`,
                 since,
               )
@@ -1090,6 +1156,12 @@ export class ChannelDO extends Server<Env> {
     if (mode === "normal" || mode === "party") this.setMeta("mode", mode);
     const ckind = h.get("x-ap-channel-kind");
     if (ckind === "standing" || ckind === "temp") this.setMeta("ckind", ckind);
+    const completionGate = h.get("x-ap-completion-gate");
+    if (completionGate === "off" || completionGate === "reviewer") this.setMeta("completion_gate", completionGate);
+    const completionReviewPolicy = h.get("x-ap-completion-review-policy");
+    if (completionReviewPolicy === "sender" || completionReviewPolicy === "owner") {
+      this.setMeta("completion_review_policy", completionReviewPolicy);
+    }
     if (host) this.setMeta("host", host);
   }
 
@@ -1936,7 +2008,10 @@ export class ChannelDO extends Server<Env> {
       this.clearLoopGuardState();
     }
     if (seq % 100 === 0) {
-      sql.exec("DELETE FROM messages WHERE seq <= ?", seq - RETAIN_N);
+      sql.exec(
+        "DELETE FROM messages WHERE seq <= ? AND (completion_review_state IS NULL OR completion_review_state != 'pending_review')",
+        seq - RETAIN_N,
+      );
     }
 
     const frames: ServerFrame[] = [msg];
@@ -2284,6 +2359,8 @@ export class ChannelDO extends Server<Env> {
     };
     const completionArtifact = parseStoredCompletionArtifact(r.completion_artifact_json);
     if (completionArtifact !== undefined) frame.completion_artifact = completionArtifact;
+    const completionReview = parseStoredCompletionReview(r);
+    if (completionReview !== undefined) frame.completion_review = completionReview;
     if (r.edited_at !== null && r.edited_at !== undefined) {
       frame.edited = true;
       frame.edited_at = Number(r.edited_at);
