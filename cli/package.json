@@ -1,6 +1,6 @@
 {
   "name": "@agentparty/cli",
-  "version": "0.2.58",
+  "version": "0.2.59",
   "private": true,
   "type": "module",
   "bin": {
