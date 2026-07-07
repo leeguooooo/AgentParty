@@ -21,7 +21,7 @@ import {
 } from "../rest";
 import { isName, isSlug } from "../validation";
 
-const CHANNEL_FLAGS = ["title", "temp", "party", "public", "policy", "confirm", "expires", "max-uses"];
+const CHANNEL_FLAGS = ["title", "temp", "party", "public", "policy", "confirm", "expires", "max-uses", "remove"];
 const COLLAB_ROLES = ["host", "worker", "reviewer", "observer"] as const;
 const COMPLETION_GATES = ["reviewer", "off"] as const;
 const COMPLETION_REVIEW_POLICIES = ["sender", "owner"] as const;
@@ -30,7 +30,7 @@ const HELP = `usage: party channel create <slug> [--title t] [--temp] [--party] 
        party channel list
        party channel archive [slug]
        party channel reset-guard [slug]
-       party channel kick <name> [slug]
+       party channel kick <name> [slug] [--remove]
        party channel gate reviewer|off [slug] [--policy sender|owner]
        party channel visibility <slug> public|private [--confirm]
        party channel members <slug>
@@ -50,6 +50,7 @@ Options:
   --public    create a public channel
   --policy p  completion review policy: sender or owner
   --confirm   confirm private-to-public visibility switch
+  --remove    revoke the channel-scoped token and remove membership when kicking
   --expires d join-link expiry like 7d, 12h, 30m, 60s
   --max-uses n join-link redemption limit`;
 
@@ -74,7 +75,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["temp", "party", "public", "confirm"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["temp", "party", "public", "confirm", "remove"] });
   const unknown = unknownFlagError(flags, CHANNEL_FLAGS);
   if (unknown !== null) {
     console.error(unknown);
@@ -158,7 +159,7 @@ export async function run(argv: string[]): Promise<number> {
         const name = positionals[1];
         const slug = resolveChannel(positionals[2]);
         if (!name || !slug) {
-          console.error("usage: party channel kick <name> [slug]");
+          console.error("usage: party channel kick <name> [slug] [--remove]");
           return 1;
         }
         if (!isName(name)) {
@@ -169,8 +170,9 @@ export async function run(argv: string[]): Promise<number> {
           console.error("slug must match [a-z0-9][a-z0-9-]{0,63}");
           return 1;
         }
-        await kickParticipant(cfg.server, cfg.token, slug, name);
-        console.log(`kicked ${name} from ${slug}`);
+        const mode = flags.remove === true ? "remove" : "disconnect";
+        await kickParticipant(cfg.server, cfg.token, slug, name, mode);
+        console.log(mode === "remove" ? `removed ${name} from ${slug}` : `kicked ${name} from ${slug}`);
         return 0;
       }
       case "gate": {

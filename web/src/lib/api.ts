@@ -280,6 +280,18 @@ export async function resetGuard(token: string, slug: string): Promise<void> {
   if (!res.ok) throw new Error(`POST /api/channels/${slug}/reset-guard failed (${res.status})`);
 }
 
+export async function kickParticipant(token: string, slug: string, name: string, mode: "disconnect" | "remove" = "disconnect"): Promise<void> {
+  const body = mode === "remove" ? { name, mode } : { name };
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/kick`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/kick failed (${res.status})`);
+}
+
 // 可见性切换（issue #38）。private→public 服务端要 confirm=true，未带时返回 409 + needs_confirm，
 // 这里以 { needsConfirm, messageCount } resolve 让 UI 弹二段确认，而不是当错误抛。
 export interface VisibilityResult {

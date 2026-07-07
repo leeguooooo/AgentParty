@@ -1694,7 +1694,9 @@ app.post("/api/channels/:slug/archive", async (c) => {
   return c.json({ ok: true });
 });
 
-// 踢人（spec §5 防滥用 MVP）：房主或 ap_ token 把某 name 的存活 ws 踢下线
+type KickMode = "disconnect" | "remove";
+
+// 踢人（spec §5 防滥用 MVP）：默认只把某 name 的存活 ws 踢下线；remove 额外撤销本频道 scoped token。
 app.post("/api/channels/:slug/kick", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);
@@ -1702,21 +1704,53 @@ app.post("/api/channels/:slug/kick", async (c) => {
   if (!isChannelModerator(c.get("identity"), channel)) {
     return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can kick"), 403);
   }
-  const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
+  const body = (await c.req.json().catch(() => null)) as { name?: unknown; mode?: unknown } | null;
   // 被踢者 name 可能是 OIDC sub（含 NAME_RE 之外的字符），只做非空 + 长度校验，不套 NAME_RE
   const name = typeof body?.name === "string" ? body.name : "";
   if (!name || name.length > 256) {
     return c.json(errorBody("bad_request", "valid name required"), 400);
   }
+  if (body?.mode !== undefined && body.mode !== "disconnect" && body.mode !== "remove") {
+    return c.json(errorBody("bad_request", "mode must be disconnect or remove"), 400);
+  }
+  const mode: KickMode = body?.mode === "remove" ? "remove" : "disconnect";
+  if (name === channel.created_by || name === channel.owner_account) {
+    return c.json(errorBody("forbidden", "channel owner cannot kick themselves"), 403);
+  }
+  if (mode === "remove") {
+    const now = Date.now();
+    await c.env.DB.prepare(
+      "UPDATE tokens SET revoked_at = ? WHERE channel_scope = ? AND name = ? AND revoked_at IS NULL",
+    )
+      .bind(now, slug, name)
+      .run();
+  }
   const stub = await getServerByName(c.env.CHANNELS, slug);
   const res = await stub.fetch(
     new Request("https://do/internal/kick", {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(mode === "remove" ? { name, mode } : { name }),
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );
   if (!res.ok) return c.json(errorBody("unavailable", "kick coordination failed"), 503);
+  if (mode === "remove") {
+    const kicked = (await res.json().catch(() => null)) as { owners?: unknown } | null;
+    const owners = Array.isArray(kicked?.owners) ? kicked.owners.filter((owner): owner is string => typeof owner === "string") : [];
+    const accounts = [...new Set([name, ...owners])].slice(0, 16);
+    const placeholders = accounts.map(() => "?").join(", ");
+    await c.env.DB.prepare(
+      `DELETE FROM channel_members
+        WHERE channel_slug = ?
+          AND (? IS NULL OR account != ?)
+          AND (
+            account IN (${placeholders})
+            OR account IN (SELECT owner FROM tokens WHERE name = ? AND owner IS NOT NULL)
+          )`,
+    )
+      .bind(slug, channel.owner_account, channel.owner_account, ...accounts, name)
+      .run();
+  }
   return c.json({ ok: true });
 });
 

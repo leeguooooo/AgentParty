@@ -2584,6 +2584,17 @@ describe("party channel kick", () => {
     expect(reqsOf(mock, "POST", "/api/channels/ops/kick").length).toBe(1);
   });
 
+  test("--remove 调 remove 语义", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "kick", "troll", "town-square", "--remove"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("removed troll from town-square");
+    const kickReqs = reqsOf(mock, "POST", "/api/channels/town-square/kick");
+    expect(kickReqs.length).toBe(1);
+    expect(kickReqs[0]!.body).toEqual({ name: "troll", mode: "remove" });
+  });
+
   test("缺 name 退出 1 且不发请求", async () => {
     mock = startRestMock();
     writeCfg(mock.url);

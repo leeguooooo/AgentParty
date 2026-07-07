@@ -15,6 +15,7 @@ import {
   ForbiddenError,
   fetchChannelCharter,
   fetchMessages,
+  kickParticipant,
   resetGuard,
   searchMessages,
   setChannelCharter,
@@ -597,6 +598,8 @@ export function ChannelPage({
   const [searchError, setSearchError] = useState<string | null>(null);
   const [guardResetting, setGuardResetting] = useState(false);
   const [guardResetError, setGuardResetError] = useState<string | null>(null);
+  const [removingName, setRemovingName] = useState<string | null>(null);
+  const [kickError, setKickError] = useState<string | null>(null);
   const [charter, setCharter] = useState<ChannelCharter | null>(null);
   const [charterOpen, setCharterOpen] = useState(false);
   const [charterEditing, setCharterEditing] = useState(false);
@@ -640,6 +643,19 @@ export function ChannelPage({
         else if (!(err instanceof ForbiddenError)) setCharterError("charter failed to load");
       });
   }, [slug, token]);
+
+  const removeParticipant = useCallback((name: string) => {
+    if (removingName !== null) return;
+    setRemovingName(name);
+    setKickError(null);
+    kickParticipant(token, slug, name, "remove")
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setKickError("没有踢出权限");
+        else setKickError("踢出失败");
+      })
+      .finally(() => setRemovingName(null));
+  }, [removingName, slug, token]);
 
   useEffect(() => {
     setSeenCharterRev(readSeenCharterRev(slug));
@@ -1053,7 +1069,11 @@ export function ChannelPage({
         status={state.status}
         party={mode === "party" || state.mode === "party"}
         isPublic={localPublic}
+        canModerate={canModerate}
+        removingName={removingName}
+        onRemoveParticipant={removeParticipant}
       />
+      {kickError !== null && <p className="banner banner--red">{kickError}</p>}
       {canMintAgent && !state.archived && (
         <div className="chan-toolbar">
           <AgentJoin slug={slug} token={token} namePrefix={agentNamePrefix} inviterName={inviterName} charter={charter} />

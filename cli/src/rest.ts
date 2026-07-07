@@ -616,11 +616,13 @@ export async function kickParticipant(
   token: string,
   slug: string,
   name: string,
+  mode: "disconnect" | "remove" = "disconnect",
 ): Promise<void> {
+  const body = mode === "remove" ? { name, mode } : { name };
   await req(server, `/api/channels/${encodeURIComponent(slug)}/kick`, {
     method: "POST",
     headers: bearerJson(token),
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(body),
   });
 }
 

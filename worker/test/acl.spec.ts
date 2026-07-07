@@ -291,6 +291,81 @@ describe("channel visibility enforcement (spec §3.2)", () => {
 });
 
 describe("kick (spec §5)", () => {
+  it("disconnect mode leaves the channel-scoped token valid", async () => {
+    const ownerAcct = `${uniq("owner")}@leeguoo.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: ownerAcct });
+    const slug = await makeChannel(owner.token, "private");
+    const guest = await seedToken("agent", uniq("guest"), { owner: `${uniq("guest")}@leeguoo.com`, channelScope: slug });
+
+    const kick = await api(`/api/channels/${slug}/kick`, owner.token, {
+      method: "POST",
+      body: JSON.stringify({ name: guest.name }),
+    });
+    expect(kick.status).toBe(200);
+
+    expect((await postMsg(slug, guest.token, "still valid after disconnect")).status).toBe(200);
+    const tokenRow = await env.DB.prepare("SELECT revoked_at FROM tokens WHERE name = ?")
+      .bind(guest.name)
+      .first<{ revoked_at: number | null }>();
+    expect(tokenRow?.revoked_at).toBeNull();
+  });
+
+  it("remove mode revokes scoped token, clears presence, removes membership, and writes a status trace", async () => {
+    const ownerAcct = `${uniq("owner")}@leeguoo.com`;
+    const guestAcct = `${uniq("guest")}@leeguoo.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: ownerAcct });
+    const slug = await makeChannel(owner.token, "private");
+    const guest = await seedToken("agent", uniq("guest"), { owner: guestAcct, channelScope: slug });
+    await env.DB.prepare("INSERT INTO channel_members (channel_slug, account, added_by, added_at) VALUES (?, ?, ?, ?)")
+      .bind(slug, guestAcct, ownerAcct, Date.now())
+      .run();
+    // presence 由 status 帧建立（普通 message 不建 presence）——发一条 status 让 guest 进在场名单
+    expect(
+      (await api(`/api/channels/${slug}/messages`, guest.token, {
+        method: "POST",
+        body: JSON.stringify({ kind: "status", state: "working", note: "before removal", mentions: [] }),
+      })).status,
+    ).toBe(200);
+    const before = ((await (await api(`/api/channels/${slug}/presence`, owner.token)).json()) as { presence: { name: string }[] }).presence;
+    expect(before.map((p) => p.name)).toContain(guest.name);
+
+    const kick = await api(`/api/channels/${slug}/kick`, owner.token, {
+      method: "POST",
+      body: JSON.stringify({ name: guest.name, mode: "remove" }),
+    });
+    expect(kick.status).toBe(200);
+
+    const tokenRow = await env.DB.prepare("SELECT revoked_at FROM tokens WHERE name = ?")
+      .bind(guest.name)
+      .first<{ revoked_at: number | null }>();
+    expect(tokenRow?.revoked_at).toBeTypeOf("number");
+    expect((await postMsg(slug, guest.token, "after removal")).status).toBe(401);
+    expect((await api(`/api/channels/${slug}/messages`, guest.token)).status).toBe(401);
+    const after = ((await (await api(`/api/channels/${slug}/presence`, owner.token)).json()) as { presence: { name: string }[] }).presence;
+    expect(after.map((p) => p.name)).not.toContain(guest.name);
+    const member = await env.DB.prepare("SELECT account FROM channel_members WHERE channel_slug = ? AND account = ?")
+      .bind(slug, guestAcct)
+      .first<{ account: string }>();
+    expect(member).toBeNull();
+    const history = ((await (await api(`/api/channels/${slug}/messages?since=0`, owner.token)).json()) as { messages: { kind: string; body: string }[] }).messages;
+    expect(history).toContainEqual(expect.objectContaining({ kind: "status", body: `removed ${guest.name} from channel` }));
+  });
+
+  it("owner cannot kick themselves", async () => {
+    const ownerAcct = `${uniq("owner")}@leeguoo.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: ownerAcct });
+    const slug = await makeChannel(owner.token, "private");
+
+    expect((await api(`/api/channels/${slug}/kick`, owner.token, {
+      method: "POST",
+      body: JSON.stringify({ name: owner.name, mode: "remove" }),
+    })).status).toBe(403);
+    expect((await api(`/api/channels/${slug}/kick`, owner.token, {
+      method: "POST",
+      body: JSON.stringify({ name: ownerAcct, mode: "remove" }),
+    })).status).toBe(403);
+  });
+
   it("owner/ap_ can kick a live fan; fan/readonly cannot", async () => {
     const { token: apToken } = await seedToken("agent");
     const ro = await seedToken("readonly");

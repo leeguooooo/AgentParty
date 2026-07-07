@@ -12,6 +12,9 @@ interface Props {
   status: SocketStatus;
   party?: boolean; // mode=party 的频道在最左挂蜡笔黄 PARTY 徽章
   isPublic?: boolean; // public 频道在最左挂蜡笔绿 PUBLIC 徽章（spec §4）
+  canModerate?: boolean;
+  removingName?: string | null;
+  onRemoveParticipant?: (name: string) => void;
 }
 
 interface Item {
@@ -74,7 +77,16 @@ function wakeabilityBadge(item: Item): { text: string; tone: "off" | "pending" |
   return { text: "wake unverified", tone: "pending" };
 }
 
-export function PresenceBar({ presence, participants, status, party = false, isPublic = false }: Props) {
+export function PresenceBar({
+  presence,
+  participants,
+  status,
+  party = false,
+  isPublic = false,
+  canModerate = false,
+  removingName = null,
+  onRemoveParticipant,
+}: Props) {
   // 相对时间 30s 刷一次
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -182,6 +194,20 @@ export function PresenceBar({ presence, participants, status, party = false, isP
             {it.workflow !== null && <span className="t-mono presence-context">wf:{it.workflow.workflow_id}</span>}
             {it.note !== null && it.note !== "" && <span className="t-mono presence-note">{it.note}</span>}
             {it.ts !== null && <span className="t-mono presence-ts">{fmtRel(it.ts)}</span>}
+            {canModerate && onRemoveParticipant !== undefined && it.name !== "system" && (
+              <button
+                className="presence-kick"
+                type="button"
+                disabled={removingName === it.name}
+                title={`踢出 ${it.name}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemoveParticipant(it.name);
+                }}
+              >
+                踢出
+              </button>
+            )}
           </span>
         );
       })}

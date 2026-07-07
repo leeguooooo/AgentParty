@@ -1051,6 +1051,12 @@ export class ChannelDO extends Server<Env> {
     for (const other of this.getConnections<ConnState>()) {
       if (other.id !== connection.id && other.state?.name === st.name) return;
     }
+    const removedAt = Number(this.getMeta(this.removedPresenceKey(st.name)) ?? "");
+    if (Number.isInteger(removedAt) && Date.now() - removedAt < PRESENCE_SCAN_MS) {
+      this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", st.name);
+      this.broadcastFrame({ type: "participants", participants: this.participants() });
+      return;
+    }
     this.markOffline(st.name, Date.now());
     this.broadcastFrame({ type: "participants", participants: this.participants() });
   }
@@ -2129,16 +2135,25 @@ export class ChannelDO extends Server<Env> {
     }
     if (url.pathname === "/internal/kick" && request.method === "POST") {
       // token 吊销即时生效：按 name 踢掉存活连接
-      const body = (await request.json().catch(() => null)) as { name?: unknown } | null;
+      const body = (await request.json().catch(() => null)) as { name?: unknown; mode?: unknown } | null;
       const name = typeof body?.name === "string" ? body.name : "";
       if (!name) {
         return Response.json({ error: { code: "bad_request", message: "name required" } }, { status: 400 });
       }
+      const owners = new Set<string>();
       for (const connection of this.getConnections<ConnState>()) {
         if (connection.state?.name !== name) continue;
+        if (connection.state.owner !== undefined) owners.add(connection.state.owner);
         this.closeRevokedConnection(connection);
       }
-      return Response.json({ ok: true });
+      if (body?.mode === "remove") {
+        const now = Date.now();
+        this.setMeta(this.removedPresenceKey(name), String(now));
+        this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", name);
+        this.broadcastFrame({ type: "presence", name, state: "offline", note: null, ts: now });
+        this.insertSystemStatus(`removed ${name} from channel`, now, false, { state: "done" });
+      }
+      return Response.json({ ok: true, owners: [...owners] });
     }
     return new Response("not found", { status: 404 });
   }
@@ -2843,6 +2858,10 @@ export class ChannelDO extends Server<Env> {
   private getMeta(key: string): string | null {
     const rows = this.ctx.storage.sql.exec("SELECT value FROM meta WHERE key = ?", key).toArray();
     return rows.length > 0 ? String(rows[0]!.value) : null;
+  }
+
+  private removedPresenceKey(name: string): string {
+    return `removed-presence:${name}`;
   }
 
   private charterRev(): number {
