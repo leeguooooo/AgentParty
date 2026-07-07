@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
 import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } from "../config";
@@ -205,6 +205,23 @@ function compactEnv(env: Record<string, string | undefined>): Record<string, str
     if (value !== undefined) out[key] = value;
   }
   return out;
+}
+
+function attachmentPathFromRunnerText(text: string): string | null {
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(/^\[attach:([^\]\r\n]+)\]$/);
+    if (!match) continue;
+    const path = match[1]!;
+    if (!isAbsolute(path)) throw new Error(`[attach] path must be absolute: ${path}`);
+    return path;
+  }
+  return null;
+}
+
+function finalMessageBody(text: string, marker: string | null): string {
+  const attach = attachmentPathFromRunnerText(text);
+  if (attach) return readFileSync(attach, "utf8");
+  return marker ? `${marker}\n${text}` : text;
 }
 
 async function defaultRunnerProcess(
@@ -425,7 +442,18 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         ? `[session reset: ${shortSid(oldSid)} → ${shortSid(finalSid)}]`
         : null
       : `[session start: ${shortSid(finalSid)}]`;
-    const body = marker ? `${marker}\n${run.text}` : run.text;
+    let body: string;
+    try {
+      body = finalMessageBody(run.text, marker);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      appendRunnerLog(
+        opts.workdir,
+        `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} attach_error=${JSON.stringify(message)}`,
+      );
+      await postBlocked(opts, frame, `builtin ${opts.harness} runner blocked: ${message}`);
+      return;
+    }
     await post(opts.server, opts.token, opts.channel, {
       kind: "message",
       body,

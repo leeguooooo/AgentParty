@@ -245,6 +245,86 @@ describe("builtin runner", () => {
     expect(log).toContain("exit=0");
   });
 
+  test("[attach:path] passthrough sends the file bytes verbatim as the reply body (issue #41)", async () => {
+    const { posts, post } = postRecorder();
+    const workdir = tempDir();
+    const payload = tempDir();
+    const attachFile = join(payload, "delivery.diff");
+    // 逐字节内容,含会被模型转述损坏的东西:diff hunk 头、trailing space、无尾换行
+    const bytes = "diff --git a/x b/x\n@@ -1,2 +1,2 @@ f() {\n-old   \n+new\n}";
+    writeFileSync(attachFile, bytes);
+    const runProcess: RunnerProcess = async (args) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, `summary line the model wrote\n[attach:${attachFile}]\n`);
+      return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
+    };
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      runProcess,
+      post,
+    })(triggerFrame(41), runnerCtx());
+
+    const finalPost = posts.at(-1)!;
+    expect(finalPost.body).toMatchObject({ kind: "message", reply_to: 41 });
+    // 正文 = 文件逐字节,不是模型输出、不加 session marker、不含摘要行
+    expect((finalPost.body as { body: string }).body).toBe(bytes);
+  });
+
+  test("[attach] with a relative path is refused and posts a blocked status (issue #41)", async () => {
+    const { posts, post } = postRecorder();
+    const workdir = tempDir();
+    const runProcess: RunnerProcess = async (args) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, "[attach:relative.diff]\n");
+      return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
+    };
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      runProcess,
+      post,
+    })(triggerFrame(42), runnerCtx());
+
+    const finalPost = posts.at(-1)!;
+    expect(finalPost.body).toMatchObject({ kind: "status", state: "blocked" });
+    expect(String((finalPost.body as { note?: unknown }).note)).toContain("path must be absolute");
+    // 绝不发部分正文
+    expect(posts.some((p) => (p.body as { kind: string }).kind === "message")).toBe(false);
+  });
+
+  test("output without an [attach] marker falls back to the model text with session marker", async () => {
+    const { posts, post } = postRecorder();
+    const workdir = tempDir();
+    const runProcess: RunnerProcess = async (args) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, "plain narrative answer\n");
+      return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
+    };
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      runProcess,
+      post,
+    })(triggerFrame(43), runnerCtx());
+
+    const body = (posts.at(-1)!.body as { body: string }).body;
+    expect(body).toContain("plain narrative answer");
+    expect(body).toStartWith("[session start: 019f35d9]");
+  });
+
   test("resume failure cold-starts a new codex session and prefixes the reply with a reset marker", async () => {
     const { posts, post } = postRecorder();
     const workdir = tempDir();
