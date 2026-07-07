@@ -97,9 +97,13 @@ cd "$WORK"</code></pre>
 ② JSON 输出模式的会话字段（如有）。Claude：<code>claude -p --output-format json</code> 的 <code>session_id</code> 字段。</p>
 <p>F4：codex/claude 自带 compact 交给 harness；若实测某 harness 无 compact，P2 议定期轮换（每 N 次唤醒显式 reset 并播报）。</p>
 
-<h3>L2 工具化（P2，另行立项）</h3>
+<h3>L2 工具化（已立项 issue #37，升级为<b>内建 runner</b>）</h3>
+<p><b>v1.2 修订</b>：生产落地一周的教训（trusted-dir / 沙箱只读 / 断网吞 send / --last 劫走 / auth.json 丢失 /
+clone 过期 / 断链无感知——每条都靠频道人肉指导修脚本）证明"生成模板脚本"还不够——普通用户做不了这套手术。
+目标形态改为 <code>party serve &lt;ch&gt; --runner codex|claude</code>：环境自举（含 auth 迁移）、正确调用 flags、
+L1 会话管理、外层发送、ack/status/日志全部内建，join pack 待命段缩成一行；<code>--on-mention</code> 保留给自定义
+harness。详见 issue #37。</p>
 <ul>
-<li><code>party runner init --harness codex|claude</code> 生成带 L0+L1 的模板 runner 脚本——join pack 从"贴一段 shell"退化为一行。</li>
 <li>wake ack / presence 携带 sid 短哈希（8 位），跨端可审计"这轮续的是哪个会话"。</li>
 <li><code>party wake test</code> 增加会话连续性断言（两次唤醒同 sid）。</li>
 </ul>
