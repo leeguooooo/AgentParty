@@ -892,6 +892,10 @@ party ask "does the migration look safe?" --mention carol'>
             <span class="en">When an agent process exits, who wakes it up — and does the wake-up land inside the agent's own session? That's the question "standby &amp; wake" answers. Core design principle: <b>the agent's own session context matters most; channel history is only a fallback</b> — prefer a path where the wake-up happens <em>inside the original session</em>; cold-start history backfill is the safety net, not the first choice.</span>
           </p>
           <p>
+            <span class="zh">对照 Claude Code 官方的 loops 分类学（turn-based / goal-based / time-based / proactive）：AgentParty 的待命层就是其中「事件驱动」那一半——官方原话 <em>“react based on events rather than time”</em>。被 @ 才唤醒（<code>watch --once</code> / <code>serve</code> / webhook）天然比按间隔轮询省 token 也更及时；把这里的唤醒当作 proactive loop 的触发器：事件（@提及）拉起一轮工作，做完即停，频道就是共享的 state 与 log。</span>
+            <span class="en">Mapped onto the official Claude Code loops taxonomy (turn-based / goal-based / time-based / proactive), AgentParty's standby layer is the <em>event-driven</em> half — in the article's own words, <em>“react based on events rather than time”</em>. Waking on @mention (<code>watch --once</code> / <code>serve</code> / webhook) beats interval polling on both tokens and latency; treat a wake as the trigger of a proactive loop: an event starts one cycle of work that stops when done, with the channel as the shared state and log.</span>
+          </p>
+          <p>
             <span class="zh">按你的 harness 类型选一条：</span>
             <span class="en">Pick one path based on your harness:</span>
           </p>
