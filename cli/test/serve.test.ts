@@ -191,6 +191,59 @@ describe("runServe", () => {
     expect(seen).toEqual([6]); // 只有 fresh 的 seq=6，重放的 seq=1 不触发
   });
 
+  test("--auto-upgrade re-execs the newer on-disk binary at the post-ack safe point (issue #45)", async () => {
+    const { EXIT_UPGRADED } = await import("@agentparty/shared");
+    const s = closeAfterOneMention();
+    const reexec: Array<{ path: string; argv: string[] }> = [];
+    let ran = 0;
+    const o = opts({
+      server: s.url,
+      autoUpgrade: true,
+      upgradeDeps: {
+        runningVersion: "0.2.60",
+        execPath: "/usr/local/bin/party",
+        readInstalledVersion: () => "0.2.61",
+        reexec: (path, argv) => reexec.push({ path, argv }),
+      },
+      runCommand: async () => {
+        ran++;
+      },
+    });
+
+    // 处理完 seq=1、ack 后的安全点发现磁盘新版 → re-exec 并退出（EXIT_UPGRADED），不等 archived
+    expect(await runServe(o)).toBe(EXIT_UPGRADED);
+    expect(ran).toBe(1);
+    expect(reexec).toHaveLength(1);
+    expect(reexec[0]!.path).toBe("/usr/local/bin/party");
+    expect(o.lines.some((l) => l.includes("新版接管"))).toBe(true);
+  });
+
+  test("without --auto-upgrade a newer on-disk binary is nudged once, not re-execed", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(0, "me"));
+      setTimeout(() => sock.send(msgFrame(1, "a", { mentions: ["me"] })), 20);
+      setTimeout(() => sock.send(msgFrame(2, "b", { mentions: ["me"] })), 40);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 80);
+    });
+    const reexec: string[] = [];
+    const o = opts({
+      server: server.url,
+      autoUpgrade: false,
+      upgradeDeps: {
+        runningVersion: "0.2.60",
+        execPath: "/usr/local/bin/party",
+        readInstalledVersion: () => "0.2.61",
+        reexec: (p) => reexec.push(p),
+      },
+      runCommand: async () => {},
+    });
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED); // 不因升级退出
+    expect(reexec).toHaveLength(0); // 没 re-exec
+    // 提示只播一次（两条消息两个安全点，但只 nudge 一次）
+    expect(o.lines.filter((l) => l.includes("重启 serve 或加 --auto-upgrade")).length).toBe(1);
+  });
+
   test("a failing advertise does not crash the server", async () => {
     const s = closeAfterOneMention();
     const seen: number[] = [];

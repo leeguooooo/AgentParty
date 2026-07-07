@@ -33,6 +33,9 @@ export const EXIT_ARCHIVED = 5;
 // 静默 return 0 会让 supervisor 误判为正常收尾（issue #29：pid 消失、日志 0 字节、无错误），
 // 故单列一个非零码，让外层 supervisor 能看到失败并重启。
 export const EXIT_STREAM_ENDED = 6;
+// serve --auto-upgrade 在唤醒间隙发现磁盘上有更新的 party 二进制、已 re-exec 新版并让本进程退出
+// （issue #45）。launchctl KeepAlive 场景无所谓；供包装脚本区分「正常升级退出」与异常。
+export const EXIT_UPGRADED = 7;
 
 // ---- 基础类型 ----
 

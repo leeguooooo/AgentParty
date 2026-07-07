@@ -1,0 +1,68 @@
+// 自升级支持（issue #45）：已在跑的 serve 是内存里的旧二进制，但 process.execPath 指向的磁盘文件
+// 会被 install.sh 换成新版。这里网络-free 地读磁盘二进制版本、比对、在唤醒间隙 re-exec 新版。
+import pkg from "../package.json" with { type: "json" };
+
+export const RUNNING_VERSION = pkg.version;
+
+// semver 比较：a>b→1, a<b→-1, ==→0。只认 X.Y.Z 数字段，非法段当 0。
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+// 磁盘上 party 二进制的版本：对编译版（bun --compile），process.execPath 就是 party 二进制本身，
+// install.sh 覆盖它后，spawn 它 --version 读到的是【新】版本，而当前进程仍是旧的内存镜像。
+// 注入点 readVersion 供测试；默认真跑 execPath --version。dev（bun run src/index.ts）下 execPath
+// 是 bun，读不到 party 版本 → 返回 null（不误判、不 re-exec）。
+export interface UpgradeDeps {
+  runningVersion?: string;
+  execPath?: string;
+  readInstalledVersion?: (execPath: string) => string | null;
+  reexec?: (execPath: string, argv: string[]) => void;
+}
+
+function defaultReadInstalledVersion(execPath: string): string | null {
+  try {
+    const proc = Bun.spawnSync([execPath, "--version"], { stdout: "pipe", stderr: "ignore" });
+    if (!proc.success) return null;
+    const out = new TextDecoder().decode(proc.stdout).trim();
+    return /^\d+\.\d+\.\d+/.test(out) ? out.split(/\s+/)[0]! : null;
+  } catch {
+    return null;
+  }
+}
+
+// 磁盘二进制比运行版新 → 返回新版本号，否则 null。
+export function pendingUpgrade(deps: UpgradeDeps = {}): string | null {
+  const running = deps.runningVersion ?? RUNNING_VERSION;
+  const execPath = deps.execPath ?? process.execPath;
+  const read = deps.readInstalledVersion ?? defaultReadInstalledVersion;
+  // 只有 execPath 看起来是 party 二进制（basename 含 party）才比——dev 下 execPath=bun，跳过。
+  const base = execPath.split("/").pop() ?? "";
+  if (!base.includes("party")) return null;
+  const installed = read(execPath);
+  if (!installed) return null;
+  return compareVersions(installed, running) > 0 ? installed : null;
+}
+
+// re-exec 磁盘上的新二进制：spawn 同 argv、继承 stdio、detach，然后让调用方退出。
+// PID 会变——launchctl KeepAlive 天然重启；nohup 场景新进程接管（旧进程退出）。
+function defaultReexec(execPath: string, argv: string[]): void {
+  Bun.spawn([execPath, ...argv], { stdio: ["inherit", "inherit", "inherit"] }).unref();
+}
+
+// serve 在唤醒间隙调用：有新版且 auto=true 就 re-exec 并返回 true（调用方应停循环退出）。
+export function maybeReexecUpgrade(auto: boolean, deps: UpgradeDeps = {}): { pending: string | null; reexeced: boolean } {
+  const pending = pendingUpgrade(deps);
+  if (!pending) return { pending: null, reexeced: false };
+  if (!auto) return { pending, reexeced: false };
+  const execPath = deps.execPath ?? process.execPath;
+  const argv = process.argv.slice(2);
+  (deps.reexec ?? defaultReexec)(execPath, argv);
+  return { pending, reexeced: true };
+}

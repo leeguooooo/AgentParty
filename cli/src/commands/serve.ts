@@ -1,7 +1,8 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
-import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, type MsgFrame } from "@agentparty/shared";
+import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type MsgFrame } from "@agentparty/shared";
+import { maybeReexecUpgrade, type UpgradeDeps } from "../upgrade";
 import {
   appendFileSync,
   copyFileSync,
@@ -138,7 +139,7 @@ export function writeContextFile(frame: MsgFrame, channel: string, self: string,
   return path;
 }
 
-const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo"];
+const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade"];
 const HELP = `usage: party serve [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all]
 
 Stay attached to a channel and run one local command for each matching message.
@@ -151,6 +152,7 @@ Options:
                        use the built-in isolated wake runner instead of a custom command
   --workdir DIR        runner workdir (default: ~/.agentparty/runners/<channel>)
   --repo URL           clone into workdir/repo once, then git pull --ff-only before each wake
+  --auto-upgrade       between wakes, if a newer party binary is on disk, re-exec it (issue #45)
   --all                run for every non-self message, not only @mentions`;
 
 export interface ServeOptions {
@@ -172,6 +174,9 @@ export interface ServeOptions {
   sdkRunner?: SdkRunnerOptions;
   // serve 挂上后声明自己「可被唤醒」的钩子；run() 注入真实实现，测试可省略/替换
   advertise?: () => Promise<void>;
+  // 唤醒间隙发现磁盘装了更新的 party 就自动 re-exec 新版（issue #45）；默认只提示不动。
+  autoUpgrade?: boolean;
+  upgradeDeps?: UpgradeDeps; // 测试注入版本读取/re-exec
   out?: (line: string) => void;
 }
 
@@ -670,6 +675,8 @@ function expandHomePath(path: string): string {
 export async function runServe(o: ServeOptions): Promise<number> {
   const out = o.out ?? ((line: string) => console.error(line));
   const run = o.runCommand ?? (o.sdkRunner ? createSdkRunner(o.sdkRunner) : o.builtinRunner ? createBuiltinRunner(o.builtinRunner) : defaultRun);
+  let upgraded = false;
+  let nudgedUpgrade = false;
   const conn = connect(o.server, o.token, o.channel, o.since, {
     onCursor: o.onCursor,
     sinceRev: o.sinceRev,
@@ -729,10 +736,25 @@ export async function runServe(o: ServeOptions): Promise<number> {
       if (recent.length > RECENT_MAX) recent.shift();
       // 处理（或跳过）后才推进游标，退出时未消费的留给下次补拉
       conn.ack(frame.seq);
+
+      // 唤醒间隙的安全点：磁盘上的 party 二进制被 install.sh 换新了吗（issue #45）？
+      // 此刻上一轮已 ack、游标已落盘、无进行中的 runner——re-exec 干净。--auto-upgrade 直接换，
+      // 否则只播一次提示（不刷屏）。dev / 版本未变 → maybeReexecUpgrade 返回 pending=null，无副作用。
+      const up = maybeReexecUpgrade(o.autoUpgrade === true, o.upgradeDeps);
+      if (up.reexeced) {
+        out(`serve: 磁盘已装 party v${up.pending}，已启动新版接管，本进程退出（issue #45）`);
+        upgraded = true;
+        break;
+      }
+      if (up.pending && !nudgedUpgrade) {
+        nudgedUpgrade = true;
+        out(`serve: 磁盘已装 party v${up.pending}（当前跑的是旧版）——重启 serve 或加 --auto-upgrade 以采用`);
+      }
     }
   } finally {
     conn.close();
   }
+  if (upgraded) return EXIT_UPGRADED;
   // 帧流意外结束（既非终局 error 也非用户 Ctrl-C）：常驻 supervisor 语义下这是异常终止。
   // 报机器可读原因 + 非零退出，否则 --on-mention supervisor 会像 watch --follow 一样静默消失（issue #29 同源）。
   if (code === 0) {
@@ -747,7 +769,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["all"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "auto-upgrade"] });
   const auth = await resolveAuthDetailed();
   if (!auth.server || !auth.token) {
     console.error("no config, run: party login or party init --server URL --token T");
@@ -799,6 +821,7 @@ export async function run(argv: string[]): Promise<number> {
     onCursor: (c) => saveCursor(channel, c),
     onRevCursor: (r) => saveRevCursor(channel, r),
     advertise: () => advertiseServeWake(auth, channel),
+    autoUpgrade: flags["auto-upgrade"] === true,
     builtinRunner: harness
       ? {
           server: auth.server,

@@ -103,6 +103,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/webhook")).run(rest);
     case "token":
       return (await import("./commands/token")).run(rest);
+    case "doctor":
+      return (await import("./commands/doctor")).run(rest);
     default:
       console.error(`unknown command: ${cmd}`);
       console.log(HELP);
