@@ -9,6 +9,8 @@ import {
   type ChannelKind,
   type ChannelMode,
   type CollaborationRole,
+  type CompletionGate,
+  type CompletionReviewPolicy,
   type MsgFrame,
   type PresenceEntry,
   type SearchHit,
@@ -21,6 +23,7 @@ import {
 import pkg from "../package.json" with { type: "json" };
 
 export type { ChannelMode, WebhookFilter };
+export type { CompletionGate, CompletionReviewPolicy };
 export type { CaptureKind, CaptureRecord };
 
 // 频道可见性：public = 任何鉴权身份可进；private（默认）= 仅 leo 的 ap_ token + 房主（spec §3.2）
@@ -401,6 +404,19 @@ export async function clearChannelRole(
     method: "DELETE",
     headers: bearerJson(token),
   });
+}
+
+export async function setCompletionGate(
+  server: string,
+  token: string,
+  slug: string,
+  body: { gate: CompletionGate; policy?: CompletionReviewPolicy },
+): Promise<{ gate: CompletionGate; policy: CompletionReviewPolicy }> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/completion-gate`, {
+    method: "PUT",
+    headers: bearerJson(token),
+    body: JSON.stringify(body),
+  })) as { gate: CompletionGate; policy: CompletionReviewPolicy };
 }
 
 export async function searchMessages(

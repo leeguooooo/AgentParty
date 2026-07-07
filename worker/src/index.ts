@@ -4,6 +4,8 @@ import type {
   AgentLineage,
   CaptureKind,
   CaptureRecord,
+  CompletionGate,
+  CompletionReviewPolicy,
   ChannelKind,
   ChannelMode,
   CollaborationRole,
@@ -43,6 +45,8 @@ const ROLES: readonly string[] = ["agent", "human", "readonly"] satisfies TokenR
 const KINDS: readonly string[] = ["standing", "temp"] satisfies ChannelKind[];
 const MODES: readonly string[] = ["normal", "party"] satisfies ChannelMode[];
 const VISIBILITIES: readonly string[] = ["public", "private"];
+const COMPLETION_GATES: readonly string[] = ["off", "reviewer"] satisfies CompletionGate[];
+const COMPLETION_REVIEW_POLICIES: readonly string[] = ["sender", "owner"] satisfies CompletionReviewPolicy[];
 const COLLAB_ROLES: readonly string[] = ["host", "worker", "reviewer", "observer"] satisfies CollaborationRole[];
 const WEBHOOK_FILTERS: readonly string[] = ["mentions", "status", "needs-human", "all"] satisfies WebhookFilter[];
 const CAPTURE_KINDS: readonly string[] = ["decision", "requirement", "bug", "action-item"] satisfies CaptureKind[];
@@ -921,6 +925,47 @@ app.delete("/api/channels/:slug/roles/:name", async (c) => {
     }),
   );
   return c.json({ ok: true });
+});
+
+app.put("/api/channels/:slug/completion-gate", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can configure completion gate"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const body = (await c.req.json().catch(() => null)) as { gate?: unknown; policy?: unknown } | null;
+  const gate = typeof body?.gate === "string" ? body.gate : "";
+  if (!COMPLETION_GATES.includes(gate as CompletionGate)) {
+    return c.json(errorBody("bad_request", "gate must be off or reviewer"), 400);
+  }
+  const policy =
+    body?.policy === undefined
+      ? channel.completion_review_policy
+      : typeof body.policy === "string"
+        ? body.policy
+        : "";
+  if (!COMPLETION_REVIEW_POLICIES.includes(policy as CompletionReviewPolicy)) {
+    return c.json(errorBody("bad_request", "policy must be sender or owner"), 400);
+  }
+  await c.env.DB.prepare(
+    "UPDATE channels SET completion_gate = ?, completion_review_policy = ? WHERE slug = ?",
+  )
+    .bind(gate, policy, slug)
+    .run();
+  const updated = { ...channel, completion_gate: gate, completion_review_policy: policy };
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  await stub.fetch(
+    new Request("https://do/internal/init", {
+      method: "POST",
+      headers: { "x-partykit-room": slug, ...channelHeaders(updated, c.req.url) },
+    }),
+  );
+  return c.json({ gate, policy });
 });
 
 app.post("/api/channels/:slug/messages/:seq/:action", async (c) => {

@@ -79,6 +79,10 @@ export function startRestMock(handler?: RestHandler): RestMock {
       if (r.method === "POST" && /^\/api\/channels\/[^/]+\/reset-guard$/.test(r.path)) {
         return Response.json({ ok: true });
       }
+      if (r.method === "PUT" && /^\/api\/channels\/[^/]+\/completion-gate$/.test(r.path)) {
+        const b = body as { gate: "off" | "reviewer"; policy?: "sender" | "owner" };
+        return Response.json({ gate: b.gate, policy: b.policy ?? "sender" });
+      }
       const roleMatch = r.path.match(/^\/api\/channels\/([^/]+)\/roles(?:\/([^/]+))?$/);
       if (roleMatch) {
         const slug = decodeURIComponent(roleMatch[1]!);

@@ -511,6 +511,35 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/completion-gate": {
+      put: {
+        summary: "configure review-gated completion for a channel",
+        security: [{ bearer: [] }],
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["gate"],
+                properties: {
+                  gate: { type: "string", enum: ["off", "reviewer"] },
+                  policy: { type: "string", enum: ["sender", "owner"] },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{gate,policy}" },
+          "400": { description: "invalid gate or policy" },
+          "403": { description: "only channel moderator can configure completion gate" },
+          "404": { description: "channel not found" },
+          "410": { description: "channel archived" },
+        },
+      },
+    },
     "/api/channels/{slug}/webhooks": {
       get: {
         summary: "list outbound webhooks (secret is never returned)",

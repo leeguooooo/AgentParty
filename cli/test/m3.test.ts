@@ -2554,6 +2554,44 @@ describe("party channel reset-guard", () => {
   });
 });
 
+describe("party channel gate", () => {
+  test("gate reviewer 调 PUT /completion-gate，可带 policy", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "gate", "reviewer", "ops", "--policy", "owner"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("completion gate ops: reviewer policy=owner");
+    const reqs = reqsOf(mock, "PUT", "/api/channels/ops/completion-gate");
+    expect(reqs.length).toBe(1);
+    expect(reqs[0]!.body).toEqual({ gate: "reviewer", policy: "owner" });
+    expect(reqs[0]!.headers.authorization).toBe("Bearer ap_tok");
+  });
+
+  test("gate off 可使用绑定频道并省略 policy", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    writeWorkspaceState("ops");
+    const r = await runCli(["channel", "gate", "off"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("completion gate ops: off policy=sender");
+    expect(reqsOf(mock, "PUT", "/api/channels/ops/completion-gate")[0]!.body).toEqual({ gate: "off" });
+  });
+
+  test("gate 本地校验 gate policy 和 slug", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    for (const args of [
+      ["channel", "gate", "quorum", "ops"],
+      ["channel", "gate", "reviewer", "ops", "--policy", "assigned_reviewer"],
+      ["channel", "gate", "reviewer", "Bad_Slug"],
+    ]) {
+      const r = await runCli(args);
+      expect(r.code).toBe(1);
+    }
+    expect(mock.requests.length).toBe(0);
+  });
+});
+
 describe("party channel role", () => {
   test("role set/list/unset 调用频道角色 API", async () => {
     mock = startRestMock();

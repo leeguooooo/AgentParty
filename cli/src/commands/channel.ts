@@ -12,16 +12,20 @@ import {
   listChannels,
   resetGuard,
   setChannelRole,
+  setCompletionGate,
 } from "../rest";
 import { isName, isSlug } from "../validation";
 
-const CHANNEL_FLAGS = ["title", "temp", "party", "public"];
+const CHANNEL_FLAGS = ["title", "temp", "party", "public", "policy"];
 const COLLAB_ROLES = ["host", "worker", "reviewer", "observer"] as const;
+const COMPLETION_GATES = ["reviewer", "off"] as const;
+const COMPLETION_REVIEW_POLICIES = ["sender", "owner"] as const;
 const HELP = `usage: party channel create <slug> [--title t] [--temp] [--party] [--public]
        party channel list
        party channel archive [slug]
        party channel reset-guard [slug]
        party channel kick <name> [slug]
+       party channel gate reviewer|off [slug] [--policy sender|owner]
        party channel role list [slug]
        party channel role set <name> host|worker|reviewer|observer [slug]
        party channel role unset <name> [slug]
@@ -32,7 +36,8 @@ Options:
   --title t   channel title when creating
   --temp      create a temporary channel
   --party     create a party-mode channel
-  --public    create a public channel`;
+  --public    create a public channel
+  --policy p  completion review policy: sender or owner`;
 
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
@@ -45,7 +50,7 @@ export async function run(argv: string[]): Promise<number> {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["title"]);
+  const flagError = valueFlagError(flags, ["title", "policy"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -138,6 +143,33 @@ export async function run(argv: string[]): Promise<number> {
         console.log(`kicked ${name} from ${slug}`);
         return 0;
       }
+      case "gate": {
+        const gate = positionals[1];
+        const slug = resolveChannel(positionals[2]);
+        const policy = str(flags.policy);
+        if (!gate || !slug) {
+          console.error("usage: party channel gate reviewer|off [slug] [--policy sender|owner]");
+          return 1;
+        }
+        if (!COMPLETION_GATES.includes(gate as (typeof COMPLETION_GATES)[number])) {
+          console.error("gate must be reviewer or off");
+          return 1;
+        }
+        if (!isSlug(slug)) {
+          console.error("slug must match [a-z0-9][a-z0-9-]{0,63}");
+          return 1;
+        }
+        if (policy !== undefined && !COMPLETION_REVIEW_POLICIES.includes(policy as (typeof COMPLETION_REVIEW_POLICIES)[number])) {
+          console.error("policy must be sender or owner");
+          return 1;
+        }
+        const result = await setCompletionGate(cfg.server, cfg.token, slug, {
+          gate: gate as (typeof COMPLETION_GATES)[number],
+          ...(policy === undefined ? {} : { policy: policy as (typeof COMPLETION_REVIEW_POLICIES)[number] }),
+        });
+        console.log(`completion gate ${slug}: ${result.gate} policy=${result.policy}`);
+        return 0;
+      }
       case "role": {
         const action = positionals[1];
         if (action === "list") {
@@ -203,7 +235,7 @@ export async function run(argv: string[]): Promise<number> {
         return 1;
       }
       default:
-        console.error("usage: party channel create|list|archive|reset-guard|kick|role");
+        console.error("usage: party channel create|list|archive|reset-guard|kick|gate|role");
         return 1;
     }
   } catch (e) {

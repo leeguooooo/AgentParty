@@ -1,7 +1,7 @@
 // 公开/私有频道访问控制（spec §3.2 矩阵 + §5 踢人）
 // 单元：canAccessChannel / isChannelModerator 全矩阵
 // 集成：WS 升级 / REST GET / REST POST 三处强制 + 踢人
-import { SELF, fetchMock } from "cloudflare:test";
+import { SELF, env, fetchMock } from "cloudflare:test";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { canAccessChannel, isChannelModerator, type AclIdentity, type ChannelAcl } from "../src/acl";
 import { ADMIN_HEADERS, api, seedToken, uniq, WsClient } from "./helpers";
@@ -424,6 +424,68 @@ describe("channel role assignments (issues #14/#17)", () => {
     const found = channels.channels.find((ch) => ch.slug === slug)?.presence.find((p) => p.name === worker.name);
     expect(found?.role).toBeUndefined();
     expect(found?.role_source).toBeUndefined();
+  });
+});
+
+describe("completion gate channel config (#34)", () => {
+  it("lets moderators configure completion gate and rejects invalid bodies", async () => {
+    const acct = `${uniq("acct")}@leeguoo.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: acct });
+    const slug = await makeChannel(owner.token, "private");
+
+    const enabled = await api(`/api/channels/${slug}/completion-gate`, owner.token, {
+      method: "PUT",
+      body: JSON.stringify({ gate: "reviewer", policy: "owner" }),
+    });
+    expect(enabled.status).toBe(200);
+    expect((await enabled.json()) as { gate: string; policy: string }).toEqual({
+      gate: "reviewer",
+      policy: "owner",
+    });
+    const row = await env.DB.prepare(
+      "SELECT completion_gate, completion_review_policy FROM channels WHERE slug = ?",
+    )
+      .bind(slug)
+      .first<{ completion_gate: string; completion_review_policy: string }>();
+    expect(row).toEqual({ completion_gate: "reviewer", completion_review_policy: "owner" });
+
+    const off = await api(`/api/channels/${slug}/completion-gate`, owner.token, {
+      method: "PUT",
+      body: JSON.stringify({ gate: "off" }),
+    });
+    expect(off.status).toBe(200);
+    expect((await off.json()) as { gate: string; policy: string }).toEqual({ gate: "off", policy: "owner" });
+
+    const badGate = await api(`/api/channels/${slug}/completion-gate`, owner.token, {
+      method: "PUT",
+      body: JSON.stringify({ gate: "quorum" }),
+    });
+    expect(badGate.status).toBe(400);
+    const badPolicy = await api(`/api/channels/${slug}/completion-gate`, owner.token, {
+      method: "PUT",
+      body: JSON.stringify({ gate: "reviewer", policy: "assigned_reviewer" }),
+    });
+    expect(badPolicy.status).toBe(400);
+  });
+
+  it("requires channel moderator permissions", async () => {
+    const acct = `${uniq("acct")}@leeguoo.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: acct });
+    const scoped = await seedToken("agent", uniq("scoped"), { owner: acct, channelScope: "placeholder" });
+    const readonly = await seedToken("readonly", uniq("ro"), { owner: acct, channelScope: "placeholder" });
+    const slug = await makeChannel(owner.token, "private");
+
+    const scopedDenied = await api(`/api/channels/${slug}/completion-gate`, scoped.token, {
+      method: "PUT",
+      body: JSON.stringify({ gate: "reviewer" }),
+    });
+    expect(scopedDenied.status).toBe(403);
+
+    const readonlyDenied = await api(`/api/channels/${slug}/completion-gate`, readonly.token, {
+      method: "PUT",
+      body: JSON.stringify({ gate: "reviewer" }),
+    });
+    expect(readonlyDenied.status).toBe(403);
   });
 });
 
