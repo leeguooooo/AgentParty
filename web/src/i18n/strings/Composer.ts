@@ -5,13 +5,21 @@ export const ComposerStrings: LocaleDict = {
     "Composer.tier.online": "online",
     "Composer.tier.wakeable": "wakeable",
     "Composer.tier.recent": "recent",
+    "Composer.kind.agent": "agent",
+    "Composer.kind.human": "human",
+    "Composer.owner": "owner: {account}",
     "Composer.role": "role: {role}",
+    "Composer.note": "note: {note}",
   },
   zh: {
     "Composer.tier.online": "在线",
     "Composer.tier.wakeable": "可唤醒",
     "Composer.tier.recent": "最近",
+    "Composer.kind.agent": "agent",
+    "Composer.kind.human": "human",
+    "Composer.owner": "所属: {account}",
     "Composer.role": "职责: {role}",
+    "Composer.note": "说明: {note}",
   },
 };
 

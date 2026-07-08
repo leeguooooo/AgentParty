@@ -5,13 +5,22 @@ import type { PresenceEntry, Sender, WakeKind } from "@agentparty/shared";
 
 export type MentionTier = "online" | "wakeable" | "recent";
 
+export interface MentionIdentity {
+  name: string;
+  display: string;
+  kind?: "agent" | "human";
+  account?: string;
+}
+
 export interface MentionCandidate {
   name: string; // @ 目标（token 名；人类网页会话是 UUID）
   display: string; // 可读名：人类优先显示账号 email，否则 name
   kind: "agent" | "human";
   tier: MentionTier;
+  group: string; // UI 分组：账号 / 未归属
   account?: string; // 会话背后的账号（人类 = email）
   role?: string; // 协作角色/职责（host/worker/reviewer/observer），hover 显示
+  note?: string; // 当前 status note，临时承载职责说明；长期应由结构化 channel role 提供
 }
 
 const WAKEABLE: readonly WakeKind[] = ["serve", "watch", "webhook"];
@@ -51,10 +60,15 @@ export function mentionCandidates(
   presence: Record<string, PresenceEntry>,
   self: string | null,
   now: number,
+  identities: MentionIdentity[] = [],
 ): MentionCandidate[] {
   const online = new Set(participants.map((p) => p.name));
+  const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
   const kindOf = new Map<string, "agent" | "human">();
   for (const p of participants) kindOf.set(p.name, p.kind);
+  for (const identity of identities) {
+    if (identity.kind === "agent" || identity.kind === "human") kindOf.set(identity.name, identity.kind);
+  }
   for (const [name, p] of Object.entries(presence)) {
     if (!kindOf.has(name) && (p.kind === "agent" || p.kind === "human")) kindOf.set(name, p.kind);
   }
@@ -69,10 +83,12 @@ export function mentionCandidates(
     .map((name) => {
       const kind = kindFor(name);
       const p = presence[name];
-      const account = p?.account;
+      const identity = identityByName.get(name);
+      const account = identity?.account ?? p?.account;
       // 人类网页会话名是 UUID，显示账号 email 才认得出「是谁」；agent 名本身可读，用 name。
-      const display = kind === "human" && account ? account : name;
-      return { name, display, kind, tier: tierFor(name, online, presence, now), account, role: p?.role };
+      const display = identity?.display && identity.display !== "" ? identity.display : (kind === "human" && account ? account : name);
+      const group = account ?? (kind === "human" ? "human sessions" : "unowned agents");
+      return { name, display, kind, tier: tierFor(name, online, presence, now), group, account, role: p?.role, note: p?.note ?? undefined };
     })
     .filter((c) => {
       if (c.tier === "online") return true; // 当前连着的都留（含在线的人类）
@@ -81,7 +97,13 @@ export function mentionCandidates(
       const seen = p?.last_seen ?? p?.ts ?? 0;
       return now - seen <= DEAD_MS; // 幽灵清理：太久没露面的 agent 也剔除
     })
-    .sort((a, b) => rank[a.tier] - rank[b.tier] || a.name.localeCompare(b.name));
+    .filter((c) => {
+      // 可读身份缺失的人类 UUID 不进补全菜单；否则用户只会看到一串无法识别的 session id。
+      if (c.kind !== "human") return true;
+      if (!SYSTEM_HUMAN_SESSION_RE.test(c.name)) return true;
+      return c.account !== undefined && c.display !== c.name;
+    })
+    .sort((a, b) => a.group.localeCompare(b.group) || rank[a.tier] - rank[b.tier] || a.display.localeCompare(b.display));
 }
 
 // Composer 用：光标前若正在打 @<prefix>，返回 { start, query }；否则 null。

@@ -1034,8 +1034,8 @@ export function ChannelPage({
   );
   // @ 补全候选：participants ∪ presence，分档（在线/可唤醒/最近）。teamNow 30s 刷新驱动 stale 判定。
   const mentionOptions = useMemo(
-    () => mentionCandidates(state.participants, state.presence, state.self, teamNow),
-    [state.participants, state.presence, state.self, teamNow],
+    () => mentionCandidates(state.participants, state.presence, state.self, teamNow, channelIdentities),
+    [channelIdentities, state.participants, state.presence, state.self, teamNow],
   );
   const identityDisplay = useMemo(
     () =>

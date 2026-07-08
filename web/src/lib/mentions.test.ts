@@ -60,7 +60,37 @@ describe("mentionCandidates", () => {
     const c = mentionCandidates(participants, pres, null, NOW)[0]!;
     expect(c.name).toBe(uuid); // @ 目标仍是 token 名
     expect(c.display).toBe("thejacks@163.com"); // 但显示可读账号
+    expect(c.group).toBe("thejacks@163.com");
     expect(c.role).toBe("reviewer"); // hover 能看职责
+  });
+
+  test("human UUID session can be labeled from the channel identity map", () => {
+    const uuid = "61ec302c-6c31-4bca-a1df-88152372f6d9";
+    const participants: Sender[] = [{ name: uuid, kind: "human" }];
+    const pres = { [uuid]: presence({ name: uuid, kind: "human" }) };
+    const c = mentionCandidates(participants, pres, null, NOW, [
+      { name: uuid, display: "thejacks@163.com", kind: "human", account: "thejacks@163.com" },
+    ])[0]!;
+    expect(c.display).toBe("thejacks@163.com");
+    expect(c.group).toBe("thejacks@163.com");
+  });
+
+  test("online opaque human UUID without an account is excluded instead of showing raw id", () => {
+    const uuid = "e6a3d3fa-3678-4c8c-ba5c-5f3481f98430";
+    const participants: Sender[] = [{ name: uuid, kind: "human" }];
+    const pres = { [uuid]: presence({ name: uuid, kind: "human" }) };
+    expect(mentionCandidates(participants, pres, null, NOW)).toEqual([]);
+  });
+
+  test("agent candidates carry account grouping from identities", () => {
+    const pres = { "leo-zego-im": presence({ name: "leo-zego-im", kind: "agent", role: "worker" }) };
+    const c = mentionCandidates([], pres, null, NOW, [
+      { name: "leo-zego-im", display: "leo-zego-im", kind: "agent", account: "leeguooooo@gmail.com" },
+    ])[0]!;
+    expect(c.display).toBe("leo-zego-im");
+    expect(c.account).toBe("leeguooooo@gmail.com");
+    expect(c.group).toBe("leeguooooo@gmail.com");
+    expect(c.role).toBe("worker");
   });
 
   test("bare-UUID session name excluded when offline (旧 presence 行没回填 kind 的兜底)", () => {
@@ -105,9 +135,9 @@ describe("activeMentionQuery", () => {
 
 describe("filterCandidates", () => {
   const cands = [
-    { name: "alice", display: "alice", kind: "human" as const, tier: "online" as const },
-    { name: "bob-review", display: "bob-review", kind: "agent" as const, tier: "wakeable" as const },
-    { name: "carol", display: "carol", kind: "agent" as const, tier: "recent" as const },
+    { name: "alice", display: "alice", kind: "human" as const, tier: "online" as const, group: "alice@example.com" },
+    { name: "bob-review", display: "bob-review", kind: "agent" as const, tier: "wakeable" as const, group: "bob@example.com" },
+    { name: "carol", display: "carol", kind: "agent" as const, tier: "recent" as const, group: "carol@example.com" },
   ];
   test("prefix hits before substring hits", () => {
     expect(filterCandidates(cands, "b").map((c) => c.name)).toEqual(["bob-review"]);

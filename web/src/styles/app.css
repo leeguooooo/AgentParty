@@ -1908,7 +1908,7 @@
   bottom: calc(100% + 4px);
   left: 2px;
   right: 2px;
-  max-width: 380px;
+  max-width: min(620px, calc(100vw - 48px));
   margin: 0;
   padding: 4px;
   list-style: none;
@@ -1919,6 +1919,22 @@
   box-shadow: 4px 5px 0 var(--d-shadow);
   max-height: 260px;
   overflow-y: auto;
+}
+.mention-row {
+  margin: 0;
+  padding: 0;
+}
+.mention-group {
+  padding: 7px 8px 3px;
+  font-size: 10.5px;
+  font-weight: 800;
+  color: var(--t-dim);
+  border-top: 1px solid var(--t-faint);
+  text-transform: none;
+}
+.mention-row:first-child .mention-group {
+  border-top: 0;
+  padding-top: 3px;
 }
 .mention-item {
   display: flex;
@@ -1938,10 +1954,25 @@
   flex: 0 0 auto;
   background: hsl(var(--ah, 220) 58% var(--agent-l-name));
 }
-.mention-name {
+.mention-main {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.mention-name {
+  min-width: 0;
   font-size: 13px;
   color: var(--t-body);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mention-owner {
+  min-width: 0;
+  font-size: 10.5px;
+  color: var(--t-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1950,6 +1981,23 @@
   font-size: 11px;
   flex: 0 0 auto;
   opacity: 0.85;
+}
+.mention-kind {
+  font-size: 10.5px;
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1.5px solid var(--t-faint);
+  border-radius: 999px;
+  color: var(--t-dim);
+  background: var(--t-panel2);
+}
+.mention-kind--human {
+  color: #2e7d46;
+  border-color: #8fc7a0;
+}
+.mention-kind--agent {
+  color: var(--t-accent);
+  border-color: var(--d-yellow);
 }
 /* 协作角色/职责小标（issue #38，hover 看 title 有完整） */
 .mention-role {

@@ -21,6 +21,7 @@ interface Props {
 }
 
 const TIER_DOT: Record<MentionTier, string> = { online: "●", wakeable: "◐", recent: "○" };
+const NAV_KEYS = new Set(["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"]);
 
 export function Composer({ draft, setDraft, onSend, ready, candidates }: Props) {
   const t = useT();
@@ -101,36 +102,59 @@ export function Composer({ draft, setDraft, onSend, ready, candidates }: Props) 
     }
   };
 
+  const onKeyUp = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (NAV_KEYS.has(e.key)) return;
+    recompute(e.currentTarget.value, e.currentTarget.selectionStart ?? 0);
+  };
+
   return (
     <div className="composer">
       {menu !== null && (
         <ul className="mention-menu" role="listbox" aria-label="mention suggestions">
-          {menu.items.map((c, i) => (
-            <li
-              key={c.name}
-              role="option"
-              aria-selected={i === menu.active}
-              className={"mention-item" + (i === menu.active ? " is-active" : "")}
-              style={{ "--ah": agentHue(c.name) } as CSSProperties}
-              // hover 看「是谁 + 职责」：显示名 + 账号 + 协作角色（issue #38/#39）
-              title={
-                [c.display, c.account && c.account !== c.display ? c.account : "", c.role ? t("Composer.role", { role: c.role }) : ""]
-                  .filter(Boolean)
-                  .join(" · ")
-              }
-              onMouseDown={(e) => {
-                e.preventDefault();
-                choose(c);
-              }}
-            >
-              <span className="mention-dot" aria-hidden="true" />
-              <span className="mention-name t-mono">{c.display}</span>
-              {c.role && <span className="mention-role">{c.role}</span>}
-              <span className={`mention-tier mention-tier--${c.tier}`}>
-                {TIER_DOT[c.tier]} {TIER_LABEL[c.tier]}
-              </span>
-            </li>
-          ))}
+          {menu.items.map((c, i) => {
+            const prev = menu.items[i - 1];
+            const showGroup = prev === undefined || prev.group !== c.group;
+            const owner = c.account && c.account !== c.display ? c.account : null;
+            const title = [
+              c.display,
+              owner ? t("Composer.owner", { account: owner }) : "",
+              t(`Composer.kind.${c.kind}`),
+              c.role ? t("Composer.role", { role: c.role }) : "",
+              c.note ? t("Composer.note", { note: c.note }) : "",
+              c.name !== c.display ? `@${c.name}` : "",
+            ].filter(Boolean).join(" · ");
+            return (
+              <li key={c.name} className="mention-row">
+                {showGroup && (
+                  <div className="mention-group" aria-hidden="true">
+                    {c.group}
+                  </div>
+                )}
+                <div
+                  role="option"
+                  aria-selected={i === menu.active}
+                  className={"mention-item" + (i === menu.active ? " is-active" : "")}
+                  style={{ "--ah": agentHue(c.name) } as CSSProperties}
+                  title={title}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    choose(c);
+                  }}
+                >
+                  <span className="mention-dot" aria-hidden="true" />
+                  <span className="mention-main">
+                    <span className="mention-name t-mono">{c.display}</span>
+                    {owner !== null && <span className="mention-owner t-mono">{owner}</span>}
+                  </span>
+                  <span className={`mention-kind mention-kind--${c.kind}`}>{t(`Composer.kind.${c.kind}`)}</span>
+                  {c.role && <span className="mention-role">{c.role}</span>}
+                  <span className={`mention-tier mention-tier--${c.tier}`}>
+                    {TIER_DOT[c.tier]} {TIER_LABEL[c.tier]}
+                  </span>
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
       <textarea
@@ -140,7 +164,7 @@ export function Composer({ draft, setDraft, onSend, ready, candidates }: Props) 
         placeholder="chime in… markdown ok · @name to mention · ⌘⏎ to send"
         value={draft}
         onChange={onChange}
-        onKeyUp={(e) => recompute(e.currentTarget.value, e.currentTarget.selectionStart ?? 0)}
+        onKeyUp={onKeyUp}
         onClick={(e) => recompute(e.currentTarget.value, e.currentTarget.selectionStart ?? 0)}
         onKeyDown={onKeyDown}
         onBlur={() => setTimeout(() => setMenu(null), 120)}
