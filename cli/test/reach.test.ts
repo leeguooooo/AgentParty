@@ -19,12 +19,21 @@ describe("reachOf", () => {
     expect(r.wake).toBe("serve");
   });
 
-  test("wakeable window matches `party who`: serve/watch/webhook stay wakeable up to 14d", () => {
-    // 2 分钟没露面但声明了 webhook → 仍可唤醒（与 who 一致，webhook 由服务端 POST，不看连接）
+  test("stale serve/watch → offline：supervisor 死了叫不醒，不再谎报可唤醒（#47）", () => {
+    // 13 分钟没心跳的 serve：supervisor 已死，@ 它无人应答 → offline
+    const deadServe = reachOf("bot", [p({ name: "bot", state: "offline", wake: { kind: "serve" }, last_seen: NOW - 780_000 })], NOW);
+    expect(deadServe.reach).toBe("offline");
+    const deadWatch = reachOf("bot", [p({ name: "bot", state: "offline", wake: { kind: "watch" }, last_seen: NOW - 780_000 })], NOW);
+    expect(deadWatch.reach).toBe("offline");
+  });
+
+  test("stale webhook 仍 wakeable：服务端投递，agent 离线也真能唤醒（#47）", () => {
+    // 2 分钟没露面但声明了 webhook → 仍可唤醒（webhook 由服务端 POST，不看连接）
     const recent = reachOf("bot", [p({ name: "bot", state: "offline", wake: { kind: "webhook" }, last_seen: NOW - 120_000 })], NOW);
     expect(recent.reach).toBe("wakeable");
-    // 超过 14 天 = 幽灵 → offline
-    const ghost = reachOf("bot", [p({ name: "bot", state: "offline", wake: { kind: "serve" }, last_seen: NOW - 15 * 24 * 60 * 60 * 1000 })], NOW);
+    expect(recent.wake).toBe("webhook");
+    // 但超过 14 天 = 幽灵 → offline（webhook 也不豁免幽灵清理）
+    const ghost = reachOf("bot", [p({ name: "bot", state: "offline", wake: { kind: "webhook" }, last_seen: NOW - 15 * 24 * 60 * 60 * 1000 })], NOW);
     expect(ghost.reach).toBe("offline");
   });
 

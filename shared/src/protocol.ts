@@ -236,6 +236,14 @@ export function presenceLastSeen(entry: Pick<PresenceEntry, "last_seen" | "ts">)
   return entry.last_seen ?? entry.ts ?? null;
 }
 
+// 可唤醒判定的统一口径（issue #47），cli `party who` / `send --reach` 与 web mention 候选共用：
+// serve/watch 靠本地常驻 supervisor 持 WS，presence 不新鲜（supervisor 大概率已死）就叫不醒；
+// webhook 由服务端投递，agent 离线也真能被唤醒，不受新鲜度限制（幽灵清理由调用方另行处理）。
+export function wakeReachable(kind: WakeKind | undefined, ageMs: number, staleMs = PRESENCE_TIMEOUT_MS): boolean {
+  if (kind === "webhook") return true;
+  return (kind === "serve" || kind === "watch") && ageMs < staleMs;
+}
+
 export function evaluateHostLease(
   entry: Pick<PresenceEntry, "state" | "ts" | "last_seen" | "role" | "residency" | "wake">,
   now: number,

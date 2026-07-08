@@ -1,6 +1,6 @@
 // party who — 从终端看频道里谁在线/可唤醒/最近，便于接着 party send --mention 把人拉进来/唤醒。
 // Claude Code 原生 @ 只认本地文件/技能，塞不进远程动态列表；本命令就是那个「动态在线列表」。
-import type { PresenceEntry, SenderKind, WakeKind } from "@agentparty/shared";
+import { wakeReachable, type PresenceEntry, type SenderKind, type WakeKind } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
@@ -22,7 +22,6 @@ Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line (name/kind/tier/wake/age_ms/read_seq)`;
 
-const WAKEABLE: readonly WakeKind[] = ["serve", "watch", "webhook"];
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
 // 系统生成的人类会话名（网页登录默认名 = UUID；OIDC 设备验证 = login-verify-*），非 @ 目标
@@ -46,8 +45,8 @@ function kindOf(e: PresenceEntry): SenderKind {
   return SYSTEM_HUMAN_SESSION_RE.test(e.name) ? "human" : "agent";
 }
 
-// 返回该 presence 的候选行，或 null（离线人类 / 幽灵，不该列）。
-function classify(e: PresenceEntry, now: number): Row | null {
+// 返回该 presence 的候选行，或 null（离线人类 / 幽灵，不该列）。导出仅为单测。
+export function classify(e: PresenceEntry, now: number): Row | null {
   if (e.name === "system") return null;
   const seen = e.last_seen ?? e.ts ?? 0;
   const age = now - seen;
@@ -56,7 +55,8 @@ function classify(e: PresenceEntry, now: number): Row | null {
   const wake = e.wake?.kind;
   let tier: Tier;
   if (online) tier = "online";
-  else if (wake !== undefined && WAKEABLE.includes(wake) && age <= DEAD_MS) tier = "wakeable";
+  // wakeable 统一口径（#47）：serve/watch 需 presence 新鲜（supervisor 死了叫不醒），webhook 离线也算
+  else if (wakeReachable(wake, age, STALE_MS) && age <= DEAD_MS) tier = "wakeable";
   else tier = "recent";
   if (tier !== "online") {
     if (kind === "human") return null; // 围观的人类只在线才列

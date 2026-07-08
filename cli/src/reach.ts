@@ -1,11 +1,11 @@
 // party send 后即时反馈：一个 @ 目标现在能不能收到。是网页发送前状态条的终端版——不用开网页，
 // 发完就知道会不会白发。与 who 的 classify 不同：这里对「找不到/离线/幽灵」一律回 offline（要提醒
 // 「重连前收不到」），不返回 null；档位判定与网页 mentions.ts 保持一致（online / wakeable / offline）。
-import type { PresenceEntry, WakeKind } from "@agentparty/shared";
+import { wakeReachable, type PresenceEntry, type WakeKind } from "@agentparty/shared";
 
-const WAKEABLE: readonly WakeKind[] = ["serve", "watch", "webhook"];
 // 档位窗口与 `party who` 的 classify 保持一致，避免 who 说「可唤醒」而 send --reach 说「离线」自相矛盾：
-// online 需当前连着且新鲜(<STALE_MS)；wakeable 只要声明了 serve/watch/webhook 且 14 天内露过面。
+// online 需当前连着且新鲜(<STALE_MS)；wakeable 按 wakeReachable 统一口径（#47）：serve/watch 需
+// presence 新鲜（supervisor 活着才叫得醒），webhook 服务端投递、离线也算，但都不越过 14 天幽灵线。
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 超过即视为幽灵，不再算可唤醒
 
@@ -24,7 +24,7 @@ export function reachOf(name: string, presence: PresenceEntry[], now: number): R
   const age = now - seen;
   const wake = e.wake?.kind;
   if (e.state !== "offline" && age < STALE_MS) return { name, reach: "online", ...(wake ? { wake } : {}) };
-  if (wake !== undefined && WAKEABLE.includes(wake) && age <= DEAD_MS) return { name, reach: "wakeable", wake };
+  if (wake !== undefined && wakeReachable(wake, age, STALE_MS) && age <= DEAD_MS) return { name, reach: "wakeable", wake };
   return { name, reach: "offline", ...(wake ? { wake } : {}) };
 }
 

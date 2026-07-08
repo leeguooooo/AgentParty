@@ -1,7 +1,7 @@
 // @ 提及候选（issue #39）：把 participants（WS 连着）∪ presence（含 wake 信息）合成一个
 // 分档的候选列表，供 Composer 的 @ 补全下拉用。"可 @" ≠ "在线连接"——本产品最特别的一档是
 // 「可唤醒」：人不在但 @ 了会被 serve/watch/webhook 拉起来。
-import type { ChannelRoleAssignment, PresenceEntry, Sender, WakeKind } from "@agentparty/shared";
+import { wakeReachable, type ChannelRoleAssignment, type PresenceEntry, type Sender, type WakeKind } from "@agentparty/shared";
 
 export type MentionTier = "online" | "wakeable" | "recent";
 
@@ -24,8 +24,7 @@ export interface MentionCandidate {
   note?: string; // 当前 status note
 }
 
-const WAKEABLE: readonly WakeKind[] = ["serve", "watch", "webhook"];
-const STALE_MS = 60_000; // 与 PRESENCE_TIMEOUT_MS 一致：超过即算 recent 而非在线/可唤醒
+const STALE_MS = 60_000; // 与 PRESENCE_TIMEOUT_MS 一致：serve/watch 超过即算 recent 而非可唤醒
 // 幽灵清理：只为防止频道长期累积几个月前的一次性 agent。设得宽松——几天前聊过的 agent
 // 仍是合理的 @/唤醒目标，不该被剔。真正的噪声（围观的人类会话）已由 kind/UUID 规则处理。
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面才视为幽灵
@@ -34,8 +33,8 @@ const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面才视为幽灵
 const SYSTEM_HUMAN_SESSION_RE =
   /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|login-verify-.+)$/i;
 
-// 档位：① 在线（当前有 WS 连接） ② 可唤醒（presence 声明了 serve/watch/webhook 且不 stale）
-// ③ 最近活跃（其余 presence）。同名取更高档。
+// 档位：① 在线（当前有 WS 连接） ② 可唤醒（wakeReachable 统一口径 #47：serve/watch 需不 stale，
+// webhook 服务端投递、离线也算） ③ 最近活跃（其余 presence）。同名取更高档。
 function tierFor(
   name: string,
   online: Set<string>,
@@ -46,9 +45,7 @@ function tierFor(
   const p = presence[name];
   if (p) {
     const seen = p.last_seen ?? p.ts ?? 0;
-    const fresh = now - seen < STALE_MS;
-    const kind = p.wake?.kind;
-    if (fresh && kind !== undefined && WAKEABLE.includes(kind)) return "wakeable";
+    if (wakeReachable(p.wake?.kind, now - seen, STALE_MS)) return "wakeable";
   }
   return "recent";
 }
