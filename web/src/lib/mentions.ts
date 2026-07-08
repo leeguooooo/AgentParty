@@ -65,6 +65,7 @@ export function mentionCandidates(
   roles: ChannelRoleAssignment[] = [],
 ): MentionCandidate[] {
   const online = new Set(participants.map((p) => p.name));
+  const participantByName = new Map(participants.map((p) => [p.name, p]));
   const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
   const roleByName = new Map(roles.map((role) => [role.name, role]));
   const kindOf = new Map<string, "agent" | "human">();
@@ -92,9 +93,13 @@ export function mentionCandidates(
       const identity = identityByName.get(name);
       const assigned = roleByName.get(name);
       const account = identity?.account ?? assigned?.account ?? p?.account;
+      // 人类全局唯一昵称（handle）：有则用它做 @ 插入 token 和显示名——UUID 会话名打不出来，
+      // handle 才能被后端 R5 按 handle 识别为「被 @」。agent 不适用（其 name 本身就是可读 handle）。
+      const handle = kind === "human" ? (participantByName.get(name)?.handle ?? p?.handle) : undefined;
       // 人类网页会话名是 UUID，显示账号 email 才认得出「是谁」；agent 名本身可读，用 name。
-      const display =
-        identity?.display && identity.display !== ""
+      const display = handle
+        ? handle
+        : identity?.display && identity.display !== ""
           ? identity.display
           : assigned?.display && assigned.display !== ""
             ? assigned.display
@@ -103,7 +108,7 @@ export function mentionCandidates(
               : name;
       const group = account ?? (kind === "human" ? "human sessions" : "unowned agents");
       return {
-        name,
+        name: handle ?? name,
         display,
         kind,
         tier: tierFor(name, online, presence, now),

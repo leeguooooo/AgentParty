@@ -28,6 +28,7 @@ import {
   type TokenIdentity,
 } from "./auth";
 import { ChannelDO } from "./do";
+import { handleConflict, validateHandleFormat } from "./handle";
 import { openapiDocument } from "./openapi";
 
 export { ChannelDO };
@@ -127,6 +128,7 @@ const AP_FORWARD_HEADERS = [
   "x-ap-archive-at",
   "x-ap-collab-role",
   "x-ap-role-source",
+  "x-ap-handle",
 ] as const;
 // 所属人标签：铸造时可选写入，须 header-safe（可打印 ASCII，含空格）以便经 x-ap-owner 转发给 do
 const OWNER_MAX = 128;
@@ -216,6 +218,10 @@ async function persistToken(
     .bind(opts.name)
     .first<{ id: number; revoked_at: number | null }>();
   if (existing && existing.revoked_at === null) return { conflict: true };
+  // 反向唯一性：token 名不得撞已存在的人类 handle（二者共用 @ 命名空间）
+  const handleOwner = await db.prepare("SELECT 1 FROM account_profiles WHERE handle = ? COLLATE NOCASE")
+    .bind(opts.name).first();
+  if (handleOwner) return { conflict: true };
   const token = randomToken();
   const hash = await sha256Hex(token);
   const now = Date.now();
@@ -430,6 +436,16 @@ function assignedRoleHeaders(role: CollaborationRole | null): Record<string, str
   return role === null ? {} : { "x-ap-collab-role": role, "x-ap-role-source": "assigned" };
 }
 
+// 人类 handle 头：仅当身份是人类且已设 handle 才带（权威值，供 do 盖 presence + stamp 消息，Task A6/A7）。
+// agent 即使与 human 共享 account 也不继承其 handle——handle 是按 account 存的，但只对人类身份生效。
+// export 仅供 test 直接单测（do 尚不消费这个头，spec 里现有的"观察 do 副作用"手法在这没有可观察点）。
+export async function handleHeader(db: D1Database, identity: TokenIdentity): Promise<Record<string, string>> {
+  if (identity.kind !== "human" || identity.account == null) return {};
+  const row = await db.prepare("SELECT handle FROM account_profiles WHERE account = ?")
+    .bind(identity.account).first<{ handle: string }>();
+  return row?.handle ? { "x-ap-handle": row.handle } : {};
+}
+
 function lineageHeaders(identity: TokenIdentity): Record<string, string> {
   const lineage = identity.lineage;
   if (lineage === undefined) return {};
@@ -516,10 +532,16 @@ app.get("/api/config", (c) => {
 });
 
 // 当前登录身份：web topbar 显示 "signed in as <email 或 name>"（spec §10）
-app.get("/api/me", requireBearer, (c) => {
+app.get("/api/me", requireBearer, async (c) => {
   const id = c.get("identity");
   // 权限自省（whoami --caps / 网页）：从 role + channel_scope + account 派生，让工具提前知道能干什么
   const scoped = id.channel_scope != null;
+  // handle（spec 2026-07-08）：全局唯一昵称，仅 human 账号会话（有 account）才可能设置过
+  const profile = id.account == null
+    ? null
+    : await c.env.DB.prepare("SELECT handle FROM account_profiles WHERE account = ?")
+        .bind(id.account)
+        .first<{ handle: string }>();
   return c.json({
     name: id.name,
     email: id.email ?? null,
@@ -528,6 +550,7 @@ app.get("/api/me", requireBearer, (c) => {
     owner: id.owner ?? null,
     channel_scope: id.channel_scope ?? null,
     lineage: id.lineage ?? null,
+    handle: profile?.handle ?? null,
     caps: {
       send: id.role !== "readonly",
       // scoped token 不得建频道（会逃出 scope）；readonly 也不行
@@ -540,6 +563,42 @@ app.get("/api/me", requireBearer, (c) => {
       scoped_to: id.channel_scope ?? null,
     },
   });
+});
+
+// 设置/更新本账号的全局唯一 handle（spec 2026-07-08，Task A4）：仅 human 账号会话（有 account）可用，
+// readonly/legacy 无账号 token 一律 403。撞保留名 / 撞任意 token 名 / 已被别的账号占用 → 409。
+app.put("/api/me/handle", requireBearer, async (c) => {
+  const id = c.get("identity");
+  if (id.role === "readonly" || id.account == null) {
+    return c.json(errorBody("forbidden", "setting a handle requires a human account session"), 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as { handle?: unknown } | null;
+  const handle = validateHandleFormat(body?.handle);
+  if (handle === null) {
+    return c.json(errorBody("bad_request", "handle must match ^[a-z0-9][a-z0-9._-]{1,31}$"), 400);
+  }
+  const conflict = await handleConflict(c.env.DB, handle, id.account);
+  if (conflict !== null) {
+    return c.json(errorBody("conflict", `handle unavailable (${conflict})`), 409);
+  }
+  const now = Date.now();
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO account_profiles (account, handle, created_at, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(account) DO UPDATE SET handle = excluded.handle, updated_at = excluded.updated_at`,
+    )
+      .bind(id.account, handle, now, now)
+      .run();
+  } catch (e) {
+    // 竞态：handleConflict 通过后、另一账号抢先占了同一 handle → UNIQUE(handle) 冲突。转 409（非 500）。
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("UNIQUE")) {
+      return c.json(errorBody("conflict", "handle unavailable (taken)"), 409);
+    }
+    throw e; // 其它未预期错误保持原样（让它 500，不掩盖真问题）
+  }
+  return c.json({ handle });
 });
 
 app.post("/api/tokens", requireAdmin, async (c) => {
@@ -1674,6 +1733,7 @@ app.post("/api/channels/:slug/messages/:seq/review", async (c) => {
         ...lineageHeaders(identity),
         ...assignedRoleHeaders(assignedRole),
         ...channelHeaders(channel, c.req.url),
+        ...(await handleHeader(c.env.DB, identity)),
       },
     }),
   );
@@ -1714,6 +1774,7 @@ app.post("/api/channels/:slug/messages/:seq/:action", async (c) => {
         ...lineageHeaders(identity),
         ...assignedRoleHeaders(assignedRole),
         ...channelHeaders(channel, c.req.url),
+        ...(await handleHeader(c.env.DB, identity)),
       },
     }),
   );
@@ -1765,6 +1826,7 @@ app.post("/api/channels/:slug/messages", async (c) => {
         ...lineageHeaders(identity),
         ...assignedRoleHeaders(assignedRole),
         ...channelHeaders(channel, c.req.url),
+        ...(await handleHeader(c.env.DB, identity)),
       },
     }),
   );
@@ -2041,6 +2103,7 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-host", new URL(c.req.url).host);
   // 无条件写：未归档也显式置 "0"，堵住"客户端注入 1、未归档分支不覆盖"的透传
   fwd.headers.set("x-ap-archived", channel.archived_at !== null ? "1" : "0");
+  for (const [key, value] of Object.entries(await handleHeader(c.env.DB, identity))) fwd.headers.set(key, value);
   const upgrade = await stub.fetch(fwd);
   const requestedProtocols = c.req
     .header("sec-websocket-protocol")

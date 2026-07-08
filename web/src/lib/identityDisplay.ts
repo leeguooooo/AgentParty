@@ -49,25 +49,30 @@ export function buildIdentityDisplay(input: {
 }): IdentityDisplayMap {
   const map: IdentityDisplayMap = {};
 
+  // 显示优先级：人类 handle > owner/account（email）> 原始 name，与 MessageCard/PresenceBar 一致。
+  // agent 恒无 handle，天然回退 name，不受影响。map 的 key 仍是原始 name/UUID，不受此优先级影响。
   for (const sender of input.participants) {
     addIdentity(map, sender.name, {
       kind: sender.kind,
       account: sender.owner,
-      display: sender.kind === "human" && sender.owner ? sender.owner : sender.name,
+      display: sender.kind === "human" ? sender.handle || sender.owner || sender.name : sender.name,
     });
   }
   for (const entry of Object.values(input.presence)) {
     addIdentity(map, entry.name, {
       kind: entry.kind,
       account: entry.account,
-      display: entry.kind === "human" && entry.account ? entry.account : entry.name,
+      display: entry.kind === "human" ? entry.handle || entry.account || entry.name : entry.name,
     });
   }
   for (const message of input.messages) {
     addIdentity(map, message.sender.name, {
       kind: message.sender.kind,
       account: message.sender.owner,
-      display: message.sender.kind === "human" && message.sender.owner ? message.sender.owner : message.sender.name,
+      display:
+        message.sender.kind === "human"
+          ? message.sender.handle || message.sender.owner || message.sender.name
+          : message.sender.name,
     });
   }
   for (const option of input.mentionOptions) {

@@ -141,6 +141,28 @@ describe("mentionCandidates", () => {
     expect(mentionCandidates([], pres, null, NOW).map((c) => c.name)).toEqual(["real-agent"]);
   });
 
+  test("online human with a handle uses the handle as the @ token + display (Task B3)", () => {
+    const uuid = "7f1a302c-6c31-4bca-a1df-88152372f6d9";
+    const participants: Sender[] = [{ name: uuid, kind: "human", handle: "leo" }];
+    const pres = {
+      [uuid]: presence({ name: uuid, kind: "human", handle: "leo", account: "leo@x.com", state: "working" }),
+    };
+    const c = mentionCandidates(participants, pres, null, NOW)[0]!;
+    expect(c.name).toBe("leo"); // @ 插入 token 必须是 handle 才能真正 @ 到（服务端按 handle 检测被@）
+    expect(c.display).toBe("leo"); // 显示名也用 handle，而非账号 email 或 UUID
+  });
+
+  test("online human without a handle keeps existing behavior (name=UUID, display=account)", () => {
+    const uuid = "8b2b302c-6c31-4bca-a1df-88152372f6d9";
+    const participants: Sender[] = [{ name: uuid, kind: "human" }];
+    const pres = {
+      [uuid]: presence({ name: uuid, kind: "human", account: "noHandle@x.com" }),
+    };
+    const c = mentionCandidates(participants, pres, null, NOW)[0]!;
+    expect(c.name).toBe(uuid);
+    expect(c.display).toBe("noHandle@x.com");
+  });
+
   test("recent agent (days old) is kept; only long-dead (>14d) ghost dropped", () => {
     const DAY = 24 * 60 * 60 * 1000;
     const pres = {

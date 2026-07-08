@@ -55,6 +55,7 @@ interface ConnState {
   kind: SenderKind;
   role: TokenRole;
   owner?: string;
+  handle?: string;
   lineage?: AgentLineage;
   tokenHash: string;
   collabRole?: CollaborationRole;
@@ -68,6 +69,7 @@ interface Identity {
   kind: SenderKind;
   role: TokenRole;
   owner?: string;
+  handle?: string;
   lineage?: AgentLineage;
   tokenHash: string;
   collabRole?: CollaborationRole;
@@ -515,12 +517,13 @@ function lineageFromHeaders(headers: Headers): AgentLineage | undefined {
   return lineage ?? undefined;
 }
 
-function senderFromIdentity(identity: Pick<Identity, "name" | "kind" | "owner" | "lineage">): Sender {
+function senderFromIdentity(identity: Pick<Identity, "name" | "kind" | "owner" | "handle" | "lineage">): Sender {
   return {
     name: identity.name,
     kind: identity.kind,
     ...(identity.owner === undefined ? {} : { owner: identity.owner }),
     ...(identity.lineage === undefined ? {} : { lineage: identity.lineage }),
+    ...(identity.handle === undefined ? {} : { handle: identity.handle }),
   };
 }
 
@@ -792,6 +795,8 @@ export class ChannelDO extends Server<Env> {
         WHERE rev_seq IS NULL
           AND (edited_at IS NOT NULL OR retracted_at IS NOT NULL OR supersedes IS NOT NULL OR superseded_by IS NOT NULL
                OR completion_review_state IS NOT NULL OR completion_review_replaced_by_seq IS NOT NULL)`,
+      // 发送时快照人类 handle，同 sender_owner 手法
+      "ALTER TABLE messages ADD COLUMN sender_handle TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -836,6 +841,8 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE presence ADD COLUMN status_context_json TEXT",
       "ALTER TABLE presence ADD COLUMN status_decision_json TEXT",
       "ALTER TABLE presence ADD COLUMN status_workflow_json TEXT",
+      // 当前连接的人类 handle
+      "ALTER TABLE presence ADD COLUMN handle TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -933,6 +940,7 @@ export class ChannelDO extends Server<Env> {
       kind: h.get("x-ap-kind") === "agent" ? "agent" : "human",
       role: (h.get("x-ap-role") ?? "readonly") as TokenRole,
       owner: h.get("x-ap-owner") ?? undefined,
+      handle: h.get("x-ap-handle") ?? undefined,
       lineage: lineageFromHeaders(h),
       tokenHash: h.get("x-ap-token-hash") ?? "",
       collabRole: parseCollaborationRole(h.get("x-ap-collab-role") ?? undefined) ?? undefined,
@@ -1068,6 +1076,7 @@ export class ChannelDO extends Server<Env> {
           kind: st.kind,
           role: st.role,
           owner: st.owner,
+          handle: st.handle,
           lineage: st.lineage,
           tokenHash: st.tokenHash,
           collabRole: st.collabRole,
@@ -1544,16 +1553,17 @@ export class ChannelDO extends Server<Env> {
     const roleSource: CollaborationRoleSource | undefined = identity.collabRole === undefined ? undefined : "assigned";
     this.ctx.storage.sql.exec(
       `INSERT INTO messages (
-         seq, sender_name, sender_kind, sender_owner, sender_lineage_json, kind, body, mentions_json, reply_to,
+         seq, sender_name, sender_kind, sender_owner, sender_handle, sender_lineage_json, kind, body, mentions_json, reply_to,
          state, note, status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
          status_decision_json, status_workflow_json,
          sender_role, sender_role_source, completion_artifact_json, ts
        )
-       VALUES (?, ?, ?, ?, ?, 'message', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, 'message', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, ?)`,
       seq,
       identity.name,
       identity.kind,
       identity.owner ?? null,
+      identity.handle ?? null,
       identity.lineage === undefined ? null : JSON.stringify(identity.lineage),
       body,
       JSON.stringify(mentions),
@@ -1747,6 +1757,7 @@ export class ChannelDO extends Server<Env> {
         kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
+        handle: request.headers.get("x-ap-handle") ?? undefined,
         lineage: lineageFromHeaders(request.headers),
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
         collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
@@ -1881,6 +1892,7 @@ export class ChannelDO extends Server<Env> {
         kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
+        handle: request.headers.get("x-ap-handle") ?? undefined,
         lineage: lineageFromHeaders(request.headers),
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
         collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
@@ -2059,6 +2071,7 @@ export class ChannelDO extends Server<Env> {
         kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
+        handle: request.headers.get("x-ap-handle") ?? undefined,
         lineage: lineageFromHeaders(request.headers),
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
         collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
@@ -2377,17 +2390,18 @@ export class ChannelDO extends Server<Env> {
           };
     sql.exec(
       `INSERT INTO messages (
-         seq, sender_name, sender_kind, sender_owner, sender_lineage_json, kind, body, mentions_json, reply_to,
+         seq, sender_name, sender_kind, sender_owner, sender_handle, sender_lineage_json, kind, body, mentions_json, reply_to,
          state, note, status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
          status_decision_json, status_workflow_json, message_workflow_json,
          sender_role, sender_role_source, completion_artifact_json, completion_review_state, completion_review_policy,
          completion_review_replaces_seq, ts
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
       identity.owner ?? null,
+      identity.handle ?? null,
       identity.lineage === undefined ? null : JSON.stringify(identity.lineage),
       msg.kind,
       msg.body,
@@ -2448,14 +2462,15 @@ export class ChannelDO extends Server<Env> {
       const wakeProvided = frame.wake !== undefined ? 1 : 0;
       sql.exec(
         `INSERT INTO presence (
-           name, kind, account, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+           name, kind, account, handle, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
            status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at, context_json,
            lineage_json
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            kind = excluded.kind,
            account = COALESCE(excluded.account, presence.account),
+           handle = COALESCE(excluded.handle, presence.handle),
            state = excluded.state,
            note = excluded.note,
            updated_at = excluded.updated_at,
@@ -2475,6 +2490,7 @@ export class ChannelDO extends Server<Env> {
         identity.name,
         identity.kind,
         identity.owner ?? null, // 人类会话 = email，agent = 所属账号；presence.account 存它供前端显示「是谁」
+        identity.handle ?? null, // 当前连接的人类 handle；同 account 手法，presence.handle 供前端展示/被 @
         frame.state,
         frame.note,
         now,
@@ -3010,7 +3026,7 @@ export class ChannelDO extends Server<Env> {
     const liveCounts = this.liveConnectionCounts();
     return this.ctx.storage.sql
       .exec(
-        `SELECT name, kind, account, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+        `SELECT name, kind, account, handle, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json
          FROM presence ORDER BY name`,
@@ -3023,7 +3039,7 @@ export class ChannelDO extends Server<Env> {
     const liveCounts = this.liveConnectionCounts();
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT name, kind, account, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+        `SELECT name, kind, account, handle, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json
          FROM presence WHERE name = ?`,
@@ -3055,6 +3071,7 @@ export class ChannelDO extends Server<Env> {
       name: String(r.name),
       ...(r.kind === "agent" || r.kind === "human" ? { kind: r.kind as SenderKind } : {}),
       ...(typeof r.account === "string" && r.account !== "" ? { account: r.account } : {}),
+      ...(typeof r.handle === "string" && r.handle !== "" ? { handle: r.handle } : {}),
       state,
       note: r.note === null ? null : String(r.note),
       ts,
@@ -3097,6 +3114,7 @@ export class ChannelDO extends Server<Env> {
           const lineage = parseStoredLineage(r.sender_lineage_json);
           return lineage === undefined ? {} : { lineage };
         })(),
+        ...(r.sender_handle === null || r.sender_handle === undefined ? {} : { handle: String(r.sender_handle) }),
       },
       kind,
       body: String(r.body),

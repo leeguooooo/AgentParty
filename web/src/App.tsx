@@ -1,7 +1,8 @@
 // 应用骨架：登录闸 → 头部 + 左侧频道列表 + 右侧（首页 | 频道页）
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChannelList } from "./components/ChannelList";
 import { CreateChannel } from "./components/CreateChannel";
+import { HandleSetup } from "./components/HandleSetup";
 import { TokenGate } from "./components/TokenGate";
 import { LanguageSwitcher } from "./components/LanguageSwitcher";
 import {
@@ -60,6 +61,35 @@ export function App() {
   const [joinStatus, setJoinStatus] = useState<{ phase: "joining" | "error"; message?: string } | null>(null);
   // 命中 /auth/callback 时先挂起，避免闪一下登录闸；换 token 成功/失败后落定
   const [oidcPending, setOidcPending] = useState<boolean>(() => isCallbackPath());
+
+  // 人类账号设置/修改 @handle（Task B2）：me chip 旁的入口开关 + 浮层定位（fixed + 视口内钳制，
+  // 手法同 AgentTokens 那次 viewport 修复）；banner 关闭态只在本次会话内记，不落盘。
+  const [handleSetupOpen, setHandleSetupOpen] = useState(false);
+  const [handlePanelStyle, setHandlePanelStyle] = useState<CSSProperties>({});
+  const [handleBannerDismissed, setHandleBannerDismissed] = useState(false);
+  const handleAnchorRef = useRef<HTMLSpanElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!handleSetupOpen) return;
+    const update = () => {
+      const anchor = handleAnchorRef.current?.getBoundingClientRect();
+      if (!anchor) return;
+      const gap = 6;
+      const margin = 12;
+      const width = Math.min(320, window.innerWidth - margin * 2);
+      const top = Math.min(anchor.bottom + gap, window.innerHeight - margin);
+      const left = Math.max(margin, Math.min(anchor.right - width, window.innerWidth - width - margin));
+      const maxHeight = Math.max(160, window.innerHeight - top - margin);
+      setHandlePanelStyle({ left, top, width, maxHeight });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [handleSetupOpen]);
 
   // oidc 配置存 ref，供 onAuthFailed/续期在稳定回调里读到最新值（避免进 effect 依赖引发重跑）
   const oidcRef = useRef<OidcConfig | null>(null);
@@ -213,6 +243,8 @@ export function App() {
   useEffect(() => {
     if (token === null) {
       setMe(null);
+      setHandleSetupOpen(false);
+      setHandleBannerDismissed(false);
       return;
     }
     let alive = true;
@@ -369,6 +401,8 @@ export function App() {
   };
   // 建频道入口只给能建的人（登录人类、非分享只读）；scoped agent token 铸不了频道
   const canCreate = !isShareMode() && me?.role === "human";
+  // 设置/修改 @handle 只给登录人类账号（agent token 会话、分享只读链接都不显示，Task B2）
+  const canSetHandle = !isShareMode() && me?.role === "human";
   const channelPending = slug !== null && channels === null && listError === null;
   const unknownChannel =
     slug !== null && channels !== null && !channels.some((c) => c.slug === slug);
@@ -402,6 +436,32 @@ export function App() {
             )}
           </span>
         )}
+        {canSetHandle && me !== null && (
+          <span className="handlesetup-anchor" ref={handleAnchorRef}>
+            <button
+              type="button"
+              className={"d-btn handlesetup-trigger" + (me.handle === null ? " handlesetup-trigger--cta" : "")}
+              onClick={() => setHandleSetupOpen((v) => !v)}
+              aria-expanded={handleSetupOpen}
+              title={me.handle !== null ? t("App.handle.editHint") : t("App.handle.setCta")}
+            >
+              {me.handle !== null ? `@${me.handle}` : t("App.handle.setCta")}
+            </button>
+          </span>
+        )}
+        {handleSetupOpen && me !== null && (
+          <div className="handlesetup-panel" style={handlePanelStyle}>
+            <HandleSetup
+              current={me.handle}
+              onSaved={(handle) => {
+                setMe((prev) => (prev ? { ...prev, handle } : prev));
+                setHandleSetupOpen(false);
+                setHandleBannerDismissed(true);
+              }}
+              onClose={() => setHandleSetupOpen(false)}
+            />
+          </div>
+        )}
         <LanguageSwitcher />
         {!isShareMode() && (
           <button
@@ -413,6 +473,8 @@ export function App() {
               setChannels(null);
               setListError(null);
               setMe(null);
+              setHandleSetupOpen(false);
+              setHandleBannerDismissed(false);
               setToken(null);
             }}
           >
@@ -420,6 +482,24 @@ export function App() {
           </button>
         )}
       </header>
+      {canSetHandle && me !== null && me.handle === null && !handleBannerDismissed && !handleSetupOpen && (
+        <p className="banner banner--yellow handle-banner" role="status">
+          <span className="handle-banner-text">{t("App.handle.banner")}</span>
+          <span className="handle-banner-actions">
+            <button type="button" className="d-btn" onClick={() => setHandleSetupOpen(true)}>
+              {t("App.handle.bannerAction")}
+            </button>
+            <button
+              type="button"
+              className="d-btn handle-banner-dismiss"
+              onClick={() => setHandleBannerDismissed(true)}
+              aria-label={t("App.handle.bannerDismiss")}
+            >
+              ✕
+            </button>
+          </span>
+        </p>
+      )}
       <div className="app-shell">
         <aside className="app-side">
           {canCreate && token !== null && (
@@ -460,6 +540,7 @@ export function App() {
               agentNamePrefix={(me?.email ?? me?.name ?? slug).split("@")[0] ?? slug}
               accountKey={me?.email ?? me?.owner ?? me?.name ?? null}
               inviterName={me?.name ?? slug}
+              selfHandle={me?.handle ?? null}
               onAuthFailed={onAuthFailed}
             />
           ) : (

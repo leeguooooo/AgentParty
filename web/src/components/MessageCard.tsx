@@ -115,14 +115,20 @@ export function MessageCard({
     msg.kind === "message" && readCursors !== undefined
       ? readStateFor(msg.seq, msg.sender.name, participants ?? [], readCursors)
       : { readers: [], unread: [] };
-  const senderLabel =
-    msg.sender.kind === "human" && msg.sender.owner ? msg.sender.owner : displayForIdentity(msg.sender.name, identityDisplay);
+  // 显示优先级：人类 handle（可 @ 昵称）> owner（email，人类专属）> 常规 identity 回退（agent 天然无 handle，不受影响）。
+  // owner/email 无论是否被 handle 取代，都作为防冒充锚点保留在下方副标签 + tooltip 中（见 senderTitle）。
+  const senderLabel = msg.sender.handle
+    ? msg.sender.handle
+    : msg.sender.kind === "human" && msg.sender.owner
+      ? msg.sender.owner
+      : displayForIdentity(msg.sender.name, identityDisplay);
   const owner = msg.sender.owner && msg.sender.owner !== senderLabel ? msg.sender.owner : null;
   const lineage = msg.sender.lineage ?? null;
   const lineageLabel = lineage === null ? null : `child of ${lineage.parent_agent}`;
   const senderTitle = [
     `sender: ${msg.sender.name}`,
     `kind: ${msg.sender.kind}`,
+    msg.sender.handle ? `handle: ${msg.sender.handle}` : null,
     owner ? `owner: ${owner}` : null,
     lineage ? `parent: ${lineage.parent_agent}` : null,
     lineage ? `root: ${lineage.root_agent}` : null,

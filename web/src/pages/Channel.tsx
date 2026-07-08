@@ -10,6 +10,7 @@ import { JoinLink } from "../components/JoinLink";
 import { Composer } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
 import { MessageCard } from "../components/MessageCard";
+import { NotifyToggle, readNotifyOptin } from "../components/NotifyToggle";
 import { PresenceBar } from "../components/PresenceBar";
 import {
   archiveChannel,
@@ -46,6 +47,7 @@ import {
   type AgentFilter,
   type AgentFilterMode,
 } from "../lib/filters";
+import { shouldNotify } from "../lib/notify";
 import { fmtTime } from "../lib/time";
 import { groupTeamMessages, summarizeTeams, type TeamMessageThread, type TeamSummary } from "../lib/teams";
 import { ChannelSocket } from "../lib/ws";
@@ -67,6 +69,7 @@ interface Props {
   agentNamePrefix: string; // 生成 agent 名的前缀来源（email/name 前缀，退回 slug）
   accountKey: string | null;
   inviterName: string; // 当前邀请人的频道身份名，接入包报到时 @ 他
+  selfHandle: string | null; // 当前人类账号的 @handle（Task C2 被@通知用；agent/未设置 handle 时为 null）
   onAuthFailed(message: string): void;
 }
 
@@ -957,6 +960,7 @@ export function ChannelPage({
   agentNamePrefix,
   accountKey,
   inviterName,
+  selfHandle,
   onAuthFailed,
 }: Props) {
   const t = useT();
@@ -1003,6 +1007,17 @@ export function ChannelPage({
   const [editSaving, setEditSaving] = useState(false);
   const [messageActionError, setMessageActionError] = useState<{ seq: number; message: string } | null>(null);
   const [messageActionBusySeq, setMessageActionBusySeq] = useState<number | null>(null);
+  // 被@浏览器通知（Task C2）：opt-in 是全局 localStorage 设置，铃铛开关组件读/写；这里只持有一份
+  // 供 ws 入帧点判定用。optin/selfHandle/t 都放 ref：onFrame 挂在 socket 连接的 effect 里，
+  // 若把它们放进依赖数组，切铃铛/切语言会连累整个 ws 重连——用 ref 让判定读到最新值又不触发重连。
+  const [optin, setOptin] = useState<boolean>(() => readNotifyOptin());
+  const optinRef = useRef(optin);
+  optinRef.current = optin;
+  const selfHandleRef = useRef(selfHandle);
+  selfHandleRef.current = selfHandle;
+  const tRef = useRef(t);
+  tRef.current = t;
+  const notifiedSeqRef = useRef<Set<number>>(new Set()); // seq 去重：防同一帧被重复处理时重复弹通知
   const sockRef = useRef<ChannelSocket | null>(null);
   const streamRef = useRef<HTMLDivElement | null>(null);
   const pendingSendsRef = useRef<Array<{ draft: string; replyTo: number | null }>>([]);
@@ -1158,6 +1173,28 @@ export function ChannelPage({
           if (floor > 0) {
             if ((frame.type === "msg" || frame.type === "status") && frame.seq < floor) return;
             if (frame.type === "message_update" && frame.message.seq < floor) return;
+          }
+          // 被@浏览器通知（Task C2）：每条 ws 入帧只处理一次，天然按 seq 去重；notifiedSeqRef 兜底
+          // 防万一同一帧被重复送进这个回调（例如未来重连语义变化）时重复弹窗。
+          if (
+            frame.type === "msg" &&
+            !notifiedSeqRef.current.has(frame.seq) &&
+            shouldNotify(
+              frame,
+              selfHandleRef.current,
+              document.hidden,
+              optinRef.current && typeof Notification !== "undefined" && Notification.permission === "granted",
+            )
+          ) {
+            notifiedSeqRef.current.add(frame.seq);
+            const n = new Notification(tRef.current("Channel.notify.title", { channel: slug }), {
+              body: summarizeReplyPreview(frame.body),
+            });
+            n.onclick = () => {
+              window.focus();
+              window.location.hash = `#msg-${frame.seq}`;
+              n.close();
+            };
           }
           dispatch({ type: "frame", frame });
         },
@@ -1849,6 +1886,11 @@ export function ChannelPage({
         onRemoveParticipant={removeParticipant}
         roles={channelRoles}
       />
+      {/* 被@浏览器通知铃铛：与「能否铸 agent / 能否 moderate」无关，任何登录人类账号都能开关，
+          所以单独一条工具条，不挂在下面 canMintAgent/canModerate 才渲染的 chan-toolbar 里。 */}
+      <div className="chan-toolbar chan-toolbar--notify">
+        <NotifyToggle optin={optin} onChange={setOptin} />
+      </div>
       {kickError !== null && <p className="banner banner--red">{kickError}</p>}
       {archiveError !== null && <p className="banner banner--red">{archiveError}</p>}
       <div className="chan-toolstrip" aria-label={t("Channel.tools.label")}>
