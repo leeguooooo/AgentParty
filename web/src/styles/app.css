@@ -1804,6 +1804,16 @@
   flex: 0 0 auto;
   opacity: 0.85;
 }
+/* 协作角色/职责小标（issue #38，hover 看 title 有完整） */
+.mention-role {
+  font-size: 10.5px;
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1.5px solid var(--d-ink);
+  border-radius: 5px 3px 6px 2px / 3px 5px 2px 4px;
+  background: var(--d-yellow);
+  color: var(--d-ink);
+}
 .mention-tier--online {
   color: #2e7d46;
 }

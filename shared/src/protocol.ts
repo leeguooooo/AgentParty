@@ -188,6 +188,9 @@ export interface PresenceEntry {
   // agent / human。@ 补全等需要区分「可 @ 的 agent」和「只是围观的人类会话」。
   // 旧 worker 响应缺此字段 → undefined，消费方按未知处理（不当人类排除）。
   kind?: SenderKind;
+  // 会话背后的账号（人类 = OIDC email）。人类网页会话的 name 是 UUID token 名，靠这个显示「是谁」。
+  // 旧 worker 缺此字段 → undefined，前端回退到 name。
+  account?: string;
   state: PresenceState;
   note: string | null;
   ts: number;

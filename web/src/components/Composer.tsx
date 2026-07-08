@@ -105,13 +105,20 @@ export function Composer({ draft, setDraft, onSend, ready, candidates }: Props) 
               aria-selected={i === menu.active}
               className={"mention-item" + (i === menu.active ? " is-active" : "")}
               style={{ "--ah": agentHue(c.name) } as CSSProperties}
+              // hover 看「是谁 + 职责」：显示名 + 账号 + 协作角色（issue #38/#39）
+              title={
+                [c.display, c.account && c.account !== c.display ? c.account : "", c.role ? `职责: ${c.role}` : ""]
+                  .filter(Boolean)
+                  .join(" · ")
+              }
               onMouseDown={(e) => {
                 e.preventDefault();
                 choose(c);
               }}
             >
               <span className="mention-dot" aria-hidden="true" />
-              <span className="mention-name t-mono">{c.name}</span>
+              <span className="mention-name t-mono">{c.display}</span>
+              {c.role && <span className="mention-role">{c.role}</span>}
               <span className={`mention-tier mention-tier--${c.tier}`}>
                 {TIER_DOT[c.tier]} {TIER_LABEL[c.tier]}
               </span>

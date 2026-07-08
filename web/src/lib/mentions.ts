@@ -6,9 +6,12 @@ import type { PresenceEntry, Sender, WakeKind } from "@agentparty/shared";
 export type MentionTier = "online" | "wakeable" | "recent";
 
 export interface MentionCandidate {
-  name: string;
+  name: string; // @ 目标（token 名；人类网页会话是 UUID）
+  display: string; // 可读名：人类优先显示账号 email，否则 name
   kind: "agent" | "human";
   tier: MentionTier;
+  account?: string; // 会话背后的账号（人类 = email）
+  role?: string; // 协作角色/职责（host/worker/reviewer/observer），hover 显示
 }
 
 const WAKEABLE: readonly WakeKind[] = ["serve", "watch", "webhook"];
@@ -63,7 +66,14 @@ export function mentionCandidates(
   const rank: Record<MentionTier, number> = { online: 0, wakeable: 1, recent: 2 };
   return [...names]
     .filter((name) => name !== self && name !== "system")
-    .map((name) => ({ name, kind: kindFor(name), tier: tierFor(name, online, presence, now) }))
+    .map((name) => {
+      const kind = kindFor(name);
+      const p = presence[name];
+      const account = p?.account;
+      // 人类网页会话名是 UUID，显示账号 email 才认得出「是谁」；agent 名本身可读，用 name。
+      const display = kind === "human" && account ? account : name;
+      return { name, display, kind, tier: tierFor(name, online, presence, now), account, role: p?.role };
+    })
     .filter((c) => {
       if (c.tier === "online") return true; // 当前连着的都留（含在线的人类）
       if (c.kind === "human") return false; // 不在线的人类围观者不作候选
@@ -91,9 +101,11 @@ export function filterCandidates(cands: MentionCandidate[], query: string, limit
   const pref: MentionCandidate[] = [];
   const sub: MentionCandidate[] = [];
   for (const c of cands) {
+    // 名字与可读显示名（人类的 email）都参与匹配——这样能直接搜 @thejacks 找到 UUID 会话
     const n = c.name.toLowerCase();
-    if (n.startsWith(q)) pref.push(c);
-    else if (n.includes(q)) sub.push(c);
+    const d = c.display.toLowerCase();
+    if (n.startsWith(q) || d.startsWith(q)) pref.push(c);
+    else if (n.includes(q) || d.includes(q)) sub.push(c);
   }
   return [...pref, ...sub].slice(0, limit);
 }

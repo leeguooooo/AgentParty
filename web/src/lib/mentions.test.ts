@@ -51,6 +51,18 @@ describe("mentionCandidates", () => {
     expect(mentionCandidates(participants, pres, null, NOW).map((c) => c.name)).toEqual(["alice"]);
   });
 
+  test("human UUID session displays its account email + carries role (issue #38 看是谁/职责)", () => {
+    const uuid = "61ec302c-6c31-4bca-a1df-88152372f6d9";
+    const participants: Sender[] = [{ name: uuid, kind: "human" }];
+    const pres = {
+      [uuid]: presence({ name: uuid, kind: "human", account: "thejacks@163.com", role: "reviewer" }),
+    };
+    const c = mentionCandidates(participants, pres, null, NOW)[0]!;
+    expect(c.name).toBe(uuid); // @ 目标仍是 token 名
+    expect(c.display).toBe("thejacks@163.com"); // 但显示可读账号
+    expect(c.role).toBe("reviewer"); // hover 能看职责
+  });
+
   test("bare-UUID session name excluded when offline (旧 presence 行没回填 kind 的兜底)", () => {
     const uuid = "63ce33fa-6169-4c71-840b-fe6ea1d1162d";
     const pres = { [uuid]: presence({ name: uuid }) }; // 无 kind：靠名字形状判为 human
@@ -93,9 +105,9 @@ describe("activeMentionQuery", () => {
 
 describe("filterCandidates", () => {
   const cands = [
-    { name: "alice", kind: "human" as const, tier: "online" as const },
-    { name: "bob-review", kind: "agent" as const, tier: "wakeable" as const },
-    { name: "carol", kind: "agent" as const, tier: "recent" as const },
+    { name: "alice", display: "alice", kind: "human" as const, tier: "online" as const },
+    { name: "bob-review", display: "bob-review", kind: "agent" as const, tier: "wakeable" as const },
+    { name: "carol", display: "carol", kind: "agent" as const, tier: "recent" as const },
   ];
   test("prefix hits before substring hits", () => {
     expect(filterCandidates(cands, "b").map((c) => c.name)).toEqual(["bob-review"]);
