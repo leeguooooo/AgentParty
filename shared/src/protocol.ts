@@ -19,6 +19,7 @@ export const WEBHOOK_TIMEOUT_MS = 10_000;
 export const WEBHOOK_MAX_RETRIES = 3;
 export const WEBHOOK_RETRY_DELAYS_MS = [60_000, 240_000, 960_000] as const;
 export const MAX_WEBHOOKS_PER_CHANNEL = 20;
+export const ROLE_RESPONSIBILITY_LIMIT = 500;
 // 保留名：不得铸成真实 token。"system" 是 webhook 失败通告的发信名，dispatchWebhooks 靠它跳过投递；
 // 若被铸成真实 token，其消息（含被 @）会静默永不触发 webhook。
 export const RESERVED_NAMES: readonly string[] = ["system"];
@@ -206,6 +207,17 @@ export interface PresenceEntry {
   lineage?: AgentLineage;
   /** 同一身份当前活跃连接数。仅 >1 时下发，用于提示 token/session 被重复使用。 */
   connection_count?: number;
+}
+
+export interface ChannelRoleAssignment {
+  name: string;
+  role: CollaborationRole;
+  responsibility: string | null;
+  assigned_by: string;
+  assigned_at: number;
+  kind?: SenderKind;
+  account?: string;
+  display?: string;
 }
 
 export interface HostLeaseEvaluation {

@@ -433,19 +433,46 @@ describe("channel role assignments (issues #14/#17)", () => {
 
     const assign = await api(`/api/channels/${slug}/roles/${worker.name}`, owner.token, {
       method: "PUT",
-      body: JSON.stringify({ role: "host" }),
+      body: JSON.stringify({ role: "host", responsibility: "main handoff owner" }),
     });
     expect(assign.status).toBe(200);
-    expect((await assign.json()) as { name: string; role: string }).toMatchObject({
+    expect((await assign.json()) as { name: string; role: string; responsibility: string }).toMatchObject({
       name: worker.name,
       role: "host",
+      responsibility: "main handoff owner",
     });
 
     const roleList = (await (await api(`/api/channels/${slug}/roles`, owner.token)).json()) as {
-      roles: { name: string; role: string; assigned_by: string }[];
+      roles: { name: string; role: string; responsibility: string | null; assigned_by: string; account?: string }[];
     };
     expect(roleList.roles).toContainEqual(
-      expect.objectContaining({ name: worker.name, role: "host", assigned_by: owner.name }),
+      expect.objectContaining({ name: worker.name, role: "host", responsibility: "main handoff owner", assigned_by: owner.name, account: acct }),
+    );
+
+    expect(
+      (await api(`/api/channels/${slug}/roles/${worker.name}`, owner.token, {
+        method: "PUT",
+        body: JSON.stringify({ role: "reviewer" }),
+      })).status,
+    ).toBe(200);
+    const roleListAfterRoleOnly = (await (await api(`/api/channels/${slug}/roles`, owner.token)).json()) as {
+      roles: { name: string; role: string; responsibility: string | null }[];
+    };
+    expect(roleListAfterRoleOnly.roles).toContainEqual(
+      expect.objectContaining({ name: worker.name, role: "reviewer", responsibility: "main handoff owner" }),
+    );
+
+    expect(
+      (await api(`/api/channels/${slug}/roles/${worker.name}`, owner.token, {
+        method: "PUT",
+        body: JSON.stringify({ role: "host", responsibility: "" }),
+      })).status,
+    ).toBe(200);
+    const roleListAfterClear = (await (await api(`/api/channels/${slug}/roles`, owner.token)).json()) as {
+      roles: { name: string; role: string; responsibility: string | null }[];
+    };
+    expect(roleListAfterClear.roles).toContainEqual(
+      expect.objectContaining({ name: worker.name, role: "host", responsibility: null }),
     );
 
     const status = await api(`/api/channels/${slug}/messages`, worker.token, {

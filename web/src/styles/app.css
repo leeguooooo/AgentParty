@@ -282,6 +282,98 @@
   gap: 8px;
   justify-content: flex-end;
 }
+.charter-role-count {
+  flex: none;
+}
+.role-board {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--t-faint);
+}
+.role-board-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-weight: 700;
+}
+.role-board-head .t-mono {
+  color: var(--t-dim);
+  font-size: 11px;
+  font-weight: 500;
+}
+.role-list {
+  display: grid;
+  gap: 7px;
+}
+.role-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(96px, 0.35fr) minmax(220px, 1.4fr) auto auto;
+  align-items: center;
+  gap: 7px;
+}
+.role-row--new {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--t-faint);
+}
+.role-person {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.role-person-name,
+.role-owner {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.role-person-name {
+  font-weight: 700;
+}
+.role-owner {
+  color: var(--t-dim);
+  font-size: 11px;
+}
+.role-kind,
+.role-badge {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--t-faint);
+  border-radius: 999px;
+  background: var(--t-panel);
+  color: var(--t-dim);
+  font-size: 11px;
+  line-height: 1.25;
+}
+.role-kind--human {
+  color: #2e7d46;
+  border-color: #8fc7a0;
+}
+.role-kind--agent {
+  color: var(--t-accent);
+  border-color: var(--d-yellow);
+}
+.role-select,
+.role-input,
+.role-name-input {
+  min-width: 0;
+  width: 100%;
+  border: 1.5px solid var(--d-ink);
+  border-radius: 7px;
+  background: var(--t-panel);
+  color: var(--t-text);
+  padding: 5px 7px;
+}
+.role-text {
+  min-width: 0;
+  color: var(--t-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ---- 新建频道 ---- */
 .newchan-open { background: var(--t-panel2); }
@@ -444,6 +536,24 @@
 .presence-agent-role {
   flex: none;
   color: var(--t-dim);
+}
+.presence-agent-kind,
+.presence-kind {
+  flex: none;
+  padding: 0 4px;
+  border: 1px solid var(--t-faint);
+  border-radius: 999px;
+  color: var(--t-dim);
+  font-size: 9.5px;
+  line-height: 1.3;
+}
+.presence-kind--human {
+  color: #2e7d46;
+  border-color: #8fc7a0;
+}
+.presence-kind--agent {
+  color: var(--t-accent);
+  border-color: var(--d-yellow);
 }
 .presence-agent-more,
 .presence-agent-empty {
@@ -2009,6 +2119,15 @@
   background: var(--d-yellow);
   color: var(--d-ink);
 }
+.mention-responsibility {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--t-muted);
+  font-size: 11px;
+}
 .mention-tier--online {
   color: #2e7d46;
 }
@@ -2202,6 +2321,17 @@
   }
   .presence-name { max-width: 42vw; }
   .presence-note { max-width: 120px; }
+  .role-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .role-board-head {
+    flex-direction: column;
+    gap: 2px;
+  }
+  .mention-responsibility {
+    max-width: 38vw;
+  }
 }
 
 /* 频道列表「已归档」折叠开关 */

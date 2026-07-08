@@ -1,6 +1,6 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
-import { evaluateHostLease, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
+import { evaluateHostLease, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
 import { useEffect, useState, type CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
 import { fmtRel } from "../lib/time";
@@ -17,6 +17,7 @@ interface Props {
   canModerate?: boolean;
   removingName?: string | null;
   onRemoveParticipant?: (name: string) => void;
+  roles?: ChannelRoleAssignment[];
 }
 
 interface Item {
@@ -35,6 +36,8 @@ interface Item {
   lineage: NonNullable<PresenceEntry["lineage"]> | null;
   workflow: NonNullable<NonNullable<PresenceEntry["status"]>["workflow"]> | null;
   owner: string | null; // 所属人：agent 的操作者 / 人类的 email，仅连接中的参与者可知
+  display: string;
+  responsibility: string | null;
   connectionCount: number;
 }
 
@@ -121,6 +124,7 @@ export function PresenceBar({
   canModerate = false,
   removingName = null,
   onRemoveParticipant,
+  roles = [],
 }: Props) {
   const t = useT();
   // 相对时间 30s 刷一次
@@ -133,23 +137,27 @@ export function PresenceBar({
 
   // 在线 sender 带 owner；离线/最近 presence 带 account。两者都归到同一账号块。
   const byName = new Map(participants.map((p) => [p.name, p]));
-  const names = [...new Set([...participants.map((p) => p.name), ...Object.keys(presence)])].sort();
+  const roleByName = new Map(roles.map((role) => [role.name, role]));
+  const names = [...new Set([...participants.map((p) => p.name), ...Object.keys(presence), ...roles.map((role) => role.name)])].sort();
   const items: Item[] = names.map((name) => {
     const entry = presence[name];
     const sender = byName.get(name);
-    const owner = sender?.owner ?? entry?.account ?? null;
-    const kind = sender?.kind ?? entry?.kind ?? "agent";
+    const assigned = roleByName.get(name);
+    const owner = sender?.owner ?? entry?.account ?? assigned?.account ?? null;
+    const kind = sender?.kind ?? entry?.kind ?? assigned?.kind ?? "agent";
     const connected = byName.has(name);
     const meta = {
       lastSeen: entry?.last_seen ?? null,
-      role: entry?.role ?? null,
-      roleSource: entry?.role_source ?? null,
+      role: assigned?.role ?? entry?.role ?? null,
+      roleSource: assigned !== undefined ? "assigned" as const : entry?.role_source ?? null,
       residency: entry?.residency ?? null,
       wakeKind: entry?.wake?.kind ?? null,
       wakeVerifiedAt: entry?.wake?.verified_at ?? null,
       context: entry?.context ?? null,
       lineage: entry?.lineage ?? sender?.lineage ?? null,
       workflow: entry?.status?.workflow ?? null,
+      display: assigned?.display ?? (kind === "human" && owner !== null ? owner : name),
+      responsibility: assigned?.responsibility ?? null,
       connectionCount: sender?.connection_count ?? entry?.connection_count ?? (connected ? 1 : 0),
     };
     if (!connected) {
@@ -198,6 +206,7 @@ export function PresenceBar({
     const titleParts = [
       it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name,
       it.role !== null ? `role: ${it.role}` : null,
+      it.responsibility !== null && it.responsibility !== "" ? `responsibility: ${it.responsibility}` : null,
       it.roleSource !== null ? `role source: ${it.roleSource}` : null,
       it.residency !== null ? `residency: ${it.residency}` : null,
       it.wakeKind !== null ? `wake: ${it.wakeKind}` : null,
@@ -234,7 +243,8 @@ export function PresenceBar({
         style={{ "--ah": agentHue(it.name) } as CSSProperties}
       >
         <span className={`d-dot d-dot--${it.state}`} />
-        <span className="presence-name">{it.name}</span>
+        <span className="presence-name">{it.display}</span>
+        <span className={`t-mono presence-kind presence-kind--${it.kind}`}>{it.kind}</span>
         {full && it.owner !== null && it.owner !== "" && it.owner !== it.name && (
           <span className="t-mono presence-owner">· {it.owner}</span>
         )}
@@ -261,6 +271,9 @@ export function PresenceBar({
         )}
         {full && it.workflow !== null && <span className="t-mono presence-context">wf:{it.workflow.workflow_id}</span>}
         {full && it.note !== null && it.note !== "" && <span className="t-mono presence-note">{it.note}</span>}
+        {full && it.responsibility !== null && it.responsibility !== "" && (
+          <span className="t-mono presence-note">{it.responsibility}</span>
+        )}
         {it.ts !== null && <span className="t-mono presence-ts">{fmtRel(it.ts)}</span>}
         {full && canModerate && onRemoveParticipant !== undefined && it.name !== "system" && (
           <button
@@ -319,7 +332,8 @@ export function PresenceBar({
             {previewAgents.map((agent) => (
               <span key={agent.name} className="presence-agent-chip">
                 <span className={`d-dot d-dot--${agent.state}`} />
-                <span>{agent.name}</span>
+                <span>{agent.display}</span>
+                <span className={`t-mono presence-agent-kind presence-kind--${agent.kind}`}>{agent.kind}</span>
                 {agent.connectionCount > 1 && <span className="t-mono presence-agent-duplicate">x{agent.connectionCount}</span>}
                 {roleBadge(agent, now) !== null && <span className="t-mono presence-agent-role">{roleBadge(agent, now)}</span>}
               </span>

@@ -1,7 +1,7 @@
 // rest 封装 + token 存取。
 // 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它，并立即从地址栏移除；
 // share token 只放 sessionStorage，本次标签页可刷新，避免长期落 localStorage。
-import type { MsgFrame, PresenceEntry, SearchHit } from "@agentparty/shared";
+import type { ChannelRoleAssignment, CollaborationRole, MsgFrame, PresenceEntry, SearchHit } from "@agentparty/shared";
 import type { WebSession } from "./oidc";
 
 const TOKEN_KEY = "ap_token";
@@ -127,6 +127,8 @@ export interface ChannelIdentity {
   account?: string;
 }
 
+export type ChannelRoleInfo = ChannelRoleAssignment;
+
 // 当前登录身份（spec §10）：topbar 显示真实 token name/kind/role，owner 仅作归属辅助信息。
 export interface MeInfo {
   name: string;
@@ -217,6 +219,47 @@ export async function fetchChannelIdentities(token: string, slug: string): Promi
   if (!res.ok) throw new Error(`GET /api/channels/${slug}/identities failed (${res.status})`);
   const data = (await res.json()) as { identities: ChannelIdentity[] };
   return data.identities;
+}
+
+export async function fetchChannelRoles(token: string, slug: string): Promise<ChannelRoleInfo[]> {
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/roles`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/roles failed (${res.status})`);
+  const data = (await res.json()) as { roles: ChannelRoleInfo[] };
+  return data.roles;
+}
+
+export async function setChannelRole(
+  token: string,
+  slug: string,
+  name: string,
+  role: CollaborationRole,
+  responsibility: string,
+): Promise<ChannelRoleInfo> {
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/roles/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ role, responsibility }),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 400) throw new ValidationError("invalid role assignment");
+  if (!res.ok) throw new Error(`PUT /api/channels/${slug}/roles/${name} failed (${res.status})`);
+  return (await res.json()) as ChannelRoleInfo;
+}
+
+export async function deleteChannelRole(token: string, slug: string, name: string): Promise<void> {
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/roles/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 400) throw new ValidationError("invalid role assignment");
+  if (!res.ok) throw new Error(`DELETE /api/channels/${slug}/roles/${name} failed (${res.status})`);
 }
 
 export async function rotateChannelAgent(token: string, slug: string, name: string): Promise<ChannelAgent> {

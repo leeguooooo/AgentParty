@@ -464,7 +464,7 @@ export const openapiDocument = {
         security: [{ bearer: [] }],
         parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
         responses: {
-          "200": { description: "{roles:[{name,role,assigned_by,assigned_at}]}" },
+          "200": { description: "{roles:[{name,role,responsibility,assigned_by,assigned_at,kind,account,display}]}" },
           "403": { description: "not allowed in this channel" },
           "404": { description: "channel not found" },
         },
@@ -485,13 +485,16 @@ export const openapiDocument = {
               schema: {
                 type: "object",
                 required: ["role"],
-                properties: { role: { type: "string", enum: ["host", "worker", "reviewer", "observer"] } },
+                properties: {
+                  role: { type: "string", enum: ["host", "worker", "reviewer", "observer"] },
+                  responsibility: { type: "string", nullable: true, maxLength: 500 },
+                },
               },
             },
           },
         },
         responses: {
-          "200": { description: "{name,role,assigned_by,assigned_at}" },
+          "200": { description: "{name,role,responsibility,assigned_by,assigned_at}" },
           "403": { description: "only channel moderator can assign roles" },
           "404": { description: "channel not found" },
           "410": { description: "channel archived" },

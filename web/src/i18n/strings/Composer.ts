@@ -9,6 +9,7 @@ export const ComposerStrings: LocaleDict = {
     "Composer.kind.human": "human",
     "Composer.owner": "owner: {account}",
     "Composer.role": "role: {role}",
+    "Composer.responsibility": "responsibility: {responsibility}",
     "Composer.note": "note: {note}",
   },
   zh: {
@@ -19,6 +20,7 @@ export const ComposerStrings: LocaleDict = {
     "Composer.kind.human": "human",
     "Composer.owner": "所属: {account}",
     "Composer.role": "职责: {role}",
+    "Composer.responsibility": "分工: {responsibility}",
     "Composer.note": "说明: {note}",
   },
 };

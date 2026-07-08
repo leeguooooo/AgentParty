@@ -1,7 +1,7 @@
 // @ 提及候选（issue #39）：把 participants（WS 连着）∪ presence（含 wake 信息）合成一个
 // 分档的候选列表，供 Composer 的 @ 补全下拉用。"可 @" ≠ "在线连接"——本产品最特别的一档是
 // 「可唤醒」：人不在但 @ 了会被 serve/watch/webhook 拉起来。
-import type { PresenceEntry, Sender, WakeKind } from "@agentparty/shared";
+import type { ChannelRoleAssignment, PresenceEntry, Sender, WakeKind } from "@agentparty/shared";
 
 export type MentionTier = "online" | "wakeable" | "recent";
 
@@ -20,7 +20,8 @@ export interface MentionCandidate {
   group: string; // UI 分组：账号 / 未归属
   account?: string; // 会话背后的账号（人类 = email）
   role?: string; // 协作角色/职责（host/worker/reviewer/observer），hover 显示
-  note?: string; // 当前 status note，临时承载职责说明；长期应由结构化 channel role 提供
+  responsibility?: string; // 结构化职责说明（频道分工字段）
+  note?: string; // 当前 status note
 }
 
 const WAKEABLE: readonly WakeKind[] = ["serve", "watch", "webhook"];
@@ -61,13 +62,18 @@ export function mentionCandidates(
   self: string | null,
   now: number,
   identities: MentionIdentity[] = [],
+  roles: ChannelRoleAssignment[] = [],
 ): MentionCandidate[] {
   const online = new Set(participants.map((p) => p.name));
   const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
+  const roleByName = new Map(roles.map((role) => [role.name, role]));
   const kindOf = new Map<string, "agent" | "human">();
   for (const p of participants) kindOf.set(p.name, p.kind);
   for (const identity of identities) {
     if (identity.kind === "agent" || identity.kind === "human") kindOf.set(identity.name, identity.kind);
+  }
+  for (const role of roles) {
+    if (role.kind === "agent" || role.kind === "human") kindOf.set(role.name, role.kind);
   }
   for (const [name, p] of Object.entries(presence)) {
     if (!kindOf.has(name) && (p.kind === "agent" || p.kind === "human")) kindOf.set(name, p.kind);
@@ -76,7 +82,7 @@ export function mentionCandidates(
   const kindFor = (name: string): "agent" | "human" =>
     kindOf.get(name) ?? (SYSTEM_HUMAN_SESSION_RE.test(name) ? "human" : "agent");
 
-  const names = new Set<string>([...online, ...Object.keys(presence)]);
+  const names = new Set<string>([...online, ...Object.keys(presence), ...roles.map((role) => role.name)]);
   const rank: Record<MentionTier, number> = { online: 0, wakeable: 1, recent: 2 };
   return [...names]
     .filter((name) => name !== self && name !== "system")
@@ -84,15 +90,34 @@ export function mentionCandidates(
       const kind = kindFor(name);
       const p = presence[name];
       const identity = identityByName.get(name);
-      const account = identity?.account ?? p?.account;
+      const assigned = roleByName.get(name);
+      const account = identity?.account ?? assigned?.account ?? p?.account;
       // 人类网页会话名是 UUID，显示账号 email 才认得出「是谁」；agent 名本身可读，用 name。
-      const display = identity?.display && identity.display !== "" ? identity.display : (kind === "human" && account ? account : name);
+      const display =
+        identity?.display && identity.display !== ""
+          ? identity.display
+          : assigned?.display && assigned.display !== ""
+            ? assigned.display
+            : kind === "human" && account
+              ? account
+              : name;
       const group = account ?? (kind === "human" ? "human sessions" : "unowned agents");
-      return { name, display, kind, tier: tierFor(name, online, presence, now), group, account, role: p?.role, note: p?.note ?? undefined };
+      return {
+        name,
+        display,
+        kind,
+        tier: tierFor(name, online, presence, now),
+        group,
+        account,
+        role: assigned?.role ?? p?.role,
+        responsibility: assigned?.responsibility ?? undefined,
+        note: p?.note ?? undefined,
+      };
     })
     .filter((c) => {
       if (c.tier === "online") return true; // 当前连着的都留（含在线的人类）
       if (c.kind === "human") return false; // 不在线的人类围观者不作候选
+      if (roleByName.has(c.name)) return true;
       const p = presence[c.name];
       const seen = p?.last_seen ?? p?.ts ?? 0;
       return now - seen <= DEAD_MS; // 幽灵清理：太久没露面的 agent 也剔除

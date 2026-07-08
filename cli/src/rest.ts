@@ -8,6 +8,7 @@ import {
   type AgentLineage,
   type ChannelKind,
   type ChannelMode,
+  type ChannelRoleAssignment,
   type CollaborationRole,
   type CompletionGate,
   type CompletionReview,
@@ -64,12 +65,7 @@ export interface WebhookInfo {
   filter: WebhookFilter;
 }
 
-export interface ChannelRoleInfo {
-  name: string;
-  role: CollaborationRole;
-  assigned_by: string;
-  assigned_at: number;
-}
+export type ChannelRoleInfo = ChannelRoleAssignment;
 
 export interface ChannelMemberInfo {
   account: string;
@@ -457,11 +453,12 @@ export async function setChannelRole(
   slug: string,
   name: string,
   role: CollaborationRole,
+  responsibility?: string,
 ): Promise<ChannelRoleInfo> {
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/roles/${encodeURIComponent(name)}`, {
     method: "PUT",
     headers: bearerJson(token),
-    body: JSON.stringify({ role }),
+    body: JSON.stringify(responsibility === undefined ? { role } : { role, responsibility }),
   })) as ChannelRoleInfo;
 }
 

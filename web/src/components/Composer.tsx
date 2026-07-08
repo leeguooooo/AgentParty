@@ -120,6 +120,7 @@ export function Composer({ draft, setDraft, onSend, ready, candidates }: Props) 
               owner ? t("Composer.owner", { account: owner }) : "",
               t(`Composer.kind.${c.kind}`),
               c.role ? t("Composer.role", { role: c.role }) : "",
+              c.responsibility ? t("Composer.responsibility", { responsibility: c.responsibility }) : "",
               c.note ? t("Composer.note", { note: c.note }) : "",
               c.name !== c.display ? `@${c.name}` : "",
             ].filter(Boolean).join(" · ");
@@ -148,6 +149,7 @@ export function Composer({ draft, setDraft, onSend, ready, candidates }: Props) 
                   </span>
                   <span className={`mention-kind mention-kind--${c.kind}`}>{t(`Composer.kind.${c.kind}`)}</span>
                   {c.role && <span className="mention-role">{c.role}</span>}
+                  {c.responsibility && <span className="mention-responsibility">{c.responsibility}</span>}
                   <span className={`mention-tier mention-tier--${c.tier}`}>
                     {TIER_DOT[c.tier]} {TIER_LABEL[c.tier]}
                   </span>

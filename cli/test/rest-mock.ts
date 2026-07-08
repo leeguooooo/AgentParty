@@ -20,7 +20,7 @@ export function startRestMock(handler?: RestHandler): RestMock {
   const requests: RestRequest[] = [];
   // 有状态 webhook 存储：add 后 list 能查到
   const webhooks = new Map<string, { name: string; url: string; filter: string }[]>();
-  const roles = new Map<string, { name: string; role: string; assigned_by: string; assigned_at: number }[]>();
+  const roles = new Map<string, { name: string; role: string; responsibility: string | null; assigned_by: string; assigned_at: number }[]>();
   const joinLinks = new Map<
     string,
     { code: string; channel_slug: string; created_by: string; created_at: number; expires_at: number | null; max_uses: number | null; uses: number; revoked_at: number | null }[]
@@ -146,7 +146,7 @@ export function startRestMock(handler?: RestHandler): RestMock {
         if (r.method === "PUT" && roleMatch[2]) {
           const name = decodeURIComponent(roleMatch[2]);
           const role = (body as { role: string }).role;
-          const next = { name, role, assigned_by: "owner", assigned_at: 123 };
+          const next = { name, role, responsibility: (body as { responsibility?: string }).responsibility ?? null, assigned_by: "owner", assigned_at: 123 };
           roles.set(slug, [...list.filter((r) => r.name !== name), next]);
           return Response.json(next);
         }

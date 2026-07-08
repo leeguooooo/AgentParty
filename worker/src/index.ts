@@ -1,8 +1,9 @@
 // worker 入口 — rest 路由 + ws 升级转发
-import { CHARTER_LIMIT, RESERVED_NAMES } from "@agentparty/shared";
+import { CHARTER_LIMIT, RESERVED_NAMES, ROLE_RESPONSIBILITY_LIMIT } from "@agentparty/shared";
 import type {
   AgentLineage,
   CaptureKind,
+  ChannelRoleAssignment,
   CaptureRecord,
   CompletionGate,
   CompletionReviewPolicy,
@@ -48,6 +49,18 @@ const VISIBILITIES: readonly string[] = ["public", "private"];
 const COMPLETION_GATES: readonly string[] = ["off", "reviewer"] satisfies CompletionGate[];
 const COMPLETION_REVIEW_POLICIES: readonly string[] = ["sender", "owner"] satisfies CompletionReviewPolicy[];
 const COLLAB_ROLES: readonly string[] = ["host", "worker", "reviewer", "observer"] satisfies CollaborationRole[];
+
+function parseRoleResponsibility(body: Record<string, unknown> | null): { present: boolean; value: string | null } | null {
+  if (body === null || !Object.prototype.hasOwnProperty.call(body, "responsibility")) {
+    return { present: false, value: null };
+  }
+  const raw = body.responsibility;
+  if (raw === null) return { present: true, value: null };
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
+  if (textEncoder.encode(value).byteLength > ROLE_RESPONSIBILITY_LIMIT) return null;
+  return { present: true, value: value === "" ? null : value };
+}
 const WEBHOOK_FILTERS: readonly string[] = ["mentions", "status", "needs-human", "all"] satisfies WebhookFilter[];
 const CAPTURE_KINDS: readonly string[] = ["decision", "requirement", "bug", "action-item"] satisfies CaptureKind[];
 const WEBHOOK_URL_MAX = 2048;
@@ -1420,11 +1433,37 @@ app.get("/api/channels/:slug/roles", async (c) => {
     return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
   }
   const { results } = await c.env.DB.prepare(
-    "SELECT agent_name AS name, role, assigned_by, assigned_at FROM channel_roles WHERE channel_slug = ? ORDER BY agent_name",
+    `SELECT cr.agent_name AS name, cr.role, cr.responsibility, cr.assigned_by, cr.assigned_at,
+            t.role AS token_role, t.owner AS account
+       FROM channel_roles cr
+       LEFT JOIN tokens t ON t.name = cr.agent_name AND t.revoked_at IS NULL
+      WHERE cr.channel_slug = ?
+      ORDER BY cr.agent_name`,
   )
     .bind(slug)
-    .all<{ name: string; role: CollaborationRole; assigned_by: string; assigned_at: number }>();
-  return c.json({ roles: results });
+    .all<{
+      name: string;
+      role: CollaborationRole;
+      responsibility: string | null;
+      assigned_by: string;
+      assigned_at: number;
+      token_role: TokenRole | null;
+      account: string | null;
+    }>();
+  const roles: ChannelRoleAssignment[] = results.map((row) => {
+    const kind = row.token_role === "human" ? "human" : row.token_role === "agent" ? "agent" : undefined;
+    return {
+      name: row.name,
+      role: row.role,
+      responsibility: row.responsibility ?? null,
+      assigned_by: row.assigned_by,
+      assigned_at: row.assigned_at,
+      ...(kind === undefined ? {} : { kind }),
+      ...(row.account === null ? {} : { account: row.account }),
+      ...(kind === "human" && row.account !== null ? { display: row.account } : { display: row.name }),
+    };
+  });
+  return c.json({ roles });
 });
 
 app.put("/api/channels/:slug/roles/:name", async (c) => {
@@ -1439,21 +1478,26 @@ app.put("/api/channels/:slug/roles/:name", async (c) => {
   if (channel.archived_at !== null) {
     return c.json(errorBody("archived", "channel is archived"), 410);
   }
-  const body = (await c.req.json().catch(() => null)) as { role?: unknown } | null;
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
   const role = typeof body?.role === "string" ? body.role : "";
+  const responsibility = parseRoleResponsibility(body);
   if (!NAME_RE.test(name) || !COLLAB_ROLES.includes(role)) {
     return c.json(errorBody("bad_request", "valid name and role (host|worker|reviewer|observer) required"), 400);
   }
+  if (responsibility === null) {
+    return c.json(errorBody("bad_request", `responsibility must be a string <= ${ROLE_RESPONSIBILITY_LIMIT} bytes`), 400);
+  }
   const assignedAt = Date.now();
   await c.env.DB.prepare(
-    `INSERT INTO channel_roles (channel_slug, agent_name, role, assigned_by, assigned_at)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO channel_roles (channel_slug, agent_name, role, assigned_by, assigned_at, responsibility)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(channel_slug, agent_name) DO UPDATE SET
        role = excluded.role,
        assigned_by = excluded.assigned_by,
-       assigned_at = excluded.assigned_at`,
+       assigned_at = excluded.assigned_at,
+       responsibility = ${responsibility.present ? "excluded.responsibility" : "channel_roles.responsibility"}`,
   )
-    .bind(slug, name, role, identity.name, assignedAt)
+    .bind(slug, name, role, identity.name, assignedAt, responsibility.value)
     .run();
   const stub = await getServerByName(c.env.CHANNELS, slug);
   await stub.fetch(
@@ -1463,7 +1507,12 @@ app.put("/api/channels/:slug/roles/:name", async (c) => {
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );
-  return c.json({ name, role, assigned_by: identity.name, assigned_at: assignedAt });
+  const stored = await c.env.DB.prepare(
+    "SELECT responsibility FROM channel_roles WHERE channel_slug = ? AND agent_name = ?",
+  )
+    .bind(slug, name)
+    .first<{ responsibility: string | null }>();
+  return c.json({ name, role, responsibility: stored?.responsibility ?? null, assigned_by: identity.name, assigned_at: assignedAt });
 });
 
 app.delete("/api/channels/:slug/roles/:name", async (c) => {

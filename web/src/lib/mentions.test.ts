@@ -93,6 +93,40 @@ describe("mentionCandidates", () => {
     expect(c.role).toBe("worker");
   });
 
+  test("assigned channel roles add offline agents and carry structured responsibility", () => {
+    const c = mentionCandidates([], {}, null, NOW, [], [
+      {
+        name: "build-agent",
+        role: "worker",
+        responsibility: "build and deploy",
+        assigned_by: "owner",
+        assigned_at: NOW,
+        kind: "agent",
+        account: "leeguooooo@gmail.com",
+        display: "build-agent",
+      },
+    ])[0]!;
+    expect(c.name).toBe("build-agent");
+    expect(c.group).toBe("leeguooooo@gmail.com");
+    expect(c.role).toBe("worker");
+    expect(c.responsibility).toBe("build and deploy");
+  });
+
+  test("assigned role overrides self-reported presence role", () => {
+    const pres = { "review-agent": presence({ name: "review-agent", kind: "agent", role: "worker" }) };
+    const c = mentionCandidates([], pres, null, NOW, [], [
+      {
+        name: "review-agent",
+        role: "reviewer",
+        responsibility: "final review",
+        assigned_by: "owner",
+        assigned_at: NOW,
+      },
+    ])[0]!;
+    expect(c.role).toBe("reviewer");
+    expect(c.responsibility).toBe("final review");
+  });
+
   test("bare-UUID session name excluded when offline (旧 presence 行没回填 kind 的兜底)", () => {
     const uuid = "63ce33fa-6169-4c71-840b-fe6ea1d1162d";
     const pres = { [uuid]: presence({ name: uuid }) }; // 无 kind：靠名字形状判为 human

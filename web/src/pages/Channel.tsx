@@ -2,7 +2,7 @@
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { buildHostBoard, type HostBoard, type MsgFrame, type SearchHit } from "@agentparty/shared";
+import { buildHostBoard, type CollaborationRole, type HostBoard, type MsgFrame, type SearchHit } from "@agentparty/shared";
 import { AgentJoin } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
 import { VisibilityToggle } from "../components/VisibilityToggle";
@@ -16,14 +16,18 @@ import {
   AuthError,
   type ChannelCharter,
   type ChannelIdentity,
+  type ChannelRoleInfo,
+  deleteChannelRole,
   ForbiddenError,
   fetchChannelCharter,
   fetchChannelIdentities,
+  fetchChannelRoles,
   fetchMessages,
   kickParticipant,
   resetGuard,
   searchMessages,
   setChannelCharter,
+  setChannelRole,
   ValidationError,
 } from "../lib/api";
 import { agentHue } from "../lib/agentColor";
@@ -45,6 +49,7 @@ import { ChannelSocket } from "../lib/ws";
 import { channelReducer, initialChannelState } from "../state";
 import { useT, type TFunc } from "../i18n/useT";
 import "../i18n/strings/Channel";
+import "../i18n/strings/Composer";
 
 interface Props {
   slug: string;
@@ -67,6 +72,7 @@ const MENTION_RE = /@([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
 // IM 式加载：初始/上翻每页条数，与 DOM 消息窗口上限（贴底时超出即丢最老页，上翻可拉回）
 const PAGE_SIZE = 50;
 const MESSAGE_CAP = 300;
+const COLLAB_ROLES: CollaborationRole[] = ["host", "worker", "reviewer", "observer"];
 // 触顶阈值：滚动到离顶部这么近就预取上一页
 const TOP_LOAD_PX = 80;
 
@@ -124,6 +130,20 @@ function writeSeenCharterRev(slug: string, rev: number) {
   }
 }
 
+interface RoleDraft {
+  role: CollaborationRole;
+  responsibility: string;
+}
+
+function roleDraftFrom(role: ChannelRoleInfo): RoleDraft {
+  return { role: role.role, responsibility: role.responsibility ?? "" };
+}
+
+function displayRoleName(role: ChannelRoleInfo, identities: ChannelIdentity[]): string {
+  const identity = identities.find((item) => item.name === role.name);
+  return identity?.display ?? role.display ?? (role.kind === "human" && role.account ? role.account : role.name);
+}
+
 function CharterBanner({
   charter,
   open,
@@ -133,11 +153,23 @@ function CharterBanner({
   saving,
   editing,
   error,
+  roles,
+  roleDrafts,
+  roleError,
+  roleSaving,
+  roleName,
+  roleDraft,
+  identities,
   onToggle,
   onDraft,
   onEdit,
   onCancel,
   onSave,
+  onRoleDraft,
+  onNewRoleName,
+  onNewRoleDraft,
+  onSaveRole,
+  onDeleteRole,
 }: {
   charter: ChannelCharter | null;
   open: boolean;
@@ -147,20 +179,34 @@ function CharterBanner({
   saving: boolean;
   editing: boolean;
   error: string | null;
+  roles: ChannelRoleInfo[];
+  roleDrafts: Record<string, RoleDraft>;
+  roleError: string | null;
+  roleSaving: string | null;
+  roleName: string;
+  roleDraft: RoleDraft;
+  identities: ChannelIdentity[];
   onToggle: () => void;
   onDraft: (value: string) => void;
   onEdit: () => void;
   onCancel: () => void;
   onSave: () => void;
+  onRoleDraft: (name: string, draft: RoleDraft) => void;
+  onNewRoleName: (name: string) => void;
+  onNewRoleDraft: (draft: RoleDraft) => void;
+  onSaveRole: (name: string, draft: RoleDraft) => void;
+  onDeleteRole: (name: string) => void;
 }) {
   const t = useT();
   const hasCharter = Boolean(charter?.charter);
+  const sortedRoles = [...roles].sort((a, b) => a.role.localeCompare(b.role) || displayRoleName(a, identities).localeCompare(displayRoleName(b, identities)));
   return (
     <section className={"charter-banner" + (updated ? " charter-banner--updated" : "")}>
       <header className="charter-head">
         <button className="charter-toggle" type="button" onClick={onToggle} aria-expanded={open}>
           <span>{t("Channel.charter.label")}</span>
           {charter ? <span className="t-mono">rev {charter.charter_rev}</span> : null}
+          <span className="t-mono charter-role-count">{t("Channel.roles.count", { count: String(roles.length) })}</span>
           {updated ? <span className="charter-updated">{t("Channel.charter.updated")}</span> : null}
         </button>
         {canModerate && (
@@ -193,6 +239,97 @@ function CharterBanner({
           ) : (
             <p className="charter-empty">{t("Channel.charter.empty")}</p>
           )}
+          <section className="role-board" aria-label={t("Channel.roles.label")}>
+            <header className="role-board-head">
+              <span>{t("Channel.roles.label")}</span>
+              <span className="t-mono">{t("Channel.roles.help")}</span>
+            </header>
+            {sortedRoles.length > 0 ? (
+              <div className="role-list">
+                {sortedRoles.map((role) => {
+                  const draftForRole = roleDrafts[role.name] ?? roleDraftFrom(role);
+                  const display = displayRoleName(role, identities);
+                  const owner = role.account && role.account !== display ? role.account : null;
+                  return (
+                    <div key={role.name} className="role-row">
+                      <div className="role-person" title={`${role.name}${owner ? ` · ${owner}` : ""}`}>
+                        <span className="role-person-name t-mono">{display}</span>
+                        <span className={`role-kind role-kind--${role.kind ?? "agent"}`}>{t(`Composer.kind.${role.kind ?? "agent"}`)}</span>
+                        {owner !== null && <span className="role-owner t-mono">{owner}</span>}
+                      </div>
+                      {canModerate ? (
+                        <>
+                          <select
+                            className="role-select t-mono"
+                            value={draftForRole.role}
+                            onChange={(e) => onRoleDraft(role.name, { ...draftForRole, role: e.target.value as CollaborationRole })}
+                          >
+                            {COLLAB_ROLES.map((item) => (
+                              <option key={item} value={item}>{item}</option>
+                            ))}
+                          </select>
+                          <input
+                            className="role-input"
+                            value={draftForRole.responsibility}
+                            onChange={(e) => onRoleDraft(role.name, { ...draftForRole, responsibility: e.target.value })}
+                            placeholder={t("Channel.roles.responsibilityPlaceholder")}
+                          />
+                          <button className="d-btn" type="button" disabled={roleSaving === role.name} onClick={() => onSaveRole(role.name, draftForRole)}>
+                            {roleSaving === role.name ? t("Channel.roles.saving") : t("Channel.roles.save")}
+                          </button>
+                          <button className="d-btn" type="button" disabled={roleSaving === role.name} onClick={() => onDeleteRole(role.name)}>
+                            {t("Channel.roles.clear")}
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <span className="role-badge t-mono">{role.role}</span>
+                          <span className="role-text">{role.responsibility ?? t("Channel.roles.noResponsibility")}</span>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="charter-empty">{t("Channel.roles.empty")}</p>
+            )}
+            {canModerate && (
+              <div className="role-row role-row--new">
+                <input
+                  className="role-name-input t-mono"
+                  value={roleName}
+                  onChange={(e) => onNewRoleName(e.target.value)}
+                  list="channel-role-targets"
+                  placeholder={t("Channel.roles.namePlaceholder")}
+                />
+                <select
+                  className="role-select t-mono"
+                  value={roleDraft.role}
+                  onChange={(e) => onNewRoleDraft({ ...roleDraft, role: e.target.value as CollaborationRole })}
+                >
+                  {COLLAB_ROLES.map((item) => (
+                    <option key={item} value={item}>{item}</option>
+                  ))}
+                </select>
+                <input
+                  className="role-input"
+                  value={roleDraft.responsibility}
+                  onChange={(e) => onNewRoleDraft({ ...roleDraft, responsibility: e.target.value })}
+                  placeholder={t("Channel.roles.responsibilityPlaceholder")}
+                />
+                <button className="d-btn d-btn--primary" type="button" disabled={roleSaving === "__new__"} onClick={() => onSaveRole(roleName, roleDraft)}>
+                  {roleSaving === "__new__" ? t("Channel.roles.saving") : t("Channel.roles.add")}
+                </button>
+                <datalist id="channel-role-targets">
+                  {identities.map((identity) => (
+                    <option key={identity.name} value={identity.name}>{identity.display}</option>
+                  ))}
+                </datalist>
+              </div>
+            )}
+            {roleError !== null && <p className="banner banner--red">{roleError}</p>}
+          </section>
         </div>
       )}
     </section>
@@ -628,6 +765,12 @@ export function ChannelPage({
   const [charterDraft, setCharterDraft] = useState("");
   const [charterSaving, setCharterSaving] = useState(false);
   const [charterError, setCharterError] = useState<string | null>(null);
+  const [channelRoles, setChannelRoles] = useState<ChannelRoleInfo[]>([]);
+  const [roleDrafts, setRoleDrafts] = useState<Record<string, RoleDraft>>({});
+  const [newRoleName, setNewRoleName] = useState("");
+  const [newRoleDraft, setNewRoleDraft] = useState<RoleDraft>({ role: "worker", responsibility: "" });
+  const [roleSaving, setRoleSaving] = useState<string | null>(null);
+  const [roleError, setRoleError] = useState<string | null>(null);
   const [seenCharterRev, setSeenCharterRev] = useState(() => readSeenCharterRev(slug));
   // 可见性可在会话内切换（issue #38 web），本地 state 让顶栏徽章即时反映，无需重载
   const [localPublic, setLocalPublic] = useState(isPublic);
@@ -666,6 +809,19 @@ export function ChannelPage({
       });
   }, [slug, token]);
 
+  const loadRoles = useCallback(() => {
+    return fetchChannelRoles(token, slug)
+      .then((roles) => {
+        setChannelRoles(roles);
+        setRoleDrafts(Object.fromEntries(roles.map((role) => [role.name, roleDraftFrom(role)])));
+        setRoleError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (!(err instanceof ForbiddenError)) setRoleError(t("Channel.roles.loadFailed"));
+      });
+  }, [slug, token, t]);
+
   const removeParticipant = useCallback((name: string) => {
     if (removingName !== null) return;
     setRemovingName(name);
@@ -702,7 +858,8 @@ export function ChannelPage({
     setCharterOpen(false);
     setCharterEditing(false);
     void loadCharter();
-  }, [loadCharter, slug]);
+    void loadRoles();
+  }, [loadCharter, loadRoles, slug]);
 
   useEffect(() => {
     let alive = true;
@@ -993,6 +1150,58 @@ export function ChannelPage({
       .finally(() => setCharterSaving(false));
   }, [charterDraft, charterSaving, slug, token]);
 
+  const updateRoleDraft = useCallback((name: string, next: RoleDraft) => {
+    setRoleDrafts((current) => ({ ...current, [name]: next }));
+  }, []);
+
+  const saveRole = useCallback((rawName: string, roleDraft: RoleDraft) => {
+    const name = rawName.trim();
+    if (name === "" || roleSaving !== null) return;
+    const savingKey = channelRoles.some((role) => role.name === name) ? name : "__new__";
+    setRoleSaving(savingKey);
+    setRoleError(null);
+    setChannelRole(token, slug, name, roleDraft.role, roleDraft.responsibility)
+      .then((saved) => {
+        setChannelRoles((current) => {
+          const previous = current.find((role) => role.name === saved.name);
+          return [...current.filter((role) => role.name !== saved.name), { ...previous, ...saved }];
+        });
+        setRoleDrafts((current) => ({ ...current, [saved.name]: roleDraftFrom(saved) }));
+        if (savingKey === "__new__") {
+          setNewRoleName("");
+          setNewRoleDraft({ role: "worker", responsibility: "" });
+        }
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setRoleError(t("Channel.roles.forbidden"));
+        else if (err instanceof ValidationError) setRoleError(t("Channel.roles.invalid"));
+        else setRoleError(t("Channel.roles.saveFailed"));
+      })
+      .finally(() => setRoleSaving(null));
+  }, [channelRoles, roleSaving, slug, token, t]);
+
+  const clearRole = useCallback((name: string) => {
+    if (roleSaving !== null) return;
+    setRoleSaving(name);
+    setRoleError(null);
+    deleteChannelRole(token, slug, name)
+      .then(() => {
+        setChannelRoles((current) => current.filter((role) => role.name !== name));
+        setRoleDrafts((current) => {
+          const next = { ...current };
+          delete next[name];
+          return next;
+        });
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setRoleError(t("Channel.roles.forbidden"));
+        else setRoleError(t("Channel.roles.saveFailed"));
+      })
+      .finally(() => setRoleSaving(null));
+  }, [roleSaving, slug, token, t]);
+
   const q = search.trim();
   const from = searchFrom.trim();
   const since = nonNegativeInt(searchSince);
@@ -1005,6 +1214,7 @@ export function ChannelPage({
     ...new Set([
       ...state.participants.map((p) => p.name),
       ...Object.keys(state.presence),
+      ...channelRoles.map((role) => role.name),
       ...state.messages.map((m) => m.sender.name),
     ]),
   ].sort((a, b) => a.localeCompare(b));
@@ -1034,8 +1244,8 @@ export function ChannelPage({
   );
   // @ 补全候选：participants ∪ presence，分档（在线/可唤醒/最近）。teamNow 30s 刷新驱动 stale 判定。
   const mentionOptions = useMemo(
-    () => mentionCandidates(state.participants, state.presence, state.self, teamNow, channelIdentities),
-    [channelIdentities, state.participants, state.presence, state.self, teamNow],
+    () => mentionCandidates(state.participants, state.presence, state.self, teamNow, channelIdentities, channelRoles),
+    [channelIdentities, channelRoles, state.participants, state.presence, state.self, teamNow],
   );
   const identityDisplay = useMemo(
     () =>
@@ -1138,6 +1348,7 @@ export function ChannelPage({
         canModerate={canModerate}
         removingName={removingName}
         onRemoveParticipant={removeParticipant}
+        roles={channelRoles}
       />
       {kickError !== null && <p className="banner banner--red">{kickError}</p>}
       {archiveError !== null && <p className="banner banner--red">{archiveError}</p>}
@@ -1194,11 +1405,23 @@ export function ChannelPage({
         saving={charterSaving}
         editing={charterEditing}
         error={charterError}
+        roles={channelRoles}
+        roleDrafts={roleDrafts}
+        roleError={roleError}
+        roleSaving={roleSaving}
+        roleName={newRoleName}
+        roleDraft={newRoleDraft}
+        identities={channelIdentities}
         onToggle={toggleCharter}
         onDraft={setCharterDraft}
         onEdit={editCharter}
         onCancel={cancelCharterEdit}
         onSave={saveCharter}
+        onRoleDraft={updateRoleDraft}
+        onNewRoleName={setNewRoleName}
+        onNewRoleDraft={setNewRoleDraft}
+        onSaveRole={saveRole}
+        onDeleteRole={clearRole}
       />
       {/* chat-first：这些协调/元信息面板默认折叠，避免把核心对话流挤出首屏。展开查看 digest/过滤/host board 等。 */}
       <details className="chan-panels">

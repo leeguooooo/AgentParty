@@ -319,7 +319,8 @@ export async function run(argv: string[]): Promise<number> {
           }
           const roles = await listChannelRoles(cfg.server, cfg.token, slug);
           for (const r of roles) {
-            console.log(`${r.name}\t${r.role}\t${r.assigned_by}\t${new Date(r.assigned_at).toISOString()}`);
+            const responsibility = r.responsibility === null ? "" : `\t${r.responsibility}`;
+            console.log(`${r.name}\t${r.role}\t${r.assigned_by}\t${new Date(r.assigned_at).toISOString()}${responsibility}`);
           }
           return 0;
         }
