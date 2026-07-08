@@ -61,6 +61,43 @@ function parseRoleResponsibility(body: Record<string, unknown> | null): { presen
   if (textEncoder.encode(value).byteLength > ROLE_RESPONSIBILITY_LIMIT) return null;
   return { present: true, value: value === "" ? null : value };
 }
+
+interface ChannelRoleRow {
+  name: string;
+  role: CollaborationRole;
+  responsibility: string | null;
+  assigned_by: string;
+  assigned_at: number;
+  token_role: TokenRole | null;
+  account: string | null;
+}
+
+function channelRoleAssignmentFromRow(row: ChannelRoleRow): ChannelRoleAssignment {
+  const kind = row.token_role === "human" ? "human" : row.token_role === "agent" ? "agent" : undefined;
+  return {
+    name: row.name,
+    role: row.role,
+    responsibility: row.responsibility ?? null,
+    assigned_by: row.assigned_by,
+    assigned_at: row.assigned_at,
+    ...(kind === undefined ? {} : { kind }),
+    ...(row.account === null ? {} : { account: row.account }),
+    ...(kind === "human" && row.account !== null ? { display: row.account } : { display: row.name }),
+  };
+}
+
+async function loadChannelRoleAssignment(db: D1Database, slug: string, name: string): Promise<ChannelRoleAssignment | null> {
+  const row = await db.prepare(
+    `SELECT cr.agent_name AS name, cr.role, cr.responsibility, cr.assigned_by, cr.assigned_at,
+            t.role AS token_role, t.owner AS account
+       FROM channel_roles cr
+       LEFT JOIN tokens t ON t.name = cr.agent_name AND t.revoked_at IS NULL
+      WHERE cr.channel_slug = ? AND cr.agent_name = ?`,
+  )
+    .bind(slug, name)
+    .first<ChannelRoleRow>();
+  return row === null ? null : channelRoleAssignmentFromRow(row);
+}
 const WEBHOOK_FILTERS: readonly string[] = ["mentions", "status", "needs-human", "all"] satisfies WebhookFilter[];
 const CAPTURE_KINDS: readonly string[] = ["decision", "requirement", "bug", "action-item"] satisfies CaptureKind[];
 const WEBHOOK_URL_MAX = 2048;
@@ -1441,28 +1478,8 @@ app.get("/api/channels/:slug/roles", async (c) => {
       ORDER BY cr.agent_name`,
   )
     .bind(slug)
-    .all<{
-      name: string;
-      role: CollaborationRole;
-      responsibility: string | null;
-      assigned_by: string;
-      assigned_at: number;
-      token_role: TokenRole | null;
-      account: string | null;
-    }>();
-  const roles: ChannelRoleAssignment[] = results.map((row) => {
-    const kind = row.token_role === "human" ? "human" : row.token_role === "agent" ? "agent" : undefined;
-    return {
-      name: row.name,
-      role: row.role,
-      responsibility: row.responsibility ?? null,
-      assigned_by: row.assigned_by,
-      assigned_at: row.assigned_at,
-      ...(kind === undefined ? {} : { kind }),
-      ...(row.account === null ? {} : { account: row.account }),
-      ...(kind === "human" && row.account !== null ? { display: row.account } : { display: row.name }),
-    };
-  });
+    .all<ChannelRoleRow>();
+  const roles: ChannelRoleAssignment[] = results.map(channelRoleAssignmentFromRow);
   return c.json({ roles });
 });
 
@@ -1507,12 +1524,8 @@ app.put("/api/channels/:slug/roles/:name", async (c) => {
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );
-  const stored = await c.env.DB.prepare(
-    "SELECT responsibility FROM channel_roles WHERE channel_slug = ? AND agent_name = ?",
-  )
-    .bind(slug, name)
-    .first<{ responsibility: string | null }>();
-  return c.json({ name, role, responsibility: stored?.responsibility ?? null, assigned_by: identity.name, assigned_at: assignedAt });
+  const saved = await loadChannelRoleAssignment(c.env.DB, slug, name);
+  return c.json(saved ?? { name, role, responsibility: responsibility.value, assigned_by: identity.name, assigned_at: assignedAt });
 });
 
 app.delete("/api/channels/:slug/roles/:name", async (c) => {

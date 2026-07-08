@@ -343,6 +343,26 @@
   font-size: 11px;
   font-weight: 600;
 }
+.role-board-summary {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  max-width: min(520px, 58vw);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.role-board-role-count {
+  flex: none;
+  padding: 1px 6px;
+  color: var(--t-muted);
+  background: var(--t-panel2);
+  border: 1px solid var(--t-faint);
+  border-radius: 999px;
+  font-size: 10.5px;
+  line-height: 1.25;
+}
 .role-board-body {
   display: grid;
   gap: 10px;
@@ -2756,6 +2776,13 @@
   }
   .role-board-head {
     padding: 7px 9px;
+  }
+  .role-board-summary {
+    max-width: 52vw;
+    justify-content: flex-start;
+  }
+  .role-board-role-count {
+    display: none;
   }
   .role-board-body {
     padding: 8px 9px 9px;

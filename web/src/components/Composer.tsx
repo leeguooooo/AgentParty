@@ -10,7 +10,7 @@ import {
   type MentionCandidate,
   type MentionTier,
 } from "../lib/mentions";
-import { useT } from "../i18n/useT";
+import { useT, type TFunc } from "../i18n/useT";
 import "../i18n/strings/Composer";
 import "../i18n/strings/WakeReceipt";
 
@@ -41,6 +41,12 @@ interface MentionMenuState {
 
 function sameCandidateNames(prev: MentionCandidate[], next: MentionCandidate[]): boolean {
   return prev.length === next.length && prev.every((item, index) => item.name === next[index]?.name);
+}
+
+function groupLabel(group: string, t: TFunc): string {
+  if (group === "human sessions") return t("Composer.group.humanSessions");
+  if (group === "unowned agents") return t("Composer.group.unownedAgents");
+  return group;
 }
 
 export function Composer({ draft, setDraft, onSend, ready, candidates, mentionStatuses }: Props) {
@@ -166,7 +172,7 @@ export function Composer({ draft, setDraft, onSend, ready, candidates, mentionSt
               <li key={c.name} className="mention-row">
                 {showGroup && (
                   <div className="mention-group" aria-hidden="true">
-                    {c.group}
+                    {groupLabel(c.group, t)}
                   </div>
                 )}
                 <div

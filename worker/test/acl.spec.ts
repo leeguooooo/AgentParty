@@ -436,10 +436,13 @@ describe("channel role assignments (issues #14/#17)", () => {
       body: JSON.stringify({ role: "host", responsibility: "main handoff owner" }),
     });
     expect(assign.status).toBe(200);
-    expect((await assign.json()) as { name: string; role: string; responsibility: string }).toMatchObject({
+    expect((await assign.json()) as { name: string; role: string; responsibility: string; kind: string; account: string; display: string }).toMatchObject({
       name: worker.name,
       role: "host",
       responsibility: "main handoff owner",
+      kind: "agent",
+      account: acct,
+      display: worker.name,
     });
 
     const roleList = (await (await api(`/api/channels/${slug}/roles`, owner.token)).json()) as {

@@ -148,15 +148,17 @@ function roleDraftFrom(role: ChannelRoleInfo): RoleDraft {
   return { role: role.role, responsibility: role.responsibility ?? "" };
 }
 
-function displayRoleName(role: ChannelRoleInfo, identities: ChannelIdentity[]): string {
-  const identity = identities.find((item) => item.name === role.name);
-  return identity?.display ?? role.display ?? (role.kind === "human" && role.account ? role.account : role.name);
+function roleViewFor(role: ChannelRoleInfo, identity: ChannelIdentity | undefined, t: TFunc) {
+  const kind = role.kind ?? identity?.kind ?? "agent";
+  const account = role.account ?? identity?.account;
+  const display = role.display ?? identity?.display ?? (kind === "human" && account ? account : role.name);
+  const accountLabel = account && account !== "" ? account : kind === "human" ? display : t("Channel.roles.unowned");
+  const owner = account && account !== display ? account : null;
+  return { role, display, accountLabel, owner, kind };
 }
 
-function roleAccountLabel(role: ChannelRoleInfo, display: string, t: TFunc): string {
-  if (role.account && role.account !== "") return role.account;
-  if (role.kind === "human") return display;
-  return t("Channel.roles.unowned");
+function roleCountLabel(role: CollaborationRole, count: number, t: TFunc): string {
+  return t("Channel.roles.roleCount", { role, count: String(count) });
 }
 
 function CharterBanner({
@@ -264,13 +266,9 @@ function DivisionBoard({
   onDeleteRole: (name: string) => void;
 }) {
   const t = useT();
+  const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
   const roleViews = [...roles]
-    .map((role) => {
-      const display = displayRoleName(role, identities);
-      const accountLabel = roleAccountLabel(role, display, t);
-      const owner = role.account && role.account !== display ? role.account : null;
-      return { role, display, accountLabel, owner };
-    })
+    .map((role) => roleViewFor(role, identityByName.get(role.name), t))
     .sort(
       (a, b) =>
         a.accountLabel.localeCompare(b.accountLabel) ||
@@ -283,6 +281,9 @@ function DivisionBoard({
     if (current !== undefined && current.accountLabel === view.accountLabel) current.roles.push(view);
     else groups.push({ accountLabel: view.accountLabel, roles: [view] });
   }
+  const roleCounts = COLLAB_ROLES
+    .map((role) => ({ role, count: roles.filter((item) => item.role === role).length }))
+    .filter((item) => item.count > 0);
 
   return (
     <details className="role-board" aria-label={t("Channel.roles.label")}>
@@ -291,7 +292,14 @@ function DivisionBoard({
           <h2>{t("Channel.roles.label")}</h2>
           <p className="t-mono">{t("Channel.roles.help")}</p>
         </div>
-        <span className="t-mono role-board-count">{t("Channel.roles.count", { count: String(roles.length) })}</span>
+        <div className="role-board-summary">
+          <span className="t-mono role-board-count">{t("Channel.roles.count", { count: String(roles.length) })}</span>
+          {roleCounts.map((item) => (
+            <span key={item.role} className="t-mono role-board-role-count">
+              {roleCountLabel(item.role, item.count, t)}
+            </span>
+          ))}
+        </div>
       </summary>
       <div className="role-board-body">
         {groups.length > 0 ? (
@@ -305,9 +313,8 @@ function DivisionBoard({
                   </span>
                 </header>
                 <div className="role-list">
-                  {group.roles.map(({ role, display, owner, accountLabel }) => {
+                  {group.roles.map(({ role, display, owner, accountLabel, kind }) => {
                     const draftForRole = roleDrafts[role.name] ?? roleDraftFrom(role);
-                    const kind = role.kind ?? "agent";
                     const title = [
                       role.name !== display ? role.name : null,
                       t("Composer.owner", { account: accountLabel }),
