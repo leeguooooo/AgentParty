@@ -134,6 +134,24 @@ function parseMentions(input: unknown): string[] | null {
   return input as string[];
 }
 
+// 正文里的 @name（@ 须在行首或空白后，避开 email 的 @）。serve/webhook 唤醒只看 mentions
+// 数组——若发送方只在正文打 @ 没进数组（裸 party send "@name"），目标永不被唤醒。故服务端
+// 从 body/note 兜底提取并 union 进 mentions，去重、剔除 system、总量截到 MAX_MENTIONS。
+// 误报无害：wake ledger 只投给真实可唤醒目标，无对应者的 @ 不会触发任何投递。
+const BODY_MENTION_RE = /(?:^|\s)@([a-zA-Z0-9][a-zA-Z0-9._-]{0,63})/g;
+function mergeBodyMentions(explicit: string[], text: string): string[] {
+  const seen = new Set(explicit);
+  const out = [...explicit];
+  for (const match of text.matchAll(BODY_MENTION_RE)) {
+    const name = match[1]!;
+    if (name === "system" || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+    if (out.length >= MAX_MENTIONS) break;
+  }
+  return out;
+}
+
 function parseStatusScope(input: unknown): string[] | undefined | null {
   if (input === undefined) return undefined;
   if (!Array.isArray(input)) return null;
@@ -543,8 +561,10 @@ function parseSendFrame(input: unknown): SendFrame | null {
   const f = input as Record<string, unknown>;
   if (f.kind === "message") {
     if (typeof f.body !== "string") return null;
-    const mentions = parseMentions(f.mentions);
-    if (mentions === null) return null;
+    const explicit = parseMentions(f.mentions);
+    if (explicit === null) return null;
+    // 正文里的 @name 也当 mention（否则裸 party send "@name" 不会唤醒目标）
+    const mentions = mergeBodyMentions(explicit, f.body);
     const reply_to =
       f.reply_to === undefined || f.reply_to === null
         ? null
@@ -573,8 +593,10 @@ function parseSendFrame(input: unknown): SendFrame | null {
     if (f.completion_artifact !== undefined) return null;
     if (typeof f.state !== "string" || !STATUS_STATES.includes(f.state)) return null;
     const note = typeof f.note === "string" ? f.note : "";
-    const mentions = parseMentions(f.mentions);
-    if (mentions === null) return null;
+    const explicit = parseMentions(f.mentions);
+    if (explicit === null) return null;
+    // status 的 note 里 @name 同样兜底提取（如「@leo blocked on X」应唤醒 leo）
+    const mentions = mergeBodyMentions(explicit, note);
     const role = parseCollaborationRole(f.role);
     if (role === null) return null;
     const residency = parseResidency(f.residency);

@@ -67,6 +67,25 @@ describe("websocket", () => {
     ws.close();
   });
 
+  it("extracts @name from the body into mentions (bare send should wake the target)", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+    // 正文打 @bob，mentions 数组留空——服务端应把 bob 提取进 mentions
+    ws.send({ type: "send", kind: "message", body: "hey @bob and @carol.dev, ping", mentions: [], reply_to: null });
+    await ws.nextOfType("sent");
+    const echo = await ws.nextOfType("msg");
+    expect(echo.mentions).toContain("bob");
+    expect(echo.mentions).toContain("carol.dev");
+    // email 里的 @ 不算，显式 mention 与正文 @ 去重合并
+    ws.send({ type: "send", kind: "message", body: "mail me@x.com about @bob", mentions: ["bob"], reply_to: null });
+    await ws.nextOfType("sent");
+    const echo2 = await ws.nextOfType("msg");
+    expect(echo2.mentions).toEqual(["bob"]); // 去重，且 me@x.com 不误提
+    ws.close();
+  });
+
   it("hello since=1 backfills only seq 2 and 3", async () => {
     const { token } = await seedToken("agent");
     const slug = await createChannel(token);
