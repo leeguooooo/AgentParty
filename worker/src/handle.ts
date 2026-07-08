@@ -15,7 +15,7 @@ export async function handleConflict(
   forAccount: string | null,
 ): Promise<"reserved" | "token_name" | "taken" | null> {
   if (RESERVED_NAMES.includes(handle)) return "reserved";
-  const tok = await db.prepare("SELECT 1 FROM tokens WHERE name = ?").bind(handle).first();
+  const tok = await db.prepare("SELECT 1 FROM tokens WHERE name = ? COLLATE NOCASE").bind(handle).first();
   if (tok) return "token_name";
   const owner = await db
     .prepare("SELECT account FROM account_profiles WHERE handle = ?")

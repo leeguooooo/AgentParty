@@ -181,7 +181,7 @@ async function persistToken(
     .first<{ id: number; revoked_at: number | null }>();
   if (existing && existing.revoked_at === null) return { conflict: true };
   // 反向唯一性：token 名不得撞已存在的人类 handle（二者共用 @ 命名空间）
-  const handleOwner = await db.prepare("SELECT 1 FROM account_profiles WHERE handle = ?")
+  const handleOwner = await db.prepare("SELECT 1 FROM account_profiles WHERE handle = ? COLLATE NOCASE")
     .bind(opts.name).first();
   if (handleOwner) return { conflict: true };
   const token = randomToken();

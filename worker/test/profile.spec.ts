@@ -36,4 +36,20 @@ describe("PUT /api/me/handle + GET /api/me handle", () => {
     });
     expect(put.status).toBe(409);
   });
+
+  // 命名空间大小写未闭合兜底：先铸一个带大写字母的 token 名，再设同名小写 handle——
+  // handleConflict 若按精确大小写匹配 tokens.name，会漏放这条撞车路径。
+  it("handle 撞已存在 token 名的大小写变体时返回 409", async () => {
+    const tokenName = uniq("CaseTok");
+    await seedToken("agent", tokenName);
+
+    const owner = uniq("acct");
+    const { token } = await seedToken("human", uniq("tok-human"), { owner });
+
+    const put = await api("/api/me/handle", token, {
+      method: "PUT",
+      body: JSON.stringify({ handle: tokenName.toLowerCase() }),
+    });
+    expect(put.status).toBe(409);
+  });
 });
