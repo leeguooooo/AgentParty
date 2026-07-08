@@ -182,6 +182,8 @@ export interface Sender {
   /** 所属人：机器 ap_ token 铸造时写入的标签，人类 OIDC token 为其 email。无则省略（旧客户端忽略） */
   owner?: string;
   lineage?: AgentLineage;
+  /** 人类全局唯一昵称（可@别名）。仅人类且已设置时下发；agent/未设置省略。旧客户端忽略。 */
+  handle?: string;
   /** 同一身份当前活跃连接数。仅 >1 时下发，用于提示 token/session 被重复使用。 */
   connection_count?: number;
 }
@@ -205,6 +207,8 @@ export interface PresenceEntry {
   wake?: WakeInfo;
   context?: AgentContext;
   lineage?: AgentLineage;
+  /** 人类全局唯一昵称（可@别名）。仅人类且已设置时下发；旧客户端忽略。 */
+  handle?: string;
   /** 同一身份当前活跃连接数。仅 >1 时下发，用于提示 token/session 被重复使用。 */
   connection_count?: number;
 }
