@@ -9,14 +9,16 @@ import { VisibilityToggle } from "../components/VisibilityToggle";
 import { JoinLink } from "../components/JoinLink";
 import { Composer } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
-import { MessageCard } from "../components/MessageCard";
+import { MessageCard, type IdentityDisplayMap } from "../components/MessageCard";
 import { PresenceBar } from "../components/PresenceBar";
 import {
   archiveChannel,
   AuthError,
   type ChannelCharter,
+  type ChannelIdentity,
   ForbiddenError,
   fetchChannelCharter,
+  fetchChannelIdentities,
   fetchMessages,
   kickParticipant,
   resetGuard,
@@ -548,7 +550,15 @@ function HostBoardPanel({ board }: { board: HostBoard }) {
   );
 }
 
-function TeamThread({ thread, self }: { thread: TeamMessageThread; self: string | null }) {
+function TeamThread({
+  thread,
+  self,
+  identityDisplay,
+}: {
+  thread: TeamMessageThread;
+  self: string | null;
+  identityDisplay: IdentityDisplayMap;
+}) {
   const parentLabel =
     thread.parentAgents.length === 1 ? `parent ${thread.parentAgents[0]}` : `${thread.parentAgents.length} parents`;
   const memberLabel = thread.members.length === 1 ? thread.members[0]! : `${thread.members.length} members`;
@@ -573,7 +583,7 @@ function TeamThread({ thread, self }: { thread: TeamMessageThread; self: string 
       </summary>
       <div className="team-thread-messages">
         {thread.messages.map((message) => (
-          <MessageCard key={message.seq} msg={message} self={self} />
+          <MessageCard key={message.seq} msg={message} self={self} identityDisplay={identityDisplay} />
         ))}
       </div>
     </details>
@@ -596,6 +606,7 @@ export function ChannelPage({
 }: Props) {
   const t = useT();
   const [state, dispatch] = useReducer(channelReducer, initialChannelState);
+  const [channelIdentities, setChannelIdentities] = useState<ChannelIdentity[]>([]);
   const [draft, setDraft] = useState("");
   const [search, setSearch] = useState("");
   const [searchFrom, setSearchFrom] = useState("");
@@ -691,6 +702,21 @@ export function ChannelPage({
     setCharterEditing(false);
     void loadCharter();
   }, [loadCharter, slug]);
+
+  useEffect(() => {
+    let alive = true;
+    setChannelIdentities([]);
+    fetchChannelIdentities(token, slug)
+      .then((identities) => {
+        if (alive) setChannelIdentities(identities);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [slug, token]);
 
   // IM 式初始加载：先用 rest 拉最新一页（打开即到底部），把 ws 起始游标 seed 到页尾，
   // ws 只补拉/直播页尾之后的新消息——不再全量重放整个频道历史。
@@ -1010,6 +1036,44 @@ export function ChannelPage({
     () => mentionCandidates(state.participants, state.presence, state.self, teamNow),
     [state.participants, state.presence, state.self, teamNow],
   );
+  const identityDisplay = useMemo<IdentityDisplayMap>(() => {
+    const map: IdentityDisplayMap = {};
+    const add = (name: string, input: { display?: string; kind?: "agent" | "human"; account?: string }) => {
+      if (name === "" || name === "system") return;
+      const prev = map[name];
+      const kind = input.kind ?? prev?.kind;
+      const account = input.account ?? prev?.account;
+      const display = input.display ?? (kind === "human" && account ? account : (prev?.display ?? name));
+      map[name] = {
+        display,
+        ...(kind === undefined ? {} : { kind }),
+        ...(account === undefined ? {} : { account }),
+      };
+    };
+
+    for (const identity of channelIdentities) add(identity.name, identity);
+    for (const sender of state.participants) {
+      add(sender.name, { kind: sender.kind, account: sender.owner, display: sender.kind === "human" && sender.owner ? sender.owner : sender.name });
+    }
+    for (const entry of Object.values(state.presence)) {
+      add(entry.name, {
+        kind: entry.kind,
+        account: entry.account,
+        display: entry.kind === "human" && entry.account ? entry.account : entry.name,
+      });
+    }
+    for (const message of state.messages) {
+      add(message.sender.name, {
+        kind: message.sender.kind,
+        account: message.sender.owner,
+        display: message.sender.kind === "human" && message.sender.owner ? message.sender.owner : message.sender.name,
+      });
+    }
+    for (const option of mentionOptions) {
+      add(option.name, { kind: option.kind, account: option.account, display: option.display });
+    }
+    return map;
+  }, [channelIdentities, mentionOptions, state.messages, state.participants, state.presence]);
   const agentFilterActive = agentFilter.agents.length > 0;
   const totalInView = q === "" ? timelineMessages.length : searchHits.length;
   const visibleInView = q === "" ? visibleMessages.length : visibleSearchHits.length;
@@ -1267,9 +1331,14 @@ export function ChannelPage({
         {q === ""
           ? visibleTimeline.map((item) =>
               item.type === "message" ? (
-                <MessageCard key={item.message.seq} msg={item.message} self={state.self} />
+                <MessageCard key={item.message.seq} msg={item.message} self={state.self} identityDisplay={identityDisplay} />
               ) : (
-                <TeamThread key={item.key + `:${item.firstSeq}-${item.lastSeq}`} thread={item} self={state.self} />
+                <TeamThread
+                  key={item.key + `:${item.firstSeq}-${item.lastSeq}`}
+                  thread={item}
+                  self={state.self}
+                  identityDisplay={identityDisplay}
+                />
               ),
             )
           : visibleSearchHits.map((hit) => <SearchHitCard key={hit.seq} hit={hit} />)}

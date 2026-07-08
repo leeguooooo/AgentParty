@@ -152,6 +152,8 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
           ...state.presence,
           [frame.name]: {
             name: frame.name,
+            kind: frame.kind,
+            account: frame.account,
             state: frame.state,
             note: frame.note,
             ts: frame.ts,

@@ -731,6 +731,8 @@ export interface SentFrame {
 export interface PresenceFrame {
   type: "presence";
   name: string;
+  kind?: SenderKind;
+  account?: string;
   state: PresenceState;
   note: string | null;
   ts: number;

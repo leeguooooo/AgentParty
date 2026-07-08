@@ -1602,6 +1602,27 @@ export class ChannelDO extends Server<Env> {
       // party who：完整 presence 快照（含 kind/wake/last_seen），供 CLI 分档展示谁在线/可唤醒
       return Response.json({ presence: this.presenceList() });
     }
+    if (url.pathname === "/internal/identities" && request.method === "GET") {
+      const identities = new Map<string, { name: string; kind?: SenderKind; account?: string }>();
+      const add = (name: unknown, kind: unknown, account: unknown) => {
+        if (typeof name !== "string" || name === "" || name === "system") return;
+        const prev = identities.get(name) ?? { name };
+        identities.set(name, {
+          ...prev,
+          ...(kind === "agent" || kind === "human" ? { kind } : {}),
+          ...(typeof account === "string" && account !== "" ? { account } : {}),
+        });
+      };
+      for (const row of this.ctx.storage.sql
+        .exec("SELECT DISTINCT sender_name, sender_kind, sender_owner FROM messages")
+        .toArray()) {
+        add(row.sender_name, row.sender_kind, row.sender_owner);
+      }
+      for (const row of this.ctx.storage.sql.exec("SELECT name, kind, account FROM presence").toArray()) {
+        add(row.name, row.kind, row.account);
+      }
+      return Response.json({ identities: [...identities.values()].sort((a, b) => a.name.localeCompare(b.name)) });
+    }
     if (url.pathname === "/internal/init" && request.method === "POST") {
       this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
       if (this.getMeta("ckind") === "temp") {

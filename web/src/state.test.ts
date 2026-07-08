@@ -59,6 +59,8 @@ describe("channel state", () => {
     const frame: PresenceFrame = {
       type: "presence",
       name: "child-a",
+      kind: "human",
+      account: "owner@example.com",
       state: "working",
       note: "checking",
       ts: 1_725_000_000_000,
@@ -89,5 +91,7 @@ describe("channel state", () => {
 
     expect(next.presence["child-a"]?.lineage).toEqual(frame.lineage);
     expect(next.presence["child-a"]?.status?.workflow).toEqual(frame.status?.workflow);
+    expect(next.presence["child-a"]?.kind).toBe("human");
+    expect(next.presence["child-a"]?.account).toBe("owner@example.com");
   });
 });

@@ -120,6 +120,13 @@ export interface ChannelCharter {
   updated_by: string | null;
 }
 
+export interface ChannelIdentity {
+  name: string;
+  display: string;
+  kind?: "agent" | "human";
+  account?: string;
+}
+
 // 当前登录身份（spec §10）：topbar 显示真实 token name/kind/role，owner 仅作归属辅助信息。
 export interface MeInfo {
   name: string;
@@ -199,6 +206,17 @@ export async function listChannelAgents(token: string, slug: string): Promise<Ch
   if (!res.ok) throw new Error(`GET /api/channels/${slug}/agents failed (${res.status})`);
   const data = (await res.json()) as { agents: ChannelAgentInfo[] };
   return data.agents;
+}
+
+export async function fetchChannelIdentities(token: string, slug: string): Promise<ChannelIdentity[]> {
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/identities`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/identities failed (${res.status})`);
+  const data = (await res.json()) as { identities: ChannelIdentity[] };
+  return data.identities;
 }
 
 export async function rotateChannelAgent(token: string, slug: string, name: string): Promise<ChannelAgent> {

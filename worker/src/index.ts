@@ -108,6 +108,10 @@ function validAccountParam(input: string): boolean {
   return input.length > 0 && input.length <= 320 && !/[\x00-\x1f\x7f]/.test(input);
 }
 
+function isOpaqueHumanSessionName(name: string): boolean {
+  return /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|login-verify-.+)$/i.test(name);
+}
+
 function captureRowToRecord(row: {
   channel_slug: string;
   seq: number;
@@ -1229,6 +1233,42 @@ app.get("/api/channels/:slug/presence", async (c) => {
   }
   const stub = await getServerByName(c.env.CHANNELS, slug);
   return stub.fetch(new Request("https://do/internal/presence", { headers: { "x-partykit-room": slug } }));
+});
+
+app.get("/api/channels/:slug/identities", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const identities = new Map<string, { name: string; kind?: "agent" | "human"; account?: string; display: string }>();
+  const add = (identity: { name: string; kind?: "agent" | "human"; account?: string }) => {
+    const prev = identities.get(identity.name);
+    const kind = identity.kind ?? prev?.kind;
+    const account = identity.account ?? prev?.account;
+    identities.set(identity.name, {
+      name: identity.name,
+      ...(kind === undefined ? {} : { kind }),
+      ...(account === undefined ? {} : { account }),
+      display: kind === "human" && account ? account : (prev?.display ?? identity.name),
+    });
+  };
+
+  if (channel.created_by && channel.owner_account && isOpaqueHumanSessionName(channel.created_by)) {
+    add({ name: channel.created_by, kind: "human", account: channel.owner_account });
+  }
+
+  const stub = await getServerByName(c.env.CHANNELS, slug);
+  const res = await stub.fetch(new Request("https://do/internal/identities", { headers: { "x-partykit-room": slug } }));
+  if (res.ok) {
+    const data = (await res.json()) as { identities?: { name: string; kind?: "agent" | "human"; account?: string }[] };
+    for (const identity of data.identities ?? []) {
+      if (typeof identity.name === "string" && identity.name !== "") add(identity);
+    }
+  }
+
+  return c.json({ identities: [...identities.values()].sort((a, b) => a.name.localeCompare(b.name)) });
 });
 
 app.get("/api/channels/:slug/search", async (c) => {

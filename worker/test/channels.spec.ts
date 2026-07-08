@@ -138,4 +138,26 @@ describe("channels", () => {
     expect((await ws.nextOfType("error")).code).toBe("unauthorized");
     ws.close();
   });
+
+  it("identity map exposes readable labels only after channel ACL passes", async () => {
+    const ownerName = "61ec302c-6c31-4bca-a1df-88152372f6d9";
+    const ownerAccount = "owner@example.com";
+    const owner = await seedToken("human", ownerName, { owner: ownerAccount });
+    const slug = await createChannel(owner.token);
+    const agent = await seedToken("agent", uniq("bot"), { owner: ownerAccount, channelScope: slug });
+    expect((await postMessage(slug, agent.token, `@${ownerName} hello`)).status).toBe(200);
+
+    const identitiesRes = await api(`/api/channels/${slug}/identities`, agent.token);
+    expect(identitiesRes.status).toBe(200);
+    const identities = ((await identitiesRes.json()) as {
+      identities: { name: string; display: string; kind?: string; account?: string }[];
+    }).identities;
+    expect(identities).toContainEqual(
+      expect.objectContaining({ name: ownerName, display: ownerAccount, kind: "human", account: ownerAccount }),
+    );
+    expect(identities).toContainEqual(expect.objectContaining({ name: agent.name, display: agent.name }));
+
+    const outsider = await seedToken("human", uniq("outsider"), { owner: "outsider@example.com" });
+    expect((await api(`/api/channels/${slug}/identities`, outsider.token)).status).toBe(403);
+  });
 });

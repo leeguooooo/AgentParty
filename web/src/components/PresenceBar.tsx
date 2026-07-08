@@ -131,13 +131,13 @@ export function PresenceBar({
   }, []);
   const now = Date.now();
 
-  // 所属人只有连接中的参与者带（presence 快照不含 owner），按 name 建索引
+  // 在线 sender 带 owner；离线/最近 presence 带 account。两者都归到同一账号块。
   const byName = new Map(participants.map((p) => [p.name, p]));
   const names = [...new Set([...participants.map((p) => p.name), ...Object.keys(presence)])].sort();
   const items: Item[] = names.map((name) => {
     const entry = presence[name];
     const sender = byName.get(name);
-    const owner = sender?.owner ?? null;
+    const owner = sender?.owner ?? entry?.account ?? null;
     const kind = sender?.kind ?? entry?.kind ?? "agent";
     const connected = byName.has(name);
     const meta = {
@@ -286,7 +286,7 @@ export function PresenceBar({
     const live = group.items.filter((item) => item.state !== "offline").length;
     const blocked = group.items.filter((item) => item.state === "blocked").length;
     const duplicateSessions = group.items.reduce((sum, item) => sum + Math.max(0, item.connectionCount - 1), 0);
-    const previewAgents = group.agents.slice(0, full ? group.agents.length : 3);
+    const previewAgents = group.agents.slice(0, 3);
     const hiddenAgents = group.agents.length - previewAgents.length;
     const title = [
       group.label,
@@ -314,18 +314,19 @@ export function PresenceBar({
           </span>
           {duplicateSessions > 0 && <span className="t-mono presence-group-duplicate">dup</span>}
         </div>
-        <div className="presence-group-agents" aria-label={`agents owned by ${group.label}`}>
-          {previewAgents.map((agent) => (
-            <span key={agent.name} className="presence-agent-chip">
-              <span className={`d-dot d-dot--${agent.state}`} />
-              <span>{agent.name}</span>
-              {agent.connectionCount > 1 && <span className="t-mono presence-agent-duplicate">x{agent.connectionCount}</span>}
-              {roleBadge(agent, now) !== null && <span className="t-mono presence-agent-role">{roleBadge(agent, now)}</span>}
-            </span>
-          ))}
-          {hiddenAgents > 0 && <span className="t-mono presence-agent-more">+{hiddenAgents}</span>}
-          {group.agents.length === 0 && group.human !== null && <span className="t-mono presence-agent-empty">human only</span>}
-        </div>
+        {!full && (
+          <div className="presence-group-agents" aria-label={`agents owned by ${group.label}`}>
+            {previewAgents.map((agent) => (
+              <span key={agent.name} className="presence-agent-chip">
+                <span className={`d-dot d-dot--${agent.state}`} />
+                <span>{agent.name}</span>
+                {agent.connectionCount > 1 && <span className="t-mono presence-agent-duplicate">x{agent.connectionCount}</span>}
+                {roleBadge(agent, now) !== null && <span className="t-mono presence-agent-role">{roleBadge(agent, now)}</span>}
+              </span>
+            ))}
+            {hiddenAgents > 0 && <span className="t-mono presence-agent-more">+{hiddenAgents}</span>}
+          </div>
+        )}
         {full && <div className="presence-group-detail">{group.items.map((item) => renderItem(item, "full"))}</div>}
       </section>
     );
