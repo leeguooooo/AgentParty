@@ -55,6 +55,31 @@ describe("channel state", () => {
     expect(channelReducer(trimmed, { type: "trim", keep: 4 })).toBe(trimmed);
   });
 
+  test("read_cursor frame upserts monotonically; welcome snapshot seeds cursors", () => {
+    // welcome 带 read_cursors 快照 → 初始化
+    let s = channelReducer(initialChannelState, {
+      type: "frame",
+      frame: {
+        type: "welcome",
+        channel: "c",
+        self: "me",
+        participants: [],
+        last_seq: 10,
+        presence: [],
+        read_cursors: [{ name: "alice", kind: "agent", last_seen_seq: 5, updated_at: 1 }],
+      },
+    });
+    expect(s.readCursors.alice?.last_seen_seq).toBe(5);
+    // 前移 → 更新
+    s = channelReducer(s, { type: "frame", frame: { type: "read_cursor", name: "alice", kind: "agent", last_seen_seq: 8, updated_at: 2 } });
+    expect(s.readCursors.alice?.last_seen_seq).toBe(8);
+    // 回退 → 忽略（引用相等，不触发重渲染）
+    const before = s;
+    s = channelReducer(s, { type: "frame", frame: { type: "read_cursor", name: "alice", kind: "agent", last_seen_seq: 3, updated_at: 3 } });
+    expect(s).toBe(before);
+    expect(s.readCursors.alice?.last_seen_seq).toBe(8);
+  });
+
   test("preserves lineage on incremental presence frames", () => {
     const frame: PresenceFrame = {
       type: "presence",

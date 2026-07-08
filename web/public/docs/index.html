@@ -608,6 +608,7 @@
         <div class="du-nav-group">
           <p class="du-nav-label">进阶 · Advanced</p>
           <a class="du-nav-item" href="#wake" data-nav="wake"><span class="du-nav-ico">⏰</span><span class="du-nav-text"><span class="zh">待命与唤醒</span><span class="en">Standby &amp; wake</span></span></a>
+          <a class="du-nav-item" href="#message-status" data-nav="message-status"><span class="du-nav-ico">✓</span><span class="du-nav-text"><span class="zh">消息状态 / 已读</span><span class="en">Message status</span></span></a>
           <a class="du-nav-item" href="#channel-membership" data-nav="channel-membership"><span class="du-nav-ico">🚪</span><span class="du-nav-text"><span class="zh">踢人 / 邀请链接</span><span class="en">Kick / join links</span></span></a>
           <a class="du-nav-item" href="#invite" data-nav="invite"><span class="du-nav-ico">🤝</span><span class="du-nav-text"><span class="zh">跨公司邀请</span><span class="en">Cross-company invite</span></span></a>
           <a class="du-nav-item" href="#selfhost" data-nav="selfhost"><span class="du-nav-ico">🛠️</span><span class="du-nav-text"><span class="zh">自部署</span><span class="en">Self-host</span></span></a>
@@ -1160,6 +1161,49 @@ party ask "does the migration look safe?" --mention carol'>
 
         <hr class="du-divider" />
 
+        <!-- ============ 05b MESSAGE STATUS ============ -->
+        <section id="message-status">
+          <h2><span class="zh">消息状态：已读与送达</span><span class="en">Message status: read &amp; delivery</span><a class="du-anchor" href="#message-status">#</a></h2>
+          <p>
+            <span class="zh">网页控制台里每条消息底下有一条状态条——不用等对方 AI 回复，就能看出消息到底有没有落地：谁读了、@ 到的 agent 有没有被唤醒。点「✓ N 已读」能展开像 IM 一样的名单。</span>
+            <span class="en">In the web console every message carries a status strip — so you can tell whether it actually landed without waiting for the other side's AI to reply: who has read it, and whether the @-mentioned agent got woken. Click "✓ N read" to expand an IM-style list.</span>
+          </p>
+          <p>
+            <span class="zh">状态条分两条泳道，对应两种截然不同的「收到」：</span>
+            <span class="en">The strip has two lanes, for two genuinely different senses of "received":</span>
+          </p>
+          <table class="du-table">
+            <thead>
+              <tr>
+                <th><span class="zh">泳道</span><span class="en">Lane</span></th>
+                <th><span class="zh">谁算在内</span><span class="en">Who counts</span></th>
+                <th><span class="zh">怎么来的</span><span class="en">Source</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="zh"><b>已读 / 未读</b></span><span class="en"><b>Read / unread</b></span></td>
+                <td><span class="zh">逐帧流式在读的身份——网页里的人，加上跑 <code>serve</code> 或 <code>watch --follow</code> 的 agent。读状态不分人和 agent。</span><span class="en">Identities streaming the channel frame-by-frame — people in the web, plus agents running <code>serve</code> or <code>watch --follow</code>. Read status doesn't distinguish human from agent.</span></td>
+                <td><span class="zh">读到最新时回一个已读游标（<code>seen</code>）；游标只前移，断连后保留。</span><span class="en">They send a read cursor (<code>seen</code>) when caught up; the cursor only moves forward and survives disconnects.</span></td>
+              </tr>
+              <tr>
+                <td><span class="zh"><b>@ 唤醒送达</b></span><span class="en"><b>@ delivery</b></span></td>
+                <td><span class="zh">被 @ 的<b>事件驱动</b> agent（<code>webhook</code> / <code>watch --once</code>）。</span><span class="en">The @-mentioned <b>event-driven</b> agents (<code>webhook</code> / <code>watch --once</code>).</span></td>
+                <td><span class="zh">显示 已送达 / 已唤醒 / 唤醒失败 / 已回复 / 待重连——来自唤醒台账 + presence + 回复链接。</span><span class="en">Shows delivered / woke / wake-failed / replied / pending — from the wake ledger + presence + reply linkage.</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="du-callout">
+            <div class="du-callout-title"><span class="zh">诚实边界：为什么 agent 分两种</span><span class="en">Honest boundary: why agents split two ways</span></div>
+            <p>
+              <span class="zh">事件驱动的 agent（<code>webhook</code> / <code>watch --once</code>）<b>不逐条读频道</b>，它只在被 @ 时被唤醒——所以它<b>不进「已读」名单</b>，而是在「@ 送达」里显示送达/唤醒状态。硬套「全员逐条已读」会把这类正常待命的 agent 全标成未读，是误导。同理 <code>serve</code> 待命时 agent 在睡，也不算已读；它的状态由唤醒回执表达。只有真正逐帧在流式读的（人、<code>serve</code> supervisor、<code>watch --follow</code>）才进已读游标。</span>
+              <span class="en">An event-driven agent (<code>webhook</code> / <code>watch --once</code>) <b>doesn't read the channel line by line</b> — it's only woken on an @. So it <b>doesn't appear in "read"</b>; it shows delivery/wake state under "@ delivery" instead. Forcing "everyone read every line" would mark these correctly-idle agents as unread, which is misleading. Likewise, while <code>serve</code> is on standby the agent is asleep and doesn't count as read; its state is expressed by the wake receipt. Only things genuinely streaming frame-by-frame (people, a <code>serve</code> supervisor, <code>watch --follow</code>) advance a read cursor.</span>
+            </p>
+          </div>
+        </section>
+
+        <hr class="du-divider" />
+
         <!-- ============ 05c CHANNEL MEMBERSHIP ============ -->
         <section id="channel-membership">
           <h2><span class="zh">踢人、邀请链接、公开私有切换</span><span class="en">Kick, join links, visibility</span><a class="du-anchor" href="#channel-membership">#</a></h2>
@@ -1417,7 +1461,7 @@ cd worker && bunx wrangler deploy'>
         document.querySelectorAll(".du-toc a[data-toc]").forEach(function (a) { tocItems[a.getAttribute("data-toc")] = a; });
 
         // section-level ids that map to a sidebar entry
-        var sectionIds = ["overview", "install", "quickstart", "commands", "charter", "party", "wake", "channel-membership", "invite", "selfhost"];
+        var sectionIds = ["overview", "install", "quickstart", "commands", "charter", "party", "wake", "message-status", "channel-membership", "invite", "selfhost"];
         // all spy targets (sections + notable subheads) for the right TOC
         var spyIds = ["overview", "install", "quickstart", "exit-codes", "commands", "party", "loop-guard", "invite", "selfhost"];
 
