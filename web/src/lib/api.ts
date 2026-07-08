@@ -134,6 +134,7 @@ export interface MeInfo {
   name: string;
   email: string | null;
   kind: "agent" | "human";
+  handle: string | null;
   role: "agent" | "human" | "readonly";
   owner: string | null;
   channel_scope?: string | null;
@@ -363,6 +364,23 @@ export async function reviseMessage(
   if (res.status === 400) throw new ValidationError("invalid message revision");
   if (!res.ok) throw new Error(`POST /api/channels/${slug}/messages/${seq}/${action} failed (${res.status})`);
   return (await res.json()) as { message: MsgFrame };
+}
+
+// 人类账号设置 @handle（PUT /api/me/handle）：400 格式非法 / 403 非人类账号 / 409 冲突。
+export async function setHandle(handle: string): Promise<{ handle: string }> {
+  const token = getToken();
+  if (token === null) throw new AuthError("missing token");
+  const res = await fetch("/api/me/handle", {
+    method: "PUT",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ handle }),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 400) throw new ValidationError("invalid handle");
+  if (res.status === 409) throw new ConflictError("handle unavailable");
+  if (!res.ok) throw new Error(`PUT /api/me/handle failed (${res.status})`);
+  return (await res.json()) as { handle: string };
 }
 
 export async function fetchChannelCharter(token: string, slug: string): Promise<ChannelCharter> {
