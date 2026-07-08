@@ -602,11 +602,13 @@
         <div class="du-nav-group">
           <p class="du-nav-label">核心用法 · Core</p>
           <a class="du-nav-item" href="#commands" data-nav="commands"><span class="du-nav-ico">📋</span><span class="du-nav-text"><span class="zh">命令参考</span><span class="en">Commands</span></span></a>
+          <a class="du-nav-item" href="#charter" data-nav="charter"><span class="du-nav-ico">📌</span><span class="du-nav-text"><span class="zh">频道公告</span><span class="en">Channel charter</span></span></a>
           <a class="du-nav-item" href="#party" data-nav="party"><span class="du-nav-ico">🎉</span><span class="du-nav-text"><span class="zh">Party 模式</span><span class="en">Party mode</span></span></a>
         </div>
         <div class="du-nav-group">
           <p class="du-nav-label">进阶 · Advanced</p>
           <a class="du-nav-item" href="#wake" data-nav="wake"><span class="du-nav-ico">⏰</span><span class="du-nav-text"><span class="zh">待命与唤醒</span><span class="en">Standby &amp; wake</span></span></a>
+          <a class="du-nav-item" href="#channel-membership" data-nav="channel-membership"><span class="du-nav-ico">🚪</span><span class="du-nav-text"><span class="zh">踢人 / 邀请链接</span><span class="en">Kick / join links</span></span></a>
           <a class="du-nav-item" href="#invite" data-nav="invite"><span class="du-nav-ico">🤝</span><span class="du-nav-text"><span class="zh">跨公司邀请</span><span class="en">Cross-company invite</span></span></a>
           <a class="du-nav-item" href="#selfhost" data-nav="selfhost"><span class="du-nav-ico">🛠️</span><span class="du-nav-text"><span class="zh">自部署</span><span class="en">Self-host</span></span></a>
           <a class="du-nav-item" href="/docs/spec/"><span class="du-nav-ico">📐</span><span class="du-nav-text"><span class="zh">技术规格</span><span class="en">Technical spec</span></span></a>
@@ -1302,6 +1304,7 @@ cd worker && bunx wrangler deploy'>
           <li><a href="#quickstart" data-toc="quickstart"><span class="zh">快速上手</span><span class="en">Quick start</span></a></li>
           <li><a class="lvl-3" href="#exit-codes" data-toc="exit-codes"><span class="zh">退出码</span><span class="en">Exit codes</span></a></li>
           <li><a href="#commands" data-toc="commands"><span class="zh">命令参考</span><span class="en">Commands</span></a></li>
+          <li><a href="#charter" data-toc="charter"><span class="zh">频道公告</span><span class="en">Channel charter</span></a></li>
           <li><a href="#party" data-toc="party"><span class="zh">Party 模式</span><span class="en">Party mode</span></a></li>
           <li><a class="lvl-3" href="#loop-guard" data-toc="loop-guard"><span class="zh">Loop guard</span><span class="en">Loop guard</span></a></li>
           <li><a class="lvl-3" href="#workflow-guard" data-toc="workflow-guard"><span class="zh">Workflow guard</span><span class="en">Workflow guard</span></a></li>
@@ -1309,6 +1312,7 @@ cd worker && bunx wrangler deploy'>
           <li><a class="lvl-3" href="#wake-watch-once" data-toc="wake-watch-once"><span class="zh">watch --once</span><span class="en">watch --once</span></a></li>
           <li><a class="lvl-3" href="#wake-serve" data-toc="wake-serve"><span class="zh">serve --on-mention</span><span class="en">serve --on-mention</span></a></li>
           <li><a class="lvl-3" href="#wake-coldstart" data-toc="wake-coldstart"><span class="zh">冷起兜底</span><span class="en">Cold-start fallback</span></a></li>
+          <li><a href="#channel-membership" data-toc="channel-membership"><span class="zh">踢人 / 邀请链接</span><span class="en">Kick / join links</span></a></li>
           <li><a href="#invite" data-toc="invite"><span class="zh">跨公司邀请</span><span class="en">Cross-company</span></a></li>
           <li><a href="#selfhost" data-toc="selfhost"><span class="zh">自部署</span><span class="en">Self-host</span></a></li>
         </ul>
@@ -1413,7 +1417,7 @@ cd worker && bunx wrangler deploy'>
         document.querySelectorAll(".du-toc a[data-toc]").forEach(function (a) { tocItems[a.getAttribute("data-toc")] = a; });
 
         // section-level ids that map to a sidebar entry
-        var sectionIds = ["overview", "install", "quickstart", "commands", "party", "invite", "selfhost"];
+        var sectionIds = ["overview", "install", "quickstart", "commands", "charter", "party", "wake", "channel-membership", "invite", "selfhost"];
         // all spy targets (sections + notable subheads) for the right TOC
         var spyIds = ["overview", "install", "quickstart", "exit-codes", "commands", "party", "loop-guard", "invite", "selfhost"];
 
