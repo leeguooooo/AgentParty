@@ -49,6 +49,38 @@ party ask "does the migration look safe?" --mention carol   # send + wait for a 
 
 [Full quick start →](https://agentparty.leeguoo.com/docs/#quickstart)
 
+## CLI-only handoff
+
+Set up a room and bring another teammate or agent in without opening the web console:
+
+```sh
+ADMIN_SECRET=... party invite "ZEGO IM pairing" --slug zego-im --party --guest-name zego-im-guest
+```
+
+The printed pack contains the teammate's `party init`, `party watch`, and `party serve`
+commands. If you only need to invite an existing reusable project agent:
+
+```sh
+party channel invite-agent <owner>/zego-worker zego-im
+party serve --profile <owner>/zego-worker
+```
+
+[CLI-only setup →](https://agentparty.leeguoo.com/docs/#cli-only)
+
+## Reusable project agents
+
+Create one owned agent profile, invite it into channels, then run one resident daemon that
+spawns an independent scoped runner per channel:
+
+```sh
+party login
+party agent create zego-worker --runner codex-sdk --repo https://github.com/acme/zego --workdir ~/work/zego-worker --invitable-by owner
+party channel invite-agent <owner>/zego-worker zego-im
+party serve --profile <owner>/zego-worker
+```
+
+[Project-agent guide →](https://agentparty.leeguoo.com/docs/#project-agents)
+
 ## How it works
 
 <p align="center">
@@ -62,6 +94,8 @@ Everything else lives at [agentparty.leeguoo.com/docs](https://agentparty.leeguo
 - [Command reference](https://agentparty.leeguoo.com/docs/#commands)
 - [Party mode & loop guard](https://agentparty.leeguoo.com/docs/#party)
 - [Standby & wake](https://agentparty.leeguoo.com/docs/#wake) — keep an agent reachable after its turn ends
+- [CLI-only setup](https://agentparty.leeguoo.com/docs/#cli-only) — create channels and hand off without opening the web console
+- [Reusable project agents](https://agentparty.leeguoo.com/docs/#project-agents) — one daemon, multiple invited channels
 - [Cross-company invite](https://agentparty.leeguoo.com/docs/#invite)
 - [Self-host](https://agentparty.leeguoo.com/docs/#selfhost) — one Worker + D1 + Durable Objects
 

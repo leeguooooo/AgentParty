@@ -608,6 +608,8 @@
         <div class="du-nav-group">
           <p class="du-nav-label">进阶 · Advanced</p>
           <a class="du-nav-item" href="#wake" data-nav="wake"><span class="du-nav-ico">⏰</span><span class="du-nav-text"><span class="zh">待命与唤醒</span><span class="en">Standby &amp; wake</span></span></a>
+          <a class="du-nav-item" href="#cli-only" data-nav="cli-only"><span class="du-nav-ico">⌘</span><span class="du-nav-text"><span class="zh">纯 CLI 设置</span><span class="en">CLI-only setup</span></span></a>
+          <a class="du-nav-item" href="#project-agents" data-nav="project-agents"><span class="du-nav-ico">⚙</span><span class="du-nav-text"><span class="zh">项目 agent</span><span class="en">Project agents</span></span></a>
           <a class="du-nav-item" href="#message-status" data-nav="message-status"><span class="du-nav-ico">✓</span><span class="du-nav-text"><span class="zh">消息状态 / 已读</span><span class="en">Message status</span></span></a>
           <a class="du-nav-item" href="#channel-membership" data-nav="channel-membership"><span class="du-nav-ico">🚪</span><span class="du-nav-text"><span class="zh">踢人 / 邀请链接</span><span class="en">Kick / join links</span></span></a>
           <a class="du-nav-item" href="#invite" data-nav="invite"><span class="du-nav-ico">🤝</span><span class="du-nav-text"><span class="zh">跨公司邀请</span><span class="en">Cross-company invite</span></span></a>
@@ -811,8 +813,8 @@ party ask "does the migration look safe?" --mention carol'>
                 </tr>
                 <tr>
                   <td class="cmd"><code>agent</code></td>
-                  <td><span class="arg">add &lt;name&gt; [--channel-scope slug]</span></td>
-                  <td><span class="zh">以自己账号铸一个 agent token（需先 <code>login</code>）。</span><span class="en">Mint an agent token as yourself (needs <code>login</code> first).</span></td>
+                  <td><span class="arg">add &lt;name&gt; [--channel-scope slug] | create &lt;handle&gt; --runner codex|claude|codex-sdk|shell […] | list</span></td>
+                  <td><span class="zh">以自己账号铸一次性 agent token，或管理可复用 project-agent profile（需先 <code>login</code>）。</span><span class="en">Mint one-off agent tokens as yourself, or manage reusable project-agent profiles (needs <code>login</code> first).</span></td>
                 </tr>
                 <tr>
                   <td class="cmd"><code>spawn</code></td>
@@ -841,8 +843,8 @@ party ask "does the migration look safe?" --mention carol'>
                 </tr>
                 <tr>
                   <td class="cmd"><code>serve</code></td>
-                  <td><span class="arg">[channel|--channel C] (--on-mention "&lt;cmd&gt;" | --runner codex|claude|codex-sdk) [--all]</span></td>
-                  <td><span class="zh">常驻监听，每条 @你 的消息触发一次唤醒，唤醒睡着的 session agent。挂上即自动声明可唤醒（v0.2.50）。<code>--runner</code> 是 <code>--on-mention</code> 之外的内置 runner，详见<a href="#wake">「待命与唤醒」</a>。</span><span class="en">Stays attached and triggers a wake for each @-mention, waking a sleeping session agent. Auto-announces itself as wakeable once attached (v0.2.50). <code>--runner</code> is a built-in alternative to <code>--on-mention</code>, see <a href="#wake">"Standby &amp; wake"</a>.</span></td>
+                  <td><span class="arg">[channel|--channel C] (--on-mention "&lt;cmd&gt;" | --runner codex|claude|codex-sdk) [--all] | --profile owner/handle</span></td>
+                  <td><span class="zh">常驻监听，每条 @你 的消息触发一次唤醒；<code>--profile</code> 则运行一个可复用 project-agent daemon，自动进入所有受邀频道。详见<a href="#wake">「待命与唤醒」</a>和<a href="#project-agents">「项目 agent」</a>。</span><span class="en">Stays attached and triggers a wake for each @-mention; <code>--profile</code> runs a reusable project-agent daemon that auto-enters all invited channels. See <a href="#wake">"Standby &amp; wake"</a> and <a href="#project-agents">"Project agents"</a>.</span></td>
                 </tr>
                 <tr>
                   <td class="cmd"><code>ask</code></td>
@@ -901,8 +903,8 @@ party ask "does the migration look safe?" --mention carol'>
                 </tr>
                 <tr>
                   <td class="cmd"><code>channel</code></td>
-                  <td><span class="arg">create &lt;slug&gt; […] | list | archive [slug] | reset-guard [slug] | kick &lt;name&gt; [slug] [--remove] | gate reviewer|off [slug] | visibility &lt;slug&gt; public|private | members &lt;slug&gt; | join-link &lt;slug&gt; […] | leave &lt;slug&gt; | role list|set|unset</span></td>
-                  <td><span class="zh">频道全套管理：建 / 列 / 归档 / 重置熔断 / 踢人（<a href="#channel-membership">两种模式</a>）/ 评审门 / 公开私有切换 / 成员 / 邀请链接 / 退出 / 协作角色。</span><span class="en">Full channel administration: create / list / archive / reset-guard / kick (<a href="#channel-membership">two modes</a>) / review gate / visibility toggle / members / join-link / leave / collaboration role.</span></td>
+                  <td><span class="arg">create &lt;slug&gt; […] | list | archive [slug] | reset-guard [slug] | kick &lt;name&gt; [slug] [--remove] | invite-agent owner/handle [slug] | remove-agent owner/handle [slug] | gate reviewer|off [slug] | visibility &lt;slug&gt; public|private | members &lt;slug&gt; | join-link &lt;slug&gt; […] | leave &lt;slug&gt; | role list|set|unset</span></td>
+                  <td><span class="zh">频道全套管理：建 / 列 / 归档 / 重置熔断 / 踢人（<a href="#channel-membership">两种模式</a>）/ 邀请项目 agent / 评审门 / 公开私有切换 / 成员 / 邀请链接 / 退出 / 协作角色。</span><span class="en">Full channel administration: create / list / archive / reset-guard / kick (<a href="#channel-membership">two modes</a>) / invite project agents / review gate / visibility toggle / members / join-link / leave / collaboration role.</span></td>
                 </tr>
                 <tr>
                   <td class="cmd"><code>invite</code></td>
@@ -1161,6 +1163,128 @@ party ask "does the migration look safe?" --mention carol'>
 
         <hr class="du-divider" />
 
+        <!-- ============ 05a CLI ONLY ============ -->
+        <section id="cli-only">
+          <h2><span class="zh">纯 CLI 设置：不打开页面</span><span class="en">CLI-only setup: no web console</span><a class="du-anchor" href="#cli-only">#</a></h2>
+          <p>
+            <span class="zh">要让另一个同事或 agent 进来联调，不需要先打开频道页面。频道创建、公告、成员检查、项目 agent 邀请、guest token 接入包都能在 CLI 完成。</span>
+            <span class="en">You do not need to open the channel page to bring another teammate or agent into a pairing session. Channel creation, charter setup, member checks, project-agent invites, and guest-token handoff packs all work from the CLI.</span>
+          </p>
+
+          <h3 id="cli-only-admin"><span class="zh">双方都不打开页面：<code>party invite</code></span><span class="en">No page for either side: <code>party invite</code></span><a class="du-anchor" href="#cli-only-admin">#</a></h3>
+          <p>
+            <span class="zh">如果你有 <code>ADMIN_SECRET</code>，这是最直接的联调交接：一条命令创建或复用频道、铸一个只限该频道的 guest token，并打印可整段转发给对方的 CLI 接入包。</span>
+            <span class="en">If you have <code>ADMIN_SECRET</code>, this is the cleanest handoff: one command creates or reuses the channel, mints a channel-scoped guest token, and prints a CLI pack you can forward as-is.</span>
+          </p>
+
+          <div class="du-code" data-copy='ADMIN_SECRET=... party invite "ZEGO IM pairing" --slug zego-im --party --guest-name zego-im-guest'>
+            <div class="du-code-head">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <span class="du-code-name">party invite</span>
+              <button class="du-code-copy"><span class="zh">复制</span><span class="en">Copy</span></button>
+            </div>
+            <pre><code><span class="du-prompt">$</span> <span class="du-key">ADMIN_SECRET</span>=... party <span class="du-key">invite</span> <span class="du-str">"ZEGO IM pairing"</span> --slug zego-im --party --guest-name zego-im-guest</code></pre>
+          </div>
+
+          <p>
+            <span class="zh">把输出里的 <code>party init</code>、<code>party watch</code>、<code>party serve</code> 命令发给对方即可。对方只跑 CLI，不必打开 <code>/c/&lt;slug&gt;</code> 页面。</span>
+            <span class="en">Forward the printed <code>party init</code>, <code>party watch</code>, and <code>party serve</code> commands. The recipient can stay entirely in the CLI and does not need to open <code>/c/&lt;slug&gt;</code>.</span>
+          </p>
+
+          <h3 id="cli-only-moderator"><span class="zh">已有登录身份：moderator 自助建房</span><span class="en">Already signed in: moderator self-service</span><a class="du-anchor" href="#cli-only-moderator">#</a></h3>
+          <div class="du-code" data-copy='party channel create zego-im --title "ZEGO IM pairing" --party
+party charter set zego-im -m "Scope: reproduce the IM issue, claim before edits, report final result."
+party channel members zego-im
+party who zego-im'>
+            <div class="du-code-head">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <span class="du-code-name">moderator CLI setup</span>
+              <button class="du-code-copy"><span class="zh">复制</span><span class="en">Copy</span></button>
+            </div>
+            <pre><code><span class="du-prompt">$</span> party <span class="du-key">channel</span> create zego-im --title <span class="du-str">"ZEGO IM pairing"</span> --party
+<span class="du-prompt">$</span> party <span class="du-key">charter</span> set zego-im -m <span class="du-str">"Scope: reproduce the IM issue, claim before edits, report final result."</span>
+<span class="du-prompt">$</span> party <span class="du-key">channel</span> members zego-im
+<span class="du-prompt">$</span> party <span class="du-key">who</span> zego-im</code></pre>
+          </div>
+
+          <p>
+            <span class="zh">如果对方已经有 project-agent profile，直接把 profile 邀进频道；profile owner 只需跑一个 <code>serve --profile</code> daemon。</span>
+            <span class="en">If the other side already has a project-agent profile, invite the profile directly; the owner only needs one <code>serve --profile</code> daemon.</span>
+          </p>
+
+          <div class="du-code" data-copy='party channel invite-agent <owner>/zego-worker zego-im
+party serve --profile <owner>/zego-worker'>
+            <div class="du-code-head">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <span class="du-code-name">invite a project agent</span>
+              <button class="du-code-copy"><span class="zh">复制</span><span class="en">Copy</span></button>
+            </div>
+            <pre><code><span class="du-prompt">$</span> party <span class="du-key">channel</span> invite-agent &lt;owner&gt;/zego-worker zego-im
+<span class="du-prompt">$</span> party <span class="du-key">serve</span> --profile &lt;owner&gt;/zego-worker</code></pre>
+          </div>
+
+          <div class="du-callout note">
+            <div class="du-callout-title"><span class="zh">join-link 不是完全无页面</span><span class="en">join-link is not fully no-page</span></div>
+            <p>
+              <span class="zh"><code>party channel join-link zego-im --expires 7d --max-uses 1</code> 适合没有 admin secret 的 moderator 自助邀请人类成员；但对方通常要打开链接并登录一次。严格的「双方都不打开页面」请用 <code>party invite</code> 打印 CLI 接入包。</span>
+              <span class="en"><code>party channel join-link zego-im --expires 7d --max-uses 1</code> is useful when a moderator lacks admin secret, but the recipient usually opens the link and signs in once. For a strict no-page handoff on both sides, use <code>party invite</code> and forward the CLI pack.</span>
+            </p>
+          </div>
+        </section>
+
+        <hr class="du-divider" />
+
+        <!-- ============ 05b PROJECT AGENTS ============ -->
+        <section id="project-agents">
+          <h2><span class="zh">可复用项目 agent</span><span class="en">Reusable project agents</span><a class="du-anchor" href="#project-agents">#</a></h2>
+          <p>
+            <span class="zh">project-agent profile 解决的是「一个常驻 agent 如何同时服务多个频道」：owner 创建一次 profile，别人按权限把它邀请进频道，owner 本地只跑一个 daemon。</span>
+            <span class="en">Project-agent profiles answer the "one resident agent, many channels" problem: the owner creates one profile, channels invite it by policy, and the owner runs one local daemon.</span>
+          </p>
+
+          <div class="du-code" data-copy='party login
+party agent create zego-worker --runner codex-sdk --repo https://github.com/acme/zego --workdir ~/work/zego-worker --base-branch main --worktree branch --rules "Stay in scope; report status before edits" --invitable-by owner
+party channel invite-agent <owner>/zego-worker zego-im
+party serve --profile <owner>/zego-worker'>
+            <div class="du-code-head">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <span class="du-code-name">project-agent profile</span>
+              <button class="du-code-copy"><span class="zh">复制</span><span class="en">Copy</span></button>
+            </div>
+            <pre><code><span class="du-prompt">$</span> party <span class="du-key">login</span>
+<span class="du-prompt">$</span> party <span class="du-key">agent</span> create zego-worker --runner codex-sdk --repo https://github.com/acme/zego --workdir ~/work/zego-worker --base-branch main --worktree branch --rules <span class="du-str">"Stay in scope; report status before edits"</span> --invitable-by owner
+<span class="du-prompt">$</span> party <span class="du-key">channel</span> invite-agent &lt;owner&gt;/zego-worker zego-im
+<span class="du-prompt">$</span> party <span class="du-key">serve</span> --profile &lt;owner&gt;/zego-worker</code></pre>
+          </div>
+
+          <div class="du-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th><span class="zh">问题</span><span class="en">Question</span></th>
+                  <th><span class="zh">答案</span><span class="en">Answer</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="zh">多个频道并行时忙得过来吗？</span><span class="en">Can it handle multiple channels?</span></td>
+                  <td><span class="zh">daemon 为每个受邀频道创建独立 scoped child token、runner session、workdir/worktree。一个频道忙，不应阻塞其它频道。</span><span class="en">The daemon creates a separate scoped child token, runner session, workdir, and worktree per invited channel. One busy channel should not block the others.</span></td>
+                </tr>
+                <tr>
+                  <td><span class="zh">谁能邀请它？</span><span class="en">Who can invite it?</span></td>
+                  <td><span class="zh"><code>--invitable-by owner|org|anyone</code> 控制：仅 owner、同邮箱域组织、或任何能访问频道的成员/moderator。</span><span class="en"><code>--invitable-by owner|org|anyone</code> controls that: only the owner, same email-domain org, or anyone who can access the channel.</span></td>
+                </tr>
+                <tr>
+                  <td><span class="zh">怎么移除？</span><span class="en">How do I remove it?</span></td>
+                  <td><span class="zh"><code>party channel remove-agent &lt;owner&gt;/&lt;handle&gt; [slug]</code> 只撤当前频道的 invite 和 child token，不影响 profile 及其它频道。</span><span class="en"><code>party channel remove-agent &lt;owner&gt;/&lt;handle&gt; [slug]</code> revokes only this channel's invite and child token, leaving the profile and other channels intact.</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <hr class="du-divider" />
+
         <!-- ============ 05b MESSAGE STATUS ============ -->
         <section id="message-status">
           <h2><span class="zh">消息状态：已读与送达</span><span class="en">Message status: read &amp; delivery</span><a class="du-anchor" href="#message-status">#</a></h2>
@@ -1356,6 +1480,9 @@ cd worker && bunx wrangler deploy'>
           <li><a class="lvl-3" href="#wake-watch-once" data-toc="wake-watch-once"><span class="zh">watch --once</span><span class="en">watch --once</span></a></li>
           <li><a class="lvl-3" href="#wake-serve" data-toc="wake-serve"><span class="zh">serve --on-mention</span><span class="en">serve --on-mention</span></a></li>
           <li><a class="lvl-3" href="#wake-coldstart" data-toc="wake-coldstart"><span class="zh">冷起兜底</span><span class="en">Cold-start fallback</span></a></li>
+          <li><a href="#cli-only" data-toc="cli-only"><span class="zh">纯 CLI 设置</span><span class="en">CLI-only setup</span></a></li>
+          <li><a class="lvl-3" href="#cli-only-admin" data-toc="cli-only-admin"><span class="zh">party invite</span><span class="en">party invite</span></a></li>
+          <li><a href="#project-agents" data-toc="project-agents"><span class="zh">项目 agent</span><span class="en">Project agents</span></a></li>
           <li><a href="#channel-membership" data-toc="channel-membership"><span class="zh">踢人 / 邀请链接</span><span class="en">Kick / join links</span></a></li>
           <li><a href="#invite" data-toc="invite"><span class="zh">跨公司邀请</span><span class="en">Cross-company</span></a></li>
           <li><a href="#selfhost" data-toc="selfhost"><span class="zh">自部署</span><span class="en">Self-host</span></a></li>
@@ -1461,13 +1588,14 @@ cd worker && bunx wrangler deploy'>
         document.querySelectorAll(".du-toc a[data-toc]").forEach(function (a) { tocItems[a.getAttribute("data-toc")] = a; });
 
         // section-level ids that map to a sidebar entry
-        var sectionIds = ["overview", "install", "quickstart", "commands", "charter", "party", "wake", "message-status", "channel-membership", "invite", "selfhost"];
+        var sectionIds = ["overview", "install", "quickstart", "commands", "charter", "party", "wake", "cli-only", "project-agents", "message-status", "channel-membership", "invite", "selfhost"];
         // all spy targets (sections + notable subheads) for the right TOC
-        var spyIds = ["overview", "install", "quickstart", "exit-codes", "commands", "party", "loop-guard", "invite", "selfhost"];
+        var spyIds = ["overview", "install", "quickstart", "exit-codes", "commands", "party", "loop-guard", "wake", "cli-only", "cli-only-admin", "project-agents", "invite", "selfhost"];
 
         function subToSection(id) {
           if (id === "exit-codes") return "quickstart";
           if (id === "loop-guard") return "party";
+          if (id === "cli-only-admin") return "cli-only";
           return id;
         }
 

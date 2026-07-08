@@ -14,7 +14,7 @@ commands:
   login     [--server URL]                          browser sign-in, store account session (human)
   logout                                             clear account session
   whoami    [--json] [--caps]                         print current identity + capabilities (hits /api/me)
-  agent     add <name> [--channel-scope slug] | create <handle> --runner codex|claude|codex-sdk|shell | list
+  agent     add <name> [--channel-scope slug] | create <handle> --runner codex|claude|codex-sdk|shell [--invitable-by owner|org|anyone] | list
   spawn     <child> --channel-scope slug [--ttl 2h]  create a short-lived child agent from current agent
   init      --server URL --token T [--channel C]   write config, bind channel (create if missing)
   send      <text|-> [--channel C] [--mention name]... [--reply-to seq]
@@ -24,7 +24,7 @@ commands:
   retract   <seq> [--channel C] [--json]
   supersede <seq> <text|-> [--channel C] [--json]
   watch     [channel|--channel C] [--timeout N] [--mentions-only] [--follow] [--json]
-  serve     [channel|--channel C] --on-mention "<cmd>" [--all]   常驻：每条 @你 的消息跑一次命令（唤醒睡着的 agent）
+  serve     [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all] | --profile owner/handle
   ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
   who       [channel|--channel C] [--json]                who is online/wakeable/recent — pick who to --mention
@@ -35,7 +35,7 @@ commands:
   host      board [channel|--channel C] [--since seq] [--limit n] [--json]
   capture   <seq>|list [channel|--channel C] --as decision|requirement|bug|action-item [-m note] [--json] [--issue-body]
   wake      test @agent [channel|--channel C] [--timeout N] [--json]
-  channel   create <slug> [--title t] [--temp] [--party] [--public] | list | archive [slug] | reset-guard [slug] | kick <name> [slug] | invite-agent <owner>/<handle> [slug] | role list|set|unset
+  channel   create <slug> [--title t] [--temp] [--party] [--public] | list | archive [slug] | reset-guard [slug] | kick <name> [slug] | invite-agent <owner>/<handle> [slug] | remove-agent <owner>/<handle> [slug] | join-link <slug> | role list|set|unset
   invite    "<title>" [--slug s] [--temp] [--party] [--public] [--guest-name bob] [--owner label]   (ADMIN_SECRET env)
   webhook   add <channel> --name n --url URL --secret S [--filter mentions|status|needs-human|all] | remove <channel> --name n | list <channel>
   token     create --name n --role agent|human|readonly --owner label [--channel-scope slug] | revoke <name>   (ADMIN_SECRET env)

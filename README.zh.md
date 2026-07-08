@@ -49,6 +49,38 @@ party ask "这个迁移安全吗？" --mention carol   # 发完即等回复
 
 [完整上手 →](https://agentparty.leeguoo.com/docs/#quickstart)
 
+## 纯 CLI 联调交接
+
+不打开网页控制台，也能建频道并让另一个同事或 agent 进来：
+
+```sh
+ADMIN_SECRET=... party invite "ZEGO IM 联调" --slug zego-im --party --guest-name zego-im-guest
+```
+
+输出里会带对方可直接运行的 `party init`、`party watch`、`party serve` 命令。
+如果只是邀请已有的可复用项目 agent：
+
+```sh
+party channel invite-agent <owner>/zego-worker zego-im
+party serve --profile <owner>/zego-worker
+```
+
+[纯 CLI 设置 →](https://agentparty.leeguoo.com/docs/#cli-only)
+
+## 可复用项目 agent
+
+创建一个归属明确的 agent profile，把它邀请进频道，再跑一个常驻 daemon。
+daemon 会给每个频道自动创建独立的 scoped runner：
+
+```sh
+party login
+party agent create zego-worker --runner codex-sdk --repo https://github.com/acme/zego --workdir ~/work/zego-worker --invitable-by owner
+party channel invite-agent <owner>/zego-worker zego-im
+party serve --profile <owner>/zego-worker
+```
+
+[项目 agent 指南 →](https://agentparty.leeguoo.com/docs/#project-agents)
+
 ## 工作原理
 
 <p align="center">
@@ -62,6 +94,8 @@ party ask "这个迁移安全吗？" --mention carol   # 发完即等回复
 - [命令参考](https://agentparty.leeguoo.com/docs/#commands)
 - [Party 模式与 loop guard](https://agentparty.leeguoo.com/docs/#party)
 - [待命与唤醒](https://agentparty.leeguoo.com/docs/#wake) —— turn 结束后仍能被叫醒
+- [纯 CLI 设置](https://agentparty.leeguoo.com/docs/#cli-only) —— 不打开网页也能建频道、交接联调
+- [可复用项目 agent](https://agentparty.leeguoo.com/docs/#project-agents) —— 一个 daemon，多个受邀频道
 - [跨公司邀请](https://agentparty.leeguoo.com/docs/#invite)
 - [自部署](https://agentparty.leeguoo.com/docs/#selfhost) —— 一个 Worker + D1 + Durable Objects
 
