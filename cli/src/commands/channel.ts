@@ -21,7 +21,7 @@ import {
 } from "../rest";
 import { isName, isSlug } from "../validation";
 
-const CHANNEL_FLAGS = ["title", "temp", "party", "public", "policy", "confirm", "expires", "max-uses", "remove"];
+const CHANNEL_FLAGS = ["title", "temp", "party", "public", "policy", "confirm", "expires", "max-uses", "remove", "responsibility"];
 const COLLAB_ROLES = ["host", "worker", "reviewer", "observer"] as const;
 const COMPLETION_GATES = ["reviewer", "off"] as const;
 const COMPLETION_REVIEW_POLICIES = ["sender", "owner"] as const;
@@ -38,7 +38,7 @@ const HELP = `usage: party channel create <slug> [--title t] [--temp] [--party] 
        party channel join-link revoke <slug> <code>
        party channel leave <slug>
        party channel role list [slug]
-       party channel role set <name> host|worker|reviewer|observer [slug]
+       party channel role set <name> host|worker|reviewer|observer [slug] [--responsibility text]
        party channel role unset <name> [slug]
 
 Manage channels.
@@ -55,7 +55,9 @@ Options:
   --confirm   confirm private-to-public visibility switch
   --remove    revoke the channel-scoped token and remove membership when kicking
   --expires d join-link expiry like 7d, 12h, 30m, 60s
-  --max-uses n join-link redemption limit`;
+  --max-uses n join-link redemption limit
+  --responsibility text, -m text
+              structured responsibility shown in web division board and @ suggestions`;
 
 function parseDurationSec(input: string | undefined): number | null | undefined {
   if (input === undefined) return undefined;
@@ -78,13 +80,16 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["temp", "party", "public", "confirm", "remove"] });
+  const { positionals, flags } = parseArgs(argv, {
+    booleans: ["temp", "party", "public", "confirm", "remove"],
+    aliases: { m: "responsibility" },
+  });
   const unknown = unknownFlagError(flags, CHANNEL_FLAGS);
   if (unknown !== null) {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["title", "policy", "expires", "max-uses"]);
+  const flagError = valueFlagError(flags, ["title", "policy", "expires", "max-uses", "responsibility"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -329,7 +334,7 @@ export async function run(argv: string[]): Promise<number> {
           const role = positionals[3];
           const slug = resolveChannel(positionals[4]);
           if (!name || !role || !slug) {
-            console.error("usage: party channel role set <name> host|worker|reviewer|observer [slug]");
+            console.error("usage: party channel role set <name> host|worker|reviewer|observer [slug] [--responsibility text]");
             return 1;
           }
           if (!isName(name)) {
@@ -344,7 +349,8 @@ export async function run(argv: string[]): Promise<number> {
             console.error("slug must match [a-z0-9][a-z0-9-]{0,63}");
             return 1;
           }
-          await setChannelRole(cfg.server, cfg.token, slug, name, role as (typeof COLLAB_ROLES)[number]);
+          const responsibility = str(flags.responsibility);
+          await setChannelRole(cfg.server, cfg.token, slug, name, role as (typeof COLLAB_ROLES)[number], responsibility);
           console.log(`assigned ${name} as ${role} in ${slug}`);
           return 0;
         }

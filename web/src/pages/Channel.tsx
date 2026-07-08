@@ -153,6 +153,12 @@ function displayRoleName(role: ChannelRoleInfo, identities: ChannelIdentity[]): 
   return identity?.display ?? role.display ?? (role.kind === "human" && role.account ? role.account : role.name);
 }
 
+function roleAccountLabel(role: ChannelRoleInfo, display: string, t: TFunc): string {
+  if (role.account && role.account !== "") return role.account;
+  if (role.kind === "human") return display;
+  return t("Channel.roles.unowned");
+}
+
 function CharterBanner({
   charter,
   open,
@@ -162,23 +168,11 @@ function CharterBanner({
   saving,
   editing,
   error,
-  roles,
-  roleDrafts,
-  roleError,
-  roleSaving,
-  roleName,
-  roleDraft,
-  identities,
   onToggle,
   onDraft,
   onEdit,
   onCancel,
   onSave,
-  onRoleDraft,
-  onNewRoleName,
-  onNewRoleDraft,
-  onSaveRole,
-  onDeleteRole,
 }: {
   charter: ChannelCharter | null;
   open: boolean;
@@ -188,34 +182,20 @@ function CharterBanner({
   saving: boolean;
   editing: boolean;
   error: string | null;
-  roles: ChannelRoleInfo[];
-  roleDrafts: Record<string, RoleDraft>;
-  roleError: string | null;
-  roleSaving: string | null;
-  roleName: string;
-  roleDraft: RoleDraft;
-  identities: ChannelIdentity[];
   onToggle: () => void;
   onDraft: (value: string) => void;
   onEdit: () => void;
   onCancel: () => void;
   onSave: () => void;
-  onRoleDraft: (name: string, draft: RoleDraft) => void;
-  onNewRoleName: (name: string) => void;
-  onNewRoleDraft: (draft: RoleDraft) => void;
-  onSaveRole: (name: string, draft: RoleDraft) => void;
-  onDeleteRole: (name: string) => void;
 }) {
   const t = useT();
   const hasCharter = Boolean(charter?.charter);
-  const sortedRoles = [...roles].sort((a, b) => a.role.localeCompare(b.role) || displayRoleName(a, identities).localeCompare(displayRoleName(b, identities)));
   return (
     <section className={"charter-banner" + (updated ? " charter-banner--updated" : "")}>
       <header className="charter-head">
         <button className="charter-toggle" type="button" onClick={onToggle} aria-expanded={open}>
           <span>{t("Channel.charter.label")}</span>
           {charter ? <span className="t-mono">rev {charter.charter_rev}</span> : null}
-          <span className="t-mono charter-role-count">{t("Channel.roles.count", { count: String(roles.length) })}</span>
           {updated ? <span className="charter-updated">{t("Channel.charter.updated")}</span> : null}
         </button>
         {canModerate && (
@@ -248,22 +228,97 @@ function CharterBanner({
           ) : (
             <p className="charter-empty">{t("Channel.charter.empty")}</p>
           )}
-          <section className="role-board" aria-label={t("Channel.roles.label")}>
-            <header className="role-board-head">
-              <span>{t("Channel.roles.label")}</span>
-              <span className="t-mono">{t("Channel.roles.help")}</span>
-            </header>
-            {sortedRoles.length > 0 ? (
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DivisionBoard({
+  canModerate,
+  roles,
+  roleDrafts,
+  roleError,
+  roleSaving,
+  roleName,
+  roleDraft,
+  identities,
+  onRoleDraft,
+  onNewRoleName,
+  onNewRoleDraft,
+  onSaveRole,
+  onDeleteRole,
+}: {
+  canModerate: boolean;
+  roles: ChannelRoleInfo[];
+  roleDrafts: Record<string, RoleDraft>;
+  roleError: string | null;
+  roleSaving: string | null;
+  roleName: string;
+  roleDraft: RoleDraft;
+  identities: ChannelIdentity[];
+  onRoleDraft: (name: string, draft: RoleDraft) => void;
+  onNewRoleName: (name: string) => void;
+  onNewRoleDraft: (draft: RoleDraft) => void;
+  onSaveRole: (name: string, draft: RoleDraft) => void;
+  onDeleteRole: (name: string) => void;
+}) {
+  const t = useT();
+  const roleViews = [...roles]
+    .map((role) => {
+      const display = displayRoleName(role, identities);
+      const accountLabel = roleAccountLabel(role, display, t);
+      const owner = role.account && role.account !== display ? role.account : null;
+      return { role, display, accountLabel, owner };
+    })
+    .sort(
+      (a, b) =>
+        a.accountLabel.localeCompare(b.accountLabel) ||
+        a.role.role.localeCompare(b.role.role) ||
+        a.display.localeCompare(b.display),
+    );
+  const groups: Array<{ accountLabel: string; roles: typeof roleViews }> = [];
+  for (const view of roleViews) {
+    const current = groups.at(-1);
+    if (current !== undefined && current.accountLabel === view.accountLabel) current.roles.push(view);
+    else groups.push({ accountLabel: view.accountLabel, roles: [view] });
+  }
+
+  return (
+    <section className="role-board" aria-label={t("Channel.roles.label")}>
+      <header className="role-board-head">
+        <div>
+          <h2>{t("Channel.roles.label")}</h2>
+          <p className="t-mono">{t("Channel.roles.help")}</p>
+        </div>
+        <span className="t-mono role-board-count">{t("Channel.roles.count", { count: String(roles.length) })}</span>
+      </header>
+      {groups.length > 0 ? (
+        <div className="role-account-list">
+          {groups.map((group) => (
+            <section key={group.accountLabel} className="role-account-group">
+              <header className="role-account-head">
+                <span className="role-account-label">{group.accountLabel}</span>
+                <span className="t-mono role-account-count">
+                  {t("Channel.roles.accountCount", { count: String(group.roles.length) })}
+                </span>
+              </header>
               <div className="role-list">
-                {sortedRoles.map((role) => {
+                {group.roles.map(({ role, display, owner, accountLabel }) => {
                   const draftForRole = roleDrafts[role.name] ?? roleDraftFrom(role);
-                  const display = displayRoleName(role, identities);
-                  const owner = role.account && role.account !== display ? role.account : null;
+                  const kind = role.kind ?? "agent";
+                  const title = [
+                    role.name !== display ? role.name : null,
+                    t("Composer.owner", { account: accountLabel }),
+                    t(`Composer.kind.${kind}`),
+                    t("Composer.role", { role: role.role }),
+                    role.responsibility ? t("Composer.responsibility", { responsibility: role.responsibility }) : null,
+                  ].filter((part): part is string => part !== null).join("\n");
                   return (
                     <div key={role.name} className="role-row">
-                      <div className="role-person" title={`${role.name}${owner ? ` · ${owner}` : ""}`}>
+                      <div className="role-person" title={title}>
                         <span className="role-person-name t-mono">{display}</span>
-                        <span className={`role-kind role-kind--${role.kind ?? "agent"}`}>{t(`Composer.kind.${role.kind ?? "agent"}`)}</span>
+                        <span className={`role-kind role-kind--${kind}`}>{t(`Composer.kind.${kind}`)}</span>
                         {owner !== null && <span className="role-owner t-mono">{owner}</span>}
                       </div>
                       {canModerate ? (
@@ -301,50 +356,50 @@ function CharterBanner({
                   );
                 })}
               </div>
-            ) : (
-              <p className="charter-empty">{t("Channel.roles.empty")}</p>
-            )}
-            {canModerate && (
-              <div className="role-row role-row--new">
-                <input
-                  className="role-name-input t-mono"
-                  value={roleName}
-                  onChange={(e) => onNewRoleName(e.target.value)}
-                  list="channel-role-targets"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder={t("Channel.roles.namePlaceholder")}
-                />
-                <select
-                  className="role-select t-mono"
-                  value={roleDraft.role}
-                  onChange={(e) => onNewRoleDraft({ ...roleDraft, role: e.target.value as CollaborationRole })}
-                >
-                  {COLLAB_ROLES.map((item) => (
-                    <option key={item} value={item}>{item}</option>
-                  ))}
-                </select>
-                <input
-                  className="role-input"
-                  value={roleDraft.responsibility}
-                  onChange={(e) => onNewRoleDraft({ ...roleDraft, responsibility: e.target.value })}
-                  autoComplete="off"
-                  placeholder={t("Channel.roles.responsibilityPlaceholder")}
-                />
-                <button className="d-btn d-btn--primary" type="button" disabled={roleSaving === "__new__"} onClick={() => onSaveRole(roleName, roleDraft)}>
-                  {roleSaving === "__new__" ? t("Channel.roles.saving") : t("Channel.roles.add")}
-                </button>
-                <datalist id="channel-role-targets">
-                  {identities.map((identity) => (
-                    <option key={identity.name} value={identity.name}>{identity.display}</option>
-                  ))}
-                </datalist>
-              </div>
-            )}
-            {roleError !== null && <p className="banner banner--red">{roleError}</p>}
-          </section>
+            </section>
+          ))}
+        </div>
+      ) : (
+        <p className="charter-empty">{t("Channel.roles.empty")}</p>
+      )}
+      {canModerate && (
+        <div className="role-row role-row--new">
+          <input
+            className="role-name-input t-mono"
+            value={roleName}
+            onChange={(e) => onNewRoleName(e.target.value)}
+            list="channel-role-targets"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={t("Channel.roles.namePlaceholder")}
+          />
+          <select
+            className="role-select t-mono"
+            value={roleDraft.role}
+            onChange={(e) => onNewRoleDraft({ ...roleDraft, role: e.target.value as CollaborationRole })}
+          >
+            {COLLAB_ROLES.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+          <input
+            className="role-input"
+            value={roleDraft.responsibility}
+            onChange={(e) => onNewRoleDraft({ ...roleDraft, responsibility: e.target.value })}
+            autoComplete="off"
+            placeholder={t("Channel.roles.responsibilityPlaceholder")}
+          />
+          <button className="d-btn d-btn--primary" type="button" disabled={roleSaving === "__new__"} onClick={() => onSaveRole(roleName, roleDraft)}>
+            {roleSaving === "__new__" ? t("Channel.roles.saving") : t("Channel.roles.add")}
+          </button>
+          <datalist id="channel-role-targets">
+            {identities.map((identity) => (
+              <option key={identity.name} value={identity.name}>{identity.display}</option>
+            ))}
+          </datalist>
         </div>
       )}
+      {roleError !== null && <p className="banner banner--red">{roleError}</p>}
     </section>
   );
 }
@@ -1654,6 +1709,14 @@ export function ChannelPage({
         saving={charterSaving}
         editing={charterEditing}
         error={charterError}
+        onToggle={toggleCharter}
+        onDraft={setCharterDraft}
+        onEdit={editCharter}
+        onCancel={cancelCharterEdit}
+        onSave={saveCharter}
+      />
+      <DivisionBoard
+        canModerate={canModerate}
         roles={channelRoles}
         roleDrafts={roleDrafts}
         roleError={roleError}
@@ -1661,11 +1724,6 @@ export function ChannelPage({
         roleName={newRoleName}
         roleDraft={newRoleDraft}
         identities={channelIdentities}
-        onToggle={toggleCharter}
-        onDraft={setCharterDraft}
-        onEdit={editCharter}
-        onCancel={cancelCharterEdit}
-        onSave={saveCharter}
         onRoleDraft={updateRoleDraft}
         onNewRoleName={setNewRoleName}
         onNewRoleDraft={setNewRoleDraft}

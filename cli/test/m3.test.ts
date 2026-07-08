@@ -2680,17 +2680,18 @@ describe("party channel role", () => {
     mock = startRestMock();
     writeCfg(mock.url);
 
-    const set = await runCli(["channel", "role", "set", "alice", "host", "ops"]);
+    const set = await runCli(["channel", "role", "set", "alice", "host", "ops", "--responsibility", "own handoff"]);
     expect(set.code).toBe(0);
     expect(set.stdout).toContain("assigned alice as host in ops");
     const setReqs = reqsOf(mock, "PUT", "/api/channels/ops/roles/alice");
     expect(setReqs.length).toBe(1);
-    expect(setReqs[0]!.body).toEqual({ role: "host" });
+    expect(setReqs[0]!.body).toEqual({ role: "host", responsibility: "own handoff" });
     expect(setReqs[0]!.headers.authorization).toBe("Bearer ap_tok");
 
     const list = await runCli(["channel", "role", "list", "ops"]);
     expect(list.code).toBe(0);
     expect(list.stdout).toContain("alice\thost\towner\t1970-01-01T00:00:00.123Z");
+    expect(list.stdout).toContain("\town handoff");
 
     const unset = await runCli(["channel", "role", "unset", "alice", "ops"]);
     expect(unset.code).toBe(0);
