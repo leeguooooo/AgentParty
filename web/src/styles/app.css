@@ -2641,12 +2641,39 @@
     gap: 10px;
     padding: 0 14px 14px;
   }
-  .app-head { padding: 12px 16px 8px; flex-wrap: wrap; }
-  .app-me { order: 2; max-width: 100%; margin-left: 0; flex-basis: 100%; }
+  .app-head {
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: 8px 10px 6px;
+  }
+  .app-logo {
+    flex: none;
+    font-size: 22px;
+  }
+  .app-docs {
+    display: none;
+  }
+  .app-me {
+    order: 0;
+    flex: 1 1 auto;
+    flex-basis: auto;
+    max-width: 128px;
+    margin-left: auto;
+    gap: 4px;
+  }
+  .app-me-prefix,
+  .app-me-owner,
+  .app-signout {
+    display: none;
+  }
+  .lang-switch {
+    flex: none;
+  }
   .app-tag { display: none; }
   .app-side {
     min-width: 0;
     max-width: 100%;
+    padding: 2px 2px 4px;
     overflow: visible;
   }
   .side {
@@ -2655,20 +2682,35 @@
     flex-direction: row;
     overflow-x: auto;
     align-items: center;
+    gap: 8px;
     padding-bottom: 4px;
   }
   .side-label { display: none; }
-  .chan-pill { width: auto; flex: none; }
+  .newchan-open {
+    padding: 6px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .chan-pill {
+    width: 168px;
+    min-height: 48px;
+    flex: none;
+    padding: 6px 8px;
+  }
+  .chan {
+    gap: 8px;
+  }
   .presence-bar {
     min-width: 0;
     max-width: 100%;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px;
+    padding: 0 2px 2px;
   }
-  .presence-meta {
-    grid-column: 1 / -1;
-  }
+  .presence-meta { display: none; }
   .presence-strip {
     grid-column: 1 / 2;
+    padding: 1px 2px 3px;
   }
   .presence-more-list {
     right: auto;
@@ -2677,7 +2719,9 @@
   }
   .presence-group {
     grid-template-columns: minmax(0, 1fr);
+    min-height: 30px;
     max-width: 72vw;
+    padding: 2px 7px;
   }
   .presence-group-agents {
     display: none;
@@ -2687,6 +2731,48 @@
   }
   .presence-name { max-width: 42vw; }
   .presence-note { max-width: 120px; }
+  .chan-toolbar {
+    flex-wrap: nowrap;
+    gap: 7px;
+    overflow-x: auto;
+    padding: 0 2px 1px;
+  }
+  .agent-join {
+    flex: none;
+    flex-wrap: nowrap;
+    gap: 7px;
+  }
+  .agent-join-btn {
+    white-space: nowrap;
+  }
+  .charter-banner {
+    margin: 0 0 4px;
+  }
+  .charter-head {
+    padding: 6px 8px;
+  }
+  .role-board {
+    margin-top: 4px;
+  }
+  .role-board-head {
+    padding: 7px 9px;
+  }
+  .role-board-body {
+    padding: 8px 9px 9px;
+  }
+  .chan-panels {
+    margin: 0 0 1px;
+  }
+  .chan-panels-summary {
+    padding: 6px 9px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stream {
+    gap: 12px;
+    padding: 8px 6px 12px 2px;
+  }
   .role-row {
     grid-template-columns: 1fr;
     align-items: stretch;
