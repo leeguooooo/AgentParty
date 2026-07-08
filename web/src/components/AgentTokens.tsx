@@ -22,11 +22,13 @@ interface Props {
   accountKey: string;
   inviterName: string;
   onAuthFailed(message: string): void;
+  active?: boolean;
+  onActiveChange?(open: boolean): void;
 }
 
 type CopyTarget = `${string}:token` | `${string}:command`;
 
-export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed }: Props) {
+export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed, active, onActiveChange }: Props) {
   const t = useT();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
@@ -35,6 +37,8 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
   const [busyName, setBusyName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<CopyTarget | null>(null);
+  const [revealed, setRevealed] = useState<Set<string>>(() => new Set());
+  const isOpen = active ?? open;
   const localOnly = useMemo(() => {
     const serverNames = new Set((agents ?? []).map((agent) => agent.name));
     return listSavedAgentTokens(accountKey, slug).filter((rec) => !serverNames.has(rec.name));
@@ -52,13 +56,14 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
   }, [onAuthFailed, slug, t, token]);
 
   const toggle = useCallback(() => {
-    const next = !open;
-    setOpen(next);
+    const next = !isOpen;
+    if (active === undefined) setOpen(next);
+    onActiveChange?.(next);
     if (next && agents === null) void refresh();
-  }, [agents, open, refresh]);
+  }, [active, agents, isOpen, onActiveChange, refresh]);
 
   useLayoutEffect(() => {
-    if (!open) return;
+    if (!isOpen) return;
 
     const updatePanelPosition = () => {
       const anchor = rootRef.current?.getBoundingClientRect();
@@ -79,7 +84,34 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
       window.removeEventListener("resize", updatePanelPosition);
       window.removeEventListener("scroll", updatePanelPosition, true);
     };
-  }, [open]);
+  }, [isOpen]);
+
+  const toggleReveal = useCallback((key: string) => {
+    setRevealed((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const tokenField = (key: string, tokenValue: string) => {
+    const isRevealed = revealed.has(key);
+    return (
+      <div className="agenttokens-tokenrow">
+        <input
+          className="agenttokens-token t-mono"
+          type={isRevealed ? "text" : "password"}
+          value={tokenValue}
+          readOnly
+          aria-label={t("AgentTokens.tokenField")}
+        />
+        <button type="button" className="d-btn agenttokens-reveal" onClick={() => toggleReveal(key)}>
+          {isRevealed ? t("AgentTokens.hideToken") : t("AgentTokens.showToken")}
+        </button>
+      </div>
+    );
+  };
 
   async function copy(name: string, kind: "token" | "command", text: string) {
     const ok = await copyText(text);
@@ -127,10 +159,10 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
 
   return (
     <div className="agenttokens" ref={rootRef}>
-      <button type="button" className="d-btn agenttokens-btn" onClick={toggle} aria-expanded={open}>
+      <button type="button" className="d-btn agenttokens-btn" onClick={toggle} aria-expanded={isOpen}>
         {t("AgentTokens.open")}
       </button>
-      {open && (
+      {isOpen && (
         <div className="agenttokens-panel" style={panelStyle}>
           <div className="agenttokens-head">
             <span className="agenttokens-title">{t("AgentTokens.title")}</span>
@@ -156,7 +188,7 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
                         {saved ? t("AgentTokens.hasPlaintext") : t("AgentTokens.noPlaintext")}
                       </span>
                     </div>
-                    {saved ? <code className="agenttokens-token t-mono">{saved.token}</code> : null}
+                    {saved ? tokenField(`server:${agent.name}`, saved.token) : null}
                     <div className="agenttokens-actions">
                       {saved ? (
                         <>
@@ -192,7 +224,7 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
                       <strong className="agenttokens-name">{rec.name}</strong>
                       <span className="agenttokens-meta">{t("AgentTokens.localOnlyMeta")}</span>
                     </div>
-                    <code className="agenttokens-token t-mono">{rec.token}</code>
+                    {tokenField(`local:${rec.name}`, rec.token)}
                   </li>
                 ))}
               </ul>

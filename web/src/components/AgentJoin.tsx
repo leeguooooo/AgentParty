@@ -1,7 +1,7 @@
 // 频道页「＋ 让 agent 加入」：登录人类先给 agent 起个能认出来的名字（默认 <你>-<频道>，
 // 可改成 drawstyle-review 这类），再铸一枚 channel-scoped agent token，弹出可复制的接入脚本。
 // 明文 token 只出现这一次（spec §10）。名字有意义 = 频道里一眼分清谁的哪个项目，不再是随机后缀。
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   AuthError,
   type ChannelCharter,
@@ -21,6 +21,8 @@ interface Props {
   inviterName: string; // 邀请人在频道里的身份名，报到时 @ 他让他知道你来了
   charter: ChannelCharter | null;
   accountKey: string;
+  active?: boolean;
+  onActiveChange?(open: boolean): void;
 }
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -64,7 +66,7 @@ type Phase =
   | { kind: "done"; name: string; command: string }
   | { kind: "error"; message: string };
 
-export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accountKey }: Props) {
+export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accountKey, active, onActiveChange }: Props) {
   const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [name, setName] = useState("");
@@ -72,16 +74,22 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
   const [copied, setCopied] = useState(false);
 
   const open = useCallback(() => {
+    onActiveChange?.(true);
     setName(suggestName(namePrefix, slug));
     setNameErr(null);
     setPhase({ kind: "compose" });
-  }, [namePrefix, slug]);
+  }, [namePrefix, onActiveChange, slug]);
 
   const close = useCallback(() => {
     setPhase({ kind: "idle" });
     setCopied(false);
     setNameErr(null);
-  }, []);
+    onActiveChange?.(false);
+  }, [onActiveChange]);
+
+  useEffect(() => {
+    if (active === false && phase.kind !== "idle") close();
+  }, [active, close, phase.kind]);
 
   const mint = useCallback(async () => {
     const wanted = name.trim();

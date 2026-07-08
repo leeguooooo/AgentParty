@@ -22,6 +22,7 @@
   display: flex;
   /* center 而非 baseline：草书 marker logo 的上伸笔画在 baseline 对齐下会顶出行盒被裁 */
   align-items: center;
+  flex-wrap: wrap;
   gap: 14px;
   padding: 18px 24px 12px;
 }
@@ -48,6 +49,7 @@
 .app-docs:hover { color: var(--t-accent); border-color: var(--t-accent); }
 .app-me {
   margin-left: auto;
+  flex: 1 1 240px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -603,19 +605,22 @@
 }
 .presence-strip {
   gap: 6px;
-  overflow-x: auto;
-  overscroll-behavior-inline: contain;
+  flex-wrap: wrap;
+  max-height: 86px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   padding: 2px 2px 5px;
 }
 .presence-group {
-  flex: 0 0 auto;
+  flex: 1 1 280px;
   display: grid;
-  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
+  grid-template-columns: minmax(110px, auto) minmax(0, 1fr);
   align-items: center;
   gap: 6px;
   min-height: 34px;
-  max-width: min(430px, 76vw);
+  max-width: 100%;
   padding: 3px 8px;
   border: 2px solid var(--d-ink);
   border-radius: 11px 7px 12px 6px / 7px 12px 6px 11px;
@@ -1054,15 +1059,18 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow: hidden;
 }
 .stream {
   flex: 1;
+  flex-basis: 0;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 18px;
   padding: 12px 12px 18px 6px;
+  scroll-padding-bottom: 112px;
 }
 .stream > .d-empty { margin: auto 0; }
 
@@ -2115,7 +2123,7 @@
 .agenttokens-btn { font-size: 13px; }
 .agenttokens-panel {
   position: fixed;
-  z-index: 20;
+  z-index: 40;
   width: min(620px, calc(100vw - 24px));
   max-height: calc(100vh - 24px);
   overflow-y: auto;
@@ -2184,6 +2192,8 @@
   font-size: 13px;
 }
 .agenttokens-token {
+  min-width: 0;
+  width: 100%;
   padding: 5px 7px;
   border: 1px solid var(--t-faint);
   border-radius: 6px;
@@ -2191,6 +2201,17 @@
   color: var(--t-muted);
   font-size: 11px;
   overflow-wrap: anywhere;
+}
+.agenttokens-tokenrow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+.agenttokens-reveal {
+  flex: none;
+  font-size: 12px;
+  padding: 2px 8px;
 }
 .agenttokens-rotate {
   border-color: var(--d-red);
@@ -2453,10 +2474,12 @@
 /* ---- 插话框 ---- */
 .composer {
   position: relative;
+  flex: none;
   display: flex;
   align-items: stretch;
   gap: 12px;
   padding: 2px 6px 6px 2px;
+  background: var(--bg);
 }
 /* @ 提及补全下拉（issue #39）：浮在插话框上方，doodle 边框，分档徽章 */
 .mention-menu {
@@ -2903,7 +2926,9 @@
     padding: 0 14px 14px;
   }
   .app-head {
-    flex-wrap: nowrap;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
     gap: 8px;
     padding: 8px 10px 6px;
   }
@@ -2915,11 +2940,10 @@
     display: none;
   }
   .app-me {
-    order: 0;
-    flex: 1 1 auto;
-    flex-basis: auto;
-    max-width: 128px;
-    margin-left: auto;
+    grid-column: 2;
+    flex: initial;
+    max-width: 100%;
+    margin-left: 0;
     gap: 4px;
   }
   .app-me-prefix,
@@ -2928,7 +2952,7 @@
     display: none;
   }
   .handlesetup-trigger {
-    max-width: 68px;
+    max-width: 78px;
     font-size: 10px;
   }
   .handle-banner {
@@ -2977,7 +3001,11 @@
   }
   .presence-meta { display: none; }
   .presence-strip {
-    grid-column: 1 / 2;
+    grid-column: 1 / -1;
+    flex-wrap: nowrap;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
     padding: 1px 2px 3px;
   }
   .presence-more-list {
@@ -2986,9 +3014,11 @@
     width: calc(100vw - 32px);
   }
   .presence-group {
+    flex: 0 0 min(260px, 82vw);
     grid-template-columns: minmax(0, 1fr);
     min-height: 30px;
-    max-width: 72vw;
+    max-width: min(260px, 82vw);
+    min-width: 0;
     padding: 2px 7px;
   }
   .presence-group-agents {
@@ -3005,15 +3035,14 @@
     max-height: 58vh;
   }
   .chan-toolstrip {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     gap: 7px;
-    overflow-x: auto;
     padding: 0 2px 1px;
   }
   .chan-tool-buttons,
   .chan-admin-actions {
-    flex: none;
-    flex-wrap: nowrap;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
     gap: 7px;
   }
   .chan-admin-actions {
@@ -3065,7 +3094,7 @@
   }
   .stream {
     gap: 12px;
-    padding: 8px 6px 12px 2px;
+    padding: 8px 6px 18px 2px;
   }
   .role-row {
     grid-template-columns: 1fr;

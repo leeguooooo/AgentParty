@@ -10,6 +10,8 @@ interface Props {
   slug: string;
   token: string;
   onAuthFailed(message: string): void;
+  active?: boolean;
+  onActiveChange?(open: boolean): void;
 }
 
 function expiryOptions(t: TFunc): { label: string; sec?: number }[] {
@@ -43,7 +45,7 @@ function expiryLabel(link: JoinLinkInfo, t: TFunc): string {
   return t("JoinLink.expiresInHours", { hours: Math.max(1, Math.floor(left / 3600000)) });
 }
 
-export function JoinLink({ slug, token, onAuthFailed }: Props) {
+export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: Props) {
   const t = useT();
   const EXPIRY_OPTIONS = expiryOptions(t);
   const USES_OPTIONS = usesOptions(t);
@@ -54,6 +56,7 @@ export function JoinLink({ slug, token, onAuthFailed }: Props) {
   const [expiryIdx, setExpiryIdx] = useState(0);
   const [usesIdx, setUsesIdx] = useState(0); // 默认单次
   const [copied, setCopied] = useState<string | null>(null);
+  const isOpen = active ?? open;
 
   const handleErr = useCallback(
     (e: unknown) => {
@@ -75,10 +78,11 @@ export function JoinLink({ slug, token, onAuthFailed }: Props) {
   }, [token, slug, handleErr]);
 
   const toggle = useCallback(() => {
-    const next = !open;
-    setOpen(next);
+    const next = !isOpen;
+    if (active === undefined) setOpen(next);
+    onActiveChange?.(next);
     if (next && links === null) void refresh();
-  }, [open, links, refresh]);
+  }, [active, isOpen, links, onActiveChange, refresh]);
 
   async function generate() {
     setBusy(true);
@@ -121,14 +125,14 @@ export function JoinLink({ slug, token, onAuthFailed }: Props) {
     }
   }
 
-  const active = (links ?? []).filter((l) => l.revoked_at === null && (l.expires_at === null || l.expires_at > Date.now()));
+  const activeLinks = (links ?? []).filter((l) => l.revoked_at === null && (l.expires_at === null || l.expires_at > Date.now()));
 
   return (
     <div className="joinlink">
-      <button type="button" className="d-btn joinlink-btn" onClick={toggle} aria-expanded={open}>
+      <button type="button" className="d-btn joinlink-btn" onClick={toggle} aria-expanded={isOpen}>
         {t("JoinLink.button")}
       </button>
-      {open && (
+      {isOpen && (
         <div className="joinlink-panel">
           <div className="joinlink-gen">
             <span className="joinlink-hint">{t("JoinLink.hint")}</span>
@@ -159,9 +163,9 @@ export function JoinLink({ slug, token, onAuthFailed }: Props) {
             </div>
           </div>
           {error !== null && <p className="joinlink-error">{error}</p>}
-          {active.length > 0 && (
+          {activeLinks.length > 0 && (
             <ul className="joinlink-list">
-              {active.map((l) => {
+              {activeLinks.map((l) => {
                 const url = linkUrl(l);
                 return (
                   <li key={l.code} className="joinlink-item">
@@ -184,7 +188,7 @@ export function JoinLink({ slug, token, onAuthFailed }: Props) {
               })}
             </ul>
           )}
-          {links !== null && active.length === 0 && <p className="joinlink-empty">{t("JoinLink.empty")}</p>}
+          {links !== null && activeLinks.length === 0 && <p className="joinlink-empty">{t("JoinLink.empty")}</p>}
         </div>
       )}
     </div>

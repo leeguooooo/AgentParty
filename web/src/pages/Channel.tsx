@@ -148,6 +148,7 @@ interface RoleDraft {
 }
 
 type ChannelPanel = "charter" | "roles" | "coordination" | "search";
+type AdminSurface = "agentJoin" | "agentTokens" | "joinLink";
 
 function roleDraftFrom(role: ChannelRoleInfo): RoleDraft {
   return { role: role.role, responsibility: role.responsibility ?? "" };
@@ -994,6 +995,7 @@ export function ChannelPage({
   const [roleError, setRoleError] = useState<string | null>(null);
   const [seenCharterRev, setSeenCharterRev] = useState(() => readSeenCharterRev(slug));
   const [activePanel, setActivePanel] = useState<ChannelPanel | null>(null);
+  const [activeAdminSurface, setActiveAdminSurface] = useState<AdminSurface | null>(null);
   // 可见性可在会话内切换（issue #38 web），本地 state 让顶栏徽章即时反映，无需重载
   const [localPublic, setLocalPublic] = useState(isPublic);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -1381,12 +1383,18 @@ export function ChannelPage({
   }, [lastSeq, seenKey]);
 
   const openPanel = useCallback((panel: ChannelPanel) => {
+    setActiveAdminSurface(null);
     if (panel === "charter" && charter !== null) {
       writeSeenCharterRev(slug, charter.charter_rev);
       setSeenCharterRev(charter.charter_rev);
     }
     setActivePanel(panel);
   }, [charter, slug]);
+
+  const setAdminSurface = useCallback((surface: AdminSurface, open: boolean) => {
+    setActivePanel(null);
+    setActiveAdminSurface(open ? surface : null);
+  }, []);
 
   const editCharter = useCallback(() => {
     setCharterEditing(true);
@@ -1929,6 +1937,8 @@ export function ChannelPage({
               inviterName={inviterName}
               charter={charter}
               accountKey={accountKey}
+              active={activeAdminSurface === "agentJoin"}
+              onActiveChange={(open) => setAdminSurface("agentJoin", open)}
             />
           )}
           {canMintAgent && accountKey !== null && (
@@ -1938,6 +1948,8 @@ export function ChannelPage({
               accountKey={accountKey}
               inviterName={inviterName}
               onAuthFailed={onAuthFailed}
+              active={activeAdminSurface === "agentTokens"}
+              onActiveChange={(open) => setAdminSurface("agentTokens", open)}
             />
           )}
           {canModerate && (
@@ -1949,7 +1961,15 @@ export function ChannelPage({
               onAuthFailed={onAuthFailed}
             />
           )}
-          {canModerate && <JoinLink slug={slug} token={token} onAuthFailed={onAuthFailed} />}
+          {canModerate && (
+            <JoinLink
+              slug={slug}
+              token={token}
+              onAuthFailed={onAuthFailed}
+              active={activeAdminSurface === "joinLink"}
+              onActiveChange={(open) => setAdminSurface("joinLink", open)}
+            />
+          )}
           {canModerate && (
             <button
               type="button"
