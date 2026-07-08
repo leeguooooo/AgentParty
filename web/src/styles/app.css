@@ -1916,6 +1916,13 @@
 .vis-badge--public { background: var(--d-yellow); color: var(--d-ink); }
 .vis-badge--private { background: var(--d-ink); color: var(--t-panel); }
 .vis-btn { font-size: 13px; }
+
+/* ---- 被@浏览器通知铃铛（Task C2） ---- */
+.chan-toolbar--notify { padding-bottom: 0; }
+.notify-toggle { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.notify-toggle-btn { font-size: 15px; line-height: 1; padding: 4px 9px; }
+.notify-toggle-btn.is-active { border-color: var(--d-yellow); background: var(--d-yellow); }
+.notify-toggle-hint { font-size: 12px; color: var(--t-dim); }
 .vis-confirm {
   display: flex;
   align-items: center;

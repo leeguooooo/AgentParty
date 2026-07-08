@@ -540,6 +540,7 @@ export function App() {
               agentNamePrefix={(me?.email ?? me?.name ?? slug).split("@")[0] ?? slug}
               accountKey={me?.email ?? me?.owner ?? me?.name ?? null}
               inviterName={me?.name ?? slug}
+              selfHandle={me?.handle ?? null}
               onAuthFailed={onAuthFailed}
             />
           ) : (

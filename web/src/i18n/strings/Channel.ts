@@ -48,6 +48,11 @@ export const ChannelStrings: LocaleDict = {
     "Channel.revise.retract.confirm": "Retract message #{seq}?",
     "Channel.revise.retract.forbidden": "only the sender or a moderator can retract this message",
     "Channel.revise.retract.failed": "message retract failed",
+    "Channel.notify.title": "You were @mentioned in #{channel}",
+    "Channel.notify.onTitle": "Mention notifications on — click to turn off",
+    "Channel.notify.offTitle": "Get a browser notification when you're @mentioned (while this tab isn't focused)",
+    "Channel.notify.denied": "Browser blocked notification permission",
+    "Channel.notify.unsupported": "This browser doesn't support notifications",
   },
   zh: {
     "Channel.charter.label": "📌 公告",
@@ -96,6 +101,11 @@ export const ChannelStrings: LocaleDict = {
     "Channel.revise.retract.confirm": "撤回消息 #{seq}？",
     "Channel.revise.retract.forbidden": "只有发送者或 moderator 可以撤回这条消息",
     "Channel.revise.retract.failed": "消息撤回失败",
+    "Channel.notify.title": "有人在 #{channel} @了你",
+    "Channel.notify.onTitle": "被@提醒已开启，点击关闭",
+    "Channel.notify.offTitle": "开启被@浏览器提醒（仅在标签页未聚焦时弹出）",
+    "Channel.notify.denied": "浏览器已拒绝通知权限",
+    "Channel.notify.unsupported": "此浏览器不支持通知",
   },
 };
 
