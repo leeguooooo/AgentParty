@@ -36,6 +36,7 @@ interface Item {
   lineage: NonNullable<PresenceEntry["lineage"]> | null;
   workflow: NonNullable<NonNullable<PresenceEntry["status"]>["workflow"]> | null;
   owner: string | null; // 所属人：agent 的操作者 / 人类的 email，仅连接中的参与者可知
+  handle: string | null; // 人类全局昵称，仅人类且已设置时有值；agent 恒为 null，天然回退 owner/name
   display: string;
   responsibility: string | null;
   connectionCount: number;
@@ -107,6 +108,8 @@ function ownerKey(item: Item): string {
 }
 
 function ownerLabel(item: Item): string {
+  // 显示优先级：handle > owner/account（email）> 原始 name。agent 恒无 handle，不受影响。
+  if (item.handle !== null && item.handle !== "") return item.handle;
   if (item.owner !== null && item.owner !== "") return item.owner;
   return item.name;
 }
@@ -144,6 +147,8 @@ export function PresenceBar({
     const sender = byName.get(name);
     const assigned = roleByName.get(name);
     const owner = sender?.owner ?? entry?.account ?? assigned?.account ?? null;
+    // 人类全局昵称：仅人类且已设置时有值，agent 恒为 null（协议层保证）。
+    const handle = sender?.handle ?? entry?.handle ?? null;
     const kind = sender?.kind ?? entry?.kind ?? assigned?.kind ?? "agent";
     const connected = byName.has(name);
     const meta = {
@@ -156,17 +161,19 @@ export function PresenceBar({
       context: entry?.context ?? null,
       lineage: entry?.lineage ?? sender?.lineage ?? null,
       workflow: entry?.status?.workflow ?? null,
-      display: assigned?.display ?? (kind === "human" && owner !== null ? owner : name),
+      display: assigned?.display ?? handle ?? (kind === "human" && owner !== null ? owner : name),
       responsibility: assigned?.responsibility ?? null,
       connectionCount: sender?.connection_count ?? entry?.connection_count ?? (connected ? 1 : 0),
     };
     if (!connected) {
-      return { name, kind, state: "offline", note: null, ts: entry?.ts ?? null, owner: null, ...meta };
+      // owner 本就仅连接中的参与者可知（见上方字段注释）；handle 依赖同一份可信度，一并置空，
+      // 避免"显示 handle 但锚点缺失"的半可信状态——离线态照旧回退原始 name，行为与改动前一致。
+      return { name, kind, state: "offline", note: null, ts: entry?.ts ?? null, owner: null, handle: null, ...meta };
     }
     if (entry && entry.state !== "offline") {
-      return { name, kind, state: entry.state, note: entry.note, ts: entry.ts, owner, ...meta };
+      return { name, kind, state: entry.state, note: entry.note, ts: entry.ts, owner, handle, ...meta };
     }
-    return { name, kind, state: "online", note: null, ts: entry?.ts ?? null, owner, ...meta };
+    return { name, kind, state: "online", note: null, ts: entry?.ts ?? null, owner, handle, ...meta };
   });
   const groupMap = new Map<string, PresenceGroup>();
   for (const item of items) {
@@ -185,6 +192,12 @@ export function PresenceBar({
     if (item.kind === "human" && group.human === null) group.human = item;
     else group.agents.push(item);
     groupMap.set(key, group);
+  }
+  // label 初值取自分组时第一个遇到的成员，但 handle 只可能来自人类成员——
+  // 若同一账号下 agent 先于人类出现在 names 排序里，初值会漏掉 handle。
+  // 分组结束后统一用「人类优先」的 representative 重算，和 renderGroup 里的口径保持一致、且与遍历顺序无关。
+  for (const group of groupMap.values()) {
+    group.label = ownerLabel(group.human ?? group.items[0]!);
   }
   const sortedGroups = [...groupMap.values()].sort((a, b) => {
     const rank = groupRank(a, now) - groupRank(b, now);
@@ -205,6 +218,7 @@ export function PresenceBar({
     const full = mode === "full";
     const titleParts = [
       it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name,
+      it.handle !== null && it.handle !== "" ? `handle: ${it.handle}` : null,
       it.role !== null ? `role: ${it.role}` : null,
       it.responsibility !== null && it.responsibility !== "" ? `responsibility: ${it.responsibility}` : null,
       it.roleSource !== null ? `role source: ${it.roleSource}` : null,
@@ -303,6 +317,8 @@ export function PresenceBar({
     const hiddenAgents = group.agents.length - previewAgents.length;
     const title = [
       group.label,
+      // group.label 优先显示 handle 时，account/email 锚点在这里补回来，保证底层身份始终可查。
+      representative.owner !== null && representative.owner !== group.label ? `account: ${representative.owner}` : null,
       `${live}/${group.items.length} live`,
       duplicateSessions > 0 ? `${duplicateSessions} extra live session${duplicateSessions === 1 ? "" : "s"}` : null,
       group.human !== null ? `human: ${group.human.name}` : null,
