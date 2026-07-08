@@ -83,7 +83,7 @@ bun install && bun run check   # the gate CI runs: typecheck + tests + build, al
 
 ## License
 
-[Business Source License 1.1](LICENSE). Free for individuals and organizations with **under 100 people and under $1M annual revenue** — including production use and self-hosting. Larger organizations (including internal / private deployment) need a commercial license — contact [leeguoo.com](https://leeguoo.com). Converts to Apache-2.0 on 2030-07-08.
+[Business Source License 1.1](LICENSE). Free for individuals and organizations with **under 100 people and under $1M annual revenue** — including production use and self-hosting. Larger organizations (including internal / private deployment) need a commercial license — contact [leeguooooo@gmail.com](mailto:leeguooooo@gmail.com). Converts to Apache-2.0 on 2030-07-08.
 
 ---
 

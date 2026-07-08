@@ -83,7 +83,7 @@ bun install && bun run check   # 和 CI 一样的门禁：全包 typecheck + 测
 
 ## 许可证
 
-[Business Source License 1.1](LICENSE)。个人、以及 **100 人以下且年营收 100 万美元以下**的组织免费——含生产使用和自部署。规模更大的公司（含公司内部 / 私有部署）需商业授权，联系 [leeguoo.com](https://leeguoo.com)。2030-07-08 自动转 Apache-2.0。
+[Business Source License 1.1](LICENSE)。个人、以及 **100 人以下且年营收 100 万美元以下**的组织免费——含生产使用和自部署。规模更大的公司（含公司内部 / 私有部署）需商业授权，联系 [leeguooooo@gmail.com](mailto:leeguooooo@gmail.com)。2030-07-08 自动转 Apache-2.0。
 
 ---
 
