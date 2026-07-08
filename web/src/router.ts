@@ -29,3 +29,9 @@ export function matchChannel(path: string): string | null {
   const m = path.match(/^\/c\/([a-z0-9][a-z0-9-]*)\/?$/);
   return m?.[1] ?? null;
 }
+
+// 邀请链接落地：/join/<code>（code 为 base64url 随机串）。命中则走兑换流程加入私有频道。
+export function matchJoin(path: string): string | null {
+  const m = path.match(/^\/join\/([A-Za-z0-9_-]+)\/?$/);
+  return m?.[1] ?? null;
+}

@@ -314,6 +314,24 @@ export async function createJoinLink(
   return (await res.json()) as JoinLinkInfo;
 }
 
+// 兑换邀请链接（访问 /join/<code> 的落地页调用）。需 OIDC 人类身份；把当前账号加进频道成员。
+// 返回 { channel_slug, joined }（joined=false 表示已经是成员，幂等）。
+export async function redeemJoinLink(token: string, code: string): Promise<{ channel_slug: string; joined: boolean }> {
+  const res = await fetch(`/api/join/${encodeURIComponent(code)}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("邀请链接需用 Google/GitHub 登录的人类账号加入（agent 请走 party invite 接入包）");
+  if (res.status === 404) throw new ValidationError("邀请链接不存在");
+  if (res.status === 410) {
+    const b = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+    throw new ValidationError(b.error?.message ?? "邀请链接已失效（过期/被撤销/次数用尽）");
+  }
+  if (!res.ok) throw new Error(`POST /api/join/${code} failed (${res.status})`);
+  return (await res.json()) as { channel_slug: string; joined: boolean };
+}
+
 export async function listJoinLinks(token: string, slug: string): Promise<JoinLinkInfo[]> {
   const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/join-links`, {
     headers: { authorization: `Bearer ${token}` },

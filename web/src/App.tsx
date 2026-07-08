@@ -14,6 +14,7 @@ import {
   isShareMode,
   listChannels,
   readSession,
+  redeemJoinLink,
   saveSession,
   saveToken,
   storedToken,
@@ -30,7 +31,10 @@ import {
 } from "./lib/oidc";
 import { ChannelPage } from "./pages/Channel";
 import { Home } from "./pages/Home";
-import { matchChannel, useRoute } from "./router";
+import { matchChannel, matchJoin, useRoute } from "./router";
+
+// 邀请链接兑换：未登录时跳 OIDC 会离开页面，用 sessionStorage 把 code 带过登录、回来接着兑换。
+const PENDING_JOIN_KEY = "ap_pending_join";
 
 function meTitle(me: MeInfo): string {
   const parts = [`token: ${me.name}`, `kind: ${me.kind}`, `role: ${me.role}`];
@@ -48,6 +52,8 @@ export function App() {
   const [listError, setListError] = useState<string | null>(null);
   const [me, setMe] = useState<MeInfo | null>(null);
   const [oidc, setOidc] = useState<OidcConfig | null>(null);
+  // 邀请链接落地页状态（/join/<code>）：正在加入 / 失败
+  const [joinStatus, setJoinStatus] = useState<{ phase: "joining" | "error"; message?: string } | null>(null);
   // 命中 /auth/callback 时先挂起，避免闪一下登录闸；换 token 成功/失败后落定
   const [oidcPending, setOidcPending] = useState<boolean>(() => isCallbackPath());
 
@@ -145,7 +151,9 @@ export function App() {
           setListError(null);
           setToken(sess.accessToken);
           setOidcPending(false);
-          replace("/");
+          // 若登录前是去兑换邀请链接，回到 /join/<code> 让下面的 effect（此时已有 token）完成加入
+          const pendingJoin = sessionStorage.getItem(PENDING_JOIN_KEY);
+          replace(pendingJoin ? `/join/${pendingJoin}` : "/");
         })
         .catch((err: unknown) => {
           if (!alive) return;
@@ -158,6 +166,44 @@ export function App() {
       alive = false;
     };
   }, [replace]);
+
+  // 邀请链接落地：访问 /join/<code> 时——已登录则直接兑换（加入频道→跳进去）；未登录则存下 code
+  // 并跳 OIDC 登录，回来后 callback 会重新落到 /join/<code>、此时有 token 走兑换分支。
+  const joinCode = matchJoin(path);
+  useEffect(() => {
+    if (joinCode === null) return;
+    if (token !== null) {
+      sessionStorage.removeItem(PENDING_JOIN_KEY);
+      setJoinStatus({ phase: "joining" });
+      let alive = true;
+      redeemJoinLink(token, joinCode)
+        .then(async (r) => {
+          if (!alive) return;
+          // 新加入的频道要重新拉列表才在侧栏/路由里认得（否则跳进去会「not available」）。
+          // 显式等这次拉取完成再跳，别依赖 setChannels(null) 触发——那样有竞态。
+          try {
+            const next = await listChannels(token);
+            if (alive) setChannels(next);
+          } catch {
+            // 列表拉取失败不阻塞跳转，频道页自己还会重试
+          }
+          if (!alive) return;
+          setJoinStatus(null);
+          replace(`/c/${r.channel_slug}`);
+        })
+        .catch((e: unknown) => {
+          if (alive) setJoinStatus({ phase: "error", message: e instanceof Error ? e.message : "加入失败" });
+        });
+      return () => {
+        alive = false;
+      };
+    }
+    // 未登录：存 code 跨登录重定向，跳 OIDC
+    if (oidc !== null && !oidcPending) {
+      sessionStorage.setItem(PENDING_JOIN_KEY, joinCode);
+      beginLogin(oidc).catch(() => setJoinStatus({ phase: "error", message: "无法开始登录" }));
+    }
+  }, [joinCode, token, oidc, oidcPending, replace]);
 
   // 登录身份：topbar 显示 token name/kind/role；readonly 分享链接 401 由页面其它路径接管，这里静默
   useEffect(() => {
@@ -258,6 +304,31 @@ export function App() {
         <p className="banner" role="status" aria-live="polite">
           signing you in...
         </p>
+      </main>
+    );
+  }
+
+  // 邀请链接落地页：兑换进行中 / 失败（未登录时 effect 已在跳 OIDC，这里显示「正在加入」）
+  if (joinCode !== null) {
+    return (
+      <main className="gate">
+        <h1 className="d-title gate-title">
+          Agent<span className="d-hl">Party</span>
+        </h1>
+        {joinStatus?.phase === "error" ? (
+          <>
+            <p className="banner banner--red" role="alert">
+              {joinStatus.message ?? "加入失败"}
+            </p>
+            <button type="button" className="d-btn" onClick={() => replace("/")}>
+              返回首页
+            </button>
+          </>
+        ) : (
+          <p className="banner" role="status" aria-live="polite">
+            正在加入频道…
+          </p>
+        )}
       </main>
     );
   }
