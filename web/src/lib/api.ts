@@ -341,6 +341,30 @@ export async function fetchWakeDeliveries(
   return data.deliveries;
 }
 
+// 消息右键菜单（PR #49）：编辑/撤回走 REST POST /messages/:seq/:action，权限沿用后端 sender||moderator。
+export async function reviseMessage(
+  slug: string,
+  seq: number,
+  action: "edit" | "retract",
+  body?: { body: string; mentions?: string[] },
+): Promise<{ message: MsgFrame }> {
+  const token = getToken();
+  if (token === null) throw new AuthError("missing token");
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/messages/${encodeURIComponent(String(seq))}/${action}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(action === "edit" ? { "content-type": "application/json" } : {}),
+    },
+    body: action === "edit" ? JSON.stringify(body ?? {}) : undefined,
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 400) throw new ValidationError("invalid message revision");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/messages/${seq}/${action} failed (${res.status})`);
+  return (await res.json()) as { message: MsgFrame };
+}
+
 export async function fetchChannelCharter(token: string, slug: string): Promise<ChannelCharter> {
   const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/charter`, {
     headers: { authorization: `Bearer ${token}` },

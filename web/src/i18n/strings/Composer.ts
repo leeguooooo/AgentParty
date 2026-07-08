@@ -11,6 +11,10 @@ export const ComposerStrings: LocaleDict = {
     "Composer.role": "role: {role}",
     "Composer.responsibility": "responsibility: {responsibility}",
     "Composer.note": "note: {note}",
+    "Composer.placeholder": "chime in… markdown ok · @name to mention · ⏎ send · ⇧⏎ newline · ⌘⏎ send",
+    "Composer.send.label": "send",
+    "Composer.send.readyTitle": "send (⏎ / ⌘⏎)",
+    "Composer.send.connectingTitle": "connecting…",
   },
   zh: {
     "Composer.tier.online": "在线",
@@ -22,6 +26,10 @@ export const ComposerStrings: LocaleDict = {
     "Composer.role": "职责: {role}",
     "Composer.responsibility": "分工: {responsibility}",
     "Composer.note": "说明: {note}",
+    "Composer.placeholder": "插句话… 支持 markdown · @name 提及 · ⏎ 发送 · ⇧⏎ 换行 · ⌘⏎ 发送",
+    "Composer.send.label": "发送",
+    "Composer.send.readyTitle": "发送（⏎ / ⌘⏎）",
+    "Composer.send.connectingTitle": "连接中…",
   },
 };
 

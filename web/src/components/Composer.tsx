@@ -32,6 +32,17 @@ const REACH_TIER: Record<MentionTier, "online" | "wakeable" | "offline"> = {
   recent: "offline",
 };
 
+interface MentionMenuState {
+  start: number;
+  query: string;
+  items: MentionCandidate[];
+  active: number;
+}
+
+function sameCandidateNames(prev: MentionCandidate[], next: MentionCandidate[]): boolean {
+  return prev.length === next.length && prev.every((item, index) => item.name === next[index]?.name);
+}
+
 export function Composer({ draft, setDraft, onSend, ready, candidates, mentionStatuses }: Props) {
   const t = useT();
   const TIER_LABEL: Record<MentionTier, string> = {
@@ -46,7 +57,7 @@ export function Composer({ draft, setDraft, onSend, ready, candidates, mentionSt
     return t("WakeReceipt.pre.offline");
   };
   const taRef = useRef<HTMLTextAreaElement | null>(null);
-  const [menu, setMenu] = useState<{ start: number; items: MentionCandidate[]; active: number } | null>(null);
+  const [menu, setMenu] = useState<MentionMenuState | null>(null);
 
   // 光标处是否在打 @<prefix> → 算候选菜单
   const recompute = useCallback(
@@ -57,7 +68,13 @@ export function Composer({ draft, setDraft, onSend, ready, candidates, mentionSt
         return;
       }
       const items = filterCandidates(candidates, q.query);
-      setMenu(items.length > 0 ? { start: q.start, items, active: 0 } : null);
+      setMenu((prev) => {
+        if (items.length === 0) return null;
+        if (prev !== null && prev.start === q.start && prev.query === q.query && sameCandidateNames(prev.items, items)) {
+          return { start: q.start, query: q.query, items, active: Math.min(prev.active, items.length - 1) };
+        }
+        return { start: q.start, query: q.query, items, active: 0 };
+      });
     },
     [candidates],
   );
@@ -92,12 +109,12 @@ export function Composer({ draft, setDraft, onSend, ready, candidates, mentionSt
     if (menu !== null) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setMenu({ ...menu, active: (menu.active + 1) % menu.items.length });
+        setMenu((prev) => (prev === null ? prev : { ...prev, active: (prev.active + 1) % prev.items.length }));
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setMenu({ ...menu, active: (menu.active - 1 + menu.items.length) % menu.items.length });
+        setMenu((prev) => (prev === null ? prev : { ...prev, active: (prev.active - 1 + prev.items.length) % prev.items.length }));
         return;
       }
       if (e.key === "Enter" || e.key === "Tab") {
@@ -112,6 +129,12 @@ export function Composer({ draft, setDraft, onSend, ready, candidates, mentionSt
       }
     }
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      onSend();
+      return;
+    }
+    // 单独 Enter 发送，但要放过输入法合成中的 Enter（中文/日文候选词确认），否则会误发半成品
+    if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       onSend();
     }
@@ -189,7 +212,7 @@ export function Composer({ draft, setDraft, onSend, ready, candidates, mentionSt
         ref={taRef}
         className="composer-input t-mono"
         rows={3}
-        placeholder="chime in… markdown ok · @name to mention · ⌘⏎ to send"
+        placeholder={t("Composer.placeholder")}
         value={draft}
         onChange={onChange}
         onKeyUp={onKeyUp}
@@ -202,9 +225,9 @@ export function Composer({ draft, setDraft, onSend, ready, candidates, mentionSt
         className="d-btn d-btn--primary composer-send"
         onClick={onSend}
         disabled={!ready || draft.trim() === ""}
-        title={ready ? "send (⌘⏎)" : "connecting…"}
+        title={ready ? t("Composer.send.readyTitle") : t("Composer.send.connectingTitle")}
       >
-        send
+        {t("Composer.send.label")}
       </button>
     </div>
   );

@@ -1525,7 +1525,10 @@
 .msg-card--own { background: var(--t-panel2); }
 /* per-agent 颜色：--ah（sender 名哈希出的色相 0–359）由 MessageCard 注入。
    左侧 inset 色条叠在原偏移投影上，一眼分辨谁在说话，不动手绘 ::before 边框。 */
-.msg-card { box-shadow: inset 4px 0 0 hsl(var(--ah, 220) 58% var(--agent-l-soft)), 5px 6px 0 var(--d-shadow); }
+.msg-card {
+  position: relative;
+  box-shadow: inset 4px 0 0 hsl(var(--ah, 220) 58% var(--agent-l-soft)), 5px 6px 0 var(--d-shadow);
+}
 .msg-head { flex-wrap: wrap; margin-bottom: 2px; }
 .msg-avatar {
   flex: none;
@@ -1652,6 +1655,81 @@
   background: color-mix(in srgb, var(--p-blocked) 10%, var(--t-panel));
 }
 .msg-fill { flex: 1; }
+.msg-copy-feedback {
+  font-size: 11px;
+  color: var(--t-dim);
+}
+.msg-menu-trigger {
+  opacity: 0;
+  padding: 1px 10px 3px;
+  line-height: 1;
+  font-size: 18px;
+  transition: opacity 120ms ease;
+}
+.msg-card:hover .msg-menu-trigger,
+.msg-card:focus-within .msg-menu-trigger,
+.msg-menu-trigger[aria-expanded="true"] {
+  opacity: 1;
+}
+.msg-menu {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  min-width: 156px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--t-panel);
+  border: 2.5px solid var(--d-ink);
+  border-radius: 12px 8px 13px 7px / 8px 12px 7px 11px;
+  box-shadow: 4px 5px 0 var(--d-shadow);
+}
+.msg-menu-item {
+  width: 100%;
+  padding: 7px 10px;
+  text-align: left;
+  font: inherit;
+  color: var(--t-text);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.msg-menu-item:hover,
+.msg-menu-item:focus-visible {
+  outline: none;
+  background: var(--t-panel2);
+}
+.msg-menu-item--danger { color: var(--d-red, #c0392b); }
+.msg-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.msg-edit-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 104px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--t-body);
+  background: var(--t-panel);
+  border: 2px solid var(--d-ink);
+  border-radius: 10px 7px 12px 6px / 7px 11px 6px 10px;
+}
+.msg-edit-input:focus {
+  outline: none;
+  border-color: var(--t-accent);
+}
+.msg-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.msg-action-error { margin-top: 0; }
 .msg-retracted {
   margin: 8px 0 4px;
   color: var(--t-dim);
@@ -1981,6 +2059,25 @@
 .banner--yellow { background: #fff3c4; }
 .banner--gray { background: #f0efe6; color: var(--t-muted); }
 .banner--red { background: var(--d-red-soft); }
+.reply-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 2px solid var(--d-ink);
+  border-radius: 12px 7px 13px 6px / 7px 12px 6px 13px;
+  box-shadow: 3px 4px 0 var(--d-shadow);
+  background: color-mix(in srgb, var(--d-blue-soft) 82%, var(--t-panel));
+}
+.reply-banner-text {
+  min-width: 0;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reply-banner-dismiss { flex: none; font-size: 12px; }
 .guard-banner {
   display: flex;
   align-items: center;
@@ -1995,6 +2092,9 @@
 }
 
 @media (max-width: 760px) {
+  .reply-banner { align-items: stretch; flex-direction: column; }
+  .reply-banner-dismiss { align-self: flex-start; }
+  .msg-menu-trigger { opacity: 1; }
   .guard-banner { align-items: stretch; flex-direction: column; }
   .guard-reset { align-self: flex-start; }
   .catchup-head { align-items: stretch; flex-direction: column; }

@@ -26,6 +26,7 @@ import {
   fetchWakeDeliveries,
   kickParticipant,
   resetGuard,
+  reviseMessage,
   searchMessages,
   setChannelCharter,
   setChannelRole,
@@ -77,6 +78,12 @@ const MESSAGE_CAP = 300;
 const COLLAB_ROLES: CollaborationRole[] = ["host", "worker", "reviewer", "observer"];
 // 触顶阈值：滚动到离顶部这么近就预取上一页
 const TOP_LOAD_PX = 80;
+
+function summarizeReplyPreview(body: string): string {
+  const collapsed = body.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= 96) return collapsed;
+  return `${collapsed.slice(0, 93)}...`;
+}
 
 function positiveInt(value: string, fallback: number, max: number): number | null {
   if (value.trim() === "") return fallback;
@@ -701,6 +708,18 @@ function TeamThread({
   receiptsBySeq,
   readCursors,
   participants,
+  canModerate,
+  editingSeq,
+  editDraft,
+  editSaving,
+  actionError,
+  busySeq,
+  onReply,
+  onEdit,
+  onRetract,
+  onEditDraftChange,
+  onEditCancel,
+  onEditSave,
 }: {
   thread: TeamMessageThread;
   self: string | null;
@@ -708,6 +727,18 @@ function TeamThread({
   receiptsBySeq: Map<number, MentionReceipt[]>;
   readCursors: Record<string, ReadCursor>;
   participants: Sender[];
+  canModerate: boolean;
+  editingSeq: number | null;
+  editDraft: string;
+  editSaving: boolean;
+  actionError: { seq: number; message: string } | null;
+  busySeq: number | null;
+  onReply: (seq: number) => void;
+  onEdit: (seq: number) => void;
+  onRetract: (seq: number) => void;
+  onEditDraftChange: (value: string) => void;
+  onEditCancel: () => void;
+  onEditSave: () => void;
 }) {
   const parentLabel =
     thread.parentAgents.length === 1 ? `parent ${thread.parentAgents[0]}` : `${thread.parentAgents.length} parents`;
@@ -733,7 +764,27 @@ function TeamThread({
       </summary>
       <div className="team-thread-messages">
         {thread.messages.map((message) => (
-          <MessageCard key={message.seq} msg={message} self={self} identityDisplay={identityDisplay} receipts={receiptsBySeq.get(message.seq)} readCursors={readCursors} participants={participants} />
+          <MessageCard
+            key={message.seq}
+            msg={message}
+            self={self}
+            identityDisplay={identityDisplay}
+            receipts={receiptsBySeq.get(message.seq)}
+            readCursors={readCursors}
+            participants={participants}
+            canModerate={canModerate}
+            onReply={onReply}
+            onEdit={onEdit}
+            onRetract={onRetract}
+            editing={editingSeq === message.seq}
+            editDraft={editingSeq === message.seq ? editDraft : message.body}
+            editSaving={editSaving && editingSeq === message.seq}
+            actionError={actionError?.seq === message.seq ? actionError.message : null}
+            busy={busySeq === message.seq}
+            onEditDraftChange={onEditDraftChange}
+            onEditCancel={onEditCancel}
+            onEditSave={onEditSave}
+          />
         ))}
       </div>
     </details>
@@ -792,9 +843,15 @@ export function ChannelPage({
   const [teamNow, setTeamNow] = useState(() => Date.now());
   const [completionOnly, setCompletionOnly] = useState(false);
   const [agentFilter, setAgentFilter] = useState<AgentFilter>(() => parseAgentFilter(window.location.search));
+  const [replyTo, setReplyTo] = useState<number | null>(null);
+  const [editingSeq, setEditingSeq] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+  const [messageActionError, setMessageActionError] = useState<{ seq: number; message: string } | null>(null);
+  const [messageActionBusySeq, setMessageActionBusySeq] = useState<number | null>(null);
   const sockRef = useRef<ChannelSocket | null>(null);
   const streamRef = useRef<HTMLDivElement | null>(null);
-  const pendingDraftsRef = useRef<string[]>([]);
+  const pendingSendsRef = useRef<Array<{ draft: string; replyTo: number | null }>>([]);
   const stickBottom = useRef(true);
   const authFailedRef = useRef(onAuthFailed);
   authFailedRef.current = onAuthFailed;
@@ -1086,9 +1143,10 @@ export function ChannelPage({
   // 服务端 sent 确认后才清对应草稿；用户已输入的新内容不能被旧 ack 清掉。
   useEffect(() => {
     if (state.lastSentSeq <= 0) return;
-    const submitted = pendingDraftsRef.current.shift();
+    const submitted = pendingSendsRef.current.shift();
     if (submitted === undefined) return;
-    setDraft((current) => (current === submitted ? "" : current));
+    setDraft((current) => (current === submitted.draft ? "" : current));
+    setReplyTo((current) => (current === submitted.replyTo ? null : current));
   }, [state.lastSentSeq]);
 
   const send = useCallback(() => {
@@ -1096,12 +1154,12 @@ export function ChannelPage({
     if (body === "") return;
     const mentions = [...new Set([...body.matchAll(MENTION_RE)].map((m) => m[1]!))];
     const ok =
-      sockRef.current?.send({ type: "send", kind: "message", body, mentions, reply_to: null }) ??
+      sockRef.current?.send({ type: "send", kind: "message", body, mentions, reply_to: replyTo }) ??
       false;
     // ⌘⏎ 不受按钮 disabled 门控，断线窗口内发送失败要内联提示（草稿保留）
-    if (ok) pendingDraftsRef.current.push(draft);
+    if (ok) pendingSendsRef.current.push({ draft, replyTo });
     else dispatch({ type: "send_failed", message: "not connected — message not sent, draft kept" });
-  }, [draft]);
+  }, [draft, replyTo]);
 
   const canWrite = state.self !== null && !state.archived && !state.readonly;
   const charterUpdated = charter !== null && charter.charter_rev > seenCharterRev;
@@ -1229,6 +1287,105 @@ export function ChannelPage({
       })
       .finally(() => setRoleSaving(null));
   }, [roleSaving, slug, token, t]);
+
+  const replyMessage = useMemo(
+    () => (replyTo === null ? null : state.messages.find((message) => message.seq === replyTo) ?? null),
+    [replyTo, state.messages],
+  );
+  const editingMessage = useMemo(
+    () => (editingSeq === null ? null : state.messages.find((message) => message.seq === editingSeq) ?? null),
+    [editingSeq, state.messages],
+  );
+  const replyPreview =
+    replyMessage === null
+      ? t("Channel.reply.unavailable")
+      : replyMessage.retracted
+        ? t("Channel.reply.retracted")
+        : summarizeReplyPreview(replyMessage.body);
+
+  useEffect(() => {
+    if (editingSeq === null) return;
+    if (editingMessage !== null && editingMessage.kind === "message" && !editingMessage.retracted) return;
+    setEditingSeq(null);
+    setEditDraft("");
+    setEditSaving(false);
+    setMessageActionError((current) => (current?.seq === editingSeq ? null : current));
+  }, [editingMessage, editingSeq]);
+
+  const startReply = useCallback((seq: number) => {
+    setReplyTo(seq);
+    setMessageActionError((current) => (current?.seq === seq ? null : current));
+  }, []);
+
+  const cancelReply = useCallback(() => {
+    setReplyTo(null);
+  }, []);
+
+  const startEdit = useCallback((seq: number) => {
+    const target = state.messages.find((message) => message.seq === seq);
+    if (target === undefined || target.kind !== "message" || target.retracted) return;
+    setEditingSeq(seq);
+    setEditDraft(target.body);
+    setMessageActionError(null);
+  }, [state.messages]);
+
+  const cancelEdit = useCallback(() => {
+    setEditingSeq(null);
+    setEditDraft("");
+    setEditSaving(false);
+    setMessageActionError(null);
+  }, []);
+
+  const saveEdit = useCallback(() => {
+    if (editingSeq === null || editSaving || editingMessage === null || editingMessage.kind !== "message") return;
+    if (editDraft.trim() === "" || editDraft === editingMessage.body) return;
+    setEditSaving(true);
+    setMessageActionBusySeq(editingSeq);
+    setMessageActionError(null);
+    const mentions = [...new Set([...editDraft.matchAll(MENTION_RE)].map((match) => match[1]!))];
+    reviseMessage(slug, editingSeq, "edit", { body: editDraft, mentions })
+      .then(({ message }) => {
+        dispatch({ type: "frame", frame: message });
+        setEditingSeq(null);
+        setEditDraft("");
+        setMessageActionError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setMessageActionError({ seq: editingSeq, message: t("Channel.revise.edit.forbidden") });
+        else if (err instanceof ValidationError) setMessageActionError({ seq: editingSeq, message: t("Channel.revise.edit.invalid") });
+        else setMessageActionError({ seq: editingSeq, message: t("Channel.revise.edit.failed") });
+      })
+      .finally(() => {
+        setEditSaving(false);
+        setMessageActionBusySeq((current) => (current === editingSeq ? null : current));
+      });
+  }, [editDraft, editSaving, editingMessage, editingSeq, slug, t]);
+
+  const retractMessage = useCallback((seq: number) => {
+    if (messageActionBusySeq !== null) return;
+    if (!window.confirm(t("Channel.revise.retract.confirm", { seq }))) return;
+    setMessageActionBusySeq(seq);
+    setMessageActionError(null);
+    reviseMessage(slug, seq, "retract")
+      .then(({ message }) => {
+        dispatch({ type: "frame", frame: message });
+        if (editingSeq === seq) {
+          setEditingSeq(null);
+          setEditDraft("");
+          setEditSaving(false);
+        }
+        setReplyTo((current) => (current === seq ? null : current));
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setMessageActionError({ seq, message: t("Channel.revise.retract.forbidden") });
+        else setMessageActionError({ seq, message: t("Channel.revise.retract.failed") });
+      })
+      .finally(() => {
+        setMessageActionBusySeq((current) => (current === seq ? null : current));
+      });
+  }, [editingSeq, messageActionBusySeq, slug, t]);
 
   const q = search.trim();
   const from = searchFrom.trim();
@@ -1620,7 +1777,27 @@ export function ChannelPage({
         {q === ""
           ? visibleTimeline.map((item) =>
               item.type === "message" ? (
-                <MessageCard key={item.message.seq} msg={item.message} self={state.self} identityDisplay={identityDisplay} receipts={receiptsBySeq.get(item.message.seq)} readCursors={state.readCursors} participants={state.participants} />
+                <MessageCard
+                  key={item.message.seq}
+                  msg={item.message}
+                  self={state.self}
+                  identityDisplay={identityDisplay}
+                  receipts={receiptsBySeq.get(item.message.seq)}
+                  readCursors={state.readCursors}
+                  participants={state.participants}
+                  canModerate={canModerate}
+                  onReply={startReply}
+                  onEdit={startEdit}
+                  onRetract={retractMessage}
+                  editing={editingSeq === item.message.seq}
+                  editDraft={editingSeq === item.message.seq ? editDraft : item.message.body}
+                  editSaving={editSaving && editingSeq === item.message.seq}
+                  actionError={messageActionError?.seq === item.message.seq ? messageActionError.message : null}
+                  busy={messageActionBusySeq === item.message.seq}
+                  onEditDraftChange={setEditDraft}
+                  onEditCancel={cancelEdit}
+                  onEditSave={saveEdit}
+                />
               ) : (
                 <TeamThread
                   key={item.key + `:${item.firstSeq}-${item.lastSeq}`}
@@ -1630,6 +1807,18 @@ export function ChannelPage({
                   receiptsBySeq={receiptsBySeq}
                   readCursors={state.readCursors}
                   participants={state.participants}
+                  canModerate={canModerate}
+                  editingSeq={editingSeq}
+                  editDraft={editDraft}
+                  editSaving={editSaving}
+                  actionError={messageActionError}
+                  busySeq={messageActionBusySeq}
+                  onReply={startReply}
+                  onEdit={startEdit}
+                  onRetract={retractMessage}
+                  onEditDraftChange={setEditDraft}
+                  onEditCancel={cancelEdit}
+                  onEditSave={saveEdit}
                 />
               ),
             )
@@ -1702,6 +1891,14 @@ export function ChannelPage({
         <p className="banner banner--red" role="alert">
           {state.sendError}
         </p>
+      )}
+      {canWrite && replyTo !== null && (
+        <div className="reply-banner">
+          <span className="reply-banner-text">{t("Channel.reply.label", { seq: replyTo, preview: replyPreview })}</span>
+          <button type="button" className="d-btn reply-banner-dismiss" onClick={cancelReply}>
+            {t("Channel.reply.cancel")}
+          </button>
+        </div>
       )}
       {canWrite && (
         <Composer
