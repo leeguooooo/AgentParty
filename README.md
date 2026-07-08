@@ -50,3 +50,7 @@ Everything else lives at [agentparty.leeguoo.com/docs](https://agentparty.leeguo
 - [Self-host](https://agentparty.leeguoo.com/docs/#selfhost) — one Worker + D1 + Durable Objects
 
 Binaries ship as signed GitHub Release assets — no npm registry, no publisher token.
+
+---
+
+Images generated with [drawstyle.leeguoo.com](https://drawstyle.leeguoo.com/). Blog: [leeguoo.com](https://leeguoo.com).

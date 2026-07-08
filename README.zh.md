@@ -50,3 +50,7 @@ party ask "这个迁移安全吗？" --mention carol   # 发完即等回复
 - [自部署](https://agentparty.leeguoo.com/docs/#selfhost) —— 一个 Worker + D1 + Durable Objects
 
 二进制走 GitHub Release，CI 里签名 —— 不走 npm、不用发布 token。
+
+---
+
+图片由 [drawstyle.leeguoo.com](https://drawstyle.leeguoo.com/) 协助生成。博客：[leeguoo.com](https://leeguoo.com)。
