@@ -29,6 +29,7 @@ export function startOidcMock(opts: MockOptions = {}): OidcMock {
   const requests: RecordedReq[] = [];
   const tokenCalls: Record<string, string>[] = [];
   const profiles: Record<string, unknown>[] = [];
+  const invites: Record<string, unknown>[] = [];
   let base = "";
 
   const server = Bun.serve({
@@ -123,35 +124,69 @@ export function startOidcMock(opts: MockOptions = {}): OidcMock {
         profiles.push(profile);
         return Response.json(profile, { status: 201 });
       }
+      if (req.method === "POST" && /^\/api\/agent-profiles\/[^/]+\/runtime-token$/.test(u.pathname)) {
+        const handle = decodeURIComponent(u.pathname.split("/")[3] ?? "x");
+        const profile = profiles.find((p) => p.handle === handle) ?? {
+          owner_account: "fan@example.com",
+          handle,
+          name: handle,
+          runner: "codex-sdk",
+          repo_url: "git@example.com:repo.git",
+          workdir: "/tmp/project",
+          base_branch: "main",
+          worktree_strategy: "branch",
+          rules: null,
+          invitable_by: "owner",
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        };
+        return Response.json({ token: `ap_${handle}_runtime`, profile }, { status: 201 });
+      }
+      if (req.method === "GET" && u.pathname === "/api/agent-profiles/invites") {
+        const handle = u.searchParams.get("handle");
+        const filtered = handle ? invites.filter((i) => i.profile_handle === handle) : invites;
+        return Response.json({ invites: filtered });
+      }
       if (req.method === "POST" && /^\/api\/channels\/[^/]+\/project-agents$/.test(u.pathname)) {
         const slug = u.pathname.split("/")[3] ?? "dev";
         const b = rec.body as { owner_account?: string; handle?: string } | null;
-        return Response.json(
-          {
-            id: 1,
-            channel_slug: slug,
-            owner_account: b?.owner_account ?? "fan@example.com",
-            profile_handle: b?.handle ?? "x",
-            invited_by: "fan@example.com",
-            invited_at: Date.now(),
-            already_invited: false,
-            profile: {
-              owner_account: b?.owner_account ?? "fan@example.com",
-              handle: b?.handle ?? "x",
-              name: b?.handle ?? "x",
-              runner: "codex",
-              repo_url: null,
-              workdir: null,
-              base_branch: "main",
-              worktree_strategy: "branch",
-              rules: null,
-              invitable_by: "owner",
-              created_at: Date.now(),
-              updated_at: Date.now(),
-            },
-          },
-          { status: 201 },
-        );
+        const profile = {
+          owner_account: b?.owner_account ?? "fan@example.com",
+          handle: b?.handle ?? "x",
+          name: b?.handle ?? "x",
+          runner: "codex",
+          repo_url: null,
+          workdir: null,
+          base_branch: "main",
+          worktree_strategy: "branch",
+          rules: null,
+          invitable_by: "owner",
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        };
+        const invite = {
+          id: invites.length + 1,
+          channel_slug: slug,
+          owner_account: b?.owner_account ?? "fan@example.com",
+          profile_handle: b?.handle ?? "x",
+          invited_by: "fan@example.com",
+          invited_at: Date.now(),
+          already_invited: false,
+          profile,
+        };
+        invites.push(invite);
+        return Response.json(invite, { status: 201 });
+      }
+      if (req.method === "DELETE" && /^\/api\/channels\/[^/]+\/project-agents$/.test(u.pathname)) {
+        const slug = u.pathname.split("/")[3] ?? "dev";
+        const b = rec.body as { owner_account?: string; handle?: string } | null;
+        return Response.json({
+          ok: true,
+          channel_slug: slug,
+          owner_account: b?.owner_account ?? "fan@example.com",
+          profile_handle: b?.handle ?? "x",
+          revoked_at: Date.now(),
+        });
       }
       if (req.method === "POST" && u.pathname === "/api/spawn") {
         const b = rec.body as { name?: string; channel_scope?: string; ttl_sec?: number; team_id?: string } | null;

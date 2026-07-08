@@ -249,7 +249,7 @@ describe("agent add", () => {
     liveAccount(mock.url);
     expect(await agentRun(["create", "builder", "--runner", "bad"])).toBe(1);
     expect(await agentRun(["create", "builder", "--runner", "codex", "--worktree", "bad"])).toBe(1);
-    expect(await agentRun(["create", "builder", "--runner", "codex", "--invitable-by", "org"])).toBe(1);
+    expect(await agentRun(["create", "builder", "--runner", "codex", "--invitable-by", "bad"])).toBe(1);
     expect(mock.requests.find((r) => r.path === "/api/agent-profiles")).toBeUndefined();
   });
 });
@@ -275,6 +275,19 @@ describe("channel invite-agent", () => {
     writeState({ channel: "ops", cursor: 0 });
     expect(await channelRun(["invite-agent", "bad-ref"])).toBe(1);
     expect(mock.requests.find((r) => r.path.includes("/project-agents"))).toBeUndefined();
+  });
+
+  test("removes a project-agent profile from only the resolved channel", async () => {
+    mock = startOidcMock();
+    writeConfig({ server: mock.url, token: "ap_runtime" });
+    writeState({ channel: "ops", cursor: 0 });
+
+    const code = await channelRun(["remove-agent", "fan@example.com/herness-dev"]);
+    expect(code).toBe(0);
+    const req = mock.requests.find((r) => r.path === "/api/channels/ops/project-agents" && r.method === "DELETE");
+    expect(req?.auth).toBe("Bearer ap_runtime");
+    expect(req?.body).toEqual({ owner_account: "fan@example.com", handle: "herness-dev" });
+    expect(logs.join("\n")).toContain("removed fan@example.com/herness-dev from ops");
   });
 });
 

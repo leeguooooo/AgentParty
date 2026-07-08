@@ -3,8 +3,10 @@ import {
   AuthError,
   type ChannelAgentInfo,
   ForbiddenError,
+  type ProjectAgentInvitableBy,
   type ProjectAgentProfile,
   type ProjectAgentRunner,
+  type ProjectAgentWorktreeStrategy,
   createProjectAgentProfile,
   inviteProjectAgent,
   listChannelAgents,
@@ -36,8 +38,11 @@ type CopyTarget = `${string}:token` | `${string}:command`;
 type ProfileForm = {
   handle: string;
   runner: ProjectAgentRunner;
+  repoUrl: string;
   workdir: string;
   baseBranch: string;
+  worktree: ProjectAgentWorktreeStrategy;
+  invitableBy: ProjectAgentInvitableBy;
   rules: string;
 };
 
@@ -51,8 +56,11 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
   const [profileForm, setProfileForm] = useState<ProfileForm>({
     handle: "",
     runner: "codex",
+    repoUrl: "",
     workdir: "",
     baseBranch: "main",
+    worktree: "branch",
+    invitableBy: "owner",
     rules: "",
   });
   const [busyName, setBusyName] = useState<string | null>(null);
@@ -197,11 +205,14 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
       await createProjectAgentProfile(token, {
         handle,
         runner: profileForm.runner,
+        ...(profileForm.repoUrl.trim() === "" ? {} : { repo_url: profileForm.repoUrl.trim() }),
         ...(profileForm.workdir.trim() === "" ? {} : { workdir: profileForm.workdir.trim() }),
         ...(profileForm.baseBranch.trim() === "" ? {} : { base_branch: profileForm.baseBranch.trim() }),
+        worktree_strategy: profileForm.worktree,
+        invitable_by: profileForm.invitableBy,
         ...(profileForm.rules.trim() === "" ? {} : { rules: profileForm.rules.trim() }),
       });
-      setProfileForm((current) => ({ ...current, handle: "", workdir: "", rules: "" }));
+      setProfileForm((current) => ({ ...current, handle: "", repoUrl: "", workdir: "", rules: "" }));
       await refresh();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
@@ -328,6 +339,13 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
               </select>
               <input
                 className="agenttokens-input"
+                value={profileForm.repoUrl}
+                onChange={(event) => setProfileForm((current) => ({ ...current, repoUrl: event.target.value }))}
+                placeholder={t("AgentTokens.profileRepo")}
+                aria-label={t("AgentTokens.profileRepo")}
+              />
+              <input
+                className="agenttokens-input"
                 value={profileForm.workdir}
                 onChange={(event) => setProfileForm((current) => ({ ...current, workdir: event.target.value }))}
                 placeholder={t("AgentTokens.profileWorkdir")}
@@ -340,6 +358,26 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
                 placeholder={t("AgentTokens.profileBase")}
                 aria-label={t("AgentTokens.profileBase")}
               />
+              <select
+                className="agenttokens-input"
+                value={profileForm.worktree}
+                onChange={(event) => setProfileForm((current) => ({ ...current, worktree: event.target.value as ProjectAgentWorktreeStrategy }))}
+                aria-label={t("AgentTokens.profileWorktree")}
+              >
+                <option value="branch">{t("AgentTokens.worktreeBranch")}</option>
+                <option value="shared">{t("AgentTokens.worktreeShared")}</option>
+                <option value="none">{t("AgentTokens.worktreeNone")}</option>
+              </select>
+              <select
+                className="agenttokens-input"
+                value={profileForm.invitableBy}
+                onChange={(event) => setProfileForm((current) => ({ ...current, invitableBy: event.target.value as ProjectAgentInvitableBy }))}
+                aria-label={t("AgentTokens.profileInvitableBy")}
+              >
+                <option value="owner">{t("AgentTokens.invitableOwner")}</option>
+                <option value="org">{t("AgentTokens.invitableOrg")}</option>
+                <option value="anyone">{t("AgentTokens.invitableAnyone")}</option>
+              </select>
               <input
                 className="agenttokens-input agenttokens-input--wide"
                 value={profileForm.rules}

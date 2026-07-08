@@ -14,6 +14,7 @@ import {
   listChannelRoles,
   listChannels,
   removeChannelMember,
+  removeProjectAgentInvite,
   resetGuard,
   revokeJoinLink,
   setChannelRole,
@@ -33,6 +34,7 @@ const HELP = `usage: party channel create <slug> [--title t] [--temp] [--party] 
        party channel reset-guard [slug]
        party channel kick <name> [slug] [--remove]
        party channel invite-agent <owner>/<handle> [slug]
+       party channel remove-agent <owner>/<handle> [slug]
        party channel gate reviewer|off [slug] [--policy sender|owner]
        party channel visibility <slug> public|private [--confirm]
        party channel members <slug>
@@ -212,6 +214,21 @@ export async function run(argv: string[]): Promise<number> {
         const invite = await inviteProjectAgent(cfg.server, cfg.token, slug, profile.owner, profile.handle);
         const state = invite.already_invited ? "already invited" : "invited";
         console.log(`${state} ${profile.owner}/${profile.handle} to ${slug}`);
+        return 0;
+      }
+      case "remove-agent": {
+        const profile = parseProfileRef(positionals[1]);
+        const slug = resolveChannel(positionals[2]);
+        if (!profile || !slug) {
+          console.error("usage: party channel remove-agent <owner>/<handle> [slug]");
+          return 1;
+        }
+        if (!isSlug(slug)) {
+          console.error("slug must match [a-z0-9][a-z0-9-]{0,63}");
+          return 1;
+        }
+        await removeProjectAgentInvite(cfg.server, cfg.token, slug, profile.owner, profile.handle);
+        console.log(`removed ${profile.owner}/${profile.handle} from ${slug}`);
         return 0;
       }
       case "gate": {

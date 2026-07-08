@@ -88,7 +88,7 @@ export interface JoinLinkInfo {
 
 export type ProjectAgentRunner = "codex" | "claude" | "codex-sdk" | "shell";
 export type ProjectAgentWorktreeStrategy = "branch" | "shared" | "none";
-export type ProjectAgentInvitableBy = "owner" | "anyone";
+export type ProjectAgentInvitableBy = "owner" | "org" | "anyone";
 
 export interface ProjectAgentProfile {
   owner_account: string;
@@ -113,6 +113,21 @@ export interface ChannelProjectAgentInvite {
   invited_by: string;
   invited_at: number;
   already_invited?: boolean;
+  profile: ProjectAgentProfile;
+}
+
+export interface ProjectAgentRuntime {
+  token: string;
+  profile: ProjectAgentProfile;
+}
+
+export interface ProjectAgentChannelRuntime {
+  token: string;
+  name: string;
+  role: "agent";
+  owner: string;
+  channel_scope: string;
+  lineage: AgentLineage;
   profile: ProjectAgentProfile;
 }
 
@@ -244,6 +259,57 @@ export async function inviteProjectAgent(
     headers: bearerJson(token),
     body: JSON.stringify({ owner_account: ownerAccount, handle }),
   })) as ChannelProjectAgentInvite;
+}
+
+export async function removeProjectAgentInvite(
+  server: string,
+  token: string,
+  slug: string,
+  ownerAccount: string,
+  handle: string,
+): Promise<{ ok: true; channel_slug: string; owner_account: string; profile_handle: string; revoked_at: number }> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/project-agents`, {
+    method: "DELETE",
+    headers: bearerJson(token),
+    body: JSON.stringify({ owner_account: ownerAccount, handle }),
+  })) as { ok: true; channel_slug: string; owner_account: string; profile_handle: string; revoked_at: number };
+}
+
+export async function mintProjectAgentRuntimeToken(
+  server: string,
+  token: string,
+  handle: string,
+): Promise<ProjectAgentRuntime> {
+  return (await req(server, `/api/agent-profiles/${encodeURIComponent(handle)}/runtime-token`, {
+    method: "POST",
+    headers: bearerJson(token),
+  })) as ProjectAgentRuntime;
+}
+
+export async function listProjectAgentInvites(
+  server: string,
+  token: string,
+  handle?: string,
+): Promise<ChannelProjectAgentInvite[]> {
+  const suffix = handle === undefined ? "" : `?handle=${encodeURIComponent(handle)}`;
+  const body = await req(server, `/api/agent-profiles/invites${suffix}`, { headers: bearerJson(token) });
+  const invites = (body as Record<string, unknown> | null)?.invites;
+  return Array.isArray(invites) ? (invites as ChannelProjectAgentInvite[]) : [];
+}
+
+export async function ensureProjectAgentChannelRuntime(
+  server: string,
+  token: string,
+  slug: string,
+  ownerAccount: string,
+  handle: string,
+  childName: string,
+): Promise<ProjectAgentChannelRuntime> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/project-agents/runtime-token`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify({ owner_account: ownerAccount, handle, name: childName }),
+  })) as ProjectAgentChannelRuntime;
 }
 
 export async function spawnAgent(

@@ -18,9 +18,9 @@ import { isName, isSlug } from "../validation";
 const AGENT_FLAGS = ["channel-scope", "name", "runner", "repo", "workdir", "base-branch", "worktree", "rules", "invitable-by"];
 const RUNNERS = ["codex", "claude", "codex-sdk", "shell"] as const;
 const WORKTREE = ["branch", "shared", "none"] as const;
-const INVITABLE_BY = ["owner", "anyone"] as const;
+const INVITABLE_BY = ["owner", "org", "anyone"] as const;
 const HELP = `usage: party agent add <name> [--channel-scope slug]
-       party agent create <handle> --runner codex|claude|codex-sdk|shell [--name n] [--repo url] [--workdir path] [--base-branch b] [--worktree branch|shared|none] [--rules text] [--invitable-by owner|anyone]
+       party agent create <handle> --runner codex|claude|codex-sdk|shell [--name n] [--repo url] [--workdir path] [--base-branch b] [--worktree branch|shared|none] [--rules text] [--invitable-by owner|org|anyone]
        party agent list
 
 Mint one-off agent tokens or manage reusable project-agent profiles.
@@ -33,7 +33,7 @@ Options:
   --base-branch b       base branch (default: main)
   --worktree mode       branch, shared, or none (default: branch)
   --rules text          fixed instruction text injected into the daemon profile
-  --invitable-by mode   owner or anyone (default: owner)`;
+  --invitable-by mode   owner, org, or anyone (default: owner)`;
 
 async function freshAccount(action: string): Promise<{ server: string; token: string } | null> {
   const sess = readAccount();
@@ -106,7 +106,7 @@ export async function run(argv: string[]): Promise<number> {
       }
       const invitableBy = str(flags["invitable-by"]);
       if (invitableBy !== undefined && !INVITABLE_BY.includes(invitableBy as (typeof INVITABLE_BY)[number])) {
-        console.error("--invitable-by must be owner or anyone");
+        console.error("--invitable-by must be owner, org, or anyone");
         return 1;
       }
       const account = await freshAccount("agent create");

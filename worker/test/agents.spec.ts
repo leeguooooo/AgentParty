@@ -291,4 +291,110 @@ describe("project agent profiles", () => {
     };
     expect(inbox.invites).toContainEqual(expect.objectContaining({ channel_slug: slug, profile: expect.objectContaining({ handle: "builder" }) }));
   });
+
+  it("mints profile and per-channel runtime tokens, and revokes only the removed channel", async () => {
+    const owner = "runtime-owner@leeguoo.com";
+    const inviter = "runtime-inviter@leeguoo.com";
+    const ownerSession = await humanSession(owner);
+    const inviterSession = await humanSession(inviter);
+    expect((await saveProfile(ownerSession, { handle: "resident", runner: "codex-sdk", invitable_by: "anyone" })).status).toBe(201);
+    const invitedSlug = uniq("runtime-invited");
+    const secondSlug = uniq("runtime-second");
+    const otherSlug = uniq("runtime-other");
+    for (const slug of [invitedSlug, secondSlug, otherSlug]) {
+      expect(
+        (
+          await api("/api/channels", inviterSession, {
+            method: "POST",
+            body: JSON.stringify({ slug, kind: "standing", visibility: "private" }),
+          })
+        ).status,
+      ).toBe(201);
+    }
+    for (const slug of [invitedSlug, secondSlug]) {
+      expect(
+        (
+          await api(`/api/channels/${slug}/project-agents`, inviterSession, {
+            method: "POST",
+            body: JSON.stringify({ owner_account: owner, handle: "resident" }),
+          })
+        ).status,
+      ).toBe(201);
+    }
+
+    const runtime = await api("/api/agent-profiles/resident/runtime-token", ownerSession, { method: "POST" });
+    expect(runtime.status).toBe(201);
+    const runtimeBody = (await runtime.json()) as { token: string; profile: { handle: string } };
+    expect(runtimeBody.profile.handle).toBe("resident");
+    expect((await api(`/api/channels/${invitedSlug}/messages`, runtimeBody.token)).status).toBe(200);
+    expect((await api(`/api/channels/${otherSlug}/messages`, runtimeBody.token)).status).toBe(403);
+    const channels = (await (await api("/api/channels", runtimeBody.token)).json()) as { channels: { slug: string }[] };
+    expect(channels.channels.map((ch) => ch.slug)).toContain(invitedSlug);
+    expect(channels.channels.map((ch) => ch.slug)).toContain(secondSlug);
+    expect(channels.channels.map((ch) => ch.slug)).not.toContain(otherSlug);
+
+    const firstChild = await api(`/api/channels/${invitedSlug}/project-agents/runtime-token`, runtimeBody.token, {
+      method: "POST",
+      body: JSON.stringify({ owner_account: owner, handle: "resident", name: "resident-child-a" }),
+    });
+    expect(firstChild.status).toBe(201);
+    const firstChildBody = (await firstChild.json()) as { token: string; channel_scope: string; lineage: { parent_agent: string } };
+    expect(firstChildBody.channel_scope).toBe(invitedSlug);
+    expect(firstChildBody.lineage.parent_agent).toBe("resident");
+    const secondChild = await api(`/api/channels/${secondSlug}/project-agents/runtime-token`, runtimeBody.token, {
+      method: "POST",
+      body: JSON.stringify({ owner_account: owner, handle: "resident", name: "resident-child-b" }),
+    });
+    expect(secondChild.status).toBe(201);
+    const secondChildBody = (await secondChild.json()) as { token: string };
+    expect((await api(`/api/channels/${invitedSlug}/messages`, firstChildBody.token)).status).toBe(200);
+    expect((await api(`/api/channels/${secondSlug}/messages`, secondChildBody.token)).status).toBe(200);
+
+    const removed = await api(`/api/channels/${invitedSlug}/project-agents`, inviterSession, {
+      method: "DELETE",
+      body: JSON.stringify({ owner_account: owner, handle: "resident" }),
+    });
+    expect(removed.status).toBe(200);
+    expect((await api(`/api/channels/${invitedSlug}/messages`, firstChildBody.token)).status).toBe(401);
+    expect((await api(`/api/channels/${invitedSlug}/messages`, runtimeBody.token)).status).toBe(403);
+    expect((await api(`/api/channels/${secondSlug}/messages`, secondChildBody.token)).status).toBe(200);
+  });
+
+  it("allows org-scoped project agent invites only within the owner domain", async () => {
+    const owner = "profile-owner@leeguoo.com";
+    const sameOrg = "teammate@leeguoo.com";
+    const otherOrg = "stranger@example.com";
+    const ownerSession = await humanSession(owner);
+    const sameOrgSession = await humanSession(sameOrg);
+    const otherOrgSession = await humanSession(otherOrg);
+    expect((await saveProfile(ownerSession, { handle: "orgbot", runner: "codex", invitable_by: "org" })).status).toBe(201);
+    const sameSlug = uniq("org-same");
+    const otherSlug = uniq("org-other");
+    for (const [slug, session] of [[sameSlug, sameOrgSession], [otherSlug, otherOrgSession]] as const) {
+      expect(
+        (
+          await api("/api/channels", session, {
+            method: "POST",
+            body: JSON.stringify({ slug, kind: "standing", visibility: "private" }),
+          })
+        ).status,
+      ).toBe(201);
+    }
+    expect(
+      (
+        await api(`/api/channels/${sameSlug}/project-agents`, sameOrgSession, {
+          method: "POST",
+          body: JSON.stringify({ owner_account: owner, handle: "orgbot" }),
+        })
+      ).status,
+    ).toBe(201);
+    expect(
+      (
+        await api(`/api/channels/${otherSlug}/project-agents`, otherOrgSession, {
+          method: "POST",
+          body: JSON.stringify({ owner_account: owner, handle: "orgbot" }),
+        })
+      ).status,
+    ).toBe(403);
+  });
 });

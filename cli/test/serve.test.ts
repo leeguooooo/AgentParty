@@ -6,7 +6,9 @@ import { join } from "node:path";
 import {
   createBuiltinRunner,
   createSdkRunner,
+  projectAgentChildName,
   run as runServeCommand,
+  runProfileServe,
   runServe,
   writeContextFile,
   type CodexLike,
@@ -572,6 +574,98 @@ describe("builtin runner", () => {
       console.error = oldError;
     }
     expect(errors.join("\n")).toContain("choose exactly one of --on-mention or --runner");
+  });
+});
+
+describe("project profile daemon", () => {
+  test("one resident daemon fans out to invited channels with scoped child tokens and distinct sessions", async () => {
+    const home = tempDir();
+    const oldHome = process.env.AGENTPARTY_HOME;
+    process.env.AGENTPARTY_HOME = home;
+    const { posts, post } = postRecorder();
+    const profile = {
+      owner_account: "fan@example.com",
+      handle: "herness-dev",
+      name: "Herness Dev",
+      runner: "codex-sdk" as const,
+      repo_url: null,
+      workdir: null,
+      base_branch: "main",
+      worktree_strategy: "branch" as const,
+      rules: "Report readiness.",
+      invitable_by: "anyone" as const,
+      created_at: 1,
+      updated_at: 1,
+    };
+    const served: ServeOptions[] = [];
+    const channelRuntimeCalls: Array<{ slug: string; childName: string }> = [];
+    try {
+      const code = await runProfileServe({
+        server: "http://agentparty.test",
+        humanToken: "acc-human",
+        ownerAccount: "fan@example.com",
+        handle: "herness-dev",
+        mentionsOnly: true,
+        once: true,
+        post,
+        mintRuntime: async () => ({ token: "ap_profile_runtime", profile }),
+        listInvites: async () => ["alpha", "beta", "gamma"].map((channel_slug, index) => ({
+          id: index + 1,
+          channel_slug,
+          owner_account: profile.owner_account,
+          profile_handle: profile.handle,
+          invited_by: "owner@example.com",
+          invited_at: index + 1,
+          profile,
+        })),
+        ensureChannelRuntime: async (_server, token, slug, owner, handle, childName) => {
+          expect(token).toBe("ap_profile_runtime");
+          expect(owner).toBe(profile.owner_account);
+          expect(handle).toBe(profile.handle);
+          channelRuntimeCalls.push({ slug, childName });
+          return {
+            token: `ap_child_${slug}`,
+            name: childName,
+            role: "agent",
+            owner,
+            channel_scope: slug,
+            lineage: { parent_agent: handle, root_agent: handle, team_id: handle, depth: 1, expires_at: null },
+            profile,
+          };
+        },
+        runChannelServe: async (opts) => {
+          served.push(opts);
+          await opts.advertise?.();
+          return 0;
+        },
+      });
+      expect(code).toBe(0);
+    } finally {
+      if (oldHome === undefined) delete process.env.AGENTPARTY_HOME;
+      else process.env.AGENTPARTY_HOME = oldHome;
+    }
+
+    expect(served.map((o) => o.channel).sort()).toEqual(["alpha", "beta", "gamma"]);
+    expect(served.map((o) => o.token).sort()).toEqual(["ap_child_alpha", "ap_child_beta", "ap_child_gamma"]);
+    expect(new Set(served.map((o) => o.sdkRunner?.workdir)).size).toBe(3);
+    expect(new Set(served.map((o) => o.projectAgent?.channel_workdir)).size).toBe(3);
+    expect(channelRuntimeCalls).toEqual([
+      { slug: "alpha", childName: projectAgentChildName("herness-dev", "alpha") },
+      { slug: "beta", childName: projectAgentChildName("herness-dev", "beta") },
+      { slug: "gamma", childName: projectAgentChildName("herness-dev", "gamma") },
+    ]);
+    expect(posts).toHaveLength(6);
+    expect(posts.filter((p) => (p.body as { kind: string }).kind === "status")).toHaveLength(3);
+    expect(posts.every((p) => p.token.startsWith("ap_child_"))).toBe(true);
+    expect(String((posts[0]!.body as { note: string }).note)).toContain("worktree=branch");
+  });
+
+  test("project-agent child names are stable and stay within the token name limit", () => {
+    const first = projectAgentChildName("long-profile-name-for-daemon", "long-channel-name-for-parallel-review");
+    const second = projectAgentChildName("long-profile-name-for-daemon", "long-channel-name-for-parallel-review");
+    expect(first).toBe(second);
+    expect(first.length).toBeLessThanOrEqual(64);
+    expect(first).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
   });
 });
 

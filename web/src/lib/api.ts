@@ -184,7 +184,7 @@ export interface ChannelAgentInfo {
 
 export type ProjectAgentRunner = "codex" | "claude" | "codex-sdk" | "shell";
 export type ProjectAgentWorktreeStrategy = "branch" | "shared" | "none";
-export type ProjectAgentInvitableBy = "owner" | "anyone";
+export type ProjectAgentInvitableBy = "owner" | "org" | "anyone";
 
 export interface ProjectAgentProfile {
   owner_account: string;

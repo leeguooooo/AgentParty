@@ -142,7 +142,7 @@ const PROFILE_TEXT_MAX = 4096;
 const PROFILE_BRANCH_MAX = 128;
 const PROJECT_AGENT_RUNNERS = ["codex", "claude", "codex-sdk", "shell"] as const;
 const PROJECT_AGENT_WORKTREE = ["branch", "shared", "none"] as const;
-const PROJECT_AGENT_INVITABLE = ["owner", "anyone"] as const;
+const PROJECT_AGENT_INVITABLE = ["owner", "org", "anyone"] as const;
 const textEncoder = new TextEncoder();
 
 function errorBody(code: RestErrorCode, message: string) {
@@ -163,6 +163,21 @@ function randomJoinCode(): string {
 
 function validAccountParam(input: string): boolean {
   return input.length > 0 && input.length <= 320 && !/[\x00-\x1f\x7f]/.test(input);
+}
+
+function accountOrg(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const at = input.lastIndexOf("@");
+  if (at <= 0 || at === input.length - 1) return null;
+  return input.slice(at + 1).toLowerCase();
+}
+
+function canInviteProjectAgent(invitableBy: string, inviterAccount: string | null | undefined, ownerAccount: string): boolean {
+  if (invitableBy === "anyone") return true;
+  if (inviterAccount === ownerAccount) return true;
+  if (invitableBy !== "org") return false;
+  const inviterOrg = accountOrg(inviterAccount);
+  return inviterOrg !== null && inviterOrg === accountOrg(ownerAccount);
 }
 
 function optionalProfileText(input: unknown, max = PROFILE_TEXT_MAX): string | null | undefined {
@@ -201,6 +216,126 @@ function projectAgentProfileFromRow(row: {
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+async function mintOrRotateProfileRuntimeToken(
+  db: D1Database,
+  opts: { ownerAccount: string; handle: string },
+): Promise<{ token: string } | { conflict: true }> {
+  const existing = await db
+    .prepare("SELECT id, role, owner, revoked_at FROM tokens WHERE name = ?")
+    .bind(opts.handle)
+    .first<{ id: number; role: string; owner: string | null; revoked_at: number | null }>();
+  if (existing && existing.revoked_at === null && (existing.role !== "agent" || existing.owner !== opts.ownerAccount)) {
+    return { conflict: true };
+  }
+  const handleOwner = await db.prepare("SELECT account FROM account_profiles WHERE handle = ? COLLATE NOCASE")
+    .bind(opts.handle).first<{ account: string }>();
+  if (handleOwner && handleOwner.account !== opts.ownerAccount) return { conflict: true };
+
+  const token = randomToken();
+  const hash = await sha256Hex(token);
+  const now = Date.now();
+  if (existing) {
+    await db.prepare(
+      `UPDATE tokens
+          SET hash = ?, role = 'agent', owner = ?, channel_scope = NULL,
+              parent_agent = NULL, root_agent = NULL, team_id = NULL, spawn_depth = NULL, child_expires_at = NULL,
+              created_at = ?, revoked_at = NULL
+        WHERE id = ?`,
+    )
+      .bind(hash, opts.ownerAccount, now, existing.id)
+      .run();
+  } else {
+    await db.prepare(
+      `INSERT INTO tokens (
+         hash, name, role, owner, channel_scope,
+         parent_agent, root_agent, team_id, spawn_depth, child_expires_at,
+         created_at
+       ) VALUES (?, ?, 'agent', ?, NULL, NULL, NULL, NULL, NULL, NULL, ?)`,
+    )
+      .bind(hash, opts.handle, opts.ownerAccount, now)
+      .run();
+  }
+  return { token };
+}
+
+async function mintOrRotateProfileChannelToken(
+  db: D1Database,
+  opts: { ownerAccount: string; handle: string; channelScope: string; childName: string },
+): Promise<{ token: string; lineage: AgentLineage } | { conflict: true }> {
+  const existing = await db
+    .prepare("SELECT id, role, owner, channel_scope, parent_agent, revoked_at FROM tokens WHERE name = ?")
+    .bind(opts.childName)
+    .first<{ id: number; role: string; owner: string | null; channel_scope: string | null; parent_agent: string | null; revoked_at: number | null }>();
+  if (
+    existing &&
+    existing.revoked_at === null &&
+    (existing.role !== "agent" ||
+      existing.owner !== opts.ownerAccount ||
+      existing.channel_scope !== opts.channelScope ||
+      existing.parent_agent !== opts.handle)
+  ) {
+    return { conflict: true };
+  }
+  const handleOwner = await db.prepare("SELECT 1 FROM account_profiles WHERE handle = ? COLLATE NOCASE")
+    .bind(opts.childName).first();
+  if (handleOwner) return { conflict: true };
+
+  const token = randomToken();
+  const hash = await sha256Hex(token);
+  const now = Date.now();
+  const lineage: AgentLineage = {
+    parent_agent: opts.handle,
+    root_agent: opts.handle,
+    team_id: opts.handle,
+    depth: 1,
+    expires_at: null,
+  };
+  if (existing) {
+    await db.prepare(
+      `UPDATE tokens
+          SET hash = ?, role = 'agent', owner = ?, channel_scope = ?,
+              parent_agent = ?, root_agent = ?, team_id = ?, spawn_depth = ?, child_expires_at = ?,
+              created_at = ?, revoked_at = NULL
+        WHERE id = ?`,
+    )
+      .bind(
+        hash,
+        opts.ownerAccount,
+        opts.channelScope,
+        lineage.parent_agent,
+        lineage.root_agent,
+        lineage.team_id,
+        lineage.depth,
+        lineage.expires_at,
+        now,
+        existing.id,
+      )
+      .run();
+  } else {
+    await db.prepare(
+      `INSERT INTO tokens (
+         hash, name, role, owner, channel_scope,
+         parent_agent, root_agent, team_id, spawn_depth, child_expires_at,
+         created_at
+       ) VALUES (?, ?, 'agent', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        hash,
+        opts.childName,
+        opts.ownerAccount,
+        opts.channelScope,
+        lineage.parent_agent,
+        lineage.root_agent,
+        lineage.team_id,
+        lineage.depth,
+        lineage.expires_at,
+        now,
+      )
+      .run();
+  }
+  return { token, lineage };
 }
 
 function isOpaqueHumanSessionName(name: string): boolean {
@@ -385,7 +520,19 @@ async function isChannelMember(db: D1Database, slug: string, account: string | n
 }
 
 async function canAccessLoadedChannel(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
-  return canAccessChannel(identity, channel, await isChannelMember(db, channel.slug, identity.account));
+  if (canAccessChannel(identity, channel, await isChannelMember(db, channel.slug, identity.account))) return true;
+  if (identity.role !== "agent" || identity.account == null) return false;
+  const row = await db.prepare(
+    `SELECT id
+       FROM channel_agent_invites
+      WHERE channel_slug = ?
+        AND owner_account = ?
+        AND profile_handle = ?
+        AND revoked_at IS NULL`,
+  )
+    .bind(channel.slug, identity.account, identity.name)
+    .first<{ id: number }>();
+  return row !== null;
 }
 
 async function channelMessageStats(env: AppEnv, slug: string): Promise<{ message_count: number; earliest_ts: number | null }> {
@@ -789,7 +936,7 @@ app.post("/api/agent-profiles", requireBearer, async (c) => {
     return c.json(errorBody("bad_request", "worktree_strategy must be branch, shared, or none"), 400);
   }
   if (!PROJECT_AGENT_INVITABLE.includes(invitableBy as (typeof PROJECT_AGENT_INVITABLE)[number])) {
-    return c.json(errorBody("bad_request", "invitable_by must be owner or anyone"), 400);
+    return c.json(errorBody("bad_request", "invitable_by must be owner, org, or anyone"), 400);
   }
 
   const now = Date.now();
@@ -835,10 +982,39 @@ app.post("/api/agent-profiles", requireBearer, async (c) => {
   return c.json(projectAgentProfileFromRow(row!), 201);
 });
 
+app.post("/api/agent-profiles/:handle/runtime-token", requireBearer, async (c) => {
+  const identity = c.get("identity");
+  if (identity.role !== "human" || identity.account == null) {
+    return c.json(errorBody("forbidden", "starting a project agent daemon requires the owner human account session"), 403);
+  }
+  const handle = c.req.param("handle");
+  if (!NAME_RE.test(handle) || RESERVED_NAMES.includes(handle)) {
+    return c.json(errorBody("bad_request", "valid project agent handle required"), 400);
+  }
+  const row = await c.env.DB.prepare(
+    `SELECT owner_account, handle, name, runner, repo_url, workdir, base_branch,
+            worktree_strategy, rules, invitable_by, created_at, updated_at
+       FROM agent_profiles
+      WHERE owner_account = ? AND handle = ?`,
+  )
+    .bind(identity.account, handle)
+    .first<Parameters<typeof projectAgentProfileFromRow>[0]>();
+  if (!row) return c.json(errorBody("not_found", "project agent profile not found"), 404);
+  const minted = await mintOrRotateProfileRuntimeToken(c.env.DB, { ownerAccount: identity.account, handle });
+  if ("conflict" in minted) {
+    return c.json(errorBody("conflict", "profile handle conflicts with an existing token or human handle"), 409);
+  }
+  return c.json({ token: minted.token, profile: projectAgentProfileFromRow(row) }, 201);
+});
+
 app.get("/api/agent-profiles/invites", requireBearer, async (c) => {
   const identity = c.get("identity");
   if (identity.account == null) {
     return c.json(errorBody("forbidden", "listing project agent invites requires an account session"), 403);
+  }
+  const handle = c.req.query("handle") ?? null;
+  if (handle !== null && !NAME_RE.test(handle)) {
+    return c.json(errorBody("bad_request", "handle must be a valid agent/name token"), 400);
   }
   const rows = await c.env.DB.prepare(
     `SELECT i.id, i.channel_slug, i.owner_account, i.profile_handle, i.invited_by, i.invited_at,
@@ -846,10 +1022,11 @@ app.get("/api/agent-profiles/invites", requireBearer, async (c) => {
        FROM channel_agent_invites i
        JOIN agent_profiles p ON p.owner_account = i.owner_account AND p.handle = i.profile_handle
       WHERE i.owner_account = ?
+        AND (? IS NULL OR i.profile_handle = ?)
         AND i.revoked_at IS NULL
       ORDER BY i.invited_at DESC, i.channel_slug`,
   )
-    .bind(identity.account)
+    .bind(identity.account, handle, handle)
     .all<{
       id: number;
       channel_slug: string;
@@ -888,6 +1065,78 @@ app.get("/api/agent-profiles/invites", requireBearer, async (c) => {
       },
     })),
   });
+});
+
+app.post("/api/channels/:slug/project-agents/runtime-token", requireBearer, async (c) => {
+  const identity = c.get("identity");
+  const slug = c.req.param("slug");
+  if (identity.role !== "agent" || identity.account == null || identity.channel_scope != null) {
+    return c.json(errorBody("forbidden", "project agent channel runtime requires an unscoped profile daemon token"), 403);
+  }
+  if (!SLUG_RE.test(slug)) {
+    return c.json(errorBody("bad_request", "valid channel slug required"), 400);
+  }
+  const body = (await c.req.json().catch(() => null)) as { owner_account?: unknown; handle?: unknown; name?: unknown } | null;
+  const ownerAccount = typeof body?.owner_account === "string" ? body.owner_account : "";
+  const handle = typeof body?.handle === "string" ? body.handle : "";
+  const childName = typeof body?.name === "string" ? body.name : "";
+  if (!validAccountParam(ownerAccount) || !NAME_RE.test(handle) || !NAME_RE.test(childName)) {
+    return c.json(errorBody("bad_request", "owner_account, handle, and child name are required"), 400);
+  }
+  if (identity.account !== ownerAccount || identity.name !== handle) {
+    return c.json(errorBody("forbidden", "profile daemon token can only mint children for itself"), 403);
+  }
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (channel.archived_at !== null) return c.json(errorBody("archived", "channel is archived"), 410);
+  const profile = await c.env.DB.prepare(
+    `SELECT owner_account, handle, name, runner, repo_url, workdir, base_branch,
+            worktree_strategy, rules, invitable_by, created_at, updated_at
+       FROM agent_profiles
+      WHERE owner_account = ? AND handle = ?`,
+  )
+    .bind(ownerAccount, handle)
+    .first<Parameters<typeof projectAgentProfileFromRow>[0]>();
+  if (!profile) return c.json(errorBody("not_found", "project agent profile not found"), 404);
+  const invite = await c.env.DB.prepare(
+    `SELECT id
+       FROM channel_agent_invites
+      WHERE channel_slug = ?
+        AND owner_account = ?
+        AND profile_handle = ?
+        AND revoked_at IS NULL`,
+  )
+    .bind(slug, ownerAccount, handle)
+    .first<{ id: number }>();
+  if (!invite) return c.json(errorBody("forbidden", "project agent profile is not invited to this channel"), 403);
+  const minted = await mintOrRotateProfileChannelToken(c.env.DB, { ownerAccount, handle, channelScope: slug, childName });
+  if ("conflict" in minted) {
+    return c.json(errorBody("conflict", "child agent name conflicts with an existing identity"), 409);
+  }
+  try {
+    const stub = await getServerByName(c.env.CHANNELS, slug);
+    await stub.fetch(
+      new Request("https://do/internal/kick", {
+        method: "POST",
+        body: JSON.stringify({ name: childName }),
+        headers: { "content-type": "application/json", "x-partykit-room": slug },
+      }),
+    );
+  } catch {
+    // Best-effort takeover after daemon restart.
+  }
+  return c.json(
+    {
+      token: minted.token,
+      name: childName,
+      role: "agent",
+      owner: ownerAccount,
+      channel_scope: slug,
+      lineage: minted.lineage,
+      profile: projectAgentProfileFromRow(profile),
+    },
+    201,
+  );
 });
 
 app.get("/api/channels/:slug/agents", requireBearer, async (c) => {
@@ -1104,7 +1353,21 @@ app.get("/api/channels", async (c) => {
             .bind(identity.account)
             .all<{ channel_slug: string }>()).results.map((row) => row.channel_slug),
         );
-  const visible = results.filter((row) => canAccessChannel(identity, row, memberSlugs.has(row.slug)));
+  const projectAgentInviteSlugs =
+    identity.role !== "agent" || identity.account == null
+      ? new Set<string>()
+      : new Set(
+          (await c.env.DB.prepare(
+            `SELECT channel_slug
+               FROM channel_agent_invites
+              WHERE owner_account = ?
+                AND profile_handle = ?
+                AND revoked_at IS NULL`,
+          )
+            .bind(identity.account, identity.name)
+            .all<{ channel_slug: string }>()).results.map((row) => row.channel_slug),
+        );
+  const visible = results.filter((row) => canAccessChannel(identity, row, memberSlugs.has(row.slug)) || projectAgentInviteSlugs.has(row.slug));
   const channels = await Promise.all(
     visible.map(async (full) => {
       // can_moderate：当前身份能否管理（转可见性/踢人/归档）。不回 owner 身份本身，只回布尔，
@@ -1221,8 +1484,8 @@ app.post("/api/channels/:slug/project-agents", async (c) => {
     .bind(ownerAccount, handle)
     .first<Parameters<typeof projectAgentProfileFromRow>[0]>();
   if (!profile) return c.json(errorBody("not_found", "project agent profile not found"), 404);
-  if (profile.invitable_by === "owner" && identity.account !== ownerAccount) {
-    return c.json(errorBody("forbidden", "this project agent can only be invited by its owner"), 403);
+  if (!canInviteProjectAgent(profile.invitable_by, identity.account, ownerAccount)) {
+    return c.json(errorBody("forbidden", `this project agent can only be invited by ${profile.invitable_by}`), 403);
   }
 
   const existing = await c.env.DB.prepare(
@@ -1267,6 +1530,78 @@ app.post("/api/channels/:slug/project-agents", async (c) => {
     },
     201,
   );
+});
+
+app.delete("/api/channels/:slug/project-agents", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (identity.role === "readonly") {
+    return c.json(errorBody("forbidden", "readonly sessions cannot remove project agents"), 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as { owner_account?: unknown; handle?: unknown } | null;
+  const ownerAccount = typeof body?.owner_account === "string" ? body.owner_account : "";
+  const handle = typeof body?.handle === "string" ? body.handle : "";
+  if (!validAccountParam(ownerAccount) || !NAME_RE.test(handle)) {
+    return c.json(errorBody("bad_request", "owner_account and valid handle required"), 400);
+  }
+  if (identity.account !== ownerAccount && !isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only the profile owner or channel moderator can remove a project agent"), 403);
+  }
+  const revokedAt = Date.now();
+  const result = await c.env.DB.prepare(
+    `UPDATE channel_agent_invites
+        SET revoked_at = ?
+      WHERE channel_slug = ?
+        AND owner_account = ?
+        AND profile_handle = ?
+        AND revoked_at IS NULL`,
+  )
+    .bind(revokedAt, slug, ownerAccount, handle)
+    .run();
+  if (result.meta.changes === 0) {
+    return c.json(errorBody("not_found", "active project agent invite not found"), 404);
+  }
+  const childRows = await c.env.DB.prepare(
+    `SELECT name
+       FROM tokens
+      WHERE owner = ?
+        AND role = 'agent'
+        AND channel_scope = ?
+        AND parent_agent = ?
+        AND revoked_at IS NULL`,
+  )
+    .bind(ownerAccount, slug, handle)
+    .all<{ name: string }>();
+  await c.env.DB.prepare(
+    `UPDATE tokens
+        SET revoked_at = ?
+      WHERE owner = ?
+        AND role = 'agent'
+        AND channel_scope = ?
+        AND parent_agent = ?
+        AND revoked_at IS NULL`,
+  )
+    .bind(revokedAt, ownerAccount, slug, handle)
+    .run();
+  try {
+    const stub = await getServerByName(c.env.CHANNELS, slug);
+    await Promise.all(
+      [handle, ...(childRows.results ?? []).map((row) => row.name)].map((name) =>
+        stub.fetch(
+          new Request("https://do/internal/kick", {
+            method: "POST",
+            body: JSON.stringify({ name }),
+            headers: { "content-type": "application/json", "x-partykit-room": slug },
+          }),
+        ),
+      ),
+    );
+  } catch {
+    // Best effort: access is already revoked at the Worker ACL layer.
+  }
+  return c.json({ ok: true, channel_slug: slug, owner_account: ownerAccount, profile_handle: handle, revoked_at: revokedAt });
 });
 
 app.get("/api/channels/:slug/members", async (c) => {
