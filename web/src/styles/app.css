@@ -118,6 +118,57 @@
 .app-me + .app-signout { margin-left: 12px; }
 .app-signout:hover { color: var(--t-accent); }
 
+/* ---- @handle 设置/修改入口（me chip 旁，仅登录人类，Task B2） ---- */
+.handlesetup-anchor { position: relative; flex: none; }
+.handlesetup-trigger {
+  font-size: 11px;
+  padding: 2px 8px;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.handlesetup-trigger--cta { background: var(--d-yellow); color: var(--d-ink); font-weight: 700; }
+/* fixed + JS 算好的 left/top/width/maxHeight（手法同 AgentTokens 的视口钳制修复），
+   避免贴在顶栏右侧时在窄屏/滚动下溢出视口。 */
+.handlesetup-panel {
+  position: fixed;
+  z-index: 30;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--t-panel);
+  border: 2.5px solid var(--d-ink);
+  border-radius: 12px 8px 13px 7px / 8px 12px 7px 11px;
+  box-shadow: 4px 5px 0 var(--d-shadow);
+  padding: 12px 14px;
+}
+.handlesetup { display: flex; flex-direction: column; gap: 8px; min-width: 220px; }
+.handlesetup-title { margin: 0; font-size: 13px; font-weight: 700; }
+.handlesetup-input {
+  font: inherit;
+  padding: 5px 8px;
+  border: 2px solid var(--d-ink);
+  border-radius: 8px 5px 9px 4px / 5px 9px 4px 8px;
+  background: var(--t-panel);
+  color: var(--fg, inherit);
+}
+.handlesetup-input:focus { outline: none; border-color: var(--t-accent); }
+.handlesetup-hint { margin: 0; font-size: 11px; color: var(--t-dim); }
+.handlesetup-err { margin: 0; }
+.handlesetup-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ---- 未设置显示名提示条（顶栏下方，非强制/可关，Task B2） ---- */
+.handle-banner {
+  margin: 0 24px 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.handle-banner-text { flex: 1 1 auto; min-width: 0; }
+.handle-banner-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.handle-banner-dismiss { font-size: 12px; padding: 2px 8px; }
+
 .app-shell {
   flex: 1;
   min-height: 0;
@@ -2665,6 +2716,13 @@
   .app-me-owner,
   .app-signout {
     display: none;
+  }
+  .handlesetup-trigger {
+    max-width: 68px;
+    font-size: 10px;
+  }
+  .handle-banner {
+    margin: 0 10px 8px;
   }
   .lang-switch {
     flex: none;
