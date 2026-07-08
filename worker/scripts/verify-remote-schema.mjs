@@ -21,6 +21,29 @@ const required = {
     "message_ts",
   ],
   channel_roles: ["channel_slug", "agent_name", "role", "assigned_by", "assigned_at"],
+  agent_profiles: [
+    "owner_account",
+    "handle",
+    "name",
+    "runner",
+    "repo_url",
+    "workdir",
+    "base_branch",
+    "worktree_strategy",
+    "rules",
+    "invitable_by",
+    "created_at",
+    "updated_at",
+  ],
+  channel_agent_invites: [
+    "id",
+    "channel_slug",
+    "owner_account",
+    "profile_handle",
+    "invited_by",
+    "invited_at",
+    "revoked_at",
+  ],
 };
 
 function run(args) {
