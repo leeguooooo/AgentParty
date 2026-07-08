@@ -753,6 +753,9 @@
 .presence-popover .presence-lineage {
   max-width: 100%;
 }
+.presence-popover .presence-kick {
+  display: none;
+}
 
 /* chat-first：协调/元信息面板默认折叠成一行，消息流才是主视图 */
 .chan-panels {
