@@ -783,6 +783,8 @@ export interface PresenceFrame {
   wake?: WakeInfo;
   context?: AgentContext;
   lineage?: AgentLineage;
+  /** 人类全局唯一昵称（可@别名）。仅人类且已设置时下发；旧客户端忽略。 */
+  handle?: string;
 }
 
 export interface ErrorFrame {

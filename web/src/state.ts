@@ -189,6 +189,7 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
             wake: frame.wake,
             context: frame.context,
             lineage: frame.lineage,
+            handle: frame.handle,
           },
         },
       };

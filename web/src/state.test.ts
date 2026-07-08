@@ -119,4 +119,20 @@ describe("channel state", () => {
     expect(next.presence["child-a"]?.kind).toBe("human");
     expect(next.presence["child-a"]?.account).toBe("owner@example.com");
   });
+
+  test("carries handle through standalone presence frames", () => {
+    const frame: PresenceFrame = {
+      type: "presence",
+      name: "child-a",
+      kind: "human",
+      account: "owner@example.com",
+      state: "working",
+      note: null,
+      ts: 1_725_000_000_000,
+      handle: "leo",
+    };
+    const next = channelReducer(initialChannelState, { type: "frame", frame });
+
+    expect(next.presence["child-a"]?.handle).toBe("leo");
+  });
 });

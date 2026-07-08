@@ -25,4 +25,37 @@ describe("buildIdentityDisplay", () => {
 
     expect(map[uuid]).toEqual({ display: "thejacks@163.com", kind: "human", account: "thejacks@163.com" });
   });
+
+  it("prefers a human's handle over owner/email for participants, presence and message senders", () => {
+    const uuid = "61ec302c-6c31-4bca-a1df-88152372f6d9";
+    const map = buildIdentityDisplay({
+      channelIdentities: [],
+      mentionOptions: [],
+      messages: [
+        {
+          seq: 1,
+          kind: "message",
+          body: "hi",
+          ts: 1,
+          sender: { name: uuid, kind: "human", owner: "thejacks@163.com", handle: "leo" },
+          mentions: [],
+          reply_to: null,
+        } as MsgFrame,
+      ],
+      participants: [{ name: uuid, kind: "human", owner: "thejacks@163.com", handle: "leo" }],
+      presence: {
+        [uuid]: {
+          name: uuid,
+          kind: "human",
+          account: "thejacks@163.com",
+          handle: "leo",
+          state: "working",
+          note: null,
+          ts: 1,
+        },
+      },
+    });
+
+    expect(map[uuid]).toEqual({ display: "leo", kind: "human", account: "thejacks@163.com" });
+  });
 });
