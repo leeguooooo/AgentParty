@@ -2,19 +2,26 @@
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError, type Parsed } from "../args";
 import { resolveChannel, saveCursor, type Config } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
-import { fetchMe, handleRestError, postMessage } from "../rest";
+import { fetchMe, fetchPresence, handleRestError, postMessage } from "../rest";
+import { formatReachLine, reachOf } from "../reach";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
-export const sendSpec = { repeatable: ["mention"], booleans: ["debug-auth"] };
-const SEND_FLAGS = ["channel", "reply-to", "mention", "debug-auth"];
+export const sendSpec = { repeatable: ["mention"], booleans: ["debug-auth", "reach", "no-reach"] };
+const SEND_FLAGS = ["channel", "reply-to", "mention", "debug-auth", "reach", "no-reach"];
 const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--reply-to seq] [--debug-auth]
 
 Send one message to a channel. Use "-" as the body to read stdin.
+
+After a send with --mention, a reachability line prints to stderr — whether each
+target is ● online / ◐ wakeable / ○ offline (won't reach until it reconnects).
+On by default in an interactive terminal; --reach forces it, --no-reach silences it.
 
 Options:
   --channel C      send to channel C instead of the bound channel
   --mention name   mention a user or agent; repeatable
   --reply-to seq   attach this message as a reply to seq
+  --reach          show mention reachability even when not a TTY (agent loops)
+  --no-reach       never show mention reachability
   --debug-auth     print resolved auth/config source to stderr`;
 
 export interface SendInput {
@@ -137,5 +144,21 @@ export async function run(argv: string[]): Promise<number> {
   const result = await doSend({ server: auth.server, token: auth.token }, input);
   if (typeof result === "number") return result;
   console.log(`sent seq=${result.seq}`);
+  await showReach(auth.server, auth.token, parsed, input);
   return 0;
+}
+
+// 发送后的可达性反馈：@ 的目标现在能不能收到。默认仅交互终端下开（脚本/agent 循环不额外拉 presence），
+// --reach 强开、--no-reach 关。拉不到 presence 不影响已发成功（只是没这行提示）。
+async function showReach(server: string, token: string, parsed: Parsed, input: SendInput): Promise<void> {
+  const want =
+    parsed.flags.reach === true ? true : parsed.flags["no-reach"] === true ? false : Boolean(process.stdout.isTTY);
+  if (!want || input.mentions.length === 0) return;
+  try {
+    const presence = await fetchPresence(server, token, input.channel);
+    const now = Date.now();
+    console.error(formatReachLine(input.mentions.map((m) => reachOf(m, presence, now))));
+  } catch {
+    /* 锦上添花：presence 拉取失败不报错，消息已发成功 */
+  }
 }
