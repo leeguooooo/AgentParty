@@ -17,6 +17,13 @@ const EXPIRY_OPTIONS: { label: string; sec?: number }[] = [
   { label: "永不过期" }, // sec undefined
 ];
 
+// 默认单次失效（一个链接只能一个人用）——私有频道更看重隐私。用尽即失效。
+const USES_OPTIONS: { label: string; max?: number }[] = [
+  { label: "单次（一人）", max: 1 },
+  { label: "5 次", max: 5 },
+  { label: "不限次数" }, // max undefined
+];
+
 function linkUrl(link: JoinLinkInfo): string {
   return link.url ?? `${location.origin}/join/${link.code}`;
 }
@@ -36,6 +43,7 @@ export function JoinLink({ slug, token, onAuthFailed }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expiryIdx, setExpiryIdx] = useState(0);
+  const [usesIdx, setUsesIdx] = useState(0); // 默认单次
   const [copied, setCopied] = useState<string | null>(null);
 
   const handleErr = useCallback(
@@ -67,7 +75,10 @@ export function JoinLink({ slug, token, onAuthFailed }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const link = await createJoinLink(token, slug, { expiresInSec: EXPIRY_OPTIONS[expiryIdx]?.sec });
+      const link = await createJoinLink(token, slug, {
+        expiresInSec: EXPIRY_OPTIONS[expiryIdx]?.sec,
+        maxUses: USES_OPTIONS[usesIdx]?.max,
+      });
       await refresh(); // 先把新链接列出来（关键路径）
       setBusy(false);
       copy(linkUrl(link)); // best-effort：剪贴板在非聚焦标签会挂起/拒绝，绝不能阻塞上面的列表刷新
@@ -113,6 +124,16 @@ export function JoinLink({ slug, token, onAuthFailed }: Props) {
           <div className="joinlink-gen">
             <span className="joinlink-hint">生成一条邀请链接，对方点开登录即加入本私有频道。仅你（房主）可管理。</span>
             <div className="joinlink-gen-row">
+              <label className="joinlink-expiry">
+                使用次数
+                <select value={usesIdx} onChange={(e) => setUsesIdx(Number(e.target.value))} disabled={busy}>
+                  {USES_OPTIONS.map((o, i) => (
+                    <option key={o.label} value={i}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label className="joinlink-expiry">
                 有效期
                 <select value={expiryIdx} onChange={(e) => setExpiryIdx(Number(e.target.value))} disabled={busy}>
