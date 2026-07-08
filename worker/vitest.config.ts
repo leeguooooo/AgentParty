@@ -11,6 +11,10 @@ export default defineWorkersConfig(async () => {
       // （非代码 bug，隔离单跑 75ms；见 issue #43）。抬到 20s 消除随机挡发布的假超时。
       testTimeout: 20_000,
       hookTimeout: 20_000,
+      // CI 满载下 vitest-pool-workers 跨 spec 文件反复 invalidate DO（thrash），偶发把
+      // WS 握手/DO fetch 顶超时、挡住 release（#48）。CI 里 retry 1 次仅作兜底：真 bug
+      // 连挂两次仍然红，retry 通过的用例 vitest 会标 flaky、不丢信号；本地不 retry 保持严格。
+      retry: process.env.CI ? 1 : 0,
       setupFiles: ["./test/apply-migrations.ts"],
       poolOptions: {
         workers: {
