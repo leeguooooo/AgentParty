@@ -792,6 +792,8 @@ export class ChannelDO extends Server<Env> {
         WHERE rev_seq IS NULL
           AND (edited_at IS NOT NULL OR retracted_at IS NOT NULL OR supersedes IS NOT NULL OR superseded_by IS NOT NULL
                OR completion_review_state IS NOT NULL OR completion_review_replaced_by_seq IS NOT NULL)`,
+      // 发送时快照人类 handle，同 sender_owner 手法
+      "ALTER TABLE messages ADD COLUMN sender_handle TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -836,6 +838,8 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE presence ADD COLUMN status_context_json TEXT",
       "ALTER TABLE presence ADD COLUMN status_decision_json TEXT",
       "ALTER TABLE presence ADD COLUMN status_workflow_json TEXT",
+      // 当前连接的人类 handle
+      "ALTER TABLE presence ADD COLUMN handle TEXT",
     ]) {
       try {
         sql.exec(ddl);
