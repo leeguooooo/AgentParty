@@ -152,7 +152,6 @@ function CharterBanner({
 }) {
   const t = useT();
   const hasCharter = Boolean(charter?.charter);
-  if (!hasCharter && !canModerate) return null;
   return (
     <section className={"charter-banner" + (updated ? " charter-banner--updated" : "")}>
       <header className="charter-head">
@@ -189,7 +188,7 @@ function CharterBanner({
           ) : hasCharter ? (
             <Markdown source={charter!.charter!} />
           ) : (
-            <p className="d-empty">charter not set</p>
+            <p className="charter-empty">{t("Channel.charter.empty")}</p>
           )}
         </div>
       )}

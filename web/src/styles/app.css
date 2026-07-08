@@ -248,6 +248,13 @@
   padding-top: 8px;
   border-top: 1px dashed var(--t-faint);
 }
+.charter-empty {
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px dashed var(--t-faint);
+  color: var(--t-dim);
+  font-size: 13px;
+}
 .charter-editor {
   display: flex;
   flex-direction: column;
@@ -1648,11 +1655,12 @@
 .agenttokens { position: relative; }
 .agenttokens-btn { font-size: 13px; }
 .agenttokens-panel {
-  position: absolute;
+  position: fixed;
   z-index: 20;
-  top: calc(100% + 6px);
-  right: 0;
-  width: min(620px, 92vw);
+  width: min(620px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 8px;

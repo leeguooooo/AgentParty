@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AuthError,
   type ChannelAgentInfo,
@@ -28,6 +28,8 @@ type CopyTarget = `${string}:token` | `${string}:command`;
 
 export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed }: Props) {
   const t = useT();
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
   const [open, setOpen] = useState(false);
   const [agents, setAgents] = useState<ChannelAgentInfo[] | null>(null);
   const [busyName, setBusyName] = useState<string | null>(null);
@@ -54,6 +56,30 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
     setOpen(next);
     if (next && agents === null) void refresh();
   }, [agents, open, refresh]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    const updatePanelPosition = () => {
+      const anchor = rootRef.current?.getBoundingClientRect();
+      if (!anchor) return;
+      const gap = 6;
+      const margin = 12;
+      const width = Math.min(620, window.innerWidth - margin * 2);
+      const top = Math.min(anchor.bottom + gap, window.innerHeight - margin);
+      const left = Math.max(margin, Math.min(anchor.right - width, window.innerWidth - width - margin));
+      const maxHeight = Math.max(220, window.innerHeight - top - margin);
+      setPanelStyle({ left, top, width, maxHeight });
+    };
+
+    updatePanelPosition();
+    window.addEventListener("resize", updatePanelPosition);
+    window.addEventListener("scroll", updatePanelPosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePanelPosition);
+      window.removeEventListener("scroll", updatePanelPosition, true);
+    };
+  }, [open]);
 
   async function copy(name: string, kind: "token" | "command", text: string) {
     const ok = await copyText(text);
@@ -100,12 +126,12 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
   }
 
   return (
-    <div className="agenttokens">
+    <div className="agenttokens" ref={rootRef}>
       <button type="button" className="d-btn agenttokens-btn" onClick={toggle} aria-expanded={open}>
         {t("AgentTokens.open")}
       </button>
       {open && (
-        <div className="agenttokens-panel">
+        <div className="agenttokens-panel" style={panelStyle}>
           <div className="agenttokens-head">
             <span className="agenttokens-title">{t("AgentTokens.title")}</span>
             <button type="button" className="d-btn agenttokens-refresh" onClick={refresh}>
