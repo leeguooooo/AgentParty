@@ -48,6 +48,7 @@ import {
   type AgentFilterMode,
 } from "../lib/filters";
 import { shouldNotify } from "../lib/notify";
+import { summarizeReplyPreview } from "../lib/replyPreview";
 import { fmtTime } from "../lib/time";
 import { groupTeamMessages, summarizeTeams, type TeamMessageThread, type TeamSummary } from "../lib/teams";
 import { ChannelSocket } from "../lib/ws";
@@ -81,12 +82,6 @@ const MESSAGE_CAP = 300;
 const COLLAB_ROLES: CollaborationRole[] = ["host", "worker", "reviewer", "observer"];
 // 触顶阈值：滚动到离顶部这么近就预取上一页
 const TOP_LOAD_PX = 80;
-
-function summarizeReplyPreview(body: string): string {
-  const collapsed = body.replace(/\s+/g, " ").trim();
-  if (collapsed.length <= 96) return collapsed;
-  return `${collapsed.slice(0, 93)}...`;
-}
 
 function positiveInt(value: string, fallback: number, max: number): number | null {
   if (value.trim() === "") return fallback;
@@ -872,6 +867,7 @@ function TeamThread({
   editSaving,
   actionError,
   busySeq,
+  messageBySeq,
   onReply,
   onEdit,
   onRetract,
@@ -891,6 +887,8 @@ function TeamThread({
   editSaving: boolean;
   actionError: { seq: number; message: string } | null;
   busySeq: number | null;
+  // seq → 消息，用于把 reply_to 解析成完整的被引用消息（同一份 Map 从 ChannelPage 传下来，不在这里重建）
+  messageBySeq: Map<number, MsgFrame>;
   onReply: (seq: number) => void;
   onEdit: (seq: number) => void;
   onRetract: (seq: number) => void;
@@ -931,6 +929,7 @@ function TeamThread({
             readCursors={readCursors}
             participants={participants}
             canModerate={canModerate}
+            quotedMessage={message.reply_to !== null ? messageBySeq.get(message.reply_to) ?? null : null}
             onReply={onReply}
             onEdit={onEdit}
             onRetract={onRetract}
@@ -1597,6 +1596,9 @@ export function ChannelPage({
     ]),
   ].sort((a, b) => a.localeCompare(b));
   const senderListId = `senders-${slug}`;
+  // seq → 消息：给引用预览用，把 reply_to 解析成完整消息（含发送者/正文/撤回状态）而不止一个编号。
+  // 只在已加载窗口内查得到——超出 MESSAGE_CAP 或翻页边界外的历史引用会查不到，MessageCard 侧降级回纯编号。
+  const messageBySeq = useMemo(() => new Map(state.messages.map((m) => [m.seq, m])), [state.messages]);
   const completions = useMemo(() => completionMessages(state.messages), [state.messages]);
   const timelineMessages = completionOnly ? completions : state.messages;
   const visibleMessages = useMemo(() => filterByAgent(timelineMessages, agentFilter), [agentFilter, timelineMessages]);
@@ -2055,6 +2057,7 @@ export function ChannelPage({
                   readCursors={state.readCursors}
                   participants={state.participants}
                   canModerate={canModerate}
+                  quotedMessage={item.message.reply_to !== null ? messageBySeq.get(item.message.reply_to) ?? null : null}
                   onReply={startReply}
                   onEdit={startEdit}
                   onRetract={retractMessage}
@@ -2082,6 +2085,7 @@ export function ChannelPage({
                   editSaving={editSaving}
                   actionError={messageActionError}
                   busySeq={messageActionBusySeq}
+                  messageBySeq={messageBySeq}
                   onReply={startReply}
                   onEdit={startEdit}
                   onRetract={retractMessage}
