@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- chrome-use docs — hand-drawn doodle sprite.
+<!-- AgentParty docs — hand-drawn doodle sprite.
      Reference set of decorations. Copy any <symbol>'s inner <path> into an
      inline <svg> inside a `.du-doodle` span for a scattered accent, e.g.:
 
        <span class="du-doodle" style="top:-6px;right:8px;width:56px;height:56px">
          <svg viewBox="0 0 60 60" fill="none" stroke="currentColor"
               stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-           <use href="/assets/docs/doodles.svg#star"/>
+           <use href="/docs/assets/docs/doodles.svg#star"/>
          </svg>
        </span>
 
@@ -17,6 +17,12 @@
   <!-- ✦ star -->
   <symbol id="star" viewBox="0 0 60 60" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
     <path d="M30 6 l6 16 17 1 -13 11 5 16 -15 -9 -15 9 5 -16 -13 -11 17 -1z"/>
+  </symbol>
+
+  <!-- ✧ spark -->
+  <symbol id="spark" viewBox="0 0 60 60" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M30 5 C33 19 41 27 55 30 C41 33 33 41 30 55 C27 41 19 33 5 30 C19 27 27 19 30 5Z"/>
+    <path d="M44 7 C45 13 49 16 55 17 C49 18 45 21 44 27 C43 21 39 18 33 17 C39 16 43 13 44 7Z"/>
   </symbol>
 
   <!-- ☁ cloud -->
