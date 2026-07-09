@@ -35,28 +35,27 @@ export function NotifyToggle({ optin, onChange }: Props) {
 
   const toggle = () => {
     setHint(null);
-    if (!supported) return;
     if (optin) {
-      // 关闭不需要权限往返，立即生效
+      // 关闭：立即生效
       writeNotifyOptin(false);
       onChange(false);
       return;
     }
-    if (Notification.permission === "granted") {
-      writeNotifyOptin(true);
-      onChange(true);
+    // 开启：立即生效——页内 toast 不需要浏览器授权，铃铛先开起来
+    writeNotifyOptin(true);
+    onChange(true);
+    // 额外能力：切走标签时的系统通知需要浏览器授权，best-effort 申请；拒绝/不支持不回滚 optin，只提示
+    if (!supported) {
+      setHint(t("Channel.notify.inAppOnly"));
+      return;
+    }
+    if (Notification.permission === "granted") return;
+    if (Notification.permission === "denied") {
+      setHint(t("Channel.notify.inAppOnly"));
       return;
     }
     void Notification.requestPermission().then((permission) => {
-      if (permission === "granted") {
-        writeNotifyOptin(true);
-        onChange(true);
-      } else {
-        // denied / default 都保持关闭；denied 时浏览器不会再弹权限框，给一次内联提示说明原因
-        writeNotifyOptin(false);
-        onChange(false);
-        setHint(t("Channel.notify.denied"));
-      }
+      if (permission !== "granted") setHint(t("Channel.notify.inAppOnly"));
     });
   };
 
@@ -65,15 +64,13 @@ export function NotifyToggle({ optin, onChange }: Props) {
       <button
         type="button"
         className={"d-btn notify-toggle-btn" + (optin ? " is-active" : "")}
-        disabled={!supported}
         onClick={toggle}
         aria-pressed={optin}
-        title={supported ? (optin ? t("Channel.notify.onTitle") : t("Channel.notify.offTitle")) : t("Channel.notify.unsupported")}
+        title={optin ? t("Channel.notify.onTitle") : t("Channel.notify.offTitle")}
       >
         {optin ? "🔔" : "🔕"}
       </button>
-      {!supported && <span className="notify-toggle-hint t-mono">{t("Channel.notify.unsupported")}</span>}
-      {supported && hint !== null && <span className="notify-toggle-hint t-mono">{hint}</span>}
+      {hint !== null && <span className="notify-toggle-hint t-mono">{hint}</span>}
     </span>
   );
 }
