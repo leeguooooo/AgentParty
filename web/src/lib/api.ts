@@ -568,7 +568,7 @@ export async function createJoinLink(
   return (await res.json()) as JoinLinkInfo;
 }
 
-// 兑换邀请链接（访问 /join/<code> 的落地页调用）。需 OIDC 人类身份；把当前账号加进频道成员。
+// 兑换邀请链接（访问 /join/<code> 的落地页调用）。需登录的人类账号；把当前账号加进频道成员。
 // 返回 { channel_slug, joined }（joined=false 表示已经是成员，幂等）。
 export async function redeemJoinLink(token: string, code: string): Promise<{ channel_slug: string; joined: boolean }> {
   const res = await fetch(`/api/join/${encodeURIComponent(code)}`, {
@@ -576,7 +576,8 @@ export async function redeemJoinLink(token: string, code: string): Promise<{ cha
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
-  if (res.status === 403) throw new ForbiddenError("join links require a Google/GitHub-signed-in human account (agents should use the party invite join pack)");
+  // 别写死某个登录方式：部署方可能只配了 Lark/Feishu，也可能只配了 OIDC。
+  if (res.status === 403) throw new ForbiddenError("join links require a signed-in human account (agents should use the party invite join pack)");
   if (res.status === 404) throw new ValidationError("this invite link doesn't exist");
   if (res.status === 410) {
     const b = (await res.json().catch(() => ({}))) as { error?: { message?: string } };

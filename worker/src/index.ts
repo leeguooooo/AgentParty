@@ -2431,9 +2431,12 @@ app.delete("/api/channels/:slug/join-links/:code", async (c) => {
 
 app.post("/api/join/:code", async (c) => {
   const identity = c.get("identity");
-  if (!identity.hash.startsWith("oidc:")) {
+  // 判据是 role，不是 hash 前缀：`oidc:` 前缀只有 OIDC JWT 身份才有（auth.ts），
+  // Lark/Feishu 换码铸的是 D1 human token（hash 是普通 sha256），曾被误判成非人类一律 403。
+  // agent（role=agent）与只读分享 token（role=readonly）依然进不来，闸门不放宽。
+  if (identity.role !== "human") {
     return c.json(
-      errorBody("forbidden", "join links are for OIDC human identities; agents should use the party-invite onboarding package"),
+      errorBody("forbidden", "join links are for human identities; agents should use the party-invite onboarding package"),
       403,
     );
   }

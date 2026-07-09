@@ -141,6 +141,40 @@ describe("join links", () => {
     expect((await env.DB.prepare("SELECT uses FROM channel_join_links WHERE code = ?").bind(limitedCode).first<{ uses: number }>())?.uses).toBe(1);
   });
 
+  // 回归：Lark/Feishu 换码铸的是 D1 human token（hash 非 `oidc:` 前缀）。旧闸门按 hash 前缀判，
+  // 把这类真人一律 403 —— 只配 Lark 登录的部署上邀请链接彻底不可用，房主只能把频道降级成 public 绕开。
+  it("accepts non-OIDC human accounts (Lark/Feishu session tokens), still rejects agent and readonly", async () => {
+    const owner = await seedToken("agent", uniq("owner"), { owner: `${uniq("owner")}@example.com` });
+    const slug = await makeChannel(owner.token);
+    const created = await api(`/api/channels/${slug}/join-links`, owner.token, { method: "POST" });
+    const { code } = (await created.json()) as { code: string };
+
+    // Lark 登录后的身份：role=human + owner(account)，token 落 D1，hash 是普通 sha256
+    const larkAccount = `lark:${uniq("union")}`;
+    const larkHuman = await seedToken("human", uniq("lark-human"), { owner: larkAccount });
+    const joined = await api(`/api/join/${code}`, larkHuman.token, { method: "POST" });
+    expect(joined.status).toBe(200);
+    expect(await joined.json()).toMatchObject({ channel_slug: slug, joined: true });
+    const member = await env.DB.prepare("SELECT account FROM channel_members WHERE channel_slug = ? AND account = ?")
+      .bind(slug, larkAccount)
+      .first<{ account: string }>();
+    expect(member?.account).toBe(larkAccount);
+
+    // 幂等：再兑换一次不重复计数
+    expect((await api(`/api/join/${code}`, larkHuman.token, { method: "POST" })).status).toBe(200);
+    expect((await env.DB.prepare("SELECT uses FROM channel_join_links WHERE code = ?").bind(code).first<{ uses: number }>())?.uses).toBe(1);
+
+    // 闸门不放宽：agent 与只读分享 token 依旧 403
+    const agent = await seedToken("agent", uniq("agent"), { owner: `${uniq("agent")}@example.com` });
+    expect((await api(`/api/join/${code}`, agent.token, { method: "POST" })).status).toBe(403);
+    const readonly = await seedToken("readonly", uniq("ro"), { owner: `${uniq("ro")}@example.com` });
+    expect((await api(`/api/join/${code}`, readonly.token, { method: "POST" })).status).toBe(403);
+
+    // legacy human token（无 owner → 无 account）仍然 403
+    const legacy = await seedToken("human", uniq("legacy"));
+    expect((await api(`/api/join/${code}`, legacy.token, { method: "POST" })).status).toBe(403);
+  });
+
   it("moderator lists and revokes join links", async () => {
     const owner = await seedToken("agent", uniq("owner"), { owner: `${uniq("owner")}@example.com` });
     const slug = await makeChannel(owner.token);
