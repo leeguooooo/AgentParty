@@ -653,6 +653,10 @@
   padding: 4px 4px 8px;
   flex: none;
 }
+/* 折叠态（默认）：没有 chip 条，收紧一点垂直空间 */
+.presence-bar--collapsed {
+  padding-bottom: 4px;
+}
 .presence-meta,
 .presence-strip {
   display: flex;
@@ -811,6 +815,43 @@
   font-size: 11px;
   color: var(--t-dim);
   white-space: nowrap;
+}
+/* 展开/折叠 toggle：计数本身就是按钮，旁边一个箭头，涂鸦风格的轻量小 pill */
+.presence-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 2px 8px 3px;
+  border: 1.5px solid var(--t-faint);
+  border-radius: 999px 8px 999px 8px / 8px 999px 8px 999px;
+  background: var(--t-panel2);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+}
+.presence-toggle:hover {
+  border-color: var(--d-ink);
+  background: var(--d-yellow);
+  color: var(--d-ink);
+  transform: translate(-1px, -1px) rotate(-1deg);
+}
+.presence-toggle:focus-visible {
+  outline: 2px solid var(--d-ink);
+  outline-offset: 2px;
+}
+.presence-toggle[aria-expanded="true"] {
+  border-color: var(--d-ink);
+  background: var(--t-panel);
+}
+.presence-toggle .presence-summary {
+  color: inherit;
+}
+.presence-toggle-arrow {
+  font-size: 10px;
+  line-height: 1;
+  color: inherit;
 }
 .presence-alert {
   padding: 1px 6px;
@@ -1008,46 +1049,6 @@
   background: var(--d-green-soft);
 }
 .presence-ts { font-size: 10px; font-weight: 400; color: var(--t-dim); }
-.presence-more {
-  position: relative;
-  flex: none;
-}
-.presence-more > summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: 30px;
-  padding: 2px 8px;
-  border: 1.5px solid var(--t-faint);
-  border-radius: 8px;
-  color: var(--t-muted);
-  background: var(--t-panel2);
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-}
-.presence-more > summary::-webkit-details-marker { display: none; }
-.presence-more[open] > summary {
-  border-color: var(--d-ink);
-  background: var(--d-yellow);
-  color: var(--d-ink);
-}
-.presence-more-list {
-  position: absolute;
-  z-index: 20;
-  right: 0;
-  top: calc(100% + 8px);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-  width: min(520px, calc(100vw - 48px));
-  max-height: 44vh;
-  overflow: auto;
-  padding: 10px;
-  border: 2px solid var(--d-ink);
-  border-radius: 10px 8px 12px 7px / 8px 12px 7px 10px;
-  background: var(--t-panel);
-  box-shadow: 4px 5px 0 var(--d-shadow);
-}
 .presence-kick {
   flex: none;
   min-height: 22px;
@@ -1114,6 +1115,9 @@
   font-size: 11px;
   color: var(--t-dim);
   white-space: nowrap;
+  /* presence-strip 折叠时中间列少了 chip，conn 会落进那个 1fr 空列——
+     强制贴右边，不然折叠态看着像挤在中间。 */
+  justify-self: end;
 }
 .conn[data-s="open"] { color: var(--d-green); }
 .conn[data-s="reconnecting"] { color: var(--d-red); }
@@ -3203,7 +3207,11 @@
     gap: 6px;
     padding: 0 2px 2px;
   }
-  .presence-meta { display: none; }
+  /* 小屏也要留 toggle（chip 条折叠时全靠它展开），只是不再强制隐藏 meta —— 折叠态默认只占一行 */
+  .presence-meta {
+    flex-wrap: wrap;
+    gap: 5px;
+  }
   .presence-strip {
     grid-column: 1 / -1;
     flex-wrap: wrap;
@@ -3211,11 +3219,6 @@
     overflow-x: hidden;
     overflow-y: auto;
     padding: 1px 2px 3px;
-  }
-  .presence-more-list {
-    right: auto;
-    left: 0;
-    width: calc(100vw - 32px);
   }
   .presence-group {
     flex: 1 1 100%;

@@ -162,6 +162,25 @@ function groupRank(group: PresenceGroup, now: number): number {
   return Math.min(...group.items.map((item) => presenceRank(item, now)));
 }
 
+// 展开/折叠偏好：默认折叠（人多时顶部不挤），记住用户上次选择。
+const PRESENCE_EXPANDED_KEY = "ap_presence_expanded";
+
+export function readPresenceExpanded(): boolean {
+  try {
+    return localStorage.getItem(PRESENCE_EXPANDED_KEY) === "1";
+  } catch {
+    return false; // 私有模式等场景 localStorage 不可用时，默认折叠
+  }
+}
+
+function writePresenceExpanded(expanded: boolean): void {
+  try {
+    localStorage.setItem(PRESENCE_EXPANDED_KEY, expanded ? "1" : "0");
+  } catch {
+    // 写入失败不阻断本次切换，只是刷新/换标签页后会回落到默认折叠
+  }
+}
+
 export function PresenceBar({
   presence,
   participants,
@@ -181,6 +200,9 @@ export function PresenceBar({
     return () => clearInterval(t);
   }, []);
   const now = Date.now();
+
+  // 默认折叠，展开态记 localStorage（记住偏好）。
+  const [expanded, setExpanded] = useState(() => readPresenceExpanded());
 
   // 在线 sender 带 owner；离线/最近 presence 带 account。两者都归到同一账号块。
   const byName = new Map(participants.map((p) => [p.name, p]));
@@ -243,13 +265,21 @@ export function PresenceBar({
     return a.label.localeCompare(b.label);
   });
   const [hoveredGroup, setHoveredGroup] = useState<{ key: string; left: number; top: number; width: number } | null>(null);
-  const visibleGroups = sortedGroups.slice(0, 4);
-  const overflowGroups = sortedGroups.slice(4);
+  function toggleExpanded() {
+    setHoveredGroup(null); // 折叠会把 chip 移出 DOM，先关掉可能悬着的 popover
+    setExpanded((prev) => {
+      const next = !prev;
+      writePresenceExpanded(next);
+      return next;
+    });
+  }
   // 顶部计数按账号折叠后的人数（非会话行数）——离线会话已在 buildGroups 里按 account 归并。
   const { live: liveGroups, total: totalGroups } = countLiveGroups(sortedGroups);
   const blockedCount = items.filter((it) => it.state === "blocked").length;
   const duplicateCount = items.filter((it) => it.connectionCount > 1).length;
-  const activePopoverGroup = hoveredGroup === null ? null : sortedGroups.find((group) => group.key === hoveredGroup.key) ?? null;
+  // 折叠态下 chip 不在 DOM 里，popover 也不该跟着冒出来。
+  const activePopoverGroup =
+    !expanded || hoveredGroup === null ? null : sortedGroups.find((group) => group.key === hoveredGroup.key) ?? null;
 
   function showGroupPopover(group: PresenceGroup, rect: DOMRect) {
     const margin = 10;
@@ -429,26 +459,29 @@ export function PresenceBar({
   }
 
   return (
-    <div className="presence-bar">
+    <div className={`presence-bar${expanded ? "" : " presence-bar--collapsed"}`}>
       <div className="presence-meta" aria-label="channel presence summary">
         {isPublic && <span className="d-hl public-badge">PUBLIC</span>}
         {party && <span className="d-hl party-badge">PARTY</span>}
-        <span className="t-mono presence-summary">
-          {liveGroups}/{totalGroups} live
-        </span>
+        <button
+          type="button"
+          className="presence-toggle"
+          aria-expanded={expanded}
+          aria-label={t(expanded ? "PresenceBar.collapse" : "PresenceBar.expand")}
+          onClick={toggleExpanded}
+        >
+          <span className="t-mono presence-summary">
+            {liveGroups}/{totalGroups} live
+          </span>
+          <span className="presence-toggle-arrow" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+        </button>
         {blockedCount > 0 && <span className="t-mono presence-alert">{blockedCount} blocked</span>}
         {duplicateCount > 0 && <span className="t-mono presence-alert presence-alert--duplicate">{duplicateCount} duplicate</span>}
       </div>
-      <div className="presence-strip" aria-label="participant groups by owner">
-        {visibleGroups.map((group) => renderGroup(group, "compact"))}
-      </div>
-      {overflowGroups.length > 0 && (
-        <details className="presence-more">
-          <summary className="t-mono" title={`${overflowGroups.length} more owners`}>
-            +{overflowGroups.length}
-          </summary>
-          <div className="presence-more-list">{overflowGroups.map((group) => renderGroup(group, "full"))}</div>
-        </details>
+      {expanded && (
+        <div className="presence-strip" aria-label="participant groups by owner">
+          {sortedGroups.map((group) => renderGroup(group, "compact"))}
+        </div>
       )}
       {items.length === 0 && (
         <span className="t-mono presence-empty" role="status" aria-live="polite">
