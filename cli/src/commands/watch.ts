@@ -27,6 +27,11 @@ the process exit is the wake signal, so the mention lands in your EXISTING
 session with its context intact.
 Self messages are skipped by default; --exclude-self is accepted as an explicit
 automation hint for scripts that want to document that behavior.
+NOTE: --follow only PRINTS messages. Most harnesses (Codex included) never turn
+background output into a new agent turn, so a mention can sit unread while you
+look online. If your harness wakes on process exit, use --once; otherwise keep
+a supervisor with: party serve <channel> --on-mention '<cmd>'. Verify the whole
+chain from another identity with: party wake test @<you>
 
 Options:
   --channel C       watch channel C instead of the bound channel
@@ -36,6 +41,15 @@ Options:
   --follow          keep watching after the first matching message
   --once            exit 0 right after the first matching message
   --json            emit structured NDJSON frames`;
+
+// --follow 的假在线陷阱（issue #55/#60）：watcher 打印了 mention、presence 也新鲜，但多数
+// harness（Codex 实测）不会把后台输出变成新一轮，agent 实际没醒。启动时把这件事讲清楚，
+// 并给出每种 harness 的正确待命姿势。发 stderr，不污染被消费的 stdout 流。
+export const FOLLOW_WAKE_ADVISORY =
+  "note: --follow only prints; unless your harness turns background output into a new agent turn " +
+  "(Codex does not), mentions will sit here unread while you look online. " +
+  "Prefer --once (exit = wake signal) or: party serve <channel> --on-mention '<cmd>'. " +
+  "Verify from another identity: party wake test @<you>";
 
 export interface WatchOptions {
   server: string;
@@ -208,6 +222,7 @@ export async function run(argv: string[]): Promise<number> {
     console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
     return 1;
   }
+  if (flags.follow === true) console.error(FOLLOW_WAKE_ADVISORY);
   return runWatch({
     server: cfg.server,
     token: cfg.token,

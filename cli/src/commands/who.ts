@@ -15,13 +15,16 @@ List who is in a channel, tiered by how you can reach them:
   ● online    connected right now
   ◐ wakeable  not connected, but @-mention will wake them (serve/watch/webhook)
   ○ recent    seen lately; mention delivers, wake not guaranteed
+wake=serve runs a live supervisor and webhook is server-delivered; wake=watch is
+self-declared and depends on the harness actually resuming the agent, so it is
+shown as "watch (unverified)" until proven — check with: party wake test @name
 A "read #N / read ✓ / N behind" note shows how far a streaming reader (web, or an
 agent on serve / watch --follow) has read. No note = not a line-by-line reader.
 Then bring one in: party send "@name …" --mention name
 
 Options:
   --channel C   read channel C instead of the bound channel
-  --json        emit one JSON object per line (name/kind/tier/wake/age_ms/read_seq)`;
+  --json        emit one JSON object per line (name/kind/tier/wake/wake_unverified/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -35,6 +38,10 @@ interface Row {
   kind: SenderKind;
   tier: Tier;
   wake?: WakeKind;
+  // watch 型 wake 是自报的：presence 新鲜只证明 watcher 进程活着，不证明 harness 会因它的
+  // 输出唤醒 agent（issue #55/#60 的假在线）。没有 wake 验证记录就如实标注，让调用方先
+  // party wake test 再依赖。serve 有活的 supervisor、webhook 由服务端投递，不带此标记。
+  wake_unverified?: true;
   age_ms: number;
   connection_count?: number;
   read_seq?: number; // 读到的最大 seq（Phase 2）；无游标 = 不逐帧流式读，不标注
@@ -68,6 +75,7 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     kind,
     tier,
     ...(wake === undefined ? {} : { wake }),
+    ...(wake === "watch" && e.wake?.verified_at === undefined ? { wake_unverified: true as const } : {}),
     age_ms: age,
     ...(typeof e.connection_count === "number" && e.connection_count > 1
       ? { connection_count: e.connection_count }
@@ -159,7 +167,7 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     }
     for (const r of rows) {
-      const wake = r.tier === "wakeable" && r.wake ? ` ${r.wake}` : "";
+      const wake = r.tier === "wakeable" && r.wake ? ` ${r.wake}${r.wake_unverified === true ? " (unverified)" : ""}` : "";
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
       const duplicate = r.connection_count !== undefined ? ` x${r.connection_count} sessions` : "";
       const read = readNote(r.read_seq, lastSeq);

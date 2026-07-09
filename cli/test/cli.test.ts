@@ -128,6 +128,22 @@ describe("cli subprocess", () => {
     expect(r.stderr).toBe("");
   }, 15_000);
 
+  test("watch --follow 把假在线警告发到 stderr，stdout 流不受污染（#55/#60）", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") sock.send(welcomeFrame(0));
+    });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: server.url, token: "ap_tok" }),
+    );
+    const r = await runCli(["watch", "dev", "--follow", "--mentions-only", "--timeout", "1"]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--once");
+    expect(r.stderr).toContain("party wake test");
+    expect(r.stdout).not.toContain("party wake test");
+  }, 15_000);
+
   test("watch --channel 优先于绑定频道", async () => {
     server = startMockServer((frame, sock) => {
       if (frame.type === "hello") sock.send(welcomeFrame(0));

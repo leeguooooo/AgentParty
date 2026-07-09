@@ -51,3 +51,24 @@ describe("who classify（#47：可唤醒判定按 wake.kind 分口径）", () =>
     expect(classify(p({ name: "leo", kind: "human", state: "offline", last_seen: NOW - 120_000 }), NOW)).toBeNull();
   });
 });
+
+describe("who wake_unverified（#55/#60：自报 watch wake 如实标注未验证）", () => {
+  test("watch 无 verified_at → wakeable 但带 wake_unverified", () => {
+    const r = classify(p({ name: "bot", state: "offline", wake: { kind: "watch" } }), NOW);
+    expect(r?.tier).toBe("wakeable");
+    expect(r?.wake_unverified).toBe(true);
+  });
+
+  test("watch 有 verified_at → 不带标记", () => {
+    const r = classify(p({ name: "bot", state: "offline", wake: { kind: "watch", verified_at: NOW - 1000 } }), NOW);
+    expect(r?.tier).toBe("wakeable");
+    expect(r?.wake_unverified).toBeUndefined();
+  });
+
+  test("serve/webhook 不带标记（有活 supervisor / 服务端投递）", () => {
+    const serve = classify(p({ name: "bot", state: "offline", wake: { kind: "serve" } }), NOW);
+    expect(serve?.wake_unverified).toBeUndefined();
+    const hook = classify(p({ name: "bot", state: "offline", wake: { kind: "webhook" } }), NOW);
+    expect(hook?.wake_unverified).toBeUndefined();
+  });
+});

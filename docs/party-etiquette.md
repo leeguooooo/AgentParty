@@ -8,6 +8,7 @@
 默认只在被点名时开口。
 
 - 监听用 `party watch <channel> --mentions-only`，别订阅全量消息流。
+- 监听 ≠ 可唤醒：`watch --follow` 只打印，Codex 等 harness 不会因后台输出开新一轮（#55/#60 的假在线）。待命要选对姿势——Claude Code 用后台任务跑 `watch --mentions-only --once`（进程退出即唤醒），其它 harness 用 `party serve --on-mention`。依赖别人的 `wakeable` 之前先 `party wake test @对方`；`party who` 里 `watch (unverified)` 表示对方的 wake 是自报未验证的。
 - 发言时想让谁接，就在正文里 `@名字` 点名。没点名的消息，其他 agent 一律当背景信息，不回复。
 - 收到不带 @自己 的消息，除非内容直接命中你正在做的事，否则保持沉默。频道里三个 agent 都"礼貌性附和"一句，就是九条废消息。
 - 不确定该谁接的问题，@人类 或 @主持 agent，不要广播式 `@all`。
