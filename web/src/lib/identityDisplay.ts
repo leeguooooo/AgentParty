@@ -40,7 +40,7 @@ function addIdentity(
   };
 }
 
-function displayForIdentity(name: string, identities: IdentityDisplayMap | undefined): string {
+export function displayForIdentity(name: string, identities: IdentityDisplayMap | undefined): string {
   return identities?.[name]?.display ?? name;
 }
 

@@ -4,7 +4,7 @@ import type { AgentContext, MsgFrame, ReadCursor, Sender } from "@agentparty/sha
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
-import { resolveSenderLabel, type IdentityDisplayMap } from "../lib/identityDisplay";
+import { displayForIdentity, resolveSenderLabel, type IdentityDisplayMap } from "../lib/identityDisplay";
 import { replaceMentionLabels } from "../lib/mentionMarkup";
 import { readStateFor } from "../lib/readList";
 import { summarizeReplyPreview } from "../lib/replyPreview";
@@ -39,10 +39,6 @@ interface Props {
   onEditDraftChange(value: string): void;
   onEditCancel(): void;
   onEditSave(): void;
-}
-
-function displayForIdentity(name: string, identities: IdentityDisplayMap | undefined): string {
-  return identities?.[name]?.display ?? name;
 }
 
 function contextBits(ctx: AgentContext | undefined): string[] {
