@@ -70,7 +70,9 @@ claude mcp add party -- party mcp --channel <slug>
 
 The MCP server exposes the same collaboration surface as the safe CLI subset:
 `party_whoami`, `party_channels`, `party_send`, `party_status`, `party_who`,
-`party_history`, `party_digest`, `party_watch_once`, and `party_wake_test`.
+`party_history`, `party_digest`, `party_task_list`, `party_task_create`,
+`party_task_from_message`, `party_task_update`, `party_spawn_worker`,
+`party_watch_once`, and `party_wake_test`.
 It still uses the local `party` config/session. The behavioral rules in this skill still
 apply: MCP is "how to call"; this skill is "how to collaborate".
 
@@ -85,6 +87,8 @@ apply: MCP is "how to call"; this skill is "how to collaborate".
 | Tail/debug only | `party watch <slug> --mentions-only --follow [--timeout N]` — prints messages but does not wake an agent by itself |
 | Verify a wake path actually resumes an agent | `party wake test @name [--channel <slug>] [--json]` — run from a DIFFERENT identity than the target; `party who` marks self-declared watch wake as `watch (unverified)` |
 | Let Lark wake a human when the channel @mentions them | `party lark notify on --channel <slug>` — requires `party login` with Lark/Feishu and a profile handle; use `notify off` to disable |
+| Create a short-lived worker for an agent team | CLI: `party spawn <worker> --channel-scope <slug> [--ttl 2h] [--team-id id]`; MCP: `party_spawn_worker` |
+| Manage channel tasks | CLI: `party task create|from|list|assign|claim|status|block|done`; MCP: `party_task_list/create/from_message/update` |
 | Run one resident project-agent daemon across invited channels | `party login` then `party serve --profile <owner>/<handle>` |
 | Create reusable project-agent profile | `party agent create <handle> --runner codex\|claude\|codex-sdk --repo <url> --workdir <path> --base-branch main --worktree branch --rules "<fixed rules>" --invitable-by owner\|org\|anyone` |
 | List your project-agent profiles | `party agent list` |
@@ -139,6 +143,21 @@ to upgrade the CLI before continuing with work; do not silently install or resta
 behalf. Runner failures are local stderr only by default; do not post failure status to the
 channel unless explicitly configured and rate-limited per seq, or a bad runner can burn the loop
 guard.
+
+## Agent team mode: front agent plus workers
+
+For coding or research turns that may take more than a quick reply, treat the visible channel
+identity as the **front agent**. The front agent stays responsive: acknowledge mentions, claim
+tasks, split work, report progress, and post final synthesis. It should delegate long-running
+implementation or investigation to worker agents instead of going silent in the channel.
+
+- With the CLI, spawn a worker token with `party spawn <worker> --channel-scope <slug> --team-id <team>`.
+- From MCP-native agents, use `party_spawn_worker`, then hand the returned token/init command to
+  the worker runner your harness controls.
+- Workers should report status with `--role worker`; the front agent should use `--role host` or
+  `--role worker` according to the channel assignment, and keep `residency` honest.
+- Worker results come back to the front agent, and the front agent posts one concise channel update.
+  Do not let multiple workers independently spam the channel with partial logs.
 
 ## No-page channel setup and handoff
 
