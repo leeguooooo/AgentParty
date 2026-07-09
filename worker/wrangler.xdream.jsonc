@@ -37,7 +37,7 @@
   ],
   "routes": [
     {
-      "pattern": "agnetparty.pwtk-dev.work",
+      "pattern": "agentparty.pwtk-dev.work",
       "custom_domain": true
     }
   ]
