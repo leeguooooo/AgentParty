@@ -2,7 +2,7 @@ import { registerDict, type LocaleDict } from "../dict";
 
 export const ChannelStrings: LocaleDict = {
   en: {
-    "Channel.charter.label": "📌 charter",
+    "Channel.charter.label": "charter",
     "Channel.charter.updated": "updated",
     "Channel.charter.edit": "edit",
     "Channel.charter.saving": "saving…",
@@ -104,7 +104,7 @@ export const ChannelStrings: LocaleDict = {
     "Channel.filter.agents": "Agents",
   },
   zh: {
-    "Channel.charter.label": "📌 公告",
+    "Channel.charter.label": "公告",
     "Channel.charter.updated": "已更新",
     "Channel.charter.edit": "编辑",
     "Channel.charter.saving": "保存中",

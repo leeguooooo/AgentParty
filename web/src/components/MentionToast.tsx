@@ -48,7 +48,10 @@ function ToastCard({
       }}
     >
       <div className="mention-toast-head">
-        <span className="mention-toast-title">🔔 {t("Channel.toast.title", { sender: senderLabel, channel })}</span>
+        <span className="mention-toast-title">
+          <span className="ap-icon ap-icon--bell-on" aria-hidden="true" />
+          <span>{t("Channel.toast.title", { sender: senderLabel, channel })}</span>
+        </span>
         <button
           type="button"
           className="mention-toast-close"

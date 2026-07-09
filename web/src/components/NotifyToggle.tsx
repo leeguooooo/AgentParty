@@ -66,9 +66,10 @@ export function NotifyToggle({ optin, onChange }: Props) {
         className={"d-btn notify-toggle-btn" + (optin ? " is-active" : "")}
         onClick={toggle}
         aria-pressed={optin}
+        aria-label={optin ? t("Channel.notify.onTitle") : t("Channel.notify.offTitle")}
         title={optin ? t("Channel.notify.onTitle") : t("Channel.notify.offTitle")}
       >
-        {optin ? "🔔" : "🔕"}
+        <span className={`ap-icon ${optin ? "ap-icon--bell-on" : "ap-icon--bell-off"}`} aria-hidden="true" />
       </button>
       {hint !== null && <span className="notify-toggle-hint t-mono">{hint}</span>}
     </span>
