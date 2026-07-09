@@ -129,8 +129,33 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  gap: 4px;
+  color: var(--t-muted);
+  background: var(--t-panel2);
+}
+/* 已设昵称态：静态就要看出"可点/可改"，不必等 hover 才靠 title 提示 */
+.handlesetup-trigger:hover,
+.handlesetup-trigger:focus-visible {
+  color: var(--t-accent);
+}
+.handlesetup-trigger:hover::before,
+.handlesetup-trigger:focus-visible::before {
+  border-color: var(--t-accent);
+}
+.handlesetup-trigger-edit {
+  flex: none;
+  font-size: 11px;
+  opacity: 0.65;
+  transition: opacity 0.12s ease;
+}
+.handlesetup-trigger:hover .handlesetup-trigger-edit,
+.handlesetup-trigger:focus-visible .handlesetup-trigger-edit {
+  opacity: 1;
 }
 .handlesetup-trigger--cta { background: var(--d-yellow); color: var(--d-ink); font-weight: 700; }
+.handlesetup-trigger--cta .handlesetup-trigger-edit { opacity: 0.8; }
+.handlesetup-trigger--cta:hover,
+.handlesetup-trigger--cta:focus-visible { color: var(--d-ink); }
 /* fixed + JS 算好的 left/top/width/maxHeight（手法同 AgentTokens 的视口钳制修复），
    避免贴在顶栏右侧时在窄屏/滚动下溢出视口。 */
 .handlesetup-panel {

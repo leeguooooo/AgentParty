@@ -445,6 +445,9 @@ export function App() {
               aria-expanded={handleSetupOpen}
               title={me.handle !== null ? t("App.handle.editHint") : t("App.handle.setCta")}
             >
+              <span className="handlesetup-trigger-edit" aria-hidden="true">
+                ✎
+              </span>
               {me.handle !== null ? `@${me.handle}` : t("App.handle.setCta")}
             </button>
           </span>
