@@ -46,6 +46,7 @@ function sameCandidateNames(prev: MentionCandidate[], next: MentionCandidate[]):
 function groupLabel(group: string, t: TFunc): string {
   if (group === "human sessions") return t("Composer.group.humanSessions");
   if (group === "unowned agents") return t("Composer.group.unownedAgents");
+  if (group === "squads") return t("Composer.group.squads");
   return group;
 }
 

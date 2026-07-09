@@ -22,6 +22,7 @@ import {
   type TaskAssigneeKind,
   type TaskRecord,
   type TaskState,
+  type ChannelSquad,
   type TokenRole,
   type WakeDelivery,
   type WebhookFilter,
@@ -32,6 +33,7 @@ export type { ChannelMode, WebhookFilter };
 export type { CompletionGate, CompletionReview, CompletionReviewPolicy };
 export type { CaptureKind, CaptureRecord };
 export type { TaskAssigneeKind, TaskRecord, TaskState };
+export type { ChannelSquad };
 
 // 频道可见性：public = 任何鉴权身份可进；private（默认）= 仅 leo 的 ap_ token + 房主（spec §3.2）
 export type ChannelVisibility = "public" | "private";
@@ -621,6 +623,64 @@ export async function updateTask(
     headers: bearerJson(token),
     body: JSON.stringify(body),
   })) as TaskRecord;
+}
+
+export async function listSquads(server: string, token: string, slug: string): Promise<ChannelSquad[]> {
+  const body = await req(server, `/api/channels/${encodeURIComponent(slug)}/squads`, {
+    headers: bearerJson(token),
+  });
+  const squads = (body as Record<string, unknown> | null)?.squads;
+  return Array.isArray(squads) ? (squads as ChannelSquad[]) : [];
+}
+
+export async function createSquad(
+  server: string,
+  token: string,
+  slug: string,
+  body: {
+    name: string;
+    title?: string;
+    description?: string;
+    leader?: string | null;
+    members: string[];
+  },
+): Promise<ChannelSquad> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/squads`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify(body),
+  })) as ChannelSquad;
+}
+
+export async function updateSquad(
+  server: string,
+  token: string,
+  slug: string,
+  name: string,
+  body: {
+    title?: string | null;
+    description?: string | null;
+    leader?: string | null;
+    members?: string[];
+  },
+): Promise<ChannelSquad> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/squads/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    headers: bearerJson(token),
+    body: JSON.stringify(body),
+  })) as ChannelSquad;
+}
+
+export async function deleteSquad(
+  server: string,
+  token: string,
+  slug: string,
+  name: string,
+): Promise<{ ok: true; squad: ChannelSquad }> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/squads/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: bearerJson(token),
+  })) as { ok: true; squad: ChannelSquad };
 }
 
 export async function fetchMessages(

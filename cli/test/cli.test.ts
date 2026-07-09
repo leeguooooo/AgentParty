@@ -68,6 +68,7 @@ describe("cli subprocess", () => {
       "mcp",
       "lark",
       "task",
+      "squad",
       "charter",
       "statusline",
     ];
@@ -440,6 +441,79 @@ describe("cli subprocess", () => {
         anchor_seqs: [7],
       },
     });
+  });
+
+  test("squad command creates, lists, updates, and deletes through REST", async () => {
+    const seen: { method: string; path: string; body: unknown }[] = [];
+    const squad = {
+      type: "squad",
+      channel: "dev",
+      name: "frontend",
+      title: "Frontend",
+      description: null,
+      leader: "alice",
+      members: ["alice", "bob"],
+      created_by: "me",
+      created_by_kind: "agent",
+      created_at: 1,
+      updated_at: 1,
+    };
+    restServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        const body = req.method === "GET" || req.method === "DELETE" ? null : await req.json().catch(() => null);
+        seen.push({ method: req.method, path: `${url.pathname}${url.search}`, body });
+        if (url.pathname === "/api/channels/dev/squads" && req.method === "POST") {
+          return Response.json(squad, { status: 201 });
+        }
+        if (url.pathname === "/api/channels/dev/squads" && req.method === "GET") {
+          return Response.json({ squads: [squad] });
+        }
+        if (url.pathname === "/api/channels/dev/squads/frontend" && req.method === "PATCH") {
+          return Response.json({ ...squad, leader: "bob", members: ["bob"] });
+        }
+        if (url.pathname === "/api/channels/dev/squads/frontend" && req.method === "DELETE") {
+          return Response.json({ ok: true, squad });
+        }
+        return Response.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
+      },
+    });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: `http://127.0.0.1:${restServer.port}`, token: "ap_tok" }),
+    );
+
+    const create = await runCli(["squad", "create", "frontend", "--channel", "dev", "--member", "alice", "--member", "bob", "--leader", "alice", "--title", "Frontend"]);
+    expect(create.code).toBe(0);
+    expect(create.stdout).toContain("created @frontend");
+
+    const list = await runCli(["squad", "list", "--channel", "dev"]);
+    expect(list.code).toBe(0);
+    expect(list.stdout).toContain("@frontend");
+
+    const update = await runCli(["squad", "update", "frontend", "--channel", "dev", "--member", "bob", "--leader", "bob"]);
+    expect(update.code).toBe(0);
+    expect(update.stdout).toContain("leader:@bob");
+
+    const del = await runCli(["squad", "delete", "frontend", "--channel", "dev"]);
+    expect(del.code).toBe(0);
+    expect(del.stdout).toContain("deleted @frontend");
+
+    expect(seen).toContainEqual({
+      method: "POST",
+      path: "/api/channels/dev/squads",
+      body: { name: "frontend", members: ["alice", "bob"], leader: "alice", title: "Frontend" },
+    });
+    expect(seen).toContainEqual({ method: "GET", path: "/api/channels/dev/squads", body: null });
+    expect(seen).toContainEqual({
+      method: "PATCH",
+      path: "/api/channels/dev/squads/frontend",
+      body: { members: ["bob"], leader: "bob" },
+    });
+    expect(seen).toContainEqual({ method: "DELETE", path: "/api/channels/dev/squads/frontend", body: null });
   });
 
   test("charter template works without config", async () => {

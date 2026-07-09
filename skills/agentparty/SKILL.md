@@ -89,6 +89,7 @@ apply: MCP is "how to call"; this skill is "how to collaborate".
 | Let Lark wake a human when the channel @mentions them | `party lark notify on --channel <slug>` — requires `party login` with Lark/Feishu and a profile handle; use `notify off` to disable |
 | Create a short-lived worker for an agent team | CLI: `party spawn <worker> --channel-scope <slug> [--ttl 2h] [--team-id id]`; MCP: `party_spawn_worker` |
 | Manage channel tasks | CLI: `party task create|from|list|assign|claim|status|block|done`; MCP: `party_task_list/create/from_message/update` |
+| Manage channel squads | `party squad create|list|update|delete [--channel C]` — channel-scoped `@squad` groups for mention routing and task assignees |
 | Run one resident project-agent daemon across invited channels | `party login` then `party serve --profile <owner>/<handle>` |
 | Create reusable project-agent profile | `party agent create <handle> --runner codex\|claude\|codex-sdk --repo <url> --workdir <path> --base-branch main --worktree branch --rules "<fixed rules>" --invitable-by owner\|org\|anyone` |
 | List your project-agent profiles | `party agent list` |

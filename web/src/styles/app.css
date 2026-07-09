@@ -3079,6 +3079,11 @@
   color: var(--t-accent);
   border-color: var(--d-yellow);
 }
+.mention-kind--squad {
+  color: var(--d-purple);
+  border-color: var(--d-purple);
+  background: var(--d-surface);
+}
 /* 协作角色/职责小标（issue #38，hover 看 title 有完整） */
 .mention-role {
   font-size: 10.5px;

@@ -4,6 +4,7 @@ import type {
   AgentLineage,
   CaptureKind,
   ChannelRoleAssignment,
+  ChannelSquad,
   CaptureRecord,
   CompletionGate,
   CompletionReviewPolicy,
@@ -208,6 +209,9 @@ const TASK_TITLE_MAX = 200;
 const TASK_DESC_MAX = 8000;
 const TASK_LABEL_MAX = 40;
 const TASK_LABELS_MAX = 20;
+const SQUAD_MEMBERS_MAX = 50;
+const SQUAD_TITLE_MAX = 120;
+const SQUAD_DESCRIPTION_MAX = 4000;
 const SPAWN_DEFAULT_TTL_SEC = 2 * 60 * 60;
 const SPAWN_MAX_TTL_SEC = 24 * 60 * 60;
 const PROFILE_TEXT_MAX = 4096;
@@ -670,6 +674,62 @@ async function loadTaskRow(db: D1Database, slug: string, id: number): Promise<Ta
   return db.prepare("SELECT * FROM channel_tasks WHERE channel_slug = ? AND id = ?")
     .bind(slug, id)
     .first<TaskRow>();
+}
+
+function parseSquadMembers(input: unknown): string[] | null {
+  if (!Array.isArray(input)) return null;
+  const members: string[] = [];
+  for (const item of input) {
+    if (typeof item !== "string") return null;
+    const name = item.trim().replace(/^@/, "");
+    if (!NAME_RE.test(name)) return null;
+    if (!members.includes(name)) members.push(name);
+    if (members.length > SQUAD_MEMBERS_MAX) return null;
+  }
+  return members;
+}
+
+function parseSquadLeader(input: unknown): string | null | undefined {
+  if (input === undefined) return undefined;
+  if (input === null || input === "") return null;
+  if (typeof input !== "string") return undefined;
+  const name = input.trim().replace(/^@/, "");
+  return NAME_RE.test(name) ? name : undefined;
+}
+
+function squadRowToRecord(row: {
+  channel_slug: string;
+  name: string;
+  title: string | null;
+  description: string | null;
+  leader_name: string | null;
+  members_json: string | null;
+  created_by: string;
+  created_by_kind: string;
+  created_at: number;
+  updated_at: number;
+}): ChannelSquad {
+  return {
+    type: "squad",
+    channel: row.channel_slug,
+    name: row.name,
+    title: row.title,
+    description: row.description,
+    leader: row.leader_name,
+    members: safeJsonArray<string>(row.members_json).filter((name): name is string => NAME_RE.test(name)),
+    created_by: row.created_by,
+    created_by_kind: row.created_by_kind === "human" ? "human" : "agent",
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+type SquadRow = Parameters<typeof squadRowToRecord>[0];
+
+async function loadSquadRow(db: D1Database, slug: string, name: string): Promise<SquadRow | null> {
+  return db.prepare("SELECT * FROM channel_squads WHERE channel_slug = ? AND name = ?")
+    .bind(slug, name)
+    .first<SquadRow>();
 }
 
 function completionTaskIdFromPayload(input: unknown): number | null | undefined {
@@ -3102,6 +3162,167 @@ app.get("/api/channels/:slug/read-cursors", async (c) => {
   );
 });
 
+app.get("/api/channels/:slug/squads", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const { results } = await c.env.DB.prepare(
+    `SELECT * FROM channel_squads
+      WHERE channel_slug = ?
+      ORDER BY name COLLATE NOCASE ASC`,
+  )
+    .bind(slug)
+    .all<SquadRow>();
+  return c.json({ squads: results.map(squadRowToRecord) });
+});
+
+app.get("/api/channels/:slug/squads/:name", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const name = c.req.param("name").replace(/^@/, "");
+  if (!NAME_RE.test(name)) return c.json(errorBody("bad_request", "squad name must be a valid name"), 400);
+  const row = await loadSquadRow(c.env.DB, slug, name);
+  if (!row) return c.json(errorBody("not_found", "squad not found"), 404);
+  return c.json(squadRowToRecord(row));
+});
+
+app.post("/api/channels/:slug/squads", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  if (identity.role === "readonly") {
+    return c.json(errorBody("forbidden", "readonly token cannot create squads"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  const name = typeof body?.name === "string" ? body.name.trim().replace(/^@/, "") : "";
+  if (!NAME_RE.test(name) || name === "system") {
+    return c.json(errorBody("bad_request", "name must be a valid squad name"), 400);
+  }
+  const title = body?.title === undefined || body?.title === null ? null : typeof body.title === "string" ? body.title.trim() : undefined;
+  if (title === undefined || (title !== null && textEncoder.encode(title).byteLength > SQUAD_TITLE_MAX)) {
+    return c.json(errorBody("bad_request", `title must be null or <= ${SQUAD_TITLE_MAX} bytes`), 400);
+  }
+  const description = body?.description === undefined || body?.description === null ? null : typeof body.description === "string" ? body.description : undefined;
+  if (description === undefined || (description !== null && textEncoder.encode(description).byteLength > SQUAD_DESCRIPTION_MAX)) {
+    return c.json(errorBody("bad_request", `description must be null or <= ${SQUAD_DESCRIPTION_MAX} bytes`), 400);
+  }
+  const members = parseSquadMembers(body?.members);
+  if (members === null || members.length === 0) {
+    return c.json(errorBody("bad_request", `members must be 1..${SQUAD_MEMBERS_MAX} valid names`), 400);
+  }
+  const leader = parseSquadLeader(body?.leader);
+  if (leader === undefined) return c.json(errorBody("bad_request", "leader must be null or a valid name"), 400);
+  if (leader !== null && !members.includes(leader)) members.unshift(leader);
+  const now = Date.now();
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO channel_squads (
+         channel_slug, name, title, description, leader_name, members_json,
+         created_by, created_by_kind, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(slug, name, title, description, leader, JSON.stringify(members), identity.name, identity.kind, now, now)
+      .run();
+  } catch (error) {
+    if (String(error).includes("UNIQUE")) return c.json(errorBody("conflict", "squad already exists"), 409);
+    throw error;
+  }
+  const row = await loadSquadRow(c.env.DB, slug, name);
+  await insertSystemStatus(c.env, slug, `squad @${name} created`).catch(() => false);
+  return c.json(squadRowToRecord(row!), 201);
+});
+
+app.patch("/api/channels/:slug/squads/:name", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  if (identity.role === "readonly") {
+    return c.json(errorBody("forbidden", "readonly token cannot update squads"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const name = c.req.param("name").replace(/^@/, "");
+  if (!NAME_RE.test(name)) return c.json(errorBody("bad_request", "squad name must be a valid name"), 400);
+  const existing = await loadSquadRow(c.env.DB, slug, name);
+  if (!existing) return c.json(errorBody("not_found", "squad not found"), 404);
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) return c.json(errorBody("bad_request", "json body required"), 400);
+  const title = body.title === undefined ? existing.title : body.title === null ? null : typeof body.title === "string" ? body.title.trim() : undefined;
+  if (title === undefined || (title !== null && textEncoder.encode(title).byteLength > SQUAD_TITLE_MAX)) {
+    return c.json(errorBody("bad_request", `title must be null or <= ${SQUAD_TITLE_MAX} bytes`), 400);
+  }
+  const description =
+    body.description === undefined ? existing.description : body.description === null ? null : typeof body.description === "string" ? body.description : undefined;
+  if (description === undefined || (description !== null && textEncoder.encode(description).byteLength > SQUAD_DESCRIPTION_MAX)) {
+    return c.json(errorBody("bad_request", `description must be null or <= ${SQUAD_DESCRIPTION_MAX} bytes`), 400);
+  }
+  const members = body.members === undefined ? squadRowToRecord(existing).members : parseSquadMembers(body.members);
+  if (members === null || members.length === 0) {
+    return c.json(errorBody("bad_request", `members must be 1..${SQUAD_MEMBERS_MAX} valid names`), 400);
+  }
+  const parsedLeader = parseSquadLeader(body.leader);
+  if (parsedLeader === undefined && Object.prototype.hasOwnProperty.call(body, "leader")) {
+    return c.json(errorBody("bad_request", "leader must be null or a valid name"), 400);
+  }
+  const leader = parsedLeader === undefined ? existing.leader_name : parsedLeader;
+  if (leader !== null && !members.includes(leader)) members.unshift(leader);
+  const now = Date.now();
+  await c.env.DB.prepare(
+    `UPDATE channel_squads
+        SET title = ?, description = ?, leader_name = ?, members_json = ?, updated_at = ?
+      WHERE channel_slug = ? AND name = ?`,
+  )
+    .bind(title, description, leader, JSON.stringify(members), now, slug, name)
+    .run();
+  const row = await loadSquadRow(c.env.DB, slug, name);
+  await insertSystemStatus(c.env, slug, `squad @${name} updated`).catch(() => false);
+  return c.json(squadRowToRecord(row!));
+});
+
+app.delete("/api/channels/:slug/squads/:name", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  if (identity.role === "readonly") {
+    return c.json(errorBody("forbidden", "readonly token cannot delete squads"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const name = c.req.param("name").replace(/^@/, "");
+  if (!NAME_RE.test(name)) return c.json(errorBody("bad_request", "squad name must be a valid name"), 400);
+  const existing = await loadSquadRow(c.env.DB, slug, name);
+  if (!existing) return c.json(errorBody("not_found", "squad not found"), 404);
+  await c.env.DB.prepare("DELETE FROM channel_squads WHERE channel_slug = ? AND name = ?")
+    .bind(slug, name)
+    .run();
+  await insertSystemStatus(c.env, slug, `squad @${name} deleted`).catch(() => false);
+  return c.json({ ok: true, squad: squadRowToRecord(existing) });
+});
+
 app.get("/api/channels/:slug/tasks", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);
@@ -3199,6 +3420,9 @@ app.post("/api/channels/:slug/tasks", async (c) => {
   if (assignee === undefined && body !== null && Object.prototype.hasOwnProperty.call(body, "assignee")) {
     return c.json(errorBody("bad_request", "assignee must be null or {name, kind: agent|human|squad}"), 400);
   }
+  if (assignee?.kind === "squad" && !(await loadSquadRow(c.env.DB, slug, assignee.name))) {
+    return c.json(errorBody("not_found", "assignee squad not found in this channel"), 404);
+  }
   const labels = parseTaskLabels(body?.labels);
   if (labels === null) {
     return c.json(errorBody("bad_request", `labels must be <= ${TASK_LABELS_MAX} valid name tokens`), 400);
@@ -3283,6 +3507,9 @@ app.patch("/api/channels/:slug/tasks/:id", async (c) => {
   const assignee = parseTaskAssignee(body.assignee);
   if (assignee === undefined && Object.prototype.hasOwnProperty.call(body, "assignee")) {
     return c.json(errorBody("bad_request", "assignee must be null or {name, kind: agent|human|squad}"), 400);
+  }
+  if (assignee?.kind === "squad" && !(await loadSquadRow(c.env.DB, slug, assignee.name))) {
+    return c.json(errorBody("not_found", "assignee squad not found in this channel"), 404);
   }
   const title = body.title === undefined ? existing.title : typeof body.title === "string" ? body.title.trim() : null;
   if (title === null || title === "" || textEncoder.encode(title).byteLength > TASK_TITLE_MAX) {
