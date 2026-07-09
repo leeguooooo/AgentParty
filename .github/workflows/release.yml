@@ -42,9 +42,9 @@ jobs:
     needs: check
     runs-on: ubuntu-latest
     permissions:
-      contents: read       # checkout
-      id-token: write       # attest-build-provenance 走 sigstore oidc 签名
-      attestations: write   # 写 attestation 到本仓库
+      contents: read # checkout
+      id-token: write # attest-build-provenance 走 sigstore oidc 签名
+      attestations: write # 写 attestation 到本仓库
     strategy:
       fail-fast: false
       matrix:
@@ -155,13 +155,66 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  desktop:
+    name: build desktop ${{ matrix.asset }}
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            asset: darwin-x64
+          - runner: macos-14
+            asset: darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: install deps
+        run: bun install --frozen-lockfile
+
+      - name: build prod desktop app
+        run: bun run desktop:build:prod
+
+      - name: package desktop dmg
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          dmg="$(find desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -n 1)"
+          if [ -z "${dmg:-}" ]; then
+            echo "No dmg produced by Tauri"
+            find desktop/src-tauri/target/release/bundle -maxdepth 3 -type f || true
+            exit 1
+          fi
+          out="agentparty-desktop-${ASSET}.dmg"
+          cp "$dmg" "$out"
+          shasum -a 256 "$out" > "${out}.sha256"
+
+      - name: upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.asset }}
+          path: agentparty-desktop-*.dmg*
+          if-no-files-found: error
+          retention-days: 7
+
   # ── 汇总所有产物挂到该 tag 的 Release ──────────────────────
   release:
     name: publish release
-    needs: build
+    needs:
+      - build
+      - desktop
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # 建/改 Release、上传 assets
+      contents: write # 建/改 Release、上传 assets
     steps:
       - name: collect artifacts
         uses: actions/download-artifact@v4
@@ -180,3 +233,5 @@ jobs:
             dist/*.tar.gz
             dist/*.tar.gz.sha256
             dist/*.tar.gz.sig
+            dist/*.dmg
+            dist/*.dmg.sha256

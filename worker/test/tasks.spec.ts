@@ -64,6 +64,19 @@ describe("channel task ledger", () => {
       state: "in_progress",
       assignee: { name: agent.name, kind: "agent" },
     });
+
+    const summary = await api(`/api/channels/${slug}/tasks/summary`, agent.token);
+    expect(summary.status).toBe(200);
+    expect(await summary.json()).toMatchObject({
+      type: "task_summary",
+      channel: slug,
+      total: 2,
+      open: 2,
+      assigned: 1,
+      in_progress: 1,
+      done: 0,
+      mine: 2,
+    });
   });
 
   it("enforces channel access and readonly write restrictions", async () => {

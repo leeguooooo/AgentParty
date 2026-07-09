@@ -2,7 +2,7 @@
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { buildHostBoard, type ChannelSquad, type CollaborationRole, type HostBoard, type MsgFrame, type PresenceEntry, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type WakeDelivery } from "@agentparty/shared";
+import { buildHostBoard, type ChannelSquad, type CollaborationRole, type HostBoard, type MsgFrame, type PresenceEntry, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentJoin } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
 import { VisibilityToggle } from "../components/VisibilityToggle";
@@ -27,11 +27,13 @@ import {
   fetchChannelRoles,
   fetchSquads,
   fetchMessages,
+  fetchTaskSummary,
   fetchTasks,
   fetchWakeDeliveries,
   kickParticipant,
   resetGuard,
   reviseMessage,
+  reviewCompletion,
   searchMessages,
   setChannelCharter,
   setLoopGuard,
@@ -158,6 +160,12 @@ interface RoleDraft {
 type ChannelPanel = "charter" | "roles" | "coordination" | "tasks" | "search" | "settings";
 type AdminSurface = "agentJoin" | "agentTokens" | "joinLink";
 const TASK_BOARD_STATES: readonly TaskState[] = ["triage", "backlog", "assigned", "in_progress", "needs_review", "blocked", "done"];
+
+function taskCompletionSeq(task: TaskRecord): number | null {
+  if (task.state !== "needs_review" || task.completion_artifact === null) return null;
+  const seq = task.anchor_seqs.at(-1);
+  return Number.isInteger(seq) && (seq ?? 0) > 0 ? seq! : null;
+}
 
 function compactTaskTitle(text: string, fallback: string): string {
   const raw = text.replace(/\s+/g, " ").trim();
@@ -1014,6 +1022,7 @@ function TaskLedgerPanel({
   onRefresh,
   onSetState,
   onAssign,
+  onReview,
 }: {
   tasks: TaskRecord[];
   loading: boolean;
@@ -1024,9 +1033,11 @@ function TaskLedgerPanel({
   onRefresh: () => void;
   onSetState: (id: number, state: TaskState) => void;
   onAssign: (id: number, name: string, kind: TaskAssigneeKind) => void;
+  onReview: (task: TaskRecord, action: "approve" | "reject") => void;
 }) {
   const [assignDrafts, setAssignDrafts] = useState<Record<number, string>>({});
   const [assignKinds, setAssignKinds] = useState<Record<number, TaskAssigneeKind>>({});
+  const [dragTaskId, setDragTaskId] = useState<number | null>(null);
   const counts = tasks.reduce<Record<string, number>>((acc, task) => {
     acc[task.state] = (acc[task.state] ?? 0) + 1;
     return acc;
@@ -1038,8 +1049,19 @@ function TaskLedgerPanel({
     const taskBusy = busyTaskId === task.id;
     const assignDraft = assignDrafts[task.id] ?? task.assignee?.name ?? "";
     const assignKind = assignKinds[task.id] ?? task.assignee?.kind ?? "agent";
+    const reviewSeq = taskCompletionSeq(task);
     return (
-      <li key={task.id} className="task-card">
+      <li
+        key={task.id}
+        className={"task-card" + (dragTaskId === task.id ? " is-dragging" : "")}
+        draggable={!disabled && !taskBusy}
+        onDragStart={(event) => {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", String(task.id));
+          setDragTaskId(task.id);
+        }}
+        onDragEnd={() => setDragTaskId(null)}
+      >
         <div className="task-card-main">
           <span className="t-mono task-id">#{task.id}</span>
           <strong>{task.title}</strong>
@@ -1063,6 +1085,16 @@ function TaskLedgerPanel({
           <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "done"} onClick={() => onSetState(task.id, "done")}>
             Done
           </button>
+          {reviewSeq !== null && (
+            <>
+              <button className="task-action-btn task-action-btn--review" type="button" disabled={disabled || taskBusy} onClick={() => onReview(task, "approve")}>
+                Approve
+              </button>
+              <button className="task-action-btn" type="button" disabled={disabled || taskBusy} onClick={() => onReview(task, "reject")}>
+                Reject
+              </button>
+            </>
+          )}
           <form
             className="task-assign-form"
             onSubmit={(event) => {
@@ -1122,7 +1154,24 @@ function TaskLedgerPanel({
           {TASK_BOARD_STATES.map((state) => {
             const columnTasks = tasksByState.get(state) ?? [];
             return (
-              <section key={state} className="task-column" aria-label={`${state} tasks`}>
+              <section
+                key={state}
+                className={"task-column" + (dragTaskId !== null ? " task-column--drop" : "")}
+                aria-label={`${state} tasks`}
+                onDragOver={(event) => {
+                  if (dragTaskId !== null && !disabled) event.preventDefault();
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const rawId = event.dataTransfer.getData("text/plain");
+                  const id = Number.parseInt(rawId, 10);
+                  setDragTaskId(null);
+                  if (!Number.isInteger(id) || disabled) return;
+                  const task = tasks.find((item) => item.id === id);
+                  if (task === undefined || task.state === state) return;
+                  onSetState(id, state);
+                }}
+              >
                 <header className="task-column-head">
                   <span className={`t-mono task-state task-state--${state}`}>{state}</span>
                   <span className="t-mono task-column-count">{columnTasks.length}</span>
@@ -1286,6 +1335,7 @@ export function ChannelPage({
   const [channelRoles, setChannelRoles] = useState<ChannelRoleInfo[]>([]);
   const [channelSquads, setChannelSquads] = useState<ChannelSquad[]>([]);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [taskSummary, setTaskSummary] = useState<TaskSummary | null>(null);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [tasksError, setTasksError] = useState<string | null>(null);
   const [taskActionBusyId, setTaskActionBusyId] = useState<number | null>(null);
@@ -1406,9 +1456,10 @@ export function ChannelPage({
 
   const loadTaskLedger = useCallback(() => {
     setTasksLoading(true);
-    return fetchTasks(token, slug)
-      .then((items) => {
+    return Promise.all([fetchTasks(token, slug), fetchTaskSummary(token, slug)])
+      .then(([items, summary]) => {
         setTasks(items);
+        setTaskSummary(summary);
         setTasksError(null);
         setTaskActionError(null);
       })
@@ -1420,6 +1471,14 @@ export function ChannelPage({
       .finally(() => setTasksLoading(false));
   }, [slug, token]);
 
+  const loadTaskSummary = useCallback(() => {
+    return fetchTaskSummary(token, slug)
+      .then(setTaskSummary)
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+      });
+  }, [slug, token]);
+
   const applyTaskUpdate = useCallback((id: number, body: Parameters<typeof updateTask>[3]) => {
     if (taskActionBusyId !== null) return;
     setTaskActionBusyId(id);
@@ -1427,6 +1486,7 @@ export function ChannelPage({
     updateTask(token, slug, id, body)
       .then((task) => {
         setTasks((current) => current.map((item) => item.id === task.id ? task : item));
+        void loadTaskSummary();
       })
       .catch((err: unknown) => {
         if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
@@ -1435,7 +1495,7 @@ export function ChannelPage({
         else setTaskActionError("task update failed");
       })
       .finally(() => setTaskActionBusyId(null));
-  }, [slug, taskActionBusyId, token]);
+  }, [loadTaskSummary, slug, taskActionBusyId, token]);
 
   const setTaskState = useCallback((id: number, state: TaskState) => {
     applyTaskUpdate(id, { state });
@@ -1450,6 +1510,37 @@ export function ChannelPage({
     applyTaskUpdate(id, { state: "assigned", assignee: { name, kind } });
   }, [applyTaskUpdate]);
 
+  const reviewTask = useCallback((task: TaskRecord, action: "approve" | "reject") => {
+    if (taskActionBusyId !== null) return;
+    const seq = taskCompletionSeq(task);
+    if (seq === null) {
+      setTaskActionError("task has no reviewable completion");
+      return;
+    }
+    const reason = action === "reject" ? window.prompt("Reject reason")?.trim() : undefined;
+    if (action === "reject" && !reason) return;
+    setTaskActionBusyId(task.id);
+    setTaskActionError(null);
+    reviewCompletion(
+      token,
+      slug,
+      seq,
+      action === "approve" ? { action: "approve" } : { action: "reject", reason: reason! },
+    )
+      .then(() => loadTaskLedger())
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setTaskActionError("review is not allowed for this token");
+        else if (err instanceof ValidationError) setTaskActionError("review was rejected");
+        else setTaskActionError("review failed");
+      })
+      .finally(() => setTaskActionBusyId(null));
+  }, [loadTaskLedger, slug, taskActionBusyId, token]);
+
+  useEffect(() => {
+    void loadTaskSummary();
+  }, [loadTaskSummary]);
+
   const createTaskFromMessage = useCallback((seq: number) => {
     if (messageActionBusySeq !== null) return;
     const message = state.messages.find((item) => item.seq === seq);
@@ -1462,6 +1553,7 @@ export function ChannelPage({
     })
       .then((task) => {
         setTasks((current) => current.some((item) => item.id === task.id) ? current : [task, ...current]);
+        void loadTaskSummary();
         setTasksError(null);
         setActiveAdminSurface(null);
         setActivePanel("tasks");
@@ -1473,7 +1565,7 @@ export function ChannelPage({
         else setMessageActionError({ seq, message: "task creation failed" });
       })
       .finally(() => setMessageActionBusySeq(null));
-  }, [messageActionBusySeq, slug, state.messages, token]);
+  }, [loadTaskSummary, messageActionBusySeq, slug, state.messages, token]);
 
   const removeParticipant = useCallback((name: string) => {
     if (removingName !== null) return;
@@ -2197,6 +2289,10 @@ export function ChannelPage({
   const totalInView = q === "" ? timelineMessages.length : searchHits.length;
   const visibleInView = q === "" ? visibleMessages.length : visibleSearchHits.length;
   const structuredRoleCount = channelRoles.length + selfReportedRoles(channelRoles, state.presence, channelIdentities).length;
+  const taskOpenCount = taskSummary?.open ?? tasks.filter((task) => task.state !== "done").length;
+  const taskReviewCount = taskSummary?.needs_review ?? tasks.filter((task) => task.state === "needs_review").length;
+  const taskBlockedCount = taskSummary?.blocked ?? tasks.filter((task) => task.state === "blocked").length;
+  const taskMineCount = taskSummary?.mine ?? 0;
 
   const setAgentMode = useCallback((mode: AgentFilterMode) => {
     setAgentFilter((current) => ({ ...current, mode }));
@@ -2428,8 +2524,16 @@ export function ChannelPage({
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("tasks")}>
             <span className="ap-sprite ap-sprite--tasks" aria-hidden="true" />
             <span>Tasks</span>
-            <span className="t-mono chan-tool-badge">{tasks.length}</span>
+            <span className="t-mono chan-tool-badge">{taskOpenCount}</span>
           </button>
+          {(taskOpenCount > 0 || taskReviewCount > 0 || taskBlockedCount > 0 || taskMineCount > 0) && (
+            <div className="task-strip-summary" aria-label="task summary">
+              <span className="t-mono chan-tool-badge">open {taskOpenCount}</span>
+              {taskReviewCount > 0 && <span className="t-mono chan-tool-badge chan-tool-badge--hot">review {taskReviewCount}</span>}
+              {taskBlockedCount > 0 && <span className="t-mono chan-tool-badge task-strip-summary--blocked">blocked {taskBlockedCount}</span>}
+              {taskMineCount > 0 && <span className="t-mono chan-tool-badge">mine {taskMineCount}</span>}
+            </div>
+          )}
           <button type="button" className={"d-btn chan-tool-btn" + (q !== "" ? " is-active" : "")} onClick={() => openPanel("search")}>
             <span className="ap-sprite ap-sprite--search" aria-hidden="true" />
             <span>{t("Channel.tools.search")}</span>
@@ -2518,7 +2622,7 @@ export function ChannelPage({
           subtitle={
             activePanel === "charter" && charter !== null ? `rev ${charter.charter_rev}` :
             activePanel === "roles" ? t("Channel.roles.count", { count: String(structuredRoleCount) }) :
-            activePanel === "tasks" ? `${tasks.length} tasks` :
+            activePanel === "tasks" ? `${taskOpenCount} open · ${taskReviewCount} review · ${taskBlockedCount} blocked` :
             activePanel === "settings" ? (localLoopGuardEnabled ? t("Channel.settings.enabled") : t("Channel.settings.unlimited")) :
             activePanel === "search" && q !== "" ? t("Channel.search.hits", { count: searchHits.length }) :
             undefined
@@ -2574,6 +2678,7 @@ export function ChannelPage({
               onRefresh={loadTaskLedger}
               onSetState={setTaskState}
               onAssign={assignTask}
+              onReview={reviewTask}
             />
           )}
           {activePanel === "settings" && (

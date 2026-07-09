@@ -1,7 +1,7 @@
 // rest 封装 + token 存取。
 // 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它，并立即从地址栏移除；
 // share token 只放 sessionStorage，本次标签页可刷新，避免长期落 localStorage。
-import type { ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, WakeDelivery } from "@agentparty/shared";
+import type { ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, TaskSummary, WakeDelivery } from "@agentparty/shared";
 import { apiUrl } from "./base";
 import type { WebSession } from "./oidc";
 
@@ -347,6 +347,16 @@ export async function fetchTasks(token: string, slug: string): Promise<TaskRecor
   return data.tasks;
 }
 
+export async function fetchTaskSummary(token: string, slug: string): Promise<TaskSummary> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/tasks/summary`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/tasks/summary failed (${res.status})`);
+  return (await res.json()) as TaskSummary;
+}
+
 export async function fetchSquads(token: string, slug: string): Promise<ChannelSquad[]> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/squads`, {
     headers: { authorization: `Bearer ${token}` },
@@ -408,6 +418,24 @@ export async function updateTask(
   if (res.status === 400) throw new ValidationError("invalid task update");
   if (!res.ok) throw new Error(`PATCH /api/channels/${slug}/tasks/${id} failed (${res.status})`);
   return (await res.json()) as TaskRecord;
+}
+
+export async function reviewCompletion(
+  token: string,
+  slug: string,
+  seq: number,
+  body: { action: "approve" } | { action: "reject"; reason: string },
+): Promise<{ message: MsgFrame; reply?: MsgFrame }> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/messages/${seq}/review`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 400) throw new ValidationError("invalid review");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/messages/${seq}/review failed (${res.status})`);
+  return (await res.json()) as { message: MsgFrame; reply?: MsgFrame };
 }
 
 export async function setChannelRole(
