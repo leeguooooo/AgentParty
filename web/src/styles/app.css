@@ -3377,7 +3377,6 @@
   .presence-bar {
     min-width: 0;
     max-width: 100%;
-    grid-template-columns: minmax(0, 1fr) auto;
     gap: 6px;
     padding: 0 2px 2px;
   }
@@ -3387,7 +3386,6 @@
     gap: 5px;
   }
   .presence-strip {
-    grid-column: 1 / -1;
     flex-wrap: wrap;
     max-height: 76px;
     overflow-x: hidden;
