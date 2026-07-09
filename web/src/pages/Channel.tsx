@@ -10,6 +10,7 @@ import { JoinLink } from "../components/JoinLink";
 import { Composer } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
 import { MessageCard } from "../components/MessageCard";
+import { MentionToast, type MentionToastItem } from "../components/MentionToast";
 import { NotifyToggle, readNotifyOptin } from "../components/NotifyToggle";
 import { PresenceBar } from "../components/PresenceBar";
 import {
@@ -52,7 +53,7 @@ import {
   type AgentFilterKind,
   type AgentFilterMode,
 } from "../lib/filters";
-import { shouldNotify } from "../lib/notify";
+import { shouldNotify, shouldToast } from "../lib/notify";
 import { summarizeReplyPreview } from "../lib/replyPreview";
 import { fmtTime } from "../lib/time";
 import { groupTeamMessages, summarizeTeams, type TeamMessageThread, type TeamSummary } from "../lib/teams";
@@ -1222,6 +1223,19 @@ export function ChannelPage({
   const tRef = useRef(t);
   tRef.current = t;
   const notifiedSeqRef = useRef<Set<number>>(new Set()); // seq 去重：防同一帧被重复处理时重复弹通知
+  const toastedSeqRef = useRef<Set<number>>(new Set()); // seq 去重：页内 toast 同一帧只弹一次
+  const [toasts, setToasts] = useState<MentionToastItem[]>([]);
+  const dismissToast = useCallback((seq: number) => {
+    setToasts((cur) => cur.filter((tt) => tt.seq !== seq));
+  }, []);
+  const jumpToMention = useCallback((seq: number) => {
+    setToasts((cur) => cur.filter((tt) => tt.seq !== seq));
+    const el = document.getElementById(`msg-${seq}`);
+    if (el === null) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("msg-jump-highlight");
+    window.setTimeout(() => el.classList.remove("msg-jump-highlight"), 1200);
+  }, []);
   const sockRef = useRef<ChannelSocket | null>(null);
   const streamRef = useRef<HTMLDivElement | null>(null);
   const pendingSendsRef = useRef<Array<{ draft: string; replyTo: number | null }>>([]);
@@ -1423,6 +1437,24 @@ export function ChannelPage({
               window.location.hash = `#msg-${frame.seq}`;
               n.close();
             };
+          }
+          // 被@页内 toast（聚焦态）：与上面的系统通知按 document.hidden 互斥，各自 seq 去重
+          if (
+            frame.type === "msg" &&
+            !toastedSeqRef.current.has(frame.seq) &&
+            shouldToast(frame, selfHandleRef.current, document.hidden, optinRef.current)
+          ) {
+            toastedSeqRef.current.add(frame.seq);
+            setToasts((cur) =>
+              [
+                ...cur,
+                {
+                  seq: frame.seq,
+                  sender: frame.sender.handle != null ? `@${frame.sender.handle}` : frame.sender.name,
+                  body: summarizeReplyPreview(frame.body),
+                },
+              ].slice(-3),
+            );
           }
           dispatch({ type: "frame", frame });
         },
@@ -2172,6 +2204,7 @@ export function ChannelPage({
 
   return (
     <div className="chan">
+      <MentionToast items={toasts} channel={slug} onJump={jumpToMention} onDismiss={dismissToast} />
       <PresenceBar
         presence={state.presence}
         participants={state.participants}
