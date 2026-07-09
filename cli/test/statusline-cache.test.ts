@@ -89,3 +89,12 @@ describe("statusline cache contract", () => {
     expect(statuslinePreview("x".repeat(60))).toBe(`${"x".repeat(47)}…`);
   });
 });
+
+test("heartbeatPatch carries mentions_only only when asked", () => {
+  const on = heartbeatPatch("watch", 1000, { mentionsOnly: true }).listener;
+  expect(on.mentions_only).toBe(true);
+  const off = heartbeatPatch("watch", 1000, { mentionsOnly: false }).listener;
+  expect("mentions_only" in off).toBe(false);
+  const legacy = heartbeatPatch("serve", 1000).listener;
+  expect("mentions_only" in legacy).toBe(false);
+});

@@ -20,6 +20,11 @@ export interface StatuslineListener {
   mode: "watch" | "serve";
   pid: number;
   heartbeat_ts: number;
+  /** True when `party watch --mentions-only` — the listener hears only
+   * messages that @-mention this agent. Status bars used to recover this by
+   * forking `ps` and grepping the listener's argv; carry it in the contract
+   * instead. Omitted (not false) when the listener hears everything. */
+  mentions_only?: true;
 }
 
 export interface StatuslineCache {
@@ -135,12 +140,17 @@ export function clearStatuslineListener(cwd: string = process.cwd()): Statusline
   return writeStatuslineCache({ listener: null }, cwd);
 }
 
-export function heartbeatPatch(mode: StatuslineListener["mode"], now: number = Date.now()): { listener: StatuslineListener } {
+export function heartbeatPatch(
+  mode: StatuslineListener["mode"],
+  now: number = Date.now(),
+  opts: { mentionsOnly?: boolean } = {},
+): { listener: StatuslineListener } {
   return {
     listener: {
       mode,
       pid: process.pid,
       heartbeat_ts: now,
+      ...(opts.mentionsOnly ? { mentions_only: true as const } : {}),
     },
   };
 }

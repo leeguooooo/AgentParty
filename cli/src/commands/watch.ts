@@ -119,7 +119,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         if (o.statusline === true) {
           writeStatuslineCache({
             ...localStatuslineBase(o.channel),
-            ...heartbeatPatch("watch"),
+            ...heartbeatPatch("watch", Date.now(), { mentionsOnly: o.mentionsOnly }),
             unread: unreadFromCursor(lastSeq, o.channel),
           });
         }
@@ -153,7 +153,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         const latestSeq = Math.max(lastSeq, msg.seq);
         writeStatuslineCache({
           ...localStatuslineBase(o.channel),
-          ...heartbeatPatch("watch"),
+          ...heartbeatPatch("watch", Date.now(), { mentionsOnly: o.mentionsOnly }),
           unread: unreadFromCursor(latestSeq, o.channel),
           last_message: lastMessageFromFrame(msg),
         });

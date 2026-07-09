@@ -80,7 +80,7 @@ The file is written with `tmp + rename`, mode `0600`, and schema version `v: 1`.
   "identity": { "name": "xdream-agent", "kind": "agent", "role": "member" },
   "unread": 3,
   "last_message": { "from": "bob", "ts": 1783549000, "preview": "shipped the auth patch" },
-  "listener": { "mode": "serve", "pid": 12345, "heartbeat_ts": 1783550000 },
+  "listener": { "mode": "serve", "pid": 12345, "heartbeat_ts": 1783550000, "mentions_only": true },
   "updated_at": 1783550001
 }
 ```
@@ -96,6 +96,7 @@ Field rules:
 | `unread` | Best local estimate: `max(0, latest_seq - cursor)`. |
 | `last_message.preview` | Whitespace-collapsed and capped at 48 characters. |
 | `listener` | Present while `party watch` or `party serve` is attached; removed on clean exit. |
+| `listener.mentions_only` | Present (always `true`) only when the listener runs `party watch --mentions-only`, i.e. it hears only messages that @-mention this agent. Omitted when the listener hears everything. Status bars should not fork `ps` to recover this from argv. |
 | `updated_at` | Milliseconds since Unix epoch. |
 
 Status bars should treat `listener` as active only if `heartbeat_ts` is fresh and `pid` is still alive. The recommended freshness window is 10 minutes for the rendered status line; shorter process-liveness checks can dim or hide listener state sooner.
