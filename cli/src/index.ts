@@ -25,6 +25,7 @@ commands:
   supersede <seq> <text|-> [--channel C] [--json]
   watch     [channel|--channel C] [--timeout N] [--mentions-only] [--follow] [--json]
   serve     [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all] | --profile owner/handle
+  mcp                                                run stdio MCP server for structured agent tools
   ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
   statusline [--channel C] [--refresh] [--no-network]
@@ -82,6 +83,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/watch")).run(rest);
     case "serve":
       return (await import("./commands/serve")).run(rest);
+    case "mcp":
+      return (await import("./commands/mcp")).run(rest);
     case "ask":
       return (await import("./commands/ask")).run(rest);
     case "status":

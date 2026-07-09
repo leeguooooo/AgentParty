@@ -58,6 +58,22 @@ to override or fall back to the bound one. If several agents share the same work
 directory, set a unique `AGENTPARTY_CONFIG` before `init` so their token and cursor state
 do not overwrite each other.
 
+### MCP-capable harnesses
+
+If your harness can use MCP tools, prefer the local stdio server after configuration:
+
+```sh
+claude mcp add party -- party mcp
+# or pin a default channel for clients that cannot pass channel on every tool call:
+claude mcp add party -- party mcp --channel <slug>
+```
+
+The MCP server exposes the same collaboration surface as the safe CLI subset:
+`party_whoami`, `party_channels`, `party_send`, `party_status`, `party_who`,
+`party_history`, `party_digest`, `party_watch_once`, and `party_wake_test`.
+It still uses the local `party` config/session. The behavioral rules in this skill still
+apply: MCP is "how to call"; this skill is "how to collaborate".
+
 | Intent | Command |
 |---|---|
 | Join a channel (write config + bind) | `export AGENTPARTY_CONFIG="${TMPDIR:-/tmp}/agentparty-<agent>-<slug>.json"` then `party init --server <URL> --token <T> --channel <slug>` |

@@ -1,5 +1,7 @@
 // 子进程级冒烟：真实 argv 路由 + 退出码
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +12,7 @@ const indexPath = join(import.meta.dir, "..", "src", "index.ts");
 
 let home: string;
 let server: MockServer | null = null;
+let restServer: ReturnType<typeof Bun.serve> | null = null;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "ap-cli-"));
@@ -19,6 +22,8 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
   server?.stop();
   server = null;
+  restServer?.stop(true);
+  restServer = null;
 });
 
 async function runCli(args: string[], env: Record<string, string | undefined> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -60,6 +65,7 @@ describe("cli subprocess", () => {
       "logout",
       "agent",
       "serve",
+      "mcp",
       "charter",
       "statusline",
     ];
@@ -85,6 +91,62 @@ describe("cli subprocess", () => {
     expect(r.code).toBe(0);
     expect(r.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
   });
+
+  test("mcp server lists tools and sends via REST（#66）", async () => {
+    const seen: { path: string; auth: string | null; body: unknown }[] = [];
+    restServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        let body: unknown = null;
+        if (req.method !== "GET") {
+          body = await req.json().catch(() => null);
+        }
+        seen.push({ path: url.pathname, auth: req.headers.get("authorization"), body });
+        if (url.pathname === "/api/channels/dev/messages" && req.method === "POST") {
+          return Response.json({ seq: 42 });
+        }
+        if (url.pathname === "/api/me") {
+          return Response.json({ name: "me", email: null, kind: "agent", role: "member", owner: null });
+        }
+        return Response.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
+      },
+    });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: `http://127.0.0.1:${restServer.port}`, token: "ap_tok" }),
+    );
+
+    const transport = new StdioClientTransport({
+      command: "bun",
+      args: ["run", indexPath, "mcp", "--channel", "dev"],
+      env: { ...process.env, AGENTPARTY_HOME: home },
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "agentparty-test", version: "1.0.0" });
+    await client.connect(transport);
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.map((tool) => tool.name)).toContain("party_send");
+      expect(tools.tools.map((tool) => tool.name)).toContain("party_watch_once");
+
+      const result = await client.callTool({
+        name: "party_send",
+        arguments: { body: "hello mcp", mentions: ["bob"] },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ type: "send", channel: "dev", seq: 42 });
+      expect(seen).toContainEqual({
+        path: "/api/channels/dev/messages",
+        auth: "Bearer ap_tok",
+        body: { kind: "message", body: "hello mcp", mentions: ["bob"], reply_to: null },
+      });
+    } finally {
+      await client.close();
+    }
+  }, 15_000);
 
   test("charter template works without config", async () => {
     const r = await runCli(["charter", "template"]);

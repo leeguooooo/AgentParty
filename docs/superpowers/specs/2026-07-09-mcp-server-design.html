@@ -44,7 +44,7 @@ nav ol { columns: 2; font-size: .92rem; }
   <div class="meta">
     <span>Issue: <a href="https://github.com/leeguooooo/agentparty/issues/66">#66</a></span>
     <span>日期: 2026-07-09</span>
-    <span>状态: 设计定稿,待实现</span>
+    <span>状态: M1 stdio 已实现, M2/M3 待做</span>
     <span>目标读者: 第一次接触本仓库、没写过 MCP server 的开发者</span>
   </div>
 </header>
@@ -105,7 +105,7 @@ nav ol { columns: 2; font-size: .92rem; }
   claude mcp add party -- party mcp
 接入示例(Claude Desktop / 其它,JSON 配置):
   { "mcpServers": { "party": { "command": "party", "args": ["mcp"] } } }</code></pre>
-<p>实现骨架(<code>cli/src/commands/mcp.ts</code>):</p>
+<p>实现位置:<code>cli/src/commands/mcp.ts</code>。M1 已落地为官方 <code>@modelcontextprotocol/sdk</code> + stdio transport,工具参数用 zod schema 校验。</p>
 <pre><code>import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -186,11 +186,9 @@ party_send:
 <tr><th>文件</th><th>新增/修改</th><th>内容</th></tr>
 <tr><td><code>cli/package.json</code></td><td>修改</td><td>加 <code>@modelcontextprotocol/sdk</code>、<code>zod</code></td></tr>
 <tr><td><code>cli/src/commands/mcp.ts</code></td><td>新增</td><td>§4.1 骨架 + §4.2 九个工具注册(每个 handler ≈10 行:zod 参数 → rest 调用 → JSON 返回)</td></tr>
-<tr><td><code>cli/src/mcp-tools.ts</code></td><td>新增</td><td>工具定义表(name/description/schema/handler 绑定 rest 函数),与 transport 无关——M2 remote 直接复用</td></tr>
 <tr><td><code>cli/src/index.ts</code></td><td>修改</td><td>注册 <code>mcp</code> 命令(HELP、路由)</td></tr>
-<tr><td><code>cli/test/mcp.test.ts</code></td><td>新增</td><td>§9 用例(mock-server 复用 <code>cli/test/mock-server.ts</code>)</td></tr>
-<tr><td><code>cli/test/cli.test.ts</code></td><td>修改</td><td><code>mcp --help</code> 进冒烟清单</td></tr>
-<tr><td><code>skills/agentparty/SKILL.md</code></td><td>修改</td><td>加"MCP 可用时优先走 MCP"小节 + 接入命令</td></tr>
+<tr><td><code>cli/test/cli.test.ts</code></td><td>修改</td><td><code>mcp --help</code> 进冒烟清单;SDK stdio client 子进程启动 <code>party mcp</code>,断言 <code>listTools</code> 与 <code>party_send</code> REST 调用</td></tr>
+<tr><td><code>skills/agentparty/SKILL.md</code></td><td>修改</td><td>加"MCP-capable harnesses"小节 + 接入命令 + M1 工具清单</td></tr>
 </table>
 
 <h2 id="test">8. 测试计划</h2>
