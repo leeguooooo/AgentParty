@@ -63,7 +63,8 @@ function ToastCard({
 }
 
 export function MentionToast({ items, channel, identityDisplay, onJump, onDismiss }: Props) {
-  if (items.length === 0) return null;
+  // 容器常驻（即使空）：aria-live 区域必须先在 DOM 里，随首条 toast 一起插入的内容屏读器不会播报。
+  // 空时无子元素、pointer-events:none，无视觉/交互影响。
   return (
     <div className="mention-toasts" aria-live="polite">
       {items.map((it) => (
