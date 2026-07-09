@@ -168,6 +168,21 @@ export interface TaskRecord {
   completed_at: number | null;
 }
 
+export interface TaskSummary {
+  type: "task_summary";
+  channel: string;
+  total: number;
+  open: number;
+  triage: number;
+  backlog: number;
+  assigned: number;
+  in_progress: number;
+  needs_review: number;
+  blocked: number;
+  done: number;
+  mine: number;
+}
+
 export interface ChannelSquad {
   type: "squad";
   channel: string;

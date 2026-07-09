@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AgentParty",
+  "version": "0.1.0",
+  "identifier": "com.agentparty.desktop",
+  "build": {
+    "beforeDevCommand": "cd ../web && bun run dev -- --host 127.0.0.1",
+    "devUrl": "http://127.0.0.1:5173",
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "AgentParty",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 560
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}

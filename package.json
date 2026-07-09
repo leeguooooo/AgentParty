@@ -4,6 +4,10 @@
   "private": true,
   "scripts": {
     "check": "cd cli && bun test && bunx tsc --noEmit && cd ../shared && bunx tsc --noEmit && cd ../web && bun test && bunx tsc --noEmit && bunx vite build && cd ../worker && bun run verify:test-runtime && bunx vitest run && bunx tsc --noEmit",
+    "desktop:dev": "cd desktop && bun run dev",
+    "desktop:build": "cd desktop && bun run build",
+    "desktop:build:prod": "cd desktop && bun run build:prod",
+    "desktop:build:xdream": "cd desktop && bun run build:xdream",
     "release:verify": "bun run check && cd worker && bun run verify:remote-schema",
     "release:deploy": "bun run check && cd worker && bun run deploy && bun run verify:remote-schema"
   },
@@ -11,6 +15,7 @@
     "worker",
     "cli",
     "shared",
-    "web"
+    "web",
+    "desktop"
   ]
 }

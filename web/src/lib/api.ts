@@ -1,7 +1,8 @@
 // rest 封装 + token 存取。
 // 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它，并立即从地址栏移除；
 // share token 只放 sessionStorage，本次标签页可刷新，避免长期落 localStorage。
-import type { ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, WakeDelivery } from "@agentparty/shared";
+import type { ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, TaskSummary, WakeDelivery } from "@agentparty/shared";
+import { apiUrl } from "./base";
 import type { WebSession } from "./oidc";
 
 const TOKEN_KEY = "ap_token";
@@ -17,6 +18,10 @@ export class ForbiddenError extends Error {}
 export class ConflictError extends Error {}
 // 名字非法 / 保留名 / scope 非法（worker 400）——文案层面走内联红字。
 export class ValidationError extends Error {}
+
+function fetchApi(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(apiUrl(path), init);
+}
 
 export function urlToken(): string | null {
   return new URLSearchParams(window.location.search).get("t");
@@ -162,7 +167,7 @@ export interface MeInfo {
 }
 
 export async function fetchMe(token: string): Promise<MeInfo> {
-  const res = await fetch("/api/me", {
+  const res = await fetchApi("/api/me", {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -171,7 +176,7 @@ export async function fetchMe(token: string): Promise<MeInfo> {
 }
 
 export async function listChannels(token: string): Promise<ChannelInfo[]> {
-  const res = await fetch("/api/channels", {
+  const res = await fetchApi("/api/channels", {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -232,7 +237,7 @@ export async function createChannelAgent(
   name: string,
   token: string,
 ): Promise<ChannelAgent> {
-  const res = await fetch("/api/agents", {
+  const res = await fetchApi("/api/agents", {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ name, channel_scope: slug }),
@@ -246,7 +251,7 @@ export async function createChannelAgent(
 }
 
 export async function listChannelAgents(token: string, slug: string): Promise<ChannelAgentInfo[]> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/agents`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/agents`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -257,7 +262,7 @@ export async function listChannelAgents(token: string, slug: string): Promise<Ch
 }
 
 export async function listProjectAgentProfiles(token: string): Promise<ProjectAgentProfile[]> {
-  const res = await fetch("/api/agent-profiles", {
+  const res = await fetchApi("/api/agent-profiles", {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -280,7 +285,7 @@ export async function createProjectAgentProfile(
     invitable_by?: ProjectAgentInvitableBy;
   },
 ): Promise<ProjectAgentProfile> {
-  const res = await fetch("/api/agent-profiles", {
+  const res = await fetchApi("/api/agent-profiles", {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -297,7 +302,7 @@ export async function inviteProjectAgent(
   slug: string,
   profile: ProjectAgentProfile,
 ): Promise<ChannelProjectAgentInvite> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/project-agents`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/project-agents`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ owner_account: profile.owner_account, handle: profile.handle }),
@@ -310,7 +315,7 @@ export async function inviteProjectAgent(
 }
 
 export async function fetchChannelIdentities(token: string, slug: string): Promise<ChannelIdentity[]> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/identities`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/identities`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -321,7 +326,7 @@ export async function fetchChannelIdentities(token: string, slug: string): Promi
 }
 
 export async function fetchChannelRoles(token: string, slug: string): Promise<ChannelRoleInfo[]> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/roles`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/roles`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -332,7 +337,7 @@ export async function fetchChannelRoles(token: string, slug: string): Promise<Ch
 }
 
 export async function fetchTasks(token: string, slug: string): Promise<TaskRecord[]> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/tasks`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/tasks`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -342,8 +347,18 @@ export async function fetchTasks(token: string, slug: string): Promise<TaskRecor
   return data.tasks;
 }
 
+export async function fetchTaskSummary(token: string, slug: string): Promise<TaskSummary> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/tasks/summary`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/tasks/summary failed (${res.status})`);
+  return (await res.json()) as TaskSummary;
+}
+
 export async function fetchSquads(token: string, slug: string): Promise<ChannelSquad[]> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/squads`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/squads`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -368,7 +383,7 @@ export async function createTask(
     workflow_id?: string;
   },
 ): Promise<TaskRecord> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/tasks`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/tasks`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -393,7 +408,7 @@ export async function updateTask(
     labels?: string[];
   },
 ): Promise<TaskRecord> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/tasks/${id}`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/tasks/${id}`, {
     method: "PATCH",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -405,6 +420,24 @@ export async function updateTask(
   return (await res.json()) as TaskRecord;
 }
 
+export async function reviewCompletion(
+  token: string,
+  slug: string,
+  seq: number,
+  body: { action: "approve" } | { action: "reject"; reason: string },
+): Promise<{ message: MsgFrame; reply?: MsgFrame }> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/messages/${seq}/review`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 400) throw new ValidationError("invalid review");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/messages/${seq}/review failed (${res.status})`);
+  return (await res.json()) as { message: MsgFrame; reply?: MsgFrame };
+}
+
 export async function setChannelRole(
   token: string,
   slug: string,
@@ -412,7 +445,7 @@ export async function setChannelRole(
   role: CollaborationRole,
   responsibility: string,
 ): Promise<ChannelRoleInfo> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/roles/${encodeURIComponent(name)}`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/roles/${encodeURIComponent(name)}`, {
     method: "PUT",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ role, responsibility }),
@@ -425,7 +458,7 @@ export async function setChannelRole(
 }
 
 export async function deleteChannelRole(token: string, slug: string, name: string): Promise<void> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/roles/${encodeURIComponent(name)}`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/roles/${encodeURIComponent(name)}`, {
     method: "DELETE",
     headers: { authorization: `Bearer ${token}` },
   });
@@ -436,7 +469,7 @@ export async function deleteChannelRole(token: string, slug: string, name: strin
 }
 
 export async function rotateChannelAgent(token: string, slug: string, name: string): Promise<ChannelAgent> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/agents/${encodeURIComponent(name)}/rotate`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/agents/${encodeURIComponent(name)}/rotate`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
   });
@@ -460,7 +493,7 @@ export async function createChannel(
   token: string,
   input: NewChannel,
 ): Promise<{ slug: string }> {
-  const res = await fetch("/api/channels", {
+  const res = await fetchApi("/api/channels", {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ kind: "standing", ...input }),
@@ -482,7 +515,7 @@ export async function fetchMessages(
 ): Promise<MsgFrame[]> {
   const params = new URLSearchParams({ limit: String(opts.limit ?? 1000) });
   if (opts.before !== undefined) params.set("before", String(opts.before));
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/messages?${params.toString()}`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/messages?${params.toString()}`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -504,7 +537,7 @@ export async function fetchWakeDeliveries(
     since: String(opts.since ?? 0),
     limit: String(opts.limit ?? 100),
   });
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/wake-deliveries?${params.toString()}`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/wake-deliveries?${params.toString()}`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -523,7 +556,7 @@ export async function reviseMessage(
 ): Promise<{ message: MsgFrame }> {
   const token = getToken();
   if (token === null) throw new AuthError("missing token");
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/messages/${encodeURIComponent(String(seq))}/${action}`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/messages/${encodeURIComponent(String(seq))}/${action}`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -542,7 +575,7 @@ export async function reviseMessage(
 export async function setHandle(handle: string): Promise<{ handle: string }> {
   const token = getToken();
   if (token === null) throw new AuthError("missing token");
-  const res = await fetch("/api/me/handle", {
+  const res = await fetchApi("/api/me/handle", {
     method: "PUT",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ handle }),
@@ -556,7 +589,7 @@ export async function setHandle(handle: string): Promise<{ handle: string }> {
 }
 
 export async function fetchChannelCharter(token: string, slug: string): Promise<ChannelCharter> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/charter`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/charter`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -566,7 +599,7 @@ export async function fetchChannelCharter(token: string, slug: string): Promise<
 }
 
 export async function setChannelCharter(token: string, slug: string, charter: string): Promise<ChannelCharter> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/charter`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/charter`, {
     method: "PUT",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ charter }),
@@ -588,7 +621,7 @@ export async function searchMessages(
   if (opts.from !== undefined && opts.from !== "") params.set("from", opts.from);
   if (opts.since !== undefined) params.set("since", String(opts.since));
   if (opts.limit !== undefined) params.set("limit", String(opts.limit));
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/search?${params.toString()}`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/search?${params.toString()}`, {
     headers: { authorization: `Bearer ${token}` },
     signal,
   });
@@ -600,7 +633,7 @@ export async function searchMessages(
 }
 
 export async function resetGuard(token: string, slug: string): Promise<void> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/reset-guard`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/reset-guard`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
   });
@@ -631,7 +664,7 @@ export async function createJoinLink(
   const body: Record<string, number> = {};
   if (opts.expiresInSec !== undefined) body.expires_in_sec = opts.expiresInSec;
   if (opts.maxUses !== undefined) body.max_uses = opts.maxUses;
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/join-links`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/join-links`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -646,7 +679,7 @@ export async function createJoinLink(
 // 兑换邀请链接（访问 /join/<code> 的落地页调用）。需登录的人类账号；把当前账号加进频道成员。
 // 返回 { channel_slug, joined }（joined=false 表示已经是成员，幂等）。
 export async function redeemJoinLink(token: string, code: string): Promise<{ channel_slug: string; joined: boolean }> {
-  const res = await fetch(`/api/join/${encodeURIComponent(code)}`, {
+  const res = await fetchApi(`/api/join/${encodeURIComponent(code)}`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
   });
@@ -663,7 +696,7 @@ export async function redeemJoinLink(token: string, code: string): Promise<{ cha
 }
 
 export async function listJoinLinks(token: string, slug: string): Promise<JoinLinkInfo[]> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/join-links`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/join-links`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
@@ -674,7 +707,7 @@ export async function listJoinLinks(token: string, slug: string): Promise<JoinLi
 }
 
 export async function revokeJoinLink(token: string, slug: string, code: string): Promise<void> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/join-links/${encodeURIComponent(code)}`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/join-links/${encodeURIComponent(code)}`, {
     method: "DELETE",
     headers: { authorization: `Bearer ${token}` },
   });
@@ -684,7 +717,7 @@ export async function revokeJoinLink(token: string, slug: string, code: string):
 }
 
 export async function archiveChannel(token: string, slug: string): Promise<void> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/archive`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/archive`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
   });
@@ -695,7 +728,7 @@ export async function archiveChannel(token: string, slug: string): Promise<void>
 
 export async function kickParticipant(token: string, slug: string, name: string, mode: "disconnect" | "remove" = "disconnect"): Promise<void> {
   const body = mode === "remove" ? { name, mode } : { name };
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/kick`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/kick`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -719,7 +752,7 @@ export async function setChannelVisibility(
   visibility: "public" | "private",
   confirm = false,
 ): Promise<VisibilityResult> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/visibility`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/visibility`, {
     method: "PUT",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(confirm ? { visibility, confirm: true } : { visibility }),
@@ -742,7 +775,7 @@ export interface GuardResult {
 }
 
 async function putGuard(token: string, slug: string, path: string, enabled: boolean, limit?: number): Promise<GuardResult> {
-  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/${path}`, {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/${path}`, {
     method: "PUT",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(enabled ? { enabled, limit } : { enabled }),

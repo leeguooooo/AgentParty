@@ -33,6 +33,10 @@ export interface StatuslineCache {
   server?: string;
   identity?: StatuslineIdentity;
   unread?: number;
+  tasks?: {
+    mine_active: number;
+    mine_total: number;
+  };
   last_message?: StatuslineLastMessage;
   listener?: StatuslineListener;
   updated_at: number;

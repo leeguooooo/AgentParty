@@ -1,6 +1,8 @@
 // 人类网页 OIDC 登录（spec §10 双轨）：授权码 + PKCE，public client（无 secret，S256）。
 // access_token 当 bearer 用；SSO 的 access_token 仅 ~10min，故一并存 refresh_token，到期前静默续期
 // （之前只存 access_token 不续期，每 10 分钟必掉登录）。
+import { apiUrl } from "./base";
+
 export interface OidcConfig {
   issuer: string;
   clientId: string;
@@ -59,7 +61,7 @@ export const CALLBACK_PATH = "/auth/callback";
 // worker 暴露的公开配置：未配 SSO provider 时 providers:[] → 降级到纯粘贴 token。
 export async function fetchAuthConfig(): Promise<AuthConfig> {
   try {
-    const res = await fetch("/api/config");
+    const res = await fetch(apiUrl("/api/config"));
     if (!res.ok) return { oidc: null, providers: [] };
     const data = (await res.json()) as {
       oidc: { issuer?: string; client_id?: string } | null;
@@ -161,7 +163,7 @@ export async function completeLogin(providers: AuthProviderConfig[]): Promise<We
   const config = providers.find((provider) => provider.id === providerId) ?? providers[0] ?? null;
   if (config === null) throw new Error("sign-in provider is not configured");
   if (config.type === "oauth") {
-    const res = await fetch(`/api/auth/${encodeURIComponent(config.id)}/callback`, {
+    const res = await fetch(apiUrl(`/api/auth/${encodeURIComponent(config.id)}/callback`), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({

@@ -44,6 +44,11 @@ Tools:
   party_task_create
   party_task_from_message
   party_task_update
+  task_list
+  task_claim
+  task_status
+  task_complete
+  task_block
   party_spawn_worker
   party_watch_once
   party_wake_test`;
@@ -92,6 +97,12 @@ function normalizeAssignee(name?: string, kind?: TaskAssigneeKind): { name: stri
   const normalized = name.replace(/^@/, "");
   if (!isName(normalized)) throw new Error("assignee_name must be a valid AgentParty name");
   return { name: normalized, kind: kind ?? "agent" };
+}
+
+function normalizeTaskAssigneeFilter(assignee?: string): string | undefined {
+  const normalized = assignee?.replace(/^@/, "");
+  if (normalized !== undefined && !isName(normalized)) throw new Error("assignee must be a valid AgentParty name");
+  return normalized;
 }
 
 function compact(text: string): string {
@@ -368,8 +379,36 @@ export function createMcpServer(defaultChannel?: string): McpServer {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
-        const normalizedAssignee = assignee?.replace(/^@/, "");
-        if (normalizedAssignee !== undefined && !isName(normalizedAssignee)) throw new Error("assignee must be a valid AgentParty name");
+        const normalizedAssignee = normalizeTaskAssigneeFilter(assignee);
+        const tasks = await listTasks(cfg.server, cfg.token, resolved, {
+          ...(state !== undefined ? { state: state as TaskState } : {}),
+          ...(normalizedAssignee !== undefined ? { assignee: normalizedAssignee } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        });
+        return ok({ type: "task_list", channel: resolved, tasks });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "task_list",
+    {
+      title: "List task board tasks",
+      description: "List channel-scoped task board tasks visible to the current AgentParty identity.",
+      inputSchema: {
+        channel: z.string().optional(),
+        state: TaskStateSchema.optional(),
+        assignee: z.string().optional().describe("Assignee name, with or without @ prefix."),
+        limit: z.number().int().positive().max(500).optional(),
+      },
+    },
+    async ({ channel, state, assignee, limit }) => {
+      try {
+        const cfg = await auth();
+        const resolved = normalizeChannel(channel, defaultChannel);
+        const normalizedAssignee = normalizeTaskAssigneeFilter(assignee);
         const tasks = await listTasks(cfg.server, cfg.token, resolved, {
           ...(state !== undefined ? { state: state as TaskState } : {}),
           ...(normalizedAssignee !== undefined ? { assignee: normalizedAssignee } : {}),
@@ -508,6 +547,95 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         if (Object.keys(body).length === 0) throw new Error("no task fields to update");
         const task = await updateTask(cfg.server, cfg.token, resolved, id, body);
         return ok({ type: "task_update", channel: resolved, task });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "task_claim",
+    {
+      title: "Claim task",
+      description: "Mark a channel task as in_progress through the existing task ledger.",
+      inputSchema: {
+        channel: z.string().optional(),
+        id: z.number().int().positive(),
+      },
+    },
+    async ({ channel, id }) => {
+      try {
+        const cfg = await auth();
+        const resolved = normalizeChannel(channel, defaultChannel);
+        const task = await updateTask(cfg.server, cfg.token, resolved, id, { state: "in_progress" });
+        return ok({ type: "task_claim", channel: resolved, task });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "task_status",
+    {
+      title: "Set task status",
+      description: "Set a channel task's ledger state through the existing task REST endpoint.",
+      inputSchema: {
+        channel: z.string().optional(),
+        id: z.number().int().positive(),
+        state: TaskStateSchema,
+      },
+    },
+    async ({ channel, id, state }) => {
+      try {
+        const cfg = await auth();
+        const resolved = normalizeChannel(channel, defaultChannel);
+        const task = await updateTask(cfg.server, cfg.token, resolved, id, { state: state as TaskState });
+        return ok({ type: "task_status", channel: resolved, task });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "task_complete",
+    {
+      title: "Complete task",
+      description: "Mark a channel task as done through the existing task ledger.",
+      inputSchema: {
+        channel: z.string().optional(),
+        id: z.number().int().positive(),
+      },
+    },
+    async ({ channel, id }) => {
+      try {
+        const cfg = await auth();
+        const resolved = normalizeChannel(channel, defaultChannel);
+        const task = await updateTask(cfg.server, cfg.token, resolved, id, { state: "done" });
+        return ok({ type: "task_complete", channel: resolved, task });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "task_block",
+    {
+      title: "Block task",
+      description: "Mark a channel task as blocked through the existing task ledger.",
+      inputSchema: {
+        channel: z.string().optional(),
+        id: z.number().int().positive(),
+      },
+    },
+    async ({ channel, id }) => {
+      try {
+        const cfg = await auth();
+        const resolved = normalizeChannel(channel, defaultChannel);
+        const task = await updateTask(cfg.server, cfg.token, resolved, id, { state: "blocked" });
+        return ok({ type: "task_block", channel: resolved, task });
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }

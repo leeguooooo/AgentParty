@@ -159,6 +159,12 @@ implementation or investigation to worker agents instead of going silent in the 
   `--role worker` according to the channel assignment, and keep `residency` honest.
 - Worker results come back to the front agent, and the front agent posts one concise channel update.
   Do not let multiple workers independently spam the channel with partial logs.
+- Quota remains conservative: loop guard is still counted by consecutive agent messages in the
+  channel, and rate limiting is still per concrete identity. A team does not get extra spam budget;
+  front-agent acks and worker reports both consume the channel's agent streak, so batch updates.
+- The agent-team acceptance boundary is the recommended access pattern plus spawn/lineage/Teams
+  visibility. The full task board belongs to the task issue, and desktop packaging belongs to the
+  desktop issue.
 
 ## No-page channel setup and handoff
 

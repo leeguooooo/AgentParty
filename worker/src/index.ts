@@ -15,6 +15,7 @@ import type {
   RestErrorCode,
   TaskAssigneeKind,
   TaskRecord,
+  TaskSummary,
   TaskState,
   TokenRole,
   WebhookFilter,
@@ -674,6 +675,47 @@ async function loadTaskRow(db: D1Database, slug: string, id: number): Promise<Ta
   return db.prepare("SELECT * FROM channel_tasks WHERE channel_slug = ? AND id = ?")
     .bind(slug, id)
     .first<TaskRow>();
+}
+
+async function loadTaskSummary(db: D1Database, slug: string, identityName: string): Promise<TaskSummary> {
+  const { results } = await db.prepare(
+    `SELECT state, COUNT(*) AS count
+       FROM channel_tasks
+      WHERE channel_slug = ?
+      GROUP BY state`,
+  )
+    .bind(slug)
+    .all<{ state: string; count: number }>();
+  const counts: Record<TaskState, number> = {
+    triage: 0,
+    backlog: 0,
+    assigned: 0,
+    in_progress: 0,
+    needs_review: 0,
+    done: 0,
+    blocked: 0,
+  };
+  for (const row of results) {
+    if (TASK_STATES.includes(row.state)) counts[row.state as TaskState] = row.count;
+  }
+  const mineRow = await db.prepare(
+    `SELECT COUNT(*) AS count
+       FROM channel_tasks
+      WHERE channel_slug = ?
+        AND assignee_name = ?
+        AND state IN ('assigned', 'in_progress', 'needs_review', 'blocked')`,
+  )
+    .bind(slug, identityName)
+    .first<{ count: number }>();
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  return {
+    type: "task_summary",
+    channel: slug,
+    total,
+    open: total - counts.done,
+    ...counts,
+    mine: mineRow?.count ?? 0,
+  };
 }
 
 function parseSquadMembers(input: unknown): string[] | null {
@@ -1466,6 +1508,29 @@ function isBlockedWebhookHost(rawHost: string): boolean {
 }
 
 const app = new Hono<AppContext>();
+const DESKTOP_CORS_ORIGINS = new Set(["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]);
+
+app.use("/api/*", async (c, next) => {
+  const origin = c.req.header("origin") ?? "";
+  if (!DESKTOP_CORS_ORIGINS.has(origin)) return next();
+
+  if (c.req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-origin": origin,
+        "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+        "access-control-allow-headers": "authorization,content-type",
+        "access-control-max-age": "86400",
+        vary: "Origin",
+      },
+    });
+  }
+
+  await next();
+  c.res.headers.set("access-control-allow-origin", origin);
+  c.res.headers.append("vary", "Origin");
+});
 
 app.get("/api/health", (c) => c.json({ ok: true }));
 app.get("/openapi.json", (c) => c.json(openapiDocument));
@@ -3373,6 +3438,17 @@ app.get("/api/channels/:slug/tasks", async (c) => {
     .bind(...bindings)
     .all<TaskRow>();
   return c.json({ tasks: results.map(taskRowToRecord) });
+});
+
+app.get("/api/channels/:slug/tasks/summary", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  return c.json(await loadTaskSummary(c.env.DB, slug, identity.name));
 });
 
 app.get("/api/channels/:slug/tasks/:id", async (c) => {

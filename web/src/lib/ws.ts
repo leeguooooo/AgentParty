@@ -1,6 +1,7 @@
 // ws 客户端：hello/since 补拉 + 断线指数退避重连（1s 起、上限 30s）+ 25s 心跳。
 // 浏览器设不了 Authorization 头：个人 token 走 Sec-WebSocket-Protocol，分享链接才走 ?t=。
 import type { ClientFrame, ServerFrame } from "@agentparty/shared";
+import { apiUrl, wsUrl } from "./base";
 
 export type SocketStatus = "connecting" | "open" | "reconnecting" | "closed";
 export type FatalReason = "revoked" | "archived" | "forbidden";
@@ -52,9 +53,8 @@ export class ChannelSocket {
   connect() {
     if (this.disposed) return;
     this.handlers.onStatus(this.everConnected ? "reconnecting" : "connecting");
-    const proto = location.protocol === "https:" ? "wss" : "ws";
     const url =
-      `${proto}://${location.host}/api/channels/${this.slug}/ws` +
+      wsUrl(`/api/channels/${this.slug}/ws`) +
       (this.options.queryToken === true ? `?t=${encodeURIComponent(this.token)}` : "");
     const ws =
       this.options.queryToken === true
@@ -119,7 +119,7 @@ export class ChannelSocket {
   private async probeThenRetry() {
     let revoked = false;
     try {
-      const res = await fetch("/api/me", {
+      const res = await fetch(apiUrl("/api/me"), {
         headers: { authorization: `Bearer ${this.token}` },
       });
       revoked = res.status === 401;
