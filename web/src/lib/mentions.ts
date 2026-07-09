@@ -52,7 +52,7 @@ function tierFor(
 
 // self 从候选里剔掉（@ 自己没意义）。档内按名字排序，档间 online > wakeable > recent。
 // 只把「有意义的 @ 目标」纳入：agent 各档都留；human 只在当前在线时才留（围观的人、尤其是
-// 只有 UUID 名的登录会话，不该冒进候选）；超过 1 天没露面的幽灵 presence 一律剔除。
+// 只有 UUID 名的登录会话，不该冒进候选）；超过 14 天没露面的幽灵 presence 一律剔除。
 export function mentionCandidates(
   participants: Sender[],
   presence: Record<string, PresenceEntry>,
@@ -80,7 +80,12 @@ export function mentionCandidates(
   const kindFor = (name: string): "agent" | "human" =>
     kindOf.get(name) ?? (SYSTEM_HUMAN_SESSION_RE.test(name) ? "human" : "agent");
 
-  const names = new Set<string>([...online, ...Object.keys(presence), ...roles.map((role) => role.name)]);
+  const names = new Set<string>([
+    ...online,
+    ...Object.keys(presence),
+    ...identities.map((identity) => identity.name),
+    ...roles.map((role) => role.name),
+  ]);
   const rank: Record<MentionTier, number> = { online: 0, wakeable: 1, recent: 2 };
   return [...names]
     .filter((name) => name !== self && name !== "system")
@@ -120,6 +125,7 @@ export function mentionCandidates(
       if (c.tier === "online") return true; // 当前连着的都留（含在线的人类）
       if (c.kind === "human") return false; // 不在线的人类围观者不作候选
       if (roleByName.has(c.name)) return true;
+      if (identityByName.has(c.name)) return true;
       const p = presence[c.name];
       const seen = p?.last_seen ?? p?.ts ?? 0;
       return now - seen <= DEAD_MS; // 幽灵清理：太久没露面的 agent 也剔除

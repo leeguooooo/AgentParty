@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SELF } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { api, createChannel, postMessage, seedToken, uniq, WsClient } from "./helpers";
 
 describe("channels", () => {
@@ -215,5 +215,31 @@ describe("channels", () => {
 
     const outsider = await seedToken("human", uniq("outsider"), { owner: "outsider@example.com" });
     expect((await api(`/api/channels/${slug}/identities`, outsider.token)).status).toBe(403);
+  });
+
+  it("identity map prefers human profile handles over opaque provider account ids", async () => {
+    const ownerName = "lark-ad72b3f9749e";
+    const ownerAccount = "lark:on_22608d74bd2d7f39f6dc67d0da248fa5";
+    const owner = await seedToken("human", ownerName, { owner: ownerAccount });
+    const handle = uniq("leo");
+    const now = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO account_profiles (account, handle, display_name, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind(ownerAccount, handle, "Leo", now, now)
+      .run();
+    const slug = await createChannel(owner.token);
+    expect((await postMessage(slug, owner.token, "hello from lark")).status).toBe(200);
+
+    const identitiesRes = await api(`/api/channels/${slug}/identities`, owner.token);
+    expect(identitiesRes.status).toBe(200);
+    const identities = ((await identitiesRes.json()) as {
+      identities: { name: string; display: string; kind?: string; account?: string }[];
+    }).identities;
+
+    expect(identities).toContainEqual(
+      expect.objectContaining({ name: ownerName, display: handle, kind: "human", account: ownerAccount }),
+    );
   });
 });

@@ -2942,15 +2942,16 @@ app.get("/api/channels/:slug/identities", async (c) => {
     return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
   }
   const identities = new Map<string, { name: string; kind?: "agent" | "human"; account?: string; display: string }>();
-  const add = (identity: { name: string; kind?: "agent" | "human"; account?: string }) => {
+  const add = (identity: { name: string; kind?: "agent" | "human"; account?: string; display?: string }) => {
     const prev = identities.get(identity.name);
     const kind = identity.kind ?? prev?.kind;
     const account = identity.account ?? prev?.account;
+    const explicitDisplay = typeof identity.display === "string" && identity.display !== "" ? identity.display : undefined;
     identities.set(identity.name, {
       name: identity.name,
       ...(kind === undefined ? {} : { kind }),
       ...(account === undefined ? {} : { account }),
-      display: kind === "human" && account ? account : (prev?.display ?? identity.name),
+      display: explicitDisplay ?? (kind === "human" && account ? account : (prev?.display ?? identity.name)),
     });
   };
 
@@ -2963,6 +2964,26 @@ app.get("/api/channels/:slug/identities", async (c) => {
     const data = (await res.json()) as { identities?: { name: string; kind?: "agent" | "human"; account?: string }[] };
     for (const identity of data.identities ?? []) {
       if (typeof identity.name === "string" && identity.name !== "") add(identity);
+    }
+  }
+
+  const humanAccounts = new Set(
+    [...identities.values()]
+      .filter((identity) => identity.kind === "human" && identity.account !== undefined)
+      .map((identity) => identity.account!),
+  );
+  for (const account of humanAccounts) {
+    const profile = await c.env.DB.prepare(
+      `SELECT handle, display_name
+         FROM account_profiles
+        WHERE account = ?`,
+    )
+      .bind(account)
+      .first<{ handle: string | null; display_name: string | null }>();
+    const display = profile?.handle || profile?.display_name || null;
+    if (display === null) continue;
+    for (const identity of identities.values()) {
+      if (identity.kind === "human" && identity.account === account) add({ ...identity, display });
     }
   }
 

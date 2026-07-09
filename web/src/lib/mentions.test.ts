@@ -103,6 +103,23 @@ describe("mentionCandidates", () => {
     expect(c.role).toBe("worker");
   });
 
+  test("identity-only agents stay mentionable even without live presence", () => {
+    const c = mentionCandidates([], {}, null, NOW, [
+      { name: "LEO-MAIN", display: "LEO-MAIN", kind: "agent", account: "lark:on_owner" },
+    ])[0]!;
+    expect(c.name).toBe("LEO-MAIN");
+    expect(c.display).toBe("LEO-MAIN");
+    expect(c.tier).toBe("recent");
+    expect(c.group).toBe("lark:on_owner");
+  });
+
+  test("identity-only agents can be found by readable display", () => {
+    const c = mentionCandidates([], {}, null, NOW, [
+      { name: "lark-14c1a0719d91", display: "AgentParty", kind: "agent", account: "lark:on_owner" },
+    ]);
+    expect(filterCandidates(c, "agent").map((candidate) => candidate.name)).toEqual(["lark-14c1a0719d91"]);
+  });
+
   test("assigned channel roles add offline agents and carry structured responsibility", () => {
     const c = mentionCandidates([], {}, null, NOW, [], [
       {
