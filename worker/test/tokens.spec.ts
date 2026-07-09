@@ -88,9 +88,9 @@ describe("tokens", () => {
     expect(res.status).toBe(409);
   });
 
-  // 命名空间大小写未闭合兜底：NAME_RE 允许大写字母、HANDLE_RE 强制全小写，
-  // account_profiles.handle 是大小写敏感 UNIQUE——若反向冲突查询按精确大小写匹配，
-  // 已占 handle "casehandle-xxxx" 时仍能铸出大小写变体的同名 token（look-alike 冒充）。
+  // 命名空间大小写未闭合兜底：NAME_RE 和 HANDLE_RE 现在都允许大写字母（handle 大小写原样保留显示），
+  // 若反向冲突查询按精确大小写匹配 account_profiles.handle，已占 handle "casehandle-xxxx" 时仍能
+  // 铸出大小写变体的同名 token（look-alike 冒充）——这条查询显式带 COLLATE NOCASE（index.ts）挡住。
   it("409 when minting a token whose name is a case-variant of an existing handle", async () => {
     const handle = uniq("casehandle");
     const owner = uniq("acct");

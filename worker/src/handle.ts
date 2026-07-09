@@ -1,6 +1,6 @@
 import { RESERVED_NAMES } from "@agentparty/shared";
 
-export const HANDLE_RE = /^[a-z0-9][a-z0-9._-]{1,31}$/;
+export const HANDLE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{1,31}$/;
 
 export function validateHandleFormat(input: unknown): string | null {
   if (typeof input !== "string") return null;

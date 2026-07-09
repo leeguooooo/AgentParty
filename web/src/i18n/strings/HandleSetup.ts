@@ -4,7 +4,7 @@ export const HandleSetupStrings: LocaleDict = {
   en: {
     "HandleSetup.title": "Display name",
     "HandleSetup.placeholder": "handle (e.g. jane_doe)",
-    "HandleSetup.formatHint": "lowercase letters/digits/._-, starting with a letter or digit, 2–32 chars",
+    "HandleSetup.formatHint": "letters/digits/._-, starting with a letter or digit, 2–32 chars (case is kept, but uniqueness ignores case)",
     "HandleSetup.save": "save",
     "HandleSetup.saving": "saving…",
     "HandleSetup.cancel": "cancel",
@@ -16,7 +16,7 @@ export const HandleSetupStrings: LocaleDict = {
   zh: {
     "HandleSetup.title": "显示名",
     "HandleSetup.placeholder": "显示名（如 jane_doe）",
-    "HandleSetup.formatHint": "小写字母/数字/._-，字母或数字开头，2–32 位",
+    "HandleSetup.formatHint": "字母/数字/._-，字母或数字开头，2–32 位（保留大小写显示，但唯一性不分大小写）",
     "HandleSetup.save": "保存",
     "HandleSetup.saving": "保存中…",
     "HandleSetup.cancel": "取消",

@@ -52,4 +52,31 @@ describe("PUT /api/me/handle + GET /api/me handle", () => {
     });
     expect(put.status).toBe(409);
   });
+
+  // Option A（GitHub 式，spec 2026-07-08 更新）：handle 允许大写、原样保留显示，但唯一性仍不分
+  // 大小写——"Evan" 已被占用后，另一账号设同一 handle 的大小写变体（"evan"）必须 409，不能并存。
+  it("设置 handle 后原样保留大小写回显，另一账号设其大小写变体时返回 409", async () => {
+    const base = uniq("evan");
+    const handle = base[0].toUpperCase() + base.slice(1); // 如 Evan-xxxxxxxx
+
+    const owner1 = uniq("acct");
+    const { token: token1 } = await seedToken("human", uniq("tok-human"), { owner: owner1 });
+    const put1 = await api("/api/me/handle", token1, {
+      method: "PUT",
+      body: JSON.stringify({ handle }),
+    });
+    expect(put1.status).toBe(200);
+    expect(await put1.json()).toMatchObject({ handle }); // 保留原大小写，不被强制转小写
+
+    const me1 = await api("/api/me", token1);
+    expect(await me1.json()).toMatchObject({ handle });
+
+    const owner2 = uniq("acct");
+    const { token: token2 } = await seedToken("human", uniq("tok-human"), { owner: owner2 });
+    const put2 = await api("/api/me/handle", token2, {
+      method: "PUT",
+      body: JSON.stringify({ handle: handle.toLowerCase() }),
+    });
+    expect(put2.status).toBe(409);
+  });
 });
