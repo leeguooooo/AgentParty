@@ -168,6 +168,20 @@ export interface TaskRecord {
   completed_at: number | null;
 }
 
+export interface ChannelSquad {
+  type: "squad";
+  channel: string;
+  name: string;
+  title: string | null;
+  description: string | null;
+  leader: string | null;
+  members: string[];
+  created_by: string;
+  created_by_kind: SenderKind;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface AgentLineage {
   parent_agent: string;
   root_agent: string;

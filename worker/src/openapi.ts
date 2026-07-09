@@ -457,6 +457,108 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/squads": {
+      get: {
+        summary: "list channel-scoped @squad mention groups",
+        security: [{ bearer: [] }],
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{squads:[ChannelSquad]}" },
+          "403": { description: "not allowed in this channel" },
+          "404": { description: "channel not found" },
+        },
+      },
+      post: {
+        summary: "create a channel-scoped @squad mention group",
+        security: [{ bearer: [] }],
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name", "members"],
+                properties: {
+                  name: { type: "string" },
+                  title: { type: ["string", "null"], maxLength: 120 },
+                  description: { type: ["string", "null"], maxLength: 4000 },
+                  leader: { type: ["string", "null"] },
+                  members: { type: "array", minItems: 1, maxItems: 50, items: { type: "string" } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": { description: "ChannelSquad" },
+          "400": { description: "invalid squad body" },
+          "403": { description: "readonly token or not allowed in this channel" },
+          "409": { description: "squad already exists" },
+          "410": { description: "channel archived" },
+        },
+      },
+    },
+    "/api/channels/{slug}/squads/{name}": {
+      get: {
+        summary: "read a channel-scoped @squad mention group",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "name", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "ChannelSquad" },
+          "403": { description: "not allowed in this channel" },
+          "404": { description: "channel or squad not found" },
+        },
+      },
+      patch: {
+        summary: "update a channel-scoped @squad mention group",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "name", in: "path", required: true, schema: { type: "string" } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  title: { type: ["string", "null"], maxLength: 120 },
+                  description: { type: ["string", "null"], maxLength: 4000 },
+                  leader: { type: ["string", "null"] },
+                  members: { type: "array", minItems: 1, maxItems: 50, items: { type: "string" } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "ChannelSquad" },
+          "400": { description: "invalid squad body" },
+          "403": { description: "readonly token or not allowed in this channel" },
+          "404": { description: "channel or squad not found" },
+          "410": { description: "channel archived" },
+        },
+      },
+      delete: {
+        summary: "delete a channel-scoped @squad mention group",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "name", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "{ok:true,squad:ChannelSquad}" },
+          "403": { description: "readonly token or not allowed in this channel" },
+          "404": { description: "channel or squad not found" },
+          "410": { description: "channel archived" },
+        },
+      },
+    },
     "/api/channels/{slug}/tasks/{id}": {
       get: {
         summary: "read a channel-scoped task",

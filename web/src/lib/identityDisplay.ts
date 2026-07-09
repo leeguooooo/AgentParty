@@ -92,7 +92,11 @@ export function buildIdentityDisplay(input: {
     });
   }
   for (const option of input.mentionOptions) {
-    addIdentity(map, option.name, { kind: option.kind, account: option.account, display: option.display });
+    addIdentity(map, option.name, {
+      kind: option.kind === "squad" ? undefined : option.kind,
+      account: option.account,
+      display: option.display,
+    });
   }
   for (const identity of input.channelIdentities) addIdentity(map, identity.name, identity, true);
 

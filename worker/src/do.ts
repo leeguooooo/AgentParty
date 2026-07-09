@@ -159,6 +159,12 @@ function mergeBodyMentions(explicit: string[], text: string): string[] {
   return out;
 }
 
+function withExpandedMentions(frame: SendFrame, mentions: string[]): SendFrame {
+  return frame.kind === "message"
+    ? { ...frame, mentions }
+    : { ...frame, mentions };
+}
+
 function parseStatusScope(input: unknown): string[] | undefined | null {
   if (input === undefined) return undefined;
   if (!Array.isArray(input)) return null;
@@ -2308,6 +2314,44 @@ export class ChannelDO extends Server<Env> {
     return new Response("not found", { status: 404 });
   }
 
+  private async expandSquadMentions(frame: SendFrame): Promise<SendFrame> {
+    const mentions = frame.mentions ?? [];
+    if (mentions.length === 0) return frame;
+    const candidates = mentions.filter((name) => name !== "system" && MENTION_NAME_RE.test(name));
+    if (candidates.length === 0) return frame;
+    const placeholders = candidates.map(() => "?").join(", ");
+    const rows = await this.env.DB.prepare(
+      `SELECT name, leader_name, members_json
+         FROM channel_squads
+        WHERE channel_slug = ? AND name IN (${placeholders})`,
+    )
+      .bind(this.name, ...candidates)
+      .all<{ name: string; leader_name: string | null; members_json: string | null }>()
+      .catch(() => ({ results: [] }));
+    if (rows.results.length === 0) return frame;
+    const routed = new Set(mentions);
+    for (const row of rows.results) {
+      const members = (() => {
+        try {
+          const parsed = JSON.parse(row.members_json ?? "[]");
+          return Array.isArray(parsed)
+            ? parsed.filter((name): name is string => typeof name === "string" && MENTION_NAME_RE.test(name))
+            : [];
+        } catch {
+          return [];
+        }
+      })();
+      const targets = row.leader_name && MENTION_NAME_RE.test(row.leader_name) ? [row.leader_name] : members;
+      for (const target of targets) {
+        if (target === "system") continue;
+        routed.add(target);
+        if (routed.size >= MAX_MENTIONS) break;
+      }
+      if (routed.size >= MAX_MENTIONS) break;
+    }
+    return withExpandedMentions(frame, [...routed]);
+  }
+
   // 校验 → 分配 seq → 落库 → 修剪/presence，返回待广播帧
   private async handleSend(
     identity: Identity,
@@ -2327,6 +2371,7 @@ export class ChannelDO extends Server<Env> {
     if (byteLength(payload) > BODY_LIMIT) {
       return { ok: false, code: "too_large", message: `body exceeds ${BODY_LIMIT} bytes` };
     }
+    frame = await this.expandSquadMentions(frame);
     const workflowGuard = this.workflowGuardDecision(identity, frame);
     if (workflowGuard !== null) {
       const row = this.workflowGuardRow(workflowGuard.workflow.workflow_id);

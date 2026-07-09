@@ -184,6 +184,35 @@ describe("mentionCandidates", () => {
     expect(c.responsibility).toBe("final review");
   });
 
+  test("channel squads are mention candidates even without live presence", () => {
+    const c = mentionCandidates([], {}, null, NOW, [], [], [
+      {
+        type: "squad",
+        channel: "dev",
+        name: "frontend",
+        title: "Frontend",
+        description: "web UI owners",
+        leader: "alice",
+        members: ["alice", "bob"],
+        created_by: "leo",
+        created_by_kind: "human",
+        created_at: NOW,
+        updated_at: NOW,
+      },
+    ]);
+    expect(c[0]).toMatchObject({
+      name: "frontend",
+      display: "Frontend",
+      kind: "squad",
+      tier: "wakeable",
+      group: "squads",
+      role: "leader:alice",
+      responsibility: "2 members",
+      note: "web UI owners",
+    });
+    expect(filterCandidates(c, "front").map((candidate) => candidate.name)).toEqual(["frontend"]);
+  });
+
   test("bare-UUID session name excluded when offline (旧 presence 行没回填 kind 的兜底)", () => {
     const uuid = "63ce33fa-6169-4c71-840b-fe6ea1d1162d";
     const pres = { [uuid]: presence({ name: uuid }) }; // 无 kind：靠名字形状判为 human
