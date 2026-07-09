@@ -12,6 +12,7 @@ import { run as whoamiRun } from "../src/commands/whoami";
 import { run as statuslineRun } from "../src/commands/statusline";
 import { run as logoutRun } from "../src/commands/logout";
 import { run as channelRun } from "../src/commands/channel";
+import { writeStatuslineCache } from "../src/statusline-cache";
 import { startRestMock, type RestMock } from "./rest-mock";
 import { startOidcMock, type OidcMock } from "./oidc-mock";
 
@@ -469,6 +470,29 @@ describe("statusline", () => {
     const code = await statuslineRun(["--no-network"]);
     expect(code).toBe(0);
     expect(logs).toEqual(["ap:codex-mini #dev"]);
+    expect(errs).toEqual([]);
+  });
+
+  test("prints cached active task count without network", async () => {
+    writeConfig({
+      server: "https://agentparty.example",
+      token: "ap_cached_secret",
+      identity: {
+        name: "codex-mini",
+        email: null,
+        kind: "agent",
+        role: "agent",
+        owner: "leo",
+        channel_scope: "dev",
+        verified_at: 123,
+      },
+    });
+    writeState({ channel: "dev", cursor: 0 });
+    writeStatuslineCache({ channel: "dev", tasks: { mine_active: 2, mine_total: 3 } });
+
+    const code = await statuslineRun(["--no-network"]);
+    expect(code).toBe(0);
+    expect(logs).toEqual(["ap:codex-mini #dev tasks:2"]);
     expect(errs).toEqual([]);
   });
 

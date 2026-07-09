@@ -1466,6 +1466,29 @@ function isBlockedWebhookHost(rawHost: string): boolean {
 }
 
 const app = new Hono<AppContext>();
+const DESKTOP_CORS_ORIGINS = new Set(["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]);
+
+app.use("/api/*", async (c, next) => {
+  const origin = c.req.header("origin") ?? "";
+  if (!DESKTOP_CORS_ORIGINS.has(origin)) return next();
+
+  if (c.req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-origin": origin,
+        "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+        "access-control-allow-headers": "authorization,content-type",
+        "access-control-max-age": "86400",
+        vary: "Origin",
+      },
+    });
+  }
+
+  await next();
+  c.res.headers.set("access-control-allow-origin", origin);
+  c.res.headers.append("vary", "Origin");
+});
 
 app.get("/api/health", (c) => c.json({ ok: true }));
 app.get("/openapi.json", (c) => c.json(openapiDocument));

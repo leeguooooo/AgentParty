@@ -1,0 +1,17 @@
+{
+  "name": "@agentparty/desktop",
+  "license": "BUSL-1.1",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "cd ../web && bunx vite build && cd ../desktop && tauri build",
+    "build:prod": "cd ../web && VITE_API_BASE=https://agentparty.leeguoo.com bunx vite build && cd ../desktop && tauri build",
+    "build:xdream": "cd ../web && VITE_API_BASE=https://agentparty.pwtk-dev.work bunx vite build && cd ../desktop && tauri build",
+    "typecheck": "cd ../web && bunx tsc --noEmit && cd ../desktop/src-tauri && cargo check"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.6.2"
+  }
+}

@@ -68,6 +68,7 @@ describe("cli subprocess", () => {
       "mcp",
       "lark",
       "task",
+      "board",
       "squad",
       "charter",
       "statusline",
@@ -78,6 +79,61 @@ describe("cli subprocess", () => {
       expect(r.stdout, cmd).toContain(`usage: party ${cmd}`);
       expect(r.stderr, cmd).toBe("");
     }
+  });
+
+  test("board renders channel task ledger as JSON", async () => {
+    const seen: { method: string; path: string; auth: string | null }[] = [];
+    restServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        seen.push({ method: req.method, path: `${url.pathname}${url.search}`, auth: req.headers.get("authorization") });
+        if (url.pathname === "/api/me") {
+          return Response.json({ name: "worker-a", email: null, kind: "agent", role: "agent", owner: null });
+        }
+        if (url.pathname === "/api/channels/dev/tasks" && req.method === "GET") {
+          return Response.json({
+            tasks: [
+              {
+                type: "task",
+                id: 1,
+                channel: "dev",
+                title: "Ship task board",
+                desc: null,
+                state: "in_progress",
+                assignee: { name: "worker-a", kind: "agent" },
+                created_by: "lead",
+                created_by_kind: "human",
+                priority: 1,
+                labels: ["ui"],
+                parent_id: null,
+                anchor_seqs: [],
+                completion_artifact: null,
+                workflow_id: null,
+                created_at: 1,
+                updated_at: 1,
+              },
+            ],
+          });
+        }
+        return Response.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
+      },
+    });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: `http://127.0.0.1:${restServer.port}`, token: "ap_tok" }),
+    );
+    const result = await runCli(["board", "dev", "--mine", "--json"]);
+    expect(result.code).toBe(0);
+    const frame = JSON.parse(result.stdout) as { type: string; channel: string; active: number; columns: { state: string; count: number }[] };
+    expect(frame.type).toBe("board");
+    expect(frame.channel).toBe("dev");
+    expect(frame.active).toBe(1);
+    expect(frame.columns.find((column) => column.state === "in_progress")?.count).toBe(1);
+    expect(seen).toContainEqual(expect.objectContaining({ method: "GET", path: "/api/me", auth: "Bearer ap_tok" }));
+    expect(seen).toContainEqual(expect.objectContaining({ method: "GET", path: "/api/channels/dev/tasks?assignee=worker-a&limit=200", auth: "Bearer ap_tok" }));
   });
 
   test("json-capable subcommands support --help without auth or config", async () => {
@@ -194,6 +250,11 @@ describe("cli subprocess", () => {
       expect(tools.tools.map((tool) => tool.name)).toContain("party_task_from_message");
       expect(tools.tools.map((tool) => tool.name)).toContain("party_task_list");
       expect(tools.tools.map((tool) => tool.name)).toContain("party_task_update");
+      expect(tools.tools.map((tool) => tool.name)).toContain("task_list");
+      expect(tools.tools.map((tool) => tool.name)).toContain("task_claim");
+      expect(tools.tools.map((tool) => tool.name)).toContain("task_status");
+      expect(tools.tools.map((tool) => tool.name)).toContain("task_complete");
+      expect(tools.tools.map((tool) => tool.name)).toContain("task_block");
       expect(tools.tools.map((tool) => tool.name)).toContain("party_spawn_worker");
 
       const result = await client.callTool({
@@ -237,6 +298,41 @@ describe("cli subprocess", () => {
       expect(updated.isError).not.toBe(true);
       expect(updated.structuredContent).toMatchObject({ type: "task_update", task: { id: 1, state: "assigned" } });
 
+      const boardList = await client.callTool({
+        name: "task_list",
+        arguments: { state: "assigned", assignee: "alice", limit: 10 },
+      });
+      expect(boardList.isError).not.toBe(true);
+      expect(boardList.structuredContent).toMatchObject({ type: "task_list", channel: "dev", tasks: [{ id: 1 }] });
+
+      const claimed = await client.callTool({
+        name: "task_claim",
+        arguments: { id: 1 },
+      });
+      expect(claimed.isError).not.toBe(true);
+      expect(claimed.structuredContent).toMatchObject({ type: "task_claim", task: { id: 1, state: "in_progress" } });
+
+      const taskStatus = await client.callTool({
+        name: "task_status",
+        arguments: { id: 1, state: "needs_review" },
+      });
+      expect(taskStatus.isError).not.toBe(true);
+      expect(taskStatus.structuredContent).toMatchObject({ type: "task_status", task: { id: 1, state: "needs_review" } });
+
+      const taskComplete = await client.callTool({
+        name: "task_complete",
+        arguments: { id: 1 },
+      });
+      expect(taskComplete.isError).not.toBe(true);
+      expect(taskComplete.structuredContent).toMatchObject({ type: "task_complete", task: { id: 1, state: "done" } });
+
+      const taskBlock = await client.callTool({
+        name: "task_block",
+        arguments: { id: 1 },
+      });
+      expect(taskBlock.isError).not.toBe(true);
+      expect(taskBlock.structuredContent).toMatchObject({ type: "task_block", task: { id: 1, state: "blocked" } });
+
       const status = await client.callTool({
         name: "party_status",
         arguments: { state: "working", note: "started", task_id: 1 },
@@ -272,9 +368,34 @@ describe("cli subprocess", () => {
         body: null,
       }));
       expect(seen).toContainEqual(expect.objectContaining({
+        method: "GET",
+        path: "/api/channels/dev/tasks?state=assigned&assignee=alice&limit=10",
+        body: null,
+      }));
+      expect(seen).toContainEqual(expect.objectContaining({
         method: "PATCH",
         path: "/api/channels/dev/tasks/1",
         body: { state: "assigned", assignee: { name: "alice", kind: "agent" } },
+      }));
+      expect(seen).toContainEqual(expect.objectContaining({
+        method: "PATCH",
+        path: "/api/channels/dev/tasks/1",
+        body: { state: "in_progress" },
+      }));
+      expect(seen).toContainEqual(expect.objectContaining({
+        method: "PATCH",
+        path: "/api/channels/dev/tasks/1",
+        body: { state: "needs_review" },
+      }));
+      expect(seen).toContainEqual(expect.objectContaining({
+        method: "PATCH",
+        path: "/api/channels/dev/tasks/1",
+        body: { state: "done" },
+      }));
+      expect(seen).toContainEqual(expect.objectContaining({
+        method: "PATCH",
+        path: "/api/channels/dev/tasks/1",
+        body: { state: "blocked" },
       }));
       expect(seen).toContainEqual(expect.objectContaining({
         method: "POST",

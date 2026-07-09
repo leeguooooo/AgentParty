@@ -28,6 +28,7 @@ commands:
   mcp                                                run stdio MCP server for structured agent tools
   lark      notify on|off|status [--channel C]       send channel @mentions to your Lark/Feishu account
   task      create|list|assign|claim|status|block|done [--channel C]  channel task ledger
+  board     [channel|--channel C] [--mine]            channel task board
   squad     create|list|update|delete [--channel C]   channel @squad mention groups
   ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
@@ -92,6 +93,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/lark")).run(rest);
     case "task":
       return (await import("./commands/task")).run(rest);
+    case "board":
+      return (await import("./commands/board")).run(rest);
     case "squad":
       return (await import("./commands/squad")).run(rest);
     case "ask":

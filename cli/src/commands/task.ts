@@ -4,7 +4,7 @@ import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../
 import { resolveChannel } from "../config";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
-import { createTask, fetchMessages, handleRestError, listTasks, updateTask } from "../rest";
+import { createTask, fetchMe, fetchMessages, handleRestError, listTasks, updateTask } from "../rest";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
 const TASK_STATES: readonly string[] = ["triage", "backlog", "assigned", "in_progress", "needs_review", "done", "blocked"] satisfies TaskState[];
@@ -22,12 +22,13 @@ const FLAGS = [
   "anchor",
   "workflow",
   "limit",
+  "mine",
   "json",
 ];
 
 const HELP = `usage: party task create <title|-> [--channel C] [--desc text] [--assignee @name] [--label bug]... [--priority N] [--parent ID] [--anchor seq]...
   party task from <seq> [--channel C] [--title text] [--desc text] [--assignee @name] [--label bug]...
-  party task list [--channel C] [--state S] [--assignee @name] [--limit N] [--json]
+  party task list [--channel C] [--state S] [--assignee @name|--mine] [--limit N] [--json]
   party task assign <id> @name [--channel C] [--assignee-kind agent|human|squad]
   party task claim <id> [--channel C]
   party task status <id> triage|backlog|assigned|in_progress|needs_review|done|blocked [--channel C]
@@ -100,7 +101,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["json"], repeatable: ["label", "anchor"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["json", "mine"], repeatable: ["label", "anchor"] });
   const unknown = unknownFlagError(flags, FLAGS);
   if (unknown !== null) {
     console.error(unknown);
@@ -134,7 +135,11 @@ export async function run(argv: string[]): Promise<number> {
         console.error("--state must be triage|backlog|assigned|in_progress|needs_review|done|blocked");
         return 1;
       }
-      const assignee = str(flags.assignee)?.replace(/^@/, "");
+      if (flags.mine === true && str(flags.assignee) !== undefined) {
+        console.error("--mine cannot be combined with --assignee");
+        return 1;
+      }
+      const assignee = flags.mine === true ? (await fetchMe(cfg.server, cfg.token)).name : str(flags.assignee)?.replace(/^@/, "");
       if (assignee !== undefined && !isName(assignee)) {
         console.error("--assignee must be a valid name");
         return 1;

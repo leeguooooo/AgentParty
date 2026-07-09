@@ -2693,6 +2693,38 @@
   padding: 0;
   list-style: none;
 }
+.task-board {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(220px, 1fr));
+  gap: 10px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.task-column {
+  min-width: 220px;
+  padding: 8px;
+  border: 1.5px solid var(--t-faint);
+  border-radius: 8px;
+  background: var(--t-panel);
+}
+.task-column-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.task-column-count {
+  color: var(--t-dim);
+  font-size: 10.5px;
+}
+.task-column-empty {
+  margin: 0;
+  padding: 10px 0;
+  color: var(--t-faint);
+  font-size: 11px;
+}
 .task-card {
   min-width: 0;
   padding: 9px 10px;

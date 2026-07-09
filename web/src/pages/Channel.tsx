@@ -157,6 +157,7 @@ interface RoleDraft {
 
 type ChannelPanel = "charter" | "roles" | "coordination" | "tasks" | "search" | "settings";
 type AdminSurface = "agentJoin" | "agentTokens" | "joinLink";
+const TASK_BOARD_STATES: readonly TaskState[] = ["triage", "backlog", "assigned", "in_progress", "needs_review", "blocked", "done"];
 
 function compactTaskTitle(text: string, fallback: string): string {
   const raw = text.replace(/\s+/g, " ").trim();
@@ -1030,7 +1031,70 @@ function TaskLedgerPanel({
     acc[task.state] = (acc[task.state] ?? 0) + 1;
     return acc;
   }, {});
+  const tasksByState = new Map<TaskState, TaskRecord[]>(TASK_BOARD_STATES.map((state) => [state, []]));
+  for (const task of tasks) tasksByState.get(task.state)?.push(task);
   const disabled = loading || !canWrite;
+  const renderTask = (task: TaskRecord) => {
+    const taskBusy = busyTaskId === task.id;
+    const assignDraft = assignDrafts[task.id] ?? task.assignee?.name ?? "";
+    const assignKind = assignKinds[task.id] ?? task.assignee?.kind ?? "agent";
+    return (
+      <li key={task.id} className="task-card">
+        <div className="task-card-main">
+          <span className="t-mono task-id">#{task.id}</span>
+          <strong>{task.title}</strong>
+          <span className={`t-mono task-state task-state--${task.state}`}>{task.state}</span>
+        </div>
+        {task.desc !== null && <p>{task.desc}</p>}
+        <div className="task-card-meta">
+          <span className="t-mono">P{task.priority}</span>
+          {task.assignee !== null && <span className="t-mono">@{task.assignee.name}</span>}
+          {task.parent_id !== null && <span className="t-mono">parent #{task.parent_id}</span>}
+          {task.anchor_seqs.map((seq) => <span key={seq} className="t-mono">msg #{seq}</span>)}
+          {task.labels.map((label) => <span key={label} className="t-mono task-label">{label}</span>)}
+        </div>
+        <div className="task-card-actions">
+          <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "in_progress"} onClick={() => onSetState(task.id, "in_progress")}>
+            Claim
+          </button>
+          <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "blocked"} onClick={() => onSetState(task.id, "blocked")}>
+            Block
+          </button>
+          <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "done"} onClick={() => onSetState(task.id, "done")}>
+            Done
+          </button>
+          <form
+            className="task-assign-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              onAssign(task.id, assignDraft, assignKind);
+            }}
+          >
+            <input
+              aria-label={`Assign task ${task.id}`}
+              disabled={disabled || taskBusy}
+              value={assignDraft}
+              placeholder="@agent"
+              onChange={(event) => setAssignDrafts((current) => ({ ...current, [task.id]: event.currentTarget.value }))}
+            />
+            <select
+              aria-label={`Assignee kind for task ${task.id}`}
+              disabled={disabled || taskBusy}
+              value={assignKind}
+              onChange={(event) => setAssignKinds((current) => ({ ...current, [task.id]: event.currentTarget.value as TaskAssigneeKind }))}
+            >
+              <option value="agent">agent</option>
+              <option value="human">human</option>
+              <option value="squad">squad</option>
+            </select>
+            <button className="task-action-btn" type="submit" disabled={disabled || taskBusy || assignDraft.trim() === ""}>
+              Assign
+            </button>
+          </form>
+        </div>
+      </li>
+    );
+  };
   return (
     <section className="task-ledger-panel" aria-label="channel tasks">
       <header className="task-ledger-head">
@@ -1054,69 +1118,24 @@ function TaskLedgerPanel({
       {tasks.length === 0 && error === null ? (
         <p className="charter-empty">No tasks yet. Use <code>party task create</code> to add one.</p>
       ) : (
-        <ol className="task-list">
-          {tasks.map((task) => {
-            const taskBusy = busyTaskId === task.id;
-            const assignDraft = assignDrafts[task.id] ?? task.assignee?.name ?? "";
-            const assignKind = assignKinds[task.id] ?? task.assignee?.kind ?? "agent";
+        <div className="task-board" role="list" aria-label="task board columns">
+          {TASK_BOARD_STATES.map((state) => {
+            const columnTasks = tasksByState.get(state) ?? [];
             return (
-              <li key={task.id} className="task-card">
-                <div className="task-card-main">
-                  <span className="t-mono task-id">#{task.id}</span>
-                  <strong>{task.title}</strong>
-                  <span className={`t-mono task-state task-state--${task.state}`}>{task.state}</span>
-                </div>
-                {task.desc !== null && <p>{task.desc}</p>}
-                <div className="task-card-meta">
-                  <span className="t-mono">P{task.priority}</span>
-                  {task.assignee !== null && <span className="t-mono">@{task.assignee.name}</span>}
-                  {task.parent_id !== null && <span className="t-mono">parent #{task.parent_id}</span>}
-                  {task.anchor_seqs.map((seq) => <span key={seq} className="t-mono">msg #{seq}</span>)}
-                  {task.labels.map((label) => <span key={label} className="t-mono task-label">{label}</span>)}
-                </div>
-                <div className="task-card-actions">
-                  <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "in_progress"} onClick={() => onSetState(task.id, "in_progress")}>
-                    Claim
-                  </button>
-                  <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "blocked"} onClick={() => onSetState(task.id, "blocked")}>
-                    Block
-                  </button>
-                  <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "done"} onClick={() => onSetState(task.id, "done")}>
-                    Done
-                  </button>
-                  <form
-                    className="task-assign-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      onAssign(task.id, assignDraft, assignKind);
-                    }}
-                  >
-                    <input
-                      aria-label={`Assign task ${task.id}`}
-                      disabled={disabled || taskBusy}
-                      value={assignDraft}
-                      placeholder="@agent"
-                      onChange={(event) => setAssignDrafts((current) => ({ ...current, [task.id]: event.currentTarget.value }))}
-                    />
-                    <select
-                      aria-label={`Assignee kind for task ${task.id}`}
-                      disabled={disabled || taskBusy}
-                      value={assignKind}
-                      onChange={(event) => setAssignKinds((current) => ({ ...current, [task.id]: event.currentTarget.value as TaskAssigneeKind }))}
-                    >
-                      <option value="agent">agent</option>
-                      <option value="human">human</option>
-                      <option value="squad">squad</option>
-                    </select>
-                    <button className="task-action-btn" type="submit" disabled={disabled || taskBusy || assignDraft.trim() === ""}>
-                      Assign
-                    </button>
-                  </form>
-                </div>
-              </li>
+              <section key={state} className="task-column" aria-label={`${state} tasks`}>
+                <header className="task-column-head">
+                  <span className={`t-mono task-state task-state--${state}`}>{state}</span>
+                  <span className="t-mono task-column-count">{columnTasks.length}</span>
+                </header>
+                {columnTasks.length === 0 ? (
+                  <p className="t-mono task-column-empty">empty</p>
+                ) : (
+                  <ol className="task-list">{columnTasks.map(renderTask)}</ol>
+                )}
+              </section>
             );
           })}
-        </ol>
+        </div>
       )}
     </section>
   );

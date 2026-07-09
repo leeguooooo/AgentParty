@@ -2,8 +2,8 @@
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readConfig, resolveChannel, writeConfig, type CachedIdentity } from "../config";
 import { resolveAuthDetailed } from "../oidc-cli";
-import { fetchMe, type Identity } from "../rest";
-import { cachedIdentity, statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
+import { fetchMe, listTasks, type Identity } from "../rest";
+import { cachedIdentity, readStatuslineCache, statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
 import { isSlug } from "../validation";
 
 const STATUSLINE_FLAGS = ["channel", "refresh", "no-network"];
@@ -29,6 +29,34 @@ async function fetchMeWithTimeout(server: string, token: string, ms = 900): Prom
         timer = setTimeout(() => resolve(null), ms);
       }),
     ]);
+  } catch {
+    return null;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+async function fetchMineTaskCountsWithTimeout(
+  server: string,
+  token: string,
+  channel: string,
+  name: string,
+  ms = 900,
+): Promise<{ mine_active: number; mine_total: number } | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const tasks = await Promise.race([
+      listTasks(server, token, channel, { assignee: name, limit: 200 }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), ms);
+      }),
+    ]);
+    if (tasks === null) return null;
+    const activeStates = new Set(["assigned", "in_progress", "needs_review", "blocked"]);
+    return {
+      mine_active: tasks.filter((task) => activeStates.has(task.state)).length,
+      mine_total: tasks.length,
+    };
   } catch {
     return null;
   } finally {
@@ -78,8 +106,25 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   if (identity === null) return 0;
+  const statuslineCache = readStatuslineCache();
+  let taskCounts = statuslineCache?.channel === channel ? statuslineCache.tasks ?? null : null;
+  if (flags["no-network"] !== true && channel !== null) {
+    const auth = await resolveAuthDetailed();
+    if (auth.server && auth.token) {
+      taskCounts = await fetchMineTaskCountsWithTimeout(auth.server, auth.token, channel, identity.name);
+      if (taskCounts !== null) {
+        writeStatuslineCache({
+          channel,
+          server: auth.server,
+          identity: statuslineIdentity(identity),
+          tasks: taskCounts,
+        });
+      }
+    }
+  }
   const parts = [`ap:${identityLabel(identity)}`];
   if (channel !== null) parts.push(`#${channel}`);
+  if (taskCounts !== null && taskCounts.mine_active > 0) parts.push(`tasks:${taskCounts.mine_active}`);
   console.log(parts.join(" "));
   return 0;
 }
