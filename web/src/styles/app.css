@@ -823,8 +823,8 @@
   gap: 5px;
   flex: none;
   padding: 2px 8px 3px;
-  border: 1.5px solid var(--t-faint);
-  border-radius: 999px 8px 999px 8px / 8px 999px 8px 999px;
+  border: 1.4px solid var(--t-faint);
+  border-radius: 0;
   background: var(--t-panel2);
   color: inherit;
   font: inherit;
@@ -835,7 +835,7 @@
   border-color: var(--d-ink);
   background: var(--d-yellow);
   color: var(--d-ink);
-  transform: translate(-1px, -1px) rotate(-1deg);
+  transform: translate(-1px, -1px);
 }
 .presence-toggle:focus-visible {
   outline: 2px solid var(--d-ink);
