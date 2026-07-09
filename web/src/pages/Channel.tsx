@@ -382,6 +382,7 @@ function CharterBanner({
 
 function DivisionBoard({
   canModerate,
+  slug,
   roles,
   roleDrafts,
   roleError,
@@ -398,6 +399,7 @@ function DivisionBoard({
   forceOpen = false,
 }: {
   canModerate: boolean;
+  slug: string;
   roles: ChannelRoleInfo[];
   roleDrafts: Record<string, RoleDraft>;
   roleError: string | null;
@@ -414,6 +416,24 @@ function DivisionBoard({
   forceOpen?: boolean;
 }) {
   const t = useT();
+  const [selfHintOpen, setSelfHintOpen] = useState(false);
+  const [selfHintCopied, setSelfHintCopied] = useState(false);
+  useEffect(() => {
+    if (!selfHintCopied) return;
+    const timer = window.setTimeout(() => setSelfHintCopied(false), 1400);
+    return () => window.clearTimeout(timer);
+  }, [selfHintCopied]);
+  const selfReportCmd = `party status --channel ${slug} working --role worker --note ${JSON.stringify(
+    t("Channel.roles.selfReport.exampleNote"),
+  )}`;
+  const copySelfReportCmd = () => {
+    if (navigator.clipboard !== undefined) {
+      void navigator.clipboard
+        .writeText(selfReportCmd)
+        .then(() => setSelfHintCopied(true))
+        .catch(() => undefined);
+    }
+  };
   const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
   const selfRoles = selfReportedRoles(roles, presence, identities);
   const roleViews = [
@@ -453,6 +473,30 @@ function DivisionBoard({
         </div>
       </summary>
       <div className="role-board-body">
+        <div className="role-selfhint">
+          <button
+            type="button"
+            className="role-selfhint-toggle t-mono"
+            aria-expanded={selfHintOpen}
+            onClick={() => setSelfHintOpen((v) => !v)}
+          >
+            <span>{t("Channel.roles.selfReport.summary")}</span>
+            <span className="role-selfhint-arrow" aria-hidden="true">{selfHintOpen ? "▾" : "▸"}</span>
+          </button>
+          {selfHintOpen && (
+            <div className="role-selfhint-body">
+              <p>{t("Channel.roles.selfReport.intro")}</p>
+              <div className="role-selfhint-cmd">
+                <code className="t-mono">{selfReportCmd}</code>
+                <button type="button" className="d-btn role-selfhint-copy" onClick={copySelfReportCmd}>
+                  {selfHintCopied ? t("Channel.roles.selfReport.copied") : t("Channel.roles.selfReport.copy")}
+                </button>
+              </div>
+              <p className="t-mono role-selfhint-meta">{t("Channel.roles.selfReport.roles")}</p>
+              <p className="role-selfhint-caveat">{t("Channel.roles.selfReport.hostCaveat")}</p>
+            </div>
+          )}
+        </div>
         {groups.length > 0 ? (
           <div className="role-account-list">
             {groups.map((group) => (
@@ -2366,6 +2410,7 @@ export function ChannelPage({
           {activePanel === "roles" && (
             <DivisionBoard
               canModerate={canModerate}
+              slug={slug}
               roles={channelRoles}
               roleDrafts={roleDrafts}
               roleError={roleError}
