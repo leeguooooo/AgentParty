@@ -43,8 +43,10 @@ import {
   agentFilterSearch,
   filterByAgent,
   parseAgentFilter,
+  setKind,
   toggleAgent,
   type AgentFilter,
+  type AgentFilterKind,
   type AgentFilterMode,
 } from "../lib/filters";
 import { shouldNotify } from "../lib/notify";
@@ -509,6 +511,7 @@ function AgentFilterPanel({
   total,
   onMode,
   onToggle,
+  onKind,
   onClear,
 }: {
   senders: string[];
@@ -517,9 +520,11 @@ function AgentFilterPanel({
   total: number;
   onMode: (mode: AgentFilterMode) => void;
   onToggle: (agent: string) => void;
+  onKind: (kind: AgentFilterKind) => void;
   onClear: () => void;
 }) {
-  const active = filter.agents.length > 0;
+  const t = useT();
+  const active = filter.agents.length > 0 || filter.kind !== null;
   return (
     <section className="agent-filter-panel" aria-label="agent filters">
       <div className="agent-filter-head">
@@ -539,6 +544,24 @@ function AgentFilterPanel({
             onClick={() => onMode("except")}
           >
             <span>Hide</span>
+          </button>
+        </div>
+        <div className="agent-filter-kinds" role="group" aria-label="agent filter kind">
+          <button
+            className={"d-btn agent-filter-kind" + (filter.kind === "human" ? " is-active" : "")}
+            type="button"
+            aria-pressed={filter.kind === "human"}
+            onClick={() => onKind("human")}
+          >
+            <span>{t("Channel.filter.humans")}</span>
+          </button>
+          <button
+            className={"d-btn agent-filter-kind" + (filter.kind === "agent" ? " is-active" : "")}
+            type="button"
+            aria-pressed={filter.kind === "agent"}
+            onClick={() => onKind("agent")}
+          >
+            <span>{t("Channel.filter.agents")}</span>
           </button>
         </div>
         <span className="t-mono agent-filter-count">
@@ -1230,6 +1253,7 @@ export function ChannelPage({
     const url = new URL(window.location.href);
     url.searchParams.delete("agent");
     url.searchParams.delete("agentMode");
+    url.searchParams.delete("agentKind");
     const filterSearch = agentFilterSearch(agentFilter);
     if (filterSearch !== "") {
       const params = new URLSearchParams(filterSearch);
@@ -1702,7 +1726,7 @@ export function ChannelPage({
       window.clearInterval(id);
     };
   }, [token, slug, shareMode]);
-  const agentFilterActive = agentFilter.agents.length > 0;
+  const agentFilterActive = agentFilter.agents.length > 0 || agentFilter.kind !== null;
   const totalInView = q === "" ? timelineMessages.length : searchHits.length;
   const visibleInView = q === "" ? visibleMessages.length : visibleSearchHits.length;
   const structuredRoleCount = channelRoles.length + selfReportedRoles(channelRoles, state.presence, channelIdentities).length;
@@ -1715,8 +1739,12 @@ export function ChannelPage({
     setAgentFilter((current) => toggleAgent(current, agent));
   }, []);
 
+  const setAgentKind = useCallback((kind: AgentFilterKind) => {
+    setAgentFilter((current) => setKind(current, kind));
+  }, []);
+
   const clearAgentFilter = useCallback(() => {
-    setAgentFilter((current) => ({ ...current, agents: [] }));
+    setAgentFilter((current) => ({ ...current, agents: [], kind: null }));
   }, []);
 
   const jumpToCompletion = useCallback((seq: number) => {
@@ -1800,6 +1828,7 @@ export function ChannelPage({
           total={totalInView}
           onMode={setAgentMode}
           onToggle={toggleAgentFilter}
+          onKind={setAgentKind}
           onClear={clearAgentFilter}
         />
       )}

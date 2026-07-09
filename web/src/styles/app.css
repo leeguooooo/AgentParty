@@ -1179,6 +1179,30 @@
   background: var(--d-yellow);
   box-shadow: 1.5px 2px 0 var(--d-shadow);
 }
+.agent-filter-kinds {
+  display: inline-flex;
+  gap: 4px;
+  padding: 2px;
+  background: var(--t-panel2);
+  border: 1.5px solid var(--d-ink);
+  border-radius: 8px;
+}
+.agent-filter-kind {
+  font-size: 11px;
+  padding: 3px 9px 4px;
+  background: transparent;
+  box-shadow: none;
+  border-width: 1.5px;
+}
+.agent-filter-kind:first-child.is-active {
+  background: var(--d-green-soft);
+  color: #2e7d46;
+  box-shadow: 1.5px 2px 0 var(--d-shadow);
+}
+.agent-filter-kind:last-child.is-active {
+  background: var(--d-yellow);
+  box-shadow: 1.5px 2px 0 var(--d-shadow);
+}
 .agent-filter-count {
   flex: none;
   color: var(--t-dim);

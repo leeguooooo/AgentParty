@@ -1,8 +1,10 @@
 export type AgentFilterMode = "only" | "except";
+export type AgentFilterKind = "human" | "agent";
 
 export interface AgentFilter {
   mode: AgentFilterMode;
   agents: string[];
+  kind: AgentFilterKind | null;
 }
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -13,18 +15,25 @@ function cleanAgents(values: string[]): string[] {
   );
 }
 
+function cleanKind(value: string | null): AgentFilterKind | null {
+  return value === "human" || value === "agent" ? value : null;
+}
+
 export function parseAgentFilter(search: string): AgentFilter {
   const params = new URLSearchParams(search);
   const rawAgents = params.getAll("agent").flatMap((value) => value.split(","));
   const mode = params.get("agentMode") === "except" ? "except" : "only";
-  return { mode, agents: cleanAgents(rawAgents) };
+  return { mode, agents: cleanAgents(rawAgents), kind: cleanKind(params.get("agentKind")) };
 }
 
 export function agentFilterSearch(filter: AgentFilter): string {
   const params = new URLSearchParams();
-  if (filter.agents.length === 0) return "";
-  params.set("agent", filter.agents.join(","));
-  if (filter.mode === "except") params.set("agentMode", "except");
+  if (filter.agents.length === 0 && filter.kind === null) return "";
+  if (filter.agents.length > 0) {
+    params.set("agent", filter.agents.join(","));
+    if (filter.mode === "except") params.set("agentMode", "except");
+  }
+  if (filter.kind !== null) params.set("agentKind", filter.kind);
   return params.toString();
 }
 
@@ -35,13 +44,21 @@ export function toggleAgent(filter: AgentFilter, agent: string): AgentFilter {
   return { ...filter, agents: cleanAgents(agents) };
 }
 
-export function matchesAgentFilter(senderName: string, filter: AgentFilter): boolean {
+export function setKind(filter: AgentFilter, kind: AgentFilterKind): AgentFilter {
+  return { ...filter, kind: filter.kind === kind ? null : kind };
+}
+
+export function matchesAgentFilter(sender: { name: string; kind: "agent" | "human" }, filter: AgentFilter): boolean {
+  if (filter.kind !== null && sender.kind !== filter.kind) return false;
   if (filter.agents.length === 0) return true;
-  const selected = filter.agents.includes(senderName);
+  const selected = filter.agents.includes(sender.name);
   return filter.mode === "only" ? selected : !selected;
 }
 
-export function filterByAgent<T extends { sender: { name: string } }>(items: T[], filter: AgentFilter): T[] {
-  if (filter.agents.length === 0) return items;
-  return items.filter((item) => matchesAgentFilter(item.sender.name, filter));
+export function filterByAgent<T extends { sender: { name: string; kind: "agent" | "human" } }>(
+  items: T[],
+  filter: AgentFilter,
+): T[] {
+  if (filter.agents.length === 0 && filter.kind === null) return items;
+  return items.filter((item) => matchesAgentFilter(item.sender, filter));
 }

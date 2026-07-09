@@ -64,6 +64,8 @@ export const ChannelStrings: LocaleDict = {
     "Channel.notify.offTitle": "Get a browser notification when you're @mentioned (while this tab isn't focused)",
     "Channel.notify.denied": "Browser blocked notification permission",
     "Channel.notify.unsupported": "This browser doesn't support notifications",
+    "Channel.filter.humans": "Humans",
+    "Channel.filter.agents": "Agents",
   },
   zh: {
     "Channel.charter.label": "📌 公告",
@@ -128,6 +130,8 @@ export const ChannelStrings: LocaleDict = {
     "Channel.notify.offTitle": "开启被@浏览器提醒（仅在标签页未聚焦时弹出）",
     "Channel.notify.denied": "浏览器已拒绝通知权限",
     "Channel.notify.unsupported": "此浏览器不支持通知",
+    "Channel.filter.humans": "全人类",
+    "Channel.filter.agents": "全机器人",
   },
 };
 
