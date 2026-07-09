@@ -590,6 +590,17 @@ function parseAgentContext(input: unknown): AgentContext | undefined | null {
   };
 }
 
+// parseSendFrame 返回 null 时用它给出更具体的拒收原因：role 拼错是 agent 自报协作角色最常见的坑，
+// 单独识别并回明确文案（列出合法值），而不是笼统的 "invalid send payload"，让 agent 能自我纠正。
+function sendRejectMessage(raw: unknown): string {
+  if (typeof raw !== "object" || raw === null) return "invalid send payload";
+  const f = raw as { kind?: unknown; role?: unknown };
+  if (f.kind === "status" && f.role !== undefined && parseCollaborationRole(f.role) === null) {
+    return `role must be one of: ${COLLAB_ROLES.join(", ")}`;
+  }
+  return "invalid send payload";
+}
+
 // rest body 与 ws send 帧共用的校验（rest 侧无 type 字段）
 function parseSendFrame(input: unknown): SendFrame | null {
   if (typeof input !== "object" || input === null) return null;
@@ -1105,7 +1116,7 @@ export class ChannelDO extends Server<Env> {
       }
       const send = parseSendFrame(frame);
       if (!send) {
-        this.sendFrame(connection, { type: "error", code: "bad_request", message: "invalid send payload" });
+        this.sendFrame(connection, { type: "error", code: "bad_request", message: sendRejectMessage(frame) });
         return;
       }
       const out = await this.handleSend(
@@ -2144,7 +2155,7 @@ export class ChannelDO extends Server<Env> {
             { status: ERROR_STATUS[rate.code] },
           );
         }
-        return Response.json({ error: { code: "bad_request", message: "invalid send payload" } }, { status: 400 });
+        return Response.json({ error: { code: "bad_request", message: sendRejectMessage(raw) } }, { status: 400 });
       }
       const out = await this.handleSend(identity, send, { countRate: true });
       if (!out.ok) {

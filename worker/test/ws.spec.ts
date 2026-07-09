@@ -647,4 +647,28 @@ describe("websocket", () => {
     });
     expect(missing.status).toBe(404);
   });
+
+  it("rejects a status frame with an invalid collaboration role using a clear message", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+    ws.send({ type: "send", kind: "status", state: "working", note: "x", mentions: [], role: "developer" });
+    const err = await ws.nextOfType("error");
+    expect(err).toMatchObject({ type: "error", code: "bad_request" });
+    expect(err.message).toContain("role");
+    expect(err.message).toContain("worker"); // 列出了合法值
+    ws.close();
+  });
+
+  it("accepts a status frame with a valid collaboration role", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+    ws.send({ type: "send", kind: "status", state: "working", note: "handling backend", mentions: [], role: "worker" });
+    const sent = await ws.nextOfType("sent");
+    expect(sent.type).toBe("sent");
+    ws.close();
+  });
 });
