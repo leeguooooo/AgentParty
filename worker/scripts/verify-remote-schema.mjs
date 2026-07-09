@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 
 const database = process.env.AGENTPARTY_D1_DATABASE ?? "agentparty";
+const wranglerConfig = process.env.AGENTPARTY_WRANGLER_CONFIG;
 
 const required = {
   channels: ["id", "slug", "title", "topic", "kind", "mode", "created_by", "created_at", "archived_at"],
@@ -47,14 +48,15 @@ const required = {
 };
 
 function run(args) {
-  const res = spawnSync("wrangler-accounts", args, {
+  const commandArgs = wranglerConfig ? [...args, "--config", wranglerConfig] : args;
+  const res = spawnSync("wrangler-accounts", commandArgs, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (res.status !== 0) {
     process.stderr.write(res.stdout);
     process.stderr.write(res.stderr);
-    throw new Error(`wrangler-accounts ${args.join(" ")} failed`);
+    throw new Error(`wrangler-accounts ${commandArgs.join(" ")} failed`);
   }
   return `${res.stdout}${res.stderr}`;
 }

@@ -27,6 +27,7 @@ commands:
   serve     [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all] | --profile owner/handle
   ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
+  statusline [--channel C] [--refresh] [--no-network]
   who       [channel|--channel C] [--json]                who is online/wakeable/recent — pick who to --mention
   charter   [slug] [--json] | set [slug] -f file.md|-m text|- | template
   history   [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]
@@ -85,6 +86,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/ask")).run(rest);
     case "status":
       return (await import("./commands/status")).run(rest);
+    case "statusline":
+      return (await import("./commands/statusline")).run(rest);
     case "who":
       return (await import("./commands/who")).run(rest);
     case "charter":

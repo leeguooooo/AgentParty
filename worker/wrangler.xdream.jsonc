@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentparty-xdream",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "workers_dev": true,
+  "vars": {
+    "AUTH_PROVIDERS": "[{\"id\":\"lark\",\"kind\":\"lark\",\"label\":\"Sign in with Lark\",\"client_id\":\"cli_aac5bdcb23389e17\"}]"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CHANNELS",
+        "class_name": "ChannelDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ChannelDO"]
+    }
+  ],
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/openapi.json"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agentparty-xdream",
+      "database_id": "3b508259-41d5-4cff-8def-319b12935203",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "agnetparty.pwtk-dev.work",
+      "custom_domain": true
+    }
+  ]
+}

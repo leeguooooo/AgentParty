@@ -32,8 +32,16 @@ import { openapiDocument } from "./openapi";
 
 export { ChannelDO };
 
-// OIDC_ISSUER + OIDC_CLIENT_ID 为可选 vars/secrets：都配齐才启用人类网页 OIDC 登录（spec §10）
-type AppEnv = Env & { ADMIN_SECRET?: string; OIDC_ISSUER?: string; OIDC_CLIENT_ID?: string };
+// OIDC_ISSUER + OIDC_CLIENT_ID 为可选 vars/secrets：都配齐才启用人类网页 OIDC 登录（spec §10）。
+// AUTH_PROVIDERS 是新版可扩展 OAuth 配置，Lark/Feishu 走 worker 服务端换码，secret 不下发给浏览器。
+type AppEnv = Env & {
+  ADMIN_SECRET?: string;
+  OIDC_ISSUER?: string;
+  OIDC_CLIENT_ID?: string;
+  AUTH_PROVIDERS?: string;
+  LARK_CLIENT_SECRET?: string;
+  FEISHU_CLIENT_SECRET?: string;
+};
 
 type AppContext = {
   Bindings: AppEnv;
@@ -172,8 +180,95 @@ const PROJECT_AGENT_WORKTREE = ["branch", "shared", "none"] as const;
 const PROJECT_AGENT_INVITABLE = ["owner", "org", "anyone"] as const;
 const textEncoder = new TextEncoder();
 
+type OAuthProviderKind = "lark" | "feishu";
+
+interface OAuthProviderConfig {
+  id: string;
+  kind: OAuthProviderKind;
+  label: string;
+  clientId: string;
+  clientSecretEnv: string;
+  authorizeUrl: string;
+  tokenUrl: string;
+  userInfoUrl: string;
+  scope: string;
+}
+
+const PROVIDER_ID_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+const PROVIDER_DEFAULTS: Record<
+  OAuthProviderKind,
+  Pick<OAuthProviderConfig, "authorizeUrl" | "tokenUrl" | "userInfoUrl" | "label" | "clientSecretEnv" | "scope">
+> = {
+  lark: {
+    label: "Sign in with Lark",
+    clientSecretEnv: "LARK_CLIENT_SECRET",
+    authorizeUrl: "https://accounts.larksuite.com/open-apis/authen/v1/authorize",
+    tokenUrl: "https://open.larksuite.com/open-apis/authen/v2/oauth/token",
+    userInfoUrl: "https://open.larksuite.com/open-apis/authen/v1/user_info",
+    scope: "",
+  },
+  feishu: {
+    label: "Sign in with Feishu",
+    clientSecretEnv: "FEISHU_CLIENT_SECRET",
+    authorizeUrl: "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+    tokenUrl: "https://open.feishu.cn/open-apis/authen/v2/oauth/token",
+    userInfoUrl: "https://open.feishu.cn/open-apis/authen/v1/user_info",
+    scope: "",
+  },
+};
+
 function errorBody(code: RestErrorCode, message: string) {
   return { error: { code, message } };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function parseAuthProviders(env: AppEnv): OAuthProviderConfig[] {
+  const raw = env.AUTH_PROVIDERS?.trim();
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const providers: OAuthProviderConfig[] = [];
+  for (const item of parsed) {
+    if (!isRecord(item)) continue;
+    const kind = item.kind === "feishu" ? "feishu" : item.kind === "lark" ? "lark" : null;
+    const id = typeof item.id === "string" ? item.id.trim() : "";
+    const clientId = typeof item.client_id === "string" ? item.client_id.trim() : "";
+    if (kind === null || !PROVIDER_ID_RE.test(id) || clientId === "") continue;
+    const defaults = PROVIDER_DEFAULTS[kind];
+    providers.push({
+      id,
+      kind,
+      label: typeof item.label === "string" && item.label.trim() ? item.label.trim() : defaults.label,
+      clientId,
+      clientSecretEnv:
+        typeof item.client_secret_env === "string" && item.client_secret_env.trim()
+          ? item.client_secret_env.trim()
+          : defaults.clientSecretEnv,
+      authorizeUrl:
+        typeof item.authorize_url === "string" && item.authorize_url.trim()
+          ? item.authorize_url.trim()
+          : defaults.authorizeUrl,
+      tokenUrl:
+        typeof item.token_url === "string" && item.token_url.trim()
+          ? item.token_url.trim()
+          : defaults.tokenUrl,
+      userInfoUrl:
+        typeof item.user_info_url === "string" && item.user_info_url.trim()
+          ? item.user_info_url.trim()
+          : defaults.userInfoUrl,
+      scope: typeof item.scope === "string" ? item.scope.trim() : defaults.scope,
+    });
+  }
+  return providers;
 }
 
 function positiveInt(input: unknown): number | null {
@@ -480,6 +575,85 @@ async function persistToken(
   return { token };
 }
 
+async function upsertHumanSessionToken(db: D1Database, name: string, owner: string): Promise<{ token: string }> {
+  const token = randomToken();
+  const hash = await sha256Hex(token);
+  const now = Date.now();
+  const existing = await db.prepare("SELECT id FROM tokens WHERE name = ?").bind(name).first<{ id: number }>();
+  if (existing) {
+    await db
+      .prepare(
+        `UPDATE tokens
+            SET hash = ?, role = 'human', owner = ?, channel_scope = NULL,
+                parent_agent = NULL, root_agent = NULL, team_id = NULL,
+                spawn_depth = NULL, child_expires_at = NULL,
+                created_at = ?, revoked_at = NULL
+          WHERE id = ?`,
+      )
+      .bind(hash, owner, now, existing.id)
+      .run();
+  } else {
+    await db
+      .prepare(
+        `INSERT INTO tokens (
+           hash, name, role, owner, channel_scope,
+           parent_agent, root_agent, team_id, spawn_depth, child_expires_at,
+           created_at
+         ) VALUES (?, ?, 'human', ?, NULL, NULL, NULL, NULL, NULL, NULL, ?)`,
+      )
+      .bind(hash, name, owner, now)
+      .run();
+  }
+  return { token };
+}
+
+function oauthTokenName(providerId: string, account: string): Promise<string> {
+  return sha256Hex(`${providerId}:${account}`).then((hash) => `${providerId}-${hash.slice(0, 12)}`);
+}
+
+function slugifyHandle(input: string): string | null {
+  const base = input
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[^a-z0-9]+/, "")
+    .replace(/[^a-z0-9._-]+$/g, "")
+    .slice(0, 31);
+  const normalized = base.length >= 2 ? base : "";
+  return validateHandleFormat(normalized) === null ? null : normalized;
+}
+
+async function ensureDefaultHandle(
+  db: D1Database,
+  account: string,
+  displayName: string,
+  providerId: string,
+): Promise<void> {
+  const existing = await db.prepare("SELECT handle FROM account_profiles WHERE account = ?").bind(account).first();
+  if (existing) return;
+  const hash = await sha256Hex(`${providerId}:${account}`);
+  const fromDisplay = slugifyHandle(displayName);
+  const candidates = [
+    fromDisplay,
+    fromDisplay === null ? null : `${fromDisplay.slice(0, 26)}-${hash.slice(0, 4)}`,
+    `${providerId}-${hash.slice(0, 10)}`,
+  ].filter((candidate): candidate is string => candidate !== null && validateHandleFormat(candidate) !== null);
+  const now = Date.now();
+  for (const handle of candidates) {
+    if ((await handleConflict(db, handle, account)) !== null) continue;
+    try {
+      await db
+        .prepare("INSERT INTO account_profiles (account, handle, created_at, updated_at) VALUES (?, ?, ?, ?)")
+        .bind(account, handle, now, now)
+        .run();
+      return;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.includes("UNIQUE")) throw e;
+    }
+  }
+}
+
 const requireAdmin = createMiddleware<AppContext>(async (c, next) => {
   const secret = c.env.ADMIN_SECRET;
   if (!secret || c.req.header("x-admin-secret") !== secret) {
@@ -644,6 +818,86 @@ async function canEditCharter(db: D1Database, identity: TokenIdentity, channel: 
   return (await loadAssignedRole(db, channel.slug, identity.name)) === "host";
 }
 
+async function fetchJson(url: string, init: RequestInit): Promise<Record<string, unknown>> {
+  const res = await fetch(url, init);
+  const data = (await res.json().catch(() => null)) as unknown;
+  if (!res.ok || !isRecord(data)) {
+    throw new Error(`provider request failed (${res.status})`);
+  }
+  return data;
+}
+
+function extractLarkAccessToken(data: Record<string, unknown>): {
+  accessToken: string;
+  expiresIn: number | null;
+} {
+  const code = data.code;
+  if (code !== undefined && String(code) !== "0") {
+    const desc = typeof data.error_description === "string" ? data.error_description : typeof data.msg === "string" ? data.msg : "token exchange failed";
+    throw new Error(desc);
+  }
+  const accessToken = typeof data.access_token === "string" ? data.access_token : "";
+  if (!accessToken) throw new Error("provider token response did not include access_token");
+  return {
+    accessToken,
+    expiresIn: typeof data.expires_in === "number" ? data.expires_in : null,
+  };
+}
+
+function extractLarkUserInfo(data: Record<string, unknown>, providerId = "lark"): {
+  account: string;
+  email: string | null;
+  displayName: string;
+} {
+  const code = data.code;
+  if (code !== undefined && Number(code) !== 0) {
+    const msg = typeof data.msg === "string" ? data.msg : "user_info failed";
+    throw new Error(msg);
+  }
+  const user = isRecord(data.data) ? data.data : data;
+  const pick = (...keys: string[]) => {
+    for (const key of keys) {
+      const value = user[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
+  };
+  const email = pick("email", "enterprise_email") || null;
+  const externalId = email ?? pick("union_id", "open_id", "user_id");
+  if (!externalId) throw new Error("provider user_info did not include a usable identity");
+  const displayName = pick("name", "en_name", "display_name") || email || externalId;
+  const account = `${email === null ? providerId : `${providerId}-email`}:${externalId}`;
+  if (account.length > OWNER_MAX || !OWNER_RE.test(account)) {
+    throw new Error("provider user_info returned an unsupported account id");
+  }
+  return { account, email, displayName };
+}
+
+async function exchangeOAuthCode(
+  provider: OAuthProviderConfig,
+  secret: string,
+  body: { code: string; redirect_uri: string; code_verifier?: string },
+): Promise<{ account: string; email: string | null; displayName: string; expiresIn: number | null }> {
+  const tokenData = await fetchJson(provider.tokenUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({
+      grant_type: "authorization_code",
+      client_id: provider.clientId,
+      client_secret: secret,
+      code: body.code,
+      redirect_uri: body.redirect_uri,
+      ...(body.code_verifier ? { code_verifier: body.code_verifier } : {}),
+    }),
+  });
+  const token = extractLarkAccessToken(tokenData);
+  const userData = await fetchJson(provider.userInfoUrl, {
+    headers: { authorization: `Bearer ${token.accessToken}` },
+  });
+  const user = extractLarkUserInfo(userData, provider.id);
+  return { ...user, expiresIn: token.expiresIn };
+}
+
 async function loadAssignedRole(db: D1Database, slug: string, name: string): Promise<CollaborationRole | null> {
   const row = await db
     .prepare("SELECT role FROM channel_roles WHERE channel_slug = ? AND agent_name = ?")
@@ -745,9 +999,65 @@ app.get("/openapi.json", (c) => c.json(openapiDocument));
 // cli_client_id 供 CLI party login 知道用哪个 public client 跑回环 PKCE（spec §4）
 app.get("/api/config", (c) => {
   const oidc = oidcConfigFromEnv(c.env, [CLI_CLIENT_ID]);
+  const providers = parseAuthProviders(c.env);
   return c.json({
     oidc: oidc ? { issuer: oidc.issuer, client_id: oidc.clientId } : null,
+    auth: {
+      providers: providers.map((provider) => ({
+        id: provider.id,
+        kind: provider.kind,
+        label: provider.label,
+        client_id: provider.clientId,
+        authorize_url: provider.authorizeUrl,
+        scope: provider.scope,
+      })),
+    },
     cli_client_id: CLI_CLIENT_ID,
+  });
+});
+
+app.post("/api/auth/:provider/callback", async (c) => {
+  const providers = parseAuthProviders(c.env);
+  const provider = providers.find((item) => item.id === c.req.param("provider"));
+  if (provider === undefined) {
+    return c.json(errorBody("not_found", "auth provider not configured"), 404);
+  }
+  const body = (await c.req.json().catch(() => null)) as
+    | { code?: unknown; redirect_uri?: unknown; code_verifier?: unknown }
+    | null;
+  const code = typeof body?.code === "string" ? body.code.trim() : "";
+  const redirectUri = typeof body?.redirect_uri === "string" ? body.redirect_uri.trim() : "";
+  const codeVerifier = typeof body?.code_verifier === "string" ? body.code_verifier.trim() : "";
+  if (!code || !redirectUri) {
+    return c.json(errorBody("bad_request", "code and redirect_uri required"), 400);
+  }
+  const secret = ((c.env as unknown) as Record<string, string | undefined>)[provider.clientSecretEnv]?.trim();
+  if (!secret) {
+    return c.json(errorBody("unavailable", "auth provider secret is not configured"), 500);
+  }
+  let exchanged: Awaited<ReturnType<typeof exchangeOAuthCode>>;
+  try {
+    exchanged = await exchangeOAuthCode(provider, secret, {
+      code,
+      redirect_uri: redirectUri,
+      ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "provider sign-in failed";
+    return c.json(errorBody("unauthorized", message), 401);
+  }
+  if (!OWNER_RE.test(exchanged.account) || exchanged.account.length > OWNER_MAX) {
+    return c.json(errorBody("unavailable", "provider account id is not header-safe"), 500);
+  }
+  const tokenName = await oauthTokenName(provider.id, exchanged.account);
+  const sess = await upsertHumanSessionToken(c.env.DB, tokenName, exchanged.account);
+  await ensureDefaultHandle(c.env.DB, exchanged.account, exchanged.displayName, provider.id);
+  return c.json({
+    access_token: sess.token,
+    token_type: "Bearer",
+    expires_in: exchanged.expiresIn ?? 365 * 24 * 60 * 60,
+    provider: provider.id,
+    email: exchanged.email,
   });
 });
 

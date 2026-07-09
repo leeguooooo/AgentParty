@@ -24,10 +24,11 @@ import {
   type MeInfo,
 } from "./lib/api";
 import {
+  type AuthProviderConfig,
   type OidcConfig,
   beginLogin,
   completeLogin,
-  fetchOidcConfig,
+  fetchAuthConfig,
   isCallbackPath,
   refreshSession,
 } from "./lib/oidc";
@@ -57,6 +58,7 @@ export function App() {
   const [listError, setListError] = useState<string | null>(null);
   const [me, setMe] = useState<MeInfo | null>(null);
   const [oidc, setOidc] = useState<OidcConfig | null>(null);
+  const [authProviders, setAuthProviders] = useState<AuthProviderConfig[]>([]);
   // 邀请链接落地页状态（/join/<code>）：正在加入 / 失败
   const [joinStatus, setJoinStatus] = useState<{ phase: "joining" | "error"; message?: string } | null>(null);
   // 命中 /auth/callback 时先挂起，避免闪一下登录闸；换 token 成功/失败后落定
@@ -160,23 +162,24 @@ export function App() {
     [doRefresh, hardLogout],
   );
 
-  // 启动时拉一次公开配置决定是否显示 SSO；若正落在 OIDC 回调则就地换 token
+  // 启动时拉一次公开配置决定是否显示 SSO；若正落在 OAuth/OIDC 回调则就地换 token
   // ref 守卫：code_verifier 一次性，StrictMode 双跑不得重复兑换 code
   const callbackHandled = useRef(false);
   useEffect(() => {
     let alive = true;
-    fetchOidcConfig().then((cfg) => {
+    fetchAuthConfig().then((cfg) => {
       if (!alive) return;
-      setOidc(cfg);
+      setOidc(cfg.oidc);
+      setAuthProviders(cfg.providers);
       if (!isCallbackPath() || callbackHandled.current) return;
       callbackHandled.current = true;
-      if (cfg === null) {
+      if (cfg.providers.length === 0) {
         setOidcPending(false);
         setAuthError("sign-in is not configured");
         replace("/");
         return;
       }
-      completeLogin(cfg)
+      completeLogin(cfg.providers)
         .then((sess) => {
           if (!alive) return;
           saveSession(sess); // 存 access + refresh，供静默续期
@@ -233,11 +236,12 @@ export function App() {
       };
     }
     // 未登录：存 code 跨登录重定向，跳 OIDC
-    if (oidc !== null && !oidcPending) {
+    const primaryProvider = authProviders[0];
+    if (primaryProvider !== undefined && !oidcPending) {
       sessionStorage.setItem(PENDING_JOIN_KEY, joinCode);
-      beginLogin(oidc).catch(() => setJoinStatus({ phase: "error", message: t("App.join.loginFailed") }));
+      beginLogin(primaryProvider).catch(() => setJoinStatus({ phase: "error", message: t("App.join.loginFailed") }));
     }
-  }, [joinCode, token, oidc, oidcPending, replace, t]);
+  }, [joinCode, token, authProviders, oidcPending, replace, t]);
 
   // 登录身份：topbar 显示 token name/kind/role；readonly 分享链接 401 由页面其它路径接管，这里静默
   useEffect(() => {
@@ -373,11 +377,10 @@ export function App() {
     return (
       <TokenGate
         error={authError}
-        oidc={oidc}
-        onSso={() => {
-          if (oidc === null) return;
+        providers={authProviders}
+        onSso={(provider) => {
           setAuthError(null);
-          beginLogin(oidc).catch(() => setAuthError("could not start sign-in"));
+          beginLogin(provider).catch(() => setAuthError("could not start sign-in"));
         }}
         onSubmit={(t) => {
           // 粘贴登录只在非分享模式落 localStorage；分享模式坏 t 已被摘除

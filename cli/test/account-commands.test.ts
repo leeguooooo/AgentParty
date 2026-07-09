@@ -9,12 +9,15 @@ import { run as sendRun } from "../src/commands/send";
 import { run as agentRun } from "../src/commands/agent";
 import { run as spawnRun } from "../src/commands/spawn";
 import { run as whoamiRun } from "../src/commands/whoami";
+import { run as statuslineRun } from "../src/commands/statusline";
 import { run as logoutRun } from "../src/commands/logout";
 import { run as channelRun } from "../src/commands/channel";
+import { startRestMock, type RestMock } from "./rest-mock";
 import { startOidcMock, type OidcMock } from "./oidc-mock";
 
 let home: string;
 let mock: OidcMock | null = null;
+let restMock: RestMock | null = null;
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 // 捕获 console.log / console.error
@@ -37,6 +40,8 @@ afterEach(() => {
   console.error = origErr;
   delete process.env.AGENTPARTY_HOME;
   rmSync(home, { recursive: true, force: true });
+  restMock?.stop();
+  restMock = null;
   mock?.stop();
   mock = null;
 });
@@ -440,6 +445,72 @@ describe("whoami", () => {
     const code = await whoamiRun(["--bogus"]);
     expect(code).toBe(1);
     expect(errs.join("\n")).toContain("unknown option --bogus");
+  });
+});
+
+describe("statusline", () => {
+  test("prints cached agent identity and bound channel without network", async () => {
+    writeConfig({
+      server: "https://agentparty.example",
+      token: "ap_cached_secret",
+      identity: {
+        name: "codex-mini",
+        email: null,
+        kind: "agent",
+        role: "agent",
+        owner: "leo",
+        channel_scope: "dev",
+        verified_at: 123,
+      },
+    });
+    writeState({ channel: "dev", cursor: 0 });
+
+    const code = await statuslineRun(["--no-network"]);
+    expect(code).toBe(0);
+    expect(logs).toEqual(["ap:codex-mini #dev"]);
+    expect(errs).toEqual([]);
+  });
+
+  test("prints nothing when no identity is available", async () => {
+    const code = await statuslineRun(["--no-network"]);
+    expect(code).toBe(0);
+    expect(logs).toEqual([]);
+    expect(errs).toEqual([]);
+  });
+
+  test("refresh verifies identity and updates the local cache", async () => {
+    restMock = startRestMock();
+    writeConfig({ server: restMock.url, token: "ap_refresh_secret" });
+    writeState({ channel: "ops", cursor: 0 });
+
+    const code = await statuslineRun(["--refresh"]);
+    expect(code).toBe(0);
+    expect(logs).toEqual(["ap:agent #ops"]);
+    expect(restMock.requests.some((r) => r.path === "/api/me" && r.headers.authorization === "Bearer ap_refresh_secret")).toBe(true);
+    logs.length = 0;
+
+    const cachedCode = await statuslineRun(["--no-network"]);
+    expect(cachedCode).toBe(0);
+    expect(logs).toEqual(["ap:agent #ops"]);
+  });
+
+  test("rejects invalid channel override", async () => {
+    writeConfig({
+      server: "https://agentparty.example",
+      token: "ap_cached_secret",
+      identity: {
+        name: "codex-mini",
+        email: null,
+        kind: "agent",
+        role: "agent",
+        owner: null,
+        channel_scope: null,
+        verified_at: 123,
+      },
+    });
+    const code = await statuslineRun(["--channel", "Bad_Channel", "--no-network"]);
+    expect(code).toBe(1);
+    expect(errs.join("\n")).toContain("channel must match");
   });
 });
 

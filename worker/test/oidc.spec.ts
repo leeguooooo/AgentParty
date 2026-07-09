@@ -156,6 +156,7 @@ describe("oidc end-to-end via SELF.fetch", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       oidc: { issuer: CONFIGURED_ISSUER, client_id: CLIENT_ID },
+      auth: { providers: [] },
       cli_client_id: "agentparty-cli",
     });
   });

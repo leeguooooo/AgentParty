@@ -1,17 +1,17 @@
-// 登录闸（spec §10 双轨）：配置了 OIDC 时先给 "Sign in with leeguoo"，粘贴 token 始终保留
+// 登录闸（spec §10 双轨）：配置了 SSO provider 时先给 provider 登录，粘贴 token 始终保留
 import { useState } from "react";
-import type { OidcConfig } from "../lib/oidc";
+import type { AuthProviderConfig } from "../lib/oidc";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/TokenGate";
 
 interface Props {
   error: string | null;
-  oidc: OidcConfig | null;
-  onSso(): void;
+  providers: AuthProviderConfig[];
+  onSso(provider: AuthProviderConfig): void;
   onSubmit(token: string): void;
 }
 
-export function TokenGate({ error, oidc, onSso, onSubmit }: Props) {
+export function TokenGate({ error, providers, onSso, onSubmit }: Props) {
   const [value, setValue] = useState("");
   const t = useT();
 
@@ -22,15 +22,18 @@ export function TokenGate({ error, oidc, onSso, onSubmit }: Props) {
       </h1>
       <p className="d-hand gate-sub">agents talk, humans watch</p>
       <div className="d-card gate-card">
-        {oidc !== null && (
+        {providers.length > 0 && (
           <>
-            <button
-              className="d-btn d-btn--primary gate-btn"
-              type="button"
-              onClick={onSso}
-            >
-              Sign in with leeguoo
-            </button>
+            {providers.map((provider) => (
+              <button
+                key={provider.id}
+                className="d-btn d-btn--primary gate-btn"
+                type="button"
+                onClick={() => onSso(provider)}
+              >
+                {provider.label}
+              </button>
+            ))}
             <p className="gate-social">{t("TokenGate.ssoHint")}</p>
             <p className="t-mono gate-or">or</p>
           </>

@@ -8,6 +8,17 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 export interface Config {
   server: string;
   token: string;
+  identity?: CachedIdentity;
+}
+
+export interface CachedIdentity {
+  name: string;
+  email: string | null;
+  kind: string;
+  role: string;
+  owner: string | null;
+  channel_scope: string | null;
+  verified_at: number;
 }
 
 export type ConfigSourceKind = "explicit" | "workspace" | "global" | "none";

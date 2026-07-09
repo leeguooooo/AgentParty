@@ -6,6 +6,29 @@ export interface OidcConfig {
   clientId: string;
 }
 
+export interface OAuthProviderConfig {
+  type: "oauth";
+  id: string;
+  kind: "lark" | "feishu" | string;
+  label: string;
+  clientId: string;
+  authorizeUrl: string;
+  scope: string;
+}
+
+export interface OidcProviderConfig extends OidcConfig {
+  type: "oidc";
+  id: "oidc";
+  label: string;
+}
+
+export type AuthProviderConfig = OidcProviderConfig | OAuthProviderConfig;
+
+export interface AuthConfig {
+  oidc: OidcConfig | null;
+  providers: AuthProviderConfig[];
+}
+
 // 网页会话：access_token + refresh_token + 绝对过期秒（epoch），供静默续期用
 export interface WebSession {
   accessToken: string;
@@ -30,18 +53,50 @@ function toSession(data: {
 
 const VERIFIER_KEY = "ap_oidc_verifier";
 const STATE_KEY = "ap_oidc_state";
+const PROVIDER_KEY = "ap_oidc_provider";
 export const CALLBACK_PATH = "/auth/callback";
 
-// worker 暴露的公开配置：未配 OIDC 时 oidc:null → 不显示 SSO 按钮（降级到纯粘贴 token）
-export async function fetchOidcConfig(): Promise<OidcConfig | null> {
+// worker 暴露的公开配置：未配 SSO provider 时 providers:[] → 降级到纯粘贴 token。
+export async function fetchAuthConfig(): Promise<AuthConfig> {
   try {
     const res = await fetch("/api/config");
-    if (!res.ok) return null;
-    const data = (await res.json()) as { oidc: { issuer?: string; client_id?: string } | null };
-    if (!data.oidc?.issuer || !data.oidc?.client_id) return null;
-    return { issuer: data.oidc.issuer.replace(/\/+$/, ""), clientId: data.oidc.client_id };
+    if (!res.ok) return { oidc: null, providers: [] };
+    const data = (await res.json()) as {
+      oidc: { issuer?: string; client_id?: string } | null;
+      auth?: {
+        providers?: Array<{
+          id?: string;
+          kind?: string;
+          label?: string;
+          client_id?: string;
+          authorize_url?: string;
+          scope?: string;
+        }>;
+      };
+    };
+    const oidc =
+      data.oidc?.issuer && data.oidc?.client_id
+        ? { issuer: data.oidc.issuer.replace(/\/+$/, ""), clientId: data.oidc.client_id }
+        : null;
+    const providers: AuthProviderConfig[] = [];
+    for (const item of data.auth?.providers ?? []) {
+      if (!item.id || !item.client_id || !item.authorize_url) continue;
+      providers.push({
+        type: "oauth",
+        id: item.id,
+        kind: item.kind ?? item.id,
+        label: item.label || `Sign in with ${item.id}`,
+        clientId: item.client_id,
+        authorizeUrl: item.authorize_url,
+        scope: item.scope ?? "",
+      });
+    }
+    if (providers.length === 0 && oidc !== null) {
+      providers.push({ type: "oidc", id: "oidc", label: "Sign in with leeguoo", ...oidc });
+    }
+    return { oidc, providers };
   } catch {
-    return null;
+    return { oidc: null, providers: [] };
   }
 }
 
@@ -66,26 +121,27 @@ async function challengeOf(verifier: string): Promise<string> {
   return base64Url(digest);
 }
 
-// 生成 verifier/challenge 存 sessionStorage，跳 issuer/authorize
-export async function beginLogin(config: OidcConfig): Promise<void> {
+// 生成 verifier/challenge 存 sessionStorage，跳 provider 授权页。
+export async function beginLogin(config: AuthProviderConfig): Promise<void> {
   const verifier = randomString();
   const state = randomString(24);
   sessionStorage.setItem(VERIFIER_KEY, verifier);
   sessionStorage.setItem(STATE_KEY, state);
-  const url = new URL(`${config.issuer}/authorize`);
+  sessionStorage.setItem(PROVIDER_KEY, config.id);
+  const url = new URL(config.type === "oidc" ? `${config.issuer}/authorize` : config.authorizeUrl);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", config.clientId);
   url.searchParams.set("redirect_uri", window.location.origin + CALLBACK_PATH);
-  // offline_access：显式索要长效 refresh_token 以便静默续期（SSO 实际无条件下发，这里表意）
-  url.searchParams.set("scope", "openid profile email offline_access");
+  const scope = config.type === "oidc" ? "openid profile email offline_access" : config.scope;
+  if (scope) url.searchParams.set("scope", scope);
   url.searchParams.set("code_challenge", await challengeOf(verifier));
   url.searchParams.set("code_challenge_method", "S256");
   url.searchParams.set("state", state);
   window.location.assign(url.toString());
 }
 
-// 回调：校验 state → 用 code + code_verifier 换 token（public client，无 secret）→ 返回整段会话
-export async function completeLogin(config: OidcConfig): Promise<WebSession> {
+// 回调：校验 state → 换 token。OIDC 走 public client，Lark/Feishu 走 worker 服务端换码。
+export async function completeLogin(providers: AuthProviderConfig[]): Promise<WebSession> {
   const params = new URLSearchParams(window.location.search);
   const providerError = params.get("error");
   if (providerError) {
@@ -95,10 +151,30 @@ export async function completeLogin(config: OidcConfig): Promise<WebSession> {
   const state = params.get("state");
   const savedState = sessionStorage.getItem(STATE_KEY);
   const verifier = sessionStorage.getItem(VERIFIER_KEY);
+  const providerId = sessionStorage.getItem(PROVIDER_KEY);
   sessionStorage.removeItem(STATE_KEY);
   sessionStorage.removeItem(VERIFIER_KEY);
+  sessionStorage.removeItem(PROVIDER_KEY);
   if (!code || !state || !verifier || state !== savedState) {
     throw new Error("invalid sign-in callback");
+  }
+  const config = providers.find((provider) => provider.id === providerId) ?? providers[0] ?? null;
+  if (config === null) throw new Error("sign-in provider is not configured");
+  if (config.type === "oauth") {
+    const res = await fetch(`/api/auth/${encodeURIComponent(config.id)}/callback`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code,
+        redirect_uri: window.location.origin + CALLBACK_PATH,
+        code_verifier: verifier,
+      }),
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+      throw new Error(data?.error?.message ?? `token exchange failed (${res.status})`);
+    }
+    return toSession((await res.json()) as Record<string, never>);
   }
   const res = await fetch(`${config.issuer}/token`, {
     method: "POST",

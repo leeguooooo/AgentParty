@@ -90,6 +90,18 @@ export async function run(argv: string[]): Promise<number> {
   );
   try {
     const me = await fetchMe(cfg.server, cfg.token);
+    writeConfig({
+      ...cfg,
+      identity: {
+        name: me.name,
+        email: me.email,
+        kind: me.kind,
+        role: me.role,
+        owner: me.owner,
+        channel_scope: me.channel_scope ?? null,
+        verified_at: Date.now(),
+      },
+    });
     const who = me.email ?? me.name;
     const owner = me.owner ? ` owner=${me.owner}` : "";
     const scope = me.channel_scope ? ` scope=${me.channel_scope}` : "";

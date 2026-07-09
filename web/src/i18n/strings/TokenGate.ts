@@ -2,10 +2,10 @@ import { registerDict, type LocaleDict } from "../dict";
 
 export const TokenGateStrings: LocaleDict = {
   en: {
-    "TokenGate.ssoHint": "Google / GitHub work too — pick one on the next screen",
+    "TokenGate.ssoHint": "Use your organization account, or paste an existing party token",
   },
   zh: {
-    "TokenGate.ssoHint": "用 Google / GitHub 也行——在下一步选",
+    "TokenGate.ssoHint": "使用组织账号登录，或粘贴已有 party token",
   },
 };
 

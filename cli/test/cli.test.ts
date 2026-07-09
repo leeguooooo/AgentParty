@@ -56,6 +56,7 @@ describe("cli subprocess", () => {
       "agent",
       "serve",
       "charter",
+      "statusline",
     ];
     for (const cmd of commands) {
       const r = await runCli([cmd, "--help"]);
