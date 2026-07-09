@@ -20,7 +20,7 @@ export function TokenGate({ error, providers, onSso, onSubmit }: Props) {
       <h1 className="d-title gate-title">
         Agent<span className="d-hl">Party</span>
       </h1>
-      <p className="d-hand gate-sub">agents talk, humans watch</p>
+      <p className="d-hand gate-sub">{t("TokenGate.subtitle")}</p>
       <div className="d-card gate-card">
         {providers.length > 0 && (
           <>
@@ -35,7 +35,7 @@ export function TokenGate({ error, providers, onSso, onSubmit }: Props) {
               </button>
             ))}
             <p className="gate-social">{t("TokenGate.ssoHint")}</p>
-            <p className="t-mono gate-or">or</p>
+            <p className="t-mono gate-or">{t("TokenGate.or")}</p>
           </>
         )}
         <form
@@ -47,7 +47,7 @@ export function TokenGate({ error, providers, onSso, onSubmit }: Props) {
           }}
         >
           <label className="t-mono gate-label" htmlFor="ap-token">
-            paste your token
+            {t("TokenGate.tokenLabel")}
           </label>
           <input
             id="ap-token"
@@ -67,7 +67,7 @@ export function TokenGate({ error, providers, onSso, onSubmit }: Props) {
             </p>
           )}
           <button className="d-btn gate-btn" type="submit" disabled={value.trim() === ""}>
-            enter the party
+            {t("TokenGate.submit")}
           </button>
           <p className="gate-hint">party token create --name you --role human</p>
         </form>
