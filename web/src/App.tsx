@@ -456,7 +456,14 @@ export function App() {
               <span className="handlesetup-trigger-edit" aria-hidden="true">
                 ✎
               </span>
-              {me.handle !== null ? t("App.handle.chipSet", { handle: me.handle }) : t("App.handle.chipUnset")}
+              {me.handle !== null ? (
+                <>
+                  <span className="handlesetup-trigger-label">{t("App.handle.chipLabel")}</span>
+                  <span className="handlesetup-trigger-value">{me.handle}</span>
+                </>
+              ) : (
+                t("App.handle.chipUnset")
+              )}
             </button>
           </span>
         )}

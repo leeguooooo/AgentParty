@@ -134,13 +134,21 @@
 .handlesetup-trigger {
   font-size: 11px;
   padding: 2px 8px;
-  max-width: 110px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: min(240px, 24vw);
   gap: 4px;
   color: var(--t-muted);
   background: var(--t-panel2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+/* 前缀常驻不截断，只有值超长时才省略 */
+.handlesetup-trigger-label {
+  flex: none;
+}
+.handlesetup-trigger-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* 已设昵称态：静态就要看出"可点/可改"，不必等 hover 才靠 title 提示 */
 .handlesetup-trigger:hover,
