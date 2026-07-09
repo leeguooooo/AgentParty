@@ -462,7 +462,7 @@ export function App() {
                   <span className="handlesetup-trigger-value">{me.handle}</span>
                 </>
               ) : (
-                t("App.handle.chipUnset")
+                <span className="handlesetup-trigger-value">{t("App.handle.chipUnset")}</span>
               )}
             </button>
           </span>

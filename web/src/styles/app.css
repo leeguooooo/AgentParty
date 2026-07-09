@@ -1140,9 +1140,7 @@
   font-size: 11px;
   color: var(--t-dim);
   white-space: nowrap;
-  /* presence-strip 折叠时中间列少了 chip，conn 会落进那个 1fr 空列——
-     强制贴右边，不然折叠态看着像挤在中间。 */
-  justify-self: end;
+  /* 贴第一行最右靠 .presence-head .conn 的 margin-left:auto（flex 化后 justify-self 已失效） */
 }
 .conn[data-s="open"] { color: var(--d-green); }
 .conn[data-s="reconnecting"] { color: var(--d-red); }
@@ -3337,6 +3335,9 @@
     max-width: 78px;
     font-size: 10px;
   }
+  /* 窄屏空间紧：藏掉 "Nickname:" 前缀，只留 ✎ 图标 + 昵称值本身（值才是要看的），
+     否则前缀(flex:none)吃光 78px 会把值挤成 0 宽度、整个昵称看不见。 */
+  .handlesetup-trigger-label { display: none; }
   .handle-banner {
     margin: 0 10px 8px;
   }
