@@ -5,8 +5,8 @@ import { AuthError, ConflictError, ForbiddenError, setHandle, ValidationError } 
 import { useT } from "../i18n/useT";
 import "../i18n/strings/HandleSetup";
 
-// spec：小写字母/数字开头，后随小写字母/数字/._- ，总长 2–32
-const HANDLE_RE = /^[a-z0-9][a-z0-9._-]{1,31}$/;
+// spec：字母/数字开头，后随字母/数字/._- ，总长 2–32；大小写原样保留显示，唯一性由后端按不分大小写判定
+const HANDLE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{1,31}$/;
 
 interface Props {
   current: string | null;
@@ -20,7 +20,7 @@ export function HandleSetup({ current, onSaved, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const trimmed = value.trim().toLowerCase();
+  const trimmed = value.trim();
   const formatOk = HANDLE_RE.test(trimmed);
 
   const submit = useCallback(async () => {

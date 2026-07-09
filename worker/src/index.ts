@@ -795,7 +795,7 @@ app.put("/api/me/handle", requireBearer, async (c) => {
   const body = (await c.req.json().catch(() => null)) as { handle?: unknown } | null;
   const handle = validateHandleFormat(body?.handle);
   if (handle === null) {
-    return c.json(errorBody("bad_request", "handle must match ^[a-z0-9][a-z0-9._-]{1,31}$"), 400);
+    return c.json(errorBody("bad_request", "handle must match ^[a-zA-Z0-9][a-zA-Z0-9._-]{1,31}$"), 400);
   }
   const conflict = await handleConflict(c.env.DB, handle, id.account);
   if (conflict !== null) {
