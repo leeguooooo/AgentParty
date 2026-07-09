@@ -881,6 +881,8 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
       </div>
       <ol className="team-list">
         {teams.map((team) => {
+          const front = team.frontAgent;
+          const workerMembers = front === null ? team.members : team.members.filter((member) => member.name !== front.name);
           const meta = [
             `root: ${team.rootAgent}`,
             team.parentAgents.length === 1 ? `parent: ${team.parentAgents[0]}` : `${team.parentAgents.length} parents`,
@@ -892,7 +894,13 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
             <li key={team.key} className="team-item">
               <div className="team-item-head">
                 <span className="team-name">{team.teamId}</span>
-                <span className="t-mono team-front">front {team.rootAgent}</span>
+                <span
+                  className={"t-mono team-front" + (front?.active ? " is-active" : "")}
+                  title={front === null ? `front: ${team.rootAgent}` : `front: ${front.name} · state: ${front.state} · residency: ${front.residency}`}
+                >
+                  <span className={`d-dot d-dot--${front?.active ? front.state : "offline"}`} />
+                  front {front?.name ?? team.rootAgent}
+                </span>
                 <span className="t-mono team-active">
                   {team.activeCount}/{team.memberCount} active
                 </span>
@@ -902,7 +910,8 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
               </div>
               <div className="t-mono team-meta">{meta.join(" · ")}</div>
               <div className="team-members">
-                {team.members.map((member) => (
+                {workerMembers.length === 0 && <span className="t-mono team-member team-member--empty">no workers</span>}
+                {workerMembers.map((member) => (
                   <span
                     key={member.name}
                     className={"t-mono team-member" + (member.active ? " is-active" : "")}

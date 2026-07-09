@@ -1,4 +1,4 @@
-import { PRESENCE_TIMEOUT_MS, type MsgFrame, type PresenceEntry, type Residency, type Sender } from "@agentparty/shared";
+import { PRESENCE_TIMEOUT_MS, type CollaborationRole, type MsgFrame, type PresenceEntry, type Residency, type Sender } from "@agentparty/shared";
 
 export type TeamResidency = Residency | "mixed";
 
@@ -9,6 +9,7 @@ export interface TeamMemberSummary {
   teamId: string;
   depth: number;
   state: string;
+  role: CollaborationRole | null;
   residency: Residency | "unknown";
   active: boolean;
   connected: boolean;
@@ -28,6 +29,7 @@ export interface TeamSummary {
   residency: TeamResidency;
   expiresAt: number | null;
   lastSeen: number | null;
+  frontAgent: TeamMemberSummary | null;
   members: TeamMemberSummary[];
 }
 
@@ -59,6 +61,7 @@ interface MemberDraft {
   name: string;
   lineage: Sender["lineage"] | null;
   state: string;
+  role: CollaborationRole | null;
   residency: Residency | "unknown";
   connected: boolean;
   lastSeen: number | null;
@@ -104,6 +107,7 @@ function mergeMember(map: Map<string, MemberDraft>, name: string, patch: Partial
     name,
     lineage: null,
     state: "offline",
+    role: null,
     residency: "unknown",
     connected: false,
     lastSeen: null,
@@ -112,6 +116,7 @@ function mergeMember(map: Map<string, MemberDraft>, name: string, patch: Partial
     ...prev,
     ...patch,
     lineage: patch.lineage ?? prev.lineage,
+    role: patch.role ?? prev.role,
     residency: patch.residency ?? prev.residency,
     connected: prev.connected || patch.connected === true,
     lastSeen: newer(prev.lastSeen, patch.lastSeen ?? null),
@@ -143,6 +148,7 @@ export function summarizeTeams({ presence, participants, messages, now = Date.no
   for (const msg of messages) {
     mergeMember(members, msg.sender.name, {
       lineage: msg.sender.lineage ?? null,
+      role: msg.role ?? null,
       lastSeen: msg.ts,
     });
   }
@@ -152,6 +158,7 @@ export function summarizeTeams({ presence, participants, messages, now = Date.no
     mergeMember(members, entry.name, {
       lineage: entry.lineage ?? participantByName.get(entry.name)?.lineage ?? null,
       state: connected && entry.state === "offline" ? "online" : entry.state,
+      role: entry.role ?? null,
       residency: entry.residency ?? "unknown",
       connected,
       lastSeen: entry.last_seen ?? entry.ts,
@@ -169,6 +176,7 @@ export function summarizeTeams({ presence, participants, messages, now = Date.no
       teamId: member.lineage.team_id,
       depth: member.lineage.depth,
       state: member.state,
+      role: member.role,
       residency: member.residency,
       active,
       connected: member.connected,
@@ -189,6 +197,12 @@ export function summarizeTeams({ presence, participants, messages, now = Date.no
       const activeCount = sortedMembers.filter((member) => member.active).length;
       const parentAgents = [...new Set(sortedMembers.map((member) => member.parentAgent))].sort((a, b) => a.localeCompare(b));
       const residency = summarizeResidency(sortedMembers.map((member) => member.residency));
+      const frontAgent =
+        sortedMembers.find((member) => member.role === "host") ??
+        sortedMembers.find((member) =>
+          member.depth === 1 && member.parentAgent === member.rootAgent && member.teamId === member.rootAgent,
+        ) ??
+        null;
       return {
         key,
         rootAgent: sortedMembers[0]!.rootAgent,
@@ -201,6 +215,7 @@ export function summarizeTeams({ presence, participants, messages, now = Date.no
         residency,
         expiresAt: sortedMembers.reduce<number | null>((acc, member) => sooner(acc, member.expiresAt), null),
         lastSeen: sortedMembers.reduce<number | null>((acc, member) => newer(acc, member.lastSeen), null),
+        frontAgent,
         members: sortedMembers,
       };
     })
