@@ -1919,8 +1919,10 @@ export function ChannelPage({
     for (const p of state.participants) kind.set(p.name, p.kind);
     for (const [name, p] of Object.entries(state.presence)) if (!kind.has(name) && p.kind) kind.set(name, p.kind);
     for (const m of state.messages) if (!kind.has(m.sender.name)) kind.set(m.sender.name, m.sender.kind);
+    for (const identity of channelIdentities) if (!kind.has(identity.name) && identity.kind) kind.set(identity.name, identity.kind);
+    for (const role of channelRoles) if (!kind.has(role.name) && role.kind) kind.set(role.name, role.kind);
     return (name: string): boolean => kind.get(name) === "agent";
-  }, [state.participants, state.presence, state.messages]);
+  }, [channelIdentities, channelRoles, state.participants, state.presence, state.messages]);
   // 发送后回执：seq → 每个被 @ 的 agent 目标的状态（已回复/已唤醒/唤醒失败/在线已送达/待唤醒/待重连）。
   const receiptsBySeq = useMemo(
     () =>
@@ -1937,14 +1939,19 @@ export function ChannelPage({
   // 发送前状态条：草稿里已 @ 的、且在频道里认得的目标 + 当前存活档位。
   const draftMentionStatuses = useMemo<DraftMentionStatus[]>(() => {
     const online = new Set(state.participants.map((p) => p.name));
-    const known = new Set<string>([...online, ...Object.keys(state.presence)]);
+    const known = new Set<string>([
+      ...online,
+      ...Object.keys(state.presence),
+      ...channelIdentities.map((identity) => identity.name),
+      ...channelRoles.map((role) => role.name),
+    ]);
     return parseDraftMentions(draft)
       .filter((name) => known.has(name) && name !== state.self)
       .map((name) => {
         const live = mentionLiveness(name, online, state.presence, teamNow);
         return { name, display: identityDisplay[name]?.display ?? name, tier: live.tier, wakeKind: live.wakeKind };
       });
-  }, [draft, state.participants, state.presence, state.self, teamNow, identityDisplay]);
+  }, [channelIdentities, channelRoles, draft, state.participants, state.presence, state.self, teamNow, identityDisplay]);
   // 轮询 @ 唤醒台账（仅 webhook 侧有行；serve/watch 靠 presence + 回复链接补齐）。用 ref 保持 7s 稳定
   // 间隔，不因每条新消息重挂定时器；标签页隐藏或频道无 agent @ 时跳过，端点失败也不影响其余回执渲染。
   const messagesRef = useRef(state.messages);
