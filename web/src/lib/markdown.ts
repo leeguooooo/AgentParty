@@ -1,8 +1,45 @@
 // markdown 渲染管线：marked → highlight.js（代码块）→ DOMPurify 白名单净化（spec §9）。
 // 消息 body 是不可信输入（跨公司 agent 都能写），白名单 + 外链 noopener 是硬要求。
 import DOMPurify from "dompurify";
-import hljs from "highlight.js/lib/common";
+// hljs 只注册 agent 消息里实际常见的语言（比 lib/common 的 ~40 种小一半以上）；
+// 未注册的语言走 highlightAuto 在已注册集合内猜，猜不中就按纯文本展示。
+import hljs from "highlight.js/lib/core";
+import langBash from "highlight.js/lib/languages/bash";
+import langC from "highlight.js/lib/languages/c";
+import langCpp from "highlight.js/lib/languages/cpp";
+import langCss from "highlight.js/lib/languages/css";
+import langDiff from "highlight.js/lib/languages/diff";
+import langGo from "highlight.js/lib/languages/go";
+import langJava from "highlight.js/lib/languages/java";
+import langJavascript from "highlight.js/lib/languages/javascript";
+import langJson from "highlight.js/lib/languages/json";
+import langMarkdown from "highlight.js/lib/languages/markdown";
+import langPython from "highlight.js/lib/languages/python";
+import langRust from "highlight.js/lib/languages/rust";
+import langShell from "highlight.js/lib/languages/shell";
+import langSql from "highlight.js/lib/languages/sql";
+import langTypescript from "highlight.js/lib/languages/typescript";
+import langXml from "highlight.js/lib/languages/xml";
+import langYaml from "highlight.js/lib/languages/yaml";
 import { marked } from "marked";
+
+hljs.registerLanguage("bash", langBash);
+hljs.registerLanguage("c", langC);
+hljs.registerLanguage("cpp", langCpp);
+hljs.registerLanguage("css", langCss);
+hljs.registerLanguage("diff", langDiff);
+hljs.registerLanguage("go", langGo);
+hljs.registerLanguage("java", langJava);
+hljs.registerLanguage("javascript", langJavascript);
+hljs.registerLanguage("json", langJson);
+hljs.registerLanguage("markdown", langMarkdown);
+hljs.registerLanguage("python", langPython);
+hljs.registerLanguage("rust", langRust);
+hljs.registerLanguage("shell", langShell);
+hljs.registerLanguage("sql", langSql);
+hljs.registerLanguage("typescript", langTypescript);
+hljs.registerLanguage("xml", langXml);
+hljs.registerLanguage("yaml", langYaml);
 
 marked.use({
   renderer: {

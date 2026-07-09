@@ -748,7 +748,7 @@
   border: 1.4px solid var(--d-red);
   border-radius: 0;
   color: var(--d-red);
-  background: #fff;
+  background: var(--t-panel);
   font-size: 10px;
 }
 .presence-group-agents {
@@ -861,7 +861,7 @@
   background: var(--d-red-soft);
 }
 .presence-alert--duplicate {
-  background: #fff;
+  background: var(--t-panel);
 }
 .presence-popover {
   position: fixed;
@@ -2628,7 +2628,7 @@
   background: var(--t-panel);
 }
 .banner--yellow { background: var(--d-yellow); }
-.banner--gray { background: #f0efe6; color: var(--t-muted); }
+.banner--gray { background: var(--t-panel2); color: var(--t-muted); }
 .banner--red { background: var(--d-red-soft); }
 .reply-banner {
   display: flex;
@@ -3393,7 +3393,7 @@
 .lang-switch-btn,
 .chan-cat-btn { border-radius: 0; }
 .lang-switch-btn.is-active,
-.chan-cat-btn.is-active { background: var(--d-ink); color: #fff; }
+.chan-cat-btn.is-active { background: var(--d-ink); color: var(--t-bg); }
 
 /* 归档入口 → 终端提示行 */
 .side-archived-toggle { font-family: var(--t-mono); }
@@ -3402,4 +3402,66 @@
 @media (max-width: 760px) {
   .side::-webkit-scrollbar { height: 6px; }
   .side::-webkit-scrollbar-thumb { border-width: 1px; }
+}
+
+/* presence 组：内容自适应宽度，agent 胶囊不再压成半截（多出的靠 +N 收纳） */
+.presence-group {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.presence-group--full {
+  display: grid;
+  grid-template-columns: 1fr;
+  width: 100%;
+}
+.presence-group-agents { overflow: visible; flex-wrap: wrap; }
+.presence-agent-chip { flex: none; max-width: 200px; }
+
+/* loop guard 警示卡：对齐参考稿 SYSTEM · BLOCKED（红框 + 左红条 + "!" 章 + 红操作钮） */
+.guard-banner {
+  position: relative;
+  background: var(--t-panel);
+  border-color: var(--d-red);
+  box-shadow: 4px 4px 0 rgba(255, 84, 71, 0.22);
+  padding: 12px 16px 12px 21px;
+  color: var(--t-body);
+}
+.guard-banner::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  background: var(--d-red);
+}
+.guard-banner > span:first-child::before {
+  content: "!";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  background: var(--d-red);
+  color: #fff;
+  border: 1.4px solid var(--d-ink);
+  font-weight: 700;
+  vertical-align: -3px;
+}
+.guard-reset {
+  background: var(--d-red);
+  color: #fff;
+}
+.presence-group { flex-wrap: wrap; }
+/* 名字段截断：原选择器 span:not(.d-dot):first-of-type 永远匹配不到（首个 span 是圆点），
+   这里直接点第二个 span（名字）做省略 */
+.presence-agent-chip > span:nth-of-type(2) {
+  min-width: 0;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

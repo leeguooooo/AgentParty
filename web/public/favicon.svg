@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- 博客风 favicon：珊瑚红方块章 + 墨线边框 + mono "P"，与 logo 的 Party 章同款 -->
+  <rect x="2.5" y="4.5" width="27" height="24" rx="1" fill="#ff5447" stroke="#1a1a1a" stroke-width="2.4" transform="rotate(-4 16 16)"/>
+  <text x="16" y="23" text-anchor="middle" font-family="'JetBrains Mono', Menlo, monospace" font-size="17" font-weight="700" fill="#ffffff" transform="rotate(-4 16 16)">P</text>
+</svg>
