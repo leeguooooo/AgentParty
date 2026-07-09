@@ -114,6 +114,38 @@ describe("team summaries", () => {
 
     expect(teams[0]!.expiresAt).toBe(NOW + 30_000);
   });
+
+  test("identifies the host profile runtime as the front agent for its workers", () => {
+    const teams = summarizeTeams({
+      now: NOW,
+      participants: [sender("agentparty-agentparty-abc123", { lineage: lineage({ team_id: "codex-main" }) })],
+      presence: {
+        "agentparty-agentparty-abc123": presence("agentparty-agentparty-abc123", {
+          role: "host",
+          residency: "supervised",
+          lineage: lineage({ team_id: "codex-main" }),
+        }),
+        "agentparty-build-1": presence("agentparty-build-1", {
+          role: "worker",
+          residency: "bare",
+          lineage: lineage({ parent_agent: "agentparty-agentparty-abc123", team_id: "codex-main", depth: 1 }),
+        }),
+      },
+      messages: [],
+    });
+
+    expect(teams).toHaveLength(1);
+    expect(teams[0]!.teamId).toBe("codex-main");
+    expect(teams[0]!.frontAgent).toMatchObject({
+      name: "agentparty-agentparty-abc123",
+      role: "host",
+      active: true,
+    });
+    expect(teams[0]!.members.map((member) => [member.name, member.role])).toEqual([
+      ["agentparty-agentparty-abc123", "host"],
+      ["agentparty-build-1", "worker"],
+    ]);
+  });
 });
 
 describe("team message grouping", () => {
