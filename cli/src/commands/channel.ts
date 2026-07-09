@@ -20,6 +20,8 @@ import {
   setChannelRole,
   setChannelVisibility,
   setCompletionGate,
+  setLoopGuard,
+  setWorkflowGuard,
 } from "../rest";
 import { isName, isSlug } from "../validation";
 
@@ -36,6 +38,8 @@ const HELP = `usage: party channel create <slug> [--title t] [--temp] [--party] 
        party channel invite-agent <owner>/<handle> [slug]
        party channel remove-agent <owner>/<handle> [slug]
        party channel gate reviewer|off [slug] [--policy sender|owner]
+       party channel guard unlimited|off|<limit> [slug]
+       party channel workflow-guard off|<limit> [slug]
        party channel visibility <slug> public|private [--confirm]
        party channel members <slug>
        party channel join-link <slug> [--expires 7d] [--max-uses N]
@@ -56,6 +60,7 @@ Options:
   --party     create a party-mode channel
   --public    create a public channel
   --policy p  completion review policy: sender or owner
+  guard limit consecutive agent messages before human intervention; off/unlimited disables it
   --confirm   confirm private-to-public visibility switch
   --remove    revoke the channel-scoped token and remove membership when kicking
   --expires d join-link expiry like 7d, 12h, 30m, 60s
@@ -256,6 +261,52 @@ export async function run(argv: string[]): Promise<number> {
           ...(policy === undefined ? {} : { policy: policy as (typeof COMPLETION_REVIEW_POLICIES)[number] }),
         });
         console.log(`completion gate ${slug}: ${result.gate} policy=${result.policy}`);
+        return 0;
+      }
+      case "guard": {
+        const value = positionals[1];
+        const slug = resolveChannel(positionals[2]);
+        if (!value || !slug) {
+          console.error("usage: party channel guard unlimited|off|<limit> [slug]");
+          return 1;
+        }
+        if (!isSlug(slug)) {
+          console.error("slug must match [a-z0-9][a-z0-9-]{0,63}");
+          return 1;
+        }
+        const disabled = value === "off" || value === "unlimited";
+        const limit = disabled ? undefined : parsePositiveIntFlag(value);
+        if (!disabled && limit === null) {
+          console.error("guard must be off, unlimited, or a positive integer");
+          return 1;
+        }
+        const result = disabled
+          ? await setLoopGuard(cfg.server, cfg.token, slug, { enabled: false })
+          : await setLoopGuard(cfg.server, cfg.token, slug, { enabled: true, limit: limit as number });
+        console.log(`loop guard ${slug}: ${result.enabled ? `${result.limit} messages` : "unlimited"}`);
+        return 0;
+      }
+      case "workflow-guard": {
+        const value = positionals[1];
+        const slug = resolveChannel(positionals[2]);
+        if (!value || !slug) {
+          console.error("usage: party channel workflow-guard off|<limit> [slug]");
+          return 1;
+        }
+        if (!isSlug(slug)) {
+          console.error("slug must match [a-z0-9][a-z0-9-]{0,63}");
+          return 1;
+        }
+        const disabled = value === "off" || value === "unlimited";
+        const limit = disabled ? undefined : parsePositiveIntFlag(value);
+        if (!disabled && limit === null) {
+          console.error("workflow-guard must be off, unlimited, or a positive integer");
+          return 1;
+        }
+        const result = disabled
+          ? await setWorkflowGuard(cfg.server, cfg.token, slug, { enabled: false })
+          : await setWorkflowGuard(cfg.server, cfg.token, slug, { enabled: true, limit: limit as number });
+        console.log(`workflow guard ${slug}: ${result.enabled ? `${result.limit} messages` : "off"}`);
         return 0;
       }
       case "visibility": {

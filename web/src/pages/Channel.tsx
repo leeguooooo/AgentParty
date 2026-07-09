@@ -30,6 +30,8 @@ import {
   reviseMessage,
   searchMessages,
   setChannelCharter,
+  setLoopGuard,
+  setWorkflowGuard,
   setChannelRole,
   ValidationError,
 } from "../lib/api";
@@ -64,6 +66,10 @@ interface Props {
   token: string;
   mode: "normal" | "party";
   isPublic: boolean; // 顶栏 PUBLIC 徽章（spec §4）
+  loopGuardEnabled: boolean;
+  loopGuardLimit: number | null;
+  workflowGuardEnabled: boolean;
+  workflowGuardLimit: number;
   shareMode: boolean;
   // 有可写人类账号会话（me.role==="human" 且非分享链接）才允许铸 agent（spec §10）
   canMintAgent: boolean;
@@ -144,7 +150,7 @@ interface RoleDraft {
   responsibility: string;
 }
 
-type ChannelPanel = "charter" | "roles" | "coordination" | "search";
+type ChannelPanel = "charter" | "roles" | "coordination" | "search" | "settings";
 type AdminSurface = "agentJoin" | "agentTokens" | "joinLink";
 
 function roleDraftFrom(role: ChannelRoleInfo): RoleDraft {
@@ -158,6 +164,100 @@ function roleViewFor(role: ChannelRoleInfo, identity: ChannelIdentity | undefine
   const accountLabel = account && account !== "" ? account : kind === "human" ? display : t("Channel.roles.unowned");
   const owner = account && account !== display ? account : null;
   return { role, display, accountLabel, owner, kind };
+}
+
+interface GuardSettingsPanelProps {
+  canModerate: boolean;
+  loopEnabled: boolean;
+  loopLimit: string;
+  workflowEnabled: boolean;
+  workflowLimit: string;
+  saving: "loop" | "workflow" | null;
+  error: string | null;
+  onLoopEnabled(next: boolean): void;
+  onLoopLimit(next: string): void;
+  onWorkflowEnabled(next: boolean): void;
+  onWorkflowLimit(next: string): void;
+  onSaveLoop(): void;
+  onSaveWorkflow(): void;
+}
+
+function GuardSettingsPanel({
+  canModerate,
+  loopEnabled,
+  loopLimit,
+  workflowEnabled,
+  workflowLimit,
+  saving,
+  error,
+  onLoopEnabled,
+  onLoopLimit,
+  onWorkflowEnabled,
+  onWorkflowLimit,
+  onSaveLoop,
+  onSaveWorkflow,
+}: GuardSettingsPanelProps) {
+  const t = useT();
+  return (
+    <div className="guard-settings">
+      <section className="guard-setting-row">
+        <div className="guard-setting-head">
+          <h3>{t("Channel.settings.loopGuard")}</h3>
+          <label className="guard-switch">
+            <input
+              type="checkbox"
+              checked={loopEnabled}
+              disabled={!canModerate || saving !== null}
+              onChange={(event) => onLoopEnabled(event.currentTarget.checked)}
+            />
+            <span>{loopEnabled ? t("Channel.settings.enabled") : t("Channel.settings.unlimited")}</span>
+          </label>
+        </div>
+        <div className="guard-setting-controls">
+          <input
+            className="guard-limit-input"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={loopLimit}
+            placeholder={t("Channel.settings.unlimited")}
+            disabled={!canModerate || !loopEnabled || saving !== null}
+            onChange={(event) => onLoopLimit(event.currentTarget.value)}
+          />
+          <button type="button" className="d-btn d-btn--primary" disabled={!canModerate || saving !== null} onClick={onSaveLoop}>
+            {saving === "loop" ? t("Channel.settings.saving") : t("Channel.settings.save")}
+          </button>
+        </div>
+      </section>
+      <section className="guard-setting-row">
+        <div className="guard-setting-head">
+          <h3>{t("Channel.settings.workflowGuard")}</h3>
+          <label className="guard-switch">
+            <input
+              type="checkbox"
+              checked={workflowEnabled}
+              disabled={!canModerate || saving !== null}
+              onChange={(event) => onWorkflowEnabled(event.currentTarget.checked)}
+            />
+            <span>{workflowEnabled ? t("Channel.settings.enabled") : t("Channel.settings.off")}</span>
+          </label>
+        </div>
+        <div className="guard-setting-controls">
+          <input
+            className="guard-limit-input"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={workflowLimit}
+            disabled={!canModerate || !workflowEnabled || saving !== null}
+            onChange={(event) => onWorkflowLimit(event.currentTarget.value)}
+          />
+          <button type="button" className="d-btn d-btn--primary" disabled={!canModerate || saving !== null} onClick={onSaveWorkflow}>
+            {saving === "workflow" ? t("Channel.settings.saving") : t("Channel.settings.save")}
+          </button>
+        </div>
+      </section>
+      {error !== null && <p className="guard-setting-error">{error}</p>}
+    </div>
+  );
 }
 
 function roleCountLabel(role: CollaborationRole, count: number, t: TFunc): string {
@@ -981,6 +1081,10 @@ export function ChannelPage({
   token,
   mode,
   isPublic,
+  loopGuardEnabled,
+  loopGuardLimit,
+  workflowGuardEnabled,
+  workflowGuardLimit,
   shareMode,
   canMintAgent,
   canResetGuard,
@@ -1023,6 +1127,12 @@ export function ChannelPage({
   const [seenCharterRev, setSeenCharterRev] = useState(() => readSeenCharterRev(slug));
   const [activePanel, setActivePanel] = useState<ChannelPanel | null>(null);
   const [activeAdminSurface, setActiveAdminSurface] = useState<AdminSurface | null>(null);
+  const [localLoopGuardEnabled, setLocalLoopGuardEnabled] = useState(loopGuardEnabled);
+  const [localLoopGuardLimit, setLocalLoopGuardLimit] = useState(loopGuardLimit === null ? "" : String(loopGuardLimit));
+  const [localWorkflowGuardEnabled, setLocalWorkflowGuardEnabled] = useState(workflowGuardEnabled);
+  const [localWorkflowGuardLimit, setLocalWorkflowGuardLimit] = useState(String(workflowGuardLimit));
+  const [guardSaving, setGuardSaving] = useState<"loop" | "workflow" | null>(null);
+  const [guardConfigError, setGuardConfigError] = useState<string | null>(null);
   // 可见性可在会话内切换（issue #38 web），本地 state 让顶栏徽章即时反映，无需重载
   const [localPublic, setLocalPublic] = useState(isPublic);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -1053,6 +1163,15 @@ export function ChannelPage({
   const stickBottom = useRef(true);
   const authFailedRef = useRef(onAuthFailed);
   authFailedRef.current = onAuthFailed;
+
+  useEffect(() => {
+    setLocalLoopGuardEnabled(loopGuardEnabled);
+    setLocalLoopGuardLimit(loopGuardLimit === null ? "" : String(loopGuardLimit));
+    setLocalWorkflowGuardEnabled(workflowGuardEnabled);
+    setLocalWorkflowGuardLimit(String(workflowGuardLimit));
+    setGuardConfigError(null);
+    setGuardSaving(null);
+  }, [loopGuardEnabled, loopGuardLimit, slug, workflowGuardEnabled, workflowGuardLimit]);
   // IM 式加载：初始只拉最新一页、ws 从页尾游标接力；触顶上翻加载更早页
   const [bootstrapped, setBootstrapped] = useState(false); // 初始页已就绪，ws 才连
   const hasMoreRef = useRef(true); // 还有更早的历史可上翻
@@ -1456,6 +1575,52 @@ export function ChannelPage({
       })
       .finally(() => setCharterSaving(false));
   }, [charterDraft, charterSaving, slug, token]);
+
+  const saveLoopGuard = useCallback(() => {
+    if (guardSaving !== null) return;
+    const limit = Number(localLoopGuardLimit);
+    if (localLoopGuardEnabled && (!Number.isInteger(limit) || limit < 1 || limit > 10_000)) {
+      setGuardConfigError(t("Channel.settings.invalidLoop"));
+      return;
+    }
+    setGuardSaving("loop");
+    setGuardConfigError(null);
+    setLoopGuard(token, slug, localLoopGuardEnabled, localLoopGuardEnabled ? limit : undefined)
+      .then((result) => {
+        setLocalLoopGuardEnabled(result.enabled);
+        setLocalLoopGuardLimit(result.limit === null ? "" : String(result.limit));
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setGuardConfigError(t("Channel.settings.forbidden"));
+        else if (err instanceof ValidationError) setGuardConfigError(t("Channel.settings.invalidLoop"));
+        else setGuardConfigError(t("Channel.settings.saveFailed"));
+      })
+      .finally(() => setGuardSaving(null));
+  }, [guardSaving, localLoopGuardEnabled, localLoopGuardLimit, slug, t, token]);
+
+  const saveWorkflowGuard = useCallback(() => {
+    if (guardSaving !== null) return;
+    const limit = Number(localWorkflowGuardLimit);
+    if (localWorkflowGuardEnabled && (!Number.isInteger(limit) || limit < 1 || limit > 1000)) {
+      setGuardConfigError(t("Channel.settings.invalidWorkflow"));
+      return;
+    }
+    setGuardSaving("workflow");
+    setGuardConfigError(null);
+    setWorkflowGuard(token, slug, localWorkflowGuardEnabled, localWorkflowGuardEnabled ? limit : undefined)
+      .then((result) => {
+        setLocalWorkflowGuardEnabled(result.enabled);
+        setLocalWorkflowGuardLimit(String(result.limit ?? limit));
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setGuardConfigError(t("Channel.settings.forbidden"));
+        else if (err instanceof ValidationError) setGuardConfigError(t("Channel.settings.invalidWorkflow"));
+        else setGuardConfigError(t("Channel.settings.saveFailed"));
+      })
+      .finally(() => setGuardSaving(null));
+  }, [guardSaving, localWorkflowGuardEnabled, localWorkflowGuardLimit, slug, t, token]);
 
   const updateRoleDraft = useCallback((name: string, next: RoleDraft) => {
     setRoleDrafts((current) => ({ ...current, [name]: next }));
@@ -1962,6 +2127,14 @@ export function ChannelPage({
             <span>{t("Channel.tools.search")}</span>
             {q !== "" && <span className="t-mono chan-tool-badge">{searchLoading ? "..." : searchHits.length}</span>}
           </button>
+          {canModerate && (
+            <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("settings")}>
+              <span>{t("Channel.tools.settings")}</span>
+              <span className="t-mono chan-tool-badge">
+                {localLoopGuardEnabled ? localLoopGuardLimit : t("Channel.settings.unlimited")}
+              </span>
+            </button>
+          )}
         </div>
         {(canMintAgent || canModerate) && !state.archived && (
           <div className="chan-admin-actions">
@@ -2026,11 +2199,13 @@ export function ChannelPage({
             activePanel === "charter" ? t("Channel.tools.charter") :
             activePanel === "roles" ? t("Channel.tools.roles") :
             activePanel === "coordination" ? t("Channel.tools.coordination") :
+            activePanel === "settings" ? t("Channel.tools.settings") :
             t("Channel.tools.search")
           }
           subtitle={
             activePanel === "charter" && charter !== null ? `rev ${charter.charter_rev}` :
             activePanel === "roles" ? t("Channel.roles.count", { count: String(structuredRoleCount) }) :
+            activePanel === "settings" ? (localLoopGuardEnabled ? t("Channel.settings.enabled") : t("Channel.settings.unlimited")) :
             activePanel === "search" && q !== "" ? t("Channel.search.hits", { count: searchHits.length }) :
             undefined
           }
@@ -2074,6 +2249,23 @@ export function ChannelPage({
             />
           )}
           {activePanel === "coordination" && coordinationContent}
+          {activePanel === "settings" && (
+            <GuardSettingsPanel
+              canModerate={canModerate}
+              loopEnabled={localLoopGuardEnabled}
+              loopLimit={localLoopGuardLimit}
+              workflowEnabled={localWorkflowGuardEnabled}
+              workflowLimit={localWorkflowGuardLimit}
+              saving={guardSaving}
+              error={guardConfigError}
+              onLoopEnabled={setLocalLoopGuardEnabled}
+              onLoopLimit={setLocalLoopGuardLimit}
+              onWorkflowEnabled={setLocalWorkflowGuardEnabled}
+              onWorkflowLimit={setLocalWorkflowGuardLimit}
+              onSaveLoop={saveLoopGuard}
+              onSaveWorkflow={saveWorkflowGuard}
+            />
+          )}
           {activePanel === "search" && searchContent}
         </ChannelPanelModal>
       )}

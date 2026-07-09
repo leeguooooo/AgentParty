@@ -15,6 +15,11 @@ export default defineWorkersConfig(async () => {
       // WS 握手/DO fetch 顶超时、挡住 release（#48）。CI 里 retry 1 次仅作兜底：真 bug
       // 连挂两次仍然红，retry 通过的用例 vitest 会标 flaky、不丢信号；本地不 retry 保持严格。
       retry: process.env.CI ? 1 : 0,
+      // Worker specs share one workerd runtime and many tests keep WebSocket / Durable Object
+      // state alive across ticks. Running spec files in parallel makes the pool invalidate the
+      // Worker module while another spec still holds a DO stub, producing false
+      // "worker/src/index.ts changed, invalidating this Durable Object" failures (#48).
+      fileParallelism: false,
       setupFiles: ["./test/apply-migrations.ts"],
       poolOptions: {
         workers: {

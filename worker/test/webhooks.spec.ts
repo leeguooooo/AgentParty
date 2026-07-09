@@ -1,5 +1,5 @@
 import { env, fetchMock, runInDurableObject } from "cloudflare:test";
-import { LOOP_GUARD_AGENT_N, MAX_WEBHOOKS_PER_CHANNEL, WEBHOOK_MAX_RETRIES } from "@agentparty/shared";
+import { LOOP_GUARD_N, MAX_WEBHOOKS_PER_CHANNEL, WEBHOOK_MAX_RETRIES } from "@agentparty/shared";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
 import { api, createChannel, postMessage, seedToken, uniq } from "./helpers";
@@ -389,12 +389,13 @@ describe("webhooks", () => {
     expect(captured[1]).toMatchObject({ type: "status", state: "done", note: "ready for review" });
   });
 
-  it("needs-human filter delivers loop guard system statuses", async () => {
-    const { token } = await seedToken("agent");
-    const slug = await createChannel(token);
+  it("needs-human filter does not receive loop guard statuses while loop guard is disabled", async () => {
+    const agentA = await seedToken("agent");
+    const agentB = await seedToken("agent");
+    const slug = await createChannel(agentA.token);
     expect(
       (
-        await addWebhook(slug, token, {
+        await addWebhook(slug, agentA.token, {
           name: "human-ops",
           url: "https://hooks.test/loop-guard",
           secret: "s",
@@ -403,31 +404,10 @@ describe("webhooks", () => {
       ).status,
     ).toBe(201);
 
-    let captured: CapturedRequest | null = null;
-    fetchMock
-      .get("https://hooks.test")
-      .intercept({ path: "/loop-guard", method: "POST" })
-      .reply(200, (opts) => {
-        captured = normalize(opts as { headers?: unknown; body?: unknown });
-        return "ok";
-      });
-
-    for (let i = 0; i < LOOP_GUARD_AGENT_N; i++) {
+    for (let i = 0; i < LOOP_GUARD_N + 1; i++) {
+      const token = i % 2 === 0 ? agentA.token : agentB.token;
       expect((await sendMessage(slug, token, `guard filler ${i}`)).status).toBe(200);
     }
-    const blocked = await sendMessage(slug, token, "one too many");
-    expect(blocked.status).toBe(409);
-
-    expect(captured).not.toBeNull();
-    const payload = JSON.parse((captured as unknown as CapturedRequest).body) as Record<string, unknown>;
-    expect(payload).toMatchObject({
-      type: "status",
-      kind: "status",
-      state: "blocked",
-      sender: { name: "system", kind: "agent" },
-      channel: slug,
-    });
-    expect(String(payload.body)).toContain("loop guard tripped:");
     expect(await queueRows(slug)).toHaveLength(0);
   });
 

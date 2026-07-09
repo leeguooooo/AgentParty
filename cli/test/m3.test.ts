@@ -2635,6 +2635,51 @@ describe("party channel gate", () => {
   });
 });
 
+describe("party channel guard config", () => {
+  test("loop guard unlimited/limit 调 PUT /loop-guard", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    writeWorkspaceState("ops");
+
+    const off = await runCli(["channel", "guard", "unlimited"]);
+    expect(off.code).toBe(0);
+    expect(off.stdout).toContain("loop guard ops: unlimited");
+    expect(reqsOf(mock, "PUT", "/api/channels/ops/loop-guard")[0]!.body).toEqual({ enabled: false });
+
+    const limited = await runCli(["channel", "guard", "80", "ops"]);
+    expect(limited.code).toBe(0);
+    expect(limited.stdout).toContain("loop guard ops: 80 messages");
+    expect(reqsOf(mock, "PUT", "/api/channels/ops/loop-guard")[1]!.body).toEqual({ enabled: true, limit: 80 });
+  });
+
+  test("workflow guard off/limit 调 PUT /workflow-guard", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const off = await runCli(["channel", "workflow-guard", "off", "ops"]);
+    expect(off.code).toBe(0);
+    expect(off.stdout).toContain("workflow guard ops: off");
+    expect(reqsOf(mock, "PUT", "/api/channels/ops/workflow-guard")[0]!.body).toEqual({ enabled: false });
+
+    const r = await runCli(["channel", "workflow-guard", "12", "ops"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("workflow guard ops: 12 messages");
+    expect(reqsOf(mock, "PUT", "/api/channels/ops/workflow-guard")[1]!.body).toEqual({ enabled: true, limit: 12 });
+  });
+
+  test("guard 本地校验 limit 和 slug", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    for (const args of [
+      ["channel", "guard", "zero", "ops"],
+      ["channel", "guard", "10", "Bad_Slug"],
+      ["channel", "workflow-guard", "0", "ops"],
+    ]) {
+      const r = await runCli(args);
+      expect(r.code).toBe(1);
+    }
+  });
+});
+
 
 describe("party channel role", () => {
   test("role set/list/unset 调用频道角色 API", async () => {

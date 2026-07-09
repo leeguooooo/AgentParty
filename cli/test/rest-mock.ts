@@ -90,6 +90,14 @@ export function startRestMock(handler?: RestHandler): RestMock {
         const b = body as { gate: "off" | "reviewer"; policy?: "sender" | "owner" };
         return Response.json({ gate: b.gate, policy: b.policy ?? "sender" });
       }
+      if (r.method === "PUT" && /^\/api\/channels\/[^/]+\/loop-guard$/.test(r.path)) {
+        const b = body as { enabled: boolean; limit?: number };
+        return Response.json({ enabled: b.enabled, limit: b.enabled ? b.limit : null });
+      }
+      if (r.method === "PUT" && /^\/api\/channels\/[^/]+\/workflow-guard$/.test(r.path)) {
+        const b = body as { enabled: boolean; limit?: number };
+        return Response.json({ enabled: b.enabled, limit: b.enabled ? b.limit : null });
+      }
       if (r.method === "PUT" && /^\/api\/channels\/[^/]+\/visibility$/.test(r.path)) {
         const b = body as { visibility: "public" | "private" };
         return Response.json({ visibility: b.visibility });

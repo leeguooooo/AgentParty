@@ -110,6 +110,11 @@ export interface ChannelInfo {
   owned?: boolean;
   // 我加入的（在 channel_members 里）。旧 worker 缺此字段 → undefined 按 false 处理。
   member?: boolean;
+  // loop/workflow guard 配置：旧 worker 响应缺字段时按「未配置」处理（不渲染开关状态）。
+  loop_guard_enabled?: number;
+  loop_guard_limit?: number | null;
+  workflow_guard_enabled?: number;
+  workflow_guard_limit?: number;
   charter_rev?: number;
   created_at: number;
   archived_at: number | null;
@@ -652,4 +657,31 @@ export async function setChannelVisibility(
   if (!res.ok) throw new Error(`PUT /api/channels/${slug}/visibility failed (${res.status})`);
   const b = (await res.json()) as { visibility?: "public" | "private"; changed?: boolean };
   return { visibility: b.visibility, changed: b.changed };
+}
+
+// loop/workflow guard 配置开关：owner/human 专属，PUT 幂等返回最新配置。
+export interface GuardResult {
+  enabled: boolean;
+  limit: number | null;
+}
+
+async function putGuard(token: string, slug: string, path: string, enabled: boolean, limit?: number): Promise<GuardResult> {
+  const res = await fetch(`/api/channels/${encodeURIComponent(slug)}/${path}`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(enabled ? { enabled, limit } : { enabled }),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 400) throw new ValidationError("invalid guard limit");
+  if (!res.ok) throw new Error(`PUT /api/channels/${slug}/${path} failed (${res.status})`);
+  return (await res.json()) as GuardResult;
+}
+
+export async function setLoopGuard(token: string, slug: string, enabled: boolean, limit?: number): Promise<GuardResult> {
+  return putGuard(token, slug, "loop-guard", enabled, limit);
+}
+
+export async function setWorkflowGuard(token: string, slug: string, enabled: boolean, limit?: number): Promise<GuardResult> {
+  return putGuard(token, slug, "workflow-guard", enabled, limit);
 }

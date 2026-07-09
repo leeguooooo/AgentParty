@@ -1,5 +1,4 @@
 import { SELF, env, runInDurableObject } from "cloudflare:test";
-import { LOOP_GUARD_N } from "@agentparty/shared";
 import { describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
 import { ADMIN_HEADERS, api, createChannel, postMessage, seedToken, WsClient } from "./helpers";
@@ -135,17 +134,10 @@ describe("channel lifecycle endpoints", () => {
     ws.close();
   });
 
-  it("reset-guard clears a tripped loop guard", async () => {
+  it("reset-guard remains human-only and harmless while loop guard is disabled", async () => {
     const agentA = await seedToken("agent");
-    const agentB = await seedToken("agent");
     const human = await seedToken("human");
     const slug = await createChannel(agentA.token);
-    for (let i = 0; i < LOOP_GUARD_N; i++) {
-      const res = await postMessage(slug, i % 2 === 0 ? agentA.token : agentB.token, `m${i}`);
-      expect(res.status).toBe(200);
-    }
-    const blocked = await postMessage(slug, agentA.token, "blocked");
-    expect(blocked.status).toBe(409);
 
     const agentReset = await api(`/api/channels/${slug}/reset-guard`, agentA.token, { method: "POST" });
     expect(agentReset.status).toBe(403);
@@ -153,7 +145,7 @@ describe("channel lifecycle endpoints", () => {
     const reset = await api(`/api/channels/${slug}/reset-guard`, human.token, { method: "POST" });
     expect(reset.status).toBe(200);
 
-    const resumed = await postMessage(slug, agentB.token, "resumed");
+    const resumed = await postMessage(slug, agentA.token, "still allowed");
     expect(resumed.status).toBe(200);
   }, 30_000);
 });

@@ -101,8 +101,8 @@ export interface BuiltinRunnerOptions {
 }
 
 export interface ThreadLike {
-  id?: string;
-  thread_id?: string;
+  id?: string | null;
+  thread_id?: string | null;
   run(prompt: string, opts: { sandbox: string }): Promise<unknown>;
 }
 
@@ -405,10 +405,11 @@ function sdkPrompt(
   return JSON.stringify(buildWakeContext(frame, channel, self, recent, charter, projectAgent, cliUpgrade), null, 2) + "\n";
 }
 
-function sdkThreadId(thread: ThreadLike): string {
+function sdkThreadId(thread: ThreadLike): string | null {
+  // codex-sdk 在 run() 之前 thread id 可能还是 null（懒初始化），不能直接抛
   if (typeof thread.id === "string") return thread.id;
   if (typeof thread.thread_id === "string") return thread.thread_id;
-  throw new Error("@openai/codex-sdk thread did not expose an id/thread_id");
+  return null;
 }
 
 async function defaultCodexFactory(): Promise<CodexLike> {
@@ -547,7 +548,7 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
     return codexPromise;
   };
 
-  const ensureThread = async (started: number): Promise<{ thread: ThreadLike; session: SdkWakeSessionState }> => {
+  const ensureThread = async (started: number): Promise<{ thread: ThreadLike; session: SdkWakeSessionState | null }> => {
     if (thread && session) return { thread, session };
     mkdirSync(opts.workdir, { recursive: true });
     const sessionPath = join(opts.workdir, RUNNER_SESSION_FILE);
@@ -560,14 +561,17 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
     }
     thread = await client.startThread();
     const threadId = sdkThreadId(thread);
-    session = {
-      harness: "codex-sdk",
-      thread_id: threadId,
-      created_at: started,
-      last_wake_ts: started,
-      wakes: 0,
-    };
-    writeSdkSession(sessionPath, session);
+    // thread id 懒初始化：拿不到就先不落 session 文件，等首个 run() 之后补写
+    session = threadId
+      ? {
+          harness: "codex-sdk",
+          thread_id: threadId,
+          created_at: started,
+          last_wake_ts: started,
+          wakes: 0,
+        }
+      : null;
+    if (session) writeSdkSession(sessionPath, session);
     return { thread, session };
   };
 
@@ -598,16 +602,25 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
     let threadId = session?.thread_id ?? null;
     try {
       const active = await ensureThread(started);
-      threadId = active.session.thread_id;
       const result = await active.thread.run(sdkPrompt(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null), {
         sandbox: opts.sandbox ?? "full_access",
       });
+      // run() 之后 thread id 一定就位；懒初始化的 session 在这里补建
+      threadId = active.session?.thread_id ?? sdkThreadId(active.thread);
+      if (!threadId) throw new Error("@openai/codex-sdk thread did not expose an id/thread_id after run");
       const body = finalText(result);
       const now = opts.now?.() ?? Date.now();
+      const baseSession = active.session ?? {
+        harness: "codex-sdk" as const,
+        thread_id: threadId,
+        created_at: started,
+        last_wake_ts: started,
+        wakes: 0,
+      };
       session = {
-        ...active.session,
+        ...baseSession,
         last_wake_ts: now,
-        wakes: active.session.wakes + 1,
+        wakes: baseSession.wakes + 1,
       };
       writeSdkSession(sessionPath, session);
       await post(opts.server, opts.token, opts.channel, {

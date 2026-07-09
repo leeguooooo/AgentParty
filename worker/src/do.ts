@@ -1,8 +1,6 @@
 // channel durable object — seq 分配 / 广播 / presence / 补拉 / 各类熔断 / webhook 投递 / temp 归档
 import {
   BODY_LIMIT,
-  LOOP_GUARD_AGENT_N,
-  LOOP_GUARD_AGENT_PARTY_N,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
   MAX_WEBHOOKS_PER_CHANNEL,
@@ -1322,6 +1320,17 @@ export class ChannelDO extends Server<Env> {
     if (completionReviewPolicy === "sender" || completionReviewPolicy === "owner") {
       this.setMeta("completion_review_policy", completionReviewPolicy);
     }
+    const loopGuardEnabled = h.get("x-ap-loop-guard-enabled");
+    if (loopGuardEnabled === "0" || loopGuardEnabled === "1") {
+      this.setMeta("loop_guard_enabled", loopGuardEnabled);
+      if (loopGuardEnabled === "0") this.deleteMeta("loop_guard_limit");
+    }
+    const rawLoopGuardLimit = h.get("x-ap-loop-guard-limit");
+    if (rawLoopGuardLimit === "") this.deleteMeta("loop_guard_limit");
+    const loopGuardLimit = Number(rawLoopGuardLimit ?? "");
+    if (Number.isInteger(loopGuardLimit) && loopGuardLimit > 0) {
+      this.setMeta("loop_guard_limit", String(Math.min(loopGuardLimit, 10_000)));
+    }
     const workflowGuardEnabled = h.get("x-ap-workflow-guard-enabled");
     if (workflowGuardEnabled === "0" || workflowGuardEnabled === "1") {
       this.setMeta("workflow_guard_enabled", workflowGuardEnabled);
@@ -2595,7 +2604,7 @@ export class ChannelDO extends Server<Env> {
   }
 
   private workflowGuardEnabled(): boolean {
-    return this.getMeta("workflow_guard_enabled") !== "0";
+    return this.getMeta("workflow_guard_enabled") === "1";
   }
 
   private workflowGuardLimit(): number {
@@ -2989,20 +2998,22 @@ export class ChannelDO extends Server<Env> {
   }
 
   private globalLoopGuardMessage(): string | null {
-    // loop guard 分档（spec §3）：party 频道放宽到 200，阈值按 meta 缓存的 mode 选
-    const guardLimit = this.getMeta("mode") === "party" ? LOOP_GUARD_PARTY_N : LOOP_GUARD_N;
+    if (this.getMeta("loop_guard_enabled") !== "1") return null;
+    const configured = Number(this.getMeta("loop_guard_limit") ?? "");
+    // 频道未显式配置 limit 时保留旧 normal/party 默认，便于手工修复旧 DO meta。
+    const guardLimit = Number.isInteger(configured) && configured > 0
+      ? Math.min(configured, 10_000)
+      : this.getMeta("mode") === "party"
+        ? LOOP_GUARD_PARTY_N
+        : LOOP_GUARD_N;
     return this.agentStreak() >= guardLimit
       ? `${guardLimit} consecutive agent messages, waiting for a human`
       : null;
   }
 
   private loopGuardMessage(agentName: string): string | null {
-    const global = this.globalLoopGuardMessage();
-    if (global !== null) return global;
-    const guardLimit = this.getMeta("mode") === "party" ? LOOP_GUARD_AGENT_PARTY_N : LOOP_GUARD_AGENT_N;
-    return this.agentCount(agentName) >= guardLimit
-      ? `${agentName} reached its ${guardLimit}-message fair-share budget since the last human message; another agent can continue, or a human/reset can clear it`
-      : null;
+    void agentName;
+    return this.globalLoopGuardMessage();
   }
 
   private clearLoopGuardState() {

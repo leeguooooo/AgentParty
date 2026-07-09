@@ -542,6 +542,10 @@ export function App() {
               token={token}
               mode={channels?.find((c) => c.slug === slug)?.mode ?? "normal"}
               isPublic={channels?.find((c) => c.slug === slug)?.visibility === "public"}
+              loopGuardEnabled={channels?.find((c) => c.slug === slug)?.loop_guard_enabled === 1}
+              loopGuardLimit={channels?.find((c) => c.slug === slug)?.loop_guard_limit ?? null}
+              workflowGuardEnabled={channels?.find((c) => c.slug === slug)?.workflow_guard_enabled === 1}
+              workflowGuardLimit={channels?.find((c) => c.slug === slug)?.workflow_guard_limit ?? 30}
               shareMode={isShareMode()}
               // 只有登录人类账号会话（非只读分享链接）才能铸 agent（worker 要求 role==="human"）
               canMintAgent={!isShareMode() && me?.role === "human"}

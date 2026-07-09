@@ -784,6 +784,36 @@ describe("codex-sdk runner", () => {
     });
   });
 
+  test("persists the thread id after the first run when the SDK fills it lazily", async () => {
+    const { post } = postRecorder();
+    const workdir = tempDir();
+    const thread: ThreadLike = {
+      id: null,
+      run: async () => {
+        thread.id = "thread_lazy_12345678";
+        return { finalResponse: "lazy answer" };
+      },
+    };
+
+    await sdkRunner({
+      workdir,
+      post,
+      codexFactory: () => ({
+        startThread: () => thread,
+        resumeThread: () => {
+          throw new Error("should not resume before first thread id is stored");
+        },
+      }),
+    })(triggerFrame(101), runnerCtx());
+
+    const state = JSON.parse(readFileSync(join(workdir, "wake-session.json"), "utf8"));
+    expect(state).toMatchObject({
+      harness: "codex-sdk",
+      thread_id: "thread_lazy_12345678",
+      wakes: 1,
+    });
+  });
+
   test("restart with an existing session resumes the stored thread id", async () => {
     const { post } = postRecorder();
     const workdir = tempDir();

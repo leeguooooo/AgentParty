@@ -2507,6 +2507,65 @@
   padding: 0;
 }
 
+.guard-settings {
+  display: grid;
+  gap: 12px;
+}
+.guard-setting-row {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1.6px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--t-panel);
+  box-shadow: 2px 2px 0 var(--d-shadow);
+}
+.guard-setting-head,
+.guard-setting-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.guard-setting-head {
+  justify-content: space-between;
+}
+.guard-setting-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.guard-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--t-dim);
+  font-size: 12px;
+}
+.guard-switch input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--t-accent);
+}
+.guard-limit-input {
+  width: 120px;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1.6px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: var(--t-text);
+  font: inherit;
+}
+.guard-limit-input:focus {
+  outline: none;
+  border-color: var(--t-accent);
+}
+.guard-setting-error {
+  margin: 0;
+  color: var(--t-red);
+  font-size: 12px;
+}
+
 /* 浮层：脱离 grid 流铺满视口（沿用抽屉遮罩修复的做法），居中放手绘卡 */
 .agent-join-overlay {
   position: fixed;

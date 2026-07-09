@@ -682,6 +682,32 @@ export async function setCompletionGate(
   })) as { gate: CompletionGate; policy: CompletionReviewPolicy };
 }
 
+export async function setLoopGuard(
+  server: string,
+  token: string,
+  slug: string,
+  body: { enabled: boolean; limit?: number },
+): Promise<{ enabled: boolean; limit: number | null }> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/loop-guard`, {
+    method: "PUT",
+    headers: bearerJson(token),
+    body: JSON.stringify(body),
+  })) as { enabled: boolean; limit: number | null };
+}
+
+export async function setWorkflowGuard(
+  server: string,
+  token: string,
+  slug: string,
+  body: { enabled: boolean; limit?: number },
+): Promise<{ enabled: boolean; limit: number | null }> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/workflow-guard`, {
+    method: "PUT",
+    headers: bearerJson(token),
+    body: JSON.stringify(body),
+  })) as { enabled: boolean; limit: number | null };
+}
+
 export async function setChannelVisibility(
   server: string,
   token: string,

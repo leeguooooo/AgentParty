@@ -167,6 +167,8 @@ const AP_FORWARD_HEADERS = [
   "x-ap-channel-kind",
   "x-ap-completion-gate",
   "x-ap-completion-review-policy",
+  "x-ap-loop-guard-enabled",
+  "x-ap-loop-guard-limit",
   "x-ap-workflow-guard-enabled",
   "x-ap-workflow-guard-limit",
   "x-ap-charter-rev",
@@ -755,7 +757,8 @@ async function loadChannel(db: D1Database, slug: string) {
   return db
     .prepare(
       `SELECT slug, kind, mode, archived_at, created_by, visibility, owner_account,
-              completion_gate, completion_review_policy, workflow_guard_enabled, workflow_guard_limit,
+              completion_gate, completion_review_policy, loop_guard_enabled, loop_guard_limit,
+              workflow_guard_enabled, workflow_guard_limit,
               charter, charter_rev, charter_updated_at, charter_updated_by
          FROM channels WHERE slug = ?`,
     )
@@ -770,6 +773,8 @@ async function loadChannel(db: D1Database, slug: string) {
       owner_account: string | null;
       completion_gate: string;
       completion_review_policy: string;
+      loop_guard_enabled: number;
+      loop_guard_limit: number | null;
       workflow_guard_enabled: number;
       workflow_guard_limit: number;
       charter: string | null;
@@ -858,6 +863,8 @@ function channelHeaders(
     mode: string;
     completion_gate?: string;
     completion_review_policy?: string;
+    loop_guard_enabled?: number;
+    loop_guard_limit?: number | null;
     workflow_guard_enabled?: number;
     workflow_guard_limit?: number;
     charter_rev?: number;
@@ -869,7 +876,9 @@ function channelHeaders(
     "x-ap-channel-kind": channel.kind,
     "x-ap-completion-gate": channel.completion_gate ?? "off",
     "x-ap-completion-review-policy": channel.completion_review_policy ?? "sender",
-    "x-ap-workflow-guard-enabled": String(channel.workflow_guard_enabled ?? 1),
+    "x-ap-loop-guard-enabled": String(channel.loop_guard_enabled ?? 0),
+    "x-ap-loop-guard-limit": channel.loop_guard_limit == null ? "" : String(channel.loop_guard_limit),
+    "x-ap-workflow-guard-enabled": String(channel.workflow_guard_enabled ?? 0),
     "x-ap-workflow-guard-limit": String(channel.workflow_guard_limit ?? 30),
     "x-ap-charter-rev": String(channel.charter_rev ?? 0),
     "x-ap-host": new URL(requestUrl).host,
@@ -1996,8 +2005,20 @@ app.get("/api/channels", async (c) => {
   const includeSummary = c.req.query("summary") === "1" || c.req.query("summary") === "true";
   // created_by / owner_account 仅用于 ACL 判定，不回给客户端（保持列表响应契约不变）
   const { results } = await c.env.DB.prepare(
-    "SELECT slug, title, topic, kind, mode, visibility, created_by, owner_account, created_at, archived_at, charter_rev FROM channels ORDER BY created_at, id",
-  ).all<{ slug: string; visibility: string; created_by: string | null; owner_account: string | null; charter_rev: number }>();
+    `SELECT slug, title, topic, kind, mode, visibility, created_by, owner_account, created_at, archived_at,
+            loop_guard_enabled, loop_guard_limit, workflow_guard_enabled, workflow_guard_limit, charter_rev
+       FROM channels ORDER BY created_at, id`,
+  ).all<{
+    slug: string;
+    visibility: string;
+    created_by: string | null;
+    owner_account: string | null;
+    charter_rev: number;
+    loop_guard_enabled: number;
+    loop_guard_limit: number | null;
+    workflow_guard_enabled: number;
+    workflow_guard_limit: number;
+  }>();
   // 防私有频道泄漏给粉丝（spec §5.5）：无权访问的私有频道连名字都不出现，summary 也不拉。
   // 账号房主 / 自己的 agent / scope 命中的 token / legacy token 照常看到对应私有频道。
   const memberSlugs =
@@ -2944,6 +2965,41 @@ app.put("/api/channels/:slug/completion-gate", async (c) => {
   return c.json({ gate, policy });
 });
 
+app.put("/api/channels/:slug/loop-guard", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!(await canConfigureChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "only channel moderators or hosts can configure loop guard"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const body = (await c.req.json().catch(() => null)) as { enabled?: unknown; limit?: unknown } | null;
+  if (typeof body?.enabled !== "boolean") {
+    return c.json(errorBody("bad_request", "enabled must be boolean"), 400);
+  }
+  const limit = body.enabled ? positiveInt(body.limit) : null;
+  if (body.enabled && (limit === null || limit > 10_000)) {
+    return c.json(errorBody("bad_request", "limit must be an integer between 1 and 10000"), 400);
+  }
+  const enabled = body.enabled ? 1 : 0;
+  await c.env.DB.prepare("UPDATE channels SET loop_guard_enabled = ?, loop_guard_limit = ? WHERE slug = ?")
+    .bind(enabled, limit, slug)
+    .run();
+  const updated = { ...channel, loop_guard_enabled: enabled, loop_guard_limit: limit };
+  await fetchChannelDO(
+    c.env,
+    slug,
+    new Request("https://do/internal/init", {
+      method: "POST",
+      headers: { "x-partykit-room": slug, ...channelHeaders(updated, c.req.url) },
+    }),
+  );
+  return c.json({ enabled: body.enabled, limit });
+});
+
 app.put("/api/channels/:slug/workflow-guard", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);
@@ -2959,15 +3015,20 @@ app.put("/api/channels/:slug/workflow-guard", async (c) => {
   if (typeof body?.enabled !== "boolean") {
     return c.json(errorBody("bad_request", "enabled must be boolean"), 400);
   }
-  const limit = body.limit === undefined ? channel.workflow_guard_limit : positiveInt(body.limit);
-  if (limit === null || limit > 1000) {
+  const limit = body.enabled
+    ? body.limit === undefined
+      ? channel.workflow_guard_limit
+      : positiveInt(body.limit)
+    : null;
+  if (body.enabled && (limit === null || limit > 1000)) {
     return c.json(errorBody("bad_request", "limit must be an integer between 1 and 1000"), 400);
   }
   const enabled = body.enabled ? 1 : 0;
+  const storedLimit = limit ?? channel.workflow_guard_limit;
   await c.env.DB.prepare("UPDATE channels SET workflow_guard_enabled = ?, workflow_guard_limit = ? WHERE slug = ?")
-    .bind(enabled, limit, slug)
+    .bind(enabled, storedLimit, slug)
     .run();
-  const updated = { ...channel, workflow_guard_enabled: enabled, workflow_guard_limit: limit };
+  const updated = { ...channel, workflow_guard_enabled: enabled, workflow_guard_limit: storedLimit };
   await fetchChannelDO(
     c.env,
     slug,
@@ -3383,6 +3444,8 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-channel-kind", channel.kind);
   fwd.headers.set("x-ap-completion-gate", channel.completion_gate);
   fwd.headers.set("x-ap-completion-review-policy", channel.completion_review_policy);
+  fwd.headers.set("x-ap-loop-guard-enabled", String(channel.loop_guard_enabled));
+  fwd.headers.set("x-ap-loop-guard-limit", channel.loop_guard_limit == null ? "" : String(channel.loop_guard_limit));
   fwd.headers.set("x-ap-workflow-guard-enabled", String(channel.workflow_guard_enabled));
   fwd.headers.set("x-ap-workflow-guard-limit", String(channel.workflow_guard_limit));
   fwd.headers.set("x-ap-charter-rev", String(channel.charter_rev ?? 0));

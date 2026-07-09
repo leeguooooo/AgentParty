@@ -53,9 +53,8 @@ describe("party mode", () => {
     expect(invalid.status).toBe(400);
   });
 
-  it("party channel: the 31st consecutive agent message passes, the 201st trips the guard", async () => {
+  it("party channel keeps accepting messages past the old loop guard thresholds", async () => {
     const { token } = await seedToken("agent");
-    const human = await seedToken("human");
     const slug = await createModeChannel(token, "party");
 
     // 首条消息让 do 缓存 mode=party
@@ -67,22 +66,15 @@ describe("party mode", () => {
 
     await seedStreak(slug, LOOP_GUARD_PARTY_N);
     const twoHundredFirst = await postMessage(slug, token, "201st in a row");
-    expect(twoHundredFirst.status).toBe(409);
-    const body = (await twoHundredFirst.json()) as { error: { code: string; message: string } };
-    expect(body.error.code).toBe("loop_guard");
-    expect(body.error.message).toContain(String(LOOP_GUARD_PARTY_N));
-
-    // 人类发言重置计数，agent 恢复发言
-    expect((await postMessage(slug, human.token, "humans joined the party")).status).toBe(200);
-    expect((await postMessage(slug, token, "back to it")).status).toBe(200);
+    expect(twoHundredFirst.status).toBe(200);
   });
 
-  it("normal channel still trips at the 31st consecutive agent message", async () => {
+  it("normal channel keeps accepting messages past the old loop guard threshold", async () => {
     const { token } = await seedToken("agent");
     const slug = await createModeChannel(token);
     expect((await postMessage(slug, token, "kickoff")).status).toBe(200);
     await seedStreak(slug, LOOP_GUARD_N);
-    const blocked = await postMessage(slug, token, "31st");
-    expect(blocked.status).toBe(409);
+    const allowed = await postMessage(slug, token, "31st");
+    expect(allowed.status).toBe(200);
   });
 });
