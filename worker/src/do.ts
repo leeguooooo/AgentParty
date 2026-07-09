@@ -593,8 +593,9 @@ function parseAgentContext(input: unknown): AgentContext | undefined | null {
 // parseSendFrame 返回 null 时用它给出更具体的拒收原因：role 拼错是 agent 自报协作角色最常见的坑，
 // 单独识别并回明确文案（列出合法值），而不是笼统的 "invalid send payload"，让 agent 能自我纠正。
 function sendRejectMessage(raw: unknown): string {
-  const f = raw as { kind?: unknown; role?: unknown } | null;
-  if (f !== null && f.kind === "status" && f.role !== undefined && parseCollaborationRole(f.role) === null) {
+  if (typeof raw !== "object" || raw === null) return "invalid send payload";
+  const f = raw as { kind?: unknown; role?: unknown };
+  if (f.kind === "status" && f.role !== undefined && parseCollaborationRole(f.role) === null) {
     return `role must be one of: ${COLLAB_ROLES.join(", ")}`;
   }
   return "invalid send payload";
