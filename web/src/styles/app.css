@@ -3524,3 +3524,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* 侧栏频道行内的 PUBLIC/PARTY 徽章：去戳章感（不旋转/无阴影/小字），别把频道名挤成省略号 */
+.chan-head .d-hl {
+  transform: none;
+  box-shadow: none;
+  font-size: 8.5px;
+  letter-spacing: 0.5px;
+  padding: 0 4px;
+  border-width: 1.4px;
+  flex: none;
+}
+.chan-head .chan-name { flex: 1; min-width: 0; }
