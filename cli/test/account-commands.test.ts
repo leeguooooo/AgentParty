@@ -309,6 +309,7 @@ describe("spawn", () => {
     expect(req?.auth).toBe("Bearer ap_parent");
     expect(req?.body).toEqual({ name: "child-bot", channel_scope: "ops", ttl_sec: 1800, team_id: "team.1" });
     expect(logs.join("\n")).toContain("ap_child-bot_secret");
+    expect(errs.join("\n")).toContain("give it to the worker");
     expect(errs.join("\n")).toContain("party init --server");
     expect(errs.join("\n")).toContain("--channel ops");
   });

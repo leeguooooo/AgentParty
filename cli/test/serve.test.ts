@@ -719,9 +719,16 @@ describe("project profile daemon", () => {
       { slug: "gamma", childName: projectAgentChildName("herness-dev", "gamma") },
     ]);
     expect(posts).toHaveLength(6);
-    expect(posts.filter((p) => (p.body as { kind: string }).kind === "status")).toHaveLength(3);
+    const statusPosts = posts.filter((p) => (p.body as { kind: string }).kind === "status");
+    const joinPosts = posts.filter((p) => (p.body as { kind: string }).kind === "message");
+    expect(statusPosts).toHaveLength(3);
+    expect(statusPosts.every((p) => (p.body as { role?: string }).role === "host")).toBe(true);
     expect(posts.every((p) => p.token.startsWith("ap_child_"))).toBe(true);
+    expect(String((posts[0]!.body as { note: string }).note)).toContain("front agent ready");
+    expect(String((posts[0]!.body as { note: string }).note)).toContain("team=herness-dev");
     expect(String((posts[0]!.body as { note: string }).note)).toContain("worktree=branch");
+    expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("front agent"))).toBe(true);
+    expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("workers should spawn under team herness-dev"))).toBe(true);
   });
 
   test("project-agent child names are stable and stay within the token name limit", () => {

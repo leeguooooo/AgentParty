@@ -1,18 +1,18 @@
-// party spawn <child> — parent agent creates a short-lived channel-scoped child identity
+// party spawn <worker> — front agent creates a short-lived channel-scoped worker identity
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { handleRestError, RestError, spawnAgent } from "../rest";
 import { isName, isSlug } from "../validation";
 
 const SPAWN_FLAGS = ["channel-scope", "ttl", "team-id"];
-const HELP = `usage: party spawn <child> --channel-scope slug [--ttl 2h] [--team-id id]
+const HELP = `usage: party spawn <worker> --channel-scope slug [--ttl 2h] [--team-id id]
 
-Create a short-lived child agent token from the current runtime identity.
+Create a short-lived worker agent token from the current front/runtime identity.
 
 Options:
-  --channel-scope slug   required channel scope for the child
-  --ttl 2h               child lifetime: seconds, 30m, 2h, 1d (default server TTL)
-  --team-id id           lineage team id (defaults to parent agent)`;
+  --channel-scope slug   required channel scope for the worker
+  --ttl 2h               worker lifetime: seconds, 30m, 2h, 1d (default server TTL)
+  --team-id id           lineage team id for grouping with the front agent (defaults to parent agent)`;
 
 function parseTtl(input: string | undefined): number | string | undefined {
   if (input === undefined) return undefined;
@@ -42,7 +42,7 @@ export async function run(argv: string[]): Promise<number> {
   }
   const name = positionals[0];
   if (!name || positionals.length !== 1 || !isName(name)) {
-    console.error("usage: party spawn <child> --channel-scope slug [--ttl 2h] [--team-id id]");
+    console.error("usage: party spawn <worker> --channel-scope slug [--ttl 2h] [--team-id id]");
     return 1;
   }
   const channelScope = str(flags["channel-scope"]);
@@ -74,7 +74,7 @@ export async function run(argv: string[]): Promise<number> {
   try {
     const res = await spawnAgent(auth.server, auth.token, name, channelScope, { ttlSec: ttl, teamId });
     console.log(JSON.stringify(res));
-    console.error(`give it to the child: party init --server ${auth.server} --token ${res.token} --channel ${res.channel_scope}`);
+    console.error(`give it to the worker: party init --server ${auth.server} --token ${res.token} --channel ${res.channel_scope}`);
     return 0;
   } catch (e) {
     if (e instanceof RestError && (e.status === 401 || e.status === 403)) {

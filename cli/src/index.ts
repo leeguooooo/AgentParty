@@ -15,7 +15,7 @@ commands:
   logout                                             clear account session
   whoami    [--json] [--caps]                         print current identity + capabilities (hits /api/me)
   agent     add <name> [--channel-scope slug] | create <handle> --runner codex|claude|codex-sdk|shell [--invitable-by owner|org|anyone] | list
-  spawn     <child> --channel-scope slug [--ttl 2h]  create a short-lived child agent from current agent
+  spawn     <worker> --channel-scope slug [--ttl 2h] create a short-lived worker from the front agent
   init      --server URL --token T [--channel C]   write config, bind channel (create if missing)
   send      <text|-> [--channel C] [--mention name]... [--reply-to seq]
   complete  <text|-> --kickoff-seq seq [--channel C] [--replies n] [--timeout] [--issue n]... [--pr n]...

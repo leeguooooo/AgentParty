@@ -907,7 +907,7 @@ export function projectAgentChildName(handle: string, channel: string): string {
 
 function profileReadyNote(profile: ProjectAgentProfile, channel: string, prepared: PreparedProfileWorkspace): string {
   const project = profile.repo_url ?? profile.workdir ?? "local";
-  return `project agent ready: ${profile.owner_account}/${profile.handle} channel=#${channel} project=${project} base=${profile.base_branch} worktree=${profile.worktree_strategy} cwd=${prepared.channelWorkdir}`;
+  return `front agent ready: ${profile.owner_account}/${profile.handle} channel=#${channel} team=${profile.handle} project=${project} base=${profile.base_branch} worktree=${profile.worktree_strategy} cwd=${prepared.channelWorkdir}`;
 }
 
 export async function runProfileServe(opts: ProfileServeOptions): Promise<number> {
@@ -955,6 +955,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
         await post(opts.server, child.token, channel, {
           kind: "status",
           state: "waiting",
+          role: "host",
           note,
           mentions: [],
           residency: "supervised",
@@ -966,7 +967,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
         });
         await post(opts.server, child.token, channel, {
           kind: "message",
-          body: `${profile.name || profile.handle} joined #${channel} as ${child.name}. ${note}`,
+          body: `${profile.name || profile.handle} joined #${channel} as front agent ${child.name}; workers should spawn under team ${profile.handle}. ${note}`,
           mentions: [],
           reply_to: null,
         });
