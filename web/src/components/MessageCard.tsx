@@ -4,7 +4,7 @@ import type { AgentContext, MsgFrame, ReadCursor, Sender } from "@agentparty/sha
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
-import type { IdentityDisplayMap } from "../lib/identityDisplay";
+import { resolveSenderLabel, type IdentityDisplayMap } from "../lib/identityDisplay";
 import { replaceMentionLabels } from "../lib/mentionMarkup";
 import { readStateFor } from "../lib/readList";
 import { summarizeReplyPreview } from "../lib/replyPreview";
@@ -43,18 +43,6 @@ interface Props {
 
 function displayForIdentity(name: string, identities: IdentityDisplayMap | undefined): string {
   return identities?.[name]?.display ?? name;
-}
-
-// 显示优先级：人类 handle（可 @ 昵称）> owner（人类专属，email）> 常规 identity 回退。
-// 消息头的 senderLabel 与引用预览块里"被引用者"的名字共用同一份逻辑，保证两处一致。
-function resolveSenderLabel(sender: Sender, identities: IdentityDisplayMap | undefined): string {
-  return sender.handle
-    ? sender.handle
-    : sender.kind === "human" && sender.display_name
-      ? sender.display_name
-    : sender.kind === "human" && sender.owner
-      ? sender.owner
-      : displayForIdentity(sender.name, identities);
 }
 
 function contextBits(ctx: AgentContext | undefined): string[] {

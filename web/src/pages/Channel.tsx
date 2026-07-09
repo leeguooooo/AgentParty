@@ -1450,7 +1450,7 @@ export function ChannelPage({
                 ...cur,
                 {
                   seq: frame.seq,
-                  sender: frame.sender.handle != null ? `@${frame.sender.handle}` : frame.sender.name,
+                  sender: frame.sender, // 存原始 sender，渲染时用 resolveSenderLabel 解析，与消息卡显示保持一致
                   body: summarizeReplyPreview(frame.body),
                 },
               ].slice(-3),
@@ -2204,7 +2204,13 @@ export function ChannelPage({
 
   return (
     <div className="chan">
-      <MentionToast items={toasts} channel={slug} onJump={jumpToMention} onDismiss={dismissToast} />
+      <MentionToast
+        items={toasts}
+        channel={slug}
+        identityDisplay={identityDisplay}
+        onJump={jumpToMention}
+        onDismiss={dismissToast}
+      />
       <PresenceBar
         presence={state.presence}
         participants={state.participants}
