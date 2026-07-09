@@ -464,6 +464,18 @@ export function PresenceBar({
         <div className="presence-meta" aria-label="channel presence summary">
           {isPublic && <span className="d-hl public-badge">PUBLIC</span>}
           {party && <span className="d-hl party-badge">PARTY</span>}
+          <button
+            type="button"
+            className="presence-toggle"
+            aria-expanded={expanded}
+            aria-label={t(expanded ? "PresenceBar.collapse" : "PresenceBar.expand")}
+            onClick={toggleExpanded}
+          >
+            <span className="t-mono presence-summary">
+              {liveGroups}/{totalGroups} live
+            </span>
+            <span className="presence-toggle-arrow" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+          </button>
           {blockedCount > 0 && <span className="t-mono presence-alert">{blockedCount} blocked</span>}
           {duplicateCount > 0 && <span className="t-mono presence-alert presence-alert--duplicate">{duplicateCount} duplicate</span>}
           {items.length === 0 && (
@@ -476,18 +488,6 @@ export function PresenceBar({
           {status === "open" ? "● live" : `◌ ${status}…`}
         </span>
       </div>
-      <button
-        type="button"
-        className="presence-toggle"
-        aria-expanded={expanded}
-        aria-label={t(expanded ? "PresenceBar.collapse" : "PresenceBar.expand")}
-        onClick={toggleExpanded}
-      >
-        <span className="t-mono presence-summary">
-          {liveGroups}/{totalGroups} live
-        </span>
-        <span className="presence-toggle-arrow" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
-      </button>
       {expanded && (
         <div className="presence-strip" aria-label="participant groups by owner">
           {sortedGroups.map((group) => renderGroup(group, "compact"))}

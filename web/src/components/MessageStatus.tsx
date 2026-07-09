@@ -11,12 +11,12 @@ import { fmtTime } from "../lib/time";
 import type { MentionReceipt, ReceiptState } from "../lib/wakeReceipt";
 
 const RECEIPT_ICON: Record<ReceiptState, string> = {
-  replied: "✓",
-  woke: "✓",
-  wake_failed: "⚠",
-  delivered: "●",
-  pending_wake: "◐",
-  pending_reconnect: "⏳",
+  replied: "ok",
+  woke: "ok",
+  wake_failed: "!",
+  delivered: "on",
+  pending_wake: "...",
+  pending_reconnect: "...",
 };
 
 interface Props {
@@ -26,8 +26,8 @@ interface Props {
   display: (name: string) => string;
 }
 
-function kindDot(kind: "agent" | "human" | undefined): string {
-  return kind === "human" ? "🧑" : "🤖";
+function kindLabel(kind: "agent" | "human" | undefined): string {
+  return kind === "human" ? "H" : "A";
 }
 
 export function MessageStatus({ receipts, readers, unread, display }: Props) {
@@ -78,7 +78,10 @@ export function MessageStatus({ receipts, readers, unread, display }: Props) {
               <ul className="msg-status-names">
                 {readers.map((e) => (
                   <li key={e.name} className="msg-status-name">
-                    <span aria-hidden="true">{kindDot(e.kind)}</span> <span className="t-mono">{display(e.name)}</span>
+                    <span className={`msg-status-kind msg-status-kind--${e.kind ?? "agent"}`} aria-hidden="true">
+                      {kindLabel(e.kind)}
+                    </span>{" "}
+                    <span className="t-mono">{display(e.name)}</span>
                   </li>
                 ))}
               </ul>
@@ -90,7 +93,10 @@ export function MessageStatus({ receipts, readers, unread, display }: Props) {
               <ul className="msg-status-names">
                 {unread.map((e) => (
                   <li key={e.name} className="msg-status-name msg-status-name--unread">
-                    <span aria-hidden="true">{kindDot(e.kind)}</span> <span className="t-mono">{display(e.name)}</span>
+                    <span className={`msg-status-kind msg-status-kind--${e.kind ?? "agent"}`} aria-hidden="true">
+                      {kindLabel(e.kind)}
+                    </span>{" "}
+                    <span className="t-mono">{display(e.name)}</span>
                   </li>
                 ))}
               </ul>
