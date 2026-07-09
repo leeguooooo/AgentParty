@@ -5,6 +5,7 @@ import { loadCursor, resolveChannel } from "../config";
 import { jsonFrame, nowTs } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { RestError, fetchMe, fetchMessages, fetchWakeDeliveries, handleRestError } from "../rest";
+import { lastMessageFromFrame, localStatuslineBase, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { isName, isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 
 const DIGEST_FLAGS = ["channel", "since", "limit", "for", "json"];
@@ -283,6 +284,12 @@ export async function run(argv: string[]): Promise<number> {
     const statuses = summarizeStatuses(messages);
     const mentions = summarizeMentions(messages, viewer, latestWakeDeliveries(deliveries));
     const lastSeq = messages.reduce((max, m) => Math.max(max, m.seq), sinceSeq);
+    const lastMessage = messages.reduce<MsgFrame | null>((latest, m) => (latest === null || m.seq > latest.seq ? m : latest), null);
+    writeStatuslineCache({
+      ...localStatuslineBase(channel),
+      unread: unreadFromCursor(lastSeq, channel),
+      ...(lastMessage === null ? {} : { last_message: lastMessageFromFrame(lastMessage) }),
+    });
     const frame = {
       type: "digest",
       channel,

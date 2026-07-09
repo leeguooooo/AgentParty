@@ -4,7 +4,8 @@ import { isHelpArg, parseArgs, unknownFlagError } from "../args";
 import { handleRestError, fetchMe, RestError } from "../rest";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { jsonFrame, nowTs } from "../json";
-import { resolveChannel } from "../config";
+import { readConfig, resolveChannel, writeConfig } from "../config";
+import { cachedIdentity, statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
 
 const WHOAMI_FLAGS = ["json", "caps", "rejoin"];
 const HELP = `usage: party whoami [--json] [--caps] [--rejoin]
@@ -67,6 +68,13 @@ export async function run(argv: string[]): Promise<number> {
   try {
     const me = await fetchMe(auth.server, auth.token);
     const boundChannel = resolveChannel() ?? null;
+    const local = readConfig();
+    if (local?.token) writeConfig({ ...local, identity: cachedIdentity(me) });
+    writeStatuslineCache({
+      ...(boundChannel === null ? {} : { channel: boundChannel }),
+      server: auth.server,
+      identity: statuslineIdentity(me),
+    });
     const rejoinInfo =
       rejoin
         ? {

@@ -3,6 +3,7 @@ import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../
 import { readConfig, resolveChannel, writeConfig, type CachedIdentity } from "../config";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, type Identity } from "../rest";
+import { cachedIdentity, statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
 import { isSlug } from "../validation";
 
 const STATUSLINE_FLAGS = ["channel", "refresh", "no-network"];
@@ -14,18 +15,6 @@ Options:
   --channel C    show channel C instead of the bound channel
   --refresh      verify /api/me and update the local cached identity
   --no-network   only use the local identity cache`;
-
-function cacheIdentity(me: Identity): CachedIdentity {
-  return {
-    name: me.name,
-    email: me.email,
-    kind: me.kind,
-    role: me.role,
-    owner: me.owner,
-    channel_scope: me.channel_scope ?? null,
-    verified_at: Date.now(),
-  };
-}
 
 function identityLabel(id: CachedIdentity | Identity): string {
   return id.kind === "agent" ? id.name : id.email ?? id.name;
@@ -78,7 +67,12 @@ export async function run(argv: string[]): Promise<number> {
       const me = await fetchMeWithTimeout(auth.server, auth.token);
       if (me !== null) {
         identity = me;
-        if (local?.token) writeConfig({ ...local, identity: cacheIdentity(me) });
+        if (local?.token) writeConfig({ ...local, identity: cachedIdentity(me) });
+        writeStatuslineCache({
+          ...(channel === null ? {} : { channel }),
+          server: auth.server,
+          identity: statuslineIdentity(me),
+        });
       }
     }
   }

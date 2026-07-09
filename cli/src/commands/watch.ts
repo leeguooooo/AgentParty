@@ -7,6 +7,14 @@ import { resolveAuth } from "../oidc-cli";
 import { formatMsg } from "../format";
 import { MAX_TIMEOUT_SEC, isSlug, parsePositiveIntFlag } from "../validation";
 import { jsonFrame, nowTs } from "../json";
+import {
+  clearStatuslineListener,
+  heartbeatPatch,
+  lastMessageFromFrame,
+  localStatuslineBase,
+  unreadFromCursor,
+  writeStatuslineCache,
+} from "../statusline-cache";
 
 const WATCH_FLAGS = ["channel", "timeout", "follow", "once", "mentions-only", "exclude-self", "json"];
 const HELP = `usage: party watch [channel|--channel C] [--timeout N] [--mentions-only] [--exclude-self] [--follow|--once] [--json]
@@ -44,6 +52,7 @@ export interface WatchOptions {
   onRevCursor?: (revCursor: number) => void;
   out?: (line: string) => void;
   backoffBaseMs?: number;
+  statusline?: boolean;
 }
 
 export function resolveWatchTimeoutSec(timeout: number | undefined, indefinite: boolean): number {
@@ -79,6 +88,13 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       if (frame.type === "welcome") {
         self = frame.self;
         lastSeq = frame.last_seq;
+        if (o.statusline === true) {
+          writeStatuslineCache({
+            ...localStatuslineBase(o.channel),
+            ...heartbeatPatch("watch"),
+            unread: unreadFromCursor(lastSeq, o.channel),
+          });
+        }
         continue;
       }
       if (frame.type === "error") {
@@ -105,6 +121,15 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       const fresh = msg.seq > conn.cursor;
       // 打印（或有意跳过）之后才推进游标，退出时入队未消费的消息留给下次补拉
       if (msg.seq > 0) conn.ack(msg.seq);
+      if (o.statusline === true) {
+        const latestSeq = Math.max(lastSeq, msg.seq);
+        writeStatuslineCache({
+          ...localStatuslineBase(o.channel),
+          ...heartbeatPatch("watch"),
+          unread: unreadFromCursor(latestSeq, o.channel),
+          last_message: lastMessageFromFrame(msg),
+        });
+      }
       // watch --follow 是流式在读整个频道：把已读游标回给服务端，agent 的已读状态因此成立（Phase 2）。
       // 只在 follow 下发；--once / 非 follow 是「查有没有 @ 我再退」的事件驱动路径，不算逐条已读，
       // 其送达/唤醒由 wake 回执表达（不假装 agent 逐条读了频道）。只对游标之上的新消息发。
@@ -120,6 +145,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
   } finally {
     if (timer) clearTimeout(timer);
     conn.close();
+    if (o.statusline === true) clearStatuslineListener();
   }
 
   // 超时判定：--once 只有 onceDone 才算被唤醒（打印过重放的修订快照不算）；
@@ -195,5 +221,6 @@ export async function run(argv: string[]): Promise<number> {
     json: flags.json === true,
     onCursor: (c) => saveCursor(channel, c),
     onRevCursor: (r) => saveRevCursor(channel, r),
+    statusline: true,
   });
 }

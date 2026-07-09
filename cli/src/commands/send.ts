@@ -4,6 +4,7 @@ import { resolveChannel, saveCursor, type Config } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, fetchPresence, handleRestError, postMessage } from "../rest";
 import { formatReachLine, reachOf } from "../reach";
+import { localStatuslineBase, statuslinePreview, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
 export const sendSpec = { repeatable: ["mention"], booleans: ["debug-auth", "reach", "no-reach"] };
@@ -114,10 +115,23 @@ export async function doSend(cfg: Config, input: SendInput): Promise<number | { 
       reply_to: input.replyTo,
     });
     saveCursor(input.channel, seq);
+    writeStatuslineCache({
+      ...localStatuslineBase(input.channel),
+      unread: unreadFromCursor(seq, input.channel),
+      last_message: {
+        from: readLocalIdentityName(cfg) ?? "me",
+        ts: Date.now(),
+        preview: statuslinePreview(input.body),
+      },
+    });
     return { seq };
   } catch (e) {
     return handleRestError(e);
   }
+}
+
+function readLocalIdentityName(cfg: Config): string | null {
+  return cfg.identity?.name ?? null;
 }
 
 export async function run(argv: string[]): Promise<number> {

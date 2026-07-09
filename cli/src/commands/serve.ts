@@ -21,6 +21,14 @@ import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } 
 import { formatMsg } from "../format";
 import { ensureFreshAccess, resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import {
+  clearStatuslineListener,
+  heartbeatPatch,
+  lastMessageFromFrame,
+  localStatuslineBase,
+  unreadFromCursor,
+  writeStatuslineCache,
+} from "../statusline-cache";
+import {
   fetchChannelCharter,
   ensureProjectAgentChannelRuntime,
   listProjectAgentInvites,
@@ -226,6 +234,7 @@ export interface ServeOptions {
   autoUpgrade?: boolean;
   upgradeDeps?: UpgradeDeps; // 测试注入版本读取/re-exec
   out?: (line: string) => void;
+  statusline?: boolean;
 }
 
 // serve 一挂上就把 presence 标成可唤醒：residency=supervised + wake.kind=serve。
@@ -994,6 +1003,13 @@ export async function runServe(o: ServeOptions): Promise<number> {
     for await (const frame of conn.frames) {
       if (frame.type === "welcome") {
         self = frame.self;
+        if (o.statusline === true) {
+          writeStatuslineCache({
+            ...localStatuslineBase(o.channel),
+            ...heartbeatPatch("serve"),
+            unread: unreadFromCursor(frame.last_seq, o.channel),
+          });
+        }
         if (typeof frame.charter_rev === "number") await refreshCharter("welcome", frame.charter_rev);
         // 挂上即声明可唤醒（best-effort，只做一次；重连再收 welcome 不重复刷）
         if (!advertised) {
@@ -1044,6 +1060,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
       if (recent.length > RECENT_MAX) recent.shift();
       // 处理（或跳过）后才推进游标，退出时未消费的留给下次补拉
       conn.ack(frame.seq);
+      if (o.statusline === true) {
+        writeStatuslineCache({
+          ...localStatuslineBase(o.channel),
+          ...heartbeatPatch("serve"),
+          unread: unreadFromCursor(frame.seq, o.channel),
+          last_message: lastMessageFromFrame(frame),
+        });
+      }
 
       // 唤醒间隙的安全点：磁盘上的 party 二进制被 install.sh 换新了吗（issue #45）？
       // 此刻上一轮已 ack、游标已落盘、无进行中的 runner——re-exec 干净。--auto-upgrade 直接换，
@@ -1061,6 +1085,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
     }
   } finally {
     conn.close();
+    if (o.statusline === true) clearStatuslineListener();
   }
   if (upgraded) return EXIT_UPGRADED;
   // 帧流意外结束（既非终局 error 也非用户 Ctrl-C）：常驻 supervisor 语义下这是异常终止。
@@ -1171,6 +1196,7 @@ export async function run(argv: string[]): Promise<number> {
     advertise: () => advertiseServeWake(auth, channel),
     fetchCharter: () => fetchChannelCharter(server, token, channel),
     autoUpgrade: flags["auto-upgrade"] === true,
+    statusline: true,
     builtinRunner: harness
       ? {
           server,

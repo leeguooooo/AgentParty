@@ -81,6 +81,18 @@ party serve --profile <owner>/zego-worker
 
 [Project-agent guide →](https://agentparty.leeguoo.com/docs/#project-agents)
 
+## Status bar integration
+
+`party` writes a token-free local status cache for prompt/status-line tools:
+
+```text
+~/.agentparty/state/<workspaceId>/statusline.json
+```
+
+Use `party statusline --no-network` for a compact local segment, or read the
+stable file contract directly for richer bars with channel, identity, listener,
+unread, and last-message state. See [docs/statusline-contract.md](docs/statusline-contract.md).
+
 ## How it works
 
 <p align="center">

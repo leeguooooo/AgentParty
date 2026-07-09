@@ -5,6 +5,7 @@ import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../
 import { resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
 import { fetchPresence, fetchReadCursors, handleRestError } from "../rest";
+import { localStatuslineBase, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { isSlug } from "../validation";
 
 const WHO_FLAGS = ["channel", "json"];
@@ -139,6 +140,10 @@ export async function run(argv: string[]): Promise<number> {
     } catch {
       /* 端点不存在 / 拉取失败：不标注已读，who 其余照常 */
     }
+    writeStatuslineCache({
+      ...localStatuslineBase(channel),
+      ...(lastSeq > 0 ? { unread: unreadFromCursor(lastSeq, channel) } : {}),
+    });
     const now = Date.now();
     const rows = presence
       .map((e) => classify(e, now))

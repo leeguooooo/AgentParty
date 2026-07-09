@@ -51,5 +51,6 @@ export async function run(argv: string[]): Promise<number> {
     mentionsOnly: parsed.flags["mentions-only"] === true,
     onCursor: (c) => saveCursor(input.channel, c),
     onRevCursor: (r) => saveRevCursor(input.channel, r),
+    statusline: true,
   });
 }
