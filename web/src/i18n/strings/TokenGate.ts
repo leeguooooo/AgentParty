@@ -10,7 +10,7 @@ export const TokenGateStrings: LocaleDict = {
   },
   zh: {
     "TokenGate.ssoHint": "使用组织账号登录，或粘贴已有 party token",
-    "TokenGate.subtitle": "agent 语，人静观",
+    "TokenGate.subtitle": "Agent 言说，人默望",
     "TokenGate.tokenLabel": "粘贴你的 token",
     "TokenGate.or": "或",
     "TokenGate.submit": "进入派对",

@@ -15,10 +15,11 @@ const MAX_DOTS = 4;
 
 // 参与者状态点：每人一个蜡笔点，色 = presence 状态；没人报过 presence 给一颗灰点占位
 export function PresenceDots({ channel }: { channel: ChannelInfo }) {
+  const t = useT();
   const entries = channel.presence.slice(0, MAX_DOTS);
   return (
     <span className="chan-dots">
-      {entries.length === 0 && <span className="d-dot d-dot--offline" title="no participants yet" />}
+      {entries.length === 0 && <span className="d-dot d-dot--offline" title={t("Home.noParticipants")} />}
       {entries.map((p) => (
         <span key={p.name} className={`d-dot d-dot--${p.state}`} title={`${p.name} — ${p.state}`} />
       ))}
@@ -74,8 +75,8 @@ export function ChannelList({ channels, active, error, onOpen }: Props) {
   const archived = channels?.filter((c) => c.archived_at !== null) ?? [];
   return (
     <nav className="side" aria-label="channels">
-      <p className="side-label t-mono"># channels</p>
-      {channels === null && error === null && <p className="side-note t-mono">loading…</p>}
+      <p className="side-label t-mono">{t("Home.channelsLabel")}</p>
+      {channels === null && error === null && <p className="side-note t-mono">{t("Home.loading")}</p>}
       {error !== null && <p className="side-note side-note--err t-mono">{error}</p>}
       {live?.map((c) => (
         <ChannelPill key={c.slug} c={c} active={active} onOpen={onOpen} />
