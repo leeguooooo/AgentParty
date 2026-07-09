@@ -20,7 +20,7 @@ interface Props {
   roles?: ChannelRoleAssignment[];
 }
 
-interface Item {
+export interface Item {
   name: string;
   kind: Sender["kind"];
   state: PresenceState | "online"; // "online" = 已连接但还没报过 status
@@ -36,13 +36,14 @@ interface Item {
   lineage: NonNullable<PresenceEntry["lineage"]> | null;
   workflow: NonNullable<NonNullable<PresenceEntry["status"]>["workflow"]> | null;
   owner: string | null; // 所属人：agent 的操作者 / 人类的 email，仅连接中的参与者可知
+  account: string | null; // 分组锚点：与 owner 同源，但离线也保留（owner 离线出于隐私置空，account 不受影响）
   handle: string | null; // 人类全局昵称，仅人类且已设置时有值；agent 恒为 null，天然回退 owner/name
   display: string;
   responsibility: string | null;
   connectionCount: number;
 }
 
-interface PresenceGroup {
+export interface PresenceGroup {
   key: string;
   label: string;
   human: Item | null;
@@ -102,8 +103,10 @@ function presenceRank(item: Item, now: number): number {
   return 5;
 }
 
-function ownerKey(item: Item): string {
-  if (item.owner !== null && item.owner !== "") return `owner:${item.owner}`;
+// 分组锚点用 account（在线/离线都可得），不用 owner（离线出于隐私置空）——
+// 否则同一个人离线时的会话会因 owner 缺失而各自单独成组，撑大人数统计。
+export function ownerKey(item: Item): string {
+  if (item.account !== null && item.account !== "") return `account:${item.account}`;
   return `${item.kind}:${item.name}`;
 }
 
@@ -112,6 +115,43 @@ function ownerLabel(item: Item): string {
   if (item.handle !== null && item.handle !== "") return item.handle;
   if (item.owner !== null && item.owner !== "") return item.owner;
   return item.name;
+}
+
+// 把已构造好的 Item 列表按账号折叠成组；在线/离线同账号归一组，label 走「人类优先」的 representative。
+export function buildGroups(items: Item[]): PresenceGroup[] {
+  const groupMap = new Map<string, PresenceGroup>();
+  for (const item of items) {
+    const key = ownerKey(item);
+    const existing = groupMap.get(key);
+    const group =
+      existing ??
+      ({
+        key,
+        label: ownerLabel(item),
+        human: null,
+        agents: [],
+        items: [],
+      } satisfies PresenceGroup);
+    group.items.push(item);
+    if (item.kind === "human" && group.human === null) group.human = item;
+    else group.agents.push(item);
+    groupMap.set(key, group);
+  }
+  // label 初值取自分组时第一个遇到的成员，但 handle 只可能来自人类成员——
+  // 若同一账号下 agent 先于人类出现在传入顺序里，初值会漏掉 handle。
+  // 分组结束后统一用「人类优先」的 representative 重算，和 renderGroup 里的口径保持一致、且与遍历顺序无关。
+  for (const group of groupMap.values()) {
+    group.label = ownerLabel(group.human ?? group.items[0]!);
+  }
+  return [...groupMap.values()];
+}
+
+// 顶部 "X/Y live" 计数：按账号折叠后的人数，而非会话行数——一个账号哪怕开多个离线会话也只算一个人。
+export function countLiveGroups(groups: PresenceGroup[]): { live: number; total: number } {
+  return {
+    total: groups.length,
+    live: groups.filter((g) => g.items.some((it) => it.state !== "offline")).length,
+  };
 }
 
 function groupRank(group: PresenceGroup, now: number): number {
@@ -168,6 +208,8 @@ export function PresenceBar({
     if (!connected) {
       // owner 本就仅连接中的参与者可知（见上方字段注释）；handle 依赖同一份可信度，一并置空，
       // 避免"显示 handle 但锚点缺失"的半可信状态——离线态照旧回退原始 name，行为与改动前一致。
+      // account 不受此限制：它只用于分组锚点、不直接展示，离线也照样保留，
+      // 否则同一账号的离线会话会各自单独成组，撑大顶部人数统计。
       return {
         name,
         kind,
@@ -175,41 +217,18 @@ export function PresenceBar({
         note: null,
         ts: entry?.ts ?? null,
         owner: null,
+        account: owner,
         handle: null,
         ...meta,
         display: assigned?.display ?? name,
       };
     }
     if (entry && entry.state !== "offline") {
-      return { name, kind, state: entry.state, note: entry.note, ts: entry.ts, owner, handle, ...meta };
+      return { name, kind, state: entry.state, note: entry.note, ts: entry.ts, owner, account: owner, handle, ...meta };
     }
-    return { name, kind, state: "online", note: null, ts: entry?.ts ?? null, owner, handle, ...meta };
+    return { name, kind, state: "online", note: null, ts: entry?.ts ?? null, owner, account: owner, handle, ...meta };
   });
-  const groupMap = new Map<string, PresenceGroup>();
-  for (const item of items) {
-    const key = ownerKey(item);
-    const existing = groupMap.get(key);
-    const group =
-      existing ??
-      ({
-        key,
-        label: ownerLabel(item),
-        human: null,
-        agents: [],
-        items: [],
-      } satisfies PresenceGroup);
-    group.items.push(item);
-    if (item.kind === "human" && group.human === null) group.human = item;
-    else group.agents.push(item);
-    groupMap.set(key, group);
-  }
-  // label 初值取自分组时第一个遇到的成员，但 handle 只可能来自人类成员——
-  // 若同一账号下 agent 先于人类出现在 names 排序里，初值会漏掉 handle。
-  // 分组结束后统一用「人类优先」的 representative 重算，和 renderGroup 里的口径保持一致、且与遍历顺序无关。
-  for (const group of groupMap.values()) {
-    group.label = ownerLabel(group.human ?? group.items[0]!);
-  }
-  const sortedGroups = [...groupMap.values()].sort((a, b) => {
+  const sortedGroups = buildGroups(items).sort((a, b) => {
     const rank = groupRank(a, now) - groupRank(b, now);
     if (rank !== 0) return rank;
     return a.label.localeCompare(b.label);
@@ -217,7 +236,8 @@ export function PresenceBar({
   const [hoveredGroup, setHoveredGroup] = useState<{ key: string; left: number; top: number; width: number } | null>(null);
   const visibleGroups = sortedGroups.slice(0, 4);
   const overflowGroups = sortedGroups.slice(4);
-  const liveCount = items.filter((it) => it.state !== "offline").length;
+  // 顶部计数按账号折叠后的人数（非会话行数）——离线会话已在 buildGroups 里按 account 归并。
+  const { live: liveGroups, total: totalGroups } = countLiveGroups(sortedGroups);
   const blockedCount = items.filter((it) => it.state === "blocked").length;
   const duplicateCount = items.filter((it) => it.connectionCount > 1).length;
   const activePopoverGroup = hoveredGroup === null ? null : sortedGroups.find((group) => group.key === hoveredGroup.key) ?? null;
@@ -401,7 +421,7 @@ export function PresenceBar({
         {isPublic && <span className="d-hl public-badge">PUBLIC</span>}
         {party && <span className="d-hl party-badge">PARTY</span>}
         <span className="t-mono presence-summary">
-          {liveCount}/{items.length} live
+          {liveGroups}/{totalGroups} live
         </span>
         {blockedCount > 0 && <span className="t-mono presence-alert">{blockedCount} blocked</span>}
         {duplicateCount > 0 && <span className="t-mono presence-alert presence-alert--duplicate">{duplicateCount} duplicate</span>}
