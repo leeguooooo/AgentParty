@@ -3724,7 +3724,7 @@
 .chan-head .chan-name { flex: 1; min-width: 0; }
 
 /* 分工面板：agent 自报引导（折叠提示） */
-.role-selfhint { margin: 0 0 10px; }
+.role-selfhint { margin: 0; }
 .role-selfhint-toggle {
   display: inline-flex;
   align-items: center;
@@ -3764,7 +3764,7 @@
   overflow-x: auto;
   white-space: pre;
   padding: 8px 10px;
-  background: var(--t-code-bg, var(--t-panel2));
+  background: var(--t-panel2);
   border: 1.4px solid var(--t-border);
   border-radius: 0;
   font-size: 12px;
