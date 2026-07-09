@@ -11,12 +11,12 @@ import { fmtTime } from "../lib/time";
 import type { MentionReceipt, ReceiptState } from "../lib/wakeReceipt";
 
 const RECEIPT_ICON: Record<ReceiptState, string> = {
-  replied: "ok",
-  woke: "ok",
-  wake_failed: "!",
-  delivered: "on",
-  pending_wake: "...",
-  pending_reconnect: "...",
+  replied: "success",
+  woke: "success",
+  wake_failed: "failed",
+  delivered: "success",
+  pending_wake: "waiting",
+  pending_reconnect: "waiting",
 };
 
 interface Props {
@@ -53,7 +53,9 @@ export function MessageStatus({ receipts, readers, unread, display }: Props) {
             aria-expanded={open}
             onClick={() => setOpen((v) => !v)}
           >
-            <span className="msg-status-read">✓ {t("WakeReceipt.read.read", { n: readers.length })}</span>
+            <span className="msg-status-read">
+              <span className="ap-sprite ap-sprite--success" aria-hidden="true" /> {t("WakeReceipt.read.read", { n: readers.length })}
+            </span>
             {unread.length > 0 && (
               <span className="msg-status-unread"> · {t("WakeReceipt.read.unread", { n: unread.length })}</span>
             )}
@@ -62,7 +64,7 @@ export function MessageStatus({ receipts, readers, unread, display }: Props) {
         )}
         {receipts.map((r) => (
           <span key={r.name} className={`msg-receipt msg-receipt--${r.state}`} title={receiptTitle(r)}>
-            <span className="msg-receipt-icon" aria-hidden="true">{RECEIPT_ICON[r.state]}</span>
+            <span className={`msg-receipt-icon ap-sprite ap-sprite--${RECEIPT_ICON[r.state]}`} aria-hidden="true" />
             <span className="msg-receipt-name t-mono">@{display(r.name)}</span>
             <span className="msg-receipt-label">{receiptText(r)}</span>
           </span>
@@ -109,7 +111,7 @@ export function MessageStatus({ receipts, readers, unread, display }: Props) {
               <ul className="msg-status-names">
                 {receipts.map((r) => (
                   <li key={r.name} className={`msg-status-name msg-receipt--${r.state}`} title={receiptTitle(r)}>
-                    <span className="msg-receipt-icon" aria-hidden="true">{RECEIPT_ICON[r.state]}</span>{" "}
+                    <span className={`msg-receipt-icon ap-sprite ap-sprite--${RECEIPT_ICON[r.state]}`} aria-hidden="true" />{" "}
                     <span className="t-mono">@{display(r.name)}</span>
                     <span className="msg-status-name-state"> — {receiptText(r)}</span>
                   </li>

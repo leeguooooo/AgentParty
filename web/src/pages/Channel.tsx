@@ -2223,11 +2223,6 @@ export function ChannelPage({
         onRemoveParticipant={removeParticipant}
         roles={channelRoles}
       />
-      {/* 被@浏览器通知铃铛：与「能否铸 agent / 能否 moderate」无关，任何登录人类账号都能开关，
-          所以单独一条工具条，不挂在下面 canMintAgent/canModerate 才渲染的 chan-toolbar 里。 */}
-      <div className="chan-toolbar chan-toolbar--notify">
-        <NotifyToggle optin={optin} onChange={setOptin} />
-      </div>
       {kickError !== null && <p className="banner banner--red">{kickError}</p>}
       {archiveError !== null && <p className="banner banner--red">{archiveError}</p>}
       <div className="chan-toolstrip" aria-label={t("Channel.tools.label")}>
@@ -2237,30 +2232,36 @@ export function ChannelPage({
             className={"d-btn chan-tool-btn" + (charterUpdated ? " chan-tool-btn--updated" : "")}
             onClick={() => openPanel("charter")}
           >
+            <span className="ap-sprite ap-sprite--announcement" aria-hidden="true" />
             <span>{t("Channel.tools.charter")}</span>
             {charter !== null && <span className="t-mono chan-tool-badge">rev {charter.charter_rev}</span>}
             {charterUpdated && <span className="t-mono chan-tool-badge chan-tool-badge--hot">{t("Channel.tools.updated")}</span>}
           </button>
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("roles")}>
+            <span className="ap-sprite ap-sprite--division" aria-hidden="true" />
             <span>{t("Channel.tools.roles")}</span>
             <span className="t-mono chan-tool-badge">{structuredRoleCount}</span>
           </button>
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("coordination")}>
+            <span className="ap-sprite ap-sprite--coordination" aria-hidden="true" />
             <span>{t("Channel.tools.coordination")}</span>
             {(agentFilterActive || completionOnly) && (
               <span className="t-mono chan-tool-badge chan-tool-badge--hot">{t("Channel.tools.active")}</span>
             )}
           </button>
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("tasks")}>
+            <span className="ap-sprite ap-sprite--tasks" aria-hidden="true" />
             <span>Tasks</span>
             <span className="t-mono chan-tool-badge">{tasks.length}</span>
           </button>
           <button type="button" className={"d-btn chan-tool-btn" + (q !== "" ? " is-active" : "")} onClick={() => openPanel("search")}>
+            <span className="ap-sprite ap-sprite--search" aria-hidden="true" />
             <span>{t("Channel.tools.search")}</span>
             {q !== "" && <span className="t-mono chan-tool-badge">{searchLoading ? "..." : searchHits.length}</span>}
           </button>
           {canModerate && (
             <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("settings")}>
+              <span className="ap-sprite ap-sprite--settings" aria-hidden="true" />
               <span>{t("Channel.tools.settings")}</span>
               <span className="t-mono chan-tool-badge">
                 {localLoopGuardEnabled ? localLoopGuardLimit : t("Channel.settings.unlimited")}
@@ -2268,62 +2269,65 @@ export function ChannelPage({
             </button>
           )}
         </div>
-        {(canMintAgent || canModerate) && !state.archived && (
-          <div className="chan-admin-actions">
-          {canMintAgent && accountKey !== null && (
-            <AgentJoin
-              slug={slug}
-              token={token}
-              namePrefix={agentNamePrefix}
-              inviterName={inviterName}
-              charter={charter}
-              accountKey={accountKey}
-              active={activeAdminSurface === "agentJoin"}
-              onActiveChange={(open) => setAdminSurface("agentJoin", open)}
-            />
+        <div className="chan-tool-actions">
+          <NotifyToggle optin={optin} onChange={setOptin} />
+          {(canMintAgent || canModerate) && !state.archived && (
+            <div className="chan-admin-actions">
+              {canMintAgent && accountKey !== null && (
+                <AgentJoin
+                  slug={slug}
+                  token={token}
+                  namePrefix={agentNamePrefix}
+                  inviterName={inviterName}
+                  charter={charter}
+                  accountKey={accountKey}
+                  active={activeAdminSurface === "agentJoin"}
+                  onActiveChange={(open) => setAdminSurface("agentJoin", open)}
+                />
+              )}
+              {canMintAgent && accountKey !== null && (
+                <AgentTokens
+                  slug={slug}
+                  token={token}
+                  accountKey={accountKey}
+                  inviterName={inviterName}
+                  onAuthFailed={onAuthFailed}
+                  active={activeAdminSurface === "agentTokens"}
+                  onActiveChange={(open) => setAdminSurface("agentTokens", open)}
+                />
+              )}
+              {canModerate && (
+                <VisibilityToggle
+                  slug={slug}
+                  token={token}
+                  isPublic={localPublic}
+                  onChanged={setLocalPublic}
+                  onAuthFailed={onAuthFailed}
+                />
+              )}
+              {canModerate && (
+                <JoinLink
+                  slug={slug}
+                  token={token}
+                  onAuthFailed={onAuthFailed}
+                  active={activeAdminSurface === "joinLink"}
+                  onActiveChange={(open) => setAdminSurface("joinLink", open)}
+                />
+              )}
+              {canModerate && (
+                <button
+                  type="button"
+                  className="d-btn archive-channel-btn"
+                  disabled={archiving}
+                  onClick={archiveCurrentChannel}
+                  title={t("Channel.archive.buttonTitle")}
+                >
+                  {archiving ? t("Channel.archive.archiving") : t("Channel.archive.button")}
+                </button>
+              )}
+            </div>
           )}
-          {canMintAgent && accountKey !== null && (
-            <AgentTokens
-              slug={slug}
-              token={token}
-              accountKey={accountKey}
-              inviterName={inviterName}
-              onAuthFailed={onAuthFailed}
-              active={activeAdminSurface === "agentTokens"}
-              onActiveChange={(open) => setAdminSurface("agentTokens", open)}
-            />
-          )}
-          {canModerate && (
-            <VisibilityToggle
-              slug={slug}
-              token={token}
-              isPublic={localPublic}
-              onChanged={setLocalPublic}
-              onAuthFailed={onAuthFailed}
-            />
-          )}
-          {canModerate && (
-            <JoinLink
-              slug={slug}
-              token={token}
-              onAuthFailed={onAuthFailed}
-              active={activeAdminSurface === "joinLink"}
-              onActiveChange={(open) => setAdminSurface("joinLink", open)}
-            />
-          )}
-          {canModerate && (
-            <button
-              type="button"
-              className="d-btn archive-channel-btn"
-              disabled={archiving}
-              onClick={archiveCurrentChannel}
-              title={t("Channel.archive.buttonTitle")}
-            >
-              {archiving ? t("Channel.archive.archiving") : t("Channel.archive.button")}
-            </button>
-          )}
-          </div>
-        )}
+        </div>
       </div>
       {activePanel !== null && (
         <ChannelPanelModal

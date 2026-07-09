@@ -69,7 +69,7 @@ export function NotifyToggle({ optin, onChange }: Props) {
         aria-label={optin ? t("Channel.notify.onTitle") : t("Channel.notify.offTitle")}
         title={optin ? t("Channel.notify.onTitle") : t("Channel.notify.offTitle")}
       >
-        <span className={`ap-icon ${optin ? "ap-icon--bell-on" : "ap-icon--bell-off"}`} aria-hidden="true" />
+        <span className={`ap-sprite ${optin ? "ap-sprite--bell-on" : "ap-sprite--bell-off"}`} aria-hidden="true" />
       </button>
       {hint !== null && <span className="notify-toggle-hint t-mono">{hint}</span>}
     </span>
