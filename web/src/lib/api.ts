@@ -106,6 +106,10 @@ export interface ChannelInfo {
   // 当前身份能否管理本频道（转可见性/踢人/归档）。服务端按 isChannelModerator 算好的布尔，
   // 不含 owner 身份本身。旧 worker 缺此字段 → undefined，前端按「不可管理」处理（不渲染管理控件）。
   can_moderate?: boolean;
+  // 我创建的（owner_account===我）；不回 owner_account 本身。旧 worker 缺此字段 → undefined 按 false 处理。
+  owned?: boolean;
+  // 我加入的（在 channel_members 里）。旧 worker 缺此字段 → undefined 按 false 处理。
+  member?: boolean;
   charter_rev?: number;
   created_at: number;
   archived_at: number | null;

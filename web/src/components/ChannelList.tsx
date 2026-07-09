@@ -11,6 +11,20 @@ interface Props {
   onOpen(slug: string): void;
 }
 
+// 分类筛选：全部 / 我创建的（owned）/ 我加入的（member）。只筛 live 段，archived 段独立不受影响。
+type ChannelCategory = "all" | "created" | "joined";
+
+const CATEGORY_LABEL_KEY: Record<ChannelCategory, string> = {
+  all: "Home.channelCategoryAll",
+  created: "Home.channelCategoryCreated",
+  joined: "Home.channelCategoryJoined",
+};
+
+const CATEGORY_EMPTY_KEY: Record<Exclude<ChannelCategory, "all">, string> = {
+  created: "Home.channelCategoryEmptyCreated",
+  joined: "Home.channelCategoryEmptyJoined",
+};
+
 const MAX_DOTS = 4;
 
 // 参与者状态点：每人一个蜡笔点，色 = presence 状态；没人报过 presence 给一颗灰点占位
@@ -69,20 +83,55 @@ function ChannelPill({
 
 export function ChannelList({ channels, active, error, onOpen }: Props) {
   const [showArchived, setShowArchived] = useState(false);
+  const [category, setCategory] = useState<ChannelCategory>("all");
   const t = useT();
   // 默认只显示活跃频道；归档的（联调用完的 temp 等）折叠起来，避免刷屏
   const live = channels?.filter((c) => c.archived_at === null) ?? null;
   const archived = channels?.filter((c) => c.archived_at !== null) ?? [];
+  // 分类只筛 live，archived 段保持独立不受影响。owned/member 缺字段（旧 worker）按 false 处理。
+  const createdCount = live?.filter((c) => c.owned === true).length ?? 0;
+  const joinedCount = live?.filter((c) => c.member === true).length ?? 0;
+  const categoryCount: Record<ChannelCategory, number> = {
+    all: live?.length ?? 0,
+    created: createdCount,
+    joined: joinedCount,
+  };
+  const filteredLive =
+    live === null
+      ? null
+      : live.filter((c) => {
+          if (category === "created") return c.owned === true;
+          if (category === "joined") return c.member === true;
+          return true;
+        });
   return (
     <nav className="side" aria-label="channels">
       <p className="side-label t-mono">{t("Home.channelsLabel")}</p>
       {channels === null && error === null && <p className="side-note t-mono">{t("Home.loading")}</p>}
       {error !== null && <p className="side-note side-note--err t-mono">{error}</p>}
-      {live?.map((c) => (
+      {channels !== null && (
+        <div className="chan-cat-switch" role="group" aria-label="channel categories">
+          {(Object.keys(CATEGORY_LABEL_KEY) as ChannelCategory[]).map((cat) => (
+            <button
+              key={cat}
+              type="button"
+              className={"chan-cat-btn" + (cat === category ? " is-active" : "")}
+              aria-pressed={cat === category}
+              onClick={() => setCategory(cat)}
+            >
+              {t(CATEGORY_LABEL_KEY[cat], { count: categoryCount[cat] })}
+            </button>
+          ))}
+        </div>
+      )}
+      {filteredLive?.map((c) => (
         <ChannelPill key={c.slug} c={c} active={active} onOpen={onOpen} />
       ))}
       {live !== null && live.length === 0 && archived.length === 0 && (
         <p className="side-note t-mono">$ party channel create</p>
+      )}
+      {category !== "all" && filteredLive !== null && filteredLive.length === 0 && live !== null && live.length > 0 && (
+        <p className="side-note t-mono">{t(CATEGORY_EMPTY_KEY[category])}</p>
       )}
       {archived.length > 0 && (
         <>

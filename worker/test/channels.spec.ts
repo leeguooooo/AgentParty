@@ -58,6 +58,58 @@ describe("channels", () => {
     expect(found?.presence).toContainEqual(expect.objectContaining({ name, state: "working" }));
   });
 
+  it("list returns owned/member booleans per identity without leaking owner_account (频道分类)", async () => {
+    const ownerAccount = uniq("owner");
+    const memberAccount = uniq("member");
+    const thirdAccount = uniq("third");
+    const { token: ownerToken } = await seedToken("agent", uniq("tok-owner"), { owner: ownerAccount });
+    const { token: memberToken } = await seedToken("agent", uniq("tok-member"), { owner: memberAccount });
+    const { token: thirdToken } = await seedToken("agent", uniq("tok-third"), { owner: thirdAccount });
+
+    const slug = uniq("ch");
+    const created = await api("/api/channels", ownerToken, {
+      method: "POST",
+      body: JSON.stringify({ slug, kind: "standing" }), // 默认 private
+    });
+    expect(created.status).toBe(201);
+
+    type Listed = { slug: string; owned?: boolean; member?: boolean; owner_account?: string; created_by?: string };
+
+    // 房主自己看：owned=true；未显式加自己进 channel_members 时 member=false（建频道不会自动写会员表）
+    let list = await api("/api/channels", ownerToken);
+    let found = ((await list.json()) as { channels: Listed[] }).channels.find((c) => c.slug === slug);
+    expect(found).toMatchObject({ owned: true, member: false });
+    expect(found?.owner_account).toBeUndefined();
+    expect(found?.created_by).toBeUndefined();
+
+    // 加入前：私有频道对未加入的其它账号不可见（不在列表里）
+    list = await api("/api/channels", memberToken);
+    found = ((await list.json()) as { channels: Listed[] }).channels.find((c) => c.slug === slug);
+    expect(found).toBeUndefined();
+
+    // 房主把另一账号加为 member
+    const add = await api(`/api/channels/${slug}/members/${encodeURIComponent(memberAccount)}`, ownerToken, {
+      method: "PUT",
+    });
+    expect(add.status).toBe(200);
+
+    // 加入后：该账号看到 member=true、owned=false
+    list = await api("/api/channels", memberToken);
+    found = ((await list.json()) as { channels: Listed[] }).channels.find((c) => c.slug === slug);
+    expect(found).toMatchObject({ owned: false, member: true });
+
+    // 公开频道：没建也没加入的第三个账号看到 owned=false && member=false
+    const publicSlug = uniq("pub");
+    const createdPublic = await api("/api/channels", ownerToken, {
+      method: "POST",
+      body: JSON.stringify({ slug: publicSlug, kind: "standing", visibility: "public" }),
+    });
+    expect(createdPublic.status).toBe(201);
+    list = await api("/api/channels", thirdToken);
+    found = ((await list.json()) as { channels: Listed[] }).channels.find((c) => c.slug === publicSlug);
+    expect(found).toMatchObject({ owned: false, member: false });
+  });
+
   it("409 on slug conflict", async () => {
     const { token } = await seedToken("agent");
     const slug = uniq("ch");

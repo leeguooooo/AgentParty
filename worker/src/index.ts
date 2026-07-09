@@ -1804,6 +1804,9 @@ app.get("/api/channels", async (c) => {
       // can_moderate：当前身份能否管理（转可见性/踢人/归档）。不回 owner 身份本身，只回布尔，
       // 前端据此决定渲不渲染可见性切换等管理控件（非 owner 不该看见会 403 的按钮）。
       const canModerate = isChannelModerator(identity, full);
+      // owned/member：分类筛选用的布尔标记，不泄露 owner_account 本身。
+      const owned = full.owner_account != null && full.owner_account === identity.account;
+      const member = memberSlugs.has(full.slug);
       const { created_by, owner_account, ...row } = full;
       let summary: ChannelSummary = { last: null, presence: [] };
       if (includeSummary) {
@@ -1818,7 +1821,7 @@ app.get("/api/channels", async (c) => {
           // do 不可达时列表仍可用，摘要降级为空
         }
       }
-      return { ...row, can_moderate: canModerate, last_message: summary.last, presence: summary.presence };
+      return { ...row, can_moderate: canModerate, owned, member, last_message: summary.last, presence: summary.presence };
     }),
   );
   return c.json({ channels });
