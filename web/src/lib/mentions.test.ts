@@ -30,6 +30,11 @@ describe("mentionCandidates", () => {
     expect(mentionCandidates([], pres, null, NOW)[0]!.tier).toBe("recent");
   });
 
+  test("human_driven watch falls back to recent", () => {
+    const pres = { bob: presence({ name: "bob", residency: "human_driven", wake: { kind: "watch" } }) };
+    expect(mentionCandidates([], pres, null, NOW)[0]!.tier).toBe("recent");
+  });
+
   test("stale webhook 仍是 wakeable：服务端投递，agent 离线也能被唤醒（#47）", () => {
     const pres = { hook: presence({ name: "hook", wake: { kind: "webhook" }, last_seen: NOW - 780_000 }) };
     expect(mentionCandidates([], pres, null, NOW)[0]!.tier).toBe("wakeable");

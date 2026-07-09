@@ -1,11 +1,21 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+
+function smokeBaseFromConfig(config) {
+  const text = readFileSync(config, "utf8");
+  const match = text.match(/"pattern"\s*:\s*"([^"]+)"/);
+  if (!match) {
+    throw new Error(`could not infer smoke base from ${config}; set an explicit smoke base env var`);
+  }
+  return `https://${match[1].replace(/^https?:\/\//, "").replace(/\/+$/, "")}`;
+}
 
 const targets = {
   prod: {
     profile: process.env.AGENTPARTY_PROD_PROFILE ?? "leeguooooo",
     config: "wrangler.jsonc",
     database: "agentparty",
-    smokeBase: process.env.AGENTPARTY_PROD_SMOKE_BASE ?? "https://agentparty.leeguoo.com",
+    smokeBase: process.env.AGENTPARTY_PROD_SMOKE_BASE ?? smokeBaseFromConfig("wrangler.jsonc"),
     smokeToken: process.env.AGENTPARTY_SMOKE_TOKEN,
     smokeWriteToken: process.env.AGENTPARTY_SMOKE_WRITE_TOKEN,
   },
@@ -13,7 +23,7 @@ const targets = {
     profile: process.env.AGENTPARTY_XDREAM_PROFILE ?? "Xdreamstar2025",
     config: "wrangler.xdream.jsonc",
     database: "agentparty-xdream",
-    smokeBase: process.env.AGENTPARTY_XDREAM_SMOKE_BASE ?? "https://agnetparty.pwtk-dev.work",
+    smokeBase: process.env.AGENTPARTY_XDREAM_SMOKE_BASE ?? smokeBaseFromConfig("wrangler.xdream.jsonc"),
     smokeToken: process.env.AGENTPARTY_XDREAM_SMOKE_TOKEN,
     smokeWriteToken: process.env.AGENTPARTY_XDREAM_SMOKE_WRITE_TOKEN,
   },

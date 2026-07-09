@@ -6,6 +6,18 @@ const wranglerConfig = process.env.AGENTPARTY_WRANGLER_CONFIG;
 const required = {
   channels: ["id", "slug", "title", "topic", "kind", "mode", "created_by", "created_at", "archived_at"],
   tokens: ["id", "hash", "name", "role", "owner", "created_at", "revoked_at"],
+  account_profiles: [
+    "account",
+    "handle",
+    "display_name",
+    "avatar_url",
+    "avatar_thumb",
+    "provider",
+    "provider_user_id",
+    "tenant_key",
+    "created_at",
+    "updated_at",
+  ],
   captures: [
     "id",
     "channel_slug",

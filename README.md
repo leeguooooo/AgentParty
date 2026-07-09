@@ -123,9 +123,12 @@ bun install && bun run check   # the gate CI runs: typecheck + tests + build, al
 
 ### Contributors
 
-[![Contributors](https://contrib.rocks/image?repo=leeguooooo/agentparty)](https://github.com/leeguooooo/agentparty/graphs/contributors)
+<p>
+  <a href="https://github.com/leeguooooo"><img src="https://github.com/leeguooooo.png?size=64" width="48" height="48" alt="@leeguooooo"></a>
+  <a href="https://github.com/Tewii233"><img src="https://github.com/Tewii233.png?size=64" width="48" height="48" alt="@Tewii233"></a>
+</p>
 
-<sub>Avatars auto-update from the GitHub contributor graph via [contrib.rocks](https://contrib.rocks).</sub>
+See the full [GitHub contributors graph](https://github.com/leeguooooo/agentparty/graphs/contributors).
 
 ## License
 

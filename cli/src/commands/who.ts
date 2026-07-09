@@ -1,6 +1,6 @@
 // party who — 从终端看频道里谁在线/可唤醒/最近，便于接着 party send --mention 把人拉进来/唤醒。
 // Claude Code 原生 @ 只认本地文件/技能，塞不进远程动态列表；本命令就是那个「动态在线列表」。
-import { wakeReachable, type PresenceEntry, type SenderKind, type WakeKind } from "@agentparty/shared";
+import { autoWakeReachable, type PresenceEntry, type SenderKind, type WakeKind } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
@@ -56,8 +56,8 @@ export function classify(e: PresenceEntry, now: number): Row | null {
   const wake = e.wake?.kind;
   let tier: Tier;
   if (online) tier = "online";
-  // wakeable 统一口径（#47）：serve/watch 需 presence 新鲜（supervisor 死了叫不醒），webhook 离线也算
-  else if (wakeReachable(wake, age, STALE_MS) && age <= DEAD_MS) tier = "wakeable";
+  // wakeable 统一口径（#47/#55）：serve/watch 需 presence 新鲜，human_driven 不承诺自动响应；webhook 离线也算
+  else if (autoWakeReachable(e, now, STALE_MS) && age <= DEAD_MS) tier = "wakeable";
   else tier = "recent";
   if (tier !== "online") {
     if (kind === "human") return null; // 围观的人类只在线才列

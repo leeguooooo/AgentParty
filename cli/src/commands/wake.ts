@@ -1,5 +1,5 @@
 // party wake test — prove mention/wake/resume as separate phases.
-import { EXIT_TIMEOUT, type MsgFrame, type PresenceEntry, type WakeDelivery } from "@agentparty/shared";
+import { autoWakeReachable, EXIT_TIMEOUT, type MsgFrame, type PresenceEntry, type WakeDelivery } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { jsonFrame, nowTs } from "../json";
@@ -9,6 +9,7 @@ import { MAX_TIMEOUT_SEC, isName, isSlug, parsePositiveIntFlag } from "../valida
 
 const WAKE_FLAGS = ["channel", "timeout", "json"];
 const DEFAULT_TIMEOUT_SEC = 30;
+const STALE_MS = 60_000; // keep serve/watch wakeability aligned with `party who` and mention receipts
 const HELP = `usage: party wake test @agent [channel|--channel C] [--timeout N] [--json]
 
 Run a wake contract test. This separates mention delivery, wake adapter delivery,
@@ -62,7 +63,7 @@ function summarizePresence(p: PresenceEntry | null): WakePresence {
   };
 }
 
-function notWakeableReason(p: PresenceEntry | null): string | null {
+function notWakeableReason(p: PresenceEntry | null, now: number): string | null {
   if (p === null) return "no presence for target";
   if (p.residency === "human_driven") return "target is human-driven; mention is inbox only";
   // wake_kind is the real capability; residency is a soft hint. If a real adapter is
@@ -75,6 +76,11 @@ function notWakeableReason(p: PresenceEntry | null): string | null {
     return p.residency === "bare"
       ? "target has bare residency and advertises no wake adapter"
       : "target advertises no wake adapter";
+  }
+  const seen = p.last_seen ?? p.ts ?? null;
+  if (seen === null) return "target wake adapter has no last_seen heartbeat";
+  if (!autoWakeReachable(p, now, STALE_MS)) {
+    return `target ${p.wake.kind} wake adapter is stale; last seen ${Math.max(0, now - seen)}ms ago`;
   }
   return null;
 }
@@ -222,7 +228,8 @@ export async function run(argv: string[]): Promise<number> {
     const channels = await listChannels(cfg.server, cfg.token);
     const info = channels.find((c) => c.slug === channel);
     const presence = info?.presence?.find((p) => p.name === target) ?? null;
-    const reason = notWakeableReason(presence);
+    const generatedAt = nowTs();
+    const reason = notWakeableReason(presence, generatedAt);
     const adapter = presence?.wake?.kind ?? null;
     if (reason !== null) {
       const frame: WakeTestFrame = {
@@ -230,7 +237,7 @@ export async function run(argv: string[]): Promise<number> {
         channel,
         target,
         result: "not_auto_wakeable",
-        generated_at: nowTs(),
+        generated_at: generatedAt,
         timeout_sec: timeoutSec,
         presence: summarizePresence(presence),
         phases: {

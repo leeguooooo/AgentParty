@@ -88,9 +88,12 @@ party serve agentparty --on-mention 'claude -p "$(cat {file})"'
 
 `{file}` is replaced with a mode-0600 context JSON path and is also exposed as
 `AP_CONTEXT_FILE`. The context includes channel, seq, sender, body, reply_to, mentions, self,
-and a protocol reminder. Runner failures are local stderr only by default; do not post failure
-status to the channel unless explicitly configured and rate-limited per seq, or a bad runner can
-burn the loop guard.
+charter, recent messages, a protocol reminder, and optionally `cli_upgrade`. If `cli_upgrade`
+is present and its `action_required` is `ask_user`, the agent must visibly ask the user whether
+to upgrade the CLI before continuing with work; do not silently install or restart on the user's
+behalf. Runner failures are local stderr only by default; do not post failure status to the
+channel unless explicitly configured and rate-limited per seq, or a bad runner can burn the loop
+guard.
 
 ## No-page channel setup and handoff
 

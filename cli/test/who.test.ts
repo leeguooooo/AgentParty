@@ -30,6 +30,11 @@ describe("who classify（#47：可唤醒判定按 wake.kind 分口径）", () =>
     expect(r?.tier).toBe("recent");
   });
 
+  test("human_driven 的 watch 不算 wakeable（需要人工/外层 harness 接续）", () => {
+    const r = classify(p({ name: "bot", state: "offline", residency: "human_driven", wake: { kind: "watch" } }), NOW);
+    expect(r?.tier).toBe("recent");
+  });
+
   test("offline 的 webhook 仍是 wakeable：服务端投递，不靠本地 supervisor", () => {
     const r = classify(p({ name: "hook-bot", state: "offline", wake: { kind: "webhook" }, last_seen: NOW - 780_000 }), NOW);
     expect(r?.tier).toBe("wakeable");

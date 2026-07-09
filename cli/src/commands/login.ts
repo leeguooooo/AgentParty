@@ -6,13 +6,12 @@ import { loginFlow } from "../oidc-cli";
 import { normalizeServerUrl } from "../validation";
 
 const LOGIN_FLAGS = ["server"];
-const DEFAULT_SERVER = "https://agentparty.leeguoo.com";
 const HELP = `usage: party login [--server URL]
 
 Open a browser PKCE sign-in flow and store the account session.
 
 Options:
-  --server URL    AgentParty server URL (default: https://agentparty.leeguoo.com)`;
+  --server URL    AgentParty server URL (or AGENTPARTY_SERVER / saved config)`;
 
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
@@ -30,7 +29,11 @@ export async function run(argv: string[]): Promise<number> {
     console.error(flagError);
     return 1;
   }
-  const raw = str(flags.server) ?? readConfig()?.server ?? DEFAULT_SERVER;
+  const raw = str(flags.server) ?? process.env.AGENTPARTY_SERVER ?? readConfig()?.server;
+  if (!raw) {
+    console.error("server required; pass --server URL, set AGENTPARTY_SERVER, or run party init first");
+    return 1;
+  }
   const server = normalizeServerUrl(raw);
   if (server === null) {
     console.error("--server must be an http(s) URL without credentials");

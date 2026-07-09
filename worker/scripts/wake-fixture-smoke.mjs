@@ -20,11 +20,10 @@
 //   {kind:"status",state:"done",note:"fixture ack",mentions:[],summary_seq:<payload.seq>}
 //
 // Optional:
-//   AGENTPARTY_FIXTURE_BASE=https://agentparty.leeguoo.com
 //   AGENTPARTY_FIXTURE_TIMEOUT_MS=30000
 //   AGENTPARTY_FIXTURE_KEEP_CHANNEL=1
 
-const base = (process.env.AGENTPARTY_FIXTURE_BASE ?? "https://agentparty.leeguoo.com").replace(/\/+$/, "");
+const rawBase = process.env.AGENTPARTY_FIXTURE_BASE;
 const testerToken = process.env.AGENTPARTY_FIXTURE_TESTER_TOKEN;
 const targetToken = process.env.AGENTPARTY_FIXTURE_TARGET_TOKEN;
 const webhookUrl = process.env.AGENTPARTY_FIXTURE_WEBHOOK_URL;
@@ -48,6 +47,9 @@ requireEnv("AGENTPARTY_FIXTURE_TARGET_TOKEN", targetToken);
 requireEnv("AGENTPARTY_FIXTURE_WEBHOOK_URL", webhookUrl);
 requireEnv("AGENTPARTY_FIXTURE_WEBHOOK_SECRET", webhookSecret);
 requireEnv("AGENTPARTY_FIXTURE_TARGET_NAME", targetName);
+requireEnv("AGENTPARTY_FIXTURE_BASE", rawBase);
+
+const base = rawBase.replace(/\/+$/, "");
 
 if (!NAME_RE.test(targetName)) {
   console.error("AGENTPARTY_FIXTURE_TARGET_NAME must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}.");

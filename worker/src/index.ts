@@ -145,6 +145,9 @@ const AP_FORWARD_HEADERS = [
   "x-ap-kind",
   "x-ap-role",
   "x-ap-owner",
+  "x-ap-display-name",
+  "x-ap-avatar-url",
+  "x-ap-avatar-thumb",
   "x-ap-token-hash",
   "x-ap-parent-agent",
   "x-ap-root-agent",
@@ -192,6 +195,17 @@ interface OAuthProviderConfig {
   tokenUrl: string;
   userInfoUrl: string;
   scope: string;
+}
+
+interface AccountProfileMetadata {
+  account: string;
+  email: string | null;
+  displayName: string;
+  avatarUrl: string | null;
+  avatarThumb: string | null;
+  provider: string;
+  providerUserId: string;
+  tenantKey: string | null;
 }
 
 const PROVIDER_ID_RE = /^[a-z][a-z0-9_-]{0,31}$/;
@@ -625,26 +639,59 @@ function slugifyHandle(input: string): string | null {
 
 async function ensureDefaultHandle(
   db: D1Database,
-  account: string,
-  displayName: string,
-  providerId: string,
+  profile: AccountProfileMetadata,
 ): Promise<void> {
-  const existing = await db.prepare("SELECT handle FROM account_profiles WHERE account = ?").bind(account).first();
-  if (existing) return;
-  const hash = await sha256Hex(`${providerId}:${account}`);
-  const fromDisplay = slugifyHandle(displayName);
+  const existing = await db.prepare("SELECT handle FROM account_profiles WHERE account = ?").bind(profile.account).first<{ handle: string }>();
+  if (existing) {
+    await db.prepare(
+      `UPDATE account_profiles
+          SET display_name = ?, avatar_url = ?, avatar_thumb = ?, provider = ?,
+              provider_user_id = ?, tenant_key = ?, updated_at = ?
+        WHERE account = ?`,
+    )
+      .bind(
+        profile.displayName,
+        profile.avatarUrl,
+        profile.avatarThumb,
+        profile.provider,
+        profile.providerUserId,
+        profile.tenantKey,
+        Date.now(),
+        profile.account,
+      )
+      .run();
+    return;
+  }
+  const hash = await sha256Hex(`${profile.provider}:${profile.account}`);
+  const fromDisplay = slugifyHandle(profile.displayName);
   const candidates = [
     fromDisplay,
     fromDisplay === null ? null : `${fromDisplay.slice(0, 26)}-${hash.slice(0, 4)}`,
-    `${providerId}-${hash.slice(0, 10)}`,
+    `${profile.provider}-${hash.slice(0, 10)}`,
   ].filter((candidate): candidate is string => candidate !== null && validateHandleFormat(candidate) !== null);
   const now = Date.now();
   for (const handle of candidates) {
-    if ((await handleConflict(db, handle, account)) !== null) continue;
+    if ((await handleConflict(db, handle, profile.account)) !== null) continue;
     try {
       await db
-        .prepare("INSERT INTO account_profiles (account, handle, created_at, updated_at) VALUES (?, ?, ?, ?)")
-        .bind(account, handle, now, now)
+        .prepare(
+          `INSERT INTO account_profiles (
+             account, handle, display_name, avatar_url, avatar_thumb, provider, provider_user_id, tenant_key,
+             created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          profile.account,
+          handle,
+          profile.displayName,
+          profile.avatarUrl,
+          profile.avatarThumb,
+          profile.provider,
+          profile.providerUserId,
+          profile.tenantKey,
+          now,
+          now,
+        )
         .run();
       return;
     } catch (e) {
@@ -848,6 +895,10 @@ function extractLarkUserInfo(data: Record<string, unknown>, providerId = "lark")
   account: string;
   email: string | null;
   displayName: string;
+  avatarUrl: string | null;
+  avatarThumb: string | null;
+  providerUserId: string;
+  tenantKey: string | null;
 } {
   const code = data.code;
   if (code !== undefined && Number(code) !== 0) {
@@ -863,21 +914,30 @@ function extractLarkUserInfo(data: Record<string, unknown>, providerId = "lark")
     return "";
   };
   const email = pick("email", "enterprise_email") || null;
-  const externalId = email ?? pick("union_id", "open_id", "user_id");
+  const providerUserId = pick("union_id", "open_id", "user_id");
+  const externalId = email ?? providerUserId;
   if (!externalId) throw new Error("provider user_info did not include a usable identity");
   const displayName = pick("name", "en_name", "display_name") || email || externalId;
   const account = `${email === null ? providerId : `${providerId}-email`}:${externalId}`;
   if (account.length > OWNER_MAX || !OWNER_RE.test(account)) {
     throw new Error("provider user_info returned an unsupported account id");
   }
-  return { account, email, displayName };
+  return {
+    account,
+    email,
+    displayName,
+    avatarUrl: pick("avatar_url", "avatar_big", "avatar_middle") || null,
+    avatarThumb: pick("avatar_thumb", "avatar_middle", "avatar_url") || null,
+    providerUserId: providerUserId || externalId,
+    tenantKey: pick("tenant_key") || null,
+  };
 }
 
 async function exchangeOAuthCode(
   provider: OAuthProviderConfig,
   secret: string,
   body: { code: string; redirect_uri: string; code_verifier?: string },
-): Promise<{ account: string; email: string | null; displayName: string; expiresIn: number | null }> {
+): Promise<AccountProfileMetadata & { expiresIn: number | null }> {
   const tokenData = await fetchJson(provider.tokenUrl, {
     method: "POST",
     headers: { "content-type": "application/json; charset=utf-8" },
@@ -895,7 +955,7 @@ async function exchangeOAuthCode(
     headers: { authorization: `Bearer ${token.accessToken}` },
   });
   const user = extractLarkUserInfo(userData, provider.id);
-  return { ...user, expiresIn: token.expiresIn };
+  return { ...user, provider: provider.id, expiresIn: token.expiresIn };
 }
 
 async function loadAssignedRole(db: D1Database, slug: string, name: string): Promise<CollaborationRole | null> {
@@ -915,9 +975,20 @@ function assignedRoleHeaders(role: CollaborationRole | null): Record<string, str
 // export 仅供 test 直接单测（do 尚不消费这个头，spec 里现有的"观察 do 副作用"手法在这没有可观察点）。
 export async function handleHeader(db: D1Database, identity: TokenIdentity): Promise<Record<string, string>> {
   if (identity.kind !== "human" || identity.account == null) return {};
-  const row = await db.prepare("SELECT handle FROM account_profiles WHERE account = ?")
-    .bind(identity.account).first<{ handle: string }>();
-  return row?.handle ? { "x-ap-handle": row.handle } : {};
+  const row = await db.prepare(
+    `SELECT handle, display_name, avatar_url, avatar_thumb
+       FROM account_profiles
+      WHERE account = ?`,
+  )
+    .bind(identity.account)
+    .first<{ handle: string | null; display_name: string | null; avatar_url: string | null; avatar_thumb: string | null }>();
+  if (!row) return {};
+  return {
+    ...(row.handle ? { "x-ap-handle": row.handle } : {}),
+    ...(row.display_name ? { "x-ap-display-name": encodeURIComponent(row.display_name) } : {}),
+    ...(row.avatar_url ? { "x-ap-avatar-url": row.avatar_url } : {}),
+    ...(row.avatar_thumb ? { "x-ap-avatar-thumb": row.avatar_thumb } : {}),
+  };
 }
 
 function lineageHeaders(identity: TokenIdentity): Record<string, string> {
@@ -1051,7 +1122,7 @@ app.post("/api/auth/:provider/callback", async (c) => {
   }
   const tokenName = await oauthTokenName(provider.id, exchanged.account);
   const sess = await upsertHumanSessionToken(c.env.DB, tokenName, exchanged.account);
-  await ensureDefaultHandle(c.env.DB, exchanged.account, exchanged.displayName, provider.id);
+  await ensureDefaultHandle(c.env.DB, exchanged);
   return c.json({
     access_token: sess.token,
     token_type: "Bearer",
@@ -1069,9 +1140,20 @@ app.get("/api/me", requireBearer, async (c) => {
   // handle（spec 2026-07-08）：全局唯一昵称，仅 human 账号会话（有 account）才可能设置过
   const profile = id.account == null
     ? null
-    : await c.env.DB.prepare("SELECT handle FROM account_profiles WHERE account = ?")
+    : await c.env.DB.prepare(
+        `SELECT handle, display_name, avatar_url, avatar_thumb, provider, tenant_key
+           FROM account_profiles
+          WHERE account = ?`,
+      )
         .bind(id.account)
-        .first<{ handle: string }>();
+        .first<{
+          handle: string | null;
+          display_name: string | null;
+          avatar_url: string | null;
+          avatar_thumb: string | null;
+          provider: string | null;
+          tenant_key: string | null;
+        }>();
   return c.json({
     name: id.name,
     email: id.email ?? null,
@@ -1081,6 +1163,11 @@ app.get("/api/me", requireBearer, async (c) => {
     channel_scope: id.channel_scope ?? null,
     lineage: id.lineage ?? null,
     handle: profile?.handle ?? null,
+    display_name: profile?.display_name ?? null,
+    avatar_url: profile?.avatar_url ?? null,
+    avatar_thumb: profile?.avatar_thumb ?? null,
+    provider: profile?.provider ?? null,
+    tenant_key: profile?.tenant_key ?? null,
     caps: {
       send: id.role !== "readonly",
       // scoped token 不得建频道（会逃出 scope）；readonly 也不行

@@ -1,9 +1,6 @@
 // party doctor — 运行版 vs 磁盘安装版 vs 最新发布版，给出升级动作（issue #45）。
 import { isHelpArg } from "../args";
-import { RUNNING_VERSION, compareVersions, pendingUpgrade } from "../upgrade";
-
-const OWNER_REPO = "leeguooooo/agentparty";
-const INSTALL_LINE = `curl -fsSL https://raw.githubusercontent.com/${OWNER_REPO}/main/install.sh | sh`;
+import { INSTALL_LINE, OWNER_REPO, RUNNING_VERSION, compareVersions, pendingUpgrade } from "../upgrade";
 
 // 最新发布版：跟 releases/latest 的 302 到 .../tag/vX.Y.Z（与 install.sh resolve_version 同源）。
 async function latestVersion(): Promise<string | null> {

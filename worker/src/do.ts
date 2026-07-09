@@ -56,6 +56,9 @@ interface ConnState {
   role: TokenRole;
   owner?: string;
   handle?: string;
+  displayName?: string;
+  avatarUrl?: string;
+  avatarThumb?: string;
   lineage?: AgentLineage;
   tokenHash: string;
   collabRole?: CollaborationRole;
@@ -70,6 +73,9 @@ interface Identity {
   role: TokenRole;
   owner?: string;
   handle?: string;
+  displayName?: string;
+  avatarUrl?: string;
+  avatarThumb?: string;
   lineage?: AgentLineage;
   tokenHash: string;
   collabRole?: CollaborationRole;
@@ -517,13 +523,40 @@ function lineageFromHeaders(headers: Headers): AgentLineage | undefined {
   return lineage ?? undefined;
 }
 
-function senderFromIdentity(identity: Pick<Identity, "name" | "kind" | "owner" | "handle" | "lineage">): Sender {
+function senderFromIdentity(identity: Pick<Identity, "name" | "kind" | "owner" | "handle" | "displayName" | "avatarUrl" | "avatarThumb" | "lineage">): Sender {
   return {
     name: identity.name,
     kind: identity.kind,
     ...(identity.owner === undefined ? {} : { owner: identity.owner }),
     ...(identity.lineage === undefined ? {} : { lineage: identity.lineage }),
     ...(identity.handle === undefined ? {} : { handle: identity.handle }),
+    ...(identity.displayName === undefined ? {} : { display_name: identity.displayName }),
+    ...(identity.avatarUrl === undefined ? {} : { avatar_url: identity.avatarUrl }),
+    ...(identity.avatarThumb === undefined ? {} : { avatar_thumb: identity.avatarThumb }),
+  };
+}
+
+function headerText(headers: Headers, name: string): string | undefined {
+  const value = headers.get(name);
+  if (value === null || value === "") return undefined;
+  return value;
+}
+
+function decodedHeaderText(headers: Headers, name: string): string | undefined {
+  const value = headerText(headers, name);
+  if (value === undefined) return undefined;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function profileFromHeaders(headers: Headers): Pick<Identity, "displayName" | "avatarUrl" | "avatarThumb"> {
+  return {
+    displayName: decodedHeaderText(headers, "x-ap-display-name"),
+    avatarUrl: headerText(headers, "x-ap-avatar-url"),
+    avatarThumb: headerText(headers, "x-ap-avatar-thumb"),
   };
 }
 
@@ -797,6 +830,9 @@ export class ChannelDO extends Server<Env> {
                OR completion_review_state IS NOT NULL OR completion_review_replaced_by_seq IS NOT NULL)`,
       // 发送时快照人类 handle，同 sender_owner 手法
       "ALTER TABLE messages ADD COLUMN sender_handle TEXT",
+      "ALTER TABLE messages ADD COLUMN sender_display_name TEXT",
+      "ALTER TABLE messages ADD COLUMN sender_avatar_url TEXT",
+      "ALTER TABLE messages ADD COLUMN sender_avatar_thumb TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -843,6 +879,9 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE presence ADD COLUMN status_workflow_json TEXT",
       // 当前连接的人类 handle
       "ALTER TABLE presence ADD COLUMN handle TEXT",
+      "ALTER TABLE presence ADD COLUMN display_name TEXT",
+      "ALTER TABLE presence ADD COLUMN avatar_url TEXT",
+      "ALTER TABLE presence ADD COLUMN avatar_thumb TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -941,6 +980,7 @@ export class ChannelDO extends Server<Env> {
       role: (h.get("x-ap-role") ?? "readonly") as TokenRole,
       owner: h.get("x-ap-owner") ?? undefined,
       handle: h.get("x-ap-handle") ?? undefined,
+      ...profileFromHeaders(h),
       lineage: lineageFromHeaders(h),
       tokenHash: h.get("x-ap-token-hash") ?? "",
       collabRole: parseCollaborationRole(h.get("x-ap-collab-role") ?? undefined) ?? undefined,
@@ -1758,6 +1798,7 @@ export class ChannelDO extends Server<Env> {
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
         handle: request.headers.get("x-ap-handle") ?? undefined,
+        ...profileFromHeaders(request.headers),
         lineage: lineageFromHeaders(request.headers),
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
         collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
@@ -1893,6 +1934,7 @@ export class ChannelDO extends Server<Env> {
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
         handle: request.headers.get("x-ap-handle") ?? undefined,
+        ...profileFromHeaders(request.headers),
         lineage: lineageFromHeaders(request.headers),
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
         collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
@@ -2072,6 +2114,7 @@ export class ChannelDO extends Server<Env> {
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
         handle: request.headers.get("x-ap-handle") ?? undefined,
+        ...profileFromHeaders(request.headers),
         lineage: lineageFromHeaders(request.headers),
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
         collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
@@ -2390,18 +2433,22 @@ export class ChannelDO extends Server<Env> {
           };
     sql.exec(
       `INSERT INTO messages (
-         seq, sender_name, sender_kind, sender_owner, sender_handle, sender_lineage_json, kind, body, mentions_json, reply_to,
+         seq, sender_name, sender_kind, sender_owner, sender_handle, sender_display_name, sender_avatar_url, sender_avatar_thumb,
+         sender_lineage_json, kind, body, mentions_json, reply_to,
          state, note, status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
          status_decision_json, status_workflow_json, message_workflow_json,
          sender_role, sender_role_source, completion_artifact_json, completion_review_state, completion_review_policy,
          completion_review_replaces_seq, ts
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
       identity.owner ?? null,
       identity.handle ?? null,
+      identity.displayName ?? null,
+      identity.avatarUrl ?? null,
+      identity.avatarThumb ?? null,
       identity.lineage === undefined ? null : JSON.stringify(identity.lineage),
       msg.kind,
       msg.body,
@@ -2462,15 +2509,19 @@ export class ChannelDO extends Server<Env> {
       const wakeProvided = frame.wake !== undefined ? 1 : 0;
       sql.exec(
         `INSERT INTO presence (
-           name, kind, account, handle, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+           name, kind, account, handle, display_name, avatar_url, avatar_thumb,
+           state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
            status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at, context_json,
            lineage_json
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            kind = excluded.kind,
            account = COALESCE(excluded.account, presence.account),
            handle = COALESCE(excluded.handle, presence.handle),
+           display_name = COALESCE(excluded.display_name, presence.display_name),
+           avatar_url = COALESCE(excluded.avatar_url, presence.avatar_url),
+           avatar_thumb = COALESCE(excluded.avatar_thumb, presence.avatar_thumb),
            state = excluded.state,
            note = excluded.note,
            updated_at = excluded.updated_at,
@@ -2491,6 +2542,9 @@ export class ChannelDO extends Server<Env> {
         identity.kind,
         identity.owner ?? null, // 人类会话 = email，agent = 所属账号；presence.account 存它供前端显示「是谁」
         identity.handle ?? null, // 当前连接的人类 handle；同 account 手法，presence.handle 供前端展示/被 @
+        identity.displayName ?? null,
+        identity.avatarUrl ?? null,
+        identity.avatarThumb ?? null,
         frame.state,
         frame.note,
         now,
@@ -3026,7 +3080,8 @@ export class ChannelDO extends Server<Env> {
     const liveCounts = this.liveConnectionCounts();
     return this.ctx.storage.sql
       .exec(
-        `SELECT name, kind, account, handle, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+        `SELECT name, kind, account, handle, display_name, avatar_url, avatar_thumb,
+                state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json
          FROM presence ORDER BY name`,
@@ -3039,7 +3094,8 @@ export class ChannelDO extends Server<Env> {
     const liveCounts = this.liveConnectionCounts();
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT name, kind, account, handle, state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
+        `SELECT name, kind, account, handle, display_name, avatar_url, avatar_thumb,
+                state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json
          FROM presence WHERE name = ?`,
@@ -3072,6 +3128,9 @@ export class ChannelDO extends Server<Env> {
       ...(r.kind === "agent" || r.kind === "human" ? { kind: r.kind as SenderKind } : {}),
       ...(typeof r.account === "string" && r.account !== "" ? { account: r.account } : {}),
       ...(typeof r.handle === "string" && r.handle !== "" ? { handle: r.handle } : {}),
+      ...(typeof r.display_name === "string" && r.display_name !== "" ? { display_name: r.display_name } : {}),
+      ...(typeof r.avatar_url === "string" && r.avatar_url !== "" ? { avatar_url: r.avatar_url } : {}),
+      ...(typeof r.avatar_thumb === "string" && r.avatar_thumb !== "" ? { avatar_thumb: r.avatar_thumb } : {}),
       state,
       note: r.note === null ? null : String(r.note),
       ts,
@@ -3115,6 +3174,9 @@ export class ChannelDO extends Server<Env> {
           return lineage === undefined ? {} : { lineage };
         })(),
         ...(r.sender_handle === null || r.sender_handle === undefined ? {} : { handle: String(r.sender_handle) }),
+        ...(r.sender_display_name === null || r.sender_display_name === undefined ? {} : { display_name: String(r.sender_display_name) }),
+        ...(r.sender_avatar_url === null || r.sender_avatar_url === undefined ? {} : { avatar_url: String(r.sender_avatar_url) }),
+        ...(r.sender_avatar_thumb === null || r.sender_avatar_thumb === undefined ? {} : { avatar_thumb: String(r.sender_avatar_thumb) }),
       },
       kind,
       body: String(r.body),

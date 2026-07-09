@@ -60,6 +60,15 @@
   white-space: nowrap;
 }
 .app-me-prefix { flex: none; }
+.app-me-avatar {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--d-ink);
+  object-fit: cover;
+  background: var(--t-panel2);
+}
 .app-me-name {
   min-width: 0;
   color: var(--t-muted);
@@ -647,6 +656,15 @@
 }
 .presence-group-head {
   gap: 6px;
+}
+.presence-group-avatar {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--d-ink);
+  object-fit: cover;
+  background: var(--t-panel2);
 }
 .presence-group-label {
   min-width: 0;
@@ -1789,11 +1807,15 @@
 .msg-avatar {
   flex: none;
   align-self: center;
-  width: 11px;
-  height: 11px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: hsl(var(--ah, 220) 58% var(--agent-l-soft));
   border: 1.5px solid var(--d-ink);
+}
+.msg-avatar--img {
+  object-fit: cover;
+  background: var(--t-panel2);
 }
 .msg-sender {
   font-family: var(--d-marker);

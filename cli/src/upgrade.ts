@@ -3,6 +3,8 @@
 import pkg from "../package.json" with { type: "json" };
 
 export const RUNNING_VERSION = pkg.version;
+export const OWNER_REPO = "leeguooooo/agentparty";
+export const INSTALL_LINE = `curl -fsSL https://raw.githubusercontent.com/${OWNER_REPO}/main/install.sh | sh`;
 
 // semver 比较：a>b→1, a<b→-1, ==→0。只认 X.Y.Z 数字段，非法段当 0。
 export function compareVersions(a: string, b: string): number {
@@ -24,6 +26,15 @@ export interface UpgradeDeps {
   execPath?: string;
   readInstalledVersion?: (execPath: string) => string | null;
   reexec?: (execPath: string, argv: string[]) => void;
+}
+
+export interface CliUpgradeNotice {
+  running_version: string;
+  installed_version: string;
+  auto_upgrade: boolean;
+  action_required: "ask_user" | "auto_reexec";
+  message: string;
+  command: string;
 }
 
 function defaultReadInstalledVersion(execPath: string): string | null {
@@ -48,6 +59,23 @@ export function pendingUpgrade(deps: UpgradeDeps = {}): string | null {
   const installed = read(execPath);
   if (!installed) return null;
   return compareVersions(installed, running) > 0 ? installed : null;
+}
+
+export function upgradeNotice(auto: boolean, deps: UpgradeDeps = {}): CliUpgradeNotice | null {
+  const installed = pendingUpgrade(deps);
+  if (!installed) return null;
+  const running = deps.runningVersion ?? RUNNING_VERSION;
+  const action = auto ? "auto_reexec" : "ask_user";
+  return {
+    running_version: running,
+    installed_version: installed,
+    auto_upgrade: auto,
+    action_required: action,
+    message: auto
+      ? `检测到 party CLI 已有新版本 v${installed}（当前运行 v${running}）。本轮唤醒结束后 serve 会自动 re-exec 新版。`
+      : `检测到 party CLI 已有新版本 v${installed}（当前运行 v${running}）。继续任务前先询问用户是否升级；用户同意后再让用户运行升级命令并重启 serve。`,
+    command: INSTALL_LINE,
+  };
 }
 
 // re-exec 磁盘上的新二进制：spawn 同 argv、继承 stdio、detach，然后让调用方退出。

@@ -184,6 +184,11 @@ export interface Sender {
   lineage?: AgentLineage;
   /** 人类全局唯一昵称（可@别名）。仅人类且已设置时下发；agent/未设置省略。旧客户端忽略。 */
   handle?: string;
+  /** OAuth/SSO profile display name. Optional; clients fall back to handle/owner/name. */
+  display_name?: string;
+  /** OAuth/SSO profile avatar URL. Optional; clients may render initials when absent. */
+  avatar_url?: string;
+  avatar_thumb?: string;
   /** 同一身份当前活跃连接数。仅 >1 时下发，用于提示 token/session 被重复使用。 */
   connection_count?: number;
 }
@@ -209,6 +214,11 @@ export interface PresenceEntry {
   lineage?: AgentLineage;
   /** 人类全局唯一昵称（可@别名）。仅人类且已设置时下发；旧客户端忽略。 */
   handle?: string;
+  /** OAuth/SSO profile display name. Optional; clients fall back to handle/account/name. */
+  display_name?: string;
+  /** OAuth/SSO profile avatar URL. Optional; clients may render initials when absent. */
+  avatar_url?: string;
+  avatar_thumb?: string;
   /** 同一身份当前活跃连接数。仅 >1 时下发，用于提示 token/session 被重复使用。 */
   connection_count?: number;
 }
@@ -242,6 +252,17 @@ export function presenceLastSeen(entry: Pick<PresenceEntry, "last_seen" | "ts">)
 export function wakeReachable(kind: WakeKind | undefined, ageMs: number, staleMs = PRESENCE_TIMEOUT_MS): boolean {
   if (kind === "webhook") return true;
   return (kind === "serve" || kind === "watch") && ageMs < staleMs;
+}
+
+export function autoWakeReachable(
+  entry: Pick<PresenceEntry, "wake" | "last_seen" | "ts" | "residency">,
+  now: number,
+  staleMs = PRESENCE_TIMEOUT_MS,
+): boolean {
+  if (entry.residency === "human_driven") return false;
+  const seen = presenceLastSeen(entry);
+  if (seen === null) return false;
+  return wakeReachable(entry.wake?.kind, now - seen, staleMs);
 }
 
 export function evaluateHostLease(
@@ -793,6 +814,9 @@ export interface PresenceFrame {
   lineage?: AgentLineage;
   /** 人类全局唯一昵称（可@别名）。仅人类且已设置时下发；旧客户端忽略。 */
   handle?: string;
+  display_name?: string;
+  avatar_url?: string;
+  avatar_thumb?: string;
 }
 
 export interface ErrorFrame {

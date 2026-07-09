@@ -102,6 +102,11 @@ describe("receiptFor priority ladder", () => {
     const r = receiptFor("evan", [], null, ONLINE([]), { evan: presence({ name: "evan", wake: { kind: "serve" }, last_seen: NOW - 120_000 }) }, NOW);
     expect(r.state).toBe("pending_reconnect");
   });
+
+  test("human_driven watch → pending_reconnect, not pending_wake", () => {
+    const r = receiptFor("evan", [], null, ONLINE([]), { evan: presence({ name: "evan", residency: "human_driven", wake: { kind: "watch" } }) }, NOW);
+    expect(r.state).toBe("pending_reconnect");
+  });
 });
 
 describe("buildReceipts", () => {

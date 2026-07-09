@@ -181,6 +181,11 @@ describe("oidc end-to-end via SELF.fetch", () => {
       channel_scope: null,
       lineage: null,
       handle: null,
+      display_name: null,
+      avatar_url: null,
+      avatar_thumb: null,
+      provider: null,
+      tenant_key: null,
       // OIDC 人类：非 readonly 能发/建频道；有 account 能自助铸 agent；无 scope；spawn 只给 scoped parent agent
       caps: { send: true, create_channel: true, mint_agents: true, spawn_children: false, scoped_to: null },
     });

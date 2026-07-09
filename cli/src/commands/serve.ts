@@ -2,7 +2,7 @@
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
 import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type MsgFrame } from "@agentparty/shared";
-import { maybeReexecUpgrade, type UpgradeDeps } from "../upgrade";
+import { maybeReexecUpgrade, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import {
   appendFileSync,
   copyFileSync,
@@ -147,6 +147,7 @@ function buildWakeContext(
   recent: MsgFrame[],
   charter: ChannelCharter | null = null,
   projectAgent: ProjectAgentRunContext | null = null,
+  cliUpgrade: CliUpgradeNotice | null = null,
 ) {
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
   return {
@@ -162,6 +163,7 @@ function buildWakeContext(
     charter: charter?.charter ?? null,
     charter_rev: charter?.charter_rev ?? 0,
     project_agent: projectAgent,
+    cli_upgrade: cliUpgrade,
     recent: recent.map((m) => ({
       seq: m.seq,
       sender: m.sender.name,
@@ -180,11 +182,12 @@ export function writeContextFile(
   recent: MsgFrame[],
   charter: ChannelCharter | null = null,
   projectAgent: ProjectAgentRunContext | null = null,
+  cliUpgrade: CliUpgradeNotice | null = null,
 ): string {
   const path = join(tmpdir(), `agentparty-serve-${channel}-${frame.seq}.json`);
   writeFileSync(
     path,
-    JSON.stringify(buildWakeContext(frame, channel, self, recent, charter, projectAgent), null, 2) + "\n",
+    JSON.stringify(buildWakeContext(frame, channel, self, recent, charter, projectAgent, cliUpgrade), null, 2) + "\n",
     { mode: 0o600 },
   );
   return path;
@@ -222,7 +225,15 @@ export interface ServeOptions {
   // 测试注入点：默认用 sh -c 起子进程
   runCommand?: (
     frame: MsgFrame,
-    ctx: { cmd: string; channel: string; self: string; recent: MsgFrame[]; charter?: ChannelCharter | null; projectAgent?: ProjectAgentRunContext | null },
+    ctx: {
+      cmd: string;
+      channel: string;
+      self: string;
+      recent: MsgFrame[];
+      charter?: ChannelCharter | null;
+      projectAgent?: ProjectAgentRunContext | null;
+      cliUpgrade?: CliUpgradeNotice | null;
+    },
   ) => Promise<void>;
   sdkRunner?: SdkRunnerOptions;
   // serve 挂上后声明自己「可被唤醒」的钩子；run() 注入真实实现，测试可省略/替换
@@ -258,10 +269,18 @@ export async function advertiseServeWake(auth: ResolvedAuthDetailed, channel: st
 // 非零退出：打印 exit code + context file 路径（便于排查），并保留文件；成功则清理。
 async function defaultRun(
   frame: MsgFrame,
-  ctx: { cmd: string; channel: string; self: string; recent: MsgFrame[]; charter?: ChannelCharter | null; projectAgent?: ProjectAgentRunContext | null },
+  ctx: {
+    cmd: string;
+    channel: string;
+    self: string;
+    recent: MsgFrame[];
+    charter?: ChannelCharter | null;
+    projectAgent?: ProjectAgentRunContext | null;
+    cliUpgrade?: CliUpgradeNotice | null;
+  },
 ): Promise<void> {
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
-  const file = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter, ctx.projectAgent ?? null);
+  const file = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null);
   const cmd = ctx.cmd.includes("{file}") ? ctx.cmd.replaceAll("{file}", file) : ctx.cmd;
   const proc = Bun.spawn(["sh", "-c", cmd], {
     stdin: new TextEncoder().encode(body),
@@ -381,8 +400,9 @@ function sdkPrompt(
   recent: MsgFrame[],
   charter: ChannelCharter | null,
   projectAgent: ProjectAgentRunContext | null = null,
+  cliUpgrade: CliUpgradeNotice | null = null,
 ): string {
-  return JSON.stringify(buildWakeContext(frame, channel, self, recent, charter, projectAgent), null, 2) + "\n";
+  return JSON.stringify(buildWakeContext(frame, channel, self, recent, charter, projectAgent, cliUpgrade), null, 2) + "\n";
 }
 
 function sdkThreadId(thread: ThreadLike): string {
@@ -553,7 +573,15 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
 
   const handle = async (
     frame: MsgFrame,
-    ctx: { cmd: string; channel: string; self: string; recent: MsgFrame[]; charter?: ChannelCharter | null; projectAgent?: ProjectAgentRunContext | null },
+    ctx: {
+      cmd: string;
+      channel: string;
+      self: string;
+      recent: MsgFrame[];
+      charter?: ChannelCharter | null;
+      projectAgent?: ProjectAgentRunContext | null;
+      cliUpgrade?: CliUpgradeNotice | null;
+    },
   ): Promise<void> => {
     const started = opts.now?.() ?? Date.now();
     mkdirSync(opts.workdir, { recursive: true });
@@ -571,7 +599,7 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
     try {
       const active = await ensureThread(started);
       threadId = active.session.thread_id;
-      const result = await active.thread.run(sdkPrompt(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null), {
+      const result = await active.thread.run(sdkPrompt(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null), {
         sandbox: opts.sandbox ?? "full_access",
       });
       const body = finalText(result);
@@ -644,7 +672,7 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
 
     const repoCwd = await ensureRepo(opts, env);
     const cwd = opts.cwd ?? repoCwd ?? opts.workdir;
-    const contextFile = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null);
+    const contextFile = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null);
     const prompt = readFileSync(contextFile, "utf8");
 
     let run = await runHarness(opts, prompt, oldSid, cwd, env, frame.seq);
@@ -1050,7 +1078,16 @@ export async function runServe(o: ServeOptions): Promise<number> {
         out(`▶ ${formatMsg(frame)}`);
         // 串行：本条命令跑完再消费下一帧（新帧此间缓冲在 FrameQueue），避免并发唤起互相抢
         try {
-          await run(frame, { cmd: o.cmd, channel: o.channel, self, recent: recent.slice(), charter, projectAgent: o.projectAgent ?? null });
+          const cliUpgrade = upgradeNotice(o.autoUpgrade === true, o.upgradeDeps);
+          await run(frame, {
+            cmd: o.cmd,
+            channel: o.channel,
+            self,
+            recent: recent.slice(),
+            charter,
+            projectAgent: o.projectAgent ?? null,
+            cliUpgrade,
+          });
         } catch (e) {
           out(`  命令失败: ${e instanceof Error ? e.message : String(e)}`);
         }

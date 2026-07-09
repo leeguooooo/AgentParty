@@ -1,7 +1,7 @@
 // party send 后即时反馈：一个 @ 目标现在能不能收到。是网页发送前状态条的终端版——不用开网页，
 // 发完就知道会不会白发。与 who 的 classify 不同：这里对「找不到/离线/幽灵」一律回 offline（要提醒
 // 「重连前收不到」），不返回 null；档位判定与网页 mentions.ts 保持一致（online / wakeable / offline）。
-import { wakeReachable, type PresenceEntry, type WakeKind } from "@agentparty/shared";
+import { autoWakeReachable, type PresenceEntry, type WakeKind } from "@agentparty/shared";
 
 // 档位窗口与 `party who` 的 classify 保持一致，避免 who 说「可唤醒」而 send --reach 说「离线」自相矛盾：
 // online 需当前连着且新鲜(<STALE_MS)；wakeable 按 wakeReachable 统一口径（#47）：serve/watch 需
@@ -24,7 +24,7 @@ export function reachOf(name: string, presence: PresenceEntry[], now: number): R
   const age = now - seen;
   const wake = e.wake?.kind;
   if (e.state !== "offline" && age < STALE_MS) return { name, reach: "online", ...(wake ? { wake } : {}) };
-  if (wake !== undefined && wakeReachable(wake, age, STALE_MS) && age <= DEAD_MS) return { name, reach: "wakeable", wake };
+  if (wake !== undefined && autoWakeReachable(e, now, STALE_MS) && age <= DEAD_MS) return { name, reach: "wakeable", wake };
   return { name, reach: "offline", ...(wake ? { wake } : {}) };
 }
 

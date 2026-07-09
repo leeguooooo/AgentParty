@@ -246,6 +246,31 @@ describe("runServe", () => {
     expect(o.lines.filter((l) => l.includes("重启 serve 或加 --auto-upgrade")).length).toBe(1);
   });
 
+  test("passes a pending CLI upgrade notice into the runner context before handling a mention", async () => {
+    const s = closeAfterOneMention();
+    const notices: unknown[] = [];
+    const o = opts({
+      server: s.url,
+      autoUpgrade: false,
+      upgradeDeps: {
+        runningVersion: "0.2.72",
+        execPath: "/usr/local/bin/party",
+        readInstalledVersion: () => "0.2.73",
+      },
+      runCommand: async (_frame, ctx) => {
+        notices.push(ctx.cliUpgrade);
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(notices[0]).toMatchObject({
+      running_version: "0.2.72",
+      installed_version: "0.2.73",
+      auto_upgrade: false,
+      action_required: "ask_user",
+    });
+  });
+
   test("a failing advertise does not crash the server", async () => {
     const s = closeAfterOneMention();
     const seen: number[] = [];
@@ -497,6 +522,45 @@ describe("builtin runner", () => {
       reply_to: 44,
       body: "[session start: 019f35d9]\nanswer body",
     });
+  });
+
+  test("builtin runner prompt includes CLI upgrade notice and asks the user before continuing", async () => {
+    const { post } = postRecorder();
+    const workdir = tempDir();
+    let prompt = "";
+    const runProcess: RunnerProcess = async (args) => {
+      prompt = String(args.at(-1));
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, "I will ask first.\n");
+      return { code: 0, stdout: `session id: ${uuid(7)}\n`, stderr: "" };
+    };
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      runProcess,
+      post,
+    })(triggerFrame(46), {
+      ...runnerCtx(),
+      cliUpgrade: {
+        running_version: "0.2.72",
+        installed_version: "0.2.73",
+        auto_upgrade: false,
+        action_required: "ask_user",
+        message: "检测到 party CLI 已有新版本 v0.2.73（当前运行 v0.2.72）。继续任务前先询问用户是否升级。",
+        command: "curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh",
+      },
+    });
+
+    const ctx = JSON.parse(prompt);
+    expect(ctx.cli_upgrade).toMatchObject({
+      installed_version: "0.2.73",
+      action_required: "ask_user",
+    });
+    expect(ctx.cli_upgrade.message).toContain("先询问用户是否升级");
   });
 
   test("child non-zero exit posts blocked status with the runner log path and no final body", async () => {

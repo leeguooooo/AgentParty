@@ -27,6 +27,11 @@ describe("reachOf", () => {
     expect(deadWatch.reach).toBe("offline");
   });
 
+  test("human_driven watch → offline for send reach（#55）", () => {
+    const r = reachOf("bot", [p({ name: "bot", state: "offline", residency: "human_driven", wake: { kind: "watch" } })], NOW);
+    expect(r.reach).toBe("offline");
+  });
+
   test("stale webhook 仍 wakeable：服务端投递，agent 离线也真能唤醒（#47）", () => {
     // 2 分钟没露面但声明了 webhook → 仍可唤醒（webhook 由服务端 POST，不看连接）
     const recent = reachOf("bot", [p({ name: "bot", state: "offline", wake: { kind: "webhook" }, last_seen: NOW - 120_000 })], NOW);

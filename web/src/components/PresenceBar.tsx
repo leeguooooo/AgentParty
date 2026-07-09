@@ -37,6 +37,9 @@ interface Item {
   workflow: NonNullable<NonNullable<PresenceEntry["status"]>["workflow"]> | null;
   owner: string | null; // 所属人：agent 的操作者 / 人类的 email，仅连接中的参与者可知
   handle: string | null; // 人类全局昵称，仅人类且已设置时有值；agent 恒为 null，天然回退 owner/name
+  displayName: string | null;
+  avatarUrl: string | null;
+  avatarThumb: string | null;
   display: string;
   responsibility: string | null;
   connectionCount: number;
@@ -108,8 +111,9 @@ function ownerKey(item: Item): string {
 }
 
 function ownerLabel(item: Item): string {
-  // 显示优先级：handle > owner/account（email）> 原始 name。agent 恒无 handle，不受影响。
+  // 显示优先级：handle > SSO display name > owner/account（email）> 原始 name。agent 恒无 handle，不受影响。
   if (item.handle !== null && item.handle !== "") return item.handle;
+  if (item.displayName !== null && item.displayName !== "") return item.displayName;
   if (item.owner !== null && item.owner !== "") return item.owner;
   return item.name;
 }
@@ -149,6 +153,7 @@ export function PresenceBar({
     const owner = sender?.owner ?? entry?.account ?? assigned?.account ?? null;
     // 人类全局昵称：仅人类且已设置时有值，agent 恒为 null（协议层保证）。
     const handle = sender?.handle ?? entry?.handle ?? null;
+    const displayName = sender?.display_name ?? entry?.display_name ?? null;
     const kind = sender?.kind ?? entry?.kind ?? assigned?.kind ?? "agent";
     const connected = byName.has(name);
     const meta = {
@@ -161,7 +166,10 @@ export function PresenceBar({
       context: entry?.context ?? null,
       lineage: entry?.lineage ?? sender?.lineage ?? null,
       workflow: entry?.status?.workflow ?? null,
-      display: assigned?.display ?? handle ?? (kind === "human" && owner !== null ? owner : name),
+      display: assigned?.display ?? handle ?? displayName ?? (kind === "human" && owner !== null ? owner : name),
+      displayName,
+      avatarUrl: sender?.avatar_url ?? entry?.avatar_url ?? null,
+      avatarThumb: sender?.avatar_thumb ?? entry?.avatar_thumb ?? null,
       responsibility: assigned?.responsibility ?? null,
       connectionCount: sender?.connection_count ?? entry?.connection_count ?? (connected ? 1 : 0),
     };
@@ -177,6 +185,7 @@ export function PresenceBar({
         owner: null,
         handle: null,
         ...meta,
+        displayName: null,
         display: assigned?.display ?? name,
       };
     }
@@ -369,7 +378,11 @@ export function PresenceBar({
         }}
       >
         <div className="presence-group-head">
-          <span className={`d-dot d-dot--${representative.state}`} />
+          {representative.avatarThumb || representative.avatarUrl ? (
+            <img className="presence-group-avatar" src={representative.avatarThumb ?? representative.avatarUrl ?? ""} alt="" />
+          ) : (
+            <span className={`d-dot d-dot--${representative.state}`} />
+          )}
           <span className="presence-group-label">{group.label}</span>
           <span className="t-mono presence-group-count">
             {live}/{group.items.length}

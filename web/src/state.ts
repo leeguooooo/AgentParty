@@ -190,6 +190,9 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
             context: frame.context,
             lineage: frame.lineage,
             handle: frame.handle,
+            display_name: frame.display_name,
+            avatar_url: frame.avatar_url,
+            avatar_thumb: frame.avatar_thumb,
           },
         },
       };

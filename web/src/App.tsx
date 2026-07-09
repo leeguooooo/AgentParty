@@ -43,8 +43,10 @@ const PENDING_JOIN_KEY = "ap_pending_join";
 
 function meTitle(me: MeInfo): string {
   const parts = [`token: ${me.name}`, `kind: ${me.kind}`, `role: ${me.role}`];
+  if (me.display_name !== null) parts.push(`display: ${me.display_name}`);
   if (me.owner !== null) parts.push(`owner: ${me.owner}`);
   if (me.email !== null) parts.push(`email: ${me.email}`);
+  if (me.provider !== null) parts.push(`provider: ${me.provider}`);
   if (me.channel_scope != null) parts.push(`scope: ${me.channel_scope}`);
   return parts.join(" · ");
 }
@@ -429,8 +431,11 @@ export function App() {
         </a>
         {me !== null && (
           <span className="t-mono app-me" title={meTitle(me)}>
+            {me.avatar_thumb !== null || me.avatar_url !== null ? (
+              <img className="app-me-avatar" src={me.avatar_thumb ?? me.avatar_url ?? ""} alt="" />
+            ) : null}
             <span className="app-me-prefix">token</span>
-            <strong className="app-me-name">{me.name}</strong>
+            <strong className="app-me-name">{me.display_name ?? me.handle ?? me.name}</strong>
             <span className={`app-me-chip app-me-chip--${me.kind}`}>{me.kind}</span>
             {/* role 与 kind 相同时（human/human、agent/agent）不重复显示，只有 readonly 等差异角色才补一个 chip */}
             {me.role !== me.kind && <span className="app-me-chip">{me.role}</span>}

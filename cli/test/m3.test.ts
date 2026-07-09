@@ -1937,6 +1937,7 @@ describe("party status/history channel flag", () => {
   test("wake test sends to a serve adapter even when residency=bare (empirical, not refused)", async () => {
     mock = startRestMock((req) => {
       if (req.method === "GET" && req.path === "/api/channels") {
+        const now = Date.now();
         return Response.json({
           channels: [
             {
@@ -1949,8 +1950,8 @@ describe("party status/history channel flag", () => {
                   name: "agent",
                   state: "waiting",
                   note: null,
-                  ts: 111,
-                  last_seen: 111,
+                  ts: now,
+                  last_seen: now,
                   residency: "bare",
                   wake: { kind: "serve", verified_at: 100 },
                 },
@@ -1998,7 +1999,7 @@ describe("party status/history channel flag", () => {
     expect(reqsOf(mock, "POST", "/api/channels/dev/messages")).toHaveLength(1);
   });
 
-  test("wake test sends to advertised wake adapter and accepts linked status summary as resume", async () => {
+  test("wake test refuses stale watch/serve adapters before sending", async () => {
     mock = startRestMock((req) => {
       if (req.method === "GET" && req.path === "/api/channels") {
         return Response.json({
@@ -2011,10 +2012,56 @@ describe("party status/history channel flag", () => {
               presence: [
                 {
                   name: "agent",
-                  state: "waiting",
+                  state: "offline",
                   note: null,
                   ts: 111,
                   last_seen: 111,
+                  residency: "supervised",
+                  wake: { kind: "watch", verified_at: 100 },
+                },
+              ],
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["wake", "test", "@agent", "dev", "--timeout", "1", "--json"]);
+    expect(r.code).toBe(2);
+    const frame = JSON.parse(r.stdout.trim());
+    expect(frame).toMatchObject({
+      type: "wake_test",
+      result: "not_auto_wakeable",
+      presence: { residency: "supervised", wake_kind: "watch", last_seen: 111 },
+      phases: {
+        mention_delivered: { ok: false, seq: null },
+        wake_invoked: { ok: false, adapter: "watch" },
+        agent_resumed: { ok: false, seq: null },
+      },
+    });
+    expect(frame.reason).toContain("watch wake adapter is stale");
+    expect(reqsOf(mock, "POST", "/api/channels/dev/messages")).toHaveLength(0);
+  });
+
+  test("wake test sends to advertised wake adapter and accepts linked status summary as resume", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels") {
+        const now = Date.now();
+        return Response.json({
+          channels: [
+            {
+              slug: "dev",
+              title: null,
+              kind: "standing",
+              archived_at: null,
+              presence: [
+                {
+                  name: "agent",
+                  state: "waiting",
+                  note: null,
+                  ts: now,
+                  last_seen: now,
                   residency: "supervised",
                   wake: { kind: "serve", verified_at: 100 },
                 },

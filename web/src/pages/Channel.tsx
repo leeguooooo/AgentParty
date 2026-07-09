@@ -535,7 +535,7 @@ function AgentFilterPanel({
             aria-pressed={filter.mode === "only"}
             onClick={() => onMode("only")}
           >
-            <span>Only</span>
+            <span>{t("Channel.filter.only")}</span>
           </button>
           <button
             className={"d-btn agent-filter-mode" + (filter.mode === "except" ? " is-active" : "")}
@@ -543,7 +543,7 @@ function AgentFilterPanel({
             aria-pressed={filter.mode === "except"}
             onClick={() => onMode("except")}
           >
-            <span>Hide</span>
+            <span>{t("Channel.filter.hide")}</span>
           </button>
         </div>
         <div className="agent-filter-kinds" role="group" aria-label="agent filter kind">
@@ -569,7 +569,7 @@ function AgentFilterPanel({
         </span>
         {active && (
           <button className="d-btn agent-filter-clear" type="button" onClick={onClear}>
-            <span>Clear</span>
+            <span>{t("Channel.filter.clear")}</span>
           </button>
         )}
       </div>
@@ -609,6 +609,7 @@ function CatchupPanel({
   latestSeq: number;
   onCaughtUp: () => void;
 }) {
+  const t = useT();
   const chips = [
     `${digest.messages} new`,
     digest.mentions > 0 ? `${digest.mentions} @you` : null,
@@ -624,13 +625,13 @@ function CatchupPanel({
     <section className="catchup-panel" aria-label="while you were away">
       <div className="catchup-head">
         <div>
-          <h2 className="catchup-title">While you were away</h2>
+          <h2 className="catchup-title">{t("Channel.heading.catchup")}</h2>
           <p className="catchup-range t-mono">
             #{seenSeq + 1}..#{latestSeq}
           </p>
         </div>
         <button className="d-btn catchup-action" type="button" onClick={onCaughtUp}>
-          <span>Caught up</span>
+          <span>{t("Channel.caughtUp")}</span>
         </button>
       </div>
       <div className="catchup-chips t-mono">
@@ -689,17 +690,18 @@ function CompletionPanel({
   onToggle: () => void;
   onJump: (seq: number) => void;
 }) {
+  const t = useT();
   if (completions.length === 0) return null;
 
   return (
     <section className="completion-panel" aria-label="completion artifacts">
       <div className="completion-panel-head">
-        <h2 className="completion-title">Completions</h2>
+        <h2 className="completion-title">{t("Channel.heading.completions")}</h2>
         <span className="t-mono completion-count">
           {visible}/{completions.length}
         </span>
         <button className={"d-btn completion-toggle" + (enabled ? " is-active" : "")} type="button" onClick={onToggle}>
-          <span>{enabled ? "All" : "Only"}</span>
+          <span>{enabled ? t("Channel.filter.all") : t("Channel.filter.only")}</span>
         </button>
       </div>
       <ol className="completion-list">
@@ -726,6 +728,7 @@ function CompletionPanel({
 }
 
 function DecisionPanel({ messages }: { messages: MsgFrame[] }) {
+  const t = useT();
   const decisions = messages
     .filter((m) => m.kind === "status" && m.status?.decision !== undefined)
     .slice(-5)
@@ -735,7 +738,7 @@ function DecisionPanel({ messages }: { messages: MsgFrame[] }) {
   return (
     <section className="decision-panel" aria-label="host decisions">
       <div className="decision-panel-head">
-        <h2 className="decision-title">Host Decisions</h2>
+        <h2 className="decision-title">{t("Channel.heading.decisions")}</h2>
         <span className="t-mono decision-count">{decisions.length}</span>
       </div>
       <ol className="decision-list">
@@ -765,12 +768,13 @@ function DecisionPanel({ messages }: { messages: MsgFrame[] }) {
 }
 
 function TeamPanel({ teams }: { teams: TeamSummary[] }) {
+  const t = useT();
   if (teams.length === 0) return null;
 
   return (
     <section className="team-panel" aria-label="agent teams">
       <div className="team-panel-head">
-        <h2 className="team-title">Teams</h2>
+        <h2 className="team-title">{t("Channel.heading.teams")}</h2>
         <span className="t-mono team-count">{teams.length}</span>
       </div>
       <ol className="team-list">
@@ -822,12 +826,13 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
 }
 
 function HostBoardPanel({ board }: { board: HostBoard }) {
+  const t = useT();
   if (board.hosts.length === 0 && board.recommended_actions.length === 0 && board.conflicts.length === 0) return null;
 
   return (
     <section className="host-board-panel" aria-label="host board">
       <div className="host-board-head">
-        <h2 className="host-board-title">Host Board</h2>
+        <h2 className="host-board-title">{t("Channel.heading.hostBoard")}</h2>
         <span className="t-mono host-board-count">#{board.last_seq}</span>
       </div>
       {board.recommended_actions.length > 0 && (
@@ -1857,16 +1862,16 @@ export function ChannelPage({
           spellCheck={false}
           onChange={(e) => setSearch(e.target.value)}
           placeholder={t("Channel.search.placeholder")}
-          aria-label="search messages"
+          aria-label={t("Channel.search.aria")}
           autoFocus
         />
         {q !== "" && (
           <span className="t-mono chan-search-count">
             {searchLoading
-              ? "searching"
+              ? t("Channel.search.searching")
               : agentFilterActive
-                ? `${visibleSearchHits.length}/${searchHits.length} hits`
-                : `${searchHits.length} hits`}
+                ? t("Channel.search.hitsFiltered", { visible: visibleSearchHits.length, total: searchHits.length })
+                : t("Channel.search.hits", { count: searchHits.length })}
           </span>
         )}
       </div>
@@ -1878,8 +1883,8 @@ export function ChannelPage({
             spellCheck={false}
             list={senderListId}
             onChange={(e) => setSearchFrom(e.target.value)}
-            placeholder="from agent"
-            aria-label="search sender filter"
+            placeholder={t("Channel.search.fromPlaceholder")}
+            aria-label={t("Channel.search.fromAria")}
           />
           <datalist id={senderListId}>
             {knownSenders.map((name) => (
@@ -1893,8 +1898,8 @@ export function ChannelPage({
             step={1}
             value={searchSince}
             onChange={(e) => setSearchSince(e.target.value)}
-            placeholder="since seq"
-            aria-label="search since sequence"
+            placeholder={t("Channel.search.sincePlaceholder")}
+            aria-label={t("Channel.search.sinceAria")}
           />
           <input
             className="t-mono chan-filter-input chan-filter-input--short"
@@ -1904,8 +1909,8 @@ export function ChannelPage({
             step={1}
             value={searchLimit}
             onChange={(e) => setSearchLimit(e.target.value)}
-            placeholder="limit"
-            aria-label="search result limit"
+            placeholder={t("Channel.search.limitPlaceholder")}
+            aria-label={t("Channel.search.limitAria")}
           />
         </div>
       )}
@@ -2026,7 +2031,7 @@ export function ChannelPage({
           subtitle={
             activePanel === "charter" && charter !== null ? `rev ${charter.charter_rev}` :
             activePanel === "roles" ? t("Channel.roles.count", { count: String(structuredRoleCount) }) :
-            activePanel === "search" && q !== "" ? `${searchHits.length} hits` :
+            activePanel === "search" && q !== "" ? t("Channel.search.hits", { count: searchHits.length }) :
             undefined
           }
           onClose={() => setActivePanel(null)}
@@ -2132,7 +2137,7 @@ export function ChannelPage({
         )}
         {state.messages.length > 0 && q === "" && visibleMessages.length === 0 && (
           <p className="d-empty" role="status" aria-live="polite">
-            {completionOnly ? "no completion artifacts match selected agents" : "no messages match selected agents"}
+            {completionOnly ? t("Channel.empty.completionsFiltered") : t("Channel.empty.messagesFiltered")}
           </p>
         )}
         {q !== "" && !searchLoading && searchHits.length === 0 && searchInputError === null && searchError === null && (
@@ -2142,7 +2147,7 @@ export function ChannelPage({
         )}
         {q !== "" && !searchLoading && searchHits.length > 0 && visibleSearchHits.length === 0 && (
           <p className="d-empty" role="status" aria-live="polite">
-            no search hits match selected agents
+            {t("Channel.empty.searchFiltered")}
           </p>
         )}
       </div>

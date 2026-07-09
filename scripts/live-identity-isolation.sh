@@ -5,7 +5,7 @@
 # channel. Live mode requires an explicit non-production channel plus two tokens:
 #
 #   AGENTPARTY_LIVE=1 \
-#   AGENTPARTY_SERVER=https://agentparty.leeguoo.com \
+#   AGENTPARTY_SERVER=https://your-agentparty.example \
 #   AGENTPARTY_CHANNEL=tmp-your-slug \
 #   AGENTPARTY_TOKEN_A=ap_... \
 #   AGENTPARTY_TOKEN_B=ap_... \
@@ -232,7 +232,10 @@ JS
 }
 
 if [[ "$MODE" == "live" ]]; then
-  SERVER="${AGENTPARTY_SERVER:-https://agentparty.leeguoo.com}"
+  SERVER="${AGENTPARTY_SERVER:-}"
+  if [[ -z "$SERVER" ]]; then
+    fail "live mode requires AGENTPARTY_SERVER"
+  fi
   if [[ -z "${AGENTPARTY_CHANNEL:-}" ]]; then
     fail "live mode requires AGENTPARTY_CHANNEL; do not use production agentparty"
   fi

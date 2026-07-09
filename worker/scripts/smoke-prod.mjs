@@ -1,6 +1,13 @@
-const base = (process.env.AGENTPARTY_SMOKE_BASE ?? "https://agentparty.leeguoo.com").replace(/\/+$/, "");
+const rawBase = process.env.AGENTPARTY_SMOKE_BASE;
 const token = process.env.AGENTPARTY_SMOKE_TOKEN;
 const writeToken = process.env.AGENTPARTY_SMOKE_WRITE_TOKEN;
+
+if (!rawBase) {
+  console.error("AGENTPARTY_SMOKE_BASE is required.");
+  process.exit(1);
+}
+
+const base = rawBase.replace(/\/+$/, "");
 
 if (!token) {
   console.error("AGENTPARTY_SMOKE_TOKEN is required.");

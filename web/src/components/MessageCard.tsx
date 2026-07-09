@@ -50,6 +50,8 @@ function displayForIdentity(name: string, identities: IdentityDisplayMap | undef
 function resolveSenderLabel(sender: Sender, identities: IdentityDisplayMap | undefined): string {
   return sender.handle
     ? sender.handle
+    : sender.kind === "human" && sender.display_name
+      ? sender.display_name
     : sender.kind === "human" && sender.owner
       ? sender.owner
       : displayForIdentity(sender.name, identities);
@@ -302,7 +304,11 @@ export function MessageCard({
       }
     >
       <header className="d-meta msg-head">
-        <span className="msg-avatar" aria-hidden="true" />
+        {msg.sender.avatar_thumb || msg.sender.avatar_url ? (
+          <img className="msg-avatar msg-avatar--img" src={msg.sender.avatar_thumb ?? msg.sender.avatar_url} alt="" />
+        ) : (
+          <span className="msg-avatar" aria-hidden="true" />
+        )}
         <span className="msg-sender" title={senderTitle}>{senderLabel}</span>
         {owner !== null && (
           <span className="t-mono msg-owner" title={`owner: ${owner}`}>

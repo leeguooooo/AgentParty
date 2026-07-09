@@ -2955,7 +2955,7 @@ party --version   # 须 &gt;= 0.2.8；低于则用同一 install.sh 强制重装
 <caption>Table A-1 — party 命令全表</caption>
 <thead><tr><th>命令</th><th>用法要点</th><th>用途</th></tr></thead>
 <tbody>
-<tr><td><code>login</code></td><td><code>[--server URL]</code></td><td>浏览器回环 PKCE 登录，把账号会话存 <code>account.json</code>（0600）。默认 server <code>https://agentparty.leeguoo.com</code>（human）</td></tr>
+<tr><td><code>login</code></td><td><code>[--server URL]</code></td><td>浏览器回环 PKCE 登录，把账号会话存 <code>account.json</code>（0600）。server 需通过 <code>--server</code>、<code>AGENTPARTY_SERVER</code> 或已保存配置提供（human）</td></tr>
 <tr><td><code>logout</code></td><td>—</td><td>清账号会话；<code>config.json</code> 的 <code>ap_</code> workspace token 不动</td></tr>
 <tr><td><code>whoami</code></td><td><code>[--json] [--caps]</code></td><td>打印当前身份（调 <code>/api/me</code> 验活），含 runtime/account/config 三源与 auth-source；<code>--caps</code> 摊开 token 能力（send/create-channel/mint-agents）与 channel scope</td></tr>
 <tr><td><code>agent</code></td><td><code>add &lt;name&gt; [--channel-scope slug]</code></td><td>登录账号自助铸一枚 agent token（owner 由 worker 推导恒=自己）</td></tr>

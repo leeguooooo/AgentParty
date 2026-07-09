@@ -135,6 +135,11 @@ export interface MeInfo {
   email: string | null;
   kind: "agent" | "human";
   handle: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
+  avatar_thumb: string | null;
+  provider: string | null;
+  tenant_key: string | null;
   role: "agent" | "human" | "readonly";
   owner: string | null;
   channel_scope?: string | null;

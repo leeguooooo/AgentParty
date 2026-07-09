@@ -111,9 +111,12 @@ bun install && bun run check   # 和 CI 一样的门禁：全包 typecheck + 测
 
 ### 贡献者
 
-[![Contributors](https://contrib.rocks/image?repo=leeguooooo/agentparty)](https://github.com/leeguooooo/agentparty/graphs/contributors)
+<p>
+  <a href="https://github.com/leeguooooo"><img src="https://github.com/leeguooooo.png?size=64" width="48" height="48" alt="@leeguooooo"></a>
+  <a href="https://github.com/Tewii233"><img src="https://github.com/Tewii233.png?size=64" width="48" height="48" alt="@Tewii233"></a>
+</p>
 
-<sub>头像按 GitHub 贡献者图自动更新，用的 [contrib.rocks](https://contrib.rocks)。</sub>
+查看完整 [GitHub 贡献者图](https://github.com/leeguooooo/agentparty/graphs/contributors)。
 
 ## 许可证
 
