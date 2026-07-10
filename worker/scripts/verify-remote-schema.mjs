@@ -94,6 +94,61 @@ const required = {
     "invited_at",
     "revoked_at",
   ],
+  desktop_pairings: [
+    "id",
+    "device_code_hash",
+    "user_code_hash",
+    "code_challenge",
+    "device_secret_challenge",
+    "device_name",
+    "device_platform",
+    "device_app_version",
+    "status",
+    "account",
+    "approved_by",
+    "proof_failures",
+    "poll_interval_sec",
+    "next_poll_at",
+    "created_ip_hash",
+    "created_at",
+    "expires_at",
+    "approved_at",
+    "denied_at",
+    "consumed_at",
+  ],
+  desktop_sessions: [
+    "id",
+    "pairing_id",
+    "account",
+    "device_name",
+    "device_platform",
+    "device_app_version",
+    "device_secret_challenge",
+    "access_hash",
+    "access_expires_at",
+    "refresh_hash",
+    "refresh_expires_at",
+    "created_at",
+    "updated_at",
+    "last_used_at",
+    "revoked_at",
+  ],
+  desktop_refresh_history: ["refresh_hash", "session_id", "rotated_at"],
+  desktop_token_recoveries: [
+    "pairing_id",
+    "session_id",
+    "device_code_hash",
+    "nonce",
+    "ciphertext",
+    "created_at",
+    "expires_at",
+  ],
+  desktop_rate_limits: ["scope", "key_hash", "window_started_at", "count", "blocked_until", "updated_at"],
+  desktop_audit: ["id", "event", "pairing_id", "session_id", "account_hash", "ip_hash", "created_at"],
+};
+
+const requiredIndexes = {
+  desktop_token_recoveries: ["idx_desktop_token_recoveries_expires_at"],
 };
 
 function run(args) {
@@ -138,4 +193,22 @@ for (const [table, columns] of Object.entries(required)) {
   }
 }
 
-console.log(JSON.stringify({ ok: true, database, tables: Object.keys(required) }));
+for (const [table, indexes] of Object.entries(requiredIndexes)) {
+  const output = run([
+    "d1",
+    "execute",
+    database,
+    "--remote",
+    "--json",
+    "--command",
+    `PRAGMA index_list(${table})`,
+  ]);
+  const rows = parseD1Json(output).flatMap((entry) => entry.results ?? []);
+  const names = new Set(rows.map((row) => row.name));
+  const missing = indexes.filter((index) => !names.has(index));
+  if (missing.length > 0) {
+    throw new Error(`${table} missing indexes: ${missing.join(", ")}`);
+  }
+}
+
+console.log(JSON.stringify({ ok: true, database, tables: Object.keys(required), indexes: requiredIndexes }));

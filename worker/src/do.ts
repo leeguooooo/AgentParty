@@ -3019,6 +3019,18 @@ export class ChannelDO extends Server<Env> {
     // OIDC 人类 token 不落 D1，无法被吊销扫描；生命周期由 JWT exp 在 worker 边界管辖（spec §10）
     if (hash.startsWith("oidc:")) return true;
     try {
+      if (hash.startsWith("desktop:")) {
+        const row = await this.env.DB.prepare(
+          `SELECT id FROM desktop_sessions
+            WHERE access_hash = ?
+              AND revoked_at IS NULL
+              AND access_expires_at > ?
+              AND refresh_expires_at > ?`,
+        )
+          .bind(hash.slice("desktop:".length), Date.now(), Date.now())
+          .first<{ id: string }>();
+        return row !== null;
+      }
       const row = await this.env.DB.prepare(
         `SELECT id FROM tokens
           WHERE hash = ?

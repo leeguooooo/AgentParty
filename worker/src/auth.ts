@@ -1,5 +1,6 @@
 // bearer/token 工具 — worker 侧鉴权唯一入口
 import type { AgentLineage, SenderKind, TokenRole } from "@agentparty/shared";
+import { desktopCredentialHash } from "./desktop-pairing";
 
 export interface TokenIdentity {
   name: string;
@@ -18,6 +19,8 @@ export interface TokenIdentity {
   //   OIDC 人类恒无 scope；普通 ap_ token 为 null/undefined；scoped token 取 tokens.channel_scope 列。
   channel_scope?: string;
   lineage?: AgentLineage;
+  // Present only for a short-lived desktop access token. Used for device self-revocation.
+  desktopSessionId?: string;
 }
 
 export type BearerSource = "authorization" | "protocol" | "query";
@@ -81,12 +84,37 @@ export async function lookupToken(
   db: D1Database,
   token: string,
   oidc?: OidcConfig | null,
+  desktopSecret?: string,
 ): Promise<TokenIdentity | null> {
   if (!token) return null;
   // 双轨（spec §10）：JWT（三段点分、非 ap_ 前缀）且配置了 OIDC 时走 OIDC 验证；
   // 其余（含未配 OIDC 时的任何 JWT）一律回落 D1 hash 查询，保持机器 ap_ token 现状。
   if (oidc && !token.startsWith("ap_") && looksLikeJwt(token)) {
     return verifyOidcToken(token, oidc);
+  }
+  if (token.startsWith("apd_")) {
+    if (!desktopSecret || desktopSecret.trim().length < 32) return null;
+    const accessHash = await desktopCredentialHash(desktopSecret.trim(), "access", token);
+    const row = await db.prepare(
+      `SELECT id, account
+         FROM desktop_sessions
+        WHERE access_hash = ?
+          AND revoked_at IS NULL
+          AND access_expires_at > ?
+          AND refresh_expires_at > ?`,
+    )
+      .bind(accessHash, Date.now(), Date.now())
+      .first<{ id: string; account: string }>();
+    if (!row) return null;
+    return {
+      name: row.account,
+      role: "human",
+      kind: "human",
+      hash: `desktop:${accessHash}`,
+      owner: row.account,
+      account: row.account,
+      desktopSessionId: row.id,
+    };
   }
   const hash = await sha256Hex(token);
   const now = Date.now();

@@ -3,10 +3,12 @@ import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useRef, us
 import { ChannelList } from "./components/ChannelList";
 import { CreateChannel } from "./components/CreateChannel";
 import { DesktopSettings } from "./components/DesktopSettings";
+import { DesktopPairingGate } from "./components/DesktopPairingGate";
 import { DesktopUpdater } from "./components/DesktopUpdater";
 import { HandleSetup } from "./components/HandleSetup";
 import { TokenGate } from "./components/TokenGate";
 import { LanguageSwitcher } from "./components/LanguageSwitcher";
+import { ServerProfileAddGate, ServerSwitcher } from "./components/ServerProfiles";
 import {
   AuthError,
   type ChannelInfo,
@@ -39,14 +41,42 @@ import {
 } from "./lib/oidc";
 import { withRefreshLock } from "./lib/refreshLock";
 import { gateSession, jwtSub } from "./lib/sessionIdentity";
+import { initialTokenForRuntime, restoreDesktopAccess } from "./lib/desktopAuth";
+import {
+  desktopCredentialVaultForOrigin,
+  logoutDesktopSession,
+  migrateLegacyDesktopCredential,
+} from "./lib/desktopCredentials";
+import { isDesktopRuntime } from "./lib/desktopRuntime";
+import { setApiBase } from "./lib/base";
+import {
+  addCustomServerProfile,
+  loadActiveServerOrigin,
+  loadServerProfiles,
+  normalizeServerOrigin,
+  saveActiveServerOrigin,
+  type ServerProfile,
+} from "./lib/serverProfiles";
+import {
+  beginDesktopServerAdd,
+  beginDesktopServerPairing,
+  cancelDesktopServerPairing,
+  completeDesktopServerPairing,
+  initialDesktopServerPairingFlow,
+  switchActiveDesktopServer,
+} from "./lib/serverSwitch";
 import { ChannelPage } from "./pages/Channel";
 import { Home } from "./pages/Home";
-import { matchChannel, matchJoin, useRoute } from "./router";
+import { extractPairingCodeAndSanitizeUrl, PairPage } from "./pages/Pair";
+import { matchChannel, matchJoin, matchPair, useRoute } from "./router";
 import { useT } from "./i18n/useT";
 import "./i18n/strings/App";
 
 // 邀请链接兑换：未登录时跳 OIDC 会离开页面，用 sessionStorage 把 code 带过登录、回来接着兑换。
 const PENDING_JOIN_KEY = "ap_pending_join";
+const PENDING_PAIR_CODE_KEY = "ap_pending_pair_code";
+const PENDING_PAIR_ROUTE_KEY = "ap_pending_pair_route";
+const PENDING_PAIR_SERVER_KEY = "ap_pending_pair_server";
 
 function meTitle(me: MeInfo): string {
   const parts = [`token: ${me.name}`, `kind: ${me.kind}`, `role: ${me.role}`];
@@ -61,12 +91,23 @@ function meTitle(me: MeInfo): string {
 export function App() {
   const t = useT();
   const [path, navigate, replace] = useRoute();
-  const [token, setToken] = useState<string | null>(() => getToken());
+  const desktop = useRef(isDesktopRuntime()).current;
+  const [serverProfiles, setServerProfiles] = useState<ServerProfile[]>(() => loadServerProfiles());
+  const [activeOrigin, setActiveOrigin] = useState<string>(() => {
+    const origin = loadActiveServerOrigin();
+    if (desktop) setApiBase(origin);
+    return origin;
+  });
+  const [serverPairingFlow, setServerPairingFlow] = useState(() => initialDesktopServerPairingFlow(activeOrigin));
+  const [token, setToken] = useState<string | null>(() => initialTokenForRuntime(desktop, getToken));
   // 本标签当前身份（access token 的 sub）。共享 localStorage 里的 session 是否可用，
   // 必须与它比对——只比 token 字符串没用：同身份续期后 access token 本来就会变。
   const identityRef = useRef<string | null>(null);
   identityRef.current = jwtSub(token);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [desktopBoot, setDesktopBoot] = useState<"loading" | "ready" | "error">(desktop ? "loading" : "ready");
+  const [desktopNotice, setDesktopNotice] = useState<string | null>(null);
+  const [desktopLogoutPending, setDesktopLogoutPending] = useState(false);
   const [channels, setChannels] = useState<ChannelInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [me, setMe] = useState<MeInfo | null>(null);
@@ -77,6 +118,87 @@ export function App() {
   const [joinStatus, setJoinStatus] = useState<{ phase: "joining" | "error"; message?: string } | null>(null);
   // 命中 /auth/callback 时先挂起，避免闪一下登录闸；换 token 成功/失败后落定
   const [oidcPending, setOidcPending] = useState<boolean>(() => isCallbackPath());
+  const [initialPairCode] = useState<string | null>(() => {
+    let stored = sessionStorage.getItem(PENDING_PAIR_CODE_KEY);
+    if (matchPair(location.pathname)) {
+      const pairOrigin = normalizeServerOrigin(location.origin);
+      if (pairOrigin !== null) sessionStorage.setItem(PENDING_PAIR_SERVER_KEY, pairOrigin);
+      const consumed = extractPairingCodeAndSanitizeUrl(location.href);
+      history.replaceState(null, "", consumed.sanitizedPath);
+      sessionStorage.setItem(PENDING_PAIR_ROUTE_KEY, "1");
+      if (consumed.userCode !== null) {
+        stored = consumed.userCode;
+        sessionStorage.setItem(PENDING_PAIR_CODE_KEY, consumed.userCode);
+      }
+    }
+    return stored;
+  });
+
+  const restoreDesktop = useCallback(() => {
+    setDesktopBoot("loading");
+    setDesktopNotice(null);
+    return restoreDesktopAccess(desktopCredentialVaultForOrigin(activeOrigin), activeOrigin)
+      .then((accessToken) => {
+        setToken(accessToken);
+        setDesktopBoot("ready");
+        return accessToken;
+      })
+      .catch((cause: unknown) => {
+        setToken(null);
+        setDesktopBoot("error");
+        throw cause;
+      });
+  }, [activeOrigin]);
+
+  const switchDesktopOrigin = useCallback(async (origin: string) => {
+    const result = await switchActiveDesktopServer(origin);
+    setActiveOrigin(result.origin);
+    setServerPairingFlow(initialDesktopServerPairingFlow(result.origin));
+    setAuthError(null);
+    setChannels(null);
+    setListError(null);
+    setMe(null);
+    setToken(result.accessToken);
+    setDesktopBoot("ready");
+  }, []);
+
+  useEffect(() => {
+    if (!desktop) return;
+    let alive = true;
+    void (async () => {
+      let startupOrigin = activeOrigin;
+      const migratedOrigin = await migrateLegacyDesktopCredential();
+      if (!alive) return null;
+      if (migratedOrigin !== null) {
+        let nextProfiles = loadServerProfiles();
+        if (!nextProfiles.some((profile) => profile.origin === migratedOrigin)) {
+          nextProfiles = addCustomServerProfile(localStorage, {
+            label: new URL(migratedOrigin).host,
+            origin: migratedOrigin,
+          });
+        }
+        setServerProfiles(nextProfiles);
+        saveActiveServerOrigin(localStorage, migratedOrigin);
+        setApiBase(migratedOrigin);
+        setActiveOrigin(migratedOrigin);
+        setServerPairingFlow(initialDesktopServerPairingFlow(migratedOrigin));
+        startupOrigin = migratedOrigin;
+      } else {
+        startupOrigin = loadActiveServerOrigin();
+      }
+      return await restoreDesktopAccess(desktopCredentialVaultForOrigin(startupOrigin), startupOrigin);
+    })().then((accessToken) => {
+        if (!alive) return;
+        setToken(accessToken);
+        setDesktopBoot("ready");
+      })
+      .catch(() => {
+        if (!alive) return;
+        setToken(null);
+        setDesktopBoot("error");
+      });
+    return () => { alive = false; };
+  }, [desktop]);
 
   // 人类账号设置/修改 @handle（Task B2）：me chip 旁的入口开关 + 浮层定位（fixed + 视口内钳制，
   // 手法同 AgentTokens 那次 viewport 修复）；banner 关闭态只在本次会话内记，不落盘。
@@ -115,6 +237,13 @@ export function App() {
 
   // 真正踢回登录闸：分享模式先摘掉坏 ?t= 退回粘贴 token，否则清会话
   const hardLogout = useCallback((message: string) => {
+    if (desktop) {
+      setAuthError(message);
+      setChannels(null);
+      setToken(null);
+      setDesktopBoot("error");
+      return;
+    }
     if (isShareMode()) {
       const failed = currentShareToken();
       clearShareToken();
@@ -148,7 +277,7 @@ export function App() {
     setAuthError(message);
     setChannels(null);
     setToken(null);
-  }, []);
+  }, [desktop]);
 
   // 静默续期（去重）：refresh_token 会轮换，并发续期会互相作废。
   // 标签页内用 refreshInFlight 去重；**标签页之间**用 navigator.locks 互斥（#126）——
@@ -158,6 +287,7 @@ export function App() {
   // 拿到锁后先重读 session：很可能别的标签已经续好了，直接复用，一次请求都不发。
   const refreshInFlight = useRef<Promise<string> | null>(null);
   const doRefresh = useCallback((): Promise<string> => {
+    if (desktop) return Promise.reject(new Error("browser refresh is unavailable in desktop mode"));
     if (refreshInFlight.current) return refreshInFlight.current;
     const gate = gateSession(readSession(), identityRef.current);
     if (oidcRef.current === null || gate === "none") {
@@ -193,11 +323,21 @@ export function App() {
       });
     refreshInFlight.current = p;
     return p;
-  }, []);
+  }, [desktop]);
 
   // token 失效（401 / ws 被踢）：OIDC 会话先试静默续期，续到就不掉登录；续不动才真踢回登录闸。
   const onAuthFailed = useCallback(
     (message: string) => {
+      if (desktop) {
+        restoreDesktop()
+          .then((accessToken) => {
+            if (accessToken === null) throw new Error("desktop session is unavailable");
+            setChannels(null);
+            setListError(null);
+          })
+          .catch(() => hardLogout(message));
+        return;
+      }
       const sess = readSession();
       if (!isShareMode() && sess?.refreshToken != null && oidcRef.current !== null) {
         doRefresh()
@@ -210,7 +350,7 @@ export function App() {
       }
       hardLogout(message);
     },
-    [doRefresh, hardLogout],
+    [desktop, doRefresh, hardLogout, restoreDesktop],
   );
 
   // 启动时拉一次公开配置决定是否显示 SSO；若正落在 OAuth/OIDC 回调则就地换 token
@@ -218,7 +358,11 @@ export function App() {
   const callbackHandled = useRef(false);
   useEffect(() => {
     let alive = true;
-    fetchAuthConfig().then((cfg) => {
+    const pendingPairOrigin = normalizeServerOrigin(sessionStorage.getItem(PENDING_PAIR_SERVER_KEY) ?? "") ?? undefined;
+    const configOrigin = !desktop && (matchPair(location.pathname) || isCallbackPath())
+      ? pendingPairOrigin
+      : undefined;
+    fetchAuthConfig(configOrigin).then((cfg) => {
       if (!alive) return;
       const runtimeConfig = authConfigForRuntime(cfg);
       setOidc(runtimeConfig.oidc);
@@ -232,7 +376,7 @@ export function App() {
         replace("/");
         return;
       }
-      completeLogin(runtimeConfig.providers)
+      completeLogin(runtimeConfig.providers, configOrigin)
         .then((sess) => {
           if (!alive) return;
           saveSession(sess); // 存 access + refresh，供静默续期
@@ -243,7 +387,8 @@ export function App() {
           setOidcPending(false);
           // 若登录前是去兑换邀请链接，回到 /join/<code> 让下面的 effect（此时已有 token）完成加入
           const pendingJoin = sessionStorage.getItem(PENDING_JOIN_KEY);
-          replace(pendingJoin ? `/join/${pendingJoin}` : "/");
+          const pendingPair = sessionStorage.getItem(PENDING_PAIR_ROUTE_KEY) === "1";
+          replace(pendingPair ? "/pair" : pendingJoin ? `/join/${pendingJoin}` : "/");
         })
         .catch((err: unknown) => {
           if (!alive) return;
@@ -306,6 +451,7 @@ export function App() {
 
   // 登录身份：topbar 显示 token name/kind/role；readonly 分享链接 401 由页面其它路径接管，这里静默
   useEffect(() => {
+    if (!desktop && matchPair(path)) return;
     if (token === null) {
       setMe(null);
       setHandleSetupOpen(false);
@@ -323,12 +469,12 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [token]);
+  }, [desktop, path, token]);
 
   // OIDC access_token 仅 ~10min：到期前 60s 主动续期，标签页长开也不掉登录（"humans watch" 常态）。
   // 每次 token 变化重排下一次；非 OIDC 会话（粘贴的机器 token）无 refresh，跳过。
   useEffect(() => {
-    if (oidc === null || token === null) return;
+    if (desktop || oidc === null || token === null) return;
     const sess = readSession();
     if (sess?.refreshToken == null || sess.expiresAt == null) return;
     const nowSec = Math.floor(Date.now() / 1000);
@@ -342,10 +488,10 @@ export function App() {
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [oidc, token, doRefresh, hardLogout]);
+  }, [desktop, oidc, token, doRefresh, hardLogout]);
 
   useEffect(() => {
-    if (token === null) return;
+    if (token === null || (!desktop && matchPair(path))) return;
     let alive = true;
     setChannels(null);
     setListError(null);
@@ -363,10 +509,10 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [token, onAuthFailed]);
+  }, [activeOrigin, desktop, path, token, onAuthFailed]);
 
   useEffect(() => {
-    if (token === null) return;
+    if (token === null || (!desktop && matchPair(path))) return;
     let alive = true;
     const refresh = () => {
       if (document.visibilityState === "hidden") return;
@@ -394,7 +540,142 @@ export function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.clearInterval(timer);
     };
-  }, [token, onAuthFailed]);
+  }, [activeOrigin, desktop, path, token, onAuthFailed]);
+
+  useEffect(() => {
+    if (token === null || !matchPair(path)) return;
+    sessionStorage.removeItem(PENDING_PAIR_ROUTE_KEY);
+    sessionStorage.removeItem(PENDING_PAIR_CODE_KEY);
+    sessionStorage.removeItem(PENDING_PAIR_SERVER_KEY);
+  }, [path, token]);
+
+  const signOut = async () => {
+    if (desktop) {
+      if (desktopLogoutPending) return;
+      setDesktopLogoutPending(true);
+      const result = await logoutDesktopSession(
+        desktopCredentialVaultForOrigin(activeOrigin),
+        fetch,
+        [activeOrigin],
+      );
+      setDesktopLogoutPending(false);
+      setDesktopNotice(result.removedOnly ? t("App.desktop.logoutRemovedOnly") : null);
+      setDesktopBoot("ready");
+    } else {
+      clearToken();
+    }
+    setAuthError(null);
+    setChannels(null);
+    setListError(null);
+    setMe(null);
+    setHandleSetupOpen(false);
+    setHandleBannerDismissed(false);
+    setToken(null);
+  };
+
+  if (desktop && token === null) {
+    if (desktopBoot === "loading") {
+      return (
+        <main className="gate desktop-session-gate">
+          <h1 className="d-title gate-title">Agent<span className="d-hl">Party</span></h1>
+          <p className="banner" role="status" aria-live="polite">{t("App.desktop.restoring")}</p>
+        </main>
+      );
+    }
+    if (desktopBoot === "error") {
+      return (
+        <main className="gate desktop-session-gate">
+          <h1 className="d-title gate-title">Agent<span className="d-hl">Party</span></h1>
+          <section className="d-card gate-card">
+            <p className="banner banner--red" role="alert">{t("App.desktop.restoreFailed")}</p>
+            <ServerSwitcher
+              profiles={serverProfiles}
+              activeOrigin={activeOrigin}
+              onSwitch={switchDesktopOrigin}
+              onAddPair={() => setDesktopBoot("ready")}
+              onPair={(origin) => {
+                saveActiveServerOrigin(localStorage, origin);
+                setApiBase(origin);
+                setActiveOrigin(origin);
+                setServerPairingFlow(initialDesktopServerPairingFlow(origin));
+                setDesktopBoot("ready");
+              }}
+            />
+            <div className="desktop-session-actions">
+              <button
+                type="button"
+                className="d-btn"
+                onClick={() => void desktopCredentialVaultForOrigin(activeOrigin).delete().then(() => setDesktopBoot("ready"))}
+              >
+                {t("App.desktop.removeLocal")}
+              </button>
+              <button type="button" className="d-btn d-btn--primary" onClick={() => void restoreDesktop().catch(() => {})}>
+                {t("App.desktop.retry")}
+              </button>
+            </div>
+          </section>
+        </main>
+      );
+    }
+    return (
+      <>
+        {desktopNotice !== null && <p className="banner banner--yellow desktop-auth-notice" role="status">{desktopNotice}</p>}
+        <DesktopPairingGate
+          profiles={serverProfiles}
+          selectedOrigin={activeOrigin}
+          onSelectOrigin={(origin) => {
+            saveActiveServerOrigin(localStorage, origin);
+            setApiBase(origin);
+            setActiveOrigin(origin);
+            setServerPairingFlow(initialDesktopServerPairingFlow(origin));
+          }}
+          onProfilesChanged={setServerProfiles}
+          onAuthenticated={(accessToken, origin) => {
+            setDesktopNotice(null);
+            setAuthError(null);
+            setActiveOrigin(origin);
+            setServerPairingFlow(initialDesktopServerPairingFlow(origin));
+            setToken(accessToken);
+          }}
+        />
+      </>
+    );
+  }
+
+  if (desktop && token !== null && serverPairingFlow.phase === "adding") {
+    return (
+      <ServerProfileAddGate
+        profiles={serverProfiles}
+        activeOrigin={serverPairingFlow.activeOrigin}
+        onPair={(origin) => setServerPairingFlow((flow) => beginDesktopServerPairing(flow, origin))}
+        onProfilesChanged={setServerProfiles}
+        onCancel={() => setServerPairingFlow((flow) => cancelDesktopServerPairing(flow))}
+      />
+    );
+  }
+
+  if (desktop && token !== null && serverPairingFlow.phase === "pairing" && serverPairingFlow.targetOrigin !== null) {
+    return (
+      <DesktopPairingGate
+        profiles={serverProfiles}
+        selectedOrigin={serverPairingFlow.targetOrigin}
+        onSelectOrigin={(origin) => setServerPairingFlow((flow) => beginDesktopServerPairing(flow, origin))}
+        onProfilesChanged={setServerProfiles}
+        onExit={() => setServerPairingFlow((flow) => cancelDesktopServerPairing(flow))}
+        onAuthenticated={(accessToken, origin) => {
+          saveActiveServerOrigin(localStorage, origin);
+          setApiBase(origin);
+          setActiveOrigin(origin);
+          setServerPairingFlow((flow) => completeDesktopServerPairing(flow));
+          setAuthError(null);
+          setChannels(null);
+          setListError(null);
+          setMe(null);
+          setToken(accessToken);
+        }}
+      />
+    );
+  }
 
   if (oidcPending) {
     return (
@@ -437,10 +718,15 @@ export function App() {
   if (token === null) {
     return (
       <TokenGate
-        error={authError}
+        error={
+          !desktop && matchPair(path) && authProvidersResolved && authProviders.length === 0
+            ? t("Pair.providerMissing")
+            : authError
+        }
         providers={authProviders}
         onSso={(provider) => {
           setAuthError(null);
+          if (matchPair(path)) sessionStorage.setItem(PENDING_PAIR_ROUTE_KEY, "1");
           beginLogin(provider).catch(() => setAuthError("could not start sign-in"));
         }}
         onSubmit={(t) => {
@@ -453,6 +739,15 @@ export function App() {
         }}
       />
     );
+  }
+
+  if (!desktop && matchPair(path)) {
+    const pairServerOrigin = normalizeServerOrigin(sessionStorage.getItem(PENDING_PAIR_SERVER_KEY) ?? "")
+      ?? normalizeServerOrigin(location.origin);
+    if (pairServerOrigin === null) {
+      return <main className="gate"><p className="banner banner--red" role="alert">{t("Pair.inspect.failed")}</p></main>;
+    }
+    return <PairPage serverOrigin={pairServerOrigin} token={token} initialCode={initialPairCode} />;
   }
 
   const slug = matchChannel(path);
@@ -540,24 +835,28 @@ export function App() {
           </div>
         )}
         <DesktopSettings />
+        {desktop && (
+          <ServerSwitcher
+            profiles={serverProfiles}
+            activeOrigin={activeOrigin}
+            onSwitch={switchDesktopOrigin}
+            onAddPair={() => setServerPairingFlow(beginDesktopServerAdd(initialDesktopServerPairingFlow(activeOrigin)))}
+            onPair={(origin) => setServerPairingFlow(beginDesktopServerPairing(
+              initialDesktopServerPairingFlow(activeOrigin),
+              origin,
+            ))}
+          />
+        )}
         <DesktopUpdater />
         <LanguageSwitcher />
         {!isShareMode() && (
           <button
             type="button"
             className="app-signout t-mono"
-            onClick={() => {
-              clearToken();
-              setAuthError(null);
-              setChannels(null);
-              setListError(null);
-              setMe(null);
-              setHandleSetupOpen(false);
-              setHandleBannerDismissed(false);
-              setToken(null);
-            }}
+            disabled={desktopLogoutPending}
+            onClick={() => void signOut()}
           >
-            sign out
+            {desktopLogoutPending ? t("App.desktop.signingOut") : t("App.signOut")}
           </button>
         )}
       </header>
@@ -605,7 +904,7 @@ export function App() {
             </p>
           ) : slug !== null ? (
             <ChannelPage
-              key={slug}
+              key={`${activeOrigin}:${slug}`}
               slug={slug}
               token={token}
               mode={channels?.find((c) => c.slug === slug)?.mode ?? "normal"}

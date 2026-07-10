@@ -40,6 +40,16 @@ import {
   type TokenIdentity,
 } from "./auth";
 import { ChannelDO } from "./do";
+import {
+  decideDesktopPairing,
+  exchangeDesktopPairing,
+  inspectDesktopPairing,
+  listDesktopSessions,
+  refreshDesktopSession,
+  revokeCurrentDesktopSession,
+  revokeDesktopSessionByOwner,
+  startDesktopPairing,
+} from "./desktop-pairing";
 import { handleConflict, validateHandleFormat } from "./handle";
 import {
   buildMentionCard,
@@ -64,6 +74,7 @@ type AppEnv = Env & {
   AUTH_PROVIDERS?: string;
   LARK_CLIENT_SECRET?: string;
   FEISHU_CLIENT_SECRET?: string;
+  DESKTOP_PAIRING_SECRET?: string;
 };
 
 type AppContext = {
@@ -1054,7 +1065,9 @@ const requireBearer = createMiddleware<AppContext>(async (c, next) => {
         c.req.path.endsWith("/ws") &&
         c.req.header("upgrade")?.toLowerCase() === "websocket",
     });
-    const identity = bearer ? await lookupToken(c.env.DB, bearer.token, oidcConfigFromEnv(c.env, [CLI_CLIENT_ID])) : null;
+    const identity = bearer
+      ? await lookupToken(c.env.DB, bearer.token, oidcConfigFromEnv(c.env, [CLI_CLIENT_ID]), c.env.DESKTOP_PAIRING_SECRET)
+      : null;
     if (!identity) {
       return c.json(errorBody("unauthorized", "invalid or revoked token"), 401);
     }
@@ -1571,9 +1584,20 @@ app.get("/docs/statusline/", (c) => docsAsset(c, "/docs/statusline/index.html"))
 app.get("/docs/spec", (c) => docsAsset(c, "/docs/spec/index.html"));
 app.get("/docs/spec/", (c) => docsAsset(c, "/docs/spec/index.html"));
 
+app.use("/api/desktop/*", async (c, next) => {
+  await next();
+  c.res.headers.set("cache-control", "no-store, no-cache, max-age=0");
+  c.res.headers.set("pragma", "no-cache");
+  c.res.headers.set("referrer-policy", "no-referrer");
+});
+
 app.use("/api/*", async (c, next) => {
   const origin = c.req.header("origin") ?? "";
-  if (!DESKTOP_CORS_ORIGINS.has(origin)) return next();
+  if (!origin) return next();
+  const sameOrigin = origin === new URL(c.req.url).origin;
+  if (!sameOrigin && !DESKTOP_CORS_ORIGINS.has(origin)) {
+    return c.json(errorBody("forbidden", "origin not allowed"), 403);
+  }
 
   if (c.req.method === "OPTIONS") {
     return new Response(null, {
@@ -1595,6 +1619,23 @@ app.use("/api/*", async (c, next) => {
 
 app.get("/api/health", (c) => c.json({ ok: true }));
 app.get("/openapi.json", (c) => c.json(openapiDocument));
+
+// Desktop Device Flow: only start/token/refresh are unauthenticated. The short user code is
+// accepted exclusively by authenticated human inspect/decision routes and can never redeem.
+app.post("/api/desktop/pairings", (c) => startDesktopPairing(c.req.raw, c.env));
+app.post("/api/desktop/pairings/inspect", requireBearer, (c) =>
+  inspectDesktopPairing(c.req.raw, c.env, c.get("identity")),
+);
+app.post("/api/desktop/pairings/decision", requireBearer, (c) =>
+  decideDesktopPairing(c.req.raw, c.env, c.get("identity")),
+);
+app.post("/api/desktop/pairings/token", (c) => exchangeDesktopPairing(c.req.raw, c.env));
+app.post("/api/desktop/sessions/refresh", (c) => refreshDesktopSession(c.req.raw, c.env));
+app.get("/api/desktop/sessions", requireBearer, (c) => listDesktopSessions(c.env, c.get("identity")));
+app.delete("/api/desktop/sessions/:id", requireBearer, (c) =>
+  revokeDesktopSessionByOwner(c.env, c.get("identity"), c.req.param("id")),
+);
+app.post("/api/desktop/sessions/revoke", (c) => revokeCurrentDesktopSession(c.req.raw, c.env));
 
 // 公开配置：web 据此决定是否显示 "Sign in with leeguoo"（未配 OIDC 时 oidc:null）；
 // cli_client_id 供 CLI party login 知道用哪个 public client 跑回环 PKCE（spec §4）

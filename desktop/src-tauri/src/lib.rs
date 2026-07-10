@@ -1,11 +1,158 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 #[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, WindowEvent,
 };
+
+#[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+use tauri_plugin_deep_link::DeepLinkExt;
+
+const CREDENTIAL_SERVICE: &str = "com.agentparty.desktop";
+const CREDENTIAL_ACCOUNT: &str = "desktop-session";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredDesktopCredential {
+    refresh_token: String,
+    device_secret: String,
+    server_origin: String,
+    session_id: Option<String>,
+}
+
+fn parse_stored_credential(input: &str) -> Result<StoredDesktopCredential, String> {
+    let credential: StoredDesktopCredential = serde_json::from_str(input)
+        .map_err(|_| "desktop credential has an invalid shape".to_string())?;
+    if credential.refresh_token.is_empty() || credential.device_secret.is_empty() {
+        return Err("desktop credential is incomplete".to_string());
+    }
+    let origin = url::Url::parse(&credential.server_origin)
+        .map_err(|_| "desktop credential server is invalid".to_string())?;
+    let local_http = origin.scheme() == "http"
+        && origin.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+    if !matches!(origin.scheme(), "https" | "http")
+        || (origin.scheme() == "http" && !local_http)
+        || origin.host_str().is_none()
+        || origin.username() != ""
+        || origin.password().is_some()
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+        || origin.path() != "/"
+    {
+        return Err("desktop credential server is invalid".to_string());
+    }
+    Ok(credential)
+}
+
+#[cfg(desktop)]
+fn credential_entry(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(CREDENTIAL_SERVICE, account)
+        .map_err(|error| format!("secure credential store unavailable: {error}"))
+}
+
+fn credential_account_for_origin(origin: &str) -> Result<String, String> {
+    let parsed =
+        url::Url::parse(origin).map_err(|_| "desktop credential server is invalid".to_string())?;
+    if parsed.origin().ascii_serialization() != origin {
+        return Err("desktop credential server is not normalized".to_string());
+    }
+    let digest = Sha256::digest(origin.as_bytes());
+    Ok(format!("desktop-session:{digest:x}"))
+}
+
+trait CredentialBackend {
+    fn read(&self, account: &str) -> Result<Option<String>, String>;
+    fn write(&self, account: &str, credential: &str) -> Result<(), String>;
+    fn delete(&self, account: &str) -> Result<(), String>;
+}
+
+#[cfg(desktop)]
+struct NativeCredentialBackend;
+
+#[cfg(desktop)]
+impl CredentialBackend for NativeCredentialBackend {
+    fn read(&self, account: &str) -> Result<Option<String>, String> {
+        match credential_entry(account)?.get_password() {
+            Ok(credential) => Ok(Some(credential)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(format!("secure credential read failed: {error}")),
+        }
+    }
+
+    fn write(&self, account: &str, credential: &str) -> Result<(), String> {
+        credential_entry(account)?
+            .set_password(credential)
+            .map_err(|error| format!("secure credential write failed: {error}"))
+    }
+
+    fn delete(&self, account: &str) -> Result<(), String> {
+        match credential_entry(account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!("secure credential delete failed: {error}")),
+        }
+    }
+}
+
+fn migrate_legacy_credential<B: CredentialBackend>(backend: &B) -> Result<Option<String>, String> {
+    let Some(raw) = backend.read(CREDENTIAL_ACCOUNT)? else {
+        return Ok(None);
+    };
+    let credential = parse_stored_credential(&raw)?;
+    let account = credential_account_for_origin(&credential.server_origin)?;
+    if backend.read(&account)?.is_none() {
+        backend.write(&account, &raw)?;
+    }
+    backend.delete(CREDENTIAL_ACCOUNT)?;
+    Ok(Some(credential.server_origin))
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_credential_write(origin: String, credential: String) -> Result<(), String> {
+    let parsed = parse_stored_credential(&credential)?;
+    if parsed.server_origin != origin {
+        return Err("desktop credential origin does not match its slot".to_string());
+    }
+    let account = credential_account_for_origin(&origin)?;
+    NativeCredentialBackend.write(&account, &credential)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_credential_read(origin: String) -> Result<Option<String>, String> {
+    let account = credential_account_for_origin(&origin)?;
+    let credential = NativeCredentialBackend.read(&account)?;
+    if let Some(raw) = credential.as_deref() {
+        let parsed = parse_stored_credential(raw)?;
+        if parsed.server_origin != origin {
+            return Err("desktop credential origin does not match its slot".to_string());
+        }
+    }
+    Ok(credential)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_credential_delete(origin: String) -> Result<(), String> {
+    let account = credential_account_for_origin(&origin)?;
+    NativeCredentialBackend.delete(&account)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_credential_migrate() -> Result<Option<String>, String> {
+    migrate_legacy_credential(&NativeCredentialBackend)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum TrayAction {
@@ -96,24 +243,41 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
-        .manage(ExitGuard::default())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_notification::init());
+    let builder = tauri::Builder::default().manage(ExitGuard::default());
 
     #[cfg(desktop)]
     let builder = builder
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main(app);
+        }))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
-        ));
+        ))
+        .invoke_handler(tauri::generate_handler![
+            desktop_credential_read,
+            desktop_credential_write,
+            desktop_credential_delete,
+            desktop_credential_migrate
+        ]);
+
+    #[cfg(mobile)]
+    let builder = builder
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init());
 
     builder
         .setup(|app| {
             #[cfg(desktop)]
             {
                 install_tray(app)?;
+                #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+                app.deep_link().register_all()?;
                 if !std::env::args().any(|arg| arg == "--hidden") {
                     show_main(app.handle());
                 }
@@ -141,7 +305,33 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{tray_action, ExitGuard, TrayAction};
+    use std::{cell::RefCell, collections::HashMap};
+
+    use super::{
+        credential_account_for_origin, migrate_legacy_credential, parse_stored_credential,
+        tray_action, CredentialBackend, ExitGuard, TrayAction, CREDENTIAL_ACCOUNT,
+    };
+
+    #[derive(Default)]
+    struct MemoryCredentials(RefCell<HashMap<String, String>>);
+
+    impl CredentialBackend for MemoryCredentials {
+        fn read(&self, account: &str) -> Result<Option<String>, String> {
+            Ok(self.0.borrow().get(account).cloned())
+        }
+
+        fn write(&self, account: &str, credential: &str) -> Result<(), String> {
+            self.0
+                .borrow_mut()
+                .insert(account.to_string(), credential.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, account: &str) -> Result<(), String> {
+            self.0.borrow_mut().remove(account);
+            Ok(())
+        }
+    }
 
     #[test]
     fn maps_known_tray_actions() {
@@ -158,5 +348,58 @@ mod tests {
 
         guard.begin_quit();
         assert!(guard.is_quitting());
+    }
+
+    #[test]
+    fn accepts_only_the_refresh_and_device_credential_shape() {
+        let credential = parse_stored_credential(
+            r#"{"refreshToken":"refresh","deviceSecret":"device-secret","serverOrigin":"https://agentparty.leeguoo.com","sessionId":"session-1"}"#,
+        )
+        .expect("valid desktop credential");
+
+        assert_eq!(credential.refresh_token, "refresh");
+        assert_eq!(credential.device_secret, "device-secret");
+        assert_eq!(credential.server_origin, "https://agentparty.leeguoo.com");
+        assert_eq!(credential.session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn rejects_access_tokens_and_incomplete_credentials_before_keyring_io() {
+        assert!(parse_stored_credential(
+            r#"{"refreshToken":"refresh","deviceSecret":"device-secret","serverOrigin":"https://agentparty.leeguoo.com","sessionId":null,"accessToken":"must-not-persist"}"#,
+        )
+        .is_err());
+        assert!(parse_stored_credential(
+            r#"{"refreshToken":"refresh","serverOrigin":"https://agentparty.leeguoo.com","sessionId":null}"#,
+        )
+        .is_err());
+        assert!(parse_stored_credential(
+            r#"{"refreshToken":"refresh","deviceSecret":"device-secret","serverOrigin":"http://evil.example","sessionId":null}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn derives_a_stable_sha256_account_from_the_origin() {
+        assert_eq!(
+            credential_account_for_origin("https://agentparty.leeguoo.com").unwrap(),
+            "desktop-session:a54553e56c5db33ab39807028be8b3c039c7694a6382d1520644c72dc63918be"
+        );
+    }
+
+    #[test]
+    fn migrates_the_legacy_slot_once_and_removes_it() {
+        let store = MemoryCredentials::default();
+        let credential = r#"{"refreshToken":"refresh","deviceSecret":"device-secret","serverOrigin":"https://party.example.com","sessionId":null}"#;
+        store.write(CREDENTIAL_ACCOUNT, credential).unwrap();
+
+        assert_eq!(
+            migrate_legacy_credential(&store).unwrap().as_deref(),
+            Some("https://party.example.com")
+        );
+        let account = credential_account_for_origin("https://party.example.com").unwrap();
+        assert_eq!(store.read(&account).unwrap().as_deref(), Some(credential));
+        assert_eq!(store.read(CREDENTIAL_ACCOUNT).unwrap(), None);
+        assert_eq!(migrate_legacy_credential(&store).unwrap(), None);
     }
 }

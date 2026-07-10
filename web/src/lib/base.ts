@@ -1,4 +1,5 @@
 const API_BASE_KEY = "ap_api_base";
+let runtimeApiBase: string | null = null;
 
 function defaultApiBase(): string {
   return normalizeApiBase(import.meta.env.VITE_API_BASE);
@@ -9,6 +10,7 @@ function normalizeApiBase(base: string | undefined | null): string {
 }
 
 export function apiBase(): string {
+  if (runtimeApiBase !== null) return runtimeApiBase;
   try {
     return normalizeApiBase(localStorage.getItem(API_BASE_KEY) ?? defaultApiBase());
   } catch {
@@ -17,14 +19,16 @@ export function apiBase(): string {
 }
 
 export function setApiBase(base: string): void {
+  runtimeApiBase = normalizeApiBase(base);
   try {
-    localStorage.setItem(API_BASE_KEY, normalizeApiBase(base));
+    localStorage.setItem(API_BASE_KEY, runtimeApiBase);
   } catch {
     // Non-browser test/runtime environments have no localStorage.
   }
 }
 
 export function clearApiBase(): void {
+  runtimeApiBase = null;
   try {
     localStorage.removeItem(API_BASE_KEY);
   } catch {

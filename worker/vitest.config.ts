@@ -1,10 +1,38 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineWorkersConfig, readD1Migrations } from "@cloudflare/vitest-pool-workers/config";
 
 export default defineWorkersConfig(async () => {
-  const migrationsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "migrations");
+  const workerDir = path.dirname(fileURLToPath(import.meta.url));
+  const migrationsDir = path.join(workerDir, "migrations");
   const migrations = await readD1Migrations(migrationsDir);
+  // Fresh worktrees intentionally do not contain web/dist. Give workerd an isolated empty
+  // assets binding so backend tests never need to write into the forbidden web workspace.
+  const testRuntimeDir = mkdtempSync(path.join(tmpdir(), "agentparty-worker-vitest-"));
+  const assetsDir = path.join(testRuntimeDir, "assets");
+  mkdirSync(assetsDir);
+  const testWranglerConfig = path.join(testRuntimeDir, "wrangler.json");
+  writeFileSync(
+    testWranglerConfig,
+    JSON.stringify({
+      name: "agentparty-test",
+      main: path.join(workerDir, "src/index.ts"),
+      compatibility_date: "2026-06-01",
+      durable_objects: { bindings: [{ name: "CHANNELS", class_name: "ChannelDO" }] },
+      migrations: [{ tag: "v1", new_sqlite_classes: ["ChannelDO"] }],
+      assets: { directory: assetsDir, binding: "ASSETS", run_worker_first: ["/api/*", "/openapi.json"] },
+      d1_databases: [
+        {
+          binding: "DB",
+          database_name: "agentparty-test",
+          database_id: "00000000-0000-0000-0000-000000000000",
+          migrations_dir: migrationsDir,
+        },
+      ],
+    }),
+  );
   return {
     test: {
       // 单 workerd 运行时串行跑全部 spec，满载时个别 WS 握手/DO 交互偶发超过默认 5000ms
@@ -26,7 +54,7 @@ export default defineWorkersConfig(async () => {
           singleWorker: true,
           // ws 连接跨事件循环，隔离存储会与挂起的 ws 事件互踩；用唯一 slug/name 代替隔离
           isolatedStorage: false,
-          wrangler: { configPath: "./wrangler.jsonc" },
+          wrangler: { configPath: testWranglerConfig },
           miniflare: {
             bindings: {
               ADMIN_SECRET: "test-admin-secret",
@@ -38,6 +66,7 @@ export default defineWorkersConfig(async () => {
                 { id: "lark-main", kind: "lark", client_id: "cli_test_lark" },
               ]),
               LARK_CLIENT_SECRET: "test-lark-secret",
+              DESKTOP_PAIRING_SECRET: "test-desktop-pairing-secret-at-least-32-bytes",
             },
           },
         },

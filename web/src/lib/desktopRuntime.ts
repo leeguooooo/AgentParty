@@ -1,4 +1,5 @@
 import { isTauriEnvironment } from "./desktopUpdater";
+import { parsePairDeepLink, resolveAllowedVerificationUrl, type PairDeepLink } from "./desktopPairing";
 
 export type DesktopNotificationPermission =
   | "granted"
@@ -46,12 +47,23 @@ interface EventModule {
   listen(event: string, handler: () => void): Promise<() => void>;
 }
 
+interface OpenerModule {
+  openUrl(url: string | URL): Promise<void>;
+}
+
+interface DeepLinkModule {
+  getCurrent(): Promise<string[] | null>;
+  onOpenUrl(handler: (urls: string[]) => void): Promise<() => void>;
+}
+
 export interface DesktopRuntimeDependencies {
   isTauri(): boolean;
   loadNotification(): Promise<NotificationModule>;
   loadAutostart(): Promise<AutostartModule>;
   loadWindow(): Promise<WindowModule>;
   loadEvent(): Promise<EventModule>;
+  loadOpener(): Promise<OpenerModule>;
+  loadDeepLink(): Promise<DeepLinkModule>;
 }
 
 const defaultDependencies: DesktopRuntimeDependencies = {
@@ -60,6 +72,8 @@ const defaultDependencies: DesktopRuntimeDependencies = {
   loadAutostart: () => import("@tauri-apps/plugin-autostart"),
   loadWindow: () => import("@tauri-apps/api/window"),
   loadEvent: () => import("@tauri-apps/api/event"),
+  loadOpener: () => import("@tauri-apps/plugin-opener"),
+  loadDeepLink: () => import("@tauri-apps/plugin-deep-link"),
 };
 
 let dependencies = defaultDependencies;
@@ -148,6 +162,44 @@ export async function showAndFocusDesktopWindow(): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+export async function openDesktopVerificationUrl(
+  input: string,
+  allowedOrigins: readonly string[],
+): Promise<boolean> {
+  if (!isDesktopRuntime()) return false;
+  const url = resolveAllowedVerificationUrl(input, allowedOrigins);
+  if (url === null) return false;
+  try {
+    const opener = await dependencies.loadOpener();
+    await opener.openUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function listenForDesktopPairLinks(
+  allowedOrigins: readonly string[],
+  onPairLink: (link: PairDeepLink) => void,
+): Promise<() => void> {
+  if (!isDesktopRuntime()) return () => {};
+  try {
+    const deepLink = await dependencies.loadDeepLink();
+    const deliver = (urls: string[]) => {
+      for (const input of urls) {
+        const parsed = parsePairDeepLink(input, allowedOrigins);
+        if (parsed !== null) onPairLink(parsed);
+      }
+    };
+    const unlisten = await deepLink.onOpenUrl(deliver);
+    const current = await deepLink.getCurrent();
+    if (current !== null) deliver(current);
+    return unlisten;
+  } catch {
+    return () => {};
   }
 }
 

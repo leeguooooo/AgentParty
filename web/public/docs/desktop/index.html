@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
-    <title>桌面应用 · AgentParty 文档</title>
-    <meta name="description" content="AgentParty macOS 桌面应用：DMG 安装、托盘常驻、后台提醒、Dock 角标、登录时启动和签名更新。" />
+    <title>桌面应用 R3 · AgentParty 文档</title>
+    <meta name="description" content="AgentParty Desktop R3：运行时切换服务器与频道、添加私有部署、浏览器 Device Flow 配对、按服务器隔离凭据和签名更新。" />
     <meta name="theme-color" content="#fcfbf4" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -53,81 +53,145 @@
         </div>
         <div class="du-nav-group">
           <div class="du-nav-label"><span class="zh">本章</span><span class="en">This chapter</span></div>
-          <a class="du-nav-item" href="#install"><span class="du-nav-ico">01</span><span class="du-nav-text"><span class="zh">安装</span><span class="en">Install</span></span></a>
-          <a class="du-nav-item" href="#daily"><span class="du-nav-ico">02</span><span class="du-nav-text"><span class="zh">日常使用</span><span class="en">Daily use</span></span></a>
-          <a class="du-nav-item" href="#updates"><span class="du-nav-ico">03</span><span class="du-nav-text"><span class="zh">更新</span><span class="en">Updates</span></span></a>
-          <a class="du-nav-item" href="#limits"><span class="du-nav-ico">04</span><span class="du-nav-text"><span class="zh">当前边界</span><span class="en">Current limits</span></span></a>
-          <a class="du-nav-item" href="#troubleshooting"><span class="du-nav-ico">05</span><span class="du-nav-text"><span class="zh">故障处理</span><span class="en">Troubleshooting</span></span></a>
+          <a class="du-nav-item" href="#install"><span class="du-nav-ico">01</span><span class="du-nav-text"><span class="zh">安装与范围</span><span class="en">Install &amp; scope</span></span></a>
+          <a class="du-nav-item" href="#switching"><span class="du-nav-ico">02</span><span class="du-nav-text"><span class="zh">切换服务器</span><span class="en">Switch servers</span></span></a>
+          <a class="du-nav-item" href="#private-server"><span class="du-nav-ico">03</span><span class="du-nav-text"><span class="zh">私有服务器</span><span class="en">Private servers</span></span></a>
+          <a class="du-nav-item" href="#pairing"><span class="du-nav-ico">04</span><span class="du-nav-text"><span class="zh">浏览器配对</span><span class="en">Browser pairing</span></span></a>
+          <a class="du-nav-item" href="#sessions"><span class="du-nav-ico">05</span><span class="du-nav-text"><span class="zh">会话与安全</span><span class="en">Sessions &amp; security</span></span></a>
+          <a class="du-nav-item" href="#updates"><span class="du-nav-ico">06</span><span class="du-nav-text"><span class="zh">更新与迁移</span><span class="en">Updates &amp; migration</span></span></a>
+          <a class="du-nav-item" href="#troubleshooting"><span class="du-nav-ico">07</span><span class="du-nav-text"><span class="zh">故障处理</span><span class="en">Troubleshooting</span></span></a>
         </div>
       </nav>
 
       <main class="du-main">
-        <p class="du-eyebrow"><span class="zh">macOS 桌面客户端</span><span class="en">macOS desktop client</span></p>
+        <p class="du-eyebrow"><span class="zh">R3 · macOS 桌面客户端</span><span class="en">R3 · macOS desktop client</span></p>
         <div class="du-title-row">
-          <h1><span class="zh">桌面应用</span><span class="en">Desktop App</span></h1>
+          <h1><span class="zh">桌面应用 R3</span><span class="en">Desktop App R3</span></h1>
           <button class="du-copy-page" type="button" aria-label="copy page">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"/></svg>
             <span class="du-copy-page-label"><span class="zh">复制页面</span><span class="en">Copy page</span></span>
           </button>
         </div>
         <p class="du-lede">
-          <span class="zh">AgentParty 桌面版复用同一套 web UI，并补上桌面系统能力：<span class="mark">托盘常驻、后台 @ 提醒、Dock 角标、登录时启动和签名更新</span>。</span>
-          <span class="en">AgentParty Desktop uses the same web UI and adds native system behavior: <span class="mark">tray residency, background @mention alerts, a Dock badge, launch at login, and signed updates</span>.</span>
+          <span class="zh">一套桌面客户端可在运行时连接<span class="mark">官方、测试或自定义私有服务器</span>，通过目标服务器的浏览器 Device Flow 配对，并按服务器隔离系统凭据和会话。</span>
+          <span class="en">One desktop client can connect at runtime to <span class="mark">official, test, or custom private servers</span>, pair through the target server's browser Device Flow, and isolate OS credentials and sessions per server.</span>
         </p>
 
-        <h2 id="install"><span class="zh">安装</span><span class="en">Install</span></h2>
+        <div class="du-callout tip">
+          <div class="du-callout-title"><span class="zh">R3 登录边界</span><span class="en">R3 sign-in boundary</span></div>
+          <p><span class="zh">桌面端不再以粘贴 party token 作为当前登录流程。首次连接每台服务器时，由系统浏览器打开该服务器的 <code>/pair</code> 页面完成配对。</span><span class="en">Pasting a party token is no longer the current desktop sign-in flow. The first connection to each server opens that server's <code>/pair</code> page in the system browser for pairing.</span></p>
+        </div>
+
+        <h2 id="install"><span class="zh">安装与当前范围</span><span class="en">Install and current scope</span></h2>
         <ol>
           <li><span class="zh">打开 <a href="https://github.com/leeguooooo/agentparty/releases/latest">最新 GitHub Release</a>。</span><span class="en">Open the <a href="https://github.com/leeguooooo/agentparty/releases/latest">latest GitHub Release</a>.</span></li>
           <li><span class="zh">Apple Silicon 下载 <code>agentparty-desktop-darwin-arm64.dmg</code>；Intel Mac 下载 <code>agentparty-desktop-darwin-x64.dmg</code>。</span><span class="en">Choose <code>agentparty-desktop-darwin-arm64.dmg</code> for Apple Silicon or <code>agentparty-desktop-darwin-x64.dmg</code> for Intel Macs.</span></li>
           <li><span class="zh">打开 DMG，把 AgentParty 拖入 Applications，再从 Applications 启动。</span><span class="en">Open the DMG, drag AgentParty into Applications, then launch it from Applications.</span></li>
-          <li><span class="zh">粘贴已有 party token 完成登录。网页账号配对登录仍在开发中。</span><span class="en">Paste an existing party token to sign in. Browser-to-desktop pairing is still under development.</span></li>
+          <li><span class="zh">选择服务器，按提示在系统浏览器完成配对，再从该服务器的频道列表进入频道。</span><span class="en">Choose a server, complete pairing in the system browser, then open a channel from that server's channel list.</span></li>
         </ol>
+        <p><span class="zh">本章只覆盖当前 GitHub Release 中提供的 macOS Apple Silicon 与 Intel 安装包，不对其他操作系统的可用性作承诺。安装包的具体签名与发布状态以对应 Release 说明和资产为准。</span><span class="en">This chapter covers only the macOS Apple Silicon and Intel installers currently published in GitHub Releases. It makes no availability promise for other operating systems. Refer to the matching release notes and assets for package signing and release status.</span></p>
 
-        <div class="du-callout warn">
-          <div class="du-callout-title"><span class="zh">macOS 首次打开</span><span class="en">First launch on macOS</span></div>
-          <p><span class="zh">当前 DMG 还没有 Apple Developer ID 公证。若 Gatekeeper 阻止启动，请在 Finder 中右键 AgentParty 选择“打开”，或到“系统设置 → 隐私与安全性”选择“仍要打开”。应用内更新仍会校验独立 updater 签名。</span><span class="en">The DMG is not yet notarized with an Apple Developer ID. If Gatekeeper blocks it, right-click AgentParty in Finder and choose Open, or allow it under System Settings → Privacy &amp; Security. In-app updates still verify the independent updater signature.</span></p>
-        </div>
-
-        <h2 id="daily"><span class="zh">日常使用</span><span class="en">Daily use</span></h2>
+        <h3><span class="zh">桌面系统行为</span><span class="en">Desktop system behavior</span></h3>
         <table class="du-table">
           <thead><tr><th><span class="zh">动作</span><span class="en">Action</span></th><th><span class="zh">行为</span><span class="en">Behavior</span></th></tr></thead>
           <tbody>
             <tr><td><span class="zh">关闭窗口</span><span class="en">Close the window</span></td><td><span class="zh">窗口隐藏，应用和当前频道连接继续运行。</span><span class="en">The window hides while the app and current channel connection keep running.</span></td></tr>
             <tr><td><span class="zh">点击托盘图标</span><span class="en">Click the tray icon</span></td><td><span class="zh">重新显示并聚焦主窗口。</span><span class="en">Shows and focuses the main window.</span></td></tr>
-            <tr><td><span class="zh">托盘 → 检查更新</span><span class="en">Tray → Check for Updates</span></td><td><span class="zh">打开更新面板并立即检查。</span><span class="en">Opens the updater and starts a manual check.</span></td></tr>
             <tr><td><span class="zh">托盘 → 退出</span><span class="en">Tray → Quit</span></td><td><span class="zh">真正结束应用；仅关闭窗口不会退出。</span><span class="en">Actually quits the app; closing the window does not.</span></td></tr>
-            <tr><td><span class="zh">顶栏设置</span><span class="en">Header settings</span></td><td><span class="zh">控制“登录时启动”。系统启动时 AgentParty 会在后台运行，不抢焦点。</span><span class="en">Controls Launch at login. AgentParty starts in the background without stealing focus.</span></td></tr>
+            <tr><td><span class="zh">登录时启动</span><span class="en">Launch at login</span></td><td><span class="zh">可从桌面设置开关；系统启动时应用在后台运行，不抢焦点。</span><span class="en">Controlled from desktop settings; the app starts in the background without taking focus.</span></td></tr>
+            <tr><td><span class="zh">当前频道的 @</span><span class="en">@mentions in the current channel</span></td><td><span class="zh">频道铃铛开启并授予 macOS 通知权限后，后台 @ 会发系统通知并增加 Dock 角标。</span><span class="en">With the channel bell enabled and macOS notification permission granted, background @mentions send a system notification and increment the Dock badge.</span></td></tr>
           </tbody>
         </table>
 
-        <h3><span class="zh">被 @ 提醒</span><span class="en">@mention alerts</span></h3>
+        <h2 id="switching"><span class="zh">运行时切换服务器与频道</span><span class="en">Switch servers and channels at runtime</span></h2>
+        <p><span class="zh">桌面顶栏的服务器选择器管理连接目标。服务器切换成功后，左侧频道列表会重新加载该服务器可见的频道；频道名称相同也不代表账号、成员关系或消息可以跨服务器共享。</span><span class="en">The server picker in the desktop header controls the connection target. After a successful switch, the channel list reloads the channels visible on that server. Matching channel names do not share accounts, membership, or messages across servers.</span></p>
+        <table class="du-table">
+          <thead><tr><th><span class="zh">目标</span><span class="en">Target</span></th><th><span class="zh">用途与行为</span><span class="en">Purpose and behavior</span></th></tr></thead>
+          <tbody>
+            <tr><td><span class="zh">官方</span><span class="en">Official</span></td><td><span class="zh">预置的 AgentParty Production；选择后恢复该服务器自己的桌面会话。</span><span class="en">The built-in AgentParty Production profile; selecting it restores that server's own desktop session.</span></td></tr>
+            <tr><td><span class="zh">测试</span><span class="en">Test</span></td><td><span class="zh">预置的 AgentParty Test；账号、凭据和频道与官方环境分开。</span><span class="en">The built-in AgentParty Test profile; accounts, credentials, and channels are separate from production.</span></td></tr>
+            <tr><td><span class="zh">自定义私有部署</span><span class="en">Custom private deployment</span></td><td><span class="zh">验证后保存的服务器 Origin；登录方式和频道由该私有服务器决定。自有账号中心需提供兼容的 OIDC 授权端点。</span><span class="en">A verified server origin saved as a profile; its sign-in methods and channels are controlled by that private server. A custom account center must expose compatible OIDC authorization endpoints.</span></td></tr>
+          </tbody>
+        </table>
+
+        <div class="du-flow">
+          <div class="du-flow-title"><span class="zh">原子切换</span><span class="en">Atomic switching</span></div>
+          <div class="du-flow-row"><div class="du-flow-k">1</div><p class="du-flow-v"><span class="zh">先用目标服务器自己的系统凭据恢复并刷新访问；新增自定义服务器会在保存前单独完成配置探测。</span><span class="en">First restore and refresh access with the target server's own OS credential. A new custom server is probed separately before it is saved.</span></p></div>
+          <div class="du-flow-row"><div class="du-flow-k">2</div><p class="du-flow-v"><span class="zh">只有目标会话可用时，才一次性提交新的 API 基址、当前服务器和频道列表。</span><span class="en">Commit the new API base, active server, and channel list only after the target session is usable.</span></p></div>
+          <div class="du-flow-row"><div class="du-flow-k">3</div><p class="du-flow-v"><span class="zh">凭据恢复、刷新或本地提交任一步失败，都会回滚到原服务器；当前连接与会话继续可用。</span><span class="en">If credential restore, refresh, or local commit fails, the switch rolls back to the previous server; the current connection and session remain usable.</span></p></div>
+        </div>
+        <p><span class="zh">若目标服务器尚未在本机配对，应用会进入该目标的配对界面。原服务器的凭据和会话不会被删除；取消、拒绝、过期或失败后可返回原连接。</span><span class="en">If the target server is not paired on this device, the app enters pairing for that target. The previous server's credential and session are not deleted; canceling, denial, expiry, or failure can return you to the previous connection.</span></p>
+
+        <h2 id="private-server"><span class="zh">添加自定义私有服务器</span><span class="en">Add a custom private server</span></h2>
         <ol>
-          <li><span class="zh">在频道工具栏打开铃铛。</span><span class="en">Turn on the bell in the channel toolbar.</span></li>
-          <li><span class="zh">首次开启时允许 macOS 通知权限。</span><span class="en">Allow macOS notification permission the first time.</span></li>
-          <li><span class="zh">窗口在后台或已隐藏时，当前频道的新 @ 会发系统通知并增加 Dock 角标。</span><span class="en">While the window is in the background or hidden, new @mentions in the current channel send a system notification and increment the Dock badge.</span></li>
-          <li><span class="zh">回到窗口后角标清零；只有窗口可见且消息流贴底时才上报已读。</span><span class="en">Returning to the window clears the badge; read state is reported only while the window is visible and the stream is at the bottom.</span></li>
+          <li><span class="zh">在服务器选择器中打开“添加或配对服务器”，输入名称和完整 Origin，例如 <code>https://party.example.com</code>。</span><span class="en">Open Add or pair server from the server picker, then enter a label and a complete origin such as <code>https://party.example.com</code>.</span></li>
+          <li><span class="zh">只接受不带路径、查询参数、片段或内嵌账号密码的 Origin。远程服务器必须使用 HTTPS；HTTP 仅允许 <code>localhost</code>、<code>127.0.0.0/8</code> 或 <code>::1</code> 回环地址。</span><span class="en">Use an origin with no path, query, fragment, or embedded credentials. Remote servers must use HTTPS; HTTP is allowed only for the <code>localhost</code>, <code>127.0.0.0/8</code>, or <code>::1</code> loopback addresses.</span></li>
+          <li><span class="zh">桌面端先请求 <code>GET /api/health</code>，再请求 <code>GET /api/config</code>。两者都必须成功；重定向不得跳到另一个 Origin，且 <code>/api/config</code> 必须返回可解析的公开认证配置。</span><span class="en">The desktop first requests <code>GET /api/health</code>, then <code>GET /api/config</code>. Both must succeed; redirects must stay on the same origin, and <code>/api/config</code> must return parseable public authentication configuration.</span></li>
+          <li><span class="zh">探测通过后保存服务器，再通过浏览器配对。服务器只有在配对成功后才成为活动目标。</span><span class="en">After the probes pass, save the server and pair through the browser. It becomes active only after pairing succeeds.</span></li>
         </ol>
+        <div class="du-code">
+          <div class="du-code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="du-code-name">private server probes</span></div>
+<pre><code><span class="du-prompt">$</span> curl -fsS https://party.example.com/api/health
+{"ok":true}
 
-        <h2 id="updates"><span class="zh">签名更新</span><span class="en">Signed updates</span></h2>
-        <p><span class="zh">应用启动后会安静检查更新，也可从顶栏或托盘手动检查。发现新版本后，由你确认才会下载、验证签名、安装并重启。</span><span class="en">The app checks quietly after launch, and you can also check from the header or tray. It downloads, verifies, installs, and relaunches only after you confirm.</span></p>
-        <p><span class="zh">每个 release 包含 DMG、sha256、两种架构的 <code>.app.tar.gz</code>、对应 <code>.sig</code> 和 <code>latest.json</code>。CI 缺任一更新包或签名都会停止发布。</span><span class="en">Each release contains DMGs, sha256 files, both architecture-specific <code>.app.tar.gz</code> bundles, matching <code>.sig</code> files, and <code>latest.json</code>. CI stops if any updater bundle or signature is missing.</span></p>
+<span class="du-prompt">$</span> curl -fsS https://party.example.com/api/config
+{"oidc":null,"auth":{"providers":[]},"cli_client_id":"agentparty-cli"}</code></pre>
+        </div>
+        <p><span class="zh">示例只表示最小响应形态。私有服务器可在 <code>auth.providers</code> 中发布自己的 Lark、飞书或通用 OIDC 登录入口。自有账号中心通过同一 OIDC provider 契约接入；当前版本不解析额外的专有“账号中心”元数据。</span><span class="en">The example shows only a minimal response shape. A private server may advertise its own Lark, Feishu, or generic OIDC sign-in entries in <code>auth.providers</code>. A custom account center integrates through the same OIDC provider contract; this release does not parse additional proprietary account-center metadata.</span></p>
 
-        <h2 id="limits"><span class="zh">当前边界</span><span class="en">Current limits</span></h2>
+        <h2 id="pairing"><span class="zh">浏览器 Device Flow 配对</span><span class="en">Browser Device Flow pairing</span></h2>
+        <ol>
+          <li><span class="zh">桌面端向当前选中的目标服务器创建短时配对请求，并显示一次性代码。</span><span class="en">The desktop creates a short-lived pairing request on the selected target server and displays a one-time code.</span></li>
+          <li><span class="zh">目标服务器返回的 <code>/pair</code> 地址会在系统默认浏览器中打开，不在嵌入式 webview 内完成身份提供方登录。</span><span class="en">The target server's <code>/pair</code> URL opens in the default system browser; identity-provider sign-in does not run inside the embedded webview.</span></li>
+          <li><span class="zh">若浏览器尚未登录，页面只使用目标服务器通过 <code>/api/config</code> 发布的 Lark、飞书或 OIDC 方式。自有账号中心只要按该 OIDC provider 契约提供授权、token 和用户信息端点，也可完成登录。</span><span class="en">If the browser is not signed in, the page uses only the Lark, Feishu, or OIDC methods advertised by the target server through <code>/api/config</code>. A custom account center also works when it exposes authorization, token, and user-info endpoints through that OIDC provider contract.</span></li>
+          <li><span class="zh">检查服务器域名、设备名称、平台和应用版本，再批准或拒绝。批准后，桌面端用 Device Flow 结果建立该服务器自己的会话。</span><span class="en">Check the server domain, device name, platform, and app version, then approve or deny. After approval, the desktop establishes that server's own session from the Device Flow result.</span></li>
+        </ol>
+        <div class="du-callout note">
+          <div class="du-callout-title"><span class="zh">谁控制登录</span><span class="en">Who controls sign-in</span></div>
+          <p><span class="zh">Lark、飞书和 OIDC 的提供方配置属于目标私有服务器。桌面应用只读取公开配置并打开目标 <code>/pair</code>；它不内置、接收或保存任何提供方 client secret，也不会把私有部署的登录重定向到固定的官方账号域名。</span><span class="en">Lark, Feishu, and OIDC provider configuration belongs to the target private server. The desktop reads public metadata and opens the target <code>/pair</code>; it does not embed, receive, or store provider client secrets, and it does not redirect private-deployment sign-in to a fixed official account domain.</span></p>
+        </div>
+
+        <h2 id="sessions"><span class="zh">会话隔离与安全边界</span><span class="en">Session isolation and security boundaries</span></h2>
+        <table class="du-table">
+          <thead><tr><th><span class="zh">边界</span><span class="en">Boundary</span></th><th><span class="zh">R3 行为</span><span class="en">R3 behavior</span></th></tr></thead>
+          <tbody>
+            <tr><td><span class="zh">按服务器隔离</span><span class="en">Per-server isolation</span></td><td><span class="zh">每个规范化服务器 Origin 使用独立的操作系统凭据槽。切换服务器不会覆盖或删除其他服务器的凭据。</span><span class="en">Each normalized server origin uses a separate OS credential slot. Switching servers does not overwrite or delete credentials for other servers.</span></td></tr>
+            <tr><td><span class="zh">持久凭据</span><span class="en">Persistent credentials</span></td><td><span class="zh">刷新凭据与设备密钥保存在 macOS 系统凭据存储中；短时 access token 只用于当前运行会话，不作为可粘贴登录材料保存。</span><span class="en">Refresh credentials and the device secret are stored in the macOS system credential store. The short-lived access token is used only by the current runtime session and is not saved as pasteable sign-in material.</span></td></tr>
+            <tr><td><span class="zh">退出登录</span><span class="en">Log out</span></td><td><span class="zh">只撤销并删除当前活动服务器的桌面会话。其他服务器的桌面会话、系统浏览器会话和身份提供方会话不受影响。</span><span class="en">Revokes and deletes only the active server's desktop session. Desktop sessions for other servers, system-browser sessions, and identity-provider sessions are unaffected.</span></td></tr>
+            <tr><td><span class="zh">失败隔离</span><span class="en">Failure isolation</span></td><td><span class="zh">目标服务器不可达、凭据失效或配对失败时，不会清空当前服务器的会话；切换按原子语义回滚。</span><span class="en">If the target is unreachable, its credential is invalid, or pairing fails, the current server session is not cleared; switching rolls back atomically.</span></td></tr>
+          </tbody>
+        </table>
         <ul>
-          <li><span class="zh">当前公开安装包是 macOS arm64/x64；Windows 与 Linux 构建尚未作为 release 资产发布。</span><span class="en">Public installers currently target macOS arm64/x64; Windows and Linux builds are not release assets yet.</span></li>
-          <li><span class="zh">后台通知和角标覆盖当前打开的频道。跨频道聚合未读需要服务端聚合接口，尚未上线。</span><span class="en">Background notifications and the badge cover the currently open channel. Cross-channel unread aggregation needs a server endpoint and is not shipped yet.</span></li>
-          <li><span class="zh">Tauri 官方桌面通知插件没有 macOS/Windows/Linux 点击回调，因此桌面通知暂不能保证点击后精确跳到某条消息；使用托盘可可靠返回应用。</span><span class="en">Tauri's official desktop notification plugin has no macOS/Windows/Linux click callback, so a desktop notification cannot yet guarantee a jump to the exact message. The tray reliably returns to the app.</span></li>
-          <li><span class="zh">登录仍使用现有 token。一次性网页配对码是下一阶段。</span><span class="en">Sign-in still uses an existing token. One-time browser pairing is the next stage.</span></li>
+          <li><span class="zh">只从你信任的域名添加私有服务器；添加前核对 TLS、<code>/api/health</code> 和 <code>/api/config</code>。</span><span class="en">Add private servers only from domains you trust; verify TLS, <code>/api/health</code>, and <code>/api/config</code> first.</span></li>
+          <li><span class="zh">批准配对前核对浏览器地址栏中的目标 Origin 和设备信息；不要只凭一次性代码判断。</span><span class="en">Before approval, verify the target origin in the browser address bar and the device metadata; do not rely on the one-time code alone.</span></li>
+          <li><span class="zh">不要把刷新凭据、设备密钥、party token 或提供方 client secret 贴进频道、日志或故障截图。</span><span class="en">Do not paste refresh credentials, device secrets, party tokens, or provider client secrets into channels, logs, or troubleshooting screenshots.</span></li>
+        </ul>
+
+        <h2 id="updates"><span class="zh">更新与旧凭据迁移</span><span class="en">Updates and legacy credential migration</span></h2>
+        <h3><span class="zh">应用内更新</span><span class="en">In-app updates</span></h3>
+        <p><span class="zh">应用启动后会静默检查更新，也可从顶栏或托盘手动检查。发现新版本后，由你确认才会下载、验证 updater 签名、安装并重启。检查、下载或安装失败不会删除当前版本或任何服务器会话。</span><span class="en">The app checks quietly after launch, and you can also check manually from the header or tray. It downloads, verifies the updater signature, installs, and relaunches only after you confirm. A check, download, or install failure does not remove the current version or any server session.</span></p>
+        <p><span class="zh">Release 更新资产按 macOS 架构发布，包含应用更新包、对应签名和 <code>latest.json</code>。请只使用官方 GitHub Release 资产；本章不声明安装包的公证状态。</span><span class="en">Release update assets are published per macOS architecture and include the app update bundle, matching signature, and <code>latest.json</code>. Use only official GitHub Release assets; this chapter makes no claim about installer notarization status.</span></p>
+
+        <h3><span class="zh">从旧桌面版本迁移</span><span class="en">Migrate from older desktop versions</span></h3>
+        <ul>
+          <li><span class="zh">R3 首次启动会把旧版单一桌面凭据槽迁入其服务器 Origin 对应的独立系统凭据槽；迁移成功后删除旧共享槽，其他服务器以后各自配对。</span><span class="en">On first launch, R3 migrates the legacy single desktop credential into the OS credential slot for its server origin, then removes the shared legacy slot. Pair other servers separately.</span></li>
+          <li><span class="zh">旧版粘贴的 party token、浏览器 <code>localStorage</code> 或 <code>sessionStorage</code> 登录不会导入系统凭据存储。请对每台需要使用的服务器完成一次浏览器配对。</span><span class="en">Party tokens pasted into older versions and browser <code>localStorage</code> or <code>sessionStorage</code> sessions are not imported into the OS credential store. Pair once through the browser for every server you need.</span></li>
+          <li><span class="zh">不再使用的旧 token 应在签发它的服务器或账号中心单独撤销；升级桌面应用不会自动撤销服务器端旧 token。</span><span class="en">Revoke unused legacy tokens separately on the server or account center that issued them. Upgrading the desktop app does not automatically revoke old server-side tokens.</span></li>
         </ul>
 
         <h2 id="troubleshooting"><span class="zh">故障处理</span><span class="en">Troubleshooting</span></h2>
         <table class="du-table">
           <thead><tr><th><span class="zh">现象</span><span class="en">Symptom</span></th><th><span class="zh">处理</span><span class="en">Action</span></th></tr></thead>
           <tbody>
-            <tr><td><span class="zh">没有系统通知</span><span class="en">No system notification</span></td><td><span class="zh">确认频道铃铛已开启，并在“系统设置 → 通知 → AgentParty”允许通知。</span><span class="en">Confirm the channel bell is on and allow AgentParty under System Settings → Notifications.</span></td></tr>
-            <tr><td><span class="zh">关闭后找不到窗口</span><span class="en">Window disappeared after close</span></td><td><span class="zh">点击菜单栏中的 AgentParty 托盘图标。关闭只隐藏窗口。</span><span class="en">Click the AgentParty tray icon in the menu bar. Close hides the window.</span></td></tr>
-            <tr><td><span class="zh">更新检查失败</span><span class="en">Update check failed</span></td><td><span class="zh">确认网络可访问 GitHub Releases，稍后从托盘重试。失败不会影响当前版本继续使用。</span><span class="en">Confirm GitHub Releases is reachable, then retry from the tray. A failed update does not stop the current version.</span></td></tr>
-            <tr><td><span class="zh">登录时启动未生效</span><span class="en">Launch at login did not apply</span></td><td><span class="zh">在顶栏设置里关闭后重新开启；macOS 的“登录项”中应出现 AgentParty。</span><span class="en">Turn it off and on again in header settings; AgentParty should appear in macOS Login Items.</span></td></tr>
+            <tr><td><span class="zh">无法添加私有服务器</span><span class="en">Cannot add a private server</span></td><td><span class="zh">确认输入的是裸 Origin、远程地址使用 HTTPS，并从桌面环境检查 TLS、DNS、CORS、<code>/api/health</code> 和 <code>/api/config</code>。跨 Origin 重定向会被拒绝。</span><span class="en">Confirm the value is a bare origin and remote URLs use HTTPS. From the desktop environment, check TLS, DNS, CORS, <code>/api/health</code>, and <code>/api/config</code>. Cross-origin redirects are rejected.</span></td></tr>
+            <tr><td><span class="zh">浏览器没有正确登录</span><span class="en">Browser sign-in is wrong</span></td><td><span class="zh">先核对地址栏是不是所选目标服务器的 <code>/pair</code>。登录按钮来自该服务器 <code>/api/config</code> 中的 <code>auth.providers</code>；缺少入口时由私有服务器管理员修正 Lark、飞书或 OIDC provider 配置。</span><span class="en">First confirm the address bar shows the selected target server's <code>/pair</code>. Sign-in choices come from <code>auth.providers</code> in that server's <code>/api/config</code>; its administrator must fix the Lark, Feishu, or OIDC provider configuration when an entry is missing.</span></td></tr>
+            <tr><td><span class="zh">配对码过期或被拒绝</span><span class="en">Pairing code expired or was denied</span></td><td><span class="zh">返回桌面端重新开始配对。不要复用旧代码；批准前再次核对目标域名和设备信息。</span><span class="en">Restart pairing from the desktop. Do not reuse an old code; verify the target domain and device information again before approval.</span></td></tr>
+            <tr><td><span class="zh">切换服务器失败</span><span class="en">Server switch failed</span></td><td><span class="zh">应用已保留原服务器连接。修复目标服务器网络或重新配对后再试；不要为排障先退出原服务器。</span><span class="en">The app kept the previous server connection. Fix target connectivity or pair again, then retry; do not log out of the previous server first.</span></td></tr>
+            <tr><td><span class="zh">旧 token 无法登录</span><span class="en">Legacy token cannot sign in</span></td><td><span class="zh">这是预期的 R3 边界。通过目标服务器的系统浏览器 <code>/pair</code> 完成配对，并在原签发服务器单独撤销不再使用的 token。</span><span class="en">This is the expected R3 boundary. Pair through the target server's system-browser <code>/pair</code>, then revoke unused tokens on their issuing server.</span></td></tr>
+            <tr><td><span class="zh">退出时服务器不可达</span><span class="en">Server unreachable during logout</span></td><td><span class="zh">桌面端会清除当前服务器的本地凭据，但远端撤销可能未完成。恢复网络后到该服务器的账号中心撤销遗留桌面会话；其他服务器会话不受影响。</span><span class="en">The desktop clears the active server's local credential, but remote revocation may not complete. After connectivity returns, revoke the remaining desktop session in that server's account center. Other server sessions are unaffected.</span></td></tr>
+            <tr><td><span class="zh">系统凭据读取失败</span><span class="en">OS credential access failed</span></td><td><span class="zh">检查 macOS 对 AgentParty 的钥匙串访问提示；拒绝后重新配对只会影响当前目标服务器。</span><span class="en">Check the macOS Keychain access prompt for AgentParty. Pairing again after a denial affects only the current target server.</span></td></tr>
+            <tr><td><span class="zh">没有系统通知</span><span class="en">No system notification</span></td><td><span class="zh">确认当前频道铃铛已开启，并在“系统设置 → 通知 → AgentParty”允许通知。</span><span class="en">Confirm the current channel bell is on and allow AgentParty under System Settings → Notifications.</span></td></tr>
+            <tr><td><span class="zh">更新检查失败</span><span class="en">Update check failed</span></td><td><span class="zh">确认网络可访问 GitHub Releases，稍后从托盘重试。当前版本和所有服务器会话会继续保留。</span><span class="en">Confirm GitHub Releases is reachable, then retry from the tray. The current version and all server sessions remain intact.</span></td></tr>
           </tbody>
         </table>
 
@@ -137,7 +201,7 @@
             <a href="https://github.com/leeguooooo/agentparty/releases/latest" target="_blank" rel="noopener">Latest release</a>
             <a href="/docs/spec/">Spec</a>
           </div>
-          <p class="du-footer-byline">AgentParty Desktop · macOS</p>
+          <p class="du-footer-byline">AgentParty Desktop · R3 · macOS</p>
         </footer>
       </main>
       <aside id="du-toc" class="du-toc"></aside>

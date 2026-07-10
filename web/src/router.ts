@@ -35,3 +35,7 @@ export function matchJoin(path: string): string | null {
   const m = path.match(/^\/join\/([A-Za-z0-9_-]+)\/?$/);
   return m?.[1] ?? null;
 }
+
+export function matchPair(path: string): boolean {
+  return /^\/pair\/?$/.test(path);
+}

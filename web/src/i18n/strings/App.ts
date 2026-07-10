@@ -13,6 +13,13 @@ export const AppStrings: LocaleDict = {
     "App.handle.banner": "You haven't set a display name yet — pick one so others can @mention you easily.",
     "App.handle.bannerAction": "set now",
     "App.handle.bannerDismiss": "dismiss",
+    "App.signOut": "sign out",
+    "App.desktop.restoring": "Restoring your secure desktop session",
+    "App.desktop.restoreFailed": "The secure desktop session could not be refreshed.",
+    "App.desktop.retry": "Retry",
+    "App.desktop.removeLocal": "Remove from this device",
+    "App.desktop.signingOut": "signing out",
+    "App.desktop.logoutRemovedOnly": "Offline: the session was removed only from this device.",
   },
   zh: {
     "App.join.failed": "加入失败",
@@ -26,6 +33,13 @@ export const AppStrings: LocaleDict = {
     "App.handle.banner": "你还没有设置显示名——设置后其他人可以更方便地 @提到你",
     "App.handle.bannerAction": "现在设置",
     "App.handle.bannerDismiss": "关闭",
+    "App.signOut": "退出登录",
+    "App.desktop.restoring": "正在恢复安全桌面会话",
+    "App.desktop.restoreFailed": "无法刷新安全桌面会话。",
+    "App.desktop.retry": "重试",
+    "App.desktop.removeLocal": "仅从此设备移除",
+    "App.desktop.signingOut": "正在退出",
+    "App.desktop.logoutRemovedOnly": "当前离线：会话仅从此设备移除。",
   },
 };
 
