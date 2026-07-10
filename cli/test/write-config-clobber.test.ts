@@ -218,7 +218,10 @@ describe("realpath 后不得丢掉旧 workspaceId 的游标 (#104 迁移)", () =
   });
 
   test("迁移是幂等的：新目录已存在时不覆盖它（顺序很重要，先有新的再出现旧的）", () => {
-    const d = ws();
+    // 必须用 symlink 路径：legacy 哈希取自 symlink 路径 d，当前 workspaceId 取自 realpath。
+    // 用普通 ws() 时，Linux 上 hash(d) == workspaceId(d)，legacy 目录会和当前目录撞成同一个，
+    // saveCursor(999) 写的 state 被随后的 cursor:111 直接覆盖 —— 假失败。
+    const { via: d } = symlinkedDir();
     // 先让当前 workspace 有一个更新的游标（这一步内部就会跑一次迁移，此时没有 legacy）
     saveCursor("dev", 999, d);
     expect(loadCursor("dev", d)).toBe(999);
