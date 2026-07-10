@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { PresenceEntry, Sender } from "@agentparty/shared";
-import { activeMentionQuery, filterCandidates, mentionCandidates } from "./mentions";
+import { activeMentionQuery, filterCandidates, mentionCandidates, parseDraftMentions } from "./mentions";
 
 const NOW = 1_000_000_000;
 
@@ -287,5 +287,27 @@ describe("filterCandidates", () => {
   });
   test("empty query returns all (capped)", () => {
     expect(filterCandidates(cands, "").length).toBe(3);
+  });
+});
+
+// 这个函数不只喂草稿状态条——发送/编辑路径也用它决定真正上报给服务端的 mentions 数组（issue #124），
+// 所以边界规则的回归必须被 CI 拦住，而不是靠人工在页面上试。
+describe("parseDraftMentions", () => {
+  test("不吃单词内部的 @（email / git 地址）", () => {
+    expect(parseDraftMentions("deploy@buildbot ping @alpha")).toEqual(["alpha"]);
+    expect(parseDraftMentions("mail me@x.com about @bob")).toEqual(["bob"]);
+  });
+  test("行首与空白后的 @ 都算", () => {
+    expect(parseDraftMentions("@alpha hi")).toEqual(["alpha"]);
+    expect(parseDraftMentions("hi\n@bob")).toEqual(["bob"]);
+  });
+  test("去重且保序", () => {
+    expect(parseDraftMentions("@bob @alice @bob")).toEqual(["bob", "alice"]);
+  });
+  test("过滤 system", () => {
+    expect(parseDraftMentions("@system hi @bob")).toEqual(["bob"]);
+  });
+  test("没有 mention 时返回空数组", () => {
+    expect(parseDraftMentions("just a plain message")).toEqual([]);
   });
 });
