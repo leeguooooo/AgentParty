@@ -5,6 +5,7 @@ import {
   finishDesktopPairing,
   logoutDesktopSession,
   refreshDesktopSession,
+  migrateLegacyDesktopCredential,
   type DesktopCredential,
   type DesktopCredentialVault,
 } from "./desktopCredentials";
@@ -31,7 +32,7 @@ describe("desktop secure credentials", () => {
   test("round-trips the credential through native commands", async () => {
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
     let stored: string | null = null;
-    const vault = createInvokeCredentialVault(async (command, args) => {
+    const vault = createInvokeCredentialVault("https://agentparty.leeguoo.com", async (command, args) => {
       calls.push({ command, args });
       if (command === "desktop_credential_read") return stored;
       if (command === "desktop_credential_write") stored = String(args?.credential);
@@ -55,6 +56,35 @@ describe("desktop secure credentials", () => {
       "desktop_credential_delete",
       "desktop_credential_read",
     ]);
+    expect(calls.every((call) => call.args?.origin === "https://agentparty.leeguoo.com")).toBe(true);
+  });
+
+  test("isolates native credential slots by normalized server origin", async () => {
+    const slots = new Map<string, string>();
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      const origin = String(args?.origin);
+      if (command === "desktop_credential_write") slots.set(origin, String(args?.credential));
+      if (command === "desktop_credential_delete") slots.delete(origin);
+      return command === "desktop_credential_read" ? slots.get(origin) ?? null : null;
+    };
+    const prod = createInvokeCredentialVault("https://agentparty.leeguoo.com", invoke);
+    const privateServer = createInvokeCredentialVault("https://party.example.com", invoke);
+    await prod.write({ refreshToken: "prod", deviceSecret: "prod-secret", serverOrigin: "https://agentparty.leeguoo.com", sessionId: null });
+    await privateServer.write({ refreshToken: "private", deviceSecret: "private-secret", serverOrigin: "https://party.example.com", sessionId: null });
+
+    expect((await prod.read())?.refreshToken).toBe("prod");
+    expect((await privateServer.read())?.refreshToken).toBe("private");
+    expect(slots).toHaveLength(2);
+  });
+
+  test("invokes the idempotent native legacy migration once at startup", async () => {
+    const calls: string[] = [];
+    const origin = await migrateLegacyDesktopCredential(async (command) => {
+      calls.push(command);
+      return "https://agentparty.leeguoo.com";
+    });
+    expect(origin).toBe("https://agentparty.leeguoo.com");
+    expect(calls).toEqual(["desktop_credential_migrate"]);
   });
 
   test("persists refresh token and device secret but never the access token", async () => {
@@ -81,7 +111,7 @@ describe("desktop secure credentials", () => {
       }]);
       expect(JSON.stringify(secure.writes)).not.toContain("access-only-in-memory");
     } finally {
-      Object.defineProperty(globalThis, "localStorage", { configurable: true, value: originalStorage });
+      Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: originalStorage });
     }
   });
 

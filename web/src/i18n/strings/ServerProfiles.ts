@@ -1,0 +1,44 @@
+import { registerDict, type LocaleDict } from "../dict";
+
+export const ServerProfileStrings: LocaleDict = {
+  en: {
+    "ServerProfiles.server": "Server",
+    "ServerProfiles.add.title": "Add a private server",
+    "ServerProfiles.add.label": "Server name",
+    "ServerProfiles.add.origin": "Server origin",
+    "ServerProfiles.add.originHint": "HTTPS origin only. HTTP is limited to localhost.",
+    "ServerProfiles.add.check": "Check and add server",
+    "ServerProfiles.add.checking": "Checking server",
+    "ServerProfiles.add.failed": "Could not verify this server.",
+    "ServerProfiles.providers": "Sign-in providers",
+    "ServerProfiles.providers.none": "No sign-in provider is configured. An existing human token can still approve pairing.",
+    "ServerProfiles.switching": "Switching server",
+    "ServerProfiles.switch.failed": "Could not switch servers. The current connection was kept.",
+    "ServerProfiles.switch.unpaired": "This server is not paired on this device.",
+    "ServerProfiles.switch.pair": "Pair this server",
+    "ServerProfiles.addPair": "Add or pair server",
+    "ServerProfiles.addPair.hint": "Choose a server to pair, or verify and add a private server. Your current connection stays active until pairing succeeds.",
+    "ServerProfiles.addPair.cancel": "Back to current server",
+  },
+  zh: {
+    "ServerProfiles.server": "服务器",
+    "ServerProfiles.add.title": "添加私有服务器",
+    "ServerProfiles.add.label": "服务器名称",
+    "ServerProfiles.add.origin": "服务器 Origin",
+    "ServerProfiles.add.originHint": "仅允许 HTTPS Origin；HTTP 只允许 localhost。",
+    "ServerProfiles.add.check": "检查并添加服务器",
+    "ServerProfiles.add.checking": "正在检查服务器",
+    "ServerProfiles.add.failed": "无法验证此服务器。",
+    "ServerProfiles.providers": "登录方式",
+    "ServerProfiles.providers.none": "服务器未配置登录方式；已有 human token 会话仍可批准配对。",
+    "ServerProfiles.switching": "正在切换服务器",
+    "ServerProfiles.switch.failed": "无法切换服务器，已保留当前连接。",
+    "ServerProfiles.switch.unpaired": "此服务器尚未与本设备配对。",
+    "ServerProfiles.switch.pair": "配对此服务器",
+    "ServerProfiles.addPair": "添加或配对服务器",
+    "ServerProfiles.addPair.hint": "选择服务器进行配对，或验证并添加私有服务器。配对成功前会保留当前连接。",
+    "ServerProfiles.addPair.cancel": "返回当前服务器",
+  },
+};
+
+registerDict(ServerProfileStrings);

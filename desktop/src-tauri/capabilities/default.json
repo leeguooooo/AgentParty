@@ -19,9 +19,9 @@
     {
       "identifier": "opener:allow-open-url",
       "allow": [
-        { "url": "https://agentparty.leeguoo.com/*" },
-        { "url": "https://agentparty.pwtk-dev.work/*" },
+        { "url": "https://*/*" },
         { "url": "http://127.0.0.1:*/*" },
+        { "url": "http://[::1]:*/*" },
         { "url": "http://localhost:*/*" }
       ]
     },

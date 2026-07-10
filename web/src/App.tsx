@@ -3,11 +3,12 @@ import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useRef, us
 import { ChannelList } from "./components/ChannelList";
 import { CreateChannel } from "./components/CreateChannel";
 import { DesktopSettings } from "./components/DesktopSettings";
-import { DesktopPairingGate, desktopAllowedServerOrigins } from "./components/DesktopPairingGate";
+import { DesktopPairingGate } from "./components/DesktopPairingGate";
 import { DesktopUpdater } from "./components/DesktopUpdater";
 import { HandleSetup } from "./components/HandleSetup";
 import { TokenGate } from "./components/TokenGate";
 import { LanguageSwitcher } from "./components/LanguageSwitcher";
+import { ServerProfileAddGate, ServerSwitcher } from "./components/ServerProfiles";
 import {
   AuthError,
   type ChannelInfo,
@@ -41,8 +42,29 @@ import {
 import { withRefreshLock } from "./lib/refreshLock";
 import { gateSession, jwtSub } from "./lib/sessionIdentity";
 import { initialTokenForRuntime, restoreDesktopAccess } from "./lib/desktopAuth";
-import { desktopCredentialVault, logoutDesktopSession } from "./lib/desktopCredentials";
+import {
+  desktopCredentialVaultForOrigin,
+  logoutDesktopSession,
+  migrateLegacyDesktopCredential,
+} from "./lib/desktopCredentials";
 import { isDesktopRuntime } from "./lib/desktopRuntime";
+import { setApiBase } from "./lib/base";
+import {
+  addCustomServerProfile,
+  loadActiveServerOrigin,
+  loadServerProfiles,
+  normalizeServerOrigin,
+  saveActiveServerOrigin,
+  type ServerProfile,
+} from "./lib/serverProfiles";
+import {
+  beginDesktopServerAdd,
+  beginDesktopServerPairing,
+  cancelDesktopServerPairing,
+  completeDesktopServerPairing,
+  initialDesktopServerPairingFlow,
+  switchActiveDesktopServer,
+} from "./lib/serverSwitch";
 import { ChannelPage } from "./pages/Channel";
 import { Home } from "./pages/Home";
 import { extractPairingCodeAndSanitizeUrl, PairPage } from "./pages/Pair";
@@ -54,6 +76,7 @@ import "./i18n/strings/App";
 const PENDING_JOIN_KEY = "ap_pending_join";
 const PENDING_PAIR_CODE_KEY = "ap_pending_pair_code";
 const PENDING_PAIR_ROUTE_KEY = "ap_pending_pair_route";
+const PENDING_PAIR_SERVER_KEY = "ap_pending_pair_server";
 
 function meTitle(me: MeInfo): string {
   const parts = [`token: ${me.name}`, `kind: ${me.kind}`, `role: ${me.role}`];
@@ -69,7 +92,13 @@ export function App() {
   const t = useT();
   const [path, navigate, replace] = useRoute();
   const desktop = useRef(isDesktopRuntime()).current;
-  const desktopOrigins = useRef(desktopAllowedServerOrigins()).current;
+  const [serverProfiles, setServerProfiles] = useState<ServerProfile[]>(() => loadServerProfiles());
+  const [activeOrigin, setActiveOrigin] = useState<string>(() => {
+    const origin = loadActiveServerOrigin();
+    if (desktop) setApiBase(origin);
+    return origin;
+  });
+  const [serverPairingFlow, setServerPairingFlow] = useState(() => initialDesktopServerPairingFlow(activeOrigin));
   const [token, setToken] = useState<string | null>(() => initialTokenForRuntime(desktop, getToken));
   // 本标签当前身份（access token 的 sub）。共享 localStorage 里的 session 是否可用，
   // 必须与它比对——只比 token 字符串没用：同身份续期后 access token 本来就会变。
@@ -92,6 +121,8 @@ export function App() {
   const [initialPairCode] = useState<string | null>(() => {
     let stored = sessionStorage.getItem(PENDING_PAIR_CODE_KEY);
     if (matchPair(location.pathname)) {
+      const pairOrigin = normalizeServerOrigin(location.origin);
+      if (pairOrigin !== null) sessionStorage.setItem(PENDING_PAIR_SERVER_KEY, pairOrigin);
       const consumed = extractPairingCodeAndSanitizeUrl(location.href);
       history.replaceState(null, "", consumed.sanitizedPath);
       sessionStorage.setItem(PENDING_PAIR_ROUTE_KEY, "1");
@@ -106,7 +137,7 @@ export function App() {
   const restoreDesktop = useCallback(() => {
     setDesktopBoot("loading");
     setDesktopNotice(null);
-    return restoreDesktopAccess(desktopCredentialVault, desktopOrigins)
+    return restoreDesktopAccess(desktopCredentialVaultForOrigin(activeOrigin), activeOrigin)
       .then((accessToken) => {
         setToken(accessToken);
         setDesktopBoot("ready");
@@ -117,13 +148,34 @@ export function App() {
         setDesktopBoot("error");
         throw cause;
       });
-  }, [desktopOrigins]);
+  }, [activeOrigin]);
 
   useEffect(() => {
     if (!desktop) return;
     let alive = true;
-    void restoreDesktopAccess(desktopCredentialVault, desktopOrigins)
-      .then((accessToken) => {
+    void (async () => {
+      let startupOrigin = activeOrigin;
+      const migratedOrigin = await migrateLegacyDesktopCredential();
+      if (!alive) return null;
+      if (migratedOrigin !== null) {
+        let nextProfiles = loadServerProfiles();
+        if (!nextProfiles.some((profile) => profile.origin === migratedOrigin)) {
+          nextProfiles = addCustomServerProfile(localStorage, {
+            label: new URL(migratedOrigin).host,
+            origin: migratedOrigin,
+          });
+        }
+        setServerProfiles(nextProfiles);
+        saveActiveServerOrigin(localStorage, migratedOrigin);
+        setApiBase(migratedOrigin);
+        setActiveOrigin(migratedOrigin);
+        setServerPairingFlow(initialDesktopServerPairingFlow(migratedOrigin));
+        startupOrigin = migratedOrigin;
+      } else {
+        startupOrigin = loadActiveServerOrigin();
+      }
+      return await restoreDesktopAccess(desktopCredentialVaultForOrigin(startupOrigin), startupOrigin);
+    })().then((accessToken) => {
         if (!alive) return;
         setToken(accessToken);
         setDesktopBoot("ready");
@@ -134,7 +186,7 @@ export function App() {
         setDesktopBoot("error");
       });
     return () => { alive = false; };
-  }, [desktop, desktopOrigins]);
+  }, [desktop]);
 
   // 人类账号设置/修改 @handle（Task B2）：me chip 旁的入口开关 + 浮层定位（fixed + 视口内钳制，
   // 手法同 AgentTokens 那次 viewport 修复）；banner 关闭态只在本次会话内记，不落盘。
@@ -294,7 +346,11 @@ export function App() {
   const callbackHandled = useRef(false);
   useEffect(() => {
     let alive = true;
-    fetchAuthConfig().then((cfg) => {
+    const pendingPairOrigin = normalizeServerOrigin(sessionStorage.getItem(PENDING_PAIR_SERVER_KEY) ?? "") ?? undefined;
+    const configOrigin = !desktop && (matchPair(location.pathname) || isCallbackPath())
+      ? pendingPairOrigin
+      : undefined;
+    fetchAuthConfig(configOrigin).then((cfg) => {
       if (!alive) return;
       const runtimeConfig = authConfigForRuntime(cfg);
       setOidc(runtimeConfig.oidc);
@@ -308,7 +364,7 @@ export function App() {
         replace("/");
         return;
       }
-      completeLogin(runtimeConfig.providers)
+      completeLogin(runtimeConfig.providers, configOrigin)
         .then((sess) => {
           if (!alive) return;
           saveSession(sess); // 存 access + refresh，供静默续期
@@ -383,6 +439,7 @@ export function App() {
 
   // 登录身份：topbar 显示 token name/kind/role；readonly 分享链接 401 由页面其它路径接管，这里静默
   useEffect(() => {
+    if (!desktop && matchPair(path)) return;
     if (token === null) {
       setMe(null);
       setHandleSetupOpen(false);
@@ -400,7 +457,7 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [token]);
+  }, [desktop, path, token]);
 
   // OIDC access_token 仅 ~10min：到期前 60s 主动续期，标签页长开也不掉登录（"humans watch" 常态）。
   // 每次 token 变化重排下一次；非 OIDC 会话（粘贴的机器 token）无 refresh，跳过。
@@ -422,7 +479,7 @@ export function App() {
   }, [desktop, oidc, token, doRefresh, hardLogout]);
 
   useEffect(() => {
-    if (token === null) return;
+    if (token === null || (!desktop && matchPair(path))) return;
     let alive = true;
     setChannels(null);
     setListError(null);
@@ -440,10 +497,10 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [token, onAuthFailed]);
+  }, [activeOrigin, desktop, path, token, onAuthFailed]);
 
   useEffect(() => {
-    if (token === null) return;
+    if (token === null || (!desktop && matchPair(path))) return;
     let alive = true;
     const refresh = () => {
       if (document.visibilityState === "hidden") return;
@@ -471,19 +528,24 @@ export function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.clearInterval(timer);
     };
-  }, [token, onAuthFailed]);
+  }, [activeOrigin, desktop, path, token, onAuthFailed]);
 
   useEffect(() => {
     if (token === null || !matchPair(path)) return;
     sessionStorage.removeItem(PENDING_PAIR_ROUTE_KEY);
     sessionStorage.removeItem(PENDING_PAIR_CODE_KEY);
+    sessionStorage.removeItem(PENDING_PAIR_SERVER_KEY);
   }, [path, token]);
 
   const signOut = async () => {
     if (desktop) {
       if (desktopLogoutPending) return;
       setDesktopLogoutPending(true);
-      const result = await logoutDesktopSession(desktopCredentialVault, fetch, desktopOrigins);
+      const result = await logoutDesktopSession(
+        desktopCredentialVaultForOrigin(activeOrigin),
+        fetch,
+        [activeOrigin],
+      );
       setDesktopLogoutPending(false);
       setDesktopNotice(result.removedOnly ? t("App.desktop.logoutRemovedOnly") : null);
       setDesktopBoot("ready");
@@ -515,7 +577,11 @@ export function App() {
           <section className="d-card gate-card">
             <p className="banner banner--red" role="alert">{t("App.desktop.restoreFailed")}</p>
             <div className="desktop-session-actions">
-              <button type="button" className="d-btn" onClick={() => void desktopCredentialVault.delete().then(() => setDesktopBoot("ready"))}>
+              <button
+                type="button"
+                className="d-btn"
+                onClick={() => void desktopCredentialVaultForOrigin(activeOrigin).delete().then(() => setDesktopBoot("ready"))}
+              >
                 {t("App.desktop.removeLocal")}
               </button>
               <button type="button" className="d-btn d-btn--primary" onClick={() => void restoreDesktop().catch(() => {})}>
@@ -529,12 +595,60 @@ export function App() {
     return (
       <>
         {desktopNotice !== null && <p className="banner banner--yellow desktop-auth-notice" role="status">{desktopNotice}</p>}
-        <DesktopPairingGate onAuthenticated={(accessToken) => {
-          setDesktopNotice(null);
-          setAuthError(null);
-          setToken(accessToken);
-        }} />
+        <DesktopPairingGate
+          profiles={serverProfiles}
+          selectedOrigin={activeOrigin}
+          onSelectOrigin={(origin) => {
+            saveActiveServerOrigin(localStorage, origin);
+            setApiBase(origin);
+            setActiveOrigin(origin);
+            setServerPairingFlow(initialDesktopServerPairingFlow(origin));
+          }}
+          onProfilesChanged={setServerProfiles}
+          onAuthenticated={(accessToken, origin) => {
+            setDesktopNotice(null);
+            setAuthError(null);
+            setActiveOrigin(origin);
+            setServerPairingFlow(initialDesktopServerPairingFlow(origin));
+            setToken(accessToken);
+          }}
+        />
       </>
+    );
+  }
+
+  if (desktop && token !== null && serverPairingFlow.phase === "adding") {
+    return (
+      <ServerProfileAddGate
+        profiles={serverProfiles}
+        activeOrigin={serverPairingFlow.activeOrigin}
+        onPair={(origin) => setServerPairingFlow((flow) => beginDesktopServerPairing(flow, origin))}
+        onProfilesChanged={setServerProfiles}
+        onCancel={() => setServerPairingFlow((flow) => cancelDesktopServerPairing(flow))}
+      />
+    );
+  }
+
+  if (desktop && token !== null && serverPairingFlow.phase === "pairing" && serverPairingFlow.targetOrigin !== null) {
+    return (
+      <DesktopPairingGate
+        profiles={serverProfiles}
+        selectedOrigin={serverPairingFlow.targetOrigin}
+        onSelectOrigin={(origin) => setServerPairingFlow((flow) => beginDesktopServerPairing(flow, origin))}
+        onProfilesChanged={setServerProfiles}
+        onExit={() => setServerPairingFlow((flow) => cancelDesktopServerPairing(flow))}
+        onAuthenticated={(accessToken, origin) => {
+          saveActiveServerOrigin(localStorage, origin);
+          setApiBase(origin);
+          setActiveOrigin(origin);
+          setServerPairingFlow((flow) => completeDesktopServerPairing(flow));
+          setAuthError(null);
+          setChannels(null);
+          setListError(null);
+          setMe(null);
+          setToken(accessToken);
+        }}
+      />
     );
   }
 
@@ -579,7 +693,11 @@ export function App() {
   if (token === null) {
     return (
       <TokenGate
-        error={authError}
+        error={
+          !desktop && matchPair(path) && authProvidersResolved && authProviders.length === 0
+            ? t("Pair.providerMissing")
+            : authError
+        }
         providers={authProviders}
         onSso={(provider) => {
           setAuthError(null);
@@ -599,7 +717,12 @@ export function App() {
   }
 
   if (!desktop && matchPair(path)) {
-    return <PairPage token={token} initialCode={initialPairCode} />;
+    const pairServerOrigin = normalizeServerOrigin(sessionStorage.getItem(PENDING_PAIR_SERVER_KEY) ?? "")
+      ?? normalizeServerOrigin(location.origin);
+    if (pairServerOrigin === null) {
+      return <main className="gate"><p className="banner banner--red" role="alert">{t("Pair.inspect.failed")}</p></main>;
+    }
+    return <PairPage serverOrigin={pairServerOrigin} token={token} initialCode={initialPairCode} />;
   }
 
   const slug = matchChannel(path);
@@ -687,6 +810,27 @@ export function App() {
           </div>
         )}
         <DesktopSettings />
+        {desktop && (
+          <ServerSwitcher
+            profiles={serverProfiles}
+            activeOrigin={activeOrigin}
+            onSwitch={async (origin) => {
+              const result = await switchActiveDesktopServer(origin);
+              setActiveOrigin(result.origin);
+              setServerPairingFlow(initialDesktopServerPairingFlow(result.origin));
+              setAuthError(null);
+              setChannels(null);
+              setListError(null);
+              setMe(null);
+              setToken(result.accessToken);
+            }}
+            onAddPair={() => setServerPairingFlow(beginDesktopServerAdd(initialDesktopServerPairingFlow(activeOrigin)))}
+            onPair={(origin) => setServerPairingFlow(beginDesktopServerPairing(
+              initialDesktopServerPairingFlow(activeOrigin),
+              origin,
+            ))}
+          />
+        )}
         <DesktopUpdater />
         <LanguageSwitcher />
         {!isShareMode() && (
@@ -744,7 +888,7 @@ export function App() {
             </p>
           ) : slug !== null ? (
             <ChannelPage
-              key={slug}
+              key={`${activeOrigin}:${slug}`}
               slug={slug}
               token={token}
               mode={channels?.find((c) => c.slug === slug)?.mode ?? "normal"}

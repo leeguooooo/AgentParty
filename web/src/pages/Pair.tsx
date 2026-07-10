@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/Pair";
-import { apiUrl } from "../lib/base";
 import { normalizePairingCode } from "../lib/desktopPairing";
+import { normalizeServerOrigin } from "../lib/serverProfiles";
 
 export interface PairingInspection {
   pairing_id: string;
@@ -41,13 +41,16 @@ async function pairingError(response: Response): Promise<Error> {
 }
 
 export async function inspectDesktopPairing(
+  serverOriginInput: string,
   token: string,
   input: string,
   fetcher: Fetcher = fetch,
 ): Promise<PairingInspection> {
   const userCode = normalizePairingCode(input);
   if (userCode === null) throw new Error("invalid_code");
-  const response = await fetcher(apiUrl("/api/desktop/pairings/inspect"), {
+  const serverOrigin = normalizeServerOrigin(serverOriginInput);
+  if (serverOrigin === null) throw new Error("invalid_server_origin");
+  const response = await fetcher(`${serverOrigin}/api/desktop/pairings/inspect`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ user_code: userCode }),
@@ -61,12 +64,15 @@ export async function inspectDesktopPairing(
 }
 
 export async function decideDesktopPairing(
+  serverOriginInput: string,
   token: string,
   inspection: PairingInspection,
   decision: PairingDecision,
   fetcher: Fetcher = fetch,
 ): Promise<void> {
-  const response = await fetcher(apiUrl("/api/desktop/pairings/decision"), {
+  const serverOrigin = normalizeServerOrigin(serverOriginInput);
+  if (serverOrigin === null) throw new Error("invalid_server_origin");
+  const response = await fetcher(`${serverOrigin}/api/desktop/pairings/decision`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({
@@ -115,11 +121,12 @@ export function PairingReview({ inspection, pending, onDecision }: ReviewProps) 
 }
 
 interface Props {
+  serverOrigin: string;
   token: string;
   initialCode: string | null;
 }
 
-export function PairPage({ token, initialCode }: Props) {
+export function PairPage({ serverOrigin, token, initialCode }: Props) {
   const t = useT();
   const [value, setValue] = useState(initialCode ?? "");
   const [inspection, setInspection] = useState<PairingInspection | null>(null);
@@ -139,7 +146,7 @@ export function PairPage({ token, initialCode }: Props) {
     setError(null);
     setDecision(null);
     try {
-      setInspection(await inspectDesktopPairing(token, normalized));
+      setInspection(await inspectDesktopPairing(serverOrigin, token, normalized));
     } catch (cause) {
       setInspection(null);
       setError(cause instanceof Error && cause.message === "human_required"
@@ -161,7 +168,7 @@ export function PairPage({ token, initialCode }: Props) {
     setPending(true);
     setError(null);
     try {
-      await decideDesktopPairing(token, inspection, next);
+      await decideDesktopPairing(serverOrigin, token, inspection, next);
       setDecision(next);
       setInspection(null);
     } catch {

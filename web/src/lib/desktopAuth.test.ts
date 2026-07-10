@@ -44,8 +44,8 @@ describe("desktop app authentication integration", () => {
       }), { status: 200, headers: { "content-type": "application/json" } });
     };
 
-    const first = restoreDesktopAccess(vault, ["https://agentparty.leeguoo.com"], fetcher);
-    const second = restoreDesktopAccess(vault, ["https://agentparty.leeguoo.com"], fetcher);
+    const first = restoreDesktopAccess(vault, "https://agentparty.leeguoo.com", fetcher);
+    const second = restoreDesktopAccess(vault, "https://agentparty.leeguoo.com", fetcher);
     expect(first).toBe(second);
     expect(await second).toBe("access");
     expect(reads).toBe(1);

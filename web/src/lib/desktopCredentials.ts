@@ -1,4 +1,5 @@
-import { isAllowlistedServerOrigin } from "./desktopPairing";
+import { isAllowlistedServerOrigin, runSingleFlight } from "./desktopPairing";
+import { normalizeServerOrigin } from "./serverProfiles";
 
 export interface DesktopTokenResponse {
   access_token: string;
@@ -46,24 +47,39 @@ function parseCredential(raw: string | null): DesktopCredential | null {
   }
 }
 
-export function createInvokeCredentialVault(invoke: DesktopInvoker): DesktopCredentialVault {
+export function createInvokeCredentialVault(originInput: string, invoke: DesktopInvoker): DesktopCredentialVault {
+  const origin = normalizeServerOrigin(originInput);
+  if (origin === null) throw new Error("desktop credential origin is invalid");
   return {
     async read() {
-      return parseCredential(await invoke<string | null>("desktop_credential_read"));
+      return parseCredential(await invoke<string | null>("desktop_credential_read", { origin }));
     },
     async write(credential) {
-      await invoke<null>("desktop_credential_write", { credential: JSON.stringify(credential) });
+      if (credential.serverOrigin !== origin) throw new Error("desktop credential origin does not match its slot");
+      await invoke<null>("desktop_credential_write", { origin, credential: JSON.stringify(credential) });
     },
     async delete() {
-      await invoke<null>("desktop_credential_delete");
+      await invoke<null>("desktop_credential_delete", { origin });
     },
   };
 }
 
-export const desktopCredentialVault: DesktopCredentialVault = createInvokeCredentialVault(async <T>(command: string, args?: Record<string, unknown>) => {
+const nativeInvoke: DesktopInvoker = async <T>(command: string, args?: Record<string, unknown>) => {
   const { invoke } = await import("@tauri-apps/api/core");
   return await invoke<T>(command, args);
-});
+};
+
+export function desktopCredentialVaultForOrigin(origin: string): DesktopCredentialVault {
+  return createInvokeCredentialVault(origin, nativeInvoke);
+}
+
+export async function migrateLegacyDesktopCredential(invoke: DesktopInvoker = nativeInvoke): Promise<string | null> {
+  const migrated = await runSingleFlight(
+    "desktop-credential-migration",
+    () => invoke<string | null>("desktop_credential_migrate"),
+  );
+  return migrated === null ? null : normalizeServerOrigin(migrated);
+}
 
 type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 

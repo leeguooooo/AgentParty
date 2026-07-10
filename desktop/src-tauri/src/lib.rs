@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[cfg(desktop)]
 use tauri::{
@@ -54,40 +55,103 @@ fn parse_stored_credential(input: &str) -> Result<StoredDesktopCredential, Strin
 }
 
 #[cfg(desktop)]
-fn credential_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(CREDENTIAL_SERVICE, CREDENTIAL_ACCOUNT)
+fn credential_entry(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(CREDENTIAL_SERVICE, account)
         .map_err(|error| format!("secure credential store unavailable: {error}"))
 }
 
-#[cfg(desktop)]
-#[tauri::command]
-fn desktop_credential_write(credential: String) -> Result<(), String> {
-    parse_stored_credential(&credential)?;
-    credential_entry()?
-        .set_password(&credential)
-        .map_err(|error| format!("secure credential write failed: {error}"))
+fn credential_account_for_origin(origin: &str) -> Result<String, String> {
+    let parsed =
+        url::Url::parse(origin).map_err(|_| "desktop credential server is invalid".to_string())?;
+    if parsed.origin().ascii_serialization() != origin {
+        return Err("desktop credential server is not normalized".to_string());
+    }
+    let digest = Sha256::digest(origin.as_bytes());
+    Ok(format!("desktop-session:{digest:x}"))
+}
+
+trait CredentialBackend {
+    fn read(&self, account: &str) -> Result<Option<String>, String>;
+    fn write(&self, account: &str, credential: &str) -> Result<(), String>;
+    fn delete(&self, account: &str) -> Result<(), String>;
 }
 
 #[cfg(desktop)]
-#[tauri::command]
-fn desktop_credential_read() -> Result<Option<String>, String> {
-    match credential_entry()?.get_password() {
-        Ok(credential) => {
-            parse_stored_credential(&credential)?;
-            Ok(Some(credential))
+struct NativeCredentialBackend;
+
+#[cfg(desktop)]
+impl CredentialBackend for NativeCredentialBackend {
+    fn read(&self, account: &str) -> Result<Option<String>, String> {
+        match credential_entry(account)?.get_password() {
+            Ok(credential) => Ok(Some(credential)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(format!("secure credential read failed: {error}")),
         }
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(format!("secure credential read failed: {error}")),
     }
+
+    fn write(&self, account: &str, credential: &str) -> Result<(), String> {
+        credential_entry(account)?
+            .set_password(credential)
+            .map_err(|error| format!("secure credential write failed: {error}"))
+    }
+
+    fn delete(&self, account: &str) -> Result<(), String> {
+        match credential_entry(account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!("secure credential delete failed: {error}")),
+        }
+    }
+}
+
+fn migrate_legacy_credential<B: CredentialBackend>(backend: &B) -> Result<Option<String>, String> {
+    let Some(raw) = backend.read(CREDENTIAL_ACCOUNT)? else {
+        return Ok(None);
+    };
+    let credential = parse_stored_credential(&raw)?;
+    let account = credential_account_for_origin(&credential.server_origin)?;
+    if backend.read(&account)?.is_none() {
+        backend.write(&account, &raw)?;
+    }
+    backend.delete(CREDENTIAL_ACCOUNT)?;
+    Ok(Some(credential.server_origin))
 }
 
 #[cfg(desktop)]
 #[tauri::command]
-fn desktop_credential_delete() -> Result<(), String> {
-    match credential_entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(format!("secure credential delete failed: {error}")),
+fn desktop_credential_write(origin: String, credential: String) -> Result<(), String> {
+    let parsed = parse_stored_credential(&credential)?;
+    if parsed.server_origin != origin {
+        return Err("desktop credential origin does not match its slot".to_string());
     }
+    let account = credential_account_for_origin(&origin)?;
+    NativeCredentialBackend.write(&account, &credential)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_credential_read(origin: String) -> Result<Option<String>, String> {
+    let account = credential_account_for_origin(&origin)?;
+    let credential = NativeCredentialBackend.read(&account)?;
+    if let Some(raw) = credential.as_deref() {
+        let parsed = parse_stored_credential(raw)?;
+        if parsed.server_origin != origin {
+            return Err("desktop credential origin does not match its slot".to_string());
+        }
+    }
+    Ok(credential)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_credential_delete(origin: String) -> Result<(), String> {
+    let account = credential_account_for_origin(&origin)?;
+    NativeCredentialBackend.delete(&account)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_credential_migrate() -> Result<Option<String>, String> {
+    migrate_legacy_credential(&NativeCredentialBackend)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -198,7 +262,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             desktop_credential_read,
             desktop_credential_write,
-            desktop_credential_delete
+            desktop_credential_delete,
+            desktop_credential_migrate
         ]);
 
     #[cfg(mobile)]
@@ -240,7 +305,33 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_stored_credential, tray_action, ExitGuard, TrayAction};
+    use std::{cell::RefCell, collections::HashMap};
+
+    use super::{
+        credential_account_for_origin, migrate_legacy_credential, parse_stored_credential,
+        tray_action, CredentialBackend, ExitGuard, TrayAction, CREDENTIAL_ACCOUNT,
+    };
+
+    #[derive(Default)]
+    struct MemoryCredentials(RefCell<HashMap<String, String>>);
+
+    impl CredentialBackend for MemoryCredentials {
+        fn read(&self, account: &str) -> Result<Option<String>, String> {
+            Ok(self.0.borrow().get(account).cloned())
+        }
+
+        fn write(&self, account: &str, credential: &str) -> Result<(), String> {
+            self.0
+                .borrow_mut()
+                .insert(account.to_string(), credential.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, account: &str) -> Result<(), String> {
+            self.0.borrow_mut().remove(account);
+            Ok(())
+        }
+    }
 
     #[test]
     fn maps_known_tray_actions() {
@@ -286,5 +377,29 @@ mod tests {
             r#"{"refreshToken":"refresh","deviceSecret":"device-secret","serverOrigin":"http://evil.example","sessionId":null}"#,
         )
         .is_err());
+    }
+
+    #[test]
+    fn derives_a_stable_sha256_account_from_the_origin() {
+        assert_eq!(
+            credential_account_for_origin("https://agentparty.leeguoo.com").unwrap(),
+            "desktop-session:a54553e56c5db33ab39807028be8b3c039c7694a6382d1520644c72dc63918be"
+        );
+    }
+
+    #[test]
+    fn migrates_the_legacy_slot_once_and_removes_it() {
+        let store = MemoryCredentials::default();
+        let credential = r#"{"refreshToken":"refresh","deviceSecret":"device-secret","serverOrigin":"https://party.example.com","sessionId":null}"#;
+        store.write(CREDENTIAL_ACCOUNT, credential).unwrap();
+
+        assert_eq!(
+            migrate_legacy_credential(&store).unwrap().as_deref(),
+            Some("https://party.example.com")
+        );
+        let account = credential_account_for_origin("https://party.example.com").unwrap();
+        assert_eq!(store.read(&account).unwrap().as_deref(), Some(credential));
+        assert_eq!(store.read(CREDENTIAL_ACCOUNT).unwrap(), None);
+        assert_eq!(migrate_legacy_credential(&store).unwrap(), None);
     }
 }

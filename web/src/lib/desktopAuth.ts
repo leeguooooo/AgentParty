@@ -9,8 +9,11 @@ export function initialTokenForRuntime(desktop: boolean, readBrowserToken: () =>
 
 export function restoreDesktopAccess(
   vault: DesktopCredentialVault,
-  allowedOrigins: readonly string[],
+  origin: string,
   fetcher: Fetcher = fetch,
 ): Promise<string | null> {
-  return runSingleFlight("desktop-startup-refresh", () => refreshDesktopSession(vault, allowedOrigins, fetcher));
+  return runSingleFlight(
+    `desktop-startup-refresh:${origin}`,
+    () => refreshDesktopSession(vault, [origin], fetcher),
+  );
 }

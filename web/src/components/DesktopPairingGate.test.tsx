@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { LocaleProvider } from "../i18n/locale";
 import { DesktopPairingStrings } from "../i18n/strings/DesktopPairing";
 import type { DesktopPairingResponse, DesktopPairingState } from "../lib/desktopPairing";
+import { OFFICIAL_SERVER_PROFILES } from "../lib/serverProfiles";
 import { DesktopPairingGate, DesktopPairingGateView } from "./DesktopPairingGate";
 
 const pairing: DesktopPairingResponse = {
@@ -54,12 +55,21 @@ describe("DesktopPairingGate", () => {
 
   test("renders a pairing-only desktop sign-in entry", () => {
     const html = renderToStaticMarkup(
-      <LocaleProvider><DesktopPairingGate onAuthenticated={() => {}} /></LocaleProvider>,
+      <LocaleProvider>
+        <DesktopPairingGate
+          profiles={[...OFFICIAL_SERVER_PROFILES]}
+          selectedOrigin={OFFICIAL_SERVER_PROFILES[0]!.origin}
+          onSelectOrigin={() => {}}
+          onProfilesChanged={() => {}}
+          onAuthenticated={() => {}}
+        />
+      </LocaleProvider>,
     );
     expect(html).toContain("Pair this desktop");
     expect(html).toContain("Start pairing");
     expect(html).not.toContain("ap-token");
     expect(html).not.toContain("Sign in with");
+    expect(html).toContain("AgentParty Production");
   });
 
   test("shows the fixed-format code and cancellation while polling", () => {
@@ -78,5 +88,21 @@ describe("DesktopPairingGate", () => {
       expect(html).toContain("Try again");
       expect(html).not.toContain("AB12C-DE34F");
     }
+  });
+
+  test("offers a return to the current server for a logged-in pairing failure", () => {
+    const html = renderToStaticMarkup(
+      <LocaleProvider>
+        <DesktopPairingGateView
+          state={state("error", "Pairing failed")}
+          pairing={null}
+          onStart={() => {}}
+          onCancel={() => {}}
+          onExit={() => {}}
+        />
+      </LocaleProvider>,
+    );
+    expect(html).toContain("Pairing failed");
+    expect(html).toContain("Back to current server");
   });
 });

@@ -1,0 +1,238 @@
+// @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import { LocaleProvider } from "./i18n/locale";
+import { apiBase, clearApiBase } from "./lib/base";
+import {
+  __resetDesktopRuntimeForTests,
+  __setDesktopRuntimeDependenciesForTests,
+} from "./lib/desktopRuntime";
+import {
+  addCustomServerProfile,
+  loadActiveServerOrigin,
+  saveActiveServerOrigin,
+} from "./lib/serverProfiles";
+
+type InvokeHandler = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+let invokeHandler: InvokeHandler = async () => null;
+
+mock.module("@tauri-apps/api/core", () => ({
+  invoke: (command: string, args?: Record<string, unknown>) => invokeHandler(command, args),
+}));
+mock.module("dompurify", () => ({
+  default: {
+    addHook: () => {},
+    sanitize: (value: string) => value,
+  },
+}));
+
+const { App } = await import("./App");
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+    removeItem: (key) => { values.delete(key); },
+    clear: () => values.clear(),
+    key: (index) => [...values.keys()][index] ?? null,
+    get length() { return values.size; },
+  };
+}
+
+const activeOrigin = "https://agentparty.leeguoo.com";
+const unpairedOrigin = "https://agentparty.pwtk-dev.work";
+let renderer: ReactTestRenderer | null = null;
+let credentialDeletes = 0;
+let storedCredential: string | null = null;
+
+beforeEach(() => {
+  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: memoryStorage() });
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { pathname: "/", search: "", origin: activeOrigin, href: `${activeOrigin}/` },
+  });
+  Object.defineProperty(globalThis, "history", {
+    configurable: true,
+    value: { pushState: () => {}, replaceState: () => {} },
+  });
+
+  const windowEvents = new EventTarget();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      __TAURI_INTERNALS__: {},
+      location: globalThis.location,
+      history: globalThis.history,
+      innerWidth: 1200,
+      innerHeight: 800,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      addEventListener: windowEvents.addEventListener.bind(windowEvents),
+      removeEventListener: windowEvents.removeEventListener.bind(windowEvents),
+    },
+  });
+  const documentEvents = new EventTarget();
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      visibilityState: "visible",
+      addEventListener: documentEvents.addEventListener.bind(documentEvents),
+      removeEventListener: documentEvents.removeEventListener.bind(documentEvents),
+    },
+  });
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { platform: "test-desktop" },
+  });
+
+  addCustomServerProfile(localStorage, { label: "Private", origin: "https://private.example.com" });
+  saveActiveServerOrigin(localStorage, activeOrigin);
+  credentialDeletes = 0;
+  storedCredential = JSON.stringify({
+    refreshToken: "old-refresh",
+    deviceSecret: "old-device-secret",
+    serverOrigin: activeOrigin,
+    sessionId: "old-session",
+  });
+  invokeHandler = async (command, args) => {
+    if (command === "desktop_credential_migrate") return null;
+    if (command === "desktop_credential_read") {
+      return args?.origin === activeOrigin ? storedCredential : null;
+    }
+    if (command === "desktop_credential_write") {
+      storedCredential = String(args?.credential);
+      return null;
+    }
+    if (command === "desktop_credential_delete") {
+      credentialDeletes += 1;
+      storedCredential = null;
+      return null;
+    }
+    throw new Error(`unexpected native command: ${command}`);
+  };
+
+  __setDesktopRuntimeDependenciesForTests({
+    isTauri: () => true,
+    loadDeepLink: async () => ({
+      getCurrent: async () => null,
+      onOpenUrl: async () => () => {},
+    }),
+  });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/api/desktop/sessions/refresh")) {
+        return new Response(JSON.stringify({
+          access_token: "old-access",
+          refresh_token: "rotated-old-refresh",
+          expires_in: 600,
+          session_id: "old-session",
+        }), { status: 200 });
+      }
+      if (url.endsWith("/api/config")) return new Response("{}", { status: 200 });
+      if (url.endsWith("/api/channels")) return new Response('{"channels":[]}', { status: 200 });
+      if (url.endsWith("/api/me")) {
+        return new Response(JSON.stringify({
+          name: "human-1",
+          email: "human@example.com",
+          kind: "human",
+          handle: "human",
+          display_name: "Human",
+          avatar_url: null,
+          avatar_thumb: null,
+          provider: "oidc",
+          tenant_key: null,
+          role: "human",
+          owner: null,
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    },
+  });
+});
+
+afterEach(async () => {
+  if (renderer !== null) await act(async () => renderer?.unmount());
+  renderer = null;
+  __resetDesktopRuntimeForTests();
+  clearApiBase();
+  for (const key of [
+    "IS_REACT_ACT_ENVIRONMENT",
+    "localStorage",
+    "sessionStorage",
+    "location",
+    "history",
+    "window",
+    "document",
+    "navigator",
+    "fetch",
+  ]) Reflect.deleteProperty(globalThis, key);
+});
+
+describe("App desktop server pairing behavior", () => {
+  test("logged-in add/pair cancellation preserves the old token, origin, runtime base, and credential", async () => {
+    await act(async () => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const root = renderer!.root;
+    const addPair = root.findByProps({ className: "server-switcher-add" });
+    await act(async () => addPair.props.onClick());
+
+    const targetSelect = root.findByProps({ id: "desktop-pairing-server" });
+    await act(async () => targetSelect.props.onChange({ target: { value: unpairedOrigin } }));
+    expect(root.findByProps({ id: "desktop-pairing-title" })).toBeTruthy();
+
+    const back = root.findAllByType("button").find((button) => button.children.includes("Back to current server"));
+    expect(back).toBeTruthy();
+    await act(async () => back!.props.onClick());
+
+    expect(root.findByProps({ className: "app-signout t-mono" })).toBeTruthy();
+    expect(root.findByProps({ id: "active-server" }).props.value).toBe(activeOrigin);
+    expect(loadActiveServerOrigin(localStorage)).toBe(activeOrigin);
+    expect(apiBase()).toBe(activeOrigin);
+    expect(credentialDeletes).toBe(0);
+    expect(JSON.parse(storedCredential ?? "null")).toEqual({
+      refreshToken: "rotated-old-refresh",
+      deviceSecret: "old-device-secret",
+      serverOrigin: activeOrigin,
+      sessionId: "old-session",
+    });
+  });
+
+  test("an unpaired normal-header target offers pairing and keeps the old session after cancellation", async () => {
+    await act(async () => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const root = renderer!.root;
+    await act(async () => {
+      root.findByProps({ id: "active-server" }).props.onChange({ target: { value: unpairedOrigin } });
+    });
+
+    const pairButton = root.findAllByType("button")
+      .find((button) => button.children.includes("Pair this server"));
+    expect(pairButton).toBeTruthy();
+    await act(async () => pairButton!.props.onClick());
+    expect(root.findByProps({ id: "desktop-pairing-title" })).toBeTruthy();
+
+    const back = root.findAllByType("button").find((button) => button.children.includes("Back to current server"));
+    await act(async () => back!.props.onClick());
+
+    expect(root.findByProps({ className: "app-signout t-mono" })).toBeTruthy();
+    expect(root.findByProps({ id: "active-server" }).props.value).toBe(activeOrigin);
+    expect(loadActiveServerOrigin(localStorage)).toBe(activeOrigin);
+    expect(apiBase()).toBe(activeOrigin);
+    expect(credentialDeletes).toBe(0);
+  });
+});

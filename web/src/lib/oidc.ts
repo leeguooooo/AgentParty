@@ -97,12 +97,9 @@ const STATE_KEY = "ap_oidc_state";
 const PROVIDER_KEY = "ap_oidc_provider";
 export const CALLBACK_PATH = "/auth/callback";
 
-// worker 暴露的公开配置：未配 SSO provider 时 providers:[] → 降级到纯粘贴 token。
-export async function fetchAuthConfig(): Promise<AuthConfig> {
+export function parseAuthConfigPayload(data: unknown): AuthConfig {
   try {
-    const res = await fetch(apiUrl("/api/config"));
-    if (!res.ok) return { oidc: null, providers: [] };
-    const data = (await res.json()) as {
+    const payload = data as {
       oidc: { issuer?: string; client_id?: string } | null;
       auth?: {
         providers?: Array<{
@@ -116,11 +113,11 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
       };
     };
     const oidc =
-      data.oidc?.issuer && data.oidc?.client_id
-        ? { issuer: data.oidc.issuer.replace(/\/+$/, ""), clientId: data.oidc.client_id }
+      payload.oidc?.issuer && payload.oidc?.client_id
+        ? { issuer: payload.oidc.issuer.replace(/\/+$/, ""), clientId: payload.oidc.client_id }
         : null;
     const providers: AuthProviderConfig[] = [];
-    for (const item of data.auth?.providers ?? []) {
+    for (const item of payload.auth?.providers ?? []) {
       if (!item.id || !item.client_id || !item.authorize_url) continue;
       providers.push({
         type: "oauth",
@@ -136,6 +133,18 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
       providers.push({ type: "oidc", id: "oidc", label: "Sign in with leeguoo", ...oidc });
     }
     return { oidc, providers };
+  } catch {
+    return { oidc: null, providers: [] };
+  }
+}
+
+// worker 暴露的公开配置：未配 SSO provider 时 providers:[] → 降级到纯粘贴 token。
+export async function fetchAuthConfig(baseOrigin?: string): Promise<AuthConfig> {
+  try {
+    const url = baseOrigin === undefined ? apiUrl("/api/config") : `${baseOrigin}/api/config`;
+    const res = await fetch(url);
+    if (!res.ok) return { oidc: null, providers: [] };
+    return parseAuthConfigPayload(await res.json());
   } catch {
     return { oidc: null, providers: [] };
   }
@@ -182,7 +191,7 @@ export async function beginLogin(config: AuthProviderConfig): Promise<void> {
 }
 
 // 回调：校验 state → 换 token。OIDC 走 public client，Lark/Feishu 走 worker 服务端换码。
-export async function completeLogin(providers: AuthProviderConfig[]): Promise<WebSession> {
+export async function completeLogin(providers: AuthProviderConfig[], baseOrigin?: string): Promise<WebSession> {
   const params = new URLSearchParams(window.location.search);
   const providerError = params.get("error");
   if (providerError) {
@@ -202,7 +211,10 @@ export async function completeLogin(providers: AuthProviderConfig[]): Promise<We
   const config = providers.find((provider) => provider.id === providerId) ?? providers[0] ?? null;
   if (config === null) throw new Error("sign-in provider is not configured");
   if (config.type === "oauth") {
-    const res = await fetch(apiUrl(`/api/auth/${encodeURIComponent(config.id)}/callback`), {
+    const callbackUrl = baseOrigin === undefined
+      ? apiUrl(`/api/auth/${encodeURIComponent(config.id)}/callback`)
+      : `${baseOrigin}/api/auth/${encodeURIComponent(config.id)}/callback`;
+    const res = await fetch(callbackUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({

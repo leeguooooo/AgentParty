@@ -43,7 +43,7 @@ describe("pair URL handling", () => {
 describe("pairing approval HTTP contract", () => {
   test("inspects a normalized short code with a human bearer", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
-    const result = await inspectDesktopPairing("human-token", "ab12cde34f", async (url, init) => {
+    const result = await inspectDesktopPairing("https://party.example.com", "human-token", "ab12cde34f", async (url, init) => {
       calls.push({ url: String(url), init });
       return new Response(JSON.stringify({
         pairing_id: inspection.pairing_id,
@@ -61,7 +61,7 @@ describe("pairing approval HTTP contract", () => {
       device: inspection.device,
       expires_in: 300,
     });
-    expect(calls[0]?.url).toBe("/api/desktop/pairings/inspect");
+    expect(calls[0]?.url).toBe("https://party.example.com/api/desktop/pairings/inspect");
     expect(calls[0]?.init?.headers).toEqual({
       authorization: "Bearer human-token",
       "content-type": "application/json",
@@ -72,7 +72,7 @@ describe("pairing approval HTTP contract", () => {
   test("sends an explicit approve or deny decision with both pairing identifiers", async () => {
     for (const decision of ["approve", "deny"] as const) {
       let body: unknown;
-      await decideDesktopPairing("human-token", inspection, decision, async (_url, init) => {
+      await decideDesktopPairing("https://party.example.com", "human-token", inspection, decision, async (_url, init) => {
         body = JSON.parse(String(init?.body));
         return new Response(null, { status: 204 });
       });
@@ -104,7 +104,9 @@ describe("PairPage", () => {
 
   test("renders a keyboard and mobile friendly manual-code form", () => {
     const html = renderToStaticMarkup(
-      <LocaleProvider><PairPage token="human-token" initialCode={null} /></LocaleProvider>,
+      <LocaleProvider>
+        <PairPage serverOrigin="https://party.example.com" token="human-token" initialCode={null} />
+      </LocaleProvider>,
     );
     expect(html).toContain('action="/pair"');
     expect(html).toContain('inputMode="text"');

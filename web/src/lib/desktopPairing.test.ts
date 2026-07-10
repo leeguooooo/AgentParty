@@ -223,6 +223,156 @@ describe("desktop pairing polling loop", () => {
     expect(result).toEqual({ type: "cancelled" });
     expect(exchanges).toBe(0);
   });
+
+  test("recovers a lost successful response with the same device proof", async () => {
+    const requestBodies: string[] = [];
+    const waits: number[] = [];
+    const events: string[] = [];
+    const recoveredTokens = {
+      access_token: "recovered-access",
+      refresh_token: "recovered-refresh",
+      expires_in: 600,
+      session_id: "session-1",
+    };
+    let exchanges = 0;
+    const exchange = () => exchangeDesktopPairingToken(
+      "https://agentparty.leeguoo.com",
+      "same-device-code",
+      "same-code-verifier",
+      async (_input, init) => {
+        exchanges += 1;
+        requestBodies.push(String(init?.body));
+        if (exchanges === 1) {
+          // The server committed this exchange, but the response was lost in transit.
+          throw new TypeError("network connection closed after commit");
+        }
+        return new Response(JSON.stringify(recoveredTokens), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    );
+
+    const result = await pollDesktopPairing({
+      intervalSeconds: 3,
+      expiresInSeconds: 300,
+      signal: new AbortController().signal,
+      wait: async (seconds) => { waits.push(seconds); },
+      exchange,
+      onEvent: (event) => { events.push(event.type); },
+    });
+
+    expect(result).toEqual({ type: "approved", tokens: recoveredTokens });
+    expect(exchanges).toBe(2);
+    expect(waits).toEqual([3, 3]);
+    expect(requestBodies).toHaveLength(2);
+    expect(requestBodies[0]).toBe(requestBodies[1]);
+    expect(JSON.parse(requestBodies[0]!)).toEqual({
+      device_code: "same-device-code",
+      code_verifier: "same-code-verifier",
+    });
+    expect(events).toEqual(["approved"]);
+  });
+
+  test("keeps retrying transient exchange failures through the 60 second recovery window", async () => {
+    let now = 0;
+    let exchanges = 0;
+    const result = await pollDesktopPairing({
+      intervalSeconds: 3,
+      expiresInSeconds: 61,
+      signal: new AbortController().signal,
+      wait: async (seconds) => { now += seconds * 1000; },
+      exchange: () => exchangeDesktopPairingToken(
+        "https://agentparty.leeguoo.com",
+        "same-device-code",
+        "same-code-verifier",
+        async () => {
+          exchanges += 1;
+          if (exchanges < 20) throw new TypeError("transient network failure");
+          return new Response(JSON.stringify({
+            access_token: "access",
+            refresh_token: "refresh",
+            expires_in: 600,
+          }), { status: 200 });
+        },
+      ),
+      onEvent: () => {},
+      now: () => now,
+    });
+
+    expect(now).toBe(60_000);
+    expect(exchanges).toBe(20);
+    expect(result.type).toBe("approved");
+  });
+
+  test("honors abort during a transient exchange failure", async () => {
+    const controller = new AbortController();
+    let exchanges = 0;
+    const result = await pollDesktopPairing({
+      intervalSeconds: 3,
+      expiresInSeconds: 300,
+      signal: controller.signal,
+      wait: async () => {},
+      exchange: (signal) => exchangeDesktopPairingToken(
+        "https://agentparty.leeguoo.com",
+        "device-code",
+        "code-verifier",
+        async () => {
+          exchanges += 1;
+          controller.abort();
+          throw new DOMException("aborted", "AbortError");
+        },
+        signal,
+      ),
+      onEvent: () => {},
+    });
+
+    expect(result).toEqual({ type: "cancelled" });
+    expect(exchanges).toBe(1);
+  });
+
+  test("does not retry terminal or invalid 4xx exchange responses", async () => {
+    for (const [status, expected] of [[403, "denied"], [410, "expired"]] as const) {
+      let exchanges = 0;
+      const result = await pollDesktopPairing({
+        intervalSeconds: 3,
+        expiresInSeconds: 300,
+        signal: new AbortController().signal,
+        wait: async () => {},
+        exchange: () => exchangeDesktopPairingToken(
+          "https://agentparty.leeguoo.com",
+          "device-code",
+          "code-verifier",
+          async () => {
+            exchanges += 1;
+            return new Response(null, { status });
+          },
+        ),
+        onEvent: () => {},
+      });
+      expect(result.type).toBe(expected);
+      expect(exchanges).toBe(1);
+    }
+
+    let invalidProofExchanges = 0;
+    await expect(pollDesktopPairing({
+      intervalSeconds: 3,
+      expiresInSeconds: 300,
+      signal: new AbortController().signal,
+      wait: async () => {},
+      exchange: () => exchangeDesktopPairingToken(
+        "https://agentparty.leeguoo.com",
+        "device-code",
+        "bad-verifier",
+        async () => {
+          invalidProofExchanges += 1;
+          return new Response(null, { status: 400 });
+        },
+      ),
+      onEvent: () => {},
+    })).rejects.toThrow("failed (400)");
+    expect(invalidProofExchanges).toBe(1);
+  });
 });
 
 describe("StrictMode single-flight", () => {

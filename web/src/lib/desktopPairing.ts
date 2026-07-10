@@ -188,12 +188,19 @@ export async function exchangeDesktopPairingToken(
   deviceCode: string,
   codeVerifier: string,
   fetcher: Fetcher = fetch,
+  signal?: AbortSignal,
 ): Promise<DesktopTokenPollResult> {
-  const response = await fetcher(`${serverOrigin}/api/desktop/pairings/token`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ device_code: deviceCode, code_verifier: codeVerifier }),
-  });
+  let response: Response;
+  try {
+    response = await fetcher(`${serverOrigin}/api/desktop/pairings/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device_code: deviceCode, code_verifier: codeVerifier }),
+      signal,
+    });
+  } catch (cause) {
+    throw new DesktopPairingExchangeNetworkError(cause);
+  }
   switch (response.status) {
     case 202:
       return { type: "authorization_pending" };
@@ -220,6 +227,13 @@ export async function exchangeDesktopPairingToken(
   }
 }
 
+export class DesktopPairingExchangeNetworkError extends Error {
+  constructor(cause: unknown) {
+    super("desktop pairing token exchange network failed", { cause });
+    this.name = "DesktopPairingExchangeNetworkError";
+  }
+}
+
 export type DesktopPollingResult =
   | Extract<DesktopTokenPollResult, { type: "approved" | "denied" | "expired" }>
   | { type: "cancelled" };
@@ -229,7 +243,7 @@ interface DesktopPollingOptions {
   expiresInSeconds: number;
   signal: AbortSignal;
   wait(seconds: number, signal: AbortSignal): Promise<void>;
-  exchange(): Promise<DesktopTokenPollResult>;
+  exchange(signal: AbortSignal): Promise<DesktopTokenPollResult>;
   onEvent(event: DesktopTokenPollResult): void;
   now?: () => number;
 }
@@ -243,7 +257,14 @@ export async function pollDesktopPairing(options: DesktopPollingOptions): Promis
     await options.wait(intervalSeconds, options.signal);
     if (options.signal.aborted) return { type: "cancelled" };
     if (now() >= deadline) return { type: "expired" };
-    const result = await options.exchange();
+    let result: DesktopTokenPollResult;
+    try {
+      result = await options.exchange(options.signal);
+    } catch (cause) {
+      if (options.signal.aborted) return { type: "cancelled" };
+      if (cause instanceof DesktopPairingExchangeNetworkError) continue;
+      throw cause;
+    }
     options.onEvent(result);
     if (result.type === "approved" || result.type === "denied" || result.type === "expired") {
       return result;
