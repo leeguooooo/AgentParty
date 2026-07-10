@@ -35,6 +35,9 @@ function startRest(): void {
           updated_by: "host",
         });
       }
+      if (url.pathname === "/api/channels/other/charter" && req.method === "GET") {
+        return Response.json({ charter: "OTHER scope", charter_rev: 9, updated_at: 1, updated_by: "host" });
+      }
       if (url.pathname === "/api/me") {
         return Response.json({ name: "me", email: null, kind: "agent", role: "member", owner: null });
       }
@@ -157,6 +160,32 @@ describe("mcp charter surface", () => {
       const reminder = reminderOf(whoami.structuredContent);
       expect(reminder).not.toContain("party://charter"); // 不指向不存在的 concrete 资源
       expect(reminder).toContain("party://{channel}/charter"); // 指向模板
+    } finally {
+      await client.close();
+    }
+  }, 20000);
+
+  // 第三处同形状不一致（LEO-MAIN followup）：resources/list 与 whoami 提示在启动时静态绑定，
+  // 无法热更新；party_charter 工具若每次调用重解析 cwd 绑定，运行中 rebind 就会让工具漂到新频道、
+  // 而资源/提示仍指旧频道，两条路径对「我在哪个频道」给出不同答案且都不报错。工具的默认频道必须
+  // 恒等于启动时的 boundChannel（显式传 channel 参数仍优先）。
+  test("party_charter without arg stays on the startup-bound channel even after cwd rebind（#224 P2 followup）", async () => {
+    startRest();
+    bindCwdChannel("dev");
+    const client = await connect(); // 无 --channel；启动时 boundChannel = dev
+    try {
+      // 运行中有人把 cwd 绑定改到 other（模拟 party init --channel other）。
+      bindCwdChannel("other");
+
+      // 不传 channel 参数：必须仍返回启动时那个频道 dev，而非漂到 other。
+      const charter = await client.callTool({ name: "party_charter", arguments: {} });
+      expect(charter.isError).not.toBe(true);
+      expect(charter.structuredContent).toMatchObject({ type: "charter", channel: "dev", charter_rev: 7 });
+
+      // 显式传 channel 参数仍然优先——不牺牲「读任意频道」的能力。
+      const explicit = await client.callTool({ name: "party_charter", arguments: { channel: "other" } });
+      expect(explicit.isError).not.toBe(true);
+      expect(explicit.structuredContent).toMatchObject({ type: "charter", channel: "other", charter_rev: 9 });
     } finally {
       await client.close();
     }

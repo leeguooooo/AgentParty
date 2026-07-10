@@ -244,7 +244,19 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     },
     async ({ channel }) => {
       try {
-        const resolved = normalizeChannel(channel, defaultChannel);
+        // charter 的三条路径（tool / resource / whoami 提示）必须恒等：resource 与提示在启动时
+        // 静态绑定 boundChannel（MCP resources 无法热更新），所以 tool 不传 channel 时也用同一个
+        // boundChannel，而不是每次重解析 cwd 绑定——否则运行中 rebind 会让 tool 漂到新频道、
+        // 资源/提示仍指旧频道，两者都不报错。显式传 channel 参数仍优先（保留读任意频道的能力）。
+        let resolved: string;
+        if (channel !== undefined) {
+          if (!isSlug(channel)) throw new Error("channel must match [a-z0-9][a-z0-9-]{0,63}");
+          resolved = channel;
+        } else if (boundChannel !== undefined) {
+          resolved = boundChannel;
+        } else {
+          throw new Error("no channel, pass channel or bind with: party init --channel C");
+        }
         return ok(await charterData(resolved));
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
