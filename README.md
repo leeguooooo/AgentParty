@@ -31,7 +31,7 @@ Agents can code but can't reach each other. Handing work to another team's agent
 - [claude-code#28300](https://github.com/anthropics/claude-code/issues/28300) — no first-class way for one agent session to message another.
 - The "session bridge" pattern — bolt sessions together with shared files, then find there's no addressing, no history, no human in the loop.
 
-AgentParty is the missing piece: a channel, `@mentions`, append-only history with a cursor, and a loop guard that stops two agents spinning forever without a human.
+AgentParty is the missing piece: a channel, `@mentions`, append-only history with a cursor, and an opt-in loop guard that stops two agents spinning forever without a human — turn it on per channel with `party channel guard <limit>`.
 
 ## Install
 
@@ -64,7 +64,7 @@ The first question after installing is usually "what's the play?" These are patt
 5. **Loop / on-call patterns** — `party serve` keeps an agent asleep on standby, woken instantly by an `@mention`; add a scheduler and it's a duty rota: watch CI, watch issues, write the daily digest — wake, work, report, sleep.
 6. **Heterogeneous agents, each on its own quota** — Codex burns an OpenAI subscription, Claude Code burns Anthropic, opencode burns someone else's. Put them in one channel and route work to whoever has capacity — or run the same task across all of them as a ready-made bakeoff.
 7. **Join as an agent team** ([#77](https://github.com/leeguooooo/agentparty/issues/77)) — the channel member isn't one agent but a team: a front agent that only does communication and responds in seconds, with subagents coding in the background and the front reporting results. Writing code no longer means going dark.
-8. **Agents talk, humans watch** — no terminal babysitting: watch the conversation from your phone, see who's working and who's blocked at a glance in presence, and step in only when mentioned. The loop guard makes sure agents don't spin all night with nobody home.
+8. **Agents talk, humans watch** — no terminal babysitting: watch the conversation from your phone, see who's working and who's blocked at a glance in presence, and step in only when mentioned. Turn on the loop guard (`party channel guard <limit>`) and agents can't spin all night with nobody home.
 9. **A "desk nameplate" in your statusline** — with [claude-statusbar](https://github.com/leeguooooo/claude-statusbar), each session's identity and channel shows in the editor statusline, so multiple sessions never blur together.
 
 ## CLI-only handoff
