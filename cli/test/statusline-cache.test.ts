@@ -98,3 +98,24 @@ test("heartbeatPatch carries mentions_only only when asked", () => {
   const legacy = heartbeatPatch("serve", 1000).listener;
   expect("mentions_only" in legacy).toBe(false);
 });
+
+test("clearStatuslineListener leaves another live listener's record alone", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "ap-"));
+  process.env.AGENTPARTY_HOME = mkdtempSync(join(tmpdir(), "ap-home-"));
+  // A foreign listener (different pid) heartbeat-wrote the record.
+  writeStatuslineCache(
+    { channel: "dev", listener: { mode: "watch", pid: process.pid + 1, heartbeat_ts: 1000 } },
+    cwd,
+    1000,
+  );
+  const after = clearStatuslineListener(cwd);
+  expect(after.listener?.pid).toBe(process.pid + 1);
+  // Our own record does get cleared.
+  writeStatuslineCache(
+    { channel: "dev", listener: { mode: "watch", pid: process.pid, heartbeat_ts: 2000 } },
+    cwd,
+    2000,
+  );
+  const cleared = clearStatuslineListener(cwd);
+  expect(cleared.listener).toBeUndefined();
+});

@@ -110,6 +110,19 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       conn.close();
     }, o.timeoutSec * 1000);
   }
+  // Heartbeat on a clock, not only on traffic: a quiet channel used to leave
+  // heartbeat_ts stale, and status bars (which treat >10 min as dead) showed
+  // "listener down" while the watch sat healthily connected.
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  if (o.statusline === true) {
+    heartbeat = setInterval(() => {
+      writeStatuslineCache({
+        ...localStatuslineBase(o.channel),
+        ...heartbeatPatch("watch", Date.now(), { mentionsOnly: o.mentionsOnly }),
+      });
+    }, 60_000);
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
+  }
 
   try {
     for await (const frame of conn.frames) {
@@ -172,6 +185,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
     }
   } finally {
     if (timer) clearTimeout(timer);
+    if (heartbeat) clearInterval(heartbeat);
     conn.close();
     if (o.statusline === true) clearStatuslineListener();
   }

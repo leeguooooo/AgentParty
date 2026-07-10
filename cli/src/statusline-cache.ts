@@ -141,6 +141,14 @@ export function writeStatuslineCache(patch: StatuslinePatch, cwd: string = proce
 }
 
 export function clearStatuslineListener(cwd: string = process.cwd()): StatuslineCache {
+  // Only clear OUR OWN listener record. Several listeners can share one
+  // workspace (multiple agent sessions in the same project dir), and the
+  // single `listener` field is last-writer-wins — an exiting `watch --once`
+  // must not wipe the record another live listener just heartbeat-wrote.
+  const current = readStatuslineCache(cwd);
+  if (current?.listener && current.listener.pid !== process.pid) {
+    return current;
+  }
   return writeStatuslineCache({ listener: null }, cwd);
 }
 

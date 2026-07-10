@@ -1041,6 +1041,18 @@ export async function runServe(o: ServeOptions): Promise<number> {
   out(
     `serving #${o.channel} — 每条${o.mentionsOnly ? " @你 的" : ""}消息触发一次命令（Ctrl-C 停）`,
   );
+  // Heartbeat on a clock, not only on traffic — see watch.ts; a quiet channel
+  // must not read as "listener down" on status bars.
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  if (o.statusline === true) {
+    heartbeat = setInterval(() => {
+      writeStatuslineCache({
+        ...localStatuslineBase(o.channel),
+        ...heartbeatPatch("serve", Date.now(), { mentionsOnly: o.mentionsOnly }),
+      });
+    }, 60_000);
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
+  }
   try {
     for await (const frame of conn.frames) {
       if (frame.type === "welcome") {
@@ -1048,7 +1060,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
         if (o.statusline === true) {
           writeStatuslineCache({
             ...localStatuslineBase(o.channel),
-            ...heartbeatPatch("serve"),
+            ...heartbeatPatch("serve", Date.now(), { mentionsOnly: o.mentionsOnly }),
             unread: unreadFromCursor(frame.last_seq, o.channel),
           });
         }
@@ -1114,7 +1126,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
       if (o.statusline === true) {
         writeStatuslineCache({
           ...localStatuslineBase(o.channel),
-          ...heartbeatPatch("serve"),
+          ...heartbeatPatch("serve", Date.now(), { mentionsOnly: o.mentionsOnly }),
           unread: unreadFromCursor(frame.seq, o.channel),
           last_message: lastMessageFromFrame(frame),
         });
@@ -1135,6 +1147,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
       }
     }
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     conn.close();
     if (o.statusline === true) clearStatuslineListener();
   }
