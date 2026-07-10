@@ -2,6 +2,7 @@
 // access_token 当 bearer 用；SSO 的 access_token 仅 ~10min，故一并存 refresh_token，到期前静默续期
 // （之前只存 access_token 不续期，每 10 分钟必掉登录）。
 import { apiUrl } from "./base";
+import { jwtSub } from "./sessionIdentity";
 
 export interface OidcConfig {
   issuer: string;
@@ -61,6 +62,8 @@ export interface WebSession {
   accessToken: string;
   refreshToken: string | null;
   expiresAt: number | null; // epoch 秒；null 表示未知（保守当已过期处理）
+  /** 稳定身份锚点（#126 follow-up）：优先 id_token.sub，回退 access_token.sub；解不出为 null。 */
+  identity: string | null;
 }
 
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -69,12 +72,14 @@ function toSession(data: {
   access_token?: string;
   refresh_token?: string;
   expires_in?: number;
+  id_token?: string;
 }): WebSession {
   if (!data.access_token) throw new Error("no access_token in token response");
   return {
     accessToken: data.access_token,
     refreshToken: data.refresh_token ?? null,
     expiresAt: typeof data.expires_in === "number" ? nowSec() + data.expires_in : null,
+    identity: jwtSub(data.id_token) ?? jwtSub(data.access_token),
   };
 }
 
