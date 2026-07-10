@@ -110,7 +110,7 @@
           <tbody>
             <tr><td><span class="zh">官方</span><span class="en">Official</span></td><td><span class="zh">预置的 AgentParty Production；选择后恢复该服务器自己的桌面会话。</span><span class="en">The built-in AgentParty Production profile; selecting it restores that server's own desktop session.</span></td></tr>
             <tr><td><span class="zh">测试</span><span class="en">Test</span></td><td><span class="zh">预置的 AgentParty Test；账号、凭据和频道与官方环境分开。</span><span class="en">The built-in AgentParty Test profile; accounts, credentials, and channels are separate from production.</span></td></tr>
-            <tr><td><span class="zh">自定义私有部署</span><span class="en">Custom private deployment</span></td><td><span class="zh">验证后保存的服务器 Origin；登录方式、账号中心和频道都由该私有服务器决定。</span><span class="en">A verified server origin saved as a profile; its sign-in methods, account center, and channels are controlled by that private server.</span></td></tr>
+            <tr><td><span class="zh">自定义私有部署</span><span class="en">Custom private deployment</span></td><td><span class="zh">验证后保存的服务器 Origin；登录方式和频道由该私有服务器决定。自有账号中心需提供兼容的 OIDC 授权端点。</span><span class="en">A verified server origin saved as a profile; its sign-in methods and channels are controlled by that private server. A custom account center must expose compatible OIDC authorization endpoints.</span></td></tr>
           </tbody>
         </table>
 
@@ -137,13 +137,13 @@
 <span class="du-prompt">$</span> curl -fsS https://party.example.com/api/config
 {"oidc":null,"auth":{"providers":[]},"cli_client_id":"agentparty-cli"}</code></pre>
         </div>
-        <p><span class="zh">示例只表示最小响应形态。私有服务器可在 <code>/api/config</code> 中发布自己的 Lark、飞书、OIDC 登录入口和账号中心能力。</span><span class="en">The example shows only a minimal response shape. A private server may advertise its own Lark, Feishu, OIDC sign-in entries and account-center capability through <code>/api/config</code>.</span></p>
+        <p><span class="zh">示例只表示最小响应形态。私有服务器可在 <code>auth.providers</code> 中发布自己的 Lark、飞书或通用 OIDC 登录入口。自有账号中心通过同一 OIDC provider 契约接入；当前版本不解析额外的专有“账号中心”元数据。</span><span class="en">The example shows only a minimal response shape. A private server may advertise its own Lark, Feishu, or generic OIDC sign-in entries in <code>auth.providers</code>. A custom account center integrates through the same OIDC provider contract; this release does not parse additional proprietary account-center metadata.</span></p>
 
         <h2 id="pairing"><span class="zh">浏览器 Device Flow 配对</span><span class="en">Browser Device Flow pairing</span></h2>
         <ol>
           <li><span class="zh">桌面端向当前选中的目标服务器创建短时配对请求，并显示一次性代码。</span><span class="en">The desktop creates a short-lived pairing request on the selected target server and displays a one-time code.</span></li>
           <li><span class="zh">目标服务器返回的 <code>/pair</code> 地址会在系统默认浏览器中打开，不在嵌入式 webview 内完成身份提供方登录。</span><span class="en">The target server's <code>/pair</code> URL opens in the default system browser; identity-provider sign-in does not run inside the embedded webview.</span></li>
-          <li><span class="zh">若浏览器尚未登录，页面只使用目标服务器通过 <code>/api/config</code> 发布的 Lark、飞书或 OIDC 方式。私有部署发布自己的账号中心时，该账号中心同样可完成登录。</span><span class="en">If the browser is not signed in, the page uses only the Lark, Feishu, or OIDC methods advertised by the target server through <code>/api/config</code>. A private deployment's own account center also works when advertised there.</span></li>
+          <li><span class="zh">若浏览器尚未登录，页面只使用目标服务器通过 <code>/api/config</code> 发布的 Lark、飞书或 OIDC 方式。自有账号中心只要按该 OIDC provider 契约提供授权、token 和用户信息端点，也可完成登录。</span><span class="en">If the browser is not signed in, the page uses only the Lark, Feishu, or OIDC methods advertised by the target server through <code>/api/config</code>. A custom account center also works when it exposes authorization, token, and user-info endpoints through that OIDC provider contract.</span></li>
           <li><span class="zh">检查服务器域名、设备名称、平台和应用版本，再批准或拒绝。批准后，桌面端用 Device Flow 结果建立该服务器自己的会话。</span><span class="en">Check the server domain, device name, platform, and app version, then approve or deny. After approval, the desktop establishes that server's own session from the Device Flow result.</span></li>
         </ol>
         <div class="du-callout note">

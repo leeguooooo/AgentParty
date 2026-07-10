@@ -150,6 +150,18 @@ export function App() {
       });
   }, [activeOrigin]);
 
+  const switchDesktopOrigin = useCallback(async (origin: string) => {
+    const result = await switchActiveDesktopServer(origin);
+    setActiveOrigin(result.origin);
+    setServerPairingFlow(initialDesktopServerPairingFlow(result.origin));
+    setAuthError(null);
+    setChannels(null);
+    setListError(null);
+    setMe(null);
+    setToken(result.accessToken);
+    setDesktopBoot("ready");
+  }, []);
+
   useEffect(() => {
     if (!desktop) return;
     let alive = true;
@@ -576,6 +588,19 @@ export function App() {
           <h1 className="d-title gate-title">Agent<span className="d-hl">Party</span></h1>
           <section className="d-card gate-card">
             <p className="banner banner--red" role="alert">{t("App.desktop.restoreFailed")}</p>
+            <ServerSwitcher
+              profiles={serverProfiles}
+              activeOrigin={activeOrigin}
+              onSwitch={switchDesktopOrigin}
+              onAddPair={() => setDesktopBoot("ready")}
+              onPair={(origin) => {
+                saveActiveServerOrigin(localStorage, origin);
+                setApiBase(origin);
+                setActiveOrigin(origin);
+                setServerPairingFlow(initialDesktopServerPairingFlow(origin));
+                setDesktopBoot("ready");
+              }}
+            />
             <div className="desktop-session-actions">
               <button
                 type="button"
@@ -814,16 +839,7 @@ export function App() {
           <ServerSwitcher
             profiles={serverProfiles}
             activeOrigin={activeOrigin}
-            onSwitch={async (origin) => {
-              const result = await switchActiveDesktopServer(origin);
-              setActiveOrigin(result.origin);
-              setServerPairingFlow(initialDesktopServerPairingFlow(result.origin));
-              setAuthError(null);
-              setChannels(null);
-              setListError(null);
-              setMe(null);
-              setToken(result.accessToken);
-            }}
+            onSwitch={switchDesktopOrigin}
             onAddPair={() => setServerPairingFlow(beginDesktopServerAdd(initialDesktopServerPairingFlow(activeOrigin)))}
             onPair={(origin) => setServerPairingFlow(beginDesktopServerPairing(
               initialDesktopServerPairingFlow(activeOrigin),

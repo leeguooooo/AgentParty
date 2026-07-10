@@ -251,7 +251,8 @@ interface DesktopPollingOptions {
 export async function pollDesktopPairing(options: DesktopPollingOptions): Promise<DesktopPollingResult> {
   let intervalSeconds = Math.max(1, options.intervalSeconds);
   const now = options.now ?? Date.now;
-  const deadline = now() + options.expiresInSeconds * 1000;
+  const pairingDeadline = now() + options.expiresInSeconds * 1000;
+  let deadline = pairingDeadline;
   while (!options.signal.aborted) {
     if (now() >= deadline) return { type: "expired" };
     await options.wait(intervalSeconds, options.signal);
@@ -262,7 +263,12 @@ export async function pollDesktopPairing(options: DesktopPollingOptions): Promis
       result = await options.exchange(options.signal);
     } catch (cause) {
       if (options.signal.aborted) return { type: "cancelled" };
-      if (cause instanceof DesktopPairingExchangeNetworkError) continue;
+      if (cause instanceof DesktopPairingExchangeNetworkError) {
+        // A request made before the pairing deadline may have committed even if its
+        // response was lost. Keep one bounded server recovery window after expiry.
+        deadline = Math.max(deadline, pairingDeadline + 60_000);
+        continue;
+      }
       throw cause;
     }
     options.onEvent(result);

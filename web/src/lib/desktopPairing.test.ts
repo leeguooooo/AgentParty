@@ -4,6 +4,7 @@ import {
   __resetDesktopPairingSingleFlightsForTests,
   createDesktopPairing,
   createDesktopPairingSecrets,
+  DesktopPairingExchangeNetworkError,
   exchangeDesktopPairingToken,
   normalizePairingCode,
   parsePairDeepLink,
@@ -302,6 +303,31 @@ describe("desktop pairing polling loop", () => {
 
     expect(now).toBe(60_000);
     expect(exchanges).toBe(20);
+    expect(result.type).toBe("approved");
+  });
+
+  test("keeps a bounded 60 second recovery grace after the original pairing deadline", async () => {
+    let now = 3_000;
+    let exchanges = 0;
+    const result = await pollDesktopPairing({
+      intervalSeconds: 1,
+      expiresInSeconds: 2,
+      signal: new AbortController().signal,
+      wait: async (seconds) => { now += seconds * 1000; },
+      exchange: async () => {
+        exchanges += 1;
+        if (exchanges === 1) throw new DesktopPairingExchangeNetworkError(new TypeError("response lost"));
+        return {
+          type: "approved",
+          tokens: { access_token: "access", refresh_token: "refresh", expires_in: 600 },
+        };
+      },
+      onEvent: () => {},
+      now: () => now,
+    });
+
+    expect(now).toBe(5_000);
+    expect(exchanges).toBe(2);
     expect(result.type).toBe("approved");
   });
 

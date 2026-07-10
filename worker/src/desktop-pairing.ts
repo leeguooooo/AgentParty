@@ -71,7 +71,6 @@ interface RecoveryRow {
   ciphertext: string;
   created_at: number;
   expires_at: number;
-  pairing_expires_at: number;
   device_secret_challenge: string;
   access_hash: string;
   access_expires_at: number;
@@ -354,12 +353,11 @@ async function recoverConsumedPairing(
 ): Promise<Response> {
   const row = await env.DB.prepare(
     `SELECT r.pairing_id, r.session_id, r.device_code_hash, r.nonce, r.ciphertext,
-            r.created_at, r.expires_at, p.expires_at AS pairing_expires_at,
+            r.created_at, r.expires_at,
             s.device_secret_challenge, s.access_hash, s.access_expires_at,
             s.refresh_hash, s.refresh_expires_at, s.created_at AS session_created_at,
             s.updated_at AS session_updated_at, s.revoked_at
        FROM desktop_token_recoveries r
-       JOIN desktop_pairings p ON p.id = r.pairing_id
        JOIN desktop_sessions s ON s.id = r.session_id AND s.pairing_id = r.pairing_id
       WHERE r.pairing_id = ?`,
   )
@@ -372,7 +370,6 @@ async function recoverConsumedPairing(
 
   const stale =
     row.expires_at <= now ||
-    row.pairing_expires_at <= now ||
     row.revoked_at !== null ||
     row.access_expires_at <= now ||
     row.refresh_expires_at <= now ||
@@ -570,8 +567,8 @@ async function pairingByUserCode(
 ): Promise<{ row: PairingRow; secret: string } | Response> {
   const secret = requireSecret(env);
   if (!secret) return sensitiveJson(errorBody("unavailable", "desktop pairing is not configured"), 503);
-  if (identity.role !== "human" || !identity.account) {
-    return sensitiveJson(errorBody("forbidden", "a human account session is required"), 403);
+  if (identity.role !== "human" || !identity.account || identity.desktopSessionId !== undefined) {
+    return sensitiveJson(errorBody("forbidden", "an independently authenticated human browser session is required"), 403);
   }
   const blocked = await wrongCodeGate(env, secret, request, identity.account, false);
   if (blocked) return blocked;
@@ -731,7 +728,7 @@ export async function exchangeDesktopPairing(request: Request, env: DesktopPairi
     deviceCodeHash: deviceHash,
     deviceSecretChallenge: row.device_secret_challenge,
   });
-  const recoveryExpiresAt = Math.min(now + RECOVERY_TTL_MS, row.expires_at);
+  const recoveryExpiresAt = now + RECOVERY_TTL_MS;
   try {
     const results = await env.DB.batch([
       env.DB.prepare(

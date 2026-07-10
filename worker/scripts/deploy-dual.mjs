@@ -54,6 +54,9 @@ function deployTarget(name) {
     },
   });
   run("wrangler-accounts", ["--profile", target.profile, "deploy", "--config", target.config], { env });
+  run("node", ["scripts/smoke-desktop-pairing.mjs"], {
+    env: { ...env, AGENTPARTY_SMOKE_BASE: target.smokeBase },
+  });
 
   if (target.smokeToken && target.smokeWriteToken) {
     run("node", ["scripts/smoke-prod.mjs"], {

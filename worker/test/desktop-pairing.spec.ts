@@ -160,6 +160,26 @@ describe("desktop device pairing", () => {
     expect(await decided.json()).toMatchObject({ pairing_id: started.body.pairing_id, status: "approved" });
   });
 
+  it("requires an independently authenticated browser session to approve another desktop", async () => {
+    const paired = await exchangeApproved("203.0.113.48");
+    const desktopTokens = JSON.parse(paired.body) as { access_token: string };
+    const next = await startPairing("203.0.113.49");
+
+    const inspect = await desktop(
+      "/api/desktop/pairings/inspect",
+      { user_code: next.body.user_code },
+      desktopTokens.access_token,
+    );
+    const decide = await desktop(
+      "/api/desktop/pairings/decision",
+      { user_code: next.body.user_code, decision: "approve" },
+      desktopTokens.access_token,
+    );
+
+    expect(inspect.status).toBe(403);
+    expect(decide.status).toBe(403);
+  });
+
   it("returns pending, slows rapid polls, and never accepts the short user code for redemption", async () => {
     const started = await startPairing("203.0.113.12");
     const pending = await desktop("/api/desktop/pairings/token", {
@@ -240,9 +260,20 @@ describe("desktop device pairing", () => {
     expect(count?.n).toBe(1);
   });
 
-  it("recovers an identical encrypted token response for 60 seconds without storing plaintext", async () => {
-    const { started, response, body } = await exchangeApproved("203.0.113.41");
+  it("recovers an identical encrypted token response for 60 seconds after exchange, even after pairing expiry", async () => {
+    const started = await approvedPairing("203.0.113.41");
+    await env.DB.prepare("UPDATE desktop_pairings SET expires_at = ? WHERE id = ?")
+      .bind(Date.now() + 1_000, started.body.pairing_id)
+      .run();
+    const response = await desktop("/api/desktop/pairings/token", {
+      device_code: started.body.device_code,
+      code_verifier: started.verifier,
+    });
+    const body = await response.text();
     const issued = JSON.parse(body) as { access_token: string; refresh_token: string; session_id: string };
+    await env.DB.prepare("UPDATE desktop_pairings SET expires_at = ? WHERE id = ?")
+      .bind(Date.now() - 1, started.body.pairing_id)
+      .run();
     const recovered = await desktop("/api/desktop/pairings/token", {
       device_code: started.body.device_code,
       code_verifier: started.verifier,
@@ -260,8 +291,9 @@ describe("desktop device pairing", () => {
       .first<{ expires_at: number }>();
     expect(recovery).not.toBeNull();
     expect(recovery?.session_id).toBe(issued.session_id);
+    expect(Number(recovery?.expires_at) - Number(recovery?.created_at)).toBeGreaterThanOrEqual(59_000);
     expect(Number(recovery?.expires_at) - Number(recovery?.created_at)).toBeLessThanOrEqual(60_000);
-    expect(Number(recovery?.expires_at)).toBeLessThanOrEqual(Number(pairing?.expires_at));
+    expect(Number(recovery?.expires_at)).toBeGreaterThan(Number(pairing?.expires_at));
     const stored = JSON.stringify(recovery);
     expect(stored).not.toContain(issued.access_token);
     expect(stored).not.toContain(issued.refresh_token);

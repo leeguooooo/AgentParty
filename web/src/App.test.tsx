@@ -176,6 +176,92 @@ afterEach(async () => {
 });
 
 describe("App desktop server pairing behavior", () => {
+  test("startup restore failure still allows switching to another paired server", async () => {
+    const privateOrigin = "https://private.example.com";
+    const credentials = new Map([
+      [activeOrigin, JSON.stringify({
+        refreshToken: "offline-refresh",
+        deviceSecret: "offline-device-secret",
+        serverOrigin: activeOrigin,
+        sessionId: "offline-session",
+      })],
+      [privateOrigin, JSON.stringify({
+        refreshToken: "private-refresh",
+        deviceSecret: "private-device-secret",
+        serverOrigin: privateOrigin,
+        sessionId: "private-session",
+      })],
+    ]);
+    invokeHandler = async (command, args) => {
+      const origin = String(args?.origin ?? "");
+      if (command === "desktop_credential_migrate") return null;
+      if (command === "desktop_credential_read") return credentials.get(origin) ?? null;
+      if (command === "desktop_credential_write") {
+        credentials.set(origin, String(args?.credential));
+        return null;
+      }
+      if (command === "desktop_credential_delete") {
+        credentials.delete(origin);
+        credentialDeletes += 1;
+        return null;
+      }
+      throw new Error(`unexpected native command: ${command}`);
+    };
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url === `${activeOrigin}/api/desktop/sessions/refresh`) {
+          return new Response("offline", { status: 503 });
+        }
+        if (url === `${privateOrigin}/api/desktop/sessions/refresh`) {
+          return new Response(JSON.stringify({
+            access_token: "private-access",
+            refresh_token: "rotated-private-refresh",
+            expires_in: 600,
+            session_id: "private-session",
+          }), { status: 200 });
+        }
+        if (url.endsWith("/api/config")) return new Response("{}", { status: 200 });
+        if (url.endsWith("/api/channels")) return new Response('{"channels":[]}', { status: 200 });
+        if (url.endsWith("/api/me")) return new Response(JSON.stringify({
+          name: "human-private",
+          email: null,
+          kind: "human",
+          handle: null,
+          display_name: "Private Human",
+          avatar_url: null,
+          avatar_thumb: null,
+          provider: "oidc",
+          tenant_key: null,
+          role: "human",
+          owner: null,
+        }), { status: 200 });
+        throw new Error(`unexpected request: ${url}`);
+      },
+    });
+
+    await act(async () => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const root = renderer!.root;
+    expect(root.findByProps({ role: "alert" }).children).toContain("The secure desktop session could not be refreshed.");
+    await act(async () => {
+      root.findByProps({ id: "active-server" }).props.onChange({ target: { value: privateOrigin } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(root.findByProps({ className: "app-signout t-mono" })).toBeTruthy();
+    expect(loadActiveServerOrigin(localStorage)).toBe(privateOrigin);
+    expect(apiBase()).toBe(privateOrigin);
+    expect(credentialDeletes).toBe(0);
+    expect(credentials.has(activeOrigin)).toBe(true);
+  });
+
   test("logged-in add/pair cancellation preserves the old token, origin, runtime base, and credential", async () => {
     await act(async () => {
       renderer = create(<LocaleProvider><App /></LocaleProvider>);
