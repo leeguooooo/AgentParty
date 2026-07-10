@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  LAST_UPDATER_DIAGNOSTIC_KEY,
   LAST_SUCCESSFUL_CHECK_KEY,
   classifyUpdaterError,
   createBrowserDesktopUpdaterClient,
@@ -188,10 +189,80 @@ describe("desktop updater auto-check", () => {
 });
 
 describe("desktop updater checks", () => {
+  test("persists an attempt before a native check settles", () => {
+    const storage = memoryStorage();
+    const pending = deferred<UpdateCandidate | null>();
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({ check: () => pending.promise }),
+      clock: { now: () => 123_456 },
+      storage,
+    });
+
+    void controller.check("manual");
+
+    expect(JSON.parse(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY) ?? "null")).toEqual({
+      status: "attempt",
+      source: "manual",
+      stage: "check",
+      category: null,
+      timestamp: 123_456,
+      appVersion: null,
+    });
+    pending.resolve(null);
+  });
+
+  test("persists a privacy-safe diagnostic when a check fails", async () => {
+    const storage = memoryStorage();
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({
+        version: async () => "0.2.88",
+        check: async () => { throw new Error("signature rejected with secret-token"); },
+      }),
+      clock: { now: () => 123_456 },
+      storage,
+    });
+
+    await captureConsoleErrors(() => controller.check("auto"));
+
+    expect(JSON.parse(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY) ?? "null")).toEqual({
+      status: "failure",
+      source: "auto",
+      stage: "check",
+      category: "verification",
+      timestamp: 123_456,
+      appVersion: "0.2.88",
+    });
+    expect(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY)).not.toContain("secret-token");
+  });
+
+  test("does not let a stuck app-version lookup keep a failed check pending", async () => {
+    let settled = false;
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({
+        version: () => new Promise(() => {}),
+        check: async () => { throw new Error("network unavailable"); },
+      }),
+      clock: { now: () => 1 },
+      storage: memoryStorage(),
+      timer: {
+        setTimeout(callback, delayMs) {
+          if (delayMs < 30_000) callback();
+          return delayMs;
+        },
+        clearTimeout() {},
+      },
+    });
+
+    void captureConsoleErrors(() => controller.check("auto")).then(() => { settled = true; });
+    for (let i = 0; i < 10 && !settled; i += 1) await Promise.resolve();
+
+    expect(settled).toBe(true);
+  });
+
   test("records a successful no-update check", async () => {
     const storage = memoryStorage();
     const controller = createDesktopUpdaterController({
-      adapter: adapter(),
+      adapter: adapter({ version: async () => "0.2.88" }),
       clock: { now: () => 123_456 },
       storage,
     });
@@ -200,6 +271,14 @@ describe("desktop updater checks", () => {
 
     expect(controller.getState()).toMatchObject({ phase: "up-to-date", panelOpen: true, error: null });
     expect(storage.values.get(LAST_SUCCESSFUL_CHECK_KEY)).toBe("123456");
+    expect(JSON.parse(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY) ?? "null")).toEqual({
+      status: "success",
+      source: "manual",
+      stage: "check",
+      category: null,
+      timestamp: 123_456,
+      appVersion: "0.2.88",
+    });
   });
 
   test("exposes the current version, next version, and notes when an update is available", async () => {
@@ -387,6 +466,7 @@ describe("desktop updater installation", () => {
 
   test("shows plugin or network failures without disabling retry", async () => {
     let installCalls = 0;
+    const storage = memoryStorage();
     const controller = createDesktopUpdaterController({
       adapter: adapter({
         check: async () => candidate(),
@@ -396,7 +476,7 @@ describe("desktop updater installation", () => {
         },
       }),
       clock: { now: () => 1 },
-      storage: memoryStorage(),
+      storage,
     });
     await controller.check("manual");
 
@@ -409,6 +489,14 @@ describe("desktop updater installation", () => {
       panelOpen: true,
     });
     expect((errors[0]?.[1] as Error).message).toBe("network unavailable");
+    expect(JSON.parse(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY) ?? "null")).toEqual({
+      status: "failure",
+      source: null,
+      stage: "install",
+      category: "offline",
+      timestamp: 1,
+      appVersion: "0.2.82",
+    });
 
     await controller.retry();
 
@@ -641,11 +729,14 @@ describe("desktop updater timeout and plugin adapter", () => {
         imports.push(specifier);
         if (specifier === "@tauri-apps/plugin-updater") return { check: async () => update };
         if (specifier === "@tauri-apps/plugin-process") return { relaunch: async () => { relaunchCalls += 1; } };
+        if (specifier === "@tauri-apps/api/app") return { getVersion: async () => "0.2.82" };
         throw new Error(`unexpected import ${specifier}`);
       },
     });
 
     expect(imports).toEqual(["@tauri-apps/plugin-updater", "@tauri-apps/plugin-process"]);
+    await expect(tauriAdapter.version?.()).resolves.toBe("0.2.82");
+    expect(imports).toEqual(["@tauri-apps/plugin-updater", "@tauri-apps/plugin-process", "@tauri-apps/api/app"]);
     await expect(tauriAdapter.check()).resolves.toMatchObject({
       currentVersion: "0.2.82",
       nextVersion: "0.2.83",
