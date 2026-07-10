@@ -411,35 +411,42 @@ describe("builtin runner", () => {
     expect(body).toStartWith("[session start: 019f35d9]");
   });
 
-  test("resume failure cold-starts a new codex session and prefixes the reply with a reset marker", async () => {
+  // 这条测试原本**固化了一个 bug**：resume 非零后内部 cold-start 重跑模型。
+  // 那次 resume 可能已经 push 过、开过 PR，只是最后非零；重跑就是把副作用做第二遍。
+  // 契约⑤：既有测试反过来断言缺陷时，要改的是测试（#206 门禁 P1②）。
+  test("resume failure stops instead of cold-starting a new session (no duplicated side effects)", async () => {
     const { posts, post } = postRecorder();
     const workdir = tempDir();
     writeFileSync(
       join(workdir, "wake-session.json"),
       JSON.stringify({ harness: "codex", session_id: uuid(1), created_at: 1, last_wake_ts: 1, wakes: 3 }),
     );
+    const calls: string[][] = [];
     const runProcess: RunnerProcess = async (args) => {
+      calls.push(args);
       if (args.includes("resume")) return { code: 9, stdout: "", stderr: "missing session" };
       const out = args[args.indexOf("-o") + 1]!;
       writeFileSync(out, "fresh answer\n");
       return { code: 0, stdout: `session id: ${uuid(2)}\n`, stderr: "" };
     };
 
-    await createBuiltinRunner({
-      server: "http://agentparty.test",
-      token: "ap_tok",
-      channel: "dev",
-      harness: "codex",
-      workdir,
-      runProcess,
-      post,
-    })(triggerFrame(33), runnerCtx());
+    await expect(
+      createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir,
+        runProcess,
+        post,
+      })(triggerFrame(33), runnerCtx()),
+    ).rejects.toThrow(/exit code 9/);
 
-    const finalPost = posts.at(-1)!;
-    expect(finalPost.body).toMatchObject({ kind: "message", reply_to: 33 });
-    expect((finalPost.body as { body: string }).body).toStartWith(
-      "[session reset: 019f35d9 → 019f35d9]\nfresh answer",
-    );
+    // 只调用一次 runner（resume），绝不 fork 出新 session 重跑模型
+    expect(calls.filter((a) => a.includes("resume"))).toHaveLength(1);
+    expect(calls.filter((a) => !a.includes("resume"))).toHaveLength(0);
+    // 也绝不发部分正文
+    expect(posts.some((p) => (p.body as { kind?: string }).kind === "message")).toBe(false);
   });
 
   test("copies codex auth.json into the isolated CODEX_HOME before running", async () => {

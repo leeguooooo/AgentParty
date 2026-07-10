@@ -2,11 +2,11 @@
 // 游标只表达「已了结」＝ 送达成功，或有界重试耗尽后**响亮地**放弃。
 // 「欠账」（送达失败、从没进过模型）由 stuck 表达，落盘，且永不被当作积压跳过。
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT_ARCHIVED, type MsgFrame } from "@agentparty/shared";
-import { createBuiltinRunner, runServe, WakeBlockedError, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
+import { createBuiltinRunner, createSdkRunner, profileChildServeOptions, runServe, WakeBlockedError, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
 import type { StuckWake } from "../src/config";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 
@@ -476,5 +476,188 @@ describe("重试不得重复模型副作用 (#206 门禁 P1③)", () => {
     const blocked = posts.find((p) => p.state === "blocked");
     expect(blocked).toBeDefined();
     expect(String(blocked!.note)).toContain("runner binary missing"); // 不是空字符串
+  });
+});
+
+// 门禁第三轮（190-codex-dev on PR #206）
+describe("resume 非零后不得内部 cold-start 重跑模型 (#206 门禁 P1②)", () => {
+  test("resume 返回非零 → 只调用一次 runner，不 fork 出新 session 重复副作用", async () => {
+    const workdir = tempDir();
+    writeFileSync(
+      join(workdir, "wake-session.json"),
+      JSON.stringify({ harness: "codex", session_id: "019f35d9-0000-7000-8000-000000000001", created_at: 1, last_wake_ts: 1, wakes: 3 }),
+    );
+    const calls: string[][] = [];
+    const run = createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      runProcess: async (args) => {
+        calls.push(args);
+        return { code: 9, stdout: "", stderr: "resume failed after model already pushed" };
+      },
+      post: async () => ({ seq: 1 }),
+    });
+
+    // resume 可能已经跑过模型、push 过、开过 PR，只是最后非零退出。
+    // 再 cold-start 一次就是重复那些副作用。
+    await expect(run(triggerFrame(1), runnerCtx())).rejects.toThrow();
+    expect(calls).toHaveLength(1); // 不是 2
+    expect(calls[0]!).toContain("resume");
+  });
+});
+
+describe("codex-sdk 模型前失败可重试，模型后不可 (#206 门禁 P1③)", () => {
+  test("startThread 抛错（模型还没跑）→ 标为可重试，外层再试一次就成功", async () => {
+    const s = closeAfterOneMention();
+    let starts = 0;
+    let runs = 0;
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      post: async () => ({ seq: 1 }),
+      runCommand: createSdkRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        workdir: tempDir(),
+        codexFactory: () => ({
+          startThread: () => {
+            starts++;
+            if (starts === 1) throw new Error("EAI_AGAIN"); // 连服务端都没连上，模型确定没跑
+            return {
+              id: "thread_1",
+              run: async () => {
+                runs++;
+                return { final_response: "ok" };
+              },
+            };
+          },
+          resumeThread: () => {
+            throw new Error("should not resume");
+          },
+        }),
+        post: async () => ({ seq: 1 }),
+      }),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(starts).toBe(2); // 模型前的瞬态失败重试了
+    expect(runs).toBe(1); // 模型只跑了一次
+  });
+
+  test("thread.run 抛错（模型可能已经跑过）→ 不可重试，一次即宣告放弃", async () => {
+    const s = closeAfterOneMention();
+    let runs = 0;
+    const posts: Array<Record<string, unknown>> = [];
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: 1 };
+      },
+      runCommand: createSdkRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        workdir: tempDir(),
+        codexFactory: () => ({
+          startThread: () => ({
+            id: "thread_1",
+            run: async () => {
+              runs++;
+              throw new Error("sdk exploded after the model ran");
+            },
+          }),
+          resumeThread: () => ({ id: "thread_1", run: async () => ({ final_response: "x" }) }),
+        }),
+        post: async () => ({ seq: 1 }),
+      }),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(runs).toBe(1); // 绝不重跑模型
+    expect(posts.filter((p) => p.state === "blocked")).toHaveLength(1);
+  });
+});
+
+// 门禁反例（190-codex-dev）：cursor=3、持久欠账 seq=4、welcome head=6 但未重放 seq 4、
+// 挂载后来一条新 seq=7。旧实现会跑 seq 7、把 cursor 推到 7，**顺手清掉 seq=4 的欠账**。
+// 现有测试只发 head 内的 seq 6，被 backlog 过滤，从没走到这条路径。
+describe("后续消息不得清掉、也不得越过另一条欠账 (#206 门禁 P1①)", () => {
+  test("欠账 seq=4 未重放时，head 之后的新 seq=7 不执行、不 ack、不清账", async () => {
+    server = startMockServer((f, sock) => {
+      if (f.type !== "hello") return;
+      sock.send(welcomeFrame(6, "me")); // head=6，但服务端没重放 seq 4
+      setTimeout(() => sock.send(msgFrame(7, "@me 新消息", { mentions: ["me"] })), 30);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 120);
+    });
+    const seen: number[] = [];
+    const cursors: number[] = [];
+    const stucks: Array<StuckWake | null> = [];
+    const o = opts({
+      server: server.url,
+      since: 3,
+      stuck: { seq: 4, attempts: 1, last_error: "died mid-retry" },
+      onCursor: (c) => cursors.push(c),
+      onStuck: (st) => stucks.push(st),
+      post: async () => ({ seq: 1 }),
+      runCommand: async (f) => void seen.push(f.seq),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(seen).toEqual([]); // seq 7 绝不能在欠账了结前被执行
+    expect(cursors).toEqual([]); // 游标绝不越过 seq 4
+    expect(stucks.filter((s) => s === null)).toEqual([]); // 欠账绝不被清掉
+  });
+
+  test("欠账那条重放回来 → 正常重试并了结，之后的新消息才放行", async () => {
+    server = startMockServer((f, sock) => {
+      if (f.type !== "hello") return;
+      sock.send(welcomeFrame(6, "me"));
+      sock.send(msgFrame(4, "@me 欠着的那条", { mentions: ["me"] })); // 这次重放回来了
+      setTimeout(() => sock.send(msgFrame(7, "@me 新消息", { mentions: ["me"] })), 40);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 140);
+    });
+    const seen: number[] = [];
+    const o = opts({
+      server: server.url,
+      since: 3,
+      stuck: { seq: 4, attempts: 1 },
+      post: async () => ({ seq: 1 }),
+      runCommand: async (f) => void seen.push(f.seq),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(seen).toEqual([4, 7]); // 先还债，再放行
+  });
+});
+
+// 门禁 P2：`--profile --replay-backlog` 被接受，但 profile 的子 serve 没拿到这个语义。
+// 用户明确要求重放，profile 模式下却静默跳过——这是「flag 接受了但不起作用」。
+describe("profile 子 serve 继承 --replay-backlog (#206 门禁 P2)", () => {
+  test("ProfileServeOptions 带 skipBacklog 时，构造的 ServeOptions 也带上", () => {
+    // 契约层面钉住：profile 的 serveOpts 必须把 skipBacklog 透传下去
+    const opts = profileChildServeOptions({
+      server: "https://x",
+      token: "ap_child",
+      channel: "dev",
+      mentionsOnly: true,
+      skipBacklog: false,
+    });
+    expect(opts.skipBacklog).toBe(false);
+  });
+
+  test("默认（不传）时仍然跳过积压", () => {
+    const opts = profileChildServeOptions({
+      server: "https://x",
+      token: "ap_child",
+      channel: "dev",
+      mentionsOnly: true,
+    });
+    expect(opts.skipBacklog).not.toBe(false);
   });
 });
