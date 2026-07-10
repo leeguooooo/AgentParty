@@ -13,6 +13,205 @@ export const openapiDocument = {
     },
   },
   paths: {
+    "/api/desktop/pairings": {
+      post: {
+        summary: "start a five-minute desktop Device Flow pairing",
+        description: "Unauthenticated. Accepts only S256 proofs; plaintext credentials are returned once and never stored.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["code_challenge_method", "code_challenge", "device_secret_challenge", "device"],
+                properties: {
+                  code_challenge_method: { type: "string", const: "S256" },
+                  code_challenge: { type: "string", pattern: "^[A-Za-z0-9_-]{43}$" },
+                  device_secret_challenge: { type: "string", pattern: "^[A-Za-z0-9_-]{43}$" },
+                  device: {
+                    type: "object",
+                    required: ["name"],
+                    properties: {
+                      name: { type: "string", minLength: 1, maxLength: 128 },
+                      platform: { type: "string", maxLength: 64 },
+                      app_version: { type: "string", maxLength: 64 },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": { description: "pairing_id, 32-byte device_code, Base20 user_code, verification_uri, expires_in=300, interval=3" },
+          "400": { description: "invalid S256 challenge or device metadata" },
+          "429": { description: "more than 20 starts per IP in ten minutes; Retry-After included" },
+          "503": { description: "DESKTOP_PAIRING_SECRET is not configured" },
+        },
+      },
+    },
+    "/api/desktop/pairings/inspect": {
+      post: {
+        summary: "inspect a pairing by short user code",
+        security: [{ bearer: [] }],
+        description: "Human bearer only. The short code locates a pairing and can never redeem it.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["user_code"],
+                properties: { user_code: { type: "string", pattern: "^[23456789BCDFGHJKLMNP]{5}-[23456789BCDFGHJKLMNP]{5}$" } },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "sanitized pairing status and device metadata" },
+          "401": { description: "missing or invalid bearer" },
+          "403": { description: "bearer is not a human account session" },
+          "404": { description: "unknown user code" },
+          "410": { description: "pairing expired" },
+          "429": { description: "IP or account blocked after five wrong codes in 15 minutes" },
+        },
+      },
+    },
+    "/api/desktop/pairings/decision": {
+      post: {
+        summary: "approve or deny a pairing by short user code",
+        security: [{ bearer: [] }],
+        description: "Human bearer only. Approval binds a new independent desktop session to the human account.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["user_code", "decision"],
+                properties: {
+                  user_code: { type: "string", pattern: "^[23456789BCDFGHJKLMNP]{5}-[23456789BCDFGHJKLMNP]{5}$" },
+                  decision: { type: "string", enum: ["approve", "deny"] },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "pairing approved or denied" },
+          "401": { description: "missing or invalid bearer" },
+          "403": { description: "bearer is not a human account session" },
+          "409": { description: "pairing already decided" },
+          "410": { description: "pairing expired" },
+          "429": { description: "IP or account wrong-code block" },
+        },
+      },
+    },
+    "/api/desktop/pairings/token": {
+      post: {
+        summary: "poll and redeem an approved desktop device grant exactly once",
+        description: "Requires the high-entropy device_code plus its S256 code_verifier. user_code is never accepted.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["device_code", "code_verifier"],
+                properties: {
+                  device_code: { type: "string", pattern: "^[A-Za-z0-9_-]{43}$" },
+                  code_verifier: { type: "string", minLength: 43, maxLength: 128 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "short-lived access token, rotating refresh token, and session_id" },
+          "202": { description: "authorization_pending" },
+          "401": { description: "invalid PKCE proof; five failures deny the pairing" },
+          "403": { description: "pairing denied" },
+          "409": { description: "grant already consumed" },
+          "410": { description: "pairing expired" },
+          "429": { description: "polling too quickly; Retry-After=10 and interval=10" },
+        },
+      },
+    },
+    "/api/desktop/sessions/refresh": {
+      post: {
+        summary: "rotate a desktop session with refresh token and device secret",
+        description: "Old refresh-token replay revokes the entire desktop session.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["refresh_token", "device_secret"],
+                properties: {
+                  refresh_token: { type: "string", pattern: "^apr_[A-Za-z0-9_-]{43}$" },
+                  device_secret: { type: "string", minLength: 32, maxLength: 256 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "rotated access and refresh tokens" },
+          "401": { description: "invalid refresh token or device proof" },
+          "403": { description: "refresh replay detected and session revoked" },
+          "410": { description: "refresh grant expired" },
+        },
+      },
+    },
+    "/api/desktop/sessions": {
+      get: {
+        summary: "list the caller's desktop sessions",
+        security: [{ bearer: [] }],
+        responses: {
+          "200": { description: "sanitized sessions without credentials or hashes" },
+          "401": { description: "missing or invalid bearer" },
+          "403": { description: "bearer is not a human account session" },
+        },
+      },
+    },
+    "/api/desktop/sessions/{id}": {
+      delete: {
+        summary: "revoke one desktop session owned by the caller",
+        security: [{ bearer: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        responses: {
+          "204": { description: "session revoked" },
+          "401": { description: "missing or invalid bearer" },
+          "403": { description: "bearer is not a human account session" },
+          "404": { description: "session not found under this account" },
+        },
+      },
+    },
+    "/api/desktop/sessions/revoke": {
+      post: {
+        summary: "revoke the current desktop session with its refresh token and device proof",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["refresh_token", "device_secret"],
+                properties: {
+                  refresh_token: { type: "string" },
+                  device_secret: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "204": { description: "session revoked or credentials were already invalid" },
+          "503": { description: "desktop pairing is not configured" },
+        },
+      },
+    },
     "/api/tokens": {
       post: {
         summary: "mint a token",
