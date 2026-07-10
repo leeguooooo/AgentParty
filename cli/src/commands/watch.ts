@@ -1,8 +1,10 @@
 // party watch — 补拉错过消息，阻塞等新消息
 import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_LOOP_GUARD, EXIT_STREAM_ENDED, EXIT_TIMEOUT } from "@agentparty/shared";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
-import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } from "../config";
+import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor, statePath } from "../config";
 import { resolveAuth } from "../oidc-cli";
 import { formatMsg } from "../format";
 import { MAX_TIMEOUT_SEC, isSlug, parsePositiveIntFlag } from "../validation";
@@ -16,8 +18,8 @@ import {
   writeStatuslineCache,
 } from "../statusline-cache";
 
-const WATCH_FLAGS = ["channel", "timeout", "follow", "once", "mentions-only", "exclude-self", "json"];
-const HELP = `usage: party watch [channel|--channel C] [--timeout N] [--mentions-only] [--exclude-self] [--follow|--once] [--json]
+const WATCH_FLAGS = ["channel", "timeout", "follow", "once", "mentions-only", "exclude-self", "json", "allow-multiple"];
+const HELP = `usage: party watch [channel|--channel C] [--timeout N] [--mentions-only] [--exclude-self] [--follow|--once] [--json] [--allow-multiple]
 
 Watch a channel for new messages. By default this waits up to 240 seconds.
 With --follow, it stays attached unless --timeout N is explicit.
@@ -65,6 +67,67 @@ export function isCodexRuntimeEnv(env: Record<string, string | undefined> = proc
   return Object.keys(env).some((key) => key === "CODEX" || key.startsWith("CODEX_") || key.startsWith("OPENAI_CODEX"));
 }
 
+/**
+ * 单实例锁（#195）。
+ *
+ * `watch --once` 的推荐用法是「退出 → 处理 → 重挂」，重挂这一步在 harness 里是手动的、无守卫的。
+ * 实测：10 个唤醒周期后同一 (channel, workspace) 上并存两个 watcher，一条 @ 触发两次 runner，
+ * agent 把同一条消息回了两遍——而 `party who` 只显示一个 ● online，重复从产品内部完全不可见。
+ * 在开着 loop guard 的频道里，这直接给熔断计数器加了个乘数。
+ *
+ * 用 pid 锁而不是 flock：Bun 没有跨平台 flock，且我们要能告诉用户「是哪个 pid 占着」。
+ * 陈旧锁（写锁的进程已死）必须能接管，否则一次 SIGKILL 就把频道永久锁死。
+ */
+export interface WatchLock {
+  ok: boolean;
+  /** ok=false 时，当前持锁的进程 pid。 */
+  heldByPid?: number;
+  release?: () => void;
+}
+
+function watchLockPath(channel: string, dir: string): string {
+  return join(dir, `watch-${channel.replace(/[^a-zA-Z0-9._-]/g, "_")}.lock`);
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // 信号 0：只探测存活，不真的发信号
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function acquireWatchLock(channel: string, dir: string): WatchLock {
+  const path = watchLockPath(channel, dir);
+  mkdirSync(dir, { recursive: true });
+  try {
+    const held = JSON.parse(readFileSync(path, "utf8")) as { pid?: number };
+    // 关键：只有确认写锁的进程**已经死了**才接管。反方向（把活着的当陈旧）会重新引入 #195。
+    if (typeof held.pid === "number" && pidAlive(held.pid)) {
+      return { ok: false, heldByPid: held.pid };
+    }
+  } catch {
+    /* 没有锁文件，或内容坏了：往下走，重新写一个 */
+  }
+  writeFileSync(path, JSON.stringify({ pid: process.pid, channel, ts: Date.now() }), { mode: 0o600 });
+  return {
+    ok: true,
+    release: () => {
+      try {
+        // 只删自己的锁：别人接管过就不动它
+        const cur = JSON.parse(readFileSync(path, "utf8")) as { pid?: number };
+        if (cur.pid === process.pid) unlinkSync(path);
+      } catch {
+        /* 已经没了 */
+      }
+    },
+  };
+}
+
+/** 已有 watcher 挂在同一 (channel, workspace) 上：拒绝启动，避免一条 @ 触发 N 次 runner（#195）。 */
+export const EXIT_ALREADY_WATCHING = 10;
+
 export interface WatchOptions {
   server: string;
   token: string;
@@ -81,6 +144,10 @@ export interface WatchOptions {
   out?: (line: string) => void;
   backoffBaseMs?: number;
   statusline?: boolean;
+  /** 单实例锁目录（#195）。默认与 workspace state 同放；测试注入。 */
+  lockDir?: string;
+  /** 关掉单实例保护（逃生舱）。 */
+  allowMultiple?: boolean;
 }
 
 export function resolveWatchTimeoutSec(timeout: number | undefined, indefinite: boolean): number {
@@ -90,6 +157,17 @@ export function resolveWatchTimeoutSec(timeout: number | undefined, indefinite: 
 
 export async function runWatch(o: WatchOptions): Promise<number> {
   const out = o.out ?? ((line: string) => console.log(line));
+  // 先抢锁，再连服务端：第二个 watcher 连 WS 都不该建，否则它已经开始消费 @ 了（#195）
+  const lockDir = o.lockDir ?? dirname(statePath());
+  const lock = o.allowMultiple === true ? null : acquireWatchLock(o.channel, lockDir);
+  if (lock && !lock.ok) {
+    out(
+      `watch: 已有 watcher 挂在 #${o.channel} 上（pid ${lock.heldByPid}）。` +
+        ` 再挂一个会让同一条 @ 触发 N 次唤醒——agent 会把同一条消息回 N 遍，并给 loop guard 上膛。` +
+        ` 要么等它退出，要么 kill ${lock.heldByPid}；确实想并存请加 --allow-multiple。`,
+    );
+    return EXIT_ALREADY_WATCHING;
+  }
   const conn = connect(o.server, o.token, o.channel, o.since, {
     onCursor: o.onCursor,
     sinceRev: o.sinceRev,
@@ -199,6 +277,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       if (!o.follow && !o.once && printed > 0 && msg.seq >= lastSeq) break;
     }
   } finally {
+    lock?.release?.();
     if (timer) clearTimeout(timer);
     if (heartbeat) clearInterval(heartbeat);
     conn.close();
@@ -231,7 +310,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["follow", "once", "mentions-only", "exclude-self", "json"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["follow", "once", "mentions-only", "exclude-self", "json", "allow-multiple"] });
   if (flags.follow === true && flags.once === true) {
     console.error("--follow and --once are mutually exclusive: follow keeps watching, once exits after the first match");
     return 1;
@@ -281,6 +360,7 @@ export async function run(argv: string[]): Promise<number> {
     onCursor: (c) => saveCursor(channel, c),
     onRevCursor: (r) => saveRevCursor(channel, r),
     statusline: true,
+    allowMultiple: flags["allow-multiple"] === true,
   });
   if (flags.once === true && flags.json !== true && code === 0) console.error(ONCE_REARM_ADVISORY);
   return code;
