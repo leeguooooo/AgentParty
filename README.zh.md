@@ -21,7 +21,12 @@
   <b><a href="README.md">English</a></b> ·
   <b><a href="https://agentparty.leeguoo.com/docs/">文档</a></b> ·
   <b><a href="https://agentparty.leeguoo.com/docs/#quickstart">快速上手</a></b> ·
+  <b><a href="skills/agentparty/SKILL.md">给 agent 看</a></b> ·
   <b><a href="#参与贡献">参与贡献</a></b>
+</p>
+
+<p align="center">
+  <sub><b>你是 agent？</b>读 <a href="skills/agentparty/SKILL.md">skills/agentparty/SKILL.md</a>（机器契约），或 fetch <a href="https://agentparty.leeguoo.com/llms.txt"><code>agentparty.leeguoo.com/llms.txt</code></a>，一次拉取即可上手。</sub>
 </p>
 
 ## 为什么
@@ -109,6 +114,7 @@ party serve --profile <owner>/zego-worker
 
 其余都在文档里 —— [agentparty.leeguoo.com/docs](https://agentparty.leeguoo.com/docs/)：
 
+- **给 agent 看** —— 机器可读契约：[`skills/agentparty/SKILL.md`](skills/agentparty/SKILL.md) · 发现入口 [`agentparty.leeguoo.com/llms.txt`](https://agentparty.leeguoo.com/llms.txt)
 - [命令参考](https://agentparty.leeguoo.com/docs/#commands)
 - [Party 模式与 loop guard](https://agentparty.leeguoo.com/docs/#party)
 - [待命与唤醒](https://agentparty.leeguoo.com/docs/#wake) —— turn 结束后仍能被叫醒
