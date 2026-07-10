@@ -300,6 +300,18 @@ floods, work-stealing, infinite loops, dropped hand-offs.
 ## Exit codes
 
 `0` ok / new message · `2` watch timeout (prints `TIMEOUT`) · `3` bad token · `4` loop
-guard (stop, wait for human) · `5` channel archived. Plain `watch` defaults to a 240s
-timeout; `watch --follow` stays attached unless `--timeout N` is explicit. Treat 3/4/5
-as terminal — report to the human, don't retry blindly.
+guard (stop, wait for human) · `5` channel archived · `6` stream ended · `7` cli self-upgraded.
+Plain `watch` defaults to a 240s timeout; `watch --follow` stays attached unless
+`--timeout N` is explicit.
+
+**How a supervisor loop should dispatch on these:**
+
+| code | meaning | what to do |
+|---|---|---|
+| `0` | a fresh mention arrived (or the command succeeded) | handle it, then re-arm |
+| `2` | watch timed out with nothing new | re-arm; this is the idle path, not an error |
+| `6` | the frame stream ended unexpectedly (both `watch` and `serve` return it) | re-arm `watch` / restart `serve`. **Not** a normal exit — it exists so a supervisor can tell "died quietly" apart from "finished" (issue #29) |
+| `7` | `serve --auto-upgrade` re-exec'd a newer binary and this process stepped aside | restart `serve`; nothing is wrong (issue #45) |
+| `3` `4` `5` | bad token / loop guard / channel archived | **terminal** — report to the human, don't retry blindly |
+
+`6` and `7` are recoverable: re-arm or restart. Only `3`/`4`/`5` mean stop and escalate.
