@@ -8,7 +8,9 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -192,13 +194,20 @@ function buildWakeContext(
   };
 }
 
-// 文件名片段消毒：身份/频道来自服务端，但它们会进路径。`..` 和分隔符必须失去含义，
-// 否则一个叫 `../../etc/x` 的 name 能把上下文写出 tmpdir。正文里仍保留原始 self。
-function pathSafe(part: string): string {
-  return part.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/\.{2,}/g, "_") || "_";
+/**
+ * 每个 serve 实例一个私有上下文目录（0700）。
+ *
+ * 不要把身份塞进文件名（PR #208 门禁）：那是**有损映射**——`tenant|alice` 与
+ * `tenant/alice` 消毒后同名，仍会互相覆盖；文件名也没有 server / profile 维度，
+ * 同时连 prod 与 test 私有部署时同频道同 seq 仍会串；长 IdP subject 还会 ENAMETOOLONG。
+ * 私有目录一次性解决碰撞、跨部署、长度三件事：路径里压根不出现身份。
+ */
+export function createWakeContextDir(): string {
+  return mkdtempSync(join(tmpdir(), "agentparty-serve-"), { encoding: "utf8" });
 }
 
 export function writeContextFile(
+  dir: string,
   frame: MsgFrame,
   channel: string,
   self: string,
@@ -207,10 +216,9 @@ export function writeContextFile(
   projectAgent: ProjectAgentRunContext | null = null,
   cliUpgrade: CliUpgradeNotice | null = null,
 ): string {
-  // 路径必须含身份（#197）。只用 channel+seq 时，同机多个 agent serve 同一频道会为同一条消息
-  // 写同一个文件、后写的赢——runner 读到别人的上下文，`self` 是别人的名字，而 --runner
-  // claude|codex 会把这个文件直接喂给模型。mode 0600 挡的是别的 unix 用户，挡不住兄弟 agent。
-  const path = join(tmpdir(), `agentparty-serve-${pathSafe(channel)}-${pathSafe(self)}-${frame.seq}.json`);
+  // dir 是本 serve 实例私有的（createWakeContextDir）。文件名只需 seq：同一次唤醒重复写得到
+  // 同一路径（幂等），而不同实例——不同身份 / 不同 server / 不同 profile——各在各的目录里。
+  const path = join(dir, `${frame.seq}.json`);
   writeFileSync(
     path,
     JSON.stringify(buildWakeContext(frame, channel, self, recent, charter, projectAgent, cliUpgrade), null, 2) + "\n",
@@ -271,6 +279,8 @@ export interface ServeOptions {
       cmd: string;
       channel: string;
       self: string;
+      /** 本 serve 实例私有的上下文目录（createWakeContextDir）。 */
+      contextDir: string;
       recent: MsgFrame[];
       charter?: ChannelCharter | null;
       projectAgent?: ProjectAgentRunContext | null;
@@ -315,6 +325,7 @@ async function defaultRun(
     cmd: string;
     channel: string;
     self: string;
+    contextDir: string;
     recent: MsgFrame[];
     charter?: ChannelCharter | null;
     projectAgent?: ProjectAgentRunContext | null;
@@ -322,7 +333,7 @@ async function defaultRun(
   },
 ): Promise<void> {
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
-  const file = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null);
+  const file = writeContextFile(ctx.contextDir, frame, ctx.channel, ctx.self, ctx.recent, ctx.charter, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null);
   const cmd = ctx.cmd.includes("{file}") ? ctx.cmd.replaceAll("{file}", file) : ctx.cmd;
   const proc = Bun.spawn(["sh", "-c", cmd], {
     stdin: new TextEncoder().encode(body),
@@ -737,7 +748,7 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
 
     const repoCwd = await ensureRepo(opts, env);
     const cwd = opts.cwd ?? repoCwd ?? opts.workdir;
-    const contextFile = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null);
+    const contextFile = writeContextFile(ctx.contextDir, frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null);
     const prompt = readFileSync(contextFile, "utf8");
 
     // resume 非零退出**不能**再 cold-start 重跑（#206 门禁 P1②）：
@@ -1124,6 +1135,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
   });
 
   const skipBacklog = o.skipBacklog !== false; // 默认跳过离线积压（#193）
+  // 本实例私有的上下文命名空间（#197 / #208 门禁）。退出时整目录删除：
+  // 失败的唤醒会把上下文留在盘上供本次排查，但它带着 charter / recent 正文，
+  // 不能在进程结束后继续躺在共享 tmpdir 里。
+  const contextDir = createWakeContextDir();
   // 挂载那一刻的频道水位（welcome.last_seq），只在首个 welcome 记一次。
   let attachHead: number | null = null;
   let self = "";
@@ -1256,6 +1271,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
               cmd: o.cmd,
               channel: o.channel,
               self,
+              contextDir,
               recent: recent.slice(),
               charter,
               projectAgent: o.projectAgent ?? null,
@@ -1347,6 +1363,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
       }
     }
   } finally {
+    // 私有目录里躺着 charter / recent 正文。失败的唤醒把它留到本次排查结束，
+    // 但绝不在进程退出后继续留在共享 tmpdir 里（#208 门禁 P2）。
+    rmSync(contextDir, { recursive: true, force: true });
     if (heartbeat) clearInterval(heartbeat);
     conn.close();
     if (o.statusline === true) clearStatuslineListener();
