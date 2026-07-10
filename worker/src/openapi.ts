@@ -109,8 +109,9 @@ export const openapiDocument = {
     },
     "/api/desktop/pairings/token": {
       post: {
-        summary: "poll and redeem an approved desktop device grant exactly once",
-        description: "Requires the high-entropy device_code plus its S256 code_verifier. user_code is never accepted.",
+        summary: "poll, redeem, or recover an approved desktop device grant",
+        description:
+          "Requires the high-entropy device_code plus its S256 code_verifier. The first consume creates exactly one session. Identical retries can recover the exact encrypted token response for at most 60 seconds and never beyond pairing expiry. user_code is never accepted.",
         requestBody: {
           required: true,
           content: {
@@ -127,11 +128,12 @@ export const openapiDocument = {
           },
         },
         responses: {
-          "200": { description: "short-lived access token, rotating refresh token, and session_id" },
+          "200": { description: "short-lived access token, rotating refresh token, and session_id; response-loss retries return identical values" },
           "202": { description: "authorization_pending" },
-          "401": { description: "invalid PKCE proof; five failures deny the pairing" },
+          "400": { description: "invalid device grant or unavailable/expired authenticated recovery" },
+          "401": { description: "invalid PKCE proof; five pre-consume failures deny the pairing" },
           "403": { description: "pairing denied" },
-          "409": { description: "grant already consumed" },
+          "409": { description: "approved pairing is internally inconsistent" },
           "410": { description: "pairing expired" },
           "429": { description: "polling too quickly; Retry-After=10 and interval=10" },
         },

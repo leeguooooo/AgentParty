@@ -61,6 +61,23 @@ async function approve(userCode: string, humanToken: string) {
   return desktop("/api/desktop/pairings/decision", { user_code: userCode, decision: "approve" }, humanToken);
 }
 
+async function approvedPairing(ip: string) {
+  const started = await startPairing(ip);
+  const human = await seedToken("human", uniq("desktop-human"), { owner: uniq("account") });
+  expect((await approve(started.body.user_code, human.token)).status).toBe(200);
+  return started;
+}
+
+async function exchangeApproved(ip: string) {
+  const started = await approvedPairing(ip);
+  const response = await desktop("/api/desktop/pairings/token", {
+    device_code: started.body.device_code,
+    code_verifier: started.verifier,
+  });
+  expect(response.status).toBe(200);
+  return { started, response, body: await response.clone().text() };
+}
+
 function expectSensitiveHeaders(res: Response) {
   expect(res.headers.get("cache-control")).toContain("no-store");
   expect(res.headers.get("cache-control")).toContain("no-cache");
@@ -180,6 +197,9 @@ describe("desktop device pairing", () => {
       code_verifier: denied.verifier,
     });
     expect(deniedToken.status).toBe(403);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM desktop_token_recoveries WHERE pairing_id = ?")
+      .bind(denied.body.pairing_id)
+      .first<{ n: number }>()).toEqual({ n: 0 });
 
     const expired = await startPairing("203.0.113.14");
     await env.DB.prepare("UPDATE desktop_pairings SET expires_at = ? WHERE id = ?")
@@ -190,12 +210,13 @@ describe("desktop device pairing", () => {
       code_verifier: expired.verifier,
     });
     expect(expiredToken.status).toBe(410);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM desktop_token_recoveries WHERE pairing_id = ?")
+      .bind(expired.body.pairing_id)
+      .first<{ n: number }>()).toEqual({ n: 0 });
   });
 
-  it("exchanges an approved device code exactly once under concurrent polling", async () => {
-    const started = await startPairing("203.0.113.15");
-    const human = await seedToken("human", uniq("desktop-human"), { owner: uniq("account") });
-    expect((await approve(started.body.user_code, human.token)).status).toBe(200);
+  it("returns the exact same response under concurrent exchange while creating one session", async () => {
+    const started = await approvedPairing("203.0.113.15");
 
     const exchange = () =>
       desktop("/api/desktop/pairings/token", {
@@ -203,16 +224,156 @@ describe("desktop device pairing", () => {
         code_verifier: started.verifier,
       });
     const responses = await Promise.all([exchange(), exchange()]);
-    expect(responses.map((res) => res.status).sort()).toEqual([200, 409]);
+    expect(responses.map((res) => res.status)).toEqual([200, 200]);
+    const payloads = await Promise.all(responses.map((response) => response.text()));
+    expect(payloads[1]).toBe(payloads[0]);
 
-    const winner = responses.find((res) => res.status === 200)!;
-    const tokens = (await winner.json()) as { access_token: string; refresh_token: string; expires_in: number; session_id: string };
+    const tokens = JSON.parse(payloads[0]) as { access_token: string; refresh_token: string; expires_in: number; session_id: string };
     expect(tokens.access_token).toMatch(/^apd_[A-Za-z0-9_-]{43}$/);
     expect(tokens.refresh_token).toMatch(/^apr_[A-Za-z0-9_-]{43}$/);
     expect(tokens.expires_in).toBeGreaterThan(0);
     expect((await SELF.fetch("http://ap.test/api/me", { headers: { authorization: `Bearer ${tokens.access_token}` } })).status).toBe(200);
-    expectSensitiveHeaders(winner);
+    expectSensitiveHeaders(responses[0]);
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM desktop_sessions WHERE pairing_id = ?")
+      .bind(started.body.pairing_id)
+      .first<{ n: number }>();
+    expect(count?.n).toBe(1);
   });
+
+  it("recovers an identical encrypted token response for 60 seconds without storing plaintext", async () => {
+    const { started, response, body } = await exchangeApproved("203.0.113.41");
+    const issued = JSON.parse(body) as { access_token: string; refresh_token: string; session_id: string };
+    const recovered = await desktop("/api/desktop/pairings/token", {
+      device_code: started.body.device_code,
+      code_verifier: started.verifier,
+    });
+    expect(recovered.status).toBe(200);
+    expect(await recovered.text()).toBe(body);
+    expectSensitiveHeaders(response);
+    expectSensitiveHeaders(recovered);
+
+    const recovery = await env.DB.prepare("SELECT * FROM desktop_token_recoveries WHERE pairing_id = ?")
+      .bind(started.body.pairing_id)
+      .first<Record<string, unknown>>();
+    const pairing = await env.DB.prepare("SELECT expires_at FROM desktop_pairings WHERE id = ?")
+      .bind(started.body.pairing_id)
+      .first<{ expires_at: number }>();
+    expect(recovery).not.toBeNull();
+    expect(recovery?.session_id).toBe(issued.session_id);
+    expect(Number(recovery?.expires_at) - Number(recovery?.created_at)).toBeLessThanOrEqual(60_000);
+    expect(Number(recovery?.expires_at)).toBeLessThanOrEqual(Number(pairing?.expires_at));
+    const stored = JSON.stringify(recovery);
+    expect(stored).not.toContain(issued.access_token);
+    expect(stored).not.toContain(issued.refresh_token);
+    expect(stored).not.toContain(body);
+  });
+
+  it("does not recover for a wrong verifier and does not consume another session", async () => {
+    const { started, body } = await exchangeApproved("203.0.113.42");
+    const wrong = await desktop("/api/desktop/pairings/token", {
+      device_code: started.body.device_code,
+      code_verifier: `wrong-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+    });
+    expect(wrong.status).toBe(400);
+    const wrongBody = await wrong.text();
+    expect(JSON.parse(wrongBody)).toEqual({ error: { code: "invalid_grant", message: "invalid device grant" } });
+    expect(await desktop("/api/desktop/pairings/token", {
+      device_code: started.body.device_code,
+      code_verifier: started.verifier,
+    }).then((response) => response.text())).toBe(body);
+    await env.DB.prepare("UPDATE desktop_token_recoveries SET expires_at = ? WHERE pairing_id = ?")
+      .bind(Date.now() - 1, started.body.pairing_id)
+      .run();
+    const stale = await desktop("/api/desktop/pairings/token", {
+      device_code: started.body.device_code,
+      code_verifier: started.verifier,
+    });
+    expect(stale.status).toBe(wrong.status);
+    expect(await stale.text()).toBe(wrongBody);
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM desktop_sessions WHERE pairing_id = ?")
+      .bind(started.body.pairing_id)
+      .first<{ n: number }>();
+    expect(count?.n).toBe(1);
+  });
+
+  it("rejects recovery after its bounded window without creating another session", async () => {
+    const { started } = await exchangeApproved("203.0.113.43");
+    await env.DB.prepare("UPDATE desktop_token_recoveries SET expires_at = ? WHERE pairing_id = ?")
+      .bind(Date.now() - 1, started.body.pairing_id)
+      .run();
+    const retry = await desktop("/api/desktop/pairings/token", {
+      device_code: started.body.device_code,
+      code_verifier: started.verifier,
+    });
+    expect(retry.status).toBe(400);
+    expect(await retry.json()).toEqual({ error: { code: "invalid_grant", message: "invalid device grant" } });
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM desktop_sessions WHERE pairing_id = ?")
+      .bind(started.body.pairing_id)
+      .first<{ n: number }>();
+    expect(count?.n).toBe(1);
+  });
+
+  it("opportunistically deletes expired encrypted recoveries through the expiry index", async () => {
+    const { started } = await exchangeApproved("203.0.113.46");
+    await env.DB.prepare("UPDATE desktop_token_recoveries SET expires_at = ? WHERE pairing_id = ?")
+      .bind(Date.now() - 1, started.body.pairing_id)
+      .run();
+
+    await startPairing("203.0.113.47");
+
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM desktop_token_recoveries WHERE pairing_id = ?")
+      .bind(started.body.pairing_id)
+      .first<{ n: number }>();
+    expect(count?.n).toBe(0);
+    const index = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_desktop_token_recoveries_expires_at'",
+    ).first<{ name: string }>();
+    expect(index?.name).toBe("idx_desktop_token_recoveries_expires_at");
+    const plan = await env.DB.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT pairing_id FROM desktop_token_recoveries
+        WHERE expires_at <= ?
+        ORDER BY expires_at
+        LIMIT 100`,
+    )
+      .bind(Date.now())
+      .all<{ detail: string }>();
+    expect(plan.results.some((row) => row.detail.includes("idx_desktop_token_recoveries_expires_at"))).toBe(true);
+  });
+
+  it.each(["ciphertext", "device_code_hash"] as const)(
+    "rejects authenticated recovery when %s is mutated",
+    async (column) => {
+      const ip = column === "ciphertext" ? "203.0.113.44" : "203.0.113.45";
+      const { started } = await exchangeApproved(ip);
+      if (column === "ciphertext") {
+        await env.DB.prepare(
+          `UPDATE desktop_token_recoveries
+              SET ciphertext = CASE substr(ciphertext, 1, 1)
+                WHEN 'A' THEN 'B' || substr(ciphertext, 2)
+                ELSE 'A' || substr(ciphertext, 2)
+              END
+            WHERE pairing_id = ?`,
+        )
+          .bind(started.body.pairing_id)
+          .run();
+      } else {
+        await env.DB.prepare("UPDATE desktop_token_recoveries SET device_code_hash = ? WHERE pairing_id = ?")
+          .bind("0".repeat(64), started.body.pairing_id)
+          .run();
+      }
+      const retry = await desktop("/api/desktop/pairings/token", {
+        device_code: started.body.device_code,
+        code_verifier: started.verifier,
+      });
+      expect(retry.status).toBe(400);
+      expect(await retry.json()).toEqual({ error: { code: "invalid_grant", message: "invalid device grant" } });
+      const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM desktop_sessions WHERE pairing_id = ?")
+        .bind(started.body.pairing_id)
+        .first<{ n: number }>();
+      expect(count?.n).toBe(1);
+    },
+  );
 
   it("denies a pairing after five PKCE proof failures", async () => {
     const started = await startPairing("203.0.113.16");

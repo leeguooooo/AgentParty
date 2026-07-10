@@ -13,9 +13,13 @@ const START_LIMIT = 20;
 const WRONG_CODE_WINDOW_MS = 15 * 60 * 1000;
 const WRONG_CODE_LIMIT = 5;
 const WRONG_CODE_BLOCK_MS = 60 * 60 * 1000;
+const RECOVERY_TTL_MS = 60_000;
 const BASE20 = "23456789BCDFGHJKLMNP";
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/;
 const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+const RECOVERY_HKDF_SALT = textEncoder.encode("agentparty.desktop-token-recovery.salt.v1");
+const RECOVERY_HKDF_INFO = textEncoder.encode("agentparty.desktop-token-recovery.aes-256-gcm.v1");
 
 interface PairingRow {
   id: string;
@@ -50,6 +54,34 @@ interface SessionRow {
   revoked_at: number | null;
 }
 
+interface DesktopTokenResponse {
+  access_token: string;
+  token_type: "Bearer";
+  expires_in: number;
+  refresh_token: string;
+  refresh_expires_in: number;
+  session_id: string;
+}
+
+interface RecoveryRow {
+  pairing_id: string;
+  session_id: string;
+  device_code_hash: string;
+  nonce: string;
+  ciphertext: string;
+  created_at: number;
+  expires_at: number;
+  pairing_expires_at: number;
+  device_secret_challenge: string;
+  access_hash: string;
+  access_expires_at: number;
+  refresh_hash: string;
+  refresh_expires_at: number;
+  session_created_at: number;
+  session_updated_at: number;
+  revoked_at: number | null;
+}
+
 function errorBody(code: string, message: string) {
   return { error: { code, message } };
 }
@@ -62,6 +94,18 @@ export function sensitiveJson(body: unknown, status = 200, extraHeaders: Headers
       pragma: "no-cache",
       "referrer-policy": "no-referrer",
       ...Object.fromEntries(new Headers(extraHeaders)),
+    },
+  });
+}
+
+function sensitiveSerializedJson(body: string, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: {
+      "content-type": "application/json; charset=UTF-8",
+      "cache-control": "no-store, no-cache, max-age=0",
+      pragma: "no-cache",
+      "referrer-policy": "no-referrer",
     },
   });
 }
@@ -90,6 +134,102 @@ function base64url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64urlToBytes(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+    const binary = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "="));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+async function recoveryKey(secret: string): Promise<CryptoKey> {
+  const material = await crypto.subtle.importKey("raw", textEncoder.encode(secret), "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: RECOVERY_HKDF_SALT, info: RECOVERY_HKDF_INFO },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+function recoveryAad(
+  pairingId: string,
+  sessionId: string,
+  deviceCodeHash: string,
+  deviceSecretChallenge: string,
+): Uint8Array {
+  return textEncoder.encode(
+    JSON.stringify([
+      "agentparty.desktop-token-recovery.v1",
+      pairingId,
+      sessionId,
+      deviceCodeHash,
+      deviceSecretChallenge,
+    ]),
+  );
+}
+
+async function encryptRecoveryResponse(
+  secret: string,
+  plaintext: string,
+  identifiers: {
+    pairingId: string;
+    sessionId: string;
+    deviceCodeHash: string;
+    deviceSecretChallenge: string;
+  },
+): Promise<{ nonce: string; ciphertext: string }> {
+  const nonce = randomBytes(12);
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: nonce,
+      additionalData: recoveryAad(
+        identifiers.pairingId,
+        identifiers.sessionId,
+        identifiers.deviceCodeHash,
+        identifiers.deviceSecretChallenge,
+      ),
+      tagLength: 128,
+    },
+    await recoveryKey(secret),
+    textEncoder.encode(plaintext),
+  );
+  return { nonce: base64url(nonce), ciphertext: base64url(new Uint8Array(ciphertext)) };
+}
+
+async function decryptRecoveryResponse(secret: string, row: RecoveryRow): Promise<string | null> {
+  const nonce = base64urlToBytes(row.nonce);
+  const ciphertext = base64urlToBytes(row.ciphertext);
+  if (!nonce || nonce.length !== 12 || !ciphertext || ciphertext.length <= 16) return null;
+  try {
+    const plaintext = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: nonce,
+        additionalData: recoveryAad(
+          row.pairing_id,
+          row.session_id,
+          row.device_code_hash,
+          row.device_secret_challenge,
+        ),
+        tagLength: 128,
+      },
+      await recoveryKey(secret),
+      ciphertext,
+    );
+    return textDecoder.decode(plaintext);
+  } catch {
+    return null;
+  }
 }
 
 function randomCredential(prefix: "apd" | "apr"): string {
@@ -175,6 +315,90 @@ async function audit(
   )
     .bind(event, values.pairingId ?? null, values.sessionId ?? null, values.accountHash ?? null, values.ipHash ?? null, Date.now())
     .run();
+}
+
+function invalidDeviceGrant(): Response {
+  return sensitiveJson(errorBody("invalid_grant", "invalid device grant"), 400);
+}
+
+function parseRecoveredTokenResponse(raw: string, sessionId: string): DesktopTokenResponse | null {
+  try {
+    const value = JSON.parse(raw) as Partial<DesktopTokenResponse>;
+    if (
+      !/^apd_[A-Za-z0-9_-]{43}$/.test(value.access_token ?? "") ||
+      !/^apr_[A-Za-z0-9_-]{43}$/.test(value.refresh_token ?? "") ||
+      value.token_type !== "Bearer" ||
+      value.session_id !== sessionId ||
+      typeof value.expires_in !== "number" ||
+      !Number.isFinite(value.expires_in) ||
+      value.expires_in <= 0 ||
+      typeof value.refresh_expires_in !== "number" ||
+      !Number.isFinite(value.refresh_expires_in) ||
+      value.refresh_expires_in <= 0
+    ) {
+      return null;
+    }
+    return value as DesktopTokenResponse;
+  } catch {
+    return null;
+  }
+}
+
+async function recoverConsumedPairing(
+  env: DesktopPairingEnv,
+  secret: string,
+  pairing: PairingRow,
+  deviceCodeHash: string,
+  now: number,
+  proofValid: boolean,
+): Promise<Response> {
+  const row = await env.DB.prepare(
+    `SELECT r.pairing_id, r.session_id, r.device_code_hash, r.nonce, r.ciphertext,
+            r.created_at, r.expires_at, p.expires_at AS pairing_expires_at,
+            s.device_secret_challenge, s.access_hash, s.access_expires_at,
+            s.refresh_hash, s.refresh_expires_at, s.created_at AS session_created_at,
+            s.updated_at AS session_updated_at, s.revoked_at
+       FROM desktop_token_recoveries r
+       JOIN desktop_pairings p ON p.id = r.pairing_id
+       JOIN desktop_sessions s ON s.id = r.session_id AND s.pairing_id = r.pairing_id
+      WHERE r.pairing_id = ?`,
+  )
+    .bind(pairing.id)
+    .first<RecoveryRow>();
+  if (!row) {
+    await audit(env.DB, "pairing_recovery_missing", { pairingId: pairing.id });
+    return invalidDeviceGrant();
+  }
+
+  const stale =
+    row.expires_at <= now ||
+    row.pairing_expires_at <= now ||
+    row.revoked_at !== null ||
+    row.access_expires_at <= now ||
+    row.refresh_expires_at <= now ||
+    row.session_updated_at !== row.session_created_at;
+  const deviceHashValid = constantTimeEqual(row.device_code_hash, deviceCodeHash);
+  const plaintext = await decryptRecoveryResponse(secret, row);
+  const recovered = plaintext === null ? null : parseRecoveredTokenResponse(plaintext, row.session_id);
+  const tokenHashesValid =
+    recovered !== null &&
+    constantTimeEqual(await desktopCredentialHash(secret, "access", recovered.access_token), row.access_hash) &&
+    constantTimeEqual(await desktopCredentialHash(secret, "refresh", recovered.refresh_token), row.refresh_hash);
+  const recoveryValid = !stale && deviceHashValid && recovered !== null && tokenHashesValid;
+  if (!recoveryValid) {
+    await env.DB.prepare("DELETE FROM desktop_token_recoveries WHERE pairing_id = ?")
+      .bind(pairing.id)
+      .run();
+    await audit(env.DB, "pairing_recovery_auth_failed", { pairingId: pairing.id, sessionId: row.session_id });
+    return invalidDeviceGrant();
+  }
+  if (!proofValid) {
+    await audit(env.DB, "pairing_recovery_proof_failed", { pairingId: pairing.id, sessionId: row.session_id });
+    return invalidDeviceGrant();
+  }
+
+  await audit(env.DB, "pairing_response_recovered", { pairingId: pairing.id, sessionId: row.session_id });
+  return sensitiveSerializedJson(plaintext!);
 }
 
 async function consumeRateLimit(
@@ -276,6 +500,17 @@ export async function startDesktopPairing(request: Request, env: DesktopPairingE
     const retry = Math.max(1, Math.ceil((rate.windowStartedAt + START_WINDOW_MS - Date.now()) / 1000));
     return sensitiveJson(errorBody("rate_limited", "too many pairing requests"), 429, { "retry-after": String(retry) });
   }
+  await env.DB.prepare(
+    `DELETE FROM desktop_token_recoveries
+      WHERE pairing_id IN (
+        SELECT pairing_id FROM desktop_token_recoveries
+         WHERE expires_at <= ?
+         ORDER BY expires_at
+         LIMIT 100
+      )`,
+  )
+    .bind(Date.now())
+    .run();
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   const codeChallenge = typeof body?.code_challenge === "string" ? body.code_challenge : "";
   const deviceSecretChallenge = typeof body?.device_secret_challenge === "string" ? body.device_secret_challenge : "";
@@ -427,9 +662,19 @@ export async function exchangeDesktopPairing(request: Request, env: DesktopPairi
     .first<PairingRow>();
   if (!row) return sensitiveJson(errorBody("bad_request", "invalid device grant"), 400);
   const now = Date.now();
+  const proof = await s256(verifier);
+  if (row.status === "consumed") {
+    return recoverConsumedPairing(
+      env,
+      secret,
+      row,
+      deviceHash,
+      now,
+      constantTimeEqual(proof, row.code_challenge),
+    );
+  }
   if (row.expires_at <= now) return sensitiveJson(errorBody("expired", "pairing expired"), 410);
   if (row.status === "denied") return sensitiveJson(errorBody("access_denied", "pairing denied"), 403);
-  if (row.status === "consumed") return sensitiveJson(errorBody("conflict", "device grant already consumed"), 409);
   if (row.next_poll_at > now) {
     await env.DB.prepare("UPDATE desktop_pairings SET poll_interval_sec = 10, next_poll_at = ? WHERE id = ?")
       .bind(now + 10_000, row.id)
@@ -440,7 +685,6 @@ export async function exchangeDesktopPairing(request: Request, env: DesktopPairi
       { "retry-after": "10" },
     );
   }
-  const proof = await s256(verifier);
   if (!constantTimeEqual(proof, row.code_challenge)) {
     const failed = await env.DB.prepare(
       `UPDATE desktop_pairings
@@ -472,6 +716,22 @@ export async function exchangeDesktopPairing(request: Request, env: DesktopPairi
   const refreshToken = randomCredential("apr");
   const accessHash = await desktopCredentialHash(secret, "access", accessToken);
   const refreshHash = await desktopCredentialHash(secret, "refresh", refreshToken);
+  const tokenResponse: DesktopTokenResponse = {
+    access_token: accessToken,
+    token_type: "Bearer",
+    expires_in: ACCESS_TTL_MS / 1000,
+    refresh_token: refreshToken,
+    refresh_expires_in: REFRESH_TTL_MS / 1000,
+    session_id: sessionId,
+  };
+  const serializedResponse = JSON.stringify(tokenResponse);
+  const encryptedRecovery = await encryptRecoveryResponse(secret, serializedResponse, {
+    pairingId: row.id,
+    sessionId,
+    deviceCodeHash: deviceHash,
+    deviceSecretChallenge: row.device_secret_challenge,
+  });
+  const recoveryExpiresAt = Math.min(now + RECOVERY_TTL_MS, row.expires_at);
   try {
     const results = await env.DB.batch([
       env.DB.prepare(
@@ -497,29 +757,44 @@ export async function exchangeDesktopPairing(request: Request, env: DesktopPairi
         now,
       ),
       env.DB.prepare(
+        `INSERT INTO desktop_token_recoveries (
+           pairing_id, session_id, device_code_hash, nonce, ciphertext, created_at, expires_at
+         )
+         SELECT ?, ?, ?, ?, ?, ?, ?
+           FROM desktop_sessions
+          WHERE id = ? AND pairing_id = ? AND revoked_at IS NULL`,
+      ).bind(
+        row.id,
+        sessionId,
+        deviceHash,
+        encryptedRecovery.nonce,
+        encryptedRecovery.ciphertext,
+        now,
+        recoveryExpiresAt,
+        sessionId,
+        row.id,
+      ),
+      env.DB.prepare(
         `UPDATE desktop_pairings SET status = 'consumed', consumed_at = ?
           WHERE id = ? AND status = 'approved'
             AND EXISTS (SELECT 1 FROM desktop_sessions WHERE id = ? AND pairing_id = ?)`,
       ).bind(now, row.id, sessionId, row.id),
     ]);
-    if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
-      return sensitiveJson(errorBody("conflict", "device grant already consumed"), 409);
+    if (
+      results[0]?.meta.changes !== 1 ||
+      results[1]?.meta.changes !== 1 ||
+      results[2]?.meta.changes !== 1
+    ) {
+      return recoverConsumedPairing(env, secret, row, deviceHash, Date.now(), true);
     }
   } catch (error) {
     if (error instanceof Error && error.message.includes("UNIQUE")) {
-      return sensitiveJson(errorBody("conflict", "device grant already consumed"), 409);
+      return recoverConsumedPairing(env, secret, row, deviceHash, Date.now(), true);
     }
     throw error;
   }
   await audit(env.DB, "pairing_exchanged", { pairingId: row.id, sessionId });
-  return sensitiveJson({
-    access_token: accessToken,
-    token_type: "Bearer",
-    expires_in: ACCESS_TTL_MS / 1000,
-    refresh_token: refreshToken,
-    refresh_expires_in: REFRESH_TTL_MS / 1000,
-    session_id: sessionId,
-  });
+  return sensitiveSerializedJson(serializedResponse);
 }
 
 export async function refreshDesktopSession(request: Request, env: DesktopPairingEnv): Promise<Response> {
