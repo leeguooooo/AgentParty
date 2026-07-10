@@ -4,7 +4,7 @@ import { isHelpArg, parseArgs, unknownFlagError } from "../args";
 import { handleRestError, fetchMe, RestError } from "../rest";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { jsonFrame, nowTs } from "../json";
-import { readConfig, resolveChannel, writeConfig } from "../config";
+import { readConfig, resolveChannel, refreshConfigInPlace } from "../config";
 import { cachedIdentity, statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
 import { healServerUrl } from "../validation";
 
@@ -76,7 +76,8 @@ export async function run(argv: string[]): Promise<number> {
     const me = await fetchMe(auth.server, auth.token);
     const boundChannel = resolveChannel() ?? null;
     const local = readConfig();
-    if (local?.token) writeConfig({ ...local, identity: cachedIdentity(me) });
+    // 只刷新读到的那个来源；whoami 不该有换掉全局回落身份的副作用（#104）
+    if (local?.token) refreshConfigInPlace({ ...local, identity: cachedIdentity(me) });
     writeStatuslineCache({
       ...(boundChannel === null ? {} : { channel: boundChannel }),
       server: auth.server,

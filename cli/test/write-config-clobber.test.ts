@@ -1,0 +1,178 @@
+// #104：writeConfig 双写**无条件覆盖**全局 config.json。
+//
+// `party init` 覆盖全局是有意的（既有契约：「init 一次，跨目录可用」，config.test.ts:84）。
+// 真正的伤害来自那些**只想刷新一下 identity 缓存**的路径：`party whoami`、`statusline`。
+// 它们读到本目录的身份，然后把全局也一起换掉——用户只是跑了句 whoami，
+// 所有靠全局回落的目录就改用了另一个身份，甚至打到另一台 server 上。
+// statusline 更隐蔽：它在后台定时跑。
+//
+// 症状（我在 #agentparty 频道亲历）：`task not found`、`board` 显示 0 tasks、
+// history 里出现一堆陌生对话。
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  readConfig,
+  refreshConfigInPlace,
+  workspaceConfigPath,
+  workspaceId,
+  writeConfig,
+  type Config,
+} from "../src/config";
+import { startRestMock } from "./rest-mock";
+
+let home = "";
+const dirs: string[] = [];
+const prevHome = process.env.AGENTPARTY_HOME;
+const prevExplicit = process.env.AGENTPARTY_CONFIG;
+
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), "ap-home-"));
+  dirs.push(home);
+  process.env.AGENTPARTY_HOME = home;
+  delete process.env.AGENTPARTY_CONFIG;
+});
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  if (prevHome === undefined) delete process.env.AGENTPARTY_HOME;
+  else process.env.AGENTPARTY_HOME = prevHome;
+  if (prevExplicit !== undefined) process.env.AGENTPARTY_CONFIG = prevExplicit;
+  else delete process.env.AGENTPARTY_CONFIG;
+});
+
+function ws(): string {
+  const d = mkdtempSync(join(tmpdir(), "ap-ws-"));
+  dirs.push(d);
+  return d;
+}
+function cfg(name: string, token = `ap_${name}`): Config {
+  return {
+    server: "https://a.example",
+    token,
+    identity: { name, email: null, kind: "agent", role: "agent", owner: null, channel_scope: null, verified_at: 1 },
+  };
+}
+
+describe("刷新 identity 缓存不得动全局回落身份 (#104)", () => {
+  test("whoami/statusline 式刷新：本目录有 workspace 身份时，只写 workspace，全局纹丝不动", () => {
+    const fallbackDir = ws(); // 从没 init 过，永远读全局
+    const dirB = ws();
+
+    writeConfig(cfg("alice"), ws()); // 第一次 init：全局 = alice
+    writeConfig(cfg("bob"), dirB); // 第二次 init：显式意图，全局 = bob（既有契约）
+    writeConfig(cfg("alice"), ws()); // 再 init 回 alice，全局 = alice
+
+    expect(readConfig(fallbackDir)?.identity?.name).toBe("alice");
+
+    // 现在在 dirB 里跑 `party whoami`：它只想把 identity 缓存刷新一下
+    refreshConfigInPlace({ ...cfg("bob"), token: "ap_bob_refreshed" }, dirB);
+
+    // dirB 自己更新了
+    expect(readConfig(dirB)?.token).toBe("ap_bob_refreshed");
+    // 但全局回落身份绝不能因此从 alice 变成 bob
+    expect(readConfig(fallbackDir)?.identity?.name).toBe("alice");
+  });
+
+  test("回落目录里刷新：不得凭空给它创建 workspace config（那会把回落身份钉死）", () => {
+    const fallbackDir = ws();
+    writeConfig(cfg("alice"), ws()); // 全局 = alice
+
+    // 在回落目录跑 whoami：local 来自全局
+    refreshConfigInPlace({ ...cfg("alice"), token: "ap_alice_refreshed" }, fallbackDir);
+
+    // 全局被就地刷新（它就是读到的那个来源）
+    expect(readConfig(fallbackDir)?.token).toBe("ap_alice_refreshed");
+    // 但不该给这个目录新建 workspace config
+    expect(existsSync(workspaceConfigPath(fallbackDir))).toBe(false);
+  });
+
+  test("AGENTPARTY_CONFIG 显式路径：只写那个文件，不碰全局", () => {
+    const explicit = join(home, "explicit.json");
+    writeConfig(cfg("alice"), ws()); // 全局 = alice
+
+    process.env.AGENTPARTY_CONFIG = explicit;
+    writeConfig(cfg("carol"), ws());
+    refreshConfigInPlace({ ...cfg("carol"), token: "ap_carol_refreshed" }, ws());
+    delete process.env.AGENTPARTY_CONFIG;
+
+    expect(readConfig(ws())?.identity?.name).toBe("alice"); // 全局仍是 alice
+  });
+
+  test("既有契约不变：party init 仍然写全局（init 一次，跨目录可用）", () => {
+    writeConfig(cfg("alice"), ws());
+    expect(readConfig(ws())?.identity?.name).toBe("alice");
+    writeConfig(cfg("bob"), ws());
+    expect(readConfig(ws())?.identity?.name).toBe("bob"); // 显式 init 覆盖，这是有意的
+  });
+});
+
+// M2 的洞：完全没有任何 config 时，刷新不该凭空造一个
+describe("无来源时不刷新 (#104)", () => {
+  test("没有任何 config：refreshConfigInPlace 不创建任何文件", () => {
+    const d = ws();
+    refreshConfigInPlace(cfg("ghost"), d);
+    expect(existsSync(workspaceConfigPath(d))).toBe(false);
+    expect(readConfig(d)).toBeNull();
+  });
+});
+
+// M3 的洞：光有 refreshConfigInPlace、没接进 whoami / statusline，等于没修。
+// 这几条驱动**真实命令**，断言全局回落身份没被动过。
+describe("whoami / statusline 接线 (#104)", () => {
+  test("在 workspace 身份是 bob 的目录跑 whoami，全局回落身份仍是 alice", async () => {
+    const mock = startRestMock((req) => {
+      if (req.path === "/api/me") {
+        return Response.json({ name: "bob", kind: "agent", role: "agent", email: null, owner: null });
+      }
+      return undefined;
+    });
+    const cwdBefore = process.cwd();
+    try {
+      const fallbackDir = ws();
+      const dirB = ws();
+      const withServer = (name: string): Config => ({ ...cfg(name), server: mock.url });
+
+      writeConfig(withServer("alice"), ws()); // 全局 = alice
+      expect(readConfig(fallbackDir)?.identity?.name).toBe("alice");
+
+      // dirB 只写 workspace（模拟它自己 init 过 bob，但之后 alice 又 init 过一次）
+      writeConfig(withServer("bob"), dirB);
+      writeConfig(withServer("alice"), ws()); // 全局回到 alice
+      expect(readConfig(fallbackDir)?.identity?.name).toBe("alice");
+
+      process.chdir(dirB);
+      const { run: whoami } = await import("../src/commands/whoami");
+      await whoami(["--json"]);
+
+      process.chdir(cwdBefore);
+      // whoami 只刷新了 dirB 的 workspace config；全局绝不能被换成 bob
+      expect(readConfig(fallbackDir)?.identity?.name).toBe("alice");
+    } finally {
+      process.chdir(cwdBefore);
+      mock.stop();
+    }
+  });
+});
+
+// 上面那条接线测试第一次跑是红的，红的原因不是接线错了，而是这个：
+describe("workspaceId 必须先 realpath (#104 的另一半)", () => {
+  test("同一目录经 symlink 路径访问，得到同一个 workspaceId", () => {
+    const d = ws(); // macOS: /var/folders/... （/var 是 /private/var 的 symlink）
+    const real = realpathSync(d); // /private/var/folders/...
+    expect(d).not.toBe(real); // 先证明这两个字符串确实不同
+    expect(workspaceId(d)).toBe(workspaceId(real));
+  });
+
+  test("cd 进 symlink 路径后，仍能读到自己的 workspace config，而不是静默回落全局", () => {
+    const fallbackDir = ws();
+    const dirB = ws();
+    writeConfig(cfg("alice"), ws()); // 全局 = alice
+    writeConfig(cfg("bob"), dirB); // dirB 的 workspace = bob
+    writeConfig(cfg("alice"), ws()); // 全局回到 alice
+
+    // 用 realpath 形式访问同一个目录：必须仍读到 bob，不能回落到全局的 alice
+    expect(readConfig(realpathSync(dirB))?.identity?.name).toBe("bob");
+    expect(readConfig(fallbackDir)?.identity?.name).toBe("alice");
+  });
+});
