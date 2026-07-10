@@ -23,7 +23,9 @@ export function reachOf(name: string, presence: PresenceEntry[], now: number): R
   const seen = e.last_seen ?? e.ts ?? 0;
   const age = now - seen;
   const wake = e.wake?.kind;
-  if (e.state !== "offline" && age < STALE_MS) return { name, reach: "online", ...(wake ? { wake } : {}) };
+  // online：与 web mentions 一致以「当前有活 WS 连接」为准（#97 的 live，DO 从 getConnections 权威判定）；
+  // 无 live 信号（旧 worker 响应）时回退到旧的新鲜度启发式，不回归。
+  if (e.state !== "offline" && (e.live === true || age < STALE_MS)) return { name, reach: "online", ...(wake ? { wake } : {}) };
   if (wake !== undefined && autoWakeReachable(e, now, STALE_MS) && age <= DEAD_MS) return { name, reach: "wakeable", wake };
   return { name, reach: "offline", ...(wake ? { wake } : {}) };
 }

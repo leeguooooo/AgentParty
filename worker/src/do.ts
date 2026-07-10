@@ -1,5 +1,6 @@
 // channel durable object — seq 分配 / 广播 / presence / 补拉 / 各类熔断 / webhook 投递 / temp 归档
 import {
+  applyLiveConnection,
   BODY_LIMIT,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
@@ -3206,7 +3207,7 @@ export class ChannelDO extends Server<Env> {
          FROM presence ORDER BY name`,
       )
       .toArray()
-      .map((r) => this.withConnectionCount(this.presenceRowToEntry(r), liveCounts));
+      .map((r) => this.withLivePresence(this.presenceRowToEntry(r), liveCounts));
   }
 
   private presenceFor(name: string): PresenceEntry | null {
@@ -3221,12 +3222,16 @@ export class ChannelDO extends Server<Env> {
         name,
       )
       .toArray();
-    return rows.length > 0 ? this.withConnectionCount(this.presenceRowToEntry(rows[0]!), liveCounts) : null;
+    return rows.length > 0 ? this.withLivePresence(this.presenceRowToEntry(rows[0]!), liveCounts) : null;
   }
 
-  private withConnectionCount(entry: PresenceEntry, liveCounts: Map<string, number>): PresenceEntry {
+  // issue #97：presence 序列化时用「当前有无活 WS 连接」在读侧修正可达性/离线，再叠加重复连接计数。
+  // 有活连接 → applyLiveConnection 打 live=true、offline 提升为 waiting（不改写 ts/last_seen，故 host 租约
+  // 判定完全不受影响，详见 shared 注释）；无活连接 → 原样返回。connection_count 语义照旧（仅 >1 时下发）。
+  private withLivePresence(entry: PresenceEntry, liveCounts: Map<string, number>): PresenceEntry {
     const count = liveCounts.get(entry.name) ?? 0;
-    return count > 1 ? { ...entry, connection_count: count } : entry;
+    const live = applyLiveConnection(entry, count > 0);
+    return count > 1 ? { ...live, connection_count: count } : live;
   }
 
   private presenceRowToEntry(r: Record<string, unknown>): PresenceEntry {
