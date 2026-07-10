@@ -376,7 +376,7 @@ export function App() {
       callbackHandled.current = true;
       if (runtimeConfig.providers.length === 0) {
         setOidcPending(false);
-        setAuthError("sign-in is not configured");
+        setAuthError(t("App.error.ssoNotConfigured"));
         replace("/");
         return;
       }
@@ -397,14 +397,14 @@ export function App() {
         .catch((err: unknown) => {
           if (!alive) return;
           setOidcPending(false);
-          setAuthError(err instanceof Error ? err.message : "sign-in failed");
+          setAuthError(err instanceof Error ? err.message : t("App.error.signInFailed"));
           replace("/");
         });
     });
     return () => {
       alive = false;
     };
-  }, [replace]);
+  }, [replace, t]);
 
   // 邀请链接落地：访问 /join/<code> 时——已登录则直接兑换（加入频道→跳进去）；未登录则存下 code
   // 并跳 OIDC 登录，回来后 callback 会重新落到 /join/<code>、此时有 token 走兑换分支。
@@ -486,13 +486,13 @@ export function App() {
     let alive = true;
     const timer = window.setTimeout(() => {
       if (!alive) return;
-      doRefresh().catch(() => hardLogout("session expired — please sign in again"));
+      doRefresh().catch(() => hardLogout(t("App.error.sessionExpired")));
     }, delayMs);
     return () => {
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [desktop, oidc, token, doRefresh, hardLogout]);
+  }, [desktop, oidc, token, doRefresh, hardLogout, t]);
 
   useEffect(() => {
     if (token === null || (!desktop && matchPair(path))) return;
@@ -510,13 +510,13 @@ export function App() {
       })
       .catch((err: unknown) => {
         if (!alive) return;
-        if (err instanceof AuthError) onAuthFailed("invalid or revoked token — paste a new one");
-        else setListError("channels failed to load");
+        if (err instanceof AuthError) onAuthFailed(t("App.error.tokenInvalid"));
+        else setListError(t("App.error.channelsLoadFailed"));
       });
     return () => {
       alive = false;
     };
-  }, [activeOrigin, desktop, path, token, onAuthFailed]);
+  }, [activeOrigin, desktop, path, token, onAuthFailed, t]);
 
   useEffect(() => {
     if (token === null || (!desktop && matchPair(path))) return;
@@ -531,8 +531,8 @@ export function App() {
         })
         .catch((err: unknown) => {
           if (!alive) return;
-          if (err instanceof AuthError) onAuthFailed("invalid or revoked token — paste a new one");
-          else setListError("channels failed to load");
+          if (err instanceof AuthError) onAuthFailed(t("App.error.tokenInvalid"));
+          else setListError(t("App.error.channelsLoadFailed"));
         });
     };
     const onVisible = () => {
@@ -547,7 +547,7 @@ export function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.clearInterval(timer);
     };
-  }, [activeOrigin, desktop, path, token, onAuthFailed]);
+  }, [activeOrigin, desktop, path, token, onAuthFailed, t]);
 
   useEffect(() => {
     if (token === null || !matchPair(path)) return;
@@ -691,7 +691,7 @@ export function App() {
           Agent<span className="d-hl">Party</span>
         </h1>
         <p className="banner" role="status" aria-live="polite">
-          signing you in...
+          {t("App.status.signingIn")}
         </p>
       </main>
     );
@@ -734,7 +734,7 @@ export function App() {
         onSso={(provider) => {
           setAuthError(null);
           if (matchPair(path)) sessionStorage.setItem(PENDING_PAIR_ROUTE_KEY, "1");
-          beginLogin(provider).catch(() => setAuthError("could not start sign-in"));
+          beginLogin(provider).catch(() => setAuthError(t("App.error.startSignInFailed")));
         }}
         onSubmit={(t) => {
           // 粘贴登录只在非分享模式落 localStorage；分享模式坏 t 已被摘除
@@ -786,9 +786,9 @@ export function App() {
         >
           Agent<span className="d-hl">Party</span>
         </a>
-        <span className="d-hand app-tag">agents talk, humans watch</span>
+        <span className="d-hand app-tag">{t("App.tagline")}</span>
         <a className="app-docs t-mono" href="/docs">
-          docs ↗
+          {t("App.docs")}
         </a>
         <DesktopDownloadLink desktop={desktop} />
         {me !== null && (
@@ -896,19 +896,19 @@ export function App() {
         <main className="app-main">
           {routeNotFound ? (
             <p className="banner banner--red" role="alert">
-              page not found
+              {t("App.route.notFound")}
             </p>
           ) : channelPending ? (
             <p className="banner" role="status" aria-live="polite">
-              loading channel...
+              {t("App.channel.loading")}
             </p>
           ) : slug !== null && channels === null ? (
             <p className="banner banner--red" role="alert">
-              {listError ?? "channels failed to load"}
+              {listError ?? t("App.error.channelsLoadFailed")}
             </p>
           ) : unknownChannel ? (
             <p className="banner banner--red" role="alert">
-              channel not found or not available to this token
+              {t("App.channel.unavailable")}
             </p>
           ) : slug !== null ? (
             <ChannelPage
