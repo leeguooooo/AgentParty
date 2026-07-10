@@ -37,7 +37,8 @@
   color: var(--d-blue);
   font-size: 13px;
 }
-.app-docs {
+.app-docs,
+.app-product-link {
   font-size: 12px;
   color: var(--t-dim);
   text-decoration: none;
@@ -46,7 +47,8 @@
   border-radius: 0;
   white-space: nowrap;
 }
-.app-docs:hover { color: var(--t-accent); border-color: var(--t-accent); }
+.app-docs:hover,
+.app-product-link:hover { color: var(--t-accent); border-color: var(--t-accent); }
 .desktop-updater {
   position: relative;
   flex: none;
@@ -4010,7 +4012,8 @@
     flex: none;
     font-size: 22px;
   }
-  .app-docs {
+  .app-docs,
+  .app-product-link {
     display: none;
   }
   .app-me {
@@ -4288,7 +4291,8 @@
 .app-logo .d-hl { font-size: 20px; }
 .app-tag { color: var(--t-muted); font-size: 12px; }
 .app-tag::before { content: "// "; }
-.app-docs { border: 1.4px solid var(--t-faint); border-radius: 0; }
+.app-docs,
+.app-product-link { border: 1.4px solid var(--t-faint); border-radius: 0; }
 
 /* 满铺框线布局：侧栏贴左带右框线，主区自己留白（桌面端；窄屏保留原媒体查询布局） */
 @media (min-width: 761px) {
