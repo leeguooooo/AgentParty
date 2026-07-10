@@ -1703,9 +1703,13 @@ export function ChannelPage({
       .finally(() => setTaskActionBusyId(null));
   }, [loadTaskLedger, slug, taskActionBusyId, token, t]);
 
+  // #204：host board 的 conflicts 与 resolve-conflict / review-blockers 建议都从任务台账派生。
+  // HostBoardPanel 在进频道时就渲染，若这里只拉 summary，board 会一直显示「无冲突」直到用户碰巧
+  // 点开任务面板——空的 board 与「确实没有冲突」在界面上无法区分。故挂载时拉完整台账
+  // （loadTaskLedger 同时取 tasks 与 summary，替代原先单拉 summary 的调用）。
   useEffect(() => {
-    void loadTaskSummary();
-  }, [loadTaskSummary]);
+    void loadTaskLedger();
+  }, [loadTaskLedger]);
 
   const createTaskFromMessage = useCallback((seq: number) => {
     if (messageActionBusySeq !== null) return;
