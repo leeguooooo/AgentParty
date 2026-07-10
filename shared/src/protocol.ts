@@ -592,6 +592,8 @@ export interface DecisionSummary {
 
 export interface ConflictClaimSummary {
   seq: number;
+  /** 同 ClaimSummary.task_id：task 派生为对应 task 的 id，消息折叠派生为 null。渲染时据此区分 `task #N` 与 `#N`。 */
+  task_id: number | null;
   owner: string;
   state: StatusState;
   scope: string[];
@@ -777,12 +779,14 @@ export function summarizeConflicts(openClaims: ClaimSummary[]): ConflictSummary[
           const claims = groups.get(scope) ?? new Map<string, ConflictClaimSummary>();
           claims.set(`${left.owner}\0${left.seq}`, {
             seq: left.seq,
+            task_id: left.task_id,
             owner: left.owner,
             state: left.state,
             scope: left.scope,
           });
           claims.set(`${right.owner}\0${right.seq}`, {
             seq: right.seq,
+            task_id: right.task_id,
             owner: right.owner,
             state: right.state,
             scope: right.scope,
