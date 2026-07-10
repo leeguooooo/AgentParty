@@ -7,6 +7,11 @@ export type SocketStatus = "connecting" | "open" | "reconnecting" | "closed";
 export type FatalReason = "revoked" | "archived" | "forbidden";
 
 const PING_INTERVAL_MS = 25_000;
+// 静默死连接看门狗阈值（issue #130）。健康连接下 do 的 setWebSocketAutoResponse 会对每个 ping 即时
+// 回 pong，所以每个 interval 都会刷新 lastFrameAt。取 2×interval：容忍一整个心跳周期的抖动/单帧丢失，
+// 但连续两个周期（含至少一个完整 ping→pong 往返）一帧不回，就判定链路已死。取值直接采纳 issue #130
+// 的建议（"lastFrameAt 超 2×interval 主动 close"），也与 do 判 offline 的 60s 无帧同数量级、略更灵敏。
+const PONG_TIMEOUT_MS = 2 * PING_INTERVAL_MS;
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 
@@ -38,6 +43,7 @@ export class ChannelSocket {
   private revSeeded = false; // 首个 welcome 是否已用 last_rev_seq 播种 revCursor
   private backoff = BACKOFF_MIN_MS;
   private pingTimer: number | null = null;
+  private lastFrameAt = 0; // 最近一次收到任何入站帧（含 pong）的时刻，心跳看门狗判活用（issue #130）
   private reconnectTimer: number | null = null;
   private everConnected = false;
   private handshakeFails = 0; // 连续「从未 open 就被关」的次数
@@ -71,18 +77,30 @@ export class ChannelSocket {
       this.everConnected = true;
       this.handshakeFails = 0;
       this.backoff = BACKOFF_MIN_MS;
+      this.lastFrameAt = Date.now(); // 看门狗基线：刚连上视为"此刻收到过帧"，避免首个周期误判死连接
       this.handlers.onStatus("open");
       // hello 等 welcome 到了再发（见 onmessage）：welcome.last_rev_seq 作 since_rev，
       // 服务端就不会把全部历史修订快照无条件重放进来——IM 窗口模式下，一条被编辑的
       // 远古消息会被插到窗口最前，导致上翻分页从它往下、中段历史永久跳过（review P1）。
       // 字面量须与 do 的 setWebSocketAutoResponse 配对，不唤醒 do
       this.pingTimer = window.setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) ws.send('{"type":"ping"}');
+        if (ws.readyState !== WebSocket.OPEN) return;
+        // 静默死连接（TCP 半开）看门狗：健康连接下每个 ping 都会被 do 即时 pong 回来刷新 lastFrameAt。
+        // 若连续 PONG_TIMEOUT_MS 一帧未回（含 pong），说明发出去的 ping 全部石沉大海——链路已死但
+        // readyState 仍是 OPEN、onclose 迟迟不来。此时必须主动 close + 重连，绝不能把"沉默"当成健康
+        // 继续对用户显示 open（issue #130：一个 supervisor 挂着却收不到消息，presence 还显示在线）。
+        if (Date.now() - this.lastFrameAt > PONG_TIMEOUT_MS) {
+          this.handleStaleConnection(ws);
+          return;
+        }
+        ws.send('{"type":"ping"}');
       }, PING_INTERVAL_MS);
     };
 
     ws.onmessage = (ev) => {
       if (typeof ev.data !== "string") return;
+      // 任何入站帧（含 pong）都证明链路还活着 → 刷新看门狗时钟（issue #130）
+      this.lastFrameAt = Date.now();
       let frame: ServerFrame;
       try {
         frame = JSON.parse(ev.data) as ServerFrame;
@@ -171,6 +189,26 @@ export class ChannelSocket {
   // 修订游标只前移：修订快照是幂等展示事件，收到即视为已消费（不等 ack，与 CLI client.ts 对齐）。
   private advanceRev(rev: number | undefined) {
     if (typeof rev === "number" && rev > this.revCursor) this.revCursor = rev;
+  }
+
+  // 看门狗判定连接已死（发了 ping 但 PONG_TIMEOUT_MS 内无任何回帧）：主动收尾并自驱重连。
+  // 先摘掉 handler 再 close——半开死连接的 onclose 可能迟迟不触发，摘掉后既不依赖它，也防止 close()
+  // 迟到的 onclose 又走一遍 scheduleReconnect 造成双连接。收尾等价于 onclose 的 transient 分支
+  // （opened=true 时的非 1008 断线）：翻 reconnecting + 退避重连（issue #130）。
+  private handleStaleConnection(ws: WebSocket) {
+    this.clearPing();
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    try {
+      ws.close(4000, "stale");
+    } catch {
+      // 已处于 CLOSING/CLOSED，忽略
+    }
+    if (this.ws === ws) this.ws = null;
+    if (this.disposed) return;
+    this.handlers.onStatus("reconnecting");
+    this.scheduleReconnect();
   }
 
   private clearPing() {
