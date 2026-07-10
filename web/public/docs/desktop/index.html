@@ -116,9 +116,9 @@
 
         <div class="du-flow">
           <div class="du-flow-title"><span class="zh">原子切换</span><span class="en">Atomic switching</span></div>
-          <div class="du-flow-row"><div class="du-flow-k">1</div><p class="du-flow-v"><span class="zh">先验证目标配置，并尝试用目标服务器自己的系统凭据恢复访问。</span><span class="en">Validate the target configuration and try to restore access with that server's own OS credential.</span></p></div>
+          <div class="du-flow-row"><div class="du-flow-k">1</div><p class="du-flow-v"><span class="zh">先用目标服务器自己的系统凭据恢复并刷新访问；新增自定义服务器会在保存前单独完成配置探测。</span><span class="en">First restore and refresh access with the target server's own OS credential. A new custom server is probed separately before it is saved.</span></p></div>
           <div class="du-flow-row"><div class="du-flow-k">2</div><p class="du-flow-v"><span class="zh">只有目标会话可用时，才一次性提交新的 API 基址、当前服务器和频道列表。</span><span class="en">Commit the new API base, active server, and channel list only after the target session is usable.</span></p></div>
-          <div class="du-flow-row"><div class="du-flow-k">3</div><p class="du-flow-v"><span class="zh">探测、刷新或提交任一步失败，都会回滚到原服务器；当前连接与会话继续可用。</span><span class="en">If probing, refresh, or commit fails, the switch rolls back to the previous server; the current connection and session remain usable.</span></p></div>
+          <div class="du-flow-row"><div class="du-flow-k">3</div><p class="du-flow-v"><span class="zh">凭据恢复、刷新或本地提交任一步失败，都会回滚到原服务器；当前连接与会话继续可用。</span><span class="en">If credential restore, refresh, or local commit fails, the switch rolls back to the previous server; the current connection and session remain usable.</span></p></div>
         </div>
         <p><span class="zh">若目标服务器尚未在本机配对，应用会进入该目标的配对界面。原服务器的凭据和会话不会被删除；取消、拒绝、过期或失败后可返回原连接。</span><span class="en">If the target server is not paired on this device, the app enters pairing for that target. The previous server's credential and session are not deleted; canceling, denial, expiry, or failure can return you to the previous connection.</span></p>
 
