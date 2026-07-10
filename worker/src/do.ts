@@ -1156,8 +1156,12 @@ export class ChannelDO extends Server<Env> {
       }
       // sent 先于广播到达发送方，客户端先推进游标再看到自己的回声
       this.sendFrame(connection, { type: "sent", seq: out.seq });
-      await this.closeInactiveConnections();
+      // 广播必须紧跟 INSERT，中间不能有任何 await（#114）：
+      // 并发发送时 A 落库 seq=N 后若在这里等 D1，B 落库 N+1 先广播，watcher ack 了 N+1，
+      // 后到的 N 就被客户端当作「已消费」永久丢弃（client.ts: seq <= cursor 静默丢），
+      // 而重连 hello since=cursor 也不会补拉——append-only + 游标契约被静默违背。
       for (const f of out.frames) this.broadcastFrame(f);
+      await this.closeInactiveConnections();
       await this.afterSend(out.frames[0] as MsgFrame);
     }
   }
@@ -2188,8 +2192,9 @@ export class ChannelDO extends Server<Env> {
           { status: ERROR_STATUS[out.code] },
         );
       }
-      await this.closeInactiveConnections();
+      // 同 ws 路径（#114）：先广播，再做与本条消息无关的连接清理
       for (const f of out.frames) this.broadcastFrame(f);
+      await this.closeInactiveConnections();
       await this.afterSend(out.frames[0] as MsgFrame);
       const sent = out.frames[0] as MsgFrame;
       return Response.json({
@@ -2967,11 +2972,39 @@ export class ChannelDO extends Server<Env> {
     }
   }
 
+  // 每条消息都要扫一遍活连接找被撤销的 token。原实现逐连接串行 await D1：
+  // 广播延迟随连接数线性放大，且 D1 抖动时 isTokenActive 的 catch 返回 false，
+  // 把所有活连接当成「已撤销」集体踢掉（#114）。
+  // 现在：按 tokenHash 去重（多个连接常共享同一 token）→ 并行查 → 只有明确查到
+  // 「已撤销/已过期」才踢；D1 报错返回 null（未知），保留连接。
   private async closeInactiveConnections() {
-    for (const connection of this.getConnections<ConnState>()) {
-      const st = connection.state;
-      if (!st) continue;
-      if (!(await this.isTokenActive(st.tokenHash))) this.closeRevokedConnection(connection);
+    const connections = [...this.getConnections<ConnState>()].filter((c) => c.state);
+    if (connections.length === 0) return;
+    const hashes = [...new Set(connections.map((c) => c.state!.tokenHash))];
+    const results = await Promise.all(hashes.map(async (h) => [h, await this.tokenActivity(h)] as const));
+    const activity = new Map(results);
+    for (const connection of connections) {
+      if (activity.get(connection.state!.tokenHash) === false) this.closeRevokedConnection(connection);
+    }
+  }
+
+  // 三态：true=有效，false=确认已撤销/过期，null=查不出来（D1 抖动）。
+  // 踢人只认 false——把「不知道」当「已撤销」会在一次 D1 抖动里踢光整个频道。
+  private async tokenActivity(hash: string): Promise<boolean | null> {
+    if (!hash) return false;
+    if (hash.startsWith("oidc:")) return true;
+    try {
+      const row = await this.env.DB.prepare(
+        `SELECT id FROM tokens
+          WHERE hash = ?
+            AND revoked_at IS NULL
+            AND (child_expires_at IS NULL OR child_expires_at > ?)`,
+      )
+        .bind(hash, Date.now())
+        .first<{ id: number }>();
+      return row !== null;
+    } catch {
+      return null;
     }
   }
 
