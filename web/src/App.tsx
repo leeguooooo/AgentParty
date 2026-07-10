@@ -2,6 +2,7 @@
 import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChannelList } from "./components/ChannelList";
 import { CreateChannel } from "./components/CreateChannel";
+import { DesktopUpdater } from "./components/DesktopUpdater";
 import { HandleSetup } from "./components/HandleSetup";
 import { TokenGate } from "./components/TokenGate";
 import { LanguageSwitcher } from "./components/LanguageSwitcher";
@@ -26,8 +27,10 @@ import {
 import {
   type AuthProviderConfig,
   type OidcConfig,
+  authConfigForRuntime,
   beginLogin,
   completeLogin,
+  decideJoinAuthAction,
   fetchAuthConfig,
   isCallbackPath,
   refreshSession,
@@ -61,6 +64,7 @@ export function App() {
   const [me, setMe] = useState<MeInfo | null>(null);
   const [oidc, setOidc] = useState<OidcConfig | null>(null);
   const [authProviders, setAuthProviders] = useState<AuthProviderConfig[]>([]);
+  const [authProvidersResolved, setAuthProvidersResolved] = useState(false);
   // 邀请链接落地页状态（/join/<code>）：正在加入 / 失败
   const [joinStatus, setJoinStatus] = useState<{ phase: "joining" | "error"; message?: string } | null>(null);
   // 命中 /auth/callback 时先挂起，避免闪一下登录闸；换 token 成功/失败后落定
@@ -171,17 +175,19 @@ export function App() {
     let alive = true;
     fetchAuthConfig().then((cfg) => {
       if (!alive) return;
-      setOidc(cfg.oidc);
-      setAuthProviders(cfg.providers);
+      const runtimeConfig = authConfigForRuntime(cfg);
+      setOidc(runtimeConfig.oidc);
+      setAuthProviders(runtimeConfig.providers);
+      setAuthProvidersResolved(true);
       if (!isCallbackPath() || callbackHandled.current) return;
       callbackHandled.current = true;
-      if (cfg.providers.length === 0) {
+      if (runtimeConfig.providers.length === 0) {
         setOidcPending(false);
         setAuthError("sign-in is not configured");
         replace("/");
         return;
       }
-      completeLogin(cfg.providers)
+      completeLogin(runtimeConfig.providers)
         .then((sess) => {
           if (!alive) return;
           saveSession(sess); // 存 access + refresh，供静默续期
@@ -209,9 +215,16 @@ export function App() {
   // 邀请链接落地：访问 /join/<code> 时——已登录则直接兑换（加入频道→跳进去）；未登录则存下 code
   // 并跳 OIDC 登录，回来后 callback 会重新落到 /join/<code>、此时有 token 走兑换分支。
   const joinCode = matchJoin(path);
+  const joinAuthAction = decideJoinAuthAction({
+    joinCode,
+    hasToken: token !== null,
+    providerAvailable: authProviders.length > 0,
+    providersResolved: authProvidersResolved,
+    providerLoginPending: oidcPending,
+  });
   useEffect(() => {
     if (joinCode === null) return;
-    if (token !== null) {
+    if (joinAuthAction === "redeem" && token !== null) {
       sessionStorage.removeItem(PENDING_JOIN_KEY);
       setJoinStatus({ phase: "joining" });
       let alive = true;
@@ -237,13 +250,14 @@ export function App() {
         alive = false;
       };
     }
-    // 未登录：存 code 跨登录重定向，跳 OIDC
-    const primaryProvider = authProviders[0];
-    if (primaryProvider !== undefined && !oidcPending) {
+    if (joinAuthAction === "begin-provider-login") {
+      const primaryProvider = authProviders[0];
+      if (primaryProvider === undefined) return;
+      // 浏览器未登录：存 code 跨登录重定向，跳 provider 登录。
       sessionStorage.setItem(PENDING_JOIN_KEY, joinCode);
       beginLogin(primaryProvider).catch(() => setJoinStatus({ phase: "error", message: t("App.join.loginFailed") }));
     }
-  }, [joinCode, token, authProviders, oidcPending, replace, t]);
+  }, [joinCode, joinAuthAction, token, authProviders, replace, t]);
 
   // 登录身份：topbar 显示 token name/kind/role；readonly 分享链接 401 由页面其它路径接管，这里静默
   useEffect(() => {
@@ -350,8 +364,8 @@ export function App() {
     );
   }
 
-  // 邀请链接落地页：兑换进行中 / 失败（未登录时 effect 已在跳 OIDC，这里显示「正在加入」）
-  if (joinCode !== null) {
+  // 无 redirect provider 的 runtime 原地显示 TokenGate；粘贴 token 后仍在 /join/<code>，effect 接着兑换。
+  if (joinCode !== null && joinAuthAction !== "request-token-login") {
     return (
       <main className="gate">
         <h1 className="d-title gate-title">
@@ -480,6 +494,7 @@ export function App() {
             />
           </div>
         )}
+        <DesktopUpdater />
         <LanguageSwitcher />
         {!isShareMode() && (
           <button

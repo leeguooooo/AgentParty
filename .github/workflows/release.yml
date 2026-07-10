@@ -32,6 +32,18 @@ jobs:
       - name: install deps
         run: bun install --frozen-lockfile
 
+      - name: verify release version contract
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CLI_VERSION=$(bun -e 'process.stdout.write(require("./cli/package.json").version)')
+          DESKTOP_VERSION=$(bun -e 'process.stdout.write(require("./desktop/package.json").version)')
+          if ! { [ "$TAG_VERSION" = "$CLI_VERSION" ] && [ "$TAG_VERSION" = "$DESKTOP_VERSION" ]; }; then
+            echo "::error::release version mismatch: tag=$TAG_VERSION cli=$CLI_VERSION desktop=$DESKTOP_VERSION"
+            exit 1
+          fi
+
       - name: run full workspace check
         run: bun run check
 
@@ -180,29 +192,46 @@ jobs:
       - name: install deps
         run: bun install --frozen-lockfile
 
+      - name: require updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is required for desktop updater artifacts"
+            exit 1
+          fi
+
       - name: build prod desktop app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: bun run desktop:build:prod
 
-      - name: package desktop dmg
+      - name: package desktop artifacts
         env:
           ASSET: ${{ matrix.asset }}
         run: |
           set -euo pipefail
-          dmg="$(find desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -n 1)"
-          if [ -z "${dmg:-}" ]; then
-            echo "No dmg produced by Tauri"
+          dmg="$(find desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' -type f 2>/dev/null | head -n 1 || true)"
+          updater="$(find desktop/src-tauri/target/release/bundle/macos -name '*.app.tar.gz' -type f 2>/dev/null | head -n 1 || true)"
+          if [ ! -s "$dmg" ] || [ ! -s "$updater" ] || [ ! -s "${updater}.sig" ]; then
+            echo "Missing DMG, updater bundle, or updater signature"
             find desktop/src-tauri/target/release/bundle -maxdepth 3 -type f || true
             exit 1
           fi
-          out="agentparty-desktop-${ASSET}.dmg"
-          cp "$dmg" "$out"
-          shasum -a 256 "$out" > "${out}.sha256"
+          dmg_out="agentparty-desktop-${ASSET}.dmg"
+          updater_out="agentparty-desktop-${ASSET}.app.tar.gz"
+          cp "$dmg" "$dmg_out"
+          cp "$updater" "$updater_out"
+          cp "${updater}.sig" "${updater_out}.sig"
+          shasum -a 256 "$dmg_out" > "${dmg_out}.sha256"
 
       - name: upload desktop artifact
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.asset }}
-          path: agentparty-desktop-*.dmg*
+          path: agentparty-desktop-*
           if-no-files-found: error
           retention-days: 7
 
@@ -216,18 +245,49 @@ jobs:
     permissions:
       contents: write # 建/改 Release、上传 assets
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
       - name: collect artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      # .sig 是可选层（未配 COSIGN_PRIVATE_KEY 时不存在），故 fail_on_unmatched_files:false；
-      # tar.gz / .sha256 的存在性已由 build job 的 if-no-files-found:error 兜底保证。
+      - name: generate desktop updater manifest
+        run: |
+          bun scripts/desktop-update-manifest.ts \
+            --version "${GITHUB_REF_NAME#v}" \
+            --tag "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir dist \
+            --output dist/latest.json \
+            --notes "AgentParty $GITHUB_REF_NAME desktop update"
+
+      - name: classify release channel
+        id: release-channel
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION_WITHOUT_BUILD="${VERSION%%+*}"
+          if [[ "$VERSION_WITHOUT_BUILD" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "make_latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "make_latest=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # CLI cosign .sig 是可选层（未配 COSIGN_PRIVATE_KEY 时不存在），故保留
+      # fail_on_unmatched_files:false；Tauri updater .sig 已由 desktop job 强制校验。
       - name: upload to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          prerelease: ${{ steps.release-channel.outputs.prerelease }}
+          make_latest: ${{ steps.release-channel.outputs.make_latest }}
           fail_on_unmatched_files: false
           files: |
             dist/*.tar.gz
@@ -235,3 +295,4 @@ jobs:
             dist/*.tar.gz.sig
             dist/*.dmg
             dist/*.dmg.sha256
+            dist/latest.json

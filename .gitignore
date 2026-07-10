@@ -8,3 +8,5 @@ cli/party.exe
 .DS_Store
 .codegraph/
 assets/generated/
+.secrets/
+.superpowers/

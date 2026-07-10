@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentParty 桌面端成熟化实施计划</title>
+  <style>
+    :root { --fg:#202020; --muted:#67645e; --accent:#d94836; --ok:#198754; --border:#d2cec5; --bg:#f7f5ef; --panel:#fff; --code:#f0eee7; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--fg); background:var(--bg); font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
+    main { width:min(1100px,calc(100% - 32px)); margin:36px auto 72px; }
+    header { border-top:5px solid var(--accent); border-bottom:1px solid var(--border); padding:26px 0 20px; }
+    h1 { margin:0 0 8px; font-size:30px; letter-spacing:0; }
+    h2 { margin:36px 0 12px; font-size:21px; border-bottom:1px solid var(--border); padding-bottom:8px; }
+    h3 { margin:25px 0 8px; font-size:17px; }
+    p { margin:8px 0; }
+    .meta,.muted { color:var(--muted); }
+    .decision { margin:18px 0; padding:14px 16px; background:var(--panel); border-left:4px solid var(--accent); }
+    table { width:100%; border-collapse:collapse; background:var(--panel); }
+    th,td { padding:10px 12px; border:1px solid var(--border); text-align:left; vertical-align:top; }
+    th { background:#ebe8df; }
+    code,pre { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    code { background:var(--code); padding:1px 4px; }
+    pre { margin:10px 0; padding:14px; overflow:auto; background:#242424; color:#f6f3ea; border-radius:4px; }
+    ol,ul { padding-left:24px; }
+    li { margin:6px 0; }
+    .gate { color:var(--ok); font-weight:700; }
+    .status { display:inline-block; padding:1px 7px; border:1px solid currentColor; font-size:12px; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>AgentParty 桌面端成熟化实施计划</h1>
+    <p class="meta">2026-07-10 · 基于 <code>2026-07-09-desktop-tauri-design.html</code> · Tauri v2 / React / GitHub Releases</p>
+  </header>
+
+  <section>
+    <h2>目标与边界</h2>
+    <p>把当前“可打开 web UI 的 macOS 壳”推进为可长期安装使用的桌面应用。成熟应用的最低闭环是：版本可信、可发现并安装更新、后台可接收提醒、登录不依赖复制敏感 token、崩溃或网络失败有可理解状态、发布产物可验证。</p>
+    <div class="decision"><strong>发布仍走 GitHub Releases，不进入 npm registry 或应用商店。</strong>桌面版本与 CLI 共用 <code>vX.Y.Z</code> 标签；应用内更新使用 Tauri 强制签名的 updater bundle，DMG 继续作为首次安装入口。</div>
+  </section>
+
+  <section>
+    <h2>当前事实</h2>
+    <table>
+      <tr><th>能力</th><th>当前证据</th><th>判定</th></tr>
+      <tr><td>Tauri 壳与远端 API</td><td><code>desktop/</code>、运行时 API base、Tauri CORS、v0.2.82 双架构 DMG</td><td><span class="status">已完成 M1</span></td></tr>
+      <tr><td>版本一致性</td><td>CLI 为 0.2.82，desktop package / Tauri config / Cargo 仍为 0.1.0</td><td>缺失</td></tr>
+      <tr><td>自动更新</td><td>无 updater/process 插件、无签名 bundle、无 <code>latest.json</code>、无 UI</td><td>缺失</td></tr>
+      <tr><td>系统通知与托盘</td><td>只有浏览器 Notification；关窗即退出</td><td>缺失</td></tr>
+      <tr><td>桌面登录</td><td>只能粘贴 token</td><td>不适合普通用户</td></tr>
+      <tr><td>签名/公证</td><td>DMG 无 Developer ID 签名和公证</td><td>发布风险</td></tr>
+      <tr><td>Windows/Linux</td><td>设计中有方向，CI 只构建 macOS</td><td>后续里程碑</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>里程碑</h2>
+    <table>
+      <tr><th>顺序</th><th>交付</th><th>验收门</th></tr>
+      <tr><td>R1</td><td>可靠更新：单一版本源、签名 updater bundle、静态更新清单、检查/下载/安装/重启 UI</td><td class="gate">旧 DMG 安装版可升级到下一测试 tag</td></tr>
+      <tr><td>R2</td><td>系统驻留：Tauri 通知、托盘、关窗隐藏、未读角标、开机自启开关</td><td class="gate">后台收到 @ 后通知；点击聚焦频道；托盘可真正退出</td></tr>
+      <tr><td>R3</td><td>配对登录：网页签发一次性短码，桌面兑换独立 session；deep link 仅作加速</td><td class="gate">10 秒内完成登录；短码一次性、5 分钟过期、失败限流</td></tr>
+      <tr><td>R4</td><td>本机 agent：受控启动/停止 <code>party serve</code> sidecar，日志、状态与失败恢复</td><td class="gate">用户无需终端即可把本机 agent 置为可唤醒</td></tr>
+      <tr><td>R5</td><td>分发硬化：Developer ID 签名、公证、Windows NSIS、Linux AppImage、跨平台升级 smoke</td><td class="gate">干净机器下载即开；每个平台完成 N-1 → N 更新</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>R1 文件结构</h2>
+    <table>
+      <tr><th>文件</th><th>责任</th></tr>
+      <tr><td><code>scripts/release-version.ts</code> + test</td><td>读取/校验/写入 CLI 与 desktop 的唯一发布版本；release 脚本只调用它</td></tr>
+      <tr><td><code>scripts/desktop-update-manifest.ts</code> + test</td><td>从两个架构的 updater bundle 和签名生成 Tauri 静态 <code>latest.json</code></td></tr>
+      <tr><td><code>web/src/lib/desktopUpdater.ts</code> + test</td><td>隔离 Tauri 动态 import、更新状态机、进度归一化和错误分类</td></tr>
+      <tr><td><code>web/src/components/DesktopUpdater.tsx</code></td><td>仅桌面显示的更新入口和状态浮层；手动检查、安装并重启</td></tr>
+      <tr><td><code>web/src/i18n/strings/DesktopUpdater.ts</code></td><td>中英文更新文案</td></tr>
+      <tr><td><code>desktop/src-tauri/*</code></td><td>注册 updater/process 插件、权限、公钥、endpoint、生成 updater artifacts</td></tr>
+      <tr><td><code>.github/workflows/release.yml</code></td><td>注入签名密钥、重命名架构包、生成并上传 <code>latest.json</code></td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>R1 执行步骤</h2>
+    <h3>任务 1：版本源</h3>
+    <ol>
+      <li>先写测试：CLI/desktop 版本不一致时失败；写入后两个 package 同步；非法 semver 不写文件。</li>
+      <li>实现 <code>release-version.ts</code>，让 <code>tauri.conf.json</code> 的 version 指向 <code>../package.json</code>。</li>
+      <li>修改 <code>scripts/release.sh</code>，同时 bump CLI 与 desktop，并在失败时恢复两份文件。</li>
+      <li>门禁：<code>bun test scripts/release-version.test.ts</code> 与 <code>bun run desktop:typecheck</code>。</li>
+    </ol>
+
+    <h3>任务 2：更新清单</h3>
+    <ol>
+      <li>先写测试：两架构齐全时生成正确平台键和下载 URL；缺 bundle、缺签名、空签名都失败。</li>
+      <li>实现纯函数和 CLI 入口，输出 RFC 3339 <code>pub_date</code>、版本、notes、<code>darwin-aarch64</code>/<code>darwin-x86_64</code>。</li>
+      <li>Release job 在上传前生成清单，清单与 bundle 一起成为 release asset。</li>
+    </ol>
+
+    <h3>任务 3：应用更新状态机</h3>
+    <ol>
+      <li>先写 reducer/服务测试：无更新、发现更新、下载进度、安装完成、网络错误、重复点击 single-flight。</li>
+      <li>动态加载 <code>@tauri-apps/plugin-updater</code> 和 <code>@tauri-apps/plugin-process</code>，浏览器构建不调用插件。</li>
+      <li>首次启动延迟检查一次；之后 24 小时内不重复自动检查；手动检查永远可用。</li>
+      <li>安装必须由用户确认；下载展示百分比或字节进度；安装完成后调用 relaunch。</li>
+    </ol>
+
+    <h3>任务 4：Tauri 与发布签名</h3>
+    <ol>
+      <li>添加 Rust/JS 插件，注册 <code>updater:default</code> 与 <code>process:allow-restart</code> 权限。</li>
+      <li>配置 HTTPS endpoint、不可提交的私钥、可公开的 pubkey、<code>createUpdaterArtifacts: true</code>。</li>
+      <li>GitHub Actions 从 <code>TAURI_SIGNING_PRIVATE_KEY</code> / <code>TAURI_SIGNING_PRIVATE_KEY_PASSWORD</code> 读取密钥；任何一个 updater 产物缺失即失败。</li>
+      <li>保留 DMG 与 sha256；新增每架构 <code>.app.tar.gz</code>、<code>.sig</code> 和 <code>latest.json</code>。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>错误与安全</h2>
+    <table>
+      <tr><th>场景</th><th>行为</th></tr>
+      <tr><td>离线/超时</td><td>不阻塞应用；更新入口显示可重试错误，自动检查不弹打断式对话框</td></tr>
+      <tr><td>签名不匹配</td><td>安装失败且不重启；保留当前版本；显示“更新校验失败”</td></tr>
+      <tr><td>下载中重复点击</td><td>复用同一 Promise，不创建第二次下载</td></tr>
+      <tr><td>密钥泄露/丢失</td><td>私钥不进入 git；GitHub secret + 用户控制的离线备份；丢失视为不可恢复的发布事故</td></tr>
+      <tr><td>Web 浏览器</td><td>不渲染更新入口，不 import 原生插件，不改变现有登录和频道行为</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>R1 验收命令</h2>
+    <pre><code>bun test scripts/release-version.test.ts scripts/desktop-update-manifest.test.ts
+cd web &amp;&amp; bun test &amp;&amp; bunx tsc --noEmit &amp;&amp; bunx vite build
+cd desktop &amp;&amp; bun run typecheck
+TAURI_SIGNING_PRIVATE_KEY=... bun run desktop:build:prod
+bun run check</code></pre>
+    <p>最终证据不是“workflow 绿”，而是用旧版 DMG 安装应用，再发布一个更高版本的测试 tag，应用内发现更新、下载、验签、替换并重启，重启后显示新版本。</p>
+  </section>
+</main>
+</body>
+</html>

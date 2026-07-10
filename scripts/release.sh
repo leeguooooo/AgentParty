@@ -1,64 +1,292 @@
 #!/usr/bin/env bash
-# AgentParty release：bump → 门禁 → tag → 推送 → 盯 CI（flaky 自动重推一次）→ 装机验证。
+# AgentParty release：bump → 门禁 → tag → 推送 → 盯 CI → 装机验证。
 # 用法: scripts/release.sh 0.2.70
-# 固化自 v0.2.65–v0.2.69 的五次手工发版；CI 满载偶发超时（issue #48）由 RETRY 兜底。
+# CI 或本地观察失败时保留已发布 tag，避免重复 workflow / Release 竞争。
 set -euo pipefail
 
-VER="${1:?用法: scripts/release.sh <version 如 0.2.70>}"
-[[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "版本号格式错: $VER"; exit 1; }
-TAG="v$VER"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+CLI_PACKAGE=""
+DESKTOP_PACKAGE=""
+CLI_PACKAGE_BACKUP=""
+DESKTOP_PACKAGE_BACKUP=""
+CLI_PACKAGE_BUMPED=""
+DESKTOP_PACKAGE_BUMPED=""
+RESTORE_PENDING=0
+INDEX_PENDING=0
+BUMPED_SNAPSHOTS_COMPLETE=0
+RELEASE_RUN_ID=""
+RELEASE_RUN_STATUS=""
+RELEASE_RUN_CONCLUSION=""
 
-# 0) 前置检查
-[[ -z "$(git status --porcelain)" ]] || { echo "工作树不干净，先提交或 stash:"; git status --short; exit 1; }
-git rev-parse "$TAG" >/dev/null 2>&1 && { echo "tag $TAG 已存在"; exit 1; }
-CUR=$(python3 -c "import json;print(json.load(open('cli/package.json'))['version'])")
-echo "== $CUR → $VER =="
-
-# 1) bump + 本地完整门禁（与 CI 同一 bun run check；先在本地挂掉比在 CI 挂便宜）
-python3 - "$VER" <<'PY'
-import json,sys
-p='cli/package.json'; d=json.load(open(p)); d['version']=sys.argv[1]
-open(p,'w').write(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
-PY
-echo "== 本地门禁 bun run check =="
-if ! bun run check; then
-  echo "!! 门禁失败。若是 worker 超时（issue #48 flaky），隔离跑该 spec 确认后可 SKIP_LOCAL_CHECK=1 重来"
-  [[ "${SKIP_LOCAL_CHECK:-}" == "1" ]] || { git checkout cli/package.json; exit 1; }
-fi
-
-# 2) 提交 + tag + 推送
-git add cli/package.json
-git commit -m "chore(release): $TAG" -m "Claude-Session: ${CLAUDE_SESSION_URL:-scripts/release.sh}"
-git tag "$TAG"
-git push origin main
-git push origin "$TAG"
-
-# 3) 盯 tag 的 CI；失败一次 → 若是 full check 超时类 flaky，把 tag 移到 HEAD 重推一次
-watch_tag_run() {
-  sleep 8
-  local id
-  id=$(gh run list --workflow=release.yml --limit 8 --json databaseId,headBranch \
-    | python3 -c "import sys,json; r=[x for x in json.load(sys.stdin) if x.get('headBranch')=='$TAG']; print(r[0]['databaseId'] if r else '')")
-  [[ -n "$id" ]] || { echo "找不到 $TAG 的 run"; return 2; }
-  echo "== watch run $id =="
-  gh run watch "$id" --exit-status >/dev/null && return 0 || return 1
+should_skip_local_check() {
+  [[ "${SKIP_LOCAL_CHECK:-}" == "1" ]]
 }
-if ! watch_tag_run; then
-  echo "!! CI 失败，重推 tag 兜底一次（flaky 超时场景，见 v0.2.67）"
-  git push --delete origin "$TAG" || true
-  git tag -f "$TAG"
-  git push origin "$TAG"
-  watch_tag_run || { echo "!! 重推后仍失败——不是 flaky，去看日志: gh run view --log-failed"; exit 1; }
-fi
 
-# 4) 确认 release 资产 + 装机验证
-echo "== release 资产 =="
-gh release view "$TAG" --json assets \
-  | python3 -c "import sys,json; a=[x['name'] for x in json.load(sys.stdin)['assets'] if x['name'].endswith('.tar.gz')]; assert len(a)>=5, f'二进制不足: {a}'; print(len(a),'binaries ok')"
-echo "== 装机 =="
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
-INSTALLED=$(party --version)
-[[ "$INSTALLED" == "$VER" ]] || { echo "!! 装机版本 $INSTALLED ≠ $VER"; exit 1; }
-echo "✅ $TAG 发布完成，本机 party=$INSTALLED"
+release_cleanup_required() {
+  [[ "$RESTORE_PENDING" == "1" || "$INDEX_PENDING" == "1" ]]
+}
+
+disable_release_cleanup() {
+  RESTORE_PENDING=0
+  INDEX_PENDING=0
+  BUMPED_SNAPSHOTS_COMPLETE=0
+}
+
+watch_tag_run() {
+  local lookup_attempts="${RELEASE_RUN_LOOKUP_ATTEMPTS:-6}"
+  local poll_attempts="${RELEASE_RUN_POLL_ATTEMPTS:-180}"
+  local retry_attempts="${RELEASE_GH_RETRY_ATTEMPTS:-3}"
+  local retry_delay="${RELEASE_GH_RETRY_DELAY:-5}"
+  local poll_interval="${RELEASE_RUN_POLL_INTERVAL:-10}"
+  local initial_delay="${RELEASE_RUN_INITIAL_DELAY:-8}"
+  local response state attempt observation_errors=0
+
+  sleep "$initial_delay"
+  for ((attempt = 1; attempt <= lookup_attempts; attempt++)); do
+    if response=$(gh run list --workflow=release.yml --limit 8 --json databaseId,headBranch); then
+      if RELEASE_RUN_ID=$(python3 -c '
+import json
+import sys
+
+tag = sys.argv[1]
+runs = [run for run in json.load(sys.stdin) if run.get("headBranch") == tag]
+print(runs[0]["databaseId"] if runs else "")
+' "$TAG" <<<"$response"); then
+        [[ -z "$RELEASE_RUN_ID" ]] || break
+      fi
+    fi
+    echo "!! 暂时无法定位 $TAG 的 release run（${attempt}/${lookup_attempts}）" >&2
+    (( attempt == lookup_attempts )) || sleep "$retry_delay"
+  done
+
+  if [[ -z "$RELEASE_RUN_ID" ]]; then
+    echo "!! 找不到 $TAG 的 release run；GitHub API 可能不可用或 workflow 尚未出现" >&2
+    return 2
+  fi
+
+  echo "== poll run $RELEASE_RUN_ID =="
+  for ((attempt = 1; attempt <= poll_attempts; attempt++)); do
+    if response=$(gh run view "$RELEASE_RUN_ID" --json status,conclusion); then
+      if state=$(python3 -c '
+import json
+import sys
+
+run = json.load(sys.stdin)
+status = run.get("status")
+conclusion = run.get("conclusion")
+if not isinstance(status, str) or conclusion is not None and not isinstance(conclusion, str):
+    raise SystemExit(1)
+print(f"{status}\t{conclusion or chr(45)}")
+' <<<"$response"); then
+        IFS=$'\t' read -r RELEASE_RUN_STATUS RELEASE_RUN_CONCLUSION <<<"$state"
+        observation_errors=0
+        if [[ "$RELEASE_RUN_STATUS" == "completed" ]]; then
+          if [[ "$RELEASE_RUN_CONCLUSION" == "success" ]]; then
+            return 0
+          fi
+          if [[ "$RELEASE_RUN_CONCLUSION" != "-" ]]; then
+            return 1
+          fi
+        elif [[ "$RELEASE_RUN_STATUS" == "queued" || "$RELEASE_RUN_STATUS" == "in_progress" || "$RELEASE_RUN_STATUS" == "pending" || "$RELEASE_RUN_STATUS" == "requested" || "$RELEASE_RUN_STATUS" == "waiting" ]]; then
+          (( attempt == poll_attempts )) || sleep "$poll_interval"
+          continue
+        fi
+      fi
+    fi
+
+    observation_errors=$((observation_errors + 1))
+    echo "!! 读取 release run $RELEASE_RUN_ID 状态失败（${observation_errors}/${retry_attempts}）" >&2
+    if (( observation_errors >= retry_attempts )); then
+      return 2
+    fi
+    (( attempt == poll_attempts )) || sleep "$retry_delay"
+  done
+
+  echo "!! release run $RELEASE_RUN_ID 在轮询期限内没有成功结束" >&2
+  return 2
+}
+
+verify_release_assets() {
+  python3 -c '
+import json
+import os
+import sys
+
+required = {
+    "party-darwin-arm64.tar.gz",
+    "party-darwin-arm64.tar.gz.sha256",
+    "party-darwin-x64.tar.gz",
+    "party-darwin-x64.tar.gz.sha256",
+    "party-linux-arm64.tar.gz",
+    "party-linux-arm64.tar.gz.sha256",
+    "party-linux-x64.tar.gz",
+    "party-linux-x64.tar.gz.sha256",
+    "party-windows-x64.tar.gz",
+    "party-windows-x64.tar.gz.sha256",
+    "agentparty-desktop-darwin-arm64.dmg",
+    "agentparty-desktop-darwin-arm64.dmg.sha256",
+    "agentparty-desktop-darwin-arm64.app.tar.gz",
+    "agentparty-desktop-darwin-arm64.app.tar.gz.sig",
+    "agentparty-desktop-darwin-x64.dmg",
+    "agentparty-desktop-darwin-x64.dmg.sha256",
+    "agentparty-desktop-darwin-x64.app.tar.gz",
+    "agentparty-desktop-darwin-x64.app.tar.gz.sig",
+    "latest.json",
+}
+
+try:
+    payload = json.loads(os.environ["RELEASE_ASSETS_JSON"])
+    assets = payload["assets"]
+    actual = {asset["name"] for asset in assets}
+except (KeyError, TypeError, json.JSONDecodeError) as error:
+    print(f"invalid release asset response: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+missing = sorted(required - actual)
+if missing:
+    print(f"missing release assets: {chr(44).join(missing)}", file=sys.stderr)
+    raise SystemExit(1)
+
+empty = sorted(
+    asset["name"]
+    for asset in assets
+    if asset["name"] in required
+    and (not isinstance(asset.get("size"), int) or asset["size"] <= 0)
+)
+if empty:
+    print(f"empty release assets: {chr(44).join(empty)}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(f"{len(required)} required release assets ok")
+'
+}
+
+restore_package_versions() {
+  local changed=()
+  local staged_changed=()
+  if [[ "$BUMPED_SNAPSHOTS_COMPLETE" == "1" && "$INDEX_PENDING" == "1" ]]; then
+    git show ":$CLI_PACKAGE" 2>/dev/null | cmp -s - "$CLI_PACKAGE_BUMPED" || staged_changed+=("$CLI_PACKAGE")
+    git show ":$DESKTOP_PACKAGE" 2>/dev/null | cmp -s - "$DESKTOP_PACKAGE_BUMPED" || staged_changed+=("$DESKTOP_PACKAGE")
+    if (( ${#staged_changed[@]} > 0 )); then
+      echo "!! package 内容在 bump 后被修改或重新暂存，未自动恢复 index 或工作树: ${staged_changed[*]}。请手工核对。" >&2
+      return 1
+    fi
+  fi
+
+  if [[ "$BUMPED_SNAPSHOTS_COMPLETE" == "1" ]]; then
+    cmp -s "$CLI_PACKAGE" "$CLI_PACKAGE_BUMPED" || changed+=("$CLI_PACKAGE")
+    cmp -s "$DESKTOP_PACKAGE" "$DESKTOP_PACKAGE_BUMPED" || changed+=("$DESKTOP_PACKAGE")
+    if (( ${#changed[@]} > 0 )); then
+      echo "!! package 内容在 bump 后被修改，未自动恢复 index 或工作树: ${changed[*]}。请手工核对备份文件。" >&2
+      return 1
+    fi
+  else
+    echo "!! bumped snapshot 未完整写入，按 bump 前备份恢复两份 package" >&2
+  fi
+
+  if [[ "$INDEX_PENDING" == "1" ]]; then
+    git restore --staged -- "$CLI_PACKAGE" "$DESKTOP_PACKAGE"
+  fi
+  cp "$CLI_PACKAGE_BACKUP" "$CLI_PACKAGE"
+  cp "$DESKTOP_PACKAGE_BACKUP" "$DESKTOP_PACKAGE"
+  echo "!! 已恢复 cli/package.json 与 desktop/package.json" >&2
+}
+
+remove_release_temp_files() {
+  local file
+  for file in "$CLI_PACKAGE_BACKUP" "$DESKTOP_PACKAGE_BACKUP" "$CLI_PACKAGE_BUMPED" "$DESKTOP_PACKAGE_BUMPED"; do
+    [[ -z "$file" ]] || rm -f "$file"
+  done
+}
+
+cleanup_release_version() {
+  local exit_status=$?
+  trap - EXIT
+  if release_cleanup_required && ! restore_package_versions; then
+    exit_status=1
+  fi
+  remove_release_temp_files
+  exit "$exit_status"
+}
+
+main() {
+  local VER="${1:?用法: scripts/release.sh <version 如 0.2.70>}"
+  local TAG="v$VER"
+  local ROOT
+  ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+  cd "$ROOT"
+
+  # 0) 前置检查
+  [[ -z "$(git status --porcelain)" ]] || { echo "工作树不干净，先提交或 stash:"; git status --short; return 1; }
+  git rev-parse "$TAG" >/dev/null 2>&1 && { echo "tag $TAG 已存在"; return 1; }
+  CLI_PACKAGE="cli/package.json"
+  DESKTOP_PACKAGE="desktop/package.json"
+  trap cleanup_release_version EXIT
+  CLI_PACKAGE_BACKUP=$(mktemp)
+  DESKTOP_PACKAGE_BACKUP=$(mktemp)
+  CLI_PACKAGE_BUMPED=$(mktemp)
+  DESKTOP_PACKAGE_BUMPED=$(mktemp)
+  cp "$CLI_PACKAGE" "$CLI_PACKAGE_BACKUP"
+  cp "$DESKTOP_PACKAGE" "$DESKTOP_PACKAGE_BACKUP"
+
+  # 1) bump + 本地完整门禁（与 CI 同一 bun run check；先在本地挂掉比在 CI 挂便宜）
+  echo "== 同步 package 版本到 $VER =="
+  bun scripts/release-version.ts "$VER"
+  RESTORE_PENDING=1
+  cp "$CLI_PACKAGE" "$CLI_PACKAGE_BUMPED"
+  cp "$DESKTOP_PACKAGE" "$DESKTOP_PACKAGE_BUMPED"
+  BUMPED_SNAPSHOTS_COMPLETE=1
+  echo "== 本地门禁 bun run check =="
+  if ! bun run check; then
+    if should_skip_local_check; then
+      echo "!! 门禁失败，但 SKIP_LOCAL_CHECK=1，继续发布" >&2
+    else
+      echo "!! 门禁失败，退出时将恢复两份 package 文件" >&2
+      return 1
+    fi
+  fi
+
+  # 2) 提交 + tag + 推送
+  git add cli/package.json desktop/package.json
+  INDEX_PENDING=1
+  git commit -m "chore(release): $TAG" -m "Claude-Session: ${CLAUDE_SESSION_URL:-scripts/release.sh}"
+  disable_release_cleanup
+  git tag "$TAG"
+  git push origin main
+  git push origin "$TAG"
+
+  # 3) 轮询 tag 的 CI；任何失败都保留 tag，交由操作者诊断。
+  if watch_tag_run; then
+    :
+  else
+    local watch_status=$?
+    if [[ "$watch_status" == "1" ]]; then
+      echo "!! CI 已确认失败: status=$RELEASE_RUN_STATUS conclusion=${RELEASE_RUN_CONCLUSION}。tag $TAG 已保留，未自动重推。" >&2
+      echo "查看失败日志: gh run view $RELEASE_RUN_ID --log-failed" >&2
+    else
+      echo "!! 观察 release run 失败。tag $TAG 已保留，未自动重推。" >&2
+      if [[ -n "$RELEASE_RUN_ID" ]]; then
+        echo "重新查看状态: gh run view $RELEASE_RUN_ID --json status,conclusion" >&2
+      else
+        echo "重新查找 run: gh run list --workflow=release.yml --branch $TAG" >&2
+      fi
+    fi
+    return 1
+  fi
+
+  # 4) 确认 release 资产 + 装机验证
+  echo "== release 资产 =="
+  local RELEASE_ASSETS_JSON
+  RELEASE_ASSETS_JSON=$(gh release view "$TAG" --json assets)
+  export RELEASE_ASSETS_JSON
+  verify_release_assets
+  echo "== 装机 =="
+  curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
+  local INSTALLED
+  INSTALLED=$(party --version)
+  [[ "$INSTALLED" == "$VER" ]] || { echo "!! 装机版本 $INSTALLED ≠ $VER"; return 1; }
+  echo "✅ $TAG 发布完成，本机 party=$INSTALLED"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

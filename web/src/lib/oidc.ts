@@ -31,6 +31,31 @@ export interface AuthConfig {
   providers: AuthProviderConfig[];
 }
 
+export type JoinAuthAction = "redeem" | "begin-provider-login" | "request-token-login" | "none";
+
+export interface JoinAuthDecisionInput {
+  joinCode: string | null;
+  hasToken: boolean;
+  providerAvailable: boolean;
+  providersResolved: boolean;
+  providerLoginPending: boolean;
+}
+
+export function decideJoinAuthAction(input: JoinAuthDecisionInput): JoinAuthAction {
+  if (input.joinCode === null) return "none";
+  if (input.hasToken) return "redeem";
+  if (input.providerLoginPending) return "none";
+  if (!input.providersResolved) return "none";
+  return input.providerAvailable ? "begin-provider-login" : "request-token-login";
+}
+
+// OAuth providers only accept HTTPS/browser callbacks today. Keep them out of the
+// embedded Tauri WebView until desktop pairing is available.
+export function authConfigForRuntime(config: AuthConfig, runtime: unknown = globalThis): AuthConfig {
+  const isTauri = typeof runtime === "object" && runtime !== null && "__TAURI_INTERNALS__" in runtime;
+  return isTauri ? { oidc: null, providers: [] } : config;
+}
+
 // 网页会话：access_token + refresh_token + 绝对过期秒（epoch），供静默续期用
 export interface WebSession {
   accessToken: string;

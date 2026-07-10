@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default desktop capability for the AgentParty web shell.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "updater:default", "process:allow-restart"]
 }
