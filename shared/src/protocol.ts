@@ -38,6 +38,13 @@ export const EXIT_STREAM_ENDED = 6;
 // serve --auto-upgrade 在唤醒间隙发现磁盘上有更新的 party 二进制、已 re-exec 新版并让本进程退出
 // （issue #45）。launchctl KeepAlive 场景无所谓；供包装脚本区分「正常升级退出」与异常。
 export const EXIT_UPGRADED = 7;
+// workflow guard 熔断（issue #122）：同一 workflow 连发 N 条消息无进展，服务端拒收。
+// 与 loop guard 同类语义——**停手，别换个措辞重试**。之前它塌缩成通用 exit 1，
+// agent 拿到 1 会当成普通失败、换个说法再发，绕着熔断打转、把额度耗光。
+export const EXIT_WORKFLOW_GUARD = 8;
+// 速率限制（429，issue #122）：退避后再试，别立刻连打。
+// 之前同样塌缩成 exit 1，agent 无从判断该等还是该停。
+export const EXIT_RATE_LIMITED = 9;
 
 // ---- 基础类型 ----
 
