@@ -246,6 +246,10 @@ const TASK_TITLE_MAX = 200;
 const TASK_DESC_MAX = 8000;
 const TASK_LABEL_MAX = 40;
 const TASK_LABELS_MAX = 20;
+// #204 scope / blocked_reason 校验上限
+const TASK_SCOPE_ITEM_MAX = 256; // 每个 scope 条目的字节上限
+const TASK_SCOPE_MAX = 32; // scope 条目数量上限
+const TASK_BLOCKED_REASON_MAX = 2000; // blocked_reason 字节上限
 const SQUAD_MEMBERS_MAX = 50;
 const SQUAD_TITLE_MAX = 120;
 const SQUAD_DESCRIPTION_MAX = 4000;
@@ -627,6 +631,8 @@ function taskRowToRecord(row: {
   labels_json: string;
   parent_id: number | null;
   anchor_seqs_json: string;
+  scope_json: string;
+  blocked_reason: string | null;
   completion_artifact_json: string | null;
   workflow_id: string | null;
   created_at: number;
@@ -660,6 +666,8 @@ function taskRowToRecord(row: {
     labels: safeJsonArray<string>(row.labels_json).filter((label): label is string => typeof label === "string"),
     parent_id: row.parent_id,
     anchor_seqs: safeJsonArray<number>(row.anchor_seqs_json).filter((seq): seq is number => Number.isInteger(seq) && seq > 0),
+    scope: safeJsonArray<string>(row.scope_json).filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
+    blocked_reason: row.blocked_reason,
     completion_artifact: completionArtifact,
     workflow_id: row.workflow_id,
     created_at: row.created_at,
@@ -693,6 +701,31 @@ function parseTaskAnchors(input: unknown): number[] | null {
     if (!anchors.includes(seq)) anchors.push(seq);
   }
   return anchors;
+}
+
+// #204 scope：每项非空字符串（去空白后非空）、字节上限、整体去重、数量上限。undefined/null → []。非法 → null。
+function parseTaskScope(input: unknown): string[] | null {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) return null;
+  const scope: string[] = [];
+  for (const item of input) {
+    if (typeof item !== "string") return null;
+    const entry = item.trim();
+    if (entry === "") return null;
+    if (textEncoder.encode(entry).byteLength > TASK_SCOPE_ITEM_MAX) return null;
+    if (!scope.includes(entry)) scope.push(entry);
+    if (scope.length > TASK_SCOPE_MAX) return null;
+  }
+  return scope;
+}
+
+// #204 blocked_reason：null 直通；字符串校验字节上限；非法类型/超长 → false（由调用方转 400）。
+// 注意：undefined 需由调用方先行处理（POST=默认 null，PATCH=保留原值），本函数不接收 undefined。
+function parseTaskBlockedReason(input: unknown): string | null | false {
+  if (input === null) return null;
+  if (typeof input !== "string") return false;
+  if (textEncoder.encode(input).byteLength > TASK_BLOCKED_REASON_MAX) return false;
+  return input;
 }
 
 function parseTaskAssignee(input: unknown): { name: string; kind: TaskAssigneeKind } | null | undefined {
@@ -3641,6 +3674,14 @@ app.post("/api/channels/:slug/tasks", async (c) => {
   }
   const anchorSeqs = parseTaskAnchors(body?.anchor_seqs);
   if (anchorSeqs === null) return c.json(errorBody("bad_request", "anchor_seqs must be positive integer array"), 400);
+  const scope = parseTaskScope(body?.scope);
+  if (scope === null) {
+    return c.json(errorBody("bad_request", `scope must be <= ${TASK_SCOPE_MAX} non-empty strings, each <= ${TASK_SCOPE_ITEM_MAX} bytes`), 400);
+  }
+  const blockedReason = body?.blocked_reason === undefined ? null : parseTaskBlockedReason(body.blocked_reason);
+  if (blockedReason === false) {
+    return c.json(errorBody("bad_request", `blocked_reason must be null or a string <= ${TASK_BLOCKED_REASON_MAX} bytes`), 400);
+  }
   const priority = body?.priority === undefined ? 0 : typeof body?.priority === "number" && Number.isInteger(body.priority) ? body.priority : null;
   if (priority === null || priority < -100 || priority > 100) {
     return c.json(errorBody("bad_request", "priority must be an integer between -100 and 100"), 400);
@@ -3662,8 +3703,8 @@ app.post("/api/channels/:slug/tasks", async (c) => {
     `INSERT INTO channel_tasks (
        channel_slug, title, description, state, assignee_name, assignee_kind,
        created_by, created_by_kind, created_by_owner, priority, labels_json,
-       parent_id, anchor_seqs_json, workflow_id, created_at, updated_at, completed_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       parent_id, anchor_seqs_json, workflow_id, scope_json, blocked_reason, created_at, updated_at, completed_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       slug,
@@ -3680,6 +3721,8 @@ app.post("/api/channels/:slug/tasks", async (c) => {
       parentId,
       JSON.stringify(anchorSeqs),
       workflowId,
+      JSON.stringify(scope),
+      blockedReason,
       now,
       now,
       state === "done" ? now : null,
@@ -3747,6 +3790,16 @@ app.patch("/api/channels/:slug/tasks/:id", async (c) => {
   if (priority === null || priority < -100 || priority > 100) {
     return c.json(errorBody("bad_request", "priority must be an integer between -100 and 100"), 400);
   }
+  const scope = body.scope === undefined
+    ? safeJsonArray<string>(existing.scope_json).filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    : parseTaskScope(body.scope);
+  if (scope === null) {
+    return c.json(errorBody("bad_request", `scope must be <= ${TASK_SCOPE_MAX} non-empty strings, each <= ${TASK_SCOPE_ITEM_MAX} bytes`), 400);
+  }
+  const blockedReason = body.blocked_reason === undefined ? existing.blocked_reason : parseTaskBlockedReason(body.blocked_reason);
+  if (blockedReason === false) {
+    return c.json(errorBody("bad_request", `blocked_reason must be null or a string <= ${TASK_BLOCKED_REASON_MAX} bytes`), 400);
+  }
 
   const nextAssigneeName =
     assignee === undefined ? existing.assignee_name : assignee === null ? null : assignee.name;
@@ -3757,10 +3810,10 @@ app.patch("/api/channels/:slug/tasks/:id", async (c) => {
   await c.env.DB.prepare(
     `UPDATE channel_tasks
         SET title = ?, description = ?, state = ?, assignee_name = ?, assignee_kind = ?,
-            priority = ?, labels_json = ?, updated_at = ?, completed_at = ?
+            priority = ?, labels_json = ?, scope_json = ?, blocked_reason = ?, updated_at = ?, completed_at = ?
       WHERE channel_slug = ? AND id = ?`,
   )
-    .bind(title, desc, state, nextAssigneeName, nextAssigneeKind, priority, JSON.stringify(labels), now, completedAt, slug, id)
+    .bind(title, desc, state, nextAssigneeName, nextAssigneeKind, priority, JSON.stringify(labels), JSON.stringify(scope), blockedReason, now, completedAt, slug, id)
     .run();
   const row = await loadTaskRow(c.env.DB, slug, id);
   await insertSystemStatus(c.env, slug, `task #${id} ${state}`, statusStateForTask(state)).catch(() => false);
