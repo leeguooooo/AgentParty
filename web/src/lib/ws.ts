@@ -34,6 +34,8 @@ export interface ChannelSocketOptions {
 export class ChannelSocket {
   private ws: WebSocket | null = null;
   private cursor = 0; // 本地已见最大 seq，重连 hello 用
+  private revCursor = 0; // 本地已消费最大 rev_seq，重连 hello.since_rev 用（issue #117）
+  private revSeeded = false; // 首个 welcome 是否已用 last_rev_seq 播种 revCursor
   private backoff = BACKOFF_MIN_MS;
   private pingTimer: number | null = null;
   private reconnectTimer: number | null = null;
@@ -89,11 +91,22 @@ export class ChannelSocket {
       }
       if (frame.type === "welcome" && !helloSent) {
         helloSent = true;
-        // REST 初始页/上翻页携带的就是消息当前状态（含编辑后正文），历史修订无需重放；
-        // 窗口内消息的后续修订走 live message_update。旧服务端无 last_rev_seq → 0 = 旧语义。
-        this.send({ type: "hello", since: this.cursor, since_rev: frame.last_rev_seq ?? 0 });
+        // 首连：REST 初始页/上翻页携带的就是消息当前状态（含编辑后正文），历史修订无需重放，
+        //   直接以服务端当前修订水位 last_rev_seq 作 revCursor 基线。旧服务端无 last_rev_seq → 0 = 旧语义。
+        // 重连：必须用本地维护的 revCursor（已消费的最大 rev_seq）作 since_rev，绝不用新 welcome 的
+        //   last_rev_seq 覆盖——否则断线窗口内发生的 edit/retract（原地 UPDATE，只 bump rev_seq）
+        //   会落在 (旧 revCursor, 新 last_rev_seq] 区间被服务端补拉跳过，页面永久停留在原文（issue #117）。
+        if (!this.revSeeded) {
+          this.revCursor = frame.last_rev_seq ?? 0;
+          this.revSeeded = true;
+        }
+        this.send({ type: "hello", since: this.cursor, since_rev: this.revCursor });
       }
       if ((frame.type === "msg" || frame.type === "status") && frame.seq > this.cursor) this.cursor = frame.seq;
+      // 收到带 rev_seq 的修订快照（hello 补拉/live）或 live message_update 后推进 revCursor，
+      // 下次重连才不会把这次修订再补拉一遍，也保证重连补拉的下界正确（issue #117）。
+      if (frame.type === "msg" || frame.type === "status") this.advanceRev(frame.rev_seq);
+      if (frame.type === "message_update") this.advanceRev(frame.message.rev_seq);
       this.handlers.onFrame(frame);
     };
 
@@ -153,6 +166,11 @@ export class ChannelSocket {
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.ws?.close(1000, "bye");
     this.ws = null;
+  }
+
+  // 修订游标只前移：修订快照是幂等展示事件，收到即视为已消费（不等 ack，与 CLI client.ts 对齐）。
+  private advanceRev(rev: number | undefined) {
+    if (typeof rev === "number" && rev > this.revCursor) this.revCursor = rev;
   }
 
   private clearPing() {
