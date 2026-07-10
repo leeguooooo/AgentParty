@@ -1,18 +1,21 @@
 // rest api 封装
 import {
-  EXIT_ARCHIVED,
-  EXIT_AUTH,
-  EXIT_LOOP_GUARD,
+  type AgentLineage,
   type CaptureKind,
   type CaptureRecord,
-  type AgentLineage,
   type ChannelKind,
   type ChannelMode,
   type ChannelRoleAssignment,
+  type ChannelSquad,
   type CollaborationRole,
   type CompletionGate,
   type CompletionReview,
   type CompletionReviewPolicy,
+  EXIT_ARCHIVED,
+  EXIT_AUTH,
+  EXIT_LOOP_GUARD,
+  EXIT_RATE_LIMITED,
+  EXIT_WORKFLOW_GUARD,
   type MsgFrame,
   type PresenceEntry,
   type ReadCursor,
@@ -22,7 +25,6 @@ import {
   type TaskAssigneeKind,
   type TaskRecord,
   type TaskState,
-  type ChannelSquad,
   type TokenRole,
   type WakeDelivery,
   type WebhookFilter,
@@ -1035,7 +1037,17 @@ export function handleRestError(e: unknown): number {
       return EXIT_AUTH;
     }
     if (e.code === "loop_guard") return EXIT_LOOP_GUARD;
+    // workflow guard 与 loop guard 同类：停手等人类，别换个措辞重试（#122）
+    if (e.code === "workflow_guard") {
+      console.error("hint: workflow guard tripped — stop, report status blocked, wait for a human. Do not rephrase and retry.");
+      return EXIT_WORKFLOW_GUARD;
+    }
     if (e.code === "archived") return EXIT_ARCHIVED;
+    // 429：退避后再试，别立刻连打（#122）
+    if (e.status === 429 || e.code === "rate_limited") {
+      console.error("hint: rate limited — back off (exponential, start ~30s) before retrying. Do not hammer.");
+      return EXIT_RATE_LIMITED;
+    }
     return 1;
   }
   console.error(`error: ${e instanceof Error ? e.message : String(e)}`);

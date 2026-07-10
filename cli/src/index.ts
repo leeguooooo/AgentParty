@@ -48,7 +48,7 @@ commands:
 
 watch defaults to a 240s timeout. With --follow, it stays attached unless --timeout N is explicit.
 
-exit codes: 0 ok/new message · 2 watch timeout (prints TIMEOUT) · 3 bad token · 4 loop guard · 5 archived · 6 stream ended (re-arm watch / restart serve) · 7 cli self-upgraded (restart serve)`;
+exit codes: 0 ok/new message · 2 watch timeout (prints TIMEOUT) · 3 bad token · 4 loop guard · 5 archived · 6 stream ended (re-arm watch / restart serve) · 7 cli self-upgraded (restart serve) · 8 workflow guard (stop, wait for human) · 9 rate limited (back off)`;
 
 export async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
