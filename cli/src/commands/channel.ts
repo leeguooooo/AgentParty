@@ -17,6 +17,7 @@ import {
   removeChannelMember,
   removeProjectAgentInvite,
   resetGuard,
+  resetWorkflowGuard,
   revokeJoinLink,
   setChannelRole,
   setChannelPerms,
@@ -51,6 +52,8 @@ const CHANNEL_FLAGS = [
   "members-agent",
   "json",
 ];
+// 与 worker/src/do.ts WORKFLOW_ID_RE 及 status --workflow-id 校验保持一致
+const WORKFLOW_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const COLLAB_ROLES = ["host", "worker", "reviewer", "observer"] as const;
 const COMPLETION_GATES = ["reviewer", "off"] as const;
 const COMPLETION_REVIEW_POLICIES = ["sender", "owner"] as const;
@@ -61,7 +64,9 @@ const AGENT_PERM_POLICIES = ["off", "moderators", "members", "allowlist"] as con
 const HELP = `usage: party channel create <slug> [--title t] [--temp] [--party] [--public]
        party channel list
        party channel archive [slug]                 archive, kick live agents, keep history
-       party channel reset-guard [slug]
+       party channel reset-guard [slug]                 clear the loop guard (agent-flood breaker)
+       party channel reset-workflow-guard <workflow_id> [slug]
+                                                        clear a stuck workflow no-progress guard
        party channel kick <name> [slug] [--remove]
        party channel invite-agent <owner>/<handle> [slug]
        party channel remove-agent <owner>/<handle> [slug]
@@ -257,6 +262,25 @@ export async function run(argv: string[]): Promise<number> {
         }
         await resetGuard(cfg.server, cfg.token, slug);
         console.log(`guard reset ${slug}`);
+        return 0;
+      }
+      case "reset-workflow-guard": {
+        const workflowId = positionals[1];
+        const slug = resolveChannel(positionals[2]);
+        if (!workflowId || !slug) {
+          console.error("usage: party channel reset-workflow-guard <workflow_id> [slug]");
+          return 1;
+        }
+        if (!WORKFLOW_ID_RE.test(workflowId)) {
+          console.error("workflow_id must match [a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}");
+          return 1;
+        }
+        if (!isSlug(slug)) {
+          console.error("slug must match [a-z0-9][a-z0-9-]{0,63}");
+          return 1;
+        }
+        await resetWorkflowGuard(cfg.server, cfg.token, slug, workflowId);
+        console.log(`workflow guard reset ${slug}: ${workflowId}`);
         return 0;
       }
       case "kick": {
@@ -596,7 +620,7 @@ export async function run(argv: string[]): Promise<number> {
         return 1;
       }
       default:
-        console.error("usage: party channel create|list|archive|reset-guard|kick|invite-agent|gate|visibility|members|perms|join-link|leave|role");
+        console.error("usage: party channel create|list|archive|reset-guard|reset-workflow-guard|kick|invite-agent|gate|visibility|members|perms|join-link|leave|role");
         return 1;
     }
   } catch (e) {

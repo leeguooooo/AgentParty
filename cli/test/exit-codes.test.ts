@@ -47,6 +47,20 @@ describe("handleRestError exit-code contract (#122)", () => {
     expect(lines.some((l) => /do not rephrase and retry/i.test(l))).toBe(true);
   });
 
+  // #127：熔断解除文案必须指向真正能用的命令。工作流熔断只能用 reset-workflow-guard 清，
+  // 不是 loop guard 的 reset-guard —— 照着旧文案（只说「等人类」）做的人无从下手。
+  test("workflow_guard hint names the reset-workflow-guard command", () => {
+    const lines: string[] = [];
+    const orig = console.error;
+    console.error = (l?: unknown) => lines.push(String(l));
+    try {
+      handleRestError(new RestError(409, "workflow_guard", "workflow wf-b is blocked by workflow guard"));
+    } finally {
+      console.error = orig;
+    }
+    expect(lines.some((l) => /party channel reset-workflow-guard/.test(l))).toBe(true);
+  });
+
   test("429 prints a back-off hint", () => {
     const lines: string[] = [];
     const orig = console.error;
