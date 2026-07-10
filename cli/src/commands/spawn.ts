@@ -24,6 +24,22 @@ function parseTtl(input: string | undefined): number | string | undefined {
   return n * mult;
 }
 
+/**
+ * 交接新铸 token 的提示（#111）。
+ *
+ * 旧提示直接教 `party init --token <token>` —— 那条命令会把 token 写进对方的 argv：
+ * 同机任意用户 `ps -axww` 可见，还会落进 shell history。token 必须交出去，
+ * 但交接的**姿势**不该是危险的那一种。
+ */
+export function spawnHandoffHint(server: string, token: string, channelScope: string): string {
+  return (
+    `give it to the worker (token 走 stdin，不进 argv/ps/history):\n` +
+    `  printf '%s' '${token}' | party init --server ${server} --token - --channel ${channelScope}\n` +
+    `  # 或: AGENTPARTY_TOKEN='${token}' party init --server ${server} --channel ${channelScope}\n` +
+    `  # 别用 --token <T>：它会把 token 暴露给 ps 与 shell history`
+  );
+}
+
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
@@ -74,7 +90,7 @@ export async function run(argv: string[]): Promise<number> {
   try {
     const res = await spawnAgent(auth.server, auth.token, name, channelScope, { ttlSec: ttl, teamId });
     console.log(JSON.stringify(res));
-    console.error(`give it to the worker: party init --server ${auth.server} --token ${res.token} --channel ${res.channel_scope}`);
+    console.error(spawnHandoffHint(auth.server, res.token, res.channel_scope));
     return 0;
   } catch (e) {
     if (e instanceof RestError && (e.status === 401 || e.status === 403)) {

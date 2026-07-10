@@ -20,8 +20,48 @@ Write local config and optionally bind this working directory to a default chann
 
 Options:
   --server URL    AgentParty server URL
-  --token T       agent/human/readonly token
+  --token T       agent/human/readonly token（会进 argv：ps 与 shell history 可见）
+  --token -       从 stdin 读 token（推荐；也可用 AGENTPARTY_TOKEN 环境变量）
   --channel C     bind the current working directory to channel C`;
+
+/**
+ * token 输入通道（#111）。
+ *
+ * argv 是进程的公共表面。实测（macOS）：`ps -axww -o command` 直接读到 `--token ap_…`，
+ * 同机任意用户可见；`party init --token <T>` 也原样落进 ~/.zsh_history。
+ *
+ * 所以补两条不经 argv 的通道：环境变量 AGENTPARTY_TOKEN，和 `--token -`（从 stdin 读）。
+ * `--token <T>` 仍然支持——不破坏现有脚本——但会响亮地告诉用户它泄漏到哪里。
+ * 优先级：显式 --token > AGENTPARTY_TOKEN > 已有 config。
+ */
+export interface TokenSources {
+  flagToken: string | undefined;
+  envToken: string | undefined;
+  prevToken: string | undefined;
+}
+export interface TokenDeps {
+  readStdin: () => Promise<string>;
+  warn: (line: string) => void;
+}
+
+export async function resolveTokenInput(src: TokenSources, deps: TokenDeps): Promise<string | null> {
+  if (src.flagToken === "-") {
+    const piped = (await deps.readStdin()).trim();
+    // 用户明确说了「从 stdin 读」。读不到就是错，不能静默回落到缓存里的旧 token。
+    return piped === "" ? null : piped;
+  }
+  if (src.flagToken !== undefined && src.flagToken !== "") {
+    // 绝不在警告里回显 token 本身——否则警告自己就成了第三个泄漏面。
+    deps.warn(
+      "warning: --token 会把 token 写进 argv：同机任意用户 `ps -axww` 可见，也会落进 shell history。" +
+        " 改用 AGENTPARTY_TOKEN 环境变量，或 `--token -` 从 stdin 读。",
+    );
+    return src.flagToken;
+  }
+  const env = src.envToken?.trim();
+  if (env !== undefined && env !== "") return env;
+  return src.prevToken ?? null;
+}
 
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
@@ -41,9 +81,14 @@ export async function run(argv: string[]): Promise<number> {
   }
   const prev = readConfig();
   const server = str(flags.server) ?? prev?.server;
-  const token = str(flags.token) ?? prev?.token;
+  const token = await resolveTokenInput(
+    { flagToken: str(flags.token), envToken: process.env.AGENTPARTY_TOKEN, prevToken: prev?.token },
+    { readStdin: async () => await Bun.stdin.text(), warn: (line) => console.error(line) },
+  );
   if (!server || !token) {
-    console.error("need --server and --token (or existing config)");
+    console.error(
+      "need --server and a token. token 可以来自：--token -（stdin，推荐）、AGENTPARTY_TOKEN 环境变量、已有 config，或 --token <T>（会进 ps 与 shell history）",
+    );
     return 1;
   }
   const normalizedServer = normalizeServerUrl(server);
