@@ -9,7 +9,9 @@
 // 症状（我在 #agentparty 频道亲历）：`task not found`、`board` 显示 0 tasks、
 // history 里出现一堆陌生对话。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { basename } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +19,10 @@ import {
   refreshConfigInPlace,
   workspaceConfigPath,
   workspaceId,
+  statePath,
+  slugifyBasename,
+  loadCursor,
+  saveCursor,
   writeConfig,
   type Config,
 } from "../src/config";
@@ -174,5 +180,45 @@ describe("workspaceId 必须先 realpath (#104 的另一半)", () => {
     // 用 realpath 形式访问同一个目录：必须仍读到 bob，不能回落到全局的 alice
     expect(readConfig(realpathSync(dirB))?.identity?.name).toBe("bob");
     expect(readConfig(fallbackDir)?.identity?.name).toBe("alice");
+  });
+});
+
+// leo-claude 在频道 seq 530 指出的合并顺序炸弹：realpath 改变 workspaceId →
+// 已有 workspace 的游标被当成陌生 workspace 从 0 开始 → serve/watch 重放整个积压。
+// serve 有 #193 的 skip-backlog 兜底，**但 watch --once 没有**：游标归 0 后
+// 每次唤醒只消费一条，要烧掉几百次唤醒才追得上。
+// 与其靠兜底，不如从根上拆掉：一次性把旧 workspaceId 的状态搬过来，游标根本不重置。
+describe("realpath 后不得丢掉旧 workspaceId 的游标 (#104 迁移)", () => {
+  test("旧路径哈希下的 state 会被一次性迁移到 realpath 哈希下", () => {
+    const d = ws(); // /var/folders/... （symlink 路径）
+    const real = realpathSync(d);
+    expect(d).not.toBe(real);
+
+    // 造一份「realpath 修复之前」写下的 state：目录名是 symlink 路径的哈希
+    const legacyId = `${slugifyBasename(basename(d))}-${createHash("sha256").update(d).digest("hex").slice(0, 16)}`;
+    const legacyDir = join(home, "state", legacyId);
+    mkdirSync(legacyDir, { recursive: true });
+    writeFileSync(join(legacyDir, "state.json"), JSON.stringify({ channel: "dev", cursor: 512 }));
+
+    // 修复之后：statePath 用 realpath 哈希，目录名不同
+    expect(statePath(d)).not.toContain(legacyId);
+
+    // 但游标必须还在 512，不能归 0（否则 watch --once 要烧 512 次唤醒才追上）
+    expect(loadCursor("dev", d)).toBe(512);
+  });
+
+  test("迁移是幂等的：新目录已存在时不覆盖它（顺序很重要，先有新的再出现旧的）", () => {
+    const d = ws();
+    // 先让当前 workspace 有一个更新的游标（这一步内部就会跑一次迁移，此时没有 legacy）
+    saveCursor("dev", 999, d);
+    expect(loadCursor("dev", d)).toBe(999);
+
+    // 之后才出现一个旧哈希目录（比如用户从旧版本的另一台机器同步过来）
+    const legacyId = `${slugifyBasename(basename(d))}-${createHash("sha256").update(d).digest("hex").slice(0, 16)}`;
+    mkdirSync(join(home, "state", legacyId), { recursive: true });
+    writeFileSync(join(home, "state", legacyId, "state.json"), JSON.stringify({ channel: "dev", cursor: 111 }));
+
+    // 绝不能被旧的 111 覆盖回去——那会让游标倒退，重放已处理过的 mention
+    expect(loadCursor("dev", d)).toBe(999);
   });
 });

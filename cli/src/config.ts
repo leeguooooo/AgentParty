@@ -251,6 +251,35 @@ export function worktreeLabel(cwd: string = process.cwd()): string | undefined {
   return head === null ? basename(root) : `${basename(root)}:${head}`;
 }
 
+/**
+ * realpath 修复（#104）改变了 workspaceId，于是老用户的 state 目录名对不上了：
+ * 游标会被当成陌生 workspace 从 0 开始。serve 有 #193 的 skip-backlog 兜底，
+ * **但 watch --once 没有**——游标归 0 后它每次唤醒只消费一条，要烧掉几百次唤醒才追得上。
+ *
+ * 所以把旧哈希（未 realpath 的 cwd 字符串）下的目录一次性搬过来。
+ * 幂等：新目录已存在就什么都不做，绝不覆盖更新的状态。
+ */
+function migrateLegacyWorkspaceState(cwd: string): void {
+  let real: string;
+  try {
+    real = realpathSync(cwd);
+  } catch {
+    return; // 目录不存在，没有可迁移的东西
+  }
+  if (real === cwd) return; // 路径本来就是真实路径，没有旧哈希
+  const root = join(agentpartyHome(), "state");
+  const legacyHash = createHash("sha256").update(cwd).digest("hex").slice(0, 16);
+  const legacy = join(root, `${slugifyBasename(basename(cwd))}-${legacyHash}`);
+  const current = join(root, workspaceId(real));
+  if (existsSync(current) || !existsSync(legacy)) return;
+  try {
+    mkdirSync(root, { recursive: true });
+    renameSync(legacy, current);
+  } catch {
+    /* 并发下另一个进程先搬完了，或跨设备：忽略，读取会走正常路径 */
+  }
+}
+
 export function statePath(cwd: string = process.cwd()): string {
   const explicit = explicitConfigPath();
   if (explicit) return join(dirname(explicit), `${basename(explicit)}.state`, "state.json");
@@ -277,6 +306,7 @@ export function bindWorkspaceConfigPointer(configPath: string, channel: string, 
 }
 
 export function readState(cwd: string = process.cwd()): WorkspaceState | null {
+  migrateLegacyWorkspaceState(cwd);
   try {
     return JSON.parse(readFileSync(statePath(cwd), "utf8")) as WorkspaceState;
   } catch {
