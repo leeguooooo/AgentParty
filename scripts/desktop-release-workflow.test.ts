@@ -47,8 +47,9 @@ describe("desktop release workflow", () => {
     expect(workflow).toContain("security find-identity -v -p codesigning");
     expect(workflow).toContain("spctl --assess --type execute");
     expect(workflow).toContain("xcrun stapler validate");
-    expect(workflow).toContain('xcrun notarytool submit "$dmg"');
-    expect(workflow).toContain('xcrun stapler staple "$dmg"');
+    expect(workflow).not.toContain('xcrun notarytool submit "$dmg"');
+    expect(workflow).not.toContain('xcrun stapler staple "$dmg"');
+    expect(workflow).toContain('xcrun stapler validate "$dmg"');
     expect(workflow).toContain('spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"');
     expect(workflow).toContain("agentparty-desktop-${ASSET}.signing-status.json");
     expect(workflow).toContain("dist/release-body.md");

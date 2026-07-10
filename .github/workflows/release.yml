@@ -273,10 +273,6 @@ jobs:
 
       - name: verify Developer ID signature and notarization ticket
         if: steps.apple-signing.outputs.enabled == 'true'
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           app="$(find desktop/src-tauri/target/release/bundle/macos -name '*.app' -type d | head -n 1)"
@@ -288,12 +284,6 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl --assess --type execute --verbose=4 "$app"
           xcrun stapler validate "$app"
-          xcrun notarytool submit "$dmg" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-          xcrun stapler staple "$dmg"
           xcrun stapler validate "$dmg"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
 
