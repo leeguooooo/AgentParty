@@ -1255,17 +1255,18 @@ describe("party status/history channel flag", () => {
       conflicts: Array<{
         scope: string;
         owners: string[];
-        claims: Array<{ seq: number; owner: string; state: string; scope: string[] }>;
+        claims: Array<{ seq: number; task_id: number | null; owner: string; state: string; scope: string[] }>;
       }>;
       recommended_actions: Array<{ kind: string; target: string | null; reason: string }>;
     };
+    // #204：conflicts 由任务台账派生，每一侧都带 task_id，运维能直接看出冲突的是哪两个 task。
     expect(frame.conflicts).toEqual([
       {
         scope: "web/src",
         owners: ["worker-a", "worker-b"],
         claims: [
-          { seq: 31, owner: "worker-b", state: "working", scope: ["web/src/components"] },
-          { seq: 30, owner: "worker-a", state: "working", scope: ["web/src"] },
+          { seq: 31, task_id: 31, owner: "worker-b", state: "working", scope: ["web/src/components"] },
+          { seq: 30, task_id: 30, owner: "worker-a", state: "working", scope: ["web/src"] },
         ],
       },
     ]);

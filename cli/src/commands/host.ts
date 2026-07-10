@@ -1,4 +1,4 @@
-// party host board — derived coordinator board from presence + retained status history.
+// party host board — derived coordinator board from presence + task ledger + retained status history.
 import {
   buildHostBoard,
   type HostBoard,
@@ -17,7 +17,8 @@ Show a derived coordinator board for host/failover review.
 
 The board is read-only and uses existing data only:
   - /api/channels/:channel/presence for host lease/residency
-  - retained status history for open claims, blockers, and host decisions
+  - the channel task ledger for open claims, blockers, and scope conflicts (#204)
+  - retained status history for host decisions, and for legacy claims with no task
 
 Options:
   --channel C   read channel C instead of the bound channel
@@ -64,6 +65,12 @@ export function formatWindowLines(w: BoardWindow): string[] {
   return lines;
 }
 
+// #204：board 上同时存在两种 claim —— 任务台账派生的（标识是 task id）与消息折叠派生的 legacy claim
+// （标识是消息 seq）。两者都渲染成 `#N` 会让运维分不清 `#1` 指 task 1 还是消息 seq 1，故显式区分前缀。
+function claimRef(claim: { seq: number; task_id: number | null }): string {
+  return claim.task_id === null ? `#${claim.seq}` : `task #${claim.task_id}`;
+}
+
 function printBoard(board: HostBoard, window: BoardWindow) {
   console.log(`host board ${board.channel} last_seq=${board.last_seq}`);
   for (const line of formatWindowLines(window)) console.log(line);
@@ -76,15 +83,15 @@ function printBoard(board: HostBoard, window: BoardWindow) {
   for (const claim of board.open_claims) {
     const blocked = claim.blocked_reason === null ? "" : ` blocked=${claim.blocked_reason}`;
     const workflow = claim.workflow === null ? "" : ` workflow=${claim.workflow.workflow_id}/${claim.workflow.kind}`;
-    console.log(`- #${claim.seq} ${claim.owner} ${claim.state} scope=${scopeLabel(claim.scope)}${workflow}${blocked}`);
+    console.log(`- ${claimRef(claim)} ${claim.owner} ${claim.state} scope=${scopeLabel(claim.scope)}${workflow}${blocked}`);
   }
   console.log(`blockers: ${board.blockers.length}`);
   for (const blocker of board.blockers) {
-    console.log(`- #${blocker.seq} ${blocker.owner} ${blocker.blocked_reason ?? blocker.note ?? "blocked"}`);
+    console.log(`- ${claimRef(blocker)} ${blocker.owner} ${blocker.blocked_reason ?? blocker.note ?? "blocked"}`);
   }
   console.log(`conflicts: ${board.conflicts.length}`);
   for (const conflict of board.conflicts) {
-    const claims = conflict.claims.map((claim) => `#${claim.seq} ${claim.owner}`).join(" vs ");
+    const claims = conflict.claims.map((claim) => `${claimRef(claim)} ${claim.owner}`).join(" vs ");
     console.log(`- ${conflict.scope}: ${claims}`);
   }
   console.log(`decisions: ${board.decisions.length}`);
@@ -96,7 +103,7 @@ function printBoard(board: HostBoard, window: BoardWindow) {
   // #204 legacy 段：没有对应 task 的历史 status claim。独立成段、不混进 open claims；给出转成 task 的命令。
   console.log(`unlinked status claims (no task, legacy): ${board.unlinked_claims.length}`);
   for (const claim of board.unlinked_claims) {
-    console.log(`- #${claim.seq} ${claim.owner} ${claim.state} scope=${scopeLabel(claim.scope)}  (no task; run: party task from ${claim.seq})`);
+    console.log(`- ${claimRef(claim)} ${claim.owner} ${claim.state} scope=${scopeLabel(claim.scope)}  (no task; run: party task from ${claim.seq})`);
   }
   console.log(`recommended actions: ${board.recommended_actions.length}`);
   for (const action of board.recommended_actions) {

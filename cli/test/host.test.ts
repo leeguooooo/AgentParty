@@ -40,7 +40,7 @@ afterEach(() => {
 
 // host board 一次并发发三个请求（presence + 主查询 + limit=1 的头探针）。
 // 全局变量拦截 fetch 在并发下会被互相覆盖，必须起一个真实的本地 server 按路径/查询串分别记录。
-function startMockServer(messages: { seq: number }[]): { seen: string[] } {
+function startMockServer(messages: { seq: number }[], tasks: { id: number }[] = []): { seen: string[] } {
   const seen: string[] = [];
   restServer = Bun.serve({
     hostname: "127.0.0.1",
@@ -51,7 +51,7 @@ function startMockServer(messages: { seq: number }[]): { seen: string[] } {
         return Response.json({ presence: [] });
       }
       if (url.pathname.endsWith("/tasks")) {
-        return Response.json({ tasks: [] });
+        return Response.json({ tasks });
       }
       if (url.pathname.endsWith("/messages")) {
         seen.push(url.search);
@@ -211,5 +211,40 @@ describe("party host board unlinked status claims 段（#204）", () => {
     expect(Array.isArray(frame.unlinked_claims)).toBe(true);
     expect(frame.unlinked_claims[0].seq).toBe(221);
     expect(frame.unlinked_claims[0].task_id).toBe(null);
+  });
+
+  // task 派生的 claim 标识是 task id，legacy claim 标识是消息 seq。取 task.id === 消息 seq === 221 这个
+  // 碰撞用例：若两者都渲染成 `#221`，运维无法判断某一行指的是任务还是消息。
+  test("文本输出：task 派生 claim 印 `task #N`，legacy claim 印 `#N`，同号也不混淆", async () => {
+    const task = {
+      type: "task",
+      id: 221,
+      channel: "dev",
+      title: "cli work",
+      desc: null,
+      state: "in_progress",
+      assignee: { name: "worker-b", kind: "agent" },
+      created_by: "worker-b",
+      created_by_kind: "agent",
+      priority: 0,
+      labels: [],
+      parent_id: null,
+      anchor_seqs: [],
+      scope: ["cli/src"],
+      blocked_reason: null,
+      completion_artifact: null,
+      workflow_id: null,
+      created_at: 1_000,
+      updated_at: 1_000,
+      completed_at: null,
+    };
+    startMockServer([statusMessage(221, "worker-a", ["web/src"])] as unknown as { seq: number }[], [task]);
+    const code = await run(["board", "dev"]);
+    expect(code).toBe(0);
+    const text = stdout.join("\n");
+    expect(text).toContain("- task #221 worker-b working scope=cli/src");
+    expect(text).toContain("- #221 worker-a working scope=web/src");
+    // 任务那一行不得退化成无前缀的 `- #221`，否则与 legacy 行同形
+    expect(text).not.toContain("- #221 worker-b");
   });
 });
