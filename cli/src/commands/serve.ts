@@ -192,6 +192,12 @@ function buildWakeContext(
   };
 }
 
+// 文件名片段消毒：身份/频道来自服务端，但它们会进路径。`..` 和分隔符必须失去含义，
+// 否则一个叫 `../../etc/x` 的 name 能把上下文写出 tmpdir。正文里仍保留原始 self。
+function pathSafe(part: string): string {
+  return part.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/\.{2,}/g, "_") || "_";
+}
+
 export function writeContextFile(
   frame: MsgFrame,
   channel: string,
@@ -201,7 +207,10 @@ export function writeContextFile(
   projectAgent: ProjectAgentRunContext | null = null,
   cliUpgrade: CliUpgradeNotice | null = null,
 ): string {
-  const path = join(tmpdir(), `agentparty-serve-${channel}-${frame.seq}.json`);
+  // 路径必须含身份（#197）。只用 channel+seq 时，同机多个 agent serve 同一频道会为同一条消息
+  // 写同一个文件、后写的赢——runner 读到别人的上下文，`self` 是别人的名字，而 --runner
+  // claude|codex 会把这个文件直接喂给模型。mode 0600 挡的是别的 unix 用户，挡不住兄弟 agent。
+  const path = join(tmpdir(), `agentparty-serve-${pathSafe(channel)}-${pathSafe(self)}-${frame.seq}.json`);
   writeFileSync(
     path,
     JSON.stringify(buildWakeContext(frame, channel, self, recent, charter, projectAgent, cliUpgrade), null, 2) + "\n",
