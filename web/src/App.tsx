@@ -37,7 +37,8 @@ import {
   refreshSession,
   type WebSession,
 } from "./lib/oidc";
-import { sessionStillFresh, withRefreshLock } from "./lib/refreshLock";
+import { withRefreshLock } from "./lib/refreshLock";
+import { gateSession, jwtSub } from "./lib/sessionIdentity";
 import { ChannelPage } from "./pages/Channel";
 import { Home } from "./pages/Home";
 import { matchChannel, matchJoin, useRoute } from "./router";
@@ -61,6 +62,10 @@ export function App() {
   const t = useT();
   const [path, navigate, replace] = useRoute();
   const [token, setToken] = useState<string | null>(() => getToken());
+  // 本标签当前身份（access token 的 sub）。共享 localStorage 里的 session 是否可用，
+  // 必须与它比对——只比 token 字符串没用：同身份续期后 access token 本来就会变。
+  const identityRef = useRef<string | null>(null);
+  identityRef.current = jwtSub(token);
   const [authError, setAuthError] = useState<string | null>(null);
   const [channels, setChannels] = useState<ChannelInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -124,16 +129,21 @@ export function App() {
       }
     } else {
       // 别的标签可能刚刚续期成功并写回了共享 localStorage（#126）：与其把所有标签一起
-      // 踢回登录页，不如接管那份新鲜会话。只有确实没有可用会话时才真正登出。
-      const adopted = readSession();
-      if (sessionStillFresh(adopted) && adopted !== null) {
+      // 踢回登录页，不如接管那份新鲜会话。但**只接管同身份的**（#126 follow-up）：
+      // 跨身份 / 旧 session 无 identity 一律不接管，否则本标签会静默变成另一个账号。
+      const shared = readSession();
+      if (shared !== null && gateSession(shared, identityRef.current) === "adopt") {
         setAuthError(null);
         setChannels(null);
         setListError(null);
-        setToken(adopted.accessToken);
+        setToken(shared.accessToken);
         return;
       }
-      clearToken();
+      // 共享会话明确属于另一个身份：不接管，也**不要删**——删了会把那个身份的其它标签一起踢下线。
+      // 其余情况（不新鲜 / 身份未知 / 属于本身份但已失效）照旧清理。
+      if (shared === null || gateSession(shared, identityRef.current) !== "foreign") {
+        clearToken();
+      }
     }
     setAuthError(message);
     setChannels(null);
@@ -149,18 +159,25 @@ export function App() {
   const refreshInFlight = useRef<Promise<string> | null>(null);
   const doRefresh = useCallback((): Promise<string> => {
     if (refreshInFlight.current) return refreshInFlight.current;
-    if (oidcRef.current === null || readSession()?.refreshToken == null) {
+    const gate = gateSession(readSession(), identityRef.current);
+    if (oidcRef.current === null || gate === "none") {
       return Promise.reject(new Error("no refreshable session"));
+    }
+    // 共享会话属于另一个身份（别的标签登录了别的账号）：既不复用、也不拿它的 refresh_token 去换，
+    // 否则本标签会静默变成那个身份。交给 hardLogout 走正常登录闸。
+    if (gate === "foreign") {
+      return Promise.reject(new Error("session identity switched"));
     }
     const p = withRefreshLock<WebSession>({
       readFresh: () => {
         const sess = readSession();
-        // 等锁期间别的标签很可能已经续好了：session 仍新鲜就直接复用，不再发请求
-        return sessionStillFresh(sess) ? sess : null;
+        // 等锁期间别的标签可能已经续好（同身份 → 直接复用），也可能换成了别的身份 → 重新按身份判定
+        return sess !== null && gateSession(sess, identityRef.current) === "adopt" ? sess : null;
       },
       refresh: async () => {
         const sess = readSession();
         if (oidcRef.current === null || sess?.refreshToken == null) throw new Error("no refreshable session");
+        if (gateSession(sess, identityRef.current) === "foreign") throw new Error("session identity switched");
         const next = await refreshSession(oidcRef.current, sess.refreshToken);
         saveSession(next);
         return next;
