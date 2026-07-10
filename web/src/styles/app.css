@@ -2855,14 +2855,50 @@
   justify-content: space-between;
   gap: 10px;
 }
-.task-ledger-head h2 {
+.task-ledger-total {
   margin: 0;
-  font-size: 14px;
-}
-.task-ledger-head p {
-  margin: 2px 0 0;
   color: var(--t-dim);
   font-size: 11px;
+}
+.task-ledger-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.task-new-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1.5px solid var(--t-faint);
+  border-radius: 8px;
+  background: var(--t-panel);
+}
+.task-new-title,
+.task-new-desc {
+  width: 100%;
+  border: 1.5px solid var(--t-faint);
+  border-radius: 0;
+  background: var(--t-panel2);
+  color: var(--t-text);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+.task-new-desc {
+  resize: vertical;
+  min-height: 40px;
+}
+.task-new-actions {
+  display: flex;
+  gap: 6px;
+}
+.task-card-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .task-ledger-counts,
 .task-card-meta {
