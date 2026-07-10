@@ -26,8 +26,30 @@ describe("deployment metadata script", () => {
     });
 
     await expect(verifyDeploymentMetadata("https://example.test", metadata, fetcher)).resolves.toEqual(metadata);
-    await expect(verifyDeploymentMetadata("https://example.test", { ...metadata, commit: "f".repeat(40) }, fetcher))
+    await expect(verifyDeploymentMetadata(
+      "https://example.test",
+      { ...metadata, commit: "f".repeat(40) },
+      fetcher,
+      { attempts: 1, delayMs: 0, sleep: async () => {} },
+    ))
       .rejects.toThrow("commit mismatch");
+  });
+
+  it("retries a stale edge response until the deployed identity propagates", async () => {
+    let calls = 0;
+    const waits: number[] = [];
+    const fetcher = async () => {
+      calls += 1;
+      const body = calls === 1 ? { ok: true } : { ok: true, ...metadata };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    };
+
+    await expect(verifyDeploymentMetadata("https://example.test", metadata, fetcher, {
+      attempts: 2,
+      delayMs: 25,
+      sleep: async (delayMs) => { waits.push(delayMs); },
+    })).resolves.toEqual(metadata);
+    expect({ calls, waits }).toEqual({ calls: 2, waits: [25] });
   });
 
   it("verifies prod and xdream against one expected build", async () => {
@@ -41,7 +63,12 @@ describe("deployment metadata script", () => {
 
     await expect(verifyDualDeployment({ prod: "https://prod.test" }, metadata, fetcher))
       .resolves.toEqual({ prod: metadata });
-    await expect(verifyDualDeployment({ prod: "https://prod.test", xdream: "https://xdream.test" }, metadata, fetcher))
+    await expect(verifyDualDeployment(
+      { prod: "https://prod.test", xdream: "https://xdream.test" },
+      metadata,
+      fetcher,
+      { attempts: 1, delayMs: 0, sleep: async () => {} },
+    ))
       .rejects.toThrow("xdream: commit mismatch");
   });
 
