@@ -43,6 +43,9 @@ function opts(over: Partial<ServeOptions> & { server: string }): ServeOptions & 
     mentionsOnly: true,
     out: (line) => lines.push(line),
     lines,
+    // 每个测试一把独立的单实例锁（#99）：测试不该依赖真实 ~/.agentparty，
+    // 也不该互相抢锁（第二个 runServe 会被拒并返回 EXIT_ALREADY_SERVING）
+    lockDir: mkdtempSync(join(tmpdir(), "ap-lock-")),
     wakeRetryDelayMs: 0,
     ...over,
   };

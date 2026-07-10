@@ -15,11 +15,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readAccount } from "../account";
 import { connect } from "../client";
-import { clearStuck, loadCursor, loadRevCursor, loadStuck, resolveChannel, saveCursor, saveRevCursor, saveStuck, type StuckWake } from "../config";
+import { readConfig, clearStuck, loadCursor, loadRevCursor, loadStuck, resolveChannel, saveCursor, saveRevCursor, saveStuck, statePath, type StuckWake } from "../config";
+import { acquireInstanceLock } from "../instance-lock";
 import { formatMsg } from "../format";
 import { ensureFreshAccess, resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import {
@@ -57,6 +58,9 @@ export class WakeBlockedError extends Error {
 
 // 放弃通告都发不出去（网络/loop guard 熔断）。此时既没送达也没宣告，继续跑就是静默丢 @。
 export const EXIT_WAKE_UNANNOUNCED = 1;
+
+/** 已有 serve 挂在同一 (channel, workspace) 上：拒绝启动，避免重复执行（#99）。 */
+export const EXIT_ALREADY_SERVING = 10;
 
 /** 传给 builtin runner 的提示：只给路径，不给正文（#120）。 */
 function wakePrompt(contextFile: string): string {
@@ -239,6 +243,30 @@ export function writeContextFile(
   return path;
 }
 
+/**
+ * runner workdir 按 (频道, 身份) 隔离（#99）。
+ *
+ * 旧实现只按频道键（`~/.agentparty/runners/<channel>`）。同机两个身份 serve 同一频道时，
+ * 它们共享同一个 wake-session.json：互相把对方的 codex/claude session id 覆盖掉，
+ * 而 builtin runner 在 resume 失败时会 fork 出一个新 session——于是重复执行。
+ *
+ * 身份未知（还没连上服务端拿到 welcome.self）时退回按频道键，保持旧行为。
+ */
+export function runnerWorkdir(root: string, channel: string, self: string | undefined): string {
+  const safe = (part: string) => part.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/\.{2,}/g, "_") || "_";
+  if (self === undefined || self === "") return join(root, safe(channel));
+  return join(root, `${safe(channel)}-${safe(self)}`);
+}
+
+/**
+ * 默认 runner workdir。身份取自本地 config（启动时就有；welcome.self 要等连上才有）。
+ * 没有缓存身份时退回按频道键，保持旧行为。
+ */
+export function defaultRunnerWorkdir(channel: string, cwd: string = process.cwd()): string {
+  const self = readConfig(cwd)?.identity?.name;
+  return runnerWorkdir(join(homedir(), ".agentparty", "runners"), channel, self);
+}
+
 const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "replay-backlog", "profile", "profile-once", "profile-poll-interval"];
 const HELP = `usage: party serve [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all]
        party serve --profile <owner>/<handle>
@@ -274,6 +302,10 @@ export interface ServeOptions {
   // 但「积压」与「欠账」是两回事（#198）：跳过的只能是**已离线堆积、从未送达**的历史；
   // 送达失败被钉住的 stuck 无论多旧都必须重放，否则 #118 救下的那条 @ 会被这里吃掉。
   skipBacklog?: boolean;
+  /** 单实例锁目录（#99）。默认与 workspace state 同放；测试注入。 */
+  lockDir?: string;
+  /** 关掉单实例保护（逃生舱）。 */
+  allowMultiple?: boolean;
   builtinRunner?: BuiltinRunnerOptions;
   onCursor?: (cursor: number) => void;
   onRevCursor?: (revCursor: number) => void;
@@ -1157,6 +1189,18 @@ export async function runServe(o: ServeOptions): Promise<number> {
   });
 
   const skipBacklog = o.skipBacklog !== false; // 默认跳过离线积压（#193）
+  // 抢锁在连 WS 之前：第二个 serve 连接都不该建，否则它已经在消费 @、已经在跑 runner 了（#99）。
+  // 这把锁只挡同机；跨机器重复执行需要服务端租约（do.ts 广播发给同名所有连接）。
+  const lockDir = o.lockDir ?? dirname(statePath());
+  const lock = o.allowMultiple === true ? null : acquireInstanceLock("serve", o.channel, lockDir);
+  if (lock && !lock.ok) {
+    out(
+      `serve: 已有 serve 挂在 #${o.channel} 上（pid ${lock.heldByPid}）。` +
+        ` 再挂一个会让同一条 @ 触发两次完整 runner——双份回帖，git push 类副作用执行两遍。` +
+        ` 要么等它退出，要么 kill ${lock.heldByPid}；确实想并存请加 --allow-multiple。`,
+    );
+    return EXIT_ALREADY_SERVING;
+  }
   // 本实例私有的上下文命名空间（#197 / #208 门禁）。退出时整目录删除：
   // 失败的唤醒会把上下文留在盘上供本次排查，但它带着 charter / recent 正文，
   // 不能在进程结束后继续躺在共享 tmpdir 里。
@@ -1512,7 +1556,7 @@ export async function run(argv: string[]): Promise<number> {
           token,
           channel,
           harness,
-          workdir: expandHomePath(str(flags.workdir) ?? join(homedir(), ".agentparty", "runners", channel)),
+          workdir: expandHomePath(str(flags.workdir) ?? defaultRunnerWorkdir(channel)),
           repo: str(flags.repo),
         }
       : undefined,
@@ -1521,7 +1565,7 @@ export async function run(argv: string[]): Promise<number> {
           server,
           token,
           channel,
-          workdir: expandHomePath(str(flags.workdir) ?? join(homedir(), ".agentparty", "runners", channel)),
+          workdir: expandHomePath(str(flags.workdir) ?? defaultRunnerWorkdir(channel)),
         }
       : undefined,
   });

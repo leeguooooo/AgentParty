@@ -105,6 +105,7 @@ describe("AP_BODY 不得把未截断正文塞进 env (#120)", () => {
         since: 0,
         mentionsOnly: true,
         out: () => {},
+        lockDir: tmp(), // 每个测试一把独立锁（#99）
         // env 长度、截断标志、stdin 长度各写一个文件
         cmd: `printf '%s' "$AP_BODY" | wc -c > ${outDir}/envlen; printf '%s' "$AP_BODY_TRUNCATED" > ${outDir}/flag; wc -c > ${outDir}/stdinlen`,
       });
@@ -137,6 +138,7 @@ describe("AP_BODY 不得把未截断正文塞进 env (#120)", () => {
         since: 0,
         mentionsOnly: true,
         out: () => {},
+        lockDir: tmp(), // 每个测试一把独立锁（#99）
         cmd: `printf '%s' "$AP_BODY" > ${outDir}/body; printf '%s' "$AP_BODY_TRUNCATED" > ${outDir}/flag`,
       });
       expect(readFileSync(join(outDir, "body"), "utf8")).toBe("short");
