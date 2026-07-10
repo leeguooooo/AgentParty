@@ -9,7 +9,7 @@
 // 症状（我在 #agentparty 频道亲历）：`task not found`、`board` 显示 0 tasks、
 // history 里出现一堆陌生对话。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { tmpdir } from "node:os";
@@ -162,23 +162,34 @@ describe("whoami / statusline 接线 (#104)", () => {
 });
 
 // 上面那条接线测试第一次跑是红的，红的原因不是接线错了，而是这个：
+//
+// 造一对指向同一真实目录的路径：一条经 symlink、一条是 realpath。
+// 不依赖「/tmp 恰好是 symlink」（macOS 成立、Linux CI 不成立 —— 第一版就是这样在 CI 挂的）。
+function symlinkedDir(): { via: string; real: string } {
+  const real = ws(); // 真实目录
+  const link = mkdtempSync(join(tmpdir(), "ap-lnk-")) + "-link";
+  dirs.push(link);
+  symlinkSync(real, link); // link → real
+  return { via: join(link), real: realpathSync(real) };
+}
+
 describe("workspaceId 必须先 realpath (#104 的另一半)", () => {
   test("同一目录经 symlink 路径访问，得到同一个 workspaceId", () => {
-    const d = ws(); // macOS: /var/folders/... （/var 是 /private/var 的 symlink）
-    const real = realpathSync(d); // /private/var/folders/...
-    expect(d).not.toBe(real); // 先证明这两个字符串确实不同
-    expect(workspaceId(d)).toBe(workspaceId(real));
+    const { via, real } = symlinkedDir();
+    expect(realpathSync(via)).toBe(real); // 两条路径指向同一真实目录
+    expect(via).not.toBe(real); // 但字符串不同
+    expect(workspaceId(via)).toBe(workspaceId(real));
   });
 
   test("cd 进 symlink 路径后，仍能读到自己的 workspace config，而不是静默回落全局", () => {
     const fallbackDir = ws();
-    const dirB = ws();
+    const { via } = symlinkedDir();
     writeConfig(cfg("alice"), ws()); // 全局 = alice
-    writeConfig(cfg("bob"), dirB); // dirB 的 workspace = bob
+    writeConfig(cfg("bob"), via); // 经 symlink 写 workspace = bob
     writeConfig(cfg("alice"), ws()); // 全局回到 alice
 
     // 用 realpath 形式访问同一个目录：必须仍读到 bob，不能回落到全局的 alice
-    expect(readConfig(realpathSync(dirB))?.identity?.name).toBe("bob");
+    expect(readConfig(realpathSync(via))?.identity?.name).toBe("bob");
     expect(readConfig(fallbackDir)?.identity?.name).toBe("alice");
   });
 });
@@ -190,8 +201,7 @@ describe("workspaceId 必须先 realpath (#104 的另一半)", () => {
 // 与其靠兜底，不如从根上拆掉：一次性把旧 workspaceId 的状态搬过来，游标根本不重置。
 describe("realpath 后不得丢掉旧 workspaceId 的游标 (#104 迁移)", () => {
   test("旧路径哈希下的 state 会被一次性迁移到 realpath 哈希下", () => {
-    const d = ws(); // /var/folders/... （symlink 路径）
-    const real = realpathSync(d);
+    const { via: d, real } = symlinkedDir(); // d 经 symlink，real 是真实路径
     expect(d).not.toBe(real);
 
     // 造一份「realpath 修复之前」写下的 state：目录名是 symlink 路径的哈希
