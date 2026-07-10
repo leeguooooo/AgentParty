@@ -58,7 +58,8 @@ export function classify(e: PresenceEntry, now: number): Row | null {
   if (e.name === "system") return null;
   const seen = e.last_seen ?? e.ts ?? 0;
   const age = now - seen;
-  const online = e.state !== "offline" && age < STALE_MS;
+  // online：与 web 一致以「当前有活 WS 连接」为准（#97 的 live）；无 live 信号时回退旧新鲜度启发式。
+  const online = e.state !== "offline" && (e.live === true || age < STALE_MS);
   const kind = kindOf(e);
   const wake = e.wake?.kind;
   let tier: Tier;

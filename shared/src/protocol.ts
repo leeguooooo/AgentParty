@@ -274,6 +274,13 @@ export interface PresenceEntry {
   avatar_thumb?: string;
   /** 同一身份当前活跃连接数。仅 >1 时下发，用于提示 token/session 被重复使用。 */
   connection_count?: number;
+  /**
+   * 序列化时该 name 是否持有活 WS 连接（issue #97）。DO 从 getConnections 权威判定，仅 true 时下发；
+   * 旧客户端忽略。用途仅限「可达性/新鲜度」——live 视同新鲜（短路 wakeReachable 的 staleMs 判定）、
+   * 视同在线。**不参与 host 租约判定**：evaluateHostLease/summarizeHosts 仍只看 last_seen，failover 触发
+   * 条件保持「多久没干活」而非「TCP 有没有断」（一个卡在无超时 await 上的 serve socket 照样是活的）。
+   */
+  live?: boolean;
 }
 
 export interface ChannelRoleAssignment {
@@ -302,20 +309,44 @@ export function presenceLastSeen(entry: Pick<PresenceEntry, "last_seen" | "ts">)
 // 可唤醒判定的统一口径（issue #47），cli `party who` / `send --reach` 与 web mention 候选共用：
 // serve/watch 靠本地常驻 supervisor 持 WS，presence 不新鲜（supervisor 大概率已死）就叫不醒；
 // webhook 由服务端投递，agent 离线也真能被唤醒，不受新鲜度限制（幽灵清理由调用方另行处理）。
-export function wakeReachable(kind: WakeKind | undefined, ageMs: number, staleMs = PRESENCE_TIMEOUT_MS): boolean {
+// live（issue #97）：DO 权威判定「当前有活 WS 连接」时视同新鲜——WS 还连着本身就是 supervisor 存活的
+// 最强证据，短路 staleMs 判定，让健康但安静的 serve/watch 不被误判叫不醒。webhook 恒 true、不受影响。
+export function wakeReachable(
+  kind: WakeKind | undefined,
+  ageMs: number,
+  staleMs = PRESENCE_TIMEOUT_MS,
+  live = false,
+): boolean {
   if (kind === "webhook") return true;
-  return (kind === "serve" || kind === "watch") && ageMs < staleMs;
+  return (kind === "serve" || kind === "watch") && (live || ageMs < staleMs);
+}
+
+// issue #97：presence 的新鲜度不变量没人维护。presence.updated_at 只由 status 帧和 markOffline 写，
+// 活着但安静的 WS 连接不回写；于是一个健康的 serve/watch 挂着、频道静默 61s，就被 wakeReachable 误判
+// 「supervisor 已死、叫不醒」，断线重连后又钉死在 offline。但 DO 权威地知道谁有活连接（getConnections）。
+// 读侧修正：序列化 presence 时，若某 name 当前有活 WS 连接，就打上 live=true——可达性/新鲜度判定视同新鲜。
+// 关键：**不改写 ts/last_seen**（那会连带把 host 租约变成「socket 在就永不过期」，废掉 failover——见 live
+// 字段注释），只加一个独立信号让 wakeReachable/在线判定短路。同时把陈旧的 offline 提升为 waiting（连着但还
+// 没自报 = 待命可唤醒，不是在忙，所以不碰 working/waiting/blocked/done 这些已自报的工作态，只解 offline 死锁）。
+// 无活连接的行原样返回（引用不变），离线/租约判定完全不变。
+export function applyLiveConnection(entry: PresenceEntry, hasLiveConnection: boolean): PresenceEntry {
+  if (!hasLiveConnection) return entry;
+  const next: PresenceEntry = { ...entry, live: true };
+  if (next.state === "offline") next.state = "waiting";
+  return next;
 }
 
 export function autoWakeReachable(
-  entry: Pick<PresenceEntry, "wake" | "last_seen" | "ts" | "residency">,
+  entry: Pick<PresenceEntry, "wake" | "last_seen" | "ts" | "residency" | "live">,
   now: number,
   staleMs = PRESENCE_TIMEOUT_MS,
 ): boolean {
   if (entry.residency === "human_driven") return false;
+  const live = entry.live === true;
   const seen = presenceLastSeen(entry);
-  if (seen === null) return false;
-  return wakeReachable(entry.wake?.kind, now - seen, staleMs);
+  if (seen === null && !live) return false;
+  const ageMs = seen === null ? 0 : now - seen;
+  return wakeReachable(entry.wake?.kind, ageMs, staleMs, live);
 }
 
 export function evaluateHostLease(

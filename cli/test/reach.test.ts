@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { PresenceEntry } from "@agentparty/shared";
+import { applyLiveConnection, type PresenceEntry } from "@agentparty/shared";
 import { formatReach, formatReachLine, reachOf } from "../src/reach";
 
 const NOW = 1_000_000_000;
@@ -48,6 +48,28 @@ describe("reachOf", () => {
 
   test("offline with no wake kind → offline", () => {
     expect(reachOf("x", [p({ name: "x", state: "offline", wake: { kind: "none" } })], NOW).reach).toBe("offline");
+  });
+});
+
+// issue #97：修复在服务端（DO presence 序列化给有活连接的 name 打 live=true，不改写 last_seen）。
+// reachOf 消费已带 live 的 presence：live 视同「在线」，与 web mentions（online.has＝participants＝活连接）
+// 同源同判。这里守住 CLI/web 一致性回归。applyLiveConnection 是那道服务端修正的纯函数形态。
+describe("consistency with server-side live-connection fix (#97)", () => {
+  test("有活连接的 serve agent：陈旧甚至 offline 的行经 applyLiveConnection 打 live 后 → reachOf 判 online", () => {
+    // 挂了 61s 没发帧的健康 serve：presence 陈旧、行内可能还是 offline（重连未自报）
+    const raw = p({ name: "bot", state: "offline", wake: { kind: "serve" }, residency: "supervised", last_seen: NOW - 61_000 });
+    // 未打 live（服务端不知道有活连接）时：CLI 会误判 offline —— 这正是 #97 里 CLI 与 web 打架的根源
+    expect(reachOf("bot", [raw], NOW).reach).toBe("offline");
+    // 打 live 后（服务端知道 bot 有活 WS 连接）：reachOf 判 online，与 web mentions（online.has）一致
+    const corrected = applyLiveConnection(raw, true);
+    expect(corrected.live).toBe(true);
+    expect(corrected.last_seen).toBe(NOW - 61_000); // 不改写 last_seen（host 租约不受污染）
+    expect(reachOf("bot", [corrected], NOW).reach).toBe("online");
+  });
+
+  test("无活连接：修正是恒等，陈旧 serve 仍判 offline（离线判定不被破坏）", () => {
+    const raw = p({ name: "bot", state: "offline", wake: { kind: "serve" }, residency: "supervised", last_seen: NOW - 61_000 });
+    expect(reachOf("bot", [applyLiveConnection(raw, false)], NOW).reach).toBe("offline");
   });
 });
 
