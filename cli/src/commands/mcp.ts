@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import pkg from "../../package.json" with { type: "json" };
-import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } from "../config";
+import { advanceCursorPastOwnMessage, loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } from "../config";
 import { jsonFrame } from "../json";
 import { resolveAuth, resolveAuthDetailed } from "../oidc-cli";
 import {
@@ -235,7 +235,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           mentions: normalizedMentions,
           reply_to: reply_to ?? null,
         });
-        saveCursor(resolved, seq);
+        advanceCursorPastOwnMessage(resolved, seq);
         return ok({ type: "send", channel: resolved, seq });
       } catch (e) {
         const code = handleRestError(e);
@@ -284,7 +284,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
             state as TaskState;
           task = await updateTask(authInfo.server, authInfo.token, resolved, task_id, { state: taskState });
         }
-        saveCursor(resolved, seq);
+        advanceCursorPastOwnMessage(resolved, seq);
         return ok({ type: "status", channel: resolved, seq, state, ...(task !== undefined ? { task } : {}) });
       } catch (e) {
         const code = handleRestError(e);

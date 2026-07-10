@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 
 export interface Config {
   server: string;
@@ -35,11 +35,22 @@ export interface ConfigWithSource {
   source: ConfigSourceInfo;
 }
 
+export interface ChannelCursor {
+  cursor: number;
+  rev_cursor?: number;
+}
+
 export interface WorkspaceState {
   channel: string;
   cursor: number;
   /** 修订游标：已见过的最大 rev_seq（hello.since_rev），与消息游标并列持久化 */
   rev_cursor?: number;
+  /**
+   * 分频道游标（#113）。旧版把游标只绑在 `channel` 上，于是 `serve --profile` 的所有
+   * 频道恒 since=0，每次重启把保留窗口里的历史 @ 逐条重放，反复拉起 runner。
+   * 顶层 channel/cursor/rev_cursor 保留作绑定频道的镜像，兼容旧读者与 statusline。
+   */
+  cursors?: Record<string, ChannelCursor>;
   /**
    * 面包屑：init 时若用了 AGENTPARTY_CONFIG，把该显式路径记进【cwd 基准】的 state（不受 env 影响）。
    * 回落用——Claude Code 的 Bash 不跨 turn 保留 export，被唤醒回复轮没了 env 就靠它找回绑定的 agent
@@ -230,10 +241,14 @@ export function readState(cwd: string = process.cwd()): WorkspaceState | null {
   }
 }
 
+// tmp + rename 原子替换（#113）：裸 writeFileSync 在崩溃/并发下会留下截断的 JSON，
+// readState 随即返回 null → 游标退回 0 → 整个保留窗口的 @ 被重放。范本同 statusline-cache.ts。
 export function writeState(st: WorkspaceState, cwd: string = process.cwd()): void {
   const p = statePath(cwd);
   mkdirSync(join(p, ".."), { recursive: true });
-  writeFileSync(p, JSON.stringify(st, null, 2) + "\n");
+  const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(st, null, 2) + "\n");
+  renameSync(tmp, p);
 }
 
 export function resolveChannel(explicit?: string, cwd?: string): string | null {
@@ -241,27 +256,58 @@ export function resolveChannel(explicit?: string, cwd?: string): string | null {
   return readState(cwd)?.channel ?? null;
 }
 
-// 游标只在频道与 workspace 绑定频道一致时读写
+// 游标按频道键持久化（#113）。读旧格式时回落到顶层字段（绑定频道），保证升级不丢游标。
+function channelCursor(st: WorkspaceState | null, channel: string): ChannelCursor {
+  if (!st) return { cursor: 0 };
+  const scoped = st.cursors?.[channel];
+  if (scoped) return scoped;
+  if (st.channel === channel) return { cursor: st.cursor, ...(st.rev_cursor === undefined ? {} : { rev_cursor: st.rev_cursor }) };
+  return { cursor: 0 };
+}
+
+// 写回：分频道表是权威；绑定频道同步镜像到顶层，供 statusline 等旧读者使用。
+function putChannelCursor(channel: string, next: ChannelCursor, cwd?: string): void {
+  const st = readState(cwd) ?? { channel, cursor: 0 };
+  const merged: WorkspaceState = {
+    ...st,
+    cursors: { ...(st.cursors ?? {}), [channel]: next },
+  };
+  if (st.channel === channel) {
+    merged.cursor = next.cursor;
+    if (next.rev_cursor !== undefined) merged.rev_cursor = next.rev_cursor;
+  }
+  writeState(merged, cwd);
+}
+
 export function loadCursor(channel: string, cwd?: string): number {
-  const st = readState(cwd);
-  return st && st.channel === channel ? st.cursor : 0;
+  return channelCursor(readState(cwd), channel).cursor;
 }
 
 export function saveCursor(channel: string, cursor: number, cwd?: string): void {
-  const st = readState(cwd);
-  if (!st || st.channel !== channel) return;
-  if (cursor <= st.cursor) return;
-  writeState({ ...st, cursor }, cwd);
+  const cur = channelCursor(readState(cwd), channel);
+  if (cursor <= cur.cursor) return; // 单调，不回退
+  putChannelCursor(channel, { ...cur, cursor }, cwd);
+}
+
+/**
+ * 自己发消息后推进游标——**仅在没有空洞时**（#113）。
+ * 旧实现无条件 saveCursor(channel, mySeq)，把发送前所有未消费的消息（含正 @ 我的新 mention）
+ * 一起吞掉：不打印、不唤醒、不补拉。watch 侧本来就有 fromSelf 过滤（watch.ts），
+ * 所以「跳过自己的回声」根本不需要动游标。
+ * 这里只处理「我已经读到最新、紧接着自己发了一条」的情形，保住 statusline 的 unread=0。
+ */
+export function advanceCursorPastOwnMessage(channel: string, seq: number, cwd?: string): void {
+  const cur = channelCursor(readState(cwd), channel);
+  if (cur.cursor !== seq - 1) return; // 有空洞：那些是别人的消息，绝不跳过
+  putChannelCursor(channel, { ...cur, cursor: seq }, cwd);
 }
 
 export function loadRevCursor(channel: string, cwd?: string): number {
-  const st = readState(cwd);
-  return st && st.channel === channel ? (st.rev_cursor ?? 0) : 0;
+  return channelCursor(readState(cwd), channel).rev_cursor ?? 0;
 }
 
 export function saveRevCursor(channel: string, revCursor: number, cwd?: string): void {
-  const st = readState(cwd);
-  if (!st || st.channel !== channel) return;
-  if (revCursor <= (st.rev_cursor ?? 0)) return;
-  writeState({ ...st, rev_cursor: revCursor }, cwd);
+  const cur = channelCursor(readState(cwd), channel);
+  if (revCursor <= (cur.rev_cursor ?? 0)) return;
+  putChannelCursor(channel, { ...cur, rev_cursor: revCursor }, cwd);
 }

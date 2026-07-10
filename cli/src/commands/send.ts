@@ -1,6 +1,6 @@
 // party send — rest 一次性发消息，成功后推进游标
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError, type Parsed } from "../args";
-import { resolveChannel, saveCursor, type Config } from "../config";
+import { advanceCursorPastOwnMessage, resolveChannel, type Config } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, fetchPresence, handleRestError, postMessage } from "../rest";
 import { formatReachLine, reachOf } from "../reach";
@@ -114,7 +114,7 @@ export async function doSend(cfg: Config, input: SendInput): Promise<number | { 
       mentions: input.mentions,
       reply_to: input.replyTo,
     });
-    saveCursor(input.channel, seq);
+    advanceCursorPastOwnMessage(input.channel, seq);
     writeStatuslineCache({
       ...localStatuslineBase(input.channel),
       unread: unreadFromCursor(seq, input.channel),

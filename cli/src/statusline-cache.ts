@@ -1,7 +1,7 @@
 import type { MsgFrame } from "@agentparty/shared";
 import { mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { agentpartyHome, readConfig, readState, workspaceId, type CachedIdentity } from "./config";
+import { agentpartyHome, loadCursor, readConfig, readState, type CachedIdentity, workspaceId } from "./config";
 import type { Identity } from "./rest";
 
 export interface StatuslineIdentity {
@@ -108,8 +108,8 @@ export function lastMessageFromFrame(frame: MsgFrame): StatuslineLastMessage {
 
 export function unreadFromCursor(latestSeq: number | undefined | null, channel?: string | null): number | undefined {
   if (typeof latestSeq !== "number" || latestSeq <= 0 || !channel) return undefined;
-  const state = readState();
-  const cursor = state?.channel === channel ? state.cursor : 0;
+  // #113：游标已按频道键持久化，不再只对绑定频道有效
+  const cursor = loadCursor(channel);
   return Math.max(0, latestSeq - cursor);
 }
 

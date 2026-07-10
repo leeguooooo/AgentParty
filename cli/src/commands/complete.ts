@@ -1,6 +1,6 @@
 // party complete — publish a final synthesis as a first-class message artifact.
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
-import { resolveChannel, saveCursor } from "../config";
+import { advanceCursorPastOwnMessage, resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
 import { handleRestError, postMessage } from "../rest";
 import { isName, isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
@@ -131,7 +131,7 @@ export async function run(argv: string[]): Promise<number> {
       },
       ...(replaces === undefined ? {} : { replaces }),
     });
-    saveCursor(channel, seq);
+    advanceCursorPastOwnMessage(channel, seq);
     if (completion_review?.state === "pending_review") {
       console.log(`completion seq=${seq} pending_review`);
       console.log(`next: party review approve ${seq} --channel ${channel}  # or: party review reject ${seq} -m "reason" --channel ${channel}`);
