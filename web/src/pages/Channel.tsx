@@ -1059,17 +1059,20 @@ function HostBoardPanel({ board }: { board: HostBoard }) {
   );
 }
 
-function TaskLedgerPanel({
+export function TaskLedgerPanel({
   tasks,
   loading,
   error,
   canWrite,
   busyTaskId,
   actionError,
+  creating,
+  createError,
   onRefresh,
   onSetState,
   onAssign,
   onReview,
+  onCreateTask,
 }: {
   tasks: TaskRecord[];
   loading: boolean;
@@ -1077,14 +1080,21 @@ function TaskLedgerPanel({
   canWrite: boolean;
   busyTaskId: number | null;
   actionError: string | null;
+  creating: boolean;
+  createError: string | null;
   onRefresh: () => void;
   onSetState: (id: number, state: TaskState) => void;
   onAssign: (id: number, name: string, kind: TaskAssigneeKind) => void;
   onReview: (task: TaskRecord, action: "approve" | "reject") => void;
+  onCreateTask: (input: { title: string; desc: string }) => Promise<boolean>;
 }) {
+  const t = useT();
   const [assignDrafts, setAssignDrafts] = useState<Record<number, string>>({});
   const [assignKinds, setAssignKinds] = useState<Record<number, TaskAssigneeKind>>({});
   const [dragTaskId, setDragTaskId] = useState<number | null>(null);
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [newDesc, setNewDesc] = useState("");
   const counts = tasks.reduce<Record<string, number>>((acc, task) => {
     acc[task.state] = (acc[task.state] ?? 0) + 1;
     return acc;
@@ -1092,6 +1102,18 @@ function TaskLedgerPanel({
   const tasksByState = new Map<TaskState, TaskRecord[]>(TASK_BOARD_STATES.map((state) => [state, []]));
   for (const task of tasks) tasksByState.get(task.state)?.push(task);
   const disabled = loading || !canWrite;
+  const stateLabel = (state: TaskState) => t(`Channel.tasks.state.${state}`);
+  const submitNewTask = (event: { preventDefault: () => void }) => {
+    event.preventDefault();
+    const title = newTitle.trim();
+    if (title === "" || creating) return;
+    void onCreateTask({ title, desc: newDesc.trim() }).then((ok) => {
+      if (!ok) return;
+      setNewTitle("");
+      setNewDesc("");
+      setComposerOpen(false);
+    });
+  };
   const renderTask = (task: TaskRecord) => {
     const taskBusy = busyTaskId === task.id;
     const assignDraft = assignDrafts[task.id] ?? task.assignee?.name ?? "";
@@ -1112,33 +1134,33 @@ function TaskLedgerPanel({
         <div className="task-card-main">
           <span className="t-mono task-id">#{task.id}</span>
           <strong>{task.title}</strong>
-          <span className={`t-mono task-state task-state--${task.state}`}>{task.state}</span>
+          <span className={`t-mono task-state task-state--${task.state}`}>{stateLabel(task.state)}</span>
         </div>
-        {task.desc !== null && <p>{task.desc}</p>}
+        {task.desc !== null && <p className="task-card-desc">{task.desc}</p>}
         <div className="task-card-meta">
           <span className="t-mono">P{task.priority}</span>
           {task.assignee !== null && <span className="t-mono">@{task.assignee.name}</span>}
-          {task.parent_id !== null && <span className="t-mono">parent #{task.parent_id}</span>}
-          {task.anchor_seqs.map((seq) => <span key={seq} className="t-mono">msg #{seq}</span>)}
+          {task.parent_id !== null && <span className="t-mono">{t("Channel.tasks.meta.parent", { id: task.parent_id })}</span>}
+          {task.anchor_seqs.map((seq) => <span key={seq} className="t-mono">{t("Channel.tasks.meta.msg", { seq })}</span>)}
           {task.labels.map((label) => <span key={label} className="t-mono task-label">{label}</span>)}
         </div>
         <div className="task-card-actions">
           <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "in_progress"} onClick={() => onSetState(task.id, "in_progress")}>
-            Claim
+            {t("Channel.tasks.action.claim")}
           </button>
           <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "blocked"} onClick={() => onSetState(task.id, "blocked")}>
-            Block
+            {t("Channel.tasks.action.block")}
           </button>
           <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "done"} onClick={() => onSetState(task.id, "done")}>
-            Done
+            {t("Channel.tasks.action.done")}
           </button>
           {reviewSeq !== null && (
             <>
               <button className="task-action-btn task-action-btn--review" type="button" disabled={disabled || taskBusy} onClick={() => onReview(task, "approve")}>
-                Approve
+                {t("Channel.tasks.action.approve")}
               </button>
               <button className="task-action-btn" type="button" disabled={disabled || taskBusy} onClick={() => onReview(task, "reject")}>
-                Reject
+                {t("Channel.tasks.action.reject")}
               </button>
             </>
           )}
@@ -1150,24 +1172,24 @@ function TaskLedgerPanel({
             }}
           >
             <input
-              aria-label={`Assign task ${task.id}`}
+              aria-label={t("Channel.tasks.assignAria", { id: task.id })}
               disabled={disabled || taskBusy}
               value={assignDraft}
-              placeholder="@agent"
+              placeholder={t("Channel.tasks.assignPlaceholder")}
               onChange={(event) => setAssignDrafts((current) => ({ ...current, [task.id]: event.currentTarget.value }))}
             />
             <select
-              aria-label={`Assignee kind for task ${task.id}`}
+              aria-label={t("Channel.tasks.kindAria", { id: task.id })}
               disabled={disabled || taskBusy}
               value={assignKind}
               onChange={(event) => setAssignKinds((current) => ({ ...current, [task.id]: event.currentTarget.value as TaskAssigneeKind }))}
             >
-              <option value="agent">agent</option>
-              <option value="human">human</option>
-              <option value="squad">squad</option>
+              <option value="agent">{t("Channel.tasks.kind.agent")}</option>
+              <option value="human">{t("Channel.tasks.kind.human")}</option>
+              <option value="squad">{t("Channel.tasks.kind.squad")}</option>
             </select>
             <button className="task-action-btn" type="submit" disabled={disabled || taskBusy || assignDraft.trim() === ""}>
-              Assign
+              {t("Channel.tasks.action.assign")}
             </button>
           </form>
         </div>
@@ -1175,36 +1197,83 @@ function TaskLedgerPanel({
     );
   };
   return (
-    <section className="task-ledger-panel" aria-label="channel tasks">
+    <section className="task-ledger-panel" aria-label={t("Channel.tasks.panelAria")}>
       <header className="task-ledger-head">
-        <div>
-          <h2>Tasks</h2>
-          <p className="t-mono">{tasks.length} total</p>
+        <p className="t-mono task-ledger-total">{t("Channel.tasks.total", { count: tasks.length })}</p>
+        <div className="task-ledger-head-actions">
+          {canWrite && (
+            <button
+              className="d-btn task-new-btn"
+              type="button"
+              aria-label={t("Channel.tasks.new")}
+              aria-expanded={composerOpen}
+              disabled={loading}
+              onClick={() => setComposerOpen((open) => !open)}
+            >
+              + {t("Channel.tasks.new")}
+            </button>
+          )}
+          <button className="d-btn" type="button" disabled={loading} onClick={onRefresh}>
+            {loading ? t("Channel.tasks.refreshing") : t("Channel.tasks.refresh")}
+          </button>
         </div>
-        <button className="d-btn" type="button" disabled={loading} onClick={onRefresh}>
-          {loading ? "Refreshing" : "Refresh"}
-        </button>
       </header>
+      {composerOpen && canWrite && (
+        <form className="task-new-form" onSubmit={submitNewTask}>
+          <input
+            className="task-new-title"
+            aria-label={t("Channel.tasks.newTitleAria")}
+            placeholder={t("Channel.tasks.newTitlePlaceholder")}
+            value={newTitle}
+            disabled={creating}
+            autoFocus
+            onChange={(event) => setNewTitle(event.currentTarget.value)}
+          />
+          <textarea
+            className="task-new-desc"
+            aria-label={t("Channel.tasks.newDescAria")}
+            placeholder={t("Channel.tasks.newDescPlaceholder")}
+            value={newDesc}
+            disabled={creating}
+            rows={2}
+            onChange={(event) => setNewDesc(event.currentTarget.value)}
+          />
+          {createError !== null && <p className="banner banner--red">{createError}</p>}
+          <div className="task-new-actions">
+            <button className="task-action-btn" type="submit" disabled={creating || newTitle.trim() === ""}>
+              {creating ? t("Channel.tasks.newSubmitting") : t("Channel.tasks.newSubmit")}
+            </button>
+            <button
+              className="task-action-btn"
+              type="button"
+              disabled={creating}
+              onClick={() => { setComposerOpen(false); setNewTitle(""); setNewDesc(""); }}
+            >
+              {t("Channel.tasks.newCancel")}
+            </button>
+          </div>
+        </form>
+      )}
       {Object.keys(counts).length > 0 && (
         <div className="task-ledger-counts">
           {Object.entries(counts).map(([state, count]) => (
-            <span key={state} className={`t-mono task-state task-state--${state}`}>{state} {count}</span>
+            <span key={state} className={`t-mono task-state task-state--${state}`}>{stateLabel(state as TaskState)} {count}</span>
           ))}
         </div>
       )}
       {error !== null && <p className="banner banner--red">{error}</p>}
       {actionError !== null && <p className="banner banner--red">{actionError}</p>}
       {tasks.length === 0 && error === null ? (
-        <p className="charter-empty">No tasks yet. Use <code>party task create</code> to add one.</p>
+        <p className="charter-empty">{t("Channel.tasks.empty")}</p>
       ) : (
-        <div className="task-board" role="list" aria-label="task board columns">
+        <div className="task-board" role="list" aria-label={t("Channel.tasks.boardAria")}>
           {TASK_BOARD_STATES.map((state) => {
             const columnTasks = tasksByState.get(state) ?? [];
             return (
               <section
                 key={state}
                 className={"task-column" + (dragTaskId !== null ? " task-column--drop" : "")}
-                aria-label={`${state} tasks`}
+                aria-label={t("Channel.tasks.columnAria", { state: stateLabel(state) })}
                 onDragOver={(event) => {
                   if (dragTaskId !== null && !disabled) event.preventDefault();
                 }}
@@ -1220,11 +1289,11 @@ function TaskLedgerPanel({
                 }}
               >
                 <header className="task-column-head">
-                  <span className={`t-mono task-state task-state--${state}`}>{state}</span>
+                  <span className={`t-mono task-state task-state--${state}`}>{stateLabel(state)}</span>
                   <span className="t-mono task-column-count">{columnTasks.length}</span>
                 </header>
                 {columnTasks.length === 0 ? (
-                  <p className="t-mono task-column-empty">empty</p>
+                  <p className="t-mono task-column-empty">{t("Channel.tasks.columnEmpty")}</p>
                 ) : (
                   <ol className="task-list">{columnTasks.map(renderTask)}</ol>
                 )}
@@ -1387,6 +1456,8 @@ export function ChannelPage({
   const [tasksError, setTasksError] = useState<string | null>(null);
   const [taskActionBusyId, setTaskActionBusyId] = useState<number | null>(null);
   const [taskActionError, setTaskActionError] = useState<string | null>(null);
+  const [taskCreating, setTaskCreating] = useState(false);
+  const [taskCreateError, setTaskCreateError] = useState<string | null>(null);
   const [roleDrafts, setRoleDrafts] = useState<Record<string, RoleDraft>>({});
   const [newRoleName, setNewRoleName] = useState("");
   const [newRoleDraft, setNewRoleDraft] = useState<RoleDraft>({ role: "worker", responsibility: "" });
@@ -1513,11 +1584,11 @@ export function ChannelPage({
       })
       .catch((err: unknown) => {
         if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (err instanceof ForbiddenError) setTasksError("tasks are not visible for this channel");
-        else setTasksError("tasks failed to load");
+        else if (err instanceof ForbiddenError) setTasksError(t("Channel.tasks.error.notVisible"));
+        else setTasksError(t("Channel.tasks.error.loadFailed"));
       })
       .finally(() => setTasksLoading(false));
-  }, [slug, token]);
+  }, [slug, token, t]);
 
   const loadTaskSummary = useCallback(() => {
     return fetchTaskSummary(token, slug)
@@ -1538,12 +1609,12 @@ export function ChannelPage({
       })
       .catch((err: unknown) => {
         if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (err instanceof ForbiddenError) setTaskActionError("task update is not allowed for this token");
-        else if (err instanceof ValidationError) setTaskActionError("task update was rejected");
-        else setTaskActionError("task update failed");
+        else if (err instanceof ForbiddenError) setTaskActionError(t("Channel.tasks.error.updateForbidden"));
+        else if (err instanceof ValidationError) setTaskActionError(t("Channel.tasks.error.updateRejected"));
+        else setTaskActionError(t("Channel.tasks.error.updateFailed"));
       })
       .finally(() => setTaskActionBusyId(null));
-  }, [loadTaskSummary, slug, taskActionBusyId, token]);
+  }, [loadTaskSummary, slug, taskActionBusyId, token, t]);
 
   const setTaskState = useCallback((id: number, state: TaskState) => {
     applyTaskUpdate(id, { state });
@@ -1552,20 +1623,46 @@ export function ChannelPage({
   const assignTask = useCallback((id: number, rawName: string, kind: TaskAssigneeKind) => {
     const name = rawName.trim().replace(/^@/, "");
     if (name === "") {
-      setTaskActionError("assignee is required");
+      setTaskActionError(t("Channel.tasks.error.assigneeRequired"));
       return;
     }
     applyTaskUpdate(id, { state: "assigned", assignee: { name, kind } });
-  }, [applyTaskUpdate]);
+  }, [applyTaskUpdate, t]);
+
+  // 面板内「新建任务」：复用后端既有 POST /api/channels/:slug/tasks（与 createTaskFromMessage 同一端点，
+  // 不新造接口）。返回 boolean 让 composer 知道成功后才清空并收起。
+  const createTaskDraft = useCallback((input: { title: string; desc: string }): Promise<boolean> => {
+    if (taskCreating) return Promise.resolve(false);
+    setTaskCreating(true);
+    setTaskCreateError(null);
+    return createTask(token, slug, {
+      title: input.title,
+      ...(input.desc === "" ? {} : { desc: input.desc }),
+    })
+      .then((task) => {
+        setTasks((current) => current.some((item) => item.id === task.id) ? current : [task, ...current]);
+        void loadTaskSummary();
+        setTasksError(null);
+        return true;
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setTaskCreateError(t("Channel.tasks.error.createForbidden"));
+        else if (err instanceof ValidationError) setTaskCreateError(t("Channel.tasks.error.createRejected"));
+        else setTaskCreateError(t("Channel.tasks.error.createFailed"));
+        return false;
+      })
+      .finally(() => setTaskCreating(false));
+  }, [loadTaskSummary, slug, taskCreating, token, t]);
 
   const reviewTask = useCallback((task: TaskRecord, action: "approve" | "reject") => {
     if (taskActionBusyId !== null) return;
     const seq = taskCompletionSeq(task);
     if (seq === null) {
-      setTaskActionError("task has no reviewable completion");
+      setTaskActionError(t("Channel.tasks.error.noReviewable"));
       return;
     }
-    const reason = action === "reject" ? window.prompt("Reject reason")?.trim() : undefined;
+    const reason = action === "reject" ? window.prompt(t("Channel.tasks.rejectPrompt"))?.trim() : undefined;
     if (action === "reject" && !reason) return;
     setTaskActionBusyId(task.id);
     setTaskActionError(null);
@@ -1578,12 +1675,12 @@ export function ChannelPage({
       .then(() => loadTaskLedger())
       .catch((err: unknown) => {
         if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (err instanceof ForbiddenError) setTaskActionError("review is not allowed for this token");
-        else if (err instanceof ValidationError) setTaskActionError("review was rejected");
-        else setTaskActionError("review failed");
+        else if (err instanceof ForbiddenError) setTaskActionError(t("Channel.tasks.error.reviewForbidden"));
+        else if (err instanceof ValidationError) setTaskActionError(t("Channel.tasks.error.reviewRejected"));
+        else setTaskActionError(t("Channel.tasks.error.reviewFailed"));
       })
       .finally(() => setTaskActionBusyId(null));
-  }, [loadTaskLedger, slug, taskActionBusyId, token]);
+  }, [loadTaskLedger, slug, taskActionBusyId, token, t]);
 
   useEffect(() => {
     void loadTaskSummary();
@@ -1608,12 +1705,12 @@ export function ChannelPage({
       })
       .catch((err: unknown) => {
         if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (err instanceof ForbiddenError) setMessageActionError({ seq, message: "task creation is not allowed for this token" });
-        else if (err instanceof ValidationError) setMessageActionError({ seq, message: "task creation was rejected" });
-        else setMessageActionError({ seq, message: "task creation failed" });
+        else if (err instanceof ForbiddenError) setMessageActionError({ seq, message: t("Channel.tasks.error.createForbidden") });
+        else if (err instanceof ValidationError) setMessageActionError({ seq, message: t("Channel.tasks.error.createRejected") });
+        else setMessageActionError({ seq, message: t("Channel.tasks.error.createFailed") });
       })
       .finally(() => setMessageActionBusySeq(null));
-  }, [loadTaskSummary, messageActionBusySeq, slug, state.messages, token]);
+  }, [loadTaskSummary, messageActionBusySeq, slug, state.messages, token, t]);
 
   const removeParticipant = useCallback((name: string) => {
     if (removingName !== null) return;
@@ -2601,15 +2698,15 @@ export function ChannelPage({
           </button>
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("tasks")}>
             <span className="ap-sprite ap-sprite--tasks" aria-hidden="true" />
-            <span>Tasks</span>
+            <span>{t("Channel.tasks.title")}</span>
             <span className="t-mono chan-tool-badge">{taskOpenCount}</span>
           </button>
           {(taskOpenCount > 0 || taskReviewCount > 0 || taskBlockedCount > 0 || taskMineCount > 0) && (
-            <div className="task-strip-summary" aria-label="task summary">
-              <span className="t-mono chan-tool-badge">open {taskOpenCount}</span>
-              {taskReviewCount > 0 && <span className="t-mono chan-tool-badge chan-tool-badge--hot">review {taskReviewCount}</span>}
-              {taskBlockedCount > 0 && <span className="t-mono chan-tool-badge task-strip-summary--blocked">blocked {taskBlockedCount}</span>}
-              {taskMineCount > 0 && <span className="t-mono chan-tool-badge">mine {taskMineCount}</span>}
+            <div className="task-strip-summary" aria-label={t("Channel.tasks.summaryAria")}>
+              <span className="t-mono chan-tool-badge">{t("Channel.tasks.summary.open", { count: taskOpenCount })}</span>
+              {taskReviewCount > 0 && <span className="t-mono chan-tool-badge chan-tool-badge--hot">{t("Channel.tasks.summary.review", { count: taskReviewCount })}</span>}
+              {taskBlockedCount > 0 && <span className="t-mono chan-tool-badge task-strip-summary--blocked">{t("Channel.tasks.summary.blocked", { count: taskBlockedCount })}</span>}
+              {taskMineCount > 0 && <span className="t-mono chan-tool-badge">{t("Channel.tasks.summary.mine", { count: taskMineCount })}</span>}
             </div>
           )}
           <button type="button" className={"d-btn chan-tool-btn" + (q !== "" ? " is-active" : "")} onClick={() => openPanel("search")}>
@@ -2693,14 +2790,14 @@ export function ChannelPage({
             activePanel === "charter" ? t("Channel.tools.charter") :
             activePanel === "roles" ? t("Channel.tools.roles") :
             activePanel === "coordination" ? t("Channel.tools.coordination") :
-            activePanel === "tasks" ? "Tasks" :
+            activePanel === "tasks" ? t("Channel.tasks.title") :
             activePanel === "settings" ? t("Channel.tools.settings") :
             t("Channel.tools.search")
           }
           subtitle={
             activePanel === "charter" && charter !== null ? `rev ${charter.charter_rev}` :
             activePanel === "roles" ? t("Channel.roles.count", { count: String(structuredRoleCount) }) :
-            activePanel === "tasks" ? `${taskOpenCount} open · ${taskReviewCount} review · ${taskBlockedCount} blocked` :
+            activePanel === "tasks" ? t("Channel.tasks.subtitle", { open: taskOpenCount, review: taskReviewCount, blocked: taskBlockedCount }) :
             activePanel === "settings" ? (localLoopGuardEnabled ? t("Channel.settings.enabled") : t("Channel.settings.unlimited")) :
             activePanel === "search" && q !== "" ? t("Channel.search.hits", { count: searchHits.length }) :
             undefined
@@ -2754,10 +2851,13 @@ export function ChannelPage({
               canWrite={canWrite}
               busyTaskId={taskActionBusyId}
               actionError={taskActionError}
+              creating={taskCreating}
+              createError={taskCreateError}
               onRefresh={loadTaskLedger}
               onSetState={setTaskState}
               onAssign={assignTask}
               onReview={reviewTask}
+              onCreateTask={createTaskDraft}
             />
           )}
           {activePanel === "settings" && (
