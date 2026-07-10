@@ -28,17 +28,7 @@ import {
   unreadFromCursor,
   writeStatuslineCache,
 } from "../statusline-cache";
-import {
-  fetchChannelCharter,
-  ensureProjectAgentChannelRuntime,
-  listProjectAgentInvites,
-  mintProjectAgentRuntimeToken,
-  postMessage,
-  type ChannelCharter,
-  type ChannelProjectAgentInvite,
-  type ProjectAgentChannelRuntime,
-  type ProjectAgentProfile,
-} from "../rest";
+import { ensureProjectAgentChannelRuntime, fetchChannelCharter, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, type ChannelCharter, type ChannelProjectAgentInvite, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
 import { buildContext } from "./status";
 
@@ -1000,15 +990,44 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
     out(`attached project agent ${profile.owner_account}/${profile.handle} to #${channel}`);
   };
 
+  // 控制面必须比数据面更耐操（#115）：一次 DNS 抖动 / 5xx / 单频道 clone 失败，都不该
+  // 拖死整个 daemon 和它已经挂上的其它频道。数据面的 ws 早就有指数退避，这里补齐。
+  const basePollMs = opts.pollIntervalMs ?? 5000;
+  const maxBackoffMs = 5 * 60_000;
+  let consecutiveFailures = 0;
+
   for (;;) {
-    const invites = await listInvites(opts.server, runtime.token, opts.handle);
-    for (const invite of invites) await startInvite(invite);
+    try {
+      const invites = await listInvites(opts.server, runtime.token, opts.handle);
+      // 单个 invite 起不来（clone 失败、token 铸不出）不连坐其它频道
+      for (const invite of invites) {
+        try {
+          await startInvite(invite);
+        } catch (err) {
+          out(`failed to attach #${invite.channel_slug}: ${errText(err)} (will retry next poll)`);
+        }
+      }
+      consecutiveFailures = 0;
+    } catch (err) {
+      // 401/403 是终局：token 被撤或无权，重试只会刷日志（同 watch 的 EXIT_AUTH 语义）
+      if (err instanceof RestError && (err.status === 401 || err.status === 403)) throw err;
+      consecutiveFailures += 1;
+      const backoff = Math.min(basePollMs * 2 ** (consecutiveFailures - 1), maxBackoffMs);
+      out(`invite poll failed (${consecutiveFailures}x): ${errText(err)}; retrying in ${Math.round(backoff / 1000)}s`);
+      if (opts.once) throw err;
+      await sleep(backoff);
+      continue;
+    }
     if (opts.once) {
       await Promise.all([...running.values()]);
       return 0;
     }
-    await sleep(opts.pollIntervalMs ?? 5000);
+    await sleep(basePollMs);
   }
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 export async function runServe(o: ServeOptions): Promise<number> {

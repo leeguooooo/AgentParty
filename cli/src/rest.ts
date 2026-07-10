@@ -184,8 +184,14 @@ function extractError(status: number, body: unknown, raw: string): RestError {
   return new RestError(status, code, message);
 }
 
+// 所有 REST 调用的默认超时（#116）。没有它，一次 TCP 半开就让 serve 永久挂在 await 上：
+// ping 还在跑、presence 显示在线，实际不再处理任何 @——最坏的一种失败（假在线）。
+// 调用方可用 init.signal 覆盖（例如 watch 的长轮询）。
+const REQ_TIMEOUT_MS = 30_000;
+
 async function req(server: string, path: string, init: RequestInit = {}): Promise<unknown> {
-  const res = await fetch(server.replace(/\/+$/, "") + path, init);
+  const signal = init.signal ?? AbortSignal.timeout(REQ_TIMEOUT_MS);
+  const res = await fetch(server.replace(/\/+$/, "") + path, { ...init, signal });
   const raw = await res.text();
   let body: unknown = null;
   try {
