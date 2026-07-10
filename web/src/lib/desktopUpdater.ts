@@ -1,8 +1,10 @@
 export const LAST_SUCCESSFUL_CHECK_KEY = "ap_desktop_updater_last_success";
+export const LAST_UPDATER_DIAGNOSTIC_KEY = "ap_desktop_updater_diagnostic";
 
 const AUTO_CHECK_DELAY_MS = 8_000;
 const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const CHECK_TIMEOUT_MS = 30_000;
+const VERSION_LOOKUP_TIMEOUT_MS = 2_000;
 const MAX_RELEASE_NOTES_LENGTH = 2_000;
 
 export type UpdaterPhase =
@@ -43,6 +45,7 @@ export type DownloadEvent =
   | { type: "finished" };
 
 export interface DesktopUpdaterAdapter {
+  version?(): Promise<string | null>;
   check(): Promise<UpdateCandidate | null>;
   install(onEvent: (event: DownloadEvent) => void): Promise<void>;
   relaunch(): Promise<void>;
@@ -180,9 +183,25 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
 
   const patch = (next: Partial<DesktopUpdaterState>) => publish({ ...state, ...next });
 
-  const reportFailure = (stage: UpdaterFailureStage, error: unknown) => {
+  const persistDiagnostic = (diagnostic: Record<string, string | number | null>) => {
+    try {
+      options.storage.setItem(LAST_UPDATER_DIAGNOSTIC_KEY, JSON.stringify(diagnostic));
+    } catch {
+      // Updater behavior must not depend on diagnostics storage availability.
+    }
+  };
+
+  const reportFailure = (
+    stage: UpdaterFailureStage,
+    error: unknown,
+    source: "auto" | "manual" | null = null,
+    appVersion: string | null = null,
+  ) => {
+    if (disposed) return;
+    const category = classifyUpdaterError(error, stage);
     console.error(`[desktop-updater] ${stage} failed`, error);
-    patch({ phase: "error", failureStage: stage, error: classifyUpdaterError(error, stage) });
+    persistDiagnostic({ status: "failure", source, stage, category, timestamp: options.clock.now(), appVersion });
+    patch({ phase: "error", failureStage: stage, error: category });
   };
 
   const closeAdapter = async () => {
@@ -212,7 +231,7 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
       try {
         await options.adapter.relaunch();
       } catch (error) {
-        reportFailure("relaunch", error);
+        reportFailure("relaunch", error, null, state.currentVersion);
       }
     })();
     operationPromise = active;
@@ -269,7 +288,7 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
           });
         });
       } catch (error) {
-        reportFailure("install", error);
+        reportFailure("install", error, null, state.currentVersion);
         return;
       }
       if (disposed) return;
@@ -281,7 +300,7 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
       try {
         await options.adapter.relaunch();
       } catch (error) {
-        reportFailure("relaunch", error);
+        reportFailure("relaunch", error, null, state.currentVersion);
       }
     })();
     operationPromise = active;
@@ -331,18 +350,38 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
         error: null,
         failureStage: null,
       });
+      persistDiagnostic({
+        status: "attempt",
+        source,
+        stage: "check",
+        category: null,
+        timestamp: options.clock.now(),
+        appVersion: null,
+      });
 
       const active = (async () => {
+        const timedCheck = withTimeout(options.adapter.check(), timer, CHECK_TIMEOUT_MS);
+        cancelCheckTimeout = timedCheck.cancel;
+        const appVersionPromise = options.adapter.version === undefined
+          ? Promise.resolve(null)
+          : withTimeout(options.adapter.version(), timer, VERSION_LOOKUP_TIMEOUT_MS).promise.catch(() => null);
         try {
-          const timedCheck = withTimeout(options.adapter.check(), timer, CHECK_TIMEOUT_MS);
-          cancelCheckTimeout = timedCheck.cancel;
           const update = await timedCheck.promise;
+          const appVersion = update?.currentVersion ?? await appVersionPromise;
           if (disposed) return;
           try {
             options.storage.setItem(LAST_SUCCESSFUL_CHECK_KEY, String(options.clock.now()));
           } catch {
             // A successful native check remains successful when persistence is unavailable.
           }
+          persistDiagnostic({
+            status: "success",
+            source,
+            stage: "check",
+            category: null,
+            timestamp: options.clock.now(),
+            appVersion,
+          });
           if (update === null) {
             patch({ phase: "up-to-date" });
             return;
@@ -354,7 +393,7 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
             notes: boundReleaseNotes(update.notes),
           });
         } catch (error) {
-          reportFailure("check", error);
+          reportFailure("check", error, source, await appVersionPromise);
         } finally {
           cancelCheckTimeout = null;
         }
@@ -426,6 +465,7 @@ type TauriDownloadEvent =
 const nativeImport: Importer = (specifier) => {
   if (specifier === "@tauri-apps/plugin-updater") return import("@tauri-apps/plugin-updater");
   if (specifier === "@tauri-apps/plugin-process") return import("@tauri-apps/plugin-process");
+  if (specifier === "@tauri-apps/api/app") return import("@tauri-apps/api/app");
   return Promise.reject(new Error(`Unsupported Tauri plugin: ${specifier}`));
 };
 
@@ -458,6 +498,11 @@ export async function createTauriUpdaterAdapter(options: TauriUpdaterOptions = {
   };
 
   return {
+    async version() {
+      const appModule = (await importer("@tauri-apps/api/app")) as { getVersion(): Promise<string> };
+      return appModule.getVersion();
+    },
+
     check() {
       const generation = ++checkGeneration;
       const operationBarrier = lifecycleQueue;
