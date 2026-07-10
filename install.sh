@@ -154,7 +154,15 @@ main() {
   base="${MIRROR%/}/v${VERSION}"
   asset="${BIN_NAME}-${TARGET}.tar.gz"
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  tmp_out=""
+  cleanup() {
+    [ -z "$tmp_out" ] || rm -f "$tmp_out" || true
+    rm -rf "$tmp" || true
+  }
+  trap cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   fetch "${base}/${asset}"          "${tmp}/${asset}"
   fetch "${base}/${asset}.sha256"   "${tmp}/${asset}.sha256"
@@ -195,8 +203,11 @@ main() {
   [ -f "${tmp}/${BIN_NAME}" ] || die "archive missing ${BIN_NAME} binary"
 
   mkdir -p "$INSTALL_DIR"
-  install -m 0755 "${tmp}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}" 2>/dev/null \
-    || { cp "${tmp}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}" && chmod +x "${INSTALL_DIR}/${BIN_NAME}"; }
+  tmp_out="$(mktemp "${INSTALL_DIR}/.${BIN_NAME}.XXXXXX")"
+  install -m 0755 "${tmp}/${BIN_NAME}" "$tmp_out" 2>/dev/null \
+    || { cp "${tmp}/${BIN_NAME}" "$tmp_out" && chmod 0755 "$tmp_out"; }
+  mv -f "$tmp_out" "${INSTALL_DIR}/${BIN_NAME}"
+  tmp_out=""
 
   log "installed ${INSTALL_DIR}/${BIN_NAME} (v${VERSION})"
 
