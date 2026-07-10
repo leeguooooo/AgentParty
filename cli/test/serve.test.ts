@@ -103,10 +103,11 @@ describe("runServe", () => {
 
   test("reports a non-zero runner exit instead of silently swallowing it", async () => {
     const s = closeAfterOneMention();
-    const o = opts({ server: s.url, cmd: "exit 7" });
+    // 每次失败都打印，并带上「第几次/共几次」——有界重试的进度必须可见（#198）
+    const o = opts({ server: s.url, cmd: "exit 7", maxWakeAttempts: 1, wakeRetryDelayMs: 0, post: async () => ({ seq: 1 }) });
 
     expect(await runServe(o)).toBe(EXIT_ARCHIVED);
-    expect(o.lines.some((line) => line.includes("命令失败: command exited 7"))).toBe(true);
+    expect(o.lines.some((line) => line.includes("命令失败 (1/1): command exited 7"))).toBe(true);
   });
 
   test("advertises wake capability once on attach, before handling mentions", async () => {
@@ -358,7 +359,7 @@ describe("builtin runner", () => {
     expect((finalPost.body as { body: string }).body).toBe(bytes);
   });
 
-  test("[attach] with a relative path is refused and posts a blocked status (issue #41)", async () => {
+  test("[attach] with a relative path is refused, throws, and posts no partial body (issue #41)", async () => {
     const { posts, post } = postRecorder();
     const workdir = tempDir();
     const runProcess: RunnerProcess = async (args) => {
@@ -367,19 +368,21 @@ describe("builtin runner", () => {
       return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
     };
 
-    await createBuiltinRunner({
-      server: "http://agentparty.test",
-      token: "ap_tok",
-      channel: "dev",
-      harness: "codex",
-      workdir,
-      runProcess,
-      post,
-    })(triggerFrame(42), runnerCtx());
+    // 唤醒未送达：既发 blocked，也抛给调用方（否则 runServe 会 ack 掉这条 @）
+    await expect(
+      createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir,
+        runProcess,
+        post,
+      })(triggerFrame(42), runnerCtx()),
+    ).rejects.toThrow(/path must be absolute/);
 
-    const finalPost = posts.at(-1)!;
-    expect(finalPost.body).toMatchObject({ kind: "status", state: "blocked" });
-    expect(String((finalPost.body as { note?: unknown }).note)).toContain("path must be absolute");
+    // runner 只回报失败信号，最终 blocked 由 runServe 在预算耗尽后统一发（#206 门禁 P1②）
+    expect(posts.some((p) => (p.body as { state?: string }).state === "blocked")).toBe(false);
     // 绝不发部分正文
     expect(posts.some((p) => (p.body as { kind: string }).kind === "message")).toBe(false);
   });
@@ -408,35 +411,42 @@ describe("builtin runner", () => {
     expect(body).toStartWith("[session start: 019f35d9]");
   });
 
-  test("resume failure cold-starts a new codex session and prefixes the reply with a reset marker", async () => {
+  // 这条测试原本**固化了一个 bug**：resume 非零后内部 cold-start 重跑模型。
+  // 那次 resume 可能已经 push 过、开过 PR，只是最后非零；重跑就是把副作用做第二遍。
+  // 契约⑤：既有测试反过来断言缺陷时，要改的是测试（#206 门禁 P1②）。
+  test("resume failure stops instead of cold-starting a new session (no duplicated side effects)", async () => {
     const { posts, post } = postRecorder();
     const workdir = tempDir();
     writeFileSync(
       join(workdir, "wake-session.json"),
       JSON.stringify({ harness: "codex", session_id: uuid(1), created_at: 1, last_wake_ts: 1, wakes: 3 }),
     );
+    const calls: string[][] = [];
     const runProcess: RunnerProcess = async (args) => {
+      calls.push(args);
       if (args.includes("resume")) return { code: 9, stdout: "", stderr: "missing session" };
       const out = args[args.indexOf("-o") + 1]!;
       writeFileSync(out, "fresh answer\n");
       return { code: 0, stdout: `session id: ${uuid(2)}\n`, stderr: "" };
     };
 
-    await createBuiltinRunner({
-      server: "http://agentparty.test",
-      token: "ap_tok",
-      channel: "dev",
-      harness: "codex",
-      workdir,
-      runProcess,
-      post,
-    })(triggerFrame(33), runnerCtx());
+    await expect(
+      createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir,
+        runProcess,
+        post,
+      })(triggerFrame(33), runnerCtx()),
+    ).rejects.toThrow(/exit code 9/);
 
-    const finalPost = posts.at(-1)!;
-    expect(finalPost.body).toMatchObject({ kind: "message", reply_to: 33 });
-    expect((finalPost.body as { body: string }).body).toStartWith(
-      "[session reset: 019f35d9 → 019f35d9]\nfresh answer",
-    );
+    // 只调用一次 runner（resume），绝不 fork 出新 session 重跑模型
+    expect(calls.filter((a) => a.includes("resume"))).toHaveLength(1);
+    expect(calls.filter((a) => !a.includes("resume"))).toHaveLength(0);
+    // 也绝不发部分正文
+    expect(posts.some((p) => (p.body as { kind?: string }).kind === "message")).toBe(false);
   });
 
   test("copies codex auth.json into the isolated CODEX_HOME before running", async () => {
@@ -563,29 +573,24 @@ describe("builtin runner", () => {
     expect(ctx.cli_upgrade.message).toContain("先询问用户是否升级");
   });
 
-  test("child non-zero exit posts blocked status with the runner log path and no final body", async () => {
+  test("child non-zero exit throws with the runner log path and posts no blocked, no final body", async () => {
     const { posts, post } = postRecorder();
     const workdir = tempDir();
 
-    await createBuiltinRunner({
-      server: "http://agentparty.test",
-      token: "ap_tok",
-      channel: "dev",
-      harness: "codex",
-      workdir,
-      runProcess: async () => ({ code: 7, stdout: "", stderr: "boom" }),
-      post,
-    })(triggerFrame(45), runnerCtx());
+    await expect(
+      createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir,
+        runProcess: async () => ({ code: 7, stdout: "", stderr: "boom" }),
+        post,
+      })(triggerFrame(45), runnerCtx()),
+    ).rejects.toThrow(/exit code 7/);
 
-    expect(posts).toHaveLength(2);
-    const blocked = posts[1]!.body as { note?: unknown };
-    const note = String(blocked.note);
-    expect(posts[1]!.body).toMatchObject({
-      kind: "status",
-      state: "blocked",
-    });
-    expect(note).toContain("exit code 7");
-    expect(note).toContain(join(workdir, "serve-runner.log"));
+    // 不再由 runner 自己发 blocked；错误信息里仍带 runner log 路径，供外层拼进最终通告
+    expect(posts.some((p) => (p.body as { state?: string }).state === "blocked")).toBe(false);
     expect(readFileSync(join(workdir, "serve-runner.log"), "utf8")).toContain("seq=45 sid=unknown");
   });
 
@@ -925,7 +930,7 @@ describe("codex-sdk runner", () => {
     expect((finalPost.body as { body: string }).body).toBe(final);
   });
 
-  test("run errors post blocked status and keep the resident thread for the next wake", async () => {
+  test("run errors signal the caller without posting blocked, and keep the resident thread", async () => {
     const { posts, post } = postRecorder();
     const workdir = tempDir();
     let startCalls = 0;
@@ -952,15 +957,13 @@ describe("codex-sdk runner", () => {
       }),
     });
 
-    await run(triggerFrame(105), runnerCtx());
+    await expect(run(triggerFrame(105), runnerCtx())).rejects.toThrow(/sdk exploded/);
     await run(triggerFrame(106), runnerCtx());
 
     expect(startCalls).toBe(1);
     expect(runCalls).toBe(2);
-    expect(posts.some((p) => (p.body as { state?: string }).state === "blocked")).toBe(true);
-    expect(String((posts.find((p) => (p.body as { state?: string }).state === "blocked")!.body as { note?: unknown }).note)).toContain(
-      "sdk exploded",
-    );
+    // 失败只回报给调用方，不自己发 blocked（#206 门禁 P1②）；常驻 thread 仍保留给下一次唤醒
+    expect(posts.some((p) => (p.body as { state?: string }).state === "blocked")).toBe(false);
     expect((posts.at(-1)!.body as { body: string }).body).toBe("second answer");
     expect(JSON.parse(readFileSync(join(workdir, "wake-session.json"), "utf8")).thread_id).toBe("thread_error_12345678");
   });

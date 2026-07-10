@@ -17,7 +17,7 @@ import { isAbsolute, join } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readAccount } from "../account";
 import { connect } from "../client";
-import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } from "../config";
+import { clearStuck, loadCursor, loadRevCursor, loadStuck, resolveChannel, saveCursor, saveRevCursor, saveStuck, type StuckWake } from "../config";
 import { formatMsg } from "../format";
 import { ensureFreshAccess, resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import {
@@ -34,6 +34,33 @@ import { buildContext } from "./status";
 
 const PROTOCOL_REMINDER =
   "被 @ 唤起：先读本文件 charter 了解频道约定；若发现 charter 与频道现状矛盾，视为一个待办上报。需要更多上下文再 `party history <channel 字段的频道>`；需要产出结论时，先用 `party send --reply-to <seq>` 把 final synthesis 发回频道，再 status done；别只回本地。";
+
+// 唤醒未送达（runner 非零退出 / 无 session id / SDK 抛错 / [attach] 被拒）。
+// 四种 runner 统一抛它：调用方据此判断「这条 @ 没进过模型」，从而不推进游标。
+export class WakeBlockedError extends Error {
+  /**
+   * 重试是否安全 —— 即**模型确定没有跑过**。
+   * 抛出这个错并不能证明模型没运行：runner 非零退出、SDK 在 thread.run 之后写 session /
+   * 发回复 / 写日志失败、custom runner 产生副作用后才退出，都会走到这里。
+   * 那些情况下重跑 = 重复模型副作用（重复 git push、重复开 PR）。默认 false。
+   * 只有「runner 根本没起来」（spawn 失败）才置 true。
+   */
+  readonly retriable: boolean;
+  constructor(message: string, retriable = false) {
+    super(message);
+    this.name = "WakeBlockedError";
+    this.retriable = retriable;
+  }
+}
+
+// 放弃通告都发不出去（网络/loop guard 熔断）。此时既没送达也没宣告，继续跑就是静默丢 @。
+export const EXIT_WAKE_UNANNOUNCED = 1;
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// 有界重放（#198）：同一条 seq 连续送达失败到顶就响亮放弃，既不无限重放也不静默丢弃
+const DEFAULT_MAX_WAKE_ATTEMPTS = 3;
+const DEFAULT_WAKE_RETRY_DELAY_MS = 500;
 
 // context file 里附带的最近频道消息条数上限（冷起的 runner 不用先跑 history 也有基本上下文）
 const RECENT_MAX = 20;
@@ -183,7 +210,7 @@ export function writeContextFile(
   return path;
 }
 
-const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "profile", "profile-once", "profile-poll-interval"];
+const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "replay-backlog", "profile", "profile-once", "profile-poll-interval"];
 const HELP = `usage: party serve [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all]
        party serve --profile <owner>/<handle>
 
@@ -199,6 +226,11 @@ Options:
   --repo URL           clone into workdir/repo once, then git pull --ff-only before each wake
   --profile ref        run the reusable project-agent profile as one resident daemon across all invites
   --auto-upgrade       between wakes, if a newer party binary is on disk, re-exec it (issue #45)
+  --replay-backlog     on attach, replay the offline backlog one wake per message
+                       (default: skip the backlog, advance the cursor, and print
+                       how many were skipped — serve wakes only for messages that
+                       arrive AFTER it attaches, issue #193. An undelivered wake
+                       (stuck, issue #198) is a debt, not backlog: it always replays.)
   --all                run for every non-self message, not only @mentions`;
 
 export interface ServeOptions {
@@ -209,9 +241,20 @@ export interface ServeOptions {
   sinceRev?: number; // 修订游标（hello.since_rev）
   cmd: string;
   mentionsOnly: boolean;
+  // 挂载时是否跳过离线积压（#193）。默认 true：serve 是唤醒 supervisor，不是补偿队列。
+  // 但「积压」与「欠账」是两回事（#198）：跳过的只能是**已离线堆积、从未送达**的历史；
+  // 送达失败被钉住的 stuck 无论多旧都必须重放，否则 #118 救下的那条 @ 会被这里吃掉。
+  skipBacklog?: boolean;
   builtinRunner?: BuiltinRunnerOptions;
   onCursor?: (cursor: number) => void;
   onRevCursor?: (revCursor: number) => void;
+  /** 上次进程留下的欠账（#198）：崩溃前失败了几次，重启后接着数。 */
+  stuck?: StuckWake | null;
+  onStuck?: (stuck: StuckWake | null) => void;
+  /** 有界重放：同一条 seq 连续送达失败上限，到顶就响亮放弃。 */
+  maxWakeAttempts?: number;
+  wakeRetryDelayMs?: number;
+  post?: typeof postMessage;
   // 测试注入点：默认用 sh -c 起子进程
   runCommand?: (
     frame: MsgFrame,
@@ -494,7 +537,19 @@ async function runHarness(
   env: Record<string, string | undefined>,
   seq: number,
 ): Promise<HarnessRun> {
-  const runProcess = opts.runProcess ?? defaultRunnerProcess;
+  const rawRunProcess = opts.runProcess ?? defaultRunnerProcess;
+  // runProcess 自己抛 = 进程根本没起来（spawn ENOENT / 权限），模型确定没跑过 → 重试安全。
+  // 一旦进程起来了（哪怕退出码非零），模型就可能已经产生副作用，重跑不安全。
+  const runProcess: RunnerProcess = async (args, o2) => {
+    try {
+      return await rawRunProcess(args, o2);
+    } catch (e) {
+      throw new WakeBlockedError(
+        `builtin ${opts.harness} runner did not start: ${e instanceof Error ? e.message : String(e)}`,
+        true,
+      );
+    }
+  };
   if (opts.harness === "codex") {
     const outFile = join(opts.workdir, `runner-${seq}-${Date.now()}.out`);
     const base = ["--skip-git-repo-check", "--sandbox", "workspace-write", "-o", outFile, prompt];
@@ -513,20 +568,6 @@ async function runHarness(
   return { result, text: parsed.text.trimEnd(), sessionId: parsed.sessionId };
 }
 
-async function postBlocked(
-  opts: BuiltinRunnerOptions,
-  frame: MsgFrame,
-  note: string,
-): Promise<void> {
-  await (opts.post ?? postMessage)(opts.server, opts.token, opts.channel, {
-    kind: "status",
-    state: "blocked",
-    note,
-    mentions: [],
-    blocked_reason: note,
-  });
-}
-
 export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOptions["runCommand"]> {
   let codexPromise: Promise<CodexLike> | null = null;
   let thread: ThreadLike | null = null;
@@ -543,13 +584,26 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
     mkdirSync(opts.workdir, { recursive: true });
     const sessionPath = join(opts.workdir, RUNNER_SESSION_FILE);
     const prior = readSdkSession(sessionPath);
-    const client = await codex();
+    // 这一段全在 thread.run() **之前**：连不上 SDK、拿不到 thread —— 模型确定还没跑。
+    // 这类失败标为可重试（EAI_AGAIN 这种瞬态抖动，第二次就成了）。
+    // thread.run() 之后的任何失败都不可重试（模型可能已经跑过、已经产生副作用）。
+    const beforeModel = async <T>(fn: () => Promise<T> | T): Promise<T> => {
+      try {
+        return await fn();
+      } catch (e) {
+        throw new WakeBlockedError(
+          `builtin codex-sdk runner blocked before the model started: ${e instanceof Error ? e.message : String(e)}`,
+          true,
+        );
+      }
+    };
+    const client = await beforeModel(() => codex());
     if (prior) {
-      thread = await client.resumeThread(prior.thread_id);
+      thread = await beforeModel(() => client.resumeThread(prior.thread_id));
       session = prior;
       return { thread, session };
     }
-    thread = await client.startThread();
+    thread = await beforeModel(() => client.startThread());
     const threadId = sdkThreadId(thread);
     // thread id 懒初始化：拿不到就先不落 session 文件，等首个 run() 之后补写
     session = threadId
@@ -635,14 +689,14 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(threadId)} duration_ms=${now - started} status=error error=${JSON.stringify(message.slice(0, 500))}`,
       );
-      const note = `builtin codex-sdk runner blocked: ${message}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`;
-      await post(opts.server, opts.token, opts.channel, {
-        kind: "status",
-        state: "blocked",
-        note,
-        mentions: [],
-        blocked_reason: note,
-      });
+      // 同上：只回报失败，最终 blocked 由 runServe 统一发一次。
+      // 模型前的失败（ensureThread 抛的 WakeBlockedError.retriable=true）必须把可重试性
+      // 透传出去，否则一次 EAI_AGAIN 就被当成「模型可能跑过」而立刻放弃（#206 门禁 P1③）。
+      const retriable = err instanceof WakeBlockedError && err.retriable;
+      throw new WakeBlockedError(
+        `builtin codex-sdk runner blocked: ${message}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`,
+        retriable,
+      );
     }
   };
 
@@ -661,7 +715,6 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
     const sessionPath = join(opts.workdir, RUNNER_SESSION_FILE);
     const prior = readSession(sessionPath, opts.harness);
     let oldSid = prior?.session_id ?? null;
-    let forked = false;
     let exitCode: number | null = null;
     let finalSid = oldSid;
     const post = opts.post ?? postMessage;
@@ -678,13 +731,13 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
     const contextFile = writeContextFile(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null);
     const prompt = readFileSync(contextFile, "utf8");
 
-    let run = await runHarness(opts, prompt, oldSid, cwd, env, frame.seq);
+    // resume 非零退出**不能**再 cold-start 重跑（#206 门禁 P1②）：
+    // 那次 resume 可能已经执行了模型、push 过、开过 PR，只是最后一步非零。
+    // 内部 fallback 会绕过外层的 retriable=false，把副作用做第二遍。
+    // 只有能**结构化证明模型没启动**的错误才允许换新 session——目前没有这样的信号，
+    // 所以一律停在这里，由外层宣告放弃。
+    const run = await runHarness(opts, prompt, oldSid, cwd, env, frame.seq);
     exitCode = run.result.code;
-    if (oldSid && run.result.code !== 0) {
-      forked = true;
-      run = await runHarness(opts, prompt, null, cwd, env, frame.seq);
-      exitCode = run.result.code;
-    }
 
     try {
       unlinkSync(contextFile);
@@ -698,12 +751,10 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}`,
       );
-      await postBlocked(
-        opts,
-        frame,
-        `builtin ${opts.harness} runner blocked: exit code ${run.result.code}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`,
-      );
-      return;
+      // 只回报失败信号，不发频道：外层还要重试，瞬态失败不该把频道标成 blocked，
+      // 每次尝试发一条更会给 loop guard 上膛（worker/src/do.ts:2582 对 status 也计数）。
+      // 最终那一条 blocked 由 runServe 在预算耗尽时统一发（#206 门禁 P1②）。
+      throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: exit code ${run.result.code}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
     }
 
     finalSid = run.sessionId;
@@ -712,28 +763,20 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=unknown duration_ms=${now - started} exit=${exitCode ?? 0} missing_session_id=true`,
       );
-      await postBlocked(
-        opts,
-        frame,
-        `builtin ${opts.harness} runner blocked: no session id parsed; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`,
-      );
-      return;
+      throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: no session id parsed; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
     }
 
-    const wakes = prior && !forked ? prior.wakes + 1 : 1;
+    const wakes = prior ? prior.wakes + 1 : 1;
     writeSession(sessionPath, {
       harness: opts.harness,
       session_id: finalSid,
-      created_at: prior && !forked ? prior.created_at : now,
+      created_at: prior ? prior.created_at : now,
       last_wake_ts: now,
       wakes,
     });
 
-    const marker = oldSid
-      ? forked
-        ? `[session reset: ${shortSid(oldSid)} → ${shortSid(finalSid)}]`
-        : null
-      : `[session start: ${shortSid(finalSid)}]`;
+    // resume 非零不再 cold-start（#206 门禁 P1②），所以不存在 session reset 这条路径了。
+    const marker = oldSid ? null : `[session start: ${shortSid(finalSid)}]`;
     let body: string;
     try {
       body = finalMessageBody(run.text, marker);
@@ -743,8 +786,7 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} attach_error=${JSON.stringify(message)}`,
       );
-      await postBlocked(opts, frame, `builtin ${opts.harness} runner blocked: ${message}`);
-      return;
+      throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: ${message}`);
     }
     await post(opts.server, opts.token, opts.channel, {
       kind: "message",
@@ -755,8 +797,7 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
 
     appendRunnerLog(
       opts.workdir,
-      `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} duration_ms=${now - started} exit=${exitCode ?? 0}` +
-        (forked ? ` fork=${shortSid(oldSid)}->${shortSid(finalSid)}` : ""),
+      `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} duration_ms=${now - started} exit=${exitCode ?? 0}`,
     );
   };
 }
@@ -845,7 +886,30 @@ export async function prepareProfileChannelWorkspace(opts: PrepareProfileWorkspa
   return { runnerWorkdir, channelWorkdir: worktreeDir };
 }
 
+/**
+ * profile 子 serve 继承的语义（#206 门禁 P2）。
+ * `--profile --replay-backlog` 原本被 parseArgs 接受，却没传给子 serve：
+ * 用户明确要求重放，profile 模式下却静默跳过——flag 接受了但不起作用。
+ */
+export function profileChildServeOptions(base: {
+  server: string;
+  token: string;
+  channel: string;
+  mentionsOnly: boolean;
+  skipBacklog?: boolean;
+}): Pick<ServeOptions, "server" | "token" | "channel" | "mentionsOnly" | "skipBacklog"> {
+  return {
+    server: base.server,
+    token: base.token,
+    channel: base.channel,
+    mentionsOnly: base.mentionsOnly,
+    ...(base.skipBacklog === undefined ? {} : { skipBacklog: base.skipBacklog }),
+  };
+}
+
 export interface ProfileServeOptions {
+  /** 由 --replay-backlog 决定；透传给每个频道的子 serve。 */
+  skipBacklog?: boolean;
   server: string;
   humanToken: string;
   ownerAccount: string;
@@ -930,10 +994,19 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       projectAgentChildName(profile.handle, channel),
     );
     const serveOpts: ServeOptions = {
+      ...profileChildServeOptions({
+        server: opts.server,
+        token: child.token,
+        channel,
+        mentionsOnly: opts.mentionsOnly,
+        skipBacklog: opts.skipBacklog,
+      }),
       server: opts.server,
       token: child.token,
       channel,
       since: loadCursor(channel),
+      stuck: loadStuck(channel),
+      onStuck: (st) => (st === null ? clearStuck(channel) : saveStuck(channel, st)),
       sinceRev: loadRevCursor(channel),
       cmd: "",
       mentionsOnly: opts.mentionsOnly,
@@ -1041,7 +1114,18 @@ export async function runServe(o: ServeOptions): Promise<number> {
     onRevCursor: o.onRevCursor,
   });
 
+  const skipBacklog = o.skipBacklog !== false; // 默认跳过离线积压（#193）
+  // 挂载那一刻的频道水位（welcome.last_seq），只在首个 welcome 记一次。
+  let attachHead: number | null = null;
   let self = "";
+  // 欠账（#198）：这条 @ 送达失败、从没进过模型。跨进程持久，重启后接着数重试次数。
+  let stuck: StuckWake | null = o.stuck ?? null;
+  const maxAttempts = Math.max(1, o.maxWakeAttempts ?? DEFAULT_MAX_WAKE_ATTEMPTS);
+  const retryDelayMs = o.wakeRetryDelayMs ?? DEFAULT_WAKE_RETRY_DELAY_MS;
+  const setStuck = (next: StuckWake | null) => {
+    stuck = next;
+    o.onStuck?.(next);
+  };
   let code = 0;
   let advertised = false;
   let charter: ChannelCharter | null = o.charter ?? null;
@@ -1076,6 +1160,21 @@ export async function runServe(o: ServeOptions): Promise<number> {
     for await (const frame of conn.frames) {
       if (frame.type === "welcome") {
         self = frame.self;
+        // 首个 welcome：定格挂载水位，并就积压去留告知（stderr）。知情权给 agent，决定权给人。
+        if (attachHead === null) {
+          attachHead = frame.last_seq;
+          const pending = Math.max(0, attachHead - o.since);
+          if (pending > 0) {
+            const range = `seq ${o.since + 1}..${attachHead}`;
+            const debt = stuck !== null && stuck.seq <= attachHead ? ` 欠账 seq=${stuck.seq} 不在跳过之列，将重放（#198）。` : "";
+            out(
+              skipBacklog
+                ? `serve: 跳过 ${pending} 条离线积压（${range}）——不逐条唤醒 runner。${debt}` +
+                    ` 查看：party history ${o.channel}；要逐条重放请重启并加 --replay-backlog`
+                : `serve: --replay-backlog：将逐条重放 ${pending} 条离线积压（${range}），每条唤醒一次 runner（可能重放副作用）`,
+            );
+          }
+        }
         if (o.statusline === true) {
           writeStatuslineCache({
             ...localStatuslineBase(o.channel),
@@ -1118,30 +1217,103 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // fresh = 游标之上的新消息。历史修订快照会穿透去重被重放（seq 早已消费过），
       // 它们不是新唤醒——不 fresh 就绝不触发 runner（否则旧 @ 被编辑一次，每次重连都重跑一遍）
       const fresh = frame.seq > conn.cursor;
-      const qualifies = fresh && !fromSelf && (!o.mentionsOnly || frame.mentions.includes(self));
+      // 欠账（#198）先于**一切**过滤条件。它送达失败过、从没进过模型——欠着就是欠着，
+      // 与当前是不是 mentions-only、是不是积压无关。
+      // 反例（190-codex-dev on PR #206）：--all 下一条非 mention 失败留下欠账，重启回默认
+      // mentions-only 后 qualifies=false → 不重试、不清欠账、却无条件 ack 越过它。
+      const isDebt = stuck !== null && frame.seq === stuck.seq;
+      const isBacklog = skipBacklog && attachHead !== null && frame.seq <= attachHead;
+      const passesFilter = !fromSelf && !isBacklog && (!o.mentionsOnly || frame.mentions.includes(self));
+      // 欠账未了结时，**后续的任何消息都不许先跑**（#206 门禁 P1①）。
+      // 反例：cursor=3、欠账 seq=4、head=6 未重放它、新 seq=7 进来 → 旧实现跑了 7、
+      // 把游标推到 7，并在成功路径上无条件 setStuck(null)，把 seq=4 的欠账顺手清掉。
+      // 欠着的那条必须先还：要么被重放并了结，要么有界重试耗尽后宣告放弃。
+      const blockedByDebt = stuck !== null && !isDebt;
+      const qualifies = fresh && !blockedByDebt && (isDebt || passesFilter);
       if (qualifies) {
         out(`▶ ${formatMsg(frame)}`);
         // 串行：本条命令跑完再消费下一帧（新帧此间缓冲在 FrameQueue），避免并发唤起互相抢
-        try {
-          const cliUpgrade = upgradeNotice(o.autoUpgrade === true, o.upgradeDeps);
-          await run(frame, {
-            cmd: o.cmd,
-            channel: o.channel,
-            self,
-            recent: recent.slice(),
-            charter,
-            projectAgent: o.projectAgent ?? null,
-            cliUpgrade,
-          });
-        } catch (e) {
-          out(`  命令失败: ${e instanceof Error ? e.message : String(e)}`);
+        // 有界重试（#198）：同一条 seq 最多 maxAttempts 次。前一个进程崩在第 k 次，这里从 k 接着数。
+        const priorAttempts = stuck?.seq === frame.seq ? stuck.attempts : 0;
+        // 崩溃在「最后一次失败落盘」与「最终通告」之间时，这里循环一次都不跑，
+        // lastError 必须从盘上接手，否则最终通告里的错误原因是空字符串（门禁 P2）。
+        let lastError = (stuck?.seq === frame.seq ? stuck.last_error : "") ?? "";
+        let delivered = false;
+        let retriable = true;
+        for (let attempt = priorAttempts + 1; attempt <= maxAttempts && retriable; attempt++) {
+          try {
+            const cliUpgrade = upgradeNotice(o.autoUpgrade === true, o.upgradeDeps);
+            await run(frame, {
+              cmd: o.cmd,
+              channel: o.channel,
+              self,
+              recent: recent.slice(),
+              charter,
+              projectAgent: o.projectAgent ?? null,
+              cliUpgrade,
+            });
+            delivered = true;
+            break;
+          } catch (e) {
+            lastError = e instanceof Error ? e.message : String(e);
+            // 抛错不等于「模型没跑过」。只有 runner 明确声明可重试（spawn 都没成功）才重试；
+            // 否则重跑会重复模型与外部副作用（git push / 开 PR）。见门禁 P1③。
+            retriable = e instanceof WakeBlockedError ? e.retriable : false;
+            if (!retriable) lastError += " (not retriable: model may have run)";
+            out(`  命令失败 (${attempt}/${maxAttempts}): ${lastError}`);
+            // 先落盘再重试：此刻进程崩掉，重启后不会把已经烧掉的次数忘干净
+            setStuck({ seq: frame.seq, attempts: attempt, last_error: lastError });
+            if (retriable && attempt < maxAttempts && retryDelayMs > 0) await delay(retryDelayMs);
+          }
+        }
+        if (delivered) {
+          // 只清**本帧**的欠账。别的 seq 的欠账不是它能了结的（#206 门禁 P1①）。
+          //
+          // 注意不能写成 `if (isDebt)`：isDebt 是进入本帧时算的，而重试过程中
+          // setStuck 会把 stuck 设成本帧 —— 那时 isDebt 仍是 false，欠账就清不掉了。
+          // （我试过，被「transient failure is retried」和「each failed attempt
+          // persists stuck」两条既有测试当场逮住。）
+          //
+          // 这里的 seq 校验在当前 blockedByDebt 守卫之下**不可达**（变异掉它零条测试变红）。
+          // 它是第二道闸：一旦有人放宽 blockedByDebt，这行会挡住「A 的成功清掉 B 的欠账」。
+          // 不删，理由写在这里。
+          if (stuck !== null && stuck.seq === frame.seq) setStuck(null);
+        } else {
+          // 有界重放到顶：显式放弃，但必须响亮留痕——静默丢弃正是 #118 要修的东西。
+          // 没有 CLI flag，所以重试预算与退避必须**在频道里可见**：把常数藏进源码是不诚实的。
+          const note =
+            `wake undelivered, giving up: seq=${frame.seq}; ` +
+            `attempts=${maxAttempts}/${maxAttempts}; retry_delay_ms=${retryDelayMs}; ` +
+            `last error: ${lastError}`;
+          out(`  ${note}`);
+          try {
+            await (o.post ?? postMessage)(o.server, o.token, o.channel, {
+              kind: "status",
+              state: "blocked",
+              note,
+              mentions: [],
+              blocked_reason: note,
+            });
+          } catch (e) {
+            // 通告发不出去 = 没宣告过 = 没了结。此时清欠账 + ack 就是恢复 #118 的静默丢失。
+            // 一个连自己喊不出救命的 supervisor，没有任何理由继续消费消息队列：响亮地死，让人发现。
+            out(`  放弃通告发送失败，欠账保留、游标不动、退出: ${e instanceof Error ? e.message : String(e)}`);
+            code = EXIT_WAKE_UNANNOUNCED;
+            break;
+          }
+          setStuck(null); // 放弃也是一种「了结」：宣告过了，才允许推进游标
         }
       }
       // 触发消息本身不进 recent（它就是 context 主体）；自己的/未 @ 的都算上下文
       recent.push(frame);
       if (recent.length > RECENT_MAX) recent.shift();
-      // 处理（或跳过）后才推进游标，退出时未消费的留给下次补拉
-      conn.ack(frame.seq);
+      // 游标只表达「已了结」（#198）：送达成功，或有界重试耗尽后**宣告过**的放弃。
+      // 欠账未了结时游标绝不越过它——否则那条 @ 永远不会再被重放。
+      //
+      // 我曾断言这个守卫是死代码（有界重试后 stuck 恒为 null），并请门禁证伪。
+      // 190-codex-dev 找到了反例：欠账那一帧若被 mentionsOnly / fromSelf 过滤掉，
+      // stuck 就活着走到这里。守卫不是死的——是我的推理漏了过滤路径。
+      if (stuck === null || frame.seq < stuck.seq) conn.ack(frame.seq);
       if (o.statusline === true) {
         writeStatuslineCache({
           ...localStatuslineBase(o.channel),
@@ -1185,7 +1357,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "auto-upgrade", "profile-once"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "auto-upgrade", "replay-backlog", "profile-once"] });
   const auth = await resolveAuthDetailed();
   if (!auth.server || !auth.token) {
     console.error("no config, run: party login or party init --server URL --token T");
@@ -1239,6 +1411,7 @@ export async function run(argv: string[]): Promise<number> {
       ownerAccount: profileRef.owner,
       handle: profileRef.handle,
       mentionsOnly: flags.all !== true,
+      skipBacklog: flags["replay-backlog"] !== true,
       once: flags["profile-once"] === true,
       pollIntervalMs,
     });
@@ -1271,9 +1444,12 @@ export async function run(argv: string[]): Promise<number> {
     token,
     channel,
     since: loadCursor(channel),
+    stuck: loadStuck(channel),
+    onStuck: (st) => (st === null ? clearStuck(channel) : saveStuck(channel, st)),
     sinceRev: loadRevCursor(channel),
     cmd: cmd ?? "",
     mentionsOnly: flags.all !== true,
+    skipBacklog: flags["replay-backlog"] !== true, // 默认跳过积压；--replay-backlog 才重放（#193）
     onCursor: (c) => saveCursor(channel, c),
     onRevCursor: (r) => saveRevCursor(channel, r),
     advertise: () => advertiseServeWake(auth, channel),

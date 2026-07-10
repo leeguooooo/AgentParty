@@ -79,6 +79,13 @@ export function msgFrame(seq: number, body: string, over: Record<string, unknown
   };
 }
 
-export function welcomeFrame(lastSeq: number, self = "me") {
-  return { type: "welcome", channel: "dev", self, last_seq: lastSeq, presence: [] };
+export function welcomeFrame(lastSeq: number, self = "me", readCursors?: Array<{ name: string; last_seen_seq: number; updated_at: number }>) {
+  return {
+    type: "welcome",
+    channel: "dev",
+    self,
+    last_seq: lastSeq,
+    presence: [],
+    ...(readCursors ? { read_cursors: readCursors } : {}),
+  };
 }

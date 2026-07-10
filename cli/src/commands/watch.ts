@@ -129,6 +129,11 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       if (frame.type === "welcome") {
         self = frame.self;
         lastSeq = frame.last_seq;
+        // 不要用 welcome.read_cursors 快进 --once 的游标（#172 的诱人错解）。
+        // read cursor 是**身份级「已读」**：protocol.ts 明确「网页 tab / serve / watch --follow
+        // 读到就回 seen；webhook / watch --once 型事件驱动 agent 不发 seen，其送达状态由
+        // wake 回执表达」。同身份的网页标签页读过一条 @，不代表这个 supervisor 被它唤醒过。
+        // 拿它 ack 会静默跳过从未送达的 mention。#172 需要一个独立的 wake cursor。
         if (o.statusline === true) {
           writeStatuslineCache({
             ...localStatuslineBase(o.channel),
@@ -175,9 +180,19 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       // 只在 follow 下发；--once / 非 follow 是「查有没有 @ 我再退」的事件驱动路径，不算逐条已读，
       // 其送达/唤醒由 wake 回执表达（不假装 agent 逐条读了频道）。只对游标之上的新消息发。
       if (o.follow && fresh && msg.seq > 0) conn.send({ type: "seen", seq: msg.seq });
-      // --once：第一条匹配的【新】消息即完成——游标已推进，进程退出就是 harness 的唤醒信号
+      // --once：第一条匹配的【新】消息即完成——游标已推进，进程退出就是 harness 的唤醒信号。
+      // 服务端从游标开始重放，所以这条是**最旧**的未读 @，不是最新的（#199）。
+      // 醒在最旧是对的（醒在最新会丢消息），但必须把落后量说出来：否则被唤醒的 agent
+      // 会以为手上这条就是频道现状，照着几小时前的上下文回话，而身后还压着一摞没读的。
       if (o.once && qualifies && fresh) {
         onceDone = true;
+        const behind = Math.max(0, lastSeq - msg.seq);
+        if (behind > 0) {
+          out(
+            `watch: 唤醒于 seq=${msg.seq}（最旧的未读 @），落后 ${behind} 条，head=${lastSeq}。` +
+              ` 这不是最新消息——补上下文：party history ${o.channel} --since ${msg.seq}`,
+          );
+        }
         break;
       }
       // 补拉排空（seq 追平 welcome.last_seq）且已有输出即视为收到新消息；自己的消息也参与排空判定

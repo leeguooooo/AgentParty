@@ -35,9 +35,22 @@ export interface ConfigWithSource {
   source: ConfigSourceInfo;
 }
 
+/**
+ * 欠账（#198）：一条送达失败、从没进过模型的 @。
+ * 它和 cursor 是**两个语义**：cursor 说「这条我了结了」（处理成功，或主动宣告放弃），
+ * stuck 说「这条我欠着」。只存内存不算修复——runner 崩溃常常连进程一起带走。
+ */
+export interface StuckWake {
+  seq: number;
+  /** 连续送达失败次数。有界重放靠它：超过上限就响亮放弃，绝不静默丢弃。 */
+  attempts: number;
+  last_error?: string;
+}
+
 export interface ChannelCursor {
   cursor: number;
   rev_cursor?: number;
+  stuck?: StuckWake;
 }
 
 export interface WorkspaceState {
@@ -287,6 +300,23 @@ export function saveCursor(channel: string, cursor: number, cwd?: string): void 
   const cur = channelCursor(readState(cwd), channel);
   if (cursor <= cur.cursor) return; // 单调，不回退
   putChannelCursor(channel, { ...cur, cursor }, cwd);
+}
+
+/** 读欠账（#198）。没有欠账返回 null。 */
+export function loadStuck(channel: string, cwd?: string): StuckWake | null {
+  return channelCursor(readState(cwd), channel).stuck ?? null;
+}
+
+/** 写欠账。和 cursor 并列，互不覆盖。 */
+export function saveStuck(channel: string, stuck: StuckWake, cwd?: string): void {
+  const cur = channelCursor(readState(cwd), channel);
+  putChannelCursor(channel, { ...cur, stuck }, cwd);
+}
+
+/** 了结欠账：送达成功，或有界重试耗尽后显式放弃。 */
+export function clearStuck(channel: string, cwd?: string): void {
+  const { stuck: _dropped, ...rest } = channelCursor(readState(cwd), channel);
+  putChannelCursor(channel, rest, cwd);
 }
 
 /**
