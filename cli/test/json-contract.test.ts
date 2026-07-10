@@ -332,4 +332,68 @@ describe("json contract fixtures", () => {
     expect(result).toMatchObject({ code: 0, stderr: "" });
     expectContract(parseOneLine(result.stdout), fixture("whoami.logged-out.json"));
   });
+
+  test("task list --json emits a single task_list envelope (empty channel)", async () => {
+    restMock = startRestMock((req) => {
+      if (req.method === "GET" && /^\/api\/channels\/dev\/tasks$/.test(req.path)) {
+        return Response.json({ tasks: [] });
+      }
+      return undefined;
+    });
+    writeCfg(restMock.url);
+
+    const result = await runCli(["task", "list", "--channel", "dev", "--json"]);
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    // Must be a single parseable document, never zero bytes.
+    const parsed = parseOneLine(result.stdout) as Record<string, unknown>;
+    expect(parsed).toMatchObject({ type: "task_list", channel: "dev", count: 0 });
+    expect(parsed.schema).toBe("agentparty.v1");
+    expect(parsed.tasks).toEqual([]);
+  });
+
+  test("task list --json emits a single task_list envelope (with tasks)", async () => {
+    restMock = startRestMock((req) => {
+      if (req.method === "GET" && /^\/api\/channels\/dev\/tasks$/.test(req.path)) {
+        return Response.json({
+          tasks: [
+            {
+              type: "task",
+              id: 1,
+              state: "triage",
+              priority: 0,
+              title: "fix task list json",
+              labels: ["bug"],
+              assignee: null,
+              parent_id: null,
+              created_at: Date.now(),
+              updated_at: Date.now(),
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    writeCfg(restMock.url);
+
+    const result = await runCli(["task", "list", "--channel", "dev", "--json"]);
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    const parsed = parseOneLine(result.stdout) as Record<string, unknown>;
+    expect(parsed).toMatchObject({ type: "task_list", channel: "dev", count: 1 });
+    expect(Array.isArray(parsed.tasks)).toBe(true);
+    expect((parsed.tasks as unknown[]).length).toBe(1);
+  });
+
+  test("task list (plain) prints a message instead of zero bytes for an empty channel", async () => {
+    restMock = startRestMock((req) => {
+      if (req.method === "GET" && /^\/api\/channels\/dev\/tasks$/.test(req.path)) {
+        return Response.json({ tasks: [] });
+      }
+      return undefined;
+    });
+    writeCfg(restMock.url);
+
+    const result = await runCli(["task", "list", "--channel", "dev"]);
+    expect(result).toMatchObject({ code: 0 });
+    expect(result.stdout.trim()).toBe("no tasks in #dev");
+  });
 });

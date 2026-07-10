@@ -36,7 +36,9 @@ const HELP = `usage: party task create <title|-> [--channel C] [--desc text] [--
   party task done <id> [--channel C]
 
 Create and move channel tasks. Agent-created tasks default to triage; human-created
-tasks default to backlog unless an assignee/state is provided.`;
+tasks default to backlog unless an assignee/state is provided.
+
+  --json   emit one JSON document: { schema, type: "task_list", channel, tasks, count }`;
 
 function parseState(value: string | undefined): TaskState | null | undefined {
   if (value === undefined) return undefined;
@@ -154,8 +156,14 @@ export async function run(argv: string[]): Promise<number> {
         ...(assignee !== undefined ? { assignee } : {}),
         ...(limit !== undefined ? { limit } : {}),
       });
-      for (const task of tasks) {
-        console.log(flags.json === true ? JSON.stringify(jsonFrame(task as unknown as Record<string, unknown>)) : formatTask(task));
+      if (flags.json === true) {
+        // Single JSON document (never zero bytes), mirroring the REST
+        // {tasks:[]} envelope so agents can JSON.parse stdout and read .tasks.
+        console.log(JSON.stringify(jsonFrame({ type: "task_list", channel: slug, tasks, count: tasks.length })));
+      } else if (tasks.length === 0) {
+        console.log(`no tasks in #${slug}`);
+      } else {
+        for (const task of tasks) console.log(formatTask(task));
       }
       return 0;
     }
