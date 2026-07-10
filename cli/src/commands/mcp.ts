@@ -57,7 +57,7 @@ Tools:
   party_wake_test
 
 Resources:
-  party://charter               charter for the bound --channel (用前必读)
+  party://charter               charter for the bound channel (--channel or cwd binding, 用前必读)
   party://{channel}/charter     charter for any channel by slug`;
 
 const StateSchema = z.enum(["working", "waiting", "blocked", "done"]);
@@ -178,9 +178,16 @@ function capturedResult(name: string, captured: { code: number; stdout: string; 
 }
 
 // 被 @ 唤起时的第一屏提示：MCP 接入的 agent 没有 serve 的 context file，
-// 靠这条把它引到 charter（用 party_charter 工具或 party://charter 资源读频道约定/scope）。
-const CHARTER_REMINDER =
-  "read the channel charter first (party_charter tool or party://charter resource) — it defines this channel's scope and etiquette before you act.";
+// 靠这条把它引到 charter。提示必须与实际注册的资源一致：绑定了频道（flag 或 cwd）才指向
+// 具体的 party://charter；否则只指 party_charter 工具与模板 party://{channel}/charter，
+// 绝不叫模型去读一个 resources/list 里不存在的资源。
+function charterReminder(boundChannel: string | undefined): string {
+  const where =
+    boundChannel !== undefined
+      ? "party_charter tool or party://charter resource"
+      : "party_charter tool (pass a channel), or the party://{channel}/charter resource";
+  return `read the channel charter first (${where}) — it defines this channel's scope and etiquette before you act.`;
+}
 
 async function charterData(channel: string): Promise<Record<string, unknown>> {
   const cfg = await auth();
@@ -201,6 +208,12 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     version: pkg.version,
   });
 
+  // 启动时解析一次「我在哪个频道」——flag 优先，否则吃 cwd 绑定（party init --channel）。
+  // 工具、concrete resource、whoami 提示三者共用这一个答案，不能各认各的。
+  const resolvedBound = resolveChannel(defaultChannel) ?? undefined;
+  const boundChannel = resolvedBound !== undefined && isSlug(resolvedBound) ? resolvedBound : undefined;
+  const reminder = charterReminder(boundChannel);
+
   server.registerTool(
     "party_whoami",
     {
@@ -212,7 +225,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
       try {
         const cfg = await auth();
         const me = await fetchMe(cfg.server, cfg.token);
-        return ok({ type: "me", server: cfg.server, identity: me, protocol_reminder: CHARTER_REMINDER });
+        return ok({ type: "me", server: cfg.server, identity: me, protocol_reminder: reminder });
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -794,19 +807,21 @@ export function createMcpServer(defaultChannel?: string): McpServer {
 
   // Resources make the charter machine-discoverable via resources/list (#136) and give the
   // MCP接入路径 a first-screen "用前必读" it otherwise never sees (#134). The concrete
-  // party://charter is only registered when a default channel is pinned, so resources/list
-  // stays meaningful; any channel is still readable through the template below.
-  if (defaultChannel !== undefined) {
+  // party://charter is registered whenever a channel resolves — from --channel OR the cwd
+  // binding (party init --channel) — so it stays consistent with the party_charter tool and
+  // the whoami reminder, which resolve the same way. Any channel is still readable via the
+  // template below. Only when neither flag nor binding names a channel is resources/list empty.
+  if (boundChannel !== undefined) {
     server.registerResource(
       "channel-charter",
       "party://charter",
       {
-        title: `Charter for #${defaultChannel}`,
+        title: `Charter for #${boundChannel}`,
         description: "The bound channel's charter / 用前必读: scope, etiquette, roles, current host. Read before acting.",
         mimeType: "text/markdown",
       },
       async (uri) => {
-        const data = await charterData(defaultChannel);
+        const data = await charterData(boundChannel);
         return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: charterText(data) }] };
       },
     );
