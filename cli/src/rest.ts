@@ -691,23 +691,47 @@ export async function deleteSquad(
   })) as { ok: true; squad: ChannelSquad };
 }
 
+/** 取「最近 N 条」用的哨兵 before：服务端 before>0 时返回 seq<before 的最近 limit 条。 */
+export const TAIL_BEFORE = Number.MAX_SAFE_INTEGER;
+
+/**
+ * 消息查询串。before 与 since 互斥——服务端 before 优先，这里直接不发 since，避免歧义。
+ * 不传 before 时保持原有 since 正向语义。
+ */
+export function messagesQuery(o: {
+  since?: number;
+  before?: number;
+  limit: number;
+  completion?: boolean;
+}): string {
+  const params = new URLSearchParams();
+  if (o.before !== undefined && o.before > 0) params.set("before", String(o.before));
+  else params.set("since", String(o.since ?? 0));
+  params.set("limit", String(o.limit));
+  if (o.completion === true) params.set("completion", "1");
+  return params.toString();
+}
+
 export async function fetchMessages(
   server: string,
   token: string,
   slug: string,
   since = 0,
   limit = 100,
-  opts: { completion?: boolean } = {},
+  opts: { completion?: boolean; before?: number } = {},
 ): Promise<MsgFrame[]> {
-  const params = new URLSearchParams({ since: String(since), limit: String(limit) });
-  if (opts.completion === true) params.set("completion", "1");
-  const body = await req(
-    server,
-    `/api/channels/${encodeURIComponent(slug)}/messages?${params.toString()}`,
-    { headers: bearerJson(token) },
-  );
+  const query = messagesQuery({ since, limit, ...(opts.before === undefined ? {} : { before: opts.before }), ...(opts.completion === true ? { completion: true } : {}) });
+  const body = await req(server, `/api/channels/${encodeURIComponent(slug)}/messages?${query}`, { headers: bearerJson(token) });
   const messages = (body as Record<string, unknown> | null)?.messages;
   return Array.isArray(messages) ? (messages as MsgFrame[]) : [];
+}
+
+/** 最近 limit 条（「补上下文」的正确默认语义）。 */
+export async function fetchRecentMessages(
+  server: string, token: string, slug: string, limit = 100,
+  opts: { completion?: boolean } = {},
+): Promise<MsgFrame[]> {
+  return fetchMessages(server, token, slug, 0, limit, { ...opts, before: TAIL_BEFORE });
 }
 
 export async function fetchPresence(server: string, token: string, slug: string): Promise<PresenceEntry[]> {

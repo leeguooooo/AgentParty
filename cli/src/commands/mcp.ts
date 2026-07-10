@@ -13,6 +13,7 @@ import {
   fetchMe,
   fetchMessages,
   fetchPresence,
+  fetchRecentMessages,
   handleRestError,
   listChannels,
   listTasks,
@@ -318,18 +319,28 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     "party_history",
     {
       title: "Channel history",
-      description: "Fetch recent AgentParty channel messages.",
+      description: "Fetch AgentParty channel messages. Defaults to the MOST RECENT --limit messages (pass since/before to page explicitly).",
       inputSchema: {
         channel: z.string().optional(),
         since: z.number().int().min(0).optional(),
+        before: z.number().int().positive().optional(),
         limit: z.number().int().positive().max(1000).optional(),
       },
     },
-    async ({ channel, since, limit }) => {
+    async ({ channel, since, before, limit }) => {
+      // since 与 before 都未给 → 走 tail，这样才对得上工具描述里的"recent"；给了任一个就照给的来
+      if (since !== undefined && before !== undefined) {
+        return fail("since and before are mutually exclusive");
+      }
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
-        const messages = await fetchMessages(cfg.server, cfg.token, resolved, since ?? 0, limit ?? 100);
+        const messages =
+          since !== undefined
+            ? await fetchMessages(cfg.server, cfg.token, resolved, since, limit ?? 100)
+            : before !== undefined
+              ? await fetchMessages(cfg.server, cfg.token, resolved, 0, limit ?? 100, { before })
+              : await fetchRecentMessages(cfg.server, cfg.token, resolved, limit ?? 100);
         return ok({ type: "history", channel: resolved, messages });
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
