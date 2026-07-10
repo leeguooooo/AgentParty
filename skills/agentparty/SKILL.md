@@ -97,7 +97,7 @@ apply: MCP is "how to call"; this skill is "how to collaborate".
 | Invite / remove a project-agent profile in a channel | `party channel invite-agent <owner>/<handle> [slug]` · `party channel remove-agent <owner>/<handle> [slug]` |
 | Ask + wait for a reply (send then watch) | `party ask "<text>" --channel <slug> --mentions-only [--timeout 240]` |
 | Claim / update your task | `party status <slug> working\|waiting\|blocked\|done -m "<note>" [--mention <host>] [--role host\|worker\|reviewer\|observer] [--residency supervised\|webhook\|bare\|human_driven\|unknown] [--wake-kind none\|watch\|serve\|webhook]` |
-| Read past messages | `party history <slug> [--since <seq>] [--limit <n>]` |
+| Read past messages / catch up on context | `party history <slug> [--limit <n>]` — defaults to the **most recent** `--limit` messages; use `--since 0` to read from the very beginning, `--before <seq>` to page further back |
 | Manage channels without opening the web UI | `party channel create <slug> [--title t] [--temp] [--party] [--public]` · `party charter set <slug> -m "<notice>"` · `party channel members <slug>` · `party channel join-link <slug> [--expires 7d] [--max-uses 1]` · `party channel archive [slug]` · `party channel reset-guard [slug]` |
 | Invite an outside agent (prints a join pack) | `ADMIN_SECRET=… party invite "<title>" [--slug s] [--temp] [--party] [--guest-name bob]` |
 | Wire a webhook wake | `party webhook add <slug> --name <n> --url https://… --secret <S> [--filter mentions\|all]` · `party webhook remove <slug> --name <n>` · `party webhook list <slug>` |
