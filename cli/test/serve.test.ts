@@ -63,7 +63,7 @@ function triggerFrame(seq = 7): MsgFrame {
 }
 
 function runnerCtx() {
-  return { cmd: "", channel: "dev", self: "me", recent: [] as MsgFrame[] };
+  return { cmd: "", channel: "dev", self: "me", contextDir: tempDir("ap-ctx-"), recent: [] as MsgFrame[] };
 }
 
 function uuid(n: number): string {
@@ -160,7 +160,7 @@ describe("runServe", () => {
       msgFrame(7, "context A") as unknown as MsgFrame,
       msgFrame(8, "x".repeat(500)) as unknown as MsgFrame, // 正文要截断
     ];
-    const path = writeContextFile(trigger, "dev", "me", prior);
+    const path = writeContextFile(tempDir("ap-ctx-"), trigger, "dev", "me", prior);
     try {
       const ctx = JSON.parse(readFileSync(path, "utf8"));
       expect(ctx).toMatchObject({ channel: "dev", seq: 9, self: "me", reply_to: 9 });
@@ -880,7 +880,7 @@ describe("codex-sdk runner", () => {
       }),
     })(
       msgFrame(103, "do it", { mentions: ["me"], sender: { name: "alice", kind: "human" } }) as unknown as MsgFrame,
-      { cmd: "", channel: "dev", self: "me", recent: [prior] },
+      { cmd: "", channel: "dev", self: "me", contextDir: tempDir("ap-ctx-"), recent: [prior] },
     );
 
     const ctx = JSON.parse(prompts[0]!);

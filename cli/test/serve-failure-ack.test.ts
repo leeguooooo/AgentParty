@@ -30,7 +30,7 @@ function triggerFrame(seq = 7): MsgFrame {
 }
 
 function runnerCtx() {
-  return { cmd: "", channel: "dev", self: "me", recent: [] as MsgFrame[] };
+  return { cmd: "", channel: "dev", self: "me", contextDir: mkdtempSync(join(tmpdir(), "ap-ctx-")), recent: [] as MsgFrame[] };
 }
 
 function opts(over: Partial<ServeOptions> & { server: string }): ServeOptions & { lines: string[] } {
