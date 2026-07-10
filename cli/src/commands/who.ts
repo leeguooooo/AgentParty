@@ -110,11 +110,25 @@ function readNote(readSeq: number | undefined, lastSeq: number): string {
 
 // 身份分层（#110）：终端行里补出 @handle / account / 展示名，让人看得见「该 @ 哪个别名」。
 // handle 是人类被 @ 通知的真正投递键（web notify 按 handle 命中），name 可能只是 UUID 会话名。
+export function terminalIdentityText(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
 export function identityNote(r: Row): string {
   const parts: string[] = [];
-  if (r.handle !== undefined && r.handle !== r.name) parts.push(`@${r.handle}`);
-  if (r.display_name !== undefined) parts.push(r.display_name);
-  if (r.account !== undefined) parts.push(r.account);
+  const name = terminalIdentityText(r.name);
+  if (r.handle !== undefined) {
+    const handle = terminalIdentityText(r.handle);
+    if (handle !== "" && handle !== name) parts.push(`@${handle}`);
+  }
+  if (r.display_name !== undefined) {
+    const displayName = terminalIdentityText(r.display_name);
+    if (displayName !== "") parts.push(displayName);
+  }
+  if (r.account !== undefined) {
+    const account = terminalIdentityText(r.account);
+    if (account !== "") parts.push(account);
+  }
   return parts.length > 0 ? ` (${parts.join(" · ")})` : "";
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { PresenceEntry } from "@agentparty/shared";
-import { classify, identityNote } from "../src/commands/who";
+import { classify, identityNote, terminalIdentityText } from "../src/commands/who";
 
 const NOW = 1_000_000_000;
 
@@ -126,6 +126,34 @@ describe("who 身份分层（#110：who --json 不再对 presence 已有的身�
     expect(identityNote(same!)).not.toContain("@leo");
     // 什么身份信息都没有 → 空串，不污染输出
     expect(identityNote(classify(p({ name: "bob" }), NOW)!)).toBe("");
+  });
+
+  test("who --json 保留 raw 身份字段；终端 identityNote 归一化控制字符", () => {
+    const e = p({
+      name: "web-login-uuid",
+      kind: "human",
+      state: "working",
+      handle: "leo\n\u001b[31m\u009badmin",
+      account: "team\r\nroot@example.com",
+      display_name: "Davian\tPearson\u007f\u0085Ops",
+    });
+    const r = classify(e, NOW)!;
+
+    // JSON 路径必须保持 presence 的真实 raw 值，不能为了终端展示污染机器可读输出。
+    const parsed = JSON.parse(JSON.stringify(r)) as Record<string, unknown>;
+    expect(parsed.handle).toBe(e.handle);
+    expect(parsed.account).toBe(e.account);
+    expect(parsed.display_name).toBe(e.display_name);
+
+    const note = identityNote(r);
+    expect(note).toContain("@leo [31m admin");
+    expect(note).toContain("team root@example.com");
+    expect(note).toContain("Davian Pearson Ops");
+    expect(note).not.toMatch(/[\u0000-\u001F\u007F-\u009F]/);
+  });
+
+  test("terminalIdentityText：控制字符变空格，并折叠多余空白", () => {
+    expect(terminalIdentityText(" a\n\tb\u001b[31m\u009bc\u007f\u0085 ")).toBe("a b [31m c");
   });
 });
 
