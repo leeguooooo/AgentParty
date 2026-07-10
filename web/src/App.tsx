@@ -262,8 +262,9 @@ export function App() {
       // 跨身份 / 旧 session 无 identity 一律不接管，否则本标签会静默变成另一个账号。
       const shared = readSession();
       if (shared !== null && gateSession(shared, identityRef.current) === "adopt") {
+        // #190 之后 adopt 分支已保证只接管同身份的共享会话（跨身份一律 foreign），
+        // 不清 channels——理由同 token-keyed effect 里的注释。
         setAuthError(null);
-        setChannels(null);
         setListError(null);
         setToken(shared.accessToken);
         return;
@@ -332,7 +333,8 @@ export function App() {
         restoreDesktop()
           .then((accessToken) => {
             if (accessToken === null) throw new Error("desktop session is unavailable");
-            setChannels(null);
+            // desktop 续期换回的是同一身份的新 token（同 server），不清 channels——理由同下面
+            // token-keyed effect 里的注释：清空只会连带卸载 ChannelPage、丢草稿。
             setListError(null);
           })
           .catch(() => hardLogout(message));
@@ -342,7 +344,7 @@ export function App() {
       if (!isShareMode() && sess?.refreshToken != null && oidcRef.current !== null) {
         doRefresh()
           .then(() => {
-            setChannels(null);
+            // 静默续期成功只是换了 access token 字符串，身份没变，不清 channels。
             setListError(null);
           })
           .catch(() => hardLogout(message));
@@ -493,7 +495,10 @@ export function App() {
   useEffect(() => {
     if (token === null || (!desktop && matchPair(path))) return;
     let alive = true;
-    setChannels(null);
+    // 同身份续期只换 token 字符串（sub 不变），这里不清 channels：清空会连带卸载
+    // ChannelPage、丢草稿和滚动位置。真正换身份 / 换 server 的路径都已在 setToken 前
+    // 显式清空过 channels，这里不清也不会残留旧身份的数据；陈旧响应由下面的 alive
+    // 闭包守卫挡住，不会覆盖新身份的 UI（见本文件其它 setChannels(null) 处的保留）。
     setListError(null);
     listChannels(token)
       .then((cs) => {
