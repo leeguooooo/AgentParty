@@ -41,7 +41,7 @@ commands:
   host      board [channel|--channel C] [--since seq] [--limit n] [--json]
   capture   <seq>|list [channel|--channel C] --as decision|requirement|bug|action-item [-m note] [--json] [--issue-body]
   wake      test @agent [channel|--channel C] [--timeout N] [--json]
-  channel   create <slug> [--title t] [--temp] [--party] [--public] | list | archive [slug] | guard unlimited|off|<limit> [slug] | workflow-guard off|<limit> [slug] | reset-guard [slug] | kick <name> [slug] | invite-agent <owner>/<handle> [slug] | remove-agent <owner>/<handle> [slug] | join-link <slug> | role list|set|unset
+  channel   create <slug> [--title t] [--temp] [--party] [--public] | list | archive [slug] | guard unlimited|off|<limit> [slug] | workflow-guard off|<limit> [slug] | reset-guard [slug] | reset-workflow-guard <workflow_id> [slug] | kick <name> [slug] | invite-agent <owner>/<handle> [slug] | remove-agent <owner>/<handle> [slug] | join-link <slug> | role list|set|unset
   invite    "<title>" [--slug s] [--temp] [--party] [--public] [--guest-name bob] [--owner label]   (ADMIN_SECRET env)
   webhook   add <channel> --name n --url URL --secret S [--filter mentions|status|needs-human|all] | remove <channel> --name n | list <channel>
   token     create --name n --role agent|human|readonly --owner label [--channel-scope slug] | revoke <name>   (ADMIN_SECRET env)

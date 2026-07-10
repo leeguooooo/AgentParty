@@ -94,6 +94,10 @@ export function startRestMock(handler?: RestHandler): RestMock {
       if (r.method === "POST" && /^\/api\/channels\/[^/]+\/reset-guard$/.test(r.path)) {
         return Response.json({ ok: true });
       }
+      const wfReset = r.path.match(/^\/api\/channels\/[^/]+\/workflows\/([^/]+)\/reset-guard$/);
+      if (r.method === "POST" && wfReset) {
+        return Response.json({ ok: true, workflow_id: decodeURIComponent(wfReset[1]!) });
+      }
       if (r.method === "PUT" && /^\/api\/channels\/[^/]+\/completion-gate$/.test(r.path)) {
         const b = body as { gate: "off" | "reviewer"; policy?: "sender" | "owner" };
         return Response.json({ gate: b.gate, policy: b.policy ?? "sender" });

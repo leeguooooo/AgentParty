@@ -1032,6 +1032,20 @@ export async function resetGuard(server: string, token: string, slug: string): P
   });
 }
 
+// 重置某个 workflow 的 no-progress 熔断（与 loop guard 的 reset-guard 分属两套熔断器）。
+// human-only + moderator/host，服务端 /api/channels/:slug/workflows/:workflow_id/reset-guard 强制。
+export async function resetWorkflowGuard(
+  server: string,
+  token: string,
+  slug: string,
+  workflowId: string,
+): Promise<void> {
+  await req(server, `/api/channels/${encodeURIComponent(slug)}/workflows/${encodeURIComponent(workflowId)}/reset-guard`, {
+    method: "POST",
+    headers: bearerJson(token),
+  });
+}
+
 // 房主踢人：按参与者/token 名字踢出频道（防滥用 MVP，spec §5）
 export async function kickParticipant(
   server: string,
@@ -1063,7 +1077,11 @@ export function handleRestError(e: unknown): number {
     if (e.code === "loop_guard") return EXIT_LOOP_GUARD;
     // workflow guard 与 loop guard 同类：停手等人类，别换个措辞重试（#122）
     if (e.code === "workflow_guard") {
-      console.error("hint: workflow guard tripped — stop, report status blocked, wait for a human. Do not rephrase and retry.");
+      console.error(
+        "hint: workflow guard tripped — stop, report status blocked, wait for a human. Do not rephrase and retry.\n" +
+          "      a human clears it with: party channel reset-workflow-guard <workflow_id> [slug]\n" +
+          "      (the blocked workflow_id is named in the error above; plain `reset-guard` only clears the loop guard, not this)",
+      );
       return EXIT_WORKFLOW_GUARD;
     }
     if (e.code === "archived") return EXIT_ARCHIVED;

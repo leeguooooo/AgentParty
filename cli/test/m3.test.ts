@@ -2626,6 +2626,48 @@ describe("party channel reset-guard", () => {
   });
 });
 
+describe("party channel reset-workflow-guard", () => {
+  test("reset-workflow-guard <wid> <slug> 调 POST /workflows/<wid>/reset-guard", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "reset-workflow-guard", "wf-b", "town-square"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("workflow guard reset town-square: wf-b");
+    const reqs = reqsOf(mock, "POST", "/api/channels/town-square/workflows/wf-b/reset-guard");
+    expect(reqs.length).toBe(1);
+    expect(reqs[0]!.headers.authorization).toBe("Bearer ap_tok");
+    // 没打到 loop guard 的 reset-guard 端点（两者是不同的熔断器）
+    expect(reqsOf(mock, "POST", "/api/channels/town-square/reset-guard").length).toBe(0);
+  });
+
+  test("省略 slug 时用绑定频道", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    writeWorkspaceState("ops");
+    const r = await runCli(["channel", "reset-workflow-guard", "wf-x"]);
+    expect(r.code).toBe(0);
+    expect(reqsOf(mock, "POST", "/api/channels/ops/workflows/wf-x/reset-guard").length).toBe(1);
+  });
+
+  test("缺 workflow_id 报用法且不发请求", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    writeWorkspaceState("ops");
+    const r = await runCli(["channel", "reset-workflow-guard"]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("usage: party channel reset-workflow-guard <workflow_id> [slug]");
+    expect(mock.requests.length).toBe(0);
+  });
+
+  test("非法 workflow_id 本地拒绝，不发请求", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "reset-workflow-guard", "bad id", "ops"]);
+    expect(r.code).toBe(1);
+    expect(mock.requests.length).toBe(0);
+  });
+});
+
 describe("party channel gate", () => {
   test("gate reviewer 调 PUT /completion-gate，可带 policy", async () => {
     mock = startRestMock();
