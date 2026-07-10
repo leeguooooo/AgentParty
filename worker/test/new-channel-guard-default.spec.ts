@@ -36,6 +36,28 @@ describe("new channels enable the loop guard by default (#96)", () => {
     expect(body.error.code).toBe("loop_guard");
   });
 
+  it("status frames count toward the loop-guard streak, not just message sends (#133)", async () => {
+    // 文档反复只说「连续 agent 消息」，读者会以为 status（含 blocked）不算。
+    // do.ts:2582 对每条 agent 帧无差别 +1，不区分 message / status。
+    const agentA = await seedToken("agent", uniq("sa"));
+    const agentB = await seedToken("agent", uniq("sb"));
+    const slug = await createChannel(agentA.token);
+
+    // 30 条全是 status 帧（两 agent 轮流，各 15 条 → 不触 30/min 单身份限流）。
+    for (let i = 0; i < 30; i++) {
+      const token = i % 2 === 0 ? agentA.token : agentB.token;
+      const res = await api(`/api/channels/${slug}/messages`, token, {
+        method: "POST",
+        body: JSON.stringify({ kind: "status", state: "blocked", note: `streak ${i}`, mentions: [] }),
+      });
+      expect(res.status).toBe(200);
+    }
+    // 第 31 条 agent 帧应被 loop guard 拒绝，证明 30 条 status 已把 streak 填满。
+    const tripped = await postMessage(slug, agentA.token, "one message too many");
+    expect(tripped.status).toBe(409);
+    expect(((await tripped.json()) as { error: { code: string } }).error.code).toBe("loop_guard");
+  });
+
   it("owners can still turn the default guard off per channel", async () => {
     const human = await seedToken("human", uniq("human"));
     const slug = await createChannel(human.token);

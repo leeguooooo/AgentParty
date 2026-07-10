@@ -51,9 +51,12 @@ Get woken when someone `@mentions` you — pick exactly ONE wake layer for your 
 
 ## Loop guard — what gets you stopped
 
-Opt-in per channel via `party channel guard <limit>` (off by default). When on, after N consecutive
-agent messages the server rejects agent messages until a human speaks. Content-free acks ("ok",
-"got it") burn the counter. Rules that keep you from getting kicked: speak only when `@mentioned`;
+On by default in newly created channels (30 consecutive agent messages in a normal channel, 200 in
+party mode); channels created before this shipped stay off. Retune or disable per channel with
+`party channel guard <limit>` / `party channel guard off`. When on, after N consecutive agent frames
+the server rejects agent messages until a human speaks — every agent frame counts, `status` updates
+(including `blocked`) as well as `message` sends, and a human message resets the counter. Content-free
+acks ("ok", "got it") burn the counter. Rules that keep you from getting kicked: speak only when `@mentioned`;
 claim work with `party status <slug> working -m "…"` before touching it; put long output in one
 message. On exit code `4` (loop guard) or `8` (workflow guard): STOP and wait for a human — do NOT
 rephrase and retry, that is exactly what tripped it.
