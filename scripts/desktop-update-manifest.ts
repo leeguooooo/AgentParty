@@ -4,7 +4,8 @@ import { basename, dirname, join } from "node:path";
 
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const RFC_3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/;
-const usage = "Usage: bun scripts/desktop-update-manifest.ts --version <semver> --tag <tag> --repo <owner/repo> --dir <bundle-directory> --output <latest.json> --notes <notes> [--pub-date <RFC3339>]";
+const SIGNATURE_SUFFIX = /^\.sig(?:\.[A-Za-z0-9_-]+)?$/;
+const usage = "Usage: bun scripts/desktop-update-manifest.ts --version <semver> --tag <tag> --repo <owner/repo> --dir <bundle-directory> --output <latest.json> --notes <notes> [--signature-suffix <.sig>] [--pub-date <RFC3339>]";
 
 const updaterBundles = {
   "darwin-aarch64": "agentparty-desktop-darwin-arm64.app.tar.gz",
@@ -17,6 +18,7 @@ export interface DesktopUpdateManifestInput {
   repo: string;
   dir: string;
   notes: string;
+  signatureSuffix?: string;
   pubDate?: string;
 }
 
@@ -84,14 +86,21 @@ function releaseUrl(repo: string, tag: string, bundleName: string): string {
   return `https://github.com/${repositoryParts.map(encodeURIComponent).join("/")}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(bundleName)}`;
 }
 
-function readSignature(dir: string, bundleName: string): string {
+function validateSignatureSuffix(signatureSuffix: string): string {
+  if (!SIGNATURE_SUFFIX.test(signatureSuffix)) {
+    throw new Error(`Invalid updater signature suffix: ${signatureSuffix}`);
+  }
+  return signatureSuffix;
+}
+
+function readSignature(dir: string, bundleName: string, signatureSuffix: string): string {
   const bundlePath = join(dir, bundleName);
   if (!existsSync(bundlePath)) throw new Error(`Missing updater bundle: ${bundleName}`);
   const bundleStat = statSync(bundlePath);
   if (!bundleStat.isFile()) throw new Error(`Invalid updater bundle: ${bundleName}`);
   if (bundleStat.size === 0) throw new Error(`Empty updater bundle: ${bundleName}`);
 
-  const signatureName = `${bundleName}.sig`;
+  const signatureName = `${bundleName}${signatureSuffix}`;
   const signaturePath = join(dir, signatureName);
   if (!existsSync(signaturePath)) throw new Error(`Missing updater signature: ${signatureName}`);
   if (!statSync(signaturePath).isFile()) throw new Error(`Invalid updater signature: ${signatureName}`);
@@ -108,12 +117,13 @@ export function buildDesktopUpdateManifest(
   if (input.tag.length === 0) throw new Error("Release tag is required");
   const pubDate = input.pubDate ?? now().toISOString();
   validateRfc3339Date(pubDate);
+  const signatureSuffix = validateSignatureSuffix(input.signatureSuffix ?? ".sig");
 
   const platforms: DesktopUpdateManifest["platforms"] = {};
   for (const [platform, bundleName] of Object.entries(updaterBundles)) {
     platforms[platform] = {
       url: releaseUrl(input.repo, input.tag, bundleName),
-      signature: readSignature(input.dir, bundleName),
+      signature: readSignature(input.dir, bundleName, signatureSuffix),
     };
   }
 
@@ -134,6 +144,7 @@ function parseCliArguments(arguments_: string[]): DesktopUpdateManifestInput & {
     ["--dir", "dir"],
     ["--output", "output"],
     ["--notes", "notes"],
+    ["--signature-suffix", "signatureSuffix"],
     ["--pub-date", "pubDate"],
   ]);
 
@@ -155,6 +166,7 @@ function parseCliArguments(arguments_: string[]): DesktopUpdateManifestInput & {
     dir: values.get("dir")!,
     output: values.get("output")!,
     notes: values.get("notes")!,
+    signatureSuffix: values.get("signatureSuffix"),
     pubDate: values.get("pubDate"),
   };
 }

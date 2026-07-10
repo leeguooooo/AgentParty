@@ -44,8 +44,8 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCNEQ4QjAzMUFFMENCOTgKUldTWXkrQWFBNHROYStyOEdvNTJsWkFxYTlLcVZ0OVRiMEtVSDZ1OGxneXdOUEVua2EzUk5scGcK",
-      "endpoints": ["https://github.com/leeguooooo/agentparty/releases/latest/download/latest.json"]
+      "pubkey": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUcxcGJtbHphV2R1SUhCMVlteHBZeUJyWlhrNklFUTBNakF6UVRFeU5URXdORFZEUVRFS1VsZFRhRmhCVWxKRmFtOW5NVXRUUWtVNWExTmpLek5xVUhONWVUaFFSR1pTY0dSdk5ucHNka3dyUmpOQmFVcEdaR0ZyYzIxdlNtRUs=",
+      "endpoints": ["https://github.com/leeguooooo/agentparty/releases/latest/download/latest-v2.json"]
     }
   }
 }

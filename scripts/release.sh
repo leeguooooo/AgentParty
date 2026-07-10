@@ -134,6 +134,14 @@ required = {
     "agentparty-desktop-darwin-x64.signing-status.json",
     "latest.json",
 }
+mode = os.environ.get("DESKTOP_UPDATER_KEY_MODE", "legacy")
+if mode in {"bridge", "v2"}:
+    required.add("latest-v2.json")
+if mode == "bridge":
+    required.update({
+        "agentparty-desktop-darwin-arm64.app.tar.gz.sig.v2",
+        "agentparty-desktop-darwin-x64.app.tar.gz.sig.v2",
+    })
 
 try:
     payload = json.loads(os.environ["RELEASE_ASSETS_JSON"])
@@ -280,6 +288,9 @@ main() {
   local RELEASE_ASSETS_JSON
   RELEASE_ASSETS_JSON=$(gh release view "$TAG" --json assets)
   export RELEASE_ASSETS_JSON
+  local DESKTOP_UPDATER_KEY_MODE
+  DESKTOP_UPDATER_KEY_MODE=$(gh variable get DESKTOP_UPDATER_KEY_MODE --repo leeguooooo/AgentParty 2>/dev/null || printf 'legacy')
+  export DESKTOP_UPDATER_KEY_MODE
   verify_release_assets
   echo "== 装机 =="
   curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh

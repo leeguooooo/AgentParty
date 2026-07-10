@@ -13,6 +13,12 @@ const tauriConfig = JSON.parse(
 const desktopCapability = JSON.parse(
   readFileSync(resolve(import.meta.dir, "../desktop/src-tauri/capabilities/default.json"), "utf8"),
 );
+const desktopJob = workflow.slice(workflow.indexOf("  desktop:"), workflow.indexOf("  release:"));
+const releaseJob = workflow.slice(workflow.indexOf("  release:"));
+
+function namedStep(job: string, name: string, nextName: string): string {
+  return job.slice(job.indexOf(`      - name: ${name}`), job.indexOf(`      - name: ${nextName}`));
+}
 
 describe("desktop release workflow", () => {
   test("hands every signed updater artifact to the release job", () => {
@@ -43,10 +49,83 @@ describe("desktop release workflow", () => {
     expect(csp).not.toContain("script-src 'self' 'unsafe-eval'");
   });
 
+  test("fails closed unless updater key mode is legacy, bridge, or v2", () => {
+    expect(desktopJob).toContain('mode="${DESKTOP_UPDATER_KEY_MODE:-}"');
+    expect(desktopJob).toContain("legacy|bridge|v2)");
+    expect(desktopJob).toContain("invalid DESKTOP_UPDATER_KEY_MODE");
+    expect(releaseJob).toContain('mode="${DESKTOP_UPDATER_KEY_MODE:-}"');
+    expect(releaseJob).toContain("legacy|bridge|v2)");
+  });
+
+  test("keeps the old key out of v2 builds and requires both key generations for bridge", () => {
+    expect(desktopJob).toContain("id: updater-key-mode");
+    expect(desktopJob).toContain("require legacy updater signing key");
+    expect(desktopJob).toContain("steps.updater-key-mode.outputs.mode != 'v2'");
+    expect(desktopJob).toContain("require v2 updater signing key");
+    expect(desktopJob).toContain("TAURI_SIGNING_PRIVATE_KEY_V2: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_V2 }}");
+    expect(desktopJob).toContain("TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2 }}");
+    expect(desktopJob).toContain("build notarized desktop app with v2 updater key");
+    expect(desktopJob).toContain("build unnotarized desktop preview with v2 updater key");
+    expect(desktopJob).toContain("if: steps.apple-signing.outputs.enabled == 'true' && steps.updater-key-mode.outputs.mode == 'v2'");
+    expect(desktopJob).toContain("if: steps.apple-signing.outputs.enabled == 'false' && steps.updater-key-mode.outputs.mode == 'v2'");
+
+    const notarizedV2 = namedStep(
+      desktopJob,
+      "build notarized desktop app with v2 updater key",
+      "build unnotarized desktop preview with legacy updater key",
+    );
+    const previewV2 = namedStep(
+      desktopJob,
+      "build unnotarized desktop preview with v2 updater key",
+      "verify Developer ID signature and notarization ticket",
+    );
+    for (const v2Build of [notarizedV2, previewV2]) {
+      expect(v2Build).toContain("secrets.TAURI_SIGNING_PRIVATE_KEY_V2");
+      expect(v2Build).not.toContain("secrets.TAURI_SIGNING_PRIVATE_KEY }}");
+      expect(v2Build).not.toContain("secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}");
+    }
+  });
+
+  test("dual-signs bridge archives and publishes both updater channels", () => {
+    expect(tauriConfig.plugins.updater.endpoints).toEqual([
+      "https://github.com/leeguooooo/agentparty/releases/latest/download/latest-v2.json",
+    ]);
+    expect(desktopJob).toContain("name: sign bridge updater with v2 key");
+    expect(desktopJob).toContain('mv "${updater}.sig" "${updater}.sig.v2"');
+    expect(desktopJob).toContain('cp "${updater}.sig.v2" "${updater_out}.sig.v2"');
+    expect(releaseJob).toContain('generate_manifest dist/latest.json ".sig"');
+    expect(releaseJob).toContain('generate_manifest dist/latest-v2.json ".sig.v2"');
+    expect(releaseJob).toContain('--signature-suffix "$signature_suffix"');
+    expect(releaseJob).toContain("dist/latest-v2.json");
+    expect(releaseJob).toContain("dist/*.tar.gz.sig.v2");
+    expect(releaseJob).not.toMatch(/environment:\s*\n\s+name: release/);
+  });
+
+  test("pins the legacy channel to the configured bridge release in v2 mode", () => {
+    expect(desktopJob).toContain("DESKTOP_UPDATER_BRIDGE_TAG: ${{ vars.DESKTOP_UPDATER_BRIDGE_TAG }}");
+    expect(desktopJob).toContain("DESKTOP_UPDATER_BRIDGE_TAG is required");
+    expect(desktopJob).toContain("bridge mode requires DESKTOP_UPDATER_BRIDGE_TAG to equal the release tag");
+    expect(releaseJob).toContain('gh release download "$DESKTOP_UPDATER_BRIDGE_TAG"');
+    expect(releaseJob).toContain("--pattern latest.json");
+    expect(releaseJob).toContain("--output dist/latest.json");
+    expect(releaseJob).toContain("encoded_bridge_tag=");
+    expect(releaseJob).toContain("legacy updater manifest does not point to the configured bridge tag");
+  });
+
+  test("records updater key mode and rejects architecture or configuration drift", () => {
+    expect(desktopJob).toContain('"updater_key_mode":"%s"');
+    expect(releaseJob).toContain("map({notarized, distribution, updater_key_mode})");
+    expect(releaseJob).toContain("desktop architectures disagree on signing status or updater key mode");
+    expect(releaseJob).toContain("desktop updater key mode does not match release configuration");
+  });
+
   test("gates desktop distribution and falls back to an honest unnotarized preview", () => {
     expect(tauriConfig.bundle.macOS.signingIdentity).not.toBe("-");
     expect(workflow).toMatch(/desktop:\n(?:[\s\S]*?)environment:\n\s+name: release/);
     expect(workflow).toContain("id: apple-signing");
+    expect(workflow).toContain("vars.DESKTOP_REQUIRE_NOTARIZATION");
+    expect(workflow).toContain("DESKTOP_REQUIRE_NOTARIZATION must be true or false");
+    expect(workflow).toContain("Apple signing is required; missing:");
     expect(workflow).toContain('echo "enabled=false" >> "$GITHUB_OUTPUT"');
     expect(workflow).toContain("if: steps.apple-signing.outputs.enabled == 'true'");
     expect(workflow).toContain("if: steps.apple-signing.outputs.enabled == 'false'");

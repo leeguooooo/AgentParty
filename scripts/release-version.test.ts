@@ -499,6 +499,12 @@ describe("release asset verification", () => {
     "agentparty-desktop-darwin-x64.signing-status.json",
     "latest.json",
   ];
+  const bridgeAssets = [
+    ...requiredAssets,
+    "agentparty-desktop-darwin-arm64.app.tar.gz.sig.v2",
+    "agentparty-desktop-darwin-x64.app.tar.gz.sig.v2",
+    "latest-v2.json",
+  ];
 
   function releaseAssetsJson(assets: string[], emptyAsset?: string) {
     return JSON.stringify({ assets: assets.map((name) => ({ name, size: name === emptyAsset ? 0 : 1 })) });
@@ -511,6 +517,34 @@ describe("release asset verification", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("21 required release assets ok");
+  });
+
+  test("requires both updater channels and v2 signatures for a bridge release", () => {
+    const result = runReleaseShell("verify_release_assets", {
+      DESKTOP_UPDATER_KEY_MODE: "bridge",
+      RELEASE_ASSETS_JSON: releaseAssetsJson(bridgeAssets),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("24 required release assets ok");
+
+    const missing = "latest-v2.json";
+    const incomplete = runReleaseShell("verify_release_assets", {
+      DESKTOP_UPDATER_KEY_MODE: "bridge",
+      RELEASE_ASSETS_JSON: releaseAssetsJson(bridgeAssets.filter((asset) => asset !== missing)),
+    });
+    expect(incomplete.exitCode).not.toBe(0);
+    expect(incomplete.stderr).toContain(`missing release assets: ${missing}`);
+  });
+
+  test("requires the v2 manifest but not bridge-only signatures after rotation", () => {
+    const result = runReleaseShell("verify_release_assets", {
+      DESKTOP_UPDATER_KEY_MODE: "v2",
+      RELEASE_ASSETS_JSON: releaseAssetsJson([...requiredAssets, "latest-v2.json"]),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("22 required release assets ok");
   });
 
   test("rejects a release missing a signed desktop updater asset", () => {
