@@ -3,6 +3,7 @@ import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useRef, us
 import { ChannelList } from "./components/ChannelList";
 import { CreateChannel } from "./components/CreateChannel";
 import { DesktopSettings } from "./components/DesktopSettings";
+import { DesktopDownloadLink } from "./components/DesktopDownloadLink";
 import { DesktopPairingGate } from "./components/DesktopPairingGate";
 import { DesktopUpdater } from "./components/DesktopUpdater";
 import { HandleSetup } from "./components/HandleSetup";
@@ -789,6 +790,7 @@ export function App() {
         <a className="app-docs t-mono" href="/docs">
           docs ↗
         </a>
+        <DesktopDownloadLink desktop={desktop} />
         {me !== null && (
           <span className="t-mono app-me" title={meTitle(me)}>
             {me.avatar_thumb !== null || me.avatar_url !== null ? (
