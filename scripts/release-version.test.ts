@@ -491,10 +491,12 @@ describe("release asset verification", () => {
     "agentparty-desktop-darwin-arm64.dmg.sha256",
     "agentparty-desktop-darwin-arm64.app.tar.gz",
     "agentparty-desktop-darwin-arm64.app.tar.gz.sig",
+    "agentparty-desktop-darwin-arm64.signing-status.json",
     "agentparty-desktop-darwin-x64.dmg",
     "agentparty-desktop-darwin-x64.dmg.sha256",
     "agentparty-desktop-darwin-x64.app.tar.gz",
     "agentparty-desktop-darwin-x64.app.tar.gz.sig",
+    "agentparty-desktop-darwin-x64.signing-status.json",
     "latest.json",
   ];
 
@@ -508,11 +510,21 @@ describe("release asset verification", () => {
     });
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("19 required release assets ok");
+    expect(result.stdout).toContain("21 required release assets ok");
   });
 
   test("rejects a release missing a signed desktop updater asset", () => {
     const missing = "agentparty-desktop-darwin-x64.app.tar.gz.sig";
+    const result = runReleaseShell("verify_release_assets", {
+      RELEASE_ASSETS_JSON: releaseAssetsJson(requiredAssets.filter((asset) => asset !== missing)),
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain(`missing release assets: ${missing}`);
+  });
+
+  test("rejects a release missing a desktop signing status asset", () => {
+    const missing = "agentparty-desktop-darwin-arm64.signing-status.json";
     const result = runReleaseShell("verify_release_assets", {
       RELEASE_ASSETS_JSON: releaseAssetsJson(requiredAssets.filter((asset) => asset !== missing)),
     });

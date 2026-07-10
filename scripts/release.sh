@@ -126,10 +126,12 @@ required = {
     "agentparty-desktop-darwin-arm64.dmg.sha256",
     "agentparty-desktop-darwin-arm64.app.tar.gz",
     "agentparty-desktop-darwin-arm64.app.tar.gz.sig",
+    "agentparty-desktop-darwin-arm64.signing-status.json",
     "agentparty-desktop-darwin-x64.dmg",
     "agentparty-desktop-darwin-x64.dmg.sha256",
     "agentparty-desktop-darwin-x64.app.tar.gz",
     "agentparty-desktop-darwin-x64.app.tar.gz.sig",
+    "agentparty-desktop-darwin-x64.signing-status.json",
     "latest.json",
 }
 
