@@ -17,7 +17,7 @@ import { isAbsolute, join } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readAccount } from "../account";
 import { connect } from "../client";
-import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } from "../config";
+import { clearStuck, loadCursor, loadRevCursor, loadStuck, resolveChannel, saveCursor, saveRevCursor, saveStuck, type StuckWake } from "../config";
 import { formatMsg } from "../format";
 import { ensureFreshAccess, resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import {
@@ -34,6 +34,21 @@ import { buildContext } from "./status";
 
 const PROTOCOL_REMINDER =
   "被 @ 唤起：先读本文件 charter 了解频道约定；若发现 charter 与频道现状矛盾，视为一个待办上报。需要更多上下文再 `party history <channel 字段的频道>`；需要产出结论时，先用 `party send --reply-to <seq>` 把 final synthesis 发回频道，再 status done；别只回本地。";
+
+// 唤醒未送达（runner 非零退出 / 无 session id / SDK 抛错 / [attach] 被拒）。
+// 四种 runner 统一抛它：调用方据此判断「这条 @ 没进过模型」，从而不推进游标。
+export class WakeBlockedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WakeBlockedError";
+  }
+}
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// 有界重放（#198）：同一条 seq 连续送达失败到顶就响亮放弃，既不无限重放也不静默丢弃
+const DEFAULT_MAX_WAKE_ATTEMPTS = 3;
+const DEFAULT_WAKE_RETRY_DELAY_MS = 500;
 
 // context file 里附带的最近频道消息条数上限（冷起的 runner 不用先跑 history 也有基本上下文）
 const RECENT_MAX = 20;
@@ -183,7 +198,7 @@ export function writeContextFile(
   return path;
 }
 
-const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "profile", "profile-once", "profile-poll-interval"];
+const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "replay-backlog", "profile", "profile-once", "profile-poll-interval"];
 const HELP = `usage: party serve [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all]
        party serve --profile <owner>/<handle>
 
@@ -199,6 +214,11 @@ Options:
   --repo URL           clone into workdir/repo once, then git pull --ff-only before each wake
   --profile ref        run the reusable project-agent profile as one resident daemon across all invites
   --auto-upgrade       between wakes, if a newer party binary is on disk, re-exec it (issue #45)
+  --replay-backlog     on attach, replay the offline backlog one wake per message
+                       (default: skip the backlog, advance the cursor, and print
+                       how many were skipped — serve wakes only for messages that
+                       arrive AFTER it attaches, issue #193. An undelivered wake
+                       (stuck, issue #198) is a debt, not backlog: it always replays.)
   --all                run for every non-self message, not only @mentions`;
 
 export interface ServeOptions {
@@ -209,9 +229,20 @@ export interface ServeOptions {
   sinceRev?: number; // 修订游标（hello.since_rev）
   cmd: string;
   mentionsOnly: boolean;
+  // 挂载时是否跳过离线积压（#193）。默认 true：serve 是唤醒 supervisor，不是补偿队列。
+  // 但「积压」与「欠账」是两回事（#198）：跳过的只能是**已离线堆积、从未送达**的历史；
+  // 送达失败被钉住的 stuck 无论多旧都必须重放，否则 #118 救下的那条 @ 会被这里吃掉。
+  skipBacklog?: boolean;
   builtinRunner?: BuiltinRunnerOptions;
   onCursor?: (cursor: number) => void;
   onRevCursor?: (revCursor: number) => void;
+  /** 上次进程留下的欠账（#198）：崩溃前失败了几次，重启后接着数。 */
+  stuck?: StuckWake | null;
+  onStuck?: (stuck: StuckWake | null) => void;
+  /** 有界重放：同一条 seq 连续送达失败上限，到顶就响亮放弃。 */
+  maxWakeAttempts?: number;
+  wakeRetryDelayMs?: number;
+  post?: typeof postMessage;
   // 测试注入点：默认用 sh -c 起子进程
   runCommand?: (
     frame: MsgFrame,
@@ -643,6 +674,7 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
         mentions: [],
         blocked_reason: note,
       });
+      throw new WakeBlockedError(note);
     }
   };
 
@@ -698,12 +730,9 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}`,
       );
-      await postBlocked(
-        opts,
-        frame,
-        `builtin ${opts.harness} runner blocked: exit code ${run.result.code}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`,
-      );
-      return;
+      const note = `builtin ${opts.harness} runner blocked: exit code ${run.result.code}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`;
+      await postBlocked(opts, frame, note);
+      throw new WakeBlockedError(note);
     }
 
     finalSid = run.sessionId;
@@ -712,12 +741,9 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=unknown duration_ms=${now - started} exit=${exitCode ?? 0} missing_session_id=true`,
       );
-      await postBlocked(
-        opts,
-        frame,
-        `builtin ${opts.harness} runner blocked: no session id parsed; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`,
-      );
-      return;
+      const note = `builtin ${opts.harness} runner blocked: no session id parsed; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`;
+      await postBlocked(opts, frame, note);
+      throw new WakeBlockedError(note);
     }
 
     const wakes = prior && !forked ? prior.wakes + 1 : 1;
@@ -743,8 +769,9 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} attach_error=${JSON.stringify(message)}`,
       );
-      await postBlocked(opts, frame, `builtin ${opts.harness} runner blocked: ${message}`);
-      return;
+      const note = `builtin ${opts.harness} runner blocked: ${message}`;
+      await postBlocked(opts, frame, note);
+      throw new WakeBlockedError(note);
     }
     await post(opts.server, opts.token, opts.channel, {
       kind: "message",
@@ -934,6 +961,8 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       token: child.token,
       channel,
       since: loadCursor(channel),
+      stuck: loadStuck(channel),
+      onStuck: (st) => (st === null ? clearStuck(channel) : saveStuck(channel, st)),
       sinceRev: loadRevCursor(channel),
       cmd: "",
       mentionsOnly: opts.mentionsOnly,
@@ -1041,7 +1070,18 @@ export async function runServe(o: ServeOptions): Promise<number> {
     onRevCursor: o.onRevCursor,
   });
 
+  const skipBacklog = o.skipBacklog !== false; // 默认跳过离线积压（#193）
+  // 挂载那一刻的频道水位（welcome.last_seq），只在首个 welcome 记一次。
+  let attachHead: number | null = null;
   let self = "";
+  // 欠账（#198）：这条 @ 送达失败、从没进过模型。跨进程持久，重启后接着数重试次数。
+  let stuck: StuckWake | null = o.stuck ?? null;
+  const maxAttempts = Math.max(1, o.maxWakeAttempts ?? DEFAULT_MAX_WAKE_ATTEMPTS);
+  const retryDelayMs = o.wakeRetryDelayMs ?? DEFAULT_WAKE_RETRY_DELAY_MS;
+  const setStuck = (next: StuckWake | null) => {
+    stuck = next;
+    o.onStuck?.(next);
+  };
   let code = 0;
   let advertised = false;
   let charter: ChannelCharter | null = o.charter ?? null;
@@ -1076,6 +1116,21 @@ export async function runServe(o: ServeOptions): Promise<number> {
     for await (const frame of conn.frames) {
       if (frame.type === "welcome") {
         self = frame.self;
+        // 首个 welcome：定格挂载水位，并就积压去留告知（stderr）。知情权给 agent，决定权给人。
+        if (attachHead === null) {
+          attachHead = frame.last_seq;
+          const pending = Math.max(0, attachHead - o.since);
+          if (pending > 0) {
+            const range = `seq ${o.since + 1}..${attachHead}`;
+            const debt = stuck !== null && stuck.seq <= attachHead ? ` 欠账 seq=${stuck.seq} 不在跳过之列，将重放（#198）。` : "";
+            out(
+              skipBacklog
+                ? `serve: 跳过 ${pending} 条离线积压（${range}）——不逐条唤醒 runner。${debt}` +
+                    ` 查看：party history ${o.channel}；要逐条重放请重启并加 --replay-backlog`
+                : `serve: --replay-backlog：将逐条重放 ${pending} 条离线积压（${range}），每条唤醒一次 runner（可能重放副作用）`,
+            );
+          }
+        }
         if (o.statusline === true) {
           writeStatuslineCache({
             ...localStatuslineBase(o.channel),
@@ -1118,29 +1173,73 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // fresh = 游标之上的新消息。历史修订快照会穿透去重被重放（seq 早已消费过），
       // 它们不是新唤醒——不 fresh 就绝不触发 runner（否则旧 @ 被编辑一次，每次重连都重跑一遍）
       const fresh = frame.seq > conn.cursor;
-      const qualifies = fresh && !fromSelf && (!o.mentionsOnly || frame.mentions.includes(self));
+      // 离线积压（seq <= 挂载水位）跳过模式下不唤醒：照常 ack + 进 recent，但不拉起 runner（#193）。
+      // 唯一例外：**欠账**。它送达失败过，从没进过模型——它不是积压，是我们欠着的（#198 约束②）。
+      // 少了这个例外，#118 特意不 ack 保下来的那条 @ 会在重连后被当成积压跳掉，净效果等于没修。
+      const isDebt = stuck !== null && frame.seq === stuck.seq;
+      const isBacklog = skipBacklog && attachHead !== null && frame.seq <= attachHead && !isDebt;
+      const qualifies = fresh && !fromSelf && !isBacklog && (!o.mentionsOnly || frame.mentions.includes(self));
       if (qualifies) {
         out(`▶ ${formatMsg(frame)}`);
         // 串行：本条命令跑完再消费下一帧（新帧此间缓冲在 FrameQueue），避免并发唤起互相抢
-        try {
-          const cliUpgrade = upgradeNotice(o.autoUpgrade === true, o.upgradeDeps);
-          await run(frame, {
-            cmd: o.cmd,
-            channel: o.channel,
-            self,
-            recent: recent.slice(),
-            charter,
-            projectAgent: o.projectAgent ?? null,
-            cliUpgrade,
-          });
-        } catch (e) {
-          out(`  命令失败: ${e instanceof Error ? e.message : String(e)}`);
+        // 有界重试（#198）：同一条 seq 最多 maxAttempts 次。前一个进程崩在第 k 次，这里从 k 接着数。
+        const priorAttempts = stuck?.seq === frame.seq ? stuck.attempts : 0;
+        let lastError = "";
+        let delivered = false;
+        for (let attempt = priorAttempts + 1; attempt <= maxAttempts; attempt++) {
+          try {
+            const cliUpgrade = upgradeNotice(o.autoUpgrade === true, o.upgradeDeps);
+            await run(frame, {
+              cmd: o.cmd,
+              channel: o.channel,
+              self,
+              recent: recent.slice(),
+              charter,
+              projectAgent: o.projectAgent ?? null,
+              cliUpgrade,
+            });
+            delivered = true;
+            break;
+          } catch (e) {
+            lastError = e instanceof Error ? e.message : String(e);
+            out(`  命令失败 (${attempt}/${maxAttempts}): ${lastError}`);
+            // 先落盘再重试：此刻进程崩掉，重启后不会把已经烧掉的次数忘干净
+            setStuck({ seq: frame.seq, attempts: attempt, last_error: lastError });
+            if (attempt < maxAttempts && retryDelayMs > 0) await delay(retryDelayMs);
+          }
+        }
+        if (delivered) {
+          if (stuck !== null) setStuck(null); // 了结：欠账清掉
+        } else {
+          // 有界重放到顶：显式放弃，但必须响亮留痕——静默丢弃正是 #118 要修的东西。
+          // 没有 CLI flag，所以重试预算与退避必须**在频道里可见**：把常数藏进源码是不诚实的。
+          const note =
+            `wake undelivered, giving up: seq=${frame.seq}; ` +
+            `attempts=${maxAttempts}/${maxAttempts}; retry_delay_ms=${retryDelayMs}; ` +
+            `last error: ${lastError}`;
+          out(`  ${note}`);
+          try {
+            await (o.post ?? postMessage)(o.server, o.token, o.channel, {
+              kind: "status",
+              state: "blocked",
+              note,
+              mentions: [],
+              blocked_reason: note,
+            });
+          } catch (e) {
+            out(`  放弃通告发送失败: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          setStuck(null); // 放弃也是一种「了结」：宣告过了，才允许推进游标
         }
       }
       // 触发消息本身不进 recent（它就是 context 主体）；自己的/未 @ 的都算上下文
       recent.push(frame);
       if (recent.length > RECENT_MAX) recent.shift();
-      // 处理（或跳过）后才推进游标，退出时未消费的留给下次补拉
+      // 游标只表达「已了结」（#198）：走到这里，这条唤醒要么送达成功、要么有界重试耗尽后
+      // **宣告过**放弃——两者都是了结，都该推进游标。
+      // 欠账不会活着走到这一行：它只可能在上面的重试循环里随进程一起死掉，那时游标压根没动，
+      // 下次 attach 从 cursor 续，这条 @ 会被重放（attempts 从盘上接着数）。
+      // 不要在这里加 `if (stuck === null)` 守卫——变异测试证明它守不住任何东西（死代码）。
       conn.ack(frame.seq);
       if (o.statusline === true) {
         writeStatuslineCache({
@@ -1185,7 +1284,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "auto-upgrade", "profile-once"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "auto-upgrade", "replay-backlog", "profile-once"] });
   const auth = await resolveAuthDetailed();
   if (!auth.server || !auth.token) {
     console.error("no config, run: party login or party init --server URL --token T");
@@ -1271,9 +1370,12 @@ export async function run(argv: string[]): Promise<number> {
     token,
     channel,
     since: loadCursor(channel),
+    stuck: loadStuck(channel),
+    onStuck: (st) => (st === null ? clearStuck(channel) : saveStuck(channel, st)),
     sinceRev: loadRevCursor(channel),
     cmd: cmd ?? "",
     mentionsOnly: flags.all !== true,
+    skipBacklog: flags["replay-backlog"] !== true, // 默认跳过积压；--replay-backlog 才重放（#193）
     onCursor: (c) => saveCursor(channel, c),
     onRevCursor: (r) => saveRevCursor(channel, r),
     advertise: () => advertiseServeWake(auth, channel),

@@ -103,10 +103,11 @@ describe("runServe", () => {
 
   test("reports a non-zero runner exit instead of silently swallowing it", async () => {
     const s = closeAfterOneMention();
-    const o = opts({ server: s.url, cmd: "exit 7" });
+    // 每次失败都打印，并带上「第几次/共几次」——有界重试的进度必须可见（#198）
+    const o = opts({ server: s.url, cmd: "exit 7", maxWakeAttempts: 1, wakeRetryDelayMs: 0, post: async () => ({ seq: 1 }) });
 
     expect(await runServe(o)).toBe(EXIT_ARCHIVED);
-    expect(o.lines.some((line) => line.includes("命令失败: command exited 7"))).toBe(true);
+    expect(o.lines.some((line) => line.includes("命令失败 (1/1): command exited 7"))).toBe(true);
   });
 
   test("advertises wake capability once on attach, before handling mentions", async () => {
@@ -367,15 +368,18 @@ describe("builtin runner", () => {
       return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
     };
 
-    await createBuiltinRunner({
-      server: "http://agentparty.test",
-      token: "ap_tok",
-      channel: "dev",
-      harness: "codex",
-      workdir,
-      runProcess,
-      post,
-    })(triggerFrame(42), runnerCtx());
+    // 唤醒未送达：既发 blocked，也抛给调用方（否则 runServe 会 ack 掉这条 @）
+    await expect(
+      createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir,
+        runProcess,
+        post,
+      })(triggerFrame(42), runnerCtx()),
+    ).rejects.toThrow(/path must be absolute/);
 
     const finalPost = posts.at(-1)!;
     expect(finalPost.body).toMatchObject({ kind: "status", state: "blocked" });
@@ -567,15 +571,17 @@ describe("builtin runner", () => {
     const { posts, post } = postRecorder();
     const workdir = tempDir();
 
-    await createBuiltinRunner({
-      server: "http://agentparty.test",
-      token: "ap_tok",
-      channel: "dev",
-      harness: "codex",
-      workdir,
-      runProcess: async () => ({ code: 7, stdout: "", stderr: "boom" }),
-      post,
-    })(triggerFrame(45), runnerCtx());
+    await expect(
+      createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir,
+        runProcess: async () => ({ code: 7, stdout: "", stderr: "boom" }),
+        post,
+      })(triggerFrame(45), runnerCtx()),
+    ).rejects.toThrow(/exit code 7/);
 
     expect(posts).toHaveLength(2);
     const blocked = posts[1]!.body as { note?: unknown };
@@ -952,7 +958,7 @@ describe("codex-sdk runner", () => {
       }),
     });
 
-    await run(triggerFrame(105), runnerCtx());
+    await expect(run(triggerFrame(105), runnerCtx())).rejects.toThrow(/sdk exploded/);
     await run(triggerFrame(106), runnerCtx());
 
     expect(startCalls).toBe(1);
