@@ -62,7 +62,12 @@ export interface WebSession {
   accessToken: string;
   refreshToken: string | null;
   expiresAt: number | null; // epoch 秒；null 表示未知（保守当已过期处理）
-  /** 稳定身份锚点（#126 follow-up）：优先 id_token.sub，回退 access_token.sub；解不出为 null。 */
+  /**
+   * 稳定身份锚点（#126 follow-up）：**优先 access_token.sub**，id_token.sub 仅作回退；解不出为 null。
+   * 之所以以 access_token 为准——App 的 identityRef 用的是 jwtSub(token)（access token），
+   * 服务端授权也按 access token 的 claims.sub 取身份；若以 id_token 为准，遇到 pairwise
+   * subject 的 IdP 会把自己刚登录的会话判成别人的。
+   */
   identity: string | null;
 }
 
