@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read # dorny/paths-filter 在 PR 模式下用 API 列变更文件（含 fork PR / 默认权限收紧时）
     outputs:
       cli_only: ${{ github.event_name == 'pull_request' && steps.filter.outputs.cli == 'true' && steps.filter.outputs.non_cli == 'false' }}
     steps:
