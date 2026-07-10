@@ -6,6 +6,7 @@ import { resolveAuthDetailed } from "../oidc-cli";
 import { jsonFrame, nowTs } from "../json";
 import { readConfig, resolveChannel, writeConfig } from "../config";
 import { cachedIdentity, statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
+import { healServerUrl } from "../validation";
 
 const WHOAMI_FLAGS = ["json", "caps", "rejoin"];
 const HELP = `usage: party whoami [--json] [--caps] [--rejoin]
@@ -91,8 +92,9 @@ export async function run(argv: string[]): Promise<number> {
           }
         : null;
     if (json) {
-      // 原样吐 /api/me（name/email/kind/role/owner…），供工具判身份/权限，免解析人类串
+      // 保留 /api/me 身份字段供工具判身份/权限；CLI 本地元数据在后，保持权威。
       console.log(JSON.stringify(jsonFrame({
+        ...me,
         type: "whoami",
         ts: nowTs(),
         logged_in: true,
@@ -102,7 +104,6 @@ export async function run(argv: string[]): Promise<number> {
         // account_server 是账号会话自己的 server，二者可能不同，分开给才不会被混用。
         effective_server: auth.server,
         account_server: auth.account.server ?? null,
-        ...me,
         auth_source: auth.auth_source,
         runtime: {
           name: me.name,
@@ -125,8 +126,11 @@ export async function run(argv: string[]): Promise<number> {
       console.log(`  scope: ${me.channel_scope ?? "none (all channels)"}`);
       // account session 的 server 可能和生效 server 不是同一台（人类登录过另一台部署的常态），
       // 不标注清楚，agent 会把这行的 URL 误当成命令实际打到的地方。
+      const accountServer = auth.account.server;
       const accountServerMismatch =
-        auth.account.present && auth.account.server !== undefined && auth.account.server !== auth.server;
+        auth.account.present &&
+        accountServer !== undefined &&
+        (healServerUrl(accountServer) ?? accountServer) !== (healServerUrl(auth.server) ?? auth.server);
       console.log(
         `account: ${
           auth.account.present

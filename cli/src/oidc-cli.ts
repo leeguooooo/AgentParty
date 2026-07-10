@@ -342,11 +342,17 @@ function accountInfo(sess: AccountSession | null): AccountInfo {
 // 关键：agent 用 `party init --token <agent-token>` 接入后必须以「该 agent」的身份发言——
 // 若让残留的人类账号会话顶替，agent 就会以「人」的名义说话，且过期会话还会直接 401
 // （「让 agent 加入」踩过：init 写了 ap_ token，却被旧 account.json 顶掉导致 send 失败）。
-// server 优先 config（频道绑定所在），仅账号会话单独存在时用其 server。
+// server 必须与 credential source 成对选择，不能把 config server 和 account token 混用。
 export async function resolveAuthDetailed(): Promise<ResolvedAuthDetailed> {
   const { config: cfg, source } = readConfigWithSource();
   const sess = readAccount();
-  const rawServer = cfg?.server ?? sess?.server;
+  const useRuntimeConfig = !!cfg?.token;
+  const useAccountSession = !useRuntimeConfig && !!sess?.refresh_token;
+  const rawServer = useRuntimeConfig
+    ? cfg!.server
+    : useAccountSession
+      ? sess!.server
+      : cfg?.server ?? sess?.server;
   // 自愈缺协议头的 server（手改 config 的常见事故，生产实锤 #agentparty seq=725）：
   // 治不了就明确报出来，别让它流进 fetch 变成不可诊断的 "fetch() URL is invalid"
   const server = rawServer ? healServerUrl(rawServer) : undefined;
@@ -356,16 +362,16 @@ export async function resolveAuthDetailed(): Promise<ResolvedAuthDetailed> {
   if (!server) {
     return { server: null, token: null, auth_source: "none", config: source, account: accountInfo(sess) };
   }
-  if (cfg?.token) {
+  if (useRuntimeConfig) {
     return {
       server,
-      token: cfg.token,
+      token: cfg!.token,
       auth_source: "runtime_config",
       config: source,
       account: accountInfo(sess),
     };
   }
-  if (sess?.refresh_token) {
+  if (useAccountSession) {
     // 身份误用护栏（issue #42）：config 无 token、正回落到人类账号会话，但 cwd-state 有个指向
     // 已失效路径的 config_path 面包屑——说明这本该是个 agent，只是丢了它的 config。宁可显著告警，
     // 避免 agent 静默以人类身份发言（冒充是安全问题）。

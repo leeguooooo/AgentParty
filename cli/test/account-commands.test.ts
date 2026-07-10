@@ -452,6 +452,52 @@ describe("whoami", () => {
   // issue #140：runtime config 指向 server A，account.json 是另一台 server B 的人类会话——
   // /api/me 打的是 A，但旧输出只印 account 那行的 B，agent 会误判自己在 B 上。
   describe("effective server disambiguation (issue #140)", () => {
+    test("account fallback keeps its token paired with the account server", async () => {
+      mock = startOidcMock();
+      restMock = startRestMock();
+      writeConfig({ server: mock.url, token: "" });
+      writeAccount({
+        server: restMock.url,
+        refresh_token: "ref",
+        access_token: "acc-live",
+        expires_at: nowSec() + 3600,
+      });
+
+      const code = await whoamiRun(["--json"]);
+      expect(code).toBe(0);
+      const frame = JSON.parse(logs[0]!);
+      expect(frame.server).toBe(restMock.url);
+      expect(frame.effective_server).toBe(restMock.url);
+      expect(frame.auth_source).toBe("account_session");
+      expect(restMock.requests.some((r) => r.path === "/api/me")).toBe(true);
+      expect(mock.requests.some((r) => r.path === "/api/me")).toBe(false);
+    });
+
+    test("json mode keeps local server fields authoritative over /api/me", async () => {
+      restMock = startRestMock((request) => {
+        if (request.method !== "GET" || request.path !== "/api/me") return undefined;
+        return Response.json({
+          name: "agent",
+          email: null,
+          kind: "agent",
+          role: "agent",
+          owner: null,
+          channel_scope: null,
+          server: "https://remote-payload.example",
+          effective_server: "https://remote-effective.example",
+          account_server: "https://remote-account.example",
+        });
+      });
+      writeConfig({ server: restMock.url, token: "ap_effective" });
+
+      const code = await whoamiRun(["--json"]);
+      expect(code).toBe(0);
+      const frame = JSON.parse(logs[0]!);
+      expect(frame.server).toBe(restMock.url);
+      expect(frame.effective_server).toBe(restMock.url);
+      expect(frame.account_server).toBe(null);
+    });
+
     test("text mode: runtime line shows the server /api/me was actually called against", async () => {
       restMock = startRestMock();
       writeConfig({ server: restMock.url, token: "ap_effective" });
@@ -498,6 +544,21 @@ describe("whoami", () => {
       const stdout = logs.join("\n");
       expect(stdout).toContain(`runtime: logged in as fan@example.com (human/human) server=${mock.url}`);
       expect(stdout).not.toContain("different server");
+    });
+
+    test("text mode: equivalent server URLs do not trigger a mismatch annotation", async () => {
+      restMock = startRestMock();
+      writeConfig({ server: restMock.url, token: "ap_effective" });
+      writeAccount({
+        server: `${restMock.url}/`,
+        refresh_token: "ref",
+        access_token: "acc-live",
+        expires_at: nowSec() + 3600,
+      });
+
+      const code = await whoamiRun([]);
+      expect(code).toBe(0);
+      expect(logs.join("\n")).not.toContain("different server");
     });
 
     test("json mode: effective_server and account_server are distinct, unambiguous fields", async () => {
