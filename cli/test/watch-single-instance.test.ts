@@ -8,7 +8,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireWatchLock, EXIT_ALREADY_WATCHING, runWatch } from "../src/commands/watch";
+import { EXIT_ALREADY_WATCHING, runWatch } from "../src/commands/watch";
+import { acquireInstanceLock } from "../src/instance-lock";
 import { startMockServer, welcomeFrame } from "./mock-server";
 
 const dirs: string[] = [];
@@ -23,17 +24,17 @@ function dir(): string {
 
 describe("watch 单实例保护 (#195)", () => {
   test("第一个 watcher 拿到锁", () => {
-    const lock = acquireWatchLock("dev", dir());
+    const lock = acquireInstanceLock("watch", "dev", dir());
     expect(lock.ok).toBe(true);
     lock.release?.();
   });
 
   test("同一 (channel, workspace) 的第二个 watcher 被拒，并告知已有 watcher 的 pid", () => {
     const d = dir();
-    const first = acquireWatchLock("dev", d);
+    const first = acquireInstanceLock("watch", "dev", d);
     expect(first.ok).toBe(true);
 
-    const second = acquireWatchLock("dev", d);
+    const second = acquireInstanceLock("watch", "dev", d);
     expect(second.ok).toBe(false);
     expect(second.heldByPid).toBe(process.pid);
 
@@ -42,8 +43,8 @@ describe("watch 单实例保护 (#195)", () => {
 
   test("不同频道互不阻塞", () => {
     const d = dir();
-    const a = acquireWatchLock("alpha", d);
-    const b = acquireWatchLock("beta", d);
+    const a = acquireInstanceLock("watch", "alpha", d);
+    const b = acquireInstanceLock("watch", "beta", d);
     expect(a.ok).toBe(true);
     expect(b.ok).toBe(true);
     a.release?.();
@@ -52,9 +53,9 @@ describe("watch 单实例保护 (#195)", () => {
 
   test("释放之后可以重挂（正常的 exit → 处理 → 重挂 循环）", () => {
     const d = dir();
-    const first = acquireWatchLock("dev", d);
+    const first = acquireInstanceLock("watch", "dev", d);
     first.release?.();
-    const second = acquireWatchLock("dev", d);
+    const second = acquireInstanceLock("watch", "dev", d);
     expect(second.ok).toBe(true);
     second.release?.();
   });
@@ -66,7 +67,7 @@ describe("watch 单实例保护 (#195)", () => {
     expect(() => process.kill(dead, 0)).toThrow(); // 先确认这个 pid 真的不存在
     writeFileSync(join(d, "watch-dev.lock"), JSON.stringify({ pid: dead, channel: "dev" }));
 
-    const lock = acquireWatchLock("dev", d);
+    const lock = acquireInstanceLock("watch", "dev", d);
     expect(lock.ok).toBe(true);
     expect(JSON.parse(readFileSync(join(d, "watch-dev.lock"), "utf8")).pid).toBe(process.pid);
     lock.release?.();
@@ -75,7 +76,7 @@ describe("watch 单实例保护 (#195)", () => {
   test("活着的锁不会被误判成陈旧（这是最危险的错误方向）", () => {
     const d = dir();
     writeFileSync(join(d, "watch-dev.lock"), JSON.stringify({ pid: process.pid, channel: "dev" }));
-    const lock = acquireWatchLock("dev", d);
+    const lock = acquireInstanceLock("watch", "dev", d);
     expect(lock.ok).toBe(false);
     expect(lock.heldByPid).toBe(process.pid);
   });
