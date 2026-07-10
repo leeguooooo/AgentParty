@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 // @ts-expect-error The deployment smoke is intentionally plain Node ESM.
 import { desktopPairingSmokePayload, smokeDesktopPairing } from "../worker/scripts/smoke-desktop-pairing.mjs";
+
+const dualDeploy = readFileSync(resolve(import.meta.dir, "../worker/scripts/deploy-dual.mjs"), "utf8");
 
 describe("desktop pairing deploy smoke", () => {
   test("sends an S256 Device Flow probe and validates the target origin", async () => {
@@ -36,7 +40,18 @@ describe("desktop pairing deploy smoke", () => {
   });
 
   test("generates fresh independent device challenges", () => {
-    expect(desktopPairingSmokePayload().device_secret_challenge)
-      .not.toBe(desktopPairingSmokePayload().device_secret_challenge);
+    const first = desktopPairingSmokePayload();
+    const second = desktopPairingSmokePayload();
+    expect(first.device_secret_challenge).not.toBe(first.code_challenge);
+    expect(first.device_secret_challenge).not.toBe(second.device_secret_challenge);
+  });
+
+  test("runs the Device Flow smoke unconditionally after every target deploy", () => {
+    const deploy = dualDeploy.indexOf('run("wrangler-accounts", ["--profile", target.profile, "deploy"');
+    const pairingSmoke = dualDeploy.indexOf('run("node", ["scripts/smoke-desktop-pairing.mjs"]');
+    const optionalAuthenticatedSmoke = dualDeploy.indexOf("if (target.smokeToken && target.smokeWriteToken)");
+    expect(deploy).toBeGreaterThan(-1);
+    expect(pairingSmoke).toBeGreaterThan(deploy);
+    expect(optionalAuthenticatedSmoke).toBeGreaterThan(pairingSmoke);
   });
 });
