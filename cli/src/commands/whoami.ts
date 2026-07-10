@@ -84,6 +84,10 @@ export async function run(argv: string[]): Promise<number> {
             channel: boundChannel,
           }
         : null;
+    // 生效 server（命令实际落点）vs 账号会话自带的 server：一台机器上人类账号(server A)与
+    // agent runtime token(server B)并存是常态，二者不同则显式标注，别让 agent 拿错 server 汇报/拼链接（#140）。
+    const accountServer = auth.account.present ? auth.account.server ?? null : null;
+    const accountServerDiffers = accountServer !== null && accountServer !== auth.server;
     if (json) {
       // 原样吐 /api/me（name/email/kind/role/owner…），供工具判身份/权限，免解析人类串
       console.log(JSON.stringify(jsonFrame({
@@ -91,6 +95,9 @@ export async function run(argv: string[]): Promise<number> {
         ts: nowTs(),
         logged_in: true,
         server: auth.server,
+        // 显式区分生效落点与账号会话 server，agent 免解析人话即可判定「命令打到哪」（#140）
+        effective_server: auth.server,
+        account_server: accountServer,
         ...me,
         auth_source: auth.auth_source,
         runtime: {
@@ -107,10 +114,11 @@ export async function run(argv: string[]): Promise<number> {
       })));
     } else {
       const who = me.email ?? me.name;
-      console.log(`runtime: logged in as ${who} (${me.kind}/${me.role})`);
+      console.log(`runtime: logged in as ${who} (${me.kind}/${me.role}) server=${auth.server}`);
       if (me.owner) console.log(`  owner: ${me.owner}`);
       console.log(`  scope: ${me.channel_scope ?? "none (all channels)"}`);
-      console.log(`account: ${auth.account.present ? `${auth.account.email ?? auth.account.sub ?? "present"} present server=${auth.account.server}` : `absent path=${auth.account.path}`}`);
+      const accountDiffNote = accountServerDiffers ? " (different server — not used for this command)" : "";
+      console.log(`account: ${auth.account.present ? `${auth.account.email ?? auth.account.sub ?? "present"} present server=${auth.account.server}${accountDiffNote}` : `absent path=${auth.account.path}`}`);
       console.log(`config: ${auth.config.path ? `${auth.config.kind} ${auth.config.path} token=${auth.config.token_fingerprint ?? "none"}` : "none"}`);
       console.log(`auth-source: ${auth.auth_source}`);
       if (rejoin) {
