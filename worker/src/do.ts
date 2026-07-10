@@ -3085,13 +3085,29 @@ export class ChannelDO extends Server<Env> {
   }
 
   // 修订游标（issue #33）：单调修订序号，编辑/撤回/超越各占一号；DO 单线程，MAX+1 足够
+  // rev_seq 计数器落 meta，绝不从 MAX(rev_seq) 派生（#125）。
+  //
+  // 修剪按 seq 删行（DELETE FROM messages WHERE seq <= cutoff），而一条【旧】消息若被
+  // 【近期】编辑/撤回过，它的 seq 很小、rev_seq 却很大。删掉这一行，MAX(rev_seq) 就回退，
+  // 下一个修订复用已经发过的号。此时一个离线客户端带着 since_rev=R 回来补拉，
+  // 服务端按 rev_seq > since_rev 过滤，新修订的号 <= R → 永久漏收。
+  // retract 的设计场景正是撤回误发的密钥——漏收就是撤不掉。
+  //
+  // 首次读取时从 MAX(rev_seq) 播种，存量 DO 无需迁移即可平滑升级。
   private lastRevSeq(): number {
+    const cached = this.getMeta("rev_seq");
+    if (cached !== null) return Number(cached);
     const row = this.ctx.storage.sql.exec("SELECT COALESCE(MAX(rev_seq), 0) AS last FROM messages").one();
-    return Number(row.last);
+    const seeded = Number(row.last);
+    this.setMeta("rev_seq", String(seeded));
+    return seeded;
   }
 
+  // 单调递增，且立即落盘——即便本次写入随后失败，号也不会被复用。
   private nextRevSeq(): number {
-    return this.lastRevSeq() + 1;
+    const next = this.lastRevSeq() + 1;
+    this.setMeta("rev_seq", String(next));
+    return next;
   }
 
   private agentStreak(): number {
