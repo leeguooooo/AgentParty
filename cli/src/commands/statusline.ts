@@ -1,6 +1,6 @@
 // party statusline — compact, prompt-safe identity segment for Codex/Claude/tmux/etc.
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
-import { readConfig, resolveChannel, writeConfig, type CachedIdentity } from "../config";
+import { readConfig, resolveChannel, refreshConfigInPlace, type CachedIdentity } from "../config";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, listTasks, type Identity } from "../rest";
 import { cachedIdentity, readStatuslineCache, statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
@@ -95,7 +95,8 @@ export async function run(argv: string[]): Promise<number> {
       const me = await fetchMeWithTimeout(auth.server, auth.token);
       if (me !== null) {
         identity = me;
-        if (local?.token) writeConfig({ ...local, identity: cachedIdentity(me) });
+        // statusline 在后台定时跑，绝不能顺手换掉全局回落身份（#104）
+        if (local?.token) refreshConfigInPlace({ ...local, identity: cachedIdentity(me) });
         writeStatuslineCache({
           ...(channel === null ? {} : { channel }),
           server: auth.server,

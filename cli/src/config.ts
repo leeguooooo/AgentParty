@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 
 export interface Config {
   server: string;
@@ -180,6 +180,24 @@ export function writeConfig(cfg: Config, cwd: string = process.cwd()): void {
   }
 }
 
+/**
+ * 就地刷新配置（#104）：只写**读取时命中的那个来源**，绝不双写、绝不新建。
+ *
+ * `party init` 双写（workspace + 全局）是有意的契约——「init 一次，跨目录可用」。
+ * 但 `party whoami` / `statusline` 只是想把 identity 缓存刷新一下，它们不该有身份的副作用：
+ * 旧实现里，在一个 workspace 身份是 bob 的目录跑一句 whoami，就会把**全局**也换成 bob，
+ * 于是所有靠全局回落的目录悄悄改用了 bob 的 token，甚至打到另一台 server 上。
+ * statusline 更隐蔽——它在后台定时跑。
+ */
+export function refreshConfigInPlace(cfg: Config, cwd: string = process.cwd()): void {
+  const { source } = readConfigWithSource(cwd);
+  if (source.kind === "none" || source.path === null) return; // 没有来源就没有该刷新的东西
+  const body = JSON.stringify(cfg, null, 2) + "\n";
+  mkdirSync(dirname(source.path), { recursive: true });
+  writeFileSync(source.path, body, { mode: 0o600 });
+  chmodSync(source.path, 0o600);
+}
+
 export function slugifyBasename(name: string): string {
   const s = name
     .toLowerCase()
@@ -188,10 +206,22 @@ export function slugifyBasename(name: string): string {
   return s || "workspace";
 }
 
-// <目录basename-slug>-<sha256(cwd)前16位>
+// <目录basename-slug>-<sha256(realpath(cwd))前16位>
+//
+// 必须先 realpath（#104）：cwd 字符串直接哈希时，同一个目录经不同路径访问会得到不同的
+// workspaceId，于是它找不到自己的 workspace config、静默回落到全局身份——用的是别人的 token。
+// macOS 上 /tmp 与 /var 都是 symlink（`/var/folders/...` 与 `/private/var/folders/...`
+// 是同一个目录），所以这不是边角情形：任何 cd 进 symlink 路径的 session 都会中招。
+// realpath 失败（目录不存在）时退回原字符串，保持旧行为。
 export function workspaceId(cwd: string = process.cwd()): string {
-  const hash = createHash("sha256").update(cwd).digest("hex").slice(0, 16);
-  return `${slugifyBasename(basename(cwd))}-${hash}`;
+  let real = cwd;
+  try {
+    real = realpathSync(cwd);
+  } catch {
+    /* 目录还不存在：用原路径，反正它也还没有 workspace config */
+  }
+  const hash = createHash("sha256").update(real).digest("hex").slice(0, 16);
+  return `${slugifyBasename(basename(real))}-${hash}`;
 }
 
 export function workspaceLabel(cwd: string = process.cwd()): string {
