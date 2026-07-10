@@ -44,6 +44,9 @@ export class WakeBlockedError extends Error {
   }
 }
 
+// 放弃通告都发不出去（网络/loop guard 熔断）。此时既没送达也没宣告，继续跑就是静默丢 @。
+export const EXIT_WAKE_UNANNOUNCED = 1;
+
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 // 有界重放（#198）：同一条 seq 连续送达失败到顶就响亮放弃，既不无限重放也不静默丢弃
@@ -544,20 +547,6 @@ async function runHarness(
   return { result, text: parsed.text.trimEnd(), sessionId: parsed.sessionId };
 }
 
-async function postBlocked(
-  opts: BuiltinRunnerOptions,
-  frame: MsgFrame,
-  note: string,
-): Promise<void> {
-  await (opts.post ?? postMessage)(opts.server, opts.token, opts.channel, {
-    kind: "status",
-    state: "blocked",
-    note,
-    mentions: [],
-    blocked_reason: note,
-  });
-}
-
 export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOptions["runCommand"]> {
   let codexPromise: Promise<CodexLike> | null = null;
   let thread: ThreadLike | null = null;
@@ -666,15 +655,8 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(threadId)} duration_ms=${now - started} status=error error=${JSON.stringify(message.slice(0, 500))}`,
       );
-      const note = `builtin codex-sdk runner blocked: ${message}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`;
-      await post(opts.server, opts.token, opts.channel, {
-        kind: "status",
-        state: "blocked",
-        note,
-        mentions: [],
-        blocked_reason: note,
-      });
-      throw new WakeBlockedError(note);
+      // 同上：只回报失败，最终 blocked 由 runServe 统一发一次
+      throw new WakeBlockedError(`builtin codex-sdk runner blocked: ${message}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
     }
   };
 
@@ -730,9 +712,10 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}`,
       );
-      const note = `builtin ${opts.harness} runner blocked: exit code ${run.result.code}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`;
-      await postBlocked(opts, frame, note);
-      throw new WakeBlockedError(note);
+      // 只回报失败信号，不发频道：外层还要重试，瞬态失败不该把频道标成 blocked，
+      // 每次尝试发一条更会给 loop guard 上膛（worker/src/do.ts:2582 对 status 也计数）。
+      // 最终那一条 blocked 由 runServe 在预算耗尽时统一发（#206 门禁 P1②）。
+      throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: exit code ${run.result.code}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
     }
 
     finalSid = run.sessionId;
@@ -741,9 +724,7 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=unknown duration_ms=${now - started} exit=${exitCode ?? 0} missing_session_id=true`,
       );
-      const note = `builtin ${opts.harness} runner blocked: no session id parsed; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`;
-      await postBlocked(opts, frame, note);
-      throw new WakeBlockedError(note);
+      throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: no session id parsed; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
     }
 
     const wakes = prior && !forked ? prior.wakes + 1 : 1;
@@ -769,9 +750,7 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         opts.workdir,
         `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} attach_error=${JSON.stringify(message)}`,
       );
-      const note = `builtin ${opts.harness} runner blocked: ${message}`;
-      await postBlocked(opts, frame, note);
-      throw new WakeBlockedError(note);
+      throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: ${message}`);
     }
     await post(opts.server, opts.token, opts.channel, {
       kind: "message",
@@ -1227,7 +1206,11 @@ export async function runServe(o: ServeOptions): Promise<number> {
               blocked_reason: note,
             });
           } catch (e) {
-            out(`  放弃通告发送失败: ${e instanceof Error ? e.message : String(e)}`);
+            // 通告发不出去 = 没宣告过 = 没了结。此时清欠账 + ack 就是恢复 #118 的静默丢失。
+            // 一个连自己喊不出救命的 supervisor，没有任何理由继续消费消息队列：响亮地死，让人发现。
+            out(`  放弃通告发送失败，欠账保留、游标不动、退出: ${e instanceof Error ? e.message : String(e)}`);
+            code = EXIT_WAKE_UNANNOUNCED;
+            break;
           }
           setStuck(null); // 放弃也是一种「了结」：宣告过了，才允许推进游标
         }

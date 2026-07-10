@@ -359,7 +359,7 @@ describe("builtin runner", () => {
     expect((finalPost.body as { body: string }).body).toBe(bytes);
   });
 
-  test("[attach] with a relative path is refused and posts a blocked status (issue #41)", async () => {
+  test("[attach] with a relative path is refused, throws, and posts no partial body (issue #41)", async () => {
     const { posts, post } = postRecorder();
     const workdir = tempDir();
     const runProcess: RunnerProcess = async (args) => {
@@ -381,9 +381,8 @@ describe("builtin runner", () => {
       })(triggerFrame(42), runnerCtx()),
     ).rejects.toThrow(/path must be absolute/);
 
-    const finalPost = posts.at(-1)!;
-    expect(finalPost.body).toMatchObject({ kind: "status", state: "blocked" });
-    expect(String((finalPost.body as { note?: unknown }).note)).toContain("path must be absolute");
+    // runner 只回报失败信号，最终 blocked 由 runServe 在预算耗尽后统一发（#206 门禁 P1②）
+    expect(posts.some((p) => (p.body as { state?: string }).state === "blocked")).toBe(false);
     // 绝不发部分正文
     expect(posts.some((p) => (p.body as { kind: string }).kind === "message")).toBe(false);
   });
@@ -567,7 +566,7 @@ describe("builtin runner", () => {
     expect(ctx.cli_upgrade.message).toContain("先询问用户是否升级");
   });
 
-  test("child non-zero exit posts blocked status with the runner log path and no final body", async () => {
+  test("child non-zero exit throws with the runner log path and posts no blocked, no final body", async () => {
     const { posts, post } = postRecorder();
     const workdir = tempDir();
 
@@ -583,15 +582,8 @@ describe("builtin runner", () => {
       })(triggerFrame(45), runnerCtx()),
     ).rejects.toThrow(/exit code 7/);
 
-    expect(posts).toHaveLength(2);
-    const blocked = posts[1]!.body as { note?: unknown };
-    const note = String(blocked.note);
-    expect(posts[1]!.body).toMatchObject({
-      kind: "status",
-      state: "blocked",
-    });
-    expect(note).toContain("exit code 7");
-    expect(note).toContain(join(workdir, "serve-runner.log"));
+    // 不再由 runner 自己发 blocked；错误信息里仍带 runner log 路径，供外层拼进最终通告
+    expect(posts.some((p) => (p.body as { state?: string }).state === "blocked")).toBe(false);
     expect(readFileSync(join(workdir, "serve-runner.log"), "utf8")).toContain("seq=45 sid=unknown");
   });
 
@@ -931,7 +923,7 @@ describe("codex-sdk runner", () => {
     expect((finalPost.body as { body: string }).body).toBe(final);
   });
 
-  test("run errors post blocked status and keep the resident thread for the next wake", async () => {
+  test("run errors signal the caller without posting blocked, and keep the resident thread", async () => {
     const { posts, post } = postRecorder();
     const workdir = tempDir();
     let startCalls = 0;
@@ -963,10 +955,8 @@ describe("codex-sdk runner", () => {
 
     expect(startCalls).toBe(1);
     expect(runCalls).toBe(2);
-    expect(posts.some((p) => (p.body as { state?: string }).state === "blocked")).toBe(true);
-    expect(String((posts.find((p) => (p.body as { state?: string }).state === "blocked")!.body as { note?: unknown }).note)).toContain(
-      "sdk exploded",
-    );
+    // 失败只回报给调用方，不自己发 blocked（#206 门禁 P1②）；常驻 thread 仍保留给下一次唤醒
+    expect(posts.some((p) => (p.body as { state?: string }).state === "blocked")).toBe(false);
     expect((posts.at(-1)!.body as { body: string }).body).toBe("second answer");
     expect(JSON.parse(readFileSync(join(workdir, "wake-session.json"), "utf8")).thread_id).toBe("thread_error_12345678");
   });

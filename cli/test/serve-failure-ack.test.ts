@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT_ARCHIVED, type MsgFrame } from "@agentparty/shared";
-import { createBuiltinRunner, runServe, type ServeOptions } from "../src/commands/serve";
+import { createBuiltinRunner, runServe, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
 import type { StuckWake } from "../src/config";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 
@@ -179,10 +179,10 @@ describe("serve wake delivery (#118 / #198)", () => {
       },
     });
 
-    // 它已经往频道发了 blocked。但它还必须告诉 runServe，
-    // 否则调用方以为这条唤醒送达了，直接 ack 掉。
+    // 它必须告诉 runServe「这条没送达」，否则调用方以为送达了、直接 ack 掉。
     await expect(run(triggerFrame(1), runnerCtx())).rejects.toThrow(/blocked|exit code 3/);
-    expect(posts.some((p) => p.state === "blocked")).toBe(true);
+    // 但它**不该自己发** blocked：外层还要重试，瞬态失败不该污染频道状态（#206 门禁 P1②）
+    expect(posts.some((p) => p.state === "blocked")).toBe(false);
   });
 
   test("a succeeding runner advances the cursor and leaves no debt", async () => {
@@ -248,5 +248,93 @@ describe("backlog vs debt (#193 + #198 约束②)", () => {
     // 4/6 是积压，跳过；5 是欠账，必须重放；7 是新消息
     expect(seen).toEqual([5, 7]);
     expect(o.lines.some((l) => l.includes("欠账 seq=5"))).toBe(true);
+  });
+});
+
+// 190-codex-dev 门禁（PR #206）指出的两条未覆盖分支
+describe("放弃通告发不出去时不得静默丢 @ (#206 门禁 P1①)", () => {
+  test("最终 blocked 发送失败 → 欠账保留、游标不动、非零退出", async () => {
+    const s = closeAfterOneMention();
+    const cursors: number[] = [];
+    const stucks: Array<StuckWake | null> = [];
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 1,
+      onCursor: (c) => cursors.push(c),
+      onStuck: (st) => stucks.push(st),
+      post: async () => {
+        throw new Error("network down");
+      },
+      runCommand: async () => {
+        throw new Error("runner exploded");
+      },
+    });
+
+    // 喊不出救命的 supervisor 没有理由继续消费队列——响亮地死，让人发现
+    expect(await runServe(o)).not.toBe(EXIT_ARCHIVED);
+    expect(await runServe(o)).not.toBe(0);
+    // 没宣告过 = 没了结：游标绝不前进，欠账绝不清
+    expect(cursors).toEqual([]);
+    expect(stucks.at(-1)).not.toBeNull();
+    expect(stucks.at(-1)!.seq).toBe(1);
+  });
+});
+
+describe("重试期间不得污染频道状态 (#206 门禁 P1②)", () => {
+  const builtin = (runProcess: RunnerProcess, post: BuiltinRunnerOptions["post"]) =>
+    createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir: tempDir(),
+      runProcess,
+      post,
+    });
+
+  test("builtin runner 一次瞬态失败后成功 → 频道上不留 blocked", async () => {
+    const s = closeAfterOneMention();
+    const posts: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    const post = async (_s: string, _t: string, _c: string, body: Record<string, unknown>) => {
+      posts.push(body);
+      return { seq: posts.length };
+    };
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      post: post as never,
+      runCommand: builtin(async () => {
+        calls++;
+        return calls === 1
+          ? { code: 7, stdout: "", stderr: "transient" }
+          : { code: 0, stdout: `session id: 019f35d9-0000-7000-8000-000000000001\n`, stderr: "" };
+      }, post as never),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(calls).toBe(2);
+    // 第一次失败不该把频道标成 blocked——它只是「还在重试」
+    expect(posts.filter((p) => p.state === "blocked")).toHaveLength(0);
+  });
+
+  test("builtin runner 持续失败 → 全程只发一条最终 blocked，不是每次尝试一条", async () => {
+    const s = closeAfterOneMention();
+    const posts: Array<Record<string, unknown>> = [];
+    const post = async (_s: string, _t: string, _c: string, body: Record<string, unknown>) => {
+      posts.push(body);
+      return { seq: posts.length };
+    };
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      post: post as never,
+      runCommand: builtin(async () => ({ code: 7, stdout: "", stderr: "always broken" }), post as never),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    // 每次尝试一条 blocked = 给 loop guard 上膛（worker/src/do.ts:2582 对 status 也计数）
+    expect(posts.filter((p) => p.state === "blocked")).toHaveLength(1);
+    expect(String(posts.find((p) => p.state === "blocked")!.note)).toContain("giving up");
   });
 });
