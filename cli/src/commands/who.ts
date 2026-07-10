@@ -21,10 +21,13 @@ shown as "watch (unverified)" until proven — check with: party wake test @name
 A "read #N / read ✓ / N behind" note shows how far a streaming reader (web, or an
 agent on serve / watch --follow) has read. No note = not a line-by-line reader.
 Then bring one in: party send "@name …" --mention name
+A human is @-notified by their handle (their web client matches on handle, not the
+session name), so mention the "@handle" shown here — not a UUID session name.
 
 Options:
   --channel C   read channel C instead of the bound channel
-  --json        emit one JSON object per line (name/kind/tier/wake/wake_unverified/age_ms/read_seq)`;
+  --json        emit one JSON object per line
+                (name/kind/tier/wake/wake_unverified/account/handle/display_name/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -45,6 +48,12 @@ interface Row {
   age_ms: number;
   connection_count?: number;
   read_seq?: number; // 读到的最大 seq（Phase 2）；无游标 = 不逐帧流式读，不标注
+  // 身份分层（#110）：presence 已带 account/handle/display_name，who 之前只吐 name，
+  // 想 @ 一个人类的 agent 从 who 里看不到 handle——而 web 通知按 handle 命中，@ 名字送不到。
+  // 这里原样带出（仅在 presence 给了非空值时），让 who 不再对已有身份信息保持沉默。
+  account?: string; // 会话背后的账号（人类 = OIDC email；agent = owner）
+  handle?: string; // 人类全局唯一 @别名；@ 通知的真正投递键（web notify 按 handle 命中）
+  display_name?: string; // OAuth/SSO 展示名
 }
 
 // kind 已知取 kind；旧 presence 行没回填时 UUID 名判 human（网页登录会话），其余判 agent。
@@ -77,6 +86,10 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     tier,
     ...(wake === undefined ? {} : { wake }),
     ...(wake === "watch" && e.wake?.verified_at === undefined ? { wake_unverified: true as const } : {}),
+    // 身份分层（#110）：只在 presence 给了非空值时带出，缺失就省略（诚实留白，不无中生有）。
+    ...(typeof e.account === "string" && e.account !== "" ? { account: e.account } : {}),
+    ...(typeof e.handle === "string" && e.handle !== "" ? { handle: e.handle } : {}),
+    ...(typeof e.display_name === "string" && e.display_name !== "" ? { display_name: e.display_name } : {}),
     age_ms: age,
     ...(typeof e.connection_count === "number" && e.connection_count > 1
       ? { connection_count: e.connection_count }
@@ -93,6 +106,16 @@ function readNote(readSeq: number | undefined, lastSeq: number): string {
   if (lastSeq > 0 && readSeq >= lastSeq) return " · read ✓";
   const behind = lastSeq - readSeq;
   return behind > 0 ? ` · read #${readSeq} (${behind} behind)` : ` · read #${readSeq}`;
+}
+
+// 身份分层（#110）：终端行里补出 @handle / account / 展示名，让人看得见「该 @ 哪个别名」。
+// handle 是人类被 @ 通知的真正投递键（web notify 按 handle 命中），name 可能只是 UUID 会话名。
+export function identityNote(r: Row): string {
+  const parts: string[] = [];
+  if (r.handle !== undefined && r.handle !== r.name) parts.push(`@${r.handle}`);
+  if (r.display_name !== undefined) parts.push(r.display_name);
+  if (r.account !== undefined) parts.push(r.account);
+  return parts.length > 0 ? ` (${parts.join(" · ")})` : "";
 }
 
 function humanAge(ms: number): string {
@@ -172,7 +195,7 @@ export async function run(argv: string[]): Promise<number> {
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
       const duplicate = r.connection_count !== undefined ? ` x${r.connection_count} sessions` : "";
       const read = readNote(r.read_seq, lastSeq);
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${wake}${read}${duplicate}${age}`);
+      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${wake}${read}${duplicate}${age}`);
     }
     return 0;
   } catch (e) {
