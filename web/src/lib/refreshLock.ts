@@ -35,7 +35,10 @@ export interface RefreshLockDeps<T> {
  * 在跨标签锁内执行续期。navigator.locks 不可用（老浏览器 / 非安全上下文）时降级为直接执行——
  * 降级后的行为与修复前一致，不会更糟。
  */
-export async function withRefreshLock<T>(deps: RefreshLockDeps<T>, locks: LockManager | undefined = navigator.locks): Promise<T> {
+export async function withRefreshLock<T>(
+  deps: RefreshLockDeps<T>,
+  locks: LockManager | undefined = globalThis.navigator?.locks,
+): Promise<T> {
   if (!locks) {
     const fresh = deps.readFresh();
     return fresh ?? (await deps.refresh());
