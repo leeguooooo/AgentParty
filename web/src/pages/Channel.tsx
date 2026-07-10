@@ -94,8 +94,6 @@ interface Props {
   onAuthFailed(message: string): void;
 }
 
-const MENTION_RE = /@([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
-
 // IM 式加载：初始/上翻每页条数，与 DOM 消息窗口上限（贴底时超出即丢最老页，上翻可拉回）
 const PAGE_SIZE = 50;
 const MESSAGE_CAP = 300;
@@ -1947,7 +1945,8 @@ export function ChannelPage({
   const send = useCallback(() => {
     const body = draft.trim();
     if (body === "") return;
-    const mentions = [...new Set([...body.matchAll(MENTION_RE)].map((m) => m[1]!))];
+    // 与草稿 chips / 服务端 BODY_MENTION_RE 同一份语义：@ 前须行首或非标识符字符，不吃 email 里的 @
+    const mentions = parseDraftMentions(body);
     const ok =
       sockRef.current?.send({ type: "send", kind: "message", body, mentions, reply_to: replyTo }) ??
       false;
@@ -2185,7 +2184,7 @@ export function ChannelPage({
     setEditSaving(true);
     setMessageActionBusySeq(editingSeq);
     setMessageActionError(null);
-    const mentions = [...new Set([...editDraft.matchAll(MENTION_RE)].map((match) => match[1]!))];
+    const mentions = parseDraftMentions(editDraft);
     reviseMessage(slug, editingSeq, "edit", { body: editDraft, mentions })
       .then(({ message }) => {
         dispatch({ type: "frame", frame: message });
