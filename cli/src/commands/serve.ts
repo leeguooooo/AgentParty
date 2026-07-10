@@ -38,9 +38,18 @@ const PROTOCOL_REMINDER =
 // 唤醒未送达（runner 非零退出 / 无 session id / SDK 抛错 / [attach] 被拒）。
 // 四种 runner 统一抛它：调用方据此判断「这条 @ 没进过模型」，从而不推进游标。
 export class WakeBlockedError extends Error {
-  constructor(message: string) {
+  /**
+   * 重试是否安全 —— 即**模型确定没有跑过**。
+   * 抛出这个错并不能证明模型没运行：runner 非零退出、SDK 在 thread.run 之后写 session /
+   * 发回复 / 写日志失败、custom runner 产生副作用后才退出，都会走到这里。
+   * 那些情况下重跑 = 重复模型副作用（重复 git push、重复开 PR）。默认 false。
+   * 只有「runner 根本没起来」（spawn 失败）才置 true。
+   */
+  readonly retriable: boolean;
+  constructor(message: string, retriable = false) {
     super(message);
     this.name = "WakeBlockedError";
+    this.retriable = retriable;
   }
 }
 
@@ -528,7 +537,19 @@ async function runHarness(
   env: Record<string, string | undefined>,
   seq: number,
 ): Promise<HarnessRun> {
-  const runProcess = opts.runProcess ?? defaultRunnerProcess;
+  const rawRunProcess = opts.runProcess ?? defaultRunnerProcess;
+  // runProcess 自己抛 = 进程根本没起来（spawn ENOENT / 权限），模型确定没跑过 → 重试安全。
+  // 一旦进程起来了（哪怕退出码非零），模型就可能已经产生副作用，重跑不安全。
+  const runProcess: RunnerProcess = async (args, o2) => {
+    try {
+      return await rawRunProcess(args, o2);
+    } catch (e) {
+      throw new WakeBlockedError(
+        `builtin ${opts.harness} runner did not start: ${e instanceof Error ? e.message : String(e)}`,
+        true,
+      );
+    }
+  };
   if (opts.harness === "codex") {
     const outFile = join(opts.workdir, `runner-${seq}-${Date.now()}.out`);
     const base = ["--skip-git-repo-check", "--sandbox", "workspace-write", "-o", outFile, prompt];
@@ -1152,20 +1173,25 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // fresh = 游标之上的新消息。历史修订快照会穿透去重被重放（seq 早已消费过），
       // 它们不是新唤醒——不 fresh 就绝不触发 runner（否则旧 @ 被编辑一次，每次重连都重跑一遍）
       const fresh = frame.seq > conn.cursor;
-      // 离线积压（seq <= 挂载水位）跳过模式下不唤醒：照常 ack + 进 recent，但不拉起 runner（#193）。
-      // 唯一例外：**欠账**。它送达失败过，从没进过模型——它不是积压，是我们欠着的（#198 约束②）。
-      // 少了这个例外，#118 特意不 ack 保下来的那条 @ 会在重连后被当成积压跳掉，净效果等于没修。
+      // 欠账（#198）先于**一切**过滤条件。它送达失败过、从没进过模型——欠着就是欠着，
+      // 与当前是不是 mentions-only、是不是积压无关。
+      // 反例（190-codex-dev on PR #206）：--all 下一条非 mention 失败留下欠账，重启回默认
+      // mentions-only 后 qualifies=false → 不重试、不清欠账、却无条件 ack 越过它。
       const isDebt = stuck !== null && frame.seq === stuck.seq;
-      const isBacklog = skipBacklog && attachHead !== null && frame.seq <= attachHead && !isDebt;
-      const qualifies = fresh && !fromSelf && !isBacklog && (!o.mentionsOnly || frame.mentions.includes(self));
+      const isBacklog = skipBacklog && attachHead !== null && frame.seq <= attachHead;
+      const passesFilter = !fromSelf && !isBacklog && (!o.mentionsOnly || frame.mentions.includes(self));
+      const qualifies = fresh && (isDebt || passesFilter);
       if (qualifies) {
         out(`▶ ${formatMsg(frame)}`);
         // 串行：本条命令跑完再消费下一帧（新帧此间缓冲在 FrameQueue），避免并发唤起互相抢
         // 有界重试（#198）：同一条 seq 最多 maxAttempts 次。前一个进程崩在第 k 次，这里从 k 接着数。
         const priorAttempts = stuck?.seq === frame.seq ? stuck.attempts : 0;
-        let lastError = "";
+        // 崩溃在「最后一次失败落盘」与「最终通告」之间时，这里循环一次都不跑，
+        // lastError 必须从盘上接手，否则最终通告里的错误原因是空字符串（门禁 P2）。
+        let lastError = (stuck?.seq === frame.seq ? stuck.last_error : "") ?? "";
         let delivered = false;
-        for (let attempt = priorAttempts + 1; attempt <= maxAttempts; attempt++) {
+        let retriable = true;
+        for (let attempt = priorAttempts + 1; attempt <= maxAttempts && retriable; attempt++) {
           try {
             const cliUpgrade = upgradeNotice(o.autoUpgrade === true, o.upgradeDeps);
             await run(frame, {
@@ -1181,10 +1207,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
             break;
           } catch (e) {
             lastError = e instanceof Error ? e.message : String(e);
+            // 抛错不等于「模型没跑过」。只有 runner 明确声明可重试（spawn 都没成功）才重试；
+            // 否则重跑会重复模型与外部副作用（git push / 开 PR）。见门禁 P1③。
+            retriable = e instanceof WakeBlockedError ? e.retriable : false;
+            if (!retriable) lastError += " (not retriable: model may have run)";
             out(`  命令失败 (${attempt}/${maxAttempts}): ${lastError}`);
             // 先落盘再重试：此刻进程崩掉，重启后不会把已经烧掉的次数忘干净
             setStuck({ seq: frame.seq, attempts: attempt, last_error: lastError });
-            if (attempt < maxAttempts && retryDelayMs > 0) await delay(retryDelayMs);
+            if (retriable && attempt < maxAttempts && retryDelayMs > 0) await delay(retryDelayMs);
           }
         }
         if (delivered) {
@@ -1218,12 +1248,13 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // 触发消息本身不进 recent（它就是 context 主体）；自己的/未 @ 的都算上下文
       recent.push(frame);
       if (recent.length > RECENT_MAX) recent.shift();
-      // 游标只表达「已了结」（#198）：走到这里，这条唤醒要么送达成功、要么有界重试耗尽后
-      // **宣告过**放弃——两者都是了结，都该推进游标。
-      // 欠账不会活着走到这一行：它只可能在上面的重试循环里随进程一起死掉，那时游标压根没动，
-      // 下次 attach 从 cursor 续，这条 @ 会被重放（attempts 从盘上接着数）。
-      // 不要在这里加 `if (stuck === null)` 守卫——变异测试证明它守不住任何东西（死代码）。
-      conn.ack(frame.seq);
+      // 游标只表达「已了结」（#198）：送达成功，或有界重试耗尽后**宣告过**的放弃。
+      // 欠账未了结时游标绝不越过它——否则那条 @ 永远不会再被重放。
+      //
+      // 我曾断言这个守卫是死代码（有界重试后 stuck 恒为 null），并请门禁证伪。
+      // 190-codex-dev 找到了反例：欠账那一帧若被 mentionsOnly / fromSelf 过滤掉，
+      // stuck 就活着走到这里。守卫不是死的——是我的推理漏了过滤路径。
+      if (stuck === null || frame.seq < stuck.seq) conn.ack(frame.seq);
       if (o.statusline === true) {
         writeStatuslineCache({
           ...localStatuslineBase(o.channel),

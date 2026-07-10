@@ -78,34 +78,20 @@ describe("watch --once 落后量告知 (#199)", () => {
   });
 });
 
-describe("watch --once 从服务端已读游标起步 (#172)", () => {
-  test("本地游标为 0 时，采用服务端 read_seq 快进——不再每次唤醒烧掉一条历史", async () => {
-    // 服务端知道我已经读到 10；频道 head 12。本地游标却是 0（新工作区）。
+describe("watch --once 不得复用身份级已读游标 (#206 门禁 P1)", () => {
+  test("welcome.read_cursors 领先本地游标时，绝不据此快进——它证明不了唤醒送达", async () => {
+    // 服务端说这个身份已读到 10（可能是同身份的网页标签页读的）。
+    // 但 watch --once 的送达由 wake 回执表达，不由 seen 表达（shared/src/protocol.ts:424-430）。
+    // 拿 read_seq 快进会把 seq 4 这条从未送达的 @ 静默跳过。
     server = startMockServer((frame, sock) => {
       if (frame.type !== "hello") return;
       sock.send(welcomeFrame(12, "me", [{ name: "me", last_seen_seq: 10, updated_at: 1 }]));
-      sock.send(msgFrame(3, "远古 @ 你", { mentions: ["me"] }));   // 已读，不该唤醒
-      sock.send(msgFrame(10, "也已读 @ 你", { mentions: ["me"] })); // 已读，不该唤醒
-      setTimeout(() => sock.send(msgFrame(11, "真正的新 @", { mentions: ["me"] })), 40);
+      sock.send(msgFrame(4, "从未送达给 supervisor 的 @", { mentions: ["me"] }));
     });
 
-    const cursors: number[] = [];
-    const o = opts({ server: server.url, since: 0, onCursor: (c) => cursors.push(c) });
+    const o = opts({ server: server.url, since: 3 });
     expect(await runWatch(o)).toBe(0);
-
-    // 唤醒发生在 11，不是 3
-    expect(o.lines.some((l) => l.includes("真正的新 @"))).toBe(true);
-    expect(cursors.at(-1)).toBe(11);
-  });
-
-  test("本地游标已经领先于服务端 read_seq 时，不倒退", async () => {
-    server = startMockServer((frame, sock) => {
-      if (frame.type !== "hello") return;
-      sock.send(welcomeFrame(12, "me", [{ name: "me", last_seen_seq: 2, updated_at: 1 }]));
-      setTimeout(() => sock.send(msgFrame(9, "新 @", { mentions: ["me"] })), 30);
-    });
-    const o = opts({ server: server.url, since: 8 });
-    expect(await runWatch(o)).toBe(0);
-    expect(o.lines.some((l) => l.includes("新 @"))).toBe(true);
+    // 仍然醒在 seq 4：这条 @ 从没唤醒过任何 runner，不能因为网页读过就算了结
+    expect(o.lines.some((l) => l.includes("从未送达给 supervisor 的 @"))).toBe(true);
   });
 });

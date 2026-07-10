@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT_ARCHIVED, type MsgFrame } from "@agentparty/shared";
-import { createBuiltinRunner, runServe, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
+import { createBuiltinRunner, runServe, WakeBlockedError, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
 import type { StuckWake } from "../src/config";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 
@@ -74,7 +74,8 @@ describe("serve wake delivery (#118 / #198)", () => {
       },
       runCommand: async () => {
         calls++;
-        if (calls < 3) throw new Error("runner exploded");
+        // 只有「模型确定没跑过」的失败才可重试；裸 Error 一律视为不可重试
+        if (calls < 3) throw new WakeBlockedError("runner did not start", true);
       },
     });
 
@@ -97,7 +98,7 @@ describe("serve wake delivery (#118 / #198)", () => {
       post: async () => ({ seq: 1 }),
       runCommand: async () => {
         calls++;
-        if (calls < 3) throw new Error("runner exploded");
+        if (calls < 3) throw new WakeBlockedError("runner did not start", true);
       },
     });
 
@@ -121,7 +122,7 @@ describe("serve wake delivery (#118 / #198)", () => {
       },
       runCommand: async () => {
         calls++;
-        throw new Error("runner binary missing");
+        throw new WakeBlockedError("runner binary missing", true);
       },
     });
 
@@ -155,7 +156,7 @@ describe("serve wake delivery (#118 / #198)", () => {
       },
       runCommand: async () => {
         calls++;
-        throw new Error("still broken");
+        throw new WakeBlockedError("still broken", true);
       },
     });
 
@@ -292,7 +293,8 @@ describe("重试期间不得污染频道状态 (#206 门禁 P1②)", () => {
       post,
     });
 
-  test("builtin runner 一次瞬态失败后成功 → 频道上不留 blocked", async () => {
+  // 瞬态 = 模型没跑过（spawn 失败）。exit!=0 说明模型可能跑过，那类失败不重试（见 P1③）
+  test("builtin runner 一次瞬态失败（没起来）后成功 → 频道上不留 blocked", async () => {
     const s = closeAfterOneMention();
     const posts: Array<Record<string, unknown>> = [];
     let calls = 0;
@@ -306,9 +308,8 @@ describe("重试期间不得污染频道状态 (#206 门禁 P1②)", () => {
       post: post as never,
       runCommand: builtin(async () => {
         calls++;
-        return calls === 1
-          ? { code: 7, stdout: "", stderr: "transient" }
-          : { code: 0, stdout: `session id: 019f35d9-0000-7000-8000-000000000001\n`, stderr: "" };
+        if (calls === 1) throw new Error("spawn ENOENT"); // 进程没起来 → 模型确定没跑
+        return { code: 0, stdout: `session id: 019f35d9-0000-7000-8000-000000000001\n`, stderr: "" };
       }, post as never),
     });
 
@@ -336,5 +337,144 @@ describe("重试期间不得污染频道状态 (#206 门禁 P1②)", () => {
     // 每次尝试一条 blocked = 给 loop guard 上膛（worker/src/do.ts:2582 对 status 也计数）
     expect(posts.filter((p) => p.state === "blocked")).toHaveLength(1);
     expect(String(posts.find((p) => p.state === "blocked")!.note)).toContain("giving up");
+  });
+});
+
+// 190-codex-dev 的反例（PR #206）：证伪了我「ack 守卫是死代码」的结论。
+// stuck 能活着走到 conn.ack —— 只要欠账那一帧被 mentionsOnly / fromSelf 过滤掉。
+describe("欠账必须先于过滤条件处理 (#206 门禁反例)", () => {
+  test("--all 下留下的非 mention 欠账，重启回 mentions-only 后不得被过滤掉再 ack 越过", async () => {
+    // 上个进程用 --all 跑，seq 4（不 @ 我）送达失败，留下欠账。
+    // 这次重启是默认 mentions-only：seq 4 不含 @me，旧实现里 qualifies=false → 直接 ack 越过。
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(5, "me"));
+      sock.send(msgFrame(4, "chatter, not a mention", { mentions: [] }));
+      setTimeout(() => sock.send(msgFrame(5, "@me fresh", { mentions: ["me"] })), 40);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 120);
+    });
+
+    const seen: number[] = [];
+    const cursors: number[] = [];
+    const o = opts({
+      server: server.url,
+      since: 3,
+      mentionsOnly: true,
+      stuck: { seq: 4, attempts: 1, last_error: "died in --all mode" },
+      onCursor: (c) => cursors.push(c),
+      post: async () => ({ seq: 1 }),
+      runCommand: async (f) => void seen.push(f.seq),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    // 欠账必须被重试（它欠着，与当前过滤模式无关）
+    expect(seen).toContain(4);
+    // 游标绝不在欠账了结前越过它
+    expect(cursors.every((c) => c >= 4)).toBe(true);
+  });
+
+  test("欠账未了结时，后续 seq 不得把游标带过它", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(6, "me"));
+      // 欠账帧永远不来（比如被服务端修剪）；后面的新消息不该把游标带过 4
+      setTimeout(() => sock.send(msgFrame(6, "@me fresh", { mentions: ["me"] })), 30);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 90);
+    });
+    const cursors: number[] = [];
+    const o = opts({
+      server: server.url,
+      since: 3,
+      stuck: { seq: 4, attempts: 1 },
+      onCursor: (c) => cursors.push(c),
+      post: async () => ({ seq: 1 }),
+      runCommand: async () => {},
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(cursors.filter((c) => c >= 4)).toEqual([]);
+  });
+});
+
+// 门禁 P1③ / P2（190-codex-dev on PR #206）
+describe("重试不得重复模型副作用 (#206 门禁 P1③)", () => {
+  test("runner 已经跑过模型（非零退出）→ 不重试，直接宣告放弃", async () => {
+    const s = closeAfterOneMention();
+    const posts: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3, // 预算给足，但这类失败一次都不该重试
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: 1 };
+      },
+      runCommand: createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir: tempDir(),
+        // 进程起来了、模型跑过了，只是退出码非零 → 重跑会重复 git push / 开 PR 之类副作用
+        runProcess: async () => {
+          calls++;
+          return { code: 7, stdout: "", stderr: "model ran, then failed" };
+        },
+        post: async () => ({ seq: 1 }),
+      }),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(calls).toBe(1); // 不是 3
+    expect(posts.filter((p) => p.state === "blocked")).toHaveLength(1);
+    expect(String(posts.find((p) => p.state === "blocked")!.note)).toContain("not retriable");
+  });
+
+  test("runner 根本没起来（spawn 失败）→ 模型没跑过，可以安全重试", async () => {
+    const s = closeAfterOneMention();
+    let calls = 0;
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      post: async () => ({ seq: 1 }),
+      runCommand: createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir: tempDir(),
+        runProcess: async () => {
+          calls++;
+          if (calls < 3) throw new Error("spawn ENOENT");
+          return { code: 0, stdout: "session id: 019f35d9-0000-7000-8000-000000000001\n", stderr: "" };
+        },
+        post: async () => ({ seq: 1 }),
+      }),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(calls).toBe(3); // 没跑过模型的失败，重试是安全的
+  });
+
+  test("崩溃在最后一次失败之后 → 最终通告仍带得出持久化的 last_error（P2）", async () => {
+    const s = closeAfterOneMention();
+    const posts: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 2,
+      stuck: { seq: 1, attempts: 2, last_error: "runner binary missing" }, // 预算已耗尽
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: 1 };
+      },
+      runCommand: async () => void calls++,
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(calls).toBe(0); // 预算已耗尽，循环不跑
+    const blocked = posts.find((p) => p.state === "blocked");
+    expect(blocked).toBeDefined();
+    expect(String(blocked!.note)).toContain("runner binary missing"); // 不是空字符串
   });
 });

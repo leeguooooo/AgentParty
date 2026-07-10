@@ -129,11 +129,11 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       if (frame.type === "welcome") {
         self = frame.self;
         lastSeq = frame.last_seq;
-        // 服务端一直知道我读到第几条（welcome.read_cursors），CLI 却从来没读过它（#172）。
-        // 后果：新工作区本地游标为 0 → 每次 --once 烧掉一整次 agent 唤醒，只为读一条远古消息。
-        // 单调快进，绝不倒退：本地领先时以本地为准（本地 ack 过但服务端 seen 没发出去的情形）。
-        const serverRead = frame.read_cursors?.find((c) => c.name === self)?.last_seen_seq ?? 0;
-        if (serverRead > conn.cursor) conn.ack(serverRead);
+        // 不要用 welcome.read_cursors 快进 --once 的游标（#172 的诱人错解）。
+        // read cursor 是**身份级「已读」**：protocol.ts 明确「网页 tab / serve / watch --follow
+        // 读到就回 seen；webhook / watch --once 型事件驱动 agent 不发 seen，其送达状态由
+        // wake 回执表达」。同身份的网页标签页读过一条 @，不代表这个 supervisor 被它唤醒过。
+        // 拿它 ack 会静默跳过从未送达的 mention。#172 需要一个独立的 wake cursor。
         if (o.statusline === true) {
           writeStatuslineCache({
             ...localStatuslineBase(o.channel),
