@@ -9,6 +9,7 @@ import { TokenGate } from "./components/TokenGate";
 import { LanguageSwitcher } from "./components/LanguageSwitcher";
 import {
   AuthError,
+  type ChannelInfo,
   clearShareToken,
   clearToken,
   currentShareToken,
@@ -17,25 +18,26 @@ import {
   getToken,
   isShareMode,
   listChannels,
+  type MeInfo,
   readSession,
   redeemJoinLink,
   saveSession,
   saveToken,
   storedToken,
-  type ChannelInfo,
-  type MeInfo,
 } from "./lib/api";
 import {
-  type AuthProviderConfig,
-  type OidcConfig,
   authConfigForRuntime,
+  type AuthProviderConfig,
   beginLogin,
   completeLogin,
   decideJoinAuthAction,
   fetchAuthConfig,
   isCallbackPath,
+  type OidcConfig,
   refreshSession,
+  type WebSession,
 } from "./lib/oidc";
+import { sessionStillFresh, withRefreshLock } from "./lib/refreshLock";
 import { ChannelPage } from "./pages/Channel";
 import { Home } from "./pages/Home";
 import { matchChannel, matchJoin, useRoute } from "./router";
@@ -121,6 +123,16 @@ export function App() {
         return;
       }
     } else {
+      // 别的标签可能刚刚续期成功并写回了共享 localStorage（#126）：与其把所有标签一起
+      // 踢回登录页，不如接管那份新鲜会话。只有确实没有可用会话时才真正登出。
+      const adopted = readSession();
+      if (sessionStillFresh(adopted) && adopted !== null) {
+        setAuthError(null);
+        setChannels(null);
+        setListError(null);
+        setToken(adopted.accessToken);
+        return;
+      }
       clearToken();
     }
     setAuthError(message);
@@ -128,18 +140,33 @@ export function App() {
     setToken(null);
   }, []);
 
-  // 静默续期（去重）：refresh_token 会轮换，并发续期会互相作废，故全局只跑一枚在途 promise。
-  // 成功 → 落盘新会话 + setToken（触发下游用新 access_token 重连/重拉）；返回新 access_token。
+  // 静默续期（去重）：refresh_token 会轮换，并发续期会互相作废。
+  // 标签页内用 refreshInFlight 去重；**标签页之间**用 navigator.locks 互斥（#126）——
+  // 否则所有标签在 expiresAt-60s 这个绝对时刻同时拿同一个 refresh_token 去换，
+  // 先到的让后到的作废，后到者 hardLogout 清掉共享 localStorage 里的 session，
+  // 于是所有标签集体被踢回登录页。
+  // 拿到锁后先重读 session：很可能别的标签已经续好了，直接复用，一次请求都不发。
   const refreshInFlight = useRef<Promise<string> | null>(null);
   const doRefresh = useCallback((): Promise<string> => {
     if (refreshInFlight.current) return refreshInFlight.current;
-    const sess = readSession();
-    if (oidcRef.current === null || sess?.refreshToken == null) {
+    if (oidcRef.current === null || readSession()?.refreshToken == null) {
       return Promise.reject(new Error("no refreshable session"));
     }
-    const p = refreshSession(oidcRef.current, sess.refreshToken)
-      .then((next) => {
+    const p = withRefreshLock<WebSession>({
+      readFresh: () => {
+        const sess = readSession();
+        // 等锁期间别的标签很可能已经续好了：session 仍新鲜就直接复用，不再发请求
+        return sessionStillFresh(sess) ? sess : null;
+      },
+      refresh: async () => {
+        const sess = readSession();
+        if (oidcRef.current === null || sess?.refreshToken == null) throw new Error("no refreshable session");
+        const next = await refreshSession(oidcRef.current, sess.refreshToken);
         saveSession(next);
+        return next;
+      },
+    })
+      .then((next) => {
         setAuthError(null);
         setToken(next.accessToken);
         return next.accessToken;
