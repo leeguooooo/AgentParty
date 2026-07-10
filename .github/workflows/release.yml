@@ -194,7 +194,33 @@ jobs:
       - name: install deps
         run: bun install --frozen-lockfile
 
-      - name: require updater signing key
+      - name: resolve updater key mode
+        id: updater-key-mode
+        env:
+          DESKTOP_UPDATER_KEY_MODE: ${{ vars.DESKTOP_UPDATER_KEY_MODE }}
+          DESKTOP_UPDATER_BRIDGE_TAG: ${{ vars.DESKTOP_UPDATER_BRIDGE_TAG }}
+        run: |
+          set -euo pipefail
+          mode="${DESKTOP_UPDATER_KEY_MODE:-}"
+          case "$mode" in
+            legacy|bridge|v2) ;;
+            *)
+              echo "::error::invalid DESKTOP_UPDATER_KEY_MODE: $mode"
+              exit 1
+              ;;
+          esac
+          if [ "$mode" != "legacy" ] && [ -z "${DESKTOP_UPDATER_BRIDGE_TAG:-}" ]; then
+            echo "::error::DESKTOP_UPDATER_BRIDGE_TAG is required for $mode updater key mode"
+            exit 1
+          fi
+          if [ "$mode" = "bridge" ] && [ "$DESKTOP_UPDATER_BRIDGE_TAG" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::bridge mode requires DESKTOP_UPDATER_BRIDGE_TAG to equal the release tag"
+            exit 1
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: require legacy updater signing key
+        if: steps.updater-key-mode.outputs.mode != 'v2'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -204,9 +230,26 @@ jobs:
             exit 1
           fi
 
+      - name: require v2 updater signing key
+        if: steps.updater-key-mode.outputs.mode == 'bridge' || steps.updater-key-mode.outputs.mode == 'v2'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_V2: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_V2 }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY_V2:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY_V2 is required for ${{ steps.updater-key-mode.outputs.mode }} updater key mode"
+            exit 1
+          fi
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2 is required for ${{ steps.updater-key-mode.outputs.mode }} updater key mode"
+            exit 1
+          fi
+
       - name: detect Apple Developer ID and notarization credentials
         id: apple-signing
         env:
+          DESKTOP_REQUIRE_NOTARIZATION: ${{ vars.DESKTOP_REQUIRE_NOTARIZATION }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -215,6 +258,11 @@ jobs:
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           set -euo pipefail
+          require_notarization="${DESKTOP_REQUIRE_NOTARIZATION:-false}"
+          if [ "$require_notarization" != "true" ] && [ "$require_notarization" != "false" ]; then
+            echo "::error::DESKTOP_REQUIRE_NOTARIZATION must be true or false"
+            exit 1
+          fi
           missing=()
           for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID KEYCHAIN_PASSWORD; do
             if [ -z "${!name:-}" ]; then
@@ -222,6 +270,10 @@ jobs:
             fi
           done
           if [ "${#missing[@]}" -gt 0 ]; then
+            if [ "$require_notarization" = "true" ]; then
+              printf '::error::Apple signing is required; missing: %s\n' "$(IFS=', '; echo "${missing[*]}")"
+              exit 1
+            fi
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             printf '::warning::Apple signing is unavailable; publishing an unnotarized desktop preview. Missing: %s\n' "$(IFS=', '; echo "${missing[*]}")"
           else
@@ -254,8 +306,8 @@ jobs:
           fi
           echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
 
-      - name: build notarized desktop app
-        if: steps.apple-signing.outputs.enabled == 'true'
+      - name: build notarized desktop app with legacy updater key
+        if: steps.apple-signing.outputs.enabled == 'true' && steps.updater-key-mode.outputs.mode != 'v2'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -264,11 +316,28 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: bun run desktop:build:prod
 
-      - name: build unnotarized desktop preview
-        if: steps.apple-signing.outputs.enabled == 'false'
+      - name: build notarized desktop app with v2 updater key
+        if: steps.apple-signing.outputs.enabled == 'true' && steps.updater-key-mode.outputs.mode == 'v2'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_V2 }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2 }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bun run desktop:build:prod
+
+      - name: build unnotarized desktop preview with legacy updater key
+        if: steps.apple-signing.outputs.enabled == 'false' && steps.updater-key-mode.outputs.mode != 'v2'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun run desktop:build:prod
+
+      - name: build unnotarized desktop preview with v2 updater key
+        if: steps.apple-signing.outputs.enabled == 'false' && steps.updater-key-mode.outputs.mode == 'v2'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_V2 }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2 }}
         run: bun run desktop:build:prod
 
       - name: verify Developer ID signature and notarization ticket
@@ -287,10 +356,34 @@ jobs:
           xcrun stapler validate "$dmg"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
 
+      - name: sign bridge updater with v2 key
+        if: steps.updater-key-mode.outputs.mode == 'bridge'
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_V2 }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2 }}
+        run: |
+          set -euo pipefail
+          updater="$(find src-tauri/target/release/bundle/macos -name '*.app.tar.gz' -type f | head -n 1)"
+          if [ -z "$updater" ] || [ ! -s "${updater}.sig" ]; then
+            echo "::error::legacy updater signature is missing before bridge dual-signing"
+            exit 1
+          fi
+          cp "${updater}.sig" "${updater}.sig.legacy"
+          rm "${updater}.sig"
+          bunx tauri signer sign "$updater"
+          if [ ! -s "${updater}.sig" ]; then
+            echo "::error::v2 updater signature was not generated"
+            exit 1
+          fi
+          mv "${updater}.sig" "${updater}.sig.v2"
+          mv "${updater}.sig.legacy" "${updater}.sig"
+
       - name: package desktop artifacts
         env:
           ASSET: ${{ matrix.asset }}
           NOTARIZED: ${{ steps.apple-signing.outputs.enabled }}
+          UPDATER_KEY_MODE: ${{ steps.updater-key-mode.outputs.mode }}
         run: |
           set -euo pipefail
           dmg="$(find desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' -type f 2>/dev/null | head -n 1 || true)"
@@ -300,18 +393,25 @@ jobs:
             find desktop/src-tauri/target/release/bundle -type f || true
             exit 1
           fi
+          if [ "$UPDATER_KEY_MODE" = "bridge" ] && [ ! -s "${updater}.sig.v2" ]; then
+            echo "::error::bridge updater v2 signature is missing"
+            exit 1
+          fi
           dmg_out="agentparty-desktop-${ASSET}.dmg"
           updater_out="agentparty-desktop-${ASSET}.app.tar.gz"
           cp "$dmg" "$dmg_out"
           cp "$updater" "$updater_out"
           cp "${updater}.sig" "${updater_out}.sig"
+          if [ "$UPDATER_KEY_MODE" = "bridge" ]; then
+            cp "${updater}.sig.v2" "${updater_out}.sig.v2"
+          fi
           shasum -a 256 "$dmg_out" > "${dmg_out}.sha256"
           distribution="preview"
           if [ "$NOTARIZED" = "true" ]; then
             distribution="production"
           fi
-          printf '{"notarized":%s,"distribution":"%s"}\n' \
-            "$NOTARIZED" "$distribution" > "agentparty-desktop-${ASSET}.signing-status.json"
+          printf '{"notarized":%s,"distribution":"%s","updater_key_mode":"%s"}\n' \
+            "$NOTARIZED" "$distribution" "$UPDATER_KEY_MODE" > "agentparty-desktop-${ASSET}.signing-status.json"
 
       - name: upload desktop artifact
         uses: actions/upload-artifact@v4
@@ -337,6 +437,31 @@ jobs:
         with:
           bun-version: "1.3.14"
 
+      - name: resolve updater key mode
+        id: updater-key-mode
+        env:
+          DESKTOP_UPDATER_KEY_MODE: ${{ vars.DESKTOP_UPDATER_KEY_MODE }}
+          DESKTOP_UPDATER_BRIDGE_TAG: ${{ vars.DESKTOP_UPDATER_BRIDGE_TAG }}
+        run: |
+          set -euo pipefail
+          mode="${DESKTOP_UPDATER_KEY_MODE:-}"
+          case "$mode" in
+            legacy|bridge|v2) ;;
+            *)
+              echo "::error::invalid DESKTOP_UPDATER_KEY_MODE: $mode"
+              exit 1
+              ;;
+          esac
+          if [ "$mode" != "legacy" ] && [ -z "${DESKTOP_UPDATER_BRIDGE_TAG:-}" ]; then
+            echo "::error::DESKTOP_UPDATER_BRIDGE_TAG is required for $mode updater key mode"
+            exit 1
+          fi
+          if [ "$mode" = "bridge" ] && [ "$DESKTOP_UPDATER_BRIDGE_TAG" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::bridge mode requires DESKTOP_UPDATER_BRIDGE_TAG to equal the release tag"
+            exit 1
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
       - name: collect artifacts
         uses: actions/download-artifact@v4
         with:
@@ -344,6 +469,8 @@ jobs:
           merge-multiple: true
 
       - name: classify desktop distribution
+        env:
+          EXPECTED_UPDATER_KEY_MODE: ${{ steps.updater-key-mode.outputs.mode }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -353,15 +480,20 @@ jobs:
             exit 1
           fi
 
-          status_count="$(jq -s 'map({notarized, distribution}) | unique | length' "${status_files[@]}")"
+          status_count="$(jq -s 'map({notarized, distribution, updater_key_mode}) | unique | length' "${status_files[@]}")"
           if [ "$status_count" -ne 1 ]; then
-            echo "::error::desktop architectures disagree on signing status"
+            echo "::error::desktop architectures disagree on signing status or updater key mode"
             jq -s '.' "${status_files[@]}"
             exit 1
           fi
 
           notarized="$(jq -r '.notarized' "${status_files[0]}")"
           distribution="$(jq -r '.distribution' "${status_files[0]}")"
+          updater_key_mode="$(jq -r '.updater_key_mode' "${status_files[0]}")"
+          if [ "$updater_key_mode" != "$EXPECTED_UPDATER_KEY_MODE" ]; then
+            echo "::error::desktop updater key mode does not match release configuration"
+            exit 1
+          fi
           if [ "$notarized" = "true" ] && [ "$distribution" = "production" ]; then
             DESKTOP_RELEASE_NOTES="AgentParty $GITHUB_REF_NAME desktop update; Developer ID signed and Apple notarized."
             cat > dist/release-body.md <<EOF
@@ -387,14 +519,55 @@ jobs:
           echo "DESKTOP_RELEASE_NOTES=$DESKTOP_RELEASE_NOTES" >> "$GITHUB_ENV"
 
       - name: generate desktop updater manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATER_KEY_MODE: ${{ steps.updater-key-mode.outputs.mode }}
+          DESKTOP_UPDATER_BRIDGE_TAG: ${{ vars.DESKTOP_UPDATER_BRIDGE_TAG }}
         run: |
-          bun scripts/desktop-update-manifest.ts \
-            --version "${GITHUB_REF_NAME#v}" \
-            --tag "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --dir dist \
-            --output dist/latest.json \
-            --notes "$DESKTOP_RELEASE_NOTES"
+          set -euo pipefail
+          generate_manifest() {
+            local output="$1"
+            local signature_suffix="$2"
+            bun scripts/desktop-update-manifest.ts \
+              --version "${GITHUB_REF_NAME#v}" \
+              --tag "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir dist \
+              --output "$output" \
+              --notes "$DESKTOP_RELEASE_NOTES" \
+              --signature-suffix "$signature_suffix"
+          }
+
+          case "$UPDATER_KEY_MODE" in
+            legacy)
+              generate_manifest dist/latest.json ".sig"
+              ;;
+            bridge)
+              generate_manifest dist/latest.json ".sig"
+              generate_manifest dist/latest-v2.json ".sig.v2"
+              ;;
+            v2)
+              gh release download "$DESKTOP_UPDATER_BRIDGE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --pattern latest.json \
+                --output dist/latest.json
+              bridge_version="${DESKTOP_UPDATER_BRIDGE_TAG#v}"
+              encoded_bridge_tag="$(jq -rn --arg tag "$DESKTOP_UPDATER_BRIDGE_TAG" '$tag | @uri')"
+              bridge_path="/releases/download/${encoded_bridge_tag}/"
+              if ! jq -e --arg version "$bridge_version" --arg bridge_path "$bridge_path" '
+                .version == $version and
+                (.platforms | type == "object" and length > 0) and
+                all(.platforms[];
+                  (.url | type == "string" and contains($bridge_path)) and
+                  (.signature | type == "string" and length > 0)
+                )
+              ' dist/latest.json >/dev/null; then
+                echo "::error::legacy updater manifest does not point to the configured bridge tag"
+                exit 1
+              fi
+              generate_manifest dist/latest-v2.json ".sig"
+              ;;
+          esac
 
       - name: classify release channel
         id: release-channel
@@ -423,7 +596,9 @@ jobs:
             dist/*.tar.gz
             dist/*.tar.gz.sha256
             dist/*.tar.gz.sig
+            dist/*.tar.gz.sig.v2
             dist/*.dmg
             dist/*.dmg.sha256
             dist/*.signing-status.json
             dist/latest.json
+            dist/latest-v2.json

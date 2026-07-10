@@ -17,6 +17,7 @@ function makeReleaseDirectory(): string {
   for (const [architecture, bundleName] of Object.entries(bundleNames)) {
     writeFileSync(join(directory, bundleName), `${architecture} bundle`);
     writeFileSync(join(directory, `${bundleName}.sig`), `${architecture} signature\n`);
+    writeFileSync(join(directory, `${bundleName}.sig.v2`), `${architecture} v2 signature\n`);
   }
   return directory;
 }
@@ -57,6 +58,23 @@ describe("buildDesktopUpdateManifest", () => {
         },
       },
     });
+  });
+
+  test("selects an alternate signature suffix for the v2 updater channel", () => {
+    const manifest = buildDesktopUpdateManifest({
+      ...manifestInput(),
+      signatureSuffix: ".sig.v2",
+    });
+
+    expect(manifest.platforms["darwin-aarch64"].signature).toBe("arm64 v2 signature\n");
+    expect(manifest.platforms["darwin-x86_64"].signature).toBe("x64 v2 signature\n");
+  });
+
+  test("rejects unsafe signature suffixes", () => {
+    expect(() => buildDesktopUpdateManifest({
+      ...manifestInput(),
+      signatureSuffix: "../../private-key",
+    })).toThrow("Invalid updater signature suffix: ../../private-key");
   });
 
   test("uses an injected clock when no publication date is supplied", () => {
@@ -121,6 +139,16 @@ describe("buildDesktopUpdateManifest", () => {
     );
   });
 
+  test("rejects a missing signature for the selected updater channel", () => {
+    const directory = makeReleaseDirectory();
+    unlinkSync(join(directory, `${bundleNames.arm64}.sig.v2`));
+
+    expect(() => buildDesktopUpdateManifest({
+      ...manifestInput(directory),
+      signatureSuffix: ".sig.v2",
+    })).toThrow(`Missing updater signature: ${bundleNames.arm64}.sig.v2`);
+  });
+
   test("rejects an empty updater signature", () => {
     const directory = makeReleaseDirectory();
     writeFileSync(join(directory, `${bundleNames.arm64}.sig`), " \n\t");
@@ -172,9 +200,29 @@ describe("desktop update manifest CLI", () => {
     expect(readdirSync(join(directory, "updates"))).toEqual(["latest.json"]);
   });
 
+  test("writes a v2 manifest from the requested signature suffix", () => {
+    const directory = makeReleaseDirectory();
+    const output = join(directory, "updates", "latest-v2.json");
+
+    runDesktopUpdateManifestCli([
+      "--version", "0.2.83",
+      "--tag", "v0.2.83",
+      "--repo", "leeguooooo/agentparty",
+      "--dir", directory,
+      "--output", output,
+      "--notes", "Desktop maturity release",
+      "--signature-suffix", ".sig.v2",
+      "--pub-date", "2026-07-10T12:30:45Z",
+    ]);
+
+    const manifest = JSON.parse(readFileSync(output, "utf8"));
+    expect(manifest.platforms["darwin-aarch64"].signature).toBe("arm64 v2 signature\n");
+    expect(manifest.platforms["darwin-x86_64"].signature).toBe("x64 v2 signature\n");
+  });
+
   test("requires every named CLI flag and prints usage", () => {
     expect(() => runDesktopUpdateManifestCli(["--version", "0.2.83"])).toThrow(
-      "Usage: bun scripts/desktop-update-manifest.ts --version <semver> --tag <tag> --repo <owner/repo> --dir <bundle-directory> --output <latest.json> --notes <notes> [--pub-date <RFC3339>]",
+      "Usage: bun scripts/desktop-update-manifest.ts --version <semver> --tag <tag> --repo <owner/repo> --dir <bundle-directory> --output <latest.json> --notes <notes> [--signature-suffix <.sig>] [--pub-date <RFC3339>]",
     );
   });
 
@@ -189,7 +237,7 @@ describe("desktop update manifest CLI", () => {
       "--output", join(directory, "latest.json"),
       "--pub-date", "2026-07-10T12:30:45Z",
     ])).toThrow(
-      "Usage: bun scripts/desktop-update-manifest.ts --version <semver> --tag <tag> --repo <owner/repo> --dir <bundle-directory> --output <latest.json> --notes <notes> [--pub-date <RFC3339>]",
+      "Usage: bun scripts/desktop-update-manifest.ts --version <semver> --tag <tag> --repo <owner/repo> --dir <bundle-directory> --output <latest.json> --notes <notes> [--signature-suffix <.sig>] [--pub-date <RFC3339>]",
     );
   });
 
