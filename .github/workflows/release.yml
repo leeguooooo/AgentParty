@@ -172,6 +172,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: check
     runs-on: ${{ matrix.runner }}
+    environment:
+      name: release
     permissions:
       contents: read
     strategy:
@@ -202,7 +204,8 @@ jobs:
             exit 1
           fi
 
-      - name: require Apple Developer ID and notarization credentials
+      - name: detect Apple Developer ID and notarization credentials
+        id: apple-signing
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -212,14 +215,21 @@ jobs:
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           set -euo pipefail
+          missing=()
           for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID KEYCHAIN_PASSWORD; do
             if [ -z "${!name:-}" ]; then
-              echo "::error::$name is required for a notarized desktop release"
-              exit 1
+              missing+=("$name")
             fi
           done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            printf '::warning::Apple signing is unavailable; publishing an unnotarized desktop preview. Missing: %s\n' "$(IFS=', '; echo "${missing[*]}")"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: import Apple Developer ID certificate
+        if: steps.apple-signing.outputs.enabled == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -244,7 +254,8 @@ jobs:
           fi
           echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
 
-      - name: build prod desktop app
+      - name: build notarized desktop app
+        if: steps.apple-signing.outputs.enabled == 'true'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -253,7 +264,15 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: bun run desktop:build:prod
 
+      - name: build unnotarized desktop preview
+        if: steps.apple-signing.outputs.enabled == 'false'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun run desktop:build:prod
+
       - name: verify Developer ID signature and notarization ticket
+        if: steps.apple-signing.outputs.enabled == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -281,6 +300,7 @@ jobs:
       - name: package desktop artifacts
         env:
           ASSET: ${{ matrix.asset }}
+          NOTARIZED: ${{ steps.apple-signing.outputs.enabled }}
         run: |
           set -euo pipefail
           dmg="$(find desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' -type f 2>/dev/null | head -n 1 || true)"
@@ -296,6 +316,12 @@ jobs:
           cp "$updater" "$updater_out"
           cp "${updater}.sig" "${updater_out}.sig"
           shasum -a 256 "$dmg_out" > "${dmg_out}.sha256"
+          distribution="preview"
+          if [ "$NOTARIZED" = "true" ]; then
+            distribution="production"
+          fi
+          printf '{"notarized":%s,"distribution":"%s"}\n' \
+            "$NOTARIZED" "$distribution" > "agentparty-desktop-${ASSET}.signing-status.json"
 
       - name: upload desktop artifact
         uses: actions/upload-artifact@v4
@@ -327,6 +353,49 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: classify desktop distribution
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          status_files=(dist/*.signing-status.json)
+          if [ "${#status_files[@]}" -ne 2 ]; then
+            echo "::error::expected two desktop signing status files, found ${#status_files[@]}"
+            exit 1
+          fi
+
+          status_count="$(jq -s 'map({notarized, distribution}) | unique | length' "${status_files[@]}")"
+          if [ "$status_count" -ne 1 ]; then
+            echo "::error::desktop architectures disagree on signing status"
+            jq -s '.' "${status_files[@]}"
+            exit 1
+          fi
+
+          notarized="$(jq -r '.notarized' "${status_files[0]}")"
+          distribution="$(jq -r '.distribution' "${status_files[0]}")"
+          if [ "$notarized" = "true" ] && [ "$distribution" = "production" ]; then
+            DESKTOP_RELEASE_NOTES="AgentParty $GITHUB_REF_NAME desktop update; Developer ID signed and Apple notarized."
+            cat > dist/release-body.md <<EOF
+          ## AgentParty $GITHUB_REF_NAME
+
+          CLI packages and the macOS desktop application are available below.
+
+          The macOS desktop artifacts are Developer ID signed and Apple notarized. Gatekeeper verification is part of the release workflow.
+          EOF
+          elif [ "$notarized" = "false" ] && [ "$distribution" = "preview" ]; then
+            DESKTOP_RELEASE_NOTES="AgentParty $GITHUB_REF_NAME unnotarized macOS preview; Gatekeeper may block manual installation."
+            cat > dist/release-body.md <<EOF
+          ## AgentParty $GITHUB_REF_NAME
+
+          CLI packages are production release artifacts.
+
+          > **macOS desktop preview:** The DMG files are not Developer ID signed or Apple notarized. Gatekeeper may block manual installation. The AgentParty website does not present these files as a formal desktop download.
+          EOF
+          else
+            echo "::error::invalid desktop signing status: notarized=$notarized distribution=$distribution"
+            exit 1
+          fi
+          echo "DESKTOP_RELEASE_NOTES=$DESKTOP_RELEASE_NOTES" >> "$GITHUB_ENV"
+
       - name: generate desktop updater manifest
         run: |
           bun scripts/desktop-update-manifest.ts \
@@ -335,7 +404,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --dir dist \
             --output dist/latest.json \
-            --notes "AgentParty $GITHUB_REF_NAME desktop update"
+            --notes "$DESKTOP_RELEASE_NOTES"
 
       - name: classify release channel
         id: release-channel
@@ -358,6 +427,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           prerelease: ${{ steps.release-channel.outputs.prerelease }}
           make_latest: ${{ steps.release-channel.outputs.make_latest }}
+          body_path: dist/release-body.md
           fail_on_unmatched_files: false
           files: |
             dist/*.tar.gz
@@ -365,4 +435,5 @@ jobs:
             dist/*.tar.gz.sig
             dist/*.dmg
             dist/*.dmg.sha256
+            dist/*.signing-status.json
             dist/latest.json

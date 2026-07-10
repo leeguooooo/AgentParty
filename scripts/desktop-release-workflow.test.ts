@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const workflow = readFileSync(resolve(import.meta.dir, "../.github/workflows/release.yml"), "utf8");
+const desktopDocs = readFileSync(
+  resolve(import.meta.dir, "../web/public/docs/desktop/index.html"),
+  "utf8",
+);
 const tauriConfig = JSON.parse(
   readFileSync(resolve(import.meta.dir, "../desktop/src-tauri/tauri.conf.json"), "utf8"),
 );
@@ -23,8 +27,13 @@ describe("desktop release workflow", () => {
     expect(workflow).toContain("dist/latest.json");
   });
 
-  test("requires Developer ID signing and notarization for every desktop release", () => {
+  test("gates desktop distribution and falls back to an honest unnotarized preview", () => {
     expect(tauriConfig.bundle.macOS.signingIdentity).not.toBe("-");
+    expect(workflow).toMatch(/desktop:\n(?:[\s\S]*?)environment:\n\s+name: release/);
+    expect(workflow).toContain("id: apple-signing");
+    expect(workflow).toContain('echo "enabled=false" >> "$GITHUB_OUTPUT"');
+    expect(workflow).toContain("if: steps.apple-signing.outputs.enabled == 'true'");
+    expect(workflow).toContain("if: steps.apple-signing.outputs.enabled == 'false'");
     for (const secret of [
       "APPLE_CERTIFICATE",
       "APPLE_CERTIFICATE_PASSWORD",
@@ -41,6 +50,13 @@ describe("desktop release workflow", () => {
     expect(workflow).toContain('xcrun notarytool submit "$dmg"');
     expect(workflow).toContain('xcrun stapler staple "$dmg"');
     expect(workflow).toContain('spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"');
+    expect(workflow).toContain("agentparty-desktop-${ASSET}.signing-status.json");
+    expect(workflow).toContain("dist/release-body.md");
+    expect(workflow).toContain("--notes \"$DESKTOP_RELEASE_NOTES\"");
+    expect(workflow).toContain("dist/*.signing-status.json");
+
+    expect(desktopDocs).toContain("Unnotarized macOS preview");
+    expect(desktopDocs).toContain("正式下载入口仍处于准备中");
   });
 
   test("uses commands available on GitHub macOS runners for certificate import", () => {
