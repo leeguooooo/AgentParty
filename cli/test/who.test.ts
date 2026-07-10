@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { PresenceEntry } from "@agentparty/shared";
-import { classify } from "../src/commands/who";
+import { classify, identityNote } from "../src/commands/who";
 
 const NOW = 1_000_000_000;
 
@@ -49,6 +49,83 @@ describe("who classify（#47：可唤醒判定按 wake.kind 分口径）", () =>
 
   test("不在线的人类不列", () => {
     expect(classify(p({ name: "leo", kind: "human", state: "offline", last_seen: NOW - 120_000 }), NOW)).toBeNull();
+  });
+});
+
+describe("who 身份分层（#110：who --json 不再对 presence 已有的身份信息保持沉默）", () => {
+  // presence 里 name / kind / account / handle / display_name 是五层身份；who 只吐 name 时，
+  // 想 @ 一个人类的 agent 从 who 里看不到 handle，@ 名字送不到（web 通知按 handle 命中）。
+  test("在线人类：handle / account / display_name 原样带出，与 presence 一致", () => {
+    const e = p({
+      name: "web-login-uuid",
+      kind: "human",
+      state: "working",
+      account: "davianpearson1@gmail.com",
+      handle: "leo",
+      display_name: "Davian Pearson",
+    });
+    const r = classify(e, NOW);
+    expect(r).not.toBeNull();
+    expect(r?.handle).toBe("leo");
+    expect(r?.account).toBe("davianpearson1@gmail.com");
+    expect(r?.display_name).toBe("Davian Pearson");
+  });
+
+  test("agent 也带出 account（owner/账号），供归属展示", () => {
+    const r = classify(p({ name: "leeguooooo-agentparty-mini2", account: "leeguooooo@gmail.com" }), NOW);
+    expect(r?.account).toBe("leeguooooo@gmail.com");
+  });
+
+  test("缺字段就省略（不无中生有 null/空串），诚实留白", () => {
+    const r = classify(p({ name: "bob" }), NOW);
+    expect(r).not.toBeNull();
+    expect("handle" in (r as object)).toBe(false);
+    expect("account" in (r as object)).toBe(false);
+    expect("display_name" in (r as object)).toBe(false);
+  });
+
+  test("空串等同缺失：不下发（presence 层不会给空串，但防御性对齐）", () => {
+    const r = classify(p({ name: "bob", handle: "", account: "", display_name: "" }), NOW);
+    expect("handle" in (r as object)).toBe(false);
+    expect("account" in (r as object)).toBe(false);
+    expect("display_name" in (r as object)).toBe(false);
+  });
+
+  // 绑定真实观测路径：who --json 打印的是 JSON.stringify(classify(...))，断言序列化后 key 真的在。
+  test("JSON.stringify（who --json 的真实输出）含 handle/account/display_name 且值一致", () => {
+    const e = p({
+      name: "web-login-uuid",
+      kind: "human",
+      state: "working",
+      account: "davianpearson1@gmail.com",
+      handle: "leo",
+      display_name: "Davian Pearson",
+    });
+    const line = JSON.stringify(classify(e, NOW));
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    expect(parsed.handle).toBe("leo");
+    expect(parsed.account).toBe("davianpearson1@gmail.com");
+    expect(parsed.display_name).toBe("Davian Pearson");
+    // 与 presence 输入的值逐字一致（不是只断言 key 存在）
+    expect(parsed.handle).toBe(e.handle);
+    expect(parsed.account).toBe(e.account);
+    expect(parsed.display_name).toBe(e.display_name);
+  });
+
+  // 终端行（非 --json）也要能看见 @handle，否则人类读 who 仍不知道该 @ 谁。
+  test("identityNote：@handle 出现在人类可读行里；handle==name 时不重复", () => {
+    const withHandle = classify(
+      p({ name: "web-login-uuid", kind: "human", state: "working", handle: "leo", account: "a@b.com" }),
+      NOW,
+    );
+    const note = identityNote(withHandle!);
+    expect(note).toContain("@leo");
+    expect(note).toContain("a@b.com");
+    // handle 与 name 相同 → 不重复贴 @name
+    const same = classify(p({ name: "leo", kind: "human", state: "working", handle: "leo" }), NOW);
+    expect(identityNote(same!)).not.toContain("@leo");
+    // 什么身份信息都没有 → 空串，不污染输出
+    expect(identityNote(classify(p({ name: "bob" }), NOW)!)).toBe("");
   });
 });
 
