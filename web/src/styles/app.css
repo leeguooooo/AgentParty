@@ -3642,6 +3642,122 @@
 }
 .gate-hint::before { content: "$ "; color: var(--t-accent); }
 
+/* ---- Desktop pairing / browser approval ---- */
+.desktop-pairing-card,
+.pair-card {
+  width: min(500px, 100%);
+}
+.desktop-pairing-card h2,
+.pair-review h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.desktop-pairing-card > p,
+.pair-warning {
+  margin: 0;
+  color: var(--t-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.desktop-pairing-code-block {
+  display: grid;
+  gap: 7px;
+  padding: 16px;
+  border: 1.6px solid var(--d-ink);
+  background: var(--d-yellow);
+  text-align: center;
+  box-shadow: 3px 3px 0 var(--d-shadow);
+}
+.desktop-pairing-code-block > span {
+  color: var(--t-muted);
+  font-size: 11px;
+}
+.desktop-pairing-code {
+  min-height: 1.35em;
+  font-size: 28px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.desktop-pairing-status {
+  min-height: 2.9em;
+  margin: 0;
+  color: var(--t-body);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.desktop-pairing-actions,
+.desktop-session-actions,
+.pair-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.desktop-auth-notice {
+  position: fixed;
+  z-index: 80;
+  top: 14px;
+  left: 50%;
+  width: min(560px, calc(100vw - 28px));
+  margin: 0;
+  transform: translateX(-50%);
+}
+.pair-page {
+  justify-content: flex-start;
+  overflow-y: auto;
+  padding-top: clamp(32px, 10vh, 88px);
+}
+.pair-code-input {
+  min-height: 44px;
+  font-size: 20px;
+  text-align: center;
+  text-transform: uppercase;
+}
+.pair-review {
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1.4px solid var(--t-faint);
+}
+.pair-warning {
+  padding: 9px 10px;
+  border-left: 4px solid var(--d-red);
+  background: var(--d-red-soft);
+  color: var(--t-body);
+}
+.pair-device {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  border: 1.4px solid var(--t-faint);
+}
+.pair-device > div {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.45fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 10px;
+}
+.pair-device > div + div { border-top: 1.4px solid var(--t-faint); }
+.pair-device dt { color: var(--t-dim); font-size: 11px; }
+.pair-device dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--t-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+.pair-deny { color: var(--d-red); border-color: var(--d-red); }
+.pair-deny:hover,
+.pair-deny:focus-visible { background: var(--d-red-soft); }
+
+@media (max-width: 560px) {
+  .desktop-pairing-code { font-size: 22px; }
+  .pair-device > div { grid-template-columns: 1fr; gap: 3px; }
+  .pair-actions .d-btn,
+  .desktop-session-actions .d-btn { flex: 1 1 100%; justify-content: center; }
+}
+
 /* ---- 首页 ---- */
 .home { padding: 8px 8px 20px 2px; overflow-y: auto; }
 .home-hero { margin: 8px 0 26px; }

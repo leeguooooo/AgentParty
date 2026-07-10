@@ -15,6 +15,16 @@
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",
+    "deep-link:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://agentparty.leeguoo.com/*" },
+        { "url": "https://agentparty.pwtk-dev.work/*" },
+        { "url": "http://127.0.0.1:*/*" },
+        { "url": "http://localhost:*/*" }
+      ]
+    },
     "updater:default",
     "process:allow-restart"
   ]

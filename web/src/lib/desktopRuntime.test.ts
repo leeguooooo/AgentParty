@@ -5,6 +5,8 @@ import {
   isAutostartEnabled,
   isDesktopNotificationPermissionGranted,
   isDesktopNotificationSupported,
+  listenForDesktopPairLinks,
+  openDesktopVerificationUrl,
   requestDesktopNotificationPermission,
   listenForDesktopUpdateChecks,
   sendMentionNotification,
@@ -169,6 +171,57 @@ describe("desktop notifications", () => {
 });
 
 describe("desktop window", () => {
+  test("opens verification pages only through the allowlisted system browser", async () => {
+    const opened: string[] = [];
+    __setDesktopRuntimeDependenciesForTests({
+      isTauri: () => true,
+      loadOpener: async () => ({ openUrl: async (url) => { opened.push(String(url)); } }),
+    });
+
+    expect(await openDesktopVerificationUrl(
+      "https://agentparty.leeguoo.com/pair?code=AB12C-DE34F",
+      ["https://agentparty.leeguoo.com"],
+    )).toBe(true);
+    expect(await openDesktopVerificationUrl(
+      "https://evil.example/pair?code=AB12C-DE34F",
+      ["https://agentparty.leeguoo.com"],
+    )).toBe(false);
+    expect(opened).toEqual(["https://agentparty.leeguoo.com/pair?code=AB12C-DE34F"]);
+  });
+
+  test("filters cold-start and live deep links before delivering navigation hints", async () => {
+    let liveHandler: ((urls: string[]) => void) | null = null;
+    const links: string[] = [];
+    __setDesktopRuntimeDependenciesForTests({
+      isTauri: () => true,
+      loadDeepLink: async () => ({
+        getCurrent: async () => [
+          "agentparty://pair/AB12C-DE34F?server=https%3A%2F%2Fagentparty.leeguoo.com",
+          "agentparty://pair/AB12C-DE34F?token=must-not-pass",
+        ],
+        onOpenUrl: async (handler) => {
+          liveHandler = handler;
+          return () => {};
+        },
+      }),
+    });
+
+    const unlisten = await listenForDesktopPairLinks(
+      ["https://agentparty.leeguoo.com"],
+      (link) => links.push(`${link.userCode}:${link.serverOrigin}`),
+    );
+    liveHandler?.([
+      "agentparty://pair/ZX90Y-WV87U",
+      "agentparty://pair/ZX90Y-WV87U?server=https%3A%2F%2Fevil.example",
+    ]);
+    unlisten();
+
+    expect(links).toEqual([
+      "AB12C-DE34F:https://agentparty.leeguoo.com",
+      "ZX90Y-WV87U:null",
+    ]);
+  });
+
   test("forwards native tray update checks and exposes cleanup", async () => {
     let handler: (() => void) | null = null;
     let cleaned = false;
