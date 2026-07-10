@@ -1,6 +1,6 @@
 // party review approve/reject — settle a gated completion review.
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
-import { resolveChannel, saveCursor } from "../config";
+import { advanceCursorPastOwnMessage, resolveChannel } from "../config";
 import { formatMsg } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
@@ -76,7 +76,7 @@ export async function run(argv: string[]): Promise<number> {
       action,
       ...(reason === undefined || reason === "" ? {} : { reason }),
     });
-    saveCursor(channel, result.reply.seq);
+    advanceCursorPastOwnMessage(channel, result.reply.seq);
     if (flags.json === true) {
       console.log(JSON.stringify(jsonFrame(result.message as unknown as Record<string, unknown>)));
     } else {

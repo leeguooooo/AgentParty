@@ -139,14 +139,20 @@ describe("workspace state", () => {
     expect(loadCursor("other", cwd)).toBe(0);
   });
 
-  test("saveCursor only advances bound channel monotonically", () => {
+  test("saveCursor advances monotonically and now keys by channel (#113)", () => {
     writeState({ channel: "dev", cursor: 5 }, cwd);
     saveCursor("dev", 9, cwd);
     expect(loadCursor("dev", cwd)).toBe(9);
     saveCursor("dev", 3, cwd);
-    expect(loadCursor("dev", cwd)).toBe(9);
+    expect(loadCursor("dev", cwd)).toBe(9); // 不回退
+
+    // #113 修复前：非绑定频道的游标被静默丢弃，serve --profile 的每个频道恒 since=0
     saveCursor("other", 42, cwd);
-    expect(readState(cwd)).toEqual({ channel: "dev", cursor: 9 });
+    expect(loadCursor("other", cwd)).toBe(42);
+    expect(loadCursor("dev", cwd)).toBe(9); // 互不干扰
+    // 绑定频道仍镜像到顶层，兼容旧读者
+    expect(readState(cwd)?.cursor).toBe(9);
+    expect(readState(cwd)?.channel).toBe("dev");
   });
 
   test("resolveChannel prefers explicit over bound", () => {

@@ -12,7 +12,7 @@ import type {
   WorkflowKind,
 } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
-import { resolveChannel, saveCursor, workspaceId, workspaceLabel, worktreeLabel } from "../config";
+import { advanceCursorPastOwnMessage, resolveChannel, workspaceId, workspaceLabel, worktreeLabel } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, handleRestError, postMessage, updateTask } from "../rest";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
@@ -330,7 +330,7 @@ export async function run(argv: string[]): Promise<number> {
         state as TaskState;
       await updateTask(auth.server, auth.token, channel, taskId, { state: taskState });
     }
-    saveCursor(channel, seq);
+    advanceCursorPastOwnMessage(channel, seq);
     console.log(`status seq=${seq}`);
     return 0;
   } catch (e) {
