@@ -1607,6 +1607,15 @@
   background: var(--d-red);
   color: #fff;
 }
+/* #341 两段式确认：待确认态反色高亮，视觉上区别于常态，误触第一下不会踢人 */
+.presence-kick--confirm {
+  background: var(--d-red);
+  color: #fff;
+  animation: kick-confirm-pulse 1s ease-in-out infinite;
+}
+@keyframes kick-confirm-pulse {
+  50% { opacity: 0.65; }
+}
 .presence-kick:disabled {
   opacity: 0.55;
   cursor: wait;
@@ -5657,3 +5666,20 @@
 .settings-facts dd { margin: 0; color: var(--t-body, #2a2820); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 面板内的 @别名编辑（复用 HandleSetup）与账号区留出间距 */
 .settings-handle { margin-top: 12px; }
+
+/* #347 iOS Safari 点输入框自动放大：任何聚焦时字号 <16px 的 input/textarea/select 都会触发页面缩放。
+   窄屏（移动端断点，与全站 760px 对齐）把所有输入控件字号硬钳到 16px——各组件散落着 11-13px 的
+   字号定义，这里必须用 !important 做地板，否则任何更具体的选择器都会把字号压回去重新触发缩放。 */
+@media (max-width: 760px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
+/* #353 断线横幅：贴着输入框、黄底加粗，取代右上角 11px 小字作为唯一断线信号 */
+.conn-banner {
+  margin: 0 4px 2px;
+  font-weight: 700;
+}

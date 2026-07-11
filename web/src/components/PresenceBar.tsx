@@ -271,6 +271,14 @@ export function PresenceBar({
   // 默认折叠，展开态记 localStorage（记住偏好）。
   const [expanded, setExpanded] = useState(() => readPresenceExpanded());
 
+  // 踢人两段式确认（#341）：第一次点进入待确认态，4s 内再点才真踢，否则自动还原。
+  const [confirmKickName, setConfirmKickName] = useState<string | null>(null);
+  useEffect(() => {
+    if (confirmKickName === null) return;
+    const timer = window.setTimeout(() => setConfirmKickName(null), 4_000);
+    return () => clearTimeout(timer);
+  }, [confirmKickName]);
+
   // 在线 sender 带 owner；离线/最近 presence 带 account。两者都归到同一账号块。
   const byName = new Map(participants.map((p) => [p.name, p]));
   const roleByName = new Map(roles.map((role) => [role.name, role]));
@@ -536,16 +544,21 @@ export function PresenceBar({
         )}
         {full && canModerate && onRemoveParticipant !== undefined && it.name !== "system" && (
           <button
-            className="presence-kick"
+            className={"presence-kick" + (confirmKickName === it.name ? " presence-kick--confirm" : "")}
             type="button"
             disabled={removingName === it.name}
             title={t("PresenceBar.kickTitle", { name: it.name })}
             onClick={(e) => {
               e.stopPropagation();
-              onRemoveParticipant(it.name);
+              if (confirmKickName === it.name) {
+                setConfirmKickName(null);
+                onRemoveParticipant(it.name);
+              } else {
+                setConfirmKickName(it.name);
+              }
             }}
           >
-            {t("PresenceBar.kick")}
+            {confirmKickName === it.name ? t("PresenceBar.kickConfirm") : t("PresenceBar.kick")}
           </button>
         )}
       </span>

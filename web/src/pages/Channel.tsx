@@ -3684,6 +3684,12 @@ export function ChannelPage({
           {state.sendError}
         </p>
       )}
+      {/* #353：断线/重连时 composer 被禁用，原来只有右上角 11px 小字——在输入框正上方给显眼横幅说明原因 */}
+      {canWrite && (state.status === "reconnecting" || state.status === "closed") && (
+        <p className="banner banner--yellow conn-banner" role="alert">
+          {state.status === "closed" ? t("Channel.conn.closed") : t("Channel.conn.reconnecting")}
+        </p>
+      )}
       {canWrite && replyTo !== null && (
         <div className="reply-banner">
           <span className="reply-banner-text">{t("Channel.reply.label", { seq: replyTo, preview: replyPreview })}</span>
