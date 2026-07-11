@@ -201,6 +201,19 @@
         <h3><span class="zh">生产更新验收</span><span class="en">Production update acceptance</span></h3>
         <p><span class="zh">维护者必须先对已安装在 <code>/Applications</code> 的 N-1 production 版本执行 <code>bun scripts/desktop-production-acceptance.ts baseline</code>，再从应用内完成更新，并对 N 版本执行 <code>verify</code>。验收工具会拒绝 preview、本地构建、版本未递增、二进制未替换、重复运行进程、非安装目录进程、旧回执以及缺少 Developer ID、Gatekeeper 或公证票据的结果。普通构建成功或手动覆盖应用不能替代这项验收。</span><span class="en">Maintainers must run <code>bun scripts/desktop-production-acceptance.ts baseline</code> against the installed N-1 production build under <code>/Applications</code>, complete the update from inside the app, and then run <code>verify</code> against version N. The tool rejects previews, local builds, non-advancing versions, unchanged binaries, duplicate processes, processes outside the installed app, stale receipts, and results missing Developer ID, Gatekeeper, or notarization evidence. A successful build or manual app replacement does not substitute for this acceptance.</span></p>
 
+        <h3><span class="zh">配置 production 签名</span><span class="en">Configure production signing</span></h3>
+        <p><span class="zh">仓库维护者应使用 <code>scripts/configure-apple-release.ts</code>，不要把证书密码、app-specific password 或 p8 内容写进命令行参数。工具只从环境变量和权限为 <code>0600</code> 的本地文件读取敏感材料，先用 OpenSSL 确认 p12 确实包含 Developer ID Application，再通过 stdin 写入 GitHub Environment secrets。建议优先使用无交互的 App Store Connect API key 模式。</span><span class="en">Repository maintainers should use <code>scripts/configure-apple-release.ts</code> instead of placing certificate passwords, app-specific passwords, or p8 contents in command-line arguments. The tool reads sensitive material only from environment variables and local <code>0600</code> files, confirms with OpenSSL that the p12 contains a Developer ID Application identity, and writes GitHub Environment secrets over stdin. Prefer the non-interactive App Store Connect API-key mode.</span></p>
+        <pre><code>chmod 600 /secure/developer-id.p12 /secure/AuthKey_KEYID.p8
+export AGENTPARTY_APPLE_CERTIFICATE_PATH=/secure/developer-id.p12
+printf 'Certificate password: '; read -s AGENTPARTY_APPLE_CERTIFICATE_PASSWORD; printf '\n'
+export AGENTPARTY_APPLE_CERTIFICATE_PASSWORD
+export AGENTPARTY_APPLE_API_ISSUER='xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+export AGENTPARTY_APPLE_API_KEY='XXXXXXXXXX'
+export AGENTPARTY_APPLE_API_KEY_PATH=/secure/AuthKey_KEYID.p8
+bun scripts/configure-apple-release.ts --repo leeguooooo/AgentParty --mode api-key --dry-run
+bun scripts/configure-apple-release.ts --repo leeguooooo/AgentParty --mode api-key</code></pre>
+        <p><span class="zh">Apple ID 模式改用 <code>AGENTPARTY_APPLE_ID</code>、<code>AGENTPARTY_APPLE_PASSWORD</code> 和 <code>AGENTPARTY_APPLE_TEAM_ID</code>，并传入 <code>--mode apple-id</code>。工具会自动生成 CI 临时 keychain 密码、设置 <code>DESKTOP_REQUIRE_NOTARIZATION=true</code>，并删除另一认证模式遗留的 secrets；先执行 <code>--dry-run</code> 不会修改 GitHub。</span><span class="en">For Apple ID mode, provide <code>AGENTPARTY_APPLE_ID</code>, <code>AGENTPARTY_APPLE_PASSWORD</code>, and <code>AGENTPARTY_APPLE_TEAM_ID</code>, then pass <code>--mode apple-id</code>. The tool generates the temporary CI keychain password, sets <code>DESKTOP_REQUIRE_NOTARIZATION=true</code>, and removes stale secrets from the other authentication mode. Running with <code>--dry-run</code> changes nothing on GitHub.</span></p>
+
         <h3><span class="zh">从旧桌面版本迁移</span><span class="en">Migrate from older desktop versions</span></h3>
         <ul>
           <li><span class="zh">R3 首次启动会把旧版单一桌面凭据槽迁入其服务器 Origin 对应的独立系统凭据槽；迁移成功后删除旧共享槽，其他服务器以后各自配对。</span><span class="en">On first launch, R3 migrates the legacy single desktop credential into the OS credential slot for its server origin, then removes the shared legacy slot. Pair other servers separately.</span></li>
