@@ -2082,6 +2082,14 @@ app.post("/api/admin/membership", requireAdmin, async (c) => {
   )
     .bind(account, tier, memberSince, now)
     .run();
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditAdminActor,
+    action: "membership.set",
+    resource: `account/${account}`,
+    channel: null,
+    timestamp: now,
+    metadata: { tier },
+  });
   return c.json({ account, tier, member_since: memberSince });
 });
 
@@ -3049,6 +3057,14 @@ app.post("/api/channels", async (c) => {
       return c.json(errorBody("unavailable", "temp channel initialization failed"), 503);
     }
   }
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(creator),
+    action: "channel.create",
+    resource: `channel/${slug}`,
+    channel: slug,
+    timestamp: now,
+    metadata: { kind, mode, visibility },
+  });
   return c.json({ slug, title, kind, mode, visibility }, 201);
 });
 
@@ -3114,6 +3130,13 @@ app.post("/api/channels/:slug/project-agents", async (c) => {
   )
     .bind(slug, ownerAccount, handle, invitedBy, invitedAt)
     .run();
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.project_agent.invite",
+    resource: `channel/${slug}/project-agents/${ownerAccount}/${handle}`,
+    channel: slug,
+    timestamp: invitedAt,
+  });
   return c.json(
     {
       id: result.meta.last_row_id,
@@ -3160,6 +3183,13 @@ app.delete("/api/channels/:slug/project-agents", async (c) => {
   if (result.meta.changes === 0) {
     return c.json(errorBody("not_found", "active project agent invite not found"), 404);
   }
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.project_agent.remove",
+    resource: `channel/${slug}/project-agents/${ownerAccount}/${handle}`,
+    channel: slug,
+    timestamp: revokedAt,
+  });
   const childRows = await c.env.DB.prepare(
     `SELECT name
        FROM tokens
@@ -3368,6 +3398,13 @@ app.post("/api/channels/:slug/join-links", async (c) => {
       )
         .bind(code, slug, createdBy, now, expiresAt, maxUses)
         .run();
+      await bestEffortRecordManagementAudit(c.env.DB, {
+        actor: managementAuditActor(identity),
+        action: "channel.join_link.create",
+        resource: `channel/${slug}/join-links/${code}`,
+        channel: slug,
+        timestamp: now,
+      });
       const url = new URL(c.req.url);
       return c.json(
         { code, url: `${url.origin}/join/${code}`, channel_slug: slug, created_by: createdBy, created_at: now, expires_at: expiresAt, max_uses: maxUses, uses: 0, revoked_at: null },
@@ -3403,15 +3440,24 @@ app.delete("/api/channels/:slug/join-links/:code", async (c) => {
   const code = c.req.param("code");
   const channel = await loadChannel(c.env.DB, slug);
   if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
-  if (!isChannelModerator(c.get("identity"), channel)) {
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
     return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage join links"), 403);
   }
+  const revokedAt = Date.now();
   const result = await c.env.DB.prepare(
     "UPDATE channel_join_links SET revoked_at = COALESCE(revoked_at, ?) WHERE code = ? AND channel_slug = ?",
   )
-    .bind(Date.now(), code, slug)
+    .bind(revokedAt, code, slug)
     .run();
   if (result.meta.changes === 0) return c.json(errorBody("not_found", "join link not found"), 404);
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.join_link.revoke",
+    resource: `channel/${slug}/join-links/${code}`,
+    channel: slug,
+    timestamp: revokedAt,
+  });
   return c.json({ ok: true });
 });
 
@@ -3545,6 +3591,13 @@ app.post("/api/join/:code", async (c) => {
       .run();
     return c.json(errorBody("not_found", "join link has reached its max uses"), 410);
   }
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.member.add",
+    resource: `channel/${link.channel_slug}/members/${identity.account}`,
+    channel: link.channel_slug,
+    timestamp: now,
+  });
   return c.json({ channel_slug: link.channel_slug, joined: true });
 });
 
@@ -4527,6 +4580,14 @@ app.put("/api/channels/:slug/roles/:name", async (c) => {
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.role.assign",
+    resource: `channel/${slug}/roles/${name}`,
+    channel: slug,
+    timestamp: assignedAt,
+    metadata: { role },
+  });
   const saved = await loadChannelRoleAssignment(c.env.DB, slug, name);
   return c.json(saved ?? { name, role, responsibility: responsibility.value, assigned_by: identity.name, assigned_at: assignedAt });
 });
@@ -4543,7 +4604,8 @@ app.delete("/api/channels/:slug/roles/:name", async (c) => {
   if (!NAME_RE.test(name)) {
     return c.json(errorBody("bad_request", "valid name required"), 400);
   }
-  await c.env.DB.prepare("DELETE FROM channel_roles WHERE channel_slug = ? AND agent_name = ?")
+  const removedAt = Date.now();
+  const removed = await c.env.DB.prepare("DELETE FROM channel_roles WHERE channel_slug = ? AND agent_name = ?")
     .bind(slug, name)
     .run();
   await fetchChannelDO(
@@ -4555,6 +4617,15 @@ app.delete("/api/channels/:slug/roles/:name", async (c) => {
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );
+  if (removed.meta.changes > 0) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(identity),
+      action: "channel.role.remove",
+      resource: `channel/${slug}/roles/${name}`,
+      channel: slug,
+      timestamp: removedAt,
+    });
+  }
   return c.json({ ok: true });
 });
 
@@ -4597,6 +4668,13 @@ app.put("/api/channels/:slug/completion-gate", async (c) => {
       headers: { "x-partykit-room": slug, ...channelHeaders(updated, c.req.url) },
     }),
   );
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.guard.update",
+    resource: `channel/${slug}/guards/completion_gate`,
+    channel: slug,
+    metadata: { guard: "completion_gate" },
+  });
   return c.json({ gate, policy });
 });
 
@@ -4628,6 +4706,13 @@ app.put("/api/channels/:slug/decision-mode", async (c) => {
       headers: { "x-partykit-room": slug, ...channelHeaders(updated, c.req.url) },
     }),
   );
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.guard.update",
+    resource: `channel/${slug}/guards/decision_mode`,
+    channel: slug,
+    metadata: { guard: "decision_mode" },
+  });
   return c.json({ mode });
 });
 
@@ -4687,6 +4772,13 @@ app.put("/api/channels/:slug/loop-guard", async (c) => {
       headers: { "x-partykit-room": slug, ...channelHeaders(updated, c.req.url) },
     }),
   );
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.guard.update",
+    resource: `channel/${slug}/guards/loop_guard`,
+    channel: slug,
+    metadata: { guard: "loop_guard" },
+  });
   return c.json({ enabled: body.enabled, limit });
 });
 
@@ -4730,6 +4822,13 @@ app.put("/api/channels/:slug/workflow-guard", async (c) => {
       headers: { "x-partykit-room": slug, ...channelHeaders(updated, c.req.url) },
     }),
   );
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.guard.update",
+    resource: `channel/${slug}/guards/workflow_guard`,
+    channel: slug,
+    metadata: { guard: "workflow_guard" },
+  });
   return c.json({ enabled: body.enabled, limit });
 });
 
@@ -5334,10 +5433,11 @@ app.post("/api/channels/:slug/reset-guard", async (c) => {
   if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
   // 重置 loop guard 要同时满足两条：① 是房主/ap_ token（挡粉丝越权重置别人频道）
   // ② 是 human（loop guard 防的就是 agent 失控刷屏，不能让 agent 重置自己的熔断）
-  if (!isChannelModerator(c.get("identity"), channel) || c.get("identity").kind !== "human") {
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel) || identity.kind !== "human") {
     return c.json(errorBody("forbidden", "only a human owner or human ap_ token can reset guard"), 403);
   }
-  return fetchChannelDO(
+  const res = await fetchChannelDO(
     c.env,
     slug,
     new Request("https://do/internal/reset-guard", {
@@ -5345,6 +5445,16 @@ app.post("/api/channels/:slug/reset-guard", async (c) => {
       headers: { "x-partykit-room": slug },
     }),
   );
+  if (res.ok) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(identity),
+      action: "channel.guard.reset",
+      resource: `channel/${slug}/guards/loop`,
+      channel: slug,
+      metadata: { guard: "loop" },
+    });
+  }
+  return res;
 });
 
 app.post("/api/channels/:slug/workflows/:workflow_id/reset-guard", async (c) => {
@@ -5368,6 +5478,13 @@ app.post("/api/channels/:slug/workflows/:workflow_id/reset-guard", async (c) => 
     }),
   );
   if (!res.ok) return c.json(errorBody("unavailable", "workflow guard reset failed"), 503);
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.guard.reset",
+    resource: `channel/${slug}/guards/workflow/${workflowId}`,
+    channel: slug,
+    metadata: { guard: "workflow" },
+  });
   return c.json({ ok: true, workflow_id: workflowId });
 });
 

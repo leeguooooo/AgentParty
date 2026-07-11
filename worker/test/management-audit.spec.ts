@@ -238,6 +238,7 @@ describe("management audit", () => {
       "channel.member.add",
       "channel.visibility.update",
       "channel.permissions.update",
+      "channel.create",
     ]);
     expect(page.audit.every((entry) => entry.channel === slug)).toBe(true);
     expect(page.audit.every((entry) => entry.actor_account === ownerAccount && entry.actor_kind === "human")).toBe(true);
@@ -273,15 +274,16 @@ describe("management audit", () => {
       expect((await api(`/api/channels/${slug}/members/${encodeURIComponent(account)}`, owner.token, { method: "PUT" })).status).toBe(200);
     }
 
+    // 4 rows total: channel.create (from createChannel) + 3 member adds.
     const first = await readPage(await api(`/api/channels/${slug}/management-audit?limit=2`, owner.token));
     expect(first.audit).toHaveLength(2);
     expect(first.next_cursor).toBeTypeOf("string");
     const second = await readPage(
       await api(`/api/channels/${slug}/management-audit?limit=2&cursor=${encodeURIComponent(first.next_cursor ?? "")}`, owner.token),
     );
-    expect(second.audit).toHaveLength(1);
+    expect(second.audit).toHaveLength(2);
     expect(second.next_cursor).toBeNull();
-    expect(new Set([...first.audit, ...second.audit].map((entry) => entry.resource)).size).toBe(3);
+    expect(new Set([...first.audit, ...second.audit].map((entry) => entry.resource)).size).toBe(4);
 
     expect((await api(`/api/channels/${slug}/management-audit?limit=0`, owner.token)).status).toBe(400);
     expect((await api(`/api/channels/${slug}/management-audit?limit=101`, owner.token)).status).toBe(400);

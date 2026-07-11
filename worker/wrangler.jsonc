@@ -46,5 +46,11 @@
       "pattern": "agentparty.leeguoo.com",
       "custom_domain": true
     }
-  ]
+  ],
+  // #137 可观测性：开启 Cloudflare Workers Logs（内建，无需外部服务 / 密钥）。
+  // 线上出安全事件或故障时可在 dashboard 查 console.error（如审计落库失败标记）与请求日志。
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
 }

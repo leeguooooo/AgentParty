@@ -7,14 +7,24 @@ export type ManagementAuditActorKind = "admin" | "human" | "agent";
 export type ManagementAuditAction =
   | "token.issue"
   | "token.revoke"
+  | "channel.create"
   | "channel.permissions.update"
   | "channel.visibility.update"
   | "channel.member.add"
   | "channel.member.remove"
+  | "channel.role.assign"
+  | "channel.role.remove"
+  | "channel.join_link.create"
+  | "channel.join_link.revoke"
+  | "channel.project_agent.invite"
+  | "channel.project_agent.remove"
+  | "channel.guard.update"
+  | "channel.guard.reset"
   | "channel.webhook.add"
   | "channel.webhook.remove"
   | "channel.webhook.redeliver"
-  | "channel.archive";
+  | "channel.archive"
+  | "membership.set";
 
 export interface ManagementAuditActor {
   account: string | null;
@@ -84,6 +94,35 @@ function safeMetadata(action: ManagementAuditAction, input: unknown): Record<str
       metadata.webhook_filter === "all"
       ? { webhook_filter: metadata.webhook_filter }
       : {};
+  }
+  if (action === "channel.create") {
+    const result: Record<string, unknown> = {};
+    if (metadata.kind === "standing" || metadata.kind === "temp") result.kind = metadata.kind;
+    if (metadata.mode === "normal" || metadata.mode === "party") result.mode = metadata.mode;
+    if (metadata.visibility === "public" || metadata.visibility === "private") result.visibility = metadata.visibility;
+    return result;
+  }
+  if (action === "channel.role.assign") {
+    return metadata.role === "host" ||
+      metadata.role === "worker" ||
+      metadata.role === "reviewer" ||
+      metadata.role === "observer"
+      ? { role: metadata.role }
+      : {};
+  }
+  if (action === "channel.guard.update") {
+    return metadata.guard === "completion_gate" ||
+      metadata.guard === "decision_mode" ||
+      metadata.guard === "loop_guard" ||
+      metadata.guard === "workflow_guard"
+      ? { guard: metadata.guard }
+      : {};
+  }
+  if (action === "channel.guard.reset") {
+    return metadata.guard === "loop" || metadata.guard === "workflow" ? { guard: metadata.guard } : {};
+  }
+  if (action === "membership.set") {
+    return metadata.tier === "free" || metadata.tier === "member" ? { tier: metadata.tier } : {};
   }
   return {};
 }
