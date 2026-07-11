@@ -9,6 +9,7 @@ import {
   DesktopSettingsPanel,
   isDesktopSettingsOutsideClick,
   loadAutostartSetting,
+  loadDesktopVersionInfo,
   shouldDismissDesktopSettings,
   type DesktopSettingsRuntime,
   updateDesktopSettingsFocus,
@@ -21,6 +22,10 @@ const translations: Record<string, string> = {
   "DesktopSettings.autostart.description": "Open AgentParty when you sign in.",
   "DesktopSettings.autostart.loading": "Reading system setting",
   "DesktopSettings.autostart.error": "Couldn't update this setting.",
+  "DesktopSettings.version.desktop": "Desktop",
+  "DesktopSettings.version.server": "Server",
+  "DesktopSettings.version.build": "Build",
+  "DesktopSettings.version.unavailable": "Unavailable",
 };
 const t = (key: string) => translations[key] ?? key;
 
@@ -29,6 +34,7 @@ function runtime(overrides: Partial<DesktopSettingsRuntime> = {}): DesktopSettin
     isDesktopRuntime: () => true,
     isAutostartEnabled: async () => false,
     setAutostartEnabled: async () => true,
+    getAppVersion: async () => "0.2.89",
     ...overrides,
   };
 }
@@ -45,6 +51,8 @@ describe("DesktopSettings", () => {
       expect(DesktopSettingsStrings[locale]["DesktopSettings.control.label"]).toBeTruthy();
       expect(DesktopSettingsStrings[locale]["DesktopSettings.autostart.label"]).toBeTruthy();
       expect(DesktopSettingsStrings[locale]["DesktopSettings.autostart.error"]).toBeTruthy();
+      expect(DesktopSettingsStrings[locale]["DesktopSettings.version.desktop"]).toBeTruthy();
+      expect(DesktopSettingsStrings[locale]["DesktopSettings.version.server"]).toBeTruthy();
     }
   });
 
@@ -68,7 +76,14 @@ describe("DesktopSettings", () => {
 describe("DesktopSettingsPanel", () => {
   test("exposes the launch-at-login toggle as a keyboard-operable switch", () => {
     const html = renderToStaticMarkup(
-      <DesktopSettingsPanel enabled={true} pending={false} error={false} t={t} onToggle={() => {}} />,
+      <DesktopSettingsPanel
+        enabled={true}
+        pending={false}
+        error={false}
+        versions={{ desktop: "0.2.88", server: "0.2.89", commit: "048e06e5d1b5" }}
+        t={t}
+        onToggle={() => {}}
+      />,
     );
 
     expect(html).toContain('id="desktop-settings-panel"');
@@ -76,15 +91,63 @@ describe("DesktopSettingsPanel", () => {
     expect(html).toContain('role="switch"');
     expect(html).toContain('aria-checked="true"');
     expect(html).toContain("Launch at login");
+    expect(html).toContain("Desktop");
+    expect(html).toContain("0.2.88");
+    expect(html).toContain("Server");
+    expect(html).toContain("0.2.89");
+    expect(html).toContain("048e06e");
   });
 
   test("disables the switch while reading or writing and renders a short error", () => {
     const html = renderToStaticMarkup(
-      <DesktopSettingsPanel enabled={false} pending={true} error={true} t={t} onToggle={() => {}} />,
+      <DesktopSettingsPanel
+        enabled={false}
+        pending={true}
+        error={true}
+        versions={{ desktop: null, server: null, commit: null }}
+        t={t}
+        onToggle={() => {}}
+      />,
     );
 
     expect(html).toContain("disabled");
     expect(html).toContain("update this setting.");
+  });
+});
+
+describe("desktop version information", () => {
+  test("combines the native app version with the active server build identity", async () => {
+    const requests: string[] = [];
+    const info = await loadDesktopVersionInfo(
+      runtime({ getAppVersion: async () => "0.2.88" }),
+      "https://party.example.com/",
+      async (input) => {
+        requests.push(String(input));
+        return new Response(JSON.stringify({
+          ok: true,
+          version: "0.2.89",
+          commit: "048e06e5d1b5f70eee5bbca0eb854d3aa710f473",
+          deployed_at: "2026-07-10T23:27:24.905Z",
+        }), { status: 200 });
+      },
+    );
+
+    expect(requests).toEqual(["https://party.example.com/api/health"]);
+    expect(info).toEqual({
+      desktop: "0.2.88",
+      server: "0.2.89",
+      commit: "048e06e5d1b5f70eee5bbca0eb854d3aa710f473",
+    });
+  });
+
+  test("keeps native and server failures independent", async () => {
+    const info = await loadDesktopVersionInfo(
+      runtime({ getAppVersion: async () => { throw new Error("native unavailable"); } }),
+      "https://party.example.com",
+      async () => new Response("not json", { status: 502 }),
+    );
+
+    expect(info).toEqual({ desktop: null, server: null, commit: null });
   });
 });
 
