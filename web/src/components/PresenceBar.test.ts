@@ -1,5 +1,9 @@
-import { describe, expect, test } from "bun:test";
-import { buildGroups, countLiveGroups, ownerKey, type Item } from "./PresenceBar";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { PresenceEntry, Sender } from "@agentparty/shared";
+import { createElement } from "react";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import { LocaleProvider } from "../i18n/locale";
+import { buildGroups, countLiveGroups, ownerKey, PresenceBar, type Item } from "./PresenceBar";
 
 function item(over: Partial<Item> = {}): Item {
   return {
@@ -20,9 +24,13 @@ function item(over: Partial<Item> = {}): Item {
     owner: null,
     account: null,
     handle: null,
+    displayName: null,
+    avatarUrl: null,
+    avatarThumb: null,
     display: "agent-a",
     responsibility: null,
     connectionCount: 1,
+    clientVersion: null,
     ...over,
   };
 }
@@ -90,5 +98,102 @@ describe("presence grouping by account", () => {
     const { live, total } = countLiveGroups(groups);
     expect(total).toBe(1);
     expect(live).toBe(0);
+  });
+});
+
+function memoryStorage(seed: Record<string, string> = {}): Storage {
+  const values = new Map(Object.entries(seed));
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+    removeItem: (key) => { values.delete(key); },
+    clear: () => values.clear(),
+    key: (index) => [...values.keys()][index] ?? null,
+    get length() { return values.size; },
+  };
+}
+
+function presenceEntry(clientVersion?: string): PresenceEntry {
+  return {
+    name: "agent-a",
+    kind: "agent",
+    state: "working",
+    note: null,
+    ts: Date.now(),
+    ...(clientVersion === undefined ? {} : { client_version: clientVersion }),
+  };
+}
+
+const participants: Sender[] = [{ name: "agent-a", kind: "agent" }];
+let renderer: ReactTestRenderer | null = null;
+
+beforeEach(() => {
+  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: memoryStorage({ ap_locale: "en", ap_presence_expanded: "1" }),
+  });
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      setInterval: globalThis.setInterval.bind(globalThis),
+      clearInterval: globalThis.clearInterval.bind(globalThis),
+      innerWidth: 1280,
+      innerHeight: 800,
+    },
+  });
+});
+
+afterEach(async () => {
+  if (renderer !== null) await act(async () => renderer?.unmount());
+  renderer = null;
+  Reflect.deleteProperty(globalThis, "localStorage");
+  Reflect.deleteProperty(globalThis, "window");
+});
+
+function renderPresence(entry: PresenceEntry): ReactTestRenderer {
+  let next!: ReactTestRenderer;
+  void act(() => {
+    next = create(
+      createElement(
+        LocaleProvider,
+        null,
+        createElement(PresenceBar, {
+          presence: { "agent-a": entry },
+          participants,
+          status: "open",
+        }),
+      ),
+    );
+  });
+  renderer = next;
+  return next;
+}
+
+function nodesWithClass(r: ReactTestRenderer, className: string) {
+  return r.root.findAll((node) => String(node.props.className ?? "").split(" ").includes(className));
+}
+
+describe("presence client version", () => {
+  test("shows an agent CLI version in expanded details and the group tooltip, then removes it when collapsed", async () => {
+    const r = renderPresence(presenceEntry("0.2.89"));
+
+    const versions = nodesWithClass(r, "presence-client-version");
+    expect(versions).toHaveLength(1);
+    expect(versions[0]?.children).toEqual(["cli v", "0.2.89"]);
+    const group = nodesWithClass(r, "presence-group")[0];
+    expect(group?.props.title).toContain("agent-a: cli v0.2.89");
+
+    await act(async () => {
+      r.root.findByProps({ "aria-label": "collapse" }).props.onClick();
+    });
+
+    expect(nodesWithClass(r, "presence-client-version")).toHaveLength(0);
+  });
+
+  test("does not render a version label for legacy presence entries", () => {
+    const r = renderPresence(presenceEntry());
+
+    expect(nodesWithClass(r, "presence-client-version")).toHaveLength(0);
   });
 });

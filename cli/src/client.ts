@@ -1,5 +1,6 @@
 // ws 客户端：帧异步迭代 + 指数退避重连 + seq 去重 + ack 驱动的游标推进
 import type { ClientFrame, ServerFrame } from "@agentparty/shared";
+import pkg from "../package.json" with { type: "json" };
 
 class FrameQueue {
   private items: ServerFrame[] = [];
@@ -190,7 +191,7 @@ export function connect(
       opened = true;
       attempt = 0;
       helloSince = cursor;
-      sock.send(JSON.stringify({ type: "hello", since: cursor, since_rev: revCursor }));
+      sock.send(JSON.stringify({ type: "hello", since: cursor, since_rev: revCursor, client_version: pkg.version }));
       stopPing();
       pingTimer = setInterval(() => {
         if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: "ping" }));

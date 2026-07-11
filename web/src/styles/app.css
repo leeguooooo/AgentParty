@@ -976,6 +976,16 @@
   flex: none;
   color: var(--t-dim);
 }
+.presence-client-version {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--t-dim);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
 .presence-agent-kind,
 .presence-kind {
   flex: none;
@@ -4118,6 +4128,7 @@
   .presence-group-label {
     max-width: 52vw;
   }
+  .presence-agent-chip .presence-client-version { display: none; }
   .presence-name { max-width: 42vw; }
   .presence-note { max-width: 120px; }
   .presence-popover {
