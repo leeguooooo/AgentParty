@@ -9,12 +9,14 @@ import {
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
   MAX_WEBHOOKS_PER_CHANNEL,
+  MAX_WEBHOOK_DEAD_LETTERS,
   MAX_WEBHOOK_QUEUE_ROWS,
   PRESENCE_TIMEOUT_MS,
   RATE_LIMIT_PER_MIN,
   RETAIN_N,
   TEMP_IDLE_ARCHIVE_MS,
   WEBHOOK_MAX_RETRIES,
+  WEBHOOK_REDELIVER_BATCH_SIZE,
   WEBHOOK_RETRY_BATCH_SIZE,
   WEBHOOK_RETRY_DELAYS_MS,
   WEBHOOK_TIMEOUT_MS,
@@ -1056,6 +1058,18 @@ export class ChannelDO extends Server<Env> {
       attempts INTEGER NOT NULL DEFAULT 0,
       next_retry_at INTEGER NOT NULL
     )`);
+    // 死信表（#105）：重试耗尽 / 队列满而被永久放弃的投递落在这里，不再静默丢弃。
+    // 保留原始 payload 以便 moderator 原样重投；有界裁剪（见 recordDeadLetter）防止写爆。
+    sql.exec(`CREATE TABLE IF NOT EXISTS webhook_dead_letters (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      webhook_name TEXT NOT NULL,
+      mention_seq INTEGER NOT NULL,
+      payload TEXT NOT NULL,
+      attempts INTEGER NOT NULL,
+      last_status INTEGER,
+      last_error TEXT,
+      dead_lettered_at INTEGER NOT NULL
+    )`);
     sql.exec(`CREATE TABLE IF NOT EXISTS wake_delivery_ledger (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       mention_seq INTEGER NOT NULL,
@@ -1436,7 +1450,10 @@ export class ChannelDO extends Server<Env> {
       }
       if (attempt > WEBHOOK_MAX_RETRIES) {
         this.ctx.storage.sql.exec("DELETE FROM webhook_queue WHERE id = ?", id);
-        this.insertSystemStatus(`webhook ${webhookName} 连续投递失败已停用本条`, now, false, { state: "blocked" });
+        // #105：不再静默永久丢弃——落死信表待 moderator 重投，
+        // 并向频道插一条 system status（in-channel，不经 webhook 自身，见 dispatchWebhooks 对 system 帧的默认跳过）。
+        this.recordDeadLetter(webhookName, payload, attempt, delivery, now);
+        this.insertSystemStatus(`webhook ${webhookName} 连续投递失败已转入死信，可 redeliver 重投`, now, false, { state: "blocked" });
         continue;
       }
       this.ctx.storage.sql.exec(
@@ -1452,6 +1469,137 @@ export class ChannelDO extends Server<Env> {
     return WEBHOOK_RETRY_DELAYS_MS[
       Math.min(Math.max(attempts, 1), WEBHOOK_RETRY_DELAYS_MS.length) - 1
     ] as number;
+  }
+
+  // #105：把一条被永久放弃的投递落死信表。保留 payload 供 redeliver 原样重投；
+  // 有界裁剪——超过上限只留最新 MAX_WEBHOOK_DEAD_LETTERS 条，坏端点写不爆 DO 存储。
+  private recordDeadLetter(
+    webhookName: string,
+    payload: string,
+    attempts: number,
+    delivery: WebhookDeliveryResult,
+    now: number,
+  ) {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO webhook_dead_letters (
+         webhook_name, mention_seq, payload, attempts, last_status, last_error, dead_lettered_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      webhookName,
+      this.seqFromWebhookPayload(payload),
+      payload,
+      attempts,
+      delivery.status,
+      delivery.error,
+      now,
+    );
+    this.ctx.storage.sql.exec(
+      `DELETE FROM webhook_dead_letters
+        WHERE id NOT IN (SELECT id FROM webhook_dead_letters ORDER BY id DESC LIMIT ?)`,
+      MAX_WEBHOOK_DEAD_LETTERS,
+    );
+  }
+
+  // 测试专用薄封装：单测直接造死信验证裁剪，不必真跑一整轮重试耗尽。
+  recordDeadLetterForTest(
+    webhookName: string,
+    payload: string,
+    attempts: number,
+    delivery: WebhookDeliveryResult,
+  ) {
+    this.recordDeadLetter(webhookName, payload, attempts, delivery, Date.now());
+  }
+
+  // #105：重投死信。成功即从死信表清除并记 wake ledger；失败则原地留存、attempts 递增，
+  // 绝不静默消失——「重投还是不通」仍是死信，operator 可再试或删 webhook。
+  // 不重新入 webhook_queue：redeliver 是一次显式尝试，不重启自动退避循环（least-surprising）。
+  private async redeliverDeadLetters(name: string | null): Promise<{ redelivered: number; failed: number; remaining: number }> {
+    const where = name === null ? "" : " WHERE dl.webhook_name = ?";
+    const args: (string | number)[] = name === null ? [WEBHOOK_REDELIVER_BATCH_SIZE] : [name, WEBHOOK_REDELIVER_BATCH_SIZE];
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT dl.id, dl.webhook_name, dl.payload, dl.attempts, w.url, w.secret
+           FROM webhook_dead_letters dl LEFT JOIN webhooks w ON w.name = dl.webhook_name${where}
+          ORDER BY dl.id
+          LIMIT ?`,
+        ...args,
+      )
+      .toArray();
+    let redelivered = 0;
+    let failed = 0;
+    const now = Date.now();
+    for (const row of rows) {
+      const id = Number(row.id);
+      const webhookName = String(row.webhook_name);
+      const payload = String(row.payload);
+      const attempt = Number(row.attempts) + 1;
+      // webhook 已被删除 → 无从投递，视为失败但留存，operator 需先重建同名 webhook 或清死信。
+      if (row.url === null) {
+        failed++;
+        this.ctx.storage.sql.exec(
+          "UPDATE webhook_dead_letters SET attempts = ?, last_status = NULL, last_error = ?, dead_lettered_at = ? WHERE id = ?",
+          attempt,
+          "webhook no longer registered",
+          now,
+          id,
+        );
+        continue;
+      }
+      const delivery = await this.deliverWebhook(String(row.url), String(row.secret), payload);
+      this.recordWakeDelivery({
+        mentionSeq: this.seqFromWebhookPayload(payload),
+        targetName: webhookName,
+        webhookName,
+        attempt,
+        delivery,
+      });
+      if (delivery.ok) {
+        redelivered++;
+        this.ctx.storage.sql.exec("DELETE FROM webhook_dead_letters WHERE id = ?", id);
+        continue;
+      }
+      failed++;
+      this.ctx.storage.sql.exec(
+        "UPDATE webhook_dead_letters SET attempts = ?, last_status = ?, last_error = ?, dead_lettered_at = ? WHERE id = ?",
+        attempt,
+        delivery.status,
+        delivery.error,
+        now,
+        id,
+      );
+    }
+    const remaining = Number(
+      name === null
+        ? this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM webhook_dead_letters").one().n
+        : this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM webhook_dead_letters WHERE webhook_name = ?", name).one().n,
+    );
+    return { redelivered, failed, remaining };
+  }
+
+  private listDeadLetters(): {
+    id: number;
+    webhook_name: string;
+    mention_seq: number;
+    attempts: number;
+    last_status: number | null;
+    last_error: string | null;
+    dead_lettered_at: number;
+  }[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT id, webhook_name, mention_seq, attempts, last_status, last_error, dead_lettered_at
+           FROM webhook_dead_letters
+          ORDER BY id`,
+      )
+      .toArray()
+      .map((r) => ({
+        id: Number(r.id),
+        webhook_name: String(r.webhook_name),
+        mention_seq: Number(r.mention_seq),
+        attempts: Number(r.attempts),
+        last_status: r.last_status === null ? null : Number(r.last_status),
+        last_error: r.last_error === null ? null : String(r.last_error),
+        dead_lettered_at: Number(r.dead_lettered_at),
+      }));
   }
 
   // temp 频道最后一条消息后闲置超时 → 归档：写 do meta + 回写 d1 archived_at + 踢连接
@@ -1690,7 +1838,9 @@ export class ChannelDO extends Server<Env> {
       if (delivery.ok) continue;
       const queued = Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM webhook_queue").one().n);
       if (queued >= MAX_WEBHOOK_QUEUE_ROWS) {
-        await this.insertSystemStatus("webhook retry queue is full; dropping failed delivery", now, false, { state: "blocked" });
+        // #105：队列满不再直接丢——落死信表，operator 事后可查可重投。
+        this.recordDeadLetter(hook.name, payload, 1, delivery, now);
+        await this.insertSystemStatus("webhook retry queue is full; delivery moved to dead-letters", now, false, { state: "blocked" });
         continue;
       }
       this.ctx.storage.sql.exec(
@@ -2448,6 +2598,16 @@ export class ChannelDO extends Server<Env> {
         }));
       return Response.json({ deliveries });
     }
+    if (url.pathname === "/internal/dead-letters" && request.method === "GET") {
+      // #105：列出被永久放弃、待重投的死信（不回 payload 明文，正文在频道历史里已可读）
+      return Response.json({ dead_letters: this.listDeadLetters() });
+    }
+    if (url.pathname === "/internal/dead-letters/redeliver" && request.method === "POST") {
+      // #105：重投死信。?name= 限定单个 webhook；缺省重投全部（受批次上限约束）。
+      const name = url.searchParams.get("name");
+      const result = await this.redeliverDeadLetters(name);
+      return Response.json(result);
+    }
     if (url.pathname === "/internal/read-cursors" && request.method === "GET") {
       // 已读游标快照 + 频道最新 seq，供 `party who` 标注每个身份读到第几条 / 落后多少（Phase 2 · CLI）。
       return Response.json({ cursors: this.readCursors(), last_seq: this.lastSeq() });
@@ -2586,6 +2746,8 @@ export class ChannelDO extends Server<Env> {
       }
       this.ctx.storage.sql.exec("DELETE FROM webhooks WHERE name = ?", name);
       this.ctx.storage.sql.exec("DELETE FROM webhook_queue WHERE webhook_name = ?", name);
+      // #105：webhook 删除后其死信已无从重投，一并清掉避免留下不可投递的孤儿。
+      this.ctx.storage.sql.exec("DELETE FROM webhook_dead_letters WHERE webhook_name = ?", name);
       return Response.json({ ok: true });
     }
     if (url.pathname === "/internal/reset-guard" && request.method === "POST") {
