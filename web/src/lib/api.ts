@@ -562,6 +562,28 @@ export async function fetchMessages(
   return data.messages;
 }
 
+export async function fetchMessagesWithRetry(
+  token: string,
+  slug: string,
+  opts: { limit?: number; before?: number } = {},
+  retry: { attempts?: number; delayMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<MsgFrame[]> {
+  const attempts = Math.max(1, Math.floor(retry.attempts ?? 2));
+  const delayMs = Math.max(0, retry.delayMs ?? 400);
+  const sleep = retry.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fetchMessages(token, slug, opts);
+    } catch (error) {
+      if (error instanceof AuthError || error instanceof ForbiddenError) throw error;
+      lastError = error;
+      if (attempt < attempts) await sleep(delayMs);
+    }
+  }
+  throw lastError;
+}
+
 // @ 唤醒回执：webhook 唤醒台账(spec wake-deliveries)。since=最老可见 seq 限定窗口，返回该窗口内
 // 每条 @ 的唤醒尝试(ok/failed/http/error) + 复活链接。serve/watch 型 agent 不产生台账行(它们是连着的
 // 客户端，不靠服务端 POST)，那部分回执由 presence + 回复链接在前端补齐。

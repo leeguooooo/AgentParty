@@ -27,6 +27,7 @@ import {
   fetchChannelRoles,
   fetchSquads,
   fetchMessages,
+  fetchMessagesWithRetry,
   fetchTaskSummary,
   fetchTasks,
   fetchWakeDeliveries,
@@ -2045,7 +2046,7 @@ export function ChannelPage({
   // 归档频道同样被这条覆盖（ws 会被 1008 踢掉，历史靠这页 + 上翻）。
   useEffect(() => {
     let alive = true;
-    fetchMessages(token, slug, { before: Number.MAX_SAFE_INTEGER, limit: PAGE_SIZE })
+    fetchMessagesWithRetry(token, slug, { before: Number.MAX_SAFE_INTEGER, limit: PAGE_SIZE })
       .then((msgs) => {
         if (!alive) return;
         setHistoryError(null);
