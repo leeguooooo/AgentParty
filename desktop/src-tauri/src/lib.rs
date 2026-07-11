@@ -462,9 +462,6 @@ fn navigate_main_to(app: &tauri::AppHandle, url: &'static str) {
         let Ok(target) = tauri::Url::parse(url) else {
             return;
         };
-        if window.url().is_ok_and(|current| current == target) {
-            return;
-        }
         let _ = window.navigate(target);
     });
 }
