@@ -59,6 +59,9 @@ export class WakeBlockedError extends Error {
 // 放弃通告都发不出去（网络/loop guard 熔断）。此时既没送达也没宣告，继续跑就是静默丢 @。
 export const EXIT_WAKE_UNANNOUNCED = 1;
 
+/** 连续放弃熔断：supervisor 已经无法履行唤醒职责，停止排空后续 @。 */
+export const EXIT_WAKE_ABANDON_CIRCUIT = 11;
+
 /** 已有 serve 挂在同一 (channel, workspace) 上：拒绝启动，避免重复执行（#99）。 */
 export const EXIT_ALREADY_SERVING = 10;
 
@@ -79,6 +82,19 @@ const AP_BODY_MAX = 4_000;
 
 const DEFAULT_MAX_WAKE_ATTEMPTS = 3;
 const DEFAULT_WAKE_RETRY_DELAY_MS = 500;
+// 普通频道 loop guard 是 30；必须远低于它，避免放弃通告先把频道熔断、随后静默丢消息。
+const MAX_CONSECUTIVE_WAKE_ABANDONS = 3;
+const BLOCKED_ERROR_MAX = 300;
+
+function sanitizeBlockedError(error: string): string {
+  const compact = error
+    .replace(/\b(?:ap|acc|ref)_[A-Za-z0-9._-]+\b/gi, "[redacted]")
+    .replace(/((?:authorization|token|secret|password)\s*[:=]\s*)(?:Bearer\s+)?\S+/gi, "$1[redacted]")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (compact || "unknown error").slice(0, BLOCKED_ERROR_MAX);
+}
 
 // context file 里附带的最近频道消息条数上限（冷起的 runner 不用先跑 history 也有基本上下文）
 const RECENT_MAX = 20;
@@ -288,7 +304,10 @@ Options:
                        how many were skipped — serve wakes only for messages that
                        arrive AFTER it attaches, issue #193. An undelivered wake
                        (stuck, issue #198) is a debt, not backlog: it always replays.)
-  --all                run for every non-self message, not only @mentions`;
+  --all                run for every non-self message, not only @mentions
+
+Supervisor safety: after ${MAX_CONSECUTIVE_WAKE_ABANDONS} consecutive wakes are abandoned, serve posts a final
+blocked status and exits nonzero instead of consuming later messages.`;
 
 export interface ServeOptions {
   server: string;
@@ -1217,6 +1236,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
     o.onStuck?.(next);
   };
   let code = 0;
+  let consecutiveWakeAbandons = 0;
+  let wakeAbandonCircuitTripped = false;
   let advertised = false;
   let charter: ChannelCharter | null = o.charter ?? null;
   const refreshCharter = async (reason: string, expectedRev?: number) => {
@@ -1358,6 +1379,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
           }
         }
         if (delivered) {
+          // 一条真正送达的 wake 证明 runner 恢复了；此前连续失败不再代表当前健康状态。
+          consecutiveWakeAbandons = 0;
           // 只清**本帧**的欠账。别的 seq 的欠账不是它能了结的（#206 门禁 P1①）。
           //
           // 注意不能写成 `if (isDebt)`：isDebt 是进入本帧时算的，而重试过程中
@@ -1393,6 +1416,27 @@ export async function runServe(o: ServeOptions): Promise<number> {
             break;
           }
           setStuck(null); // 放弃也是一种「了结」：宣告过了，才允许推进游标
+          consecutiveWakeAbandons += 1;
+          if (consecutiveWakeAbandons >= MAX_CONSECUTIVE_WAKE_ABANDONS) {
+            const finalNote =
+              `serve wake circuit breaker tripped: consecutive_abandons=${consecutiveWakeAbandons}/${MAX_CONSECUTIVE_WAKE_ABANDONS}; ` +
+              `last_seq=${frame.seq}; last_error=${sanitizeBlockedError(lastError)}`;
+            out(`  ${finalNote}`);
+            try {
+              await (o.post ?? postMessage)(o.server, o.token, o.channel, {
+                kind: "status",
+                state: "blocked",
+                note: finalNote,
+                mentions: [],
+                blocked_reason: finalNote,
+              });
+            } catch (e) {
+              out(`  熔断通告发送失败，立即退出: ${sanitizeBlockedError(e instanceof Error ? e.message : String(e))}`);
+            }
+            // 当前 wake 已经逐条宣告放弃；让公共 ack 路径把它了结，再退出且不读取下一帧。
+            wakeAbandonCircuitTripped = true;
+            code = EXIT_WAKE_ABANDON_CIRCUIT;
+          }
         }
       }
       // 触发消息本身不进 recent（它就是 context 主体）；自己的/未 @ 的都算上下文
@@ -1413,6 +1457,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
           last_message: lastMessageFromFrame(frame),
         });
       }
+
+      if (wakeAbandonCircuitTripped) break;
 
       // 唤醒间隙的安全点：磁盘上的 party 二进制被 install.sh 换新了吗（issue #45）？
       // 此刻上一轮已 ack、游标已落盘、无进行中的 runner——re-exec 干净。--auto-upgrade 直接换，

@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT_ARCHIVED, type MsgFrame } from "@agentparty/shared";
-import { createBuiltinRunner, createSdkRunner, profileChildServeOptions, runServe, WakeBlockedError, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
+import { createBuiltinRunner, createSdkRunner, EXIT_WAKE_ABANDON_CIRCUIT, profileChildServeOptions, runServe, WakeBlockedError, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
 import type { StuckWake } from "../src/config";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 
@@ -203,6 +203,90 @@ describe("serve wake delivery (#118 / #198)", () => {
     expect(await runServe(o)).toBe(EXIT_ARCHIVED);
     expect(cursors).toEqual([1]);
     expect(stucks).toEqual([]);
+  });
+});
+
+describe("连续放弃熔断 (#193 / #198 owner 约束④)", () => {
+  function mentionBurst(count: number) {
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(0, "me"));
+      for (let seq = 1; seq <= count; seq++) {
+        sock.send(msgFrame(seq, `wake ${seq}`, { mentions: ["me"] }));
+      }
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 200);
+    });
+    return server;
+  }
+
+  test("three consecutive explicit abandons post a final sanitized blocked status and exit nonzero", async () => {
+    const s = mentionBurst(3);
+    const posts: Array<Record<string, unknown>> = [];
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 1,
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: posts.length };
+      },
+      runCommand: async (frame) => {
+        throw new WakeBlockedError(`runner missing for seq ${frame.seq}\nAuthorization: Bearer ap_secret_value`, true);
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_WAKE_ABANDON_CIRCUIT);
+    const blocked = posts.filter((p) => p.state === "blocked");
+    expect(blocked).toHaveLength(4); // 三条逐条放弃留痕 + 一条 supervisor 熔断终态
+    const finalNote = String(blocked.at(-1)!.note);
+    expect(finalNote).toContain("circuit breaker");
+    expect(finalNote).toContain("last_seq=3");
+    expect(finalNote).toContain("runner missing for seq 3");
+    expect(finalNote).not.toContain("ap_secret_value");
+    expect(finalNote).not.toContain("\n");
+  });
+
+  test("a successfully delivered wake resets the consecutive-abandon counter", async () => {
+    const s = mentionBurst(4);
+    const posts: Array<Record<string, unknown>> = [];
+    const seen: number[] = [];
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 1,
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: posts.length };
+      },
+      runCommand: async (frame) => {
+        seen.push(frame.seq);
+        if (frame.seq !== 2) throw new WakeBlockedError(`runner missing ${frame.seq}`, true);
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(seen).toEqual([1, 2, 3, 4]);
+    expect(posts.filter((p) => p.state === "blocked")).toHaveLength(3);
+    expect(posts.some((p) => String(p.note).includes("circuit breaker"))).toBe(false);
+  });
+
+  test("after the circuit trips, buffered future mentions are neither executed nor acknowledged", async () => {
+    const s = mentionBurst(5);
+    const executed: number[] = [];
+    const cursors: number[] = [];
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 1,
+      onCursor: (cursor) => cursors.push(cursor),
+      post: async () => ({ seq: 1 }),
+      runCommand: async (frame) => {
+        executed.push(frame.seq);
+        throw new WakeBlockedError("runner missing", true);
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_WAKE_ABANDON_CIRCUIT);
+    expect(executed).toEqual([1, 2, 3]);
+    // conn.ack 的权威副作用是 cursor 持久化；4/5 已在 FrameQueue 缓冲，但熔断后绝不消费。
+    expect(cursors).toEqual([1, 2, 3]);
   });
 });
 
