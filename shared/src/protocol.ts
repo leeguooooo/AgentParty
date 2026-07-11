@@ -32,6 +32,11 @@ export const ROLE_RESPONSIBILITY_LIMIT = 500;
 export const RESERVED_NAMES: readonly string[] = ["system"];
 export const MAX_WEBHOOK_QUEUE_ROWS = 200;
 export const WEBHOOK_RETRY_BATCH_SIZE = 25;
+// 死信保留上限（#105）：重试耗尽 / 队列满而被永久放弃的投递不再静默丢弃，落死信表待人重投。
+// 有界裁剪（只留最新 N 条）避免坏端点把 DO 存储写爆。
+export const MAX_WEBHOOK_DEAD_LETTERS = 200;
+// 单次 redeliver 最多重投多少条死信，避免一个端点的巨量积压一次性打满 subrequest 配额。
+export const WEBHOOK_REDELIVER_BATCH_SIZE = 50;
 
 // ---- 会员分层（#277 骨架）----
 // 账号维度的 free/member 层：托管部署每月要成本，会员用于回收；自部署始终免费。

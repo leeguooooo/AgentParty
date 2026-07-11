@@ -13,6 +13,7 @@ export type ManagementAuditAction =
   | "channel.member.remove"
   | "channel.webhook.add"
   | "channel.webhook.remove"
+  | "channel.webhook.redeliver"
   | "channel.archive";
 
 export interface ManagementAuditActor {

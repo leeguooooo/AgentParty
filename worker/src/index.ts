@@ -4843,6 +4843,52 @@ app.delete("/api/channels/:slug/webhooks/:name", async (c) => {
   return response;
 });
 
+// #105：列出死信（重试耗尽 / 队列满被永久放弃的投递）。与 webhook 管理同权限：仅房主 / ap_ token。
+app.get("/api/channels/:slug/webhooks/dead-letters", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!isChannelModerator(c.get("identity"), channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage webhooks"), 403);
+  }
+  return fetchChannelDO(
+    c.env,
+    slug,
+    new Request("https://do/internal/dead-letters", { headers: { "x-partykit-room": slug } }),
+  );
+});
+
+// #105：重投某 webhook 的死信。成功即出表，仍失败留表待再试——不再永久静默丢弃。管理权同上。
+app.post("/api/channels/:slug/webhooks/:name/redeliver", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!isChannelModerator(c.get("identity"), channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage webhooks"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const name = c.req.param("name");
+  const response = await fetchChannelDO(
+    c.env,
+    slug,
+    new Request(`https://do/internal/dead-letters/redeliver?name=${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: { "x-partykit-room": slug },
+    }),
+  );
+  if (response.ok) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(c.get("identity")),
+      action: "channel.webhook.redeliver",
+      resource: `channel/${slug}/webhooks/${name}`,
+      channel: slug,
+    });
+  }
+  return response;
+});
+
 app.post("/api/channels/:slug/archive", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);
