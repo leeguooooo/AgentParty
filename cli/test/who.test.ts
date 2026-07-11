@@ -52,6 +52,33 @@ describe("who classify（#47：可唤醒判定按 wake.kind 分口径）", () =>
   });
 });
 
+describe("who classify 暂停接待（#180：paused 与 offline 视觉/语义区分）", () => {
+  test("被暂停的 agent 带出 paused + resume_at，供 who 独立渲染", () => {
+    const r = classify(p({ name: "bot", state: "waiting", paused: true, resume_at: NOW + 3_600_000 }), NOW);
+    expect(r).not.toBeNull();
+    expect(r?.paused).toBe(true);
+    expect(r?.resume_at).toBe(NOW + 3_600_000);
+  });
+
+  test("无 resume_at 的暂停（开放式）：paused 为 true，不带 resume_at", () => {
+    const r = classify(p({ name: "bot", state: "waiting", paused: true }), NOW);
+    expect(r?.paused).toBe(true);
+    expect(r?.resume_at).toBeUndefined();
+  });
+
+  test("暂停即使离线很久也照列（人主动保留的状态，不当幽灵清掉）", () => {
+    const stale = 20 * 24 * 60 * 60 * 1000; // 超过 14 天幽灵阈值
+    const r = classify(p({ name: "bot", state: "offline", paused: true, last_seen: NOW - stale }), NOW);
+    expect(r).not.toBeNull();
+    expect(r?.paused).toBe(true);
+  });
+
+  test("未暂停的 agent 不带 paused 字段（诚实留白）", () => {
+    const r = classify(p({ name: "bot", state: "working" }), NOW);
+    expect(r?.paused).toBeUndefined();
+  });
+});
+
 describe("who 身份分层（#110：who --json 不再对 presence 已有的身份信息保持沉默）", () => {
   // presence 里 name / kind / account / handle / display_name 是五层身份；who 只吐 name 时，
   // 想 @ 一个人类的 agent 从 who 里看不到 handle，@ 名字送不到（web 通知按 handle 命中）。

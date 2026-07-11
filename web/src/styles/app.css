@@ -1410,6 +1410,56 @@
 }
 .presence-empty { font-size: 12px; color: var(--t-dim); }
 
+/* 暂停接待（#180）：琥珀色 chip，与 offline 的灰、blocked 的红都不同——「有意暂停」不是「掉线丢了」。 */
+.presence-paused {
+  flex: none;
+  padding: 1px 5px;
+  border: 1.4px solid #d98a1f;
+  border-radius: 0;
+  background: var(--d-yellow);
+  color: #9a5b00;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+/* 暂停者的状态点：琥珀实心 + 一圈浅晕，一眼从 online/offline 里区分出来。 */
+.d-dot--paused {
+  background: #d98a1f;
+  box-shadow: 0 0 0 2px var(--d-yellow);
+}
+.presence-resume {
+  flex: none;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1.4px solid #d98a1f;
+  border-radius: 0;
+  background: var(--d-yellow);
+  color: #9a5b00;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.presence-resume:hover:not(:disabled) { background: #d98a1f; color: #fff; }
+.presence-resume:disabled { opacity: 0.55; cursor: wait; }
+.presence-pause-select {
+  flex: none;
+  min-height: 22px;
+  padding: 1px 4px;
+  border: 1.4px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--bg);
+  color: var(--t-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.presence-pause-select:disabled { opacity: 0.55; cursor: wait; }
+
 /* party 频道徽章：复用 .d-hl 蜡笔黄高亮，缩小 + marker 字 + 手绘歪斜 */
 .party-badge {
   font-family: var(--d-marker);

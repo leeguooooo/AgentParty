@@ -48,6 +48,10 @@ interface Row {
   age_ms: number;
   connection_count?: number;
   read_seq?: number; // 读到的最大 seq（Phase 2）；无游标 = 不逐帧流式读，不标注
+  // 人为暂停接待（#180）：与 offline 视觉区分——不是「掉线丢了」，是「人主动按下暂停」。
+  // 暂停期该 agent 被 @ 也不唤醒（webhook 不投、serve/watch 自我抑制），消息仍进历史。
+  paused?: true;
+  resume_at?: number; // 定时恢复时刻（epoch ms）；无则需手动恢复
   // 身份分层（#110）：presence 已带 account/handle/display_name，who 之前只吐 name，
   // 想 @ 一个人类的 agent 从 who 里看不到 handle——而 web 通知按 handle 命中，@ 名字送不到。
   // 这里原样带出（仅在 presence 给了非空值时），让 who 不再对已有身份信息保持沉默。
@@ -71,19 +75,22 @@ export function classify(e: PresenceEntry, now: number): Row | null {
   const online = e.state !== "offline" && (e.live === true || age < STALE_MS);
   const kind = kindOf(e);
   const wake = e.wake?.kind;
+  const paused = e.paused === true;
   let tier: Tier;
   if (online) tier = "online";
   // wakeable 统一口径（#47/#55）：serve/watch 需 presence 新鲜，human_driven 不承诺自动响应；webhook 离线也算
   else if (autoWakeReachable(e, now, STALE_MS) && age <= DEAD_MS) tier = "wakeable";
   else tier = "recent";
   if (tier !== "online") {
-    if (kind === "human") return null; // 围观的人类只在线才列
-    if (age > DEAD_MS) return null; // 幽灵清理
+    // 暂停是人主动设的、有意保留的状态：不当人类/幽灵清掉，始终列出，让人看得见「谁被按了暂停」。
+    if (!paused && kind === "human") return null; // 围观的人类只在线才列
+    if (!paused && age > DEAD_MS) return null; // 幽灵清理
   }
   return {
     name: e.name,
     kind,
     tier,
+    ...(paused ? { paused: true as const, ...(typeof e.resume_at === "number" ? { resume_at: e.resume_at } : {}) } : {}),
     ...(wake === undefined ? {} : { wake }),
     ...(wake === "watch" && e.wake?.verified_at === undefined ? { wake_unverified: true as const } : {}),
     // 身份分层（#110）：只在 presence 给了非空值时带出，缺失就省略（诚实留白，不无中生有）。
@@ -205,10 +212,19 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     }
     for (const r of rows) {
+      const read = readNote(r.read_seq, lastSeq);
+      const duplicate = r.connection_count !== undefined ? ` x${r.connection_count} sessions` : "";
+      // 暂停接待（#180）：独立的 ⏸ 行，与 offline 视觉区分。带上定时/手动恢复提示，一眼看清何时回来。
+      if (r.paused === true) {
+        const resume =
+          typeof r.resume_at === "number"
+            ? ` · resumes in ${humanAge(Math.max(0, r.resume_at - now))}`
+            : " · resume manually";
+        console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${read}${duplicate}`);
+        continue;
+      }
       const wake = r.tier === "wakeable" && r.wake ? ` ${r.wake}${r.wake_unverified === true ? " (unverified)" : ""}` : "";
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
-      const duplicate = r.connection_count !== undefined ? ` x${r.connection_count} sessions` : "";
-      const read = readNote(r.read_seq, lastSeq);
       console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${wake}${read}${duplicate}${age}`);
     }
     return 0;

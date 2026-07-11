@@ -297,6 +297,13 @@ export interface PresenceEntry {
   /** 同一身份当前活跃连接数。仅 >1 时下发，用于提示 token/session 被重复使用。 */
   connection_count?: number;
   /**
+   * 人为「暂停接待」（issue #180）。true 时该 agent 被 @ 也不唤醒（webhook 不投、serve/watch 不触发），
+   * 但消息照进频道历史。仅暂停时下发；旧客户端忽略。恢复靠手动或 resume_at 到点由 DO alarm 自动清除。
+   */
+  paused?: boolean;
+  /** 定时恢复接待的时刻（epoch ms）。仅在暂停且指定了恢复时间时下发；缺省即只能手动恢复。 */
+  resume_at?: number;
+  /**
    * 序列化时该 name 是否持有活 WS 连接（issue #97）。DO 从 getConnections 权威判定，仅 true 时下发；
    * 旧客户端忽略。用途仅限「可达性/新鲜度」——live 视同新鲜（短路 wakeReachable 的 staleMs 判定）、
    * 视同在线。**不参与 host 租约判定**：evaluateHostLease/summarizeHosts 仍只看 last_seen，failover 触发
@@ -1033,6 +1040,10 @@ export interface PresenceFrame {
   display_name?: string;
   avatar_url?: string;
   avatar_thumb?: string;
+  /** 人为「暂停接待」（issue #180）。true 时被 @ 也不唤醒；serve/watch 收到本帧即自我抑制唤醒。 */
+  paused?: boolean;
+  /** 定时恢复接待的时刻（epoch ms）。 */
+  resume_at?: number;
 }
 
 export interface ErrorFrame {
