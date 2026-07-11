@@ -1,3 +1,4 @@
+// (#247 smoke) 碰 worker/ 应回落全量 check
 // 频道访问控制（账号模型 spec §5）——纯函数，便于单测。
 // v2：判定锚点从 token 名/万能钥匙改为「账号」(principal.account) + channel_scope 硬上限。
 import type { TokenIdentity } from "./auth";
