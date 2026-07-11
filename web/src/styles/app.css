@@ -2401,6 +2401,12 @@
   gap: 6px 10px;
   padding: 0 4px 2px;
 }
+.chan-toolstrip-toggle {
+  display: none;
+}
+.chan-toolstrip-content {
+  display: contents;
+}
 .chan-tool-buttons,
 .chan-tool-actions,
 .chan-admin-actions {
@@ -4188,15 +4194,42 @@
      两个真正锚在按钮上的绝对定位下拉（邀请链接 / 我的 agent）在窄屏改成贴底 sheet，避免被裁掉。 */
   .chan-toolstrip {
     flex-wrap: nowrap;
+    gap: 8px;
+    padding: 0 2px 5px;
+  }
+  .chan-toolstrip-toggle {
+    display: inline-flex;
+    align-items: center;
+    align-self: flex-start;
+    flex: 0 0 auto;
+    gap: 1px;
+    min-width: 36px;
+    min-height: 36px;
+    padding: 4px;
+  }
+  .chan-toolstrip-toggle .ap-sprite { --ap-icon-size: 22px; }
+  .chan-toolstrip-toggle-arrow {
+    width: 7px;
+    font-size: 9px;
+    line-height: 1;
+  }
+  .chan-toolstrip-content {
+    display: flex;
+    align-items: center;
+    flex: 1 1 auto;
+    min-width: 0;
     overflow-x: auto;
     overflow-y: hidden;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: thin;
     gap: 8px;
-    padding: 0 2px 5px;
+    padding-bottom: 1px;
   }
-  .chan-toolstrip::-webkit-scrollbar { height: 6px; }
-  .chan-toolstrip::-webkit-scrollbar-thumb { border-width: 1px; }
+  .chan-toolstrip--collapsed .chan-toolstrip-content {
+    display: none;
+  }
+  .chan-toolstrip-content::-webkit-scrollbar { height: 6px; }
+  .chan-toolstrip-content::-webkit-scrollbar-thumb { border-width: 1px; }
   .chan-tool-buttons,
   .chan-tool-actions,
   .chan-admin-actions {

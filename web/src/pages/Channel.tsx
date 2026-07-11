@@ -70,6 +70,7 @@ import { groupTeamMessages, summarizeTeams, type TeamMessageThread, type TeamSum
 import { ChannelSocket } from "../lib/ws";
 import { channelReducer, initialChannelState } from "../state";
 import { useT, type TFunc } from "../i18n/useT";
+import { ChannelToolstrip } from "../components/ChannelToolstrip";
 import "../i18n/strings/Channel";
 import "../i18n/strings/Composer";
 
@@ -2809,8 +2810,9 @@ export function ChannelPage({
       />
       {kickError !== null && <p className="banner banner--red">{kickError}</p>}
       {archiveError !== null && <p className="banner banner--red">{archiveError}</p>}
-      <div className="chan-toolstrip" aria-label={t("Channel.tools.label")}>
-        <div className="chan-tool-buttons">
+      <ChannelToolstrip
+        buttons={
+          <>
           <button
             type="button"
             className={"d-btn chan-tool-btn" + (charterUpdated ? " chan-tool-btn--updated" : "")}
@@ -2860,8 +2862,10 @@ export function ChannelPage({
               </span>
             </button>
           )}
-        </div>
-        <div className="chan-tool-actions">
+          </>
+        }
+        actions={
+          <>
           <NotifyToggle optin={optin} onChange={setOptin} />
           {(canMintAgent || canModerate) && !state.archived && (
             <div className="chan-admin-actions">
@@ -2919,8 +2923,9 @@ export function ChannelPage({
               )}
             </div>
           )}
-        </div>
-      </div>
+          </>
+        }
+      />
       {activePanel !== null && (
         <ChannelPanelModal
           title={
