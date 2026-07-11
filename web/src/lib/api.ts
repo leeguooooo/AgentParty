@@ -829,6 +829,49 @@ export async function revokeJoinLink(token: string, slug: string, code: string):
   if (!res.ok && res.status !== 404) throw new Error(`DELETE join-link failed (${res.status})`);
 }
 
+// 观看模式邀请（#186）：房主铸「频道内只读分享 token」，返回 /c/<slug>?t=<token> 围观链接。
+// 与 join-links（参与模式）平行——观看链接无需登录，点开即读、发送禁用（复用 readonly 角色）。
+// token 明文只在创建时回一次，故列表只能列 name/created_at，不能重现 URL。
+export interface ShareLinkInfo {
+  name: string;
+  created_at: number;
+  // 仅创建响应带；列表不回（明文取不回）
+  url?: string;
+  token?: string;
+}
+
+export async function createShareLink(token: string, slug: string): Promise<ShareLinkInfo> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/share-links`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: "{}",
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("only the channel owner can create watch links");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/share-links failed (${res.status})`);
+  return (await res.json()) as ShareLinkInfo;
+}
+
+export async function listShareLinks(token: string, slug: string): Promise<ShareLinkInfo[]> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/share-links`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("only the channel owner can view watch links");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/share-links failed (${res.status})`);
+  return ((await res.json()) as { links: ShareLinkInfo[] }).links;
+}
+
+export async function revokeShareLink(token: string, slug: string, name: string): Promise<void> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/share-links/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("only the channel owner can revoke watch links");
+  if (!res.ok && res.status !== 404) throw new Error(`DELETE watch-link failed (${res.status})`);
+}
+
 export async function archiveChannel(token: string, slug: string): Promise<void> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/archive`, {
     method: "POST",
