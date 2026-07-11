@@ -2993,6 +2993,13 @@ export function ChannelPage({
     [completionOnly, visibleMessages],
   );
   const visibleSearchHits = useMemo(() => filterByAgent(searchHits, agentFilter), [agentFilter, searchHits]);
+  // #339 触顶上翻只挂在 onScroll 上：开 agent 筛选/completionOnly 后内容可能撑不满视口，
+  // 元素不可滚动 → scroll 永不触发 → 历史永远加载不出来。这里主动补拉，
+  // 每页 prepend 后随 firstSeq/可见条数变化重新评估，直到内容可滚或历史拉尽（loadOlder 自带防重入与终止）。
+  useEffect(() => {
+    const el = streamRef.current;
+    if (el !== null && hasMoreRef.current && !loadingOlderRef.current && el.scrollHeight <= el.clientHeight) loadOlder();
+  }, [visibleTimeline.length, firstSeq, loadOlder]);
   const teamSummaries = useMemo(
     () =>
       summarizeTeams({
