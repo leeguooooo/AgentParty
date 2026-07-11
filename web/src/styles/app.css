@@ -4301,6 +4301,8 @@
 .composer-input {
   flex: 1;
   resize: none;
+  max-height: 40vh;
+  overflow-y: auto;
   font-size: 13px;
   line-height: 1.55;
   color: var(--t-body);

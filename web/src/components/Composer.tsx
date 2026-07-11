@@ -1,6 +1,6 @@
 // 底部插话框：Markdown、@name mention（动态在线列表补全，issue #39）、Cmd/Ctrl+Enter 发送（spec §9 第 4 块）。
 // readonly / archived 时由页面层直接不渲染本组件（错误内联为条幅）。
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, CSSProperties, DragEvent, KeyboardEvent } from "react";
 import type { Attachment } from "@agentparty/shared";
 import { formatSize } from "./AttachmentList";
@@ -109,6 +109,14 @@ export function Composer({
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const activeMentionRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<MentionMenuState | null>(null);
+
+  // 自动增高（#340）：随内容长高、封顶 40vh（超出后框内滚动）；清空 draft 时缩回初始 3 行。
+  useLayoutEffect(() => {
+    const ta = taRef.current;
+    if (ta === null) return;
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight, Math.round(window.innerHeight * 0.4)) + "px";
+  }, [draft]);
 
   useEffect(() => {
     if (menu === null) return;
