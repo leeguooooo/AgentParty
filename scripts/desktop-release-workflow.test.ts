@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const workflow = readFileSync(resolve(import.meta.dir, "../.github/workflows/release.yml"), "utf8");
+const appleSigningMode = readFileSync(resolve(import.meta.dir, "apple-signing-mode.ts"), "utf8");
 const desktopDocs = readFileSync(
   resolve(import.meta.dir, "../web/public/docs/desktop/index.html"),
   "utf8",
@@ -140,9 +141,25 @@ describe("desktop release workflow", () => {
 
   test("records updater key mode and rejects architecture or configuration drift", () => {
     expect(desktopJob).toContain('"updater_key_mode":"%s"');
-    expect(releaseJob).toContain("map({notarized, distribution, updater_key_mode})");
-    expect(releaseJob).toContain("desktop architectures disagree on signing status or updater key mode");
+    expect(desktopJob).toContain('"notarization_auth":"%s"');
+    expect(releaseJob).toContain("map({notarized, distribution, updater_key_mode, notarization_auth})");
+    expect(releaseJob).toContain("desktop architectures disagree on signing status, updater key mode, or notarization auth");
     expect(releaseJob).toContain("desktop updater key mode does not match release configuration");
+  });
+
+  test("supports either Apple ID or App Store Connect API-key notarization", () => {
+    expect(workflow).toContain("bun scripts/apple-signing-mode.ts");
+    expect(appleSigningMode).toContain('"apple-id"');
+    expect(appleSigningMode).toContain('"api-key"');
+    expect(workflow).toContain("name: prepare App Store Connect API key");
+    expect(workflow).toContain("APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}");
+    expect(workflow).toContain("APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}");
+    expect(workflow).toContain("APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}");
+    expect(workflow).toContain('APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"');
+    expect(workflow).toContain('echo "APPLE_API_KEY_PATH=$APPLE_API_KEY_PATH" >> "$GITHUB_ENV"');
+    expect(workflow).toContain("BEGIN PRIVATE KEY");
+    expect(workflow).toContain("END PRIVATE KEY");
+    expect(appleSigningMode).toContain("notarization requires either a complete Apple ID or App Store Connect API-key credential set");
   });
 
   test("gates desktop distribution and falls back to an honest unnotarized preview", () => {
@@ -150,9 +167,9 @@ describe("desktop release workflow", () => {
     expect(workflow).toMatch(/desktop:\n(?:[\s\S]*?)environment:\n\s+name: release/);
     expect(workflow).toContain("id: apple-signing");
     expect(workflow).toContain("vars.DESKTOP_REQUIRE_NOTARIZATION");
-    expect(workflow).toContain("DESKTOP_REQUIRE_NOTARIZATION must be true or false");
-    expect(workflow).toContain("Apple signing is required; missing:");
-    expect(workflow).toContain('echo "enabled=false" >> "$GITHUB_OUTPUT"');
+    expect(appleSigningMode).toContain("DESKTOP_REQUIRE_NOTARIZATION must be true or false");
+    expect(appleSigningMode).toContain("Apple signing is required; missing:");
+    expect(appleSigningMode).toContain("enabled=${resolution.enabled}");
     expect(workflow).toContain("if: steps.apple-signing.outputs.enabled == 'true'");
     expect(workflow).toContain("if: steps.apple-signing.outputs.enabled == 'false'");
     for (const secret of [
@@ -162,6 +179,9 @@ describe("desktop release workflow", () => {
       "APPLE_PASSWORD",
       "APPLE_TEAM_ID",
       "KEYCHAIN_PASSWORD",
+      "APPLE_API_ISSUER",
+      "APPLE_API_KEY",
+      "APPLE_API_KEY_P8_BASE64",
     ]) {
       expect(workflow).toContain(`secrets.${secret}`);
     }
