@@ -46,10 +46,16 @@ CLI:
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
 ```
 
-macOS desktop app (production releases only; the installer rejects previews and verifies Developer ID, Apple notarization, and Gatekeeper before replacing the app):
+macOS desktop app (Developer ID signed releases verify Apple notarization and Gatekeeper before replacing the app):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install-desktop.sh | sh
+```
+
+Without an Apple Developer account, releases contain an explicitly labeled unnotarized preview. Install it only when you trust this repository; the installer still verifies the release checksum and version, then removes macOS quarantine so the app can start:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install-desktop.sh | AGENTPARTY_ALLOW_UNNOTARIZED=1 sh
 ```
 
 ## Quick start
