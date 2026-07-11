@@ -16,7 +16,7 @@ import { formatCharterSnapshotForOnboarding } from "../onboarding";
 import { isName, isSlug, normalizeServerUrl } from "../validation";
 
 const USAGE =
-  'usage: party invite "<title>" [--slug s] [--temp] [--party] [--public] [--guest-name bob] [--checkin-mention name] [--owner label]';
+  'usage: party invite "<title>" [--mode watch|participate] [--slug s] [--temp] [--party] [--public] [--guest-name bob] [--checkin-mention name] [--owner label]';
 const HELP = `${USAGE}
 
 Create a channel, mint a scoped guest token, and print a copy-paste join pack.
@@ -24,6 +24,8 @@ Requires ADMIN_SECRET.
 
 Options:
   --server URL       AgentParty server URL
+  --mode m           invite mode: participate (default, full agent token) or
+                     watch (readonly token — can read, sending disabled)
   --slug s           channel slug
   --temp             create a temporary channel
   --party            create a party-mode channel
@@ -31,7 +33,9 @@ Options:
   --guest-name bob   guest agent token name
   --checkin-mention  mention this name in the check-in line
   --owner label      printable owner label`;
-const INVITE_FLAGS = ["server", "slug", "guest-name", "checkin-mention", "owner", "temp", "party", "public"];
+const INVITE_FLAGS = ["server", "mode", "slug", "guest-name", "checkin-mention", "owner", "temp", "party", "public"];
+const INVITE_MODES = ["participate", "watch"] as const;
+type InviteMode = (typeof INVITE_MODES)[number];
 const OWNER_MAX = 128;
 const OWNER_RE = /^[\x20-\x7e]{1,128}$/;
 
@@ -53,9 +57,14 @@ export async function run(argv: string[]): Promise<number> {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["server", "slug", "guest-name", "checkin-mention", "owner"]);
+  const flagError = valueFlagError(flags, ["server", "mode", "slug", "guest-name", "checkin-mention", "owner"]);
   if (flagError !== null) {
     console.error(flagError);
+    return 1;
+  }
+  const inviteMode = (str(flags.mode) ?? "participate") as InviteMode;
+  if (!INVITE_MODES.includes(inviteMode)) {
+    console.error(`--mode must be one of: ${INVITE_MODES.join(", ")}`);
     return 1;
   }
   const title = positionals.join(" ");
@@ -173,8 +182,49 @@ export async function run(argv: string[]): Promise<number> {
 party send "👋 ${guestName} 报到，来参与协作" --channel ${slug} --mention ${checkinMention}`;
     const charter = await fetchChannelCharter(server, guest.token, slug).catch(() => null);
     const charterLines = formatCharterSnapshotForOnboarding(charter).join("\n");
+
+    // 观看模式（#186）：接入包锚到 readonly 分享 token——只读围观、发送已禁用（readonly 在服务端所有 seam 被硬挡）。
+    // shareToken 为 null 只发生在【复用已存在频道且 share token 已存在】——明文取不回，退回沿用旧链接的提示。
+    if (inviteMode === "watch") {
+      const watchToken = shareToken;
+      const initLine =
+        watchToken !== null
+          ? `party init --server ${server} --token ${watchToken} --channel ${slug}`
+          : `# 该频道的只读分享 token 已存在，明文无法重现——沿用已分发的 ${shareName} 链接，或先手动撤销再重发邀请`;
+      console.log(`${line}
+AgentParty 接入包 — ${title}  · 观看模式 (watch · readonly)
+${line}
+server:   ${server}
+channel:  ${slug}  ${channelDesc}${charterLines ? `\n\n${charterLines}` : ""}
+
+把下面整段发给对方的 agent（Claude Code / Codex）——【观看模式】：只读围观，发送已禁用。
+带 # 的是给它读的说明，不带 # 的是要执行的命令：
+
+# ── 围观频道 #${slug}（只读，不能发言）──
+
+# 1) 装 party CLI（已装则跳过）
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
+export PATH="\$HOME/.local/bin:\$PATH"
+
+# 2) 隔离本地配置（同机多身份不串号）
+export AGENTPARTY_CONFIG="\${TMPDIR:-/tmp}/agentparty-${shareName}-${slug}.json"
+
+# 3) 绑定频道（readonly token，只出现这一次）
+${initLine}
+
+# 4) 怎么围观（观看模式只读，不能 send）：
+#   实时跟读：party watch ${slug} --follow
+#   补历史：  party history ${slug}
+#   ⚠ 观看模式发送被禁用：party send 会被服务端以 "readonly token cannot send" 拒绝。
+#     想要全程参与？让邀请人改用【参与模式】重发邀请（party invite ... --mode participate）。
+
+${webLines}
+${line}`);
+      return 0;
+    }
+
     console.log(`${line}
-AgentParty 接入包 — ${title}
+AgentParty 接入包 — ${title}  · 参与模式 (participate)
 ${line}
 server:   ${server}
 channel:  ${slug}  ${channelDesc}${charterLines ? `\n\n${charterLines}` : ""}

@@ -1,8 +1,22 @@
 // 私有频道邀请链接（issue #38 web）。只对 moderator（房主）渲染——隐私性靠「只有创建者能生成」，
-// 服务端 isChannelModerator 再强制。生成 /join/<code> 链接：对方点开 → OIDC 登录 → 加入为成员。
-// 折叠面板：生成（可选有效期）+ 一键复制 + 列出未撤销链接 + 撤销。
+// 服务端 isChannelModerator 再强制。折叠面板：生成（可选有效期）+ 一键复制 + 列出未撤销链接 + 撤销。
+//
+// 邀请模式一等选择（#186）：
+//   · 参与模式（participate）→ /join/<code> 成员链接，对方登录后成为正式成员，可读可发。
+//   · 观看模式（watch）→ /c/<slug>?t=<token> 只读围观链接，无需登录，可读但发送禁用（复用 readonly 角色）。
+// token 明文只在创建时回一次，所以观看链接只在生成时展示一次；列表只列 name + 撤销。
 import { useCallback, useState } from "react";
-import { AuthError, createJoinLink, type JoinLinkInfo, listJoinLinks, revokeJoinLink } from "../lib/api";
+import {
+  AuthError,
+  createJoinLink,
+  createShareLink,
+  listJoinLinks,
+  listShareLinks,
+  revokeJoinLink,
+  revokeShareLink,
+  type JoinLinkInfo,
+  type ShareLinkInfo,
+} from "../lib/api";
 import { useT, type TFunc } from "../i18n/useT";
 import "../i18n/strings/JoinLink";
 
@@ -13,6 +27,8 @@ interface Props {
   active?: boolean;
   onActiveChange?(open: boolean): void;
 }
+
+type InviteMode = "participate" | "watch";
 
 function expiryOptions(t: TFunc): { label: string; sec?: number }[] {
   return [
@@ -50,7 +66,10 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
   const EXPIRY_OPTIONS = expiryOptions(t);
   const USES_OPTIONS = usesOptions(t);
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<InviteMode>("participate");
   const [links, setLinks] = useState<JoinLinkInfo[] | null>(null);
+  const [shareLinks, setShareLinks] = useState<ShareLinkInfo[] | null>(null);
+  const [watchUrl, setWatchUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expiryIdx, setExpiryIdx] = useState(0);
@@ -77,6 +96,14 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
     }
   }, [token, slug, handleErr]);
 
+  const refreshShare = useCallback(async () => {
+    try {
+      setShareLinks(await listShareLinks(token, slug));
+    } catch (e) {
+      handleErr(e);
+    }
+  }, [token, slug, handleErr]);
+
   const toggle = useCallback(() => {
     const next = !isOpen;
     if (active === undefined) setOpen(next);
@@ -84,10 +111,30 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
     if (next && links === null) void refresh();
   }, [active, isOpen, links, onActiveChange, refresh]);
 
+  const selectMode = useCallback(
+    (next: InviteMode) => {
+      setMode(next);
+      setError(null);
+      if (next === "watch" && shareLinks === null) void refreshShare();
+      if (next === "participate" && links === null) void refresh();
+    },
+    [shareLinks, links, refreshShare, refresh],
+  );
+
   async function generate() {
     setBusy(true);
     setError(null);
     try {
+      if (mode === "watch") {
+        const link = await createShareLink(token, slug);
+        await refreshShare();
+        setBusy(false);
+        if (link.url) {
+          setWatchUrl(link.url);
+          copy(link.url);
+        }
+        return;
+      }
       const link = await createJoinLink(token, slug, {
         expiresInSec: EXPIRY_OPTIONS[expiryIdx]?.sec,
         maxUses: USES_OPTIONS[usesIdx]?.max,
@@ -125,6 +172,18 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
     }
   }
 
+  async function revokeWatch(name: string) {
+    setBusy(true);
+    try {
+      await revokeShareLink(token, slug, name);
+      await refreshShare();
+    } catch (e) {
+      handleErr(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const activeLinks = (links ?? []).filter((l) => l.revoked_at === null && (l.expires_at === null || l.expires_at > Date.now()));
 
   return (
@@ -134,61 +193,125 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
       </button>
       {isOpen && (
         <div className="joinlink-panel">
-          <div className="joinlink-gen">
-            <span className="joinlink-hint">{t("JoinLink.hint")}</span>
-            <div className="joinlink-gen-row">
-              <label className="joinlink-expiry">
-                {t("JoinLink.usesLabel")}
-                <select value={usesIdx} onChange={(e) => setUsesIdx(Number(e.target.value))} disabled={busy}>
-                  {USES_OPTIONS.map((o, i) => (
-                    <option key={o.label} value={i}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
+          <div className="joinlink-mode" role="radiogroup" aria-label={t("JoinLink.modeLabel")}>
+            {(["participate", "watch"] as InviteMode[]).map((m) => (
+              <label key={m} className={`joinlink-mode-opt${mode === m ? " is-active" : ""}`}>
+                <input
+                  type="radio"
+                  name="joinlink-mode"
+                  value={m}
+                  checked={mode === m}
+                  disabled={busy}
+                  onChange={() => selectMode(m)}
+                />
+                {t(`JoinLink.mode.${m}`)}
               </label>
-              <label className="joinlink-expiry">
-                {t("JoinLink.expiryLabel")}
-                <select value={expiryIdx} onChange={(e) => setExpiryIdx(Number(e.target.value))} disabled={busy}>
-                  {EXPIRY_OPTIONS.map((o, i) => (
-                    <option key={o.label} value={i}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button type="button" className="d-btn d-btn--primary" disabled={busy} onClick={generate}>
-                {busy ? t("JoinLink.generating") : t("JoinLink.generate")}
-              </button>
-            </div>
+            ))}
           </div>
-          {error !== null && <p className="joinlink-error">{error}</p>}
-          {activeLinks.length > 0 && (
-            <ul className="joinlink-list">
-              {activeLinks.map((l) => {
-                const url = linkUrl(l);
-                return (
-                  <li key={l.code} className="joinlink-item">
-                    <code className="joinlink-url t-mono">{url}</code>
-                    <span className="joinlink-meta">
-                      {expiryLabel(l, t)}
-                      {" · "}
-                      {l.max_uses !== null
-                        ? t("JoinLink.usesOf", { uses: l.uses, max: l.max_uses })
-                        : t("JoinLink.usesCount", { uses: l.uses })}
-                    </span>
-                    <button type="button" className="d-btn joinlink-copy" onClick={() => copy(url)}>
-                      {copied === url ? t("JoinLink.copied") : t("JoinLink.copy")}
-                    </button>
-                    <button type="button" className="d-btn joinlink-revoke" disabled={busy} onClick={() => revoke(l.code)}>
-                      {t("JoinLink.revoke")}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+          <span className="joinlink-mode-desc">{t(`JoinLink.mode.${mode}.desc`)}</span>
+
+          {mode === "participate" ? (
+            <div className="joinlink-gen">
+              <span className="joinlink-hint">{t("JoinLink.hint")}</span>
+              <div className="joinlink-gen-row">
+                <label className="joinlink-expiry">
+                  {t("JoinLink.usesLabel")}
+                  <select value={usesIdx} onChange={(e) => setUsesIdx(Number(e.target.value))} disabled={busy}>
+                    {USES_OPTIONS.map((o, i) => (
+                      <option key={o.label} value={i}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="joinlink-expiry">
+                  {t("JoinLink.expiryLabel")}
+                  <select value={expiryIdx} onChange={(e) => setExpiryIdx(Number(e.target.value))} disabled={busy}>
+                    {EXPIRY_OPTIONS.map((o, i) => (
+                      <option key={o.label} value={i}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" className="d-btn d-btn--primary" disabled={busy} onClick={generate}>
+                  {busy ? t("JoinLink.generating") : t("JoinLink.generate")}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="joinlink-gen">
+              <span className="joinlink-hint">{t("JoinLink.watch.hint")}</span>
+              <div className="joinlink-gen-row">
+                <button type="button" className="d-btn d-btn--primary" disabled={busy} onClick={generate}>
+                  {busy ? t("JoinLink.generating") : t("JoinLink.watch.generate")}
+                </button>
+              </div>
+              {watchUrl !== null && (
+                <div className="joinlink-watch-oneshot">
+                  <span className="joinlink-meta">{t("JoinLink.watch.oneTime")}</span>
+                  <code className="joinlink-url t-mono">{watchUrl}</code>
+                  <button type="button" className="d-btn joinlink-copy" onClick={() => copy(watchUrl)}>
+                    {copied === watchUrl ? t("JoinLink.copied") : t("JoinLink.copy")}
+                  </button>
+                </div>
+              )}
+            </div>
           )}
-          {links !== null && activeLinks.length === 0 && <p className="joinlink-empty">{t("JoinLink.empty")}</p>}
+
+          {error !== null && <p className="joinlink-error">{error}</p>}
+
+          {mode === "participate" ? (
+            <>
+              {activeLinks.length > 0 && (
+                <ul className="joinlink-list">
+                  {activeLinks.map((l) => {
+                    const url = linkUrl(l);
+                    return (
+                      <li key={l.code} className="joinlink-item">
+                        <code className="joinlink-url t-mono">{url}</code>
+                        <span className="joinlink-meta">
+                          <span className="joinlink-tag">{t("JoinLink.tag.participate")}</span>
+                          {" · "}
+                          {expiryLabel(l, t)}
+                          {" · "}
+                          {l.max_uses !== null
+                            ? t("JoinLink.usesOf", { uses: l.uses, max: l.max_uses })
+                            : t("JoinLink.usesCount", { uses: l.uses })}
+                        </span>
+                        <button type="button" className="d-btn joinlink-copy" onClick={() => copy(url)}>
+                          {copied === url ? t("JoinLink.copied") : t("JoinLink.copy")}
+                        </button>
+                        <button type="button" className="d-btn joinlink-revoke" disabled={busy} onClick={() => revoke(l.code)}>
+                          {t("JoinLink.revoke")}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              {links !== null && activeLinks.length === 0 && <p className="joinlink-empty">{t("JoinLink.empty")}</p>}
+            </>
+          ) : (
+            <>
+              {(shareLinks ?? []).length > 0 && (
+                <ul className="joinlink-list">
+                  {(shareLinks ?? []).map((l) => (
+                    <li key={l.name} className="joinlink-item">
+                      <code className="joinlink-url t-mono">{l.name}</code>
+                      <span className="joinlink-meta">
+                        <span className="joinlink-tag">{t("JoinLink.tag.watch")}</span>
+                      </span>
+                      <button type="button" className="d-btn joinlink-revoke" disabled={busy} onClick={() => revokeWatch(l.name)}>
+                        {t("JoinLink.revoke")}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {shareLinks !== null && (shareLinks ?? []).length === 0 && <p className="joinlink-empty">{t("JoinLink.watch.empty")}</p>}
+            </>
+          )}
         </div>
       )}
     </div>

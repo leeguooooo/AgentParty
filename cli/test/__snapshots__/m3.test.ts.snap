@@ -2,7 +2,7 @@
 
 exports[`party invite 默认参数：slug 由标题推导，铸 guest+share，输出可粘贴接入包 1`] = `
 "────────────────────────────────────────────────────────────
-AgentParty 接入包 — Fix Login Bug
+AgentParty 接入包 — Fix Login Bug  · 参与模式 (participate)
 ────────────────────────────────────────────────────────────
 server:   https://party.example
 channel:  fix-login-bug  (standing)

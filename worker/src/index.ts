@@ -3326,6 +3326,84 @@ app.delete("/api/channels/:slug/join-links/:code", async (c) => {
   return c.json({ ok: true });
 });
 
+// 观看模式邀请（#186）：房主自助铸「频道内只读分享 token」，返回 /c/<slug>?t=<token> 围观链接。
+// 复用现成 readonly 角色——发送在所有 seam 已被硬挡（do.handleSend / acl），不新造权限。
+// 与 join-links（参与模式，成员制、需登录）平行：观看链接无需登录，点开即读、发送禁用。
+// token 明文只在创建时回一次（表里只存 hash），故 GET 列表只能回 name/created_at，不能重现 URL。
+app.post("/api/channels/:slug/share-links", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage watch links"), 403);
+  }
+  // owner 恒 = 房主账号（legacy admin token 无账号则回落 token 名，header-safe）；不取客户端值。
+  const owner = identity.account ?? identity.name;
+  const now = Date.now();
+  for (let i = 0; i < 3; i++) {
+    const name = `watch_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const result = await persistToken(c.env.DB, { name, role: "readonly", owner, channelScope: slug });
+    if ("conflict" in result) continue; // 撞名（极罕见）→ 换名重试
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(identity),
+      action: "token.issue",
+      resource: `token/${name}`,
+      channel: slug,
+      metadata: { token_role: "readonly", channel_scope: slug },
+    });
+    const url = new URL(c.req.url);
+    return c.json(
+      { token: result.token, name, role: "readonly", channel_scope: slug, url: `${url.origin}/c/${slug}?t=${result.token}`, created_at: now },
+      201,
+    );
+  }
+  return c.json(errorBody("conflict", "could not allocate watch link"), 409);
+});
+
+app.get("/api/channels/:slug/share-links", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!isChannelModerator(c.get("identity"), channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage watch links"), 403);
+  }
+  const { results } = await c.env.DB.prepare(
+    `SELECT name, created_at
+       FROM tokens
+      WHERE channel_scope = ? AND role = 'readonly' AND revoked_at IS NULL
+      ORDER BY created_at DESC`,
+  )
+    .bind(slug)
+    .all();
+  return c.json({ links: results });
+});
+
+app.delete("/api/channels/:slug/share-links/:name", async (c) => {
+  const slug = c.req.param("slug");
+  const name = c.req.param("name");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage watch links"), 403);
+  }
+  const result = await c.env.DB.prepare(
+    "UPDATE tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE name = ? AND channel_scope = ? AND role = 'readonly'",
+  )
+    .bind(Date.now(), name, slug)
+    .run();
+  if (result.meta.changes === 0) return c.json(errorBody("not_found", "watch link not found"), 404);
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "token.revoke",
+    resource: `token/${name}`,
+    channel: slug,
+    metadata: { token_role: "readonly", channel_scope: slug },
+  });
+  return c.json({ ok: true });
+});
+
 app.post("/api/join/:code", async (c) => {
   const identity = c.get("identity");
   // 判据是 role，不是 hash 前缀：`oidc:` 前缀只有 OIDC JWT 身份才有（auth.ts），

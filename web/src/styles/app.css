@@ -2944,6 +2944,37 @@
   box-shadow: 3px 3px 0 var(--d-shadow);
 }
 .joinlink-hint { font-size: 12px; color: var(--t-dim); }
+/* 邀请模式一等选择（#186）：观看(readonly)/参与 */
+.joinlink-mode { display: flex; gap: 6px; }
+.joinlink-mode-opt {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  padding: 3px 9px;
+  border: 1.6px solid var(--d-ink);
+  border-radius: 0;
+  cursor: pointer;
+  background: var(--t-panel);
+}
+.joinlink-mode-opt.is-active { background: var(--d-ink); color: var(--t-panel); }
+.joinlink-mode-desc { font-size: 11.5px; color: var(--t-dim); }
+.joinlink-tag {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0 4px;
+  border: 1.2px solid var(--d-ink);
+}
+.joinlink-watch-oneshot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1.4px dashed var(--d-ink);
+}
 .joinlink-gen-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
 .joinlink-expiry { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
 .joinlink-expiry select {
