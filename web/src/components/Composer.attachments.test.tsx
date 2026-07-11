@@ -38,6 +38,10 @@ const att: Attachment = {
   url: "/api/channels/slug/attachments/uuid/pic.png",
 };
 
+function fileList(...files: File[]): FileList {
+  return files as unknown as FileList;
+}
+
 function render(props: Partial<Parameters<typeof Composer>[0]>) {
   localStorage.setItem("ap_locale", "en");
   const base = {
@@ -100,5 +104,66 @@ describe("Composer attachments (#176)", () => {
     const removeBtn = byClass(root, "composer-attachment-remove")[0]!;
     act(() => removeBtn.props.onClick());
     expect(removed).toBe("slug/uuid/pic.png");
+  });
+
+  test("dropping files onto the composer forwards them to onPickFiles", () => {
+    let dropped: FileList | null = null;
+    const root = render({ onPickFiles: (f: FileList) => { dropped = f; } });
+    const composer = byClass(root, "composer")[0]!;
+    const file = new File([new Uint8Array([1, 2, 3])], "drop.png", { type: "image/png" });
+    act(() =>
+      composer.props.onDrop({ preventDefault() {}, stopPropagation() {}, dataTransfer: { files: fileList(file) } }),
+    );
+    expect(dropped).not.toBeNull();
+    expect(dropped![0]!.name).toBe("drop.png");
+  });
+
+  test("pasting an image forwards it to onPickFiles", () => {
+    let pasted: FileList | null = null;
+    const root = render({ onPickFiles: (f: FileList) => { pasted = f; } });
+    const textarea = byClass(root, "composer-input")[0]!;
+    const file = new File([new Uint8Array([1, 2, 3])], "clip.png", { type: "image/png" });
+    act(() => textarea.props.onPaste({ preventDefault() {}, clipboardData: { files: fileList(file) } }));
+    expect(pasted).not.toBeNull();
+    expect(pasted![0]!.name).toBe("clip.png");
+  });
+
+  test("pasting plain text (no files) does not call onPickFiles", () => {
+    let called = false;
+    const root = render({ onPickFiles: () => { called = true; } });
+    const textarea = byClass(root, "composer-input")[0]!;
+    act(() => textarea.props.onPaste({ preventDefault() {}, clipboardData: { files: fileList() } }));
+    expect(called).toBe(false);
+  });
+
+  test("an in-flight upload renders a chip with its filename", () => {
+    const root = render({
+      onPickFiles: () => {},
+      uploads: [{ id: "u1", filename: "up.png", size: 1234, status: "uploading" }],
+    });
+    const names = byClass(root, "composer-upload-name");
+    expect(names).toHaveLength(1);
+    expect(names[0]!.props.children).toBe("up.png");
+  });
+
+  test("a failed upload shows a retry button that calls onRetryUpload with the id", () => {
+    let retried: string | null = null;
+    const root = render({
+      onPickFiles: () => {},
+      uploads: [{ id: "u2", filename: "bad.png", size: 10, status: "error", error: "file too large (max 25MB)" }],
+      onRetryUpload: (id: string) => { retried = id; },
+    });
+    const retry = byClass(root, "composer-upload-retry")[0]!;
+    act(() => retry.props.onClick());
+    expect(retried).toBe("u2");
+  });
+
+  test("send is disabled while an upload is in flight, even with draft text", () => {
+    const root = render({
+      onPickFiles: () => {},
+      draft: "hi",
+      uploads: [{ id: "u3", filename: "wip.png", size: 10, status: "uploading" }],
+    });
+    expect(byClass(root, "composer-send")[0]!.props.disabled).toBe(true);
   });
 });

@@ -66,9 +66,11 @@ function FileLink({ att }: { att: Attachment }) {
       type="button"
       className="d-btn msg-attachment-file t-mono"
       onClick={() => void onDownload()}
-      title={att.filename}
+      title={`${att.filename} · ${formatSize(att.size)} · download`}
     >
-      ⬇ {att.filename} <span className="msg-attachment-size">{formatSize(att.size)}</span>
+      <span aria-hidden="true">⬇</span>
+      <span className="msg-attachment-fname">{att.filename}</span>
+      <span className="msg-attachment-size">{formatSize(att.size)}</span>
     </button>
   );
 }
