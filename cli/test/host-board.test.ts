@@ -22,6 +22,7 @@ function task(overrides: Partial<TaskRecord> & { id: number }): TaskRecord {
     anchor_seqs: [],
     scope: [],
     blocked_reason: null,
+    external_ref: null,
     completion_artifact: null,
     workflow_id: null,
     created_at: NOW,

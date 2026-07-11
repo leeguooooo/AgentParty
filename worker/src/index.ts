@@ -257,6 +257,7 @@ const TASK_LABELS_MAX = 20;
 const TASK_SCOPE_ITEM_MAX = 256; // 每个 scope 条目的字节上限
 const TASK_SCOPE_MAX = 32; // scope 条目数量上限
 const TASK_BLOCKED_REASON_MAX = 2000; // blocked_reason 字节上限
+const TASK_EXTERNAL_REF_MAX = 512; // #141 external_ref 字节上限
 const SQUAD_MEMBERS_MAX = 50;
 const SQUAD_TITLE_MAX = 120;
 const SQUAD_DESCRIPTION_MAX = 4000;
@@ -640,6 +641,7 @@ function taskRowToRecord(row: {
   anchor_seqs_json: string;
   scope_json: string;
   blocked_reason: string | null;
+  external_ref: string | null;
   completion_artifact_json: string | null;
   workflow_id: string | null;
   created_at: number;
@@ -675,6 +677,7 @@ function taskRowToRecord(row: {
     anchor_seqs: safeJsonArray<number>(row.anchor_seqs_json).filter((seq): seq is number => Number.isInteger(seq) && seq > 0),
     scope: safeJsonArray<string>(row.scope_json).filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
     blocked_reason: row.blocked_reason,
+    external_ref: row.external_ref,
     completion_artifact: completionArtifact,
     workflow_id: row.workflow_id,
     created_at: row.created_at,
@@ -732,6 +735,17 @@ function parseTaskBlockedReason(input: unknown): string | null | false {
   if (input === null) return null;
   if (typeof input !== "string") return false;
   if (textEncoder.encode(input).byteLength > TASK_BLOCKED_REASON_MAX) return false;
+  return input;
+}
+
+// #141 external_ref：null 直通；字符串校验非空、字节上限、不含控制字符；非法类型/超长/空串 → false。
+// 注意：undefined 需由调用方先行处理（POST=不提供即 null），本函数不接收 undefined。
+function parseTaskExternalRef(input: unknown): string | null | false {
+  if (input === null) return null;
+  if (typeof input !== "string") return false;
+  if (input.trim() === "") return false;
+  if (textEncoder.encode(input).byteLength > TASK_EXTERNAL_REF_MAX) return false;
+  if (/[\x00-\x1f\x7f]/.test(input)) return false;
   return input;
 }
 
@@ -3826,6 +3840,11 @@ app.post("/api/channels/:slug/tasks", async (c) => {
   if (blockedReason === false) {
     return c.json(errorBody("bad_request", `blocked_reason must be null or a string <= ${TASK_BLOCKED_REASON_MAX} bytes`), 400);
   }
+  // #141 external_ref：可选外部引用键，供 issue→task 同步做幂等 create。undefined/null → 不去重（今天的默认行为）。
+  const externalRef = body?.external_ref === undefined ? null : parseTaskExternalRef(body.external_ref);
+  if (externalRef === false) {
+    return c.json(errorBody("bad_request", `external_ref must be null or a non-empty printable string <= ${TASK_EXTERNAL_REF_MAX} bytes`), 400);
+  }
   const priority = body?.priority === undefined ? 0 : typeof body?.priority === "number" && Number.isInteger(body.priority) ? body.priority : null;
   if (priority === null || priority < -100 || priority > 100) {
     return c.json(errorBody("bad_request", "priority must be an integer between -100 and 100"), 400);
@@ -3846,36 +3865,63 @@ app.post("/api/channels/:slug/tasks", async (c) => {
   // 否则 blockers 派生会读到「未 blocked 却带 reason」的陈旧数据（门禁 P1）。服务端强制，
   // 不信任客户端一致性。
   const effectiveBlockedReason = state === "blocked" ? blockedReason : null;
-  const now = Date.now();
-  const result = await c.env.DB.prepare(
-    `INSERT INTO channel_tasks (
-       channel_slug, title, description, state, assignee_name, assignee_kind,
-       created_by, created_by_kind, created_by_owner, priority, labels_json,
-       parent_id, anchor_seqs_json, workflow_id, scope_json, blocked_reason, created_at, updated_at, completed_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      slug,
-      title,
-      desc,
-      state,
-      assignee?.name ?? null,
-      assignee?.kind ?? null,
-      identity.name,
-      identity.kind,
-      identity.owner ?? null,
-      priority,
-      JSON.stringify(labels),
-      parentId,
-      JSON.stringify(anchorSeqs),
-      workflowId,
-      JSON.stringify(scope),
-      effectiveBlockedReason,
-      now,
-      now,
-      state === "done" ? now : null,
+  // #141 幂等 create：external_ref 命中已存在的 (channel, external_ref) 行 → 直接返回既有 task（200），
+  // 不再 INSERT、不再重复触发 system status/唤醒。这是 issue→task 同步重跑不再重复建的核心。
+  if (externalRef !== null) {
+    const existing = await c.env.DB.prepare(
+      `SELECT * FROM channel_tasks WHERE channel_slug = ? AND external_ref = ?`,
     )
-    .run();
+      .bind(slug, externalRef)
+      .first<TaskRow>();
+    if (existing) return c.json(taskRowToRecord(existing), 200);
+  }
+  const now = Date.now();
+  let result: D1Result;
+  try {
+    result = await c.env.DB.prepare(
+      `INSERT INTO channel_tasks (
+         channel_slug, title, description, state, assignee_name, assignee_kind,
+         created_by, created_by_kind, created_by_owner, priority, labels_json,
+         parent_id, anchor_seqs_json, workflow_id, scope_json, blocked_reason, external_ref, created_at, updated_at, completed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        slug,
+        title,
+        desc,
+        state,
+        assignee?.name ?? null,
+        assignee?.kind ?? null,
+        identity.name,
+        identity.kind,
+        identity.owner ?? null,
+        priority,
+        JSON.stringify(labels),
+        parentId,
+        JSON.stringify(anchorSeqs),
+        workflowId,
+        JSON.stringify(scope),
+        effectiveBlockedReason,
+        externalRef,
+        now,
+        now,
+        state === "done" ? now : null,
+      )
+      .run();
+  } catch (error) {
+    // #141 并发兜底：两个请求同时带同一 external_ref 都读到「未命中」再各自 INSERT，
+    // 唯一索引 (channel_slug, external_ref) 会让后到的一条撞 UNIQUE constraint failed——
+    // 回落成幂等命中语义（200 + 既有行），而不是把 D1 错误甩给调用方。
+    if (externalRef !== null && String(error).includes("UNIQUE constraint failed")) {
+      const existing = await c.env.DB.prepare(
+        `SELECT * FROM channel_tasks WHERE channel_slug = ? AND external_ref = ?`,
+      )
+        .bind(slug, externalRef)
+        .first<TaskRow>();
+      if (existing) return c.json(taskRowToRecord(existing), 200);
+    }
+    throw error;
+  }
   const id = Number(result.meta.last_row_id);
   const row = await loadTaskRow(c.env.DB, slug, id);
   await insertSystemStatus(c.env, slug, `task #${id} created: ${title}`, "waiting").catch(() => false);
