@@ -176,7 +176,7 @@
 }
 .desktop-settings-trigger:hover,
 .desktop-settings-trigger:focus-visible { border-color: var(--t-accent); outline: none; }
-.desktop-settings-trigger .ap-sprite { --ap-icon-size: 22px; }
+.desktop-settings-trigger .ap-sprite { --ap-icon-size: 26px; }
 .desktop-settings-panel {
   position: absolute;
   z-index: 40;
@@ -2474,7 +2474,7 @@
 .ap-sprite {
   --ap-icon-x: 0%;
   --ap-icon-y: 0%;
-  --ap-icon-size: 22px;
+  --ap-icon-size: 26px;
   display: inline-block;
   width: var(--ap-icon-size);
   height: var(--ap-icon-size);
@@ -2499,7 +2499,7 @@
 .ap-sprite--failed,
 .ap-sprite--waiting { --ap-icon-x: 100%; --ap-icon-y: 100%; }
 .chan-tool-btn .ap-sprite {
-  --ap-icon-size: 22px;
+  --ap-icon-size: 26px;
   margin-left: -1px;
 }
 
