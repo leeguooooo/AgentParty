@@ -1,6 +1,6 @@
 // 消息渲染：message → doodle 卡片外壳 + mono 元信息 + markdown 正文；
 // status → 时间线分隔条（spec §9 第 2 块）。
-import type { AgentContext, MsgFrame, ReadCursor, Sender } from "@agentparty/shared";
+import type { AgentContext, MsgFrame, PresenceEntry, ReadCursor, Sender } from "@agentparty/shared";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
@@ -41,6 +41,8 @@ interface Props {
   onEditDraftChange(value: string): void;
   onEditCancel(): void;
   onEditSave(): void;
+  // #274：name → presence 条目（Channel 的 state.presence 原样传下来），悬停发送者名/@提及展示实时状态。
+  presence?: Record<string, PresenceEntry>;
   // 频道决策协议（#284）：人类/moderator 是否可对本条 decision_request 拍板 + 回调。
   canRespondDecision?: boolean;
   decisionBusy?: boolean;
@@ -105,6 +107,20 @@ export function blockedReasonDuplicatesNote(
   return b !== "" && b === n;
 }
 
+/**
+ * #274：鼠标悬停任意 agent 名字（发送者名/@提及）即见其实时状态。取 presence 里该名字的
+ * 条目拼三行：status（busy #103 优先于声明的 state）、task #seq（#228 正在处理的那条 wake）、
+ * queued N（#103 排队深度，>0 才列）。presence 查不到该名字 → 空数组，不加空行。
+ */
+export function presenceTitleBits(entry: PresenceEntry | undefined): string[] {
+  if (entry === undefined) return [];
+  return [
+    `status: ${entry.busy === true ? "busy" : entry.state}`,
+    typeof entry.current_task === "number" ? `task: #${entry.current_task}` : null,
+    typeof entry.queue_depth === "number" && entry.queue_depth > 0 ? `queued: ${entry.queue_depth}` : null,
+  ].filter((part): part is string => part !== null);
+}
+
 export function MessageCard({
   msg,
   self,
@@ -127,6 +143,7 @@ export function MessageCard({
   onEditDraftChange,
   onEditCancel,
   onEditSave,
+  presence,
   canRespondDecision,
   decisionBusy,
   onDecisionRespond,
@@ -158,6 +175,7 @@ export function MessageCard({
     lineage ? `team: ${lineage.team_id}` : null,
     lineage ? `depth: ${lineage.depth}` : null,
     lineage?.expires_at ? `expires: ${fmtTime(lineage.expires_at)}` : null,
+    ...presenceTitleBits(presence?.[msg.sender.name]),
   ]
     .filter((part): part is string => part !== null)
     .join("\n");
@@ -332,11 +350,20 @@ export function MessageCard({
         <span className={"msg-kind" + (msg.sender.kind === "human" ? " msg-kind--human" : "")}>
           {msg.sender.kind}
         </span>
-        {msg.mentions.map((m) => (
-          <span key={m} className="msg-mention" title={m === displayForIdentity(m, identityDisplay) ? undefined : `@${m}`}>
-            @{displayForIdentity(m, identityDisplay)}
-          </span>
-        ))}
+        {msg.mentions.map((m) => {
+          // #274：@提及悬停也能看到该名字的实时状态；原始名与显示名不同时保留 @原名防冒充锚点。
+          const mentionTitle = [
+            m === displayForIdentity(m, identityDisplay) ? null : `@${m}`,
+            ...presenceTitleBits(presence?.[m]),
+          ]
+            .filter((part): part is string => part !== null)
+            .join("\n");
+          return (
+            <span key={m} className="msg-mention" title={mentionTitle !== "" ? mentionTitle : undefined}>
+              @{displayForIdentity(m, identityDisplay)}
+            </span>
+          );
+        })}
         {msg.reply_to !== null && quotedMessage === null && <span className="msg-reply">↩ #{msg.reply_to}</span>}
         {revisionBadges.map((badge) => (
           <span key={badge} className="msg-revision">

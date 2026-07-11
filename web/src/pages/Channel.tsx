@@ -1574,6 +1574,7 @@ function TeamThread({
   actionError,
   busySeq,
   messageBySeq,
+  presence,
   onReply,
   onEdit,
   onRetract,
@@ -1597,6 +1598,8 @@ function TeamThread({
   busySeq: number | null;
   // seq → 消息，用于把 reply_to 解析成完整的被引用消息（同一份 Map 从 ChannelPage 传下来，不在这里重建）
   messageBySeq: Map<number, MsgFrame>;
+  // #274：name → presence 条目，MessageCard 悬停发送者名/@提及展示实时状态
+  presence: Record<string, PresenceEntry>;
   onReply: (seq: number) => void;
   onEdit: (seq: number) => void;
   onRetract: (seq: number) => void;
@@ -1639,6 +1642,7 @@ function TeamThread({
             readCursors={readCursors}
             participants={participants}
             canModerate={canModerate}
+            presence={presence}
             quotedMessage={message.reply_to !== null ? messageBySeq.get(message.reply_to) ?? null : null}
             onReply={onReply}
             onEdit={onEdit}
@@ -3394,6 +3398,7 @@ export function ChannelPage({
                   readCursors={state.readCursors}
                   participants={state.participants}
                   canModerate={canModerate}
+                  presence={state.presence}
                   quotedMessage={item.message.reply_to !== null ? messageBySeq.get(item.message.reply_to) ?? null : null}
                   onReply={startReply}
                   onEdit={startEdit}
@@ -3428,6 +3433,7 @@ export function ChannelPage({
                   actionError={messageActionError}
                   busySeq={messageActionBusySeq}
                   messageBySeq={messageBySeq}
+                  presence={state.presence}
                   onReply={startReply}
                   onEdit={startEdit}
                   onRetract={retractMessage}
