@@ -69,6 +69,38 @@ describe("receiptFor priority ladder", () => {
     expect(r.detail).toBe("boom");
   });
 
+  // #107 之后 ledger 里有 serve/watch 的 broadcast/consumed 行；生产实测（seq 785）：
+  // agent 实际经 serve 被唤醒并回复，但回执只看失败的 webhook 行，红标「唤醒失败」——假报警。
+  test("serve broadcast → pending_wake (delivered to pull client, not a failure)", () => {
+    const r = receiptFor(
+      "evan",
+      [delivery({ mention_seq: 45, target_name: "evan", adapter_kind: "serve", webhook_name: "evan", result: "broadcast", http_status: null, attempted_at: 321 })],
+      null, ONLINE([]), {}, NOW,
+    );
+    expect(r.state).toBe("pending_wake");
+    expect(r.detail).toBe("serve");
+    expect(r.at).toBe(321);
+  });
+
+  test("failed webhook + serve broadcast for the same @ → success signal wins, no false wake_failed", () => {
+    const rows = [
+      delivery({ mention_seq: 45, target_name: "evan", result: "failed", http_status: 500, error: "boom", attempt: 2 }),
+      delivery({ mention_seq: 45, target_name: "evan", adapter_kind: "serve", webhook_name: "evan", result: "broadcast", http_status: null, attempt: 1 }),
+    ];
+    const r = receiptFor("evan", rows, null, ONLINE([]), {}, NOW);
+    expect(r.state).toBe("pending_wake");
+  });
+
+  test("serve consumed (resume referenced the @) → replied via ack_seq", () => {
+    const rows = [
+      delivery({ mention_seq: 45, target_name: "evan", result: "failed", http_status: 500, attempt: 2 }),
+      delivery({ mention_seq: 45, target_name: "evan", adapter_kind: "serve", webhook_name: "evan", result: "consumed", http_status: null, ack_seq: 52 }),
+    ];
+    const r = receiptFor("evan", rows, null, ONLINE([]), {}, NOW);
+    expect(r.state).toBe("replied");
+    expect(r.detail).toBe("#52");
+  });
+
   test("failed with no error text falls back to HTTP code", () => {
     const r = receiptFor("evan", [delivery({ mention_seq: 45, target_name: "evan", result: "failed", http_status: 502, error: null })], null, ONLINE([]), {}, NOW);
     expect(r.detail).toBe("HTTP 502");
