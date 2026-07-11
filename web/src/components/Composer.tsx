@@ -1,7 +1,7 @@
 // 底部插话框：Markdown、@name mention（动态在线列表补全，issue #39）、Cmd/Ctrl+Enter 发送（spec §9 第 4 块）。
 // readonly / archived 时由页面层直接不渲染本组件（错误内联为条幅）。
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChangeEvent, CSSProperties, KeyboardEvent } from "react";
+import type { ChangeEvent, ClipboardEvent, CSSProperties, DragEvent, KeyboardEvent } from "react";
 import type { Attachment } from "@agentparty/shared";
 import { formatSize } from "./AttachmentList";
 import { agentHue } from "../lib/agentColor";
@@ -24,12 +24,25 @@ interface Props {
   ready: boolean; // ws open 才能发
   candidates: MentionCandidate[]; // @ 补全候选（participants ∪ presence，已分档排序）
   mentionStatuses: DraftMentionStatus[]; // 草稿里已 @ 的目标 + 当前存活档位（发送前提醒会不会白发）
-  // 附件（#176）：已上传待发的引用 + 选文件/移除回调 + 上传中/错误态。缺省即无附件能力。
+  // 附件（#176）：已上传待发的引用 + 选文件/移除回调 + 每文件上传中/错误态。缺省即无附件能力。
   attachments?: Attachment[];
   onPickFiles?: (files: FileList) => void;
   onRemoveAttachment?: (key: string) => void;
+  // 在途/失败的上传（每文件一条）；uploading 时禁发，error 时给重试/撤下。
+  uploads?: UploadItem[];
+  onRetryUpload?: (id: string) => void;
+  onCancelUpload?: (id: string) => void;
   uploading?: boolean;
   uploadError?: string | null;
+}
+
+// 上传中/失败的附件（#176）：已完成的进 attachments，在途/失败的进 uploads，各自成 chip。
+export interface UploadItem {
+  id: string;
+  filename: string;
+  size: number;
+  status: "uploading" | "error";
+  error?: string;
 }
 
 const TIER_DOT: Record<MentionTier, string> = { online: "●", wakeable: "◐", recent: "○" };
@@ -69,14 +82,19 @@ export function Composer({
   attachments = [],
   onPickFiles,
   onRemoveAttachment,
+  uploads = [],
+  onRetryUpload,
+  onCancelUpload,
   uploading = false,
   uploadError = null,
 }: Props) {
   const t = useT();
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const [dragging, setDragging] = useState(false);
   const canAttach = onPickFiles !== undefined;
-  // 有附件时允许空正文发送（纯图片消息）
-  const sendDisabled = !ready || uploading || (draft.trim() === "" && attachments.length === 0);
+  const anyUploading = uploading || uploads.some((u) => u.status === "uploading");
+  // 有附件时允许空正文发送（纯图片消息）；任一上传在途时禁发，避免发出漏引用的半成品。
+  const sendDisabled = !ready || anyUploading || (draft.trim() === "" && attachments.length === 0);
   const TIER_LABEL: Record<MentionTier, string> = {
     online: t("Composer.tier.online"),
     wakeable: t("Composer.tier.wakeable"),
@@ -183,8 +201,47 @@ export function Composer({
     recompute(e.currentTarget.value, e.currentTarget.selectionStart ?? 0);
   };
 
+  // 拖拽到插话框任意处即上传（#176）。dragover 必须 preventDefault，否则浏览器不触发 drop。
+  const onDragOver = (e: DragEvent<HTMLDivElement>) => {
+    if (!canAttach) return;
+    e.preventDefault();
+    if (!dragging) setDragging(true);
+  };
+  const onDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    // 只有真正离开 composer（而非移到子元素）才收起高亮
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setDragging(false);
+  };
+  const onDrop = (e: DragEvent<HTMLDivElement>) => {
+    if (!canAttach) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDragging(false);
+    const files = e.dataTransfer?.files;
+    if (files !== undefined && files.length > 0) onPickFiles?.(files);
+  };
+  // 剪贴板里带文件（截图/复制的图片或文件）即上传；纯文本粘贴不拦截，走默认插入。
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!canAttach) return;
+    const files = e.clipboardData?.files;
+    if (files !== undefined && files.length > 0) {
+      e.preventDefault();
+      onPickFiles?.(files);
+    }
+  };
+
   return (
-    <div className="composer">
+    <div
+      className={"composer" + (dragging ? " composer--dragging" : "")}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {dragging && (
+        <div className="composer-dropzone" aria-hidden="true">
+          {t("Composer.attach.dropHere")}
+        </div>
+      )}
       {menu !== null && (
         <ul className="mention-menu" role="listbox" aria-label="mention suggestions">
           {menu.items.map((c, i) => {
@@ -257,6 +314,7 @@ export function Composer({
         onKeyUp={onKeyUp}
         onClick={(e) => recompute(e.currentTarget.value, e.currentTarget.selectionStart ?? 0)}
         onKeyDown={onKeyDown}
+        onPaste={onPaste}
         onBlur={() => setTimeout(() => setMenu(null), 120)}
       />
       {attachments.length > 0 && (
@@ -271,6 +329,46 @@ export function Composer({
                   className="composer-attachment-remove"
                   aria-label={`remove ${att.filename}`}
                   onClick={() => onRemoveAttachment(att.key)}
+                >
+                  ×
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {uploads.length > 0 && (
+        <ul className="composer-uploads" aria-label="uploads in progress">
+          {uploads.map((u) => (
+            <li key={u.id} className={`composer-upload composer-upload--${u.status} t-mono`}>
+              {u.status === "uploading" ? (
+                <span className="composer-upload-spinner" aria-hidden="true" />
+              ) : (
+                <span className="composer-upload-icon composer-upload-icon--error" aria-hidden="true">!</span>
+              )}
+              <span className="composer-upload-name">{u.filename}</span>
+              {u.status === "uploading" ? (
+                <span className="composer-upload-status">{t("Composer.upload.uploading")}</span>
+              ) : (
+                <span className="composer-upload-status composer-upload-error-text">
+                  {u.error ?? t("Composer.upload.failed")}
+                </span>
+              )}
+              {u.status === "error" && onRetryUpload !== undefined && (
+                <button
+                  type="button"
+                  className="composer-upload-retry"
+                  onClick={() => onRetryUpload(u.id)}
+                >
+                  {t("Composer.upload.retry")}
+                </button>
+              )}
+              {onCancelUpload !== undefined && (
+                <button
+                  type="button"
+                  className="composer-upload-cancel"
+                  aria-label={`dismiss ${u.filename}`}
+                  onClick={() => onCancelUpload(u.id)}
                 >
                   ×
                 </button>

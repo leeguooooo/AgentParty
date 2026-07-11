@@ -3894,25 +3894,128 @@
 .composer-attachment-remove:hover { color: var(--fg, inherit); }
 .composer-upload-error { margin: 0.25rem 0; }
 
+/* 拖拽上传高亮（#176）：composer 相对定位，dropzone 覆盖其上 */
+.composer { position: relative; }
+.composer--dragging { outline: 2px dashed var(--accent, var(--fg)); outline-offset: 2px; }
+.composer-dropzone {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg, #000) 78%, transparent);
+  color: var(--fg, inherit);
+  font-size: 0.9rem;
+  pointer-events: none;
+}
+
+/* 每文件上传态 chip（#176） */
+.composer-uploads {
+  list-style: none;
+  margin: 0;
+  padding: 0.25rem 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.composer-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.8rem;
+  max-width: 100%;
+}
+.composer-upload-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 12rem;
+}
+.composer-upload-status { color: var(--t-dim); }
+.composer-upload--error { border-color: var(--red, #c0392b); }
+.composer-upload-error-text { color: var(--red, #c0392b); }
+.composer-upload-icon--error {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  border: 1px solid var(--red, #c0392b);
+  color: var(--red, #c0392b);
+  font-weight: bold;
+  line-height: 1;
+}
+.composer-upload-spinner {
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 2px solid var(--border);
+  border-top-color: var(--fg, inherit);
+  border-radius: 50%;
+  animation: composer-upload-spin 0.7s linear infinite;
+}
+@keyframes composer-upload-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .composer-upload-spinner { animation-duration: 2s; }
+}
+.composer-upload-retry {
+  border: 1px solid var(--border);
+  background: none;
+  cursor: pointer;
+  color: var(--fg, inherit);
+  font: inherit;
+  border-radius: 3px;
+  padding: 0 0.35rem;
+}
+.composer-upload-retry:hover { border-color: var(--fg, inherit); }
+.composer-upload-cancel {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--t-dim);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0;
+}
+.composer-upload-cancel:hover { color: var(--fg, inherit); }
+
 /* ---- 消息附件渲染（#176） ---- */
 .msg-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.4rem;
+  max-width: 100%;
 }
+.msg-attachment { max-width: 100%; }
+.msg-attachment-img { display: inline-block; max-width: 100%; }
 .msg-attachment-img img {
-  max-width: 320px;
+  /* 缩略图受限于 320px 与容器宽度的较小者，移动端不撑破消息卡 */
+  max-width: min(320px, 100%);
   max-height: 240px;
+  width: auto;
+  height: auto;
   border-radius: 6px;
   border: 1px solid var(--border);
   display: block;
+  cursor: zoom-in;
 }
 .msg-attachment-file {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
   font-size: 0.85rem;
+  max-width: 100%;
+}
+.msg-attachment-file .msg-attachment-fname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .msg-attachment-size { color: var(--t-dim); }
 .msg-attachment-loading { color: var(--t-dim); font-size: 0.85rem; }

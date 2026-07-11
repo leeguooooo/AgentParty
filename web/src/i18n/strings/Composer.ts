@@ -22,6 +22,10 @@ export const ComposerStrings: LocaleDict = {
     "Composer.attach.label": "attach",
     "Composer.attach.uploading": "uploading…",
     "Composer.attach.title": "attach images or files",
+    "Composer.attach.dropHere": "drop files to attach",
+    "Composer.upload.uploading": "uploading…",
+    "Composer.upload.failed": "upload failed",
+    "Composer.upload.retry": "retry",
   },
   zh: {
     "Composer.tier.online": "在线",
@@ -44,6 +48,10 @@ export const ComposerStrings: LocaleDict = {
     "Composer.attach.label": "附件",
     "Composer.attach.uploading": "上传中…",
     "Composer.attach.title": "上传图片或文件",
+    "Composer.attach.dropHere": "拖放文件以上传",
+    "Composer.upload.uploading": "上传中…",
+    "Composer.upload.failed": "上传失败",
+    "Composer.upload.retry": "重试",
   },
 };
 

@@ -7,7 +7,7 @@ import { AgentJoin } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
 import { VisibilityToggle } from "../components/VisibilityToggle";
 import { JoinLink } from "../components/JoinLink";
-import { Composer } from "../components/Composer";
+import { Composer, type UploadItem } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
 import { MessageCard } from "../components/MessageCard";
 import { MentionToast, type MentionToastItem } from "../components/MentionToast";
@@ -1665,10 +1665,11 @@ export function ChannelPage({
   const [state, dispatch] = useReducer(channelReducer, initialChannelState);
   const [channelIdentities, setChannelIdentities] = useState<ChannelIdentity[]>([]);
   const [draft, setDraft] = useState("");
-  // 附件（#176）：已上传待随下一条消息发出的引用 + 上传中/错误态
+  // 附件（#176）：已上传待随下一条消息发出的引用（attachments）+ 在途/失败的每文件上传态（uploads）。
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
+  // 失败重试要拿回原始 File；uploads 里只存元数据，File 本体放这个 ref（不进 render）。
+  const uploadFilesRef = useRef<Map<string, File>>(new Map());
   const [search, setSearch] = useState("");
   const [searchFrom, setSearchFrom] = useState("");
   const [searchSince, setSearchSince] = useState("");
@@ -2325,6 +2326,8 @@ export function ChannelPage({
 
   const send = useCallback(() => {
     const body = draft.trim();
+    // 上传在途时按下 ⌘⏎ 不发（按钮已 disabled，但快捷键绕过它）——否则会漏掉还没落 R2 的引用。
+    if (uploads.some((u) => u.status === "uploading")) return;
     // 有附件时允许空正文（纯图片/文件消息）
     if (body === "" && attachments.length === 0) return;
     // 与草稿 chips / 服务端 BODY_MENTION_RE 同一份语义：@ 前须行首或非标识符字符，不吃 email 里的 @
@@ -2341,37 +2344,66 @@ export function ChannelPage({
     // ⌘⏎ 不受按钮 disabled 门控，断线窗口内发送失败要内联提示（草稿保留）
     if (ok) {
       pendingSendsRef.current.push({ draft, replyTo });
-      // 附件已落 R2，ws 已接收帧 → 乐观清空待发引用（失败时保留草稿由 ack 逻辑处理）
+      // 附件已落 R2，ws 已接收帧 → 乐观清空待发引用（失败上传一并丢弃，失败时保留草稿由 ack 逻辑处理）
       setAttachments([]);
-      setUploadError(null);
+      setUploads([]);
+      uploadFilesRef.current.clear();
     } else {
       dispatch({ type: "send_failed", message: "not connected — message not sent, draft kept" });
     }
-  }, [draft, replyTo, attachments]);
+  }, [draft, replyTo, attachments, uploads]);
 
-  // 选文件 → 逐个上传到 R2 → 追加引用；上限 25MB / 20 个由服务端强制，前端只报错不拦
-  const onPickFiles = useCallback(
-    (files: FileList) => {
-      setUploading(true);
-      setUploadError(null);
-      const list = Array.from(files);
-      void (async () => {
-        for (const file of list) {
-          try {
-            const meta = await uploadAttachment(token, slug, file);
-            setAttachments((prev) => (prev.some((a) => a.key === meta.key) ? prev : [...prev, meta]));
-          } catch (err) {
-            if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-            else if (err instanceof TooLargeError) setUploadError(`${file.name}: file too large (max 25MB)`);
-            else if (err instanceof ForbiddenError) setUploadError(`${file.name}: not allowed to upload here`);
-            else setUploadError(`${file.name}: upload failed`);
-          }
+  // 单文件上传：先落一条 uploading 态，成功转入 attachments、失败转 error 态（可重试）。
+  const runUpload = useCallback(
+    async (id: string, file: File) => {
+      setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, status: "uploading", error: undefined } : u)));
+      try {
+        const meta = await uploadAttachment(token, slug, file);
+        uploadFilesRef.current.delete(id);
+        setUploads((prev) => prev.filter((u) => u.id !== id));
+        setAttachments((prev) => (prev.some((a) => a.key === meta.key) ? prev : [...prev, meta]));
+      } catch (err) {
+        if (err instanceof AuthError) {
+          authFailedRef.current("token revoked — paste a new one");
+          return;
         }
-        setUploading(false);
-      })();
+        const error =
+          err instanceof TooLargeError
+            ? "file too large (max 25MB)"
+            : err instanceof ForbiddenError
+              ? "not allowed to upload here"
+              : "upload failed";
+        setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, status: "error", error } : u)));
+      }
     },
     [token, slug],
   );
+
+  // 选/拖/粘贴文件 → 每文件一条上传态并行上传；上限 25MB / 20 个由服务端强制，前端只报错不拦。
+  const onPickFiles = useCallback(
+    (files: FileList) => {
+      for (const file of Array.from(files)) {
+        const id = crypto.randomUUID();
+        uploadFilesRef.current.set(id, file);
+        setUploads((prev) => [...prev, { id, filename: file.name, size: file.size, status: "uploading" }]);
+        void runUpload(id, file);
+      }
+    },
+    [runUpload],
+  );
+
+  const onRetryUpload = useCallback(
+    (id: string) => {
+      const file = uploadFilesRef.current.get(id);
+      if (file !== undefined) void runUpload(id, file);
+    },
+    [runUpload],
+  );
+
+  const onCancelUpload = useCallback((id: string) => {
+    uploadFilesRef.current.delete(id);
+    setUploads((prev) => prev.filter((u) => u.id !== id));
+  }, []);
 
   const onRemoveAttachment = useCallback((key: string) => {
     setAttachments((prev) => prev.filter((a) => a.key !== key));
@@ -3442,8 +3474,9 @@ export function ChannelPage({
           attachments={attachments}
           onPickFiles={onPickFiles}
           onRemoveAttachment={onRemoveAttachment}
-          uploading={uploading}
-          uploadError={uploadError}
+          uploads={uploads}
+          onRetryUpload={onRetryUpload}
+          onCancelUpload={onCancelUpload}
         />
       )}
     </div>
