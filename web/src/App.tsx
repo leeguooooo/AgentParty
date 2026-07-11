@@ -9,6 +9,7 @@ import { DesktopUpdater } from "./components/DesktopUpdater";
 import { HandleSetup } from "./components/HandleSetup";
 import { TokenGate } from "./components/TokenGate";
 import { LanguageSwitcher } from "./components/LanguageSwitcher";
+import { OnboardingGuide } from "./components/OnboardingGuide";
 import { ServerProfileAddGate, ServerSwitcher } from "./components/ServerProfiles";
 import {
   AuthError,
@@ -960,6 +961,8 @@ export function App() {
           )}
         </main>
       </div>
+      {/* 首次进入的 1-2-3-4 引导：自管 localStorage 标记，只首次显示（#146） */}
+      <OnboardingGuide />
     </div>
   );
 }

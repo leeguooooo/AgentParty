@@ -4522,3 +4522,93 @@
 .role-selfhint-copy { flex: none; align-self: center; }
 .role-selfhint-meta { color: var(--t-muted); font-size: 11.5px; }
 .role-selfhint-caveat { color: var(--t-dim); font-size: 11.5px; }
+
+/* 首次进入的 1-2-3-4 引导浮层（#146）。沿用 doodle 硬边 + 4px 硬阴影，克制不花哨。 */
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.onboarding-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.42);
+}
+.onboarding-card {
+  position: relative;
+  z-index: 1;
+  width: min(440px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  background: var(--t-panel);
+  border: 1.8px solid var(--d-ink);
+  box-shadow: 6px 6px 0 var(--d-shadow);
+  padding: 20px 22px 22px;
+}
+.onboarding-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 2px 7px;
+  line-height: 1.2;
+}
+.onboarding-title {
+  margin: 0 26px 2px 0;
+  font-size: 18px;
+}
+.onboarding-subtitle {
+  margin: 0 0 16px;
+  color: var(--t-muted);
+  font-size: 13px;
+}
+.onboarding-steps {
+  list-style: none;
+  margin: 0 0 18px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+.onboarding-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+}
+.onboarding-step-num {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.6px solid var(--d-ink);
+  background: var(--t-accent);
+  color: var(--t-accent-ink);
+  font-weight: 800;
+  font-size: 13px;
+}
+.onboarding-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.onboarding-step-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--t-text);
+}
+.onboarding-step-desc {
+  font-size: 12.5px;
+  color: var(--t-dim);
+  line-height: 1.4;
+}
+.onboarding-dismiss {
+  width: 100%;
+  padding: 9px 12px;
+  font-weight: 700;
+}
