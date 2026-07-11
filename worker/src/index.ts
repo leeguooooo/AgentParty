@@ -41,6 +41,15 @@ import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { canAccessChannel, isChannelModerator } from "./acl";
 import {
+  CLIENT_TOO_OLD_HEADER,
+  CLIENT_VERSION_HEADER,
+  MIN_CLIENT_VERSION_HEADER,
+  clientTooOldNotice,
+  evaluateClientVersion,
+  isEnforced,
+  resolveMinClientVersion,
+} from "./client-version";
+import {
   extractBearer,
   lookupToken,
   oidcConfigFromEnv,
@@ -102,6 +111,9 @@ type AppEnv = Env & {
   LARK_CLIENT_SECRET?: string;
   FEISHU_CLIENT_SECRET?: string;
   DESKTOP_PAIRING_SECRET?: string;
+  // CLI↔worker 版本协商（#137）：声明的最低客户端版本 + 是否硬拒。缺省时用内置默认、默认只建言。
+  MIN_CLIENT_VERSION?: string;
+  MIN_CLIENT_ENFORCE?: string;
 };
 
 type AppContext = {
@@ -1730,9 +1742,40 @@ app.use("/api/*", async (c, next) => {
   c.res.headers.append("vary", "Origin");
 });
 
+// CLI↔worker 版本协商护栏（#137）。默认建言：低版本客户端照常放行，仅回一个 x-ap-client-too-old 信号头；
+// 仅当 MIN_CLIENT_ENFORCE 显式开启且客户端**确实带版本头且低于下限**时才 426 硬拒——缺头的 legacy 永不拒。
+// /api/version 与 /api/health 是老客户端了解自己过时的唯一入口，任何模式下都不拦。
+app.use("/api/*", async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  if (path === "/api/version" || path === "/api/health") return next();
+  const minVersion = resolveMinClientVersion(c.env.MIN_CLIENT_VERSION);
+  const verdict = evaluateClientVersion(c.req.header(CLIENT_VERSION_HEADER), minVersion);
+  if (verdict.status === "too_old" && isEnforced(c.env.MIN_CLIENT_ENFORCE)) {
+    c.header("cache-control", "no-store");
+    c.header(MIN_CLIENT_VERSION_HEADER, minVersion);
+    c.header(CLIENT_TOO_OLD_HEADER, "1");
+    return c.json(clientTooOldNotice(verdict), 426);
+  }
+  await next();
+  // 建言信号：始终告知下限；已知过时才打 too-old 标（unknown/legacy 不打，避免误伤本就不带头的浏览器等）。
+  c.res.headers.set(MIN_CLIENT_VERSION_HEADER, minVersion);
+  if (verdict.status === "too_old") c.res.headers.set(CLIENT_TOO_OLD_HEADER, "1");
+});
+
 app.get("/api/health", (c) => {
   c.header("cache-control", "no-store");
   return c.json({ ok: true, ...DEPLOYMENT_METADATA });
+});
+
+// CLI↔worker 版本协商源点（#137）：服务端 version/commit/deployed_at + 声明的最低客户端版本 + 是否硬拒。
+// 老客户端据此得知自己是否过时；本端点与 /api/health 永不受 min-version 护栏拦截（见下方中间件）。
+app.get("/api/version", (c) => {
+  c.header("cache-control", "no-store");
+  return c.json({
+    ...DEPLOYMENT_METADATA,
+    min_client_version: resolveMinClientVersion(c.env.MIN_CLIENT_VERSION),
+    min_client_enforced: isEnforced(c.env.MIN_CLIENT_ENFORCE),
+  });
 });
 
 app.get("/api/management-audit", requireAdmin, async (c) => {
