@@ -1,6 +1,7 @@
 // rest api 封装
 import {
   type AgentLineage,
+  type Attachment,
   type CaptureKind,
   type CaptureRecord,
   type ChannelKind,
@@ -1068,6 +1069,28 @@ export async function postMessage(
     headers: bearerJson(token),
     body: JSON.stringify(body),
   })) as { seq: number; completion_review?: CompletionReview };
+}
+
+// 附件上传（#176/#109）：blob 进 R2，返回引用元数据；随消息带在 attachments 字段里。
+// serve 交付物（[attach] 文件 / 超过 BODY_LIMIT 的正文）走这里，绝不再 inline 进消息正文撞 413。
+// content-type 直接透传给 worker（它会 split(";")[0] 归一化）；content-length 由 fetch 依 body 自动补。
+export async function uploadAttachment(
+  server: string,
+  token: string,
+  slug: string,
+  filename: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<Attachment> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/attachments?filename=${encodeURIComponent(filename)}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": contentType,
+    },
+    // typed array 是合法 BodyInit；不能走 bearerJson（它会把 content-type 钉成 application/json）
+    body: bytes,
+  })) as Attachment;
 }
 
 export async function archiveChannel(server: string, token: string, slug: string): Promise<void> {
