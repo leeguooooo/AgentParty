@@ -554,6 +554,22 @@ jobs:
           fi
           echo "DESKTOP_RELEASE_NOTES=$DESKTOP_RELEASE_NOTES" >> "$GITHUB_ENV"
 
+      - name: generate release changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          jq -n --arg tag_name "$GITHUB_REF_NAME" '{tag_name: $tag_name}' > dist/generate-notes-request.json
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            --input dist/generate-notes-request.json \
+            --jq .body > dist/generated-release-notes.md
+          if [ ! -s dist/generated-release-notes.md ]; then
+            echo "::error::GitHub generated an empty release changelog"
+            exit 1
+          fi
+          printf '\n' >> dist/release-body.md
+          cat dist/generated-release-notes.md >> dist/release-body.md
+
       - name: generate desktop updater manifest
         env:
           GH_TOKEN: ${{ github.token }}
