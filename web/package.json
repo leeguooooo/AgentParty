@@ -29,7 +29,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@types/react-test-renderer": "19.1.0",
-    "@vitejs/plugin-react": "^4.5.2",
+    "@vitejs/plugin-react": "^6.0.3",
     "react-test-renderer": "19.2.7",
     "typescript": "^7.0.2",
     "vite": "^7.0.0"
