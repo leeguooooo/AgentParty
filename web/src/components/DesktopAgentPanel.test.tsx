@@ -1,0 +1,247 @@
+// @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import { LocaleProvider } from "../i18n/locale";
+import { DesktopSettingsStrings } from "../i18n/strings/DesktopSettings";
+import type {
+  DesktopAgentAdapter,
+  DesktopAgentConfig,
+  DesktopAgentStartInput,
+  DesktopAgentStatus,
+} from "../lib/desktopAgent";
+import { DesktopAgentPanel, type DesktopAgentScheduler } from "./DesktopAgentPanel";
+
+const config: DesktopAgentConfig = {
+  configId: "local-main",
+  name: "Leo Codex",
+  serverOrigin: "https://party.example.com",
+  channel: "agentparty",
+  kind: "project",
+  role: "worker",
+};
+
+const stopped: DesktopAgentStatus = {
+  state: "stopped",
+  pid: null,
+  configId: null,
+  name: null,
+  channel: null,
+  runner: null,
+  startedAt: null,
+  exitCode: null,
+  lastError: null,
+};
+
+function adapter(overrides: Partial<DesktopAgentAdapter> = {}): DesktopAgentAdapter {
+  return {
+    listConfigs: async () => [config],
+    status: async () => stopped,
+    start: async () => ({ ...stopped, state: "running", pid: 42 }),
+    stop: async () => stopped,
+    logs: async () => [],
+    ...overrides,
+  };
+}
+
+let renderer: ReactTestRenderer | null = null;
+const t = (key: string) => DesktopSettingsStrings.en[key] ?? key;
+
+async function render(adapterValue: DesktopAgentAdapter, scheduler?: DesktopAgentScheduler) {
+  await act(async () => {
+    renderer = create(
+      <LocaleProvider>
+        <DesktopAgentPanel adapter={adapterValue} scheduler={scheduler} t={t} />
+      </LocaleProvider>,
+    );
+  });
+  return renderer!.root;
+}
+
+function button(label: string) {
+  return renderer!.root.find((node) => node.type === "button" && node.props["aria-label"] === label);
+}
+
+beforeEach(() => {
+  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: { getItem: () => "en", setItem: () => {}, removeItem: () => {} },
+  });
+});
+
+afterEach(async () => {
+  if (renderer !== null) await act(async () => renderer?.unmount());
+  renderer = null;
+});
+
+describe("DesktopAgentPanel", () => {
+  test("shows party init guidance when no local identity is configured", async () => {
+    const root = await render(adapter({ listConfigs: async () => [] }));
+    const text = JSON.stringify(renderer!.toJSON());
+
+    expect(text).toContain("party init");
+    expect(text).not.toContain("token");
+    expect(text).not.toContain("config path");
+  });
+
+  test("starts the selected identity, channel, and runner as a single-flight action", async () => {
+    let resolveStart!: (status: DesktopAgentStatus) => void;
+    const starts: DesktopAgentStartInput[] = [];
+    const root = await render(adapter({
+      start: (input) => {
+        starts.push(input);
+        return new Promise((resolve) => { resolveStart = resolve; });
+      },
+    }));
+    const selects = root.findAllByType("select");
+    const channel = root.findByProps({ name: "desktop-agent-channel" });
+
+    await act(async () => {
+      selects[1]!.props.onChange({ target: { value: "claude" } });
+      channel.props.onChange({ target: { value: "release" } });
+    });
+    await act(async () => {
+      const start = button("Start local agent");
+      void start.props.onClick();
+      void start.props.onClick();
+    });
+
+    expect(starts).toEqual([{ configId: "local-main", channel: "release", runner: "claude" }]);
+    expect(button("Start local agent").props.disabled).toBe(true);
+
+    await act(async () => resolveStart({
+      ...stopped,
+      state: "running",
+      pid: 42,
+      configId: "local-main",
+      name: "Leo Codex",
+      channel: "release",
+      runner: "claude",
+      startedAt: 1234,
+    }));
+  });
+
+  test("renders a failed status and its native failure reason", async () => {
+    const root = await render(adapter({
+      status: async () => ({ ...stopped, state: "failed", exitCode: 1, lastError: "runner exited before ready" }),
+    }));
+    const text = JSON.stringify(renderer!.toJSON());
+
+    expect(text).toContain("Failed");
+    expect(text).toContain("runner exited before ready");
+  });
+
+  test("offers a retry when initial native loading fails", async () => {
+    let reads = 0;
+    await render(adapter({
+      listConfigs: async () => {
+        reads += 1;
+        if (reads === 1) throw new Error("native bridge unavailable");
+        return [config];
+      },
+    }));
+
+    expect(JSON.stringify(renderer!.toJSON())).toContain("native bridge unavailable");
+    await act(async () => button("Retry loading").props.onClick());
+    expect(reads).toBe(2);
+    expect(renderer!.root.findAllByType("select").length).toBe(2);
+  });
+
+  test("loads logs only after the collapsed log view is expanded", async () => {
+    let reads = 0;
+    const root = await render(adapter({ logs: async () => { reads += 1; return ["ready", "watching #agentparty"]; } }));
+
+    expect(reads).toBe(0);
+    await act(async () => button("Show local agent logs").props.onClick());
+
+    expect(reads).toBe(1);
+    expect(JSON.stringify(renderer!.toJSON())).toContain("watching #agentparty");
+    expect(button("Hide local agent logs").props["aria-expanded"]).toBe(true);
+  });
+
+  test("redacts tokens and config paths from expanded logs", async () => {
+    await render(adapter({
+      logs: async () => ["token=private-value config=/Users/leo/.agentparty/config.json"],
+    }));
+
+    await act(async () => button("Show local agent logs").props.onClick());
+    const text = JSON.stringify(renderer!.toJSON());
+
+    expect(text).toContain("token=[redacted]");
+    expect(text).toContain("[config path redacted]");
+    expect(text).not.toContain("private-value");
+    expect(text).not.toContain("/Users/leo/.agentparty/config.json");
+  });
+
+  test("reloads logs after a new sidecar lifecycle", async () => {
+    let generation = "old run";
+    await render(adapter({
+      logs: async () => [generation],
+      start: async () => ({
+        ...stopped,
+        state: "running",
+        pid: 42,
+        configId: config.configId,
+        name: config.name,
+        channel: config.channel,
+        runner: "codex",
+        startedAt: 1234,
+      }),
+    }));
+
+    await act(async () => button("Show local agent logs").props.onClick());
+    expect(JSON.stringify(renderer!.toJSON())).toContain("old run");
+    await act(async () => button("Hide local agent logs").props.onClick());
+    generation = "new run";
+    await act(async () => button("Start local agent").props.onClick());
+    await act(async () => button("Show local agent logs").props.onClick());
+    const text = JSON.stringify(renderer!.toJSON());
+    expect(text).toContain("new run");
+    expect(text).not.toContain("old run");
+  });
+
+  test("polls an active agent and cancels polling when unmounted", async () => {
+    const polls: Array<() => void> = [];
+    let cancelled = 0;
+    let statusReads = 0;
+    const scheduler: DesktopAgentScheduler = {
+      every: (callback) => {
+        polls.push(callback);
+        return () => { cancelled += 1; };
+      },
+    };
+    await render(adapter({
+      status: async () => {
+        statusReads += 1;
+        return { ...stopped, state: "running", pid: 42 };
+      },
+    }), scheduler);
+
+    expect(statusReads).toBe(1);
+    await act(async () => { polls[0]?.(); });
+    expect(statusReads).toBe(2);
+
+    await act(async () => renderer?.unmount());
+    renderer = null;
+    expect(cancelled).toBe(1);
+    polls[0]?.();
+    await Promise.resolve();
+    expect(statusReads).toBe(2);
+  });
+
+  test("provides distinct English and Chinese copy for the local agent controls", () => {
+    const keys = [
+      "DesktopSettings.agent.title",
+      "DesktopSettings.agent.empty",
+      "DesktopSettings.agent.start",
+      "DesktopSettings.agent.stop",
+      "DesktopSettings.agent.state.failed",
+      "DesktopSettings.agent.logs.show",
+    ];
+    for (const key of keys) {
+      expect(DesktopSettingsStrings.en[key]).toBeTruthy();
+      expect(DesktopSettingsStrings.zh[key]).toBeTruthy();
+      expect(DesktopSettingsStrings.zh[key]).not.toBe(DesktopSettingsStrings.en[key]);
+    }
+  });
+});

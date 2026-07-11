@@ -183,6 +183,8 @@
   top: calc(100% + 7px);
   right: 0;
   width: min(340px, calc(100vw - 24px));
+  max-height: min(620px, calc(100vh - 80px));
+  overflow: auto;
   padding: 12px;
   border: 1.6px solid var(--d-ink);
   border-radius: 0;
@@ -226,6 +228,68 @@
 .desktop-settings-versions div { display: flex; justify-content: space-between; gap: 14px; }
 .desktop-settings-versions dt { color: var(--t-dim); }
 .desktop-settings-versions dd { margin: 0; color: var(--t-text); font-weight: 700; }
+.desktop-agent { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--t-faint); }
+.desktop-agent-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.desktop-agent-head strong { font-size: 12px; }
+.desktop-agent-state { color: var(--t-dim); font-size: 10px; font-weight: 700; }
+.desktop-agent-state--running { color: var(--d-green-dark, var(--d-green)); }
+.desktop-agent-state--failed { color: var(--d-red); }
+.desktop-agent-fields { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr); gap: 6px; margin-top: 8px; }
+.desktop-agent-fields label { min-width: 0; color: var(--t-dim); font-size: 9px; }
+.desktop-agent-fields label > span { display: block; margin-bottom: 3px; }
+.desktop-agent-fields select,
+.desktop-agent-fields input {
+  width: 100%;
+  min-width: 0;
+  height: 27px;
+  padding: 3px 5px;
+  border: 1px solid var(--t-faint);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: var(--t-text);
+  font: inherit;
+  font-size: 10px;
+}
+.desktop-agent-fields select:focus-visible,
+.desktop-agent-fields input:focus-visible { border-color: var(--t-accent); outline: 1px solid var(--t-accent); }
+.desktop-agent-empty,
+.desktop-agent-detail,
+.desktop-agent-error { margin: 7px 0 0; overflow-wrap: anywhere; font-size: 10px; line-height: 1.4; }
+.desktop-agent-empty,
+.desktop-agent-detail { color: var(--t-dim); }
+.desktop-agent-error { color: var(--d-red); }
+.desktop-agent-retry { margin-top: 7px; }
+.desktop-agent-actions { display: flex; align-items: center; gap: 5px; margin-top: 8px; }
+.desktop-agent-actions .d-btn { min-height: 27px; padding: 3px 7px; font-size: 10px; }
+.desktop-agent-actions button:disabled { cursor: not-allowed; opacity: 0.5; }
+.desktop-agent-logs-toggle {
+  margin-left: auto;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--t-accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  text-decoration: underline;
+}
+.desktop-agent-logs {
+  max-height: 120px;
+  margin: 7px 0 0;
+  padding: 7px;
+  overflow: auto;
+  border: 1px solid var(--t-faint);
+  background: var(--t-bg);
+  color: var(--t-body);
+  font-size: 9px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 430px) {
+  .desktop-agent-fields { grid-template-columns: 1fr 1fr; }
+  .desktop-agent-fields label:first-child { grid-column: 1 / -1; }
+}
 .app-me {
   margin-left: auto;
   flex: 1 1 240px;

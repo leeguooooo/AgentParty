@@ -6,6 +6,8 @@ import {
 } from "../lib/desktopRuntime";
 import { useT, type TFunc } from "../i18n/useT";
 import "../i18n/strings/DesktopSettings";
+import { DesktopAgentPanel } from "./DesktopAgentPanel";
+import { desktopAgentAdapter, type DesktopAgentAdapter } from "../lib/desktopAgent";
 
 export interface DesktopSettingsRuntime {
   isDesktopRuntime(): boolean;
@@ -114,9 +116,19 @@ interface PanelProps {
   t: TFunc;
   onToggle(): void;
   switchRef?: RefObject<HTMLButtonElement | null>;
+  agentAdapter?: DesktopAgentAdapter;
 }
 
-export function DesktopSettingsPanel({ enabled, pending, error, versions, t, onToggle, switchRef }: PanelProps) {
+export function DesktopSettingsPanel({
+  enabled,
+  pending,
+  error,
+  versions,
+  t,
+  onToggle,
+  switchRef,
+  agentAdapter = desktopAgentAdapter,
+}: PanelProps) {
   const unavailable = t("DesktopSettings.version.unavailable");
   return (
     <section
@@ -154,6 +166,7 @@ export function DesktopSettingsPanel({ enabled, pending, error, versions, t, onT
           <dd title={versions.commit ?? undefined}>{versions.commit?.slice(0, 8) ?? unavailable}</dd>
         </div>
       </dl>
+      <DesktopAgentPanel adapter={agentAdapter} t={t} />
     </section>
   );
 }
@@ -161,9 +174,10 @@ export function DesktopSettingsPanel({ enabled, pending, error, versions, t, onT
 interface Props {
   runtime?: DesktopSettingsRuntime;
   serverOrigin?: string;
+  agentAdapter?: DesktopAgentAdapter;
 }
 
-export function DesktopSettings({ runtime = defaultRuntime, serverOrigin = "" }: Props) {
+export function DesktopSettings({ runtime = defaultRuntime, serverOrigin = "", agentAdapter = desktopAgentAdapter }: Props) {
   const t = useT();
   const desktop = runtime.isDesktopRuntime();
   const [open, setOpen] = useState(false);
@@ -273,6 +287,7 @@ export function DesktopSettings({ runtime = defaultRuntime, serverOrigin = "" }:
           t={t}
           onToggle={toggleAutostart}
           switchRef={switchRef}
+          agentAdapter={agentAdapter}
         />
       )}
     </div>

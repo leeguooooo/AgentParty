@@ -1,0 +1,143 @@
+export type DesktopAgentState = "stopped" | "starting" | "running" | "stopping" | "failed";
+export type DesktopAgentRunner = "codex" | "claude" | "codex-sdk";
+
+export interface DesktopAgentConfig {
+  configId: string;
+  name: string;
+  serverOrigin: string;
+  channel: string | null;
+  kind: string;
+  role: string;
+}
+
+export interface DesktopAgentStatus {
+  state: DesktopAgentState;
+  pid: number | null;
+  configId: string | null;
+  name: string | null;
+  channel: string | null;
+  runner: string | null;
+  startedAt: number | null;
+  exitCode: number | null;
+  lastError: string | null;
+}
+
+export interface DesktopAgentStartInput {
+  configId: string;
+  channel: string;
+  runner: DesktopAgentRunner;
+}
+
+export interface DesktopAgentAdapter {
+  listConfigs(): Promise<DesktopAgentConfig[]>;
+  status(): Promise<DesktopAgentStatus>;
+  start(input: DesktopAgentStartInput): Promise<DesktopAgentStatus>;
+  stop(): Promise<DesktopAgentStatus>;
+  logs(): Promise<string[]>;
+}
+
+export type DesktopAgentInvoker = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isNullableNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
+}
+
+function parseConfig(value: unknown): DesktopAgentConfig | null {
+  if (!isRecord(value)) return null;
+  if (
+    typeof value.configId !== "string" || value.configId.length === 0 ||
+    typeof value.name !== "string" || value.name.length === 0 ||
+    typeof value.serverOrigin !== "string" ||
+    !isNullableString(value.channel) ||
+    typeof value.kind !== "string" ||
+    typeof value.role !== "string"
+  ) return null;
+  return {
+    configId: value.configId,
+    name: value.name,
+    serverOrigin: value.serverOrigin,
+    channel: value.channel,
+    kind: value.kind,
+    role: value.role,
+  };
+}
+
+function parseConfigs(value: unknown): DesktopAgentConfig[] {
+  if (!Array.isArray(value)) throw new Error("invalid desktop agent config list");
+  const configs = value.map(parseConfig);
+  if (configs.some((config) => config === null)) throw new Error("invalid desktop agent config list");
+  return configs as DesktopAgentConfig[];
+}
+
+function parseStatus(value: unknown): DesktopAgentStatus {
+  if (!isRecord(value)) throw new Error("invalid desktop agent status");
+  const state = value.state;
+  if (
+    (state !== "stopped" && state !== "starting" && state !== "running" && state !== "stopping" && state !== "failed") ||
+    !isNullableNumber(value.pid) ||
+    !isNullableString(value.configId) ||
+    !isNullableString(value.name) ||
+    !isNullableString(value.channel) ||
+    !isNullableString(value.runner) ||
+    !isNullableNumber(value.startedAt) ||
+    !isNullableNumber(value.exitCode) ||
+    !isNullableString(value.lastError)
+  ) throw new Error("invalid desktop agent status");
+  return {
+    state,
+    pid: value.pid,
+    configId: value.configId,
+    name: value.name,
+    channel: value.channel,
+    runner: value.runner,
+    startedAt: value.startedAt,
+    exitCode: value.exitCode,
+    lastError: value.lastError,
+  };
+}
+
+function parseLogs(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.every((line) => typeof line === "string")) {
+    throw new Error("invalid desktop agent logs");
+  }
+  return value;
+}
+
+export function createDesktopAgentAdapter(invoke: DesktopAgentInvoker): DesktopAgentAdapter {
+  return {
+    async listConfigs() {
+      return parseConfigs(await invoke<unknown>("desktop_agent_list_configs"));
+    },
+    async status() {
+      return parseStatus(await invoke<unknown>("desktop_agent_status"));
+    },
+    async start(input) {
+      return parseStatus(await invoke<unknown>("desktop_agent_start", {
+        configId: input.configId,
+        channel: input.channel,
+        runner: input.runner,
+      }));
+    },
+    async stop() {
+      return parseStatus(await invoke<unknown>("desktop_agent_stop"));
+    },
+    async logs() {
+      return parseLogs(await invoke<unknown>("desktop_agent_logs"));
+    },
+  };
+}
+
+const nativeInvoke: DesktopAgentInvoker = async <T>(command: string, args?: Record<string, unknown>) => {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return await invoke<T>(command, args);
+};
+
+export const desktopAgentAdapter = createDesktopAgentAdapter(nativeInvoke);
