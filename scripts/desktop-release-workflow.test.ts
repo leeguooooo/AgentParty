@@ -174,4 +174,13 @@ describe("desktop release workflow", () => {
     expect(workflow).toContain("prerelease: ${{ steps.release-channel.outputs.prerelease }}");
     expect(workflow).toContain("make_latest: ${{ steps.release-channel.outputs.make_latest }}");
   });
+
+  test("appends GitHub generated changelog entries to the release distribution notice", () => {
+    expect(releaseJob).toContain("name: generate release changelog");
+    expect(releaseJob).toContain("GH_TOKEN: ${{ github.token }}");
+    expect(releaseJob).toContain("repos/$GITHUB_REPOSITORY/releases/generate-notes");
+    expect(releaseJob).toContain('--arg tag_name "$GITHUB_REF_NAME"');
+    expect(releaseJob).toContain("dist/generated-release-notes.md");
+    expect(releaseJob).toContain('cat dist/generated-release-notes.md >> dist/release-body.md');
+  });
 });
