@@ -1,7 +1,7 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
-import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type MsgFrame } from "@agentparty/shared";
+import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type MsgFrame, type ServerFrame } from "@agentparty/shared";
 import { maybeReexecUpgrade, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import {
   appendFileSync,
@@ -373,6 +373,8 @@ export interface ServeOptions {
       charter?: ChannelCharter | null;
       projectAgent?: ProjectAgentRunContext | null;
       cliUpgrade?: CliUpgradeNotice | null;
+      /** 排在当前 wake 身后、尚未处理的 wake 数（#103）；runner 随 working 帧上报 busy+此值。 */
+      queueDepth?: number;
     },
   ) => Promise<void>;
   sdkRunner?: SdkRunnerOptions;
@@ -418,6 +420,8 @@ async function defaultRun(
     charter?: ChannelCharter | null;
     projectAgent?: ProjectAgentRunContext | null;
     cliUpgrade?: CliUpgradeNotice | null;
+    /** 排在当前 wake 身后、尚未处理的 wake 数（#103）。 */
+    queueDepth?: number;
   },
 ): Promise<void> {
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
@@ -780,6 +784,8 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
       charter?: ChannelCharter | null;
       projectAgent?: ProjectAgentRunContext | null;
       cliUpgrade?: CliUpgradeNotice | null;
+      /** 排在当前 wake 身后、尚未处理的 wake 数（#103）。 */
+      queueDepth?: number;
     },
   ): Promise<void> => {
     const started = opts.now?.() ?? Date.now();
@@ -792,6 +798,9 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
       state: "working",
       note: `wake ack: ${ctx.self} builtin codex-sdk runner handling seq=${frame.seq}`,
       mentions: [],
+      // busy（#103）：串行处理这条 wake 期间自报「忙 + 身后队列深度」，让 who/reach/web 别谎报可即时响应。
+      busy: true,
+      queue_depth: ctx.queueDepth ?? 0,
     });
 
     let threadId = session?.thread_id ?? null;
@@ -875,6 +884,9 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
       state: "working",
       note: `wake ack: ${ctx.self} builtin ${opts.harness} runner handling seq=${frame.seq}`,
       mentions: [],
+      // busy（#103）：串行处理这条 wake 期间自报「忙 + 身后队列深度」，让 who/reach/web 别谎报可即时响应。
+      busy: true,
+      queue_depth: ctx.queueDepth ?? 0,
     });
 
     const repoCwd = await ensureRepo(opts, env);
@@ -1261,9 +1273,35 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// 排队深度估算（#103）：serve 串行处理一条 wake 时，其后到达并已缓冲的帧里，有多少条是「够格触发
+// 一次唤醒」的新消息——即排在身后、迟早要挨个处理的 wake 数。只数已缓冲快照，不含正在处理的这条。
+// afterSeq = 当前正在处理/已了结到的 seq；只数它之后、非自己发的、（mentions-only 时）@ 到自己的消息。
+export function pendingWakeDepth(
+  pending: ServerFrame[],
+  self: string,
+  mentionsOnly: boolean,
+  afterSeq: number,
+): number {
+  let depth = 0;
+  for (const f of pending) {
+    if (f.type !== "msg") continue;
+    if (f.seq <= afterSeq) continue;
+    if (f.sender.name === self) continue;
+    if (mentionsOnly && !f.mentions.includes(self)) continue;
+    depth += 1;
+  }
+  return depth;
+}
+
 export async function runServe(o: ServeOptions): Promise<number> {
   const out = o.out ?? ((line: string) => console.error(line));
   const run = o.runCommand ?? (o.sdkRunner ? createSdkRunner(o.sdkRunner) : o.builtinRunner ? createBuiltinRunner(o.builtinRunner) : defaultRun);
+  // busy 生命周期（#103）：只有内建 serve runner（builtin/sdk）在 working 帧里自报 busy=true，
+  // 因此也只有它们需要 runServe 在收尾时补一条「busy=false 空闲」把 busy 清干净。注入 runCommand
+  // 的测试、以及 --cmd 裸执行器（自管 presence）不参与，避免覆盖它们自己的收尾状态。
+  const reportsBusy = o.runCommand === undefined && (o.builtinRunner !== undefined || o.sdkRunner !== undefined);
+  // 已自报 busy、尚未补发空闲清除。一次 busy→idle 转场只补一条，不逐 tick 刷。
+  let busyReported = false;
   let upgraded = false;
   let nudgedUpgrade = false;
   // 本地连接健康探针（#254）：WS 生命周期转场（不是 presence 自报、不是 PID 推断）落 health.json，
@@ -1468,6 +1506,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
         let lastError = (stuck?.seq === frame.seq ? stuck.last_error : "") ?? "";
         let delivered = false;
         let retriable = true;
+        // 身后已缓冲的 wake 深度（#103）：内建 runner 随 working 帧上报，presence 显示「忙 + N 待处理」。
+        // 本帧正在处理，故只数它 seq 之后、够格触发唤醒的缓冲帧。
+        const queueDepth = pendingWakeDepth(conn.pendingFrames(), self, o.mentionsOnly === true, frame.seq);
+        if (reportsBusy) busyReported = true;
         for (let attempt = priorAttempts + 1; attempt <= maxAttempts && retriable; attempt++) {
           try {
             const cliUpgrade = upgradeNotice(o.autoUpgrade === true, o.upgradeDeps);
@@ -1480,6 +1522,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
               charter,
               projectAgent: o.projectAgent ?? null,
               cliUpgrade,
+              queueDepth,
             });
             delivered = true;
             break;
@@ -1509,6 +1552,29 @@ export async function runServe(o: ServeOptions): Promise<number> {
           // 它是第二道闸：一旦有人放宽 blockedByDebt，这行会挡住「A 的成功清掉 B 的欠账」。
           // 不删，理由写在这里。
           if (stuck !== null && stuck.seq === frame.seq) setStuck(null);
+          // busy 清除（#103）：这条 wake 处理完了。若身后已无待处理 wake（队列排空），补一条「空闲」把
+          // 之前 working 帧上的 busy 清回 false——否则任务结束后 presence 会永远卡在「忙」（假忙）。
+          // 只在真排空时补：还有 @ 排队就保持 busy=true，等下一条 wake 的 working 帧继续覆盖 queue_depth。
+          if (busyReported) {
+            const remaining = pendingWakeDepth(conn.pendingFrames(), self, o.mentionsOnly === true, conn.cursor);
+            if (remaining === 0) {
+              busyReported = false;
+              try {
+                await (o.post ?? postMessage)(o.server, o.token, o.channel, {
+                  kind: "status",
+                  state: "waiting",
+                  note: `idle: ${self} finished wake seq=${frame.seq}, waiting for next @`,
+                  mentions: [],
+                  busy: false,
+                  queue_depth: 0,
+                });
+              } catch (e) {
+                // 清 busy 只是锦上添花：发不出去就下条 wake 的 working 帧会重置 queue_depth，
+                // 或下次排空再补。留痕但不影响主流程（wake 已成功送达）。
+                out(`  busy 清除通告发送失败（不影响送达）: ${errText(e)}`);
+              }
+            }
+          }
         } else {
           // 有界重放到顶：显式放弃，但必须响亮留痕——静默丢弃正是 #118 要修的东西。
           // 没有 CLI flag，所以重试预算与退避必须**在频道里可见**：把常数藏进源码是不诚实的。

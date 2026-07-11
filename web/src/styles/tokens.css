@@ -60,6 +60,9 @@
   --d-red-soft: #3a1f1c;
   --d-blue-soft: #1a2436;
   --d-green-soft: #16301f;
+  /* busy（#103）：琥珀色，暗底提亮免糊背景 */
+  --d-amber: #e8a24a;
+  --d-amber-soft: #3a2a12;
   --code-bg: #0a0c10;
   --code-border: #3a4250;
   --scroll-track: #161a20;
@@ -76,6 +79,9 @@
   --d-blue-soft: #dde7ff;
   --d-green: #34b36b;
   --d-green-soft: #d8f0df;
+  /* busy（#103）：琥珀色，与 working 绿点、blocked 红明确区分 */
+  --d-amber: #c9720b;
+  --d-amber-soft: #ffeccb;
   /* 硬偏移阴影：淡墨而非重墨，阴影只提"纸片感"不抢戏 */
   --d-shadow: rgba(0, 0, 0, 0.16);
   /* 代码块 / 滚动条配色（midnight 有对应暗色覆盖） */
@@ -87,6 +93,7 @@
   --p-working: var(--d-green);
   --p-waiting: var(--d-blue);
   --p-blocked: var(--d-red);
+  --p-busy: var(--d-amber);
   --p-done: #8a857a;
   --p-offline: #cfcabb;
 

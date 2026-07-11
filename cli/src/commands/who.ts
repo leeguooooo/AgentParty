@@ -15,6 +15,9 @@ List who is in a channel, tiered by how you can reach them:
   ● online    connected right now
   ◐ wakeable  not connected, but @-mention will wake them (serve/watch/webhook)
   ○ recent    seen lately; mention delivers, wake not guaranteed
+A "⏳ busy" tag means the target is serially handling a wake (e.g. a long run): it
+is reachable but a reply will be slow — an ask that times out means "busy", not
+"offline", so do not re-@ it. "N queued" shows how many wakes are already waiting.
 wake=serve runs a live supervisor and webhook is server-delivered; wake=watch is
 self-declared and depends on the harness actually resuming the agent, so it is
 shown as "watch (unverified)" until proven — check with: party wake test @name
@@ -27,7 +30,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/wake/wake_unverified/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/wake/wake_unverified/busy/queue_depth/account/handle/display_name/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -58,6 +61,9 @@ interface Row {
   account?: string; // 会话背后的账号（人类 = OIDC email；agent = owner）
   handle?: string; // 人类全局唯一 @别名；@ 通知的真正投递键（web notify 按 handle 命中）
   display_name?: string; // OAuth/SSO 展示名
+  // busy（#103）：serve 正串行处理一条 wake，回复会慢。让人别把「@ 了没立刻回」误判成失联、反复 @。
+  busy?: true;
+  queue_depth?: number; // 忙时排在身后、尚未处理的 wake 数；>0 才带出
 }
 
 // kind 已知取 kind；旧 presence 行没回填时 UUID 名判 human（网页登录会话），其余判 agent。
@@ -97,6 +103,9 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     ...(typeof e.account === "string" && e.account !== "" ? { account: e.account } : {}),
     ...(typeof e.handle === "string" && e.handle !== "" ? { handle: e.handle } : {}),
     ...(typeof e.display_name === "string" && e.display_name !== "" ? { display_name: e.display_name } : {}),
+    // busy/queue_depth（#103）：仅在服务端标了 busy（目标可达且自报忙）时带出；离线态服务端本就不下发 busy。
+    ...(e.busy === true ? { busy: true as const } : {}),
+    ...(e.busy === true && typeof e.queue_depth === "number" && e.queue_depth > 0 ? { queue_depth: e.queue_depth } : {}),
     age_ms: age,
     ...(typeof e.connection_count === "number" && e.connection_count > 1
       ? { connection_count: e.connection_count }
@@ -137,6 +146,14 @@ export function identityNote(r: Row): string {
     if (account !== "") parts.push(account);
   }
   return parts.length > 0 ? ` (${parts.join(" · ")})` : "";
+}
+
+// busy 标注（#103）：目标可达但正串行处理一条 wake——「⏳ busy」或「⏳ busy · N queued」。
+// 让人看懂「@ 了没立刻回」是忙、不是失联，别反复 @ 堆重复唤醒。
+export function busyNote(r: Row): string {
+  if (r.busy !== true) return "";
+  const queued = r.queue_depth !== undefined && r.queue_depth > 0 ? ` · ${r.queue_depth} queued` : "";
+  return ` · ⏳ busy${queued}`;
 }
 
 function humanAge(ms: number): string {
@@ -225,7 +242,7 @@ export async function run(argv: string[]): Promise<number> {
       }
       const wake = r.tier === "wakeable" && r.wake ? ` ${r.wake}${r.wake_unverified === true ? " (unverified)" : ""}` : "";
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${wake}${read}${duplicate}${age}`);
+      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${wake}${read}${duplicate}${age}`);
     }
     return 0;
   } catch (e) {

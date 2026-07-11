@@ -15,6 +15,18 @@ export interface Reachability {
   name: string;
   reach: Reach;
   wake?: WakeKind;
+  // busy（#103）：目标可达但正串行处理一条 wake，回复会慢。让调用方把 ask 超时当「忙」而非「失联」，
+  // 别反复 @ 堆重复唤醒。仅在服务端标了 busy（即目标在线且自报忙）时带出。
+  busy?: true;
+  // 忙时排在身后、尚未处理的 wake 数（#103）；>0 才带出。
+  queueDepth?: number;
+}
+
+// busy/queue_depth 只在目标「可达」（online/wakeable）时有意义——offline 谈不上忙。
+function busyBits(e: PresenceEntry | undefined): Pick<Reachability, "busy" | "queueDepth"> {
+  if (e?.busy !== true) return {};
+  const depth = typeof e.queue_depth === "number" && e.queue_depth > 0 ? e.queue_depth : undefined;
+  return { busy: true, ...(depth !== undefined ? { queueDepth: depth } : {}) };
 }
 
 export function reachOf(name: string, presence: PresenceEntry[], now: number): Reachability {
@@ -25,16 +37,24 @@ export function reachOf(name: string, presence: PresenceEntry[], now: number): R
   const wake = e.wake?.kind;
   // online：与 web mentions 一致以「当前有活 WS 连接」为准（#97 的 live，DO 从 getConnections 权威判定）；
   // 无 live 信号（旧 worker 响应）时回退到旧的新鲜度启发式，不回归。
-  if (e.state !== "offline" && (e.live === true || age < STALE_MS)) return { name, reach: "online", ...(wake ? { wake } : {}) };
-  if (wake !== undefined && autoWakeReachable(e, now, STALE_MS) && age <= DEAD_MS) return { name, reach: "wakeable", wake };
+  if (e.state !== "offline" && (e.live === true || age < STALE_MS))
+    return { name, reach: "online", ...(wake ? { wake } : {}), ...busyBits(e) };
+  if (wake !== undefined && autoWakeReachable(e, now, STALE_MS) && age <= DEAD_MS)
+    return { name, reach: "wakeable", wake, ...busyBits(e) };
   return { name, reach: "offline", ...(wake ? { wake } : {}) };
 }
 
 const DOT: Record<Reach, string> = { online: "●", wakeable: "◐", offline: "○" };
 
+// 忙态后缀：「· busy」或「· busy, N queued」。目标可达但正忙——回复会慢，别当失联。
+function busyNote(r: Reachability): string {
+  if (r.busy !== true) return "";
+  return r.queueDepth !== undefined ? ` · busy, ${r.queueDepth} queued` : " · busy";
+}
+
 export function formatReach(r: Reachability): string {
-  if (r.reach === "online") return `@${r.name} ${DOT.online} online`;
-  if (r.reach === "wakeable") return `@${r.name} ${DOT.wakeable} wakeable${r.wake ? `(${r.wake})` : ""}`;
+  if (r.reach === "online") return `@${r.name} ${DOT.online} online${busyNote(r)}`;
+  if (r.reach === "wakeable") return `@${r.name} ${DOT.wakeable} wakeable${r.wake ? `(${r.wake})` : ""}${busyNote(r)}`;
   return `@${r.name} ${DOT.offline} offline — reconnect to reach`;
 }
 

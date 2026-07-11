@@ -73,6 +73,46 @@ describe("consistency with server-side live-connection fix (#97)", () => {
   });
 });
 
+// busy + 队列深度（#103）：目标可达但正串行处理一条 wake——回复会慢，不是失联。
+describe("busy surfacing (#103)", () => {
+  test("online + busy with no queue → carries busy, no queueDepth", () => {
+    const r = reachOf("bot", [p({ name: "bot", busy: true })], NOW);
+    expect(r.reach).toBe("online");
+    expect(r.busy).toBe(true);
+    expect(r).not.toHaveProperty("queueDepth");
+  });
+
+  test("online + busy with a backlog → carries queue depth", () => {
+    const r = reachOf("bot", [p({ name: "bot", busy: true, queue_depth: 4 })], NOW);
+    expect(r).toMatchObject({ reach: "online", busy: true, queueDepth: 4 });
+  });
+
+  test("wakeable serve + busy → busy rides on wakeable too", () => {
+    const r = reachOf("bot", [p({ name: "bot", state: "offline", wake: { kind: "serve" }, busy: true, queue_depth: 2 })], NOW);
+    expect(r).toMatchObject({ reach: "wakeable", wake: "serve", busy: true, queueDepth: 2 });
+  });
+
+  test("not busy → no busy/queueDepth fields", () => {
+    const r = reachOf("bot", [p({ name: "bot" })], NOW);
+    expect(r).not.toHaveProperty("busy");
+    expect(r).not.toHaveProperty("queueDepth");
+  });
+
+  test("queue_depth of 0 while busy → busy but no queued count", () => {
+    const r = reachOf("bot", [p({ name: "bot", busy: true, queue_depth: 0 })], NOW);
+    expect(r.busy).toBe(true);
+    expect(r).not.toHaveProperty("queueDepth");
+  });
+
+  test("format shows busy and queued count legibly", () => {
+    expect(formatReach({ name: "a", reach: "online", busy: true })).toBe("@a ● online · busy");
+    expect(formatReach({ name: "a", reach: "online", busy: true, queueDepth: 3 })).toBe("@a ● online · busy, 3 queued");
+    expect(formatReach({ name: "b", reach: "wakeable", wake: "serve", busy: true, queueDepth: 1 })).toBe(
+      "@b ◐ wakeable(serve) · busy, 1 queued",
+    );
+  });
+});
+
 describe("formatting", () => {
   test("per-target labels are honest and compact", () => {
     expect(formatReach({ name: "a", reach: "online" })).toBe("@a ● online");
