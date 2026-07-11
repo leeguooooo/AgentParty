@@ -1,0 +1,63 @@
+# #137 供应链输入侧：产物侧（release.yml 的 cosign + provenance）已经不错，
+# 输入侧（依赖树自动更新 + 漏洞告警）在此之前完全空白——.github/ 下只有
+# workflows/，没有任何 dependabot/renovate 配置。这个文件补上。
+#
+# 覆盖三个生态：
+#   - bun：单一 workspace 根 lockfile（bun.lock）管住 worker/cli/shared/web/desktop
+#     五个 workspace 成员，Dependabot 从根 "/" 一个入口就能解析全部 package.json。
+#   - cargo：desktop/src-tauri 是唯一的 Rust crate（Tauri 桌面壳）。
+#   - github-actions：.github/workflows/*.yml + .github/actions/*/action.yml 里
+#     引用的 actions（actions/checkout、sigstore/cosign-installer 等）。
+#
+# 分组 minor/patch 减噪音——一周最多几个 PR 而不是逐包轰炸；major 版本不分组，
+# 单独出 PR 走人工审（避免自动合入破坏性升级）。
+version: 2
+updates:
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "cargo"
+    directory: "/desktop/src-tauri"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
