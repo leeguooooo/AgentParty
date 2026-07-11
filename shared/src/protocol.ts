@@ -112,6 +112,18 @@ export type HostLeaseState = "active" | "stale";
 export type CompletionGate = "off" | "reviewer";
 export type CompletionReviewState = "pending_review" | "approved" | "rejected";
 export type CompletionReviewPolicy = "sender" | "owner";
+// 频道人类决策协议（#284）。approval：decision_request 挂起等人类回应；
+// unattended（无人值守）：服务端在落库时立即自动放行（auto_resolved），agent 不必等人。
+export type DecisionMode = "approval" | "unattended";
+// approval：选项固定为 approve/reject；choice：agent 自带 1..N 个自定义选项。
+export type DecisionKind = "approval" | "choice";
+// pending：等人类；resolved：人类已选；auto_resolved：无人值守模式自动放行。
+export type DecisionState = "pending" | "resolved" | "auto_resolved";
+// decision_request 上限（#284）：与 completion review 同量级，防把 prompt/选项当附加 payload 滥用。
+export const DECISION_PROMPT_LIMIT = 4_000;
+export const DECISION_OPTIONS_MAX = 10;
+export const DECISION_OPTION_LIMIT = 200;
+export const DECISION_REASON_LIMIT = 2_000;
 
 export interface WakeInfo {
   kind: WakeKind;
@@ -480,6 +492,8 @@ export interface SendMessageFrame {
   mentions: string[];
   reply_to: number | null;
   completion_artifact?: CompletionArtifact;
+  /** 人类决策请求（#284）；带上它 = 这条 message 是一个 decision_request。与 completion_artifact 互斥。 */
+  decision_request?: SendDecisionRequest;
   /** 附件引用（#176）；空/缺省视为无附件。上限见 do 侧 MAX_ATTACHMENTS_PER_MESSAGE。 */
   attachments?: Attachment[];
   replaces?: number;
@@ -606,6 +620,44 @@ export interface CompletionReview {
   replaced_by_seq?: number;
 }
 
+// ---- 人类决策协议（#284）----
+// 一条 decision_request 消息携带一个待决问题：方案审批（approve/reject）或选项回答（1..N）。
+// 决策的落地状态挂在同一条消息上（DecisionResolution），像 completion_review 挂在 completion 上。
+export interface DecisionRequest {
+  kind: DecisionKind;
+  /** 一句话问题 / 方案标题；方案正文走消息 body。 */
+  prompt: string;
+  /** 可选项文本；approval 恒为 ["approve","reject"]，choice 为 agent 自带的 1..N 个。 */
+  options: string[];
+}
+
+export interface DecisionResolution {
+  state: DecisionState;
+  /** 选中项在 options 中的 0 基下标；pending 时省略。 */
+  chosen_index?: number;
+  chosen_option?: string;
+  /** 做出选择的人类/moderator；无人值守自动放行时省略。 */
+  responder?: Sender;
+  responder_owner?: string;
+  responded_at?: number;
+  /** 可选备注（如 reject 理由）。 */
+  reason?: string;
+}
+
+// decision_response 消息：回应挂到频道里成为一条独立可渲染/可消费的帧，反指 request 的 seq。
+export interface DecisionResponse {
+  request_seq: number;
+  chosen_index: number;
+  chosen_option: string;
+}
+
+// 客户端发 decision_request 时的入参：kind/options 可省，服务端兜底 approval + approve/reject。
+export interface SendDecisionRequest {
+  kind?: DecisionKind;
+  prompt: string;
+  options?: string[];
+}
+
 export interface MsgFrame {
   /** status messages are emitted as type:"status" so tools can consume them without text scraping. */
   type: "msg" | "status";
@@ -624,6 +676,12 @@ export interface MsgFrame {
   role_source?: CollaborationRoleSource;
   completion_artifact?: CompletionArtifact;
   completion_review?: CompletionReview;
+  /** 决策请求（#284）；仅 decision_request 消息携带。 */
+  decision_request?: DecisionRequest;
+  /** 决策落地状态（#284）；随人类回应/自动放行更新并以 message_update("decision") 重播。 */
+  decision_resolution?: DecisionResolution;
+  /** 决策回应（#284）；仅 decision_response 回复消息携带，反指 request 的 seq。 */
+  decision_response?: DecisionResponse;
   /** 附件引用（#176）；仅 kind:"message" 携带，无附件时省略。 */
   attachments?: Attachment[];
   ts: number;
@@ -1075,7 +1133,7 @@ export function buildHostBoard(
 export interface MessageUpdateFrame {
   type: "message_update";
   target_seq: number;
-  action: "edit" | "retract" | "supersede" | "review";
+  action: "edit" | "retract" | "supersede" | "review" | "decision";
   actor: Sender;
   ts: number;
   message: MsgFrame;

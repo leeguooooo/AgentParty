@@ -19,6 +19,7 @@ import type {
   CaptureRecord,
   CompletionGate,
   CompletionReviewPolicy,
+  DecisionMode,
   ChannelKind,
   ChannelMode,
   CollaborationRole,
@@ -113,6 +114,7 @@ const MODES: readonly string[] = ["normal", "party"] satisfies ChannelMode[];
 const VISIBILITIES: readonly string[] = ["public", "private"];
 const COMPLETION_GATES: readonly string[] = ["off", "reviewer"] satisfies CompletionGate[];
 const COMPLETION_REVIEW_POLICIES: readonly string[] = ["sender", "owner"] satisfies CompletionReviewPolicy[];
+const DECISION_MODES: readonly string[] = ["approval", "unattended"] satisfies DecisionMode[];
 const COLLAB_ROLES: readonly string[] = ["host", "worker", "reviewer", "observer"] satisfies CollaborationRole[];
 const TASK_STATES: readonly string[] = ["triage", "backlog", "assigned", "in_progress", "needs_review", "done", "blocked"] satisfies TaskState[];
 const TASK_ASSIGNEE_KINDS: readonly string[] = ["agent", "human", "squad"] satisfies TaskAssigneeKind[];
@@ -241,6 +243,7 @@ const AP_FORWARD_HEADERS = [
   "x-ap-channel-kind",
   "x-ap-completion-gate",
   "x-ap-completion-review-policy",
+  "x-ap-decision-mode",
   "x-ap-loop-guard-enabled",
   "x-ap-loop-guard-limit",
   "x-ap-workflow-guard-enabled",
@@ -1172,7 +1175,7 @@ async function loadChannel(db: D1Database, slug: string) {
   return db
     .prepare(
       `SELECT slug, kind, mode, archived_at, created_by, visibility, owner_account,
-              completion_gate, completion_review_policy, loop_guard_enabled, loop_guard_limit,
+              completion_gate, completion_review_policy, decision_mode, loop_guard_enabled, loop_guard_limit,
               workflow_guard_enabled, workflow_guard_limit,
               charter, charter_rev, charter_updated_at, charter_updated_by,
               charter_write_policy, charter_write_agents, charter_write_agent_allowlist_json,
@@ -1190,6 +1193,7 @@ async function loadChannel(db: D1Database, slug: string) {
       owner_account: string | null;
       completion_gate: string;
       completion_review_policy: string;
+      decision_mode: string;
       loop_guard_enabled: number;
       loop_guard_limit: number | null;
       workflow_guard_enabled: number;
@@ -1304,6 +1308,7 @@ function channelHeaders(
     mode: string;
     completion_gate?: string;
     completion_review_policy?: string;
+    decision_mode?: string;
     loop_guard_enabled?: number;
     loop_guard_limit?: number | null;
     workflow_guard_enabled?: number;
@@ -1317,6 +1322,7 @@ function channelHeaders(
     "x-ap-channel-kind": channel.kind,
     "x-ap-completion-gate": channel.completion_gate ?? "off",
     "x-ap-completion-review-policy": channel.completion_review_policy ?? "sender",
+    "x-ap-decision-mode": channel.decision_mode ?? "approval",
     "x-ap-loop-guard-enabled": String(channel.loop_guard_enabled ?? 0),
     "x-ap-loop-guard-limit": channel.loop_guard_limit == null ? "" : String(channel.loop_guard_limit),
     "x-ap-workflow-guard-enabled": String(channel.workflow_guard_enabled ?? 0),
@@ -4383,6 +4389,37 @@ app.put("/api/channels/:slug/completion-gate", async (c) => {
   return c.json({ gate, policy });
 });
 
+// 频道决策模式（#284）：approval（默认，人类审批）↔ unattended（无人值守，自动放行）。
+// 门禁同 completion-gate——只有 moderator（频道 owner / ap_ token）能切。
+app.put("/api/channels/:slug/decision-mode", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can configure decision mode"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const body = (await c.req.json().catch(() => null)) as { mode?: unknown } | null;
+  const mode = typeof body?.mode === "string" ? body.mode : "";
+  if (!DECISION_MODES.includes(mode as DecisionMode)) {
+    return c.json(errorBody("bad_request", "mode must be approval or unattended"), 400);
+  }
+  await c.env.DB.prepare("UPDATE channels SET decision_mode = ? WHERE slug = ?").bind(mode, slug).run();
+  const updated = { ...channel, decision_mode: mode };
+  await fetchChannelDO(
+    c.env,
+    slug,
+    new Request("https://do/internal/init", {
+      method: "POST",
+      headers: { "x-partykit-room": slug, ...channelHeaders(updated, c.req.url) },
+    }),
+  );
+  return c.json({ mode });
+});
+
 
 // #119：削弱 guard 的门禁不得弱于 reset-guard 的 human-only。
 // reset 只清计数，关闭/放宽 guard 是永久摘掉刹车——更强的动作，不能门禁更松。
@@ -4532,6 +4569,47 @@ app.post("/api/channels/:slug/messages/:seq/review", async (c) => {
       await syncTaskCompletion(c.env, slug, taskId, message.completion_artifact, message.seq, "in_progress");
     }
   }
+  return res;
+});
+
+// 人类决策回应（#284）：人类/moderator 在频道内对某条 decision_request 点选项/审批。
+// 必须注册在 :action 泛匹配之前，否则被吞。moderator 位在 worker 层算好后转发给 DO。
+app.post("/api/channels/:slug/messages/:seq/decision", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const seq = positiveInt(Number(c.req.param("seq")));
+  if (seq === null) return c.json(errorBody("bad_request", "seq must be a positive integer"), 400);
+  const assignedRole = await loadAssignedRole(c.env.DB, slug, identity);
+  const res = await fetchChannelDO(
+    c.env,
+    slug,
+    new Request(`https://do/internal/messages/${seq}/decision`, {
+      method: "POST",
+      body: await c.req.text(),
+      headers: {
+        "content-type": "application/json",
+        "x-partykit-room": slug,
+        "x-ap-name": identity.name,
+        "x-ap-kind": identity.kind,
+        "x-ap-role": identity.role,
+        ...(identity.owner ? { "x-ap-owner": identity.owner } : {}),
+        "x-ap-token-hash": identity.hash,
+        ...(isChannelModerator(identity, channel) ? { "x-ap-moderator": "1" } : {}),
+        ...lineageHeaders(identity),
+        ...assignedRoleHeaders(assignedRole),
+        ...channelHeaders(channel, c.req.url),
+        ...(await handleHeader(c.env.DB, identity)),
+      },
+    }),
+  );
   return res;
 });
 
@@ -5127,6 +5205,7 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-channel-kind", channel.kind);
   fwd.headers.set("x-ap-completion-gate", channel.completion_gate);
   fwd.headers.set("x-ap-completion-review-policy", channel.completion_review_policy);
+  fwd.headers.set("x-ap-decision-mode", channel.decision_mode ?? "approval");
   fwd.headers.set("x-ap-loop-guard-enabled", String(channel.loop_guard_enabled));
   fwd.headers.set("x-ap-loop-guard-limit", channel.loop_guard_limit == null ? "" : String(channel.loop_guard_limit));
   fwd.headers.set("x-ap-workflow-guard-enabled", String(channel.workflow_guard_enabled));

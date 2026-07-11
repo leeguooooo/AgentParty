@@ -196,6 +196,10 @@ export const ChannelStrings: LocaleDict = {
     "Channel.tasks.error.createRejected": "task creation was rejected",
     "Channel.tasks.error.createFailed": "task creation failed",
     "Channel.tasks.rejectPrompt": "Reject reason",
+    "Channel.decision.rejectPrompt": "Reject reason (optional)",
+    "Channel.decision.error.forbidden": "only a human or moderator can respond to a decision",
+    "Channel.decision.error.rejected": "decision already resolved or invalid choice",
+    "Channel.decision.error.failed": "decision response failed",
   },
   zh: {
     "Channel.charter.label": "公告",
@@ -392,6 +396,10 @@ export const ChannelStrings: LocaleDict = {
     "Channel.tasks.error.createRejected": "任务创建被拒绝",
     "Channel.tasks.error.createFailed": "任务创建失败",
     "Channel.tasks.rejectPrompt": "打回原因",
+    "Channel.decision.rejectPrompt": "拒绝理由（可选）",
+    "Channel.decision.error.forbidden": "只有人类或 moderator 能回应决策",
+    "Channel.decision.error.rejected": "决策已被处理或选项无效",
+    "Channel.decision.error.failed": "决策回应失败",
   },
 };
 

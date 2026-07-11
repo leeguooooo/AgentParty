@@ -35,6 +35,7 @@ import {
   pauseAgent,
   resumeAgent,
   resetGuard,
+  respondDecision,
   reviseMessage,
   reviewCompletion,
   searchMessages,
@@ -1729,6 +1730,8 @@ export function ChannelPage({
   const [editSaving, setEditSaving] = useState(false);
   const [messageActionError, setMessageActionError] = useState<{ seq: number; message: string } | null>(null);
   const [messageActionBusySeq, setMessageActionBusySeq] = useState<number | null>(null);
+  // 频道决策协议（#284）：人类/moderator 在频道内对某条 decision_request 拍板
+  const [decisionBusySeq, setDecisionBusySeq] = useState<number | null>(null);
   // 被@浏览器通知（Task C2）：opt-in 是全局 localStorage 设置，铃铛开关组件读/写；这里只持有一份
   // 供 ws 入帧点判定用。optin/selfHandle/t 都放 ref：onFrame 挂在 socket 连接的 effect 里，
   // 若把它们放进依赖数组，切铃铛/切语言会连累整个 ws 重连——用 ref 让判定读到最新值又不触发重连。
@@ -1925,6 +1928,30 @@ export function ChannelPage({
       })
       .finally(() => setTaskActionBusyId(null));
   }, [loadTaskLedger, slug, taskActionBusyId, token, t]);
+
+  // 人类对某条 decision_request 点选项/审批（#284）。reject 走一次 prompt 收理由（同 reviewTask 手法）。
+  const respondToDecision = useCallback(
+    (seq: number, choice: { action: "approve" | "reject" } | { option: number }) => {
+      if (decisionBusySeq !== null) return;
+      let body: { action: "approve" | "reject"; reason?: string } | { option: number };
+      if ("action" in choice && choice.action === "reject") {
+        const reason = window.prompt(t("Channel.decision.rejectPrompt"))?.trim();
+        body = reason ? { action: "reject", reason } : { action: "reject" };
+      } else {
+        body = choice;
+      }
+      setDecisionBusySeq(seq);
+      respondDecision(token, slug, seq, body)
+        .catch((err: unknown) => {
+          if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+          else if (err instanceof ForbiddenError) setMessageActionError({ seq, message: t("Channel.decision.error.forbidden") });
+          else if (err instanceof ValidationError) setMessageActionError({ seq, message: t("Channel.decision.error.rejected") });
+          else setMessageActionError({ seq, message: t("Channel.decision.error.failed") });
+        })
+        .finally(() => setDecisionBusySeq(null));
+    },
+    [decisionBusySeq, slug, token, t],
+  );
 
   // #204：host board 的 conflicts 与 resolve-conflict / review-blockers 建议都从任务台账派生。
   // HostBoardPanel 在进频道时就渲染，若这里只拉 summary，board 会一直显示「无冲突」直到用户碰巧
@@ -2411,6 +2438,9 @@ export function ChannelPage({
   }, []);
 
   const canWrite = state.self !== null && !state.archived && !state.readonly;
+  // 谁能回应决策（#284）：人类账号会话（canMintAgent ⟹ me.role==="human"）或频道 moderator。
+  // 服务端才是权威（human OR moderator）；这里只决定是否给这位查看者渲染选项按钮。
+  const canRespondDecision = !state.archived && (canModerate || canMintAgent);
   const charterUpdated = charter !== null && charter.charter_rev > seenCharterRev;
   const catchupDigest =
     state.self !== null && seenSeq !== null && lastSeq > seenSeq
@@ -3358,6 +3388,9 @@ export function ChannelPage({
                   onEditDraftChange={setEditDraft}
                   onEditCancel={cancelEdit}
                   onEditSave={saveEdit}
+                  canRespondDecision={canRespondDecision}
+                  decisionBusy={decisionBusySeq === item.message.seq}
+                  onDecisionRespond={respondToDecision}
                 />
               ) : (
                 <TeamThread

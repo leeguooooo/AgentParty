@@ -11,6 +11,10 @@ import {
   MAX_WEBHOOKS_PER_CHANNEL,
   MAX_WEBHOOK_DEAD_LETTERS,
   MAX_WEBHOOK_QUEUE_ROWS,
+  DECISION_PROMPT_LIMIT,
+  DECISION_OPTIONS_MAX,
+  DECISION_OPTION_LIMIT,
+  DECISION_REASON_LIMIT,
   PRESENCE_TIMEOUT_MS,
   RATE_LIMIT_PER_MIN,
   RETAIN_N,
@@ -30,6 +34,12 @@ import {
   type CompletionReview,
   type CompletionReviewPolicy,
   type CompletionReviewState,
+  type DecisionKind,
+  type DecisionMode,
+  type DecisionRequest,
+  type DecisionResolution,
+  type DecisionResponse,
+  type DecisionState,
   type HostDecision,
   type HostDecisionKind,
   type MsgFrame,
@@ -247,6 +257,85 @@ function parseCompletionArtifact(input: unknown, replyTo: number | null): Comple
   };
   if (byteLength(JSON.stringify(artifact)) > COMPLETION_ARTIFACT_JSON_LIMIT) return null;
   return artifact;
+}
+
+// 解析客户端发来的 decision_request（#284）。undefined = 无（不是决策消息）；null = 结构非法（拒收）。
+// kind 缺省 approval；approval 恒用 approve/reject，忽略自带 options；choice 需 1..N 个非空选项。
+function parseDecisionRequest(input: unknown): DecisionRequest | undefined | null {
+  if (input === undefined) return undefined;
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.prompt !== "string") return null;
+  const prompt = raw.prompt.trim();
+  if (prompt === "" || byteLength(prompt) > DECISION_PROMPT_LIMIT) return null;
+  if (raw.kind !== undefined && raw.kind !== "approval" && raw.kind !== "choice") return null;
+  const kind: DecisionKind = raw.kind === "choice" ? "choice" : "approval";
+  if (kind === "approval") {
+    return { kind, prompt, options: ["approve", "reject"] };
+  }
+  if (!Array.isArray(raw.options)) return null;
+  const options: string[] = [];
+  for (const opt of raw.options) {
+    if (typeof opt !== "string") return null;
+    const trimmed = opt.trim();
+    if (trimmed === "" || byteLength(trimmed) > DECISION_OPTION_LIMIT) return null;
+    options.push(trimmed);
+  }
+  if (options.length < 2 || options.length > DECISION_OPTIONS_MAX) return null;
+  return { kind, prompt, options };
+}
+
+function parseStoredDecisionRequest(input: unknown): DecisionRequest | undefined {
+  if (typeof input !== "string" || input === "") return undefined;
+  try {
+    const parsed = parseDecisionRequest(JSON.parse(input) as unknown);
+    return parsed === null ? undefined : parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseStoredDecisionResolution(r: Record<string, unknown>): DecisionResolution | undefined {
+  if (r.decision_state === null || r.decision_state === undefined) return undefined;
+  const state = String(r.decision_state) as DecisionState;
+  if (r.decision_resolution_json === null || r.decision_resolution_json === undefined) {
+    return { state };
+  }
+  try {
+    const raw = JSON.parse(String(r.decision_resolution_json)) as Record<string, unknown>;
+    const resolution: DecisionResolution = { state };
+    if (typeof raw.chosen_index === "number") resolution.chosen_index = raw.chosen_index;
+    if (typeof raw.chosen_option === "string") resolution.chosen_option = raw.chosen_option;
+    if (raw.responder !== undefined && raw.responder !== null && typeof raw.responder === "object") {
+      const rp = raw.responder as Record<string, unknown>;
+      if (typeof rp.name === "string") {
+        resolution.responder = {
+          name: rp.name,
+          kind: rp.kind === "human" || rp.kind === "agent" ? (rp.kind as SenderKind) : "human",
+          ...(typeof rp.owner === "string" ? { owner: rp.owner } : {}),
+        };
+      }
+    }
+    if (typeof raw.responder_owner === "string") resolution.responder_owner = raw.responder_owner;
+    if (typeof raw.responded_at === "number") resolution.responded_at = raw.responded_at;
+    if (typeof raw.reason === "string") resolution.reason = raw.reason;
+    return resolution;
+  } catch {
+    return { state };
+  }
+}
+
+function parseStoredDecisionResponse(input: unknown): DecisionResponse | undefined {
+  if (typeof input !== "string" || input === "") return undefined;
+  try {
+    const raw = JSON.parse(input) as Record<string, unknown>;
+    if (typeof raw.request_seq !== "number" || typeof raw.chosen_index !== "number" || typeof raw.chosen_option !== "string") {
+      return undefined;
+    }
+    return { request_seq: raw.request_seq, chosen_index: raw.chosen_index, chosen_option: raw.chosen_option };
+  } catch {
+    return undefined;
+  }
 }
 
 function parseStoredCompletionArtifact(input: unknown): CompletionArtifact | undefined {
@@ -720,6 +809,10 @@ function parseSendFrame(input: unknown): SendFrame | null {
     if (reply_to === undefined) return null;
     const completionArtifact = parseCompletionArtifact(f.completion_artifact, reply_to);
     if (completionArtifact === null) return null;
+    const decisionRequest = parseDecisionRequest(f.decision_request);
+    if (decisionRequest === null) return null;
+    // 一条消息不能既是 completion 又是 decision_request——两种结构化审批语义互斥，避免落库/渲染歧义。
+    if (decisionRequest !== undefined && completionArtifact !== undefined) return null;
     const attachments = parseAttachments(f.attachments);
     if (attachments === null) return null;
     let replaces: number | undefined;
@@ -734,6 +827,7 @@ function parseSendFrame(input: unknown): SendFrame | null {
       mentions,
       reply_to,
       ...(completionArtifact !== undefined ? { completion_artifact: completionArtifact } : {}),
+      ...(decisionRequest !== undefined ? { decision_request: decisionRequest } : {}),
       ...(attachments !== undefined ? { attachments } : {}),
       ...(completionArtifact !== undefined && replaces !== undefined ? { replaces } : {}),
       ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
@@ -908,6 +1002,10 @@ export class ChannelDO extends Server<Env> {
       completion_review_reason TEXT,
       completion_review_replaces_seq INTEGER,
       completion_review_replaced_by_seq INTEGER,
+      decision_request_json TEXT,
+      decision_state TEXT,
+      decision_resolution_json TEXT,
+      decision_response_json TEXT,
       original_body TEXT,
       edited_at INTEGER,
       edited_by TEXT,
@@ -944,6 +1042,12 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE messages ADD COLUMN completion_review_reason TEXT",
       "ALTER TABLE messages ADD COLUMN completion_review_replaces_seq INTEGER",
       "ALTER TABLE messages ADD COLUMN completion_review_replaced_by_seq INTEGER",
+      // 人类决策协议（#284）：DO 内建 SQLite 幂等补列，非 D1 迁移。decision_request_json 存请求 payload；
+      // decision_state 单独成列以便裁剪时保护 pending 请求；resolution/response 存 JSON。
+      "ALTER TABLE messages ADD COLUMN decision_request_json TEXT",
+      "ALTER TABLE messages ADD COLUMN decision_state TEXT",
+      "ALTER TABLE messages ADD COLUMN decision_resolution_json TEXT",
+      "ALTER TABLE messages ADD COLUMN decision_response_json TEXT",
       "ALTER TABLE messages ADD COLUMN original_body TEXT",
       "ALTER TABLE messages ADD COLUMN edited_at INTEGER",
       "ALTER TABLE messages ADD COLUMN edited_by TEXT",
@@ -1747,6 +1851,8 @@ export class ChannelDO extends Server<Env> {
     if (completionReviewPolicy === "sender" || completionReviewPolicy === "owner") {
       this.setMeta("completion_review_policy", completionReviewPolicy);
     }
+    const decisionMode = h.get("x-ap-decision-mode");
+    if (decisionMode === "approval" || decisionMode === "unattended") this.setMeta("decision_mode", decisionMode);
     // loop guard：权威推送随意改；顺带快照只在从未缓存 enabled 时播种，不回滚
     if (authoritative || this.getMeta("loop_guard_enabled") === null) {
       const loopGuardEnabled = h.get("x-ap-loop-guard-enabled");
@@ -2065,6 +2171,45 @@ export class ChannelDO extends Server<Env> {
       replyTo,
       effectiveRole ?? null,
       roleSource ?? null,
+      now,
+    );
+    const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+    const frame = this.rowToFrame(row);
+    this.linkWakeResume(identity.name, frame);
+    return frame;
+  }
+
+  // 决策回应回复（#284）：像 insertReviewerReply，但额外落 decision_response_json，
+  // 让这条回复成为一条反指 request seq 的独立可消费帧。
+  private insertDecisionResponse(
+    identity: Identity,
+    body: string,
+    mentions: string[],
+    replyTo: number,
+    response: DecisionResponse,
+    now: number,
+  ): MsgFrame {
+    const seq = this.lastSeq() + 1;
+    const effectiveRole = identity.collabRole;
+    const roleSource: CollaborationRoleSource | undefined = identity.collabRole === undefined ? undefined : "assigned";
+    this.ctx.storage.sql.exec(
+      `INSERT INTO messages (
+         seq, sender_name, sender_kind, sender_owner, sender_handle, sender_lineage_json, kind, body, mentions_json, reply_to,
+         state, note, sender_role, sender_role_source, decision_response_json, ts
+       )
+       VALUES (?, ?, ?, ?, ?, ?, 'message', ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+      seq,
+      identity.name,
+      identity.kind,
+      identity.owner ?? null,
+      identity.handle ?? null,
+      identity.lineage === undefined ? null : JSON.stringify(identity.lineage),
+      body,
+      JSON.stringify(mentions),
+      replyTo,
+      effectiveRole ?? null,
+      roleSource ?? null,
+      JSON.stringify(response),
       now,
     );
     const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
@@ -2520,6 +2665,114 @@ export class ChannelDO extends Server<Env> {
       await this.afterSend(reply);
       return Response.json({ message, reply });
     }
+    // 人类决策回应（#284）：镜像 completion review 的收口——resolve 请求 + 广播 message_update("decision")
+    // + 落一条 decision_response 回复 @ 请求方。approval 用 action=approve/reject，choice 用 option=下标/文本。
+    const decisionMatch = url.pathname.match(/^\/internal\/messages\/([1-9]\d*)\/decision$/);
+    if (decisionMatch && request.method === "POST") {
+      this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
+      const seq = Number(decisionMatch[1]);
+      const identity: Identity = {
+        name: request.headers.get("x-ap-name") ?? "",
+        kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
+        role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
+        owner: request.headers.get("x-ap-owner") ?? undefined,
+        handle: decodedHeaderText(request.headers, "x-ap-handle"),
+        ...profileFromHeaders(request.headers),
+        lineage: lineageFromHeaders(request.headers),
+        tokenHash: request.headers.get("x-ap-token-hash") ?? "",
+        collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
+        collabRoleSource: parseRoleSource(request.headers.get("x-ap-role-source") ?? undefined) ?? undefined,
+      };
+      // moderator 由 worker 层（isChannelModerator）算好后转发；DO 只信这一位。
+      const isModerator = request.headers.get("x-ap-moderator") === "1";
+      if (this.isArchived()) {
+        return Response.json({ error: { code: "archived", message: "channel is archived" } }, { status: 410 });
+      }
+      if (identity.role === "readonly") {
+        return Response.json({ error: { code: "unauthorized", message: "readonly token cannot respond to decisions" } }, { status: 403 });
+      }
+      if (!(await this.isTokenActive(identity.tokenHash))) {
+        return Response.json({ error: { code: "unauthorized", message: "invalid or revoked token" } }, { status: 401 });
+      }
+      const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+      if (!row) {
+        return Response.json({ error: { code: "not_found", message: `message seq ${seq} not found` } }, { status: 404 });
+      }
+      const decisionReq = parseStoredDecisionRequest(row.decision_request_json);
+      if (String(row.kind) !== "message" || decisionReq === undefined) {
+        return Response.json({ error: { code: "bad_request", message: "target is not a decision request" } }, { status: 400 });
+      }
+      if (row.retracted_at !== null && row.retracted_at !== undefined) {
+        return Response.json({ error: { code: "bad_request", message: "retracted decision cannot be answered" } }, { status: 400 });
+      }
+      const currentState = row.decision_state === null || row.decision_state === undefined ? null : String(row.decision_state);
+      if (currentState !== "pending") {
+        return Response.json({ error: { code: "decision_already_final", message: "decision is not pending" } }, { status: 409 });
+      }
+      const senderName = String(row.sender_name);
+      if (identity.name === senderName) {
+        return Response.json({ error: { code: "forbidden", message: "the requesting agent cannot answer its own decision" } }, { status: 403 });
+      }
+      // 人在回路：只有人类或 moderator 能替频道拍板；普通 worker agent 不行。
+      if (identity.kind !== "human" && !isModerator) {
+        return Response.json({ error: { code: "forbidden", message: "only a human or moderator can respond to a decision" } }, { status: 403 });
+      }
+      const body = (await request.json().catch(() => null)) as { option?: unknown; action?: unknown; reason?: unknown } | null;
+      let chosenIndex: number | null = null;
+      if (body?.action === "approve" || body?.action === "reject") {
+        if (decisionReq.kind !== "approval") {
+          return Response.json({ error: { code: "bad_request", message: "action is only valid for approval decisions" } }, { status: 400 });
+        }
+        chosenIndex = body.action === "approve" ? 0 : 1;
+      } else if (body?.action !== undefined) {
+        return Response.json({ error: { code: "bad_request", message: "action must be approve or reject" } }, { status: 400 });
+      } else if (typeof body?.option === "number" && Number.isInteger(body.option)) {
+        chosenIndex = body.option;
+      } else if (typeof body?.option === "string") {
+        chosenIndex = decisionReq.options.indexOf(body.option.trim());
+      } else {
+        return Response.json({ error: { code: "bad_request", message: "option (index or text) or action is required" } }, { status: 400 });
+      }
+      if (chosenIndex < 0 || chosenIndex >= decisionReq.options.length) {
+        return Response.json({ error: { code: "bad_request", message: "chosen option is out of range" } }, { status: 400 });
+      }
+      const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
+      if (byteLength(reason) > DECISION_REASON_LIMIT) {
+        return Response.json({ error: { code: "too_large", message: `reason exceeds ${DECISION_REASON_LIMIT} bytes` } }, { status: 413 });
+      }
+      const now = Date.now();
+      const chosenOption = decisionReq.options[chosenIndex];
+      const resolution: DecisionResolution = {
+        state: "resolved",
+        chosen_index: chosenIndex,
+        chosen_option: chosenOption,
+        responder: senderFromIdentity(identity),
+        ...(identity.owner === undefined ? {} : { responder_owner: identity.owner }),
+        responded_at: now,
+        ...(reason === "" ? {} : { reason }),
+      };
+      this.ctx.storage.sql.exec(
+        `UPDATE messages SET decision_state = 'resolved', decision_resolution_json = ?, rev_seq = ? WHERE seq = ?`,
+        JSON.stringify(resolution),
+        this.nextRevSeq(),
+        seq,
+      );
+      const updated = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+      const message = this.rowToFrame(updated);
+      this.broadcastFrame(this.messageUpdate("decision", identity, message, now));
+      const replyBody = `@${senderName} decision #${seq} → ${chosenOption}${reason === "" ? "" : `: ${reason}`}`;
+      const reply = this.insertDecisionResponse(
+        identity,
+        replyBody,
+        [senderName],
+        seq,
+        { request_seq: seq, chosen_index: chosenIndex, chosen_option: chosenOption },
+        now,
+      );
+      this.broadcastFrame(reply);
+      await this.afterSend(reply);
+      return Response.json({ message, reply });
+    }
     if (url.pathname === "/internal/search" && request.method === "GET") {
       const query = (url.searchParams.get("q") ?? "").trim();
       if (query.length === 0) {
@@ -2661,6 +2914,8 @@ export class ChannelDO extends Server<Env> {
       return Response.json({
         seq: out.seq,
         ...(sent.completion_review === undefined ? {} : { completion_review: sent.completion_review }),
+        ...(sent.decision_request === undefined ? {} : { decision_request: sent.decision_request }),
+        ...(sent.decision_resolution === undefined ? {} : { decision_resolution: sent.decision_resolution }),
       });
     }
     if (url.pathname === "/internal/webhooks" && request.method === "GET") {
@@ -2984,6 +3239,16 @@ export class ChannelDO extends Server<Env> {
     const completionReviewPolicy = (this.getMeta("completion_review_policy") ?? "sender") as CompletionReviewPolicy;
     const completionArtifact = frame.kind === "message" ? frame.completion_artifact : undefined;
     const attachments = frame.kind === "message" ? frame.attachments : undefined;
+    // decision_request（#284）：parseSendFrame 已把它规整成完整 DecisionRequest（kind/options 齐全）。
+    const decisionRequest = frame.kind === "message" ? (frame.decision_request as DecisionRequest | undefined) : undefined;
+    // 无人值守模式（unattended）：落库即自动放行第一项，agent 不必等人；approval 模式则挂起等人类。
+    const decisionMode = (this.getMeta("decision_mode") ?? "approval") as DecisionMode;
+    const decisionResolution: DecisionResolution | undefined =
+      decisionRequest === undefined
+        ? undefined
+        : decisionMode === "unattended"
+          ? { state: "auto_resolved", chosen_index: 0, chosen_option: decisionRequest.options[0] }
+          : { state: "pending" };
     const replacesSeq =
       frame.kind === "message" && completionArtifact !== undefined && completionGate === "reviewer"
         ? frame.replaces
@@ -3038,6 +3303,8 @@ export class ChannelDO extends Server<Env> {
                   },
                 }
               : {}),
+            ...(decisionRequest === undefined ? {} : { decision_request: decisionRequest }),
+            ...(decisionResolution === undefined ? {} : { decision_resolution: decisionResolution }),
             ...(messageWorkflow === undefined ? {} : { workflow_ref: messageWorkflow }),
             ts: now,
           }
@@ -3063,9 +3330,10 @@ export class ChannelDO extends Server<Env> {
          state, note, status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
          status_decision_json, status_workflow_json, message_workflow_json,
          sender_role, sender_role_source, completion_artifact_json, completion_review_state, completion_review_policy,
-         completion_review_replaces_seq, idempotency_key, attachments_json, ts
+         completion_review_replaces_seq, decision_request_json, decision_state, decision_resolution_json,
+         idempotency_key, attachments_json, ts
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
@@ -3096,6 +3364,11 @@ export class ChannelDO extends Server<Env> {
       msg.completion_review?.state ?? null,
       msg.completion_review?.policy ?? null,
       replacesSeq ?? null,
+      decisionRequest === undefined ? null : JSON.stringify(decisionRequest),
+      decisionResolution?.state ?? null,
+      decisionResolution === undefined || decisionResolution.state === "pending"
+        ? null
+        : JSON.stringify(decisionResolution),
       frame.idempotency_key ?? null,
       attachments === undefined ? null : JSON.stringify(attachments),
       now,
@@ -3125,7 +3398,7 @@ export class ChannelDO extends Server<Env> {
     }
     if (seq % 100 === 0) {
       sql.exec(
-        "DELETE FROM messages WHERE seq <= ? AND (completion_review_state IS NULL OR completion_review_state != 'pending_review')",
+        "DELETE FROM messages WHERE seq <= ? AND (completion_review_state IS NULL OR completion_review_state != 'pending_review') AND (decision_state IS NULL OR decision_state != 'pending')",
         seq - RETAIN_N,
       );
     }
@@ -3965,6 +4238,12 @@ export class ChannelDO extends Server<Env> {
       if (completionArtifact !== undefined) frame.completion_artifact = completionArtifact;
       const completionReview = parseStoredCompletionReview(r);
       if (completionReview !== undefined) frame.completion_review = completionReview;
+      const decisionRequest = parseStoredDecisionRequest(r.decision_request_json);
+      if (decisionRequest !== undefined) frame.decision_request = decisionRequest;
+      const decisionResolution = parseStoredDecisionResolution(r);
+      if (decisionResolution !== undefined) frame.decision_resolution = decisionResolution;
+      const decisionResponse = parseStoredDecisionResponse(r.decision_response_json);
+      if (decisionResponse !== undefined) frame.decision_response = decisionResponse;
       const workflowRef = parseStoredStatusWorkflow(r.message_workflow_json);
       if (workflowRef !== undefined) frame.workflow_ref = workflowRef;
       const attachments = parseStoredAttachments(r.attachments_json);

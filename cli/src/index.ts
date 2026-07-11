@@ -21,6 +21,7 @@ commands:
   send      <text|-> [--channel C] [--mention name]... [--reply-to seq]
   complete  <text|-> --kickoff-seq seq [--channel C] [--replies n] [--timeout] [--issue n]... [--pr n]...
   review    approve|reject <seq> [-m reason] [--channel C] [--json]
+  decision  ask <prompt> [--option opt]... [--wait] | respond <seq> approve|reject|N | mode approval|unattended [--channel C]
   edit      <seq> <text|-> [--channel C] [--json]
   retract   <seq> [--channel C] [--json]
   supersede <seq> <text|-> [--channel C] [--json]
@@ -86,6 +87,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/complete")).run(rest);
     case "review":
       return (await import("./commands/review")).run(rest);
+    case "decision":
+      return (await import("./commands/decision")).run(rest);
     case "edit":
     case "retract":
     case "supersede":
