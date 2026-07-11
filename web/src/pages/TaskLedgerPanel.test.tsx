@@ -57,6 +57,7 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
     workflow_id: null,
     scope: [],
     blocked_reason: null,
+    external_ref: null,
     created_at: 0,
     updated_at: 0,
     completed_at: null,
