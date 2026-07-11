@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { EXIT_ARCHIVED, type MsgFrame } from "@agentparty/shared";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -477,6 +477,43 @@ describe("builtin runner", () => {
     })(triggerFrame(3), runnerCtx());
 
     expect(readFileSync(join(workdir, ".codex", "auth.json"), "utf8")).toBe('{"token":"secret"}\n');
+  });
+
+  // #121: ~/.codex/auth.json 是长期 ChatGPT 凭据；workdir 常是 git worktree，
+  // 拷贝进去会被 git add -A 提交、被同步工具打包、被同机其它进程读到。
+  // 断言 workdir 里那份必须是指回真实文件的符号链接，绝不能是独立字节的普通文件。
+  test("does not duplicate ~/.codex/auth.json bytes into the runner workdir (#121)", async () => {
+    const { post } = postRecorder();
+    const workdir = tempDir();
+    const sourceDir = tempDir();
+    const authSourceFile = join(sourceDir, "auth.json");
+    writeFileSync(authSourceFile, '{"token":"secret"}\n');
+    const runProcess: RunnerProcess = async (args, o) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, "ok\n");
+      return { code: 0, stdout: `session id: ${uuid(3)}\n`, stderr: "" };
+    };
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      authSourceFile,
+      runProcess,
+      post,
+    })(triggerFrame(4), runnerCtx());
+
+    const authDest = join(workdir, ".codex", "auth.json");
+    // 必须存在（登录态得能用），但必须是符号链接，不是独立拷贝。
+    expect(lstatSync(authDest).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(authDest)).toBe(authSourceFile);
+
+    // 证明字节没有被复制：删掉源文件后，workdir 里那份也应该跟着失效——
+    // 如果之前是 copyFileSync，这里删源文件不会影响 workdir 里的独立副本。
+    rmSync(authSourceFile);
+    expect(existsSync(authDest)).toBe(false);
   });
 
   test("claude cold-starts from json output and resumes the persisted session id", async () => {

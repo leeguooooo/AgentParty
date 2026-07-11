@@ -5,12 +5,13 @@ import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type MsgFra
 import { maybeReexecUpgrade, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import {
   appendFileSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -581,9 +582,25 @@ function prepareCodexHome(workdir: string, authSourceFile?: string): Record<stri
   mkdirSync(codexHome, { recursive: true });
   const authDest = join(codexHome, "auth.json");
   const authSource = authSourceFile ?? join(homedir(), ".codex", "auth.json");
-  // 隔离 CODEX_HOME 会把登录态也隔离掉；只在目标缺失时拷贝一次，后续由该 home 自己刷新。
-  if (!existsSync(authDest) && existsSync(authSource)) {
-    copyFileSync(authSource, authDest);
+  // 隔离 CODEX_HOME（会话/rollout 状态）仍然需要——多个 workdir 的 codex exec 可能并发跑，
+  // 共享一个 CODEX_HOME 会互相踩会话索引。但 auth.json 是长期 ChatGPT 凭据，workdir 往往
+  // 就是个 git worktree：拷贝进去等于把凭据字节复制到一个可能被 `git add -A`、同步工具、
+  // 同机其它进程读到的地方（#121）。改成符号链接指回真实文件——workdir 里只留一条路径引用，
+  // 凭据字节永远只有一份；codex 对真实文件做 token 刷新时，所有 workdir 立刻共享新值，
+  // 不会像“拷贝一次后各自为政”那样，某个 workdir 长期攥着一份已撤销/已过期的旧 token。
+  if (existsSync(authSource)) {
+    let currentTarget: string | null = null;
+    try {
+      currentTarget = readlinkSync(authDest);
+    } catch {
+      // 不存在，或者存在但不是符号链接（例如修复前遗留的独立拷贝）。
+    }
+    if (currentTarget !== authSource) {
+      // 清掉任何遗留状态再重建：可能是旧版本 copyFileSync 留下的真实凭据拷贝，
+      // 也可能是指向别处的坏链接——两种都不该继续留在 workdir 里。
+      rmSync(authDest, { force: true, recursive: true });
+      symlinkSync(authSource, authDest);
+    }
   }
   return { ...process.env, CODEX_HOME: codexHome };
 }
