@@ -3,7 +3,13 @@ import { describe, expect, it } from "vitest";
 import { seedToken } from "./helpers";
 
 describe("desktop CORS", () => {
-  it.each(["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"])(
+  it.each([
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "agentparty-ui://localhost",
+    "http://agentparty-ui.localhost",
+  ])(
     "allows %s preflight requests for API routes",
     async (origin) => {
       const res = await SELF.fetch("http://ap.test/api/me", {

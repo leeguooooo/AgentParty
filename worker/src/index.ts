@@ -1675,7 +1675,13 @@ function isBlockedWebhookHost(rawHost: string): boolean {
 }
 
 const app = new Hono<AppContext>();
-const DESKTOP_CORS_ORIGINS = new Set(["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]);
+const DESKTOP_CORS_ORIGINS = new Set([
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+  "agentparty-ui://localhost",
+  "http://agentparty-ui.localhost",
+]);
 
 function docsAsset(c: Context<AppContext>, path: string): Promise<Response> {
   const url = new URL(c.req.url);
