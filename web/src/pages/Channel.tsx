@@ -71,6 +71,7 @@ import {
   type AgentFilterMode,
 } from "../lib/filters";
 import { nextMentionBadgeCount, shouldMarkSeen, shouldNotify, shouldToast } from "../lib/notify";
+import { historyFallbackRecovered } from "../lib/historyRecovery";
 import { summarizeReplyPreview } from "../lib/replyPreview";
 import { fmtTime } from "../lib/time";
 import { groupTeamMessages, summarizeTeams, type TeamMessageThread, type TeamSummary } from "../lib/teams";
@@ -1729,6 +1730,10 @@ export function ChannelPage({
   const [editDraft, setEditDraft] = useState("");
   const [editSaving, setEditSaving] = useState(false);
   const [messageActionError, setMessageActionError] = useState<{ seq: number; message: string } | null>(null);
+
+  useEffect(() => {
+    if (historyError !== null && historyFallbackRecovered(state.status)) setHistoryError(null);
+  }, [historyError, state.status]);
   const [messageActionBusySeq, setMessageActionBusySeq] = useState<number | null>(null);
   // 频道决策协议（#284）：人类/moderator 在频道内对某条 decision_request 拍板
   const [decisionBusySeq, setDecisionBusySeq] = useState<number | null>(null);
