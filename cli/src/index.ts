@@ -34,6 +34,7 @@ commands:
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
   statusline [--channel C] [--refresh] [--no-network]
   who       [channel|--channel C] [--json]                who is online/wakeable/recent — pick who to --mention
+  health    [--json] [--channel C] [--stale-after ms]      local serve WS health probe (pid alive != ws alive, #254)
   charter   [slug] [--json] | set [slug] -f file.md|-m text|- | template
   history   [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]
   search    <query> [--channel C] [--from name] [--since seq] [--limit n] [--json]
@@ -129,6 +130,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/token")).run(rest);
     case "doctor":
       return (await import("./commands/doctor")).run(rest);
+    case "health":
+      return (await import("./commands/health")).run(rest);
     default:
       console.error(`unknown command: ${cmd}`);
       console.log(HELP);

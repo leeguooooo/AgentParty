@@ -23,6 +23,7 @@ import { connect } from "../client";
 import { readConfig, clearStuck, loadCursor, loadRevCursor, loadStuck, resolveChannel, saveCursor, saveRevCursor, saveStuck, statePath, type StuckWake } from "../config";
 import { acquireInstanceLock } from "../instance-lock";
 import { formatMsg } from "../format";
+import { clearHealthCache, writeHealthCache } from "../health-cache";
 import { ensureFreshAccess, resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import {
   clearStatuslineListener,
@@ -1218,10 +1219,25 @@ export async function runServe(o: ServeOptions): Promise<number> {
   const run = o.runCommand ?? (o.sdkRunner ? createSdkRunner(o.sdkRunner) : o.builtinRunner ? createBuiltinRunner(o.builtinRunner) : defaultRun);
   let upgraded = false;
   let nudgedUpgrade = false;
+  // 本地连接健康探针（#254）：WS 生命周期转场（不是 presence 自报、不是 PID 推断）落 health.json，
+  // 让 watchdog 能问「这个 serve 此刻真的还在收帧吗」而不是只能 pgrep。reconnect_count 数的是
+  // 本进程生命周期内进入过几次 reconnecting，不是每次退避重试都加一——那样一次掉线会看起来像刷屏。
+  let reconnectCount = 0;
+  const onWsStatus = (status: "open" | "reconnecting" | "closed", detail?: { error?: string }) => {
+    if (status === "open") {
+      writeHealthCache({ channel: o.channel, ws_connected: true, reconnecting: false, connected_since: Date.now(), last_error: null });
+    } else if (status === "reconnecting") {
+      reconnectCount += 1;
+      writeHealthCache({ channel: o.channel, ws_connected: false, reconnecting: true, reconnect_count: reconnectCount, connected_since: null });
+    } else {
+      writeHealthCache({ channel: o.channel, ws_connected: false, reconnecting: false, connected_since: null, last_error: detail?.error ?? null });
+    }
+  };
   const conn = connect(o.server, o.token, o.channel, o.since, {
     onCursor: o.onCursor,
     sinceRev: o.sinceRev,
     onRevCursor: o.onRevCursor,
+    onStatus: onWsStatus,
   });
 
   const skipBacklog = o.skipBacklog !== false; // 默认跳过离线积压（#193）
@@ -1235,8 +1251,12 @@ export async function runServe(o: ServeOptions): Promise<number> {
         ` 再挂一个会让同一条 @ 触发两次完整 runner——双份回帖，git push 类副作用执行两遍。` +
         ` 要么等它退出，要么 kill ${lock.heldByPid}；确实想并存请加 --allow-multiple。`,
     );
+    conn.close();
     return EXIT_ALREADY_SERVING;
   }
+  // 挂载之初就落一份 health 基线：即便还没收到第一帧，watchdog 也能看到「这个 pid 认领了这个频道」，
+  // 而不是文件缺失时无法区分「serve 没起来」和「serve 起来了但还没写过健康数据」。
+  writeHealthCache({ channel: o.channel, ws_connected: false, reconnecting: false, reconnect_count: 0, last_frame_at: null, last_error: null, connected_since: null });
   // 本实例私有的上下文命名空间（#197 / #208 门禁）。退出时整目录删除：
   // 失败的唤醒会把上下文留在盘上供本次排查，但它带着 charter / recent 正文，
   // 不能在进程结束后继续躺在共享 tmpdir 里。
@@ -1286,6 +1306,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
   }
   try {
     for await (const frame of conn.frames) {
+      // 每收到一帧（含 ping 的 pong 回执）就刷新 last_frame_at——空闲频道也靠 ping 心跳（~25s）
+      // 保持新鲜，watchdog 才能把"频道安静"和"连接僵死"分开（issue #254 证据边界）。
+      writeHealthCache({ channel: o.channel, last_frame_at: Date.now() });
       if (frame.type === "welcome") {
         self = frame.self;
         // 首个 welcome：定格挂载水位，并就积压去留告知（stderr）。知情权给 agent，决定权给人。
@@ -1498,6 +1521,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
     if (heartbeat) clearInterval(heartbeat);
     conn.close();
     if (o.statusline === true) clearStatuslineListener();
+    // 进程真退出了：health.json 不该继续显示 ws_connected=true 骗 watchdog（只清自己写的记录）。
+    clearHealthCache();
   }
   if (upgraded) return EXIT_UPGRADED;
   // 帧流意外结束（既非终局 error 也非用户 Ctrl-C）：常驻 supervisor 语义下这是异常终止。

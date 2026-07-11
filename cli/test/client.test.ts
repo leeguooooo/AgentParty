@@ -246,4 +246,36 @@ describe("ws client", () => {
     expect(bodies).toEqual(["before drop", "after reconnect"]);
     expect(conn.cursor).toBe(5);
   });
+
+  test("onStatus reports open, then reconnecting across a transient drop, then open again (#254)", async () => {
+    server = startMockServer((frame, sock, connIndex) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(4));
+      if (connIndex === 0) sock.close();
+    });
+    const statuses: Array<{ status: string; error?: string }> = [];
+    conn = connect(server.url, "ap_tok", "dev", 0, {
+      backoffBaseMs: 20,
+      onStatus: (status, detail) => statuses.push({ status, ...(detail?.error ? { error: detail.error } : {}) }),
+    });
+    // welcome × 2 = handshake completed twice (initial + after reconnect)
+    await collect(conn, 2, 3000, false);
+    expect(statuses.map((s) => s.status)).toEqual(["open", "reconnecting", "open"]);
+  });
+
+  test("onStatus reports closed with the fatal reason on a terminal 1008 close, and never reconnecting", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send(welcomeFrame(0));
+        sock.close(1008, "revoked");
+      }
+    });
+    const statuses: Array<{ status: string; error?: string }> = [];
+    conn = connect(server.url, "ap_tok", "dev", 0, {
+      backoffBaseMs: 20,
+      onStatus: (status, detail) => statuses.push({ status, ...(detail?.error ? { error: detail.error } : {}) }),
+    });
+    await collect(conn, 2, 3000, false); // welcome + error
+    expect(statuses).toEqual([{ status: "open" }, { status: "closed", error: "token revoked, re-run: party init" }]);
+  });
 });

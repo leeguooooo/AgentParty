@@ -40,6 +40,13 @@ export interface ConnectOptions {
   backoffBaseMs?: number;
   backoffMaxMs?: number;
   pingIntervalMs?: number;
+  /**
+   * 连接健康探针（issue #254）：WS 生命周期转场通知，供上层（serve）落本地 health.json。
+   * "open" = 握手成功（socket 已连上，尚未必然收到 welcome）；"reconnecting" = 断线后进入退避等待；
+   * "closed" = 终局关闭，不会再重连（1008 策略性终局，或探测出的 401/404）。frame 级的收帧时间戳不
+   * 走这里——上层消费 `frames` 时打点即可，onStatus 只报连接状态本身，避免每条消息都要过一遍这里。
+   */
+  onStatus?: (status: "open" | "reconnecting" | "closed", detail?: { error?: string }) => void;
 }
 
 export interface Connection {
@@ -173,6 +180,7 @@ export function connect(
   const scheduleReconnect = () => {
     const delay = Math.min(base * 2 ** attempt, max);
     attempt++;
+    opts.onStatus?.("reconnecting");
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (!closed) open();
@@ -191,6 +199,7 @@ export function connect(
       opened = true;
       attempt = 0;
       helloSince = cursor;
+      opts.onStatus?.("open");
       sock.send(JSON.stringify({ type: "hello", since: cursor, since_rev: revCursor, client_version: pkg.version }));
       stopPing();
       pingTimer = setInterval(() => {
@@ -245,6 +254,7 @@ export function connect(
         closed = true;
         const fatal = fatalCloseFrame(ev.reason ?? "");
         if (fatal) queue.push(fatal);
+        opts.onStatus?.("closed", fatal && fatal.type === "error" ? { error: fatal.message } : undefined);
         queue.end();
         return;
       }
@@ -254,6 +264,7 @@ export function connect(
           if (fatal) {
             closed = true;
             queue.push(fatal);
+            opts.onStatus?.("closed", fatal.type === "error" ? { error: fatal.message } : undefined);
             queue.end();
             return;
           }
