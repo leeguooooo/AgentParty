@@ -1025,20 +1025,22 @@
   color: var(--t-dim);
   white-space: nowrap;
 }
-/* 展开/折叠 toggle：计数本身就是按钮，旁边一个箭头，涂鸦风格的轻量小 pill */
+/* 展开/折叠 toggle：计数本身就是按钮，旁边一个箭头。给它涂鸦按钮的立体投影 + 实墨边，
+   和旁边扁平的 blocked/duplicate 告警 pill 拉开层次——一眼看出「这条 live 是能按的」。 */
 .presence-toggle {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   flex: none;
   padding: 1px 8px 2px;
-  border: 1.4px solid var(--t-faint);
+  border: 1.4px solid var(--d-ink);
   border-radius: 0;
   background: var(--t-panel2);
   color: inherit;
   font: inherit;
   cursor: pointer;
-  transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+  box-shadow: 2px 2px 0 var(--d-shadow);
+  transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
 }
 .presence-toggle::before {
   content: "❯";
@@ -1051,6 +1053,12 @@
   background: var(--d-yellow);
   color: var(--d-ink);
   transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--d-shadow);
+}
+/* 按下时压回原位、投影收窄——涂鸦按钮的「真的被按了」反馈（与 .d-btn 一致） */
+.presence-toggle:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--d-shadow);
 }
 .presence-toggle:focus-visible {
   outline: 2px solid var(--d-ink);

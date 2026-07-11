@@ -197,3 +197,31 @@ describe("presence client version", () => {
     expect(nodesWithClass(r, "presence-client-version")).toHaveLength(0);
   });
 });
+
+describe("presence live toggle affordance", () => {
+  // issue #179：用户看不出「X/Y live」是可点的按钮。守住它必须是真正的 <button>
+  // （而非扁平展示文字），且计数文字就挂在这个按钮里、点击能收起参与者列表。
+  test("the live count is a real button that toggles the participant strip", async () => {
+    const r = renderPresence(presenceEntry());
+
+    const toggle = nodesWithClass(r, "presence-toggle")[0];
+    expect(toggle).toBeDefined();
+    // 是 <button type="button">，天然带 button role + 键盘可达——不是纯展示 span。
+    expect(toggle?.type).toBe("button");
+    expect(toggle?.props.type).toBe("button");
+    // 「X/Y live」计数就渲染在这个按钮内部（点 live 即点按钮，不是旁边的告警文字）。
+    const summary = toggle?.findAll(
+      (node) => String(node.props.className ?? "").split(" ").includes("presence-summary"),
+    );
+    expect(summary).toHaveLength(1);
+    expect(summary?.[0]?.children.join("")).toBe("1/1 live");
+
+    // 展开态种子为 true，点击后应折叠：aria-expanded 翻转、参与者组从 DOM 移除。
+    expect(toggle?.props["aria-expanded"]).toBe(true);
+    expect(nodesWithClass(r, "presence-group")).toHaveLength(1);
+    await act(async () => {
+      toggle?.props.onClick();
+    });
+    expect(nodesWithClass(r, "presence-group")).toHaveLength(0);
+  });
+});
