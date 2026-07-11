@@ -369,6 +369,18 @@ fn show_main(app: &tauri::AppHandle) {
 }
 
 #[cfg(desktop)]
+#[tauri::command]
+fn desktop_ui_ready(app: tauri::AppHandle, build_id: String, ui_abi: u32) -> Result<(), String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "desktop UI data directory is unavailable".to_string())?;
+    ui_update::UiUpdateStore::new(app_data)
+        .mark_ready(&build_id, ui_abi)
+        .map_err(|_| "desktop UI ready receipt was rejected".to_string())
+}
+
+#[cfg(desktop)]
 fn install_tray(app: &tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show AgentParty", true, None::<&str>)?;
     let check_updates = MenuItem::with_id(
@@ -445,6 +457,7 @@ pub fn run() {
             desktop_credential_delete,
             desktop_credential_migrate,
             desktop_updater_record_diagnostic,
+            desktop_ui_ready,
             agent::desktop_agent_list_configs,
             agent::desktop_agent_status,
             agent::desktop_agent_start,
