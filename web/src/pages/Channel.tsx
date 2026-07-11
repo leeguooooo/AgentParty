@@ -189,7 +189,7 @@ function roleViewFor(role: ChannelRoleInfo, identity: ChannelIdentity | undefine
   return { role, display, accountLabel, owner, kind };
 }
 
-interface GuardSettingsPanelProps {
+export interface GuardSettingsPanelProps {
   canModerate: boolean;
   loopEnabled: boolean;
   loopLimit: string;
@@ -203,9 +203,11 @@ interface GuardSettingsPanelProps {
   onWorkflowLimit(next: string): void;
   onSaveLoop(): void;
   onSaveWorkflow(): void;
+  onLoopUnlimited(): void;
+  onWorkflowUnlimited(): void;
 }
 
-function GuardSettingsPanel({
+export function GuardSettingsPanel({
   canModerate,
   loopEnabled,
   loopLimit,
@@ -219,6 +221,8 @@ function GuardSettingsPanel({
   onWorkflowLimit,
   onSaveLoop,
   onSaveWorkflow,
+  onLoopUnlimited,
+  onWorkflowUnlimited,
 }: GuardSettingsPanelProps) {
   const t = useT();
   return (
@@ -242,12 +246,20 @@ function GuardSettingsPanel({
             inputMode="numeric"
             pattern="[0-9]*"
             value={loopLimit}
-            placeholder={t("Channel.settings.unlimited")}
+            placeholder={loopEnabled ? t("Channel.settings.loopRange") : t("Channel.settings.unlimited")}
             disabled={!canModerate || !loopEnabled || saving !== null}
             onChange={(event) => onLoopLimit(event.currentTarget.value)}
           />
           <button type="button" className="d-btn d-btn--primary" disabled={!canModerate || saving !== null} onClick={onSaveLoop}>
             {saving === "loop" ? t("Channel.settings.saving") : t("Channel.settings.save")}
+          </button>
+          <button
+            type="button"
+            className="d-btn guard-unlimited-btn"
+            disabled={!canModerate || saving !== null || !loopEnabled}
+            onClick={onLoopUnlimited}
+          >
+            {t("Channel.settings.setUnlimited")}
           </button>
         </div>
       </section>
@@ -270,11 +282,20 @@ function GuardSettingsPanel({
             inputMode="numeric"
             pattern="[0-9]*"
             value={workflowLimit}
+            placeholder={workflowEnabled ? t("Channel.settings.workflowRange") : t("Channel.settings.off")}
             disabled={!canModerate || !workflowEnabled || saving !== null}
             onChange={(event) => onWorkflowLimit(event.currentTarget.value)}
           />
           <button type="button" className="d-btn d-btn--primary" disabled={!canModerate || saving !== null} onClick={onSaveWorkflow}>
             {saving === "workflow" ? t("Channel.settings.saving") : t("Channel.settings.save")}
+          </button>
+          <button
+            type="button"
+            className="d-btn guard-unlimited-btn"
+            disabled={!canModerate || saving !== null || !workflowEnabled}
+            onClick={onWorkflowUnlimited}
+          >
+            {t("Channel.settings.turnOff")}
           </button>
         </div>
       </section>
@@ -2175,6 +2196,42 @@ export function ChannelPage({
       .finally(() => setGuardSaving(null));
   }, [guardSaving, localWorkflowGuardEnabled, localWorkflowGuardLimit, slug, t, token]);
 
+  // 一键无限（issue #182）：直接把守卫置为 disabled=无限/关闭并落库，
+  // 不需要用户先取消勾选再保存——把「无限」从复选框语义提升成显式动作。
+  const setLoopUnlimited = useCallback(() => {
+    if (guardSaving !== null) return;
+    setGuardSaving("loop");
+    setGuardConfigError(null);
+    setLoopGuard(token, slug, false)
+      .then((result) => {
+        setLocalLoopGuardEnabled(result.enabled);
+        setLocalLoopGuardLimit(result.limit === null ? "" : String(result.limit));
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setGuardConfigError(t("Channel.settings.forbidden"));
+        else setGuardConfigError(t("Channel.settings.saveFailed"));
+      })
+      .finally(() => setGuardSaving(null));
+  }, [guardSaving, slug, t, token]);
+
+  const setWorkflowUnlimited = useCallback(() => {
+    if (guardSaving !== null) return;
+    setGuardSaving("workflow");
+    setGuardConfigError(null);
+    setWorkflowGuard(token, slug, false)
+      .then((result) => {
+        setLocalWorkflowGuardEnabled(result.enabled);
+        setLocalWorkflowGuardLimit(result.limit === null ? String(workflowGuardLimit) : String(result.limit));
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setGuardConfigError(t("Channel.settings.forbidden"));
+        else setGuardConfigError(t("Channel.settings.saveFailed"));
+      })
+      .finally(() => setGuardSaving(null));
+  }, [guardSaving, slug, t, token, workflowGuardLimit]);
+
   const updateRoleDraft = useCallback((name: string, next: RoleDraft) => {
     setRoleDrafts((current) => ({ ...current, [name]: next }));
   }, []);
@@ -2875,6 +2932,8 @@ export function ChannelPage({
               onWorkflowLimit={setLocalWorkflowGuardLimit}
               onSaveLoop={saveLoopGuard}
               onSaveWorkflow={saveWorkflowGuard}
+              onLoopUnlimited={setLoopUnlimited}
+              onWorkflowUnlimited={setWorkflowUnlimited}
             />
           )}
           {activePanel === "search" && searchContent}
