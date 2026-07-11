@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { EXIT_ARCHIVED, type MsgFrame } from "@agentparty/shared";
+import { EXIT_ARCHIVED, type Attachment, type MsgFrame } from "@agentparty/shared";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -81,6 +81,23 @@ function postRecorder() {
     post: async (server: string, token: string, channel: string, body: MessagePayload) => {
       posts.push({ server, token, channel, body });
       return { seq: posts.length };
+    },
+  };
+}
+
+function uploadRecorder() {
+  const uploads: Array<{ server: string; token: string; channel: string; filename: string; bytes: Uint8Array; contentType: string }> = [];
+  return {
+    uploads,
+    upload: async (server: string, token: string, channel: string, filename: string, bytes: Uint8Array, contentType: string): Promise<Attachment> => {
+      uploads.push({ server, token, channel, filename, bytes: Uint8Array.from(bytes), contentType });
+      return {
+        key: `${channel}/00000000-0000-4000-8000-000000000000/${filename}`,
+        filename,
+        content_type: contentType,
+        size: bytes.byteLength,
+        url: `/api/channels/${channel}/attachments/00000000-0000-4000-8000-000000000000/${filename}`,
+      };
     },
   };
 }
@@ -365,8 +382,9 @@ describe("builtin runner", () => {
     expect(log).toContain("exit=0");
   });
 
-  test("[attach:path] passthrough sends the file bytes verbatim as the reply body (issue #41)", async () => {
+  test("[attach:path] uploads the file to R2 and references it as an attachment, not inlined (#41/#109)", async () => {
     const { posts, post } = postRecorder();
+    const { uploads, upload } = uploadRecorder();
     const workdir = tempDir();
     const payload = tempDir();
     const attachFile = join(payload, "delivery.diff");
@@ -387,12 +405,117 @@ describe("builtin runner", () => {
       workdir,
       runProcess,
       post,
+      uploadAttachment: upload,
     })(triggerFrame(41), runnerCtx());
+
+    // 交付物逐字节上传到 R2（不做 utf8 往返、不经模型转述），保住 #41 的完整性
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]!.filename).toBe("delivery.diff");
+    expect(Buffer.from(uploads[0]!.bytes).toString("utf8")).toBe(bytes);
 
     const finalPost = posts.at(-1)!;
     expect(finalPost.body).toMatchObject({ kind: "message", reply_to: 41 });
-    // 正文 = 文件逐字节,不是模型输出、不加 session marker、不含摘要行
-    expect((finalPost.body as { body: string }).body).toBe(bytes);
+    const msg = finalPost.body as { body: string; attachments?: Array<{ filename: string }> };
+    // 正文不再是文件内容（不再 inline → 不再撞 BODY_LIMIT / 413）；文件以附件引用随消息带上
+    expect(msg.body).not.toBe(bytes);
+    expect(msg.attachments).toHaveLength(1);
+    expect(msg.attachments![0]!.filename).toBe("delivery.diff");
+  });
+
+  test("oversize reply body is uploaded to R2 and referenced as an attachment, never a 413 (#109)", async () => {
+    const { posts, post } = postRecorder();
+    const { uploads, upload } = uploadRecorder();
+    const workdir = tempDir();
+    // 超过 BODY_LIMIT(100_000) 的正文：旧路径会 inline → worker 413 → 交付物静默丢失
+    const huge = "x".repeat(100_001);
+    const runProcess: RunnerProcess = async (args) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, huge);
+      return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
+    };
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      runProcess,
+      post,
+      uploadAttachment: upload,
+    })(triggerFrame(50), runnerCtx());
+
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]!.bytes.byteLength).toBeGreaterThan(100_000);
+    const finalPost = posts.at(-1)!;
+    const msg = finalPost.body as { kind: string; body: string; attachments?: unknown[] };
+    expect(msg.kind).toBe("message");
+    expect(msg.attachments).toHaveLength(1);
+    // 送出的正文本身不再超限（否则 worker 仍会 413）
+    expect(Buffer.byteLength(msg.body, "utf8")).toBeLessThanOrEqual(100_000);
+  });
+
+  test("[attach] upload failure blocks the wake and posts no partial message (#109)", async () => {
+    const { posts, post } = postRecorder();
+    const workdir = tempDir();
+    const payload = tempDir();
+    const attachFile = join(payload, "delivery.diff");
+    writeFileSync(attachFile, "some artifact bytes");
+    const runProcess: RunnerProcess = async (args) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, `[attach:${attachFile}]\n`);
+      return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
+    };
+    const upload = async (): Promise<Attachment> => {
+      throw new Error("attachment endpoint rejected: 413 too_large");
+    };
+
+    // 唤醒未送达：抛给调用方（否则 runServe 会 ack 掉这条 @），最终 blocked 由 runServe 统一发
+    await expect(
+      createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir,
+        runProcess,
+        post,
+        uploadAttachment: upload,
+      })(triggerFrame(51), runnerCtx()),
+    ).rejects.toThrow(/413 too_large/);
+
+    // 绝不发部分正文（附件上传失败就整条不发）
+    expect(posts.some((p) => (p.body as { kind?: string }).kind === "message")).toBe(false);
+  });
+
+  test("upload failure surfaces as a blocked status carrying the reason (runServe end to end, #109)", async () => {
+    const s = closeAfterOneMention();
+    const { posts, post } = postRecorder();
+    const workdir = tempDir();
+    const huge = "x".repeat(100_001);
+    const runProcess: RunnerProcess = async (args) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, huge);
+      return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
+    };
+    const upload = async (): Promise<Attachment> => {
+      throw new Error("attachment endpoint rejected: 413 too_large");
+    };
+    const o = opts({
+      server: s.url,
+      post,
+      maxWakeAttempts: 1,
+      builtinRunner: { server: s.url, token: "ap_tok", channel: "dev", harness: "codex", workdir, runProcess, post, uploadAttachment: upload },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+
+    const blocked = posts.find((p) => (p.body as { state?: string }).state === "blocked");
+    expect(blocked).toBeDefined();
+    // 不是静默 413：原因透传到 blocked_reason，人能看见交付为什么没送达
+    expect((blocked!.body as { blocked_reason?: string }).blocked_reason).toContain("413 too_large");
+    // 既然上传失败，绝不发出（半截）消息
+    expect(posts.some((p) => (p.body as { kind?: string }).kind === "message")).toBe(false);
   });
 
   test("[attach] with a relative path is refused, throws, and posts no partial body (issue #41)", async () => {

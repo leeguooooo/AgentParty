@@ -1,7 +1,7 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
-import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type MsgFrame, type ServerFrame } from "@agentparty/shared";
+import { BODY_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type MsgFrame, type ServerFrame } from "@agentparty/shared";
 import { maybeReexecUpgrade, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import {
   appendFileSync,
@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readAccount } from "../account";
 import { connect } from "../client";
@@ -33,7 +33,7 @@ import {
   unreadFromCursor,
   writeStatuslineCache,
 } from "../statusline-cache";
-import { ensureProjectAgentChannelRuntime, fetchChannelCharter, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, type ChannelCharter, type ChannelProjectAgentInvite, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
+import { ensureProjectAgentChannelRuntime, fetchChannelCharter, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
 import { buildContext } from "./status";
 
@@ -174,6 +174,8 @@ export interface BuiltinRunnerOptions {
   authSourceFile?: string;
   now?: () => number;
   post?: typeof postMessage;
+  /** 交付物上传（#109）；默认真 REST。测试注入 mock。 */
+  uploadAttachment?: typeof uploadAttachment;
 }
 
 export interface ThreadLike {
@@ -196,6 +198,8 @@ export interface SdkRunnerOptions {
   codexFactory?: () => CodexLike | Promise<CodexLike>;
   now?: () => number;
   post?: typeof postMessage;
+  /** 交付物上传（#109）；默认真 REST。测试注入 mock。 */
+  uploadAttachment?: typeof uploadAttachment;
 }
 
 export interface ProjectAgentRunContext {
@@ -478,10 +482,123 @@ function attachmentPathFromRunnerText(text: string): string | null {
   return null;
 }
 
-function finalMessageBody(text: string, marker: string | null): string {
-  const attach = attachmentPathFromRunnerText(text);
-  if (attach) return readFileSync(attach, "utf8");
-  return marker ? `${marker}\n${text}` : text;
+const ATTACH_LINE_RE = /^\[attach:[^\]\r\n]+\]$/;
+
+// worker 存什么 content-type 就回什么（它 split(";")[0] 归一化）。给常见交付物一个像样的类型，
+// 让 web 的 AttachmentList 能正确渲染（图片走 <img>、文本可预览）；认不出就 octet-stream。
+const ATTACHMENT_CONTENT_TYPE_BY_EXT: Record<string, string> = {
+  diff: "text/x-diff; charset=utf-8",
+  patch: "text/x-diff; charset=utf-8",
+  md: "text/markdown; charset=utf-8",
+  markdown: "text/markdown; charset=utf-8",
+  txt: "text/plain; charset=utf-8",
+  log: "text/plain; charset=utf-8",
+  json: "application/json; charset=utf-8",
+  csv: "text/csv; charset=utf-8",
+  html: "text/html; charset=utf-8",
+  xml: "application/xml; charset=utf-8",
+  yaml: "text/yaml; charset=utf-8",
+  yml: "text/yaml; charset=utf-8",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  pdf: "application/pdf",
+  zip: "application/zip",
+};
+
+function guessAttachmentContentType(filename: string): string {
+  const dot = filename.lastIndexOf(".");
+  const ext = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : "";
+  return ATTACHMENT_CONTENT_TYPE_BY_EXT[ext] ?? "application/octet-stream";
+}
+
+// worker 端 filename 校验：/^[^/\\\x00-\x1f\x7f]{1,255}$/（单段、无控制符）。消毒到合法单段。
+function safeAttachmentFilename(name: string): string {
+  const cleaned = name.replace(/[/\\\x00-\x1f\x7f]/g, "_").slice(0, 255);
+  return cleaned.length > 0 ? cleaned : "attachment";
+}
+
+function stripAttachLines(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !ATTACH_LINE_RE.test(line.trim()))
+    .join("\n")
+    .trim();
+}
+
+// 正文兜底裁剪：极少见——[attach] 周围的叙述文本本身超过 BODY_LIMIT。裁到安全字节数，附件仍完整。
+function clampInlineBody(body: string): string {
+  if (Buffer.byteLength(body, "utf8") <= BODY_LIMIT) return body;
+  return Buffer.from(body, "utf8").subarray(0, BODY_LIMIT - 1024).toString("utf8");
+}
+
+/**
+ * 交付一条 runner 结果（#109）。
+ *
+ * 旧实现把 [attach] 文件内容 / 长正文直接 inline 进消息 body：一撞 BODY_LIMIT(100KB) worker 就 413，
+ * 而那次 post 在 try/catch 之外，连 blocked 都发不出——交付物静默丢失。
+ *
+ * 现在：有 [attach] 交付物、或 inline 正文会超限，就先把 blob 传到 R2（复用 #176 的附件端点），
+ * 消息只带轻量正文 + 附件引用，走既有 AttachmentList 渲染。上传/交付失败由调用方兜进 WakeBlockedError，
+ * 最终 runServe 发 blocked（带原因），绝不静默丢。
+ */
+async function deliverRunnerMessage(opts: {
+  post: typeof postMessage;
+  upload: typeof uploadAttachment;
+  server: string;
+  token: string;
+  channel: string;
+  replyTo: number;
+  text: string;
+  marker: string | null;
+}): Promise<void> {
+  const { post, upload, server, token, channel, replyTo, text, marker } = opts;
+  // [attach:/abs/path]：交付物永远走 R2 附件（相对路径在此抛错，与旧行为一致）。
+  const attachPath = attachmentPathFromRunnerText(text);
+  if (attachPath !== null) {
+    const bytes = readFileSync(attachPath); // Buffer：逐字节，不做 utf8 往返，保住 #41 的完整性
+    const filename = safeAttachmentFilename(basename(attachPath));
+    const ref = await upload(server, token, channel, filename, bytes, guessAttachmentContentType(filename));
+    const rest = stripAttachLines(text);
+    const parts: string[] = [];
+    if (marker) parts.push(marker);
+    if (rest) parts.push(rest);
+    if (parts.length === 0) parts.push(`[attached ${filename}]`);
+    await post(server, token, channel, {
+      kind: "message",
+      body: clampInlineBody(parts.join("\n")),
+      mentions: [],
+      reply_to: replyTo,
+      attachments: [ref],
+    });
+    return;
+  }
+
+  const inline = marker ? `${marker}\n${text}` : text;
+  const inlineBytes = Buffer.byteLength(inline, "utf8");
+  if (inlineBytes > BODY_LIMIT) {
+    // 正文超 inline 上限：整段传成 R2 附件，正文只留一行指引（#109），不再撞 413。
+    const filename = `delivery-seq${replyTo}.md`;
+    const ref = await upload(server, token, channel, filename, Buffer.from(inline, "utf8"), "text/markdown; charset=utf-8");
+    await post(server, token, channel, {
+      kind: "message",
+      body: `[reply body ${inlineBytes} bytes exceeded the ${BODY_LIMIT}-byte inline limit; delivered as attachment ${filename}]`,
+      mentions: [],
+      reply_to: replyTo,
+      attachments: [ref],
+    });
+    return;
+  }
+
+  await post(server, token, channel, {
+    kind: "message",
+    body: inline,
+    mentions: [],
+    reply_to: replyTo,
+  });
 }
 
 async function defaultRunnerProcess(
@@ -827,11 +944,16 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
         wakes: baseSession.wakes + 1,
       };
       writeSdkSession(sessionPath, session);
-      await post(opts.server, opts.token, opts.channel, {
-        kind: "message",
-        body,
-        mentions: [],
-        reply_to: frame.seq,
+      // 交付走统一路径：超限正文改走 R2 附件（#109），不再 inline 撞 413。上传失败落进下面的 catch。
+      await deliverRunnerMessage({
+        post,
+        upload: opts.uploadAttachment ?? uploadAttachment,
+        server: opts.server,
+        token: opts.token,
+        channel: opts.channel,
+        replyTo: frame.seq,
+        text: body,
+        marker: null,
       });
       appendRunnerLog(
         opts.workdir,
@@ -947,9 +1069,20 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
 
     // resume 非零不再 cold-start（#206 门禁 P1②），所以不存在 session reset 这条路径了。
     const marker = oldSid ? null : `[session start: ${shortSid(finalSid)}]`;
-    let body: string;
+    // 交付：[attach] 交付物 / 超限正文改走 R2 附件（#109）。上传+发送整体包进 try —— 旧代码里
+    // 那次 post（含 413）在 try 外逃逸，交付物静默丢失；现在失败一律转 WakeBlockedError，
+    // 由 runServe 统一发 blocked（带原因）。
     try {
-      body = finalMessageBody(run.text, marker);
+      await deliverRunnerMessage({
+        post,
+        upload: opts.uploadAttachment ?? uploadAttachment,
+        server: opts.server,
+        token: opts.token,
+        channel: opts.channel,
+        replyTo: frame.seq,
+        text: run.text,
+        marker,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       appendRunnerLog(
@@ -958,12 +1091,6 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
       );
       throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: ${message}`);
     }
-    await post(opts.server, opts.token, opts.channel, {
-      kind: "message",
-      body,
-      mentions: [],
-      reply_to: frame.seq,
-    });
 
     appendRunnerLog(
       opts.workdir,
