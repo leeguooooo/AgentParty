@@ -34,9 +34,11 @@ use tauri::{
 #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
 use tauri_plugin_deep_link::DeepLinkExt;
 
+#[cfg(not(target_os = "macos"))]
 const CREDENTIAL_SERVICE: &str = "com.agentparty.desktop";
 const CREDENTIAL_ACCOUNT: &str = "desktop-session";
-const UI_HIGH_WATER_ACCOUNT: &str = "desktop-ui-high-water";
+#[cfg(target_os = "macos")]
+const MACOS_CREDENTIAL_SERVICE: &str = "com.agentparty.desktop.credentials.v2";
 const UI_RELEASE_FLOOR_PUBLISHED_AT: i64 = 1_783_751_237;
 const UPDATER_DIAGNOSTIC_FILE: &str = "updater-diagnostic.json";
 static UPDATER_DIAGNOSTIC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -244,7 +246,7 @@ fn parse_stored_credential(input: &str) -> Result<StoredDesktopCredential, Strin
     Ok(credential)
 }
 
-#[cfg(desktop)]
+#[cfg(all(desktop, not(target_os = "macos")))]
 fn credential_entry(account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(CREDENTIAL_SERVICE, account)
         .map_err(|error| format!("secure credential store unavailable: {error}"))
@@ -269,7 +271,48 @@ trait CredentialBackend {
 #[cfg(desktop)]
 struct NativeCredentialBackend;
 
-#[cfg(desktop)]
+#[cfg(all(desktop, target_os = "macos"))]
+fn macos_keychain_read(service: &str, account: &str) -> Result<Option<String>, String> {
+    match security_framework::passwords::get_generic_password(service, account) {
+        Ok(value) => String::from_utf8(value)
+            .map(Some)
+            .map_err(|_| "secure credential has an invalid encoding".to_string()),
+        Err(error) if error.code() == -25_300 => Ok(None),
+        Err(error) => Err(format!("secure credential read failed: {error}")),
+    }
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn macos_keychain_write(service: &str, account: &str, value: &str) -> Result<(), String> {
+    security_framework::passwords::set_generic_password(service, account, value.as_bytes())
+        .map_err(|error| format!("secure credential write failed: {error}"))
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn macos_keychain_delete(service: &str, account: &str) -> Result<(), String> {
+    match security_framework::passwords::delete_generic_password(service, account) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == -25_300 => Ok(()),
+        Err(error) => Err(format!("secure credential delete failed: {error}")),
+    }
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+impl CredentialBackend for NativeCredentialBackend {
+    fn read(&self, account: &str) -> Result<Option<String>, String> {
+        macos_keychain_read(MACOS_CREDENTIAL_SERVICE, account)
+    }
+
+    fn write(&self, account: &str, credential: &str) -> Result<(), String> {
+        macos_keychain_write(MACOS_CREDENTIAL_SERVICE, account, credential)
+    }
+
+    fn delete(&self, account: &str) -> Result<(), String> {
+        macos_keychain_delete(MACOS_CREDENTIAL_SERVICE, account)
+    }
+}
+
+#[cfg(all(desktop, not(target_os = "macos")))]
 impl CredentialBackend for NativeCredentialBackend {
     fn read(&self, account: &str) -> Result<Option<String>, String> {
         match credential_entry(account)?.get_password() {
@@ -293,31 +336,20 @@ impl CredentialBackend for NativeCredentialBackend {
     }
 }
 
-fn read_ui_high_water<B: CredentialBackend>(backend: &B) -> Result<i64, String> {
-    let Some(raw) = backend.read(UI_HIGH_WATER_ACCOUNT)? else {
-        return Ok(UI_RELEASE_FLOOR_PUBLISHED_AT);
-    };
-    let stored = raw
-        .parse::<i64>()
-        .map_err(|_| "desktop UI high-water mark is invalid".to_string())?;
+#[cfg(desktop)]
+fn read_ui_high_water(store: &ui_update::UiUpdateStore) -> Result<i64, String> {
+    // Activation advances this value before a pending UI can run. Do not mirror this
+    // non-secret watermark into Keychain: ad-hoc preview builds get a new macOS code
+    // identity on every shell update and would trigger a password prompt on each launch.
+    let stored = store
+        .load_metadata()
+        .map_err(|_| "desktop UI state is invalid".to_string())?
+        .highest_published_at
+        .unwrap_or(UI_RELEASE_FLOOR_PUBLISHED_AT);
     if stored < UI_RELEASE_FLOOR_PUBLISHED_AT {
         return Err("desktop UI high-water mark is invalid".to_string());
     }
     Ok(stored)
-}
-
-fn advance_ui_high_water<B: CredentialBackend>(
-    backend: &B,
-    published_at: i64,
-) -> Result<(), String> {
-    let current = read_ui_high_water(backend)?;
-    if published_at < current {
-        return Err("desktop UI release is older than the accepted high-water mark".to_string());
-    }
-    if published_at > current {
-        backend.write(UI_HIGH_WATER_ACCOUNT, &published_at.to_string())?;
-    }
-    Ok(())
 }
 
 fn migrate_legacy_credential<B: CredentialBackend>(backend: &B) -> Result<Option<String>, String> {
@@ -470,7 +502,7 @@ fn navigate_main_to(app: &tauri::AppHandle, url: &'static str) {
 fn navigate_to_available_ui(app: &tauri::AppHandle, store: &ui_update::UiUpdateStore) {
     let shell_version = app.package_info().version.to_string();
     let verifier = configured_ui_verifier().ok();
-    let high_water = read_ui_high_water(&NativeCredentialBackend).ok();
+    let high_water = read_ui_high_water(store).ok();
     let trust_available = verifier.is_some() && high_water.is_some();
     let is_verified = |store: &ui_update::UiUpdateStore| {
         verifier
@@ -641,7 +673,8 @@ fn serve_ui_protocol(app: &tauri::AppHandle, path: &str) -> tauri::http::Respons
             .body(b"Internal Server Error".to_vec())
             .expect("static desktop UI error response must be valid");
     };
-    let Ok(high_water) = read_ui_high_water(&NativeCredentialBackend) else {
+    let store = ui_update::UiUpdateStore::new(app_data);
+    let Ok(high_water) = read_ui_high_water(&store) else {
         return tauri::http::Response::builder()
             .status(500)
             .header("Content-Type", "text/plain; charset=utf-8")
@@ -650,7 +683,7 @@ fn serve_ui_protocol(app: &tauri::AppHandle, path: &str) -> tauri::http::Respons
     };
     let protocol = ui_protocol::serve_verified(
         &app.state::<UiRuntimeManager>().protocol_cache,
-        &ui_update::UiUpdateStore::new(app_data),
+        &store,
         &app.package_info().version.to_string(),
         ui_update::SUPPORTED_UI_ABI,
         Some(high_water),
@@ -692,7 +725,7 @@ fn desktop_ui_ready(app: tauri::AppHandle, build_id: String, ui_abi: u32) -> Res
         .map_err(|_| "desktop UI data directory is unavailable".to_string())?;
     let store = ui_update::UiUpdateStore::new(app_data);
     let verifier = configured_ui_verifier()?;
-    let high_water = read_ui_high_water(&NativeCredentialBackend)?;
+    let high_water = read_ui_high_water(&store)?;
     let archive = store
         .verified_current_archive_at_least(
             &app.package_info().version.to_string(),
@@ -706,7 +739,6 @@ fn desktop_ui_ready(app: tauri::AppHandle, build_id: String, ui_abi: u32) -> Res
     if archive.build_id() != build_id || archive.ui_abi() != ui_abi {
         return Err("desktop UI ready receipt does not match signed evidence".to_string());
     }
-    advance_ui_high_water(&NativeCredentialBackend, archive.published_at())?;
     store
         .mark_ready(&build_id, ui_abi)
         .map_err(|_| "desktop UI ready receipt was rejected".to_string())
@@ -892,11 +924,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        advance_ui_high_water, credential_account_for_origin, migrate_legacy_credential,
-        parse_stored_credential, read_ui_high_water, tray_action, validate_updater_diagnostic,
-        write_updater_diagnostic, CredentialBackend, ExitGuard, TrayAction, UpdaterDiagnostic,
-        UpdaterDiagnosticCategory, UpdaterDiagnosticStage, UpdaterDiagnosticStatus,
-        CREDENTIAL_ACCOUNT, UI_HIGH_WATER_ACCOUNT, UI_RELEASE_FLOOR_PUBLISHED_AT,
+        credential_account_for_origin, migrate_legacy_credential, parse_stored_credential,
+        tray_action, validate_updater_diagnostic, write_updater_diagnostic, CredentialBackend,
+        ExitGuard, TrayAction, UpdaterDiagnostic, UpdaterDiagnosticCategory,
+        UpdaterDiagnosticStage, UpdaterDiagnosticStatus, CREDENTIAL_ACCOUNT,
     };
 
     fn pending_updater_receipt() -> UpdaterDiagnostic {
@@ -977,25 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn ui_high_water_is_monotonic_and_not_stored_in_user_writable_state() {
-        let credentials = MemoryCredentials::default();
-        assert_eq!(
-            read_ui_high_water(&credentials).unwrap(),
-            UI_RELEASE_FLOOR_PUBLISHED_AT
-        );
-
-        let accepted = UI_RELEASE_FLOOR_PUBLISHED_AT + 60;
-        advance_ui_high_water(&credentials, accepted).unwrap();
-        assert_eq!(read_ui_high_water(&credentials).unwrap(), accepted);
-        assert_eq!(
-            credentials.0.borrow().get(UI_HIGH_WATER_ACCOUNT).cloned(),
-            Some(accepted.to_string())
-        );
-        assert!(advance_ui_high_water(&credentials, accepted - 1).is_err());
-        assert_eq!(read_ui_high_water(&credentials).unwrap(), accepted);
-    }
-
-    #[test]
     fn maps_known_tray_actions() {
         assert_eq!(tray_action("show"), Some(TrayAction::Show));
         assert_eq!(tray_action("check-updates"), Some(TrayAction::CheckUpdates));
@@ -1010,6 +1022,16 @@ mod tests {
 
         guard.begin_quit();
         assert!(guard.is_quitting());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_credentials_do_not_reopen_the_legacy_keychain_service() {
+        assert_eq!(
+            super::MACOS_CREDENTIAL_SERVICE,
+            "com.agentparty.desktop.credentials.v2"
+        );
+        assert_ne!(super::MACOS_CREDENTIAL_SERVICE, "com.agentparty.desktop");
     }
 
     #[test]
