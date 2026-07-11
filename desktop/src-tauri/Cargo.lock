@@ -24,12 +24,15 @@ name = "agentparty-desktop"
 version = "0.2.94"
 dependencies = [
  "base64 0.22.1",
+ "flate2",
  "keyring",
  "minisign-verify",
  "regex",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
@@ -41,8 +44,10 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tempfile",
+ "time",
  "tokio",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
