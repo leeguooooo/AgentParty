@@ -144,7 +144,7 @@ main() {
   fi
 
   # 挂载 dmg，取出 .app
-  mnt="$(hdiutil attach "$tmp/$dmg" -nobrowse -readonly -mountrandom /tmp | awk '/\/Volumes\//{print $NF}' | tail -n1)"
+  mnt="$(hdiutil attach "$tmp/$dmg" -nobrowse -readonly -mountrandom /tmp | awk 'NF >= 3 && $NF ~ /^\// {print $NF}' | tail -n1)"
   [ -n "$mnt" ] && [ -d "$mnt" ] || die "挂载 dmg 失败。"
   src="$(find "$mnt" -maxdepth 1 -name '*.app' -type d | head -n1)"
   [ -n "$src" ] || die "dmg 里找不到 .app。"

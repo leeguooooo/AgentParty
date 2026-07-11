@@ -41,7 +41,7 @@ function runInstaller(failReplacement: boolean, preview = false, allowUnnotarize
   executable(resolve(bin, "uname"), '[ "$1" = "-s" ] && echo Darwin || echo arm64');
   executable(resolve(bin, "curl"), 'for last; do :; done; cp "$FIXTURE_ASSETS/$(basename "$2")" "$last" 2>/dev/null || cp "$FIXTURE_ASSETS/$(basename "$1")" "$last"');
   executable(resolve(bin, "shasum"), 'echo "$FIXTURE_DMG_HASH  $3"');
-  executable(resolve(bin, "hdiutil"), 'case "$1" in attach) echo "mock /Volumes/fixture $FIXTURE_MOUNT" ;; esac; exit 0');
+  executable(resolve(bin, "hdiutil"), 'case "$1" in attach) printf "/dev/disk9s1\\tApple_HFS\\t%s\\n" "$FIXTURE_MOUNT" ;; esac; exit 0');
   executable(resolve(bin, "plutil"), 'case "$2" in notarized) [ "${FIXTURE_PREVIEW:-0}" = 1 ] && echo false || echo true ;; distribution) [ "${FIXTURE_PREVIEW:-0}" = 1 ] && echo preview || echo production ;; notarization_auth) [ "${FIXTURE_PREVIEW:-0}" = 1 ] && echo none || echo api-key ;; CFBundleShortVersionString) echo 0.2.90 ;; *) exit 1 ;; esac');
   executable(resolve(bin, "xcrun"), "exit 0");
   executable(resolve(bin, "spctl"), "exit 0");
