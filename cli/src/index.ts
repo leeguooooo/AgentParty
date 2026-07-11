@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 // party — agentparty cli 入口，手写 argv 路由
+// (#247 smoke) 纯 cli/ 改动应只触发 check:cli 快路径
 
 // 版本号从 package.json 内联（bun --compile 会把 JSON 打进二进制，运行期无需读文件）。
 import pkg from "../package.json" with { type: "json" };
