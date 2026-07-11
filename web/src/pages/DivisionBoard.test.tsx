@@ -54,6 +54,11 @@ function baseProps(overrides: Partial<DivisionBoardProps> = {}): DivisionBoardPr
     onSaveRole: noop,
     onDeleteRole: noop,
     forceOpen: true,
+    charterText: null,
+    onSyncToCharter: noop,
+    syncingCharter: false,
+    canManageAgentRules: false,
+    onOpenAgentRules: noop,
     ...overrides,
   };
 }
@@ -146,5 +151,160 @@ describe("DivisionBoard roster completeness (#169)", () => {
     );
     const unassignedLabel = renderer!.root.findAll((n) => n.props.className === "role-source role-source--unassigned t-mono");
     expect(unassignedLabel.length).toBe(1);
+  });
+});
+
+// issue #168：分工要看得出组织架构关系——每个 agent 的汇报人（来自 presence
+// lineage.parent_agent，agentparty 的 dispatch 关系本就是"谁派我我向谁汇报"）、
+// 每个频道的主负责人（已有的 host 分工角色），以及汇报对象是否在本频道可见。
+describe("DivisionBoard org-structure relationships (#168)", () => {
+  function findText(className: string): string[] {
+    return renderer!.root
+      .findAll((n) => n.props.className === className)
+      .map((n) => (Array.isArray(n.props.children) ? n.props.children.join("") : String(n.props.children)));
+  }
+
+  // 汇报对象是否恰好也在本频道 roster 里，决定渲染成 "role-report t-mono" 还是
+  // "role-report role-report--external t-mono"（见下面两个专门测试）；这条测试只
+  // 关心「汇报关系文字有没有渲染出来」，两种 class 都收。
+  function anyReportText(): string[] {
+    return [...findText("role-report t-mono"), ...findText("role-report role-report--external t-mono")];
+  }
+
+  test("a declared role with lineage shows who it reports to", () => {
+    render(
+      baseProps({
+        roles: [
+          { name: "worker-a", role: "worker", responsibility: "ships x", assigned_by: "leo", assigned_at: 1, kind: "agent", account: "leo", display: "worker-a" },
+        ],
+        presence: {
+          "worker-a": presenceEntry({
+            name: "worker-a",
+            account: "leo",
+            lineage: { parent_agent: "leo-claude", root_agent: "leo-claude", team_id: "t1", depth: 1, expires_at: null },
+          }),
+        },
+      }),
+    );
+    expect(anyReportText().some((line) => line.includes("leo-claude"))).toBe(true);
+  });
+
+  test("a role with no lineage shows no reporting badge", () => {
+    render(
+      baseProps({
+        roles: [
+          { name: "worker-a", role: "worker", responsibility: "ships x", assigned_by: "leo", assigned_at: 1, kind: "agent", account: "leo", display: "worker-a" },
+        ],
+        presence: { "worker-a": presenceEntry({ name: "worker-a", account: "leo" }) },
+      }),
+    );
+    expect(findText("role-report t-mono").length).toBe(0);
+  });
+
+  test("the host role is tagged as the channel lead", () => {
+    render(
+      baseProps({
+        roles: [
+          { name: "leo-claude", role: "host", responsibility: "统筹", assigned_by: "leo", assigned_at: 1, kind: "agent", account: "leo", display: "leo-claude" },
+          { name: "worker-a", role: "worker", responsibility: "ships x", assigned_by: "leo", assigned_at: 1, kind: "agent", account: "leo", display: "worker-a" },
+        ],
+        presence: {
+          "leo-claude": presenceEntry({ name: "leo-claude", account: "leo" }),
+          "worker-a": presenceEntry({ name: "worker-a", account: "leo" }),
+        },
+      }),
+    );
+    const leadTags = renderer!.root.findAll((n) => n.props.className === "role-lead-tag t-mono");
+    expect(leadTags.length).toBe(1);
+  });
+
+  test("flags when the reporting target isn't part of this channel's roster", () => {
+    render(
+      baseProps({
+        roles: [
+          { name: "worker-a", role: "worker", responsibility: "ships x", assigned_by: "leo", assigned_at: 1, kind: "agent", account: "leo", display: "worker-a" },
+        ],
+        presence: {
+          "worker-a": presenceEntry({
+            name: "worker-a",
+            account: "leo",
+            lineage: { parent_agent: "someone-not-in-channel", root_agent: "someone-not-in-channel", team_id: "t1", depth: 1, expires_at: null },
+          }),
+        },
+      }),
+    );
+    const externalHints = renderer!.root.findAll((n) => n.props.className === "role-report role-report--external t-mono");
+    expect(externalHints.length).toBe(1);
+  });
+
+  test("does not flag a reporting target that IS visible in this channel's roster", () => {
+    render(
+      baseProps({
+        roles: [
+          { name: "leo-claude", role: "host", responsibility: "统筹", assigned_by: "leo", assigned_at: 1, kind: "agent", account: "leo", display: "leo-claude" },
+          { name: "worker-a", role: "worker", responsibility: "ships x", assigned_by: "leo", assigned_at: 1, kind: "agent", account: "leo", display: "worker-a" },
+        ],
+        presence: {
+          "leo-claude": presenceEntry({ name: "leo-claude", account: "leo" }),
+          "worker-a": presenceEntry({
+            name: "worker-a",
+            account: "leo",
+            lineage: { parent_agent: "leo-claude", root_agent: "leo-claude", team_id: "t1", depth: 1, expires_at: null },
+          }),
+        },
+      }),
+    );
+    const externalHints = renderer!.root.findAll((n) => n.props.className === "role-report role-report--external t-mono");
+    expect(externalHints.length).toBe(0);
+  });
+});
+
+// issue #150：分工内容应该能一键同步进公告（charter）。这里测的是 DivisionBoard
+// 把当前已声明分工（assigned + self）拼成 markdown 小节、合并进现有公告文本、
+// 再把结果通过 onSyncToCharter 交给上层去落盘——按钮本身不发网络请求。
+describe("DivisionBoard sync-to-charter (#150)", () => {
+  test("moderator sees a sync button that merges declared roles into the existing charter text", () => {
+    let synced: string | null = null;
+    render(
+      baseProps({
+        canModerate: true,
+        charterText: "# Team charter\n\nBe kind to each other.",
+        roles: [
+          { name: "leo-claude", role: "host", responsibility: "统筹", assigned_by: "leo", assigned_at: 1, kind: "agent", account: "leo", display: "leo-claude" },
+        ],
+        presence: { "leo-claude": presenceEntry({ name: "leo-claude", account: "leo" }) },
+        onSyncToCharter: (text: string) => { synced = text; },
+      }),
+    );
+    const btn = renderer!.root.find((n) => n.props.className === "d-btn role-sync-charter-btn");
+    act(() => btn.props.onClick());
+    expect(synced).not.toBeNull();
+    expect(synced as unknown as string).toContain("leo-claude");
+    expect(synced as unknown as string).toContain("Be kind to each other.");
+  });
+
+  test("non-moderators do not see the sync-to-charter button", () => {
+    render(baseProps({ canModerate: false }));
+    const btn = renderer!.root.findAll((n) => n.props.className === "d-btn role-sync-charter-btn");
+    expect(btn.length).toBe(0);
+  });
+});
+
+// issue #171：分工面板应该能跳到「查看/编辑每个 agent 自己的规则」（已用
+// AgentTokens 面板实现，见 commit 7f7e8e1）——这里只测入口按钮的存在性/门禁和
+// 点击转发，不重复造 AgentTokens 的规则编辑逻辑。
+describe("DivisionBoard agent-rules entry point (#171)", () => {
+  test("shows a link to the agent rules editor when the viewer can manage agent profiles", () => {
+    let opened = false;
+    render(baseProps({ canManageAgentRules: true, onOpenAgentRules: () => { opened = true; } }));
+    const btn = renderer!.root.find((n) => n.props.className === "d-btn role-open-rules-btn");
+    act(() => btn.props.onClick());
+    expect(opened).toBe(true);
+  });
+
+  test("hides the link when the viewer cannot manage agent profiles", () => {
+    render(baseProps({ canManageAgentRules: false }));
+    const btn = renderer!.root.findAll((n) => n.props.className === "d-btn role-open-rules-btn");
+    expect(btn.length).toBe(0);
   });
 });

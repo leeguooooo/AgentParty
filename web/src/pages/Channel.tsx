@@ -48,6 +48,7 @@ import { mentionCandidates, mentionLiveness, parseDraftMentions, type DraftMenti
 import { buildReceipts, type MentionReceipt } from "../lib/wakeReceipt";
 import { completionMessages } from "../lib/completions";
 import { catchupKey, summarizeCatchup, type CatchupDigest } from "../lib/digest";
+import { formatDivisionSection, mergeDivisionIntoCharter, type DivisionCharterRole } from "../lib/divisionCharter";
 import {
   isDesktopRuntime,
   sendMentionNotification,
@@ -487,6 +488,16 @@ export interface DivisionBoardProps {
   onSaveRole: (name: string, draft: RoleDraft) => void;
   onDeleteRole: (name: string) => void;
   forceOpen?: boolean;
+  // issue #150：一键把当前已声明分工同步进公告——DivisionBoard 只负责拼内容，
+  // 落盘（网络请求 + rev 刷新）交给上层（Channel.tsx 已有 charter 状态机）。
+  charterText: string | null;
+  onSyncToCharter: (text: string) => void;
+  syncingCharter: boolean;
+  // issue #171：分工面板到「查看/编辑每个 agent 自己的规则」（AgentTokens，已在
+  // commit 7f7e8e1 落地）的入口——门禁复用 Channel.tsx 里 AgentTokens 本身的门禁
+  // （canMintAgent && accountKey !== null），不在这里重新定义一套。
+  canManageAgentRules: boolean;
+  onOpenAgentRules: () => void;
 }
 
 export function DivisionBoard({
@@ -506,6 +517,11 @@ export function DivisionBoard({
   onSaveRole,
   onDeleteRole,
   forceOpen = false,
+  charterText,
+  onSyncToCharter,
+  syncingCharter,
+  canManageAgentRules,
+  onOpenAgentRules,
 }: DivisionBoardProps) {
   const t = useT();
   const [selfHintOpen, setSelfHintOpen] = useState(false);
@@ -545,8 +561,19 @@ export function DivisionBoard({
         (a.role?.role ?? "\uffff").localeCompare(b.role?.role ?? "\uffff") ||
         a.display.localeCompare(b.display),
     );
-  const groups: Array<{ accountLabel: string; roles: typeof roleViews }> = [];
-  for (const view of roleViews) {
+  // issue #168\uff1a\u5206\u5de5\u8981\u770b\u5f97\u51fa\u7ec4\u7ec7\u67b6\u6784\u5173\u7cfb\u3002\u6c47\u62a5\u4eba\u53d6 presence.lineage.parent_agent\u2014\u2014
+  // \u5728 agentparty \u7684 agent-dispatch \u6a21\u578b\u91cc\uff0c"\u8c01 spawn \u6211" \u672c\u5c31\u7b49\u4ef7\u4e8e "\u6211\u5411\u8c01\u6c47\u62a5/
+  // \u4ea4\u4ed8"\uff0c\u4e0d\u662f\u53e6\u9020\u4e00\u5957\u4eba\u4e8b\u5173\u7cfb\u3002roster \u91cc\u540c\u65f6\u6536 assigned/self/unassigned \u4e09\u7c7b
+  // \u540d\u5b57\uff0c\u7528\u6765\u5224\u65ad\u6c47\u62a5\u5bf9\u8c61\u300c\u662f\u5426\u5728\u672c\u9891\u9053\u53ef\u89c1\u300d\u2014\u2014\u4e0d\u5728\u573a\u5c31\u63d0\u793a\uff0c\u5e2e\u52a9\u53d1\u73b0/\u907f\u514d
+  // \u8de8\u51fa\u672c\u9891\u9053\u8fb9\u754c\u7684\u6c47\u62a5\u5173\u7cfb\uff08\u771f\u6b63\u610f\u4e49\u4e0a\u7684\u7ec4\u7ec7\u5c42\u7ea7\u8df3\u7ea7\u5224\u5b9a\uff0c\u9700\u8981\u4e00\u4e2a\u6b63\u5f0f\u7684
+  // \u7ba1\u7406\u5c42\u7ea7\u6a21\u578b\uff0c\u73b0\u6709\u6570\u636e\u505a\u4e0d\u5230\uff0c\u89c1\u4ea4\u63a5\u62a5\u544a\uff09\u3002
+  const knownNames = new Set(roleViews.map((view) => view.name));
+  const roleViewsWithReports = roleViews.map((view) => ({
+    ...view,
+    reportsTo: presence[view.name]?.lineage?.parent_agent ?? null,
+  }));
+  const groups: Array<{ accountLabel: string; roles: typeof roleViewsWithReports }> = [];
+  for (const view of roleViewsWithReports) {
     const current = groups.at(-1);
     if (current !== undefined && current.accountLabel === view.accountLabel) current.roles.push(view);
     else groups.push({ accountLabel: view.accountLabel, roles: [view] });
@@ -554,6 +581,24 @@ export function DivisionBoard({
   const roleCounts = COLLAB_ROLES
     .map((role) => ({ role, count: roleViews.filter((item) => item.role?.role === role).length }))
     .filter((item) => item.count > 0);
+
+  // issue #150\uff1a\u62ff\u5f53\u524d\u5df2\u58f0\u660e\u5206\u5de5\uff08assigned + self\uff0c\u4e0d\u542b\u672a\u5206\u5de5\u5360\u4f4d\uff09\u62fc\u6210 markdown
+  // \u5c0f\u8282\uff0c\u5408\u5e76\u8fdb\u73b0\u6709\u516c\u544a\u6587\u672c\uff0c\u4ea4\u7ed9\u4e0a\u5c42\u843d\u76d8\u3002
+  const syncDivisionToCharter = () => {
+    const declared: DivisionCharterRole[] = roleViews
+      .filter((view): view is typeof view & { role: NonNullable<typeof view.role> } => view.role !== null)
+      .map((view) => ({
+        display: view.display,
+        accountLabel: view.accountLabel,
+        role: view.role.role,
+        responsibility: view.role.responsibility,
+      }));
+    const section = formatDivisionSection(declared, {
+      heading: t("Channel.roles.syncHeading"),
+      empty: t("Channel.roles.syncEmpty"),
+    });
+    onSyncToCharter(mergeDivisionIntoCharter(charterText ?? "", section));
+  };
 
   return (
     <details className="role-board" aria-label={t("Channel.roles.label")} open={forceOpen ? true : undefined}>
@@ -572,6 +617,25 @@ export function DivisionBoard({
         </div>
       </summary>
       <div className="role-board-body">
+        {(canModerate || canManageAgentRules) && (
+          <div className="role-board-actions">
+            {canModerate && (
+              <button
+                type="button"
+                className="d-btn role-sync-charter-btn"
+                disabled={syncingCharter}
+                onClick={syncDivisionToCharter}
+              >
+                {syncingCharter ? t("Channel.roles.syncingCharter") : t("Channel.roles.syncToCharter")}
+              </button>
+            )}
+            {canManageAgentRules && (
+              <button type="button" className="d-btn role-open-rules-btn" onClick={onOpenAgentRules}>
+                {t("Channel.roles.openAgentRules")}
+              </button>
+            )}
+          </div>
+        )}
         <div className="role-selfhint">
           <button
             type="button"
@@ -607,11 +671,14 @@ export function DivisionBoard({
                   </span>
                 </header>
                 <div className="role-list">
-                  {group.roles.map(({ role, display, owner, accountLabel, kind, source, name }) => {
+                  {group.roles.map(({ role, display, owner, accountLabel, kind, source, name, reportsTo }) => {
                     // issue #169：role 为 null 代表「已连接/曾出现过，但从没声明过角色」的
                     // 未分工成员——只读展示占位文案，不接可编辑的 role-select/input（那需要一个
                     // 真实的 ChannelRoleInfo；moderator 要给他分工，走下面的「添加」新建行）。
                     const draftForRole = role !== null ? roleDrafts[role.name] ?? roleDraftFrom(role) : null;
+                    // issue #168：汇报对象是否在本频道 roster 里可见——不可见就提示，帮助
+                    // 发现/避免跨出本频道边界的汇报关系。
+                    const reportsToVisible = reportsTo !== null && knownNames.has(reportsTo);
                     const title = [
                       name !== display ? name : null,
                       t("Composer.owner", { account: accountLabel }),
@@ -624,11 +691,23 @@ export function DivisionBoard({
                         <div className="role-person" title={title}>
                           <span className="role-person-name t-mono">{display}</span>
                           <span className={`role-kind role-kind--${kind}`}>{t(`Composer.kind.${kind}`)}</span>
+                          {role !== null && role.role === "host" && (
+                            <span className="role-lead-tag t-mono">{t("Channel.roles.channelLead")}</span>
+                          )}
                           {source === "self" && <span className="role-source t-mono">{t("Channel.roles.selfReported")}</span>}
                           {source === "unassigned" && (
                             <span className="role-source role-source--unassigned t-mono">{t("Channel.roles.unassigned")}</span>
                           )}
                           {owner !== null && <span className="role-owner t-mono">{owner}</span>}
+                          {reportsTo !== null && (
+                            <span
+                              className={"role-report" + (reportsToVisible ? "" : " role-report--external") + " t-mono"}
+                            >
+                              {reportsToVisible
+                                ? t("Channel.roles.reportsTo", { parent: reportsTo })
+                                : t("Channel.roles.reportsToExternal", { parent: reportsTo })}
+                            </span>
+                          )}
                         </div>
                         {role === null || draftForRole === null ? (
                           <span className="role-text role-text--unassigned">{t("Channel.roles.noRoleYet")}</span>
@@ -2229,6 +2308,37 @@ export function ChannelPage({
       .finally(() => setCharterSaving(false));
   }, [charterDraft, charterSaving, slug, token]);
 
+  // issue #150：分工面板「同步到公告」——DivisionBoard 已经把分工内容拼好、合并进
+  // 现有公告文本，这里只负责落盘，复用与 saveCharter 相同的 setChannelCharter 写路径
+  // 和错误处理，唯一区别是写入的文本来自调用方而不是 charterDraft 状态。
+  const syncDivisionToCharter = useCallback((nextText: string) => {
+    if (charterSaving) return;
+    setCharterSaving(true);
+    setCharterError(null);
+    setChannelCharter(token, slug, nextText)
+      .then((body) => {
+        setCharter(body);
+        setCharterDraft(body.charter ?? "");
+        setCharterEditing(false);
+        writeSeenCharterRev(slug, body.charter_rev);
+        setSeenCharterRev(body.charter_rev);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setCharterError("only moderators or hosts can edit the charter");
+        else if (err instanceof ValidationError) setCharterError("charter must be 16KB or less");
+        else setCharterError("charter save failed");
+      })
+      .finally(() => setCharterSaving(false));
+  }, [charterSaving, slug, token]);
+
+  // issue #171：分工面板到 AgentTokens（已有的 project-agent 规则查看/编辑面板，
+  // commit 7f7e8e1）的入口——复用 setAdminSurface（关掉分工弹层，打开 AgentTokens），
+  // 不重复造轮子。
+  const openAgentRulesFromDivision = useCallback(() => {
+    setAdminSurface("agentTokens", true);
+  }, [setAdminSurface]);
+
   const saveLoopGuard = useCallback(() => {
     if (guardSaving !== null) return;
     const limit = Number(localLoopGuardLimit);
@@ -2982,6 +3092,11 @@ export function ChannelPage({
               onNewRoleDraft={setNewRoleDraft}
               onSaveRole={saveRole}
               onDeleteRole={clearRole}
+              charterText={charter?.charter ?? null}
+              onSyncToCharter={syncDivisionToCharter}
+              syncingCharter={charterSaving}
+              canManageAgentRules={canMintAgent && accountKey !== null}
+              onOpenAgentRules={openAgentRulesFromDivision}
             />
           )}
           {activePanel === "coordination" && coordinationContent}

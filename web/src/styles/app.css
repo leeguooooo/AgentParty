@@ -672,6 +672,17 @@
   min-width: 0;
   padding: 10px 12px 12px;
 }
+/* issue #150 / #171：分工面板头部动作条——同步到公告 + 跳转 agent 规则编辑 */
+.role-board-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.role-sync-charter-btn,
+.role-open-rules-btn {
+  font-size: 12px;
+  padding: 4px 9px;
+}
 .role-account-list {
   display: grid;
   gap: 10px;
@@ -772,6 +783,34 @@
   border-color: var(--t-faint);
   background: var(--t-panel);
 }
+/* issue #168：频道主负责人（host 角色）标注，让组织架构里"谁是这个频道的头"一眼可见 */
+.role-lead-tag {
+  flex: none;
+  padding: 1px 6px;
+  border: 1.4px solid var(--d-yellow);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: var(--t-accent);
+  font-weight: 700;
+  font-size: 11px;
+  line-height: 1.25;
+}
+/* issue #168：汇报关系——普通情况标注汇报对象，汇报对象不在本频道 roster 里时
+   用红色调提示，帮助发现/避免跨出本频道边界的汇报关系 */
+.role-report {
+  flex: none;
+  padding: 1px 6px;
+  border: 1.4px solid var(--t-faint);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: var(--t-dim);
+  font-size: 11px;
+  line-height: 1.25;
+}
+.role-report--external {
+  color: var(--d-red);
+  border-color: var(--d-red);
+}
 .role-select,
 .role-input,
 .role-name-input {
@@ -785,11 +824,13 @@
   padding: 5px 7px;
 }
 .role-text {
+  /* issue #150：分工职责说明之前单行截断看不全，改成可换行，读到完整内容 */
   min-width: 0;
   color: var(--t-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.4;
 }
 .role-text--unassigned {
   font-style: italic;
