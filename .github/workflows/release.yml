@@ -825,7 +825,7 @@ jobs:
       # CLI cosign .sig 是可选层（未配 COSIGN_PRIVATE_KEY 时不存在），故保留
       # fail_on_unmatched_files:false；Tauri updater .sig 已由 desktop job 强制校验。
       - name: upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           prerelease: ${{ steps.release-channel.outputs.prerelease }}
