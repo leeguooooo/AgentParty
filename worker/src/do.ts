@@ -9,8 +9,11 @@ import {
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
   MAX_WEBHOOKS_PER_CHANNEL,
+  MAX_MESSAGE_AUDIT_ROWS,
   MAX_WEBHOOK_DEAD_LETTERS,
   MAX_WEBHOOK_QUEUE_ROWS,
+  READ_CURSOR_RETENTION_MS,
+  WAKE_LEDGER_RETENTION_MS,
   DECISION_PROMPT_LIMIT,
   DECISION_OPTIONS_MAX,
   DECISION_OPTION_LIMIT,
@@ -1521,7 +1524,63 @@ export class ChannelDO extends Server<Env> {
     this.resumeDuePauses(now);
     await this.retryWebhooks(now);
     await this.checkTempArchive(now);
+    this.pruneStorage(now);
     await this.scheduleNextAlarm(now, live);
+  }
+
+  // #128：DO 存储有界修剪。wake_delivery_ledger / message_audit / read_cursor 此前只增不减，
+  // DO SQLite 无上限增长（10GB 上限前先拖慢 who/hello）。onAlarm 周期跑（60s presence 扫描顺带），
+  // 全走已在 DO 单线程内的 sql.exec，热路径零成本；每张表各按「消费者仍需的窗口」定界，见各方法注释。
+  private pruneStorage(now: number) {
+    this.pruneWakeLedger(now);
+    this.pruneMessageAudit();
+    this.pruneReadCursors(now);
+  }
+
+  // wake_delivery_ledger：按时间窗裁。保留窗口 WAKE_LEDGER_RETENTION_MS 严格大于预算窗口上限
+  // WAKE_BUDGET_MAX_WINDOW_MS（#108 wakeCountInWindow 只数 attempted_at >= now-windowMs，windowMs ≤ 30d），
+  // 故预算仍要数的行 attempted_at 一定 > cutoff，绝不被裁 → 预算不少计、不漏。#105 死信与 #107 resume
+  // 回填（linkWakeResume 按 mention_seq 事后补 ack/resume）都只关心近期行，35 天足够；/internal/wake-deliveries
+  // 观测丢失 35 天前的投递记录属可接受的保留策略。
+  private pruneWakeLedger(now: number) {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM wake_delivery_ledger WHERE attempted_at < ?",
+      now - WAKE_LEDGER_RETENTION_MS,
+    );
+  }
+
+  // message_audit：保留最新 MAX_MESSAGE_AUDIT_ROWS 行（按自增 id，镜像 recordDeadLetter 的裁剪手法）。
+  // 审计 API（/internal/messages/:seq/audit）只按 target_seq 查单条消息 → 近期消息对应高 id 行，永不被裁。
+  // 与 #196 撤回清洗正交：清洗按 target_seq 把撤回/编辑行正文置 NULL，这里按行数裁旧整行——被裁的旧行
+  // 正文早已是 NULL（撤回后不可再编辑），裁掉不泄露任何内容；EXISTS('retract') 子查询按 target_seq 命中，
+  // 裁旧行不影响同一 target 更晚（更高 id）的撤回行是否存在。
+  private pruneMessageAudit() {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM message_audit
+        WHERE id NOT IN (SELECT id FROM message_audit ORDER BY id DESC LIMIT ?)`,
+      MAX_MESSAGE_AUDIT_ROWS,
+    );
+  }
+
+  // read_cursor：PK=name，每身份仅一行 = 其当前游标，无重复行可裁。只裁「updated_at 早于保留窗口
+  // 且此刻无活连接」的陈旧游标——在线身份（含刚 caught-up、频道久无新帧而未再推进游标的）永不被裁其活游标。
+  // 断连超 READ_CURSOR_RETENTION_MS 仍未回来的身份，其读位对应的消息多半已过 RETAIN_N 被裁，游标失去意义；
+  // 它再上线时 recordSeen 会重建游标，无副作用（只是丢了旧读位，长期离线后本就无从谈起）。
+  private pruneReadCursors(now: number) {
+    const aged = this.ctx.storage.sql
+      .exec("SELECT name FROM read_cursor WHERE updated_at < ?", now - READ_CURSOR_RETENTION_MS)
+      .toArray()
+      .map((r) => String(r.name));
+    if (aged.length === 0) return;
+    const connected = new Set<string>();
+    for (const connection of this.getConnections<ConnState>()) {
+      const n = connection.state?.name;
+      if (n) connected.add(n);
+    }
+    for (const name of aged) {
+      if (connected.has(name)) continue;
+      this.ctx.storage.sql.exec("DELETE FROM read_cursor WHERE name = ?", name);
+    }
   }
 
   // spec §5：60s 无帧（ping 由 auto-response 记时间戳）判 offline，返回存活连接数
