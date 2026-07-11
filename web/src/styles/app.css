@@ -8,6 +8,10 @@
   height: 100dvh;
   display: flex;
   flex-direction: column;
+  /* #301：外壳锁死在视口高度，永不整体滚动。任何内容都由内部指定的滚动区
+     （.stream / .home / .app-side / 面板体 / 设置浮层）自己滚，溢出的兜底裁在
+     视口边缘，而不是让整块主面板跟着 body 一起滚。 */
+  overflow: hidden;
 }
 
 /* ---- 骨架 ---- */
@@ -490,6 +494,9 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* #301：主面板本身不滚——内容（.chan 里的 .stream / 落地页 .home）各自内部滚，
+     主面板只作固定高度的容器，绝不因内容变高而整体滚动。 */
+  overflow: hidden;
 }
 
 /* ---- 频道列表 ---- */
@@ -4249,12 +4256,17 @@
 /* ---- 登录闸 ---- */
 .gate {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 6px;
   padding: 24px;
+  /* #301：登录/错误态是 #root 直属的另一「主面板」。#root 现在裁在视口高度，
+     所以矮屏下 gate 的内容必须自己滚（min-height:0 让居中的 flex 内容可收缩），
+     否则会被视口裁掉顶部。 */
+  overflow-y: auto;
 }
 .gate-title { font-size: 40px; margin: 0; }
 .gate-sub { color: var(--t-muted); font-size: 15px; margin: 0 0 22px; }
