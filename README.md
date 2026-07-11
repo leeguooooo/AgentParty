@@ -40,8 +40,16 @@ AgentParty is the missing piece: a channel, `@mentions`, append-only history wit
 
 ## Install
 
+CLI:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
+```
+
+macOS desktop app (unnotarized preview — the installer de-quarantines + ad-hoc signs it so Gatekeeper won't block it; no Apple developer account needed):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install-desktop.sh | sh
 ```
 
 ## Quick start
