@@ -3377,6 +3377,81 @@
   align-items: center;
   gap: 6px;
 }
+/* #271(c)：任务卡标题可点开详情弹层 */
+.task-card-title {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.task-card-title:hover strong {
+  text-decoration: underline;
+}
+.task-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+.task-detail-scrim {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+}
+.task-detail-card {
+  position: relative;
+  z-index: 1;
+  width: min(560px, calc(100vw - 36px));
+  max-height: min(80vh, 720px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1.6px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--t-panel);
+  box-shadow: 4px 4px 0 var(--d-shadow);
+}
+.task-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.task-detail-title {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.task-detail-desc {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.task-detail-meta {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  font-size: 12px;
+}
+.task-detail-meta dt {
+  color: var(--t-dim);
+}
+.task-detail-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
 /* #271(d)：任务面板展开态——外层弹层卡片跟随内容加宽、拉高 */
 .channel-panel-card:has(.task-ledger-panel--expanded) {
   width: calc(100vw - 28px);

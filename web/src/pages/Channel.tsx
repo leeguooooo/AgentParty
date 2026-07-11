@@ -1356,6 +1356,9 @@ export function TaskLedgerPanel({
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   // #271(d)：展开放大——CSS class 切宽度，外层 channel-panel-card 用 :has() 跟随。
   const [expandedView, setExpandedView] = useState(false);
+  // #271(c)：任务详情弹层。存 id 不存快照，刷新后始终显示最新记录。
+  const [detailTaskId, setDetailTaskId] = useState<number | null>(null);
+  const detailTask = detailTaskId === null ? null : tasks.find((task) => task.id === detailTaskId) ?? null;
   const counts = tasks.reduce<Record<string, number>>((acc, task) => {
     acc[task.state] = (acc[task.state] ?? 0) + 1;
     return acc;
@@ -1401,7 +1404,14 @@ export function TaskLedgerPanel({
       >
         <div className="task-card-main">
           <span className="t-mono task-id">#{task.id}</span>
-          <strong>{task.title}</strong>
+          <button
+            type="button"
+            className="task-card-title"
+            aria-label={t("Channel.tasks.detailOpenAria", { id: task.id })}
+            onClick={() => setDetailTaskId(task.id)}
+          >
+            <strong>{task.title}</strong>
+          </button>
           <span className={`t-mono task-state task-state--${task.state}`}>{stateLabel(task.state)}</span>
         </div>
         {task.desc !== null && <p className="task-card-desc">{task.desc}</p>}
@@ -1603,6 +1613,84 @@ export function TaskLedgerPanel({
               </section>
             );
           })}
+        </div>
+      )}
+      {detailTask !== null && (
+        <div
+          className="task-detail-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("Channel.tasks.detailAria", { id: detailTask.id })}
+        >
+          <button
+            className="task-detail-scrim"
+            type="button"
+            aria-label={t("Channel.tasks.detailClose")}
+            onClick={() => setDetailTaskId(null)}
+          />
+          <section className="task-detail-card">
+            <header className="task-detail-head">
+              <span className="t-mono task-id">#{detailTask.id}</span>
+              <strong className="task-detail-title">{detailTask.title}</strong>
+              <span className={`t-mono task-state task-state--${detailTask.state}`}>{stateLabel(detailTask.state)}</span>
+              <button className="d-btn task-detail-close" type="button" onClick={() => setDetailTaskId(null)}>
+                {t("Channel.tasks.detailClose")}
+              </button>
+            </header>
+            {detailTask.desc !== null && detailTask.desc !== "" ? (
+              <p className="task-detail-desc">{detailTask.desc}</p>
+            ) : (
+              <p className="charter-empty">{t("Channel.tasks.detailNoDesc")}</p>
+            )}
+            <dl className="task-detail-meta">
+              <dt>{t("Channel.tasks.detail.priority")}</dt>
+              <dd className="t-mono">P{detailTask.priority}</dd>
+              <dt>{t("Channel.tasks.detail.assignee")}</dt>
+              <dd className="t-mono">{detailTask.assignee !== null ? `@${detailTask.assignee.name} · ${detailTask.assignee.kind}` : "—"}</dd>
+              <dt>{t("Channel.tasks.detail.createdBy")}</dt>
+              <dd className="t-mono">{`${detailTask.created_by} · ${detailTask.created_by_kind}`}</dd>
+              {detailTask.labels.length > 0 && (
+                <>
+                  <dt>{t("Channel.tasks.detail.labels")}</dt>
+                  <dd className="t-mono">{detailTask.labels.join(", ")}</dd>
+                </>
+              )}
+              {detailTask.parent_id !== null && (
+                <>
+                  <dt>{t("Channel.tasks.detail.parent")}</dt>
+                  <dd className="t-mono">#{detailTask.parent_id}</dd>
+                </>
+              )}
+              {detailTask.anchor_seqs.length > 0 && (
+                <>
+                  <dt>{t("Channel.tasks.detail.msgs")}</dt>
+                  <dd className="t-mono">{detailTask.anchor_seqs.map((seq) => `#${seq}`).join(", ")}</dd>
+                </>
+              )}
+              {detailTask.blocked_reason !== null && (
+                <>
+                  <dt>{t("Channel.tasks.detail.blockedReason")}</dt>
+                  <dd>{detailTask.blocked_reason}</dd>
+                </>
+              )}
+              {detailTask.external_ref !== null && (
+                <>
+                  <dt>{t("Channel.tasks.detail.externalRef")}</dt>
+                  <dd className="t-mono">{detailTask.external_ref}</dd>
+                </>
+              )}
+              <dt>{t("Channel.tasks.detail.created")}</dt>
+              <dd className="t-mono">{fmtTime(detailTask.created_at)}</dd>
+              <dt>{t("Channel.tasks.detail.updated")}</dt>
+              <dd className="t-mono">{fmtTime(detailTask.updated_at)}</dd>
+              {detailTask.completed_at !== null && (
+                <>
+                  <dt>{t("Channel.tasks.detail.completed")}</dt>
+                  <dd className="t-mono">{fmtTime(detailTask.completed_at)}</dd>
+                </>
+              )}
+            </dl>
+          </section>
         </div>
       )}
     </section>

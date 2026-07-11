@@ -268,3 +268,37 @@ describe("TaskLedgerPanel expanded view (#271)", () => {
       .toBe("task-ledger-panel");
   });
 });
+
+// #271(c)：点击任务卡标题打开详情弹层（完整 title/desc/meta）。
+describe("TaskLedgerPanel task detail (#271)", () => {
+  test("clicking a task title opens the detail dialog and close dismisses it", async () => {
+    const detailed = task({
+      id: 7,
+      title: "detail-task",
+      desc: "long description body",
+      assignee: { name: "worker-a", kind: "agent" },
+      labels: ["infra"],
+    });
+    const r = render("en", baseProps({ tasks: [detailed] }));
+    expect(r.root.findAll((n) => n.props["aria-label"] === "task 7 details")).toHaveLength(0);
+
+    await act(async () => { findByAria(r, "Open task 7 details").props.onClick(); });
+    findByAria(r, "task 7 details");
+    const text = allText(r);
+    expect(text).toContain("long description body");
+    expect(text).toContain("created by"); // meta 标签只出现在详情里
+    expect(text).toContain("human-a · human");
+    expect(text).toContain("@worker-a · agent");
+
+    await act(async () => {
+      r.root.find((n) => n.props.className === "d-btn task-detail-close").props.onClick();
+    });
+    expect(r.root.findAll((n) => n.props["aria-label"] === "task 7 details")).toHaveLength(0);
+  });
+
+  test("detail dialog shows a placeholder when the task has no desc", async () => {
+    const r = render("en", baseProps({ tasks: [task({ id: 9, desc: null })] }));
+    await act(async () => { findByAria(r, "Open task 9 details").props.onClick(); });
+    expect(allText(r)).toContain("No details");
+  });
+});
