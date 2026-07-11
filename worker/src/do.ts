@@ -1563,7 +1563,16 @@ export class ChannelDO extends Server<Env> {
   }
 
   // worker 每次转发都会带上频道快照头，do 写 meta 缓存（同 archived 的手法）
-  private cacheChannelMeta(h: Headers, host: string | null) {
+  // 每个请求都带着自己那一刻的 D1 快照头进来。无脑 last-writer-wins 会让在途旧快照回滚
+  // 刚改的配置（#102）——正如 archived 早就防住的同一竞态：archived 只由权威路径写、且是单向
+  // 闩，旧快照掀不回去。这里对 charter_rev / guard config 补上同款防线：
+  //   - charter_rev 天生是单调计数器（D1 里只 +1），只接受 rev ≥ 已缓存值；旧快照的小 rev 丢弃。
+  //   - guard config（loop/workflow 的 enabled/limit）没有自带版本号，无法比较新旧。于是照搬
+  //     archived 的手法「DO 自己写下的值即权威」：只有权威配置推送（/internal/init，由 guard PUT
+  //     触发）能改动已缓存的 guard 值；在途请求的顺带快照只能在 DO 从未缓存过时做首次播种，绝不
+  //     覆盖已有值——这样管理员刚关掉的 guard 不会被旧快照又打开。
+  private cacheChannelMeta(h: Headers, host: string | null, opts?: { authoritative?: boolean }) {
+    const authoritative = opts?.authoritative === true;
     const mode = h.get("x-ap-mode");
     if (mode === "normal" || mode === "party") this.setMeta("mode", mode);
     const ckind = h.get("x-ap-channel-kind");
@@ -1574,27 +1583,38 @@ export class ChannelDO extends Server<Env> {
     if (completionReviewPolicy === "sender" || completionReviewPolicy === "owner") {
       this.setMeta("completion_review_policy", completionReviewPolicy);
     }
-    const loopGuardEnabled = h.get("x-ap-loop-guard-enabled");
-    if (loopGuardEnabled === "0" || loopGuardEnabled === "1") {
-      this.setMeta("loop_guard_enabled", loopGuardEnabled);
-      if (loopGuardEnabled === "0") this.deleteMeta("loop_guard_limit");
+    // loop guard：权威推送随意改；顺带快照只在从未缓存 enabled 时播种，不回滚
+    if (authoritative || this.getMeta("loop_guard_enabled") === null) {
+      const loopGuardEnabled = h.get("x-ap-loop-guard-enabled");
+      if (loopGuardEnabled === "0" || loopGuardEnabled === "1") {
+        this.setMeta("loop_guard_enabled", loopGuardEnabled);
+        if (loopGuardEnabled === "0") this.deleteMeta("loop_guard_limit");
+      }
+      const rawLoopGuardLimit = h.get("x-ap-loop-guard-limit");
+      if (rawLoopGuardLimit === "") this.deleteMeta("loop_guard_limit");
+      const loopGuardLimit = Number(rawLoopGuardLimit ?? "");
+      if (Number.isInteger(loopGuardLimit) && loopGuardLimit > 0) {
+        this.setMeta("loop_guard_limit", String(Math.min(loopGuardLimit, 10_000)));
+      }
     }
-    const rawLoopGuardLimit = h.get("x-ap-loop-guard-limit");
-    if (rawLoopGuardLimit === "") this.deleteMeta("loop_guard_limit");
-    const loopGuardLimit = Number(rawLoopGuardLimit ?? "");
-    if (Number.isInteger(loopGuardLimit) && loopGuardLimit > 0) {
-      this.setMeta("loop_guard_limit", String(Math.min(loopGuardLimit, 10_000)));
+    // workflow guard：同上
+    if (authoritative || this.getMeta("workflow_guard_enabled") === null) {
+      const workflowGuardEnabled = h.get("x-ap-workflow-guard-enabled");
+      if (workflowGuardEnabled === "0" || workflowGuardEnabled === "1") {
+        this.setMeta("workflow_guard_enabled", workflowGuardEnabled);
+      }
+      const workflowGuardLimit = Number(h.get("x-ap-workflow-guard-limit") ?? "");
+      if (Number.isInteger(workflowGuardLimit) && workflowGuardLimit > 0) {
+        this.setMeta("workflow_guard_limit", String(Math.min(workflowGuardLimit, 1000)));
+      }
     }
-    const workflowGuardEnabled = h.get("x-ap-workflow-guard-enabled");
-    if (workflowGuardEnabled === "0" || workflowGuardEnabled === "1") {
-      this.setMeta("workflow_guard_enabled", workflowGuardEnabled);
-    }
-    const workflowGuardLimit = Number(h.get("x-ap-workflow-guard-limit") ?? "");
-    if (Number.isInteger(workflowGuardLimit) && workflowGuardLimit > 0) {
-      this.setMeta("workflow_guard_limit", String(Math.min(workflowGuardLimit, 1000)));
-    }
+    // charter_rev：单调守卫，只前进不后退（旧快照的小 rev 丢弃）
     const charterRev = Number(h.get("x-ap-charter-rev") ?? "");
-    if (Number.isInteger(charterRev) && charterRev >= 0) this.setMeta("charter_rev", String(charterRev));
+    if (Number.isInteger(charterRev) && charterRev >= 0) {
+      const cachedRaw = Number(this.getMeta("charter_rev") ?? "");
+      const cached = Number.isInteger(cachedRaw) ? cachedRaw : -1;
+      if (charterRev >= cached) this.setMeta("charter_rev", String(charterRev));
+    }
     if (host) this.setMeta("host", host);
   }
 
@@ -1968,7 +1988,9 @@ export class ChannelDO extends Server<Env> {
       return Response.json({ identities: [...identities.values()].sort((a, b) => a.name.localeCompare(b.name)) });
     }
     if (url.pathname === "/internal/init" && request.method === "POST") {
-      this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
+      // /internal/init 是权威配置推送（channel 创建 + 每次 guard PUT 都打这条），
+      // 承载当下 D1 的真值，故允许改动已缓存的 guard config（#102）。
+      this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"), { authoritative: true });
       if (this.getMeta("ckind") === "temp") {
         const born = Date.now();
         this.setMeta("born", String(born));
