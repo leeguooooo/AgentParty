@@ -12,6 +12,7 @@ import {
   type CompletionGate,
   type CompletionReview,
   type CompletionReviewPolicy,
+  type DecisionMode,
   EXIT_ARCHIVED,
   EXIT_AUTH,
   EXIT_LOOP_GUARD,
@@ -815,6 +816,36 @@ export async function reviewCompletion(
     headers: bearerJson(token),
     body: JSON.stringify(body),
   })) as { message: MsgFrame; reply: MsgFrame };
+}
+
+// 人类决策回应（#284）：人类/moderator 对某条 decision_request 点选项/审批。
+// approval 用 { action }；choice 用 { option }（下标或选项文本）。
+export async function respondDecision(
+  server: string,
+  token: string,
+  slug: string,
+  seq: number,
+  body: { action?: "approve" | "reject"; option?: number | string; reason?: string },
+): Promise<{ message: MsgFrame; reply: MsgFrame }> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/messages/${seq}/decision`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify(body),
+  })) as { message: MsgFrame; reply: MsgFrame };
+}
+
+// 频道决策模式（#284）：approval（人类审批）↔ unattended（无人值守）。moderator only。
+export async function setDecisionMode(
+  server: string,
+  token: string,
+  slug: string,
+  mode: DecisionMode,
+): Promise<{ mode: DecisionMode }> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/decision-mode`, {
+    method: "PUT",
+    headers: bearerJson(token),
+    body: JSON.stringify({ mode }),
+  })) as { mode: DecisionMode };
 }
 
 export async function fetchWakeDeliveries(

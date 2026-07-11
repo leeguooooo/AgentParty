@@ -1143,6 +1143,74 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/decision-mode": {
+      put: {
+        summary: "configure the channel human-decision mode (#284)",
+        security: [{ bearer: [] }],
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["mode"],
+                properties: {
+                  mode: {
+                    type: "string",
+                    enum: ["approval", "unattended"],
+                    description: "approval keeps decision_request pending for a human; unattended auto-resolves on send",
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{mode}" },
+          "400": { description: "invalid mode" },
+          "403": { description: "only channel moderator can configure decision mode" },
+          "404": { description: "channel not found" },
+          "410": { description: "channel archived" },
+        },
+      },
+    },
+    "/api/channels/{slug}/messages/{seq}/decision": {
+      post: {
+        summary: "respond to a pending decision_request — approve/reject or pick an option (#284)",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "seq", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  action: { type: "string", enum: ["approve", "reject"], description: "for approval-kind requests" },
+                  option: {
+                    oneOf: [{ type: "integer", minimum: 0 }, { type: "string" }],
+                    description: "for choice-kind requests: 0-based index or the option text",
+                  },
+                  reason: { type: "string", description: "optional note; public" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{message,reply}; broadcasts message_update(decision) and a decision_response reply" },
+          "400": { description: "invalid option/action, target is not a decision request, or out of range" },
+          "403": { description: "readonly, the requester, or a non-human/non-moderator responder" },
+          "404": { description: "channel or message not found" },
+          "409": { description: "decision is not pending (already resolved or auto-resolved)" },
+          "410": { description: "channel archived" },
+        },
+      },
+    },
     "/api/channels/{slug}/webhooks": {
       get: {
         summary: "list outbound webhooks (secret is never returned)",

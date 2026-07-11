@@ -2501,6 +2501,64 @@
   color: var(--p-blocked);
   background: color-mix(in srgb, var(--p-blocked) 10%, var(--t-panel));
 }
+/* 频道决策协议（#284）：decision_request 卡片 + 选项按钮 + 落地状态 */
+.msg-decision-badge {
+  font-size: 10px;
+  padding: 0 6px;
+  border: 1.4px solid var(--d-blue);
+  border-radius: 0;
+  color: var(--d-blue);
+  background: var(--d-blue-soft);
+}
+.msg-decision-badge--resolved,
+.msg-decision-badge--auto_resolved {
+  border-color: var(--p-done);
+  color: var(--p-done);
+  background: color-mix(in srgb, var(--p-done) 12%, var(--t-panel));
+}
+.msg-decision {
+  width: fit-content;
+  max-width: 100%;
+  margin: 6px 0 4px;
+  padding: 6px 10px;
+  border: 1.6px solid var(--d-blue);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--d-blue-soft) 70%, var(--t-panel));
+  color: var(--d-blue);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.msg-decision--resolved,
+.msg-decision--auto_resolved {
+  border-color: var(--p-done);
+  color: var(--p-done);
+  background: color-mix(in srgb, var(--p-done) 8%, var(--t-panel));
+}
+.msg-decision-prompt {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.msg-decision-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.msg-decision-opt {
+  font-size: 11px;
+}
+.msg-decision-opt--reject {
+  border-color: var(--p-blocked);
+  color: var(--p-blocked);
+}
+.msg-decision-status {
+  font-size: 11px;
+  color: var(--t-dim);
+}
+.msg-decision-status--resolved {
+  color: inherit;
+  font-weight: 600;
+}
 .msg-fill { flex: 1; }
 .msg-copy-feedback {
   font-size: 11px;

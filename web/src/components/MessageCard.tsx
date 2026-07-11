@@ -41,6 +41,10 @@ interface Props {
   onEditDraftChange(value: string): void;
   onEditCancel(): void;
   onEditSave(): void;
+  // 频道决策协议（#284）：人类/moderator 是否可对本条 decision_request 拍板 + 回调。
+  canRespondDecision?: boolean;
+  decisionBusy?: boolean;
+  onDecisionRespond?(seq: number, choice: { action: "approve" | "reject" } | { option: number }): void;
 }
 
 function contextBits(ctx: AgentContext | undefined): string[] {
@@ -123,6 +127,9 @@ export function MessageCard({
   onEditDraftChange,
   onEditCancel,
   onEditSave,
+  canRespondDecision,
+  decisionBusy,
+  onDecisionRespond,
 }: Props) {
   const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -164,6 +171,12 @@ export function MessageCard({
   const review = msg.completion_review;
   const reviewBadge = reviewLabel(msg);
   const reviewTitleText = reviewTitle(msg);
+  // 决策协议（#284）：decision_request 挂请求 + 落地状态；decision_response 是回应回复。
+  const decision = msg.decision_request;
+  const resolution = msg.decision_resolution;
+  const decisionPending = decision !== undefined && (resolution === undefined || resolution.state === "pending");
+  const decisionState = resolution?.state ?? (decision !== undefined ? "pending" : undefined);
+  const decisionResponse = msg.decision_response;
   const canRevise = (self !== null && msg.sender.name === self) || canModerate;
   const canShowActions = msg.kind === "message";
   const canReply = canShowActions && !msg.retracted;
@@ -350,6 +363,16 @@ export function MessageCard({
             {reviewBadge}
           </span>
         )}
+        {decisionState !== undefined && (
+          <span className={`msg-decision-badge msg-decision-badge--${decisionState}`}>
+            {t(`MessageCard.decision.state.${decisionState}`)}
+          </span>
+        )}
+        {decisionResponse !== undefined && (
+          <span className="msg-decision-badge msg-decision-badge--response">
+            {t("MessageCard.decision.responseBadge")}
+          </span>
+        )}
         <span className="msg-fill" />
         {copied && <span className="msg-copy-feedback">{t("MessageCard.copied")}</span>}
         {canShowActions && (
@@ -462,6 +485,60 @@ export function MessageCard({
             review.replaced_by_seq ? `replaced by #${review.replaced_by_seq}` : null,
             review.reason ? `reason: ${review.reason}` : null,
           ].filter((part): part is string => part !== null).join(" · ")}
+        </div>
+      )}
+      {decision !== undefined && !msg.retracted && (
+        <div className={`msg-decision msg-decision--${decisionState}`} aria-label="decision request">
+          <div className="msg-decision-prompt">{decision.prompt}</div>
+          {decisionPending && canRespondDecision === true && onDecisionRespond !== undefined ? (
+            <div className="msg-decision-options">
+              {decision.kind === "approval" ? (
+                <>
+                  <button
+                    type="button"
+                    className="d-btn d-btn--primary msg-decision-opt"
+                    disabled={decisionBusy === true}
+                    onClick={() => onDecisionRespond(msg.seq, { action: "approve" })}
+                  >
+                    {t("MessageCard.decision.approve")}
+                  </button>
+                  <button
+                    type="button"
+                    className="d-btn msg-decision-opt msg-decision-opt--reject"
+                    disabled={decisionBusy === true}
+                    onClick={() => onDecisionRespond(msg.seq, { action: "reject" })}
+                  >
+                    {t("MessageCard.decision.reject")}
+                  </button>
+                </>
+              ) : (
+                decision.options.map((opt, i) => (
+                  <button
+                    key={`${i}-${opt}`}
+                    type="button"
+                    className="d-btn msg-decision-opt"
+                    disabled={decisionBusy === true}
+                    onClick={() => onDecisionRespond(msg.seq, { option: i })}
+                  >
+                    {i + 1}. {opt}
+                  </button>
+                ))
+              )}
+            </div>
+          ) : decisionPending ? (
+            <div className="msg-decision-status">
+              {t("MessageCard.decision.awaiting")}
+              {decision.kind === "choice" ? ` · ${decision.options.map((opt, i) => `${i + 1}. ${opt}`).join(" · ")}` : ""}
+            </div>
+          ) : (
+            <div className="msg-decision-status msg-decision-status--resolved">
+              {t(resolution?.state === "auto_resolved" ? "MessageCard.decision.autoResolved" : "MessageCard.decision.resolved", {
+                option: resolution?.chosen_option ?? "?",
+              })}
+              {resolution?.responder ? ` · ${resolution.responder.name}` : ""}
+              {resolution?.reason ? ` · ${resolution.reason}` : ""}
+            </div>
+          )}
         </div>
       )}
       {editing ? (

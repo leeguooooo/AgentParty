@@ -475,6 +475,42 @@ export async function reviewCompletion(
   return (await res.json()) as { message: MsgFrame; reply?: MsgFrame };
 }
 
+// 频道决策协议（#284）：人类/moderator 在频道内对某条 decision_request 拍板。
+export async function respondDecision(
+  token: string,
+  slug: string,
+  seq: number,
+  body: { action: "approve" | "reject"; reason?: string } | { option: number | string; reason?: string },
+): Promise<{ message: MsgFrame; reply?: MsgFrame }> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/messages/${seq}/decision`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 400 || res.status === 409) throw new ValidationError("invalid decision response");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/messages/${seq}/decision failed (${res.status})`);
+  return (await res.json()) as { message: MsgFrame; reply?: MsgFrame };
+}
+
+export async function setDecisionMode(
+  token: string,
+  slug: string,
+  mode: "approval" | "unattended",
+): Promise<{ mode: string }> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/decision-mode`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 400) throw new ValidationError("invalid decision mode");
+  if (!res.ok) throw new Error(`PUT /api/channels/${slug}/decision-mode failed (${res.status})`);
+  return (await res.json()) as { mode: string };
+}
+
 export async function setChannelRole(
   token: string,
   slug: string,
