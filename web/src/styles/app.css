@@ -5189,3 +5189,24 @@
 .settings-account-chip { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--t-faint, #eee); text-transform: uppercase; }
 .settings-account-chip--human { background: var(--d-green-soft, #d7f0d7); }
 .settings-logout { margin-top: 12px; border: 1px solid var(--border, #ccc); background: transparent; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; color: var(--danger, #e5534b); }
+/* 主题分段选择（#273）：与语言开关同风格的一排硬边按钮 */
+.settings-theme { display: inline-flex; gap: 2px; padding: 2px; border: 1.4px solid var(--t-faint, #ddd); }
+.settings-theme-btn {
+  background: none;
+  border: none;
+  padding: 3px 12px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--t-dim, #888);
+  cursor: pointer;
+}
+.settings-theme-btn:hover { color: var(--t-accent, #ff5447); }
+.settings-theme-btn.is-active { background: var(--d-yellow, #f5e6a8); color: var(--d-ink, #1a1a1a); }
+/* 账号区的补充身份字段（邮箱/登录方式） */
+.settings-facts { margin: 8px 0 0; display: grid; gap: 4px; }
+.settings-facts > div { display: flex; justify-content: space-between; gap: 14px; font-size: 12px; }
+.settings-facts dt { color: var(--t-dim, #888); }
+.settings-facts dd { margin: 0; color: var(--t-body, #2a2820); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 面板内的 @别名编辑（复用 HandleSetup）与账号区留出间距 */
+.settings-handle { margin-top: 12px; }

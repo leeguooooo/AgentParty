@@ -1,16 +1,14 @@
 // 应用骨架：登录闸 → 头部 + 左侧频道列表 + 右侧（首页 | 频道页）
 import { isMember } from "@agentparty/shared";
 import { membershipApplyMailto, membershipStatusOf } from "./lib/membership";
-import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChannelList } from "./components/ChannelList";
 import { CreateChannel } from "./components/CreateChannel";
 import { DesktopSettings } from "./components/DesktopSettings";
 import { DesktopDownloadLink } from "./components/DesktopDownloadLink";
 import { DesktopPairingGate } from "./components/DesktopPairingGate";
 import { DesktopUpdater } from "./components/DesktopUpdater";
-import { HandleSetup } from "./components/HandleSetup";
 import { TokenGate } from "./components/TokenGate";
-import { LanguageSwitcher } from "./components/LanguageSwitcher";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { OnboardingGuide } from "./components/OnboardingGuide";
 import { ServerProfileAddGate, ServerSwitcher } from "./components/ServerProfiles";
@@ -228,35 +226,11 @@ export function App() {
     return () => { alive = false; };
   }, [desktop]);
 
-  // 人类账号设置/修改 @handle（Task B2）：me chip 旁的入口开关 + 浮层定位（fixed + 视口内钳制，
-  // 手法同 AgentTokens 那次 viewport 修复）；banner 关闭态只在本次会话内记，不落盘。
-  const [handleSetupOpen, setHandleSetupOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false); // #273 全局设置面板
-  const [handlePanelStyle, setHandlePanelStyle] = useState<CSSProperties>({});
+  // 全局设置面板（#273）：语言/主题/通知/账号（身份 + @别名编辑 + 退出）都收进这里，由顶栏齿轮开合。
+  // 账号 @handle / 昵称编辑复用 HandleSetup，放进面板的账号区（不再在顶栏单独挂一个浮层入口）。
+  // banner 关闭态只在本次会话内记，不落盘。
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [handleBannerDismissed, setHandleBannerDismissed] = useState(false);
-  const handleAnchorRef = useRef<HTMLSpanElement | null>(null);
-
-  useLayoutEffect(() => {
-    if (!handleSetupOpen) return;
-    const update = () => {
-      const anchor = handleAnchorRef.current?.getBoundingClientRect();
-      if (!anchor) return;
-      const gap = 6;
-      const margin = 12;
-      const width = Math.min(320, window.innerWidth - margin * 2);
-      const top = Math.min(anchor.bottom + gap, window.innerHeight - margin);
-      const left = Math.max(margin, Math.min(anchor.right - width, window.innerWidth - width - margin));
-      const maxHeight = Math.max(160, window.innerHeight - top - margin);
-      setHandlePanelStyle({ left, top, width, maxHeight });
-    };
-    update();
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
-    return () => {
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
-    };
-  }, [handleSetupOpen]);
 
   // oidc 配置存 ref，供 onAuthFailed/续期在稳定回调里读到最新值（避免进 effect 依赖引发重跑）
   const oidcRef = useRef<OidcConfig | null>(null);
@@ -485,7 +459,7 @@ export function App() {
     if (!desktop && matchPair(path)) return;
     if (token === null) {
       setMe(null);
-      setHandleSetupOpen(false);
+      setSettingsOpen(false);
       setHandleBannerDismissed(false);
       return;
     }
@@ -602,7 +576,7 @@ export function App() {
     setChannels(null);
     setListError(null);
     setMe(null);
-    setHandleSetupOpen(false);
+    setSettingsOpen(false);
     setHandleBannerDismissed(false);
     setToken(null);
   };
@@ -857,42 +831,18 @@ export function App() {
             )}
           </span>
         )}
-        {canSetHandle && me !== null && (
-          <span className="handlesetup-anchor" ref={handleAnchorRef}>
-            <button
-              type="button"
-              className={"d-btn handlesetup-trigger" + (me.handle === null ? " handlesetup-trigger--cta" : "")}
-              onClick={() => setHandleSetupOpen((v) => !v)}
-              aria-expanded={handleSetupOpen}
-              title={me.handle !== null ? t("App.handle.editHint") : t("App.handle.setCta")}
-            >
-              <span className="handlesetup-trigger-edit" aria-hidden="true">
-                ✎
-              </span>
-              {me.handle !== null ? (
-                <>
-                  <span className="handlesetup-trigger-label">{t("App.handle.chipLabel")}</span>
-                  <span className="handlesetup-trigger-value">{me.handle}</span>
-                </>
-              ) : (
-                <span className="handlesetup-trigger-value">{t("App.handle.chipUnset")}</span>
-              )}
-            </button>
-          </span>
-        )}
-        {handleSetupOpen && me !== null && (
-          <div className="handlesetup-panel" style={handlePanelStyle}>
-            <HandleSetup
-              current={me.handle}
-              mode={me.kind === "agent" ? "nickname" : "handle"}
-              onSaved={(handle) => {
-                setMe((prev) => (prev ? { ...prev, handle } : prev));
-                setHandleSetupOpen(false);
-                setHandleBannerDismissed(true);
-              }}
-              onClose={() => setHandleSetupOpen(false)}
-            />
-          </div>
+        {canSetHandle && me !== null && me.handle === null && (
+          <button
+            type="button"
+            className="d-btn handlesetup-trigger handlesetup-trigger--cta"
+            onClick={() => setSettingsOpen(true)}
+            title={t("App.handle.setCta")}
+          >
+            <span className="handlesetup-trigger-edit" aria-hidden="true">
+              ✎
+            </span>
+            <span className="handlesetup-trigger-value">{t("App.handle.chipUnset")}</span>
+          </button>
         )}
         <DesktopSettings serverOrigin={activeOrigin} />
         {desktop && (
@@ -908,7 +858,6 @@ export function App() {
           />
         )}
         <DesktopUpdater />
-        <LanguageSwitcher />
         <button
           type="button"
           className="app-settings-btn"
@@ -918,20 +867,11 @@ export function App() {
         >
           ⚙
         </button>
-        {!isShareMode() && (
-          <button
-            type="button"
-            className="app-signout t-mono"
-            disabled={desktopLogoutPending}
-            onClick={() => void signOut()}
-          >
-            {desktopLogoutPending ? t("App.desktop.signingOut") : t("App.signOut")}
-          </button>
-        )}
       </header>
       {settingsOpen && (
         <SettingsPanel
           me={me}
+          canSetHandle={canSetHandle}
           onClose={() => setSettingsOpen(false)}
           onLogout={
             isShareMode() || desktopLogoutPending
@@ -941,13 +881,17 @@ export function App() {
                   void signOut();
                 }
           }
+          onHandleSaved={(handle) => {
+            setMe((prev) => (prev ? { ...prev, handle } : prev));
+            setHandleBannerDismissed(true);
+          }}
         />
       )}
-      {canSetHandle && me !== null && me.handle === null && !handleBannerDismissed && !handleSetupOpen && (
+      {canSetHandle && me !== null && me.handle === null && !handleBannerDismissed && !settingsOpen && (
         <p className="banner banner--yellow handle-banner" role="status">
           <span className="handle-banner-text">{t("App.handle.banner")}</span>
           <span className="handle-banner-actions">
-            <button type="button" className="d-btn" onClick={() => setHandleSetupOpen(true)}>
+            <button type="button" className="d-btn" onClick={() => setSettingsOpen(true)}>
               {t("App.handle.bannerAction")}
             </button>
             <button

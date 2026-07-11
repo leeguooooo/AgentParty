@@ -317,10 +317,14 @@ describe("App silent renewal keeps channels (#123)", () => {
     // 身份 A 的 listChannels 请求已发出、还没 resolve（deferred）
     expect(channelTokens).toEqual([tokenA]);
 
-    // 真实「登出」路径：点击退出登录按钮，token A → null，token-keyed effect 的旧闭包在
-    // cleanup 时把 alive 置 false（等价实现替换后则是 tokenRef.current 不再等于捕获的 tokenA）。
+    // 真实「登出」路径：打开全局设置面板 → 点面板里的退出登录（#273 后退出登录归位到设置面板），
+    // token A → null，token-keyed effect 的旧闭包在 cleanup 时把 alive 置 false
+    // （等价实现替换后则是 tokenRef.current 不再等于捕获的 tokenA）。
     await act(async () => {
-      const signOutButton = renderer!.root.findByProps({ className: "app-signout t-mono" });
+      renderer!.root.findByProps({ className: "app-settings-btn" }).props.onClick();
+    });
+    await act(async () => {
+      const signOutButton = renderer!.root.findByProps({ className: "settings-logout" });
       signOutButton.props.onClick();
     });
     await waitFor(() => {

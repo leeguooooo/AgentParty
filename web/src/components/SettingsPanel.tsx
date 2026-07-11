@@ -1,9 +1,12 @@
-// #273 全局设置：把散落的跨频道偏好收进一个面板——语言、被@通知、账号（身份 + 退出）。
-// 纯前端；通知偏好读写 localStorage 的 ap_notify_optin（与 NotifyToggle 同键），语言走 LanguageSwitcher。
-// 不动顶栏原有的桌面专属控件，只新增一个入口 + 面板。
+// #273 全局设置：把散落的跨频道偏好收进一个面板——语言、主题、被@通知、账号（身份 + @别名编辑 + 退出）。
+// 纯前端；通知偏好读写 localStorage 的 ap_notify_optin（与 NotifyToggle 同键），语言走 LanguageSwitcher，
+// 主题走 lib/theme（doodle↔midnight，写 <html data-theme> + localStorage）。账号 @handle/昵称编辑复用
+// HandleSetup——顶栏不再单独挂浮层入口，编辑归位到这里。不动顶栏原有的桌面专属控件。
 import { useCallback, useEffect, useState } from "react";
 import { useT } from "../i18n/useT";
 import { LanguageSwitcher } from "./LanguageSwitcher";
+import { HandleSetup } from "./HandleSetup";
+import { applyTheme, readStoredTheme, SUPPORTED_THEMES, type Theme } from "../lib/theme";
 import "../i18n/strings/App";
 
 const NOTIFY_OPTIN_KEY = "ap_notify_optin";
@@ -23,19 +26,26 @@ export interface SettingsMe {
   handle: string | null;
   display_name: string | null;
   owner: string | null;
+  email?: string | null;
+  provider?: string | null;
 }
 
 export function SettingsPanel({
   me,
+  canSetHandle = false,
   onClose,
   onLogout,
+  onHandleSaved,
 }: {
   me: SettingsMe | null;
+  canSetHandle?: boolean;
   onClose: () => void;
   onLogout: (() => void) | null;
+  onHandleSaved?: (value: string) => void;
 }) {
   const t = useT();
   const [notifyOptin, setNotifyOptin] = useState<boolean>(readNotifyOptin);
+  const [theme, setTheme] = useState<Theme>(readStoredTheme);
 
   // Esc 关闭；打开时锁焦点在面板（简版：Esc + 点遮罩关）。
   useEffect(() => {
@@ -45,6 +55,11 @@ export function SettingsPanel({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  const pickTheme = useCallback((next: Theme) => {
+    applyTheme(next);
+    setTheme(next);
+  }, []);
 
   const toggleNotify = useCallback(() => {
     setNotifyOptin((prev) => {
@@ -82,6 +97,24 @@ export function SettingsPanel({
         </section>
 
         <section className="settings-section">
+          <div className="settings-label">{t("App.settings.theme")}</div>
+          <div className="settings-theme" role="group" aria-label={t("App.settings.theme")}>
+            {SUPPORTED_THEMES.map((option) => (
+              <button
+                key={option.code}
+                type="button"
+                data-theme-code={option.code}
+                className={"settings-theme-btn" + (option.code === theme ? " is-active" : "")}
+                aria-pressed={option.code === theme}
+                onClick={() => pickTheme(option.code)}
+              >
+                {t(option.labelKey)}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="settings-section">
           <div className="settings-label">{t("App.settings.notifications")}</div>
           <button
             type="button"
@@ -105,6 +138,25 @@ export function SettingsPanel({
             </div>
             {me.owner !== null && me.owner !== me.name && (
               <p className="settings-hint">owner: {me.owner}</p>
+            )}
+            {(me.email != null || me.provider != null) && (
+              <dl className="settings-facts">
+                {me.email != null && (
+                  <div><dt>{t("App.settings.email")}</dt><dd>{me.email}</dd></div>
+                )}
+                {me.provider != null && (
+                  <div><dt>{t("App.settings.provider")}</dt><dd>{me.provider}</dd></div>
+                )}
+              </dl>
+            )}
+            {canSetHandle && (
+              <div className="settings-handle">
+                <HandleSetup
+                  current={me.handle}
+                  mode={me.kind === "agent" ? "nickname" : "handle"}
+                  onSaved={(value) => onHandleSaved?.(value)}
+                />
+              </div>
             )}
             {onLogout !== null && (
               <button type="button" className="settings-logout" onClick={onLogout}>

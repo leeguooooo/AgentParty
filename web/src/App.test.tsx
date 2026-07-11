@@ -385,7 +385,7 @@ describe("App desktop server pairing behavior", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(root.findByProps({ className: "app-signout t-mono" })).toBeTruthy();
+    expect(root.findByProps({ className: "app-settings-btn" })).toBeTruthy();
     expect(loadActiveServerOrigin(localStorage)).toBe(privateOrigin);
     expect(apiBase()).toBe(privateOrigin);
     expect(credentialDeletes).toBe(0);
@@ -411,7 +411,7 @@ describe("App desktop server pairing behavior", () => {
     expect(back).toBeTruthy();
     await act(async () => back!.props.onClick());
 
-    expect(root.findByProps({ className: "app-signout t-mono" })).toBeTruthy();
+    expect(root.findByProps({ className: "app-settings-btn" })).toBeTruthy();
     expect(root.findByProps({ id: "active-server" }).props.value).toBe(activeOrigin);
     expect(loadActiveServerOrigin(localStorage)).toBe(activeOrigin);
     expect(apiBase()).toBe(activeOrigin);
@@ -445,7 +445,7 @@ describe("App desktop server pairing behavior", () => {
     const back = root.findAllByType("button").find((button) => button.children.includes("Back to current server"));
     await act(async () => back!.props.onClick());
 
-    expect(root.findByProps({ className: "app-signout t-mono" })).toBeTruthy();
+    expect(root.findByProps({ className: "app-settings-btn" })).toBeTruthy();
     expect(root.findByProps({ id: "active-server" }).props.value).toBe(activeOrigin);
     expect(loadActiveServerOrigin(localStorage)).toBe(activeOrigin);
     expect(apiBase()).toBe(activeOrigin);

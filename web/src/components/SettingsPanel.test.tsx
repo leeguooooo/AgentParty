@@ -1,8 +1,12 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
 import { SettingsPanel, type SettingsMe } from "./SettingsPanel";
+
+mock.module("dompurify", () => ({
+  default: { addHook: () => {}, sanitize: (value: string) => value },
+}));
 
 function memoryStorage(seed: Record<string, string> = {}): Storage {
   const values = new Map<string, string>(Object.entries(seed));
@@ -18,17 +22,28 @@ function memoryStorage(seed: Record<string, string> = {}): Storage {
 
 let renderer: ReactTestRenderer | null = null;
 let store: Storage;
+let themeAttribute: string | null = null;
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   store = memoryStorage({ ap_locale: "en" });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });
   Object.defineProperty(globalThis, "window", { configurable: true, value: globalThis });
+  themeAttribute = null;
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      documentElement: {
+        setAttribute: (name: string, value: string) => { if (name === "data-theme") themeAttribute = value; },
+      },
+    },
+  });
 });
 afterEach(async () => {
   if (renderer !== null) await act(async () => renderer?.unmount());
   renderer = null;
   Reflect.deleteProperty(globalThis, "localStorage");
   Reflect.deleteProperty(globalThis, "window");
+  Reflect.deleteProperty(globalThis, "document");
 });
 
 const me: SettingsMe = { name: "alice", kind: "agent", role: "agent", handle: null, display_name: null, owner: null };
@@ -51,6 +66,15 @@ function findByClass(node: unknown, target: string): { props: Record<string, unk
   else if (kids) { const hit = findByClass(kids, target); if (hit) return hit; }
   return null;
 }
+function findByProp(node: unknown, key: string, val: unknown): { props: Record<string, unknown> } | null {
+  if (node === null || typeof node !== "object") return null;
+  const n = node as { props?: Record<string, unknown>; children?: unknown };
+  if (n.props && n.props[key] === val) return n as { props: Record<string, unknown> };
+  const kids = n.children;
+  if (Array.isArray(kids)) { for (const k of kids) { const hit = findByProp(k, key, val); if (hit) return hit; } }
+  else if (kids) { const hit = findByProp(kids, key, val); if (hit) return hit; }
+  return null;
+}
 function allText(r: ReactTestRenderer): string {
   const out: string[] = [];
   const walk = (node: unknown) => {
@@ -63,17 +87,18 @@ function allText(r: ReactTestRenderer): string {
 }
 
 describe("SettingsPanel (#273)", () => {
-  test("renders language, notifications, and account sections", () => {
-    const txt = allText(render({ me, onClose: () => {}, onLogout: () => {} }));
+  test("renders language, theme, notifications, and account sections", () => {
+    const txt = allText(render({ me, canSetHandle: false, onClose: () => {}, onLogout: () => {} }));
     expect(txt).toContain("Settings");
     expect(txt).toContain("Language");
+    expect(txt).toContain("Theme");
     expect(txt).toContain("@-mention notifications");
     expect(txt).toContain("Account");
     expect(txt).toContain("alice");
   });
 
   test("notification toggle writes ap_notify_optin to localStorage", () => {
-    const r = render({ me, onClose: () => {}, onLogout: () => {} });
+    const r = render({ me, canSetHandle: false, onClose: () => {}, onLogout: () => {} });
     expect(store.getItem("ap_notify_optin")).toBe(null);
     const toggle = findByClass(r.toJSON(), "settings-toggle");
     expect(toggle).not.toBeNull();
@@ -85,8 +110,46 @@ describe("SettingsPanel (#273)", () => {
     expect(store.getItem("ap_notify_optin")).toBe(null);
   });
 
+  test("theme buttons flip data-theme and persist to localStorage", () => {
+    const r = render({ me, canSetHandle: false, onClose: () => {}, onLogout: () => {} });
+    const midnight = findByProp(r.toJSON(), "data-theme-code", "midnight");
+    expect(midnight).not.toBeNull();
+    void act(() => { (midnight!.props.onClick as () => void)(); });
+    expect(themeAttribute).toBe("midnight");
+    expect(store.getItem("ap_theme")).toBe("midnight");
+    const paper = findByProp(r.toJSON(), "data-theme-code", "doodle");
+    void act(() => { (paper!.props.onClick as () => void)(); });
+    expect(themeAttribute).toBe("doodle");
+    expect(store.getItem("ap_theme")).toBe("doodle");
+  });
+
+  test("embeds the HandleSetup editor only when canSetHandle", () => {
+    const withEdit = render({ me, canSetHandle: true, onClose: () => {}, onLogout: () => {}, onHandleSaved: () => {} });
+    expect(findByClass(withEdit.toJSON(), "handlesetup-input")).not.toBeNull();
+    void act(() => renderer!.unmount());
+    renderer = null;
+    const noEdit = render({ me, canSetHandle: false, onClose: () => {}, onLogout: () => {} });
+    expect(findByClass(noEdit.toJSON(), "handlesetup-input")).toBeNull();
+  });
+
+  test("logout button invokes onLogout", () => {
+    let loggedOut = 0;
+    const r = render({ me, canSetHandle: false, onClose: () => {}, onLogout: () => { loggedOut += 1; } });
+    const logout = findByClass(r.toJSON(), "settings-logout");
+    expect(logout).not.toBeNull();
+    void act(() => { (logout!.props.onClick as () => void)(); });
+    expect(loggedOut).toBe(1);
+  });
+
+  test("surfaces email and provider when present", () => {
+    const rich: SettingsMe = { ...me, email: "a@example.com", provider: "oidc" };
+    const txt = allText(render({ me: rich, canSetHandle: false, onClose: () => {}, onLogout: () => {} }));
+    expect(txt).toContain("a@example.com");
+    expect(txt).toContain("oidc");
+  });
+
   test("no account section / logout when me is null", () => {
-    const txt = allText(render({ me: null, onClose: () => {}, onLogout: null }));
+    const txt = allText(render({ me: null, canSetHandle: false, onClose: () => {}, onLogout: null }));
     expect(txt).toContain("Language");
     expect(txt).not.toContain("Account");
   });

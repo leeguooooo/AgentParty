@@ -10,6 +10,10 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { LocaleProvider } from "./i18n/locale";
+import { applyStoredTheme } from "./lib/theme";
+
+// 主题在首帧前就落到 <html data-theme>，避免刷新时先闪一下默认主题再切（#273）。
+applyStoredTheme();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
