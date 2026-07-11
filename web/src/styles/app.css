@@ -10,7 +10,11 @@
   flex-direction: column;
   /* #301：外壳锁死在视口高度，永不整体滚动。任何内容都由内部指定的滚动区
      （.stream / .home / .app-side / 面板体 / 设置浮层）自己滚，溢出的兜底裁在
-     视口边缘，而不是让整块主面板跟着 body 一起滚。 */
+     视口边缘，而不是让整块主面板跟着 body 一起滚。
+     #348：配合 index.html viewport 的 interactive-widget=resizes-content，
+     软键盘弹出时布局视口（dvh）随之收缩，flex 列自动压短 .stream、composer
+     贴在键盘上方；100vh 是不支持 dvh 的老浏览器兜底，别改成 svh（工具栏收起
+     时会留一条死缝）。 */
   overflow: hidden;
 }
 
