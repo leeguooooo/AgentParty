@@ -2119,6 +2119,7 @@ export function ChannelPage({
                   seq: frame.seq,
                   sender: frame.sender, // 存原始 sender，渲染时用 resolveSenderLabel 解析，与消息卡显示保持一致
                   body: summarizeReplyPreview(frame.body),
+                  fullBody: frame.body, // #280：完整正文，供 toast 悬停看全文
                 },
               ].slice(-3),
             );

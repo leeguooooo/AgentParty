@@ -252,9 +252,12 @@ export function MessageCard({
       blockedReason !== null && !blockedIsDupOfNote ? `blocked ${blockedReason}` : null,
       msg.status?.summary_seq !== null && msg.status?.summary_seq !== undefined ? `summary #${msg.status.summary_seq}` : null,
     ].filter((part): part is string => typeof part === "string" && part !== "");
+    // #280：系统公告/状态在时间线里只显示紧凑摘要，长内容会被 CSS 截断。把完整内容
+    // （note/scope/blocked/summary + workflow 详情）挂到原生 title 上，鼠标悬停即可看全文。
+    const statusFullDetail = [statusBits.join(" · "), statusTitle].filter((part) => part !== "").join("\n");
     return (
       <div id={`msg-${msg.seq}`} className="msg-status" data-state={msg.state ?? undefined} style={hueStyle}>
-        <span>
+        <span title={statusFullDetail !== "" ? statusFullDetail : undefined}>
           <span className="msg-sender" title={senderTitle}>{senderLabel}</span>
           {owner !== null && (
             <span className="t-mono msg-owner" title={`owner: ${owner}`}>

@@ -10,6 +10,7 @@ export interface MentionToastItem {
   seq: number;
   sender: Sender; // 原始发送者，渲染时经 resolveSenderLabel 解析显示名，保证与消息卡一致
   body: string;   // 已截断的正文预览
+  fullBody?: string; // #280：完整正文，挂到 title 上供悬停看全文（缺省回退到 body）
 }
 
 interface Props {
@@ -60,7 +61,7 @@ function ToastCard({
           onKeyDown={(e) => e.stopPropagation()}
         >×</button>
       </div>
-      <div className="mention-toast-body">{item.body}</div>
+      <div className="mention-toast-body" title={(item.fullBody ?? item.body) || undefined}>{item.body}</div>
     </div>
   );
 }
