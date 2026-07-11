@@ -940,7 +940,7 @@
 }
 
 /* issue #281：频道组织架构/汇报关系树预览——把逐行的汇报标注折成一棵可整体查看的组织图。
-   主题变量沿用 role-* 那套（--t-*/--d-*），light/dark 都随 :root 走，不另开配色。 */
+   主题变量沿用 role 系列（--t- 与 --d-），light/dark 都随 :root 走，不另开配色。 */
 .org-tree {
   border: 1.4px solid var(--t-faint);
   background: var(--t-panel);
