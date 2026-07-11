@@ -130,6 +130,10 @@ const STATUS_WORKFLOW_JSON_LIMIT = 4096;
 const MAX_COMPLETION_RELATED = 20;
 const COMPLETION_ARTIFACT_JSON_LIMIT = 4096;
 const REVIEW_REASON_LIMIT = 4000;
+// #106：workflow guard 近期 (step,state) 窗口大小。8 足以罩住多 agent 在若干状态间的环形 ping-pong
+// （长度 ≤8 的循环里，重访的 tuple 仍在窗口内 → 被判非进展 → 计数累加直到 trip）；又足够小，
+// 让真正线性推进的工作流（每帧都是新 step）永远命中「窗口内没见过」→ 判进展 → 永不误伤。
+const WORKFLOW_GUARD_WINDOW = 8;
 
 function byteLength(s: string): number {
   return new TextEncoder().encode(s).byteLength;
@@ -411,6 +415,22 @@ function statusWorkflowFromSend(input: SendStatusWorkflow | undefined): StatusWo
     step_id: input.step_id ?? null,
     parent_summary_seq: input.parent_summary_seq ?? null,
   };
+}
+
+// #106：workflow guard 近期窗口的 tuple 键。step_id / state 均不含 \u0000，用它当分隔符杜绝歧义拼接。
+function workflowTupleKey(stepId: string | null, state: StatusState | null): string {
+  return `${stepId ?? ""}\u0000${state ?? ""}`;
+}
+
+// 存量行 recent_tuples 为 NULL / 脏数据时安全退回 []（等价于「窗口里什么都没见过」）。
+function parseWorkflowGuardTuples(input: unknown): string[] {
+  if (typeof input !== "string" || input === "") return [];
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string").slice(-WORKFLOW_GUARD_WINDOW) : [];
+  } catch {
+    return [];
+  }
 }
 
 function parseStoredStatusWorkflow(input: unknown): StatusWorkflow | undefined {
@@ -751,6 +771,9 @@ interface WorkflowGuardRow {
   state: StatusState | null;
   count_since_progress: number;
   no_progress: number;
+  // #106：本 run 内近期见过的 (step_id,state) tuple 环形窗口（最多 WORKFLOW_GUARD_WINDOW 个）。
+  // 进展判定不再只比对紧邻上一帧——回到窗口里见过的 tuple = 非进展（振荡），只有从未见过的新 tuple 才算进展。
+  recent_tuples: string[];
   blocked_seq: number | null;
   last_progress_seq: number | null;
   last_counted_seq: number | null;
@@ -1040,6 +1063,7 @@ export class ChannelDO extends Server<Env> {
       state TEXT,
       count_since_progress INTEGER NOT NULL DEFAULT 0,
       no_progress INTEGER NOT NULL DEFAULT 0,
+      recent_tuples TEXT,
       blocked_seq INTEGER,
       last_progress_seq INTEGER,
       last_counted_seq INTEGER,
@@ -1050,6 +1074,13 @@ export class ChannelDO extends Server<Env> {
       terminal_seq INTEGER,
       updated_at INTEGER NOT NULL
     )`);
+    // #106：给早于本次的 DO 表补 recent_tuples 列（DO 内建 SQLite，非 D1，无需 worker/migrations 迁移文件）。
+    // 与 messages 表补列同手法：幂等 ALTER，列已存在则吞掉；缺列的存量行 recent_tuples 为 NULL → 解析成 []。
+    try {
+      sql.exec("ALTER TABLE workflow_guard_state ADD COLUMN recent_tuples TEXT");
+    } catch {
+      // 列已存在
+    }
     sql.exec("CREATE INDEX IF NOT EXISTS workflow_guard_state_updated_idx ON workflow_guard_state(updated_at)");
     sql.exec(
       "CREATE INDEX IF NOT EXISTS workflow_guard_state_no_progress_idx ON workflow_guard_state(no_progress, updated_at)",
@@ -2845,6 +2876,7 @@ export class ChannelDO extends Server<Env> {
       state: r.state === null || r.state === undefined ? null : (String(r.state) as StatusState),
       count_since_progress: Number(r.count_since_progress),
       no_progress: Number(r.no_progress),
+      recent_tuples: parseWorkflowGuardTuples(r.recent_tuples),
       blocked_seq: r.blocked_seq === null || r.blocked_seq === undefined ? null : Number(r.blocked_seq),
       last_progress_seq: r.last_progress_seq === null || r.last_progress_seq === undefined ? null : Number(r.last_progress_seq),
       last_counted_seq: r.last_counted_seq === null || r.last_counted_seq === undefined ? null : Number(r.last_counted_seq),
@@ -2856,13 +2888,26 @@ export class ChannelDO extends Server<Env> {
     };
   }
 
+  // #106：进展 = 一个在本 run 近期窗口里从未见过的 (step_id,state) tuple。
+  // 旧实现只比对紧邻上一行，任何翻转都算进展——双 agent 在 A/B 之间来回，每帧都「≠上一帧」→ 永远进展 →
+  // 计数永不累加 → guard 永不 trip。现在用窗口判定：回到窗口里见过的 tuple = 非进展（振荡），计数继续爬；
+  // run_id 变化 = 新 run = 全新进展且窗口重置。真正线性推进（每帧都是新 step）永远命中「窗口内没见过」→ 判进展。
   private workflowProgressed(workflow: StatusWorkflow, state: StatusState, row: WorkflowGuardRow | null): boolean {
-    return (
-      row === null ||
-      row.run_id !== workflow.run_id ||
-      row.step_id !== workflow.step_id ||
-      row.state !== state
-    );
+    if (row === null) return true;
+    if (row.run_id !== workflow.run_id) return true;
+    return !row.recent_tuples.includes(workflowTupleKey(workflow.step_id, state));
+  }
+
+  // 计算本次落库要写回的近期窗口：run 内沿用旧窗口并追加当前 tuple（换 run 则清空重开），环形截断到窗口大小。
+  // tuple 为 null（message 帧无 step/state 转移）时不追加，只保留 run 内旧窗口。
+  private nextWorkflowGuardWindow(
+    row: WorkflowGuardRow | null,
+    workflow: StatusWorkflow,
+    tuple: string | null,
+  ): string[] {
+    const base = row !== null && row.run_id === workflow.run_id ? row.recent_tuples : [];
+    const next = tuple === null ? base : [...base, tuple];
+    return next.slice(-WORKFLOW_GUARD_WINDOW);
   }
 
   private workflowFromReply(replyTo: number | null): StatusWorkflow | undefined {
@@ -2928,12 +2973,15 @@ export class ChannelDO extends Server<Env> {
     const row = this.workflowGuardRow(decision.workflow.workflow_id);
     const hostName = this.activeHostName() ?? row?.host_name ?? null;
     if (msg.kind === "status" && msg.state === "done") {
-      this.upsertWorkflowGuardProgress(decision.workflow, msg.state, msg.seq, identity.name, hostName, now, true);
+      const window = this.nextWorkflowGuardWindow(row, decision.workflow, workflowTupleKey(decision.workflow.step_id, msg.state));
+      this.upsertWorkflowGuardProgress(decision.workflow, msg.state, msg.seq, identity.name, hostName, now, true, window);
       this.pruneWorkflowGuardState();
       return undefined;
     }
     if (msg.kind === "status" && decision.progressed) {
-      this.upsertWorkflowGuardProgress(decision.workflow, msg.state ?? "working", msg.seq, identity.name, hostName, now, false);
+      const state = msg.state ?? "working";
+      const window = this.nextWorkflowGuardWindow(row, decision.workflow, workflowTupleKey(decision.workflow.step_id, state));
+      this.upsertWorkflowGuardProgress(decision.workflow, state, msg.seq, identity.name, hostName, now, false, window);
       this.pruneWorkflowGuardState();
       return undefined;
     }
@@ -2942,13 +2990,17 @@ export class ChannelDO extends Server<Env> {
     const shouldTrip = (row?.no_progress ?? 0) === 0 && nextCount >= this.workflowGuardLimit();
     const blockedSeq = shouldTrip ? msg.seq : row?.blocked_seq ?? null;
     const trackedState = msg.kind === "status" ? msg.state : row?.state ?? null;
+    // #106：只有 status 帧承载 (step,state) 转移；message 帧（reply/presence 关联的工作流）没有 tuple，
+    // 传 null → 窗口原样保留，不污染振荡判定。非进展的重访 tuple 照样进窗口，让后续判定持续认得它。
+    const countedTuple = msg.kind === "status" ? workflowTupleKey(decision.workflow.step_id, msg.state) : null;
+    const nextWindow = this.nextWorkflowGuardWindow(row, decision.workflow, countedTuple);
     this.ctx.storage.sql.exec(
       `INSERT INTO workflow_guard_state (
-         workflow_id, kind, run_id, step_id, state, count_since_progress, no_progress,
+         workflow_id, kind, run_id, step_id, state, count_since_progress, no_progress, recent_tuples,
          blocked_seq, last_progress_seq, last_counted_seq, initiator_name, host_name,
          terminal, terminal_seq, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
        ON CONFLICT(workflow_id) DO UPDATE SET
          kind = excluded.kind,
          run_id = excluded.run_id,
@@ -2956,6 +3008,7 @@ export class ChannelDO extends Server<Env> {
          state = excluded.state,
          count_since_progress = excluded.count_since_progress,
          no_progress = excluded.no_progress,
+         recent_tuples = excluded.recent_tuples,
          blocked_seq = COALESCE(workflow_guard_state.blocked_seq, excluded.blocked_seq),
          last_counted_seq = excluded.last_counted_seq,
          initiator_name = COALESCE(workflow_guard_state.initiator_name, excluded.initiator_name),
@@ -2970,6 +3023,7 @@ export class ChannelDO extends Server<Env> {
       trackedState,
       nextCount,
       shouldTrip ? 1 : row?.no_progress ?? 0,
+      JSON.stringify(nextWindow),
       blockedSeq,
       row?.last_progress_seq ?? null,
       msg.seq,
@@ -3001,14 +3055,15 @@ export class ChannelDO extends Server<Env> {
     hostName: string | null,
     now: number,
     terminal: boolean,
+    recentTuples: string[],
   ) {
     this.ctx.storage.sql.exec(
       `INSERT INTO workflow_guard_state (
-         workflow_id, kind, run_id, step_id, state, count_since_progress, no_progress,
+         workflow_id, kind, run_id, step_id, state, count_since_progress, no_progress, recent_tuples,
          blocked_seq, last_progress_seq, last_counted_seq, initiator_name, host_name,
          terminal, terminal_seq, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?, NULL, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, 0, 0, ?, NULL, ?, NULL, ?, ?, ?, ?, ?)
        ON CONFLICT(workflow_id) DO UPDATE SET
          kind = excluded.kind,
          run_id = excluded.run_id,
@@ -3016,6 +3071,7 @@ export class ChannelDO extends Server<Env> {
          state = excluded.state,
          count_since_progress = 0,
          no_progress = 0,
+         recent_tuples = excluded.recent_tuples,
          blocked_seq = NULL,
          last_progress_seq = excluded.last_progress_seq,
          initiator_name = COALESCE(workflow_guard_state.initiator_name, excluded.initiator_name),
@@ -3028,6 +3084,7 @@ export class ChannelDO extends Server<Env> {
       workflow.run_id,
       workflow.step_id,
       state,
+      JSON.stringify(recentTuples),
       seq,
       initiatorName,
       hostName,
