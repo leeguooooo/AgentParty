@@ -2,6 +2,7 @@
 import { useState } from "react";
 import type { AuthProviderConfig } from "../lib/oidc";
 import { useT } from "../i18n/useT";
+import { LanguageSwitcher } from "./LanguageSwitcher";
 import "../i18n/strings/TokenGate";
 
 interface Props {
@@ -71,6 +72,9 @@ export function TokenGate({ error, providers, onSso, onSubmit }: Props) {
           </button>
           <p className="gate-hint">party token create --name you --role human</p>
         </form>
+      </div>
+      <div className="gate-lang">
+        <LanguageSwitcher />
       </div>
     </main>
   );

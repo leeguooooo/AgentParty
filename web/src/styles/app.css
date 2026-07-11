@@ -3683,6 +3683,7 @@
   text-align: center;
 }
 .gate-hint::before { content: "$ "; color: var(--t-accent); }
+.gate-lang { margin-top: 20px; }
 
 /* ---- Desktop pairing / browser approval ---- */
 .desktop-pairing-card,
