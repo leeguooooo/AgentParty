@@ -1093,6 +1093,9 @@ export class ChannelDO extends Server<Env> {
       connection.close(1008, "archived");
       return;
     }
+    // #200：非归档连接落活连接注册表，且在 welcome 之前 await——保证吊销扇出看得见这条连接，
+    // 也保证测试拿到 welcome 时行已落库。归档分支已在上面 close，不写。
+    await this.d1PresenceUpsert(state);
     const loopGuard = state.kind === "agent" ? this.loopGuardMessage(state.name) : this.globalLoopGuardMessage();
     this.sendFrame(connection, {
       type: "welcome",
@@ -1240,15 +1243,18 @@ export class ChannelDO extends Server<Env> {
     }
   }
 
-  onClose(connection: Connection<ConnState>) {
+  async onClose(connection: Connection<ConnState>) {
     const st = connection.state;
     if (!st || !st.name || st.archived) return;
     for (const other of this.getConnections<ConnState>()) {
       if (other.id !== connection.id && other.state?.name === st.name) {
+        // 该 name 在本 DO 还有其它活连接：名仍在线，不删注册表行。
         this.broadcastFrame({ type: "participants", participants: this.participants() });
         return;
       }
     }
+    // 走到这里 = 本 DO 该 name 的最后一条连接正在关闭 → 尽力删掉活连接注册表行（#200）。
+    await this.d1PresenceDelete(st.name);
     const removedAt = Number(this.getMeta(this.removedPresenceKey(st.name)) ?? "");
     if (Number.isInteger(removedAt) && Date.now() - removedAt < PRESENCE_SCAN_MS) {
       this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", st.name);
@@ -1263,6 +1269,9 @@ export class ChannelDO extends Server<Env> {
   async onAlarm() {
     const now = Date.now();
     const live = this.scanPresence(now);
+    // #200：60s presence 扫描顺带把本频道注册表与当前连接对齐——DO 醒着、ws 已恢复，
+    // reconcile 安全，被吊销驱逐/删失败留下的残留行由此有界清理。
+    await this.d1PresenceReconcile();
     await this.retryWebhooks(now);
     await this.checkTempArchive(now);
     await this.scheduleNextAlarm(now, live);
@@ -1411,6 +1420,65 @@ export class ChannelDO extends Server<Env> {
     const frame: PresenceFrame = { type: "presence", name, state: "offline", note: null, ts };
     const entry = this.presenceFor(name);
     this.broadcastFrame(entry ? { type: "presence", ...entry } : frame);
+  }
+
+  // #200 活连接注册表（D1 表 channel_presence）：让吊销扇出从 O(全部频道) 收窄到
+  // 「确有该 name 活连接的频道」。写入(connect)可靠且在 welcome 之前 await——漏一行 =
+  // 被吊销 token 踢不掉 = 安全漏洞（假阴性）；删除(close)尽力而为，残留由 onAlarm reconcile
+  // 有界清理（假阳性 = 冷启动 no-op，无害）。D1 抖动不能炸生命周期，故整体 try/catch 吞错。
+  private async d1PresenceUpsert(state: ConnState) {
+    if (!state.name) return;
+    try {
+      await this.env.DB.prepare(
+        `INSERT OR REPLACE INTO channel_presence
+           (channel_slug, name, kind, owner, token_hash, connected_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(this.name, state.name, state.kind, state.owner ?? null, state.tokenHash ?? null, Date.now())
+        .run();
+    } catch {
+      // D1 抖动：宁可残留旧行也不炸 onConnect；下一次 connect/reconcile 会纠正
+    }
+  }
+
+  private async d1PresenceDelete(name: string) {
+    if (!name) return;
+    try {
+      await this.env.DB.prepare("DELETE FROM channel_presence WHERE channel_slug = ? AND name = ?")
+        .bind(this.name, name)
+        .run();
+    } catch {
+      // 删失败 = 残留行（假阳性），onAlarm reconcile 兜底
+    }
+  }
+
+  // 把本频道注册表与当前 getConnections() 对齐：给每个存活 name upsert，删掉不再在线的残留行。
+  // 只在连接确定已恢复时调用（onAlarm，DO 醒着且 ws 已恢复），否则会误删活连接行造成假阴性。
+  private async d1PresenceReconcile() {
+    try {
+      const live = new Set<string>();
+      for (const connection of this.getConnections<ConnState>()) {
+        const st = connection.state;
+        if (!st || !st.name || st.archived) continue;
+        if (!live.has(st.name)) await this.d1PresenceUpsert(st);
+        live.add(st.name);
+      }
+      const names = [...live];
+      if (names.length === 0) {
+        await this.env.DB.prepare("DELETE FROM channel_presence WHERE channel_slug = ?")
+          .bind(this.name)
+          .run();
+      } else {
+        const placeholders = names.map(() => "?").join(", ");
+        await this.env.DB.prepare(
+          `DELETE FROM channel_presence WHERE channel_slug = ? AND name NOT IN (${placeholders})`,
+        )
+          .bind(this.name, ...names)
+          .run();
+      }
+    } catch {
+      // reconcile 是补偿性清理，抖动就下个 alarm 再来
+    }
   }
 
   private recordClientVersion(name: string, clientVersion: string, ts: number) {

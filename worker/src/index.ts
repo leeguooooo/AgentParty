@@ -2460,8 +2460,12 @@ app.delete("/api/tokens/:name", requireAdmin, async (c) => {
     resource: `token/${name}`,
     channel: revoked.channel_scope,
   });
-  // 吊销即时生效：踢掉所有未归档频道里该 name 的存活 ws（spec §12）
-  const { results } = await c.env.DB.prepare("SELECT slug FROM channels").all<{ slug: string }>();
+  // 吊销即时生效：踢掉该 name 的存活 ws（spec §12）。
+  // #200：只踢确有该 name 活连接的频道（注册表由 DO 维护），不再唤醒全部频道 DO。
+  const { results } = await c.env.DB
+    .prepare("SELECT DISTINCT channel_slug AS slug FROM channel_presence WHERE name = ?")
+    .bind(name)
+    .all<{ slug: string }>();
   await Promise.all(
     results.map(async ({ slug }) => {
       try {
