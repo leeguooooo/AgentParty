@@ -29,7 +29,7 @@ jobs:
       cli_only: ${{ github.event_name == 'pull_request' && steps.filter.outputs.cli == 'true' && steps.filter.outputs.non_cli == 'false' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
