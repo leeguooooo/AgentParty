@@ -14,14 +14,14 @@ use sha2::{Digest, Sha256};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 pub const OFFICIAL_UI_MANIFEST_ENDPOINT: &str =
-    "https://github.com/leeguooooo/agentparty/releases/download/desktop-ui/desktop-ui.json";
+    "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/desktop-ui.json";
 pub const SUPPORTED_MANIFEST_SCHEMA: u32 = 1;
 pub const SUPPORTED_UI_ABI: u32 = 1;
 pub const MAX_MANIFEST_ENVELOPE_BYTES: usize = 512 * 1024;
 pub const MAX_MANIFEST_PAYLOAD_BYTES: usize = 256 * 1024;
 
 const OFFICIAL_ARCHIVE_PREFIX: &str =
-    "https://github.com/leeguooooo/agentparty/releases/download/desktop-ui/";
+    "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/";
 const UI_DIRECTORY: &str = "ui";
 const METADATA_FILE: &str = "state.json";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -912,7 +912,7 @@ mod tests {
                 published_at: "2026-07-11T07:30:00Z".to_string(),
                 archive: UiArchive {
                     name: "agentparty-desktop-ui-v1.4.0.tar.gz".to_string(),
-                    url: "https://github.com/leeguooooo/agentparty/releases/download/desktop-ui/agentparty-desktop-ui-v1.4.0.tar.gz".to_string(),
+                    url: "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/agentparty-desktop-ui-v1.4.0.tar.gz".to_string(),
                     size_bytes: bundle.len() as u64,
                     file_count: 2,
                     sha256: sha256_hex(bundle),
@@ -929,7 +929,7 @@ mod tests {
     fn exposes_one_fixed_official_manifest_endpoint() {
         assert_eq!(
             OFFICIAL_UI_MANIFEST_ENDPOINT,
-            "https://github.com/leeguooooo/agentparty/releases/download/desktop-ui/desktop-ui.json"
+            "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/desktop-ui.json"
         );
     }
 
@@ -1036,7 +1036,7 @@ mod tests {
             "published_at": "2026-07-11T07:30:00Z",
             "archive": {
               "name":"agentparty-desktop-ui-v1.4.0.tar.gz",
-              "url":"https://github.com/leeguooooo/agentparty/releases/download/desktop-ui/agentparty-desktop-ui-v1.4.0.tar.gz",
+              "url":"https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/agentparty-desktop-ui-v1.4.0.tar.gz",
               "sizeBytes":1,"fileCount":1,"sha256":"00","signature":"sig"
             },
             "entrypoint":"index.html",
@@ -1048,7 +1048,7 @@ mod tests {
     #[test]
     fn parses_the_release_manifest_and_verifies_its_exact_bytes() {
         let raw = format!(
-            "{{\n  \"schema\": 1,\n  \"version\": \"1.4.0\",\n  \"ui_abi\": 1,\n  \"min_shell_version\": \"0.2.94\",\n  \"build_id\": \"933a665e06f3b3dcb1d45f9cccbad0be83581637\",\n  \"published_at\": \"2026-07-11T07:30:00Z\",\n  \"archive\": {{\n    \"name\": \"agentparty-desktop-ui-v1.4.0.tar.gz\",\n    \"url\": \"https://github.com/leeguooooo/agentparty/releases/download/desktop-ui/agentparty-desktop-ui-v1.4.0.tar.gz\",\n    \"sizeBytes\": 123,\n    \"fileCount\": 2,\n    \"sha256\": \"{}\",\n    \"signature\": \"archive-signature\\n\"\n  }},\n  \"entrypoint\": \"index.html\"\n}}\n",
+            "{{\n  \"schema\": 1,\n  \"version\": \"1.4.0\",\n  \"ui_abi\": 1,\n  \"min_shell_version\": \"0.2.94\",\n  \"build_id\": \"933a665e06f3b3dcb1d45f9cccbad0be83581637\",\n  \"published_at\": \"2026-07-11T07:30:00Z\",\n  \"archive\": {{\n    \"name\": \"agentparty-desktop-ui-v1.4.0.tar.gz\",\n    \"url\": \"https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/agentparty-desktop-ui-v1.4.0.tar.gz\",\n    \"sizeBytes\": 123,\n    \"fileCount\": 2,\n    \"sha256\": \"{}\",\n    \"signature\": \"archive-signature\\n\"\n  }},\n  \"entrypoint\": \"index.html\"\n}}\n",
             "0".repeat(64)
         );
         let verifier = RecordingVerifier::default();
@@ -1345,7 +1345,7 @@ mod tests {
         blocked_manifest.version = "1.4.1".to_string();
         blocked_manifest.build_id = "b33a665e06f3b3dcb1d45f9cccbad0be83581637".to_string();
         blocked_manifest.archive.name = "agentparty-desktop-ui-v1.4.1.tar.gz".to_string();
-        blocked_manifest.archive.url = "https://github.com/leeguooooo/agentparty/releases/download/desktop-ui/agentparty-desktop-ui-v1.4.1.tar.gz".to_string();
+        blocked_manifest.archive.url = "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/agentparty-desktop-ui-v1.4.1.tar.gz".to_string();
         let blocked = SignedUiManifest::new(blocked_manifest, "manifest-signature")
             .unwrap()
             .verify_for_core("0.2.94", SUPPORTED_UI_ABI, &verifier)
@@ -1369,7 +1369,7 @@ mod tests {
         second_manifest.manifest.version = "1.5.0".to_string();
         second_manifest.manifest.build_id = "a33a665e06f3b3dcb1d45f9cccbad0be83581637".to_string();
         second_manifest.manifest.archive.name = "agentparty-desktop-ui-v1.5.0.tar.gz".to_string();
-        second_manifest.manifest.archive.url = "https://github.com/leeguooooo/agentparty/releases/download/desktop-ui/agentparty-desktop-ui-v1.5.0.tar.gz".to_string();
+        second_manifest.manifest.archive.url = "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/agentparty-desktop-ui-v1.5.0.tar.gz".to_string();
         let second_manifest =
             SignedUiManifest::new(second_manifest.manifest, "manifest-signature").unwrap();
         let second = second_manifest
@@ -1443,7 +1443,7 @@ mod tests {
         old_manifest.build_id = "c33a665e06f3b3dcb1d45f9cccbad0be83581637".to_string();
         old_manifest.published_at = "2026-07-10T07:30:00Z".to_string();
         old_manifest.archive.name = "agentparty-desktop-ui-v1.3.0.tar.gz".to_string();
-        old_manifest.archive.url = "https://github.com/leeguooooo/agentparty/releases/download/desktop-ui/agentparty-desktop-ui-v1.3.0.tar.gz".to_string();
+        old_manifest.archive.url = "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/agentparty-desktop-ui-v1.3.0.tar.gz".to_string();
         let old = SignedUiManifest::new(old_manifest, "manifest-signature")
             .unwrap()
             .verify_for_core("0.2.94", SUPPORTED_UI_ABI, &verifier)
