@@ -1,4 +1,9 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::Path,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,6 +22,160 @@ use tauri_plugin_deep_link::DeepLinkExt;
 
 const CREDENTIAL_SERVICE: &str = "com.agentparty.desktop";
 const CREDENTIAL_ACCOUNT: &str = "desktop-session";
+const UPDATER_DIAGNOSTIC_FILE: &str = "updater-diagnostic.json";
+static UPDATER_DIAGNOSTIC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum UpdaterDiagnosticStatus {
+    Attempt,
+    Success,
+    Failure,
+    Pending,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum UpdaterDiagnosticSource {
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum UpdaterDiagnosticStage {
+    Check,
+    Install,
+    Relaunch,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum UpdaterDiagnosticCategory {
+    Offline,
+    Timeout,
+    Verification,
+    Install,
+    Relaunch,
+    Generic,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdaterDiagnostic {
+    status: UpdaterDiagnosticStatus,
+    source: Option<UpdaterDiagnosticSource>,
+    stage: UpdaterDiagnosticStage,
+    category: Option<UpdaterDiagnosticCategory>,
+    timestamp: u64,
+    app_version: Option<String>,
+    target_version: Option<String>,
+}
+
+fn valid_diagnostic_version(version: &str) -> bool {
+    version.len() <= 64
+        && regex::Regex::new(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+            .expect("valid updater version pattern")
+            .is_match(version)
+}
+
+fn validate_updater_diagnostic(diagnostic: &UpdaterDiagnostic) -> Result<(), String> {
+    if diagnostic.timestamp == 0 {
+        return Err("updater diagnostic timestamp is invalid".to_string());
+    }
+    for version in [
+        diagnostic.app_version.as_deref(),
+        diagnostic.target_version.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !valid_diagnostic_version(version) {
+            return Err("updater diagnostic version is invalid".to_string());
+        }
+    }
+    if diagnostic.target_version.is_some() && diagnostic.stage != UpdaterDiagnosticStage::Relaunch {
+        return Err("updater diagnostic target version is invalid".to_string());
+    }
+    match diagnostic.stage {
+        UpdaterDiagnosticStage::Check if diagnostic.source.is_none() => {
+            return Err("updater check diagnostic source is required".to_string());
+        }
+        UpdaterDiagnosticStage::Install | UpdaterDiagnosticStage::Relaunch
+            if diagnostic.source.is_some() =>
+        {
+            return Err("updater diagnostic source is invalid".to_string());
+        }
+        _ => {}
+    }
+    match diagnostic.status {
+        UpdaterDiagnosticStatus::Failure if diagnostic.category.is_none() => {
+            return Err("updater failure diagnostic category is required".to_string());
+        }
+        UpdaterDiagnosticStatus::Attempt
+        | UpdaterDiagnosticStatus::Success
+        | UpdaterDiagnosticStatus::Pending
+            if diagnostic.category.is_some() =>
+        {
+            return Err("updater diagnostic category is invalid".to_string());
+        }
+        _ => {}
+    }
+    if diagnostic.status == UpdaterDiagnosticStatus::Pending
+        && (diagnostic.stage != UpdaterDiagnosticStage::Relaunch
+            || diagnostic.app_version.is_none()
+            || diagnostic.target_version.is_none())
+    {
+        return Err("pending updater receipt is incomplete".to_string());
+    }
+    if diagnostic.status == UpdaterDiagnosticStatus::Success
+        && diagnostic.stage == UpdaterDiagnosticStage::Relaunch
+        && (diagnostic.app_version.is_none() || diagnostic.app_version != diagnostic.target_version)
+    {
+        return Err("completed updater receipt does not match its target".to_string());
+    }
+    Ok(())
+}
+
+fn write_updater_diagnostic(path: &Path, diagnostic: &UpdaterDiagnostic) -> Result<(), String> {
+    validate_updater_diagnostic(diagnostic)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "updater diagnostic path is invalid".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|_| "updater diagnostic directory is unavailable".to_string())?;
+    let sequence = UPDATER_DIAGNOSTIC_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("json.{}.{sequence}.tmp", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|_| "updater diagnostic file is unavailable".to_string())?;
+    let mut encoded = serde_json::to_vec(diagnostic)
+        .map_err(|_| "updater diagnostic serialization failed".to_string())?;
+    encoded.push(b'\n');
+    let committed = file
+        .write_all(&encoded)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| "updater diagnostic write failed".to_string())
+        .and_then(|_| {
+            fs::rename(&temporary, path).map_err(|_| "updater diagnostic commit failed".to_string())
+        });
+    if let Err(error) = committed {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "updater diagnostic directory sync failed".to_string())?;
+    Ok(())
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -156,6 +315,20 @@ fn desktop_credential_migrate() -> Result<Option<String>, String> {
     migrate_legacy_credential(&NativeCredentialBackend)
 }
 
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_updater_record_diagnostic(
+    app: tauri::AppHandle,
+    diagnostic: UpdaterDiagnostic,
+) -> Result<(), String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "desktop app data directory is unavailable".to_string())?
+        .join(UPDATER_DIAGNOSTIC_FILE);
+    write_updater_diagnostic(&path, &diagnostic)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum TrayAction {
     Show,
@@ -270,6 +443,7 @@ pub fn run() {
             desktop_credential_write,
             desktop_credential_delete,
             desktop_credential_migrate,
+            desktop_updater_record_diagnostic,
             agent::desktop_agent_list_configs,
             agent::desktop_agent_status,
             agent::desktop_agent_start,
@@ -327,11 +501,70 @@ mod tests {
 
     use base64::{engine::general_purpose::STANDARD, Engine};
     use minisign_verify::{PublicKey, Signature};
+    use tempfile::TempDir;
 
     use super::{
         credential_account_for_origin, migrate_legacy_credential, parse_stored_credential,
-        tray_action, CredentialBackend, ExitGuard, TrayAction, CREDENTIAL_ACCOUNT,
+        tray_action, validate_updater_diagnostic, write_updater_diagnostic, CredentialBackend,
+        ExitGuard, TrayAction, UpdaterDiagnostic, UpdaterDiagnosticCategory,
+        UpdaterDiagnosticStage, UpdaterDiagnosticStatus, CREDENTIAL_ACCOUNT,
     };
+
+    fn pending_updater_receipt() -> UpdaterDiagnostic {
+        UpdaterDiagnostic {
+            status: UpdaterDiagnosticStatus::Pending,
+            source: None,
+            stage: UpdaterDiagnosticStage::Relaunch,
+            category: None,
+            timestamp: 123_456,
+            app_version: Some("0.2.90".to_string()),
+            target_version: Some("0.2.91".to_string()),
+        }
+    }
+
+    #[test]
+    fn updater_diagnostic_rejects_unknown_or_inconsistent_fields() {
+        let raw = r#"{
+            "status":"failure",
+            "source":null,
+            "stage":"relaunch",
+            "category":"verification",
+            "timestamp":123456,
+            "appVersion":"0.2.90",
+            "targetVersion":"0.2.91",
+            "rawError":"token=must-not-persist"
+        }"#;
+        assert!(serde_json::from_str::<UpdaterDiagnostic>(raw).is_err());
+
+        let mut diagnostic = pending_updater_receipt();
+        diagnostic.category = Some(UpdaterDiagnosticCategory::Verification);
+        assert!(validate_updater_diagnostic(&diagnostic).is_err());
+        diagnostic.category = None;
+        diagnostic.target_version = Some("../../secret".to_string());
+        assert!(validate_updater_diagnostic(&diagnostic).is_err());
+    }
+
+    #[test]
+    fn updater_diagnostic_is_atomically_persisted_without_a_temp_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("updater-diagnostic.json");
+        let diagnostic = pending_updater_receipt();
+
+        write_updater_diagnostic(&path, &diagnostic).unwrap();
+
+        let stored: UpdaterDiagnostic =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored, diagnostic);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 
     #[derive(Default)]
     struct MemoryCredentials(RefCell<HashMap<String, String>>);

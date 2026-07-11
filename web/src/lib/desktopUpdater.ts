@@ -6,6 +6,7 @@ const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const CHECK_TIMEOUT_MS = 30_000;
 const VERSION_LOOKUP_TIMEOUT_MS = 2_000;
 const MAX_RELEASE_NOTES_LENGTH = 2_000;
+const SAFE_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 export type UpdaterPhase =
   | "idle"
@@ -46,10 +47,21 @@ export type DownloadEvent =
 
 export interface DesktopUpdaterAdapter {
   version?(): Promise<string | null>;
+  recordDiagnostic?(diagnostic: DesktopUpdaterDiagnostic): Promise<void>;
   check(): Promise<UpdateCandidate | null>;
   install(onEvent: (event: DownloadEvent) => void): Promise<void>;
   relaunch(): Promise<void>;
   close(): Promise<void>;
+}
+
+export interface DesktopUpdaterDiagnostic {
+  status: "attempt" | "success" | "failure" | "pending";
+  source: "auto" | "manual" | null;
+  stage: UpdaterFailureStage;
+  category: UpdaterErrorKind | null;
+  timestamp: number;
+  appVersion: string | null;
+  targetVersion?: string;
 }
 
 export interface StorageAdapter {
@@ -67,6 +79,11 @@ interface ControllerOptions {
   clock: { now(): number };
   storage: StorageAdapter;
   timer?: TimerAdapter;
+}
+
+interface PendingUpdateReceipt {
+  appVersion: string;
+  targetVersion: string;
 }
 
 export interface DesktopUpdaterController {
@@ -113,6 +130,27 @@ export function shouldAutoCheck(storage: StorageAdapter, now: number): boolean {
     return !Number.isFinite(timestamp) || age >= AUTO_CHECK_INTERVAL_MS;
   } catch {
     return true;
+  }
+}
+
+function readPendingUpdateReceipt(storage: StorageAdapter): PendingUpdateReceipt | null {
+  try {
+    const raw = storage.getItem(LAST_UPDATER_DIAGNOSTIC_KEY);
+    if (raw === null) return null;
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== "object" || value === null) return null;
+    const receipt = value as Record<string, unknown>;
+    if (
+      receipt.status !== "pending" ||
+      receipt.stage !== "relaunch" ||
+      typeof receipt.appVersion !== "string" ||
+      typeof receipt.targetVersion !== "string" ||
+      !SAFE_VERSION_PATTERN.test(receipt.appVersion) ||
+      !SAFE_VERSION_PATTERN.test(receipt.targetVersion)
+    ) return null;
+    return { appVersion: receipt.appVersion, targetVersion: receipt.targetVersion };
+  } catch {
+    return null;
   }
 }
 
@@ -174,6 +212,7 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
   let cancelCheckTimeout: (() => void) | null = null;
   let operationPromise: Promise<void> | null = null;
   let closeRequested = false;
+  let diagnosticQueue: Promise<void> = Promise.resolve();
 
   const publish = (next: DesktopUpdaterState) => {
     if (disposed) return;
@@ -183,12 +222,20 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
 
   const patch = (next: Partial<DesktopUpdaterState>) => publish({ ...state, ...next });
 
-  const persistDiagnostic = (diagnostic: Record<string, string | number | null>) => {
+  const persistDiagnostic = (diagnostic: DesktopUpdaterDiagnostic): Promise<void> => {
     try {
       options.storage.setItem(LAST_UPDATER_DIAGNOSTIC_KEY, JSON.stringify(diagnostic));
     } catch {
       // Updater behavior must not depend on diagnostics storage availability.
     }
+    if (options.adapter.recordDiagnostic === undefined) return Promise.resolve();
+    diagnosticQueue = diagnosticQueue
+      .then(() => options.adapter.recordDiagnostic?.(diagnostic))
+      .then(() => undefined)
+      .catch(() => {
+        console.error("[desktop-updater] failed to persist native diagnostic");
+      });
+    return diagnosticQueue;
   };
 
   const reportFailure = (
@@ -196,12 +243,34 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
     error: unknown,
     source: "auto" | "manual" | null = null,
     appVersion: string | null = null,
+    targetVersion: string | null = null,
   ) => {
     if (disposed) return;
     const category = classifyUpdaterError(error, stage);
     console.error(`[desktop-updater] ${stage} failed`, error);
-    persistDiagnostic({ status: "failure", source, stage, category, timestamp: options.clock.now(), appVersion });
+    void persistDiagnostic({
+      status: "failure",
+      source,
+      stage,
+      category,
+      timestamp: options.clock.now(),
+      appVersion,
+      ...(targetVersion === null ? {} : { targetVersion }),
+    });
     patch({ phase: "error", failureStage: stage, error: category });
+  };
+
+  const persistPendingRelaunch = (): Promise<void> => {
+    if (state.currentVersion === null || state.nextVersion === null) return Promise.resolve();
+    return persistDiagnostic({
+      status: "pending",
+      source: null,
+      stage: "relaunch",
+      category: null,
+      timestamp: options.clock.now(),
+      appVersion: state.currentVersion,
+      targetVersion: state.nextVersion,
+    });
   };
 
   const closeAdapter = async () => {
@@ -228,10 +297,11 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
     if (operationPromise !== null) return operationPromise;
     patch({ phase: "ready", failureStage: null, error: null });
     const active = (async () => {
+      await persistPendingRelaunch();
       try {
         await options.adapter.relaunch();
       } catch (error) {
-        reportFailure("relaunch", error, null, state.currentVersion);
+        reportFailure("relaunch", error, null, state.currentVersion, state.nextVersion);
       }
     })();
     operationPromise = active;
@@ -297,10 +367,11 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
         downloadedBytes: state.totalBytes ?? state.downloadedBytes,
         progressPercent: state.totalBytes === null ? null : 100,
       });
+      await persistPendingRelaunch();
       try {
         await options.adapter.relaunch();
       } catch (error) {
-        reportFailure("relaunch", error, null, state.currentVersion);
+        reportFailure("relaunch", error, null, state.currentVersion, state.nextVersion);
       }
     })();
     operationPromise = active;
@@ -322,12 +393,49 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
     start() {
       if (disposed || started) return;
       started = true;
-      if (!shouldAutoCheck(options.storage, options.clock.now())) return;
-      startupTimer = timer.setTimeout(() => {
-        startupTimer = undefined;
+      const scheduleAutoCheck = () => {
         if (disposed || !shouldAutoCheck(options.storage, options.clock.now())) return;
-        void controller.check("auto");
-      }, AUTO_CHECK_DELAY_MS);
+        startupTimer = timer.setTimeout(() => {
+          startupTimer = undefined;
+          if (disposed || !shouldAutoCheck(options.storage, options.clock.now())) return;
+          void controller.check("auto");
+        }, AUTO_CHECK_DELAY_MS);
+      };
+      const pending = readPendingUpdateReceipt(options.storage);
+      if (pending === null) {
+        scheduleAutoCheck();
+        return;
+      }
+      void (async () => {
+        let currentVersion: string | null = null;
+        try {
+          currentVersion = options.adapter.version === undefined ? null : await options.adapter.version();
+        } catch {
+          currentVersion = null;
+        }
+        if (disposed) return;
+        if (currentVersion === pending.targetVersion) {
+          void persistDiagnostic({
+            status: "success",
+            source: null,
+            stage: "relaunch",
+            category: null,
+            timestamp: options.clock.now(),
+            appVersion: currentVersion,
+            targetVersion: pending.targetVersion,
+          });
+          scheduleAutoCheck();
+          return;
+        }
+        reportFailure(
+          "relaunch",
+          new Error("Update version verification failed"),
+          null,
+          currentVersion,
+          pending.targetVersion,
+        );
+        patch({ panelOpen: true });
+      })();
     },
 
     check(source) {
@@ -350,7 +458,7 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
         error: null,
         failureStage: null,
       });
-      persistDiagnostic({
+      void persistDiagnostic({
         status: "attempt",
         source,
         stage: "check",
@@ -374,7 +482,7 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
           } catch {
             // A successful native check remains successful when persistence is unavailable.
           }
-          persistDiagnostic({
+          void persistDiagnostic({
             status: "success",
             source,
             stage: "check",
@@ -449,6 +557,10 @@ interface TauriProcessModule {
   relaunch(): Promise<void>;
 }
 
+interface TauriCoreModule {
+  invoke(command: string, args?: Record<string, unknown>): Promise<unknown>;
+}
+
 interface TauriUpdate {
   currentVersion: string;
   version: string;
@@ -466,6 +578,7 @@ const nativeImport: Importer = (specifier) => {
   if (specifier === "@tauri-apps/plugin-updater") return import("@tauri-apps/plugin-updater");
   if (specifier === "@tauri-apps/plugin-process") return import("@tauri-apps/plugin-process");
   if (specifier === "@tauri-apps/api/app") return import("@tauri-apps/api/app");
+  if (specifier === "@tauri-apps/api/core") return import("@tauri-apps/api/core");
   return Promise.reject(new Error(`Unsupported Tauri plugin: ${specifier}`));
 };
 
@@ -501,6 +614,11 @@ export async function createTauriUpdaterAdapter(options: TauriUpdaterOptions = {
     async version() {
       const appModule = (await importer("@tauri-apps/api/app")) as { getVersion(): Promise<string> };
       return appModule.getVersion();
+    },
+
+    async recordDiagnostic(diagnostic) {
+      const coreModule = (await importer("@tauri-apps/api/core")) as TauriCoreModule;
+      await coreModule.invoke("desktop_updater_record_diagnostic", { diagnostic });
     },
 
     check() {
@@ -595,6 +713,12 @@ export function createBrowserDesktopUpdaterClient(
   };
   const controller = createDesktopUpdaterController({
     adapter: {
+      async version() {
+        return (await getNativeAdapter()).version?.() ?? null;
+      },
+      async recordDiagnostic(diagnostic) {
+        await (await getNativeAdapter()).recordDiagnostic?.(diagnostic);
+      },
       async check() {
         return (await getNativeAdapter()).check();
       },

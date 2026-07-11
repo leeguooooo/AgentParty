@@ -101,9 +101,120 @@ describe("desktop runtime detection", () => {
     expect(() => createBrowserDesktopUpdaterClient({ windowRef })).not.toThrow();
     expect(createBrowserDesktopUpdaterClient({ windowRef })).not.toBe(null);
   });
+
+  test("passes the native app version through the browser-to-Tauri bridge", async () => {
+    const storage = memoryStorage({
+      [LAST_UPDATER_DIAGNOSTIC_KEY]: JSON.stringify({
+        status: "pending",
+        source: null,
+        stage: "relaunch",
+        category: null,
+        timestamp: 100,
+        appVersion: "0.2.82",
+        targetVersion: "0.2.83",
+      }),
+    });
+    const client = createBrowserDesktopUpdaterClient({
+      windowRef: { __TAURI_INTERNALS__: {} },
+      clock: { now: () => 200 },
+      storage,
+      importer: async (specifier) => {
+        if (specifier === "@tauri-apps/plugin-updater") return { check: async () => null };
+        if (specifier === "@tauri-apps/plugin-process") return { relaunch: async () => {} };
+        if (specifier === "@tauri-apps/api/app") return { getVersion: async () => "0.2.83" };
+        if (specifier === "@tauri-apps/api/core") return { invoke: async () => {} };
+        throw new Error(`unexpected import ${specifier}`);
+      },
+    });
+
+    client?.start();
+    for (let attempt = 0; attempt < 10; attempt += 1) await Promise.resolve();
+
+    expect(JSON.parse(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY) ?? "null")).toMatchObject({
+      status: "success",
+      stage: "relaunch",
+      appVersion: "0.2.83",
+      targetVersion: "0.2.83",
+    });
+  });
 });
 
 describe("desktop updater auto-check", () => {
+  test("confirms a pending update receipt after the new process reports the target version", async () => {
+    const storage = memoryStorage({
+      [LAST_UPDATER_DIAGNOSTIC_KEY]: JSON.stringify({
+        status: "pending",
+        source: null,
+        stage: "relaunch",
+        category: null,
+        timestamp: 100,
+        appVersion: "0.2.82",
+        targetVersion: "0.2.83",
+      }),
+    });
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({ version: async () => "0.2.83" }),
+      clock: { now: () => 200 },
+      storage,
+    });
+
+    controller.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(JSON.parse(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY) ?? "null")).toEqual({
+      status: "success",
+      source: null,
+      stage: "relaunch",
+      category: null,
+      timestamp: 200,
+      appVersion: "0.2.83",
+      targetVersion: "0.2.83",
+    });
+    expect(controller.getState().phase).toBe("idle");
+  });
+
+  test("surfaces a verification failure when relaunch keeps the previous version", async () => {
+    const storage = memoryStorage({
+      [LAST_UPDATER_DIAGNOSTIC_KEY]: JSON.stringify({
+        status: "pending",
+        source: null,
+        stage: "relaunch",
+        category: null,
+        timestamp: 100,
+        appVersion: "0.2.82",
+        targetVersion: "0.2.83",
+      }),
+    });
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({ version: async () => "0.2.82" }),
+      clock: { now: () => 200 },
+      storage,
+    });
+
+    await captureConsoleErrors(async () => {
+      controller.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(controller.getState()).toMatchObject({
+      phase: "error",
+      panelOpen: true,
+      failureStage: "relaunch",
+      error: "verification",
+    });
+    expect(JSON.parse(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY) ?? "null")).toEqual({
+      status: "failure",
+      source: null,
+      stage: "relaunch",
+      category: "verification",
+      timestamp: 200,
+      appVersion: "0.2.82",
+      targetVersion: "0.2.83",
+    });
+  });
+
   test("skips checks recorded within the previous 24 hours", () => {
     const now = 30 * HOUR;
     const recent = memoryStorage({ [LAST_SUCCESSFUL_CHECK_KEY]: String(now - 23 * HOUR) });
@@ -189,6 +300,31 @@ describe("desktop updater auto-check", () => {
 });
 
 describe("desktop updater checks", () => {
+  test("serializes native diagnostics so an older attempt cannot overwrite success", async () => {
+    const attemptWrite = deferred<void>();
+    const successWrite = deferred<void>();
+    const statuses: string[] = [];
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({
+        version: async () => "0.2.90",
+        recordDiagnostic: async (diagnostic) => {
+          statuses.push(diagnostic.status);
+          if (diagnostic.status === "attempt") await attemptWrite.promise;
+          if (diagnostic.status === "success") successWrite.resolve();
+        },
+      }),
+      clock: { now: () => 1 },
+      storage: memoryStorage(),
+    });
+
+    await controller.check("manual");
+    expect(statuses).toEqual(["attempt"]);
+    attemptWrite.resolve();
+    await successWrite.promise;
+
+    expect(statuses).toEqual(["attempt", "success"]);
+  });
+
   test("persists an attempt before a native check settles", () => {
     const storage = memoryStorage();
     const pending = deferred<UpdateCandidate | null>();
@@ -439,6 +575,62 @@ describe("desktop updater installation", () => {
     expect(controller.getState().phase).toBe("ready");
   });
 
+  test("persists the target-version receipt before requesting relaunch", async () => {
+    const storage = memoryStorage();
+    let receiptAtRelaunch: unknown = null;
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({
+        check: async () => candidate(),
+        install: async (onEvent) => onEvent({ type: "finished" }),
+        relaunch: async () => {
+          receiptAtRelaunch = JSON.parse(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY) ?? "null");
+        },
+      }),
+      clock: { now: () => 123_456 },
+      storage,
+    });
+    await controller.check("manual");
+
+    await controller.install();
+
+    expect(receiptAtRelaunch).toEqual({
+      status: "pending",
+      source: null,
+      stage: "relaunch",
+      category: null,
+      timestamp: 123_456,
+      appVersion: "0.2.82",
+      targetVersion: "0.2.83",
+    });
+  });
+
+  test("waits for the native receipt before requesting relaunch", async () => {
+    const nativeWrite = deferred<void>();
+    let relaunchCalls = 0;
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({
+        check: async () => candidate(),
+        install: async () => {},
+        recordDiagnostic: async (diagnostic) => {
+          if (diagnostic.status === "pending") await nativeWrite.promise;
+        },
+        relaunch: async () => { relaunchCalls += 1; },
+      }),
+      clock: { now: () => 1 },
+      storage: memoryStorage(),
+    });
+    await controller.check("manual");
+
+    const installing = controller.install();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(relaunchCalls).toBe(0);
+
+    nativeWrite.resolve();
+    await installing;
+    expect(relaunchCalls).toBe(1);
+  });
+
   test("reports the ready phase after download finishes and before relaunch", async () => {
     const phases: string[] = [];
     const relaunchGate = deferred<void>();
@@ -584,6 +776,7 @@ describe("desktop updater installation", () => {
 
     const first = controller.retry();
     const second = controller.retry();
+    await Promise.resolve();
     expect(relaunchCalls).toBe(2);
 
     retryRelaunch.resolve();
@@ -661,6 +854,7 @@ describe("desktop updater timeout and plugin adapter", () => {
             },
           };
         }
+        if (specifier === "@tauri-apps/api/core") return { invoke: async () => {} };
         return { relaunch: async () => {} };
       },
     });
@@ -709,6 +903,7 @@ describe("desktop updater timeout and plugin adapter", () => {
 
   test("loads Tauri updater plugins only through dynamic import", async () => {
     const imports: string[] = [];
+    const nativeDiagnostics: unknown[] = [];
     let closeCalls = 0;
     const update = {
       currentVersion: "0.2.82",
@@ -730,6 +925,9 @@ describe("desktop updater timeout and plugin adapter", () => {
         if (specifier === "@tauri-apps/plugin-updater") return { check: async () => update };
         if (specifier === "@tauri-apps/plugin-process") return { relaunch: async () => { relaunchCalls += 1; } };
         if (specifier === "@tauri-apps/api/app") return { getVersion: async () => "0.2.82" };
+        if (specifier === "@tauri-apps/api/core") {
+          return { invoke: async (command: string, args: unknown) => nativeDiagnostics.push({ command, args }) };
+        }
         throw new Error(`unexpected import ${specifier}`);
       },
     });
@@ -737,6 +935,25 @@ describe("desktop updater timeout and plugin adapter", () => {
     expect(imports).toEqual(["@tauri-apps/plugin-updater", "@tauri-apps/plugin-process"]);
     await expect(tauriAdapter.version?.()).resolves.toBe("0.2.82");
     expect(imports).toEqual(["@tauri-apps/plugin-updater", "@tauri-apps/plugin-process", "@tauri-apps/api/app"]);
+    await tauriAdapter.recordDiagnostic?.({
+      status: "success",
+      source: "manual",
+      stage: "check",
+      category: null,
+      timestamp: 1,
+      appVersion: "0.2.82",
+    });
+    expect(nativeDiagnostics).toEqual([{
+      command: "desktop_updater_record_diagnostic",
+      args: { diagnostic: {
+        status: "success",
+        source: "manual",
+        stage: "check",
+        category: null,
+        timestamp: 1,
+        appVersion: "0.2.82",
+      } },
+    }]);
     await expect(tauriAdapter.check()).resolves.toMatchObject({
       currentVersion: "0.2.82",
       nextVersion: "0.2.83",

@@ -47,7 +47,7 @@
       <tr><th>能力</th><th>当前证据</th><th>判定</th></tr>
       <tr><td>Tauri 壳与远端 API</td><td><code>desktop/</code>、运行时 API base、私有服务器探测与原子切换、双架构 DMG</td><td><span class="status">已完成</span></td></tr>
       <tr><td>版本一致性</td><td>CLI、desktop package、Rust <code>Cargo.toml</code>/<code>Cargo.lock</code> 与 tag 由同一脚本校验和原子同步；当前均为 0.2.90</td><td><span class="status">已完成</span></td></tr>
-      <tr><td>自动更新</td><td>updater v2 签名、静态双架构 manifest、检查/下载/安装/重启状态机和脱敏诊断已发布</td><td><span class="status">已完成，待 production E2E</span></td></tr>
+      <tr><td>自动更新</td><td>updater v2 签名、静态双架构 manifest、检查/下载/安装/重启状态机、原生原子回执和两阶段 production 验收工具已实现</td><td><span class="status">已完成，待签名基线执行 E2E</span></td></tr>
       <tr><td>系统通知与托盘</td><td>原生通知、Dock 角标、点击定位、托盘、关窗隐藏、登录启动均已实现</td><td><span class="status">已完成</span></td></tr>
       <tr><td>桌面登录</td><td>浏览器 Device Flow；Lark/飞书与 OIDC 由目标服务器配置；凭据按 Origin 隔离在 Keychain</td><td><span class="status">已完成</span></td></tr>
       <tr><td>本机 agent</td><td>内置同版本 <code>party</code> sidecar；桌面设置可选择本机 agent 身份、频道和 runner，启动/停止并查看脱敏日志</td><td><span class="status">R4 已实现，GUI 复核受 Keychain 密码框阻塞</span></td></tr>
@@ -130,10 +130,12 @@
 
   <section>
     <h2>R1 验收命令</h2>
-    <pre><code>bun test scripts/release-version.test.ts scripts/desktop-update-manifest.test.ts
+    <pre><code>bun test scripts/release-version.test.ts scripts/desktop-update-manifest.test.ts scripts/desktop-production-acceptance.test.ts
 cd web &amp;&amp; bun test &amp;&amp; bunx tsc --noEmit &amp;&amp; bunx vite build
 cd desktop &amp;&amp; bun run typecheck
 TAURI_SIGNING_PRIVATE_KEY=... bun run desktop:build:prod
+bun scripts/desktop-production-acceptance.ts baseline --app /Applications/AgentParty.app --expected-version &lt;N-1&gt; --output /tmp/agentparty-baseline.json
+bun scripts/desktop-production-acceptance.ts verify --app /Applications/AgentParty.app --expected-version &lt;N&gt; --baseline /tmp/agentparty-baseline.json --receipt "$HOME/Library/Application Support/com.agentparty.desktop/updater-diagnostic.json"
 bun run check</code></pre>
     <p>最终证据不是“workflow 绿”，而是用旧版 DMG 安装应用，再发布一个更高版本的测试 tag，应用内发现更新、下载、验签、替换并重启，重启后显示新版本。</p>
   </section>
