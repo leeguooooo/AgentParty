@@ -3,6 +3,7 @@
 // 读/写 opt-in、申请浏览器通知权限、把结果上报给持有 optin state 的父组件（ChannelPage）。
 import { useState } from "react";
 import { useT } from "../i18n/useT";
+import { FeatureTip } from "./FeatureTip";
 import { isDesktopRuntime, requestDesktopNotificationPermission } from "../lib/desktopRuntime";
 import "../i18n/strings/Channel";
 
@@ -79,6 +80,7 @@ export function NotifyToggle({ optin, onChange }: Props) {
       >
         <span className={`ap-sprite ${optin ? "ap-sprite--bell-on" : "ap-sprite--bell-off"}`} aria-hidden="true" />
       </button>
+      <FeatureTip tip="Tips.notify" />
       {hint !== null && <span className="notify-toggle-hint t-mono">{hint}</span>}
     </span>
   );

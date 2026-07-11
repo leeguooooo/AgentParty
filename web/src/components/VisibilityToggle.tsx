@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { AuthError, ForbiddenError, setChannelVisibility } from "../lib/api";
 import { useT } from "../i18n/useT";
+import { FeatureTip } from "./FeatureTip";
 import "../i18n/strings/VisibilityToggle";
 
 interface Props {
@@ -57,6 +58,7 @@ export function VisibilityToggle({ slug, token, isPublic, onChanged, onAuthFaile
       >
         {busy ? "…" : isPublic ? t("Visibility.toPrivate") : t("Visibility.toPublic")}
       </button>
+      <FeatureTip tip="Tips.visibility" />
       {confirmPublic !== null && (
         <div className="vis-confirm" role="alertdialog" aria-label={t("Visibility.confirmDialogLabel")}>
           <span className="vis-confirm-text">{t("Visibility.confirmText", { count: confirmPublic })}</span>

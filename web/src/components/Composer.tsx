@@ -11,6 +11,7 @@ import {
   type MentionTier,
 } from "../lib/mentions";
 import { useT, type TFunc } from "../i18n/useT";
+import { FeatureTip } from "./FeatureTip";
 import "../i18n/strings/Composer";
 import "../i18n/strings/WakeReceipt";
 
@@ -234,6 +235,7 @@ export function Composer({ draft, setDraft, onSend, ready, candidates, mentionSt
         onKeyDown={onKeyDown}
         onBlur={() => setTimeout(() => setMenu(null), 120)}
       />
+      <FeatureTip tip="Tips.wake" className="composer-wake-tip" />
       <button
         type="button"
         className="d-btn d-btn--primary composer-send"

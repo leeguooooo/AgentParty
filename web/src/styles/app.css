@@ -4612,3 +4612,63 @@
   padding: 9px 12px;
   font-weight: 700;
 }
+
+/* 功能级 tips 引导（#145）。一个「?」小圆点，hover/focus 弹出一句话解释。沿用 doodle 硬边 +
+   4px 硬阴影，克制不花哨；默认收起，只在指上去/键盘聚焦时显示，不打扰。 */
+.feature-tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+.feature-tip-dot {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.4px solid var(--d-ink);
+  border-radius: 999px;
+  background: var(--t-panel);
+  color: var(--t-muted);
+  font-size: 10.5px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+}
+.feature-tip-dot:hover,
+.feature-tip-dot:focus-visible {
+  background: var(--t-accent);
+  color: var(--t-accent-ink);
+}
+.feature-tip-bubble {
+  position: absolute;
+  z-index: 75;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 240px;
+  padding: 7px 9px;
+  border: 1.6px solid var(--d-ink);
+  background: var(--t-panel);
+  box-shadow: 4px 4px 0 var(--d-shadow);
+  color: var(--t-text);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.feature-tip:hover .feature-tip-bubble,
+.feature-tip:focus-within .feature-tip-bubble {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* @ 唤醒提示（#145）：贴着发送按钮底部对齐，不撑高插话框行。 */
+.composer-wake-tip { align-self: flex-end; margin-bottom: 7px; }
+.composer-wake-tip .feature-tip-bubble { left: auto; right: 0; transform: none; }
