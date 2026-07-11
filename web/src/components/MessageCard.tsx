@@ -85,6 +85,21 @@ function reviewTitle(msg: MsgFrame): string {
   ].filter((part): part is string => part !== null).join("\n");
 }
 
+/**
+ * worker 常把同一句话既写进 status.note 又写进 blocked_reason（两者是独立字段，
+ * shared/src/protocol.ts）。时间线把两份同文用 `·` 一拼就成「… · blocked …」的整句
+ * 重复（issue #147）。这里判断该不该单列 blocked 那条：与 note 同文时不列。
+ */
+export function blockedReasonDuplicatesNote(
+  note: string | null | undefined,
+  blockedReason: string | null | undefined,
+): boolean {
+  const n = note?.trim() ?? "";
+  const b = blockedReason?.trim() ?? "";
+  // b === n 且 b 非空 已蕴含 n 非空，不再赘写 n !== ""（变异证明那是死代码）
+  return b !== "" && b === n;
+}
+
 export function MessageCard({
   msg,
   self,
@@ -229,9 +244,8 @@ export function MessageCard({
     ].filter((part): part is string => part !== null && part !== "").join("\n");
     // worker 常把同一句话既写进 note 又写进 blocked_reason，直接拼接会让时间线出现
     // 「… · blocked …」的整句重复（issue #147）——受阻原因与 note 同文时去掉重复的那一份。
-    const noteTrimmed = msg.note?.trim() ?? "";
     const blockedReason = msg.status?.blocked_reason ?? null;
-    const blockedIsDupOfNote = blockedReason !== null && blockedReason.trim() === noteTrimmed && noteTrimmed !== "";
+    const blockedIsDupOfNote = blockedReasonDuplicatesNote(msg.note, blockedReason);
     const statusBits = [
       msg.note,
       msg.status?.scope.length ? `scope ${msg.status.scope.join(", ")}` : null,
