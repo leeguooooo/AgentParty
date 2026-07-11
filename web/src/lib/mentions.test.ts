@@ -310,4 +310,18 @@ describe("parseDraftMentions", () => {
   test("没有 mention 时返回空数组", () => {
     expect(parseDraftMentions("just a plain message")).toEqual([]);
   });
+  // #165：中文昵称
+  test("解析 @中文昵称，且 email 里的 @ 仍不算", () => {
+    expect(parseDraftMentions("@小助手 帮我看下")).toEqual(["小助手"]);
+    expect(parseDraftMentions("hi @程序员小明 and @bob")).toEqual(["程序员小明", "bob"]);
+    expect(parseDraftMentions("mail me@bar.com thanks")).toEqual([]);
+    expect(parseDraftMentions("路人甲@小明")).toEqual([]); // @ 前是中文标识符 → 不当 mention
+  });
+});
+
+describe("activeMentionQuery — 中文昵称补全（#165）", () => {
+  test("打 @中 触发补全下拉", () => {
+    expect(activeMentionQuery("@中", 2)).toEqual({ start: 0, query: "中" });
+    expect(activeMentionQuery("hi @小助", 6)).toEqual({ start: 3, query: "小助" });
+  });
 });

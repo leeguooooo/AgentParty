@@ -444,6 +444,8 @@
 }
 .handlesetup-input:focus { outline: none; border-color: var(--t-accent); }
 .handlesetup-hint { margin: 0; font-size: 11px; color: var(--t-dim); }
+/* #165：agent 昵称未设时的空状态提示（比错误行更柔和，引导而非报错） */
+.handlesetup-empty { margin: 0; font-size: 11px; color: var(--t-dim); font-style: italic; }
 .handlesetup-err { margin: 0; }
 .handlesetup-actions { display: flex; justify-content: flex-end; gap: 8px; }
 

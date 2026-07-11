@@ -33,7 +33,8 @@ const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面才视为幽灵
 // OIDC 设备验证流 = login-verify-*。过渡期旧 presence 行没回填 kind 时靠名字把它们判为 human。
 const SYSTEM_HUMAN_SESSION_RE =
   /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|login-verify-.+)$/i;
-const NAME_TOKEN_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+// #165：昵称可含 unicode（中文），故放开首字为任意字母/数字（与后端 NICKNAME_RE 对齐）。
+const NAME_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$/u;
 
 // 档位：① 在线（当前有 WS 连接） ② 可唤醒（autoWakeReachable 统一口径 #47/#55：
 // serve/watch 需不 stale 且不能是 human_driven，webhook 服务端投递、离线也算） ③ 最近活跃（其余 presence）。
@@ -98,13 +99,13 @@ export function mentionCandidates(
       const identity = identityByName.get(name);
       const assigned = roleByName.get(name);
       const account = identity?.account ?? assigned?.account ?? p?.account;
-      // 人类全局唯一昵称（handle）：有则用它做 @ 插入 token 和显示名——UUID 会话名打不出来，
-      // handle 才能被后端 R5 按 handle 识别为「被 @」。agent 不适用（其 name 本身就是可读 handle）。
+      // 全局唯一昵称（handle）：有则用它做 @ 插入 token 和显示名。人类=account handle（UUID 会话名打不出来，
+      // 只有 handle 能被后端识别为「被 @」）；agent=自设昵称（#165，可中文，其 ASCII name 由后端解析回填）。
       const identityHandle =
         identity?.handle !== undefined && identity.handle !== "" && NAME_TOKEN_RE.test(identity.handle)
           ? identity.handle
           : undefined;
-      const handle = kind === "human" ? (participantByName.get(name)?.handle ?? p?.handle ?? identityHandle) : undefined;
+      const handle = participantByName.get(name)?.handle ?? p?.handle ?? identityHandle;
       // 人类网页会话名是 UUID，显示账号 email 才认得出「是谁」；agent 名本身可读，用 name。
       const display = handle
         ? handle
@@ -168,7 +169,7 @@ export function mentionCandidates(
 // prefix 允许 [a-zA-Z0-9._-]（与 name 字符集一致），@ 前须是行首或空白（不匹配 email 里的 @）。
 export function activeMentionQuery(text: string, caret: number): { start: number; query: string } | null {
   let i = caret - 1;
-  while (i >= 0 && /[a-zA-Z0-9._-]/.test(text[i]!)) i--;
+  while (i >= 0 && /[\p{L}\p{N}._-]/u.test(text[i]!)) i--;
   if (i < 0 || text[i] !== "@") return null;
   if (i > 0 && !/\s/.test(text[i - 1]!)) return null; // @ 前不是空白/行首 → 是 email 之类，不触发
   return { start: i, query: text.slice(i + 1, caret) };
@@ -203,7 +204,9 @@ export function mentionLiveness(
 
 // 从草稿正文里提取 @name（与服务端 BODY_MENTION_RE 一致：@ 前须行首/空白，不吃 email 里的 @）。
 // 去重、保序，供发送前状态条渲染。
-const DRAFT_MENTION_RE = /(^|[^a-zA-Z0-9._@-])@([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
+// #165：放开为 unicode（含中文昵称）。@ 前的边界字符类同样排除 unicode 字母/数字，@ 前是标识符
+// （含中文）就不当 mention（email/句中 @ 安全）；捕获 token 上界 64（{0,63}）。
+const DRAFT_MENTION_RE = /(^|[^\p{L}\p{N}._@-])@([\p{L}\p{N}][\p{L}\p{N}._-]{0,63})/gu;
 export function parseDraftMentions(text: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();

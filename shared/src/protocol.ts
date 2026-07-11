@@ -255,7 +255,7 @@ export interface Sender {
   /** 所属人：机器 ap_ token 铸造时写入的标签，人类 OIDC token 为其 email。无则省略（旧客户端忽略） */
   owner?: string;
   lineage?: AgentLineage;
-  /** 人类全局唯一昵称（可@别名）。仅人类且已设置时下发；agent/未设置省略。旧客户端忽略。 */
+  /** 全局唯一昵称（可@别名）。人类=account handle，agent=自设 nickname（#165）；已设置才下发，未设置省略。旧客户端忽略。 */
   handle?: string;
   /** OAuth/SSO profile display name. Optional; clients fall back to handle/owner/name. */
   display_name?: string;
@@ -287,7 +287,7 @@ export interface PresenceEntry {
   wake?: WakeInfo;
   context?: AgentContext;
   lineage?: AgentLineage;
-  /** 人类全局唯一昵称（可@别名）。仅人类且已设置时下发；旧客户端忽略。 */
+  /** 全局唯一昵称（可@别名）。人类=account handle，agent=自设 nickname（#165）；已设置才下发，未设置省略。旧客户端忽略。 */
   handle?: string;
   /** OAuth/SSO profile display name. Optional; clients fall back to handle/account/name. */
   display_name?: string;
@@ -1046,7 +1046,7 @@ export interface PresenceFrame {
   wake?: WakeInfo;
   context?: AgentContext;
   lineage?: AgentLineage;
-  /** 人类全局唯一昵称（可@别名）。仅人类且已设置时下发；旧客户端忽略。 */
+  /** 全局唯一昵称（可@别名）。人类=account handle，agent=自设 nickname（#165）；已设置才下发，未设置省略。旧客户端忽略。 */
   handle?: string;
   display_name?: string;
   avatar_url?: string;

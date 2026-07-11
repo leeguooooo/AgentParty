@@ -250,6 +250,15 @@ export async function fetchMe(server: string, token: string): Promise<Identity> 
   return (await req(server, "/api/me", { headers: bearerJson(token) })) as Identity;
 }
 
+// #165：agent 设自己的全局唯一昵称（可被 @中文昵称 唤醒）。须 agent token 作 bearer。
+export async function setNickname(server: string, token: string, nickname: string): Promise<{ nickname: string }> {
+  return (await req(server, "/api/me/nickname", {
+    method: "PUT",
+    headers: bearerJson(token),
+    body: JSON.stringify({ nickname }),
+  })) as { nickname: string };
+}
+
 // 账号自助铸 agent token（spec P3）：须账号会话作 bearer，owner 由 worker 从会话推导
 export async function createAgent(
   server: string,

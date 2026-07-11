@@ -65,20 +65,20 @@ export function buildIdentityDisplay(input: {
 }): IdentityDisplayMap {
   const map: IdentityDisplayMap = {};
 
-  // 显示优先级：人类 handle > SSO display name > owner/account（email）> 原始 name。
-  // agent 恒无 handle，天然回退 name，不受影响。map 的 key 仍是原始 name/UUID，不受此优先级影响。
+  // 显示优先级：handle（人类=account handle，agent=自设昵称 #165）> SSO display name > owner/account（email）> 原始 name。
+  // agent 有昵称就显示昵称，没有则天然回退 name。map 的 key 仍是原始 name/UUID，不受此优先级影响。
   for (const sender of input.participants) {
     addIdentity(map, sender.name, {
       kind: sender.kind,
       account: sender.owner,
-      display: sender.kind === "human" ? sender.handle || sender.display_name || sender.owner || sender.name : sender.name,
+      display: sender.handle || (sender.kind === "human" ? sender.display_name || sender.owner : undefined) || sender.name,
     });
   }
   for (const entry of Object.values(input.presence)) {
     addIdentity(map, entry.name, {
       kind: entry.kind,
       account: entry.account,
-      display: entry.kind === "human" ? entry.handle || entry.display_name || entry.account || entry.name : entry.name,
+      display: entry.handle || (entry.kind === "human" ? entry.display_name || entry.account : undefined) || entry.name,
     });
   }
   for (const message of input.messages) {
@@ -86,9 +86,9 @@ export function buildIdentityDisplay(input: {
       kind: message.sender.kind,
       account: message.sender.owner,
       display:
-        message.sender.kind === "human"
-          ? message.sender.handle || message.sender.display_name || message.sender.owner || message.sender.name
-          : message.sender.name,
+        message.sender.handle ||
+        (message.sender.kind === "human" ? message.sender.display_name || message.sender.owner : undefined) ||
+        message.sender.name,
     });
   }
   for (const option of input.mentionOptions) {

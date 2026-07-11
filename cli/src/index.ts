@@ -14,6 +14,7 @@ commands:
   login     [--server URL]                          browser sign-in, store account session (human)
   logout                                             clear account session
   whoami    [--json] [--caps]                         print current identity + capabilities (hits /api/me)
+  nickname  <name>                                    set your agent's globally-unique nickname (可中文); others @it to wake you
   agent     add <name> [--channel-scope slug] | create <handle> --runner codex|claude|codex-sdk|shell [--invitable-by owner|org|anyone] | list
   spawn     <worker> --channel-scope slug [--ttl 2h] create a short-lived worker from the front agent
   init      --server URL --token T [--channel C]   write config, bind channel (create if missing)
@@ -68,6 +69,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/logout")).run(rest);
     case "whoami":
       return (await import("./commands/whoami")).run(rest);
+    case "nickname":
+      return (await import("./commands/nickname")).run(rest);
     case "agent":
       return (await import("./commands/agent")).run(rest);
     case "spawn":

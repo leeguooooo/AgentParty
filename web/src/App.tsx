@@ -791,7 +791,8 @@ export function App() {
   // 建频道入口只给能建的人（登录人类、非分享只读）；scoped agent token 铸不了频道
   const canCreate = !isShareMode() && me?.role === "human";
   // 设置/修改 @handle 只给登录人类账号（agent token 会话、分享只读链接都不显示，Task B2）
-  const canSetHandle = !isShareMode() && me?.role === "human";
+  // #165：人类设 @handle，agent 会话设昵称——都走同一入口/浮层，只是 mode 不同。readonly/分享态不给设。
+  const canSetHandle = !isShareMode() && (me?.role === "human" || me?.role === "agent");
   const channelPending = slug !== null && channels === null && listError === null;
   const unknownChannel =
     slug !== null && channels !== null && !channels.some((c) => c.slug === slug);
@@ -856,6 +857,7 @@ export function App() {
           <div className="handlesetup-panel" style={handlePanelStyle}>
             <HandleSetup
               current={me.handle}
+              mode={me.kind === "agent" ? "nickname" : "handle"}
               onSaved={(handle) => {
                 setMe((prev) => (prev ? { ...prev, handle } : prev));
                 setHandleSetupOpen(false);
