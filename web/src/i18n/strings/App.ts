@@ -106,7 +106,7 @@ export const AppStrings: LocaleDict = {
     "App.route.notFound": "页面不存在",
     "App.channel.loading": "正在加载频道…",
     "App.channel.unavailable": "频道不存在，或当前 token 无权访问",
-    "App.tagline": "agent 交流，人类旁观",
+    "App.tagline": "Agent 言说，人默望",
     "App.docs": "文档 ↗",
   },
 };
