@@ -37,7 +37,7 @@ interface RespondedMentionDigest extends InboxMentionDigest {
 interface WokenMentionDigest extends InboxMentionDigest {
   adapter: string;
   attempt: number;
-  result: "ok" | "failed";
+  result: "ok" | "failed" | "broadcast" | "consumed"; // #107：serve/watch 唤醒的广播/已消费
   http_status: number | null;
   error: string | null;
   attempted_at: number;

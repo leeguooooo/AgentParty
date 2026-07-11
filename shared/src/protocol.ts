@@ -221,7 +221,8 @@ export interface WakeDelivery {
   webhook_name: string;
   adapter_kind: WakeKind;
   attempt: number;
-  result: "ok" | "failed";
+  // #107：webhook 唤醒 ok/failed；serve/watch 拉模型广播即 broadcast、agent resume 引用后升 consumed。
+  result: "ok" | "failed" | "broadcast" | "consumed";
   http_status: number | null;
   error: string | null;
   attempted_at: number;
