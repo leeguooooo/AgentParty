@@ -322,11 +322,8 @@ export function MessageCard({
           <span className="msg-avatar" aria-hidden="true" />
         )}
         <span className="msg-sender" title={senderTitle}>{senderLabel}</span>
-        {owner !== null && (
-          <span className="t-mono msg-owner" title={`owner: ${owner}`}>
-            · {owner}
-          </span>
-        )}
+        {/* owner(lark 长 id）不再每条平铺——它已在 senderTitle 里，悬停发送者名即见；
+           防冒充锚点保留在 tooltip + kind 徽章，行内只留重要内容（名字/类型/提及）。 */}
         {lineageLabel !== null && (
           <span className="t-mono msg-lineage" title={senderTitle}>
             {lineageLabel}
