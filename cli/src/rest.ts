@@ -1,6 +1,7 @@
 // rest api 封装
 import {
   type AgentLineage,
+  type Attachment,
   type CaptureKind,
   type CaptureRecord,
   type ChannelKind,
@@ -1050,6 +1051,27 @@ function newIdempotencyKey(): string {
   const rand: string[] = [];
   for (let i = 0; i < 16; i += 1) rand.push(ULID_CROCKFORD[rnd[i]! % 32]!);
   return time.join("") + rand.join("");
+}
+
+export type { Attachment };
+
+// 附件上传（#176）：把文件本体 POST 到频道附件端点，拿回 R2 引用元数据；随后 postMessage 时带在
+// attachments 字段里。413 too_large / 403 forbidden 由 req() 抛成带 code 的 RestError，调用方据此给文案。
+export async function uploadAttachment(
+  server: string,
+  token: string,
+  slug: string,
+  file: { name: string; type: string; bytes: Uint8Array },
+): Promise<Attachment> {
+  return (await req(
+    server,
+    `/api/channels/${encodeURIComponent(slug)}/attachments?filename=${encodeURIComponent(file.name)}`,
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": file.type || "application/octet-stream" },
+      body: file.bytes,
+    },
+  )) as Attachment;
 }
 
 export async function postMessage(

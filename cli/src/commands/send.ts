@@ -1,17 +1,22 @@
 // party send — rest 一次性发消息，成功后推进游标
+import { basename } from "node:path";
+import type { Attachment } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError, type Parsed } from "../args";
 import { advanceCursorPastOwnMessage, resolveChannel, type Config } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
-import { fetchMe, fetchPresence, handleRestError, postMessage } from "../rest";
+import { fetchMe, fetchPresence, handleRestError, postMessage, RestError, uploadAttachment } from "../rest";
 import { formatReachLine, reachOf } from "../reach";
 import { localStatuslineBase, statuslinePreview, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
-export const sendSpec = { repeatable: ["mention"], booleans: ["debug-auth", "reach", "no-reach"] };
-const SEND_FLAGS = ["channel", "reply-to", "mention", "debug-auth", "reach", "no-reach"];
-const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--reply-to seq] [--debug-auth]
+export const sendSpec = { repeatable: ["mention", "attach"], booleans: ["debug-auth", "reach", "no-reach"] };
+const SEND_FLAGS = ["channel", "reply-to", "mention", "attach", "debug-auth", "reach", "no-reach"];
+const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--attach path]... [--reply-to seq] [--debug-auth]
 
 Send one message to a channel. Use "-" as the body to read stdin.
+
+With --attach, each file is uploaded to the channel first, then the message is sent
+carrying the attachment refs. Body may be empty when at least one --attach is present.
 
 After a send with --mention, a reachability line prints to stderr — whether each
 target is ● online / ◐ wakeable / ○ offline (won't reach until it reconnects).
@@ -20,16 +25,85 @@ On by default in an interactive terminal; --reach forces it, --no-reach silences
 Options:
   --channel C      send to channel C instead of the bound channel
   --mention name   mention a user or agent; repeatable
+  --attach path    upload a local file and attach it; repeatable (max 25MB each)
   --reply-to seq   attach this message as a reply to seq
   --reach          show mention reachability even when not a TTY (agent loops)
   --no-reach       never show mention reachability
   --debug-auth     print resolved auth/config source to stderr`;
+
+// 附件上限与文件名规则与 worker 侧保持一致（#176）：本地先挡一刀，给出比服务端 413 更贴切的文案。
+const ATTACH_SIZE_LIMIT = 25 * 1024 * 1024;
+const ATTACH_FILENAME_RE = /^[^/\\\x00-\x1f\x7f]{1,255}$/;
+
+// 常见类型的扩展名 → MIME 映射；命中不了回退 application/octet-stream，让服务端按 nosniff 处理。
+const CONTENT_TYPE_BY_EXT: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  pdf: "application/pdf",
+  txt: "text/plain",
+  md: "text/markdown",
+  json: "application/json",
+  csv: "text/csv",
+  zip: "application/zip",
+  log: "text/plain",
+};
+
+function guessContentType(filename: string): string {
+  const ext = filename.includes(".") ? filename.slice(filename.lastIndexOf(".") + 1).toLowerCase() : "";
+  return CONTENT_TYPE_BY_EXT[ext] ?? "application/octet-stream";
+}
+
+export interface AttachSource {
+  path: string;
+  filename: string;
+  size: number;
+  contentType: string;
+  bytes: Uint8Array;
+}
 
 export interface SendInput {
   channel: string;
   body: string;
   mentions: string[];
   replyTo: number | null;
+  attachPaths: string[];
+}
+
+// 本地路径 → 上传源：不存在/空文件/超限一律抛带路径的可读错误，绝不静默上传半个包。
+export async function resolveAttachments(paths: string[]): Promise<AttachSource[]> {
+  const sources: AttachSource[] = [];
+  for (const path of paths) {
+    const file = Bun.file(path);
+    if (!(await file.exists())) throw new Error(`attach: file not found: ${path}`);
+    const filename = basename(path);
+    if (!ATTACH_FILENAME_RE.test(filename)) {
+      throw new Error(`attach: illegal filename (single path segment, <=255 chars, no control chars): ${filename}`);
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes.byteLength === 0) throw new Error(`attach: file is empty: ${path}`);
+    if (bytes.byteLength > ATTACH_SIZE_LIMIT) throw new Error(`attach: ${filename}: file too large (max 25MB)`);
+    sources.push({ path, filename, size: bytes.byteLength, contentType: guessContentType(filename), bytes });
+  }
+  return sources;
+}
+
+// 逐个上传，保序返回引用。upload 可注入以便测试；默认走 rest.uploadAttachment。
+export async function collectAttachments(
+  server: string,
+  token: string,
+  slug: string,
+  sources: AttachSource[],
+  upload: typeof uploadAttachment = uploadAttachment,
+): Promise<Attachment[]> {
+  const refs: Attachment[] = [];
+  for (const src of sources) {
+    refs.push(await upload(server, token, slug, { name: src.filename, type: src.contentType, bytes: src.bytes }));
+  }
+  return refs;
 }
 
 export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null> {
@@ -39,11 +113,12 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     console.error(unknown);
     return null;
   }
-  const flagError = valueFlagError(flags, ["channel", "reply-to"], ["mention"]);
+  const flagError = valueFlagError(flags, ["channel", "reply-to"], ["mention", "attach"]);
   if (flagError !== null) {
     console.error(flagError);
     return null;
   }
+  const attachPaths = strArray(flags.attach) ?? [];
   const replyTo = parsePositiveIntFlag(str(flags["reply-to"]), "reply-to");
   if (typeof replyTo === "string") {
     console.error(replyTo);
@@ -82,8 +157,13 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
   if (readStdin) {
     text = await Bun.stdin.text();
   } else if (text === undefined) {
-    console.error("missing message body (use - to read stdin)");
-    return null;
+    // 纯附件消息（#176）：有 --attach 就允许空正文，与网页端「纯图片消息」一致。
+    if (attachPaths.length > 0) {
+      text = "";
+    } else {
+      console.error("missing message body (use - to read stdin, or --attach a file)");
+      return null;
+    }
   }
   // send footgun 软提示（#6）：无 --channel、≥2 个裸 positional、首个像 slug 且 ≠ 目标频道 →
   // 很可能误把「send <频道> <正文>」当成了子命令用法（首个词其实被并进了正文，发到了绑定频道）。
@@ -103,16 +183,46 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     body: text,
     mentions,
     replyTo: replyTo ?? null,
+    attachPaths,
   };
 }
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export async function doSend(cfg: Config, input: SendInput): Promise<number | { seq: number }> {
+  // 先把 --attach 的文件上传到 R2，拿到引用；解析/上传任一失败就直接退，不发一条空引用的消息。
+  let attachments: Attachment[] | undefined;
+  if (input.attachPaths.length > 0) {
+    let sources: AttachSource[];
+    try {
+      sources = await resolveAttachments(input.attachPaths);
+    } catch (e) {
+      console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
+      return 1;
+    }
+    try {
+      attachments = await collectAttachments(cfg.server, cfg.token, input.channel, sources);
+    } catch (e) {
+      // 上传阶段 413 给「max 25MB」贴切文案（服务端消息是字节数，可读性差）；其余走契约退出码。
+      if (e instanceof RestError && (e.code === "too_large" || e.status === 413)) {
+        console.error("error: attachment too large (max 25MB)");
+        return 1;
+      }
+      return handleRestError(e);
+    }
+    for (const ref of attachments) console.error(`uploaded ${ref.filename} (${formatSize(ref.size)})`);
+  }
   try {
     const { seq } = await postMessage(cfg.server, cfg.token, input.channel, {
       kind: "message",
       body: input.body,
       mentions: input.mentions,
       reply_to: input.replyTo,
+      ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
     });
     advanceCursorPastOwnMessage(input.channel, seq);
     writeStatuslineCache({
@@ -157,7 +267,8 @@ export async function run(argv: string[]): Promise<number> {
   }
   const result = await doSend({ server: auth.server, token: auth.token }, input);
   if (typeof result === "number") return result;
-  console.log(`sent seq=${result.seq}`);
+  const attachNote = input.attachPaths.length > 0 ? ` (+${input.attachPaths.length} attachment${input.attachPaths.length > 1 ? "s" : ""})` : "";
+  console.log(`sent seq=${result.seq}${attachNote}`);
   await showReach(auth.server, auth.token, parsed, input);
   return 0;
 }
