@@ -4,6 +4,7 @@
 interface __BaseEnv_Env {
 	DB: D1Database;
 	CHANNELS: DurableObjectNamespace<import("./src/index").ChannelDO>;
+	ATTACHMENTS: R2Bucket;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {

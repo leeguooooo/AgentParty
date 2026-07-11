@@ -23,6 +23,8 @@ export default defineWorkersConfig(async () => {
       durable_objects: { bindings: [{ name: "CHANNELS", class_name: "ChannelDO" }] },
       migrations: [{ tag: "v1", new_sqlite_classes: ["ChannelDO"] }],
       assets: { directory: assetsDir, binding: "ASSETS", run_worker_first: ["/api/*", "/openapi.json"] },
+      // vitest-pool-workers 下 miniflare 会为每个声明的 r2 bucket 自动起一个内存 R2，无需真实账号
+      r2_buckets: [{ binding: "ATTACHMENTS", bucket_name: "agentparty-attachments-test" }],
       d1_databases: [
         {
           binding: "DB",

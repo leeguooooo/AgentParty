@@ -2,7 +2,7 @@
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { buildHostBoard, type ChannelSquad, type CollaborationRole, type HostBoard, type MsgFrame, type PresenceEntry, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
+import { buildHostBoard, type Attachment, type ChannelSquad, type CollaborationRole, type HostBoard, type MsgFrame, type PresenceEntry, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentJoin } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
 import { VisibilityToggle } from "../components/VisibilityToggle";
@@ -39,7 +39,9 @@ import {
   setLoopGuard,
   setWorkflowGuard,
   setChannelRole,
+  TooLargeError,
   updateTask,
+  uploadAttachment,
   ValidationError,
 } from "../lib/api";
 import { agentHue } from "../lib/agentColor";
@@ -1661,6 +1663,10 @@ export function ChannelPage({
   const [state, dispatch] = useReducer(channelReducer, initialChannelState);
   const [channelIdentities, setChannelIdentities] = useState<ChannelIdentity[]>([]);
   const [draft, setDraft] = useState("");
+  // 附件（#176）：已上传待随下一条消息发出的引用 + 上传中/错误态
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [searchFrom, setSearchFrom] = useState("");
   const [searchSince, setSearchSince] = useState("");
@@ -2288,16 +2294,57 @@ export function ChannelPage({
 
   const send = useCallback(() => {
     const body = draft.trim();
-    if (body === "") return;
+    // 有附件时允许空正文（纯图片/文件消息）
+    if (body === "" && attachments.length === 0) return;
     // 与草稿 chips / 服务端 BODY_MENTION_RE 同一份语义：@ 前须行首或非标识符字符，不吃 email 里的 @
     const mentions = parseDraftMentions(body);
     const ok =
-      sockRef.current?.send({ type: "send", kind: "message", body, mentions, reply_to: replyTo }) ??
-      false;
+      sockRef.current?.send({
+        type: "send",
+        kind: "message",
+        body,
+        mentions,
+        reply_to: replyTo,
+        ...(attachments.length > 0 ? { attachments } : {}),
+      }) ?? false;
     // ⌘⏎ 不受按钮 disabled 门控，断线窗口内发送失败要内联提示（草稿保留）
-    if (ok) pendingSendsRef.current.push({ draft, replyTo });
-    else dispatch({ type: "send_failed", message: "not connected — message not sent, draft kept" });
-  }, [draft, replyTo]);
+    if (ok) {
+      pendingSendsRef.current.push({ draft, replyTo });
+      // 附件已落 R2，ws 已接收帧 → 乐观清空待发引用（失败时保留草稿由 ack 逻辑处理）
+      setAttachments([]);
+      setUploadError(null);
+    } else {
+      dispatch({ type: "send_failed", message: "not connected — message not sent, draft kept" });
+    }
+  }, [draft, replyTo, attachments]);
+
+  // 选文件 → 逐个上传到 R2 → 追加引用；上限 25MB / 20 个由服务端强制，前端只报错不拦
+  const onPickFiles = useCallback(
+    (files: FileList) => {
+      setUploading(true);
+      setUploadError(null);
+      const list = Array.from(files);
+      void (async () => {
+        for (const file of list) {
+          try {
+            const meta = await uploadAttachment(token, slug, file);
+            setAttachments((prev) => (prev.some((a) => a.key === meta.key) ? prev : [...prev, meta]));
+          } catch (err) {
+            if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+            else if (err instanceof TooLargeError) setUploadError(`${file.name}: file too large (max 25MB)`);
+            else if (err instanceof ForbiddenError) setUploadError(`${file.name}: not allowed to upload here`);
+            else setUploadError(`${file.name}: upload failed`);
+          }
+        }
+        setUploading(false);
+      })();
+    },
+    [token, slug],
+  );
+
+  const onRemoveAttachment = useCallback((key: string) => {
+    setAttachments((prev) => prev.filter((a) => a.key !== key));
+  }, []);
 
   const canWrite = state.self !== null && !state.archived && !state.readonly;
   const charterUpdated = charter !== null && charter.charter_rev > seenCharterRev;
@@ -3357,6 +3404,11 @@ export function ChannelPage({
           ready={state.status === "open"}
           candidates={mentionOptions}
           mentionStatuses={draftMentionStatuses}
+          attachments={attachments}
+          onPickFiles={onPickFiles}
+          onRemoveAttachment={onRemoveAttachment}
+          uploading={uploading}
+          uploadError={uploadError}
         />
       )}
     </div>

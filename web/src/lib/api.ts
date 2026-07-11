@@ -1,7 +1,7 @@
 // rest 封装 + token 存取。
 // 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它，并立即从地址栏移除；
 // share token 只放 sessionStorage，本次标签页可刷新，避免长期落 localStorage。
-import type { ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, TaskSummary, WakeDelivery } from "@agentparty/shared";
+import type { Attachment, ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, TaskSummary, WakeDelivery } from "@agentparty/shared";
 import { apiUrl } from "./base";
 import type { WebSession } from "./oidc";
 
@@ -173,6 +173,40 @@ export async function fetchMe(token: string): Promise<MeInfo> {
   if (res.status === 401) throw new AuthError("invalid or revoked token");
   if (!res.ok) throw new Error(`GET /api/me failed (${res.status})`);
   return (await res.json()) as MeInfo;
+}
+
+// 附件上传（#176）：把文件本体 POST 到频道，拿回 R2 引用元数据；随后发消息时带在 attachments 里。
+// 体积上限 25MB 在服务端强制（超限 413）。TooLarge 单列以便前端给出明确文案。
+export class TooLargeError extends Error {}
+
+export async function uploadAttachment(token: string, slug: string, file: File): Promise<Attachment> {
+  const res = await fetchApi(
+    `/api/channels/${slug}/attachments?filename=${encodeURIComponent(file.name)}`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": file.type || "application/octet-stream",
+      },
+      body: file,
+    },
+  );
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("not allowed to upload here");
+  if (res.status === 413) throw new TooLargeError("file too large (max 25MB)");
+  if (!res.ok) throw new Error(`upload failed (${res.status})`);
+  return (await res.json()) as Attachment;
+}
+
+// 附件下载（#176）：下载端点要 Bearer 鉴权，<img src>/<a href> 带不了头，所以取回 blob 再造 objectURL。
+export async function fetchAttachmentBlob(token: string | null, url: string): Promise<Blob> {
+  const res = await fetchApi(url, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("not allowed to read this attachment");
+  if (!res.ok) throw new Error(`download failed (${res.status})`);
+  return res.blob();
 }
 
 export async function listChannels(token: string): Promise<ChannelInfo[]> {

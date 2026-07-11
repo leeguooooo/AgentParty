@@ -11,6 +11,7 @@ import { useT } from "../i18n/useT";
 import "../i18n/strings/MessageCard";
 import { fmtTime } from "../lib/time";
 import type { MentionReceipt } from "../lib/wakeReceipt";
+import { AttachmentList } from "./AttachmentList";
 import { Markdown } from "./Markdown";
 import { MessageStatus } from "./MessageStatus";
 
@@ -485,6 +486,9 @@ export function MessageCard({
         <p className="msg-retracted">{t("MessageCard.retracted")}</p>
       ) : (
         <Markdown source={msg.body} identities={identityDisplay} />
+      )}
+      {!editing && !msg.retracted && msg.attachments !== undefined && msg.attachments.length > 0 && (
+        <AttachmentList attachments={msg.attachments} />
       )}
       {!editing && actionError !== null && <p className="banner banner--red msg-action-error">{actionError}</p>}
     </article>

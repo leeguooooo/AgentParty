@@ -8,6 +8,7 @@ import {
 } from "@agentparty/shared";
 import type {
   AgentLineage,
+  Attachment,
   CaptureKind,
   ChannelRoleAssignment,
   ChannelSquad,
@@ -210,6 +211,10 @@ async function loadChannelRoleAssignment(db: D1Database, slug: string, name: str
 const WEBHOOK_FILTERS: readonly string[] = ["mentions", "status", "needs-human", "all"] satisfies WebhookFilter[];
 const CAPTURE_KINDS: readonly string[] = ["decision", "requirement", "bug", "action-item"] satisfies CaptureKind[];
 const WEBHOOK_URL_MAX = 2048;
+// 附件上传体积上限（#176）：25 MiB。R2 免费额度 10GB 存储 + 无出站费，够撑；超限返回 413。
+const ATTACHMENT_SIZE_LIMIT = 25 * 1024 * 1024;
+// 附件文件名：单段、禁路径分隔符与控制符，用作 R2 key 末段和下载文件名
+const ATTACHMENT_FILENAME_RE = /^[^/\\\x00-\x1f\x7f]{1,255}$/;
 const WEBHOOK_SECRET_MAX = 4096;
 const HEADER_VALUE_RE = /^[\x21-\x7e]+$/;
 // do 无条件信任的内部头清单：ws 升级转发前必须逐个剥离客户端注入值，只认 worker 权威版本
@@ -4478,6 +4483,80 @@ app.get("/api/channels/:slug/messages/:seq/audit", async (c) => {
       headers: { "x-partykit-room": slug },
     }),
   );
+});
+
+// 附件上传（#176）：blob 进 R2，返回引用元数据；发消息时把引用带在 attachments 字段里。
+// 鉴权同频道写：必须是可访问该频道的非 readonly token（私有频道即房主/成员/被邀 agent）。
+app.post("/api/channels/:slug/attachments", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  if (identity.role === "readonly") {
+    return c.json(errorBody("forbidden", "readonly token cannot upload attachments"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const filename = (c.req.query("filename") ?? "").trim();
+  if (!ATTACHMENT_FILENAME_RE.test(filename)) {
+    return c.json(errorBody("bad_request", "filename query param required (single path segment, <=255 chars)"), 400);
+  }
+  // Content-Length 先挡一刀，避免把超大体读进内存
+  const declaredLength = Number(c.req.header("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > ATTACHMENT_SIZE_LIMIT) {
+    return c.json(errorBody("too_large", `attachment exceeds ${ATTACHMENT_SIZE_LIMIT} bytes`), 413);
+  }
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (bytes.byteLength === 0) {
+    return c.json(errorBody("bad_request", "attachment body is empty"), 400);
+  }
+  if (bytes.byteLength > ATTACHMENT_SIZE_LIMIT) {
+    return c.json(errorBody("too_large", `attachment exceeds ${ATTACHMENT_SIZE_LIMIT} bytes`), 413);
+  }
+  const contentType = c.req.header("content-type")?.split(";")[0]?.trim() || "application/octet-stream";
+  // key 前缀锚定 slug：下载时 worker 用权威 slug 重新拼 key，跨频道的伪造引用读不到别人的 blob
+  const objectPath = `${crypto.randomUUID()}/${filename}`;
+  const key = `${slug}/${objectPath}`;
+  await c.env.ATTACHMENTS.put(key, bytes, {
+    httpMetadata: { contentType },
+    customMetadata: { filename, uploaded_by: identity.name, channel: slug },
+  });
+  const meta: Attachment = {
+    key,
+    filename,
+    content_type: contentType,
+    size: bytes.byteLength,
+    url: `/api/channels/${slug}/attachments/${objectPath}`,
+  };
+  return c.json(meta, 201);
+});
+
+// 附件下载（#176）：同频道读鉴权，从 R2 流式回传。绝不暴露裸 R2 公链——频道内容是受控的。
+app.get("/api/channels/:slug/attachments/:path{.+}", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const objectPath = c.req.param("path");
+  // 只认 worker 权威 slug 前缀拼出的 key，客户端传的完整 key 一律不信任，防目录穿越
+  if (!objectPath || objectPath.includes("..") || objectPath.startsWith("/")) {
+    return c.json(errorBody("bad_request", "invalid attachment path"), 400);
+  }
+  const object = await c.env.ATTACHMENTS.get(`${slug}/${objectPath}`);
+  if (!object) return c.json(errorBody("not_found", "attachment not found"), 404);
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+  if (!headers.has("content-type")) headers.set("content-type", "application/octet-stream");
+  // nosniff：即便 content-type 被伪造也不让浏览器嗅探成可执行类型，缓解存储型 XSS
+  headers.set("x-content-type-options", "nosniff");
+  return new Response(object.body, { headers });
 });
 
 app.post("/api/channels/:slug/messages", async (c) => {

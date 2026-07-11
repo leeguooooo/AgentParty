@@ -3779,6 +3779,66 @@
 .composer-input::placeholder { color: var(--t-dim); }
 .composer-send { align-self: flex-end; }
 
+/* ---- 附件 composer（#176） ---- */
+.composer-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: flex-end;
+}
+.composer-attachments {
+  list-style: none;
+  margin: 0;
+  padding: 0.25rem 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.composer-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+.composer-attachment-size { color: var(--t-dim); }
+.composer-attachment-remove {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--t-dim);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0;
+}
+.composer-attachment-remove:hover { color: var(--fg, inherit); }
+.composer-upload-error { margin: 0.25rem 0; }
+
+/* ---- 消息附件渲染（#176） ---- */
+.msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+.msg-attachment-img img {
+  max-width: 320px;
+  max-height: 240px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  display: block;
+}
+.msg-attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+.msg-attachment-size { color: var(--t-dim); }
+.msg-attachment-loading { color: var(--t-dim); font-size: 0.85rem; }
+
 .d-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
