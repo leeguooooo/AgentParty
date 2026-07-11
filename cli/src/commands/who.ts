@@ -1,6 +1,6 @@
 // party who — 从终端看频道里谁在线/可唤醒/最近，便于接着 party send --mention 把人拉进来/唤醒。
 // Claude Code 原生 @ 只认本地文件/技能，塞不进远程动态列表；本命令就是那个「动态在线列表」。
-import { autoWakeReachable, type PresenceEntry, type SenderKind, type WakeKind } from "@agentparty/shared";
+import { type PresenceEntry, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
@@ -13,14 +13,19 @@ const HELP = `usage: party who [channel|--channel C] [--json]
 
 List who is in a channel, tiered by how you can reach them:
   ● online    connected right now
-  ◐ wakeable  not connected, but @-mention will wake them (serve/watch/webhook)
-  ○ recent    seen lately; mention delivers, wake not guaranteed
+  ◐ wakeable  not connected, but a wake layer means @-mention can still wake them.
+              A watch --once agent is offline between wakes yet still wakeable —
+              this is its normal standby, not "gone". Shown as verified/unverified:
+                · wakeable verified    server-confirmed — webhook (server-delivered)
+                                       or it was seen resuming after an @-mention
+                · wakeable unverified  self-declared serve/watch the server has NOT
+                                       verified — may or may not actually wake up
+  ○ recent    seen lately, no wake layer; mention delivers, wake not guaranteed
 A "⏳ busy" tag means the target is serially handling a wake (e.g. a long run): it
 is reachable but a reply will be slow — an ask that times out means "busy", not
 "offline", so do not re-@ it. "N queued" shows how many wakes are already waiting.
-wake=serve runs a live supervisor and webhook is server-delivered; wake=watch is
-self-declared and depends on the harness actually resuming the agent, so it is
-shown as "watch (unverified)" until proven — check with: party wake test @name
+The verified/unverified split is server-authoritative and does NOT trust the wake
+kind the client self-reports: prove a self-declared agent with: party wake test @name
 A "read #N / read ✓ / N behind" note shows how far a streaming reader (web, or an
 agent on serve / watch --follow) has read. No note = not a line-by-line reader.
 Then bring one in: party send "@name …" --mention name
@@ -87,10 +92,15 @@ export function classify(e: PresenceEntry, now: number): Row | null {
   const kind = kindOf(e);
   const wake = e.wake?.kind;
   const paused = e.paused === true;
+  // #191：非在线的 wake layer 判定。wakeableState 把「非在线」分成三档——
+  //   offline（无 wake layer / human_driven）/ wakeable_unverified（自报 serve/watch 未经服务端验证）
+  //   / wakeable_verified（webhook，或服务端观测到被 @ 后 resume 盖了 verified_at）。
+  const wstate = wakeableState(e, now);
   let tier: Tier;
   if (online) tier = "online";
-  // wakeable 统一口径（#47/#55）：serve/watch 需 presence 新鲜，human_driven 不承诺自动响应；webhook 离线也算
-  else if (autoWakeReachable(e, now, STALE_MS) && age <= DEAD_MS) tier = "wakeable";
+  // 声明了 wake layer（serve/watch/webhook，非 human_driven）→ 一律「可唤醒·待命」，哪怕 supervisor 陈旧
+  // 也不再谎报「离线·待重连」（这正是 watch --once 两次唤醒之间的常态）；可信度由 verified/unverified 另表。
+  else if (wstate !== "offline" && age <= DEAD_MS) tier = "wakeable";
   else tier = "recent";
   if (tier !== "online") {
     // 暂停是人主动设的、有意保留的状态：不当人类/幽灵清掉，始终列出，让人看得见「谁被按了暂停」。
@@ -103,7 +113,9 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     tier,
     ...(paused ? { paused: true as const, ...(typeof e.resume_at === "number" ? { resume_at: e.resume_at } : {}) } : {}),
     ...(wake === undefined ? {} : { wake }),
-    ...(wake === "watch" && e.wake?.verified_at === undefined ? { wake_unverified: true as const } : {}),
+    // #191：可唤醒但未经服务端验证（自报的 serve/watch，服务端从没观测到它被 @ 后 resume）如实标注。
+    // 不再只针对 watch——serve 同样是自报，未验证就不该被默认信任（避免「自称可唤醒实则叫不醒」）。
+    ...(tier === "wakeable" && wstate === "wakeable_unverified" ? { wake_unverified: true as const } : {}),
     // 身份分层（#110）：只在 presence 给了非空值时带出，缺失就省略（诚实留白，不无中生有）。
     ...(typeof e.account === "string" && e.account !== "" ? { account: e.account } : {}),
     ...(typeof e.handle === "string" && e.handle !== "" ? { handle: e.handle } : {}),
@@ -262,7 +274,12 @@ export async function run(argv: string[]): Promise<number> {
         console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${read}${duplicate}`);
         continue;
       }
-      const wake = r.tier === "wakeable" && r.wake ? ` ${r.wake}${r.wake_unverified === true ? " (unverified)" : ""}` : "";
+      // #191：可唤醒行明确标出「已验证 / 未验证」——verified＝服务端确认过（webhook，或观测到被 @ 后 resume），
+      // unverified＝仅自报、服务端没验证过，别当它一定叫得醒。
+      const wake =
+        r.tier === "wakeable"
+          ? ` · ${r.wake_unverified === true ? "unverified" : "verified"}${r.wake ? ` (${r.wake})` : ""}`
+          : "";
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
       console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${taskNote(r, now)}${wake}${read}${duplicate}${age}`);
     }

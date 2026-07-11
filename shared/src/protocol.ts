@@ -457,6 +457,42 @@ export function autoWakeReachable(
   return wakeReachable(entry.wake?.kind, ageMs, staleMs, live);
 }
 
+// #191：一个 `watch --once` 的 agent 在两次唤醒之间必然断连（live=None），但它**依然可被唤醒**——
+// presence 却只有「在线 / 离线」两档，把这种「断连但可唤醒的待命态」谎报成「离线·待重连」，用户以为它死了。
+// wakeableState 把「非在线」细分成三档（在线与否由调用方按 live/新鲜度另判，本函数只看 wake layer + 校验事实）：
+//   • offline            —— 没有任何 wake layer（wake=none/缺失）或 human_driven：进程没了 / 靠人接续，@ 它落不了地。
+//   • wakeable_unverified —— 声明了 serve/watch wake layer，但服务端从未验证过它真能被唤醒。**自报不可信**
+//                            （issue #55/#60 的「假在线」另一半：false-online），如实标注「未验证」，不谎称可达。
+//   • wakeable_verified   —— 服务端亲自确认：webhook（服务端控制投递，天然可验证）或 serve/watch 且服务端
+//                            近期观测到它被 @ 后确实 resume（presence.wake.verified_at 由 DO 盖，**不吃客户端自报**）。
+// 关键：verified 只认服务端记录的事实，绝不信客户端塞进来的 wake.verified_at——不然就回到「自称可唤醒实则叫不醒」。
+export type WakeableState = "wakeable_verified" | "wakeable_unverified" | "offline";
+
+// 服务端唤醒验证的有效期：DO 每观测到一次「被 @ 后 resume」就把 verified_at 刷新到当下；
+// 超过这个窗口没有新证据，就不再谎称 verified，回落到 unverified（仍显示「可唤醒·待命」，只是不再打包票）。
+export const WAKE_VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
+
+export function wakeableState(
+  entry: Pick<PresenceEntry, "wake" | "residency">,
+  now: number,
+  verifyTtlMs = WAKE_VERIFY_TTL_MS,
+): WakeableState {
+  const kind = entry.wake?.kind;
+  // 没有 wake layer（或显式 none）：真离线，无处可唤醒。
+  if (kind === undefined || kind === "none") return "offline";
+  // human_driven：靠人/外层 harness 接续，不承诺自动响应——不算可唤醒。
+  if (entry.residency === "human_driven") return "offline";
+  // webhook：服务端持有端点、自己 POST 投递 → 天然可服务端验证，离线也真能唤醒。
+  if (kind === "webhook") return "wakeable_verified";
+  // serve/watch：只有服务端记录过「近期成功唤醒」（verified_at，由 DO 盖，非客户端自报）才算已验证。
+  const verifiedAt = entry.wake?.verified_at;
+  if (typeof verifiedAt === "number" && verifiedAt > 0 && now - verifiedAt <= verifyTtlMs) {
+    return "wakeable_verified";
+  }
+  // 声明了 serve/watch 但服务端从未（或不再新鲜地）验证过 → 可唤醒但未验证，如实标注。
+  return "wakeable_unverified";
+}
+
 export function evaluateHostLease(
   entry: Pick<PresenceEntry, "state" | "ts" | "last_seen" | "role" | "residency" | "wake">,
   now: number,

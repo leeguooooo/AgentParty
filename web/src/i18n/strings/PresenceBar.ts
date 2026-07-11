@@ -24,6 +24,10 @@ export const PresenceBarStrings: LocaleDict = {
     "PresenceBar.taskChipBeat": "▶ #{seq} · ♥ {age}",
     "PresenceBar.taskTitle": "running the wake from #{seq}",
     "PresenceBar.taskTitleBeat": "running the wake from #{seq} — last heartbeat {age} (still alive; a stale heartbeat means stuck)",
+    // #191：断连但可唤醒的「待命」态——不是掉线丢了。verified＝服务端验证过；unverified＝仅自报未验证。
+    "PresenceBar.wake.verified": "⏾ wakeable · verified",
+    "PresenceBar.wake.unverified": "⏾ wakeable · unverified",
+    "PresenceBar.wake.off": "not wakeable",
   },
   zh: {
     "PresenceBar.kickTitle": "踢出 {name}",
@@ -48,6 +52,10 @@ export const PresenceBarStrings: LocaleDict = {
     "PresenceBar.taskChipBeat": "▶ #{seq} · ♥ {age}",
     "PresenceBar.taskTitle": "正在处理 #{seq} 的唤醒",
     "PresenceBar.taskTitleBeat": "正在处理 #{seq} 的唤醒——最近心跳 {age}（还活着；心跳很旧多半卡死了）",
+    // #191：断连但可唤醒的「待命」态——不是掉线丢了。verified＝服务端已验证；unverified＝仅自报未验证。
+    "PresenceBar.wake.verified": "⏾ 可唤醒 · 已验证",
+    "PresenceBar.wake.unverified": "⏾ 可唤醒 · 未验证",
+    "PresenceBar.wake.off": "不可唤醒",
   },
 };
 

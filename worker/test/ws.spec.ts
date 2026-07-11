@@ -339,7 +339,9 @@ describe("websocket", () => {
       },
       role: "worker",
       residency: "supervised",
-      wake: { kind: "serve", verified_at: 123 },
+      // #191：客户端在 status 里自报的 wake.verified_at 一律不被采信——verified_at 只由服务端在观测到
+      // 真实 @→resume 闭环时盖（见 wakeable-verification.spec）。这里 kind 照收，verified_at 被丢弃。
+      wake: { kind: "serve" },
       context: {
         config_kind: "explicit",
         config_fingerprint: "sha256:abc123",
@@ -348,6 +350,7 @@ describe("websocket", () => {
         worktree_label: "agentparty:main",
       },
     });
+    expect(presence.wake).not.toHaveProperty("verified_at");
 
     worker.send({
       type: "send",
