@@ -1963,20 +1963,22 @@ export class ChannelDO extends Server<Env> {
         return Response.json({ message: frame });
       }
       if (action === "retract") {
+        // #196 安全：retract 的设计场景是撤回误发的密钥，正文必须真正抹掉，不能残留在任何地方。
+        // 故审计不留 old_body（只记「谁在何时 retract 了 seq」），也不把正文搬进 original_body
+        // （否则 rowToFrame 的 revision.original_body 会把密钥重新广播 + hello 补拉回来）。
+        // edit 不同：它不是密钥撤回，仍保留 old_body / original_body 供「编辑自何处」展示。
         this.ctx.storage.sql.exec(
           `INSERT INTO message_audit (target_seq, action, actor_name, actor_kind, old_body, new_body, created_at)
-           VALUES (?, 'retract', ?, ?, ?, NULL, ?)`,
+           VALUES (?, 'retract', ?, ?, NULL, NULL, ?)`,
           seq,
           identity.name,
           identity.kind,
-          String(row.body),
           now,
         );
         this.ctx.storage.sql.exec(
           `UPDATE messages
-              SET body = '', mentions_json = '[]', original_body = COALESCE(original_body, ?), retracted_at = ?, retracted_by = ?, rev_seq = ?
+              SET body = '', mentions_json = '[]', original_body = NULL, retracted_at = ?, retracted_by = ?, rev_seq = ?
             WHERE seq = ?`,
-          originalBody,
           now,
           identity.name,
           this.nextRevSeq(),

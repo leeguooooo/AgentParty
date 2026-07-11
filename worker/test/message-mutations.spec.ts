@@ -56,23 +56,35 @@ describe("message edit/retract/supersede", () => {
     });
   });
 
-  it("lets a moderator retract another sender and removes it from search", async () => {
+  it("retract scrubs the body everywhere — not readable via revision, audit, or search (#196)", async () => {
     const { slug, owner, writer } = await scopedFixture();
     const sent = await postMessage(slug, writer.token, "needle secret");
     const seq = ((await sent.json()) as { seq: number }).seq;
 
     const retracted = await api(`/api/channels/${slug}/messages/${seq}/retract`, owner.token, { method: "POST" });
     expect(retracted.status).toBe(200);
-    expect(((await retracted.json()) as { message: MsgLike }).message).toMatchObject({
-      seq,
-      body: "",
-      retracted: true,
-      revision: { original_body: "needle secret" },
-    });
+    const message = ((await retracted.json()) as { message: MsgLike }).message;
+    // 正文清空；revision.original_body 不得带回密钥——否则 retract 响应帧 / hello 补拉 / history 会重发它
+    expect(message).toMatchObject({ seq, body: "", retracted: true });
+    expect(message.revision?.original_body ?? null).toBe(null);
 
+    // search 命不中
     const search = await api(`/api/channels/${slug}/search?q=needle`, writer.token);
     expect(search.status).toBe(200);
     expect(((await search.json()) as { hits: unknown[] }).hits).toEqual([]);
+
+    // 审计端点也读不回密钥：retract 只记「谁在何时撤回了 seq」，old_body 必须为 null
+    const audit = await api(`/api/channels/${slug}/messages/${seq}/audit`, owner.token);
+    expect(audit.status).toBe(200);
+    const auditRows = ((await audit.json()) as { audit: Array<{ action: string; old_body: string | null }> }).audit;
+    const retractRow = auditRows.find((r) => r.action === "retract");
+    expect(retractRow).toBeDefined();
+    expect(retractRow!.old_body).toBe(null);
+    expect(JSON.stringify(auditRows)).not.toContain("needle secret");
+
+    // 补拉 history（模拟 hello 补拉）同样不含密钥
+    const history = await api(`/api/channels/${slug}/messages?since=0&limit=1000`, owner.token);
+    expect(JSON.stringify(await history.json())).not.toContain("needle secret");
   });
 
   it("supersedes with a new linked message", async () => {
