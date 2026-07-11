@@ -148,6 +148,10 @@ const STATUS_SCOPE_JSON_LIMIT = 4096;
 const STATUS_DECISION_JSON_LIMIT = 4096;
 const STATUS_WORKFLOW_JSON_LIMIT = 4096;
 const MAX_COMPLETION_RELATED = 20;
+// #129：hello 首连补拉的分页大小。REST /internal/messages 早有 limit=1000；hello 曾无 LIMIT，
+// 单次把最多 1 万行一并 toArray 序列化。改为按 seq 分页多批下发（每批 ≤ 此值）——单条查询恒有界，
+// 又不砍完整性：循环直到某页短于一页即判排空，跨批次仍下发全部消息（客户端逐帧消费，与不分页无差别）。
+const HELLO_BACKFILL_PAGE_SIZE = 1000;
 const COMPLETION_ARTIFACT_JSON_LIMIT = 4096;
 const REVIEW_REASON_LIMIT = 4000;
 // #106：workflow guard 近期 (step,state) 窗口大小。8 足以罩住多 agent 在若干状态间的环形 ping-pong
@@ -1401,34 +1405,47 @@ export class ChannelDO extends Server<Env> {
       const sinceRev =
         typeof frame.since_rev === "number" && frame.since_rev >= 0 ? Math.floor(frame.since_rev) : null;
       // 带 since_rev 的新客户端：修订快照只重放 rev_seq 更大的那些（issue #33）；
-      // 不带的旧客户端：保持旧行为（全部历史修订每次连接都重放，由客户端自行去重）
-      const rows =
+      // 不带的旧客户端：保持旧行为（全部历史修订每次连接都重放，由客户端自行去重）。
+      //
+      // #129：分页而非无 LIMIT。曾用单条查询把全部匹配行（最多 1 万）一并 toArray——单次序列化上万行。
+      // 现按 seq 游标分页（seq 是主键、唯一、单调），每页 ≤ HELLO_BACKFILL_PAGE_SIZE 有界下发，循环到
+      // 某页短于一页即排空。分页游标从 0 起（不是 since）：since_rev 命中的行 seq 可能 ≤ since，
+      // 必须纳入遍历，否则会漏掉「seq 小但被修订」的行。跨批次逐帧下发，客户端消费与不分页时完全一致，
+      // 首连即完整的契约不破。
+      //
+      // 注：补拉期间不 await——DO 单线程处理这条 hello，其间新 send 无法穿插改表，快照一致；分页边界
+      // 只会漏「本次 hello 开始后」的新消息，那些由 send 的 live 广播补上（seq 更大，客户端照收）。
+      const backfillQuery =
         sinceRev !== null
-          ? this.ctx.storage.sql
-              .exec(
-                `SELECT * FROM messages
-                  WHERE seq > ?
-                     OR (rev_seq IS NOT NULL AND rev_seq > ?)
-                  ORDER BY seq`,
-                since,
-                sinceRev,
-              )
-              .toArray()
-          : this.ctx.storage.sql
-              .exec(
-                `SELECT * FROM messages
-                  WHERE seq > ?
-                     OR edited_at IS NOT NULL
-                     OR retracted_at IS NOT NULL
-                     OR supersedes IS NOT NULL
-                     OR superseded_by IS NOT NULL
-                     OR completion_review_state IS NOT NULL
-                     OR completion_review_replaced_by_seq IS NOT NULL
-                  ORDER BY seq`,
-                since,
-              )
-              .toArray();
-      for (const row of rows) this.sendFrame(connection, this.rowToFrame(row));
+          ? `SELECT * FROM messages
+              WHERE (seq > ? OR (rev_seq IS NOT NULL AND rev_seq > ?))
+                AND seq > ?
+              ORDER BY seq LIMIT ?`
+          : `SELECT * FROM messages
+              WHERE (seq > ?
+                 OR edited_at IS NOT NULL
+                 OR retracted_at IS NOT NULL
+                 OR supersedes IS NOT NULL
+                 OR superseded_by IS NOT NULL
+                 OR completion_review_state IS NOT NULL
+                 OR completion_review_replaced_by_seq IS NOT NULL)
+                AND seq > ?
+              ORDER BY seq LIMIT ?`;
+      let pageCursor = 0;
+      for (;;) {
+        const rows =
+          sinceRev !== null
+            ? this.ctx.storage.sql
+                .exec(backfillQuery, since, sinceRev, pageCursor, HELLO_BACKFILL_PAGE_SIZE)
+                .toArray()
+            : this.ctx.storage.sql
+                .exec(backfillQuery, since, pageCursor, HELLO_BACKFILL_PAGE_SIZE)
+                .toArray();
+        for (const row of rows) this.sendFrame(connection, this.rowToFrame(row));
+        if (rows.length < HELLO_BACKFILL_PAGE_SIZE) break;
+        // 游标推进到本页最后一行的 seq；seq 唯一且升序，下一页严格取更大的 seq，保证前进、不重不漏。
+        pageCursor = Number(rows[rows.length - 1]!.seq);
+      }
       return;
     }
     if (frame.type === "seen") {
