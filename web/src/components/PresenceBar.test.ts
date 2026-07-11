@@ -3,7 +3,7 @@ import type { PresenceEntry, Sender } from "@agentparty/shared";
 import { createElement } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import { buildGroups, busyLabel, countLiveGroups, ownerKey, pauseResumeAt, PresenceBar, taskLabel, type Item } from "./PresenceBar";
+import { buildGroups, busyLabel, countLiveGroups, ownerKey, pauseResumeAt, PresenceBar, taskLabel, wakeabilityBadge, type Item } from "./PresenceBar";
 
 function item(over: Partial<Item> = {}): Item {
   return {
@@ -36,6 +36,38 @@ function item(over: Partial<Item> = {}): Item {
     ...over,
   };
 }
+
+describe("wakeabilityBadge (#191 可唤醒·待命 + 服务端校验)", () => {
+  const NOW = 2_000_000;
+  test("无 wake 元数据 → 不渲染徽章", () => {
+    expect(wakeabilityBadge(item({ wakeKind: null }), NOW)).toBeNull();
+  });
+
+  test("webhook → verified（服务端投递，天然已验证）", () => {
+    expect(wakeabilityBadge(item({ wakeKind: "webhook", wakeVerifiedAt: null }), NOW)).toEqual({
+      key: "PresenceBar.wake.verified",
+      tone: "on",
+    });
+  });
+
+  test("serve/watch 无服务端 verified_at → unverified（自报未验证，如实标注）", () => {
+    expect(wakeabilityBadge(item({ wakeKind: "serve", wakeVerifiedAt: null }), NOW)?.key).toBe("PresenceBar.wake.unverified");
+    expect(wakeabilityBadge(item({ wakeKind: "watch", wakeVerifiedAt: null }), NOW)?.tone).toBe("pending");
+  });
+
+  test("serve/watch 有服务端 verified_at（新鲜）→ verified", () => {
+    expect(wakeabilityBadge(item({ wakeKind: "watch", wakeVerifiedAt: NOW - 1000 }), NOW)).toEqual({
+      key: "PresenceBar.wake.verified",
+      tone: "on",
+    });
+  });
+
+  test("wake=none / human_driven / bare → not wakeable（off）", () => {
+    expect(wakeabilityBadge(item({ wakeKind: "none" }), NOW)?.key).toBe("PresenceBar.wake.off");
+    expect(wakeabilityBadge(item({ wakeKind: "watch", wakeVerifiedAt: NOW, residency: "human_driven" }), NOW)?.tone).toBe("off");
+    expect(wakeabilityBadge(item({ wakeKind: "serve", wakeVerifiedAt: NOW, residency: "bare" }), NOW)?.tone).toBe("off");
+  });
+});
 
 describe("presence grouping by account", () => {
   test("ownerKey groups online and offline sessions of the same account together", () => {

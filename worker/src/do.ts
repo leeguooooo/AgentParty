@@ -2359,7 +2359,7 @@ export class ChannelDO extends Server<Env> {
     );
     const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
     const frame = this.rowToFrame(row);
-    this.linkWakeResume(identity.name, frame);
+    this.linkWakeResume(identity.name, frame, now);
     return frame;
   }
 
@@ -2398,7 +2398,7 @@ export class ChannelDO extends Server<Env> {
     );
     const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
     const frame = this.rowToFrame(row);
-    this.linkWakeResume(identity.name, frame);
+    this.linkWakeResume(identity.name, frame, now);
     return frame;
   }
 
@@ -3615,7 +3615,7 @@ export class ChannelDO extends Server<Env> {
       const replacedRow = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", replacesSeq).one();
       if (replacedRow) replacedUpdate = this.messageUpdate("review", identity, this.rowToFrame(replacedRow), now);
     }
-    this.linkWakeResume(identity.name, msg);
+    this.linkWakeResume(identity.name, msg, now);
     const workflowGuardFrame = this.applyWorkflowGuardAfterSend(identity, msg, workflowGuard, now);
     if (identity.kind === "agent") {
       this.setMeta("agent_streak", String(this.agentStreak() + 1));
@@ -3663,7 +3663,13 @@ export class ChannelDO extends Server<Env> {
            role_source = COALESCE(excluded.role_source, presence.role_source),
            residency = COALESCE(excluded.residency, presence.residency),
            wake_kind = CASE WHEN ? THEN excluded.wake_kind ELSE presence.wake_kind END,
-           wake_verified_at = CASE WHEN ? THEN excluded.wake_verified_at ELSE presence.wake_verified_at END,
+           -- #191：wake.verified_at 只由服务端在观测到 resume 时盖（markWakeVerified），**绝不吃客户端自报**
+           -- （否则回到 #55/#60 的「自称可唤醒实则叫不醒」）。status 帧只能改 wake_kind：kind 不变则保留服务端
+           -- 已盖的验证时间；kind 变了（旧验证对新 kind 无效）则清空；没带 wake 则原样保留。
+           wake_verified_at = CASE
+             WHEN NOT ? THEN presence.wake_verified_at
+             WHEN excluded.wake_kind IS presence.wake_kind THEN presence.wake_verified_at
+             ELSE NULL END,
            context_json = COALESCE(excluded.context_json, presence.context_json),
            lineage_json = excluded.lineage_json,
            busy = excluded.busy,
@@ -3688,7 +3694,7 @@ export class ChannelDO extends Server<Env> {
         roleSource ?? null,
         frame.residency ?? null,
         frame.wake?.kind ?? null,
-        frame.wake?.verified_at ?? null,
+        null, // #191：wake_verified_at 从不采信客户端；服务端 markWakeVerified 才盖，见上方 CASE
         frame.context === undefined ? null : JSON.stringify(frame.context),
         identity.lineage === undefined ? null : JSON.stringify(identity.lineage),
         // busy/queue_depth（#103）：每条 status 覆盖写（非 COALESCE）——不显式自报 busy 的 status
@@ -3704,7 +3710,7 @@ export class ChannelDO extends Server<Env> {
     return { ok: true, seq, frames };
   }
 
-  private linkWakeResume(targetName: string, msg: MsgFrame) {
+  private linkWakeResume(targetName: string, msg: MsgFrame, now: number) {
     if (msg.reply_to !== null) {
       this.ctx.storage.sql.exec(
         `UPDATE wake_delivery_ledger
@@ -3714,6 +3720,8 @@ export class ChannelDO extends Server<Env> {
         msg.reply_to,
         targetName,
       );
+      // #191：回复的正是一条 @ 了自己的消息 → 服务端亲眼看到「被 @ 后 resume」，据此盖 verified_at。
+      if (this.messageMentions(msg.reply_to).includes(targetName)) this.markWakeVerified(targetName, now);
     }
     const summarySeq = msg.status?.summary_seq ?? null;
     if (summarySeq !== null) {
@@ -3725,7 +3733,34 @@ export class ChannelDO extends Server<Env> {
         summarySeq,
         targetName,
       );
+      // 同理：status 帧 summary_seq 指向的那条消息若 @ 了自己，也是一次可验证的 resume。
+      if (this.messageMentions(summarySeq).includes(targetName)) this.markWakeVerified(targetName, now);
     }
+  }
+
+  // #191：读一条历史消息的 @ 列表，用于判定「这次 resume 是不是回应对本人的 @」——
+  // 别人的普通回帖不能伪造成「被唤醒」证据（校验必须来自真实的 @→resume 闭环）。
+  private messageMentions(seq: number): string[] {
+    const rows = this.ctx.storage.sql.exec("SELECT mentions_json FROM messages WHERE seq = ?", seq).toArray();
+    const raw = rows[0]?.mentions_json;
+    if (typeof raw !== "string") return [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? parsed.filter((m): m is string => typeof m === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  // #191：服务端对某 agent 的 serve/watch wake layer 记下「已验证可唤醒」的时间戳。
+  // 只在观测到真实 @→resume 闭环时调用；只盖 serve/watch（webhook 本就服务端投递、恒 verified，
+  // wake=none/缺失不无中生有）。这是「可唤醒·已验证」区别于「自称可唤醒·未验证」的唯一可信来源。
+  private markWakeVerified(name: string, now: number) {
+    this.ctx.storage.sql.exec(
+      "UPDATE presence SET wake_verified_at = ? WHERE name = ? AND wake_kind IN ('serve', 'watch')",
+      now,
+      name,
+    );
   }
 
   private workflowGuardEnabled(): boolean {

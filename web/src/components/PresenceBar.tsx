@@ -1,6 +1,6 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
-import { evaluateHostLease, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
+import { evaluateHostLease, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
 import { useEffect, useState, type CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
 import { fmtRel } from "../lib/time";
@@ -138,14 +138,25 @@ export function taskLabel(item: Item, now: number): string | null {
   return `▶ #${item.currentTask}${beat}`;
 }
 
-function wakeabilityBadge(item: Item): { text: string; tone: "off" | "pending" | "on" } | null {
-  if (item.residency === "human_driven" || item.residency === "bare" || item.wakeKind === "none") {
-    return { text: "not wakeable", tone: "off" };
-  }
-  if (item.wakeKind === null) return null;
-  if (item.wakeVerifiedAt !== null) return { text: "wakeable", tone: "on" };
-  return { text: "wake unverified", tone: "pending" };
-}
+// #191：presence 的可唤醒徽章。三档一律走共享的 wakeableState（与 CLI `party who` / 服务端同口径），
+// 返回 i18n key + 语气色。verified＝服务端确认（webhook，或观测到被 @ 后 resume 盖了 verified_at）；
+// unverified＝自报的 serve/watch，服务端没验证过，别当它一定叫得醒；off＝无 wake layer / human_driven / bare。
+// bare（无常驻）与 wake=none 同待遇：不承诺可唤醒。verified_at **只信服务端**下发的值，不受客户端自报影响。
+export function wakeabilityBadge(item: Item, now: number): { key: string; tone: "off" | "pending" | "on" } | null {
+  if (item.wakeKind === null) return null; // 没有 wake 元数据，不渲染徽章
+  const state =
+    item.residency === "bare"
+      ? "offline"
+      : wakeableState(
+          {
+            wake: { kind: item.wakeKind, ...(item.wakeVerifiedAt !== null ? { verified_at: item.wakeVerifiedAt } : {}) },
+            ...(item.residency !== null ? { residency: item.residency } : {}),
+          },
+          now,
+        );
+  if (state === "wakeable_verified") return { key: "PresenceBar.wake.verified", tone: "on" };
+  if (state === "wakeable_unverified") return { key: "PresenceBar.wake.unverified", tone: "pending" };
+  return { key: "PresenceBar.wake.off", tone: "off" };}
 
 function presenceRank(item: Item, now: number): number {
   if (hasActiveHostLease(item, now)) return 0;
@@ -357,7 +368,7 @@ export function PresenceBar({
   function renderItem(it: Item, mode: "compact" | "full") {
     const badge = roleBadge(it, now);
     const residency = residencyBadge(it);
-    const wakeability = wakeabilityBadge(it);
+    const wakeability = wakeabilityBadge(it, now);
     const busy = busyLabel(it);
     const task = taskLabel(it, now);
     const taskTitle =
@@ -449,7 +460,7 @@ export function PresenceBar({
         )}
         {full && residency !== null && <span className="t-mono presence-residency">{residency}</span>}
         {full && wakeability !== null && (
-          <span className={`t-mono presence-wake presence-wake--${wakeability.tone}`}>{wakeability.text}</span>
+          <span className={`t-mono presence-wake presence-wake--${wakeability.tone}`}>{t(wakeability.key)}</span>
         )}
         {full && it.context?.worktree_label !== undefined && (
           <span className="t-mono presence-context">{it.context.worktree_label}</span>
