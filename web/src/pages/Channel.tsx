@@ -2167,6 +2167,8 @@ export function ChannelPage({
 
   const removeParticipant = useCallback((name: string) => {
     if (removingName !== null) return;
+    const ok = window.confirm(t("Channel.kick.confirm", { name }));
+    if (!ok) return;
     setRemovingName(name);
     setKickError(null);
     kickParticipant(token, slug, name, "remove")
@@ -2841,6 +2843,8 @@ export function ChannelPage({
 
   const clearRole = useCallback((name: string) => {
     if (roleSaving !== null) return;
+    const ok = window.confirm(t("Channel.roles.clearConfirm", { name }));
+    if (!ok) return;
     setRoleSaving(name);
     setRoleError(null);
     deleteChannelRole(token, slug, name)
