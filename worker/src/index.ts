@@ -3,10 +3,14 @@ import {
   CHANNEL_CREATE_WINDOW_MS,
   CHARTER_LIMIT,
   DEFAULT_MEMBERSHIP,
+  FREE_ATTACHMENT_SIZE_LIMIT,
+  FREE_CHANNEL_CAP,
+  isMember,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
   MAX_CHANNELS_PER_ACCOUNT,
   MAX_CHANNEL_CREATES_PER_WINDOW,
+  MEMBER_ATTACHMENT_SIZE_LIMIT,
   normalizeTier,
   RESERVED_NAMES,
   ROLE_RESPONSIBILITY_LIMIT,
@@ -114,6 +118,9 @@ type AppEnv = Env & {
   // CLI↔worker 版本协商（#137）：声明的最低客户端版本 + 是否硬拒。缺省时用内置默认、默认只建言。
   MIN_CLIENT_VERSION?: string;
   MIN_CLIENT_ENFORCE?: string;
+  // 会员分层真门槛（#277）：free 层配额/附件上限，自部署可抬高。缺省取 shared 常量。
+  FREE_CHANNEL_CAP?: string;
+  FREE_ATTACHMENT_SIZE_LIMIT?: string;
 };
 
 type AppContext = {
@@ -233,10 +240,26 @@ async function loadChannelRoleAssignment(db: D1Database, slug: string, name: str
 const WEBHOOK_FILTERS: readonly string[] = ["mentions", "status", "needs-human", "all"] satisfies WebhookFilter[];
 const CAPTURE_KINDS: readonly string[] = ["decision", "requirement", "bug", "action-item"] satisfies CaptureKind[];
 const WEBHOOK_URL_MAX = 2048;
-// 附件上传体积上限（#176）：25 MiB。R2 免费额度 10GB 存储 + 无出站费，够撑；超限返回 413。
-const ATTACHMENT_SIZE_LIMIT = 25 * 1024 * 1024;
 // 附件文件名：单段、禁路径分隔符与控制符，用作 R2 key 末段和下载文件名
 const ATTACHMENT_FILENAME_RE = /^[^/\\\x00-\x1f\x7f]{1,255}$/;
+
+// #277 会员真门槛：free 账号（含未开通会员、legacy 无账号 token）用低配额，member 解锁到平台原上限。
+// env 覆盖手法同 do.ts 的 maxConnectionsPerChannel()——非法/缺省值一律回落到 shared 常量。
+function resolveFreeChannelCap(env: AppEnv): number {
+  const raw = env.FREE_CHANNEL_CAP;
+  const n = typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : FREE_CHANNEL_CAP;
+}
+
+function resolveFreeAttachmentLimit(env: AppEnv): number {
+  const raw = env.FREE_ATTACHMENT_SIZE_LIMIT;
+  const n = typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : FREE_ATTACHMENT_SIZE_LIMIT;
+}
+
+// 会员申请指引：拒绝时附在错误信息里，告诉调用方「为什么」+「怎么解锁」。
+const MEMBERSHIP_UPGRADE_HINT =
+  "upgrade to member for a higher quota (see README membership section)";
 const WEBHOOK_SECRET_MAX = 4096;
 const HEADER_VALUE_RE = /^[\x21-\x7e]+$/;
 // do 无条件信任的内部头清单：ws 升级转发前必须逐个剥离客户端注入值，只认 worker 权威版本
@@ -2990,11 +3013,15 @@ app.post("/api/channels", async (c) => {
   }
   const now = Date.now();
   const creator = c.get("identity");
-  // #137 成本滥用：每频道 = 一个 DO + 一行 D1。带账号的 token 受两道闸约束——
-  //   owned 总量硬上限（quota_exceeded/403）+ 滚动窗口创建限速（rate_limited/429）。
+  // #137 成本滥用 + #277 会员真门槛：每频道 = 一个 DO + 一行 D1。带账号的 token 受两道闸约束——
+  //   owned 总量硬上限（quota_exceeded/403，free/member 分层）+ 滚动窗口创建限速（rate_limited/429，不分层）。
   // owned 计数含归档频道（archived_at 不为 null 也占 DO/D1），堵 create→archive→create 绕过。
-  // legacy 无账号 token（account == null）不计入、不受限（fail-open，与建表处 owner_account=null 的过渡口径一致）。
+  // legacy 无账号 token（account == null）不计入、不受限（fail-open，与建表处 owner_account=null 的过渡口径一致）；
+  // 有账号但未开通会员的一律按 free 分层（loadMembership 无记录 => DEFAULT_MEMBERSHIP=free）。
   if (creator.account != null) {
+    const membership = await loadMembership(c.env.DB, creator.account);
+    const member = isMember(membership);
+    const cap = member ? MAX_CHANNELS_PER_ACCOUNT : resolveFreeChannelCap(c.env);
     const windowStart = now - CHANNEL_CREATE_WINDOW_MS;
     const counts = await c.env.DB.prepare(
       `SELECT COUNT(*) AS total,
@@ -3006,9 +3033,10 @@ app.post("/api/channels", async (c) => {
       .first<{ total: number; recent: number }>();
     const total = Number(counts?.total ?? 0);
     const recent = Number(counts?.recent ?? 0);
-    if (total >= MAX_CHANNELS_PER_ACCOUNT) {
+    if (total >= cap) {
+      const hint = member ? "" : ` (free tier limit — ${MEMBERSHIP_UPGRADE_HINT})`;
       return c.json(
-        errorBody("quota_exceeded", `account channel quota reached (max ${MAX_CHANNELS_PER_ACCOUNT} channels per account)`),
+        errorBody("quota_exceeded", `account channel quota reached (max ${cap} channels per account)${hint}`),
         403,
       );
     }
@@ -5003,17 +5031,23 @@ app.post("/api/channels/:slug/attachments", async (c) => {
   if (!ATTACHMENT_FILENAME_RE.test(filename)) {
     return c.json(errorBody("bad_request", "filename query param required (single path segment, <=255 chars)"), 400);
   }
+  // #277 会员真门槛：上传者账号决定体积上限——free 低配额，member 解锁到平台原 25 MiB 上限。
+  // 无账号的 legacy token（identity.account undefined）按 loadMembership 的 fail-open 语义落回 free。
+  const uploaderMembership = await loadMembership(c.env.DB, identity.account);
+  const uploaderIsMember = isMember(uploaderMembership);
+  const sizeLimit = uploaderIsMember ? MEMBER_ATTACHMENT_SIZE_LIMIT : resolveFreeAttachmentLimit(c.env);
+  const sizeHint = uploaderIsMember ? "" : ` (free tier limit — ${MEMBERSHIP_UPGRADE_HINT})`;
   // Content-Length 先挡一刀，避免把超大体读进内存
   const declaredLength = Number(c.req.header("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > ATTACHMENT_SIZE_LIMIT) {
-    return c.json(errorBody("too_large", `attachment exceeds ${ATTACHMENT_SIZE_LIMIT} bytes`), 413);
+  if (Number.isFinite(declaredLength) && declaredLength > sizeLimit) {
+    return c.json(errorBody("too_large", `attachment exceeds ${sizeLimit} bytes${sizeHint}`), 413);
   }
   const bytes = new Uint8Array(await c.req.arrayBuffer());
   if (bytes.byteLength === 0) {
     return c.json(errorBody("bad_request", "attachment body is empty"), 400);
   }
-  if (bytes.byteLength > ATTACHMENT_SIZE_LIMIT) {
-    return c.json(errorBody("too_large", `attachment exceeds ${ATTACHMENT_SIZE_LIMIT} bytes`), 413);
+  if (bytes.byteLength > sizeLimit) {
+    return c.json(errorBody("too_large", `attachment exceeds ${sizeLimit} bytes${sizeHint}`), 413);
   }
   const contentType = c.req.header("content-type")?.split(";")[0]?.trim() || "application/octet-stream";
   // key 前缀锚定 slug：下载时 worker 用权威 slug 重新拼 key，跨频道的伪造引用读不到别人的 blob

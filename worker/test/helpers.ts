@@ -60,6 +60,17 @@ export async function seedToken(
   return { token, name };
 }
 
+// #277：把测试账号翻成 member（走 admin 激活端点，与生产开通路径一致），供需要验证「会员解锁到高配额」
+// 的用例复用，也用来给沿用旧高上限（如 MAX_CHANNELS_PER_ACCOUNT）语义的既有用例续命。
+export async function activateMembership(account: string): Promise<void> {
+  const res = await SELF.fetch("http://ap.test/api/admin/membership", {
+    method: "POST",
+    headers: { ...ADMIN_HEADERS, "content-type": "application/json" },
+    body: JSON.stringify({ account, tier: "member" }),
+  });
+  if (!res.ok) throw new Error(`activateMembership failed: ${res.status}`);
+}
+
 export function api(path: string, token: string, init: RequestInit = {}): Promise<Response> {
   return SELF.fetch(`http://ap.test${path}`, {
     ...init,

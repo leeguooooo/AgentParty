@@ -102,11 +102,21 @@ export function normalizeTier(tier: unknown): MembershipTier {
 
 /**
  * feature-gating 的唯一钩子：将来「免费 vs 会员」功能清单都只通过它判定，别处别再各自比字符串。
- * 传入 /api/me 或 account_membership 行（或 null=无记录）。本次不 gate 任何功能。
+ * 传入 /api/me 或 account_membership 行（或 null=无记录）。
  */
 export function isMember(status: { tier?: string | null } | null | undefined): boolean {
   return normalizeTier(status?.tier) === "member";
 }
+
+// ---- 会员分层真门槛（#277）----
+// 托管部署每月要成本，免费层设低配额、会员解锁到平台原有的高上限；自部署走 worker env 覆盖
+// （FREE_CHANNEL_CAP / FREE_ATTACHMENT_SIZE_LIMIT），手法同下面 MAX_CONNECTIONS_PER_CHANNEL 的
+// env-override 模式，见 worker/src/do.ts 的 maxConnectionsPerChannel()。
+// 频道配额：free 账号硬上限；member 沿用 MAX_CHANNELS_PER_ACCOUNT（原高上限，不变）。
+export const FREE_CHANNEL_CAP = 20;
+// 附件体积：free 账号上限；member 沿用原 25 MiB（#176 引入时的默认值，不变）。
+export const FREE_ATTACHMENT_SIZE_LIMIT = 5 * 1024 * 1024; // 5 MiB
+export const MEMBER_ATTACHMENT_SIZE_LIMIT = 25 * 1024 * 1024; // 25 MiB
 
 // cli 退出码
 export const EXIT_TIMEOUT = 2;

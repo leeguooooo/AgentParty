@@ -4,7 +4,7 @@ import {
 } from "@agentparty/shared";
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
-import { api, seedToken, uniq, WsClient } from "./helpers";
+import { activateMembership, api, seedToken, uniq, WsClient } from "./helpers";
 
 // #137 成本滥用：每频道一个 Durable Object，无配额时任一带账号的 ap_ token 可无限造 DO + D1 行。
 // 下面直接向 D1 播种 channels 行来把某账号推到配额/限速边界，避免真跑上百次建频道 API。
@@ -35,6 +35,9 @@ describe("per-account channel quota (#137)", () => {
   it("rejects channel creation once the account is at its owned-channel quota", async () => {
     const account = uniq("acct");
     const { token } = await seedToken("agent", uniq("tok"), { owner: account });
+    // MAX_CHANNELS_PER_ACCOUNT 是 member 层的上限（#277 起 free 层配额更低，见 member-gating spec）；
+    // 这条用例本来就是在测那道平台级硬顶，把账号开通成 member 保留其原始语义。
+    await activateMembership(account);
     // 播种到「配额 - 1」，用一个 window 之外的时间戳避免撞上创建限速
     const old = Date.now() - 2 * 60 * 60 * 1000;
     await seedChannels(account, MAX_CHANNELS_PER_ACCOUNT - 1, old);
@@ -71,6 +74,8 @@ describe("per-account channel quota (#137)", () => {
   it("rate-limits bursty channel creation within the window (429 rate_limited)", async () => {
     const account = uniq("acct");
     const { token } = await seedToken("agent", uniq("tok"), { owner: account });
+    // 开通 member：确保这里只测限速本身，不被 #277 更低的 free 层配额提前挡下
+    await activateMembership(account);
     // 窗口内已有「限速 - 1」个刚创建的频道；总数远低于配额，只应触发限速
     await seedChannels(account, MAX_CHANNEL_CREATES_PER_WINDOW - 1, Date.now());
 
