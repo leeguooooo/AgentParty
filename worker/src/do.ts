@@ -4,6 +4,8 @@ import {
   BODY_LIMIT,
   IDEMPOTENCY_KEY_MAX,
   IDEMPOTENCY_WINDOW_MS,
+  LOOP_GUARD_AGENT_N,
+  LOOP_GUARD_AGENT_PARTY_N,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
   MAX_WEBHOOKS_PER_CHANNEL,
@@ -3241,8 +3243,13 @@ export class ChannelDO extends Server<Env> {
   }
 
   private loopGuardMessage(agentName: string): string | null {
-    void agentName;
-    return this.globalLoopGuardMessage();
+    if (this.getMeta("loop_guard_enabled") !== "1") return null;
+    const global = this.globalLoopGuardMessage();
+    if (global !== null) return global;
+    const guardLimit = this.getMeta("mode") === "party" ? LOOP_GUARD_AGENT_PARTY_N : LOOP_GUARD_AGENT_N;
+    return this.agentCount(agentName) >= guardLimit
+      ? `${agentName} reached its ${guardLimit}-message fair-share budget since the last human message; another agent can continue, or a human/reset can clear it`
+      : null;
   }
 
   private clearLoopGuardState() {
