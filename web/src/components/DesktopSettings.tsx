@@ -117,6 +117,7 @@ interface PanelProps {
   onToggle(): void;
   switchRef?: RefObject<HTMLButtonElement | null>;
   agentAdapter?: DesktopAgentAdapter;
+  embedded?: boolean;
 }
 
 export function DesktopSettingsPanel({
@@ -128,13 +129,14 @@ export function DesktopSettingsPanel({
   onToggle,
   switchRef,
   agentAdapter = desktopAgentAdapter,
+  embedded = false,
 }: PanelProps) {
   const unavailable = t("DesktopSettings.version.unavailable");
   return (
     <section
       id="desktop-settings-panel"
-      className="desktop-settings-panel t-mono"
-      role="dialog"
+      className={`desktop-settings-panel t-mono${embedded ? " desktop-settings-panel--embedded" : ""}`}
+      role={embedded ? "group" : "dialog"}
       aria-label={t("DesktopSettings.panel.title")}
     >
       <header>{t("DesktopSettings.panel.title")}</header>
@@ -175,9 +177,15 @@ interface Props {
   runtime?: DesktopSettingsRuntime;
   serverOrigin?: string;
   agentAdapter?: DesktopAgentAdapter;
+  embedded?: boolean;
 }
 
-export function DesktopSettings({ runtime = defaultRuntime, serverOrigin = "", agentAdapter = desktopAgentAdapter }: Props) {
+export function DesktopSettings({
+  runtime = defaultRuntime,
+  serverOrigin = "",
+  agentAdapter = desktopAgentAdapter,
+  embedded = false,
+}: Props) {
   const t = useT();
   const desktop = runtime.isDesktopRuntime();
   const [open, setOpen] = useState(false);
@@ -259,6 +267,24 @@ export function DesktopSettings({ runtime = defaultRuntime, serverOrigin = "", a
       setPending(false);
     });
   };
+
+  if (embedded) {
+    return (
+      <section className="settings-section settings-section--desktop">
+        <DesktopSettingsPanel
+          enabled={enabled}
+          pending={pending}
+          error={error}
+          versions={versions}
+          t={t}
+          onToggle={toggleAutostart}
+          switchRef={switchRef}
+          agentAdapter={agentAdapter}
+          embedded
+        />
+      </section>
+    );
+  }
 
   return (
     <div className="desktop-settings" ref={rootRef}>

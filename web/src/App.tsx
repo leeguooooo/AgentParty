@@ -861,7 +861,6 @@ export function App() {
             <span className="handlesetup-trigger-value">{t("App.handle.chipUnset")}</span>
           </button>
         )}
-        <DesktopSettings serverOrigin={activeOrigin} />
         {desktop && (
           <ServerSwitcher
             profiles={serverProfiles}
@@ -882,7 +881,7 @@ export function App() {
           title={t("App.settings.title")}
           onClick={() => setSettingsOpen(true)}
         >
-          ⚙
+          <span className="ap-sprite ap-sprite--settings" aria-hidden="true" />
         </button>
       </header>
       {settingsOpen && (
@@ -902,6 +901,7 @@ export function App() {
             setMe((prev) => (prev ? { ...prev, handle } : prev));
             setHandleBannerDismissed(true);
           }}
+          desktopSettings={<DesktopSettings embedded serverOrigin={activeOrigin} />}
         />
       )}
       {canSetHandle && me !== null && me.handle === null && !handleBannerDismissed && !settingsOpen && (

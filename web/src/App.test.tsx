@@ -186,6 +186,26 @@ beforeEach(() => {
   });
 });
 
+test("desktop renders one settings entry and keeps desktop controls in the global panel", async () => {
+  await act(async () => {
+    renderer = create(<LocaleProvider><App /></LocaleProvider>);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  const root = renderer!.root;
+  expect(root.findAllByProps({ className: "app-settings-btn" })).toHaveLength(1);
+  expect(root.findAllByProps({ className: "desktop-settings-trigger" })).toHaveLength(0);
+  expect(root.findByProps({ className: "app-settings-btn" }).findByProps({
+    className: "ap-sprite ap-sprite--settings",
+  })).toBeTruthy();
+
+  await act(async () => root.findByProps({ className: "app-settings-btn" }).props.onClick());
+
+  expect(root.findByProps({ id: "desktop-settings-panel" })).toBeTruthy();
+  expect(root.findByProps({ className: "desktop-agent" })).toBeTruthy();
+});
+
 afterEach(async () => {
   if (renderer !== null) await act(async () => renderer?.unmount());
   renderer = null;

@@ -196,6 +196,18 @@
   box-shadow: 3px 3px 0 var(--d-shadow);
   color: var(--t-body);
 }
+.settings-section--desktop { padding: 0; }
+.desktop-settings-panel--embedded {
+  position: static;
+  width: auto;
+  max-height: none;
+  overflow: visible;
+  padding: 14px 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
 .desktop-settings-panel header { margin-bottom: 10px; font-size: 12px; font-weight: 800; }
 .desktop-settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .desktop-settings-row strong,
@@ -5383,6 +5395,7 @@
   color: var(--fg, inherit);
 }
 .app-settings-btn:hover { background: var(--t-faint, rgba(0,0,0,0.05)); }
+.app-settings-btn .ap-sprite { --ap-icon-size: 22px; }
 .settings-overlay {
   position: fixed;
   inset: 0;

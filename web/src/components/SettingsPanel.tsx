@@ -2,7 +2,7 @@
 // 纯前端；通知偏好读写 localStorage 的 ap_notify_optin（与 NotifyToggle 同键），语言走 LanguageSwitcher，
 // 主题走 lib/theme（doodle↔midnight，写 <html data-theme> + localStorage）。账号 @handle/昵称编辑复用
 // HandleSetup——顶栏不再单独挂浮层入口，编辑归位到这里。不动顶栏原有的桌面专属控件。
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useT } from "../i18n/useT";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { HandleSetup } from "./HandleSetup";
@@ -36,12 +36,14 @@ export function SettingsPanel({
   onClose,
   onLogout,
   onHandleSaved,
+  desktopSettings = null,
 }: {
   me: SettingsMe | null;
   canSetHandle?: boolean;
   onClose: () => void;
   onLogout: (() => void) | null;
   onHandleSaved?: (value: string) => void;
+  desktopSettings?: ReactNode;
 }) {
   const t = useT();
   const [notifyOptin, setNotifyOptin] = useState<boolean>(readNotifyOptin);
@@ -127,6 +129,8 @@ export function SettingsPanel({
           </button>
           <p className="settings-hint">{t("App.settings.notify.hint")}</p>
         </section>
+
+        {desktopSettings}
 
         {me !== null && (
           <section className="settings-section">
