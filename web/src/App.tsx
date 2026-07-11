@@ -9,6 +9,7 @@ import { DesktopUpdater } from "./components/DesktopUpdater";
 import { HandleSetup } from "./components/HandleSetup";
 import { TokenGate } from "./components/TokenGate";
 import { LanguageSwitcher } from "./components/LanguageSwitcher";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { OnboardingGuide } from "./components/OnboardingGuide";
 import { ServerProfileAddGate, ServerSwitcher } from "./components/ServerProfiles";
 import {
@@ -228,6 +229,7 @@ export function App() {
   // 人类账号设置/修改 @handle（Task B2）：me chip 旁的入口开关 + 浮层定位（fixed + 视口内钳制，
   // 手法同 AgentTokens 那次 viewport 修复）；banner 关闭态只在本次会话内记，不落盘。
   const [handleSetupOpen, setHandleSetupOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false); // #273 全局设置面板
   const [handlePanelStyle, setHandlePanelStyle] = useState<CSSProperties>({});
   const [handleBannerDismissed, setHandleBannerDismissed] = useState(false);
   const handleAnchorRef = useRef<HTMLSpanElement | null>(null);
@@ -882,6 +884,15 @@ export function App() {
         )}
         <DesktopUpdater />
         <LanguageSwitcher />
+        <button
+          type="button"
+          className="app-settings-btn"
+          aria-label={t("App.settings.title")}
+          title={t("App.settings.title")}
+          onClick={() => setSettingsOpen(true)}
+        >
+          ⚙
+        </button>
         {!isShareMode() && (
           <button
             type="button"
@@ -893,6 +904,20 @@ export function App() {
           </button>
         )}
       </header>
+      {settingsOpen && (
+        <SettingsPanel
+          me={me}
+          onClose={() => setSettingsOpen(false)}
+          onLogout={
+            isShareMode() || desktopLogoutPending
+              ? null
+              : () => {
+                  setSettingsOpen(false);
+                  void signOut();
+                }
+          }
+        />
+      )}
       {canSetHandle && me !== null && me.handle === null && !handleBannerDismissed && !handleSetupOpen && (
         <p className="banner banner--yellow handle-banner" role="status">
           <span className="handle-banner-text">{t("App.handle.banner")}</span>

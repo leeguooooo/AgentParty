@@ -5019,3 +5019,55 @@
 .agent-board-note { margin: 0; font-size: 12px; color: var(--muted, #999); }
 .agent-board-counts { display: flex; gap: 12px; font-size: 12px; color: var(--muted, #999); }
 .agent-board-count-blocked { color: var(--danger, #e5534b); }
+
+/* #273 全局设置面板 */
+.app-settings-btn {
+  flex: 0 0 auto;
+  border: 1px solid var(--border, #ccc);
+  background: transparent;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--fg, inherit);
+}
+.app-settings-btn:hover { background: var(--t-faint, rgba(0,0,0,0.05)); }
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 64px 16px;
+  background: rgba(0,0,0,0.35);
+  overflow-y: auto;
+}
+.settings-panel {
+  width: min(440px, 100%);
+  background: var(--t-bg, #fff);
+  border: 1px solid var(--border, #ccc);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.2);
+  padding: 4px 20px 20px;
+}
+.settings-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; }
+.settings-title { margin: 0; font-size: 16px; }
+.settings-close { border: 0; background: transparent; font-size: 20px; line-height: 1; cursor: pointer; color: var(--t-dim, #888); }
+.settings-section { padding: 14px 0; border-top: 1px solid var(--t-faint, #eee); }
+.settings-label { font-size: 12px; color: var(--t-dim, #888); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.04em; }
+.settings-toggle {
+  display: inline-flex; align-items: center; gap: 8px;
+  border: 1px solid var(--border, #ccc); border-radius: 20px;
+  padding: 5px 12px; cursor: pointer; background: transparent; font-size: 13px; color: var(--fg, inherit);
+}
+.settings-toggle-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--t-dim, #bbb); }
+.settings-toggle.is-on { border-color: var(--ok, #57ab5a); }
+.settings-toggle.is-on .settings-toggle-dot { background: var(--ok, #57ab5a); }
+.settings-hint { margin: 8px 0 0; font-size: 11px; color: var(--t-dim, #999); line-height: 1.5; }
+.settings-account { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.settings-account-name { font-weight: 600; }
+.settings-account-chip { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--t-faint, #eee); text-transform: uppercase; }
+.settings-account-chip--human { background: var(--d-green-soft, #d7f0d7); }
+.settings-logout { margin-top: 12px; border: 1px solid var(--border, #ccc); background: transparent; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; color: var(--danger, #e5534b); }
