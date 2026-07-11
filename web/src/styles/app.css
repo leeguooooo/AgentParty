@@ -5681,3 +5681,33 @@
     font-size: 16px;
   }
 }
+
+/* ============================================================================
+   移动端触摸目标补齐（#349）：手指按压区约 44px，窄屏下把漏掉的高频小按钮
+   可点区域提到 ≥36px，对齐既有 .chan-tool-btn 的 36px 基线。只在窄屏媒体块
+   生效，桌面端视觉密度不变。
+   ========================================================================== */
+@media (max-width: 760px) {
+  .chan-cat-btn {
+    min-height: 36px;
+    padding: 8px 10px;
+  }
+  .presence-kick,
+  .presence-resume,
+  .presence-pause-select {
+    min-height: 36px;
+    padding: 5px 10px;
+  }
+  .msg-menu-trigger {
+    min-width: 36px;
+    min-height: 36px;
+  }
+  .lang-switch-btn {
+    min-height: 36px;
+    padding: 6px 10px;
+  }
+  .mention-toast-close {
+    min-width: 36px;
+    min-height: 36px;
+  }
+}
