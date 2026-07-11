@@ -162,7 +162,7 @@ export interface RoleDraft {
   responsibility: string;
 }
 
-type ChannelPanel = "charter" | "roles" | "coordination" | "tasks" | "search" | "settings";
+type ChannelPanel = "charter" | "roles" | "coordination" | "tasks" | "agents" | "search" | "settings";
 type AdminSurface = "agentJoin" | "agentTokens" | "joinLink";
 const TASK_BOARD_STATES: readonly TaskState[] = ["triage", "backlog", "assigned", "in_progress", "needs_review", "blocked", "done"];
 
@@ -1163,6 +1163,73 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
           );
         })}
       </ol>
+    </section>
+  );
+}
+
+// #187：agent 维度看板——每个 agent 在忙/空闲/阻塞/离线，手里在做/排队/待审/受阻多少任务。
+// 纯只读聚合：数据全来自已有的 presence（状态/note）+ task 台账（按 assignee 归组），不新增后端。
+type AgentBoardStatus = "busy" | "blocked" | "idle" | "offline";
+const AGENT_STATUS_ORDER: Record<AgentBoardStatus, number> = { busy: 0, blocked: 1, idle: 2, offline: 3 };
+
+export function AgentBoardPanel({ presence, tasks }: { presence: PresenceEntry[]; tasks: TaskRecord[] }) {
+  const t = useT();
+  const counts = new Map<string, { inProgress: number; queued: number; review: number; blocked: number }>();
+  const bump = (name: string, key: "inProgress" | "queued" | "review" | "blocked") => {
+    const cur = counts.get(name) ?? { inProgress: 0, queued: 0, review: 0, blocked: 0 };
+    cur[key] += 1;
+    counts.set(name, cur);
+  };
+  for (const task of tasks) {
+    const name = task.assignee?.name;
+    if (!name) continue;
+    if (task.state === "in_progress") bump(name, "inProgress");
+    else if (task.state === "assigned") bump(name, "queued");
+    else if (task.state === "needs_review") bump(name, "review");
+    else if (task.state === "blocked") bump(name, "blocked");
+  }
+  const presenceByName = new Map(presence.map((p) => [p.name, p]));
+  const names = new Set<string>();
+  for (const p of presence) if (p.kind !== "human") names.add(p.name);
+  for (const name of counts.keys()) names.add(name);
+  const statusOf = (p: PresenceEntry | undefined): AgentBoardStatus => {
+    if (!p || p.live !== true) return "offline";
+    if (p.state === "blocked") return "blocked";
+    if (p.state === "working") return "busy";
+    return "idle";
+  };
+  const rows = [...names]
+    .map((name) => {
+      const p = presenceByName.get(name);
+      const c = counts.get(name) ?? { inProgress: 0, queued: 0, review: 0, blocked: 0 };
+      return { name, status: statusOf(p), note: p?.note ?? null, ...c };
+    })
+    .sort((a, b) => AGENT_STATUS_ORDER[a.status] - AGENT_STATUS_ORDER[b.status] || b.inProgress - a.inProgress || a.name.localeCompare(b.name));
+
+  if (rows.length === 0) {
+    return (
+      <section className="agent-board-panel" aria-label="agent board">
+        <p className="agent-board-empty">{t("Channel.agents.empty")}</p>
+      </section>
+    );
+  }
+  return (
+    <section className="agent-board-panel" aria-label="agent board">
+      {rows.map((row) => (
+        <div key={row.name} className={`agent-board-row agent-board-row--${row.status}`}>
+          <div className="agent-board-row-head">
+            <span className="agent-board-name">{row.name}</span>
+            <span className={`t-mono agent-board-status agent-board-status--${row.status}`}>{t(`Channel.agents.status.${row.status}`)}</span>
+          </div>
+          {row.note !== null && row.note.trim() !== "" && <p className="agent-board-note">{row.note}</p>}
+          <div className="agent-board-counts t-mono">
+            <span title={t("Channel.agents.count.inProgress")}>▶ {row.inProgress}</span>
+            <span title={t("Channel.agents.count.queued")}>⏳ {row.queued}</span>
+            <span title={t("Channel.agents.count.review")}>👁 {row.review}</span>
+            {row.blocked > 0 && <span className="agent-board-count-blocked" title={t("Channel.agents.count.blocked")}>⛔ {row.blocked}</span>}
+          </div>
+        </div>
+      ))}
     </section>
   );
 }
@@ -2266,7 +2333,7 @@ export function ChannelPage({
       writeSeenCharterRev(slug, charter.charter_rev);
       setSeenCharterRev(charter.charter_rev);
     }
-    if (panel === "tasks") void loadTaskLedger();
+    if (panel === "tasks" || panel === "agents") void loadTaskLedger();
     setActivePanel(panel);
   }, [charter, loadTaskLedger, slug]);
 
@@ -2950,6 +3017,9 @@ export function ChannelPage({
             <span>{t("Channel.tasks.title")}</span>
             <span className="t-mono chan-tool-badge">{taskOpenCount}</span>
           </button>
+          <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("agents")}>
+            <span>{t("Channel.agents.title")}</span>
+          </button>
           {(taskOpenCount > 0 || taskReviewCount > 0 || taskBlockedCount > 0 || taskMineCount > 0) && (
             <div className="task-strip-summary" aria-label={t("Channel.tasks.summaryAria")}>
               <span className="t-mono chan-tool-badge">{t("Channel.tasks.summary.open", { count: taskOpenCount })}</span>
@@ -3043,6 +3113,7 @@ export function ChannelPage({
             activePanel === "roles" ? t("Channel.tools.roles") :
             activePanel === "coordination" ? t("Channel.tools.coordination") :
             activePanel === "tasks" ? t("Channel.tasks.title") :
+            activePanel === "agents" ? t("Channel.agents.title") :
             activePanel === "settings" ? t("Channel.tools.settings") :
             t("Channel.tools.search")
           }
@@ -3050,6 +3121,7 @@ export function ChannelPage({
             activePanel === "charter" && charter !== null ? `rev ${charter.charter_rev}` :
             activePanel === "roles" ? t("Channel.roles.count", { count: String(structuredRoleCount) }) :
             activePanel === "tasks" ? t("Channel.tasks.subtitle", { open: taskOpenCount, review: taskReviewCount, blocked: taskBlockedCount }) :
+            activePanel === "agents" ? t("Channel.agents.subtitle") :
             activePanel === "settings" ? (localLoopGuardEnabled ? t("Channel.settings.enabled") : t("Channel.settings.unlimited")) :
             activePanel === "search" && q !== "" ? t("Channel.search.hits", { count: searchHits.length }) :
             undefined
@@ -3116,6 +3188,9 @@ export function ChannelPage({
               onReview={reviewTask}
               onCreateTask={createTaskDraft}
             />
+          )}
+          {activePanel === "agents" && (
+            <AgentBoardPanel presence={Object.values(state.presence)} tasks={tasks} />
           )}
           {activePanel === "settings" && (
             <GuardSettingsPanel

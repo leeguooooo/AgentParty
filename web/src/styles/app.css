@@ -4856,3 +4856,28 @@
 /* @ 唤醒提示（#145）：贴着发送按钮底部对齐，不撑高插话框行。 */
 .composer-wake-tip { align-self: flex-end; margin-bottom: 7px; }
 .composer-wake-tip .feature-tip-bubble { left: auto; right: 0; transform: none; }
+
+/* #187 agent 维度看板 */
+.agent-board-panel { display: flex; flex-direction: column; gap: 8px; }
+.agent-board-empty { color: var(--muted, #888); font-size: 13px; }
+.agent-board-row {
+  border: 1px solid var(--border, #2a2a2a);
+  border-left: 3px solid var(--border, #2a2a2a);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.agent-board-row--busy { border-left-color: var(--accent, #4a9eff); }
+.agent-board-row--blocked { border-left-color: var(--danger, #e5534b); }
+.agent-board-row--idle { border-left-color: var(--ok, #57ab5a); }
+.agent-board-row--offline { opacity: 0.6; }
+.agent-board-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.agent-board-name { font-weight: 600; }
+.agent-board-status { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted, #888); }
+.agent-board-status--busy { color: var(--accent, #4a9eff); }
+.agent-board-status--blocked { color: var(--danger, #e5534b); }
+.agent-board-note { margin: 0; font-size: 12px; color: var(--muted, #999); }
+.agent-board-counts { display: flex; gap: 12px; font-size: 12px; color: var(--muted, #999); }
+.agent-board-count-blocked { color: var(--danger, #e5534b); }
