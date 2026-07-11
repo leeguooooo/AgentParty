@@ -988,8 +988,50 @@ export class ChannelDO extends Server<Env> {
       actor_kind TEXT NOT NULL,
       old_body TEXT,
       new_body TEXT,
+      original_byte_length INTEGER,
       created_at INTEGER NOT NULL
     )`);
+    try {
+      sql.exec("ALTER TABLE message_audit ADD COLUMN original_byte_length INTEGER");
+    } catch {
+      // column already exists
+    }
+    if (this.getMeta("retract_scrub_v1") === null) {
+      this.ctx.storage.transactionSync(() => {
+        // Capture the only retained content-derived fact before erasing historical bodies.
+        sql.exec(
+          `UPDATE message_audit AS audit
+              SET original_byte_length = length(CAST(COALESCE(
+                (SELECT original_body FROM messages WHERE seq = audit.target_seq),
+                audit.old_body,
+                (SELECT NULLIF(body, '') FROM messages WHERE seq = audit.target_seq),
+                (SELECT note FROM messages WHERE seq = audit.target_seq),
+                ''
+              ) AS BLOB))
+            WHERE action = 'retract'
+              AND original_byte_length IS NULL`,
+        );
+        sql.exec(
+          `UPDATE messages
+              SET body = '[retracted]', mentions_json = '[]', original_body = NULL,
+                  state = NULL, note = NULL, status_scope_json = NULL, status_blocked_reason = NULL,
+                  status_context_json = NULL, status_decision_json = NULL, status_workflow_json = NULL,
+                  message_workflow_json = NULL, completion_artifact_json = NULL,
+                  completion_review_state = NULL, completion_review_policy = NULL,
+                  completion_reviewed_by = NULL, completion_reviewed_by_kind = NULL,
+                  completion_reviewed_by_owner = NULL, completion_reviewed_at = NULL,
+                  completion_review_reason = NULL
+            WHERE retracted_at IS NOT NULL`,
+        );
+        sql.exec(
+          `UPDATE message_audit
+              SET old_body = NULL, new_body = NULL
+            WHERE target_seq IN (SELECT target_seq FROM message_audit WHERE action = 'retract')
+               OR target_seq IN (SELECT seq FROM messages WHERE retracted_at IS NOT NULL)`,
+        );
+        this.setMeta("retract_scrub_v1", "1");
+      });
+    }
     sql.exec(`CREATE TABLE IF NOT EXISTS workflow_guard_state (
       workflow_id TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
@@ -1868,10 +1910,19 @@ export class ChannelDO extends Server<Env> {
       const seq = Number(auditMatch[1]);
       const rows = this.ctx.storage.sql
         .exec(
-          `SELECT target_seq, action, actor_name, actor_kind, old_body, new_body, created_at
-             FROM message_audit
-            WHERE target_seq = ?
-            ORDER BY id`,
+          `SELECT audit.target_seq, audit.action, audit.actor_name, audit.actor_kind,
+                  CASE WHEN EXISTS (
+                    SELECT 1 FROM message_audit AS retraction
+                     WHERE retraction.target_seq = audit.target_seq AND retraction.action = 'retract'
+                  ) THEN NULL ELSE audit.old_body END AS old_body,
+                  CASE WHEN EXISTS (
+                    SELECT 1 FROM message_audit AS retraction
+                     WHERE retraction.target_seq = audit.target_seq AND retraction.action = 'retract'
+                  ) THEN NULL ELSE audit.new_body END AS new_body,
+                  audit.original_byte_length, audit.created_at
+             FROM message_audit AS audit
+            WHERE audit.target_seq = ?
+            ORDER BY audit.id`,
           seq,
         )
         .toArray()
@@ -1881,6 +1932,10 @@ export class ChannelDO extends Server<Env> {
           actor: { name: String(r.actor_name), kind: String(r.actor_kind) },
           old_body: r.old_body === null ? null : String(r.old_body),
           new_body: r.new_body === null ? null : String(r.new_body),
+          original_byte_length:
+            r.original_byte_length === null || r.original_byte_length === undefined
+              ? null
+              : Number(r.original_byte_length),
           created_at: Number(r.created_at),
         }));
       return Response.json({ audit: rows });
@@ -1965,25 +2020,39 @@ export class ChannelDO extends Server<Env> {
         return Response.json({ message: frame });
       }
       if (action === "retract") {
-        this.ctx.storage.sql.exec(
-          `INSERT INTO message_audit (target_seq, action, actor_name, actor_kind, old_body, new_body, created_at)
-           VALUES (?, 'retract', ?, ?, ?, NULL, ?)`,
-          seq,
-          identity.name,
-          identity.kind,
-          String(row.body),
-          now,
-        );
-        this.ctx.storage.sql.exec(
-          `UPDATE messages
-              SET body = '', mentions_json = '[]', original_body = COALESCE(original_body, ?), retracted_at = ?, retracted_by = ?, rev_seq = ?
-            WHERE seq = ?`,
-          originalBody,
-          now,
-          identity.name,
-          this.nextRevSeq(),
-          seq,
-        );
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec(
+            `INSERT INTO message_audit (
+               target_seq, action, actor_name, actor_kind, old_body, new_body, original_byte_length, created_at
+             ) VALUES (?, 'retract', ?, ?, NULL, NULL, ?, ?)`,
+            seq,
+            identity.name,
+            identity.kind,
+            byteLength(originalBody),
+            now,
+          );
+          this.ctx.storage.sql.exec(
+            "UPDATE message_audit SET old_body = NULL, new_body = NULL WHERE target_seq = ?",
+            seq,
+          );
+          this.ctx.storage.sql.exec(
+            `UPDATE messages
+                SET body = '[retracted]', mentions_json = '[]', original_body = NULL,
+                    state = NULL, note = NULL, status_scope_json = NULL, status_blocked_reason = NULL,
+                    status_context_json = NULL, status_decision_json = NULL, status_workflow_json = NULL,
+                    message_workflow_json = NULL, completion_artifact_json = NULL,
+                    completion_review_state = NULL, completion_review_policy = NULL,
+                    completion_reviewed_by = NULL, completion_reviewed_by_kind = NULL,
+                    completion_reviewed_by_owner = NULL, completion_reviewed_at = NULL,
+                    completion_review_reason = NULL,
+                    retracted_at = ?, retracted_by = ?, rev_seq = ?
+              WHERE seq = ?`,
+            now,
+            identity.name,
+            this.nextRevSeq(),
+            seq,
+          );
+        });
         const updated = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
         const frame = this.rowToFrame(updated);
         this.broadcastFrame(this.messageUpdate("retract", identity, frame, now));
@@ -3408,11 +3477,12 @@ export class ChannelDO extends Server<Env> {
 
   private rowToFrame(r: Record<string, unknown>): MsgFrame {
     const kind = String(r.kind) as MsgFrame["kind"];
-    const state = r.state === null ? null : (String(r.state) as StatusState);
-    const note = r.note === null ? null : String(r.note);
+    const retracted = r.retracted_at !== null && r.retracted_at !== undefined;
+    const state = retracted || r.state === null ? null : (String(r.state) as StatusState);
+    const note = retracted || r.note === null ? null : String(r.note);
     const ts = Number(r.ts);
     const status: StatusEvent | null =
-      kind === "status" && state !== null
+      !retracted && kind === "status" && state !== null
         ? statusEventFromRow(r, String(r.sender_name), state, ts)
         : null;
     const frame: MsgFrame = {
@@ -3432,7 +3502,7 @@ export class ChannelDO extends Server<Env> {
         ...(r.sender_avatar_thumb === null || r.sender_avatar_thumb === undefined ? {} : { avatar_thumb: String(r.sender_avatar_thumb) }),
       },
       kind,
-      body: String(r.body),
+      body: retracted ? "[retracted]" : String(r.body),
       mentions: JSON.parse(String(r.mentions_json ?? "[]")) as string[],
       reply_to: r.reply_to === null ? null : Number(r.reply_to),
       state,
@@ -3446,18 +3516,20 @@ export class ChannelDO extends Server<Env> {
         : { role_source: String(r.sender_role_source) as CollaborationRoleSource }),
       ts,
     };
-    const completionArtifact = parseStoredCompletionArtifact(r.completion_artifact_json);
-    if (completionArtifact !== undefined) frame.completion_artifact = completionArtifact;
-    const completionReview = parseStoredCompletionReview(r);
-    if (completionReview !== undefined) frame.completion_review = completionReview;
-    const workflowRef = parseStoredStatusWorkflow(r.message_workflow_json);
-    if (workflowRef !== undefined) frame.workflow_ref = workflowRef;
+    if (!retracted) {
+      const completionArtifact = parseStoredCompletionArtifact(r.completion_artifact_json);
+      if (completionArtifact !== undefined) frame.completion_artifact = completionArtifact;
+      const completionReview = parseStoredCompletionReview(r);
+      if (completionReview !== undefined) frame.completion_review = completionReview;
+      const workflowRef = parseStoredStatusWorkflow(r.message_workflow_json);
+      if (workflowRef !== undefined) frame.workflow_ref = workflowRef;
+    }
     if (r.edited_at !== null && r.edited_at !== undefined) {
       frame.edited = true;
       frame.edited_at = Number(r.edited_at);
       if (r.edited_by !== null && r.edited_by !== undefined) frame.edited_by = String(r.edited_by);
     }
-    if (r.retracted_at !== null && r.retracted_at !== undefined) {
+    if (retracted) {
       frame.retracted = true;
       frame.retracted_at = Number(r.retracted_at);
       if (r.retracted_by !== null && r.retracted_by !== undefined) frame.retracted_by = String(r.retracted_by);
@@ -3465,7 +3537,7 @@ export class ChannelDO extends Server<Env> {
     if (r.supersedes !== null && r.supersedes !== undefined) frame.supersedes = Number(r.supersedes);
     if (r.superseded_by !== null && r.superseded_by !== undefined) frame.superseded_by = Number(r.superseded_by);
     if (r.rev_seq !== null && r.rev_seq !== undefined) frame.rev_seq = Number(r.rev_seq);
-    if (r.original_body !== null && r.original_body !== undefined) {
+    if (!retracted && r.original_body !== null && r.original_body !== undefined) {
       frame.revision = { original_body: String(r.original_body) };
     }
     return frame;
