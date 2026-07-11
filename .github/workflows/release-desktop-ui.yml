@@ -142,7 +142,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: desktop-ui
-          release_name: AgentParty Desktop UI
+          name: AgentParty Desktop UI
           body: Independent signed Desktop UI bundle channel. Use desktop-ui.json for the current manifest.
           prerelease: true
           make_latest: false

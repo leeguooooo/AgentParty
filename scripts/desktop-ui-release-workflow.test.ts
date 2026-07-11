@@ -15,7 +15,7 @@ describe("desktop UI release workflow", () => {
     expect(workflow).toContain("group: desktop-ui-release");
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("tag_name: desktop-ui");
-    expect(workflow).toContain("release_name: AgentParty Desktop UI");
+    expect(workflow).toContain("name: AgentParty Desktop UI");
     expect(workflow).toContain("make_latest: false");
     expect(workflow).toContain("overwrite_files: true");
   });
