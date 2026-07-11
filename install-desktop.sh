@@ -115,7 +115,7 @@ main() {
   want="$(awk '{print $1}' "$tmp/$dmg.sha256")"
   got="$(shasum -a 256 "$tmp/$dmg" | awk '{print $1}')"
   [ -n "$want" ] || die "sha256 文件为空。"
-  [ "$want" = "$got" ] || die "sha256 不匹配（期望 $want，实得 $got）。已中止，未安装。"
+  [ "$want" = "$got" ] || die "sha256 不匹配（期望 ${want}，实得 ${got}）。已中止，未安装。"
   log "sha256 校验通过。"
 
   notarized="$(plutil -extract notarized raw -o - "$tmp/$status" 2>/dev/null || true)"
@@ -150,7 +150,7 @@ main() {
   cp -R "$src" "$stage"
 
   info="$stage/Contents/Info.plist"
-  installed_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$info" 2>/dev/null || true)"
+  installed_version="$(plutil -extract CFBundleShortVersionString raw -o - "$info" 2>/dev/null || true)"
   [ "$installed_version" = "$version" ] || die "app 版本不匹配（期望 $version，实际 ${installed_version:-unknown}）。"
   [ -x "$stage/Contents/MacOS/party" ] || die "app 缺少可执行的内置 party sidecar。"
   bundled_version="$("$stage/Contents/MacOS/party" --version 2>/dev/null || true)"
