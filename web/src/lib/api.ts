@@ -622,6 +622,24 @@ export async function setHandle(handle: string): Promise<{ handle: string }> {
   return (await res.json()) as { handle: string };
 }
 
+// #165：agent 会话设置昵称（PUT /api/me/nickname）：400 格式非法 / 403 非 agent / 409 冲突。
+// 与 setHandle 同形，只是别名可含 unicode（中文），后端 nicknameConflict 判全局唯一。
+export async function setNickname(nickname: string): Promise<{ nickname: string }> {
+  const token = getToken();
+  if (token === null) throw new AuthError("missing token");
+  const res = await fetchApi("/api/me/nickname", {
+    method: "PUT",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ nickname }),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 400) throw new ValidationError("invalid nickname");
+  if (res.status === 409) throw new ConflictError("nickname unavailable");
+  if (!res.ok) throw new Error(`PUT /api/me/nickname failed (${res.status})`);
+  return (await res.json()) as { nickname: string };
+}
+
 export async function fetchChannelCharter(token: string, slug: string): Promise<ChannelCharter> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/charter`, {
     headers: { authorization: `Bearer ${token}` },

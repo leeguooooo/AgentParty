@@ -120,6 +120,9 @@ const WAKE_KINDS: readonly string[] = ["none", "watch", "serve", "webhook"];
 const HOST_DECISION_KINDS: readonly string[] = ["decision", "handoff", "takeover"];
 const WORKFLOW_KINDS: readonly string[] = ["pipeline", "parallel", "orchestrator-workers", "evaluator-optimizer"];
 const MENTION_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+// #165：mentions 数组现在也能装 unicode @昵称（中文），故用放开首字的 unicode 版校验它；
+// MENTION_NAME_RE 仍保 ASCII，用于 squad / lineage / handoff 这些结构性标识符。
+const MENTION_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$/u;
 const WORKFLOW_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const CLIENT_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 const MAX_MENTIONS = 50;
@@ -149,7 +152,7 @@ function parseMentions(input: unknown): string[] | null {
   if (!Array.isArray(input)) return null;
   if (
     input.length > MAX_MENTIONS ||
-    input.some((m) => typeof m !== "string" || !MENTION_NAME_RE.test(m)) ||
+    input.some((m) => typeof m !== "string" || !MENTION_TOKEN_RE.test(m)) ||
     byteLength(JSON.stringify(input)) > MENTIONS_JSON_LIMIT
   ) {
     return null;
@@ -161,7 +164,9 @@ function parseMentions(input: unknown): string[] | null {
 // 数组——若发送方只在正文打 @ 没进数组（裸 party send "@name"），目标永不被唤醒。故服务端
 // 从 body/note 兜底提取并 union 进 mentions，去重、剔除 system、总量截到 MAX_MENTIONS。
 // 误报无害：wake ledger 只投给真实可唤醒目标，无对应者的 @ 不会触发任何投递。
-const BODY_MENTION_RE = /(?:^|\s)@([a-zA-Z0-9][a-zA-Z0-9._-]{0,63})/g;
+// #165：放开首字为 unicode 字母/数字，能捕获 @中文昵称。@ 前仍须行首/空白（不吃 email 的 @），
+// 长度仍上界 64（[\p{L}\p{N}._-]{0,63}）。捕获到的 @昵称 由 resolveNicknameMentions 解析成真实 name。
+const BODY_MENTION_RE = /(?:^|\s)@([\p{L}\p{N}][\p{L}\p{N}._-]{0,63})/gu;
 function mergeBodyMentions(explicit: string[], text: string): string[] {
   const seen = new Set(explicit);
   const out = [...explicit];
@@ -1148,7 +1153,7 @@ export class ChannelDO extends Server<Env> {
       kind: h.get("x-ap-kind") === "agent" ? "agent" : "human",
       role: (h.get("x-ap-role") ?? "readonly") as TokenRole,
       owner: h.get("x-ap-owner") ?? undefined,
-      handle: h.get("x-ap-handle") ?? undefined,
+      handle: decodedHeaderText(h, "x-ap-handle"),
       ...profileFromHeaders(h),
       lineage: lineageFromHeaders(h),
       tokenHash: h.get("x-ap-token-hash") ?? "",
@@ -2024,7 +2029,7 @@ export class ChannelDO extends Server<Env> {
         kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
-        handle: request.headers.get("x-ap-handle") ?? undefined,
+        handle: decodedHeaderText(request.headers, "x-ap-handle"),
         ...profileFromHeaders(request.headers),
         lineage: lineageFromHeaders(request.headers),
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
@@ -2174,7 +2179,7 @@ export class ChannelDO extends Server<Env> {
         kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
-        handle: request.headers.get("x-ap-handle") ?? undefined,
+        handle: decodedHeaderText(request.headers, "x-ap-handle"),
         ...profileFromHeaders(request.headers),
         lineage: lineageFromHeaders(request.headers),
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
@@ -2354,7 +2359,7 @@ export class ChannelDO extends Server<Env> {
         kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
         role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
         owner: request.headers.get("x-ap-owner") ?? undefined,
-        handle: request.headers.get("x-ap-handle") ?? undefined,
+        handle: decodedHeaderText(request.headers, "x-ap-handle"),
         ...profileFromHeaders(request.headers),
         lineage: lineageFromHeaders(request.headers),
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
@@ -2568,6 +2573,32 @@ export class ChannelDO extends Server<Env> {
     return withExpandedMentions(frame, [...routed]);
   }
 
+  // #165：把正文/显式 mentions 里的 @昵称（含中文）解析成目标 agent 的真实 ASCII name，union 进 mentions。
+  // 手法镜像 expandSquadMentions（读 D1、大小写不敏感匹配、再重写 mentions），且同样跑在 INSERT 之前——
+  // 这样 serve/watch（msg.mentions.includes(name)）与 webhook（shouldDeliverWebhook 按 hookName=name）
+  // 都能凭真实 name 命中被 @ 的 agent。昵称是全局唯一的，故一个 token 匹配即定位到唯一 agent。
+  private async resolveNicknameMentions(frame: SendFrame): Promise<SendFrame> {
+    const mentions = frame.mentions ?? [];
+    if (mentions.length === 0) return frame;
+    const candidates = mentions.filter((t) => t !== "system" && t.length <= 64);
+    if (candidates.length === 0) return frame;
+    const placeholders = candidates.map(() => "?").join(", ");
+    const rows = await this.env.DB.prepare(
+      `SELECT name, nickname FROM agent_nicknames WHERE nickname COLLATE NOCASE IN (${placeholders})`,
+    )
+      .bind(...candidates)
+      .all<{ name: string; nickname: string }>()
+      .catch(() => ({ results: [] as { name: string; nickname: string }[] }));
+    if (rows.results.length === 0) return frame;
+    const routed = new Set(mentions);
+    for (const row of rows.results) {
+      if (typeof row.name !== "string" || !MENTION_NAME_RE.test(row.name)) continue;
+      routed.add(row.name);
+      if (routed.size >= MAX_MENTIONS) break;
+    }
+    return withExpandedMentions(frame, [...routed]);
+  }
+
   // 校验 → 分配 seq → 落库 → 修剪/presence，返回待广播帧
   private async handleSend(
     identity: Identity,
@@ -2605,6 +2636,7 @@ export class ChannelDO extends Server<Env> {
       return { ok: false, code: "too_large", message: `body exceeds ${BODY_LIMIT} bytes` };
     }
     frame = await this.expandSquadMentions(frame);
+    frame = await this.resolveNicknameMentions(frame);
     const workflowGuard = this.workflowGuardDecision(identity, frame);
     if (workflowGuard !== null) {
       const row = this.workflowGuardRow(workflowGuard.workflow.workflow_id);

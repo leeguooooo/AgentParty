@@ -52,6 +52,7 @@ import {
   startDesktopPairing,
 } from "./desktop-pairing";
 import { handleConflict, validateHandleFormat } from "./handle";
+import { nicknameConflict, validateNicknameFormat } from "./nickname";
 import {
   bestEffortRecordManagementAudit,
   listManagementAudit,
@@ -942,10 +943,13 @@ async function persistToken(
     .bind(opts.name)
     .first<{ id: number; revoked_at: number | null }>();
   if (existing && existing.revoked_at === null) return { conflict: true };
-  // 反向唯一性：token 名不得撞已存在的人类 handle（二者共用 @ 命名空间）
+  // 反向唯一性：token 名不得撞已存在的人类 handle 或 agent 昵称（三者共用 @ 命名空间，#165）
   const handleOwner = await db.prepare("SELECT 1 FROM account_profiles WHERE handle = ? COLLATE NOCASE")
     .bind(opts.name).first();
   if (handleOwner) return { conflict: true };
+  const nickOwner = await db.prepare("SELECT 1 FROM agent_nicknames WHERE nickname = ? COLLATE NOCASE")
+    .bind(opts.name).first();
+  if (nickOwner) return { conflict: true };
   const token = randomToken();
   const hash = await sha256Hex(token);
   const now = Date.now();
@@ -1546,9 +1550,18 @@ function assignedRoleHeaders(role: CollaborationRole | null): Record<string, str
 }
 
 // 人类 handle 头：仅当身份是人类且已设 handle 才带（权威值，供 do 盖 presence + stamp 消息，Task A6/A7）。
-// agent 即使与 human 共享 account 也不继承其 handle——handle 是按 account 存的，但只对人类身份生效。
-// export 仅供 test 直接单测（do 尚不消费这个头，spec 里现有的"观察 do 副作用"手法在这没有可观察点）。
+// #165：agent 身份则带自己的 nickname（同样走 x-ap-handle，复用 do 的 presence/sender 展示管线）。
+// x-ap-handle 一律 encodeURIComponent——人类 handle 是 ASCII 编码后原样不变，agent 中文昵称则需编码
+// 才能塞进 latin1 的 HTTP 头（do 侧 decodedHeaderText 解回）。
 export async function handleHeader(db: D1Database, identity: TokenIdentity): Promise<Record<string, string>> {
+  // agent：昵称按 token name 存，与是否有 account 无关。
+  if (identity.kind === "agent") {
+    const row = await db
+      .prepare("SELECT nickname FROM agent_nicknames WHERE name = ?")
+      .bind(identity.name)
+      .first<{ nickname: string | null }>();
+    return row?.nickname ? { "x-ap-handle": encodeURIComponent(row.nickname) } : {};
+  }
   if (identity.kind !== "human" || identity.account == null) return {};
   const row = await db.prepare(
     `SELECT handle, display_name, avatar_url, avatar_thumb
@@ -1559,7 +1572,7 @@ export async function handleHeader(db: D1Database, identity: TokenIdentity): Pro
     .first<{ handle: string | null; display_name: string | null; avatar_url: string | null; avatar_thumb: string | null }>();
   if (!row) return {};
   return {
-    ...(row.handle ? { "x-ap-handle": row.handle } : {}),
+    ...(row.handle ? { "x-ap-handle": encodeURIComponent(row.handle) } : {}),
     ...(row.display_name ? { "x-ap-display-name": encodeURIComponent(row.display_name) } : {}),
     ...(row.avatar_url ? { "x-ap-avatar-url": row.avatar_url } : {}),
     ...(row.avatar_thumb ? { "x-ap-avatar-thumb": row.avatar_thumb } : {}),
@@ -1848,6 +1861,12 @@ app.get("/api/me", requireBearer, async (c) => {
           provider: string | null;
           tenant_key: string | null;
         }>();
+  // #165：agent 的昵称按 token name 存（非 per-account），单独取，作为 handle 回给网页 me chip。
+  const agentNickname = id.kind !== "agent"
+    ? null
+    : (await c.env.DB.prepare("SELECT nickname FROM agent_nicknames WHERE name = ?")
+        .bind(id.name)
+        .first<{ nickname: string | null }>())?.nickname ?? null;
   return c.json({
     name: id.name,
     email: id.email ?? null,
@@ -1856,7 +1875,7 @@ app.get("/api/me", requireBearer, async (c) => {
     owner: id.owner ?? null,
     channel_scope: id.channel_scope ?? null,
     lineage: id.lineage ?? null,
-    handle: profile?.handle ?? null,
+    handle: profile?.handle ?? agentNickname,
     display_name: profile?.display_name ?? null,
     avatar_url: profile?.avatar_url ?? null,
     avatar_thumb: profile?.avatar_thumb ?? null,
@@ -1910,6 +1929,43 @@ app.put("/api/me/handle", requireBearer, async (c) => {
     throw e; // 其它未预期错误保持原样（让它 500，不掩盖真问题）
   }
   return c.json({ handle });
+});
+
+// #165：设置/更新本 agent 的全局唯一昵称（可被 @中文昵称 唤醒）。昵称按 token name 存（per-identity，
+// 因 agent 与 human 共享 account，不能像 handle 那样 per-account）。仅 agent 身份可用；
+// readonly/human 一律 403（human 用 /api/me/handle）。撞保留名/token 名/人类 handle/别的 agent 昵称 → 409。
+app.put("/api/me/nickname", requireBearer, async (c) => {
+  const id = c.get("identity");
+  if (id.role !== "agent") {
+    return c.json(errorBody("forbidden", "setting a nickname requires an agent session"), 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as { nickname?: unknown } | null;
+  const nickname = validateNicknameFormat(body?.nickname);
+  if (nickname === null) {
+    return c.json(errorBody("bad_request", "nickname must be 1-64 unicode letters/digits (start alnum, then . _ -)"), 400);
+  }
+  const conflict = await nicknameConflict(c.env.DB, nickname, id.name);
+  if (conflict !== null) {
+    return c.json(errorBody("conflict", `nickname unavailable (${conflict})`), 409);
+  }
+  const now = Date.now();
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO agent_nicknames (name, nickname, created_at, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET nickname = excluded.nickname, updated_at = excluded.updated_at`,
+    )
+      .bind(id.name, nickname, now, now)
+      .run();
+  } catch (e) {
+    // 竞态：nicknameConflict 通过后、另一 agent 抢先占了同名 → UNIQUE(nickname) 冲突。转 409（非 500）。
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("UNIQUE")) {
+      return c.json(errorBody("conflict", "nickname unavailable (taken)"), 409);
+    }
+    throw e;
+  }
+  return c.json({ nickname });
 });
 
 app.post("/api/tokens", requireAdmin, async (c) => {
