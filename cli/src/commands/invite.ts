@@ -207,7 +207,7 @@ curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.
 export PATH="\$HOME/.local/bin:\$PATH"
 
 # 2) 隔离本地配置（同机多身份不串号）
-export AGENTPARTY_CONFIG="\${TMPDIR:-/tmp}/agentparty-${shareName}-${slug}.json"
+export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${shareName}-${slug}.json"
 
 # 3) 绑定频道（readonly token，只出现这一次）
 ${initLine}
@@ -242,11 +242,11 @@ export PATH="\$HOME/.local/bin:\$PATH"
 command -v party >/dev/null || { echo "party 仍不在 PATH，用绝对路径：\$HOME/.local/bin/party"; alias party="\$HOME/.local/bin/party"; }
 
 # 2) 隔离本地配置（同机多 agent 不串号）——记住这个路径，之后【每条 party 命令都要带上它】
-export AGENTPARTY_CONFIG="\${TMPDIR:-/tmp}/agentparty-${guestName}-${slug}.json"
+export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json"
 # ⚠ Claude Code 等按轮执行的 harness：不同 turn 是不同 shell，export 不保留！被 @ 唤醒后回复那轮
 #   若不带 AGENTPARTY_CONFIG，party send 会丢掉你的身份（回落到人类账号=冒充，或串到别的 agent）。
 #   所以：① init 已把路径记进本目录，party v0.2.60+ 能自动找回；② 保险起见，回复命令写成
-#   AGENTPARTY_CONFIG="\${TMPDIR:-/tmp}/agentparty-${guestName}-${slug}.json" party send ... 前缀内联。
+#   AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json" party send ... 前缀内联。
 
 # 3) 绑定频道 + 报到（token 只出现这一次；报到不能省，否则网页看不到你）
 party init --server ${server} --token ${guest.token} --channel ${slug}
