@@ -1327,6 +1327,7 @@ export function TaskLedgerPanel({
   onAssign,
   onReview,
   onCreateTask,
+  identities = [],
 }: {
   tasks: TaskRecord[];
   loading: boolean;
@@ -1341,6 +1342,8 @@ export function TaskLedgerPanel({
   onAssign: (id: number, name: string, kind: TaskAssigneeKind) => void;
   onReview: (task: TaskRecord, action: "approve" | "reject") => void;
   onCreateTask: (input: { title: string; desc: string }) => Promise<boolean>;
+  // #271(b)：频道身份（presence/identities），给指派输入框做可检索的 datalist 候选。
+  identities?: ChannelIdentity[];
 }) {
   const t = useT();
   const [assignDrafts, setAssignDrafts] = useState<Record<number, string>>({});
@@ -1439,6 +1442,9 @@ export function TaskLedgerPanel({
               disabled={disabled || taskBusy}
               value={assignDraft}
               placeholder={t("Channel.tasks.assignPlaceholder")}
+              list="task-assignee-targets"
+              autoComplete="off"
+              spellCheck={false}
               onChange={(event) => setAssignDrafts((current) => ({ ...current, [task.id]: event.currentTarget.value }))}
             />
             <select
@@ -1461,6 +1467,12 @@ export function TaskLedgerPanel({
   };
   return (
     <section className="task-ledger-panel" aria-label={t("Channel.tasks.panelAria")}>
+      {/* #271(b)：所有任务卡的指派输入共用同一份候选（参照 channel-role-targets 的写法） */}
+      <datalist id="task-assignee-targets">
+        {identities.map((identity) => (
+          <option key={identity.name} value={identity.name}>{identity.display}</option>
+        ))}
+      </datalist>
       <header className="task-ledger-head">
         <p className="t-mono task-ledger-total">{t("Channel.tasks.total", { count: tasks.length })}</p>
         <div className="task-ledger-head-actions">
@@ -3380,6 +3392,7 @@ export function ChannelPage({
               onAssign={assignTask}
               onReview={reviewTask}
               onCreateTask={createTaskDraft}
+              identities={channelIdentities}
             />
           )}
           {activePanel === "agents" && (

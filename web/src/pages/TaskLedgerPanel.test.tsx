@@ -224,3 +224,25 @@ describe("TaskLedgerPanel assignee filter (#271)", () => {
     expect(r.root.findAll((n) => n.props["aria-label"] === "Filter by assignee")).toHaveLength(0);
   });
 });
+
+// #271(b)：指派输入框接 datalist，候选来自频道身份。
+describe("TaskLedgerPanel assignee datalist (#271)", () => {
+  test("assign input points at a datalist fed by channel identities", () => {
+    const identities = [
+      { name: "worker-a", display: "worker-a · agent" },
+      { name: "human-b", display: "human-b · human" },
+    ];
+    const r = render("en", baseProps({ identities }));
+    const input = findByAria(r, "Assign task 1");
+    expect(input.props.list).toBe("task-assignee-targets");
+    const datalist = r.root.find((n) => n.type === "datalist");
+    expect(datalist.props.id).toBe("task-assignee-targets");
+    expect(datalist.findAllByType("option").map((o) => o.props.value)).toEqual(["worker-a", "human-b"]);
+  });
+
+  test("datalist renders empty (not crashing) without identities", () => {
+    const r = render("en", baseProps());
+    const datalist = r.root.find((n) => n.type === "datalist");
+    expect(datalist.findAllByType("option")).toHaveLength(0);
+  });
+});
