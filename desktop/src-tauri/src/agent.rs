@@ -842,6 +842,10 @@ mod tests {
         assert_eq!(runtime.phase, AgentPhase::Running);
         assert_eq!(runtime.pid, Some(42));
 
+        runtime.phase = AgentPhase::Stopping;
+        let serialized = serde_json::to_value(&runtime).unwrap();
+        assert_eq!(serialized["state"], "stopping");
+
         runtime.mark_exited(Some(7), Some("token=must-not-leak"));
         assert_eq!(runtime.phase, AgentPhase::Failed);
         assert_eq!(runtime.exit_code, Some(7));

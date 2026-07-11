@@ -55,4 +55,20 @@ describe("desktop agent native adapter", () => {
     expect(invalidConfigs.listConfigs()).rejects.toThrow("invalid desktop agent config list");
     expect(invalidLogs.logs()).rejects.toThrow("invalid desktop agent logs");
   });
+
+  test("accepts the native stopping state while termination is pending", async () => {
+    const adapter = createDesktopAgentAdapter(async () => ({
+      state: "stopping",
+      pid: 42,
+      configId: "local-main",
+      name: "Leo Codex",
+      channel: "agentparty",
+      runner: "codex",
+      startedAt: 1234,
+      exitCode: null,
+      lastError: null,
+    }));
+
+    expect((await adapter.status()).state).toBe("stopping");
+  });
 });

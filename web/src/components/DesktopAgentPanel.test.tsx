@@ -235,6 +235,7 @@ describe("DesktopAgentPanel", () => {
       "DesktopSettings.agent.empty",
       "DesktopSettings.agent.start",
       "DesktopSettings.agent.stop",
+      "DesktopSettings.agent.state.stopping",
       "DesktopSettings.agent.state.failed",
       "DesktopSettings.agent.logs.show",
     ];

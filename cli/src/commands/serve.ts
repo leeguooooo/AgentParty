@@ -122,6 +122,29 @@ export type RunnerProcess = (
   opts: RunnerProcessOptions,
 ) => Promise<RunnerProcessResult>;
 
+interface KillableRunnerProcess {
+  pid: number;
+  kill(signal?: NodeJS.Signals | number): void;
+}
+
+export function forwardRunnerSignal(
+  proc: KillableRunnerProcess,
+  signal: NodeJS.Signals,
+  platform: NodeJS.Platform = process.platform,
+  killGroup: typeof process.kill = process.kill,
+): "group" | "child" {
+  if (platform !== "win32") {
+    try {
+      killGroup(-proc.pid, signal);
+      return "group";
+    } catch {
+      // The process may have exited between signal delivery and group lookup.
+    }
+  }
+  proc.kill(signal);
+  return "child";
+}
+
 interface WakeSessionState {
   harness: RunnerHarness;
   session_id: string;
@@ -467,12 +490,36 @@ async function defaultRunnerProcess(
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    detached: process.platform !== "win32",
   });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  let terminatingSignal: NodeJS.Signals | null = null;
+  const forward = (signal: NodeJS.Signals) => {
+    if (terminatingSignal !== null) return;
+    terminatingSignal = signal;
+    forwardRunnerSignal(proc, signal);
+    const force = setTimeout(() => forwardRunnerSignal(proc, "SIGKILL"), 1_000);
+    force.unref();
+  };
+  const onTerm = () => forward("SIGTERM");
+  const onInterrupt = () => forward("SIGINT");
+  process.once("SIGTERM", onTerm);
+  process.once("SIGINT", onInterrupt);
+  let stdout: string;
+  let stderr: string;
+  let code: number;
+  try {
+    [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+  } finally {
+    process.off("SIGTERM", onTerm);
+    process.off("SIGINT", onInterrupt);
+  }
+  if (terminatingSignal !== null) {
+    process.exit(terminatingSignal === "SIGINT" ? 130 : 143);
+  }
   return { code, stdout, stderr };
 }
 
