@@ -3,6 +3,7 @@
 // share token 只放 sessionStorage，本次标签页可刷新，避免长期落 localStorage。
 import type { Attachment, ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, TaskSummary, WakeDelivery } from "@agentparty/shared";
 import { apiUrl } from "./base";
+import { isTauriEnvironment } from "./desktopUpdater";
 import type { WebSession } from "./oidc";
 
 const TOKEN_KEY = "ap_token";
@@ -56,6 +57,11 @@ export function getToken(): string | null {
 }
 
 export function saveToken(token: string) {
+  // 桌面端绝不把「粘贴的 party token」落进持久化存储（#248）：桌面登录只经设备码配对
+  // （refresh 存系统钥匙串）或 OIDC 浏览器登录换来的会话，粘贴的 token 至多驱动本次内存会话。
+  // 这与 App 渲染层（桌面永不渲染粘贴登录闸）互为兜底——即便渲染层回归误挂粘贴闸，
+  // 持久化边界仍拒绝写盘，保证桌面自身存储里不会留下粘贴的 party token。
+  if (isTauriEnvironment()) return;
   localStorage.setItem(TOKEN_KEY, token);
 }
 
