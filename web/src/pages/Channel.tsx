@@ -1026,7 +1026,8 @@ function CatchupPanel({
   );
 }
 
-function SearchHitCard({ hit }: { hit: SearchHit }) {
+function SearchHitCard({ hit, onJump }: { hit: SearchHit; onJump: (seq: number) => void }) {
+  const t = useT();
   const hueStyle = { "--ah": agentHue(hit.sender.name) } as CSSProperties;
   return (
     <article className="d-card msg-card search-hit-card" style={hueStyle}>
@@ -1038,7 +1039,14 @@ function SearchHitCard({ hit }: { hit: SearchHit }) {
         </span>
         <span className="search-hit-field">{hit.match_field}</span>
         <span className="msg-fill" />
-        <span>#{hit.seq}</span>
+        <button
+          className="t-mono completion-jump"
+          type="button"
+          title={t("Channel.search.jumpTitle")}
+          onClick={() => onJump(hit.seq)}
+        >
+          #{hit.seq}
+        </button>
         <time>{fmtTime(hit.ts)}</time>
       </header>
       <p className="search-hit-snippet">{hit.snippet === "" ? "(empty)" : hit.snippet}</p>
@@ -3139,6 +3147,20 @@ export function ChannelPage({
     }, 0);
   }, []);
 
+  // #342 搜索命中跳回原消息。不复用 jumpToCompletion：它会 setCompletionOnly(true)，
+  // 把非 completion 的命中从消息流里滤掉。清空搜索恢复消息流后再滚动+高亮（同 jumpToMention）；
+  // 消息不在已加载窗口（MESSAGE_CAP/翻页边界外）时 getElementById 为 null → 停在原地，按钮 title 已注明。
+  const jumpToSearchHit = useCallback((seq: number) => {
+    setSearch("");
+    window.setTimeout(() => {
+      const el = document.getElementById(`msg-${seq}`);
+      if (el === null) return;
+      el.scrollIntoView({ block: "center" });
+      el.classList.add("msg-jump-highlight");
+      window.setTimeout(() => el.classList.remove("msg-jump-highlight"), 1200);
+    }, 0);
+  }, []);
+
   useEffect(() => {
     if (q === "") {
       setSearchHits([]);
@@ -3625,7 +3647,7 @@ export function ChannelPage({
                 />
               ),
             )
-          : visibleSearchHits.map((hit) => <SearchHitCard key={hit.seq} hit={hit} />)}
+          : visibleSearchHits.map((hit) => <SearchHitCard key={hit.seq} hit={hit} onJump={jumpToSearchHit} />)}
         {state.messages.length === 0 && q === "" && (
           <p className="d-empty" role="status" aria-live="polite">
             party watch {slug}
