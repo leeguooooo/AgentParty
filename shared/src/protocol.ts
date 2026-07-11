@@ -255,6 +255,8 @@ export interface Sender {
 
 export interface PresenceEntry {
   name: string;
+  /** 最近一次有效 CLI hello 上报的 package version；旧客户端或非 CLI 客户端缺失时省略。 */
+  client_version?: string;
   // agent / human。@ 补全等需要区分「可 @ 的 agent」和「只是围观的人类会话」。
   // 旧 worker 响应缺此字段 → undefined，消费方按未知处理（不当人类排除）。
   kind?: SenderKind;
@@ -384,6 +386,8 @@ export function evaluateHostLease(
 export interface HelloFrame {
   type: "hello";
   since: number;
+  /** CLI package version。可选以兼容旧客户端；服务端会忽略非法值。 */
+  client_version?: string;
   /**
    * 修订游标：客户端已见过的最大 rev_seq。带上它，服务端补拉只重放 rev_seq 更大的
    * 修订快照（编辑/撤回/超越），而不是把全部历史修订对每次连接无条件重放（issue #33）。
@@ -891,6 +895,7 @@ export interface SentFrame {
 export interface PresenceFrame {
   type: "presence";
   name: string;
+  client_version?: string;
   kind?: SenderKind;
   account?: string;
   state: PresenceState;

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ServerFrame } from "@agentparty/shared";
+import pkg from "../package.json" with { type: "json" };
 import { connect, type Connection } from "../src/client";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 
@@ -92,7 +93,7 @@ describe("ws client", () => {
     const revs: number[] = [];
     conn = connect(server.url, "ap_tok", "dev", 6, { sinceRev: 2, onRevCursor: (r) => revs.push(r) });
     await collect(conn, 2, 800, false);
-    expect(hellos[0]).toMatchObject({ since: 6, since_rev: 2 });
+    expect(hellos[0]).toMatchObject({ since: 6, since_rev: 2, client_version: pkg.version });
     expect(revs).toEqual([5]);
     expect(conn.revCursor).toBe(5);
   });
@@ -221,8 +222,10 @@ describe("ws client", () => {
   });
 
   test("reconnects with backoff and latest cursor", async () => {
+    const hellos: Record<string, unknown>[] = [];
     server = startMockServer((frame, sock, connIndex) => {
       if (frame.type !== "hello") return;
+      hellos.push(frame as unknown as Record<string, unknown>);
       if (connIndex === 0) {
         sock.send(welcomeFrame(4));
         sock.send(msgFrame(4, "before drop"));
@@ -235,6 +238,10 @@ describe("ws client", () => {
     conn = connect(server.url, "ap_tok", "dev", 0, { backoffBaseMs: 20 });
     const frames = await collect(conn, 4, 5000);
     expect(server.hellos).toEqual([0, 4]);
+    expect(hellos).toEqual([
+      expect.objectContaining({ since: 0, client_version: pkg.version }),
+      expect.objectContaining({ since: 4, client_version: pkg.version }),
+    ]);
     const bodies = frames.filter((f) => f.type === "msg").map((f) => (f as { body: string }).body);
     expect(bodies).toEqual(["before drop", "after reconnect"]);
     expect(conn.cursor).toBe(5);

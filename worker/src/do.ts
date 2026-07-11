@@ -115,6 +115,7 @@ const HOST_DECISION_KINDS: readonly string[] = ["decision", "handoff", "takeover
 const WORKFLOW_KINDS: readonly string[] = ["pipeline", "parallel", "orchestrator-workers", "evaluator-optimizer"];
 const MENTION_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const WORKFLOW_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
+const CLIENT_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 const MAX_MENTIONS = 50;
 const MENTIONS_JSON_LIMIT = 4096;
 const MAX_STATUS_SCOPE = 50;
@@ -127,6 +128,10 @@ const REVIEW_REASON_LIMIT = 4000;
 
 function byteLength(s: string): number {
   return new TextEncoder().encode(s).byteLength;
+}
+
+function parseClientVersion(input: unknown): string | null {
+  return typeof input === "string" && CLIENT_VERSION_RE.test(input) ? input : null;
 }
 
 function parseMentions(input: unknown): string[] | null {
@@ -885,7 +890,8 @@ export class ChannelDO extends Server<Env> {
       context_json TEXT,
       lineage_json TEXT,
       kind TEXT,
-      account TEXT
+      account TEXT,
+      client_version TEXT
     )`);
     for (const ddl of [
       "ALTER TABLE presence ADD COLUMN kind TEXT",
@@ -908,6 +914,7 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE presence ADD COLUMN display_name TEXT",
       "ALTER TABLE presence ADD COLUMN avatar_url TEXT",
       "ALTER TABLE presence ADD COLUMN avatar_thumb TEXT",
+      "ALTER TABLE presence ADD COLUMN client_version TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -1078,6 +1085,8 @@ export class ChannelDO extends Server<Env> {
       return;
     }
     if (frame.type === "hello") {
+      const clientVersion = parseClientVersion(frame.client_version);
+      if (clientVersion !== null) this.recordClientVersion(st.name, clientVersion, Date.now());
       const since = typeof frame.since === "number" && frame.since > 0 ? Math.floor(frame.since) : 0;
       const sinceRev =
         typeof frame.since_rev === "number" && frame.since_rev >= 0 ? Math.floor(frame.since_rev) : null;
@@ -1338,6 +1347,18 @@ export class ChannelDO extends Server<Env> {
     const frame: PresenceFrame = { type: "presence", name, state: "offline", note: null, ts };
     const entry = this.presenceFor(name);
     this.broadcastFrame(entry ? { type: "presence", ...entry } : frame);
+  }
+
+  private recordClientVersion(name: string, clientVersion: string, ts: number) {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO presence (name, state, note, updated_at, client_version) VALUES (?, 'waiting', NULL, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET client_version = excluded.client_version`,
+      name,
+      ts,
+      clientVersion,
+    );
+    const entry = this.presenceFor(name);
+    if (entry) this.broadcastFrame({ type: "presence", ...entry });
   }
 
   // worker 每次转发都会带上频道快照头，do 写 meta 缓存（同 archived 的手法）
@@ -3231,7 +3252,7 @@ export class ChannelDO extends Server<Env> {
   // presence.kind 非 NULL 时（即刚发过 status 帧、最新一手 token 快照）优先用它，不被历史消息覆盖。
   private static readonly PRESENCE_COLUMNS = `name,
                 COALESCE(kind, (SELECT sender_kind FROM messages WHERE sender_name = presence.name ORDER BY seq DESC LIMIT 1)) AS kind,
-                account, handle, display_name, avatar_url, avatar_thumb,
+                account, handle, display_name, avatar_url, avatar_thumb, client_version,
                 state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json`;
@@ -3276,6 +3297,9 @@ export class ChannelDO extends Server<Env> {
         : statusEventFromRow(r, String(r.name), state as StatusState, ts);
     return {
       name: String(r.name),
+      ...(typeof r.client_version === "string" && r.client_version !== ""
+        ? { client_version: r.client_version }
+        : {}),
       ...(r.kind === "agent" || r.kind === "human" ? { kind: r.kind as SenderKind } : {}),
       ...(typeof r.account === "string" && r.account !== "" ? { account: r.account } : {}),
       ...(typeof r.handle === "string" && r.handle !== "" ? { handle: r.handle } : {}),

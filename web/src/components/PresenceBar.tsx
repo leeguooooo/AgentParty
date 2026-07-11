@@ -44,6 +44,7 @@ export interface Item {
   display: string;
   responsibility: string | null;
   connectionCount: number;
+  clientVersion: string | null;
 }
 
 export interface PresenceGroup {
@@ -210,6 +211,7 @@ export function PresenceBar({
   const names = [...new Set([...participants.map((p) => p.name), ...Object.keys(presence), ...roles.map((role) => role.name)])].sort();
   const items: Item[] = names.map((name) => {
     const entry = presence[name];
+    const clientVersion = entry?.client_version ?? null;
     const sender = byName.get(name);
     const assigned = roleByName.get(name);
     const owner = sender?.owner ?? entry?.account ?? assigned?.account ?? null;
@@ -234,6 +236,7 @@ export function PresenceBar({
       avatarThumb: sender?.avatar_thumb ?? entry?.avatar_thumb ?? null,
       responsibility: assigned?.responsibility ?? null,
       connectionCount: sender?.connection_count ?? entry?.connection_count ?? (connected ? 1 : 0),
+      clientVersion,
     };
     if (!connected) {
       // owner 本就仅连接中的参与者可知（见上方字段注释）；handle 依赖同一份可信度，一并置空，
@@ -320,6 +323,7 @@ export function PresenceBar({
       it.workflow?.step_id ? `workflow step: ${it.workflow.step_id}` : null,
       it.workflow?.parent_summary_seq ? `parent summary: #${it.workflow.parent_summary_seq}` : null,
       it.connectionCount > 1 ? `${it.connectionCount} live sessions using this identity` : null,
+      it.kind === "agent" && it.clientVersion !== null ? `cli v${it.clientVersion}` : null,
       it.note !== null && it.note !== "" ? `note: ${it.note}` : null,
       it.lastSeen !== null ? `last seen: ${fmtRel(it.lastSeen)}` : null,
     ].filter((part): part is string => part !== null);
@@ -362,6 +366,9 @@ export function PresenceBar({
         {it.connectionCount > 1 && (
           <span className="t-mono presence-duplicate">x{it.connectionCount} sessions</span>
         )}
+        {full && it.kind === "agent" && it.clientVersion !== null && (
+          <span className="t-mono presence-client-version">cli v{it.clientVersion}</span>
+        )}
         {full && it.workflow !== null && <span className="t-mono presence-context">wf:{it.workflow.workflow_id}</span>}
         {full && it.note !== null && it.note !== "" && <span className="t-mono presence-note">{it.note}</span>}
         {full && it.responsibility !== null && it.responsibility !== "" && (
@@ -402,6 +409,9 @@ export function PresenceBar({
       duplicateSessions > 0 ? `${duplicateSessions} extra live session${duplicateSessions === 1 ? "" : "s"}` : null,
       group.human !== null ? `human: ${group.human.name}` : null,
       group.agents.length > 0 ? `agents: ${group.agents.map((item) => item.name).join(", ")}` : null,
+      ...group.agents
+        .filter((item) => item.clientVersion !== null)
+        .map((item) => `${item.name}: cli v${item.clientVersion}`),
     ].filter((part): part is string => part !== null).join(" · ");
     return (
       <section
@@ -446,6 +456,9 @@ export function PresenceBar({
                 <span className={`d-dot d-dot--${agent.state}`} />
                 <span>{agent.display}</span>
                 <span className={`t-mono presence-agent-kind presence-kind--${agent.kind}`}>{agent.kind}</span>
+                {agent.clientVersion !== null && (
+                  <span className="t-mono presence-client-version">cli v{agent.clientVersion}</span>
+                )}
                 {agent.connectionCount > 1 && <span className="t-mono presence-agent-duplicate">x{agent.connectionCount}</span>}
                 {roleBadge(agent, now) !== null && <span className="t-mono presence-agent-role">{roleBadge(agent, now)}</span>}
               </span>
