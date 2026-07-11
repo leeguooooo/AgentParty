@@ -1,6 +1,6 @@
 [package]
 name = "agentparty-desktop"
-version = "0.1.0"
+version = "0.2.90"
 description = "AgentParty desktop shell"
 authors = ["AgentParty"]
 license = "BUSL-1.1"
@@ -16,11 +16,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "=2.11.5", features = ["tray-icon"] }
 tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
 tauri-plugin-notification = "=2.3.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+regex = "1"
 url = "2"
+tokio = { version = "1", features = ["time"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"
@@ -33,3 +36,4 @@ keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sy
 [dev-dependencies]
 base64 = "0.22"
 minisign-verify = "0.2.5"
+tempfile = "3"

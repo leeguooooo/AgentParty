@@ -5,10 +5,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "cd ../web && bunx vite build && cd ../desktop && tauri build",
-    "build:prod": "cd ../web && VITE_API_BASE=https://agentparty.leeguoo.com bunx vite build && cd ../desktop && tauri build",
-    "build:xdream": "cd ../web && VITE_API_BASE=https://agentparty.pwtk-dev.work bunx vite build && cd ../desktop && tauri build",
+    "prepare:sidecar": "bun ../scripts/prepare-desktop-sidecar.ts",
+    "dev": "bun run prepare:sidecar && tauri dev",
+    "build": "cd ../web && bunx vite build && cd ../desktop && bun run prepare:sidecar && tauri build",
+    "build:prod": "cd ../web && VITE_API_BASE=https://agentparty.leeguoo.com bunx vite build && cd ../desktop && bun run prepare:sidecar && tauri build",
+    "build:xdream": "cd ../web && VITE_API_BASE=https://agentparty.pwtk-dev.work bunx vite build && cd ../desktop && bun run prepare:sidecar && tauri build",
     "typecheck": "cd ../web && bunx tsc --noEmit && cd ../desktop/src-tauri && cargo check"
   },
   "devDependencies": {

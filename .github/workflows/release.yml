@@ -117,7 +117,7 @@ jobs:
       - working-directory: worker
         run: bunx tsc --noEmit
 
-  # 发布版本契约：只在 tag 上校验 tag == cli/desktop package.json 版本。
+  # 发布版本契约：只在 tag 上校验 tag == CLI / desktop JS / desktop Rust 版本。
   # 非 tag 时 skip（聚合门禁把 skipped 当通过）。
   version-contract:
     needs: changes
@@ -129,15 +129,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/bun-install
       - name: verify release version contract
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          CLI_VERSION=$(bun -e 'process.stdout.write(require("./cli/package.json").version)')
-          DESKTOP_VERSION=$(bun -e 'process.stdout.write(require("./desktop/package.json").version)')
-          if ! { [ "$TAG_VERSION" = "$CLI_VERSION" ] && [ "$TAG_VERSION" = "$DESKTOP_VERSION" ]; }; then
-            echo "::error::release version mismatch: tag=$TAG_VERSION cli=$CLI_VERSION desktop=$DESKTOP_VERSION"
-            exit 1
-          fi
+          bun scripts/release-version.ts --check "$TAG_VERSION"
+          LATEST_TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          bun scripts/release-version.ts --check-not-older-than "${LATEST_TAG#v}" "$TAG_VERSION"
 
   # 唯一的 required 门禁，名字保持 "full check"（分支保护映射的就是它，不用改设置）。
   # if: always() → 无论上游成功/跳过/失败都跑；任一 workspace job 结论为 failure/cancelled
@@ -310,8 +309,10 @@ jobs:
         include:
           - runner: macos-15-intel
             asset: darwin-x64
+            rust_target: x86_64-apple-darwin
           - runner: macos-14
             asset: darwin-arm64
+            rust_target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
 
@@ -321,6 +322,23 @@ jobs:
 
       - name: install deps
         run: bun install --frozen-lockfile
+
+      - name: prepare and verify desktop sidecar
+        env:
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+          bun scripts/prepare-desktop-sidecar.ts --target "$RUST_TARGET"
+          sidecar="desktop/src-tauri/binaries/party-${RUST_TARGET}"
+          if [ ! -s "$sidecar" ] || [ ! -x "$sidecar" ]; then
+            echo "::error::desktop sidecar is missing, empty, or not executable: $sidecar"
+            exit 1
+          fi
+          sidecar_version="$("$sidecar" --version)"
+          if [ "$sidecar_version" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::desktop sidecar version mismatch: tag=${GITHUB_REF_NAME#v} sidecar=$sidecar_version"
+            exit 1
+          fi
 
       - name: resolve updater key mode
         id: updater-key-mode
@@ -483,6 +501,21 @@ jobs:
           xcrun stapler validate "$app"
           xcrun stapler validate "$dmg"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+
+      - name: verify bundled desktop sidecar
+        run: |
+          set -euo pipefail
+          app="$(find desktop/src-tauri/target/release/bundle/macos -name '*.app' -type d | head -n 1)"
+          bundled_sidecar="$app/Contents/MacOS/party"
+          if [ -z "$app" ] || [ ! -s "$bundled_sidecar" ] || [ ! -x "$bundled_sidecar" ]; then
+            echo "::error::executable desktop sidecar is missing from the app bundle"
+            exit 1
+          fi
+          bundled_version="$("$bundled_sidecar" --version)"
+          if [ "$bundled_version" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::bundled sidecar version mismatch: tag=${GITHUB_REF_NAME#v} sidecar=$bundled_version"
+            exit 1
+          fi
 
       - name: sign bridge updater with v2 key
         if: steps.updater-key-mode.outputs.mode == 'bridge'

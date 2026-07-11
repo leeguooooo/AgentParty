@@ -45,12 +45,13 @@
     <h2>当前事实</h2>
     <table>
       <tr><th>能力</th><th>当前证据</th><th>判定</th></tr>
-      <tr><td>Tauri 壳与远端 API</td><td><code>desktop/</code>、运行时 API base、Tauri CORS、v0.2.82 双架构 DMG</td><td><span class="status">已完成 M1</span></td></tr>
-      <tr><td>版本一致性</td><td>CLI 为 0.2.82，desktop package / Tauri config / Cargo 仍为 0.1.0</td><td>缺失</td></tr>
-      <tr><td>自动更新</td><td>无 updater/process 插件、无签名 bundle、无 <code>latest.json</code>、无 UI</td><td>缺失</td></tr>
-      <tr><td>系统通知与托盘</td><td>只有浏览器 Notification；关窗即退出</td><td>缺失</td></tr>
-      <tr><td>桌面登录</td><td>只能粘贴 token</td><td>不适合普通用户</td></tr>
-      <tr><td>签名/公证</td><td>DMG 无 Developer ID 签名和公证</td><td>发布风险</td></tr>
+      <tr><td>Tauri 壳与远端 API</td><td><code>desktop/</code>、运行时 API base、私有服务器探测与原子切换、双架构 DMG</td><td><span class="status">已完成</span></td></tr>
+      <tr><td>版本一致性</td><td>CLI、desktop package、Rust <code>Cargo.toml</code>/<code>Cargo.lock</code> 与 tag 由同一脚本校验和原子同步；当前均为 0.2.90</td><td><span class="status">已完成</span></td></tr>
+      <tr><td>自动更新</td><td>updater v2 签名、静态双架构 manifest、检查/下载/安装/重启状态机和脱敏诊断已发布</td><td><span class="status">已完成，待 production E2E</span></td></tr>
+      <tr><td>系统通知与托盘</td><td>原生通知、Dock 角标、点击定位、托盘、关窗隐藏、登录启动均已实现</td><td><span class="status">已完成</span></td></tr>
+      <tr><td>桌面登录</td><td>浏览器 Device Flow；Lark/飞书与 OIDC 由目标服务器配置；凭据按 Origin 隔离在 Keychain</td><td><span class="status">已完成</span></td></tr>
+      <tr><td>本机 agent</td><td>内置同版本 <code>party</code> sidecar；桌面设置可选择本机 agent 身份、频道和 runner，启动/停止并查看脱敏日志</td><td><span class="status">R4 已实现，GUI 复核受 Keychain 密码框阻塞</span></td></tr>
+      <tr><td>签名/公证</td><td>Release Environment 仅有 updater v2 密钥，缺 Developer ID Application 与 notarization 凭据；产物诚实标记为 preview</td><td>外部门禁未满足</td></tr>
       <tr><td>Windows/Linux</td><td>设计中有方向，CI 只构建 macOS</td><td>后续里程碑</td></tr>
     </table>
   </section>

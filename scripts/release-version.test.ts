@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  compareVersionPrecedence,
   readConsistentVersion,
   runReleaseVersionCli,
   syncVersion,
@@ -30,9 +31,13 @@ function makePackages(cliVersion = "0.2.82", desktopVersion = cliVersion): Relea
   const paths = {
     cliPackagePath: join(directory, "cli-package.json"),
     desktopPackagePath: join(directory, "desktop-package.json"),
+    desktopCargoPath: join(directory, "Cargo.toml"),
+    desktopCargoLockPath: join(directory, "Cargo.lock"),
   };
   writeFileSync(paths.cliPackagePath, JSON.stringify({ name: "cli", version: cliVersion }, null, 2) + "\n");
   writeFileSync(paths.desktopPackagePath, JSON.stringify({ name: "desktop", version: desktopVersion }, null, 2) + "\n");
+  writeFileSync(paths.desktopCargoPath, `[package]\nname = "agentparty-desktop"\nversion = "${desktopVersion}"\n`);
+  writeFileSync(paths.desktopCargoLockPath, `version = 4\n\n[[package]]\nname = "agentparty-desktop"\nversion = "${desktopVersion}"\ndependencies = []\n`);
   return paths;
 }
 
@@ -43,13 +48,21 @@ function makeCleanupFiles() {
     ...paths,
     cliBackup: join(directory, "cli-package.backup.json"),
     desktopBackup: join(directory, "desktop-package.backup.json"),
+    cargoBackup: join(directory, "Cargo.backup.toml"),
+    cargoLockBackup: join(directory, "Cargo.backup.lock"),
     cliBumped: join(directory, "cli-package.bumped.json"),
     desktopBumped: join(directory, "desktop-package.bumped.json"),
+    cargoBumped: join(directory, "Cargo.bumped.toml"),
+    cargoLockBumped: join(directory, "Cargo.bumped.lock"),
   };
   writeFileSync(files.cliBackup, '{"name":"cli","version":"0.2.82"}\n');
   writeFileSync(files.desktopBackup, '{"name":"desktop","version":"0.2.82"}\n');
+  writeFileSync(files.cargoBackup, '[package]\nname = "agentparty-desktop"\nversion = "0.2.82"\n');
+  writeFileSync(files.cargoLockBackup, 'version = 4\n\n[[package]]\nname = "agentparty-desktop"\nversion = "0.2.82"\ndependencies = []\n');
   writeFileSync(files.cliBumped, readFileSync(files.cliPackagePath));
   writeFileSync(files.desktopBumped, readFileSync(files.desktopPackagePath));
+  writeFileSync(files.cargoBumped, readFileSync(files.desktopCargoPath));
+  writeFileSync(files.cargoLockBumped, readFileSync(files.desktopCargoLockPath));
   return files;
 }
 
@@ -67,14 +80,24 @@ function runReleaseShell(body: string, environment: Record<string, string> = {})
   };
 }
 
-function cleanupEnvironment(files: ReturnType<typeof makeCleanupFiles>): Record<string, string> {
+function cleanupEnvironment(files: Pick<ReturnType<typeof makeCleanupFiles>,
+  "cliPackagePath" | "desktopPackagePath" | "cliBackup" | "desktopBackup" | "cliBumped" | "desktopBumped"
+> & Partial<Pick<ReturnType<typeof makeCleanupFiles>,
+  "desktopCargoPath" | "desktopCargoLockPath" | "cargoBackup" | "cargoLockBackup" | "cargoBumped" | "cargoLockBumped"
+>>): Record<string, string> {
   return {
     TEST_CLI_PACKAGE: files.cliPackagePath,
     TEST_DESKTOP_PACKAGE: files.desktopPackagePath,
+    TEST_DESKTOP_CARGO: files.desktopCargoPath ?? "",
+    TEST_DESKTOP_CARGO_LOCK: files.desktopCargoLockPath ?? "",
     TEST_CLI_BACKUP: files.cliBackup,
     TEST_DESKTOP_BACKUP: files.desktopBackup,
+    TEST_DESKTOP_CARGO_BACKUP: files.cargoBackup ?? "",
+    TEST_DESKTOP_CARGO_LOCK_BACKUP: files.cargoLockBackup ?? "",
     TEST_CLI_BUMPED: files.cliBumped,
     TEST_DESKTOP_BUMPED: files.desktopBumped,
+    TEST_DESKTOP_CARGO_BUMPED: files.cargoBumped ?? "",
+    TEST_DESKTOP_CARGO_LOCK_BUMPED: files.cargoLockBumped ?? "",
   };
 }
 
@@ -98,6 +121,7 @@ function runReleaseHarness(scenario: ReleaseHarnessScenario) {
   mkdirSync(join(directory, "scripts"));
   mkdirSync(join(directory, "cli"));
   mkdirSync(join(directory, "desktop"));
+  mkdirSync(join(directory, "desktop", "src-tauri"));
   mkdirSync(fakeBin);
   copyFileSync(resolve(import.meta.dir, "release.sh"), join(directory, "scripts", "release.sh"));
   chmodSync(join(directory, "scripts", "release.sh"), 0o755);
@@ -108,6 +132,8 @@ function runReleaseHarness(scenario: ReleaseHarnessScenario) {
   const originalDesktop = '{"name":"desktop","version":"0.2.82"}\n';
   writeFileSync(cliPackage, originalCli);
   writeFileSync(desktopPackage, originalDesktop);
+  writeFileSync(join(directory, "desktop", "src-tauri", "Cargo.toml"), '[package]\nname = "agentparty-desktop"\nversion = "0.2.82"\n');
+  writeFileSync(join(directory, "desktop", "src-tauri", "Cargo.lock"), 'version = 4\n\n[[package]]\nname = "agentparty-desktop"\nversion = "0.2.82"\n');
 
   writeExecutable(
     join(fakeBin, "git"),
@@ -124,6 +150,10 @@ esac
     `if [[ "\${1:-}" == "scripts/release-version.ts" ]]; then
   printf '{"name":"cli","version":"%s"}\\n' "$2" > cli/package.json
   printf '{"name":"desktop","version":"%s"}\\n' "$2" > desktop/package.json
+  sed "s/version = \\\"0.2.82\\\"/version = \\\"$2\\\"/" desktop/src-tauri/Cargo.toml > desktop/src-tauri/Cargo.toml.next
+  mv desktop/src-tauri/Cargo.toml.next desktop/src-tauri/Cargo.toml
+  sed "s/version = \\\"0.2.82\\\"/version = \\\"$2\\\"/" desktop/src-tauri/Cargo.lock > desktop/src-tauri/Cargo.lock.next
+  mv desktop/src-tauri/Cargo.lock.next desktop/src-tauri/Cargo.lock
   exit 0
 fi
 [[ "\${1:-} \${2:-}" == "run check" ]]
@@ -158,7 +188,7 @@ exit 64
 [[ ! -f "$MOCK_COPY_COUNT" ]] || count=$(<"$MOCK_COPY_COUNT")
 count=$((count + 1))
 printf '%s\\n' "$count" > "$MOCK_COPY_COUNT"
-if [[ "$MOCK_SCENARIO" == "snapshot-copy-failure" && "$count" == "3" ]]; then
+if [[ "$MOCK_SCENARIO" == "snapshot-copy-failure" && "$count" == "7" ]]; then
   echo "simulated snapshot copy failure" >&2
   exit 73
 fi
@@ -192,18 +222,28 @@ exec /bin/cp "$@"
     commands: readFileSync(commandLog, "utf8"),
     cliPackage,
     desktopPackage,
+    desktopCargo: join(directory, "desktop", "src-tauri", "Cargo.toml"),
+    desktopCargoLock: join(directory, "desktop", "src-tauri", "Cargo.lock"),
     originalCli,
     originalDesktop,
+    originalCargo: '[package]\nname = "agentparty-desktop"\nversion = "0.2.82"\n',
+    originalCargoLock: 'version = 4\n\n[[package]]\nname = "agentparty-desktop"\nversion = "0.2.82"\n',
   };
 }
 
 const configureCleanup = `
 CLI_PACKAGE="$TEST_CLI_PACKAGE"
 DESKTOP_PACKAGE="$TEST_DESKTOP_PACKAGE"
+DESKTOP_CARGO="$TEST_DESKTOP_CARGO"
+DESKTOP_CARGO_LOCK="$TEST_DESKTOP_CARGO_LOCK"
 CLI_PACKAGE_BACKUP="$TEST_CLI_BACKUP"
 DESKTOP_PACKAGE_BACKUP="$TEST_DESKTOP_BACKUP"
+DESKTOP_CARGO_BACKUP="$TEST_DESKTOP_CARGO_BACKUP"
+DESKTOP_CARGO_LOCK_BACKUP="$TEST_DESKTOP_CARGO_LOCK_BACKUP"
 CLI_PACKAGE_BUMPED="$TEST_CLI_BUMPED"
 DESKTOP_PACKAGE_BUMPED="$TEST_DESKTOP_BUMPED"
+DESKTOP_CARGO_BUMPED="$TEST_DESKTOP_CARGO_BUMPED"
+DESKTOP_CARGO_LOCK_BUMPED="$TEST_DESKTOP_CARGO_LOCK_BUMPED"
 BUMPED_SNAPSHOTS_COMPLETE=1
 `;
 
@@ -220,20 +260,38 @@ describe("release version source", () => {
     }
   });
 
+  test("compares SemVer precedence without treating build metadata as a newer release", () => {
+    expect(compareVersionPrecedence("0.2.91", "0.2.90")).toBe(1);
+    expect(compareVersionPrecedence("0.2.91-rc.1", "0.2.90")).toBe(1);
+    expect(compareVersionPrecedence("0.2.91-rc.2", "0.2.91-rc.10")).toBe(-1);
+    expect(compareVersionPrecedence("0.2.90+rebuild.2", "0.2.90+rebuild.1")).toBe(0);
+  });
+
   test("reads the shared version only when CLI and desktop packages agree", () => {
     expect(readConsistentVersion(makePackages())).toBe("0.2.82");
     expect(() => readConsistentVersion(makePackages("0.2.82", "0.2.81"))).toThrow(
-      "Version mismatch: cli/package.json is 0.2.82 but desktop/package.json is 0.2.81",
+      "Version mismatch: cli/package.json is 0.2.82, desktop/package.json is 0.2.81, desktop/src-tauri/Cargo.toml is 0.2.81, desktop/src-tauri/Cargo.lock is 0.2.81",
     );
   });
 
-  test("syncs a valid version to both package files", () => {
+  test("rejects a stale Rust desktop package version", () => {
+    const paths = makePackages();
+    writeFileSync(paths.desktopCargoPath, '[package]\nname = "agentparty-desktop"\nversion = "0.1.0"\n');
+
+    expect(() => readConsistentVersion(paths)).toThrow(
+      "Version mismatch: cli/package.json is 0.2.82, desktop/package.json is 0.2.82, desktop/src-tauri/Cargo.toml is 0.1.0, desktop/src-tauri/Cargo.lock is 0.2.82",
+    );
+  });
+
+  test("syncs a valid version to both package files and the Rust manifest", () => {
     const paths = makePackages();
 
     syncVersion("0.2.83", paths);
 
     expect(JSON.parse(readFileSync(paths.cliPackagePath, "utf8")).version).toBe("0.2.83");
     expect(JSON.parse(readFileSync(paths.desktopPackagePath, "utf8")).version).toBe("0.2.83");
+    expect(readFileSync(paths.desktopCargoPath, "utf8")).toContain('version = "0.2.83"');
+    expect(readFileSync(paths.desktopCargoLockPath, "utf8")).toContain('name = "agentparty-desktop"\nversion = "0.2.83"');
   });
 
   test("does not write either package when the version is invalid", () => {
@@ -265,6 +323,53 @@ describe("release version source", () => {
     expect(readFileSync(paths.desktopPackagePath, "utf8")).toBe(before[1]);
   });
 
+  test("attempts every rollback and preserves the original commit failure", () => {
+    const paths = makePackages();
+    const before = [
+      readFileSync(paths.cliPackagePath, "utf8"),
+      readFileSync(paths.desktopPackagePath, "utf8"),
+      readFileSync(paths.desktopCargoPath, "utf8"),
+      readFileSync(paths.desktopCargoLockPath, "utf8"),
+    ];
+    let commitRenames = 0;
+    let rollbackWrites = 0;
+    const fileSystem: ReleaseVersionFileSystem = {
+      readFile: (path) => readFileSync(path, "utf8"),
+      writeFile: (path, data) => {
+        if (path.includes(".tmp") && commitRenames >= 2) {
+          rollbackWrites += 1;
+          if (rollbackWrites === 1) throw new Error("rollback write failed");
+        }
+        writeFileSync(path, data);
+      },
+      rename: (source, destination) => {
+        if (destination === paths.desktopCargoPath && commitRenames === 2) {
+          throw new Error("third commit rename failed");
+        }
+        commitRenames += 1;
+        renameSync(source, destination);
+      },
+      unlink: unlinkSync,
+    };
+
+    let failure: unknown;
+    try {
+      syncVersion("0.2.83", paths, fileSystem);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    const errors = (failure as AggregateError).errors as Error[];
+    expect(errors.map((error) => error.message)).toContain("third commit rename failed");
+    expect(errors.map((error) => error.message)).toContain("rollback write failed");
+    expect(rollbackWrites).toBe(2);
+    expect(readFileSync(paths.cliPackagePath, "utf8")).toBe(before[0]);
+    expect(readFileSync(paths.desktopPackagePath, "utf8")).not.toBe(before[1]);
+    expect(readFileSync(paths.desktopCargoPath, "utf8")).toBe(before[2]);
+    expect(readFileSync(paths.desktopCargoLockPath, "utf8")).toBe(before[3]);
+  });
+
   test("CLI accepts a version argument and rejects extra arguments", () => {
     const paths = makePackages();
 
@@ -273,6 +378,46 @@ describe("release version source", () => {
     expect(() => runReleaseVersionCli(["0.2.84", "extra"], paths)).toThrow(
       "Usage: bun scripts/release-version.ts <version>",
     );
+  });
+
+  test("CLI release bump rejects equal or lower precedence", () => {
+    const paths = makePackages();
+    expect(() => runReleaseVersionCli(["0.2.82+rebuild"], paths)).toThrow(
+      "Release version must advance: current 0.2.82, requested 0.2.82+rebuild",
+    );
+    expect(() => runReleaseVersionCli(["0.2.81"], paths)).toThrow(
+      "Release version must advance: current 0.2.82, requested 0.2.81",
+    );
+  });
+
+  test("CI monotonic check allows a rerun of latest but rejects an older tag", () => {
+    const paths = makePackages();
+    expect(runReleaseVersionCli(["--check-not-older-than", "0.2.90", "0.2.90"], paths)).toBe("0.2.90");
+    expect(runReleaseVersionCli(["--check-not-older-than", "0.2.90", "0.2.91-rc.1"], paths)).toBe("0.2.91-rc.1");
+    expect(() => runReleaseVersionCli(["--check-not-older-than", "0.2.90", "0.2.89+rebuild"], paths)).toThrow(
+      "Release version regression: candidate 0.2.89+rebuild is older than 0.2.90",
+    );
+  });
+
+  test("CLI check mode validates all release version sources without writing", () => {
+    const paths = makePackages();
+    const before = [
+      readFileSync(paths.cliPackagePath, "utf8"),
+      readFileSync(paths.desktopPackagePath, "utf8"),
+      readFileSync(paths.desktopCargoPath, "utf8"),
+      readFileSync(paths.desktopCargoLockPath, "utf8"),
+    ];
+
+    expect(runReleaseVersionCli(["--check", "0.2.82"], paths)).toBe("0.2.82");
+    expect(() => runReleaseVersionCli(["--check", "0.2.83"], paths)).toThrow(
+      "Release version mismatch: expected 0.2.83, found 0.2.82",
+    );
+    expect([
+      readFileSync(paths.cliPackagePath, "utf8"),
+      readFileSync(paths.desktopPackagePath, "utf8"),
+      readFileSync(paths.desktopCargoPath, "utf8"),
+      readFileSync(paths.desktopCargoLockPath, "utf8"),
+    ]).toEqual(before);
   });
 });
 
@@ -464,13 +609,15 @@ watch_tag_run
     expect(result.exitCode).toBe(0);
   });
 
-  test("restores both packages when a bumped snapshot copy fails", () => {
+  test("restores every version source when a bumped snapshot copy fails", () => {
     const result = runReleaseHarness("snapshot-copy-failure");
 
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toContain("simulated snapshot copy failure");
     expect(readFileSync(result.cliPackage, "utf8")).toBe(result.originalCli);
     expect(readFileSync(result.desktopPackage, "utf8")).toBe(result.originalDesktop);
+    expect(readFileSync(result.desktopCargo, "utf8")).toBe(result.originalCargo);
+    expect(readFileSync(result.desktopCargoLock, "utf8")).toBe(result.originalCargoLock);
     expect(result.commands).not.toContain("git add");
   });
 });

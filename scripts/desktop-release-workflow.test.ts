@@ -10,6 +10,9 @@ const desktopDocs = readFileSync(
 const tauriConfig = JSON.parse(
   readFileSync(resolve(import.meta.dir, "../desktop/src-tauri/tauri.conf.json"), "utf8"),
 );
+const desktopPackage = JSON.parse(
+  readFileSync(resolve(import.meta.dir, "../desktop/package.json"), "utf8"),
+);
 const desktopCapability = JSON.parse(
   readFileSync(resolve(import.meta.dir, "../desktop/src-tauri/capabilities/default.json"), "utf8"),
 );
@@ -21,6 +24,29 @@ function namedStep(job: string, name: string, nextName: string): string {
 }
 
 describe("desktop release workflow", () => {
+  test("prepares the CLI sidecar before every desktop Tauri command", () => {
+    expect(tauriConfig.bundle.externalBin).toEqual(["binaries/party"]);
+    expect(desktopPackage.scripts["prepare:sidecar"]).toBe(
+      "bun ../scripts/prepare-desktop-sidecar.ts",
+    );
+    for (const name of ["dev", "build", "build:prod", "build:xdream"]) {
+      const command = desktopPackage.scripts[name] as string;
+      expect(command).toContain("bun run prepare:sidecar");
+      expect(command.indexOf("bun run prepare:sidecar")).toBeLessThan(command.indexOf("tauri "));
+    }
+  });
+
+  test("verifies both release sidecars before and after Tauri packaging", () => {
+    expect(desktopJob).toContain("rust_target: x86_64-apple-darwin");
+    expect(desktopJob).toContain("rust_target: aarch64-apple-darwin");
+    expect(desktopJob).toContain("bun scripts/prepare-desktop-sidecar.ts --target \"$RUST_TARGET\"");
+    expect(desktopJob).toContain('sidecar="desktop/src-tauri/binaries/party-${RUST_TARGET}"');
+    expect(desktopJob).toContain('sidecar_version="$("$sidecar" --version)"');
+    expect(desktopJob).toContain('bundled_sidecar="$app/Contents/MacOS/party"');
+    expect(desktopJob).toContain('[ ! -x "$bundled_sidecar" ]');
+    expect(desktopJob).toContain('bundled_version="$("$bundled_sidecar" --version)"');
+  });
+
   test("hands every signed updater artifact to the release job", () => {
     expect(workflow).toMatch(/^\s+path: agentparty-desktop-\*\s*$/m);
     expect(workflow).toContain("agentparty-desktop-${ASSET}.app.tar.gz");
@@ -152,7 +178,7 @@ describe("desktop release workflow", () => {
     expect(workflow).toContain("dist/*.signing-status.json");
 
     expect(desktopDocs).toContain("Unnotarized macOS preview");
-    expect(desktopDocs).toContain("正式下载入口仍处于准备中");
+    expect(desktopDocs).toContain("正式下载入口会在这些门禁真实通过后开放");
   });
 
   test("uses commands available on GitHub macOS runners for certificate import", () => {
@@ -160,12 +186,12 @@ describe("desktop release workflow", () => {
     expect(workflow).not.toContain("-maxdepth");
   });
 
-  test("requires the tag, CLI package, and desktop package versions to match", () => {
+  test("requires the tag, CLI package, desktop package, and Rust package versions to match", () => {
     expect(workflow).toContain('TAG_VERSION="${GITHUB_REF_NAME#v}"');
-    expect(workflow).toContain('CLI_VERSION=$(bun -e');
-    expect(workflow).toContain('DESKTOP_VERSION=$(bun -e');
-    expect(workflow).toContain('"$TAG_VERSION" = "$CLI_VERSION"');
-    expect(workflow).toContain('"$TAG_VERSION" = "$DESKTOP_VERSION"');
+    expect(workflow).toContain('bun scripts/release-version.ts --check "$TAG_VERSION"');
+    expect(workflow).toContain('LATEST_TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"');
+    expect(workflow).toContain('bun scripts/release-version.ts --check-not-older-than "${LATEST_TAG#v}" "$TAG_VERSION"');
+    expect(workflow).not.toContain("DESKTOP_RUST_VERSION=$(sed -n");
   });
 
   test("keeps prereleases out of the stable latest updater channel", () => {

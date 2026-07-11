@@ -6,10 +6,16 @@ set -euo pipefail
 
 CLI_PACKAGE=""
 DESKTOP_PACKAGE=""
+DESKTOP_CARGO=""
+DESKTOP_CARGO_LOCK=""
 CLI_PACKAGE_BACKUP=""
 DESKTOP_PACKAGE_BACKUP=""
 CLI_PACKAGE_BUMPED=""
 DESKTOP_PACKAGE_BUMPED=""
+DESKTOP_CARGO_BACKUP=""
+DESKTOP_CARGO_LOCK_BACKUP=""
+DESKTOP_CARGO_BUMPED=""
+DESKTOP_CARGO_LOCK_BUMPED=""
 RESTORE_PENDING=0
 INDEX_PENDING=0
 BUMPED_SNAPSHOTS_COMPLETE=0
@@ -176,6 +182,8 @@ restore_package_versions() {
   if [[ "$BUMPED_SNAPSHOTS_COMPLETE" == "1" && "$INDEX_PENDING" == "1" ]]; then
     git show ":$CLI_PACKAGE" 2>/dev/null | cmp -s - "$CLI_PACKAGE_BUMPED" || staged_changed+=("$CLI_PACKAGE")
     git show ":$DESKTOP_PACKAGE" 2>/dev/null | cmp -s - "$DESKTOP_PACKAGE_BUMPED" || staged_changed+=("$DESKTOP_PACKAGE")
+    [[ -z "$DESKTOP_CARGO" ]] || git show ":$DESKTOP_CARGO" 2>/dev/null | cmp -s - "$DESKTOP_CARGO_BUMPED" || staged_changed+=("$DESKTOP_CARGO")
+    [[ -z "$DESKTOP_CARGO_LOCK" ]] || git show ":$DESKTOP_CARGO_LOCK" 2>/dev/null | cmp -s - "$DESKTOP_CARGO_LOCK_BUMPED" || staged_changed+=("$DESKTOP_CARGO_LOCK")
     if (( ${#staged_changed[@]} > 0 )); then
       echo "!! package 内容在 bump 后被修改或重新暂存，未自动恢复 index 或工作树: ${staged_changed[*]}。请手工核对。" >&2
       return 1
@@ -185,25 +193,32 @@ restore_package_versions() {
   if [[ "$BUMPED_SNAPSHOTS_COMPLETE" == "1" ]]; then
     cmp -s "$CLI_PACKAGE" "$CLI_PACKAGE_BUMPED" || changed+=("$CLI_PACKAGE")
     cmp -s "$DESKTOP_PACKAGE" "$DESKTOP_PACKAGE_BUMPED" || changed+=("$DESKTOP_PACKAGE")
+    [[ -z "$DESKTOP_CARGO" ]] || cmp -s "$DESKTOP_CARGO" "$DESKTOP_CARGO_BUMPED" || changed+=("$DESKTOP_CARGO")
+    [[ -z "$DESKTOP_CARGO_LOCK" ]] || cmp -s "$DESKTOP_CARGO_LOCK" "$DESKTOP_CARGO_LOCK_BUMPED" || changed+=("$DESKTOP_CARGO_LOCK")
     if (( ${#changed[@]} > 0 )); then
       echo "!! package 内容在 bump 后被修改，未自动恢复 index 或工作树: ${changed[*]}。请手工核对备份文件。" >&2
       return 1
     fi
   else
-    echo "!! bumped snapshot 未完整写入，按 bump 前备份恢复两份 package" >&2
+    echo "!! bumped snapshot 未完整写入，按 bump 前备份恢复发布版本文件" >&2
   fi
 
   if [[ "$INDEX_PENDING" == "1" ]]; then
-    git restore --staged -- "$CLI_PACKAGE" "$DESKTOP_PACKAGE"
+    local staged=("$CLI_PACKAGE" "$DESKTOP_PACKAGE")
+    [[ -z "$DESKTOP_CARGO" ]] || staged+=("$DESKTOP_CARGO")
+    [[ -z "$DESKTOP_CARGO_LOCK" ]] || staged+=("$DESKTOP_CARGO_LOCK")
+    git restore --staged -- "${staged[@]}"
   fi
   cp "$CLI_PACKAGE_BACKUP" "$CLI_PACKAGE"
   cp "$DESKTOP_PACKAGE_BACKUP" "$DESKTOP_PACKAGE"
-  echo "!! 已恢复 cli/package.json 与 desktop/package.json" >&2
+  [[ -z "$DESKTOP_CARGO" ]] || cp "$DESKTOP_CARGO_BACKUP" "$DESKTOP_CARGO"
+  [[ -z "$DESKTOP_CARGO_LOCK" ]] || cp "$DESKTOP_CARGO_LOCK_BACKUP" "$DESKTOP_CARGO_LOCK"
+  echo "!! 已恢复 CLI 与 desktop 的发布版本文件" >&2
 }
 
 remove_release_temp_files() {
   local file
-  for file in "$CLI_PACKAGE_BACKUP" "$DESKTOP_PACKAGE_BACKUP" "$CLI_PACKAGE_BUMPED" "$DESKTOP_PACKAGE_BUMPED"; do
+  for file in "$CLI_PACKAGE_BACKUP" "$DESKTOP_PACKAGE_BACKUP" "$DESKTOP_CARGO_BACKUP" "$DESKTOP_CARGO_LOCK_BACKUP" "$CLI_PACKAGE_BUMPED" "$DESKTOP_PACKAGE_BUMPED" "$DESKTOP_CARGO_BUMPED" "$DESKTOP_CARGO_LOCK_BUMPED"; do
     [[ -z "$file" ]] || rm -f "$file"
   done
 }
@@ -230,13 +245,21 @@ main() {
   git rev-parse "$TAG" >/dev/null 2>&1 && { echo "tag $TAG 已存在"; return 1; }
   CLI_PACKAGE="cli/package.json"
   DESKTOP_PACKAGE="desktop/package.json"
+  DESKTOP_CARGO="desktop/src-tauri/Cargo.toml"
+  DESKTOP_CARGO_LOCK="desktop/src-tauri/Cargo.lock"
   trap cleanup_release_version EXIT
   CLI_PACKAGE_BACKUP=$(mktemp)
   DESKTOP_PACKAGE_BACKUP=$(mktemp)
+  DESKTOP_CARGO_BACKUP=$(mktemp)
+  DESKTOP_CARGO_LOCK_BACKUP=$(mktemp)
   CLI_PACKAGE_BUMPED=$(mktemp)
   DESKTOP_PACKAGE_BUMPED=$(mktemp)
+  DESKTOP_CARGO_BUMPED=$(mktemp)
+  DESKTOP_CARGO_LOCK_BUMPED=$(mktemp)
   cp "$CLI_PACKAGE" "$CLI_PACKAGE_BACKUP"
   cp "$DESKTOP_PACKAGE" "$DESKTOP_PACKAGE_BACKUP"
+  cp "$DESKTOP_CARGO" "$DESKTOP_CARGO_BACKUP"
+  cp "$DESKTOP_CARGO_LOCK" "$DESKTOP_CARGO_LOCK_BACKUP"
 
   # 1) bump + 本地完整门禁（与 CI 同一 bun run check；先在本地挂掉比在 CI 挂便宜）
   echo "== 同步 package 版本到 $VER =="
@@ -244,6 +267,8 @@ main() {
   RESTORE_PENDING=1
   cp "$CLI_PACKAGE" "$CLI_PACKAGE_BUMPED"
   cp "$DESKTOP_PACKAGE" "$DESKTOP_PACKAGE_BUMPED"
+  cp "$DESKTOP_CARGO" "$DESKTOP_CARGO_BUMPED"
+  cp "$DESKTOP_CARGO_LOCK" "$DESKTOP_CARGO_LOCK_BUMPED"
   BUMPED_SNAPSHOTS_COMPLETE=1
   echo "== 本地门禁 bun run check =="
   if ! bun run check; then
@@ -256,7 +281,7 @@ main() {
   fi
 
   # 2) 提交 + tag + 推送
-  git add cli/package.json desktop/package.json
+  git add cli/package.json desktop/package.json desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock
   INDEX_PENDING=1
   git commit -m "chore(release): $TAG" -m "Claude-Session: ${CLAUDE_SESSION_URL:-scripts/release.sh}"
   disable_release_cleanup

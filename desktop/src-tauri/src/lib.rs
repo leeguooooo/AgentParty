@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod agent;
+
 #[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
@@ -246,6 +248,9 @@ pub fn run() {
     let builder = tauri::Builder::default().manage(ExitGuard::default());
 
     #[cfg(desktop)]
+    let builder = builder.manage(agent::AgentManager::default());
+
+    #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app);
@@ -253,6 +258,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -263,7 +269,12 @@ pub fn run() {
             desktop_credential_read,
             desktop_credential_write,
             desktop_credential_delete,
-            desktop_credential_migrate
+            desktop_credential_migrate,
+            agent::desktop_agent_list_configs,
+            agent::desktop_agent_status,
+            agent::desktop_agent_start,
+            agent::desktop_agent_stop,
+            agent::desktop_agent_logs
         ]);
 
     #[cfg(mobile)]
@@ -296,8 +307,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building AgentParty desktop")
         .run(|app, event| {
+            #[cfg(desktop)]
+            if matches!(
+                &event,
+                tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
+            ) {
+                app.state::<agent::AgentManager>().kill_on_exit();
+            }
             #[cfg(target_os = "macos")]
-            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+            if matches!(&event, tauri::RunEvent::Reopen { .. }) {
                 show_main(app);
             }
         });
