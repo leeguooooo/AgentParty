@@ -6,6 +6,7 @@ import { ChannelList } from "./components/ChannelList";
 import { CreateChannel } from "./components/CreateChannel";
 import { DesktopSettings } from "./components/DesktopSettings";
 import { DesktopDownloadLink } from "./components/DesktopDownloadLink";
+import { DesktopInvitePaste } from "./components/DesktopInvitePaste";
 import { DesktopPairingGate } from "./components/DesktopPairingGate";
 import { DesktopUpdater } from "./components/DesktopUpdater";
 import { TokenGate } from "./components/TokenGate";
@@ -13,6 +14,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { OnboardingGuide } from "./components/OnboardingGuide";
 import { ServerProfileAddGate, ServerSwitcher } from "./components/ServerProfiles";
 import {
+  applyShareToken,
   AuthError,
   type ChannelInfo,
   clearShareToken,
@@ -174,6 +176,21 @@ export function App() {
         throw cause;
       });
   }, [activeOrigin]);
+
+  // 桌面版贴观看邀请链接（#297）：/c/<slug>?t=<token> 的观看 token 直接落进分享态（复用 #186），
+  // 换成只读会话打开频道——与网页命中 ?t= 等价，只是桌面没有地址栏，token 从粘贴框进来。
+  const enterWatchInvite = useCallback(
+    (slug: string, watchToken: string) => {
+      applyShareToken(watchToken);
+      setAuthError(null);
+      setChannels(null);
+      setListError(null);
+      setMe(null);
+      setToken(watchToken);
+      navigate(`/c/${slug}`);
+    },
+    [navigate],
+  );
 
   const switchDesktopOrigin = useCallback(async (origin: string) => {
     const result = await switchActiveDesktopServer(origin);
@@ -909,6 +926,16 @@ export function App() {
         <aside className="app-side">
           {canCreate && token !== null && (
             <CreateChannel token={token} onCreated={onChannelCreated} />
+          )}
+          {/* 桌面版：贴网页邀请链接进入频道（#297）。桌面壳没地址栏，粘贴框把 /join 或 /c 链接
+              解析后走网页同款兑换——participate 走 /join/<code> 兑换 effect，watch 落分享态。 */}
+          {desktop && !isShareMode() && (
+            <DesktopInvitePaste
+              activeOrigin={activeOrigin}
+              onParticipate={(code) => navigate(`/join/${code}`)}
+              onOpen={(s) => navigate(`/c/${s}`)}
+              onWatch={enterWatchInvite}
+            />
           )}
           <ChannelList channels={channels} active={slug} error={listError} onOpen={openChannel} />
         </aside>

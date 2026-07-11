@@ -3008,6 +3008,21 @@
 .joinlink-revoke { color: var(--d-red, #c0392b); }
 .joinlink-empty { font-size: 12px; color: var(--t-dim); margin: 0; }
 .joinlink-error { font-size: 12px; color: var(--d-red, #c0392b); margin: 0; }
+/* 桌面版贴邀请链接（#297）：入口在左侧栏，浮层左对齐（joinlink 默认右对齐是给顶栏用的）。 */
+.invite-paste { margin-bottom: 8px; }
+.invite-paste-btn { width: 100%; }
+.invite-paste-panel { left: 0; right: auto; }
+.invite-paste-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 12.5px;
+  padding: 5px 8px;
+  border: 1.6px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: var(--fg, inherit);
+}
+.invite-paste-detected { font-size: 12px; margin: 0; }
 .agenttokens { position: relative; }
 .agenttokens-btn { font-size: 13px; }
 .agenttokens-panel {

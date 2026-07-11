@@ -85,6 +85,18 @@ export function clearShareToken() {
   sessionStorage.removeItem(SHARE_TOKEN_KEY);
 }
 
+// 桌面版贴观看邀请链接（#297）：链接里的 ?t= 观看 token 不经地址栏，直接落进分享态。
+// 与网页 getToken() 命中 ?t= 的分支等价（都设 activeShareToken + sessionStorage），
+// 于是 isShareMode() 为真、ChannelPage 走只读——复用同一套 #186 观看机制。
+export function applyShareToken(token: string) {
+  activeShareToken = token;
+  try {
+    sessionStorage.setItem(SHARE_TOKEN_KEY, token);
+  } catch {
+    // 非浏览器测试环境无 sessionStorage；activeShareToken 已够驱动本次会话。
+  }
+}
+
 // 分享 token 失效时退回粘贴登录：把 ?t= 从地址栏摘掉，避免 getToken 继续命中坏 token
 export function dropUrlToken() {
   const url = new URL(window.location.href);
