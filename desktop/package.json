@@ -1,7 +1,7 @@
 {
   "name": "@agentparty/desktop",
   "license": "BUSL-1.1",
-  "version": "0.2.93",
+  "version": "0.2.94",
   "private": true,
   "type": "module",
   "scripts": {
