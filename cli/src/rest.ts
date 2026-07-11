@@ -195,7 +195,11 @@ const REQ_TIMEOUT_MS = 30_000;
 
 async function req(server: string, path: string, init: RequestInit = {}): Promise<unknown> {
   const signal = init.signal ?? AbortSignal.timeout(REQ_TIMEOUT_MS);
-  const res = await fetch(server.replace(/\/+$/, "") + path, { ...init, signal });
+  // 版本协商（#137）：每个 REST 调用都带上客户端版本，服务端据此做 min-version 护栏/建言。
+  // 用 Headers 合并，既保留调用方的 authorization/content-type，又不覆盖显式已设的版本头。
+  const headers = new Headers(init.headers);
+  if (!headers.has("x-ap-client-version")) headers.set("x-ap-client-version", pkg.version);
+  const res = await fetch(server.replace(/\/+$/, "") + path, { ...init, headers, signal });
   const raw = await res.text();
   let body: unknown = null;
   try {
@@ -228,6 +232,27 @@ export async function fetchPublicConfig(server: string): Promise<PublicConfig> {
   const clientId = body.cli_client_id ?? body.oidc?.client_id;
   if (!clientId) throw new Error("server did not advertise a cli client_id");
   return { issuer, clientId };
+}
+
+// 服务端版本协商信息（#137）：/api/version 暴露 version/commit + 声明的最低客户端版本 + 是否硬拒。
+export interface ServerVersion {
+  version: string;
+  commit: string;
+  deployed_at: string | null;
+  min_client_version: string;
+  min_client_enforced: boolean;
+}
+
+export async function fetchServerVersion(server: string): Promise<ServerVersion> {
+  const body = (await req(server, "/api/version")) as Partial<ServerVersion> | null;
+  return {
+    version: typeof body?.version === "string" ? body.version : "unknown",
+    commit: typeof body?.commit === "string" ? body.commit : "unknown",
+    deployed_at: typeof body?.deployed_at === "string" ? body.deployed_at : null,
+    // 老 worker 无 /api/version 时不会走到这（req 抛 404）；字段缺省则按最宽松处理，绝不误报过时。
+    min_client_version: typeof body?.min_client_version === "string" ? body.min_client_version : "0.0.0",
+    min_client_enforced: body?.min_client_enforced === true,
+  };
 }
 
 export interface Identity {

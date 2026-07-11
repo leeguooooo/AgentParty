@@ -78,6 +78,37 @@ export function upgradeNotice(auto: boolean, deps: UpgradeDeps = {}): CliUpgrade
   };
 }
 
+// 服务端声明的最低客户端版本（#137）高于本机运行版本时的升级提示——与磁盘自升级（cli_upgrade）
+// 互补：cli_upgrade 是「磁盘已有新版、re-exec 即可」，这条是「服务端要求更高、需真正去装新版」。
+// 形状对齐 CliUpgradeNotice（action_required=ask_user + command），runner 复用同一条询问用户的处理流。
+export interface ServerMinVersionNotice {
+  running_version: string;
+  min_client_version: string;
+  enforced: boolean;
+  action_required: "ask_user";
+  message: string;
+  command: string;
+}
+
+export function serverMinVersionNotice(
+  minClientVersion: string,
+  enforced: boolean,
+  deps: { runningVersion?: string } = {},
+): ServerMinVersionNotice | null {
+  const running = deps.runningVersion ?? RUNNING_VERSION;
+  if (compareVersions(running, minClientVersion) >= 0) return null;
+  return {
+    running_version: running,
+    min_client_version: minClientVersion,
+    enforced,
+    action_required: "ask_user",
+    message: enforced
+      ? `服务端要求 party CLI 最低 v${minClientVersion}，当前 v${running} 已被拒绝。请先运行升级命令再继续。`
+      : `服务端声明 party CLI 最低支持版本 v${minClientVersion}，当前 v${running} 偏旧（协议可能有破坏性变更）。继续任务前先询问用户是否升级。`,
+    command: INSTALL_LINE,
+  };
+}
+
 // re-exec 磁盘上的新二进制：spawn 同 argv、继承 stdio、detach，然后让调用方退出。
 // PID 会变——launchctl KeepAlive 天然重启；nohup 场景新进程接管（旧进程退出）。
 function defaultReexec(execPath: string, argv: string[]): void {
