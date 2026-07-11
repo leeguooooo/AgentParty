@@ -3698,6 +3698,10 @@ app.post("/api/channels/:slug/tasks", async (c) => {
     return c.json(errorBody("bad_request", "workflow_id must be printable text <= 128 chars"), 400);
   }
   const state = (requestedState ?? (assignee ? "assigned" : identity.kind === "agent" ? "triage" : "backlog")) as TaskState;
+  // #204 不变量：blocked_reason 只在 state=blocked 时有意义。非 blocked 一律落 null，
+  // 否则 blockers 派生会读到「未 blocked 却带 reason」的陈旧数据（门禁 P1）。服务端强制，
+  // 不信任客户端一致性。
+  const effectiveBlockedReason = state === "blocked" ? blockedReason : null;
   const now = Date.now();
   const result = await c.env.DB.prepare(
     `INSERT INTO channel_tasks (
@@ -3722,7 +3726,7 @@ app.post("/api/channels/:slug/tasks", async (c) => {
       JSON.stringify(anchorSeqs),
       workflowId,
       JSON.stringify(scope),
-      blockedReason,
+      effectiveBlockedReason,
       now,
       now,
       state === "done" ? now : null,
@@ -3800,6 +3804,9 @@ app.patch("/api/channels/:slug/tasks/:id", async (c) => {
   if (blockedReason === false) {
     return c.json(errorBody("bad_request", `blocked_reason must be null or a string <= ${TASK_BLOCKED_REASON_MAX} bytes`), 400);
   }
+  // #204 不变量：blocked_reason 只在 state=blocked 时保留。转出 blocked（→done/in_progress/…）
+  // 时清掉旧原因，否则 blockers 派生把已不再 blocked 的任务当阻塞（门禁 P1）。服务端强制。
+  const effectiveBlockedReason = state === "blocked" ? blockedReason : null;
 
   const nextAssigneeName =
     assignee === undefined ? existing.assignee_name : assignee === null ? null : assignee.name;
@@ -3813,7 +3820,7 @@ app.patch("/api/channels/:slug/tasks/:id", async (c) => {
             priority = ?, labels_json = ?, scope_json = ?, blocked_reason = ?, updated_at = ?, completed_at = ?
       WHERE channel_slug = ? AND id = ?`,
   )
-    .bind(title, desc, state, nextAssigneeName, nextAssigneeKind, priority, JSON.stringify(labels), JSON.stringify(scope), blockedReason, now, completedAt, slug, id)
+    .bind(title, desc, state, nextAssigneeName, nextAssigneeKind, priority, JSON.stringify(labels), JSON.stringify(scope), effectiveBlockedReason, now, completedAt, slug, id)
     .run();
   const row = await loadTaskRow(c.env.DB, slug, id);
   await insertSystemStatus(c.env, slug, `task #${id} ${state}`, statusStateForTask(state)).catch(() => false);

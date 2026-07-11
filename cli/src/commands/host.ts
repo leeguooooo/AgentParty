@@ -2,6 +2,8 @@
 import {
   buildHostBoard,
   type HostBoard,
+  type TaskRecord,
+  type TaskState,
 } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
@@ -9,6 +11,27 @@ import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { fetchMessages, fetchPresence, fetchRecentMessages, handleRestError, listTasks } from "../rest";
 import { isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
+
+// #204 P1：board 只由这 4 个活跃状态派生——open_claims 取 assigned/in_progress/needs_review，
+// blockers 取 blocked（见 buildHostBoard / OPEN_CLAIM_STATES）。done/triage/backlog 不进 board。
+const BOARD_TASK_STATES: readonly TaskState[] = ["assigned", "in_progress", "needs_review", "blocked"];
+const BOARD_TASK_PAGE = 500;
+
+// 原来 board 用一次 listTasks(limit:500) 拉「全部状态」，大量 done/backlog 会把活跃 task 挤出
+// 500 窗口 → board 静默漏报活跃 claim/blocker。改为按 board-相关状态分别拉：每个活跃状态集在
+// 实践中远小于 500。任一状态命中上限就把它计入 truncated，board 显性告警而不是静默漏（门禁 P1）。
+async function fetchBoardTasks(
+  server: string,
+  token: string,
+  channel: string,
+): Promise<{ tasks: TaskRecord[]; truncated: TaskState[] }> {
+  const pages = await Promise.all(
+    BOARD_TASK_STATES.map((state) => listTasks(server, token, channel, { state, limit: BOARD_TASK_PAGE })),
+  );
+  const tasks = pages.flat();
+  const truncated = BOARD_TASK_STATES.filter((_, i) => pages[i]!.length >= BOARD_TASK_PAGE);
+  return { tasks, truncated };
+}
 
 const HOST_FLAGS = ["channel", "since", "limit", "json"];
 const HELP = `usage: party host board [channel|--channel C] [--since seq] [--limit n] [--json]
@@ -165,7 +188,7 @@ export async function run(argv: string[]): Promise<number> {
     // flag 是否存在才决定走向——没给 --since 就取最近窗口（tail），否则频道超过 limit 条后
     // last_seq 永久冻结在头部、loop guard blocker 永远看不到最新发言（见频道公告 rev347）。
     const sinceGiven = flags.since !== undefined;
-    const [presence, messages, headProbe, tasks] = await Promise.all([
+    const [presence, messages, headProbe, boardTasks] = await Promise.all([
       fetchPresence(cfg.server, cfg.token, channel),
       sinceGiven
         ? fetchMessages(cfg.server, cfg.token, channel, since ?? 0, resolvedLimit)
@@ -173,13 +196,20 @@ export async function run(argv: string[]): Promise<number> {
       // 独立 tail 探针拿频道真实 head：取尾窗口本身推不出「后面还有没有更新」，取头窗口更推不出。
       fetchRecentMessages(cfg.server, cfg.token, channel, 1),
       // #204 open_claims / conflicts / blockers 改由任务台账派生，board 必须并行拉 tasks 一并喂进 buildHostBoard。
-      listTasks(cfg.server, cfg.token, channel, { limit: 500 }),
+      // 只拉 board-相关的活跃状态，无损覆盖（done/backlog 不进 board），见 fetchBoardTasks（门禁 P1）。
+      fetchBoardTasks(cfg.server, cfg.token, channel),
     ]);
     const head = headProbe.at(-1)?.seq ?? 0;
     const window = describeWindow(messages, head);
-    const board = buildHostBoard(channel, presence, messages, tasks);
-    if (flags.json === true) console.log(JSON.stringify(jsonFrame({ ...board, window } as unknown as Record<string, unknown>)));
-    else printBoard(board, window);
+    const board = buildHostBoard(channel, presence, messages, boardTasks.tasks);
+    if (flags.json === true) {
+      console.log(JSON.stringify(jsonFrame({ ...board, window, tasks_truncated: boardTasks.truncated } as unknown as Record<string, unknown>)));
+    } else {
+      printBoard(board, window);
+      if (boardTasks.truncated.length > 0) {
+        console.log(`⚠ board 可能不完整：状态 ${boardTasks.truncated.join("/")} 的任务超过 ${BOARD_TASK_PAGE} 条，未全部计入。`);
+      }
+    }
     return 0;
   } catch (e) {
     return handleRestError(e);

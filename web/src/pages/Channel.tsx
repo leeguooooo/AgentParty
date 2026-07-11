@@ -207,6 +207,13 @@ export interface GuardSettingsPanelProps {
   onWorkflowUnlimited(): void;
 }
 
+// #204 P1②：worker 更新 task 时广播的 system status note 形如 `task #12 in_progress`。
+// 任一客户端收到就刷新任务台账，否则 board 的 open_claims/conflicts/blockers 会长期陈旧
+// （本地 setTasks 只覆盖本客户端发起的更新）。抽成纯函数便于回归。
+export function isTaskLedgerStatusNote(note: string): boolean {
+  return /^task #\d+ /.test(note);
+}
+
 export function GuardSettingsPanel({
   canModerate,
   loopEnabled,
@@ -1900,6 +1907,16 @@ export function ChannelPage({
           ) {
             void loadCharter();
           }
+          // #204 P1②：任一客户端更新 task 会广播一条 `task #N <state>` system status。
+          // 收到就刷新台账，否则 board 的 open_claims/conflicts/blockers 会长期陈旧——本地
+          // setTasks 只覆盖本客户端发起的更新，看不到别人改的（门禁 P1）。
+          if (
+            (frame.type === "msg" || frame.type === "status") &&
+            frame.kind === "status" &&
+            isTaskLedgerStatusNote(frame.note ?? frame.body)
+          ) {
+            void loadTaskLedger();
+          }
           // 窗口下界防御（review P1 双保险）：低于已加载窗口的旧消息/旧修订不进窗口——
           // 插进去会把上翻分页的 before 起点拽到远古 seq，中段历史被永久跳过。
           // 上翻时 REST 本来就返回当前正文，丢掉这些帧无信息损失。
@@ -1975,7 +1992,7 @@ export function ChannelPage({
       sock.dispose();
       sockRef.current = null;
     };
-  }, [slug, token, shareMode, bootstrapped, loadCharter]);
+  }, [slug, token, shareMode, bootstrapped, loadCharter, loadTaskLedger]);
 
   useEffect(() => {
     const onPopState = () => setAgentFilter(parseAgentFilter(window.location.search));

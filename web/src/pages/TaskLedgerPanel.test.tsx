@@ -9,7 +9,22 @@ mock.module("dompurify", () => ({
   default: { addHook: () => {}, sanitize: (value: string) => value },
 }));
 
-const { TaskLedgerPanel } = await import("./Channel");
+const { TaskLedgerPanel, isTaskLedgerStatusNote } = await import("./Channel");
+
+// #204 P1②：判定哪些 system status 触发任务台账刷新（多客户端一致性）。
+describe("isTaskLedgerStatusNote (#204 P1②)", () => {
+  test("matches worker-broadcast task status notes", () => {
+    expect(isTaskLedgerStatusNote("task #12 in_progress")).toBe(true);
+    expect(isTaskLedgerStatusNote("task #3 blocked")).toBe(true);
+    expect(isTaskLedgerStatusNote("task #1 done")).toBe(true);
+  });
+  test("ignores non-task and lookalike notes (no false refetch)", () => {
+    expect(isTaskLedgerStatusNote("charter updated to rev 5")).toBe(false);
+    expect(isTaskLedgerStatusNote("worker-a working on task #5")).toBe(false); // 必须以 task # 开头
+    expect(isTaskLedgerStatusNote("task #x oops")).toBe(false); // 需数字 id
+    expect(isTaskLedgerStatusNote("task #12")).toBe(false); // 需 state 段（后随空格）
+  });
+});
 
 function memoryStorage(seed: Record<string, string> = {}): Storage {
   const values = new Map<string, string>(Object.entries(seed));
@@ -40,6 +55,8 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
     anchor_seqs: [],
     completion_artifact: null,
     workflow_id: null,
+    scope: [],
+    blocked_reason: null,
     created_at: 0,
     updated_at: 0,
     completed_at: null,
