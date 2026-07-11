@@ -24,6 +24,8 @@ const OFFICIAL_ARCHIVE_PREFIX: &str =
     "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/";
 const UI_DIRECTORY: &str = "ui";
 const METADATA_FILE: &str = "state.json";
+const BUILD_MANIFEST_FILE: &str = ".agentparty-ui-manifest.json";
+const BUILD_ARCHIVE_FILE: &str = ".agentparty-ui-archive.tar.gz";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -70,7 +72,7 @@ pub struct SignedUiManifest {
     signed_bytes: Vec<u8>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SignedUiManifestEnvelope {
     payload: String,
@@ -157,6 +159,8 @@ impl SignedUiManifest {
         validate_manifest(&self.manifest, shell_version, ui_abi, limits)?;
         Ok(VerifiedManifest {
             manifest: self.manifest.clone(),
+            signature: self.signature.clone(),
+            signed_bytes: self.signed_bytes.clone(),
         })
     }
 }
@@ -235,6 +239,8 @@ pub enum VerifyError {
 #[derive(Clone, Debug)]
 pub struct VerifiedManifest {
     manifest: UiManifest,
+    signature: String,
+    signed_bytes: Vec<u8>,
 }
 
 impl VerifiedManifest {
@@ -265,6 +271,8 @@ impl VerifiedManifest {
         }
         Ok(VerifiedUpdate {
             manifest: self.manifest.clone(),
+            signature: self.signature.clone(),
+            signed_bytes: self.signed_bytes.clone(),
         })
     }
 }
@@ -272,6 +280,8 @@ impl VerifiedManifest {
 #[derive(Clone, Debug)]
 pub struct VerifiedUpdate {
     manifest: UiManifest,
+    signature: String,
+    signed_bytes: Vec<u8>,
 }
 
 impl VerifiedUpdate {
@@ -281,6 +291,14 @@ impl VerifiedUpdate {
 
     pub fn ui_abi(&self) -> u32 {
         self.manifest.ui_abi
+    }
+
+    fn evidence_bytes(&self) -> Result<Vec<u8>, StoreError> {
+        serde_json::to_vec(&SignedUiManifestEnvelope {
+            payload: STANDARD.encode(&self.signed_bytes),
+            signature: self.signature.clone(),
+        })
+        .map_err(|_| StoreError::InvalidEvidence)
     }
 }
 
@@ -482,10 +500,12 @@ pub enum FailureReason {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct UiUpdateMetadata {
     pub current: Option<String>,
+    pub current_ui_abi: Option<u32>,
     pub previous: Option<String>,
+    pub previous_ui_abi: Option<u32>,
     pub pending: Option<String>,
     pub pending_ui_abi: Option<u32>,
     pub status: UpdateStatus,
@@ -499,7 +519,9 @@ impl Default for UiUpdateMetadata {
     fn default() -> Self {
         Self {
             current: None,
+            current_ui_abi: None,
             previous: None,
+            previous_ui_abi: None,
             pending: None,
             pending_ui_abi: None,
             status: UpdateStatus::Ready,
@@ -517,6 +539,58 @@ pub struct StagedUpdate {
     ui_abi: u32,
     published_at: i64,
     path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentUiBuild {
+    build_id: String,
+    ui_abi: u32,
+    root: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct VerifiedCurrentUiArchive {
+    build_id: String,
+    ui_abi: u32,
+    entrypoint: String,
+    file_count: usize,
+    bytes: Vec<u8>,
+}
+
+impl VerifiedCurrentUiArchive {
+    pub fn build_id(&self) -> &str {
+        &self.build_id
+    }
+
+    pub fn ui_abi(&self) -> u32 {
+        self.ui_abi
+    }
+
+    pub fn entrypoint(&self) -> &str {
+        &self.entrypoint
+    }
+
+    pub fn file_count(&self) -> usize {
+        self.file_count
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl CurrentUiBuild {
+    pub fn build_id(&self) -> &str {
+        &self.build_id
+    }
+
+    pub fn ui_abi(&self) -> u32 {
+        self.ui_abi
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -539,11 +613,76 @@ impl UiUpdateStore {
         self.root.join("builds").join(build_id)
     }
 
+    pub fn current_build(&self) -> Result<Option<CurrentUiBuild>, StoreError> {
+        let metadata = self.load_metadata()?;
+        let Some(build_id) = metadata.current else {
+            return Ok(None);
+        };
+        let ui_abi = metadata.current_ui_abi.ok_or(StoreError::CorruptMetadata)?;
+        let root = self.release_path(&build_id);
+        if !root.is_dir() {
+            return Err(StoreError::MissingCurrentBuild);
+        }
+        Ok(Some(CurrentUiBuild {
+            build_id,
+            ui_abi,
+            root,
+        }))
+    }
+
+    pub fn verified_current_archive<V: SignatureVerifier>(
+        &self,
+        shell_version: &str,
+        ui_abi: u32,
+        verifier: &V,
+        limits: &UpdateLimits,
+    ) -> Result<Option<VerifiedCurrentUiArchive>, StoreError> {
+        let Some(current) = self.current_build()? else {
+            return Ok(None);
+        };
+        let evidence = read_regular_file_bounded(
+            &current.root.join(BUILD_MANIFEST_FILE),
+            MAX_MANIFEST_ENVELOPE_BYTES as u64,
+        )?;
+        let signed = SignedUiManifest::parse_envelope_json(&evidence)
+            .map_err(|_| StoreError::InvalidEvidence)?;
+        let verified = signed
+            .verify_for_core_with_limits(shell_version, ui_abi, verifier, limits)
+            .map_err(|_| StoreError::InvalidEvidence)?;
+        if verified.build_id() != current.build_id || verified.manifest.ui_abi != current.ui_abi {
+            return Err(StoreError::InvalidEvidence);
+        }
+        let bytes = read_regular_file_bounded(
+            &current.root.join(BUILD_ARCHIVE_FILE),
+            limits.max_download_bytes,
+        )?;
+        verified
+            .verify_archive(&bytes, verifier)
+            .map_err(|_| StoreError::InvalidEvidence)?;
+        Ok(Some(VerifiedCurrentUiArchive {
+            build_id: current.build_id,
+            ui_abi: current.ui_abi,
+            entrypoint: verified.manifest.entrypoint.clone(),
+            file_count: verified.manifest.archive.file_count,
+            bytes,
+        }))
+    }
+
     pub fn load_metadata(&self) -> Result<UiUpdateMetadata, StoreError> {
         match fs::read(self.metadata_path()) {
             Ok(bytes) => {
-                let metadata: UiUpdateMetadata =
+                let mut metadata: UiUpdateMetadata =
                     serde_json::from_slice(&bytes).map_err(|_| StoreError::CorruptMetadata)?;
+                if metadata.current_ui_abi.is_none() && metadata.current.is_some() {
+                    metadata.current_ui_abi = if metadata.status == UpdateStatus::Pending {
+                        metadata.pending_ui_abi
+                    } else {
+                        Some(SUPPORTED_UI_ABI)
+                    };
+                }
+                if metadata.previous_ui_abi.is_none() && metadata.previous.is_some() {
+                    metadata.previous_ui_abi = Some(SUPPORTED_UI_ABI);
+                }
                 validate_metadata(&metadata)?;
                 Ok(metadata)
             }
@@ -563,8 +702,24 @@ impl UiUpdateStore {
         let staging = self.root.join("staging");
         fs::create_dir_all(&staging).map_err(|_| StoreError::Io)?;
         let final_path = staging.join(update.build_id());
-        if final_path.exists() || self.release_path(update.build_id()).exists() {
+        if final_path.exists() {
             return Err(StoreError::AlreadyExists);
+        }
+        let release_path = self.release_path(update.build_id());
+        if release_path.exists() {
+            let metadata = self.load_metadata()?;
+            let referenced = [
+                metadata.current.as_deref(),
+                metadata.previous.as_deref(),
+                metadata.pending.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|build_id| build_id == update.build_id());
+            if referenced {
+                return Err(StoreError::AlreadyExists);
+            }
+            fs::remove_dir_all(&release_path).map_err(|_| StoreError::Io)?;
         }
         let temporary = staging.join(temp_name(update.build_id(), "tmp"));
         let result = (|| {
@@ -575,6 +730,13 @@ impl UiUpdateStore {
             if !entrypoint.is_file() {
                 return Err(StoreError::MissingEntrypoint);
             }
+            let evidence_path = temporary.join(BUILD_MANIFEST_FILE);
+            let archive_path = temporary.join(BUILD_ARCHIVE_FILE);
+            if evidence_path.exists() || archive_path.exists() {
+                return Err(StoreError::InvalidEvidence);
+            }
+            write_new_file(&evidence_path, &update.evidence_bytes()?)?;
+            write_new_file(&archive_path, bytes)?;
             fs::rename(&temporary, &final_path).map_err(|_| StoreError::Io)?;
             sync_directory(&staging).map_err(|_| StoreError::Io)?;
             Ok(StagedUpdate {
@@ -617,7 +779,9 @@ impl UiUpdateStore {
         sync_directory(&builds).map_err(|_| StoreError::Io)?;
 
         metadata.previous = metadata.current.take();
+        metadata.previous_ui_abi = metadata.current_ui_abi.take();
         metadata.current = Some(staged.build_id.clone());
+        metadata.current_ui_abi = Some(staged.ui_abi);
         metadata.pending = Some(staged.build_id.clone());
         metadata.pending_ui_abi = Some(staged.ui_abi);
         metadata.status = UpdateStatus::Pending;
@@ -630,7 +794,21 @@ impl UiUpdateStore {
                     highest.max(staged.published_at)
                 }),
         );
-        self.write_metadata(&metadata)
+        if let Err(error) = self.write_metadata(&metadata) {
+            if self.load_metadata().is_ok_and(|stored| {
+                stored.status == UpdateStatus::Pending
+                    && stored.current.as_deref() == Some(staged.build_id.as_str())
+                    && stored.pending.as_deref() == Some(staged.build_id.as_str())
+            }) {
+                return Ok(());
+            }
+            if !staged.path.exists() && release.is_dir() {
+                let _ = fs::rename(&release, &staged.path);
+                let _ = sync_directory(&builds);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn mark_ready(&self, build_id: &str, ui_abi: u32) -> Result<(), StoreError> {
@@ -644,6 +822,7 @@ impl UiUpdateStore {
         }
         metadata.pending = None;
         metadata.pending_ui_abi = None;
+        metadata.current_ui_abi = Some(ui_abi);
         metadata.status = UpdateStatus::Ready;
         metadata.failed = None;
         metadata.failure = None;
@@ -667,6 +846,28 @@ impl UiUpdateStore {
         metadata.failure = Some(reason);
         metadata.failure_count = metadata.failure_count.saturating_add(1);
         metadata.current = metadata.previous.take();
+        metadata.current_ui_abi = metadata.previous_ui_abi.take();
+        metadata.pending = None;
+        metadata.pending_ui_abi = None;
+        metadata.status = UpdateStatus::Failed;
+        self.write_metadata(&metadata)
+    }
+
+    pub fn quarantine_current(
+        &self,
+        build_id: &str,
+        reason: FailureReason,
+    ) -> Result<(), StoreError> {
+        let mut metadata = self.load_metadata()?;
+        if metadata.status == UpdateStatus::Pending || metadata.current.as_deref() != Some(build_id)
+        {
+            return Err(StoreError::InvalidTransition);
+        }
+        metadata.failed = Some(build_id.to_string());
+        metadata.failure = Some(reason);
+        metadata.failure_count = metadata.failure_count.saturating_add(1);
+        metadata.current = metadata.previous.take();
+        metadata.current_ui_abi = metadata.previous_ui_abi.take();
         metadata.pending = None;
         metadata.pending_ui_abi = None;
         metadata.status = UpdateStatus::Failed;
@@ -720,6 +921,7 @@ fn validate_metadata(metadata: &UiUpdateMetadata) -> Result<(), StoreError> {
             metadata.pending.is_some()
                 && metadata.pending == metadata.current
                 && metadata.pending_ui_abi.is_some()
+                && metadata.pending_ui_abi == metadata.current_ui_abi
                 && metadata.failure.is_none()
         }
         UpdateStatus::Failed => {
@@ -728,7 +930,8 @@ fn validate_metadata(metadata: &UiUpdateMetadata) -> Result<(), StoreError> {
                 && metadata.failed.is_some()
                 && metadata.failure.is_some()
         }
-    };
+    } && (metadata.current.is_some() == metadata.current_ui_abi.is_some())
+        && (metadata.previous.is_some() == metadata.previous_ui_abi.is_some());
     if !valid_state {
         return Err(StoreError::CorruptMetadata);
     }
@@ -738,6 +941,37 @@ fn validate_metadata(metadata: &UiUpdateMetadata) -> Result<(), StoreError> {
 fn temp_name(stem: &str, suffix: &str) -> String {
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!(".{stem}.{}.{sequence}.{suffix}", std::process::id())
+}
+
+fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| StoreError::InvalidEvidence)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(StoreError::InvalidEvidence);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    fs::File::open(path)
+        .and_then(|file| {
+            file.take(max_bytes.saturating_add(1))
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|_| StoreError::InvalidEvidence)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(StoreError::InvalidEvidence);
+    }
+    Ok(bytes)
+}
+
+fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|_| StoreError::Io)?;
+    file.write_all(bytes).map_err(|_| StoreError::Io)?;
+    file.sync_all().map_err(|_| StoreError::Io)
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -835,12 +1069,14 @@ error_enum!(ExtractError {
 error_enum!(StoreError {
     Io,
     CorruptMetadata,
+    MissingCurrentBuild,
     Extraction,
     MissingEntrypoint,
     AlreadyExists,
     InvalidStaging,
     InvalidTransition,
     RollbackRejected,
+    InvalidEvidence,
 });
 
 #[cfg(test)]
@@ -1321,6 +1557,184 @@ mod tests {
     }
 
     #[test]
+    fn migrates_legacy_metadata_when_optional_state_fields_are_missing() {
+        let app_data = tempdir().unwrap();
+        let store = UiUpdateStore::new(app_data.path());
+        std::fs::create_dir_all(store.metadata_path().parent().unwrap()).unwrap();
+        std::fs::write(
+            store.metadata_path(),
+            r#"{"current":"933a665e06f3b3dcb1d45f9cccbad0be83581637","status":"ready"}"#,
+        )
+        .unwrap();
+
+        let metadata = store.load_metadata().unwrap();
+        assert_eq!(
+            metadata.current.as_deref(),
+            Some("933a665e06f3b3dcb1d45f9cccbad0be83581637")
+        );
+        assert_eq!(metadata.current_ui_abi, Some(SUPPORTED_UI_ABI));
+        assert_eq!(metadata.previous, None);
+        assert_eq!(metadata.failure_count, 0);
+    }
+
+    #[test]
+    fn ready_metadata_persists_the_current_ui_abi() {
+        let app_data = tempdir().unwrap();
+        let store = UiUpdateStore::new(app_data.path());
+        let verifier = RecordingVerifier::default();
+        let bundle = archive(&[("index.html", b"ok", None), ("assets/app.js", b"js", None)]);
+        let update = signed_manifest(&bundle)
+            .verify_for_core("0.2.94", SUPPORTED_UI_ABI, &verifier)
+            .unwrap()
+            .verify_archive(&bundle, &verifier)
+            .unwrap();
+        let staged = store
+            .stage(&update, &bundle, &UpdateLimits::default())
+            .unwrap();
+
+        store.activate(&staged).unwrap();
+        let pending = store.load_metadata().unwrap();
+        assert_eq!(pending.current_ui_abi, Some(SUPPORTED_UI_ABI));
+        assert_eq!(pending.pending_ui_abi, pending.current_ui_abi);
+        store
+            .mark_ready(update.build_id(), SUPPORTED_UI_ABI)
+            .unwrap();
+
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.metadata_path()).unwrap()).unwrap();
+        assert_eq!(
+            persisted.get("currentUiAbi"),
+            Some(&serde_json::json!(SUPPORTED_UI_ABI))
+        );
+    }
+
+    #[test]
+    fn exposes_only_the_current_serviceable_build_identity_and_root() {
+        let app_data = tempdir().unwrap();
+        let store = UiUpdateStore::new(app_data.path());
+        let verifier = RecordingVerifier::default();
+        let bundle = archive(&[("index.html", b"ok", None), ("assets/app.js", b"js", None)]);
+        let update = signed_manifest(&bundle)
+            .verify_for_core("0.2.94", SUPPORTED_UI_ABI, &verifier)
+            .unwrap()
+            .verify_archive(&bundle, &verifier)
+            .unwrap();
+
+        assert!(store.current_build().unwrap().is_none());
+        let staged = store
+            .stage(&update, &bundle, &UpdateLimits::default())
+            .unwrap();
+        store.activate(&staged).unwrap();
+
+        let pending = store.current_build().unwrap().unwrap();
+        assert_eq!(pending.build_id(), update.build_id());
+        assert_eq!(pending.ui_abi(), SUPPORTED_UI_ABI);
+        assert_eq!(pending.root(), store.release_path(update.build_id()));
+
+        store
+            .mark_ready(update.build_id(), SUPPORTED_UI_ABI)
+            .unwrap();
+        let ready = store.current_build().unwrap().unwrap();
+        assert_eq!(ready.build_id(), pending.build_id());
+        assert_eq!(ready.ui_abi(), pending.ui_abi());
+        assert_eq!(ready.root(), pending.root());
+    }
+
+    #[test]
+    fn revalidates_signed_evidence_before_reusing_a_cached_build() {
+        let app_data = tempdir().unwrap();
+        let store = UiUpdateStore::new(app_data.path());
+        let verifier = RecordingVerifier::default();
+        let limits = UpdateLimits::default();
+        let bundle = archive(&[
+            ("index.html", b"signed", None),
+            ("assets/app.js", b"js", None),
+        ]);
+        let update = signed_manifest(&bundle)
+            .verify_for_core("0.2.94", SUPPORTED_UI_ABI, &verifier)
+            .unwrap()
+            .verify_archive(&bundle, &verifier)
+            .unwrap();
+        let staged = store.stage(&update, &bundle, &limits).unwrap();
+        store.activate(&staged).unwrap();
+        store
+            .mark_ready(update.build_id(), SUPPORTED_UI_ABI)
+            .unwrap();
+
+        std::fs::write(
+            store.release_path(update.build_id()).join("index.html"),
+            b"tampered extracted file",
+        )
+        .unwrap();
+        let verified = store
+            .verified_current_archive("0.2.94", SUPPORTED_UI_ABI, &verifier, &limits)
+            .unwrap()
+            .unwrap();
+        assert_eq!(verified.bytes(), bundle);
+        assert_eq!(
+            store
+                .verified_current_archive(
+                    "0.2.94",
+                    SUPPORTED_UI_ABI,
+                    &RecordingVerifier {
+                        reject: true,
+                        ..Default::default()
+                    },
+                    &limits,
+                )
+                .unwrap_err(),
+            StoreError::InvalidEvidence
+        );
+
+        std::fs::write(
+            store
+                .release_path(update.build_id())
+                .join(BUILD_ARCHIVE_FILE),
+            b"tampered archive",
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .verified_current_archive("0.2.94", SUPPORTED_UI_ABI, &verifier, &limits)
+                .unwrap_err(),
+            StoreError::InvalidEvidence
+        );
+        store
+            .quarantine_current(update.build_id(), FailureReason::LoadFailed)
+            .unwrap();
+        let quarantined = store.load_metadata().unwrap();
+        assert_eq!(quarantined.current, None);
+        assert_eq!(quarantined.failed.as_deref(), Some(update.build_id()));
+        assert!(store.stage(&update, &bundle, &limits).is_ok());
+    }
+
+    #[test]
+    fn retries_a_build_left_orphaned_between_release_move_and_metadata_commit() {
+        let app_data = tempdir().unwrap();
+        let store = UiUpdateStore::new(app_data.path());
+        let verifier = RecordingVerifier::default();
+        let bundle = archive(&[
+            ("index.html", b"retry", None),
+            ("assets/app.js", b"js", None),
+        ]);
+        let update = signed_manifest(&bundle)
+            .verify_for_core("0.2.94", SUPPORTED_UI_ABI, &verifier)
+            .unwrap()
+            .verify_archive(&bundle, &verifier)
+            .unwrap();
+        let orphan = store.release_path(update.build_id());
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("partial"), b"crash residue").unwrap();
+
+        let staged = store
+            .stage(&update, &bundle, &UpdateLimits::default())
+            .unwrap();
+
+        assert!(staged.path.join("index.html").is_file());
+        assert!(!orphan.exists());
+    }
+
+    #[test]
     fn stages_activates_marks_ready_and_rolls_back_failed_updates() {
         let app_data = tempdir().unwrap();
         let store = UiUpdateStore::new(app_data.path());
@@ -1403,6 +1817,7 @@ mod tests {
             Some("933a665e06f3b3dcb1d45f9cccbad0be83581637")
         );
         assert_eq!(failed.previous, None);
+        assert_eq!(failed.current_ui_abi, Some(SUPPORTED_UI_ABI));
         assert_eq!(failed.status, UpdateStatus::Failed);
         assert_eq!(
             failed.failed.as_deref(),

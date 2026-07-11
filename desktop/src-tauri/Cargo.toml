@@ -29,6 +29,9 @@ tar = "0.4"
 time = { version = "0.3", features = ["parsing"] }
 url = "2"
 tokio = { version = "1", features = ["time"] }
+minisign-verify = "0.2.5"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"
@@ -42,5 +45,4 @@ keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sy
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-minisign-verify = "0.2.5"
 tempfile = "3"

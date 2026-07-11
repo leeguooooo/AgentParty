@@ -2,13 +2,26 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::Path,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
+
+#[cfg(desktop)]
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod agent;
+#[cfg(desktop)]
+mod ui_download;
+#[cfg(desktop)]
+mod ui_protocol;
+#[cfg(desktop)]
+mod ui_storage;
 pub mod ui_update;
 
 #[cfg(desktop)]
@@ -25,6 +38,19 @@ const CREDENTIAL_SERVICE: &str = "com.agentparty.desktop";
 const CREDENTIAL_ACCOUNT: &str = "desktop-session";
 const UPDATER_DIAGNOSTIC_FILE: &str = "updater-diagnostic.json";
 static UPDATER_DIAGNOSTIC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(desktop, windows))]
+const UI_PROTOCOL_URL: &str = "http://agentparty-ui.localhost/";
+#[cfg(all(desktop, not(windows)))]
+const UI_PROTOCOL_URL: &str = "agentparty-ui://localhost/";
+#[cfg(all(desktop, windows))]
+const BUNDLED_UI_URL: &str = "http://tauri.localhost/";
+#[cfg(all(desktop, not(windows)))]
+const BUNDLED_UI_URL: &str = "tauri://localhost/";
+#[cfg(desktop)]
+const UI_READY_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(desktop)]
+const UI_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -360,6 +386,251 @@ impl ExitGuard {
 }
 
 #[cfg(desktop)]
+struct UiRuntimeManager {
+    started: AtomicBool,
+    checking: Arc<AtomicBool>,
+    operation: Arc<Mutex<()>>,
+    protocol_cache: Mutex<ui_protocol::UiProtocolCache>,
+}
+
+#[cfg(desktop)]
+impl Default for UiRuntimeManager {
+    fn default() -> Self {
+        Self {
+            started: AtomicBool::new(false),
+            checking: Arc::new(AtomicBool::new(false)),
+            operation: Arc::new(Mutex::new(())),
+            protocol_cache: Mutex::new(ui_protocol::UiProtocolCache::default()),
+        }
+    }
+}
+
+#[cfg(desktop)]
+fn app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|_| "desktop UI data directory is unavailable".to_string())
+}
+
+#[cfg(desktop)]
+fn configured_ui_verifier() -> Result<ui_download::MinisignVerifier, String> {
+    let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+        .map_err(|_| "desktop UI updater configuration is invalid".to_string())?;
+    let encoded = config["plugins"]["updater"]["pubkey"]
+        .as_str()
+        .ok_or_else(|| "desktop UI updater public key is unavailable".to_string())?;
+    ui_download::MinisignVerifier::from_updater_pubkey_base64(encoded)
+        .map_err(|_| "desktop UI updater public key is invalid".to_string())
+}
+
+#[cfg(desktop)]
+fn navigate_main_to(app: &tauri::AppHandle, url: &'static str) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window("main") else {
+            return;
+        };
+        let Ok(target) = tauri::Url::parse(url) else {
+            return;
+        };
+        if window.url().is_ok_and(|current| current == target) {
+            return;
+        }
+        let _ = window.navigate(target);
+    });
+}
+
+#[cfg(desktop)]
+fn navigate_to_available_ui(app: &tauri::AppHandle, store: &ui_update::UiUpdateStore) {
+    let shell_version = app.package_info().version.to_string();
+    let verifier = configured_ui_verifier().ok();
+    let is_verified = |store: &ui_update::UiUpdateStore| {
+        verifier.as_ref().is_some_and(|verifier| {
+            store
+                .verified_current_archive(
+                    &shell_version,
+                    ui_update::SUPPORTED_UI_ABI,
+                    verifier,
+                    &ui_update::UpdateLimits::default(),
+                )
+                .is_ok_and(|archive| archive.is_some())
+        })
+    };
+    let mut verified = is_verified(store);
+    if !verified {
+        if let Ok(metadata) = store.load_metadata() {
+            if let Some(build_id) = metadata.current {
+                if metadata.status == ui_update::UpdateStatus::Pending {
+                    let _ =
+                        store.fail_and_rollback(&build_id, ui_update::FailureReason::LoadFailed);
+                } else {
+                    let _ =
+                        store.quarantine_current(&build_id, ui_update::FailureReason::LoadFailed);
+                }
+            }
+        }
+        verified = is_verified(store);
+    }
+    let target = if verified {
+        UI_PROTOCOL_URL
+    } else {
+        BUNDLED_UI_URL
+    };
+    navigate_main_to(app, target);
+}
+
+#[cfg(desktop)]
+fn recover_stale_pending(store: &ui_update::UiUpdateStore) {
+    let Ok(metadata) = store.load_metadata() else {
+        return;
+    };
+    if metadata.status != ui_update::UpdateStatus::Pending {
+        return;
+    }
+    if let Some(build_id) = metadata.pending {
+        let _ = store.fail_and_rollback(&build_id, ui_update::FailureReason::BootFailed);
+    }
+}
+
+#[cfg(desktop)]
+fn start_ui_ready_watchdog(app: tauri::AppHandle, build_id: String) {
+    let operation = app.state::<UiRuntimeManager>().operation.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(UI_READY_TIMEOUT);
+        let Ok(_guard) = operation.lock() else {
+            return;
+        };
+        let Ok(app_data) = app_data_dir(&app) else {
+            return;
+        };
+        let store = ui_update::UiUpdateStore::new(app_data);
+        let Ok(metadata) = store.load_metadata() else {
+            return;
+        };
+        if metadata.status == ui_update::UpdateStatus::Pending
+            && metadata.pending.as_deref() == Some(build_id.as_str())
+            && store
+                .fail_and_rollback(&build_id, ui_update::FailureReason::ReadyTimeout)
+                .is_ok()
+        {
+            navigate_to_available_ui(&app, &store);
+        }
+    });
+}
+
+#[cfg(desktop)]
+fn perform_ui_check(app: &tauri::AppHandle) {
+    let manager = app.state::<UiRuntimeManager>();
+    if manager.checking.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let checking = manager.checking.clone();
+    let operation = manager.operation.clone();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let result: Result<(), ()> = (|| {
+            let _guard = operation.lock().map_err(|_| ())?;
+            let app_data = app_data_dir(&app).map_err(|_| ())?;
+            let store = ui_update::UiUpdateStore::new(app_data);
+            if store
+                .load_metadata()
+                .is_ok_and(|metadata| metadata.status == ui_update::UpdateStatus::Pending)
+            {
+                return Ok(());
+            }
+            let current = store.current_build().ok().flatten();
+            let current_build_id = current.as_ref().map(|build| build.build_id().to_string());
+            let client = ui_download::OfficialHttpClient::new().map_err(|_| ())?;
+            let verifier = configured_ui_verifier().map_err(|_| ())?;
+            let shell_version = app.package_info().version.to_string();
+            match ui_download::download_and_activate(
+                &client,
+                &verifier,
+                &store,
+                current_build_id.as_deref(),
+                &shell_version,
+                ui_update::SUPPORTED_UI_ABI,
+                &ui_update::UpdateLimits::default(),
+            ) {
+                Ok(ui_download::DownloadOutcome::Activated { build_id, .. }) => {
+                    navigate_main_to(&app, UI_PROTOCOL_URL);
+                    start_ui_ready_watchdog(app.clone(), build_id);
+                }
+                Ok(ui_download::DownloadOutcome::NoUpdate) | Err(_) => {
+                    if current.is_some() {
+                        navigate_main_to(&app, UI_PROTOCOL_URL);
+                    }
+                }
+            }
+            Ok(())
+        })();
+        let _ = result;
+        checking.store(false, Ordering::Release);
+    });
+}
+
+#[cfg(desktop)]
+fn ensure_ui_runtime_started(app: &tauri::AppHandle) {
+    let manager = app.state::<UiRuntimeManager>();
+    if manager.started.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let operation = manager.operation.clone();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Ok(_guard) = operation.lock() {
+            if let Ok(app_data) = app_data_dir(&app) {
+                let store = ui_update::UiUpdateStore::new(app_data);
+                recover_stale_pending(&store);
+                navigate_to_available_ui(&app, &store);
+            }
+        }
+        perform_ui_check(&app);
+        loop {
+            std::thread::sleep(UI_CHECK_INTERVAL);
+            perform_ui_check(&app);
+        }
+    });
+}
+
+#[cfg(desktop)]
+fn serve_ui_protocol(app: &tauri::AppHandle, path: &str) -> tauri::http::Response<Vec<u8>> {
+    let Ok(app_data) = app_data_dir(app) else {
+        return tauri::http::Response::builder()
+            .status(500)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body(b"Internal Server Error".to_vec())
+            .expect("static desktop UI error response must be valid");
+    };
+    let Ok(verifier) = configured_ui_verifier() else {
+        return tauri::http::Response::builder()
+            .status(500)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body(b"Internal Server Error".to_vec())
+            .expect("static desktop UI error response must be valid");
+    };
+    let protocol = ui_protocol::serve_verified(
+        &app.state::<UiRuntimeManager>().protocol_cache,
+        &ui_update::UiUpdateStore::new(app_data),
+        &app.package_info().version.to_string(),
+        ui_update::SUPPORTED_UI_ABI,
+        &verifier,
+        path,
+    );
+    let (status, headers, body) = protocol.into_parts();
+    let mut response = tauri::http::Response::builder().status(status);
+    for (name, value) in headers {
+        response = response.header(name, value);
+    }
+    response.body(body).unwrap_or_else(|_| {
+        tauri::http::Response::builder()
+            .status(500)
+            .body(b"Internal Server Error".to_vec())
+            .expect("fixed desktop UI error response is valid")
+    })
+}
+
+#[cfg(desktop)]
 fn show_main(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -371,6 +642,10 @@ fn show_main(app: &tauri::AppHandle) {
 #[cfg(desktop)]
 #[tauri::command]
 fn desktop_ui_ready(app: tauri::AppHandle, build_id: String, ui_abi: u32) -> Result<(), String> {
+    let operation = app.state::<UiRuntimeManager>().operation.clone();
+    let _guard = operation
+        .lock()
+        .map_err(|_| "desktop UI state is unavailable".to_string())?;
     let app_data = app
         .path()
         .app_data_dir()
@@ -378,6 +653,31 @@ fn desktop_ui_ready(app: tauri::AppHandle, build_id: String, ui_abi: u32) -> Res
     ui_update::UiUpdateStore::new(app_data)
         .mark_ready(&build_id, ui_abi)
         .map_err(|_| "desktop UI ready receipt was rejected".to_string())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_ui_storage_restore(app: tauri::AppHandle) -> Result<BTreeMap<String, String>, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "desktop UI data directory is unavailable".to_string())?;
+    ui_storage::read_snapshot(&app_data)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_ui_storage_snapshot(
+    app: tauri::AppHandle,
+    entries: BTreeMap<String, String>,
+) -> Result<(), String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "desktop UI data directory is unavailable".to_string())?;
+    ui_storage::write_snapshot(&app_data, &entries)?;
+    ensure_ui_runtime_started(&app);
+    Ok(())
 }
 
 #[cfg(desktop)]
@@ -401,6 +701,7 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
             Some(TrayAction::Show) => show_main(app),
             Some(TrayAction::CheckUpdates) => {
                 show_main(app);
+                perform_ui_check(app);
                 let _ = app.emit("agentparty://check-for-updates", ());
             }
             Some(TrayAction::Quit) => {
@@ -434,7 +735,12 @@ pub fn run() {
     let builder = tauri::Builder::default().manage(ExitGuard::default());
 
     #[cfg(desktop)]
-    let builder = builder.manage(agent::AgentManager::default());
+    let builder = builder
+        .manage(agent::AgentManager::default())
+        .manage(UiRuntimeManager::default())
+        .register_uri_scheme_protocol("agentparty-ui", |context, request| {
+            serve_ui_protocol(context.app_handle(), request.uri().path())
+        });
 
     #[cfg(desktop)]
     let builder = builder
@@ -458,6 +764,8 @@ pub fn run() {
             desktop_credential_migrate,
             desktop_updater_record_diagnostic,
             desktop_ui_ready,
+            desktop_ui_storage_restore,
+            desktop_ui_storage_snapshot,
             agent::desktop_agent_list_configs,
             agent::desktop_agent_status,
             agent::desktop_agent_start,
@@ -479,6 +787,15 @@ pub fn run() {
                 app.deep_link().register_all()?;
                 if !std::env::args().any(|arg| arg == "--hidden") {
                     show_main(app.handle());
+                }
+                let handle = app.handle().clone();
+                if app_data_dir(&handle).is_ok_and(|path| ui_storage::snapshot_exists(&path)) {
+                    ensure_ui_runtime_started(&handle);
+                } else {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(5));
+                        ensure_ui_runtime_started(&handle);
+                    });
                 }
             }
             Ok(())
