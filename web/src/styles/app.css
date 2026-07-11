@@ -4136,17 +4136,32 @@
     width: calc(100vw - 16px) !important;
     max-height: 58vh;
   }
+  /* 工具条：窄屏收成单行横向滚动带（与 .side 频道条同样的处理），把纵向空间还给消息流。
+     原先三组按钮各占满整行、内部再换行，会堆成 5-6 行（实测约 232px），把消息流挤到只剩一条缝。
+     横滚容器会裁掉纵向溢出，故其中只保留“点开是全屏遮罩 / 内联横幅”的按钮；
+     两个真正锚在按钮上的绝对定位下拉（邀请链接 / 我的 agent）在窄屏改成贴底 sheet，避免被裁掉。 */
   .chan-toolstrip {
-    flex-wrap: wrap;
-    gap: 7px;
-    padding: 0 2px 1px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    gap: 8px;
+    padding: 0 2px 5px;
   }
+  .chan-toolstrip::-webkit-scrollbar { height: 6px; }
+  .chan-toolstrip::-webkit-scrollbar-thumb { border-width: 1px; }
   .chan-tool-buttons,
   .chan-tool-actions,
   .chan-admin-actions {
-    flex: 1 1 100%;
-    flex-wrap: wrap;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
     gap: 7px;
+  }
+  .chan-tool-buttons > *,
+  .chan-tool-actions > *,
+  .chan-admin-actions > * {
+    flex: 0 0 auto;
   }
   .chan-tool-actions,
   .chan-admin-actions {
@@ -4155,9 +4170,23 @@
   }
   .chan-tool-btn {
     white-space: nowrap;
-    min-height: 32px;
-    padding: 4px 9px;
+    min-height: 36px;
+    padding: 5px 9px;
     font-size: 12.5px;
+  }
+  /* 横滚带会裁掉锚在按钮上的绝对定位下拉，这俩改成贴底 sheet（触屏上也更好按）。 */
+  .joinlink-panel,
+  .agenttokens-panel {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    top: auto;
+    bottom: 8px;
+    width: auto;
+    max-width: none;
+    max-height: 64vh;
+    overflow-y: auto;
+    z-index: 60;
   }
   .agent-join {
     flex: none;
