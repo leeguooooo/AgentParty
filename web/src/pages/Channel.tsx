@@ -13,6 +13,7 @@ import { MessageCard } from "../components/MessageCard";
 import { MentionToast, type MentionToastItem } from "../components/MentionToast";
 import { NotifyToggle, readNotifyOptin } from "../components/NotifyToggle";
 import { PresenceBar } from "../components/PresenceBar";
+import { OrgTreePreview } from "../components/OrgTreePreview";
 import {
   archiveChannel,
   AuthError,
@@ -54,6 +55,7 @@ import { mentionCandidates, mentionLiveness, parseDraftMentions, type DraftMenti
 import { buildReceipts, type MentionReceipt } from "../lib/wakeReceipt";
 import { completionMessages } from "../lib/completions";
 import { catchupKey, summarizeCatchup, type CatchupDigest } from "../lib/digest";
+import { buildOrgTree, type OrgMemberInput } from "../lib/orgTree";
 import { formatDivisionSection, mergeDivisionIntoCharter, type DivisionCharterRole } from "../lib/divisionCharter";
 import {
   isDesktopRuntime,
@@ -578,6 +580,18 @@ export function DivisionBoard({
     ...view,
     reportsTo: presence[view.name]?.lineage?.parent_agent ?? null,
   }));
+  // issue #281：把同一份 roleViews（assigned/self/unassigned + reportsTo）喂给 buildOrgTree，
+  // 折成一棵可整体预览的频道组织/汇报树——纯函数在 lib/orgTree.ts，环/孤儿处理都在那里。
+  const orgMembers: OrgMemberInput[] = roleViewsWithReports.map((view) => ({
+    name: view.name,
+    display: view.display,
+    role: view.role?.role ?? null,
+    reportsTo: view.reportsTo,
+    kind: view.kind,
+    accountLabel: view.accountLabel,
+    source: view.source,
+  }));
+  const orgTree = buildOrgTree(orgMembers);
   const groups: Array<{ accountLabel: string; roles: typeof roleViewsWithReports }> = [];
   for (const view of roleViewsWithReports) {
     const current = groups.at(-1);
@@ -666,6 +680,7 @@ export function DivisionBoard({
             </div>
           )}
         </div>
+        <OrgTreePreview tree={orgTree} t={t} />
         {groups.length > 0 ? (
           <div className="role-account-list">
             {groups.map((group) => (

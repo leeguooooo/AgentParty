@@ -920,6 +920,116 @@
   font-style: italic;
 }
 
+/* issue #281：频道组织架构/汇报关系树预览——把逐行的汇报标注折成一棵可整体查看的组织图。
+   主题变量沿用 role-* 那套（--t-*/--d-*），light/dark 都随 :root 走，不另开配色。 */
+.org-tree {
+  border: 1.4px solid var(--t-faint);
+  background: var(--t-panel);
+  margin: 4px 0 2px;
+}
+.org-tree-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+.org-tree-head::-webkit-details-marker { display: none; }
+.org-tree-head h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--t-text);
+}
+.org-tree-head p {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--t-dim);
+}
+.org-tree-count {
+  flex: none;
+  font-size: 11px;
+  color: var(--t-dim);
+}
+.org-tree-body {
+  padding: 4px 10px 10px;
+  overflow-x: auto;
+}
+.org-roots,
+.org-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+/* 子层级缩进 + 一条竖向连接线，形成组织图的层级感 */
+.org-children {
+  margin-left: 8px;
+  padding-left: 12px;
+  border-left: 1.4px dashed var(--t-faint);
+}
+.org-node {
+  margin: 3px 0;
+}
+.org-node-self {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.org-node-name {
+  color: var(--t-text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.org-node-role,
+.org-node-owner,
+.org-report {
+  flex: none;
+  padding: 1px 6px;
+  border: 1.4px solid var(--t-faint);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: var(--t-dim);
+  font-size: 11px;
+  line-height: 1.25;
+}
+/* 组织树里的主负责人标注（与 role-lead-tag 同视觉，但独立 class，避免与 #168 逐行标注冲突） */
+.org-lead-tag {
+  flex: none;
+  padding: 1px 6px;
+  border: 1.4px solid var(--d-yellow);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: var(--t-accent);
+  font-weight: 700;
+  font-size: 11px;
+  line-height: 1.25;
+}
+/* 汇报对象不在本频道 roster 里时的红色提示，与 role-report--external 同调 */
+.org-report--external {
+  color: var(--d-red);
+  border-color: var(--d-red);
+}
+.org-unassigned {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1.4px dashed var(--t-faint);
+}
+.org-unassigned-head {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--t-dim);
+}
+@media (max-width: 560px) {
+  .org-children {
+    margin-left: 4px;
+    padding-left: 8px;
+  }
+}
+
 /* ---- 新建频道 ---- */
 .newchan-open { background: var(--t-panel2); }
 .newchan-plus { font-family: var(--d-marker); font-size: 16px; color: var(--t-accent); flex: none; }
