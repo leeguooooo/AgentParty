@@ -214,6 +214,21 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/management-audit": {
+      get: {
+        summary: "query structured management audit across all channels",
+        security: [{ admin: [] }],
+        parameters: [
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
+          { name: "cursor", in: "query", description: "opaque random URL-safe cursor for the global audit scope", schema: { type: "string", pattern: "^mc_[0-9a-f]{32}$" } },
+        ],
+        responses: {
+          "200": { description: "bounded page of sanitized audit records and an opaque next_cursor" },
+          "400": { description: "invalid limit or cursor" },
+          "401": { description: "invalid admin secret" },
+        },
+      },
+    },
     "/api/tokens": {
       post: {
         summary: "mint a token",
@@ -848,6 +863,23 @@ export const openapiDocument = {
         responses: {
           "200": { description: "{deliveries:[{mention_seq,target_name,webhook_name,adapter_kind,attempt,result,http_status,error,attempted_at,ack_seq,resume_seq}]}" },
           "403": { description: "not allowed in this channel" },
+          "404": { description: "channel not found" },
+        },
+      },
+    },
+    "/api/channels/{slug}/management-audit": {
+      get: {
+        summary: "query sanitized management audit for one channel",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
+          { name: "cursor", in: "query", description: "opaque random URL-safe cursor bound to this channel slug", schema: { type: "string", pattern: "^mc_[0-9a-f]{32}$" } },
+        ],
+        responses: {
+          "200": { description: "bounded success-only page containing actor account/kind, action, resource, channel, result=success, timestamp, and allowlisted metadata" },
+          "400": { description: "invalid limit or cursor" },
+          "403": { description: "only channel owners or moderators can read management audit" },
           "404": { description: "channel not found" },
         },
       },

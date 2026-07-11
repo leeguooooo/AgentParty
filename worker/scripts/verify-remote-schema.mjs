@@ -145,10 +145,27 @@ const required = {
   ],
   desktop_rate_limits: ["scope", "key_hash", "window_started_at", "count", "blocked_until", "updated_at"],
   desktop_audit: ["id", "event", "pairing_id", "session_id", "account_hash", "ip_hash", "created_at"],
+  management_audit: [
+    "id",
+    "cursor_token",
+    "actor_account",
+    "actor_kind",
+    "action",
+    "resource",
+    "channel",
+    "result",
+    "timestamp",
+    "metadata_json",
+  ],
 };
 
 const requiredIndexes = {
   desktop_token_recoveries: ["idx_desktop_token_recoveries_expires_at"],
+  management_audit: [
+    "idx_management_audit_cursor_token",
+    "idx_management_audit_timestamp",
+    "idx_management_audit_channel",
+  ],
 };
 
 function run(args) {

@@ -52,6 +52,13 @@ import {
 } from "./desktop-pairing";
 import { handleConflict, validateHandleFormat } from "./handle";
 import {
+  bestEffortRecordManagementAudit,
+  listManagementAudit,
+  managementAuditActor,
+  managementAuditAdminActor,
+  parseManagementAuditPagination,
+} from "./management-audit";
+import {
   buildMentionCard,
   inferReceiveIdType,
   resolveLarkProvider,
@@ -1664,6 +1671,16 @@ app.get("/api/health", (c) => {
   c.header("cache-control", "no-store");
   return c.json({ ok: true, ...DEPLOYMENT_METADATA });
 });
+
+app.get("/api/management-audit", requireAdmin, async (c) => {
+  const pagination = parseManagementAuditPagination(new URL(c.req.url));
+  if (pagination === null) {
+    return c.json(errorBody("bad_request", "limit must be 1..100 and cursor must be valid for this audit scope"), 400);
+  }
+  const page = await listManagementAudit(c.env.DB, pagination);
+  if (page === null) return c.json(errorBody("bad_request", "cursor is unknown for this audit scope"), 400);
+  return c.json(page);
+});
 app.get("/openapi.json", (c) => c.json(openapiDocument));
 
 // Desktop Device Flow: only start/token/refresh are unauthenticated. The short user code is
@@ -1909,6 +1926,13 @@ app.post("/api/tokens", requireAdmin, async (c) => {
     return c.json(errorBody("conflict", "token name already exists, revoke it first"), 409);
   }
   const { token } = result;
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditAdminActor,
+    action: "token.issue",
+    resource: `token/${name}`,
+    channel: channelScope,
+    metadata: { token_role: role, channel_scope: channelScope },
+  });
   return c.json(
     channelScope !== null ? { token, name, role, owner, channel_scope: channelScope } : { token, name, role, owner },
     201,
@@ -1964,6 +1988,13 @@ app.post("/api/agents", requireBearer, async (c) => {
     return c.json(errorBody("conflict", "token name already exists, revoke it first"), 409);
   }
   const { token } = result;
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "token.issue",
+    resource: `token/${name}`,
+    channel: effectiveScope,
+    metadata: { token_role: "agent", channel_scope: effectiveScope },
+  });
   return c.json(
     effectiveScope !== null
       ? { token, name, role: "agent", owner, channel_scope: effectiveScope }
@@ -2089,6 +2120,12 @@ app.post("/api/agent-profiles/:handle/runtime-token", requireBearer, async (c) =
   if ("conflict" in minted) {
     return c.json(errorBody("conflict", "profile handle conflicts with an existing token or human handle"), 409);
   }
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "token.issue",
+    resource: `token/${handle}`,
+    metadata: { token_role: "agent" },
+  });
   return c.json({ token: minted.token, profile: projectAgentProfileFromRow(row) }, 201);
 });
 
@@ -2211,6 +2248,13 @@ app.post("/api/channels/:slug/project-agents/runtime-token", requireBearer, asyn
   } catch {
     // Best-effort takeover after daemon restart.
   }
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "token.issue",
+    resource: `token/${childName}`,
+    channel: slug,
+    metadata: { token_role: "agent", channel_scope: slug },
+  });
   return c.json(
     {
       token: minted.token,
@@ -2288,6 +2332,14 @@ app.post("/api/channels/:slug/agents/:name/rotate", requireBearer, async (c) => 
   )
     .bind(await sha256Hex(nextToken), now, row.id)
     .run();
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "token.issue",
+    resource: `token/${name}`,
+    channel: slug,
+    timestamp: now,
+    metadata: { token_role: "agent", channel_scope: slug },
+  });
   const kicked = await fetchChannelDO(
     c.env,
     slug,
@@ -2368,6 +2420,13 @@ app.post("/api/spawn", requireBearer, async (c) => {
   if ("conflict" in result) {
     return c.json(errorBody("conflict", "token name already exists, revoke it first"), 409);
   }
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "token.issue",
+    resource: `token/${name}`,
+    channel: identity.channel_scope,
+    metadata: { token_role: "agent", channel_scope: identity.channel_scope },
+  });
   return c.json(
     {
       token: result.token,
@@ -2384,14 +2443,23 @@ app.post("/api/spawn", requireBearer, async (c) => {
 
 app.delete("/api/tokens/:name", requireAdmin, async (c) => {
   const name = c.req.param("name");
-  const result = await c.env.DB.prepare(
-    "UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL",
+  const revoked = await c.env.DB.prepare(
+    `UPDATE tokens
+        SET revoked_at = ?
+      WHERE name = ? AND revoked_at IS NULL
+      RETURNING channel_scope`,
   )
     .bind(Date.now(), name)
-    .run();
-  if (result.meta.changes === 0) {
+    .first<{ channel_scope: string | null }>();
+  if (revoked === null) {
     return c.json(errorBody("not_found", "no active token with that name"), 404);
   }
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditAdminActor,
+    action: "token.revoke",
+    resource: `token/${name}`,
+    channel: revoked.channel_scope,
+  });
   // 吊销即时生效：踢掉所有未归档频道里该 name 的存活 ws（spec §12）
   const { results } = await c.env.DB.prepare("SELECT slug FROM channels").all<{ slug: string }>();
   await Promise.all(
@@ -2416,6 +2484,22 @@ app.delete("/api/tokens/:name", requireAdmin, async (c) => {
 
 app.use("/api/channels", requireBearer);
 app.use("/api/channels/*", requireBearer);
+
+app.get("/api/channels/:slug/management-audit", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!isChannelModerator(c.get("identity"), channel)) {
+    return c.json(errorBody("forbidden", "only channel owners or moderators can read management audit"), 403);
+  }
+  const pagination = parseManagementAuditPagination(new URL(c.req.url));
+  if (pagination === null) {
+    return c.json(errorBody("bad_request", "limit must be 1..100 and cursor must be valid for this audit scope"), 400);
+  }
+  const page = await listManagementAudit(c.env.DB, { ...pagination, channel: slug });
+  if (page === null) return c.json(errorBody("bad_request", "cursor is unknown for this channel"), 400);
+  return c.json(page);
+});
 app.use("/api/join/*", requireBearer);
 
 app.get("/api/channels/:slug/lark-notify", async (c) => {
@@ -2857,6 +2941,17 @@ app.delete("/api/channels/:slug/project-agents", async (c) => {
   )
     .bind(revokedAt, ownerAccount, slug, handle)
     .run();
+  await Promise.all(
+    (childRows.results ?? []).map(({ name }) =>
+      bestEffortRecordManagementAudit(c.env.DB, {
+        actor: managementAuditActor(identity),
+        action: "token.revoke",
+        resource: `token/${name}`,
+        channel: slug,
+        timestamp: revokedAt,
+      }),
+    ),
+  );
   try {
     await Promise.all(
       [handle, ...(childRows.results ?? []).map((row) => row.name)].map((name) =>
@@ -2926,6 +3021,13 @@ app.put("/api/channels/:slug/perms", async (c) => {
     await c.env.DB.prepare(`UPDATE channels SET ${patch.sets.join(", ")} WHERE slug = ?`)
       .bind(...patch.values, slug)
       .run();
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(identity),
+      action: "channel.permissions.update",
+      resource: `channel/${slug}/permissions`,
+      channel: slug,
+      metadata: { permission_fields: Object.keys(body) },
+    });
   }
   const updated = await loadChannel(c.env.DB, slug);
   return c.json({ permissions: channelPerms(updated ?? channel) });
@@ -2954,6 +3056,13 @@ app.put("/api/channels/:slug/members/:account", async (c) => {
   )
     .bind(slug, account, addedBy, addedAt)
     .run();
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.member.add",
+    resource: `channel/${slug}/members/${account}`,
+    channel: slug,
+    timestamp: addedAt,
+  });
   return c.json({ account, added_by: addedBy, added_at: addedAt });
 });
 
@@ -2973,9 +3082,19 @@ app.delete("/api/channels/:slug/members/:account", async (c) => {
   if (!isChannelModerator(identity, channel) && identity.account !== account) {
     return c.json(errorBody("forbidden", "only moderators can remove other members"), 403);
   }
-  await c.env.DB.prepare("DELETE FROM channel_members WHERE channel_slug = ? AND account = ?")
+  const removedAt = Date.now();
+  const removed = await c.env.DB.prepare("DELETE FROM channel_members WHERE channel_slug = ? AND account = ?")
     .bind(slug, account)
     .run();
+  if (removed.meta.changes > 0) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(identity),
+      action: "channel.member.remove",
+      resource: `channel/${slug}/members/${account}`,
+      channel: slug,
+      timestamp: removedAt,
+    });
+  }
   return c.json({ ok: true });
 });
 
@@ -3137,6 +3256,14 @@ app.put("/api/channels/:slug/visibility", async (c) => {
   await c.env.DB.prepare("UPDATE channels SET visibility = ? WHERE slug = ?")
     .bind(visibility, slug)
     .run();
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.visibility.update",
+    resource: `channel/${slug}/visibility`,
+    channel: slug,
+    timestamp: now,
+    metadata: { visibility },
+  });
   const ok = await insertSystemStatus(c.env, slug, `visibility changed to ${visibility} by ${identity.name}`, "waiting", now);
   if (!ok) return c.json(errorBody("unavailable", "visibility changed but audit status failed"), 503);
   const recentSpeakers =
@@ -4392,7 +4519,7 @@ app.post("/api/channels/:slug/webhooks", async (c) => {
       400,
     );
   }
-  return fetchChannelDO(
+  const response = await fetchChannelDO(
     c.env,
     slug,
     new Request("https://do/internal/webhooks", {
@@ -4401,6 +4528,16 @@ app.post("/api/channels/:slug/webhooks", async (c) => {
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );
+  if (response.ok) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(c.get("identity")),
+      action: "channel.webhook.add",
+      resource: `channel/${slug}/webhooks/${name}`,
+      channel: slug,
+      metadata: { webhook_filter: filter },
+    });
+  }
+  return response;
 });
 
 app.get("/api/channels/:slug/webhooks", async (c) => {
@@ -4434,14 +4571,24 @@ app.delete("/api/channels/:slug/webhooks/:name", async (c) => {
   if (channel.archived_at !== null) {
     return c.json(errorBody("archived", "channel is archived"), 410);
   }
-  return fetchChannelDO(
+  const name = c.req.param("name");
+  const response = await fetchChannelDO(
     c.env,
     slug,
-    new Request(`https://do/internal/webhooks?name=${encodeURIComponent(c.req.param("name"))}`, {
+    new Request(`https://do/internal/webhooks?name=${encodeURIComponent(name)}`, {
       method: "DELETE",
       headers: { "x-partykit-room": slug },
     }),
   );
+  if (response.ok) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(c.get("identity")),
+      action: "channel.webhook.remove",
+      resource: `channel/${slug}/webhooks/${name}`,
+      channel: slug,
+    });
+  }
+  return response;
 });
 
 app.post("/api/channels/:slug/archive", async (c) => {
@@ -4466,6 +4613,13 @@ app.post("/api/channels/:slug/archive", async (c) => {
     }),
   );
   if (!res.ok) return c.json(errorBody("unavailable", "archive coordination failed"), 503);
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(c.get("identity")),
+    action: "channel.archive",
+    resource: `channel/${slug}`,
+    channel: slug,
+    timestamp: channel.archived_at ?? archivedAt,
+  });
   return c.json({ ok: true });
 });
 
@@ -4494,11 +4648,20 @@ app.post("/api/channels/:slug/kick", async (c) => {
   }
   if (mode === "remove") {
     const now = Date.now();
-    await c.env.DB.prepare(
+    const revoked = await c.env.DB.prepare(
       "UPDATE tokens SET revoked_at = ? WHERE channel_scope = ? AND name = ? AND revoked_at IS NULL",
     )
       .bind(now, slug, name)
       .run();
+    if (revoked.meta.changes > 0) {
+      await bestEffortRecordManagementAudit(c.env.DB, {
+        actor: managementAuditActor(c.get("identity")),
+        action: "token.revoke",
+        resource: `token/${name}`,
+        channel: slug,
+        timestamp: now,
+      });
+    }
   }
   const res = await fetchChannelDO(
     c.env,
