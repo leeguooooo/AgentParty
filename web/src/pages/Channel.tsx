@@ -1349,12 +1349,21 @@ export function TaskLedgerPanel({
   const [composerOpen, setComposerOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  // #271(a)：按受理人筛选看板。"all" 全量，"__unassigned__" 只看未指派。
+  const [assigneeFilter, setAssigneeFilter] = useState("all");
   const counts = tasks.reduce<Record<string, number>>((acc, task) => {
     acc[task.state] = (acc[task.state] ?? 0) + 1;
     return acc;
   }, {});
+  const assigneeOptions = [...new Set(
+    tasks.flatMap((task) => (task.assignee !== null ? [task.assignee.name] : [])),
+  )].sort();
+  const visibleTasks =
+    assigneeFilter === "all" ? tasks :
+    assigneeFilter === "__unassigned__" ? tasks.filter((task) => task.assignee === null) :
+    tasks.filter((task) => task.assignee?.name === assigneeFilter);
   const tasksByState = new Map<TaskState, TaskRecord[]>(TASK_BOARD_STATES.map((state) => [state, []]));
-  for (const task of tasks) tasksByState.get(task.state)?.push(task);
+  for (const task of visibleTasks) tasksByState.get(task.state)?.push(task);
   const disabled = loading || !canWrite;
   const stateLabel = (state: TaskState) => t(`Channel.tasks.state.${state}`);
   const submitNewTask = (event: { preventDefault: () => void }) => {
@@ -1455,6 +1464,20 @@ export function TaskLedgerPanel({
       <header className="task-ledger-head">
         <p className="t-mono task-ledger-total">{t("Channel.tasks.total", { count: tasks.length })}</p>
         <div className="task-ledger-head-actions">
+          {assigneeOptions.length > 0 && (
+            <select
+              className="task-filter-select t-mono"
+              aria-label={t("Channel.tasks.filterAria")}
+              value={assigneeFilter}
+              onChange={(event) => setAssigneeFilter(event.currentTarget.value)}
+            >
+              <option value="all">{t("Channel.tasks.filterAll")}</option>
+              <option value="__unassigned__">{t("Channel.tasks.filterUnassigned")}</option>
+              {assigneeOptions.map((name) => (
+                <option key={name} value={name}>@{name}</option>
+              ))}
+            </select>
+          )}
           {canWrite && (
             <button
               className="d-btn task-new-btn"

@@ -188,3 +188,39 @@ describe("TaskLedgerPanel new-task entry", () => {
     expect(onCreateTask).toHaveBeenCalledTimes(0);
   });
 });
+
+// #271(a)：按受理人筛选看板。
+describe("TaskLedgerPanel assignee filter (#271)", () => {
+  const filterTasks = () => [
+    task({ id: 1, title: "alpha-task", assignee: { name: "worker-a", kind: "agent" } }),
+    task({ id: 2, title: "bravo-task", assignee: { name: "worker-b", kind: "agent" }, state: "in_progress" }),
+    task({ id: 3, title: "charlie-task" }),
+  ];
+
+  test("dropdown lists each assignee once and filters the board", async () => {
+    const r = render("en", baseProps({ tasks: filterTasks() }));
+    const select = findByAria(r, "Filter by assignee");
+    const values = select.findAllByType("option").map((o) => o.props.value);
+    expect(values).toEqual(["all", "__unassigned__", "worker-a", "worker-b"]);
+
+    await act(async () => {
+      select.props.onChange({ currentTarget: { value: "worker-a" } });
+    });
+    let text = allText(r);
+    expect(text).toContain("alpha-task");
+    expect(text).not.toContain("bravo-task");
+    expect(text).not.toContain("charlie-task");
+
+    await act(async () => {
+      findByAria(r, "Filter by assignee").props.onChange({ currentTarget: { value: "__unassigned__" } });
+    });
+    text = allText(r);
+    expect(text).toContain("charlie-task");
+    expect(text).not.toContain("alpha-task");
+  });
+
+  test("dropdown stays hidden while no task has an assignee", () => {
+    const r = render("en", baseProps());
+    expect(r.root.findAll((n) => n.props["aria-label"] === "Filter by assignee")).toHaveLength(0);
+  });
+});

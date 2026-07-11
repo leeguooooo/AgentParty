@@ -3377,6 +3377,15 @@
   align-items: center;
   gap: 6px;
 }
+.task-filter-select {
+  max-width: 160px;
+  padding: 2px 4px;
+  font-size: 11px;
+  border: 1px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: inherit;
+}
 .task-new-form {
   display: flex;
   flex-direction: column;
