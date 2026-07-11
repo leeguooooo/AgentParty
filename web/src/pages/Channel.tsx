@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { buildHostBoard, type Attachment, type ChannelSquad, type CollaborationRole, type HostBoard, type MsgFrame, type PresenceEntry, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
+import { AgentDetailModal } from "../components/AgentDetailModal";
 import { AgentJoin } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
 import { VisibilityToggle } from "../components/VisibilityToggle";
@@ -507,6 +508,9 @@ export interface DivisionBoardProps {
   // （canMintAgent && accountKey !== null），不在这里重新定义一套。
   canManageAgentRules: boolean;
   onOpenAgentRules: () => void;
+  // issue #272（审计重开）：点分工面板里的某个成员，打开它的单 Agent 详情弹窗
+  // （工作状态/历史工作内容/在线状态）。可选——未接的调用方（如既有测试）行内保持只读展示。
+  onOpenAgentDetail?: (name: string) => void;
 }
 
 export function DivisionBoard({
@@ -531,6 +535,7 @@ export function DivisionBoard({
   syncingCharter,
   canManageAgentRules,
   onOpenAgentRules,
+  onOpenAgentDetail,
 }: DivisionBoardProps) {
   const t = useT();
   const [selfHintOpen, setSelfHintOpen] = useState(false);
@@ -711,7 +716,17 @@ export function DivisionBoard({
                     return (
                       <div key={name} className="role-row">
                         <div className="role-person" title={title}>
-                          <span className="role-person-name t-mono">{display}</span>
+                          {onOpenAgentDetail !== undefined ? (
+                            <button
+                              type="button"
+                              className="role-person-name role-person-name--btn t-mono"
+                              onClick={() => onOpenAgentDetail(name)}
+                            >
+                              {display}
+                            </button>
+                          ) : (
+                            <span className="role-person-name t-mono">{display}</span>
+                          )}
                           <span className={`role-kind role-kind--${kind}`}>{t(`Composer.kind.${kind}`)}</span>
                           {role !== null && role.role === "host" && (
                             <span className="role-lead-tag t-mono">{t("Channel.roles.channelLead")}</span>
@@ -1846,6 +1861,8 @@ export function ChannelPage({
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [charter, setCharter] = useState<ChannelCharter | null>(null);
   const [wakeDeliveries, setWakeDeliveries] = useState<WakeDelivery[]>([]); // @ 唤醒台账（webhook 侧硬证据）
+  // issue #272（审计重开）：单 Agent 详情弹窗——存被点开的 agent name，null = 关闭。
+  const [openAgentDetail, setOpenAgentDetail] = useState<string | null>(null);
   const [charterEditing, setCharterEditing] = useState(false);
   const [charterDraft, setCharterDraft] = useState("");
   const [charterSaving, setCharterSaving] = useState(false);
@@ -3290,6 +3307,7 @@ export function ChannelPage({
         onPauseAgent={pauseAgentReception}
         onResumeAgent={resumeAgentReception}
         roles={channelRoles}
+        onOpenAgentDetail={setOpenAgentDetail}
       />
       {kickError !== null && <p className="banner banner--red">{kickError}</p>}
       {pauseError !== null && <p className="banner banner--red">{pauseError}</p>}
@@ -3476,6 +3494,7 @@ export function ChannelPage({
               syncingCharter={charterSaving}
               canManageAgentRules={canMintAgent && accountKey !== null}
               onOpenAgentRules={openAgentRulesFromDivision}
+              onOpenAgentDetail={setOpenAgentDetail}
             />
           )}
           {activePanel === "coordination" && coordinationContent}
@@ -3521,6 +3540,18 @@ export function ChannelPage({
           )}
           {activePanel === "search" && searchContent}
         </ChannelPanelModal>
+      )}
+      {openAgentDetail !== null && (
+        <AgentDetailModal
+          name={openAgentDetail}
+          display={identityDisplay[openAgentDetail]?.display ?? openAgentDetail}
+          kind={identityDisplay[openAgentDetail]?.kind ?? state.presence[openAgentDetail]?.kind ?? "agent"}
+          owner={identityDisplay[openAgentDetail]?.account ?? state.presence[openAgentDetail]?.account ?? null}
+          online={state.participants.some((p) => p.name === openAgentDetail)}
+          presence={state.presence[openAgentDetail] ?? null}
+          messages={state.messages}
+          onClose={() => setOpenAgentDetail(null)}
+        />
       )}
       {/* overflow-anchor:none —— 浏览器原生滚动锚定会和我们手动的 prepend 锚定打架 */}
       <div className="stream" ref={streamRef} onScroll={onScroll} style={{ overflowAnchor: "none" }}>

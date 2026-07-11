@@ -22,6 +22,8 @@ interface Props {
   onPauseAgent?: (name: string, resumeAt: number | null) => void;
   onResumeAgent?: (name: string) => void;
   roles?: ChannelRoleAssignment[];
+  // issue #272（审计重开）：点 presence roster 里的某个人/agent，打开它的单 Agent 详情弹窗。
+  onOpenAgentDetail?: (name: string) => void;
 }
 
 // 暂停时长预设（#180）：值 → 相对 now 的恢复时刻（epoch ms），"indefinite" 返回 null（手动恢复）。
@@ -255,6 +257,7 @@ export function PresenceBar({
   onPauseAgent,
   onResumeAgent,
   roles = [],
+  onOpenAgentDetail,
 }: Props) {
   const t = useT();
   // 相对时间 30s 刷一次
@@ -417,9 +420,23 @@ export function PresenceBar({
           `d-pill presence-pill${it.state === "blocked" ? " presence-pill--blocked" : ""}` +
           `${activeHost ? " presence-pill--active-host" : ""}` +
           `${it.connectionCount > 1 ? " presence-pill--duplicate" : ""}` +
-          `${full ? " presence-pill--full" : ""}`
+          `${full ? " presence-pill--full" : ""}` +
+          `${onOpenAgentDetail !== undefined ? " presence-pill--clickable" : ""}`
         }
         title={titleParts.join(" · ")}
+        role={onOpenAgentDetail !== undefined ? "button" : undefined}
+        tabIndex={onOpenAgentDetail !== undefined ? 0 : undefined}
+        onClick={onOpenAgentDetail !== undefined ? () => onOpenAgentDetail(it.name) : undefined}
+        onKeyDown={
+          onOpenAgentDetail !== undefined
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onOpenAgentDetail(it.name);
+                }
+              }
+            : undefined
+        }
         style={{ "--ah": agentHue(it.name) } as CSSProperties}
       >
         <span className={`d-dot d-dot--${it.state}${it.paused ? " d-dot--paused" : ""}`} />
@@ -594,7 +611,31 @@ export function PresenceBar({
         {!full && (
           <div className="presence-group-agents" aria-label={`agents owned by ${group.label}`}>
             {previewAgents.map((agent) => (
-              <span key={agent.name} className="presence-agent-chip">
+              <span
+                key={agent.name}
+                className={`presence-agent-chip${onOpenAgentDetail !== undefined ? " presence-agent-chip--clickable" : ""}`}
+                role={onOpenAgentDetail !== undefined ? "button" : undefined}
+                tabIndex={onOpenAgentDetail !== undefined ? 0 : undefined}
+                onClick={
+                  onOpenAgentDetail !== undefined
+                    ? (e) => {
+                        e.stopPropagation();
+                        onOpenAgentDetail(agent.name);
+                      }
+                    : undefined
+                }
+                onKeyDown={
+                  onOpenAgentDetail !== undefined
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          onOpenAgentDetail(agent.name);
+                        }
+                      }
+                    : undefined
+                }
+              >
                 <span className={`d-dot d-dot--${agent.state}${agent.paused ? " d-dot--paused" : ""}`} />
                 <span>{agent.display}</span>
                 <span className={`t-mono presence-agent-kind presence-kind--${agent.kind}`}>{agent.kind}</span>

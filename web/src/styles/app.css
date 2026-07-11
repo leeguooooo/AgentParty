@@ -851,6 +851,20 @@
 .role-person-name {
   font-weight: 700;
 }
+.role-person-name--btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.role-person-name--btn:hover,
+.role-person-name--btn:focus-visible {
+  color: var(--d-ink);
+  text-decoration-style: solid;
+}
 .role-owner {
   color: var(--t-dim);
   font-size: 11px;
@@ -1460,6 +1474,17 @@
 .presence-pill--duplicate {
   border-color: var(--d-red);
   background: var(--d-red-soft);
+}
+.presence-pill--clickable,
+.presence-agent-chip--clickable {
+  cursor: pointer;
+}
+.presence-pill--clickable:hover,
+.presence-pill--clickable:focus-visible,
+.presence-agent-chip--clickable:hover,
+.presence-agent-chip--clickable:focus-visible {
+  box-shadow: 3px 3px 0 var(--d-shadow);
+  outline: none;
 }
 .presence-name {
   max-width: min(160px, 22vw);
@@ -3295,6 +3320,87 @@
 }
 .channel-panel-body .chan-search-panel {
   padding: 0;
+}
+
+/* issue #272（审计重开）：单 Agent 详情弹窗——工作状态/历史工作内容/在线状态。 */
+.agent-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.agent-detail-alias { color: var(--t-dim); }
+.agent-detail-online-badge {
+  font-weight: 700;
+}
+.agent-detail-kind,
+.agent-detail-owner {
+  padding: 1px 6px;
+  border: 1.4px solid var(--t-faint);
+  background: var(--t-panel);
+  color: var(--t-dim);
+  font-size: 11px;
+}
+.agent-detail-section {
+  margin-top: 14px;
+}
+.agent-detail-section:first-child {
+  margin-top: 0;
+}
+.agent-detail-section h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.agent-detail-facts {
+  display: grid;
+  gap: 4px 12px;
+  margin: 0;
+}
+.agent-detail-fact {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.agent-detail-fact dt {
+  flex: none;
+  width: 96px;
+  color: var(--t-dim);
+  font-size: 11px;
+}
+.agent-detail-fact dd {
+  margin: 0;
+  min-width: 0;
+}
+.agent-detail-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.agent-detail-history-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--t-faint);
+  min-width: 0;
+}
+.agent-detail-history-seq,
+.agent-detail-history-time {
+  flex: none;
+  color: var(--t-dim);
+  font-size: 11px;
+}
+.agent-detail-history-body {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-detail-empty {
+  color: var(--t-dim);
 }
 
 .guard-settings {
