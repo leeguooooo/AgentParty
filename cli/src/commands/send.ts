@@ -9,9 +9,9 @@ import { formatReachLine, reachOf } from "../reach";
 import { localStatuslineBase, statuslinePreview, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
-export const sendSpec = { repeatable: ["mention", "attach"], booleans: ["debug-auth", "reach", "no-reach"] };
-const SEND_FLAGS = ["channel", "reply-to", "mention", "attach", "debug-auth", "reach", "no-reach"];
-const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--attach path]... [--reply-to seq] [--debug-auth]
+export const sendSpec = { repeatable: ["mention", "attach", "option"], booleans: ["debug-auth", "reach", "no-reach"] };
+const SEND_FLAGS = ["channel", "reply-to", "mention", "attach", "option", "debug-auth", "reach", "no-reach"];
+const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--attach path]... [--option label]... [--reply-to seq] [--debug-auth]
 
 Send one message to a channel. Use "-" as the body to read stdin.
 
@@ -26,6 +26,8 @@ Options:
   --channel C      send to channel C instead of the bound channel
   --mention name   mention a user or agent; repeatable
   --attach path    upload a local file and attach it; repeatable (max 25MB each)
+  --option label   turn this message into an in-channel prompt with a clickable option; repeatable (#284).
+                   body becomes the question; humans click an option to answer (approve/reject = --option 通过 --option 拒绝)
   --reply-to seq   attach this message as a reply to seq
   --reach          show mention reachability even when not a TTY (agent loops)
   --no-reach       never show mention reachability
@@ -71,6 +73,7 @@ export interface SendInput {
   mentions: string[];
   replyTo: number | null;
   attachPaths: string[];
+  options: string[]; // #284：非空则把消息变成带这些选项的交互式提问
 }
 
 // 本地路径 → 上传源：不存在/空文件/超限一律抛带路径的可读错误，绝不静默上传半个包。
@@ -119,6 +122,7 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     return null;
   }
   const attachPaths = strArray(flags.attach) ?? [];
+  const options = (strArray(flags.option) ?? []).map((o) => o.trim()).filter((o) => o !== "");
   const replyTo = parsePositiveIntFlag(str(flags["reply-to"]), "reply-to");
   if (typeof replyTo === "string") {
     console.error(replyTo);
@@ -184,6 +188,7 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     mentions,
     replyTo: replyTo ?? null,
     attachPaths,
+    options,
   };
 }
 
@@ -223,6 +228,7 @@ export async function doSend(cfg: Config, input: SendInput): Promise<number | { 
       mentions: input.mentions,
       reply_to: input.replyTo,
       ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
+      ...(input.options.length > 0 ? { prompt: { question: input.body, options: input.options } } : {}),
     });
     advanceCursorPastOwnMessage(input.channel, seq);
     writeStatuslineCache({

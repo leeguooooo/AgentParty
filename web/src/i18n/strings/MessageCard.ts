@@ -16,6 +16,7 @@ export const MessageCardStrings: LocaleDict = {
     "MessageCard.edit.saving": "saving…",
     "MessageCard.edit.cancel": "cancel",
     "MessageCard.reply.retracted": "original message retracted",
+    "MessageCard.prompt.answer": "Chose: {option}",
     "MessageCard.reply.jump": "jump to original message #{seq}",
   },
   zh: {
@@ -33,6 +34,7 @@ export const MessageCardStrings: LocaleDict = {
     "MessageCard.edit.saving": "保存中…",
     "MessageCard.edit.cancel": "取消",
     "MessageCard.reply.retracted": "原消息已撤回",
+    "MessageCard.prompt.answer": "选择：{option}",
     "MessageCard.reply.jump": "跳转到原消息 #{seq}",
   },
 };

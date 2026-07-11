@@ -2325,6 +2325,17 @@ export function ChannelPage({
     setReplyTo((current) => (current === submitted.replyTo ? null : current));
   }, [state.lastSentSeq]);
 
+  // #284：点选交互式提问的一个选项 → 一键发一条回复该问题的答案，并 @ 问的人（把它叫醒看答案）。
+  const answerPrompt = useCallback((seq: number, senderName: string, option: string) => {
+    sockRef.current?.send({
+      type: "send",
+      kind: "message",
+      body: t("MessageCard.prompt.answer", { option }),
+      mentions: senderName !== "" ? [senderName] : [],
+      reply_to: seq,
+    });
+  }, [t]);
+
   const send = useCallback(() => {
     const body = draft.trim();
     // 上传在途时按下 ⌘⏎ 不发（按钮已 disabled，但快捷键绕过它）——否则会漏掉还没落 R2 的引用。
@@ -3346,6 +3357,7 @@ export function ChannelPage({
                   canModerate={canModerate}
                   quotedMessage={item.message.reply_to !== null ? messageBySeq.get(item.message.reply_to) ?? null : null}
                   onReply={startReply}
+                  onAnswerPrompt={answerPrompt}
                   onEdit={startEdit}
                   onRetract={retractMessage}
                   canCreateTask={canWrite}

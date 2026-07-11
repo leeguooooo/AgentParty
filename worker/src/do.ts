@@ -22,6 +22,10 @@ import {
   WEBHOOK_TIMEOUT_MS,
   type AgentLineage,
   type Attachment,
+  type MessagePrompt,
+  PROMPT_QUESTION_MAX,
+  PROMPT_OPTION_MAX,
+  PROMPT_OPTIONS_MAX,
   type ErrorCode,
   type AgentContext,
   type CollaborationRole,
@@ -700,6 +704,38 @@ function parseAttachments(raw: unknown): Attachment[] | null | undefined {
   return out;
 }
 
+// #284 交互式提问校验：question 非空且不超上限，options 为 1..PROMPT_OPTIONS_MAX 个非空字符串
+// （去空白、各不超上限、去重）。undefined/null → 无 prompt；非法 → null（调用方拒收）。
+function parseMessagePrompt(raw: unknown): MessagePrompt | null | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  if (typeof p.question !== "string") return null;
+  const question = p.question.trim();
+  if (question === "" || byteLength(question) > PROMPT_QUESTION_MAX) return null;
+  if (!Array.isArray(p.options)) return null;
+  const options: string[] = [];
+  for (const item of p.options) {
+    if (typeof item !== "string") return null;
+    const opt = item.trim();
+    if (opt === "" || byteLength(opt) > PROMPT_OPTION_MAX) return null;
+    if (!options.includes(opt)) options.push(opt);
+  }
+  if (options.length === 0 || options.length > PROMPT_OPTIONS_MAX) return null;
+  return { question, options };
+}
+
+// 反序列化落库的 prompt（#284）；复用同一校验，脏数据静默丢弃。
+function parseStoredMessagePrompt(input: unknown): MessagePrompt | undefined {
+  if (typeof input !== "string" || input === "") return undefined;
+  try {
+    const parsed = parseMessagePrompt(JSON.parse(input) as unknown);
+    return parsed === null ? undefined : parsed;
+  } catch {
+    return undefined;
+  }
+}
+
 // rest body 与 ws send 帧共用的校验（rest 侧无 type 字段）
 function parseSendFrame(input: unknown): SendFrame | null {
   if (typeof input !== "object" || input === null) return null;
@@ -722,6 +758,8 @@ function parseSendFrame(input: unknown): SendFrame | null {
     if (completionArtifact === null) return null;
     const attachments = parseAttachments(f.attachments);
     if (attachments === null) return null;
+    const prompt = parseMessagePrompt(f.prompt);
+    if (prompt === null) return null;
     let replaces: number | undefined;
     if (f.replaces !== undefined) {
       if (typeof f.replaces !== "number" || !Number.isInteger(f.replaces) || f.replaces <= 0) return null;
@@ -735,6 +773,7 @@ function parseSendFrame(input: unknown): SendFrame | null {
       reply_to,
       ...(completionArtifact !== undefined ? { completion_artifact: completionArtifact } : {}),
       ...(attachments !== undefined ? { attachments } : {}),
+      ...(prompt !== undefined ? { prompt } : {}),
       ...(completionArtifact !== undefined && replaces !== undefined ? { replaces } : {}),
       ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
     };
@@ -968,6 +1007,8 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE messages ADD COLUMN idempotency_key TEXT",
       // 附件引用（#176）：存 Attachment[] 的 JSON，仅元数据（key/filename/type/size/url），blob 在 R2。
       "ALTER TABLE messages ADD COLUMN attachments_json TEXT",
+      // #284 交互式提问：{question, options[]} JSON；DO 内建 SQLite 幂等 ALTER，非 D1 迁移。
+      "ALTER TABLE messages ADD COLUMN prompt_json TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -2984,6 +3025,7 @@ export class ChannelDO extends Server<Env> {
     const completionReviewPolicy = (this.getMeta("completion_review_policy") ?? "sender") as CompletionReviewPolicy;
     const completionArtifact = frame.kind === "message" ? frame.completion_artifact : undefined;
     const attachments = frame.kind === "message" ? frame.attachments : undefined;
+    const prompt = frame.kind === "message" ? frame.prompt : undefined;
     const replacesSeq =
       frame.kind === "message" && completionArtifact !== undefined && completionGate === "reviewer"
         ? frame.replaces
@@ -3063,9 +3105,9 @@ export class ChannelDO extends Server<Env> {
          state, note, status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
          status_decision_json, status_workflow_json, message_workflow_json,
          sender_role, sender_role_source, completion_artifact_json, completion_review_state, completion_review_policy,
-         completion_review_replaces_seq, idempotency_key, attachments_json, ts
+         completion_review_replaces_seq, idempotency_key, attachments_json, prompt_json, ts
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
@@ -3098,6 +3140,7 @@ export class ChannelDO extends Server<Env> {
       replacesSeq ?? null,
       frame.idempotency_key ?? null,
       attachments === undefined ? null : JSON.stringify(attachments),
+      prompt === undefined ? null : JSON.stringify(prompt),
       now,
     );
     let replacedUpdate: MessageUpdateFrame | undefined;
@@ -3969,6 +4012,9 @@ export class ChannelDO extends Server<Env> {
       if (workflowRef !== undefined) frame.workflow_ref = workflowRef;
       const attachments = parseStoredAttachments(r.attachments_json);
       if (attachments !== undefined) frame.attachments = attachments;
+      // #284 交互式提问：已撤回的消息不再渲染可点按钮。
+      const prompt = parseStoredMessagePrompt(r.prompt_json);
+      if (prompt !== undefined && !retracted) frame.prompt = prompt;
     }
     if (r.edited_at !== null && r.edited_at !== undefined) {
       frame.edited = true;

@@ -5210,3 +5210,12 @@
 .settings-facts dd { margin: 0; color: var(--t-body, #2a2820); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 面板内的 @别名编辑（复用 HandleSetup）与账号区留出间距 */
 .settings-handle { margin-top: 12px; }
+
+/* #284 频道内交互式提问 */
+.msg-prompt { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border, #ddd); border-left: 3px solid var(--accent, #4a9eff); border-radius: 6px; background: var(--t-faint, rgba(74,158,255,0.05)); }
+.msg-prompt-q { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.msg-prompt-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.msg-prompt-opt { font-size: 12px; padding: 4px 12px; border: 1px solid var(--border, #ccc); border-radius: 16px; background: var(--t-bg, #fff); cursor: pointer; color: var(--fg, inherit); }
+.msg-prompt-opt:hover { border-color: var(--accent, #4a9eff); background: var(--accent, #4a9eff); color: #fff; }
+.msg-prompt-opt--readonly { cursor: default; opacity: 0.7; }
+.msg-prompt-opt--readonly:hover { border-color: var(--border, #ccc); background: var(--t-bg, #fff); color: var(--fg, inherit); }

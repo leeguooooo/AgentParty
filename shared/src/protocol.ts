@@ -473,6 +473,19 @@ export interface Attachment {
   url: string;
 }
 
+/**
+ * 频道内交互式提问（#284）：agent 抛一个问题 + 若干选项，人类（或别的 agent）在频道 UI 里点选回答。
+ * 回答走普通回复消息（reply_to 指向本条），body 形如「选择：<选项>」。把 CLI 里 agent↔人的选择/审批
+ * 交互搬进频道。approve/reject 只是 options 为 ["通过","拒绝"] 的特例。
+ */
+export interface MessagePrompt {
+  question: string;
+  options: string[];
+}
+export const PROMPT_QUESTION_MAX = 500;
+export const PROMPT_OPTION_MAX = 100; // 每个选项字节上限
+export const PROMPT_OPTIONS_MAX = 12; // 选项数量上限
+
 export interface SendMessageFrame {
   type: "send";
   kind: "message";
@@ -482,6 +495,8 @@ export interface SendMessageFrame {
   completion_artifact?: CompletionArtifact;
   /** 附件引用（#176）；空/缺省视为无附件。上限见 do 侧 MAX_ATTACHMENTS_PER_MESSAGE。 */
   attachments?: Attachment[];
+  /** 交互式提问（#284）；带上则该消息在频道里渲染成可点选按钮。 */
+  prompt?: MessagePrompt;
   replaces?: number;
   /**
    * 幂等键（#98）：客户端每次发送生成一个唯一键（ULID）。同一条逻辑消息的重试（客户端超时重发、
@@ -626,6 +641,8 @@ export interface MsgFrame {
   completion_review?: CompletionReview;
   /** 附件引用（#176）；仅 kind:"message" 携带，无附件时省略。 */
   attachments?: Attachment[];
+  /** 交互式提问（#284）；带上则前端渲染为可点选按钮，点选发一条回复本条的消息。 */
+  prompt?: MessagePrompt;
   ts: number;
   edited?: true;
   edited_at?: number;

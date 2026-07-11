@@ -29,6 +29,8 @@ interface Props {
   // 消息右键菜单（PR #49）：引用/编辑/撤回/复制
   canModerate: boolean;
   onReply(seq: number): void;
+  /** #284 交互式提问：点选项时一键发一条回复本条的答案（并 @问的人）。缺省则选项只读展示。 */
+  onAnswerPrompt?: (seq: number, senderName: string, option: string) => void;
   onEdit(seq: number): void;
   onRetract(seq: number): void;
   canCreateTask: boolean;
@@ -111,6 +113,7 @@ export function MessageCard({
   quotedMessage,
   canModerate,
   onReply,
+  onAnswerPrompt,
   onEdit,
   onRetract,
   canCreateTask,
@@ -489,6 +492,29 @@ export function MessageCard({
       )}
       {!editing && !msg.retracted && msg.attachments !== undefined && msg.attachments.length > 0 && (
         <AttachmentList attachments={msg.attachments} />
+      )}
+      {!editing && !msg.retracted && msg.prompt !== undefined && (
+        <div className="msg-prompt" role="group" aria-label={msg.prompt.question}>
+          <div className="msg-prompt-q">{msg.prompt.question}</div>
+          <div className="msg-prompt-opts">
+            {msg.prompt.options.map((opt) =>
+              onAnswerPrompt !== undefined ? (
+                <button
+                  key={opt}
+                  type="button"
+                  className="msg-prompt-opt"
+                  onClick={() => onAnswerPrompt(msg.seq, msg.sender.name, opt)}
+                >
+                  {opt}
+                </button>
+              ) : (
+                <span key={opt} className="msg-prompt-opt msg-prompt-opt--readonly">
+                  {opt}
+                </span>
+              ),
+            )}
+          </div>
+        </div>
       )}
       {!editing && actionError !== null && <p className="banner banner--red msg-action-error">{actionError}</p>}
     </article>
