@@ -117,6 +117,37 @@ jobs:
       - working-directory: worker
         run: bunx tsc --noEmit
 
+  # ── #137 供应链输入侧：bun audit 扫 bun.lock 依赖树已知漏洞 ──────────
+  # 只在 PR 上跑，且不进 "full check" 的 needs——bun audit 命中的公开漏洞库
+  # 会随时间变化，把它塞进 required 门禁等于让历史 PR 因为无关的第三方新
+  # CVE 突然变红。先让结果在 job 日志/summary 里可见，观察一段时间稳定后
+  # 再考虑收紧成阻断项。
+  dependency-audit:
+    name: dependency audit (bun audit)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/bun-install
+      - name: bun audit
+        run: |
+          set +e
+          bun audit 2>&1 | tee bun-audit.log
+          status="${PIPESTATUS[0]}"
+          set -e
+          {
+            echo "## bun audit (#137，非阻断)"
+            echo '```'
+            cat bun-audit.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::bun audit reported findings (exit $status) — non-blocking, see job summary"
+          fi
+          exit 0
+
   # 发布版本契约：只在 tag 上校验 tag == CLI / desktop JS / desktop Rust 版本。
   # 非 tag 时 skip（聚合门禁把 skipped 当通过）。
   version-contract:
