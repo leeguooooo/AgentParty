@@ -7,7 +7,7 @@
     },
     "cli": {
       "name": "@agentparty/cli",
-      "version": "0.2.85",
+      "version": "0.2.94",
       "bin": {
         "party": "src/index.ts",
       },
@@ -29,7 +29,7 @@
     },
     "desktop": {
       "name": "@agentparty/desktop",
-      "version": "0.2.85",
+      "version": "0.2.94",
       "devDependencies": {
         "@tauri-apps/cli": "^2.6.2",
       },
@@ -53,7 +53,7 @@
         "@tauri-apps/plugin-updater": "^2.10.1",
         "dompurify": "^3.2.6",
         "highlight.js": "^11.11.1",
-        "marked": "^15.0.12",
+        "marked": "^18.0.6",
         "react": "^19.1.0",
         "react-dom": "^19.1.0",
       },
@@ -629,7 +629,7 @@
 
     "magic-string": ["magic-string@0.30.21", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.5" } }, "sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ=="],
 
-    "marked": ["marked@15.0.12", "", { "bin": { "marked": "bin/marked.js" } }, "sha512-8dD6FusOQSrpv9Z1rdNMdlSgQOIP880DHqnohobOmYLElGEqAL/JvxvuxZO16r4HtjTlfPRDC1hbvxC9dPN2nA=="],
+    "marked": ["marked@18.0.6", "", { "bin": { "marked": "bin/marked.js" } }, "sha512-MrV5puXBfuiy6wl6DLaq3BtIJQAJToAd5zt/ZKhRfGRAuFPALE7/4Y7jnxRQoEgK/pBgurGqLyAuRgZ2xOjr6w=="],
 
     "math-intrinsics": ["math-intrinsics@1.1.0", "", {}, "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g=="],
 
