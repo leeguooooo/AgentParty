@@ -768,6 +768,17 @@ function parseSendFrame(input: unknown): SendFrame | null {
     if (decision === null) return null;
     const workflow = parseSendStatusWorkflow(f.workflow);
     if (workflow === null) return null;
+    // busy（#103）：serve 串行处理时自报「忙」。只认 boolean；false 也保留（用于把 busy 显式清回空闲）。
+    if (f.busy !== undefined && typeof f.busy !== "boolean") return null;
+    const busy = f.busy as boolean | undefined;
+    // queue_depth（#103）：非负整数，封顶防脏值撑爆展示。非法/负数 → 拒收（parseSendFrame 返 null）。
+    const queueDepth =
+      f.queue_depth === undefined
+        ? undefined
+        : typeof f.queue_depth === "number" && Number.isInteger(f.queue_depth) && f.queue_depth >= 0
+          ? Math.min(f.queue_depth, 100_000)
+          : null;
+    if (queueDepth === null) return null;
     return {
       type: "send",
       kind: "status",
@@ -783,6 +794,8 @@ function parseSendFrame(input: unknown): SendFrame | null {
       ...(context !== undefined ? { context } : {}),
       ...(decision !== undefined ? { decision } : {}),
       ...(workflow !== undefined ? { workflow } : {}),
+      ...(busy !== undefined ? { busy } : {}),
+      ...(queueDepth !== undefined ? { queue_depth: queueDepth } : {}),
       ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
     };
   }
@@ -1009,6 +1022,9 @@ export class ChannelDO extends Server<Env> {
       // 人为「暂停接待」（issue #180）：paused_at 非 NULL 即暂停；paused_resume_at 为定时恢复时刻（epoch ms）。
       "ALTER TABLE presence ADD COLUMN paused_at INTEGER",
       "ALTER TABLE presence ADD COLUMN paused_resume_at INTEGER",
+      // busy + 队列深度（#103）：serve 串行处理长任务时自报「忙 + N 待处理」，供 who/reach/web 展示。
+      "ALTER TABLE presence ADD COLUMN busy INTEGER",
+      "ALTER TABLE presence ADD COLUMN queue_depth INTEGER",
     ]) {
       try {
         sql.exec(ddl);
@@ -2961,9 +2977,9 @@ export class ChannelDO extends Server<Env> {
            name, kind, account, handle, display_name, avatar_url, avatar_thumb,
            state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
            status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at, context_json,
-           lineage_json
+           lineage_json, busy, queue_depth
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            kind = excluded.kind,
            account = COALESCE(excluded.account, presence.account),
@@ -2986,7 +3002,9 @@ export class ChannelDO extends Server<Env> {
            wake_kind = CASE WHEN ? THEN excluded.wake_kind ELSE presence.wake_kind END,
            wake_verified_at = CASE WHEN ? THEN excluded.wake_verified_at ELSE presence.wake_verified_at END,
            context_json = COALESCE(excluded.context_json, presence.context_json),
-           lineage_json = excluded.lineage_json`,
+           lineage_json = excluded.lineage_json,
+           busy = excluded.busy,
+           queue_depth = excluded.queue_depth`,
         identity.name,
         identity.kind,
         identity.owner ?? null, // 人类会话 = email，agent = 所属账号；presence.account 存它供前端显示「是谁」
@@ -3010,6 +3028,10 @@ export class ChannelDO extends Server<Env> {
         frame.wake?.verified_at ?? null,
         frame.context === undefined ? null : JSON.stringify(frame.context),
         identity.lineage === undefined ? null : JSON.stringify(identity.lineage),
+        // busy/queue_depth（#103）：每条 status 覆盖写（非 COALESCE）——不显式自报 busy 的 status
+        // （waiting/done/blocked 等）自然把 busy 清回 0，这就是「任务结束即清 busy」的落点。
+        frame.busy === true ? 1 : 0,
+        frame.queue_depth ?? 0,
         wakeProvided,
         wakeProvided,
       );
@@ -3649,7 +3671,7 @@ export class ChannelDO extends Server<Env> {
                 account, handle, display_name, avatar_url, avatar_thumb, client_version,
                 state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
-                context_json, lineage_json, paused_at, paused_resume_at`;
+                context_json, lineage_json, paused_at, paused_resume_at, busy, queue_depth`;
 
   private presenceList(): PresenceEntry[] {
     const liveCounts = this.liveConnectionCounts();
@@ -3728,6 +3750,10 @@ export class ChannelDO extends Server<Env> {
         const lineage = parseStoredLineage(r.lineage_json);
         return lineage === undefined ? {} : { lineage };
       })(),
+      // busy/queue_depth（#103）：仅在真的 busy / 有积压时下发，且 offline 一律不带（离线谈不上「忙」）。
+      // 缺省即「不忙、无积压」，旧客户端与旧行没这两列时 Number(undefined/null)=0/NaN，天然回退。
+      ...(state !== "offline" && Number(r.busy) === 1 ? { busy: true } : {}),
+      ...(state !== "offline" && Number(r.queue_depth) > 0 ? { queue_depth: Number(r.queue_depth) } : {}),
     };
   }
 

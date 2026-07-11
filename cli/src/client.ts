@@ -30,6 +30,12 @@ class FrameQueue {
   [Symbol.asyncIterator](): AsyncIterator<ServerFrame> {
     return this;
   }
+
+  // 已缓冲、尚未被消费的帧快照（#103）：serve 串行处理一条 wake 时，其后到达的帧堆在这里。
+  // 用于估算「排在身后的 wake 深度」。返回副本，调用方遍历不影响队列。
+  snapshot(): ServerFrame[] {
+    return [...this.items];
+  }
 }
 
 export interface ConnectOptions {
@@ -55,6 +61,8 @@ export interface Connection {
   /** 消费方处理完一条 msg 后调用，此时才推进并持久化游标 */
   ack(seq: number): void;
   close(): void;
+  /** 已缓冲、尚未消费的帧快照（#103）：估算 serve 排队深度用。 */
+  pendingFrames(): ServerFrame[];
   readonly cursor: number;
   readonly revCursor: number;
 }
@@ -301,6 +309,9 @@ export function connect(
         ws.close();
       }
       queue.end();
+    },
+    pendingFrames() {
+      return queue.snapshot();
     },
     get cursor() {
       return cursor;

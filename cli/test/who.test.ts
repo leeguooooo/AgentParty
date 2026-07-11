@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { PresenceEntry } from "@agentparty/shared";
-import { classify, identityNote, terminalIdentityText } from "../src/commands/who";
+import { busyNote, classify, identityNote, terminalIdentityText } from "../src/commands/who";
 
 const NOW = 1_000_000_000;
 
@@ -202,5 +202,42 @@ describe("who wake_unverified（#55/#60：自报 watch wake 如实标注未验�
     expect(serve?.wake_unverified).toBeUndefined();
     const hook = classify(p({ name: "bot", state: "offline", wake: { kind: "webhook" } }), NOW);
     expect(hook?.wake_unverified).toBeUndefined();
+  });
+});
+
+// busy + 队列深度（#103）：serve 串行处理长任务时，who 要能看出「忙、N 待处理」，
+// 而不是显示 working/可达、让人以为 @ 了会立刻回。
+describe("who busy + queue depth (#103)", () => {
+  test("busy 在线 agent：classify 带出 busy，无队列时不带 queue_depth", () => {
+    const r = classify(p({ name: "bot", state: "working", busy: true }), NOW);
+    expect(r?.tier).toBe("online");
+    expect(r?.busy).toBe(true);
+    expect(r).not.toHaveProperty("queue_depth");
+  });
+
+  test("busy 且有积压：带出 queue_depth", () => {
+    const r = classify(p({ name: "bot", state: "working", busy: true, queue_depth: 3 }), NOW);
+    expect(r?.busy).toBe(true);
+    expect(r?.queue_depth).toBe(3);
+  });
+
+  test("不 busy：不带 busy/queue_depth（诚实留白）", () => {
+    const r = classify(p({ name: "bot", state: "working", queue_depth: 5 }), NOW);
+    expect(r).not.toHaveProperty("busy");
+    expect(r).not.toHaveProperty("queue_depth");
+  });
+
+  test("busy 但 queue_depth=0：只带 busy，不显示 0 queued", () => {
+    const r = classify(p({ name: "bot", state: "working", busy: true, queue_depth: 0 }), NOW);
+    expect(r?.busy).toBe(true);
+    expect(r).not.toHaveProperty("queue_depth");
+  });
+
+  test("busyNote 渲染：忙、忙+队列、空闲三态", () => {
+    expect(busyNote({ name: "a", kind: "agent", tier: "online", age_ms: 0, busy: true })).toBe(" · ⏳ busy");
+    expect(busyNote({ name: "a", kind: "agent", tier: "online", age_ms: 0, busy: true, queue_depth: 4 })).toBe(
+      " · ⏳ busy · 4 queued",
+    );
+    expect(busyNote({ name: "a", kind: "agent", tier: "online", age_ms: 0 })).toBe("");
   });
 });

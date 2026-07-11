@@ -3,7 +3,7 @@ import type { PresenceEntry, Sender } from "@agentparty/shared";
 import { createElement } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import { buildGroups, countLiveGroups, ownerKey, pauseResumeAt, PresenceBar, type Item } from "./PresenceBar";
+import { buildGroups, busyLabel, countLiveGroups, ownerKey, pauseResumeAt, PresenceBar, type Item } from "./PresenceBar";
 
 function item(over: Partial<Item> = {}): Item {
   return {
@@ -126,6 +126,10 @@ function presenceEntry(clientVersion?: string): PresenceEntry {
   };
 }
 
+function busyEntry(over: Partial<PresenceEntry> = {}): PresenceEntry {
+  return { name: "agent-a", kind: "agent", state: "working", note: null, ts: Date.now(), busy: true, ...over };
+}
+
 const participants: Sender[] = [{ name: "agent-a", kind: "agent" }];
 let renderer: ReactTestRenderer | null = null;
 
@@ -197,6 +201,41 @@ describe("presence client version", () => {
     const r = renderPresence(presenceEntry());
 
     expect(nodesWithClass(r, "presence-client-version")).toHaveLength(0);
+  });
+});
+
+// busy + 队列深度（#103）：serve 串行处理长任务时，presence 要显式表达「忙 + N 待处理」，
+// 与 working 蜡笔点区分，让人别把「@ 了没立刻回」当失联。
+describe("busy indicator + queue depth (#103)", () => {
+  test("busyLabel: 忙无队列 / 忙有队列 / 不忙三态", () => {
+    const it = (over: Partial<Item>) =>
+      ({ name: "a", busy: false, queueDepth: null, ...over }) as Item;
+    expect(busyLabel(it({ busy: true, queueDepth: null }))).toBe("⏳ busy");
+    expect(busyLabel(it({ busy: true, queueDepth: 4 }))).toBe("⏳ busy · 4 queued");
+    expect(busyLabel(it({ busy: false }))).toBeNull();
+  });
+
+  test("busy 项渲染琥珀徽章 + 顶部「N busy」汇总", () => {
+    const r = renderPresence(busyEntry({ queue_depth: 3 }));
+    const badges = nodesWithClass(r, "presence-busy");
+    expect(badges.length).toBeGreaterThan(0);
+    expect(badges.some((n) => n.children.join("").includes("⏳ busy · 3 queued"))).toBe(true);
+    const summary = nodesWithClass(r, "presence-alert--busy");
+    expect(summary).toHaveLength(1);
+    expect(summary[0]?.children.join("")).toContain("1 busy");
+  });
+
+  test("busy 但无队列：徽章只显示「busy」，不显示 queued", () => {
+    const r = renderPresence(busyEntry({ queue_depth: 0 }));
+    const badges = nodesWithClass(r, "presence-busy");
+    expect(badges.some((n) => n.children.join("") === "⏳ busy")).toBe(true);
+    expect(badges.some((n) => n.children.join("").includes("queued"))).toBe(false);
+  });
+
+  test("不忙的 working 项：不渲染 busy 徽章或汇总", () => {
+    const r = renderPresence(presenceEntry());
+    expect(nodesWithClass(r, "presence-busy")).toHaveLength(0);
+    expect(nodesWithClass(r, "presence-alert--busy")).toHaveLength(0);
   });
 });
 

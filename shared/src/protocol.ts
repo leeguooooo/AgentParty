@@ -310,6 +310,14 @@ export interface PresenceEntry {
    * 条件保持「多久没干活」而非「TCP 有没有断」（一个卡在无超时 await 上的 serve socket 照样是活的）。
    */
   live?: boolean;
+  /**
+   * serve 正串行处理一条 wake、无法即时响应新 @（issue #103）。DO 从最近一条 status 帧的 busy 写入，
+   * 仅 state != offline 且 busy 时下发；旧客户端忽略。用途：who/reach/web 显示「忙」，让同事把 ask 超时
+   * 当作「忙、稍后回」而非「失联」，别反复 @ 堆重复唤醒。**不参与可达性/租约判定**——忙 ≠ 不可达。
+   */
+  busy?: boolean;
+  /** 排在当前 wake 身后、尚未处理的 wake 数（issue #103）。仅 state != offline 且 >0 时下发。 */
+  queue_depth?: number;
 }
 
 export interface ChannelRoleAssignment {
@@ -465,6 +473,13 @@ export interface SendStatusFrame {
   context?: AgentContext;
   decision?: SendHostDecision;
   workflow?: SendStatusWorkflow;
+  /**
+   * serve 串行处理一条 wake 时置 true：正忙、无法即时响应新 @（issue #103）。空/false = 空闲。
+   * 服务端据此在 presence 上表达「忙」，让同事把 ask 超时当作「忙」而非「失联」，别反复 @ 堆重复唤醒。
+   */
+  busy?: boolean;
+  /** 当前排在身后、尚未处理的 wake 数（issue #103）。0/缺省 = 无积压。非负整数。 */
+  queue_depth?: number;
 }
 
 export type SendFrame = SendMessageFrame | SendStatusFrame;

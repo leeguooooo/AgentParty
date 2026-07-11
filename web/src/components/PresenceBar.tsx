@@ -71,9 +71,11 @@ export interface Item {
   connectionCount: number;
   clientVersion: string | null;
   // 人为暂停接待（#180）：被 @ 也不唤醒（webhook 不投、serve/watch 自我抑制），消息仍进历史。
-  // 与 offline 语义/视觉都不同——不是掉线丢了，是人主动按下暂停。
   paused: boolean;
   resumeAt: number | null; // 定时恢复时刻（epoch ms）；null = 需手动恢复
+  // busy（#103）：serve 正串行处理一条 wake，可达但回复会慢。working = 在干活，busy = 正忙无法即时响应新 @。
+  busy: boolean;
+  queueDepth: number | null; // 忙时身后排队、尚未处理的 wake 数；>0 才有值
 }
 
 export interface PresenceGroup {
@@ -116,6 +118,12 @@ function residencyBadge(item: Item): string | null {
   if (item.residency === null) return null;
   if (item.residency === "human_driven") return "manual";
   return item.residency;
+}
+
+// busy 标签（#103）：「⏳ busy」或「⏳ busy · N queued」。null = 不忙，不渲染。
+export function busyLabel(item: Item): string | null {
+  if (!item.busy) return null;
+  return item.queueDepth !== null ? `⏳ busy · ${item.queueDepth} queued` : "⏳ busy";
 }
 
 function wakeabilityBadge(item: Item): { text: string; tone: "off" | "pending" | "on" } | null {
@@ -272,6 +280,9 @@ export function PresenceBar({
       // 暂停接待（#180）：即使 agent 离线也保留 paused（人主动设的状态，不随连接消失）。
       paused: entry?.paused === true,
       resumeAt: entry?.resume_at ?? null,
+      // busy/queueDepth（#103）：服务端只在 state != offline 且真忙时下发 busy，故离线项天然为 false。
+      busy: entry?.busy === true,
+      queueDepth: entry?.busy === true && typeof entry.queue_depth === "number" && entry.queue_depth > 0 ? entry.queue_depth : null,
     };
     if (!connected) {
       // owner 本就仅连接中的参与者可知（见上方字段注释）；handle 依赖同一份可信度，一并置空，
@@ -314,6 +325,7 @@ export function PresenceBar({
   // 顶部计数按账号折叠后的人数（非会话行数）——离线会话已在 buildGroups 里按 account 归并。
   const { live: liveGroups, total: totalGroups } = countLiveGroups(sortedGroups);
   const blockedCount = items.filter((it) => it.state === "blocked").length;
+  const busyCount = items.filter((it) => it.busy).length;
   const duplicateCount = items.filter((it) => it.connectionCount > 1).length;
   // 折叠态下 chip 不在 DOM 里，popover 也不该跟着冒出来。
   const activePopoverGroup =
@@ -331,10 +343,12 @@ export function PresenceBar({
     const badge = roleBadge(it, now);
     const residency = residencyBadge(it);
     const wakeability = wakeabilityBadge(it);
+    const busy = busyLabel(it);
     const activeHost = hasActiveHostLease(it, now);
     const full = mode === "full";
     const titleParts = [
       it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name,
+      it.busy ? `busy${it.queueDepth !== null ? ` · ${it.queueDepth} queued` : ""} (reachable, reply may be slow — do not re-@)` : null,
       it.handle !== null && it.handle !== "" ? `handle: ${it.handle}` : null,
       it.role !== null ? `role: ${it.role}` : null,
       it.responsibility !== null && it.responsibility !== "" ? `responsibility: ${it.responsibility}` : null,
@@ -401,6 +415,7 @@ export function PresenceBar({
             {badge}
           </span>
         )}
+        {busy !== null && <span className="t-mono presence-busy">{busy}</span>}
         {full && it.lineage !== null && (
           <span className="t-mono presence-lineage">child:{it.lineage.parent_agent}</span>
         )}
@@ -565,6 +580,7 @@ export function PresenceBar({
                 )}
                 {agent.connectionCount > 1 && <span className="t-mono presence-agent-duplicate">x{agent.connectionCount}</span>}
                 {roleBadge(agent, now) !== null && <span className="t-mono presence-agent-role">{roleBadge(agent, now)}</span>}
+                {busyLabel(agent) !== null && <span className="t-mono presence-busy presence-busy--chip">{busyLabel(agent)}</span>}
               </span>
             ))}
             {hiddenAgents > 0 && <span className="t-mono presence-agent-more">+{hiddenAgents}</span>}
@@ -594,6 +610,11 @@ export function PresenceBar({
             <span className="presence-toggle-arrow" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
           </button>
           {blockedCount > 0 && <span className="t-mono presence-alert">{blockedCount} blocked</span>}
+          {busyCount > 0 && (
+            <span className="t-mono presence-alert presence-alert--busy" title="serially handling a wake — reachable, reply may be slow">
+              ⏳ {busyCount} busy
+            </span>
+          )}
           {duplicateCount > 0 && <span className="t-mono presence-alert presence-alert--duplicate">{duplicateCount} duplicate</span>}
           {items.length === 0 && (
             <span className="t-mono presence-empty" role="status" aria-live="polite">

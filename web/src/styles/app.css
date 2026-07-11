@@ -1205,6 +1205,12 @@
 .presence-alert--duplicate {
   background: var(--t-panel);
 }
+/* busy 汇总徽章（#103）：琥珀调，区别于红色 blocked 告警。 */
+.presence-alert--busy {
+  border-color: var(--d-amber);
+  color: var(--d-amber);
+  background: var(--d-amber-soft);
+}
 .presence-popover {
   position: fixed;
   z-index: 70;
@@ -1374,6 +1380,23 @@
 .presence-role--active {
   background: var(--d-green);
   color: #fff;
+}
+/* busy（#103）：琥珀蜡笔徽章，与 role/residency 同形，色调独立——一眼看出「忙、可达但回复慢」。 */
+.presence-busy {
+  flex: none;
+  padding: 1px 5px;
+  border: 1.4px solid var(--d-amber);
+  border-radius: 0;
+  background: var(--d-amber-soft);
+  color: var(--d-amber);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.presence-busy--chip {
+  font-size: 9px;
+  padding: 0 4px;
 }
 .presence-wake--off {
   border-color: var(--t-faint);

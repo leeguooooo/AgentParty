@@ -7,6 +7,7 @@ import {
   createBuiltinRunner,
   createSdkRunner,
   projectAgentChildName,
+  pendingWakeDepth,
   run as runServeCommand,
   runProfileServe,
   runServe,
@@ -102,6 +103,38 @@ describe("runServe", () => {
     expect(seen[0]!.frame.seq).toBe(1);
     expect(seen[0]!.self).toBe("me");
     expect(cursors).toEqual([1]);
+  });
+
+  // busy + 队列深度（#103）：serve 串行处理长任务时不再假装可即时响应。
+  test("busy lifecycle: builtin runner marks busy on the working frame, then serve clears it when idle", async () => {
+    const s = closeAfterOneMention();
+    const { posts, post } = postRecorder();
+    const workdir = tempDir();
+    const runProcess: RunnerProcess = async (args) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, "answer\n");
+      return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
+    };
+    const o = opts({
+      server: s.url,
+      post,
+      builtinRunner: { server: s.url, token: "ap_tok", channel: "dev", harness: "codex", workdir, runProcess, post },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+
+    // 处理这条 wake 时自报「忙」（无积压 → queue_depth 0）
+    const working = posts.find((p) => (p.body as { state?: string }).state === "working");
+    expect(working, "runner must post a working frame").toBeDefined();
+    expect(working!.body).toMatchObject({ kind: "status", state: "working", busy: true, queue_depth: 0 });
+
+    // 收尾补一条「空闲」把 busy 清回 false——任务结束就不再假忙
+    const idle = posts.find((p) => (p.body as { state?: string; busy?: boolean }).state === "waiting" && (p.body as { busy?: boolean }).busy === false);
+    expect(idle, "serve must post a busy=false idle-clear once the queue drains").toBeDefined();
+    expect(idle!.body).toMatchObject({ kind: "status", state: "waiting", busy: false, queue_depth: 0 });
+
+    // 顺序：先忙后清
+    expect(posts.indexOf(working!)).toBeLessThan(posts.indexOf(idle!));
   });
 
   test("reports a non-zero runner exit instead of silently swallowing it", async () => {
@@ -1050,5 +1083,33 @@ describe("codex-sdk runner", () => {
     await second;
     expect(JSON.parse(prompts[0]!).seq).toBe(107);
     expect(JSON.parse(prompts[1]!).seq).toBe(108);
+  });
+});
+
+// 排队深度估算（#103）：只数「排在当前 wake 身后、够格触发唤醒」的已缓冲帧。
+describe("pendingWakeDepth (#103)", () => {
+  const msg = (seq: number, sender: string, mentions: string[]) =>
+    msgFrame(seq, "x", { sender: { name: sender, kind: "agent" }, mentions }) as never;
+
+  test("counts buffered mentions after the current seq, excluding self and older frames", () => {
+    const pending = [
+      msg(2, "alice", ["me"]),
+      msg(3, "bob", ["me"]),
+      msg(4, "me", ["me"]), // 自己发的不算
+      { type: "status", seq: 5 } as never, // 非 msg 帧不算
+      msg(1, "alice", ["me"]), // 早于/等于当前 seq 不算
+    ];
+    expect(pendingWakeDepth(pending, "me", true, 1)).toBe(2);
+  });
+
+  test("mentions-only=false counts every fresh message from others, mentioned or not", () => {
+    const pending = [msg(2, "alice", []), msg(3, "bob", ["someone-else"])];
+    expect(pendingWakeDepth(pending, "me", false, 1)).toBe(2);
+    // mentions-only=true 时，没 @ 我的不算
+    expect(pendingWakeDepth(pending, "me", true, 1)).toBe(0);
+  });
+
+  test("empty queue → depth 0", () => {
+    expect(pendingWakeDepth([], "me", true, 0)).toBe(0);
   });
 });
