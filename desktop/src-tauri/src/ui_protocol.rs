@@ -139,6 +139,7 @@ pub fn serve_verified<V: SignatureVerifier>(
     store: &UiUpdateStore,
     shell_version: &str,
     ui_abi: u32,
+    minimum_published_at: Option<i64>,
     verifier: &V,
     url_path: &str,
 ) -> UiProtocolResponse {
@@ -156,11 +157,12 @@ pub fn serve_verified<V: SignatureVerifier>(
         .as_ref()
         .is_some_and(|current| current.build_id == identity.0 && current.ui_abi == identity.1);
     if !cached_matches {
-        let archive = match store.verified_current_archive(
+        let archive = match store.verified_current_archive_at_least(
             shell_version,
             ui_abi,
             verifier,
             &UpdateLimits::default(),
+            minimum_published_at,
         ) {
             Ok(Some(archive)) => archive,
             Ok(None) => return not_found(),
@@ -752,6 +754,7 @@ mod tests {
             &store,
             "0.2.94",
             SUPPORTED_UI_ABI,
+            None,
             &AcceptVerifier,
             "/",
         );

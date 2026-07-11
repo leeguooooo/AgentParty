@@ -554,6 +554,7 @@ pub struct VerifiedCurrentUiArchive {
     ui_abi: u32,
     entrypoint: String,
     file_count: usize,
+    published_at: i64,
     bytes: Vec<u8>,
 }
 
@@ -572,6 +573,10 @@ impl VerifiedCurrentUiArchive {
 
     pub fn file_count(&self) -> usize {
         self.file_count
+    }
+
+    pub fn published_at(&self) -> i64 {
+        self.published_at
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -637,6 +642,17 @@ impl UiUpdateStore {
         verifier: &V,
         limits: &UpdateLimits,
     ) -> Result<Option<VerifiedCurrentUiArchive>, StoreError> {
+        self.verified_current_archive_at_least(shell_version, ui_abi, verifier, limits, None)
+    }
+
+    pub fn verified_current_archive_at_least<V: SignatureVerifier>(
+        &self,
+        shell_version: &str,
+        ui_abi: u32,
+        verifier: &V,
+        limits: &UpdateLimits,
+        minimum_published_at: Option<i64>,
+    ) -> Result<Option<VerifiedCurrentUiArchive>, StoreError> {
         let Some(current) = self.current_build()? else {
             return Ok(None);
         };
@@ -652,6 +668,12 @@ impl UiUpdateStore {
         if verified.build_id() != current.build_id || verified.manifest.ui_abi != current.ui_abi {
             return Err(StoreError::InvalidEvidence);
         }
+        let published_at = OffsetDateTime::parse(&verified.manifest.published_at, &Rfc3339)
+            .map_err(|_| StoreError::InvalidEvidence)?
+            .unix_timestamp();
+        if minimum_published_at.is_some_and(|minimum| published_at < minimum) {
+            return Err(StoreError::RollbackRejected);
+        }
         let bytes = read_regular_file_bounded(
             &current.root.join(BUILD_ARCHIVE_FILE),
             limits.max_download_bytes,
@@ -664,6 +686,7 @@ impl UiUpdateStore {
             ui_abi: current.ui_abi,
             entrypoint: verified.manifest.entrypoint.clone(),
             file_count: verified.manifest.archive.file_count,
+            published_at,
             bytes,
         }))
     }
@@ -703,7 +726,10 @@ impl UiUpdateStore {
         fs::create_dir_all(&staging).map_err(|_| StoreError::Io)?;
         let final_path = staging.join(update.build_id());
         if final_path.exists() {
-            return Err(StoreError::AlreadyExists);
+            if !final_path.is_dir() {
+                return Err(StoreError::AlreadyExists);
+            }
+            fs::remove_dir_all(&final_path).map_err(|_| StoreError::Io)?;
         }
         let release_path = self.release_path(update.build_id());
         if release_path.exists() {
@@ -1673,6 +1699,18 @@ mod tests {
         assert_eq!(verified.bytes(), bundle);
         assert_eq!(
             store
+                .verified_current_archive_at_least(
+                    "0.2.94",
+                    SUPPORTED_UI_ABI,
+                    &verifier,
+                    &limits,
+                    Some(verified.published_at() + 1),
+                )
+                .unwrap_err(),
+            StoreError::RollbackRejected
+        );
+        assert_eq!(
+            store
                 .verified_current_archive(
                     "0.2.94",
                     SUPPORTED_UI_ABI,
@@ -1725,12 +1763,21 @@ mod tests {
         let orphan = store.release_path(update.build_id());
         std::fs::create_dir_all(&orphan).unwrap();
         std::fs::write(orphan.join("partial"), b"crash residue").unwrap();
+        let orphan_staging = store
+            .metadata_path()
+            .parent()
+            .unwrap()
+            .join("staging")
+            .join(update.build_id());
+        std::fs::create_dir_all(&orphan_staging).unwrap();
+        std::fs::write(orphan_staging.join("partial"), b"staging residue").unwrap();
 
         let staged = store
             .stage(&update, &bundle, &UpdateLimits::default())
             .unwrap();
 
         assert!(staged.path.join("index.html").is_file());
+        assert!(!staged.path.join("partial").exists());
         assert!(!orphan.exists());
     }
 

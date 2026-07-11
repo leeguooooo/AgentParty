@@ -36,6 +36,8 @@ use tauri_plugin_deep_link::DeepLinkExt;
 
 const CREDENTIAL_SERVICE: &str = "com.agentparty.desktop";
 const CREDENTIAL_ACCOUNT: &str = "desktop-session";
+const UI_HIGH_WATER_ACCOUNT: &str = "desktop-ui-high-water";
+const UI_RELEASE_FLOOR_PUBLISHED_AT: i64 = 1_783_751_237;
 const UPDATER_DIAGNOSTIC_FILE: &str = "updater-diagnostic.json";
 static UPDATER_DIAGNOSTIC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -291,6 +293,33 @@ impl CredentialBackend for NativeCredentialBackend {
     }
 }
 
+fn read_ui_high_water<B: CredentialBackend>(backend: &B) -> Result<i64, String> {
+    let Some(raw) = backend.read(UI_HIGH_WATER_ACCOUNT)? else {
+        return Ok(UI_RELEASE_FLOOR_PUBLISHED_AT);
+    };
+    let stored = raw
+        .parse::<i64>()
+        .map_err(|_| "desktop UI high-water mark is invalid".to_string())?;
+    if stored < UI_RELEASE_FLOOR_PUBLISHED_AT {
+        return Err("desktop UI high-water mark is invalid".to_string());
+    }
+    Ok(stored)
+}
+
+fn advance_ui_high_water<B: CredentialBackend>(
+    backend: &B,
+    published_at: i64,
+) -> Result<(), String> {
+    let current = read_ui_high_water(backend)?;
+    if published_at < current {
+        return Err("desktop UI release is older than the accepted high-water mark".to_string());
+    }
+    if published_at > current {
+        backend.write(UI_HIGH_WATER_ACCOUNT, &published_at.to_string())?;
+    }
+    Ok(())
+}
+
 fn migrate_legacy_credential<B: CredentialBackend>(backend: &B) -> Result<Option<String>, String> {
     let Some(raw) = backend.read(CREDENTIAL_ACCOUNT)? else {
         return Ok(None);
@@ -444,20 +473,26 @@ fn navigate_main_to(app: &tauri::AppHandle, url: &'static str) {
 fn navigate_to_available_ui(app: &tauri::AppHandle, store: &ui_update::UiUpdateStore) {
     let shell_version = app.package_info().version.to_string();
     let verifier = configured_ui_verifier().ok();
+    let high_water = read_ui_high_water(&NativeCredentialBackend).ok();
+    let trust_available = verifier.is_some() && high_water.is_some();
     let is_verified = |store: &ui_update::UiUpdateStore| {
-        verifier.as_ref().is_some_and(|verifier| {
-            store
-                .verified_current_archive(
-                    &shell_version,
-                    ui_update::SUPPORTED_UI_ABI,
-                    verifier,
-                    &ui_update::UpdateLimits::default(),
-                )
-                .is_ok_and(|archive| archive.is_some())
-        })
+        verifier
+            .as_ref()
+            .zip(high_water)
+            .is_some_and(|(verifier, minimum)| {
+                store
+                    .verified_current_archive_at_least(
+                        &shell_version,
+                        ui_update::SUPPORTED_UI_ABI,
+                        verifier,
+                        &ui_update::UpdateLimits::default(),
+                        Some(minimum),
+                    )
+                    .is_ok_and(|archive| archive.is_some())
+            })
     };
     let mut verified = is_verified(store);
-    if !verified {
+    if !verified && trust_available {
         if let Ok(metadata) = store.load_metadata() {
             if let Some(build_id) = metadata.current {
                 if metadata.status == ui_update::UpdateStatus::Pending {
@@ -609,11 +644,19 @@ fn serve_ui_protocol(app: &tauri::AppHandle, path: &str) -> tauri::http::Respons
             .body(b"Internal Server Error".to_vec())
             .expect("static desktop UI error response must be valid");
     };
+    let Ok(high_water) = read_ui_high_water(&NativeCredentialBackend) else {
+        return tauri::http::Response::builder()
+            .status(500)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body(b"Internal Server Error".to_vec())
+            .expect("static desktop UI error response must be valid");
+    };
     let protocol = ui_protocol::serve_verified(
         &app.state::<UiRuntimeManager>().protocol_cache,
         &ui_update::UiUpdateStore::new(app_data),
         &app.package_info().version.to_string(),
         ui_update::SUPPORTED_UI_ABI,
+        Some(high_water),
         &verifier,
         path,
     );
@@ -650,7 +693,24 @@ fn desktop_ui_ready(app: tauri::AppHandle, build_id: String, ui_abi: u32) -> Res
         .path()
         .app_data_dir()
         .map_err(|_| "desktop UI data directory is unavailable".to_string())?;
-    ui_update::UiUpdateStore::new(app_data)
+    let store = ui_update::UiUpdateStore::new(app_data);
+    let verifier = configured_ui_verifier()?;
+    let high_water = read_ui_high_water(&NativeCredentialBackend)?;
+    let archive = store
+        .verified_current_archive_at_least(
+            &app.package_info().version.to_string(),
+            ui_update::SUPPORTED_UI_ABI,
+            &verifier,
+            &ui_update::UpdateLimits::default(),
+            Some(high_water),
+        )
+        .map_err(|_| "desktop UI signed evidence was rejected".to_string())?
+        .ok_or_else(|| "desktop UI signed evidence is unavailable".to_string())?;
+    if archive.build_id() != build_id || archive.ui_abi() != ui_abi {
+        return Err("desktop UI ready receipt does not match signed evidence".to_string());
+    }
+    advance_ui_high_water(&NativeCredentialBackend, archive.published_at())?;
+    store
         .mark_ready(&build_id, ui_abi)
         .map_err(|_| "desktop UI ready receipt was rejected".to_string())
 }
@@ -835,10 +895,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        credential_account_for_origin, migrate_legacy_credential, parse_stored_credential,
-        tray_action, validate_updater_diagnostic, write_updater_diagnostic, CredentialBackend,
-        ExitGuard, TrayAction, UpdaterDiagnostic, UpdaterDiagnosticCategory,
-        UpdaterDiagnosticStage, UpdaterDiagnosticStatus, CREDENTIAL_ACCOUNT,
+        advance_ui_high_water, credential_account_for_origin, migrate_legacy_credential,
+        parse_stored_credential, read_ui_high_water, tray_action, validate_updater_diagnostic,
+        write_updater_diagnostic, CredentialBackend, ExitGuard, TrayAction, UpdaterDiagnostic,
+        UpdaterDiagnosticCategory, UpdaterDiagnosticStage, UpdaterDiagnosticStatus,
+        CREDENTIAL_ACCOUNT, UI_HIGH_WATER_ACCOUNT, UI_RELEASE_FLOOR_PUBLISHED_AT,
     };
 
     fn pending_updater_receipt() -> UpdaterDiagnostic {
@@ -916,6 +977,25 @@ mod tests {
             self.0.borrow_mut().remove(account);
             Ok(())
         }
+    }
+
+    #[test]
+    fn ui_high_water_is_monotonic_and_not_stored_in_user_writable_state() {
+        let credentials = MemoryCredentials::default();
+        assert_eq!(
+            read_ui_high_water(&credentials).unwrap(),
+            UI_RELEASE_FLOOR_PUBLISHED_AT
+        );
+
+        let accepted = UI_RELEASE_FLOOR_PUBLISHED_AT + 60;
+        advance_ui_high_water(&credentials, accepted).unwrap();
+        assert_eq!(read_ui_high_water(&credentials).unwrap(), accepted);
+        assert_eq!(
+            credentials.0.borrow().get(UI_HIGH_WATER_ACCOUNT).cloned(),
+            Some(accepted.to_string())
+        );
+        assert!(advance_ui_high_water(&credentials, accepted - 1).is_err());
+        assert_eq!(read_ui_high_water(&credentials).unwrap(), accepted);
     }
 
     #[test]
