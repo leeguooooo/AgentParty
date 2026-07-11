@@ -11,12 +11,56 @@ export interface DesktopSettingsRuntime {
   isDesktopRuntime(): boolean;
   isAutostartEnabled(): Promise<boolean>;
   setAutostartEnabled(enabled: boolean): Promise<boolean>;
+  getAppVersion(): Promise<string>;
+}
+
+export interface DesktopVersionInfo {
+  desktop: string | null;
+  server: string | null;
+  commit: string | null;
+}
+
+type DesktopVersionFetcher = (input: string) => Promise<Response>;
+
+function displayVersion(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(normalized)
+    ? normalized
+    : null;
+}
+
+function displayCommit(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : null;
+}
+
+export async function loadDesktopVersionInfo(
+  runtime: DesktopSettingsRuntime,
+  serverOrigin: string,
+  fetcher: DesktopVersionFetcher = fetch,
+): Promise<DesktopVersionInfo> {
+  const desktop = runtime.getAppVersion().then(displayVersion).catch(() => null);
+  const server = (async (): Promise<Pick<DesktopVersionInfo, "server" | "commit">> => {
+    const origin = serverOrigin.trim().replace(/\/+$/, "");
+    if (origin === "") return { server: null, commit: null };
+    try {
+      const response = await fetcher(`${origin}/api/health`);
+      if (!response.ok) return { server: null, commit: null };
+      const payload = await response.json() as { version?: unknown; commit?: unknown };
+      return { server: displayVersion(payload.version), commit: displayCommit(payload.commit) };
+    } catch {
+      return { server: null, commit: null };
+    }
+  })();
+  const [desktopVersion, serverVersion] = await Promise.all([desktop, server]);
+  return { desktop: desktopVersion, ...serverVersion };
 }
 
 const defaultRuntime: DesktopSettingsRuntime = {
   isDesktopRuntime,
   isAutostartEnabled,
   setAutostartEnabled,
+  getAppVersion: async () => (await import("@tauri-apps/api/app")).getVersion(),
 };
 
 export async function loadAutostartSetting(runtime: DesktopSettingsRuntime): Promise<boolean> {
@@ -66,12 +110,14 @@ interface PanelProps {
   enabled: boolean;
   pending: boolean;
   error: boolean;
+  versions: DesktopVersionInfo;
   t: TFunc;
   onToggle(): void;
   switchRef?: RefObject<HTMLButtonElement | null>;
 }
 
-export function DesktopSettingsPanel({ enabled, pending, error, t, onToggle, switchRef }: PanelProps) {
+export function DesktopSettingsPanel({ enabled, pending, error, versions, t, onToggle, switchRef }: PanelProps) {
+  const unavailable = t("DesktopSettings.version.unavailable");
   return (
     <section
       id="desktop-settings-panel"
@@ -100,21 +146,31 @@ export function DesktopSettingsPanel({ enabled, pending, error, t, onToggle, swi
       </div>
       {pending && <p className="desktop-settings-status">{t("DesktopSettings.autostart.loading")}</p>}
       {error && <p className="desktop-settings-error" role="alert">{t("DesktopSettings.autostart.error")}</p>}
+      <dl className="desktop-settings-versions">
+        <div><dt>{t("DesktopSettings.version.desktop")}</dt><dd>{versions.desktop ?? unavailable}</dd></div>
+        <div><dt>{t("DesktopSettings.version.server")}</dt><dd>{versions.server ?? unavailable}</dd></div>
+        <div>
+          <dt>{t("DesktopSettings.version.build")}</dt>
+          <dd title={versions.commit ?? undefined}>{versions.commit?.slice(0, 8) ?? unavailable}</dd>
+        </div>
+      </dl>
     </section>
   );
 }
 
 interface Props {
   runtime?: DesktopSettingsRuntime;
+  serverOrigin?: string;
 }
 
-export function DesktopSettings({ runtime = defaultRuntime }: Props) {
+export function DesktopSettings({ runtime = defaultRuntime, serverOrigin = "" }: Props) {
   const t = useT();
   const desktop = runtime.isDesktopRuntime();
   const [open, setOpen] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [pending, setPending] = useState(desktop);
   const [error, setError] = useState(false);
+  const [versions, setVersions] = useState<DesktopVersionInfo>({ desktop: null, server: null, commit: null });
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const switchRef = useRef<HTMLButtonElement | null>(null);
@@ -132,6 +188,15 @@ export function DesktopSettings({ runtime = defaultRuntime }: Props) {
     });
     return () => { alive = false; };
   }, [desktop, runtime]);
+
+  useEffect(() => {
+    if (!desktop) return;
+    let alive = true;
+    void loadDesktopVersionInfo(runtime, serverOrigin).then((next) => {
+      if (alive) setVersions(next);
+    });
+    return () => { alive = false; };
+  }, [desktop, runtime, serverOrigin]);
 
   useEffect(() => {
     if (!open) return;
@@ -204,6 +269,7 @@ export function DesktopSettings({ runtime = defaultRuntime }: Props) {
           enabled={enabled}
           pending={pending}
           error={error}
+          versions={versions}
           t={t}
           onToggle={toggleAutostart}
           switchRef={switchRef}

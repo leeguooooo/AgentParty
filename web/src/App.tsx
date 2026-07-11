@@ -864,7 +864,7 @@ export function App() {
             />
           </div>
         )}
-        <DesktopSettings />
+        <DesktopSettings serverOrigin={activeOrigin} />
         {desktop && (
           <ServerSwitcher
             profiles={serverProfiles}
