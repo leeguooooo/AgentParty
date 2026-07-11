@@ -19,6 +19,7 @@ import {
   WEBHOOK_RETRY_DELAYS_MS,
   WEBHOOK_TIMEOUT_MS,
   type AgentLineage,
+  type Attachment,
   type ErrorCode,
   type AgentContext,
   type CollaborationRole,
@@ -247,6 +248,17 @@ function parseStoredCompletionArtifact(input: unknown): CompletionArtifact | und
     const parsed = JSON.parse(input) as unknown;
     const artifact = parseCompletionArtifact(parsed, (parsed as { kickoff_seq?: unknown } | null)?.kickoff_seq as number | null);
     return artifact ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// 反序列化落库的附件引用（#176）；复用 parseAttachments 做结构校验，脏数据静默丢弃。
+function parseStoredAttachments(input: unknown): Attachment[] | undefined {
+  if (typeof input !== "string" || input === "") return undefined;
+  try {
+    const parsed = parseAttachments(JSON.parse(input) as unknown);
+    return parsed === null ? undefined : parsed;
   } catch {
     return undefined;
   }
@@ -655,6 +667,32 @@ function parseIdempotencyKey(raw: unknown): string | undefined {
   return raw;
 }
 
+// 附件引用（#176）：一条消息可带 N 个引用，只是元数据不是 blob。缺省/空数组 → undefined（不落列）。
+// 校验失败（类型不对、超上限）返回 null，由 parseSendFrame 上抛整条拒收——附件是主动带上的，宁可明确报错。
+const MAX_ATTACHMENTS_PER_MESSAGE = 20;
+const ATTACHMENT_KEY_MAX = 1024;
+const ATTACHMENT_FILENAME_MAX = 512;
+const ATTACHMENT_CONTENT_TYPE_MAX = 256;
+const ATTACHMENT_URL_MAX = 2048;
+function parseAttachments(raw: unknown): Attachment[] | null | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) return null;
+  if (raw.length === 0) return undefined;
+  if (raw.length > MAX_ATTACHMENTS_PER_MESSAGE) return null;
+  const out: Attachment[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) return null;
+    const a = item as Record<string, unknown>;
+    if (typeof a.key !== "string" || a.key.length === 0 || a.key.length > ATTACHMENT_KEY_MAX) return null;
+    if (typeof a.filename !== "string" || a.filename.length === 0 || a.filename.length > ATTACHMENT_FILENAME_MAX) return null;
+    if (typeof a.content_type !== "string" || a.content_type.length === 0 || a.content_type.length > ATTACHMENT_CONTENT_TYPE_MAX) return null;
+    if (typeof a.size !== "number" || !Number.isInteger(a.size) || a.size < 0) return null;
+    if (typeof a.url !== "string" || a.url.length === 0 || a.url.length > ATTACHMENT_URL_MAX) return null;
+    out.push({ key: a.key, filename: a.filename, content_type: a.content_type, size: a.size, url: a.url });
+  }
+  return out;
+}
+
 // rest body 与 ws send 帧共用的校验（rest 侧无 type 字段）
 function parseSendFrame(input: unknown): SendFrame | null {
   if (typeof input !== "object" || input === null) return null;
@@ -675,6 +713,8 @@ function parseSendFrame(input: unknown): SendFrame | null {
     if (reply_to === undefined) return null;
     const completionArtifact = parseCompletionArtifact(f.completion_artifact, reply_to);
     if (completionArtifact === null) return null;
+    const attachments = parseAttachments(f.attachments);
+    if (attachments === null) return null;
     let replaces: number | undefined;
     if (f.replaces !== undefined) {
       if (typeof f.replaces !== "number" || !Number.isInteger(f.replaces) || f.replaces <= 0) return null;
@@ -687,6 +727,7 @@ function parseSendFrame(input: unknown): SendFrame | null {
       mentions,
       reply_to,
       ...(completionArtifact !== undefined ? { completion_artifact: completionArtifact } : {}),
+      ...(attachments !== undefined ? { attachments } : {}),
       ...(completionArtifact !== undefined && replaces !== undefined ? { replaces } : {}),
       ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
     };
@@ -905,6 +946,8 @@ export class ChannelDO extends Server<Env> {
       // 幂等键（#98）：客户端每次发送带一个 ULID，服务端按 (sender_name, idempotency_key) 去重。
       // 注：messages 表是 DO 内建 SQLite（ctx.storage.sql），不是 D1，故无需 worker/migrations 迁移文件。
       "ALTER TABLE messages ADD COLUMN idempotency_key TEXT",
+      // 附件引用（#176）：存 Attachment[] 的 JSON，仅元数据（key/filename/type/size/url），blob 在 R2。
+      "ALTER TABLE messages ADD COLUMN attachments_json TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -2618,6 +2661,7 @@ export class ChannelDO extends Server<Env> {
     const completionGate = this.getMeta("completion_gate");
     const completionReviewPolicy = (this.getMeta("completion_review_policy") ?? "sender") as CompletionReviewPolicy;
     const completionArtifact = frame.kind === "message" ? frame.completion_artifact : undefined;
+    const attachments = frame.kind === "message" ? frame.attachments : undefined;
     const replacesSeq =
       frame.kind === "message" && completionArtifact !== undefined && completionGate === "reviewer"
         ? frame.replaces
@@ -2662,6 +2706,7 @@ export class ChannelDO extends Server<Env> {
             ...(effectiveRole === undefined ? {} : { role: effectiveRole }),
             ...(roleSource === undefined ? {} : { role_source: roleSource }),
             ...(completionArtifact !== undefined ? { completion_artifact: completionArtifact } : {}),
+            ...(attachments !== undefined ? { attachments } : {}),
             ...(completionArtifact !== undefined && completionGate === "reviewer"
               ? {
                   completion_review: {
@@ -2696,9 +2741,9 @@ export class ChannelDO extends Server<Env> {
          state, note, status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
          status_decision_json, status_workflow_json, message_workflow_json,
          sender_role, sender_role_source, completion_artifact_json, completion_review_state, completion_review_policy,
-         completion_review_replaces_seq, idempotency_key, ts
+         completion_review_replaces_seq, idempotency_key, attachments_json, ts
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
@@ -2730,6 +2775,7 @@ export class ChannelDO extends Server<Env> {
       msg.completion_review?.policy ?? null,
       replacesSeq ?? null,
       frame.idempotency_key ?? null,
+      attachments === undefined ? null : JSON.stringify(attachments),
       now,
     );
     let replacedUpdate: MessageUpdateFrame | undefined;
@@ -3580,6 +3626,8 @@ export class ChannelDO extends Server<Env> {
       if (completionReview !== undefined) frame.completion_review = completionReview;
       const workflowRef = parseStoredStatusWorkflow(r.message_workflow_json);
       if (workflowRef !== undefined) frame.workflow_ref = workflowRef;
+      const attachments = parseStoredAttachments(r.attachments_json);
+      if (attachments !== undefined) frame.attachments = attachments;
     }
     if (r.edited_at !== null && r.edited_at !== undefined) {
       frame.edited = true;

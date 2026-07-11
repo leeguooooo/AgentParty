@@ -19,6 +19,9 @@ export const ComposerStrings: LocaleDict = {
     "Composer.send.label": "send",
     "Composer.send.readyTitle": "send (⏎ / ⌘⏎)",
     "Composer.send.connectingTitle": "connecting…",
+    "Composer.attach.label": "attach",
+    "Composer.attach.uploading": "uploading…",
+    "Composer.attach.title": "attach images or files",
   },
   zh: {
     "Composer.tier.online": "在线",
@@ -38,6 +41,9 @@ export const ComposerStrings: LocaleDict = {
     "Composer.send.label": "发送",
     "Composer.send.readyTitle": "发送（⏎ / ⌘⏎）",
     "Composer.send.connectingTitle": "连接中…",
+    "Composer.attach.label": "附件",
+    "Composer.attach.uploading": "上传中…",
+    "Composer.attach.title": "上传图片或文件",
   },
 };
 

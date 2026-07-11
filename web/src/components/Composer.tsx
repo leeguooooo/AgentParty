@@ -2,6 +2,8 @@
 // readonly / archived 时由页面层直接不渲染本组件（错误内联为条幅）。
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties, KeyboardEvent } from "react";
+import type { Attachment } from "@agentparty/shared";
+import { formatSize } from "./AttachmentList";
 import { agentHue } from "../lib/agentColor";
 import {
   activeMentionQuery,
@@ -22,6 +24,12 @@ interface Props {
   ready: boolean; // ws open 才能发
   candidates: MentionCandidate[]; // @ 补全候选（participants ∪ presence，已分档排序）
   mentionStatuses: DraftMentionStatus[]; // 草稿里已 @ 的目标 + 当前存活档位（发送前提醒会不会白发）
+  // 附件（#176）：已上传待发的引用 + 选文件/移除回调 + 上传中/错误态。缺省即无附件能力。
+  attachments?: Attachment[];
+  onPickFiles?: (files: FileList) => void;
+  onRemoveAttachment?: (key: string) => void;
+  uploading?: boolean;
+  uploadError?: string | null;
 }
 
 const TIER_DOT: Record<MentionTier, string> = { online: "●", wakeable: "◐", recent: "○" };
@@ -51,8 +59,24 @@ function groupLabel(group: string, t: TFunc): string {
   return group;
 }
 
-export function Composer({ draft, setDraft, onSend, ready, candidates, mentionStatuses }: Props) {
+export function Composer({
+  draft,
+  setDraft,
+  onSend,
+  ready,
+  candidates,
+  mentionStatuses,
+  attachments = [],
+  onPickFiles,
+  onRemoveAttachment,
+  uploading = false,
+  uploadError = null,
+}: Props) {
   const t = useT();
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const canAttach = onPickFiles !== undefined;
+  // 有附件时允许空正文发送（纯图片消息）
+  const sendDisabled = !ready || uploading || (draft.trim() === "" && attachments.length === 0);
   const TIER_LABEL: Record<MentionTier, string> = {
     online: t("Composer.tier.online"),
     wakeable: t("Composer.tier.wakeable"),
@@ -235,16 +259,63 @@ export function Composer({ draft, setDraft, onSend, ready, candidates, mentionSt
         onKeyDown={onKeyDown}
         onBlur={() => setTimeout(() => setMenu(null), 120)}
       />
+      {attachments.length > 0 && (
+        <ul className="composer-attachments" aria-label="pending attachments">
+          {attachments.map((att) => (
+            <li key={att.key} className="composer-attachment t-mono">
+              <span className="composer-attachment-name">{att.filename}</span>
+              <span className="composer-attachment-size">{formatSize(att.size)}</span>
+              {onRemoveAttachment !== undefined && (
+                <button
+                  type="button"
+                  className="composer-attachment-remove"
+                  aria-label={`remove ${att.filename}`}
+                  onClick={() => onRemoveAttachment(att.key)}
+                >
+                  ×
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {uploadError !== null && <p className="banner banner--red composer-upload-error">{uploadError}</p>}
       <FeatureTip tip="Tips.wake" className="composer-wake-tip" />
-      <button
-        type="button"
-        className="d-btn d-btn--primary composer-send"
-        onClick={onSend}
-        disabled={!ready || draft.trim() === ""}
-        title={ready ? t("Composer.send.readyTitle") : t("Composer.send.connectingTitle")}
-      >
-        {t("Composer.send.label")}
-      </button>
+      <div className="composer-actions">
+        {canAttach && (
+          <>
+            <input
+              ref={fileRef}
+              type="file"
+              multiple
+              className="composer-file-input"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files !== null && e.target.files.length > 0) onPickFiles?.(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              className="d-btn composer-attach"
+              onClick={() => fileRef.current?.click()}
+              disabled={uploading}
+              title={t("Composer.attach.title")}
+            >
+              {uploading ? t("Composer.attach.uploading") : t("Composer.attach.label")}
+            </button>
+          </>
+        )}
+        <button
+          type="button"
+          className="d-btn d-btn--primary composer-send"
+          onClick={onSend}
+          disabled={sendDisabled}
+          title={ready ? t("Composer.send.readyTitle") : t("Composer.send.connectingTitle")}
+        >
+          {t("Composer.send.label")}
+        </button>
+      </div>
     </div>
   );
 }

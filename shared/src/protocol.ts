@@ -409,6 +409,20 @@ export interface HelloFrame {
   since_rev?: number;
 }
 
+/**
+ * 频道消息附件引用（#176）：仅是指向 R2 对象的元数据，blob 本体不进消息帧/DO sqlite。
+ * 客户端先 POST /api/channels/:slug/attachments 上传拿到本结构，再随消息带上 N 个引用。
+ */
+export interface Attachment {
+  /** R2 对象键：<slug>/<uuid>/<filename>，前缀锚定到频道 slug 以隔离跨频道读取 */
+  key: string;
+  filename: string;
+  content_type: string;
+  size: number;
+  /** 回 worker 的鉴权下载路径 /api/channels/<slug>/attachments/<uuid>/<filename>；不是裸 R2 公链 */
+  url: string;
+}
+
 export interface SendMessageFrame {
   type: "send";
   kind: "message";
@@ -416,6 +430,8 @@ export interface SendMessageFrame {
   mentions: string[];
   reply_to: number | null;
   completion_artifact?: CompletionArtifact;
+  /** 附件引用（#176）；空/缺省视为无附件。上限见 do 侧 MAX_ATTACHMENTS_PER_MESSAGE。 */
+  attachments?: Attachment[];
   replaces?: number;
   /**
    * 幂等键（#98）：客户端每次发送生成一个唯一键（ULID）。同一条逻辑消息的重试（客户端超时重发、
@@ -551,6 +567,8 @@ export interface MsgFrame {
   role_source?: CollaborationRoleSource;
   completion_artifact?: CompletionArtifact;
   completion_review?: CompletionReview;
+  /** 附件引用（#176）；仅 kind:"message" 携带，无附件时省略。 */
+  attachments?: Attachment[];
   ts: number;
   edited?: true;
   edited_at?: number;

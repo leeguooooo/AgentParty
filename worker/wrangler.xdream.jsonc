@@ -35,6 +35,14 @@
       "migrations_dir": "migrations"
     }
   ],
+  // 频道附件（#176）：图片/文件走 R2。部署前运营需先建桶（xdream 账号）：
+  //   wrangler r2 bucket create agentparty-attachments-xdream
+  "r2_buckets": [
+    {
+      "binding": "ATTACHMENTS",
+      "bucket_name": "agentparty-attachments-xdream"
+    }
+  ],
   "routes": [
     {
       "pattern": "agentparty.pwtk-dev.work",
