@@ -3,7 +3,7 @@ import type { PresenceEntry, Sender } from "@agentparty/shared";
 import { createElement } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import { buildGroups, countLiveGroups, ownerKey, PresenceBar, type Item } from "./PresenceBar";
+import { buildGroups, countLiveGroups, ownerKey, pauseResumeAt, PresenceBar, type Item } from "./PresenceBar";
 
 function item(over: Partial<Item> = {}): Item {
   return {
@@ -31,6 +31,8 @@ function item(over: Partial<Item> = {}): Item {
     responsibility: null,
     connectionCount: 1,
     clientVersion: null,
+    paused: false,
+    resumeAt: null,
     ...over,
   };
 }
@@ -223,5 +225,105 @@ describe("presence live toggle affordance", () => {
       toggle?.props.onClick();
     });
     expect(nodesWithClass(r, "presence-group")).toHaveLength(0);
+  });
+});
+
+function renderWith(entry: PresenceEntry, extra: Record<string, unknown>): ReactTestRenderer {
+  let next!: ReactTestRenderer;
+  void act(() => {
+    next = create(
+      createElement(
+        LocaleProvider,
+        null,
+        createElement(PresenceBar, {
+          presence: { "agent-a": entry },
+          participants,
+          status: "open",
+          ...extra,
+        }),
+      ),
+    );
+  });
+  renderer = next;
+  return next;
+}
+
+describe("presence 暂停接待（#180）", () => {
+  test("pauseResumeAt：预设 → 恢复时刻；indefinite → null", () => {
+    const now = 1_800_000_000_000;
+    expect(pauseResumeAt("1h", now)).toBe(now + 3_600_000);
+    expect(pauseResumeAt("4h", now)).toBe(now + 4 * 3_600_000);
+    expect(pauseResumeAt("indefinite", now)).toBeNull();
+    expect(pauseResumeAt("", now)).toBeNull();
+    // tomorrow 落在次日 09:00 本地
+    const d = new Date(pauseResumeAt("tomorrow", now)!);
+    expect(d.getHours()).toBe(9);
+  });
+
+  test("被暂停的 agent 渲染 ⏸ paused chip（与 offline 视觉区分）", () => {
+    const r = renderWith({ name: "agent-a", kind: "agent", state: "waiting", note: null, ts: Date.now(), paused: true }, {});
+    const chip = nodesWithClass(r, "presence-paused");
+    expect(chip.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("带 resume_at 时 chip 显示恢复时刻", () => {
+    const resumeAt = Date.now() + 3_600_000;
+    const r = renderWith({ name: "agent-a", kind: "agent", state: "waiting", note: null, ts: Date.now(), paused: true, resume_at: resumeAt }, {});
+    const chip = nodesWithClass(r, "presence-paused")[0];
+    expect(String(chip?.children.join(""))).toContain("resumes");
+  });
+
+  test("未暂停时不渲染 paused chip", () => {
+    const r = renderWith({ name: "agent-a", kind: "agent", state: "working", note: null, ts: Date.now() }, {});
+    expect(nodesWithClass(r, "presence-paused")).toHaveLength(0);
+  });
+
+  // 管理控件在 hover 详情弹层里（与 kick 同处）；测试先触发 popover 再断言。
+  async function openPopover(r: ReactTestRenderer): Promise<void> {
+    const section = nodesWithClass(r, "presence-group")[0];
+    await act(async () => {
+      section?.props.onFocus({ currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 0 }) } });
+    });
+  }
+
+  test("moderator：未暂停的 agent 在详情弹层显示 pause 下拉，选预设即回调 onPauseAgent 带恢复时刻", async () => {
+    const calls: Array<{ name: string; resumeAt: number | null }> = [];
+    const r = renderWith(
+      { name: "agent-a", kind: "agent", state: "working", note: null, ts: Date.now() },
+      { canModerate: true, onPauseAgent: (name: string, resumeAt: number | null) => calls.push({ name, resumeAt }), onResumeAgent: () => {} },
+    );
+    await openPopover(r);
+    const select = nodesWithClass(r, "presence-pause-select")[0];
+    expect(select).toBeDefined();
+    await act(async () => {
+      select?.props.onChange({ target: { value: "1h" }, currentTarget: { value: "1h" } });
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.name).toBe("agent-a");
+    expect(calls[0]?.resumeAt).toBeGreaterThan(Date.now());
+  });
+
+  test("moderator：已暂停的 agent 在详情弹层显示 resume 按钮，点击回调 onResumeAgent", async () => {
+    const resumed: string[] = [];
+    const r = renderWith(
+      { name: "agent-a", kind: "agent", state: "waiting", note: null, ts: Date.now(), paused: true },
+      { canModerate: true, onPauseAgent: () => {}, onResumeAgent: (name: string) => resumed.push(name) },
+    );
+    await openPopover(r);
+    const btn = nodesWithClass(r, "presence-resume")[0];
+    expect(btn).toBeDefined();
+    // 暂停态不应再显示 pause 下拉
+    expect(nodesWithClass(r, "presence-pause-select")).toHaveLength(0);
+    await act(async () => {
+      btn?.props.onClick({ stopPropagation: () => {} });
+    });
+    expect(resumed).toEqual(["agent-a"]);
+  });
+
+  test("非 moderator 详情弹层不渲染任何暂停/恢复控件", async () => {
+    const r = renderWith({ name: "agent-a", kind: "agent", state: "waiting", note: null, ts: Date.now(), paused: true }, { canModerate: false });
+    await openPopover(r);
+    expect(nodesWithClass(r, "presence-pause-select")).toHaveLength(0);
+    expect(nodesWithClass(r, "presence-resume")).toHaveLength(0);
   });
 });

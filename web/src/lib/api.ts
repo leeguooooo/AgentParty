@@ -790,6 +790,29 @@ export async function kickParticipant(token: string, slug: string, name: string,
   if (!res.ok) throw new Error(`POST /api/channels/${slug}/kick failed (${res.status})`);
 }
 
+// 人为暂停某 agent 的接待（issue #180）。resumeAt = 定时恢复时刻（epoch ms），省略则手动恢复。moderator only。
+export async function pauseAgent(token: string, slug: string, name: string, resumeAt?: number): Promise<void> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/presence/${encodeURIComponent(name)}/pause`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(resumeAt === undefined ? {} : { resume_at: resumeAt }),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/presence/${name}/pause failed (${res.status})`);
+}
+
+// 恢复某 agent 的接待（issue #180）。moderator only。
+export async function resumeAgent(token: string, slug: string, name: string): Promise<void> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/presence/${encodeURIComponent(name)}/resume`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/presence/${name}/resume failed (${res.status})`);
+}
+
 // 可见性切换（issue #38）。private→public 服务端要 confirm=true，未带时返回 409 + needs_confirm，
 // 这里以 { needsConfirm, messageCount } resolve 让 UI 弹二段确认，而不是当错误抛。
 export interface VisibilityResult {

@@ -1006,6 +1006,9 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE presence ADD COLUMN avatar_url TEXT",
       "ALTER TABLE presence ADD COLUMN avatar_thumb TEXT",
       "ALTER TABLE presence ADD COLUMN client_version TEXT",
+      // 人为「暂停接待」（issue #180）：paused_at 非 NULL 即暂停；paused_resume_at 为定时恢复时刻（epoch ms）。
+      "ALTER TABLE presence ADD COLUMN paused_at INTEGER",
+      "ALTER TABLE presence ADD COLUMN paused_resume_at INTEGER",
     ]) {
       try {
         sql.exec(ddl);
@@ -1342,6 +1345,7 @@ export class ChannelDO extends Server<Env> {
   async onAlarm() {
     const now = Date.now();
     const live = this.scanPresence(now);
+    this.resumeDuePauses(now);
     await this.retryWebhooks(now);
     await this.checkTempArchive(now);
     await this.scheduleNextAlarm(now, live);
@@ -1470,6 +1474,11 @@ export class ChannelDO extends Server<Env> {
       .exec("SELECT MIN(next_retry_at) AS t FROM webhook_queue")
       .one();
     if (next.t !== null) candidates.push(Number(next.t));
+    // 暂停接待的定时恢复（issue #180）：取最近的一个未来恢复时刻作为候选，前移 alarm 到点自动恢复。
+    const nextResume = this.ctx.storage.sql
+      .exec("SELECT MIN(paused_resume_at) AS t FROM presence WHERE paused_resume_at IS NOT NULL")
+      .one();
+    if (nextResume.t !== null) candidates.push(Number(nextResume.t));
     if (this.getMeta("archive_pending_at") !== null) candidates.push(now + 60_000);
     if (this.getMeta("ckind") === "temp" && !this.isArchived()) {
       const basis = this.lastActivityTs();
@@ -1502,6 +1511,55 @@ export class ChannelDO extends Server<Env> {
     );
     const entry = this.presenceFor(name);
     if (entry) this.broadcastFrame({ type: "presence", ...entry });
+  }
+
+  // 人为「暂停接待」（issue #180）：某个 name 当前是否被暂停。唤醒抑制的唯一权威判据。
+  private isPresencePaused(name: string): boolean {
+    const row = this.ctx.storage.sql
+      .exec("SELECT paused_at FROM presence WHERE name = ?", name)
+      .toArray()[0];
+    return row !== undefined && row.paused_at !== null && row.paused_at !== undefined;
+  }
+
+  // 暂停某 agent 的接待：写 paused_at（可选 paused_resume_at 定时恢复）。不动 state/updated_at，
+  // 故不干扰在线/新鲜度/host 租约判定——暂停与「活没活」正交。有定时点则前移 alarm 到点自动恢复。
+  private pausePresence(name: string, resumeAt: number | null, now: number) {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO presence (name, state, note, updated_at, paused_at, paused_resume_at)
+       VALUES (?, 'waiting', NULL, ?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET paused_at = excluded.paused_at, paused_resume_at = excluded.paused_resume_at`,
+      name,
+      now,
+      now,
+      resumeAt,
+    );
+    const entry = this.presenceFor(name);
+    if (entry) this.broadcastFrame({ type: "presence", ...entry });
+    const when = resumeAt !== null ? `，将于 ${new Date(resumeAt).toISOString()} 自动恢复` : "（需手动恢复）";
+    this.insertSystemStatus(`${name} 已被暂停接待${when}`, now, false, { state: "waiting" });
+    if (resumeAt !== null) void this.ensureAlarmAt(resumeAt);
+  }
+
+  // 恢复某 agent 的接待：清 paused_at/paused_resume_at。手动恢复与定时恢复共用。
+  private resumePresence(name: string, now: number): boolean {
+    const wasPaused = this.isPresencePaused(name);
+    this.ctx.storage.sql.exec(
+      "UPDATE presence SET paused_at = NULL, paused_resume_at = NULL WHERE name = ?",
+      name,
+    );
+    if (!wasPaused) return false;
+    const entry = this.presenceFor(name);
+    if (entry) this.broadcastFrame({ type: "presence", ...entry });
+    this.insertSystemStatus(`${name} 已恢复接待`, now, false, { state: "waiting" });
+    return true;
+  }
+
+  // alarm 到点：清掉所有 paused_resume_at 已过期的暂停（定时自动恢复，issue #180）。
+  private resumeDuePauses(now: number) {
+    const due = this.ctx.storage.sql
+      .exec("SELECT name FROM presence WHERE paused_resume_at IS NOT NULL AND paused_resume_at <= ?", now)
+      .toArray();
+    for (const row of due) this.resumePresence(String(row.name), now);
   }
 
   // worker 每次转发都会带上频道快照头，do 写 meta 缓存（同 archived 的手法）
@@ -1571,7 +1629,11 @@ export class ChannelDO extends Server<Env> {
       channel: this.name,
       permalink: `https://${host}/c/${this.name}`,
     });
-    const targets = hooks.filter((h) => this.shouldDeliverWebhook(h.filter, h.name, msg));
+    // 暂停接待（issue #180）的抑制点：命中的 hook 里剔掉当前被人为暂停的目标——webhook 一律不投。
+    // 这里在 afterSend 之后跑，消息早已落库+广播，历史/广播完全不受影响，只是不把「唤醒」推给暂停者。
+    const targets = hooks.filter(
+      (h) => this.shouldDeliverWebhook(h.filter, h.name, msg) && !this.isPresencePaused(h.name),
+    );
     if (targets.length === 0) return;
     // 并行投递：一个慢/坏端点不再拖累其余 hook（首投已由 afterSend 的 waitUntil 移出发送关键路径）
     const results = await Promise.all(
@@ -2531,6 +2593,34 @@ export class ChannelDO extends Server<Env> {
         this.insertSystemStatus(`removed ${name} from channel`, now, false, { state: "done" });
       }
       return Response.json({ ok: true, owners: [...owners] });
+    }
+    // 人为暂停/恢复接待（issue #180）。授权在 worker 侧已判（moderator），do 只落状态。
+    const pauseMatch = url.pathname.match(/^\/internal\/presence\/([^/]+)\/(pause|resume)$/);
+    if (pauseMatch && request.method === "POST") {
+      const name = decodeURIComponent(pauseMatch[1] ?? "");
+      const action = pauseMatch[2];
+      if (!name) {
+        return Response.json({ error: { code: "bad_request", message: "name required" } }, { status: 400 });
+      }
+      const now = Date.now();
+      if (action === "pause") {
+        const body = (await request.json().catch(() => null)) as { resume_at?: unknown } | null;
+        let resumeAt: number | null = null;
+        if (body?.resume_at !== undefined && body.resume_at !== null) {
+          const parsed = Number(body.resume_at);
+          if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= now) {
+            return Response.json(
+              { error: { code: "bad_request", message: "resume_at must be a future epoch-ms integer" } },
+              { status: 400 },
+            );
+          }
+          resumeAt = parsed;
+        }
+        this.pausePresence(name, resumeAt, now);
+        return Response.json({ ok: true, paused: true, ...(resumeAt !== null ? { resume_at: resumeAt } : {}) });
+      }
+      this.resumePresence(name, now);
+      return Response.json({ ok: true, paused: false });
     }
     return new Response("not found", { status: 404 });
   }
@@ -3537,7 +3627,7 @@ export class ChannelDO extends Server<Env> {
                 account, handle, display_name, avatar_url, avatar_thumb, client_version,
                 state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
-                context_json, lineage_json`;
+                context_json, lineage_json, paused_at, paused_resume_at`;
 
   private presenceList(): PresenceEntry[] {
     const liveCounts = this.liveConnectionCounts();
@@ -3599,6 +3689,15 @@ export class ChannelDO extends Server<Env> {
         : { role_source: String(r.role_source) as CollaborationRoleSource }),
       ...(r.residency === null || r.residency === undefined ? {} : { residency: String(r.residency) as Residency }),
       ...(wake === undefined ? {} : { wake }),
+      // 人为暂停接待（issue #180）：paused_at 非空即暂停；有定时恢复时刻则一并带出。
+      ...(r.paused_at === null || r.paused_at === undefined
+        ? {}
+        : {
+            paused: true as const,
+            ...(r.paused_resume_at === null || r.paused_resume_at === undefined
+              ? {}
+              : { resume_at: Number(r.paused_resume_at) }),
+          }),
       ...(() => {
         const context = parseStoredAgentContext(r.context_json);
         return context === undefined ? {} : { context };

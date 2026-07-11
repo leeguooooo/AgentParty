@@ -4891,6 +4891,54 @@ app.post("/api/channels/:slug/kick", async (c) => {
   return c.json({ ok: true });
 });
 
+// 人为暂停/恢复某 agent 的接待（issue #180）。授权口径同 kick：仅频道 moderator（房主 / legacy ap_）。
+// 暂停后该 agent 被 @ 也不唤醒（webhook 不投、serve/watch 自我抑制），消息仍进历史；可带 resume_at 定时恢复。
+app.post("/api/channels/:slug/presence/:name/pause", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!isChannelModerator(c.get("identity"), channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can pause an agent"), 403);
+  }
+  const name = c.req.param("name");
+  if (!name || name.length > 256) {
+    return c.json(errorBody("bad_request", "valid name required"), 400);
+  }
+  const body = (await c.req.json().catch(() => null)) as { resume_at?: unknown } | null;
+  const res = await fetchChannelDO(
+    c.env,
+    slug,
+    new Request(`https://do/internal/presence/${encodeURIComponent(name)}/pause`, {
+      method: "POST",
+      body: JSON.stringify({ resume_at: body?.resume_at ?? null }),
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+  return res;
+});
+
+app.post("/api/channels/:slug/presence/:name/resume", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!isChannelModerator(c.get("identity"), channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can resume an agent"), 403);
+  }
+  const name = c.req.param("name");
+  if (!name || name.length > 256) {
+    return c.json(errorBody("bad_request", "valid name required"), 400);
+  }
+  const res = await fetchChannelDO(
+    c.env,
+    slug,
+    new Request(`https://do/internal/presence/${encodeURIComponent(name)}/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+  return res;
+});
+
 app.post("/api/channels/:slug/reset-guard", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);

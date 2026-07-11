@@ -35,6 +35,8 @@ commands:
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
   statusline [--channel C] [--refresh] [--no-network]
   who       [channel|--channel C] [--json]                who is online/wakeable/recent — pick who to --mention
+  pause     <name> [--channel C] [--resume-at T|--for D]   stop waking an agent (moderator); auto-resume at T / after D
+  resume    <name> [--channel C]                           resume a paused agent's reception (moderator)
   health    [--json] [--channel C] [--stale-after ms]      local serve WS health probe (pid alive != ws alive, #254)
   charter   [slug] [--json] | set [slug] -f file.md|-m text|- | template
   history   [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]
@@ -109,6 +111,9 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/statusline")).run(rest);
     case "who":
       return (await import("./commands/who")).run(rest);
+    case "pause":
+    case "resume":
+      return (await import("./commands/pause")).run(cmd, rest);
     case "charter":
       return (await import("./commands/charter")).run(rest);
     case "history":

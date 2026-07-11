@@ -31,6 +31,8 @@ import {
   fetchTasks,
   fetchWakeDeliveries,
   kickParticipant,
+  pauseAgent,
+  resumeAgent,
   resetGuard,
   reviseMessage,
   reviewCompletion,
@@ -1678,6 +1680,8 @@ export function ChannelPage({
   const [guardResetError, setGuardResetError] = useState<string | null>(null);
   const [removingName, setRemovingName] = useState<string | null>(null);
   const [kickError, setKickError] = useState<string | null>(null);
+  const [pausingName, setPausingName] = useState<string | null>(null);
+  const [pauseError, setPauseError] = useState<string | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [charter, setCharter] = useState<ChannelCharter | null>(null);
@@ -1966,6 +1970,33 @@ export function ChannelPage({
       })
       .finally(() => setRemovingName(null));
   }, [removingName, slug, token, t]);
+
+  // 人为暂停某 agent 的接待（#180）：被 @ 也不唤醒（webhook 不投、serve/watch 自我抑制），消息仍进历史。
+  const pauseAgentReception = useCallback((name: string, resumeAt: number | null) => {
+    if (pausingName !== null) return;
+    setPausingName(name);
+    setPauseError(null);
+    pauseAgent(token, slug, name, resumeAt ?? undefined)
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setPauseError(t("Channel.pause.forbidden"));
+        else setPauseError(t("Channel.pause.failed"));
+      })
+      .finally(() => setPausingName(null));
+  }, [pausingName, slug, token, t]);
+
+  const resumeAgentReception = useCallback((name: string) => {
+    if (pausingName !== null) return;
+    setPausingName(name);
+    setPauseError(null);
+    resumeAgent(token, slug, name)
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        else if (err instanceof ForbiddenError) setPauseError(t("Channel.pause.forbidden"));
+        else setPauseError(t("Channel.pause.failed"));
+      })
+      .finally(() => setPausingName(null));
+  }, [pausingName, slug, token, t]);
 
   const archiveCurrentChannel = useCallback(() => {
     if (archiving || state.archived) return;
@@ -3031,9 +3062,13 @@ export function ChannelPage({
         canModerate={canModerate}
         removingName={removingName}
         onRemoveParticipant={removeParticipant}
+        pausingName={pausingName}
+        onPauseAgent={pauseAgentReception}
+        onResumeAgent={resumeAgentReception}
         roles={channelRoles}
       />
       {kickError !== null && <p className="banner banner--red">{kickError}</p>}
+      {pauseError !== null && <p className="banner banner--red">{pauseError}</p>}
       {archiveError !== null && <p className="banner banner--red">{archiveError}</p>}
       <ChannelToolstrip
         buttons={

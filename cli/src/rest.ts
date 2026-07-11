@@ -1114,6 +1114,29 @@ export async function kickParticipant(
   });
 }
 
+// 人为暂停某 agent 的接待（issue #180）。resumeAt = 定时恢复时刻（epoch ms），省略则只能手动恢复。
+export async function pauseAgent(
+  server: string,
+  token: string,
+  slug: string,
+  name: string,
+  resumeAt?: number,
+): Promise<void> {
+  await req(server, `/api/channels/${encodeURIComponent(slug)}/presence/${encodeURIComponent(name)}/pause`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify(resumeAt === undefined ? {} : { resume_at: resumeAt }),
+  });
+}
+
+// 恢复某 agent 的接待（issue #180）。
+export async function resumeAgent(server: string, token: string, slug: string, name: string): Promise<void> {
+  await req(server, `/api/channels/${encodeURIComponent(slug)}/presence/${encodeURIComponent(name)}/resume`, {
+    method: "POST",
+    headers: bearerJson(token),
+  });
+}
+
 // rest 错误 → 契约退出码
 export function handleRestError(e: unknown): number {
   if (e instanceof RestError) {

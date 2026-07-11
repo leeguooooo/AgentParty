@@ -1323,6 +1323,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
   let consecutiveWakeAbandons = 0;
   let wakeAbandonCircuitTripped = false;
   let advertised = false;
+  // 人为暂停接待（#180）：服务端对 webhook 已抑制，但 serve 是本地 supervisor、消息照样广播给它。
+  // 收到自己的 paused presence 帧就自我抑制唤醒——被 @ 也不触发 runner，直到收到恢复帧。消息仍进历史。
+  let selfPaused = false;
   let charter: ChannelCharter | null = o.charter ?? null;
   const refreshCharter = async (reason: string, expectedRev?: number) => {
     if (!o.fetchCharter) return;
@@ -1358,6 +1361,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
       writeHealthCache({ channel: o.channel, last_frame_at: Date.now() });
       if (frame.type === "welcome") {
         self = frame.self;
+        // 连上时若自己已被暂停接待（#180），从 welcome 的 presence 快照里认出来——重连也不误唤醒。
+        const mine = frame.presence?.find((p) => p.name === self);
+        selfPaused = mine?.paused === true;
+        if (selfPaused) {
+          out(
+            `serve: 当前处于暂停接待状态——被 @ 也不唤醒 runner${typeof mine?.resume_at === "number" ? `，将于 ${new Date(mine.resume_at).toISOString()} 恢复` : "（等人工恢复）"}。`,
+          );
+        }
         // 首个 welcome：定格挂载水位，并就积压去留告知（stderr）。知情权给 agent，决定权给人。
         if (attachHead === null) {
           attachHead = frame.last_seq;
@@ -1410,6 +1421,18 @@ export async function runServe(o: ServeOptions): Promise<number> {
         const rev = Number((frame.note ?? frame.body).match(/^charter updated to rev (\d+)/)?.[1] ?? "");
         await refreshCharter("status", Number.isInteger(rev) ? rev : undefined);
       }
+      // 人为暂停/恢复（#180）：跟踪自己的 paused 状态。moderator 一按暂停，DO 就广播这帧过来。
+      if (frame.type === "presence" && frame.name === self) {
+        const nextPaused = frame.paused === true;
+        if (nextPaused !== selfPaused) {
+          selfPaused = nextPaused;
+          out(
+            selfPaused
+              ? `serve: 已被暂停接待——被 @ 也不再唤醒 runner${typeof frame.resume_at === "number" ? `，将于 ${new Date(frame.resume_at).toISOString()} 恢复` : "（等人工恢复）"}。消息仍进历史。`
+              : "serve: 已恢复接待——重新响应 @。",
+          );
+        }
+      }
       if (frame.type !== "msg") continue;
       const fromSelf = frame.sender.name === self;
       // fresh = 游标之上的新消息。历史修订快照会穿透去重被重放（seq 早已消费过），
@@ -1427,7 +1450,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // 把游标推到 7，并在成功路径上无条件 setStuck(null)，把 seq=4 的欠账顺手清掉。
       // 欠着的那条必须先还：要么被重放并了结，要么有界重试耗尽后宣告放弃。
       const blockedByDebt = stuck !== null && !isDebt;
-      const qualifies = fresh && !blockedByDebt && (isDebt || passesFilter);
+      const wouldWake = fresh && !blockedByDebt && (isDebt || passesFilter);
+      // 暂停接待（#180）：本帧本该唤醒，但人按了暂停 → 不跑 runner。普通 @ 照进 recent/历史、游标照推进
+      // （下方 ack），恢复后不重放（在历史里，agent 自行补看）；欠账帧因 stuck.seq===seq 天然不 ack，
+      // 会一直欠着到恢复后再还——暂停不吞没一条从没进过模型的 @。
+      if (wouldWake && selfPaused) {
+        out(`⏸ 暂停中，跳过唤醒（消息仍在历史）: ${formatMsg(frame)}`);
+      }
+      const qualifies = wouldWake && !selfPaused;
       if (qualifies) {
         out(`▶ ${formatMsg(frame)}`);
         // 串行：本条命令跑完再消费下一帧（新帧此间缓冲在 FrameQueue），避免并发唤起互相抢

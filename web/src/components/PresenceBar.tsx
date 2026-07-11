@@ -17,7 +17,32 @@ interface Props {
   canModerate?: boolean;
   removingName?: string | null;
   onRemoveParticipant?: (name: string) => void;
+  // 人为暂停/恢复某 agent 的接待（#180）。resumeAt=null 即开放式暂停（手动恢复）。
+  pausingName?: string | null;
+  onPauseAgent?: (name: string, resumeAt: number | null) => void;
+  onResumeAgent?: (name: string) => void;
   roles?: ChannelRoleAssignment[];
+}
+
+// 暂停时长预设（#180）：值 → 相对 now 的恢复时刻（epoch ms），"indefinite" 返回 null（手动恢复）。
+export function pauseResumeAt(preset: string, now: number): number | null {
+  switch (preset) {
+    case "1h":
+      return now + 3_600_000;
+    case "4h":
+      return now + 4 * 3_600_000;
+    case "8h":
+      return now + 8 * 3_600_000;
+    case "tomorrow": {
+      // 次日 09:00（本地时区）——常见「明早再说」语义。
+      const d = new Date(now);
+      d.setDate(d.getDate() + 1);
+      d.setHours(9, 0, 0, 0);
+      return d.getTime();
+    }
+    default:
+      return null; // indefinite
+  }
 }
 
 export interface Item {
@@ -45,6 +70,10 @@ export interface Item {
   responsibility: string | null;
   connectionCount: number;
   clientVersion: string | null;
+  // 人为暂停接待（#180）：被 @ 也不唤醒（webhook 不投、serve/watch 自我抑制），消息仍进历史。
+  // 与 offline 语义/视觉都不同——不是掉线丢了，是人主动按下暂停。
+  paused: boolean;
+  resumeAt: number | null; // 定时恢复时刻（epoch ms）；null = 需手动恢复
 }
 
 export interface PresenceGroup {
@@ -191,6 +220,9 @@ export function PresenceBar({
   canModerate = false,
   removingName = null,
   onRemoveParticipant,
+  pausingName = null,
+  onPauseAgent,
+  onResumeAgent,
   roles = [],
 }: Props) {
   const t = useT();
@@ -237,6 +269,9 @@ export function PresenceBar({
       responsibility: assigned?.responsibility ?? null,
       connectionCount: sender?.connection_count ?? entry?.connection_count ?? (connected ? 1 : 0),
       clientVersion,
+      // 暂停接待（#180）：即使 agent 离线也保留 paused（人主动设的状态，不随连接消失）。
+      paused: entry?.paused === true,
+      resumeAt: entry?.resume_at ?? null,
     };
     if (!connected) {
       // owner 本就仅连接中的参与者可知（见上方字段注释）；handle 依赖同一份可信度，一并置空，
@@ -339,9 +374,25 @@ export function PresenceBar({
         title={titleParts.join(" · ")}
         style={{ "--ah": agentHue(it.name) } as CSSProperties}
       >
-        <span className={`d-dot d-dot--${it.state}`} />
+        <span className={`d-dot d-dot--${it.state}${it.paused ? " d-dot--paused" : ""}`} />
         <span className="presence-name">{it.display}</span>
         <span className={`t-mono presence-kind presence-kind--${it.kind}`}>{it.kind}</span>
+        {it.paused && (
+          <span
+            className="t-mono presence-paused"
+            title={
+              it.resumeAt !== null
+                ? t("PresenceBar.pausedUntil", { time: new Date(it.resumeAt).toLocaleString() })
+                : t("PresenceBar.pausedManual")
+            }
+          >
+            {it.resumeAt !== null
+              ? t("PresenceBar.pausedChipUntil", {
+                  time: new Date(it.resumeAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                })
+              : t("PresenceBar.pausedChip")}
+          </span>
+        )}
         {full && it.owner !== null && it.owner !== "" && it.owner !== it.name && (
           <span className="t-mono presence-owner">· {it.owner}</span>
         )}
@@ -375,6 +426,43 @@ export function PresenceBar({
           <span className="t-mono presence-note">{it.responsibility}</span>
         )}
         {it.ts !== null && <span className="t-mono presence-ts">{fmtRel(it.ts)}</span>}
+        {full && canModerate && it.kind === "agent" && it.name !== "system" && it.paused && onResumeAgent !== undefined && (
+          <button
+            className="presence-resume"
+            type="button"
+            disabled={pausingName === it.name}
+            title={t("PresenceBar.resumeTitle", { name: it.name })}
+            onClick={(e) => {
+              e.stopPropagation();
+              onResumeAgent(it.name);
+            }}
+          >
+            {t("PresenceBar.resume")}
+          </button>
+        )}
+        {full && canModerate && it.kind === "agent" && it.name !== "system" && !it.paused && onPauseAgent !== undefined && (
+          <select
+            className="presence-pause-select"
+            aria-label={t("PresenceBar.pauseTitle", { name: it.name })}
+            title={t("PresenceBar.pauseTitle", { name: it.name })}
+            disabled={pausingName === it.name}
+            value=""
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => {
+              const preset = e.target.value;
+              e.currentTarget.value = "";
+              if (preset === "") return;
+              onPauseAgent(it.name, pauseResumeAt(preset, Date.now()));
+            }}
+          >
+            <option value="">{t("PresenceBar.pause")}</option>
+            <option value="1h">{t("PresenceBar.pause1h")}</option>
+            <option value="4h">{t("PresenceBar.pause4h")}</option>
+            <option value="8h">{t("PresenceBar.pause8h")}</option>
+            <option value="tomorrow">{t("PresenceBar.pauseTomorrow")}</option>
+            <option value="indefinite">{t("PresenceBar.pauseIndefinite")}</option>
+          </select>
+        )}
         {full && canModerate && onRemoveParticipant !== undefined && it.name !== "system" && (
           <button
             className="presence-kick"
@@ -453,9 +541,25 @@ export function PresenceBar({
           <div className="presence-group-agents" aria-label={`agents owned by ${group.label}`}>
             {previewAgents.map((agent) => (
               <span key={agent.name} className="presence-agent-chip">
-                <span className={`d-dot d-dot--${agent.state}`} />
+                <span className={`d-dot d-dot--${agent.state}${agent.paused ? " d-dot--paused" : ""}`} />
                 <span>{agent.display}</span>
                 <span className={`t-mono presence-agent-kind presence-kind--${agent.kind}`}>{agent.kind}</span>
+                {agent.paused && (
+                  <span
+                    className="t-mono presence-paused"
+                    title={
+                      agent.resumeAt !== null
+                        ? t("PresenceBar.pausedUntil", { time: new Date(agent.resumeAt).toLocaleString() })
+                        : t("PresenceBar.pausedManual")
+                    }
+                  >
+                    {agent.resumeAt !== null
+                      ? t("PresenceBar.pausedChipUntil", {
+                          time: new Date(agent.resumeAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                        })
+                      : t("PresenceBar.pausedChip")}
+                  </span>
+                )}
                 {agent.clientVersion !== null && (
                   <span className="t-mono presence-client-version">cli v{agent.clientVersion}</span>
                 )}
