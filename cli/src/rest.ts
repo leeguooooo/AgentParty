@@ -605,6 +605,7 @@ export async function createTask(
     workflow_id?: string;
     scope?: string[];
     blocked_reason?: string | null;
+    external_ref?: string;
   },
 ): Promise<TaskRecord> {
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/tasks`, {

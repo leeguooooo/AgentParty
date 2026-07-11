@@ -179,6 +179,8 @@ export interface TaskRecord {
   scope: string[];
   /** state=blocked 时的结构化阻塞原因（#204）；其他状态为 null */
   blocked_reason: string | null;
+  /** 外部系统引用键（如 gh:owner/repo#96），供 issue→task 同步做幂等 create（#141）；未提供为 null */
+  external_ref: string | null;
   completion_artifact: unknown | null;
   workflow_id: string | null;
   created_at: number;

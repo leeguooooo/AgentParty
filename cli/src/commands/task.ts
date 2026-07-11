@@ -23,12 +23,13 @@ const FLAGS = [
   "parent",
   "anchor",
   "workflow",
+  "external-ref",
   "limit",
   "mine",
   "json",
 ];
 
-const HELP = `usage: party task create <title|-> [--channel C] [--desc text] [--assignee @name] [--label bug]... [--scope path]... [--blocked-reason text] [--priority N] [--parent ID] [--anchor seq]...
+const HELP = `usage: party task create <title|-> [--channel C] [--desc text] [--assignee @name] [--label bug]... [--scope path]... [--blocked-reason text] [--priority N] [--parent ID] [--anchor seq]... [--external-ref ref]
   party task from <seq> [--channel C] [--title text] [--desc text] [--assignee @name] [--label bug]... [--scope path]...
   party task list [--channel C] [--state S] [--assignee @name|--mine] [--limit N] [--json]
   party task assign <id> @name [--channel C] [--assignee-kind agent|human|squad] [--scope path]...
@@ -39,6 +40,9 @@ const HELP = `usage: party task create <title|-> [--channel C] [--desc text] [--
 
 --scope declares the files/dirs a task claims (repeatable); host board conflicts and open claims
 derive from it. --blocked-reason attaches a structured reason when a task is blocked.
+--external-ref (create only) is an idempotency key (e.g. gh:owner/repo#96): creating with a ref
+that already exists in the channel returns the existing task instead of a duplicate — safe to
+rerun an issue→task sync (#141).
 
 Create and move channel tasks. Agent-created tasks default to triage; human-created
 tasks default to backlog unless an assignee/state is provided.
@@ -114,7 +118,7 @@ export async function run(argv: string[]): Promise<number> {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["channel", "title", "desc", "description", "state", "assignee", "assignee-kind", "priority", "parent", "workflow", "limit", "blocked-reason"], ["label", "anchor", "scope"]);
+  const flagError = valueFlagError(flags, ["channel", "title", "desc", "description", "state", "assignee", "assignee-kind", "priority", "parent", "workflow", "limit", "blocked-reason", "external-ref"], ["label", "anchor", "scope"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -243,6 +247,7 @@ export async function run(argv: string[]): Promise<number> {
         }
         anchors.push(anchor);
       }
+      const externalRef = str(flags["external-ref"]);
       const task = await createTask(cfg.server, cfg.token, slug, {
         title,
         ...(desc !== undefined ? { desc } : {}),
@@ -255,6 +260,7 @@ export async function run(argv: string[]): Promise<number> {
         ...(str(flags.workflow) !== undefined ? { workflow_id: str(flags.workflow) } : {}),
         ...(scope !== undefined ? { scope } : {}),
         ...(blockedReason !== undefined ? { blocked_reason: blockedReason } : {}),
+        ...(externalRef !== undefined ? { external_ref: externalRef } : {}),
       });
       console.log(flags.json === true ? JSON.stringify(jsonFrame(task as unknown as Record<string, unknown>)) : `created ${formatTask(task)}`);
       return 0;
