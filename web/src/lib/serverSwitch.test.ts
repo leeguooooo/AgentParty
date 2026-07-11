@@ -1,7 +1,12 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { apiBase, apiUrl, clearApiBase, setApiBase, wsUrl } from "./base";
-import type { DesktopCredentialVault } from "./desktopCredentials";
+import {
+  createInvokeCredentialVault,
+  refreshDesktopSession,
+  type DesktopCredentialVault,
+  type DesktopInvoker,
+} from "./desktopCredentials";
 import {
   addCustomServerProfile,
   loadActiveServerOrigin,
@@ -116,6 +121,58 @@ describe("atomic desktop server switching", () => {
     });
     expect(restores).toBe(1);
     expect(commits).toBe(1);
+  });
+
+  test("switching to a private deployment and back preserves the original server session", async () => {
+    const prod = "https://agentparty.leeguoo.com";
+    const priv = "https://party.example.com";
+
+    // 真实的按 origin 分槽的凭据金库（复用 desktop_credential_* 命令的语义），
+    // 配上真实的 refreshDesktopSession，端到端验证往返切换不丢原会话。
+    const slots = new Map<string, string>();
+    const invoke: DesktopInvoker = async <T>(command: string, args?: Record<string, unknown>) => {
+      const origin = String(args?.origin);
+      if (command === "desktop_credential_write") slots.set(origin, String(args?.credential));
+      if (command === "desktop_credential_delete") slots.delete(origin);
+      return (command === "desktop_credential_read" ? slots.get(origin) ?? null : null) as T;
+    };
+    const vaultForOrigin = (origin: string) => createInvokeCredentialVault(origin, invoke);
+    await vaultForOrigin(prod).write({ refreshToken: "prod-r0", deviceSecret: "prod-secret", serverOrigin: prod, sessionId: "prod-session" });
+    await vaultForOrigin(priv).write({ refreshToken: "priv-r0", deviceSecret: "priv-secret", serverOrigin: priv, sessionId: "priv-session" });
+
+    const rotations: Record<string, string[]> = { [prod]: ["prod-r1"], [priv]: ["priv-r1"] };
+    const refreshed: string[] = [];
+    const fetcher = async (url: string | URL | Request) => {
+      const origin = new URL(String(url)).origin;
+      refreshed.push(origin);
+      const next = rotations[origin]!.shift()!;
+      return new Response(
+        JSON.stringify({ access_token: `${origin}#access`, refresh_token: next, expires_in: 600, session_id: `${origin}#session` }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const dependencies = {
+      vaultForOrigin,
+      restore: (vault: DesktopCredentialVault, origin: string) => refreshDesktopSession(vault, [origin], fetcher),
+      setRuntimeBase: setApiBase,
+    };
+
+    // 起始在生产（beforeEach 已设为活跃），切到私有部署。
+    const toPrivate = await switchActiveDesktopServer(priv, storage, dependencies);
+    expect(toPrivate.origin).toBe(priv);
+    expect(apiBase()).toBe(priv);
+    // 只轮换了目标（私有）槽；生产会话原封未动，没有被清或被覆盖。
+    expect(refreshed).toEqual([priv]);
+    expect(JSON.parse(slots.get(prod)!)).toMatchObject({ refreshToken: "prod-r0", serverOrigin: prod });
+
+    // 再切回生产：生产会话仍在（本次轮换到 prod-r1），私有会话也没在往返里丢。
+    const toProduction = await switchActiveDesktopServer(prod, storage, dependencies);
+    expect(toProduction.origin).toBe(prod);
+    expect(toProduction.accessToken).toBe(`${prod}#access`);
+    expect(apiBase()).toBe(prod);
+    expect(refreshed).toEqual([priv, prod]);
+    expect(JSON.parse(slots.get(prod)!)).toMatchObject({ refreshToken: "prod-r1", serverOrigin: prod });
+    expect(JSON.parse(slots.get(priv)!)).toMatchObject({ refreshToken: "priv-r1", serverOrigin: priv });
   });
 });
 
