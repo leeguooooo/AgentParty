@@ -107,6 +107,8 @@ describe("channel task ledger", () => {
       body: JSON.stringify({
         title: "scoped task",
         assignee: { name: agent.name, kind: "agent" },
+        // state=blocked：blocked_reason 只在 blocked 状态保留（#204 不变量），故 round-trip 用例落 blocked
+        state: "blocked",
         scope: ["web/src", "cli/src", "web/src"],
         blocked_reason: "waiting on token",
       }),
@@ -167,6 +169,35 @@ describe("channel task ledger", () => {
     });
     expect(plain.status).toBe(201);
     expect(await plain.json()).toMatchObject({ scope: [], blocked_reason: null });
+  });
+
+  it("clears blocked_reason on any non-blocked state (invariant #204)", async () => {
+    const human = await seedToken("human", uniq("human"));
+    const slug = await createChannel(human.token);
+
+    // create 非 blocked 状态却带 blocked_reason → 服务端落 null（不信任客户端一致性）
+    const created = await api(`/api/channels/${slug}/tasks`, human.token, {
+      method: "POST",
+      body: JSON.stringify({ title: "not blocked", state: "in_progress", blocked_reason: "should be dropped" }),
+    });
+    expect(created.status).toBe(201);
+    expect(((await created.json()) as { blocked_reason: string | null }).blocked_reason).toBe(null);
+
+    // create blocked + reason → 保留
+    const blocked = await api(`/api/channels/${slug}/tasks`, human.token, {
+      method: "POST",
+      body: JSON.stringify({ title: "blocked", state: "blocked", blocked_reason: "waiting on secret" }),
+    });
+    const blockedTask = (await blocked.json()) as { id: number; blocked_reason: string | null };
+    expect(blockedTask.blocked_reason).toBe("waiting on secret");
+
+    // 转出 blocked（→done，且 PATCH 不带 blocked_reason 字段）→ 旧 reason 也被清
+    const done = await api(`/api/channels/${slug}/tasks/${blockedTask.id}`, human.token, {
+      method: "PATCH",
+      body: JSON.stringify({ state: "done" }),
+    });
+    expect(done.status).toBe(200);
+    expect(((await done.json()) as { blocked_reason: string | null }).blocked_reason).toBe(null);
   });
 
 });

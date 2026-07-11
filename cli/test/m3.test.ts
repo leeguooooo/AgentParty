@@ -844,8 +844,9 @@ describe("party status/history channel flag", () => {
       }
       if (req.method === "GET" && req.path === "/api/channels/dev/tasks") {
         // open_claims / blockers 现在从任务台账派生：worker-a 正在做 web/src（in_progress），worker-b 因缺 token 被 blocked。
-        return Response.json({
-          tasks: [
+        // #204 P1：host board 现在按 board-相关状态分别拉，故 mock 按 state 查询参数过滤，模拟真实 API
+        // （否则每个状态查询都返回全量 → 重复 claim）。
+        const allTasks = [
             {
               type: "task",
               id: 1,
@@ -890,8 +891,9 @@ describe("party status/history channel flag", () => {
               updated_at: 11_000,
               completed_at: null,
             },
-          ],
-        });
+        ];
+        const tasks = req.query.state ? allTasks.filter((task) => task.state === req.query.state) : allTasks;
+        return Response.json({ tasks });
       }
       if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
         return Response.json({
@@ -966,6 +968,36 @@ describe("party status/history channel flag", () => {
     expect(mainReq?.query.since).toBeUndefined();
     const headProbeReq = messageReqs.find((r) => r.query.limit === "1");
     expect(headProbeReq?.query.before).toBe(String(TAIL_BEFORE));
+  });
+
+  test("host board fetches only board-relevant states and flags truncation (#204 P1)", async () => {
+    const now = Date.now();
+    // 500 个 in_progress（命中每状态页上限），模拟大量活跃 task
+    const bigInProgress = Array.from({ length: 500 }, (_, i) => ({
+      type: "task", id: i + 1, channel: "dev", title: `t${i}`, desc: null,
+      state: "in_progress", assignee: { name: "w", kind: "agent" },
+      created_by: "w", created_by_kind: "agent", priority: 0, labels: [],
+      parent_id: null, anchor_seqs: [], scope: ["web/src"], blocked_reason: null,
+      completion_artifact: null, workflow_id: null, created_at: now, updated_at: now, completed_at: null,
+    }));
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/presence") return Response.json({ presence: [] });
+      if (req.method === "GET" && req.path === "/api/channels/dev/tasks") {
+        // 只有 in_progress 有数据；关键：无论 state 如何，done/backlog/triage 永不被查询
+        return Response.json({ tasks: req.query.state === "in_progress" ? bigInProgress : [] });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") return Response.json({ messages: [] });
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["host", "board", "dev", "--json"]);
+    expect(r.code).toBe(0);
+    const frame = JSON.parse(r.stdout.trim()) as { tasks_truncated: string[] };
+    // in_progress 命中 500 上限 → 显性标截断，而不是静默漏（门禁 P1）
+    expect(frame.tasks_truncated).toContain("in_progress");
+    // board 只按 4 个活跃状态拉；done/backlog/triage 绝不被查询 → 大量 done task 无法挤掉活跃 task
+    const states = reqsOf(mock, "GET", "/api/channels/dev/tasks").map((req) => req.query.state).sort();
+    expect(states).toEqual(["assigned", "blocked", "in_progress", "needs_review"]);
   });
 
   test("host board recommends human guard reset and takeover when only stale hosts remain", async () => {
