@@ -428,6 +428,26 @@ export const openapiDocument = {
                           related_prs: { type: "array", items: { type: "integer", minimum: 1 } },
                         },
                       },
+                      attachments: {
+                        type: "array",
+                        maxItems: 20,
+                        description:
+                          "R2 attachment refs from POST /api/channels/{slug}/attachments; body may be empty when >=1 attachment is present",
+                        items: {
+                          type: "object",
+                          required: ["key", "filename", "content_type", "size", "url"],
+                          properties: {
+                            key: { type: "string", description: "<slug>/<uuid>/<filename> R2 object key" },
+                            filename: { type: "string", maxLength: 255 },
+                            content_type: { type: "string" },
+                            size: { type: "integer", minimum: 0 },
+                            url: {
+                              type: "string",
+                              description: "authenticated download path /api/channels/{slug}/attachments/{uuid}/{filename}",
+                            },
+                          },
+                        },
+                      },
                     },
                   },
                   {
@@ -515,6 +535,61 @@ export const openapiDocument = {
           "410": { description: "channel archived" },
           "413": { description: "body too large" },
           "429": { description: "rate limited" },
+        },
+      },
+    },
+    "/api/channels/{slug}/attachments": {
+      post: {
+        summary: "upload one attachment blob to R2 and get a ref",
+        description:
+          "uploads the raw request body to R2 under <slug>/<uuid>/<filename>; returns the ref to carry in a message's attachments field. non-readonly token with channel access required. max 25MB.",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          {
+            name: "filename",
+            in: "query",
+            required: true,
+            schema: { type: "string", maxLength: 255, pattern: "^[^/\\\\\\x00-\\x1f\\x7f]{1,255}$" },
+            description: "single path segment; becomes the R2 key suffix and download filename",
+          },
+        ],
+        requestBody: {
+          required: true,
+          description: "raw file bytes; Content-Type is stored and echoed on download",
+          content: { "application/octet-stream": { schema: { type: "string", format: "binary" } } },
+        },
+        responses: {
+          "201": { description: "{key, filename, content_type, size, url}" },
+          "400": { description: "missing/illegal filename or empty body" },
+          "403": { description: "readonly token or no channel access" },
+          "404": { description: "channel not found" },
+          "410": { description: "channel archived" },
+          "413": { description: "attachment exceeds 25MB" },
+        },
+      },
+    },
+    "/api/channels/{slug}/attachments/{path}": {
+      get: {
+        summary: "download an attachment blob from R2 (authenticated)",
+        description:
+          "streams the R2 object back with its stored content-type and X-Content-Type-Options: nosniff. same read access as the channel; never a public R2 link. path is <uuid>/<filename>.",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          {
+            name: "path",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            description: "<uuid>/<filename> object path (no .. or leading /)",
+          },
+        ],
+        responses: {
+          "200": { description: "attachment bytes" },
+          "400": { description: "invalid attachment path" },
+          "403": { description: "no channel access" },
+          "404": { description: "channel or attachment not found" },
         },
       },
     },
