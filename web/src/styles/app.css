@@ -5948,3 +5948,13 @@
 /* #370 团队面板：分工/Agent状态/协调 三区分隔 */
 .team-section { margin-top: 12px; border-top: 1px solid var(--t-faint); padding-top: 8px; }
 .team-section-head { font-size: 12px; font-weight: 700; color: var(--t-muted); margin: 0 0 6px; }
+
+/* #370 点1：公告面板的分工摘要单列块 */
+.charter-division-summary {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 6px 4px 0; padding: 6px 10px;
+  border: 1px solid var(--t-faint); border-radius: 4px; background: var(--t-panel2);
+}
+.charter-division-label { font-size: 11px; font-weight: 700; color: var(--t-muted); }
+.charter-division-text { font-size: 12px; color: var(--fg, inherit); }
+.charter-division-open { margin-left: auto; font-size: 11px; }

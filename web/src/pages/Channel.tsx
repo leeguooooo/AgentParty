@@ -3444,6 +3444,15 @@ export function ChannelPage({
   const totalInView = q === "" ? timelineMessages.length : searchHits.length;
   const visibleInView = q === "" ? visibleMessages.length : visibleSearchHits.length;
   const structuredRoleCount = channelRoles.length + selfReportedRoles(channelRoles, state.presence, channelIdentities).length;
+  // #370 点1：公告面板单列一块「分工摘要」——host + 各角色计数，只读，点开跳团队面板看全貌。
+  const charterDivisionSummary = ((): string => {
+    if (channelRoles.length === 0) return "";
+    const host = channelRoles.find((r) => r.role === "host");
+    const counts = new Map<string, number>();
+    for (const r of channelRoles) if (r.role !== "host") counts.set(r.role, (counts.get(r.role) ?? 0) + 1);
+    const parts = [host ? `host=${host.display ?? host.name}` : null, ...[...counts].map(([role, n]) => `${n} ${role}`)];
+    return parts.filter((p): p is string => p !== null).join(" · ");
+  })();
   const taskOpenCount = taskSummary?.open ?? tasks.filter((task) => task.state !== "done").length;
   const taskReviewCount = taskSummary?.needs_review ?? tasks.filter((task) => task.state === "needs_review").length;
   const taskBlockedCount = taskSummary?.blocked ?? tasks.filter((task) => task.state === "blocked").length;
@@ -3783,6 +3792,16 @@ export function ChannelPage({
               onSave={saveCharter}
               onRetry={() => void loadCharter()}
             />
+          )}
+          {activePanel === "charter" && charterDivisionSummary !== "" && (
+            // #370 点1：分工在公告里单列一块（与公告正文分开），点开跳团队面板看组织树/全貌。
+            <section className="charter-division-summary">
+              <span className="charter-division-label">{t("Channel.charter.divisionLabel")}</span>
+              <span className="t-mono charter-division-text">{charterDivisionSummary}</span>
+              <button type="button" className="d-btn charter-division-open" onClick={() => openPanel("team")}>
+                {t("Channel.charter.viewTeam")}
+              </button>
+            </section>
           )}
           {activePanel === "team" && (
             // #370 方案A：分工 + Agent 状态板 + 协调 三块合成单一「团队」面板。组织架构树在
