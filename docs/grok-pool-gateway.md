@@ -134,25 +134,25 @@ Invalid topic responses, login/challenge HTML, unauthorized attachment paths, un
 
 For login-required topics, export browser/session material manually into the ignored local `http_headers_file`. The tool does not automate login, bypass verification, harvest cookies, register accounts, or search public topics.
 
-## Forum resource discovery and optional LLM ranking
+## CPA forum discovery and optional LLM ranking
 
-The `discovery` block can run several explicit linux.do search queries and consolidate likely Grok/xAI resource topics into a local candidate file:
+The `discovery` block can run several explicit linux.do search queries and consolidate likely CPA resource topics for any provider into a local candidate file. Broad `cpa` queries are recommended because the packaging pattern may be shared across providers:
 
 ```bash
 python3 scripts/linuxdo_grok_replenish.py search \
   .secrets/grok-pool.authorized-sources.json
 ```
 
-When `discovery` is configured, the normal `watch` command also runs discovery after every authorized replenish cycle. A deterministic rule ranker first checks Grok/xAI and resource signals such as attachment, ZIP, credential, quota, expiry, update, and pool language. Low-scoring discussion/news topics are discarded.
+When `discovery` is configured, the normal `watch` command also runs discovery after every authorized replenish cycle. A deterministic rule ranker first checks CPA and resource signals such as attachment, ZIP, credential, quota, expiry, update, and pool language. It classifies provider hints including xAI, Anthropic, OpenAI, Google, and DeepSeek. Low-scoring discussion/news topics are discarded; xAI candidates receive ordering priority without removing other providers.
 
 An optional OpenAI-compatible LLM ranker may then rerank the remaining metadata. This is the useful LLM boundary:
 
-- Input: topic ID, title, URL, a maximum 500-character redacted search summary, and the rule score.
+- Input: topic ID, title, URL, a maximum 500-character redacted search summary, rule score, and deterministic provider hints.
 - Output: strict JSON containing the same topic ID, a `0..100` score, and a short reason.
 - Excluded: attachment contents, credential JSON, access/refresh tokens, Cookies, request bodies, and upstream error bodies.
 - Failure behavior: fall back to the deterministic rule score; forum polling and authorized replenish continue.
 
-Every discovered item is written with `"authorization":"candidate_only"`. The search/LLM stage cannot add a source, download its attachment, or put anything into the pool. An operator must inspect the candidate and explicitly register its exact topic and attachment rule before the existing safe pipeline can process it.
+Every discovered item is written with `"authorization":"candidate_only"`, `provider_hints`, and `pool_compatibility`. The search/LLM stage cannot add a source, download its attachment, or put anything into the pool. The current importer intentionally validates only xAI credentials; other provider candidates are marked `requires_provider_adapter`. An operator must inspect a candidate and explicitly register its exact topic and attachment rule before a matching provider-specific safe pipeline can process it.
 
 ## Single authorized attachment replenish
 

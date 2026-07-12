@@ -20,9 +20,11 @@
   "discovery": {
     "search_base_url": "https://linux.do",
     "queries": [
+      "cpa",
+      "cpa credential zip",
       "grok cpa",
-      "grok 资源 附件",
-      "xai credential zip"
+      "claude cpa",
+      "gemini cpa"
     ],
     "candidate_file": "<ABSOLUTE_LOCAL_DISCOVERY_CANDIDATE_FILE>",
     "minimum_rule_score": 60,

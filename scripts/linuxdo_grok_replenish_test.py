@@ -41,6 +41,14 @@ class LinuxDoGrokReplenishTest(unittest.TestCase):
         candidates = MODULE.discover_candidates(topic, "https://linux.do")
         self.assertEqual([candidate["url"] for candidate in candidates], ["https://linux.do/uploads/example.zip"])
 
+    def test_discovers_registered_cpa_topics_for_other_providers(self):
+        topic = {
+            "topic": {"id": 2571016, "title": "Claude CPA credential bundle"},
+            "posts": [{"cooked": '<a class="attachment" href="/uploads/claude.zip">claude.zip</a>'}],
+        }
+        candidates = MODULE.discover_candidates(topic, "https://linux.do")
+        self.assertEqual([candidate["url"] for candidate in candidates], ["https://linux.do/uploads/claude.zip"])
+
     def test_rejects_import_without_explicit_authorization(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"
@@ -310,8 +318,41 @@ class LinuxDoGrokReplenishTest(unittest.TestCase):
             self.assertEqual(candidates[0]["topic_id"], 101)
             self.assertEqual(candidates[0]["authorization"], "candidate_only")
             self.assertGreaterEqual(candidates[0]["score"], 60)
+            self.assertEqual(candidates[0]["provider_hints"], ["xai"])
+            self.assertEqual(candidates[0]["pool_compatibility"], "xai_import_candidate")
             manifest_payload = json.loads(manifest.read_text())
             self.assertEqual(len(manifest_payload["sources"]), 1)
+
+    def test_forum_search_keeps_generic_cpa_candidates_and_classifies_provider_hints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            routes = {
+                "/search.json?q=cpa": ("application/json", json.dumps({
+                    "topics": [
+                        {"id": 121, "slug": "claude-cpa", "title": "Claude CPA 资源包"},
+                        {"id": 122, "slug": "gemini-cpa", "title": "Gemini CPA credential zip"},
+                        {"id": 123, "slug": "grok-cpa", "title": "Grok CPA 更新"},
+                    ],
+                    "posts": [
+                        {"topic_id": 121, "blurb": "附件 zip 分享"},
+                        {"topic_id": 122, "blurb": "archive attachment"},
+                        {"topic_id": 123, "blurb": "credential zip attachment"},
+                    ],
+                }).encode()),
+            }
+            with serve_routes(routes) as origin:
+                manifest = write_search_manifest(root, origin, query="cpa")
+                result = MODULE.search_forum_resources(manifest)
+
+            self.assertEqual(result["candidates"], 3)
+            candidates = json.loads((root / "candidates.json").read_text())
+            by_id = {candidate["topic_id"]: candidate for candidate in candidates}
+            self.assertEqual(by_id[121]["provider_hints"], ["anthropic"])
+            self.assertEqual(by_id[122]["provider_hints"], ["google"])
+            self.assertEqual(by_id[123]["provider_hints"], ["xai"])
+            self.assertEqual(by_id[121]["pool_compatibility"], "requires_provider_adapter")
+            self.assertEqual(by_id[123]["pool_compatibility"], "xai_import_candidate")
+            self.assertEqual(candidates[0]["topic_id"], 123)
 
     def test_forum_search_redacts_secret_like_text_before_candidate_storage_or_llm(self):
         with tempfile.TemporaryDirectory() as directory:

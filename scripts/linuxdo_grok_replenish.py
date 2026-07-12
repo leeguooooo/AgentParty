@@ -52,7 +52,7 @@ def discover_candidates(topic_payload: dict, origin: str = "https://linux.do") -
     topic = topic_payload.get("topic", {})
     title = str(topic.get("title", ""))
     topic_id = topic.get("id")
-    if "grok" not in title.lower() and "xai" not in title.lower():
+    if not any(term in title.lower() for term in ("grok", "xai", "cpa")):
         return []
     candidates: list[dict] = []
     for post in topic_payload.get("posts", []):
@@ -654,11 +654,14 @@ def _search_rule_score(title: str, blurb: str) -> tuple[int, list[str]]:
     text = f"{title} {blurb}".lower()
     score = 0
     reasons: list[str] = []
-    if "grok" in text or "xai" in text:
+    if "cpa" in text:
         score += 35
+        reasons.append("mentions CPA")
+    if "grok" in text or "xai" in text:
+        score += 20
         reasons.append("mentions Grok/xAI")
     resource_terms = (
-        "cpa", "资源", "分享", "附件", "zip", "credential", "resource", "archive", "attachment",
+        "资源", "分享", "附件", "zip", "credential", "resource", "archive", "attachment",
         "账号", "额度", "失效", "更新", "pool",
     )
     matched = [term for term in resource_terms if term in text]
@@ -669,6 +672,22 @@ def _search_rule_score(title: str, blurb: str) -> tuple[int, list[str]]:
         score -= 25
         reasons.append("mostly discussion/news")
     return max(0, min(100, score)), reasons
+
+
+def _provider_hints(title: str, summary: str) -> list[str]:
+    text = f"{title} {summary}".lower()
+    providers: list[str] = []
+    patterns = (
+        ("xai", ("grok", "xai")),
+        ("anthropic", ("claude", "anthropic")),
+        ("openai", ("openai", "chatgpt", "gpt")),
+        ("google", ("gemini", "google ai")),
+        ("deepseek", ("deepseek",)),
+    )
+    for provider, terms in patterns:
+        if any(term in text for term in terms):
+            providers.append(provider)
+    return providers or ["unknown"]
 
 
 def _redact_discovery_text(value: str) -> str:
@@ -720,9 +739,11 @@ def _llm_rank_candidate(candidate: dict, config: dict) -> dict:
         "url": candidate["url"],
         "summary": candidate["summary"][:500],
         "rule_score": candidate["score"],
+        "provider_hints": candidate["provider_hints"],
     }
     prompt = (
-        "You rank forum topic metadata for whether it likely contains a Grok/xAI resource attachment. "
+        "You rank forum topic metadata for whether it likely contains a reusable CPA credential/resource attachment "
+        "for any model provider. Consider the provider hints, but do not claim provider compatibility without evidence. "
         "Return strict JSON only: {\"topic_id\": number, \"score\": 0-100, \"reason\": string}. "
         "This is discovery only; never claim authorization and never request credentials.\n"
         + json.dumps(metadata, ensure_ascii=False)
@@ -786,6 +807,7 @@ def search_forum_resources(manifest_path: Path) -> dict[str, int]:
             score, reasons = _search_rule_score(title, summary)
             if score < minimum_score:
                 continue
+            provider_hints = _provider_hints(title, summary)
             candidate = {
                 "topic_id": topic["id"],
                 "title": title,
@@ -795,6 +817,8 @@ def search_forum_resources(manifest_path: Path) -> dict[str, int]:
                 "reason": "; ".join(reasons),
                 "queries": [query],
                 "authorization": "candidate_only",
+                "provider_hints": provider_hints,
+                "pool_compatibility": "xai_import_candidate" if "xai" in provider_hints else "requires_provider_adapter",
             }
             current = candidates_by_id.get(topic["id"])
             if current:
@@ -816,7 +840,10 @@ def search_forum_resources(manifest_path: Path) -> dict[str, int]:
             except Exception:
                 candidate["ranker"] = "rules_fallback"
                 totals["llm_failures"] += 1
-    ordered = sorted(candidates_by_id.values(), key=lambda item: (-item["score"], item["topic_id"]))
+    ordered = sorted(
+        candidates_by_id.values(),
+        key=lambda item: (0 if "xai" in item["provider_hints"] else 1, -item["score"], item["topic_id"]),
+    )
     totals["candidates"] = len(ordered)
     _atomic_json(Path(candidate_file_value).expanduser(), ordered)
     return totals
@@ -847,7 +874,7 @@ def parser() -> argparse.ArgumentParser:
     watch_cmd = commands.add_parser("watch", help="continuously poll registered topics")
     watch_cmd.add_argument("manifest", type=Path)
     watch_cmd.add_argument("--interval-seconds", type=int, default=300)
-    search_cmd = commands.add_parser("search", help="discover candidate Grok resource topics without authorizing them")
+    search_cmd = commands.add_parser("search", help="discover candidate CPA resource topics without authorizing them")
     search_cmd.add_argument("manifest", type=Path)
     return root
 
