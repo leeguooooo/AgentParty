@@ -179,11 +179,27 @@ main() {
     xattr -dr com.apple.quarantine "$stage" || die "无法移除 preview 的 quarantine 属性。"
   fi
 
-  # 若目标正在运行，先退出
-  if pgrep -f "$appdir/$APP_NAME/Contents/MacOS/" >/dev/null 2>&1; then
+  # 覆盖正在运行的 app 只会替换磁盘文件，旧进程仍会执行旧代码。先优雅退出，
+  # 超时后终止，并在确认进程消失前绝不替换应用。
+  app_process="$appdir/$APP_NAME/Contents/MacOS/"
+  app_running() { pgrep -f "$app_process" >/dev/null 2>&1; }
+  wait_for_app_exit() {
+    wait_attempt=0
+    while [ "$wait_attempt" -lt 20 ]; do
+      app_running || return 0
+      sleep 0.25
+      wait_attempt="$((wait_attempt + 1))"
+    done
+    return 1
+  }
+  if app_running; then
     log "检测到 AgentParty 正在运行，先退出它…"
     osascript -e 'quit app "AgentParty"' 2>/dev/null || true
-    sleep 2
+    if ! wait_for_app_exit; then
+      log "AgentParty 未及时退出，终止旧进程…"
+      pkill -TERM -f "$app_process" 2>/dev/null || true
+      wait_for_app_exit || die "旧版 AgentParty 仍在运行；为避免新旧版本混用，已中止安装。"
+    fi
   fi
 
   log "安装到 $dst …"

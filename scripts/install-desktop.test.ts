@@ -13,7 +13,12 @@ function executable(path: string, body: string): void {
   chmodSync(path, 0o755);
 }
 
-function runInstaller(failReplacement: boolean, preview = false, allowUnnotarized = false) {
+function runInstaller(
+  failReplacement: boolean,
+  preview = false,
+  allowUnnotarized = false,
+  runningApp = false,
+) {
   const root = mkdtempSync(resolve(tmpdir(), "desktop-installer-"));
   const bin = resolve(root, "bin");
   const assets = resolve(root, "assets");
@@ -47,7 +52,12 @@ function runInstaller(failReplacement: boolean, preview = false, allowUnnotarize
   executable(resolve(bin, "spctl"), "exit 0");
   executable(resolve(bin, "codesign"), 'case "$1" in -dv) echo "Authority=Developer ID Application: AgentParty Inc. (TEAM123456)" >&2 ;; esac; exit 0');
   executable(resolve(bin, "xattr"), 'printf "%s\\n" "$*" > "$FIXTURE_XATTR_LOG"');
-  executable(resolve(bin, "pgrep"), "exit 1");
+  executable(
+    resolve(bin, "pgrep"),
+    '[ "${FIXTURE_RUNNING_APP:-0}" = 1 ] && [ ! -e "$FIXTURE_TERMINATED" ] && exit 0; exit 1',
+  );
+  executable(resolve(bin, "osascript"), 'printf "%s\\n" "$*" > "$FIXTURE_OSASCRIPT_LOG"');
+  executable(resolve(bin, "pkill"), 'printf "%s\\n" "$*" > "$FIXTURE_PKILL_LOG"; : > "$FIXTURE_TERMINATED"');
   executable(resolve(bin, "sleep"), "exit 0");
   if (failReplacement) {
     executable(resolve(bin, "mv"), 'case "$1" in *.AgentParty.app.new.*) exit 1 ;; esac; PATH=/usr/bin:/bin exec mv "$@"');
@@ -65,6 +75,10 @@ function runInstaller(failReplacement: boolean, preview = false, allowUnnotarize
       FIXTURE_DMG_HASH: dmgHash,
       FIXTURE_PREVIEW: preview ? "1" : "0",
       FIXTURE_XATTR_LOG: resolve(root, "xattr.log"),
+      FIXTURE_RUNNING_APP: runningApp ? "1" : "0",
+      FIXTURE_TERMINATED: resolve(root, "terminated"),
+      FIXTURE_OSASCRIPT_LOG: resolve(root, "osascript.log"),
+      FIXTURE_PKILL_LOG: resolve(root, "pkill.log"),
       AGENTPARTY_ALLOW_UNNOTARIZED: allowUnnotarized ? "1" : "0",
     },
   });
@@ -108,6 +122,20 @@ describe("macOS desktop installer", () => {
     expect(gatekeeper).toBeLessThan(backup);
     expect(backup).toBeLessThan(replacement);
     expect(installer).toContain('mv "$backup" "$dst"');
+  });
+
+  test("terminates an old app process that ignores the graceful quit before replacement", () => {
+    const run = runInstaller(false, false, false, true);
+    try {
+      expect(run.result.status).toBe(0);
+      expect(readFileSync(resolve(run.root, "osascript.log"), "utf8")).toContain('quit app "AgentParty"');
+      expect(readFileSync(resolve(run.root, "pkill.log"), "utf8")).toContain(
+        `${run.appDir}/AgentParty.app/Contents/MacOS/`,
+      );
+      expect(readFileSync(resolve(run.appDir, "AgentParty.app/Contents/MacOS/party"), "utf8")).toContain("0.2.90");
+    } finally {
+      rmSync(run.root, { recursive: true, force: true });
+    }
   });
 
   test("installs a fully verified production fixture through the real shell flow", () => {
