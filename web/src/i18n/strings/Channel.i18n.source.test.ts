@@ -136,8 +136,10 @@ describe("Channel i18n source guard (#350)", () => {
     }
   });
 
-  test("localizes all 30 token-revoked paths through the live translation ref", () => {
-    expect(source.match(/tRef\.current\("Channel\.error\.tokenRevoked"\)/g)).toHaveLength(30);
+  test("localizes every audited token-revoked path through the live translation ref", () => {
+    const localizedPaths = source.match(/tRef\.current\("Channel\.error\.tokenRevoked"\)/g) ?? [];
+    expect(localizedPaths.length).toBeGreaterThanOrEqual(30);
+    expect(source).not.toContain('authFailedRef.current("token revoked');
   });
 
   test("keeps long-lived loaders and the socket independent from locale changes", () => {

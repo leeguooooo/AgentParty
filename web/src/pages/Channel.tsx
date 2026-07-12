@@ -411,6 +411,7 @@ function CharterBanner({
   onEdit,
   onCancel,
   onSave,
+  onRetry,
 }: {
   charter: ChannelCharter | null;
   open: boolean;
@@ -426,6 +427,7 @@ function CharterBanner({
   onEdit: () => void;
   onCancel: () => void;
   onSave: () => void;
+  onRetry?: () => void;
 }) {
   const t = useT();
   const hasCharter = Boolean(charter?.charter);
@@ -453,6 +455,9 @@ function CharterBanner({
       </header>
       {open && (
         <div className="charter-body">
+          {error !== null && !(canModerate && editing) && (
+            <p className="banner banner--red" role="alert">{error}</p>
+          )}
           {canModerate && editing ? (
             <div className="charter-editor">
               <textarea
@@ -472,6 +477,12 @@ function CharterBanner({
             </div>
           ) : hasCharter ? (
             <Markdown source={charter!.charter!} />
+          ) : charter === null && error !== null ? (
+            onRetry !== undefined && (
+              <button className="d-btn" type="button" onClick={onRetry}>
+                {t("Channel.charter.retry")}
+              </button>
+            )
           ) : (
             <p className="charter-empty">{t("Channel.charter.empty")}</p>
           )}
@@ -1972,6 +1983,7 @@ export function ChannelPage({
   const [bootstrapped, setBootstrapped] = useState(false); // 初始页已就绪，ws 才连
   const hasMoreRef = useRef(true); // 还有更早的历史可上翻
   const loadingOlderRef = useRef(false); // 上翻请求进行中（去抖）
+  const [olderStatus, setOlderStatus] = useState<"idle" | "loading" | "error" | "end">("idle");
   const initialCursorRef = useRef(0); // ws hello 的起始游标 = 初始页最后一条 seq
   const pendingAnchorRef = useRef<{ height: number; top: number } | null>(null); // prepend 前的滚动锚
   const oldestSeqRef = useRef(0);
@@ -2280,6 +2292,7 @@ export function ChannelPage({
         setHistoryError(null);
         for (const m of msgs) dispatch({ type: "frame", frame: m }); // 按 seq 去重，与 ws 交叠无害
         hasMoreRef.current = msgs.length >= PAGE_SIZE;
+        if (!hasMoreRef.current) setOlderStatus("end");
         initialCursorRef.current = msgs.length > 0 ? msgs[msgs.length - 1]!.seq : 0;
         setBootstrapped(true);
       })
@@ -2297,6 +2310,7 @@ export function ChannelPage({
         setHistoryError(tRef.current("Channel.error.historyLoad"));
         initialCursorRef.current = 0;
         hasMoreRef.current = false;
+        setOlderStatus("end");
         setBootstrapped(true);
       });
     return () => {
@@ -2459,6 +2473,7 @@ export function ChannelPage({
     if (stickBottom.current && state.messages.length > MESSAGE_CAP + PAGE_SIZE) {
       dispatch({ type: "trim", keep: MESSAGE_CAP });
       hasMoreRef.current = true;
+      setOlderStatus("idle");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSeq]);
@@ -2511,12 +2526,15 @@ export function ChannelPage({
     const oldest = oldestSeqRef.current;
     if (oldest <= 1) {
       hasMoreRef.current = false;
+      setOlderStatus("end");
       return;
     }
     loadingOlderRef.current = true;
+    setOlderStatus("loading");
     fetchMessages(token, slug, { before: oldest, limit: PAGE_SIZE })
       .then((msgs) => {
         if (msgs.length < PAGE_SIZE) hasMoreRef.current = false;
+        setOlderStatus(hasMoreRef.current ? "idle" : "end");
         if (msgs.length === 0) return;
         // 锚在 dispatch 前一刻采样（review P2）：请求飞行期间用户可能已滚走/来了新消息，
         // 用请求发出时的旧锚会把视口拽回触顶位置
@@ -2528,8 +2546,10 @@ export function ChannelPage({
           pendingAnchorRef.current = null;
         });
       })
-      .catch(() => {
-        // 失败不锚定；下次触顶重试
+      .catch((err: unknown) => {
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+        else if (err instanceof ForbiddenError) dispatch({ type: "fatal", reason: "forbidden" });
+        else setOlderStatus("error");
       })
       .finally(() => {
         loadingOlderRef.current = false;
@@ -3516,6 +3536,7 @@ export function ChannelPage({
               onEdit={editCharter}
               onCancel={cancelCharterEdit}
               onSave={saveCharter}
+              onRetry={() => void loadCharter()}
             />
           )}
           {activePanel === "roles" && (
@@ -3602,6 +3623,40 @@ export function ChannelPage({
       )}
       {/* overflow-anchor:none —— 浏览器原生滚动锚定会和我们手动的 prepend 锚定打架 */}
       <div className="stream" ref={streamRef} onScroll={onScroll} style={{ overflowAnchor: "none" }}>
+        {q === "" && olderStatus === "loading" && (
+          <p className="stream-top-note" role="status">{t("Channel.older.loading")}</p>
+        )}
+        {q === "" && olderStatus === "error" && (
+          <p className="stream-top-note stream-top-note--error" role="alert">
+            {t("Channel.older.failed")}
+            <button
+              type="button"
+              className="d-btn"
+              onClick={() => {
+                setOlderStatus("idle");
+                loadOlder();
+              }}
+            >
+              {t("Channel.older.retry")}
+            </button>
+          </p>
+        )}
+        {q === "" && olderStatus === "end" && bootstrapped && state.messages.length > 0 && (
+          <p className="stream-top-note" role="status">{t("Channel.older.end")}</p>
+        )}
+        {!bootstrapped && q === "" && (
+          <div className="stream-skeleton" aria-hidden>
+            {[0, 1, 2].map((index) => (
+              <div key={index} className="d-card msg-card msg-card--skeleton">
+                <div className="msg-skeleton-avatar" />
+                <div className="msg-skeleton-lines">
+                  <div className="msg-skeleton-line msg-skeleton-line--short" />
+                  <div className="msg-skeleton-line" />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         {q === ""
           ? visibleTimeline.map((item) =>
               item.type === "message" ? (
@@ -3662,10 +3717,17 @@ export function ChannelPage({
               ),
             )
           : visibleSearchHits.map((hit) => <SearchHitCard key={hit.seq} hit={hit} onJump={jumpToSearchHit} />)}
-        {state.messages.length === 0 && q === "" && (
-          <p className="d-empty" role="status" aria-live="polite">
-            {t("Channel.empty.partyWatch", { slug })}
-          </p>
+        {bootstrapped && state.messages.length === 0 && q === "" && (
+          <div className="stream-empty" role="status" aria-live="polite">
+            <p className="stream-empty-lead">{t("Channel.empty.partyWatch", { slug })}</p>
+            <p className="stream-empty-lead">{t("Channel.empty.noMessagesHint")}</p>
+            <p className="d-empty">{t("Channel.empty.partyWatchCommand", { slug })}</p>
+            {canMintAgent && accountKey !== null && (
+              <button type="button" className="d-btn d-btn--primary" onClick={() => setAdminSurface("agentJoin", true)}>
+                {t("AgentJoin.open")}
+              </button>
+            )}
+          </div>
         )}
         {state.messages.length > 0 && q === "" && visibleMessages.length === 0 && (
           <p className="d-empty" role="status" aria-live="polite">
