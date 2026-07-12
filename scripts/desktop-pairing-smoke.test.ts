@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { desktopPairingSmokePayload, smokeDesktopPairing } from "../worker/scripts/smoke-desktop-pairing.mjs";
 
 const dualDeploy = readFileSync(resolve(import.meta.dir, "../worker/scripts/deploy-dual.mjs"), "utf8");
+const dualVerify = readFileSync(resolve(import.meta.dir, "../worker/scripts/verify-dual-deployment.mjs"), "utf8");
 
 describe("desktop pairing deploy smoke", () => {
   test("sends an S256 Device Flow probe and validates the target origin", async () => {
@@ -57,5 +58,10 @@ describe("desktop pairing deploy smoke", () => {
 
   test("runs Wrangler noninteractively so unattended dual deploys cannot pause for setup prompts", () => {
     expect(dualDeploy).toContain('CI: "1"');
+  });
+
+  test("uses the bounded consecutive metadata verifier for independent dual-deployment checks", () => {
+    expect(dualVerify).toContain('verifyDeploymentIdentity');
+    expect(dualVerify).not.toContain('readDeploymentMetadata');
   });
 });

@@ -6,6 +6,7 @@ export interface DeploymentMetadata {
 
 export interface DeploymentVerificationOptions {
   attempts?: number;
+  consecutive?: number;
   delayMs?: number;
   sleep?: (delayMs: number) => Promise<void>;
 }
@@ -19,6 +20,12 @@ export function readDeploymentMetadata(
 export function verifyDeploymentMetadata(
   base: string,
   expected: DeploymentMetadata,
+  fetcher?: typeof fetch,
+  options?: DeploymentVerificationOptions,
+): Promise<DeploymentMetadata>;
+export function verifyDeploymentIdentity(
+  base: string,
+  expected: Pick<DeploymentMetadata, "version" | "commit">,
   fetcher?: typeof fetch,
   options?: DeploymentVerificationOptions,
 ): Promise<DeploymentMetadata>;

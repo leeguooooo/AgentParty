@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { readDeploymentMetadata } from "./deployment-metadata.mjs";
+import { verifyDeploymentIdentity } from "./deployment-metadata.mjs";
 
 const expectedVersion = JSON.parse(readFileSync("../desktop/package.json", "utf8")).version;
 const expectedCommit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -10,13 +10,10 @@ const targets = {
 };
 
 const entries = await Promise.all(Object.entries(targets).map(async ([name, base]) => {
-  const metadata = await readDeploymentMetadata(base);
-  if (metadata.version !== expectedVersion) {
-    throw new Error(`${name}: version mismatch: expected ${expectedVersion}, got ${metadata.version}`);
-  }
-  if (metadata.commit !== expectedCommit) {
-    throw new Error(`${name}: commit mismatch: expected ${expectedCommit}, got ${metadata.commit}`);
-  }
+  const metadata = await verifyDeploymentIdentity(base, {
+    version: expectedVersion,
+    commit: expectedCommit,
+  });
   return [name, metadata];
 }));
 

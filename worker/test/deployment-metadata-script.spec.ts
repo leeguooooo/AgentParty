@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   deploymentDefineArgs,
   verifyDualDeployment,
+  verifyDeploymentIdentity,
   verifyDeploymentMetadata,
 } from "../scripts/deployment-metadata.mjs";
 
@@ -30,7 +31,7 @@ describe("deployment metadata script", () => {
       "https://example.test",
       { ...metadata, commit: "f".repeat(40) },
       fetcher,
-      { attempts: 1, delayMs: 0, sleep: async () => {} },
+      { attempts: 1, consecutive: 1, delayMs: 0, sleep: async () => {} },
     ))
       .rejects.toThrow("commit mismatch");
   });
@@ -46,6 +47,7 @@ describe("deployment metadata script", () => {
 
     await expect(verifyDeploymentMetadata("https://example.test", metadata, fetcher, {
       attempts: 2,
+      consecutive: 1,
       delayMs: 25,
       sleep: async (delayMs) => { waits.push(delayMs); },
     })).resolves.toEqual(metadata);
@@ -65,7 +67,47 @@ describe("deployment metadata script", () => {
     await expect(verifyDeploymentMetadata("https://example.test", metadata, fetcher, {
       sleep: async () => {},
     })).resolves.toEqual(metadata);
-    expect(calls).toBe(46);
+    expect(calls).toBe(48);
+  });
+
+  it("requires consecutive exact responses and resets after a stale edge reappears", async () => {
+    let calls = 0;
+    const sequence = [true, true, false, true, true, true];
+    const fetcher = async () => {
+      const exact = sequence[calls++] ?? true;
+      const body = exact ? { ok: true, ...metadata } : { ok: true, ...metadata, commit: "f".repeat(40) };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    };
+
+    await expect(verifyDeploymentMetadata("https://example.test", metadata, fetcher, {
+      attempts: 6,
+      consecutive: 3,
+      delayMs: 0,
+      sleep: async () => {},
+    })).resolves.toEqual(metadata);
+    expect(calls).toBe(6);
+  });
+
+  it("requires one stable deployment timestamp when verifying only version and commit", async () => {
+    let calls = 0;
+    const timestamps = ["2026-07-11T00:00:01.000Z", "2026-07-11T00:00:02.000Z"];
+    const fetcher = async () => {
+      const deployed_at = timestamps[Math.min(calls++, timestamps.length - 1)];
+      return new Response(JSON.stringify({ ok: true, ...metadata, deployed_at }), {
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    await expect(verifyDeploymentIdentity("https://example.test", {
+      version: metadata.version,
+      commit: metadata.commit,
+    }, fetcher, {
+      attempts: 4,
+      consecutive: 3,
+      delayMs: 0,
+      sleep: async () => {},
+    })).resolves.toEqual({ ...metadata, deployed_at: timestamps[1] });
+    expect(calls).toBe(4);
   });
 
   it("verifies prod and xdream against one expected build", async () => {
@@ -83,7 +125,7 @@ describe("deployment metadata script", () => {
       { prod: "https://prod.test", xdream: "https://xdream.test" },
       metadata,
       fetcher,
-      { attempts: 1, delayMs: 0, sleep: async () => {} },
+      { attempts: 1, consecutive: 1, delayMs: 0, sleep: async () => {} },
     ))
       .rejects.toThrow("xdream: commit mismatch");
   });
