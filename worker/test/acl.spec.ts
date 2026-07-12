@@ -78,11 +78,13 @@ describe("canAccessChannel v2 matrix (spec §5.4/§5.5)", () => {
     expect(canAccessChannel(roNoScope, collabCh, false)).toBe(false);
   });
 
-  it("legacy ap_ token (owner=null) transitional passthrough on private (agent & readonly)", () => {
+  // #372 安全：legacy 放行只对无归属账号的老频道（owner_account=null）生效。
+  // 修复前 legacy token 对任意账号拥有的私有频道也 true（全局跨频道 god-mode）——现已收紧。
+  it("legacy ap_ token (owner=null) passes ONLY on owner_account=null legacy channels, denied on account-owned", () => {
     for (const id of [legacyAgent, legacyReadonly]) {
-      expect(canAccessChannel(id, privateOwned, false)).toBe(true);
-      expect(canAccessChannel(id, otherOwned, false)).toBe(true);
-      expect(canAccessChannel(id, legacyCh, false)).toBe(true);
+      expect(canAccessChannel(id, legacyCh, false)).toBe(true); // 老频道过渡放行
+      expect(canAccessChannel(id, privateOwned, false)).toBe(false); // #372：账号拥有的私有频道不再放行
+      expect(canAccessChannel(id, otherOwned, false)).toBe(false); // 别账号频道更不该进
     }
   });
 
@@ -102,8 +104,11 @@ describe("isChannelModerator v2 (spec §5)", () => {
     expect(isChannelModerator(apAgent, legacyCh)).toBe(false); // owner_account=null 不命中
   });
 
-  it("legacy ap_ token moderates (transitional); OIDC fan does not", () => {
-    expect(isChannelModerator(legacyAgent, privateOwned)).toBe(true);
+  // #372 安全：legacy token 只 moderate owner_account=null 的老频道，不再对账号拥有的频道恒判 moderator。
+  it("legacy ap_ token moderates ONLY owner_account=null channels; OIDC fan does not", () => {
+    expect(isChannelModerator(legacyAgent, legacyCh)).toBe(true); // 老频道过渡放行
+    expect(isChannelModerator(legacyAgent, privateOwned)).toBe(false); // #372：账号拥有的频道不再放行
+    expect(isChannelModerator(legacyAgent, otherOwned)).toBe(false); // 别账号频道不能管
     expect(isChannelModerator(oidcFan, publicCh)).toBe(false);
     expect(isChannelModerator(oidcFan, privateOwned)).toBe(false);
   });

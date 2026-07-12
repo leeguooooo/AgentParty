@@ -1,6 +1,16 @@
 // 消息打印格式："[seq] name(kind): body 首行"，多行缩进跟随
 import type { AgentContext, MsgFrame } from "@agentparty/shared";
 
+// #372 安全：远端可控字段（body/name/owner/context/attachment 文件名/note 等）会被原样打进终端。
+// 攻击者发一条含终端转义序列的消息，就能在每个 watch/history 该频道的 agent 终端上注入 OSC52
+// 剪贴板写入、用光标/清屏序列伪造或隐藏输出。剥离 C0（保留 \t\n，去掉含 ESC/BEL/CR 在内的其余）、
+// DEL、C1，把注入序列降级为可见文本。换行是 formatMsg 自己的结构，逐行清洗后再拼接。
+// eslint-disable-next-line no-control-regex
+const TERMINAL_CONTROL = /[\x00-\x08\x0B-\x1F\x7F-\x9F]/g;
+export function stripTerminalControls(text: string): string {
+  return text.replace(TERMINAL_CONTROL, "");
+}
+
 function formatSender(m: MsgFrame): string {
   const owner = m.sender.owner && m.sender.owner !== m.sender.name ? ` owner=${m.sender.owner}` : "";
   const lineage = m.sender.lineage ? ` parent=${m.sender.lineage.parent_agent} team=${m.sender.lineage.team_id}` : "";
@@ -36,7 +46,12 @@ function formatAttachments(m: MsgFrame): string[] {
   );
 }
 
+// 唯一出口：任何远端字段拼进来后，整串统一剥离终端控制字符（#372）。逐行结构用的 \n/\t 保留。
 export function formatMsg(m: MsgFrame): string {
+  return stripTerminalControls(formatMsgRaw(m));
+}
+
+function formatMsgRaw(m: MsgFrame): string {
   const badges = [
     m.completion_artifact !== undefined ? "completion" : null,
     m.edited ? "edited" : null,

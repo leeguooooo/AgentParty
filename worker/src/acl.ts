@@ -24,6 +24,15 @@ function isLegacyAdminToken(identity: AclIdentity): boolean {
   return !isOidcIdentity(identity) && identity.account == null;
 }
 
+// #372 安全修复：legacy 放行只对**无归属账号的老频道**（owner_account 为 null）生效。
+// 修复前，owner=null 的存量 ap_ token 对**任意**频道（含账号拥有的私有频道）恒判 moderator——
+// 迁移 0003 只 ADD COLUMN 不回填、`undefined == null` 为真，导致全局跨频道 god-mode。
+// 收紧后：老频道仍由 legacy token 过渡管理，但账号拥有的频道（owner_account 非空）不再放行，
+// legacy token 落到账号/成员规则（其 account 为 null，不匹配 owner_account）→ 私有频道被拒。
+function legacyAdminAppliesTo(identity: AclIdentity, channel: ChannelAcl): boolean {
+  return isLegacyAdminToken(identity) && channel.owner_account == null;
+}
+
 // 是否允许「进入/读」该频道（spec §5.4/§5.5 访问矩阵），判定顺序：
 //   ① public → 任何通过鉴权的身份放行（public 先于 scope，scoped token 也能进公开频道）
 //   ② channel_scope 非空 → 仅 slug 命中才放行，否则一律 forbidden（对所有 role 含 readonly 硬上限，
@@ -36,7 +45,7 @@ function isLegacyAdminToken(identity: AclIdentity): boolean {
 export function canAccessChannel(identity: AclIdentity, channel: ChannelAcl, isMember: boolean): boolean {
   if (channel.visibility === "public") return true;
   if (identity.channel_scope != null) return channel.slug === identity.channel_scope;
-  if (isLegacyAdminToken(identity)) return true;
+  if (legacyAdminAppliesTo(identity, channel)) return true;
   if (identity.role === "readonly") return false;
   if (identity.account != null && identity.account === channel.owner_account) return true;
   return isMember;
@@ -48,6 +57,6 @@ export function canAccessChannel(identity: AclIdentity, channel: ChannelAcl, isM
 export function isChannelModerator(identity: AclIdentity, channel: ChannelAcl): boolean {
   if (identity.role === "readonly") return false;
   if (identity.channel_scope != null) return false;
-  if (isLegacyAdminToken(identity)) return true;
+  if (legacyAdminAppliesTo(identity, channel)) return true;
   return identity.account != null && identity.account === channel.owner_account;
 }
