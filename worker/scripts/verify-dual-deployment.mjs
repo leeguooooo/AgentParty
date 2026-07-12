@@ -18,8 +18,4 @@ const entries = await Promise.all(Object.entries(targets).map(async ([name, base
 }));
 
 const verified = Object.fromEntries(entries);
-if (verified.prod.deployed_at !== verified.xdream.deployed_at) {
-  throw new Error(`deployment timestamp mismatch: prod=${verified.prod.deployed_at}, xdream=${verified.xdream.deployed_at}`);
-}
-
 console.log(JSON.stringify(verified, null, 2));

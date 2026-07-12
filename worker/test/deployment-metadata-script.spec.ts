@@ -110,6 +110,24 @@ describe("deployment metadata script", () => {
     expect(calls).toBe(4);
   });
 
+  it("rejects an invalid deployment timestamp when verifying only version and commit", async () => {
+    const fetcher = async () => new Response(JSON.stringify({
+      ok: true,
+      ...metadata,
+      deployed_at: "not-a-timestamp",
+    }), { headers: { "content-type": "application/json" } });
+
+    await expect(verifyDeploymentIdentity("https://example.test", {
+      version: metadata.version,
+      commit: metadata.commit,
+    }, fetcher, {
+      attempts: 1,
+      consecutive: 1,
+      delayMs: 0,
+      sleep: async () => {},
+    })).rejects.toThrow("deployment timestamp is invalid");
+  });
+
   it("verifies prod and xdream against one expected build", async () => {
     const fetcher = async (input: string | URL | Request) => {
       const url = String(input);
