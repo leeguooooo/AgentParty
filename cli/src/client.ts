@@ -205,7 +205,9 @@ export function connect(
     let helloSince = 0;
     sock.onopen = () => {
       opened = true;
-      attempt = 0;
+      // #373：退避计数不在 TCP/WS 握手完成时清零——否则"accept 后立刻 close"（过载保护/
+      // 拒绝/半坏实例）会退化成 ~1 次/秒的无限紧循环锤服务端。改到收到首个业务帧才清零
+      // （见 onmessage：解析成功=连接真实可用）。
       helloSince = cursor;
       opts.onStatus?.("open");
       sock.send(JSON.stringify({ type: "hello", since: cursor, since_rev: revCursor, client_version: pkg.version }));
@@ -223,6 +225,9 @@ export function connect(
         } catch {
           continue;
         }
+        // #373：收到首个可解析业务帧 = 连接真实可用（accept-then-close 永远走不到这里），
+        // 此刻才把指数退避清零；幂等，之后每帧再置 0 无副作用。
+        attempt = 0;
         // 全量同步（hello since=0）会带上每条消息的当前状态，历史修订无需单独补——
         // 直接采纳服务端的修订水位，避免下次连接重收一遍
         if (frame.type === "welcome" && helloSince === 0 && typeof frame.last_rev_seq === "number") {
