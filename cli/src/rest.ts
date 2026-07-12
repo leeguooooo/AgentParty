@@ -1306,6 +1306,42 @@ export async function resumeAgent(server: string, token: string, slug: string, n
   });
 }
 
+// GDPR 按身份数据擦除（#421）。物理删除该身份在频道 message_audit/wake 账本/读游标/presence 的可识别行，
+// 并把其消息正文 + 归属 PII 抹成 [erased]。返回各表命中数。仅频道 moderator（房主 / ap_ token）可调。
+export interface IdentityEraseSummary {
+  name: string;
+  erased_at: number;
+  messages_scrubbed: number;
+  audit_deleted: number;
+  wake_ledger_deleted: number;
+  read_cursors_deleted: number;
+  presence_deleted: number;
+}
+
+export async function eraseIdentityData(
+  server: string,
+  token: string,
+  slug: string,
+  name: string,
+): Promise<IdentityEraseSummary> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/identity/${encodeURIComponent(name)}/data`, {
+    method: "DELETE",
+    headers: bearerJson(token),
+  })) as IdentityEraseSummary;
+}
+
+// GDPR 按身份数据导出（#421，只读）。返回该身份在频道可归因的全部数据，供数据可携 / 出境审查。
+export async function exportIdentityData(
+  server: string,
+  token: string,
+  slug: string,
+  name: string,
+): Promise<unknown> {
+  return await req(server, `/api/channels/${encodeURIComponent(slug)}/identity/${encodeURIComponent(name)}/data`, {
+    headers: bearerJson(token),
+  });
+}
+
 // rest 错误 → 契约退出码
 export function handleRestError(e: unknown): number {
   if (e instanceof RestError) {
