@@ -76,6 +76,18 @@ describe("party health", () => {
     expect(code).toBe(2);
   });
 
+  test("--channel reads its canonical slot instead of the last-written workspace mirror", async () => {
+    const now = Date.now();
+    writeHealthCache({ channel: "dev", ws_connected: true, reconnecting: false, last_frame_at: now }, cwd);
+    writeHealthCache({ channel: "ops", ws_connected: true, reconnecting: false, last_frame_at: now }, cwd);
+
+    const code = await run(["--channel", "dev", "--json"]);
+    expect(code).toBe(0);
+    const report = JSON.parse(logs.join(""));
+    expect(report.channel).toBe("dev");
+    expect(report.healthy).toBe(true);
+  });
+
   test("text output includes a one-line operator hint", async () => {
     writeHealthCache({ channel: "dev", ws_connected: false, reconnecting: true, reconnect_count: 3 }, cwd);
     const code = await run([]);
