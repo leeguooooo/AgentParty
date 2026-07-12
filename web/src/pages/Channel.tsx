@@ -435,13 +435,13 @@ function CharterBanner({
         {lockedOpen ? (
           <div className="charter-toggle charter-toggle--static">
             <span>{t("Channel.charter.label")}</span>
-            {charter ? <span className="t-mono">rev {charter.charter_rev}</span> : null}
+            {charter ? <span className="t-mono">{t("Channel.charter.rev", { rev: charter.charter_rev })}</span> : null}
             {updated ? <span className="charter-updated">{t("Channel.charter.updated")}</span> : null}
           </div>
         ) : (
           <button className="charter-toggle" type="button" onClick={onToggle} aria-expanded={open}>
             <span>{t("Channel.charter.label")}</span>
-            {charter ? <span className="t-mono">rev {charter.charter_rev}</span> : null}
+            {charter ? <span className="t-mono">{t("Channel.charter.rev", { rev: charter.charter_rev })}</span> : null}
             {updated ? <span className="charter-updated">{t("Channel.charter.updated")}</span> : null}
           </button>
         )}
@@ -895,9 +895,9 @@ function AgentFilterPanel({
   const t = useT();
   const active = filter.agents.length > 0 || filter.kind !== null;
   return (
-    <section className="agent-filter-panel" aria-label="agent filters">
+    <section className="agent-filter-panel" aria-label={t("Channel.filter.aria")}>
       <div className="agent-filter-head">
-        <div className="agent-filter-modes" role="group" aria-label="agent filter mode">
+        <div className="agent-filter-modes" role="group" aria-label={t("Channel.filter.modeAria")}>
           <button
             className={"d-btn agent-filter-mode" + (filter.mode === "only" ? " is-active" : "")}
             type="button"
@@ -915,7 +915,7 @@ function AgentFilterPanel({
             <span>{t("Channel.filter.hide")}</span>
           </button>
         </div>
-        <div className="agent-filter-kinds" role="group" aria-label="agent filter kind">
+        <div className="agent-filter-kinds" role="group" aria-label={t("Channel.filter.kindAria")}>
           <button
             className={"d-btn agent-filter-kind" + (filter.kind === "human" ? " is-active" : "")}
             type="button"
@@ -980,18 +980,18 @@ function CatchupPanel({
 }) {
   const t = useT();
   const chips = [
-    `${digest.messages} new`,
-    digest.mentions > 0 ? `${digest.mentions} @you` : null,
-    digest.respondedMentions > 0 ? `${digest.respondedMentions} handled` : null,
-    digest.blocked > 0 ? `${digest.blocked} blocked` : null,
-    digest.done > 0 ? `${digest.done} done` : null,
-    digest.releases > 0 ? `${digest.releases} release` : null,
-    digest.questions > 0 ? `${digest.questions} question` : null,
-    digest.replies > 0 ? `${digest.replies} replies` : null,
+    t("Channel.catchup.chip.new", { count: digest.messages }),
+    digest.mentions > 0 ? t("Channel.catchup.chip.mentions", { count: digest.mentions }) : null,
+    digest.respondedMentions > 0 ? t("Channel.catchup.chip.handled", { count: digest.respondedMentions }) : null,
+    digest.blocked > 0 ? t("Channel.catchup.chip.blocked", { count: digest.blocked }) : null,
+    digest.done > 0 ? t("Channel.catchup.chip.done", { count: digest.done }) : null,
+    digest.releases > 0 ? t("Channel.catchup.chip.release", { count: digest.releases }) : null,
+    digest.questions > 0 ? t("Channel.catchup.chip.question", { count: digest.questions }) : null,
+    digest.replies > 0 ? t("Channel.catchup.chip.replies", { count: digest.replies }) : null,
   ].filter((chip): chip is string => chip !== null);
 
   return (
-    <section className="catchup-panel" aria-label="while you were away">
+    <section className="catchup-panel" aria-label={t("Channel.catchup.aria")}>
       <div className="catchup-head">
         <div>
           <h2 className="catchup-title">{t("Channel.heading.catchup")}</h2>
@@ -1049,7 +1049,7 @@ function SearchHitCard({ hit, onJump }: { hit: SearchHit; onJump: (seq: number) 
         </button>
         <time>{fmtTime(hit.ts)}</time>
       </header>
-      <p className="search-hit-snippet">{hit.snippet === "" ? "(empty)" : hit.snippet}</p>
+      <p className="search-hit-snippet">{hit.snippet === "" ? t("Channel.empty.content") : hit.snippet}</p>
     </article>
   );
 }
@@ -1071,7 +1071,7 @@ function CompletionPanel({
   if (completions.length === 0) return null;
 
   return (
-    <section className="completion-panel" aria-label="completion artifacts">
+    <section className="completion-panel" aria-label={t("Channel.completion.aria")}>
       <div className="completion-panel-head">
         <h2 className="completion-title">{t("Channel.heading.completions")}</h2>
         <span className="t-mono completion-count">
@@ -1085,16 +1085,16 @@ function CompletionPanel({
         {completions.slice(-6).reverse().map((message) => {
           const artifact = message.completion_artifact!;
           const meta = [
-            `kickoff #${artifact.kickoff_seq}`,
-            `${artifact.replies_count} replies`,
-            artifact.timeout ? "timeout" : "closed",
+            t("Channel.completion.meta.kickoff", { seq: artifact.kickoff_seq }),
+            t("Channel.completion.meta.replies", { count: artifact.replies_count }),
+            artifact.timeout ? t("Channel.completion.meta.timeout") : t("Channel.completion.meta.closed"),
           ];
           return (
             <li key={message.seq} className="completion-item">
               <button className="t-mono completion-jump" type="button" onClick={() => onJump(message.seq)}>
                 #{message.seq}
               </button>
-              <span className="completion-item-body">{message.body === "" ? "(empty)" : message.body}</span>
+              <span className="completion-item-body">{message.body === "" ? t("Channel.empty.content") : message.body}</span>
               <span className="t-mono completion-meta">{meta.join(" · ")}</span>
             </li>
           );
@@ -1113,7 +1113,7 @@ function DecisionPanel({ messages }: { messages: MsgFrame[] }) {
   if (decisions.length === 0) return null;
 
   return (
-    <section className="decision-panel" aria-label="host decisions">
+    <section className="decision-panel" aria-label={t("Channel.decision.aria")}>
       <div className="decision-panel-head">
         <h2 className="decision-title">{t("Channel.heading.decisions")}</h2>
         <span className="t-mono decision-count">{decisions.length}</span>
@@ -1122,10 +1122,10 @@ function DecisionPanel({ messages }: { messages: MsgFrame[] }) {
         {decisions.map((m) => {
           const decision = m.status!.decision!;
           const meta = [
-            decision.next !== null ? `next: ${decision.next}` : null,
-            decision.handoff_to !== undefined ? `handoff: ${decision.handoff_to}` : null,
-            decision.takeover_from !== undefined ? `takeover: ${decision.takeover_from}` : null,
-            decision.expires_at !== null ? `expires ${fmtTime(decision.expires_at)}` : null,
+            decision.next !== null ? t("Channel.decision.meta.next", { value: decision.next }) : null,
+            decision.handoff_to !== undefined ? t("Channel.decision.meta.handoff", { value: decision.handoff_to }) : null,
+            decision.takeover_from !== undefined ? t("Channel.decision.meta.takeover", { value: decision.takeover_from }) : null,
+            decision.expires_at !== null ? t("Channel.decision.meta.expires", { time: fmtTime(decision.expires_at) }) : null,
           ].filter((part): part is string => part !== null);
           return (
             <li key={m.seq} className="decision-item">
@@ -1149,7 +1149,7 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
   if (teams.length === 0) return null;
 
   return (
-    <section className="team-panel" aria-label="agent teams">
+    <section className="team-panel" aria-label={t("Channel.team.aria")}>
       <div className="team-panel-head">
         <h2 className="team-title">{t("Channel.heading.teams")}</h2>
         <span className="t-mono team-count">{teams.length}</span>
@@ -1159,11 +1159,13 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
           const front = team.frontAgent;
           const workerMembers = front === null ? team.members : team.members.filter((member) => member.name !== front.name);
           const meta = [
-            `root: ${team.rootAgent}`,
-            team.parentAgents.length === 1 ? `parent: ${team.parentAgents[0]}` : `${team.parentAgents.length} parents`,
-            `depth ${team.maxDepth}`,
-            team.expiresAt !== null ? `expires ${fmtTime(team.expiresAt)}` : null,
-            team.lastSeen !== null ? `seen ${fmtTime(team.lastSeen)}` : null,
+            t("Channel.team.meta.root", { name: team.rootAgent }),
+            team.parentAgents.length === 1
+              ? t("Channel.team.meta.parent", { name: team.parentAgents[0]! })
+              : t("Channel.team.meta.parents", { count: team.parentAgents.length }),
+            t("Channel.team.meta.depth", { depth: team.maxDepth }),
+            team.expiresAt !== null ? t("Channel.team.meta.expires", { time: fmtTime(team.expiresAt) }) : null,
+            team.lastSeen !== null ? t("Channel.team.meta.seen", { time: fmtTime(team.lastSeen) }) : null,
           ].filter((part): part is string => part !== null);
           return (
             <li key={team.key} className="team-item">
@@ -1171,32 +1173,36 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
                 <span className="team-name">{team.teamId}</span>
                 <span
                   className={"t-mono team-front" + (front?.active ? " is-active" : "")}
-                  title={front === null ? `front: ${team.rootAgent}` : `front: ${front.name} · state: ${front.state} · residency: ${front.residency}`}
+                  title={front === null
+                    ? t("Channel.team.front", { name: team.rootAgent })
+                    : t("Channel.team.frontTitle", { name: front.name, state: front.state, residency: front.residency })}
                 >
                   <span className={`d-dot d-dot--${front?.active ? front.state : "offline"}`} />
-                  front {front?.name ?? team.rootAgent}
+                  {t("Channel.team.front", { name: front?.name ?? team.rootAgent })}
                 </span>
                 <span className="t-mono team-active">
-                  {team.activeCount}/{team.memberCount} active
+                  {t("Channel.team.active", { active: team.activeCount, total: team.memberCount })}
                 </span>
                 <span className={`t-mono team-residency team-residency--${team.residency}`}>
-                  {team.residency === "human_driven" ? "manual" : team.residency}
+                  {team.residency === "human_driven" ? t("Channel.team.manual") : team.residency}
                 </span>
               </div>
               <div className="t-mono team-meta">{meta.join(" · ")}</div>
               <div className="team-members">
-                {workerMembers.length === 0 && <span className="t-mono team-member team-member--empty">no workers</span>}
+                {workerMembers.length === 0 && <span className="t-mono team-member team-member--empty">{t("Channel.team.noWorkers")}</span>}
                 {workerMembers.map((member) => (
                   <span
                     key={member.name}
                     className={"t-mono team-member" + (member.active ? " is-active" : "")}
                     title={[
-                      member.name,
-                      `parent: ${member.parentAgent}`,
-                      `state: ${member.state}`,
-                      `residency: ${member.residency}`,
-                      member.expiresAt !== null ? `expires: ${fmtTime(member.expiresAt)}` : null,
-                      member.lastSeen !== null ? `last seen: ${fmtTime(member.lastSeen)}` : null,
+                      t("Channel.team.memberTitle", {
+                        name: member.name,
+                        parent: member.parentAgent,
+                        state: member.state,
+                        residency: member.residency,
+                      }),
+                      member.expiresAt !== null ? t("Channel.team.meta.expires", { time: fmtTime(member.expiresAt) }) : null,
+                      member.lastSeen !== null ? t("Channel.team.meta.seen", { time: fmtTime(member.lastSeen) }) : null,
                     ].filter((part): part is string => part !== null).join(" · ")}
                   >
                     <span className={`d-dot d-dot--${member.active ? member.state : "offline"}`} />
@@ -1253,13 +1259,13 @@ export function AgentBoardPanel({ presence, tasks }: { presence: PresenceEntry[]
 
   if (rows.length === 0) {
     return (
-      <section className="agent-board-panel" aria-label="agent board">
+      <section className="agent-board-panel" aria-label={t("Channel.agentBoard.aria")}>
         <p className="agent-board-empty">{t("Channel.agents.empty")}</p>
       </section>
     );
   }
   return (
-    <section className="agent-board-panel" aria-label="agent board">
+    <section className="agent-board-panel" aria-label={t("Channel.agentBoard.aria")}>
       {rows.map((row) => (
         <div key={row.name} className={`agent-board-row agent-board-row--${row.status}`}>
           <div className="agent-board-row-head">
@@ -1284,7 +1290,7 @@ function HostBoardPanel({ board }: { board: HostBoard }) {
   if (board.hosts.length === 0 && board.recommended_actions.length === 0 && board.conflicts.length === 0) return null;
 
   return (
-    <section className="host-board-panel" aria-label="host board">
+    <section className="host-board-panel" aria-label={t("Channel.hostBoard.aria")}>
       <div className="host-board-head">
         <h2 className="host-board-title">{t("Channel.heading.hostBoard")}</h2>
         <span className="t-mono host-board-count">#{board.last_seq}</span>
@@ -1296,7 +1302,7 @@ function HostBoardPanel({ board }: { board: HostBoard }) {
               <div className="host-action-head">
                 <span className="t-mono host-action-kind">{action.kind}</span>
                 {action.target !== null && <span className="host-action-target">{action.target}</span>}
-                {action.requires_human && <span className="t-mono host-action-human">human</span>}
+                {action.requires_human && <span className="t-mono host-action-human">{t("Channel.hostBoard.human")}</span>}
               </div>
               <p>{action.reason}</p>
               {action.command !== null && <code>{action.command}</code>}
@@ -1309,7 +1315,7 @@ function HostBoardPanel({ board }: { board: HostBoard }) {
           {board.conflicts.map((conflict) => (
             <li key={conflict.scope} className="host-conflict">
               <span className="t-mono host-conflict-scope">{conflict.scope}</span>
-              <span>{conflict.owners.join(" vs ")}</span>
+              <span>{conflict.owners.join(t("Channel.hostBoard.conflictSeparator"))}</span>
             </li>
           ))}
         </ol>
@@ -1321,10 +1327,8 @@ function HostBoardPanel({ board }: { board: HostBoard }) {
               key={host.name}
               className={`t-mono host-board-host host-board-host--${host.lease}`}
               title={[
-                `state: ${host.state}`,
-                `residency: ${host.residency}`,
-                `wake: ${host.wake_kind}`,
-                host.stale_reason !== null ? `reason: ${host.stale_reason}` : null,
+                t("Channel.hostBoard.hostTitle", { state: host.state, residency: host.residency, wake: host.wake_kind }),
+                host.stale_reason !== null ? t("Channel.hostBoard.reason", { reason: host.stale_reason }) : null,
               ].filter((part): part is string => part !== null).join("\n")}
             >
               {host.name} · {host.lease}
@@ -1769,16 +1773,22 @@ function TeamThread({
   onEditCancel: () => void;
   onEditSave: () => void;
 }) {
+  const t = useT();
   const parentLabel =
-    thread.parentAgents.length === 1 ? `parent ${thread.parentAgents[0]}` : `${thread.parentAgents.length} parents`;
-  const memberLabel = thread.members.length === 1 ? thread.members[0]! : `${thread.members.length} members`;
-  const title = [
-    `team: ${thread.teamId}`,
-    `root: ${thread.rootAgent}`,
-    parentLabel,
-    `members: ${thread.members.join(", ")}`,
-    `seq: #${thread.firstSeq}..#${thread.lastSeq}`,
-  ].join("\n");
+    thread.parentAgents.length === 1
+      ? t("Channel.teamThread.parent", { name: thread.parentAgents[0]! })
+      : t("Channel.teamThread.parents", { count: thread.parentAgents.length });
+  const memberLabel = thread.members.length === 1
+    ? thread.members[0]!
+    : t("Channel.teamThread.members", { count: thread.members.length });
+  const title = t("Channel.teamThread.title", {
+    team: thread.teamId,
+    root: thread.rootAgent,
+    parent: parentLabel,
+    members: thread.members.join(", "),
+    first: thread.firstSeq,
+    last: thread.lastSeq,
+  });
   return (
     <details className="team-thread" title={title}>
       <summary className="team-thread-summary">
@@ -1977,8 +1987,8 @@ export function ChannelPage({
         setCharterError(null);
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (!(err instanceof ForbiddenError)) setCharterError("charter failed to load");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+        else if (!(err instanceof ForbiddenError)) setCharterError(tRef.current("Channel.charter.error.loadFailed"));
       });
   }, [slug, token]);
 
@@ -1990,10 +2000,10 @@ export function ChannelPage({
         setRoleError(null);
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (!(err instanceof ForbiddenError)) setRoleError(t("Channel.roles.loadFailed"));
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+        else if (!(err instanceof ForbiddenError)) setRoleError(tRef.current("Channel.roles.loadFailed"));
       });
-  }, [slug, token, t]);
+  }, [slug, token]);
 
   const loadSquads = useCallback(() => {
     return fetchSquads(token, slug)
@@ -2001,7 +2011,7 @@ export function ChannelPage({
         setChannelSquads(squads);
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (!(err instanceof ForbiddenError)) setChannelSquads([]);
       });
   }, [slug, token]);
@@ -2016,18 +2026,18 @@ export function ChannelPage({
         setTaskActionError(null);
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (err instanceof ForbiddenError) setTasksError(t("Channel.tasks.error.notVisible"));
-        else setTasksError(t("Channel.tasks.error.loadFailed"));
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+        else if (err instanceof ForbiddenError) setTasksError(tRef.current("Channel.tasks.error.notVisible"));
+        else setTasksError(tRef.current("Channel.tasks.error.loadFailed"));
       })
       .finally(() => setTasksLoading(false));
-  }, [slug, token, t]);
+  }, [slug, token]);
 
   const loadTaskSummary = useCallback(() => {
     return fetchTaskSummary(token, slug)
       .then(setTaskSummary)
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
       });
   }, [slug, token]);
 
@@ -2041,7 +2051,7 @@ export function ChannelPage({
         void loadTaskSummary();
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setTaskActionError(t("Channel.tasks.error.updateForbidden"));
         else if (err instanceof ValidationError) setTaskActionError(t("Channel.tasks.error.updateRejected"));
         else setTaskActionError(t("Channel.tasks.error.updateFailed"));
@@ -2079,7 +2089,7 @@ export function ChannelPage({
         return true;
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setTaskCreateError(t("Channel.tasks.error.createForbidden"));
         else if (err instanceof ValidationError) setTaskCreateError(t("Channel.tasks.error.createRejected"));
         else setTaskCreateError(t("Channel.tasks.error.createFailed"));
@@ -2107,7 +2117,7 @@ export function ChannelPage({
     )
       .then(() => loadTaskLedger())
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setTaskActionError(t("Channel.tasks.error.reviewForbidden"));
         else if (err instanceof ValidationError) setTaskActionError(t("Channel.tasks.error.reviewRejected"));
         else setTaskActionError(t("Channel.tasks.error.reviewFailed"));
@@ -2129,7 +2139,7 @@ export function ChannelPage({
       setDecisionBusySeq(seq);
       respondDecision(token, slug, seq, body)
         .catch((err: unknown) => {
-          if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+          if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
           else if (err instanceof ForbiddenError) setMessageActionError({ seq, message: t("Channel.decision.error.forbidden") });
           else if (err instanceof ValidationError) setMessageActionError({ seq, message: t("Channel.decision.error.rejected") });
           else setMessageActionError({ seq, message: t("Channel.decision.error.failed") });
@@ -2154,7 +2164,10 @@ export function ChannelPage({
     setMessageActionBusySeq(seq);
     setMessageActionError(null);
     createTask(token, slug, {
-      title: compactTaskTitle(message.body, `${message.sender.name} message #${message.seq}`),
+      title: compactTaskTitle(
+        message.body,
+        t("Channel.tasks.fromMessageTitle", { sender: message.sender.name, seq: message.seq }),
+      ),
       anchor_seqs: [message.seq],
     })
       .then((task) => {
@@ -2165,7 +2178,7 @@ export function ChannelPage({
         setActivePanel("tasks");
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setMessageActionError({ seq, message: t("Channel.tasks.error.createForbidden") });
         else if (err instanceof ValidationError) setMessageActionError({ seq, message: t("Channel.tasks.error.createRejected") });
         else setMessageActionError({ seq, message: t("Channel.tasks.error.createFailed") });
@@ -2181,7 +2194,7 @@ export function ChannelPage({
     setKickError(null);
     kickParticipant(token, slug, name, "remove")
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setKickError(t("Channel.kick.forbidden"));
         else setKickError(t("Channel.kick.failed"));
       })
@@ -2195,7 +2208,7 @@ export function ChannelPage({
     setPauseError(null);
     pauseAgent(token, slug, name, resumeAt ?? undefined)
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setPauseError(t("Channel.pause.forbidden"));
         else setPauseError(t("Channel.pause.failed"));
       })
@@ -2208,7 +2221,7 @@ export function ChannelPage({
     setPauseError(null);
     resumeAgent(token, slug, name)
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setPauseError(t("Channel.pause.forbidden"));
         else setPauseError(t("Channel.pause.failed"));
       })
@@ -2226,7 +2239,7 @@ export function ChannelPage({
         dispatch({ type: "fatal", reason: "archived" });
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setArchiveError(t("Channel.archive.forbidden"));
         else setArchiveError(t("Channel.archive.failed"));
       })
@@ -2249,7 +2262,7 @@ export function ChannelPage({
         if (alive) setChannelIdentities(identities);
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
       });
     return () => {
       alive = false;
@@ -2273,7 +2286,7 @@ export function ChannelPage({
       .catch((err: unknown) => {
         if (!alive) return;
         if (err instanceof AuthError) {
-          authFailedRef.current("token revoked — paste a new one");
+          authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
           return;
         }
         if (err instanceof ForbiddenError) {
@@ -2281,7 +2294,7 @@ export function ChannelPage({
           return;
         }
         // 初始页失败：退回 ws 全量重放（since=0），页面仍可用
-        setHistoryError("history failed to load");
+        setHistoryError(tRef.current("Channel.error.historyLoad"));
         initialCursorRef.current = 0;
         hasMoreRef.current = false;
         setBootstrapped(true);
@@ -2382,7 +2395,7 @@ export function ChannelPage({
         },
         onStatus: (status) => dispatch({ type: "status", status }),
         onFatal: (reason) => {
-          if (reason === "revoked") authFailedRef.current("token revoked — paste a new one");
+          if (reason === "revoked") authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
           else dispatch({ type: "fatal", reason });
         },
       },
@@ -2565,7 +2578,7 @@ export function ChannelPage({
       setUploads([]);
       uploadFilesRef.current.clear();
     } else {
-      dispatch({ type: "send_failed", message: "not connected — message not sent, draft kept" });
+      dispatch({ type: "send_failed", message: tRef.current("Channel.error.sendNotConnected") });
     }
   }, [draft, replyTo, attachments, uploads]);
 
@@ -2580,15 +2593,15 @@ export function ChannelPage({
         setAttachments((prev) => (prev.some((a) => a.key === meta.key) ? prev : [...prev, meta]));
       } catch (err) {
         if (err instanceof AuthError) {
-          authFailedRef.current("token revoked — paste a new one");
+          authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
           return;
         }
         const error =
           err instanceof TooLargeError
-            ? "file too large (max 25MB)"
+            ? tRef.current("Channel.upload.tooLarge")
             : err instanceof ForbiddenError
-              ? "not allowed to upload here"
-              : "upload failed";
+              ? tRef.current("Channel.upload.forbidden")
+              : tRef.current("Channel.upload.failed");
         setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, status: "error", error } : u)));
       }
     },
@@ -2645,9 +2658,9 @@ export function ChannelPage({
         setGuardResetError(null);
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (err instanceof ForbiddenError) setGuardResetError("only a human owner can reset guard");
-        else setGuardResetError("guard reset failed");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+        else if (err instanceof ForbiddenError) setGuardResetError(tRef.current("Channel.guard.error.forbidden"));
+        else setGuardResetError(tRef.current("Channel.guard.error.failed"));
       })
       .finally(() => setGuardResetting(false));
   }, [guardResetting, slug, token]);
@@ -2697,10 +2710,10 @@ export function ChannelPage({
         setSeenCharterRev(body.charter_rev);
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (err instanceof ForbiddenError) setCharterError("only moderators or hosts can edit the charter");
-        else if (err instanceof ValidationError) setCharterError("charter must be 16KB or less");
-        else setCharterError("charter save failed");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+        else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
+        else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
+        else setCharterError(tRef.current("Channel.charter.error.saveFailed"));
       })
       .finally(() => setCharterSaving(false));
   }, [charterDraft, charterSaving, slug, token]);
@@ -2721,10 +2734,10 @@ export function ChannelPage({
         setSeenCharterRev(body.charter_rev);
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
-        else if (err instanceof ForbiddenError) setCharterError("only moderators or hosts can edit the charter");
-        else if (err instanceof ValidationError) setCharterError("charter must be 16KB or less");
-        else setCharterError("charter save failed");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+        else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
+        else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
+        else setCharterError(tRef.current("Channel.charter.error.saveFailed"));
       })
       .finally(() => setCharterSaving(false));
   }, [charterSaving, slug, token]);
@@ -2751,7 +2764,7 @@ export function ChannelPage({
         setLocalLoopGuardLimit(result.limit === null ? "" : String(result.limit));
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setGuardConfigError(t("Channel.settings.forbidden"));
         else if (err instanceof ValidationError) setGuardConfigError(t("Channel.settings.invalidLoop"));
         else setGuardConfigError(t("Channel.settings.saveFailed"));
@@ -2774,7 +2787,7 @@ export function ChannelPage({
         setLocalWorkflowGuardLimit(String(result.limit ?? limit));
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setGuardConfigError(t("Channel.settings.forbidden"));
         else if (err instanceof ValidationError) setGuardConfigError(t("Channel.settings.invalidWorkflow"));
         else setGuardConfigError(t("Channel.settings.saveFailed"));
@@ -2794,7 +2807,7 @@ export function ChannelPage({
         setLocalLoopGuardLimit(result.limit === null ? "" : String(result.limit));
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setGuardConfigError(t("Channel.settings.forbidden"));
         else setGuardConfigError(t("Channel.settings.saveFailed"));
       })
@@ -2811,7 +2824,7 @@ export function ChannelPage({
         setLocalWorkflowGuardLimit(result.limit === null ? String(workflowGuardLimit) : String(result.limit));
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setGuardConfigError(t("Channel.settings.forbidden"));
         else setGuardConfigError(t("Channel.settings.saveFailed"));
       })
@@ -2841,7 +2854,7 @@ export function ChannelPage({
         }
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setRoleError(t("Channel.roles.forbidden"));
         else if (err instanceof ValidationError) setRoleError(t("Channel.roles.invalid"));
         else setRoleError(t("Channel.roles.saveFailed"));
@@ -2865,7 +2878,7 @@ export function ChannelPage({
         });
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setRoleError(t("Channel.roles.forbidden"));
         else setRoleError(t("Channel.roles.saveFailed"));
       })
@@ -2935,7 +2948,7 @@ export function ChannelPage({
         setMessageActionError(null);
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setMessageActionError({ seq: editingSeq, message: t("Channel.revise.edit.forbidden") });
         else if (err instanceof ValidationError) setMessageActionError({ seq: editingSeq, message: t("Channel.revise.edit.invalid") });
         else setMessageActionError({ seq: editingSeq, message: t("Channel.revise.edit.failed") });
@@ -2962,7 +2975,7 @@ export function ChannelPage({
         setReplyTo((current) => (current === seq ? null : current));
       })
       .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setMessageActionError({ seq, message: t("Channel.revise.retract.forbidden") });
         else setMessageActionError({ seq, message: t("Channel.revise.retract.failed") });
       })
@@ -2975,10 +2988,11 @@ export function ChannelPage({
   const from = searchFrom.trim();
   const since = nonNegativeInt(searchSince);
   const limit = positiveInt(searchLimit, 100, 1000);
-  const searchInputError =
-    q !== "" && since === null ? "since must be a non-negative integer" :
-    q !== "" && limit === null ? "limit must be 1..1000" :
+  const searchInputErrorKey =
+    q !== "" && since === null ? "Channel.search.error.since" :
+    q !== "" && limit === null ? "Channel.search.error.limit" :
     null;
+  const searchInputError = searchInputErrorKey === null ? null : t(searchInputErrorKey);
   const knownSenders = [
     ...new Set([
       ...state.participants.map((p) => p.name),
@@ -3168,7 +3182,7 @@ export function ChannelPage({
       setSearchError(null);
       return;
     }
-    if (searchInputError !== null || since === null || limit === null) {
+    if (searchInputErrorKey !== null || since === null || limit === null) {
       setSearchHits([]);
       setSearchLoading(false);
       setSearchError(null);
@@ -3191,9 +3205,9 @@ export function ChannelPage({
         .catch((err: unknown) => {
           if (controller.signal.aborted) return;
           setSearchHits([]);
-          if (err instanceof AuthError) authFailedRef.current("token revoked — paste a new one");
+          if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
           else if (err instanceof ForbiddenError) dispatch({ type: "fatal", reason: "forbidden" });
-          else setSearchError("search failed to load");
+          else setSearchError(tRef.current("Channel.search.error.failed"));
         })
         .finally(() => {
           if (!controller.signal.aborted) setSearchLoading(false);
@@ -3203,7 +3217,7 @@ export function ChannelPage({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [from, limit, q, searchInputError, since, slug, token]);
+  }, [from, limit, q, searchInputErrorKey, since, slug, token]);
 
   // 私有频道拒入（spec §3）：ws 已停止重连，给一条友好红条，不留空白 / 不无限转圈
   if (state.forbidden) {
@@ -3355,7 +3369,7 @@ export function ChannelPage({
           >
             <span className="ap-sprite ap-sprite--announcement" aria-hidden="true" />
             <span>{t("Channel.tools.charter")}</span>
-            {charter !== null && <span className="t-mono chan-tool-badge">rev {charter.charter_rev}</span>}
+            {charter !== null && <span className="t-mono chan-tool-badge">{t("Channel.charter.rev", { rev: charter.charter_rev })}</span>}
             {charterUpdated && <span className="t-mono chan-tool-badge chan-tool-badge--hot">{t("Channel.tools.updated")}</span>}
           </button>
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("roles")}>
@@ -3476,7 +3490,7 @@ export function ChannelPage({
             t("Channel.tools.search")
           }
           subtitle={
-            activePanel === "charter" && charter !== null ? `rev ${charter.charter_rev}` :
+            activePanel === "charter" && charter !== null ? t("Channel.charter.rev", { rev: charter.charter_rev }) :
             activePanel === "roles" ? t("Channel.roles.count", { count: String(structuredRoleCount) }) :
             activePanel === "tasks" ? t("Channel.tasks.subtitle", { open: taskOpenCount, review: taskReviewCount, blocked: taskBlockedCount }) :
             activePanel === "agents" ? t("Channel.agents.subtitle") :
@@ -3650,7 +3664,7 @@ export function ChannelPage({
           : visibleSearchHits.map((hit) => <SearchHitCard key={hit.seq} hit={hit} onJump={jumpToSearchHit} />)}
         {state.messages.length === 0 && q === "" && (
           <p className="d-empty" role="status" aria-live="polite">
-            party watch {slug}
+            {t("Channel.empty.partyWatch", { slug })}
           </p>
         )}
         {state.messages.length > 0 && q === "" && visibleMessages.length === 0 && (
@@ -3681,7 +3695,7 @@ export function ChannelPage({
       )}
       {state.archived && (
         <p className="banner banner--gray" role="status" aria-live="polite">
-          channel archived — read-only from here on
+          {t("Channel.banner.archived")}
         </p>
       )}
       {historyError !== null && (
@@ -3692,7 +3706,7 @@ export function ChannelPage({
       {state.loopGuard !== null && (
         <div className="banner banner--yellow guard-banner" role="alert">
           <span>
-            loop guard: agents hit the back-and-forth cap — a human message or reset clears it
+            {t("Channel.guard.banner")}
             {guardResetError !== null ? ` · ${guardResetError}` : ""}
           </span>
           {canResetGuard && (
@@ -3702,14 +3716,14 @@ export function ChannelPage({
               onClick={onResetGuard}
               disabled={guardResetting}
             >
-              <span>{guardResetting ? "Resetting" : "Reset guard"}</span>
+              <span>{guardResetting ? t("Channel.guard.resetting") : t("Channel.guard.reset")}</span>
             </button>
           )}
         </div>
       )}
       {state.readonly && !state.archived && (
         <p className="banner banner--gray" role="status" aria-live="polite">
-          read-only link — you're watching the party
+          {t("Channel.banner.readonly")}
         </p>
       )}
       {state.sendError !== null && canWrite && (
