@@ -224,7 +224,8 @@ describe("desktop release workflow", () => {
 
     expect(desktopDocs).toContain("Unnotarized macOS preview");
     expect(desktopDocs).toContain("正式下载入口会在这些门禁真实通过后开放");
-    expect(desktopDocs).toContain("常驻期间每小时复查一次");
+    expect(desktopDocs).toContain("正常运行期间每小时复查");
+    expect(desktopDocs).toContain("从锁屏或后台回到应用时也会立即补查是否到期");
     expect(desktopDocs).toContain("A newly available version opens the update panel automatically");
   });
 
