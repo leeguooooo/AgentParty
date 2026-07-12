@@ -5,7 +5,9 @@ export interface ScrollViewport {
 }
 
 export function isNearBottom(viewport: ScrollViewport, threshold = 160): boolean {
-  return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < threshold;
+  const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+  const scrollTop = Math.max(0, Math.min(viewport.scrollTop, maxScrollTop));
+  return maxScrollTop - scrollTop < threshold;
 }
 
 export function pinToBottom(viewport: ScrollViewport, enabled: boolean): boolean {

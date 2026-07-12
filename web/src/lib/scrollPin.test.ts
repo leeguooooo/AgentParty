@@ -6,6 +6,8 @@ describe("channel stream bottom pinning", () => {
   test("treats the final 160px as sticky-bottom territory", () => {
     expect(isNearBottom({ scrollTop: 740, scrollHeight: 1000, clientHeight: 200 })).toBe(true);
     expect(isNearBottom({ scrollTop: 500, scrollHeight: 1000, clientHeight: 200 })).toBe(false);
+    expect(isNearBottom({ scrollTop: 2000, scrollHeight: 1000, clientHeight: 200 })).toBe(true);
+    expect(isNearBottom({ scrollTop: -40, scrollHeight: 1000, clientHeight: 200 })).toBe(false);
   });
 
   test("pins after layout growth only while the user remains in sticky-bottom mode", () => {
