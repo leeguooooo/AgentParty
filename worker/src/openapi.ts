@@ -11,6 +11,29 @@ export const openapiDocument = {
       bearer: { type: "http", scheme: "bearer" },
       admin: { type: "apiKey", in: "header", name: "x-admin-secret" },
     },
+    schemas: {
+      ChannelJoinRequest: {
+        type: "object",
+        required: [
+          "id", "slug", "account", "requester_display", "requester_profile", "state", "note",
+          "source_token_name", "requested_at", "reviewed_at", "reviewed_by", "review_reason",
+        ],
+        properties: {
+          id: { type: "string", pattern: "^jr_[0-9a-f]{32}$" },
+          slug: { type: "string" },
+          account: { type: "string" },
+          requester_display: { type: "string" },
+          requester_profile: { type: "object", additionalProperties: true },
+          state: { type: "string", enum: ["pending", "approved", "rejected"] },
+          note: { type: ["string", "null"] },
+          source_token_name: { type: "string" },
+          requested_at: { type: "integer" },
+          reviewed_at: { type: ["integer", "null"] },
+          reviewed_by: { type: ["string", "null"] },
+          review_reason: { type: ["string", "null"] },
+        },
+      },
+    },
   },
   paths: {
     "/api/desktop/pairings": {
@@ -226,6 +249,101 @@ export const openapiDocument = {
           "200": { description: "bounded page of sanitized audit records and an opaque next_cursor" },
           "400": { description: "invalid limit or cursor" },
           "401": { description: "invalid admin secret" },
+        },
+      },
+    },
+    "/api/channels/{slug}/join-requests": {
+      post: {
+        summary: "apply to join a channel through its readonly watch link",
+        security: [{ bearer: [] }],
+        description:
+          "The bearer must be a human account session. watch_token must be live, readonly, and scoped to slug. A rejected account may reapply; a current member receives state=already_member.",
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["watch_token"],
+                properties: {
+                  watch_token: { type: "string", description: "plaintext token from a readonly channel watch link" },
+                  note: { type: "string", maxLength: 2000 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "existing pending request, or {state:'already_member'}" },
+          "201": { description: "new or resubmitted pending ChannelJoinRequest" },
+          "400": { description: "invalid body or watch token" },
+          "401": { description: "missing or invalid bearer" },
+          "403": { description: "bearer is not a human account session" },
+          "404": { description: "channel not found" },
+          "409": { description: "request is already approved or changed concurrently" },
+        },
+      },
+      get: {
+        summary: "list pending channel join requests",
+        security: [{ bearer: [] }],
+        description: "Moderator only. This endpoint deliberately exposes only pending requests.",
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "state", in: "query", required: true, schema: { type: "string", const: "pending" } },
+        ],
+        responses: {
+          "200": { description: "{requests: ChannelJoinRequest[]}" },
+          "400": { description: "state=pending was not supplied" },
+          "403": { description: "bearer is not a channel moderator" },
+          "404": { description: "channel not found" },
+        },
+      },
+    },
+    "/api/channels/{slug}/join-requests/me": {
+      get: {
+        summary: "read the caller's channel join request",
+        security: [{ bearer: [] }],
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{request: ChannelJoinRequest|null}" },
+          "403": { description: "bearer is not a human account session" },
+          "404": { description: "channel not found" },
+        },
+      },
+    },
+    "/api/channels/{slug}/join-requests/{id}/review": {
+      post: {
+        summary: "approve or reject a pending channel join request",
+        security: [{ bearer: [] }],
+        description:
+          "Moderator only. Approval atomically finalizes the request and inserts channel_members idempotently. Rejection requires reason. Any repeated terminal review returns 409.",
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "id", in: "path", required: true, schema: { type: "string", pattern: "^jr_[0-9a-f]{32}$" } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["action"],
+                properties: {
+                  action: { type: "string", enum: ["approve", "reject"] },
+                  reason: { type: "string", maxLength: 2000, description: "required when action=reject" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "final ChannelJoinRequest" },
+          "400": { description: "invalid action or missing reject reason" },
+          "403": { description: "bearer is not a channel moderator" },
+          "404": { description: "channel or request not found" },
+          "409": { description: "request is already approved or rejected" },
+          "410": { description: "channel archived" },
         },
       },
     },

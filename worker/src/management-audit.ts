@@ -16,6 +16,8 @@ export type ManagementAuditAction =
   | "channel.role.remove"
   | "channel.join_link.create"
   | "channel.join_link.revoke"
+  | "channel.join_request.approve"
+  | "channel.join_request.reject"
   | "channel.project_agent.invite"
   | "channel.project_agent.remove"
   | "channel.guard.update"

@@ -321,6 +321,8 @@ const SPAWN_DEFAULT_TTL_SEC = 2 * 60 * 60;
 const SPAWN_MAX_TTL_SEC = 24 * 60 * 60;
 const PROFILE_TEXT_MAX = 4096;
 const PROFILE_BRANCH_MAX = 128;
+const JOIN_REQUEST_NOTE_MAX = 2000;
+const JOIN_REQUEST_REASON_MAX = 2000;
 const PROJECT_AGENT_RUNNERS = ["codex", "claude", "codex-sdk", "shell"] as const;
 const PROJECT_AGENT_WORKTREE = ["branch", "shared", "none"] as const;
 const PROJECT_AGENT_INVITABLE = ["owner", "org", "anyone"] as const;
@@ -349,6 +351,21 @@ interface AccountProfileMetadata {
   provider: string;
   providerUserId: string;
   tenantKey: string | null;
+}
+
+interface ChannelJoinRequestRow {
+  id: string;
+  slug: string;
+  account: string;
+  requester_display: string;
+  requester_profile_json: string;
+  state: "pending" | "approved" | "rejected";
+  note: string | null;
+  source_token_name: string;
+  requested_at: number;
+  reviewed_at: number | null;
+  reviewed_by: string | null;
+  review_reason: string | null;
 }
 
 interface LarkNotifySubscriptionRow {
@@ -1262,6 +1279,83 @@ async function isChannelMember(db: D1Database, slug: string, account: string | n
     .bind(slug, account)
     .first<{ account: string }>();
   return row !== null;
+}
+
+function channelJoinRequestFromRow(row: ChannelJoinRequestRow) {
+  let requesterProfile: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(row.requester_profile_json) as unknown;
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      requesterProfile = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // The migration enforces valid JSON; retain a safe response if a legacy/manual row is malformed.
+  }
+  return {
+    id: row.id,
+    slug: row.slug,
+    account: row.account,
+    requester_display: row.requester_display,
+    requester_profile: requesterProfile,
+    state: row.state,
+    note: row.note,
+    source_token_name: row.source_token_name,
+    requested_at: row.requested_at,
+    reviewed_at: row.reviewed_at,
+    reviewed_by: row.reviewed_by,
+    review_reason: row.review_reason,
+  };
+}
+
+async function loadChannelJoinRequest(
+  db: D1Database,
+  slug: string,
+  where: { id: string } | { account: string },
+): Promise<ChannelJoinRequestRow | null> {
+  const column = "id" in where ? "id" : "account";
+  const value = "id" in where ? where.id : where.account;
+  return db.prepare(
+    `SELECT id, slug, account, requester_display, requester_profile_json, state, note,
+            source_token_name, requested_at, reviewed_at, reviewed_by, review_reason
+       FROM channel_join_requests
+      WHERE slug = ? AND ${column} = ?`,
+  )
+    .bind(slug, value)
+    .first<ChannelJoinRequestRow>();
+}
+
+async function joinRequestProfileSnapshot(db: D1Database, account: string): Promise<{
+  display: string;
+  json: string;
+}> {
+  const profile = await db.prepare(
+    `SELECT handle, display_name, avatar_url, avatar_thumb
+       FROM account_profiles
+      WHERE account = ?`,
+  )
+    .bind(account)
+    .first<{
+      handle: string;
+      display_name: string | null;
+      avatar_url: string | null;
+      avatar_thumb: string | null;
+    }>();
+  if (!profile) return { display: account, json: "{}" };
+  const snapshot = {
+    handle: profile.handle,
+    display_name: profile.display_name,
+    avatar_url: profile.avatar_url,
+    avatar_thumb: profile.avatar_thumb,
+  };
+  return { display: profile.display_name ?? profile.handle ?? account, json: JSON.stringify(snapshot) };
+}
+
+function optionalBoundedText(value: unknown, maxBytes: number): string | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (textEncoder.encode(text).byteLength > maxBytes) return undefined;
+  return text === "" ? null : text;
 }
 
 async function canAccessLoadedChannel(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
@@ -3570,6 +3664,179 @@ app.delete("/api/channels/:slug/share-links/:name", async (c) => {
     metadata: { token_role: "readonly", channel_scope: slug },
   });
   return c.json({ ok: true });
+});
+
+app.post("/api/channels/:slug/join-requests", async (c) => {
+  const identity = c.get("identity");
+  if (identity.role !== "human" || identity.account == null) {
+    return c.json(errorBody("forbidden", "join requests require a human account session"), 403);
+  }
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (await isChannelMember(c.env.DB, slug, identity.account)) {
+    return c.json({ state: "already_member" });
+  }
+  const body = (await c.req.json().catch(() => null)) as { watch_token?: unknown; note?: unknown } | null;
+  const note = optionalBoundedText(body?.note, JOIN_REQUEST_NOTE_MAX);
+  if (typeof body?.watch_token !== "string" || body.watch_token === "" || note === undefined) {
+    return c.json(errorBody("bad_request", "watch_token and a valid note are required"), 400);
+  }
+  const now = Date.now();
+  const watchHash = await sha256Hex(body.watch_token);
+  const watch = await c.env.DB.prepare(
+    `SELECT name
+       FROM tokens
+      WHERE hash = ?
+        AND revoked_at IS NULL
+        AND role = 'readonly'
+        AND channel_scope = ?
+        AND (child_expires_at IS NULL OR child_expires_at > ?)`,
+  )
+    .bind(watchHash, slug, now)
+    .first<{ name: string }>();
+  if (!watch) {
+    return c.json(errorBody("bad_request", "watch_token is invalid for this channel"), 400);
+  }
+
+  const existing = await loadChannelJoinRequest(c.env.DB, slug, { account: identity.account });
+  if (existing?.state === "pending") return c.json(channelJoinRequestFromRow(existing));
+  if (existing?.state === "approved") {
+    return c.json(errorBody("conflict", "join request is already approved"), 409);
+  }
+  const profile = await joinRequestProfileSnapshot(c.env.DB, identity.account);
+  if (existing?.state === "rejected") {
+    const updated = await c.env.DB.prepare(
+      `UPDATE channel_join_requests
+          SET requester_display = ?, requester_profile_json = ?, state = 'pending', note = ?,
+              source_token_name = ?, requested_at = ?, reviewed_at = NULL, reviewed_by = NULL,
+              review_reason = NULL
+        WHERE id = ? AND slug = ? AND state = 'rejected'`,
+    )
+      .bind(profile.display, profile.json, note, watch.name, now, existing.id, slug)
+      .run();
+    if (updated.meta.changes > 0) {
+      const request = await loadChannelJoinRequest(c.env.DB, slug, { id: existing.id });
+      return c.json(channelJoinRequestFromRow(request!), 201);
+    }
+    const current = await loadChannelJoinRequest(c.env.DB, slug, { account: identity.account });
+    if (current?.state === "pending") return c.json(channelJoinRequestFromRow(current));
+    return c.json(errorBody("conflict", "join request changed while reapplying"), 409);
+  }
+
+  const id = `jr_${crypto.randomUUID().replaceAll("-", "")}`;
+  const inserted = await c.env.DB.prepare(
+    `INSERT INTO channel_join_requests (
+       id, slug, account, requester_display, requester_profile_json, state, note,
+       source_token_name, requested_at, reviewed_at, reviewed_by, review_reason
+     ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, NULL, NULL)
+     ON CONFLICT(slug, account) DO NOTHING`,
+  )
+    .bind(id, slug, identity.account, profile.display, profile.json, note, watch.name, now)
+    .run();
+  if (inserted.meta.changes === 0) {
+    const current = await loadChannelJoinRequest(c.env.DB, slug, { account: identity.account });
+    if (current?.state === "pending") return c.json(channelJoinRequestFromRow(current));
+    return c.json(errorBody("conflict", "join request already exists"), 409);
+  }
+  const request = await loadChannelJoinRequest(c.env.DB, slug, { id });
+  return c.json(channelJoinRequestFromRow(request!), 201);
+});
+
+app.get("/api/channels/:slug/join-requests/me", async (c) => {
+  const identity = c.get("identity");
+  if (identity.role !== "human" || identity.account == null) {
+    return c.json(errorBody("forbidden", "join requests require a human account session"), 403);
+  }
+  const slug = c.req.param("slug");
+  if (!(await loadChannel(c.env.DB, slug))) return c.json(errorBody("not_found", "channel not found"), 404);
+  const request = await loadChannelJoinRequest(c.env.DB, slug, { account: identity.account });
+  return c.json({ request: request === null ? null : channelJoinRequestFromRow(request) });
+});
+
+app.get("/api/channels/:slug/join-requests", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!isChannelModerator(c.get("identity"), channel)) {
+    return c.json(errorBody("forbidden", "only channel moderators can list join requests"), 403);
+  }
+  if (new URL(c.req.url).searchParams.get("state") !== "pending") {
+    return c.json(errorBody("bad_request", "state=pending is required"), 400);
+  }
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, slug, account, requester_display, requester_profile_json, state, note,
+            source_token_name, requested_at, reviewed_at, reviewed_by, review_reason
+       FROM channel_join_requests
+      WHERE slug = ? AND state = 'pending'
+      ORDER BY requested_at ASC, id ASC`,
+  )
+    .bind(slug)
+    .all<ChannelJoinRequestRow>();
+  return c.json({ requests: results.map(channelJoinRequestFromRow) });
+});
+
+app.post("/api/channels/:slug/join-requests/:id/review", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only channel moderators can review join requests"), 403);
+  }
+  if (channel.archived_at !== null) return c.json(errorBody("archived", "channel is archived"), 410);
+  const id = c.req.param("id");
+  const request = await loadChannelJoinRequest(c.env.DB, slug, { id });
+  if (!request) return c.json(errorBody("not_found", "join request not found"), 404);
+  if (request.state !== "pending") {
+    return c.json(errorBody("conflict", "join request is already final"), 409);
+  }
+  const body = (await c.req.json().catch(() => null)) as { action?: unknown; reason?: unknown } | null;
+  if (body?.action !== "approve" && body?.action !== "reject") {
+    return c.json(errorBody("bad_request", "action must be approve or reject"), 400);
+  }
+  const reason = optionalBoundedText(body.reason, JOIN_REQUEST_REASON_MAX);
+  if (reason === undefined || (body.action === "reject" && reason === null)) {
+    return c.json(errorBody("bad_request", "a valid reason is required when rejecting"), 400);
+  }
+  const reviewedAt = Date.now();
+  const reviewedBy = identity.account ?? identity.name;
+  let changed = 0;
+  if (body.action === "approve") {
+    const results = await c.env.DB.batch([
+      c.env.DB.prepare(
+        `UPDATE channel_join_requests
+            SET state = 'approved', reviewed_at = ?, reviewed_by = ?, review_reason = NULL
+          WHERE id = ? AND slug = ? AND state = 'pending'`,
+      ).bind(reviewedAt, reviewedBy, id, slug),
+      c.env.DB.prepare(
+        `INSERT OR IGNORE INTO channel_members (channel_slug, account, added_by, added_at)
+         SELECT slug, account, ?, ?
+           FROM channel_join_requests
+          WHERE id = ? AND slug = ? AND state = 'approved' AND reviewed_at = ? AND reviewed_by = ?`,
+      ).bind(reviewedBy, reviewedAt, id, slug, reviewedAt, reviewedBy),
+    ]);
+    changed = results[0]?.meta.changes ?? 0;
+  } else {
+    const result = await c.env.DB.prepare(
+      `UPDATE channel_join_requests
+          SET state = 'rejected', reviewed_at = ?, reviewed_by = ?, review_reason = ?
+        WHERE id = ? AND slug = ? AND state = 'pending'`,
+    )
+      .bind(reviewedAt, reviewedBy, reason, id, slug)
+      .run();
+    changed = result.meta.changes;
+  }
+  if (changed === 0) return c.json(errorBody("conflict", "join request is already final"), 409);
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: body.action === "approve" ? "channel.join_request.approve" : "channel.join_request.reject",
+    resource: `channel/${slug}/join-requests/${id}`,
+    channel: slug,
+    timestamp: reviewedAt,
+  });
+  const reviewed = await loadChannelJoinRequest(c.env.DB, slug, { id });
+  return c.json(channelJoinRequestFromRow(reviewed!));
 });
 
 app.post("/api/join/:code", async (c) => {
