@@ -1,0 +1,16 @@
+{
+  "staging_dir": "<ABSOLUTE_LOCAL_STAGING_DIRECTORY>",
+  "target_dir": "<ABSOLUTE_LOCAL_TARGET_CREDENTIAL_DIRECTORY>",
+  "limits": {
+    "max_archive_bytes": 25000000,
+    "max_extracted_bytes": 100000000,
+    "max_files": 1000
+  },
+  "sources": [
+    {
+      "id": "<REGISTERED_SOURCE_ID>",
+      "topic_url": "https://<AUTHORIZED_TOPIC_EXACT_URL>",
+      "attachment_url": "https://<AUTHORIZED_ATTACHMENT_EXACT_URL>.zip"
+    }
+  ]
+}
