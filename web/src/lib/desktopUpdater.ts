@@ -1,6 +1,7 @@
 export const LAST_SUCCESSFUL_CHECK_KEY = "ap_desktop_updater_last_success";
 export const LAST_UPDATER_DIAGNOSTIC_KEY = "ap_desktop_updater_diagnostic";
 export const LAST_NOTIFIED_VERSION_KEY = "ap_desktop_updater_notified_version";
+export const LAST_SHOWN_VERSION_KEY = "ap_desktop_updater_shown_version";
 
 const AUTO_CHECK_DELAY_MS = 8_000;
 const AUTO_CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -9,6 +10,8 @@ const CHECK_TIMEOUT_MS = 30_000;
 const VERSION_LOOKUP_TIMEOUT_MS = 2_000;
 const MAX_RELEASE_NOTES_LENGTH = 2_000;
 const SAFE_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const notifiedVersionsInMemory = new Set<string>();
+const shownVersionsInMemory = new Set<string>();
 
 export type UpdaterPhase =
   | "idle"
@@ -144,9 +147,12 @@ export async function notifyDesktopUpdateAvailableOnce(
   notify: () => Promise<boolean>,
 ): Promise<boolean> {
   if (!isHidden || !SAFE_VERSION_PATTERN.test(nextVersion)) return false;
+  if (notifiedVersionsInMemory.has(nextVersion)) return false;
+  let storageFailed = false;
   try {
     if (storage.getItem(LAST_NOTIFIED_VERSION_KEY) === nextVersion) return false;
   } catch {
+    storageFailed = true;
     // A denied storage read must not hide an important update notification.
   }
 
@@ -161,8 +167,10 @@ export async function notifyDesktopUpdateAvailableOnce(
   try {
     storage.setItem(LAST_NOTIFIED_VERSION_KEY, nextVersion);
   } catch {
+    storageFailed = true;
     // Delivery succeeded; persistence failure only affects future deduplication.
   }
+  if (storageFailed) notifiedVersionsInMemory.add(nextVersion);
   return true;
 }
 
@@ -261,6 +269,8 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
   let operationPromise: Promise<void> | null = null;
   let closeRequested = false;
   let diagnosticQueue: Promise<void> = Promise.resolve();
+  const shownVersions = new Set<string>();
+  let shownVersionStorageFailed = false;
 
   const publish = (next: DesktopUpdaterState) => {
     if (disposed) return;
@@ -269,6 +279,30 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
   };
 
   const patch = (next: Partial<DesktopUpdaterState>) => publish({ ...state, ...next });
+
+  const hasShownVersion = (version: string): boolean => {
+    if (shownVersions.has(version) || shownVersionsInMemory.has(version)) return true;
+    try {
+      if (options.storage.getItem(LAST_SHOWN_VERSION_KEY) !== version) return false;
+      shownVersions.add(version);
+      return true;
+    } catch {
+      shownVersionStorageFailed = true;
+      return false;
+    }
+  };
+
+  const markVersionShown = (version: string | null) => {
+    if (version === null || !SAFE_VERSION_PATTERN.test(version)) return;
+    shownVersions.add(version);
+    try {
+      options.storage.setItem(LAST_SHOWN_VERSION_KEY, version);
+    } catch {
+      shownVersionStorageFailed = true;
+      // The in-process record still prevents repeated interruption.
+    }
+    if (shownVersionStorageFailed) shownVersionsInMemory.add(version);
+  };
 
   const persistDiagnostic = (diagnostic: DesktopUpdaterDiagnostic): Promise<void> => {
     try {
@@ -565,9 +599,11 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
             patch({ phase: "up-to-date" });
             return;
           }
+          const panelOpen = source === "manual" || !hasShownVersion(update.nextVersion) || state.panelOpen;
+          if (panelOpen) markVersionShown(update.nextVersion);
           patch({
             phase: "available",
-            panelOpen: true,
+            panelOpen,
             currentVersion: update.currentVersion,
             nextVersion: update.nextVersion,
             notes: boundReleaseNotes(update.notes),
@@ -599,9 +635,15 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
       return Promise.resolve();
     },
 
-    openPanel: () => patch({ panelOpen: true }),
+    openPanel: () => {
+      markVersionShown(state.nextVersion);
+      patch({ panelOpen: true });
+    },
     closePanel: () => patch({ panelOpen: false }),
-    togglePanel: () => patch({ panelOpen: !state.panelOpen }),
+    togglePanel: () => {
+      if (!state.panelOpen) markVersionShown(state.nextVersion);
+      patch({ panelOpen: !state.panelOpen });
+    },
 
     dispose() {
       if (disposed) return;

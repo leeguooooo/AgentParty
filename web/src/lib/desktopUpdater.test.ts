@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   LAST_NOTIFIED_VERSION_KEY,
+  LAST_SHOWN_VERSION_KEY,
   LAST_UPDATER_DIAGNOSTIC_KEY,
   bindDesktopUpdaterResumeChecks,
   LAST_SUCCESSFUL_CHECK_KEY,
@@ -178,6 +179,22 @@ describe("desktop update notifications", () => {
 
     expect(await notifyDesktopUpdateAvailableOnce("0.2.83", true, storage, async () => false)).toBe(false);
     expect(storage.values.has(LAST_NOTIFIED_VERSION_KEY)).toBe(false);
+  });
+
+  test("deduplicates successful delivery in memory when storage is unavailable", async () => {
+    const unavailableStorage = (): StorageAdapter => ({
+      getItem: () => { throw new Error("storage denied"); },
+      setItem: () => { throw new Error("storage denied"); },
+    });
+    let sends = 0;
+    const notify = async () => {
+      sends += 1;
+      return true;
+    };
+
+    expect(await notifyDesktopUpdateAvailableOnce("0.2.85", true, unavailableStorage(), notify)).toBe(true);
+    expect(await notifyDesktopUpdateAvailableOnce("0.2.85", true, unavailableStorage(), notify)).toBe(false);
+    expect(sends).toBe(1);
   });
 });
 
@@ -612,10 +629,11 @@ describe("desktop updater checks", () => {
   });
 
   test("automatically opens the update panel when a background check finds a new version", async () => {
+    const storage = memoryStorage({ [LAST_NOTIFIED_VERSION_KEY]: "0.2.83" });
     const controller = createDesktopUpdaterController({
       adapter: adapter({ check: async () => candidate() }),
       clock: { now: () => 1 },
-      storage: memoryStorage(),
+      storage,
     });
 
     await controller.check("auto");
@@ -626,6 +644,98 @@ describe("desktop updater checks", () => {
       currentVersion: "0.2.82",
       nextVersion: "0.2.83",
     });
+    expect(storage.values.get(LAST_SHOWN_VERSION_KEY)).toBe("0.2.83");
+    expect(storage.values.get(LAST_NOTIFIED_VERSION_KEY)).toBe("0.2.83");
+  });
+
+  test("keeps a dismissed version available without forcing the panel open again", async () => {
+    const storage = memoryStorage();
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({ check: async () => candidate() }),
+      clock: { now: () => 1 },
+      storage,
+    });
+
+    await controller.check("auto");
+    controller.closePanel();
+    await controller.check("auto");
+
+    expect(controller.getState()).toMatchObject({
+      phase: "available",
+      panelOpen: false,
+      nextVersion: "0.2.83",
+    });
+  });
+
+  test("forces the panel open again for a higher version", async () => {
+    let nextVersion = "0.2.83";
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({
+        check: async () => ({ currentVersion: "0.2.82", nextVersion }),
+      }),
+      clock: { now: () => 1 },
+      storage: memoryStorage(),
+    });
+
+    await controller.check("auto");
+    controller.closePanel();
+    nextVersion = "0.2.84";
+    await controller.check("auto");
+
+    expect(controller.getState()).toMatchObject({
+      phase: "available",
+      panelOpen: true,
+      nextVersion: "0.2.84",
+    });
+  });
+
+  test("records versions shown by manual checks and explicit panel opens", async () => {
+    const storage = memoryStorage();
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({ check: async () => candidate() }),
+      clock: { now: () => 1 },
+      storage,
+    });
+
+    await controller.check("manual");
+    expect(storage.values.get(LAST_SHOWN_VERSION_KEY)).toBe("0.2.83");
+
+    controller.closePanel();
+    storage.values.delete(LAST_SHOWN_VERSION_KEY);
+    controller.openPanel();
+    expect(storage.values.get(LAST_SHOWN_VERSION_KEY)).toBe("0.2.83");
+
+    controller.closePanel();
+    await controller.check("auto");
+    expect(controller.getState()).toMatchObject({ phase: "available", panelOpen: false });
+  });
+
+  test("shows an update once per process when storage reads and writes fail", async () => {
+    const unavailableStorage = (): StorageAdapter => ({
+      getItem: () => { throw new Error("storage denied"); },
+      setItem: () => { throw new Error("storage denied"); },
+    });
+    const createController = () => createDesktopUpdaterController({
+      adapter: adapter({ check: async () => candidate() }),
+      clock: { now: () => 1 },
+      storage: unavailableStorage(),
+    });
+    const controller = createController();
+
+    await controller.check("auto");
+    expect(controller.getState().panelOpen).toBe(true);
+
+    controller.closePanel();
+    await controller.check("auto");
+    expect(controller.getState()).toMatchObject({
+      phase: "available",
+      panelOpen: false,
+      nextVersion: "0.2.83",
+    });
+
+    const replacementController = createController();
+    await replacementController.check("auto");
+    expect(replacementController.getState()).toMatchObject({ phase: "available", panelOpen: false });
   });
 
   test("bounds release notes before publishing an available update", async () => {

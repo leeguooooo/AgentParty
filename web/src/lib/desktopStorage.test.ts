@@ -34,6 +34,8 @@ describe("desktop origin storage migration", () => {
       ap_presence_expanded: "0",
       ap_channel_tools_expanded: "1",
       ap_desktop_updater_last_success: "1720000000000",
+      ap_desktop_updater_notified_version: "0.2.94",
+      ap_desktop_updater_shown_version: "0.2.94",
       ap_desktop_updater_diagnostic: '{"status":"success","source":"manual","stage":"check","category":null,"timestamp":1720000000000,"appVersion":"0.2.94"}',
       "ap_seen:v1:agentparty:leo": "42",
       "ap_charter_seen:agentparty": "7",
@@ -56,6 +58,8 @@ describe("desktop origin storage migration", () => {
       ap_presence_expanded: "0",
       ap_channel_tools_expanded: "1",
       ap_desktop_updater_last_success: "1720000000000",
+      ap_desktop_updater_notified_version: "0.2.94",
+      ap_desktop_updater_shown_version: "0.2.94",
       ap_desktop_updater_diagnostic: '{"status":"success","source":"manual","stage":"check","category":null,"timestamp":1720000000000,"appVersion":"0.2.94"}',
       "ap_seen:v1:agentparty:leo": "42",
       "ap_charter_seen:agentparty": "7",
@@ -78,6 +82,8 @@ describe("desktop origin storage migration", () => {
       "ap_seen:v1:agentparty:leo:ghp_secret": "42",
       "ap_charter_seen:agentparty?token=secret": "7",
       ap_desktop_updater_last_success: "NaN",
+      ap_desktop_updater_notified_version: "secret-token",
+      ap_desktop_updater_shown_version: "0.2.94\nsecret",
       ap_desktop_updater_diagnostic: '{"status":"success","source":"manual","stage":"check","category":null,"timestamp":42,"appVersion":"0.2.94","token":"secret"}',
     });
 
@@ -92,6 +98,8 @@ describe("desktop origin storage migration", () => {
     for (const [key, invalid] of [
       ["ap_server_profiles_v1", '[{"label":"","origin":"https://private.example"}]'],
       ["ap_desktop_updater_diagnostic", '{"status":"success","source":"manual","stage":"check","category":null,"timestamp":42,"appVersion":"0.2.94","targetVersion":null}'],
+      ["ap_desktop_updater_notified_version", "0.2"],
+      ["ap_desktop_updater_shown_version", "v0.2.94"],
     ]) {
       expect(collectDesktopStorage(storage({ [key]: invalid }))).toEqual({});
     }

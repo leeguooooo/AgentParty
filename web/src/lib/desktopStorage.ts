@@ -111,6 +111,8 @@ function validValue(key: string, value: string): boolean {
     case "ap_onboarded": return value === "1";
     case "ap_desktop_updater_diagnostic": return validUpdaterDiagnostic(value);
     case "ap_desktop_updater_last_success": return validNonNegativeInteger(value);
+    case "ap_desktop_updater_notified_version":
+    case "ap_desktop_updater_shown_version": return SAFE_VERSION_PATTERN.test(value);
     case "ap_locale": return value === "en" || value === "zh";
     case "ap_server_profiles_v1": return validServerProfiles(value);
     case "ap_theme": return value === "doodle" || value === "midnight";
