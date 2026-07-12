@@ -4,6 +4,7 @@ import { apiBase, apiUrl, clearApiBase, setApiBase, wsUrl } from "./base";
 import {
   createInvokeCredentialVault,
   refreshDesktopSession,
+  type DesktopCredential,
   type DesktopCredentialVault,
   type DesktopInvoker,
 } from "./desktopCredentials";
@@ -14,10 +15,12 @@ import {
   type ServerProfileStorage,
 } from "./serverProfiles";
 import {
+  activateDesktopServerWithAccessToken,
   beginDesktopServerAdd,
   beginDesktopServerPairing,
   cancelDesktopServerPairing,
   completeDesktopServerPairing,
+  DesktopServerAuthorizationRequiredError,
   DesktopServerNotPairedError,
   initialDesktopServerPairingFlow,
   switchActiveDesktopServer,
@@ -50,6 +53,20 @@ afterEach(() => {
 const vault = {} as DesktopCredentialVault;
 
 describe("atomic desktop server switching", () => {
+  test("commits an already-restored access token without refreshing credentials again", () => {
+    let runtimeOrigin = "https://agentparty.leeguoo.com";
+    const result = activateDesktopServerWithAccessToken(
+      "https://party.example.com",
+      "interactive-access",
+      storage,
+      (origin) => { runtimeOrigin = origin; },
+    );
+
+    expect(result).toEqual({ origin: "https://party.example.com", accessToken: "interactive-access" });
+    expect(loadActiveServerOrigin(storage)).toBe("https://party.example.com");
+    expect(runtimeOrigin).toBe("https://party.example.com");
+  });
+
   test("restores the target session before committing active API and WS base", async () => {
     const order: string[] = [];
     const result = await switchActiveDesktopServer("https://party.example.com", storage, {
@@ -88,6 +105,102 @@ describe("atomic desktop server switching", () => {
     expect(loadActiveServerOrigin(storage)).toBe("https://agentparty.leeguoo.com");
     expect(apiBase()).toBe("https://agentparty.leeguoo.com");
     expect(apiUrl("/api/me")).toBe("https://agentparty.leeguoo.com/api/me");
+  });
+
+  test("preserves target origin when a noninteractive Keychain read requires authorization", async () => {
+    let caught: unknown;
+    try {
+      await switchActiveDesktopServer("https://party.example.com", storage, {
+        vaultForOrigin: () => ({
+          read: async () => { throw new Error("desktop_keychain_authorization_required"); },
+          authorize: async () => null,
+          write: async () => {},
+          writeInteractive: async () => {},
+          delete: async () => {},
+          deleteInteractive: async () => {},
+        }),
+        restore: (targetVault, origin) => refreshDesktopSession(targetVault, [origin], async () => {
+          throw new Error("fetch must not run before Keychain authorization");
+        }),
+        setRuntimeBase: setApiBase,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(DesktopServerAuthorizationRequiredError);
+    expect((caught as DesktopServerAuthorizationRequiredError).origin).toBe("https://party.example.com");
+    expect(loadActiveServerOrigin(storage)).toBe("https://agentparty.leeguoo.com");
+    expect(apiBase()).toBe("https://agentparty.leeguoo.com");
+  });
+
+  test("persists an already-rotated credential interactively without a second refresh", async () => {
+    let refreshCalls = 0;
+    let interactiveCredential: DesktopCredential | null = null;
+    const targetVault: DesktopCredentialVault = {
+      read: async () => ({
+        refreshToken: "refresh-old",
+        deviceSecret: "device-secret",
+        serverOrigin: "https://party.example.com",
+        sessionId: "session-1",
+      }),
+      authorize: async () => null,
+      write: async () => { throw new Error("desktop_keychain_authorization_required"); },
+      writeInteractive: async (credential) => { interactiveCredential = credential; },
+      delete: async () => {},
+      deleteInteractive: async () => {},
+    };
+    let caught: unknown;
+    try {
+      await switchActiveDesktopServer("https://party.example.com", storage, {
+        vaultForOrigin: () => targetVault,
+        restore: (nextVault, origin) => refreshDesktopSession(nextVault, [origin], async () => {
+          refreshCalls += 1;
+          return new Response(JSON.stringify({
+            access_token: "private-access",
+            refresh_token: "refresh-rotated",
+            expires_in: 600,
+            session_id: "session-1",
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }),
+        setRuntimeBase: setApiBase,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(DesktopServerAuthorizationRequiredError);
+    expect((caught as DesktopServerAuthorizationRequiredError).origin).toBe("https://party.example.com");
+    expect(await (caught as DesktopServerAuthorizationRequiredError).authorize(async () => {
+      throw new Error("read authorization fallback must not run");
+    })).toBe("private-access");
+    expect(refreshCalls).toBe(1);
+    expect(interactiveCredential).toEqual({
+      refreshToken: "refresh-rotated",
+      deviceSecret: "device-secret",
+      serverOrigin: "https://party.example.com",
+      sessionId: "session-1",
+    });
+    expect(loadActiveServerOrigin(storage)).toBe("https://agentparty.leeguoo.com");
+    expect(apiBase()).toBe("https://agentparty.leeguoo.com");
+  });
+
+  test("keeps generic restore failures ordinary and preserves their identity", async () => {
+    const failure = new TypeError("offline");
+    let caught: unknown;
+    try {
+      await switchActiveDesktopServer("https://party.example.com", storage, {
+        vaultForOrigin: () => vault,
+        restore: async () => { throw failure; },
+        setRuntimeBase: setApiBase,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBe(failure);
+    expect(loadActiveServerOrigin(storage)).toBe("https://agentparty.leeguoo.com");
+    expect(apiBase()).toBe("https://agentparty.leeguoo.com");
   });
 
   test("rejects switching to a server that has no device session", async () => {

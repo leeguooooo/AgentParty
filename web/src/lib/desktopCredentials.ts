@@ -25,6 +25,32 @@ export interface DesktopCredentialVault {
   deleteInteractive(): Promise<void>;
 }
 
+function isKeychainAuthorizationRequired(cause: unknown): boolean {
+  const message = typeof cause === "string"
+    ? cause
+    : cause instanceof Error
+      ? cause.message
+      : null;
+  return message === "desktop_keychain_authorization_required";
+}
+
+export class DesktopCredentialWriteAuthorizationRequiredError extends Error {
+  readonly #credential: DesktopCredential;
+  readonly #accessToken: string;
+
+  constructor(credential: DesktopCredential, accessToken: string) {
+    super("desktop credential write requires Keychain authorization");
+    this.name = "DesktopCredentialWriteAuthorizationRequiredError";
+    this.#credential = credential;
+    this.#accessToken = accessToken;
+  }
+
+  async persist(vault: DesktopCredentialVault): Promise<string> {
+    await vault.writeInteractive(this.#credential);
+    return this.#accessToken;
+  }
+}
+
 export type DesktopInvoker = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
 function isMissingNativeCommand(cause: unknown, command: string): boolean {
@@ -182,8 +208,18 @@ async function refreshDesktopCredential(
   });
   const tokens = await readTokenResponse(response, "desktop session refresh");
   const nextCredential = credentialFromTokens(tokens, credential.deviceSecret, credential.serverOrigin);
-  if (interactiveWrite) await vault.writeInteractive(nextCredential);
-  else await vault.write(nextCredential);
+  if (interactiveWrite) {
+    await vault.writeInteractive(nextCredential);
+  } else {
+    try {
+      await vault.write(nextCredential);
+    } catch (cause) {
+      if (isKeychainAuthorizationRequired(cause)) {
+        throw new DesktopCredentialWriteAuthorizationRequiredError(nextCredential, tokens.access_token);
+      }
+      throw cause;
+    }
+  }
   return tokens.access_token;
 }
 

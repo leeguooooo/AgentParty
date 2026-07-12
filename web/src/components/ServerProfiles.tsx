@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/ServerProfiles";
+import { restoreDesktopAccessInteractive } from "../lib/desktopAuth";
+import { desktopCredentialVaultForOrigin } from "../lib/desktopCredentials";
 import {
   addCustomServerProfile,
   probeServerProfile,
@@ -8,7 +10,10 @@ import {
   type ServerProfile,
   type ServerProfileStorage,
 } from "../lib/serverProfiles";
-import { DesktopServerNotPairedError } from "../lib/serverSwitch";
+import {
+  DesktopServerAuthorizationRequiredError,
+  DesktopServerNotPairedError,
+} from "../lib/serverSwitch";
 
 type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -121,9 +126,13 @@ interface SwitcherViewProps {
   pending: boolean;
   error: string | null;
   pairTarget: string | null;
+  authorizationTarget: string | null;
+  retryTarget: string | null;
   onSelect(origin: string): void;
   onAddPair(): void;
   onPair(origin: string): void;
+  onAuthorize(origin: string): void;
+  onRetry(origin: string): void;
 }
 
 export function ServerSwitcherView({
@@ -132,9 +141,13 @@ export function ServerSwitcherView({
   pending,
   error,
   pairTarget,
+  authorizationTarget,
+  retryTarget,
   onSelect,
   onAddPair,
   onPair,
+  onAuthorize,
+  onRetry,
 }: SwitcherViewProps) {
   const t = useT();
   return (
@@ -158,6 +171,14 @@ export function ServerSwitcherView({
           {pairTarget !== null && (
             <button type="button" onClick={() => onPair(pairTarget)}>{t("ServerProfiles.switch.pair")}</button>
           )}
+          {authorizationTarget !== null && (
+            <button type="button" onClick={() => onAuthorize(authorizationTarget)}>
+              {t("ServerProfiles.switch.authorizeRetry")}
+            </button>
+          )}
+          {retryTarget !== null && (
+            <button type="button" onClick={() => onRetry(retryTarget)}>{t("ServerProfiles.switch.retry")}</button>
+          )}
         </div>
       )}
     </div>
@@ -167,34 +188,82 @@ export function ServerSwitcherView({
 interface SwitcherProps {
   profiles: ServerProfile[];
   activeOrigin: string;
-  onSwitch(origin: string): Promise<void>;
+  onSwitch(origin: string, restoredAccessToken?: string): Promise<void>;
   onAddPair(): void;
   onPair(origin: string): void;
+  restoreInteractive?(origin: string): Promise<string | null>;
 }
 
-export function ServerSwitcher({ profiles, activeOrigin, onSwitch, onAddPair, onPair }: SwitcherProps) {
+function restoreServerAccessInteractive(origin: string): Promise<string | null> {
+  return restoreDesktopAccessInteractive(desktopCredentialVaultForOrigin(origin), origin);
+}
+
+export function ServerSwitcher({
+  profiles,
+  activeOrigin,
+  onSwitch,
+  onAddPair,
+  onPair,
+  restoreInteractive = restoreServerAccessInteractive,
+}: SwitcherProps) {
   const t = useT();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pairTarget, setPairTarget] = useState<string | null>(null);
+  const [authorizationFailure, setAuthorizationFailure] = useState<DesktopServerAuthorizationRequiredError | null>(null);
+  const [retryTarget, setRetryTarget] = useState<string | null>(null);
+
+  const clearRecovery = () => {
+    setPairTarget(null);
+    setAuthorizationFailure(null);
+    setRetryTarget(null);
+  };
+
+  const showFailure = (cause: unknown, origin: string) => {
+    clearRecovery();
+    if (cause instanceof DesktopServerAuthorizationRequiredError) {
+      setAuthorizationFailure(cause);
+      setError(t("ServerProfiles.switch.authorizationRequired"));
+    } else if (cause instanceof DesktopServerNotPairedError) {
+      setPairTarget(cause.origin);
+      setError(t("ServerProfiles.switch.unpaired"));
+    } else {
+      setRetryTarget(origin);
+      setError(t("ServerProfiles.switch.failed"));
+    }
+  };
+
   const select = async (origin: string) => {
     if (origin === activeOrigin || pending) return;
     setPending(true);
     setError(null);
-    setPairTarget(null);
+    clearRecovery();
     try {
       await onSwitch(origin);
     } catch (cause) {
-      if (cause instanceof DesktopServerNotPairedError) {
-        setPairTarget(cause.origin);
-        setError(t("ServerProfiles.switch.unpaired"));
-      } else {
-        setError(t("ServerProfiles.switch.failed"));
-      }
+      showFailure(cause, origin);
     } finally {
       setPending(false);
     }
   };
+
+  const authorizeAndRetry = async (failure: DesktopServerAuthorizationRequiredError) => {
+    if (pending) return;
+    const origin = failure.origin;
+    setPending(true);
+    setError(null);
+    clearRecovery();
+    try {
+      const accessToken = await failure.authorize(restoreInteractive);
+      if (accessToken === null) throw new DesktopServerNotPairedError(origin);
+      await onSwitch(origin, accessToken);
+    } catch (cause) {
+      showFailure(cause, origin);
+    } finally {
+      setPending(false);
+    }
+  };
+
   return (
     <ServerSwitcherView
       profiles={profiles}
@@ -202,13 +271,19 @@ export function ServerSwitcher({ profiles, activeOrigin, onSwitch, onAddPair, on
       pending={pending}
       error={error}
       pairTarget={pairTarget}
+      authorizationTarget={authorizationFailure?.origin ?? null}
+      retryTarget={retryTarget}
       onSelect={(origin) => void select(origin)}
       onAddPair={onAddPair}
       onPair={(origin) => {
         setError(null);
-        setPairTarget(null);
+        clearRecovery();
         onPair(origin);
       }}
+      onAuthorize={(origin) => {
+        if (authorizationFailure?.origin === origin) void authorizeAndRetry(authorizationFailure);
+      }}
+      onRetry={(origin) => void select(origin)}
     />
   );
 }

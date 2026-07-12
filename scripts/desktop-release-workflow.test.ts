@@ -278,6 +278,7 @@ describe("desktop release workflow", () => {
     expect(desktopDocs).toContain("应用不会为了更新主动弹出通知权限申请");
     expect(desktopDocs).toContain("同一版本只成功通知一次");
     expect(desktopDocs).toContain("A newly available version opens the update panel automatically");
+    expect(desktopDocs).toContain("授权并重试");
   });
 
   test("keeps the isolated updater-channel publisher valid Bash", () => {
@@ -304,6 +305,9 @@ describe("desktop release workflow", () => {
     expect(script).not.toContain("desktop updater manifests disagree on candidate version");
     expect(script).toContain('|| gh release view "$channel_tag"');
     expect(script).toContain('trap restore_channel_manifests ERR');
+    expect(script).toContain('rollback_verification_dir="$RUNNER_TEMP/desktop-updater-channel-rollback-verification"');
+    expect(script).toContain('restored updater manifest does not match its backup');
+    expect(script).toContain('candidate updater manifest remained after rollback');
     expect(script).toContain('gh release download "$channel_tag"');
     expect(script).toContain('--check-not-older-than "$current_version" "$candidate_version"');
     expect(script).toContain('gh release upload "$channel_tag" "${manifests[@]}"');

@@ -974,6 +974,35 @@ jobs:
                 --repo "$GITHUB_REPOSITORY" \
                 --clobber || restore_failed=1
             done
+            rollback_verification_dir="$RUNNER_TEMP/desktop-updater-channel-rollback-verification"
+            rm -rf "$rollback_verification_dir"
+            mkdir -p "$rollback_verification_dir"
+            if ! restored_assets="$(gh release view "$channel_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name')"; then
+              echo "::error::failed to list updater manifests after rollback"
+              restored_assets=""
+              restore_failed=1
+            fi
+            for manifest in "${manifests[@]}"; do
+              manifest_name="$(basename "$manifest")"
+              backup="$backup_dir/$manifest_name"
+              if [ -f "$backup" ]; then
+                restored="$rollback_verification_dir/$manifest_name"
+                if ! gh release download "$channel_tag" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --pattern "$manifest_name" \
+                  --output "$restored" \
+                  || ! cmp --silent "$backup" "$restored"; then
+                  echo "::error::restored updater manifest does not match its backup: $manifest_name"
+                  restore_failed=1
+                fi
+              elif grep -Fxq "$manifest_name" <<<"$restored_assets"; then
+                echo "::error::candidate updater manifest remained after rollback: $manifest_name"
+                restore_failed=1
+              fi
+            done
             if [ "$restore_failed" -ne 0 ]; then
               echo "::error::desktop updater channel rollback was incomplete"
               exit 1

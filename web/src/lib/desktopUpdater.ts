@@ -20,7 +20,8 @@ export type UpdaterPhase =
   | "ready"
   | "error";
 
-export type UpdaterFailureStage = "check" | "install" | "relaunch";
+export type UpdaterFailureStage = "check" | "install" | "relaunch" | "verification";
+type UpdaterDiagnosticStage = Exclude<UpdaterFailureStage, "verification">;
 export type UpdaterErrorKind = "offline" | "timeout" | "verification" | "install" | "relaunch" | "generic";
 
 export interface DesktopUpdaterState {
@@ -59,7 +60,7 @@ export interface DesktopUpdaterAdapter {
 export interface DesktopUpdaterDiagnostic {
   status: "attempt" | "success" | "failure" | "pending";
   source: "auto" | "manual" | null;
-  stage: UpdaterFailureStage;
+  stage: UpdaterDiagnosticStage;
   category: UpdaterErrorKind | null;
   timestamp: number;
   appVersion: string | null;
@@ -286,11 +287,12 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
   };
 
   const reportFailure = (
-    stage: UpdaterFailureStage,
+    stage: UpdaterDiagnosticStage,
     error: unknown,
     source: "auto" | "manual" | null = null,
     appVersion: string | null = null,
     targetVersion: string | null = null,
+    failureStage: UpdaterFailureStage = stage,
   ) => {
     if (disposed) return;
     const category = classifyUpdaterError(error, stage);
@@ -304,7 +306,7 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
       appVersion,
       ...(targetVersion === null ? {} : { targetVersion }),
     });
-    patch({ phase: "error", failureStage: stage, error: category });
+    patch({ phase: "error", failureStage, error: category });
   };
 
   const persistPendingRelaunch = (): Promise<void> => {
@@ -493,6 +495,7 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
           null,
           currentVersion,
           pending.targetVersion,
+          "verification",
         );
         patch({ panelOpen: true });
       })();
@@ -510,6 +513,7 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
       if (operationPromise !== null || state.failureStage === "install" || state.failureStage === "relaunch") {
         return operationPromise ?? Promise.resolve();
       }
+      const resetStaleUpdate = state.failureStage === "verification";
 
       patch({
         phase: "checking",
@@ -533,6 +537,8 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
       });
 
       const active = (async () => {
+        if (resetStaleUpdate) await closeAdapter();
+        if (disposed) return;
         const timedCheck = withTimeout(options.adapter.check(), timer, CHECK_TIMEOUT_MS);
         cancelCheckTimeout = timedCheck.cancel;
         const appVersionPromise = options.adapter.version === undefined
@@ -584,9 +590,12 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
     },
 
     retry() {
+      if (checkPromise !== null) return checkPromise;
+      if (operationPromise !== null) return operationPromise;
       if (state.failureStage === "check") return controller.check("manual");
       if (state.failureStage === "install") return beginInstall();
       if (state.failureStage === "relaunch") return beginRelaunch();
+      if (state.failureStage === "verification") return controller.check("manual");
       return Promise.resolve();
     },
 

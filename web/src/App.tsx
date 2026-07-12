@@ -88,6 +88,7 @@ import {
   type ServerProfile,
 } from "./lib/serverProfiles";
 import {
+  activateDesktopServerWithAccessToken,
   beginDesktopServerAdd,
   beginDesktopServerPairing,
   cancelDesktopServerPairing,
@@ -388,8 +389,10 @@ export function App() {
     replace(`/c/${slug}`);
   }, [path, replace, temporaryHumanToken, t]);
 
-  const switchDesktopOrigin = useCallback(async (origin: string) => {
-    const result = await switchActiveDesktopServer(origin);
+  const switchDesktopOrigin = useCallback(async (origin: string, restoredAccessToken?: string) => {
+    const result = restoredAccessToken === undefined
+      ? await switchActiveDesktopServer(origin)
+      : activateDesktopServerWithAccessToken(origin, restoredAccessToken);
     setActiveOrigin(result.origin);
     setServerPairingFlow(initialDesktopServerPairingFlow(result.origin));
     setAuthError(null);

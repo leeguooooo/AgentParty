@@ -6,6 +6,7 @@ import {
   notifyDesktopUpdateAvailableOnce,
   type DesktopUpdaterController,
   type DesktopUpdaterState,
+  type StorageAdapter,
 } from "../lib/desktopUpdater";
 import {
   listenForDesktopUpdateChecks,
@@ -31,6 +32,39 @@ const INITIAL_STATE: DesktopUpdaterState = {
   error: null,
   failureStage: null,
 };
+
+const unavailableStorageValues = new Map<string, string>();
+const deliveredNotificationVersions = new Set<string>();
+const notificationFlights = new Map<string, Promise<boolean>>();
+const UNAVAILABLE_STORAGE: StorageAdapter = {
+  getItem: (key) => unavailableStorageValues.get(key) ?? null,
+  setItem: (key, value) => { unavailableStorageValues.set(key, value); },
+};
+
+export function notifyDesktopUpdateAvailableInBackground(
+  nextVersion: string,
+  isHidden: boolean,
+  storageTarget: { readonly localStorage: StorageAdapter },
+  notify: () => Promise<boolean>,
+): Promise<boolean> {
+  if (deliveredNotificationVersions.has(nextVersion)) return Promise.resolve(false);
+  const current = notificationFlights.get(nextVersion);
+  if (current !== undefined) return current;
+  let storage = UNAVAILABLE_STORAGE;
+  try {
+    storage = storageTarget.localStorage;
+  } catch {
+    // Process-local delivery state still deduplicates when persistence is unavailable.
+  }
+  const pending = notifyDesktopUpdateAvailableOnce(nextVersion, isHidden, storage, notify)
+    .then((delivered) => {
+      if (delivered) deliveredNotificationVersions.add(nextVersion);
+      return delivered;
+    })
+    .finally(() => notificationFlights.delete(nextVersion));
+  notificationFlights.set(nextVersion, pending);
+  return pending;
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -238,17 +272,11 @@ export function DesktopUpdater() {
 
   useEffect(() => {
     if (!desktop || state.phase !== "available" || state.nextVersion === null) return;
-    let storage: Storage;
-    try {
-      storage = window.localStorage;
-    } catch {
-      return;
-    }
     const nextVersion = state.nextVersion;
-    void notifyDesktopUpdateAvailableOnce(
+    void notifyDesktopUpdateAvailableInBackground(
       nextVersion,
       document.visibilityState !== "visible",
-      storage,
+      window,
       () => sendDesktopUpdateAvailableNotification({
         title: t("DesktopUpdater.notification.title"),
         body: t("DesktopUpdater.notification.body", { version: nextVersion }),

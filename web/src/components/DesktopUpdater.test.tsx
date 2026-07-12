@@ -4,7 +4,12 @@ import { createRef } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DesktopUpdaterState } from "../lib/desktopUpdater";
 import { DesktopUpdaterStrings } from "../i18n/strings/DesktopUpdater";
-import { DesktopUpdaterPanel, handleDesktopUpdaterTrayCheck, updateUpdaterDialogFocus } from "./DesktopUpdater";
+import {
+  DesktopUpdaterPanel,
+  handleDesktopUpdaterTrayCheck,
+  notifyDesktopUpdateAvailableInBackground,
+  updateUpdaterDialogFocus,
+} from "./DesktopUpdater";
 
 const state = (overrides: Partial<DesktopUpdaterState>): DesktopUpdaterState => ({
   phase: "idle",
@@ -35,6 +40,71 @@ const translations: Record<string, string> = {
   "DesktopUpdater.error.offline": "Connect to the internet and try again.",
 };
 const t = (key: string) => translations[key] ?? key;
+
+test("attempts one native notification for a hidden update when localStorage access throws", async () => {
+  const storageTarget = Object.defineProperty({}, "localStorage", {
+    get: () => { throw new Error("localStorage unavailable"); },
+  }) as { readonly localStorage: Storage };
+  let nativeNotificationAttempts = 0;
+
+  expect(await notifyDesktopUpdateAvailableInBackground("0.2.102", true, storageTarget, async () => {
+    nativeNotificationAttempts += 1;
+    return true;
+  })).toBe(true);
+
+  expect(nativeNotificationAttempts).toBe(1);
+});
+
+test("deduplicates repeated and concurrent notifications when localStorage is unavailable", async () => {
+  const storageTarget = Object.defineProperty({}, "localStorage", {
+    get: () => { throw new Error("localStorage unavailable"); },
+  }) as { readonly localStorage: Storage };
+  let nativeNotificationAttempts = 0;
+  let resolveDelivery: ((delivered: boolean) => void) | null = null;
+  const delivery = new Promise<boolean>((resolve) => { resolveDelivery = resolve; });
+  const notify = () => {
+    nativeNotificationAttempts += 1;
+    return delivery;
+  };
+
+  const first = notifyDesktopUpdateAvailableInBackground("0.2.103", true, storageTarget, notify);
+  const second = notifyDesktopUpdateAvailableInBackground("0.2.103", true, storageTarget, notify);
+  expect(first).toBe(second);
+  expect(nativeNotificationAttempts).toBe(1);
+
+  resolveDelivery!(true);
+  expect(await first).toBe(true);
+  expect(await second).toBe(true);
+  expect(await notifyDesktopUpdateAvailableInBackground("0.2.103", true, storageTarget, notify)).toBe(false);
+  expect(nativeNotificationAttempts).toBe(1);
+});
+
+test("deduplicates when localStorage methods throw", async () => {
+  const storageTarget = {
+    localStorage: {
+      getItem: () => { throw new Error("read denied"); },
+      setItem: () => { throw new Error("write denied"); },
+    },
+  };
+  let nativeNotificationAttempts = 0;
+  let resolveDelivery: ((delivered: boolean) => void) | null = null;
+  const delivery = new Promise<boolean>((resolve) => { resolveDelivery = resolve; });
+  const notify = () => {
+    nativeNotificationAttempts += 1;
+    return delivery;
+  };
+
+  const first = notifyDesktopUpdateAvailableInBackground("0.2.104", true, storageTarget, notify);
+  const second = notifyDesktopUpdateAvailableInBackground("0.2.104", true, storageTarget, notify);
+  expect(first).toBe(second);
+  expect(nativeNotificationAttempts).toBe(1);
+
+  resolveDelivery!(true);
+  expect(await first).toBe(true);
+  expect(await second).toBe(true);
+  expect(await notifyDesktopUpdateAvailableInBackground("0.2.104", true, storageTarget, notify)).toBe(false);
+  expect(nativeNotificationAttempts).toBe(1);
+});
 
 describe("DesktopUpdaterPanel", () => {
   test("provides localized copy for every safe error category", () => {

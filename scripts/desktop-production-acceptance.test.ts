@@ -76,8 +76,18 @@ describe("desktop production acceptance", () => {
     });
     expect(parseAcceptanceCliArgs([
       "verify", "--app", "/Applications/AgentParty.app", "--expected-version", "0.2.91",
+      "--baseline", "/tmp/base.json", "--receipt", "/tmp/receipt.json", "--output", "/tmp/report.json",
+    ])).toMatchObject({ command: "verify", expectedVersion: "0.2.91", output: "/tmp/report.json" });
+    expect(parseAcceptanceCliArgs([
+      "verify", "--app", "/Applications/AgentParty.app", "--expected-version", "0.2.91",
       "--baseline", "/tmp/base.json", "--receipt", "/tmp/receipt.json",
-    ])).toMatchObject({ command: "verify", expectedVersion: "0.2.91" });
+    ])).toEqual({
+      command: "verify",
+      app: "/Applications/AgentParty.app",
+      expectedVersion: "0.2.91",
+      baseline: "/tmp/base.json",
+      receipt: "/tmp/receipt.json",
+    });
     expect(() => parseAcceptanceCliArgs(["verify", "--app", "/Applications/AgentParty.app"])).toThrow(
       "--expected-version is required",
     );
@@ -100,15 +110,33 @@ describe("desktop production acceptance", () => {
       "0.2.91",
       "2026-07-11T00:11:00.000Z",
     )).toEqual({
-      schema: "agentparty.desktop-acceptance.v3",
+      schema: "agentparty.desktop-acceptance-report.v1",
       status: "passed",
       fromVersion: "0.2.90",
       toVersion: "0.2.91",
+      baselineCapturedAt: baseline.capturedAt,
+      currentCapturedAt: current.capturedAt,
+      bundleIdentifier: current.bundleIdentifier,
+      teamIdentifier: current.teamIdentifier,
+      codeIdentifier: current.codeIdentifier,
+      designatedRequirement: current.designatedRequirement,
+      entitlementsSha256: current.entitlementsSha256,
+      fromExecutableSha256: baseline.executableSha256,
+      toExecutableSha256: current.executableSha256,
+      fromSidecarSha256: baseline.sidecarSha256,
+      toSidecarSha256: current.sidecarSha256,
       appPath: current.appPath,
       executablePath: current.executablePath,
       processId: 42,
+      receiptStatus: "success",
+      receiptStage: "relaunch",
+      receiptAppVersion: "0.2.91",
+      receiptTargetVersion: "0.2.91",
       receiptTimestamp: Date.parse("2026-07-11T00:09:00.000Z"),
       verifiedAt: "2026-07-11T00:11:00.000Z",
+      codesignVerified: true,
+      gatekeeperAccepted: true,
+      notarizationStapled: true,
     });
   });
 

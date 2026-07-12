@@ -1,6 +1,7 @@
 import { setApiBase } from "./base";
-import { restoreDesktopAccess } from "./desktopAuth";
+import { classifyDesktopRestoreFailure, restoreDesktopAccess } from "./desktopAuth";
 import {
+  DesktopCredentialWriteAuthorizationRequiredError,
   desktopCredentialVaultForOrigin,
   type DesktopCredentialVault,
 } from "./desktopCredentials";
@@ -70,6 +71,46 @@ export class DesktopServerNotPairedError extends Error {
   }
 }
 
+export class DesktopServerAuthorizationRequiredError extends Error {
+  readonly origin: string;
+  readonly #recover: (() => Promise<string>) | null;
+
+  constructor(origin: string, recover: (() => Promise<string>) | null = null) {
+    super("target server requires Keychain authorization");
+    this.name = "DesktopServerAuthorizationRequiredError";
+    this.origin = origin;
+    this.#recover = recover;
+  }
+
+  authorize(fallback: (origin: string) => Promise<string | null>): Promise<string | null> {
+    return this.#recover === null ? fallback(this.origin) : this.#recover();
+  }
+}
+
+export function activateDesktopServerWithAccessToken(
+  targetInput: string,
+  accessToken: string,
+  storage: ServerProfileStorage = localStorage,
+  setRuntimeBase: (origin: string) => void = setApiBase,
+): { origin: string; accessToken: string } {
+  const target = normalizeServerOrigin(targetInput);
+  if (target === null || !loadServerProfiles(storage).some((profile) => profile.origin === target)) {
+    throw new Error("target server profile is not registered");
+  }
+  if (accessToken.length === 0) throw new Error("target server access token is unavailable");
+
+  const previous = loadActiveServerOrigin(storage);
+  try {
+    saveActiveServerOrigin(storage, target);
+    setRuntimeBase(target);
+  } catch (error) {
+    saveActiveServerOrigin(storage, previous);
+    setRuntimeBase(previous);
+    throw error;
+  }
+  return { origin: target, accessToken };
+}
+
 export async function switchActiveDesktopServer(
   targetInput: string,
   storage: ServerProfileStorage = localStorage,
@@ -80,17 +121,19 @@ export async function switchActiveDesktopServer(
     throw new Error("target server profile is not registered");
   }
 
-  const accessToken = await dependencies.restore(dependencies.vaultForOrigin(target), target);
-  if (accessToken === null) throw new DesktopServerNotPairedError(target);
-
-  const previous = loadActiveServerOrigin(storage);
+  const vault = dependencies.vaultForOrigin(target);
+  let accessToken: string | null;
   try {
-    saveActiveServerOrigin(storage, target);
-    dependencies.setRuntimeBase(target);
+    accessToken = await dependencies.restore(vault, target);
   } catch (error) {
-    saveActiveServerOrigin(storage, previous);
-    dependencies.setRuntimeBase(previous);
+    if (error instanceof DesktopCredentialWriteAuthorizationRequiredError) {
+      throw new DesktopServerAuthorizationRequiredError(target, () => error.persist(vault));
+    }
+    if (classifyDesktopRestoreFailure(error) === "keychain-authorization") {
+      throw new DesktopServerAuthorizationRequiredError(target);
+    }
     throw error;
   }
-  return { origin: target, accessToken };
+  if (accessToken === null) throw new DesktopServerNotPairedError(target);
+  return activateDesktopServerWithAccessToken(target, accessToken, storage, dependencies.setRuntimeBase);
 }

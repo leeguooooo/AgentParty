@@ -243,7 +243,7 @@ describe("desktop updater auto-check", () => {
     expect(controller.getState()).toMatchObject({
       phase: "error",
       panelOpen: true,
-      failureStage: "relaunch",
+      failureStage: "verification",
       error: "verification",
     });
     expect(JSON.parse(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY) ?? "null")).toEqual({
@@ -254,6 +254,78 @@ describe("desktop updater auto-check", () => {
       timestamp: 200,
       appVersion: "0.2.82",
       targetVersion: "0.2.83",
+    });
+  });
+
+  test("retries a post-relaunch verification mismatch with one fresh close-then-check path", async () => {
+    const storage = memoryStorage({
+      [LAST_UPDATER_DIAGNOSTIC_KEY]: JSON.stringify({
+        status: "pending",
+        source: null,
+        stage: "relaunch",
+        category: null,
+        timestamp: 100,
+        appVersion: "0.2.82",
+        targetVersion: "0.2.83",
+      }),
+    });
+    const closed = deferred<void>();
+    const checked = deferred<UpdateCandidate | null>();
+    const checkStarted = deferred<void>();
+    const calls: string[] = [];
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({
+        version: async () => "0.2.82",
+        check: () => {
+          calls.push("check");
+          checkStarted.resolve();
+          return checked.promise;
+        },
+        install: async () => {
+          calls.push("install");
+        },
+        relaunch: async () => {
+          calls.push("relaunch");
+        },
+        close: async () => {
+          calls.push("close");
+          await closed.promise;
+        },
+      }),
+      clock: { now: () => 200 },
+      storage,
+    });
+
+    await captureConsoleErrors(async () => {
+      controller.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const first = controller.retry();
+    const second = controller.retry();
+    await Promise.resolve();
+
+    expect(first).toBe(second);
+    expect(calls).toEqual(["close"]);
+    expect(JSON.parse(storage.values.get(LAST_UPDATER_DIAGNOSTIC_KEY) ?? "null")).toMatchObject({
+      status: "attempt",
+      source: "manual",
+      stage: "check",
+    });
+
+    closed.resolve();
+    await checkStarted.promise;
+    expect(calls).toEqual(["close", "check"]);
+
+    checked.resolve(candidate());
+    await Promise.all([first, second]);
+
+    expect(calls).toEqual(["close", "check"]);
+    expect(controller.getState()).toMatchObject({
+      phase: "available",
+      failureStage: null,
+      error: null,
     });
   });
 
@@ -1164,6 +1236,54 @@ describe("desktop updater timeout and plugin adapter", () => {
 });
 
 describe("desktop updater disposal", () => {
+  test("does not start the verification retry check after disposal while closing the stale handle", async () => {
+    const storage = memoryStorage({
+      [LAST_UPDATER_DIAGNOSTIC_KEY]: JSON.stringify({
+        status: "pending",
+        source: null,
+        stage: "relaunch",
+        category: null,
+        timestamp: 100,
+        appVersion: "0.2.82",
+        targetVersion: "0.2.83",
+      }),
+    });
+    const closed = deferred<void>();
+    let checkCalls = 0;
+    let closeCalls = 0;
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({
+        version: async () => "0.2.82",
+        check: async () => {
+          checkCalls += 1;
+          return null;
+        },
+        close: async () => {
+          closeCalls += 1;
+          if (closeCalls === 1) await closed.promise;
+        },
+      }),
+      clock: { now: () => 200 },
+      storage,
+    });
+
+    await captureConsoleErrors(async () => {
+      controller.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const retry = controller.retry();
+    await Promise.resolve();
+    controller.dispose();
+    closed.resolve();
+    await retry;
+    await Promise.resolve();
+
+    expect(checkCalls).toBe(0);
+    expect(closeCalls).toBe(2);
+  });
+
   test("clears an in-flight native check timeout on disposal", async () => {
     const pending = deferred<UpdateCandidate | null>();
     const { timer, scheduled, cleared } = timerHarness();

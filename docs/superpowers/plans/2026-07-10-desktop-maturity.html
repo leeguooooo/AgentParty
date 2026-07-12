@@ -135,7 +135,7 @@ cd web &amp;&amp; bun test &amp;&amp; bunx tsc --noEmit &amp;&amp; bunx vite bui
 cd desktop &amp;&amp; bun run typecheck
 TAURI_SIGNING_PRIVATE_KEY=... bun run desktop:build:prod
 bun scripts/desktop-production-acceptance.ts baseline --app /Applications/AgentParty.app --expected-version &lt;N-1&gt; --output /tmp/agentparty-baseline.json
-bun scripts/desktop-production-acceptance.ts verify --app /Applications/AgentParty.app --expected-version &lt;N&gt; --baseline /tmp/agentparty-baseline.json --receipt "$HOME/Library/Application Support/com.agentparty.desktop/updater-diagnostic.json"
+bun scripts/desktop-production-acceptance.ts verify --app /Applications/AgentParty.app --expected-version &lt;N&gt; --baseline /tmp/agentparty-baseline.json --receipt "$HOME/Library/Application Support/com.agentparty.desktop/updater-diagnostic.json" --output /tmp/agentparty-acceptance.json
 bun run check</code></pre>
     <p>最终证据不是“workflow 绿”，而是用旧版 DMG 安装应用，再发布一个更高版本的测试 tag，应用内发现更新、下载、验签、替换并重启，重启后显示新版本。</p>
   </section>

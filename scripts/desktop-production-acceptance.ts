@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import { compareVersionPrecedence, validateVersion } from "./release-version";
 
 const SCHEMA = "agentparty.desktop-acceptance.v3";
+const REPORT_SCHEMA = "agentparty.desktop-acceptance-report.v1";
 const BUNDLE_IDENTIFIER = "com.agentparty.desktop";
 
 export interface InstalledAppEvidence {
@@ -48,20 +49,38 @@ export interface UpdaterReceipt {
 }
 
 export interface UpgradeAcceptanceReport {
-  schema: typeof SCHEMA;
+  schema: typeof REPORT_SCHEMA;
   status: "passed";
   fromVersion: string;
   toVersion: string;
+  baselineCapturedAt: string;
+  currentCapturedAt: string;
+  bundleIdentifier: string;
+  teamIdentifier: string;
+  codeIdentifier: string;
+  designatedRequirement: string;
+  entitlementsSha256: string;
+  fromExecutableSha256: string;
+  toExecutableSha256: string;
+  fromSidecarSha256: string;
+  toSidecarSha256: string;
   appPath: string;
   executablePath: string;
   processId: number;
+  receiptStatus: "success";
+  receiptStage: "relaunch";
+  receiptAppVersion: string;
+  receiptTargetVersion: string;
   receiptTimestamp: number;
   verifiedAt: string;
+  codesignVerified: true;
+  gatekeeperAccepted: true;
+  notarizationStapled: true;
 }
 
 export type AcceptanceCliOptions =
   | { command: "baseline"; app: string; expectedVersion: string; output: string }
-  | { command: "verify"; app: string; expectedVersion: string; baseline: string; receipt: string };
+  | { command: "verify"; app: string; expectedVersion: string; baseline: string; receipt: string; output?: string };
 
 function requireValue(argv: readonly string[], index: number, name: string): string {
   const value = argv[index + 1];
@@ -83,7 +102,7 @@ export function parseAcceptanceCliArgs(argv: readonly string[]): AcceptanceCliOp
   }
   const allowed = command === "baseline"
     ? new Set(["--app", "--expected-version", "--output"])
-    : new Set(["--app", "--expected-version", "--baseline", "--receipt"]);
+    : new Set(["--app", "--expected-version", "--baseline", "--receipt", "--output"]);
   for (const name of values.keys()) {
     if (!allowed.has(name)) throw new Error(`unknown argument: ${name}`);
   }
@@ -99,9 +118,10 @@ export function parseAcceptanceCliArgs(argv: readonly string[]): AcceptanceCliOp
   }
   const baseline = values.get("--baseline");
   const receipt = values.get("--receipt");
+  const output = values.get("--output");
   if (!baseline) throw new Error("--baseline is required");
   if (!receipt) throw new Error("--receipt is required");
-  return { command, app, expectedVersion, baseline, receipt };
+  return { command, app, expectedVersion, baseline, receipt, ...(output === undefined ? {} : { output }) };
 }
 
 function run(command: string, args: readonly string[]): { stdout: string; stderr: string } {
@@ -334,15 +354,33 @@ export function verifyUpgradeEvidence(
     throw new Error("expected exactly one running desktop process from the installed app");
   }
   return {
-    schema: SCHEMA,
+    schema: REPORT_SCHEMA,
     status: "passed",
     fromVersion: baseline.version,
     toVersion: current.version,
+    baselineCapturedAt: baseline.capturedAt,
+    currentCapturedAt: current.capturedAt,
+    bundleIdentifier: current.bundleIdentifier,
+    teamIdentifier: current.teamIdentifier,
+    codeIdentifier: current.codeIdentifier,
+    designatedRequirement: current.designatedRequirement,
+    entitlementsSha256: current.entitlementsSha256,
+    fromExecutableSha256: baseline.executableSha256,
+    toExecutableSha256: current.executableSha256,
+    fromSidecarSha256: baseline.sidecarSha256,
+    toSidecarSha256: current.sidecarSha256,
     appPath: current.appPath,
     executablePath: current.executablePath,
     processId: matching[0].pid,
+    receiptStatus: receipt.status,
+    receiptStage: receipt.stage,
+    receiptAppVersion: receipt.appVersion,
+    receiptTargetVersion: receipt.targetVersion,
     receiptTimestamp: receipt.timestamp,
     verifiedAt,
+    codesignVerified: true,
+    gatekeeperAccepted: true,
+    notarizationStapled: true,
   };
 }
 
@@ -395,6 +433,7 @@ function main(argv: readonly string[]): void {
     runningDesktopProcesses(basename(evidence.executablePath)),
     options.expectedVersion,
   );
+  if (options.output !== undefined) atomicWriteJson(options.output, report);
   console.log(JSON.stringify(report, null, 2));
 }
 
