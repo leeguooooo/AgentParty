@@ -52,12 +52,11 @@ jobs:
             exit 1
           fi
           echo "PR #$PR head SHA=$SHA"
-          BOTS='github-actions|github-actions\[bot\]|qodo|pr-agent|coderabbit|dependabot'
           # 采纳 pr-agent 建议：API 失败时按 0 计（fail-safe——查不到就当无 ack、保持红，绝不误放行）
           REVIEWS=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-            --jq "[.[] | select((.user.login | test(\"$BOTS\"; \"i\")) | not) | select(.state != \"PENDING\" and .state != \"DISMISSED\")] | length" 2>/dev/null || echo 0)
+            --jq '[.[] | select(.user.type != "Bot") | select(.state != "PENDING" and .state != "DISMISSED")] | length' 2>/dev/null || echo 0)
           ACK_COMMENTS=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq "[.[] | select((.user.login | test(\"$BOTS\"; \"i\")) | not) | select(.body | test(\"review-ack:|合并前已读|合并者 review 结论\"; \"i\"))] | length" 2>/dev/null || echo 0)
+            --jq '[.[] | select(.user.type != "Bot") | select(.body | test("review-ack:|合并前已读|合并者 review 结论"; "i"))] | length' 2>/dev/null || echo 0)
           REVIEWS=${REVIEWS:-0}; ACK_COMMENTS=${ACK_COMMENTS:-0}
           echo "非机器人 PR reviews=$REVIEWS · ack 评论=$ACK_COMMENTS"
           if [ "$REVIEWS" -gt 0 ] || [ "$ACK_COMMENTS" -gt 0 ]; then
