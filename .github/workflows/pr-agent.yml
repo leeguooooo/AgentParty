@@ -18,7 +18,9 @@ permissions:
 
 concurrency:
   group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
+  # 不取消在途 run：pr_agent 是 required check，被取消的 run 会报红卡住合并，且取消绕过
+  # continue-on-error/exit 0。宁可多跑一次也不能让取消把 required check 变红。
+  cancel-in-progress: false
 
 jobs:
   pr_agent:
