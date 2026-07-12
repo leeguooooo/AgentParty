@@ -189,6 +189,10 @@ export interface ChannelLastMessage {
   ts: number;
 }
 
+// 频道访问档（#381）：public 任意人可读可参与；private 仅成员可读；
+// public_watch 任意人可读（观看），但参与/发送需成员或被邀请。
+export type Visibility = "public" | "private" | "public_watch";
+
 export interface ChannelInfo {
   slug: string;
   title: string | null;
@@ -196,7 +200,8 @@ export interface ChannelInfo {
   kind: "standing" | "temp";
   mode: "normal" | "party";
   // 公开/私有（spec §3.1）：默认 private，旧 worker 响应缺此字段时按私有处理（不显 PUBLIC 徽章）。
-  visibility: "public" | "private";
+  // #381：public_watch = 任意人可观看、参与需邀请（读同 public，写需成员/被邀）。
+  visibility: Visibility;
   // 当前身份能否管理本频道（转可见性/踢人/归档）。服务端按 isChannelModerator 算好的布尔，
   // 不含 owner 身份本身。旧 worker 缺此字段 → undefined，前端按「不可管理」处理（不渲染管理控件）。
   can_moderate?: boolean;
@@ -653,7 +658,7 @@ export interface NewChannel {
   slug: string;
   title?: string;
   mode?: "normal" | "party";
-  visibility?: "public" | "private";
+  visibility?: Visibility;
 }
 
 export async function createChannel(
@@ -1115,7 +1120,7 @@ export async function resumeAgent(token: string, slug: string, name: string): Pr
 // 可见性切换（issue #38）。private→public 服务端要 confirm=true，未带时返回 409 + needs_confirm，
 // 这里以 { needsConfirm, messageCount } resolve 让 UI 弹二段确认，而不是当错误抛。
 export interface VisibilityResult {
-  visibility?: "public" | "private";
+  visibility?: Visibility;
   changed?: boolean;
   needsConfirm?: boolean;
   messageCount?: number;
@@ -1123,7 +1128,7 @@ export interface VisibilityResult {
 export async function setChannelVisibility(
   token: string,
   slug: string,
-  visibility: "public" | "private",
+  visibility: Visibility,
   confirm = false,
 ): Promise<VisibilityResult> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/visibility`, {
@@ -1138,7 +1143,7 @@ export async function setChannelVisibility(
     return { needsConfirm: true, messageCount: b.message_count };
   }
   if (!res.ok) throw new Error(`PUT /api/channels/${slug}/visibility failed (${res.status})`);
-  const b = (await res.json()) as { visibility?: "public" | "private"; changed?: boolean };
+  const b = (await res.json()) as { visibility?: Visibility; changed?: boolean };
   return { visibility: b.visibility, changed: b.changed };
 }
 

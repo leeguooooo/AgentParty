@@ -138,7 +138,9 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ROLES: readonly string[] = ["agent", "human", "readonly"] satisfies TokenRole[];
 const KINDS: readonly string[] = ["standing", "temp"] satisfies ChannelKind[];
 const MODES: readonly string[] = ["normal", "party"] satisfies ChannelMode[];
-const VISIBILITIES: readonly string[] = ["public", "private"];
+// #381 public_watch：第三档访问模式——任意人可观看（读），参与（发送）需成员/被邀请。
+// 读门 acl.ts 把 public_watch 当 public 放行；写门由 worker 算 canParticipateInChannel、DO handleSend 强制。
+const VISIBILITIES: readonly string[] = ["public", "private", "public_watch"];
 const COMPLETION_GATES: readonly string[] = ["off", "reviewer"] satisfies CompletionGate[];
 const COMPLETION_REVIEW_POLICIES: readonly string[] = ["sender", "owner"] satisfies CompletionReviewPolicy[];
 const DECISION_MODES: readonly string[] = ["approval", "unattended"] satisfies DecisionMode[];
@@ -304,6 +306,9 @@ const AP_FORWARD_HEADERS = [
   "x-ap-collab-role",
   "x-ap-role-source",
   "x-ap-handle",
+  // #381：频道可见性 + 「本连接能否参与写」都是 worker 权威值，客户端注入必须先剥离
+  "x-ap-visibility",
+  "x-ap-can-write",
 ] as const;
 // 所属人标签：铸造时可选写入，须 header-safe（可打印 ASCII，含空格）以便经 x-ap-owner 转发给 do
 const OWNER_MAX = 128;
@@ -1390,6 +1395,19 @@ async function canAccessLoadedChannel(db: D1Database, identity: TokenIdentity, c
   return row !== null;
 }
 
+// #381 public_watch 写门：能否「参与/发送」。public_watch 频道任意人可读，但发送需成员/被邀请。
+// 参与集 = 把该频道当**私有**频道时的访问集（房主账号 / channel_members / 被邀 project-agent / scope 命中）。
+// readonly 恒不可写（DO handleSend 也拦）。worker 持 D1 成员表，算好后经 x-ap-can-write 传给 DO 强制。
+// 仅 public_watch 频道 DO 才据此拦截；public/private 忽略此位，故对现有频道零行为变化。
+async function canParticipateInChannel(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
+  if (identity.role === "readonly") return false;
+  return canAccessLoadedChannel(db, identity, { ...channel, visibility: "private" });
+}
+
+async function writeGateHeaders(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<Record<string, string>> {
+  return { "x-ap-can-write": (await canParticipateInChannel(db, identity, channel)) ? "1" : "0" };
+}
+
 async function channelMessageStats(env: AppEnv, slug: string): Promise<{ message_count: number; earliest_ts: number | null }> {
   const res = await fetchChannelDO(
     env,
@@ -1459,6 +1477,7 @@ function channelHeaders(
   channel: {
     kind: string;
     mode: string;
+    visibility?: string;
     completion_gate?: string;
     completion_review_policy?: string;
     decision_mode?: string;
@@ -1473,6 +1492,8 @@ function channelHeaders(
   return {
     "x-ap-mode": channel.mode,
     "x-ap-channel-kind": channel.kind,
+    // #381：把频道可见性权威缓存进 DO（cacheChannelMeta），供 handleSend 判 public_watch 写门
+    ...(channel.visibility ? { "x-ap-visibility": channel.visibility } : {}),
     "x-ap-completion-gate": channel.completion_gate ?? "off",
     "x-ap-completion-review-policy": channel.completion_review_policy ?? "sender",
     "x-ap-decision-mode": channel.decision_mode ?? "approval",
@@ -3154,7 +3175,7 @@ app.post("/api/channels", async (c) => {
     return c.json(errorBody("bad_request", "mode must be normal or party"), 400);
   }
   if (typeof visibility !== "string" || !VISIBILITIES.includes(visibility)) {
-    return c.json(errorBody("bad_request", "visibility must be public or private"), 400);
+    return c.json(errorBody("bad_request", "visibility must be public, private, or public_watch"), 400);
   }
   if (c.get("identity").role === "readonly") {
     return c.json(errorBody("unauthorized", "readonly token cannot create channels"), 403);
@@ -4094,12 +4115,13 @@ app.put("/api/channels/:slug/visibility", async (c) => {
   const body = (await c.req.json().catch(() => null)) as { visibility?: unknown; confirm?: unknown } | null;
   const visibility = typeof body?.visibility === "string" ? body.visibility : "";
   if (!VISIBILITIES.includes(visibility)) {
-    return c.json(errorBody("bad_request", "visibility must be public or private"), 400);
+    return c.json(errorBody("bad_request", "visibility must be public, private, or public_watch"), 400);
   }
   if (visibility === channel.visibility) {
     return c.json({ visibility, changed: false });
   }
-  if (channel.visibility === "private" && visibility === "public" && body?.confirm !== true) {
+  // #381：private→(public | public_watch) 都会把私有历史暴露给任意观看者，故同样要二段确认。
+  if (channel.visibility === "private" && (visibility === "public" || visibility === "public_watch") && body?.confirm !== true) {
     const stats = await channelMessageStats(c.env, slug);
     return c.json(
       { needs_confirm: true, message_count: stats.message_count, earliest_ts: stats.earliest_ts },
@@ -4110,6 +4132,16 @@ app.put("/api/channels/:slug/visibility", async (c) => {
   await c.env.DB.prepare("UPDATE channels SET visibility = ? WHERE slug = ?")
     .bind(visibility, slug)
     .run();
+  // #381：把新可见性权威推给 DO（同 guard PUT 的 /internal/init 手法），立即刷新缓存的 visibility meta，
+  // 让已挂着的 WS 连接的后续发送也按新档判写门（否则要等下一次带 channelHeaders 的请求才生效）。
+  await fetchChannelDO(
+    c.env,
+    slug,
+    new Request("https://do/internal/init", {
+      method: "POST",
+      headers: { "x-partykit-room": slug, ...channelHeaders({ ...channel, visibility }, c.req.url) },
+    }),
+  );
   await bestEffortRecordManagementAudit(c.env.DB, {
     actor: managementAuditActor(identity),
     action: "channel.visibility.update",
@@ -5486,6 +5518,9 @@ app.post("/api/channels/:slug/messages/:seq/:action", async (c) => {
         ...lineageHeaders(identity),
         ...assignedRoleHeaders(assignedRole),
         ...channelHeaders(channel, c.req.url),
+        // #381：supersede 会经 handleSend 落新消息，public_watch 频道须带写门信号，否则房主自己的
+        // 超越会被 fail-closed 拦下。edit/retract 不经 handleSend，多带此位无害。
+        ...(await writeGateHeaders(c.env.DB, identity, channel)),
         ...(await handleHeader(c.env.DB, identity)),
       },
     }),
@@ -5643,6 +5678,8 @@ app.post("/api/channels/:slug/messages", async (c) => {
         ...lineageHeaders(identity),
         ...assignedRoleHeaders(assignedRole),
         ...channelHeaders(channel, c.req.url),
+        // #381：public_watch 写门信号——非成员/未被邀者在 public_watch 频道会被 DO handleSend 拒发
+        ...(await writeGateHeaders(c.env.DB, identity, channel)),
         ...(await handleHeader(c.env.DB, identity)),
       },
     }),
@@ -6083,6 +6120,11 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-workflow-guard-limit", String(channel.workflow_guard_limit));
   fwd.headers.set("x-ap-charter-rev", String(channel.charter_rev ?? 0));
   fwd.headers.set("x-ap-host", new URL(c.req.url).host);
+  // #381：把频道可见性 + 「本连接能否写」权威传给 DO。可见性缓存进 meta 供 handleSend 判 public_watch；
+  // can-write 定死在连接建立时（与 role/archived 同快照语义），public_watch 频道 DO 据此拦发。
+  // 无条件显式写 "0"，堵住客户端注入 + 未覆盖的透传（AP_FORWARD_HEADERS 已先剥离）。
+  fwd.headers.set("x-ap-visibility", channel.visibility);
+  fwd.headers.set("x-ap-can-write", (await canParticipateInChannel(c.env.DB, identity, channel)) ? "1" : "0");
   // 无条件写：未归档也显式置 "0"，堵住"客户端注入 1、未归档分支不覆盖"的透传
   fwd.headers.set("x-ap-archived", channel.archived_at !== null ? "1" : "0");
   for (const [key, value] of Object.entries(await handleHeader(c.env.DB, identity))) fwd.headers.set(key, value);

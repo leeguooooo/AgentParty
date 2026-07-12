@@ -52,6 +52,7 @@ import {
   updateTask,
   uploadAttachment,
   ValidationError,
+  type Visibility,
 } from "../lib/api";
 import type { AuthProviderConfig } from "../lib/oidc";
 import { agentHue } from "../lib/agentColor";
@@ -93,7 +94,7 @@ interface Props {
   slug: string;
   token: string;
   mode: "normal" | "party";
-  isPublic: boolean; // 顶栏 PUBLIC 徽章（spec §4）
+  visibility: Visibility; // 顶栏访问徽章 + 可见性切换初值（spec §4；#381 加 public_watch）
   loopGuardEnabled: boolean;
   loopGuardLimit: number | null;
   workflowGuardEnabled: boolean;
@@ -2103,7 +2104,7 @@ export function ChannelPage({
   slug,
   token,
   mode,
-  isPublic,
+  visibility,
   loopGuardEnabled,
   loopGuardLimit,
   workflowGuardEnabled,
@@ -2183,8 +2184,11 @@ export function ChannelPage({
   const [localWorkflowGuardLimit, setLocalWorkflowGuardLimit] = useState(String(workflowGuardLimit));
   const [guardSaving, setGuardSaving] = useState<"loop" | "workflow" | null>(null);
   const [guardConfigError, setGuardConfigError] = useState<string | null>(null);
-  // 可见性可在会话内切换（issue #38 web），本地 state 让顶栏徽章即时反映，无需重载
-  const [localPublic, setLocalPublic] = useState(isPublic);
+  // 可见性可在会话内切换（issue #38 web；#381 三档），本地 state 让顶栏徽章即时反映，无需重载
+  const [localVisibility, setLocalVisibility] = useState(visibility);
+  // 顶栏徽章：public 与 public_watch 都对外可读（挂徽章），仅 public_watch 显「WATCH」区分观看档
+  const localPublic = localVisibility !== "private";
+  const localWatch = localVisibility === "public_watch";
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [seenSeq, setSeenSeq] = useState<number | null>(null);
   const [teamNow, setTeamNow] = useState(() => Date.now());
@@ -3628,6 +3632,7 @@ export function ChannelPage({
         status={state.status}
         party={mode === "party" || state.mode === "party"}
         isPublic={localPublic}
+        publicWatch={localWatch}
         canModerate={canModerate}
         removingName={removingName}
         onRemoveParticipant={removeParticipant}
@@ -3724,8 +3729,8 @@ export function ChannelPage({
                 <VisibilityToggle
                   slug={slug}
                   token={token}
-                  isPublic={localPublic}
-                  onChanged={setLocalPublic}
+                  visibility={localVisibility}
+                  onChanged={setLocalVisibility}
                   onAuthFailed={onAuthFailed}
                 />
               )}

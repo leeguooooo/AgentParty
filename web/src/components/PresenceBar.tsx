@@ -13,7 +13,8 @@ interface Props {
   participants: Sender[];
   status: SocketStatus;
   party?: boolean; // mode=party 的频道在最左挂蜡笔黄 PARTY 徽章
-  isPublic?: boolean; // public 频道在最左挂蜡笔绿 PUBLIC 徽章（spec §4）
+  isPublic?: boolean; // public / public_watch 频道在最左挂蜡笔绿徽章（spec §4）
+  publicWatch?: boolean; // #381：public_watch 时徽章文案显「WATCH」（观看公开）区分纯 public
   canModerate?: boolean;
   removingName?: string | null;
   onRemoveParticipant?: (name: string) => void;
@@ -250,6 +251,7 @@ export function PresenceBar({
   status,
   party = false,
   isPublic = false,
+  publicWatch = false,
   canModerate = false,
   removingName = null,
   onRemoveParticipant,
@@ -692,7 +694,7 @@ export function PresenceBar({
     <div className={`presence-bar${expanded ? "" : " presence-bar--collapsed"}`}>
       <div className="presence-head">
         <div className="presence-meta" aria-label="channel presence summary">
-          {isPublic && <span className="d-hl public-badge">PUBLIC</span>}
+          {isPublic && <span className="d-hl public-badge">{publicWatch ? "WATCH" : "PUBLIC"}</span>}
           {party && <span className="d-hl party-badge">PARTY</span>}
           <button
             type="button"

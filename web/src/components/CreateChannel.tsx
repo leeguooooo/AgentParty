@@ -7,6 +7,7 @@ import {
   createChannel,
   ForbiddenError,
   ValidationError,
+  type Visibility,
 } from "../lib/api";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/CreateChannel";
@@ -17,13 +18,14 @@ interface Props {
 }
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const VIS_OPTIONS: readonly Visibility[] = ["private", "public_watch", "public"];
 
 export function CreateChannel({ token, onCreated }: Props) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [slug, setSlug] = useState("");
   const [title, setTitle] = useState("");
-  const [isPublic, setIsPublic] = useState(false);
+  const [visibility, setVisibility] = useState<Visibility>("private");
   const [party, setParty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -31,7 +33,7 @@ export function CreateChannel({ token, onCreated }: Props) {
   const reset = useCallback(() => {
     setSlug("");
     setTitle("");
-    setIsPublic(false);
+    setVisibility("private");
     setParty(false);
     setErr(null);
   }, []);
@@ -48,7 +50,7 @@ export function CreateChannel({ token, onCreated }: Props) {
       await createChannel(token, {
         slug: s,
         title: title.trim() || undefined,
-        visibility: isPublic ? "public" : "private",
+        visibility,
         mode: party ? "party" : "normal",
       });
       setBusy(false);
@@ -69,7 +71,7 @@ export function CreateChannel({ token, onCreated }: Props) {
                 : t("CreateChannel.errGeneric"),
       );
     }
-  }, [slug, title, isPublic, party, token, onCreated, reset, t]);
+  }, [slug, title, visibility, party, token, onCreated, reset, t]);
 
   if (!open) {
     return (
@@ -116,22 +118,18 @@ export function CreateChannel({ token, onCreated }: Props) {
       <div className="newchan-opts">
         <label className="newchan-seg">
           <span className="t-mono newchan-segk">{t("CreateChannel.visibilityLabel")}</span>
-          <button
-            type="button"
-            className={"newchan-choice" + (!isPublic ? " is-on" : "")}
-            onClick={() => setIsPublic(false)}
-            disabled={busy}
-          >
-            {t("CreateChannel.private")}
-          </button>
-          <button
-            type="button"
-            className={"newchan-choice" + (isPublic ? " is-on" : "")}
-            onClick={() => setIsPublic(true)}
-            disabled={busy}
-          >
-            {t("CreateChannel.public")}
-          </button>
+          {VIS_OPTIONS.map((opt) => (
+            <button
+              key={opt}
+              type="button"
+              className={"newchan-choice" + (visibility === opt ? " is-on" : "")}
+              onClick={() => setVisibility(opt)}
+              disabled={busy}
+              aria-pressed={visibility === opt}
+            >
+              {t(`CreateChannel.vis.${opt}`)}
+            </button>
+          ))}
         </label>
         <label className="newchan-check">
           <input
@@ -143,9 +141,7 @@ export function CreateChannel({ token, onCreated }: Props) {
           <span>{t("CreateChannel.party")}</span>
         </label>
       </div>
-      <p className="newchan-help t-mono">
-        {isPublic ? t("CreateChannel.helpPublic") : t("CreateChannel.helpPrivate")}
-      </p>
+      <p className="newchan-help t-mono">{t(`CreateChannel.help.${visibility}`)}</p>
       {err !== null && (
         <p className="banner banner--red newchan-err" role="alert">
           {err}
