@@ -15,7 +15,6 @@ import { MessageCard } from "../components/MessageCard";
 import { MentionToast, type MentionToastItem } from "../components/MentionToast";
 import { NotifyToggle, readNotifyOptin } from "../components/NotifyToggle";
 import { PresenceBar } from "../components/PresenceBar";
-import { OrgTree } from "../components/OrgTree";
 import { AttachmentList } from "../components/AttachmentList";
 import { OrgTreePreview } from "../components/OrgTreePreview";
 import {
@@ -521,6 +520,7 @@ export interface DivisionBoardProps {
   onNewRoleName: (name: string) => void;
   onNewRoleDraft: (draft: RoleDraft) => void;
   onSaveRole: (name: string, draft: RoleDraft) => void;
+  onSetReportsTo?: (name: string, reportsTo: string | null) => void;
   onDeleteRole: (name: string) => void;
   forceOpen?: boolean;
   // issue #150：一键把当前已声明分工同步进公告——DivisionBoard 只负责拼内容，
@@ -553,6 +553,7 @@ export function DivisionBoard({
   onNewRoleName,
   onNewRoleDraft,
   onSaveRole,
+  onSetReportsTo,
   onDeleteRole,
   forceOpen = false,
   charterText,
@@ -607,9 +608,11 @@ export function DivisionBoard({
   // \u8de8\u51fa\u672c\u9891\u9053\u8fb9\u754c\u7684\u6c47\u62a5\u5173\u7cfb\uff08\u771f\u6b63\u610f\u4e49\u4e0a\u7684\u7ec4\u7ec7\u5c42\u7ea7\u8df3\u7ea7\u5224\u5b9a\uff0c\u9700\u8981\u4e00\u4e2a\u6b63\u5f0f\u7684
   // \u7ba1\u7406\u5c42\u7ea7\u6a21\u578b\uff0c\u73b0\u6709\u6570\u636e\u505a\u4e0d\u5230\uff0c\u89c1\u4ea4\u63a5\u62a5\u544a\uff09\u3002
   const knownNames = new Set(roleViews.map((view) => view.name));
+  // #370：优先用正式管理层级 channel_roles.reports_to（可跨 owner，owner 定的模型）；
+  // 没显式设置的回落到 lineage.parent_agent（spawn 血缘，#281 的旧近似）。组织树从此显示真汇报线。
   const roleViewsWithReports = roleViews.map((view) => ({
     ...view,
-    reportsTo: presence[view.name]?.lineage?.parent_agent ?? null,
+    reportsTo: view.role?.reports_to ?? presence[view.name]?.lineage?.parent_agent ?? null,
   }));
   // issue #281：把同一份 roleViews（assigned/self/unassigned + reportsTo）喂给 buildOrgTree，
   // 折成一棵可整体预览的频道组织/汇报树——纯函数在 lib/orgTree.ts，环/孤儿处理都在那里。
@@ -711,7 +714,15 @@ export function DivisionBoard({
             </div>
           )}
         </div>
-        <OrgTreePreview tree={orgTree} t={t} />
+        <OrgTreePreview
+          tree={orgTree}
+          t={t}
+          interactive={
+            canModerate && onSetReportsTo !== undefined
+              ? { canModerate, allNames: orgMembers.map((m) => m.name), busyName: roleSaving, onSetReportsTo }
+              : undefined
+          }
+        />
         {groups.length > 0 ? (
           <div className="role-account-list">
             {groups.map((group) => (
@@ -3784,19 +3795,6 @@ export function ChannelPage({
             />
           )}
           {activePanel === "roles" && (
-            <div className="org-tree-section">
-              <div className="org-tree-head">{t("OrgTree.heading")}</div>
-              <OrgTree
-                roles={channelRoles}
-                presence={Object.values(state.presence)}
-                canModerate={canModerate}
-                onSetReportsTo={setReportsTo}
-                busyName={roleSaving}
-                onOpenDetail={setOpenAgentDetail}
-              />
-            </div>
-          )}
-          {activePanel === "roles" && (
             <DivisionBoard
               canModerate={canModerate}
               slug={slug}
@@ -3813,6 +3811,7 @@ export function ChannelPage({
               onNewRoleName={setNewRoleName}
               onNewRoleDraft={setNewRoleDraft}
               onSaveRole={saveRole}
+              onSetReportsTo={setReportsTo}
               onDeleteRole={clearRole}
               charterText={charter?.charter ?? null}
               onSyncToCharter={syncDivisionToCharter}
