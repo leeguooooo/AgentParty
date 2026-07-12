@@ -40,9 +40,16 @@ export function LarkMemberInvite({
   function isDirectoryPermissionError(cause: unknown): boolean {
     return (
       cause instanceof LarkDirectoryApiError &&
-      cause.status === 503 &&
-      cause.message.toLowerCase().includes("permission")
+      cause.code === "lark_contact_permission_required"
     );
+  }
+
+  function disableDirectoryActions() {
+    setDirectoryUnavailable(true);
+    setUsers([]);
+    setCursor(null);
+    setSearched(false);
+    setError(null);
   }
 
   function errorLabel(cause: unknown, fallbackKey: string): string {
@@ -65,8 +72,8 @@ export function LarkMemberInvite({
       setCursor(page.next_cursor);
       setSearched(true);
     } catch (cause) {
-      if (isDirectoryPermissionError(cause)) setDirectoryUnavailable(true);
-      setError(errorLabel(cause, "LarkInvite.error.search"));
+      if (isDirectoryPermissionError(cause)) disableDirectoryActions();
+      else setError(errorLabel(cause, "LarkInvite.error.search"));
     } finally {
       setBusy(false);
     }
@@ -85,7 +92,8 @@ export function LarkMemberInvite({
       setUsers((current) => current.map((item) => item.id === user.id ? { ...item, already_member: true } : item));
       onInvited?.(added);
     } catch (cause) {
-      setError(errorLabel(cause, "LarkInvite.error.invite"));
+      if (isDirectoryPermissionError(cause)) disableDirectoryActions();
+      else setError(errorLabel(cause, "LarkInvite.error.invite"));
     } finally {
       setInviting(null);
     }
@@ -115,8 +123,8 @@ export function LarkMemberInvite({
           {error !== null && <p className="lark-invite-error" role="alert">{error}</p>}
         </>
       )}
-      {searched && users.length === 0 && !busy && <p className="lark-invite-empty">{t("LarkInvite.empty")}</p>}
-      {users.length > 0 && (
+      {!directoryUnavailable && searched && users.length === 0 && !busy && <p className="lark-invite-empty">{t("LarkInvite.empty")}</p>}
+      {!directoryUnavailable && users.length > 0 && (
         <ul className="lark-invite-results">
           {users.map((user) => (
             <li key={user.id}>
@@ -141,7 +149,7 @@ export function LarkMemberInvite({
           ))}
         </ul>
       )}
-      {cursor !== null && (
+      {!directoryUnavailable && cursor !== null && (
         <button type="button" className="d-btn lark-invite-more" disabled={busy} onClick={() => runSearch(cursor)}>
           {t("LarkInvite.more")}
         </button>

@@ -3494,7 +3494,7 @@ app.get("/api/channels/:slug/lark-directory", async (c) => {
     });
   } catch (error) {
     if (error instanceof LarkDirectoryError) {
-      if (error.kind === "permission") return c.json(errorBody("unavailable", "Lark contact permission is not enabled"), 503);
+      if (error.kind === "permission") return c.json(errorBody("lark_contact_permission_required", "Lark contact permission is not enabled"), 503);
       if (error.kind === "invalid_cursor") return c.json(errorBody("bad_request", "Lark directory cursor is invalid"), 400);
       if (error.kind === "rate_limited") return c.json(errorBody("unavailable", "Lark directory is rate limited"), 503);
     }
@@ -3560,7 +3560,7 @@ app.post("/api/channels/:slug/lark-members", async (c) => {
     return c.json({ id: user.id, name: user.name, avatar_url: user.avatarUrl, already_member: alreadyMember }, alreadyMember ? 200 : 201);
   } catch (error) {
     if (error instanceof LarkDirectoryError) {
-      if (error.kind === "permission") return c.json(errorBody("unavailable", "Lark contact permission is not enabled"), 503);
+      if (error.kind === "permission") return c.json(errorBody("lark_contact_permission_required", "Lark contact permission is not enabled"), 503);
       if (error.kind === "not_found") return c.json(errorBody("not_found", "Lark user not found in this organization"), 404);
       if (error.kind === "rate_limited") return c.json(errorBody("unavailable", "Lark directory is rate limited"), 503);
     }

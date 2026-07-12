@@ -125,6 +125,24 @@ describe("Lark organization member invitations (#358)", () => {
     expect(entries.filter((entry) => entry.action === "channel.member.add" && entry.resource === `channel/${slug}/members/lark-main:on_alice`)).toHaveLength(1);
   });
 
+  it("uses the stable contact-permission code for direct invite failures", async () => {
+    const owner = await larkHuman();
+    const slug = await createChannel(owner.token);
+    mockTenantToken();
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/contact/v3/users/on_alice?user_id_type=union_id", method: "GET" })
+      .reply(200, { code: 41050, msg: "no user authority" });
+
+    const response = await api(`/api/channels/${slug}/lark-members`, owner.token, {
+      method: "POST",
+      body: JSON.stringify({ user_id: "on_alice" }),
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: { code: "lark_contact_permission_required" },
+    });
+  });
+
   it("rejects non-moderators, agent moderators, and cross-tenant profiles before any directory request", async () => {
     const owner = await larkHuman();
     const slug = await createChannel(owner.token);
@@ -147,7 +165,12 @@ describe("Lark organization member invitations (#358)", () => {
     mockDirectoryPage({ permissionDenied: true });
     const denied = await api(`/api/channels/${deniedSlug}/lark-directory?q=alice`, deniedOwner.token);
     expect(denied.status).toBe(503);
-    expect(await denied.json()).toMatchObject({ error: { code: "unavailable", message: expect.stringContaining("contact permission") } });
+    expect(await denied.json()).toMatchObject({
+      error: {
+        code: "lark_contact_permission_required",
+        message: expect.stringContaining("contact permission"),
+      },
+    });
 
     clearLarkTokenCache();
     const owner = await larkHuman();

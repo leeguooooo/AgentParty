@@ -348,7 +348,7 @@ export type ErrorCode =
   | "channel_full"
   | "not_found";
 
-export type RestErrorCode = ErrorCode | "conflict" | "unavailable" | "forbidden";
+export type RestErrorCode = ErrorCode | "conflict" | "unavailable" | "forbidden" | "lark_contact_permission_required";
 
 export interface Sender {
   name: string;

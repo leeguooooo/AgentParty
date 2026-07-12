@@ -1,7 +1,7 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 # CodeRabbit 配置（#380）——PR 自动审查。
 # 安装 CodeRabbit GitHub App 到 leeguooooo/AgentParty 后即生效（App 授权需 owner 在 github.com 操作）。
 # 文档：https://docs.coderabbit.ai/
-version: 2
 language: zh-CN
 
 reviews:

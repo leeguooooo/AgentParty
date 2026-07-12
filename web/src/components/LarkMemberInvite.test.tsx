@@ -55,7 +55,7 @@ test("renders Chinese labels and a contact-permission error", async () => {
         <LarkMemberInvite
           slug="room"
           token="token"
-          search={async () => { throw new LarkDirectoryApiError("Lark contact permission is not enabled", 503, "unavailable", null); }}
+          search={async () => { throw new LarkDirectoryApiError("opaque upstream wording", 503, "lark_contact_permission_required", null); }}
         />
       </LocaleProvider>,
     );
@@ -65,4 +65,81 @@ test("renders Chinese labels and a contact-permission error", async () => {
   act(() => input.props.onChange({ target: { value: "张" } }));
   await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
   expect(JSON.stringify(renderer!.toJSON())).toContain("当前部署尚未开通 Lark 通讯录权限");
+  expect(renderer!.root.findAllByType("form")).toHaveLength(0);
+  expect(renderer!.root.findByProps({ role: "status" })).toBeTruthy();
+});
+
+test("does not disable directory actions for an ordinary 503 even when its message mentions permission", async () => {
+  act(() => {
+    renderer = create(
+      <LocaleProvider>
+        <LarkMemberInvite
+          slug="room"
+          token="token"
+          search={async () => { throw new LarkDirectoryApiError("permission proxy failure", 503, "unavailable", null); }}
+        />
+      </LocaleProvider>,
+    );
+  });
+  const input = renderer!.root.findByType("input");
+  act(() => input.props.onChange({ target: { value: "Alice" } }));
+  await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+  expect(renderer!.root.findAllByType("form")).toHaveLength(1);
+  expect(renderer!.root.findByProps({ role: "alert" }).children).toContain("The Lark directory is unavailable.");
+});
+
+test("clears results and pagination when contact permission is revoked during load more", async () => {
+  let searches = 0;
+  act(() => {
+    renderer = create(
+      <LocaleProvider>
+        <LarkMemberInvite
+          slug="room"
+          token="token"
+          search={async () => {
+            searches += 1;
+            if (searches === 1) {
+              return {
+                users: [{ id: "on_alice", name: "Alice", avatar_url: null, already_member: false }],
+                next_cursor: "next",
+              };
+            }
+            throw new LarkDirectoryApiError("denied", 503, "lark_contact_permission_required", null);
+          }}
+        />
+      </LocaleProvider>,
+    );
+  });
+  const input = renderer!.root.findByType("input");
+  act(() => input.props.onChange({ target: { value: "Alice" } }));
+  await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+  expect(renderer!.root.findByProps({ "data-lark-user-id": "on_alice" })).toBeTruthy();
+  await act(async () => renderer!.root.findByProps({ className: "d-btn lark-invite-more" }).props.onClick());
+  expect(renderer!.root.findAllByProps({ "data-lark-user-id": "on_alice" })).toHaveLength(0);
+  expect(renderer!.root.findAllByProps({ className: "d-btn lark-invite-more" })).toHaveLength(0);
+  expect(renderer!.root.findByProps({ role: "status" })).toBeTruthy();
+});
+
+test("disables stale invite actions when contact permission is revoked during invite", async () => {
+  act(() => {
+    renderer = create(
+      <LocaleProvider>
+        <LarkMemberInvite
+          slug="room"
+          token="token"
+          search={async () => ({
+            users: [{ id: "on_alice", name: "Alice", avatar_url: null, already_member: false }],
+            next_cursor: null,
+          })}
+          invite={async () => { throw new LarkDirectoryApiError("denied", 503, "lark_contact_permission_required", null); }}
+        />
+      </LocaleProvider>,
+    );
+  });
+  const input = renderer!.root.findByType("input");
+  act(() => input.props.onChange({ target: { value: "Alice" } }));
+  await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+  await act(async () => renderer!.root.findByProps({ "data-lark-user-id": "on_alice" }).props.onClick());
+  expect(renderer!.root.findAllByProps({ "data-lark-user-id": "on_alice" })).toHaveLength(0);
+  expect(renderer!.root.findByProps({ role: "status" })).toBeTruthy();
 });
