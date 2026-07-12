@@ -6,13 +6,53 @@ import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock
 
 let server: MockServer | null = null;
 let conn: Connection | null = null;
+const originalFetch = globalThis.fetch;
+const OriginalWebSocket = globalThis.WebSocket;
+const originalConsoleDebug = console.debug;
 
 afterEach(() => {
   conn?.close();
   conn = null;
   server?.stop();
   server = null;
+  globalThis.fetch = originalFetch;
+  globalThis.WebSocket = OriginalWebSocket;
+  console.debug = originalConsoleDebug;
 });
+
+class ProbeWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static instances: ProbeWebSocket[] = [];
+
+  readyState = ProbeWebSocket.CONNECTING;
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+
+  constructor() {
+    ProbeWebSocket.instances.push(this);
+  }
+
+  send(): void {}
+
+  close(): void {
+    this.readyState = ProbeWebSocket.CLOSED;
+  }
+
+  failHandshake(): void {
+    this.readyState = ProbeWebSocket.CLOSED;
+    this.onclose?.({ code: 1006, reason: "" } as CloseEvent);
+  }
+}
+
+function useProbeWebSocket(): void {
+  ProbeWebSocket.instances = [];
+  globalThis.WebSocket = ProbeWebSocket as unknown as typeof WebSocket;
+}
 
 async function collect(
   c: Connection,
@@ -277,5 +317,71 @@ describe("ws client", () => {
     });
     await collect(conn, 2, 3000, false); // welcome + error
     expect(statuses).toEqual([{ status: "open" }, { status: "closed", error: "token revoked, re-run: party init" }]);
+  });
+
+  test("a known network error from the fatal probe is debugged and retried", async () => {
+    useProbeWebSocket();
+    const cause = Object.assign(new Error("socket reset"), { code: "ECONNRESET" });
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed", { cause });
+    }) as unknown as typeof fetch;
+    const debug: unknown[][] = [];
+    console.debug = (...args: unknown[]) => debug.push(args);
+    const statuses: string[] = [];
+
+    conn = connect("https://party.invalid", "ap_tok", "dev", 0, {
+      backoffBaseMs: 5,
+      onStatus: (status) => statuses.push(status),
+    });
+    ProbeWebSocket.instances[0]!.failHandshake();
+    await Bun.sleep(20);
+
+    expect(debug).toHaveLength(1);
+    expect(debug[0]!.join(" ")).toContain("ECONNRESET");
+    expect(statuses).toContain("reconnecting");
+    expect(ProbeWebSocket.instances.length).toBeGreaterThan(1);
+  });
+
+  test("HTTP 403 from the fatal probe becomes a terminal auth frame", async () => {
+    useProbeWebSocket();
+    globalThis.fetch = (async () => new Response(null, { status: 403 })) as unknown as typeof fetch;
+    const statuses: Array<{ status: string; error?: string }> = [];
+
+    conn = connect("https://party.invalid", "ap_tok", "dev", 0, {
+      backoffBaseMs: 5,
+      onStatus: (status, detail) => statuses.push({ status, ...(detail?.error ? { error: detail.error } : {}) }),
+    });
+    const next = conn.frames[Symbol.asyncIterator]().next();
+    ProbeWebSocket.instances[0]!.failHandshake();
+
+    expect((await next).value).toEqual({
+      type: "error",
+      code: "unauthorized",
+      message: "channel access forbidden",
+    });
+    expect(statuses).toEqual([{ status: "closed", error: "channel access forbidden" }]);
+    await Bun.sleep(15);
+    expect(ProbeWebSocket.instances).toHaveLength(1);
+  });
+
+  test("an unknown fatal-probe exception rejects the frame stream instead of reconnecting", async () => {
+    useProbeWebSocket();
+    const failure = new Error("probe invariant failed");
+    globalThis.fetch = (async () => {
+      throw failure;
+    }) as unknown as typeof fetch;
+    const statuses: Array<{ status: string; error?: string }> = [];
+
+    conn = connect("https://party.invalid", "ap_tok", "dev", 0, {
+      backoffBaseMs: 5,
+      onStatus: (status, detail) => statuses.push({ status, ...(detail?.error ? { error: detail.error } : {}) }),
+    });
+    const next = conn.frames[Symbol.asyncIterator]().next();
+    ProbeWebSocket.instances[0]!.failHandshake();
+
+    await expect(next).rejects.toBe(failure);
+    expect(statuses).toEqual([{ status: "closed", error: "probe invariant failed" }]);
+    await Bun.sleep(15);
+    expect(ProbeWebSocket.instances).toHaveLength(1);
   });
 });

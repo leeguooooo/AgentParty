@@ -4,27 +4,42 @@ import pkg from "../package.json" with { type: "json" };
 
 class FrameQueue {
   private items: ServerFrame[] = [];
-  private waiters: ((r: IteratorResult<ServerFrame>) => void)[] = [];
+  private waiters: Array<{
+    resolve: (r: IteratorResult<ServerFrame>) => void;
+    reject: (error: unknown) => void;
+  }> = [];
   private done = false;
+  private failed = false;
+  private failure: unknown;
 
   push(frame: ServerFrame): void {
     if (this.done) return;
     const w = this.waiters.shift();
-    if (w) w({ value: frame, done: false });
+    if (w) w.resolve({ value: frame, done: false });
     else this.items.push(frame);
   }
 
   end(): void {
     if (this.done) return;
     this.done = true;
-    for (const w of this.waiters.splice(0)) w({ value: undefined, done: true });
+    for (const w of this.waiters.splice(0)) w.resolve({ value: undefined, done: true });
+  }
+
+  fail(error: unknown): void {
+    if (this.done) return;
+    this.done = true;
+    this.failed = true;
+    this.failure = error;
+    this.items = [];
+    for (const w of this.waiters.splice(0)) w.reject(error);
   }
 
   async next(): Promise<IteratorResult<ServerFrame>> {
+    if (this.failed) throw this.failure;
     const item = this.items.shift();
     if (item !== undefined) return { value: item, done: false };
     if (this.done) return { value: undefined, done: true };
-    return new Promise((resolve) => this.waiters.push(resolve));
+    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
   }
 
   [Symbol.asyncIterator](): AsyncIterator<ServerFrame> {
@@ -38,6 +53,43 @@ class FrameQueue {
   }
 }
 
+const RETRYABLE_NETWORK_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+function errorCode(error: unknown): string | null {
+  let current = error;
+  const seen = new Set<unknown>();
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+function errorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = errorCode(error);
+  return code ? `${message} (${code})` : message;
+}
+
+function isRetryableNetworkError(error: unknown): boolean {
+  const code = errorCode(error);
+  if (code && RETRYABLE_NETWORK_CODES.has(code)) return true;
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
 export interface ConnectOptions {
   onCursor?: (cursor: number) => void;
   /** 修订游标：已见过的最大 rev_seq，随 hello.since_rev 上报，服务端据此限定修订重放（issue #33） */
@@ -49,7 +101,7 @@ export interface ConnectOptions {
   /**
    * 连接健康探针（issue #254）：WS 生命周期转场通知，供上层（serve）落本地 health.json。
    * "open" = 握手成功（socket 已连上，尚未必然收到 welcome）；"reconnecting" = 断线后进入退避等待；
-   * "closed" = 终局关闭，不会再重连（1008 策略性终局，或探测出的 401/404）。frame 级的收帧时间戳不
+   * "closed" = 终局关闭，不会再重连（1008 策略性终局，或探测出的非重试错误）。frame 级的收帧时间戳不
    * 走这里——上层消费 `frames` 时打点即可，onStatus 只报连接状态本身，避免每条消息都要过一遍这里。
    */
   onStatus?: (status: "open" | "reconnecting" | "closed", detail?: { error?: string }) => void;
@@ -146,7 +198,7 @@ export function connect(
     }
   };
 
-  // 升级被 http 拒绝时 ws api 分不清 401/404 和断网，用 rest 探测一次
+  // 升级被 HTTP 拒绝时 WS API 分不清鉴权/频道错误和断网，用 REST 探测一次
   const probeFatal = async (): Promise<ServerFrame | null> => {
     try {
       const res = await fetch(
@@ -156,11 +208,18 @@ export function connect(
       if (res.status === 401) {
         return { type: "error", code: "unauthorized", message: "invalid or revoked token, re-run: party init" };
       }
+      if (res.status === 403) {
+        return { type: "error", code: "unauthorized", message: "channel access forbidden" };
+      }
       if (res.status === 404) {
         return { type: "error", code: "not_found", message: `channel not found: ${slug}` };
       }
-    } catch {
-      // 网络问题，走正常重连
+      if (!res.ok) {
+        throw new Error(`websocket probe failed: HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`);
+      }
+    } catch (error) {
+      if (!isRetryableNetworkError(error)) throw error;
+      console.debug(`party ws probe: retryable network error; reconnecting: ${errorMessage(error)}`);
     }
     return null;
   };
@@ -272,17 +331,24 @@ export function connect(
         return;
       }
       if (!opened) {
-        void probeFatal().then((fatal) => {
-          if (closed) return;
-          if (fatal) {
+        void probeFatal()
+          .then((fatal) => {
+            if (closed) return;
+            if (fatal) {
+              closed = true;
+              queue.push(fatal);
+              opts.onStatus?.("closed", fatal.type === "error" ? { error: fatal.message } : undefined);
+              queue.end();
+              return;
+            }
+            scheduleReconnect();
+          })
+          .catch((error: unknown) => {
+            if (closed) return;
             closed = true;
-            queue.push(fatal);
-            opts.onStatus?.("closed", fatal.type === "error" ? { error: fatal.message } : undefined);
-            queue.end();
-            return;
-          }
-          scheduleReconnect();
-        });
+            opts.onStatus?.("closed", { error: errorMessage(error) });
+            queue.fail(error);
+          });
         return;
       }
       scheduleReconnect();
