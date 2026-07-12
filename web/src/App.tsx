@@ -1196,7 +1196,7 @@ export function App() {
               slug={slug}
               token={token}
               mode={channels?.find((c) => c.slug === slug)?.mode ?? "normal"}
-              isPublic={channels?.find((c) => c.slug === slug)?.visibility === "public"}
+              visibility={channels?.find((c) => c.slug === slug)?.visibility ?? "private"}
               loopGuardEnabled={channels?.find((c) => c.slug === slug)?.loop_guard_enabled === 1}
               loopGuardLimit={channels?.find((c) => c.slug === slug)?.loop_guard_limit ?? null}
               workflowGuardEnabled={channels?.find((c) => c.slug === slug)?.workflow_guard_enabled === 1}

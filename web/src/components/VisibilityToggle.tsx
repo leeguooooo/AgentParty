@@ -1,8 +1,8 @@
-// 频道可见性切换（issue #38 web 前端）。public→private 立即生效；private→public 服务端要二段
-// 确认（会暴露历史给任何人），这里用 409 needs_confirm 弹确认条。只对可写人类会话渲染，最终
-// 由服务端强制 owner 校验（非 owner → 403，内联报错）。
+// 频道可见性切换（issue #38 web；#381 加第三档 public_watch）。三档单选：private / public_watch / public。
+// private→(public|public_watch) 服务端要二段确认（会把历史暴露给任何观看者），这里用 409 needs_confirm 弹确认条。
+// 只对可写人类会话（moderator）渲染，最终由服务端强制 owner 校验（非 owner → 403，内联报错）。
 import { useState } from "react";
-import { AuthError, ForbiddenError, setChannelVisibility } from "../lib/api";
+import { AuthError, ForbiddenError, setChannelVisibility, type Visibility } from "../lib/api";
 import { useT } from "../i18n/useT";
 import { FeatureTip } from "./FeatureTip";
 import "../i18n/strings/VisibilityToggle";
@@ -10,29 +10,33 @@ import "../i18n/strings/VisibilityToggle";
 interface Props {
   slug: string;
   token: string;
-  isPublic: boolean;
-  onChanged(nextPublic: boolean): void;
+  visibility: Visibility;
+  onChanged(next: Visibility): void;
   onAuthFailed(message: string): void;
 }
 
-export function VisibilityToggle({ slug, token, isPublic, onChanged, onAuthFailed }: Props) {
+const OPTIONS: readonly Visibility[] = ["private", "public_watch", "public"];
+const BADGE: Record<Visibility, string> = { private: "PRIVATE", public_watch: "WATCH", public: "PUBLIC" };
+
+export function VisibilityToggle({ slug, token, visibility, onChanged, onAuthFailed }: Props) {
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // private→public 待确认：暂存待暴露的历史条数，用于确认条文案
-  const [confirmPublic, setConfirmPublic] = useState<number | null>(null);
+  // 待确认的目标档（private→公开/观看公开）：暂存待暴露的历史条数，用于确认条文案。
+  const [confirm, setConfirm] = useState<{ target: Visibility; count: number } | null>(null);
 
-  async function apply(target: "public" | "private", confirm: boolean) {
+  async function apply(target: Visibility, confirmed: boolean) {
+    if (target === visibility) return;
     setBusy(true);
     setError(null);
     try {
-      const r = await setChannelVisibility(token, slug, target, confirm);
+      const r = await setChannelVisibility(token, slug, target, confirmed);
       if (r.needsConfirm) {
-        setConfirmPublic(r.messageCount ?? 0);
+        setConfirm({ target, count: r.messageCount ?? 0 });
         return;
       }
-      setConfirmPublic(null);
-      onChanged(target === "public");
+      setConfirm(null);
+      onChanged(target);
     } catch (e) {
       if (e instanceof AuthError) {
         onAuthFailed(e.message);
@@ -46,26 +50,38 @@ export function VisibilityToggle({ slug, token, isPublic, onChanged, onAuthFaile
 
   return (
     <div className="vis-toggle">
-      <span className={`vis-badge vis-badge--${isPublic ? "public" : "private"}`}>
-        {isPublic ? "PUBLIC" : "PRIVATE"}
-      </span>
-      <button
-        type="button"
-        className="d-btn vis-btn"
-        disabled={busy}
-        onClick={() => apply(isPublic ? "private" : "public", false)}
-        title={isPublic ? t("Visibility.toPrivateTitle") : t("Visibility.toPublicTitle")}
-      >
-        {busy ? "…" : isPublic ? t("Visibility.toPrivate") : t("Visibility.toPublic")}
-      </button>
+      <span className={`vis-badge vis-badge--${visibility}`}>{BADGE[visibility]}</span>
+      <div className="vis-seg" role="group" aria-label={t("Visibility.groupLabel")}>
+        {OPTIONS.map((opt) => (
+          <button
+            key={opt}
+            type="button"
+            className={"vis-seg-btn" + (visibility === opt ? " is-on" : "")}
+            disabled={busy || visibility === opt}
+            aria-pressed={visibility === opt}
+            onClick={() => apply(opt, false)}
+            title={t(`Visibility.opt.${opt}.help`)}
+          >
+            {busy && confirm?.target === opt ? "…" : t(`Visibility.opt.${opt}`)}
+          </button>
+        ))}
+      </div>
       <FeatureTip tip="Tips.visibility" />
-      {confirmPublic !== null && (
+      <p className="vis-help t-mono">{t(`Visibility.opt.${visibility}.help`)}</p>
+      {confirm !== null && (
         <div className="vis-confirm" role="alertdialog" aria-label={t("Visibility.confirmDialogLabel")}>
-          <span className="vis-confirm-text">{t("Visibility.confirmText", { count: confirmPublic })}</span>
-          <button type="button" className="d-btn d-btn--primary" disabled={busy} onClick={() => apply("public", true)}>
+          <span className="vis-confirm-text">
+            {t(`Visibility.confirmText.${confirm.target}`, { count: confirm.count })}
+          </span>
+          <button
+            type="button"
+            className="d-btn d-btn--primary"
+            disabled={busy}
+            onClick={() => apply(confirm.target, true)}
+          >
             {t("Visibility.confirmButton")}
           </button>
-          <button type="button" className="d-btn" disabled={busy} onClick={() => setConfirmPublic(null)}>
+          <button type="button" className="d-btn" disabled={busy} onClick={() => setConfirm(null)}>
             {t("Visibility.cancel")}
           </button>
         </div>

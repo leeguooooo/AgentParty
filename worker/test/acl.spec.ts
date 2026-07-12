@@ -37,11 +37,20 @@ const privateOwned: ChannelAcl = { slug: "mine", visibility: "private", owner_ac
 const collabCh: ChannelAcl = { slug: "collab", visibility: "private", owner_account: LEO }; // scope 目标频道
 const otherOwned: ChannelAcl = { slug: "other", visibility: "private", owner_account: "other@leeguoo.com" };
 const legacyCh: ChannelAcl = { slug: "old", visibility: "private", owner_account: null }; // 老频道无 owner_account
+const publicWatchCh: ChannelAcl = { slug: "watch", visibility: "public_watch", owner_account: LEO }; // #381 任意人可读
 
 describe("canAccessChannel v2 matrix (spec §5.4/§5.5)", () => {
   it("public channel: every identity may enter (public 先于 scope)", () => {
     for (const id of [apAgent, apHuman, legacyAgent, legacyReadonly, scopedAgent, scopedReadonly, roNoScope, oidcOwner, oidcFan]) {
       expect(canAccessChannel(id, publicCh, false)).toBe(true);
+    }
+  });
+
+  // #381：public_watch 的读门与 public 完全一致——任何通过鉴权的身份（含粉丝/只读/无 scope）都可观看。
+  // 写门（参与）不在本纯函数内判断，由 worker 的 canParticipateInChannel + DO 强制（见 public-watch.spec）。
+  it("public_watch channel: every identity may READ, same as public (write-gate is layered elsewhere)", () => {
+    for (const id of [apAgent, apHuman, legacyAgent, legacyReadonly, scopedAgent, scopedReadonly, roNoScope, oidcOwner, oidcFan]) {
+      expect(canAccessChannel(id, publicWatchCh, false)).toBe(true);
     }
   });
 

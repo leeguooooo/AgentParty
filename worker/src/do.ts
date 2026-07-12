@@ -89,6 +89,9 @@ interface ConnState {
   collabRole?: CollaborationRole;
   collabRoleSource?: CollaborationRoleSource;
   archived: boolean;
+  // #381：worker（持 D1 成员表）在连接建立时算好「本连接能否在本频道参与/发送」。
+  // 仅 public_watch 频道的 handleSend 据此拦发；快照语义同 role/archived（连接期间定死）。
+  canWrite: boolean;
   lastSeen: number;
   // 同名 serve 跨机租约（#99）：本连接是否 claim 过 serve 租约（是一条 serve runner）。
   serveCandidate?: boolean;
@@ -114,6 +117,8 @@ interface Identity {
   tokenHash: string;
   collabRole?: CollaborationRole;
   collabRoleSource?: CollaborationRoleSource;
+  // #381：public_watch 写门信号（worker 权威）。缺省/false 且频道为 public_watch → handleSend 拒发。
+  canWrite?: boolean;
 }
 
 interface WebhookDeliveryResult {
@@ -1427,6 +1432,7 @@ export class ChannelDO extends Server<Env> {
       collabRole: parseCollaborationRole(h.get("x-ap-collab-role") ?? undefined) ?? undefined,
       collabRoleSource: parseRoleSource(h.get("x-ap-role-source") ?? undefined) ?? undefined,
       archived: h.get("x-ap-archived") === "1",
+      canWrite: h.get("x-ap-can-write") === "1",
       lastSeen: Date.now(),
     };
     connection.setState(state);
@@ -1611,6 +1617,7 @@ export class ChannelDO extends Server<Env> {
           tokenHash: st.tokenHash,
           collabRole: st.collabRole,
           collabRoleSource: st.collabRoleSource,
+          canWrite: st.canWrite,
         },
         send,
         { countRate: false, sessionId: connection.id },
@@ -2128,6 +2135,12 @@ export class ChannelDO extends Server<Env> {
     }
     const decisionMode = h.get("x-ap-decision-mode");
     if (decisionMode === "approval" || decisionMode === "unattended") this.setMeta("decision_mode", decisionMode);
+    // #381：缓存频道可见性，供 handleSend 判 public_watch 写门。缺失/非法值不覆盖已缓存值
+    // （旧路径不带此头时保留旧值；PUT visibility 会经 /internal/init 权威刷新）。
+    const visibility = h.get("x-ap-visibility");
+    if (visibility === "public" || visibility === "private" || visibility === "public_watch") {
+      this.setMeta("visibility", visibility);
+    }
     // loop guard：权威推送随意改；顺带快照只在从未缓存 enabled 时播种，不回滚
     if (authoritative || this.getMeta("loop_guard_enabled") === null) {
       const loopGuardEnabled = h.get("x-ap-loop-guard-enabled");
@@ -2878,6 +2891,7 @@ export class ChannelDO extends Server<Env> {
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
         collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
         collabRoleSource: parseRoleSource(request.headers.get("x-ap-role-source") ?? undefined) ?? undefined,
+        canWrite: request.headers.get("x-ap-can-write") === "1",
       };
       if (this.isArchived()) {
         return Response.json({ error: { code: "archived", message: "channel is archived" } }, { status: 410 });
@@ -3028,6 +3042,7 @@ export class ChannelDO extends Server<Env> {
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
         collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
         collabRoleSource: parseRoleSource(request.headers.get("x-ap-role-source") ?? undefined) ?? undefined,
+        canWrite: request.headers.get("x-ap-can-write") === "1",
       };
       if (this.isArchived()) {
         return Response.json({ error: { code: "archived", message: "channel is archived" } }, { status: 410 });
@@ -3130,6 +3145,7 @@ export class ChannelDO extends Server<Env> {
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
         collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
         collabRoleSource: parseRoleSource(request.headers.get("x-ap-role-source") ?? undefined) ?? undefined,
+        canWrite: request.headers.get("x-ap-can-write") === "1",
       };
       // moderator 由 worker 层（isChannelModerator）算好后转发；DO 只信这一位。
       const isModerator = request.headers.get("x-ap-moderator") === "1";
@@ -3326,6 +3342,7 @@ export class ChannelDO extends Server<Env> {
         tokenHash: request.headers.get("x-ap-token-hash") ?? "",
         collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
         collabRoleSource: parseRoleSource(request.headers.get("x-ap-role-source") ?? undefined) ?? undefined,
+        canWrite: request.headers.get("x-ap-can-write") === "1",
       };
       let raw: unknown;
       try {
@@ -3647,6 +3664,16 @@ export class ChannelDO extends Server<Env> {
     }
     if (identity.role === "readonly") {
       return { ok: false, code: "unauthorized", message: "readonly token cannot send" };
+    }
+    // #381 public_watch 参与门：任意人可观看（读），但发送需成员/被邀请。可见性由 worker 经 x-ap-visibility
+    // 权威缓存到 meta；能否写由 worker（持 D1 成员表）经 x-ap-can-write 传入。仅 public_watch 频道据此拦发，
+    // public/private 忽略此位（对现有频道零行为变化）。fail-closed：public_watch 下缺写门信号即拒。
+    if (this.getMeta("visibility") === "public_watch" && identity.canWrite !== true) {
+      return {
+        ok: false,
+        code: "unauthorized",
+        message: "this channel is watch-only for non-members; sending requires membership or an invite",
+      };
     }
     if (!(await this.isTokenActive(identity.tokenHash))) {
       return { ok: false, code: "unauthorized", message: "invalid or revoked token" };

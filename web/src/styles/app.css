@@ -3047,8 +3047,24 @@
   border-radius: 0;
 }
 .vis-badge--public { background: var(--d-yellow); color: var(--d-ink); }
+.vis-badge--public_watch { background: var(--d-green, var(--d-yellow)); color: var(--d-ink); }
 .vis-badge--private { background: var(--d-ink); color: var(--t-panel); }
 .vis-btn { font-size: 12.5px; }
+/* #381 三档访问选择器 */
+.vis-seg { display: inline-flex; border: 1.6px solid var(--d-ink); border-radius: 0; overflow: hidden; }
+.vis-seg-btn {
+  font-size: 12px;
+  padding: 3px 8px;
+  background: var(--t-panel);
+  color: var(--d-ink);
+  border: 0;
+  border-right: 1.6px solid var(--d-ink);
+  cursor: pointer;
+}
+.vis-seg-btn:last-child { border-right: 0; }
+.vis-seg-btn.is-on { background: var(--d-ink); color: var(--t-panel); }
+.vis-seg-btn:disabled:not(.is-on) { opacity: 0.55; cursor: default; }
+.vis-help { font-size: 11.5px; color: var(--t-dim); flex-basis: 100%; margin: 2px 0 0; }
 
 /* ---- 小图雪碧图（app 运行界面，替代散落 emoji/符号） ---- */
 .ap-sprite {

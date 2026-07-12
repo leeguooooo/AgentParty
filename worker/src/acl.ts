@@ -43,7 +43,11 @@ function legacyAdminAppliesTo(identity: AclIdentity, channel: ChannelAcl): boole
 //   ⑥ 成员规则 → principal.account ∈ channel_members(slug)
 // 写权限在此之上再叠加现有规则（readonly 不能发），不在本函数内判断。
 export function canAccessChannel(identity: AclIdentity, channel: ChannelAcl, isMember: boolean): boolean {
-  if (channel.visibility === "public") return true;
+  // #381：public 与 public_watch 的**读门**一致——任何通过鉴权的身份都可进入/观看。
+  // 二者只在**写门**分野：public 任何非只读都可发；public_watch 的发送需成员/被邀请，
+  // 由 worker 的 canParticipateInChannel + DO handleSend 叠加强制，不在本函数内判断。
+  // [范围说明] 「任何人」= 任何通过鉴权的 token；真正的匿名/无 token 读是更大的安全面，本次不做。
+  if (channel.visibility === "public" || channel.visibility === "public_watch") return true;
   if (identity.channel_scope != null) return channel.slug === identity.channel_scope;
   if (legacyAdminAppliesTo(identity, channel)) return true;
   if (identity.role === "readonly") return false;
