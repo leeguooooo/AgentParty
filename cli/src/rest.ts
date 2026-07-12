@@ -1255,6 +1255,27 @@ export async function resetGuard(server: string, token: string, slug: string): P
   });
 }
 
+// #422 频道级备份：拉取合并后的频道存档 JSON（D1 channels 行 + roles/tasks/members + DO 持久表）。
+// moderator-only；原样返回服务端 JSON 交由 CLI 写盘/打印，作为离线备份物。
+export async function exportChannel(server: string, token: string, slug: string): Promise<unknown> {
+  return req(server, `/api/channels/${encodeURIComponent(slug)}/export`, { headers: bearerJson(token) });
+}
+
+// #422 DO↔D1 对账报告：只读比对双写字段，返回 { ok, divergences[], durable_object }。
+export interface ReconcileReport {
+  ok: boolean;
+  checked_at: number;
+  channel: string;
+  divergences: { field: string; d1: unknown; durable_object: unknown }[];
+  durable_object: Record<string, unknown>;
+}
+
+export async function reconcileChannel(server: string, token: string, slug: string): Promise<ReconcileReport> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/reconcile`, {
+    headers: bearerJson(token),
+  })) as ReconcileReport;
+}
+
 // 重置某个 workflow 的 no-progress 熔断（与 loop guard 的 reset-guard 分属两套熔断器）。
 // human-only + moderator/host，服务端 /api/channels/:slug/workflows/:workflow_id/reset-guard 强制。
 export async function resetWorkflowGuard(

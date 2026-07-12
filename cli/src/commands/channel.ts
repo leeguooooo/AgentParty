@@ -7,8 +7,10 @@ import {
   archiveChannel,
   clearChannelRole,
   createChannel,
+  exportChannel,
   getLoopGuard,
   handleRestError,
+  reconcileChannel,
   inviteProjectAgent,
   fetchChannelPerms,
   kickParticipant,
@@ -32,6 +34,7 @@ import {
   type HumanChannelListPolicy,
   type HumanChannelPermPolicy,
 } from "../rest";
+import { writeFileSync } from "node:fs";
 import { isName, isSlug } from "../validation";
 
 const CHANNEL_FLAGS = [
@@ -53,6 +56,7 @@ const CHANNEL_FLAGS = [
   "members-list-agents",
   "members-agent",
   "json",
+  "out",
 ];
 // 与 worker/src/do.ts WORKFLOW_ID_RE 及 status --workflow-id 校验保持一致
 const WORKFLOW_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
@@ -91,6 +95,8 @@ const HELP = `usage: party channel create <slug> [--title t] [--temp] [--party] 
        party channel role list [slug]
        party channel role set <name> host|worker|reviewer|observer [slug] [--responsibility text]
        party channel role unset <name> [slug]
+       party channel export <slug> [--out file.json]   dump channel backup (D1 + DO) as JSON
+       party channel reconcile <slug> [--json]          report DO/D1 double-write divergence (exit 1 on drift)
 
 Manage channels.
 
@@ -108,7 +114,8 @@ Options:
   --remove    revoke the channel-scoped token and remove membership when kicking
   --expires d join-link expiry like 7d, 12h, 30m, 60s
   --max-uses n join-link redemption limit
-  --json      output channel permission policy as JSON
+  --json      output channel permission/reconcile result as JSON
+  --out f     write channel export backup to file f (default: stdout)
   --charter-write p
               human charter writers: owner, moderators, or members
   --charter-write-agents p
@@ -188,7 +195,7 @@ export async function run(argv: string[]): Promise<number> {
   }
   const flagError = valueFlagError(
     flags,
-    ["title", "policy", "expires", "max-uses", "responsibility", "charter-write", "charter-write-agents", "members-list", "members-list-agents"],
+    ["title", "policy", "expires", "max-uses", "responsibility", "charter-write", "charter-write-agents", "members-list", "members-list-agents", "out"],
     ["agent", "members-agent"],
   );
   if (flagError !== null) {
@@ -645,8 +652,59 @@ export async function run(argv: string[]): Promise<number> {
         console.error("usage: party channel role list|set|unset");
         return 1;
       }
+      case "export": {
+        // #422 频道级备份：把 D1（channels 行 + roles/tasks/members）+ DO 持久表 dump 成一份 JSON 存档。
+        const slug = resolveChannel(positionals[1]);
+        if (!slug) {
+          console.error("usage: party channel export <slug> [--out file.json]");
+          return 1;
+        }
+        if (!isSlug(slug)) {
+          console.error("slug must match [a-z0-9][a-z0-9-]{0,63}");
+          return 1;
+        }
+        const backup = await exportChannel(cfg.server, cfg.token, slug);
+        const json = JSON.stringify(backup, null, 2);
+        const out = str(flags.out);
+        if (out) {
+          try {
+            writeFileSync(out, json + "\n");
+          } catch (error) {
+            console.error(`failed to write backup to ${out}: ${error instanceof Error ? error.message : String(error)}`);
+            return 1;
+          }
+          console.error(`exported ${slug} backup to ${out}`);
+        } else {
+          console.log(json);
+        }
+        return 0;
+      }
+      case "reconcile": {
+        // #422 DO↔D1 对账：只读比对双写字段，报告分裂项。有分裂时退出码 1（便于 CI 门禁）。
+        const slug = resolveChannel(positionals[1]);
+        if (!slug) {
+          console.error("usage: party channel reconcile <slug> [--json]");
+          return 1;
+        }
+        if (!isSlug(slug)) {
+          console.error("slug must match [a-z0-9][a-z0-9-]{0,63}");
+          return 1;
+        }
+        const report = await reconcileChannel(cfg.server, cfg.token, slug);
+        if (flags.json === true) {
+          console.log(JSON.stringify(report, null, 2));
+        } else if (report.ok) {
+          console.log(`in sync\t${slug}\tno DO/D1 divergence detected`);
+        } else {
+          console.log(`DRIFT DETECTED\t${slug}\t${report.divergences.length} field(s)`);
+          for (const d of report.divergences) {
+            console.log(`  ${d.field}\td1=${JSON.stringify(d.d1)}\tdo=${JSON.stringify(d.durable_object)}`);
+          }
+        }
+        return report.ok ? 0 : 1;
+      }
       default:
-        console.error("usage: party channel create|list|archive|reset-guard|reset-workflow-guard|kick|invite-agent|gate|visibility|members|perms|join-link|leave|role");
+        console.error("usage: party channel create|list|archive|reset-guard|reset-workflow-guard|kick|invite-agent|gate|visibility|members|perms|join-link|leave|role|export|reconcile");
         return 1;
     }
   } catch (e) {

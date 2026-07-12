@@ -3869,6 +3869,100 @@ app.delete("/api/channels/:slug/share-links/:name", async (c) => {
   return c.json({ ok: true });
 });
 
+// #422 频道级导出/备份：把某频道分散在 D1（channels 行 + roles/tasks/members）与 DO（messages/presence/meta
+// 等内建 SQLite 持久表）的关键状态合并成一份可离线存档的 JSON。moderator-only（同 share-links/members 的 ap_ 门）。
+// 与 #421 的按身份 GDPR 导出正交：本端点按频道全量、面向容灾备份，不做 per-identity 脱敏。
+app.get("/api/channels/:slug/export", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only channel moderators can export a channel backup"), 403);
+  }
+  const doRes = await fetchChannelDO(
+    c.env,
+    slug,
+    new Request("https://do/internal/export", { headers: { "x-partykit-room": slug } }),
+  );
+  if (!doRes.ok) return c.json(errorBody("unavailable", "channel state export failed"), 503);
+  const doDump = (await doRes.json().catch(() => null)) as {
+    exported_at: number; row_counts: Record<string, number>; tables: Record<string, unknown[]>;
+  } | null;
+  if (doDump === null) return c.json(errorBody("unavailable", "channel state export returned invalid JSON"), 503);
+  const [roles, tasks, members] = await Promise.all([
+    c.env.DB.prepare("SELECT * FROM channel_roles WHERE channel_slug = ? ORDER BY agent_name").bind(slug).all(),
+    c.env.DB.prepare("SELECT * FROM channel_tasks WHERE channel_slug = ? ORDER BY id").bind(slug).all(),
+    c.env.DB.prepare("SELECT * FROM channel_members WHERE channel_slug = ? ORDER BY account").bind(slug).all(),
+  ]);
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.export",
+    resource: `channel/${slug}`,
+    channel: slug,
+  });
+  return c.json({
+    backup_version: 1,
+    exported_at: Date.now(),
+    channel,
+    d1: {
+      channel_roles: roles.results ?? [],
+      channel_tasks: tasks.results ?? [],
+      channel_members: members.results ?? [],
+    },
+    durable_object: doDump,
+  });
+});
+
+// #422 DO↔D1 对账：只读校验双写字段是否一致，报告分裂项，不做修复（先给对账手段，修复留 follow-up）。
+// 逐字段比对 D1 channels 行与 DO 缓存的 meta 快照。DO meta 为懒缓存：未物化的配置字段（null）跳过，
+// 不误报为分裂；archived 恒有真值故始终比对——D1 写成功但 DO 归档 alarm 未跑的分裂即从此处显形。
+app.get("/api/channels/:slug/reconcile", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only channel moderators can reconcile a channel"), 403);
+  }
+  const doRes = await fetchChannelDO(
+    c.env,
+    slug,
+    new Request("https://do/internal/reconcile-state", { headers: { "x-partykit-room": slug } }),
+  );
+  if (!doRes.ok) return c.json(errorBody("unavailable", "channel reconcile-state fetch failed"), 503);
+  const state = (await doRes.json()) as Record<string, unknown>;
+  const divergences: { field: string; d1: unknown; durable_object: unknown }[] = [];
+  const flag = (field: string, d1: unknown, dobj: unknown) => divergences.push({ field, d1, durable_object: dobj });
+  // archived：D1 有 archived_at ⇔ DO isArchived。恒比对（DO 缺省 false 与 D1 null 一致，健康频道不误报）。
+  const d1Archived = channel.archived_at != null;
+  if (d1Archived !== (state.archived === true)) flag("archived", d1Archived, state.archived === true);
+  // 配置字段：DO 懒缓存，未物化（null）则跳过；两侧都有具体值且不同才判分裂。
+  const cmp = (field: string, d1: unknown, dobj: unknown) => {
+    if (dobj === null || dobj === undefined) return; // DO 尚未物化，非分裂
+    if (String(d1) !== String(dobj)) flag(field, d1, dobj);
+  };
+  cmp("mode", channel.mode, state.mode);
+  cmp("kind", channel.kind, state.ckind);
+  cmp("visibility", channel.visibility, state.visibility);
+  cmp("completion_gate", channel.completion_gate, state.completion_gate);
+  cmp("completion_review_policy", channel.completion_review_policy, state.completion_review_policy);
+  cmp("decision_mode", channel.decision_mode, state.decision_mode);
+  cmp("loop_guard_enabled", channel.loop_guard_enabled, state.loop_guard_enabled);
+  cmp("loop_guard_limit", channel.loop_guard_limit, state.loop_guard_limit);
+  cmp("workflow_guard_enabled", channel.workflow_guard_enabled, state.workflow_guard_enabled);
+  cmp("workflow_guard_limit", channel.workflow_guard_limit, state.workflow_guard_limit);
+  // charter_rev：单调，DO 只前进不后退；DO 落后即分裂（D1 权威更新未随 channelHeaders 抵达 DO）。
+  cmp("charter_rev", channel.charter_rev, state.charter_rev);
+  return c.json({
+    ok: divergences.length === 0,
+    checked_at: Date.now(),
+    channel: slug,
+    divergences,
+    durable_object: state,
+  });
+});
+
 app.post("/api/channels/:slug/join-requests", async (c) => {
   const identity = c.get("identity");
   if (identity.role !== "human" || identity.account == null) {

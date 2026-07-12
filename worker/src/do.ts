@@ -2812,6 +2812,47 @@ export class ChannelDO extends Server<Env> {
         earliest_ts: row.earliest_ts === null || row.earliest_ts === undefined ? null : Number(row.earliest_ts),
       });
     }
+    if (url.pathname === "/internal/export" && request.method === "GET") {
+      // #422 频道级备份：把 DO 内建 SQLite 的持久表整表 dump 成 JSON，作为离线存档 = DO 的备份物
+      //（D1 有 time-travel 兜底，DO 侧此前无等价备份）。跳过纯运行期表（速率窗口、webhook 重试队列/死信、
+      // 唤醒投递账本）——它们是瞬时状态，不属于需要归档的频道数据，且会让备份无谓膨胀。
+      const ephemeral = new Set(["rate", "webhook_queue", "webhook_dead_letters", "wake_delivery_ledger"]);
+      const tableRows = this.ctx.storage.sql
+        .exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'")
+        .toArray();
+      const tables: Record<string, unknown[]> = {};
+      const rowCounts: Record<string, number> = {};
+      for (const t of tableRows) {
+        const name = String(t.name);
+        if (ephemeral.has(name)) continue;
+        // 表名来自 sqlite_master（无外部输入），拼接安全；无法参数化标识符故直接内插。
+        const rows = this.ctx.storage.sql.exec(`SELECT * FROM "${name}"`).toArray();
+        tables[name] = rows;
+        rowCounts[name] = rows.length;
+      }
+      return Response.json({ exported_at: Date.now(), row_counts: rowCounts, tables });
+    }
+    if (url.pathname === "/internal/reconcile-state" && request.method === "GET") {
+      // #422 对账：暴露 DO 侧对「与 D1 双写字段」的当前缓存值，供 worker 与 D1 channels 行逐字段比对。
+      // meta 是懒缓存（standing 频道创建时不 push /internal/init，首条消息/guard/可见性变更才落）——
+      // 故未落的字段返回 null，由 worker 侧解释为「DO 尚未物化」而非分裂。archived 恒有真值（缺省 false）。
+      const msgCount = this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM messages").one();
+      return Response.json({
+        archived: this.isArchived(),
+        mode: this.getMeta("mode"),
+        ckind: this.getMeta("ckind"),
+        visibility: this.getMeta("visibility"),
+        completion_gate: this.getMeta("completion_gate"),
+        completion_review_policy: this.getMeta("completion_review_policy"),
+        decision_mode: this.getMeta("decision_mode"),
+        loop_guard_enabled: this.getMeta("loop_guard_enabled"),
+        loop_guard_limit: this.getMeta("loop_guard_limit"),
+        workflow_guard_enabled: this.getMeta("workflow_guard_enabled"),
+        workflow_guard_limit: this.getMeta("workflow_guard_limit"),
+        charter_rev: this.charterRev(),
+        message_count: Number(msgCount.n ?? 0),
+      });
+    }
     if (url.pathname === "/internal/system-status" && request.method === "POST") {
       const body = (await request.json().catch(() => null)) as { note?: unknown; ts?: unknown; state?: unknown } | null;
       const note = typeof body?.note === "string" ? body.note : "";
