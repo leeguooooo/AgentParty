@@ -82,6 +82,7 @@ import {
 } from "../lib/filters";
 import { isOwnMention, nextMentionBadgeCount, shouldMarkSeen, shouldNotify, shouldToast } from "../lib/notify";
 import { historyFallbackRecovered } from "../lib/historyRecovery";
+import { isNearBottom, pinToBottom } from "../lib/scrollPin";
 import { summarizeReplyPreview } from "../lib/replyPreview";
 import { fmtTime } from "../lib/time";
 import { groupTeamMessages, summarizeTeams, type TeamMessageThread, type TeamSummary } from "../lib/teams";
@@ -2743,9 +2744,17 @@ export function ChannelPage({
     },
     [shareMode],
   );
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = streamRef.current;
-    if (el !== null && stickBottom.current) el.scrollTop = el.scrollHeight;
+    if (el !== null) pinToBottom(el, stickBottom.current);
+    const frame = window.requestAnimationFrame(() => {
+      const current = streamRef.current;
+      if (current !== null) pinToBottom(current, stickBottom.current);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [lastSeq]);
+
+  useEffect(() => {
     if (shouldMarkSeen(document.hidden, stickBottom.current)) sendSeen(lastSeq);
     // 贴底时收窄消息窗口：DOM 不挂几千条；被丢弃的最老页上翻会重新拉回
     if (stickBottom.current && state.messages.length > MESSAGE_CAP + PAGE_SIZE) {
@@ -2755,6 +2764,19 @@ export function ChannelPage({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSeq]);
+
+  useEffect(() => {
+    const el = streamRef.current;
+    if (el === null) return;
+    const repin = () => pinToBottom(el, stickBottom.current);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(repin);
+    observer?.observe(el);
+    el.addEventListener("load", repin, true);
+    return () => {
+      observer?.disconnect();
+      el.removeEventListener("load", repin, true);
+    };
+  }, []);
 
   // 当前频道已加载窗口里所有 @我的确定性通知 id：聚焦时据此精确清掉本频道在通知中心的
   // 旧 @提醒，绝不误删其他频道的（issue #399 / CodeRabbit #401）。用 ref 供 markVisible 读最新值。
@@ -2783,7 +2805,7 @@ export function ChannelPage({
       desktopMentionBadgeRef.current = 0;
       void setDesktopBadge(0);
     };
-  }, [sendSeen]);
+  }, [sendSeen, slug]);
 
   // prepend 老页后的 scroll anchoring：绘制前把 scrollTop 平移新增高度，视口纹丝不动
   const firstSeq = state.messages.length > 0 ? state.messages[0]!.seq : 0;
@@ -2848,7 +2870,7 @@ export function ChannelPage({
   const onScroll = useCallback(() => {
     const el = streamRef.current;
     if (el === null) return;
-    stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+    stickBottom.current = isNearBottom(el);
     if (stickBottom.current) sendSeen(lastSeqRef.current); // 滚到底＝看到了最新，回执已读
     if (el.scrollTop < TOP_LOAD_PX) loadOlder();
   }, [loadOlder, sendSeen]);
