@@ -1494,6 +1494,13 @@ export async function runServe(o: ServeOptions): Promise<number> {
   // 因此也只有它们需要 runServe 在收尾时补一条「busy=false 空闲」把 busy 清干净。注入 runCommand
   // 的测试、以及 --cmd 裸执行器（自管 presence）不参与，避免覆盖它们自己的收尾状态。
   const reportsBusy = o.runCommand === undefined && (o.builtinRunner !== undefined || o.sdkRunner !== undefined);
+  // runner_started 审计标签（#228）：标明是哪种 runner 启动，写进落 history 的审计 status。
+  // sdk / builtin / custom(o.cmd 或注入的 runCommand) 三类统一在下方 wrap 点用它发一条启动证据。
+  const runnerKind = o.sdkRunner
+    ? "codex-sdk"
+    : o.builtinRunner
+      ? `builtin-${o.builtinRunner.harness}`
+      : "custom";
   // 已自报 busy、尚未补发空闲清除。一次 busy→idle 转场只补一条，不逐 tick 刷。
   let busyReported = false;
   let upgraded = false;
@@ -1772,6 +1779,24 @@ export async function runServe(o: ServeOptions): Promise<number> {
         };
         // t=0 立刻发一拍「started」：不必等第一个间隔，频道/本机马上就能看到「已开始处理 seq=X」。
         emitTaskBeat(true, taskStartedAt);
+        // runner_started 审计（#228）：上面那拍是 presence-only 的 heartbeat——**不落 history、任务结束即清**，
+        // 任务跑完后频道历史里没有任何「这个 runner 曾为 seq=X 启动过」的证据。这里在 run() 之前补发一条
+        // **落 history** 的 working status，作为可审计的启动记录。三种 runner（builtin / sdk / custom o.cmd）
+        // 统一在此 wrap 点覆盖——尤其 custom o.cmd 此前只有 presence 心跳、零 history 证据。
+        // 与「结束」（runner 自己的回帖 / 排空后的 idle waiting 帧）和「失败」（blocked 帧）区分：note 以
+        // 「runner started for seq X」起头，带 trigger_seq 与 runner 类型。不置 busy——busy 生命周期仍由
+        // builtin/sdk 的 wake-ack 帧与下方 idle 清除各管各的，这条纯审计不掺和（custom 不参与 busy）。
+        // best-effort：审计发不出去不阻塞唤醒（主职是把 @ 送进模型），留痕即可。
+        try {
+          await (o.post ?? postMessage)(o.server, o.token, o.channel, {
+            kind: "status",
+            state: "working",
+            note: `runner started for seq ${frame.seq}: ${self} runner=${runnerKind}`,
+            mentions: [],
+          });
+        } catch (e) {
+          out(`  runner_started 审计发送失败（不影响送达）: ${errText(e)}`);
+        }
         const taskBeat: ReturnType<typeof setInterval> = setInterval(() => emitTaskBeat(true, nowFn()), heartbeatIntervalMs);
         if (typeof taskBeat.unref === "function") taskBeat.unref();
         try {
