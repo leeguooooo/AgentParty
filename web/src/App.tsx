@@ -59,6 +59,11 @@ import {
   type WebSession,
 } from "./lib/oidc";
 import { withRefreshLock } from "./lib/refreshLock";
+import {
+  clearPendingPairing,
+  readPendingPairing,
+  rememberPendingPairing,
+} from "./lib/pairingPending";
 import { gateSession, jwtSub } from "./lib/sessionIdentity";
 import {
   classifyDesktopRestoreFailure,
@@ -105,10 +110,6 @@ import "./i18n/strings/App";
 
 // 邀请链接兑换：未登录时跳 OIDC 会离开页面，用 sessionStorage 把 code 带过登录、回来接着兑换。
 const PENDING_JOIN_KEY = "ap_pending_join";
-const PENDING_PAIR_CODE_KEY = "ap_pending_pair_code";
-const PENDING_PAIR_ROUTE_KEY = "ap_pending_pair_route";
-const PENDING_PAIR_SERVER_KEY = "ap_pending_pair_server";
-
 function meTitle(me: MeInfo): string {
   const parts = [`token: ${me.name}`, `kind: ${me.kind}`, `role: ${me.role}`];
   if (me.display_name !== null) parts.push(`display: ${me.display_name}`);
@@ -175,17 +176,16 @@ export function App() {
   // 命中 /auth/callback 时先挂起，避免闪一下登录闸；换 token 成功/失败后落定
   const [oidcPending, setOidcPending] = useState<boolean>(() => isCallbackPath());
   const [initialPairCode] = useState<string | null>(() => {
-    let stored = sessionStorage.getItem(PENDING_PAIR_CODE_KEY);
+    let stored = readPendingPairing(sessionStorage).code;
     if (matchPair(location.pathname)) {
       const pairOrigin = normalizeServerOrigin(location.origin);
-      if (pairOrigin !== null) sessionStorage.setItem(PENDING_PAIR_SERVER_KEY, pairOrigin);
       const consumed = extractPairingCodeAndSanitizeUrl(location.href);
       history.replaceState(null, "", consumed.sanitizedPath);
-      sessionStorage.setItem(PENDING_PAIR_ROUTE_KEY, "1");
-      if (consumed.userCode !== null) {
-        stored = consumed.userCode;
-        sessionStorage.setItem(PENDING_PAIR_CODE_KEY, consumed.userCode);
-      }
+      const pending = rememberPendingPairing(sessionStorage, {
+        ...(pairOrigin === null ? {} : { serverOrigin: pairOrigin }),
+        ...(consumed.userCode === null ? {} : { code: consumed.userCode }),
+      });
+      stored = pending.code;
     }
     return stored;
   });
@@ -586,7 +586,7 @@ export function App() {
   const callbackHandled = useRef(false);
   useEffect(() => {
     let alive = true;
-    const pendingPairOrigin = normalizeServerOrigin(sessionStorage.getItem(PENDING_PAIR_SERVER_KEY) ?? "") ?? undefined;
+    const pendingPairOrigin = readPendingPairing(sessionStorage).serverOrigin ?? undefined;
     const configOrigin = !desktop && (matchPair(location.pathname) || isCallbackPath())
       ? pendingPairOrigin
       : undefined;
@@ -624,7 +624,7 @@ export function App() {
           setOidcPending(false);
           // 若登录前是去兑换邀请链接，回到 /join/<code> 让下面的 effect（此时已有 token）完成加入
           const pendingJoin = sessionStorage.getItem(PENDING_JOIN_KEY);
-          const pendingPair = sessionStorage.getItem(PENDING_PAIR_ROUTE_KEY) === "1";
+          const pendingPair = readPendingPairing(sessionStorage).routePending;
           replace(pendingPair ? "/pair" : pendingJoin ? `/join/${pendingJoin}` : "/");
         })
         .catch((err: unknown) => {
@@ -772,13 +772,6 @@ export function App() {
       window.clearInterval(timer);
     };
   }, [desktop, path, reloadChannels, token]);
-
-  useEffect(() => {
-    if (token === null || !matchPair(path)) return;
-    sessionStorage.removeItem(PENDING_PAIR_ROUTE_KEY);
-    sessionStorage.removeItem(PENDING_PAIR_CODE_KEY);
-    sessionStorage.removeItem(PENDING_PAIR_SERVER_KEY);
-  }, [path, token]);
 
   const signOut = async () => {
     if (desktop) {
@@ -975,7 +968,7 @@ export function App() {
         providers={authProviders}
         onSso={(provider) => {
           setAuthError(null);
-          if (matchPair(path)) sessionStorage.setItem(PENDING_PAIR_ROUTE_KEY, "1");
+          if (matchPair(path)) rememberPendingPairing(sessionStorage, {});
           beginLogin(provider).catch(() => setAuthError(t("App.error.startSignInFailed")));
         }}
         onSubmit={(t) => {
@@ -991,12 +984,25 @@ export function App() {
   }
 
   if (!desktop && matchPair(path)) {
-    const pairServerOrigin = normalizeServerOrigin(sessionStorage.getItem(PENDING_PAIR_SERVER_KEY) ?? "")
+    const pairServerOrigin = readPendingPairing(sessionStorage).serverOrigin
       ?? normalizeServerOrigin(location.origin);
     if (pairServerOrigin === null) {
       return <main className="gate"><p className="banner banner--red" role="alert">{t("Pair.inspect.failed")}</p></main>;
     }
-    return <PairPage serverOrigin={pairServerOrigin} token={token} initialCode={initialPairCode} />;
+    return (
+      <PairPage
+        serverOrigin={pairServerOrigin}
+        token={token}
+        initialCode={readPendingPairing(sessionStorage).code ?? initialPairCode}
+        onRequireHuman={({ code }) => {
+          rememberPendingPairing(sessionStorage, { code, serverOrigin: pairServerOrigin });
+          clearToken();
+          setAuthError(null);
+          setToken(null);
+        }}
+        onDecisionComplete={() => clearPendingPairing(sessionStorage)}
+      />
+    );
   }
 
   const slug = matchChannel(path);

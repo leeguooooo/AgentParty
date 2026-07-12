@@ -7,6 +7,7 @@ import {
   decideDesktopPairing,
   extractPairingCodeAndSanitizeUrl,
   inspectDesktopPairing,
+  PairHumanRequiredAction,
   PairingReview,
   PairPage,
   type PairingInspection,
@@ -91,6 +92,7 @@ describe("PairPage", () => {
       "Pair.title",
       "Pair.code.label",
       "Pair.inspect",
+      "Pair.inspect.useHuman",
       "Pair.approve",
       "Pair.deny",
       "Pair.device.name",
@@ -127,5 +129,15 @@ describe("PairPage", () => {
     expect(html).toContain("Approve this device");
     expect(html).toContain("Reject");
     expect(html).toContain('class="d-btn pair-deny"');
+  });
+
+  test("renders an explicit human-account switch for a rejected non-human token", () => {
+    const html = renderToStaticMarkup(
+      <LocaleProvider>
+        <PairHumanRequiredAction code="AB12C-DE34F" onRequireHuman={() => {}} />
+      </LocaleProvider>,
+    );
+    expect(html).toContain("Switch to a human account");
+    expect(html).toContain('class="d-btn pair-human-login"');
   });
 });
