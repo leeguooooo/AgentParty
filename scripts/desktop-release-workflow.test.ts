@@ -224,6 +224,8 @@ describe("desktop release workflow", () => {
 
     expect(desktopDocs).toContain("Unnotarized macOS preview");
     expect(desktopDocs).toContain("正式下载入口会在这些门禁真实通过后开放");
+    expect(desktopDocs).toContain("常驻期间每小时复查一次");
+    expect(desktopDocs).toContain("A newly available version opens the update panel automatically");
   });
 
   test("uses commands available on GitHub macOS runners for certificate import", () => {
