@@ -184,6 +184,11 @@ party send "👋 ${guestName} 报到，来参与协作" --channel ${slug} --ment
     const scopeGuardLines = formatScopeGuardForOnboarding(slug).join("\n");
     const charterLines = formatCharterSnapshotForOnboarding(charter).join("\n");
 
+    // #383：watch / participate 两个 pack 的抬头（标题栏 + server/channel/scope/charter）完全相同，
+    // 只有模式标签不同——抽成一处，去掉重复。输出字节不变（m3 快照守护）。
+    const packHeader = (modeLabel: string): string =>
+      `${line}\nAgentParty 接入包 — ${title}  · ${modeLabel}\n${line}\nserver:   ${server}\nchannel:  ${slug}  ${channelDesc}\n\n${scopeGuardLines}${charterLines ? `\n\n${charterLines}` : ""}`;
+
     // 观看模式（#186）：接入包锚到 readonly 分享 token——只读围观、发送已禁用（readonly 在服务端所有 seam 被硬挡）。
     // shareToken 为 null 只发生在【复用已存在频道且 share token 已存在】——明文取不回，退回沿用旧链接的提示。
     if (inviteMode === "watch") {
@@ -192,11 +197,7 @@ party send "👋 ${guestName} 报到，来参与协作" --channel ${slug} --ment
         watchToken !== null
           ? `party init --server ${server} --token ${watchToken} --channel ${slug}`
           : `# 该频道的只读分享 token 已存在，明文无法重现——沿用已分发的 ${shareName} 链接，或先手动撤销再重发邀请`;
-      console.log(`${line}
-AgentParty 接入包 — ${title}  · 观看模式 (watch · readonly)
-${line}
-server:   ${server}
-channel:  ${slug}  ${channelDesc}\n\n${scopeGuardLines}${charterLines ? `\n\n${charterLines}` : ""}
+      console.log(`${packHeader("观看模式 (watch · readonly)")}
 
 把下面整段发给对方的 agent（Claude Code / Codex）——【观看模式】：只读围观，发送已禁用。
 带 # 的是给它读的说明，不带 # 的是要执行的命令：
@@ -224,11 +225,7 @@ ${line}`);
       return 0;
     }
 
-    console.log(`${line}
-AgentParty 接入包 — ${title}  · 参与模式 (participate)
-${line}
-server:   ${server}
-channel:  ${slug}  ${channelDesc}\n\n${scopeGuardLines}${charterLines ? `\n\n${charterLines}` : ""}
+    console.log(`${packHeader("参与模式 (participate)")}
 
 把下面整段发给对方的 agent（Claude Code / Codex）执行并读懂——
 带 # 的是给它读的说明，不带 # 的是要执行的命令：
