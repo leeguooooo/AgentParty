@@ -1,0 +1,47 @@
+# PR Agent（qwen-max，非阻塞）——自动 review + 代码建议，随时可挂不拦合并。
+# 模型走自建 OpenAI 兼容端点 ai.leeguoo.com；key/base 存 GitHub Secret，不进代码。
+# 同仓库分支 PR 才拿得到 secret；fork PR 无 secret 会自动 no-op（安全，不用 pull_request_target）。
+name: PR Agent (qwen · non-blocking)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr_agent:
+    # 只处理 PR（含 PR 评论里的 /review /improve /ask 命令），跳过纯 issue 评论
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: PR Agent (qwen-max via ai.leeguoo.com)
+        continue-on-error: true   # 端点/模型随时会挂——绝不因此让 PR 变红或阻断合并
+        uses: docker://pragent/pr-agent:0.39.0-github_action
+        env:
+          # LLM：自建 OpenAI 兼容端点 + qwen-max（litellm 需 openai/ 前缀路由）
+          OPENAI_KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
+          OPENAI__KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
+          OPENAI__API_BASE: ${{ secrets.PR_AGENT_OPENAI_API_BASE }}
+          CONFIG__MODEL: "openai/qwen-max"
+          CONFIG__FALLBACK_MODELS: '["openai/qwen-max"]'
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "32000"
+          CONFIG__RESPONSE_LANGUAGE: "zh-cn"
+          CONFIG__PUBLISH_OUTPUT_PROGRESS: "false"
+          # 只自动跑 review + 代码建议；描述我们自己写得够详，关掉省 token
+          GITHUB_ACTION_CONFIG__AUTO_REVIEW: "true"
+          GITHUB_ACTION_CONFIG__AUTO_IMPROVE: "true"
+          GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: "false"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
