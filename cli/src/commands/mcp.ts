@@ -518,9 +518,15 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         parent_id: z.number().int().positive().optional(),
         anchor_seqs: z.array(z.number().int().positive()).optional(),
         workflow_id: z.string().optional(),
+        external_ref: z
+          .string()
+          .optional()
+          .describe(
+            "Idempotency key (e.g. gh:owner/repo#96). Creating with a ref that already exists in the channel returns the existing task instead of a duplicate — safe to rerun an issue→task sync (#141).",
+          ),
       },
     },
-    async ({ channel, title, desc, state, assignee_name, assignee_kind, priority, labels, parent_id, anchor_seqs, workflow_id }) => {
+    async ({ channel, title, desc, state, assignee_name, assignee_kind, priority, labels, parent_id, anchor_seqs, workflow_id, external_ref }) => {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
@@ -536,6 +542,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           ...(parent_id !== undefined ? { parent_id } : {}),
           ...(anchor_seqs !== undefined && anchor_seqs.length > 0 ? { anchor_seqs } : {}),
           ...(workflow_id !== undefined ? { workflow_id } : {}),
+          ...(external_ref !== undefined ? { external_ref } : {}),
         });
         return ok({ type: "task_create", channel: resolved, task });
       } catch (e) {
