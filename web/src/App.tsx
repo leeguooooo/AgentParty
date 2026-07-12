@@ -124,7 +124,10 @@ export function App() {
   const [desktopLogoutPending, setDesktopLogoutPending] = useState(false);
   const [channels, setChannels] = useState<ChannelInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
+  const channelReloadGeneration = useRef(0);
+  const channelReloadInFlight = useRef<{ key: string; promise: Promise<void> } | null>(null);
   const [me, setMe] = useState<MeInfo | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
   const [oidc, setOidc] = useState<OidcConfig | null>(null);
   const [authProviders, setAuthProviders] = useState<AuthProviderConfig[]>([]);
   const [authProvidersResolved, setAuthProvidersResolved] = useState(false);
@@ -517,46 +520,36 @@ export function App() {
     };
   }, [desktop, oidc, token, doRefresh, hardLogout, t]);
 
-  useEffect(() => {
-    if (token === null || (!desktop && matchPair(path))) return;
-    let alive = true;
-    // 同身份续期只换 token 字符串（sub 不变），这里不清 channels：清空会连带卸载
-    // ChannelPage、丢草稿和滚动位置。真正换身份 / 换 server 的路径都已在 setToken 前
-    // 显式清空过 channels，这里不清也不会残留旧身份的数据；陈旧响应由下面的 alive
-    // 闭包守卫挡住，不会覆盖新身份的 UI（见本文件其它 setChannels(null) 处的保留）。
+  const reloadChannels = useCallback((): Promise<void> => {
+    if (token === null || (!desktop && matchPair(path))) return Promise.resolve();
+    const key = `${activeOrigin}\n${token}`;
+    if (channelReloadInFlight.current?.key === key) return channelReloadInFlight.current.promise;
+
+    const generation = ++channelReloadGeneration.current;
     setListError(null);
-    listChannels(token)
+    const promise = listChannels(token)
       .then((cs) => {
-        if (!alive) return;
+        if (channelReloadGeneration.current !== generation) return;
         setChannels(cs);
         setListError(null);
       })
       .catch((err: unknown) => {
-        if (!alive) return;
+        if (channelReloadGeneration.current !== generation) return;
         if (err instanceof AuthError) onAuthFailed(t("App.error.tokenInvalid"));
         else setListError(t("App.error.channelsLoadFailed"));
+      })
+      .finally(() => {
+        if (channelReloadInFlight.current?.promise === promise) channelReloadInFlight.current = null;
       });
-    return () => {
-      alive = false;
-    };
+    channelReloadInFlight.current = { key, promise };
+    return promise;
   }, [activeOrigin, desktop, path, token, onAuthFailed, t]);
 
   useEffect(() => {
     if (token === null || (!desktop && matchPair(path))) return;
-    let alive = true;
+    void reloadChannels();
     const refresh = () => {
-      if (document.visibilityState === "hidden") return;
-      listChannels(token)
-        .then((cs) => {
-          if (!alive) return;
-          setChannels(cs);
-          setListError(null);
-        })
-        .catch((err: unknown) => {
-          if (!alive) return;
-          if (err instanceof AuthError) onAuthFailed(t("App.error.tokenInvalid"));
-          else setListError(t("App.error.channelsLoadFailed"));
-        });
+      if (document.visibilityState !== "hidden") void reloadChannels();
     };
     const onVisible = () => {
       if (document.visibilityState === "visible") refresh();
@@ -565,12 +558,13 @@ export function App() {
     document.addEventListener("visibilitychange", onVisible);
     const timer = window.setInterval(refresh, 60_000);
     return () => {
-      alive = false;
+      channelReloadGeneration.current += 1;
+      channelReloadInFlight.current = null;
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", onVisible);
       window.clearInterval(timer);
     };
-  }, [activeOrigin, desktop, path, token, onAuthFailed, t]);
+  }, [desktop, path, reloadChannels, token]);
 
   useEffect(() => {
     if (token === null || !matchPair(path)) return;
@@ -906,6 +900,10 @@ export function App() {
             setMe((prev) => (prev ? { ...prev, handle } : prev));
             setHandleBannerDismissed(true);
           }}
+          onShowOnboarding={() => {
+            setSettingsOpen(false);
+            setGuideOpen(true);
+          }}
           desktopSettings={<DesktopSettings embedded serverOrigin={activeOrigin} />}
         />
       )}
@@ -942,7 +940,13 @@ export function App() {
               onWatch={enterWatchInvite}
             />
           )}
-          <ChannelList channels={channels} active={slug} error={listError} onOpen={openChannel} />
+          <ChannelList
+            channels={channels}
+            active={slug}
+            error={listError}
+            onOpen={openChannel}
+            onRetry={reloadChannels}
+          />
         </aside>
         <main className="app-main">
           {routeNotFound ? (
@@ -955,7 +959,10 @@ export function App() {
             </p>
           ) : slug !== null && channels === null ? (
             <p className="banner banner--red" role="alert">
-              {listError ?? t("App.error.channelsLoadFailed")}
+              <span>{listError ?? t("App.error.channelsLoadFailed")}</span>{" "}
+              <button type="button" className="d-btn channels-retry" onClick={reloadChannels}>
+                {t("App.error.retry")}
+              </button>
             </p>
           ) : unknownChannel ? (
             <p className="banner banner--red" role="alert">
@@ -989,8 +996,8 @@ export function App() {
           )}
         </main>
       </div>
-      {/* 首次进入的 1-2-3-4 引导：自管 localStorage 标记，只首次显示（#146） */}
-      <OnboardingGuide />
+      {/* 首次自动显示仍由组件记忆；设置入口可显式重开（#146 / #357）。 */}
+      <OnboardingGuide forceOpen={guideOpen} onClose={() => setGuideOpen(false)} />
     </div>
   );
 }

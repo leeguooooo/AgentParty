@@ -84,6 +84,8 @@ const TASK_KEYS = [
   "Channel.tasks.error.createRejected",
   "Channel.tasks.error.createFailed",
   "Channel.tasks.rejectPrompt",
+  "Channel.reject.confirm",
+  "Channel.reject.cancel",
 ] as const;
 
 describe("Channel task-panel strings", () => {

@@ -3,12 +3,14 @@ import { useState } from "react";
 import type { ChannelInfo } from "../lib/api";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/Home"; // 复用 "已归档 (N)" key，两处折叠开关文案一致
+import "../i18n/strings/App";
 
 interface Props {
   channels: ChannelInfo[] | null;
   active: string | null;
   error: string | null;
   onOpen(slug: string): void;
+  onRetry?: () => void;
 }
 
 // 分类筛选：全部 / 我创建的（owned）/ 我加入的（member）。只筛 live 段，archived 段独立不受影响。
@@ -81,7 +83,7 @@ function ChannelPill({
   );
 }
 
-export function ChannelList({ channels, active, error, onOpen }: Props) {
+export function ChannelList({ channels, active, error, onOpen, onRetry }: Props) {
   const [showArchived, setShowArchived] = useState(false);
   const [category, setCategory] = useState<ChannelCategory>("all");
   const t = useT();
@@ -108,7 +110,16 @@ export function ChannelList({ channels, active, error, onOpen }: Props) {
     <nav className="side" aria-label="channels">
       <p className="side-label t-mono">{t("Home.channelsLabel")}</p>
       {channels === null && error === null && <p className="side-note t-mono">{t("Home.loading")}</p>}
-      {error !== null && <p className="side-note side-note--err t-mono">{error}</p>}
+      {error !== null && (
+        <p className="side-note side-note--err t-mono">
+          <span>{error}</span>{" "}
+          {onRetry && (
+            <button type="button" className="d-btn channels-retry" onClick={onRetry}>
+              {t("App.error.retry")}
+            </button>
+          )}
+        </p>
+      )}
       {channels !== null && (
         <div className="chan-cat-switch" role="group" aria-label="channel categories">
           {(Object.keys(CATEGORY_LABEL_KEY) as ChannelCategory[]).map((cat) => (

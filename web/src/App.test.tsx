@@ -187,6 +187,7 @@ beforeEach(() => {
 });
 
 test("desktop renders one settings entry and keeps desktop controls in the global panel", async () => {
+  localStorage.setItem("ap_onboarded", "1");
   await act(async () => {
     renderer = create(<LocaleProvider><App /></LocaleProvider>);
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -204,6 +205,15 @@ test("desktop renders one settings entry and keeps desktop controls in the globa
 
   expect(root.findByProps({ id: "desktop-settings-panel" })).toBeTruthy();
   expect(root.findByProps({ className: "desktop-agent" })).toBeTruthy();
+
+  const onboardingButton = root.findAll((node) =>
+    typeof node.props.className === "string" && node.props.className.split(/\s+/).includes("settings-onboarding"),
+  )[0];
+  expect(onboardingButton).toBeTruthy();
+  await act(async () => onboardingButton!.props.onClick());
+
+  expect(root.findAllByProps({ className: "settings-panel" })).toHaveLength(0);
+  expect(root.findByProps({ className: "d-card onboarding-card" })).toBeTruthy();
 });
 
 afterEach(async () => {

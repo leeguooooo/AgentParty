@@ -36,6 +36,7 @@ export function SettingsPanel({
   onClose,
   onLogout,
   onHandleSaved,
+  onShowOnboarding,
   desktopSettings = null,
 }: {
   me: SettingsMe | null;
@@ -43,6 +44,7 @@ export function SettingsPanel({
   onClose: () => void;
   onLogout: (() => void) | null;
   onHandleSaved?: (value: string) => void;
+  onShowOnboarding?: () => void;
   desktopSettings?: ReactNode;
 }) {
   const t = useT();
@@ -129,6 +131,15 @@ export function SettingsPanel({
           </button>
           <p className="settings-hint">{t("App.settings.notify.hint")}</p>
         </section>
+
+        {onShowOnboarding && (
+          <section className="settings-section">
+            <div className="settings-label">{t("App.settings.help")}</div>
+            <button type="button" className="d-btn settings-onboarding" onClick={onShowOnboarding}>
+              {t("App.settings.onboarding")}
+            </button>
+          </section>
+        )}
 
         {desktopSettings}
 

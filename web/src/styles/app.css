@@ -1416,6 +1416,11 @@
   min-width: 0;
   overflow: hidden;
 }
+.presence-popover-more {
+  color: var(--t-dim);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
 .presence-popover .presence-pill {
   width: 100%;
   max-width: 100%;
@@ -2125,6 +2130,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.team-member-detail {
+  flex: 1 0 100%;
+  padding: 4px 7px;
+  border-left: 2px solid var(--t-faint);
+  color: var(--t-dim);
+  font-size: 10.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
 .team-thread {
   min-width: 0;
   border: 1.4px solid var(--t-faint);
@@ -2618,6 +2632,25 @@
   color: var(--t-faint);
   cursor: default;
   font-size: 11px;
+}
+.msg-status-detail {
+  margin: 6px 0 0;
+  padding: 7px 9px;
+  border-left: 2px solid currentColor;
+  color: var(--t-text);
+  background: var(--t-panel2);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.msg-context.msg-context-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  max-width: none;
+  margin-top: 5px;
+  white-space: normal;
 }
 .msg-mention { color: var(--t-accent); }
 .msg-reply { color: var(--t-dim); }
@@ -3396,6 +3429,10 @@
 .channel-panel-body .role-board {
   box-shadow: none;
 }
+.channel-panel-body .charter-body .msg-body {
+  max-height: none;
+  overflow: visible;
+}
 .channel-panel-body .chan-search-panel {
   padding: 0;
 }
@@ -4023,6 +4060,10 @@
   .catchup-items li { grid-template-columns: 1fr; gap: 2px; }
   .agent-filter-head { align-items: flex-start; flex-wrap: wrap; }
   .agent-filter-clear { margin-left: 0; }
+}
+
+@media (hover: none) {
+  .msg-menu-trigger { opacity: 1; }
 }
 
 /* ---- 插话框 ---- */

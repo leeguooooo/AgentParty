@@ -89,7 +89,7 @@ afterEach(() => {
 });
 
 describe("decision_request card (#284)", () => {
-  test("pending approval renders approve/reject buttons that fire the callback", () => {
+  test("pending approval calls approve immediately and collects reject reason inline", () => {
     const calls: Array<{ seq: number; choice: unknown }> = [];
     const root = render(
       baseMsg({ decision_request: { kind: "approval", prompt: "approve this plan?", options: ["approve", "reject"] }, decision_resolution: { state: "pending" } }),
@@ -100,7 +100,25 @@ describe("decision_request card (#284)", () => {
     act(() => buttons[0]!.props.onClick());
     expect(calls).toEqual([{ seq: 7, choice: { action: "approve" } }]);
     act(() => buttons[1]!.props.onClick());
-    expect(calls[1]).toEqual({ seq: 7, choice: { action: "reject" } });
+    expect(calls).toHaveLength(1);
+
+    const reason = root.findByProps({ className: "task-new-desc msg-decision-reject-reason" });
+    act(() => reason.props.onChange({ currentTarget: { value: "missing evidence" } }));
+    const confirm = root.findByProps({ className: "task-action-btn msg-decision-reject-confirm" });
+    act(() => confirm.props.onClick());
+    expect(calls[1]).toEqual({ seq: 7, choice: { action: "reject", reason: "missing evidence" } });
+  });
+
+  test("inline reject can be cancelled without responding", () => {
+    const calls: unknown[] = [];
+    const root = render(
+      baseMsg({ decision_request: { kind: "approval", prompt: "approve?", options: ["approve", "reject"] }, decision_resolution: { state: "pending" } }),
+      { canRespondDecision: true, onDecisionRespond: (...args: unknown[]) => calls.push(args) },
+    );
+    act(() => optionButtons(root)[1]!.props.onClick());
+    act(() => root.findByProps({ className: "task-action-btn msg-decision-reject-cancel" }).props.onClick());
+    expect(root.findAllByProps({ className: "task-new-desc msg-decision-reject-reason" })).toHaveLength(0);
+    expect(calls).toHaveLength(0);
   });
 
   test("pending choice renders one button per custom option", () => {

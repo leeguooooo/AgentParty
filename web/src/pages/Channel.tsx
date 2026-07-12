@@ -1,6 +1,6 @@
 // 频道页：presence 条 + 实时消息流 + 内联错误条幅 + 插话框。
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { buildHostBoard, type Attachment, type ChannelSquad, type CollaborationRole, type HostBoard, type MsgFrame, type PresenceEntry, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentDetailModal } from "../components/AgentDetailModal";
@@ -1293,8 +1293,9 @@ function DecisionPanel({ messages }: { messages: MsgFrame[] }) {
   );
 }
 
-function TeamPanel({ teams }: { teams: TeamSummary[] }) {
+export function TeamPanel({ teams }: { teams: TeamSummary[] }) {
   const t = useT();
+  const [expandedMember, setExpandedMember] = useState<string | null>(null);
   if (teams.length === 0) return null;
 
   return (
@@ -1339,25 +1340,34 @@ function TeamPanel({ teams }: { teams: TeamSummary[] }) {
               <div className="t-mono team-meta">{meta.join(" · ")}</div>
               <div className="team-members">
                 {workerMembers.length === 0 && <span className="t-mono team-member team-member--empty">{t("Channel.team.noWorkers")}</span>}
-                {workerMembers.map((member) => (
-                  <span
-                    key={member.name}
-                    className={"t-mono team-member" + (member.active ? " is-active" : "")}
-                    title={[
-                      t("Channel.team.memberTitle", {
-                        name: member.name,
-                        parent: member.parentAgent,
-                        state: member.state,
-                        residency: member.residency,
-                      }),
-                      member.expiresAt !== null ? t("Channel.team.meta.expires", { time: fmtTime(member.expiresAt) }) : null,
-                      member.lastSeen !== null ? t("Channel.team.meta.seen", { time: fmtTime(member.lastSeen) }) : null,
-                    ].filter((part): part is string => part !== null).join(" · ")}
-                  >
-                    <span className={`d-dot d-dot--${member.active ? member.state : "offline"}`} />
-                    <span>{member.name}</span>
-                  </span>
-                ))}
+                {workerMembers.map((member) => {
+                  const detail = [
+                    t("Channel.team.memberTitle", {
+                      name: member.name,
+                      parent: member.parentAgent,
+                      state: member.state,
+                      residency: member.residency,
+                    }),
+                    member.expiresAt !== null ? t("Channel.team.meta.expires", { time: fmtTime(member.expiresAt) }) : null,
+                    member.lastSeen !== null ? t("Channel.team.meta.seen", { time: fmtTime(member.lastSeen) }) : null,
+                  ].filter((part): part is string => part !== null).join(" · ");
+                  const expanded = expandedMember === member.name;
+                  return (
+                    <Fragment key={member.name}>
+                      <button
+                        type="button"
+                        className={"t-mono team-member" + (member.active ? " is-active" : "")}
+                        title={detail}
+                        aria-expanded={expanded}
+                        onClick={() => setExpandedMember((current) => current === member.name ? null : member.name)}
+                      >
+                        <span className={`d-dot d-dot--${member.active ? member.state : "offline"}`} />
+                        <span>{member.name}</span>
+                      </button>
+                      {expanded && <span className="t-mono team-member-detail">{detail}</span>}
+                    </Fragment>
+                  );
+                })}
               </div>
             </li>
           );
@@ -1516,7 +1526,7 @@ export function TaskLedgerPanel({
   onRefresh: () => void;
   onSetState: (id: number, state: TaskState) => void;
   onAssign: (id: number, name: string, kind: TaskAssigneeKind) => void;
-  onReview: (task: TaskRecord, action: "approve" | "reject") => void;
+  onReview: (task: TaskRecord, action: "approve" | "reject", reason?: string) => void;
   onCreateTask: (input: { title: string; desc: string }) => Promise<boolean>;
   // #271(b)：频道身份（presence/identities），给指派输入框做可检索的 datalist 候选。
   identities?: ChannelIdentity[];
@@ -1528,6 +1538,8 @@ export function TaskLedgerPanel({
   const [composerOpen, setComposerOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [rejectingTaskId, setRejectingTaskId] = useState<number | null>(null);
+  const [rejectDraft, setRejectDraft] = useState("");
   // #271(a)：按受理人筛选看板。"all" 全量，"__unassigned__" 只看未指派。
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   // #271(d)：展开放大——CSS class 切宽度，外层 channel-panel-card 用 :has() 跟随。
@@ -1613,7 +1625,7 @@ export function TaskLedgerPanel({
               <button className="task-action-btn task-action-btn--review" type="button" disabled={disabled || taskBusy} onClick={() => onReview(task, "approve")}>
                 {t("Channel.tasks.action.approve")}
               </button>
-              <button className="task-action-btn" type="button" disabled={disabled || taskBusy} onClick={() => onReview(task, "reject")}>
+              <button className="task-action-btn" type="button" disabled={disabled || taskBusy} aria-expanded={rejectingTaskId === task.id} onClick={() => { setRejectingTaskId(task.id); setRejectDraft(""); }}>
                 {t("Channel.tasks.action.reject")}
               </button>
             </>
@@ -1650,6 +1662,37 @@ export function TaskLedgerPanel({
             </button>
           </form>
         </div>
+        {rejectingTaskId === task.id && (
+          <div className="task-new-form task-reject-form">
+            <textarea
+              className="task-new-desc task-reject-reason"
+              aria-label={t("Channel.tasks.rejectReasonAria", { id: task.id })}
+              placeholder={t("Channel.tasks.rejectPrompt")}
+              rows={3}
+              autoFocus
+              disabled={taskBusy}
+              value={rejectDraft}
+              onChange={(event) => setRejectDraft(event.currentTarget.value)}
+            />
+            <div className="task-new-actions">
+              <button
+                className="task-action-btn task-reject-confirm"
+                type="button"
+                disabled={taskBusy || rejectDraft.trim() === ""}
+                onClick={() => {
+                  onReview(task, "reject", rejectDraft.trim());
+                  setRejectingTaskId(null);
+                  setRejectDraft("");
+                }}
+              >
+                {t("Channel.reject.confirm")}
+              </button>
+              <button className="task-action-btn task-reject-cancel" type="button" disabled={taskBusy} onClick={() => { setRejectingTaskId(null); setRejectDraft(""); }}>
+                {t("Channel.reject.cancel")}
+              </button>
+            </div>
+          </div>
+        )}
       </li>
     );
   };
@@ -2123,6 +2166,7 @@ export function ChannelPage({
   const loadingOlderRef = useRef(false); // 上翻请求进行中（去抖）
   const [olderStatus, setOlderStatus] = useState<"idle" | "loading" | "error" | "end">("idle");
   const initialCursorRef = useRef(0); // ws hello 的起始游标 = 初始页最后一条 seq
+  const initialHistoryRequestRef = useRef(0);
   const pendingAnchorRef = useRef<{ height: number; top: number } | null>(null); // prepend 前的滚动锚
   const oldestSeqRef = useRef(0);
   const charterRevRef = useRef(0);
@@ -2248,22 +2292,22 @@ export function ChannelPage({
       .finally(() => setTaskCreating(false));
   }, [loadTaskSummary, slug, taskCreating, token, t]);
 
-  const reviewTask = useCallback((task: TaskRecord, action: "approve" | "reject") => {
+  const reviewTask = useCallback((task: TaskRecord, action: "approve" | "reject", reason?: string) => {
     if (taskActionBusyId !== null) return;
     const seq = taskCompletionSeq(task);
     if (seq === null) {
       setTaskActionError(t("Channel.tasks.error.noReviewable"));
       return;
     }
-    const reason = action === "reject" ? window.prompt(t("Channel.tasks.rejectPrompt"))?.trim() : undefined;
-    if (action === "reject" && !reason) return;
+    const rejectReason = reason?.trim();
+    if (action === "reject" && !rejectReason) return;
     setTaskActionBusyId(task.id);
     setTaskActionError(null);
     reviewCompletion(
       token,
       slug,
       seq,
-      action === "approve" ? { action: "approve" } : { action: "reject", reason: reason! },
+      action === "approve" ? { action: "approve" } : { action: "reject", reason: rejectReason! },
     )
       .then(() => loadTaskLedger())
       .catch((err: unknown) => {
@@ -2275,14 +2319,13 @@ export function ChannelPage({
       .finally(() => setTaskActionBusyId(null));
   }, [loadTaskLedger, slug, taskActionBusyId, token, t]);
 
-  // 人类对某条 decision_request 点选项/审批（#284）。reject 走一次 prompt 收理由（同 reviewTask 手法）。
+  // 人类对某条 decision_request 点选项/审批（#284）；reject reason 由消息卡内联编辑器收集。
   const respondToDecision = useCallback(
-    (seq: number, choice: { action: "approve" | "reject" } | { option: number }) => {
+    (seq: number, choice: { action: "approve" } | { action: "reject"; reason?: string } | { option: number }) => {
       if (decisionBusySeq !== null) return;
       let body: { action: "approve" | "reject"; reason?: string } | { option: number };
       if ("action" in choice && choice.action === "reject") {
-        const reason = window.prompt(t("Channel.decision.rejectPrompt"))?.trim();
-        body = reason ? { action: "reject", reason } : { action: "reject" };
+        body = choice.reason ? { action: "reject", reason: choice.reason } : { action: "reject" };
       } else {
         body = choice;
       }
@@ -2422,11 +2465,15 @@ export function ChannelPage({
   // IM 式初始加载：先用 rest 拉最新一页（打开即到底部），把 ws 起始游标 seed 到页尾，
   // ws 只补拉/直播页尾之后的新消息——不再全量重放整个频道历史。
   // 归档频道同样被这条覆盖（ws 会被 1008 踢掉，历史靠这页 + 上翻）。
-  useEffect(() => {
-    let alive = true;
+  const loadInitialPage = useCallback(() => {
+    const request = ++initialHistoryRequestRef.current;
+    hasMoreRef.current = true;
+    initialCursorRef.current = 0;
+    setOlderStatus("idle");
+    setHistoryError(null);
     fetchMessagesWithRetry(token, slug, { before: Number.MAX_SAFE_INTEGER, limit: PAGE_SIZE })
       .then((msgs) => {
-        if (!alive) return;
+        if (request !== initialHistoryRequestRef.current) return;
         setHistoryError(null);
         for (const m of msgs) dispatch({ type: "frame", frame: m }); // 按 seq 去重，与 ws 交叠无害
         hasMoreRef.current = msgs.length >= PAGE_SIZE;
@@ -2435,7 +2482,7 @@ export function ChannelPage({
         setBootstrapped(true);
       })
       .catch((err: unknown) => {
-        if (!alive) return;
+        if (request !== initialHistoryRequestRef.current) return;
         if (err instanceof AuthError) {
           authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
           return;
@@ -2445,16 +2492,20 @@ export function ChannelPage({
           return;
         }
         // 初始页失败：退回 ws 全量重放（since=0），页面仍可用
-        setHistoryError(tRef.current("Channel.error.historyLoad"));
+        setHistoryError(tRef.current("Channel.history.loadFailed"));
         initialCursorRef.current = 0;
         hasMoreRef.current = false;
         setOlderStatus("end");
         setBootstrapped(true);
       });
-    return () => {
-      alive = false;
-    };
   }, [slug, token]);
+
+  useEffect(() => {
+    void loadInitialPage();
+    return () => {
+      initialHistoryRequestRef.current += 1;
+    };
+  }, [loadInitialPage]);
 
   useEffect(() => {
     if (!bootstrapped) return;
@@ -3294,6 +3345,7 @@ export function ChannelPage({
   const taskReviewCount = taskSummary?.needs_review ?? tasks.filter((task) => task.state === "needs_review").length;
   const taskBlockedCount = taskSummary?.blocked ?? tasks.filter((task) => task.state === "blocked").length;
   const taskMineCount = taskSummary?.mine ?? 0;
+  const onlineAgentCount = Object.values(state.presence).filter((entry) => entry.kind !== "human" && entry.live === true).length;
 
   const setAgentMode = useCallback((mode: AgentFilterMode) => {
     setAgentFilter((current) => ({ ...current, mode }));
@@ -3507,7 +3559,9 @@ export function ChannelPage({
             <span className="t-mono chan-tool-badge">{taskOpenCount}</span>
           </button>
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("agents")}>
+            <span className="ap-sprite ap-sprite--agent" aria-hidden="true" />
             <span>{t("Channel.agents.title")}</span>
+            <span className="t-mono chan-tool-badge">{onlineAgentCount}</span>
           </button>
           {(taskOpenCount > 0 || taskReviewCount > 0 || taskBlockedCount > 0 || taskMineCount > 0) && (
             <div className="task-strip-summary" aria-label={t("Channel.tasks.summaryAria")}>
@@ -3836,9 +3890,10 @@ export function ChannelPage({
         </p>
       )}
       {historyError !== null && (
-        <p className="banner banner--red" role="alert">
-          {historyError}
-        </p>
+        <div className="banner banner--red" role="alert">
+          <span>{historyError}</span>
+          <button type="button" className="d-btn" onClick={loadInitialPage}>{t("Channel.history.retry")}</button>
+        </div>
       )}
       {state.loopGuard !== null && (
         <div className="banner banner--yellow guard-banner" role="alert">
@@ -3886,6 +3941,7 @@ export function ChannelPage({
           draft={draft}
           setDraft={setDraft}
           onSend={send}
+          onEscape={replyTo !== null ? cancelReply : undefined}
           ready={state.status === "open"}
           candidates={mentionOptions}
           mentionStatuses={draftMentionStatuses}

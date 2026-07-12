@@ -22,11 +22,11 @@ function memoryStorage(): Storage {
 
 let renderer: ReactTestRenderer | null = null;
 
-function render() {
+function render(props: Parameters<typeof OnboardingGuide>[0] = {}) {
   act(() => {
     renderer = create(
       <LocaleProvider>
-        <OnboardingGuide />
+        <OnboardingGuide {...props} />
       </LocaleProvider>,
     );
   });
@@ -90,6 +90,31 @@ describe("OnboardingGuide (#146)", () => {
     act(() => { closeBtn.props.onClick(); });
 
     expect(localStorage.getItem(STORAGE_KEY)).toBe("1");
+    expect(steps().length).toBe(0);
+  });
+
+  test("forceOpen shows the guide after onboarding and closing notifies the controller", () => {
+    localStorage.setItem(STORAGE_KEY, "1");
+    let closes = 0;
+    const root = render({ forceOpen: true, onClose: () => { closes += 1; } });
+
+    expect(steps().length).toBe(4);
+    const closeBtn = root
+      .findAll((n) => n.type === "button")
+      .find((n) => n.props.className?.includes("onboarding-close"));
+    if (!closeBtn) throw new Error("close button not rendered");
+
+    act(() => { closeBtn.props.onClick(); });
+
+    expect(closes).toBe(1);
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("1");
+    act(() => {
+      renderer!.update(
+        <LocaleProvider>
+          <OnboardingGuide forceOpen={false} onClose={() => { closes += 1; }} />
+        </LocaleProvider>,
+      );
+    });
     expect(steps().length).toBe(0);
   });
 });

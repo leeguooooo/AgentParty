@@ -141,6 +141,23 @@ describe("SettingsPanel (#273)", () => {
     expect(loggedOut).toBe(1);
   });
 
+  test("help entry invokes the onboarding callback", () => {
+    let opens = 0;
+    const r = render({
+      me,
+      canSetHandle: false,
+      onClose: () => {},
+      onLogout: () => {},
+      onShowOnboarding: () => { opens += 1; },
+    });
+    const help = findByClass(r.toJSON(), "settings-onboarding");
+    expect(help).not.toBeNull();
+
+    void act(() => { (help!.props.onClick as () => void)(); });
+
+    expect(opens).toBe(1);
+  });
+
   test("surfaces email and provider when present", () => {
     const rich: SettingsMe = { ...me, email: "a@example.com", provider: "oidc" };
     const txt = allText(render({ me: rich, canSetHandle: false, onClose: () => {}, onLogout: () => {} }));

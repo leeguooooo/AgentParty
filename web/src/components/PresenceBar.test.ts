@@ -208,6 +208,33 @@ function renderPresence(entry: PresenceEntry): ReactTestRenderer {
   return next;
 }
 
+function renderPresenceRoster(count: number): ReactTestRenderer {
+  const roster = Array.from({ length: count }, (_, index) => {
+    const name = `agent-${index + 1}`;
+    return {
+      name,
+      entry: { name, kind: "agent", state: "working", note: null, ts: Date.now() } satisfies PresenceEntry,
+      participant: { name, kind: "agent", owner: "alice@example.com" } satisfies Sender,
+    };
+  });
+  let next!: ReactTestRenderer;
+  void act(() => {
+    next = create(
+      createElement(
+        LocaleProvider,
+        null,
+        createElement(PresenceBar, {
+          presence: Object.fromEntries(roster.map(({ name, entry }) => [name, entry])),
+          participants: roster.map(({ participant }) => participant),
+          status: "open",
+        }),
+      ),
+    );
+  });
+  renderer = next;
+  return next;
+}
+
 function nodesWithClass(r: ReactTestRenderer, className: string) {
   return r.root.findAll((node) => String(node.props.className ?? "").split(" ").includes(className));
 }
@@ -308,6 +335,53 @@ describe("presence live toggle affordance", () => {
       toggle?.props.onClick();
     });
     expect(nodesWithClass(r, "presence-group")).toHaveLength(0);
+  });
+});
+
+describe("presence group popover overflow (#357)", () => {
+  async function focusGroup(r: ReactTestRenderer): Promise<void> {
+    const group = nodesWithClass(r, "presence-group")[0];
+    await act(async () => {
+      group?.props.onFocus({
+        currentTarget: { getBoundingClientRect: () => ({ left: 10, right: 310, top: 10, bottom: 44, width: 300, height: 34 }) },
+      });
+    });
+  }
+
+  test("caps the hover popover at ten members and reports the hidden count", async () => {
+    const r = renderPresenceRoster(12);
+    await focusGroup(r);
+
+    const popover = nodesWithClass(r, "presence-popover")[0];
+    expect(popover).toBeDefined();
+    expect(popover?.findAll((node) => String(node.props.className ?? "").includes("presence-pill--full"))).toHaveLength(10);
+    expect(nodesWithClass(r, "presence-popover-more")[0]?.children.join("")).toBe("+2 · expand participants");
+  });
+
+  test("clicking the compact group closes the popover and expands all members inline", async () => {
+    const r = renderPresenceRoster(12);
+    await focusGroup(r);
+
+    const group = nodesWithClass(r, "presence-group")[0];
+    expect(group?.props["aria-expanded"]).toBe(false);
+    await act(async () => {
+      group?.props.onClick({ target: { closest: () => null } });
+    });
+
+    expect(nodesWithClass(r, "presence-popover")).toHaveLength(0);
+    const expandedGroup = nodesWithClass(r, "presence-group--full")[0];
+    expect(expandedGroup?.props["aria-expanded"]).toBe(true);
+    expect(nodesWithClass(r, "presence-group-detail")[0]?.findAll(
+      (node) => String(node.props.className ?? "").includes("presence-pill--full"),
+    )).toHaveLength(12);
+  });
+
+  test("uses the existing Chinese expand text for the overflow affordance", async () => {
+    localStorage.setItem("ap_locale", "zh");
+    const r = renderPresenceRoster(11);
+    await focusGroup(r);
+
+    expect(nodesWithClass(r, "presence-popover-more")[0]?.children.join("")).toBe("+1 · 展开参与者");
   });
 });
 

@@ -9,7 +9,7 @@ mock.module("dompurify", () => ({
   default: { addHook: () => {}, sanitize: (value: string) => value },
 }));
 
-const { TaskLedgerPanel, isTaskLedgerStatusNote } = await import("./Channel");
+const { TaskLedgerPanel, TeamPanel, isTaskLedgerStatusNote } = await import("./Channel");
 
 // #204 P1②：判定哪些 system status 触发任务台账刷新（多客户端一致性）。
 describe("isTaskLedgerStatusNote (#204 P1②)", () => {
@@ -186,6 +186,62 @@ describe("TaskLedgerPanel new-task entry", () => {
     });
 
     expect(onCreateTask).toHaveBeenCalledTimes(0);
+  });
+});
+
+describe("TaskLedgerPanel inline rejection (#357)", () => {
+  test("reject opens a textarea and submits the trimmed reason", async () => {
+    const reviews: Array<{ id: number; action: string; reason?: string }> = [];
+    const reviewable = task({ state: "needs_review", completion_artifact: {}, anchor_seqs: [42] });
+    const r = render("en", baseProps({
+      tasks: [reviewable],
+      onReview: (item, action, reason) => reviews.push({ id: item.id, action, reason }),
+    }));
+
+    await act(async () => {
+      r.root.find((n) => n.type === "button" && n.children.includes("Reject")).props.onClick();
+    });
+    const reason = findByAria(r, "Reject reason for task 1");
+    await act(async () => reason.props.onChange({ currentTarget: { value: "  add test evidence  " } }));
+    await act(async () => r.root.find((n) => n.props.className === "task-action-btn task-reject-confirm").props.onClick());
+
+    expect(reviews).toEqual([{ id: 1, action: "reject", reason: "add test evidence" }]);
+  });
+
+  test("cancel closes the rejection editor without reviewing", async () => {
+    const onReview = mock(() => undefined);
+    const reviewable = task({ state: "needs_review", completion_artifact: {}, anchor_seqs: [42] });
+    const r = render("en", baseProps({ tasks: [reviewable], onReview }));
+    await act(async () => r.root.find((n) => n.type === "button" && n.children.includes("Reject")).props.onClick());
+    await act(async () => r.root.find((n) => n.props.className === "task-action-btn task-reject-cancel").props.onClick());
+    expect(r.root.findAll((n) => n.props.className === "task-new-form task-reject-form")).toHaveLength(0);
+    expect(onReview).toHaveBeenCalledTimes(0);
+  });
+});
+
+describe("TeamPanel touch details (#357)", () => {
+  test("member detail is a button that expands the title content inline", async () => {
+    const member = {
+      name: "worker-a", parentAgent: "lead", rootAgent: "lead", teamId: "squad-a", depth: 1,
+      state: "working", role: "worker" as const, residency: "supervised" as const, active: true, connected: true,
+      lastSeen: 1_700_000_000_000, expiresAt: null,
+    };
+    let r!: ReactTestRenderer;
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage({ ap_locale: "en" }) });
+    await act(async () => {
+      r = create(<LocaleProvider><TeamPanel teams={[{
+        key: "lead::squad-a", rootAgent: "lead", teamId: "squad-a", parentAgents: ["lead"],
+        activeCount: 1, staleCount: 0, memberCount: 1, maxDepth: 1, residency: "supervised",
+        expiresAt: null, lastSeen: member.lastSeen, frontAgent: null, members: [member],
+      }]} /></LocaleProvider>);
+    });
+    renderer = r;
+    const button = r.root.find((n) => n.type === "button" && n.props.className.includes("team-member"));
+    expect(button.props["aria-expanded"]).toBe(false);
+    await act(async () => button.props.onClick());
+    expect(button.props["aria-expanded"]).toBe(true);
+    expect(allText(r)).toContain("parent: lead");
+    expect(allText(r)).toContain("residency: supervised");
   });
 });
 

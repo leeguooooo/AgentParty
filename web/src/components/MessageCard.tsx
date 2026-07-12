@@ -9,6 +9,7 @@ import { readStateFor } from "../lib/readList";
 import { summarizeReplyPreview } from "../lib/replyPreview";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/MessageCard";
+import "../i18n/strings/Channel";
 import { fmtTime } from "../lib/time";
 import type { MentionReceipt } from "../lib/wakeReceipt";
 import { AttachmentList } from "./AttachmentList";
@@ -46,7 +47,7 @@ interface Props {
   // 频道决策协议（#284）：人类/moderator 是否可对本条 decision_request 拍板 + 回调。
   canRespondDecision?: boolean;
   decisionBusy?: boolean;
-  onDecisionRespond?(seq: number, choice: { action: "approve" | "reject" } | { option: number }): void;
+  onDecisionRespond?(seq: number, choice: { action: "approve" } | { action: "reject"; reason?: string } | { option: number }): void;
 }
 
 function contextBits(ctx: AgentContext | undefined): string[] {
@@ -151,6 +152,10 @@ export function MessageCard({
   const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [statusExpanded, setStatusExpanded] = useState(false);
+  const [contextExpanded, setContextExpanded] = useState(false);
+  const [decisionRejecting, setDecisionRejecting] = useState(false);
+  const [decisionRejectDraft, setDecisionRejectDraft] = useState("");
   const menuRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   // 每个 agent 一个确定性色相：CSS 用 --ah 套 hsl() 给头像点/名字/卡片左条上色
@@ -284,25 +289,56 @@ export function MessageCard({
       blockedReason !== null && !blockedIsDupOfNote ? `blocked ${blockedReason}` : null,
       msg.status?.summary_seq !== null && msg.status?.summary_seq !== undefined ? `summary #${msg.status.summary_seq}` : null,
     ].filter((part): part is string => typeof part === "string" && part !== "");
-    // #280：系统公告/状态在时间线里只显示紧凑摘要，长内容会被 CSS 截断。把完整内容
-    // （note/scope/blocked/summary + workflow 详情）挂到原生 title 上，鼠标悬停即可看全文。
+    // #280/#357：紧凑状态行保留 title，同时提供点击/键盘展开，触屏也能读取完整详情。
     const statusFullDetail = [statusBits.join(" · "), statusTitle].filter((part) => part !== "").join("\n");
+    const contextDetailBits = [
+      owner !== null ? `owner:${owner}` : null,
+      lineage !== null ? `parent:${lineage.parent_agent}` : null,
+      lineage !== null ? `root:${lineage.root_agent}` : null,
+      lineage !== null ? `team:${lineage.team_id}` : null,
+      ...statusContextBits,
+      ...statusWorkflowBits,
+    ].filter((part): part is string => part !== null);
+    const toggleStatus = () => setStatusExpanded((expanded) => !expanded);
     return (
       <div id={`msg-${msg.seq}`} className="msg-status" data-state={msg.state ?? undefined} style={hueStyle}>
-        <span title={statusFullDetail !== "" ? statusFullDetail : undefined}>
+        <span
+          className="msg-status-summary"
+          title={statusFullDetail !== "" ? statusFullDetail : undefined}
+          role="button"
+          tabIndex={0}
+          aria-expanded={statusExpanded}
+          onClick={toggleStatus}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            toggleStatus();
+          }}
+          style={{ cursor: "pointer" }}
+        >
           <span className="msg-sender" title={senderTitle}>{senderLabel}</span>
-          {(owner !== null ||
-            lineageLabel !== null ||
-            statusContextBits.length > 0 ||
-            statusWorkflowBits.length > 0) && (
-            <span className="t-mono msg-context-more" aria-hidden="true">
-              {" "}
-              ⋯
-            </span>
-          )}{" "}
+          {" "}
           → {msg.state}
           {statusBits.length > 0 ? ` · ${statusBits.join(" · ")}` : ""} · {fmtTime(msg.ts)}
         </span>
+        {contextDetailBits.length > 0 && (
+          <button
+            type="button"
+            className="t-mono msg-context-more"
+            aria-label={t("Channel.message.context.toggle")}
+            aria-expanded={contextExpanded}
+            style={{ border: 0, background: "transparent", padding: 0, cursor: "pointer" }}
+            onClick={() => setContextExpanded((expanded) => !expanded)}
+          >
+            ⋯
+          </button>
+        )}
+        {statusExpanded && statusFullDetail !== "" && <pre className="msg-status-detail t-mono">{statusFullDetail}</pre>}
+        {contextExpanded && contextDetailBits.length > 0 && (
+          <span className="msg-context msg-context-detail">
+            {contextDetailBits.map((bit) => <span key={bit} className="t-mono">{bit}</span>)}
+          </span>
+        )}
       </div>
     );
   }
@@ -518,7 +554,8 @@ export function MessageCard({
                     type="button"
                     className="d-btn msg-decision-opt msg-decision-opt--reject"
                     disabled={decisionBusy === true}
-                    onClick={() => onDecisionRespond(msg.seq, { action: "reject" })}
+                    aria-expanded={decisionRejecting}
+                    onClick={() => setDecisionRejecting(true)}
                   >
                     {t("MessageCard.decision.reject")}
                   </button>
@@ -549,6 +586,43 @@ export function MessageCard({
               })}
               {resolution?.responder ? ` · ${resolution.responder.name}` : ""}
               {resolution?.reason ? ` · ${resolution.reason}` : ""}
+            </div>
+          )}
+          {decisionPending && decisionRejecting && canRespondDecision === true && onDecisionRespond !== undefined && (
+            <div className="task-new-form msg-decision-reject-form">
+              <textarea
+                className="task-new-desc msg-decision-reject-reason"
+                aria-label={t("Channel.decision.rejectPrompt")}
+                placeholder={t("Channel.decision.rejectPrompt")}
+                rows={3}
+                autoFocus
+                disabled={decisionBusy === true}
+                value={decisionRejectDraft}
+                onChange={(event) => setDecisionRejectDraft(event.currentTarget.value)}
+              />
+              <div className="task-new-actions">
+                <button
+                  type="button"
+                  className="task-action-btn msg-decision-reject-confirm"
+                  disabled={decisionBusy === true}
+                  onClick={() => {
+                    const reason = decisionRejectDraft.trim();
+                    onDecisionRespond(msg.seq, { action: "reject", ...(reason === "" ? {} : { reason }) });
+                    setDecisionRejecting(false);
+                    setDecisionRejectDraft("");
+                  }}
+                >
+                  {t("Channel.reject.confirm")}
+                </button>
+                <button
+                  type="button"
+                  className="task-action-btn msg-decision-reject-cancel"
+                  disabled={decisionBusy === true}
+                  onClick={() => { setDecisionRejecting(false); setDecisionRejectDraft(""); }}
+                >
+                  {t("Channel.reject.cancel")}
+                </button>
+              </div>
             </div>
           )}
         </div>

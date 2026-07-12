@@ -343,8 +343,10 @@ export function PresenceBar({
     return a.label.localeCompare(b.label);
   });
   const [hoveredGroup, setHoveredGroup] = useState<{ key: string; left: number; top: number; width: number } | null>(null);
+  const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
   function toggleExpanded() {
     setHoveredGroup(null); // 折叠会把 chip 移出 DOM，先关掉可能悬着的 popover
+    setExpandedGroupKey(null);
     setExpanded((prev) => {
       const next = !prev;
       writePresenceExpanded(next);
@@ -575,7 +577,8 @@ export function PresenceBar({
     return (
       <section
         key={group.key}
-        tabIndex={full ? undefined : 0}
+        tabIndex={0}
+        aria-expanded={full}
         className={
           `presence-group${blocked > 0 ? " presence-group--blocked" : ""}` +
           `${duplicateSessions > 0 ? " presence-group--duplicate" : ""}` +
@@ -594,6 +597,17 @@ export function PresenceBar({
         }}
         onBlur={() => {
           if (!full) setHoveredGroup(null);
+        }}
+        onClick={(e) => {
+          if ((e.target as Element).closest(".presence-group-detail, button, select")) return;
+          setHoveredGroup(null);
+          setExpandedGroupKey(full ? null : group.key);
+        }}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;
+          e.preventDefault();
+          setHoveredGroup(null);
+          setExpandedGroupKey(full ? null : group.key);
         }}
       >
         <div className="presence-group-head">
@@ -711,7 +725,7 @@ export function PresenceBar({
       </div>
       {expanded && (
         <div className="presence-strip" aria-label="participant groups by owner">
-          {sortedGroups.map((group) => renderGroup(group, "compact"))}
+          {sortedGroups.map((group) => renderGroup(group, expandedGroupKey === group.key ? "full" : "compact"))}
         </div>
       )}
       {activePopoverGroup !== null && hoveredGroup !== null && (
@@ -732,7 +746,12 @@ export function PresenceBar({
             </span>
           </header>
           <div className="presence-popover-list">
-            {activePopoverGroup.items.map((item) => renderItem(item, "full"))}
+            {activePopoverGroup.items.slice(0, 10).map((item) => renderItem(item, "full"))}
+            {activePopoverGroup.items.length > 10 && (
+              <span className="t-mono presence-popover-more">
+                +{activePopoverGroup.items.length - 10} · {t("PresenceBar.expand")}
+              </span>
+            )}
           </div>
         </div>
       )}

@@ -193,6 +193,7 @@ beforeEach(() => {
       clearInterval,
       addEventListener: windowEvents.addEventListener.bind(windowEvents),
       removeEventListener: windowEvents.removeEventListener.bind(windowEvents),
+      dispatchEvent: windowEvents.dispatchEvent.bind(windowEvents),
     },
   });
   const documentEvents = new EventTarget();
@@ -358,5 +359,74 @@ describe("App silent renewal keeps channels (#123)", () => {
     await settle();
 
     expect(channelPillTitles(renderer!)).toEqual(["B's room"]);
+  });
+
+  test("direct channel load errors expose retry in the main area and sidebar", async () => {
+    const token = jwt("user-a");
+    localStorage.setItem("ap_token", token);
+    location.pathname = "/c/general";
+    location.href = "https://party.example/c/general";
+    let channelCalls = 0;
+
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.endsWith("/api/config")) return new Response(JSON.stringify({ oidc: null }));
+        if (url.endsWith("/api/channels")) {
+          channelCalls += 1;
+          if (channelCalls === 1) return new Response("offline", { status: 503 });
+          return new Response(channelsPayload("general", "general room"));
+        }
+        if (url.endsWith("/api/me")) return meResponse();
+        throw new Error(`unexpected request: ${url}`);
+      },
+    });
+
+    await act(async () => { renderer = create(<LocaleProvider><App /></LocaleProvider>); });
+    await waitFor(() => renderer!.root.findAll((node) => classTokens(node.props.className).includes("channels-retry")).length === 2);
+
+    const retries = renderer!.root.findAll((node) => classTokens(node.props.className).includes("channels-retry"));
+    expect(retries.map((button) => button.children.join(""))).toEqual(["Retry", "Retry"]);
+    await act(async () => { retries[0]!.props.onClick(); });
+    await waitFor(() => channelPillTitles(renderer!)[0] === "general room");
+
+    expect(channelCalls).toBe(2);
+    expect(renderer!.root.findAll((node) => classTokens(node.props.className).includes("channels-retry"))).toHaveLength(0);
+  });
+
+  test("focus refreshes reuse the in-flight channel request", async () => {
+    const token = jwt("user-a");
+    localStorage.setItem("ap_token", token);
+    const pendingChannels = deferredResponse();
+    let channelCalls = 0;
+
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.endsWith("/api/config")) return new Response(JSON.stringify({ oidc: null }));
+        if (url.endsWith("/api/channels")) {
+          channelCalls += 1;
+          return pendingChannels.promise;
+        }
+        if (url.endsWith("/api/me")) return meResponse();
+        throw new Error(`unexpected request: ${url}`);
+      },
+    });
+
+    await act(async () => { renderer = create(<LocaleProvider><App /></LocaleProvider>); });
+    await waitFor(() => channelCalls === 1);
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    await settle();
+
+    expect(channelCalls).toBe(1);
+    await act(async () => {
+      pendingChannels.resolve(new Response(channelsPayload("general", "general room")));
+    });
+    await waitFor(() => channelPillTitles(renderer!)[0] === "general room");
   });
 });

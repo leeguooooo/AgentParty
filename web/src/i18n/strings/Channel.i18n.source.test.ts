@@ -16,7 +16,8 @@ const REQUIRED_KEYS = [
   "Channel.guard.error.failed",
   "Channel.error.tokenRevoked",
   "Channel.error.sendNotConnected",
-  "Channel.error.historyLoad",
+  "Channel.history.loadFailed",
+  "Channel.history.retry",
   "Channel.upload.tooLarge",
   "Channel.upload.forbidden",
   "Channel.upload.failed",
@@ -158,5 +159,18 @@ describe("Channel i18n source guard (#350)", () => {
   test("leaves the #353 reconnect banner on its existing translation keys", () => {
     expect(source).toContain('t("Channel.conn.reconnecting")');
     expect(source).toContain('t("Channel.conn.closed")');
+  });
+
+  test("keeps resolved channel banners translated and adds the Agents affordance", () => {
+    for (const key of ["Channel.banner.archived", "Channel.banner.readonly", "Channel.guard.banner"] as const) {
+      expect(source).toContain(`t("${key}")`);
+      expect(ChannelStrings.zh[key]).not.toBe(ChannelStrings.en[key]);
+    }
+    expect(source).toContain('className="ap-sprite ap-sprite--agent"');
+    expect(source).toContain("onlineAgentCount");
+  });
+
+  test("reject actions no longer use a browser prompt", () => {
+    expect(source).not.toContain("window.prompt");
   });
 });

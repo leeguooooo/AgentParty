@@ -26,7 +26,13 @@ function markOnboarded(): void {
 
 const STEP_KEYS = ["step1", "step2", "step3", "step4"] as const;
 
-export function OnboardingGuide() {
+export function OnboardingGuide({
+  forceOpen = false,
+  onClose,
+}: {
+  forceOpen?: boolean;
+  onClose?: () => void;
+}) {
   const t = useT();
   // 「是否首次进入」判定：读 localStorage 标记。改这里（比如恒为 false）会让首次显示的测试红。
   const [open, setOpen] = useState(() => !alreadyOnboarded());
@@ -34,9 +40,10 @@ export function OnboardingGuide() {
   const dismiss = () => {
     markOnboarded();
     setOpen(false);
+    onClose?.();
   };
 
-  if (!open) return null;
+  if (!forceOpen && !open) return null;
 
   return (
     <div className="onboarding-overlay" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">

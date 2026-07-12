@@ -14,6 +14,8 @@ const keys = [
   "Channel.older.retry",
   "Channel.older.end",
   "Channel.charter.retry",
+  "Channel.history.loadFailed",
+  "Channel.history.retry",
 ] as const;
 
 describe("Channel loading and recovery surfaces (#344 #345 #346 #354)", () => {
@@ -47,5 +49,14 @@ describe("Channel loading and recovery surfaces (#344 #345 #346 #354)", () => {
     expect(channelSource).toContain("onRetry?: () => void");
     expect(channelSource).toContain('t("Channel.charter.retry")');
     expect(channelSource).toContain("onRetry={() => void loadCharter()}");
+  });
+
+  test("reuses an initial-history callback for retry and resets pagination refs", () => {
+    expect(channelSource).toContain("const loadInitialPage = useCallback");
+    expect(channelSource).toContain("onClick={loadInitialPage}");
+    expect(channelSource).toContain("hasMoreRef.current = true");
+    expect(channelSource).toContain("initialCursorRef.current = 0");
+    expect(channelSource).toContain('t("Channel.history.retry")');
+    expect(channelSource).toContain('tRef.current("Channel.history.loadFailed")');
   });
 });

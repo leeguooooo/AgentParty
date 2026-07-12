@@ -21,6 +21,7 @@ interface Props {
   draft: string;
   setDraft(value: string): void;
   onSend(): void;
+  onEscape?: () => void;
   ready: boolean; // ws open 才能发
   candidates: MentionCandidate[]; // @ 补全候选（participants ∪ presence，已分档排序）
   mentionStatuses: DraftMentionStatus[]; // 草稿里已 @ 的目标 + 当前存活档位（发送前提醒会不会白发）
@@ -76,6 +77,7 @@ export function Composer({
   draft,
   setDraft,
   onSend,
+  onEscape,
   ready,
   candidates,
   mentionStatuses,
@@ -170,6 +172,7 @@ export function Composer({
   );
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing) return;
     if (menu !== null) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -192,13 +195,18 @@ export function Composer({
         return;
       }
     }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onEscape?.();
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
       onSend();
       return;
     }
     // 单独 Enter 发送，但要放过输入法合成中的 Enter（中文/日文候选词确认），否则会误发半成品
-    if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing) {
+    if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       onSend();
     }
