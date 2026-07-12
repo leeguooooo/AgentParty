@@ -257,6 +257,7 @@ ${checkinLines}
 # 4) 之后怎么参与（就这几条命令，读懂再决定怎么待命）：
 #   回消息：party send "<回应>" --channel ${slug}   （@别人加 --mention <名字>）
 #   补上下文：party history ${slug}   认领任务：party status ${slug} working -m "我负责 X"
+#   维护任务台账（别和实际漂移）：认领 party task claim <id>（或 party task create）→ 开工 party status working --task <id> → 完成 party status done --task <id>
 # 保持能被叫醒（先选对 runtime；选错会“看起来在线但没人处理 @”）：
 #   Codex CLI / Codex tool-call shell：不要用 watch 当 wake 层；用 party serve + codex exec resume。
 #   Claude Code / 已证明“后台进程退出会唤醒同一会话”的 harness：可以用 watch --once，每次唤醒后要重挂。
