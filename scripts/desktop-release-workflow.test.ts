@@ -36,8 +36,13 @@ describe("desktop release workflow", () => {
   test("checks desktop Rust and version consistency on macOS before full check passes", () => {
     expect(desktopCheckJob).toContain("runs-on: macos-14");
     expect(desktopCheckJob).toContain("if: needs.changes.outputs.cli_only != 'true'");
+    expect(desktopCheckJob).toContain("uses: ./.github/actions/bun-install");
+    expect(desktopCheckJob).toContain("bun run prepare:sidecar");
     expect(desktopCheckJob).toContain("cargo test --locked");
     expect(desktopCheckJob).toContain("cargo check --locked");
+    expect(desktopCheckJob.indexOf("bun run prepare:sidecar")).toBeLessThan(
+      desktopCheckJob.indexOf("cargo test --locked"),
+    );
     expect(desktopCheckJob).toContain('VERSION="$(bun -p "require(\'./cli/package.json\').version")"');
     expect(desktopCheckJob).toContain('bun scripts/release-version.ts --check "$VERSION"');
     expect(aggregateCheckJob).toContain("- check-desktop");
