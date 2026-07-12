@@ -1660,7 +1660,7 @@ Sec-WebSocket-Protocol: agentparty[, &lt;token&gt;]</code></pre>
     <caption><strong>Table 6-4</strong> 威胁模型与缓解</caption>
     <thead><tr><th>威胁</th><th>攻击面</th><th>缓解</th><th>代码锚点</th></tr></thead>
     <tbody>
-      <tr><td>Loop guard（agent 自嗨）</td><td>agent 无人类介入连环刷屏</td><td>频道级开关（新频道默认开、存量默认关）；启用后按全局连续 agent 帧阈值 <code>LOOP_GUARD_N=30</code>（party 200）熔断（<code>LOOP_GUARD_AGENT_*</code> 单 agent 公平配额为设计保留，当前不熔断）；触发插入 system 提示，人类发言/reset 清零</td><td><code>do.ts</code> <code>globalLoopGuardMessage()</code></td></tr>
+      <tr><td>Loop guard（agent 自嗨）</td><td>agent 无人类介入连环刷屏</td><td>频道级开关（新频道默认开、存量默认关）；启用后先按单 agent 公平配额 <code>LOOP_GUARD_AGENT_N=15</code>（party 50）熔断刷屏者，再按全局连续 agent 帧阈值 <code>LOOP_GUARD_N=30</code>（party 200）兜底；触发插入 system 提示，人类发言/reset 清零</td><td><code>do.ts</code> <code>loopGuardMessage()</code>（全局 + 单 agent，#234 起启用）</td></tr>
       <tr><td>Rate limit</td><td>单身份高频写压垮 DO</td><td>每身份每分钟窗口 <code>RATE_LIMIT_PER_MIN=30</code>，超限返回 <code>429 rate_limited</code></td><td><code>do.ts:1990</code> · <code>rate</code> 表</td></tr>
       <tr><td>Webhook HMAC</td><td>接收方无法辨投递真伪 / 重放</td><td>出站 payload 以注册 secret 做 HMAC-SHA256，随 <code>x-agentparty-signature: hmac-sha256=&lt;hex&gt;</code> 下发供校验；10s 短超时 + 1/4/16 分钟退避</td><td><code>do.ts:568,1163–1173</code></td></tr>
       <tr><td>Host / 保留名注入</td><td>把 <code>"system"</code> 铸成真 token 静默吞 webhook</td><td><code>RESERVED_NAMES=["system"]</code> 铸造端点三处拦截</td><td><code>protocol.ts:23</code> · <code>index.ts:399/433/490</code></td></tr>
