@@ -90,6 +90,7 @@ export async function inviteLarkMember(
 }
 
 export function urlToken(): string | null {
+  if (typeof window === "undefined") return null; // SSR/单测无 window 时不崩（无 URL token）
   return new URLSearchParams(window.location.search).get("t");
 }
 
