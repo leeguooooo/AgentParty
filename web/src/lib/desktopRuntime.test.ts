@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   __resetDesktopRuntimeForTests,
   __setDesktopRuntimeDependenciesForTests,
+  clearDeliveredNotifications,
+  mentionNotificationId,
   isAutostartEnabled,
   isDesktopNotificationPermissionGranted,
   isDesktopNotificationSupported,
@@ -152,10 +154,51 @@ describe("desktop notifications", () => {
       seq: 42,
     })).toBe(true);
     expect(payloads).toEqual([{
+      id: mentionNotificationId("general", 42),
       title: "Mention in #general",
       body: "Ada: hello @leo",
       extra: { slug: "general", seq: 42 },
     }]);
+  });
+
+  test("derives a stable, positive notification id per (channel, seq)", () => {
+    // 同一 (频道, seq) → 同一 id：多窗口 / 重连 / 重开都覆盖同一条通知，去掉通知中心重复。
+    const a = mentionNotificationId("general", 42);
+    expect(mentionNotificationId("general", 42)).toBe(a);
+    expect(a).toBeGreaterThan(0);
+    expect(Number.isSafeInteger(a)).toBe(true);
+    // 不同 seq / 频道给出不同 id，避免误覆盖别的通知。
+    expect(mentionNotificationId("general", 43)).not.toBe(a);
+    expect(mentionNotificationId("other", 42)).not.toBe(a);
+  });
+
+  test("clearDeliveredNotifications removes all active notifications when supported", async () => {
+    let cleared = 0;
+    __setDesktopRuntimeDependenciesForTests({
+      isTauri: () => true,
+      loadNotification: async () => notificationModule({
+        removeAllActive: async () => {
+          cleared += 1;
+        },
+      }),
+    });
+
+    expect(await clearDeliveredNotifications()).toBe(true);
+    expect(cleared).toBe(1);
+  });
+
+  test("clearDeliveredNotifications is a safe no-op on shells without removeAllActive", async () => {
+    __setDesktopRuntimeDependenciesForTests({
+      isTauri: () => true,
+      loadNotification: async () => {
+        const base = notificationModule();
+        // 旧壳：JS 里没有 removeAllActive。
+        delete (base as { removeAllActive?: unknown }).removeAllActive;
+        return base;
+      },
+    });
+
+    expect(await clearDeliveredNotifications()).toBe(false);
   });
 
   test("does not send when notification permission is not granted", async () => {

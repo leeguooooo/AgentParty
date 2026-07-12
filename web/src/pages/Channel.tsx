@@ -64,6 +64,7 @@ import { catchupKey, summarizeCatchup, type CatchupDigest } from "../lib/digest"
 import { buildOrgTree, type OrgMemberInput } from "../lib/orgTree";
 import { formatDivisionSection, mergeDivisionIntoCharter, type DivisionCharterRole } from "../lib/divisionCharter";
 import {
+  clearDeliveredNotifications,
   isDesktopRuntime,
   sendMentionNotification,
   setDesktopBadge,
@@ -2759,6 +2760,8 @@ export function ChannelPage({
       if (document.hidden) return;
       desktopMentionBadgeRef.current = 0;
       void setDesktopBadge(0);
+      // 聚焦即视为读到：清掉通知中心堆积的旧 @提醒，否则每次打开桌面版仍会看到已读的 @（issue #399）。
+      void clearDeliveredNotifications();
       if (stickBottom.current) sendSeen(lastSeqRef.current);
     };
     document.addEventListener("visibilitychange", markVisible);

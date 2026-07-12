@@ -34,11 +34,14 @@ interface NotificationModule {
   isPermissionGranted(): Promise<boolean>;
   requestPermission(): Promise<Exclude<DesktopNotificationPermission, "unsupported">>;
   sendNotification(options: {
+    id?: number;
     title: string;
     body: string;
     extra?: Record<string, unknown>;
   }): void;
   onAction(handler: (notification: { extra?: Record<string, unknown> }) => void): Promise<NotificationListener>;
+  // 清掉通知中心里所有已投递的通知（issue #399）。旧壳可能没有此命令，标可选，调用侧兜底。
+  removeAllActive?(): Promise<void>;
 }
 
 interface AutostartModule {
@@ -138,16 +141,41 @@ export async function requestDesktopNotificationPermission(): Promise<DesktopNot
   }
 }
 
+// 稳定通知 id：同一 (频道, seq) 的 @提醒在多窗口 / 重连 / 重开时都映射到同一 id，
+// macOS 用相同 identifier 覆盖旧通知而非再堆一条——消除通知中心里的重复（issue #399：
+// 两个 session 各弹一次、或重触发导致同一条 @ 出现多遍）。djb2 → 正 i32、非 0。
+export function mentionNotificationId(slug: string, seq: number): number {
+  const s = `${slug}:${seq}`;
+  let h = 5381;
+  for (let i = 0; i < s.length; i += 1) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h & 0x7fffffff) || 1;
+}
+
 export async function sendMentionNotification(input: MentionNotification): Promise<boolean> {
   if (!isDesktopRuntime()) return false;
   try {
     const notification = await dependencies.loadNotification();
     if (!(await notification.isPermissionGranted())) return false;
     await notification.sendNotification({
+      id: mentionNotificationId(input.slug, input.seq),
       title: input.title,
       body: input.body,
       extra: { slug: input.slug, seq: input.seq },
     });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 清掉通知中心里所有已投递的 @提醒。用户聚焦窗口即视为读到，堆积的旧通知应随之消失
+// （issue #399：「每次登录进来都显示 @我，但我都看过了」）。旧壳无 removeAllActive → 兜底返回 false。
+export async function clearDeliveredNotifications(): Promise<boolean> {
+  if (!isDesktopRuntime()) return false;
+  try {
+    const notification = await dependencies.loadNotification();
+    if (typeof notification.removeAllActive !== "function") return false;
+    await notification.removeAllActive();
     return true;
   } catch {
     return false;
