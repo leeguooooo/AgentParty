@@ -4,7 +4,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     time::Duration,
 };
@@ -380,8 +380,7 @@ fn desktop_credential_write(origin: String, credential: String) -> Result<(), St
 }
 
 #[cfg(desktop)]
-#[tauri::command]
-fn desktop_credential_read(origin: String) -> Result<Option<String>, String> {
+fn read_desktop_credential(origin: String) -> Result<Option<String>, String> {
     let account = credential_account_for_origin(&origin)?;
     let credential = NativeCredentialBackend.read(&account)?;
     if let Some(raw) = credential.as_deref() {
@@ -394,6 +393,25 @@ fn desktop_credential_read(origin: String) -> Result<Option<String>, String> {
 }
 
 #[cfg(desktop)]
+async fn wait_for_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<MainWindowGate>().wait_until_shown();
+    })
+    .await
+    .map_err(|error| format!("desktop window wait failed: {error}"))
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+async fn desktop_credential_read(
+    app: tauri::AppHandle,
+    origin: String,
+) -> Result<Option<String>, String> {
+    wait_for_main_window(app).await?;
+    read_desktop_credential(origin)
+}
+
+#[cfg(desktop)]
 #[tauri::command]
 fn desktop_credential_delete(origin: String) -> Result<(), String> {
     let account = credential_account_for_origin(&origin)?;
@@ -402,7 +420,8 @@ fn desktop_credential_delete(origin: String) -> Result<(), String> {
 
 #[cfg(desktop)]
 #[tauri::command]
-fn desktop_credential_migrate() -> Result<Option<String>, String> {
+async fn desktop_credential_migrate(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    wait_for_main_window(app).await?;
     migrate_legacy_credential(&NativeCredentialBackend)
 }
 
@@ -463,6 +482,47 @@ fn refresh_enabled_autostart<B: AutostartBackend>(backend: &B) -> Result<(), Str
 
 #[derive(Default)]
 struct ExitGuard(AtomicBool);
+
+struct MainWindowGate {
+    has_been_shown: AtomicBool,
+    wait_lock: Mutex<()>,
+    shown: Condvar,
+}
+
+impl MainWindowGate {
+    fn new(has_been_shown: bool) -> Self {
+        Self {
+            has_been_shown: AtomicBool::new(has_been_shown),
+            wait_lock: Mutex::new(()),
+            shown: Condvar::new(),
+        }
+    }
+
+    fn has_been_shown(&self) -> bool {
+        self.has_been_shown.load(Ordering::Acquire)
+    }
+
+    fn mark_shown(&self) {
+        self.has_been_shown.store(true, Ordering::Release);
+        self.shown.notify_all();
+    }
+
+    fn wait_until_shown(&self) {
+        if self.has_been_shown() {
+            return;
+        }
+        let mut guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while !self.has_been_shown() {
+            guard = self
+                .shown
+                .wait(guard)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
 
 impl ExitGuard {
     fn begin_quit(&self) {
@@ -735,9 +795,18 @@ fn serve_ui_protocol(app: &tauri::AppHandle, path: &str) -> tauri::http::Respons
 fn show_main(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
-        let _ = window.show();
+        if window.show().is_ok() {
+            app.state::<MainWindowGate>().mark_shown();
+            let _ = app.emit("agentparty://window-shown", ());
+        }
         let _ = window.set_focus();
     }
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_window_has_been_shown(app: tauri::AppHandle) -> bool {
+    app.state::<MainWindowGate>().has_been_shown()
 }
 
 #[cfg(desktop)]
@@ -853,6 +922,9 @@ pub fn run() {
 
     #[cfg(desktop)]
     let builder = builder
+        .manage(MainWindowGate::new(
+            !std::env::args().any(|arg| arg == "--hidden"),
+        ))
         .manage(agent::AgentManager::default())
         .manage(UiRuntimeManager::default())
         .register_uri_scheme_protocol("agentparty-ui", |context, request| {
@@ -879,6 +951,7 @@ pub fn run() {
             desktop_credential_write,
             desktop_credential_delete,
             desktop_credential_migrate,
+            desktop_window_has_been_shown,
             desktop_updater_record_diagnostic,
             desktop_ui_ready,
             desktop_ui_storage_restore,
@@ -957,9 +1030,9 @@ mod tests {
     use super::{
         credential_account_for_origin, migrate_legacy_credential, parse_stored_credential,
         refresh_enabled_autostart, tray_action, validate_updater_diagnostic,
-        write_updater_diagnostic, AutostartBackend, CredentialBackend, ExitGuard, TrayAction,
-        UpdaterDiagnostic, UpdaterDiagnosticCategory,
-        UpdaterDiagnosticStage, UpdaterDiagnosticStatus, CREDENTIAL_ACCOUNT,
+        write_updater_diagnostic, AutostartBackend, CredentialBackend, ExitGuard, MainWindowGate,
+        TrayAction, UpdaterDiagnostic, UpdaterDiagnosticCategory, UpdaterDiagnosticStage,
+        UpdaterDiagnosticStatus, CREDENTIAL_ACCOUNT,
     };
 
     #[derive(Default)]
@@ -1116,6 +1189,29 @@ mod tests {
 
         guard.begin_quit();
         assert!(guard.is_quitting());
+    }
+
+    #[test]
+    fn hidden_startup_gate_opens_only_after_the_main_window_is_shown() {
+        use std::{
+            sync::{mpsc, Arc},
+            thread,
+            time::Duration,
+        };
+
+        let gate = Arc::new(MainWindowGate::new(false));
+        let waiting_gate = Arc::clone(&gate);
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            waiting_gate.wait_until_shown();
+            done_tx.send(()).unwrap();
+        });
+
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+
+        gate.mark_shown();
+
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
     #[cfg(target_os = "macos")]

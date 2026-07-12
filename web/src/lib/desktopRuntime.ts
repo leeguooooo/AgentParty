@@ -218,6 +218,26 @@ export async function showAndFocusDesktopWindow(): Promise<boolean> {
   }
 }
 
+export async function waitForDesktopWindowShown(): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  try {
+    const event = await dependencies.loadEvent();
+    let finish!: () => void;
+    const shown = new Promise<void>((resolve) => { finish = resolve; });
+    const unlisten = await event.listen("agentparty://window-shown", finish);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      if (await invoke<boolean>("desktop_window_has_been_shown")) finish();
+      await shown;
+    } finally {
+      unlisten();
+    }
+  } catch {
+    // Older shells do not expose the visibility command. Fail open so a UI-only
+    // update cannot strand users on the desktop loading screen.
+  }
+}
+
 export async function openDesktopVerificationUrl(
   input: string,
   allowedOrigins: readonly string[],

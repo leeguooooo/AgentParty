@@ -70,6 +70,7 @@ import {
   isDesktopRuntime,
   listenForDesktopNotificationActions,
   showAndFocusDesktopWindow,
+  waitForDesktopWindowShown,
 } from "./lib/desktopRuntime";
 import { setApiBase } from "./lib/base";
 import {
@@ -369,6 +370,8 @@ export function App() {
     if (!desktop) return;
     let alive = true;
     void (async () => {
+      await waitForDesktopWindowShown();
+      if (!alive) return null;
       let startupOrigin = activeOrigin;
       const migratedOrigin = await migrateLegacyDesktopCredential();
       if (!alive) return null;

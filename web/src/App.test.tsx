@@ -48,6 +48,7 @@ let storedCredential: string | null = null;
 let notificationActionHandler: ((notification: { extra?: Record<string, unknown> }) => void) | null = null;
 let desktopFocusCalls: string[] = [];
 let pushedPaths: string[] = [];
+let desktopWindowShownHandler: (() => void) | null = null;
 
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -105,6 +106,7 @@ beforeEach(() => {
   notificationActionHandler = null;
   desktopFocusCalls = [];
   pushedPaths = [];
+  desktopWindowShownHandler = null;
   storedCredential = JSON.stringify({
     refreshToken: "old-refresh",
     deviceSecret: "old-device-secret",
@@ -112,6 +114,7 @@ beforeEach(() => {
     sessionId: "old-session",
   });
   invokeHandler = async (command, args) => {
+    if (command === "desktop_window_has_been_shown") return true;
     if (command === "desktop_credential_migrate") return null;
     if (command === "desktop_credential_read") {
       return args?.origin === activeOrigin ? storedCredential : null;
@@ -150,6 +153,12 @@ beforeEach(() => {
         unminimize: async () => { desktopFocusCalls.push("unminimize"); },
         setFocus: async () => { desktopFocusCalls.push("focus"); },
       }),
+    }),
+    loadEvent: async () => ({
+      listen: async (event, handler) => {
+        if (event === "agentparty://window-shown") desktopWindowShownHandler = handler;
+        return () => {};
+      },
     }),
   });
   Object.defineProperty(globalThis, "fetch", {
@@ -235,6 +244,40 @@ afterEach(async () => {
 });
 
 describe("App desktop server pairing behavior", () => {
+  test("hidden desktop startup defers Keychain restore until the main window is shown", async () => {
+    let credentialReads = 0;
+    invokeHandler = async (command, args) => {
+      if (command === "desktop_window_has_been_shown") return false;
+      if (command === "desktop_credential_migrate") return null;
+      if (command === "desktop_credential_read") {
+        credentialReads += 1;
+        return args?.origin === activeOrigin ? storedCredential : null;
+      }
+      if (command === "desktop_credential_write") {
+        storedCredential = String(args?.credential);
+        return null;
+      }
+      throw new Error(`unexpected native command: ${command}`);
+    };
+
+    await act(async () => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(credentialReads).toBe(0);
+    expect(desktopWindowShownHandler).not.toBeNull();
+
+    await act(async () => {
+      desktopWindowShownHandler?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(credentialReads).toBe(1);
+  });
+
   test("opens a clicked desktop mention notification at the target message", async () => {
     await act(async () => {
       renderer = create(<LocaleProvider><App /></LocaleProvider>);
