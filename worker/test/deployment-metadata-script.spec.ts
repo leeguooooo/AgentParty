@@ -52,6 +52,22 @@ describe("deployment metadata script", () => {
     expect({ calls, waits }).toEqual({ calls: 2, waits: [25] });
   });
 
+  it("keeps the default retry window open for a slow custom-domain propagation", async () => {
+    let calls = 0;
+    const fetcher = async () => {
+      calls += 1;
+      const body = calls <= 20
+        ? { ok: true, ...metadata, commit: "f".repeat(40) }
+        : { ok: true, ...metadata };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    };
+
+    await expect(verifyDeploymentMetadata("https://example.test", metadata, fetcher, {
+      sleep: async () => {},
+    })).resolves.toEqual(metadata);
+    expect(calls).toBe(21);
+  });
+
   it("verifies prod and xdream against one expected build", async () => {
     const fetcher = async (input: string | URL | Request) => {
       const url = String(input);

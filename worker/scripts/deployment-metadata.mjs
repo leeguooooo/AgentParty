@@ -1,6 +1,6 @@
 const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const COMMIT_RE = /^[0-9a-f]{40}$/;
-const DEFAULT_VERIFY_ATTEMPTS = 12;
+const DEFAULT_VERIFY_ATTEMPTS = 30;
 const DEFAULT_VERIFY_DELAY_MS = 1_000;
 
 const defaultSleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
