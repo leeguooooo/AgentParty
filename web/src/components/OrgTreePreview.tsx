@@ -2,11 +2,19 @@ import type { ReactElement } from "react";
 import type { TFunc } from "../i18n/useT";
 import type { OrgTree, OrgTreeNode } from "../lib/orgTree";
 
-// issue #281：整个频道的组织/汇报关系应该可以「预览」。DivisionBoard 逐行标注了汇报对象，
-// 但看不出整体层级；这里把 buildOrgTree() 折出来的汇报树渲染成一棵可整体查看的组织架构图。
-// 纯展示组件：树的构建（含环/孤儿处理）在 lib/orgTree.ts 里，这里只负责画。
+// issue #281 + #370：频道组织/汇报关系整体预览。DivisionBoard 逐行标注汇报对象，这里折成
+// 一棵可整体查看的组织架构图（办公软件式管理层级）。数据源优先 channel_roles.reports_to
+// （#370 正式管理层级，可跨 owner），回落 lineage。moderator 可就地设「向谁汇报」（可交互）。
+// 树构建（含环/孤儿处理）在 lib/orgTree.ts。
 
-function OrgNodeRow({ node, t }: { node: OrgTreeNode; t: TFunc }): ReactElement {
+interface OrgInteractive {
+  canModerate: boolean;
+  allNames: string[];
+  busyName: string | null;
+  onSetReportsTo: (name: string, reportsTo: string | null) => void;
+}
+
+function OrgNodeRow({ node, t, interactive }: { node: OrgTreeNode; t: TFunc; interactive?: OrgInteractive }): ReactElement {
   const roleText = node.role !== null && !node.isLead ? node.role : null;
   return (
     <li className="org-node">
@@ -25,11 +33,29 @@ function OrgNodeRow({ node, t }: { node: OrgTreeNode; t: TFunc }): ReactElement 
               : t("Channel.roles.reportsTo", { parent: node.reportsTo })}
           </span>
         )}
+        {interactive?.canModerate && (
+          <select
+            className="org-report-select"
+            value={node.reportsTo ?? ""}
+            disabled={interactive.busyName === node.name}
+            aria-label={t("Channel.org.setReportsToAria", { name: node.name })}
+            onChange={(e) => interactive.onSetReportsTo(node.name, e.target.value === "" ? null : e.target.value)}
+          >
+            <option value="">{t("Channel.org.reportsToTop")}</option>
+            {interactive.allNames
+              .filter((n) => n !== node.name)
+              .map((n) => (
+                <option key={n} value={n}>
+                  {t("Channel.org.reportsToOption", { name: n })}
+                </option>
+              ))}
+          </select>
+        )}
       </div>
       {node.children.length > 0 && (
         <ul className="org-children">
           {node.children.map((child) => (
-            <OrgNodeRow key={child.name} node={child} t={t} />
+            <OrgNodeRow key={child.name} node={child} t={t} interactive={interactive} />
           ))}
         </ul>
       )}
@@ -37,7 +63,15 @@ function OrgNodeRow({ node, t }: { node: OrgTreeNode; t: TFunc }): ReactElement 
   );
 }
 
-export function OrgTreePreview({ tree, t }: { tree: OrgTree; t: TFunc }): ReactElement {
+export function OrgTreePreview({
+  tree,
+  t,
+  interactive,
+}: {
+  tree: OrgTree;
+  t: TFunc;
+  interactive?: OrgInteractive;
+}): ReactElement {
   const isEmpty = tree.roots.length === 0 && tree.unassigned.length === 0;
   return (
     <details className="org-tree" aria-label={t("Channel.org.label")}>
@@ -56,7 +90,7 @@ export function OrgTreePreview({ tree, t }: { tree: OrgTree; t: TFunc }): ReactE
             {tree.roots.length > 0 && (
               <ul className="org-roots">
                 {tree.roots.map((node) => (
-                  <OrgNodeRow key={node.name} node={node} t={t} />
+                  <OrgNodeRow key={node.name} node={node} t={t} interactive={interactive} />
                 ))}
               </ul>
             )}
@@ -65,7 +99,7 @@ export function OrgTreePreview({ tree, t }: { tree: OrgTree; t: TFunc }): ReactE
                 <header className="org-unassigned-head t-mono">{t("Channel.org.unassignedGroup")}</header>
                 <ul className="org-roots">
                   {tree.unassigned.map((node) => (
-                    <OrgNodeRow key={node.name} node={node} t={t} />
+                    <OrgNodeRow key={node.name} node={node} t={t} interactive={interactive} />
                   ))}
                 </ul>
               </section>
