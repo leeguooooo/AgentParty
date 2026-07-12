@@ -94,4 +94,30 @@ describe("AgentBoardPanel (#187)", () => {
     expect(txt).toContain("ghost");
     expect(txt).toContain("offline");
   });
+
+  test("surfaces scheduling: paused agent with resume_at shows resume time (#187 排期)", () => {
+    // 定时恢复：paused + resume_at → 本行展示「暂停至 HH:MM」，时间来自 presence.resume_at
+    const at = new Date();
+    at.setHours(14, 30, 0, 0);
+    const p = [presence("alice", { state: "working", live: true, paused: true, resume_at: at.getTime() })];
+    const txt = allText(render("zh", p, [task(1, "alice", "in_progress")]));
+    expect(txt).toContain("alice");
+    expect(txt).toContain("暂停至");
+    expect(txt).toContain("14:30");
+  });
+
+  test("surfaces scheduling: paused without resume_at shows manual-pause label", () => {
+    // 只能手动恢复：paused 但无 resume_at → 展示暂停但不含具体恢复时刻
+    const p = [presence("bob", { state: "waiting", live: true, paused: true })];
+    const txt = allText(render("en", p, []));
+    expect(txt).toContain("bob");
+    expect(txt).toContain("paused");
+  });
+
+  test("does not surface schedule line when not paused", () => {
+    const p = [presence("carol", { state: "working", live: true })];
+    const txt = allText(render("en", p, [task(1, "carol", "in_progress")]));
+    expect(txt).toContain("carol");
+    expect(txt).not.toContain("paused");
+  });
 });
