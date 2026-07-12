@@ -96,6 +96,24 @@ describe("desktop secure credentials", () => {
     expect(slots).toHaveLength(2);
   });
 
+  test("falls back to the legacy write command when an older shell lacks interactive write", async () => {
+    const calls: string[] = [];
+    const vault = createInvokeCredentialVault("https://agentparty.leeguoo.com", async (command) => {
+      calls.push(command);
+      if (command === "desktop_credential_write_interactive") {
+        throw new Error("Command desktop_credential_write_interactive not found");
+      }
+      return null;
+    });
+    await vault.writeInteractive({
+      refreshToken: "refresh",
+      deviceSecret: "device-secret",
+      serverOrigin: "https://agentparty.leeguoo.com",
+      sessionId: null,
+    });
+    expect(calls).toEqual(["desktop_credential_write_interactive", "desktop_credential_write"]);
+  });
+
   test("invokes the idempotent native legacy migration once at startup", async () => {
     const calls: string[] = [];
     const origin = await migrateLegacyDesktopCredential(async (command) => {

@@ -27,6 +27,15 @@ export interface DesktopCredentialVault {
 
 export type DesktopInvoker = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
+function isMissingNativeCommand(cause: unknown, command: string): boolean {
+  const message = typeof cause === "string"
+    ? cause
+    : cause instanceof Error
+      ? cause.message
+      : "";
+  return message.includes(command) && /(?:command.*not found|unknown command)/i.test(message);
+}
+
 function parseCredential(raw: string | null): DesktopCredential | null {
   if (raw === null) return null;
   try {
@@ -66,7 +75,14 @@ export function createInvokeCredentialVault(originInput: string, invoke: Desktop
     },
     async writeInteractive(credential) {
       if (credential.serverOrigin !== origin) throw new Error("desktop credential origin does not match its slot");
-      await invoke<null>("desktop_credential_write_interactive", { origin, credential: JSON.stringify(credential) });
+      const args = { origin, credential: JSON.stringify(credential) };
+      try {
+        await invoke<null>("desktop_credential_write_interactive", args);
+      } catch (cause) {
+        // UI releases can reach an older shell before the native update is installed.
+        if (!isMissingNativeCommand(cause, "desktop_credential_write_interactive")) throw cause;
+        await invoke<null>("desktop_credential_write", args);
+      }
     },
     async delete() {
       await invoke<null>("desktop_credential_delete", { origin });
