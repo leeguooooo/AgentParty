@@ -2807,6 +2807,15 @@ export function ChannelPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSeq]);
 
+  // 当前频道已加载窗口里所有 @我的确定性通知 id：聚焦时据此精确清掉本频道在通知中心的
+  // 旧 @提醒，绝不误删其他频道的（issue #399 / CodeRabbit #401）。用 ref 供 markVisible 读最新值。
+  const mentionNotificationIds = useMemo(
+    () => state.messages.filter((m) => isOwnMention(m, selfHandle)).map((m) => mentionNotificationId(slug, m.seq)),
+    [state.messages, selfHandle, slug],
+  );
+  const mentionNotificationIdsRef = useRef<number[]>(mentionNotificationIds);
+  mentionNotificationIdsRef.current = mentionNotificationIds;
+
   useEffect(() => {
     const el = streamRef.current;
     if (el === null) return;
