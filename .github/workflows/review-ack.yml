@@ -41,7 +41,7 @@ jobs:
           BOTS='github-actions|github-actions\[bot\]|qodo|pr-agent|coderabbit|dependabot'
           # ① 正式 PR review（approve / comment / changes_requested），非机器人
           REVIEWS=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-            --jq "[.[] | select((.user.login | test(\"$BOTS\"; \"i\")) | not) | select(.state != \"PENDING\")] | length")
+            --jq "[.[] | select((.user.login | test(\"$BOTS\"; \"i\")) | not) | select(.state != \"PENDING\" and .state != \"DISMISSED\")] | length")
           # ② 评论里的显式 ack（review-ack: / 合并前已读 / 合并者 review 结论），非机器人
           ACK_COMMENTS=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
             --jq "[.[] | select((.user.login | test(\"$BOTS\"; \"i\")) | not) | select(.body | test(\"review-ack:|合并前已读|合并者 review 结论\"; \"i\"))] | length")
