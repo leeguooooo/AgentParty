@@ -215,10 +215,10 @@ describe("desktop updater auto-check", () => {
     });
   });
 
-  test("skips checks recorded within the previous 6 hours", () => {
+  test("skips checks recorded within the previous hour", () => {
     const now = 30 * HOUR;
-    const recent = memoryStorage({ [LAST_SUCCESSFUL_CHECK_KEY]: String(now - 5 * HOUR) });
-    const stale = memoryStorage({ [LAST_SUCCESSFUL_CHECK_KEY]: String(now - 6 * HOUR) });
+    const recent = memoryStorage({ [LAST_SUCCESSFUL_CHECK_KEY]: String(now - HOUR + 1) });
+    const stale = memoryStorage({ [LAST_SUCCESSFUL_CHECK_KEY]: String(now - HOUR) });
 
     expect(shouldAutoCheck(recent, now)).toBe(false);
     expect(shouldAutoCheck(stale, now)).toBe(true);
@@ -256,7 +256,7 @@ describe("desktop updater auto-check", () => {
 
     expect(checkCalls).toBe(1);
     expect(controller.getState().panelOpen).toBe(false);
-    expect(scheduled.some(({ delayMs }) => delayMs === 6 * HOUR)).toBe(true);
+    expect(scheduled.some(({ delayMs }) => delayMs === HOUR)).toBe(true);
   });
 
   test("does not open the panel for automatic no-update checks", async () => {
@@ -271,7 +271,7 @@ describe("desktop updater auto-check", () => {
     expect(controller.getState()).toMatchObject({ phase: "up-to-date", panelOpen: false, error: null });
   });
 
-  test("rechecks the 6 hour gate when the delayed callback runs", async () => {
+  test("rechecks the one hour gate when the delayed callback runs", async () => {
     let now = 50 * HOUR;
     let checkCalls = 0;
     const storage = memoryStorage();
@@ -294,7 +294,7 @@ describe("desktop updater auto-check", () => {
     scheduled.find(({ delayMs }) => delayMs === 8_000)?.callback();
     await Promise.resolve();
 
-    expect(checkCalls).toBe(1);
+    expect(checkCalls).toBe(2);
   });
 });
 

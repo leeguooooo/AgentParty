@@ -2,7 +2,7 @@ export const LAST_SUCCESSFUL_CHECK_KEY = "ap_desktop_updater_last_success";
 export const LAST_UPDATER_DIAGNOSTIC_KEY = "ap_desktop_updater_diagnostic";
 
 const AUTO_CHECK_DELAY_MS = 8_000;
-const AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const AUTO_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const AUTO_CHECK_RETRY_MS = 60 * 60 * 1000;
 const CHECK_TIMEOUT_MS = 30_000;
 const VERSION_LOOKUP_TIMEOUT_MS = 2_000;
