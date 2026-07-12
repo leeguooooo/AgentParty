@@ -91,6 +91,7 @@ export interface DesktopUpdaterController {
   getState(): DesktopUpdaterState;
   subscribe(listener: (state: DesktopUpdaterState) => void): () => void;
   start(): void;
+  checkIfDue(): Promise<void>;
   check(source: "auto" | "manual"): Promise<void>;
   install(): Promise<void>;
   retry(): Promise<void>;
@@ -467,6 +468,11 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
       })();
     },
 
+    checkIfDue() {
+      if (disposed || !shouldAutoCheck(options.storage, options.clock.now())) return Promise.resolve();
+      return controller.check("auto");
+    },
+
     check(source) {
       if (disposed) return Promise.resolve();
       if (source === "manual" && !state.panelOpen) patch({ panelOpen: true });
@@ -571,6 +577,32 @@ export function createDesktopUpdaterController(options: ControllerOptions): Desk
   };
 
   return controller;
+}
+
+interface DesktopUpdaterEventTarget {
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+}
+
+interface DesktopUpdaterVisibilityTarget extends DesktopUpdaterEventTarget {
+  readonly visibilityState?: string;
+}
+
+export function bindDesktopUpdaterResumeChecks(
+  controller: DesktopUpdaterController,
+  windowTarget: DesktopUpdaterEventTarget,
+  documentTarget: DesktopUpdaterVisibilityTarget,
+): () => void {
+  const checkIfVisible = () => {
+    if (documentTarget.visibilityState === "hidden") return;
+    void controller.checkIfDue();
+  };
+  windowTarget.addEventListener("focus", checkIfVisible);
+  documentTarget.addEventListener("visibilitychange", checkIfVisible);
+  return () => {
+    windowTarget.removeEventListener("focus", checkIfVisible);
+    documentTarget.removeEventListener("visibilitychange", checkIfVisible);
+  };
 }
 
 type Importer = (specifier: string) => Promise<unknown>;

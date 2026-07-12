@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import {
+  bindDesktopUpdaterResumeChecks,
   createBrowserDesktopUpdaterClient,
   isTauriEnvironment,
   type DesktopUpdaterController,
@@ -175,10 +176,12 @@ export function DesktopUpdater() {
     if (controller === null) return;
     controllerRef.current = controller;
     const unsubscribe = controller.subscribe(setState);
+    const unbindResumeChecks = bindDesktopUpdaterResumeChecks(controller, window, document);
     setState(controller.getState());
     controller.start();
 
     return () => {
+      unbindResumeChecks();
       unsubscribe();
       controller.dispose();
       if (controllerRef.current === controller) controllerRef.current = null;

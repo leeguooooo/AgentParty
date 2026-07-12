@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   LAST_UPDATER_DIAGNOSTIC_KEY,
+  bindDesktopUpdaterResumeChecks,
   LAST_SUCCESSFUL_CHECK_KEY,
   classifyUpdaterError,
   createBrowserDesktopUpdaterClient,
@@ -9,6 +10,7 @@ import {
   isTauriEnvironment,
   shouldAutoCheck,
   type DesktopUpdaterAdapter,
+  type DesktopUpdaterController,
   type DownloadEvent,
   type StorageAdapter,
   type TimerAdapter,
@@ -295,6 +297,69 @@ describe("desktop updater auto-check", () => {
     await Promise.resolve();
 
     expect(checkCalls).toBe(2);
+  });
+
+  test("checks immediately on resume only when the persistent gate is due", async () => {
+    let now = 50 * HOUR;
+    let checkCalls = 0;
+    const storage = memoryStorage({ [LAST_SUCCESSFUL_CHECK_KEY]: String(now) });
+    const controller = createDesktopUpdaterController({
+      adapter: adapter({
+        check: async () => {
+          checkCalls += 1;
+          return null;
+        },
+      }),
+      clock: { now: () => now },
+      storage,
+    });
+
+    await controller.checkIfDue();
+    expect(checkCalls).toBe(0);
+
+    now += HOUR;
+    await controller.checkIfDue();
+    expect(checkCalls).toBe(1);
+  });
+
+  test("rechecks on focus or visible resume and removes both listeners on cleanup", async () => {
+    const windowListeners = new Map<string, () => void>();
+    const documentListeners = new Map<string, () => void>();
+    let visibilityState = "visible";
+    let checkCalls = 0;
+    const controller = {
+      checkIfDue: async () => {
+        checkCalls += 1;
+      },
+    } as DesktopUpdaterController;
+    const windowTarget = {
+      addEventListener: (type: string, listener: () => void) => windowListeners.set(type, listener),
+      removeEventListener: (type: string) => windowListeners.delete(type),
+    };
+    const documentTarget = {
+      get visibilityState() { return visibilityState; },
+      addEventListener: (type: string, listener: () => void) => documentListeners.set(type, listener),
+      removeEventListener: (type: string) => documentListeners.delete(type),
+    };
+
+    const cleanup = bindDesktopUpdaterResumeChecks(controller, windowTarget, documentTarget);
+    windowListeners.get("focus")?.();
+    await Promise.resolve();
+    expect(checkCalls).toBe(1);
+
+    visibilityState = "hidden";
+    documentListeners.get("visibilitychange")?.();
+    await Promise.resolve();
+    expect(checkCalls).toBe(1);
+
+    visibilityState = "visible";
+    documentListeners.get("visibilitychange")?.();
+    await Promise.resolve();
+    expect(checkCalls).toBe(2);
+
+    cleanup();
+    expect(windowListeners.size).toBe(0);
+    expect(documentListeners.size).toBe(0);
   });
 });
 
