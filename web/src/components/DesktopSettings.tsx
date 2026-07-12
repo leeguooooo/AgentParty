@@ -8,18 +8,24 @@ import { useT, type TFunc } from "../i18n/useT";
 import "../i18n/strings/DesktopSettings";
 import { DesktopAgentPanel } from "./DesktopAgentPanel";
 import { desktopAgentAdapter, type DesktopAgentAdapter } from "../lib/desktopAgent";
+import {
+  loadDesktopReleaseInfo,
+  type DesktopReleaseInfo,
+} from "../lib/desktopRelease";
 
 export interface DesktopSettingsRuntime {
   isDesktopRuntime(): boolean;
   isAutostartEnabled(): Promise<boolean>;
   setAutostartEnabled(enabled: boolean): Promise<boolean>;
   getAppVersion(): Promise<string>;
+  getReleaseInfo(): Promise<DesktopReleaseInfo>;
 }
 
 export interface DesktopVersionInfo {
   desktop: string | null;
   server: string | null;
   commit: string | null;
+  release: DesktopReleaseInfo;
 }
 
 type DesktopVersionFetcher = (input: string) => Promise<Response>;
@@ -42,6 +48,10 @@ export async function loadDesktopVersionInfo(
   fetcher: DesktopVersionFetcher = fetch,
 ): Promise<DesktopVersionInfo> {
   const desktop = runtime.getAppVersion().then(displayVersion).catch(() => null);
+  const release = runtime.getReleaseInfo().catch(() => ({
+    distribution: "development" as const,
+    notarized: false,
+  }));
   const server = (async (): Promise<Pick<DesktopVersionInfo, "server" | "commit">> => {
     const origin = serverOrigin.trim().replace(/\/+$/, "");
     if (origin === "") return { server: null, commit: null };
@@ -54,8 +64,8 @@ export async function loadDesktopVersionInfo(
       return { server: null, commit: null };
     }
   })();
-  const [desktopVersion, serverVersion] = await Promise.all([desktop, server]);
-  return { desktop: desktopVersion, ...serverVersion };
+  const [desktopVersion, releaseInfo, serverVersion] = await Promise.all([desktop, release, server]);
+  return { desktop: desktopVersion, release: releaseInfo, ...serverVersion };
 }
 
 const defaultRuntime: DesktopSettingsRuntime = {
@@ -63,6 +73,7 @@ const defaultRuntime: DesktopSettingsRuntime = {
   isAutostartEnabled,
   setAutostartEnabled,
   getAppVersion: async () => (await import("@tauri-apps/api/app")).getVersion(),
+  getReleaseInfo: loadDesktopReleaseInfo,
 };
 
 export async function loadAutostartSetting(runtime: DesktopSettingsRuntime): Promise<boolean> {
@@ -162,12 +173,21 @@ export function DesktopSettingsPanel({
       {error && <p className="desktop-settings-error" role="alert">{t("DesktopSettings.autostart.error")}</p>}
       <dl className="desktop-settings-versions">
         <div><dt>{t("DesktopSettings.version.desktop")}</dt><dd>{versions.desktop ?? unavailable}</dd></div>
+        <div>
+          <dt>{t("DesktopSettings.version.channel")}</dt>
+          <dd>{t(`DesktopSettings.release.${versions.release.distribution}`)}</dd>
+        </div>
         <div><dt>{t("DesktopSettings.version.server")}</dt><dd>{versions.server ?? unavailable}</dd></div>
         <div>
           <dt>{t("DesktopSettings.version.build")}</dt>
           <dd title={versions.commit ?? undefined}>{versions.commit?.slice(0, 8) ?? unavailable}</dd>
         </div>
       </dl>
+      {versions.release.distribution === "preview" && (
+        <p className="desktop-settings-release-warning" role="status">
+          {t("DesktopSettings.release.previewWarning")}
+        </p>
+      )}
       <DesktopAgentPanel adapter={agentAdapter} t={t} />
     </section>
   );
@@ -192,7 +212,12 @@ export function DesktopSettings({
   const [enabled, setEnabled] = useState(false);
   const [pending, setPending] = useState(desktop);
   const [error, setError] = useState(false);
-  const [versions, setVersions] = useState<DesktopVersionInfo>({ desktop: null, server: null, commit: null });
+  const [versions, setVersions] = useState<DesktopVersionInfo>({
+    desktop: null,
+    server: null,
+    commit: null,
+    release: { distribution: "development", notarized: false },
+  });
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const switchRef = useRef<HTMLButtonElement | null>(null);

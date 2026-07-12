@@ -2,7 +2,11 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { __resetDesktopPairingSingleFlightsForTests } from "./desktopPairing";
 import type { DesktopCredentialVault } from "./desktopCredentials";
-import { initialTokenForRuntime, restoreDesktopAccess } from "./desktopAuth";
+import {
+  initialTokenForRuntime,
+  restoreDesktopAccess,
+  restoreDesktopAccessInteractive,
+} from "./desktopAuth";
 
 describe("desktop app authentication integration", () => {
   beforeEach(() => __resetDesktopPairingSingleFlightsForTests());
@@ -31,8 +35,10 @@ describe("desktop app authentication integration", () => {
           sessionId: "session-1",
         };
       },
+      authorize: async () => null,
       write: async () => {},
       delete: async () => {},
+      deleteInteractive: async () => {},
     };
     const fetcher = async () => {
       requests += 1;
@@ -50,5 +56,31 @@ describe("desktop app authentication integration", () => {
     expect(await second).toBe("access");
     expect(reads).toBe(1);
     expect(requests).toBe(1);
+  });
+
+  test("uses the interactive Keychain path only after an explicit recovery action", async () => {
+    let reads = 0;
+    let authorizations = 0;
+    const vault: DesktopCredentialVault = {
+      read: async () => {
+        reads += 1;
+        return null;
+      },
+      authorize: async () => {
+        authorizations += 1;
+        return null;
+      },
+      write: async () => {},
+      delete: async () => {},
+      deleteInteractive: async () => {},
+    };
+
+    expect(await restoreDesktopAccessInteractive(
+      vault,
+      "https://agentparty.leeguoo.com",
+      async () => new Response(null, { status: 500 }),
+    )).toBeNull();
+    expect(reads).toBe(0);
+    expect(authorizations).toBe(1);
   });
 });

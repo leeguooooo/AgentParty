@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const workflow = readFileSync(resolve(import.meta.dir, "../.github/workflows/release.yml"), "utf8");
+const workflowDocument = Bun.YAML.parse(workflow) as {
+  jobs: { release: { steps: Array<{ name?: string; run?: string }> } };
+};
 const appleSigningMode = readFileSync(resolve(import.meta.dir, "apple-signing-mode.ts"), "utf8");
 const desktopDocs = readFileSync(
   resolve(import.meta.dir, "../web/public/docs/desktop/index.html"),
@@ -140,7 +144,7 @@ describe("desktop release workflow", () => {
 
   test("dual-signs bridge archives and publishes both updater channels", () => {
     expect(tauriConfig.plugins.updater.endpoints).toEqual([
-      "https://github.com/leeguooooo/agentparty/releases/latest/download/latest-v2.json",
+      "https://github.com/leeguooooo/agentparty/releases/download/desktop-preview/latest-v2.json",
     ]);
     expect(desktopJob).toContain("name: sign bridge updater with v2 key");
     expect(desktopJob).toContain('mv "${updater}.sig" "${updater}.sig.v2"');
@@ -197,6 +201,36 @@ describe("desktop release workflow", () => {
     expect(appleSigningMode).toContain("enabled=${resolution.enabled}");
     expect(workflow).toContain("if: steps.apple-signing.outputs.enabled == 'true'");
     expect(workflow).toContain("if: steps.apple-signing.outputs.enabled == 'false'");
+    const notarizedLegacy = namedStep(
+      desktopJob,
+      "build notarized desktop app with legacy updater key",
+      "build notarized desktop app with v2 updater key",
+    );
+    const notarizedV2 = namedStep(
+      desktopJob,
+      "build notarized desktop app with v2 updater key",
+      "build unnotarized desktop preview with legacy updater key",
+    );
+    const previewLegacy = namedStep(
+      desktopJob,
+      "build unnotarized desktop preview with legacy updater key",
+      "build unnotarized desktop preview with v2 updater key",
+    );
+    const previewV2 = namedStep(
+      desktopJob,
+      "build unnotarized desktop preview with v2 updater key",
+      "verify Developer ID signature and notarization ticket",
+    );
+    for (const productionBuild of [notarizedLegacy, notarizedV2]) {
+      expect(productionBuild).toContain("AGENTPARTY_DESKTOP_DISTRIBUTION: production");
+      expect(productionBuild).toContain('AGENTPARTY_DESKTOP_NOTARIZED: "true"');
+      expect(productionBuild).toContain("/releases/download/desktop-stable/latest-v2.json");
+    }
+    for (const previewBuild of [previewLegacy, previewV2]) {
+      expect(previewBuild).toContain("AGENTPARTY_DESKTOP_DISTRIBUTION: preview");
+      expect(previewBuild).toContain('AGENTPARTY_DESKTOP_NOTARIZED: "false"');
+      expect(previewBuild).toContain("/releases/download/desktop-preview/latest-v2.json");
+    }
     for (const secret of [
       "APPLE_CERTIFICATE",
       "APPLE_CERTIFICATE_PASSWORD",
@@ -221,8 +255,17 @@ describe("desktop release workflow", () => {
     expect(workflow).toContain("dist/release-body.md");
     expect(workflow).toContain("--notes \"$DESKTOP_RELEASE_NOTES\"");
     expect(workflow).toContain("dist/*.signing-status.json");
+    expect(releaseJob).toContain("id: desktop-distribution");
+    expect(releaseJob).toContain('echo "distribution=$distribution" >> "$GITHUB_OUTPUT"');
+    expect(releaseJob).toContain('production) channel_tag="desktop-stable"');
+    expect(releaseJob).toContain('preview) channel_tag="desktop-preview"');
+    expect(releaseJob).toContain('gh release upload "$channel_tag" "${manifests[@]}"');
+    expect(releaseJob).toContain("--clobber");
+    expect(releaseJob).not.toContain('"$channel_tag" +');
 
     expect(desktopDocs).toContain("Unnotarized macOS preview");
+    expect(desktopDocs).toContain("desktop-stable");
+    expect(desktopDocs).toContain("desktop-preview");
     expect(desktopDocs).toContain("正式下载入口会在这些门禁真实通过后开放");
     expect(desktopDocs).toContain("正常运行期间每小时复查");
     expect(desktopDocs).toContain("从锁屏或后台回到应用时也会立即补查是否到期");
@@ -230,6 +273,16 @@ describe("desktop release workflow", () => {
     expect(desktopDocs).toContain("应用不会为了更新主动弹出通知权限申请");
     expect(desktopDocs).toContain("同一版本只成功通知一次");
     expect(desktopDocs).toContain("A newly available version opens the update panel automatically");
+  });
+
+  test("keeps the isolated updater-channel publisher valid Bash", () => {
+    const script = workflowDocument.jobs.release.steps.find(
+      (step) => step.name === "publish isolated desktop updater channel",
+    )?.run;
+    expect(script).toBeTruthy();
+    const syntax = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
+    expect(syntax.status).toBe(0);
+    expect(syntax.stderr).toBe("");
   });
 
   test("uses commands available on GitHub macOS runners for certificate import", () => {

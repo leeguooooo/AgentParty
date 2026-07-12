@@ -18,8 +18,10 @@ export interface DesktopCredential {
 
 export interface DesktopCredentialVault {
   read(): Promise<DesktopCredential | null>;
+  authorize(): Promise<DesktopCredential | null>;
   write(credential: DesktopCredential): Promise<void>;
   delete(): Promise<void>;
+  deleteInteractive(): Promise<void>;
 }
 
 export type DesktopInvoker = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
@@ -54,12 +56,18 @@ export function createInvokeCredentialVault(originInput: string, invoke: Desktop
     async read() {
       return parseCredential(await invoke<string | null>("desktop_credential_read", { origin }));
     },
+    async authorize() {
+      return parseCredential(await invoke<string | null>("desktop_credential_authorize", { origin }));
+    },
     async write(credential) {
       if (credential.serverOrigin !== origin) throw new Error("desktop credential origin does not match its slot");
       await invoke<null>("desktop_credential_write", { origin, credential: JSON.stringify(credential) });
     },
     async delete() {
       await invoke<null>("desktop_credential_delete", { origin });
+    },
+    async deleteInteractive() {
+      await invoke<null>("desktop_credential_delete_interactive", { origin });
     },
   };
 }
@@ -120,6 +128,24 @@ export async function refreshDesktopSession(
   fetcher: Fetcher = fetch,
 ): Promise<string | null> {
   const credential = await vault.read();
+  return refreshDesktopCredential(credential, vault, allowedOrigins, fetcher);
+}
+
+export async function refreshDesktopSessionInteractive(
+  vault: DesktopCredentialVault,
+  allowedOrigins: readonly string[],
+  fetcher: Fetcher = fetch,
+): Promise<string | null> {
+  const credential = await vault.authorize();
+  return refreshDesktopCredential(credential, vault, allowedOrigins, fetcher);
+}
+
+async function refreshDesktopCredential(
+  credential: DesktopCredential | null,
+  vault: DesktopCredentialVault,
+  allowedOrigins: readonly string[],
+  fetcher: Fetcher,
+): Promise<string | null> {
   if (credential === null) return null;
   if (!isAllowlistedServerOrigin(credential.serverOrigin, allowedOrigins)) {
     throw new Error("stored desktop server is not allowed");

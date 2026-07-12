@@ -24,6 +24,7 @@ name = "agentparty-desktop"
 version = "0.2.99"
 dependencies = [
  "base64 0.22.1",
+ "core-foundation 0.10.1",
  "flate2",
  "keyring",
  "minisign-verify",
@@ -31,6 +32,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "security-framework 3.7.0",
+ "security-framework-sys",
  "semver",
  "serde",
  "serde_json",

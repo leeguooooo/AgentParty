@@ -280,6 +280,35 @@ describe("App desktop server pairing behavior", () => {
     expect(credentialReads).toBe(1);
   });
 
+  test("a stale legacy Keychain slot does not block the current server session", async () => {
+    let credentialReads = 0;
+    invokeHandler = async (command, args) => {
+      if (command === "desktop_window_has_been_shown") return true;
+      if (command === "desktop_credential_migrate") {
+        throw new Error("desktop_keychain_authorization_required");
+      }
+      if (command === "desktop_credential_read") {
+        credentialReads += 1;
+        return args?.origin === activeOrigin ? storedCredential : null;
+      }
+      if (command === "desktop_credential_write") {
+        storedCredential = String(args?.credential);
+        return null;
+      }
+      throw new Error(`unexpected native command: ${command}`);
+    };
+
+    await act(async () => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(credentialReads).toBe(1);
+    expect(renderer!.root.findByProps({ className: "app-settings-btn" })).toBeTruthy();
+    expect(renderer!.root.findAllByProps({ role: "alert" })).toHaveLength(0);
+  });
+
   test("opens a clicked desktop mention notification at the target message", async () => {
     await act(async () => {
       renderer = create(<LocaleProvider><App /></LocaleProvider>);

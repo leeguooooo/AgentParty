@@ -12,7 +12,7 @@ function evidence(version: string, hash: string): InstalledAppEvidence {
   const executableHash = hash === "old" ? "a".repeat(64) : "b".repeat(64);
   const sidecarHash = hash === "old" ? "c".repeat(64) : "d".repeat(64);
   return {
-    schema: "agentparty.desktop-acceptance.v1",
+    schema: "agentparty.desktop-acceptance.v2",
     capturedAt: version === "0.2.90" ? "2026-07-11T00:00:00.000Z" : "2026-07-11T00:10:00.000Z",
     appPath: "/Applications/AgentParty.app",
     version,
@@ -23,6 +23,8 @@ function evidence(version: string, hash: string): InstalledAppEvidence {
     sidecarSha256: sidecarHash,
     signingAuthority: "Developer ID Application: AgentParty Inc. (TEAM123456)",
     teamIdentifier: "TEAM123456",
+    codeIdentifier: "com.agentparty.desktop",
+    designatedRequirement: 'identifier "com.agentparty.desktop" and anchor apple generic and certificate leaf[subject.OU] = TEAM123456',
     codesignVerified: true,
     gatekeeperAccepted: true,
     notarizationStapled: true,
@@ -75,7 +77,7 @@ describe("desktop production acceptance", () => {
       "0.2.91",
       "2026-07-11T00:11:00.000Z",
     )).toEqual({
-      schema: "agentparty.desktop-acceptance.v1",
+      schema: "agentparty.desktop-acceptance.v2",
       status: "passed",
       fromVersion: "0.2.90",
       toVersion: "0.2.91",
@@ -121,5 +123,26 @@ describe("desktop production acceptance", () => {
       ],
       "0.2.91",
     )).toThrow("exactly one running desktop process");
+  });
+
+  test("rejects signing identity drift even when the Team ID is unchanged", () => {
+    const baseline = evidence("0.2.90", "old");
+    const current = evidence("0.2.91", "new");
+    expect(() => verifyUpgradeEvidence(
+      baseline,
+      { ...current, codeIdentifier: "agentparty_desktop-random-hash" },
+      receipt,
+      [{ pid: 42, executablePath: current.executablePath }],
+      "0.2.91",
+      "2026-07-11T00:11:00.000Z",
+    )).toThrow("code-signing identity changed");
+    expect(() => verifyUpgradeEvidence(
+      baseline,
+      { ...current, designatedRequirement: 'cdhash H"DEADBEEF"' },
+      receipt,
+      [{ pid: 42, executablePath: current.executablePath }],
+      "0.2.91",
+      "2026-07-11T00:11:00.000Z",
+    )).toThrow("code-signing identity changed");
   });
 });

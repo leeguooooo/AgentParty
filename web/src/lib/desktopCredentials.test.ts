@@ -5,6 +5,7 @@ import {
   finishDesktopPairing,
   logoutDesktopSession,
   refreshDesktopSession,
+  refreshDesktopSessionInteractive,
   migrateLegacyDesktopCredential,
   type DesktopCredential,
   type DesktopCredentialVault,
@@ -16,11 +17,16 @@ function memoryVault(initial: DesktopCredential | null = null) {
   let deletes = 0;
   const vault: DesktopCredentialVault = {
     read: async () => credential,
+    authorize: async () => credential,
     write: async (next) => {
       credential = next;
       writes.push(next);
     },
     delete: async () => {
+      credential = null;
+      deletes += 1;
+    },
+    deleteInteractive: async () => {
       credential = null;
       deletes += 1;
     },
@@ -35,8 +41,10 @@ describe("desktop secure credentials", () => {
     const vault = createInvokeCredentialVault("https://agentparty.leeguoo.com", async (command, args) => {
       calls.push({ command, args });
       if (command === "desktop_credential_read") return stored;
+      if (command === "desktop_credential_authorize") return stored;
       if (command === "desktop_credential_write") stored = String(args?.credential);
       if (command === "desktop_credential_delete") stored = null;
+      if (command === "desktop_credential_delete_interactive") stored = null;
       return null;
     });
     const credential: DesktopCredential = {
@@ -48,12 +56,16 @@ describe("desktop secure credentials", () => {
 
     await vault.write(credential);
     expect(await vault.read()).toEqual(credential);
+    expect(await vault.authorize()).toEqual(credential);
     await vault.delete();
+    await vault.deleteInteractive();
     expect(await vault.read()).toBeNull();
     expect(calls.map((call) => call.command)).toEqual([
       "desktop_credential_write",
       "desktop_credential_read",
+      "desktop_credential_authorize",
       "desktop_credential_delete",
+      "desktop_credential_delete_interactive",
       "desktop_credential_read",
     ]);
     expect(calls.every((call) => call.args?.origin === "https://agentparty.leeguoo.com")).toBe(true);
@@ -145,6 +157,41 @@ describe("desktop secure credentials", () => {
     });
     expect(secure.writes.at(-1)?.refreshToken).toBe("refresh-new");
     expect(JSON.stringify(secure.writes)).not.toContain("access-new");
+  });
+
+  test("allows an explicit recovery action to authorize Keychain access", async () => {
+    const secure = memoryVault({
+      refreshToken: "refresh-old",
+      deviceSecret: "device-secret",
+      serverOrigin: "https://agentparty.leeguoo.com",
+      sessionId: "session-1",
+    });
+    let reads = 0;
+    let authorizations = 0;
+    const vault: DesktopCredentialVault = {
+      ...secure.vault,
+      read: async () => {
+        reads += 1;
+        throw new Error("automatic read must not be used");
+      },
+      authorize: async () => {
+        authorizations += 1;
+        return secure.vault.authorize();
+      },
+    };
+
+    const access = await refreshDesktopSessionInteractive(vault, ["https://agentparty.leeguoo.com"], async () => (
+      new Response(JSON.stringify({
+        access_token: "access-new",
+        refresh_token: "refresh-new",
+        expires_in: 600,
+        session_id: "session-1",
+      }), { status: 200, headers: { "content-type": "application/json" } })
+    ));
+
+    expect(access).toBe("access-new");
+    expect(reads).toBe(0);
+    expect(authorizations).toBe(1);
   });
 });
 

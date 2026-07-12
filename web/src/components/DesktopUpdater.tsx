@@ -14,6 +14,10 @@ import {
 import { useT } from "../i18n/useT";
 import type { TFunc } from "../i18n/useT";
 import "../i18n/strings/DesktopUpdater";
+import {
+  loadDesktopReleaseInfo,
+  type DesktopReleaseInfo,
+} from "../lib/desktopRelease";
 
 const INITIAL_STATE: DesktopUpdaterState = {
   phase: "idle",
@@ -55,6 +59,7 @@ export function handleDesktopUpdaterTrayCheck(controller: DesktopUpdaterControll
 
 interface DesktopUpdaterPanelProps {
   state: DesktopUpdaterState;
+  releaseInfo?: DesktopReleaseInfo;
   t: TFunc;
   panelRef: RefObject<HTMLElement | null>;
   onClose(): void;
@@ -65,6 +70,7 @@ interface DesktopUpdaterPanelProps {
 
 export function DesktopUpdaterPanel({
   state,
+  releaseInfo,
   t,
   panelRef,
   onClose,
@@ -95,6 +101,9 @@ export function DesktopUpdaterPanel({
       </header>
 
       <div className="desktop-updater-status" role="status" aria-live="polite">
+        {releaseInfo?.distribution === "preview" && (
+          <p className="desktop-updater-preview-warning">{t("DesktopUpdater.previewWarning")}</p>
+        )}
         {state.phase === "idle" && <p>{t("DesktopUpdater.idle")}</p>}
         {state.phase === "checking" && <p>{t("DesktopUpdater.checking")}</p>}
         {state.phase === "up-to-date" && <p>{t("DesktopUpdater.noUpdate")}</p>}
@@ -173,6 +182,19 @@ export function DesktopUpdater() {
   const panelRef = useRef<HTMLElement | null>(null);
   const wasPanelOpenRef = useRef(false);
   const [state, setState] = useState<DesktopUpdaterState>(INITIAL_STATE);
+  const [releaseInfo, setReleaseInfo] = useState<DesktopReleaseInfo>({
+    distribution: "development",
+    notarized: false,
+  });
+
+  useEffect(() => {
+    if (!desktop) return;
+    let alive = true;
+    void loadDesktopReleaseInfo().then((next) => {
+      if (alive) setReleaseInfo(next);
+    });
+    return () => { alive = false; };
+  }, [desktop]);
 
   useEffect(() => {
     if (!desktop) return;
@@ -295,6 +317,7 @@ export function DesktopUpdater() {
       {state.panelOpen && (
         <DesktopUpdaterPanel
           state={state}
+          releaseInfo={releaseInfo}
           t={t}
           panelRef={panelRef}
           onClose={closePanel}

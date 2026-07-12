@@ -23,9 +23,14 @@ const translations: Record<string, string> = {
   "DesktopSettings.autostart.loading": "Reading system setting",
   "DesktopSettings.autostart.error": "Couldn't update this setting.",
   "DesktopSettings.version.desktop": "Desktop",
+  "DesktopSettings.version.channel": "Release",
   "DesktopSettings.version.server": "Server",
   "DesktopSettings.version.build": "Build",
   "DesktopSettings.version.unavailable": "Unavailable",
+  "DesktopSettings.release.production": "Production",
+  "DesktopSettings.release.preview": "Preview",
+  "DesktopSettings.release.development": "Development",
+  "DesktopSettings.release.previewWarning": "This preview may ask for Keychain access again.",
 };
 const t = (key: string) => translations[key] ?? key;
 
@@ -35,6 +40,7 @@ function runtime(overrides: Partial<DesktopSettingsRuntime> = {}): DesktopSettin
     isAutostartEnabled: async () => false,
     setAutostartEnabled: async () => true,
     getAppVersion: async () => "0.2.89",
+    getReleaseInfo: async () => ({ distribution: "production", notarized: true }),
     ...overrides,
   };
 }
@@ -80,7 +86,12 @@ describe("DesktopSettingsPanel", () => {
         enabled={true}
         pending={false}
         error={false}
-        versions={{ desktop: "0.2.88", server: "0.2.89", commit: "048e06e5d1b5" }}
+        versions={{
+          desktop: "0.2.88",
+          server: "0.2.89",
+          commit: "048e06e5d1b5",
+          release: { distribution: "production", notarized: true },
+        }}
         t={t}
         onToggle={() => {}}
       />,
@@ -96,6 +107,8 @@ describe("DesktopSettingsPanel", () => {
     expect(html).toContain("Server");
     expect(html).toContain("0.2.89");
     expect(html).toContain("048e06e");
+    expect(html).toContain("Production");
+    expect(html).not.toContain("Keychain access again");
   });
 
   test("disables the switch while reading or writing and renders a short error", () => {
@@ -104,7 +117,12 @@ describe("DesktopSettingsPanel", () => {
         enabled={false}
         pending={true}
         error={true}
-        versions={{ desktop: null, server: null, commit: null }}
+        versions={{
+          desktop: null,
+          server: null,
+          commit: null,
+          release: { distribution: "preview", notarized: false },
+        }}
         t={t}
         onToggle={() => {}}
       />,
@@ -112,6 +130,7 @@ describe("DesktopSettingsPanel", () => {
 
     expect(html).toContain("disabled");
     expect(html).toContain("update this setting.");
+    expect(html).toContain("Keychain access again");
   });
 });
 
@@ -137,6 +156,7 @@ describe("desktop version information", () => {
       desktop: "0.2.88",
       server: "0.2.89",
       commit: "048e06e5d1b5f70eee5bbca0eb854d3aa710f473",
+      release: { distribution: "production", notarized: true },
     });
   });
 
@@ -147,7 +167,12 @@ describe("desktop version information", () => {
       async () => new Response("not json", { status: 502 }),
     );
 
-    expect(info).toEqual({ desktop: null, server: null, commit: null });
+    expect(info).toEqual({
+      desktop: null,
+      server: null,
+      commit: null,
+      release: { distribution: "production", notarized: true },
+    });
   });
 });
 

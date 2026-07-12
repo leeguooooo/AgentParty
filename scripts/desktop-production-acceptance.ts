@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 
 import { compareVersionPrecedence, validateVersion } from "./release-version";
 
-const SCHEMA = "agentparty.desktop-acceptance.v1";
+const SCHEMA = "agentparty.desktop-acceptance.v2";
 const BUNDLE_IDENTIFIER = "com.agentparty.desktop";
 
 export interface InstalledAppEvidence {
@@ -29,6 +29,8 @@ export interface InstalledAppEvidence {
   sidecarSha256: string;
   signingAuthority: string;
   teamIdentifier: string;
+  codeIdentifier: string;
+  designatedRequirement: string;
   codesignVerified: true;
   gatekeeperAccepted: true;
   notarizationStapled: true;
@@ -152,7 +154,17 @@ export function inspectInstalledApp(app: string, expectedVersion: string): Insta
   const signature = run("codesign", ["-dv", "--verbose=4", appPath]).stderr;
   const signingAuthority = signature.match(/^Authority=(Developer ID Application: .+)$/m)?.[1];
   const teamIdentifier = signature.match(/^TeamIdentifier=([A-Z0-9]+)$/m)?.[1];
+  const codeIdentifier = signature.match(/^Identifier=(.+)$/m)?.[1];
+  const designatedRequirement = run("codesign", ["-d", "-r-", "--", appPath]).stderr
+    .match(/^designated => (.+)$/m)?.[1];
   if (!signingAuthority || !teamIdentifier) throw new Error("Developer ID signing identity is missing");
+  if (codeIdentifier !== bundleIdentifier) throw new Error("CodeDirectory identifier does not match the app bundle");
+  if (!designatedRequirement
+    || !designatedRequirement.includes(`identifier \"${bundleIdentifier}\"`)
+    || !designatedRequirement.includes("anchor apple")
+    || designatedRequirement.includes("cdhash")) {
+    throw new Error("desktop designated requirement is not stable Developer ID identity");
+  }
 
   return {
     schema: SCHEMA,
@@ -166,6 +178,8 @@ export function inspectInstalledApp(app: string, expectedVersion: string): Insta
     sidecarSha256: sha256(sidecarPath),
     signingAuthority,
     teamIdentifier,
+    codeIdentifier,
+    designatedRequirement,
     codesignVerified: true,
     gatekeeperAccepted: true,
     notarizationStapled: true,
@@ -188,6 +202,8 @@ function isEvidence(value: unknown): value is InstalledAppEvidence {
     && /^[0-9a-f]{64}$/.test(item.sidecarSha256)
     && typeof item.signingAuthority === "string"
     && typeof item.teamIdentifier === "string"
+    && typeof item.codeIdentifier === "string"
+    && typeof item.designatedRequirement === "string"
     && item.codesignVerified === true
     && item.gatekeeperAccepted === true
     && item.notarizationStapled === true;
@@ -244,7 +260,12 @@ export function verifyUpgradeEvidence(
   if (baseline.executableSha256 === current.executableSha256 || baseline.sidecarSha256 === current.sidecarSha256) {
     throw new Error("desktop upgrade did not replace both bundled executables");
   }
-  if (baseline.teamIdentifier !== current.teamIdentifier) throw new Error("desktop signing team changed during upgrade");
+  if (baseline.teamIdentifier !== current.teamIdentifier
+    || baseline.signingAuthority !== current.signingAuthority
+    || baseline.codeIdentifier !== current.codeIdentifier
+    || baseline.designatedRequirement !== current.designatedRequirement) {
+    throw new Error("desktop code-signing identity changed during upgrade");
+  }
   if (!baseline.signingAuthority.startsWith("Developer ID Application:")
     || !current.signingAuthority.startsWith("Developer ID Application:")) {
     throw new Error("desktop evidence is not Developer ID signed");

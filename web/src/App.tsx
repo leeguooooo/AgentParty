@@ -60,7 +60,11 @@ import {
 } from "./lib/oidc";
 import { withRefreshLock } from "./lib/refreshLock";
 import { gateSession, jwtSub } from "./lib/sessionIdentity";
-import { initialTokenForRuntime, restoreDesktopAccess } from "./lib/desktopAuth";
+import {
+  initialTokenForRuntime,
+  restoreDesktopAccess,
+  restoreDesktopAccessInteractive,
+} from "./lib/desktopAuth";
 import {
   desktopCredentialVaultForOrigin,
   logoutDesktopSession,
@@ -204,6 +208,22 @@ export function App() {
     setDesktopBoot("loading");
     setDesktopNotice(null);
     return restoreDesktopAccess(desktopCredentialVaultForOrigin(activeOrigin), activeOrigin)
+      .then((accessToken) => {
+        setToken(accessToken);
+        setDesktopBoot("ready");
+        return accessToken;
+      })
+      .catch((cause: unknown) => {
+        setToken(null);
+        setDesktopBoot("error");
+        throw cause;
+      });
+  }, [activeOrigin]);
+
+  const restoreDesktopInteractive = useCallback(() => {
+    setDesktopBoot("loading");
+    setDesktopNotice(null);
+    return restoreDesktopAccessInteractive(desktopCredentialVaultForOrigin(activeOrigin), activeOrigin)
       .then((accessToken) => {
         setToken(accessToken);
         setDesktopBoot("ready");
@@ -381,7 +401,10 @@ export function App() {
       await waitForDesktopWindowShown();
       if (!alive) return null;
       let startupOrigin = activeOrigin;
-      const migratedOrigin = await migrateLegacyDesktopCredential();
+      // A stale legacy slot must never block the current per-server credential.
+      // Automatic migration is deliberately non-interactive; users can authorize
+      // or remove the old item later from the explicit recovery screen.
+      const migratedOrigin = await migrateLegacyDesktopCredential().catch(() => null);
       if (!alive) return null;
       if (migratedOrigin !== null) {
         let nextProfiles = loadServerProfiles();
@@ -805,11 +828,14 @@ export function App() {
                 <button
                   type="button"
                   className="d-btn"
-                  onClick={() => void desktopCredentialVaultForOrigin(activeOrigin).delete().then(() => setDesktopBoot("ready"))}
+                  onClick={() => void desktopCredentialVaultForOrigin(activeOrigin)
+                    .deleteInteractive()
+                    .then(() => setDesktopBoot("ready"))
+                    .catch(() => setDesktopBoot("error"))}
                 >
                   {t("App.desktop.removeLocal")}
                 </button>
-                <button type="button" className="d-btn d-btn--primary" onClick={() => void restoreDesktop().catch(() => {})}>
+                <button type="button" className="d-btn d-btn--primary" onClick={() => void restoreDesktopInteractive().catch(() => {})}>
                   {t("App.desktop.retry")}
                 </button>
               </div>

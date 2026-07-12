@@ -42,9 +42,49 @@ const CREDENTIAL_SERVICE: &str = "com.agentparty.desktop";
 const CREDENTIAL_ACCOUNT: &str = "desktop-session";
 #[cfg(target_os = "macos")]
 const MACOS_CREDENTIAL_SERVICE: &str = "com.agentparty.desktop.credentials.v2";
+#[cfg(target_os = "macos")]
+const KEYCHAIN_AUTHORIZATION_REQUIRED: &str = "desktop_keychain_authorization_required";
+#[cfg(target_os = "macos")]
+const KEYCHAIN_UNAVAILABLE: &str = "desktop_keychain_unavailable";
 const UI_RELEASE_FLOOR_PUBLISHED_AT: i64 = 1_783_751_237;
 const UPDATER_DIAGNOSTIC_FILE: &str = "updater-diagnostic.json";
 static UPDATER_DIAGNOSTIC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DesktopReleaseInfo {
+    distribution: &'static str,
+    notarized: bool,
+}
+
+fn release_info_from_build(
+    distribution: Option<&str>,
+    notarized: Option<&str>,
+) -> DesktopReleaseInfo {
+    match (distribution, notarized) {
+        (Some("production"), Some("true")) => DesktopReleaseInfo {
+            distribution: "production",
+            notarized: true,
+        },
+        (Some("preview"), Some("false")) => DesktopReleaseInfo {
+            distribution: "preview",
+            notarized: false,
+        },
+        _ => DesktopReleaseInfo {
+            distribution: "development",
+            notarized: false,
+        },
+    }
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_release_info() -> DesktopReleaseInfo {
+    release_info_from_build(
+        option_env!("AGENTPARTY_DESKTOP_DISTRIBUTION"),
+        option_env!("AGENTPARTY_DESKTOP_NOTARIZED"),
+    )
+}
 
 #[cfg(all(desktop, windows))]
 const UI_PROTOCOL_URL: &str = "http://agentparty-ui.localhost/";
@@ -275,43 +315,103 @@ trait CredentialBackend {
 struct NativeCredentialBackend;
 
 #[cfg(all(desktop, target_os = "macos"))]
-fn macos_keychain_read(service: &str, account: &str) -> Result<Option<String>, String> {
-    match security_framework::passwords::get_generic_password(service, account) {
-        Ok(value) => String::from_utf8(value)
-            .map(Some)
-            .map_err(|_| "secure credential has an invalid encoding".to_string()),
-        Err(error) if error.code() == -25_300 => Ok(None),
-        Err(error) => Err(format!("secure credential read failed: {error}")),
+fn macos_password_options(
+    service: &str,
+    account: &str,
+    allow_interaction: bool,
+) -> security_framework::passwords::PasswordOptions {
+    use core_foundation::{
+        base::TCFType,
+        string::{CFString, CFStringRef},
+    };
+    use security_framework_sys::item::kSecUseAuthenticationUI;
+
+    unsafe extern "C" {
+        static kSecUseAuthenticationUIFail: CFStringRef;
+    }
+
+    let mut options =
+        security_framework::passwords::PasswordOptions::new_generic_password(service, account);
+    if !allow_interaction {
+        #[allow(deprecated)]
+        options.query.push((
+            unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
+            unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUIFail) }.into_CFType(),
+        ));
+    }
+    options
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn map_macos_keychain_error(error: security_framework::base::Error) -> String {
+    match error.code() {
+        -25_308 => KEYCHAIN_AUTHORIZATION_REQUIRED.to_string(),
+        _ => KEYCHAIN_UNAVAILABLE.to_string(),
     }
 }
 
 #[cfg(all(desktop, target_os = "macos"))]
-fn macos_keychain_write(service: &str, account: &str, value: &str) -> Result<(), String> {
-    security_framework::passwords::set_generic_password(service, account, value.as_bytes())
-        .map_err(|error| format!("secure credential write failed: {error}"))
+fn macos_keychain_read(
+    service: &str,
+    account: &str,
+    allow_interaction: bool,
+) -> Result<Option<String>, String> {
+    match security_framework::passwords::generic_password(macos_password_options(
+        service,
+        account,
+        allow_interaction,
+    )) {
+        Ok(value) => String::from_utf8(value)
+            .map(Some)
+            .map_err(|_| "secure credential has an invalid encoding".to_string()),
+        Err(error) if error.code() == -25_300 => Ok(None),
+        Err(error) => Err(map_macos_keychain_error(error)),
+    }
 }
 
 #[cfg(all(desktop, target_os = "macos"))]
-fn macos_keychain_delete(service: &str, account: &str) -> Result<(), String> {
-    match security_framework::passwords::delete_generic_password(service, account) {
+fn macos_keychain_write(
+    service: &str,
+    account: &str,
+    value: &str,
+    allow_interaction: bool,
+) -> Result<(), String> {
+    security_framework::passwords::set_generic_password_options(
+        value.as_bytes(),
+        macos_password_options(service, account, allow_interaction),
+    )
+    .map_err(map_macos_keychain_error)
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn macos_keychain_delete(
+    service: &str,
+    account: &str,
+    allow_interaction: bool,
+) -> Result<(), String> {
+    match security_framework::passwords::delete_generic_password_options(macos_password_options(
+        service,
+        account,
+        allow_interaction,
+    )) {
         Ok(()) => Ok(()),
         Err(error) if error.code() == -25_300 => Ok(()),
-        Err(error) => Err(format!("secure credential delete failed: {error}")),
+        Err(error) => Err(map_macos_keychain_error(error)),
     }
 }
 
 #[cfg(all(desktop, target_os = "macos"))]
 impl CredentialBackend for NativeCredentialBackend {
     fn read(&self, account: &str) -> Result<Option<String>, String> {
-        macos_keychain_read(MACOS_CREDENTIAL_SERVICE, account)
+        macos_keychain_read(MACOS_CREDENTIAL_SERVICE, account, false)
     }
 
     fn write(&self, account: &str, credential: &str) -> Result<(), String> {
-        macos_keychain_write(MACOS_CREDENTIAL_SERVICE, account, credential)
+        macos_keychain_write(MACOS_CREDENTIAL_SERVICE, account, credential, false)
     }
 
     fn delete(&self, account: &str) -> Result<(), String> {
-        macos_keychain_delete(MACOS_CREDENTIAL_SERVICE, account)
+        macos_keychain_delete(MACOS_CREDENTIAL_SERVICE, account, false)
     }
 }
 
@@ -380,8 +480,14 @@ fn desktop_credential_write(origin: String, credential: String) -> Result<(), St
 }
 
 #[cfg(desktop)]
-fn read_desktop_credential(origin: String) -> Result<Option<String>, String> {
+fn read_desktop_credential_with_interaction(
+    origin: String,
+    allow_interaction: bool,
+) -> Result<Option<String>, String> {
     let account = credential_account_for_origin(&origin)?;
+    #[cfg(target_os = "macos")]
+    let credential = macos_keychain_read(MACOS_CREDENTIAL_SERVICE, &account, allow_interaction)?;
+    #[cfg(not(target_os = "macos"))]
     let credential = NativeCredentialBackend.read(&account)?;
     if let Some(raw) = credential.as_deref() {
         let parsed = parse_stored_credential(raw)?;
@@ -390,6 +496,11 @@ fn read_desktop_credential(origin: String) -> Result<Option<String>, String> {
         }
     }
     Ok(credential)
+}
+
+#[cfg(desktop)]
+fn read_desktop_credential(origin: String) -> Result<Option<String>, String> {
+    read_desktop_credential_with_interaction(origin, false)
 }
 
 #[cfg(desktop)]
@@ -413,8 +524,28 @@ async fn desktop_credential_read(
 
 #[cfg(desktop)]
 #[tauri::command]
+async fn desktop_credential_authorize(
+    app: tauri::AppHandle,
+    origin: String,
+) -> Result<Option<String>, String> {
+    wait_for_main_window(app).await?;
+    read_desktop_credential_with_interaction(origin, true)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
 fn desktop_credential_delete(origin: String) -> Result<(), String> {
     let account = credential_account_for_origin(&origin)?;
+    NativeCredentialBackend.delete(&account)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn desktop_credential_delete_interactive(origin: String) -> Result<(), String> {
+    let account = credential_account_for_origin(&origin)?;
+    #[cfg(target_os = "macos")]
+    return macos_keychain_delete(MACOS_CREDENTIAL_SERVICE, &account, true);
+    #[cfg(not(target_os = "macos"))]
     NativeCredentialBackend.delete(&account)
 }
 
@@ -947,9 +1078,12 @@ pub fn run() {
             Some(vec!["--hidden"]),
         ))
         .invoke_handler(tauri::generate_handler![
+            desktop_release_info,
             desktop_credential_read,
+            desktop_credential_authorize,
             desktop_credential_write,
             desktop_credential_delete,
+            desktop_credential_delete_interactive,
             desktop_credential_migrate,
             desktop_window_has_been_shown,
             desktop_updater_record_diagnostic,
@@ -1029,11 +1163,57 @@ mod tests {
 
     use super::{
         credential_account_for_origin, migrate_legacy_credential, parse_stored_credential,
-        refresh_enabled_autostart, tray_action, validate_updater_diagnostic,
-        write_updater_diagnostic, AutostartBackend, CredentialBackend, ExitGuard, MainWindowGate,
-        TrayAction, UpdaterDiagnostic, UpdaterDiagnosticCategory, UpdaterDiagnosticStage,
-        UpdaterDiagnosticStatus, CREDENTIAL_ACCOUNT,
+        refresh_enabled_autostart, release_info_from_build, tray_action,
+        validate_updater_diagnostic, write_updater_diagnostic, AutostartBackend, CredentialBackend,
+        ExitGuard, MainWindowGate, TrayAction, UpdaterDiagnostic, UpdaterDiagnosticCategory,
+        UpdaterDiagnosticStage, UpdaterDiagnosticStatus, CREDENTIAL_ACCOUNT,
     };
+
+    #[test]
+    fn desktop_release_identity_fails_closed() {
+        assert_eq!(
+            release_info_from_build(Some("production"), Some("true")),
+            super::DesktopReleaseInfo {
+                distribution: "production",
+                notarized: true,
+            }
+        );
+        assert_eq!(
+            release_info_from_build(Some("preview"), Some("false")),
+            super::DesktopReleaseInfo {
+                distribution: "preview",
+                notarized: false,
+            }
+        );
+        for invalid in [
+            release_info_from_build(Some("production"), Some("false")),
+            release_info_from_build(Some("preview"), Some("true")),
+            release_info_from_build(None, None),
+        ] {
+            assert_eq!(invalid.distribution, "development");
+            assert!(!invalid.notarized);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn automatic_keychain_access_disables_authentication_ui() {
+        let interactive = super::macos_password_options("service", "account", true);
+        let automatic = super::macos_password_options("service", "account", false);
+        #[allow(deprecated)]
+        {
+            assert_eq!(interactive.query.len(), 3);
+            assert_eq!(automatic.query.len(), 4);
+        }
+        assert_eq!(
+            super::map_macos_keychain_error(security_framework::base::Error::from_code(-25_308)),
+            super::KEYCHAIN_AUTHORIZATION_REQUIRED
+        );
+        assert_eq!(
+            super::map_macos_keychain_error(security_framework::base::Error::from_code(-25_299)),
+            super::KEYCHAIN_UNAVAILABLE
+        );
+    }
 
     #[derive(Default)]
     struct MockAutostart {

@@ -24,6 +24,7 @@ const translations: Record<string, string> = {
   "DesktopUpdater.panel.title": "Desktop update",
   "DesktopUpdater.close": "Close update status",
   "DesktopUpdater.available": "A new version is ready to install.",
+  "DesktopUpdater.previewWarning": "Preview build may ask for Keychain access again.",
   "DesktopUpdater.currentVersion": "Current",
   "DesktopUpdater.nextVersion": "Available",
   "DesktopUpdater.releaseNotes": "Release notes",
@@ -85,6 +86,36 @@ describe("DesktopUpdaterPanel", () => {
 
     expect(html).toContain("Connect to the internet and try again.");
     expect(html).not.toContain("ECONNREFUSED");
+  });
+
+  test("warns before installing a preview build but stays quiet for production", () => {
+    const preview = renderToStaticMarkup(
+      <DesktopUpdaterPanel
+        state={state({ phase: "available", currentVersion: "0.2.98", nextVersion: "0.2.99" })}
+        releaseInfo={{ distribution: "preview", notarized: false }}
+        t={t}
+        panelRef={createRef<HTMLElement>()}
+        onClose={() => {}}
+        onCheck={() => {}}
+        onInstall={() => {}}
+        onRetry={() => {}}
+      />,
+    );
+    const production = renderToStaticMarkup(
+      <DesktopUpdaterPanel
+        state={state({ phase: "available", currentVersion: "0.2.98", nextVersion: "0.2.99" })}
+        releaseInfo={{ distribution: "production", notarized: true }}
+        t={t}
+        panelRef={createRef<HTMLElement>()}
+        onClose={() => {}}
+        onCheck={() => {}}
+        onInstall={() => {}}
+        onRetry={() => {}}
+      />,
+    );
+
+    expect(preview).toContain("Preview build may ask for Keychain access again.");
+    expect(production).not.toContain("Preview build may ask for Keychain access again.");
   });
 });
 

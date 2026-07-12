@@ -525,6 +525,9 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           NOTARIZATION_AUTH_MODE: ${{ steps.apple-signing.outputs.auth_mode }}
+          AGENTPARTY_DESKTOP_DISTRIBUTION: production
+          AGENTPARTY_DESKTOP_NOTARIZED: "true"
+          TAURI_CONFIG: '{"plugins":{"updater":{"endpoints":["https://github.com/leeguooooo/agentparty/releases/download/desktop-stable/latest-v2.json"]}}}'
         run: |
           set -euo pipefail
           if [ "$NOTARIZATION_AUTH_MODE" = "api-key" ]; then
@@ -545,6 +548,9 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           NOTARIZATION_AUTH_MODE: ${{ steps.apple-signing.outputs.auth_mode }}
+          AGENTPARTY_DESKTOP_DISTRIBUTION: production
+          AGENTPARTY_DESKTOP_NOTARIZED: "true"
+          TAURI_CONFIG: '{"plugins":{"updater":{"endpoints":["https://github.com/leeguooooo/agentparty/releases/download/desktop-stable/latest-v2.json"]}}}'
         run: |
           set -euo pipefail
           if [ "$NOTARIZATION_AUTH_MODE" = "api-key" ]; then
@@ -559,6 +565,9 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          AGENTPARTY_DESKTOP_DISTRIBUTION: preview
+          AGENTPARTY_DESKTOP_NOTARIZED: "false"
+          TAURI_CONFIG: '{"plugins":{"updater":{"endpoints":["https://github.com/leeguooooo/agentparty/releases/download/desktop-preview/latest-v2.json"]}}}'
         run: bun run desktop:build:prod
 
       - name: build unnotarized desktop preview with v2 updater key
@@ -566,6 +575,9 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_V2 }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2 }}
+          AGENTPARTY_DESKTOP_DISTRIBUTION: preview
+          AGENTPARTY_DESKTOP_NOTARIZED: "false"
+          TAURI_CONFIG: '{"plugins":{"updater":{"endpoints":["https://github.com/leeguooooo/agentparty/releases/download/desktop-preview/latest-v2.json"]}}}'
         run: bun run desktop:build:prod
 
       - name: verify Developer ID signature and notarization ticket
@@ -713,6 +725,7 @@ jobs:
           merge-multiple: true
 
       - name: classify desktop distribution
+        id: desktop-distribution
         env:
           EXPECTED_UPDATER_KEY_MODE: ${{ steps.updater-key-mode.outputs.mode }}
         run: |
@@ -770,6 +783,7 @@ jobs:
             exit 1
           fi
           echo "DESKTOP_RELEASE_NOTES=$DESKTOP_RELEASE_NOTES" >> "$GITHUB_ENV"
+          echo "distribution=$distribution" >> "$GITHUB_OUTPUT"
 
       - name: generate release changelog
         env:
@@ -871,3 +885,38 @@ jobs:
             dist/*.signing-status.json
             dist/latest.json
             dist/latest-v2.json
+
+      - name: publish isolated desktop updater channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_DISTRIBUTION: ${{ steps.desktop-distribution.outputs.distribution }}
+        run: |
+          set -euo pipefail
+          case "$DESKTOP_DISTRIBUTION" in
+            production) channel_tag="desktop-stable" ;;
+            preview) channel_tag="desktop-preview" ;;
+            *)
+              echo "::error::invalid desktop updater channel: $DESKTOP_DISTRIBUTION"
+              exit 1
+              ;;
+          esac
+          if ! gh release view "$channel_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$channel_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "AgentParty Desktop ${DESKTOP_DISTRIBUTION} channel" \
+              --notes "Machine-managed desktop updater manifest channel." \
+              --prerelease
+          fi
+          manifests=()
+          for manifest in dist/latest.json dist/latest-v2.json; do
+            if [ -s "$manifest" ]; then
+              manifests+=("$manifest")
+            fi
+          done
+          if [ "${#manifests[@]}" -eq 0 ]; then
+            echo "::error::no desktop updater manifests are available"
+            exit 1
+          fi
+          gh release upload "$channel_tag" "${manifests[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
