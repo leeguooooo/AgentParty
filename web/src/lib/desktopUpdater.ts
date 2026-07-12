@@ -1,5 +1,6 @@
 export const LAST_SUCCESSFUL_CHECK_KEY = "ap_desktop_updater_last_success";
 export const LAST_UPDATER_DIAGNOSTIC_KEY = "ap_desktop_updater_diagnostic";
+export const LAST_NOTIFIED_VERSION_KEY = "ap_desktop_updater_notified_version";
 
 const AUTO_CHECK_DELAY_MS = 8_000;
 const AUTO_CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -133,6 +134,35 @@ export function shouldAutoCheck(storage: StorageAdapter, now: number): boolean {
   } catch {
     return true;
   }
+}
+
+export async function notifyDesktopUpdateAvailableOnce(
+  nextVersion: string,
+  isHidden: boolean,
+  storage: StorageAdapter,
+  notify: () => Promise<boolean>,
+): Promise<boolean> {
+  if (!isHidden || !SAFE_VERSION_PATTERN.test(nextVersion)) return false;
+  try {
+    if (storage.getItem(LAST_NOTIFIED_VERSION_KEY) === nextVersion) return false;
+  } catch {
+    // A denied storage read must not hide an important update notification.
+  }
+
+  let delivered = false;
+  try {
+    delivered = await notify();
+  } catch {
+    return false;
+  }
+  if (!delivered) return false;
+
+  try {
+    storage.setItem(LAST_NOTIFIED_VERSION_KEY, nextVersion);
+  } catch {
+    // Delivery succeeded; persistence failure only affects future deduplication.
+  }
+  return true;
 }
 
 function autoCheckDelay(storage: StorageAdapter, now: number): number {

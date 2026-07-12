@@ -16,6 +16,11 @@ export interface MentionNotification {
   seq: number;
 }
 
+export interface DesktopUpdateNotification {
+  title: string;
+  body: string;
+}
+
 export interface DesktopNotificationAction {
   slug: string;
   seq: number;
@@ -31,7 +36,7 @@ interface NotificationModule {
   sendNotification(options: {
     title: string;
     body: string;
-    extra: { slug: string; seq: number };
+    extra?: Record<string, unknown>;
   }): void;
   onAction(handler: (notification: { extra?: Record<string, unknown> }) => void): Promise<NotificationListener>;
 }
@@ -143,6 +148,20 @@ export async function sendMentionNotification(input: MentionNotification): Promi
       body: input.body,
       extra: { slug: input.slug, seq: input.seq },
     });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function sendDesktopUpdateAvailableNotification(
+  input: DesktopUpdateNotification,
+): Promise<boolean> {
+  if (!isDesktopRuntime()) return false;
+  try {
+    const notification = await dependencies.loadNotification();
+    if (!(await notification.isPermissionGranted())) return false;
+    await notification.sendNotification({ title: input.title, body: input.body });
     return true;
   } catch {
     return false;

@@ -10,6 +10,7 @@ import {
   openDesktopVerificationUrl,
   requestDesktopNotificationPermission,
   listenForDesktopUpdateChecks,
+  sendDesktopUpdateAvailableNotification,
   sendMentionNotification,
   setAutostartEnabled,
   setDesktopBadge,
@@ -170,6 +171,49 @@ describe("desktop notifications", () => {
     });
 
     expect(await sendMentionNotification({ title: "Mention", body: "hello", slug: "general", seq: 8 })).toBe(false);
+    expect(sends).toBe(0);
+  });
+
+  test("sends update copy without requesting permission or mention metadata", async () => {
+    const payloads: unknown[] = [];
+    let permissionRequests = 0;
+    __setDesktopRuntimeDependenciesForTests({
+      isTauri: () => true,
+      loadNotification: async () => notificationModule({
+        requestPermission: async () => {
+          permissionRequests += 1;
+          return "granted";
+        },
+        sendNotification: (payload) => {
+          payloads.push(payload);
+        },
+      }),
+    });
+
+    expect(await sendDesktopUpdateAvailableNotification({
+      title: "Desktop update available",
+      body: "AgentParty 0.2.98 is ready to install.",
+    })).toBe(true);
+    expect(permissionRequests).toBe(0);
+    expect(payloads).toEqual([{
+      title: "Desktop update available",
+      body: "AgentParty 0.2.98 is ready to install.",
+    }]);
+  });
+
+  test("does not send an update notification without existing permission", async () => {
+    let sends = 0;
+    __setDesktopRuntimeDependenciesForTests({
+      isTauri: () => true,
+      loadNotification: async () => notificationModule({
+        isPermissionGranted: async () => false,
+        sendNotification: () => {
+          sends += 1;
+        },
+      }),
+    });
+
+    expect(await sendDesktopUpdateAvailableNotification({ title: "Update", body: "Ready" })).toBe(false);
     expect(sends).toBe(0);
   });
 

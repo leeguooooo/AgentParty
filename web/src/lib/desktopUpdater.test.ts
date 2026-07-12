@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  LAST_NOTIFIED_VERSION_KEY,
   LAST_UPDATER_DIAGNOSTIC_KEY,
   bindDesktopUpdaterResumeChecks,
   LAST_SUCCESSFUL_CHECK_KEY,
@@ -8,6 +9,7 @@ import {
   createDesktopUpdaterController,
   createTauriUpdaterAdapter,
   isTauriEnvironment,
+  notifyDesktopUpdateAvailableOnce,
   shouldAutoCheck,
   type DesktopUpdaterAdapter,
   type DesktopUpdaterController,
@@ -138,6 +140,44 @@ describe("desktop runtime detection", () => {
       appVersion: "0.2.83",
       targetVersion: "0.2.83",
     });
+  });
+});
+
+describe("desktop update notifications", () => {
+  test("only notifies in the background and records a successful delivery", async () => {
+    const storage = memoryStorage();
+    const delivered: string[] = [];
+    const notify = async () => {
+      delivered.push("0.2.83");
+      return true;
+    };
+
+    expect(await notifyDesktopUpdateAvailableOnce("0.2.83", false, storage, notify)).toBe(false);
+    expect(await notifyDesktopUpdateAvailableOnce("0.2.83", true, storage, notify)).toBe(true);
+    expect(await notifyDesktopUpdateAvailableOnce("0.2.83", true, storage, notify)).toBe(false);
+
+    expect(delivered).toEqual(["0.2.83"]);
+    expect(storage.values.get(LAST_NOTIFIED_VERSION_KEY)).toBe("0.2.83");
+  });
+
+  test("notifies again for a newer version", async () => {
+    const storage = memoryStorage({ [LAST_NOTIFIED_VERSION_KEY]: "0.2.83" });
+    let sends = 0;
+
+    expect(await notifyDesktopUpdateAvailableOnce("0.2.84", true, storage, async () => {
+      sends += 1;
+      return true;
+    })).toBe(true);
+
+    expect(sends).toBe(1);
+    expect(storage.values.get(LAST_NOTIFIED_VERSION_KEY)).toBe("0.2.84");
+  });
+
+  test("does not suppress a later attempt when native delivery fails", async () => {
+    const storage = memoryStorage();
+
+    expect(await notifyDesktopUpdateAvailableOnce("0.2.83", true, storage, async () => false)).toBe(false);
+    expect(storage.values.has(LAST_NOTIFIED_VERSION_KEY)).toBe(false);
   });
 });
 

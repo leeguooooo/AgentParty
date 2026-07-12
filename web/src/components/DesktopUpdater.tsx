@@ -3,10 +3,14 @@ import {
   bindDesktopUpdaterResumeChecks,
   createBrowserDesktopUpdaterClient,
   isTauriEnvironment,
+  notifyDesktopUpdateAvailableOnce,
   type DesktopUpdaterController,
   type DesktopUpdaterState,
 } from "../lib/desktopUpdater";
-import { listenForDesktopUpdateChecks } from "../lib/desktopRuntime";
+import {
+  listenForDesktopUpdateChecks,
+  sendDesktopUpdateAvailableNotification,
+} from "../lib/desktopRuntime";
 import { useT } from "../i18n/useT";
 import type { TFunc } from "../i18n/useT";
 import "../i18n/strings/DesktopUpdater";
@@ -209,6 +213,26 @@ export function DesktopUpdater() {
     updateUpdaterDialogFocus(state.panelOpen, wasPanelOpenRef.current, panelRef.current, triggerRef.current);
     wasPanelOpenRef.current = state.panelOpen;
   }, [state.panelOpen]);
+
+  useEffect(() => {
+    if (!desktop || state.phase !== "available" || state.nextVersion === null) return;
+    let storage: Storage;
+    try {
+      storage = window.localStorage;
+    } catch {
+      return;
+    }
+    const nextVersion = state.nextVersion;
+    void notifyDesktopUpdateAvailableOnce(
+      nextVersion,
+      document.visibilityState !== "visible",
+      storage,
+      () => sendDesktopUpdateAvailableNotification({
+        title: t("DesktopUpdater.notification.title"),
+        body: t("DesktopUpdater.notification.body", { version: nextVersion }),
+      }),
+    );
+  }, [desktop, state.nextVersion, state.phase, t]);
 
   useEffect(() => {
     if (!state.panelOpen) return;

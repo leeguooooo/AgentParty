@@ -226,6 +226,9 @@ describe("desktop release workflow", () => {
     expect(desktopDocs).toContain("正式下载入口会在这些门禁真实通过后开放");
     expect(desktopDocs).toContain("正常运行期间每小时复查");
     expect(desktopDocs).toContain("从锁屏或后台回到应用时也会立即补查是否到期");
+    expect(desktopDocs).toContain("还会发送一次包含目标版本的 macOS 通知");
+    expect(desktopDocs).toContain("应用不会为了更新主动弹出通知权限申请");
+    expect(desktopDocs).toContain("同一版本只成功通知一次");
     expect(desktopDocs).toContain("A newly available version opens the update panel automatically");
   });
 
