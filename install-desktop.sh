@@ -214,6 +214,44 @@ main() {
   rm -rf "$backup"
   backup=""
 
+  # tauri-plugin-autostart stores an absolute executable path. Preserve an
+  # enabled login preference, but migrate stale paths left by an older install
+  # or a local preview build so the next login cannot start the wrong binary.
+  launch_agent="$HOME/Library/LaunchAgents/AgentParty.plist"
+  installed_executable="$dst/Contents/MacOS/agentparty-desktop"
+  if [ -f "$launch_agent" ]; then
+    registered_executable="$(plutil -extract ProgramArguments.0 raw -o - "$launch_agent" 2>/dev/null || true)"
+    if [ -n "$registered_executable" ] && [ "$registered_executable" != "$installed_executable" ]; then
+      launch_agent_backup="$tmp/AgentParty.plist.backup"
+      cp "$launch_agent" "$launch_agent_backup"
+      if plutil -replace ProgramArguments -json '[]' "$launch_agent" \
+        && plutil -insert ProgramArguments.0 -string "$installed_executable" "$launch_agent" \
+        && plutil -insert ProgramArguments.1 -string "--hidden" "$launch_agent" \
+        && [ "$(plutil -extract ProgramArguments.0 raw -o - "$launch_agent" 2>/dev/null || true)" = "$installed_executable" ]; then
+        launch_domain="gui/$(id -u)"
+        launchctl bootout "$launch_domain/AgentParty" >/dev/null 2>&1 || true
+        launch_reloaded=0
+        launch_attempt=1
+        while [ "$launch_attempt" -le 3 ]; do
+          if launchctl bootstrap "$launch_domain" "$launch_agent" >/dev/null 2>&1; then
+            launch_reloaded=1
+            break
+          fi
+          [ "$launch_attempt" -eq 3 ] || sleep "$launch_attempt"
+          launch_attempt="$((launch_attempt + 1))"
+        done
+        if [ "$launch_reloaded" = "1" ]; then
+          log "已把登录启动项迁移到当前安装。"
+        else
+          log "登录启动项路径已更新；将在下次登录时生效。"
+        fi
+      else
+        cp "$launch_agent_backup" "$launch_agent" 2>/dev/null || true
+        log "警告：无法更新现有登录启动项；请在桌面设置中关闭后重新开启。"
+      fi
+    fi
+  fi
+
   log "✅ 已安装：$dst"
   log "启动：open \"$dst\"    或在 Launchpad/访达里双击。"
   if [ "$preview" = "0" ]; then

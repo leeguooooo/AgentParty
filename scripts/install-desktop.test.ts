@@ -18,6 +18,8 @@ function runInstaller(
   preview = false,
   allowUnnotarized = false,
   runningApp = false,
+  staleAutostart = false,
+  bootstrapFailsOnce = false,
 ) {
   const root = mkdtempSync(resolve(tmpdir(), "desktop-installer-"));
   const bin = resolve(root, "bin");
@@ -29,6 +31,12 @@ function runInstaller(
   mkdirSync(bin, { recursive: true });
   mkdirSync(assets, { recursive: true });
   mkdirSync(resolve(appDir, "AgentParty.app"), { recursive: true });
+  const launchAgent = resolve(root, "Library/LaunchAgents/AgentParty.plist");
+  if (staleAutostart) {
+    mkdirSync(resolve(root, "Library/LaunchAgents"), { recursive: true });
+    writeFileSync(launchAgent, "fixture launch agent");
+    writeFileSync(`${launchAgent}.path`, "/tmp/old-agentparty/AgentParty.app/Contents/MacOS/agentparty-desktop");
+  }
   writeFileSync(resolve(appDir, "AgentParty.app/old-marker"), "old");
   writeFileSync(resolve(app, "Contents/Info.plist"), "fixture");
   executable(resolve(app, "Contents/MacOS/party"), "echo 0.2.90");
@@ -47,7 +55,7 @@ function runInstaller(
   executable(resolve(bin, "curl"), 'for last; do :; done; cp "$FIXTURE_ASSETS/$(basename "$2")" "$last" 2>/dev/null || cp "$FIXTURE_ASSETS/$(basename "$1")" "$last"');
   executable(resolve(bin, "shasum"), 'echo "$FIXTURE_DMG_HASH  $3"');
   executable(resolve(bin, "hdiutil"), 'case "$1" in attach) printf "/dev/disk9s1\\tApple_HFS\\t%s\\n" "$FIXTURE_MOUNT" ;; esac; exit 0');
-  executable(resolve(bin, "plutil"), 'case "$2" in notarized) [ "${FIXTURE_PREVIEW:-0}" = 1 ] && echo false || echo true ;; distribution) [ "${FIXTURE_PREVIEW:-0}" = 1 ] && echo preview || echo production ;; notarization_auth) [ "${FIXTURE_PREVIEW:-0}" = 1 ] && echo none || echo api-key ;; CFBundleShortVersionString) echo 0.2.90 ;; *) exit 1 ;; esac');
+  executable(resolve(bin, "plutil"), 'if [ "$1" = "-replace" ]; then printf "%s\\n" "$*" >> "$FIXTURE_PLUTIL_LOG"; : > "$5.path"; exit 0; fi; if [ "$1" = "-insert" ]; then printf "%s\\n" "$*" >> "$FIXTURE_PLUTIL_LOG"; case "$2" in ProgramArguments.0) printf "%s" "$4" > "$5.path" ;; esac; exit 0; fi; case "$2" in notarized) [ "${FIXTURE_PREVIEW:-0}" = 1 ] && echo false || echo true ;; distribution) [ "${FIXTURE_PREVIEW:-0}" = 1 ] && echo preview || echo production ;; notarization_auth) [ "${FIXTURE_PREVIEW:-0}" = 1 ] && echo none || echo api-key ;; CFBundleShortVersionString) echo 0.2.90 ;; ProgramArguments.0) cat "$6.path" ;; *) exit 1 ;; esac');
   executable(resolve(bin, "xcrun"), "exit 0");
   executable(resolve(bin, "spctl"), "exit 0");
   executable(resolve(bin, "codesign"), 'case "$1" in -dv) echo "Authority=Developer ID Application: AgentParty Inc. (TEAM123456)" >&2 ;; esac; exit 0');
@@ -59,6 +67,7 @@ function runInstaller(
   executable(resolve(bin, "osascript"), 'printf "%s\\n" "$*" > "$FIXTURE_OSASCRIPT_LOG"');
   executable(resolve(bin, "pkill"), 'printf "%s\\n" "$*" > "$FIXTURE_PKILL_LOG"; : > "$FIXTURE_TERMINATED"');
   executable(resolve(bin, "sleep"), "exit 0");
+  executable(resolve(bin, "launchctl"), 'printf "%s\\n" "$*" >> "$FIXTURE_LAUNCHCTL_LOG"; if [ "$1" = "bootstrap" ] && [ "${FIXTURE_BOOTSTRAP_FAIL_ONCE:-0}" = 1 ] && [ ! -e "$FIXTURE_BOOTSTRAP_MARKER" ]; then : > "$FIXTURE_BOOTSTRAP_MARKER"; exit 1; fi');
   if (failReplacement) {
     executable(resolve(bin, "mv"), 'case "$1" in *.AgentParty.app.new.*) exit 1 ;; esac; PATH=/usr/bin:/bin exec mv "$@"');
   }
@@ -79,10 +88,15 @@ function runInstaller(
       FIXTURE_TERMINATED: resolve(root, "terminated"),
       FIXTURE_OSASCRIPT_LOG: resolve(root, "osascript.log"),
       FIXTURE_PKILL_LOG: resolve(root, "pkill.log"),
+      FIXTURE_PLUTIL_LOG: resolve(root, "plutil.log"),
+      FIXTURE_LAUNCHCTL_LOG: resolve(root, "launchctl.log"),
+      FIXTURE_BOOTSTRAP_FAIL_ONCE: bootstrapFailsOnce ? "1" : "0",
+      FIXTURE_BOOTSTRAP_MARKER: resolve(root, "bootstrap-attempted"),
       AGENTPARTY_ALLOW_UNNOTARIZED: allowUnnotarized ? "1" : "0",
+      HOME: root,
     },
   });
-  return { root, appDir, result };
+  return { root, appDir, launchAgent, result };
 }
 
 describe("macOS desktop installer", () => {
@@ -178,6 +192,21 @@ describe("macOS desktop installer", () => {
       expect(readFileSync(resolve(run.root, "xattr.log"), "utf8")).toContain("com.apple.quarantine");
       expect(readFileSync(resolve(run.appDir, "AgentParty.app/Contents/MacOS/party"), "utf8")).toContain("0.2.90");
       expect(run.result.stderr).toContain("未经 Apple Developer ID 签名和公证");
+    } finally {
+      rmSync(run.root, { recursive: true, force: true });
+    }
+  });
+
+  test("rewrites and reloads an enabled login item that points at an old installation", () => {
+    const run = runInstaller(false, false, false, false, true, true);
+    try {
+      expect(run.result.status).toBe(0);
+      expect(readFileSync(`${run.launchAgent}.path`, "utf8")).toBe(
+        `${run.appDir}/AgentParty.app/Contents/MacOS/agentparty-desktop`,
+      );
+      const launchctl = readFileSync(resolve(run.root, "launchctl.log"), "utf8");
+      expect(launchctl).toContain("bootout");
+      expect(launchctl.match(/^bootstrap /gm)).toHaveLength(2);
     } finally {
       rmSync(run.root, { recursive: true, force: true });
     }

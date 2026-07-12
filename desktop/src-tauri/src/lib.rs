@@ -31,6 +31,9 @@ use tauri::{
     Emitter, Manager, WindowEvent,
 };
 
+#[cfg(desktop)]
+use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+
 #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
 use tauri_plugin_deep_link::DeepLinkExt;
 
@@ -431,6 +434,31 @@ fn tray_action(id: &str) -> Option<TrayAction> {
         "quit" => Some(TrayAction::Quit),
         _ => None,
     }
+}
+
+trait AutostartBackend {
+    fn is_enabled(&self) -> Result<bool, String>;
+    fn enable(&self) -> Result<(), String>;
+}
+
+#[cfg(desktop)]
+impl AutostartBackend for tauri_plugin_autostart::AutoLaunchManager {
+    fn is_enabled(&self) -> Result<bool, String> {
+        self.is_enabled().map_err(|error| error.to_string())
+    }
+
+    fn enable(&self) -> Result<(), String> {
+        self.enable().map_err(|error| error.to_string())
+    }
+}
+
+fn refresh_enabled_autostart<B: AutostartBackend>(backend: &B) -> Result<(), String> {
+    if backend.is_enabled()? {
+        // The plugin stores an absolute executable path. Re-enabling preserves the
+        // user's preference while replacing stale paths left by an older install.
+        backend.enable()?;
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -872,6 +900,9 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 install_tray(app)?;
+                if let Err(error) = refresh_enabled_autostart(app.autolaunch().inner()) {
+                    eprintln!("AgentParty could not refresh its login item: {error}");
+                }
                 #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
                 app.deep_link().register_all()?;
                 if !std::env::args().any(|arg| arg == "--hidden") {
@@ -925,10 +956,73 @@ mod tests {
 
     use super::{
         credential_account_for_origin, migrate_legacy_credential, parse_stored_credential,
-        tray_action, validate_updater_diagnostic, write_updater_diagnostic, CredentialBackend,
-        ExitGuard, TrayAction, UpdaterDiagnostic, UpdaterDiagnosticCategory,
+        refresh_enabled_autostart, tray_action, validate_updater_diagnostic,
+        write_updater_diagnostic, AutostartBackend, CredentialBackend, ExitGuard, TrayAction,
+        UpdaterDiagnostic, UpdaterDiagnosticCategory,
         UpdaterDiagnosticStage, UpdaterDiagnosticStatus, CREDENTIAL_ACCOUNT,
     };
+
+    #[derive(Default)]
+    struct MockAutostart {
+        enabled: bool,
+        enable_calls: RefCell<usize>,
+        read_error: bool,
+        write_error: bool,
+    }
+
+    impl AutostartBackend for MockAutostart {
+        fn is_enabled(&self) -> Result<bool, String> {
+            if self.read_error {
+                return Err("autostart read failed".to_string());
+            }
+            Ok(self.enabled)
+        }
+
+        fn enable(&self) -> Result<(), String> {
+            *self.enable_calls.borrow_mut() += 1;
+            if self.write_error {
+                return Err("autostart write failed".to_string());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn refreshes_only_an_enabled_autostart_registration() {
+        let disabled = MockAutostart::default();
+        refresh_enabled_autostart(&disabled).unwrap();
+        assert_eq!(*disabled.enable_calls.borrow(), 0);
+
+        let enabled = MockAutostart {
+            enabled: true,
+            ..MockAutostart::default()
+        };
+        refresh_enabled_autostart(&enabled).unwrap();
+        assert_eq!(*enabled.enable_calls.borrow(), 1);
+    }
+
+    #[test]
+    fn autostart_refresh_surfaces_read_and_rewrite_failures() {
+        let read_failure = MockAutostart {
+            read_error: true,
+            ..MockAutostart::default()
+        };
+        assert_eq!(
+            refresh_enabled_autostart(&read_failure).unwrap_err(),
+            "autostart read failed"
+        );
+
+        let write_failure = MockAutostart {
+            enabled: true,
+            write_error: true,
+            ..MockAutostart::default()
+        };
+        assert_eq!(
+            refresh_enabled_autostart(&write_failure).unwrap_err(),
+            "autostart write failed"
+        );
+        assert_eq!(*write_failure.enable_calls.borrow(), 1);
+    }
 
     fn pending_updater_receipt() -> UpdaterDiagnostic {
         UpdaterDiagnostic {
