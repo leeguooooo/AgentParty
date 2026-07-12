@@ -3886,7 +3886,10 @@ app.get("/api/channels/:slug/export", async (c) => {
     new Request("https://do/internal/export", { headers: { "x-partykit-room": slug } }),
   );
   if (!doRes.ok) return c.json(errorBody("unavailable", "channel state export failed"), 503);
-  const doDump = (await doRes.json()) as { exported_at: number; row_counts: Record<string, number>; tables: Record<string, unknown[]> };
+  const doDump = (await doRes.json().catch(() => null)) as {
+    exported_at: number; row_counts: Record<string, number>; tables: Record<string, unknown[]>;
+  } | null;
+  if (doDump === null) return c.json(errorBody("unavailable", "channel state export returned invalid JSON"), 503);
   const [roles, tasks, members] = await Promise.all([
     c.env.DB.prepare("SELECT * FROM channel_roles WHERE channel_slug = ? ORDER BY agent_name").bind(slug).all(),
     c.env.DB.prepare("SELECT * FROM channel_tasks WHERE channel_slug = ? ORDER BY id").bind(slug).all(),

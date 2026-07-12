@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AgentParty 频道备份与恢复 Runbook</title>
+  <style>
+    :root { --fg:#172033; --muted:#667085; --accent:#2563eb; --border:#d0d5dd; --bg:#f8fafc; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--fg); background:var(--bg); font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
+    main { max-width:960px; margin:40px auto; padding:0 24px 56px; }
+    header,section,aside { background:#fff; border:1px solid var(--border); border-radius:10px; padding:22px; margin:16px 0; }
+    h1,h2 { margin:0 0 10px; line-height:1.25; } h2 { font-size:20px; }
+    p { margin:8px 0; } code { background:#eef2f6; padding:2px 5px; border-radius:4px; }
+    pre { overflow:auto; background:#111827; color:#f8fafc; padding:14px; border-radius:7px; }
+    table { width:100%; border-collapse:collapse; } th,td { padding:9px; border:1px solid var(--border); text-align:left; vertical-align:top; }
+    th { background:#f2f4f7; } .warn { border-left:4px solid var(--accent); }
+  </style>
+</head>
+<body><main>
+  <header><h1>频道备份与恢复 Runbook</h1><p>适用于单频道 DO SQLite 与 D1 元数据分裂、误部署或存储恢复。备份格式版本为 <code>backup_version: 1</code>。</p></header>
+  <section><h2>1. 先冻结写入并采集证据</h2><pre><code>party channel reconcile &lt;slug&gt; --json
+party channel export &lt;slug&gt; --out &lt;slug&gt;-$(date +%Y%m%d-%H%M%S).json</code></pre><p>保存当前部署 commit、D1 time-travel 时间点、对账输出和导出文件校验和。不要在证据保存前覆盖 DO。</p></section>
+  <section><h2>2. 判断权威数据源</h2><table><thead><tr><th>故障</th><th>权威源</th><th>动作</th></tr></thead><tbody>
+    <tr><td>仅 D1 元数据误改</td><td>导出物中的 <code>channel</code> / D1 表</td><td>用 D1 time-travel 恢复到确认时间点，再重新对账。</td></tr>
+    <tr><td>DO SQLite 丢失或损坏</td><td>最近一次频道导出物</td><td>新建/清空目标 DO 后，按导出表的主键顺序恢复持久表；跳过 rate、webhook queue/dead letters、wake ledger 等瞬时表。</td></tr>
+    <tr><td>DO 与 D1 分裂</td><td>D1 配置字段；DO 消息历史</td><td>先恢复 D1，再通过正常频道初始化请求重推配置；消息只从导出物恢复，禁止双向盲合并。</td></tr>
+  </tbody></table></section>
+  <section><h2>3. D1 time-travel</h2><p>使用 Cloudflare D1 time-travel 在独立恢复库验证目标时间点；确认 schema 与行数后再替换生产库。迁移不可逆时，先回退 Worker 到与目标 schema 兼容的版本。</p><pre><code>wrangler d1 time-travel info &lt;database&gt;
+wrangler d1 time-travel restore &lt;database&gt; --timestamp=&lt;ISO-8601&gt;</code></pre></section>
+  <section><h2>4. DO 状态重建</h2><p>导出 JSON 的 <code>durable_object.tables</code> 是恢复输入。恢复工具必须逐表事务写入、校验行数，并保持 <code>messages.seq</code>、修订游标和 meta 计数器单调。恢复期间禁止客户端连接；完成后再解除写入冻结。</p></section>
+  <section><h2>5. 验收</h2><pre><code>party channel reconcile &lt;slug&gt;
+party history --channel &lt;slug&gt; --limit 20
+party who --channel &lt;slug&gt;</code></pre><p>要求 reconcile 为 <code>ok:true</code>、最近消息可读、成员/角色/任务数量与备份一致，并记录恢复操作者、时间点、源文件 SHA-256 和部署 commit。</p></section>
+  <aside class="warn"><strong>边界：</strong>当前 CLI 提供导出与对账，不提供自动覆盖生产 DO 的 <code>restore</code> 命令。恢复写入必须在隔离环境演练并经 owner 审批；不得把 D1 time-travel 当作 DO SQLite 的备份。</aside>
+</main></body></html>

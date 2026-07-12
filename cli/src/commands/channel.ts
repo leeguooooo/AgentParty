@@ -667,7 +667,12 @@ export async function run(argv: string[]): Promise<number> {
         const json = JSON.stringify(backup, null, 2);
         const out = str(flags.out);
         if (out) {
-          writeFileSync(out, json + "\n");
+          try {
+            writeFileSync(out, json + "\n");
+          } catch (error) {
+            console.error(`failed to write backup to ${out}: ${error instanceof Error ? error.message : String(error)}`);
+            return 1;
+          }
           console.error(`exported ${slug} backup to ${out}`);
         } else {
           console.log(json);
