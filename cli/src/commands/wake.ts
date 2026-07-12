@@ -1,5 +1,5 @@
 // party wake test — prove mention/wake/resume as separate phases.
-import { autoWakeReachable, EXIT_TIMEOUT, type MsgFrame, type PresenceEntry, type WakeDelivery } from "@agentparty/shared";
+import { autoWakeReachable, EXIT_TIMEOUT, type MsgFrame, type PresenceEntry, type WakeDelivery, type WakeKind } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readConfig, resolveChannel } from "../config";
 import { jsonFrame, nowTs } from "../json";
@@ -141,17 +141,56 @@ function summarizeWakeDelivery(delivery: WakeDelivery | null, adapter: string | 
   };
 }
 
-async function fetchLatestWebhookDelivery(
+// #107：serve/watch 是拉模型——服务端从不主动投递，只能记「这条 @ 已广播给已登记 serve/watch 的可唤醒
+// 目标」(result='broadcast')；该 agent resume 引用这条 @ 后升级为 'consumed'。故 wake_invoked 相位映射为：
+//  - null delivery         → ok:null，标注「尚未审计」（沿用旧语义，仅在 ledger 缺行/端点不支持时）。
+//  - result='broadcast'    → ok:null，但给出真实审计证据（已广播、待 resume 确认消费），而不是笼统的「未审计」。
+//  - result='consumed'     → ok:true，唤醒闭环（resume 已引用这条 @）。
+function summarizeServeWatchDelivery(delivery: WakeDelivery | null, adapter: string | null): { ok: boolean | null; adapter: string | null; evidence: string } {
+  if (delivery === null) {
+    return {
+      ok: null,
+      adapter,
+      evidence: "serve/watch broadcast is not audited by the worker yet; only linked resume is conclusive",
+    };
+  }
+  const kind = delivery.adapter_kind;
+  if (delivery.result === "consumed") {
+    const via = delivery.ack_seq !== null ? `reply #${delivery.ack_seq}` : delivery.resume_seq !== null ? `status #${delivery.resume_seq}` : "linked resume";
+    return {
+      ok: true,
+      adapter,
+      evidence: `${kind} client consumed the broadcast for mention #${delivery.mention_seq} (${via})`,
+    };
+  }
+  // result='broadcast'：服务端已把这条 @ 广播给可唤醒的拉客户端，但尚未观测到引用它的 resume。
+  return {
+    ok: null,
+    adapter,
+    evidence: `${kind} broadcast delivered for mention #${delivery.mention_seq}; awaiting linked resume to confirm consumption`,
+  };
+}
+
+// #107：webhook 由服务端主动投递、天然可审计；serve/watch 的广播同样落 ledger（adapter_kind='serve'|'watch'）。
+// 按目标当前登记的 wake 层挑对应的 adapter_kind 读最新一行——webhook 只认 'webhook'，serve/watch 认两者。
+function ledgerKindsFor(adapter: string | null): readonly WakeKind[] | null {
+  if (adapter === "webhook") return ["webhook"];
+  if (adapter === "serve" || adapter === "watch") return ["serve", "watch"];
+  return null;
+}
+
+async function fetchLatestLedgerDelivery(
   server: string,
   token: string,
   channel: string,
   target: string,
   mentionSeq: number,
+  kinds: readonly WakeKind[],
 ): Promise<WakeDelivery | null> {
   try {
     const deliveries = await fetchWakeDeliveries(server, token, channel, { since: mentionSeq, target, limit: 20 });
     return deliveries
-      .filter((d) => d.mention_seq === mentionSeq && d.adapter_kind === "webhook")
+      .filter((d) => d.mention_seq === mentionSeq && kinds.includes(d.adapter_kind))
       .at(-1) ?? null;
   } catch (e) {
     if (e instanceof RestError && (e.status === 404 || e.status === 501)) return null;
@@ -171,7 +210,17 @@ function printHuman(frame: WakeTestFrame) {
   console.log(
     `mention: ${frame.phases.mention_delivered.ok ? `delivered #${frame.phases.mention_delivered.seq}` : "not sent"}`,
   );
-  console.log(`wake invoked: ${frame.phases.wake_invoked.ok === null ? "not audited" : frame.phases.wake_invoked.ok ? "yes" : "no"}`);
+  // #107：ok===null 时别一律印死板的「not audited」——serve/watch 的 broadcast 行已是真实审计结果，
+  // 直接摊出 evidence（broadcast 已投递/待 resume 确认），只有 ledger 真无行时 evidence 才是「未审计」。
+  console.log(
+    `wake invoked: ${
+      frame.phases.wake_invoked.ok === null
+        ? frame.phases.wake_invoked.evidence
+        : frame.phases.wake_invoked.ok
+          ? "yes"
+          : "no"
+    }`,
+  );
   console.log(
     `resumed: ${
       frame.phases.agent_resumed.ok
@@ -299,11 +348,12 @@ export async function run(argv: string[]): Promise<number> {
       reply_to: null,
     });
     const deadline = Date.now() + timeoutSec * 1000;
+    const ledgerKinds = ledgerKindsFor(adapter);
     let ack: { seq: number; evidence: AckEvidence } | null = null;
     let wakeDelivery: WakeDelivery | null = null;
     do {
-      if (adapter === "webhook") {
-        wakeDelivery = await fetchLatestWebhookDelivery(cfg.server, cfg.token, channel, target, seq);
+      if (ledgerKinds !== null) {
+        wakeDelivery = await fetchLatestLedgerDelivery(cfg.server, cfg.token, channel, target, seq, ledgerKinds);
         ack = ackFromWakeDelivery(wakeDelivery);
         if (ack !== null) break;
       }
@@ -311,8 +361,8 @@ export async function run(argv: string[]): Promise<number> {
       if (ack !== null) break;
       await sleep(Math.min(1000, Math.max(100, deadline - Date.now())));
     } while (Date.now() < deadline);
-    if (adapter === "webhook" && wakeDelivery === null) {
-      wakeDelivery = await fetchLatestWebhookDelivery(cfg.server, cfg.token, channel, target, seq);
+    if (ledgerKinds !== null && wakeDelivery === null) {
+      wakeDelivery = await fetchLatestLedgerDelivery(cfg.server, cfg.token, channel, target, seq, ledgerKinds);
     }
 
     // serve/watch are local supervisors reading the channel stream; they filter out the
@@ -339,7 +389,9 @@ export async function run(argv: string[]): Promise<number> {
     const wakeInvoked =
       gate.advisory !== null && wakeDelivery === null
         ? { ok: false as const, adapter, evidence: gate.advisory }
-        : summarizeWakeDelivery(wakeDelivery, adapter);
+        : adapter === "serve" || adapter === "watch"
+          ? summarizeServeWatchDelivery(wakeDelivery, adapter)
+          : summarizeWakeDelivery(wakeDelivery, adapter);
     const frame: WakeTestFrame = {
       type: "wake_test",
       channel,

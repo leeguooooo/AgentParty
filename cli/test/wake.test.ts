@@ -183,3 +183,231 @@ describe("wake test self-target fast-fail (#194)", () => {
     expect(frame).toMatchObject({ type: "wake_test", target: "me", result: "self_target" });
   });
 });
+
+// ── #107：serve/watch 的唤醒也进服务端 ledger，CLI 要读它、把 wake_invoked 从「not audited」升级为真实审计 ──
+function freshServeWatchPresence(kind: "serve" | "watch") {
+  const now = Date.now();
+  return {
+    name: "agent",
+    state: "waiting",
+    note: null,
+    ts: now,
+    last_seen: now,
+    residency: "supervised",
+    wake: { kind, verified_at: 100 },
+  };
+}
+
+describe("wake test audits serve/watch ledger (#107)", () => {
+  test("serve broadcast (not yet consumed): wake_invoked reads the ledger, not 'not audited'", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/presence") {
+        return Response.json({ presence: [freshServeWatchPresence("serve")] });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ seq: 50 });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/wake-deliveries") {
+        return Response.json({
+          deliveries: [
+            {
+              mention_seq: 50,
+              target_name: "agent",
+              webhook_name: "agent",
+              adapter_kind: "serve",
+              attempt: 1,
+              result: "broadcast",
+              http_status: null,
+              error: null,
+              attempted_at: 112,
+              ack_seq: null,
+              resume_seq: null,
+            },
+          ],
+        });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ messages: [] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+
+    const r = await runCli(["wake", "test", "@agent", "dev", "--timeout", "1", "--json"]);
+    // broadcast ≠ consumed：还没观测到 resume，仍是 timeout（exit 2），但不再是「未审计」
+    expect(r.code).toBe(2);
+    const frame = JSON.parse(r.stdout.trim());
+    expect(frame).toMatchObject({
+      type: "wake_test",
+      result: "timeout",
+      phases: {
+        mention_delivered: { ok: true, seq: 50 },
+        wake_invoked: { ok: null, adapter: "serve" },
+        agent_resumed: { ok: false, seq: null },
+      },
+    });
+    // 关键：wake_invoked 摊出真实审计事实（已广播、待 resume 确认），不再是笼统的「未审计」占位
+    expect(frame.phases.wake_invoked.evidence).toContain("broadcast delivered");
+    expect(frame.phases.wake_invoked.evidence).toContain("awaiting linked resume");
+    expect(frame.phases.wake_invoked.evidence).not.toContain("not audited");
+    // CLI 确实读了 ledger（serve 目标此前根本不查）
+    expect(reqsOf(mock, "GET", "/api/channels/dev/wake-deliveries")[0]!.query).toMatchObject({
+      since: "50",
+      target: "agent",
+    });
+  });
+
+  test("serve consumed: ledger resume evidence lifts wake_invoked to yes and resolves resumed", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/presence") {
+        return Response.json({ presence: [freshServeWatchPresence("serve")] });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ seq: 60 });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/wake-deliveries") {
+        return Response.json({
+          deliveries: [
+            {
+              mention_seq: 60,
+              target_name: "agent",
+              webhook_name: "agent",
+              adapter_kind: "serve",
+              attempt: 1,
+              result: "consumed",
+              http_status: null,
+              error: null,
+              attempted_at: 112,
+              ack_seq: 61,
+              resume_seq: null,
+            },
+          ],
+        });
+      }
+      // ledger 已闭环，无需靠频道历史里的 reply 佐证
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ messages: [] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+
+    const r = await runCli(["wake", "test", "@agent", "dev", "--timeout", "1", "--json"]);
+    expect(r.code).toBe(0);
+    const frame = JSON.parse(r.stdout.trim());
+    expect(frame).toMatchObject({
+      type: "wake_test",
+      result: "healthy",
+      phases: {
+        mention_delivered: { ok: true, seq: 60 },
+        wake_invoked: { ok: true, adapter: "serve" },
+        agent_resumed: { ok: true, seq: 61, evidence: "reply_to" },
+      },
+    });
+    expect(frame.phases.wake_invoked.evidence).toContain("consumed");
+  });
+
+  test("watch broadcast: ledger filter keeps serve/watch rows and ignores unrelated webhook rows", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/presence") {
+        return Response.json({ presence: [freshServeWatchPresence("watch")] });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ seq: 70 });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/wake-deliveries") {
+        return Response.json({
+          deliveries: [
+            // 无关的 webhook 行（同一 mention_seq）：watch 目标必须过滤掉它，否则会误判成 consumed
+            {
+              mention_seq: 70,
+              target_name: "agent",
+              webhook_name: "hook",
+              adapter_kind: "webhook",
+              attempt: 1,
+              result: "ok",
+              http_status: 202,
+              error: null,
+              attempted_at: 111,
+              ack_seq: 999,
+              resume_seq: null,
+            },
+            {
+              mention_seq: 70,
+              target_name: "agent",
+              webhook_name: "agent",
+              adapter_kind: "watch",
+              attempt: 1,
+              result: "broadcast",
+              http_status: null,
+              error: null,
+              attempted_at: 112,
+              ack_seq: null,
+              resume_seq: null,
+            },
+          ],
+        });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ messages: [] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+
+    const r = await runCli(["wake", "test", "@agent", "dev", "--timeout", "1", "--json"]);
+    expect(r.code).toBe(2);
+    const frame = JSON.parse(r.stdout.trim());
+    // 只认 watch 那行（broadcast → 待确认），绝不把 webhook 行的 ack_seq=999 当成 watch 的 resume
+    expect(frame).toMatchObject({
+      type: "wake_test",
+      result: "timeout",
+      phases: {
+        wake_invoked: { ok: null, adapter: "watch" },
+        agent_resumed: { ok: false, seq: null },
+      },
+    });
+    expect(frame.phases.wake_invoked.evidence).toContain("watch broadcast delivered");
+  });
+
+  test("human output surfaces the broadcast audit instead of printing 'not audited'", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/presence") {
+        return Response.json({ presence: [freshServeWatchPresence("serve")] });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ seq: 80 });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/wake-deliveries") {
+        return Response.json({
+          deliveries: [
+            {
+              mention_seq: 80,
+              target_name: "agent",
+              webhook_name: "agent",
+              adapter_kind: "serve",
+              attempt: 1,
+              result: "broadcast",
+              http_status: null,
+              error: null,
+              attempted_at: 112,
+              ack_seq: null,
+              resume_seq: null,
+            },
+          ],
+        });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ messages: [] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+
+    const r = await runCli(["wake", "test", "@agent", "dev", "--timeout", "1"]);
+    expect(r.code).toBe(2);
+    // 人读输出的 wake invoked 行不再是死板的「not audited」，而是真实广播审计
+    expect(r.stdout).toContain("wake invoked: serve broadcast delivered");
+    expect(r.stdout).not.toContain("wake invoked: not audited");
+  });
+});
