@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { num, parseArgs, str } from "../src/args";
+import { isHelpArg, num, parseArgs, str } from "../src/args";
 
 describe("parseArgs", () => {
   test("positionals and value flags", () => {
@@ -80,5 +80,25 @@ describe("parseArgs", () => {
     expect(num("42")).toBe(42);
     expect(num("abc")).toBeUndefined();
     expect(num(undefined)).toBeUndefined();
+  });
+});
+
+describe("isHelpArg respects the `--` terminator (#373)", () => {
+  test("real --help/-h flag (before terminator) triggers help", () => {
+    expect(isHelpArg(["--help"])).toBe(true);
+    expect(isHelpArg(["-h"])).toBe(true);
+    expect(isHelpArg(["send", "--help"])).toBe(true);
+  });
+
+  test("--help/-h after `--` is body, not help — send must NOT be swallowed", () => {
+    expect(isHelpArg(["--", "见 --help 说明"])).toBe(false);
+    expect(isHelpArg(["--", "--help"])).toBe(false);
+    expect(isHelpArg(["--channel", "c", "--", "text with -h inside"])).toBe(false);
+  });
+
+  test("allowHelpPositional only when `help` is the sole pre-terminator token", () => {
+    expect(isHelpArg(["help"], { allowHelpPositional: true })).toBe(true);
+    expect(isHelpArg(["--", "help"], { allowHelpPositional: true })).toBe(false); // 正文里的 help
+    expect(isHelpArg(["help", "extra"], { allowHelpPositional: true })).toBe(false);
   });
 });

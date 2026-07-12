@@ -127,6 +127,11 @@ export function strArray(v: string | boolean | Array<string | boolean> | undefin
 }
 
 export function isHelpArg(argv: string[], opts: { allowHelpPositional?: boolean } = {}): boolean {
-  if (argv.includes("--help") || argv.includes("-h")) return true;
-  return opts.allowHelpPositional === true && argv.length === 1 && argv[0] === "help";
+  // #373：只在 POSIX `--` 终止符**之前**判 help；`--` 之后的 token 一律是正文/位置参数。
+  // 否则 `party send -- "见 --help 说明"` 里正文含 --help 会被当 flag、静默吞掉整条消息、以 0 退出，
+  // agent 自以为发了实际石沉大海。终止符前才是真正的 flag 区。
+  const term = argv.indexOf("--");
+  const scan = term === -1 ? argv : argv.slice(0, term);
+  if (scan.includes("--help") || scan.includes("-h")) return true;
+  return opts.allowHelpPositional === true && scan.length === 1 && scan[0] === "help";
 }
