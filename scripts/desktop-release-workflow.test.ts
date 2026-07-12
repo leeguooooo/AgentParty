@@ -19,12 +19,32 @@ const desktopCapability = JSON.parse(
 );
 const desktopJob = workflow.slice(workflow.indexOf("  desktop:"), workflow.indexOf("  release:"));
 const releaseJob = workflow.slice(workflow.indexOf("  release:"));
+const desktopCheckJob = workflow.slice(
+  workflow.indexOf("  check-desktop:"),
+  workflow.indexOf("  dependency-audit:"),
+);
+const aggregateCheckJob = workflow.slice(
+  workflow.indexOf("  check:\n"),
+  workflow.indexOf("  build:\n"),
+);
 
 function namedStep(job: string, name: string, nextName: string): string {
   return job.slice(job.indexOf(`      - name: ${name}`), job.indexOf(`      - name: ${nextName}`));
 }
 
 describe("desktop release workflow", () => {
+  test("checks desktop Rust and version consistency on macOS before full check passes", () => {
+    expect(desktopCheckJob).toContain("runs-on: macos-14");
+    expect(desktopCheckJob).toContain("if: needs.changes.outputs.cli_only != 'true'");
+    expect(desktopCheckJob).toContain("cargo test --locked");
+    expect(desktopCheckJob).toContain("cargo check --locked");
+    expect(desktopCheckJob).toContain('VERSION="$(bun -p "require(\'./cli/package.json\').version")"');
+    expect(desktopCheckJob).toContain('bun scripts/release-version.ts --check "$VERSION"');
+    expect(aggregateCheckJob).toContain("- check-desktop");
+    expect(aggregateCheckJob).toContain("R_DESKTOP: ${{ needs.check-desktop.result }}");
+    expect(aggregateCheckJob).toContain('"$R_DESKTOP"');
+  });
+
   test("prepares the CLI sidecar before every desktop Tauri command", () => {
     expect(tauriConfig.bundle.externalBin).toEqual(["binaries/party"]);
     expect(desktopPackage.scripts["prepare:sidecar"]).toBe(

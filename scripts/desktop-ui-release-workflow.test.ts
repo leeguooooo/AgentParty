@@ -20,14 +20,27 @@ describe("desktop UI release workflow", () => {
     expect(workflow).toContain("overwrite_files: true");
   });
 
-  test("automatically publishes UI-affecting main changes and keeps manual dispatch", () => {
+  test("publishes automatically only after the authoritative main release workflow succeeds", () => {
     const workflow = readFileSync(workflowPath, "utf8");
+    expect(workflow).toContain("workflow_run:");
+    expect(workflow).toContain('workflows: ["release"]');
+    expect(workflow).toContain("types: [completed]");
     expect(workflow).toContain("branches: [main]");
-    expect(workflow).toContain("- 'web/**'");
-    expect(workflow).toContain("- 'shared/**'");
-    expect(workflow).toContain("- 'scripts/desktop-ui-*.ts'");
-    expect(workflow).toContain("- 'package.json'");
-    expect(workflow).toContain("- 'bun.lock'");
+    expect(workflow).not.toMatch(/^\s+push:\s*$/m);
+    expect(workflow).toContain("github.event.workflow_run.event == 'push'");
+    expect(workflow).toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(workflow).toContain("github.event.workflow_run.head_branch == 'main'");
+  });
+
+  test("checks out and publishes the exact successful workflow SHA while preserving manual dispatch", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    expect(workflow).toContain("workflow_dispatch:");
+    expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
+    expect(workflow).toContain("github.ref == 'refs/heads/main'");
+    expect(workflow).toContain("github.event.workflow_run.head_sha || github.sha");
+    expect(workflow).toContain("ref: ${{ env.SOURCE_SHA }}");
+    expect(workflow).toContain('--build-id "$SOURCE_SHA"');
+    expect(workflow).not.toContain('--build-id "$GITHUB_SHA"');
     expect(workflow).toContain('UI_VERSION="0.0.${GITHUB_RUN_NUMBER}"');
     expect(workflow).toContain('PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"');
     expect(workflow).not.toContain("git show -s --format=%cI");
@@ -43,7 +56,7 @@ describe("desktop UI release workflow", () => {
     expect(workflow).toContain("bun scripts/desktop-ui-bundle.ts");
     expect(workflow).toContain("--source web/dist");
     expect(workflow).toContain("bun scripts/desktop-ui-manifest.ts");
-    expect(workflow).toContain('--build-id "$GITHUB_SHA"');
+    expect(workflow).toContain('--build-id "$SOURCE_SHA"');
     expect(workflow).toContain('--published-at "$PUBLISHED_AT"');
   });
 

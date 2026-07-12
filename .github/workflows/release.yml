@@ -39,7 +39,7 @@ jobs:
               - '!cli/**'
 
   # ── #9 pre-merge / release gate：每个 workspace 独立并行跑，墙上时间=最慢单个 ──
-  # 5 个 workspace（cli/worker/web/shared/scripts）互不依赖（worker vitest 用隔离的
+  # 6 个检查区域（cli/worker/web/shared/scripts/desktop）互不依赖（worker vitest 用隔离的
   # 空 assets 目录，不再需要 web/dist），原来一个 job 串行跑 `bun run check` 要 ~6min，
   # 拆并行后 ≈ 最慢那个 job。
   # 复用的 setup 步骤（checkout+bun+install cache+install）由 composite action 提供。
@@ -117,6 +117,32 @@ jobs:
       - working-directory: worker
         run: bunx tsc --noEmit
 
+  # Desktop Rust checks require macOS system frameworks. Keep this in the normal PR/main gate,
+  # while preserving the explicit CLI-only PR fast path.
+  check-desktop:
+    name: check desktop (macOS)
+    needs: changes
+    if: needs.changes.outputs.cli_only != 'true'
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - name: verify desktop version consistency
+        run: |
+          set -euo pipefail
+          VERSION="$(bun -p "require('./cli/package.json').version")"
+          bun scripts/release-version.ts --check "$VERSION"
+      - name: test desktop Rust
+        working-directory: desktop/src-tauri
+        run: cargo test --locked
+      - name: check desktop Rust build
+        working-directory: desktop/src-tauri
+        run: cargo check --locked
+
   # ── #137 供应链输入侧：bun audit 扫 bun.lock 依赖树已知漏洞 ──────────
   # 只在 PR 上跑，且不进 "full check" 的 needs——bun audit 命中的公开漏洞库
   # 会随时间变化，把它塞进 required 门禁等于让历史 PR 因为无关的第三方新
@@ -179,6 +205,7 @@ jobs:
       - check-rest
       - check-worker
       - check-worker-types
+      - check-desktop
       - version-contract
     if: always()
     runs-on: ubuntu-latest
@@ -191,12 +218,13 @@ jobs:
           R_REST: ${{ needs.check-rest.result }}
           R_WORKER: ${{ needs.check-worker.result }}
           R_WORKER_TYPES: ${{ needs.check-worker-types.result }}
+          R_DESKTOP: ${{ needs.check-desktop.result }}
           R_VERSION: ${{ needs.version-contract.result }}
         run: |
           set -euo pipefail
-          echo "cli=$R_CLI rest=$R_REST worker=$R_WORKER worker-types=$R_WORKER_TYPES version=$R_VERSION"
+          echo "cli=$R_CLI rest=$R_REST worker=$R_WORKER worker-types=$R_WORKER_TYPES desktop=$R_DESKTOP version=$R_VERSION"
           fail=0
-          for r in "$R_CLI" "$R_REST" "$R_WORKER" "$R_WORKER_TYPES" "$R_VERSION"; do
+          for r in "$R_CLI" "$R_REST" "$R_WORKER" "$R_WORKER_TYPES" "$R_DESKTOP" "$R_VERSION"; do
             case "$r" in
               success|skipped) ;;
               *) echo "::error::required check job did not pass: result=$r"; fail=1 ;;

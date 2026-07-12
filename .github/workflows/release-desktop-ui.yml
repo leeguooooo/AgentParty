@@ -1,15 +1,10 @@
 name: release desktop UI
 
 on:
-  push:
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
     branches: [main]
-    paths:
-      - 'web/**'
-      - 'shared/**'
-      - 'scripts/desktop-ui-*.ts'
-      - '.github/workflows/release-desktop-ui.yml'
-      - 'package.json'
-      - 'bun.lock'
   workflow_dispatch:
     inputs:
       version:
@@ -37,13 +32,24 @@ concurrency:
 jobs:
   build-sign-publish:
     name: build, sign, and publish desktop UI
+    if: >-
+      ${{
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+        (github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.head_branch == 'main')
+      }}
     runs-on: ubuntu-latest
     environment:
       name: release
     permissions:
       contents: write
+    env:
+      SOURCE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -114,7 +120,7 @@ jobs:
             --version "$UI_VERSION" \
             --ui-abi "$UI_ABI" \
             --min-shell-version "$MIN_SHELL_VERSION" \
-            --build-id "$GITHUB_SHA" \
+            --build-id "$SOURCE_SHA" \
             --published-at "$PUBLISHED_AT" \
             --repo "$GITHUB_REPOSITORY" \
             --archive "dist/$ASSET" \
