@@ -300,6 +300,55 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/lark-directory": {
+      get: {
+        summary: "search same-tenant Lark users for a channel invitation",
+        security: [{ bearer: [] }],
+        description: "Available only to human channel moderators signed in through the configured Lark or Feishu provider. Results contain only an opaque provider user id, display name, avatar URL, and membership state.",
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "q", in: "query", required: true, schema: { type: "string", minLength: 1, maxLength: 64 } },
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 50, default: 20 } },
+          { name: "cursor", in: "query", description: "opaque Lark pagination cursor", schema: { type: "string", maxLength: 1024 } },
+        ],
+        responses: {
+          "200": { description: "{users:[{id,name,avatar_url,already_member}],next_cursor}" },
+          "400": { description: "invalid query, limit, or cursor" },
+          "403": { description: "not a same-tenant Lark human moderator" },
+          "404": { description: "channel not found" },
+          "429": { description: "per-account directory search limit reached; Retry-After included" },
+          "503": { description: "Lark contact permission is missing or the directory is unavailable" },
+        },
+      },
+    },
+    "/api/channels/{slug}/lark-members": {
+      post: {
+        summary: "directly invite a same-tenant Lark user as a channel member",
+        security: [{ bearer: [] }],
+        description: "Available only to human channel moderators signed in through Lark or Feishu. The server revalidates the selected union id against the configured tenant, inserts channel_members idempotently, and writes management audit on the first add.",
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["user_id"],
+                properties: { user_id: { type: "string", minLength: 1, maxLength: 128 } },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "user was already a channel member" },
+          "201": { description: "user added to channel_members" },
+          "400": { description: "invalid user id" },
+          "403": { description: "not a same-tenant Lark human moderator" },
+          "404": { description: "channel or Lark user not found" },
+          "503": { description: "Lark contact permission is missing or the directory is unavailable" },
+        },
+      },
+    },
     "/api/channels/{slug}/join-requests/me": {
       get: {
         summary: "read the caller's channel join request",

@@ -52,7 +52,7 @@ export default defineConfig(async () => {
             OIDC_ISSUER: "https://oidc.test",
             OIDC_CLIENT_ID: "ap-web",
             AUTH_PROVIDERS: JSON.stringify([
-              { id: "lark-main", kind: "lark", client_id: "cli_test_lark" },
+              { id: "lark-main", kind: "lark", client_id: "cli_test_lark", tenant_key: "tenant-test" },
             ]),
             LARK_CLIENT_SECRET: "test-lark-secret",
             DESKTOP_PAIRING_SECRET: "test-desktop-pairing-secret-at-least-32-bytes",

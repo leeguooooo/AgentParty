@@ -19,12 +19,75 @@ export class ForbiddenError extends Error {}
 export class ConflictError extends Error {}
 // 名字非法 / 保留名 / scope 非法（worker 400）——文案层面走内联红字。
 export class ValidationError extends Error {}
+export class LarkDirectoryApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string,
+    readonly retryAfter: number | null,
+  ) {
+    super(message);
+  }
+}
 
 function fetchApi(path: string, init?: RequestInit): Promise<Response> {
   return fetch(apiUrl(path), init);
 }
 
 type ApiRequest = typeof fetchApi;
+
+async function larkDirectoryError(res: Response): Promise<LarkDirectoryApiError> {
+  const body = (await res.json().catch(() => null)) as { error?: { code?: string; message?: string } } | null;
+  const retry = Number(res.headers.get("retry-after"));
+  return new LarkDirectoryApiError(
+    body?.error?.message ?? `Lark directory request failed (${res.status})`,
+    res.status,
+    body?.error?.code ?? "unavailable",
+    Number.isFinite(retry) && retry > 0 ? retry : null,
+  );
+}
+
+export interface LarkDirectoryUser {
+  id: string;
+  name: string;
+  avatar_url: string | null;
+  already_member: boolean;
+}
+
+export interface LarkDirectoryPage {
+  users: LarkDirectoryUser[];
+  next_cursor: string | null;
+}
+
+export async function searchLarkDirectory(
+  token: string,
+  slug: string,
+  query: string,
+  limit = 20,
+  cursor: string | null = null,
+): Promise<LarkDirectoryPage> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  if (cursor !== null) params.set("cursor", cursor);
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/lark-directory?${params.toString()}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw await larkDirectoryError(res);
+  return (await res.json()) as LarkDirectoryPage;
+}
+
+export async function inviteLarkMember(
+  token: string,
+  slug: string,
+  userId: string,
+): Promise<LarkDirectoryUser> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/lark-members`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ user_id: userId }),
+  });
+  if (!res.ok) throw await larkDirectoryError(res);
+  return (await res.json()) as LarkDirectoryUser;
+}
 
 export function urlToken(): string | null {
   return new URLSearchParams(window.location.search).get("t");

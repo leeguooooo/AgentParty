@@ -15,6 +15,7 @@ mock.module("../lib/api", () => ({
   AuthError: class AuthError extends Error {},
   ForbiddenError: class ForbiddenError extends Error {},
   ValidationError: class ValidationError extends Error {},
+  LarkDirectoryApiError: class LarkDirectoryApiError extends Error {},
   createJoinLink: mock(async (_token: string, slug: string) => {
     joinCalls.push({ slug });
     return { code: "abc123", url: "https://x/join/abc123", channel_slug: slug, created_by: "o", created_at: 0, expires_at: null, max_uses: null, uses: 0, revoked_at: null };
@@ -34,6 +35,8 @@ mock.module("../lib/api", () => ({
     pendingRequests = pendingRequests.filter((request) => request.id !== id);
     return { id, state: body.action === "approve" ? "approved" : "rejected" };
   },
+  searchLarkDirectory: async () => ({ users: [], next_cursor: null }),
+  inviteLarkMember: async () => ({ id: "", name: "", avatar_url: null, already_member: true }),
   revokeJoinLink: async () => {},
   revokeShareLink: async () => {},
 }));
@@ -89,7 +92,7 @@ afterEach(() => {
   Reflect.deleteProperty(globalThis, "document");
 });
 
-function render(props: { active?: boolean; onActiveChange?(open: boolean): void } = { active: true }) {
+function render(props: { active?: boolean; onActiveChange?(open: boolean): void; larkDirectoryEnabled?: boolean } = { active: true }) {
   act(() => {
     renderer = create(
       <LocaleProvider>
@@ -116,6 +119,18 @@ function clickPrimary(r: ReactTestRenderer) {
 }
 
 describe("JoinLink invite mode selector", () => {
+  test("shows the organization directory only when Lark invitation is enabled", async () => {
+    const disabled = render();
+    await act(async () => {});
+    expect(disabled.root.findAllByProps({ className: "lark-invite" })).toHaveLength(0);
+    act(() => disabled.unmount());
+    renderer = null;
+
+    const enabled = render({ active: true, larkDirectoryEnabled: true });
+    await act(async () => {});
+    expect(enabled.root.findByProps({ className: "lark-invite" })).toBeTruthy();
+  });
+
   test("default participate mode wires generate into createJoinLink", async () => {
     const r = render();
     clickPrimary(r);

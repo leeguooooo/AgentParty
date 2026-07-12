@@ -8,6 +8,22 @@ export interface LarkProviderConfig {
   kind: LarkProviderKind;
   clientId: string;
   clientSecretEnv: string;
+  tenantKey: string | null;
+}
+
+export interface LarkDirectoryUser {
+  id: string;
+  name: string;
+  avatarUrl: string | null;
+}
+
+export class LarkDirectoryError extends Error {
+  constructor(
+    readonly kind: "permission" | "invalid_cursor" | "not_found" | "rate_limited" | "upstream",
+    message: string,
+  ) {
+    super(message);
+  }
 }
 
 export interface LarkWebhookPayload extends MsgFrame {
@@ -58,9 +74,99 @@ function authProviderConfigs(env: EnvLike): LarkProviderConfig[] {
         typeof item.client_secret_env === "string" && item.client_secret_env.trim()
           ? item.client_secret_env.trim()
           : DEFAULT_SECRET_ENV[kind],
+      tenantKey: typeof item.tenant_key === "string" && item.tenant_key.trim() ? item.tenant_key.trim() : null,
     });
   }
   return providers;
+}
+
+function larkError(data: Record<string, unknown>, status: number): LarkDirectoryError | null {
+  const code = Number(data.code ?? 0);
+  if (status >= 200 && status < 300 && code === 0) return null;
+  const message = typeof data.msg === "string" ? data.msg : `Lark request failed (${status})`;
+  if (status === 429) return new LarkDirectoryError("rate_limited", message);
+  if (code === 40012) return new LarkDirectoryError("invalid_cursor", message);
+  if (code === 41012 || code === 99992352 || code === 99992363 || code === 99992364 || code === 99992381) {
+    return new LarkDirectoryError("not_found", message);
+  }
+  if (code === 41050 || code === 40004 || /(?:permission|authority|scope)/i.test(message)) {
+    return new LarkDirectoryError("permission", message);
+  }
+  return new LarkDirectoryError("upstream", message);
+}
+
+async function larkDirectoryRequest(
+  env: EnvLike,
+  provider: LarkProviderConfig,
+  path: string,
+): Promise<Record<string, unknown>> {
+  const token = await getTenantAccessToken(env, provider);
+  const res = await fetch(`${larkApiBase(provider.kind)}${path}`, {
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+  });
+  const data = (await res.json().catch(() => null)) as unknown;
+  if (!isRecord(data)) throw new LarkDirectoryError("upstream", `Lark request failed (${res.status})`);
+  const error = larkError(data, res.status);
+  if (error !== null) throw error;
+  return data;
+}
+
+function directoryUsers(data: Record<string, unknown>): LarkDirectoryUser[] {
+  const payload = isRecord(data.data) ? data.data : {};
+  const rows = Array.isArray(payload.user_list) ? payload.user_list : Array.isArray(payload.items) ? payload.items : [];
+  const users: LarkDirectoryUser[] = [];
+  for (const value of rows) {
+    if (!isRecord(value)) continue;
+    const id = typeof value.union_id === "string" ? value.union_id.trim() : "";
+    const name = typeof value.name === "string" ? value.name.trim() : "";
+    if (!id || !name) continue;
+    const avatar = isRecord(value.avatar) ? value.avatar : {};
+    const avatarUrl = typeof avatar.avatar_72 === "string"
+      ? avatar.avatar_72
+      : typeof value.avatar_url === "string"
+        ? value.avatar_url
+        : null;
+    users.push({ id, name, avatarUrl });
+  }
+  return users;
+}
+
+export async function searchLarkDirectory(
+  env: EnvLike,
+  provider: LarkProviderConfig,
+  query: string,
+  cursor: string | null,
+  pageSize: number,
+): Promise<{ users: LarkDirectoryUser[]; nextCursor: string | null }> {
+  const params = new URLSearchParams({ open_department_id: "0", fetch_child: "true", page_size: String(pageSize) });
+  if (cursor !== null) params.set("page_token", cursor);
+  const data = await larkDirectoryRequest(
+    env,
+    provider,
+    `/open-apis/contact/v1/department/user/detail/list?${params.toString()}`,
+  );
+  const normalizedQuery = query.toLocaleLowerCase();
+  const users = directoryUsers(data).filter((user) => user.name.toLocaleLowerCase().includes(normalizedQuery));
+  const payload = isRecord(data.data) ? data.data : {};
+  const hasMore = payload.has_more === true;
+  const pageToken = typeof payload.page_token === "string" && payload.page_token ? payload.page_token : null;
+  return { users, nextCursor: hasMore ? pageToken : null };
+}
+
+export async function getLarkDirectoryUser(
+  env: EnvLike,
+  provider: LarkProviderConfig,
+  userId: string,
+): Promise<LarkDirectoryUser> {
+  const data = await larkDirectoryRequest(
+    env,
+    provider,
+    `/open-apis/contact/v3/users/${encodeURIComponent(userId)}?user_id_type=union_id`,
+  );
+  const payload = isRecord(data.data) && isRecord(data.data.user) ? { data: { items: [data.data.user] } } : data;
+  const user = directoryUsers(payload)[0];
+  if (user === undefined || user.id !== userId) throw new LarkDirectoryError("not_found", "Lark user not found");
+  return user;
 }
 
 export function resolveLarkProvider(env: EnvLike, preferredId?: string | null): LarkProviderConfig | null {

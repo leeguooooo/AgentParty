@@ -22,6 +22,7 @@ import {
 } from "../lib/api";
 import { useT, type TFunc } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
+import { LarkMemberInvite } from "./LarkMemberInvite";
 import "../i18n/strings/JoinLink";
 
 interface Props {
@@ -30,6 +31,7 @@ interface Props {
   onAuthFailed(message: string): void;
   active?: boolean;
   onActiveChange?(open: boolean): void;
+  larkDirectoryEnabled?: boolean;
 }
 
 type InviteMode = "participate" | "watch";
@@ -65,7 +67,7 @@ function expiryLabel(link: JoinLinkInfo, t: TFunc): string {
   return t("JoinLink.expiresInHours", { hours: Math.max(1, Math.floor(left / 3600000)) });
 }
 
-export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: Props) {
+export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, larkDirectoryEnabled = false }: Props) {
   const t = useT();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const EXPIRY_OPTIONS = expiryOptions(t);
@@ -465,6 +467,7 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
               </ul>
             )}
           </section>
+          {larkDirectoryEnabled && <LarkMemberInvite slug={slug} token={token} />}
         </div>
       )}
     </div>

@@ -1154,6 +1154,11 @@ export function App() {
               joinRequestReason={channelJoinRequest?.slug === slug ? channelJoinRequest.reason ?? null : null}
               joinRequestError={channelJoinRequest?.slug === slug ? channelJoinRequest.message ?? null : null}
               joinAuthProviders={authProviders}
+              larkDirectoryEnabled={!isShareMode() && me?.role === "human" && authProviders.some(
+                (provider) => provider.type === "oauth"
+                  && provider.id === me.provider
+                  && (provider.kind === "lark" || provider.kind === "feishu"),
+              )}
               onRequestJoin={requestChannelJoin}
               onBeginJoinLogin={beginChannelJoinLogin}
               onRefreshJoinRequest={refreshChannelJoinRequest}

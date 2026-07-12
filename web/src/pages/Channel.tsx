@@ -110,6 +110,7 @@ interface Props {
   joinRequestReason: string | null;
   joinRequestError: string | null;
   joinAuthProviders: AuthProviderConfig[];
+  larkDirectoryEnabled: boolean;
   onRequestJoin(): Promise<void>;
   onBeginJoinLogin(provider: AuthProviderConfig): void;
   onRefreshJoinRequest(): Promise<void>;
@@ -2058,6 +2059,7 @@ export function ChannelPage({
   joinRequestReason,
   joinRequestError,
   joinAuthProviders,
+  larkDirectoryEnabled,
   onRequestJoin,
   onBeginJoinLogin,
   onRefreshJoinRequest,
@@ -3647,6 +3649,7 @@ export function ChannelPage({
                 <JoinLink
                   slug={slug}
                   token={token}
+                  larkDirectoryEnabled={larkDirectoryEnabled}
                   onAuthFailed={onAuthFailed}
                   active={activeAdminSurface === "joinLink"}
                   onActiveChange={(open) => setAdminSurface("joinLink", open)}

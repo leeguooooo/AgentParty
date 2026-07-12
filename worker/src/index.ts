@@ -83,8 +83,11 @@ import {
 } from "./management-audit";
 import {
   buildMentionCard,
+  getLarkDirectoryUser,
   inferReceiveIdType,
+  LarkDirectoryError,
   resolveLarkProvider,
+  searchLarkDirectory,
   sendLarkCard,
   verifyWebhookSignature,
   type LarkReceiveIdType,
@@ -323,6 +326,9 @@ const PROFILE_TEXT_MAX = 4096;
 const PROFILE_BRANCH_MAX = 128;
 const JOIN_REQUEST_NOTE_MAX = 2000;
 const JOIN_REQUEST_REASON_MAX = 2000;
+const LARK_DIRECTORY_QUERY_MAX = 64;
+const LARK_DIRECTORY_MAX_LIMIT = 50;
+const LARK_DIRECTORY_SEARCHES_PER_MINUTE = 10;
 const PROJECT_AGENT_RUNNERS = ["codex", "claude", "codex-sdk", "shell"] as const;
 const PROJECT_AGENT_WORKTREE = ["branch", "shared", "none"] as const;
 const PROJECT_AGENT_INVITABLE = ["owner", "org", "anyone"] as const;
@@ -340,6 +346,7 @@ interface OAuthProviderConfig {
   tokenUrl: string;
   userInfoUrl: string;
   scope: string;
+  tenantKey: string | null;
 }
 
 interface AccountProfileMetadata {
@@ -453,6 +460,7 @@ function parseAuthProviders(env: AppEnv): OAuthProviderConfig[] {
           ? item.user_info_url.trim()
           : defaults.userInfoUrl,
       scope: typeof item.scope === "string" ? item.scope.trim() : defaults.scope,
+      tenantKey: typeof item.tenant_key === "string" && item.tenant_key.trim() ? item.tenant_key.trim() : null,
     });
   }
   return providers;
@@ -1539,6 +1547,36 @@ async function canListMembers(db: D1Database, identity: TokenIdentity, channel: 
   return canByHumanPolicy(perms.members_list, identity, channel, isMember);
 }
 
+async function consumeLarkDirectorySearchLimit(db: D1Database, account: string): Promise<number> {
+  const now = Date.now();
+  const windowMs = 60_000;
+  const keyHash = await sha256Hex(account);
+  await db.prepare(
+    `INSERT INTO desktop_rate_limits (scope, key_hash, window_started_at, count, blocked_until, updated_at)
+     VALUES ('lark-directory-search', ?, ?, 1, 0, ?)
+     ON CONFLICT(scope, key_hash) DO UPDATE SET
+       window_started_at = CASE
+         WHEN excluded.updated_at - desktop_rate_limits.window_started_at >= ? THEN excluded.updated_at
+         ELSE desktop_rate_limits.window_started_at
+       END,
+       count = CASE
+         WHEN excluded.updated_at - desktop_rate_limits.window_started_at >= ? THEN 1
+         ELSE desktop_rate_limits.count + 1
+       END,
+       updated_at = excluded.updated_at`,
+  ).bind(keyHash, now, now, windowMs, windowMs).run();
+  const row = await db.prepare(
+    "SELECT count, window_started_at FROM desktop_rate_limits WHERE scope = 'lark-directory-search' AND key_hash = ?",
+  ).bind(keyHash).first<{ count: number; window_started_at: number }>();
+  if (Number(row?.count ?? 1) <= LARK_DIRECTORY_SEARCHES_PER_MINUTE) return 0;
+  return Math.max(1, Math.ceil((Number(row?.window_started_at ?? now) + windowMs - now) / 1000));
+}
+
+function directoryAccount(providerId: string, providerUserId: string): string | null {
+  const account = `${providerId}:${providerUserId}`;
+  return account.length <= OWNER_MAX && OWNER_RE.test(account) ? account : null;
+}
+
 async function canEditCharter(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
   if (identity.role === "readonly") return false;
   const perms = channelPerms(channel);
@@ -1987,6 +2025,16 @@ app.post("/api/auth/:provider/callback", async (c) => {
   if (!OWNER_RE.test(exchanged.account) || exchanged.account.length > OWNER_MAX) {
     return c.json(errorBody("unavailable", "provider account id is not header-safe"), 500);
   }
+  const existingAccount = await c.env.DB.prepare(
+    `SELECT account FROM account_profiles
+      WHERE provider = ? AND provider_user_id = ? AND tenant_key = ?
+      LIMIT 1`,
+  ).bind(provider.id, exchanged.providerUserId, exchanged.tenantKey).first<{ account: string }>();
+  const stableAccount = existingAccount?.account ?? directoryAccount(provider.id, exchanged.providerUserId);
+  if (stableAccount === null) {
+    return c.json(errorBody("unavailable", "provider user id is not header-safe"), 500);
+  }
+  exchanged.account = stableAccount;
   const tokenName = await oauthTokenName(provider.id, exchanged.account);
   const sess = await upsertHumanSessionToken(c.env.DB, tokenName, exchanged.account);
   await ensureDefaultHandle(c.env.DB, exchanged);
@@ -3384,6 +3432,132 @@ app.get("/api/channels/:slug/members", async (c) => {
     .bind(slug)
     .all<{ account: string; added_by: string; added_at: number }>();
   return c.json({ members: results });
+});
+
+app.get("/api/channels/:slug/lark-directory", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (identity.kind !== "human" || identity.account == null || !isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only a Lark human moderator can search the organization directory"), 403);
+  }
+  const profile = await c.env.DB.prepare(
+    "SELECT provider, tenant_key FROM account_profiles WHERE account = ?",
+  ).bind(identity.account).first<{ provider: string | null; tenant_key: string | null }>();
+  const provider = profile?.provider == null
+    ? undefined
+    : parseAuthProviders(c.env).find((candidate) => candidate.id === profile.provider);
+  if (provider === undefined || (provider.kind !== "lark" && provider.kind !== "feishu")) {
+    return c.json(errorBody("forbidden", "only a Lark human moderator can search the organization directory"), 403);
+  }
+  if (profile?.tenant_key == null || provider.tenantKey == null || profile.tenant_key !== provider.tenantKey) {
+    return c.json(errorBody("forbidden", "Lark tenant does not match the configured organization"), 403);
+  }
+  const url = new URL(c.req.url);
+  const query = (url.searchParams.get("q") ?? "").trim();
+  const limitRaw = url.searchParams.get("limit");
+  const limit = limitRaw === null ? 20 : Number(limitRaw);
+  const cursor = url.searchParams.get("cursor");
+  if (!query || query.length > LARK_DIRECTORY_QUERY_MAX || !Number.isInteger(limit) || limit < 1 || limit > LARK_DIRECTORY_MAX_LIMIT || (cursor !== null && cursor.length > 1024)) {
+    return c.json(errorBody("bad_request", "q, limit, or cursor is invalid"), 400);
+  }
+  const retryAfter = await consumeLarkDirectorySearchLimit(c.env.DB, identity.account);
+  if (retryAfter > 0) {
+    return c.json(errorBody("rate_limited", "too many Lark directory searches"), 429, { "retry-after": String(retryAfter) });
+  }
+  try {
+    const page = await searchLarkDirectory(c.env, provider, query, cursor, limit);
+    const profiles = await c.env.DB.prepare(
+      "SELECT account, provider_user_id FROM account_profiles WHERE provider = ? AND tenant_key = ?",
+    ).bind(provider.id, profile.tenant_key).all<{ account: string; provider_user_id: string | null }>();
+    const knownAccounts = new Map(
+      profiles.results.filter((row) => row.provider_user_id !== null).map((row) => [row.provider_user_id!, row.account]),
+    );
+    const members = new Set((await c.env.DB.prepare(
+      "SELECT account FROM channel_members WHERE channel_slug = ?",
+    ).bind(slug).all<{ account: string }>()).results.map((row) => row.account));
+    return c.json({
+      users: page.users.map((user) => {
+        const account = knownAccounts.get(user.id) ?? directoryAccount(provider.id, user.id);
+        return { id: user.id, name: user.name, avatar_url: user.avatarUrl, already_member: account !== null && members.has(account) };
+      }),
+      next_cursor: page.nextCursor,
+    });
+  } catch (error) {
+    if (error instanceof LarkDirectoryError) {
+      if (error.kind === "permission") return c.json(errorBody("unavailable", "Lark contact permission is not enabled"), 503);
+      if (error.kind === "invalid_cursor") return c.json(errorBody("bad_request", "Lark directory cursor is invalid"), 400);
+      if (error.kind === "rate_limited") return c.json(errorBody("unavailable", "Lark directory is rate limited"), 503);
+    }
+    return c.json(errorBody("unavailable", "Lark directory is unavailable"), 503);
+  }
+});
+
+app.post("/api/channels/:slug/lark-members", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (identity.kind !== "human" || identity.account == null || !isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only a Lark human moderator can invite organization members"), 403);
+  }
+  const profile = await c.env.DB.prepare(
+    "SELECT provider, tenant_key FROM account_profiles WHERE account = ?",
+  ).bind(identity.account).first<{ provider: string | null; tenant_key: string | null }>();
+  const provider = profile?.provider == null
+    ? undefined
+    : parseAuthProviders(c.env).find((candidate) => candidate.id === profile.provider);
+  if (provider === undefined || (provider.kind !== "lark" && provider.kind !== "feishu") || profile?.tenant_key == null || provider.tenantKey !== profile.tenant_key) {
+    return c.json(errorBody("forbidden", "Lark tenant does not match the configured organization"), 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as { user_id?: unknown } | null;
+  const userId = typeof body?.user_id === "string" ? body.user_id.trim() : "";
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(userId)) {
+    return c.json(errorBody("bad_request", "valid Lark user_id required"), 400);
+  }
+  try {
+    const user = await getLarkDirectoryUser(c.env, provider, userId);
+    const known = await c.env.DB.prepare(
+      `SELECT account FROM account_profiles
+        WHERE provider = ? AND provider_user_id = ? AND tenant_key = ?
+        LIMIT 1`,
+    ).bind(provider.id, user.id, profile.tenant_key).first<{ account: string }>();
+    const account = known?.account ?? directoryAccount(provider.id, user.id);
+    if (account === null) return c.json(errorBody("bad_request", "unsupported Lark user id"), 400);
+    await ensureDefaultHandle(c.env.DB, {
+      account,
+      email: null,
+      displayName: user.name,
+      avatarUrl: user.avatarUrl,
+      avatarThumb: user.avatarUrl,
+      provider: provider.id,
+      providerUserId: user.id,
+      tenantKey: profile.tenant_key,
+    });
+    const addedAt = Date.now();
+    const inserted = await c.env.DB.prepare(
+      "INSERT OR IGNORE INTO channel_members (channel_slug, account, added_by, added_at) VALUES (?, ?, ?, ?)",
+    ).bind(slug, account, identity.account, addedAt).run();
+    const alreadyMember = inserted.meta.changes === 0;
+    if (!alreadyMember) {
+      await bestEffortRecordManagementAudit(c.env.DB, {
+        actor: managementAuditActor(identity),
+        action: "channel.member.add",
+        resource: `channel/${slug}/members/${account}`,
+        channel: slug,
+        timestamp: addedAt,
+      });
+    }
+    return c.json({ id: user.id, name: user.name, avatar_url: user.avatarUrl, already_member: alreadyMember }, alreadyMember ? 200 : 201);
+  } catch (error) {
+    if (error instanceof LarkDirectoryError) {
+      if (error.kind === "permission") return c.json(errorBody("unavailable", "Lark contact permission is not enabled"), 503);
+      if (error.kind === "not_found") return c.json(errorBody("not_found", "Lark user not found in this organization"), 404);
+      if (error.kind === "rate_limited") return c.json(errorBody("unavailable", "Lark directory is rate limited"), 503);
+    }
+    return c.json(errorBody("unavailable", "Lark directory is unavailable"), 503);
+  }
 });
 
 app.get("/api/channels/:slug/perms", async (c) => {
