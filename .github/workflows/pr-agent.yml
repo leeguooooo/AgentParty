@@ -33,7 +33,6 @@ jobs:
         env:
           # LLM：自建 OpenAI 兼容端点 + qwen-max（litellm 需 openai/ 前缀路由）
           OPENAI_KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
-          OPENAI__KEY: ${{ secrets.PR_AGENT_OPENAI_KEY }}
           OPENAI__API_BASE: ${{ secrets.PR_AGENT_OPENAI_API_BASE }}
           CONFIG__MODEL: "openai/qwen-max"
           CONFIG__FALLBACK_MODELS: '["openai/qwen-max"]'
