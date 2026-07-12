@@ -6,9 +6,10 @@ const EXPANDED_STORAGE_KEY = "ap_channel_tools_expanded";
 
 function readExpandedPreference(): boolean {
   try {
-    return localStorage.getItem(EXPANDED_STORAGE_KEY) === "1";
+    const raw = localStorage.getItem(EXPANDED_STORAGE_KEY);
+    return raw === null ? true : raw === "1";
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -51,7 +52,8 @@ export function ChannelToolstrip({ buttons, actions }: ChannelToolstripProps) {
         title={t(expanded ? "Channel.tools.collapse" : "Channel.tools.expand")}
         onClick={toggle}
       >
-        <span className="ap-sprite ap-sprite--coordination" aria-hidden="true" />
+        <span className="ap-sprite ap-sprite--tools" aria-hidden="true" />
+        <span className="chan-toolstrip-toggle-label">{t("Channel.tools.label")}</span>
         <span className="chan-toolstrip-toggle-arrow" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
       </button>
       <div id="channel-toolstrip-content" className="chan-toolstrip-content">
