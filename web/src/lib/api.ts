@@ -506,6 +506,7 @@ export async function createTask(
     parent_id?: number;
     anchor_seqs?: number[];
     workflow_id?: string;
+    attachments?: Attachment[];
   },
 ): Promise<TaskRecord> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/tasks`, {

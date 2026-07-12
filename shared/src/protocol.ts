@@ -278,6 +278,8 @@ export interface TaskRecord {
   blocked_reason: string | null;
   /** 外部系统引用键（如 gh:owner/repo#96），供 issue→task 同步做幂等 create（#141）；未提供为 null */
   external_ref: string | null;
+  /** 附件引用（#369，#271 遗留）；空/缺省视为无附件。R2 上传流程与消息一致，见 Attachment。上限 MAX_ATTACHMENTS。 */
+  attachments?: Attachment[];
   completion_artifact: unknown | null;
   workflow_id: string | null;
   created_at: number;

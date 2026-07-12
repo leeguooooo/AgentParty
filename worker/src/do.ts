@@ -72,6 +72,7 @@ import {
   type WebhookFilter,
   type WorkflowKind,
 } from "@agentparty/shared";
+import { parseAttachments, parseStoredAttachments } from "./attachments";
 import { Server, type Connection, type ConnectionContext, type WSMessage } from "partyserver";
 
 interface ConnState {
@@ -372,16 +373,6 @@ function parseStoredCompletionArtifact(input: unknown): CompletionArtifact | und
   }
 }
 
-// 反序列化落库的附件引用（#176）；复用 parseAttachments 做结构校验，脏数据静默丢弃。
-function parseStoredAttachments(input: unknown): Attachment[] | undefined {
-  if (typeof input !== "string" || input === "") return undefined;
-  try {
-    const parsed = parseAttachments(JSON.parse(input) as unknown);
-    return parsed === null ? undefined : parsed;
-  } catch {
-    return undefined;
-  }
-}
 
 function parseStoredCompletionReview(r: Record<string, unknown>): CompletionReview | undefined {
   if (r.completion_review_state === null || r.completion_review_state === undefined) return undefined;
@@ -786,31 +777,8 @@ function parseIdempotencyKey(raw: unknown): string | undefined {
   return raw;
 }
 
-// 附件引用（#176）：一条消息可带 N 个引用，只是元数据不是 blob。缺省/空数组 → undefined（不落列）。
-// 校验失败（类型不对、超上限）返回 null，由 parseSendFrame 上抛整条拒收——附件是主动带上的，宁可明确报错。
-const MAX_ATTACHMENTS_PER_MESSAGE = 20;
-const ATTACHMENT_KEY_MAX = 1024;
-const ATTACHMENT_FILENAME_MAX = 512;
-const ATTACHMENT_CONTENT_TYPE_MAX = 256;
-const ATTACHMENT_URL_MAX = 2048;
-function parseAttachments(raw: unknown): Attachment[] | null | undefined {
-  if (raw === undefined || raw === null) return undefined;
-  if (!Array.isArray(raw)) return null;
-  if (raw.length === 0) return undefined;
-  if (raw.length > MAX_ATTACHMENTS_PER_MESSAGE) return null;
-  const out: Attachment[] = [];
-  for (const item of raw) {
-    if (typeof item !== "object" || item === null) return null;
-    const a = item as Record<string, unknown>;
-    if (typeof a.key !== "string" || a.key.length === 0 || a.key.length > ATTACHMENT_KEY_MAX) return null;
-    if (typeof a.filename !== "string" || a.filename.length === 0 || a.filename.length > ATTACHMENT_FILENAME_MAX) return null;
-    if (typeof a.content_type !== "string" || a.content_type.length === 0 || a.content_type.length > ATTACHMENT_CONTENT_TYPE_MAX) return null;
-    if (typeof a.size !== "number" || !Number.isInteger(a.size) || a.size < 0) return null;
-    if (typeof a.url !== "string" || a.url.length === 0 || a.url.length > ATTACHMENT_URL_MAX) return null;
-    out.push({ key: a.key, filename: a.filename, content_type: a.content_type, size: a.size, url: a.url });
-  }
-  return out;
-}
+// 附件引用校验（#176）已抽到 ./attachments，消息与任务（#369）共用同一实现。parseAttachments /
+// parseStoredAttachments / MAX_ATTACHMENTS 见该模块（顶部 import）。
 
 // rest body 与 ws send 帧共用的校验（rest 侧无 type 字段）
 function parseSendFrame(input: unknown): SendFrame | null {
