@@ -194,6 +194,10 @@ export async function runWatch(o: WatchOptions): Promise<number> {
   let timedOut = false;
   let onceDone = false;
   let code = 0;
+  // 人为暂停接待（#180）：镜像 serve 的 self-paused 跟踪。被 @ 时不把 --once 退出当唤醒信号，
+  // 但消息照常打印进历史、游标照推进。从 welcome 的 presence 快照认出初始状态（重连也不误唤醒），
+  // 之后靠 presence 帧增量翻转。恢复后不重放暂停期的 @（在历史里，agent 自行补看），与 serve 一致。
+  let selfPaused = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   if (o.timeoutSec > 0) {
     timer = setTimeout(() => {
@@ -220,6 +224,15 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       if (frame.type === "welcome") {
         self = frame.self;
         lastSeq = frame.last_seq;
+        // 连上/重连时若自己已被暂停接待（#180），从 welcome 的 presence 快照里认出来——
+        // 重连也不会把暂停期的 @ 误当成 --once 唤醒。提示走 stderr，不污染被消费的 stdout 流。
+        const mine = frame.presence?.find((p) => p.name === self);
+        selfPaused = mine?.paused === true;
+        if (selfPaused) {
+          console.error(
+            `watch: 当前处于暂停接待状态——被 @ 也不作为 --once 唤醒信号${typeof mine?.resume_at === "number" ? `，将于 ${new Date(mine.resume_at).toISOString()} 恢复` : "（等人工恢复）"}。消息仍进历史。`,
+          );
+        }
         // 不要用 welcome.read_cursors 快进 --once 的游标（#172 的诱人错解）。
         // read cursor 是**身份级「已读」**：protocol.ts 明确「网页 tab / serve / watch --follow
         // 读到就回 seen；webhook / watch --once 型事件驱动 agent 不发 seen，其送达状态由
@@ -245,6 +258,20 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         else code = 1;
         break;
       }
+      // 人为暂停/恢复（#180）：跟踪自己的 paused 状态（镜像 serve）。moderator 一按暂停/恢复，
+      // DO 就广播这帧过来。提示走 stderr，不污染被消费的 stdout 流。
+      if (frame.type === "presence" && frame.name === self) {
+        const nextPaused = frame.paused === true;
+        if (nextPaused !== selfPaused) {
+          selfPaused = nextPaused;
+          console.error(
+            selfPaused
+              ? `watch: 已被暂停接待——被 @ 也不再作为 --once 唤醒信号${typeof frame.resume_at === "number" ? `，将于 ${new Date(frame.resume_at).toISOString()} 恢复` : "（等人工恢复）"}。消息仍进历史。`
+              : "watch: 已恢复接待——@ 重新作为唤醒信号。",
+          );
+        }
+        continue;
+      }
       const msg = frame.type === "message_update" ? frame.message : frame;
       if (msg.type !== "msg" && msg.type !== "status") continue;
       lastSeq = Math.max(lastSeq, msg.seq);
@@ -253,8 +280,11 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       // fresh = 游标之上的新消息。重放的历史修订快照（seq 早已消费过）会穿透去重进来
       // ——它们可以照常打印（展示编辑是 feature），但绝不能算「唤醒」（曾把 --once 假唤醒）
       const fresh = msg.seq > conn.cursor;
+      // 暂停接待（#180）：qualifies 的新消息本该把 --once 退出当唤醒信号，但人按了暂停 →
+      // 不退出、不发 once-wake 帧。消息仍照常打印进历史、游标照推进（下方 ack），与 serve 一致。
+      const wakes = fresh && !selfPaused;
       if (qualifies) {
-        if (o.json && o.once && fresh) {
+        if (o.json && o.once && wakes) {
           out(
             JSON.stringify(
               jsonFrame({
@@ -289,7 +319,14 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       // 服务端从游标开始重放，所以这条是**最旧**的未读 @，不是最新的（#199）。
       // 醒在最旧是对的（醒在最新会丢消息），但必须把落后量说出来：否则被唤醒的 agent
       // 会以为手上这条就是频道现状，照着几小时前的上下文回话，而身后还压着一摞没读的。
-      if (o.once && qualifies && fresh) {
+      // 暂停接待中被 @：不退出、不唤醒；发一条 stderr 提示交代这条 @ 已在历史里，恢复后自行补看。
+      if (o.once && qualifies && fresh && selfPaused) {
+        console.error(
+          `watch: ⏸ 暂停接待中，seq=${msg.seq} 的 @ 不作为 --once 唤醒信号（消息已在历史）。` +
+            ` 恢复后补看：party history ${o.channel} --since ${msg.seq}`,
+        );
+      }
+      if (o.once && qualifies && wakes) {
         onceDone = true;
         const behind = Math.max(0, lastSeq - msg.seq);
         if (!o.json && behind > 0) {
