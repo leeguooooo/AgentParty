@@ -32,6 +32,32 @@ describe("desktop UI release workflow", () => {
     expect(workflow).toContain("github.event.workflow_run.head_branch == 'main'");
   });
 
+  test("skips superseded release events before checking out their source tree", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    const parsed = Bun.YAML.parse(workflow) as {
+      jobs: Record<string, {
+        needs?: string;
+        if?: string;
+        outputs?: Record<string, string>;
+        env?: Record<string, string>;
+      }>;
+    };
+    const resolver = parsed.jobs["resolve-source"];
+    const build = parsed.jobs["build-sign-publish"];
+
+    expect(resolver.outputs).toEqual({
+      source_sha: "${{ steps.source.outputs.source_sha }}",
+      current: "${{ steps.source.outputs.current }}",
+    });
+    expect(workflow).toContain('gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha');
+    expect(workflow).toContain('if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]');
+    expect(workflow).toContain('if [ "$SOURCE_SHA" = "$CURRENT_MAIN_SHA" ]');
+    expect(workflow).toContain('echo "current=false" >> "$GITHUB_OUTPUT"');
+    expect(build.needs).toBe("resolve-source");
+    expect(build.if).toBe("needs.resolve-source.outputs.current == 'true'");
+    expect(build.env?.SOURCE_SHA).toBe("${{ needs.resolve-source.outputs.source_sha }}");
+  });
+
   test("checks out and publishes the exact successful workflow SHA while preserving manual dispatch", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     expect(workflow).toContain("workflow_dispatch:");
