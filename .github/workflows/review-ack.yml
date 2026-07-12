@@ -52,16 +52,16 @@ jobs:
             exit 1
           fi
           echo "PR #$PR head SHA=$SHA"
-          # 注意：这串会内嵌进 jq 的 test() 字符串字面量，不能含 jq 非法转义。
-          # 原来的 `github-actions\[bot\]` 里 `\[`/`\]` 在 jq 字符串里是非法转义序列，会让**整条 jq 解析失败**，
-          # 配合下面的 `|| echo 0` 使 REVIEWS/ACK_COMMENTS 恒为 0 → 所有 PR 的 review-ack 恒 fail，全员合并被卡。
-          # `github-actions` 本就子串命中 `github-actions[bot]`，那个 `[bot]` 分支冗余，直接删掉即修复。
-          BOTS='github-actions|qodo|pr-agent|coderabbit|dependabot'
+          # 机器人判定改用 GitHub API 的结构化字段 .user.type == "Bot"（采纳并致谢 #406 codex 的方案）：
+          # 比维护机器人用户名正则更稳——① 覆盖所有 GitHub App bot（github-actions/coderabbit/pr-agent/
+          # dependabot 都是 type=Bot），新增 bot 无需改名单；② 彻底避开「正则内嵌进 jq test() 字符串字面量」
+          # 的转义雷区（此前 `github-actions\[bot\]` 的 `\[` 是 jq 非法转义，让整条 jq 解析失败 + `|| echo 0`
+          # 兜底成 0，导致所有 PR 的 review-ack 恒 fail、全员合并被卡）。已在 #401/#404/#407 真实数据上验证。
           # 采纳 pr-agent 建议：API 失败时按 0 计（fail-safe——查不到就当无 ack、保持红，绝不误放行）
           REVIEWS=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-            --jq "[.[] | select((.user.login | test(\"$BOTS\"; \"i\")) | not) | select(.state != \"PENDING\" and .state != \"DISMISSED\")] | length" 2>/dev/null || echo 0)
+            --jq "[.[] | select(.user.type != \"Bot\") | select(.state != \"PENDING\" and .state != \"DISMISSED\")] | length" 2>/dev/null || echo 0)
           ACK_COMMENTS=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq "[.[] | select((.user.login | test(\"$BOTS\"; \"i\")) | not) | select(.body | test(\"review-ack:|合并前已读|合并者 review 结论\"; \"i\"))] | length" 2>/dev/null || echo 0)
+            --jq "[.[] | select(.user.type != \"Bot\") | select(.body | test(\"review-ack:|合并前已读|合并者 review 结论\"; \"i\"))] | length" 2>/dev/null || echo 0)
           REVIEWS=${REVIEWS:-0}; ACK_COMMENTS=${ACK_COMMENTS:-0}
           echo "非机器人 PR reviews=$REVIEWS · ack 评论=$ACK_COMMENTS"
           if [ "$REVIEWS" -gt 0 ] || [ "$ACK_COMMENTS" -gt 0 ]; then
