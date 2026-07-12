@@ -65,6 +65,8 @@ const REQUIRED_KEYS = [
   "Channel.team.noWorkers",
   "Channel.team.memberTitle",
   "Channel.agentBoard.aria",
+  "Channel.agents.pausedUntil",
+  "Channel.agents.pausedManual",
   "Channel.hostBoard.aria",
   "Channel.hostBoard.human",
   "Channel.hostBoard.conflictSeparator",

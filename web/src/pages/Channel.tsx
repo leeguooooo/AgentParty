@@ -1441,7 +1441,8 @@ export function AgentBoardPanel({ presence, tasks }: { presence: PresenceEntry[]
     .map((name) => {
       const p = presenceByName.get(name);
       const c = counts.get(name) ?? { inProgress: 0, queued: 0, review: 0, blocked: 0 };
-      return { name, status: statusOf(p), note: p?.note ?? null, ...c };
+      // #187 第4项「排期」：surface presence 里的暂停/定时恢复（resume_at），看板本行直接可见。
+      return { name, status: statusOf(p), note: p?.note ?? null, paused: p?.paused === true, resumeAt: p?.resume_at ?? null, ...c };
     })
     .sort((a, b) => AGENT_STATUS_ORDER[a.status] - AGENT_STATUS_ORDER[b.status] || b.inProgress - a.inProgress || a.name.localeCompare(b.name));
 
@@ -1461,6 +1462,13 @@ export function AgentBoardPanel({ presence, tasks }: { presence: PresenceEntry[]
             <span className={`t-mono agent-board-status agent-board-status--${row.status}`}>{t(`Channel.agents.status.${row.status}`)}</span>
           </div>
           {row.note !== null && row.note.trim() !== "" && <p className="agent-board-note">{row.note}</p>}
+          {row.paused && (
+            <p className="t-mono agent-board-schedule">
+              {row.resumeAt !== null
+                ? t("Channel.agents.pausedUntil", { time: fmtTime(row.resumeAt) })
+                : t("Channel.agents.pausedManual")}
+            </p>
+          )}
           <div className="agent-board-counts t-mono">
             <span title={t("Channel.agents.count.inProgress")}>▶ {row.inProgress}</span>
             <span title={t("Channel.agents.count.queued")}>⏳ {row.queued}</span>
