@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   __resetDesktopRuntimeForTests,
   __setDesktopRuntimeDependenciesForTests,
-  clearDeliveredNotifications,
+  clearDeliveredMentionNotifications,
   mentionNotificationId,
   isAutostartEnabled,
   isDesktopNotificationPermissionGranted,
@@ -172,33 +172,76 @@ describe("desktop notifications", () => {
     expect(mentionNotificationId("other", 42)).not.toBe(a);
   });
 
-  test("clearDeliveredNotifications removes all active notifications when supported", async () => {
-    let cleared = 0;
+  test("clearDeliveredMentionNotifications removes only the focused channel's notifications", async () => {
+    // 通知中心里混着两个频道 + 一条无关通知；只应删掉当前频道（general）的两条：
+    // 一条按确定性 id 命中（已加载窗口内的 @），一条按 extra.slug 命中（窗口外但 extra 回传）。
+    const delivered = [
+      { id: mentionNotificationId("general", 42), extra: { slug: "general", seq: 42 } },
+      { id: 999999, extra: { slug: "general", seq: 7 } },
+      { id: mentionNotificationId("other", 5), extra: { slug: "other", seq: 5 } },
+      { id: 111, extra: {} },
+    ];
+    let removed: Array<{ id: number }> = [];
     __setDesktopRuntimeDependenciesForTests({
       isTauri: () => true,
       loadNotification: async () => notificationModule({
-        removeAllActive: async () => {
-          cleared += 1;
+        active: async () => delivered,
+        removeActive: async (notifications) => {
+          removed = notifications;
         },
       }),
     });
 
-    expect(await clearDeliveredNotifications()).toBe(true);
-    expect(cleared).toBe(1);
+    expect(await clearDeliveredMentionNotifications("general", [mentionNotificationId("general", 42)])).toBe(true);
+    expect(removed.map((n) => n.id).sort((a, b) => a - b)).toEqual(
+      [mentionNotificationId("general", 42), 999999].sort((a, b) => a - b),
+    );
   });
 
-  test("clearDeliveredNotifications is a safe no-op on shells without removeAllActive", async () => {
+  test("clearDeliveredMentionNotifications skips removeActive when nothing matches", async () => {
+    let removeCalls = 0;
+    __setDesktopRuntimeDependenciesForTests({
+      isTauri: () => true,
+      loadNotification: async () => notificationModule({
+        active: async () => [{ id: mentionNotificationId("other", 5), extra: { slug: "other", seq: 5 } }],
+        removeActive: async () => {
+          removeCalls += 1;
+        },
+      }),
+    });
+
+    expect(await clearDeliveredMentionNotifications("general", [])).toBe(true);
+    expect(removeCalls).toBe(0);
+  });
+
+  test("clearDeliveredMentionNotifications is a safe no-op on shells without active/removeActive", async () => {
     __setDesktopRuntimeDependenciesForTests({
       isTauri: () => true,
       loadNotification: async () => {
         const base = notificationModule();
-        // 旧壳：JS 里没有 removeAllActive。
-        delete (base as { removeAllActive?: unknown }).removeAllActive;
+        // 旧壳：JS 里没有 active / removeActive。
+        delete (base as { active?: unknown }).active;
+        delete (base as { removeActive?: unknown }).removeActive;
         return base;
       },
     });
 
-    expect(await clearDeliveredNotifications()).toBe(false);
+    expect(await clearDeliveredMentionNotifications("general", [1, 2, 3])).toBe(false);
+  });
+
+  test("clearDeliveredMentionNotifications returns false when the native command rejects", async () => {
+    // 旧壳保留了 JS 方法但底层命令不支持：应进入 catch 返回 false（CodeRabbit #401）。
+    __setDesktopRuntimeDependenciesForTests({
+      isTauri: () => true,
+      loadNotification: async () => notificationModule({
+        active: async () => [{ id: mentionNotificationId("general", 42), extra: { slug: "general", seq: 42 } }],
+        removeActive: async () => {
+          throw new Error("plugin:notification|remove_active not implemented");
+        },
+      }),
+    });
+
+    expect(await clearDeliveredMentionNotifications("general", [mentionNotificationId("general", 42)])).toBe(false);
   });
 
   test("does not send when notification permission is not granted", async () => {

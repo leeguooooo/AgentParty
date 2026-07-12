@@ -40,8 +40,9 @@ interface NotificationModule {
     extra?: Record<string, unknown>;
   }): void;
   onAction(handler: (notification: { extra?: Record<string, unknown> }) => void): Promise<NotificationListener>;
-  // 清掉通知中心里所有已投递的通知（issue #399）。旧壳可能没有此命令，标可选，调用侧兜底。
-  removeAllActive?(): Promise<void>;
+  // 枚举已投递的通知 / 按 id 精确删除（issue #399）。旧壳可能没有这两条命令，标可选、调用侧兜底。
+  active?(): Promise<Array<{ id: number; extra?: Record<string, unknown> }>>;
+  removeActive?(notifications: Array<{ id: number }>): Promise<void>;
 }
 
 interface AutostartModule {
@@ -168,14 +169,25 @@ export async function sendMentionNotification(input: MentionNotification): Promi
   }
 }
 
-// 清掉通知中心里所有已投递的 @提醒。用户聚焦窗口即视为读到，堆积的旧通知应随之消失
-// （issue #399：「每次登录进来都显示 @我，但我都看过了」）。旧壳无 removeAllActive → 兜底返回 false。
-export async function clearDeliveredNotifications(): Promise<boolean> {
+// 清掉通知中心里「当前频道」已投递的 @提醒。用户聚焦窗口即视为读到，堆积的旧通知应随之消失
+// （issue #399：「每次登录进来都显示 @我，但我都看过了」）。
+//
+// 只删当前频道，绝不用 removeAllActive——那会把其他频道仍未读的 @提醒一并误删（CodeRabbit #401）。
+// 匹配用双保险：① 确定性 id（hash(频道:seq)，调用方按已加载的本频道 @消息算好传入，不依赖平台回传
+// extra）；② 发送时写入的 extra.slug（覆盖已加载窗口外、但 extra 能回传的旧通知）。任一命中即删。
+// 旧壳缺 active / removeActive → 兜底返回 false。
+export async function clearDeliveredMentionNotifications(
+  slug: string,
+  mentionIds: readonly number[],
+): Promise<boolean> {
   if (!isDesktopRuntime()) return false;
   try {
     const notification = await dependencies.loadNotification();
-    if (typeof notification.removeAllActive !== "function") return false;
-    await notification.removeAllActive();
+    if (typeof notification.active !== "function" || typeof notification.removeActive !== "function") return false;
+    const idSet = new Set(mentionIds);
+    const delivered = await notification.active();
+    const mine = delivered.filter((n) => idSet.has(n.id) || n.extra?.slug === slug);
+    if (mine.length > 0) await notification.removeActive(mine.map((n) => ({ id: n.id })));
     return true;
   } catch {
     return false;
