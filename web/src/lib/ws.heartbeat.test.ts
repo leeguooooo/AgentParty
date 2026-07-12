@@ -11,6 +11,9 @@ import { ChannelSocket } from "./ws";
 // 受控时钟：ws.ts 的看门狗用 Date.now() 算 lastFrameAt 新鲜度，测试用它推进"时间"。
 let clock = 0;
 const realDateNow = Date.now;
+const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+const originalWebSocket = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
 
 // 捕获 window.setInterval 的心跳回调，fireHeartbeat() 手动放行一次 tick。
 let intervalCbs: Map<number, () => void>;
@@ -100,12 +103,13 @@ beforeEach(() => {
   intervalCbs = new Map();
   intervalSeq = 0;
   pendingTimers = [];
-  (globalThis as unknown as { WebSocket: typeof FakeSocket }).WebSocket = FakeSocket;
-  (globalThis as unknown as { location: { protocol: string; host: string } }).location = {
-    protocol: "http:",
-    host: "localhost",
-  };
-  (globalThis as unknown as { window: unknown }).window = {
+  Object.defineProperty(globalThis, "WebSocket", { configurable: true, writable: true, value: FakeSocket });
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    writable: true,
+    value: { protocol: "http:", host: "localhost" },
+  });
+  Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: {
     setInterval: (fn: () => void) => {
       const id = ++intervalSeq;
       intervalCbs.set(id, fn);
@@ -119,14 +123,19 @@ beforeEach(() => {
       return pendingTimers.length;
     },
     clearTimeout: () => {},
-  };
+  } });
 });
 
 afterEach(() => {
   Date.now = realDateNow;
-  Reflect.deleteProperty(globalThis, "WebSocket");
-  Reflect.deleteProperty(globalThis, "window");
-  Reflect.deleteProperty(globalThis, "location");
+  for (const [key, descriptor] of [
+    ["WebSocket", originalWebSocket],
+    ["window", originalWindow],
+    ["location", originalLocation],
+  ] as const) {
+    if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
+    else Object.defineProperty(globalThis, key, descriptor);
+  }
 });
 
 const PING_INTERVAL = 25_000;
