@@ -901,6 +901,21 @@ export const openapiDocument = {
                   parent_id: { type: ["integer", "null"], minimum: 1 },
                   anchor_seqs: { type: "array", items: { type: "integer", minimum: 1 } },
                   workflow_id: { type: ["string", "null"], maxLength: 128 },
+                  attachments: {
+                    type: "array",
+                    description: "R2 attachment refs from POST /api/channels/{slug}/attachments (#369); max 20",
+                    items: {
+                      type: "object",
+                      required: ["key", "filename", "content_type", "size", "url"],
+                      properties: {
+                        key: { type: "string" },
+                        filename: { type: "string" },
+                        content_type: { type: "string" },
+                        size: { type: "integer", minimum: 0 },
+                        url: { type: "string" },
+                      },
+                    },
+                  },
                 },
               },
             },

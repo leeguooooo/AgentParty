@@ -200,4 +200,54 @@ describe("channel task ledger", () => {
     expect(((await done.json()) as { blocked_reason: string | null }).blocked_reason).toBe(null);
   });
 
+  it("round-trips task attachments and rejects invalid ones (#369)", async () => {
+    const owner = `owner-${uniq("task")}@example.com`;
+    const human = await seedToken("human", uniq("human"), { owner });
+    const slug = await createChannel(human.token);
+    const att = {
+      key: `${slug}/11111111-1111-1111-1111-111111111111/spec.png`,
+      filename: "spec.png",
+      content_type: "image/png",
+      size: 2048,
+      url: `/api/channels/${slug}/attachments/11111111-1111-1111-1111-111111111111/spec.png`,
+    };
+
+    // create 带一个附件引用 → 201，返回体带 attachments
+    const created = await api(`/api/channels/${slug}/tasks`, human.token, {
+      method: "POST",
+      body: JSON.stringify({ title: "task with attachment", attachments: [att] }),
+    });
+    expect(created.status).toBe(201);
+    const task = (await created.json()) as { id: number; attachments?: typeof att[] };
+    expect(task.attachments).toEqual([att]);
+
+    // GET 单条 + 列表都往返一致
+    const got = await api(`/api/channels/${slug}/tasks/${task.id}`, human.token);
+    expect(((await got.json()) as { attachments?: typeof att[] }).attachments).toEqual([att]);
+    const listed = await api(`/api/channels/${slug}/tasks`, human.token);
+    const listedTask = ((await listed.json()) as { tasks: Array<{ id: number; attachments?: typeof att[] }> }).tasks.find((t) => t.id === task.id)!;
+    expect(listedTask.attachments).toEqual([att]);
+
+    // 无附件的任务：字段省略（不落 attachments 键）
+    const plain = await api(`/api/channels/${slug}/tasks`, human.token, {
+      method: "POST",
+      body: JSON.stringify({ title: "no attachment" }),
+    });
+    expect((await plain.json() as Record<string, unknown>).attachments).toBeUndefined();
+
+    // 非法附件（缺 key）→ 400
+    const bad = await api(`/api/channels/${slug}/tasks`, human.token, {
+      method: "POST",
+      body: JSON.stringify({ title: "bad", attachments: [{ filename: "x", content_type: "image/png", size: 1, url: "/x" }] }),
+    });
+    expect(bad.status).toBe(400);
+
+    // 超过 MAX_ATTACHMENTS(20) → 400
+    const tooMany = await api(`/api/channels/${slug}/tasks`, human.token, {
+      method: "POST",
+      body: JSON.stringify({ title: "too many", attachments: Array.from({ length: 21 }, (_, i) => ({ ...att, filename: `f${i}.png` })) }),
+    });
+    expect(tooMany.status).toBe(400);
+  });
+
 });

@@ -40,6 +40,7 @@ import type {
   TokenRole,
   WebhookFilter,
 } from "@agentparty/shared";
+import { MAX_ATTACHMENTS, parseAttachments, parseStoredAttachments } from "./attachments";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
@@ -723,6 +724,7 @@ function taskRowToRecord(row: {
   scope_json: string;
   blocked_reason: string | null;
   external_ref: string | null;
+  attachments_json: string | null;
   completion_artifact_json: string | null;
   workflow_id: string | null;
   created_at: number;
@@ -759,6 +761,10 @@ function taskRowToRecord(row: {
     scope: safeJsonArray<string>(row.scope_json).filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
     blocked_reason: row.blocked_reason,
     external_ref: row.external_ref,
+    ...(() => {
+      const att = parseStoredAttachments(row.attachments_json);
+      return att === undefined ? {} : { attachments: att };
+    })(),
     completion_artifact: completionArtifact,
     workflow_id: row.workflow_id,
     created_at: row.created_at,
@@ -4719,6 +4725,11 @@ app.post("/api/channels/:slug/tasks", async (c) => {
   if (workflowId !== null && (typeof workflowId !== "string" || workflowId.length > 128 || /[\x00-\x1f\x7f]/.test(workflowId))) {
     return c.json(errorBody("bad_request", "workflow_id must be printable text <= 128 chars"), 400);
   }
+  // #369 附件引用：与消息同款校验（./attachments）。非法结构/超上限 → 400；缺省/空 → undefined（不落列）。
+  const attachments = parseAttachments(body?.attachments);
+  if (attachments === null) {
+    return c.json(errorBody("bad_request", `attachments must be at most ${MAX_ATTACHMENTS} valid attachment refs`), 400);
+  }
   const state = (requestedState ?? (assignee ? "assigned" : identity.kind === "agent" ? "triage" : "backlog")) as TaskState;
   // #204 不变量：blocked_reason 只在 state=blocked 时有意义。非 blocked 一律落 null，
   // 否则 blockers 派生会读到「未 blocked 却带 reason」的陈旧数据（门禁 P1）。服务端强制，
@@ -4741,8 +4752,8 @@ app.post("/api/channels/:slug/tasks", async (c) => {
       `INSERT INTO channel_tasks (
          channel_slug, title, description, state, assignee_name, assignee_kind,
          created_by, created_by_kind, created_by_owner, priority, labels_json,
-         parent_id, anchor_seqs_json, workflow_id, scope_json, blocked_reason, external_ref, created_at, updated_at, completed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         parent_id, anchor_seqs_json, workflow_id, scope_json, blocked_reason, external_ref, attachments_json, created_at, updated_at, completed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         slug,
@@ -4762,6 +4773,7 @@ app.post("/api/channels/:slug/tasks", async (c) => {
         JSON.stringify(scope),
         effectiveBlockedReason,
         externalRef,
+        attachments === undefined ? null : JSON.stringify(attachments),
         now,
         now,
         state === "done" ? now : null,
