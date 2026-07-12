@@ -98,6 +98,8 @@ interface ConnState {
   serveLeaseHeld?: boolean;
 }
 
+const LEGACY_SESSION_ID = "__legacy__";
+
 interface Identity {
   name: string;
   kind: SenderKind;
@@ -1126,7 +1128,8 @@ export class ChannelDO extends Server<Env> {
     // 幂等去重查询走 (sender_name, idempotency_key)；NULL 键（老客户端/非幂等发送）不进有效查询路径。
     sql.exec("CREATE INDEX IF NOT EXISTS idx_messages_idempotency ON messages(sender_name, idempotency_key)");
     sql.exec(`CREATE TABLE IF NOT EXISTS presence (
-      name TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      session_id TEXT NOT NULL,
       state TEXT NOT NULL,
       note TEXT,
       updated_at INTEGER NOT NULL,
@@ -1145,9 +1148,11 @@ export class ChannelDO extends Server<Env> {
       lineage_json TEXT,
       kind TEXT,
       account TEXT,
-      client_version TEXT
+      client_version TEXT,
+      PRIMARY KEY (name, session_id)
     )`);
     for (const ddl of [
+      "ALTER TABLE presence ADD COLUMN session_id TEXT",
       "ALTER TABLE presence ADD COLUMN kind TEXT",
       "ALTER TABLE presence ADD COLUMN account TEXT",
       "ALTER TABLE presence ADD COLUMN role TEXT",
@@ -1187,6 +1192,7 @@ export class ChannelDO extends Server<Env> {
         // 列已存在
       }
     }
+    this.migratePresenceSessionSchema();
     sql.exec(`CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -1322,14 +1328,113 @@ export class ChannelDO extends Server<Env> {
     // 已读游标（Phase 2）：每身份读到的最大 seq。逐帧流式客户端（网页 / serve / watch --follow）回 seen
     // 时前移，断连后保留。人类与流式 agent 同表——读状态与身份类型无关，只看它逐帧收没收。
     sql.exec(`CREATE TABLE IF NOT EXISTS read_cursor (
-      name TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      session_id TEXT NOT NULL,
       kind TEXT NOT NULL,
       last_seen_seq INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (name, session_id)
     )`);
+    try {
+      sql.exec("ALTER TABLE read_cursor ADD COLUMN session_id TEXT");
+    } catch {
+      // column already exists
+    }
+    this.migrateReadCursorSessionSchema();
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'),
     );
+  }
+
+  private hasCompositeSessionPrimaryKey(table: "presence" | "read_cursor"): boolean {
+    const primaryKey = this.ctx.storage.sql
+      .exec(`PRAGMA table_info(${table})`)
+      .toArray()
+      .filter((row) => Number(row.pk) > 0)
+      .sort((a, b) => Number(a.pk) - Number(b.pk))
+      .map((row) => String(row.name));
+    return primaryKey.length === 2 && primaryKey[0] === "name" && primaryKey[1] === "session_id";
+  }
+
+  private migratePresenceSessionSchema() {
+    if (this.hasCompositeSessionPrimaryKey("presence")) return;
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("DROP TABLE IF EXISTS presence_session_v2");
+      sql.exec(`CREATE TABLE presence_session_v2 (
+        name TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        note TEXT,
+        updated_at INTEGER NOT NULL,
+        status_scope_json TEXT,
+        status_summary_seq INTEGER,
+        status_blocked_reason TEXT,
+        status_context_json TEXT,
+        status_decision_json TEXT,
+        status_workflow_json TEXT,
+        role TEXT,
+        role_source TEXT,
+        residency TEXT,
+        wake_kind TEXT,
+        wake_verified_at INTEGER,
+        context_json TEXT,
+        lineage_json TEXT,
+        kind TEXT,
+        account TEXT,
+        client_version TEXT,
+        handle TEXT,
+        display_name TEXT,
+        avatar_url TEXT,
+        avatar_thumb TEXT,
+        paused_at INTEGER,
+        paused_resume_at INTEGER,
+        busy INTEGER,
+        queue_depth INTEGER,
+        current_task INTEGER,
+        task_started_at INTEGER,
+        heartbeat_at INTEGER,
+        PRIMARY KEY (name, session_id)
+      )`);
+      sql.exec(`INSERT INTO presence_session_v2 (
+        name, session_id, state, note, updated_at,
+        status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
+        status_decision_json, status_workflow_json, role, role_source, residency, wake_kind,
+        wake_verified_at, context_json, lineage_json, kind, account, client_version, handle,
+        display_name, avatar_url, avatar_thumb, paused_at, paused_resume_at, busy, queue_depth,
+        current_task, task_started_at, heartbeat_at
+      ) SELECT
+        name, COALESCE(NULLIF(session_id, ''), '${LEGACY_SESSION_ID}'), state, note, updated_at,
+        status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
+        status_decision_json, status_workflow_json, role, role_source, residency, wake_kind,
+        wake_verified_at, context_json, lineage_json, kind, account, client_version, handle,
+        display_name, avatar_url, avatar_thumb, paused_at, paused_resume_at, busy, queue_depth,
+        current_task, task_started_at, heartbeat_at
+      FROM presence`);
+      sql.exec("DROP TABLE presence");
+      sql.exec("ALTER TABLE presence_session_v2 RENAME TO presence");
+    });
+  }
+
+  private migrateReadCursorSessionSchema() {
+    if (this.hasCompositeSessionPrimaryKey("read_cursor")) return;
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      sql.exec("DROP TABLE IF EXISTS read_cursor_session_v2");
+      sql.exec(`CREATE TABLE read_cursor_session_v2 (
+        name TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        last_seen_seq INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (name, session_id)
+      )`);
+      sql.exec(`INSERT INTO read_cursor_session_v2 (name, session_id, kind, last_seen_seq, updated_at)
+        SELECT name, COALESCE(NULLIF(session_id, ''), '${LEGACY_SESSION_ID}'), kind, last_seen_seq, updated_at
+        FROM read_cursor`);
+      sql.exec("DROP TABLE read_cursor");
+      sql.exec("ALTER TABLE read_cursor_session_v2 RENAME TO read_cursor");
+    });
   }
 
   // #137：每频道连接上限缺省取 MAX_CONNECTIONS_PER_CHANNEL；worker env 可覆盖以便运维调参
@@ -1438,7 +1543,7 @@ export class ChannelDO extends Server<Env> {
     }
     if (frame.type === "hello") {
       const clientVersion = parseClientVersion(frame.client_version);
-      if (clientVersion !== null) this.recordClientVersion(st.name, clientVersion, Date.now());
+      if (clientVersion !== null) this.recordClientVersion(st.name, connection.id, clientVersion, Date.now());
       const since = typeof frame.since === "number" && frame.since > 0 ? Math.floor(frame.since) : 0;
       const sinceRev =
         typeof frame.since_rev === "number" && frame.since_rev >= 0 ? Math.floor(frame.since_rev) : null;
@@ -1490,7 +1595,7 @@ export class ChannelDO extends Server<Env> {
       // 已读游标（Phase 2）：前移了才广播。人类与流式 agent 走同一条路径。
       const seq = typeof frame.seq === "number" ? frame.seq : NaN;
       if (Number.isFinite(seq)) {
-        const cursor = this.recordSeen(st.name, st.kind, seq);
+        const cursor = this.recordSeen(st.name, connection.id, st.kind, seq);
         if (cursor !== null) this.broadcastFrame({ type: "read_cursor", ...cursor });
       }
       return;
@@ -1499,7 +1604,7 @@ export class ChannelDO extends Server<Env> {
       // 每任务进度/心跳（#228）：presence-only，不落 history、不占发送速率、不炸连接。
       // 脏值（负数/非整数/字段不齐）静默丢弃——心跳是自动流量，宁可漏一拍也别断流。
       const hb = parseHeartbeatFrame(frame);
-      if (hb !== null) this.applyTaskHeartbeat(st.name, hb);
+      if (hb !== null) this.applyTaskHeartbeat(st.name, connection.id, hb);
       return;
     }
     if (frame.type === "serve_lease" && frame.op === "claim") {
@@ -1540,7 +1645,7 @@ export class ChannelDO extends Server<Env> {
           collabRoleSource: st.collabRoleSource,
         },
         send,
-        { countRate: false },
+        { countRate: false, sessionId: connection.id },
       );
       if (!out.ok) {
         this.sendFrame(connection, { type: "error", code: out.code, message: out.message });
@@ -1566,19 +1671,13 @@ export class ChannelDO extends Server<Env> {
     // 同名 serve 跨机租约（#99）：持租者/候选断连 → 重选，让下一条 standby 顶上（补发 held=true）。
     // 排除正在关闭的这条（getConnections 可能仍返回它）。非 serve 连接不触发。
     if (st.serveCandidate) this.reconcileServeLease(st.name, connection.id);
-    for (const other of this.getConnections<ConnState>()) {
-      if (other.id !== connection.id && other.state?.name === st.name) {
-        this.broadcastFrame({ type: "participants", participants: this.participants() });
-        return;
-      }
-    }
     const removedAt = Number(this.getMeta(this.removedPresenceKey(st.name)) ?? "");
     if (Number.isInteger(removedAt) && Date.now() - removedAt < PRESENCE_SCAN_MS) {
       this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", st.name);
       this.broadcastFrame({ type: "participants", participants: this.participants() });
       return;
     }
-    this.markOffline(st.name, Date.now());
+    this.cleanupPresenceSession(st.name, connection.id, Date.now());
     this.broadcastFrame({ type: "participants", participants: this.participants() });
   }
 
@@ -1627,8 +1726,8 @@ export class ChannelDO extends Server<Env> {
     );
   }
 
-  // read_cursor：PK=name，每身份仅一行 = 其当前游标，无重复行可裁。只裁「updated_at 早于保留窗口
-  // 且此刻无活连接」的陈旧游标——在线身份（含刚 caught-up、频道久无新帧而未再推进游标的）永不被裁其活游标。
+  // read_cursor：每个 session 一行；对外按身份取 MAX。只裁「updated_at 早于保留窗口且此刻该身份
+  // 无活连接」的陈旧游标——在线身份（含刚 caught-up、频道久无新帧而未再推进游标的）永不被裁其活游标。
   // 断连超 READ_CURSOR_RETENTION_MS 仍未回来的身份，其读位对应的消息多半已过 RETAIN_N 被裁，游标失去意义；
   // 它再上线时 recordSeen 会重建游标，无副作用（只是丢了旧读位，长期离线后本就无从谈起）。
   private pruneReadCursors(now: number) {
@@ -1666,15 +1765,7 @@ export class ChannelDO extends Server<Env> {
       if (connection.state?.serveCandidate && name) staleServeNames.add(name);
       connection.close(1001, "heartbeat timeout");
       if (!name) continue;
-      // getConnections 只回 open 的连接，刚 close 的不算
-      let gone = true;
-      for (const other of this.getConnections<ConnState>()) {
-        if (other.state?.name === name) {
-          gone = false;
-          break;
-        }
-      }
-      if (gone) this.markOffline(name, now);
+      this.cleanupPresenceSession(name, connection.id, now);
     }
     // 已 close 的陈旧连接不在 getConnections 里，直接重选：存活的候选里最早的顶上、补发 held=true。
     for (const name of staleServeNames) this.reconcileServeLease(name);
@@ -1925,14 +2016,15 @@ export class ChannelDO extends Server<Env> {
     }
   }
 
-  private markOffline(name: string, ts: number) {
+  private markOffline(name: string, sessionId: string, ts: number) {
     this.ctx.storage.sql.exec(
       // 离线时清掉每任务心跳（#228）：否则一次硬崩后再上线（发个 status 但不带心跳），旧的 current_task
       // 会借尸还魂显示成「还在处理」。心跳字段与「活着」正交，离线即无任务，直接清空最干净。
-      `INSERT INTO presence (name, state, note, updated_at) VALUES (?, 'offline', NULL, ?)
-       ON CONFLICT(name) DO UPDATE SET state = 'offline', updated_at = excluded.updated_at,
+      `INSERT INTO presence (name, session_id, state, note, updated_at) VALUES (?, ?, 'offline', NULL, ?)
+       ON CONFLICT(name, session_id) DO UPDATE SET state = 'offline', updated_at = excluded.updated_at,
          current_task = NULL, task_started_at = NULL, heartbeat_at = NULL`,
       name,
+      sessionId,
       ts,
     );
     const frame: PresenceFrame = { type: "presence", name, state: "offline", note: null, ts };
@@ -1940,11 +2032,27 @@ export class ChannelDO extends Server<Env> {
     this.broadcastFrame(entry ? { type: "presence", ...entry } : frame);
   }
 
-  private recordClientVersion(name: string, clientVersion: string, ts: number) {
+  private cleanupPresenceSession(name: string, sessionId: string, ts: number) {
+    const hasOtherLiveSession = [...this.getConnections<ConnState>()].some(
+      (connection) => connection.id !== sessionId && connection.state?.name === name,
+    );
+    if (hasOtherLiveSession) {
+      this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ? AND session_id = ?", name, sessionId);
+      const entry = this.presenceFor(name);
+      if (entry) this.broadcastFrame({ type: "presence", ...entry });
+      return;
+    }
+    // Bound reconnect churn: once the identity is fully disconnected, retain only its final offline snapshot.
+    this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ? AND session_id != ?", name, sessionId);
+    this.markOffline(name, sessionId, ts);
+  }
+
+  private recordClientVersion(name: string, sessionId: string, clientVersion: string, ts: number) {
     this.ctx.storage.sql.exec(
-      `INSERT INTO presence (name, state, note, updated_at, client_version) VALUES (?, 'waiting', NULL, ?, ?)
-       ON CONFLICT(name) DO UPDATE SET client_version = excluded.client_version`,
+      `INSERT INTO presence (name, session_id, state, note, updated_at, client_version) VALUES (?, ?, 'waiting', NULL, ?, ?)
+       ON CONFLICT(name, session_id) DO UPDATE SET client_version = excluded.client_version`,
       name,
+      sessionId,
       ts,
       clientVersion,
     );
@@ -1955,15 +2063,19 @@ export class ChannelDO extends Server<Env> {
   // 每任务进度/心跳（#228）：只更新 presence 上的 current_task/task_started_at/heartbeat_at 三列，
   // 不碰 state/note/busy、不落 history（presence-only，不刷屏）。仅当已有这行 presence 时才更新+广播；
   // 从没发过 presence（连 status 都没发）就无从附着，直接忽略。current_task=null 即清除（任务结束）。
-  private applyTaskHeartbeat(name: string, hb: ParsedTaskHeartbeat) {
-    const exists = this.ctx.storage.sql.exec("SELECT 1 FROM presence WHERE name = ? LIMIT 1", name).toArray().length > 0;
+  private applyTaskHeartbeat(name: string, sessionId: string, hb: ParsedTaskHeartbeat) {
+    const exists =
+      this.ctx.storage.sql
+        .exec("SELECT 1 FROM presence WHERE name = ? AND session_id = ? LIMIT 1", name, sessionId)
+        .toArray().length > 0;
     if (!exists) return;
     this.ctx.storage.sql.exec(
-      `UPDATE presence SET current_task = ?, task_started_at = ?, heartbeat_at = ? WHERE name = ?`,
+      `UPDATE presence SET current_task = ?, task_started_at = ?, heartbeat_at = ? WHERE name = ? AND session_id = ?`,
       hb.current_task,
       hb.task_started_at,
       hb.heartbeat_at,
       name,
+      sessionId,
     );
     const entry = this.presenceFor(name);
     if (entry) this.broadcastFrame({ type: "presence", ...entry });
@@ -1980,14 +2092,21 @@ export class ChannelDO extends Server<Env> {
   // 暂停某 agent 的接待：写 paused_at（可选 paused_resume_at 定时恢复）。不动 state/updated_at，
   // 故不干扰在线/新鲜度/host 租约判定——暂停与「活没活」正交。有定时点则前移 alarm 到点自动恢复。
   private pausePresence(name: string, resumeAt: number | null, now: number) {
+    const exists = this.ctx.storage.sql.exec("SELECT 1 FROM presence WHERE name = ? LIMIT 1", name).toArray().length > 0;
+    if (!exists) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO presence (name, session_id, state, note, updated_at)
+         VALUES (?, ?, 'waiting', NULL, ?)`,
+        name,
+        LEGACY_SESSION_ID,
+        now,
+      );
+    }
     this.ctx.storage.sql.exec(
-      `INSERT INTO presence (name, state, note, updated_at, paused_at, paused_resume_at)
-       VALUES (?, 'waiting', NULL, ?, ?, ?)
-       ON CONFLICT(name) DO UPDATE SET paused_at = excluded.paused_at, paused_resume_at = excluded.paused_resume_at`,
-      name,
-      now,
+      "UPDATE presence SET paused_at = ?, paused_resume_at = ? WHERE name = ?",
       now,
       resumeAt,
+      name,
     );
     const entry = this.presenceFor(name);
     if (entry) this.broadcastFrame({ type: "presence", ...entry });
@@ -2013,7 +2132,7 @@ export class ChannelDO extends Server<Env> {
   // alarm 到点：清掉所有 paused_resume_at 已过期的暂停（定时自动恢复，issue #180）。
   private resumeDuePauses(now: number) {
     const due = this.ctx.storage.sql
-      .exec("SELECT name FROM presence WHERE paused_resume_at IS NOT NULL AND paused_resume_at <= ?", now)
+      .exec("SELECT DISTINCT name FROM presence WHERE paused_resume_at IS NOT NULL AND paused_resume_at <= ?", now)
       .toArray();
     for (const row of due) this.resumePresence(String(row.name), now);
   }
@@ -2250,9 +2369,7 @@ export class ChannelDO extends Server<Env> {
 
   // #107：某 name 当前登记的 wake 层（presence.wake_kind）。无 presence / 未登记 = null。
   private wakeKindFor(name: string): WakeKind | null {
-    const row = this.ctx.storage.sql.exec("SELECT wake_kind FROM presence WHERE name = ?", name).toArray()[0];
-    const raw = row?.wake_kind;
-    return typeof raw === "string" ? (raw as WakeKind) : null;
+    return this.presenceFor(name)?.wake?.kind ?? null;
   }
 
   // #107：serve/watch 的唤醒也进服务端 ledger。webhook 由服务端主动 POST、天然可审计；serve/watch 是
@@ -3555,7 +3672,7 @@ export class ChannelDO extends Server<Env> {
   private async handleSend(
     identity: Identity,
     frame: SendFrame,
-    options: { countRate?: boolean } = {},
+    options: { countRate?: boolean; sessionId?: string } = {},
   ): Promise<SendOutcome> {
     if (this.isArchived()) {
       return { ok: false, code: "archived", message: "channel is archived" };
@@ -3816,13 +3933,13 @@ export class ChannelDO extends Server<Env> {
       const wakeProvided = frame.wake !== undefined ? 1 : 0;
       sql.exec(
         `INSERT INTO presence (
-           name, kind, account, handle, display_name, avatar_url, avatar_thumb,
+           name, session_id, kind, account, handle, display_name, avatar_url, avatar_thumb,
            state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
            status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at, context_json,
            lineage_json, busy, queue_depth
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(name) DO UPDATE SET
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(name, session_id) DO UPDATE SET
            kind = excluded.kind,
            account = COALESCE(excluded.account, presence.account),
            handle = COALESCE(excluded.handle, presence.handle),
@@ -3854,6 +3971,7 @@ export class ChannelDO extends Server<Env> {
            busy = excluded.busy,
            queue_depth = excluded.queue_depth`,
         identity.name,
+        options.sessionId ?? LEGACY_SESSION_ID,
         identity.kind,
         identity.owner ?? null, // 人类会话 = email，agent = 所属账号；presence.account 存它供前端显示「是谁」
         identity.handle ?? null, // 当前连接的人类 handle；同 account 手法，presence.handle 供前端展示/被 @
@@ -4017,10 +4135,7 @@ export class ChannelDO extends Server<Env> {
   }
 
   private currentWorkflowForSender(name: string): StatusWorkflow | undefined {
-    const rows = this.ctx.storage.sql
-      .exec("SELECT status_workflow_json FROM presence WHERE name = ? AND state != 'offline'", name)
-      .toArray();
-    return rows.length > 0 ? parseStoredStatusWorkflow(rows[0]!.status_workflow_json) : undefined;
+    return this.presenceFor(name)?.status?.workflow;
   }
 
   private workflowGuardDecision(identity: Identity, frame: SendFrame): WorkflowGuardDecision | null {
@@ -4355,7 +4470,8 @@ export class ChannelDO extends Server<Env> {
   // 已读游标快照（welcome 首帧下发）。
   private readCursors(): ReadCursor[] {
     return this.ctx.storage.sql
-      .exec("SELECT name, kind, last_seen_seq, updated_at FROM read_cursor ORDER BY name")
+      .exec(`SELECT name, kind, MAX(last_seen_seq) AS last_seen_seq, MAX(updated_at) AS updated_at
+               FROM read_cursor GROUP BY name ORDER BY name`)
       .toArray()
       .map((r) => ({
         name: String(r.name),
@@ -4367,22 +4483,28 @@ export class ChannelDO extends Server<Env> {
 
   // seen 帧：把某身份的已读游标前移到 seq（只前移；旧 seq 幂等忽略）。前移了返回新游标（供广播），
   // 没前移返回 null（不广播，避免噪声）。seq 被夹到 [0, lastSeq]，防止未来 seq 污染。
-  private recordSeen(name: string, kind: SenderKind, seq: number): ReadCursor | null {
+  private recordSeen(name: string, sessionId: string, kind: SenderKind, seq: number): ReadCursor | null {
     const capped = Math.min(Math.max(Math.floor(seq), 0), this.lastSeq());
     if (capped <= 0) return null;
+    const aggregateBefore = Number(
+      this.ctx.storage.sql.exec("SELECT COALESCE(MAX(last_seen_seq), 0) AS seq FROM read_cursor WHERE name = ?", name).one()
+        .seq,
+    );
     const prev = this.ctx.storage.sql
-      .exec("SELECT last_seen_seq FROM read_cursor WHERE name = ?", name)
+      .exec("SELECT last_seen_seq FROM read_cursor WHERE name = ? AND session_id = ?", name, sessionId)
       .toArray();
     if (prev.length > 0 && Number(prev[0]!.last_seen_seq) >= capped) return null;
     const updatedAt = Date.now();
     this.ctx.storage.sql.exec(
-      `INSERT INTO read_cursor (name, kind, last_seen_seq, updated_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, last_seen_seq = excluded.last_seen_seq, updated_at = excluded.updated_at`,
+      `INSERT INTO read_cursor (name, session_id, kind, last_seen_seq, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(name, session_id) DO UPDATE SET kind = excluded.kind, last_seen_seq = excluded.last_seen_seq, updated_at = excluded.updated_at`,
       name,
+      sessionId,
       kind,
       capped,
       updatedAt,
     );
+    if (capped <= aggregateBefore) return null;
     return { name, kind, last_seen_seq: capped, updated_at: updatedAt };
   }
 
@@ -4602,7 +4724,7 @@ export class ChannelDO extends Server<Env> {
   // 回填该 name 最近一条消息的 sender_kind，让 `who`（读 presence）与 `history`（读 messages）对同一身份返回同一个
   // kind——否则 CLI who.ts kindOf() 会按名字猜（非 UUID → "agent"），把只发过普通消息的人类谎报成 agent。
   // presence.kind 非 NULL 时（即刚发过 status 帧、最新一手 token 快照）优先用它，不被历史消息覆盖。
-  private static readonly PRESENCE_COLUMNS = `name,
+  private static readonly PRESENCE_COLUMNS = `name, session_id,
                 COALESCE(kind, (SELECT sender_kind FROM messages WHERE sender_name = presence.name ORDER BY seq DESC LIMIT 1)) AS kind,
                 account, handle, display_name, avatar_url, avatar_thumb, client_version,
                 state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
@@ -4613,19 +4735,77 @@ export class ChannelDO extends Server<Env> {
   private presenceList(): PresenceEntry[] {
     const liveCounts = this.liveConnectionCounts();
     const serveCounts = this.serveCandidateCounts();
-    return this.ctx.storage.sql
+    const liveSessions = this.livePresenceSessions();
+    const rows = this.ctx.storage.sql
       .exec(`SELECT ${ChannelDO.PRESENCE_COLUMNS} FROM presence ORDER BY name`)
-      .toArray()
-      .map((r) => this.withLivePresence(this.presenceRowToEntry(r), liveCounts, serveCounts));
+      .toArray();
+    const grouped = new Map<string, Record<string, unknown>[]>();
+    for (const row of rows) {
+      const name = String(row.name);
+      const group = grouped.get(name) ?? [];
+      group.push(row);
+      grouped.set(name, group);
+    }
+    return [...grouped.entries()].map(([name, group]) =>
+      this.withLivePresence(
+        this.presenceRowToEntry(this.aggregatePresenceRow(name, group, liveSessions)),
+        liveCounts,
+        serveCounts,
+      ),
+    );
   }
 
   private presenceFor(name: string): PresenceEntry | null {
     const liveCounts = this.liveConnectionCounts();
     const serveCounts = this.serveCandidateCounts();
+    const liveSessions = this.livePresenceSessions();
     const rows = this.ctx.storage.sql
       .exec(`SELECT ${ChannelDO.PRESENCE_COLUMNS} FROM presence WHERE name = ?`, name)
       .toArray();
-    return rows.length > 0 ? this.withLivePresence(this.presenceRowToEntry(rows[0]!), liveCounts, serveCounts) : null;
+    return rows.length > 0
+      ? this.withLivePresence(
+          this.presenceRowToEntry(this.aggregatePresenceRow(name, rows, liveSessions)),
+          liveCounts,
+          serveCounts,
+        )
+      : null;
+  }
+
+  private livePresenceSessions(): Map<string, Set<string>> {
+    const sessions = new Map<string, Set<string>>();
+    for (const connection of this.getConnections<ConnState>()) {
+      const name = connection.state?.name;
+      if (!name) continue;
+      const ids = sessions.get(name) ?? new Set<string>();
+      ids.add(connection.id);
+      sessions.set(name, ids);
+    }
+    return sessions;
+  }
+
+  private aggregatePresenceRow(
+    name: string,
+    rows: Record<string, unknown>[],
+    liveSessions: Map<string, Set<string>>,
+  ): Record<string, unknown> {
+    const live = liveSessions.get(name);
+    const liveRows = live === undefined ? [] : rows.filter((row) => live.has(String(row.session_id)));
+    const candidates = liveRows.length > 0 ? liveRows : rows;
+    const rank = (row: Record<string, unknown>): number => {
+      if (Number(row.busy) === 1) return 500;
+      if (row.current_task !== null && row.current_task !== undefined) return 450;
+      if (row.state === "working") return 400;
+      if (row.state === "blocked") return 300;
+      if (row.state === "waiting") return 200;
+      if (row.state === "done") return 100;
+      return 0;
+    };
+    return candidates.reduce((best, row) => {
+      const score = rank(row);
+      const bestScore = rank(best);
+      if (score !== bestScore) return score > bestScore ? row : best;
+      return Number(row.updated_at) > Number(best.updated_at) ? row : best;
+    });
   }
 
   // issue #97：presence 序列化时用「当前有无活 WS 连接」在读侧修正可达性/离线，再叠加重复连接计数。

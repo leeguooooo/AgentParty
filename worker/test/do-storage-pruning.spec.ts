@@ -44,9 +44,10 @@ function insertAuditRow(state: DurableObjectState, targetSeq: number, createdAt:
 
 function insertCursorRow(state: DurableObjectState, name: string, seq: number, updatedAt: number) {
   state.storage.sql.exec(
-    `INSERT INTO read_cursor (name, kind, last_seen_seq, updated_at) VALUES (?, 'agent', ?, ?)
-     ON CONFLICT(name) DO UPDATE SET last_seen_seq = excluded.last_seen_seq, updated_at = excluded.updated_at`,
+    `INSERT INTO read_cursor (name, session_id, kind, last_seen_seq, updated_at) VALUES (?, ?, 'agent', ?, ?)
+     ON CONFLICT(name, session_id) DO UPDATE SET last_seen_seq = excluded.last_seen_seq, updated_at = excluded.updated_at`,
     name,
+    `test:${name}`,
     seq,
     updatedAt,
   );
