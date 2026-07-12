@@ -993,7 +993,7 @@ export function App() {
       <PairPage
         serverOrigin={pairServerOrigin}
         token={token}
-        initialCode={initialPairCode}
+        initialCode={readPendingPairing(sessionStorage).code ?? initialPairCode}
         onRequireHuman={({ code }) => {
           rememberPendingPairing(sessionStorage, { code, serverOrigin: pairServerOrigin });
           clearToken();

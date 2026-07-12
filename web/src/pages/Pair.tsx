@@ -195,8 +195,10 @@ export function PairPage({ serverOrigin, token, initialCode, onRequireHuman, onD
       setDecision(next);
       setInspection(null);
       onDecisionComplete?.();
-    } catch {
-      setError(t("Pair.decision.failed"));
+    } catch (cause) {
+      const humanRequired = cause instanceof Error && cause.message === "human_required";
+      setRequiresHuman(humanRequired);
+      setError(humanRequired ? t("Pair.inspect.humanRequired") : t("Pair.decision.failed"));
     } finally {
       setPending(false);
     }

@@ -4,7 +4,6 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "./i18n/locale";
 import { readPendingPairing } from "./lib/pairingPending";
 
-mock.module("./pages/Channel", () => ({ ChannelPage: () => null }));
 mock.module("dompurify", () => ({ default: { addHook: () => {}, sanitize: (value: string) => value } }));
 
 const { App } = await import("./App");
@@ -23,6 +22,7 @@ function memoryStorage(seed: Record<string, string> = {}): Storage {
 
 let renderer: ReactTestRenderer | null = null;
 let decisions: Array<{ authorization: string | null; body: unknown }> = [];
+let rejectDecisionAsNonHuman = false;
 
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -36,8 +36,8 @@ beforeEach(() => {
     configurable: true,
     value: {
       pathname: "/pair",
-      search: "?code=AB12C-DE34F",
-      href: "https://agentparty.leeguoo.com/pair?code=AB12C-DE34F",
+      search: "",
+      href: "https://agentparty.leeguoo.com/pair",
       origin: "https://agentparty.leeguoo.com",
       hash: "",
     },
@@ -77,6 +77,7 @@ beforeEach(() => {
   });
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: {} });
   decisions = [];
+  rejectDecisionAsNonHuman = false;
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (input: string | URL | Request, init?: RequestInit) => {
@@ -95,6 +96,7 @@ beforeEach(() => {
         }
       }
       if (url.endsWith("/api/desktop/pairings/decision")) {
+        if (rejectDecisionAsNonHuman) return new Response(null, { status: 403 });
         decisions.push({ authorization, body: JSON.parse(String(init?.body)) });
         return new Response(null, { status: 204 });
       }
@@ -115,6 +117,13 @@ test("preserves the pairing through a human-token switch and clears it after app
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
+  await act(async () => {
+    renderer!.root.findByProps({ id: "pair-code" }).props.onChange({ target: { value: "ab12c-de34f" } });
+  });
+  await act(async () => {
+    renderer!.root.findByProps({ className: "gate-form" }).props.onSubmit({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
   expect(renderer!.root.findByProps({ className: "d-btn pair-human-login" })).toBeTruthy();
   await act(async () => renderer!.root.findByProps({ className: "d-btn pair-human-login" }).props.onClick());
 
@@ -152,4 +161,34 @@ test("preserves the pairing through a human-token switch and clears it after app
     body: { pairing_id: "pair-1", user_code: "AB12C-DE34F", decision: "approve" },
   }]);
   expect(readPendingPairing(sessionStorage)).toEqual({ code: null, routePending: false, serverOrigin: null });
+});
+
+test("offers the human-account switch when authorization expires during approval", async () => {
+  localStorage.setItem("ap_token", "ap_human");
+  rejectDecisionAsNonHuman = true;
+  await act(async () => {
+    renderer = create(<LocaleProvider><App /></LocaleProvider>);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  await act(async () => {
+    renderer!.root.findByProps({ id: "pair-code" }).props.onChange({ target: { value: "AB12C-DE34F" } });
+  });
+  await act(async () => {
+    renderer!.root.findByProps({ className: "gate-form" }).props.onSubmit({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  const approve = renderer!.root.findAllByType("button")
+    .find((button) => button.children.includes("Approve this device"));
+  expect(approve).toBeTruthy();
+  await act(async () => {
+    approve!.props.onClick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(renderer!.root.findByProps({ className: "d-btn pair-human-login" })).toBeTruthy();
+  expect(renderer!.root.findByProps({ role: "alert" }).children).toContain(
+    "Sign in with a human account to approve this device.",
+  );
 });

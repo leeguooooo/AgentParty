@@ -54,4 +54,26 @@ describe("pending desktop pairing route", () => {
       serverOrigin: "https://agentparty.leeguoo.com",
     });
   });
+
+  test("updates or explicitly clears a remembered code without losing the server", () => {
+    const storage = memoryStorage();
+    rememberPendingPairing(storage, {
+      code: "AB12C-DE34F",
+      serverOrigin: "https://agentparty.leeguoo.com",
+    });
+
+    rememberPendingPairing(storage, { code: "FG56H-JK78L" });
+    expect(readPendingPairing(storage)).toEqual({
+      code: "FG56H-JK78L",
+      routePending: true,
+      serverOrigin: "https://agentparty.leeguoo.com",
+    });
+
+    rememberPendingPairing(storage, { code: null });
+    expect(readPendingPairing(storage)).toEqual({
+      code: null,
+      routePending: true,
+      serverOrigin: "https://agentparty.leeguoo.com",
+    });
+  });
 });
