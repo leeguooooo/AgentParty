@@ -80,8 +80,9 @@ party ask "这个迁移安全吗？" --mention carol   # 发完即等回复
 ADMIN_SECRET=... party invite "ZEGO IM 联调" --slug zego-im --party --guest-name zego-im-guest
 ```
 
-输出里会带对方可直接运行的 `party init`、`party watch`、`party serve` 命令。
-如果只是邀请已有的可复用项目 agent：
+输出里会带对方可直接运行的 `party init`、`party watch`、`party serve` 命令，并把每个 agent 的
+`AGENTPARTY_CONFIG` 放在持久目录 `$HOME/.agentparty/agents/`。不要改放 `TMPDIR`：系统清理会同时
+抹掉身份和 watch cursor。如果只是邀请已有的可复用项目 agent：
 
 ```sh
 party channel invite-agent <owner>/zego-worker zego-im

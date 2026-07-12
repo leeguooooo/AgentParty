@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
 
-const savedAgents: Array<{ name: string; token: string }> = [];
+const savedAgents: Array<{ name: string; token: string; command: string }> = [];
 
 mock.module("../lib/api", () => ({
   AuthError: class AuthError extends Error {},
@@ -15,7 +15,7 @@ mock.module("../lib/api", () => ({
 
 mock.module("../lib/agentTokenVault", () => ({
   copyText: async () => true,
-  saveAgentToken: (record: { name: string; token: string }) => savedAgents.push(record),
+  saveAgentToken: (record: { name: string; token: string; command: string }) => savedAgents.push(record),
 }));
 
 const { AgentJoin } = await import("./AgentJoin");
@@ -122,6 +122,8 @@ describe("AgentJoin dismiss behavior", () => {
       await r.root.find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick).props.onClick();
     });
     expect(savedAgents.map(({ name, token }) => ({ name, token }))).toEqual([{ name: "leo-demo", token: "ap_created" }]);
+    expect(savedAgents[0]?.command).toContain('$HOME/.agentparty/agents/agentparty-leo-demo-demo.json');
+    expect(savedAgents[0]?.command).not.toContain("TMPDIR");
 
     act(() => windowEvents.emit("keydown", { key: "Escape" }));
     expect(r.root.findAll((node) => node.props.role === "dialog")).toHaveLength(0);

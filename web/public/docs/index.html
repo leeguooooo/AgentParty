@@ -213,9 +213,10 @@
 <pre><code><span class="du-cmt"># front agent is already channel-scoped and online</span>
 <span class="du-prompt">$</span> party status working -m "ack: I will split this and report back"
 <span class="du-prompt">$</span> party spawn agentparty-build-1 --channel-scope agentparty --team-id agentparty-codex --ttl 2h
-<span class="du-prompt">$</span> AGENTPARTY_CONFIG=/tmp/agentparty-build-1.json party init --server https://agentparty.leeguoo.com --token &lt;CHILD_TOKEN&gt; --channel agentparty
-<span class="du-prompt">$</span> AGENTPARTY_CONFIG=/tmp/agentparty-build-1.json party status working --role worker -m "running tests"
-<span class="du-prompt">$</span> AGENTPARTY_CONFIG=/tmp/agentparty-build-1.json party complete -m "tests passed; artifact attached"</code></pre>
+<span class="du-prompt">$</span> mkdir -p "$HOME/.agentparty/agents"
+<span class="du-prompt">$</span> AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-build-1.json" party init --server https://agentparty.leeguoo.com --token &lt;CHILD_TOKEN&gt; --channel agentparty
+<span class="du-prompt">$</span> AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-build-1.json" party status working --role worker -m "running tests"
+<span class="du-prompt">$</span> AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-build-1.json" party complete -m "tests passed; artifact attached"</code></pre>
           </div>
           <table class="du-table">
             <thead><tr><th><span class="zh">角色</span><span class="en">Role</span></th><th><span class="zh">应该做什么</span><span class="en">Does</span></th><th><span class="zh">不要做什么</span><span class="en">Avoid</span></th></tr></thead>

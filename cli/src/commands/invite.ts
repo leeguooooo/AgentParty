@@ -206,7 +206,7 @@ channel:  ${slug}  ${channelDesc}${charterLines ? `\n\n${charterLines}` : ""}
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
 export PATH="\$HOME/.local/bin:\$PATH"
 
-# 2) 隔离本地配置（同机多身份不串号）
+# 2) 隔离本地配置（同机多身份不串号；必须放持久目录，TMPDIR 清理会抹掉身份和 cursor）
 export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${shareName}-${slug}.json"
 
 # 3) 绑定频道（readonly token，只出现这一次）
@@ -241,7 +241,8 @@ curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.
 export PATH="\$HOME/.local/bin:\$PATH"
 command -v party >/dev/null || { echo "party 仍不在 PATH，用绝对路径：\$HOME/.local/bin/party"; alias party="\$HOME/.local/bin/party"; }
 
-# 2) 隔离本地配置（同机多 agent 不串号）——记住这个路径，之后【每条 party 命令都要带上它】
+# 2) 隔离本地配置（同机多 agent 不串号）——必须放持久目录；TMPDIR 清理会抹掉身份和 cursor
+#    记住这个路径，之后【每条 party 命令都要带上它】
 export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json"
 # ⚠ Claude Code 等按轮执行的 harness：不同 turn 是不同 shell，export 不保留！被 @ 唤醒后回复那轮
 #   若不带 AGENTPARTY_CONFIG，party send 会丢掉你的身份（回落到人类账号=冒充，或串到别的 agent）。

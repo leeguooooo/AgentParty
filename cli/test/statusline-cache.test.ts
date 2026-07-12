@@ -8,6 +8,7 @@ import {
   heartbeatPatch,
   readStatuslineCache,
   statuslineCachePath,
+  statuslineCacheSlotPath,
   statuslinePreview,
   unreadFromCursor,
   writeStatuslineCache,
@@ -87,6 +88,31 @@ describe("statusline cache contract", () => {
   test("message previews collapse whitespace and cap at 48 characters", () => {
     expect(statuslinePreview("  shipped\n\n the\t auth patch  ")).toBe("shipped the auth patch");
     expect(statuslinePreview("x".repeat(60))).toBe(`${"x".repeat(47)}…`);
+  });
+
+  test("isolates canonical slots by channel and explicit config while keeping statusline.json readable", () => {
+    const configA = join(home, "alice.json");
+    const configB = join(home, "bob.json");
+
+    process.env.AGENTPARTY_CONFIG = configA;
+    writeStatuslineCache(
+      { channel: "dev", identity: { name: "alice", kind: "agent", role: "agent" }, unread: 7 },
+      cwd,
+      1000,
+    );
+    const aliceDev = statuslineCacheSlotPath("dev", cwd);
+
+    process.env.AGENTPARTY_CONFIG = configB;
+    writeStatuslineCache({ channel: "dev", identity: { name: "bob", kind: "agent", role: "agent" } }, cwd, 2000);
+    const bobDev = statuslineCacheSlotPath("dev", cwd);
+
+    expect(aliceDev).not.toBe(bobDev);
+    process.env.AGENTPARTY_CONFIG = configA;
+    expect(readStatuslineCache(cwd, "dev")?.identity?.name).toBe("alice");
+    process.env.AGENTPARTY_CONFIG = configB;
+    expect(readStatuslineCache(cwd, "dev")?.identity?.name).toBe("bob");
+    expect(readStatuslineCache(cwd, "dev")?.unread).toBeUndefined();
+    expect(JSON.parse(require("node:fs").readFileSync(statuslineCachePath(cwd), "utf8")).channel).toBe("dev");
   });
 });
 

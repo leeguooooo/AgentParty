@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { workspaceId } from "../src/config";
-import { clearHealthCache, healthCachePath, readHealthCache, writeHealthCache } from "../src/health-cache";
+import { clearHealthCache, healthCachePath, healthCacheSlotPath, readHealthCache, writeHealthCache } from "../src/health-cache";
 
 let home: string;
 let cwd: string;
@@ -13,10 +13,12 @@ beforeEach(() => {
   cwd = join(home, "repo");
   mkdirSync(cwd, { recursive: true });
   process.env.AGENTPARTY_HOME = home;
+  delete process.env.AGENTPARTY_CONFIG;
 });
 
 afterEach(() => {
   delete process.env.AGENTPARTY_HOME;
+  delete process.env.AGENTPARTY_CONFIG;
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -86,5 +88,26 @@ describe("health cache contract", () => {
 
   test("readHealthCache returns null when no file exists yet", () => {
     expect(readHealthCache(cwd)).toBeNull();
+  });
+
+  test("isolates canonical slots by channel and explicit config while keeping health.json readable", () => {
+    const configA = join(home, "alice.json");
+    const configB = join(home, "bob.json");
+
+    process.env.AGENTPARTY_CONFIG = configA;
+    writeHealthCache({ channel: "dev", ws_connected: true, last_frame_at: 1000 }, cwd, 1000);
+    const aliceDev = healthCacheSlotPath("dev", cwd);
+
+    process.env.AGENTPARTY_CONFIG = configB;
+    writeHealthCache({ channel: "dev", ws_connected: false, last_error: "bob-dev" }, cwd, 2000);
+    const bobDev = healthCacheSlotPath("dev", cwd);
+
+    expect(aliceDev).not.toBe(bobDev);
+    process.env.AGENTPARTY_CONFIG = configA;
+    expect(readHealthCache(cwd, "dev")?.last_frame_at).toBe(1000);
+    process.env.AGENTPARTY_CONFIG = configB;
+    expect(readHealthCache(cwd, "dev")?.last_error).toBe("bob-dev");
+    expect(readHealthCache(cwd, "dev")?.last_frame_at).toBeNull();
+    expect(JSON.parse(require("node:fs").readFileSync(healthCachePath(cwd), "utf8")).channel).toBe("dev");
   });
 });

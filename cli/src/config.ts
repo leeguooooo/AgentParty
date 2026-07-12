@@ -3,7 +3,19 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { atomicWriteJson } from "./atomic-json";
 
 export interface Config {
   server: string;
@@ -64,6 +76,8 @@ export interface WorkspaceState {
    * 顶层 channel/cursor/rev_cursor 保留作绑定频道的镜像，兼容旧读者与 statusline。
    */
   cursors?: Record<string, ChannelCursor>;
+  /** 每个频道最后一次 init 使用的显式 config；同一 cwd 的多频道互不覆盖。 */
+  bindings?: Record<string, string>;
   /**
    * 面包屑：init 时若用了 AGENTPARTY_CONFIG，把该显式路径记进【cwd 基准】的 state（不受 env 影响）。
    * 回落用——Claude Code 的 Bash 不跨 turn 保留 export，被唤醒回复轮没了 env 就靠它找回绑定的 agent
@@ -132,7 +146,23 @@ export function readConfigWithSource(cwd: string = process.cwd()): ConfigWithSou
     const cfg = JSON.parse(readFileSync(ws, "utf8")) as Config;
     return { config: cfg, source: sourceInfo("workspace", ws, cfg, cwd) };
   } catch {
-    /* 试全局来源 */
+    /* 试 cwd 面包屑 */
+  }
+
+  // cwd 绑定优先于全局兜底（#359）。bindings 是新格式；config_path 是旧状态兼容镜像。
+  try {
+    const st = JSON.parse(readFileSync(cwdStatePath(cwd), "utf8")) as WorkspaceState;
+    const breadcrumb = st.bindings?.[st.channel] ?? st.config_path;
+    if (breadcrumb) {
+      try {
+        const cfg = JSON.parse(readFileSync(breadcrumb, "utf8")) as Config;
+        return { config: cfg, source: sourceInfo("explicit", breadcrumb, cfg, cwd) };
+      } catch {
+        console.error(`warning: workspace config breadcrumb is unreadable: ${breadcrumb}; falling back to global config`);
+      }
+    }
+  } catch {
+    /* 无 cwd state */
   }
 
   const global = globalConfigPath();
@@ -140,19 +170,7 @@ export function readConfigWithSource(cwd: string = process.cwd()): ConfigWithSou
     const cfg = JSON.parse(readFileSync(global, "utf8")) as Config;
     return { config: cfg, source: sourceInfo("global", global, cfg, cwd) };
   } catch {
-    /* 试面包屑指针 */
-  }
-
-  // 面包屑回落（issue #42）：cwd-state 记了 config_path 就顺着找回绑定的 agent config——
-  // 这是 Claude 唤醒回复轮丢了 AGENTPARTY_CONFIG env 后不冒充人类账号的关键兜底。
-  try {
-    const st = JSON.parse(readFileSync(cwdStatePath(cwd), "utf8")) as WorkspaceState;
-    if (st.config_path) {
-      const cfg = JSON.parse(readFileSync(st.config_path, "utf8")) as Config;
-      return { config: cfg, source: sourceInfo("explicit", st.config_path, cfg, cwd) };
-    }
-  } catch {
-    /* 无指针或指向的文件已删 */
+    /* 无全局来源 */
   }
   return { config: null, source: sourceInfo("none", null, null, cwd) };
 }
@@ -162,21 +180,16 @@ export function readConfig(cwd: string = process.cwd()): Config | null {
 }
 
 export function writeConfig(cfg: Config, cwd: string = process.cwd()): void {
-  const body = JSON.stringify(cfg, null, 2) + "\n";
   const explicit = explicitConfigPath();
   if (explicit) {
-    mkdirSync(dirname(explicit), { recursive: true });
-    writeFileSync(explicit, body, { mode: 0o600 });
-    chmodSync(explicit, 0o600);
+    atomicWriteJson(explicit, cfg);
     return;
   }
   // 配置里有 token 明文，收紧到仅属主可读写；对已存在的文件补 chmod
   // 双写：① workspace 级（本目录/session 专属，读取时优先）② 全局（跨目录默认 + 存量兼容）。
   // 读取偏好 workspace，故全局被并发覆盖也不会串号。
   for (const p of [workspaceConfigPath(cwd), globalConfigPath()]) {
-    mkdirSync(join(p, ".."), { recursive: true });
-    writeFileSync(p, body, { mode: 0o600 });
-    chmodSync(p, 0o600);
+    atomicWriteJson(p, cfg);
   }
 }
 
@@ -192,10 +205,7 @@ export function writeConfig(cfg: Config, cwd: string = process.cwd()): void {
 export function refreshConfigInPlace(cfg: Config, cwd: string = process.cwd()): void {
   const { source } = readConfigWithSource(cwd);
   if (source.kind === "none" || source.path === null) return; // 没有来源就没有该刷新的东西
-  const body = JSON.stringify(cfg, null, 2) + "\n";
-  mkdirSync(dirname(source.path), { recursive: true });
-  writeFileSync(source.path, body, { mode: 0o600 });
-  chmodSync(source.path, 0o600);
+  atomicWriteJson(source.path, cfg);
 }
 
 export function slugifyBasename(name: string): string {
@@ -291,18 +301,87 @@ export function cwdStatePath(cwd: string = process.cwd()): string {
   return join(agentpartyHome(), "state", workspaceId(cwd), "state.json");
 }
 
-// init 时把显式 config 路径记进 cwd-state（issue #42）。只在该 state 无 config_path 或指向不同路径时更新。
+const STATE_LOCK_TIMEOUT_MS = 5_000;
+const STATE_LOCK_STALE_MS = 30_000;
+const lockWaiter = new Int32Array(new SharedArrayBuffer(4));
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function removeStaleLock(lockPath: string): void {
+  try {
+    const age = Date.now() - statSync(lockPath).mtimeMs;
+    const owner = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: number };
+    if (typeof owner.pid === "number" && processAlive(owner.pid)) return;
+    if (typeof owner.pid !== "number" && age < STATE_LOCK_STALE_MS) return;
+    rmSync(lockPath, { force: true });
+  } catch {
+    /* lock disappeared or is still being initialized */
+  }
+}
+
+function withStateLock<T>(path: string, fn: () => T): T {
+  const lockPath = `${path}.lock`;
+  mkdirSync(dirname(path), { recursive: true });
+  const deadline = Date.now() + STATE_LOCK_TIMEOUT_MS;
+  for (;;) {
+    let fd: number | null = null;
+    let created = false;
+    try {
+      fd = openSync(lockPath, "wx", 0o600);
+      created = true;
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, created_at: Date.now() }) + "\n");
+      closeSync(fd);
+      fd = null;
+      break;
+    } catch (error) {
+      if (fd !== null) closeSync(fd);
+      if (created) rmSync(lockPath, { force: true });
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      removeStaleLock(lockPath);
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for state lock: ${lockPath}`);
+      Atomics.wait(lockWaiter, 0, 0, 2);
+    }
+  }
+
+  try {
+    return fn();
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+}
+
+function readStateFile(path: string): WorkspaceState | null {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as WorkspaceState;
+  } catch {
+    return null;
+  }
+}
+
+// init 时把显式 config 路径按频道记进 cwd-state；config_path 保留为旧读者的当前频道镜像。
 export function bindWorkspaceConfigPointer(configPath: string, channel: string, cwd: string = process.cwd()): void {
   const p = cwdStatePath(cwd);
-  let prev: WorkspaceState | null = null;
-  try {
-    prev = JSON.parse(readFileSync(p, "utf8")) as WorkspaceState;
-  } catch {
-    /* 无既有 cwd-state */
-  }
-  const next: WorkspaceState = { channel, cursor: prev?.cursor ?? 0, ...prev, config_path: configPath };
-  mkdirSync(join(p, ".."), { recursive: true });
-  writeFileSync(p, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+  withStateLock(p, () => {
+    const prev = readStateFile(p);
+    const next: WorkspaceState = {
+      ...(prev ?? { channel, cursor: 0 }),
+      channel,
+      bindings: {
+        ...(prev?.config_path ? { [prev.channel]: prev.config_path } : {}),
+        ...(prev?.bindings ?? {}),
+        [channel]: configPath,
+      },
+      config_path: configPath,
+    };
+    atomicWriteJson(p, next);
+  });
 }
 
 export function readState(cwd: string = process.cwd()): WorkspaceState | null {
@@ -318,10 +397,7 @@ export function readState(cwd: string = process.cwd()): WorkspaceState | null {
 // readState 随即返回 null → 游标退回 0 → 整个保留窗口的 @ 被重放。范本同 statusline-cache.ts。
 export function writeState(st: WorkspaceState, cwd: string = process.cwd()): void {
   const p = statePath(cwd);
-  mkdirSync(join(p, ".."), { recursive: true });
-  const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(st, null, 2) + "\n");
-  renameSync(tmp, p);
+  withStateLock(p, () => atomicWriteJson(p, st));
 }
 
 export function resolveChannel(explicit?: string, cwd?: string): string | null {
@@ -338,18 +414,29 @@ function channelCursor(st: WorkspaceState | null, channel: string): ChannelCurso
   return { cursor: 0 };
 }
 
-// 写回：分频道表是权威；绑定频道同步镜像到顶层，供 statusline 等旧读者使用。
-function putChannelCursor(channel: string, next: ChannelCursor, cwd?: string): void {
-  const st = readState(cwd) ?? { channel, cursor: 0 };
-  const merged: WorkspaceState = {
-    ...st,
-    cursors: { ...(st.cursors ?? {}), [channel]: next },
-  };
-  if (st.channel === channel) {
-    merged.cursor = next.cursor;
-    if (next.rev_cursor !== undefined) merged.rev_cursor = next.rev_cursor;
-  }
-  writeState(merged, cwd);
+// cursor 的读取、比较、合并、写回必须同处一个跨进程临界区（#364）。
+function updateChannelCursor(
+  channel: string,
+  update: (current: ChannelCursor) => ChannelCursor | null,
+  cwd: string = process.cwd(),
+): void {
+  migrateLegacyWorkspaceState(cwd);
+  const p = statePath(cwd);
+  withStateLock(p, () => {
+    const st = readStateFile(p) ?? { channel, cursor: 0 };
+    const next = update(channelCursor(st, channel));
+    if (next === null) return;
+    const merged: WorkspaceState = {
+      ...st,
+      cursors: { ...(st.cursors ?? {}), [channel]: next },
+    };
+    if (st.channel === channel) {
+      merged.cursor = next.cursor;
+      if (next.rev_cursor === undefined) delete merged.rev_cursor;
+      else merged.rev_cursor = next.rev_cursor;
+    }
+    atomicWriteJson(p, merged);
+  });
 }
 
 export function loadCursor(channel: string, cwd?: string): number {
@@ -357,9 +444,7 @@ export function loadCursor(channel: string, cwd?: string): number {
 }
 
 export function saveCursor(channel: string, cursor: number, cwd?: string): void {
-  const cur = channelCursor(readState(cwd), channel);
-  if (cursor <= cur.cursor) return; // 单调，不回退
-  putChannelCursor(channel, { ...cur, cursor }, cwd);
+  updateChannelCursor(channel, (cur) => cursor <= cur.cursor ? null : { ...cur, cursor }, cwd);
 }
 
 /** 读欠账（#198）。没有欠账返回 null。 */
@@ -369,14 +454,15 @@ export function loadStuck(channel: string, cwd?: string): StuckWake | null {
 
 /** 写欠账。和 cursor 并列，互不覆盖。 */
 export function saveStuck(channel: string, stuck: StuckWake, cwd?: string): void {
-  const cur = channelCursor(readState(cwd), channel);
-  putChannelCursor(channel, { ...cur, stuck }, cwd);
+  updateChannelCursor(channel, (cur) => ({ ...cur, stuck }), cwd);
 }
 
 /** 了结欠账：送达成功，或有界重试耗尽后显式放弃。 */
 export function clearStuck(channel: string, cwd?: string): void {
-  const { stuck: _dropped, ...rest } = channelCursor(readState(cwd), channel);
-  putChannelCursor(channel, rest, cwd);
+  updateChannelCursor(channel, (cur) => {
+    const { stuck: _dropped, ...rest } = cur;
+    return rest;
+  }, cwd);
 }
 
 /**
@@ -387,9 +473,7 @@ export function clearStuck(channel: string, cwd?: string): void {
  * 这里只处理「我已经读到最新、紧接着自己发了一条」的情形，保住 statusline 的 unread=0。
  */
 export function advanceCursorPastOwnMessage(channel: string, seq: number, cwd?: string): void {
-  const cur = channelCursor(readState(cwd), channel);
-  if (cur.cursor !== seq - 1) return; // 有空洞：那些是别人的消息，绝不跳过
-  putChannelCursor(channel, { ...cur, cursor: seq }, cwd);
+  updateChannelCursor(channel, (cur) => cur.cursor === seq - 1 ? { ...cur, cursor: seq } : null, cwd);
 }
 
 export function loadRevCursor(channel: string, cwd?: string): number {
@@ -397,7 +481,9 @@ export function loadRevCursor(channel: string, cwd?: string): number {
 }
 
 export function saveRevCursor(channel: string, revCursor: number, cwd?: string): void {
-  const cur = channelCursor(readState(cwd), channel);
-  if (revCursor <= (cur.rev_cursor ?? 0)) return;
-  putChannelCursor(channel, { ...cur, rev_cursor: revCursor }, cwd);
+  updateChannelCursor(
+    channel,
+    (cur) => revCursor <= (cur.rev_cursor ?? 0) ? null : { ...cur, rev_cursor: revCursor },
+    cwd,
+  );
 }

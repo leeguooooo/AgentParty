@@ -733,7 +733,7 @@ describe("cli subprocess", () => {
         .map((k) => [k, undefined as string | undefined]),
     );
     const r = await runCli(
-      ["watch", "dev", "--once", "--mentions-only", "--timeout", "1"],
+      ["watch", "dev", "--once", "--mentions-only", "--since", "0", "--timeout", "1"],
       { ...clearClaudeCode, CODEX_CI: "1" },
     );
     expect(r.code).toBe(2);
@@ -755,7 +755,7 @@ describe("cli subprocess", () => {
       join(home, "config.json"),
       JSON.stringify({ server: server.url, token: "ap_tok" }),
     );
-    const r = await runCli(["watch", "dev", "--once", "--mentions-only", "--timeout", "2"], { CODEX_CI: undefined });
+    const r = await runCli(["watch", "dev", "--once", "--mentions-only", "--since", "0", "--timeout", "2"], { CODEX_CI: undefined });
     expect(r.code).toBe(0);
     expect(r.stdout.split("\n")[0]).toBe("[1] bob(human): @me wake");
     expect(r.stderr).toContain("--once is single-shot");

@@ -1,8 +1,10 @@
 import type { MsgFrame } from "@agentparty/shared";
-import { mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { agentpartyHome, loadCursor, readConfig, readState, type CachedIdentity, workspaceId } from "./config";
 import type { Identity } from "./rest";
+import { atomicWriteJson } from "./atomic-json";
+import { cacheSlotPath } from "./cache-slot";
 
 export interface StatuslineIdentity {
   name: string;
@@ -53,13 +55,26 @@ export function statuslineCachePath(cwd: string = process.cwd()): string {
   return join(agentpartyHome(), "state", workspaceId(cwd), "statusline.json");
 }
 
-export function readStatuslineCache(cwd: string = process.cwd()): StatuslineCache | null {
+export function statuslineCacheSlotPath(channel: string, cwd: string = process.cwd()): string {
+  return cacheSlotPath("statusline", channel, cwd);
+}
+
+function readStatuslinePath(path: string): StatuslineCache | null {
   try {
-    const body = JSON.parse(readFileSync(statuslineCachePath(cwd), "utf8")) as StatuslineCache;
+    const body = JSON.parse(readFileSync(path, "utf8")) as StatuslineCache;
     return body.v === 1 ? body : null;
   } catch {
     return null;
   }
+}
+
+export function readStatuslineCache(cwd: string = process.cwd(), channel?: string): StatuslineCache | null {
+  const selectedChannel = channel ?? readState(cwd)?.channel;
+  if (selectedChannel) {
+    const slot = readStatuslinePath(statuslineCacheSlotPath(selectedChannel, cwd));
+    if (slot !== null) return slot;
+  }
+  return readStatuslinePath(statuslineCachePath(cwd));
 }
 
 export function statuslineIdentity(identity: CachedIdentity | Identity | undefined | null): StatuslineIdentity | undefined {
@@ -114,7 +129,10 @@ export function unreadFromCursor(latestSeq: number | undefined | null, channel?:
 }
 
 export function writeStatuslineCache(patch: StatuslinePatch, cwd: string = process.cwd(), now: number = Date.now()): StatuslineCache {
-  const prev = readStatuslineCache(cwd);
+  const legacy = readStatuslinePath(statuslineCachePath(cwd));
+  const channel = patch.channel ?? readState(cwd)?.channel ?? legacy?.channel;
+  const slot = channel ? readStatuslinePath(statuslineCacheSlotPath(channel, cwd)) : null;
+  const prev = slot ?? (patch.channel === undefined ? legacy : null);
   const { last_message, listener, ...rest } = patch;
   const next: StatuslineCache = {
     ...(prev ?? { v: 1 }),
@@ -131,12 +149,8 @@ export function writeStatuslineCache(patch: StatuslinePatch, cwd: string = proce
     else if (listener !== undefined) next.listener = listener;
   }
 
-  const path = statuslineCachePath(cwd);
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${now}.tmp`;
-  writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
-  renameSync(tmp, path);
-  chmodSync(path, 0o600);
+  if (channel) atomicWriteJson(statuslineCacheSlotPath(channel, cwd), next);
+  atomicWriteJson(statuslineCachePath(cwd), next);
   return next;
 }
 

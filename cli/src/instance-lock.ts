@@ -11,6 +11,7 @@
 // ⚠️ 这把锁只挡**同一台机器**。跨机器的重复执行（工位机 + 家里机各跑一个 serve）
 // 需要服务端租约（#99 的另一半,`do.ts` 广播发给同名所有连接）。
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 export type InstanceKind = "watch" | "serve";
@@ -35,19 +36,98 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+interface LockHolder {
+  pid?: number;
+  id?: string;
+}
+
+function readHolder(path: string): LockHolder | null {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as LockHolder;
+  } catch {
+    return null;
+  }
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+
 export function acquireInstanceLock(kind: InstanceKind, channel: string, dir: string): InstanceLock {
   const path = lockPath(kind, channel, dir);
+  const reclaimPath = `${path}.reclaim`;
+  const lockId = randomUUID();
+  const body = JSON.stringify({ pid: process.pid, id: lockId, kind, channel, ts: Date.now() });
+  let staleGeneration: string | null = null;
   mkdirSync(dir, { recursive: true });
-  try {
-    const held = JSON.parse(readFileSync(path, "utf8")) as { pid?: number };
-    // 关键：只有确认写锁的进程**已经死了**才接管。反方向（把活着的当陈旧）会重新引入 bug。
-    if (typeof held.pid === "number" && pidAlive(held.pid)) {
+
+  for (;;) {
+    try {
+      writeFileSync(path, body, { flag: "wx", mode: 0o600 });
+      break;
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+    }
+
+    const held = readHolder(path);
+    if (typeof held?.pid === "number" && pidAlive(held.pid)) {
       return { ok: false, heldByPid: held.pid };
     }
-  } catch {
-    /* 没有锁文件,或内容坏了：往下走,重新写一个 */
+    const generation = held?.id ?? `legacy:${held?.pid ?? "invalid"}`;
+    // If the file changed since this contender observed the stale owner, another
+    // contender won the takeover. Never delete that newer generation.
+    if (staleGeneration !== null && generation !== staleGeneration) {
+      return { ok: false, heldByPid: held?.pid };
+    }
+    staleGeneration = generation;
+
+    const reclaimId = randomUUID();
+    try {
+      // O_EXCL serializes stale-file removal; the winner recreates the main lock
+      // with O_EXCL while still holding this short-lived reclaim lock.
+      writeFileSync(reclaimPath, JSON.stringify({ pid: process.pid, id: reclaimId }), { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+      const reclaimer = readHolder(reclaimPath);
+      if (typeof reclaimer?.pid === "number" && !pidAlive(reclaimer.pid)) {
+        try {
+          unlinkSync(reclaimPath);
+        } catch {
+          /* Another contender already removed the stale reclaim lock. */
+        }
+      } else {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+      }
+      continue;
+    }
+
+    try {
+      const current = readHolder(path);
+      if (typeof current?.pid === "number" && pidAlive(current.pid)) {
+        return { ok: false, heldByPid: current.pid };
+      }
+      const currentGeneration = current?.id ?? `legacy:${current?.pid ?? "invalid"}`;
+      if (currentGeneration !== staleGeneration) {
+        return { ok: false, heldByPid: current?.pid };
+      }
+      try {
+        unlinkSync(path);
+      } catch {
+        /* Another stale cleanup may already have removed the old file. */
+      }
+      writeFileSync(path, body, { flag: "wx", mode: 0o600 });
+      break;
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+    } finally {
+      try {
+        unlinkSync(reclaimPath);
+      } catch {
+        /* Reclaim lock already disappeared. */
+      }
+    }
   }
-  writeFileSync(path, JSON.stringify({ pid: process.pid, kind, channel, ts: Date.now() }), { mode: 0o600 });
+
   return {
     ok: true,
     release: () => {

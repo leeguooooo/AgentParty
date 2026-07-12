@@ -1,20 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import {
   bindWorkspaceConfigPointer,
+  cwdStatePath,
+  globalConfigPath,
   loadCursor,
   readConfig,
   readConfigWithSource,
   readState,
+  refreshConfigInPlace,
   resolveChannel,
   saveCursor,
   slugifyBasename,
   statePath,
   tokenFingerprint,
   workspaceId,
+  workspaceConfigPath,
   writeConfig,
   writeState,
 } from "../src/config";
@@ -84,6 +88,36 @@ describe("config", () => {
     expect(readConfig("/tmp/proj-c")).toEqual({ server: "s", token: "ap_b" });
   });
 
+  test("config precedence is explicit env > workspace > cwd breadcrumb > global (#359)", () => {
+    const cwd = "/tmp/config-precedence";
+    const breadcrumbPath = join(home, "breadcrumb.json");
+    const explicitPath = join(home, "explicit.json");
+
+    writeConfig({ server: "s", token: "ap_global" }, "/tmp/global-source");
+
+    process.env.AGENTPARTY_CONFIG = breadcrumbPath;
+    writeConfig({ server: "s", token: "ap_breadcrumb" }, cwd);
+    bindWorkspaceConfigPointer(breadcrumbPath, "dev", cwd);
+    delete process.env.AGENTPARTY_CONFIG;
+    expect(readConfigWithSource(cwd)).toMatchObject({
+      config: { token: "ap_breadcrumb" },
+      source: { kind: "explicit", path: breadcrumbPath },
+    });
+
+    writeConfig({ server: "s", token: "ap_workspace" }, cwd);
+    expect(readConfigWithSource(cwd)).toMatchObject({
+      config: { token: "ap_workspace" },
+      source: { kind: "workspace" },
+    });
+
+    process.env.AGENTPARTY_CONFIG = explicitPath;
+    writeConfig({ server: "s", token: "ap_explicit" }, cwd);
+    expect(readConfigWithSource(cwd)).toMatchObject({
+      config: { token: "ap_explicit" },
+      source: { kind: "explicit", path: explicitPath },
+    });
+  });
+
   test("AGENTPARTY_CONFIG pins config and cursor state for same-cwd agents", () => {
     const cwd = "/tmp/shared-worktree";
     const configA = join(home, "agent-a.json");
@@ -106,6 +140,32 @@ describe("config", () => {
     process.env.AGENTPARTY_CONFIG = configA;
     expect(readConfig(cwd)).toEqual({ server: "s", token: "ap_a" });
     expect(readState(cwd)).toEqual({ channel: "agentparty", cursor: 10 });
+  });
+
+  test("config, refreshed config, state, and breadcrumb writes replace JSON atomically (#364)", () => {
+    const cwd = "/tmp/atomic-json-writes";
+    writeConfig({ server: "s", token: "ap_one" }, cwd);
+    const workspacePath = workspaceConfigPath(cwd);
+    const globalPath = globalConfigPath();
+    const workspaceInode = statSync(workspacePath).ino;
+    const globalInode = statSync(globalPath).ino;
+    writeConfig({ server: "s", token: "ap_two" }, cwd);
+    expect(statSync(workspacePath).ino).not.toBe(workspaceInode);
+    expect(statSync(globalPath).ino).not.toBe(globalInode);
+
+    const refreshedInode = statSync(workspacePath).ino;
+    refreshConfigInPlace({ server: "s", token: "ap_three" }, cwd);
+    expect(statSync(workspacePath).ino).not.toBe(refreshedInode);
+
+    writeState({ channel: "dev", cursor: 1 }, cwd);
+    const stateInode = statSync(statePath(cwd)).ino;
+    writeState({ channel: "dev", cursor: 2 }, cwd);
+    expect(statSync(statePath(cwd)).ino).not.toBe(stateInode);
+
+    bindWorkspaceConfigPointer(join(home, "dev-one.json"), "dev", cwd);
+    const breadcrumbInode = statSync(cwdStatePath(cwd)).ino;
+    bindWorkspaceConfigPointer(join(home, "dev-two.json"), "dev", cwd);
+    expect(statSync(cwdStatePath(cwd)).ino).not.toBe(breadcrumbInode);
   });
 });
 
@@ -176,9 +236,70 @@ describe("workspace state", () => {
     expect(r.source.path).toBe(cfgPath);
   });
 
-  test("breadcrumb pointing to a deleted config yields no config (not a stale one)", () => {
-    bindWorkspaceConfigPointer(join(home, "gone.json"), "dev", cwd);
+  test("channel bindings survive later init and channel follows the latest init (#360)", () => {
+    const alphaPath = join(home, "alpha.json");
+    const betaPath = join(home, "beta.json");
+    bindWorkspaceConfigPointer(alphaPath, "alpha", cwd);
+    bindWorkspaceConfigPointer(betaPath, "beta", cwd);
+
+    expect(readState(cwd)).toMatchObject({
+      channel: "beta",
+      config_path: betaPath,
+      bindings: { alpha: alphaPath, beta: betaPath },
+    });
+
+    bindWorkspaceConfigPointer(alphaPath, "alpha", cwd);
+    expect(readState(cwd)).toMatchObject({
+      channel: "alpha",
+      config_path: alphaPath,
+      bindings: { alpha: alphaPath, beta: betaPath },
+    });
+  });
+
+  test("legacy config_path remains a readable breadcrumb", () => {
+    const legacyPath = join(home, "legacy.json");
+    process.env.AGENTPARTY_CONFIG = legacyPath;
+    writeConfig({ server: "s", token: "ap_legacy" }, cwd);
     delete process.env.AGENTPARTY_CONFIG;
-    expect(readConfigWithSource(cwd).config).toBeNull();
+    writeState({ channel: "dev", cursor: 0, config_path: legacyPath }, cwd);
+
+    expect(readConfigWithSource(cwd)).toMatchObject({
+      config: { token: "ap_legacy" },
+      source: { kind: "explicit", path: legacyPath },
+    });
+  });
+
+  test("the first post-upgrade init migrates the legacy channel binding", () => {
+    const alphaPath = join(home, "legacy-alpha.json");
+    const betaPath = join(home, "beta.json");
+    writeState({ channel: "alpha", cursor: 7, config_path: alphaPath }, cwd);
+
+    bindWorkspaceConfigPointer(betaPath, "beta", cwd);
+    expect(readState(cwd)).toMatchObject({
+      channel: "beta",
+      cursor: 7,
+      config_path: betaPath,
+      bindings: { alpha: alphaPath, beta: betaPath },
+    });
+  });
+
+  test("unreadable breadcrumb warns before falling back to global (#359)", () => {
+    const missingPath = join(home, "gone.json");
+    writeConfig({ server: "s", token: "ap_global" }, "/tmp/global-fallback");
+    bindWorkspaceConfigPointer(missingPath, "dev", cwd);
+    const warnings: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+    try {
+      expect(readConfigWithSource(cwd)).toMatchObject({
+        config: { token: "ap_global" },
+        source: { kind: "global" },
+      });
+    } finally {
+      console.error = originalError;
+    }
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(missingPath);
+    expect(warnings[0]).toContain("falling back");
   });
 });

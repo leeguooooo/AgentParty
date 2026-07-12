@@ -30,6 +30,8 @@ With --once, it stays attached until the FIRST matching message, prints it, and
 exits 0 — made for harness background tasks (e.g. Claude Code run_in_background):
 the process exit is the wake signal, so the mention lands in your EXISTING
 session with its context intact.
+For --mentions-only --once, an uninitialized cursor (0) attaches at the current
+channel head to avoid replaying old mentions. Use --since 0 to request backlog.
 Self messages are skipped by default; --exclude-self is accepted as an explicit
 automation hint for scripts that want to document that behavior.
 NOTE: --follow only PRINTS messages. Most harnesses (Codex included) never turn
@@ -390,9 +392,15 @@ export async function run(argv: string[]): Promise<number> {
   if (flags.follow === true) console.error(FOLLOW_WAKE_ADVISORY);
   if (flags.once === true && isCodexRuntimeEnv()) console.error(ONCE_CODEX_ADVISORY);
   const localCursor = loadCursor(channel);
+  const initialLatest =
+    localCursor === 0 &&
+    explicitSince === undefined &&
+    flags.latest !== true &&
+    flags.once === true &&
+    flags["mentions-only"] === true;
   let since = explicitSince ?? localCursor;
   let skippedMentionSeqs: number[] = [];
-  if (flags.latest === true || (explicitSince !== undefined && explicitSince > localCursor)) {
+  if (flags.latest === true || initialLatest || (explicitSince !== undefined && explicitSince > localCursor)) {
     try {
       const selection = await resolveExplicitWatchCursor(
         cfg.server,
@@ -408,6 +416,7 @@ export async function run(argv: string[]): Promise<number> {
         type: "watch_attached",
         channel,
         attached_at_seq: since,
+        ...(initialLatest ? { initial_cursor: "latest" } : {}),
         skipped_messages: selection.skippedMessages,
         skipped_mentions: skippedMentionSeqs.length,
         skipped_mention_seqs: skippedMentionSeqs,
@@ -415,7 +424,7 @@ export async function run(argv: string[]): Promise<number> {
       console.log(
         flags.json === true
           ? JSON.stringify(jsonFrame(attached))
-          : `watch: attached_at_seq=${since} skipped_messages=${selection.skippedMessages} skipped_mentions=${skippedMentionSeqs.length} skipped_mention_seqs=${JSON.stringify(skippedMentionSeqs)}`,
+          : `watch: attached_at_seq=${since}${initialLatest ? " initial_cursor=latest" : ""} skipped_messages=${selection.skippedMessages} skipped_mentions=${skippedMentionSeqs.length} skipped_mention_seqs=${JSON.stringify(skippedMentionSeqs)}`,
       );
     } catch (e) {
       if (e instanceof Error && e.message.startsWith("refusing to skip more than")) {

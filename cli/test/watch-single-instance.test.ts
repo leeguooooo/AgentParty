@@ -5,7 +5,7 @@
 //
 // 在有 loop guard 的频道里，这是直接给熔断计数器加了个乘数（每条重复回复都是一条 agent 消息）。
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT_ALREADY_WATCHING, runWatch } from "../src/commands/watch";
@@ -79,6 +79,31 @@ describe("watch 单实例保护 (#195)", () => {
     const lock = acquireInstanceLock("watch", "dev", d);
     expect(lock.ok).toBe(false);
     expect(lock.heldByPid).toBe(process.pid);
+  });
+
+  test("8 个进程并发接管同一陈旧锁时只有一个成功", async () => {
+    const d = dir();
+    const start = join(d, "start");
+    const ready = join(d, "ready");
+    mkdirSync(ready);
+    writeFileSync(join(d, "watch-dev.lock"), JSON.stringify({ pid: 999_999, channel: "dev" }));
+
+    const children = Array.from({ length: 8 }, (_, index) =>
+      Bun.spawn([process.execPath, join(import.meta.dir, "fixtures", "instance-lock-contender.ts"), "watch", "dev", d, start, ready, String(index), "8"], {
+        stdout: "pipe",
+        stderr: "pipe",
+      }),
+    );
+    writeFileSync(start, "go");
+
+    const results = await Promise.all(
+      children.map(async (child) => {
+        const [stdout, stderr, exitCode] = await Promise.all([child.stdout.text(), child.stderr.text(), child.exited]);
+        expect(exitCode, stderr).toBe(0);
+        return JSON.parse(stdout) as { ok: boolean };
+      }),
+    );
+    expect(results.filter((result) => result.ok), JSON.stringify(results)).toHaveLength(1);
   });
 });
 

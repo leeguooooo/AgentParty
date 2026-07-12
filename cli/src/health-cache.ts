@@ -1,11 +1,13 @@
 // party serve 本地连接健康探针（#254）：watchdog 不能只凭 pgrep 判断 serve 是否真的还在收帧——
 // 进程/launchd 状态是"活着"的必要条件，不是充分条件；socket 僵住或陷入重连循环时 PID 依旧健在。
-// 这里落一份 workspace 级的 health.json，与 statusline-cache.ts 同源同规范（tmp+rename 原子写、
-// 0600、last-writer-wins）；serve 在 WS 生命周期转场（open/reconnecting/关闭）与每次收到服务端
+// 这里按 workspace + channel/config scope 落规范槽，同时原子更新 health.json 兼容镜像；
+// serve 在 WS 生命周期转场（open/reconnecting/关闭）与每次收到服务端
 // frame 时各写一次，写入频率跟着 ping 心跳节奏（~25s）走，空闲频道也不会假新鲜。
-import { mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { agentpartyHome, workspaceId } from "./config";
+import { atomicWriteJson } from "./atomic-json";
+import { cacheSlotPath } from "./cache-slot";
 
 export interface HealthCache {
   v: 1;
@@ -41,13 +43,25 @@ export function healthCachePath(cwd: string = process.cwd()): string {
   return join(agentpartyHome(), "state", workspaceId(cwd), "health.json");
 }
 
-export function readHealthCache(cwd: string = process.cwd()): HealthCache | null {
+export function healthCacheSlotPath(channel: string, cwd: string = process.cwd()): string {
+  return cacheSlotPath("health", channel, cwd);
+}
+
+function readHealthPath(path: string): HealthCache | null {
   try {
-    const body = JSON.parse(readFileSync(healthCachePath(cwd), "utf8")) as HealthCache;
+    const body = JSON.parse(readFileSync(path, "utf8")) as HealthCache;
     return body.v === 1 ? body : null;
   } catch {
     return null;
   }
+}
+
+export function readHealthCache(cwd: string = process.cwd(), channel?: string): HealthCache | null {
+  if (channel) {
+    const slot = readHealthPath(healthCacheSlotPath(channel, cwd));
+    if (slot !== null) return slot;
+  }
+  return readHealthPath(healthCachePath(cwd));
 }
 
 // 字段级合并：patch 里显式传的 key（哪怕值是 null/false/0）一律采纳，未提到的 key 保留旧值。
@@ -57,7 +71,10 @@ function pick<K extends keyof HealthPatch>(patch: HealthPatch, key: K, fallback:
 }
 
 export function writeHealthCache(patch: HealthPatch, cwd: string = process.cwd(), now: number = Date.now()): HealthCache {
-  const prev = readHealthCache(cwd);
+  const legacy = readHealthPath(healthCachePath(cwd));
+  const channel = patch.channel ?? legacy?.channel ?? "";
+  const slot = channel ? readHealthPath(healthCacheSlotPath(channel, cwd)) : null;
+  const prev = slot ?? (patch.channel === undefined ? legacy : null);
   const next: HealthCache = {
     v: 1,
     pid: process.pid,
@@ -74,12 +91,8 @@ export function writeHealthCache(patch: HealthPatch, cwd: string = process.cwd()
     updated_at: now,
   };
 
-  const path = healthCachePath(cwd);
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${now}.tmp`;
-  writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
-  renameSync(tmp, path);
-  chmodSync(path, 0o600);
+  if (channel) atomicWriteJson(healthCacheSlotPath(channel, cwd), next);
+  atomicWriteJson(healthCachePath(cwd), next);
   return next;
 }
 

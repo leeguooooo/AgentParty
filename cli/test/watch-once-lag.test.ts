@@ -147,6 +147,96 @@ describe("watch --once 不得复用身份级已读游标 (#206 门禁 P1)", () =
 });
 
 describe("watch explicit cursor choices (#172)", () => {
+  test("zero cursor defaults mentions-only once to latest instead of replaying historical mentions (#361)", async () => {
+    home = mkdtempSync(join(tmpdir(), "ap-watch-initial-latest-"));
+    const messages = [
+      msgFrame(1, "stale mention", { mentions: ["me"] }),
+      msgFrame(2, "head"),
+    ];
+    const hellos: number[] = [];
+    apiServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req, srv) {
+        const url = new URL(req.url);
+        if (url.pathname === "/api/me") {
+          return Response.json({ name: "me", kind: "agent", role: "agent", email: null, owner: null });
+        }
+        if (url.pathname === "/api/channels/dev/messages") {
+          const since = Number(url.searchParams.get("since") ?? 0);
+          const limit = Number(url.searchParams.get("limit") ?? 100);
+          const before = Number(url.searchParams.get("before") ?? 0);
+          const selected = before > 0 ? messages.slice(-limit) : messages.filter((msg) => msg.seq > since).slice(0, limit);
+          return Response.json({ messages: selected });
+        }
+        if (srv.upgrade(req, { data: undefined })) return;
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        message(ws, raw) {
+          const frame = JSON.parse(String(raw));
+          if (frame.type !== "hello") return;
+          hellos.push(frame.since);
+          ws.send(JSON.stringify(welcomeFrame(2, "me")));
+          ws.send(JSON.stringify(frame.since === 0 ? messages[0] : msgFrame(3, "fresh mention", { mentions: ["me"] })));
+        },
+      },
+    });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: `http://127.0.0.1:${apiServer.port}`, token: "ap_tok" }),
+    );
+    const dir = join(home, "state", workspaceId(process.cwd()));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), JSON.stringify({ channel: "dev", cursor: 0 }));
+
+    const result = await runCli(["watch", "dev", "--once", "--mentions-only", "--timeout", "2"]);
+
+    expect(result.code).toBe(0);
+    expect(hellos).toEqual([2]);
+    expect(result.stdout).toContain("initial_cursor=latest");
+    expect(result.stdout).toContain("skipped_mention_seqs=[1]");
+    expect(result.stdout).not.toContain("stale mention");
+    expect(result.stdout).toContain("fresh mention");
+    expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).cursors.dev.cursor).toBe(3);
+  }, 15_000);
+
+  test("explicit --since 0 preserves historical mention replay for zero-cursor users (#361)", async () => {
+    home = mkdtempSync(join(tmpdir(), "ap-watch-explicit-zero-"));
+    const hellos: number[] = [];
+    apiServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req, srv) {
+        if (srv.upgrade(req, { data: undefined })) return;
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        message(ws, raw) {
+          const frame = JSON.parse(String(raw));
+          if (frame.type !== "hello") return;
+          hellos.push(frame.since);
+          ws.send(JSON.stringify(welcomeFrame(2, "me")));
+          ws.send(JSON.stringify(msgFrame(1, "requested historical mention", { mentions: ["me"] })));
+        },
+      },
+    });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: `http://127.0.0.1:${apiServer.port}`, token: "ap_tok" }),
+    );
+    const dir = join(home, "state", workspaceId(process.cwd()));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), JSON.stringify({ channel: "dev", cursor: 0 }));
+
+    const result = await runCli(["watch", "dev", "--since", "0", "--once", "--mentions-only", "--timeout", "2"]);
+
+    expect(result.code).toBe(0);
+    expect(hellos).toEqual([0]);
+    expect(result.stdout).not.toContain("initial_cursor=latest");
+    expect(result.stdout).toContain("requested historical mention");
+  }, 15_000);
+
   test("--since starts and persists the explicit local watch cursor", async () => {
     home = mkdtempSync(join(tmpdir(), "ap-watch-since-"));
     const messages = [msgFrame(3, "old"), msgFrame(4, "mention", { mentions: ["me"] }), msgFrame(5, "head")];

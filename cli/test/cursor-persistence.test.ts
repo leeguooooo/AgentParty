@@ -1,6 +1,6 @@
 // #113：本地游标持久化三连击。三个独立缺陷共同击穿「@mention 恰好一次送达」。
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
   saveCursor,
   saveRevCursor,
   statePath,
+  workspaceId,
   writeState,
 } from "../src/config";
 
@@ -105,6 +106,60 @@ describe("cursor persistence (#113)", () => {
       for (let i = 1; i <= 50; i++) saveCursor("dev", i, d);
       expect(loadCursor("dev", d)).toBe(50);
       expect(readState(d)).not.toBeNull();
+    });
+  });
+
+  describe("④ cursor RMW 必须跨进程保持单调 (#364)", () => {
+    test("barrier-released writers cannot overwrite a larger cursor", async () => {
+      const root = cwd();
+      const workspace = join(root, "workspace");
+      const home = join(root, "home");
+      const rounds = 40;
+      mkdirSync(workspace);
+      const isolatedStatePath = join(home, "state", workspaceId(workspace), "state.json");
+      mkdirSync(join(isolatedStatePath, ".."), { recursive: true });
+      writeFileSync(isolatedStatePath, JSON.stringify({ channel: "dev", cursor: 0 }) + "\n");
+      try {
+        const values = Array.from({ length: 32 }, (_, index) => index + 1);
+        const children = values.map((value) => {
+          const readyPrefix = join(root, `ready-${value}`);
+          const donePrefix = join(root, `done-${value}`);
+          const goPrefix = join(root, "go");
+          return {
+            readyPrefix,
+            donePrefix,
+            child: Bun.spawn(
+              [
+                process.execPath,
+                join(import.meta.dir, "fixtures", "cursor-writer.ts"),
+                workspace,
+                "dev",
+                String(value),
+                readyPrefix,
+                goPrefix,
+                donePrefix,
+                String(rounds),
+              ],
+              { env: { ...process.env, AGENTPARTY_HOME: home }, stdout: "pipe", stderr: "pipe" },
+            ),
+          };
+        });
+
+        const observed: number[] = [];
+        for (let round = 1; round <= rounds; round++) {
+          while (!children.every(({ readyPrefix }) => existsSync(`${readyPrefix}-${round}`))) await Bun.sleep(1);
+          writeFileSync(join(root, `go-${round}`), "go\n");
+          while (!children.every(({ donePrefix }) => existsSync(`${donePrefix}-${round}`))) await Bun.sleep(1);
+          const state = JSON.parse(readFileSync(isolatedStatePath, "utf8")) as { cursors?: Record<string, { cursor: number }> };
+          observed.push(state.cursors?.dev?.cursor ?? 0);
+        }
+        const exitCodes = await Promise.all(children.map(({ child }) => child.exited));
+        expect(exitCodes.every((code) => code === 0)).toBeTrue();
+        expect(observed).toEqual(Array.from({ length: rounds }, (_, index) => (index + 1) * 1_000 + Math.max(...values)));
+        expect(() => JSON.parse(readFileSync(isolatedStatePath, "utf8"))).not.toThrow();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 });

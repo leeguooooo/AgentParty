@@ -95,7 +95,10 @@ ADMIN_SECRET=... party invite "ZEGO IM pairing" --slug zego-im --party --guest-n
 ```
 
 The printed pack contains the teammate's `party init`, `party watch`, and `party serve`
-commands. If you only need to invite an existing reusable project agent:
+commands. Its per-agent `AGENTPARTY_CONFIG` lives under the persistent
+`$HOME/.agentparty/agents/` directory; do not move it to `TMPDIR`, because cleanup would
+erase both the identity and its watch cursor. If you only need to invite an existing
+reusable project agent:
 
 ```sh
 party channel invite-agent <owner>/zego-worker zego-im
