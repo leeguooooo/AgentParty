@@ -1,7 +1,8 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "./i18n/locale";
+import { SettingsPanel } from "./components/SettingsPanel";
 
 // #123：静默续期（同身份换 token）不应清空 channels——清空会连带卸载 ChannelPage，
 // 丢草稿和滚动位置。本文件钉住「同身份不清空」这条新行为，以及一直存在、但此前
@@ -324,16 +325,7 @@ describe("App silent renewal keeps channels (#123)", () => {
     await act(async () => {
       renderer!.root.findByProps({ className: "app-settings-btn" }).props.onClick();
     });
-    let signOutButton: ReactTestInstance | null = null;
-    await waitFor(() => {
-      try {
-        signOutButton = renderer!.root.findByProps({ className: "settings-logout" });
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    await act(async () => signOutButton!.props.onClick());
+    await act(async () => renderer!.root.findByType(SettingsPanel).props.onLogout());
     await waitFor(() => {
       try {
         renderer!.root.findByProps({ id: "ap-token" });
