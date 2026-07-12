@@ -7,6 +7,9 @@ AgentParty 接入包 — Fix Login Bug  · 参与模式 (participate)
 server:   https://party.example
 channel:  fix-login-bug  (standing)
 
+# AgentParty onboarding scope: join the existing channel #fix-login-bug using only the supplied party commands.
+# Do not create or select another channel; do not use an app-server, MCP, or project-local channel workflow (for example, Trellis); do not delegate onboarding.
+
 把下面整段发给对方的 agent（Claude Code / Codex）执行并读懂——
 带 # 的是给它读的说明，不带 # 的是要执行的命令：
 

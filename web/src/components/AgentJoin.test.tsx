@@ -44,9 +44,11 @@ class TestEventTarget {
 
 let renderer: ReactTestRenderer | null = null;
 let windowEvents: TestEventTarget;
+let storedLocale: string | null;
 
 beforeEach(() => {
   savedAgents.length = 0;
+  storedLocale = null;
   windowEvents = new TestEventTarget();
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "window", {
@@ -57,6 +59,15 @@ beforeEach(() => {
     },
   });
   Object.defineProperty(globalThis, "location", { configurable: true, value: { origin: "https://party.test" } });
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => (key === "ap_locale" ? storedLocale : null),
+      setItem: (key: string, value: string) => {
+        if (key === "ap_locale") storedLocale = value;
+      },
+    },
+  });
 });
 
 afterEach(() => {
@@ -64,9 +75,13 @@ afterEach(() => {
   renderer = null;
   Reflect.deleteProperty(globalThis, "window");
   Reflect.deleteProperty(globalThis, "location");
+  Reflect.deleteProperty(globalThis, "localStorage");
 });
 
-function render(onActiveChange?: (open: boolean) => void): ReactTestRenderer {
+function render(
+  onActiveChange?: (open: boolean) => void,
+  charter: React.ComponentProps<typeof AgentJoin>["charter"] = null,
+): ReactTestRenderer {
   act(() => {
     renderer = create(
       <LocaleProvider>
@@ -75,7 +90,7 @@ function render(onActiveChange?: (open: boolean) => void): ReactTestRenderer {
           token="owner-token"
           namePrefix="leo"
           inviterName="host"
-          charter={null}
+          charter={charter}
           accountKey="acct-1"
           onActiveChange={onActiveChange}
         />
@@ -90,6 +105,34 @@ function open(r: ReactTestRenderer) {
 }
 
 describe("AgentJoin dismiss behavior", () => {
+  test.each([
+    ["en", "AgentParty onboarding scope: join the existing channel #demo"],
+    ["zh", "AgentParty 接入范围：只用下方提供的 party 命令加入现有频道 #demo"],
+  ] as const)(
+    "puts the %s scope guard before moderator charter text and party init",
+    async (locale: "en" | "zh", guard: string) => {
+      localStorage.setItem("ap_locale", locale);
+      const r = render(undefined, {
+        charter: "MODERATOR CONTROLLED CHARTER",
+        charter_rev: 1,
+        updated_at: 1,
+        updated_by: "moderator",
+      });
+      open(r);
+      await act(async () => {
+        await r.root
+          .find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick)
+          .props.onClick();
+      });
+
+      const command = savedAgents[0]!.command;
+      expect(command).toContain(guard);
+      expect(command).toContain("Trellis");
+      expect(command.indexOf(guard)).toBeLessThan(command.indexOf("MODERATOR CONTROLLED CHARTER"));
+      expect(command.indexOf(guard)).toBeLessThan(command.indexOf("party init "));
+    },
+  );
+
   test("Escape closes the compose dialog, reports controlled state, and removes its listener", () => {
     const changes: boolean[] = [];
     const r = render((value) => changes.push(value));

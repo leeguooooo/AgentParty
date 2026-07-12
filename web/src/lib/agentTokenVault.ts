@@ -93,6 +93,9 @@ export function buildMinimalAgentCommand(input: {
   checkinMessage: string;
 }): string {
   return [
+    `# AgentParty onboarding scope: join the existing channel #${input.slug} using only the supplied party commands.`,
+    "# Do not create or select another channel; do not use an app-server, MCP, or project-local channel workflow (for example, Trellis); do not delegate onboarding.",
+    "",
     `export PATH="$HOME/.local/bin:$PATH"; command -v party >/dev/null || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
     `export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${input.name}-${input.slug}.json"`,
     `party init --server ${input.server} --token ${input.token} --channel ${input.slug}`,

@@ -1,5 +1,12 @@
 import type { ChannelCharter } from "./rest";
 
+export function formatScopeGuardForOnboarding(slug: string): string[] {
+  return [
+    `# AgentParty onboarding scope: join the existing channel #${slug} using only the supplied party commands.`,
+    "# Do not create or select another channel; do not use an app-server, MCP, or project-local channel workflow (for example, Trellis); do not delegate onboarding.",
+  ];
+}
+
 export function formatCharterSnapshotForOnboarding(charter: ChannelCharter | null): string[] {
   if (!charter?.charter) return [];
   return [

@@ -16,5 +16,12 @@ describe("buildMinimalAgentCommand", () => {
       'export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-desktop-worker-release-room.json"',
     );
     expect(command).not.toContain("TMPDIR");
+    const guardIndex = command.indexOf("AgentParty onboarding scope: join the existing channel #release-room");
+    expect(guardIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeLessThan(command.indexOf("party init "));
+    expect(command).toContain("only the supplied party commands");
+    expect(command).toContain("Do not create or select another channel");
+    expect(command).toContain("app-server, MCP, or project-local channel workflow (for example, Trellis)");
+    expect(command).toContain("do not delegate onboarding");
   });
 });

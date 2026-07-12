@@ -70,6 +70,9 @@ describe("party invite --mode", () => {
     // a readonly token was minted and it is the one the invitee inits with
     expect(minted.some((m) => m.role === "readonly")).toBe(true);
     expect(r.stdout).toMatch(/party init .*--token ap_readonly/);
+    const watchGuardIndex = r.stdout.indexOf("AgentParty onboarding scope: join the existing channel #watchroom");
+    expect(watchGuardIndex).toBeGreaterThan(-1);
+    expect(watchGuardIndex).toBeLessThan(r.stdout.indexOf("party init "));
     // mode is stated in the pack
     expect(r.stdout).toContain("观看");
     // watch mode never tells the invitee to send a check-in (readonly can't send)
@@ -83,6 +86,9 @@ describe("party invite --mode", () => {
     expect(r.code).toBe(0);
     expect(minted.some((m) => m.role === "agent")).toBe(true);
     expect(r.stdout).toMatch(/party init .*--token ap_agenttok/);
+    const participateGuardIndex = r.stdout.indexOf("AgentParty onboarding scope: join the existing channel #partroom");
+    expect(participateGuardIndex).toBeGreaterThan(-1);
+    expect(participateGuardIndex).toBeLessThan(r.stdout.indexOf("party init "));
     expect(r.stdout).toContain("参与");
     // participate keeps the check-in send line
     expect(r.stdout).toMatch(/party send .*报到/);

@@ -109,6 +109,14 @@ describe("party invite", () => {
     expect(r.stdout).toContain(
       `party init --server ${mock.url} --token ap_fix-login-bug-guest_secret --channel fix-login-bug`,
     );
+    const scopeGuardIndex = r.stdout.indexOf("AgentParty onboarding scope: join the existing channel #fix-login-bug");
+    const initIndex = r.stdout.indexOf("party init --server");
+    expect(scopeGuardIndex).toBeGreaterThan(-1);
+    expect(scopeGuardIndex).toBeLessThan(initIndex);
+    expect(r.stdout).toContain("only the supplied party commands");
+    expect(r.stdout).toContain("Do not create or select another channel");
+    expect(r.stdout).toContain("app-server, MCP, or project-local channel workflow (for example, Trellis)");
+    expect(r.stdout).toContain("do not delegate onboarding");
     // 自包含简报要内联教会 agent 待命模型，核心是保住 agent 自己会话的上下文：
     // Claude Code 走后台 watch --once（同会话唤醒），其它 harness 走 serve + 续会话 runner
     expect(r.stdout).toContain("party watch fix-login-bug --mentions-only --once");
@@ -138,6 +146,22 @@ describe("party invite", () => {
       slug: "fix-login-bug",
       title: "Fix Login Bug",
     });
+  });
+
+  test("scope guard precedes moderator-controlled charter text and party init", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/guarded-room/charter") {
+        return Response.json({ charter: "MODERATOR CONTROLLED CHARTER", charter_rev: 1 });
+      }
+      return undefined;
+    });
+    const r = await runCli(["invite", "Guarded Room", "--server", mock.url], { ADMIN_SECRET: "s" });
+
+    expect(r.code).toBe(0);
+    const guardIndex = r.stdout.indexOf("AgentParty onboarding scope: join the existing channel #guarded-room");
+    expect(guardIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeLessThan(r.stdout.indexOf("MODERATOR CONTROLLED CHARTER"));
+    expect(guardIndex).toBeLessThan(r.stdout.indexOf("party init "));
   });
 
   test("--checkin-mention 会在报到行 @ 邀请人", async () => {
