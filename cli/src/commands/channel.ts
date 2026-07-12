@@ -45,6 +45,7 @@ const CHANNEL_FLAGS = [
   "max-uses",
   "remove",
   "responsibility",
+  "reports-to",
   "charter-write",
   "charter-write-agents",
   "agent",
@@ -601,7 +602,7 @@ export async function run(argv: string[]): Promise<number> {
           const role = positionals[3];
           const slug = resolveChannel(positionals[4]);
           if (!name || !role || !slug) {
-            console.error("usage: party channel role set <name> host|worker|reviewer|observer [slug] [--responsibility text]");
+            console.error("usage: party channel role set <name> host|worker|reviewer|observer [slug] [--responsibility text] [--reports-to <manager>|--reports-to \"\"]");
             return 1;
           }
           if (!isName(name)) {
@@ -617,8 +618,9 @@ export async function run(argv: string[]): Promise<number> {
             return 1;
           }
           const responsibility = str(flags.responsibility);
-          await setChannelRole(cfg.server, cfg.token, slug, name, role as (typeof COLLAB_ROLES)[number], responsibility);
-          console.log(`assigned ${name} as ${role} in ${slug}`);
+          const reportsTo = flags["reports-to"] === undefined ? undefined : str(flags["reports-to"]) ?? "";
+          await setChannelRole(cfg.server, cfg.token, slug, name, role as (typeof COLLAB_ROLES)[number], responsibility, reportsTo);
+          console.log(`assigned ${name} as ${role} in ${slug}${reportsTo ? `, reporting to ${reportsTo}` : ""}`);
           return 0;
         }
         if (action === "unset") {

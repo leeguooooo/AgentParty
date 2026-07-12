@@ -214,6 +214,7 @@ interface ChannelRoleRow {
   assigned_at: number;
   token_role: TokenRole | null;
   account: string | null;
+  reports_to: string | null;
 }
 
 function channelRoleAssignmentFromRow(row: ChannelRoleRow): ChannelRoleAssignment {
@@ -227,13 +228,14 @@ function channelRoleAssignmentFromRow(row: ChannelRoleRow): ChannelRoleAssignmen
     ...(kind === undefined ? {} : { kind }),
     ...(row.account === null ? {} : { account: row.account }),
     ...(kind === "human" && row.account !== null ? { display: row.account } : { display: row.name }),
+    ...(row.reports_to == null ? {} : { reports_to: row.reports_to }),
   };
 }
 
 async function loadChannelRoleAssignment(db: D1Database, slug: string, name: string): Promise<ChannelRoleAssignment | null> {
   const row = await db.prepare(
     `SELECT cr.agent_name AS name, cr.role, cr.responsibility, cr.assigned_by, cr.assigned_at,
-            t.role AS token_role, t.owner AS account
+            t.role AS token_role, t.owner AS account, cr.reports_to
        FROM channel_roles cr
        LEFT JOIN tokens t ON t.name = cr.agent_name AND t.revoked_at IS NULL
       WHERE cr.channel_slug = ? AND cr.agent_name = ?`,
@@ -5003,7 +5005,7 @@ app.get("/api/channels/:slug/roles", async (c) => {
   }
   const { results } = await c.env.DB.prepare(
     `SELECT cr.agent_name AS name, cr.role, cr.responsibility, cr.assigned_by, cr.assigned_at,
-            t.role AS token_role, t.owner AS account
+            t.role AS token_role, t.owner AS account, cr.reports_to
        FROM channel_roles cr
        LEFT JOIN tokens t ON t.name = cr.agent_name AND t.revoked_at IS NULL
       WHERE cr.channel_slug = ?
@@ -5036,6 +5038,44 @@ app.put("/api/channels/:slug/roles/:name", async (c) => {
   if (responsibility === null) {
     return c.json(errorBody("bad_request", `responsibility must be a string <= ${ROLE_RESPONSIBILITY_LIMIT} bytes`), 400);
   }
+  // #370 reports_to：管理层级（可跨 owner）。undefined=不改；null/""=清空（顶层）；否则须是本频道在场
+  // 角色、非自己、且不成环。归属账号不参与此校验——正是为了允许 owner X 的 agent 挂到 owner Y 的 agent 下。
+  const reportsToRaw = body?.reports_to;
+  const reportsToProvided = reportsToRaw !== undefined;
+  let reportsTo: string | null = null;
+  if (reportsToProvided) {
+    if (reportsToRaw === null || reportsToRaw === "") {
+      reportsTo = null;
+    } else if (typeof reportsToRaw !== "string" || !NAME_RE.test(reportsToRaw)) {
+      return c.json(errorBody("bad_request", "reports_to must be a valid agent name or null"), 400);
+    } else if (reportsToRaw === name) {
+      return c.json(errorBody("bad_request", "an agent cannot report to itself"), 400);
+    } else {
+      reportsTo = reportsToRaw;
+    }
+    if (reportsTo !== null) {
+      const edgeRows = await c.env.DB.prepare(
+        "SELECT agent_name, reports_to FROM channel_roles WHERE channel_slug = ?",
+      )
+        .bind(slug)
+        .all<{ agent_name: string; reports_to: string | null }>();
+      const managerOf = new Map(edgeRows.results.map((r) => [r.agent_name, r.reports_to]));
+      if (!managerOf.has(reportsTo)) {
+        return c.json(errorBody("bad_request", "reports_to must reference an agent that already has a role in this channel"), 400);
+      }
+      // 从 reportsTo 沿 reports_to 链上溯：碰到被指派者 name → 会成环，拒绝。
+      let cursor: string | null = reportsTo;
+      const seen = new Set<string>();
+      while (cursor !== null) {
+        if (cursor === name) {
+          return c.json(errorBody("bad_request", "reports_to would create a reporting cycle"), 400);
+        }
+        if (seen.has(cursor)) break;
+        seen.add(cursor);
+        cursor = managerOf.get(cursor) ?? null;
+      }
+    }
+  }
   const assignedAt = Date.now();
   // 角色按账号锚定（#101）：绑定到该 name 当前【存活】token 的 owner。
   // 若无存活 token（预分配「先分工再铸 token」）→ null，等 persistToken 在首次铸造时认领绑定。
@@ -5046,16 +5086,17 @@ app.put("/api/channels/:slug/roles/:name", async (c) => {
     .first<{ owner: string | null }>();
   const ownerAccount = liveOwner?.owner ?? null;
   await c.env.DB.prepare(
-    `INSERT INTO channel_roles (channel_slug, agent_name, role, assigned_by, assigned_at, responsibility, owner_account)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO channel_roles (channel_slug, agent_name, role, assigned_by, assigned_at, responsibility, owner_account, reports_to)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(channel_slug, agent_name) DO UPDATE SET
        role = excluded.role,
        assigned_by = excluded.assigned_by,
        assigned_at = excluded.assigned_at,
        responsibility = ${responsibility.present ? "excluded.responsibility" : "channel_roles.responsibility"},
-       owner_account = COALESCE(excluded.owner_account, channel_roles.owner_account)`,
+       owner_account = COALESCE(excluded.owner_account, channel_roles.owner_account),
+       reports_to = ${reportsToProvided ? "excluded.reports_to" : "channel_roles.reports_to"}`,
   )
-    .bind(slug, name, role, identity.name, assignedAt, responsibility.value, ownerAccount)
+    .bind(slug, name, role, identity.name, assignedAt, responsibility.value, ownerAccount, reportsTo)
     .run();
   await fetchChannelDO(
     c.env,
