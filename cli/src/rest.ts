@@ -941,11 +941,16 @@ export async function setChannelRole(
   name: string,
   role: CollaborationRole,
   responsibility?: string,
+  // #370：向谁汇报（可跨 owner）。undefined=不改；空串=清空（顶层）；否则 agent 名。
+  reportsTo?: string,
 ): Promise<ChannelRoleInfo> {
+  const payload: Record<string, unknown> = { role };
+  if (responsibility !== undefined) payload.responsibility = responsibility;
+  if (reportsTo !== undefined) payload.reports_to = reportsTo === "" ? null : reportsTo;
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/roles/${encodeURIComponent(name)}`, {
     method: "PUT",
     headers: bearerJson(token),
-    body: JSON.stringify(responsibility === undefined ? { role } : { role, responsibility }),
+    body: JSON.stringify(payload),
   })) as ChannelRoleInfo;
 }
 

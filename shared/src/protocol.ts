@@ -451,6 +451,8 @@ export interface ChannelRoleAssignment {
   kind?: SenderKind;
   account?: string;
   display?: string;
+  /** 管理层级（#370）：本 agent 向哪个 agent 汇报，构成组织树。可跨 owner；null/缺省=顶层。 */
+  reports_to?: string | null;
 }
 
 export interface HostLeaseEvaluation {
