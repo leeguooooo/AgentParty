@@ -9,6 +9,7 @@ It is an independent local process. It does not change AgentParty Worker, Web, T
 - The server always binds `127.0.0.1`. `GROK_POOL_HOST` is optional, but any value other than `127.0.0.1` is rejected.
 - The credential file must be local, outside Git or under the ignored `.secrets/` directory. It is never uploaded.
 - Topic polling is limited to exact topic URLs and exact attachment URL prefixes registered by the operator. It never searches or scans the site.
+- Optional forum discovery uses explicit search queries and produces candidate metadata only. Discovery never grants download authorization or edits the registered source list.
 - `/health` and `/v1/chat/completions` require the same `GROK_POOL_CLIENT_TOKEN` bearer token.
 - Client `Authorization` is discarded and replaced with the selected upstream token.
 - Logs and health data contain only safe credential IDs, state, status classification, cooldown deadline, and counts. They never contain tokens, request bodies, or upstream error bodies.
@@ -97,6 +98,7 @@ The authorized-source manifest connects the three local artifacts:
 - `target_dir`: validated xAI credential JSON files.
 - `pool_file`: the same file configured as `GROK_POOL_CREDENTIALS_FILE` for the gateway.
 - `http_headers_file`: optional local JSON string map for an operator's own authenticated session, for example `{ "Cookie": "<LOCAL_SESSION_COOKIE>" }`. Keep it under `.secrets/`; headers are never printed or stored in the manifest.
+- `attachment_ledger_file`: local atomic ledger of attachment URL, safe processing status, content hash, HTTP validators, counts, and timestamps. It never stores credentials or error bodies.
 
 Run one authorized check:
 
@@ -121,9 +123,36 @@ registered exact topics → topic JSON → authorized ZIP links only
 → atomic pool-file rebuild → gateway hot reload
 ```
 
-Repeated cycles are idempotent. Invalid topic responses, login/challenge HTML, unauthorized attachment paths, unsafe archives, or invalid credentials fail closed. A bad or partially written pool file does not replace the gateway's currently working in-memory pool. Unchanged credentials retain their current exhausted/cooldown state during hot reload; newly added IDs start healthy.
+Repeated cycles are idempotent at both attachment and credential level:
+
+- Successfully processed attachment + `revalidate_processed_attachments=false`: skip without downloading again.
+- Revalidation enabled and ETag/Last-Modified available: send a conditional request; `304` skips download and processing.
+- Downloaded content records a SHA-256 digest after successful validation/import.
+- Failed processing records only a safe failure class and attempt count, and is retried in a later cycle.
+
+Invalid topic responses, login/challenge HTML, unauthorized attachment paths, unsafe archives, or invalid credentials fail closed. A bad or partially written pool file does not replace the gateway's currently working in-memory pool. Unchanged credentials retain their current exhausted/cooldown state during hot reload; newly added IDs start healthy.
 
 For login-required topics, export browser/session material manually into the ignored local `http_headers_file`. The tool does not automate login, bypass verification, harvest cookies, register accounts, or search public topics.
+
+## Forum resource discovery and optional LLM ranking
+
+The `discovery` block can run several explicit linux.do search queries and consolidate likely Grok/xAI resource topics into a local candidate file:
+
+```bash
+python3 scripts/linuxdo_grok_replenish.py search \
+  .secrets/grok-pool.authorized-sources.json
+```
+
+When `discovery` is configured, the normal `watch` command also runs discovery after every authorized replenish cycle. A deterministic rule ranker first checks Grok/xAI and resource signals such as attachment, ZIP, credential, quota, expiry, update, and pool language. Low-scoring discussion/news topics are discarded.
+
+An optional OpenAI-compatible LLM ranker may then rerank the remaining metadata. This is the useful LLM boundary:
+
+- Input: topic ID, title, URL, a maximum 500-character redacted search summary, and the rule score.
+- Output: strict JSON containing the same topic ID, a `0..100` score, and a short reason.
+- Excluded: attachment contents, credential JSON, access/refresh tokens, Cookies, request bodies, and upstream error bodies.
+- Failure behavior: fall back to the deterministic rule score; forum polling and authorized replenish continue.
+
+Every discovered item is written with `"authorization":"candidate_only"`. The search/LLM stage cannot add a source, download its attachment, or put anything into the pool. An operator must inspect the candidate and explicitly register its exact topic and attachment rule before the existing safe pipeline can process it.
 
 ## Single authorized attachment replenish
 

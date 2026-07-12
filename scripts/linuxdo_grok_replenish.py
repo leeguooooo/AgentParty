@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import shutil
@@ -14,7 +15,8 @@ import zipfile
 import time
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.error import HTTPError
+from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -50,7 +52,7 @@ def discover_candidates(topic_payload: dict, origin: str = "https://linux.do") -
     topic = topic_payload.get("topic", {})
     title = str(topic.get("title", ""))
     topic_id = topic.get("id")
-    if "grok" not in title.lower() or "cpa" not in title.lower():
+    if "grok" not in title.lower() and "xai" not in title.lower():
         return []
     candidates: list[dict] = []
     for post in topic_payload.get("posts", []):
@@ -153,6 +155,11 @@ def load_authorized_manifest(path: Path) -> dict:
     pool_file = Path(str(pool_file_value)).expanduser() if pool_file_value else None
     headers_file_value = payload.get("http_headers_file")
     headers_file = Path(str(headers_file_value)).expanduser() if headers_file_value else None
+    ledger_file_value = payload.get("attachment_ledger_file")
+    ledger_file = Path(str(ledger_file_value)).expanduser() if ledger_file_value else staging_dir / "attachment-ledger.json"
+    discovery = payload.get("discovery")
+    if discovery is not None and not isinstance(discovery, dict):
+        raise ValueError("discovery must be an object")
     if not str(staging_dir) or not str(target_dir):
         raise ValueError("staging_dir and target_dir are required")
     limits = payload.get("limits", {})
@@ -188,6 +195,9 @@ def load_authorized_manifest(path: Path) -> dict:
         "target_dir": target_dir,
         "pool_file": pool_file,
         "http_headers_file": headers_file,
+        "attachment_ledger_file": ledger_file,
+        "revalidate_processed_attachments": bool(payload.get("revalidate_processed_attachments", False)),
+        "discovery": discovery,
         "limits": {
             "max_archive_bytes": _positive_limit(limits.get("max_archive_bytes", 25_000_000), "max_archive_bytes"),
             "max_extracted_bytes": _positive_limit(limits.get("max_extracted_bytes", 100_000_000), "max_extracted_bytes"),
@@ -197,10 +207,30 @@ def load_authorized_manifest(path: Path) -> dict:
     }
 
 
-def _download_exact(url: str, destination: Path, max_bytes: int, *, headers: dict[str, str] | None = None) -> None:
+def _download_exact(
+    url: str,
+    destination: Path,
+    max_bytes: int,
+    *,
+    headers: dict[str, str] | None = None,
+    validators: dict[str, str] | None = None,
+) -> dict[str, object]:
     request_headers = {"User-Agent": "AgentParty authorized Grok replenish/1", **(headers or {})}
+    if validators:
+        if validators.get("etag"):
+            request_headers["If-None-Match"] = validators["etag"]
+        if validators.get("last_modified"):
+            request_headers["If-Modified-Since"] = validators["last_modified"]
     request = Request(url, headers=request_headers)
-    with urlopen(request, timeout=30) as response, destination.open("wb") as output:
+    try:
+        response = urlopen(request, timeout=30)
+    except HTTPError as error:
+        if error.code == 304:
+            error.close()
+            return {"not_modified": True}
+        raise
+    digest = hashlib.sha256()
+    with response, destination.open("wb") as output:
         content_type = (response.headers.get("Content-Type") or "").lower()
         if "text/html" in content_type:
             raise ValueError("archive magic mismatch: received HTML")
@@ -209,7 +239,15 @@ def _download_exact(url: str, destination: Path, max_bytes: int, *, headers: dic
             total += len(chunk)
             if total > max_bytes:
                 raise ValueError("compressed archive exceeds configured limit")
+            digest.update(chunk)
             output.write(chunk)
+        return {
+            "not_modified": False,
+            "sha256": digest.hexdigest(),
+            "size": total,
+            "etag": response.headers.get("ETag"),
+            "last_modified": response.headers.get("Last-Modified"),
+        }
 
 
 def _safe_extract_zip(archive_path: Path, destination: Path, *, max_files: int, max_extracted_bytes: int) -> None:
@@ -414,6 +452,93 @@ def rebuild_pool_file(target: Path, pool_file: Path) -> int:
     return len(credentials)
 
 
+def _atomic_json(path: Path, payload: object, *, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.write("\n")
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _load_attachment_ledger(path: Path) -> dict:
+    if not path.exists():
+        return {"version": 1, "attachments": {}}
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("attachment ledger is invalid") from error
+    if not isinstance(payload, dict) or not isinstance(payload.get("attachments"), dict):
+        raise ValueError("attachment ledger is invalid")
+    return payload
+
+
+def _ledger_key(source_id: str, url: str) -> str:
+    return hashlib.sha256(f"{source_id}\0{url}".encode()).hexdigest()
+
+
+def _record_attachment_success(
+    ledger: dict,
+    ledger_file: Path,
+    *,
+    source_id: str,
+    url: str,
+    download: dict[str, object],
+    imported: int,
+    duplicates: int,
+) -> None:
+    ledger["attachments"][_ledger_key(source_id, url)] = {
+        "source_id": source_id,
+        "url": url,
+        "status": "success",
+        "sha256": download["sha256"],
+        "size": download["size"],
+        "etag": download.get("etag"),
+        "last_modified": download.get("last_modified"),
+        "imported": imported,
+        "duplicates": duplicates,
+        "processed_at": int(time.time()),
+    }
+    _atomic_json(ledger_file, ledger)
+
+
+def _failure_class(error: Exception) -> str:
+    message = str(error).lower()
+    if "archive" in message or "zip" in message or "extracted" in message:
+        return "archive_validation"
+    if "credential json" in message or "schema" in message:
+        return "credential_validation"
+    if isinstance(error, (HTTPError, OSError)):
+        return "download"
+    return "processing"
+
+
+def _record_attachment_failure(
+    ledger: dict,
+    ledger_file: Path,
+    *,
+    source_id: str,
+    url: str,
+    error: Exception,
+) -> None:
+    key = _ledger_key(source_id, url)
+    prior = ledger["attachments"].get(key, {})
+    ledger["attachments"][key] = {
+        "source_id": source_id,
+        "url": url,
+        "status": "failed",
+        "failure_class": _failure_class(error),
+        "attempts": int(prior.get("attempts", 0)) + 1,
+        "last_attempt_at": int(time.time()),
+    }
+    _atomic_json(ledger_file, ledger)
+
+
 def poll_registered_topics(manifest_path: Path) -> dict[str, int]:
     manifest = load_authorized_manifest(manifest_path)
     pool_file = manifest.get("pool_file")
@@ -427,8 +552,13 @@ def poll_registered_topics(manifest_path: Path) -> dict[str, int]:
         "duplicates": 0,
         "invalid": 0,
         "pool_credentials": 0,
+        "downloads": 0,
+        "attachments_skipped": 0,
+        "not_modified": 0,
     }
     headers = _local_http_headers(manifest)
+    ledger_file: Path = manifest["attachment_ledger_file"]
+    ledger = _load_attachment_ledger(ledger_file)
     for source in manifest["sources"]:
         topic = _fetch_topic_json(source["topic_url"], headers)
         totals["sources_checked"] += 1
@@ -439,12 +569,27 @@ def poll_registered_topics(manifest_path: Path) -> dict[str, int]:
                 totals["rejected_attachments"] += 1
                 continue
             totals["attachments_seen"] += 1
+            prior = ledger["attachments"].get(_ledger_key(source["id"], url))
+            revalidate = manifest["revalidate_processed_attachments"]
+            if prior and prior.get("status") == "success" and not revalidate:
+                totals["attachments_skipped"] += 1
+                continue
             staging_dir: Path = manifest["staging_dir"]
             staging_dir.mkdir(parents=True, exist_ok=True)
             work = Path(tempfile.mkdtemp(prefix=f'{source["id"]}-', dir=staging_dir))
             try:
                 archive_path = work / "download.zip"
-                _download_exact(url, archive_path, manifest["limits"]["max_archive_bytes"], headers=headers)
+                download = _download_exact(
+                    url,
+                    archive_path,
+                    manifest["limits"]["max_archive_bytes"],
+                    headers=headers,
+                    validators=prior if revalidate and prior else None,
+                )
+                if download.get("not_modified"):
+                    totals["not_modified"] += 1
+                    continue
+                totals["downloads"] += 1
                 extracted = work / "extracted"
                 extracted.mkdir()
                 _safe_extract_zip(
@@ -457,6 +602,24 @@ def poll_registered_topics(manifest_path: Path) -> dict[str, int]:
                 for key in ("imported", "duplicates", "invalid"):
                     totals[key] += result[key]
                 totals["pool_credentials"] = rebuild_pool_file(manifest["target_dir"], pool_file)
+                _record_attachment_success(
+                    ledger,
+                    ledger_file,
+                    source_id=source["id"],
+                    url=url,
+                    download=download,
+                    imported=result["imported"],
+                    duplicates=result["duplicates"],
+                )
+            except Exception as error:
+                _record_attachment_failure(
+                    ledger,
+                    ledger_file,
+                    source_id=source["id"],
+                    url=url,
+                    error=error,
+                )
+                raise
             finally:
                 shutil.rmtree(work, ignore_errors=True)
     return totals
@@ -474,12 +637,189 @@ def watch_registered_topics(
     results: list[dict[str, int]] = []
     cycles = 0
     while max_cycles is None or cycles < max_cycles:
-        results.append(poll_registered_topics(manifest_path))
+        result = poll_registered_topics(manifest_path)
+        manifest = load_authorized_manifest(manifest_path)
+        if manifest.get("discovery"):
+            discovery_result = search_forum_resources(manifest_path)
+            result.update({f"discovery_{key}": value for key, value in discovery_result.items()})
+        results.append(result)
         cycles += 1
         if max_cycles is not None and cycles >= max_cycles:
             break
         sleep(interval_seconds)
     return results
+
+
+def _search_rule_score(title: str, blurb: str) -> tuple[int, list[str]]:
+    text = f"{title} {blurb}".lower()
+    score = 0
+    reasons: list[str] = []
+    if "grok" in text or "xai" in text:
+        score += 35
+        reasons.append("mentions Grok/xAI")
+    resource_terms = (
+        "cpa", "资源", "分享", "附件", "zip", "credential", "resource", "archive", "attachment",
+        "账号", "额度", "失效", "更新", "pool",
+    )
+    matched = [term for term in resource_terms if term in text]
+    score += min(55, len(matched) * 11)
+    if matched:
+        reasons.append("resource signals: " + ", ".join(matched[:5]))
+    if any(term in text for term in ("闲聊", "体验", "新闻", "评测")) and len(matched) < 2:
+        score -= 25
+        reasons.append("mostly discussion/news")
+    return max(0, min(100, score)), reasons
+
+
+def _redact_discovery_text(value: str) -> str:
+    redacted = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+\-/=]{12,}", "Bearer [REDACTED]", value)
+    redacted = re.sub(r"\b(?:sk|xai)-[A-Za-z0-9._~+\-/=]{16,}", "[REDACTED]", redacted)
+    redacted = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[REDACTED]", redacted)
+    return redacted[:500]
+
+
+def _candidate_topic_url(base_url: str, topic: dict) -> str:
+    topic_id = topic.get("id")
+    slug = topic.get("slug") or "topic"
+    return f'{base_url.rstrip("/")}/t/{slug}/{topic_id}'
+
+
+def _search_json(base_url: str, query: str, headers: dict[str, str]) -> dict:
+    url = f'{base_url.rstrip("/")}/search.json?q={quote(query)}'
+    request = Request(url, headers={
+        "Accept": "application/json",
+        "User-Agent": "AgentParty Grok resource discovery/1",
+        **headers,
+    })
+    with urlopen(request, timeout=30) as response:
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        body = response.read(5_000_001)
+    if "json" not in content_type or len(body) > 5_000_000:
+        raise ValueError("forum search JSON response is invalid")
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise ValueError("forum search JSON response is invalid") from error
+    if not isinstance(payload, dict):
+        raise ValueError("forum search JSON response is invalid")
+    return payload
+
+
+def _llm_rank_candidate(candidate: dict, config: dict) -> dict:
+    base_url = str(config.get("base_url", "")).rstrip("/")
+    model = config.get("model")
+    token_file = Path(str(config.get("token_file", ""))).expanduser()
+    if not base_url or not isinstance(model, str) or not model or not str(token_file):
+        raise ValueError("LLM discovery config is incomplete")
+    token = token_file.read_text().strip()
+    if not token:
+        raise ValueError("LLM discovery token is empty")
+    metadata = {
+        "topic_id": candidate["topic_id"],
+        "title": candidate["title"],
+        "url": candidate["url"],
+        "summary": candidate["summary"][:500],
+        "rule_score": candidate["score"],
+    }
+    prompt = (
+        "You rank forum topic metadata for whether it likely contains a Grok/xAI resource attachment. "
+        "Return strict JSON only: {\"topic_id\": number, \"score\": 0-100, \"reason\": string}. "
+        "This is discovery only; never claim authorization and never request credentials.\n"
+        + json.dumps(metadata, ensure_ascii=False)
+    )
+    body = json.dumps({
+        "model": model,
+        "stream": False,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+    request = Request(f"{base_url}/v1/chat/completions", data=body, method="POST", headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "AgentParty Grok discovery ranker/1",
+    })
+    with urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read(1_000_001))
+    content = payload["choices"][0]["message"]["content"]
+    ranked = json.loads(content)
+    if ranked.get("topic_id") != candidate["topic_id"] or not isinstance(ranked.get("score"), int):
+        raise ValueError("LLM discovery response is invalid")
+    return {
+        "score": max(0, min(100, ranked["score"])),
+        "reason": str(ranked.get("reason", ""))[:300],
+    }
+
+
+def search_forum_resources(manifest_path: Path) -> dict[str, int]:
+    manifest = load_authorized_manifest(manifest_path)
+    discovery = manifest.get("discovery")
+    if not discovery:
+        raise ValueError("discovery config is required")
+    base_url = str(discovery.get("search_base_url", "")).rstrip("/")
+    queries = discovery.get("queries")
+    candidate_file_value = discovery.get("candidate_file")
+    minimum_score = discovery.get("minimum_rule_score", 60)
+    if urlparse(base_url).scheme not in {"http", "https"}:
+        raise ValueError("discovery search_base_url must use http or https")
+    if not isinstance(queries, list) or not queries or not all(isinstance(query, str) and query for query in queries):
+        raise ValueError("discovery queries must be a non-empty string list")
+    if not isinstance(candidate_file_value, str) or not candidate_file_value:
+        raise ValueError("discovery candidate_file is required")
+    if not isinstance(minimum_score, int) or not 0 <= minimum_score <= 100:
+        raise ValueError("minimum_rule_score must be 0..100")
+    headers = _local_http_headers(manifest)
+    candidates_by_id: dict[int, dict] = {}
+    totals = {"queries": 0, "candidates": 0, "llm_ranked": 0, "llm_failures": 0}
+    for query in queries:
+        payload = _search_json(base_url, query, headers)
+        totals["queries"] += 1
+        blurbs = {
+            post.get("topic_id"): str(post.get("blurb", ""))
+            for post in payload.get("posts", [])
+            if isinstance(post, dict)
+        }
+        for topic in payload.get("topics", []):
+            if not isinstance(topic, dict) or not isinstance(topic.get("id"), int):
+                continue
+            title = str(topic.get("title", ""))
+            summary = _redact_discovery_text(blurbs.get(topic["id"], ""))
+            score, reasons = _search_rule_score(title, summary)
+            if score < minimum_score:
+                continue
+            candidate = {
+                "topic_id": topic["id"],
+                "title": title,
+                "url": _candidate_topic_url(base_url, topic),
+                "summary": summary[:500],
+                "score": score,
+                "reason": "; ".join(reasons),
+                "queries": [query],
+                "authorization": "candidate_only",
+            }
+            current = candidates_by_id.get(topic["id"])
+            if current:
+                if query not in current["queries"]:
+                    current["queries"].append(query)
+                if score > current["score"]:
+                    current.update({"score": score, "reason": candidate["reason"]})
+            else:
+                candidates_by_id[topic["id"]] = candidate
+    llm = discovery.get("llm")
+    if llm:
+        for candidate in candidates_by_id.values():
+            try:
+                ranked = _llm_rank_candidate(candidate, llm)
+                candidate["score"] = ranked["score"]
+                candidate["reason"] = ranked["reason"]
+                candidate["ranker"] = "llm"
+                totals["llm_ranked"] += 1
+            except Exception:
+                candidate["ranker"] = "rules_fallback"
+                totals["llm_failures"] += 1
+    ordered = sorted(candidates_by_id.values(), key=lambda item: (-item["score"], item["topic_id"]))
+    totals["candidates"] = len(ordered)
+    _atomic_json(Path(candidate_file_value).expanduser(), ordered)
+    return totals
 
 
 def load_json(path: str) -> dict:
@@ -507,6 +847,8 @@ def parser() -> argparse.ArgumentParser:
     watch_cmd = commands.add_parser("watch", help="continuously poll registered topics")
     watch_cmd.add_argument("manifest", type=Path)
     watch_cmd.add_argument("--interval-seconds", type=int, default=300)
+    search_cmd = commands.add_parser("search", help="discover candidate Grok resource topics without authorizing them")
+    search_cmd.add_argument("manifest", type=Path)
     return root
 
 
@@ -516,11 +858,13 @@ def main() -> int:
         if args.command == "discover":
             print(json.dumps(discover_candidates(load_json(args.topic_json), args.origin), ensure_ascii=False, indent=2))
             return 0
-        if args.command == "watch":
+        if args.command == "search":
+            result = search_forum_resources(args.manifest)
+        elif args.command == "watch":
             for result in watch_registered_topics(args.manifest, args.interval_seconds):
                 print(json.dumps(result, ensure_ascii=False), flush=True)
             return 0
-        if args.command == "poll":
+        elif args.command == "poll":
             result = poll_registered_topics(args.manifest)
         elif args.command == "replenish":
             result = replenish(args.manifest, args.source_id, attachment_url=args.attachment_url)

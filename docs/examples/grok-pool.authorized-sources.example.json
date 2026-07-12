@@ -3,6 +3,8 @@
   "target_dir": "<ABSOLUTE_LOCAL_TARGET_CREDENTIAL_DIRECTORY>",
   "pool_file": "<ABSOLUTE_GROK_POOL_CREDENTIALS_FILE>",
   "http_headers_file": "<OPTIONAL_ABSOLUTE_LOCAL_HTTP_HEADERS_FILE>",
+  "attachment_ledger_file": "<ABSOLUTE_LOCAL_ATTACHMENT_LEDGER_FILE>",
+  "revalidate_processed_attachments": false,
   "limits": {
     "max_archive_bytes": 25000000,
     "max_extracted_bytes": 100000000,
@@ -14,5 +16,20 @@
       "topic_url": "https://<AUTHORIZED_TOPIC_EXACT_URL>",
       "attachment_url_prefix": "https://<AUTHORIZED_ATTACHMENT_DIRECTORY_EXACT_PREFIX>/"
     }
-  ]
+  ],
+  "discovery": {
+    "search_base_url": "https://linux.do",
+    "queries": [
+      "grok cpa",
+      "grok 资源 附件",
+      "xai credential zip"
+    ],
+    "candidate_file": "<ABSOLUTE_LOCAL_DISCOVERY_CANDIDATE_FILE>",
+    "minimum_rule_score": 60,
+    "llm": {
+      "base_url": "http://127.0.0.1:8789",
+      "model": "<LOCAL_RANKER_MODEL>",
+      "token_file": "<ABSOLUTE_LOCAL_LLM_CLIENT_TOKEN_FILE>"
+    }
+  }
 }
