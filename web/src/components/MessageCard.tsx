@@ -560,6 +560,18 @@ export function MessageCard({
             rows={4}
             value={editDraft}
             onChange={(event) => onEditDraftChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing) return;
+              if (event.key === "Escape") {
+                event.preventDefault();
+                if (!editSaving) onEditCancel();
+                return;
+              }
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                if (!saveDisabled) onEditSave();
+              }
+            }}
           />
           <div className="msg-edit-actions">
             <button type="button" className="d-btn d-btn--primary" disabled={saveDisabled} onClick={onEditSave}>
