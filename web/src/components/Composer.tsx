@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, CSSProperties, DragEvent, KeyboardEvent } from "react";
 import type { Attachment } from "@agentparty/shared";
-import { formatSize } from "./AttachmentList";
+import { formatSize, isImageAttachment, useAttachmentBlobUrl } from "./AttachmentList";
 import { agentHue } from "../lib/agentColor";
 import {
   activeMentionQuery,
@@ -44,6 +44,50 @@ export interface UploadItem {
   size: number;
   status: "uploading" | "error";
   error?: string;
+}
+
+// #377 待发附件预览（参考 Codex）：图片显缩略图 + 角标 ×；非图片显文件名 chip + ×。
+function PendingAttachment({
+  att,
+  onRemove,
+  removeLabel,
+}: {
+  att: Attachment;
+  onRemove?: (key: string) => void;
+  removeLabel: string;
+}) {
+  const isImage = isImageAttachment(att.content_type);
+  const { src, failed } = useAttachmentBlobUrl(isImage ? att.url : "");
+  const removeBtn =
+    onRemove === undefined ? null : (
+      <button
+        type="button"
+        className="composer-attachment-remove"
+        aria-label={removeLabel}
+        onClick={() => onRemove(att.key)}
+      >
+        ×
+      </button>
+    );
+  if (isImage && !failed) {
+    return (
+      <li className="composer-attachment composer-attachment--img" title={`${att.filename} · ${formatSize(att.size)}`}>
+        {src === null ? (
+          <span className="composer-attachment-thumb composer-attachment-thumb--loading" aria-hidden="true" />
+        ) : (
+          <img className="composer-attachment-thumb" src={src} alt={att.filename} />
+        )}
+        {removeBtn}
+      </li>
+    );
+  }
+  return (
+    <li className="composer-attachment t-mono">
+      <span className="composer-attachment-name">{att.filename}</span>
+      <span className="composer-attachment-size">{formatSize(att.size)}</span>
+      {removeBtn}
+    </li>
+  );
 }
 
 const TIER_DOT: Record<MentionTier, string> = { online: "●", wakeable: "◐", recent: "○" };
@@ -336,20 +380,12 @@ export function Composer({
       {attachments.length > 0 && (
         <ul className="composer-attachments" aria-label="pending attachments">
           {attachments.map((att) => (
-            <li key={att.key} className="composer-attachment t-mono">
-              <span className="composer-attachment-name">{att.filename}</span>
-              <span className="composer-attachment-size">{formatSize(att.size)}</span>
-              {onRemoveAttachment !== undefined && (
-                <button
-                  type="button"
-                  className="composer-attachment-remove"
-                  aria-label={`remove ${att.filename}`}
-                  onClick={() => onRemoveAttachment(att.key)}
-                >
-                  ×
-                </button>
-              )}
-            </li>
+            <PendingAttachment
+              key={att.key}
+              att={att}
+              onRemove={onRemoveAttachment}
+              removeLabel={`remove ${att.filename}`}
+            />
           ))}
         </ul>
       )}

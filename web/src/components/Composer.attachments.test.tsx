@@ -23,6 +23,8 @@ let renderer: ReactTestRenderer | null = null;
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
+  // #377 图片缩略图路径会走 getToken()（读 session/local storage）；单测无 DOM，补桩避免 ReferenceError。
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: memoryStorage() });
 });
 
 afterEach(() => {
@@ -74,11 +76,20 @@ describe("Composer attachments (#176)", () => {
     expect(byClass(render({ onPickFiles: () => {} }), "composer-attach")).toHaveLength(1);
   });
 
-  test("pending attachment renders a chip with the filename", () => {
-    const root = render({ onPickFiles: () => {}, attachments: [att] });
+  test("non-image pending attachment renders a chip with the filename", () => {
+    const docAtt: Attachment = { ...att, key: "slug/uuid/spec.pdf", filename: "spec.pdf", content_type: "application/pdf" };
+    const root = render({ onPickFiles: () => {}, attachments: [docAtt] });
     const names = byClass(root, "composer-attachment-name");
     expect(names).toHaveLength(1);
-    expect(names[0]!.props.children).toBe("pic.png");
+    expect(names[0]!.props.children).toBe("spec.pdf");
+  });
+
+  test("image pending attachment renders a thumbnail preview with a remove button (#377)", () => {
+    const root = render({ onPickFiles: () => {}, attachments: [att], onRemoveAttachment: () => {} });
+    // 图片走缩略图路径（composer-attachment--img），不再是文件名 chip
+    expect(byClass(root, "composer-attachment--img")).toHaveLength(1);
+    expect(byClass(root, "composer-attachment-name")).toHaveLength(0);
+    expect(byClass(root, "composer-attachment-remove")).toHaveLength(1);
   });
 
   test("send is enabled with an attachment even when the draft is empty", () => {

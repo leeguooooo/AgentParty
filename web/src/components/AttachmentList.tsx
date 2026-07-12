@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { Attachment } from "@agentparty/shared";
 import { fetchAttachmentBlob, getToken } from "../lib/api";
 
-function isImage(contentType: string): boolean {
+export function isImageAttachment(contentType: string): boolean {
   return contentType.startsWith("image/");
 }
 
@@ -14,13 +14,17 @@ export function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function ImageThumb({ att }: { att: Attachment }) {
+// 鉴权下载端点带不了 <img> 头，先 fetch 成 blob 再造 objectURL。消息缩略图与 composer 待发预览共用。
+export function useAttachmentBlobUrl(url: string): { src: string | null; failed: boolean } {
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     let alive = true;
     let objectUrl: string | null = null;
-    fetchAttachmentBlob(getToken(), att.url)
+    setSrc(null);
+    setFailed(false);
+    if (url === "") return; // 非图片附件传空串 → 不发请求（hook 不能条件调用，用空串跳过）
+    fetchAttachmentBlob(getToken(), url)
       .then((blob) => {
         if (!alive) return;
         objectUrl = URL.createObjectURL(blob);
@@ -33,7 +37,12 @@ function ImageThumb({ att }: { att: Attachment }) {
       alive = false;
       if (objectUrl !== null) URL.revokeObjectURL(objectUrl);
     };
-  }, [att.url]);
+  }, [url]);
+  return { src, failed };
+}
+
+function ImageThumb({ att }: { att: Attachment }) {
+  const { src, failed } = useAttachmentBlobUrl(att.url);
   if (failed) return <FileLink att={att} />;
   if (src === null) {
     return <span className="msg-attachment-loading t-mono">{att.filename}…</span>;
@@ -81,7 +90,7 @@ export function AttachmentList({ attachments }: { attachments: Attachment[] }) {
     <div className="msg-attachments">
       {attachments.map((att) => (
         <div key={att.key} className="msg-attachment">
-          {isImage(att.content_type) ? <ImageThumb att={att} /> : <FileLink att={att} />}
+          {isImageAttachment(att.content_type) ? <ImageThumb att={att} /> : <FileLink att={att} />}
         </div>
       ))}
     </div>

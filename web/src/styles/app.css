@@ -4488,6 +4488,41 @@
   padding: 0;
 }
 .composer-attachment-remove:hover { color: var(--fg, inherit); }
+/* #377 图片待发预览（参考 Codex）：方形缩略图 + 右上角 × 浮层 */
+.composer-attachment--img {
+  position: relative;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  width: 56px;
+  height: 56px;
+}
+.composer-attachment-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  display: block;
+}
+.composer-attachment-thumb--loading {
+  background: var(--t-panel2);
+  animation: kick-confirm-pulse 1.2s ease-in-out infinite;
+}
+.composer-attachment--img .composer-attachment-remove {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 50%;
+  font-size: 13px;
+}
+.composer-attachment--img .composer-attachment-remove:hover { background: rgba(0, 0, 0, 0.8); color: #fff; }
 .composer-upload-error { margin: 0.25rem 0; }
 
 /* 拖拽上传高亮（#176）：composer 相对定位，dropzone 覆盖其上 */
