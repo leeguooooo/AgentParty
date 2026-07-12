@@ -124,14 +124,36 @@ interface Props {
   serverOrigin: string;
   token: string;
   initialCode: string | null;
+  onRequireHuman?(input: { code: string }): void;
+  onDecisionComplete?(): void;
 }
 
-export function PairPage({ serverOrigin, token, initialCode }: Props) {
+export function PairHumanRequiredAction({
+  code,
+  onRequireHuman,
+}: {
+  code: string;
+  onRequireHuman(input: { code: string }): void;
+}) {
+  const t = useT();
+  return (
+    <button
+      type="button"
+      className="d-btn pair-human-login"
+      onClick={() => onRequireHuman({ code })}
+    >
+      {t("Pair.inspect.useHuman")}
+    </button>
+  );
+}
+
+export function PairPage({ serverOrigin, token, initialCode, onRequireHuman, onDecisionComplete }: Props) {
   const t = useT();
   const [value, setValue] = useState(initialCode ?? "");
   const [inspection, setInspection] = useState<PairingInspection | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [requiresHuman, setRequiresHuman] = useState(false);
   const [decision, setDecision] = useState<PairingDecision | null>(null);
   const autoInspected = useRef(false);
 
@@ -144,14 +166,15 @@ export function PairPage({ serverOrigin, token, initialCode }: Props) {
     setValue(normalized);
     setPending(true);
     setError(null);
+    setRequiresHuman(false);
     setDecision(null);
     try {
       setInspection(await inspectDesktopPairing(serverOrigin, token, normalized));
     } catch (cause) {
       setInspection(null);
-      setError(cause instanceof Error && cause.message === "human_required"
-        ? t("Pair.inspect.humanRequired")
-        : t("Pair.inspect.failed"));
+      const humanRequired = cause instanceof Error && cause.message === "human_required";
+      setRequiresHuman(humanRequired);
+      setError(humanRequired ? t("Pair.inspect.humanRequired") : t("Pair.inspect.failed"));
     } finally {
       setPending(false);
     }
@@ -171,6 +194,7 @@ export function PairPage({ serverOrigin, token, initialCode }: Props) {
       await decideDesktopPairing(serverOrigin, token, inspection, next);
       setDecision(next);
       setInspection(null);
+      onDecisionComplete?.();
     } catch {
       setError(t("Pair.decision.failed"));
     } finally {
@@ -222,6 +246,9 @@ export function PairPage({ serverOrigin, token, initialCode }: Props) {
           </>
         )}
         {error !== null && <p className="banner banner--red" role="alert">{error}</p>}
+        {requiresHuman && onRequireHuman !== undefined && (
+          <PairHumanRequiredAction code={value} onRequireHuman={onRequireHuman} />
+        )}
       </div>
     </main>
   );
