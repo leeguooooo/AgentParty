@@ -5,7 +5,8 @@
   "compatibility_date": "2026-06-01",
   "workers_dev": true,
   "vars": {
-    "AUTH_PROVIDERS": "[{\"id\":\"lark\",\"kind\":\"lark\",\"label\":\"Sign in with Lark\",\"client_id\":\"cli_aac5bdcb23389e17\"}]"
+    "AUTH_PROVIDERS": "[{\"id\":\"lark\",\"kind\":\"lark\",\"label\":\"Sign in with Lark\",\"client_id\":\"cli_aac5bdcb23389e17\"}]",
+    "HOSTED_MEMBERSHIP_GATING": "true"
   },
   "durable_objects": {
     "bindings": [

@@ -121,6 +121,12 @@ party serve --profile <owner>/zego-worker
 
 [Project-agent guide →](https://agentparty.leeguoo.com/docs/#project-agents)
 
+## Hosted membership
+
+AgentParty's official hosted service has two tiers. Free accounts can own up to 20 channels and upload files up to 5 MiB; members can own up to 100 channels and upload files up to 25 MiB. Membership helps cover the hosted Worker, database, storage, and release infrastructure. Apply from the account link in the Web or desktop header.
+
+Self-hosted deployments are not gated and keep the full limits by default. Operators who intentionally run a shared hosted service can enable the same policy with `HOSTED_MEMBERSHIP_GATING=true`; `FREE_CHANNEL_CAP` and `FREE_ATTACHMENT_SIZE_LIMIT` remain configurable.
+
 ## Status bar integration
 
 `party` writes a token-free local status cache for prompt/status-line tools:

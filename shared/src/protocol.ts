@@ -109,9 +109,8 @@ export function isMember(status: { tier?: string | null } | null | undefined): b
 }
 
 // ---- 会员分层真门槛（#277）----
-// 托管部署每月要成本，免费层设低配额、会员解锁到平台原有的高上限；自部署走 worker env 覆盖
-// （FREE_CHANNEL_CAP / FREE_ATTACHMENT_SIZE_LIMIT），手法同下面 MAX_CONNECTIONS_PER_CHANNEL 的
-// env-override 模式，见 worker/src/do.ts 的 maxConnectionsPerChannel()。
+// 官方托管部署每月有成本，免费层设低配额、会员解锁到平台原有高上限。
+// 自部署默认不启用门槛；只有显式 HOSTED_MEMBERSHIP_GATING=true 才应用以下 free 配额。
 // 频道配额：free 账号硬上限；member 沿用 MAX_CHANNELS_PER_ACCOUNT（原高上限，不变）。
 export const FREE_CHANNEL_CAP = 20;
 // 附件体积：free 账号上限；member 沿用原 25 MiB（#176 引入时的默认值，不变）。

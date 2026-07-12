@@ -121,6 +121,7 @@ type AppEnv = Env & {
   // 会员分层真门槛（#277）：free 层配额/附件上限，自部署可抬高。缺省取 shared 常量。
   FREE_CHANNEL_CAP?: string;
   FREE_ATTACHMENT_SIZE_LIMIT?: string;
+  HOSTED_MEMBERSHIP_GATING?: string;
 };
 
 type AppContext = {
@@ -257,9 +258,13 @@ function resolveFreeAttachmentLimit(env: AppEnv): number {
   return Number.isInteger(n) && n > 0 ? n : FREE_ATTACHMENT_SIZE_LIMIT;
 }
 
+export function hostedMembershipGating(env: Pick<AppEnv, "HOSTED_MEMBERSHIP_GATING">): boolean {
+  return env.HOSTED_MEMBERSHIP_GATING === "true" || env.HOSTED_MEMBERSHIP_GATING === "1";
+}
+
 // 会员申请指引：拒绝时附在错误信息里，告诉调用方「为什么」+「怎么解锁」。
 const MEMBERSHIP_UPGRADE_HINT =
-  "upgrade to member for a higher quota (see README membership section)";
+  "upgrade to member for a higher quota (use the membership link in the Web or desktop header)";
 const WEBHOOK_SECRET_MAX = 4096;
 const HEADER_VALUE_RE = /^[\x21-\x7e]+$/;
 // do 无条件信任的内部头清单：ws 升级转发前必须逐个剥离客户端注入值，只认 worker 权威版本
@@ -3020,7 +3025,7 @@ app.post("/api/channels", async (c) => {
   // 有账号但未开通会员的一律按 free 分层（loadMembership 无记录 => DEFAULT_MEMBERSHIP=free）。
   if (creator.account != null) {
     const membership = await loadMembership(c.env.DB, creator.account);
-    const member = isMember(membership);
+    const member = !hostedMembershipGating(c.env) || isMember(membership);
     const cap = member ? MAX_CHANNELS_PER_ACCOUNT : resolveFreeChannelCap(c.env);
     const windowStart = now - CHANNEL_CREATE_WINDOW_MS;
     const counts = await c.env.DB.prepare(
@@ -5034,7 +5039,7 @@ app.post("/api/channels/:slug/attachments", async (c) => {
   // #277 会员真门槛：上传者账号决定体积上限——free 低配额，member 解锁到平台原 25 MiB 上限。
   // 无账号的 legacy token（identity.account undefined）按 loadMembership 的 fail-open 语义落回 free。
   const uploaderMembership = await loadMembership(c.env.DB, identity.account);
-  const uploaderIsMember = isMember(uploaderMembership);
+  const uploaderIsMember = !hostedMembershipGating(c.env) || isMember(uploaderMembership);
   const sizeLimit = uploaderIsMember ? MEMBER_ATTACHMENT_SIZE_LIMIT : resolveFreeAttachmentLimit(c.env);
   const sizeHint = uploaderIsMember ? "" : ` (free tier limit — ${MEMBERSHIP_UPGRADE_HINT})`;
   // Content-Length 先挡一刀，避免把超大体读进内存

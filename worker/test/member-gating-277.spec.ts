@@ -7,6 +7,15 @@ import { SELF } from "cloudflare:test";
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { activateMembership, api, createChannel, seedToken, uniq } from "./helpers";
+import { hostedMembershipGating } from "../src/index";
+
+describe("member gating deployment policy (#277)", () => {
+  it("is opt-in so self-hosted deployments keep the original full limits", () => {
+    expect(hostedMembershipGating({})).toBe(false);
+    expect(hostedMembershipGating({ HOSTED_MEMBERSHIP_GATING: "false" })).toBe(false);
+    expect(hostedMembershipGating({ HOSTED_MEMBERSHIP_GATING: "true" })).toBe(true);
+  });
+});
 
 async function seedChannels(ownerAccount: string, count: number, createdAt: number): Promise<void> {
   for (let i = 0; i < count; i++) {

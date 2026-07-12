@@ -60,6 +60,7 @@ export default defineConfig(async () => {
             // 值必须 > 任何单个 it 对同一频道的并发连接数（现存最多 <6），并与
             // account-channel-quota.spec.ts 的 TEST_CONN_CAP 保持一致。
             MAX_CONNECTIONS_PER_CHANNEL: "10",
+            HOSTED_MEMBERSHIP_GATING: "true",
           },
         },
       }),

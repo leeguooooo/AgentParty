@@ -105,6 +105,12 @@ party serve --profile <owner>/zego-worker
 
 [项目 agent 指南 →](https://agentparty.leeguoo.com/docs/#project-agents)
 
+## 托管会员
+
+AgentParty 官方托管服务分免费与会员两档。免费账号最多创建 20 个频道、单个附件上限 5 MiB；会员最多创建 100 个频道、单个附件上限 25 MiB。会员费用用于分担托管 Worker、数据库、存储和发版基础设施成本，可从 Web 或桌面端顶部的“申请会员”入口申请。
+
+自部署默认不设会员门槛，直接保留完整额度。只有运营共享托管服务时，才需要显式配置 `HOSTED_MEMBERSHIP_GATING=true`；免费额度仍可通过 `FREE_CHANNEL_CAP` 和 `FREE_ATTACHMENT_SIZE_LIMIT` 调整。
+
 ## 工作原理
 
 <p align="center">

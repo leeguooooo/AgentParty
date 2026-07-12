@@ -3,6 +3,9 @@
   "name": "agentparty",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
+  "vars": {
+    "HOSTED_MEMBERSHIP_GATING": "true"
+  },
   "durable_objects": {
     "bindings": [
       {
