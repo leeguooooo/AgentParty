@@ -18,12 +18,16 @@ import {
   applyShareToken,
   AuthError,
   type ChannelInfo,
+  type ChannelJoinRequest,
+  type ChannelJoinRequestState,
   clearShareToken,
   clearToken,
   currentShareToken,
+  createChannelJoinRequest,
   dropUrlToken,
   fetchMe,
   getToken,
+  getMyChannelJoinRequest,
   isShareMode,
   listChannels,
   type MeInfo,
@@ -32,7 +36,16 @@ import {
   saveSession,
   saveToken,
   storedToken,
+  suspendShareMode,
 } from "./lib/api";
+import {
+  clearJoinRequestTarget,
+  clearPendingJoinRequest,
+  readJoinRequestTarget,
+  readPendingJoinRequest as loadPendingJoinRequest,
+  rememberJoinRequestTarget,
+  savePendingJoinRequest,
+} from "./lib/joinRequestPending";
 import {
   authConfigForRuntime,
   type AuthProviderConfig,
@@ -133,6 +146,15 @@ export function App() {
   const [authProvidersResolved, setAuthProvidersResolved] = useState(false);
   // 邀请链接落地页状态（/join/<code>）：正在加入 / 失败
   const [joinStatus, setJoinStatus] = useState<{ phase: "joining" | "error"; message?: string } | null>(null);
+  const [channelJoinRequest, setChannelJoinRequest] = useState<{
+    slug: string;
+    state: ChannelJoinRequestState | "submitting" | "login_required" | "error";
+    reason?: string | null;
+    message?: string;
+  } | null>(() => {
+    const slug = readJoinRequestTarget();
+    return slug === null ? null : { slug, state: "submitting" };
+  });
   // 命中 /auth/callback 时先挂起，避免闪一下登录闸；换 token 成功/失败后落定
   const [oidcPending, setOidcPending] = useState<boolean>(() => isCallbackPath());
   const [initialPairCode] = useState<string | null>(() => {
@@ -199,6 +221,136 @@ export function App() {
     },
     [navigate],
   );
+
+  const temporaryHumanToken = useCallback(async (): Promise<string | null> => {
+    if (desktop) {
+      return restoreDesktopAccess(desktopCredentialVaultForOrigin(activeOrigin), activeOrigin);
+    }
+    return readSession()?.accessToken ?? null;
+  }, [activeOrigin, desktop]);
+
+  useEffect(() => {
+    const slug = readJoinRequestTarget();
+    if (slug === null || loadPendingJoinRequest() !== null || channelJoinRequest?.slug !== slug || channelJoinRequest.state !== "submitting") return;
+    let alive = true;
+    temporaryHumanToken()
+      .then((humanToken) => {
+        if (humanToken === null) throw new Error("human session unavailable");
+        return getMyChannelJoinRequest(humanToken, slug);
+      })
+      .then((request) => {
+        if (alive) setChannelJoinRequest({ slug, state: request.state, reason: request.review_reason });
+      })
+      .catch(() => {
+        if (alive) setChannelJoinRequest({ slug, state: "error", message: t("Channel.joinRequest.error") });
+      });
+    return () => { alive = false; };
+  }, [channelJoinRequest?.slug, channelJoinRequest?.state, t, temporaryHumanToken]);
+
+  const submitPendingChannelJoinRequest = useCallback(async (
+    humanToken: string,
+    pending = loadPendingJoinRequest(),
+  ): Promise<ChannelJoinRequest | null> => {
+    if (pending === null) return null;
+    const watchToken = currentShareToken();
+    if (watchToken === null) {
+      setChannelJoinRequest({ slug: pending.slug, state: "error", message: t("Channel.joinRequest.error") });
+      return null;
+    }
+    setChannelJoinRequest({ slug: pending.slug, state: "submitting" });
+    try {
+      const request = await createChannelJoinRequest(humanToken, pending.slug, watchToken);
+      rememberJoinRequestTarget(pending.slug);
+      clearPendingJoinRequest();
+      setChannelJoinRequest({ slug: pending.slug, state: request.state, reason: request.review_reason });
+      return request;
+    } catch (cause) {
+      setChannelJoinRequest({
+        slug: pending.slug,
+        state: "error",
+        message: cause instanceof Error ? cause.message : t("Channel.joinRequest.error"),
+      });
+      return null;
+    } finally {
+      // Human auth is deliberately temporary until approval. Keep the live ChannelPage on the watch credential.
+      applyShareToken(watchToken);
+      setToken(watchToken);
+    }
+  }, [t]);
+
+  const requestChannelJoin = useCallback(async (): Promise<void> => {
+    const slug = matchChannel(path);
+    const watchToken = currentShareToken();
+    if (slug === null || watchToken === null) return;
+    savePendingJoinRequest({ slug });
+    const humanToken = await temporaryHumanToken().catch(() => null);
+    if (humanToken !== null) {
+      await submitPendingChannelJoinRequest(humanToken);
+      return;
+    }
+    if (desktop) {
+      setChannelJoinRequest({ slug, state: "error", message: t("Channel.joinRequest.desktopAuthRequired") });
+      return;
+    }
+    setChannelJoinRequest({ slug, state: "login_required" });
+    suspendShareMode();
+    dropUrlToken();
+    setAuthError(null);
+    setMe(null);
+    setToken(null);
+  }, [desktop, path, submitPendingChannelJoinRequest, temporaryHumanToken, t]);
+
+  useEffect(() => {
+    const pending = loadPendingJoinRequest();
+    if (pending === null || token === null || isShareMode()) return;
+    void submitPendingChannelJoinRequest(token, pending);
+  }, [submitPendingChannelJoinRequest, token]);
+
+  const beginChannelJoinLogin = useCallback((provider: AuthProviderConfig) => {
+    const pending = loadPendingJoinRequest();
+    if (pending === null) return;
+    setChannelJoinRequest({ slug: pending.slug, state: "submitting" });
+    beginLogin(provider).catch(() => {
+      setChannelJoinRequest({ slug: pending.slug, state: "error", message: t("App.error.startSignInFailed") });
+    });
+  }, [t]);
+
+  const refreshChannelJoinRequest = useCallback(async (): Promise<void> => {
+    const slug = matchChannel(path);
+    if (slug === null) return;
+    setChannelJoinRequest((current) => ({ slug, state: "submitting", reason: current?.reason }));
+    const humanToken = await temporaryHumanToken().catch(() => null);
+    if (humanToken === null) {
+      setChannelJoinRequest({ slug, state: desktop ? "error" : "login_required", message: desktop ? t("Channel.joinRequest.desktopAuthRequired") : undefined });
+      return;
+    }
+    try {
+      const request = await getMyChannelJoinRequest(humanToken, slug);
+      setChannelJoinRequest({ slug, state: request.state, reason: request.review_reason });
+    } catch (cause) {
+      setChannelJoinRequest({ slug, state: "error", message: cause instanceof Error ? cause.message : t("Channel.joinRequest.error") });
+    }
+  }, [desktop, path, temporaryHumanToken, t]);
+
+  const enterApprovedChannel = useCallback(async (): Promise<void> => {
+    const slug = matchChannel(path);
+    if (slug === null) return;
+    const humanToken = await temporaryHumanToken().catch(() => null);
+    if (humanToken === null) {
+      setChannelJoinRequest({ slug, state: "error", message: t("Channel.joinRequest.humanSessionMissing") });
+      return;
+    }
+    clearPendingJoinRequest();
+    clearJoinRequestTarget();
+    clearShareToken();
+    dropUrlToken();
+    setChannelJoinRequest(null);
+    setChannels(null);
+    setListError(null);
+    setMe(null);
+    setToken(humanToken);
+    replace(`/c/${slug}`);
+  }, [path, replace, temporaryHumanToken, t]);
 
   const switchDesktopOrigin = useCallback(async (origin: string) => {
     const result = await switchActiveDesktopServer(origin);
@@ -410,6 +562,15 @@ export function App() {
         .then((sess) => {
           if (!alive) return;
           saveSession(sess); // 存 access + refresh，供静默续期
+          const pendingChannelJoin = loadPendingJoinRequest();
+          if (pendingChannelJoin !== null) {
+            setAuthError(null);
+            setOidcPending(false);
+            void submitPendingChannelJoinRequest(sess.accessToken, pendingChannelJoin).finally(() => {
+              replace(`/c/${pendingChannelJoin.slug}`);
+            });
+            return;
+          }
           setAuthError(null);
           setChannels(null);
           setListError(null);
@@ -430,7 +591,7 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [replace, t]);
+  }, [replace, submitPendingChannelJoinRequest, t]);
 
   // 邀请链接落地：访问 /join/<code> 时——已登录则直接兑换（加入频道→跳进去）；未登录则存下 code
   // 并跳 OIDC 登录，回来后 callback 会重新落到 /join/<code>、此时有 token 走兑换分支。
@@ -989,6 +1150,14 @@ export function App() {
               accountKey={me?.email ?? me?.owner ?? me?.name ?? null}
               inviterName={me?.name ?? slug}
               selfHandle={me?.handle ?? null}
+              joinRequestStatus={channelJoinRequest?.slug === slug ? channelJoinRequest.state : "none"}
+              joinRequestReason={channelJoinRequest?.slug === slug ? channelJoinRequest.reason ?? null : null}
+              joinRequestError={channelJoinRequest?.slug === slug ? channelJoinRequest.message ?? null : null}
+              joinAuthProviders={authProviders}
+              onRequestJoin={requestChannelJoin}
+              onBeginJoinLogin={beginChannelJoinLogin}
+              onRefreshJoinRequest={refreshChannelJoinRequest}
+              onEnterApprovedChannel={enterApprovedChannel}
               onAuthFailed={onAuthFailed}
             />
           ) : (

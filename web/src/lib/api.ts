@@ -24,6 +24,8 @@ function fetchApi(path: string, init?: RequestInit): Promise<Response> {
   return fetch(apiUrl(path), init);
 }
 
+type ApiRequest = typeof fetchApi;
+
 export function urlToken(): string | null {
   return new URLSearchParams(window.location.search).get("t");
 }
@@ -37,7 +39,12 @@ export function isShareMode(): boolean {
 }
 
 export function currentShareToken(): string | null {
-  return activeShareToken;
+  return activeShareToken ?? sessionStorage.getItem(SHARE_TOKEN_KEY);
+}
+
+// Temporarily leave share mode without losing this tab's credential across an auth redirect.
+export function suspendShareMode(): void {
+  activeShareToken = null;
 }
 
 export function getToken(): string | null {
@@ -845,6 +852,107 @@ export async function revokeJoinLink(token: string, slug: string, code: string):
   if (res.status === 401) throw new AuthError("invalid or revoked token");
   if (res.status === 403) throw new ForbiddenError("only the channel owner can revoke invite links");
   if (!res.ok && res.status !== 404) throw new Error(`DELETE join-link failed (${res.status})`);
+}
+
+export type ChannelJoinRequestState = "none" | "pending" | "rejected" | "approved" | "already_member";
+
+export interface ChannelJoinRequest {
+  id?: number | string;
+  state: ChannelJoinRequestState;
+  slug?: string;
+  account?: string;
+  requester_name?: string;
+  requester_display?: string | null;
+  requester_profile?: { display_name?: string | null; handle?: string | null; avatar_url?: string | null };
+  note?: string | null;
+  review_reason?: string | null;
+  requested_at?: number;
+}
+
+function joinRequestFromPayload(payload: unknown): ChannelJoinRequest {
+  const envelope = typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : {};
+  const nested = envelope.request ?? envelope.join_request;
+  const value = typeof nested === "object" && nested !== null ? nested as Record<string, unknown> : envelope;
+  const rawState = value.state ?? value.status;
+  const state: ChannelJoinRequestState =
+    rawState === "pending" || rawState === "rejected" || rawState === "approved" || rawState === "already_member"
+      ? rawState
+      : "none";
+  return { ...value, state } as ChannelJoinRequest;
+}
+
+export async function createChannelJoinRequest(
+  token: string,
+  slug: string,
+  watchToken: string,
+  note?: string,
+  request: ApiRequest = fetchApi,
+): Promise<ChannelJoinRequest> {
+  const body = note === undefined || note.trim() === ""
+    ? { watch_token: watchToken }
+    : { watch_token: watchToken, note: note.trim() };
+  const res = await request(`/api/channels/${encodeURIComponent(slug)}/join-requests`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("a signed-in human account is required");
+  if (res.status === 400) throw new ValidationError("invalid join request");
+  if (res.status === 409) throw new ConflictError("join request already approved or changed");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/join-requests failed (${res.status})`);
+  return joinRequestFromPayload(await res.json().catch(() => ({})));
+}
+
+export async function getMyChannelJoinRequest(token: string, slug: string, request: ApiRequest = fetchApi): Promise<ChannelJoinRequest> {
+  const res = await request(`/api/channels/${encodeURIComponent(slug)}/join-requests/me`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 404) return { state: "none" };
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("a signed-in human account is required");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/join-requests/me failed (${res.status})`);
+  return joinRequestFromPayload(await res.json());
+}
+
+export async function listChannelJoinRequests(
+  token: string,
+  slug: string,
+  state: "pending" = "pending",
+  request: ApiRequest = fetchApi,
+): Promise<ChannelJoinRequest[]> {
+  const params = new URLSearchParams({ state });
+  const res = await request(`/api/channels/${encodeURIComponent(slug)}/join-requests?${params.toString()}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("only channel moderators can view join requests");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/join-requests failed (${res.status})`);
+  const payload = await res.json() as { requests?: unknown[]; join_requests?: unknown[] } | unknown[];
+  const requests = Array.isArray(payload) ? payload : payload.requests ?? payload.join_requests ?? [];
+  return requests.map(joinRequestFromPayload);
+}
+
+export async function reviewChannelJoinRequest(
+  token: string,
+  slug: string,
+  id: number | string,
+  body: { action: "approve" } | { action: "reject"; reason: string },
+  request: ApiRequest = fetchApi,
+): Promise<ChannelJoinRequest> {
+  const res = await request(
+    `/api/channels/${encodeURIComponent(slug)}/join-requests/${encodeURIComponent(String(id))}/review`,
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("only channel moderators can review join requests");
+  if (res.status === 400 || res.status === 409) throw new ValidationError("invalid join request review");
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/join-requests/${id}/review failed (${res.status})`);
+  return joinRequestFromPayload(await res.json());
 }
 
 // 观看模式邀请（#186）：房主铸「频道内只读分享 token」，返回 /c/<slug>?t=<token> 围观链接。

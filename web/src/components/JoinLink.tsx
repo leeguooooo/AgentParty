@@ -10,11 +10,14 @@ import {
   AuthError,
   createJoinLink,
   createShareLink,
+  listChannelJoinRequests,
   listJoinLinks,
   listShareLinks,
+  reviewChannelJoinRequest,
   revokeJoinLink,
   revokeShareLink,
   type JoinLinkInfo,
+  type ChannelJoinRequest,
   type ShareLinkInfo,
 } from "../lib/api";
 import { useT, type TFunc } from "../i18n/useT";
@@ -77,12 +80,18 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
   const [expiryIdx, setExpiryIdx] = useState(0);
   const [usesIdx, setUsesIdx] = useState(0); // 默认单次
   const [copied, setCopied] = useState<string | null>(null);
+  const [joinRequests, setJoinRequests] = useState<ChannelJoinRequest[] | null>(null);
+  const [joinRequestsError, setJoinRequestsError] = useState(false);
+  const [reviewBusyId, setReviewBusyId] = useState<number | string | null>(null);
+  const [rejectingId, setRejectingId] = useState<number | string | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
   const isOpen = active ?? open;
 
   const handleErr = useCallback(
     (e: unknown) => {
       if (e instanceof AuthError) {
         onAuthFailed(e.message);
+        setJoinRequestsError(true);
         return;
       }
       setError(e instanceof Error ? e.message : "failed");
@@ -106,6 +115,20 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
     }
   }, [token, slug, handleErr]);
 
+  const refreshJoinRequests = useCallback(async () => {
+    setJoinRequests(null);
+    setJoinRequestsError(false);
+    try {
+      setJoinRequests(await listChannelJoinRequests(token, slug, "pending"));
+    } catch (e) {
+      if (e instanceof AuthError) {
+        onAuthFailed(e.message);
+        return;
+      }
+      setJoinRequestsError(true);
+    }
+  }, [token, slug, onAuthFailed]);
+
   const close = useCallback(() => {
     if (active === undefined) setOpen(false);
     onActiveChange?.(false);
@@ -122,6 +145,10 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
   }, [active, close, isOpen, links, onActiveChange, refresh]);
 
   useDismissableLayer({ active: isOpen, onDismiss: close, outsideRef: rootRef });
+
+  useEffect(() => {
+    if (isOpen && joinRequests === null && !joinRequestsError) void refreshJoinRequests();
+  }, [isOpen, joinRequests, joinRequestsError, refreshJoinRequests]);
 
   useEffect(() => {
     if (isOpen) return;
@@ -203,6 +230,30 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
       handleErr(e);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function review(request: ChannelJoinRequest, action: "approve" | "reject") {
+    if (request.id === undefined) return;
+    const reason = rejectReason.trim();
+    if (action === "reject" && reason === "") return;
+    setReviewBusyId(request.id);
+    setJoinRequestsError(false);
+    try {
+      await reviewChannelJoinRequest(
+        token,
+        slug,
+        request.id,
+        action === "approve" ? { action } : { action, reason },
+      );
+      setJoinRequests((current) => current?.filter((item) => item.id !== request.id) ?? []);
+      setRejectingId(null);
+      setRejectReason("");
+    } catch (e) {
+      if (e instanceof AuthError) onAuthFailed(e.message);
+      else setJoinRequestsError(true);
+    } finally {
+      setReviewBusyId(null);
     }
   }
 
@@ -334,6 +385,86 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange }: 
               {shareLinks !== null && (shareLinks ?? []).length === 0 && <p className="joinlink-empty">{t("JoinLink.watch.empty")}</p>}
             </>
           )}
+
+          <section className="joinrequest-section" aria-labelledby="joinrequest-heading">
+            <div className="joinrequest-heading-row">
+              <strong id="joinrequest-heading">{t("JoinLink.requests.title")}</strong>
+              {joinRequests !== null && <span className="joinrequest-count">{joinRequests.length}</span>}
+            </div>
+            {joinRequests === null && !joinRequestsError && (
+              <p className="joinrequest-loading" role="status">{t("JoinLink.requests.loading")}</p>
+            )}
+            {joinRequestsError && (
+              <p className="joinrequest-error" role="alert">
+                {t("JoinLink.requests.error")}{" "}
+                <button type="button" className="d-btn joinrequest-retry" onClick={() => void refreshJoinRequests()}>
+                  {t("JoinLink.requests.retry")}
+                </button>
+              </p>
+            )}
+            {joinRequests !== null && joinRequests.length === 0 && (
+              <p className="joinrequest-empty">{t("JoinLink.requests.empty")}</p>
+            )}
+            {joinRequests !== null && joinRequests.length > 0 && (
+              <ul className="joinrequest-list">
+                {joinRequests.map((request, index) => {
+                  const id = request.id ?? `pending-${index}`;
+                  const rejecting = rejectingId === request.id;
+                  return (
+                    <li className="joinrequest-item" key={id}>
+                      <div className="joinrequest-person">
+                        <strong>{request.requester_display ?? request.requester_profile?.display_name ?? request.requester_name ?? t("JoinLink.requests.unknown")}</strong>
+                        {request.account && <span>{request.account}</span>}
+                      </div>
+                      {request.note && <p className="joinrequest-note">{request.note}</p>}
+                      {rejecting ? (
+                        <div className="joinrequest-reject-row">
+                          <input
+                            className="joinrequest-reason"
+                            value={rejectReason}
+                            onChange={(event) => setRejectReason(event.target.value)}
+                            placeholder={t("JoinLink.requests.reasonPlaceholder")}
+                            aria-label={t("JoinLink.requests.reasonLabel")}
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            className="d-btn joinrequest-reject-confirm"
+                            disabled={rejectReason.trim() === "" || reviewBusyId === request.id}
+                            onClick={() => void review(request, "reject")}
+                          >
+                            {t("JoinLink.requests.confirmReject")}
+                          </button>
+                          <button type="button" className="d-btn" onClick={() => { setRejectingId(null); setRejectReason(""); }}>
+                            {t("JoinLink.requests.cancel")}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="joinrequest-actions">
+                          <button
+                            type="button"
+                            className="d-btn d-btn--primary joinrequest-approve"
+                            disabled={reviewBusyId !== null || request.id === undefined}
+                            onClick={() => void review(request, "approve")}
+                          >
+                            {t("JoinLink.requests.approve")}
+                          </button>
+                          <button
+                            type="button"
+                            className="d-btn joinrequest-reject"
+                            disabled={reviewBusyId !== null || request.id === undefined}
+                            onClick={() => { setRejectingId(request.id ?? null); setRejectReason(""); }}
+                          >
+                            {t("JoinLink.requests.reject")}
+                          </button>
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
         </div>
       )}
     </div>

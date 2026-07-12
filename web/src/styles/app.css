@@ -3163,6 +3163,25 @@
 .joinlink-revoke { color: var(--d-red, #c0392b); }
 .joinlink-empty { font-size: 12px; color: var(--t-dim); margin: 0; }
 .joinlink-error { font-size: 12px; color: var(--d-red, #c0392b); margin: 0; }
+.joinrequest-section { border-top: 1px solid var(--t-faint); padding-top: 8px; }
+.joinrequest-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.joinrequest-count { min-width: 20px; padding: 1px 5px; text-align: center; border: 1px solid var(--d-ink); font: 11px var(--font-mono); }
+.joinrequest-loading, .joinrequest-empty, .joinrequest-error { margin: 6px 0 0; font-size: 12px; color: var(--t-dim); }
+.joinrequest-error { color: var(--d-red, #c0392b); }
+.joinrequest-list { list-style: none; display: flex; flex-direction: column; gap: 6px; margin: 7px 0 0; padding: 0; }
+.joinrequest-item { padding: 7px 8px; border: 1px dashed var(--d-ink); }
+.joinrequest-person, .joinrequest-actions, .joinrequest-reject-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.joinrequest-person { justify-content: space-between; font-size: 12px; }
+.joinrequest-person span { color: var(--t-dim); font-size: 11px; overflow-wrap: anywhere; }
+.joinrequest-note { margin: 5px 0; font-size: 12px; white-space: pre-wrap; }
+.joinrequest-actions { justify-content: flex-end; }
+.joinrequest-reason { min-width: 0; flex: 1 1 180px; padding: 4px 6px; border: 1px solid var(--d-ink); background: var(--t-panel); color: var(--fg); font: inherit; }
+.joinrequest-status { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.joinrequest-login-options { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.joinrequest-status-reason { padding-left: 8px; border-left: 1px solid currentColor; }
+.joinrequest-status-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: joinrequest-spin 700ms linear infinite; }
+@keyframes joinrequest-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .joinrequest-status-spinner { animation: none; } }
 /* 桌面版贴邀请链接（#297）：入口在左侧栏，浮层左对齐（joinlink 默认右对齐是给顶栏用的）。 */
 .invite-paste { margin-bottom: 8px; }
 .invite-paste-btn { width: 100%; }

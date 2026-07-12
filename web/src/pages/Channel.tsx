@@ -8,6 +8,7 @@ import { AgentJoin } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
 import { VisibilityToggle } from "../components/VisibilityToggle";
 import { JoinLink } from "../components/JoinLink";
+import { JoinRequestBanner } from "../components/JoinRequestBanner";
 import { Composer, type UploadItem } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
 import { MessageCard } from "../components/MessageCard";
@@ -21,6 +22,7 @@ import {
   type ChannelCharter,
   type ChannelIdentity,
   type ChannelRoleInfo,
+  type ChannelJoinRequestState,
   createTask,
   deleteChannelRole,
   ForbiddenError,
@@ -50,6 +52,7 @@ import {
   uploadAttachment,
   ValidationError,
 } from "../lib/api";
+import type { AuthProviderConfig } from "../lib/oidc";
 import { agentHue } from "../lib/agentColor";
 import { buildIdentityDisplay, type IdentityDisplayMap } from "../lib/identityDisplay";
 import { mentionCandidates, mentionLiveness, parseDraftMentions, type DraftMentionStatus } from "../lib/mentions";
@@ -103,6 +106,14 @@ interface Props {
   accountKey: string | null;
   inviterName: string; // 当前邀请人的频道身份名，接入包报到时 @ 他
   selfHandle: string | null; // 当前人类账号的 @handle（Task C2 被@通知用；agent/未设置 handle 时为 null）
+  joinRequestStatus: ChannelJoinRequestState | "submitting" | "login_required" | "error";
+  joinRequestReason: string | null;
+  joinRequestError: string | null;
+  joinAuthProviders: AuthProviderConfig[];
+  onRequestJoin(): Promise<void>;
+  onBeginJoinLogin(provider: AuthProviderConfig): void;
+  onRefreshJoinRequest(): Promise<void>;
+  onEnterApprovedChannel(): Promise<void>;
   onAuthFailed(message: string): void;
 }
 
@@ -2043,6 +2054,14 @@ export function ChannelPage({
   accountKey,
   inviterName,
   selfHandle,
+  joinRequestStatus,
+  joinRequestReason,
+  joinRequestError,
+  joinAuthProviders,
+  onRequestJoin,
+  onBeginJoinLogin,
+  onRefreshJoinRequest,
+  onEnterApprovedChannel,
   onAuthFailed,
 }: Props) {
   const t = useT();
@@ -3914,9 +3933,17 @@ export function ChannelPage({
         </div>
       )}
       {state.readonly && !state.archived && (
-        <p className="banner banner--gray" role="status" aria-live="polite">
-          {t("Channel.banner.readonly")}
-        </p>
+        <JoinRequestBanner
+          state={joinRequestStatus === "none" ? "idle" : joinRequestStatus}
+          idleText={t("Channel.banner.readonly")}
+          reason={joinRequestReason}
+          errorMessage={joinRequestError}
+          providers={joinAuthProviders}
+          onApply={shareMode ? () => void onRequestJoin() : undefined}
+          onRetry={() => void onRefreshJoinRequest()}
+          onLogin={onBeginJoinLogin}
+          onEnter={() => void onEnterApprovedChannel()}
+        />
       )}
       {state.sendError !== null && canWrite && (
         <p className="banner banner--red" role="alert">

@@ -7,6 +7,9 @@ import { LocaleProvider } from "../i18n/locale";
 //   participate → createJoinLink，watch → createShareLink。整体桩掉 ../lib/api，不打网络。
 const joinCalls: Array<{ slug: string }> = [];
 const shareCalls: Array<{ slug: string }> = [];
+const reviewCalls: Array<{ id: string | number; body: { action: "approve" } | { action: "reject"; reason: string } }> = [];
+let pendingRequests: Array<{ id: string | number; state: string; requester_name: string; requester_handle?: string; note: string | null }> = [];
+let pendingError: Error | null = null;
 
 mock.module("../lib/api", () => ({
   AuthError: class AuthError extends Error {},
@@ -22,6 +25,15 @@ mock.module("../lib/api", () => ({
   }),
   listJoinLinks: async () => [],
   listShareLinks: async () => [],
+  listChannelJoinRequests: async () => {
+    if (pendingError) throw pendingError;
+    return pendingRequests;
+  },
+  reviewChannelJoinRequest: async (_token: string, _slug: string, id: string | number, body: { action: "approve" } | { action: "reject"; reason: string }) => {
+    reviewCalls.push({ id, body });
+    pendingRequests = pendingRequests.filter((request) => request.id !== id);
+    return { id, state: body.action === "approve" ? "approved" : "rejected" };
+  },
   revokeJoinLink: async () => {},
   revokeShareLink: async () => {},
 }));
@@ -58,6 +70,11 @@ class TestEventTarget {
 beforeEach(() => {
   joinCalls.length = 0;
   shareCalls.length = 0;
+  reviewCalls.length = 0;
+  pendingRequests = [
+    { id: "jr_1", state: "pending", requester_name: "Alice", requester_handle: "alice", note: "I can help" },
+  ];
+  pendingError = null;
   windowEvents = new TestEventTarget();
   documentEvents = new TestEventTarget();
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -158,5 +175,47 @@ describe("JoinLink dismiss behavior", () => {
     act(() => trigger.props.onClick());
     const participateRadio = r.root.find((node) => node.type === "input" && node.props.value === "participate");
     expect(participateRadio.props.checked).toBe(true);
+  });
+});
+
+describe("JoinLink join request moderation", () => {
+  test("shows the pending count and approves a request", async () => {
+    const r = render();
+    await act(async () => {});
+
+    expect(r.root.findByProps({ className: "joinrequest-count" }).children.join("")).toContain("1");
+    const approve = r.root.findByProps({ className: "d-btn d-btn--primary joinrequest-approve" });
+    await act(async () => approve.props.onClick());
+
+    expect(reviewCalls).toEqual([{ id: "jr_1", body: { action: "approve" } }]);
+    expect(r.root.findAllByProps({ className: "joinrequest-item" })).toHaveLength(0);
+  });
+
+  test("collects an inline reason before rejecting", async () => {
+    const r = render();
+    await act(async () => {});
+
+    await act(async () => r.root.findByProps({ className: "d-btn joinrequest-reject" }).props.onClick());
+    const reason = r.root.findByProps({ className: "joinrequest-reason" });
+    await act(async () => reason.props.onChange({ target: { value: "  channel is full  " } }));
+    await act(async () => r.root.findByProps({ className: "d-btn joinrequest-reject-confirm" }).props.onClick());
+
+    expect(reviewCalls).toEqual([{ id: "jr_1", body: { action: "reject", reason: "channel is full" } }]);
+  });
+  test("renders empty and retry states", async () => {
+    pendingRequests = [];
+    const empty = render();
+    await act(async () => {});
+    expect(empty.root.findByProps({ className: "joinrequest-empty" })).toBeTruthy();
+    act(() => empty.unmount());
+    renderer = null;
+
+    pendingError = new Error("offline");
+    const failed = render();
+    await act(async () => {});
+    expect(failed.root.findByProps({ className: "joinrequest-error" })).toBeTruthy();
+    pendingError = null;
+    await act(async () => failed.root.findByProps({ className: "d-btn joinrequest-retry" }).props.onClick());
+    expect(failed.root.findByProps({ className: "joinrequest-empty" })).toBeTruthy();
   });
 });
