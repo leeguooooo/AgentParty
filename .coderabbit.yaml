@@ -1,0 +1,45 @@
+# CodeRabbit 配置（#380）——PR 自动审查。
+# 安装 CodeRabbit GitHub App 到 leeguooooo/AgentParty 后即生效（App 授权需 owner 在 github.com 操作）。
+# 文档：https://docs.coderabbit.ai/
+version: 2
+language: zh-CN
+
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+  # 本仓是 bun monorepo（cli / worker / web / shared / desktop）。审查侧重点：
+  path_instructions:
+    - path: "worker/**"
+      instructions: >
+        Cloudflare Worker + Durable Object + D1。重点看：SQL 注入 / 越权（acl.ts 的 moderator 判定、
+        channel_scope 硬上限）、迁移是否只增列不回填导致 NULL 语义漏洞、附件 key 是否锚定频道 slug
+        做跨频道隔离、DO 存储是否只增不减。测试用 vitest-pool-workers。
+    - path: "cli/**"
+      instructions: >
+        Bun CLI。重点看：终端输出是否剥离控制字符（防转义注入）、参数解析是否尊重 -- 终止符、
+        join pack / PROTOCOL_REMINDER 是否保留既有护栏（trellis / TMPDIR 持久路径 / 任务台账）、
+        WS 重连退避是否会被握手架空成紧循环。
+    - path: "web/**"
+      instructions: >
+        React + Vite。重点看：远端可控内容是否经 React 转义 / DOMPurify、鉴权附件是否走 fetch→blob
+        （<img> 带不了 Bearer 头）、i18n 是否 en/zh 同步、useEffect 依赖与清理。
+    - path: "shared/**"
+      instructions: 协议类型（protocol.ts）。改动要向后兼容，可选字段用 `?`，别破坏既有序列化。
+
+  # 生成的 / 快照 / 锁文件不审。
+  path_filters:
+    - "!**/*.snap"
+    - "!**/bun.lock"
+    - "!**/dist/**"
+    - "!**/*.md"
+
+chat:
+  auto_reply: true

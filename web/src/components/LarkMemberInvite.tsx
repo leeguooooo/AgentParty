@@ -33,14 +33,23 @@ export function LarkMemberInvite({
   const [busy, setBusy] = useState(false);
   const [inviting, setInviting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // #382：部署未开通 Lark 通讯录权限时，撞一次就记住——之后禁用搜索并持久提示，
+  // 不让用户反复搜了才报错。权限是 owner 在 Lark 后台配置项，前端只能优雅降级。
+  const [directoryUnavailable, setDirectoryUnavailable] = useState(false);
+
+  function isDirectoryPermissionError(cause: unknown): boolean {
+    return (
+      cause instanceof LarkDirectoryApiError &&
+      cause.status === 503 &&
+      cause.message.toLowerCase().includes("permission")
+    );
+  }
 
   function errorLabel(cause: unknown, fallbackKey: string): string {
     if (cause instanceof LarkDirectoryApiError) {
       if (cause.status === 429 || cause.code === "rate_limited") return t("LarkInvite.error.rateLimited");
       if (cause.status === 403) return t("LarkInvite.error.forbidden");
-      if (cause.status === 503 && cause.message.toLowerCase().includes("permission")) {
-        return t("LarkInvite.error.permission");
-      }
+      if (isDirectoryPermissionError(cause)) return t("LarkInvite.error.permission");
     }
     return t(fallbackKey);
   }
@@ -56,6 +65,7 @@ export function LarkMemberInvite({
       setCursor(page.next_cursor);
       setSearched(true);
     } catch (cause) {
+      if (isDirectoryPermissionError(cause)) setDirectoryUnavailable(true);
       setError(errorLabel(cause, "LarkInvite.error.search"));
     } finally {
       setBusy(false);
@@ -84,20 +94,27 @@ export function LarkMemberInvite({
   return (
     <section className="lark-invite" aria-labelledby="lark-invite-title">
       <h3 id="lark-invite-title">{t("LarkInvite.title")}</h3>
-      <form className="lark-invite-search" onSubmit={submit}>
-        <input
-          type="search"
-          value={query}
-          maxLength={64}
-          aria-label={t("LarkInvite.searchLabel")}
-          placeholder={t("LarkInvite.placeholder")}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        <button type="submit" className="d-btn d-btn--primary" disabled={busy || !query.trim()}>
-          {busy ? t("LarkInvite.searching") : t("LarkInvite.search")}
-        </button>
-      </form>
-      {error !== null && <p className="lark-invite-error" role="alert">{error}</p>}
+      {directoryUnavailable ? (
+        // #382 优雅降级：权限未开通，持久提示 + 不再显示可徒劳操作的搜索框。
+        <p className="lark-invite-unavailable" role="status">{t("LarkInvite.unavailable")}</p>
+      ) : (
+        <>
+          <form className="lark-invite-search" onSubmit={submit}>
+            <input
+              type="search"
+              value={query}
+              maxLength={64}
+              aria-label={t("LarkInvite.searchLabel")}
+              placeholder={t("LarkInvite.placeholder")}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <button type="submit" className="d-btn d-btn--primary" disabled={busy || !query.trim()}>
+              {busy ? t("LarkInvite.searching") : t("LarkInvite.search")}
+            </button>
+          </form>
+          {error !== null && <p className="lark-invite-error" role="alert">{error}</p>}
+        </>
+      )}
       {searched && users.length === 0 && !busy && <p className="lark-invite-empty">{t("LarkInvite.empty")}</p>}
       {users.length > 0 && (
         <ul className="lark-invite-results">
