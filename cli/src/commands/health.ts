@@ -78,7 +78,7 @@ export async function run(argv: string[]): Promise<number> {
   const staleAfterMs = staleAfterFlag ?? DEFAULT_STALE_AFTER_MS;
   const channel = str(flags.channel);
 
-  const report = buildHealthReport(readHealthCache(), { channel, staleAfterMs });
+  const report = buildHealthReport(readHealthCache(process.cwd(), channel), { channel, staleAfterMs });
 
   if (flags.json === true) {
     console.log(JSON.stringify(report, null, 2));
