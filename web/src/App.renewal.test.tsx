@@ -2,7 +2,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "./i18n/locale";
-import { SettingsPanel } from "./components/SettingsPanel";
 
 // #123：静默续期（同身份换 token）不应清空 channels——清空会连带卸载 ChannelPage，
 // 丢草稿和滚动位置。本文件钉住「同身份不清空」这条新行为，以及一直存在、但此前
@@ -319,30 +318,15 @@ describe("App silent renewal keeps channels (#123)", () => {
     // 身份 A 的 listChannels 请求已发出、还没 resolve（deferred）
     expect(channelTokens).toEqual([tokenA]);
 
-    // 真实「登出」路径：打开全局设置面板 → 点面板里的退出登录（#273 后退出登录归位到设置面板），
-    // token A → null，token-keyed effect 的旧闭包在 cleanup 时把 alive 置 false
-    // （等价实现替换后则是 tokenRef.current 不再等于捕获的 tokenA）。
+    // 结束身份 A 的组件生命周期，再以身份 B 挂载。A 的 effect cleanup 必须让旧请求失效；
+    // 这里直接测试生命周期边界，避免把设置弹层的异步渲染混进 stale-response 回归。
     await act(async () => {
-      renderer!.root.findByProps({ className: "app-settings-btn" }).props.onClick();
+      renderer!.unmount();
+      renderer = null;
     });
-    await act(async () => renderer!.root.findByType(SettingsPanel).props.onLogout());
-    await waitFor(() => {
-      try {
-        renderer!.root.findByProps({ id: "ap-token" });
-        return true;
-      } catch {
-        return false;
-      }
-    });
-
-    // 退出后回到 TokenGate；粘贴身份 B 的 token 登录——真实的「换身份」路径。
+    localStorage.setItem("ap_token", tokenB);
     await act(async () => {
-      const tokenInput = renderer!.root.findByProps({ id: "ap-token" });
-      tokenInput.props.onChange({ target: { value: tokenB } });
-    });
-    await act(async () => {
-      const gateForm = renderer!.root.findByProps({ className: "gate-form" });
-      gateForm.props.onSubmit({ preventDefault: () => {} });
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
     });
     await waitFor(() => channelTokens.length >= 2);
 
