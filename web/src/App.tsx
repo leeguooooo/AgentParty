@@ -112,6 +112,14 @@ function meTitle(me: MeInfo): string {
   return parts.join(" · ");
 }
 
+function DesktopRecoveryUpdater() {
+  return (
+    <aside className="desktop-recovery-updater">
+      <DesktopUpdater />
+    </aside>
+  );
+}
+
 export function App() {
   useEffect(() => {
     void reportDesktopUiReady();
@@ -764,45 +772,51 @@ export function App() {
   if (desktop && token === null) {
     if (desktopBoot === "loading") {
       return (
-        <main className="gate desktop-session-gate">
-          <h1 className="d-title gate-title">Agent<span className="d-hl">Party</span></h1>
-          <p className="banner" role="status" aria-live="polite">{t("App.desktop.restoring")}</p>
-        </main>
+        <>
+          <main className="gate desktop-session-gate">
+            <h1 className="d-title gate-title">Agent<span className="d-hl">Party</span></h1>
+            <p className="banner" role="status" aria-live="polite">{t("App.desktop.restoring")}</p>
+          </main>
+          <DesktopRecoveryUpdater />
+        </>
       );
     }
     if (desktopBoot === "error") {
       return (
-        <main className="gate desktop-session-gate">
-          <h1 className="d-title gate-title">Agent<span className="d-hl">Party</span></h1>
-          <section className="d-card gate-card">
-            <p className="banner banner--red" role="alert">{t("App.desktop.restoreFailed")}</p>
-            <ServerSwitcher
-              profiles={serverProfiles}
-              activeOrigin={activeOrigin}
-              onSwitch={switchDesktopOrigin}
-              onAddPair={() => setDesktopBoot("ready")}
-              onPair={(origin) => {
-                saveActiveServerOrigin(localStorage, origin);
-                setApiBase(origin);
-                setActiveOrigin(origin);
-                setServerPairingFlow(initialDesktopServerPairingFlow(origin));
-                setDesktopBoot("ready");
-              }}
-            />
-            <div className="desktop-session-actions">
-              <button
-                type="button"
-                className="d-btn"
-                onClick={() => void desktopCredentialVaultForOrigin(activeOrigin).delete().then(() => setDesktopBoot("ready"))}
-              >
-                {t("App.desktop.removeLocal")}
-              </button>
-              <button type="button" className="d-btn d-btn--primary" onClick={() => void restoreDesktop().catch(() => {})}>
-                {t("App.desktop.retry")}
-              </button>
-            </div>
-          </section>
-        </main>
+        <>
+          <main className="gate desktop-session-gate">
+            <h1 className="d-title gate-title">Agent<span className="d-hl">Party</span></h1>
+            <section className="d-card gate-card">
+              <p className="banner banner--red" role="alert">{t("App.desktop.restoreFailed")}</p>
+              <ServerSwitcher
+                profiles={serverProfiles}
+                activeOrigin={activeOrigin}
+                onSwitch={switchDesktopOrigin}
+                onAddPair={() => setDesktopBoot("ready")}
+                onPair={(origin) => {
+                  saveActiveServerOrigin(localStorage, origin);
+                  setApiBase(origin);
+                  setActiveOrigin(origin);
+                  setServerPairingFlow(initialDesktopServerPairingFlow(origin));
+                  setDesktopBoot("ready");
+                }}
+              />
+              <div className="desktop-session-actions">
+                <button
+                  type="button"
+                  className="d-btn"
+                  onClick={() => void desktopCredentialVaultForOrigin(activeOrigin).delete().then(() => setDesktopBoot("ready"))}
+                >
+                  {t("App.desktop.removeLocal")}
+                </button>
+                <button type="button" className="d-btn d-btn--primary" onClick={() => void restoreDesktop().catch(() => {})}>
+                  {t("App.desktop.retry")}
+                </button>
+              </div>
+            </section>
+          </main>
+          <DesktopRecoveryUpdater />
+        </>
       );
     }
     return (
@@ -826,6 +840,7 @@ export function App() {
             setToken(accessToken);
           }}
         />
+        <DesktopRecoveryUpdater />
       </>
     );
   }

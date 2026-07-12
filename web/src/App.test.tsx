@@ -52,6 +52,7 @@ let desktopWindowShownHandler: (() => void) | null = null;
 
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+  Object.defineProperty(globalThis, "__TAURI_INTERNALS__", { configurable: true, value: {} });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
   Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: memoryStorage() });
   Object.defineProperty(globalThis, "location", {
@@ -232,6 +233,7 @@ afterEach(async () => {
   clearApiBase();
   for (const key of [
     "IS_REACT_ACT_ENVIRONMENT",
+    "__TAURI_INTERNALS__",
     "localStorage",
     "sessionStorage",
     "location",
@@ -452,6 +454,10 @@ describe("App desktop server pairing behavior", () => {
 
     const root = renderer!.root;
     expect(root.findByProps({ role: "alert" }).children).toContain("The secure desktop session could not be refreshed.");
+    expect(root.findByProps({ className: "desktop-recovery-updater" })).toBeTruthy();
+    expect(root.findAll((node) =>
+      typeof node.props.className === "string" && node.props.className.split(/\s+/).includes("desktop-updater-trigger"),
+    )).toHaveLength(1);
     await act(async () => {
       root.findByProps({ id: "active-server" }).props.onChange({ target: { value: privateOrigin } });
       await new Promise((resolve) => setTimeout(resolve, 0));

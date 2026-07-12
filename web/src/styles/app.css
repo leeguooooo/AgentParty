@@ -63,6 +63,13 @@
   width: 30px;
   height: 28px;
 }
+
+.desktop-recovery-updater {
+  position: fixed;
+  top: max(14px, env(safe-area-inset-top));
+  right: max(14px, env(safe-area-inset-right));
+  z-index: 80;
+}
 .desktop-updater-trigger {
   width: 30px;
   height: 28px;
