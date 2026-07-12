@@ -205,9 +205,11 @@ describe("runServe", () => {
 
     expect(await runServe(o)).toBe(EXIT_ARCHIVED);
 
-    // 处理这条 wake 时自报「忙」（无积压 → queue_depth 0）
-    const working = posts.find((p) => (p.body as { state?: string }).state === "working");
-    expect(working, "runner must post a working frame").toBeDefined();
+    // 处理这条 wake 时自报「忙」（无积压 → queue_depth 0）。
+    // 注意：#228 起 wrap 点会先落一条 busy 无关的 runner_started 审计 working 帧，故这里精确挑
+    // busy=true 的那条 wake-ack，而不是第一条 working。
+    const working = posts.find((p) => (p.body as { state?: string; busy?: boolean }).state === "working" && (p.body as { busy?: boolean }).busy === true);
+    expect(working, "runner must post a busy working frame").toBeDefined();
     expect(working!.body).toMatchObject({ kind: "status", state: "working", busy: true, queue_depth: 0 });
 
     // 收尾补一条「空闲」把 busy 清回 false——任务结束就不再假忙
@@ -258,6 +260,64 @@ describe("runServe", () => {
     const clears = beats.filter((b) => b.current_task === null);
     expect(clears.length, "must clear the running task once it finishes").toBeGreaterThanOrEqual(1);
     expect(beats.lastIndexOf(active[active.length - 1]!)).toBeLessThan(beats.indexOf(clears[0]!));
+  });
+
+  // runner_started 审计（#228）：presence 心跳不落 history、任务结束即清 —— custom runner 跑完后频道
+  // 历史里此前零证据它曾启动。现在 wrap 点补发一条落 history 的 working status「runner started for seq X」。
+  test("runner_started audit: custom runner posts an auditable working status to history on start", async () => {
+    const s = closeAfterOneMention();
+    const { posts, post } = postRecorder();
+    const o = opts({
+      server: s.url,
+      post,
+      // 注入的自定义 runner（runnerKind=custom）：成功返回，不自报 busy、不发结束/失败 status。
+      runCommand: async () => {},
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+
+    // 启动即落一条可审计的 working status —— 这正是此前 custom runner 缺失的那条历史证据。
+    const started = posts.find(
+      (p) =>
+        (p.body as { state?: string }).state === "working" &&
+        typeof (p.body as { note?: string }).note === "string" &&
+        (p.body as { note: string }).note.startsWith("runner started for seq 1"),
+    );
+    expect(started, "custom runner must post an auditable runner_started status").toBeDefined();
+    expect(started!.body).toMatchObject({ kind: "status", state: "working" });
+    // 带 trigger_seq 与 runner 信息，方便审计时定位是哪种 runner 为哪条 wake 启动。
+    expect((started!.body as { note: string }).note).toContain("runner=custom");
+    // 纯审计记录：不掺 busy（custom 不参与 busy 生命周期，置 busy 会让 presence 卡「假忙」）。
+    expect((started!.body as { busy?: boolean }).busy).toBeUndefined();
+    // 与「失败」区分：成功路径不产生 blocked 帧。
+    expect(posts.some((p) => (p.body as { state?: string }).state === "blocked")).toBe(false);
+  });
+
+  // 与结束/失败区分（#228）：失败时 runner_started 仍先落，随后才是 blocked —— 两条各司其职、可分辨。
+  test("runner_started audit: distinct from the failure status, and posted before it", async () => {
+    const s = closeAfterOneMention();
+    const { posts, post } = postRecorder();
+    const o = opts({
+      server: s.url,
+      post,
+      // 抛普通 Error（非 WakeBlockedError）→ 不可重试 → 走放弃路径发一条 blocked。
+      runCommand: async () => {
+        throw new Error("custom runner boom");
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+
+    const startedIdx = posts.findIndex(
+      (p) =>
+        (p.body as { state?: string }).state === "working" &&
+        (p.body as { note?: string }).note?.startsWith("runner started for seq 1"),
+    );
+    const blockedIdx = posts.findIndex((p) => (p.body as { state?: string }).state === "blocked");
+    expect(startedIdx, "runner_started must be posted even when the runner fails").toBeGreaterThanOrEqual(0);
+    expect(blockedIdx, "failure must post a blocked status").toBeGreaterThanOrEqual(0);
+    // 启动证据先落、失败通告后落 —— 顺序即「先启动，后失败」的可审计时间线。
+    expect(startedIdx).toBeLessThan(blockedIdx);
   });
 
   // 本机操作者可见性（#228）：health.json 盖上正在处理的 seq，任务结束清回 null。
