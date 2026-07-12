@@ -171,7 +171,7 @@ describe("TaskLedgerPanel new-task entry", () => {
     });
 
     expect(onCreateTask).toHaveBeenCalledTimes(1);
-    expect(calls).toEqual([{ title: "ship it", desc: "" }]);
+    expect(calls).toEqual([{ title: "ship it", desc: "", attachments: [] }]);
   });
 
   test("submitting with an empty title never calls onCreateTask", async () => {

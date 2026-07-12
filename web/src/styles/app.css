@@ -5936,3 +5936,11 @@
   background: var(--t-panel2); color: var(--fg, inherit); border: 1px solid var(--t-faint);
 }
 .org-empty { color: var(--t-dim); font-size: 12px; padding: 6px 4px; }
+
+/* #369 新建任务附件上传 */
+.task-new-attach { margin: 4px 0; display: flex; flex-direction: column; gap: 4px; }
+.task-attach-btn { font-size: 12px; color: var(--t-accent); cursor: pointer; }
+.task-attach-btn input { display: none; }
+.task-new-atts { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.task-new-att { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; border: 1px solid var(--t-faint); padding: 1px 5px; }
+.task-new-att-remove { border: none; background: none; cursor: pointer; color: var(--t-dim); font-size: 13px; padding: 0; }
