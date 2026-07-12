@@ -922,17 +922,18 @@ jobs:
             exit 1
           fi
 
-          candidate_version="$(jq -er '.version | strings' "${manifests[0]}")"
+          primary_manifest="dist/latest.json"
+          if [ -s dist/latest-v2.json ]; then
+            primary_manifest="dist/latest-v2.json"
+          fi
+          candidate_version="$(jq -er '.version | strings' "$primary_manifest")"
           if [ "$candidate_version" != "${GITHUB_REF_NAME#v}" ]; then
             echo "::error::desktop updater manifest version does not match the release tag"
             exit 1
           fi
           for manifest in "${manifests[@]}"; do
             manifest_version="$(jq -er '.version | strings' "$manifest")"
-            if [ "$manifest_version" != "$candidate_version" ]; then
-              echo "::error::desktop updater manifests disagree on candidate version"
-              exit 1
-            fi
+            bun scripts/release-version.ts --check-not-older-than "$manifest_version" "$manifest_version"
           done
 
           backup_dir="$RUNNER_TEMP/desktop-updater-channel-backup"

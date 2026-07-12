@@ -299,6 +299,9 @@ describe("desktop release workflow", () => {
       (step) => step.name === "publish isolated desktop updater channel",
     )?.run ?? "";
     expect(script).toContain('backup_dir="$RUNNER_TEMP/desktop-updater-channel-backup"');
+    expect(script).toContain('primary_manifest="dist/latest-v2.json"');
+    expect(script).toContain('candidate_version="$(jq -er');
+    expect(script).not.toContain("desktop updater manifests disagree on candidate version");
     expect(script).toContain('|| gh release view "$channel_tag"');
     expect(script).toContain('trap restore_channel_manifests ERR');
     expect(script).toContain('gh release download "$channel_tag"');
