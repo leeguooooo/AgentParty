@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { AuthProviderConfig } from "../lib/oidc";
 import { useT } from "../i18n/useT";
 import { LanguageSwitcher } from "./LanguageSwitcher";
+import "../i18n/strings/App";
 import "../i18n/strings/TokenGate";
 
 interface Props {
@@ -32,7 +33,9 @@ export function TokenGate({ error, providers, onSso, onSubmit }: Props) {
                 type="button"
                 onClick={() => onSso(provider)}
               >
-                {provider.label}
+                {provider.label || (provider.type === "oidc"
+                  ? t("App.auth.oidcSignIn")
+                  : t("App.auth.providerSignIn", { id: provider.id }))}
               </button>
             ))}
             <p className="gate-social">{t("TokenGate.ssoHint")}</p>

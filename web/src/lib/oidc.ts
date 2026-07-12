@@ -123,14 +123,14 @@ export function parseAuthConfigPayload(data: unknown): AuthConfig {
         type: "oauth",
         id: item.id,
         kind: item.kind ?? item.id,
-        label: item.label || `Sign in with ${item.id}`,
+        label: item.label ?? "",
         clientId: item.client_id,
         authorizeUrl: item.authorize_url,
         scope: item.scope ?? "",
       });
     }
     if (oidc !== null) {
-      providers.push({ type: "oidc", id: "@oidc", label: "Sign in with account center", ...oidc });
+      providers.push({ type: "oidc", id: "@oidc", label: "", ...oidc });
     }
     return { oidc, providers };
   } catch {

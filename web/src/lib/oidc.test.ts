@@ -40,20 +40,29 @@ describe("parseAuthConfigPayload", () => {
           {
             id: "oidc",
             kind: "lark",
-            label: "Sign in with Lark",
+            label: "  Continue with Lark  ",
             client_id: "lark-client",
             authorize_url: "https://accounts.larksuite.com/open-apis/authen/v1/authorize",
             scope: "",
+          },
+          {
+            id: "github",
+            kind: "github",
+            client_id: "github-client",
+            authorize_url: "https://github.com/login/oauth/authorize",
+            scope: "read:user",
           },
         ],
       },
     });
 
-    expect(parsed.providers.map((provider) => provider.id)).toEqual(["oidc", "@oidc"]);
-    expect(parsed.providers[1]).toEqual({
+    expect(parsed.providers.map((provider) => provider.id)).toEqual(["oidc", "github", "@oidc"]);
+    expect(parsed.providers[0]?.label).toBe("  Continue with Lark  ");
+    expect(parsed.providers[1]?.label).toBe("");
+    expect(parsed.providers[2]).toEqual({
       type: "oidc",
       id: "@oidc",
-      label: "Sign in with account center",
+      label: "",
       issuer: "https://accounts.example.com",
       clientId: "agentparty-web",
     });

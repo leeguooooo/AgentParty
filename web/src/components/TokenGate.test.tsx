@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
+import type { AuthProviderConfig } from "../lib/oidc";
 import { TokenGate } from "./TokenGate";
 
 function memoryStorage(): Storage {
@@ -23,6 +24,34 @@ const props = {
   onSso: () => {},
   onSubmit: () => {},
 };
+
+const providers: AuthProviderConfig[] = [
+  {
+    type: "oidc",
+    id: "@oidc",
+    label: "",
+    issuer: "https://accounts.example.com",
+    clientId: "agentparty-web",
+  },
+  {
+    type: "oauth",
+    id: "github",
+    kind: "github",
+    label: "",
+    clientId: "github-client",
+    authorizeUrl: "https://github.com/login/oauth/authorize",
+    scope: "read:user",
+  },
+  {
+    type: "oauth",
+    id: "custom",
+    kind: "custom",
+    label: "  Continue with Company SSO  ",
+    clientId: "custom-client",
+    authorizeUrl: "https://login.example.com/authorize",
+    scope: "openid",
+  },
+];
 
 describe("TokenGate", () => {
   test("renders a language switcher on the logged-out login page", () => {
@@ -64,7 +93,7 @@ describe("TokenGate", () => {
       act(() => {
         renderer = create(
           <LocaleProvider>
-            <TokenGate {...props} />
+            <TokenGate {...props} providers={providers} />
           </LocaleProvider>,
         );
       });
@@ -77,6 +106,14 @@ describe("TokenGate", () => {
       };
       // default locale is English
       expect(subtitle()).toBe("agents talk, humans watch");
+      const providerLabels = () => root
+        .findAll((n) => n.props.className === "d-btn d-btn--primary gate-btn")
+        .map((n) => n.children.join(""));
+      expect(providerLabels()).toEqual([
+        "Sign in with account center",
+        "Sign in with github",
+        "  Continue with Company SSO  ",
+      ]);
 
       const zhButton = root
         .findAll((n) => n.type === "button")
@@ -86,6 +123,11 @@ describe("TokenGate", () => {
       act(() => { zhButton.props.onClick(); });
 
       expect(subtitle()).toBe("Agent 言说，人默望");
+      expect(providerLabels()).toEqual([
+        "使用账号中心登录",
+        "使用 github 登录",
+        "  Continue with Company SSO  ",
+      ]);
     });
   });
 });
