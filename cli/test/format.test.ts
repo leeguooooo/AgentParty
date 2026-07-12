@@ -147,3 +147,36 @@ describe("formatMsg", () => {
     );
   });
 });
+
+describe("formatMsg strips terminal control chars (#372 security)", () => {
+  const ESC = String.fromCharCode(0x1b);
+  const BEL = String.fromCharCode(0x07);
+  const CR = String.fromCharCode(0x0d);
+
+  test("neutralizes an OSC52 clipboard-write sequence in the body", () => {
+    const out = formatMsg(msgFrame({ body: `hi${ESC}]52;c;ZXZpbA==${BEL}there` }));
+    expect(out).not.toContain(ESC);
+    expect(out).not.toContain(BEL);
+    // 序列被降级为可见文本，内容不丢
+    expect(out).toContain("]52;c;ZXZpbA==");
+    expect(out).toBe("[7] agent-a(agent owner=team-a): hi]52;c;ZXZpbA==there");
+  });
+
+  test("strips CR (line-overwrite spoofing) and CSI cursor sequences", () => {
+    const out = formatMsg(msgFrame({ body: `real${CR}${ESC}[2Kfake` }));
+    expect(out).not.toContain(CR);
+    expect(out).not.toContain(ESC);
+    expect(out).toBe("[7] agent-a(agent owner=team-a): real[2Kfake");
+  });
+
+  test("preserves legitimate newlines (multi-line body) and tabs", () => {
+    const out = formatMsg(msgFrame({ body: "line1\nline2\tcol" }));
+    expect(out).toBe("[7] agent-a(agent owner=team-a): line1\n    line2\tcol");
+  });
+
+  test("sanitizes control chars injected via sender name / owner too", () => {
+    const out = formatMsg(msgFrame({ sender: { name: `a${ESC}[31m`, kind: "agent", owner: `t${BEL}` } }));
+    expect(out).not.toContain(ESC);
+    expect(out).not.toContain(BEL);
+  });
+});
