@@ -16,6 +16,7 @@ import { MentionToast, type MentionToastItem } from "../components/MentionToast"
 import { NotifyToggle, readNotifyOptin } from "../components/NotifyToggle";
 import { PresenceBar } from "../components/PresenceBar";
 import { OrgTree } from "../components/OrgTree";
+import { AttachmentList } from "../components/AttachmentList";
 import { OrgTreePreview } from "../components/OrgTreePreview";
 import {
   archiveChannel,
@@ -1527,6 +1528,7 @@ export function TaskLedgerPanel({
   onReview,
   onCreateTask,
   identities = [],
+  onUploadAttachment,
 }: {
   tasks: TaskRecord[];
   loading: boolean;
@@ -1540,9 +1542,11 @@ export function TaskLedgerPanel({
   onSetState: (id: number, state: TaskState) => void;
   onAssign: (id: number, name: string, kind: TaskAssigneeKind) => void;
   onReview: (task: TaskRecord, action: "approve" | "reject", reason?: string) => void;
-  onCreateTask: (input: { title: string; desc: string }) => Promise<boolean>;
+  onCreateTask: (input: { title: string; desc: string; attachments?: Attachment[] }) => Promise<boolean>;
   // #271(b)：频道身份（presence/identities），给指派输入框做可检索的 datalist 候选。
   identities?: ChannelIdentity[];
+  // #369：上传图片/文件到 R2 拿引用（Channel 提供 token/slug）。缺省则不显上传入口（如从消息建任务）。
+  onUploadAttachment?: (file: File) => Promise<Attachment>;
 }) {
   const t = useT();
   const [assignDrafts, setAssignDrafts] = useState<Record<number, string>>({});
@@ -1551,6 +1555,17 @@ export function TaskLedgerPanel({
   const [composerOpen, setComposerOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  // #369：新建任务的待发附件（先上传到 R2 拿引用，随 createTask 带上）。
+  const [newAtts, setNewAtts] = useState<Attachment[]>([]);
+  const [attUploading, setAttUploading] = useState(false);
+  const onPickTaskFiles = (files: FileList | null) => {
+    if (files === null || files.length === 0 || onUploadAttachment === undefined) return;
+    setAttUploading(true);
+    Promise.all(Array.from(files).map((f) => onUploadAttachment(f)))
+      .then((refs) => setNewAtts((cur) => [...cur, ...refs]))
+      .catch(() => {})
+      .finally(() => setAttUploading(false));
+  };
   const [rejectingTaskId, setRejectingTaskId] = useState<number | null>(null);
   const [rejectDraft, setRejectDraft] = useState("");
   // #271(a)：按受理人筛选看板。"all" 全量，"__unassigned__" 只看未指派。
@@ -1579,10 +1594,11 @@ export function TaskLedgerPanel({
     event.preventDefault();
     const title = newTitle.trim();
     if (title === "" || creating) return;
-    void onCreateTask({ title, desc: newDesc.trim() }).then((ok) => {
+    void onCreateTask({ title, desc: newDesc.trim(), attachments: newAtts }).then((ok) => {
       if (!ok) return;
       setNewTitle("");
       setNewDesc("");
+      setNewAtts([]);
       setComposerOpen(false);
     });
   };
@@ -1616,6 +1632,9 @@ export function TaskLedgerPanel({
           <span className={`t-mono task-state task-state--${task.state}`}>{stateLabel(task.state)}</span>
         </div>
         {task.desc !== null && <p className="task-card-desc">{task.desc}</p>}
+        {task.attachments !== undefined && task.attachments.length > 0 && (
+          <AttachmentList attachments={task.attachments} />
+        )}
         <div className="task-card-meta">
           <span className="t-mono">P{task.priority}</span>
           {task.assignee !== null && <span className="t-mono">@{task.assignee.name}</span>}
@@ -1783,9 +1802,39 @@ export function TaskLedgerPanel({
             rows={2}
             onChange={(event) => setNewDesc(event.currentTarget.value)}
           />
+          {onUploadAttachment !== undefined && (
+            <div className="task-new-attach">
+              <label className="task-attach-btn">
+                <input
+                  type="file"
+                  multiple
+                  disabled={creating || attUploading}
+                  onChange={(event) => { onPickTaskFiles(event.currentTarget.files); event.currentTarget.value = ""; }}
+                />
+                {attUploading ? t("Channel.tasks.attachUploading") : t("Channel.tasks.attach")}
+              </label>
+              {newAtts.length > 0 && (
+                <ul className="task-new-atts">
+                  {newAtts.map((att) => (
+                    <li key={att.key} className="task-new-att t-mono">
+                      <span className="task-new-att-name">{att.filename}</span>
+                      <button
+                        type="button"
+                        className="task-new-att-remove"
+                        aria-label={`remove ${att.filename}`}
+                        onClick={() => setNewAtts((cur) => cur.filter((a) => a.key !== att.key))}
+                      >
+                        ×
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           {createError !== null && <p className="banner banner--red">{createError}</p>}
           <div className="task-new-actions">
-            <button className="task-action-btn" type="submit" disabled={creating || newTitle.trim() === ""}>
+            <button className="task-action-btn" type="submit" disabled={creating || attUploading || newTitle.trim() === ""}>
               {creating ? t("Channel.tasks.newSubmitting") : t("Channel.tasks.newSubmit")}
             </button>
             <button
@@ -2290,13 +2339,14 @@ export function ChannelPage({
 
   // 面板内「新建任务」：复用后端既有 POST /api/channels/:slug/tasks（与 createTaskFromMessage 同一端点，
   // 不新造接口）。返回 boolean 让 composer 知道成功后才清空并收起。
-  const createTaskDraft = useCallback((input: { title: string; desc: string }): Promise<boolean> => {
+  const createTaskDraft = useCallback((input: { title: string; desc: string; attachments?: Attachment[] }): Promise<boolean> => {
     if (taskCreating) return Promise.resolve(false);
     setTaskCreating(true);
     setTaskCreateError(null);
     return createTask(token, slug, {
       title: input.title,
       ...(input.desc === "" ? {} : { desc: input.desc }),
+      ...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
     })
       .then((task) => {
         setTasks((current) => current.some((item) => item.id === task.id) ? current : [task, ...current]);
@@ -3789,6 +3839,7 @@ export function ChannelPage({
               onReview={reviewTask}
               onCreateTask={createTaskDraft}
               identities={channelIdentities}
+              onUploadAttachment={canWrite ? (file) => uploadAttachment(token, slug, file) : undefined}
             />
           )}
           {activePanel === "agents" && (
