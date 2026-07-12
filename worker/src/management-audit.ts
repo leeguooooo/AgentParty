@@ -27,6 +27,7 @@ export type ManagementAuditAction =
   | "channel.webhook.redeliver"
   | "channel.archive"
   | "channel.identity.erase"
+  | "channel.export"
   | "membership.set";
 
 export interface ManagementAuditActor {
