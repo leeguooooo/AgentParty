@@ -56,7 +56,7 @@ describe("deployment metadata script", () => {
     let calls = 0;
     const fetcher = async () => {
       calls += 1;
-      const body = calls <= 20
+      const body = calls <= 45
         ? { ok: true, ...metadata, commit: "f".repeat(40) }
         : { ok: true, ...metadata };
       return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
@@ -65,7 +65,7 @@ describe("deployment metadata script", () => {
     await expect(verifyDeploymentMetadata("https://example.test", metadata, fetcher, {
       sleep: async () => {},
     })).resolves.toEqual(metadata);
-    expect(calls).toBe(21);
+    expect(calls).toBe(46);
   });
 
   it("verifies prod and xdream against one expected build", async () => {

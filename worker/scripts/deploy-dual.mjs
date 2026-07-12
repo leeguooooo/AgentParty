@@ -54,7 +54,7 @@ async function deployTarget(name) {
   if (!target) throw new Error(`unknown deploy target: ${name}`);
 
   console.error(`\n==> Deploying ${name} with ${target.profile} (${target.config})`);
-  const env = { WRANGLER_PROFILE: target.profile };
+  const env = { WRANGLER_PROFILE: target.profile, CI: "1" };
   run("wrangler-accounts", ["--profile", target.profile, "d1", "migrations", "apply", target.database, "--remote", "--config", target.config], { env });
   run("node", ["scripts/verify-remote-schema.mjs"], {
     env: {

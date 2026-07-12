@@ -54,4 +54,8 @@ describe("desktop pairing deploy smoke", () => {
     expect(pairingSmoke).toBeGreaterThan(deploy);
     expect(optionalAuthenticatedSmoke).toBeGreaterThan(pairingSmoke);
   });
+
+  test("runs Wrangler noninteractively so unattended dual deploys cannot pause for setup prompts", () => {
+    expect(dualDeploy).toContain('CI: "1"');
+  });
 });
