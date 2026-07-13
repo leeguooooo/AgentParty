@@ -104,6 +104,22 @@ describe("watch attach 上报 wake_kind=watch (#440)", () => {
     expect(o.lines.some((l) => l.includes("wake up"))).toBe(true);
   });
 
+  test("advertise 永不返回也不阻塞后续 @", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(0, "me"));
+      sock.send(msgFrame(1, "wake through stalled advertise", { mentions: ["me"] }));
+    });
+
+    const o = opts({
+      server: server.url,
+      advertise: () => new Promise<void>(() => {}),
+    });
+
+    expect(await runWatch(o)).toBe(0);
+    expect(o.lines.some((l) => l.includes("wake through stalled advertise"))).toBe(true);
+  });
+
   test("advertiseWatchWake 发 wake.kind=watch + residency=supervised，且不谎称已验证", async () => {
     let captured: Record<string, unknown> | null = null;
     api = Bun.serve({

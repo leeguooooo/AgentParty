@@ -270,7 +270,9 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         if (!advertised) {
           advertised = true;
           try {
-            await o.advertise?.();
+            // 上报不能反过来阻塞监听：REST 请求若卡住，welcome 后的 @ 仍必须立刻进入主循环。
+            // 同步抛错和异步拒绝都按 best-effort 静默处理。
+            void o.advertise?.().catch(() => {});
           } catch {
             /* best-effort presence：失败静默，不碰 stdout/stderr（保 --json 帧契约与 stderr 洁净） */
           }
