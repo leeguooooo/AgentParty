@@ -8,6 +8,8 @@ export type ManagementAuditAction =
   | "token.issue"
   | "token.revoke"
   | "agent.nickname.update"
+  | "agent.reception.pause"
+  | "agent.reception.resume"
   | "channel.create"
   | "channel.permissions.update"
   | "channel.visibility.update"
@@ -126,6 +128,12 @@ function safeMetadata(action: ManagementAuditAction, input: unknown): Record<str
   }
   if (action === "channel.guard.reset") {
     return metadata.guard === "loop" || metadata.guard === "workflow" ? { guard: metadata.guard } : {};
+  }
+  if (action === "agent.reception.pause") {
+    const resumeAt = metadata.resume_at;
+    return resumeAt === null || (typeof resumeAt === "number" && Number.isSafeInteger(resumeAt) && resumeAt > 0)
+      ? { resume_at: resumeAt }
+      : {};
   }
   if (action === "channel.identity.erase") {
     // GDPR 硬擦除（#421）：只留各表命中数（纯数字，无内容），供合规追溯「删了多少行」。
