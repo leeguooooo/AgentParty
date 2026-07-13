@@ -166,7 +166,7 @@ describe("formatMsg strips terminal control chars (#372 security)", () => {
     const out = formatMsg(msgFrame({ body: `real${CR}${ESC}[2Kfake` }));
     expect(out).not.toContain(CR);
     expect(out).not.toContain(ESC);
-    expect(out).toBe("[7] agent-a(agent owner=team-a): real[2Kfake");
+    expect(out).toBe("[7] agent-a(agent owner=team-a): realfake");
   });
 
   test("preserves legitimate newlines (multi-line body) and tabs", () => {
