@@ -62,6 +62,7 @@ export function evaluateReviewAck({
   const codeRabbitReviews = reviews.filter(
     (review) =>
       review.commit_id === headSha &&
+      isBot(review.user) &&
       /coderabbit/iu.test(review.user?.login ?? "") &&
       review.state !== "PENDING" &&
       review.state !== "DISMISSED",
@@ -82,6 +83,13 @@ export function evaluateReviewAck({
     ...prAgentArtifacts.map(commentTime),
     ...codeRabbitReviews.map(reviewTime),
   ].filter((time) => time > 0);
+  if (botArtifactTimes.length === 0) {
+    return {
+      ok: false,
+      code: "missing_bot_review",
+      description: "当前 head 尚无任何 bot review，无法判定 ack",
+    };
+  }
   const latestBotReviewAt = botArtifactTimes.length > 0 ? Math.max(...botArtifactTimes) : 0;
 
   const humanReviews = reviews.filter(

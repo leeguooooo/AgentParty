@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { evaluateReviewAck } from "./review-ack-gate.mjs";
+import { evaluateReviewAck, type ReviewAckInput } from "./review-ack-gate.mjs";
 
 const headSha = "abc123";
 const user = (login: string, type: "User" | "Bot" = "User") => ({ login, type });
@@ -20,7 +20,7 @@ const prAgentGuide = {
   updated_at: "2026-07-13T10:01:00Z",
 };
 
-function evaluate(over: Record<string, unknown> = {}) {
+function evaluate(over: Partial<ReviewAckInput> = {}) {
   return evaluateReviewAck({
     headSha,
     reviews: [codeRabbitReview],
@@ -41,6 +41,8 @@ describe("review-ack ordering gate (#460)", () => {
     expect(workflow).toContain('workflows: ["PR Agent (qwen · soft-gate)"]');
     expect(workflow).toContain("checks: read");
     expect(workflow).toContain("statuses: write");
+    expect(workflow).toContain("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0");
+    expect(workflow).toContain("persist-credentials: false");
     expect(workflow).toContain("run: node scripts/review-ack-gate.mjs");
   });
 
@@ -85,6 +87,26 @@ describe("review-ack ordering gate (#460)", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.code).toBe("waiting_coderabbit");
+  });
+
+  test("rejects a human reviewer whose login only looks like CodeRabbit", () => {
+    const result = evaluate({
+      reviews: [{ ...codeRabbitReview, user: user("coderabbit-fan", "User") }],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("waiting_coderabbit");
+  });
+
+  test("never accepts an ack when no bot review artifact exists", () => {
+    const result = evaluate({
+      requireCodeRabbit: false,
+      reviews: [],
+      comments: [
+        { user: user("maintainer"), body: "review-ack: no bot review", created_at: "2026-07-13T10:03:00Z" },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("missing_bot_review");
   });
 
   test("waits for the current-head pr_agent workflow to finish", () => {

@@ -38,7 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: 评估 ack 并给 PR head SHA 发 review-ack commit status
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
