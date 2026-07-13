@@ -32,13 +32,18 @@ beforeEach(() => {
 });
 
 describe("pending watch-token join request storage", () => {
-  test("keeps only slug and TTL in the pending marker", () => {
+  test("keeps the slug, application note, and TTL without copying the watch credential", () => {
     session.setItem("ap_share_token", "ap_watch_secret");
-    savePendingJoinRequest({ slug: "private-room" }, 1_000);
+    savePendingJoinRequest({ slug: "private-room", note: "  release testing  " }, 1_000);
 
-    expect(readPendingJoinRequest(1_001)).toEqual({ slug: "private-room", expiresAt: 901_000 });
-    expect(session.getItem("ap_pending_join_request")).toBe('{"slug":"private-room","expiresAt":901000}');
+    expect(readPendingJoinRequest(1_001)).toEqual({ slug: "private-room", note: "release testing", expiresAt: 901_000 });
+    expect(session.getItem("ap_pending_join_request")).toBe('{"slug":"private-room","note":"release testing","expiresAt":901000}');
     expect(session.getItem("ap_pending_join_request")).not.toContain("ap_watch_secret");
+  });
+
+  test("reads legacy pending markers as an empty optional note", () => {
+    session.setItem("ap_pending_join_request", '{"slug":"private-room","expiresAt":901000}');
+    expect(readPendingJoinRequest(1_001)).toEqual({ slug: "private-room", note: "", expiresAt: 901_000 });
   });
 
   test("drops malformed and expired pending values", () => {
@@ -48,6 +53,8 @@ describe("pending watch-token join request storage", () => {
 
     savePendingJoinRequest({ slug: "valid-room" }, 1_000);
     expect(readPendingJoinRequest(901_001)).toBeNull();
+
+    expect(() => savePendingJoinRequest({ slug: "valid-room", note: "x".repeat(2001) }, 1_000)).toThrow();
   });
 
   test("clearing the marker leaves the existing share credential alone", () => {

@@ -125,12 +125,12 @@ test("uses a temporary human credential for requests while ChannelPage keeps the
   expect(latestChannelProps?.shareMode).toBe(true);
 
   await act(async () => {
-    await (latestChannelProps?.onRequestJoin as () => Promise<void>)();
+    await (latestChannelProps?.onRequestJoin as (note: string) => Promise<void>)("  I can help test releases  ");
   });
 
   expect(joinPosts).toEqual([{
     authorization: "Bearer ap_human_access",
-    body: { watch_token: "ap_watch_secret" },
+    body: { watch_token: "ap_watch_secret", note: "I can help test releases" },
     url: "/api/channels/private-room/join-requests",
   }]);
   expect(latestChannelProps?.token).toBe("ap_watch_secret");
@@ -160,7 +160,7 @@ test("uses TokenGate and auto-submits after pasted human login when no human ses
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  await act(async () => { await (latestChannelProps?.onRequestJoin as () => Promise<void>)(); });
+  await act(async () => { await (latestChannelProps?.onRequestJoin as (note: string) => Promise<void>)("Need access after login"); });
 
   const input = renderer!.root.findByProps({ id: "ap-token" });
   await act(async () => input.props.onChange({ target: { value: "ap_pasted_human" } }));
@@ -170,7 +170,7 @@ test("uses TokenGate and auto-submits after pasted human login when no human ses
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  expect(joinPosts).toEqual([{ authorization: "Bearer ap_pasted_human", body: { watch_token: "ap_watch_secret" }, url: "/api/channels/private-room/join-requests" }]);
+  expect(joinPosts).toEqual([{ authorization: "Bearer ap_pasted_human", body: { watch_token: "ap_watch_secret", note: "Need access after login" }, url: "/api/channels/private-room/join-requests" }]);
   expect(localStorage.getItem("ap_token")).toBe("ap_pasted_human");
   expect([...Array(localStorage.length)].map((_, i) => localStorage.getItem(localStorage.key(i)!)).join("|")).not.toContain("ap_watch_secret");
   expect(location.search).not.toContain("ap_watch_secret");
