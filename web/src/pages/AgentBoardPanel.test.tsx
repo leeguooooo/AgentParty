@@ -51,15 +51,18 @@ function render(locale: "en" | "zh", presenceList: PresenceEntry[], tasks: TaskR
   renderer = r;
   return r;
 }
-function allText(r: ReactTestRenderer): string {
+function treeText(node: unknown): string {
   const out: string[] = [];
   const walk = (node: unknown) => {
     if (typeof node === "string") out.push(node);
     else if (Array.isArray(node)) node.forEach(walk);
     else if (node !== null && typeof node === "object" && "children" in (node as Record<string, unknown>)) walk((node as { children: unknown }).children);
   };
-  walk(r.toJSON());
+  walk(node);
   return out.join(" ");
+}
+function allText(r: ReactTestRenderer): string {
+  return treeText(r.toJSON());
 }
 
 describe("AgentBoardPanel (#187)", () => {
@@ -71,7 +74,8 @@ describe("AgentBoardPanel (#187)", () => {
       task(5, null, "in_progress"), // 无 assignee 不计入任何 agent
       task(6, "alice", "done"), // done 不计入在手
     ];
-    const txt = allText(render("en", p, tasks));
+    const r = render("en", p, tasks);
+    const txt = allText(r);
     // alice：busy + 2 in progress + 1 queued
     expect(txt).toContain("alice");
     expect(txt).toContain("busy");
@@ -79,8 +83,19 @@ describe("AgentBoardPanel (#187)", () => {
     // bob：live=false → offline，且有 1 待审
     expect(txt).toContain("bob");
     expect(txt).toContain("offline");
+    // 每个状态是一列，agent 卡片落在对应列，并直接展示真实任务进度。
+    const busyLane = r.root.findByProps({ "data-status": "busy" });
+    const offlineLane = r.root.findByProps({ "data-status": "offline" });
+    expect(treeText(busyLane)).toContain("alice");
+    expect(treeText(busyLane)).toContain("t1");
+    expect(treeText(offlineLane)).toContain("bob");
+    expect(treeText(offlineLane)).toContain("t4");
+    expect(r.root.findAllByProps({ "data-status": "idle" })).toHaveLength(1);
+    expect(r.root.findAllByProps({ "data-status": "blocked" })).toHaveLength(1);
     // 无 assignee 的 task5 不产生「未命名」agent 行
     expect(txt).not.toContain("t5");
+    // 已完成任务不再属于在手工作。
+    expect(txt).not.toContain("t6");
   });
 
   test("empty when no agents and no assigned tasks", () => {
