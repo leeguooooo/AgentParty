@@ -106,6 +106,10 @@ function sanitizeBlockedError(error: string): string {
 // context file 里附带的最近频道消息条数上限（冷起的 runner 不用先跑 history 也有基本上下文）
 const RECENT_MAX = 20;
 const RECENT_BODY_MAX = 400;
+// 自动塞给模型的辅助正文预算（不含本次触发消息）。触发正文始终保留全文；charter/recent
+// 超出预算时显式标记，runner 可按需 `party charter/history` 补取，避免每次 wake 固定烧掉大段上下文（#436）。
+const WAKE_AUX_BODY_MAX = 8_000;
+const WAKE_CHARTER_BODY_MAX = 4_000;
 const RUNNER_SESSION_FILE = "wake-session.json";
 const RUNNER_LOG_FILE = "serve-runner.log";
 
@@ -249,6 +253,43 @@ function buildWakeContext(
   attachments?: WakeContextAttachment[],
 ) {
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
+  const rawCharter = charter?.charter ?? null;
+  const charterNotice = `\n… [charter truncated; run \`party charter ${channel}\`]`;
+  const boundedCharter = rawCharter === null
+    ? null
+    : rawCharter.length <= WAKE_CHARTER_BODY_MAX
+      ? rawCharter
+      : rawCharter.slice(0, WAKE_CHARTER_BODY_MAX - charterNotice.length) + charterNotice;
+  let recentBudget = WAKE_AUX_BODY_MAX - (boundedCharter?.length ?? 0);
+  let recentBodyChars = 0;
+  let recentBodyTruncated = false;
+  const boundedRecent: Array<{
+    seq: number;
+    sender: string;
+    kind: MsgFrame["kind"];
+    body: string;
+    attachments: ReturnType<typeof attachmentContextMetadata>[];
+    ts: number;
+  }> = [];
+  // 最近的消息最有用：从尾部向前装预算，最后再恢复时间顺序。
+  for (let i = recent.length - 1; i >= 0 && recentBudget > 0; i--) {
+    const message = recent[i]!;
+    const rawBody = message.kind === "message" ? message.body : (message.note ?? "");
+    const boundedBody = rawBody.slice(0, Math.min(RECENT_BODY_MAX, recentBudget));
+    recentBodyTruncated ||= boundedBody.length < rawBody.length;
+    recentBodyChars += boundedBody.length;
+    recentBudget -= boundedBody.length;
+    boundedRecent.push({
+      seq: message.seq,
+      sender: message.sender.name,
+      kind: message.kind,
+      body: boundedBody,
+      attachments: message.attachments?.map(attachmentContextMetadata) ?? [],
+      ts: message.ts,
+    });
+  }
+  boundedRecent.reverse();
+  recentBodyTruncated ||= boundedRecent.length < recent.length;
   return {
     channel,
     seq: frame.seq,
@@ -260,18 +301,24 @@ function buildWakeContext(
     mentions: frame.mentions,
     reply_to: frame.seq, // 回这条就 --reply-to 它
     self,
-    charter: charter?.charter ?? null,
+    charter: boundedCharter,
     charter_rev: charter?.charter_rev ?? 0,
     project_agent: projectAgent,
     cli_upgrade: cliUpgrade,
-    recent: recent.map((m) => ({
-      seq: m.seq,
-      sender: m.sender.name,
-      kind: m.kind,
-      body: (m.kind === "message" ? m.body : (m.note ?? "")).slice(0, RECENT_BODY_MAX),
-      attachments: m.attachments?.map(attachmentContextMetadata) ?? [],
-      ts: m.ts,
-    })),
+    recent: boundedRecent,
+    context_budget: {
+      policy: "auxiliary-body-chars-v1",
+      max_auxiliary_body_chars: WAKE_AUX_BODY_MAX,
+      auxiliary_body_chars: (boundedCharter?.length ?? 0) + recentBodyChars,
+      trigger_body_chars: body.length,
+      trigger_body_truncated: false,
+      charter_chars: boundedCharter?.length ?? 0,
+      charter_truncated: rawCharter !== null && boundedCharter !== rawCharter,
+      recent_body_chars: recentBodyChars,
+      recent_messages_included: boundedRecent.length,
+      recent_messages_available: recent.length,
+      recent_truncated: recentBodyTruncated,
+    },
     protocol_reminder: PROTOCOL_REMINDER,
   };
 }
