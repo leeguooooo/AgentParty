@@ -91,6 +91,31 @@ describe("ws client", () => {
     expect(conn.cursor).toBe(1);
   });
 
+  test("replayUnacked puts consumed standby frames back before newer queued frames", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(3));
+      sock.send(msgFrame(1, "standby wake"));
+      sock.send(msgFrame(2, "queued context"));
+      sock.send(msgFrame(3, "queued latest"));
+    });
+    conn = connect(server.url, "ap_tok", "dev", 0);
+    const it = conn.frames[Symbol.asyncIterator]();
+    await it.next(); // welcome
+    const consumed = (await it.next()).value as { type: "msg"; seq: number; body: string };
+    expect(consumed.body).toBe("standby wake");
+
+    // seq=2/3 还在 FrameQueue，只有已取走但未 ack 的 seq=1 应被重排；不得复制仍在队里的帧。
+    expect(conn.replayUnacked()).toBe(1);
+    const replay = (await it.next()).value as { type: "msg"; seq: number; body: string };
+    const second = (await it.next()).value as { type: "msg"; seq: number; body: string };
+    const third = (await it.next()).value as { type: "msg"; seq: number; body: string };
+    expect([replay.body, second.body, third.body]).toEqual(["standby wake", "queued context", "queued latest"]);
+
+    conn.ack(3);
+    expect(conn.replayUnacked()).toBe(0);
+  });
+
   test("dedups frames delivered by both broadcast and backfill", async () => {
     server = startMockServer((frame, sock) => {
       if (frame.type === "hello") {
