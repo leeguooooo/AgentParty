@@ -6249,18 +6249,52 @@ app.post("/api/channels/:slug/kick", async (c) => {
   return c.json({ ok: true });
 });
 
-// 人为暂停/恢复某 agent 的接待（issue #180）。授权口径同 kick：仅频道 moderator（房主 / legacy ap_）。
+type AgentReceptionController = "moderator" | "host";
+
+async function agentReceptionController(
+  db: D1Database,
+  slug: string,
+  identity: TokenIdentity,
+  channel: LoadedChannel,
+): Promise<AgentReceptionController | null> {
+  if (isChannelModerator(identity, channel)) return "moderator";
+  if (identity.kind !== "agent" || identity.role !== "agent") return null;
+  return (await loadAssignedRole(db, slug, identity)) === "host" ? "host" : null;
+}
+
+async function isActiveAgentReceptionTarget(db: D1Database, slug: string, name: string): Promise<boolean> {
+  const row = await db.prepare(
+    `SELECT 1 AS found
+       FROM tokens
+      WHERE name = ?
+        AND role = 'agent'
+        AND revoked_at IS NULL
+        AND (child_expires_at IS NULL OR child_expires_at > ?)
+        AND (channel_scope IS NULL OR channel_scope = ?)`,
+  )
+    .bind(name, Date.now(), slug)
+    .first<{ found: number }>();
+  return row !== null;
+}
+
+// 人为暂停/恢复某 agent 的接待（issue #180/#439）。房主 / legacy ap_ 保持原权限；频道 host agent
+// 也可在本频道止损，但只能控制有效且未被 scope 到其他频道的 agent token，不能借此管理人类。
 // 暂停后该 agent 被 @ 也不唤醒（webhook 不投、serve/watch 自我抑制），消息仍进历史；可带 resume_at 定时恢复。
 app.post("/api/channels/:slug/presence/:name/pause", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);
   if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
-  if (!isChannelModerator(c.get("identity"), channel)) {
-    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can pause an agent"), 403);
+  const identity = c.get("identity");
+  const controller = await agentReceptionController(c.env.DB, slug, identity, channel);
+  if (controller === null) {
+    return c.json(errorBody("forbidden", "only the channel owner, an ap_ moderator, or a host agent can pause an agent"), 403);
   }
   const name = c.req.param("name");
   if (!name || name.length > 256) {
     return c.json(errorBody("bad_request", "valid name required"), 400);
+  }
+  if (controller === "host" && !(await isActiveAgentReceptionTarget(c.env.DB, slug, name))) {
+    return c.json(errorBody("forbidden", "host agents can only pause an active agent in this channel"), 403);
   }
   const body = (await c.req.json().catch(() => null)) as { resume_at?: unknown } | null;
   const res = await fetchChannelDO(
@@ -6272,6 +6306,15 @@ app.post("/api/channels/:slug/presence/:name/pause", async (c) => {
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );
+  if (res.ok) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(identity),
+      action: "agent.reception.pause",
+      resource: `channel/${slug}/agents/${name}/reception`,
+      channel: slug,
+      metadata: { resume_at: body?.resume_at ?? null },
+    });
+  }
   return res;
 });
 
@@ -6279,12 +6322,17 @@ app.post("/api/channels/:slug/presence/:name/resume", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);
   if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
-  if (!isChannelModerator(c.get("identity"), channel)) {
-    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can resume an agent"), 403);
+  const identity = c.get("identity");
+  const controller = await agentReceptionController(c.env.DB, slug, identity, channel);
+  if (controller === null) {
+    return c.json(errorBody("forbidden", "only the channel owner, an ap_ moderator, or a host agent can resume an agent"), 403);
   }
   const name = c.req.param("name");
   if (!name || name.length > 256) {
     return c.json(errorBody("bad_request", "valid name required"), 400);
+  }
+  if (controller === "host" && !(await isActiveAgentReceptionTarget(c.env.DB, slug, name))) {
+    return c.json(errorBody("forbidden", "host agents can only resume an active agent in this channel"), 403);
   }
   const res = await fetchChannelDO(
     c.env,
@@ -6294,6 +6342,14 @@ app.post("/api/channels/:slug/presence/:name/resume", async (c) => {
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );
+  if (res.ok) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(identity),
+      action: "agent.reception.resume",
+      resource: `channel/${slug}/agents/${name}/reception`,
+      channel: slug,
+    });
+  }
   return res;
 });
 

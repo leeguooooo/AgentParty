@@ -59,6 +59,34 @@ async function bodiesInHistory(slug: string, token: string): Promise<string[]> {
   return body.messages.map((m) => m.body);
 }
 
+async function assignHost(slug: string, moderatorToken: string, name: string): Promise<void> {
+  const res = await api(`/api/channels/${slug}/roles/${encodeURIComponent(name)}`, moderatorToken, {
+    method: "PUT",
+    body: JSON.stringify({ role: "host" }),
+  });
+  if (!res.ok) throw new Error(`assign host failed: ${res.status} ${await res.text()}`);
+}
+
+async function managementAudit(slug: string, token: string): Promise<Array<{
+  actor_account: string | null;
+  actor_kind: string;
+  action: string;
+  resource: string;
+  channel: string | null;
+  metadata: Record<string, unknown>;
+}>> {
+  const res = await api(`/api/channels/${slug}/management-audit?limit=100`, token);
+  if (!res.ok) throw new Error(`management audit failed: ${res.status}`);
+  return ((await res.json()) as { audit: Array<{
+    actor_account: string | null;
+    actor_kind: string;
+    action: string;
+    resource: string;
+    channel: string | null;
+    metadata: Record<string, unknown>;
+  }> }).audit;
+}
+
 describe("暂停接待（issue #180）", () => {
   it("被暂停的 agent 被 @ 时不投 webhook（唤醒被抑制），但消息仍进历史", async () => {
     const { token } = await seedToken("agent");
@@ -141,6 +169,67 @@ describe("暂停接待（issue #180）", () => {
     expect(res.status).toBe(403);
     // 未真的暂停
     expect((await presenceOf(slug, token, target))?.paused).toBeUndefined();
+  });
+
+  it("频道 host agent 可暂停并恢复 agent，且两次止损操作都可审计（#439）", async () => {
+    const owner = await seedToken("agent");
+    const slug = await createChannel(owner.token);
+    const target = await seedToken("agent", uniq("runaway"), { channelScope: slug });
+    const hostAccount = `${uniq("host")}@example.com`;
+    const host = await seedToken("agent", uniq("host-agent"), { owner: hostAccount, channelScope: slug });
+    await assignHost(slug, owner.token, host.name);
+
+    const resumeAt = Date.now() + 60_000;
+    expect((await pause(slug, host.token, target.name, resumeAt)).status).toBe(200);
+    expect((await presenceOf(slug, owner.token, target.name))?.paused).toBe(true);
+    expect((await resume(slug, host.token, target.name)).status).toBe(200);
+    expect((await presenceOf(slug, owner.token, target.name))?.paused).toBeUndefined();
+
+    const audit = await managementAudit(slug, owner.token);
+    const resource = `channel/${slug}/agents/${target.name}/reception`;
+    expect(audit).toContainEqual(expect.objectContaining({
+      actor_account: hostAccount,
+      actor_kind: "agent",
+      action: "agent.reception.pause",
+      resource,
+      channel: slug,
+      metadata: { resume_at: resumeAt },
+    }));
+    expect(audit).toContainEqual(expect.objectContaining({
+      actor_account: hostAccount,
+      actor_kind: "agent",
+      action: "agent.reception.resume",
+      resource,
+      channel: slug,
+      metadata: {},
+    }));
+  });
+
+  it("host agent 只能控制有效 agent，不能暂停 human 或其他频道 scope 的 agent", async () => {
+    const owner = await seedToken("agent");
+    const slug = await createChannel(owner.token);
+    const host = await seedToken("agent", uniq("host-agent"), { owner: `${uniq("host")}@example.com`, channelScope: slug });
+    await assignHost(slug, owner.token, host.name);
+    const human = await seedToken("human", uniq("human-target"), { channelScope: slug });
+    const otherScoped = await seedToken("agent", uniq("other-agent"), { channelScope: uniq("other-channel") });
+
+    expect((await pause(slug, host.token, human.name)).status).toBe(403);
+    expect((await pause(slug, host.token, otherScoped.name)).status).toBe(403);
+    expect((await resume(slug, host.token, human.name)).status).toBe(403);
+    expect((await managementAudit(slug, owner.token)).filter((entry) => entry.action.startsWith("agent.reception."))).toHaveLength(0);
+  });
+
+  it("另一个频道的 host 角色不能跨频道暂停 agent", async () => {
+    const owner = await seedToken("agent");
+    const slug = await createChannel(owner.token);
+    const otherSlug = await createChannel(owner.token);
+    const hostAccount = `${uniq("host")}@example.com`;
+    const host = await seedToken("agent", uniq("host-agent"), { owner: hostAccount });
+    await assignHost(otherSlug, owner.token, host.name);
+    const target = await seedToken("agent", uniq("target"), { channelScope: slug });
+
+    expect((await pause(slug, host.token, target.name)).status).toBe(403);
+    expect((await presenceOf(slug, owner.token, target.name))?.paused).toBeUndefined();
   });
 
   it("resume_at 必须是未来的整数 epoch-ms，否则 400", async () => {
