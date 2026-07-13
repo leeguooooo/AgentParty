@@ -8,6 +8,8 @@ import {
   type GitRunner,
   run,
   runGitCommand,
+  sanitizeForTerminal,
+  spawnWithTimeout,
   terminateGitProcessTree,
 } from "../src/commands/worktree";
 
@@ -111,6 +113,7 @@ describe("classifyWorktrees", () => {
     };
     const rows = await classifyWorktrees(main, "main", failingGit);
     const mc = rows.find((r) => r.branch === "mc");
+    // 精确断言 unmerged；undefined / merged-dirty 都不能误放行。
     expect(mc?.status).toBe("unmerged");
   });
 
@@ -140,19 +143,43 @@ describe("git runner safety", () => {
     expect(childSignals).toEqual([]);
   });
 
-  test("disables interactive prompts and kills a hung git command on timeout", async () => {
+  test("disables interactive Git and credential prompts", async () => {
     const bin = join(root, "bin");
     git(root, "init", "--quiet", bin);
     const fakeGit = join(bin, "git");
-    writeFileSync(fakeGit, "#!/bin/sh\nprintf '%s|%s' \"$GIT_TERMINAL_PROMPT\" \"$GCM_INTERACTIVE\"\nexec sleep 0.2\n");
+    writeFileSync(fakeGit, "#!/bin/sh\nprintf '%s|%s' \"$GIT_TERMINAL_PROMPT\" \"$GCM_INTERACTIVE\"\n");
     chmodSync(fakeGit, 0o755);
     const result = await runGitCommand(["status"], main, {
-      timeoutMs: 30,
       env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
     });
-    expect(result.code).toBe(124);
+    expect(result.code).toBe(0);
     expect(result.stdout).toBe("0|Never");
-    expect(result.stderr).toContain("timed out");
+  });
+});
+
+describe("spawnWithTimeout", () => {
+  test("超时独立返回 124，不等命令自然结束（防子进程占管道导致卡死）", async () => {
+    const t0 = Date.now();
+    const r = await spawnWithTimeout(["sleep", "5"], root, 200);
+    expect(r.code).toBe(124);
+    expect(r.stderr).toContain("timed out");
+    // 远早于 5s 返回 = 超时确实独立于命令/管道，没干等。
+    expect(Date.now() - t0).toBeLessThan(4000);
+  });
+
+  test("命令按时结束时返回真实退出码与输出", async () => {
+    const r = await spawnWithTimeout(["sh", "-c", "printf ok"], root, 5000);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("ok");
+  });
+});
+
+describe("sanitizeForTerminal", () => {
+  test("剥掉 ANSI 转义与控制字符，保留可见文本/制表/换行", () => {
+    expect(sanitizeForTerminal("\x1b[31mred\x1b[0m")).toBe("red");
+    expect(sanitizeForTerminal("a\x07b\x00c\x7f")).toBe("abc");
+    expect(sanitizeForTerminal("real\rFAKE")).toBe("realFAKE");
+    expect(sanitizeForTerminal("keep\tnormal\nline")).toBe("keep\tnormal\nline");
   });
 });
 
@@ -220,7 +247,8 @@ describe("party worktree prune", () => {
     expect(existsSync(join(root, "agentparty-wt-un"))).toBe(true);
     const branches = git(main, "branch", "--format=%(refname:short)").split("\n");
     expect(branches).toContain("un");
-    expect(logs.join("\n")).toMatch(/skip\s+un\s+—/);
+    // 精确匹配 skip 行本身，避免被 "executing prune" 之类的普通文本误满足。
+    expect(logs.join("\n")).toMatch(/skip\s+un\s+—\s+unmerged/);
   });
 
   test("--yes skips unrelated manual worktree", async () => {

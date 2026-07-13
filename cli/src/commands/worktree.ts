@@ -90,12 +90,15 @@ export function terminateGitProcessTree(
   return "child";
 }
 
-export async function runGitCommand(
-  args: string[],
+// 超时必须独立返回：即使平台级终止失败、子进程仍握着管道，也不能让 prune 永久等下去。
+// 同时尽力终止整棵进程树，避免把 ssh/credential helper 留在后台。
+export async function spawnWithTimeout(
+  cmd: string[],
   cwd: string,
-  opts: { timeoutMs?: number; env?: Record<string, string | undefined> } = {},
+  timeoutMs: number,
+  env: Record<string, string | undefined> = process.env,
 ): Promise<GitResult> {
-  const proc = Bun.spawn(["git", ...args], {
+  const proc = Bun.spawn(cmd, {
     cwd,
     stdin: "ignore",
     stdout: "pipe",
@@ -103,36 +106,50 @@ export async function runGitCommand(
     // POSIX 上独立进程组可一次终止 git + ssh/credential helper；
     // Windows 保留父子关系，超时时交给 taskkill /T /F 清整棵进程树。
     detached: process.platform !== "win32",
-    env: {
-      ...process.env,
-      ...opts.env,
-      GIT_TERMINAL_PROMPT: "0",
-      GCM_INTERACTIVE: "Never",
-      GIT_SSH_COMMAND: opts.env?.GIT_SSH_COMMAND ?? process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes",
-    },
+    env,
   });
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try {
-      terminateGitProcessTree(proc);
-    } catch {
+  if (!proc.pid) return { code: 1, stdout: "", stderr: `failed to start: ${cmd.join(" ")}` };
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const work: Promise<GitResult> = (async () => {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { code, stdout, stderr };
+  })().catch((error): GitResult => ({ code: 1, stdout: "", stderr: String(error) }));
+  const timeout = new Promise<GitResult>((resolve) => {
+    timer = setTimeout(() => {
       try {
-        proc.kill("SIGKILL");
+        terminateGitProcessTree(proc);
       } catch {
-        /* 已退出：流读取会正常收尾 */
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* 已退出或终止失败：race 仍会立即返回，绝不依赖管道收尾。 */
+        }
       }
-    }
-  }, opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS);
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  clearTimeout(timer);
-  return timedOut
-    ? { code: 124, stdout, stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}git command timed out` }
-    : { code, stdout, stderr };
+      resolve({ code: 124, stdout: "", stderr: `timed out after ${timeoutMs}ms: ${cmd.join(" ")}` });
+    }, timeoutMs);
+  });
+  const result = await Promise.race([work, timeout]);
+  if (timer) clearTimeout(timer);
+  return result;
+}
+
+export async function runGitCommand(
+  args: string[],
+  cwd: string,
+  opts: { timeoutMs?: number; env?: Record<string, string | undefined> } = {},
+): Promise<GitResult> {
+  return spawnWithTimeout(["git", ...args], cwd, opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS, {
+    ...process.env,
+    ...opts.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GCM_INTERACTIVE: "Never",
+    GIT_SSH_COMMAND: opts.env?.GIT_SSH_COMMAND ?? process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes",
+  });
 }
 
 const defaultGit: GitRunner = (args, cwd) => runGitCommand(args, cwd);
@@ -216,7 +233,8 @@ export async function classifyWorktrees(
   }
   const raws = parseWorktreePorcelain(list.stdout);
 
-  // 当前工作树（cwd 所在的顶层）——绝不删自己脚下的。
+  // 当前工作树（cwd 所在的顶层）——绝不删自己脚下的。失败绝不能静默降级成 ""：
+  // 那样 w.path === "" 永不命中，当前 worktree 保护失效、可能被删。失败即抛（同 list 失败）。
   const top = await git(["rev-parse", "--show-toplevel"], root);
   if (top.code !== 0 || top.stdout.trim() === "") {
     throw new Error(`cannot protect current worktree: ${terminal(top.stderr.trim() || "git rev-parse failed")}`);
@@ -292,8 +310,13 @@ function detail(r: WorktreeRow): string {
   return "";
 }
 
+export function sanitizeForTerminal(input: string): string {
+  // 先移除常见 CSI 序列本体，再剥其余控制字符；否则只去 ESC 会把 "[31m" 留进输出。
+  return stripTerminalControls(input.replace(/\x1B\[[0-9;]*[A-Za-z]/g, ""));
+}
+
 function terminal(input: string): string {
-  return stripTerminalControls(input).replace(/[\r\n\t]+/g, " ");
+  return sanitizeForTerminal(input).replace(/[\r\n\t]+/g, " ");
 }
 
 async function runList(root: string, base: string, json: boolean, git: GitRunner): Promise<number> {
@@ -347,47 +370,52 @@ async function removeMergedClean(
   remote: boolean,
   git: GitRunner,
 ): Promise<boolean> {
-  const branch = action.row.branch!;
+  // raw 用于 git 参数，branch(sanitized) 只用于打印——绝不把『防注入显示串』喂给会真删/真推的
+  // git 命令，否则日后扩展 sanitize（如 Unicode 归一化）会悄悄改掉实际分支名（CodeRabbit #459）。
+  const raw = action.row.branch!;
+  const branch = terminal(raw);
   const rm = await git(["worktree", "remove", action.row.path], root);
   if (rm.code !== 0) {
-    console.error(`  ! ${terminal(branch)}: worktree remove failed, skipped — ${terminal(rm.stderr.trim())}`);
+    console.error(`  ! ${branch}: worktree remove failed, skipped — ${terminal(rm.stderr.trim())}`);
     return false;
   }
-  const del = await git(["branch", "-D", branch], root);
+  const del = await git(["branch", "-D", raw], root);
   if (del.code !== 0) {
-    console.error(`  ! ${terminal(branch)}: worktree removed but branch delete failed — ${terminal(del.stderr.trim())}`);
+    console.error(`  ! ${branch}: worktree removed but branch delete failed — ${terminal(del.stderr.trim())}`);
     return false;
   }
   if (remote) {
-    const pushDel = await git(["push", "origin", "--delete", branch], root);
+    const pushDel = await git(["push", "origin", "--delete", raw], root);
     if (pushDel.code !== 0) {
-      console.error(`  ! ${terminal(branch)}: remote branch delete failed — ${terminal(pushDel.stderr.trim())}`);
+      console.error(`  ! ${branch}: remote branch delete failed — ${terminal(pushDel.stderr.trim())}`);
       return false;
     }
   }
-  console.log(`  removed ${terminal(branch)} (merged-clean)`);
+  console.log(`  removed ${branch} (merged-clean)`);
   return true;
 }
 
 // merged-dirty：绝不 --force 丢活。先把未提交改动 commit + push 到 preserve/*，全部成功才删。
 // 任一步失败 → 保留 worktree，跳过并告警，宁可留着让人处理也不丢工作。
 async function preserveAndRemove(root: string, action: PruneAction, git: GitRunner): Promise<boolean> {
-  const branch = action.row.branch!;
+  // raw 喂 git，branch(sanitized) 只打印——同 removeMergedClean 的理由（CodeRabbit #459）。
+  const raw = action.row.branch!;
+  const branch = terminal(raw);
   const path = action.row.path;
   const add = await git(["-C", path, "add", "-A"], root);
   if (add.code !== 0) {
-    console.error(`  ! ${terminal(branch)}: git add failed, worktree preserved as-is — ${terminal(add.stderr.trim())}`);
+    console.error(`  ! ${branch}: git add failed, worktree preserved as-is — ${terminal(add.stderr.trim())}`);
     return false;
   }
-  const commit = await git(["-C", path, "commit", "-m", `wip: preserve ${branch} (#455)`], root);
+  const commit = await git(["-C", path, "commit", "-m", `wip: preserve ${raw} (#455)`], root);
   if (commit.code !== 0) {
-    console.error(`  ! ${terminal(branch)}: commit failed, worktree preserved as-is — ${terminal(commit.stderr.trim())}`);
+    console.error(`  ! ${branch}: commit failed, worktree preserved as-is — ${terminal(commit.stderr.trim())}`);
     return false;
   }
-  const push = await git(["-C", path, "push", "origin", `HEAD:preserve/${branch}`], root);
+  const push = await git(["-C", path, "push", "origin", `HEAD:preserve/${raw}`], root);
   if (push.code !== 0) {
     console.error(
-      `  ! ${terminal(branch)}: push to preserve/${terminal(branch)} failed, worktree preserved as-is — ${terminal(push.stderr.trim())}`,
+      `  ! ${branch}: push to preserve/${branch} failed, worktree preserved as-is — ${terminal(push.stderr.trim())}`,
     );
     return false;
   }
@@ -395,18 +423,18 @@ async function preserveAndRemove(root: string, action: PruneAction, git: GitRunn
   const rm = await git(["worktree", "remove", "--force", path], root);
   if (rm.code !== 0) {
     console.error(
-      `  ! ${terminal(branch)}: preserved to preserve/${terminal(branch)} but worktree remove failed — ${terminal(rm.stderr.trim())}`,
+      `  ! ${branch}: preserved to preserve/${branch} but worktree remove failed — ${terminal(rm.stderr.trim())}`,
     );
     return false;
   }
-  const del = await git(["branch", "-D", branch], root);
+  const del = await git(["branch", "-D", raw], root);
   if (del.code !== 0) {
     console.error(
-      `  ! ${terminal(branch)}: preserved + worktree removed but branch delete failed — ${terminal(del.stderr.trim())}`,
+      `  ! ${branch}: preserved + worktree removed but branch delete failed — ${terminal(del.stderr.trim())}`,
     );
     return false;
   }
-  console.log(`  preserved ${terminal(branch)} -> origin/preserve/${terminal(branch)}, then removed (merged-dirty)`);
+  console.log(`  preserved ${branch} -> origin/preserve/${branch}, then removed (merged-dirty)`);
   return true;
 }
 
