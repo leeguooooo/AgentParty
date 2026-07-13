@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { EXIT_ARCHIVED, type MsgFrame } from "@agentparty/shared";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  cleanupCodexCredentials,
   createBuiltinRunner,
   createSdkRunner,
   projectAgentChildName,
@@ -439,14 +440,20 @@ describe("builtin runner", () => {
     );
   });
 
-  test("copies codex auth.json into the isolated CODEX_HOME before running", async () => {
+  // issue #121: 长期 ChatGPT OAuth 凭据绝不能被复制进 runner 的 workdir/cwd（否则 agent 一句
+  // `git add -A` 就能把它推上远端）。修复：codex 直接共用真实 ~/.codex，workdir 里不落任何副本。
+  test("does not copy codex auth.json into the workdir; points CODEX_HOME at the real codex home (issue #121)", async () => {
     const { post } = postRecorder();
     const workdir = tempDir();
     const sourceDir = tempDir();
     const authSourceFile = join(sourceDir, "auth.json");
-    writeFileSync(authSourceFile, '{"token":"secret"}\n');
+    writeFileSync(authSourceFile, '{"tokens":{"access_token":"AT","refresh_token":"RT"}}\n');
+    const seen: { creds: string | null } = { creds: null };
     const runProcess: RunnerProcess = async (args, opts) => {
-      expect(opts.env.CODEX_HOME).toBe(join(workdir, ".codex"));
+      // 功能不能被修坏：子进程必须能从 $CODEX_HOME/auth.json 读到真实凭据。
+      const home = opts.env.CODEX_HOME!;
+      expect(home).toBe(sourceDir);
+      seen.creds = readFileSync(join(home, "auth.json"), "utf8");
       const out = args[args.indexOf("-o") + 1]!;
       writeFileSync(out, "ok\n");
       return { code: 0, stdout: `session id: ${uuid(3)}\n`, stderr: "" };
@@ -463,7 +470,23 @@ describe("builtin runner", () => {
       post,
     })(triggerFrame(3), runnerCtx());
 
-    expect(readFileSync(join(workdir, ".codex", "auth.json"), "utf8")).toBe('{"token":"secret"}\n');
+    // 凭据没有落进 workdir（无论 .codex 目录还是 auth.json 副本）
+    expect(existsSync(join(workdir, ".codex", "auth.json"))).toBe(false);
+    expect(existsSync(join(workdir, ".codex"))).toBe(false);
+    // 但子进程仍拿到了真实凭据 —— 功能没被修坏
+    expect(seen.creds).toBe('{"tokens":{"access_token":"AT","refresh_token":"RT"}}\n');
+  });
+
+  test("cleanupCodexCredentials removes legacy <workdir>/.codex copies left by older versions (issue #121)", () => {
+    const workdir = tempDir();
+    const other = tempDir();
+    mkdirSync(join(workdir, ".codex"), { recursive: true });
+    writeFileSync(join(workdir, ".codex", "auth.json"), '{"tokens":{"refresh_token":"RT"}}\n');
+
+    const removed = cleanupCodexCredentials([workdir, other]);
+
+    expect(removed).toEqual([join(workdir, ".codex")]);
+    expect(existsSync(join(workdir, ".codex"))).toBe(false);
   });
 
   test("claude cold-starts from json output and resumes the persisted session id", async () => {

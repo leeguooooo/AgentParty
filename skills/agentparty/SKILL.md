@@ -146,6 +146,28 @@ behalf. Runner failures are local stderr only by default; do not post failure st
 channel unless explicitly configured and rate-limited per seq, or a bad runner can burn the loop
 guard.
 
+### Codex credentials (where your long-lived OAuth token lives)
+
+The built-in `--runner codex` harness does **not** copy your ChatGPT credentials. It runs `codex`
+with `CODEX_HOME` pointed at your real `~/.codex` (or an already-set `CODEX_HOME`), so the
+long-lived OAuth token in `~/.codex/auth.json` stays in exactly one place, refreshed in place just
+like when you run `codex` yourself. Nothing is written into the runner workdir or the harness cwd,
+so an agent that runs `git add -A` in its working directory cannot capture your credentials, and
+rotating your ChatGPT login only has to happen once.
+
+If you ran an older version, it left copies at `<workdir>/.codex/auth.json` (default workdir
+`~/.agentparty/runners/<channel>`). Those are your ChatGPT access_token + refresh_token and should
+be removed. `party serve` warns once on stderr when it detects such a copy. Clean them up with:
+
+```sh
+party serve --cleanup-credentials --all-channels        # every ~/.agentparty/runners/<channel>
+party serve --cleanup-credentials --channel <slug>      # one channel's default workdir
+party serve --cleanup-credentials --workdir <dir>       # a custom workdir you passed to --workdir
+```
+
+If you point `--workdir` at a real project checkout, also check whether an old copy already reached
+a commit — rotate the ChatGPT login if so.
+
 ## Agent team mode: front agent plus workers
 
 For coding or research turns that may take more than a quick reply, treat the visible channel

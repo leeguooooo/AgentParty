@@ -5,15 +5,16 @@ import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type MsgFra
 import { maybeReexecUpgrade, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import {
   appendFileSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readAccount } from "../account";
 import { connect } from "../client";
@@ -183,7 +184,7 @@ export function writeContextFile(
   return path;
 }
 
-const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "profile", "profile-once", "profile-poll-interval"];
+const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "profile", "profile-once", "profile-poll-interval", "cleanup-credentials", "all-channels"];
 const HELP = `usage: party serve [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all]
        party serve --profile <owner>/<handle>
 
@@ -199,7 +200,16 @@ Options:
   --repo URL           clone into workdir/repo once, then git pull --ff-only before each wake
   --profile ref        run the reusable project-agent profile as one resident daemon across all invites
   --auto-upgrade       between wakes, if a newer party binary is on disk, re-exec it (issue #45)
-  --all                run for every non-self message, not only @mentions`;
+  --all                run for every non-self message, not only @mentions
+  --cleanup-credentials
+                       delete legacy <workdir>/.codex credential copies left by older versions,
+                       then exit. Scope: --workdir/--channel target, or --all-channels for every
+                       ~/.agentparty/runners/<channel>. See "codex credentials" below.
+
+The --runner codex harness NEVER copies your ChatGPT credentials. It runs codex with
+CODEX_HOME set to your real ~/.codex (or an already-set CODEX_HOME), so the long-lived OAuth
+token in ~/.codex/auth.json stays in one place — nothing lands in the runner workdir or the
+harness cwd, and an agent's \`git add\` can't leak it.`;
 
 export interface ServeOptions {
   server: string;
@@ -447,16 +457,71 @@ function parseClaudeJson(stdout: string): { sessionId: string | null; text: stri
   }
 }
 
+// 旧版本会把 ~/.codex/auth.json 复制进 <workdir>/.codex/auth.json。这个位置就是 codex harness 的
+// 默认 cwd（没有 --repo 时），agent 一句 `git add -A` 就能把 ChatGPT 的长期 OAuth 凭据推上远端。
+function legacyCodexAuthCopy(workdir: string): string {
+  return join(workdir, ".codex", "auth.json");
+}
+
+let warnedLegacyCodexCopy = false;
+function warnLegacyCodexCopy(workdir: string): void {
+  if (warnedLegacyCodexCopy) return;
+  if (!existsSync(legacyCodexAuthCopy(workdir))) return;
+  warnedLegacyCodexCopy = true;
+  console.error(
+    `party serve: 检测到旧版本遗留的 codex 凭据副本：${legacyCodexAuthCopy(workdir)}\n` +
+      `  这是你 ChatGPT 的长期 OAuth 凭据（access_token + refresh_token），落在 runner 的工作目录里，` +
+      `可能被 agent 的 \`git add\` 带进仓库。\n` +
+      `  新版已改为直接共用 ~/.codex，不再需要这份副本。清理：party serve --cleanup-credentials [--workdir <目录>] [--channel <频道>]`,
+  );
+}
+
+// 根本不复制：codex 只认 $CODEX_HOME/auth.json（默认 ~/.codex），没有单独指向凭据文件的环境变量
+// （codex 0.144 只有 -c/--config、-p/--profile，均不涉及 auth 路径）。给子进程凭据要么共用真实 home、
+// 要么在隔离 home 里放一份 auth.json。而 auth.json 里的 OAuth refresh_token 用一次就轮换——任何第二份
+// 副本一旦刷新，就会让服务端把 refresh_token 换掉，反过来作废包括 ~/.codex 在内的其它所有副本（等于把
+// 用户登出）。symlink 也救不了：codex 刷新时是「写临时文件 + rename」原子替换，rename 会把符号链接换成
+// 普通文件，真实 home 照样分叉。所以正解是共用真实 ~/.codex：凭据只有一份、原地刷新（与用户直接跑 codex
+// 完全一致），workdir 里不落任何长期凭据，agent 的 git add 无从泄露。已设置的 CODEX_HOME 保持尊重。
+function resolveCodexHome(authSourceFile?: string): string {
+  if (authSourceFile) return dirname(authSourceFile); // 测试注入点：把 auth 文件所在目录当作 home
+  const explicit = process.env.CODEX_HOME;
+  if (explicit && explicit.trim() !== "") return explicit;
+  return join(homedir(), ".codex");
+}
+
 function prepareCodexHome(workdir: string, authSourceFile?: string): Record<string, string | undefined> {
-  const codexHome = join(workdir, ".codex");
-  mkdirSync(codexHome, { recursive: true });
-  const authDest = join(codexHome, "auth.json");
-  const authSource = authSourceFile ?? join(homedir(), ".codex", "auth.json");
-  // 隔离 CODEX_HOME 会把登录态也隔离掉；只在目标缺失时拷贝一次，后续由该 home 自己刷新。
-  if (!existsSync(authDest) && existsSync(authSource)) {
-    copyFileSync(authSource, authDest);
+  warnLegacyCodexCopy(workdir);
+  return { ...process.env, CODEX_HOME: resolveCodexHome(authSourceFile) };
+}
+
+// 删除旧版本散落的 <workdir>/.codex 凭据目录。返回真正删掉的路径列表。
+export function cleanupCodexCredentials(workdirs: string[]): string[] {
+  const removed: string[] = [];
+  const seen = new Set<string>();
+  for (const wd of workdirs) {
+    const dir = join(wd, ".codex");
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    if (existsSync(dir)) {
+      rmSync(dir, { recursive: true, force: true });
+      removed.push(dir);
+    }
   }
-  return { ...process.env, CODEX_HOME: codexHome };
+  return removed;
+}
+
+// 默认 runner 根目录下的每个频道 workdir：~/.agentparty/runners/<channel>
+export function defaultRunnerWorkdirs(): string[] {
+  const root = join(homedir(), ".agentparty", "runners");
+  if (!existsSync(root)) return [];
+  try {
+    return readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => join(root, e.name));
+  } catch {
+    return [];
+  }
 }
 
 async function ensureRepo(
@@ -1185,7 +1250,30 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "auto-upgrade", "profile-once"] });
+  const { positionals, flags } = parseArgs(argv, {
+    booleans: ["all", "auto-upgrade", "profile-once", "cleanup-credentials", "all-channels"],
+  });
+  if (flags["cleanup-credentials"] === true) {
+    const targets: string[] = [];
+    if (flags["all-channels"] === true) targets.push(...defaultRunnerWorkdirs());
+    const explicitWorkdir = str(flags.workdir);
+    if (explicitWorkdir) targets.push(expandHomePath(explicitWorkdir));
+    const channel = resolveChannel(str(flags.channel) ?? positionals[0]);
+    if (channel && isSlug(channel)) targets.push(join(homedir(), ".agentparty", "runners", channel));
+    if (targets.length === 0) {
+      console.error(
+        "party serve --cleanup-credentials: pass --all-channels, --channel <slug>, or --workdir <dir> to say what to clean",
+      );
+      return 1;
+    }
+    const removed = cleanupCodexCredentials(targets);
+    if (removed.length === 0) {
+      console.log("party serve: no legacy codex credential copies found");
+    } else {
+      for (const dir of removed) console.log(`party serve: removed legacy codex credentials at ${dir}`);
+    }
+    return 0;
+  }
   const auth = await resolveAuthDetailed();
   if (!auth.server || !auth.token) {
     console.error("no config, run: party login or party init --server URL --token T");
