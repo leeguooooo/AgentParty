@@ -184,6 +184,7 @@ export async function runReviewAckGate(env, dependencies = { githubJson, postSta
   const dryRun = env.DRY_RUN === "true";
   let pr = env.PR;
   let knownHeadSha = env.KNOWN_HEAD_SHA ?? env.WORKFLOW_HEAD_SHA;
+  let resolvedPull;
   let redHeadSha;
   const markRed = async (sha, description) => {
     if (dryRun) return;
@@ -192,6 +193,18 @@ export async function runReviewAckGate(env, dependencies = { githubJson, postSta
   };
 
   try {
+    // issue_comment 没有 head SHA。先走 pull API；若它瞬时失败，再从 Git pull ref 独立解析，
+    // 让 gate 仍能在后续任何评估请求前把同一 head 的旧 success 置红。
+    if (!knownHeadSha && pr) {
+      try {
+        resolvedPull = await dependencies.githubJson(`/repos/${repo}/pulls/${pr}`, token);
+        knownHeadSha = resolvedPull.head?.sha;
+      } catch {
+        const ref = await dependencies.githubJson(`/repos/${repo}/git/ref/pull/${pr}/head`, token);
+        knownHeadSha = ref.object?.sha;
+      }
+      if (!knownHeadSha) throw new Error(`cannot resolve PR #${pr} head SHA`);
+    }
     // pull_request/review 与 workflow_run 事件都已携带 head SHA：在任何解析 API 请求前先置红，
     // 即使反查 PR 或读取 pull 失败，也不能让同一 SHA 上旧的 success 原样残留。
     if (knownHeadSha) {
@@ -203,7 +216,7 @@ export async function runReviewAckGate(env, dependencies = { githubJson, postSta
       const pulls = await dependencies.githubJson(`/repos/${repo}/commits/${workflowHeadSha}/pulls`, token);
       pr = selectWorkflowPullNumber(workflowHeadSha, pulls);
     }
-    const pull = await dependencies.githubJson(`/repos/${repo}/pulls/${pr}`, token);
+    const pull = resolvedPull ?? await dependencies.githubJson(`/repos/${repo}/pulls/${pr}`, token);
     const headSha = pull.head?.sha;
     if (!headSha) throw new Error(`cannot resolve PR #${pr} head SHA`);
     if (knownHeadSha && knownHeadSha !== headSha) {

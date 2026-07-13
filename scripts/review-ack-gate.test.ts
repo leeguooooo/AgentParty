@@ -60,8 +60,10 @@ describe("review-ack ordering gate (#460)", () => {
     expect(workflow).toContain("persist-credentials: false");
     expect(workflow).toContain("run: node scripts/review-ack-gate.mjs");
     expect(workflow).toContain("WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}");
-    expect(workflow).toContain("KNOWN_HEAD_SHA: ${{ steps.target.outputs.head_sha }}");
-    expect(workflow).toContain('gh api "repos/$REPO/pulls/$PR" --jq \'.head.sha\'');
+    expect(workflow).toContain(
+      "KNOWN_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}",
+    );
+    expect(workflow).not.toContain("id: target");
     expect(workflow).toContain("github.event.workflow_run.event == 'pull_request'");
     expect(workflow).not.toContain("workflow_run.pull_requests[0]");
   });
@@ -114,6 +116,35 @@ describe("review-ack ordering gate (#460)", () => {
       ),
     ).rejects.toThrow("simulated pull lookup failure");
     expect(statusCalls.length).toBeGreaterThanOrEqual(1);
+    expect(statusCalls[0]).toEqual({
+      sha: headSha,
+      ok: false,
+      description: "正在解析 PR 并核验当前 head 的 bot review 与人工 ack",
+    });
+  });
+
+  test("issue_comment falls back to the pull ref and marks red before pull lookup fails", async () => {
+    const statusCalls: Array<{ sha: string; ok: boolean; description: string }> = [];
+    let pullLookups = 0;
+    await expect(
+      runReviewAckGate(
+        { REPO: "owner/repo", GH_TOKEN: "token", PR: "42" },
+        {
+          githubJson: async (path) => {
+            if (path.endsWith("/pulls/42")) {
+              pullLookups += 1;
+              throw new Error("simulated pull lookup failure");
+            }
+            if (path.endsWith("/git/ref/pull/42/head")) return { object: { sha: headSha } };
+            throw new Error(`unexpected path ${path}`);
+          },
+          postStatus: async (_repo, sha, _token, result) => {
+            statusCalls.push({ sha, ok: result.ok, description: result.description });
+          },
+        },
+      ),
+    ).rejects.toThrow("simulated pull lookup failure");
+    expect(pullLookups).toBe(2);
     expect(statusCalls[0]).toEqual({
       sha: headSha,
       ok: false,
