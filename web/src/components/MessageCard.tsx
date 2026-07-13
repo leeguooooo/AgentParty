@@ -1,6 +1,6 @@
 // 消息渲染：message → doodle 卡片外壳 + mono 元信息 + markdown 正文；
 // status → 时间线分隔条（spec §9 第 2 块）。
-import type { AgentContext, MsgFrame, PresenceEntry, ReadCursor, Sender } from "@agentparty/shared";
+import type { AgentContext, ChannelRoleAssignment, MsgFrame, PresenceEntry, ReadCursor, Sender } from "@agentparty/shared";
 import { memo, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
@@ -45,6 +45,8 @@ interface Props {
   onEditSave(): void;
   // #274：name → presence 条目（Channel 的 state.presence 原样传下来），悬停发送者名/@提及展示实时状态。
   presence?: Record<string, PresenceEntry>;
+  // #448：频道公开分工（role/responsibility）。只展示频道内已公开的信息，不把账号私有 profile prompt 塞进消息。
+  agentRoles?: Record<string, ChannelRoleAssignment>;
   // 频道决策协议（#284）：人类/moderator 是否可对本条 decision_request 拍板 + 回调。
   canRespondDecision?: boolean;
   decisionBusy?: boolean;
@@ -123,6 +125,21 @@ export function presenceTitleBits(entry: PresenceEntry | undefined): string[] {
   ].filter((part): part is string => part !== null);
 }
 
+/** #448：发送者/@ 的悬停信息补齐频道公开职责，以及 agent 当前主动上报的 note。 */
+export function agentInfoTitleBits(
+  entry: PresenceEntry | undefined,
+  assignment: ChannelRoleAssignment | undefined,
+): string[] {
+  const responsibility = assignment?.responsibility?.trim() ?? "";
+  const note = entry?.note?.trim() ?? "";
+  return [
+    assignment !== undefined ? `role: ${assignment.role}` : entry?.role ? `role: ${entry.role}` : null,
+    responsibility !== "" ? `responsibility: ${responsibility}` : null,
+    note !== "" ? `note: ${note}` : null,
+    ...presenceTitleBits(entry),
+  ].filter((part): part is string => part !== null);
+}
+
 // memo 化：主输入框每次按键都会重渲染 Channel（draft 是顶层 state），中文 IME 尤其密集。
 // 卡片的所有 props（msg / 各 useCallback 回调 / useMemo 出来的 identityDisplay·receipts /
 // 逐条标量）在 draft-only 重渲染时引用稳定，浅比较即可跳过整窗口卡片的重渲染，消除输入卡顿
@@ -150,6 +167,7 @@ function MessageCardImpl({
   onEditCancel,
   onEditSave,
   presence,
+  agentRoles,
   canRespondDecision,
   decisionBusy,
   onDecisionRespond,
@@ -189,7 +207,7 @@ function MessageCardImpl({
     lineage ? `team: ${lineage.team_id}` : null,
     lineage ? `depth: ${lineage.depth}` : null,
     lineage?.expires_at ? `expires: ${fmtTime(lineage.expires_at)}` : null,
-    ...presenceTitleBits(presence?.[msg.sender.name]),
+    ...agentInfoTitleBits(presence?.[msg.sender.name], agentRoles?.[msg.sender.name]),
   ]
     .filter((part): part is string => part !== null)
     .join("\n");
@@ -416,7 +434,7 @@ function MessageCardImpl({
           // #274：@提及悬停也能看到该名字的实时状态；原始名与显示名不同时保留 @原名防冒充锚点。
           const mentionTitle = [
             m === displayForIdentity(m, identityDisplay) ? null : `@${m}`,
-            ...presenceTitleBits(presence?.[m]),
+            ...agentInfoTitleBits(presence?.[m], agentRoles?.[m]),
           ]
             .filter((part): part is string => part !== null)
             .join("\n");
