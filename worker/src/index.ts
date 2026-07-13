@@ -6259,6 +6259,7 @@ async function agentReceptionController(
 ): Promise<AgentReceptionController | null> {
   if (isChannelModerator(identity, channel)) return "moderator";
   if (identity.kind !== "agent" || identity.role !== "agent") return null;
+  if (identity.channel_scope != null && identity.channel_scope !== slug) return null;
   return (await loadAssignedRole(db, slug, identity)) === "host" ? "host" : null;
 }
 

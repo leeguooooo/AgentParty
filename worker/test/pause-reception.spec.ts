@@ -205,27 +205,29 @@ describe("暂停接待（issue #180）", () => {
     }));
   });
 
-  it("host agent 只能控制有效 agent，不能暂停 human 或其他频道 scope 的 agent", async () => {
+  it("host agent 只能控制有效 agent，不能暂停 human、过期或其他频道 scope 的 agent", async () => {
     const owner = await seedToken("agent");
     const slug = await createChannel(owner.token);
     const host = await seedToken("agent", uniq("host-agent"), { owner: `${uniq("host")}@example.com`, channelScope: slug });
     await assignHost(slug, owner.token, host.name);
     const human = await seedToken("human", uniq("human-target"), { channelScope: slug });
+    const expired = await seedToken("agent", uniq("expired-agent"), { channelScope: slug, childExpiresAt: Date.now() - 1_000 });
     const otherScoped = await seedToken("agent", uniq("other-agent"), { channelScope: uniq("other-channel") });
 
     expect((await pause(slug, host.token, human.name)).status).toBe(403);
+    expect((await pause(slug, host.token, expired.name)).status).toBe(403);
     expect((await pause(slug, host.token, otherScoped.name)).status).toBe(403);
     expect((await resume(slug, host.token, human.name)).status).toBe(403);
     expect((await managementAudit(slug, owner.token)).filter((entry) => entry.action.startsWith("agent.reception."))).toHaveLength(0);
   });
 
-  it("另一个频道的 host 角色不能跨频道暂停 agent", async () => {
+  it("scope 在另一个频道的 token 即使被分配当前频道 host，也不能跨频道暂停 agent", async () => {
     const owner = await seedToken("agent");
     const slug = await createChannel(owner.token);
     const otherSlug = await createChannel(owner.token);
     const hostAccount = `${uniq("host")}@example.com`;
-    const host = await seedToken("agent", uniq("host-agent"), { owner: hostAccount });
-    await assignHost(otherSlug, owner.token, host.name);
+    const host = await seedToken("agent", uniq("host-agent"), { owner: hostAccount, channelScope: otherSlug });
+    await assignHost(slug, owner.token, host.name);
     const target = await seedToken("agent", uniq("target"), { channelScope: slug });
 
     expect((await pause(slug, host.token, target.name)).status).toBe(403);
