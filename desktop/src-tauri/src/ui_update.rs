@@ -1203,6 +1203,14 @@ mod tests {
     }
 
     #[test]
+    fn sha256_hex_matches_known_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
     fn verifies_manifest_signature_and_core_compatibility() {
         let bundle = archive(&[("index.html", b"ok", None), ("assets/app.js", b"js", None)]);
         let signed = signed_manifest(&bundle);
