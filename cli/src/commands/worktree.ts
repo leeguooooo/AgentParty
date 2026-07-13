@@ -181,9 +181,15 @@ export async function runGitCommand(
   opts: { timeoutMs?: number; env?: Record<string, string | undefined> } = {},
 ): Promise<GitResult> {
   const inheritedSshCommand = opts.env?.GIT_SSH_COMMAND ?? process.env.GIT_SSH_COMMAND ?? "ssh";
-  const sshCommand = /(?:^|\s)-o\s*BatchMode(?:=|\s+)/iu.test(inheritedSshCommand)
-    ? inheritedSshCommand
-    : `${inheritedSshCommand} -o BatchMode=yes`;
+  let foundBatchMode = false;
+  const normalizedSshCommand = inheritedSshCommand.replace(
+    /(^|\s)-o\s*BatchMode\s*(?:=\s*|\s+)(?:yes|no|ask)\b/giu,
+    (_match, leading: string) => {
+      foundBatchMode = true;
+      return `${leading}-o BatchMode=yes`;
+    },
+  );
+  const sshCommand = foundBatchMode ? normalizedSshCommand : `${inheritedSshCommand} -o BatchMode=yes`;
   const env: Record<string, string | undefined> = {
     ...process.env,
     ...opts.env,
