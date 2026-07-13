@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useT } from "../i18n/useT";
+import { JOIN_REQUEST_NOTE_MAX_LENGTH } from "../lib/joinRequestPending";
 import type { AuthProviderConfig } from "../lib/oidc";
 import "../i18n/strings/Channel";
 
@@ -40,7 +41,7 @@ export function JoinRequestBanner({ state, idleText, reason, errorMessage, provi
         <textarea
           className="joinrequest-note-input"
           value={note}
-          maxLength={2000}
+          maxLength={JOIN_REQUEST_NOTE_MAX_LENGTH}
           rows={2}
           placeholder={t("Channel.joinRequest.notePlaceholder")}
           onChange={(event) => setNote(event.target.value)}

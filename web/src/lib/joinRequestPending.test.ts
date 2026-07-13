@@ -46,6 +46,12 @@ describe("pending watch-token join request storage", () => {
     expect(readPendingJoinRequest(1_001)).toEqual({ slug: "private-room", note: "", expiresAt: 901_000 });
   });
 
+  test("rejects an explicit null note instead of treating it as a legacy missing field", () => {
+    session.setItem("ap_pending_join_request", '{"slug":"private-room","note":null,"expiresAt":901000}');
+    expect(readPendingJoinRequest(1_001)).toBeNull();
+    expect(session.getItem("ap_pending_join_request")).toBeNull();
+  });
+
   test("drops malformed and expired pending values", () => {
     session.setItem("ap_pending_join_request", '{"slug":"../bad","expiresAt":2000}');
     expect(readPendingJoinRequest()).toBeNull();
