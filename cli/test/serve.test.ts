@@ -418,9 +418,115 @@ describe("runServe", () => {
       expect(ctx).toMatchObject({ channel: "dev", seq: 9, self: "me", reply_to: 9 });
       expect(ctx.recent.map((m: { seq: number }) => m.seq)).toEqual([7, 8]);
       expect(ctx.recent[1].body).toHaveLength(400);
+      expect(ctx.context_budget).toMatchObject({
+        max_auxiliary_body_chars: 8000,
+        trigger_body_chars: 12,
+        trigger_body_truncated: false,
+        recent_messages_included: 2,
+        recent_messages_available: 2,
+        recent_truncated: true,
+      });
       expect(ctx.protocol_reminder).toContain("party history");
       expect(ctx.protocol_reminder).toContain("trellis");
       expect(ctx.protocol_reminder).toContain("不要触发项目自带的其它频道/工作流机制");
+    } finally {
+      unlinkSync(path);
+    }
+  });
+
+  test("wake context caps charter + recent bodies while preserving the full trigger", () => {
+    const triggerBody = "T".repeat(12_000);
+    const trigger = msgFrame(50, triggerBody, { mentions: ["me"] }) as unknown as MsgFrame;
+    const prior = Array.from({ length: 20 }, (_, index) =>
+      msgFrame(index + 1, String(index + 1).padStart(2, "0") + "x".repeat(498)) as unknown as MsgFrame,
+    );
+    const path = writeContextFile(
+      tempDir("ap-budget-"),
+      trigger,
+      "dev",
+      "me",
+      prior,
+      { charter: "C".repeat(8_000), charter_rev: 7, updated_at: null, updated_by: null },
+    );
+    try {
+      const ctx = JSON.parse(readFileSync(path, "utf8"));
+      expect(ctx.body).toBe(triggerBody); // 用户本次指令绝不为省 token 被裁掉
+      expect(ctx.charter).toHaveLength(4_000);
+      expect(ctx.charter).toEndWith("[charter truncated; run `party charter dev`]");
+      expect(ctx.recent.map((m: { seq: number }) => m.seq)).toEqual([11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+      expect(ctx.recent.reduce((sum: number, m: { body: string }) => sum + m.body.length, 0)).toBe(4_000);
+      expect(ctx.context_budget).toEqual({
+        policy: "auxiliary-body-chars-v1",
+        max_auxiliary_body_chars: 8_000,
+        auxiliary_body_chars: 8_000,
+        trigger_body_chars: 12_000,
+        trigger_body_truncated: false,
+        charter_chars: 4_000,
+        charter_truncated: true,
+        recent_body_chars: 4_000,
+        recent_messages_included: 10,
+        recent_messages_available: 20,
+        recent_truncated: true,
+      });
+    } finally {
+      unlinkSync(path);
+    }
+  });
+
+  test("wake context uses the final partial recent-message budget", () => {
+    const trigger = msgFrame(50, "full trigger", { mentions: ["me"] }) as unknown as MsgFrame;
+    const prior = Array.from({ length: 12 }, (_, index) =>
+      msgFrame(index + 1, `m${String(index + 1).padStart(2, "0")}` + "x".repeat(397)) as unknown as MsgFrame,
+    );
+    const path = writeContextFile(
+      tempDir("ap-budget-partial-"),
+      trigger,
+      "dev",
+      "me",
+      prior,
+      { charter: "C".repeat(3_999), charter_rev: 8, updated_at: null, updated_by: null },
+    );
+    try {
+      const ctx = JSON.parse(readFileSync(path, "utf8"));
+      expect(ctx.body).toBe("full trigger");
+      expect(ctx.recent.map((m: { seq: number }) => m.seq)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      expect(ctx.recent[0].body).toBe("m");
+      expect(ctx.context_budget).toMatchObject({
+        auxiliary_body_chars: 8_000,
+        charter_chars: 3_999,
+        recent_body_chars: 4_001,
+        recent_messages_included: 11,
+        recent_messages_available: 12,
+        recent_truncated: true,
+      });
+    } finally {
+      unlinkSync(path);
+    }
+  });
+
+  test("wake context truncates on Unicode code-point boundaries", () => {
+    const triggerBody = "🧭".repeat(10);
+    const trigger = msgFrame(50, triggerBody, { mentions: ["me"] }) as unknown as MsgFrame;
+    const path = writeContextFile(
+      tempDir("ap-budget-unicode-"),
+      trigger,
+      "dev",
+      "me",
+      [msgFrame(49, "😀".repeat(500)) as unknown as MsgFrame],
+      { charter: "🚀".repeat(5_000), charter_rev: 9, updated_at: null, updated_by: null },
+    );
+    try {
+      const ctx = JSON.parse(readFileSync(path, "utf8"));
+      expect(ctx.body).toBe(triggerBody);
+      expect(Array.from(ctx.charter)).toHaveLength(4_000);
+      expect(ctx.charter).toEndWith("[charter truncated; run `party charter dev`]");
+      expect(Array.from(ctx.recent[0].body)).toHaveLength(400);
+      expect(ctx.recent[0].body).toBe("😀".repeat(400));
+      expect(ctx.context_budget).toMatchObject({
+        trigger_body_chars: 10,
+        charter_chars: 4_000,
+        recent_body_chars: 400,
+      });
     } finally {
       unlinkSync(path);
     }

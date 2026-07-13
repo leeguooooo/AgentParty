@@ -106,6 +106,10 @@ function sanitizeBlockedError(error: string): string {
 // context file 里附带的最近频道消息条数上限（冷起的 runner 不用先跑 history 也有基本上下文）
 const RECENT_MAX = 20;
 const RECENT_BODY_MAX = 400;
+// 自动塞给模型的辅助正文预算（不含本次触发消息）。触发正文始终保留全文；charter/recent
+// 超出预算时显式标记，runner 可按需 `party charter/history` 补取，避免每次 wake 固定烧掉大段上下文（#436）。
+const WAKE_AUX_BODY_MAX = 8_000;
+const WAKE_CHARTER_BODY_MAX = 4_000;
 const RUNNER_SESSION_FILE = "wake-session.json";
 const RUNNER_LOG_FILE = "serve-runner.log";
 
@@ -234,6 +238,16 @@ function attachmentContextMetadata(attachment: Attachment): WakeContextAttachmen
   return { ...attachment, auth: "Bearer token required", local_path: null };
 }
 
+function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
+function truncateCodePoints(value: string, maxLength: number): string {
+  if (maxLength <= 0) return "";
+  const points = Array.from(value);
+  return points.length <= maxLength ? value : points.slice(0, maxLength).join("");
+}
+
 // 把一条 @mention 的完整上下文落成 JSON 文件，命令拿路径读——避开 env/stdin 的 shell quoting/注入，
 // 也让 runner 能一次拿全 channel/seq/sender/body/reply_to/recent/protocol_reminder（评审建议）。
 // recent = 触发消息之前、serve 在线期间看到的最近频道消息（含自己/未 @ 的闲聊，正文截断），
@@ -249,6 +263,49 @@ function buildWakeContext(
   attachments?: WakeContextAttachment[],
 ) {
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
+  const rawCharter = charter?.charter ?? null;
+  const charterNotice = `\n… [charter truncated; run \`party charter ${channel}\`]`;
+  const charterNoticeLength = codePointLength(charterNotice);
+  const boundedCharter = rawCharter === null
+    ? null
+    : codePointLength(rawCharter) <= WAKE_CHARTER_BODY_MAX
+      ? rawCharter
+      : charterNoticeLength >= WAKE_CHARTER_BODY_MAX
+        ? truncateCodePoints(charterNotice, WAKE_CHARTER_BODY_MAX)
+        : truncateCodePoints(rawCharter, WAKE_CHARTER_BODY_MAX - charterNoticeLength) + charterNotice;
+  const boundedCharterLength = boundedCharter === null ? 0 : codePointLength(boundedCharter);
+  let recentBudget = WAKE_AUX_BODY_MAX - boundedCharterLength;
+  let recentBodyChars = 0;
+  let recentBodyTruncated = false;
+  const boundedRecent: Array<{
+    seq: number;
+    sender: string;
+    kind: MsgFrame["kind"];
+    body: string;
+    attachments: ReturnType<typeof attachmentContextMetadata>[];
+    ts: number;
+  }> = [];
+  // 最近的消息最有用：从尾部向前装预算，最后再恢复时间顺序。
+  for (let i = recent.length - 1; i >= 0 && recentBudget > 0; i--) {
+    const message = recent[i]!;
+    const rawBody = message.kind === "message" ? message.body : (message.note ?? "");
+    const rawBodyLength = codePointLength(rawBody);
+    const boundedBody = truncateCodePoints(rawBody, Math.min(RECENT_BODY_MAX, recentBudget));
+    const boundedBodyLength = codePointLength(boundedBody);
+    recentBodyTruncated ||= boundedBodyLength < rawBodyLength;
+    recentBodyChars += boundedBodyLength;
+    recentBudget -= boundedBodyLength;
+    boundedRecent.push({
+      seq: message.seq,
+      sender: message.sender.name,
+      kind: message.kind,
+      body: boundedBody,
+      attachments: message.attachments?.map(attachmentContextMetadata) ?? [],
+      ts: message.ts,
+    });
+  }
+  boundedRecent.reverse();
+  recentBodyTruncated ||= boundedRecent.length < recent.length;
   return {
     channel,
     seq: frame.seq,
@@ -260,18 +317,24 @@ function buildWakeContext(
     mentions: frame.mentions,
     reply_to: frame.seq, // 回这条就 --reply-to 它
     self,
-    charter: charter?.charter ?? null,
+    charter: boundedCharter,
     charter_rev: charter?.charter_rev ?? 0,
     project_agent: projectAgent,
     cli_upgrade: cliUpgrade,
-    recent: recent.map((m) => ({
-      seq: m.seq,
-      sender: m.sender.name,
-      kind: m.kind,
-      body: (m.kind === "message" ? m.body : (m.note ?? "")).slice(0, RECENT_BODY_MAX),
-      attachments: m.attachments?.map(attachmentContextMetadata) ?? [],
-      ts: m.ts,
-    })),
+    recent: boundedRecent,
+    context_budget: {
+      policy: "auxiliary-body-chars-v1",
+      max_auxiliary_body_chars: WAKE_AUX_BODY_MAX,
+      auxiliary_body_chars: boundedCharterLength + recentBodyChars,
+      trigger_body_chars: codePointLength(body),
+      trigger_body_truncated: false,
+      charter_chars: boundedCharterLength,
+      charter_truncated: rawCharter !== null && boundedCharter !== rawCharter,
+      recent_body_chars: recentBodyChars,
+      recent_messages_included: boundedRecent.length,
+      recent_messages_available: recent.length,
+      recent_truncated: recentBodyTruncated,
+    },
     protocol_reminder: PROTOCOL_REMINDER,
   };
 }
