@@ -5,9 +5,10 @@ import { acquireInstanceLock } from "../instance-lock";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
 import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor, statePath } from "../config";
-import { resolveAuth } from "../oidc-cli";
+import { resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import { formatMsg } from "../format";
-import { fetchMe, fetchMessages, fetchRecentMessages, handleRestError } from "../rest";
+import { fetchMe, fetchMessages, fetchRecentMessages, handleRestError, postMessage } from "../rest";
+import { buildContext } from "./status";
 import { MAX_TIMEOUT_SEC, isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 import { jsonFrame, nowTs } from "../json";
 import {
@@ -105,6 +106,28 @@ export interface WatchOptions {
   lockDir?: string;
   /** 关掉单实例保护（逃生舱）。 */
   allowMultiple?: boolean;
+  // watch 挂上（连上 WS、开始监听）后声明自己「有 watch 唤醒层」的钩子；run() 注入真实实现，测试可省略/替换。
+  advertise?: () => Promise<void>;
+}
+
+// watch 一挂上（连上 WS、开始监听）就把 presence 标成带 watch 唤醒层：residency=supervised + wake.kind=watch。
+// 没这一步，agent 跑了 watch 但 presence.wake_kind 仍是 null → 服务端 / `party wake test` 对它恒判
+// 'no wake adapter'、presence 把挂着 watch 的 agent 判成假在线 / not listening（#440）。对照 serve 的
+// advertiseServeWake（residency=supervised + wake.kind=serve）——watch 同样是本地常驻 supervisor 持 WS，
+// wakeReachable 也把 serve/watch 一并按「持 WS 才可唤醒」处理，故 residency 用 supervised。
+// 自报=unverified（who 里显示 'wakeable unverified'）：只声明「存在 watch 唤醒层」，不谎称已验证——
+// 真验证仍靠 agent_resumed / ledger（#191②）。--once 单发也在 attach 时报一次，让服务端至少看得见。
+export async function advertiseWatchWake(auth: ResolvedAuthDetailed, channel: string): Promise<void> {
+  if (!auth.server || !auth.token) return;
+  await postMessage(auth.server, auth.token, channel, {
+    kind: "status",
+    state: "waiting",
+    note: "watch 已挂上——被 @ 才唤起你一次，等待零 token",
+    mentions: [],
+    residency: "supervised",
+    wake: { kind: "watch" },
+    context: buildContext(auth),
+  });
 }
 
 export function resolveWatchTimeoutSec(timeout: number | undefined, indefinite: boolean): number {
@@ -198,6 +221,8 @@ export async function runWatch(o: WatchOptions): Promise<number> {
   // 但消息照常打印进历史、游标照推进。从 welcome 的 presence 快照认出初始状态（重连也不误唤醒），
   // 之后靠 presence 帧增量翻转。恢复后不重放暂停期的 @（在历史里，agent 自行补看），与 serve 一致。
   let selfPaused = false;
+  // 挂上即声明「有 watch 唤醒层」（best-effort，只做一次；重连再收 welcome 不重复刷）——见 advertiseWatchWake。
+  let advertised = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   if (o.timeoutSec > 0) {
     timer = setTimeout(() => {
@@ -238,6 +263,18 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         // 读到就回 seen；webhook / watch --once 型事件驱动 agent 不发 seen，其送达状态由
         // wake 回执表达」。同身份的网页标签页读过一条 @，不代表这个 supervisor 被它唤醒过。
         // 拿它 ack 会静默跳过从未送达的 mention。#172 需要一个独立的 wake cursor。
+        // 挂上即声明 watch 唤醒层（#440，best-effort，只做一次；重连再收 welcome 不重复刷）。
+        // presence 上报走独立 REST 通道，绝不进 watch 的输出流：失败也**静默吞掉**——既不能污染
+        // stdout（--json 的帧契约按 fixture 校验，多一行就崩），也不能污染 stderr（订阅方按
+        // stderr==="" 断言）。声明失败最坏就是 agent 回到「wake_kind=null」的旧态，不比现状差。
+        if (!advertised) {
+          advertised = true;
+          try {
+            await o.advertise?.();
+          } catch {
+            /* best-effort presence：失败静默，不碰 stdout/stderr（保 --json 帧契约与 stderr 洁净） */
+          }
+        }
         if (o.statusline === true) {
           writeStatuslineCache({
             ...localStatuslineBase(o.channel),
@@ -397,11 +434,12 @@ export async function run(argv: string[]): Promise<number> {
     console.error(explicitSince);
     return 1;
   }
-  const cfg = await resolveAuth();
-  if (!cfg) {
+  const auth = await resolveAuthDetailed();
+  if (!auth.server || !auth.token) {
     console.error("no config, run: party login or party init --server URL --token T");
     return 1;
   }
+  const cfg = { server: auth.server, token: auth.token };
   const unknown = unknownFlagError(flags, WATCH_FLAGS);
   if (unknown !== null) {
     console.error(unknown);
@@ -487,6 +525,7 @@ export async function run(argv: string[]): Promise<number> {
     onRevCursor: (r) => saveRevCursor(channel, r),
     statusline: true,
     allowMultiple: flags["allow-multiple"] === true,
+    advertise: () => advertiseWatchWake(auth, channel),
   });
   if (flags.once === true && flags.json !== true && code === 0) console.error(ONCE_REARM_ADVISORY);
   return code;
