@@ -296,7 +296,7 @@ export function App() {
     }
     setChannelJoinRequest({ slug: pending.slug, state: "submitting" });
     try {
-      const request = await createChannelJoinRequest(humanToken, pending.slug, watchToken);
+      const request = await createChannelJoinRequest(humanToken, pending.slug, watchToken, pending.note);
       rememberJoinRequestTarget(pending.slug);
       clearPendingJoinRequest();
       setChannelJoinRequest({ slug: pending.slug, state: request.state, reason: request.review_reason });
@@ -315,11 +315,11 @@ export function App() {
     }
   }, [t]);
 
-  const requestChannelJoin = useCallback(async (): Promise<void> => {
+  const requestChannelJoin = useCallback(async (note: string): Promise<void> => {
     const slug = matchChannel(path);
     const watchToken = currentShareToken();
     if (slug === null || watchToken === null) return;
-    savePendingJoinRequest({ slug });
+    savePendingJoinRequest({ slug, note });
     const humanToken = await temporaryHumanToken().catch(() => null);
     if (humanToken !== null) {
       await submitPendingChannelJoinRequest(humanToken);

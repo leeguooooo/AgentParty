@@ -116,7 +116,7 @@ interface Props {
   joinRequestError: string | null;
   joinAuthProviders: AuthProviderConfig[];
   larkDirectoryEnabled: boolean;
-  onRequestJoin(): Promise<void>;
+  onRequestJoin(note: string): Promise<void>;
   onBeginJoinLogin(provider: AuthProviderConfig): void;
   onRefreshJoinRequest(): Promise<void>;
   onEnterApprovedChannel(): Promise<void>;
@@ -4125,7 +4125,7 @@ export function ChannelPage({
           reason={joinRequestReason}
           errorMessage={joinRequestError}
           providers={joinAuthProviders}
-          onApply={shareMode ? () => void onRequestJoin() : undefined}
+          onApply={shareMode ? (note) => void onRequestJoin(note) : undefined}
           onRetry={() => void onRefreshJoinRequest()}
           onLogin={onBeginJoinLogin}
           onEnter={() => void onEnterApprovedChannel()}

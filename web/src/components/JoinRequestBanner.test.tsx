@@ -11,11 +11,14 @@ function render(props: React.ComponentProps<typeof JoinRequestBanner>) {
   return renderer!;
 }
 
-test("offers join from the readonly banner", () => {
-  let applied = 0;
-  const r = render({ state: "idle", onApply: () => { applied += 1; } });
+test("offers join with a trimmed optional application note", () => {
+  let applied: string | null = null;
+  const r = render({ state: "idle", onApply: (note) => { applied = note; } });
+  const input = r.root.findByProps({ className: "joinrequest-note-input" });
+  act(() => input.props.onChange({ target: { value: "  I can help test releases  " } }));
   act(() => r.root.findByProps({ className: "d-btn d-btn--primary joinrequest-apply" }).props.onClick());
-  expect(applied).toBe(1);
+  expect(applied).toBe("I can help test releases");
+  expect(input.props.maxLength).toBe(2000);
 });
 
 test("renders server states, rejection reason, and approved entry", () => {

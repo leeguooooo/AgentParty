@@ -3223,6 +3223,8 @@
 .joinrequest-actions { justify-content: flex-end; }
 .joinrequest-reason { min-width: 0; flex: 1 1 180px; padding: 4px 6px; border: 1px solid var(--d-ink); background: var(--t-panel); color: var(--fg); font: inherit; }
 .joinrequest-status { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.joinrequest-note-field { display: flex; flex: 1 1 280px; align-items: center; gap: 7px; font-size: 12px; }
+.joinrequest-note-input { min-width: 180px; flex: 1; resize: vertical; padding: 5px 7px; border: 1px solid var(--d-ink); background: var(--t-panel); color: var(--fg); font: inherit; }
 .joinrequest-login-options { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .joinrequest-status-reason { padding-left: 8px; border-left: 1px solid currentColor; }
 .joinrequest-status-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: joinrequest-spin 700ms linear infinite; }
