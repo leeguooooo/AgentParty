@@ -303,7 +303,14 @@ impl VerifiedUpdate {
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1192,6 +1199,14 @@ mod tests {
         assert_eq!(
             OFFICIAL_UI_MANIFEST_ENDPOINT,
             "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/desktop-ui.json"
+        );
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 
