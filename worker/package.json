@@ -22,7 +22,7 @@
   "dependencies": {
     "@agentparty/shared": "workspace:*",
     "chanfana": "^3.3.0",
-    "hono": "^4.12.29",
+    "hono": "^4.12.30",
     "partyserver": "^0.5.8"
   },
   "devDependencies": {
