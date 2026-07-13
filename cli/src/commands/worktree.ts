@@ -189,6 +189,13 @@ export async function runGitCommand(
       return `${leading}-o BatchMode=yes`;
     },
   );
+  if (/BatchMode/iu.test(normalizedSshCommand.replaceAll(/BatchMode=yes/giu, ""))) {
+    return {
+      code: 1,
+      stdout: "",
+      stderr: "unsafe GIT_SSH_COMMAND BatchMode syntax; refusing an interactive Git command",
+    };
+  }
   const sshCommand = foundBatchMode ? normalizedSshCommand : `${inheritedSshCommand} -o BatchMode=yes`;
   const env: Record<string, string | undefined> = {
     ...process.env,

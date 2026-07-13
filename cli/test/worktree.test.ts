@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import {
   classifyWorktrees,
   type GitRunner,
@@ -170,7 +170,7 @@ describe("git runner safety", () => {
     chmodSync(fakeGit, 0o755);
     const result = await runGitCommand(["status"], main, {
       env: {
-        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
         GIT_ASKPASS: "/tmp/should-not-run",
         SSH_ASKPASS: "/tmp/should-not-run",
         GIT_SSH_COMMAND: "ssh -i '/tmp/key path'",
@@ -182,25 +182,35 @@ describe("git runner safety", () => {
     expect(result.stdout).toBe("0|Never|unset|unset|ssh -i '/tmp/key path' -o BatchMode=yes|2|http.sslVerify");
 
     const existingBatchMode = await runGitCommand(["status"], main, {
-      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, GIT_SSH_COMMAND: "ssh -o BatchMode=yes -i key" },
+      env: { PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`, GIT_SSH_COMMAND: "ssh -o BatchMode=yes -i key" },
     });
     expect(existingBatchMode.stdout.match(/BatchMode=yes/gu)?.length).toBe(1);
 
     const interactiveBatchMode = await runGitCommand(["status"], main, {
-      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, GIT_SSH_COMMAND: "ssh -i key -oBatchMode=no" },
+      env: { PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`, GIT_SSH_COMMAND: "ssh -i key -oBatchMode=no" },
     });
     expect(interactiveBatchMode.stdout).toContain("ssh -i key -o BatchMode=yes");
     expect(interactiveBatchMode.stdout).not.toContain("BatchMode=no");
 
     const quotedBatchModes = await runGitCommand(["status"], main, {
       env: {
-        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
         GIT_SSH_COMMAND: `ssh -i 'key path' -o 'BatchMode=no' "-oBatchMode=ask" -o BatchMode='no'`,
       },
     });
     expect(quotedBatchModes.stdout).toContain("ssh -i 'key path'");
     expect(quotedBatchModes.stdout.match(/BatchMode=yes/gu)?.length).toBe(3);
     expect(quotedBatchModes.stdout).not.toMatch(/BatchMode=(?:no|ask)/u);
+
+    const unsafeSeparatedTokens = await runGitCommand(["status"], main, {
+      env: {
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
+        GIT_SSH_COMMAND: `ssh '-o' 'BatchMode=no'`,
+      },
+    });
+    expect(unsafeSeparatedTokens.code).toBe(1);
+    expect(unsafeSeparatedTokens.stdout).toBe("");
+    expect(unsafeSeparatedTokens.stderr).toContain("unsafe GIT_SSH_COMMAND BatchMode syntax");
   });
 });
 
