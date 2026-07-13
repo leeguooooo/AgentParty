@@ -364,7 +364,14 @@ export function PresenceBar({
     }, 160);
   }
 
-  useEffect(() => () => cancelPopoverClose(), []);
+  useEffect(
+    () => () => {
+      if (popoverCloseTimer.current === null) return;
+      clearTimeout(popoverCloseTimer.current);
+      popoverCloseTimer.current = null;
+    },
+    [],
+  );
   function toggleExpanded() {
     setHoveredGroup(null); // 折叠会把 chip 移出 DOM，先关掉可能悬着的 popover
     setExpandedGroupKey(null);
