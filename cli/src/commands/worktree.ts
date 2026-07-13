@@ -180,15 +180,16 @@ export async function runGitCommand(
   cwd: string,
   opts: { timeoutMs?: number; env?: Record<string, string | undefined> } = {},
 ): Promise<GitResult> {
+  const inheritedSshCommand = opts.env?.GIT_SSH_COMMAND ?? process.env.GIT_SSH_COMMAND ?? "ssh";
+  const sshCommand = /(?:^|\s)-o\s*BatchMode(?:=|\s+)/iu.test(inheritedSshCommand)
+    ? inheritedSshCommand
+    : `${inheritedSshCommand} -o BatchMode=yes`;
   const env: Record<string, string | undefined> = {
     ...process.env,
     ...opts.env,
     GIT_TERMINAL_PROMPT: "0",
     GCM_INTERACTIVE: "Never",
-    GIT_SSH_COMMAND: opts.env?.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes",
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: "core.askPass",
-    GIT_CONFIG_VALUE_0: "",
+    GIT_SSH_COMMAND: sshCommand,
   };
   delete env.GIT_ASKPASS;
   delete env.SSH_ASKPASS;
@@ -412,7 +413,7 @@ async function removeMergedClean(
   action: PruneAction,
   remote: boolean,
   git: GitRunner,
-): Promise<boolean> {
+): Promise<number> {
   // raw 用于 git 参数，branch(sanitized) 只用于打印——绝不把『防注入显示串』喂给会真删/真推的
   // git 命令，否则日后扩展 sanitize（如 Unicode 归一化）会悄悄改掉实际分支名（CodeRabbit #459）。
   const raw = action.row.branch!;
@@ -420,27 +421,27 @@ async function removeMergedClean(
   const rm = await git(["worktree", "remove", action.row.path], root);
   if (rm.code !== 0) {
     console.error(`  ! ${branch}: worktree remove failed, skipped — ${terminal(rm.stderr.trim())}`);
-    return false;
+    return rm.code;
   }
   const del = await git(["branch", "-D", raw], root);
   if (del.code !== 0) {
     console.error(`  ! ${branch}: worktree removed but branch delete failed — ${terminal(del.stderr.trim())}`);
-    return false;
+    return del.code;
   }
   if (remote) {
     const pushDel = await git(["push", "origin", "--delete", raw], root);
     if (pushDel.code !== 0) {
       console.error(`  ! ${branch}: remote branch delete failed — ${terminal(pushDel.stderr.trim())}`);
-      return false;
+      return pushDel.code;
     }
   }
   console.log(`  removed ${branch} (merged-clean)`);
-  return true;
+  return 0;
 }
 
 // merged-dirty：绝不 --force 丢活。先把未提交改动 commit + push 到 preserve/*，全部成功才删。
 // 任一步失败 → 保留 worktree，跳过并告警，宁可留着让人处理也不丢工作。
-async function preserveAndRemove(root: string, action: PruneAction, git: GitRunner): Promise<boolean> {
+async function preserveAndRemove(root: string, action: PruneAction, git: GitRunner): Promise<number> {
   // raw 喂 git，branch(sanitized) 只打印——同 removeMergedClean 的理由（CodeRabbit #459）。
   const raw = action.row.branch!;
   const branch = terminal(raw);
@@ -448,19 +449,19 @@ async function preserveAndRemove(root: string, action: PruneAction, git: GitRunn
   const add = await git(["-C", path, "add", "-A"], root);
   if (add.code !== 0) {
     console.error(`  ! ${branch}: git add failed, worktree preserved as-is — ${terminal(add.stderr.trim())}`);
-    return false;
+    return add.code;
   }
   const commit = await git(["-C", path, "commit", "-m", `wip: preserve ${raw} (#455)`], root);
   if (commit.code !== 0) {
     console.error(`  ! ${branch}: commit failed, worktree preserved as-is — ${terminal(commit.stderr.trim())}`);
-    return false;
+    return commit.code;
   }
   const push = await git(["-C", path, "push", "origin", `HEAD:preserve/${raw}`], root);
   if (push.code !== 0) {
     console.error(
       `  ! ${branch}: push to preserve/${branch} failed, worktree preserved as-is — ${terminal(push.stderr.trim())}`,
     );
-    return false;
+    return push.code;
   }
   // 改动已安全落到 origin/preserve/*，现在删本地 worktree+分支才不丢活。
   const rm = await git(["worktree", "remove", "--force", path], root);
@@ -468,17 +469,17 @@ async function preserveAndRemove(root: string, action: PruneAction, git: GitRunn
     console.error(
       `  ! ${branch}: preserved to preserve/${branch} but worktree remove failed — ${terminal(rm.stderr.trim())}`,
     );
-    return false;
+    return rm.code;
   }
   const del = await git(["branch", "-D", raw], root);
   if (del.code !== 0) {
     console.error(
       `  ! ${branch}: preserved + worktree removed but branch delete failed — ${terminal(del.stderr.trim())}`,
     );
-    return false;
+    return del.code;
   }
   console.log(`  preserved ${branch} -> origin/preserve/${branch}, then removed (merged-dirty)`);
-  return true;
+  return 0;
 }
 
 async function runPrune(
@@ -512,11 +513,12 @@ async function runPrune(
       console.log(`  skip    ${terminal(b)} — ${terminal(a.reason)}`);
       continue;
     }
-    const ok =
+    const code =
       a.kind === "remove"
         ? await removeMergedClean(root, a, opts.remote, git)
         : await preserveAndRemove(root, a, git);
-    if (!ok) failed = true;
+    if (code === 130 || code === 143) return code;
+    if (code !== 0) failed = true;
   }
   return failed ? 1 : 0;
 }

@@ -164,7 +164,7 @@ describe("git runner safety", () => {
     const fakeGit = join(bin, "git");
     writeFileSync(
       fakeGit,
-      "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s' \"$GIT_TERMINAL_PROMPT\" \"$GCM_INTERACTIVE\" \"${GIT_ASKPASS-unset}\" \"${SSH_ASKPASS-unset}\" \"$GIT_SSH_COMMAND\" \"$GIT_CONFIG_KEY_0\"\n",
+      "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s' \"$GIT_TERMINAL_PROMPT\" \"$GCM_INTERACTIVE\" \"${GIT_ASKPASS-unset}\" \"${SSH_ASKPASS-unset}\" \"$GIT_SSH_COMMAND\" \"$GIT_CONFIG_COUNT\" \"$GIT_CONFIG_KEY_0\"\n",
     );
     chmodSync(fakeGit, 0o755);
     const result = await runGitCommand(["status"], main, {
@@ -172,10 +172,18 @@ describe("git runner safety", () => {
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         GIT_ASKPASS: "/tmp/should-not-run",
         SSH_ASKPASS: "/tmp/should-not-run",
+        GIT_SSH_COMMAND: "ssh -i '/tmp/key path'",
+        GIT_CONFIG_COUNT: "2",
+        GIT_CONFIG_KEY_0: "http.sslVerify",
       },
     });
     expect(result.code).toBe(0);
-    expect(result.stdout).toBe("0|Never|unset|unset|ssh -o BatchMode=yes|core.askPass");
+    expect(result.stdout).toBe("0|Never|unset|unset|ssh -i '/tmp/key path' -o BatchMode=yes|2|http.sslVerify");
+
+    const existingBatchMode = await runGitCommand(["status"], main, {
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, GIT_SSH_COMMAND: "ssh -o BatchMode=yes -i key" },
+    });
+    expect(existingBatchMode.stdout.match(/BatchMode=yes/gu)?.length).toBe(1);
   });
 });
 
@@ -248,6 +256,24 @@ describe("party worktree prune", () => {
     expect(existsSync(join(root, "agentparty-wt-mc"))).toBe(false);
     const branches = git(main, "branch", "--format=%(refname:short)").split("\n");
     expect(branches).not.toContain("mc");
+  });
+
+  test("SIGINT/SIGTERM exit code stops prune before the next destructive command", async () => {
+    const destructive: string[][] = [];
+    const interruptedGit: GitRunner = async (args, cwd) => {
+      if (args[0] === "worktree" && args[1] === "remove") {
+        destructive.push(args);
+        return { code: 130, stdout: "", stderr: "interrupted by SIGINT" };
+      }
+      if (args[0] === "branch" && args[1] === "-D") destructive.push(args);
+      const out = execFileSync("git", args, { cwd, encoding: "utf8" });
+      return { code: 0, stdout: out, stderr: "" };
+    };
+
+    const code = await run(["prune", "--base", "main", "--yes"], interruptedGit);
+    expect(code).toBe(130);
+    expect(destructive).toHaveLength(1);
+    expect(existsSync(join(root, "agentparty-wt-md"))).toBe(true);
   });
 
   test("--yes preserves merged-dirty to preserve/* BEFORE removing (never loses work)", async () => {
