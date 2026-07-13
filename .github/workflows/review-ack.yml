@@ -34,7 +34,8 @@ concurrency:
 jobs:
   review_ack_runner:
     if: >-
-      github.event_name != 'issue_comment' || github.event.issue.pull_request
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

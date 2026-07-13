@@ -62,6 +62,7 @@ describe("review-ack ordering gate (#460)", () => {
     expect(workflow).toContain("WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}");
     expect(workflow).toContain("KNOWN_HEAD_SHA: ${{ steps.target.outputs.head_sha }}");
     expect(workflow).toContain('gh api "repos/$REPO/pulls/$PR" --jq \'.head.sha\'');
+    expect(workflow).toContain("github.event.workflow_run.event == 'pull_request'");
     expect(workflow).not.toContain("workflow_run.pull_requests[0]");
   });
 
@@ -80,9 +81,12 @@ describe("review-ack ordering gate (#460)", () => {
       }),
       new Response(JSON.stringify({ total_count: 101, workflow_runs: completedChecks })),
     ];
-    const body = (await githubJson("/repos/owner/repo/actions/workflows/pr-agent.yml/runs", "token", "workflow_runs", async () => pages.shift()!)) as {
-      workflow_runs: typeof completedChecks;
-    };
+    const body = await githubJson<(typeof completedChecks)[number]>(
+      "/repos/owner/repo/actions/workflows/pr-agent.yml/runs",
+      "token",
+      "workflow_runs",
+      async () => pages.shift()!,
+    );
     expect(body.workflow_runs).toHaveLength(101);
     expect(evaluate({ prAgentRuns: body.workflow_runs }).code).toBe("missing_ack");
   });

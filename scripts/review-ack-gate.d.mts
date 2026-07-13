@@ -75,15 +75,21 @@ export function selectWorkflowPullNumber(headSha: string, pulls: WorkflowPull[])
 
 export type GitHubRequest = (input: string, init?: RequestInit) => Promise<Response>;
 
-export function githubJson(
+export function githubJson<T = unknown>(
   path: string,
   token: string,
-  collectionKey?: string,
+  collectionKey: string,
   request?: GitHubRequest,
-): Promise<unknown>;
+): Promise<Record<string, unknown> & Record<string, T[]>>;
+export function githubJson<T = unknown>(
+  path: string,
+  token: string,
+  collectionKey?: undefined,
+  request?: GitHubRequest,
+): Promise<T>;
 
 export interface ReviewAckDependencies {
-  githubJson(path: string, token: string, collectionKey?: string): Promise<unknown>;
+  githubJson: typeof githubJson;
   postStatus(
     repo: string,
     sha: string,
