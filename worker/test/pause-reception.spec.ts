@@ -233,6 +233,7 @@ describe("暂停接待（issue #180）", () => {
     const target = await seedToken("agent", uniq("target"), { channelScope: slug });
 
     expect((await pause(slug, host.token, target.name)).status).toBe(403);
+    expect((await resume(slug, host.token, target.name)).status).toBe(403);
     expect((await presenceOf(slug, owner.token, target.name))?.paused).toBeUndefined();
   });
 
