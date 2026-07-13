@@ -69,3 +69,18 @@ export interface WorkflowPull {
 }
 
 export function selectWorkflowPullNumber(headSha: string, pulls: WorkflowPull[]): string;
+
+export interface ReviewAckDependencies {
+  githubJson(path: string, token: string): Promise<unknown>;
+  postStatus(
+    repo: string,
+    sha: string,
+    token: string,
+    result: { ok: boolean; description: string },
+  ): Promise<void>;
+}
+
+export function runReviewAckGate(
+  env: Record<string, string | undefined>,
+  dependencies?: ReviewAckDependencies,
+): Promise<{ pr: string; headSha: string; result: ReviewAckResult }>;

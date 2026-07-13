@@ -165,44 +165,73 @@ export function selectWorkflowPullNumber(headSha, pulls) {
   return String(matches[0].number);
 }
 
-async function main() {
-  const repo = process.env.REPO;
-  const token = process.env.GH_TOKEN;
+export async function runReviewAckGate(env, dependencies = { githubJson, postStatus }) {
+  const repo = env.REPO;
+  const token = env.GH_TOKEN;
   if (!repo || !token) throw new Error("REPO and GH_TOKEN are required");
-  let pr = process.env.PR;
-  if (!pr) {
-    const workflowHeadSha = process.env.WORKFLOW_HEAD_SHA;
-    if (!workflowHeadSha) throw new Error("PR or WORKFLOW_HEAD_SHA is required");
-    const pulls = await githubJson(`/repos/${repo}/commits/${workflowHeadSha}/pulls`, token);
-    pr = selectWorkflowPullNumber(workflowHeadSha, pulls);
-  }
-  const pull = await githubJson(`/repos/${repo}/pulls/${pr}`, token);
-  const headSha = pull.head?.sha;
-  if (!headSha) throw new Error(`cannot resolve PR #${pr} head SHA`);
-  const dryRun = process.env.DRY_RUN === "true";
-  // 同一 head 上可能残留旧 success。先置 failure，再抓 review；后续任何 API 异常都会 fail-safe，
-  // 不会因为脚本中途退出而让旧的绿色 review-ack 继续放行。
-  if (!dryRun) {
-    await postStatus(repo, headSha, token, {
-      ok: false,
-      description: "正在核验当前 head 的最新 bot review 与人工 ack",
+  const dryRun = env.DRY_RUN === "true";
+  let pr = env.PR;
+  let knownHeadSha = env.KNOWN_HEAD_SHA ?? env.WORKFLOW_HEAD_SHA;
+  let redHeadSha;
+  const markRed = async (sha, description) => {
+    if (dryRun) return;
+    await dependencies.postStatus(repo, sha, token, { ok: false, description });
+    redHeadSha = sha;
+  };
+
+  try {
+    // pull_request/review 与 workflow_run 事件都已携带 head SHA：在任何解析 API 请求前先置红，
+    // 即使反查 PR 或读取 pull 失败，也不能让同一 SHA 上旧的 success 原样残留。
+    if (knownHeadSha) {
+      await markRed(knownHeadSha, "正在解析 PR 并核验当前 head 的 bot review 与人工 ack");
+    }
+    if (!pr) {
+      const workflowHeadSha = env.WORKFLOW_HEAD_SHA;
+      if (!workflowHeadSha) throw new Error("PR or WORKFLOW_HEAD_SHA is required");
+      const pulls = await dependencies.githubJson(`/repos/${repo}/commits/${workflowHeadSha}/pulls`, token);
+      pr = selectWorkflowPullNumber(workflowHeadSha, pulls);
+    }
+    const pull = await dependencies.githubJson(`/repos/${repo}/pulls/${pr}`, token);
+    const headSha = pull.head?.sha;
+    if (!headSha) throw new Error(`cannot resolve PR #${pr} head SHA`);
+    if (knownHeadSha && knownHeadSha !== headSha) {
+      throw new Error(`event head ${knownHeadSha} does not match PR #${pr} head ${headSha}`);
+    }
+    knownHeadSha = headSha;
+    if (redHeadSha !== headSha) {
+      await markRed(headSha, "正在核验当前 head 的最新 bot review 与人工 ack");
+    }
+    const [reviews, comments, checksBody, statuses] = await Promise.all([
+      dependencies.githubJson(`/repos/${repo}/pulls/${pr}/reviews`, token),
+      dependencies.githubJson(`/repos/${repo}/issues/${pr}/comments`, token),
+      dependencies.githubJson(`/repos/${repo}/commits/${headSha}/check-runs`, token),
+      dependencies.githubJson(`/repos/${repo}/commits/${headSha}/statuses`, token),
+    ]);
+    const result = evaluateReviewAck({
+      headSha,
+      reviews,
+      comments,
+      checkRuns: checksBody.check_runs ?? [],
+      statuses,
+      requireCodeRabbit: env.REQUIRE_CODERABBIT !== "false",
     });
+    if (!dryRun) await dependencies.postStatus(repo, headSha, token, result);
+    return { pr, headSha, result };
+  } catch (error) {
+    if (knownHeadSha && !dryRun) {
+      await dependencies
+        .postStatus(repo, knownHeadSha, token, {
+          ok: false,
+          description: `review-ack 评估异常，fail-closed：${error instanceof Error ? error.message : String(error)}`,
+        })
+        .catch(() => undefined);
+    }
+    throw error;
   }
-  const [reviews, comments, checksBody, statuses] = await Promise.all([
-    githubJson(`/repos/${repo}/pulls/${pr}/reviews`, token),
-    githubJson(`/repos/${repo}/issues/${pr}/comments`, token),
-    githubJson(`/repos/${repo}/commits/${headSha}/check-runs`, token),
-    githubJson(`/repos/${repo}/commits/${headSha}/statuses`, token),
-  ]);
-  const result = evaluateReviewAck({
-    headSha,
-    reviews,
-    comments,
-    checkRuns: checksBody.check_runs ?? [],
-    statuses,
-    requireCodeRabbit: process.env.REQUIRE_CODERABBIT !== "false",
-  });
-  if (!dryRun) await postStatus(repo, headSha, token, result);
+}
+
+async function main() {
+  const { headSha, result } = await runReviewAckGate(process.env);
   console.log(`review-ack=${result.ok ? "success" : "failure"} code=${result.code} @ ${headSha}`);
 }
 

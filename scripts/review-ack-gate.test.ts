@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   evaluateReviewAck,
+  runReviewAckGate,
   selectWorkflowPullNumber,
   type ReviewAckInput,
 } from "./review-ack-gate.mjs";
@@ -49,7 +50,33 @@ describe("review-ack ordering gate (#460)", () => {
     expect(workflow).toContain("persist-credentials: false");
     expect(workflow).toContain("run: node scripts/review-ack-gate.mjs");
     expect(workflow).toContain("WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}");
+    expect(workflow).toContain(
+      "KNOWN_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}",
+    );
     expect(workflow).not.toContain("workflow_run.pull_requests[0]");
+  });
+
+  test("known event head is marked failure before PR resolution can fail", async () => {
+    const statusCalls: Array<{ sha: string; ok: boolean; description: string }> = [];
+    await expect(
+      runReviewAckGate(
+        { REPO: "owner/repo", GH_TOKEN: "token", PR: "42", KNOWN_HEAD_SHA: headSha },
+        {
+          githubJson: async () => {
+            throw new Error("simulated pull lookup failure");
+          },
+          postStatus: async (_repo, sha, _token, result) => {
+            statusCalls.push({ sha, ok: result.ok, description: result.description });
+          },
+        },
+      ),
+    ).rejects.toThrow("simulated pull lookup failure");
+    expect(statusCalls.length).toBeGreaterThanOrEqual(1);
+    expect(statusCalls[0]).toEqual({
+      sha: headSha,
+      ok: false,
+      description: "正在解析 PR 并核验当前 head 的 bot review 与人工 ack",
+    });
   });
 
   test("workflow_run uses head SHA to resolve the only open PR", () => {

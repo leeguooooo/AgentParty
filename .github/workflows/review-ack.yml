@@ -46,5 +46,6 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || github.event.issue.number }}
           WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          KNOWN_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
           REQUIRE_CODERABBIT: "true"
         run: node scripts/review-ack-gate.mjs
