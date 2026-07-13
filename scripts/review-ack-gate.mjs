@@ -197,10 +197,20 @@ export async function runReviewAckGate(env, dependencies = { githubJson, postSta
     // 让 gate 仍能在后续任何评估请求前把同一 head 的旧 success 置红。
     if (!knownHeadSha && pr) {
       try {
-        resolvedPull = await dependencies.githubJson(`/repos/${repo}/pulls/${pr}`, token);
+        resolvedPull = await dependencies.githubJson(
+          `/repos/${repo}/pulls/${pr}`,
+          token,
+          undefined,
+          dependencies.request,
+        );
         knownHeadSha = resolvedPull.head?.sha;
       } catch {
-        const ref = await dependencies.githubJson(`/repos/${repo}/git/ref/pull/${pr}/head`, token);
+        const ref = await dependencies.githubJson(
+          `/repos/${repo}/git/ref/pull/${pr}/head`,
+          token,
+          undefined,
+          dependencies.request,
+        );
         knownHeadSha = ref.object?.sha;
       }
       if (!knownHeadSha) throw new Error(`cannot resolve PR #${pr} head SHA`);
@@ -213,10 +223,20 @@ export async function runReviewAckGate(env, dependencies = { githubJson, postSta
     if (!pr) {
       const workflowHeadSha = env.WORKFLOW_HEAD_SHA;
       if (!workflowHeadSha) throw new Error("PR or WORKFLOW_HEAD_SHA is required");
-      const pulls = await dependencies.githubJson(`/repos/${repo}/commits/${workflowHeadSha}/pulls`, token);
+      const pulls = await dependencies.githubJson(
+        `/repos/${repo}/commits/${workflowHeadSha}/pulls`,
+        token,
+        undefined,
+        dependencies.request,
+      );
       pr = selectWorkflowPullNumber(workflowHeadSha, pulls);
     }
-    const pull = resolvedPull ?? await dependencies.githubJson(`/repos/${repo}/pulls/${pr}`, token);
+    const pull = resolvedPull ?? await dependencies.githubJson(
+      `/repos/${repo}/pulls/${pr}`,
+      token,
+      undefined,
+      dependencies.request,
+    );
     const headSha = pull.head?.sha;
     if (!headSha) throw new Error(`cannot resolve PR #${pr} head SHA`);
     if (knownHeadSha && knownHeadSha !== headSha) {
@@ -227,14 +247,15 @@ export async function runReviewAckGate(env, dependencies = { githubJson, postSta
       await markRed(headSha, "正在核验当前 head 的最新 bot review 与人工 ack");
     }
     const [reviews, comments, runsBody, statuses] = await Promise.all([
-      dependencies.githubJson(`/repos/${repo}/pulls/${pr}/reviews`, token),
-      dependencies.githubJson(`/repos/${repo}/issues/${pr}/comments`, token),
+      dependencies.githubJson(`/repos/${repo}/pulls/${pr}/reviews`, token, undefined, dependencies.request),
+      dependencies.githubJson(`/repos/${repo}/issues/${pr}/comments`, token, undefined, dependencies.request),
       dependencies.githubJson(
         `/repos/${repo}/actions/workflows/pr-agent.yml/runs?head_sha=${encodeURIComponent(headSha)}`,
         token,
         "workflow_runs",
+        dependencies.request,
       ),
-      dependencies.githubJson(`/repos/${repo}/commits/${headSha}/statuses`, token),
+      dependencies.githubJson(`/repos/${repo}/commits/${headSha}/statuses`, token, undefined, dependencies.request),
     ]);
     const result = evaluateReviewAck({
       headSha,

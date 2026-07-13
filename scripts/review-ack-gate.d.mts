@@ -89,18 +89,8 @@ export function githubJson<T = unknown>(
 ): Promise<T>;
 
 export interface ReviewAckDependencies {
-  githubJson<T = unknown, K extends string = string>(
-    path: string,
-    token: string,
-    collectionKey: K,
-    request?: GitHubRequest,
-  ): Promise<Record<string, unknown> & Record<K, T[]>>;
-  githubJson<T = unknown>(
-    path: string,
-    token: string,
-    collectionKey?: undefined,
-    request?: GitHubRequest,
-  ): Promise<T>;
+  githubJson: typeof githubJson;
+  request?: GitHubRequest;
   postStatus(
     repo: string,
     sha: string,

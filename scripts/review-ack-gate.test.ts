@@ -45,10 +45,6 @@ function evaluate(over: Partial<ReviewAckInput> = {}) {
   });
 }
 
-function githubJsonMock(handler: (path: string) => unknown | Promise<unknown>): typeof githubJson {
-  return (async (path: string) => handler(path)) as typeof githubJson;
-}
-
 describe("review-ack ordering gate (#460)", () => {
   test("workflow reruns after PR Agent completion with the permissions the script needs", async () => {
     const workflow = await Bun.file(
@@ -110,9 +106,8 @@ describe("review-ack ordering gate (#460)", () => {
       runReviewAckGate(
         { REPO: "owner/repo", GH_TOKEN: "token", PR: "42", KNOWN_HEAD_SHA: headSha },
         {
-          githubJson: githubJsonMock(async () => {
-            throw new Error("simulated pull lookup failure");
-          }),
+          githubJson,
+          request: async () => new Response("simulated pull lookup failure", { status: 500 }),
           postStatus: async (_repo, sha, _token, result) => {
             statusCalls.push({ sha, ok: result.ok, description: result.description });
           },
@@ -134,14 +129,18 @@ describe("review-ack ordering gate (#460)", () => {
       runReviewAckGate(
         { REPO: "owner/repo", GH_TOKEN: "token", PR: "42" },
         {
-          githubJson: githubJsonMock(async (path) => {
+          githubJson,
+          request: async (url) => {
+            const path = new URL(url).pathname;
             if (path.endsWith("/pulls/42")) {
               pullLookups += 1;
-              throw new Error("simulated pull lookup failure");
+              return new Response("simulated pull lookup failure", { status: 500 });
             }
-            if (path.endsWith("/git/ref/pull/42/head")) return { object: { sha: headSha } };
+            if (path.endsWith("/git/ref/pull/42/head")) {
+              return Response.json({ object: { sha: headSha } });
+            }
             throw new Error(`unexpected path ${path}`);
-          }),
+          },
           postStatus: async (_repo, sha, _token, result) => {
             statusCalls.push({ sha, ok: result.ok, description: result.description });
           },
