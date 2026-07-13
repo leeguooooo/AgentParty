@@ -280,6 +280,8 @@ export interface TaskRecord {
   external_ref: string | null;
   /** 附件引用（#369，#271 遗留）；空/缺省视为无附件。R2 上传流程与消息一致，见 Attachment。上限 MAX_ATTACHMENTS。 */
   attachments?: Attachment[];
+  /** 任务的唯一交付方案（#464）；走频道鉴权附件端点，频道成员可见，缺省表示尚未提交。 */
+  solution?: Attachment;
   completion_artifact: unknown | null;
   workflow_id: string | null;
   created_at: number;

@@ -3746,6 +3746,23 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.task-solution {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1.4px solid var(--t-accent);
+  background: color-mix(in srgb, var(--t-accent) 8%, var(--t-panel));
+}
+.task-solution-label {
+  color: var(--t-accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.task-solution--detail {
+  margin-top: 2px;
+}
 .task-detail-meta {
   margin: 0;
   display: grid;

@@ -40,7 +40,7 @@ import type {
   TokenRole,
   WebhookFilter,
 } from "@agentparty/shared";
-import { MAX_ATTACHMENTS, parseAttachments, parseStoredAttachments } from "./attachments";
+import { MAX_ATTACHMENTS, parseAttachment, parseAttachments, parseStoredAttachment, parseStoredAttachments } from "./attachments";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
@@ -713,6 +713,12 @@ function safeJsonArray<T>(raw: string | null, fallback: T[] = []): T[] {
   }
 }
 
+function solutionBelongsToChannel(solution: Attachment, slug: string): boolean {
+  const keyPrefix = `${slug}/`;
+  if (!solution.key.startsWith(keyPrefix)) return false;
+  return solution.url === `/api/channels/${slug}/attachments/${solution.key.slice(keyPrefix.length)}`;
+}
+
 function taskRowToRecord(row: {
   id: number;
   channel_slug: string;
@@ -732,6 +738,7 @@ function taskRowToRecord(row: {
   blocked_reason: string | null;
   external_ref: string | null;
   attachments_json: string | null;
+  solution_attachment_json: string | null;
   completion_artifact_json: string | null;
   workflow_id: string | null;
   created_at: number;
@@ -771,6 +778,10 @@ function taskRowToRecord(row: {
     ...(() => {
       const att = parseStoredAttachments(row.attachments_json);
       return att === undefined ? {} : { attachments: att };
+    })(),
+    ...(() => {
+      const solution = parseStoredAttachment(row.solution_attachment_json);
+      return solution === undefined ? {} : { solution };
     })(),
     completion_artifact: completionArtifact,
     workflow_id: row.workflow_id,
@@ -4907,6 +4918,10 @@ app.post("/api/channels/:slug/tasks", async (c) => {
   if (attachments === null) {
     return c.json(errorBody("bad_request", `attachments must be at most ${MAX_ATTACHMENTS} valid attachment refs`), 400);
   }
+  const solution = body?.solution === undefined || body.solution === null ? undefined : parseAttachment(body.solution);
+  if (solution === null || (solution !== undefined && !solutionBelongsToChannel(solution, slug))) {
+    return c.json(errorBody("bad_request", "solution must be one valid attachment ref"), 400);
+  }
   const state = (requestedState ?? (assignee ? "assigned" : identity.kind === "agent" ? "triage" : "backlog")) as TaskState;
   // #204 不变量：blocked_reason 只在 state=blocked 时有意义。非 blocked 一律落 null，
   // 否则 blockers 派生会读到「未 blocked 却带 reason」的陈旧数据（门禁 P1）。服务端强制，
@@ -4929,8 +4944,9 @@ app.post("/api/channels/:slug/tasks", async (c) => {
       `INSERT INTO channel_tasks (
          channel_slug, title, description, state, assignee_name, assignee_kind,
          created_by, created_by_kind, created_by_owner, priority, labels_json,
-         parent_id, anchor_seqs_json, workflow_id, scope_json, blocked_reason, external_ref, attachments_json, created_at, updated_at, completed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         parent_id, anchor_seqs_json, workflow_id, scope_json, blocked_reason, external_ref, attachments_json,
+         solution_attachment_json, created_at, updated_at, completed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         slug,
@@ -4951,6 +4967,7 @@ app.post("/api/channels/:slug/tasks", async (c) => {
         effectiveBlockedReason,
         externalRef,
         attachments === undefined ? null : JSON.stringify(attachments),
+        solution === undefined ? null : JSON.stringify(solution),
         now,
         now,
         state === "done" ? now : null,
@@ -5046,6 +5063,19 @@ app.patch("/api/channels/:slug/tasks/:id", async (c) => {
   // 时清掉旧原因，否则 blockers 派生把已不再 blocked 的任务当阻塞（门禁 P1）。服务端强制。
   const effectiveBlockedReason = state === "blocked" ? blockedReason : null;
 
+  let solutionAttachmentJson = existing.solution_attachment_json;
+  if (Object.prototype.hasOwnProperty.call(body, "solution")) {
+    if (body.solution === null) {
+      solutionAttachmentJson = null;
+    } else {
+      const solution = parseAttachment(body.solution);
+      if (solution === null || !solutionBelongsToChannel(solution, slug)) {
+        return c.json(errorBody("bad_request", "solution must be null or one valid attachment ref"), 400);
+      }
+      solutionAttachmentJson = JSON.stringify(solution);
+    }
+  }
+
   const nextAssigneeName =
     assignee === undefined ? existing.assignee_name : assignee === null ? null : assignee.name;
   const nextAssigneeKind =
@@ -5055,10 +5085,11 @@ app.patch("/api/channels/:slug/tasks/:id", async (c) => {
   await c.env.DB.prepare(
     `UPDATE channel_tasks
         SET title = ?, description = ?, state = ?, assignee_name = ?, assignee_kind = ?,
-            priority = ?, labels_json = ?, scope_json = ?, blocked_reason = ?, updated_at = ?, completed_at = ?
+            priority = ?, labels_json = ?, scope_json = ?, blocked_reason = ?, solution_attachment_json = ?,
+            updated_at = ?, completed_at = ?
       WHERE channel_slug = ? AND id = ?`,
   )
-    .bind(title, desc, state, nextAssigneeName, nextAssigneeKind, priority, JSON.stringify(labels), JSON.stringify(scope), effectiveBlockedReason, now, completedAt, slug, id)
+    .bind(title, desc, state, nextAssigneeName, nextAssigneeKind, priority, JSON.stringify(labels), JSON.stringify(scope), effectiveBlockedReason, solutionAttachmentJson, now, completedAt, slug, id)
     .run();
   const row = await loadTaskRow(c.env.DB, slug, id);
   await insertSystemStatus(c.env, slug, `task #${id} ${state}`, statusStateForTask(state)).catch(() => false);

@@ -334,6 +334,13 @@ describe("TaskLedgerPanel task detail (#271)", () => {
       desc: "long description body",
       assignee: { name: "worker-a", kind: "agent" },
       labels: ["infra"],
+      solution: {
+        key: "demo/11111111-1111-1111-1111-111111111111/solution.html",
+        filename: "solution.html",
+        content_type: "text/html",
+        size: 123,
+        url: "/api/channels/demo/attachments/11111111-1111-1111-1111-111111111111/solution.html",
+      },
     });
     const r = render("en", baseProps({ tasks: [detailed] }));
     expect(r.root.findAll((n) => n.props["aria-label"] === "task 7 details")).toHaveLength(0);
@@ -345,6 +352,8 @@ describe("TaskLedgerPanel task detail (#271)", () => {
     expect(text).toContain("created by"); // meta 标签只出现在详情里
     expect(text).toContain("human-a · human");
     expect(text).toContain("@worker-a · agent");
+    expect(text).toContain("Solution");
+    expect(text).toContain("solution.html");
 
     await act(async () => {
       r.root.find((n) => n.props.className === "d-btn task-detail-close").props.onClick();

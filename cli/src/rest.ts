@@ -661,6 +661,8 @@ export async function createTask(
     scope?: string[];
     blocked_reason?: string | null;
     external_ref?: string;
+    attachments?: Attachment[];
+    solution?: Attachment;
   },
 ): Promise<TaskRecord> {
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/tasks`, {
@@ -684,6 +686,7 @@ export async function updateTask(
     labels?: string[];
     scope?: string[];
     blocked_reason?: string | null;
+    solution?: Attachment | null;
   },
 ): Promise<TaskRecord> {
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/tasks/${id}`, {
