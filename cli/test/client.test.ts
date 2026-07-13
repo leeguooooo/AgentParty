@@ -155,6 +155,24 @@ describe("ws client", () => {
     expect(conn.replayUnacked()).toBe(0);
   });
 
+  test("replay resolves a consumer already waiting for the next frame", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(1));
+      sock.send(msgFrame(1, "standby wake"));
+    });
+    conn = connect(server.url, "ap_tok", "dev", 0);
+    const it = conn.frames[Symbol.asyncIterator]();
+    await it.next(); // welcome
+    await it.next(); // msg remains unacked
+
+    const pendingNext = it.next();
+    expect(conn.replayUnacked()).toBe(1);
+
+    const replay = (await pendingNext).value as { type: "msg"; body: string };
+    expect(replay.body).toBe("standby wake");
+  });
+
   test("dedups frames delivered by both broadcast and backfill", async () => {
     server = startMockServer((frame, sock) => {
       if (frame.type === "hello") {

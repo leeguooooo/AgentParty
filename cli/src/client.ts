@@ -56,8 +56,15 @@ class FrameQueue {
   // prepend 而不是 push：它们的 seq 早于当前缓冲区，必须先还旧账再处理新帧。
   prepend(frames: ServerFrame[]): boolean {
     if (this.done || frames.length === 0) return false;
+    let index = 0;
+    while (index < frames.length) {
+      const waiter = this.waiters.shift();
+      if (!waiter) break;
+      waiter.resolve({ value: frames[index]!, done: false });
+      index += 1;
+    }
     // 禁止 unshift(...frames)：参数展开到数万帧会触发 Maximum call stack size exceeded。
-    this.items = frames.concat(this.items);
+    if (index < frames.length) this.items = frames.slice(index).concat(this.items);
     return true;
   }
 }
@@ -176,7 +183,10 @@ export function connect(
   const base = opts.backoffBaseMs ?? 1000;
   const max = opts.backoffMaxMs ?? 30_000;
   const pingEvery = opts.pingIntervalMs ?? 25_000;
-  const maxUnackedFrames = Math.max(1, Math.floor(opts.maxUnackedFrames ?? DEFAULT_MAX_UNACKED_FRAMES));
+  const requestedMaxUnackedFrames = opts.maxUnackedFrames ?? DEFAULT_MAX_UNACKED_FRAMES;
+  const maxUnackedFrames = Number.isFinite(requestedMaxUnackedFrames)
+    ? Math.max(1, Math.floor(requestedMaxUnackedFrames))
+    : DEFAULT_MAX_UNACKED_FRAMES;
   const httpBase = server.replace(/\/+$/, "");
   const wsUrl = httpBase.replace(/^http/, "ws") + `/api/channels/${encodeURIComponent(slug)}/ws`;
 
