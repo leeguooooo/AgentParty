@@ -191,6 +191,16 @@ describe("git runner safety", () => {
     });
     expect(interactiveBatchMode.stdout).toContain("ssh -i key -o BatchMode=yes");
     expect(interactiveBatchMode.stdout).not.toContain("BatchMode=no");
+
+    const quotedBatchModes = await runGitCommand(["status"], main, {
+      env: {
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        GIT_SSH_COMMAND: `ssh -i 'key path' -o 'BatchMode=no' "-oBatchMode=ask" -o BatchMode='no'`,
+      },
+    });
+    expect(quotedBatchModes.stdout).toContain("ssh -i 'key path'");
+    expect(quotedBatchModes.stdout.match(/BatchMode=yes/gu)?.length).toBe(3);
+    expect(quotedBatchModes.stdout).not.toMatch(/BatchMode=(?:no|ask)/u);
   });
 });
 

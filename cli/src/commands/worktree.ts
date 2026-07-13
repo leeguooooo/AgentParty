@@ -183,7 +183,7 @@ export async function runGitCommand(
   const inheritedSshCommand = opts.env?.GIT_SSH_COMMAND ?? process.env.GIT_SSH_COMMAND ?? "ssh";
   let foundBatchMode = false;
   const normalizedSshCommand = inheritedSshCommand.replace(
-    /(^|\s)-o\s*BatchMode\s*(?:=\s*|\s+)(?:yes|no|ask)\b/giu,
+    /(^|\s)["']?-o\s*["']?BatchMode["']?\s*(?:=\s*|\s+)["']?(?:yes|no|ask)["']?/giu,
     (_match, leading: string) => {
       foundBatchMode = true;
       return `${leading}-o BatchMode=yes`;
