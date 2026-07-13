@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import { LarkDirectoryApiError } from "../lib/api";
+import { LarkDirectoryApiError, type LarkDirectoryPage } from "../lib/api";
 import { LarkMemberInvite } from "./LarkMemberInvite";
 
 function memoryStorage(): Storage {
@@ -160,6 +160,74 @@ test("deduplicates users returned through multiple department pages", async () =
   expect(renderer!.root.findAllByProps({ "data-lark-user-id": "on_alice" })).toHaveLength(1);
   expect(renderer!.root.findAllByProps({ "data-lark-user-id": "on_bob" })).toHaveLength(1);
   expect(cursors).toEqual([null, "next"]);
+});
+
+test("clears old results and pagination when the query changes", async () => {
+  act(() => {
+    renderer = create(
+      <LocaleProvider>
+        <LarkMemberInvite
+          slug="room"
+          token="token"
+          search={async (_token, _slug, query) => query === "Alice"
+            ? {
+                users: [{ id: "on_alice", name: "Alice", avatar_url: null, already_member: false }],
+                next_cursor: "alice-next",
+              }
+            : {
+                users: [{ id: "on_bob", name: "Bob", avatar_url: null, already_member: false }],
+                next_cursor: null,
+              }}
+        />
+      </LocaleProvider>,
+    );
+  });
+  const input = renderer!.root.findByType("input");
+  act(() => input.props.onChange({ target: { value: "Alice" } }));
+  await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+  expect(renderer!.root.findByProps({ "data-lark-user-id": "on_alice" })).toBeTruthy();
+  expect(renderer!.root.findByProps({ className: "d-btn lark-invite-more" })).toBeTruthy();
+
+  act(() => input.props.onChange({ target: { value: "Bob" } }));
+  expect(renderer!.root.findAllByProps({ "data-lark-user-id": "on_alice" })).toHaveLength(0);
+  expect(renderer!.root.findAllByProps({ className: "d-btn lark-invite-more" })).toHaveLength(0);
+  await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+  expect(renderer!.root.findByProps({ "data-lark-user-id": "on_bob" })).toBeTruthy();
+});
+
+test("ignores a stale response after the query changes", async () => {
+  let resolveAlice!: (page: LarkDirectoryPage) => void;
+  const alicePage = new Promise<LarkDirectoryPage>((resolve) => { resolveAlice = resolve; });
+  act(() => {
+    renderer = create(
+      <LocaleProvider>
+        <LarkMemberInvite
+          slug="room"
+          token="token"
+          search={async (_token, _slug, query) => query === "Alice"
+            ? alicePage
+            : {
+                users: [{ id: "on_bob", name: "Bob", avatar_url: null, already_member: false }],
+                next_cursor: null,
+              }}
+        />
+      </LocaleProvider>,
+    );
+  });
+  const input = renderer!.root.findByType("input");
+  act(() => input.props.onChange({ target: { value: "Alice" } }));
+  let firstRequest!: Promise<void>;
+  act(() => { firstRequest = renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
+  act(() => input.props.onChange({ target: { value: "Bob" } }));
+  await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+  resolveAlice({
+    users: [{ id: "on_alice", name: "Alice", avatar_url: null, already_member: false }],
+    next_cursor: "stale-next",
+  });
+  await act(async () => { await firstRequest; });
+  expect(renderer!.root.findAllByProps({ "data-lark-user-id": "on_alice" })).toHaveLength(0);
+  expect(renderer!.root.findAllByProps({ "data-lark-user-id": "on_bob" })).toHaveLength(1);
+  expect(renderer!.root.findAllByProps({ className: "d-btn lark-invite-more" })).toHaveLength(0);
 });
 
 test("disables stale invite actions when contact permission is revoked during invite", async () => {
