@@ -3,7 +3,13 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { classifyWorktrees, type GitRunner, run, runGitCommand } from "../src/commands/worktree";
+import {
+  classifyWorktrees,
+  type GitRunner,
+  run,
+  runGitCommand,
+  terminateGitProcessTree,
+} from "../src/commands/worktree";
 
 // 用真 git：临时仓库 + 真 worktree，覆盖 merged-clean / merged-dirty / unmerged 三态。
 // 不 mock git——命令的价值就在于对真 porcelain 输出的解析与真 cherry/status 判定。
@@ -119,6 +125,21 @@ describe("classifyWorktrees", () => {
 });
 
 describe("git runner safety", () => {
+  test("uses taskkill semantics for the full process tree on Windows", () => {
+    const treePids: number[] = [];
+    const childSignals: Array<NodeJS.Signals | number | undefined> = [];
+    const result = terminateGitProcessTree(
+      { pid: 42, kill: (signal) => childSignals.push(signal) },
+      "win32",
+      process.kill,
+      (pid) => treePids.push(pid),
+    );
+
+    expect(result).toBe("tree");
+    expect(treePids).toEqual([42]);
+    expect(childSignals).toEqual([]);
+  });
+
   test("disables interactive prompts and kills a hung git command on timeout", async () => {
     const bin = join(root, "bin");
     git(root, "init", "--quiet", bin);

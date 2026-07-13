@@ -49,6 +49,47 @@ export type GitRunner = (args: string[], cwd: string) => Promise<GitResult>;
 
 const DEFAULT_GIT_TIMEOUT_MS = 30_000;
 
+interface KillableGitProcess {
+  pid: number;
+  kill(signal?: NodeJS.Signals | number): void;
+}
+
+type WindowsTreeKiller = (pid: number) => void;
+
+function taskkillProcessTree(pid: number): void {
+  const killer = Bun.spawn(["taskkill", "/PID", String(pid), "/T", "/F"], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  killer.unref();
+}
+
+export function terminateGitProcessTree(
+  proc: KillableGitProcess,
+  platform: NodeJS.Platform = process.platform,
+  killGroup: typeof process.kill = process.kill,
+  killWindowsTree: WindowsTreeKiller = taskkillProcessTree,
+): "group" | "tree" | "child" {
+  if (platform === "win32") {
+    try {
+      killWindowsTree(proc.pid);
+      return "tree";
+    } catch {
+      // taskkill 启动失败时仍要至少终止直接子进程。
+    }
+  } else {
+    try {
+      killGroup(-proc.pid, "SIGKILL");
+      return "group";
+    } catch {
+      // Git 可能恰好已退出；回退到直接子进程。
+    }
+  }
+  proc.kill("SIGKILL");
+  return "child";
+}
+
 export async function runGitCommand(
   args: string[],
   cwd: string,
@@ -59,7 +100,9 @@ export async function runGitCommand(
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
-    detached: true,
+    // POSIX 上独立进程组可一次终止 git + ssh/credential helper；
+    // Windows 保留父子关系，超时时交给 taskkill /T /F 清整棵进程树。
+    detached: process.platform !== "win32",
     env: {
       ...process.env,
       ...opts.env,
@@ -72,9 +115,7 @@ export async function runGitCommand(
   const timer = setTimeout(() => {
     timedOut = true;
     try {
-      // detached 让 Git 及其 ssh/credential helper 处在独立进程组；超时要杀整组，
-      // 否则只杀 git 时子进程仍可能握着 stdout/stderr pipe，Promise 会继续永久等待。
-      process.kill(-proc.pid, "SIGKILL");
+      terminateGitProcessTree(proc);
     } catch {
       try {
         proc.kill("SIGKILL");
