@@ -53,6 +53,7 @@ commands:
   token     create --name n --role agent|human|readonly --owner label [--channel-scope slug] | revoke <name>   (ADMIN_SECRET env)
   membership activate --account a | deactivate --account a   owner-only: mark an account member/free (#277)   (ADMIN_SECRET env)
   gdpr      erase <name> [channel] --yes | export <name> [channel] [--json]   per-identity hard-erase / export (moderator, #421)
+  worktree  list [--base ref] [--json] | prune [--base ref] [--dry-run] [--remote] [--yes]   safely tear down stale dev worktrees (#455)
 
 watch defaults to a 240s timeout. With --follow, it stays attached unless --timeout N is explicit.
 
@@ -152,6 +153,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/doctor")).run(rest);
     case "health":
       return (await import("./commands/health")).run(rest);
+    case "worktree":
+      return (await import("./commands/worktree")).run(rest);
     default:
       console.error(`unknown command: ${cmd}`);
       console.log(HELP);

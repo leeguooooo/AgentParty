@@ -1,0 +1,147 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { classifyWorktrees, run } from "../src/commands/worktree";
+
+// 用真 git：临时仓库 + 真 worktree，覆盖 merged-clean / merged-dirty / unmerged 三态。
+// 不 mock git——命令的价值就在于对真 porcelain 输出的解析与真 cherry/status 判定。
+
+let root: string;
+let main: string; // 主工作树
+let origin: string; // 裸远端，供 preserve/* push
+let oldCwd: string;
+let logs: string[];
+let errs: string[];
+let oldLog: typeof console.log;
+let oldError: typeof console.error;
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function commitFile(cwd: string, name: string, content: string, msg: string): void {
+  writeFileSync(join(cwd, name), content);
+  git(cwd, "add", "-A");
+  git(cwd, "commit", "-m", msg);
+}
+
+beforeEach(() => {
+  oldCwd = process.cwd();
+  root = mkdtempSync(join(tmpdir(), "ap-worktree-"));
+  origin = join(root, "origin.git");
+  main = join(root, "main");
+
+  git(root, "init", "--bare", "origin.git");
+  git(root, "init", "-b", "main", "main");
+  git(main, "config", "user.email", "t@t.io");
+  git(main, "config", "user.name", "t");
+  git(main, "remote", "add", "origin", origin);
+  commitFile(main, "base.txt", "base\n", "init");
+  git(main, "push", "-u", "origin", "main");
+
+  // merged-clean: 分支提交了改动，同一 patch 也进了 main（cherry -> '-'），工作树干净。
+  git(main, "worktree", "add", "-b", "mc", join(root, "wt-mc"), "main");
+  commitFile(join(root, "wt-mc"), "mc.txt", "mc-change\n", "mc: add file");
+  const mcSha = git(join(root, "wt-mc"), "rev-parse", "HEAD");
+  git(main, "cherry-pick", mcSha); // main 现在 patch-equivalent 含 mc 的改动
+
+  // merged-dirty: 同上 patch-equivalent，但工作树留未提交改动。
+  git(main, "worktree", "add", "-b", "md", join(root, "wt-md"), "main");
+  commitFile(join(root, "wt-md"), "md.txt", "md-change\n", "md: add file");
+  const mdSha = git(join(root, "wt-md"), "rev-parse", "HEAD");
+  git(main, "cherry-pick", mdSha);
+  writeFileSync(join(root, "wt-md", "dirty.txt"), "uncommitted work\n"); // 脏
+
+  // unmerged: 分支有真未合提交（cherry -> '+'）。
+  git(main, "worktree", "add", "-b", "un", join(root, "wt-un"), "main");
+  commitFile(join(root, "wt-un"), "un.txt", "un-change\n", "un: real unmerged work");
+
+  process.chdir(main);
+  logs = [];
+  errs = [];
+  oldLog = console.log;
+  oldError = console.error;
+  console.log = (line?: unknown) => logs.push(String(line));
+  console.error = (line?: unknown) => errs.push(String(line));
+});
+
+afterEach(() => {
+  process.chdir(oldCwd);
+  console.log = oldLog;
+  console.error = oldError;
+  rmSync(root, { recursive: true, force: true });
+});
+
+describe("classifyWorktrees", () => {
+  test("classifies merged-clean / merged-dirty / unmerged, skips main", async () => {
+    const rows = await classifyWorktrees(main, "main");
+    const by = (b: string) => rows.find((r) => r.branch === b);
+    expect(by("mc")?.status).toBe("merged-clean");
+    expect(by("md")?.status).toBe("merged-dirty");
+    expect(by("md")?.dirty).toBeGreaterThan(0);
+    expect(by("un")?.status).toBe("unmerged");
+    expect(by("un")?.ahead).toBeGreaterThan(0);
+    // 主工作树永远是 skip（不能删）。git 会 realpath（macOS /var -> /private/var）。
+    const realMain = realpathSync(main);
+    const mainRow = rows.find((r) => r.path === realMain);
+    expect(mainRow?.status).toBe("main");
+  });
+});
+
+describe("party worktree list", () => {
+  test("--json emits the three states", async () => {
+    const code = await run(["list", "--base", "main", "--json"]);
+    expect(code).toBe(0);
+    const out = JSON.parse(logs.join(""));
+    const statuses = Object.fromEntries(out.map((r: any) => [r.branch, r.status]));
+    expect(statuses.mc).toBe("merged-clean");
+    expect(statuses.md).toBe("merged-dirty");
+    expect(statuses.un).toBe("unmerged");
+  });
+});
+
+describe("party worktree prune", () => {
+  test("default is dry-run: touches nothing", async () => {
+    const code = await run(["prune", "--base", "main"]);
+    expect(code).toBe(0);
+    expect(existsSync(join(root, "wt-mc"))).toBe(true);
+    expect(existsSync(join(root, "wt-md"))).toBe(true);
+    expect(existsSync(join(root, "wt-un"))).toBe(true);
+    // 分支都还在
+    const branches = git(main, "branch", "--format=%(refname:short)");
+    expect(branches).toContain("mc");
+    expect(logs.join("\n").toLowerCase()).toContain("dry-run");
+  });
+
+  test("--yes removes merged-clean worktree + branch", async () => {
+    const code = await run(["prune", "--base", "main", "--yes"]);
+    expect(code).toBe(0);
+    expect(existsSync(join(root, "wt-mc"))).toBe(false);
+    const branches = git(main, "branch", "--format=%(refname:short)").split("\n");
+    expect(branches).not.toContain("mc");
+  });
+
+  test("--yes preserves merged-dirty to preserve/* BEFORE removing (never loses work)", async () => {
+    const code = await run(["prune", "--base", "main", "--yes"]);
+    expect(code).toBe(0);
+    // 工作树删了
+    expect(existsSync(join(root, "wt-md"))).toBe(false);
+    // 但脏改动被 push 到 origin 的 preserve/md，内容没丢
+    const remoteRefs = git(main, "ls-remote", "--heads", "origin");
+    expect(remoteRefs).toContain("refs/heads/preserve/md");
+    // preserve 分支里确实含那份未提交的文件
+    const files = git(main, "ls-tree", "-r", "--name-only", "origin/preserve/md");
+    expect(files).toContain("dirty.txt");
+  });
+
+  test("--yes skips unmerged: worktree + branch survive", async () => {
+    const code = await run(["prune", "--base", "main", "--yes"]);
+    expect(code).toBe(0);
+    expect(existsSync(join(root, "wt-un"))).toBe(true);
+    const branches = git(main, "branch", "--format=%(refname:short)").split("\n");
+    expect(branches).toContain("un");
+    expect(logs.join("\n")).toContain("un");
+  });
+});
