@@ -473,6 +473,65 @@ describe("runServe", () => {
     }
   });
 
+  test("wake context uses the final partial recent-message budget", () => {
+    const trigger = msgFrame(50, "full trigger", { mentions: ["me"] }) as unknown as MsgFrame;
+    const prior = Array.from({ length: 12 }, (_, index) =>
+      msgFrame(index + 1, `m${String(index + 1).padStart(2, "0")}` + "x".repeat(397)) as unknown as MsgFrame,
+    );
+    const path = writeContextFile(
+      tempDir("ap-budget-partial-"),
+      trigger,
+      "dev",
+      "me",
+      prior,
+      { charter: "C".repeat(3_999), charter_rev: 8, updated_at: null, updated_by: null },
+    );
+    try {
+      const ctx = JSON.parse(readFileSync(path, "utf8"));
+      expect(ctx.body).toBe("full trigger");
+      expect(ctx.recent.map((m: { seq: number }) => m.seq)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      expect(ctx.recent[0].body).toBe("m");
+      expect(ctx.context_budget).toMatchObject({
+        auxiliary_body_chars: 8_000,
+        charter_chars: 3_999,
+        recent_body_chars: 4_001,
+        recent_messages_included: 11,
+        recent_messages_available: 12,
+        recent_truncated: true,
+      });
+    } finally {
+      unlinkSync(path);
+    }
+  });
+
+  test("wake context truncates on Unicode code-point boundaries", () => {
+    const triggerBody = "🧭".repeat(10);
+    const trigger = msgFrame(50, triggerBody, { mentions: ["me"] }) as unknown as MsgFrame;
+    const path = writeContextFile(
+      tempDir("ap-budget-unicode-"),
+      trigger,
+      "dev",
+      "me",
+      [msgFrame(49, "😀".repeat(500)) as unknown as MsgFrame],
+      { charter: "🚀".repeat(5_000), charter_rev: 9, updated_at: null, updated_by: null },
+    );
+    try {
+      const ctx = JSON.parse(readFileSync(path, "utf8"));
+      expect(ctx.body).toBe(triggerBody);
+      expect(Array.from(ctx.charter)).toHaveLength(4_000);
+      expect(ctx.charter).toEndWith("[charter truncated; run `party charter dev`]");
+      expect(Array.from(ctx.recent[0].body)).toHaveLength(400);
+      expect(ctx.recent[0].body).toBe("😀".repeat(400));
+      expect(ctx.context_budget).toMatchObject({
+        trigger_body_chars: 10,
+        charter_chars: 4_000,
+        recent_body_chars: 400,
+      });
+    } finally {
+      unlinkSync(path);
+    }
+  });
+
   test("replayed revision snapshot of an old mention does not re-trigger the runner", async () => {
     // 旧 @ 被编辑过 → 服务端每次连接都重放它；runner 只能被真正未消费的新消息触发
     server = startMockServer((frame, sock) => {

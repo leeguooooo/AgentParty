@@ -238,6 +238,16 @@ function attachmentContextMetadata(attachment: Attachment): WakeContextAttachmen
   return { ...attachment, auth: "Bearer token required", local_path: null };
 }
 
+function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
+function truncateCodePoints(value: string, maxLength: number): string {
+  if (maxLength <= 0) return "";
+  const points = Array.from(value);
+  return points.length <= maxLength ? value : points.slice(0, maxLength).join("");
+}
+
 // 把一条 @mention 的完整上下文落成 JSON 文件，命令拿路径读——避开 env/stdin 的 shell quoting/注入，
 // 也让 runner 能一次拿全 channel/seq/sender/body/reply_to/recent/protocol_reminder（评审建议）。
 // recent = 触发消息之前、serve 在线期间看到的最近频道消息（含自己/未 @ 的闲聊，正文截断），
@@ -255,12 +265,16 @@ function buildWakeContext(
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
   const rawCharter = charter?.charter ?? null;
   const charterNotice = `\n… [charter truncated; run \`party charter ${channel}\`]`;
+  const charterNoticeLength = codePointLength(charterNotice);
   const boundedCharter = rawCharter === null
     ? null
-    : rawCharter.length <= WAKE_CHARTER_BODY_MAX
+    : codePointLength(rawCharter) <= WAKE_CHARTER_BODY_MAX
       ? rawCharter
-      : rawCharter.slice(0, WAKE_CHARTER_BODY_MAX - charterNotice.length) + charterNotice;
-  let recentBudget = WAKE_AUX_BODY_MAX - (boundedCharter?.length ?? 0);
+      : charterNoticeLength >= WAKE_CHARTER_BODY_MAX
+        ? truncateCodePoints(charterNotice, WAKE_CHARTER_BODY_MAX)
+        : truncateCodePoints(rawCharter, WAKE_CHARTER_BODY_MAX - charterNoticeLength) + charterNotice;
+  const boundedCharterLength = boundedCharter === null ? 0 : codePointLength(boundedCharter);
+  let recentBudget = WAKE_AUX_BODY_MAX - boundedCharterLength;
   let recentBodyChars = 0;
   let recentBodyTruncated = false;
   const boundedRecent: Array<{
@@ -275,10 +289,12 @@ function buildWakeContext(
   for (let i = recent.length - 1; i >= 0 && recentBudget > 0; i--) {
     const message = recent[i]!;
     const rawBody = message.kind === "message" ? message.body : (message.note ?? "");
-    const boundedBody = rawBody.slice(0, Math.min(RECENT_BODY_MAX, recentBudget));
-    recentBodyTruncated ||= boundedBody.length < rawBody.length;
-    recentBodyChars += boundedBody.length;
-    recentBudget -= boundedBody.length;
+    const rawBodyLength = codePointLength(rawBody);
+    const boundedBody = truncateCodePoints(rawBody, Math.min(RECENT_BODY_MAX, recentBudget));
+    const boundedBodyLength = codePointLength(boundedBody);
+    recentBodyTruncated ||= boundedBodyLength < rawBodyLength;
+    recentBodyChars += boundedBodyLength;
+    recentBudget -= boundedBodyLength;
     boundedRecent.push({
       seq: message.seq,
       sender: message.sender.name,
@@ -309,10 +325,10 @@ function buildWakeContext(
     context_budget: {
       policy: "auxiliary-body-chars-v1",
       max_auxiliary_body_chars: WAKE_AUX_BODY_MAX,
-      auxiliary_body_chars: (boundedCharter?.length ?? 0) + recentBodyChars,
-      trigger_body_chars: body.length,
+      auxiliary_body_chars: boundedCharterLength + recentBodyChars,
+      trigger_body_chars: codePointLength(body),
       trigger_body_truncated: false,
-      charter_chars: boundedCharter?.length ?? 0,
+      charter_chars: boundedCharterLength,
       charter_truncated: rawCharter !== null && boundedCharter !== rawCharter,
       recent_body_chars: recentBodyChars,
       recent_messages_included: boundedRecent.length,
