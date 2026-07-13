@@ -13,6 +13,7 @@ export interface LarkProviderConfig {
 
 export interface LarkDirectoryUser {
   id: string;
+  identifiers: string[];
   name: string;
   avatarUrl: string | null;
 }
@@ -42,11 +43,113 @@ const DEFAULT_SECRET_ENV: Record<LarkProviderKind, string> = {
   feishu: "FEISHU_CLIENT_SECRET",
 };
 const TOKEN_SKEW_MS = 60_000;
+const DIRECTORY_CURSOR_VERSION = 1;
+const DIRECTORY_CURSOR_MAX = 1_024;
+const DIRECTORY_PAGE_TOKEN_MAX = 512;
+const DIRECTORY_DEPARTMENT_BATCH = 4;
+const DEPARTMENT_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_\-@.]{0,63}$/;
 const tokenCache = new Map<string, { token: string; expiresAt: number }>();
 const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+interface DirectoryCursorState {
+  v: 1;
+  q: string;
+  p: string;
+  d: string;
+  a: string[];
+  u: string | null;
+  n: string | null;
+  s: boolean;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function providerSecret(env: EnvLike, provider: LarkProviderConfig): string {
+  const secret = (env as Record<string, string | undefined>)[provider.clientSecretEnv]?.trim();
+  if (!secret) throw new Error("lark provider secret is not configured");
+  return secret;
+}
+
+function base64url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64urlBytes(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+    const binary = atob(padded);
+    return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
+async function directoryCursorSignature(secret: string, payload: string): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    textEncoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return new Uint8Array(await crypto.subtle.sign("HMAC", key, textEncoder.encode(payload))).slice(0, 16);
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
+function validPageToken(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && value.length > 0 && value.length <= DIRECTORY_PAGE_TOKEN_MAX);
+}
+
+async function encodeDirectoryCursor(secret: string, state: DirectoryCursorState): Promise<string> {
+  const payload = base64url(textEncoder.encode(JSON.stringify(state)));
+  const encoded = `${payload}.${base64url(await directoryCursorSignature(secret, payload))}`;
+  if (encoded.length > DIRECTORY_CURSOR_MAX) throw new LarkDirectoryError("upstream", "Lark directory cursor is too large");
+  return encoded;
+}
+
+async function decodeDirectoryCursor(
+  secret: string,
+  cursor: string,
+  query: string,
+  providerId: string,
+): Promise<DirectoryCursorState> {
+  const invalid = () => new LarkDirectoryError("invalid_cursor", "Lark directory cursor is invalid");
+  if (cursor.length === 0 || cursor.length > DIRECTORY_CURSOR_MAX) throw invalid();
+  const [payload, signature, extra] = cursor.split(".");
+  const payloadBytes = payload === undefined ? null : base64urlBytes(payload);
+  const signatureBytes = signature === undefined ? null : base64urlBytes(signature);
+  if (payloadBytes === null || signatureBytes === null || extra !== undefined) throw invalid();
+  const expected = await directoryCursorSignature(secret, payload);
+  if (!sameBytes(signatureBytes, expected)) throw invalid();
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(textDecoder.decode(payloadBytes));
+  } catch {
+    throw invalid();
+  }
+  if (
+    !isRecord(decoded) || decoded.v !== DIRECTORY_CURSOR_VERSION || decoded.q !== query || decoded.p !== providerId ||
+    typeof decoded.d !== "string" || !DEPARTMENT_ID_RE.test(decoded.d) || !validPageToken(decoded.u) ||
+    !Array.isArray(decoded.a) || decoded.a.length >= DIRECTORY_DEPARTMENT_BATCH ||
+    !decoded.a.every((departmentId) => typeof departmentId === "string" && DEPARTMENT_ID_RE.test(departmentId)) ||
+    !validPageToken(decoded.n) || typeof decoded.s !== "boolean" ||
+    (!decoded.s && (decoded.d !== "0" || decoded.a.length !== 0 || decoded.n !== null))
+  ) {
+    throw invalid();
+  }
+  return decoded as unknown as DirectoryCursorState;
 }
 
 function authProviderConfigs(env: EnvLike): LarkProviderConfig[] {
@@ -89,7 +192,7 @@ function larkError(data: Record<string, unknown>, status: number): LarkDirectory
   if (code === 41012 || code === 99992352 || code === 99992363 || code === 99992364 || code === 99992381) {
     return new LarkDirectoryError("not_found", message);
   }
-  if (code === 41050 || code === 40004 || /(?:permission|authority|scope)/i.test(message)) {
+  if (code === 41050 || code === 40004 || code === 40014 || /(?:permission|authority|scope)/i.test(message)) {
     return new LarkDirectoryError("permission", message);
   }
   return new LarkDirectoryError("upstream", message);
@@ -117,7 +220,11 @@ function directoryUsers(data: Record<string, unknown>): LarkDirectoryUser[] {
   const users: LarkDirectoryUser[] = [];
   for (const value of rows) {
     if (!isRecord(value)) continue;
-    const id = typeof value.union_id === "string" ? value.union_id.trim() : "";
+    const identifiers = [value.union_id, value.open_id, value.user_id]
+      .filter((identifier): identifier is string => typeof identifier === "string" && identifier.trim().length > 0)
+      .map((identifier) => identifier.trim())
+      .filter((identifier, index, all) => all.indexOf(identifier) === index);
+    const id = identifiers[0] ?? "";
     const name = typeof value.name === "string" ? value.name.trim() : "";
     if (!id || !name) continue;
     const avatar = isRecord(value.avatar) ? value.avatar : {};
@@ -126,9 +233,70 @@ function directoryUsers(data: Record<string, unknown>): LarkDirectoryUser[] {
       : typeof value.avatar_url === "string"
         ? value.avatar_url
         : null;
-    users.push({ id, name, avatarUrl });
+    users.push({ id, identifiers, name, avatarUrl });
   }
   return users;
+}
+
+async function nextLarkDepartments(
+  env: EnvLike,
+  provider: LarkProviderConfig,
+  pageToken: string | null,
+): Promise<{ departmentIds: string[]; nextPageToken: string | null } | null> {
+  const params = new URLSearchParams({
+    department_id_type: "open_department_id",
+    fetch_child: "true",
+    page_size: String(DIRECTORY_DEPARTMENT_BATCH),
+  });
+  if (pageToken !== null) params.set("page_token", pageToken);
+  const data = await larkDirectoryRequest(
+    env,
+    provider,
+    `/open-apis/contact/v3/departments/0/children?${params.toString()}`,
+  );
+  const payload = isRecord(data.data) ? data.data : {};
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  if (items.length === 0) {
+    if (payload.has_more === true) throw new LarkDirectoryError("upstream", "Lark returned an empty department page");
+    return null;
+  }
+  const departmentIds = items.map((item) => isRecord(item) && typeof item.open_department_id === "string"
+    ? item.open_department_id.trim()
+    : "");
+  if (departmentIds.some((departmentId) => !DEPARTMENT_ID_RE.test(departmentId))) {
+    throw new LarkDirectoryError("upstream", "Lark returned an invalid department id");
+  }
+  const nextPageToken = payload.has_more === true && typeof payload.page_token === "string" && payload.page_token
+    ? payload.page_token
+    : null;
+  if (payload.has_more === true && nextPageToken === null) {
+    throw new LarkDirectoryError("upstream", "Lark omitted the next department cursor");
+  }
+  return { departmentIds, nextPageToken };
+}
+
+async function advanceLarkDepartment(
+  env: EnvLike,
+  provider: LarkProviderConfig,
+  state: DirectoryCursorState,
+): Promise<DirectoryCursorState | null> {
+  if (state.a.length > 0) {
+    return { ...state, d: state.a[0], a: state.a.slice(1), u: null, s: true };
+  }
+  const batch = state.s
+    ? state.n === null ? null : await nextLarkDepartments(env, provider, state.n)
+    : await nextLarkDepartments(env, provider, null);
+  if (batch === null) return null;
+  return {
+    v: DIRECTORY_CURSOR_VERSION,
+    q: state.q,
+    p: state.p,
+    d: batch.departmentIds[0],
+    a: batch.departmentIds.slice(1),
+    u: null,
+    n: batch.nextPageToken,
+    s: true,
+  };
 }
 
 export async function searchLarkDirectory(
@@ -138,19 +306,35 @@ export async function searchLarkDirectory(
   cursor: string | null,
   pageSize: number,
 ): Promise<{ users: LarkDirectoryUser[]; nextCursor: string | null }> {
-  const params = new URLSearchParams({ open_department_id: "0", fetch_child: "true", page_size: String(pageSize) });
-  if (cursor !== null) params.set("page_token", cursor);
+  const normalizedQuery = query.toLocaleLowerCase();
+  const secret = providerSecret(env, provider);
+  const state = cursor === null
+    ? { v: DIRECTORY_CURSOR_VERSION, q: normalizedQuery, p: provider.id, d: "0", a: [], u: null, n: null, s: false } as DirectoryCursorState
+    : await decodeDirectoryCursor(secret, cursor, normalizedQuery, provider.id);
+  const params = new URLSearchParams({
+    user_id_type: "union_id",
+    department_id_type: "open_department_id",
+    department_id: state.d,
+    page_size: String(pageSize),
+  });
+  if (state.u !== null) params.set("page_token", state.u);
   const data = await larkDirectoryRequest(
     env,
     provider,
-    `/open-apis/contact/v1/department/user/detail/list?${params.toString()}`,
+    `/open-apis/contact/v3/users/find_by_department?${params.toString()}`,
   );
-  const normalizedQuery = query.toLocaleLowerCase();
   const users = directoryUsers(data).filter((user) => user.name.toLocaleLowerCase().includes(normalizedQuery));
   const payload = isRecord(data.data) ? data.data : {};
   const hasMore = payload.has_more === true;
   const pageToken = typeof payload.page_token === "string" && payload.page_token ? payload.page_token : null;
-  return { users, nextCursor: hasMore ? pageToken : null };
+  if (hasMore && pageToken === null) throw new LarkDirectoryError("upstream", "Lark omitted the next user cursor");
+  let nextState: DirectoryCursorState | null = hasMore
+    ? { ...state, u: pageToken }
+    : null;
+  if (!hasMore) {
+    nextState = await advanceLarkDepartment(env, provider, state);
+  }
+  return { users, nextCursor: nextState === null ? null : await encodeDirectoryCursor(secret, nextState) };
 }
 
 export async function getLarkDirectoryUser(
@@ -195,8 +379,7 @@ export function inferReceiveIdType(providerUserId: string, email: string | null 
 }
 
 export async function getTenantAccessToken(env: EnvLike, provider: LarkProviderConfig): Promise<string> {
-  const secret = (env as Record<string, string | undefined>)[provider.clientSecretEnv]?.trim();
-  if (!secret) throw new Error("lark provider secret is not configured");
+  const secret = providerSecret(env, provider);
   const cacheKey = `${provider.id}:${provider.kind}:${provider.clientId}:${secret}`;
   const cached = tokenCache.get(cacheKey);
   const now = Date.now();

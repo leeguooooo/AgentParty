@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import {
   inviteLarkMember,
   LarkDirectoryApiError,
@@ -33,6 +33,8 @@ export function LarkMemberInvite({
   const [busy, setBusy] = useState(false);
   const [inviting, setInviting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const activeQuery = useRef("");
+  const queryVersion = useRef(0);
   // #382：部署未开通 Lark 通讯录权限时，撞一次就记住——之后禁用搜索并持久提示，
   // 不让用户反复搜了才报错。权限是 owner 在 Lark 后台配置项，前端只能优雅降级。
   const [directoryUnavailable, setDirectoryUnavailable] = useState(false);
@@ -64,19 +66,44 @@ export function LarkMemberInvite({
   async function runSearch(nextCursor: string | null) {
     const normalized = query.trim();
     if (!normalized) return;
+    const version = queryVersion.current;
     setBusy(true);
     setError(null);
     try {
       const page: LarkDirectoryPage = await search(token, slug, normalized, 20, nextCursor);
-      setUsers((current) => nextCursor === null ? page.users : [...current, ...page.users]);
+      if (version !== queryVersion.current || normalized !== activeQuery.current) return;
+      setUsers((current) => {
+        const merged = nextCursor === null ? [] : [...current];
+        const known = new Set(merged.map((user) => user.id));
+        for (const user of page.users) {
+          if (known.has(user.id)) continue;
+          known.add(user.id);
+          merged.push(user);
+        }
+        return merged;
+      });
       setCursor(page.next_cursor);
       setSearched(true);
     } catch (cause) {
+      if (version !== queryVersion.current || normalized !== activeQuery.current) return;
       if (isDirectoryPermissionError(cause)) disableDirectoryActions();
       else setError(errorLabel(cause, "LarkInvite.error.search"));
     } finally {
-      setBusy(false);
+      if (version === queryVersion.current && normalized === activeQuery.current) setBusy(false);
     }
+  }
+
+  function changeQuery(value: string) {
+    setQuery(value);
+    const normalized = value.trim();
+    if (normalized === activeQuery.current) return;
+    activeQuery.current = normalized;
+    queryVersion.current += 1;
+    setUsers([]);
+    setCursor(null);
+    setSearched(false);
+    setError(null);
+    setBusy(false);
   }
 
   async function submit(event: FormEvent) {
@@ -114,7 +141,7 @@ export function LarkMemberInvite({
               maxLength={64}
               aria-label={t("LarkInvite.searchLabel")}
               placeholder={t("LarkInvite.placeholder")}
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={(event) => changeQuery(event.target.value)}
             />
             <button type="submit" className="d-btn d-btn--primary" disabled={busy || !query.trim()}>
               {busy ? t("LarkInvite.searching") : t("LarkInvite.search")}

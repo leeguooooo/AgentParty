@@ -3561,7 +3561,8 @@ app.get("/api/channels/:slug/lark-directory", async (c) => {
     ).bind(slug).all<{ account: string }>()).results.map((row) => row.account));
     return c.json({
       users: page.users.map((user) => {
-        const account = knownAccounts.get(user.id) ?? directoryAccount(provider.id, user.id);
+        const account = user.identifiers.map((identifier) => knownAccounts.get(identifier)).find((known) => known !== undefined)
+          ?? directoryAccount(provider.id, user.id);
         return { id: user.id, name: user.name, avatar_url: user.avatarUrl, already_member: account !== null && members.has(account) };
       }),
       next_cursor: page.nextCursor,
@@ -3600,12 +3601,20 @@ app.post("/api/channels/:slug/lark-members", async (c) => {
   }
   try {
     const user = await getLarkDirectoryUser(c.env, provider, userId);
-    const known = await c.env.DB.prepare(
-      `SELECT account FROM account_profiles
-        WHERE provider = ? AND provider_user_id = ? AND tenant_key = ?
-        LIMIT 1`,
-    ).bind(provider.id, user.id, profile.tenant_key).first<{ account: string }>();
-    const account = known?.account ?? directoryAccount(provider.id, user.id);
+    const directoryIdentifiers = user.identifiers.slice(0, 3);
+    const identifiers = [...directoryIdentifiers, "", ""].slice(0, 3);
+    const knownProfiles = await c.env.DB.prepare(
+      `SELECT account, provider_user_id FROM account_profiles
+        WHERE provider = ? AND tenant_key = ? AND provider_user_id IN (?, ?, ?)`,
+    ).bind(provider.id, profile.tenant_key, ...identifiers)
+      .all<{ account: string; provider_user_id: string }>();
+    const accountsByIdentifier = new Map(
+      knownProfiles.results.map((knownProfile) => [knownProfile.provider_user_id, knownProfile.account]),
+    );
+    const knownAccount = directoryIdentifiers
+      .map((identifier) => accountsByIdentifier.get(identifier))
+      .find((candidate) => candidate !== undefined);
+    const account = knownAccount ?? directoryAccount(provider.id, user.id);
     if (account === null) return c.json(errorBody("bad_request", "unsupported Lark user id"), 400);
     await ensureDefaultHandle(c.env.DB, {
       account,
