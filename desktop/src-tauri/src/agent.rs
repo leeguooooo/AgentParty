@@ -8,7 +8,6 @@ use std::{
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 #[cfg(desktop)]
 use tauri::{AppHandle, State};
@@ -203,9 +202,9 @@ fn config_identity_key(path: &Path, server_origin: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{}:{:x}",
+        "{}:{}",
         server_origin,
-        Sha256::digest(config.token.as_bytes())
+        crate::ui_update::sha256_hex(config.token.as_bytes())
     ))
 }
 
@@ -213,9 +212,8 @@ pub(crate) fn config_id(path: &Path) -> Result<String, String> {
     let canonical = path
         .canonicalize()
         .map_err(|_| "AgentParty config path is unavailable".to_string())?;
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(canonical.as_os_str().as_encoded_bytes())
+    Ok(crate::ui_update::sha256_hex(
+        canonical.as_os_str().as_encoded_bytes(),
     ))
 }
 

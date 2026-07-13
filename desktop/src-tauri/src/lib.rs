@@ -13,7 +13,6 @@ use std::{
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 mod agent;
 #[cfg(desktop)]
@@ -301,8 +300,10 @@ fn credential_account_for_origin(origin: &str) -> Result<String, String> {
     if parsed.origin().ascii_serialization() != origin {
         return Err("desktop credential server is not normalized".to_string());
     }
-    let digest = Sha256::digest(origin.as_bytes());
-    Ok(format!("desktop-session:{digest:x}"))
+    Ok(format!(
+        "desktop-session:{}",
+        ui_update::sha256_hex(origin.as_bytes())
+    ))
 }
 
 trait CredentialBackend {
