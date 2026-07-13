@@ -186,7 +186,7 @@ export function connect(
   // 已入队未 ack 的 seq，broadcast 与 hello 补拉重叠时去重
   const delivered = new Set<number>();
   // 非修订消息的原始帧保留到 ack；serve standby 接管租约时可把已消费但未确认的帧重新排队。
-  const unacked = new Map<number, ServerFrame>();
+  const unacked = new Map<number, Extract<ServerFrame, { type: "msg" | "status" }>>();
   // 已递过的修订快照 seq → 指纹：跨重连去重（服务端每次 hello 都重放全部历史修订）
   const deliveredRevisions = new Map<number, string>();
   let closed = false;

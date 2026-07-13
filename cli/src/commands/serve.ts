@@ -1806,6 +1806,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
         deferredLeaseSeq = Math.min(deferredLeaseSeq ?? frame.seq, frame.seq);
         out(`▷ standby（未持有 serve 租约），保留未确认 wake seq=${frame.seq}，接管后重放: ${formatMsg(frame)}`);
       }
+      // deferredLeaseSeq 只会在 !hasLease 时设置，held=true 分支会先清空再 replay；因此持租处理
+      // 与 standby 冻结区互斥。不要在这里额外跳过，否则一旦状态漂移反而会把欠账永久冻住。
       const qualifies = wouldWake && !selfPaused && hasLease;
       if (qualifies) {
         out(`▶ ${formatMsg(frame)}`);
