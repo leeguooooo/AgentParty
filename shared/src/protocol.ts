@@ -11,6 +11,11 @@ export const LOOP_GUARD_AGENT_N = 15;
 export const LOOP_GUARD_PARTY_N = 200;
 export const LOOP_GUARD_AGENT_PARTY_N = 50;
 export const RETAIN_N = 10_000;
+// read_cursor 每个曾发过 seen 的身份留一行（upsert，不随消息增长，但随参与者增长）。
+// 长寿 standing/party 频道里 ephemeral agent 换了一批又一批，游标只增不减（issue #128）。
+// 按行数封顶，淘汰最久未更新的：活跃读者每次 seen 都刷新 updated_at，被淘汰的只会是久已沉默的身份，
+// 它若回来，下次 seen 会重建游标。
+export const MAX_READ_CURSORS = 500;
 export const PRESENCE_TIMEOUT_MS = 60_000;
 // temp 频道最后一条消息后闲置多久自动归档（spec §6）
 export const TEMP_IDLE_ARCHIVE_MS = 14 * 24 * 60 * 60 * 1000;

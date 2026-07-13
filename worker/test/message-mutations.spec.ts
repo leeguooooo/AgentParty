@@ -56,23 +56,60 @@ describe("message edit/retract/supersede", () => {
     });
   });
 
-  it("lets a moderator retract another sender and removes it from search", async () => {
+  // #128：撤回的设计场景是抹掉误发的密钥。清空 body 与 search 不够——正文此前还活在
+  // messages.original_body（rowToFrame 会当 revision.original_body 广播回去）和 message_audit 里。
+  // 撤回必须抹掉全部正文，只留问责痕迹。
+  it("lets a moderator retract another sender and scrubs the body everywhere", async () => {
     const { slug, owner, writer } = await scopedFixture();
     const sent = await postMessage(slug, writer.token, "needle secret");
     const seq = ((await sent.json()) as { seq: number }).seq;
 
     const retracted = await api(`/api/channels/${slug}/messages/${seq}/retract`, owner.token, { method: "POST" });
     expect(retracted.status).toBe(200);
-    expect(((await retracted.json()) as { message: MsgLike }).message).toMatchObject({
-      seq,
-      body: "",
-      retracted: true,
-      revision: { original_body: "needle secret" },
-    });
+    const retractedMsg = ((await retracted.json()) as { message: MsgLike }).message;
+    expect(retractedMsg).toMatchObject({ seq, body: "", retracted: true });
+    // 撤回响应帧不得再回泄正文
+    expect(retractedMsg.revision?.original_body ?? null).toBeNull();
 
+    // search 抹掉
     const search = await api(`/api/channels/${slug}/search?q=needle`, writer.token);
     expect(search.status).toBe(200);
     expect(((await search.json()) as { hits: unknown[] }).hits).toEqual([]);
+
+    // /audit 端点不得再读回密钥：留痕迹（action=retract）但正文为 null
+    const audit = await api(`/api/channels/${slug}/messages/${seq}/audit`, owner.token);
+    expect(audit.status).toBe(200);
+    const rows = ((await audit.json()) as { audit: Array<{ action: string; old_body: string | null; new_body: string | null }> }).audit;
+    expect(rows.some((r) => r.action === "retract")).toBe(true);
+    for (const r of rows) {
+      expect(r.old_body).toBeNull();
+      expect(r.new_body).toBeNull();
+    }
+  });
+
+  // 先编辑再撤回：编辑把首版写进了 audit.old_body，撤回必须把这份历史正文也抹掉。
+  it("scrubs prior edit-audit bodies when a previously edited message is retracted", async () => {
+    const { slug, writer } = await scopedFixture();
+    const sent = await postMessage(slug, writer.token, "first secret");
+    const seq = ((await sent.json()) as { seq: number }).seq;
+
+    const edited = await api(`/api/channels/${slug}/messages/${seq}/edit`, writer.token, {
+      method: "POST",
+      body: JSON.stringify({ body: "second secret" }),
+    });
+    expect(edited.status).toBe(200);
+
+    const retracted = await api(`/api/channels/${slug}/messages/${seq}/retract`, writer.token, { method: "POST" });
+    expect(retracted.status).toBe(200);
+
+    const audit = await api(`/api/channels/${slug}/messages/${seq}/audit`, writer.token);
+    const rows = ((await audit.json()) as { audit: Array<{ old_body: string | null; new_body: string | null }> }).audit;
+    // 编辑行 + 撤回行都在（痕迹保留），但没有一格正文残留
+    expect(rows.length).toBeGreaterThanOrEqual(2);
+    for (const r of rows) {
+      expect(r.old_body).toBeNull();
+      expect(r.new_body).toBeNull();
+    }
   });
 
   it("supersedes with a new linked message", async () => {

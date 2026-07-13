@@ -4,6 +4,7 @@ import {
   BODY_LIMIT,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
+  MAX_READ_CURSORS,
   MAX_WEBHOOKS_PER_CHANNEL,
   MAX_WEBHOOK_QUEUE_ROWS,
   PRESENCE_TIMEOUT_MS,
@@ -993,6 +994,16 @@ export class ChannelDO extends Server<Env> {
       last_seen_seq INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     )`);
+    // 一次性回填（issue #128）：修复前撤回的消息，正文仍留在 messages.original_body 与
+    // message_audit 里。撤回的设计场景是抹掉误发密钥，存量泄漏必须一并清掉。幂等、按 meta 标志只跑一次。
+    if (this.getMeta("retract_scrub_v1") === null) {
+      sql.exec("UPDATE messages SET original_body = NULL WHERE retracted_at IS NOT NULL AND original_body IS NOT NULL");
+      sql.exec(
+        `UPDATE message_audit SET old_body = NULL, new_body = NULL
+          WHERE target_seq IN (SELECT seq FROM messages WHERE retracted_at IS NOT NULL)`,
+      );
+      this.setMeta("retract_scrub_v1", "1");
+    }
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'),
     );
@@ -1916,20 +1927,29 @@ export class ChannelDO extends Server<Env> {
         return Response.json({ message: frame });
       }
       if (action === "retract") {
+        // 撤回即抹正文：retract 的设计场景是撤回误发的密钥（issue #128 / GDPR 删除权）。
+        // 只把 messages.body 清空是不够的——正文还活在三处：
+        //   1. messages.original_body（编辑历史；rowToFrame 会当 revision.original_body 广播回去）
+        //   2. message_audit.old_body / new_body（/audit 端点原样读回）
+        //   3. 撤回本身若把旧 body 写进 audit，等于又存了一份
+        // 所以撤回要抹掉全部正文，只留「谁在何时撤/改」的痕迹（action/actor/created_at）作问责链。
         this.ctx.storage.sql.exec(
           `INSERT INTO message_audit (target_seq, action, actor_name, actor_kind, old_body, new_body, created_at)
-           VALUES (?, 'retract', ?, ?, ?, NULL, ?)`,
+           VALUES (?, 'retract', ?, ?, NULL, NULL, ?)`,
           seq,
           identity.name,
           identity.kind,
-          String(row.body),
           now,
+        );
+        // 抹掉此消息此前所有审计行的正文（编辑/超越留下的旧版本也含密钥），保留行骨架作痕迹。
+        this.ctx.storage.sql.exec(
+          "UPDATE message_audit SET old_body = NULL, new_body = NULL WHERE target_seq = ?",
+          seq,
         );
         this.ctx.storage.sql.exec(
           `UPDATE messages
-              SET body = '', mentions_json = '[]', original_body = COALESCE(original_body, ?), retracted_at = ?, retracted_by = ?, rev_seq = ?
+              SET body = '', mentions_json = '[]', original_body = NULL, retracted_at = ?, retracted_by = ?, rev_seq = ?
             WHERE seq = ?`,
-          originalBody,
           now,
           identity.name,
           this.nextRevSeq(),
@@ -2586,10 +2606,13 @@ export class ChannelDO extends Server<Env> {
       this.clearWorkflowGuards();
     }
     if (seq % 100 === 0) {
+      const cutoff = seq - RETAIN_N;
       sql.exec(
         "DELETE FROM messages WHERE seq <= ? AND (completion_review_state IS NULL OR completion_review_state != 'pending_review')",
-        seq - RETAIN_N,
+        cutoff,
       );
+      this.pruneReferencedTables(cutoff);
+      this.pruneReadCursors();
     }
 
     const frames: ServerFrame[] = replacedUpdate === undefined ? [msg] : [msg, replacedUpdate];
@@ -2895,6 +2918,41 @@ export class ChannelDO extends Server<Env> {
       terminal ? 1 : 0,
       terminal ? seq : null,
       now,
+    );
+  }
+
+  // wake_delivery_ledger / message_audit 都以 message seq 为外键（mention_seq / target_seq）。
+  // 消息按 seq <= cutoff 修剪后，指向它们的投递记录与审计记录就成了永远读不到的孤儿——
+  // /wake-deliveries 按 mention_seq 查、/audit 按 target_seq 查，消息没了就没有入口。跟随消息一起修剪。
+  // 但 message 修剪会跳过 pending_review 的低 seq 消息（completion gate），它们仍在表里、仍可被读，
+  // 其审计/投递记录必须保留——故用 `NOT IN (SELECT seq FROM messages WHERE seq <= cutoff)` 排除幸存者
+  // （子查询被 cutoff 夹住，正常只剩极少数 pending_review 行，通常为空）。
+  private pruneReferencedTables(cutoff: number) {
+    if (cutoff <= 0) return;
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "DELETE FROM wake_delivery_ledger WHERE mention_seq <= ? AND mention_seq NOT IN (SELECT seq FROM messages WHERE seq <= ?)",
+      cutoff,
+      cutoff,
+    );
+    sql.exec(
+      "DELETE FROM message_audit WHERE target_seq <= ? AND target_seq NOT IN (SELECT seq FROM messages WHERE seq <= ?)",
+      cutoff,
+      cutoff,
+    );
+  }
+
+  // read_cursor 按行数封顶，淘汰最久未更新的（issue #128）。活跃读者每次 seen 刷新 updated_at，
+  // 被淘汰的只会是久已沉默的身份；它若回来，下一条 seen 会重建游标——丢的只是它离开期间的陈旧水位。
+  private pruneReadCursors() {
+    const total = Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM read_cursor").one().n);
+    const excess = total - MAX_READ_CURSORS;
+    if (excess <= 0) return;
+    this.ctx.storage.sql.exec(
+      `DELETE FROM read_cursor WHERE name IN (
+         SELECT name FROM read_cursor ORDER BY updated_at, name LIMIT ?
+       )`,
+      excess,
     );
   }
 
