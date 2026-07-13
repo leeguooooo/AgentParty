@@ -151,7 +151,10 @@ export async function run(argv: string[]): Promise<number> {
           console.log(`  token: ${auth.config.token_fingerprint ?? "unknown fingerprint"} (not printed)`);
           if (boundChannel) console.log(`  channel: ${boundChannel}`);
           console.log(`  verify: ${prefix} party whoami --rejoin`);
-          if (boundChannel) console.log(`  wait:   ${prefix} party watch ${boundChannel} --mentions-only --once`);
+          if (boundChannel) {
+            console.log(`  wait:   ${prefix} party watch ${boundChannel} --mentions-only --once  # turn-scoped; re-arm every turn`);
+            console.log(`  durable: ${prefix} party serve ${boundChannel} --runner claude  # persistent terminal/project agent`);
+          }
         } else {
           console.log("  no agent config file is active; this identity comes from the account session");
           console.log("  for a durable agent identity, mint an agent token and run party init with AGENTPARTY_CONFIG");
