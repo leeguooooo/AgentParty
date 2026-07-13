@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { classifyWorktrees, type GitRunner, run } from "../src/commands/worktree";
+import { classifyWorktrees, type GitRunner, run, runGitCommand } from "../src/commands/worktree";
 
 // 用真 git：临时仓库 + 真 worktree，覆盖 merged-clean / merged-dirty / unmerged 三态。
 // 不 mock git——命令的价值就在于对真 porcelain 输出的解析与真 cherry/status 判定。
@@ -42,21 +42,24 @@ beforeEach(() => {
   git(main, "push", "-u", "origin", "main");
 
   // merged-clean: 分支提交了改动，同一 patch 也进了 main（cherry -> '-'），工作树干净。
-  git(main, "worktree", "add", "-b", "mc", join(root, "wt-mc"), "main");
-  commitFile(join(root, "wt-mc"), "mc.txt", "mc-change\n", "mc: add file");
-  const mcSha = git(join(root, "wt-mc"), "rev-parse", "HEAD");
+  git(main, "worktree", "add", "-b", "mc", join(root, "agentparty-wt-mc"), "main");
+  commitFile(join(root, "agentparty-wt-mc"), "mc.txt", "mc-change\n", "mc: add file");
+  const mcSha = git(join(root, "agentparty-wt-mc"), "rev-parse", "HEAD");
   git(main, "cherry-pick", mcSha); // main 现在 patch-equivalent 含 mc 的改动
 
   // merged-dirty: 同上 patch-equivalent，但工作树留未提交改动。
-  git(main, "worktree", "add", "-b", "md", join(root, "wt-md"), "main");
-  commitFile(join(root, "wt-md"), "md.txt", "md-change\n", "md: add file");
-  const mdSha = git(join(root, "wt-md"), "rev-parse", "HEAD");
+  git(main, "worktree", "add", "-b", "md", join(root, "agentparty-wt-md"), "main");
+  commitFile(join(root, "agentparty-wt-md"), "md.txt", "md-change\n", "md: add file");
+  const mdSha = git(join(root, "agentparty-wt-md"), "rev-parse", "HEAD");
   git(main, "cherry-pick", mdSha);
-  writeFileSync(join(root, "wt-md", "dirty.txt"), "uncommitted work\n"); // 脏
+  writeFileSync(join(root, "agentparty-wt-md", "dirty.txt"), "uncommitted work\n"); // 脏
 
   // unmerged: 分支有真未合提交（cherry -> '+'）。
-  git(main, "worktree", "add", "-b", "un", join(root, "wt-un"), "main");
-  commitFile(join(root, "wt-un"), "un.txt", "un-change\n", "un: real unmerged work");
+  git(main, "worktree", "add", "-b", "un", join(root, "agentparty-wt-un"), "main");
+  commitFile(join(root, "agentparty-wt-un"), "un.txt", "un-change\n", "un: real unmerged work");
+
+  // 普通手工 worktree：即使 patch 已在 main，也不属于 AgentParty teardown 范围，绝不能清。
+  git(main, "worktree", "add", "-b", "manual", join(root, "manual-wt"), "main");
 
   process.chdir(main);
   logs = [];
@@ -94,7 +97,7 @@ describe("classifyWorktrees", () => {
     // 空 stdout 绝不能被读成 dirty=0 → merged-clean → 删。status 拿不到 = 状态未知 = 保守保留。
     // 命令形如 git(["-C", <wt路径>, "status", "--porcelain"], root)——按 args 内容匹配。
     const failingGit: GitRunner = async (args, cwd) => {
-      if (args.includes("status") && args.some((a) => a.includes("wt-mc"))) {
+      if (args.includes("status") && args.some((a) => a.includes("agentparty-wt-mc"))) {
         return { code: 1, stdout: "", stderr: "fatal: simulated status failure" };
       }
       const out = execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -102,7 +105,33 @@ describe("classifyWorktrees", () => {
     };
     const rows = await classifyWorktrees(main, "main", failingGit);
     const mc = rows.find((r) => r.branch === "mc");
-    expect(mc?.status).not.toBe("merged-clean");
+    expect(mc?.status).toBe("unmerged");
+  });
+
+  test("rev-parse 当前 worktree 失败时直接中止，不能绕过 current 保护", async () => {
+    const failingGit: GitRunner = async (args, cwd) => {
+      if (args[0] === "rev-parse") return { code: 1, stdout: "", stderr: "simulated rev-parse failure" };
+      const out = execFileSync("git", args, { cwd, encoding: "utf8" });
+      return { code: 0, stdout: out, stderr: "" };
+    };
+    await expect(classifyWorktrees(main, "main", failingGit)).rejects.toThrow("cannot protect current worktree");
+  });
+});
+
+describe("git runner safety", () => {
+  test("disables interactive prompts and kills a hung git command on timeout", async () => {
+    const bin = join(root, "bin");
+    git(root, "init", "--quiet", bin);
+    const fakeGit = join(bin, "git");
+    writeFileSync(fakeGit, "#!/bin/sh\nprintf '%s|%s' \"$GIT_TERMINAL_PROMPT\" \"$GCM_INTERACTIVE\"\nexec sleep 0.2\n");
+    chmodSync(fakeGit, 0o755);
+    const result = await runGitCommand(["status"], main, {
+      timeoutMs: 30,
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
+    });
+    expect(result.code).toBe(124);
+    expect(result.stdout).toBe("0|Never");
+    expect(result.stderr).toContain("timed out");
   });
 });
 
@@ -122,9 +151,9 @@ describe("party worktree prune", () => {
   test("default is dry-run: touches nothing", async () => {
     const code = await run(["prune", "--base", "main"]);
     expect(code).toBe(0);
-    expect(existsSync(join(root, "wt-mc"))).toBe(true);
-    expect(existsSync(join(root, "wt-md"))).toBe(true);
-    expect(existsSync(join(root, "wt-un"))).toBe(true);
+    expect(existsSync(join(root, "agentparty-wt-mc"))).toBe(true);
+    expect(existsSync(join(root, "agentparty-wt-md"))).toBe(true);
+    expect(existsSync(join(root, "agentparty-wt-un"))).toBe(true);
     // 分支都还在
     const branches = git(main, "branch", "--format=%(refname:short)");
     expect(branches).toContain("mc");
@@ -134,7 +163,7 @@ describe("party worktree prune", () => {
   test("--yes removes merged-clean worktree + branch", async () => {
     const code = await run(["prune", "--base", "main", "--yes"]);
     expect(code).toBe(0);
-    expect(existsSync(join(root, "wt-mc"))).toBe(false);
+    expect(existsSync(join(root, "agentparty-wt-mc"))).toBe(false);
     const branches = git(main, "branch", "--format=%(refname:short)").split("\n");
     expect(branches).not.toContain("mc");
   });
@@ -143,7 +172,7 @@ describe("party worktree prune", () => {
     const code = await run(["prune", "--base", "main", "--yes"]);
     expect(code).toBe(0);
     // 工作树删了
-    expect(existsSync(join(root, "wt-md"))).toBe(false);
+    expect(existsSync(join(root, "agentparty-wt-md"))).toBe(false);
     // 但脏改动被 push 到 origin 的 preserve/md，内容没丢
     const remoteRefs = git(main, "ls-remote", "--heads", "origin");
     expect(remoteRefs).toContain("refs/heads/preserve/md");
@@ -156,10 +185,10 @@ describe("party worktree prune", () => {
     // 把 origin 指到不存在的地址，preserve push 必失败
     git(main, "remote", "set-url", "origin", join(root, "nonexistent-origin.git"));
     const code = await run(["prune", "--base", "main", "--yes"]);
-    expect(code).toBe(0);
+    expect(code).toBe(1);
     // push 失败 → 绝不删 worktree（脏活还在原地）
-    expect(existsSync(join(root, "wt-md"))).toBe(true);
-    expect(existsSync(join(root, "wt-md", "dirty.txt"))).toBe(true);
+    expect(existsSync(join(root, "agentparty-wt-md"))).toBe(true);
+    expect(existsSync(join(root, "agentparty-wt-md", "dirty.txt"))).toBe(true);
     // 明确报了跳过/失败
     expect(errs.join("\n").toLowerCase()).toContain("md");
   });
@@ -167,9 +196,18 @@ describe("party worktree prune", () => {
   test("--yes skips unmerged: worktree + branch survive", async () => {
     const code = await run(["prune", "--base", "main", "--yes"]);
     expect(code).toBe(0);
-    expect(existsSync(join(root, "wt-un"))).toBe(true);
+    expect(existsSync(join(root, "agentparty-wt-un"))).toBe(true);
     const branches = git(main, "branch", "--format=%(refname:short)").split("\n");
     expect(branches).toContain("un");
-    expect(logs.join("\n")).toContain("un");
+    expect(logs.join("\n")).toMatch(/skip\s+un\s+—/);
+  });
+
+  test("--yes skips unrelated manual worktree", async () => {
+    const code = await run(["prune", "--base", "main", "--yes"]);
+    expect(code).toBe(0);
+    expect(existsSync(join(root, "manual-wt"))).toBe(true);
+    const branches = git(main, "branch", "--format=%(refname:short)").split("\n");
+    expect(branches).toContain("manual");
+    expect(logs.join("\n")).toMatch(/skip\s+manual\s+— unrelated/);
   });
 });

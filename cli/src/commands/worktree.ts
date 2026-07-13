@@ -6,6 +6,7 @@
 //   2. dirty 保全：worktree 有未提交改动时【绝不 --force 丢活】——先 commit+push 到 preserve/*，再删。
 //   3. 未合价值：有 '+' 提交 → skip + 报告，交作者追 main 开 PR。
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
+import { stripTerminalControls } from "../format";
 
 const HELP = `usage: party worktree list [--base <ref>] [--json]
        party worktree prune [--base <ref>] [--dry-run] [--remote] [--yes]
@@ -19,13 +20,14 @@ would otherwise mis-flag merged work as unmerged):
   unmerged      has '+' commits not in base (real unmerged work)
 
 list   print every worktree with its status + (commits-ahead / dirty-file-count).
+       Only AgentParty patterns are eligible for cleanup; unrelated worktrees are reported and skipped.
 
 prune  DEFAULT IS --dry-run: print the plan, do nothing. Pass --yes to execute.
   merged-clean -> git worktree remove + git branch -D  (+ push --delete if --remote)
   merged-dirty -> commit + push origin HEAD:preserve/<branch>, THEN remove (never
                   --force-loses work; if preserve fails the worktree is SKIPPED)
   unmerged     -> SKIP + report so you can open a PR
-  Never touches the main working tree, the current worktree, or a locked worktree.
+  Never touches the main/current/locked/detached worktree, or an unrelated worktree.
 
 Options:
   --base <ref>   base to compare against (default: origin/main)
@@ -45,20 +47,54 @@ export interface GitResult {
 
 export type GitRunner = (args: string[], cwd: string) => Promise<GitResult>;
 
-const defaultGit: GitRunner = async (args, cwd) => {
+const DEFAULT_GIT_TIMEOUT_MS = 30_000;
+
+export async function runGitCommand(
+  args: string[],
+  cwd: string,
+  opts: { timeoutMs?: number; env?: Record<string, string | undefined> } = {},
+): Promise<GitResult> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    detached: true,
+    env: {
+      ...process.env,
+      ...opts.env,
+      GIT_TERMINAL_PROMPT: "0",
+      GCM_INTERACTIVE: "Never",
+      GIT_SSH_COMMAND: opts.env?.GIT_SSH_COMMAND ?? process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes",
+    },
   });
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      // detached 让 Git 及其 ssh/credential helper 处在独立进程组；超时要杀整组，
+      // 否则只杀 git 时子进程仍可能握着 stdout/stderr pipe，Promise 会继续永久等待。
+      process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        /* 已退出：流读取会正常收尾 */
+      }
+    }
+  }, opts.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS);
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
-  return { code, stdout, stderr };
-};
+  clearTimeout(timer);
+  return timedOut
+    ? { code: 124, stdout, stderr: `${stderr}${stderr.endsWith("\n") || stderr === "" ? "" : "\n"}git command timed out` }
+    : { code, stdout, stderr };
+}
+
+const defaultGit: GitRunner = (args, cwd) => runGitCommand(args, cwd);
 
 export type WorktreeStatus =
   | "merged-clean"
@@ -67,7 +103,8 @@ export type WorktreeStatus =
   | "main"
   | "current"
   | "locked"
-  | "detached";
+  | "detached"
+  | "unrelated";
 
 export interface WorktreeRow {
   path: string;
@@ -83,6 +120,16 @@ interface RawWorktree {
   detached: boolean;
   locked: boolean;
   bare: boolean;
+}
+
+export function isAgentPartyWorktree(path: string, branch: string | null): boolean {
+  const normalized = path.replaceAll("\\", "/");
+  return (
+    branch?.startsWith("agentparty/") === true ||
+    /(?:^|\/)agentparty-wt-[^/]+(?:\/|$)/i.test(normalized) ||
+    /(?:^|\/)\.claude\/worktrees\/agent-[^/]+(?:\/|$)/.test(normalized) ||
+    /(?:^|\/)worktrees\/[^/]+(?:\/|$)/.test(normalized)
+  );
 }
 
 // 解析 `git worktree list --porcelain`：block 之间空行分隔，主工作树是第一个 block。
@@ -124,13 +171,16 @@ export async function classifyWorktrees(
 ): Promise<WorktreeRow[]> {
   const list = await git(["worktree", "list", "--porcelain"], root);
   if (list.code !== 0) {
-    throw new Error(`git worktree list failed: ${list.stderr.trim() || list.stdout.trim()}`);
+    throw new Error(`git worktree list failed: ${terminal(list.stderr.trim() || list.stdout.trim())}`);
   }
   const raws = parseWorktreePorcelain(list.stdout);
 
   // 当前工作树（cwd 所在的顶层）——绝不删自己脚下的。
   const top = await git(["rev-parse", "--show-toplevel"], root);
-  const currentPath = top.code === 0 ? top.stdout.trim() : "";
+  if (top.code !== 0 || top.stdout.trim() === "") {
+    throw new Error(`cannot protect current worktree: ${terminal(top.stderr.trim() || "git rev-parse failed")}`);
+  }
+  const currentPath = top.stdout.trim();
 
   const rows: WorktreeRow[] = [];
   for (let i = 0; i < raws.length; i++) {
@@ -155,6 +205,11 @@ export async function classifyWorktrees(
     }
     if (w.detached || !w.branch) {
       row.status = "detached";
+      rows.push(row);
+      continue;
+    }
+    if (!isAgentPartyWorktree(w.path, w.branch)) {
+      row.status = "unrelated";
       rows.push(row);
       continue;
     }
@@ -196,16 +251,22 @@ function detail(r: WorktreeRow): string {
   return "";
 }
 
+function terminal(input: string): string {
+  return stripTerminalControls(input).replace(/[\r\n\t]+/g, " ");
+}
+
 async function runList(root: string, base: string, json: boolean, git: GitRunner): Promise<number> {
   const rows = await classifyWorktrees(root, base, git);
   if (json) {
     console.log(JSON.stringify(rows));
     return 0;
   }
-  console.log(`base: ${base}`);
+  console.log(`base: ${terminal(base)}`);
   for (const r of rows) {
     const d = detail(r);
-    console.log(`${r.status.padEnd(13)} ${(r.branch ?? "(detached)").padEnd(28)} ${d.padEnd(16)} ${r.path}`);
+    console.log(
+      `${r.status.padEnd(13)} ${terminal(r.branch ?? "(detached)").padEnd(28)} ${d.padEnd(16)} ${terminal(r.path)}`,
+    );
   }
   return 0;
 }
@@ -248,20 +309,22 @@ async function removeMergedClean(
   const branch = action.row.branch!;
   const rm = await git(["worktree", "remove", action.row.path], root);
   if (rm.code !== 0) {
-    console.error(`  ! ${branch}: worktree remove failed, skipped — ${rm.stderr.trim()}`);
+    console.error(`  ! ${terminal(branch)}: worktree remove failed, skipped — ${terminal(rm.stderr.trim())}`);
     return false;
   }
   const del = await git(["branch", "-D", branch], root);
   if (del.code !== 0) {
-    console.error(`  ! ${branch}: worktree removed but branch delete failed — ${del.stderr.trim()}`);
+    console.error(`  ! ${terminal(branch)}: worktree removed but branch delete failed — ${terminal(del.stderr.trim())}`);
+    return false;
   }
   if (remote) {
     const pushDel = await git(["push", "origin", "--delete", branch], root);
     if (pushDel.code !== 0) {
-      console.error(`  ! ${branch}: remote branch delete failed — ${pushDel.stderr.trim()}`);
+      console.error(`  ! ${terminal(branch)}: remote branch delete failed — ${terminal(pushDel.stderr.trim())}`);
+      return false;
     }
   }
-  console.log(`  removed ${branch} (merged-clean)`);
+  console.log(`  removed ${terminal(branch)} (merged-clean)`);
   return true;
 }
 
@@ -272,30 +335,37 @@ async function preserveAndRemove(root: string, action: PruneAction, git: GitRunn
   const path = action.row.path;
   const add = await git(["-C", path, "add", "-A"], root);
   if (add.code !== 0) {
-    console.error(`  ! ${branch}: git add failed, worktree preserved as-is — ${add.stderr.trim()}`);
+    console.error(`  ! ${terminal(branch)}: git add failed, worktree preserved as-is — ${terminal(add.stderr.trim())}`);
     return false;
   }
   const commit = await git(["-C", path, "commit", "-m", `wip: preserve ${branch} (#455)`], root);
   if (commit.code !== 0) {
-    console.error(`  ! ${branch}: commit failed, worktree preserved as-is — ${commit.stderr.trim()}`);
+    console.error(`  ! ${terminal(branch)}: commit failed, worktree preserved as-is — ${terminal(commit.stderr.trim())}`);
     return false;
   }
   const push = await git(["-C", path, "push", "origin", `HEAD:preserve/${branch}`], root);
   if (push.code !== 0) {
-    console.error(`  ! ${branch}: push to preserve/${branch} failed, worktree preserved as-is — ${push.stderr.trim()}`);
+    console.error(
+      `  ! ${terminal(branch)}: push to preserve/${terminal(branch)} failed, worktree preserved as-is — ${terminal(push.stderr.trim())}`,
+    );
     return false;
   }
   // 改动已安全落到 origin/preserve/*，现在删本地 worktree+分支才不丢活。
   const rm = await git(["worktree", "remove", "--force", path], root);
   if (rm.code !== 0) {
-    console.error(`  ! ${branch}: preserved to preserve/${branch} but worktree remove failed — ${rm.stderr.trim()}`);
+    console.error(
+      `  ! ${terminal(branch)}: preserved to preserve/${terminal(branch)} but worktree remove failed — ${terminal(rm.stderr.trim())}`,
+    );
     return false;
   }
   const del = await git(["branch", "-D", branch], root);
   if (del.code !== 0) {
-    console.error(`  ! ${branch}: preserved + worktree removed but branch delete failed — ${del.stderr.trim()}`);
+    console.error(
+      `  ! ${terminal(branch)}: preserved + worktree removed but branch delete failed — ${terminal(del.stderr.trim())}`,
+    );
+    return false;
   }
-  console.log(`  preserved ${branch} -> origin/preserve/${branch}, then removed (merged-dirty)`);
+  console.log(`  preserved ${terminal(branch)} -> origin/preserve/${terminal(branch)}, then removed (merged-dirty)`);
   return true;
 }
 
@@ -310,27 +380,33 @@ async function runPrune(
   const act = opts.yes && !opts.dryRun;
 
   if (!act) {
-    console.log(`plan (dry-run — pass --yes to execute), base ${base}:`);
+    console.log(`plan (dry-run — pass --yes to execute), base ${terminal(base)}:`);
     for (const a of actions) {
       const b = a.row.branch ?? "(detached)";
-      console.log(`  ${a.kind.padEnd(8)} ${b.padEnd(28)} ${a.reason}  [${a.row.path}]`);
+      console.log(
+        `  ${a.kind.padEnd(8)} ${terminal(b).padEnd(28)} ${terminal(a.reason)}  [${terminal(a.row.path)}]`,
+      );
     }
     const removable = actions.filter((a) => a.kind !== "skip").length;
     console.log(`\n${removable} worktree(s) would be cleaned, ${actions.length - removable} skipped. Re-run with --yes.`);
     return 0;
   }
 
-  console.log(`executing prune, base ${base}:`);
+  console.log(`executing prune, base ${terminal(base)}:`);
+  let failed = false;
   for (const a of actions) {
     if (a.kind === "skip") {
       const b = a.row.branch ?? "(detached)";
-      console.log(`  skip    ${b} — ${a.reason}`);
+      console.log(`  skip    ${terminal(b)} — ${terminal(a.reason)}`);
       continue;
     }
-    if (a.kind === "remove") await removeMergedClean(root, a, opts.remote, git);
-    else await preserveAndRemove(root, a, git);
+    const ok =
+      a.kind === "remove"
+        ? await removeMergedClean(root, a, opts.remote, git)
+        : await preserveAndRemove(root, a, git);
+    if (!ok) failed = true;
   }
-  return 0;
+  return failed ? 1 : 0;
 }
 
 export async function run(argv: string[], git: GitRunner = defaultGit): Promise<number> {
