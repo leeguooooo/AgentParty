@@ -122,14 +122,16 @@ test("clears results and pagination when contact permission is revoked during lo
 
 test("deduplicates users returned through multiple department pages", async () => {
   let searches = 0;
+  const cursors: Array<string | null> = [];
   act(() => {
     renderer = create(
       <LocaleProvider>
         <LarkMemberInvite
           slug="room"
           token="token"
-          search={async () => {
+          search={async (_token, _slug, _query, _limit, cursor) => {
             searches += 1;
+            cursors.push(cursor ?? null);
             return searches === 1
               ? {
                   users: [
@@ -157,6 +159,7 @@ test("deduplicates users returned through multiple department pages", async () =
   await act(async () => renderer!.root.findByProps({ className: "d-btn lark-invite-more" }).props.onClick());
   expect(renderer!.root.findAllByProps({ "data-lark-user-id": "on_alice" })).toHaveLength(1);
   expect(renderer!.root.findAllByProps({ "data-lark-user-id": "on_bob" })).toHaveLength(1);
+  expect(cursors).toEqual([null, "next"]);
 });
 
 test("disables stale invite actions when contact permission is revoked during invite", async () => {

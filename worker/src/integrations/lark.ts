@@ -45,6 +45,7 @@ const TOKEN_SKEW_MS = 60_000;
 const DIRECTORY_CURSOR_VERSION = 1;
 const DIRECTORY_CURSOR_MAX = 1_024;
 const DIRECTORY_PAGE_TOKEN_MAX = 512;
+const DIRECTORY_DEPARTMENT_BATCH = 4;
 const DEPARTMENT_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_\-@.]{0,63}$/;
 const tokenCache = new Map<string, { token: string; expiresAt: number }>();
 const textEncoder = new TextEncoder();
@@ -55,6 +56,7 @@ interface DirectoryCursorState {
   q: string;
   p: string;
   d: string;
+  a: string[];
   u: string | null;
   n: string | null;
   s: boolean;
@@ -139,7 +141,10 @@ async function decodeDirectoryCursor(
   if (
     !isRecord(decoded) || decoded.v !== DIRECTORY_CURSOR_VERSION || decoded.q !== query || decoded.p !== providerId ||
     typeof decoded.d !== "string" || !DEPARTMENT_ID_RE.test(decoded.d) || !validPageToken(decoded.u) ||
-    !validPageToken(decoded.n) || typeof decoded.s !== "boolean" || (!decoded.s && (decoded.d !== "0" || decoded.n !== null))
+    !Array.isArray(decoded.a) || decoded.a.length >= DIRECTORY_DEPARTMENT_BATCH ||
+    !decoded.a.every((departmentId) => typeof departmentId === "string" && DEPARTMENT_ID_RE.test(departmentId)) ||
+    !validPageToken(decoded.n) || typeof decoded.s !== "boolean" ||
+    (!decoded.s && (decoded.d !== "0" || decoded.a.length !== 0 || decoded.n !== null))
   ) {
     throw invalid();
   }
@@ -228,15 +233,15 @@ function directoryUsers(data: Record<string, unknown>): LarkDirectoryUser[] {
   return users;
 }
 
-async function nextLarkDepartment(
+async function nextLarkDepartments(
   env: EnvLike,
   provider: LarkProviderConfig,
   pageToken: string | null,
-): Promise<{ departmentId: string; nextPageToken: string | null } | null> {
+): Promise<{ departmentIds: string[]; nextPageToken: string | null } | null> {
   const params = new URLSearchParams({
     department_id_type: "open_department_id",
     fetch_child: "true",
-    page_size: "1",
+    page_size: String(DIRECTORY_DEPARTMENT_BATCH),
   });
   if (pageToken !== null) params.set("page_token", pageToken);
   const data = await larkDirectoryRequest(
@@ -250,18 +255,43 @@ async function nextLarkDepartment(
     if (payload.has_more === true) throw new LarkDirectoryError("upstream", "Lark returned an empty department page");
     return null;
   }
-  const item = items[0];
-  const departmentId = isRecord(item) && typeof item.open_department_id === "string"
+  const departmentIds = items.map((item) => isRecord(item) && typeof item.open_department_id === "string"
     ? item.open_department_id.trim()
-    : "";
-  if (!DEPARTMENT_ID_RE.test(departmentId)) throw new LarkDirectoryError("upstream", "Lark returned an invalid department id");
+    : "");
+  if (departmentIds.some((departmentId) => !DEPARTMENT_ID_RE.test(departmentId))) {
+    throw new LarkDirectoryError("upstream", "Lark returned an invalid department id");
+  }
   const nextPageToken = payload.has_more === true && typeof payload.page_token === "string" && payload.page_token
     ? payload.page_token
     : null;
   if (payload.has_more === true && nextPageToken === null) {
     throw new LarkDirectoryError("upstream", "Lark omitted the next department cursor");
   }
-  return { departmentId, nextPageToken };
+  return { departmentIds, nextPageToken };
+}
+
+async function advanceLarkDepartment(
+  env: EnvLike,
+  provider: LarkProviderConfig,
+  state: DirectoryCursorState,
+): Promise<DirectoryCursorState | null> {
+  if (state.a.length > 0) {
+    return { ...state, d: state.a[0], a: state.a.slice(1), u: null, s: true };
+  }
+  const batch = state.s
+    ? state.n === null ? null : await nextLarkDepartments(env, provider, state.n)
+    : await nextLarkDepartments(env, provider, null);
+  if (batch === null) return null;
+  return {
+    v: DIRECTORY_CURSOR_VERSION,
+    q: state.q,
+    p: state.p,
+    d: batch.departmentIds[0],
+    a: batch.departmentIds.slice(1),
+    u: null,
+    n: batch.nextPageToken,
+    s: true,
+  };
 }
 
 export async function searchLarkDirectory(
@@ -274,7 +304,7 @@ export async function searchLarkDirectory(
   const normalizedQuery = query.toLocaleLowerCase();
   const secret = providerSecret(env, provider);
   const state = cursor === null
-    ? { v: DIRECTORY_CURSOR_VERSION, q: normalizedQuery, p: provider.id, d: "0", u: null, n: null, s: false } as DirectoryCursorState
+    ? { v: DIRECTORY_CURSOR_VERSION, q: normalizedQuery, p: provider.id, d: "0", a: [], u: null, n: null, s: false } as DirectoryCursorState
     : await decodeDirectoryCursor(secret, cursor, normalizedQuery, provider.id);
   const params = new URLSearchParams({
     user_id_type: "union_id",
@@ -297,20 +327,7 @@ export async function searchLarkDirectory(
     ? { ...state, u: pageToken }
     : null;
   if (!hasMore) {
-    const nextDepartment = state.s
-      ? state.n === null ? null : await nextLarkDepartment(env, provider, state.n)
-      : await nextLarkDepartment(env, provider, null);
-    if (nextDepartment !== null) {
-      nextState = {
-        v: DIRECTORY_CURSOR_VERSION,
-        q: normalizedQuery,
-        p: provider.id,
-        d: nextDepartment.departmentId,
-        u: null,
-        n: nextDepartment.nextPageToken,
-        s: true,
-      };
-    }
+    nextState = await advanceLarkDepartment(env, provider, state);
   }
   return { users, nextCursor: nextState === null ? null : await encodeDirectoryCursor(secret, nextState) };
 }

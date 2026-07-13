@@ -107,12 +107,15 @@ describe("Lark organization member invitations (#358)", () => {
       .reply(200, { code: 0, data: { has_more: false, items: [{ union_id: "on_owner", name: "Owner" }] } });
     fetchMock.get(LARK_ORIGIN)
       .intercept({
-        path: "/open-apis/contact/v3/departments/0/children?department_id_type=open_department_id&fetch_child=true&page_size=1",
+        path: "/open-apis/contact/v3/departments/0/children?department_id_type=open_department_id&fetch_child=true&page_size=4",
         method: "GET",
       })
       .reply(200, {
         code: 0,
-        data: { has_more: false, items: [{ open_department_id: "od-engineering" }] },
+        data: {
+          has_more: false,
+          items: [{ open_department_id: "od-engineering" }, { open_department_id: "od-sales" }],
+        },
       });
 
     const first = await api(`/api/channels/${slug}/lark-directory?q=alice&limit=20`, owner.token);
@@ -153,10 +156,24 @@ describe("Lark organization member invitations (#358)", () => {
       owner.token,
     );
     expect(second.status).toBe(200);
-    expect(await second.json()).toMatchObject({
+    const secondPage = (await second.json()) as { users: unknown[]; next_cursor: string };
+    expect(secondPage).toMatchObject({
       users: [{ id: "on_alice", name: "Alice Zhang", avatar_url: "https://cdn.example/alice.png" }],
-      next_cursor: null,
     });
+    expect(secondPage.next_cursor).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({
+        path: "/open-apis/contact/v3/users/find_by_department?user_id_type=union_id&department_id_type=open_department_id&department_id=od-sales&page_size=20",
+        method: "GET",
+      })
+      .reply(200, { code: 0, data: { has_more: false, items: [{ union_id: "on_bob", name: "Bob" }] } });
+    const third = await api(
+      `/api/channels/${slug}/lark-directory?q=alice&limit=20&cursor=${encodeURIComponent(secondPage.next_cursor)}`,
+      owner.token,
+    );
+    expect(third.status).toBe(200);
+    expect(await third.json()).toEqual({ users: [], next_cursor: null });
   });
 
   it("maps missing v3 department visibility to the stable contact-permission error", async () => {
@@ -171,7 +188,7 @@ describe("Lark organization member invitations (#358)", () => {
       .reply(200, { code: 0, data: { has_more: false, items: [] } });
     fetchMock.get(LARK_ORIGIN)
       .intercept({
-        path: "/open-apis/contact/v3/departments/0/children?department_id_type=open_department_id&fetch_child=true&page_size=1",
+        path: "/open-apis/contact/v3/departments/0/children?department_id_type=open_department_id&fetch_child=true&page_size=4",
         method: "GET",
       })
       .reply(403, { code: 40014, msg: "no parent dept authority" });
