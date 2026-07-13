@@ -37,6 +37,11 @@ function mockTenantToken() {
     .reply(200, { code: 0, tenant_access_token: "tenant-secret-token", expire: 3600 });
 }
 
+function decodeDirectoryCursor(cursor: string): Record<string, unknown> {
+  const payload = cursor.split(".", 1)[0].replace(/-/g, "+").replace(/_/g, "/");
+  return JSON.parse(atob(payload.padEnd(Math.ceil(payload.length / 4) * 4, "="))) as Record<string, unknown>;
+}
+
 function mockDirectoryPage(options: { permissionDenied?: boolean; persist?: boolean } = {}) {
   const interceptor = fetchMock.get(LARK_ORIGIN)
     .intercept({
@@ -209,9 +214,11 @@ describe("Lark organization member invitations (#358)", () => {
 
     const response = await api(`/api/channels/${slug}/lark-directory?q=alice&limit=20`, owner.token);
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    const body = (await response.json()) as { users: unknown[]; next_cursor: string };
+    expect(body).toMatchObject({
       users: [{ id: unionId, name: "Alice", already_member: true }],
     });
+    expect(decodeDirectoryCursor(body.next_cursor)).toMatchObject({ d: "0", u: "next-page" });
   });
 
   it("maps missing v3 department visibility to the stable contact-permission error", async () => {
@@ -299,6 +306,45 @@ describe("Lark organization member invitations (#358)", () => {
     expect(await env.DB.prepare(
       "SELECT provider_user_id FROM account_profiles WHERE account = ?",
     ).bind(legacyAccount).first<{ provider_user_id: string }>()).toEqual({ provider_user_id: unionId });
+  });
+
+  it("prefers the stable union_id account when multiple historical identifiers already exist", async () => {
+    const owner = await larkHuman();
+    const slug = await createChannel(owner.token);
+    const unionAccount = `lark-main:${uniq("union_alice")}`;
+    const openAccount = `lark-main:${uniq("open_alice")}`;
+    const unionId = uniq("on_alice");
+    const openId = uniq("ou_alice");
+    const userId = uniq("alice_user");
+    const now = Date.now();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO account_profiles (
+           account, handle, display_name, provider, provider_user_id, tenant_key, created_at, updated_at
+         ) VALUES (?, ?, 'Union Alice', 'lark-main', ?, 'tenant-test', ?, ?)`,
+      ).bind(unionAccount, uniq("union_alice"), unionId, now, now),
+      env.DB.prepare(
+        `INSERT INTO account_profiles (
+           account, handle, display_name, provider, provider_user_id, tenant_key, created_at, updated_at
+         ) VALUES (?, ?, 'Open Alice', 'lark-main', ?, 'tenant-test', ?, ?)`,
+      ).bind(openAccount, uniq("open_alice"), openId, now, now),
+    ]);
+    mockTenantToken();
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: `/open-apis/contact/v3/users/${unionId}?user_id_type=union_id`, method: "GET" })
+      .reply(200, {
+        code: 0,
+        data: { user: { union_id: unionId, open_id: openId, user_id: userId, name: "Alice" } },
+      });
+
+    const response = await api(`/api/channels/${slug}/lark-members`, owner.token, {
+      method: "POST",
+      body: JSON.stringify({ user_id: unionId }),
+    });
+    expect(response.status).toBe(201);
+    expect((await env.DB.prepare(
+      "SELECT account FROM channel_members WHERE channel_slug = ? AND account IN (?, ?) ORDER BY account",
+    ).bind(slug, unionAccount, openAccount).all<{ account: string }>()).results).toEqual([{ account: unionAccount }]);
   });
 
   it("uses the stable contact-permission code for direct invite failures", async () => {
