@@ -334,9 +334,18 @@ describe("TaskLedgerPanel task detail (#271)", () => {
       desc: "long description body",
       assignee: { name: "worker-a", kind: "agent" },
       labels: ["infra"],
+      solution: {
+        key: "demo/11111111-1111-1111-1111-111111111111/solution.html",
+        filename: "solution.html",
+        content_type: "text/html",
+        size: 123,
+        url: "/api/channels/demo/attachments/11111111-1111-1111-1111-111111111111/solution.html",
+      },
     });
     const r = render("en", baseProps({ tasks: [detailed] }));
     expect(r.root.findAll((n) => n.props["aria-label"] === "task 7 details")).toHaveLength(0);
+    expect(r.root.findAll((n) => n.props.className === "task-solution")).toHaveLength(1);
+    expect(allText(r)).toContain("solution.html");
 
     await act(async () => { findByAria(r, "Open task 7 details").props.onClick(); });
     findByAria(r, "task 7 details");
@@ -345,6 +354,8 @@ describe("TaskLedgerPanel task detail (#271)", () => {
     expect(text).toContain("created by"); // meta 标签只出现在详情里
     expect(text).toContain("human-a · human");
     expect(text).toContain("@worker-a · agent");
+    expect(text).toContain("Solution");
+    expect(text).toContain("solution.html");
 
     await act(async () => {
       r.root.find((n) => n.props.className === "d-btn task-detail-close").props.onClick();
@@ -354,7 +365,9 @@ describe("TaskLedgerPanel task detail (#271)", () => {
 
   test("detail dialog shows a placeholder when the task has no desc", async () => {
     const r = render("en", baseProps({ tasks: [task({ id: 9, desc: null })] }));
+    expect(r.root.findAll((n) => typeof n.props.className === "string" && n.props.className.startsWith("task-solution"))).toHaveLength(0);
     await act(async () => { findByAria(r, "Open task 9 details").props.onClick(); });
     expect(allText(r)).toContain("No details");
+    expect(r.root.findAll((n) => typeof n.props.className === "string" && n.props.className.startsWith("task-solution"))).toHaveLength(0);
   });
 });

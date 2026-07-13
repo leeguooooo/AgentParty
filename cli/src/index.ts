@@ -29,7 +29,7 @@ commands:
   serve     [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all] | --profile owner/handle
   mcp                                                run stdio MCP server for structured agent tools
   lark      notify on|off|status [--channel C]       send channel @mentions to your Lark/Feishu account
-  task      create|list|assign|claim|status|block|done [--channel C]  channel task ledger
+  task      create|list|assign|claim|status|block|done|solution [--channel C]  channel task ledger
   board     [channel|--channel C] [--mine]            channel task board
   squad     create|list|update|delete [--channel C]   channel @squad mention groups
   ask       <text|-> [--channel C] [--timeout 240] [--mention name]... [--reply-to seq] [--mentions-only]

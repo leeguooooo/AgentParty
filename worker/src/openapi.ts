@@ -955,6 +955,18 @@ export const openapiDocument = {
                       },
                     },
                   },
+                  solution: {
+                    type: ["object", "null"],
+                    description: "single channel-authenticated solution attachment for this task (#464)",
+                    required: ["key", "filename", "content_type", "size", "url"],
+                    properties: {
+                      key: { type: "string" },
+                      filename: { type: "string" },
+                      content_type: { type: "string" },
+                      size: { type: "integer", minimum: 0 },
+                      url: { type: "string" },
+                    },
+                  },
                 },
               },
             },
@@ -1087,7 +1099,7 @@ export const openapiDocument = {
         },
       },
       patch: {
-        summary: "update channel-scoped task state, assignee, title, description, labels, or priority",
+        summary: "update channel-scoped task fields or its single channel-visible solution attachment",
         security: [{ bearer: [] }],
         parameters: [
           { name: "slug", in: "path", required: true, schema: { type: "string" } },
@@ -1113,6 +1125,18 @@ export const openapiDocument = {
                   },
                   labels: { type: "array", maxItems: 20, items: { type: "string", maxLength: 40 } },
                   priority: { type: "integer", minimum: -100, maximum: 100 },
+                  solution: {
+                    type: ["object", "null"],
+                    description: "set/replace the single solution attachment; null clears it (#464)",
+                    required: ["key", "filename", "content_type", "size", "url"],
+                    properties: {
+                      key: { type: "string" },
+                      filename: { type: "string" },
+                      content_type: { type: "string" },
+                      size: { type: "integer", minimum: 0 },
+                      url: { type: "string" },
+                    },
+                  },
                 },
               },
             },

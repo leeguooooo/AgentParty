@@ -39,3 +39,18 @@ export function parseStoredAttachments(input: unknown): Attachment[] | undefined
     return undefined;
   }
 }
+
+// 单附件字段（任务 solution）与 attachments[] 共用同一套结构校验，但存储为对象而不是单元素数组。
+export function parseAttachment(raw: unknown): Attachment | null {
+  const parsed = parseAttachments([raw]);
+  return parsed === null || parsed === undefined || parsed.length !== 1 ? null : parsed[0]!;
+}
+
+export function parseStoredAttachment(input: unknown): Attachment | undefined {
+  if (typeof input !== "string" || input === "") return undefined;
+  try {
+    return parseAttachment(JSON.parse(input) as unknown) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}

@@ -250,4 +250,58 @@ describe("channel task ledger", () => {
     expect(tooMany.status).toBe(400);
   });
 
+  it("stores exactly one channel-visible solution attachment and supports replace/clear (#464)", async () => {
+    const owner = `owner-${uniq("solution")}@example.com`;
+    const human = await seedToken("human", uniq("human"), { owner });
+    const channelAgent = await seedToken("agent", uniq("agent"), { owner });
+    const slug = await createChannel(human.token);
+    const solution = {
+      key: `${slug}/11111111-1111-1111-1111-111111111111/solution.html`,
+      filename: "solution.html",
+      content_type: "text/html",
+      size: 4096,
+      url: `/api/channels/${slug}/attachments/11111111-1111-1111-1111-111111111111/solution.html`,
+    };
+
+    const created = await api(`/api/channels/${slug}/tasks`, human.token, {
+      method: "POST",
+      body: JSON.stringify({ title: "task with solution", solution }),
+    });
+    expect(created.status).toBe(201);
+    const task = (await created.json()) as { id: number; solution?: typeof solution };
+    expect(task.solution).toEqual(solution);
+
+    const replacement = { ...solution, key: solution.key.replace("solution.html", "solution-v2.html"), filename: "solution-v2.html", url: solution.url.replace("solution.html", "solution-v2.html") };
+    const replaced = await api(`/api/channels/${slug}/tasks/${task.id}`, human.token, {
+      method: "PATCH",
+      body: JSON.stringify({ solution: replacement }),
+    });
+    expect(replaced.status).toBe(200);
+    expect(((await replaced.json()) as { solution?: typeof solution }).solution).toEqual(replacement);
+
+    // 同频道另一身份无需原创建者的私有 artifact 会话，也能从任务记录看到鉴权下载引用。
+    const listed = await api(`/api/channels/${slug}/tasks`, channelAgent.token);
+    expect(((await listed.json()) as { tasks: Array<{ id: number; solution?: typeof solution }> }).tasks.find((entry) => entry.id === task.id)?.solution).toEqual(replacement);
+
+    const invalid = await api(`/api/channels/${slug}/tasks/${task.id}`, human.token, {
+      method: "PATCH",
+      body: JSON.stringify({ solution: [solution, replacement] }),
+    });
+    expect(invalid.status).toBe(400);
+
+    const crossChannel = await api(`/api/channels/${slug}/tasks/${task.id}`, human.token, {
+      method: "PATCH",
+      body: JSON.stringify({ solution: { ...solution, key: `other/${solution.filename}`, url: `/api/channels/other/attachments/${solution.filename}` } }),
+    });
+    expect(crossChannel.status).toBe(400);
+    expect(await crossChannel.json()).toMatchObject({ error: { message: "solution must belong to the current channel" } });
+
+    const cleared = await api(`/api/channels/${slug}/tasks/${task.id}`, human.token, {
+      method: "PATCH",
+      body: JSON.stringify({ solution: null }),
+    });
+    expect(cleared.status).toBe(200);
+    expect((await cleared.json() as Record<string, unknown>).solution).toBeUndefined();
+  });
+
 });

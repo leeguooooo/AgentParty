@@ -1,11 +1,13 @@
 // party task — channel-scoped task ledger.
-import type { MsgFrame, TaskAssigneeKind, TaskRecord, TaskState } from "@agentparty/shared";
+import type { Attachment, MsgFrame, TaskAssigneeKind, TaskRecord, TaskState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
+import { stripTerminalControls } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { createTask, fetchMe, fetchMessages, handleRestError, listTasks, updateTask } from "../rest";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
+import { collectAttachments, resolveAttachments } from "./send";
 
 const TASK_STATES: readonly string[] = ["triage", "backlog", "assigned", "in_progress", "needs_review", "done", "blocked"] satisfies TaskState[];
 const FLAGS = [
@@ -27,6 +29,7 @@ const FLAGS = [
   "limit",
   "mine",
   "json",
+  "clear",
 ];
 
 const HELP = `usage: party task create <title|-> [--channel C] [--desc text] [--assignee @name] [--label bug]... [--scope path]... [--blocked-reason text] [--priority N] [--parent ID] [--anchor seq]... [--external-ref ref]
@@ -37,12 +40,16 @@ const HELP = `usage: party task create <title|-> [--channel C] [--desc text] [--
   party task status <id> triage|backlog|assigned|in_progress|needs_review|done|blocked [--channel C] [--scope path]... [--blocked-reason text]
   party task block <id> [--channel C] [--blocked-reason text] [--scope path]...
   party task done <id> [--channel C]
+  party task solution <id> <file> [--channel C] [--json]
+  party task solution <id> --clear [--channel C] [--json]
 
 --scope declares the files/dirs a task claims (repeatable); host board conflicts and open claims
 derive from it. --blocked-reason attaches a structured reason when a task is blocked.
 --external-ref (create only) is an idempotency key (e.g. gh:owner/repo#96): creating with a ref
 that already exists in the channel returns the existing task instead of a duplicate — safe to
 rerun an issue→task sync (#141).
+solution uploads one channel-authenticated file as the task's canonical deliverable (#464).
+Replacing it keeps exactly one current solution; --clear removes the reference.
 
 Create and move channel tasks. Agent-created tasks default to triage; human-created
 tasks default to backlog unless an assignee/state is provided.
@@ -83,7 +90,7 @@ function formatTask(task: TaskRecord): string {
   const assignee = task.assignee ? ` @${task.assignee.name}` : "";
   const labels = task.labels.length > 0 ? ` [${task.labels.join(",")}]` : "";
   const parent = task.parent_id === null ? "" : ` parent:${task.parent_id}`;
-  return `#${task.id}\t${task.state}\tP${task.priority}${assignee}${labels}${parent}\t${compact(task.title)}`;
+  return stripTerminalControls(`#${task.id}\t${task.state}\tP${task.priority}${assignee}${labels}${parent}\t${compact(task.title)}`);
 }
 
 function parseAssignee(raw: string | undefined, kindRaw: string | undefined): { name: string; kind: TaskAssigneeKind } | null | undefined {
@@ -112,7 +119,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["json", "mine"], repeatable: ["label", "anchor", "scope"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["json", "mine", "clear"], repeatable: ["label", "anchor", "scope"] });
   const unknown = unknownFlagError(flags, FLAGS);
   if (unknown !== null) {
     console.error(unknown);
@@ -281,6 +288,26 @@ export async function run(argv: string[]): Promise<number> {
       console.log(flags.json === true ? JSON.stringify(jsonFrame(task as unknown as Record<string, unknown>)) : `updated ${formatTask(task)}`);
       return 0;
     }
+    if (sub === "solution") {
+      const path = positionals[2];
+      if (flags.clear === true && path !== undefined) {
+        console.error("party task solution: --clear cannot be combined with a file");
+        return 1;
+      }
+      if (flags.clear !== true && path === undefined) {
+        console.error("usage: party task solution <id> <file> [--channel C] | party task solution <id> --clear [--channel C]");
+        return 1;
+      }
+      let solution: Attachment | null = null;
+      if (flags.clear !== true) {
+        const uploaded = await collectAttachments(cfg.server, cfg.token, slug, await resolveAttachments([path!]));
+        if (uploaded.length !== 1) throw new Error("party task solution: upload did not return exactly one attachment");
+        solution = uploaded[0]!;
+      }
+      const task = await updateTask(cfg.server, cfg.token, slug, id, { solution });
+      console.log(flags.json === true ? JSON.stringify(jsonFrame(task as unknown as Record<string, unknown>)) : `updated ${formatTask(task)}`);
+      return 0;
+    }
     if (sub === "claim") {
       const task = await updateTask(cfg.server, cfg.token, slug, id, { state: "in_progress", ...(scope !== undefined ? { scope } : {}), ...(blockedReason !== undefined ? { blocked_reason: blockedReason } : {}) });
       console.log(flags.json === true ? JSON.stringify(jsonFrame(task as unknown as Record<string, unknown>)) : `updated ${formatTask(task)}`);
@@ -306,7 +333,7 @@ export async function run(argv: string[]): Promise<number> {
       console.log(flags.json === true ? JSON.stringify(jsonFrame(task as unknown as Record<string, unknown>)) : `updated ${formatTask(task)}`);
       return 0;
     }
-    console.error("usage: party task create|list|assign|claim|status|block|done");
+    console.error("usage: party task create|list|assign|claim|status|block|done|solution");
     return 1;
   } catch (e) {
     return handleRestError(e);

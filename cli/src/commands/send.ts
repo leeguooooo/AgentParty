@@ -46,6 +46,7 @@ const CONTENT_TYPE_BY_EXT: Record<string, string> = {
   pdf: "application/pdf",
   txt: "text/plain",
   md: "text/markdown",
+  html: "text/html",
   json: "application/json",
   csv: "text/csv",
   zip: "application/zip",

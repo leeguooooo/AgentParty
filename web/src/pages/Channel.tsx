@@ -1744,6 +1744,12 @@ export function TaskLedgerPanel({
         {task.attachments !== undefined && task.attachments.length > 0 && (
           <AttachmentList attachments={task.attachments} />
         )}
+        {task.solution !== undefined && (
+          <section className="task-solution">
+            <span className="t-mono task-solution-label">{t("Channel.tasks.solution")}</span>
+            <AttachmentList attachments={[task.solution]} />
+          </section>
+        )}
         <div className="task-card-meta">
           <span className="t-mono">P{task.priority}</span>
           {task.assignee !== null && <span className="t-mono">@{task.assignee.name}</span>}
@@ -2031,6 +2037,12 @@ export function TaskLedgerPanel({
               <p className="task-detail-desc">{detailTask.desc}</p>
             ) : (
               <p className="charter-empty">{t("Channel.tasks.detailNoDesc")}</p>
+            )}
+            {detailTask.solution !== undefined && (
+              <section className="task-solution task-solution--detail">
+                <strong>{t("Channel.tasks.solution")}</strong>
+                <AttachmentList attachments={[detailTask.solution]} />
+              </section>
             )}
             <dl className="task-detail-meta">
               <dt>{t("Channel.tasks.detail.priority")}</dt>

@@ -493,6 +493,69 @@ describe("cli subprocess", () => {
     });
   });
 
+  test("task solution uploads one file and can clear the channel-visible solution (#464)", async () => {
+    const seen: Array<{ method: string; path: string; body: unknown; contentType?: string | null }> = [];
+    const solution = {
+      key: "dev/11111111-1111-1111-1111-111111111111/solution.html",
+      filename: "solution.html",
+      content_type: "text/html",
+      size: 17,
+      url: "/api/channels/dev/attachments/11111111-1111-1111-1111-111111111111/solution.html",
+    };
+    restServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/api/channels/dev/attachments" && req.method === "POST") {
+          const body = await req.text();
+          seen.push({ method: req.method, path: `${url.pathname}${url.search}`, body, contentType: req.headers.get("content-type") });
+          return Response.json(solution);
+        }
+        const body = req.method === "GET" ? null : await req.json().catch(() => null);
+        seen.push({ method: req.method, path: `${url.pathname}${url.search}`, body });
+        if (url.pathname === "/api/channels/dev/tasks/1" && req.method === "PATCH") {
+          return Response.json({ type: "task", id: 1, channel: "dev", title: "\x1b[31mdeliver\x1b[0m\x07", state: "done", priority: 0, labels: [], parent_id: null, anchor_seqs: [], assignee: null, created_by: "me", created_by_kind: "agent", desc: null, completion_artifact: null, workflow_id: null, created_at: 1, updated_at: 1, ...(body as object) });
+        }
+        return Response.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
+      },
+    });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "config.json"), JSON.stringify({ server: `http://127.0.0.1:${restServer.port}`, token: "ap_tok" }));
+    const path = join(home, "solution.html");
+    writeFileSync(path, "<h1>方案</h1>");
+
+    const set = await runCli(["task", "solution", "1", path, "--channel", "dev"]);
+    expect(set.code).toBe(0);
+    expect(set.stdout).toContain("updated #1");
+    expect(set.stdout).toContain("deliver");
+    expect(set.stdout).not.toContain("\x1b");
+    expect(set.stdout).not.toContain("\x07");
+    const clear = await runCli(["task", "solution", "1", "--clear", "--channel", "dev"]);
+    expect(clear.code).toBe(0);
+
+    const both = await runCli(["task", "solution", "1", path, "--clear", "--channel", "dev"]);
+    expect(both.code).toBe(1);
+    expect(both.stderr).toContain("--clear cannot be combined with a file");
+    const missing = await runCli(["task", "solution", "1", "--channel", "dev"]);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("usage: party task solution");
+    const maliciousPath = join(home, "\x1b[31mmissing.html");
+    const badPath = await runCli(["task", "solution", "1", maliciousPath, "--channel", "dev"]);
+    expect(badPath.code).toBe(1);
+    expect(badPath.stderr).not.toContain("\x1b");
+    expect(badPath.stderr).toContain("missing.html");
+
+    expect(seen).toContainEqual({
+      method: "POST",
+      path: "/api/channels/dev/attachments?filename=solution.html",
+      body: "<h1>方案</h1>",
+      contentType: "text/html",
+    });
+    expect(seen).toContainEqual({ method: "PATCH", path: "/api/channels/dev/tasks/1", body: { solution } });
+    expect(seen).toContainEqual({ method: "PATCH", path: "/api/channels/dev/tasks/1", body: { solution: null } });
+  });
+
   test("task from creates a task anchored to the source message", async () => {
     const seen: { method: string; path: string; body: unknown }[] = [];
     const task = {

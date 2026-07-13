@@ -536,6 +536,7 @@ export async function createTask(
     anchor_seqs?: number[];
     workflow_id?: string;
     attachments?: Attachment[];
+    solution?: Attachment;
   },
 ): Promise<TaskRecord> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/tasks`, {
@@ -561,6 +562,7 @@ export async function updateTask(
     assignee?: { name: string; kind: TaskAssigneeKind } | null;
     priority?: number;
     labels?: string[];
+    solution?: Attachment | null;
   },
 ): Promise<TaskRecord> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/tasks/${id}`, {
