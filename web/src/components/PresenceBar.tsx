@@ -1,7 +1,7 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
 import { evaluateHostLease, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
 import { fmtRel } from "../lib/time";
 import type { SocketStatus } from "../lib/ws";
@@ -346,6 +346,32 @@ export function PresenceBar({
   });
   const [hoveredGroup, setHoveredGroup] = useState<{ key: string; left: number; top: number; width: number } | null>(null);
   const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
+  const popoverCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function cancelPopoverClose() {
+    if (popoverCloseTimer.current === null) return;
+    clearTimeout(popoverCloseTimer.current);
+    popoverCloseTimer.current = null;
+  }
+
+  function schedulePopoverClose() {
+    cancelPopoverClose();
+    // #457：chip 与 fixed popover 之间有 8px 间隙。立即关闭会让鼠标永远跨不过去；
+    // 留一个短 grace period，进入 popover 后取消，既可操作又不会把浮层粘在页面上。
+    popoverCloseTimer.current = setTimeout(() => {
+      popoverCloseTimer.current = null;
+      setHoveredGroup(null);
+    }, 160);
+  }
+
+  useEffect(
+    () => () => {
+      if (popoverCloseTimer.current === null) return;
+      clearTimeout(popoverCloseTimer.current);
+      popoverCloseTimer.current = null;
+    },
+    [],
+  );
   function toggleExpanded() {
     setHoveredGroup(null); // 折叠会把 chip 移出 DOM，先关掉可能悬着的 popover
     setExpandedGroupKey(null);
@@ -365,6 +391,7 @@ export function PresenceBar({
     !expanded || hoveredGroup === null ? null : sortedGroups.find((group) => group.key === hoveredGroup.key) ?? null;
 
   function showGroupPopover(group: PresenceGroup, rect: DOMRect) {
+    cancelPopoverClose();
     const margin = 10;
     const width = Math.min(520, window.innerWidth - margin * 2);
     const left = Math.min(Math.max(margin, rect.left), Math.max(margin, window.innerWidth - width - margin));
@@ -592,7 +619,7 @@ export function PresenceBar({
           if (!full) showGroupPopover(group, e.currentTarget.getBoundingClientRect());
         }}
         onMouseLeave={() => {
-          if (!full) setHoveredGroup(null);
+          if (!full) schedulePopoverClose();
         }}
         onFocus={(e) => {
           if (!full) showGroupPopover(group, e.currentTarget.getBoundingClientRect());
@@ -734,6 +761,8 @@ export function PresenceBar({
         <div
           className="presence-popover"
           role="tooltip"
+          onMouseEnter={cancelPopoverClose}
+          onMouseLeave={schedulePopoverClose}
           style={{
             left: hoveredGroup.left,
             top: hoveredGroup.top,

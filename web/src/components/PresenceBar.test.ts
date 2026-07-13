@@ -383,6 +383,36 @@ describe("presence group popover overflow (#357)", () => {
 
     expect(nodesWithClass(r, "presence-popover-more")[0]?.children.join("")).toBe("+1 · 展开参与者");
   });
+
+  test("mouse can cross the trigger gap into the popover without closing it (#457)", async () => {
+    const r = renderPresenceRoster(3);
+    const group = nodesWithClass(r, "presence-group")[0];
+    await act(async () => {
+      group?.props.onMouseEnter({
+        currentTarget: { getBoundingClientRect: () => ({ left: 10, right: 310, top: 10, bottom: 44, width: 300, height: 34 }) },
+      });
+    });
+    const popover = nodesWithClass(r, "presence-popover")[0];
+    expect(popover).toBeDefined();
+
+    await act(async () => {
+      group?.props.onMouseLeave();
+      popover?.props.onMouseEnter();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(nodesWithClass(r, "presence-popover")).toHaveLength(1);
+
+    await act(async () => {
+      nodesWithClass(r, "presence-popover")[0]?.props.onMouseLeave();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(nodesWithClass(r, "presence-popover")).toHaveLength(0);
+  });
+
+  test("popover accepts pointer events so its enter handler can keep it open (#457)", async () => {
+    const css = await Bun.file(new URL("../styles/app.css", import.meta.url)).text();
+    expect(css).toMatch(/\.presence-popover\s*\{[^}]*pointer-events:\s*auto;/s);
+  });
 });
 
 function renderWith(entry: PresenceEntry, extra: Record<string, unknown>): ReactTestRenderer {
