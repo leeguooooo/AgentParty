@@ -132,13 +132,17 @@ test("deduplicates users returned through multiple department pages", async () =
             searches += 1;
             return searches === 1
               ? {
-                  users: [{ id: "on_alice", name: "Alice", avatar_url: null, already_member: false }],
+                  users: [
+                    { id: "on_alice", name: "Alice", avatar_url: null, already_member: false },
+                    { id: "on_alice", name: "Alice duplicate", avatar_url: null, already_member: false },
+                  ],
                   next_cursor: "next",
                 }
               : {
                   users: [
                     { id: "on_alice", name: "Alice", avatar_url: null, already_member: false },
                     { id: "on_bob", name: "Bob", avatar_url: null, already_member: false },
+                    { id: "on_bob", name: "Bob duplicate", avatar_url: null, already_member: false },
                   ],
                   next_cursor: null,
                 };

@@ -69,9 +69,14 @@ export function LarkMemberInvite({
     try {
       const page: LarkDirectoryPage = await search(token, slug, normalized, 20, nextCursor);
       setUsers((current) => {
-        if (nextCursor === null) return page.users;
-        const known = new Set(current.map((user) => user.id));
-        return [...current, ...page.users.filter((user) => !known.has(user.id))];
+        const merged = nextCursor === null ? [] : [...current];
+        const known = new Set(merged.map((user) => user.id));
+        for (const user of page.users) {
+          if (known.has(user.id)) continue;
+          known.add(user.id);
+          merged.push(user);
+        }
+        return merged;
       });
       setCursor(page.next_cursor);
       setSearched(true);
