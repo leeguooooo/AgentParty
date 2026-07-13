@@ -183,7 +183,7 @@ export function writeContextFile(
   return path;
 }
 
-const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "profile", "profile-once", "profile-poll-interval"];
+const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "replay-backlog", "profile", "profile-once", "profile-poll-interval"];
 const HELP = `usage: party serve [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all]
        party serve --profile <owner>/<handle>
 
@@ -199,6 +199,10 @@ Options:
   --repo URL           clone into workdir/repo once, then git pull --ff-only before each wake
   --profile ref        run the reusable project-agent profile as one resident daemon across all invites
   --auto-upgrade       between wakes, if a newer party binary is on disk, re-exec it (issue #45)
+  --replay-backlog     on attach, replay the offline backlog one wake per message
+                       (default: skip the backlog, advance the cursor, and print
+                       how many were skipped — serve wakes only for messages that
+                       arrive AFTER it attaches, issue #193)
   --all                run for every non-self message, not only @mentions`;
 
 export interface ServeOptions {
@@ -209,6 +213,11 @@ export interface ServeOptions {
   sinceRev?: number; // 修订游标（hello.since_rev）
   cmd: string;
   mentionsOnly: boolean;
+  // 挂载时是否跳过离线积压（issue #193）。默认 true：serve 是唤醒 supervisor 不是补偿队列，
+  // 挂上那一刻只对「此后」到达的 @ 唤起 runner，把 attach 之前的积压推过游标而不逐条拉起 runner
+  // （否则离线一夜的 @ 会被逐条重放，每条一次完整 codex/claude run + 可能的 git push/开 PR 副作用重放）。
+  // 传 false（--replay-backlog）才恢复旧的「从上次游标逐条重放」行为。
+  skipBacklog?: boolean;
   builtinRunner?: BuiltinRunnerOptions;
   onCursor?: (cursor: number) => void;
   onRevCursor?: (revCursor: number) => void;
@@ -1041,9 +1050,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
     onRevCursor: o.onRevCursor,
   });
 
+  const skipBacklog = o.skipBacklog !== false; // 默认跳过离线积压（issue #193）
   let self = "";
   let code = 0;
   let advertised = false;
+  // 挂载那一刻的频道水位（welcome.last_seq），只在首个 welcome 记一次。
+  // seq <= attachHead 的都是挂载前就存在的积压——跳过模式下不触发 runner（但仍推进游标 + 进 recent）。
+  // 重连再收 welcome 不重置：那时游标早已越过 attachHead，seq > attachHead 的才是真新消息。
+  let attachHead: number | null = null;
   let charter: ChannelCharter | null = o.charter ?? null;
   const refreshCharter = async (reason: string, expectedRev?: number) => {
     if (!o.fetchCharter) return;
@@ -1076,6 +1090,24 @@ export async function runServe(o: ServeOptions): Promise<number> {
     for await (const frame of conn.frames) {
       if (frame.type === "welcome") {
         self = frame.self;
+        // 首个 welcome：定格挂载水位，并就积压去留告知（stderr）。把知情权交给 agent，决定权交给人。
+        if (attachHead === null) {
+          attachHead = frame.last_seq;
+          const pending = Math.max(0, attachHead - o.since);
+          if (pending > 0) {
+            const range = `seq ${o.since + 1}..${attachHead}`;
+            if (skipBacklog) {
+              out(
+                `serve: 跳过 ${pending} 条离线积压（${range}）——不逐条唤醒 runner。` +
+                  ` 查看：party history ${o.channel}；要逐条重放请重启并加 --replay-backlog`,
+              );
+            } else {
+              out(
+                `serve: --replay-backlog：将逐条重放 ${pending} 条离线积压（${range}），每条唤醒一次 runner（可能重放副作用）`,
+              );
+            }
+          }
+        }
         if (o.statusline === true) {
           writeStatuslineCache({
             ...localStatuslineBase(o.channel),
@@ -1118,7 +1150,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // fresh = 游标之上的新消息。历史修订快照会穿透去重被重放（seq 早已消费过），
       // 它们不是新唤醒——不 fresh 就绝不触发 runner（否则旧 @ 被编辑一次，每次重连都重跑一遍）
       const fresh = frame.seq > conn.cursor;
-      const qualifies = fresh && !fromSelf && (!o.mentionsOnly || frame.mentions.includes(self));
+      // 离线积压（seq <= 挂载水位）在跳过模式下不算唤醒：照常 ack 推进游标 + 进 recent 供后续真唤醒
+      // 当上下文，但绝不拉起 runner（issue #193：避免离线一夜的 @ 被逐条重放跑真实副作用）。
+      const isBacklog = skipBacklog && attachHead !== null && frame.seq <= attachHead;
+      const qualifies = fresh && !fromSelf && !isBacklog && (!o.mentionsOnly || frame.mentions.includes(self));
       if (qualifies) {
         out(`▶ ${formatMsg(frame)}`);
         // 串行：本条命令跑完再消费下一帧（新帧此间缓冲在 FrameQueue），避免并发唤起互相抢
@@ -1185,7 +1220,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "auto-upgrade", "profile-once"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "auto-upgrade", "replay-backlog", "profile-once"] });
   const auth = await resolveAuthDetailed();
   if (!auth.server || !auth.token) {
     console.error("no config, run: party login or party init --server URL --token T");
@@ -1274,6 +1309,7 @@ export async function run(argv: string[]): Promise<number> {
     sinceRev: loadRevCursor(channel),
     cmd: cmd ?? "",
     mentionsOnly: flags.all !== true,
+    skipBacklog: flags["replay-backlog"] !== true, // 默认跳过积压；--replay-backlog 才重放（issue #193）
     onCursor: (c) => saveCursor(channel, c),
     onRevCursor: (r) => saveRevCursor(channel, r),
     advertise: () => advertiseServeWake(auth, channel),

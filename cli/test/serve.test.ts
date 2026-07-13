@@ -193,6 +193,84 @@ describe("runServe", () => {
     expect(seen).toEqual([6]); // 只有 fresh 的 seq=6，重放的 seq=1 不触发
   });
 
+  // issue #193：离线积压不该在挂载时逐条拉起 runner
+  // 场景：游标停在 3，频道已到 6（挂载前的积压 4/5/6），挂上后又来一条真·新消息 7。
+  function backlogThenFreshServer() {
+    return startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(6, "me")); // 挂载水位 = 6：4/5/6 是积压
+      sock.send(msgFrame(4, "overnight mention A", { mentions: ["me"] }));
+      sock.send(msgFrame(5, "overnight mention B", { mentions: ["me"] }));
+      sock.send(msgFrame(6, "overnight mention C", { mentions: ["me"] }));
+      setTimeout(() => sock.send(msgFrame(7, "fresh mention", { mentions: ["me"] })), 40);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 90);
+    });
+  }
+
+  test("default skips the offline backlog: advances the cursor, wakes only for post-attach messages (issue #193)", async () => {
+    server = backlogThenFreshServer();
+    const cursors: number[] = [];
+    const seen: { seq: number; recent: number[] }[] = [];
+    const o = opts({
+      server: server.url,
+      since: 3, // 上次消费到 3
+      onCursor: (c) => cursors.push(c),
+      runCommand: async (frame, ctx) => {
+        seen.push({ seq: frame.seq, recent: ctx.recent.map((m) => m.seq) });
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    // 积压 4/5/6 一个 runner 都没拉起；只有挂载后到达的 7 触发一次
+    expect(seen.map((s) => s.seq)).toEqual([7]);
+    // 但游标照常推过积压，退出时不会再补拉它们
+    expect(cursors.at(-1)).toBe(7);
+    expect(cursors).toContain(6);
+    // 积压仍进 recent，成为那次真唤醒的上下文（跳过 ≠ 丢弃知情）
+    expect(seen[0]!.recent).toEqual([4, 5, 6]);
+    // stderr 明确告知跳过了多少、seq 范围、如何查看
+    expect(o.lines.some((l) => l.includes("跳过 3 条离线积压") && l.includes("seq 4..6") && l.includes("party history dev"))).toBe(true);
+  });
+
+  test("--replay-backlog opts back into replaying every backlog mention one wake at a time (issue #193)", async () => {
+    server = backlogThenFreshServer();
+    const seen: number[] = [];
+    const o = opts({
+      server: server.url,
+      since: 3,
+      skipBacklog: false, // = CLI 的 --replay-backlog
+      runCommand: async (frame) => {
+        seen.push(frame.seq);
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    // 旧行为：积压 4/5/6 + 新消息 7，逐条唤醒
+    expect(seen).toEqual([4, 5, 6, 7]);
+    expect(o.lines.some((l) => l.includes("--replay-backlog") && l.includes("重放 3 条离线积压"))).toBe(true);
+  });
+
+  test("no backlog notice when the cursor is already at the channel head (issue #193)", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(3, "me")); // 水位就是上次游标：无积压
+      setTimeout(() => sock.send(msgFrame(4, "fresh mention", { mentions: ["me"] })), 20);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 60);
+    });
+    const seen: number[] = [];
+    const o = opts({
+      server: server.url,
+      since: 3,
+      runCommand: async (frame) => {
+        seen.push(frame.seq);
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(seen).toEqual([4]); // 挂载后的 4 正常触发
+    expect(o.lines.some((l) => l.includes("离线积压"))).toBe(false); // 无积压不告知
+  });
+
   test("--auto-upgrade re-execs the newer on-disk binary at the post-ack safe point (issue #45)", async () => {
     const { EXIT_UPGRADED } = await import("@agentparty/shared");
     const s = closeAfterOneMention();
