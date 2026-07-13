@@ -2,6 +2,7 @@
 import type { Attachment, MsgFrame, TaskAssigneeKind, TaskRecord, TaskState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
+import { stripTerminalControls } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { createTask, fetchMe, fetchMessages, handleRestError, listTasks, updateTask } from "../rest";
@@ -89,7 +90,7 @@ function formatTask(task: TaskRecord): string {
   const assignee = task.assignee ? ` @${task.assignee.name}` : "";
   const labels = task.labels.length > 0 ? ` [${task.labels.join(",")}]` : "";
   const parent = task.parent_id === null ? "" : ` parent:${task.parent_id}`;
-  return `#${task.id}\t${task.state}\tP${task.priority}${assignee}${labels}${parent}\t${compact(task.title)}`;
+  return stripTerminalControls(`#${task.id}\t${task.state}\tP${task.priority}${assignee}${labels}${parent}\t${compact(task.title)}`);
 }
 
 function parseAssignee(raw: string | undefined, kindRaw: string | undefined): { name: string; kind: TaskAssigneeKind } | null | undefined {

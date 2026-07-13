@@ -7,8 +7,10 @@ import type { AgentContext, MsgFrame } from "@agentparty/shared";
 // DEL、C1，把注入序列降级为可见文本。换行是 formatMsg 自己的结构，逐行清洗后再拼接。
 // eslint-disable-next-line no-control-regex
 const TERMINAL_CONTROL = /[\x00-\x08\x0B-\x1F\x7F-\x9F]/g;
+// CSI 颜色/光标序列先整段移除；其他控制序列至少会在 TERMINAL_CONTROL 阶段失去 ESC/BEL，无法执行。
+const ANSI_CSI = /\x1B\[[0-?]*[ -/]*[@-~]/g;
 export function stripTerminalControls(text: string): string {
-  return text.replace(TERMINAL_CONTROL, "");
+  return text.replace(ANSI_CSI, "").replace(TERMINAL_CONTROL, "");
 }
 
 function formatSender(m: MsgFrame): string {

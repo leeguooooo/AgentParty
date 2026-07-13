@@ -34,6 +34,7 @@ import {
   type WebhookFilter,
 } from "@agentparty/shared";
 import pkg from "../package.json" with { type: "json" };
+import { stripTerminalControls } from "./format";
 
 export type { ChannelMode, WebhookFilter };
 export type { CompletionGate, CompletionReview, CompletionReviewPolicy };
@@ -1408,7 +1409,7 @@ export async function exportIdentityData(
 // rest 错误 → 契约退出码
 export function handleRestError(e: unknown): number {
   if (e instanceof RestError) {
-    console.error(`error: ${e.code ?? e.status} ${e.message}`);
+    console.error(stripTerminalControls(`error: ${e.code ?? e.status} ${e.message}`));
     if (e.status === 401) {
       // #2：旧版 CLI 会把「需升级」误报成 unauthorized，看着像 token 失效。附版本 + 升级指引降低误诊。
       console.error(
@@ -1435,6 +1436,6 @@ export function handleRestError(e: unknown): number {
     }
     return 1;
   }
-  console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
+  console.error(stripTerminalControls(`error: ${e instanceof Error ? e.message : String(e)}`));
   return 1;
 }
