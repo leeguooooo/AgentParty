@@ -139,6 +139,22 @@ describe("ws client", () => {
     expect(conn.cursor).toBe(0);
   });
 
+  test("reports no replay after the connection queue is closed", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(1));
+      sock.send(msgFrame(1, "standby wake"));
+    });
+    conn = connect(server.url, "ap_tok", "dev", 0);
+    const it = conn.frames[Symbol.asyncIterator]();
+    await it.next(); // welcome
+    await it.next(); // msg remains unacked
+
+    conn.close();
+
+    expect(conn.replayUnacked()).toBe(0);
+  });
+
   test("dedups frames delivered by both broadcast and backfill", async () => {
     server = startMockServer((frame, sock) => {
       if (frame.type === "hello") {

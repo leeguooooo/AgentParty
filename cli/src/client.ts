@@ -54,10 +54,11 @@ class FrameQueue {
 
   // 租约 standby 已经取走、但没有 ack 的帧需要在接管时重新排到队首。
   // prepend 而不是 push：它们的 seq 早于当前缓冲区，必须先还旧账再处理新帧。
-  prepend(frames: ServerFrame[]): void {
-    if (this.done || frames.length === 0) return;
+  prepend(frames: ServerFrame[]): boolean {
+    if (this.done || frames.length === 0) return false;
     // 禁止 unshift(...frames)：参数展开到数万帧会触发 Maximum call stack size exceeded。
     this.items = frames.concat(this.items);
+    return true;
   }
 }
 
@@ -430,8 +431,7 @@ export function connect(
         .filter(([seq]) => seq > cursor && !pendingSeqs.has(seq))
         .sort(([a], [b]) => a - b)
         .map(([, frame]) => frame);
-      queue.prepend(frames);
-      return frames.length;
+      return queue.prepend(frames) ? frames.length : 0;
     },
     get cursor() {
       return cursor;
