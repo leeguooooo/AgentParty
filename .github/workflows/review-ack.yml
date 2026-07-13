@@ -27,14 +27,13 @@ permissions:
   statuses: write   # 给 head SHA 发 commit status
 
 concurrency:
-  group: review-ack-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
+  group: review-ack-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 jobs:
   review_ack_runner:
     if: >-
-      (github.event_name != 'issue_comment' || github.event.issue.pull_request) &&
-      (github.event_name != 'workflow_run' || github.event.workflow_run.pull_requests[0])
+      github.event_name != 'issue_comment' || github.event.issue.pull_request
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -45,6 +44,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           REQUIRE_CODERABBIT: "true"
         run: node scripts/review-ack-gate.mjs

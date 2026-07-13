@@ -157,11 +157,25 @@ async function postStatus(repo, sha, token, result) {
   if (!response.ok) throw new Error(`status POST ${response.status}: ${await response.text()}`);
 }
 
+export function selectWorkflowPullNumber(headSha, pulls) {
+  const matches = pulls.filter((pull) => pull.state === "open" && pull.head?.sha === headSha);
+  if (matches.length !== 1) {
+    throw new Error(`expected exactly one open PR for workflow head ${headSha}, found ${matches.length}`);
+  }
+  return String(matches[0].number);
+}
+
 async function main() {
   const repo = process.env.REPO;
-  const pr = process.env.PR;
   const token = process.env.GH_TOKEN;
-  if (!repo || !pr || !token) throw new Error("REPO, PR and GH_TOKEN are required");
+  if (!repo || !token) throw new Error("REPO and GH_TOKEN are required");
+  let pr = process.env.PR;
+  if (!pr) {
+    const workflowHeadSha = process.env.WORKFLOW_HEAD_SHA;
+    if (!workflowHeadSha) throw new Error("PR or WORKFLOW_HEAD_SHA is required");
+    const pulls = await githubJson(`/repos/${repo}/commits/${workflowHeadSha}/pulls`, token);
+    pr = selectWorkflowPullNumber(workflowHeadSha, pulls);
+  }
   const pull = await githubJson(`/repos/${repo}/pulls/${pr}`, token);
   const headSha = pull.head?.sha;
   if (!headSha) throw new Error(`cannot resolve PR #${pr} head SHA`);

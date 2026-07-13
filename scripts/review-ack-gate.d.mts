@@ -61,3 +61,11 @@ export interface ReviewAckInput {
 }
 
 export function evaluateReviewAck(input: ReviewAckInput): ReviewAckResult;
+
+export interface WorkflowPull {
+  number?: number;
+  state?: string;
+  head?: { sha?: string };
+}
+
+export function selectWorkflowPullNumber(headSha: string, pulls: WorkflowPull[]): string;

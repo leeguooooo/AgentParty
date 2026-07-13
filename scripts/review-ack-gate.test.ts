@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { evaluateReviewAck, type ReviewAckInput } from "./review-ack-gate.mjs";
+import {
+  evaluateReviewAck,
+  selectWorkflowPullNumber,
+  type ReviewAckInput,
+} from "./review-ack-gate.mjs";
 
 const headSha = "abc123";
 const user = (login: string, type: "User" | "Bot" = "User") => ({ login, type });
@@ -44,6 +48,25 @@ describe("review-ack ordering gate (#460)", () => {
     expect(workflow).toContain("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0");
     expect(workflow).toContain("persist-credentials: false");
     expect(workflow).toContain("run: node scripts/review-ack-gate.mjs");
+    expect(workflow).toContain("WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}");
+    expect(workflow).not.toContain("workflow_run.pull_requests[0]");
+  });
+
+  test("workflow_run uses head SHA to resolve the only open PR", () => {
+    expect(
+      selectWorkflowPullNumber(headSha, [
+        { number: 40, state: "closed", head: { sha: headSha } },
+        { number: 41, state: "open", head: { sha: "old-head" } },
+        { number: 42, state: "open", head: { sha: headSha } },
+      ]),
+    ).toBe("42");
+    expect(() => selectWorkflowPullNumber(headSha, [])).toThrow("found 0");
+    expect(() =>
+      selectWorkflowPullNumber(headSha, [
+        { number: 42, state: "open", head: { sha: headSha } },
+        { number: 43, state: "open", head: { sha: headSha } },
+      ]),
+    ).toThrow("found 2");
   });
 
   test("ack posted before bot reviews stays red", () => {
