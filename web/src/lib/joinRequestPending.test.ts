@@ -52,6 +52,16 @@ describe("pending watch-token join request storage", () => {
     expect(session.getItem("ap_pending_join_request")).toBeNull();
   });
 
+  test("rejects non-string notes passed through an untyped runtime caller", () => {
+    const saveUnsafe = savePendingJoinRequest as unknown as (
+      value: { slug: string; note?: unknown },
+      now?: number,
+    ) => void;
+    expect(() => saveUnsafe({ slug: "private-room", note: null }, 1_000)).toThrow("invalid pending join request");
+    expect(() => saveUnsafe({ slug: "private-room", note: 42 }, 1_000)).toThrow("invalid pending join request");
+    expect(session.getItem("ap_pending_join_request")).toBeNull();
+  });
+
   test("drops malformed and expired pending values", () => {
     session.setItem("ap_pending_join_request", '{"slug":"../bad","expiresAt":2000}');
     expect(readPendingJoinRequest()).toBeNull();
