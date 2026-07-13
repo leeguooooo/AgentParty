@@ -173,19 +173,20 @@ describe("current-account channel agent inventory", () => {
     })).status).toBe(201);
     const minted = await mintAgent(session, { name: uniq("bot"), channel_scope: slug });
     const agent = (await minted.json()) as { name: string; token: string };
+    const nickname = uniq("页面小助手");
 
     const updated = await api(`/api/channels/${slug}/agents/${encodeURIComponent(agent.name)}/nickname`, session, {
       method: "PUT",
-      body: JSON.stringify({ nickname: "页面小助手" }),
+      body: JSON.stringify({ nickname }),
     });
     expect(updated.status).toBe(200);
-    expect(await updated.json()).toMatchObject({ name: agent.name, nickname: "页面小助手" });
+    expect(await updated.json()).toMatchObject({ name: agent.name, nickname });
 
     const listed = (await (await api(`/api/channels/${slug}/agents`, session)).json()) as {
       agents: { name: string; nickname: string | null }[];
     };
-    expect(listed.agents).toContainEqual(expect.objectContaining({ name: agent.name, nickname: "页面小助手" }));
-    expect(((await (await api("/api/me", agent.token)).json()) as { handle: string | null }).handle).toBe("页面小助手");
+    expect(listed.agents).toContainEqual(expect.objectContaining({ name: agent.name, nickname }));
+    expect(((await (await api("/api/me", agent.token)).json()) as { handle: string | null }).handle).toBe(nickname);
     const audit = (await (await api(`/api/channels/${slug}/management-audit?limit=100`, session)).json()) as {
       audit: { action: string; resource: string; channel: string | null; metadata: Record<string, unknown> }[];
     };
@@ -213,10 +214,11 @@ describe("current-account channel agent inventory", () => {
       method: "PUT",
       body: JSON.stringify({ nickname }),
     });
+    const uniqueNickname = uniq("唯一页面昵称");
 
     expect((await put(session, first.name, "bad nickname")).status).toBe(400);
-    expect((await put(session, first.name, "唯一页面昵称")).status).toBe(200);
-    expect((await put(session, second.name, "唯一页面昵称")).status).toBe(409);
+    expect((await put(session, first.name, uniqueNickname)).status).toBe(200);
+    expect((await put(session, second.name, uniqueNickname)).status).toBe(409);
     // 公共频道对 other 可读，仍必须被 token.owner 绑定挡住；不能靠外层 private ACL 偶然过测试。
     expect((await put(other, first.name, "越权改名")).status).toBe(404);
     expect((await put(first.token, first.name, "agent自己走owner端点")).status).toBe(403);

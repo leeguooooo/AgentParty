@@ -2688,7 +2688,7 @@ app.get("/api/channels/:slug/agents", requireBearer, async (c) => {
       ORDER BY t.created_at DESC, t.name`,
   )
     .bind(identity.account, slug)
-    .all<{ name: string; owner: string; channel_scope: string; created_at: number }>();
+    .all<{ name: string; owner: string; channel_scope: string; created_at: number; nickname: string | null }>();
   return c.json({ agents: rows.results ?? [] });
 });
 
