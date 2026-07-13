@@ -1406,7 +1406,7 @@
 .presence-popover {
   position: fixed;
   z-index: 70;
-  pointer-events: none;
+  pointer-events: auto;
   max-height: min(70vh, 520px);
   overflow: hidden;
   display: flex;
