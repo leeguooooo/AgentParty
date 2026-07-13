@@ -2050,6 +2050,7 @@ function TeamThread({
   busySeq,
   messageBySeq,
   presence,
+  agentRoles,
   onReply,
   onEdit,
   onRetract,
@@ -2075,6 +2076,7 @@ function TeamThread({
   messageBySeq: Map<number, MsgFrame>;
   // #274：name → presence 条目，MessageCard 悬停发送者名/@提及展示实时状态
   presence: Record<string, PresenceEntry>;
+  agentRoles: Record<string, ChannelRoleInfo>;
   onReply: (seq: number) => void;
   onEdit: (seq: number) => void;
   onRetract: (seq: number) => void;
@@ -2124,6 +2126,7 @@ function TeamThread({
             participants={participants}
             canModerate={canModerate}
             presence={presence}
+            agentRoles={agentRoles}
             quotedMessage={message.reply_to !== null ? messageBySeq.get(message.reply_to) ?? null : null}
             onReply={onReply}
             onEdit={onEdit}
@@ -3525,6 +3528,10 @@ export function ChannelPage({
   const totalInView = q === "" ? timelineMessages.length : searchHits.length;
   const visibleInView = q === "" ? visibleMessages.length : visibleSearchHits.length;
   const structuredRoleCount = channelRoles.length + selfReportedRoles(channelRoles, state.presence, channelIdentities).length;
+  const channelRolesByName = useMemo(
+    () => Object.fromEntries(channelRoles.map((role) => [role.name, role])),
+    [channelRoles],
+  );
   // #370 点1：公告面板单列一块「分工摘要」——host + 各角色计数，只读，点开跳团队面板看全貌。
   const charterDivisionSummary = ((): string => {
     if (channelRoles.length === 0) return "";
@@ -4025,6 +4032,7 @@ export function ChannelPage({
                   participants={state.participants}
                   canModerate={canModerate}
                   presence={state.presence}
+                  agentRoles={channelRolesByName}
                   quotedMessage={item.message.reply_to !== null ? messageBySeq.get(item.message.reply_to) ?? null : null}
                   onReply={startReply}
                   onEdit={startEdit}
@@ -4060,6 +4068,7 @@ export function ChannelPage({
                   busySeq={messageActionBusySeq}
                   messageBySeq={messageBySeq}
                   presence={state.presence}
+                  agentRoles={channelRolesByName}
                   onReply={startReply}
                   onEdit={startEdit}
                   onRetract={retractMessage}

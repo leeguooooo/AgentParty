@@ -8,7 +8,7 @@ import { LocaleProvider } from "../i18n/locale";
 
 // Markdown 正文经 DOMPurify（需真实 DOM）；本用例只关心悬停 title，桩掉渲染避免拉起 DOM。
 mock.module("../lib/markdown", () => ({ renderMarkdown: (s: string) => s }));
-const { MessageCard, presenceTitleBits } = await import("./MessageCard");
+const { MessageCard, agentInfoTitleBits, presenceTitleBits } = await import("./MessageCard");
 
 let renderer: ReactTestRenderer | null = null;
 
@@ -122,6 +122,33 @@ describe("presenceTitleBits (#274)", () => {
   });
 });
 
+describe("agentInfoTitleBits (#448)", () => {
+  test("优先展示频道公开分工，并附 agent 当前 note 与状态", () => {
+    expect(agentInfoTitleBits(
+      presenceEntry({ role: "worker", note: "正在核对迁移" }),
+      {
+        name: "planner",
+        role: "reviewer",
+        responsibility: "检查发布风险与回归范围",
+        assigned_by: "host",
+        assigned_at: 1,
+      },
+    )).toEqual([
+      "role: reviewer",
+      "responsibility: 检查发布风险与回归范围",
+      "note: 正在核对迁移",
+      "status: working",
+    ]);
+  });
+
+  test("没有公开分工时回退到 agent 自报 role，空 note 不占行", () => {
+    expect(agentInfoTitleBits(presenceEntry({ role: "worker", note: "  " }), undefined)).toEqual([
+      "role: worker",
+      "status: working",
+    ]);
+  });
+});
+
 describe("发送者名/@提及悬停展示实时状态 (#274)", () => {
   test("传入 presence map 时 senderTitle 追加 status/task 行", () => {
     const root = render(baseMsg({}), {
@@ -131,6 +158,23 @@ describe("发送者名/@提及悬停展示实时状态 (#274)", () => {
     expect(title).toContain("status: busy");
     expect(title).toContain("task: #510");
     expect(title).toContain("queued: 2");
+  });
+
+  test("sender 与 @ 悬停都能看到频道公开职责", () => {
+    const role = {
+      name: "planner",
+      role: "worker",
+      responsibility: "先读 issue，再实现和验证",
+      assigned_by: "host",
+      assigned_at: 1,
+    };
+    const root = render(baseMsg({ mentions: ["planner"] }), {
+      presence: { planner: presenceEntry({ note: "实现中" }) },
+      agentRoles: { planner: role },
+    });
+    expect(senderTitle(root)).toContain("responsibility: 先读 issue，再实现和验证");
+    expect(senderTitle(root)).toContain("note: 实现中");
+    expect(mentionTitle(root)).toContain("responsibility: 先读 issue，再实现和验证");
   });
 
   test("不传 presence（或查不到该名字）时 senderTitle 不含 status/task 行", () => {
