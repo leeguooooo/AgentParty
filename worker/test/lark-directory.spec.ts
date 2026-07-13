@@ -129,6 +129,13 @@ describe("Lark organization member invitations (#358)", () => {
     expect(rejected.status).toBe(400);
     expect(await rejected.json()).toMatchObject({ error: { code: "bad_request" } });
 
+    const rebound = await api(
+      `/api/channels/${slug}/lark-directory?q=bob&limit=20&cursor=${encodeURIComponent(firstPage.next_cursor)}`,
+      owner.token,
+    );
+    expect(rebound.status).toBe(400);
+    expect(await rebound.json()).toMatchObject({ error: { code: "bad_request" } });
+
     fetchMock.get(LARK_ORIGIN)
       .intercept({
         path: "/open-apis/contact/v3/users/find_by_department?user_id_type=union_id&department_id_type=open_department_id&department_id=od-engineering&page_size=20",
