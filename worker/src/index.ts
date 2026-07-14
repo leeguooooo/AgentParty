@@ -196,6 +196,17 @@ async function fetchChannelDO(env: AppEnv, slug: string, request: Request | (() 
   throw lastError;
 }
 
+// Responses returned by Durable Object fetches have immutable headers in the
+// production Workers runtime. Hono's response middleware appends headers after
+// the handler returns, so copy the response into a fresh, mutable wrapper first.
+export function mutableFetchResponse(response: Response): Response {
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: new Headers(response.headers),
+  });
+}
+
 function parseRoleResponsibility(body: Record<string, unknown> | null): { present: boolean; value: string | null } | null {
   if (body === null || !Object.prototype.hasOwnProperty.call(body, "responsibility")) {
     return { present: false, value: null };
@@ -6093,7 +6104,7 @@ app.post("/api/channels/:slug/webhooks", async (c) => {
       metadata: { webhook_filter: filter },
     });
   }
-  return response;
+  return mutableFetchResponse(response);
 });
 
 app.get("/api/channels/:slug/webhooks", async (c) => {
@@ -6144,7 +6155,7 @@ app.delete("/api/channels/:slug/webhooks/:name", async (c) => {
       channel: slug,
     });
   }
-  return response;
+  return mutableFetchResponse(response);
 });
 
 // #105：列出死信（重试耗尽 / 队列满被永久放弃的投递）。与 webhook 管理同权限：仅房主 / ap_ token。
@@ -6190,7 +6201,7 @@ app.post("/api/channels/:slug/webhooks/:name/redeliver", async (c) => {
       channel: slug,
     });
   }
-  return response;
+  return mutableFetchResponse(response);
 });
 
 app.post("/api/channels/:slug/archive", async (c) => {

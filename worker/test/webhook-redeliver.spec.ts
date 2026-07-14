@@ -112,8 +112,12 @@ describe("webhook dead-letter persistence + redeliver", () => {
     expect(await deadLetterRows(slug)).toHaveLength(1);
 
     fetchMock.get("https://revive.test").intercept({ path: "/wake", method: "POST" }).reply(200, "ok");
-    const res = await api(`/api/channels/${slug}/webhooks/${hook}/redeliver`, token, { method: "POST" });
+    const res = await api(`/api/channels/${slug}/webhooks/${hook}/redeliver`, token, {
+      method: "POST",
+      headers: { origin: "http://agentparty-ui.localhost" },
+    });
     expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe("http://agentparty-ui.localhost");
     expect((await res.json()) as { redelivered: number; failed: number }).toMatchObject({
       redelivered: 1,
       failed: 0,

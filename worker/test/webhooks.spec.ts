@@ -3,6 +3,7 @@ import { fetchMock } from "./fetch-mock";
 import { LOOP_GUARD_N, MAX_WEBHOOKS_PER_CHANNEL, WEBHOOK_MAX_RETRIES } from "@agentparty/shared";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
+import { mutableFetchResponse } from "../src/index";
 import { api, createChannel, disableLoopGuard, postMessage, seedToken, uniq } from "./helpers";
 
 beforeAll(() => {
@@ -90,6 +91,17 @@ async function queueRows(slug: string) {
 }
 
 describe("webhooks", () => {
+  it("copies immutable Durable Object responses before Hono appends headers (#495)", () => {
+    const upstream = Response.redirect("https://do/internal/webhooks", 302);
+    expect(() => upstream.headers.set("x-regression", "broken")).toThrow();
+
+    const response = mutableFetchResponse(upstream);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("https://do/internal/webhooks");
+    expect(() => response.headers.set("x-regression", "fixed")).not.toThrow();
+    expect(response.headers.get("x-regression")).toBe("fixed");
+  });
+
   it("registers, lists without leaking secret, deletes; readonly is rejected", async () => {
     const agent = await seedToken("agent");
     const ro = await seedToken("readonly");
@@ -151,13 +163,18 @@ describe("webhooks", () => {
       expect(unsafe.status).toBe(400);
     }
 
-    const created = await addWebhook(slug, agent.token, {
-      name: "hermes",
-      url: "https://hooks.test/wake",
-      secret: "super-secret",
-      filter: "mentions",
+    const created = await api(`/api/channels/${slug}/webhooks`, agent.token, {
+      method: "POST",
+      headers: { origin: "http://agentparty-ui.localhost" },
+      body: JSON.stringify({
+        name: "hermes",
+        url: "https://hooks.test/wake",
+        secret: "super-secret",
+        filter: "mentions",
+      }),
     });
     expect(created.status).toBe(201);
+    expect(created.headers.get("access-control-allow-origin")).toBe("http://agentparty-ui.localhost");
 
     const list = await api(`/api/channels/${slug}/webhooks`, agent.token);
     expect(list.status).toBe(200);
@@ -173,8 +190,12 @@ describe("webhooks", () => {
 
     const roDelete = await api(`/api/channels/${slug}/webhooks/hermes`, ro.token, { method: "DELETE" });
     expect(roDelete.status).toBe(403);
-    const del = await api(`/api/channels/${slug}/webhooks/hermes`, agent.token, { method: "DELETE" });
+    const del = await api(`/api/channels/${slug}/webhooks/hermes`, agent.token, {
+      method: "DELETE",
+      headers: { origin: "http://agentparty-ui.localhost" },
+    });
     expect(del.status).toBe(200);
+    expect(del.headers.get("access-control-allow-origin")).toBe("http://agentparty-ui.localhost");
     const again = await api(`/api/channels/${slug}/webhooks/hermes`, agent.token, { method: "DELETE" });
     expect(again.status).toBe(404);
     const empty = (await (await api(`/api/channels/${slug}/webhooks`, agent.token)).json()) as {
