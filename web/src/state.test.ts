@@ -63,7 +63,7 @@ describe("channel state", () => {
 
     expect(revised.messages[0]).toMatchObject({ seq: 6, body: "edited", edited: true });
     expect(revised.mentionSenders.external).toMatchObject({
-      seq: 6,
+      ts: edited.ts,
       sender: { name: "external", owner: "lark:on_cross", handle: "external-handle" },
     });
   });
@@ -81,7 +81,7 @@ describe("channel state", () => {
     for (let seq = 1; seq <= 10; seq++) s = channelReducer(s, { type: "frame", frame: msgFrame(seq, `m${seq}`) });
     const trimmed = channelReducer(s, { type: "trim", keep: 4 });
     expect(trimmed.messages.map((m) => m.seq)).toEqual([7, 8, 9, 10]);
-    expect(trimmed.mentionSenders.bob?.seq).toBe(10); // @ 身份窗口不随 DOM 消息窗口一起裁掉
+    expect(trimmed.mentionSenders.bob?.ts).toBe(msgFrame(10, "").ts); // @ 身份窗口不随 DOM 消息窗口一起裁掉
     // 低于上限时不动原状态（引用相等，避免无谓重渲染）
     expect(channelReducer(trimmed, { type: "trim", keep: 4 })).toBe(trimmed);
   });
@@ -101,9 +101,35 @@ describe("channel state", () => {
 
     expect(s.messages.map((m) => m.seq)).toEqual([2]);
     expect(s.mentionSenders.external).toMatchObject({
-      seq: 2,
+      ts: msgFrame(2, "").ts,
       sender: { name: "external", owner: "lark:on_cross", handle: "external-handle" },
     });
+  });
+
+  test("an older loaded frame only fills gaps and never overwrites a newer sender identity", () => {
+    let s = channelReducer(initialChannelState, {
+      type: "frame",
+      frame: msgFrame(20, "new", {
+        sender: { name: "external", kind: "agent", owner: "new-owner", handle: "new-handle" },
+      }),
+    });
+    s = channelReducer(s, {
+      type: "frame",
+      frame: msgFrame(10, "old", {
+        sender: { name: "external", kind: "agent", owner: "old-owner", display_name: "Old display" },
+      }),
+    });
+
+    expect(s.mentionSenders.external).toMatchObject({
+      ts: msgFrame(20, "").ts,
+      sender: {
+        name: "external",
+        owner: "new-owner",
+        handle: "new-handle",
+        display_name: "Old display",
+      },
+    });
+    expect(s.mentionSenders.external).not.toHaveProperty("body");
   });
 
   test("read_cursor frame upserts monotonically; welcome snapshot seeds cursors", () => {

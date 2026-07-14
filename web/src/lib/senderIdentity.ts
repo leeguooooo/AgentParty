@@ -1,5 +1,10 @@
 import type { Sender } from "@agentparty/shared";
 
+export interface SenderIdentitySnapshot {
+  ts: number;
+  sender: Sender;
+}
+
 /** 合并新旧协议混杂的 sender 快照：新身份字段优先，缺失/空串时保留旧值。 */
 export function mergeSenderIdentity(previous: Sender | undefined, next: Sender): Sender {
   return {

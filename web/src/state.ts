@@ -2,7 +2,7 @@
 // 消息按 seq 去重排序；status 帧同时进时间线和 presence 快照；error 帧内联展示不做 toast。
 import type { ChannelMode, MsgFrame, PresenceEntry, ReadCursor, Sender, ServerFrame } from "@agentparty/shared";
 import type { FatalReason, SocketStatus } from "./lib/ws";
-import { mergeSenderIdentity } from "./lib/senderIdentity";
+import { mergeSenderIdentity, type SenderIdentitySnapshot } from "./lib/senderIdentity";
 
 export interface ChannelState {
   self: string | null;
@@ -11,7 +11,7 @@ export interface ChannelState {
   presence: Record<string, PresenceEntry>;
   messages: MsgFrame[]; // 按 seq 升序、已去重
   /** 每个近期发信人的最新身份快照；独立于 messages 窗口，trim 后仍可用于 @ 候选。 */
-  mentionSenders: Record<string, MsgFrame>;
+  mentionSenders: Record<string, SenderIdentitySnapshot>;
   readCursors: Record<string, ReadCursor>; // 每身份读到第几条（Phase 2）；人类 + 流式 agent 同表
   status: SocketStatus;
   readonly: boolean; // welcome.role=readonly（或 send 被拒 unauthorized 兜底）→ 隐藏输入框
@@ -116,12 +116,20 @@ function replaceMessage(messages: MsgFrame[], msg: MsgFrame): MsgFrame[] {
   return replaced ? next : insertMessage(messages, msg);
 }
 
-function rememberMentionSender(senders: Record<string, MsgFrame>, frame: MsgFrame): Record<string, MsgFrame> {
+function rememberMentionSender(
+  senders: Record<string, SenderIdentitySnapshot>,
+  frame: MsgFrame,
+): Record<string, SenderIdentitySnapshot> {
   const previous = senders[frame.sender.name];
-  const sender = mergeSenderIdentity(previous?.sender, frame.sender);
-  // 上翻加载老页时不把 last-seen 时间倒退，但可用老帧补齐稀疏身份字段。
-  const latest = previous !== undefined && previous.ts > frame.ts ? previous : frame;
-  return { ...senders, [frame.sender.name]: { ...latest, sender } };
+  // 上翻加载老页时不把 last-seen 时间或身份倒退：旧帧只能补新快照缺失的字段，不能覆盖新值。
+  const previousIsNewer = previous !== undefined && previous.ts > frame.ts;
+  const sender = previousIsNewer
+    ? mergeSenderIdentity(frame.sender, previous.sender)
+    : mergeSenderIdentity(previous?.sender, frame.sender);
+  return {
+    ...senders,
+    [frame.sender.name]: { ts: previousIsNewer ? previous.ts : frame.ts, sender },
+  };
 }
 
 function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {

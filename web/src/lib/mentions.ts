@@ -1,8 +1,8 @@
 // @ 提及候选（issue #39）：把 participants（WS 连着）∪ presence（含 wake 信息）合成一个
 // 分档的候选列表，供 Composer 的 @ 补全下拉用。"可 @" ≠ "在线连接"——本产品最特别的一档是
 // 「可唤醒」：人不在但 @ 了会被 serve/watch/webhook 拉起来。
-import { autoWakeReachable, type ChannelRoleAssignment, type ChannelSquad, type MsgFrame, type PresenceEntry, type Sender, type WakeKind } from "@agentparty/shared";
-import { mergeSenderIdentity } from "./senderIdentity";
+import { autoWakeReachable, type ChannelRoleAssignment, type ChannelSquad, type PresenceEntry, type Sender, type WakeKind } from "@agentparty/shared";
+import { mergeSenderIdentity, type SenderIdentitySnapshot } from "./senderIdentity";
 
 export type MentionTier = "online" | "wakeable" | "recent";
 
@@ -66,7 +66,7 @@ export function mentionCandidates(
   identities: MentionIdentity[] = [],
   roles: ChannelRoleAssignment[] = [],
   squads: ChannelSquad[] = [],
-  messages: MsgFrame[] = [],
+  messages: SenderIdentitySnapshot[] = [],
 ): MentionCandidate[] {
   const online = new Set(participants.map((p) => p.name));
   const participantByName = new Map(participants.map((p) => [p.name, p]));
