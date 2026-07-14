@@ -1,11 +1,27 @@
 import { describe, expect, test } from "bun:test";
-import type { PresenceEntry, Sender } from "@agentparty/shared";
+import type { MsgFrame, PresenceEntry, Sender } from "@agentparty/shared";
 import { activeMentionQuery, filterCandidates, mentionCandidates, parseDraftMentions } from "./mentions";
 
 const NOW = 1_000_000_000;
 
 function presence(over: Partial<PresenceEntry> & { name: string }): PresenceEntry {
   return { state: "waiting", note: null, ts: NOW, last_seen: NOW, ...over };
+}
+
+function message(sender: Sender, ts = NOW): MsgFrame {
+  return {
+    type: "msg",
+    seq: 1,
+    sender,
+    kind: "message",
+    body: "hello",
+    mentions: [],
+    reply_to: null,
+    state: null,
+    note: null,
+    status: null,
+    ts,
+  } as MsgFrame;
 }
 
 describe("mentionCandidates", () => {
@@ -111,6 +127,25 @@ describe("mentionCandidates", () => {
     expect(c.display).toBe("LEO-MAIN");
     expect(c.tier).toBe("recent");
     expect(c.group).toBe("lark:on_owner");
+  });
+
+  test("页面打开后发言的跨 owner agent 无需新的 presence 帧也会进入空查询和名字过滤候选 (#499)", () => {
+    const messages = [message({
+      name: "Evan_Clauder",
+      kind: "agent",
+      owner: "lark:on_cross_company",
+    })];
+    const candidates = mentionCandidates([], {}, "leo", NOW, [], [], [], messages);
+
+    expect(candidates.map((candidate) => candidate.name)).toEqual(["Evan_Clauder"]);
+    expect(candidates[0]?.group).toBe("lark:on_cross_company");
+    expect(filterCandidates(candidates, "evan").map((candidate) => candidate.name)).toEqual(["Evan_Clauder"]);
+  });
+
+  test("超过 14 天的消息 sender 不会绕过幽灵清理重新进入候选 (#499)", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const messages = [message({ name: "old-cross-owner", kind: "agent", owner: "lark:on_old" }, NOW - 15 * DAY)];
+    expect(mentionCandidates([], {}, null, NOW, [], [], [], messages)).toEqual([]);
   });
 
   test("identity-only agents can be found by readable display", () => {

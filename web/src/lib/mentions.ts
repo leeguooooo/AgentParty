@@ -1,7 +1,7 @@
 // @ 提及候选（issue #39）：把 participants（WS 连着）∪ presence（含 wake 信息）合成一个
 // 分档的候选列表，供 Composer 的 @ 补全下拉用。"可 @" ≠ "在线连接"——本产品最特别的一档是
 // 「可唤醒」：人不在但 @ 了会被 serve/watch/webhook 拉起来。
-import { autoWakeReachable, type ChannelRoleAssignment, type ChannelSquad, type PresenceEntry, type Sender, type WakeKind } from "@agentparty/shared";
+import { autoWakeReachable, type ChannelRoleAssignment, type ChannelSquad, type MsgFrame, type PresenceEntry, type Sender, type WakeKind } from "@agentparty/shared";
 
 export type MentionTier = "online" | "wakeable" | "recent";
 
@@ -64,13 +64,25 @@ export function mentionCandidates(
   identities: MentionIdentity[] = [],
   roles: ChannelRoleAssignment[] = [],
   squads: ChannelSquad[] = [],
+  messages: MsgFrame[] = [],
 ): MentionCandidate[] {
   const online = new Set(participants.map((p) => p.name));
   const participantByName = new Map(participants.map((p) => [p.name, p]));
   const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
   const roleByName = new Map(roles.map((role) => [role.name, role]));
+  // identities REST 只在频道 mount 时抓一次。页面打开后才发言、又没有补 status/presence 帧的成员
+  // 仍应立即可 @；消息 sender 是服务端已鉴权的频道身份，按同一 14 天窗口补进候选即可。
+  const recentSenderByName = new Map<string, Sender>();
+  const recentMentionNames = new Set<string>();
+  for (const message of messages) {
+    if (now - message.ts > DEAD_MS) continue;
+    recentSenderByName.set(message.sender.name, message.sender);
+    recentMentionNames.add(message.sender.name);
+    if (message.sender.handle) recentMentionNames.add(message.sender.handle);
+  }
   const kindOf = new Map<string, "agent" | "human">();
   for (const p of participants) kindOf.set(p.name, p.kind);
+  for (const sender of recentSenderByName.values()) kindOf.set(sender.name, sender.kind);
   for (const identity of identities) {
     if (identity.kind === "agent" || identity.kind === "human") kindOf.set(identity.name, identity.kind);
   }
@@ -89,6 +101,7 @@ export function mentionCandidates(
     ...Object.keys(presence),
     ...identities.map((identity) => identity.name),
     ...roles.map((role) => role.name),
+    ...recentSenderByName.keys(),
   ]);
   const rank: Record<MentionTier, number> = { online: 0, wakeable: 1, recent: 2 };
   const base = [...names]
@@ -98,14 +111,15 @@ export function mentionCandidates(
       const p = presence[name];
       const identity = identityByName.get(name);
       const assigned = roleByName.get(name);
-      const account = identity?.account ?? assigned?.account ?? p?.account;
+      const recentSender = recentSenderByName.get(name);
+      const account = identity?.account ?? assigned?.account ?? p?.account ?? recentSender?.owner;
       // 全局唯一昵称（handle）：有则用它做 @ 插入 token 和显示名。人类=account handle（UUID 会话名打不出来，
       // 只有 handle 能被后端识别为「被 @」）；agent=自设昵称（#165，可中文，其 ASCII name 由后端解析回填）。
       const identityHandle =
         identity?.handle !== undefined && identity.handle !== "" && NAME_TOKEN_RE.test(identity.handle)
           ? identity.handle
           : undefined;
-      const handle = participantByName.get(name)?.handle ?? p?.handle ?? identityHandle;
+      const handle = participantByName.get(name)?.handle ?? p?.handle ?? identityHandle ?? recentSender?.handle;
       // 人类网页会话名是 UUID，显示账号 email 才认得出「是谁」；agent 名本身可读，用 name。
       const display = handle
         ? handle
@@ -114,7 +128,7 @@ export function mentionCandidates(
           : assigned?.display && assigned.display !== ""
             ? assigned.display
             : kind === "human" && account
-              ? account
+              ? recentSender?.display_name || account
               : name;
       const group = account ?? (kind === "human" ? "human sessions" : "unowned agents");
       return {
@@ -139,6 +153,7 @@ export function mentionCandidates(
       }
       if (roleByName.has(c.name)) return true;
       if (identityByName.has(c.name)) return true;
+      if (recentMentionNames.has(c.name)) return true;
       const p = presence[c.name];
       const seen = p?.last_seen ?? p?.ts ?? 0;
       return now - seen <= DEAD_MS; // 幽灵清理：太久没露面的 agent 也剔除
