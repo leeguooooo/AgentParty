@@ -51,8 +51,29 @@ describe("channel state", () => {
     for (let seq = 1; seq <= 10; seq++) s = channelReducer(s, { type: "frame", frame: msgFrame(seq, `m${seq}`) });
     const trimmed = channelReducer(s, { type: "trim", keep: 4 });
     expect(trimmed.messages.map((m) => m.seq)).toEqual([7, 8, 9, 10]);
+    expect(trimmed.mentionSenders.bob?.seq).toBe(10); // @ 身份窗口不随 DOM 消息窗口一起裁掉
     // 低于上限时不动原状态（引用相等，避免无谓重渲染）
     expect(channelReducer(trimmed, { type: "trim", keep: 4 })).toBe(trimmed);
+  });
+
+  test("mention sender snapshot survives trim and merges complete identity fields", () => {
+    let s = channelReducer(initialChannelState, {
+      type: "frame",
+      frame: msgFrame(1, "complete", {
+        sender: { name: "external", kind: "agent", owner: "lark:on_cross", handle: "external-handle" },
+      }),
+    });
+    s = channelReducer(s, {
+      type: "frame",
+      frame: msgFrame(2, "sparse", { sender: { name: "external", kind: "agent" } }),
+    });
+    s = channelReducer(s, { type: "trim", keep: 1 });
+
+    expect(s.messages.map((m) => m.seq)).toEqual([2]);
+    expect(s.mentionSenders.external).toMatchObject({
+      seq: 2,
+      sender: { name: "external", owner: "lark:on_cross", handle: "external-handle" },
+    });
   });
 
   test("read_cursor frame upserts monotonically; welcome snapshot seeds cursors", () => {

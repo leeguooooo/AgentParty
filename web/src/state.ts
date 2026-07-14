@@ -9,6 +9,8 @@ export interface ChannelState {
   mode: ChannelMode;
   presence: Record<string, PresenceEntry>;
   messages: MsgFrame[]; // 按 seq 升序、已去重
+  /** 每个近期发信人的最新身份快照；独立于 messages 窗口，trim 后仍可用于 @ 候选。 */
+  mentionSenders: Record<string, MsgFrame>;
   readCursors: Record<string, ReadCursor>; // 每身份读到第几条（Phase 2）；人类 + 流式 agent 同表
   status: SocketStatus;
   readonly: boolean; // welcome.role=readonly（或 send 被拒 unauthorized 兜底）→ 隐藏输入框
@@ -26,6 +28,7 @@ export const initialChannelState: ChannelState = {
   mode: "normal",
   presence: {},
   messages: [],
+  mentionSenders: {},
   readCursors: {},
   status: "connecting",
   readonly: false,
@@ -112,6 +115,24 @@ function replaceMessage(messages: MsgFrame[], msg: MsgFrame): MsgFrame[] {
   return replaced ? next : insertMessage(messages, msg);
 }
 
+function rememberMentionSender(senders: Record<string, MsgFrame>, frame: MsgFrame): Record<string, MsgFrame> {
+  const previous = senders[frame.sender.name];
+  const sender: Sender = {
+    ...frame.sender,
+    owner: frame.sender.owner || previous?.sender.owner,
+    lineage: frame.sender.lineage ?? previous?.sender.lineage,
+    handle: frame.sender.handle || previous?.sender.handle,
+    display_name: frame.sender.display_name || previous?.sender.display_name,
+    avatar_url: frame.sender.avatar_url || previous?.sender.avatar_url,
+    avatar_thumb: frame.sender.avatar_thumb || previous?.sender.avatar_thumb,
+    client_version: frame.sender.client_version || previous?.sender.client_version,
+    connection_count: frame.sender.connection_count ?? previous?.sender.connection_count,
+  };
+  // 上翻加载老页时不把 last-seen 时间倒退，但可用老帧补齐稀疏身份字段。
+  const latest = previous !== undefined && previous.ts > frame.ts ? previous : frame;
+  return { ...senders, [frame.sender.name]: { ...latest, sender } };
+}
+
 function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
   switch (frame.type) {
     case "welcome": {
@@ -155,7 +176,11 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
       return { ...state, participants: frame.participants };
     case "msg":
     case "status": {
-      const next: ChannelState = { ...state, messages: insertMessage(state.messages, frame) };
+      const next: ChannelState = {
+        ...state,
+        messages: insertMessage(state.messages, frame),
+        mentionSenders: rememberMentionSender(state.mentionSenders, frame),
+      };
       // 人类发言重置服务端 loop guard 计数，黄条同步撤下
       if (
         frame.sender.kind === "human" &&
@@ -168,7 +193,11 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
       return next;
     }
     case "message_update":
-      return { ...state, messages: replaceMessage(state.messages, frame.message) };
+      return {
+        ...state,
+        messages: replaceMessage(state.messages, frame.message),
+        mentionSenders: rememberMentionSender(state.mentionSenders, frame.message),
+      };
     case "presence":
       return {
         ...state,

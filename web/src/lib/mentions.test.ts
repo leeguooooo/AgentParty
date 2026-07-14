@@ -142,6 +142,26 @@ describe("mentionCandidates", () => {
     expect(filterCandidates(candidates, "evan").map((candidate) => candidate.name)).toEqual(["Evan_Clauder"]);
   });
 
+  test("同名 sender 的稀疏新帧不会擦掉完整 owner/handle/display (#499)", () => {
+    const complete = message({
+      name: "cross-owner-session",
+      kind: "human",
+      owner: "lark:on_cross_company",
+      handle: "Evan_Clauder",
+      display_name: "Evan",
+    }, NOW - 1);
+    const sparse = message({ name: "cross-owner-session", kind: "human" }, NOW);
+    const candidates = mentionCandidates([], {}, null, NOW, [], [], [], [complete, sparse]);
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      name: "Evan_Clauder",
+      display: "Evan_Clauder",
+      account: "lark:on_cross_company",
+      group: "lark:on_cross_company",
+    });
+  });
+
   test("超过 14 天的消息 sender 不会绕过幽灵清理重新进入候选 (#499)", () => {
     const DAY = 24 * 60 * 60 * 1000;
     const messages = [message({ name: "old-cross-owner", kind: "agent", owner: "lark:on_old" }, NOW - 15 * DAY)];

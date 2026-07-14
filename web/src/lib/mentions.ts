@@ -23,6 +23,7 @@ export interface MentionCandidate {
   role?: string; // 协作角色/职责（host/worker/reviewer/observer），hover 显示
   responsibility?: string; // 结构化职责说明（频道分工字段）
   note?: string; // 当前 status note
+  wakeKind?: WakeKind | null; // 当前唤醒层；发送前状态条直接复用最终候选，避免身份集合漂移
 }
 
 const STALE_MS = 60_000; // 与 PRESENCE_TIMEOUT_MS 一致：serve/watch 超过即算 recent 而非可唤醒
@@ -76,7 +77,19 @@ export function mentionCandidates(
   const recentMentionNames = new Set<string>();
   for (const message of messages) {
     if (now - message.ts > DEAD_MS) continue;
-    recentSenderByName.set(message.sender.name, message.sender);
+    const previous = recentSenderByName.get(message.sender.name);
+    // 同一身份的历史帧可能新旧协议混杂：较新的稀疏 sender 不能擦掉较早帧里已有的 owner/handle/display。
+    recentSenderByName.set(message.sender.name, {
+      ...message.sender,
+      owner: message.sender.owner || previous?.owner,
+      lineage: message.sender.lineage ?? previous?.lineage,
+      handle: message.sender.handle || previous?.handle,
+      display_name: message.sender.display_name || previous?.display_name,
+      avatar_url: message.sender.avatar_url || previous?.avatar_url,
+      avatar_thumb: message.sender.avatar_thumb || previous?.avatar_thumb,
+      client_version: message.sender.client_version || previous?.client_version,
+      connection_count: message.sender.connection_count ?? previous?.connection_count,
+    });
     recentMentionNames.add(message.sender.name);
     if (message.sender.handle) recentMentionNames.add(message.sender.handle);
   }
@@ -141,6 +154,7 @@ export function mentionCandidates(
         role: assigned?.role ?? p?.role,
         responsibility: assigned?.responsibility ?? undefined,
         note: p?.note ?? undefined,
+        wakeKind: p?.wake?.kind ?? null,
       };
     })
     .filter((c) => {
@@ -176,6 +190,7 @@ export function mentionCandidates(
       role: squad.leader === null ? undefined : `leader:${squad.leader}`,
       responsibility: `${squad.members.length} members`,
       note: squad.description ?? undefined,
+      wakeKind: "webhook" as const,
     }));
   return [...squadCandidates, ...base];
 }
