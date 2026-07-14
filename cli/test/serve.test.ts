@@ -660,6 +660,35 @@ describe("runServe", () => {
     });
   });
 
+  test("refreshes the deployed CLI notice before a later wake without blocking serve (#485)", async () => {
+    const s = closeAfterOneMention();
+    const notices: unknown[] = [];
+    let probes = 0;
+    const o = opts({
+      server: s.url,
+      availableUpgrade: null,
+      upgradeProbeIntervalMs: 0,
+      refreshAvailableUpgrade: async () => {
+        probes += 1;
+        return {
+          running_version: "0.2.107",
+          available_version: "0.2.109",
+          auto_upgrade: false,
+          action_required: "ask_user",
+          message: "长驻 serve 检测到新发布。",
+          command: "curl -fsSL https://example.test/install.sh | sh",
+        };
+      },
+      runCommand: async (_frame, ctx) => {
+        notices.push(ctx.cliUpgrade);
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(probes).toBe(1);
+    expect(notices[0]).toMatchObject({ available_version: "0.2.109", action_required: "ask_user" });
+  });
+
   test("a failing advertise does not crash the server", async () => {
     const s = closeAfterOneMention();
     const seen: number[] = [];

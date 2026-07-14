@@ -338,6 +338,7 @@ describe("presence live roster dialog (#484)", () => {
     expect(toggle?.props["aria-haspopup"]).toBe("dialog");
     expect(r.root.findAllByProps({ role: "dialog" })).toHaveLength(1);
     expect(r.root.findByProps({ role: "dialog" }).props["aria-modal"]).toBe("true");
+    expect(r.root.findByProps({ "aria-label": "Participant groups by owner" })).toBeDefined();
 
     // helper 已点开弹框；再次点击应关闭，姓名组从 DOM 移除，顶部不再留一整排列表。
     expect(toggle?.props["aria-expanded"]).toBe(true);

@@ -78,5 +78,7 @@ describe("CLI↔worker version negotiation (issue #137)", () => {
     expect(serverVersionUpgradeNotice("0.2.107", { runningVersion: "0.2.107" })).toBeNull();
     expect(serverVersionUpgradeNotice("0.2.106", { runningVersion: "0.2.107" })).toBeNull();
     expect(serverVersionUpgradeNotice("dev", { runningVersion: "0.2.107" })).toBeNull();
+    expect(serverVersionUpgradeNotice("0.2.108-rc.1", { runningVersion: "0.2.107" })).toBeNull();
+    expect(serverVersionUpgradeNotice("v0.2.108+build.7", { runningVersion: "0.2.107" })?.available_version).toBe("0.2.108");
   });
 });

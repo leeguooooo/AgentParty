@@ -90,7 +90,8 @@ export function serverVersionUpgradeNotice(
   serverVersion: string,
   deps: { runningVersion?: string } = {},
 ): CliUpgradeNotice | null {
-  const match = serverVersion.trim().match(/^v?(\d+\.\d+\.\d+)(?:[-+].*)?$/);
+  // 只接受正式版和 build metadata；prerelease 的优先级低于同号正式版，不能当成已发布。
+  const match = serverVersion.trim().match(/^v?(\d+\.\d+\.\d+)(?:\+[0-9A-Za-z.-]+)?$/);
   if (!match) return null;
   const available = match[1]!;
   const running = deps.runningVersion ?? RUNNING_VERSION;

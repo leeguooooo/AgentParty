@@ -1,7 +1,7 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
 import { evaluateHostLease, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
 import { fmtRel } from "../lib/time";
 import type { SocketStatus } from "../lib/ws";
@@ -253,6 +253,8 @@ export function PresenceBar({
 
   // #484：姓名 roster 不再挤占频道顶部；点 live 计数后在独立弹框里查看和操作。
   const [rosterOpen, setRosterOpen] = useState(false);
+  const rosterToggleRef = useRef<HTMLButtonElement | null>(null);
+  const rosterCloseRef = useRef<HTMLButtonElement | null>(null);
 
   // 在线 sender 带 owner；离线/最近 presence 带 account。两者都归到同一账号块。
   const byName = new Map(participants.map((p) => [p.name, p]));
@@ -353,11 +355,12 @@ export function PresenceBar({
     },
     [],
   );
-  function closeRoster() {
+  const closeRoster = useCallback(() => {
     setHoveredGroup(null);
     setExpandedGroupKey(null);
     setRosterOpen(false);
-  }
+    rosterToggleRef.current?.focus();
+  }, []);
 
   function toggleRoster() {
     if (rosterOpen) closeRoster();
@@ -374,12 +377,13 @@ export function PresenceBar({
 
   useEffect(() => {
     if (!rosterOpen) return;
+    rosterCloseRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeRoster();
     };
     window.addEventListener?.("keydown", onKeyDown);
     return () => window.removeEventListener?.("keydown", onKeyDown);
-  }, [rosterOpen]);
+  }, [closeRoster, rosterOpen]);
 
   function openAgentDetail(name: string) {
     if (onOpenAgentDetail === undefined) return;
@@ -721,6 +725,7 @@ export function PresenceBar({
           {isPublic && <span className="d-hl public-badge">{publicWatch ? "WATCH" : "PUBLIC"}</span>}
           {party && <span className="d-hl party-badge">PARTY</span>}
           <button
+            ref={rosterToggleRef}
             type="button"
             className="presence-toggle"
             aria-expanded={rosterOpen}
@@ -759,12 +764,12 @@ export function PresenceBar({
                 <h2 id="presence-roster-title">{t("PresenceBar.dialogTitle")}</h2>
                 <p className="t-mono">{liveGroups}/{totalGroups} live</p>
               </div>
-              <button className="d-btn channel-panel-close" type="button" aria-label={t("PresenceBar.close")} onClick={closeRoster}>
+              <button ref={rosterCloseRef} className="d-btn channel-panel-close" type="button" aria-label={t("PresenceBar.close")} onClick={closeRoster}>
                 {t("PresenceBar.close")}
               </button>
             </header>
             <div className="channel-panel-body presence-roster-body">
-              <div className="presence-strip" aria-label="participant groups by owner">
+              <div className="presence-strip" aria-label={t("PresenceBar.participantGroupsByOwner")}>
                 {sortedGroups.map((group) => renderGroup(group, expandedGroupKey === group.key ? "full" : "compact"))}
               </div>
             </div>
