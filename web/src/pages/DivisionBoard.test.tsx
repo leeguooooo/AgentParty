@@ -106,6 +106,53 @@ afterEach(() => {
 });
 
 describe("DivisionBoard roster completeness (#169)", () => {
+  test("role editing stays collapsed until requested and collapses again after save (#504)", () => {
+    let savedName = "";
+    render(
+      baseProps({
+        canModerate: true,
+        roles: [
+          {
+            name: "leo-claude",
+            role: "host",
+            responsibility: "统筹交付",
+            assigned_by: "leo",
+            assigned_at: 1,
+            kind: "agent",
+            account: "lark:on_leo",
+            display: "leo-claude",
+          },
+        ],
+        presence: { "leo-claude": presenceEntry({ name: "leo-claude", account: "lark:on_leo", live: true }) },
+        onSaveRole: (name) => { savedName = name; },
+      }),
+    );
+    let card = renderer!.root.find((node) =>
+      String(node.props.className ?? "").split(" ").includes("role-row--card"),
+    );
+    expect(card.findAllByType("select")).toHaveLength(0);
+    expect(card.findAllByType("input")).toHaveLength(0);
+
+    const edit = card.findByProps({ className: "d-btn role-edit-btn" });
+    act(() => edit.props.onClick());
+    card = renderer!.root.find((node) =>
+      String(node.props.className ?? "").split(" ").includes("role-row--card"),
+    );
+    expect(card.findAllByType("select")).toHaveLength(1);
+    expect(card.findAllByType("input")).toHaveLength(1);
+    const save = card.findAllByType("button").find((node) => String(node.props.children).includes("保存"));
+    expect(save).toBeDefined();
+    act(() => save!.props.onClick());
+
+    card = renderer!.root.find((node) =>
+      String(node.props.className ?? "").split(" ").includes("role-row--card"),
+    );
+    expect(savedName).toBe("leo-claude");
+    expect(card.findAllByType("select")).toHaveLength(0);
+    expect(card.findByProps({ className: "d-btn role-edit-btn" })).toBeDefined();
+    expect(personNames()).toContain("leo-claude");
+  });
+
   test("all 4 distinct agents render as rows even though only 2 have a declared role, and all share one owner", () => {
     const owner = "lark:on_22608d74bd2d7f39f6dc67d0da248fa5";
     render(
