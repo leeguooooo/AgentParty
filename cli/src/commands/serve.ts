@@ -1439,11 +1439,11 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
   let sharedUpgradeProbe: Promise<CliUpgradeNotice | null> | null = null;
   const sharedRefreshAvailableUpgrade = refreshAvailableUpgrade === undefined
     ? undefined
-    : (current: CliUpgradeNotice | null) => {
+    : (_current: CliUpgradeNotice | null) => {
         const now = Date.now();
         if (sharedUpgradeProbe === null || now >= nextSharedUpgradeProbeAt) {
           nextSharedUpgradeProbeAt = now + upgradeProbeIntervalMs;
-          sharedUpgradeProbe = refreshAvailableUpgrade(currentAvailableUpgrade ?? current).then((next) => {
+          sharedUpgradeProbe = refreshAvailableUpgrade(currentAvailableUpgrade).then((next) => {
             currentAvailableUpgrade = next;
             return next;
           });

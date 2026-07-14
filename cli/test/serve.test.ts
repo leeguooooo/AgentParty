@@ -1340,7 +1340,7 @@ describe("project profile daemon", () => {
     expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("workers should spawn under team herness-dev"))).toBe(true);
   });
 
-  test("a channel attached after a shared version probe inherits the refreshed notice (#485)", async () => {
+  test("a cleared profile upgrade is not revived by a stale channel after a failed probe (#485)", async () => {
     const home = tempDir();
     const oldHome = process.env.AGENTPARTY_HOME;
     process.env.AGENTPARTY_HOME = home;
@@ -1369,6 +1369,8 @@ describe("project profile daemon", () => {
     const served: ServeOptions[] = [];
     let polls = 0;
     let sleeps = 0;
+    let probes = 0;
+    let refreshDone: Promise<void> = Promise.resolve();
     try {
       await expect(runProfileServe({
         server: "http://agentparty.test",
@@ -1376,7 +1378,13 @@ describe("project profile daemon", () => {
         ownerAccount: profile.owner_account,
         handle: profile.handle,
         mentionsOnly: true,
-        refreshAvailableUpgrade: async () => notice,
+        availableUpgrade: notice,
+        upgradeProbeIntervalMs: 0,
+        refreshAvailableUpgrade: async () => {
+          probes += 1;
+          if (probes === 1) return null;
+          throw new Error("version endpoint offline");
+        },
         mintRuntime: async () => ({ token: "ap_profile_runtime", profile }),
         listInvites: async () => {
           polls += 1;
@@ -1401,12 +1409,17 @@ describe("project profile daemon", () => {
         }),
         runChannelServe: (opts) => {
           served.push(opts);
-          if (opts.channel === "alpha") void opts.refreshAvailableUpgrade?.(null);
+          if (opts.channel === "alpha" && served.filter((item) => item.channel === "alpha").length === 1) {
+            refreshDone = (async () => {
+              await opts.refreshAvailableUpgrade?.(notice);
+              await expect(opts.refreshAvailableUpgrade?.(notice)).rejects.toThrow("version endpoint offline");
+            })();
+          }
           return new Promise<number>(() => {});
         },
         sleep: async () => {
           sleeps += 1;
-          await Promise.resolve();
+          await refreshDone;
           if (sleeps >= 2) throw new Error("stop profile test");
         },
       })).rejects.toThrow("stop profile test");
@@ -1415,7 +1428,8 @@ describe("project profile daemon", () => {
       else process.env.AGENTPARTY_HOME = oldHome;
     }
 
-    expect(served.find((opts) => opts.channel === "beta")?.availableUpgrade).toEqual(notice);
+    expect(probes).toBe(2);
+    expect(served.find((opts) => opts.channel === "beta")?.availableUpgrade).toBeNull();
   });
 
   test("project-agent child names are stable and stay within the token name limit", () => {
