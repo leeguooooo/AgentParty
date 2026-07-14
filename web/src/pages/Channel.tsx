@@ -1847,6 +1847,8 @@ export function TaskLedgerPanel({
   const [taskQuery, setTaskQuery] = useState("");
   const [prioFilter, setPrioFilter] = useState<number | null>(null);
   const [openTaskId, setOpenTaskId] = useState<number | null>(null);
+  // #504：已完成组默认只显 N 条，避免积累后无界渲染（CodeRabbit #517 指出）；点开加载更多。
+  const [doneLimit, setDoneLimit] = useState(6);
   // #271(d)：展开放大——CSS class 切宽度，外层 channel-panel-card 用 :has() 跟随。
   const [expandedView, setExpandedView] = useState(false);
   // #271(c)：任务详情弹层。存 id 不存快照，刷新后始终显示最新记录。
@@ -2263,7 +2265,20 @@ export function TaskLedgerPanel({
                 {columnTasks.length === 0 ? (
                   <p className="t-mono task-column-empty">{t("Channel.tasks.columnEmpty")}</p>
                 ) : (
-                  <ol className="task-list">{columnTasks.map(renderTask)}</ol>
+                  <>
+                    <ol className="task-list">
+                      {(state === "done" ? columnTasks.slice(0, doneLimit) : columnTasks).map(renderTask)}
+                    </ol>
+                    {state === "done" && columnTasks.length > doneLimit && (
+                      <button
+                        type="button"
+                        className="task-blog-more"
+                        onClick={() => setDoneLimit((n) => n + 20)}
+                      >
+                        ▾ {t("Channel.tasks.showMore", { count: columnTasks.length - doneLimit })}
+                      </button>
+                    )}
+                  </>
                 )}
               </section>
             );
