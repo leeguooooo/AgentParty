@@ -1910,10 +1910,12 @@ export function TaskLedgerPanel({
     const assignDraft = assignDrafts[task.id] ?? task.assignee?.name ?? "";
     const assignKind = assignKinds[task.id] ?? task.assignee?.kind ?? "agent";
     const reviewSeq = taskCompletionSeq(task);
+    // #504 博客风：卡片默认折叠——摘要行(#id+优先级+标题+@人+标签+箭头)常显，详情/动作点开才展开。
+    const open = openTaskId === task.id;
     return (
       <li
         key={task.id}
-        className={`task-card task-card--${task.state}` + (dragTaskId === task.id ? " is-dragging" : "")}
+        className={`task-card task-card--${task.state}` + (open ? " task-card--open" : "") + (dragTaskId === task.id ? " is-dragging" : "")}
         draggable={!disabled && !taskBusy}
         onDragStart={(event) => {
           event.dataTransfer.effectAllowed = "move";
@@ -1924,6 +1926,7 @@ export function TaskLedgerPanel({
       >
         <div className="task-card-main">
           <span className="t-mono task-id">#{task.id}</span>
+          <span className={`t-mono task-prio task-prio--p${task.priority}`}>P{task.priority}</span>
           <button
             type="button"
             className="task-card-title"
@@ -1932,8 +1935,20 @@ export function TaskLedgerPanel({
           >
             <strong>{task.title}</strong>
           </button>
+          {task.assignee !== null && <span className="t-mono task-card-assignee">@{task.assignee.name}</span>}
+          {task.labels.map((label) => <span key={label} className="t-mono task-label">{label}</span>)}
           <span className={`t-mono task-state task-state--${task.state}`}>{stateLabel(task.state)}</span>
+          <button
+            type="button"
+            className="task-card-toggle"
+            aria-expanded={open}
+            aria-label={t("Channel.tasks.toggleAria", { id: task.id })}
+            onClick={() => setOpenTaskId(open ? null : task.id)}
+          >
+            {open ? "▴" : "▸"}
+          </button>
         </div>
+        {open && (<>
         {task.desc !== null && <p className="task-card-desc">{task.desc}</p>}
         {task.attachments !== undefined && task.attachments.length > 0 && (
           <AttachmentList attachments={task.attachments} />
@@ -2034,6 +2049,7 @@ export function TaskLedgerPanel({
             </div>
           </div>
         )}
+        </>)}
       </li>
     );
   };

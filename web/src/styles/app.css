@@ -6566,3 +6566,27 @@
 .task-ledger-panel .task-card--done { border-left-color: var(--t-green); }
 .task-ledger-panel .task-card--backlog,
 .task-ledger-panel .task-card--assigned { border-left-color: var(--t-dim); }
+
+/* #504 增量C：任务卡折叠——摘要行常显，详情/动作点开才展开。 */
+.task-ledger-panel .task-card { padding: 0; }
+.task-ledger-panel .task-card-main {
+  display: flex; align-items: center; gap: 9px; padding: 8px 13px;
+  cursor: default; min-width: 0;
+}
+.task-ledger-panel .task-id { flex: 0 0 auto; color: var(--t-dim); font-size: 11.5px; }
+.task-ledger-panel .task-prio { flex: 0 0 auto; padding: 0 6px; border: 1.4px solid var(--t-border); font-size: 10.5px; font-weight: 600; }
+.task-prio--p1 { background: var(--t-red); color: var(--t-accent-ink); }
+.task-prio--p2 { background: var(--d-yellow); color: var(--t-text); }
+.task-prio--p3 { background: var(--t-panel2); color: var(--t-text); }
+.task-ledger-panel .task-card-title { flex: 1 1 auto; min-width: 0; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; overflow: hidden; }
+.task-ledger-panel .task-card-title strong { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.task-ledger-panel .task-card-assignee { flex: 0 0 auto; color: var(--t-link); font-size: 11.5px; }
+.task-ledger-panel .task-card-main .task-label { flex: 0 0 auto; }
+.task-ledger-panel .task-card-main .task-state { flex: 0 0 auto; }
+.task-ledger-panel .task-card-toggle { flex: 0 0 auto; border: 0; background: none; color: var(--t-muted); cursor: pointer; font-size: 13px; padding: 0 2px; }
+.task-ledger-panel .task-card-desc,
+.task-ledger-panel .task-card-meta,
+.task-ledger-panel .task-card-actions,
+.task-ledger-panel .task-solution,
+.task-ledger-panel .task-reject-form { border-top: 1.5px dashed var(--t-faint); margin: 0; padding: 10px 13px; background: var(--t-panel2); }
+.task-ledger-panel .task-card-actions { border-top: 0; }

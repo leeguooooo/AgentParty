@@ -128,9 +128,18 @@ function findByAria(r: ReactTestRenderer, label: string) {
   return r.root.find((n) => n.props["aria-label"] === label);
 }
 
+// #504 博客风：任务卡默认折叠，详情/动作点开才渲染。测试要验动作/详情前先展开所有卡。
+async function expandCards(r: ReactTestRenderer) {
+  const toggles = r.root.findAll((n) => n.props.className === "task-card-toggle");
+  for (const toggle of toggles) {
+    await act(async () => { toggle.props.onClick(); });
+  }
+}
+
 describe("TaskLedgerPanel i18n", () => {
-  test("renders Chinese action + column labels when locale is zh", () => {
+  test("renders Chinese action + column labels when locale is zh", async () => {
     const r = render("zh", baseProps());
+    await expandCards(r);
     const text = allText(r);
     expect(text).toContain("认领"); // Claim
     expect(text).toContain("阻塞"); // Block
@@ -140,8 +149,9 @@ describe("TaskLedgerPanel i18n", () => {
     expect(text).not.toContain("New task");
   });
 
-  test("renders English labels when locale is en", () => {
+  test("renders English labels when locale is en", async () => {
     const r = render("en", baseProps());
+    await expandCards(r);
     const text = allText(r);
     expect(text).toContain("Claim");
     expect(text).toContain("New task");
@@ -198,6 +208,7 @@ describe("TaskLedgerPanel inline rejection (#357)", () => {
       onReview: (item, action, reason) => reviews.push({ id: item.id, action, reason }),
     }));
 
+    await expandCards(r);
     await act(async () => {
       r.root.find((n) => n.type === "button" && n.children.includes("Reject")).props.onClick();
     });
@@ -212,6 +223,7 @@ describe("TaskLedgerPanel inline rejection (#357)", () => {
     const onReview = mock(() => undefined);
     const reviewable = task({ state: "needs_review", completion_artifact: {}, anchor_seqs: [42] });
     const r = render("en", baseProps({ tasks: [reviewable], onReview }));
+    await expandCards(r);
     await act(async () => r.root.find((n) => n.type === "button" && n.children.includes("Reject")).props.onClick());
     await act(async () => r.root.find((n) => n.props.className === "task-action-btn task-reject-cancel").props.onClick());
     expect(r.root.findAll((n) => n.props.className === "task-new-form task-reject-form")).toHaveLength(0);
@@ -283,12 +295,13 @@ describe("TaskLedgerPanel assignee filter (#271)", () => {
 
 // #271(b)：指派输入框接 datalist，候选来自频道身份。
 describe("TaskLedgerPanel assignee datalist (#271)", () => {
-  test("assign input points at a datalist fed by channel identities", () => {
+  test("assign input points at a datalist fed by channel identities", async () => {
     const identities = [
       { name: "worker-a", display: "worker-a · agent" },
       { name: "human-b", display: "human-b · human" },
     ];
     const r = render("en", baseProps({ identities }));
+    await expandCards(r);
     const input = findByAria(r, "Assign task 1");
     expect(input.props.list).toBe("task-assignee-targets");
     const datalist = r.root.find((n) => n.type === "datalist");
@@ -344,6 +357,7 @@ describe("TaskLedgerPanel task detail (#271)", () => {
     });
     const r = render("en", baseProps({ tasks: [detailed] }));
     expect(r.root.findAll((n) => n.props["aria-label"] === "task 7 details")).toHaveLength(0);
+    await expandCards(r); // 博客风：卡片内联 solution 展开后才渲染
     expect(r.root.findAll((n) => n.props.className === "task-solution")).toHaveLength(1);
     expect(allText(r)).toContain("solution.html");
 
