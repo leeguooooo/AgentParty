@@ -57,7 +57,7 @@ import {
 import type { AuthProviderConfig } from "../lib/oidc";
 import { agentHue } from "../lib/agentColor";
 import { buildIdentityDisplay, type IdentityDisplayMap } from "../lib/identityDisplay";
-import { mentionCandidates, mentionLiveness, parseDraftMentions, type DraftMentionStatus } from "../lib/mentions";
+import { mentionCandidates, parseDraftMentions, type DraftMentionStatus } from "../lib/mentions";
 import { buildReceipts, type MentionReceipt } from "../lib/wakeReceipt";
 import { completionMessages } from "../lib/completions";
 import { catchupKey, summarizeCatchup, type CatchupDigest } from "../lib/digest";
@@ -3521,8 +3521,8 @@ export function ChannelPage({
   );
   // @ 补全候选：participants ∪ presence，分档（在线/可唤醒/最近）。teamNow 30s 刷新驱动 stale 判定。
   const mentionOptions = useMemo(
-    () => mentionCandidates(state.participants, state.presence, state.self, teamNow, channelIdentities, channelRoles, channelSquads),
-    [channelIdentities, channelRoles, channelSquads, state.participants, state.presence, state.self, teamNow],
+    () => mentionCandidates(state.participants, state.presence, state.self, teamNow, channelIdentities, channelRoles, channelSquads, Object.values(state.mentionSenders)),
+    [channelIdentities, channelRoles, channelSquads, state.mentionSenders, state.participants, state.presence, state.self, teamNow],
   );
   const identityDisplay = useMemo(
     () =>
@@ -3560,23 +3560,15 @@ export function ChannelPage({
   );
   // 发送前状态条：草稿里已 @ 的、且在频道里认得的目标 + 当前存活档位。
   const draftMentionStatuses = useMemo<DraftMentionStatus[]>(() => {
-    const online = new Set(state.participants.map((p) => p.name));
-    const known = new Set<string>([
-      ...online,
-      ...Object.keys(state.presence),
-      ...channelIdentities.map((identity) => identity.name),
-      ...channelRoles.map((role) => role.name),
-      ...channelSquads.map((squad) => squad.name),
-    ]);
+    // 以补全菜单的最终结果为唯一身份集合：消息 sender、handle 与 squad 都不会再和状态条各算一套。
+    const known = new Map(mentionOptions.map((candidate) => [candidate.name, candidate]));
     return parseDraftMentions(draft)
       .filter((name) => known.has(name) && name !== state.self)
       .map((name) => {
-        const squad = channelSquads.find((item) => item.name === name);
-        if (squad) return { name, display: squad.title ?? squad.name, tier: "wakeable", wakeKind: "webhook" };
-        const live = mentionLiveness(name, online, state.presence, teamNow);
-        return { name, display: identityDisplay[name]?.display ?? name, tier: live.tier, wakeKind: live.wakeKind };
+        const candidate = known.get(name)!;
+        return { name, display: candidate.display, tier: candidate.tier, wakeKind: candidate.wakeKind ?? null };
       });
-  }, [channelIdentities, channelRoles, channelSquads, draft, state.participants, state.presence, state.self, teamNow, identityDisplay]);
+  }, [draft, mentionOptions, state.self]);
   // 轮询 @ 唤醒台账（仅 webhook 侧有行；serve/watch 靠 presence + 回复链接补齐）。用 ref 保持 7s 稳定
   // 间隔，不因每条新消息重挂定时器；标签页隐藏或频道无 agent @ 时跳过，端点失败也不影响其余回执渲染。
   const messagesRef = useRef(state.messages);

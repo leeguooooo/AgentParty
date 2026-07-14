@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { MsgFrame, PresenceFrame } from "@agentparty/shared";
 import { channelReducer, initialChannelState } from "./state";
 
+const NOW_FOR_RETENTION = 1_725_000_000_000;
+
 function msgFrame(seq: number, body: string, over: Partial<MsgFrame> = {}): MsgFrame {
   return {
     type: "msg",
@@ -38,6 +40,36 @@ describe("channel state", () => {
     expect(revised.messages[0]).toMatchObject({ seq: 6, body: "edited", edited: true });
   });
 
+  test("message_update replaces the message and refreshes the stable mention sender snapshot", () => {
+    const original = msgFrame(6, "original", {
+      sender: { name: "external", kind: "agent", owner: "lark:on_cross" },
+    });
+    const first = channelReducer(initialChannelState, { type: "frame", frame: original });
+    const edited = msgFrame(6, "edited", {
+      sender: { name: "external", kind: "agent", handle: "external-handle" },
+      edited: true,
+      edited_at: original.ts + 1,
+      edited_by: "external",
+    });
+    const revised = channelReducer(first, {
+      type: "frame",
+      frame: {
+        type: "message_update",
+        target_seq: 6,
+        action: "edit",
+        actor: { name: "external", kind: "agent" },
+        ts: edited.ts,
+        message: edited,
+      },
+    });
+
+    expect(revised.messages[0]).toMatchObject({ seq: 6, body: "edited", edited: true });
+    expect(revised.mentionSenders.external).toMatchObject({
+      ts: edited.ts,
+      sender: { name: "external", owner: "lark:on_cross", handle: "external-handle" },
+    });
+  });
+
   test("prepending an older page keeps messages sorted and deduped (IM scroll-up)", () => {
     let s = initialChannelState;
     for (const seq of [51, 52, 53]) s = channelReducer(s, { type: "frame", frame: msgFrame(seq, `m${seq}`) });
@@ -51,8 +83,69 @@ describe("channel state", () => {
     for (let seq = 1; seq <= 10; seq++) s = channelReducer(s, { type: "frame", frame: msgFrame(seq, `m${seq}`) });
     const trimmed = channelReducer(s, { type: "trim", keep: 4 });
     expect(trimmed.messages.map((m) => m.seq)).toEqual([7, 8, 9, 10]);
+    expect(trimmed.mentionSenders.bob?.ts).toBe(msgFrame(10, "").ts); // @ 身份窗口不随 DOM 消息窗口一起裁掉
     // 低于上限时不动原状态（引用相等，避免无谓重渲染）
     expect(channelReducer(trimmed, { type: "trim", keep: 4 })).toBe(trimmed);
+  });
+
+  test("mention sender snapshot survives trim and merges complete identity fields", () => {
+    let s = channelReducer(initialChannelState, {
+      type: "frame",
+      frame: msgFrame(1, "complete", {
+        sender: { name: "external", kind: "agent", owner: "lark:on_cross", handle: "external-handle" },
+      }),
+    });
+    s = channelReducer(s, {
+      type: "frame",
+      frame: msgFrame(2, "sparse", { sender: { name: "external", kind: "agent" } }),
+    });
+    s = channelReducer(s, { type: "trim", keep: 1 });
+
+    expect(s.messages.map((m) => m.seq)).toEqual([2]);
+    expect(s.mentionSenders.external).toMatchObject({
+      ts: msgFrame(2, "").ts,
+      sender: { name: "external", owner: "lark:on_cross", handle: "external-handle" },
+    });
+  });
+
+  test("an older loaded frame only fills gaps and never overwrites a newer sender identity", () => {
+    let s = channelReducer(initialChannelState, {
+      type: "frame",
+      frame: msgFrame(20, "new", {
+        sender: { name: "external", kind: "agent", owner: "new-owner", handle: "new-handle" },
+      }),
+    });
+    s = channelReducer(s, {
+      type: "frame",
+      frame: msgFrame(10, "old", {
+        sender: { name: "external", kind: "agent", owner: "old-owner", display_name: "Old display" },
+      }),
+    });
+
+    expect(s.mentionSenders.external).toMatchObject({
+      ts: msgFrame(20, "").ts,
+      sender: {
+        name: "external",
+        owner: "new-owner",
+        handle: "new-handle",
+        display_name: "Old display",
+      },
+    });
+    expect(s.mentionSenders.external).not.toHaveProperty("body");
+  });
+
+  test("mention sender snapshots older than 14 days are evicted on the next write", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    let s = channelReducer(initialChannelState, {
+      type: "frame",
+      frame: msgFrame(1, "old", { ts: NOW_FOR_RETENTION, sender: { name: "old-agent", kind: "agent" } }),
+    });
+    s = channelReducer(s, {
+      type: "frame",
+      frame: msgFrame(2, "new", { ts: NOW_FOR_RETENTION + 15 * DAY, sender: { name: "new-agent", kind: "agent" } }),
+    });
+
+    expect(Object.keys(s.mentionSenders)).toEqual(["new-agent"]);
   });
 
   test("read_cursor frame upserts monotonically; welcome snapshot seeds cursors", () => {

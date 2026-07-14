@@ -2,6 +2,7 @@
 // 分档的候选列表，供 Composer 的 @ 补全下拉用。"可 @" ≠ "在线连接"——本产品最特别的一档是
 // 「可唤醒」：人不在但 @ 了会被 serve/watch/webhook 拉起来。
 import { autoWakeReachable, type ChannelRoleAssignment, type ChannelSquad, type PresenceEntry, type Sender, type WakeKind } from "@agentparty/shared";
+import { MENTION_SENDER_RETENTION_MS, mergeSenderIdentity, type SenderIdentitySnapshot } from "./senderIdentity";
 
 export type MentionTier = "online" | "wakeable" | "recent";
 
@@ -23,12 +24,13 @@ export interface MentionCandidate {
   role?: string; // 协作角色/职责（host/worker/reviewer/observer），hover 显示
   responsibility?: string; // 结构化职责说明（频道分工字段）
   note?: string; // 当前 status note
+  wakeKind?: WakeKind | null; // 当前唤醒层；发送前状态条直接复用最终候选，避免身份集合漂移
 }
 
 const STALE_MS = 60_000; // 与 PRESENCE_TIMEOUT_MS 一致：serve/watch 超过即算 recent 而非可唤醒
 // 幽灵清理：只为防止频道长期累积几个月前的一次性 agent。设得宽松——几天前聊过的 agent
 // 仍是合理的 @/唤醒目标，不该被剔。真正的噪声（围观的人类会话）已由 kind/UUID 规则处理。
-const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面才视为幽灵
+const DEAD_MS = MENTION_SENDER_RETENTION_MS; // 14 天没露面才视为幽灵
 // 系统生成的人类会话名，永远不是有意义的 @ 目标：网页登录 token 默认名 = 纯 UUID；
 // OIDC 设备验证流 = login-verify-*。过渡期旧 presence 行没回填 kind 时靠名字把它们判为 human。
 const SYSTEM_HUMAN_SESSION_RE =
@@ -64,13 +66,27 @@ export function mentionCandidates(
   identities: MentionIdentity[] = [],
   roles: ChannelRoleAssignment[] = [],
   squads: ChannelSquad[] = [],
+  messages: SenderIdentitySnapshot[] = [],
 ): MentionCandidate[] {
   const online = new Set(participants.map((p) => p.name));
   const participantByName = new Map(participants.map((p) => [p.name, p]));
   const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
   const roleByName = new Map(roles.map((role) => [role.name, role]));
+  // identities REST 只在频道 mount 时抓一次。页面打开后才发言、又没有补 status/presence 帧的成员
+  // 仍应立即可 @；消息 sender 是服务端已鉴权的频道身份，按同一 14 天窗口补进候选即可。
+  const recentSenderByName = new Map<string, Sender>();
+  const recentMentionNames = new Set<string>();
+  for (const message of messages) {
+    if (now - message.ts > DEAD_MS) continue;
+    const previous = recentSenderByName.get(message.sender.name);
+    // 同一身份的历史帧可能新旧协议混杂：较新的稀疏 sender 不能擦掉较早帧里已有的 owner/handle/display。
+    recentSenderByName.set(message.sender.name, mergeSenderIdentity(previous, message.sender));
+    recentMentionNames.add(message.sender.name);
+    if (message.sender.handle) recentMentionNames.add(message.sender.handle);
+  }
   const kindOf = new Map<string, "agent" | "human">();
   for (const p of participants) kindOf.set(p.name, p.kind);
+  for (const sender of recentSenderByName.values()) kindOf.set(sender.name, sender.kind);
   for (const identity of identities) {
     if (identity.kind === "agent" || identity.kind === "human") kindOf.set(identity.name, identity.kind);
   }
@@ -89,6 +105,7 @@ export function mentionCandidates(
     ...Object.keys(presence),
     ...identities.map((identity) => identity.name),
     ...roles.map((role) => role.name),
+    ...recentSenderByName.keys(),
   ]);
   const rank: Record<MentionTier, number> = { online: 0, wakeable: 1, recent: 2 };
   const base = [...names]
@@ -98,14 +115,20 @@ export function mentionCandidates(
       const p = presence[name];
       const identity = identityByName.get(name);
       const assigned = roleByName.get(name);
-      const account = identity?.account ?? assigned?.account ?? p?.account;
+      const recentSender = recentSenderByName.get(name);
+      const account =
+        identity?.account ??
+        assigned?.account ??
+        p?.account ??
+        participantByName.get(name)?.owner ??
+        recentSender?.owner;
       // 全局唯一昵称（handle）：有则用它做 @ 插入 token 和显示名。人类=account handle（UUID 会话名打不出来，
       // 只有 handle 能被后端识别为「被 @」）；agent=自设昵称（#165，可中文，其 ASCII name 由后端解析回填）。
       const identityHandle =
         identity?.handle !== undefined && identity.handle !== "" && NAME_TOKEN_RE.test(identity.handle)
           ? identity.handle
           : undefined;
-      const handle = participantByName.get(name)?.handle ?? p?.handle ?? identityHandle;
+      const handle = participantByName.get(name)?.handle ?? p?.handle ?? identityHandle ?? recentSender?.handle;
       // 人类网页会话名是 UUID，显示账号 email 才认得出「是谁」；agent 名本身可读，用 name。
       const display = handle
         ? handle
@@ -114,10 +137,11 @@ export function mentionCandidates(
           : assigned?.display && assigned.display !== ""
             ? assigned.display
             : kind === "human" && account
-              ? account
+              ? recentSender?.display_name || account
               : name;
       const group = account ?? (kind === "human" ? "human sessions" : "unowned agents");
       return {
+        sourceName: name,
         name: handle ?? name,
         display,
         kind,
@@ -127,6 +151,7 @@ export function mentionCandidates(
         role: assigned?.role ?? p?.role,
         responsibility: assigned?.responsibility ?? undefined,
         note: p?.note ?? undefined,
+        wakeKind: p?.wake?.kind ?? null,
       };
     })
     .filter((c) => {
@@ -137,9 +162,10 @@ export function mentionCandidates(
         if (SYSTEM_HUMAN_SESSION_RE.test(c.name)) return c.account !== undefined && c.display !== c.name && c.display !== c.account;
         return c.account !== undefined || (c.display !== c.name && c.display !== c.account);
       }
-      if (roleByName.has(c.name)) return true;
-      if (identityByName.has(c.name)) return true;
-      const p = presence[c.name];
+      if (roleByName.has(c.sourceName)) return true;
+      if (identityByName.has(c.sourceName)) return true;
+      if (recentMentionNames.has(c.sourceName) || recentMentionNames.has(c.name)) return true;
+      const p = presence[c.sourceName];
       const seen = p?.last_seen ?? p?.ts ?? 0;
       return now - seen <= DEAD_MS; // 幽灵清理：太久没露面的 agent 也剔除
     })
@@ -149,7 +175,8 @@ export function mentionCandidates(
       if (!SYSTEM_HUMAN_SESSION_RE.test(c.name)) return true;
       return c.account !== undefined && c.display !== c.name;
     })
-    .sort((a, b) => a.group.localeCompare(b.group) || rank[a.tier] - rank[b.tier] || a.display.localeCompare(b.display));
+    .sort((a, b) => a.group.localeCompare(b.group) || rank[a.tier] - rank[b.tier] || a.display.localeCompare(b.display))
+    .map(({ sourceName: _sourceName, ...candidate }) => candidate);
   const squadCandidates: MentionCandidate[] = squads
     .filter((squad) => squad.name !== self && squad.name !== "system")
     .map((squad) => ({
@@ -161,6 +188,7 @@ export function mentionCandidates(
       role: squad.leader === null ? undefined : `leader:${squad.leader}`,
       responsibility: `${squad.members.length} members`,
       note: squad.description ?? undefined,
+      wakeKind: "webhook" as const,
     }));
   return [...squadCandidates, ...base];
 }
