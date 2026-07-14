@@ -166,7 +166,7 @@ function AgentInfoPopover({
   id: string;
   label: string;
   name: string;
-  kind: Sender["kind"];
+  kind: Sender["kind"] | null;
   owner: string | null;
   entry: PresenceEntry | undefined;
   assignment: ChannelRoleAssignment | undefined;
@@ -175,11 +175,13 @@ function AgentInfoPopover({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
+  const [suppressed, setSuppressed] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const dismiss = useCallback(() => {
     triggerRef.current?.blur();
     setOpen(false);
+    setSuppressed(true);
   }, []);
   const leader = assignment?.reports_to ?? entry?.lineage?.parent_agent ?? null;
   const role = assignment?.role ?? entry?.role ?? null;
@@ -197,7 +199,16 @@ function AgentInfoPopover({
     outsideRef: rootRef,
   });
   return (
-    <div ref={rootRef} className={`msg-agent-popover${open ? " msg-agent-popover--open" : ""}`}>
+    <div
+      ref={rootRef}
+      className={`msg-agent-popover${open ? " msg-agent-popover--open" : ""}${suppressed ? " msg-agent-popover--closed" : ""}`}
+      onMouseEnter={() => {
+        if (!open) setSuppressed(false);
+      }}
+      onMouseLeave={() => {
+        if (!open) setSuppressed(false);
+      }}
+    >
       <button
         ref={triggerRef}
         type="button"
@@ -205,9 +216,16 @@ function AgentInfoPopover({
         aria-describedby={id}
         aria-expanded={open}
         onClick={(event) => {
-          if (open) event.currentTarget.blur();
-          setOpen((value) => !value);
+          if (open) {
+            event.currentTarget.blur();
+            setOpen(false);
+            setSuppressed(true);
+          } else {
+            setSuppressed(false);
+            setOpen(true);
+          }
         }}
+        onFocus={() => setSuppressed(false)}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             event.currentTarget.blur();
@@ -225,7 +243,7 @@ function AgentInfoPopover({
         <dl className="msg-agent-card-facts">
           <div>
             <dt>{t("MessageCard.agentCard.identity")}</dt>
-            <dd>{[kind, owner].filter(Boolean).join(" · ")}</dd>
+            <dd>{[kind, owner].filter(Boolean).join(" · ") || t("MessageCard.agentCard.none")}</dd>
           </div>
           <div>
             <dt>{t("MessageCard.agentCard.leader")}</dt>
@@ -564,15 +582,17 @@ function MessageCardImpl({
         )}
         {msg.mentions.map((m) => {
           const mentionedSender = participants?.find((participant) => participant.name === m);
+          const mentionedPresence = presence?.[m];
+          const mentionedIdentity = identityDisplay?.[m];
           return (
             <AgentInfoPopover
               key={m}
               id={`agent-info-${msg.seq}-mention-${m}`}
               label={`@${displayForIdentity(m, identityDisplay)}`}
               name={m}
-              kind={mentionedSender?.kind ?? "agent"}
-              owner={mentionedSender?.owner ?? null}
-              entry={presence?.[m]}
+              kind={mentionedSender?.kind ?? mentionedPresence?.kind ?? mentionedIdentity?.kind ?? null}
+              owner={mentionedSender?.owner ?? mentionedPresence?.account ?? mentionedIdentity?.account ?? null}
+              entry={mentionedPresence}
               assignment={agentRoles?.[m]}
               recentMessages={recentMessagesByAgent?.get(m) ?? (m === msg.sender.name ? recentMessages : [])}
               triggerClassName="msg-mention"

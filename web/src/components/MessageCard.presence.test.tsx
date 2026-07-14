@@ -11,8 +11,33 @@ mock.module("../lib/markdown", () => ({ renderMarkdown: (s: string) => s }));
 const { MessageCard, agentInfoTitleBits, presenceTitleBits } = await import("./MessageCard");
 
 let renderer: ReactTestRenderer | null = null;
+let windowEvents: TestEventTarget;
+let documentEvents: TestEventTarget;
+const insidePopoverTarget = {};
 
 const noop = () => undefined;
+
+class TestEventTarget {
+  private listeners = new Map<string, Set<(event: unknown) => void>>();
+
+  addEventListener(type: string, listener: (event: unknown) => void) {
+    const listeners = this.listeners.get(type) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: (event: unknown) => void) {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  emit(type: string, event: unknown) {
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+
+  count(type: string) {
+    return this.listeners.get(type)?.size ?? 0;
+  }
+}
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -27,8 +52,12 @@ function memoryStorage(): Storage {
 }
 
 beforeEach(() => {
+  windowEvents = new TestEventTarget();
+  documentEvents = new TestEventTarget();
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
+  Object.defineProperty(globalThis, "window", { configurable: true, value: windowEvents });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: documentEvents });
 });
 
 function baseMsg(overrides: Partial<MsgFrame>): MsgFrame {
@@ -84,6 +113,16 @@ function render(msg: MsgFrame, extra: Record<string, unknown> = {}, locale: "en"
           {...extra}
         />
       </LocaleProvider>,
+      {
+        createNodeMock(element) {
+          const className = String((element.props as { className?: string }).className ?? "");
+          if (className.includes("msg-agent-popover")) {
+            return { contains: (target: unknown) => target === insidePopoverTarget };
+          }
+          if (className.includes("msg-agent-trigger")) return { blur: noop };
+          return {};
+        },
+      },
     );
   });
   return renderer!.root;
@@ -109,6 +148,8 @@ function mentionTrigger(root: ReactTestInstance): ReactTestInstance {
 afterEach(() => {
   act(() => renderer?.unmount());
   renderer = null;
+  Reflect.deleteProperty(globalThis, "window");
+  Reflect.deleteProperty(globalThis, "document");
 });
 
 describe("presenceTitleBits (#274)", () => {
@@ -196,7 +237,31 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--open");
     act(() => mentionTrigger(root).props.onClick(clickEvent));
     expect(mentionTrigger(root).props["aria-expanded"]).toBe(false);
+    expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--closed");
     expect(blurred).toBe(true);
+  });
+
+  test("打开 @提及信息卡后，站内点击保留，站外点击与 Escape 都会收起", () => {
+    const root = render(baseMsg({ mentions: ["planner"] }));
+    const clickEvent = { currentTarget: { blur: noop } };
+
+    act(() => mentionTrigger(root).props.onClick(clickEvent));
+    expect(documentEvents.count("pointerdown")).toBe(1);
+    expect(windowEvents.count("keydown")).toBe(1);
+
+    act(() => documentEvents.emit("pointerdown", { target: insidePopoverTarget }));
+    expect(mentionTrigger(root).props["aria-expanded"]).toBe(true);
+
+    act(() => documentEvents.emit("pointerdown", { target: {} }));
+    expect(mentionTrigger(root).props["aria-expanded"]).toBe(false);
+    expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--closed");
+    expect(documentEvents.count("pointerdown")).toBe(0);
+
+    act(() => mentionTrigger(root).props.onClick(clickEvent));
+    act(() => windowEvents.emit("keydown", { key: "Escape" }));
+    expect(mentionTrigger(root).props["aria-expanded"]).toBe(false);
+    expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--closed");
+    expect(windowEvents.count("keydown")).toBe(0);
   });
 
   test("不传 presence（或查不到该名字）时 sender 信息卡明确显示未上报", () => {
@@ -210,6 +275,7 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     const root = render(baseMsg({ mentions: ["reviewer"] }), {}, "zh");
     expect(senderCardText(root)).toContain("身份agent");
     expect(senderCardText(root)).toContain("进行中的工作未上报");
+    expect(textContent(mentionCard(root))).toContain("身份未上报");
     expect(textContent(mentionCard(root))).toContain("角色与分工未上报");
   });
 
@@ -245,9 +311,11 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     const root = render(baseMsg({}));
     const trigger = root.find((n) => n.type === "button" && String(n.props.className ?? "").includes("msg-agent-trigger"));
     let blurred = false;
-    trigger.props.onKeyDown({
-      key: "Escape",
-      currentTarget: { blur: () => { blurred = true; } },
+    act(() => {
+      trigger.props.onKeyDown({
+        key: "Escape",
+        currentTarget: { blur: () => { blurred = true; } },
+      });
     });
     expect(blurred).toBe(true);
   });
@@ -261,5 +329,23 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
 
     const withoutPresence = render(baseMsg({ mentions: ["reviewer"] }));
     expect(textContent(mentionCard(withoutPresence))).toContain("Current workNot reported");
+  });
+
+  test("离线 @agent 从 presence 快照恢复身份和 owner，不伪装成在线参与者", () => {
+    const root = render(baseMsg({ mentions: ["reviewer"] }), {
+      presence: {
+        reviewer: presenceEntry({ name: "reviewer", kind: "agent", account: "owner-a" }),
+      },
+    });
+    expect(textContent(mentionCard(root))).toContain("Identityagent · owner-a");
+  });
+
+  test("离线 @human 从 identity map 恢复人类身份和账号", () => {
+    const root = render(baseMsg({ mentions: ["reviewer"] }), {
+      identityDisplay: {
+        reviewer: { display: "Alice", kind: "human", account: "alice@example.com" },
+      },
+    });
+    expect(textContent(mentionCard(root))).toContain("Identityhuman · alice@example.com");
   });
 });

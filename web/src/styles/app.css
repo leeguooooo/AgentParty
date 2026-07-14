@@ -2658,8 +2658,8 @@
   transform: translateY(-2px);
   transition: opacity 60ms linear, transform 60ms linear, visibility 0s linear 60ms;
 }
-.msg-agent-popover:hover .msg-agent-card,
-.msg-agent-popover:focus-within .msg-agent-card,
+.msg-agent-popover:not(.msg-agent-popover--closed):hover .msg-agent-card,
+.msg-agent-popover:not(.msg-agent-popover--closed):focus-within .msg-agent-card,
 .msg-agent-popover--open .msg-agent-card {
   opacity: 1;
   visibility: visible;
