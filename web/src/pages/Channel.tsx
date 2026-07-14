@@ -12,7 +12,7 @@ import { JoinRequestBanner } from "../components/JoinRequestBanner";
 import { Composer, type UploadItem } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
 import { MessageCard } from "../components/MessageCard";
-import { MentionToast, type MentionToastItem } from "../components/MentionToast";
+import { MentionHeaderNotice, MentionToast, type MentionToastItem } from "../components/MentionToast";
 import { NotifyToggle, readNotifyOptin } from "../components/NotifyToggle";
 import { PresenceBar } from "../components/PresenceBar";
 import { AttachmentList } from "../components/AttachmentList";
@@ -3847,6 +3847,13 @@ export function ChannelPage({
         }
         actions={
           <>
+          <MentionHeaderNotice
+            items={toasts}
+            channel={slug}
+            identityDisplay={identityDisplay}
+            onJump={jumpToMention}
+            onDismiss={dismissToast}
+          />
           <NotifyToggle optin={optin} onChange={setOptin} />
           {(canMintAgent || canModerate) && !state.archived && (
             <div className="chan-admin-actions">

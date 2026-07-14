@@ -84,3 +84,32 @@ export function MentionToast({ items, channel, identityDisplay, onJump, onDismis
     </div>
   );
 }
+
+export function MentionHeaderNotice({ items, channel, identityDisplay, onJump, onDismiss }: Props) {
+  const t = useT();
+  const item = items[items.length - 1];
+  if (item === undefined) return null;
+  const senderLabel = resolveSenderLabel(item.sender, identityDisplay);
+  return (
+    <div className="mention-header-notice" role="status" aria-live="polite">
+      <button
+        type="button"
+        className="mention-header-jump"
+        onClick={() => onJump(item.seq)}
+        title={(item.fullBody ?? item.body) || undefined}
+      >
+        <span className="ap-sprite ap-sprite--bell-on" aria-hidden="true" />
+        <span className="mention-header-title">{t("Channel.toast.title", { sender: senderLabel, channel })}</span>
+        {items.length > 1 && <span className="t-mono mention-header-count">+{items.length - 1}</span>}
+      </button>
+      <button
+        type="button"
+        className="mention-header-dismiss"
+        aria-label={t("Channel.toast.dismiss")}
+        onClick={() => onDismiss(item.seq)}
+      >
+        ×
+      </button>
+    </div>
+  );
+}

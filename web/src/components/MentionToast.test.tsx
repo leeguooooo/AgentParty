@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import { MentionToast, type MentionToastItem } from "./MentionToast";
+import { MentionHeaderNotice, MentionToast, type MentionToastItem } from "./MentionToast";
 
 function memoryStorage(seed: Record<string, string> = {}): Storage {
   const values = new Map<string, string>(Object.entries(seed));
@@ -77,5 +77,54 @@ describe("MentionToast 悬停看全文 (#280)", () => {
     });
     const bodyProps = findByClass(renderer!.toJSON(), "mention-toast-body");
     expect(bodyProps!.title).toBe("short");
+  });
+});
+
+describe("MentionHeaderNotice (#476)", () => {
+  test("renders the latest mention in one header notice with a backlog count", () => {
+    const items: MentionToastItem[] = [
+      { seq: 1, sender: { name: "alice", kind: "agent" }, body: "first" },
+      { seq: 2, sender: { name: "bob", kind: "agent" }, body: "second", fullBody: "second full body" },
+    ];
+    const jumps: number[] = [];
+    const dismisses: number[] = [];
+    void act(() => {
+      renderer = create(
+        <LocaleProvider>
+          <MentionHeaderNotice
+            items={items}
+            channel="dev"
+            identityDisplay={{}}
+            onJump={(seq) => jumps.push(seq)}
+            onDismiss={(seq) => dismisses.push(seq)}
+          />
+        </LocaleProvider>,
+      );
+    });
+
+    const root = renderer!.root;
+    const jump = root.findByProps({ className: "mention-header-jump" });
+    expect(jump.props.title).toBe("second full body");
+    expect(root.findByProps({ className: "mention-header-title" }).children.join("")).toContain("bob mentioned you in #dev");
+    expect(root.findByProps({ className: "t-mono mention-header-count" }).children.join("")).toBe("+1");
+
+    void act(() => jump.props.onClick());
+    expect(jumps).toEqual([2]);
+
+    const dismiss = root.findByProps({ className: "mention-header-dismiss" });
+    void act(() => dismiss.props.onClick());
+    expect(dismisses).toEqual([2]);
+  });
+
+  test("renders nothing when there are no mentions", () => {
+    void act(() => {
+      renderer = create(
+        <LocaleProvider>
+          <MentionHeaderNotice items={[]} channel="dev" identityDisplay={{}} onJump={() => {}} onDismiss={() => {}} />
+        </LocaleProvider>,
+      );
+    });
+
+    expect(renderer!.toJSON()).toBeNull();
   });
 });

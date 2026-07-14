@@ -176,4 +176,20 @@ describe("AgentJoin dismiss behavior", () => {
     const input = r.root.find((node) => node.props.className === "t-mono agent-join-nameinput");
     expect(input.props.value).toBe("leo-demo");
   });
+
+  test("join command tells turn-based agents to re-anchor context and route human confirmations to the channel", async () => {
+    localStorage.setItem("ap_locale", "en");
+    const r = render();
+    open(r);
+    await act(async () => {
+      await r.root.find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick).props.onClick();
+    });
+
+    const command = savedAgents[0]!.command;
+    expect(command).toContain("every new turn: first re-anchor yourself");
+    expect(command).toContain("party status demo waiting -m \"need human: <question>\"");
+    expect(command).toContain("party send \"need human confirmation: <question/options>\" --channel demo --mention host");
+    expect(command).toContain("watch --once is only a current-turn standby");
+    expect(command).toContain("prefer party serve or webhook delivery");
+  });
 });
