@@ -1913,7 +1913,7 @@ export function TaskLedgerPanel({
     return (
       <li
         key={task.id}
-        className={"task-card" + (dragTaskId === task.id ? " is-dragging" : "")}
+        className={`task-card task-card--${task.state}` + (dragTaskId === task.id ? " is-dragging" : "")}
         draggable={!disabled && !taskBusy}
         onDragStart={(event) => {
           event.dataTransfer.effectAllowed = "move";
