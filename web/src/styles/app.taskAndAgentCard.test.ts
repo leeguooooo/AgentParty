@@ -12,9 +12,10 @@ describe("task title containment (#489)", () => {
   });
 });
 
-describe("agent hover card (#490)", () => {
-  test("opens immediately on hover or keyboard focus without a native tooltip delay", () => {
+describe("agent hover/touch card (#490)", () => {
+  test("opens immediately on hover, keyboard focus, or explicit touch click", () => {
     expect(css).toMatch(/\.msg-agent-card\s*\{[^}]*transition:\s*opacity 60ms linear/s);
-    expect(css).toMatch(/\.msg-agent-popover:hover \.msg-agent-card,[\s\S]*\.msg-agent-popover:focus-within \.msg-agent-card\s*\{[^}]*visibility:\s*visible;/s);
+    expect(css).toMatch(/\.msg-agent-popover:not\(\.msg-agent-popover--closed\):hover \.msg-agent-card,[\s\S]*\.msg-agent-popover:not\(\.msg-agent-popover--closed\):focus-within \.msg-agent-card,[\s\S]*\.msg-agent-popover--open \.msg-agent-card\s*\{[^}]*visibility:\s*visible;/s);
+    expect(css).toMatch(/@media \(max-width:\s*760px\)[\s\S]*\.msg-agent-card\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*auto 10px[^}]*max-height:\s*min\(70dvh, 560px\);/s);
   });
 });

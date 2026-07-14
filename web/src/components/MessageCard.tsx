@@ -1,7 +1,7 @@
 // 消息渲染：message → doodle 卡片外壳 + mono 元信息 + markdown 正文；
 // status → 时间线分隔条（spec §9 第 2 块）。
 import type { AgentContext, ChannelRoleAssignment, MsgFrame, PresenceEntry, ReadCursor, Sender } from "@agentparty/shared";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
 import { isClientVersionOutdated, useMinClientVersion } from "../lib/clientVersion";
@@ -16,6 +16,7 @@ import type { MentionReceipt } from "../lib/wakeReceipt";
 import { AttachmentList } from "./AttachmentList";
 import { Markdown } from "./Markdown";
 import { MessageStatus } from "./MessageStatus";
+import { useDismissableLayer } from "./useDismissableLayer";
 
 interface Props {
   msg: MsgFrame;
@@ -49,6 +50,8 @@ interface Props {
   agentRoles?: Record<string, ChannelRoleAssignment>;
   // #490：发送者信息卡展示最近工作；Channel 已按 agent 截成最多三条，避免卡片自己反复扫整段历史。
   recentMessages?: MsgFrame[];
+  // #490 follow-up：@提及也复用同一张完整信息卡，因此需要按被提及 agent 取最近工作。
+  recentMessagesByAgent?: ReadonlyMap<string, MsgFrame[]>;
   // 频道决策协议（#284）：人类/moderator 是否可对本条 decision_request 拍板 + 回调。
   canRespondDecision?: boolean;
   decisionBusy?: boolean;
@@ -158,17 +161,28 @@ function AgentInfoPopover({
   entry,
   assignment,
   recentMessages,
+  triggerClassName,
 }: {
   id: string;
   label: string;
   name: string;
-  kind: Sender["kind"];
+  kind: Sender["kind"] | null;
   owner: string | null;
   entry: PresenceEntry | undefined;
   assignment: ChannelRoleAssignment | undefined;
   recentMessages: MsgFrame[];
+  triggerClassName: string;
 }) {
   const t = useT();
+  const [open, setOpen] = useState(false);
+  const [suppressed, setSuppressed] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const dismiss = useCallback(() => {
+    triggerRef.current?.blur();
+    setOpen(false);
+    setSuppressed(true);
+  }, []);
   const leader = assignment?.reports_to ?? entry?.lineage?.parent_agent ?? null;
   const role = assignment?.role ?? entry?.role ?? null;
   const responsibility = assignment?.responsibility?.trim() || null;
@@ -179,14 +193,44 @@ function AgentInfoPopover({
     .map((message) => ({ message, text: activityLine(message) }))
     .filter((item) => item.text !== "")
     .slice(0, 3);
+  useDismissableLayer({
+    active: open && typeof document !== "undefined" && typeof window !== "undefined",
+    onDismiss: dismiss,
+    outsideRef: rootRef,
+  });
   return (
-    <div className="msg-agent-popover">
+    <div
+      ref={rootRef}
+      className={`msg-agent-popover${open ? " msg-agent-popover--open" : ""}${suppressed ? " msg-agent-popover--closed" : ""}`}
+      onMouseEnter={() => {
+        if (!open) setSuppressed(false);
+      }}
+      onMouseLeave={() => {
+        if (!open) setSuppressed(false);
+      }}
+    >
       <button
+        ref={triggerRef}
         type="button"
-        className="msg-sender msg-agent-trigger"
+        className={`${triggerClassName} msg-agent-trigger`}
         aria-describedby={id}
+        aria-expanded={open}
+        onClick={(event) => {
+          if (open) {
+            event.currentTarget.blur();
+            setOpen(false);
+            setSuppressed(true);
+          } else {
+            setSuppressed(false);
+            setOpen(true);
+          }
+        }}
+        onFocus={() => setSuppressed(false)}
         onKeyDown={(event) => {
-          if (event.key === "Escape") event.currentTarget.blur();
+          if (event.key === "Escape") {
+            event.currentTarget.blur();
+            dismiss();
+          }
         }}
       >
         {label}
@@ -199,7 +243,7 @@ function AgentInfoPopover({
         <dl className="msg-agent-card-facts">
           <div>
             <dt>{t("MessageCard.agentCard.identity")}</dt>
-            <dd>{[kind, owner].filter(Boolean).join(" · ")}</dd>
+            <dd>{[kind, owner].filter(Boolean).join(" · ") || t("MessageCard.agentCard.none")}</dd>
           </div>
           <div>
             <dt>{t("MessageCard.agentCard.leader")}</dt>
@@ -263,6 +307,7 @@ function MessageCardImpl({
   presence,
   agentRoles,
   recentMessages = [],
+  recentMessagesByAgent,
   canRespondDecision,
   decisionBusy,
   onDecisionRespond,
@@ -506,6 +551,7 @@ function MessageCardImpl({
           entry={presence?.[msg.sender.name]}
           assignment={agentRoles?.[msg.sender.name]}
           recentMessages={recentMessages}
+          triggerClassName="msg-sender"
         />
         {/* owner(lark 长 id）不再每条平铺——它已在 senderTitle 里，悬停发送者名即见；
            防冒充锚点保留在 tooltip + kind 徽章，行内只留重要内容（名字/类型/提及）。 */}
@@ -535,17 +581,22 @@ function MessageCardImpl({
           </span>
         )}
         {msg.mentions.map((m) => {
-          // #274：@提及悬停也能看到该名字的实时状态；原始名与显示名不同时保留 @原名防冒充锚点。
-          const mentionTitle = [
-            m === displayForIdentity(m, identityDisplay) ? null : `@${m}`,
-            ...agentInfoTitleBits(presence?.[m], agentRoles?.[m]),
-          ]
-            .filter((part): part is string => part !== null)
-            .join("\n");
+          const mentionedSender = participants?.find((participant) => participant.name === m);
+          const mentionedPresence = presence?.[m];
+          const mentionedIdentity = identityDisplay?.[m];
           return (
-            <span key={m} className="msg-mention" title={mentionTitle !== "" ? mentionTitle : undefined}>
-              @{displayForIdentity(m, identityDisplay)}
-            </span>
+            <AgentInfoPopover
+              key={m}
+              id={`agent-info-${msg.seq}-mention-${m}`}
+              label={`@${displayForIdentity(m, identityDisplay)}`}
+              name={m}
+              kind={mentionedSender?.kind ?? mentionedPresence?.kind ?? mentionedIdentity?.kind ?? null}
+              owner={mentionedSender?.owner ?? mentionedPresence?.account ?? mentionedIdentity?.account ?? null}
+              entry={mentionedPresence}
+              assignment={agentRoles?.[m]}
+              recentMessages={recentMessagesByAgent?.get(m) ?? (m === msg.sender.name ? recentMessages : [])}
+              triggerClassName="msg-mention"
+            />
           );
         })}
         {msg.reply_to !== null && quotedMessage === null && <span className="msg-reply">↩ #{msg.reply_to}</span>}

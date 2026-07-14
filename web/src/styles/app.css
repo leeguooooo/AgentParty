@@ -2658,8 +2658,9 @@
   transform: translateY(-2px);
   transition: opacity 60ms linear, transform 60ms linear, visibility 0s linear 60ms;
 }
-.msg-agent-popover:hover .msg-agent-card,
-.msg-agent-popover:focus-within .msg-agent-card {
+.msg-agent-popover:not(.msg-agent-popover--closed):hover .msg-agent-card,
+.msg-agent-popover:not(.msg-agent-popover--closed):focus-within .msg-agent-card,
+.msg-agent-popover--open .msg-agent-card {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
@@ -5444,6 +5445,14 @@
     left: 8px !important;
     width: calc(100vw - 16px) !important;
     max-height: 58vh;
+  }
+  /* 触屏没有可靠 hover，信息卡按底部 sheet 展示，避免靠近右侧的 @ 名字把卡片推出视口。 */
+  .msg-agent-card {
+    position: fixed;
+    inset: auto 10px max(10px, env(safe-area-inset-bottom));
+    width: auto;
+    max-height: min(70dvh, 560px);
+    overflow: auto;
   }
   /* 工具条：窄屏收成单行横向滚动带（与 .side 频道条同样的处理），把纵向空间还给消息流。
      原先三组按钮各占满整行、内部再换行，会堆成 5-6 行（实测约 232px），把消息流挤到只剩一条缝。

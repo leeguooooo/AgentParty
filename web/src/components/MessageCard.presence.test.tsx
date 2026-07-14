@@ -11,8 +11,33 @@ mock.module("../lib/markdown", () => ({ renderMarkdown: (s: string) => s }));
 const { MessageCard, agentInfoTitleBits, presenceTitleBits } = await import("./MessageCard");
 
 let renderer: ReactTestRenderer | null = null;
+let windowEvents: TestEventTarget;
+let documentEvents: TestEventTarget;
+const insidePopoverTarget = {};
 
 const noop = () => undefined;
+
+class TestEventTarget {
+  private listeners = new Map<string, Set<(event: unknown) => void>>();
+
+  addEventListener(type: string, listener: (event: unknown) => void) {
+    const listeners = this.listeners.get(type) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: (event: unknown) => void) {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  emit(type: string, event: unknown) {
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+
+  count(type: string) {
+    return this.listeners.get(type)?.size ?? 0;
+  }
+}
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -27,8 +52,12 @@ function memoryStorage(): Storage {
 }
 
 beforeEach(() => {
+  windowEvents = new TestEventTarget();
+  documentEvents = new TestEventTarget();
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
+  Object.defineProperty(globalThis, "window", { configurable: true, value: windowEvents });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: documentEvents });
 });
 
 function baseMsg(overrides: Partial<MsgFrame>): MsgFrame {
@@ -58,8 +87,8 @@ function presenceEntry(overrides: Partial<PresenceEntry>): PresenceEntry {
   } as PresenceEntry;
 }
 
-function render(msg: MsgFrame, extra: Record<string, unknown> = {}) {
-  localStorage.setItem("ap_locale", "en");
+function render(msg: MsgFrame, extra: Record<string, unknown> = {}, locale: "en" | "zh" = "en") {
+  localStorage.setItem("ap_locale", locale);
   act(() => {
     renderer = create(
       <LocaleProvider>
@@ -84,6 +113,16 @@ function render(msg: MsgFrame, extra: Record<string, unknown> = {}) {
           {...extra}
         />
       </LocaleProvider>,
+      {
+        createNodeMock(element) {
+          const className = String((element.props as { className?: string }).className ?? "");
+          if (className.includes("msg-agent-popover")) {
+            return { contains: (target: unknown) => target === insidePopoverTarget };
+          }
+          if (className.includes("msg-agent-trigger")) return { blur: noop };
+          return {};
+        },
+      },
     );
   });
   return renderer!.root;
@@ -94,18 +133,23 @@ function textContent(node: ReactTestInstance): string {
 }
 
 function senderCardText(root: ReactTestInstance): string {
-  const card = root.find((n) => n.type === "aside" && String(n.props.className ?? "").includes("msg-agent-card"));
+  const card = root.find((n) => n.type === "aside" && String(n.props.id ?? "").startsWith("agent-info-") && !String(n.props.id).includes("-mention-"));
   return textContent(card);
 }
 
-function mentionTitle(root: ReactTestInstance): string | undefined {
-  const span = root.find((n) => n.type === "span" && String(n.props.className ?? "").includes("msg-mention"));
-  return span.props.title as string | undefined;
+function mentionCard(root: ReactTestInstance): ReactTestInstance {
+  return root.find((n) => n.type === "aside" && String(n.props.id ?? "").includes("-mention-"));
+}
+
+function mentionTrigger(root: ReactTestInstance): ReactTestInstance {
+  return root.find((n) => n.type === "button" && String(n.props.className ?? "").includes("msg-mention"));
 }
 
 afterEach(() => {
   act(() => renderer?.unmount());
   renderer = null;
+  Reflect.deleteProperty(globalThis, "window");
+  Reflect.deleteProperty(globalThis, "document");
 });
 
 describe("presenceTitleBits (#274)", () => {
@@ -162,7 +206,7 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     expect(card).toContain("Current work#510 · working");
   });
 
-  test("sender 与 @ 悬停都能看到频道公开职责", () => {
+  test("sender 与 @ 都使用完整信息卡展示公开职责", () => {
     const role = {
       name: "planner",
       role: "worker",
@@ -176,7 +220,48 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     });
     expect(senderCardText(root)).toContain("Role & divisionworker · 先读 issue，再实现和验证");
     expect(senderCardText(root)).toContain("Current work实现中 · working");
-    expect(mentionTitle(root)).toContain("responsibility: 先读 issue，再实现和验证");
+    expect(textContent(mentionCard(root))).toContain("Role & divisionworker · 先读 issue，再实现和验证");
+    expect(textContent(mentionCard(root))).toContain("Current work实现中 · working");
+  });
+
+  test("移动端点击 @提及会显式打开信息卡，再次点击关闭", () => {
+    const root = render(baseMsg({ mentions: ["planner"] }), {
+      presence: { planner: presenceEntry({ note: "实现中" }) },
+    });
+    const trigger = mentionTrigger(root);
+    let blurred = false;
+    const clickEvent = { currentTarget: { blur: () => { blurred = true; } } };
+    expect(trigger.props["aria-expanded"]).toBe(false);
+    act(() => trigger.props.onClick(clickEvent));
+    expect(mentionTrigger(root).props["aria-expanded"]).toBe(true);
+    expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--open");
+    act(() => mentionTrigger(root).props.onClick(clickEvent));
+    expect(mentionTrigger(root).props["aria-expanded"]).toBe(false);
+    expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--closed");
+    expect(blurred).toBe(true);
+  });
+
+  test("打开 @提及信息卡后，站内点击保留，站外点击与 Escape 都会收起", () => {
+    const root = render(baseMsg({ mentions: ["planner"] }));
+    const clickEvent = { currentTarget: { blur: noop } };
+
+    act(() => mentionTrigger(root).props.onClick(clickEvent));
+    expect(documentEvents.count("pointerdown")).toBe(1);
+    expect(windowEvents.count("keydown")).toBe(1);
+
+    act(() => documentEvents.emit("pointerdown", { target: insidePopoverTarget }));
+    expect(mentionTrigger(root).props["aria-expanded"]).toBe(true);
+
+    act(() => documentEvents.emit("pointerdown", { target: {} }));
+    expect(mentionTrigger(root).props["aria-expanded"]).toBe(false);
+    expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--closed");
+    expect(documentEvents.count("pointerdown")).toBe(0);
+
+    act(() => mentionTrigger(root).props.onClick(clickEvent));
+    act(() => windowEvents.emit("keydown", { key: "Escape" }));
+    expect(mentionTrigger(root).props["aria-expanded"]).toBe(false);
+    expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--closed");
+    expect(windowEvents.count("keydown")).toBe(0);
   });
 
   test("不传 presence（或查不到该名字）时 sender 信息卡明确显示未上报", () => {
@@ -184,6 +269,14 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     const card = senderCardText(root);
     expect(card).toContain("@planner");
     expect(card).toContain("Current workNot reported");
+  });
+
+  test("中文 locale 使用同步的信息卡文案", () => {
+    const root = render(baseMsg({ mentions: ["reviewer"] }), {}, "zh");
+    expect(senderCardText(root)).toContain("身份agent");
+    expect(senderCardText(root)).toContain("进行中的工作未上报");
+    expect(textContent(mentionCard(root))).toContain("身份未上报");
+    expect(textContent(mentionCard(root))).toContain("角色与分工未上报");
   });
 
   test("信息卡展示 leader、分工和最近三项工作", () => {
@@ -218,21 +311,41 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     const root = render(baseMsg({}));
     const trigger = root.find((n) => n.type === "button" && String(n.props.className ?? "").includes("msg-agent-trigger"));
     let blurred = false;
-    trigger.props.onKeyDown({
-      key: "Escape",
-      currentTarget: { blur: () => { blurred = true; } },
+    act(() => {
+      trigger.props.onKeyDown({
+        key: "Escape",
+        currentTarget: { blur: () => { blurred = true; } },
+      });
     });
     expect(blurred).toBe(true);
   });
 
-  test("@提及悬停也能看到该名字的状态；presence 查不到时 title 保持缺省", () => {
+  test("@提及信息卡展示该名字的状态；presence 查不到时明确显示未上报", () => {
     const withPresence = render(baseMsg({ mentions: ["reviewer"] }), {
       presence: { reviewer: presenceEntry({ name: "reviewer", state: "waiting", current_task: 42 }) },
     });
-    expect(mentionTitle(withPresence)).toBe("status: waiting\ntask: #42");
+    expect(textContent(mentionCard(withPresence))).toContain("Current work#42 · waiting");
     act(() => renderer?.unmount());
 
     const withoutPresence = render(baseMsg({ mentions: ["reviewer"] }));
-    expect(mentionTitle(withoutPresence)).toBeUndefined();
+    expect(textContent(mentionCard(withoutPresence))).toContain("Current workNot reported");
+  });
+
+  test("离线 @agent 从 presence 快照恢复身份和 owner，不伪装成在线参与者", () => {
+    const root = render(baseMsg({ mentions: ["reviewer"] }), {
+      presence: {
+        reviewer: presenceEntry({ name: "reviewer", kind: "agent", account: "owner-a" }),
+      },
+    });
+    expect(textContent(mentionCard(root))).toContain("Identityagent · owner-a");
+  });
+
+  test("离线 @human 从 identity map 恢复人类身份和账号", () => {
+    const root = render(baseMsg({ mentions: ["reviewer"] }), {
+      identityDisplay: {
+        reviewer: { display: "Alice", kind: "human", account: "alice@example.com" },
+      },
+    });
+    expect(textContent(mentionCard(root))).toContain("Identityhuman · alice@example.com");
   });
 });
