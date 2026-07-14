@@ -346,7 +346,7 @@ export function parseRunningProcessCommand(
   const match = line.trim().match(/^(\d+)\s+(.+)$/);
   if (match === null) return null;
   const command = match[2];
-  const executable = command.match(new RegExp(`^(.+/${escapeRegExp(executableName)})(?:\\s|$)`))?.[1];
+  const executable = command.match(new RegExp(`^(.+?/${escapeRegExp(executableName)})(?:\\s|$)`))?.[1];
   if (executable === undefined || !executable.startsWith("/")) return null;
   return { pid: Number(match[1]), executablePath: executable };
 }

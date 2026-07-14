@@ -94,7 +94,14 @@ describe("desktop ad-hoc acceptance", () => {
       pid: 4242,
       executablePath: "/Applications/Agent Party Preview.app/Contents/MacOS/agentparty-desktop",
     });
-    expect(parseRunningProcessCommand("4243 agentparty-desktop --flag", "agentparty-desktop")).toBeNull();
+    expect(parseRunningProcessCommand(
+      "4243 /Applications/AgentParty.app/Contents/MacOS/agentparty-desktop --helper /tmp/agentparty-desktop",
+      "agentparty-desktop",
+    )).toEqual({
+      pid: 4243,
+      executablePath: "/Applications/AgentParty.app/Contents/MacOS/agentparty-desktop",
+    });
+    expect(parseRunningProcessCommand("4244 agentparty-desktop --flag", "agentparty-desktop")).toBeNull();
   });
 
   test("proves an ad-hoc N-1 to N in-app replacement without claiming Gatekeeper acceptance", () => {
