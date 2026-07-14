@@ -6590,3 +6590,9 @@
 .task-ledger-panel .task-solution,
 .task-ledger-panel .task-reject-form { border-top: 1.5px dashed var(--t-faint); margin: 0; padding: 10px 13px; background: var(--t-panel2); }
 .task-ledger-panel .task-card-actions { border-top: 0; }
+.task-ledger-panel .task-blog-more {
+  align-self: flex-start; margin-top: 8px; padding: 3px 13px;
+  border: 1.5px dashed var(--t-faint); background: var(--t-panel2);
+  color: var(--t-muted); font: 12px var(--t-mono); cursor: pointer;
+}
+.task-ledger-panel .task-blog-more:hover { background: var(--t-panel); color: var(--t-text); }
