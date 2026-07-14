@@ -1,7 +1,7 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { PresenceEntry, TaskRecord } from "@agentparty/shared";
+import type { PresenceEntry, Sender, TaskRecord } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 
 const { AgentBoardPanel } = await import("./Channel");
@@ -47,11 +47,16 @@ afterEach(async () => {
   Reflect.deleteProperty(globalThis, "localStorage");
 });
 
-function render(locale: "en" | "zh", presenceList: PresenceEntry[], tasks: TaskRecord[]): ReactTestRenderer {
+function render(
+  locale: "en" | "zh",
+  presenceList: PresenceEntry[],
+  tasks: TaskRecord[],
+  participants: Sender[] = [],
+): ReactTestRenderer {
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage({ ap_locale: locale }) });
   let r!: ReactTestRenderer;
   void act(() => {
-    r = create(<LocaleProvider><AgentBoardPanel presence={presenceList} tasks={tasks} /></LocaleProvider>);
+    r = create(<LocaleProvider><AgentBoardPanel presence={presenceList} participants={participants} tasks={tasks} /></LocaleProvider>);
   });
   renderer = r;
   return r;
@@ -146,6 +151,25 @@ describe("AgentBoardPanel (#187)", () => {
     const txt = allText(render("en", [], [task(1, "ghost", "assigned")]));
     expect(txt).toContain("ghost");
     expect(txt).toContain("offline");
+  });
+
+  test("participant-only agent is visible and online before its first presence row (#514)", () => {
+    const r = render("en", [], [], [{ name: "fresh-agent", kind: "agent" }]);
+    const idleLane = r.root.findByProps({ "data-status": "idle" });
+    const offlineLane = r.root.findByProps({ "data-status": "offline" });
+    expect(treeText(idleLane)).toContain("fresh-agent");
+    expect(treeText(offlineLane)).not.toContain("fresh-agent");
+  });
+
+  test("live participants override a stale persisted offline row (#514)", () => {
+    const r = render(
+      "en",
+      [presence("reconnected", { state: "offline", live: false })],
+      [],
+      [{ name: "reconnected", kind: "agent" }],
+    );
+    expect(treeText(r.root.findByProps({ "data-status": "idle" }))).toContain("reconnected");
+    expect(treeText(r.root.findByProps({ "data-status": "offline" }))).not.toContain("reconnected");
   });
 
   test("surfaces scheduling: paused agent with resume_at shows resume time (#187 排期)", () => {
