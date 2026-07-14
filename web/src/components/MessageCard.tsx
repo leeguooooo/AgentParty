@@ -1,7 +1,7 @@
 // 消息渲染：message → doodle 卡片外壳 + mono 元信息 + markdown 正文；
 // status → 时间线分隔条（spec §9 第 2 块）。
 import type { AgentContext, ChannelRoleAssignment, MsgFrame, PresenceEntry, ReadCursor, Sender } from "@agentparty/shared";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
 import { isClientVersionOutdated, useMinClientVersion } from "../lib/clientVersion";
@@ -16,6 +16,7 @@ import type { MentionReceipt } from "../lib/wakeReceipt";
 import { AttachmentList } from "./AttachmentList";
 import { Markdown } from "./Markdown";
 import { MessageStatus } from "./MessageStatus";
+import { useDismissableLayer } from "./useDismissableLayer";
 
 interface Props {
   msg: MsgFrame;
@@ -176,6 +177,10 @@ function AgentInfoPopover({
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const dismiss = useCallback(() => {
+    triggerRef.current?.blur();
+    setOpen(false);
+  }, []);
   const leader = assignment?.reports_to ?? entry?.lineage?.parent_agent ?? null;
   const role = assignment?.role ?? entry?.role ?? null;
   const responsibility = assignment?.responsibility?.trim() || null;
@@ -186,24 +191,11 @@ function AgentInfoPopover({
     .map((message) => ({ message, text: activityLine(message) }))
     .filter((item) => item.text !== "")
     .slice(0, 3);
-  useEffect(() => {
-    if (!open || typeof document === "undefined" || typeof window === "undefined") return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node | null)) {
-        triggerRef.current?.blur();
-        setOpen(false);
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
+  useDismissableLayer({
+    active: open && typeof document !== "undefined" && typeof window !== "undefined",
+    onDismiss: dismiss,
+    outsideRef: rootRef,
+  });
   return (
     <div ref={rootRef} className={`msg-agent-popover${open ? " msg-agent-popover--open" : ""}`}>
       <button
@@ -218,8 +210,8 @@ function AgentInfoPopover({
         }}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
-            setOpen(false);
             event.currentTarget.blur();
+            dismiss();
           }
         }}
       >

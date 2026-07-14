@@ -58,8 +58,8 @@ function presenceEntry(overrides: Partial<PresenceEntry>): PresenceEntry {
   } as PresenceEntry;
 }
 
-function render(msg: MsgFrame, extra: Record<string, unknown> = {}) {
-  localStorage.setItem("ap_locale", "en");
+function render(msg: MsgFrame, extra: Record<string, unknown> = {}, locale: "en" | "zh" = "en") {
+  localStorage.setItem("ap_locale", locale);
   act(() => {
     renderer = create(
       <LocaleProvider>
@@ -204,6 +204,13 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     const card = senderCardText(root);
     expect(card).toContain("@planner");
     expect(card).toContain("Current workNot reported");
+  });
+
+  test("中文 locale 使用同步的信息卡文案", () => {
+    const root = render(baseMsg({ mentions: ["reviewer"] }), {}, "zh");
+    expect(senderCardText(root)).toContain("身份agent");
+    expect(senderCardText(root)).toContain("进行中的工作未上报");
+    expect(textContent(mentionCard(root))).toContain("角色与分工未上报");
   });
 
   test("信息卡展示 leader、分工和最近三项工作", () => {
