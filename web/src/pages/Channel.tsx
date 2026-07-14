@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useReducer,
 import type { CSSProperties, ReactNode } from "react";
 import { buildHostBoard, type Attachment, type ChannelSquad, type CollaborationRole, type HostBoard, type MsgFrame, type PresenceEntry, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentDetailModal } from "../components/AgentDetailModal";
+import { TeamTabs } from "../components/TeamTabs";
 import { AgentJoin } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
 import { VisibilityToggle } from "../components/VisibilityToggle";
@@ -3631,6 +3632,16 @@ export function ChannelPage({
   const taskBlockedCount = taskSummary?.blocked ?? tasks.filter((task) => task.state === "blocked").length;
   const taskMineCount = taskSummary?.mine ?? 0;
   const onlineAgentCount = Object.values(state.presence).filter((entry) => entry.kind !== "human" && entry.live === true).length;
+  // #504 团队面板博客风页签的角标：离线 agent 数 / 未认领分工数 / @我未读数。
+  // 未认领复用 DivisionBoard 同款 unassignedMembers（assigned+self 之外的已连接成员），语义一致。
+  const offlineAgentCount = Object.values(state.presence).filter((entry) => entry.kind !== "human" && entry.live !== true).length;
+  const unclaimedTeamCount = unassignedMembers(
+    channelRoles,
+    selfReportedRoles(channelRoles, state.presence, channelIdentities),
+    state.presence,
+    channelIdentities,
+    t,
+  ).length;
 
   const setAgentMode = useCallback((mode: AgentFilterMode) => {
     setAgentFilter((current) => ({ ...current, mode }));
@@ -3978,43 +3989,47 @@ export function ChannelPage({
             </section>
           )}
           {activePanel === "team" && (
-            // #370 方案A：分工 + Agent 状态板 + 协调 三块合成单一「团队」面板。组织架构树在
-            // DivisionBoard 顶部（OrgTreePreview）。分区标题让大信息量仍可扫读。
-            <>
-              <DivisionBoard
-                canModerate={canModerate}
-                slug={slug}
-                roles={channelRoles}
-                roleDrafts={roleDrafts}
-                roleError={roleError}
-                roleSaving={roleSaving}
-                roleName={newRoleName}
-                roleDraft={newRoleDraft}
-                identities={channelIdentities}
-                presence={state.presence}
-                forceOpen
-                onRoleDraft={updateRoleDraft}
-                onNewRoleName={setNewRoleName}
-                onNewRoleDraft={setNewRoleDraft}
-                onSaveRole={saveRole}
-                onSetReportsTo={setReportsTo}
-                onDeleteRole={clearRole}
-                charterText={charter?.charter ?? null}
-                onSyncToCharter={syncDivisionToCharter}
-                syncingCharter={charterSaving}
-                canManageAgentRules={canMintAgent && accountKey !== null}
-                onOpenAgentRules={openAgentRulesFromDivision}
-                onOpenAgentDetail={setOpenAgentDetail}
-              />
-              <section className="team-section">
-                <h3 className="team-section-head">{t("Channel.agents.title")}</h3>
-                <AgentBoardPanel presence={Object.values(state.presence)} tasks={tasks} />
-              </section>
-              <section className="team-section">
-                <h3 className="team-section-head">{t("Channel.tools.coordination")}</h3>
-                {coordinationContent}
-              </section>
-            </>
+            // #504 团队面板「博客风」：原来一整页长滚动（分工 + Agent 看板 + 协调）收进三个页签，
+            // 结构一目了然、页签带角标。各段数据逻辑不动（DivisionBoard 等原样），TeamTabs 只管外壳。
+            // 组织架构树仍在 DivisionBoard 顶部（OrgTreePreview）。
+            <TeamTabs
+              stats={{
+                roles: structuredRoleCount,
+                online: onlineAgentCount,
+                offline: offlineAgentCount,
+                unclaimed: unclaimedTeamCount,
+              }}
+              mentionCount={toasts.length}
+              division={
+                <DivisionBoard
+                  canModerate={canModerate}
+                  slug={slug}
+                  roles={channelRoles}
+                  roleDrafts={roleDrafts}
+                  roleError={roleError}
+                  roleSaving={roleSaving}
+                  roleName={newRoleName}
+                  roleDraft={newRoleDraft}
+                  identities={channelIdentities}
+                  presence={state.presence}
+                  forceOpen
+                  onRoleDraft={updateRoleDraft}
+                  onNewRoleName={setNewRoleName}
+                  onNewRoleDraft={setNewRoleDraft}
+                  onSaveRole={saveRole}
+                  onSetReportsTo={setReportsTo}
+                  onDeleteRole={clearRole}
+                  charterText={charter?.charter ?? null}
+                  onSyncToCharter={syncDivisionToCharter}
+                  syncingCharter={charterSaving}
+                  canManageAgentRules={canMintAgent && accountKey !== null}
+                  onOpenAgentRules={openAgentRulesFromDivision}
+                  onOpenAgentDetail={setOpenAgentDetail}
+                />
+              }
+              board={<AgentBoardPanel presence={Object.values(state.presence)} tasks={tasks} />}
+              coordination={coordinationContent}
+            />
           )}
           {activePanel === "tasks" && (
             <TaskLedgerPanel
