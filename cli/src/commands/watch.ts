@@ -3,7 +3,16 @@ import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_LOOP_GUARD, EXIT_STREAM_ENDED, EXIT_TIME
 import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from "../instance-lock";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
-import { loadCursor, loadRevCursor, resolveChannel, saveCursor, saveRevCursor } from "../config";
+import {
+  loadCursor,
+  loadRevCursor,
+  loadStuck,
+  resolveChannel,
+  saveCursor,
+  saveRevCursor,
+  saveWatchStuck,
+  type StuckWake,
+} from "../config";
 import { resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import { formatMsg } from "../format";
 import { fetchMe, fetchMessages, fetchRecentMessages, handleRestError, postMessage } from "../rest";
@@ -30,6 +39,8 @@ With --once, it stays attached until the FIRST matching message, prints it, and
 exits 0. It is only a wake signal while the harness keeps that background task
 alive. Claude Code may kill run_in_background tasks at turn boundaries, so this
 is turn-scoped best effort, not durable unattended presence.
+Re-arm --once with the persisted cursor (omit --latest). If the previous result
+was lost before the agent replied, the pending wake is replayed first.
 For --mentions-only --once, an uninitialized cursor (0) attaches at the current
 channel head to avoid replaying old mentions. Use --since 0 to request backlog.
 Self messages are skipped by default; --exclude-self is accepted as an explicit
@@ -75,7 +86,12 @@ export const ONCE_CLAUDE_ADVISORY =
   "For unattended wake, run `party serve <channel> --runner claude --replay-backlog` from a persistent terminal/project agent.";
 
 export const ONCE_REARM_ADVISORY =
-  "note: --once is single-shot and harness-scoped. Re-arm it every turn, or use `party serve --runner claude|codex --replay-backlog` for durable presence and process-loss recovery.";
+  "note: --once is single-shot and harness-scoped. Re-arm it every turn without --latest; pending wakes are replayed until this identity sends a message/status. " +
+  "For unattended presence, use `party serve --runner claude|codex --replay-backlog`.";
+
+export const ONCE_LATEST_ADVISORY =
+  "warning: re-arming `party watch --once` with --latest explicitly discards backlog. " +
+  "Use the persisted cursor (omit --latest); any pending unacknowledged wake will be replayed first.";
 
 /** Claude Code 环境：可做回合内 --once，但 run_in_background 可能在回合边界被回收（#454）。 */
 export function isClaudeCodeEnv(env: Record<string, string | undefined> = process.env): boolean {
@@ -103,6 +119,8 @@ export interface WatchOptions {
   once?: boolean; // 第一条匹配消息后立即退出 0（harness 后台任务的唤醒信号）
   json?: boolean; // 输出 NDJSON 帧而非人类格式，供 supervisor/工具消费
   skippedMentionSeqs?: number[]; // 显式 --latest/--since 快进时跳过的 @，随 once wake 交给 agent
+  /** --once 打印前先持久化「尚未被模型确认」的唤醒；后续自己发消息/状态才清账（#508）。 */
+  onStuck?: (stuck: StuckWake) => void;
   onCursor?: (cursor: number) => void;
   onRevCursor?: (revCursor: number) => void;
   out?: (line: string) => void;
@@ -333,6 +351,20 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       // 暂停接待（#180）：qualifies 的新消息本该把 --once 退出当唤醒信号，但人按了暂停 →
       // 不退出、不发 once-wake 帧。消息仍照常打印进历史、游标照推进（下方 ack），与 serve 一致。
       const wakes = fresh && !selfPaused;
+      // Claude Code 会在 turn boundary 回收 run_in_background watcher（#508）。旧逻辑先打印、
+      // 再 ack 游标：后台结果若被 harness 吞掉，下一次 watch 已从更高游标开始，这条 @ 永久消失。
+      // 因此先落一笔 durable debt，再打印、再推进 transport cursor。agent 后续发出任何消息/状态，
+      // advanceCursorPastOwnMessage 才把 debt 清掉；如果模型没真正恢复，下次 --once 会先重放同一 seq。
+      if (o.once && qualifies && wakes) {
+        o.onStuck?.({
+          seq: msg.seq,
+          attempts: 0,
+          last_error: "watch wake awaiting agent acknowledgement",
+          source: "watch",
+          channel_last_seq: lastSeq,
+          skipped_mention_seqs: o.skippedMentionSeqs ?? [],
+        });
+      }
       if (qualifies) {
         if (o.json && o.once && wakes) {
           out(
@@ -480,7 +512,73 @@ export async function run(argv: string[]): Promise<number> {
   if (flags.follow === true) console.error(FOLLOW_WAKE_ADVISORY);
   if (flags.once === true && isClaudeCodeEnv()) console.error(ONCE_CLAUDE_ADVISORY);
   else if (flags.once === true && isCodexRuntimeEnv()) console.error(ONCE_CODEX_ADVISORY);
+  if (flags.once === true && flags.latest === true) console.error(ONCE_LATEST_ADVISORY);
   const localCursor = loadCursor(channel);
+  const stuck = loadStuck(channel);
+  // pending wake 比任何显式快进选择都优先。即使调用者误用 --latest，也不能先把仍未被模型
+  // 确认的 @ 丢掉。REST 精确补拉后立即退出，避免重新挂起一个可能又被 harness 回收的后台任务。
+  if (flags.once === true && stuck !== null) {
+    if (stuck.source !== "watch") {
+      console.error(
+        `error: #${channel} has a pending serve wake at seq=${stuck.seq}; ` +
+          "watch will not overwrite that delivery debt. Resume the existing party serve supervisor first.",
+      );
+      return 1;
+    }
+    try {
+      const [pendingPage, tail] = await Promise.all([
+        fetchMessages(cfg.server, cfg.token, channel, Math.max(0, stuck.seq - 1), 1),
+        fetchRecentMessages(cfg.server, cfg.token, channel, 1),
+      ]);
+      const pending = pendingPage.find((msg) => msg.seq === stuck.seq);
+      if (pending === undefined) {
+        console.error(
+          `error: pending watch wake seq=${stuck.seq} is no longer retained; debt was preserved. ` +
+            `Inspect channel history before clearing or advancing this workspace state.`,
+        );
+        return 1;
+      }
+      const replay = { ...stuck, attempts: stuck.attempts + 1 };
+      if (!saveWatchStuck(channel, replay)) {
+        console.error(
+          `error: #${channel} acquired a pending serve wake while replaying seq=${stuck.seq}; ` +
+            "watch preserved that delivery debt and did not acknowledge this wake.",
+        );
+        return 1;
+      }
+      const channelLastSeq = Math.max(stuck.channel_last_seq ?? 0, tail.at(-1)?.seq ?? 0, pending.seq);
+      const lag = Math.max(0, channelLastSeq - pending.seq);
+      const skippedMentionSeqs = stuck.skipped_mention_seqs ?? [];
+      if (flags.json === true) {
+        console.log(
+          JSON.stringify(
+            jsonFrame({
+              ...(pending as unknown as Record<string, unknown>),
+              watch_replay: true,
+              pending_ack: true,
+              replay_attempt: replay.attempts,
+              channel_last_seq: channelLastSeq,
+              lag,
+              skipped_mention_seqs: skippedMentionSeqs,
+            }),
+          ),
+        );
+      } else {
+        console.log(
+          `watch: replaying pending unacknowledged wake seq=${stuck.seq} attempt=${replay.attempts}; ` +
+            `channel_last_seq=${channelLastSeq} lag=${lag} ` +
+            `skipped_mention_seqs=${JSON.stringify(skippedMentionSeqs)}; ` +
+            `send a reply/status after handling it to clear this debt.` +
+            (lag > 0 ? ` 补上下文：party history ${channel} --since ${stuck.seq}` : ""),
+        );
+        console.log(formatMsg(pending));
+      }
+      if (flags.json !== true) console.error(ONCE_REARM_ADVISORY);
+      return 0;
+    } catch (e) {
+      return handleRestError(e);
+    }
+  }
   const initialLatest =
     localCursor === 0 &&
     explicitSince === undefined &&
@@ -535,6 +633,13 @@ export async function run(argv: string[]): Promise<number> {
     mentionsOnly: flags["mentions-only"] === true,
     json: flags.json === true,
     skippedMentionSeqs,
+    onStuck: (st) => {
+      if (!saveWatchStuck(channel, st)) {
+        throw new Error(
+          `#${channel} has a pending serve wake; watch preserved that delivery debt and did not acknowledge this wake`,
+        );
+      }
+    },
     onCursor: (c) => saveCursor(channel, c),
     onRevCursor: (r) => saveRevCursor(channel, r),
     statusline: true,

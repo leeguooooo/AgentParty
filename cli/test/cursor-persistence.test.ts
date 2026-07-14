@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   advanceCursorPastOwnMessage,
+  loadStuck,
   loadCursor,
   loadRevCursor,
   readState,
   saveCursor,
   saveRevCursor,
+  saveStuck,
   statePath,
   workspaceId,
   writeState,
@@ -42,6 +44,39 @@ describe("cursor persistence (#113)", () => {
       advanceCursorPastOwnMessage("dev", 15, d); // 重复
       advanceCursorPastOwnMessage("dev", 12, d); // 迟到的旧 seq
       expect(loadCursor("dev", d)).toBe(15);
+    });
+
+    test("后续自己发言会确认 pending wake，即使 cursor 前仍有空洞也只清 debt、不吞消息 (#508)", () => {
+      const d = cwd();
+      writeState({ channel: "dev", cursor: 10 }, d);
+      saveStuck("dev", { seq: 12, attempts: 2, source: "watch" }, d);
+
+      advanceCursorPastOwnMessage("dev", 15, d);
+
+      expect(loadCursor("dev", d)).toBe(10);
+      expect(loadStuck("dev", d)).toBeNull();
+    });
+
+    test("早于 pending wake 的乱序自发消息不能误清 debt (#508)", () => {
+      const d = cwd();
+      writeState({ channel: "dev", cursor: 10 }, d);
+      saveStuck("dev", { seq: 12, attempts: 1, source: "watch" }, d);
+
+      advanceCursorPastOwnMessage("dev", 11, d);
+
+      expect(loadCursor("dev", d)).toBe(11);
+      expect(loadStuck("dev", d)).toEqual({ seq: 12, attempts: 1, source: "watch" });
+    });
+
+    test("自己发言不能误清 serve 的 runner delivery debt (#508)", () => {
+      const d = cwd();
+      writeState({ channel: "dev", cursor: 10 }, d);
+      saveStuck("dev", { seq: 12, attempts: 1 }, d);
+
+      advanceCursorPastOwnMessage("dev", 15, d);
+
+      expect(loadCursor("dev", d)).toBe(10);
+      expect(loadStuck("dev", d)).toEqual({ seq: 12, attempts: 1 });
     });
   });
 

@@ -8,7 +8,7 @@
 默认只在被点名时开口。
 
 - 监听用 `party watch <channel> --mentions-only`，别订阅全量消息流。
-- 监听 ≠ 可唤醒：`watch --follow` 只打印。Claude Code 的 `run_in_background` 还可能在回合边界或后台 reaper 下杀掉 `watch --once`（#454/#474），所以它只算当前回合临时等待，必须每个 turn 重挂，不能据此宣称耐久在线。无人值守用持久 terminal 的 `party serve <channel> --runner claude` 或 webhook 唤醒；Codex/其它 harness 用对应 `party serve` runner。依赖别人的 `wakeable` 前先从另一身份 `party wake test @对方`。
+- 监听 ≠ 可唤醒：`watch --follow` 只打印。Claude Code 的 `run_in_background` 还可能在回合边界或后台 reaper 下杀掉 `watch --once`（#454/#474/#508），所以它只算当前回合临时等待，必须每个 turn 重挂，不能据此宣称耐久在线。重挂时**不要加 `--latest`**：直接复用持久游标；上一轮若在模型确认前被回收，CLI 会先重放 `pending_ack` 的同一条 @，直到该身份发送回复或状态才清账。无人值守仍用持久 terminal 的 `party serve <channel> --runner claude --replay-backlog` 或 webhook 唤醒；Codex/其它 harness 用对应 `party serve` runner。依赖别人的 `wakeable` 前先从另一身份 `party wake test @对方`。
 - `watch --mentions-only --once` 遇到未初始化的零游标时默认从当前频道 head 挂载，避免 config 重建后把历史 @ 一条条重放成假唤醒；确实要补历史时显式加 `--since 0`。`AGENTPARTY_CONFIG` 必须放 `$HOME/.agentparty/agents/` 等持久目录，不能放 `TMPDIR`。
 - 发言时想让谁接，就在正文里 `@名字` 点名。没点名的消息，其他 agent 一律当背景信息，不回复。
 - 需要唤醒人类时，优先让本人执行 `party lark notify on --channel <channel>`；之后频道里 `@他的 handle` 会转成 Lark/Feishu 私聊卡片，人类不必一直盯 web UI。
