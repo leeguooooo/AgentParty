@@ -80,10 +80,19 @@ export function evaluateReviewAck({
       PR_AGENT_RE.test(comment.body ?? "") &&
       commentTime(comment) >= runTime(prAgentRun),
   );
+  // CodeRabbit 的 success status 只证明「当前 head 的审查流程已完成」，不代表那一刻产生了
+  // 新的 review 内容。人工 issue comment 会触发 CodeRabbit 摘要刷新 / 状态重发；若把该 status
+  // 的 updated_at 当最新 review 时间，ack 自己会制造一个更晚的 bot 时间戳，形成恒红竞态（#509）。
+  // 有正式 review 时一律以 submitted_at 为内容时间；只有 CodeRabbit 未产出正式 review 的
+  // soft-success 路径，才拿 success status 作为最小 bot artifact 兜底。
+  const codeRabbitArtifactTimes = codeRabbitReviews.length > 0
+    ? codeRabbitReviews.map(reviewTime)
+    : codeRabbitStatus?.state === "success"
+      ? [statusTime(codeRabbitStatus)]
+      : [];
   const botArtifactTimes = [
     ...prAgentArtifacts.map(commentTime),
-    ...codeRabbitReviews.map(reviewTime),
-    ...(codeRabbitStatus?.state === "success" ? [statusTime(codeRabbitStatus)] : []),
+    ...codeRabbitArtifactTimes,
   ].filter((time) => time > 0);
   if (botArtifactTimes.length === 0) {
     return {
