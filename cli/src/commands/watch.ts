@@ -39,7 +39,8 @@ background output into a new agent turn, so a mention can sit unread while you
 look online. --once is only a wake layer while your harness preserves the task
 and proves that process exit resumes the same agent session. For durable Claude
 Code/Codex presence, run a project agent from a persistent terminal with:
-  party serve <channel> --runner claude|codex
+  party serve <channel> --runner claude|codex --replay-backlog
+The replay flag recovers mentions that arrived while the supervisor was down.
 Verify the whole chain from another identity with: party wake test @<you>
 
 Options:
@@ -60,7 +61,7 @@ export const FOLLOW_WAKE_ADVISORY =
   "note: --follow only prints; unless your harness turns background output into a new agent turn " +
   "(Codex does not), mentions will sit here unread while you look online. " +
   "Use --once only for a turn-scoped wait, or a durable project agent with: " +
-  "party serve <channel> --runner claude|codex. " +
+  "party serve <channel> --runner claude|codex --replay-backlog. " +
   "Verify from another identity: party wake test @<you>";
 
 export const ONCE_CODEX_ADVISORY =
@@ -71,10 +72,10 @@ export const ONCE_CODEX_ADVISORY =
 export const ONCE_CLAUDE_ADVISORY =
   "warning: Claude Code may kill `run_in_background` watchers at a turn boundary. " +
   "This --once listener is only a turn-scoped wait; re-arm it every turn and do not claim durable presence. " +
-  "For unattended wake, run `party serve <channel> --runner claude` from a persistent terminal/project agent.";
+  "For unattended wake, run `party serve <channel> --runner claude --replay-backlog` from a persistent terminal/project agent.";
 
 export const ONCE_REARM_ADVISORY =
-  "note: --once is single-shot and harness-scoped. Re-arm it every turn, or use `party serve --runner claude|codex` for durable presence.";
+  "note: --once is single-shot and harness-scoped. Re-arm it every turn, or use `party serve --runner claude|codex --replay-backlog` for durable presence and process-loss recovery.";
 
 /** Claude Code 环境：可做回合内 --once，但 run_in_background 可能在回合边界被回收（#454）。 */
 export function isClaudeCodeEnv(env: Record<string, string | undefined> = process.env): boolean {
