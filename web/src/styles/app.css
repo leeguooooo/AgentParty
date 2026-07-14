@@ -6539,3 +6539,30 @@
   flex: 1; min-width: 180px; padding: 4px 10px; border: 1.5px solid var(--t-border);
   background: var(--t-panel); color: var(--t-text); font: 12.5px var(--t-mono);
 }
+
+/* #504 增量B：任务卡色条 + 分组头 chip + 隐藏空分组，对齐设计的分组色条列表。 */
+.task-ledger-panel .task-board { display: flex; flex-direction: column; gap: 14px; }
+.task-ledger-panel .task-column:has(.task-column-empty) { display: none; } /* 空分组不显示（对齐设计） */
+.task-ledger-panel .task-column { border: 0; background: transparent; padding: 0; }
+.task-ledger-panel .task-column-head {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+  border: 0; padding: 0; background: transparent;
+}
+.task-ledger-panel .task-column-head::after { content: ""; flex: 1; border-top: 1.5px dashed var(--t-faint); }
+.task-ledger-panel .task-column-head > * { order: -1; }
+.task-ledger-panel .task-column-title, .task-ledger-panel .task-column-count {
+  display: inline-block; padding: 0 9px; border: 1.5px solid var(--t-border);
+  font: 600 12px/1.6 var(--t-mono); background: var(--t-panel2); white-space: nowrap;
+}
+.task-ledger-panel .task-list { display: flex; flex-direction: column; gap: 9px; list-style: none; margin: 0; padding: 0; }
+.task-ledger-panel .task-card {
+  position: relative; border: 1.6px solid var(--t-border); background: var(--t-panel);
+  box-shadow: 3px 3px 0 var(--d-shadow); border-left-width: 5px; padding: 9px 13px;
+}
+.task-ledger-panel .task-card--triage { border-left-color: var(--d-amber); }
+.task-ledger-panel .task-card--in_progress { border-left-color: var(--t-accent); }
+.task-ledger-panel .task-card--needs_review { border-left-color: var(--t-purple); }
+.task-ledger-panel .task-card--blocked { border-left-color: var(--t-link); }
+.task-ledger-panel .task-card--done { border-left-color: var(--t-green); }
+.task-ledger-panel .task-card--backlog,
+.task-ledger-panel .task-card--assigned { border-left-color: var(--t-dim); }
