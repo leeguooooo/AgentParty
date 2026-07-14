@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { MsgFrame, PresenceFrame } from "@agentparty/shared";
 import { channelReducer, initialChannelState } from "./state";
 
+const NOW_FOR_RETENTION = 1_725_000_000_000;
+
 function msgFrame(seq: number, body: string, over: Partial<MsgFrame> = {}): MsgFrame {
   return {
     type: "msg",
@@ -130,6 +132,20 @@ describe("channel state", () => {
       },
     });
     expect(s.mentionSenders.external).not.toHaveProperty("body");
+  });
+
+  test("mention sender snapshots older than 14 days are evicted on the next write", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    let s = channelReducer(initialChannelState, {
+      type: "frame",
+      frame: msgFrame(1, "old", { ts: NOW_FOR_RETENTION, sender: { name: "old-agent", kind: "agent" } }),
+    });
+    s = channelReducer(s, {
+      type: "frame",
+      frame: msgFrame(2, "new", { ts: NOW_FOR_RETENTION + 15 * DAY, sender: { name: "new-agent", kind: "agent" } }),
+    });
+
+    expect(Object.keys(s.mentionSenders)).toEqual(["new-agent"]);
   });
 
   test("read_cursor frame upserts monotonically; welcome snapshot seeds cursors", () => {

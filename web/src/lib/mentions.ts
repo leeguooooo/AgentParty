@@ -2,7 +2,7 @@
 // 分档的候选列表，供 Composer 的 @ 补全下拉用。"可 @" ≠ "在线连接"——本产品最特别的一档是
 // 「可唤醒」：人不在但 @ 了会被 serve/watch/webhook 拉起来。
 import { autoWakeReachable, type ChannelRoleAssignment, type ChannelSquad, type PresenceEntry, type Sender, type WakeKind } from "@agentparty/shared";
-import { mergeSenderIdentity, type SenderIdentitySnapshot } from "./senderIdentity";
+import { MENTION_SENDER_RETENTION_MS, mergeSenderIdentity, type SenderIdentitySnapshot } from "./senderIdentity";
 
 export type MentionTier = "online" | "wakeable" | "recent";
 
@@ -30,7 +30,7 @@ export interface MentionCandidate {
 const STALE_MS = 60_000; // 与 PRESENCE_TIMEOUT_MS 一致：serve/watch 超过即算 recent 而非可唤醒
 // 幽灵清理：只为防止频道长期累积几个月前的一次性 agent。设得宽松——几天前聊过的 agent
 // 仍是合理的 @/唤醒目标，不该被剔。真正的噪声（围观的人类会话）已由 kind/UUID 规则处理。
-const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面才视为幽灵
+const DEAD_MS = MENTION_SENDER_RETENTION_MS; // 14 天没露面才视为幽灵
 // 系统生成的人类会话名，永远不是有意义的 @ 目标：网页登录 token 默认名 = 纯 UUID；
 // OIDC 设备验证流 = login-verify-*。过渡期旧 presence 行没回填 kind 时靠名字把它们判为 human。
 const SYSTEM_HUMAN_SESSION_RE =
@@ -116,7 +116,12 @@ export function mentionCandidates(
       const identity = identityByName.get(name);
       const assigned = roleByName.get(name);
       const recentSender = recentSenderByName.get(name);
-      const account = identity?.account ?? assigned?.account ?? p?.account ?? recentSender?.owner;
+      const account =
+        identity?.account ??
+        assigned?.account ??
+        p?.account ??
+        participantByName.get(name)?.owner ??
+        recentSender?.owner;
       // 全局唯一昵称（handle）：有则用它做 @ 插入 token 和显示名。人类=account handle（UUID 会话名打不出来，
       // 只有 handle 能被后端识别为「被 @」）；agent=自设昵称（#165，可中文，其 ASCII name 由后端解析回填）。
       const identityHandle =
@@ -136,6 +141,7 @@ export function mentionCandidates(
               : name;
       const group = account ?? (kind === "human" ? "human sessions" : "unowned agents");
       return {
+        sourceName: name,
         name: handle ?? name,
         display,
         kind,
@@ -156,10 +162,10 @@ export function mentionCandidates(
         if (SYSTEM_HUMAN_SESSION_RE.test(c.name)) return c.account !== undefined && c.display !== c.name && c.display !== c.account;
         return c.account !== undefined || (c.display !== c.name && c.display !== c.account);
       }
-      if (roleByName.has(c.name)) return true;
-      if (identityByName.has(c.name)) return true;
-      if (recentMentionNames.has(c.name)) return true;
-      const p = presence[c.name];
+      if (roleByName.has(c.sourceName)) return true;
+      if (identityByName.has(c.sourceName)) return true;
+      if (recentMentionNames.has(c.sourceName) || recentMentionNames.has(c.name)) return true;
+      const p = presence[c.sourceName];
       const seen = p?.last_seen ?? p?.ts ?? 0;
       return now - seen <= DEAD_MS; // 幽灵清理：太久没露面的 agent 也剔除
     })
@@ -169,7 +175,8 @@ export function mentionCandidates(
       if (!SYSTEM_HUMAN_SESSION_RE.test(c.name)) return true;
       return c.account !== undefined && c.display !== c.name;
     })
-    .sort((a, b) => a.group.localeCompare(b.group) || rank[a.tier] - rank[b.tier] || a.display.localeCompare(b.display));
+    .sort((a, b) => a.group.localeCompare(b.group) || rank[a.tier] - rank[b.tier] || a.display.localeCompare(b.display))
+    .map(({ sourceName: _sourceName, ...candidate }) => candidate);
   const squadCandidates: MentionCandidate[] = squads
     .filter((squad) => squad.name !== self && squad.name !== "system")
     .map((squad) => ({

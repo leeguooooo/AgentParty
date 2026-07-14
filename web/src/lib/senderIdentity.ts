@@ -5,6 +5,8 @@ export interface SenderIdentitySnapshot {
   sender: Sender;
 }
 
+export const MENTION_SENDER_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
 /** 合并新旧协议混杂的 sender 快照：新身份字段优先，缺失/空串时保留旧值。 */
 export function mergeSenderIdentity(previous: Sender | undefined, next: Sender): Sender {
   return {

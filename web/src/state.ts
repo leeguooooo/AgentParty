@@ -2,7 +2,7 @@
 // 消息按 seq 去重排序；status 帧同时进时间线和 presence 快照；error 帧内联展示不做 toast。
 import type { ChannelMode, MsgFrame, PresenceEntry, ReadCursor, Sender, ServerFrame } from "@agentparty/shared";
 import type { FatalReason, SocketStatus } from "./lib/ws";
-import { mergeSenderIdentity, type SenderIdentitySnapshot } from "./lib/senderIdentity";
+import { MENTION_SENDER_RETENTION_MS, mergeSenderIdentity, type SenderIdentitySnapshot } from "./lib/senderIdentity";
 
 export interface ChannelState {
   self: string | null;
@@ -126,10 +126,15 @@ function rememberMentionSender(
   const sender = previousIsNewer
     ? mergeSenderIdentity(frame.sender, previous.sender)
     : mergeSenderIdentity(previous?.sender, frame.sender);
-  return {
+  const updated = {
     ...senders,
     [frame.sender.name]: { ts: previousIsNewer ? previous.ts : frame.ts, sender },
   };
+  let watermark = frame.ts;
+  for (const snapshot of Object.values(updated)) watermark = Math.max(watermark, snapshot.ts);
+  return Object.fromEntries(
+    Object.entries(updated).filter(([, snapshot]) => watermark - snapshot.ts <= MENTION_SENDER_RETENTION_MS),
+  );
 }
 
 function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {

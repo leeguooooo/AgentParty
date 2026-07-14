@@ -142,6 +142,49 @@ describe("mentionCandidates", () => {
     expect(filterCandidates(candidates, "evan").map((candidate) => candidate.name)).toEqual(["Evan_Clauder"]);
   });
 
+  test("participants-only agent uses its owner instead of falling into unowned agents (#499)", () => {
+    const candidates = mentionCandidates([
+      { name: "external-live", kind: "agent", owner: "lark:on_cross_company" },
+    ], {}, null, NOW);
+
+    expect(candidates[0]).toMatchObject({
+      name: "external-live",
+      account: "lark:on_cross_company",
+      group: "lark:on_cross_company",
+    });
+  });
+
+  test("participants-only human UUID remains readable through its owner (#499)", () => {
+    const uuid = "61ec302c-6c31-4bca-a1df-88152372f6d9";
+    const candidates = mentionCandidates([
+      { name: uuid, kind: "human", owner: "cross-owner@example.com" },
+    ], {}, null, NOW);
+
+    expect(candidates[0]).toMatchObject({
+      name: uuid,
+      display: "cross-owner@example.com",
+      account: "cross-owner@example.com",
+    });
+  });
+
+  test("recent raw sender stays retained when stale presence supplies a different current handle (#499)", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const messages = [message({ name: "external-session", kind: "agent", handle: "old-handle" })];
+    const pres = {
+      "external-session": presence({
+        name: "external-session",
+        kind: "agent",
+        handle: "new-handle",
+        last_seen: NOW - 15 * DAY,
+        ts: NOW - 15 * DAY,
+      }),
+    };
+
+    expect(mentionCandidates([], pres, null, NOW, [], [], [], messages)).toMatchObject([
+      { name: "new-handle", tier: "recent" },
+    ]);
+  });
+
   test("同名 sender 的稀疏新帧不会擦掉完整 owner/handle/display (#499)", () => {
     const complete = message({
       name: "cross-owner-session",
