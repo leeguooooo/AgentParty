@@ -194,6 +194,26 @@ describe("review-ack ordering gate (#460)", () => {
     expect(result.code).toBe("ack_after_reviews");
   });
 
+  test("CodeRabbit status/summary refresh caused by an issue-comment ack cannot make that ack stale (#509)", () => {
+    const result = evaluate({
+      statuses: [{ ...codeRabbitStatus[0], updated_at: "2026-07-13T10:04:00Z" }],
+      comments: [
+        prAgentGuide,
+        {
+          user: user("coderabbitai[bot]", "Bot"),
+          body: "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->",
+          created_at: "2026-07-13T10:00:00Z",
+          updated_at: "2026-07-13T10:05:00Z",
+        },
+        { user: user("maintainer"), body: "review-ack: valid findings fixed", created_at: "2026-07-13T10:03:00Z" },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.code).toBe("ack_after_reviews");
+    expect(result.latestBotReviewAt).toBe(Date.parse(codeRabbitReview.submitted_at));
+  });
+
   test("pr_agent endpoint failure does not block when its workflow completed without a comment", () => {
     const result = evaluate({
       comments: [
@@ -228,6 +248,17 @@ describe("review-ack ordering gate (#460)", () => {
   test("current-head CodeRabbit success status is a bot artifact even without a formal review", () => {
     const result = evaluate({ reviews: [], comments: [] });
     expect(result.code).toBe("missing_ack");
+  });
+
+  test("without a formal CodeRabbit review, the success status remains the fallback ordering artifact", () => {
+    const result = evaluate({
+      reviews: [],
+      comments: [
+        { user: user("maintainer"), body: "review-ack: after soft success", created_at: "2026-07-13T10:03:00Z" },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.latestBotReviewAt).toBe(Date.parse(codeRabbitStatus[0].updated_at));
   });
 
   test("never accepts an ack when no bot review artifact exists", () => {
