@@ -3770,7 +3770,10 @@ export function ChannelPage({
   const taskReviewCount = taskSummary?.needs_review ?? tasks.filter((task) => task.state === "needs_review").length;
   const taskBlockedCount = taskSummary?.blocked ?? tasks.filter((task) => task.state === "blocked").length;
   const taskMineCount = taskSummary?.mine ?? 0;
-  const agentPresence = agentPresenceSummary(Object.values(state.presence), state.participants);
+  const agentPresence = useMemo(
+    () => agentPresenceSummary(Object.values(state.presence), state.participants),
+    [state.participants, state.presence],
+  );
   const onlineAgentCount = agentPresence.online;
   // #504 团队面板博客风页签的角标：离线 agent 数 / 未认领分工数 / @我未读数。
   // 未认领复用 DivisionBoard 同款 unassignedMembers（assigned+self 之外的已连接成员），语义一致。

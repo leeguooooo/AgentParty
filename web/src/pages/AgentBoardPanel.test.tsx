@@ -4,7 +4,7 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { PresenceEntry, Sender, TaskRecord } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 
-const { AgentBoardPanel } = await import("./Channel");
+const { AgentBoardPanel, agentPresenceSummary } = await import("./Channel");
 
 function memoryStorage(seed: Record<string, string> = {}): Storage {
   const values = new Map<string, string>(Object.entries(seed));
@@ -172,6 +172,12 @@ describe("AgentBoardPanel (#187)", () => {
     expect(treeText(r.root.findByProps({ "data-status": "offline" }))).not.toContain("reconnected");
   });
 
+  test("human-only participant is excluded from every Agent lane (#514)", () => {
+    const txt = allText(render("en", [], [], [{ name: "human-owner", kind: "human" }]));
+    expect(txt).not.toContain("human-owner");
+    expect(txt).toContain("No agents yet");
+  });
+
   test("surfaces scheduling: paused agent with resume_at shows resume time (#187 排期)", () => {
     // 定时恢复：paused + resume_at → 本行展示「暂停至 HH:MM」，时间来自 presence.resume_at
     const at = new Date();
@@ -196,5 +202,28 @@ describe("AgentBoardPanel (#187)", () => {
     const txt = allText(render("en", p, [task(1, "carol", "in_progress")]));
     expect(txt).toContain("carol");
     expect(txt).not.toContain("paused");
+  });
+});
+
+describe("agentPresenceSummary (#514)", () => {
+  test("unions live agents, excludes humans, and keeps unmatched presence offline", () => {
+    const summary = agentPresenceSummary(
+      [
+        presence("reconnected", { state: "offline", live: false }),
+        presence("offline-agent", { state: "waiting", live: false }),
+        presence("human-presence", { kind: "human", live: true }),
+      ],
+      [
+        { name: "reconnected", kind: "agent" },
+        { name: "participant-only", kind: "agent" },
+        { name: "human-only", kind: "human" },
+        { name: "human-presence", kind: "human" },
+      ],
+    );
+
+    expect([...summary.agentNames].sort()).toEqual(["offline-agent", "participant-only", "reconnected"]);
+    expect([...summary.onlineNames].sort()).toEqual(["participant-only", "reconnected"]);
+    expect(summary.online).toBe(2);
+    expect(summary.offline).toBe(1);
   });
 });
