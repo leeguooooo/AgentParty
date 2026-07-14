@@ -1662,7 +1662,6 @@ export function TaskLedgerPanel({
   const t = useT();
   const [assignDrafts, setAssignDrafts] = useState<Record<number, string>>({});
   const [assignKinds, setAssignKinds] = useState<Record<number, TaskAssigneeKind>>({});
-  const [dragTaskId, setDragTaskId] = useState<number | null>(null);
   const [composerOpen, setComposerOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDesc, setNewDesc] = useState("");
@@ -1697,8 +1696,12 @@ export function TaskLedgerPanel({
     assigneeFilter === "all" ? tasks :
     assigneeFilter === "__unassigned__" ? tasks.filter((task) => task.assignee === null) :
     tasks.filter((task) => task.assignee?.name === assigneeFilter);
-  const tasksByState = new Map<TaskState, TaskRecord[]>(TASK_BOARD_STATES.map((state) => [state, []]));
-  for (const task of visibleTasks) tasksByState.get(task.state)?.push(task);
+  // 博客风：单条期刊 feed（最新记录在前），取代看板七列。onSetState 的全状态可达性由每张卡的状态下拉保留。
+  const feedTasks = [...visibleTasks].sort((a, b) => (b.created_at - a.created_at) || (b.id - a.id));
+  // 统计条三项（进行中 / 待处理 / 已完成），基于全量台账；待处理 = 既非进行中也非已完成的其余状态之和。
+  const statInProgress = counts["in_progress"] ?? 0;
+  const statDone = counts["done"] ?? 0;
+  const statPending = tasks.length - statInProgress - statDone;
   const disabled = loading || !canWrite;
   const stateLabel = (state: TaskState) => t(`Channel.tasks.state.${state}`);
   const submitNewTask = (event: { preventDefault: () => void }) => {
@@ -1718,31 +1721,26 @@ export function TaskLedgerPanel({
     const assignDraft = assignDrafts[task.id] ?? task.assignee?.name ?? "";
     const assignKind = assignKinds[task.id] ?? task.assignee?.kind ?? "agent";
     const reviewSeq = taskCompletionSeq(task);
+    // 博客风：meta 行的署名优先受理人，无受理人时退回创建者（对应设计稿 @name）。
+    const byline = task.assignee?.name ?? task.created_by;
     return (
-      <li
-        key={task.id}
-        className={"task-card" + (dragTaskId === task.id ? " is-dragging" : "")}
-        draggable={!disabled && !taskBusy}
-        onDragStart={(event) => {
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", String(task.id));
-          setDragTaskId(task.id);
-        }}
-        onDragEnd={() => setDragTaskId(null)}
-      >
-        <div className="task-card-main">
-          <span className="t-mono task-id">#{task.id}</span>
-          <button
-            type="button"
-            className="task-card-title"
-            aria-label={t("Channel.tasks.detailOpenAria", { id: task.id })}
-            onClick={() => setDetailTaskId(task.id)}
-          >
-            <strong>{task.title}</strong>
-          </button>
-          <span className={`t-mono task-state task-state--${task.state}`}>{stateLabel(task.state)}</span>
+      <li key={task.id} className="task-card task-journal-article">
+        <div className="t-mono task-journal-meta-row">
+          <span className="task-journal-ref">{t("Channel.tasks.journalRef", { id: task.id })}</span>
+          <span className="task-journal-dot" aria-hidden="true">·</span>
+          <time className="task-journal-date">{fmtTime(task.created_at)}</time>
+          <span className="task-journal-dot" aria-hidden="true">·</span>
+          <span className="task-journal-byline">@{byline}</span>
         </div>
-        {task.desc !== null && <p className="task-card-desc">{task.desc}</p>}
+        <button
+          type="button"
+          className="task-card-title task-journal-headline"
+          aria-label={t("Channel.tasks.detailOpenAria", { id: task.id })}
+          onClick={() => setDetailTaskId(task.id)}
+        >
+          <strong>{task.title}</strong>
+        </button>
+        {task.desc !== null && <p className="task-card-desc task-journal-excerpt">{task.desc}</p>}
         {task.attachments !== undefined && task.attachments.length > 0 && (
           <AttachmentList attachments={task.attachments} />
         )}
@@ -1752,14 +1750,16 @@ export function TaskLedgerPanel({
             <AttachmentList attachments={[task.solution]} />
           </section>
         )}
-        <div className="task-card-meta">
-          <span className="t-mono">P{task.priority}</span>
-          {task.assignee !== null && <span className="t-mono">@{task.assignee.name}</span>}
-          {task.parent_id !== null && <span className="t-mono">{t("Channel.tasks.meta.parent", { id: task.parent_id })}</span>}
-          {task.anchor_seqs.map((seq) => <span key={seq} className="t-mono">{t("Channel.tasks.meta.msg", { seq })}</span>)}
-          {task.labels.map((label) => <span key={label} className="t-mono task-label">{label}</span>)}
+        <div className="task-journal-footer">
+          <div className="task-journal-tags">
+            {task.labels.map((label) => <span key={label} className="t-mono task-label task-journal-tag">{label}</span>)}
+            <span className="t-mono task-journal-fact">P{task.priority}</span>
+            {task.parent_id !== null && <span className="t-mono task-journal-fact">{t("Channel.tasks.meta.parent", { id: task.parent_id })}</span>}
+            {task.anchor_seqs.map((seq) => <span key={seq} className="t-mono task-journal-fact">{t("Channel.tasks.meta.msg", { seq })}</span>)}
+          </div>
+          <span className={`t-mono task-state task-state--${task.state} task-journal-status`}>{stateLabel(task.state)}</span>
         </div>
-        <div className="task-card-actions">
+        <div className="task-card-actions task-journal-actions">
           <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "in_progress"} onClick={() => onSetState(task.id, "in_progress")}>
             {t("Channel.tasks.action.claim")}
           </button>
@@ -1769,6 +1769,21 @@ export function TaskLedgerPanel({
           <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "done"} onClick={() => onSetState(task.id, "done")}>
             {t("Channel.tasks.action.done")}
           </button>
+          {/* 看板拖拽转状态改成博客风后没有列可拖，用状态下拉保留「移到任意状态」的能力（含 triage/backlog/assigned/needs_review） */}
+          <select
+            className="task-journal-move t-mono"
+            aria-label={t("Channel.tasks.moveAria", { id: task.id })}
+            disabled={disabled || taskBusy}
+            value={task.state}
+            onChange={(event) => {
+              const next = event.currentTarget.value as TaskState;
+              if (next !== task.state) onSetState(task.id, next);
+            }}
+          >
+            {TASK_BOARD_STATES.map((state) => (
+              <option key={state} value={state}>{stateLabel(state)}</option>
+            ))}
+          </select>
           {reviewSeq !== null && (
             <>
               <button className="task-action-btn task-action-btn--review" type="button" disabled={disabled || taskBusy} onClick={() => onReview(task, "approve")}>
@@ -1856,6 +1871,25 @@ export function TaskLedgerPanel({
           <option key={identity.name} value={identity.name}>{identity.display}</option>
         ))}
       </datalist>
+      {/* 博客风头部：居中衬线标题 + 斜体副标题，底部实线分隔（视觉皮，纯展示） */}
+      <header className="task-journal-masthead">
+        <h2 className="task-journal-title">{t("Channel.tasks.journalTitle")}</h2>
+        <p className="task-journal-subtitle">{t("Channel.tasks.journalSubtitle")}</p>
+      </header>
+      <div className="task-journal-stats">
+        <div className="task-journal-stat">
+          <span className="task-journal-stat-num">{statInProgress}</span>
+          <span className="task-journal-stat-label">{t("Channel.tasks.stat.inProgress")}</span>
+        </div>
+        <div className="task-journal-stat">
+          <span className="task-journal-stat-num">{statPending}</span>
+          <span className="task-journal-stat-label">{t("Channel.tasks.stat.pending")}</span>
+        </div>
+        <div className="task-journal-stat">
+          <span className="task-journal-stat-num">{statDone}</span>
+          <span className="task-journal-stat-label">{t("Channel.tasks.stat.done")}</span>
+        </div>
+      </div>
       <header className="task-ledger-head">
         <p className="t-mono task-ledger-total">{t("Channel.tasks.total", { count: tasks.length })}</p>
         <div className="task-ledger-head-actions">
@@ -1965,53 +1999,16 @@ export function TaskLedgerPanel({
           </div>
         </form>
       )}
-      {Object.keys(counts).length > 0 && (
-        <div className="task-ledger-counts">
-          {Object.entries(counts).map(([state, count]) => (
-            <span key={state} className={`t-mono task-state task-state--${state}`}>{stateLabel(state as TaskState)} {count}</span>
-          ))}
-        </div>
-      )}
       {error !== null && <p className="banner banner--red">{error}</p>}
       {actionError !== null && <p className="banner banner--red">{actionError}</p>}
       {tasks.length === 0 && error === null ? (
         <p className="charter-empty">{t("Channel.tasks.empty")}</p>
+      ) : feedTasks.length === 0 ? (
+        <p className="t-mono task-column-empty">{t("Channel.tasks.columnEmpty")}</p>
       ) : (
-        <div className="task-board" role="list" aria-label={t("Channel.tasks.boardAria")}>
-          {TASK_BOARD_STATES.map((state) => {
-            const columnTasks = tasksByState.get(state) ?? [];
-            return (
-              <section
-                key={state}
-                className={"task-column" + (dragTaskId !== null ? " task-column--drop" : "")}
-                aria-label={t("Channel.tasks.columnAria", { state: stateLabel(state) })}
-                onDragOver={(event) => {
-                  if (dragTaskId !== null && !disabled) event.preventDefault();
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  const rawId = event.dataTransfer.getData("text/plain");
-                  const id = Number.parseInt(rawId, 10);
-                  setDragTaskId(null);
-                  if (!Number.isInteger(id) || disabled) return;
-                  const task = tasks.find((item) => item.id === id);
-                  if (task === undefined || task.state === state) return;
-                  onSetState(id, state);
-                }}
-              >
-                <header className="task-column-head">
-                  <span className={`t-mono task-state task-state--${state}`}>{stateLabel(state)}</span>
-                  <span className="t-mono task-column-count">{columnTasks.length}</span>
-                </header>
-                {columnTasks.length === 0 ? (
-                  <p className="t-mono task-column-empty">{t("Channel.tasks.columnEmpty")}</p>
-                ) : (
-                  <ol className="task-list">{columnTasks.map(renderTask)}</ol>
-                )}
-              </section>
-            );
-          })}
-        </div>
+        <ol className="task-journal-feed" role="list" aria-label={t("Channel.tasks.boardAria")}>
+          {feedTasks.map(renderTask)}
+        </ol>
       )}
       {detailTask !== null && (
         <div
