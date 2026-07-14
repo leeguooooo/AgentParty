@@ -49,6 +49,11 @@ async function hmacHex(secret: string, body: string): Promise<string> {
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+async function sha256Hex(body: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function sendMessage(slug: string, token: string, body: string, mentions: string[] = []) {
   return api(`/api/channels/${slug}/messages`, token, {
     method: "POST",
@@ -267,7 +272,10 @@ describe("webhooks", () => {
 
     expect(headers.authorization).toBe(`Bearer ${secret}`);
     expect(headers["content-type"]).toBe("application/json");
-    expect(headers["x-agentparty-signature"]).toBe(`hmac-sha256=${await hmacHex(secret, body)}`);
+    const signature = await hmacHex(secret, body);
+    expect(headers["x-agentparty-signature"]).toBe(`hmac-sha256=${signature}`);
+    expect(headers["x-webhook-signature"]).toBe(signature);
+    expect(headers["x-request-id"]).toBe(`agentparty-${await sha256Hex(body)}`);
     expect(await queueRows(slug)).toHaveLength(0);
   });
 
@@ -312,7 +320,10 @@ describe("webhooks", () => {
       channel: slug,
     });
     expect(headers.authorization).toBe(`Bearer ${secret}`);
-    expect(headers["x-agentparty-signature"]).toBe(`hmac-sha256=${await hmacHex(secret, body)}`);
+    const signature = await hmacHex(secret, body);
+    expect(headers["x-agentparty-signature"]).toBe(`hmac-sha256=${signature}`);
+    expect(headers["x-webhook-signature"]).toBe(signature);
+    expect(headers["x-request-id"]).toBe(`agentparty-${await sha256Hex(body)}`);
     expect(await queueRows(slug)).toHaveLength(0);
   });
 
@@ -452,14 +463,33 @@ describe("webhooks", () => {
         .status,
     ).toBe(201);
 
-    // 没有 interceptor + disableNetConnect：立即投递失败 → 入队 attempts=1
+    const captured: CapturedRequest[] = [];
+    fetchMock
+      .get("https://down.test")
+      .intercept({ path: "/wake", method: "POST" })
+      .reply(503, (opts) => {
+        captured.push(normalize(opts as { headers?: unknown; body?: unknown }));
+        return "temporarily unavailable";
+      });
+
+    // 首投 503 → 入队 attempts=1
     expect((await sendMessage(slug, token, "@hermes ping", ["hermes"])).status).toBe(200);
     let rows = await queueRows(slug);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ webhook_name: "hermes", attempts: 1 });
 
-    // 到期后 alarm 重投成功 → 队列清空
-    fetchMock.get("https://down.test").intercept({ path: "/wake", method: "POST" }).reply(200, "ok");
+    // 同名注册轮换 secret；同一 payload 的重试 ID 必须保持不变，HMAC/Bearer 则使用新 secret。
+    expect(
+      (await addWebhook(slug, token, { name: "hermes", url: "https://down.test/wake", secret: "rotated" }))
+        .status,
+    ).toBe(201);
+    fetchMock
+      .get("https://down.test")
+      .intercept({ path: "/wake", method: "POST" })
+      .reply(200, (opts) => {
+        captured.push(normalize(opts as { headers?: unknown; body?: unknown }));
+        return "ok";
+      });
     const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
     await runInDurableObject(stub, async (instance: ChannelDO, state) => {
       state.storage.sql.exec("UPDATE webhook_queue SET next_retry_at = ?", Date.now() - 1);
@@ -467,6 +497,14 @@ describe("webhooks", () => {
     });
     rows = await queueRows(slug);
     expect(rows).toHaveLength(0);
+    expect(captured).toHaveLength(2);
+    expect(captured[1]!.body).toBe(captured[0]!.body);
+    expect(captured[1]!.headers["x-request-id"]).toBe(captured[0]!.headers["x-request-id"]);
+    expect(captured[0]!.headers.authorization).toBe("Bearer s");
+    expect(captured[1]!.headers.authorization).toBe("Bearer rotated");
+    expect(captured[1]!.headers["x-webhook-signature"]).toBe(
+      await hmacHex("rotated", captured[1]!.body),
+    );
   });
 
   it("drops after 3 failed retries and posts a system status to the channel", async () => {

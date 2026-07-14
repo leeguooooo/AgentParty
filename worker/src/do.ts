@@ -75,6 +75,7 @@ import {
   type WorkflowKind,
 } from "@agentparty/shared";
 import { parseAttachments, parseStoredAttachments } from "./attachments";
+import { sha256Hex } from "./auth";
 import { Server, type Connection, type ConnectionContext, type WSMessage } from "partyserver";
 
 interface ConnState {
@@ -2428,6 +2429,7 @@ export class ChannelDO extends Server<Env> {
   private async deliverWebhook(url: string, secret: string, payload: string): Promise<WebhookDeliveryResult> {
     try {
       const signature = await hmacSha256Hex(secret, payload);
+      const requestId = await sha256Hex(payload);
       const res = await fetch(url, {
         method: "POST",
         body: payload,
@@ -2435,6 +2437,13 @@ export class ChannelDO extends Server<Env> {
           "content-type": "application/json",
           authorization: `Bearer ${secret}`,
           "x-agentparty-signature": `hmac-sha256=${signature}`,
+          // Hermes Agent's generic webhook adapter accepts the same HMAC as a
+          // raw hex digest. Keep AgentParty's namespaced header as the primary
+          // contract and send the compatibility header alongside it.
+          "x-webhook-signature": signature,
+          // Derived only from the immutable payload: stable across retries and
+          // webhook secret rotation, so Hermes starts at most one agent turn.
+          "x-request-id": `agentparty-${requestId}`,
         },
         redirect: "manual",
         signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),

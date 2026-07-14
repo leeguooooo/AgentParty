@@ -6,7 +6,9 @@ import { join, sep } from "node:path";
 import {
   createBuiltinRunner,
   createSdkRunner,
+  projectAgentCleanupCommand,
   projectAgentChildName,
+  projectAgentReadyNote,
   pendingWakeDepth,
   run as runServeCommand,
   runProfileServe,
@@ -1243,6 +1245,34 @@ describe("builtin runner", () => {
 });
 
 describe("project profile daemon", () => {
+  test("shell-quotes cleanup branches and sanitizes user-visible ready fields", () => {
+    expect(projectAgentCleanupCommand("main'; echo pwn")).toBe(
+      "party worktree prune --base 'main'\\''; echo pwn' --remote --yes",
+    );
+    const note = projectAgentReadyNote(
+      {
+        owner_account: "fan@example.com",
+        handle: "herness-dev",
+        name: "Herness Dev",
+        runner: "codex-sdk",
+        repo_url: `https://example.test/repo\x1b[31m\nforged${"x".repeat(300)}`,
+        workdir: null,
+        base_branch: "main\nforged",
+        worktree_strategy: "branch",
+        rules: null,
+        invitable_by: "anyone",
+        created_at: 1,
+        updated_at: 1,
+      },
+      "alpha\nforged",
+      { runnerWorkdir: "/tmp/runner", channelWorkdir: "/tmp/repo\x1b]8;;https://evil\x07\nforged" },
+    );
+    expect(note).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(note).toContain("channel=#alpha forged");
+    expect(note).toContain("base=main forged");
+    expect(note).not.toContain("x".repeat(241));
+  });
+
   test("one resident daemon fans out to invited channels with scoped child tokens and distinct sessions", async () => {
     const home = tempDir();
     const oldHome = process.env.AGENTPARTY_HOME;
@@ -1322,6 +1352,11 @@ describe("project profile daemon", () => {
     await Promise.all(served.map((o) => o.refreshAvailableUpgrade?.(null)));
     expect(upgradeProbes).toBe(1);
     expect(new Set(served.map((o) => o.projectAgent?.channel_workdir)).size).toBe(3);
+    expect(served.every((o) => o.projectAgent?.delivery_workflow.steps.join("->") ===
+      "work_in_channel_worktree->create_pull_request->report_pull_request_url_in_channel->verify_deployment->prune_merged_worktree")).toBe(true);
+    expect(served.every((o) => o.projectAgent?.delivery_workflow.cleanup_command ===
+      "party worktree prune --base 'main' --remote --yes")).toBe(true);
+    expect(served.every((o) => o.projectAgent?.delivery_workflow.cleanup_guard.includes("dirty or unmerged"))).toBe(true);
     expect(channelRuntimeCalls).toEqual([
       { slug: "alpha", childName: projectAgentChildName("herness-dev", "alpha") },
       { slug: "beta", childName: projectAgentChildName("herness-dev", "beta") },
@@ -1336,6 +1371,7 @@ describe("project profile daemon", () => {
     expect(String((posts[0]!.body as { note: string }).note)).toContain("front agent ready");
     expect(String((posts[0]!.body as { note: string }).note)).toContain("team=herness-dev");
     expect(String((posts[0]!.body as { note: string }).note)).toContain("worktree=branch");
+    expect(String((posts[0]!.body as { note: string }).note)).toContain("delivery=worktree->PR->channel-link->deploy-verify->safe-prune");
     expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("front agent"))).toBe(true);
     expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("workers should spawn under team herness-dev"))).toBe(true);
   });

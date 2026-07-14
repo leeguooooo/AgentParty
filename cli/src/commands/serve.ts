@@ -109,6 +109,23 @@ const DEFAULT_TASK_HEARTBEAT_MS = 15_000;
 const MAX_CONSECUTIVE_WAKE_ABANDONS = 3;
 const BLOCKED_ERROR_MAX = 300;
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function projectAgentCleanupCommand(baseBranch: string): string {
+  return `party worktree prune --base ${shellQuote(baseBranch)} --remote --yes`;
+}
+
+function readyNoteField(value: string, maxLength: number): string {
+  return value
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
 function sanitizeBlockedError(error: string): string {
   const compact = error
     .replace(/\b(?:ap|acc|ref)_[A-Za-z0-9._-]+\b/gi, "[redacted]")
@@ -239,6 +256,17 @@ export interface ProjectAgentRunContext {
   rules: string | null;
   channel_workdir: string;
   runner_workdir: string;
+  delivery_workflow: {
+    steps: readonly [
+      "work_in_channel_worktree",
+      "create_pull_request",
+      "report_pull_request_url_in_channel",
+      "verify_deployment",
+      "prune_merged_worktree",
+    ];
+    cleanup_command: string;
+    cleanup_guard: string;
+  };
 }
 
 export interface WakeContextAttachment extends Attachment {
@@ -1400,6 +1428,17 @@ function profileContext(profile: ProjectAgentProfile, prepared: PreparedProfileW
     rules: profile.rules,
     channel_workdir: prepared.channelWorkdir,
     runner_workdir: prepared.runnerWorkdir,
+    delivery_workflow: {
+      steps: [
+        "work_in_channel_worktree",
+        "create_pull_request",
+        "report_pull_request_url_in_channel",
+        "verify_deployment",
+        "prune_merged_worktree",
+      ],
+      cleanup_command: projectAgentCleanupCommand(profile.base_branch),
+      cleanup_guard: "run only after deployment is verified; dirty or unmerged worktrees must be preserved",
+    },
   };
 }
 
@@ -1419,9 +1458,12 @@ export function projectAgentChildName(handle: string, channel: string): string {
   return `${cleanHandle.slice(0, 24)}-${cleanChannel.slice(0, 24)}-${suffix}`.slice(0, 64);
 }
 
-function profileReadyNote(profile: ProjectAgentProfile, channel: string, prepared: PreparedProfileWorkspace): string {
-  const project = profile.repo_url ?? profile.workdir ?? "local";
-  return `front agent ready: ${profile.owner_account}/${profile.handle} channel=#${channel} team=${profile.handle} project=${project} base=${profile.base_branch} worktree=${profile.worktree_strategy} cwd=${prepared.channelWorkdir}`;
+export function projectAgentReadyNote(profile: ProjectAgentProfile, channel: string, prepared: PreparedProfileWorkspace): string {
+  const channelLabel = readyNoteField(channel, 64);
+  const project = readyNoteField(profile.repo_url ?? profile.workdir ?? "local", 240);
+  const baseBranch = readyNoteField(profile.base_branch, 128);
+  const channelWorkdir = readyNoteField(prepared.channelWorkdir, 512);
+  return `front agent ready: ${profile.owner_account}/${profile.handle} channel=#${channelLabel} team=${profile.handle} project=${project} base=${baseBranch} worktree=${profile.worktree_strategy} cwd=${channelWorkdir} delivery=worktree->PR->channel-link->deploy-verify->safe-prune`;
 }
 
 export async function runProfileServe(opts: ProfileServeOptions): Promise<number> {
@@ -1495,7 +1537,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       refreshAvailableUpgrade: sharedRefreshAvailableUpgrade,
       upgradeProbeIntervalMs,
       advertise: async () => {
-        const note = profileReadyNote(profile, channel, prepared);
+        const note = projectAgentReadyNote(profile, channel, prepared);
         await post(opts.server, child.token, channel, {
           kind: "status",
           state: "waiting",
