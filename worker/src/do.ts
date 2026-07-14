@@ -153,8 +153,19 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   not_found: 404,
 };
 
-// presence 扫描周期（spec §5：60s 无帧判 offline）
-export const PRESENCE_SCAN_MS = PRESENCE_TIMEOUT_MS;
+// presence 扫描 / 半开连接回收窗口（#487 降本）。
+// 背景：Durable Objects Compute 是账单最大头（$37.50/68%），根因是每个有连接的频道 DO 被这个 alarm
+// 24/7 每分钟唤醒一次。WS Hibernation 已开，健康连接的 ping 由 auto-response 处理、不唤醒 DO；alarm 唯一
+// 的活是「醒来看看有没有连接超时静默（半开）需要回收」。把回收窗口与 alarm 重挂间隔从 60s 拉到 2× =
+// 120s，并改成按连接实际到期时刻自适应重挂（见 scheduleNextAlarm），把每频道唤醒频率砍半。
+//
+// 与 PRESENCE_TIMEOUT_MS 的分工：
+//   • PRESENCE_TIMEOUT_MS(60s) —— **面向客户端的时间戳新鲜度口径**（host 租约 / wakeReachable，只看
+//     presence.last_seen / ts）。本次不动，host failover / 可唤醒判定语义完全不变。
+//   • PRESENCE_SCAN_MS(120s)   —— **服务端回收半开 WS 连接的静默阈值 + alarm 重挂间隔**。客户端每 25s
+//     ping（cli/web 一致），健康连接永远够不到 120s 静默，不会误回收；真半开的连接在其最后一次 ping 后
+//     ≤PRESENCE_SCAN_MS + 一个 ping 间隔内被标 offline（#487 验收：≤2× 新间隔，自适应下实测≈1×）。
+export const PRESENCE_SCAN_MS = 2 * PRESENCE_TIMEOUT_MS;
 
 const STATUS_STATES: readonly string[] = ["working", "waiting", "blocked", "done"];
 const COLLAB_ROLES: readonly string[] = ["host", "worker", "reviewer", "observer"];
@@ -1490,7 +1501,8 @@ export class ChannelDO extends Server<Env> {
       read_cursors: this.readCursors(),
     });
     this.broadcastFrame({ type: "participants", participants: this.participants() });
-    // 只前移不后移：即便已有远期 alarm（temp 归档 +14 天 / webhook 重试）也保证 60s presence 扫描
+    // 只前移不后移：即便已有远期 alarm（temp 归档 +14 天 / webhook 重试）也保证 presence 扫描按期到来。
+    // 新连接此刻刚握手（lastSeen=now），最早也要 PRESENCE_SCAN_MS 静默才可能被判半开，故排到 now+窗口即可。
     await this.ensureAlarmAt(Date.now() + PRESENCE_SCAN_MS);
   }
 
@@ -1663,8 +1675,10 @@ export class ChannelDO extends Server<Env> {
     // 同名 serve 跨机租约（#99）：持租者/候选断连 → 重选，让下一条 standby 顶上（补发 held=true）。
     // 排除正在关闭的这条（getConnections 可能仍返回它）。非 serve 连接不触发。
     if (st.serveCandidate) this.reconcileServeLease(st.name, connection.id);
+    // 被移除成员的残连关闭去抖：窗口口径按 presence 新鲜度基准（60s），与 #487 拉长的扫描间隔无关，
+    // 保持既有语义不变——避免把回收 alarm 的间隔耦合进「移除后多久内的残连关闭要抹掉 presence」。
     const removedAt = Number(this.getMeta(this.removedPresenceKey(st.name)) ?? "");
-    if (Number.isInteger(removedAt) && Date.now() - removedAt < PRESENCE_SCAN_MS) {
+    if (Number.isInteger(removedAt) && Date.now() - removedAt < PRESENCE_TIMEOUT_MS) {
       this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", st.name);
       this.broadcastFrame({ type: "participants", participants: this.participants() });
       return;
@@ -1676,12 +1690,12 @@ export class ChannelDO extends Server<Env> {
   // alarm 三件套（spec §6/§13）：presence 扫描 → webhook 重试 → temp 归档检查，最后按最近到期时间续排
   async onAlarm() {
     const now = Date.now();
-    const live = this.scanPresence(now);
+    const scan = this.scanPresence(now);
     this.resumeDuePauses(now);
     await this.retryWebhooks(now);
     await this.checkTempArchive(now);
     await this.pruneStorage(now);
-    await this.scheduleNextAlarm(now, live);
+    await this.scheduleNextAlarm(now, scan);
   }
 
   // #128：DO 存储有界修剪。wake_delivery_ledger / message_audit / read_cursor 此前只增不减，
@@ -1794,16 +1808,23 @@ export class ChannelDO extends Server<Env> {
     }
   }
 
-  // spec §5：60s 无帧（ping 由 auto-response 记时间戳）判 offline，返回存活连接数
-  private scanPresence(now: number): number {
+  // #487：静默超过 PRESENCE_SCAN_MS（120s）的半开连接判 offline 并回收；ping 由 auto-response 盖时间戳、
+  // 不唤醒 DO。返回存活连接数 + 最早一条存活连接的 last 活动时刻（earliestSeen），供 scheduleNextAlarm 按
+  // 「最早到期」自适应重挂 alarm——只在真有连接可能超时的那一刻醒来，而非固定每分钟空转。
+  private scanPresence(now: number): { live: number; earliestSeen: number | null } {
     const stale: Connection<ConnState>[] = [];
     let live = 0;
+    let earliestSeen: number | null = null;
     for (const connection of this.getConnections<ConnState>()) {
       const st = connection.state;
       const pinged = this.ctx.getWebSocketAutoResponseTimestamp(connection)?.getTime() ?? 0;
       const last = Math.max(pinged, st?.lastSeen ?? 0);
-      if (now - last >= PRESENCE_TIMEOUT_MS) stale.push(connection);
-      else live++;
+      if (now - last >= PRESENCE_SCAN_MS) {
+        stale.push(connection);
+      } else {
+        live++;
+        if (earliestSeen === null || last < earliestSeen) earliestSeen = last;
+      }
     }
     // 同名 serve 跨机租约（#99）：心跳超时的持租者，其连接在这里被关；关掉后要重选租约让 standby 顶上。
     const staleServeNames = new Set<string>();
@@ -1819,7 +1840,7 @@ export class ChannelDO extends Server<Env> {
     if (stale.length > 0) {
       this.broadcastFrame({ type: "participants", participants: this.participants() });
     }
-    return live;
+    return { live, earliestSeen };
   }
 
   // 队列里到期的重投一轮：成功删行，失败退避 1/4/16 分钟，超过 3 次丢弃并向频道记一条 status
@@ -2040,10 +2061,16 @@ export class ChannelDO extends Server<Env> {
     }
   }
 
-  // 三个来源里最近的下一个到期时间：presence 扫描 / webhook 重试 / temp 归档
-  private async scheduleNextAlarm(now: number, live: number) {
+  // 各来源里最近的下一个到期时间：presence 扫描 / webhook 重试 / paused 恢复 / temp 归档 / retention 修剪。
+  // #487：presence 候选从固定 `now + PRESENCE_SCAN_MS` 改为 `earliestSeen + PRESENCE_SCAN_MS`——即最早一条
+  // 存活连接真正可能跨过静默阈值的时刻。健康连接每 25s ping、last 紧贴当下，到期约在 now+95~120s，等于把
+  // 空转的每分钟唤醒拉到近两分钟一次（无连接则彻底不排，让 DO 睡到别的 candidate）。webhook/paused/temp/
+  // retention 候选一律照旧，各自的 alarm 用途不受影响（#180 / #128 / temp 归档仍按点触发）。
+  private async scheduleNextAlarm(now: number, scan: { live: number; earliestSeen: number | null }) {
     const candidates: number[] = [];
-    if (live > 0) candidates.push(now + PRESENCE_SCAN_MS);
+    if (scan.live > 0 && scan.earliestSeen !== null) {
+      candidates.push(scan.earliestSeen + PRESENCE_SCAN_MS);
+    }
     const next = this.ctx.storage.sql
       .exec("SELECT MIN(next_retry_at) AS t FROM webhook_queue")
       .one();
