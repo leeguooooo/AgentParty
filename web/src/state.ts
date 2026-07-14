@@ -2,6 +2,7 @@
 // 消息按 seq 去重排序；status 帧同时进时间线和 presence 快照；error 帧内联展示不做 toast。
 import type { ChannelMode, MsgFrame, PresenceEntry, ReadCursor, Sender, ServerFrame } from "@agentparty/shared";
 import type { FatalReason, SocketStatus } from "./lib/ws";
+import { mergeSenderIdentity } from "./lib/senderIdentity";
 
 export interface ChannelState {
   self: string | null;
@@ -117,17 +118,7 @@ function replaceMessage(messages: MsgFrame[], msg: MsgFrame): MsgFrame[] {
 
 function rememberMentionSender(senders: Record<string, MsgFrame>, frame: MsgFrame): Record<string, MsgFrame> {
   const previous = senders[frame.sender.name];
-  const sender: Sender = {
-    ...frame.sender,
-    owner: frame.sender.owner || previous?.sender.owner,
-    lineage: frame.sender.lineage ?? previous?.sender.lineage,
-    handle: frame.sender.handle || previous?.sender.handle,
-    display_name: frame.sender.display_name || previous?.sender.display_name,
-    avatar_url: frame.sender.avatar_url || previous?.sender.avatar_url,
-    avatar_thumb: frame.sender.avatar_thumb || previous?.sender.avatar_thumb,
-    client_version: frame.sender.client_version || previous?.sender.client_version,
-    connection_count: frame.sender.connection_count ?? previous?.sender.connection_count,
-  };
+  const sender = mergeSenderIdentity(previous?.sender, frame.sender);
   // 上翻加载老页时不把 last-seen 时间倒退，但可用老帧补齐稀疏身份字段。
   const latest = previous !== undefined && previous.ts > frame.ts ? previous : frame;
   return { ...senders, [frame.sender.name]: { ...latest, sender } };

@@ -38,6 +38,36 @@ describe("channel state", () => {
     expect(revised.messages[0]).toMatchObject({ seq: 6, body: "edited", edited: true });
   });
 
+  test("message_update replaces the message and refreshes the stable mention sender snapshot", () => {
+    const original = msgFrame(6, "original", {
+      sender: { name: "external", kind: "agent", owner: "lark:on_cross" },
+    });
+    const first = channelReducer(initialChannelState, { type: "frame", frame: original });
+    const edited = msgFrame(6, "edited", {
+      sender: { name: "external", kind: "agent", handle: "external-handle" },
+      edited: true,
+      edited_at: original.ts + 1,
+      edited_by: "external",
+    });
+    const revised = channelReducer(first, {
+      type: "frame",
+      frame: {
+        type: "message_update",
+        target_seq: 6,
+        action: "edit",
+        actor: { name: "external", kind: "agent" },
+        ts: edited.ts,
+        message: edited,
+      },
+    });
+
+    expect(revised.messages[0]).toMatchObject({ seq: 6, body: "edited", edited: true });
+    expect(revised.mentionSenders.external).toMatchObject({
+      seq: 6,
+      sender: { name: "external", owner: "lark:on_cross", handle: "external-handle" },
+    });
+  });
+
   test("prepending an older page keeps messages sorted and deduped (IM scroll-up)", () => {
     let s = initialChannelState;
     for (const seq of [51, 52, 53]) s = channelReducer(s, { type: "frame", frame: msgFrame(seq, `m${seq}`) });

@@ -2,6 +2,7 @@
 // 分档的候选列表，供 Composer 的 @ 补全下拉用。"可 @" ≠ "在线连接"——本产品最特别的一档是
 // 「可唤醒」：人不在但 @ 了会被 serve/watch/webhook 拉起来。
 import { autoWakeReachable, type ChannelRoleAssignment, type ChannelSquad, type MsgFrame, type PresenceEntry, type Sender, type WakeKind } from "@agentparty/shared";
+import { mergeSenderIdentity } from "./senderIdentity";
 
 export type MentionTier = "online" | "wakeable" | "recent";
 
@@ -79,17 +80,7 @@ export function mentionCandidates(
     if (now - message.ts > DEAD_MS) continue;
     const previous = recentSenderByName.get(message.sender.name);
     // 同一身份的历史帧可能新旧协议混杂：较新的稀疏 sender 不能擦掉较早帧里已有的 owner/handle/display。
-    recentSenderByName.set(message.sender.name, {
-      ...message.sender,
-      owner: message.sender.owner || previous?.owner,
-      lineage: message.sender.lineage ?? previous?.lineage,
-      handle: message.sender.handle || previous?.handle,
-      display_name: message.sender.display_name || previous?.display_name,
-      avatar_url: message.sender.avatar_url || previous?.avatar_url,
-      avatar_thumb: message.sender.avatar_thumb || previous?.avatar_thumb,
-      client_version: message.sender.client_version || previous?.client_version,
-      connection_count: message.sender.connection_count ?? previous?.connection_count,
-    });
+    recentSenderByName.set(message.sender.name, mergeSenderIdentity(previous, message.sender));
     recentMentionNames.add(message.sender.name);
     if (message.sender.handle) recentMentionNames.add(message.sender.handle);
   }
