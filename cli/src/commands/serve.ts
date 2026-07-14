@@ -239,6 +239,17 @@ export interface ProjectAgentRunContext {
   rules: string | null;
   channel_workdir: string;
   runner_workdir: string;
+  delivery_workflow: {
+    steps: readonly [
+      "work_in_channel_worktree",
+      "create_pull_request",
+      "report_pull_request_url_in_channel",
+      "verify_deployment",
+      "prune_merged_worktree",
+    ];
+    cleanup_command: string;
+    cleanup_guard: string;
+  };
 }
 
 export interface WakeContextAttachment extends Attachment {
@@ -1400,6 +1411,17 @@ function profileContext(profile: ProjectAgentProfile, prepared: PreparedProfileW
     rules: profile.rules,
     channel_workdir: prepared.channelWorkdir,
     runner_workdir: prepared.runnerWorkdir,
+    delivery_workflow: {
+      steps: [
+        "work_in_channel_worktree",
+        "create_pull_request",
+        "report_pull_request_url_in_channel",
+        "verify_deployment",
+        "prune_merged_worktree",
+      ],
+      cleanup_command: `party worktree prune --base ${profile.base_branch} --remote --yes`,
+      cleanup_guard: "run only after deployment is verified; dirty or unmerged worktrees must be preserved",
+    },
   };
 }
 
@@ -1421,7 +1443,7 @@ export function projectAgentChildName(handle: string, channel: string): string {
 
 function profileReadyNote(profile: ProjectAgentProfile, channel: string, prepared: PreparedProfileWorkspace): string {
   const project = profile.repo_url ?? profile.workdir ?? "local";
-  return `front agent ready: ${profile.owner_account}/${profile.handle} channel=#${channel} team=${profile.handle} project=${project} base=${profile.base_branch} worktree=${profile.worktree_strategy} cwd=${prepared.channelWorkdir}`;
+  return `front agent ready: ${profile.owner_account}/${profile.handle} channel=#${channel} team=${profile.handle} project=${project} base=${profile.base_branch} worktree=${profile.worktree_strategy} cwd=${prepared.channelWorkdir} delivery=worktree->PR->channel-link->deploy-verify->safe-prune`;
 }
 
 export async function runProfileServe(opts: ProfileServeOptions): Promise<number> {
