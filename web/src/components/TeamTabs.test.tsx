@@ -61,6 +61,28 @@ describe("TeamTabs (#504 博客风页签)", () => {
     expect(text).toContain("7"); // 离线
   });
 
+  test("没有未认领成员时仍显示 0 状态角标，但不标红", () => {
+    let r!: ReactTestRenderer;
+    act(() => {
+      r = create(
+        <LocaleProvider>
+          <TeamTabs
+            stats={{ roles: 3, online: 3, offline: 0, unclaimed: 0 }}
+            mentionCount={0}
+            division={<div>DIVISION_PANEL</div>}
+            board={<div>BOARD_PANEL</div>}
+            coordination={<div>COORD_PANEL</div>}
+          />
+        </LocaleProvider>,
+      );
+    });
+    renderer = r;
+    const badges = r.root.findAllByProps({ role: "listitem" });
+    const unclaimed = badges.find((node) => allText({ toJSON: () => node } as unknown as ReactTestRenderer).includes("0 unclaimed"));
+    expect(unclaimed).toBeDefined();
+    expect(unclaimed!.props.className).toBe("t-mono team-blog-stat");
+  });
+
   test("默认显示分工页，看板/协调页不渲染", () => {
     const r = render();
     const text = allText(r);
