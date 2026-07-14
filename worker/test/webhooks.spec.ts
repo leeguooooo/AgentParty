@@ -3,6 +3,7 @@ import { fetchMock } from "./fetch-mock";
 import { LOOP_GUARD_N, MAX_WEBHOOKS_PER_CHANNEL, WEBHOOK_MAX_RETRIES } from "@agentparty/shared";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
+import { mutableFetchResponse } from "../src/index";
 import { api, createChannel, disableLoopGuard, postMessage, seedToken, uniq } from "./helpers";
 
 beforeAll(() => {
@@ -90,6 +91,17 @@ async function queueRows(slug: string) {
 }
 
 describe("webhooks", () => {
+  it("copies immutable Durable Object responses before Hono appends headers (#495)", () => {
+    const upstream = Response.redirect("https://do/internal/webhooks", 302);
+    expect(() => upstream.headers.set("x-regression", "broken")).toThrow();
+
+    const response = mutableFetchResponse(upstream);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("https://do/internal/webhooks");
+    expect(() => response.headers.set("x-regression", "fixed")).not.toThrow();
+    expect(response.headers.get("x-regression")).toBe("fixed");
+  });
+
   it("registers, lists without leaking secret, deletes; readonly is rejected", async () => {
     const agent = await seedToken("agent");
     const ro = await seedToken("readonly");
