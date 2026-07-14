@@ -352,7 +352,7 @@ export function parseRunningProcessCommand(
 }
 
 function runningDesktopProcesses(executableName: string): Array<{ pid: number; executablePath: string }> {
-  return run("ps", ["-axo", "pid=,command="]).stdout
+  return run("ps", ["-wwaxo", "pid=,command="]).stdout
     .split("\n")
     .map((line) => parseRunningProcessCommand(line, executableName))
     .filter((process): process is { pid: number; executablePath: string } => process !== null);
