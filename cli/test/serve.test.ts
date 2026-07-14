@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { EXIT_ARCHIVED, type Attachment, type MsgFrame } from "@agentparty/shared";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import {
   createBuiltinRunner,
   createSdkRunner,
@@ -1004,6 +1004,35 @@ describe("builtin runner", () => {
     expect(JSON.parse(readFileSync(join(workdir, "wake-session.json"), "utf8")).session_id).toBe(uuid(4));
     expect(calls[0]).toContain("--output-format");
     expect(calls[1]).toEqual(["claude", "-p", "--resume", uuid(4), expect.any(String)]);
+  });
+
+  test("builtin claude runner writes wake context inside the runner workdir (#479)", async () => {
+    const { post } = postRecorder();
+    const workdir = tempDir();
+    let prompt = "";
+    let contextPath = "";
+    const runProcess: RunnerProcess = async (args) => {
+      prompt = String(args.at(-1));
+      const m = prompt.match(/(\/[^\s]*\.json)/);
+      contextPath = m?.[0] ?? "";
+      expect(contextPath).toStartWith(join(workdir, "wake-context") + sep);
+      expect(JSON.parse(readFileSync(contextPath, "utf8"))).toMatchObject({ channel: "dev", seq: 6 });
+      return { code: 0, stdout: JSON.stringify({ session_id: uuid(6), result: "ok" }), stderr: "" };
+    };
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "claude",
+      workdir,
+      runProcess,
+      post,
+    })(triggerFrame(6), runnerCtx());
+
+    expect(prompt).toContain(contextPath);
+    expect(existsSync(contextPath)).toBe(false);
+    expect(existsSync(join(workdir, "wake-context"))).toBe(true);
   });
 
   test("outer serve process posts ack and final message with reply_to and session start marker", async () => {
