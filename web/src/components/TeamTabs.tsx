@@ -44,11 +44,12 @@ export function TeamTabs({ stats, mentionCount, division, board, coordination, i
           <span className="t-mono team-blog-stat" role="listitem">{t("Channel.team.badge.roles", { count: String(stats.roles) })}</span>
           <span className="t-mono team-blog-stat" role="listitem">{t("Channel.team.badge.online", { count: String(stats.online) })}</span>
           <span className="t-mono team-blog-stat" role="listitem">{t("Channel.team.badge.offline", { count: String(stats.offline) })}</span>
-          {stats.unclaimed > 0 && (
-            <span className="t-mono team-blog-stat team-blog-stat--hot" role="listitem">
-              {t("Channel.team.badge.unclaimed", { count: String(stats.unclaimed) })}
-            </span>
-          )}
+          <span
+            className={`t-mono team-blog-stat${stats.unclaimed > 0 ? " team-blog-stat--hot" : ""}`}
+            role="listitem"
+          >
+            {t("Channel.team.badge.unclaimed", { count: String(stats.unclaimed) })}
+          </span>
         </div>
       </header>
 
