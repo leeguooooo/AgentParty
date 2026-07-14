@@ -1520,13 +1520,60 @@ export function TeamPanel({ teams }: { teams: TeamSummary[] }) {
 type AgentBoardStatus = "busy" | "blocked" | "idle" | "offline";
 const AGENT_STATUS_ORDER: Record<AgentBoardStatus, number> = { busy: 0, blocked: 1, idle: 2, offline: 3 };
 
-export function AgentBoardPanel({ presence, tasks }: { presence: PresenceEntry[]; tasks: TaskRecord[] }) {
+export function agentPresenceSummary(
+  presence: PresenceEntry[],
+  participants: Sender[],
+  taskAgentNames: Iterable<string> = [],
+) {
+  const participantKinds = new Map(participants.map((participant) => [participant.name, participant.kind]));
+  const agentNames = new Set<string>();
+  for (const entry of presence) {
+    if ((participantKinds.get(entry.name) ?? entry.kind) !== "human") agentNames.add(entry.name);
+  }
+  for (const participant of participants) {
+    if (participant.kind === "agent") agentNames.add(participant.name);
+    else agentNames.delete(participant.name);
+  }
+  for (const name of taskAgentNames) agentNames.add(name);
+
+  // participants is the Durable Object's authoritative list of currently open
+  // connections. A freshly connected agent does not necessarily have a
+  // persisted presence row yet, so presence.live alone under-counts the board.
+  const onlineNames = new Set(
+    participants
+      .filter((participant) => participant.kind === "agent")
+      .map((participant) => participant.name),
+  );
+  for (const entry of presence) {
+    if (entry.live === true && (participantKinds.get(entry.name) ?? entry.kind) !== "human") {
+      onlineNames.add(entry.name);
+    }
+  }
+  return { agentNames, onlineNames, online: onlineNames.size, offline: agentNames.size - onlineNames.size };
+}
+
+export function agentBoardTaskAssignee(task: TaskRecord): string | null {
+  const name = task.assignee?.name;
+  if (!name || task.assignee?.kind !== "agent") return null;
+  return task.state === "in_progress" || task.state === "assigned" || task.state === "needs_review" || task.state === "blocked"
+    ? name
+    : null;
+}
+
+export function AgentBoardPanel({
+  presence,
+  participants = [],
+  tasks,
+}: {
+  presence: PresenceEntry[];
+  participants?: Sender[];
+  tasks: TaskRecord[];
+}) {
   const t = useT();
   const tasksByName = new Map<string, TaskRecord[]>();
   for (const task of tasks) {
-    const name = task.assignee?.name;
-    if (!name || task.assignee?.kind !== "agent") continue;
-    if (task.state !== "in_progress" && task.state !== "assigned" && task.state !== "needs_review" && task.state !== "blocked") continue;
+    const name = agentBoardTaskAssignee(task);
+    if (name === null) continue;
     const assigned = tasksByName.get(name) ?? [];
     assigned.push(task);
     tasksByName.set(name, assigned);
@@ -1546,13 +1593,12 @@ export function AgentBoardPanel({ presence, tasks }: { presence: PresenceEntry[]
     );
   }
   const presenceByName = new Map(presence.map((p) => [p.name, p]));
-  const names = new Set<string>();
-  for (const p of presence) if (p.kind !== "human") names.add(p.name);
-  for (const name of tasksByName.keys()) names.add(name);
-  const statusOf = (p: PresenceEntry | undefined): AgentBoardStatus => {
-    if (!p || p.live !== true) return "offline";
-    if (p.state === "blocked") return "blocked";
-    if (p.state === "working") return "busy";
+  const presenceSummary = agentPresenceSummary(presence, participants, tasksByName.keys());
+  const names = new Set(presenceSummary.agentNames);
+  const statusOf = (name: string, p: PresenceEntry | undefined): AgentBoardStatus => {
+    if (!presenceSummary.onlineNames.has(name)) return "offline";
+    if (p?.state === "blocked") return "blocked";
+    if (p?.state === "working") return "busy";
     return "idle";
   };
   const rows = [...names]
@@ -1562,7 +1608,7 @@ export function AgentBoardPanel({ presence, tasks }: { presence: PresenceEntry[]
       // #187 第4项「排期」：surface presence 里的暂停/定时恢复（resume_at），看板本行直接可见。
       return {
         name,
-        status: statusOf(p),
+        status: statusOf(name, p),
         note: p?.note ?? null,
         paused: p?.paused === true,
         resumeAt: p?.resume_at ?? null,
@@ -3735,10 +3781,18 @@ export function ChannelPage({
   const taskReviewCount = taskSummary?.needs_review ?? tasks.filter((task) => task.state === "needs_review").length;
   const taskBlockedCount = taskSummary?.blocked ?? tasks.filter((task) => task.state === "blocked").length;
   const taskMineCount = taskSummary?.mine ?? 0;
-  const onlineAgentCount = Object.values(state.presence).filter((entry) => entry.kind !== "human" && entry.live === true).length;
+  const agentPresence = useMemo(
+    () => agentPresenceSummary(
+      Object.values(state.presence),
+      state.participants,
+      tasks.map(agentBoardTaskAssignee).filter((name): name is string => name !== null),
+    ),
+    [state.participants, state.presence, tasks],
+  );
+  const onlineAgentCount = agentPresence.online;
   // #504 团队面板博客风页签的角标：离线 agent 数 / 未认领分工数 / @我未读数。
   // 未认领复用 DivisionBoard 同款 unassignedMembers（assigned+self 之外的已连接成员），语义一致。
-  const offlineAgentCount = Object.values(state.presence).filter((entry) => entry.kind !== "human" && entry.live !== true).length;
+  const offlineAgentCount = agentPresence.offline;
   const unclaimedTeamCount = unassignedMembers(
     channelRoles,
     selfReportedRoles(channelRoles, state.presence, channelIdentities),
@@ -4133,7 +4187,7 @@ export function ChannelPage({
                   onOpenAgentDetail={setOpenAgentDetail}
                 />
               }
-              board={<AgentBoardPanel presence={Object.values(state.presence)} tasks={tasks} />}
+              board={<AgentBoardPanel presence={Object.values(state.presence)} participants={state.participants} tasks={tasks} />}
               coordination={coordinationContent}
             />
           )}

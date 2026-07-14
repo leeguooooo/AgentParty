@@ -1,10 +1,10 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { PresenceEntry, TaskRecord } from "@agentparty/shared";
+import type { PresenceEntry, Sender, TaskRecord } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 
-const { AgentBoardPanel } = await import("./Channel");
+const { AgentBoardPanel, agentPresenceSummary } = await import("./Channel");
 
 function memoryStorage(seed: Record<string, string> = {}): Storage {
   const values = new Map<string, string>(Object.entries(seed));
@@ -47,11 +47,16 @@ afterEach(async () => {
   Reflect.deleteProperty(globalThis, "localStorage");
 });
 
-function render(locale: "en" | "zh", presenceList: PresenceEntry[], tasks: TaskRecord[]): ReactTestRenderer {
+function render(
+  locale: "en" | "zh",
+  presenceList: PresenceEntry[],
+  tasks: TaskRecord[],
+  participants: Sender[] = [],
+): ReactTestRenderer {
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage({ ap_locale: locale }) });
   let r!: ReactTestRenderer;
   void act(() => {
-    r = create(<LocaleProvider><AgentBoardPanel presence={presenceList} tasks={tasks} /></LocaleProvider>);
+    r = create(<LocaleProvider><AgentBoardPanel presence={presenceList} participants={participants} tasks={tasks} /></LocaleProvider>);
   });
   renderer = r;
   return r;
@@ -148,6 +153,31 @@ describe("AgentBoardPanel (#187)", () => {
     expect(txt).toContain("offline");
   });
 
+  test("participant-only agent is visible and online before its first presence row (#514)", () => {
+    const r = render("en", [], [], [{ name: "fresh-agent", kind: "agent" }]);
+    const idleLane = r.root.findByProps({ "data-status": "idle" });
+    const offlineLane = r.root.findByProps({ "data-status": "offline" });
+    expect(treeText(idleLane)).toContain("fresh-agent");
+    expect(treeText(offlineLane)).not.toContain("fresh-agent");
+  });
+
+  test("live participants override a stale persisted offline row (#514)", () => {
+    const r = render(
+      "en",
+      [presence("reconnected", { state: "offline", live: false })],
+      [],
+      [{ name: "reconnected", kind: "agent" }],
+    );
+    expect(treeText(r.root.findByProps({ "data-status": "idle" }))).toContain("reconnected");
+    expect(treeText(r.root.findByProps({ "data-status": "offline" }))).not.toContain("reconnected");
+  });
+
+  test("human-only participant is excluded from every Agent lane (#514)", () => {
+    const txt = allText(render("en", [], [], [{ name: "human-owner", kind: "human" }]));
+    expect(txt).not.toContain("human-owner");
+    expect(txt).toContain("No agents yet");
+  });
+
   test("surfaces scheduling: paused agent with resume_at shows resume time (#187 排期)", () => {
     // 定时恢复：paused + resume_at → 本行展示「暂停至 HH:MM」，时间来自 presence.resume_at
     const at = new Date();
@@ -172,5 +202,29 @@ describe("AgentBoardPanel (#187)", () => {
     const txt = allText(render("en", p, [task(1, "carol", "in_progress")]));
     expect(txt).toContain("carol");
     expect(txt).not.toContain("paused");
+  });
+});
+
+describe("agentPresenceSummary (#514)", () => {
+  test("unions live and tasked agents, excludes humans, and keeps unmatched entries offline", () => {
+    const summary = agentPresenceSummary(
+      [
+        presence("reconnected", { state: "offline", live: false }),
+        presence("offline-agent", { state: "waiting", live: false }),
+        presence("human-presence", { kind: "human", live: true }),
+      ],
+      [
+        { name: "reconnected", kind: "agent" },
+        { name: "participant-only", kind: "agent" },
+        { name: "human-only", kind: "human" },
+        { name: "human-presence", kind: "human" },
+      ],
+      ["task-only"],
+    );
+
+    expect([...summary.agentNames].sort()).toEqual(["offline-agent", "participant-only", "reconnected", "task-only"]);
+    expect([...summary.onlineNames].sort()).toEqual(["participant-only", "reconnected"]);
+    expect(summary.online).toBe(2);
+    expect(summary.offline).toBe(2);
   });
 });
