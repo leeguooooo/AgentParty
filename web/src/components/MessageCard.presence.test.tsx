@@ -94,13 +94,16 @@ function textContent(node: ReactTestInstance): string {
 }
 
 function senderCardText(root: ReactTestInstance): string {
-  const card = root.find((n) => n.type === "aside" && String(n.props.className ?? "").includes("msg-agent-card"));
+  const card = root.find((n) => n.type === "aside" && String(n.props.id ?? "").startsWith("agent-info-") && !String(n.props.id).includes("-mention-"));
   return textContent(card);
 }
 
-function mentionTitle(root: ReactTestInstance): string | undefined {
-  const span = root.find((n) => n.type === "span" && String(n.props.className ?? "").includes("msg-mention"));
-  return span.props.title as string | undefined;
+function mentionCard(root: ReactTestInstance): ReactTestInstance {
+  return root.find((n) => n.type === "aside" && String(n.props.id ?? "").includes("-mention-"));
+}
+
+function mentionTrigger(root: ReactTestInstance): ReactTestInstance {
+  return root.find((n) => n.type === "button" && String(n.props.className ?? "").includes("msg-mention"));
 }
 
 afterEach(() => {
@@ -162,7 +165,7 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     expect(card).toContain("Current work#510 · working");
   });
 
-  test("sender 与 @ 悬停都能看到频道公开职责", () => {
+  test("sender 与 @ 都使用完整信息卡展示公开职责", () => {
     const role = {
       name: "planner",
       role: "worker",
@@ -176,7 +179,24 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     });
     expect(senderCardText(root)).toContain("Role & divisionworker · 先读 issue，再实现和验证");
     expect(senderCardText(root)).toContain("Current work实现中 · working");
-    expect(mentionTitle(root)).toContain("responsibility: 先读 issue，再实现和验证");
+    expect(textContent(mentionCard(root))).toContain("Role & divisionworker · 先读 issue，再实现和验证");
+    expect(textContent(mentionCard(root))).toContain("Current work实现中 · working");
+  });
+
+  test("移动端点击 @提及会显式打开信息卡，再次点击关闭", () => {
+    const root = render(baseMsg({ mentions: ["planner"] }), {
+      presence: { planner: presenceEntry({ note: "实现中" }) },
+    });
+    const trigger = mentionTrigger(root);
+    let blurred = false;
+    const clickEvent = { currentTarget: { blur: () => { blurred = true; } } };
+    expect(trigger.props["aria-expanded"]).toBe(false);
+    act(() => trigger.props.onClick(clickEvent));
+    expect(mentionTrigger(root).props["aria-expanded"]).toBe(true);
+    expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--open");
+    act(() => mentionTrigger(root).props.onClick(clickEvent));
+    expect(mentionTrigger(root).props["aria-expanded"]).toBe(false);
+    expect(blurred).toBe(true);
   });
 
   test("不传 presence（或查不到该名字）时 sender 信息卡明确显示未上报", () => {
@@ -225,14 +245,14 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     expect(blurred).toBe(true);
   });
 
-  test("@提及悬停也能看到该名字的状态；presence 查不到时 title 保持缺省", () => {
+  test("@提及信息卡展示该名字的状态；presence 查不到时明确显示未上报", () => {
     const withPresence = render(baseMsg({ mentions: ["reviewer"] }), {
       presence: { reviewer: presenceEntry({ name: "reviewer", state: "waiting", current_task: 42 }) },
     });
-    expect(mentionTitle(withPresence)).toBe("status: waiting\ntask: #42");
+    expect(textContent(mentionCard(withPresence))).toContain("Current work#42 · waiting");
     act(() => renderer?.unmount());
 
     const withoutPresence = render(baseMsg({ mentions: ["reviewer"] }));
-    expect(mentionTitle(withoutPresence)).toBeUndefined();
+    expect(textContent(mentionCard(withoutPresence))).toContain("Current workNot reported");
   });
 });

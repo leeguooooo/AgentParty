@@ -2196,6 +2196,7 @@ function TeamThread({
             presence={presence}
             agentRoles={agentRoles}
             recentMessages={recentMessagesByAgent.get(message.sender.name) ?? EMPTY_RECENT_MESSAGES}
+            recentMessagesByAgent={recentMessagesByAgent}
             quotedMessage={message.reply_to !== null ? messageBySeq.get(message.reply_to) ?? null : null}
             onReply={onReply}
             onEdit={onEdit}
@@ -4118,6 +4119,7 @@ export function ChannelPage({
                   presence={state.presence}
                   agentRoles={channelRolesByName}
                   recentMessages={recentMessagesByAgent.get(item.message.sender.name) ?? EMPTY_RECENT_MESSAGES}
+                  recentMessagesByAgent={recentMessagesByAgent}
                   quotedMessage={item.message.reply_to !== null ? messageBySeq.get(item.message.reply_to) ?? null : null}
                   onReply={startReply}
                   onEdit={startEdit}
