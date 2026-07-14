@@ -305,7 +305,7 @@ describe("TaskLedgerPanel assignee datalist (#271)", () => {
 
 // #271(d)：展开/收起切换宽度 class。
 describe("TaskLedgerPanel expanded view (#271)", () => {
-  test("toggle flips the --expanded class and the button label", async () => {
+  test("toggle flips the --expanded class and aria-pressed", async () => {
     const r = render("en", baseProps());
     const section = r.root.find((n) => n.props["aria-label"] === "channel tasks");
     expect(section.props.className).toBe("task-ledger-panel");
@@ -316,8 +316,8 @@ describe("TaskLedgerPanel expanded view (#271)", () => {
 
     expect(r.root.find((n) => n.props["aria-label"] === "channel tasks").props.className)
       .toBe("task-ledger-panel task-ledger-panel--expanded");
+    // 博客风把展开钮改成图标（⇱/⇲），可见状态由 aria-pressed 表达（文案断言已上移到 aria）。
     expect(findByAria(r, "Toggle task panel width").props["aria-pressed"]).toBe(true);
-    expect(allText(r)).toContain("Collapse");
 
     await act(async () => { findByAria(r, "Toggle task panel width").props.onClick(); });
     expect(r.root.find((n) => n.props["aria-label"] === "channel tasks").props.className)
