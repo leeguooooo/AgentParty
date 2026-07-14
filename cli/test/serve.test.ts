@@ -1262,6 +1262,7 @@ describe("project profile daemon", () => {
       updated_at: 1,
     };
     const served: ServeOptions[] = [];
+    let upgradeProbes = 0;
     const channelRuntimeCalls: Array<{ slug: string; childName: string }> = [];
     try {
       const code = await runProfileServe({
@@ -1270,6 +1271,11 @@ describe("project profile daemon", () => {
         ownerAccount: "fan@example.com",
         handle: "herness-dev",
         mentionsOnly: true,
+        upgradeProbeIntervalMs: 60_000,
+        refreshAvailableUpgrade: async () => {
+          upgradeProbes += 1;
+          return null;
+        },
         once: true,
         post,
         mintRuntime: async () => ({ token: "ap_profile_runtime", profile }),
@@ -1312,6 +1318,8 @@ describe("project profile daemon", () => {
     expect(served.map((o) => o.channel).sort()).toEqual(["alpha", "beta", "gamma"]);
     expect(served.map((o) => o.token).sort()).toEqual(["ap_child_alpha", "ap_child_beta", "ap_child_gamma"]);
     expect(new Set(served.map((o) => o.sdkRunner?.workdir)).size).toBe(3);
+    await Promise.all(served.map((o) => o.refreshAvailableUpgrade?.(null)));
+    expect(upgradeProbes).toBe(1);
     expect(new Set(served.map((o) => o.projectAgent?.channel_workdir)).size).toBe(3);
     expect(channelRuntimeCalls).toEqual([
       { slug: "alpha", childName: projectAgentChildName("herness-dev", "alpha") },

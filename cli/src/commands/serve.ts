@@ -1374,6 +1374,7 @@ export interface ProfileServeOptions {
   mentionsOnly: boolean;
   availableUpgrade?: CliUpgradeNotice | null;
   refreshAvailableUpgrade?: (current: CliUpgradeNotice | null) => Promise<CliUpgradeNotice | null>;
+  upgradeProbeIntervalMs?: number;
   once?: boolean;
   pollIntervalMs?: number;
   out?: (line: string) => void;
@@ -1431,6 +1432,20 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
   const runChannelServe = opts.runChannelServe ?? runServe;
   const post = opts.post ?? postMessage;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const upgradeProbeIntervalMs = opts.upgradeProbeIntervalMs ?? 5 * 60_000;
+  const refreshAvailableUpgrade = opts.refreshAvailableUpgrade;
+  let nextSharedUpgradeProbeAt = 0;
+  let sharedUpgradeProbe: Promise<CliUpgradeNotice | null> | null = null;
+  const sharedRefreshAvailableUpgrade = refreshAvailableUpgrade === undefined
+    ? undefined
+    : (current: CliUpgradeNotice | null) => {
+        const now = Date.now();
+        if (sharedUpgradeProbe === null || now >= nextSharedUpgradeProbeAt) {
+          nextSharedUpgradeProbeAt = now + upgradeProbeIntervalMs;
+          sharedUpgradeProbe = refreshAvailableUpgrade(current);
+        }
+        return sharedUpgradeProbe;
+      };
   const runtime = await mintRuntime(opts.server, opts.humanToken, opts.handle);
   const profile = runtime.profile;
   if (profile.owner_account !== opts.ownerAccount || profile.handle !== opts.handle) {
@@ -1473,7 +1488,8 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       onRevCursor: (r) => saveRevCursor(channel, r),
       projectAgent: ctx,
       availableUpgrade: opts.availableUpgrade ?? null,
-      refreshAvailableUpgrade: opts.refreshAvailableUpgrade,
+      refreshAvailableUpgrade: sharedRefreshAvailableUpgrade,
+      upgradeProbeIntervalMs,
       advertise: async () => {
         const note = profileReadyNote(profile, channel, prepared);
         await post(opts.server, child.token, channel, {
