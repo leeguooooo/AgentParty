@@ -1799,11 +1799,13 @@ export function TaskLedgerPanel({
   onCreateTask,
   identities = [],
   onUploadAttachment,
+  onClose,
 }: {
   tasks: TaskRecord[];
   loading: boolean;
   error: string | null;
   canWrite: boolean;
+  onClose?: () => void;
   busyTaskId: number | null;
   actionError: string | null;
   creating: boolean;
@@ -1840,6 +1842,11 @@ export function TaskLedgerPanel({
   const [rejectDraft, setRejectDraft] = useState("");
   // #271(a)：按受理人筛选看板。"all" 全量，"__unassigned__" 只看未指派。
   const [assigneeFilter, setAssigneeFilter] = useState("all");
+  // #504 博客风：状态筛选 chips（need/各状态/all）+ 关键词搜索 + 优先级 + 卡片折叠。
+  const [stateFilter, setStateFilter] = useState<"active" | "all" | TaskState>("all");
+  const [taskQuery, setTaskQuery] = useState("");
+  const [prioFilter, setPrioFilter] = useState<number | null>(null);
+  const [openTaskId, setOpenTaskId] = useState<number | null>(null);
   // #271(d)：展开放大——CSS class 切宽度，外层 channel-panel-card 用 :has() 跟随。
   const [expandedView, setExpandedView] = useState(false);
   // #271(c)：任务详情弹层。存 id 不存快照，刷新后始终显示最新记录。
@@ -1852,12 +1859,38 @@ export function TaskLedgerPanel({
   const assigneeOptions = [...new Set(
     tasks.flatMap((task) => (task.assignee !== null ? [task.assignee.name] : [])),
   )].sort();
-  const visibleTasks =
-    assigneeFilter === "all" ? tasks :
-    assigneeFilter === "__unassigned__" ? tasks.filter((task) => task.assignee === null) :
-    tasks.filter((task) => task.assignee?.name === assigneeFilter);
+  const q = taskQuery.trim().toLowerCase();
+  const visibleTasks = tasks.filter((task) => {
+    // 受理人
+    if (assigneeFilter === "__unassigned__" && task.assignee !== null) return false;
+    if (assigneeFilter !== "all" && assigneeFilter !== "__unassigned__" && task.assignee?.name !== assigneeFilter) return false;
+    // 状态（active=非 done；具体状态；all）
+    if (stateFilter === "active" && task.state === "done") return false;
+    if (stateFilter !== "active" && stateFilter !== "all" && task.state !== stateFilter) return false;
+    // 优先级
+    if (prioFilter !== null && task.priority !== prioFilter) return false;
+    // 关键词：标题 / #编号 / 标签
+    if (q !== "" && !(
+      task.title.toLowerCase().includes(q) ||
+      `#${task.id}`.includes(q) ||
+      task.labels.join(" ").toLowerCase().includes(q)
+    )) return false;
+    return true;
+  });
   const tasksByState = new Map<TaskState, TaskRecord[]>(TASK_BOARD_STATES.map((state) => [state, []]));
   for (const task of visibleTasks) tasksByState.get(task.state)?.push(task);
+  const activeCount = tasks.filter((task) => task.state !== "done").length;
+  const taskFiltered = stateFilter !== "all" || prioFilter !== null || q !== "" || assigneeFilter !== "all";
+  // 状态筛选 chips（need处理 / 待归类 / 进行中 / 受阻 / 已完成 / 全部），对齐设计。
+  const stateChipDefs: Array<{ key: "active" | "all" | TaskState; label: string; count: number }> = [
+    { key: "active", label: t("Channel.tasks.chip.active"), count: activeCount },
+    { key: "triage", label: t("Channel.tasks.state.triage"), count: counts.triage ?? 0 },
+    { key: "in_progress", label: t("Channel.tasks.state.in_progress"), count: counts.in_progress ?? 0 },
+    { key: "needs_review", label: t("Channel.tasks.state.needs_review"), count: counts.needs_review ?? 0 },
+    { key: "blocked", label: t("Channel.tasks.state.blocked"), count: counts.blocked ?? 0 },
+    { key: "done", label: t("Channel.tasks.state.done"), count: counts.done ?? 0 },
+    { key: "all", label: t("Channel.tasks.chip.all"), count: tasks.length },
+  ];
   const disabled = loading || !canWrite;
   const stateLabel = (state: TaskState) => t(`Channel.tasks.state.${state}`);
   const submitNewTask = (event: { preventDefault: () => void }) => {
@@ -2015,9 +2048,80 @@ export function TaskLedgerPanel({
           <option key={identity.name} value={identity.name}>{identity.display}</option>
         ))}
       </datalist>
-      <header className="task-ledger-head">
-        <p className="t-mono task-ledger-total">{t("Channel.tasks.total", { count: tasks.length })}</p>
-        <div className="task-ledger-head-actions">
+      <header className="task-blog-head">
+        <div className="task-blog-title">
+          <h2 className="task-blog-name">{t("Channel.tasks.title")}</h2>
+          <span className="t-mono task-blog-prompt">{t("Channel.tasks.overviewPrompt", { count: tasks.length })}</span>
+        </div>
+        <div className="task-blog-stats" role="list">
+          <span className="t-mono task-blog-stat task-blog-stat--triage" role="listitem">{t("Channel.tasks.badge.triage", { count: counts.triage ?? 0 })}</span>
+          <span className="t-mono task-blog-stat" role="listitem">{t("Channel.tasks.badge.doing", { count: counts.in_progress ?? 0 })}</span>
+          <span className="t-mono task-blog-stat task-blog-stat--done" role="listitem">{t("Channel.tasks.badge.done", { count: counts.done ?? 0 })}</span>
+        </div>
+        <div className="task-blog-head-actions">
+          {canWrite && (
+            <button
+              className="d-btn task-new-btn task-blog-new"
+              type="button"
+              aria-label={t("Channel.tasks.new")}
+              aria-expanded={composerOpen}
+              disabled={loading}
+              onClick={() => setComposerOpen((open) => !open)}
+            >
+              ＋ {t("Channel.tasks.new")}
+            </button>
+          )}
+          <button className="d-btn" type="button" aria-label={t("Channel.tasks.refresh")} disabled={loading} onClick={onRefresh}>
+            {loading ? t("Channel.tasks.refreshing") : "↻"}
+          </button>
+          <button
+            className="d-btn task-expand-btn"
+            type="button"
+            aria-label={t("Channel.tasks.expandAria")}
+            aria-pressed={expandedView}
+            onClick={() => setExpandedView((open) => !open)}
+          >
+            {expandedView ? "⇲" : "⇱"}
+          </button>
+          {onClose !== undefined && (
+            <button type="button" className="d-btn task-blog-close" onClick={onClose}>
+              {t("Channel.tools.close")} ✕
+            </button>
+          )}
+        </div>
+      </header>
+      <div className="task-blog-filter">
+        <div className="task-blog-filter-row">
+          <span className="t-mono task-blog-grep">{t("Channel.tasks.grepState")}</span>
+          {stateChipDefs.map((chip) => (
+            <button
+              key={chip.key}
+              type="button"
+              className={"task-blog-chip" + (stateFilter === chip.key ? " task-blog-chip--on" : "") + (chip.count === 0 ? " task-blog-chip--dim" : "")}
+              onClick={() => setStateFilter(chip.key)}
+            >
+              {chip.label} <b>{chip.count}</b>
+            </button>
+          ))}
+        </div>
+        <div className="task-blog-filter-row">
+          <input
+            className="task-blog-search"
+            aria-label={t("Channel.tasks.searchAria")}
+            placeholder={t("Channel.tasks.searchPlaceholder")}
+            value={taskQuery}
+            onChange={(event) => setTaskQuery(event.currentTarget.value)}
+          />
+          {[1, 2, 3].map((p) => (
+            <button
+              key={p}
+              type="button"
+              className={"task-blog-chip task-blog-prio" + (prioFilter === p ? " task-blog-chip--on" : "")}
+              onClick={() => setPrioFilter(prioFilter === p ? null : p)}
+            >
+              P{p}
+            </button>
+          ))}
           {assigneeOptions.length > 0 && (
             <select
               className="task-filter-select t-mono"
@@ -2032,32 +2136,17 @@ export function TaskLedgerPanel({
               ))}
             </select>
           )}
-          {canWrite && (
+          {taskFiltered && (
             <button
-              className="d-btn task-new-btn"
               type="button"
-              aria-label={t("Channel.tasks.new")}
-              aria-expanded={composerOpen}
-              disabled={loading}
-              onClick={() => setComposerOpen((open) => !open)}
+              className="task-blog-chip task-blog-clear"
+              onClick={() => { setStateFilter("all"); setPrioFilter(null); setTaskQuery(""); setAssigneeFilter("all"); }}
             >
-              + {t("Channel.tasks.new")}
+              ✕ {t("Channel.tasks.clearFilters")}
             </button>
           )}
-          <button className="d-btn" type="button" disabled={loading} onClick={onRefresh}>
-            {loading ? t("Channel.tasks.refreshing") : t("Channel.tasks.refresh")}
-          </button>
-          <button
-            className="d-btn task-expand-btn"
-            type="button"
-            aria-label={t("Channel.tasks.expandAria")}
-            aria-pressed={expandedView}
-            onClick={() => setExpandedView((open) => !open)}
-          >
-            {expandedView ? t("Channel.tasks.collapse") : t("Channel.tasks.expand")}
-          </button>
         </div>
-      </header>
+      </div>
       {composerOpen && canWrite && (
         <form className="task-new-form" onSubmit={submitNewTask}>
           <input
@@ -2123,13 +2212,6 @@ export function TaskLedgerPanel({
             </button>
           </div>
         </form>
-      )}
-      {Object.keys(counts).length > 0 && (
-        <div className="task-ledger-counts">
-          {Object.entries(counts).map(([state, count]) => (
-            <span key={state} className={`t-mono task-state task-state--${state}`}>{stateLabel(state as TaskState)} {count}</span>
-          ))}
-        </div>
       )}
       {error !== null && <p className="banner banner--red">{error}</p>}
       {actionError !== null && <p className="banner banner--red">{actionError}</p>}
@@ -4116,7 +4198,7 @@ export function ChannelPage({
             undefined
           }
           onClose={() => setActivePanel(null)}
-          hideHeader={activePanel === "team"}
+          hideHeader={activePanel === "team" || activePanel === "tasks"}
         >
           {activePanel === "charter" && (
             <CharterBanner
@@ -4208,6 +4290,7 @@ export function ChannelPage({
               onCreateTask={createTaskDraft}
               identities={channelIdentities}
               onUploadAttachment={canWrite ? (file) => uploadAttachment(token, slug, file) : undefined}
+              onClose={() => setActivePanel(null)}
             />
           )}
           {activePanel === "settings" && (

@@ -6506,3 +6506,36 @@
 .team-blog .agent-board-lane--busy .agent-board-lane-title { background: var(--d-amber-soft); }
 .team-blog .agent-board-lane--blocked .agent-board-lane-title { background: var(--d-red-soft); }
 .team-blog .agent-board-lane:not(.agent-board-lane--offline) .agent-board-lane-count { border: 0; background: transparent; color: var(--t-dim); }
+
+/* #504 任务面板「博客风」头部 + $ grep 筛选栏，对齐 任务面板 博客风.dc.html。 */
+.task-blog-head {
+  display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap;
+  padding-bottom: 10px; border-bottom: 2px solid var(--t-border);
+}
+.task-blog-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.task-blog-name { margin: 0; font: 700 20px/1.1 var(--t-mono); color: var(--t-text); letter-spacing: -0.5px; }
+.task-blog-prompt { font-size: 12px; color: var(--t-muted); white-space: nowrap; }
+.task-blog-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.task-blog-stat { padding: 2px 7px; border: 1.4px solid var(--t-faint); color: var(--t-dim); background: var(--t-panel); font-size: 11px; white-space: nowrap; }
+.task-blog-stat--triage { background: var(--d-yellow); color: var(--t-text); border-color: var(--t-border); font-weight: 600; }
+.task-blog-stat--done { background: var(--d-green-soft); color: var(--t-text); border-color: var(--t-border); }
+.task-blog-head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.task-blog-new { background: var(--t-border); color: var(--t-bg); }
+.task-blog-close { flex: none; }
+
+.task-blog-filter { display: flex; flex-direction: column; gap: 9px; padding: 12px 0; border-bottom: 1.5px dashed var(--t-faint); }
+.task-blog-filter-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.task-blog-grep { font-size: 12px; color: var(--t-muted); white-space: nowrap; }
+.task-blog-chip {
+  padding: 2px 11px; border: 1.5px solid var(--t-border); background: var(--t-panel);
+  box-shadow: 2px 2px 0 var(--d-shadow); color: var(--t-text);
+  font: 12px var(--t-mono); cursor: pointer; white-space: nowrap;
+}
+.task-blog-chip b { font-weight: 700; }
+.task-blog-chip--on { background: var(--t-border); color: var(--t-bg); }
+.task-blog-chip--dim { color: var(--t-dim); box-shadow: none; }
+.task-blog-clear, .task-blog-chip.task-blog-clear { color: var(--t-link); box-shadow: none; }
+.task-blog-search {
+  flex: 1; min-width: 180px; padding: 4px 10px; border: 1.5px solid var(--t-border);
+  background: var(--t-panel); color: var(--t-text); font: 12.5px var(--t-mono);
+}
