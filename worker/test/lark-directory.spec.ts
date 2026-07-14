@@ -243,6 +243,100 @@ describe("Lark organization member invitations (#358)", () => {
     expect(await response.json()).toMatchObject({ error: { code: "lark_contact_permission_required" } });
   });
 
+  it("falls back to the app contact scope when root department access is not all-staff", async () => {
+    const owner = await larkHuman();
+    const slug = await createChannel(owner.token);
+    mockTenantToken();
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({
+        path: "/open-apis/contact/v3/users/find_by_department?user_id_type=union_id&department_id_type=open_department_id&department_id=0&page_size=1",
+        method: "GET",
+      })
+      .reply(403, { code: 40014, msg: "no all-staff authority" });
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({
+        path: "/open-apis/contact/v3/scopes?user_id_type=union_id&department_id_type=open_department_id&page_size=100",
+        method: "GET",
+      })
+      .reply(200, {
+        code: 0,
+        data: {
+          has_more: false,
+          department_ids: ["od-engineering"],
+          user_ids: ["on_owner", "on_alice"],
+        },
+      });
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/contact/v3/users/on_owner?user_id_type=union_id", method: "GET" })
+      .reply(200, {
+        code: 0,
+        data: { user: { union_id: "on_owner", name: "Owner" } },
+      });
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/contact/v3/users/on_alice?user_id_type=union_id", method: "GET" })
+      .reply(200, {
+        code: 0,
+        data: { user: { union_id: "on_alice", name: "Alice Zhang", avatar: { avatar_72: "https://cdn.example/alice.png" } } },
+      });
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({
+        path: "/open-apis/contact/v3/users/find_by_department?user_id_type=union_id&department_id_type=open_department_id&department_id=od-engineering&page_size=1",
+        method: "GET",
+      })
+      .reply(200, {
+        code: 0,
+        data: {
+          has_more: true,
+          page_token: "dept-next",
+          items: [
+            { union_id: "on_alice", name: "Alice Zhang" },
+            { union_id: "on_alicia", name: "Alicia Team" },
+          ],
+        },
+      });
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({
+        path: "/open-apis/contact/v3/users/find_by_department?user_id_type=union_id&department_id_type=open_department_id&department_id=od-engineering&page_size=1&page_token=dept-next",
+        method: "GET",
+      })
+      .reply(200, {
+        code: 0,
+        data: {
+          has_more: false,
+          items: [{ union_id: "on_alina", name: "Alina Team" }],
+        },
+      });
+
+    const response = await api(`/api/channels/${slug}/lark-directory?q=ali&limit=1`, owner.token);
+    expect(response.status).toBe(200);
+    const first = (await response.json()) as { users: unknown[]; next_cursor: string };
+    expect(first).toEqual({
+      users: [{ id: "on_alice", name: "Alice Zhang", avatar_url: "https://cdn.example/alice.png", already_member: false }],
+      next_cursor: expect.stringMatching(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/),
+    });
+
+    const secondResponse = await api(
+      `/api/channels/${slug}/lark-directory?q=ali&limit=1&cursor=${encodeURIComponent(first.next_cursor)}`,
+      owner.token,
+    );
+    expect(secondResponse.status).toBe(200);
+    const second = (await secondResponse.json()) as { users: unknown[]; next_cursor: string };
+    expect(second).toEqual({
+      users: [{ id: "on_alicia", name: "Alicia Team", avatar_url: null, already_member: false }],
+      next_cursor: expect.stringMatching(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/),
+    });
+
+    const thirdResponse = await api(
+      `/api/channels/${slug}/lark-directory?q=ali&limit=1&cursor=${encodeURIComponent(second.next_cursor)}`,
+      owner.token,
+    );
+    expect(thirdResponse.status).toBe(200);
+    expect(await thirdResponse.json()).toEqual({
+      users: [{ id: "on_alina", name: "Alina Team", avatar_url: null, already_member: false }],
+      next_cursor: null,
+    });
+  });
+
   it("directly adds the selected same-tenant Lark user idempotently and records management audit", async () => {
     const owner = await larkHuman();
     const slug = await createChannel(owner.token);
@@ -385,6 +479,12 @@ describe("Lark organization member invitations (#358)", () => {
     const deniedSlug = await createChannel(deniedOwner.token);
     mockTenantToken();
     mockDirectoryPage({ permissionDenied: true });
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({
+        path: "/open-apis/contact/v3/scopes?user_id_type=union_id&department_id_type=open_department_id&page_size=100",
+        method: "GET",
+      })
+      .reply(403, { code: 40014, msg: "no contact scope authority" });
     const denied = await api(`/api/channels/${deniedSlug}/lark-directory?q=alice`, deniedOwner.token);
     expect(denied.status).toBe(503);
     expect(await denied.json()).toMatchObject({
