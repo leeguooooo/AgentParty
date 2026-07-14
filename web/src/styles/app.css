@@ -6273,3 +6273,42 @@
 .charter-division-label { font-size: 11px; font-weight: 700; color: var(--t-muted); }
 .charter-division-text { font-size: 12px; color: var(--fg, inherit); }
 .charter-division-open { margin-left: auto; font-size: 11px; }
+
+/* #504 团队面板「博客风」页签外壳 —— 头部 + 三页签导航，复用 neo-brutalist terminal token。 */
+.team-blog { display: flex; flex-direction: column; gap: 0; }
+.team-blog-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap; padding-bottom: 10px; border-bottom: 2px solid var(--t-border);
+}
+.team-blog-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.team-blog-name { margin: 0; font: 700 20px/1.1 var(--t-mono); color: var(--t-text); letter-spacing: -0.5px; }
+.team-blog-prompt { font-size: 12px; color: var(--t-muted); }
+.team-blog-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.team-blog-stat {
+  padding: 2px 7px; border: 1.4px solid var(--t-faint); color: var(--t-dim);
+  background: var(--t-panel); font-size: 11px; white-space: nowrap;
+}
+.team-blog-stat--hot { color: var(--t-red); border-color: var(--t-red); font-weight: 700; }
+
+.team-blog-tabs {
+  display: flex; align-items: stretch; gap: 4px; flex-wrap: wrap;
+  margin-top: 2px; border-bottom: 1px solid var(--t-faint);
+}
+.team-blog-tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 9px 12px 8px; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; color: var(--t-muted); cursor: pointer;
+  font: 13px var(--t-mono); margin-bottom: -1px;
+}
+.team-blog-tab:hover { color: var(--t-text); }
+.team-blog-tab--active { color: var(--t-text); border-bottom-color: var(--t-accent); font-weight: 700; }
+.team-blog-tab-no { color: var(--t-dim); font-size: 12px; }
+.team-blog-tab--active .team-blog-tab-no { color: var(--t-accent); }
+.team-blog-tab-badge {
+  padding: 0 5px; min-width: 18px; text-align: center;
+  border: 1.2px solid var(--t-faint); background: var(--t-panel);
+  color: var(--t-dim); font-size: 10.5px; line-height: 16px;
+}
+.team-blog-tab-badge--hot { color: var(--t-accent-ink); background: var(--t-accent); border-color: var(--t-accent); font-weight: 700; }
+
+.team-blog-panel { padding-top: 12px; }
