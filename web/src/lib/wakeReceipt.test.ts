@@ -135,6 +135,22 @@ describe("receiptFor priority ladder", () => {
     expect(r).toMatchObject({ name: "evan", state: "working", detail: "#45", at: NOW - 500 });
   });
 
+  test("stale current_task heartbeat does not keep claiming working and falls through to the consumed receipt", () => {
+    const rows = [
+      delivery({ mention_seq: 45, target_name: "evan", adapter_kind: "serve", webhook_name: "evan", result: "consumed", http_status: null, ack_seq: 52 }),
+    ];
+    const r = receiptFor(
+      "evan",
+      rows,
+      null,
+      ONLINE([]),
+      { evan: presence({ name: "evan", current_task: 45, task_started_at: NOW - 120_000, heartbeat_at: NOW - 60_001 }) },
+      NOW,
+      45,
+    );
+    expect(r).toMatchObject({ name: "evan", state: "replied", detail: "#52" });
+  });
+
   test("current_task for a different mention does not claim this message is being processed", () => {
     const r = receiptFor(
       "evan",
