@@ -362,8 +362,8 @@ export function writeContextFile(
   cliUpgrade: CliUpgradeNotice | null = null,
   attachments?: WakeContextAttachment[],
 ): string {
-  // dir 是本 serve 实例私有的（createWakeContextDir）。文件名只需 seq：同一次唤醒重复写得到
-  // 同一路径（幂等），而不同实例——不同身份 / 不同 server / 不同 profile——各在各的目录里。
+  // dir 必须由调用方按运行实例隔离。文件名只需 seq：同一次唤醒重复写得到同一路径（幂等），
+  // 而不同实例——不同身份 / 不同 server / 不同 profile——各在各的目录里。
   const path = join(dir, `${frame.seq}.json`);
   writeFileSync(
     path,
@@ -371,6 +371,12 @@ export function writeContextFile(
     { mode: 0o600 },
   );
   return path;
+}
+
+function builtinRunnerContextDir(workdir: string): string {
+  const dir = join(workdir, "wake-context");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
 }
 
 /**
@@ -1143,7 +1149,9 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
 
     const repoCwd = await ensureRepo(opts, env);
     const cwd = opts.cwd ?? repoCwd ?? opts.workdir;
-    const contextFile = writeContextFile(ctx.contextDir, frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null, ctx.attachments);
+    // #479：builtin Claude/Codex 子进程在 runner workdir 内运行；把 context JSON 写到 workdir
+    // 内，避免 Claude Code 默认权限模式因读取系统 tmpdir 文件而卡无人批准的权限弹窗。
+    const contextFile = writeContextFile(builtinRunnerContextDir(opts.workdir), frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null, ctx.attachments);
     // 绝不把 context JSON 当 argv 传（#120）：argv 对同机任意用户可见（`ps -axww`），
     // 一条私有频道消息的正文、charter、最近 20 条上下文就全泄漏了。
     // 只传 0700 私有目录里的文件路径——protocol_reminder 本来就叫模型「先读本文件」。
