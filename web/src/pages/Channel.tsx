@@ -1520,7 +1520,11 @@ export function TeamPanel({ teams }: { teams: TeamSummary[] }) {
 type AgentBoardStatus = "busy" | "blocked" | "idle" | "offline";
 const AGENT_STATUS_ORDER: Record<AgentBoardStatus, number> = { busy: 0, blocked: 1, idle: 2, offline: 3 };
 
-export function agentPresenceSummary(presence: PresenceEntry[], participants: Sender[]) {
+export function agentPresenceSummary(
+  presence: PresenceEntry[],
+  participants: Sender[],
+  taskAgentNames: Iterable<string> = [],
+) {
   const participantKinds = new Map(participants.map((participant) => [participant.name, participant.kind]));
   const agentNames = new Set<string>();
   for (const entry of presence) {
@@ -1530,6 +1534,7 @@ export function agentPresenceSummary(presence: PresenceEntry[], participants: Se
     if (participant.kind === "agent") agentNames.add(participant.name);
     else agentNames.delete(participant.name);
   }
+  for (const name of taskAgentNames) agentNames.add(name);
 
   // participants is the Durable Object's authoritative list of currently open
   // connections. A freshly connected agent does not necessarily have a
@@ -1547,6 +1552,14 @@ export function agentPresenceSummary(presence: PresenceEntry[], participants: Se
   return { agentNames, onlineNames, online: onlineNames.size, offline: agentNames.size - onlineNames.size };
 }
 
+export function agentBoardTaskAssignee(task: TaskRecord): string | null {
+  const name = task.assignee?.name;
+  if (!name || task.assignee?.kind !== "agent") return null;
+  return task.state === "in_progress" || task.state === "assigned" || task.state === "needs_review" || task.state === "blocked"
+    ? name
+    : null;
+}
+
 export function AgentBoardPanel({
   presence,
   participants = [],
@@ -1559,9 +1572,8 @@ export function AgentBoardPanel({
   const t = useT();
   const tasksByName = new Map<string, TaskRecord[]>();
   for (const task of tasks) {
-    const name = task.assignee?.name;
-    if (!name || task.assignee?.kind !== "agent") continue;
-    if (task.state !== "in_progress" && task.state !== "assigned" && task.state !== "needs_review" && task.state !== "blocked") continue;
+    const name = agentBoardTaskAssignee(task);
+    if (name === null) continue;
     const assigned = tasksByName.get(name) ?? [];
     assigned.push(task);
     tasksByName.set(name, assigned);
@@ -1581,9 +1593,8 @@ export function AgentBoardPanel({
     );
   }
   const presenceByName = new Map(presence.map((p) => [p.name, p]));
-  const presenceSummary = agentPresenceSummary(presence, participants);
+  const presenceSummary = agentPresenceSummary(presence, participants, tasksByName.keys());
   const names = new Set(presenceSummary.agentNames);
-  for (const name of tasksByName.keys()) names.add(name);
   const statusOf = (name: string, p: PresenceEntry | undefined): AgentBoardStatus => {
     if (!presenceSummary.onlineNames.has(name)) return "offline";
     if (p?.state === "blocked") return "blocked";
@@ -3771,8 +3782,12 @@ export function ChannelPage({
   const taskBlockedCount = taskSummary?.blocked ?? tasks.filter((task) => task.state === "blocked").length;
   const taskMineCount = taskSummary?.mine ?? 0;
   const agentPresence = useMemo(
-    () => agentPresenceSummary(Object.values(state.presence), state.participants),
-    [state.participants, state.presence],
+    () => agentPresenceSummary(
+      Object.values(state.presence),
+      state.participants,
+      tasks.map(agentBoardTaskAssignee).filter((name): name is string => name !== null),
+    ),
+    [state.participants, state.presence, tasks],
   );
   const onlineAgentCount = agentPresence.online;
   // #504 团队面板博客风页签的角标：离线 agent 数 / 未认领分工数 / @我未读数。

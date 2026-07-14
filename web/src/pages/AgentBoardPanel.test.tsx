@@ -206,7 +206,7 @@ describe("AgentBoardPanel (#187)", () => {
 });
 
 describe("agentPresenceSummary (#514)", () => {
-  test("unions live agents, excludes humans, and keeps unmatched presence offline", () => {
+  test("unions live and tasked agents, excludes humans, and keeps unmatched entries offline", () => {
     const summary = agentPresenceSummary(
       [
         presence("reconnected", { state: "offline", live: false }),
@@ -219,11 +219,12 @@ describe("agentPresenceSummary (#514)", () => {
         { name: "human-only", kind: "human" },
         { name: "human-presence", kind: "human" },
       ],
+      ["task-only"],
     );
 
-    expect([...summary.agentNames].sort()).toEqual(["offline-agent", "participant-only", "reconnected"]);
+    expect([...summary.agentNames].sort()).toEqual(["offline-agent", "participant-only", "reconnected", "task-only"]);
     expect([...summary.onlineNames].sort()).toEqual(["participant-only", "reconnected"]);
     expect(summary.online).toBe(2);
-    expect(summary.offline).toBe(1);
+    expect(summary.offline).toBe(2);
   });
 });
