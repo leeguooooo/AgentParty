@@ -257,6 +257,29 @@ describe("DivisionBoard org-structure relationships (#168)", () => {
     return [...findText("role-report t-mono"), ...findText("role-report role-report--external t-mono")];
   }
 
+  test("the compact org button is the single control for showing the full tree (#504)", () => {
+    render(
+      baseProps({
+        roles: [
+          { name: "worker-a", role: "worker", responsibility: "ships x", assigned_by: "leo", assigned_at: 1, kind: "agent", account: "leo", display: "worker-a" },
+        ],
+        presence: { "worker-a": presenceEntry({ name: "worker-a", account: "leo" }) },
+      }),
+    );
+
+    const toggle = renderer!.root.find((node) => node.props.className === "d-btn role-org-toggle");
+    expect(toggle.props["aria-expanded"]).toBe(false);
+    expect(toggle.props["aria-controls"]).toBe("division-org-tree");
+    expect(renderer!.root.findAllByProps({ id: "division-org-tree" })).toHaveLength(0);
+
+    act(() => toggle.props.onClick());
+
+    expect(toggle.props["aria-expanded"]).toBe(true);
+    const tree = renderer!.root.find((node) => node.type === "section" && node.props.id === "division-org-tree");
+    expect(tree.type).toBe("section");
+    expect(tree.findAllByType("details")).toHaveLength(0);
+  });
+
   test("a declared role with lineage shows who it reports to", () => {
     render(
       baseProps({

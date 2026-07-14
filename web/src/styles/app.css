@@ -994,10 +994,7 @@
   justify-content: space-between;
   gap: 10px;
   padding: 8px 10px;
-  cursor: pointer;
-  list-style: none;
 }
-.org-tree-head::-webkit-details-marker { display: none; }
 .org-tree-head h3 {
   margin: 0;
   font-size: 13px;

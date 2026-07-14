@@ -737,6 +737,7 @@ export function DivisionBoard({
             type="button"
             className="d-btn role-org-toggle"
             aria-expanded={orgOpen}
+            aria-controls="division-org-tree"
             onClick={() => setOrgOpen((v) => !v)}
           >
             {t("Channel.roles.orgToggle")} <span aria-hidden="true">{orgOpen ? "▾" : "▸"}</span>
@@ -768,6 +769,7 @@ export function DivisionBoard({
         </div>
         {orgOpen && (
           <OrgTreePreview
+            id="division-org-tree"
             tree={orgTree}
             t={t}
             interactive={

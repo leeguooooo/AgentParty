@@ -39,4 +39,12 @@ describe("issue #504 team blog board layout", () => {
     const online = ruleBody(".agent-board-live-dot.is-online");
     expect(online).toContain("background: var(--t-green)");
   });
+
+  test("compresses only lanes explicitly marked empty and leaves offline disclosure styling intact", () => {
+    const empty = ruleBody('.team-blog .agent-board-lane[data-empty="true"]');
+    expect(empty).toContain("border: 0");
+    expect(empty).toContain("background: transparent");
+    expect(css).toContain('.team-blog .agent-board-lane:not(.agent-board-lane--offline):not([data-empty="true"]) .agent-board-lane-head');
+    expect(css).not.toContain('.agent-board-lane--offline[data-empty="true"]');
+  });
 });

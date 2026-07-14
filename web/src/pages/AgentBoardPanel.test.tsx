@@ -126,6 +126,21 @@ describe("AgentBoardPanel (#187)", () => {
     expect(txt).toContain("还没有 agent");
   });
 
+  test("marks only empty active lanes while preserving the offline disclosure (#504)", () => {
+    const r = render(
+      "en",
+      [presence("alice", { state: "working", live: true })],
+      [task(1, "alice", "in_progress")],
+    );
+
+    expect(r.root.findByProps({ "data-status": "busy" }).props["data-empty"]).toBe(false);
+    expect(r.root.findByProps({ "data-status": "blocked" }).props["data-empty"]).toBe(true);
+    expect(r.root.findByProps({ "data-status": "idle" }).props["data-empty"]).toBe(true);
+    const offline = r.root.findByProps({ "data-status": "offline" });
+    expect(offline.type).toBe("details");
+    expect(offline.props["data-empty"]).toBeUndefined();
+  });
+
   test("offline agent with backlog still shows (from task assignee union)", () => {
     // 一个不在 presence 里但有任务的 agent 也要显示（离线但手里有活）
     const txt = allText(render("en", [], [task(1, "ghost", "assigned")]));
