@@ -575,6 +575,8 @@ export function DivisionBoard({
   const [selfHintCopied, setSelfHintCopied] = useState(false);
   const [editingRoleName, setEditingRoleName] = useState<string | null>(null);
   const [unassignedOpen, setUnassignedOpen] = useState(false);
+  // #504 还原度：组织架构树默认折叠（设计里是个按钮，不是常驻大卡），点开才展开，别顶乱分工列表。
+  const [orgOpen, setOrgOpen] = useState(false);
   useEffect(() => {
     if (!selfHintCopied) return;
     const timer = window.setTimeout(() => setSelfHintCopied(false), 1400);
@@ -715,25 +717,32 @@ export function DivisionBoard({
         </div>
       </summary>
       <div className="role-board-body">
-        {(canModerate || canManageAgentRules) && (
-          <div className="role-board-actions">
-            {canModerate && (
-              <button
-                type="button"
-                className="d-btn role-sync-charter-btn"
-                disabled={syncingCharter}
-                onClick={syncDivisionToCharter}
-              >
-                {syncingCharter ? t("Channel.roles.syncingCharter") : t("Channel.roles.syncToCharter")}
-              </button>
-            )}
-            {canManageAgentRules && (
-              <button type="button" className="d-btn role-open-rules-btn" onClick={onOpenAgentRules}>
-                {t("Channel.roles.openAgentRules")}
-              </button>
-            )}
-          </div>
-        )}
+        <div className="role-board-actions">
+          {canModerate && (
+            <button
+              type="button"
+              className="d-btn role-sync-charter-btn"
+              disabled={syncingCharter}
+              onClick={syncDivisionToCharter}
+            >
+              {syncingCharter ? t("Channel.roles.syncingCharter") : t("Channel.roles.syncToCharter")}
+            </button>
+          )}
+          {canManageAgentRules && (
+            <button type="button" className="d-btn role-open-rules-btn" onClick={onOpenAgentRules}>
+              {t("Channel.roles.openAgentRules")}
+            </button>
+          )}
+          <button
+            type="button"
+            className="d-btn role-org-toggle"
+            aria-expanded={orgOpen}
+            aria-controls="division-org-tree"
+            onClick={() => setOrgOpen((v) => !v)}
+          >
+            {t("Channel.roles.orgToggle")} <span aria-hidden="true">{orgOpen ? "▾" : "▸"}</span>
+          </button>
+        </div>
         <div className="role-selfhint">
           <button
             type="button"
@@ -758,15 +767,18 @@ export function DivisionBoard({
             </div>
           )}
         </div>
-        <OrgTreePreview
-          tree={orgTree}
-          t={t}
-          interactive={
-            canModerate && onSetReportsTo !== undefined
-              ? { canModerate, allNames: orgMembers.map((m) => m.name), busyName: roleSaving, onSetReportsTo }
-              : undefined
-          }
-        />
+        {orgOpen && (
+          <OrgTreePreview
+            id="division-org-tree"
+            tree={orgTree}
+            t={t}
+            interactive={
+              canModerate && onSetReportsTo !== undefined
+                ? { canModerate, allNames: orgMembers.map((m) => m.name), busyName: roleSaving, onSetReportsTo }
+                : undefined
+            }
+          />
+        )}
         {groups.length > 0 ? (
           <div className="role-account-list">
             {groups.map((group) => (
@@ -1650,6 +1662,7 @@ export function AgentBoardPanel({ presence, tasks }: { presence: PresenceEntry[]
             key={status}
             className={`agent-board-lane agent-board-lane--${status}`}
             data-status={status}
+            data-empty={laneRows.length === 0}
             aria-label={t("Channel.tasks.columnAria", { state: statusLabel })}
           >
             <header className="agent-board-lane-head">

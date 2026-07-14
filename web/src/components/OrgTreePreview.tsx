@@ -75,21 +75,23 @@ export function OrgTreePreview({
   tree,
   t,
   interactive,
+  id,
 }: {
   tree: OrgTree;
   t: TFunc;
   interactive?: OrgInteractive;
+  id?: string;
 }): ReactElement {
   const isEmpty = tree.roots.length === 0 && tree.unassigned.length === 0;
   return (
-    <details className="org-tree" aria-label={t("Channel.org.label")}>
-      <summary className="org-tree-head">
+    <section id={id} className="org-tree" aria-label={t("Channel.org.label")}>
+      <header className="org-tree-head">
         <div>
           <h3>{t("Channel.org.label")}</h3>
           <p className="t-mono">{t("Channel.org.help")}</p>
         </div>
         <span className="t-mono org-tree-count">{t("Channel.org.count", { count: String(tree.memberCount) })}</span>
-      </summary>
+      </header>
       <div className="org-tree-body">
         {isEmpty ? (
           <p className="charter-empty">{t("Channel.org.empty")}</p>
@@ -115,6 +117,6 @@ export function OrgTreePreview({
           </>
         )}
       </div>
-    </details>
+    </section>
   );
 }
