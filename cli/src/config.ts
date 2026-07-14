@@ -57,6 +57,8 @@ export interface StuckWake {
   /** 连续送达失败次数。有界重放靠它：超过上限就响亮放弃，绝不静默丢弃。 */
   attempts: number;
   last_error?: string;
+  /** 旧状态/serve 欠账没有该字段；watch 用它隔离两阶段确认语义，不能误清 serve delivery debt。 */
+  source?: "serve" | "watch";
 }
 
 export interface ChannelCursor {
@@ -473,7 +475,14 @@ export function clearStuck(channel: string, cwd?: string): void {
  * 这里只处理「我已经读到最新、紧接着自己发了一条」的情形，保住 statusline 的 unread=0。
  */
 export function advanceCursorPastOwnMessage(channel: string, seq: number, cwd?: string): void {
-  updateChannelCursor(channel, (cur) => cur.cursor === seq - 1 ? { ...cur, cursor: seq } : null, cwd);
+  updateChannelCursor(channel, (cur) => {
+    const advancesCursor = cur.cursor === seq - 1;
+    const acknowledgesWake = cur.stuck?.source === "watch" && seq > cur.stuck.seq;
+    if (!advancesCursor && !acknowledgesWake) return null;
+    const next: ChannelCursor = advancesCursor ? { ...cur, cursor: seq } : { ...cur };
+    if (acknowledgesWake) delete next.stuck;
+    return next;
+  }, cwd);
 }
 
 export function loadRevCursor(channel: string, cwd?: string): number {

@@ -56,6 +56,28 @@ function opts(over: Partial<WatchOptions> & { server: string }): WatchOptions & 
 }
 
 describe("watch --once 落后量告知 (#199)", () => {
+  test("持久化 pending wake 发生在输出与 cursor ack 之前 (#508)", async () => {
+    const events: string[] = [];
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(4, "me"));
+      sock.send(msgFrame(4, "wake", { mentions: ["me"] }));
+    });
+
+    const o = opts({
+      server: server.url,
+      since: 3,
+      out: (line) => events.push(`out:${line}`),
+      onStuck: (stuck) => events.push(`stuck:${stuck?.seq ?? "clear"}`),
+      onCursor: (cursor) => events.push(`cursor:${cursor}`),
+    });
+    expect(await runWatch(o)).toBe(0);
+
+    expect(events[0]).toBe("stuck:4");
+    expect(events.findIndex((event) => event.startsWith("out:"))).toBeGreaterThan(0);
+    expect(events.indexOf("stuck:4")).toBeLessThan(events.indexOf("cursor:4"));
+  });
+
   test("醒在最旧未读 @ 时，报出还落后多少条、频道 head 是多少", async () => {
     // 游标停在 3；频道已经到 20。seq 4 是最旧的未读 @，后面还压着 16 条。
     server = startMockServer((frame, sock) => {
@@ -126,6 +148,95 @@ describe("watch --once 落后量告知 (#199)", () => {
     expect(await runWatch(o)).toBe(0); // 补拉排空即退出 0，不会等到 archived
     expect(o.lines.some((l) => l.includes("落后"))).toBe(false);
   });
+});
+
+describe("watch --once pending wake replay (#508)", () => {
+  test("重挂先从 REST 重放欠账，--latest 也不能越过，且不再建立 WS", async () => {
+    home = mkdtempSync(join(tmpdir(), "ap-watch-pending-replay-"));
+    const pending = msgFrame(10, "@me must survive reaper", { mentions: ["me"] });
+    let upgrades = 0;
+    apiServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req, srv) {
+        const url = new URL(req.url);
+        if (url.pathname === "/api/channels/dev/messages") {
+          const since = Number(url.searchParams.get("since") ?? 0);
+          return Response.json({ messages: pending.seq > since ? [pending] : [] });
+        }
+        if (url.pathname === "/api/me") {
+          return Response.json({ name: "me", kind: "agent", role: "agent", email: null, owner: null });
+        }
+        upgrades++;
+        if (srv.upgrade(req, { data: undefined })) return;
+        return new Response("not found", { status: 404 });
+      },
+      websocket: { message() {} },
+    });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: `http://127.0.0.1:${apiServer.port}`, token: "ap_tok" }),
+    );
+    const dir = join(home, "state", workspaceId(process.cwd()));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "state.json"),
+      JSON.stringify({
+        channel: "dev",
+        cursor: 10,
+        cursors: {
+          dev: {
+            cursor: 10,
+            stuck: { seq: 10, attempts: 0, last_error: "watch wake awaiting agent acknowledgement", source: "watch" },
+          },
+        },
+      }),
+    );
+
+    const first = await runCli(["watch", "dev", "--once", "--mentions-only", "--latest", "--json"]);
+    expect(first.code).toBe(0);
+    expect(upgrades).toBe(0);
+    expect(JSON.parse(first.stdout)).toMatchObject({
+      type: "msg",
+      seq: 10,
+      watch_replay: true,
+      pending_ack: true,
+      replay_attempt: 1,
+    });
+    expect(first.stderr).toContain("--latest explicitly discards backlog");
+    expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).cursors.dev.stuck.attempts).toBe(1);
+
+    const second = await runCli(["watch", "dev", "--once", "--mentions-only", "--json"]);
+    expect(second.code).toBe(0);
+    expect(JSON.parse(second.stdout)).toMatchObject({ seq: 10, watch_replay: true, replay_attempt: 2 });
+    expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).cursors.dev.stuck.attempts).toBe(2);
+  }, 15_000);
+
+  test("欠账消息已退出保留窗口时响亮失败并保留 debt", async () => {
+    home = mkdtempSync(join(tmpdir(), "ap-watch-pending-missing-"));
+    apiServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        return Response.json({ messages: [] });
+      },
+    });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: `http://127.0.0.1:${apiServer.port}`, token: "ap_tok" }),
+    );
+    const dir = join(home, "state", workspaceId(process.cwd()));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "state.json"),
+      JSON.stringify({ channel: "dev", cursor: 10, cursors: { dev: { cursor: 10, stuck: { seq: 10, attempts: 3, source: "watch" } } } }),
+    );
+
+    const result = await runCli(["watch", "dev", "--once", "--mentions-only", "--json"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("no longer retained");
+    expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).cursors.dev.stuck).toEqual({ seq: 10, attempts: 3, source: "watch" });
+  }, 15_000);
 });
 
 describe("watch --once 不得复用身份级已读游标 (#206 门禁 P1)", () => {
