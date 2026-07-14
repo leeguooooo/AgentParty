@@ -232,6 +232,7 @@ describe("desktop release workflow", () => {
       expect(productionBuild).toContain("/releases/download/desktop-stable/latest-v2.json");
     }
     for (const previewBuild of [previewLegacy, previewV2]) {
+      expect(previewBuild).toContain('APPLE_SIGNING_IDENTITY: "-"');
       expect(previewBuild).toContain("AGENTPARTY_DESKTOP_DISTRIBUTION: preview");
       expect(previewBuild).toContain('AGENTPARTY_DESKTOP_NOTARIZED: "false"');
       expect(previewBuild).toContain("/releases/download/desktop-preview/latest-v2.json");
@@ -250,6 +251,12 @@ describe("desktop release workflow", () => {
       expect(workflow).toContain(`secrets.${secret}`);
     }
     expect(workflow).toContain("security find-identity -v -p codesigning");
+    expect(workflow).toContain("name: verify complete ad-hoc app bundle signature");
+    expect(workflow).toContain('code_resources="$app/Contents/_CodeSignature/CodeResources"');
+    expect(workflow).toContain("codesign --verify --deep --strict --verbose=2 \"$app\"");
+    expect(workflow).toContain("grep -Fxq 'Signature=adhoc'");
+    expect(workflow).toContain("grep -Fxq 'Identifier=com.agentparty.desktop'");
+    expect(workflow).toContain("grep -Fxq 'TeamIdentifier=not set'");
     expect(workflow).toContain("spctl --assess --type execute");
     expect(workflow).toContain("xcrun stapler validate");
     expect(workflow).not.toContain('xcrun notarytool submit "$dmg"');
@@ -268,10 +275,11 @@ describe("desktop release workflow", () => {
     expect(releaseJob).toContain("--clobber");
     expect(releaseJob).not.toContain('"$channel_tag" +');
 
-    expect(desktopDocs).toContain("Unnotarized macOS preview");
+    expect(desktopDocs).toContain("Current ad-hoc macOS distribution");
     expect(desktopDocs).toContain("desktop-stable");
     expect(desktopDocs).toContain("desktop-preview");
-    expect(desktopDocs).toContain("正式下载入口会在这些门禁真实通过后开放");
+    expect(desktopDocs).toContain("目前正式支持从下载页安装 ad-hoc 桌面包");
+    expect(desktopDocs).toContain("系统设置 → 隐私与安全性");
     expect(desktopDocs).toContain("正常运行期间每小时复查");
     expect(desktopDocs).toContain("从锁屏或后台回到应用时也会立即补查是否到期");
     expect(desktopDocs).toContain("还会发送一次包含目标版本的 macOS 通知");

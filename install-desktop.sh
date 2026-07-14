@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# agentparty install-desktop.sh — macOS production 桌面端安装器（#248）
+# agentparty install-desktop.sh — macOS 桌面端安装器（production 或明确 opt-in 的 ad-hoc 分发）
 # 用法:
 #   curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install-desktop.sh | sh
 # 环境变量:
@@ -7,10 +7,10 @@
 #   AGENTPARTY_MIRROR        下载 base url，默认 github releases。GFW/内网兜底。
 #   AGENTPARTY_APP_DIR       安装目录，默认 /Applications（无写权时回落 $HOME/Applications）。
 #   AGENTPARTY_ALLOW_UNNOTARIZED=1
-#                            显式允许安装未公证 preview；适合没有 Apple Developer 账号的自托管分发。
+#                            显式允许安装当前未公证的 ad-hoc 分发（发布元数据仍使用 preview 通道）。
 #
 # 默认只安装 Developer ID 签名并通过 Apple 公证的 production 产物。
-# 未公证 preview 必须由用户显式选择；安装器仍校验 release SHA-256 和应用版本，但会移除
+# 未公证的 ad-hoc 分发必须由用户显式选择；安装器仍校验 release SHA-256 和应用版本，但会移除
 # quarantine 以允许启动。安装器不会在用户机器上重签名应用。
 #
 # 安全:
@@ -129,10 +129,10 @@ main() {
   if [ "$notarized" = "true" ] && [ "$distribution" = "production" ]; then
     case "$auth" in apple-id|api-key) ;; *) die "签名状态缺少合法 notarization 认证记录。" ;; esac
   elif [ "$notarized" = "false" ] && [ "$distribution" = "preview" ] && [ "$auth" = "none" ]; then
-    [ "$ALLOW_UNNOTARIZED" = "1" ] || die "该版本是未公证 preview。确认信任发布方后，用 AGENTPARTY_ALLOW_UNNOTARIZED=1 显式安装。"
-    need xattr || die "preview 安装需要 xattr（macOS 自带）。"
+    [ "$ALLOW_UNNOTARIZED" = "1" ] || die "该版本是未公证的 ad-hoc 分发。确认信任发布方后，用 AGENTPARTY_ALLOW_UNNOTARIZED=1 显式安装。"
+    need xattr || die "ad-hoc 分发安装需要 xattr（macOS 自带）。"
     preview=1
-    log "警告：正在安装未经 Apple Developer ID 签名和公证的 preview；macOS 无法验证开发者身份。"
+    log "警告：正在安装未经 Apple Developer ID 签名和公证的 ad-hoc 分发；macOS 无法验证开发者身份。"
   else
     die "桌面签名状态无效（notarized=$notarized distribution=$distribution auth=$auth）。"
   fi
@@ -176,7 +176,7 @@ main() {
     xcrun stapler validate "$stage" >/dev/null 2>&1 || die "app 缺少有效 Apple 公证票据。"
     spctl --assess --type execute "$stage" >/dev/null 2>&1 || die "Gatekeeper 拒绝该 app。"
   else
-    xattr -dr com.apple.quarantine "$stage" || die "无法移除 preview 的 quarantine 属性。"
+    xattr -dr com.apple.quarantine "$stage" || die "无法移除 ad-hoc 分发的 quarantine 属性。"
   fi
 
   # 覆盖正在运行的 app 只会替换磁盘文件，旧进程仍会执行旧代码。先优雅退出，
@@ -257,7 +257,7 @@ main() {
   if [ "$preview" = "0" ]; then
     log "Developer ID、Apple 公证与 Gatekeeper 校验均已通过。"
   else
-    log "已按你的显式选择安装未公证 preview；升级到公证版后将恢复完整 Gatekeeper 验证。"
+    log "已按你的显式选择安装未公证的 ad-hoc 分发；发布状态可在桌面设置中查看。"
   fi
 }
 
