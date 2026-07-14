@@ -46,17 +46,13 @@ CLI:
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
 ```
 
-macOS desktop app (Developer ID signed releases verify Apple notarization and Gatekeeper before replacing the app):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install-desktop.sh | sh
-```
-
-Without an Apple Developer account, releases contain an explicitly labeled unnotarized preview. Install it only when you trust this repository; the installer still verifies the release checksum and version, then removes macOS quarantine so the app can start:
+macOS desktop app: [download page](https://app.leeguoo.com/agentparty). The current distribution is an explicitly labeled ad-hoc build, not a Developer ID signed or Apple-notarized app. Install it only when you trust this repository. The installer detects the Mac architecture, verifies the release checksum and version, and removes quarantine only for this ad-hoc distribution:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install-desktop.sh | AGENTPARTY_ALLOW_UNNOTARIZED=1 sh
 ```
+
+If a future release is Developer ID signed and notarized, the same installer verifies the Apple notarization ticket and Gatekeeper before replacing the app; the opt-in variable is then unnecessary.
 
 ## Quick start
 

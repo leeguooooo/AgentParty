@@ -563,6 +563,7 @@ jobs:
       - name: build unnotarized desktop preview with legacy updater key
         if: steps.apple-signing.outputs.enabled == 'false' && steps.updater-key-mode.outputs.mode != 'v2'
         env:
+          APPLE_SIGNING_IDENTITY: "-"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           AGENTPARTY_DESKTOP_DISTRIBUTION: preview
@@ -573,6 +574,7 @@ jobs:
       - name: build unnotarized desktop preview with v2 updater key
         if: steps.apple-signing.outputs.enabled == 'false' && steps.updater-key-mode.outputs.mode == 'v2'
         env:
+          APPLE_SIGNING_IDENTITY: "-"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_V2 }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD_V2 }}
           AGENTPARTY_DESKTOP_DISTRIBUTION: preview
@@ -595,6 +597,36 @@ jobs:
           xcrun stapler validate "$app"
           xcrun stapler validate "$dmg"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+
+      - name: verify complete ad-hoc app bundle signature
+        if: steps.apple-signing.outputs.enabled == 'false'
+        run: |
+          set -euo pipefail
+          app="$(find desktop/src-tauri/target/release/bundle/macos -name '*.app' -type d | head -n 1)"
+          if [ -z "$app" ]; then
+            echo "::error::macOS app bundle is missing"
+            exit 1
+          fi
+          code_resources="$app/Contents/_CodeSignature/CodeResources"
+          if [ ! -s "$code_resources" ]; then
+            echo "::error::complete ad-hoc bundle signature is missing CodeResources"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app"
+          signature="$(codesign -dv --verbose=4 "$app" 2>&1)"
+          printf '%s\n' "$signature"
+          grep -Fxq 'Signature=adhoc' <<< "$signature"
+          grep -Fxq 'Identifier=com.agentparty.desktop' <<< "$signature"
+          grep -Fxq 'TeamIdentifier=not set' <<< "$signature"
+          if grep -q '^Authority=' <<< "$signature"; then
+            echo "::error::ad-hoc desktop bundle unexpectedly contains a certificate authority"
+            exit 1
+          fi
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")"
+          if [ "$bundle_id" != 'com.agentparty.desktop' ]; then
+            echo "::error::desktop bundle identifier mismatch: $bundle_id"
+            exit 1
+          fi
 
       - name: verify bundled desktop sidecar
         run: |
@@ -773,13 +805,13 @@ jobs:
               echo "::error::preview desktop release must record notarization_auth=none"
               exit 1
             fi
-            DESKTOP_RELEASE_NOTES="AgentParty $GITHUB_REF_NAME unnotarized macOS preview; Gatekeeper may block manual installation."
+            DESKTOP_RELEASE_NOTES="AgentParty $GITHUB_REF_NAME ad-hoc macOS release; not Developer ID signed or Apple notarized."
             cat > dist/release-body.md <<EOF
           ## AgentParty $GITHUB_REF_NAME
 
           CLI packages are production release artifacts.
 
-          > **macOS desktop preview:** The DMG files are not Developer ID signed or Apple notarized. Gatekeeper may block manual installation. The AgentParty website does not present these files as a formal desktop download.
+          > **macOS ad-hoc distribution:** The DMG files are available from the AgentParty download page, but they are not Developer ID signed or Apple notarized. Use the documented one-line installer for checksum verification and first launch; direct DMG installation may be blocked by Gatekeeper.
           EOF
           else
             echo "::error::invalid desktop signing status: notarized=$notarized distribution=$distribution"
