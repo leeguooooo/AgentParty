@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -255,10 +255,19 @@ fn finalize_pending_updater_relaunch(
     current_version: &str,
     timestamp: u64,
 ) -> Result<bool, String> {
-    if !path.exists() {
-        return Ok(false);
+    const MAX_DIAGNOSTIC_BYTES: u64 = 64 * 1024;
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("updater diagnostic is unavailable".to_string()),
+    };
+    let mut raw = Vec::new();
+    file.take(MAX_DIAGNOSTIC_BYTES + 1)
+        .read_to_end(&mut raw)
+        .map_err(|_| "updater diagnostic is unavailable".to_string())?;
+    if raw.len() as u64 > MAX_DIAGNOSTIC_BYTES {
+        return Err("updater diagnostic is too large".to_string());
     }
-    let raw = fs::read(path).map_err(|_| "updater diagnostic is unavailable".to_string())?;
     let pending: UpdaterDiagnostic =
         serde_json::from_slice(&raw).map_err(|_| "updater diagnostic is invalid".to_string())?;
     validate_updater_diagnostic(&pending)?;
@@ -286,11 +295,7 @@ fn finalize_pending_updater_relaunch(
 
 #[cfg(desktop)]
 fn finalize_pending_updater_relaunch_for_app(app: &tauri::App) -> Result<bool, String> {
-    let path = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| "desktop app data directory is unavailable".to_string())?
-        .join(UPDATER_DIAGNOSTIC_FILE);
+    let path = app_data_dir(app.handle())?.join(UPDATER_DIAGNOSTIC_FILE);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is unavailable".to_string())?
@@ -1247,8 +1252,8 @@ mod tests {
         migrate_legacy_credential, parse_stored_credential, refresh_enabled_autostart,
         release_info_from_build, tray_action, validate_updater_diagnostic,
         write_updater_diagnostic, AutostartBackend, CredentialBackend, ExitGuard, MainWindowGate,
-        TrayAction, UpdaterDiagnostic, UpdaterDiagnosticCategory, UpdaterDiagnosticStage,
-        UpdaterDiagnosticStatus, CREDENTIAL_ACCOUNT,
+        TrayAction, UpdaterDiagnostic, UpdaterDiagnosticCategory, UpdaterDiagnosticSource,
+        UpdaterDiagnosticStage, UpdaterDiagnosticStatus, CREDENTIAL_ACCOUNT,
     };
 
     #[test]
@@ -1446,6 +1451,57 @@ mod tests {
         let stored: UpdaterDiagnostic =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(stored, pending);
+    }
+
+    #[test]
+    fn native_startup_ignores_missing_and_non_pending_updater_receipts() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().join("missing.json");
+        assert!(!finalize_pending_updater_relaunch(&missing, "0.2.91", 654_321).unwrap());
+
+        let completed_path = temp.path().join("completed.json");
+        let completed = UpdaterDiagnostic {
+            status: UpdaterDiagnosticStatus::Success,
+            source: None,
+            stage: UpdaterDiagnosticStage::Relaunch,
+            category: None,
+            timestamp: 123_456,
+            app_version: Some("0.2.91".to_string()),
+            target_version: Some("0.2.91".to_string()),
+        };
+        write_updater_diagnostic(&completed_path, &completed).unwrap();
+        assert!(!finalize_pending_updater_relaunch(&completed_path, "0.2.91", 654_321).unwrap());
+        let stored: UpdaterDiagnostic =
+            serde_json::from_slice(&std::fs::read(completed_path).unwrap()).unwrap();
+        assert_eq!(stored, completed);
+
+        let check_path = temp.path().join("check.json");
+        let check = UpdaterDiagnostic {
+            status: UpdaterDiagnosticStatus::Success,
+            source: Some(UpdaterDiagnosticSource::Manual),
+            stage: UpdaterDiagnosticStage::Check,
+            category: None,
+            timestamp: 123_456,
+            app_version: Some("0.2.91".to_string()),
+            target_version: None,
+        };
+        write_updater_diagnostic(&check_path, &check).unwrap();
+        assert!(!finalize_pending_updater_relaunch(&check_path, "0.2.91", 654_321).unwrap());
+        let stored: UpdaterDiagnostic =
+            serde_json::from_slice(&std::fs::read(check_path).unwrap()).unwrap();
+        assert_eq!(stored, check);
+    }
+
+    #[test]
+    fn native_startup_rejects_an_oversized_updater_receipt() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("updater-diagnostic.json");
+        std::fs::write(&path, vec![b'x'; 64 * 1024 + 1]).unwrap();
+
+        assert_eq!(
+            finalize_pending_updater_relaunch(&path, "0.2.91", 654_321).unwrap_err(),
+            "updater diagnostic is too large"
+        );
     }
 
     #[derive(Default)]
