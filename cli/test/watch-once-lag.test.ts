@@ -264,6 +264,11 @@ describe("watch --once pending wake replay (#508)", () => {
       lag: 4,
       skipped_mention_seqs: [3, 7],
     });
+
+    const human = await runCli(["watch", "dev", "--once", "--mentions-only"]);
+    expect(human.code).toBe(0);
+    expect(human.stdout).toContain("channel_last_seq=14 lag=4 skipped_mention_seqs=[3,7]");
+    expect(human.stdout).toContain("party history dev --since 10");
   }, 15_000);
 
   test("欠账消息已退出保留窗口时响亮失败并保留 debt", async () => {
