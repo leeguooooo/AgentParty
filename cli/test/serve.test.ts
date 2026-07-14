@@ -387,6 +387,7 @@ describe("runServe", () => {
     const blockedNote = blocked && "note" in blocked ? blocked.note : undefined;
     expect(blockedNote).toContain("attempts=1/3");
     expect(blockedNote).toContain("command exited 143 (SIGTERM)");
+    expect(blockedNote).toContain("(context: ");
   });
 
   test("advertises wake capability once on attach, before handling mentions", async () => {
