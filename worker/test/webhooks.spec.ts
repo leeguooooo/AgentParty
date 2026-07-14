@@ -163,13 +163,18 @@ describe("webhooks", () => {
       expect(unsafe.status).toBe(400);
     }
 
-    const created = await addWebhook(slug, agent.token, {
-      name: "hermes",
-      url: "https://hooks.test/wake",
-      secret: "super-secret",
-      filter: "mentions",
+    const created = await api(`/api/channels/${slug}/webhooks`, agent.token, {
+      method: "POST",
+      headers: { origin: "http://agentparty-ui.localhost" },
+      body: JSON.stringify({
+        name: "hermes",
+        url: "https://hooks.test/wake",
+        secret: "super-secret",
+        filter: "mentions",
+      }),
     });
     expect(created.status).toBe(201);
+    expect(created.headers.get("access-control-allow-origin")).toBe("http://agentparty-ui.localhost");
 
     const list = await api(`/api/channels/${slug}/webhooks`, agent.token);
     expect(list.status).toBe(200);
@@ -185,8 +190,12 @@ describe("webhooks", () => {
 
     const roDelete = await api(`/api/channels/${slug}/webhooks/hermes`, ro.token, { method: "DELETE" });
     expect(roDelete.status).toBe(403);
-    const del = await api(`/api/channels/${slug}/webhooks/hermes`, agent.token, { method: "DELETE" });
+    const del = await api(`/api/channels/${slug}/webhooks/hermes`, agent.token, {
+      method: "DELETE",
+      headers: { origin: "http://agentparty-ui.localhost" },
+    });
     expect(del.status).toBe(200);
+    expect(del.headers.get("access-control-allow-origin")).toBe("http://agentparty-ui.localhost");
     const again = await api(`/api/channels/${slug}/webhooks/hermes`, agent.token, { method: "DELETE" });
     expect(again.status).toBe(404);
     const empty = (await (await api(`/api/channels/${slug}/webhooks`, agent.token)).json()) as {
