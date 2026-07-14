@@ -12,7 +12,7 @@ import { JoinRequestBanner } from "../components/JoinRequestBanner";
 import { Composer, type UploadItem } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
 import { MessageCard } from "../components/MessageCard";
-import { MentionHeaderNotice, MentionToast, type MentionToastItem } from "../components/MentionToast";
+import { MentionHeaderNotice, type MentionToastItem } from "../components/MentionToast";
 import { NotifyToggle, readNotifyOptin } from "../components/NotifyToggle";
 import { PresenceBar } from "../components/PresenceBar";
 import { AttachmentList } from "../components/AttachmentList";
@@ -2326,6 +2326,8 @@ export function ChannelPage({
   optinRef.current = optin;
   const selfHandleRef = useRef(selfHandle);
   selfHandleRef.current = selfHandle;
+  const selfNameRef = useRef(state.self);
+  selfNameRef.current = state.self;
   const tRef = useRef(t);
   tRef.current = t;
   const notifiedSeqRef = useRef<Set<number>>(new Set()); // seq 去重：防同一帧被重复处理时重复弹通知
@@ -2746,7 +2748,7 @@ export function ChannelPage({
           if (
             frame.type === "msg" &&
             !notifiedSeqRef.current.has(frame.seq) &&
-            shouldNotify(frame, selfHandleRef.current, document.hidden, optinRef.current)
+            shouldNotify(frame, selfHandleRef.current, document.hidden, optinRef.current, selfNameRef.current)
           ) {
             notifiedSeqRef.current.add(frame.seq);
             const title = tRef.current("Channel.notify.title", { channel: slug });
@@ -2768,6 +2770,7 @@ export function ChannelPage({
               frame,
               selfHandleRef.current,
               document.hidden,
+              selfNameRef.current,
             );
             if (nextBadge !== desktopMentionBadgeRef.current) {
               desktopMentionBadgeRef.current = nextBadge;
@@ -2778,7 +2781,7 @@ export function ChannelPage({
           if (
             frame.type === "msg" &&
             !toastedSeqRef.current.has(frame.seq) &&
-            shouldToast(frame, selfHandleRef.current, document.hidden, optinRef.current)
+            shouldToast(frame, selfHandleRef.current, document.hidden, optinRef.current, selfNameRef.current)
           ) {
             toastedSeqRef.current.add(frame.seq);
             setToasts((cur) =>
@@ -2890,8 +2893,8 @@ export function ChannelPage({
   // 当前频道已加载窗口里所有 @我的确定性通知 id：聚焦时据此精确清掉本频道在通知中心的
   // 旧 @提醒，绝不误删其他频道的（issue #399 / CodeRabbit #401）。用 ref 供 markVisible 读最新值。
   const mentionNotificationIds = useMemo(
-    () => state.messages.filter((m) => isOwnMention(m, selfHandle)).map((m) => mentionNotificationId(slug, m.seq)),
-    [state.messages, selfHandle, slug],
+    () => state.messages.filter((m) => isOwnMention(m, selfHandle, state.self)).map((m) => mentionNotificationId(slug, m.seq)),
+    [state.messages, selfHandle, state.self, slug],
   );
   const mentionNotificationIdsRef = useRef<number[]>(mentionNotificationIds);
   mentionNotificationIdsRef.current = mentionNotificationIds;
@@ -3767,13 +3770,6 @@ export function ChannelPage({
 
   return (
     <div className="chan">
-      <MentionToast
-        items={toasts}
-        channel={slug}
-        identityDisplay={identityDisplay}
-        onJump={jumpToMention}
-        onDismiss={dismissToast}
-      />
       <PresenceBar
         presence={state.presence}
         participants={state.participants}

@@ -4451,9 +4451,11 @@
   color: var(--t-muted, #8a8778);
 }
 .msg-receipt--replied .msg-receipt-icon,
+.msg-receipt--working .msg-receipt-icon,
 .msg-receipt--woke .msg-receipt-icon,
 .msg-receipt--delivered .msg-receipt-icon,
 .msg-receipt--replied .msg-receipt-label,
+.msg-receipt--working .msg-receipt-label,
 .msg-receipt--woke .msg-receipt-label,
 .msg-receipt--delivered .msg-receipt-label {
   color: var(--t-green);

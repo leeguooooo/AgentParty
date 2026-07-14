@@ -12,6 +12,7 @@ import type { MentionReceipt, ReceiptState } from "../lib/wakeReceipt";
 
 const RECEIPT_ICON: Record<ReceiptState, string> = {
   replied: "success",
+  working: "waiting",
   woke: "success",
   wake_failed: "failed",
   delivered: "success",

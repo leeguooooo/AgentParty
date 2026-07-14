@@ -120,6 +120,7 @@ describe("party invite", () => {
     // 自包含简报要内联教会 agent 待命模型，核心是保住 agent 自己会话的上下文：
     // Claude Code 走后台 watch --once（同会话唤醒），其它 harness 走 serve + 续会话 runner
     expect(r.stdout).toContain("party watch fix-login-bug --mentions-only --once");
+    expect(r.stdout).toContain("party serve fix-login-bug --runner claude --replay-backlog");
     expect(r.stdout).toContain('$HOME/.agentparty/agents/agentparty-fix-login-bug-guest-fix-login-bug.json');
     expect(r.stdout).toContain("TMPDIR 清理会抹掉身份和 cursor");
     expect(r.stdout).not.toContain("${TMPDIR");

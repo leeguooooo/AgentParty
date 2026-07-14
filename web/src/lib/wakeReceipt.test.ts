@@ -119,6 +119,35 @@ describe("receiptFor priority ladder", () => {
     expect(r.state).toBe("delivered");
   });
 
+  test("current_task matching this mention → working even after serve consumed the wake", () => {
+    const rows = [
+      delivery({ mention_seq: 45, target_name: "evan", adapter_kind: "serve", webhook_name: "evan", result: "consumed", http_status: null, ack_seq: 52 }),
+    ];
+    const r = receiptFor(
+      "evan",
+      rows,
+      null,
+      ONLINE([]),
+      { evan: presence({ name: "evan", current_task: 45, task_started_at: NOW - 500, heartbeat_at: NOW }) },
+      NOW,
+      45,
+    );
+    expect(r).toMatchObject({ name: "evan", state: "working", detail: "#45", at: NOW - 500 });
+  });
+
+  test("current_task for a different mention does not claim this message is being processed", () => {
+    const r = receiptFor(
+      "evan",
+      [],
+      null,
+      ONLINE([]),
+      { evan: presence({ name: "evan", current_task: 99, task_started_at: NOW - 500, heartbeat_at: NOW }) },
+      NOW,
+      45,
+    );
+    expect(r.state).toBe("pending_reconnect");
+  });
+
   test("no ledger + wakeable presence → pending_wake with wake kind", () => {
     const r = receiptFor("evan", [], null, ONLINE([]), { evan: presence({ name: "evan", wake: { kind: "serve" } }) }, NOW);
     expect(r.state).toBe("pending_wake");
@@ -172,5 +201,20 @@ describe("buildReceipts", () => {
     ];
     const receipts = buildReceipts(messages, [], ONLINE([]), { evan: presence({ name: "evan", wake: { kind: "none" } }) }, NOW, ALL_AGENTS);
     expect(receipts.get(45)![0]!.state).toBe("pending_reconnect");
+  });
+
+  test("presence current_task links an active runner to the original mention", () => {
+    const messages: MsgFrame[] = [
+      msg({ seq: 45, sender: { name: "leo", kind: "human" }, mentions: ["evan"] }),
+    ];
+    const receipts = buildReceipts(
+      messages,
+      [],
+      ONLINE([]),
+      { evan: presence({ name: "evan", current_task: 45, task_started_at: NOW - 1_000, heartbeat_at: NOW }) },
+      NOW,
+      ALL_AGENTS,
+    );
+    expect(receipts.get(45)![0]).toMatchObject({ name: "evan", state: "working", detail: "#45" });
   });
 });

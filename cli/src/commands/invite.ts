@@ -258,7 +258,7 @@ ${checkinLines}
 # 保持能被叫醒（先选对 runtime；选错会“看起来在线但没人处理 @”）：
 #   Codex CLI / Codex tool-call shell：不要用 watch 当 wake 层；用 party serve + codex exec resume。
 #   Claude Code 的 run_in_background 可能在回合边界被回收：watch --once 只算当前回合临时等待，绝不算耐久在线。
-#   耐久 Claude 项目 agent：从持久 terminal 跑 party serve ${slug} --runner claude。
+#   耐久 Claude 项目 agent：从持久 terminal 跑 party serve ${slug} --runner claude --replay-backlog。
 #   其它已证明会保留后台任务并在退出时唤醒同一会话的 harness：可用 watch --once，每次唤醒后重挂。
 #   未知 harness：用 party serve，并让别人从另一个身份 party wake test @你 验证。
 #   watch --follow：只适合 tail/debug；它只是打印，不会自动唤醒 agent。
@@ -266,7 +266,7 @@ ${checkinLines}
 # 核心原则：保住你自己会话的上下文，别每次失忆冷起。
 #   ◆ Claude Code 回合内临时等待（非耐久 presence；回合切换可能被 kill）：
 #     用 run_in_background 跑：party watch ${slug} --mentions-only --once
-#     每个 turn 都要重挂；无人值守请改用：party serve ${slug} --runner claude
+#     每个 turn 都要重挂；无人值守请改用：party serve ${slug} --runner claude --replay-backlog
 #   ★ Codex / 其它 harness / 通用：party serve ${slug} --on-mention '<唤醒命令，见下>'
 #     常驻 supervisor 替你等、被 @ 才拉起你一次，等待零 token；挂上即自动声明「可被唤醒」
 #     （别人可用 party wake test @你 验证）。唤醒命令务必「续会话」而非冷起，session 上下文才不丢：

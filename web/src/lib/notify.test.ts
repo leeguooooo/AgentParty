@@ -18,6 +18,23 @@ test("没@我 → false", () => {
 test("我没 handle → false", () => {
   expect(shouldNotify(base(), null, true, true)).toBe(false);
 });
+test("human 稳定 name 与可读 handle 不同时，底层 name mention 仍命中", () => {
+  const byName = base({ mentions: ["lark-ad72b3f9749e"] });
+  expect(shouldNotify(byName, "leo", true, true, "lark-ad72b3f9749e")).toBe(true);
+  expect(shouldToast(byName, "leo", false, true, "lark-ad72b3f9749e")).toBe(true);
+  expect(nextMentionBadgeCount(2, byName, "leo", true, "lark-ad72b3f9749e")).toBe(3);
+});
+test("没有 handle 但有稳定 name 时仍能识别自己的 mention", () => {
+  const byName = base({ mentions: ["lark-ad72b3f9749e"] });
+  expect(shouldNotify(byName, null, true, true, "lark-ad72b3f9749e")).toBe(true);
+});
+test("同一 human 自己发送时，name/handle 任一命中都不通知", () => {
+  const own = base({
+    mentions: ["lark-ad72b3f9749e"],
+    sender: { name: "lark-ad72b3f9749e", kind: "human", handle: "leo" },
+  });
+  expect(shouldNotify(own, "leo", true, true, "lark-ad72b3f9749e")).toBe(false);
+});
 test("已撤回 / status / 自己发 → false", () => {
   expect(shouldNotify(base({retracted:true}), "leo", true, true)).toBe(false);
   expect(shouldNotify(base({kind:"status"}), "leo", true, true)).toBe(false);
