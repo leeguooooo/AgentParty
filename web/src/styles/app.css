@@ -6486,3 +6486,25 @@
   .team-blog .agent-board-row--offline { grid-template-columns: 1fr; }
   .agent-board-overview { align-items: flex-start; flex-direction: column; }
 }
+
+/* #504 还原度修复：看板空态与 lane 标题贴合设计源码。 */
+/* 空的忙/阻塞：去掉框和标题条，压成一行虚线占位（设计的 "忙 · 0 — 空"）。 */
+.team-blog .agent-board-lane[data-empty="true"] { border: 0; background: transparent; }
+.team-blog .agent-board-lane[data-empty="true"] .agent-board-lane-head { display: none; }
+.team-blog .agent-board-lane[data-empty="true"] .agent-board-lane-cards { padding: 0; }
+.team-blog .agent-board-lane[data-empty="true"] .agent-board-lane-empty {
+  margin: 0; padding: 8px 12px; border: 1.5px dashed var(--t-faint);
+  color: var(--t-muted); text-align: left; font-size: 12px;
+}
+/* 非空 lane（忙/阻塞/空闲）：标题改小 pill，不再通栏大条；离线折叠标题不动。 */
+.team-blog .agent-board-lane:not(.agent-board-lane--offline):not([data-empty="true"]) .agent-board-lane-head {
+  border-bottom: 0; padding: 9px 9px 0;
+}
+.team-blog .agent-board-lane:not(.agent-board-lane--offline) .agent-board-lane-title {
+  display: inline-block; padding: 1px 8px; border: 1.5px solid var(--t-border);
+  font-size: 11.5px; text-transform: none; letter-spacing: 0; font-weight: 600;
+}
+.team-blog .agent-board-lane--idle .agent-board-lane-title { background: var(--d-green-soft); }
+.team-blog .agent-board-lane--busy .agent-board-lane-title { background: var(--d-amber-soft); }
+.team-blog .agent-board-lane--blocked .agent-board-lane-title { background: var(--d-red-soft); }
+.team-blog .agent-board-lane:not(.agent-board-lane--offline) .agent-board-lane-count { border: 0; background: transparent; color: var(--t-dim); }
