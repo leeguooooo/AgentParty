@@ -59,6 +59,10 @@ export interface StuckWake {
   last_error?: string;
   /** 旧状态/serve 欠账没有该字段；watch 用它隔离两阶段确认语义，不能误清 serve delivery debt。 */
   source?: "serve" | "watch";
+  /** watch 首次输出时看到的频道 head；重放时会再探测并取较新者。 */
+  channel_last_seq?: number;
+  /** 首次显式快进时跳过的 mentions，随 pending wake 一起保留。 */
+  skipped_mention_seqs?: number[];
 }
 
 export interface ChannelCursor {
@@ -457,6 +461,20 @@ export function loadStuck(channel: string, cwd?: string): StuckWake | null {
 /** 写欠账。和 cursor 并列，互不覆盖。 */
 export function saveStuck(channel: string, stuck: StuckWake, cwd?: string): void {
   updateChannelCursor(channel, (cur) => ({ ...cur, stuck }), cwd);
+}
+
+/**
+ * 原子写 watch 欠账：watch/serve 用不同实例锁，可以并发；不能先 load 再 save（TOCTOU 会覆盖 serve debt）。
+ * 返回 false 表示已有非 watch 欠账，调用方必须停止且不得 ack 当前消息。
+ */
+export function saveWatchStuck(channel: string, stuck: StuckWake, cwd?: string): boolean {
+  let saved = false;
+  updateChannelCursor(channel, (cur) => {
+    if (cur.stuck !== undefined && cur.stuck.source !== "watch") return null;
+    saved = true;
+    return { ...cur, stuck: { ...stuck, source: "watch" } };
+  }, cwd);
+  return saved;
 }
 
 /** 了结欠账：送达成功，或有界重试耗尽后显式放弃。 */

@@ -68,7 +68,7 @@ describe("watch --once 落后量告知 (#199)", () => {
       server: server.url,
       since: 3,
       out: (line) => events.push(`out:${line}`),
-      onStuck: (stuck) => events.push(`stuck:${stuck?.seq ?? "clear"}`),
+      onStuck: (stuck) => events.push(`stuck:${stuck.seq}`),
       onCursor: (cursor) => events.push(`cursor:${cursor}`),
     });
     expect(await runWatch(o)).toBe(0);
@@ -202,6 +202,9 @@ describe("watch --once pending wake replay (#508)", () => {
       watch_replay: true,
       pending_ack: true,
       replay_attempt: 1,
+      channel_last_seq: 10,
+      lag: 0,
+      skipped_mention_seqs: [],
     });
     expect(first.stderr).toContain("--latest explicitly discards backlog");
     expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).cursors.dev.stuck.attempts).toBe(1);
@@ -210,6 +213,57 @@ describe("watch --once pending wake replay (#508)", () => {
     expect(second.code).toBe(0);
     expect(JSON.parse(second.stdout)).toMatchObject({ seq: 10, watch_replay: true, replay_attempt: 2 });
     expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).cursors.dev.stuck.attempts).toBe(2);
+  }, 15_000);
+
+  test("重放帧重新探测频道 head，并保留首次快进的 mention 元数据 (#508)", async () => {
+    home = mkdtempSync(join(tmpdir(), "ap-watch-pending-head-"));
+    const pending = msgFrame(10, "oldest pending wake", { mentions: ["me"] });
+    const head = msgFrame(14, "newer context");
+    apiServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname !== "/api/channels/dev/messages") return new Response("not found", { status: 404 });
+        return Response.json({ messages: url.searchParams.has("before") ? [head] : [pending] });
+      },
+    });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: `http://127.0.0.1:${apiServer.port}`, token: "ap_tok" }),
+    );
+    const dir = join(home, "state", workspaceId(process.cwd()));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "state.json"),
+      JSON.stringify({
+        channel: "dev",
+        cursor: 10,
+        cursors: {
+          dev: {
+            cursor: 10,
+            stuck: {
+              seq: 10,
+              attempts: 0,
+              source: "watch",
+              channel_last_seq: 12,
+              skipped_mention_seqs: [3, 7],
+            },
+          },
+        },
+      }),
+    );
+
+    const result = await runCli(["watch", "dev", "--once", "--mentions-only", "--json"]);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      seq: 10,
+      watch_replay: true,
+      pending_ack: true,
+      channel_last_seq: 14,
+      lag: 4,
+      skipped_mention_seqs: [3, 7],
+    });
   }, 15_000);
 
   test("欠账消息已退出保留窗口时响亮失败并保留 debt", async () => {

@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clearStuck, loadStuck, saveStuck } from "../src/config";
+import { clearStuck, loadStuck, saveStuck, saveWatchStuck } from "../src/config";
 
 const cwd = () => mkdtempSync(join(tmpdir(), "ap-stuck-"));
 
@@ -49,5 +49,18 @@ describe("stuck wake persistence (#198 约束①：stuck 落盘)", () => {
     const prev = loadStuck("dev", d)!;
     saveStuck("dev", { ...prev, attempts: prev.attempts + 1, last_error: "again" }, d);
     expect(loadStuck("dev", d)).toEqual({ seq: 100, attempts: 2, last_error: "again" });
+  });
+
+  test("watch 原子写不能覆盖 serve 欠账，但可以创建或更新自己的欠账 (#508)", () => {
+    const d = cwd();
+    saveStuck("dev", { seq: 100, attempts: 1 }, d);
+
+    expect(saveWatchStuck("dev", { seq: 101, attempts: 0, source: "watch" }, d)).toBe(false);
+    expect(loadStuck("dev", d)).toEqual({ seq: 100, attempts: 1 });
+
+    clearStuck("dev", d);
+    expect(saveWatchStuck("dev", { seq: 101, attempts: 0, source: "watch" }, d)).toBe(true);
+    expect(saveWatchStuck("dev", { seq: 101, attempts: 1, source: "watch" }, d)).toBe(true);
+    expect(loadStuck("dev", d)).toEqual({ seq: 101, attempts: 1, source: "watch" });
   });
 });

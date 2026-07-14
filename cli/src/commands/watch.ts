@@ -4,14 +4,13 @@ import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from 
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
 import {
-  clearStuck,
   loadCursor,
   loadRevCursor,
   loadStuck,
   resolveChannel,
   saveCursor,
   saveRevCursor,
-  saveStuck,
+  saveWatchStuck,
   type StuckWake,
 } from "../config";
 import { resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
@@ -121,7 +120,7 @@ export interface WatchOptions {
   json?: boolean; // 输出 NDJSON 帧而非人类格式，供 supervisor/工具消费
   skippedMentionSeqs?: number[]; // 显式 --latest/--since 快进时跳过的 @，随 once wake 交给 agent
   /** --once 打印前先持久化「尚未被模型确认」的唤醒；后续自己发消息/状态才清账（#508）。 */
-  onStuck?: (stuck: StuckWake | null) => void;
+  onStuck?: (stuck: StuckWake) => void;
   onCursor?: (cursor: number) => void;
   onRevCursor?: (revCursor: number) => void;
   out?: (line: string) => void;
@@ -362,6 +361,8 @@ export async function runWatch(o: WatchOptions): Promise<number> {
           attempts: 0,
           last_error: "watch wake awaiting agent acknowledgement",
           source: "watch",
+          channel_last_seq: lastSeq,
+          skipped_mention_seqs: o.skippedMentionSeqs ?? [],
         });
       }
       if (qualifies) {
@@ -525,8 +526,11 @@ export async function run(argv: string[]): Promise<number> {
       return 1;
     }
     try {
-      const pending = (await fetchMessages(cfg.server, cfg.token, channel, Math.max(0, stuck.seq - 1), 1))
-        .find((msg) => msg.seq === stuck.seq);
+      const [pendingPage, tail] = await Promise.all([
+        fetchMessages(cfg.server, cfg.token, channel, Math.max(0, stuck.seq - 1), 1),
+        fetchRecentMessages(cfg.server, cfg.token, channel, 1),
+      ]);
+      const pending = pendingPage.find((msg) => msg.seq === stuck.seq);
       if (pending === undefined) {
         console.error(
           `error: pending watch wake seq=${stuck.seq} is no longer retained; debt was preserved. ` +
@@ -535,7 +539,16 @@ export async function run(argv: string[]): Promise<number> {
         return 1;
       }
       const replay = { ...stuck, attempts: stuck.attempts + 1 };
-      saveStuck(channel, replay);
+      if (!saveWatchStuck(channel, replay)) {
+        console.error(
+          `error: #${channel} acquired a pending serve wake while replaying seq=${stuck.seq}; ` +
+            "watch preserved that delivery debt and did not acknowledge this wake.",
+        );
+        return 1;
+      }
+      const channelLastSeq = Math.max(stuck.channel_last_seq ?? 0, tail.at(-1)?.seq ?? 0, pending.seq);
+      const lag = Math.max(0, channelLastSeq - pending.seq);
+      const skippedMentionSeqs = stuck.skipped_mention_seqs ?? [];
       if (flags.json === true) {
         console.log(
           JSON.stringify(
@@ -544,13 +557,19 @@ export async function run(argv: string[]): Promise<number> {
               watch_replay: true,
               pending_ack: true,
               replay_attempt: replay.attempts,
+              channel_last_seq: channelLastSeq,
+              lag,
+              skipped_mention_seqs: skippedMentionSeqs,
             }),
           ),
         );
       } else {
         console.log(
           `watch: replaying pending unacknowledged wake seq=${stuck.seq} attempt=${replay.attempts}; ` +
-            `send a reply/status after handling it to clear this debt.`,
+            `channel_last_seq=${channelLastSeq} lag=${lag} ` +
+            `skipped_mention_seqs=${JSON.stringify(skippedMentionSeqs)}; ` +
+            `send a reply/status after handling it to clear this debt.` +
+            (lag > 0 ? ` 补上下文：party history ${channel} --since ${stuck.seq}` : ""),
         );
         console.log(formatMsg(pending));
       }
@@ -614,7 +633,13 @@ export async function run(argv: string[]): Promise<number> {
     mentionsOnly: flags["mentions-only"] === true,
     json: flags.json === true,
     skippedMentionSeqs,
-    onStuck: (st) => (st === null ? clearStuck(channel) : saveStuck(channel, st)),
+    onStuck: (st) => {
+      if (!saveWatchStuck(channel, st)) {
+        throw new Error(
+          `#${channel} has a pending serve wake; watch preserved that delivery debt and did not acknowledge this wake`,
+        );
+      }
+    },
     onCursor: (c) => saveCursor(channel, c),
     onRevCursor: (r) => saveRevCursor(channel, r),
     statusline: true,
