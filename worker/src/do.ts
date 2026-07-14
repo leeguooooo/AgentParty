@@ -2435,6 +2435,13 @@ export class ChannelDO extends Server<Env> {
           "content-type": "application/json",
           authorization: `Bearer ${secret}`,
           "x-agentparty-signature": `hmac-sha256=${signature}`,
+          // Hermes Agent's generic webhook adapter accepts the same HMAC as a
+          // raw hex digest. Keep AgentParty's namespaced header as the primary
+          // contract and send the compatibility header alongside it.
+          "x-webhook-signature": signature,
+          // Stable across retries so Hermes can deduplicate a delivery instead
+          // of starting another agent turn after a transient failure.
+          "x-request-id": `agentparty-${signature}`,
         },
         redirect: "manual",
         signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),

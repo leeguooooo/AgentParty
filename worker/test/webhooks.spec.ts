@@ -267,7 +267,10 @@ describe("webhooks", () => {
 
     expect(headers.authorization).toBe(`Bearer ${secret}`);
     expect(headers["content-type"]).toBe("application/json");
-    expect(headers["x-agentparty-signature"]).toBe(`hmac-sha256=${await hmacHex(secret, body)}`);
+    const signature = await hmacHex(secret, body);
+    expect(headers["x-agentparty-signature"]).toBe(`hmac-sha256=${signature}`);
+    expect(headers["x-webhook-signature"]).toBe(signature);
+    expect(headers["x-request-id"]).toBe(`agentparty-${signature}`);
     expect(await queueRows(slug)).toHaveLength(0);
   });
 
@@ -312,7 +315,10 @@ describe("webhooks", () => {
       channel: slug,
     });
     expect(headers.authorization).toBe(`Bearer ${secret}`);
-    expect(headers["x-agentparty-signature"]).toBe(`hmac-sha256=${await hmacHex(secret, body)}`);
+    const signature = await hmacHex(secret, body);
+    expect(headers["x-agentparty-signature"]).toBe(`hmac-sha256=${signature}`);
+    expect(headers["x-webhook-signature"]).toBe(signature);
+    expect(headers["x-request-id"]).toBe(`agentparty-${signature}`);
     expect(await queueRows(slug)).toHaveLength(0);
   });
 
