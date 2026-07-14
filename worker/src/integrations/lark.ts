@@ -47,6 +47,8 @@ const DIRECTORY_CURSOR_VERSION = 1;
 const DIRECTORY_CURSOR_MAX = 1_024;
 const DIRECTORY_PAGE_TOKEN_MAX = 512;
 const DIRECTORY_DEPARTMENT_BATCH = 4;
+const DIRECTORY_SCOPE_PAGE_SIZE = 100;
+const DIRECTORY_SCOPE_SCAN_LIMIT = 400;
 const DEPARTMENT_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_\-@.]{0,63}$/;
 const tokenCache = new Map<string, { token: string; expiresAt: number }>();
 const textEncoder = new TextEncoder();
@@ -61,6 +63,9 @@ interface DirectoryCursorState {
   u: string | null;
   n: string | null;
   s: boolean;
+  m?: "scope";
+  i?: string[];
+  e?: string[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -145,7 +150,19 @@ async function decodeDirectoryCursor(
     !Array.isArray(decoded.a) || decoded.a.length >= DIRECTORY_DEPARTMENT_BATCH ||
     !decoded.a.every((departmentId) => typeof departmentId === "string" && DEPARTMENT_ID_RE.test(departmentId)) ||
     !validPageToken(decoded.n) || typeof decoded.s !== "boolean" ||
-    (!decoded.s && (decoded.d !== "0" || decoded.a.length !== 0 || decoded.n !== null))
+    (decoded.m !== undefined && decoded.m !== "scope") ||
+    (decoded.i !== undefined && (
+      !Array.isArray(decoded.i) ||
+      decoded.i.length > DIRECTORY_SCOPE_PAGE_SIZE ||
+      !decoded.i.every((userId) => typeof userId === "string" && userId.trim().length > 0)
+    )) ||
+    (decoded.e !== undefined && (
+      !Array.isArray(decoded.e) ||
+      decoded.e.length > DIRECTORY_SCOPE_SCAN_LIMIT ||
+      !decoded.e.every((userId) => typeof userId === "string" && userId.trim().length > 0)
+    )) ||
+    (!decoded.s && (decoded.d !== "0" || decoded.a.length !== 0 || decoded.n !== null)) ||
+    (decoded.m !== "scope" && (decoded.i !== undefined || decoded.e !== undefined))
   ) {
     throw invalid();
   }
@@ -299,6 +316,136 @@ async function advanceLarkDepartment(
   };
 }
 
+async function larkScopePage(
+  env: EnvLike,
+  provider: LarkProviderConfig,
+  pageToken: string | null,
+): Promise<{ departmentIds: string[]; userIds: string[]; nextPageToken: string | null }> {
+  const params = new URLSearchParams({
+    user_id_type: "union_id",
+    department_id_type: "open_department_id",
+    page_size: String(DIRECTORY_SCOPE_PAGE_SIZE),
+  });
+  if (pageToken !== null) params.set("page_token", pageToken);
+  const data = await larkDirectoryRequest(env, provider, `/open-apis/contact/v3/scopes?${params.toString()}`);
+  const payload = isRecord(data.data) ? data.data : {};
+  const departmentIds = Array.isArray(payload.department_ids)
+    ? payload.department_ids.filter((id): id is string => typeof id === "string" && DEPARTMENT_ID_RE.test(id))
+    : [];
+  const userIds = Array.isArray(payload.user_ids)
+    ? payload.user_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim())
+    : [];
+  const nextPageToken = payload.has_more === true && typeof payload.page_token === "string" && payload.page_token
+    ? payload.page_token
+    : null;
+  if (payload.has_more === true && nextPageToken === null) {
+    throw new LarkDirectoryError("upstream", "Lark omitted the next contact-scope cursor");
+  }
+  return { departmentIds, userIds, nextPageToken };
+}
+
+async function directDepartmentUsersPage(
+  env: EnvLike,
+  provider: LarkProviderConfig,
+  departmentId: string,
+  pageSize: number,
+  pageToken: string | null,
+): Promise<{ users: LarkDirectoryUser[]; nextPageToken: string | null }> {
+  const params = new URLSearchParams({
+    user_id_type: "union_id",
+    department_id_type: "open_department_id",
+    department_id: departmentId,
+    page_size: String(pageSize),
+  });
+  if (pageToken !== null) params.set("page_token", pageToken);
+  const data = await larkDirectoryRequest(
+    env,
+    provider,
+    `/open-apis/contact/v3/users/find_by_department?${params.toString()}`,
+  );
+  const payload = isRecord(data.data) ? data.data : {};
+  const nextPageToken = payload.has_more === true && typeof payload.page_token === "string" && payload.page_token
+    ? payload.page_token
+    : null;
+  if (payload.has_more === true && nextPageToken === null) {
+    throw new LarkDirectoryError("upstream", "Lark omitted the next user cursor");
+  }
+  return { users: directoryUsers(data), nextPageToken };
+}
+
+async function scopedLarkDirectorySearch(
+  env: EnvLike,
+  provider: LarkProviderConfig,
+  normalizedQuery: string,
+  pageSize: number,
+  cursorState: DirectoryCursorState | null = null,
+): Promise<{ users: LarkDirectoryUser[]; nextCursor: string | null }> {
+  const secret = providerSecret(env, provider);
+  const state: DirectoryCursorState = cursorState ?? {
+    v: DIRECTORY_CURSOR_VERSION,
+    q: normalizedQuery,
+    p: provider.id,
+    d: "0",
+    a: [],
+    u: null,
+    n: null,
+    s: false,
+    m: "scope",
+    i: [],
+    e: [],
+  };
+  const seen = new Set(state.e ?? []);
+  const users: LarkDirectoryUser[] = [];
+  let scanned = seen.size;
+  while (users.length < pageSize && scanned < DIRECTORY_SCOPE_SCAN_LIMIT) {
+    const directUserIds = state.i ?? [];
+    if (directUserIds.length > 0) {
+      const batch = directUserIds.splice(0, Math.min(4, directUserIds.length, pageSize - users.length));
+      const batchUsers = await Promise.all(batch.map((userId) => getLarkDirectoryUser(env, provider, userId)));
+      for (const user of batchUsers) {
+        scanned += 1;
+        if (seen.has(user.id)) continue;
+        seen.add(user.id);
+        if (user.name.toLocaleLowerCase().includes(normalizedQuery)) users.push(user);
+      }
+      state.i = directUserIds;
+      continue;
+    }
+    if (state.d !== "0") {
+      const page = await directDepartmentUsersPage(env, provider, state.d, pageSize, state.u);
+      state.u = page.nextPageToken;
+      if (state.u === null) state.d = state.a.shift() ?? "0";
+      for (const user of page.users) {
+        scanned += 1;
+        if (seen.has(user.id)) continue;
+        seen.add(user.id);
+        if (user.name.toLocaleLowerCase().includes(normalizedQuery)) users.push(user);
+        if (users.length >= pageSize || scanned >= DIRECTORY_SCOPE_SCAN_LIMIT) break;
+      }
+      continue;
+    }
+    if (state.a.length > 0) {
+      state.d = state.a.shift() ?? "0";
+      state.u = null;
+      continue;
+    }
+    if (state.s && state.n === null) break;
+    const scope = await larkScopePage(env, provider, state.s ? state.n : null);
+    state.s = true;
+    state.n = scope.nextPageToken;
+    state.i = scope.userIds;
+    state.a = scope.departmentIds;
+  }
+  state.e = [...seen];
+  const hasMore = scanned < DIRECTORY_SCOPE_SCAN_LIMIT && (
+    (state.i?.length ?? 0) > 0 ||
+    state.d !== "0" ||
+    state.a.length > 0 ||
+    state.n !== null
+  );
+  return { users, nextCursor: hasMore ? await encodeDirectoryCursor(secret, state) : null };
+}
+
 export async function searchLarkDirectory(
   env: EnvLike,
   provider: LarkProviderConfig,
@@ -311,6 +458,7 @@ export async function searchLarkDirectory(
   const state = cursor === null
     ? { v: DIRECTORY_CURSOR_VERSION, q: normalizedQuery, p: provider.id, d: "0", a: [], u: null, n: null, s: false } as DirectoryCursorState
     : await decodeDirectoryCursor(secret, cursor, normalizedQuery, provider.id);
+  if (state.m === "scope") return scopedLarkDirectorySearch(env, provider, normalizedQuery, pageSize, state);
   const params = new URLSearchParams({
     user_id_type: "union_id",
     department_id_type: "open_department_id",
@@ -318,11 +466,19 @@ export async function searchLarkDirectory(
     page_size: String(pageSize),
   });
   if (state.u !== null) params.set("page_token", state.u);
-  const data = await larkDirectoryRequest(
-    env,
-    provider,
-    `/open-apis/contact/v3/users/find_by_department?${params.toString()}`,
-  );
+  let data: Record<string, unknown>;
+  try {
+    data = await larkDirectoryRequest(
+      env,
+      provider,
+      `/open-apis/contact/v3/users/find_by_department?${params.toString()}`,
+    );
+  } catch (error) {
+    if (cursor === null && error instanceof LarkDirectoryError && error.kind === "permission") {
+      return scopedLarkDirectorySearch(env, provider, normalizedQuery, pageSize);
+    }
+    throw error;
+  }
   const users = directoryUsers(data).filter((user) => user.name.toLocaleLowerCase().includes(normalizedQuery));
   const payload = isRecord(data.data) ? data.data : {};
   const hasMore = payload.has_more === true;
