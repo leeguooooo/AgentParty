@@ -324,6 +324,7 @@ describe("App desktop server pairing behavior", () => {
 
     expect(isShareMode()).toBe(true);
     expect(currentShareToken()).toBe("stale-watch-token");
+    expect(renderer!.root.findAllByProps({ className: "app-settings-btn" })).toHaveLength(0);
   });
 
   test("hidden desktop startup defers Keychain restore until the main window is shown", async () => {
