@@ -22,6 +22,7 @@ describe("division agent summary", () => {
       ...screenshotRoles,
       { name: "human", display: "Leo", kind: "human", role: "host" },
     ]);
+    expect(roles.map((role) => role.name)).toEqual(expect.arrayContaining(["ai-girl", "ai-girl-zim"]));
     expect(roles.map((role) => role.name)).not.toContain("lark:on_owner");
     expect(roles.map((role) => role.name)).not.toContain("human");
   });
