@@ -13,6 +13,8 @@ import {
   type CompletionReview,
   type CompletionReviewPolicy,
   type DecisionMode,
+  type DecisionRequest,
+  type DecisionResolution,
   type IdentityEraseSummary,
   type IdentityExportData,
   EXIT_ARCHIVED,
@@ -100,7 +102,10 @@ export interface WebhookInfo {
   name: string;
   url: string;
   filter: WebhookFilter;
+  mode?: WebhookMode;
 }
+
+export type WebhookMode = "notify" | "agent";
 
 export interface LarkNotifyStatus {
   enabled: boolean;
@@ -368,10 +373,12 @@ export async function mintProjectAgentRuntimeToken(
   server: string,
   token: string,
   handle: string,
+  signal?: AbortSignal,
 ): Promise<ProjectAgentRuntime> {
   return (await req(server, `/api/agent-profiles/${encodeURIComponent(handle)}/runtime-token`, {
     method: "POST",
     headers: bearerJson(token),
+    signal,
   })) as ProjectAgentRuntime;
 }
 
@@ -379,9 +386,13 @@ export async function listProjectAgentInvites(
   server: string,
   token: string,
   handle?: string,
+  signal?: AbortSignal,
 ): Promise<ChannelProjectAgentInvite[]> {
   const suffix = handle === undefined ? "" : `?handle=${encodeURIComponent(handle)}`;
-  const body = await req(server, `/api/agent-profiles/invites${suffix}`, { headers: bearerJson(token) });
+  const body = await req(server, `/api/agent-profiles/invites${suffix}`, {
+    headers: bearerJson(token),
+    signal,
+  });
   const invites = (body as Record<string, unknown> | null)?.invites;
   return Array.isArray(invites) ? (invites as ChannelProjectAgentInvite[]) : [];
 }
@@ -393,11 +404,13 @@ export async function ensureProjectAgentChannelRuntime(
   ownerAccount: string,
   handle: string,
   childName: string,
+  signal?: AbortSignal,
 ): Promise<ProjectAgentChannelRuntime> {
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/project-agents/runtime-token`, {
     method: "POST",
     headers: bearerJson(token),
     body: JSON.stringify({ owner_account: ownerAccount, handle, name: childName }),
+    signal,
   })) as ProjectAgentChannelRuntime;
 }
 
@@ -493,9 +506,15 @@ export async function listChannels(server: string, token: string): Promise<Chann
   return Array.isArray(channels) ? (channels as ChannelInfo[]) : [];
 }
 
-export async function fetchChannelCharter(server: string, token: string, slug: string): Promise<ChannelCharter> {
+export async function fetchChannelCharter(
+  server: string,
+  token: string,
+  slug: string,
+  signal?: AbortSignal,
+): Promise<ChannelCharter> {
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/charter`, {
     headers: bearerJson(token),
+    signal,
   })) as ChannelCharter;
 }
 
@@ -560,7 +579,7 @@ export async function addWebhook(
   server: string,
   token: string,
   slug: string,
-  body: { name: string; url: string; secret: string; filter: WebhookFilter },
+  body: { name: string; url: string; secret: string; filter: WebhookFilter; mode?: WebhookMode },
 ): Promise<void> {
   await req(server, `/api/channels/${encodeURIComponent(slug)}/webhooks`, {
     method: "POST",
@@ -1208,7 +1227,13 @@ export async function postMessage(
   token: string,
   slug: string,
   payload: MessagePayload,
-): Promise<{ seq: number; completion_review?: CompletionReview }> {
+  signal?: AbortSignal,
+): Promise<{
+  seq: number;
+  completion_review?: CompletionReview;
+  decision_request?: DecisionRequest;
+  decision_resolution?: DecisionResolution;
+}> {
   // 每次发送生成一个新的幂等键：调用方不必操心；重试（客户端超时重发 / 服务端 DO-reset clone 重发）
   // 携带同一 body 即同一 key，服务端据此去重。调用方若已带 key（少见）则尊重之。
   const body: MessagePayload = "idempotency_key" in payload && payload.idempotency_key !== undefined
@@ -1218,7 +1243,13 @@ export async function postMessage(
     method: "POST",
     headers: bearerJson(token),
     body: JSON.stringify(body),
-  })) as { seq: number; completion_review?: CompletionReview };
+    signal,
+  })) as {
+    seq: number;
+    completion_review?: CompletionReview;
+    decision_request?: DecisionRequest;
+    decision_resolution?: DecisionResolution;
+  };
 }
 
 // 附件上传（#176/#109）：blob 进 R2，返回引用元数据；随消息带在 attachments 字段里。

@@ -80,6 +80,8 @@ export interface Item {
   // busy（#103）：serve 正串行处理一条 wake，可达但回复会慢。working = 在干活，busy = 正忙无法即时响应新 @。
   busy: boolean;
   queueDepth: number | null; // 忙时身后排队、尚未处理的 wake 数；>0 才有值
+  // 已挂起等待 owner 的 work 数；不占 runner，与 busy/queue 分开展示。
+  waitingOwnerCount: number;
   // 每任务进度/心跳（#228）：正在处理哪条 wake（触发 seq）、最近心跳时刻。比 busy 更细——能区分
   // 「还在干、活到 T」与「卡死」。null = 无活跃任务。
   currentTask: number | null;
@@ -132,6 +134,12 @@ function residencyBadge(item: Item): string | null {
 export function busyLabel(item: Item): string | null {
   if (!item.busy) return null;
   return item.queueDepth !== null ? `⏳ busy · ${item.queueDepth} queued` : "⏳ busy";
+}
+
+export function waitingOwnerLabel(item: Item): { key: string; vars: { count: number } } | null {
+  return item.waitingOwnerCount > 0
+    ? { key: "PresenceBar.waitingOwnerChip", vars: { count: item.waitingOwnerCount } }
+    : null;
 }
 
 // 每任务进度/心跳 chip（#228）：「▶ #510」或「▶ #510 · ♥ 8s」。比 busy 更细——不仅「在忙」，还标明
@@ -245,6 +253,10 @@ export function PresenceBar({
   onOpenAgentDetail,
 }: Props) {
   const t = useT();
+  const localizeWaitingOwner = (item: Item): string | null => {
+    const label = waitingOwnerLabel(item);
+    return label === null ? null : t(label.key, label.vars);
+  };
   // 相对时间 30s 刷一次
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -296,6 +308,8 @@ export function PresenceBar({
       // busy/queueDepth（#103）：服务端只在 state != offline 且真忙时下发 busy，故离线项天然为 false。
       busy: entry?.busy === true,
       queueDepth: entry?.busy === true && typeof entry.queue_depth === "number" && entry.queue_depth > 0 ? entry.queue_depth : null,
+      waitingOwnerCount:
+        typeof entry?.waiting_owner_count === "number" && entry.waiting_owner_count > 0 ? entry.waiting_owner_count : 0,
       // 每任务进度/心跳（#228）：服务端只在 state != offline 且有活跃任务时下发 current_task，故离线项天然为 null。
       currentTask: typeof entry?.current_task === "number" ? entry.current_task : null,
       heartbeatAt: typeof entry?.current_task === "number" && typeof entry?.heartbeat_at === "number" ? entry.heartbeat_at : null,
@@ -407,6 +421,7 @@ export function PresenceBar({
     const residency = residencyBadge(it);
     const wakeability = wakeabilityBadge(it, now);
     const busy = busyLabel(it);
+    const waitingOwner = localizeWaitingOwner(it);
     const task = taskLabel(it, now);
     const taskTitle =
       it.currentTask === null
@@ -419,6 +434,7 @@ export function PresenceBar({
     const titleParts = [
       it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name,
       it.busy ? `busy${it.queueDepth !== null ? ` · ${it.queueDepth} queued` : ""} (reachable, reply may be slow — do not re-@)` : null,
+      it.waitingOwnerCount > 0 ? t("PresenceBar.waitingOwnerTitle", { count: it.waitingOwnerCount }) : null,
       taskTitle,
       it.handle !== null && it.handle !== "" ? `handle: ${it.handle}` : null,
       it.role !== null ? `role: ${it.role}` : null,
@@ -501,6 +517,7 @@ export function PresenceBar({
           </span>
         )}
         {busy !== null && <span className="t-mono presence-busy">{busy}</span>}
+        {waitingOwner !== null && <span className="t-mono presence-busy presence-waiting-owner">{waitingOwner}</span>}
         {task !== null && (
           <span className="t-mono presence-busy presence-task" title={taskTitle ?? undefined}>
             {task}
@@ -707,6 +724,11 @@ export function PresenceBar({
                 {agent.connectionCount > 1 && <span className="t-mono presence-agent-duplicate">x{agent.connectionCount}</span>}
                 {roleBadge(agent, now) !== null && <span className="t-mono presence-agent-role">{roleBadge(agent, now)}</span>}
                 {busyLabel(agent) !== null && <span className="t-mono presence-busy presence-busy--chip">{busyLabel(agent)}</span>}
+                {agent.waitingOwnerCount > 0 && (
+                  <span className="t-mono presence-busy presence-busy--chip presence-waiting-owner">
+                    {t("PresenceBar.waitingOwnerChip", { count: agent.waitingOwnerCount })}
+                  </span>
+                )}
                 {taskLabel(agent, now) !== null && (
                   <span className="t-mono presence-busy presence-busy--chip presence-task">{taskLabel(agent, now)}</span>
                 )}

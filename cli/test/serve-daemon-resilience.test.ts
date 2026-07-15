@@ -5,7 +5,14 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectAgentChildName, runProfileServe, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
+import {
+  EXIT_SIGNAL_TERM,
+  projectAgentChildName,
+  runProfileServe,
+  ServeShutdownError,
+  type RunnerProcess,
+  type ServeOptions,
+} from "../src/commands/serve";
 import { RestError } from "../src/rest";
 
 const tempDir = () => mkdtempSync(join(tmpdir(), "ap-daemon-"));
@@ -153,6 +160,115 @@ describe("profile daemon resilience (#115)", () => {
     expect(served.map((o) => o.channel).sort()).toEqual(["alpha", "gamma"]);
     expect(logs.some((l) => l.includes("failed to attach #boom"))).toBe(true);
     expect(logs.some((l) => l.includes("will retry next poll"))).toBe(true);
+  });
+
+  test("a profile child keeps its initial backlog policy across failures before welcome", async () => {
+    let attempts = 0;
+    let invitePolls = 0;
+    const policies: Array<boolean | undefined> = [];
+    const { opts } = baseOpts({
+      once: false,
+      skipBacklog: true,
+      listInvites: async () => {
+        invitePolls += 1;
+        if (attempts >= 2) throw new RestError(401, "unauthorized", "stop after child retry");
+        // Keep returning the same invite while its child supervisor owns the running slot.
+        return [invite("alpha")];
+      },
+      runChannelServe: async (serveOpts) => {
+        policies.push(serveOpts.skipBacklog);
+        attempts += 1;
+        if (attempts === 1) throw new Error("pre-welcome child crash"); // no welcome callback
+        serveOpts.onWelcome?.();
+        return 0;
+      },
+      sleep: async () => { await Promise.resolve(); },
+    });
+
+    await withHome(async () => {
+      await expect(runProfileServe(opts)).rejects.toThrow("stop after child retry");
+    });
+
+    expect(invitePolls).toBeGreaterThanOrEqual(1);
+    expect(policies).toEqual([true, true]);
+  });
+
+  test("one profile lifecycle abort stops invite polling and every child serve", async () => {
+    const controller = new AbortController();
+    const { served, opts } = baseOpts({
+      once: false,
+      signal: controller.signal,
+      listInvites: async () => [invite("alpha")],
+      sleep: async () => await new Promise<void>(() => {}),
+    });
+    opts.runChannelServe = async (serveOpts) => {
+      served.push(serveOpts);
+      return await new Promise<number>((resolve) => {
+        const finish = () => resolve(
+          serveOpts.signal?.reason instanceof ServeShutdownError
+            ? serveOpts.signal.reason.exitCode
+            : EXIT_SIGNAL_TERM,
+        );
+        serveOpts.signal?.addEventListener("abort", finish, { once: true });
+        if (serveOpts.signal?.aborted) finish();
+      });
+    };
+
+    await withHome(async () => {
+      const running = runProfileServe(opts);
+      for (let i = 0; i < 100 && served.length === 0; i++) await Bun.sleep(5);
+      expect(served).toHaveLength(1);
+      expect(served[0]!.signal).toBeDefined();
+      controller.abort(new ServeShutdownError("SIGTERM"));
+      expect(await running).toBe(EXIT_SIGNAL_TERM);
+    });
+  });
+
+  test("profile shutdown waits for an in-flight git attach to finish its abort cleanup", async () => {
+    const controller = new AbortController();
+    const slowProfile = {
+      ...profile,
+      repo_url: "https://example.test/slow.git",
+    };
+    let markGitStarted!: () => void;
+    let markGitAborted!: () => void;
+    let releaseGitCleanup!: () => void;
+    const gitStarted = new Promise<void>((resolve) => { markGitStarted = resolve; });
+    const gitAborted = new Promise<void>((resolve) => { markGitAborted = resolve; });
+    const gitCleanup = new Promise<void>((resolve) => { releaseGitCleanup = resolve; });
+    const { served, opts } = baseOpts({
+      signal: controller.signal,
+      mintRuntime: async () => ({ token: "ap_profile_runtime", profile: slowProfile }),
+      listInvites: async () => [{ ...invite("alpha"), profile: slowProfile }],
+      runGit: async (_args, gitOpts) => {
+        markGitStarted();
+        await new Promise<void>((resolve) => {
+          const onAbort = () => {
+            markGitAborted();
+            void gitCleanup.then(resolve);
+          };
+          gitOpts.signal?.addEventListener("abort", onAbort, { once: true });
+          if (gitOpts.signal?.aborted) onAbort();
+        });
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    await withHome(async () => {
+      let settled = false;
+      const running = runProfileServe(opts).finally(() => { settled = true; });
+      await gitStarted;
+      controller.abort(new ServeShutdownError("SIGTERM"));
+      await gitAborted;
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(served).toHaveLength(0);
+
+      releaseGitCleanup();
+      expect(await running).toBe(EXIT_SIGNAL_TERM);
+      expect(settled).toBe(true);
+    });
   });
 
   test("projectAgentChildName stays stable (guard against fixture drift)", () => {

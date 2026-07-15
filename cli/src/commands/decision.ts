@@ -4,12 +4,22 @@
 //   mode    切频道决策模式：approval（人类审批）↔ unattended（无人值守，自动放行）
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
 import { advanceCursorPastOwnMessage, resolveChannel } from "../config";
-import { formatMsg } from "../format";
+import { formatMsg, stripTerminalControls } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { fetchMessages, handleRestError, postMessage, respondDecision, setDecisionMode } from "../rest";
 import type { DecisionMode, MsgFrame } from "@agentparty/shared";
 import { isName, isSlug } from "../validation";
+import { existsSync } from "node:fs";
+import { isAbsolute } from "node:path";
+import {
+  continuationPath,
+  continuationSessionId,
+  mergeRunnerContinuation,
+  readRunnerContinuation,
+  type RunnerContinuationHarness,
+  type RunnerContinuationState,
+} from "../continuation";
 
 const HELP = `usage:
   party decision ask <prompt|-> [--channel C] [--option opt]... [--body text|-] [--mention name]... [--wait] [--json]
@@ -40,6 +50,139 @@ const WAIT_TIMEOUT_MS = 240_000;
 const WAIT_POLL_MS = 2_000;
 
 type Flags = Record<string, string | boolean | (string | boolean)[] | undefined>;
+
+type DecisionContinuationContext =
+  | {
+      mode: "model-session";
+      workId: string;
+      continuationRef: string;
+      deliveryId: string;
+      workdir: string;
+      harness: RunnerContinuationHarness;
+      sessionId: string;
+      path: string;
+    }
+  | {
+      mode: "custom-process";
+      workId: string;
+      continuationRef: string;
+      deliveryId: string;
+      harness: "custom";
+    };
+
+function nonEmpty(value: string | undefined): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function terminalText(value: unknown): string {
+  return stripTerminalControls(String(value));
+}
+
+function runnerSessionFromEnv(
+  harness: RunnerContinuationHarness,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const explicit = nonEmpty(env.AP_RUNNER_SESSION_ID);
+  if (explicit !== null) return explicit;
+  return harness === "claude"
+    ? nonEmpty(env.CLAUDE_SESSION_ID)
+    : nonEmpty(env.CODEX_THREAD_ID);
+}
+
+/**
+ * Built-in model turns park only after their local session mapping is crash-safe. A custom
+ * `--on-mention` command has a different, explicitly stateless contract: owner_answer launches the
+ * same command as a fresh process with the same delivery/work/ref and a new AP_CONTEXT_FILE. It has
+ * no party-managed model session, so only server-authoritative lineage is prepared here.
+ */
+export function prepareDecisionContinuation(
+  env: NodeJS.ProcessEnv = process.env,
+  now = Date.now(),
+): DecisionContinuationContext | null {
+  const workId = nonEmpty(env.AP_WORK_ID);
+  const continuationRef = nonEmpty(env.AP_CONTINUATION_REF);
+  if (workId === null && continuationRef === null) return null;
+  if (workId === null || continuationRef === null) {
+    throw new Error("runner continuation is incomplete: AP_WORK_ID and AP_CONTINUATION_REF must both be set");
+  }
+  if (workId.length > 128 || continuationRef.length > 512) {
+    throw new Error("runner continuation exceeds the server work/ref limits");
+  }
+  const deliveryId = nonEmpty(env.AP_DELIVERY_ID);
+  if (deliveryId === null || deliveryId.length > 128) {
+    throw new Error("runner continuation is missing a valid AP_DELIVERY_ID");
+  }
+  const harnessRaw = nonEmpty(env.AP_RUNNER_HARNESS);
+  if (harnessRaw === "custom") {
+    return {
+      mode: "custom-process",
+      workId,
+      continuationRef,
+      deliveryId,
+      harness: "custom",
+    };
+  }
+  const workdir = nonEmpty(env.AP_RUNNER_WORKDIR);
+  if (workdir === null || !isAbsolute(workdir)) {
+    throw new Error("runner continuation is missing an absolute AP_RUNNER_WORKDIR");
+  }
+  if (harnessRaw !== "codex" && harnessRaw !== "claude" && harnessRaw !== "codex-sdk") {
+    throw new Error("runner continuation is missing AP_RUNNER_HARNESS (custom, codex, claude, or codex-sdk)");
+  }
+  const sessionId = runnerSessionFromEnv(harnessRaw, env);
+  if (sessionId === null) {
+    const expected = harnessRaw === "claude" ? "CLAUDE_SESSION_ID" : "CODEX_THREAD_ID";
+    throw new Error(
+      `runner continuation has no live session id; expected AP_RUNNER_SESSION_ID or ${expected}`,
+    );
+  }
+
+  const path = continuationPath(workdir, continuationRef);
+  const existing = readRunnerContinuation(path);
+  if (existing === null && existsSync(path)) {
+    throw new Error(`runner continuation mapping is invalid: ${path}`);
+  }
+  if (existing !== null) {
+    if (
+      existing.harness !== harnessRaw ||
+      existing.work_id !== workId ||
+      existing.continuation_ref !== continuationRef ||
+      continuationSessionId(existing) !== sessionId
+    ) {
+      throw new Error("runner continuation mapping conflicts with the current work/session; refusing to park");
+    }
+    if (typeof existing.resume_blocked_reason === "string" && existing.resume_blocked_reason.length > 0) {
+      throw new Error(`runner continuation resume is blocked: ${existing.resume_blocked_reason}`);
+    }
+  }
+
+  const state: RunnerContinuationState = existing ?? {
+    harness: harnessRaw,
+    ...(harnessRaw === "codex-sdk" ? { thread_id: sessionId } : { session_id: sessionId }),
+    created_at: now,
+    last_wake_ts: now,
+    wakes: 0,
+  };
+  const committed = mergeRunnerContinuation(path, {
+    ...state,
+    workdir,
+    work_id: workId,
+    continuation_ref: continuationRef,
+  });
+  if (typeof committed.resume_blocked_reason === "string" && committed.resume_blocked_reason.length > 0) {
+    throw new Error(`runner continuation resume is blocked: ${committed.resume_blocked_reason}`);
+  }
+  return {
+    mode: "model-session",
+    workId,
+    continuationRef,
+    deliveryId,
+    workdir,
+    harness: harnessRaw,
+    sessionId,
+    path,
+  };
+}
 
 function resolveSlug(flags: Flags): string | null {
   const channel = resolveChannel(str(flags.channel));
@@ -94,15 +237,63 @@ async function runAsk(argv: string[]): Promise<number> {
   }
   const decisionRequest =
     options.length > 0 ? { kind: "choice" as const, prompt, options } : { kind: "approval" as const, prompt };
+  let continuation: DecisionContinuationContext | null;
   try {
-    const { seq } = await postMessage(auth.server, auth.token, channel, {
+    // This is deliberately the last local step before POST. Once the Worker parks the delivery,
+    // a process crash must still leave enough durable state for the future owner_answer wake.
+    continuation = prepareDecisionContinuation();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`decision ask refused before POST: ${terminalText(reason)}`);
+    return 1;
+  }
+  try {
+    const payload: Parameters<typeof postMessage>[3] & {
+      expected_decision_lineage?: {
+        delivery_id: string;
+        work_id: string;
+        continuation_ref: string;
+      };
+    } = {
       kind: "message",
       body,
       mentions,
       reply_to: null,
       decision_request: decisionRequest,
-    });
+      ...(continuation === null
+        ? {}
+        : {
+            expected_decision_lineage: {
+              delivery_id: continuation.deliveryId,
+              work_id: continuation.workId,
+              continuation_ref: continuation.continuationRef,
+            },
+          }),
+    };
+    const posted = await postMessage(auth.server, auth.token, channel, payload);
+    const { seq } = posted;
     advanceCursorPastOwnMessage(channel, seq);
+    const publicRequest = posted.decision_request;
+    const immediate = posted.decision_resolution;
+    if (immediate?.state === "auto_resolved") {
+      if (flags.json === true) {
+        console.log(JSON.stringify({ seq, decision_request: publicRequest, decision_resolution: immediate }));
+      } else {
+        console.log(`decision #${seq} auto_resolved → ${terminalText(immediate.chosen_option ?? "?")}`);
+      }
+      return 0;
+    }
+    // A serve-owned work must never park its single runner in the CLI poll loop. The Worker has
+    // durably moved it to waiting_owner and released the next delivery; owner resolution will create
+    // a new owner_answer delivery for the same work/continuation.
+    if (continuation !== null && immediate?.state === "pending") {
+      if (flags.json === true) {
+        console.log(JSON.stringify({ seq, state: "waiting_owner", decision_request: publicRequest, decision_resolution: immediate }));
+      } else {
+        console.log(`WAITING_OWNER decision #${seq} work=${terminalText(continuation.workId)}`);
+      }
+      return 0;
+    }
     if (flags.wait !== true) {
       if (flags.json === true) console.log(JSON.stringify({ seq }));
       else console.log(`decision #${seq} posted — waiting for a human (party decision respond ${seq} ...)`);
@@ -117,7 +308,10 @@ async function runAsk(argv: string[]): Promise<number> {
       console.log(JSON.stringify(jsonFrame(resolved as unknown as Record<string, unknown>)));
     } else {
       const res = resolved.decision_resolution;
-      console.log(`decision #${seq} ${res?.state ?? "resolved"} → ${res?.chosen_option ?? "?"}${res?.reason ? `: ${res.reason}` : ""}`);
+      console.log(
+        `decision #${seq} ${terminalText(res?.state ?? "resolved")} → ${terminalText(res?.chosen_option ?? "?")}` +
+        `${res?.reason ? `: ${terminalText(res.reason)}` : ""}`,
+      );
     }
     return 0;
   } catch (e) {
@@ -185,7 +379,7 @@ async function runRespond(argv: string[]): Promise<number> {
       console.log(JSON.stringify(jsonFrame(result.message as unknown as Record<string, unknown>)));
     } else {
       const res = result.message.decision_resolution;
-      console.log(`decision #${seqArg} → ${res?.chosen_option ?? "?"}`);
+      console.log(`decision #${seqArg} → ${terminalText(res?.chosen_option ?? "?")}`);
       console.log(formatMsg(result.reply));
     }
     return 0;
