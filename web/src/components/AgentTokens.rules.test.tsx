@@ -30,11 +30,17 @@ let rotateResult: { name: string; token: string } = { name: "build-bot", token: 
 const createCalls: Array<{ token: string; body: Record<string, unknown> }> = [];
 const nicknameCalls: Array<{ token: string; slug: string; name: string; nickname: string }> = [];
 
-mock.module("../lib/api", () => ({
+// bun 的 mock.module("../lib/api") 是全局共享的：多个测试文件各自只桩了自己用到的那部分 export
+// （AgentJoin 只桩 createChannelAgent、本文件桩 rotateChannelAgent 等），串行全套跑时按加载顺序互相覆盖。
+// 若不在每个测试前把桩重置回本文件的完整版本，rotate() 运行时可能拿到别文件的桩、返回错值 → CI 偶发 Received:null。
+// 因此抽成具名 factory 供顶层 + beforeEach 复用；并兜底 createChannelAgent，避免本文件的桩最后生效时
+// 让 AgentJoin.tsx 加载期因缺少该 export 报 SyntaxError。
+const apiMockFactory = () => ({
   AuthError: class AuthError extends Error {},
   ConflictError: class ConflictError extends Error {},
   ForbiddenError: class ForbiddenError extends Error {},
   ValidationError: class ValidationError extends Error {},
+  createChannelAgent: async (_slug: string, name: string) => ({ name, token: "ap_created" }),
   createProjectAgentProfile: mock(async (token: string, body: Record<string, unknown>) => {
     createCalls.push({ token, body });
     // upsert：把新 rules 落回 fixture，模拟 worker 的 ON CONFLICT DO UPDATE
@@ -52,7 +58,8 @@ mock.module("../lib/api", () => ({
     if (agent) agent.nickname = nickname;
     return { name, nickname };
   }),
-}));
+});
+mock.module("../lib/api", apiMockFactory);
 
 const { AgentTokens } = await import("./AgentTokens");
 
@@ -142,6 +149,8 @@ beforeEach(() => {
       removeEventListener: documentEvents.removeEventListener.bind(documentEvents),
     },
   });
+  // 每个测试前把 ../lib/api 桩重置回本文件完整版本，抵消别的测试文件 mock.module 的跨文件覆盖（见顶部 factory 注释）。
+  mock.module("../lib/api", apiMockFactory);
 });
 
 afterEach(async () => {
