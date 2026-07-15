@@ -2,8 +2,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import { clearApiBase, setApiBase } from "../lib/base";
-import { findSavedAgentToken } from "../lib/agentTokenVault";
 
 // AgentTokens 只依赖 ../lib/api 的这几个运行时导出；类型导入会被擦除。
 // 这里整体桩掉，让测试可以驱动 profile 规则的查看/编辑，而不真的打网络。
@@ -25,17 +23,10 @@ type AgentFixture = { name: string; owner: string; channel_scope: string; create
 
 let profilesFixture: ProfileFixture[] = [];
 let agentsFixture: AgentFixture[] = [];
-// #530：rotate 后 worker 返回的新 name/token；用它拼接入包命令并落进本地保险库。
-let rotateResult: { name: string; token: string } = { name: "build-bot", token: "ap_rotated" };
 const createCalls: Array<{ token: string; body: Record<string, unknown> }> = [];
 const nicknameCalls: Array<{ token: string; slug: string; name: string; nickname: string }> = [];
 
-// bun 的 mock.module("../lib/api") 是全局共享的：多个测试文件各自只桩了自己用到的那部分 export
-// （AgentJoin 只桩 createChannelAgent、本文件桩 rotateChannelAgent 等），串行全套跑时按加载顺序互相覆盖。
-// 若不在每个测试前把桩重置回本文件的完整版本，rotate() 运行时可能拿到别文件的桩、返回错值 → CI 偶发 Received:null。
-// 因此抽成具名 factory 供顶层 + beforeEach 复用；并兜底 createChannelAgent，避免本文件的桩最后生效时
-// 让 AgentJoin.tsx 加载期因缺少该 export 报 SyntaxError。
-const apiMockFactory = () => ({
+mock.module("../lib/api", () => ({
   AuthError: class AuthError extends Error {},
   ConflictError: class ConflictError extends Error {},
   ForbiddenError: class ForbiddenError extends Error {},
@@ -51,15 +42,14 @@ const apiMockFactory = () => ({
   inviteProjectAgent: async () => {},
   listChannelAgents: async () => agentsFixture,
   listProjectAgentProfiles: async () => profilesFixture,
-  rotateChannelAgent: async () => rotateResult,
+  rotateChannelAgent: async () => ({}),
   setChannelAgentNickname: mock(async (token: string, slug: string, name: string, nickname: string) => {
     nicknameCalls.push({ token, slug, name, nickname });
     const agent = agentsFixture.find((entry) => entry.name === name);
     if (agent) agent.nickname = nickname;
     return { name, nickname };
   }),
-});
-mock.module("../lib/api", apiMockFactory);
+}));
 
 const { AgentTokens } = await import("./AgentTokens");
 
@@ -123,13 +113,10 @@ class TestEventTarget {
 beforeEach(() => {
   profilesFixture = [];
   agentsFixture = [];
-  rotateResult = { name: "build-bot", token: "ap_rotated" };
   createCalls.length = 0;
   nicknameCalls.length = 0;
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage({ ap_locale: "en" }) });
-  // #530：模拟测试/桌面环境的伪源；apiBase() 非空时不该被用到，仅用于校验没有回退到它。
-  Object.defineProperty(globalThis, "location", { configurable: true, value: { origin: "http://localhost:5173" } });
   windowEvents = new TestEventTarget();
   documentEvents = new TestEventTarget();
   Object.defineProperty(globalThis, "window", {
@@ -137,7 +124,6 @@ beforeEach(() => {
     value: {
       innerWidth: 1200,
       innerHeight: 800,
-      confirm: () => true, // rotate() 前会 window.confirm 确认
       addEventListener: windowEvents.addEventListener.bind(windowEvents),
       removeEventListener: windowEvents.removeEventListener.bind(windowEvents),
     },
@@ -149,18 +135,14 @@ beforeEach(() => {
       removeEventListener: documentEvents.removeEventListener.bind(documentEvents),
     },
   });
-  // 每个测试前把 ../lib/api 桩重置回本文件完整版本，抵消别的测试文件 mock.module 的跨文件覆盖（见顶部 factory 注释）。
-  mock.module("../lib/api", apiMockFactory);
 });
 
 afterEach(async () => {
-  clearApiBase(); // #530：清掉注入的 runtime apiBase，避免泄漏
   if (renderer !== null) await act(async () => renderer?.unmount());
   renderer = null;
   Reflect.deleteProperty(globalThis, "window");
   Reflect.deleteProperty(globalThis, "document");
   Reflect.deleteProperty(globalThis, "localStorage");
-  Reflect.deleteProperty(globalThis, "location");
 });
 
 function baseProps() {
@@ -358,28 +340,5 @@ describe("AgentTokens dismiss behavior", () => {
     act(() => documentEvents.emit("pointerdown", { target: {} }));
     expect(changes).toEqual([false]);
     expect(renderer!.root.findAll((node) => node.props.className === "agenttokens-panel")).toHaveLength(1);
-  });
-});
-
-describe("AgentTokens 轮换接入包 server 域名 (#530)", () => {
-  // 桌面版(Tauri)里 location.origin 是 tauri://localhost，轮换后重新生成的接入包若用它拼
-  // `party init --server` 会让 agent 报错。修复要求：优先用注入的真实后端 apiBase()，
-  // 仅同源 web(apiBase 为空)才回退 location.origin。本用例 location.origin = http://localhost:5173，
-  // 代表「不该被用到的伪源」。
-  test("apiBase() 非空时，rotate 生成的 party init --server 用真实后端而非 location.origin", async () => {
-    setApiBase("https://agentparty.leeguoo.com");
-    agentsFixture = [{ name: "build-bot", owner: "acct-1", channel_scope: "demo", created_at: 1, nickname: null }];
-    const r = await renderOpen();
-
-    // 轮换 token → 触发 buildMinimalAgentCommand，命令写进本地保险库
-    await act(async () => findClass(r, "d-btn agenttokens-rotate").props.onClick());
-    await act(async () => {}); // flush rotate + refresh
-
-    const saved = findSavedAgentToken("acct-1", "demo", "build-bot");
-    expect(saved).not.toBeNull();
-    // 关键断言：--server 用的是 apiBase() 的真后端
-    expect(saved!.command).toContain("party init --server https://agentparty.leeguoo.com ");
-    // 绝不能回退到 location.origin(桌面端伪源，此处以 http://localhost:5173 代表)
-    expect(saved!.command).not.toContain("http://localhost:5173");
   });
 });

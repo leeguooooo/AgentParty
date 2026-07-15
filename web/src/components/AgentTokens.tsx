@@ -23,7 +23,7 @@ import {
   listSavedAgentTokens,
   saveAgentToken,
 } from "../lib/agentTokenVault";
-import { apiBase } from "../lib/base";
+import { apiOrigin } from "../lib/base";
 import { useT } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
 import "../i18n/strings/AgentTokens";
@@ -204,7 +204,7 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
       const next = await rotateChannelAgent(token, slug, name);
       const command = buildMinimalAgentCommand({
         // #530：桌面版 location.origin 是 tauri://localhost，接入包会报错；优先真实后端 apiBase，同源 web 回退 origin。
-        server: apiBase() || location.origin,
+        server: apiOrigin(),
         slug,
         name: next.name,
         token: next.token,
