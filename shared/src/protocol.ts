@@ -40,13 +40,23 @@ export const MAX_MENTIONS = 50;
 const BODY_MENTION_RE =
   /(^|[^A-Za-z0-9._@-])@(?:([A-Za-z0-9][A-Za-z0-9._-]{0,63})|([\p{L}\p{N}][\p{L}\p{N}._-]{0,63}))/gu;
 
+// ASCII token names / human handles are case-insensitive. Unicode nickname
+// and display-name aliases stay exact (NFC), because SQLite NOCASE is
+// ASCII-only and must not silently disagree with client-side matching.
+export function mentionMatchKey(value: string): string {
+  const normalized = value.normalize("NFC");
+  return /^[A-Za-z0-9._-]+$/.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
 export function extractMentionTokens(text: string, limit: number = MAX_MENTIONS): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const match of text.matchAll(BODY_MENTION_RE)) {
     const token = match[2] ?? match[3];
-    if (!token || token === "system" || seen.has(token)) continue;
-    seen.add(token);
+    if (!token) continue;
+    const key = mentionMatchKey(token);
+    if (key === "system" || seen.has(key)) continue;
+    seen.add(key);
     out.push(token);
     if (out.length >= limit) break;
   }

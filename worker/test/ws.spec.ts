@@ -94,9 +94,13 @@ describe("websocket", () => {
     await seedToken("agent", "carol.dev");
     await seedToken("agent", "agent-a");
     const nicknameTarget = await seedToken("agent");
+    const unicodeCaseTarget = await seedToken("agent");
     await env.DB.prepare(
       "INSERT INTO agent_nicknames (name, nickname, created_at, updated_at) VALUES (?, ?, ?, ?)",
     ).bind(nicknameTarget.name, "程序员小明", Date.now(), Date.now()).run();
+    await env.DB.prepare(
+      "INSERT INTO agent_nicknames (name, nickname, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    ).bind(unicodeCaseTarget.name, "Éclair", Date.now(), Date.now()).run();
     await env.DB.prepare(
       `INSERT INTO account_profiles (account, handle, created_at, updated_at, display_name)
        VALUES (?, ?, ?, ?, ?)`,
@@ -134,6 +138,14 @@ describe("websocket", () => {
     await ws.nextOfType("sent");
     const echo4 = await ws.nextOfType("msg");
     expect(echo4.mentions).toEqual(["display552"]);
+    ws.send({ type: "send", kind: "message", body: "请 @Éclair 确认", mentions: [], reply_to: null });
+    await ws.nextOfType("sent");
+    expect((await ws.nextOfType("msg")).mentions).toEqual([unicodeCaseTarget.name]);
+    ws.send({ type: "send", kind: "message", body: "请 @éclair 确认", mentions: [], reply_to: null });
+    expect(await ws.nextOfType("error")).toMatchObject({
+      code: "bad_request",
+      message: "unknown mention @éclair",
+    });
 
     await seedToken("agent", "collision552");
     const ambiguousTarget = await seedToken("agent");
@@ -163,6 +175,11 @@ describe("websocket", () => {
     expect(await ws.nextOfType("error")).toMatchObject({
       code: "bad_request",
       message: "unsupported mention @全体",
+    });
+    ws.send({ type: "send", kind: "message", body: "reserved", mentions: ["SYSTEM"], reply_to: null });
+    expect(await ws.nextOfType("error")).toMatchObject({
+      code: "bad_request",
+      message: "reserved mention @system",
     });
     ws.close();
   });

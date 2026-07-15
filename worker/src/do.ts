@@ -9,6 +9,7 @@ import {
   LOOP_GUARD_AGENT_PARTY_N,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
+  mentionMatchKey,
   MAX_WEBHOOKS_PER_CHANNEL,
   MAX_MESSAGE_AUDIT_ROWS,
   MAX_WEBHOOK_DEAD_LETTERS,
@@ -3962,7 +3963,10 @@ export class ChannelDO extends Server<Env> {
   private async resolveMentionTargets(frame: SendFrame): Promise<{ frame: SendFrame; error?: string }> {
     const mentions = frame.mentions ?? [];
     if (mentions.length === 0) return { frame };
-    const candidates = mentions.filter((t) => t !== "system" && t.length <= 64);
+    if (mentions.some((mention) => mentionMatchKey(mention) === "system")) {
+      return { frame, error: "reserved mention @system" };
+    }
+    const candidates = mentions.filter((t) => t.length <= 64);
     if (candidates.length === 0) return { frame };
     const placeholders = candidates.map(() => "?").join(", ");
     // Pure-CJK aliases have no lexical boundary before following prose
@@ -3975,10 +3979,10 @@ export class ChannelDO extends Server<Env> {
     );
     const nicknamePrefixClause = cjkPrefixCandidates.length === 0
       ? ""
-      : ` OR (${cjkPrefixCandidates.map(() => "? LIKE nickname || '%'").join(" OR ")})`;
+      : ` OR (${cjkPrefixCandidates.map(() => "substr(?, 1, length(nickname)) = nickname").join(" OR ")})`;
     const displayNamePrefixClause = cjkPrefixCandidates.length === 0
       ? ""
-      : ` OR (${cjkPrefixCandidates.map(() => "? LIKE display_name || '%'").join(" OR ")})`;
+      : ` OR (${cjkPrefixCandidates.map(() => "substr(?, 1, length(display_name)) = display_name").join(" OR ")})`;
     type AliasRow = { target: string; alias: string };
     let remote: AliasRow[];
     try {
@@ -3989,7 +3993,7 @@ export class ChannelDO extends Server<Env> {
         ).bind(...candidates).all<AliasRow>(),
         this.env.DB.prepare(
           `SELECT name AS target, nickname AS alias FROM agent_nicknames
-            WHERE nickname COLLATE NOCASE IN (${placeholders})${nicknamePrefixClause}`,
+            WHERE nickname IN (${placeholders})${nicknamePrefixClause}`,
         ).bind(...candidates, ...cjkPrefixCandidates).all<AliasRow>(),
         this.env.DB.prepare(
           `SELECT handle AS target, handle AS alias FROM account_profiles
@@ -3998,7 +4002,7 @@ export class ChannelDO extends Server<Env> {
         this.env.DB.prepare(
           `SELECT handle AS target, display_name AS alias FROM account_profiles
             WHERE display_name IS NOT NULL
-              AND (display_name COLLATE NOCASE IN (${placeholders})${displayNamePrefixClause})`,
+              AND (display_name IN (${placeholders})${displayNamePrefixClause})`,
         ).bind(...candidates, ...cjkPrefixCandidates).all<AliasRow>(),
         this.env.DB.prepare(
           `SELECT name AS target, name AS alias FROM channel_squads
@@ -4026,7 +4030,7 @@ export class ChannelDO extends Server<Env> {
     const aliases = new Map<string, Set<string>>();
     const add = (alias: unknown, target: unknown) => {
       if (typeof alias !== "string" || typeof target !== "string" || alias === "" || target === "") return;
-      const key = alias.toLocaleLowerCase("en-US");
+      const key = mentionMatchKey(alias);
       const targets = aliases.get(key) ?? new Set<string>();
       targets.add(target);
       aliases.set(key, targets);
@@ -4059,10 +4063,10 @@ export class ChannelDO extends Server<Env> {
     const routed: string[] = [];
     const seen = new Set<string>();
     for (const raw of candidates) {
-      if (raw.toLocaleLowerCase("en-US") === "all" || raw.startsWith("全体")) {
+      if (mentionMatchKey(raw) === "all" || raw.startsWith("全体")) {
         return { frame, error: `unsupported mention @${raw.startsWith("全体") ? "全体" : raw}` };
       }
-      const key = raw.toLocaleLowerCase("en-US");
+      const key = mentionMatchKey(raw);
       let targets = aliases.get(key);
       if (!targets && cjkPrefixCandidates.includes(raw)) {
         let longest = 0;

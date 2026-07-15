@@ -400,7 +400,7 @@ describe("parseDraftMentions", () => {
     expect(parseDraftMentions("hi\n@bob")).toEqual(["bob"]);
   });
   test("去重且保序", () => {
-    expect(parseDraftMentions("@bob @alice @bob")).toEqual(["bob", "alice"]);
+    expect(parseDraftMentions("@bob @alice @Bob")).toEqual(["bob", "alice"]);
   });
   test("过滤 system", () => {
     expect(parseDraftMentions("@system hi @bob")).toEqual(["bob"]);

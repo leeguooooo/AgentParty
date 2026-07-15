@@ -1,6 +1,6 @@
 // party send — rest 一次性发消息，成功后推进游标
 import { basename } from "node:path";
-import { extractMentionTokens, MAX_MENTIONS, type Attachment } from "@agentparty/shared";
+import { extractMentionTokens, MAX_MENTIONS, mentionMatchKey, type Attachment } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError, type Parsed } from "../args";
 import { advanceCursorPastOwnMessage, resolveChannel, type Config } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
@@ -189,18 +189,29 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     console.error("--mention must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");
     return null;
   }
+  if (explicitMentions.some((mention) => mentionMatchKey(mention) === "system")) {
+    console.error("--mention cannot target reserved name system");
+    return null;
+  }
   if (explicitMentions.length > MAX_MENTIONS) {
     console.error(`too many mentions (max ${MAX_MENTIONS})`);
     return null;
   }
   // Keep CLI, Web and Worker on the same body-mention contract. Explicit
   // --mention values stay first; body tokens are appended in source order.
-  const mentions = [...explicitMentions];
-  const seenMentions = new Set(mentions);
+  const mentions: string[] = [];
+  const seenMentions = new Set<string>();
+  for (const mention of explicitMentions) {
+    const key = mentionMatchKey(mention);
+    if (seenMentions.has(key)) continue;
+    seenMentions.add(key);
+    mentions.push(mention);
+  }
   for (const mention of extractMentionTokens(text)) {
     if (mentions.length >= MAX_MENTIONS) break;
-    if (seenMentions.has(mention)) continue;
-    seenMentions.add(mention);
+    const key = mentionMatchKey(mention);
+    if (seenMentions.has(key)) continue;
+    seenMentions.add(key);
     mentions.push(mention);
   }
   return {
