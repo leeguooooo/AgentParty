@@ -5,7 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Attachment } from "@agentparty/shared";
 import { parseArgs } from "../src/args";
-import { collectAttachments, resolveAttachments, resolveSendInput, sendSpec } from "../src/commands/send";
+import {
+  collectAttachments,
+  decodePositionalNewlines,
+  resolveAttachments,
+  resolveSendInput,
+  sendSpec,
+} from "../src/commands/send";
 
 let dir = "";
 let png = "";
@@ -27,6 +33,20 @@ afterAll(async () => {
 });
 
 describe("send --attach parsing", () => {
+  test("quoted positional text decodes escaped newlines", async () => {
+    const parsed = parseArgs(["first\\nsecond", "--channel", "c"], sendSpec);
+    const input = await resolveSendInput(parsed);
+    expect(input?.body).toBe("first\nsecond");
+  });
+
+  test("an escaped backslash keeps a literal \\n sequence", () => {
+    expect(decodePositionalNewlines(String.raw`first\\nsecond`)).toBe(String.raw`first\nsecond`);
+  });
+
+  test("mixed escaped and literal newline sequences preserve intent", () => {
+    expect(decodePositionalNewlines(String.raw`one\ntwo\\nthree\\\nfour`)).toBe("one\ntwo\\nthree\\\nfour");
+  });
+
   test("--attach is repeatable and collected into attachPaths", async () => {
     const parsed = parseArgs(["hello", "--channel", "c", "--attach", "a.png", "--attach", "b.pdf"], sendSpec);
     const input = await resolveSendInput(parsed);

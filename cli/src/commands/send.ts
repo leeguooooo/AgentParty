@@ -14,6 +14,7 @@ const SEND_FLAGS = ["channel", "reply-to", "mention", "attach", "debug-auth", "r
 const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--attach path]... [--reply-to seq] [--debug-auth]
 
 Send one message to a channel. Use "-" as the body to read stdin.
+Positional text decodes \\n as a line break; use \\\\n for a literal \\n, or stdin for exact bytes.
 
 With --attach, each file is uploaded to the channel first, then the message is sent
 carrying the attachment refs. Body may be empty when at least one --attach is present.
@@ -72,6 +73,15 @@ export interface SendInput {
   mentions: string[];
   replyTo: number | null;
   attachPaths: string[];
+}
+
+// Agent-generated shell commands commonly pass multiline replies as one quoted argument containing `\n`.
+// Decode only positional text; stdin remains byte-for-byte so code and other literal content always have an exact path.
+export function decodePositionalNewlines(input: string): string {
+  return input.replace(/(\\+)n/g, (_match, slashes: string) => {
+    const prefix = "\\".repeat(Math.floor(slashes.length / 2));
+    return prefix + (slashes.length % 2 === 1 ? "\n" : "n");
+  });
 }
 
 // 本地路径 → 上传源：不存在/空文件/超限一律抛带路径的可读错误，绝不静默上传半个包。
@@ -143,7 +153,7 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
   } else if (trailingStdin && positionals.length === 1) {
     readStdin = true; // send -、send --channel C -、send - --
   } else {
-    text = positionals.length > 0 ? positionals.join(" ") : undefined;
+    text = positionals.length > 0 ? decodePositionalNewlines(positionals.join(" ")) : undefined;
   }
 
   const channel = resolveChannel(channelArg);
