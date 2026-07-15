@@ -435,6 +435,19 @@ describe("party send", () => {
     });
   });
 
+  test("命令行正文把 \\n 解码为换行，并允许双反斜杠表达字面量", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    writeWorkspaceState("dev");
+
+    expect((await runCli(["send", "first\\nsecond"])).code).toBe(0);
+    expect((await runCli(["send", "literal\\\\ntext"])).code).toBe(0);
+
+    const sent = reqsOf(mock, "POST", "/api/channels/dev/messages");
+    expect(sent[0]!.body).toMatchObject({ body: "first\nsecond" });
+    expect(sent[1]!.body).toMatchObject({ body: "literal\\ntext" });
+  });
+
   test("--channel 可在绑定 workspace 中显式发送到其他频道", async () => {
     mock = startRestMock();
     writeCfg(mock.url);
@@ -516,6 +529,15 @@ describe("party send", () => {
     expect(r.code).toBe(0);
     const sendReq = reqsOf(mock, "POST", "/api/channels/dev/messages")[0]!;
     expect(sendReq.body).toMatchObject({ body: "hello from stdin\n" });
+  });
+
+  test("send - 保持 stdin 中的字面量 \\n 不变", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["send", "--channel", "dev", "-"], {}, "first\\nsecond");
+    expect(r.code).toBe(0);
+    const sendReq = reqsOf(mock, "POST", "/api/channels/dev/messages")[0]!;
+    expect(sendReq.body).toMatchObject({ body: "first\\nsecond" });
   });
 
   test("send <slug> - 把首 positional 当 channel 并从 stdin 读正文", async () => {

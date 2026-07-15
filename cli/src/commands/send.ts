@@ -14,6 +14,7 @@ const SEND_FLAGS = ["channel", "reply-to", "mention", "attach", "debug-auth", "r
 const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--attach path]... [--reply-to seq] [--debug-auth]
 
 Send one message to a channel. Use "-" as the body to read stdin.
+Command-line text decodes \\n as a newline; use \\\\n for a literal \\n, or stdin for exact text.
 
 With --attach, each file is uploaded to the channel first, then the message is sent
 carrying the attachment refs. Body may be empty when at least one --attach is present.
@@ -52,6 +53,30 @@ const CONTENT_TYPE_BY_EXT: Record<string, string> = {
   zip: "application/zip",
   log: "text/plain",
 };
+
+// #529：shell 的普通引号不会把 `\\n` 变成换行，agent/人类用一行 argv 发送多段结论时
+// 因而会把转义符原样写进频道。只处理命令行正文，stdin 保持逐字节语义；双反斜杠作为
+// literal escape，避免用户无法表达真正的 `\\n` 文本。
+export function decodeCommandLineNewlines(input: string): string {
+  let output = "";
+  for (let i = 0; i < input.length; i++) {
+    if (input[i] !== "\\" || i + 1 >= input.length) {
+      output += input[i];
+      continue;
+    }
+    const next = input[i + 1];
+    if (next === "n") {
+      output += "\n";
+      i++;
+    } else if (next === "\\") {
+      output += "\\";
+      i++;
+    } else {
+      output += input[i];
+    }
+  }
+  return output;
+}
 
 function guessContentType(filename: string): string {
   const ext = filename.includes(".") ? filename.slice(filename.lastIndexOf(".") + 1).toLowerCase() : "";
@@ -143,7 +168,7 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
   } else if (trailingStdin && positionals.length === 1) {
     readStdin = true; // send -、send --channel C -、send - --
   } else {
-    text = positionals.length > 0 ? positionals.join(" ") : undefined;
+    text = positionals.length > 0 ? decodeCommandLineNewlines(positionals.join(" ")) : undefined;
   }
 
   const channel = resolveChannel(channelArg);
