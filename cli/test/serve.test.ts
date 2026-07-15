@@ -281,7 +281,8 @@ describe("runServe", () => {
       clientFrames.push(frame as unknown as Record<string, unknown>);
       if (frame.type !== "hello") return;
       sock.send(welcomeFrame(0, "me"));
-      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 350);
+      setTimeout(() => sock.send({ type: "serve_lease", name: "me", held: true }), 20);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 60);
     });
     const o = opts({
       server: server.url,

@@ -75,8 +75,9 @@ describe("serve 跨机租约客户端互斥（#99）", () => {
       clientFrames.push(frame);
       if (frame.type !== "hello") return;
       sock.send(welcomeFrame(0, "me"));
-      setTimeout(() => sock.send(leaseFrame(false)), 20);
-      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 320);
+      // 故意晚于旧实现的 250ms 猜测窗口，证明网络慢时也不会先泄漏 standby session。
+      setTimeout(() => sock.send(leaseFrame(false)), 300);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 360);
     });
 
     await runServe(opts({
