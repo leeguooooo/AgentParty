@@ -174,7 +174,11 @@ describe("Channel i18n source guard (#350)", () => {
     expect(source).toContain("onlineAgentCount");
   });
 
-  test("orders channel tools by content, members, access, then channel management", () => {
+  test("places visibility on the presence row and right-aligns channel management after content tools", () => {
+    const presence = source.slice(
+      source.indexOf("<PresenceBar"),
+      source.indexOf("<ChannelToolstrip"),
+    );
     const toolbar = source.slice(
       source.indexOf("<ChannelToolstrip"),
       source.indexOf("{activePanel !== null"),
@@ -186,7 +190,6 @@ describe("Channel i18n source guard (#350)", () => {
       'openPanel("search")',
       "<AgentJoin",
       "<AgentTokens",
-      "<VisibilityToggle",
       "<JoinLink",
       'openPanel("settings")',
       'className="d-btn archive-channel-btn"',
@@ -195,6 +198,9 @@ describe("Channel i18n source guard (#350)", () => {
 
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(presence).toContain("headerControls=");
+    expect(presence).toContain("<VisibilityToggle");
+    expect(toolbar).not.toContain("<VisibilityToggle");
     expect(toolbar).toContain('className="chan-admin-group chan-admin-group--agents"');
     expect(toolbar).toContain('className="chan-admin-group chan-admin-group--access"');
     expect(toolbar).toContain('className="chan-admin-group chan-admin-group--channel"');

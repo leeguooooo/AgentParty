@@ -1160,6 +1160,15 @@
 .presence-head .conn {
   margin-left: auto;
 } /* ● live 推到第一行最右 */
+.presence-channel-controls {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.presence-channel-controls + .conn {
+  margin-left: 0;
+}
 .presence-meta,
 .presence-strip {
   display: flex;
@@ -3143,6 +3152,7 @@
 }
 .chan-tool-actions {
   flex: 0 0 auto;
+  margin-left: auto;
   justify-content: flex-start;
 }
 .chan-admin-actions {
@@ -3294,7 +3304,7 @@
 .vis-seg-btn:last-child { border-right: 0; }
 .vis-seg-btn.is-on { background: var(--d-ink); color: var(--t-panel); }
 .vis-seg-btn:disabled:not(.is-on) { opacity: 0.55; cursor: default; }
-/* 功能与管理控件共用一条横向轨道。常见宽屏直接铺开；空间不足时滚动，
+/* 内容入口靠左、管理控件靠右，共用一条横向轨道。空间不足时滚动，
    邀请面板改为视口底部浮层，避免被滚动容器裁切。 */
 @media (max-width: 1759px) {
   .chan-toolstrip-content {
@@ -3303,6 +3313,23 @@
     -webkit-overflow-scrolling: touch;
     scrollbar-width: thin;
     padding-bottom: 2px;
+  }
+  /* A regular 1440px desktop still has room for both semantic groups when the
+     controls use their compact density. Keep every action visible before
+     falling back to horizontal scrolling at genuinely narrow widths. */
+  .chan-toolstrip-content,
+  .chan-tool-buttons,
+  .chan-tool-actions,
+  .chan-admin-group {
+    gap: 4px;
+  }
+  .chan-tool-btn {
+    padding-inline: 6px;
+    font-size: 11.5px;
+  }
+  .chan-admin-group + .chan-admin-group {
+    margin-left: 4px;
+    padding-left: 5px;
   }
   .joinlink-panel {
     position: fixed;

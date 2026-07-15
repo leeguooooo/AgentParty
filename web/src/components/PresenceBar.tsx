@@ -1,7 +1,7 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
 import { evaluateHostLease, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { agentHue } from "../lib/agentColor";
 import { fmtRel } from "../lib/time";
 import type { SocketStatus } from "../lib/ws";
@@ -23,6 +23,7 @@ interface Props {
   onPauseAgent?: (name: string, resumeAt: number | null) => void;
   onResumeAgent?: (name: string) => void;
   roles?: ChannelRoleAssignment[];
+  headerControls?: ReactNode;
   // issue #272（审计重开）：点 presence roster 里的某个人/agent，打开它的单 Agent 详情弹窗。
   onOpenAgentDetail?: (name: string) => void;
 }
@@ -240,6 +241,7 @@ export function PresenceBar({
   onPauseAgent,
   onResumeAgent,
   roles = [],
+  headerControls,
   onOpenAgentDetail,
 }: Props) {
   const t = useT();
@@ -751,6 +753,9 @@ export function PresenceBar({
             <span className="presence-toggle-arrow" aria-hidden="true">{rosterOpen ? "▾" : "▸"}</span>
           </button>
         </div>
+        {headerControls !== undefined && headerControls !== null && (
+          <div className="presence-channel-controls">{headerControls}</div>
+        )}
         <span className="conn t-mono" data-s={status} role="status" aria-live="polite">
           {status === "open" ? "● live" : `◌ ${status}…`}
         </span>
