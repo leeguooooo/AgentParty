@@ -347,7 +347,6 @@ export function connect(
       // 拒绝/半坏实例）会退化成 ~1 次/秒的无限紧循环锤服务端。改到收到首个业务帧才清零
       // （见 onmessage：解析成功=连接真实可用）。
       helloSince = cursor;
-      opts.onStatus?.("open");
       armInboundWatchdog();
       sock.send(JSON.stringify({
         type: "hello",
@@ -356,6 +355,9 @@ export function connect(
         client_version: pkg.version,
         ...(opts.directedDelivery === "v1" ? { directed_delivery: "v1" as const } : {}),
       }));
+      // External status callbacks may synchronously send an actionable frame on reconnect. Publish
+      // OPEN only after hello is on the wire so no callback can overtake the mandatory handshake.
+      opts.onStatus?.("open");
       stopPing();
       pingTimer = setInterval(() => {
         if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: "ping" }));

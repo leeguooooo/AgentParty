@@ -21,7 +21,9 @@ export type FrameHandler = (
   connIndex: number,
 ) => void;
 
-export function startMockServer(onFrame: FrameHandler): MockServer {
+export type OpenHandler = (sock: MockSocket, connIndex: number) => void;
+
+export function startMockServer(onFrame: FrameHandler, onOpen?: OpenHandler): MockServer {
   const hellos: number[] = [];
   const auths: (string | null)[] = [];
   const paths: string[] = [];
@@ -37,6 +39,12 @@ export function startMockServer(onFrame: FrameHandler): MockServer {
       return new Response("expected websocket", { status: 400 });
     },
     websocket: {
+      open(ws) {
+        onOpen?.({
+          send: (frame) => ws.send(JSON.stringify(frame)),
+          close: (code, reason) => ws.close(code, reason),
+        }, ws.data.index);
+      },
       message(ws, raw) {
         const frame = JSON.parse(String(raw)) as ClientFrame;
         if (frame.type === "hello") hellos.push(frame.since);

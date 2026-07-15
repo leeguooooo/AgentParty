@@ -89,6 +89,40 @@ describe("websocket", () => {
     ws.close();
   });
 
+  it("serializes hello before an immediately-following serve claim while token validation awaits", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+    await ws.nextOfType("participants");
+
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, async (instance: ChannelDO) => {
+      const target = instance as unknown as {
+        isTokenActive(tokenHash: string): Promise<boolean>;
+      };
+      const realIsTokenActive = target.isTokenActive.bind(instance);
+      let delayNext = true;
+      target.isTokenActive = async (tokenHash: string) => {
+        if (delayNext) {
+          delayNext = false;
+          await new Promise((resolve) => setTimeout(resolve, 75));
+        }
+        return realIsTokenActive(tokenHash);
+      };
+    });
+
+    // The production D1 lookup yields here. partyserver may deliver the claim callback while the
+    // hello callback is still awaiting; it must queue behind hello, not receive hello_required.
+    ws.send({ type: "hello", since: 0, directed_delivery: "v1" });
+    ws.send({ type: "serve_lease", op: "claim" });
+    expect(await ws.next()).toMatchObject({
+      type: "serve_lease",
+      held: true,
+    });
+    ws.close();
+  });
+
   it("extracts @name from the body into mentions (bare send should wake the target)", async () => {
     const { token } = await seedToken("agent");
     const bob = await seedToken("agent", "bob");
