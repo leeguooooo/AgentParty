@@ -63,6 +63,7 @@ import { completionMessages } from "../lib/completions";
 import { catchupKey, summarizeCatchup, type CatchupDigest } from "../lib/digest";
 import { buildOrgTree, type OrgMemberInput } from "../lib/orgTree";
 import { charterHasDivisionSection, formatDivisionSection, mergeDivisionIntoCharter, type DivisionCharterRole } from "../lib/divisionCharter";
+import { declaredAgentRoles, formatAgentRoleSummary } from "../lib/divisionSummary";
 import {
   clearDeliveredMentionNotifications,
   isDesktopRuntime,
@@ -651,13 +652,27 @@ export function DivisionBoard({
   // issue #150\uff1a\u62ff\u5f53\u524d\u5df2\u58f0\u660e\u5206\u5de5\uff08assigned + self\uff0c\u4e0d\u542b\u672a\u5206\u5de5\u5360\u4f4d\uff09\u62fc\u6210 markdown
   // \u5c0f\u8282\uff0c\u5408\u5e76\u8fdb\u73b0\u6709\u516c\u544a\u6587\u672c\u3002\u7eaf\u8ba1\u7b97\u653e\u5728\u6e32\u67d3\u671f\uff0c\u624b\u52a8\u6309\u94ae\u548c\u4e0b\u9762\u7684\u81ea\u52a8\u540c\u6b65 effect
   // \u5171\u7528\u540c\u4e00\u4efd\u5408\u5e76\u7ed3\u679c nextCharterText\u2014\u2014\u4fdd\u8bc1\u300c\u624b\u70b9\u300d\u548c\u300c\u81ea\u52a8\u300d\u5199\u8fdb\u53bb\u7684\u6587\u672c\u4e00\u6a21\u4e00\u6837\u3002
-  const declared: DivisionCharterRole[] = roleViews
+  const declaredRoleIdentities = roleViews
     .filter((view): view is typeof view & { role: NonNullable<typeof view.role> } => view.role !== null)
     .map((view) => ({
+      ...view,
+      kind: view.role.kind ?? identityByName.get(view.name)?.kind ?? presence[view.name]?.kind,
+      roleName: view.role.role,
+    }));
+  const declared: DivisionCharterRole[] = declaredAgentRoles(
+    declaredRoleIdentities.map((view) => ({
+      name: view.name,
       display: view.display,
-      accountLabel: view.accountLabel,
-      role: view.role.role,
-      responsibility: view.role.responsibility,
+      kind: view.kind,
+      role: view.roleName,
+      source: view,
+    })),
+  )
+    .map((view) => ({
+      display: view.source.display,
+      accountLabel: view.source.accountLabel,
+      role: view.source.role.role,
+      responsibility: view.source.role.responsibility,
     }));
   const currentCharterText = charterText ?? "";
   const nextCharterText = mergeDivisionIntoCharter(
@@ -3876,20 +3891,22 @@ export function ChannelPage({
   const agentFilterActive = agentFilter.agents.length > 0 || agentFilter.kind !== null;
   const totalInView = q === "" ? timelineMessages.length : searchHits.length;
   const visibleInView = q === "" ? visibleMessages.length : visibleSearchHits.length;
-  const structuredRoleCount = channelRoles.length + selfReportedRoles(channelRoles, state.presence, channelIdentities).length;
+  const channelSelfRoles = selfReportedRoles(channelRoles, state.presence, channelIdentities);
+  const structuredRoleCount = channelRoles.length + channelSelfRoles.length;
   const channelRolesByName = useMemo(
     () => Object.fromEntries(channelRoles.map((role) => [role.name, role])),
     [channelRoles],
   );
-  // #370 点1：公告面板单列一块「分工摘要」——host + 各角色计数，只读，点开跳团队面板看全貌。
-  const charterDivisionSummary = ((): string => {
-    if (channelRoles.length === 0) return "";
-    const host = channelRoles.find((r) => r.role === "host");
-    const counts = new Map<string, number>();
-    for (const r of channelRoles) if (r.role !== "host") counts.set(r.role, (counts.get(r.role) ?? 0) + 1);
-    const parts = [host ? `host=${host.display ?? host.name}` : null, ...[...counts].map(([role, n]) => `${n} ${role}`)];
-    return parts.filter((p): p is string => p !== null).join(" · ");
-  })();
+  // 公告摘要与团队面板共用「管理员分配 + agent 自报」口径，并直接列出 agent 名。
+  // 已知 agent 存在时排除陈旧的人类/未知 role 行，避免 owner account 抢占 host 展示。
+  const charterDivisionSummary = formatAgentRoleSummary(
+    [...channelRoles, ...channelSelfRoles].map((role) => ({
+      name: role.name,
+      display: identityDisplay[role.name]?.display ?? role.display ?? role.name,
+      kind: role.kind ?? identityDisplay[role.name]?.kind ?? state.presence[role.name]?.kind,
+      role: role.role,
+    })),
+  );
   const taskOpenCount = taskSummary?.open ?? tasks.filter((task) => task.state !== "done").length;
   const taskReviewCount = taskSummary?.needs_review ?? tasks.filter((task) => task.state === "needs_review").length;
   const taskBlockedCount = taskSummary?.blocked ?? tasks.filter((task) => task.state === "blocked").length;
