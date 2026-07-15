@@ -45,4 +45,13 @@ describe("attachment downloads (#521)", () => {
     });
     expect(blobCalls).toEqual([{ token: "token", url: "/attachment" }]);
   });
+
+  test("skips signed URL exchange and uses a blob directly without a token", async () => {
+    expect(await resolveAttachmentDownloadUrl(null, "/attachment")).toEqual({
+      href: "blob:authenticated-fallback",
+      revoke: true,
+    });
+    expect(signedCalls).toEqual([]);
+    expect(blobCalls).toEqual([{ token: null, url: "/attachment" }]);
+  });
 });
