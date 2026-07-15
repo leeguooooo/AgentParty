@@ -271,6 +271,21 @@ describe("presence client version", () => {
   });
 });
 
+describe("presence header controls", () => {
+  test("renders channel controls on the top row before the connection status", () => {
+    const controls = createElement("button", { type: "button" }, "Visibility");
+    const r = renderWith(presenceEntry(), { headerControls: controls });
+    const head = nodesWithClass(r, "presence-head")[0];
+
+    expect(head?.children.map((child) => typeof child === "string" ? child : child.props.className)).toEqual([
+      "presence-meta",
+      "presence-channel-controls",
+      "conn t-mono",
+    ]);
+    expect(nodesWithClass(r, "presence-channel-controls")[0]?.findByType("button").children).toEqual(["Visibility"]);
+  });
+});
+
 // busy + 队列深度（#103）：serve 串行处理长任务时，presence 要显式表达「忙 + N 待处理」，
 // 与 working 蜡笔点区分，让人别把「@ 了没立刻回」当失联。
 describe("busy indicator + queue depth (#103)", () => {

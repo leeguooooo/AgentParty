@@ -174,7 +174,11 @@ describe("Channel i18n source guard (#350)", () => {
     expect(source).toContain("onlineAgentCount");
   });
 
-  test("orders channel tools by content, members, access, then channel management", () => {
+  test("places visibility on the presence row and right-aligns channel management after content tools", () => {
+    const presence = source.slice(
+      source.indexOf("<PresenceBar"),
+      source.indexOf("<ChannelToolstrip"),
+    );
     const toolbar = source.slice(
       source.indexOf("<ChannelToolstrip"),
       source.indexOf("{activePanel !== null"),
@@ -186,15 +190,25 @@ describe("Channel i18n source guard (#350)", () => {
       'openPanel("search")',
       "<AgentJoin",
       "<AgentTokens",
-      "<VisibilityToggle",
       "<JoinLink",
       'openPanel("settings")',
       'className="d-btn archive-channel-btn"',
     ];
     const positions = controls.map((control) => toolbar.indexOf(control));
+    const headerControlsStart = presence.indexOf("headerControls={");
+    const headerControlsEndMarker = "\n        ) : null}";
+    const headerControlsEnd = presence.indexOf(headerControlsEndMarker, headerControlsStart);
+    const headerControls = presence.slice(
+      headerControlsStart,
+      headerControlsEnd + headerControlsEndMarker.length,
+    );
 
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(headerControlsStart).toBeGreaterThanOrEqual(0);
+    expect(headerControlsEnd).toBeGreaterThan(headerControlsStart);
+    expect(headerControls).toContain("<VisibilityToggle");
+    expect(toolbar).not.toContain("<VisibilityToggle");
     expect(toolbar).toContain('className="chan-admin-group chan-admin-group--agents"');
     expect(toolbar).toContain('className="chan-admin-group chan-admin-group--access"');
     expect(toolbar).toContain('className="chan-admin-group chan-admin-group--channel"');

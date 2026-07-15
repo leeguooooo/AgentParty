@@ -4102,6 +4102,15 @@ export function ChannelPage({
         onResumeAgent={resumeAgentReception}
         roles={channelRoles}
         onOpenAgentDetail={setOpenAgentDetail}
+        headerControls={canModerate && !state.archived ? (
+          <VisibilityToggle
+            slug={slug}
+            token={token}
+            visibility={localVisibility}
+            onChanged={setLocalVisibility}
+            onAuthFailed={onAuthFailed}
+          />
+        ) : null}
       />
       {kickError !== null && <p className="banner banner--red">{kickError}</p>}
       {pauseError !== null && <p className="banner banner--red">{pauseError}</p>}
@@ -4185,13 +4194,6 @@ export function ChannelPage({
               )}
               {canModerate && !state.archived && (
                 <div className="chan-admin-group chan-admin-group--access">
-                  <VisibilityToggle
-                    slug={slug}
-                    token={token}
-                    visibility={localVisibility}
-                    onChanged={setLocalVisibility}
-                    onAuthFailed={onAuthFailed}
-                  />
                   <JoinLink
                     slug={slug}
                     token={token}
