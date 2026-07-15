@@ -13,6 +13,7 @@ import { DesktopUpdater } from "./components/DesktopUpdater";
 import { TokenGate } from "./components/TokenGate";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { OnboardingGuide } from "./components/OnboardingGuide";
+import { NotifyToggle, readNotifyOptin } from "./components/NotifyToggle";
 import { ServerProfileAddGate, ServerSwitcher } from "./components/ServerProfiles";
 import {
   applyShareToken,
@@ -159,6 +160,7 @@ export function App() {
   const channelReloadInFlight = useRef<{ key: string; promise: Promise<void> } | null>(null);
   const [me, setMe] = useState<MeInfo | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
+  const [notifyOptin, setNotifyOptin] = useState<boolean>(() => readNotifyOptin());
   const [oidc, setOidc] = useState<OidcConfig | null>(null);
   const [authProviders, setAuthProviders] = useState<AuthProviderConfig[]>([]);
   const [authProvidersResolved, setAuthProvidersResolved] = useState(false);
@@ -1115,6 +1117,11 @@ export function App() {
           />
         )}
         <DesktopUpdater />
+        {slug !== null && (
+          <div className="app-channel-notify" aria-label={t("Channel.notify.headerLabel")}>
+            <NotifyToggle optin={notifyOptin} onChange={setNotifyOptin} />
+          </div>
+        )}
         <button
           ref={settingsButtonRef}
           type="button"
@@ -1232,6 +1239,7 @@ export function App() {
               accountKey={me?.email ?? me?.owner ?? me?.name ?? null}
               inviterName={me?.name ?? slug}
               selfHandle={me?.handle ?? null}
+              notifyOptin={notifyOptin}
               joinRequestStatus={channelJoinRequest?.slug === slug ? channelJoinRequest.state : "none"}
               joinRequestReason={channelJoinRequest?.slug === slug ? channelJoinRequest.reason ?? null : null}
               joinRequestError={channelJoinRequest?.slug === slug ? channelJoinRequest.message ?? null : null}

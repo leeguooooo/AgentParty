@@ -97,9 +97,10 @@ describe("ChannelToolstrip discoverability (#355)", () => {
     expect(r.root.findByProps({ "aria-label": "channel tools" }).props.className).toContain("chan-toolstrip--collapsed");
   });
 
-  test("responsive CSS leaves desktop unchanged and hides only mobile collapsed content", () => {
+  test("responsive CSS keeps the one-row desktop track and hides only mobile collapsed content", () => {
     const css = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
     expect(css).toContain(".chan-toolstrip-toggle {\n  display: none;");
+    expect(css).toMatch(/\.chan-toolstrip-content\s*{[^}]*display:\s*flex;[^}]*overflow:\s*visible;/s);
     expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*\.chan-toolstrip-toggle \{[\s\S]*display: inline-flex;/);
     expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*\.chan-toolstrip-toggle-label \{[\s\S]*display: none;/);
     expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*\.chan-toolstrip--collapsed \.chan-toolstrip-content \{\s*display: none;/);
