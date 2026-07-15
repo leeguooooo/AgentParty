@@ -28,8 +28,31 @@ import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock
 
 const dirs: string[] = [];
 const servers: MockServer[] = [];
+type TrackedProcess = {
+  kill(signal?: NodeJS.Signals | number): void;
+  exited: Promise<number>;
+};
+const processes: TrackedProcess[] = [];
 
-afterEach(() => {
+function trackProcess<T extends TrackedProcess>(process: T): T {
+  processes.push(process);
+  return process;
+}
+
+async function stopProcess(process: TrackedProcess): Promise<void> {
+  try { process.kill("SIGTERM"); } catch { /* already exited */ }
+  const stopped = await Promise.race([
+    process.exited.then(() => true),
+    Bun.sleep(100).then(() => false),
+  ]);
+  if (!stopped) {
+    try { process.kill("SIGKILL"); } catch { /* already exited */ }
+  }
+  await process.exited.catch(() => undefined);
+}
+
+afterEach(async () => {
+  for (const process of processes.splice(0)) await stopProcess(process);
   for (const server of servers.splice(0)) server.stop();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -536,6 +559,7 @@ describe("codex-sdk per-work continuations (#548)", () => {
         updates.push(frame);
         socket.send({
           type: "delivery_state",
+          request_id: frame.request_id,
           delivery: {
             ...answer,
             state: frame.state,
@@ -650,14 +674,14 @@ describe("continuation transaction lock", () => {
       continuation_ref: "contended",
     });
     const modulePath = new URL("../src/continuation.ts", import.meta.url).pathname;
-    const holder = Bun.spawn(["bun", "-e", `
+    const holder = trackProcess(Bun.spawn(["bun", "-e", `
       import { withRunnerContinuationLock } from ${JSON.stringify(modulePath)};
       import { writeFileSync } from "node:fs";
       withRunnerContinuationLock(${JSON.stringify(path)}, () => {
         writeFileSync(${JSON.stringify(ready)}, "ready");
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
       });
-    `], { stdout: "pipe", stderr: "pipe" });
+    `], { stdout: "pipe", stderr: "pipe" }));
     // A cold Bun child must transpile/import continuation.ts before it can acquire the lock. Under
     // a parallel suite that startup exceeded the old 500ms readiness budget even though no SQLite
     // timeout occurred. Keep readiness aligned with the production 5s lock budget; this does not
@@ -689,7 +713,7 @@ describe("continuation transaction lock", () => {
     const done = join(workdir, "done");
     const modulePath = new URL("../src/continuation.ts", import.meta.url).pathname;
 
-    const children = ["a", "b"].map((id) => Bun.spawn(["bun", "-e", `
+    const children = ["a", "b"].map((id) => trackProcess(Bun.spawn(["bun", "-e", `
       import { withRunnerContinuationLock } from ${JSON.stringify(modulePath)};
       import { appendFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
       const sleep = new Int32Array(new SharedArrayBuffer(4));
@@ -707,7 +731,7 @@ describe("continuation transaction lock", () => {
         if (ownsGuard) rmSync(${JSON.stringify(active)}, { force: true });
         appendFileSync(${JSON.stringify(done)}, ${JSON.stringify(id)} + "\\n");
       });
-    `], { stdout: "pipe", stderr: "pipe" }));
+    `], { stdout: "pipe", stderr: "pipe" })));
     for (let i = 0; i < 200; i++) {
       if (existsSync(join(workdir, "ready-a")) && existsSync(join(workdir, "ready-b"))) break;
       await Bun.sleep(5);
@@ -726,14 +750,14 @@ describe("continuation transaction lock", () => {
     const path = continuationPath(workdir, "killed-holder");
     const ready = join(workdir, "killed-holder-ready");
     const modulePath = new URL("../src/continuation.ts", import.meta.url).pathname;
-    const holder = Bun.spawn(["bun", "-e", `
+    const holder = trackProcess(Bun.spawn(["bun", "-e", `
       import { withRunnerContinuationLock } from ${JSON.stringify(modulePath)};
       import { writeFileSync } from "node:fs";
       withRunnerContinuationLock(${JSON.stringify(path)}, () => {
         writeFileSync(${JSON.stringify(ready)}, "ready");
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10_000);
       });
-    `], { stdout: "pipe", stderr: "pipe" });
+    `], { stdout: "pipe", stderr: "pipe" }));
     for (let i = 0; i < 200 && !existsSync(ready); i++) await Bun.sleep(5);
     expect(existsSync(ready)).toBe(true);
     holder.kill("SIGKILL");
@@ -751,14 +775,14 @@ describe("continuation transaction lock", () => {
     const path = continuationPath(workdir, "live-holder");
     const ready = join(workdir, "live-holder-ready");
     const modulePath = new URL("../src/continuation.ts", import.meta.url).pathname;
-    const holder = Bun.spawn(["bun", "-e", `
+    const holder = trackProcess(Bun.spawn(["bun", "-e", `
       import { withRunnerContinuationLock } from ${JSON.stringify(modulePath)};
       import { writeFileSync } from "node:fs";
       withRunnerContinuationLock(${JSON.stringify(path)}, () => {
         writeFileSync(${JSON.stringify(ready)}, "ready");
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
       });
-    `], { stdout: "pipe", stderr: "pipe" });
+    `], { stdout: "pipe", stderr: "pipe" }));
     for (let i = 0; i < 200 && !existsSync(ready); i++) await Bun.sleep(5);
     expect(existsSync(ready)).toBe(true);
 

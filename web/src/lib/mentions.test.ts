@@ -458,10 +458,13 @@ describe("parseDraftMentions", () => {
   });
 
   test("仅 ASCII alias 忽略大小写；Unicode alias 按 NFC 精确匹配", () => {
+    const decomposed = "A\u0308gent";
     expect(parseDraftMentions("@ALICE @alice", ["alice"])).toEqual(["alice"]);
     expect(parseDraftMentions("@Ägent", ["Ägent"])).toEqual(["Ägent"]);
     expect(parseDraftMentions("@ÄGENT", ["Ägent"])).toEqual(["ÄGENT"]);
     expect(parseDraftMentions("@Ägent @ägent", ["Ägent", "ägent"])).toEqual(["Ägent", "ägent"]);
+    expect(parseDraftMentions(`@${decomposed}看一下`, ["Ägent"])).toEqual(["Ägent"]);
+    expect(parseDraftMentions("@Ägent看一下", [decomposed])).toEqual([decomposed]);
   });
 });
 
@@ -469,6 +472,8 @@ describe("activeMentionQuery — 中文昵称补全（#165）", () => {
   test("打 @中 触发补全下拉", () => {
     expect(activeMentionQuery("@中", 2)).toEqual({ start: 0, query: "中" });
     expect(activeMentionQuery("hi @小助", 6)).toEqual({ start: 3, query: "小助" });
+    const supplementary = "请@𠮷";
+    expect(activeMentionQuery(supplementary, supplementary.length)).toEqual({ start: 1, query: "𠮷" });
   });
   test("中文正文后可触发，ASCII/email 左边界仍拒绝", () => {
     expect(activeMentionQuery("请@agent", 8)).toEqual({ start: 1, query: "agent" });

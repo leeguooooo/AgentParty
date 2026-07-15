@@ -19,6 +19,17 @@ async function claim(ws: WsClient) {
   return ws.nextOfType("serve_lease");
 }
 
+async function nextDeliveryState(
+  ws: WsClient,
+  deliveryId: string,
+  state: DirectedDelivery["state"],
+) {
+  for (;;) {
+    const frame = await ws.nextOfType("delivery_state");
+    if (frame.delivery.id === deliveryId && frame.delivery.state === state) return frame;
+  }
+}
+
 async function deliveryRows(
   slug: string,
 ): Promise<Array<DirectedDelivery & { lease_connection_id: string | null; lease_adapter: string | null; target_owner: string | null }>> {
@@ -343,8 +354,24 @@ describe("持久定向投递（issue #551）", () => {
     const serve = await WsClient.open(slug, target.token);
     const welcome = await serve.nextOfType("welcome");
     expect(welcome.directed_delivery).toBe("v1");
-    expect((await claim(serve)).held).toBe(true);
-    const frame = await serve.nextOfType("delivery");
+    serve.send({ type: "hello", since: 0, directed_delivery: "v1" });
+    serve.send({ type: "serve_lease", op: "claim" });
+    let sawSourceBackfill = false;
+    let sawHeldLease = false;
+    let frame: DirectedDeliveryFrame | undefined;
+    while (frame === undefined) {
+      const next = await serve.next();
+      if (next.type === "msg" && next.seq === posted.seq) sawSourceBackfill = true;
+      if (next.type === "serve_lease") {
+        expect(next.held).toBe(true);
+        sawHeldLease = true;
+      }
+      if (next.type === "delivery") {
+        expect(sawSourceBackfill).toBe(true);
+        expect(sawHeldLease).toBe(true);
+        frame = next;
+      }
+    }
     expect(frame).toMatchObject({
       delivery: { message_seq: posted.seq, target_name: target.name, state: "claimed", attempt: 1 },
       message: { seq: posted.seq, body: "offline work" },
@@ -353,7 +380,7 @@ describe("持久定向投递（issue #551）", () => {
     serve.close();
   });
 
-  it("同一 target 串行 claim；read cursor 不吞 work；终态回执幂等并释放下一条", async () => {
+  it("同一 target 串行 claim；无问题不能停车；终态回执幂等并释放下一条", async () => {
     const sender = await seedToken("agent", uniq("sender"));
     const target = await seedToken("agent", uniq("target"));
     const slug = await createChannel(sender.token);
@@ -366,6 +393,8 @@ describe("持久定向投递（issue #551）", () => {
     const second = await sendMention(slug, sender.token, target.name, "second");
     // 普通消息游标即使前移到第二条之后，也不能改变独立 delivery 状态。
     serve.send({ type: "seen", seq: second.seq + 100 });
+    serve.send({ type: "ping" });
+    await serve.nextOfType("pong");
     expect(await deliveryRows(slug)).toMatchObject([
       { message_seq: first.seq, state: "claimed" },
       { message_seq: second.seq, state: "queued" },
@@ -378,28 +407,75 @@ describe("持久定向投递（issue #551）", () => {
       work_id: firstDelivery.delivery.work_id,
       continuation_ref: firstDelivery.delivery.continuation_ref,
     });
-    const secondDelivery = await serve.nextOfType("delivery");
-    expect(secondDelivery.delivery).toMatchObject({ message_seq: second.seq, state: "claimed", attempt: 1 });
-    // 同一个挂起态帧重发是 no-op，不会把当前第二条 work 释放或改写。
-    serve.send({ type: "delivery_update", delivery_id: firstDelivery.delivery.id, state: "waiting_owner" });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await serve.nextOfType("error")).code).toBe("bad_request");
     expect(await deliveryRows(slug)).toMatchObject([
       {
         message_seq: first.seq,
-        state: "waiting_owner",
+        state: "claimed",
         work_id: firstDelivery.delivery.work_id,
         continuation_ref: firstDelivery.delivery.continuation_ref,
       },
+      { message_seq: second.seq, state: "queued" },
+    ]);
+    serve.send({
+      type: "delivery_update",
+      delivery_id: firstDelivery.delivery.id,
+      state: "failed",
+      error: "runner exited",
+    });
+    await nextDeliveryState(serve, firstDelivery.delivery.id, "failed");
+    const secondDelivery = await serve.nextOfType("delivery");
+    expect(secondDelivery.delivery).toMatchObject({ message_seq: second.seq, state: "claimed", attempt: 1 });
+    // 同一个终态帧重发只返回权威 ACK，不会再改写或重复释放队列。
+    serve.send({
+      type: "delivery_update",
+      delivery_id: firstDelivery.delivery.id,
+      state: "failed",
+      error: "ignored retry",
+    });
+    await nextDeliveryState(serve, firstDelivery.delivery.id, "failed");
+    expect(await deliveryRows(slug)).toMatchObject([
+      { message_seq: first.seq, state: "failed", last_error: "runner exited" },
       { message_seq: second.seq, state: "claimed" },
     ]);
     serve.send({
       type: "delivery_update",
       delivery_id: secondDelivery.delivery.id,
       state: "failed",
-      error: "runner exited",
+      error: "second exited",
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect((await deliveryRows(slug))[1]).toMatchObject({ state: "failed", last_error: "runner exited" });
+    await nextDeliveryState(serve, secondDelivery.delivery.id, "failed");
+    expect((await deliveryRows(slug))[1]).toMatchObject({ state: "failed", last_error: "second exited" });
+    serve.close();
+  });
+
+  it("delivery_update 只在本连接的直接 ACK 回显临时 request_id", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("target"));
+    const slug = await createChannel(sender.token);
+    const serve = await WsClient.open(slug, target.token);
+    await serve.nextOfType("welcome");
+    expect((await claim(serve)).held).toBe(true);
+
+    await sendMention(slug, sender.token, target.name, "correlated ack");
+    const work = await serve.nextOfType("delivery");
+    serve.send({
+      type: "delivery_update",
+      delivery_id: work.delivery.id,
+      request_id: "request-ack-1",
+      state: "running",
+      work_id: work.delivery.work_id,
+      continuation_ref: work.delivery.continuation_ref,
+    });
+
+    const broadcast = await serve.nextOfType("delivery_state");
+    const direct = await serve.nextOfType("delivery_state");
+    expect(broadcast).toMatchObject({ delivery: { id: work.delivery.id, state: "running" } });
+    expect(broadcast.request_id).toBeUndefined();
+    expect(direct).toMatchObject({
+      request_id: "request-ack-1",
+      delivery: { id: work.delivery.id, state: "running" },
+    });
     serve.close();
   });
 
@@ -449,7 +525,7 @@ describe("持久定向投递（issue #551）", () => {
       work_id: firstAttempt.delivery.work_id,
       continuation_ref: firstAttempt.delivery.continuation_ref,
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await nextDeliveryState(holder, firstAttempt.delivery.id, "running");
     expect((await deliveryRows(slug))[0]).toMatchObject({ state: "running", attempt: 1 });
     holder.send({
       type: "heartbeat",
@@ -457,7 +533,8 @@ describe("持久定向投递（issue #551）", () => {
       task_started_at: Date.now() - 1000,
       heartbeat_at: Date.now(),
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    holder.send({ type: "ping" });
+    await holder.nextOfType("pong");
     expect((await deliveryRows(slug))[0]).toMatchObject({ state: "running", attempt: 1 });
 
     const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));

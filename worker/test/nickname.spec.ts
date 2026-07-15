@@ -265,12 +265,17 @@ describe("@中文昵称 解析成真实 name 并唤醒（#165）", () => {
   it("正文提取超过 50 个唯一 mention 时整条拒绝，不静默截断前 50 个", async () => {
     const sender = await seedToken("agent", uniq("mention-overflow"));
     const slug = await createChannel(sender.token);
-    const body = Array.from({ length: 51 }, (_, index) => `@overflow-${index}`).join(" ");
+    const targets: string[] = [];
+    for (let index = 0; index < 51; index++) {
+      targets.push((await seedToken("agent", uniq(`overflow-${index}`))).name);
+    }
+    const body = targets.map((name) => `@${name}`).join(" ");
     const response = await api(`/api/channels/${slug}/messages`, sender.token, {
       method: "POST",
       body: JSON.stringify({ kind: "message", body, mentions: [], reply_to: null }),
     });
     expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "bad_request" } });
     const history = await api(`/api/channels/${slug}/messages?since=0`, sender.token);
     expect(((await history.json()) as { messages: unknown[] }).messages).toHaveLength(0);
   });

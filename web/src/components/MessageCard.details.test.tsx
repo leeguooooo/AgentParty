@@ -122,6 +122,7 @@ describe("MessageCard touch and keyboard details (#357)", () => {
 
     const delivery = root.findByProps({ "data-delivery-id": "delivery-10-builder" });
     expect(delivery.props.className).toContain("msg-delivery--running");
+    expect(delivery.props.tabIndex).toBe(0);
     expect(delivery.children.map((child) => typeof child === "string" ? child : child.children.join("")).join(""))
       .toContain("@builderrunning");
     expect(delivery.props.title).not.toContain("attempt 2");
@@ -129,5 +130,14 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     expect(delivery.props.title).not.toContain("thread-10");
     expect(delivery.props.title).not.toContain("secret internal stack");
     expect(root.findAll((node) => String(node.props.className ?? "").includes("msg-receipt--pending_wake"))).toHaveLength(0);
+
+    // 没有 read_cursor 时，可靠投递本身也必须能展开详情；按钮天然可键盘聚焦。
+    const toggle = root.findByProps({ className: "msg-status-summary" });
+    expect(toggle.type).toBe("button");
+    expect(toggle.props["aria-expanded"]).toBe(false);
+    act(() => toggle.props.onClick());
+    expect(root.findByProps({ className: "msg-status-pop" })).toBeDefined();
+    expect(root.findAllByProps({ className: "msg-status-group-head" }).map((node) => node.children.join("")))
+      .toContain("Reliable @ delivery");
   });
 });

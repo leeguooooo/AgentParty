@@ -22,6 +22,8 @@ export const PresenceBarStrings: LocaleDict = {
     "PresenceBar.pausedChipUntil": "⏸ paused · resumes {time}",
     "PresenceBar.pausedManual": "Paused — won't be woken by @-mentions until resumed manually",
     "PresenceBar.pausedUntil": "Paused — won't be woken by @-mentions; auto-resumes {time}",
+    "PresenceBar.waitingOwnerChip": "💬 {count} waiting owner",
+    "PresenceBar.waitingOwnerTitle": "{count} work awaiting owner input (runner remains available)",
     // 每任务进度/心跳（#228）
     "PresenceBar.taskChip": "▶ #{seq}",
     "PresenceBar.taskChipBeat": "▶ #{seq} · ♥ {age}",
@@ -53,6 +55,8 @@ export const PresenceBarStrings: LocaleDict = {
     "PresenceBar.pausedChipUntil": "⏸ 已暂停 · {time} 恢复",
     "PresenceBar.pausedManual": "已暂停接待——被 @ 也不唤醒，需手动恢复",
     "PresenceBar.pausedUntil": "已暂停接待——被 @ 也不唤醒；将于 {time} 自动恢复",
+    "PresenceBar.waitingOwnerChip": "💬 {count} 项等待 owner",
+    "PresenceBar.waitingOwnerTitle": "{count} 项任务正在等待 owner（runner 仍可接活）",
     // 每任务进度/心跳（#228）
     "PresenceBar.taskChip": "▶ #{seq}",
     "PresenceBar.taskChipBeat": "▶ #{seq} · ♥ {age}",

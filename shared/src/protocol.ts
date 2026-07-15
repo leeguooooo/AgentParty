@@ -779,6 +779,8 @@ export interface DeliveryAdapterRegisterFrame {
 export interface DeliveryUpdateFrame {
   type: "delivery_update";
   delivery_id: string;
+  /** Ephemeral per-update correlation token. It is echoed only on the direct ACK, never persisted. */
+  request_id?: string;
   state: "running" | "waiting_owner" | "replied" | "failed";
   work_id?: string;
   continuation_ref?: string;
@@ -851,8 +853,9 @@ export interface DirectedDelivery {
 
 /**
  * 频道状态投影。租约、attempt、cause、continuation/work 引用和内部错误永远不进
- * `delivery_state`；完整对象只走目标 holder 专用的 `delivery` 帧。未授权连接还会把
- * claimed/running/waiting_owner 都投影为 running，只暴露 queued/processing/replied/failed 四档。
+ * `delivery_state`；完整对象只走目标 holder 专用的 `delivery` 帧。状态本身按连接投影：
+ * 目标身份及其 owner 可见 claimed/waiting_owner，其他连接会把 claimed/running/waiting_owner
+ * 统一投影为 running。因此这里保留完整状态联合，授权边界由 worker 逐连接执行。
  */
 export interface PublicDirectedDelivery {
   id: string;
@@ -875,6 +878,8 @@ export interface DirectedDeliveryFrame {
 export interface DeliveryStateFrame {
   type: "delivery_state";
   delivery: PublicDirectedDelivery;
+  /** Present only on the direct ACK for a delivery_update carrying the same token. */
+  request_id?: string;
 }
 
 export interface ParticipantsFrame {

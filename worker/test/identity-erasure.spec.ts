@@ -124,7 +124,7 @@ describe("gdpr identity erasure + export (#421)", () => {
     const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
     await runInDurableObject(stub, async (_instance: ChannelDO, state) => {
       state.storage.sql.exec(
-        "UPDATE messages SET decision_response_json = ? WHERE seq = ?",
+        "UPDATE messages SET decision_response_json = ?, decision_state = 'pending' WHERE seq = ?",
         JSON.stringify({
           request_seq: firstSeq,
           chosen_index: 0,
@@ -195,6 +195,12 @@ describe("gdpr identity erasure + export (#421)", () => {
       expect(
         Number(state.storage.sql.exec("SELECT COUNT(*) AS n FROM directed_deliveries WHERE target_name = ?", other.name).one().n),
       ).toBe(1);
+      expect(
+        Number(state.storage.sql.exec(
+          "SELECT COUNT(*) AS n FROM messages WHERE sender_name = ? AND decision_state IS NOT NULL",
+          writer.name,
+        ).one().n),
+      ).toBe(0);
     });
 
     // 擦除后：该身份数据不可查——消息正文被抹成 [erased]，审计/账本/游标/presence 清零。

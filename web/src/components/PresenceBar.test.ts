@@ -303,8 +303,25 @@ describe("busy indicator + queue depth (#103)", () => {
   });
 
   test("waiting_owner 单独显示，不冒充 busy", () => {
-    expect(waitingOwnerLabel(item({ waitingOwnerCount: 2, busy: false }))).toBe("💬 2 waiting owner");
+    expect(waitingOwnerLabel(item({ waitingOwnerCount: 2, busy: false }))).toEqual({
+      key: "PresenceBar.waitingOwnerChip",
+      vars: { count: 2 },
+    });
     expect(waitingOwnerLabel(item({ waitingOwnerCount: 0 }))).toBeNull();
+  });
+
+  test("waiting_owner chip follows the active en/zh locale", async () => {
+    const entry = busyEntry({ busy: false, waiting_owner_count: 2 });
+    const en = renderPresence(entry, true);
+    expect(nodesWithClass(en, "presence-waiting-owner").some((node) => node.children.join("") === "💬 2 waiting owner"))
+      .toBe(true);
+
+    await act(async () => en.unmount());
+    renderer = null;
+    localStorage.setItem("ap_locale", "zh");
+    const zh = renderPresence(entry, true);
+    expect(nodesWithClass(zh, "presence-waiting-owner").some((node) => node.children.join("") === "💬 2 项等待 owner"))
+      .toBe(true);
   });
 
   // 每任务进度/心跳（#228）：比 busy 更细——标明正在处理哪条 wake + 心跳新鲜度。

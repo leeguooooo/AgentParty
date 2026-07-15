@@ -136,8 +136,10 @@ export function busyLabel(item: Item): string | null {
   return item.queueDepth !== null ? `⏳ busy · ${item.queueDepth} queued` : "⏳ busy";
 }
 
-export function waitingOwnerLabel(item: Item): string | null {
-  return item.waitingOwnerCount > 0 ? `💬 ${item.waitingOwnerCount} waiting owner` : null;
+export function waitingOwnerLabel(item: Item): { key: string; vars: { count: number } } | null {
+  return item.waitingOwnerCount > 0
+    ? { key: "PresenceBar.waitingOwnerChip", vars: { count: item.waitingOwnerCount } }
+    : null;
 }
 
 // 每任务进度/心跳 chip（#228）：「▶ #510」或「▶ #510 · ♥ 8s」。比 busy 更细——不仅「在忙」，还标明
@@ -251,6 +253,10 @@ export function PresenceBar({
   onOpenAgentDetail,
 }: Props) {
   const t = useT();
+  const localizeWaitingOwner = (item: Item): string | null => {
+    const label = waitingOwnerLabel(item);
+    return label === null ? null : t(label.key, label.vars);
+  };
   // 相对时间 30s 刷一次
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -415,7 +421,7 @@ export function PresenceBar({
     const residency = residencyBadge(it);
     const wakeability = wakeabilityBadge(it, now);
     const busy = busyLabel(it);
-    const waitingOwner = waitingOwnerLabel(it);
+    const waitingOwner = localizeWaitingOwner(it);
     const task = taskLabel(it, now);
     const taskTitle =
       it.currentTask === null
@@ -428,7 +434,7 @@ export function PresenceBar({
     const titleParts = [
       it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name,
       it.busy ? `busy${it.queueDepth !== null ? ` · ${it.queueDepth} queued` : ""} (reachable, reply may be slow — do not re-@)` : null,
-      it.waitingOwnerCount > 0 ? `${it.waitingOwnerCount} work waiting for owner (runner remains available)` : null,
+      it.waitingOwnerCount > 0 ? t("PresenceBar.waitingOwnerTitle", { count: it.waitingOwnerCount }) : null,
       taskTitle,
       it.handle !== null && it.handle !== "" ? `handle: ${it.handle}` : null,
       it.role !== null ? `role: ${it.role}` : null,
@@ -718,9 +724,9 @@ export function PresenceBar({
                 {agent.connectionCount > 1 && <span className="t-mono presence-agent-duplicate">x{agent.connectionCount}</span>}
                 {roleBadge(agent, now) !== null && <span className="t-mono presence-agent-role">{roleBadge(agent, now)}</span>}
                 {busyLabel(agent) !== null && <span className="t-mono presence-busy presence-busy--chip">{busyLabel(agent)}</span>}
-                {waitingOwnerLabel(agent) !== null && (
+                {agent.waitingOwnerCount > 0 && (
                   <span className="t-mono presence-busy presence-busy--chip presence-waiting-owner">
-                    {waitingOwnerLabel(agent)}
+                    {t("PresenceBar.waitingOwnerChip", { count: agent.waitingOwnerCount })}
                   </span>
                 )}
                 {taskLabel(agent, now) !== null && (

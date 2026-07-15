@@ -25,6 +25,7 @@ const serverLogPath = resolve(process.env.MCP_PROBE_LOG ?? "cli/.probe-results/c
 const idleObservationMs = Number(process.env.MCP_APP_IDLE_MS ?? 30_000);
 const notificationDelayMs = Number(process.env.MCP_APP_NOTIFICATION_DELAY_MS ?? 5_000);
 const turnTimeoutMs = Number(process.env.MCP_APP_TURN_TIMEOUT_MS ?? 180_000);
+const appServerShutdownGraceMs = Number(process.env.MCP_APP_SHUTDOWN_GRACE_MS ?? 2_000);
 const bunPath = Bun.which("bun");
 const desktopBinaryCandidates = [
   "/Applications/ChatGPT.app/Contents/Resources/codex",
@@ -47,7 +48,7 @@ const invocationId = crypto.randomUUID();
 
 if (!bunPath) throw new Error("bun executable not found");
 if (!existsSync(codexBin)) throw new Error(`Codex binary not found: ${codexBin}`);
-for (const [name, value] of Object.entries({ idleObservationMs, notificationDelayMs, turnTimeoutMs })) {
+for (const [name, value] of Object.entries({ idleObservationMs, notificationDelayMs, turnTimeoutMs, appServerShutdownGraceMs })) {
   if (!Number.isFinite(value) || value < 250) throw new Error(`${name} must be at least 250ms`);
 }
 mkdirSync(dirname(evidencePath), { recursive: true });
@@ -103,8 +104,39 @@ const child = Bun.spawn(
       probeScript,
     ].map(tomlString).join(",")}]`,
   ],
-  { cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe", env: appEnv },
+  {
+    cwd,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: appEnv,
+    detached: process.platform !== "win32",
+  },
 );
+let childExitCode: number | null = null;
+const childExited = child.exited.then((code) => {
+  childExitCode = code;
+  return code;
+});
+
+function signalAppServer(signal: NodeJS.Signals): void {
+  if (childExitCode !== null) return;
+  if (process.platform !== "win32") {
+    try { process.kill(-child.pid, signal); } catch { /* leader fallback below */ }
+  }
+  try { child.kill(signal); } catch { /* already exited */ }
+}
+
+async function stopAppServer(): Promise<number> {
+  try { child.stdin.end(); } catch { /* stdin may already be closed after an early app-server exit */ }
+  signalAppServer("SIGTERM");
+  const stopped = await Promise.race([
+    childExited.then(() => true),
+    Bun.sleep(appServerShutdownGraceMs).then(() => false),
+  ]);
+  if (!stopped) signalAppServer("SIGKILL");
+  return await childExited;
+}
 
 const version = Bun.spawnSync([codexBin, "--version"], { env: appEnv }).stdout.toString().trim();
 const binarySha256 = Bun.spawnSync(["shasum", "-a", "256", codexBin]).stdout.toString().trim().split(/\s+/)[0];
@@ -245,6 +277,7 @@ function readIdleMarker(): {
   runId: string;
   hiddenToken: string;
   sent: Array<{ kind: string; ts: number }>;
+  runCount: number;
 } {
   const appended = readFileSync(serverLogPath).subarray(serverLogStartOffset).toString("utf8");
   const rows = appended
@@ -253,7 +286,8 @@ function readIdleMarker(): {
     .filter(Boolean)
     .map((line) => JSON.parse(line) as Record<string, unknown>)
     .filter((row) => row.invocation_id === invocationId);
-  const armed = [...rows].reverse().find((row) => row.event === "idle_probe_armed");
+  const armedRuns = rows.filter((row) => row.event === "idle_probe_armed");
+  const armed = armedRuns[0];
   if (!armed || typeof armed.run_id !== "string" || typeof armed.hidden_token !== "string") {
     throw new Error("probe server did not record idle_probe_armed");
   }
@@ -264,7 +298,7 @@ function readIdleMarker(): {
         row.hidden_token === armed.hidden_token,
     )
     .map((row) => ({ kind: String(row.kind), ts: Number(row.ts) }));
-  return { runId: armed.run_id, hiddenToken: armed.hidden_token, sent };
+  return { runId: armed.run_id, hiddenToken: armed.hidden_token, sent, runCount: armedRuns.length };
 }
 
 let exitCode = 1;
@@ -312,6 +346,7 @@ try {
     completed_turn_id: firstTurn.id,
     elapsed_ms: Date.now() - idleStartedAt,
     server_run_id: marker.runId,
+    server_run_count: marker.runCount,
     server_notification_sends: marker.sent.map((item) => item.kind),
     all_notifications_after_turn_completed: marker.sent.every((item) => item.ts > firstTurnCompletedAt),
     unsolicited_turn_count: unsolicitedTurns.length,
@@ -348,6 +383,9 @@ try {
   const followupExplicitlyDeniedMarker =
     parsedFollowup?.saw_unsolicited_notification_token === false &&
     parsedFollowup.exact_token_or_null === null;
+  // Re-read after the manual follow-up so an unexpected second tool call anywhere in this
+  // invocation cannot be hidden by the marker snapshot taken before that turn.
+  const finalMarker = readIdleMarker();
   const expectedKinds = ["logging/message", "resources/updated", "resources/list_changed", "tools/list_changed"];
   const sentKinds = marker.sent.map((item) => item.kind);
   const allNotificationsAfterTurnCompleted = marker.sent.every((item) => item.ts > firstTurnCompletedAt);
@@ -360,6 +398,7 @@ try {
     armed_turn_id: firstTurn.id,
     followup_turn_id: followupTurn.id,
     server_run_id: marker.runId,
+    server_run_count: finalMarker.runCount,
     server_notification_sends: sentKinds,
     first_turn_completed_at: firstTurnCompletedAt,
     notification_send_timestamps: marker.sent,
@@ -371,6 +410,7 @@ try {
     followup_assistant_items: assistantPayload,
   });
   exitCode =
+    finalMarker.runCount === 1 &&
     unsolicitedTurns.length === 0 &&
     !markerInAssistantOutput &&
     followupExplicitlyDeniedMarker &&
@@ -382,10 +422,9 @@ try {
   record("probe_error", { error: error instanceof Error ? error.stack ?? error.message : String(error) });
   console.error(error);
 } finally {
-  child.kill("SIGTERM");
-  child.stdin.end();
-  await Promise.allSettled([child.exited, stdoutLoop, stderrLoop]);
-  record("app_server_stopped", { exit_code: await child.exited, probe_exit_code: exitCode });
+  const appServerExitCode = await stopAppServer();
+  await Promise.allSettled([stdoutLoop, stderrLoop]);
+  record("app_server_stopped", { exit_code: appServerExitCode, probe_exit_code: exitCode });
   if (!keepIsolatedState) {
     if (configuredCodexHome === undefined) rmSync(isolatedCodexHome, { recursive: true, force: true });
     if (configuredWorkspace === undefined) rmSync(cwd, { recursive: true, force: true });

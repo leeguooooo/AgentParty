@@ -144,7 +144,7 @@ describe("MCP party_watch_once durable delivery (#551)", () => {
           send({ type: "delivery_adapter", adapter: "watch", registered: true });
           send({ type: "delivery", delivery, message });
         } else if (frame.type === "delivery_update") {
-          send({ type: "delivery_state", delivery: publicState(delivery, "running") });
+          send({ type: "delivery_state", request_id: frame.request_id, delivery: publicState(delivery, "running") });
         }
       },
     });
@@ -162,13 +162,14 @@ describe("MCP party_watch_once durable delivery (#551)", () => {
         exit_code: 0,
         frames: [{ type: "delivery", delivery: { id: delivery.id }, message: { seq: 11 } }],
       });
-      expect(probe.clientFrames).toContainEqual({
+      expect(probe.clientFrames).toContainEqual(expect.objectContaining({
         type: "delivery_update",
         delivery_id: delivery.id,
         state: "running",
         work_id: delivery.work_id,
         continuation_ref: delivery.continuation_ref,
-      });
+        request_id: expect.any(String),
+      }));
       expect(readDebt()).toMatchObject({
         seq: 11,
         delivery_id: delivery.id,

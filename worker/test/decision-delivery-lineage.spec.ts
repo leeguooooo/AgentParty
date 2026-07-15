@@ -88,6 +88,11 @@ async function askDecision(
   originSeq: number | null,
   prompt: string,
   extras: Record<string, unknown> = {},
+  expectedDecisionLineage?: {
+    delivery_id: string;
+    work_id: string;
+    continuation_ref: string;
+  },
 ) {
   const response = await api(`/api/channels/${slug}/messages`, token, {
     method: "POST",
@@ -97,6 +102,9 @@ async function askDecision(
       mentions: [],
       reply_to: originSeq,
       decision_request: { prompt, ...extras },
+      ...(expectedDecisionLineage === undefined
+        ? {}
+        : { expected_decision_lineage: expectedDecisionLineage }),
     }),
   });
   return { response, body: response.ok ? ((await response.json()) as MessageResult) : null };
@@ -211,12 +219,10 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
     });
     expect(asked.response.status).toBe(200);
     expect(asked.body?.decision_resolution).toEqual({ state: "pending" });
-    expect(asked.body?.decision_request).toMatchObject({
-      delivery_id: first.delivery.id,
-      origin_seq: origin.seq,
-      origin_channel: slug,
-      work_id: first.delivery.work_id,
-      continuation_ref: first.delivery.continuation_ref,
+    expect(asked.body?.decision_request).toEqual({
+      kind: "approval",
+      prompt: "ship it?",
+      options: ["approve", "reject"],
     });
     const parkedState = await nextDeliveryState(serve, first.delivery.id, "waiting_owner");
     expect(parkedState.delivery).toMatchObject({ id: first.delivery.id, state: "waiting_owner" });
@@ -270,6 +276,18 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
       work_id: first.delivery.work_id,
       continuation_ref: first.delivery.continuation_ref,
     });
+    // Resolution changes the question from pending to resolved before the original runner's final
+    // receipt is guaranteed to arrive. That late generic receipt must still be ACKed as the
+    // authoritative waiting_owner no-op; the separate owner_answer delivery owns continuation now.
+    serve.send({
+      type: "delivery_update",
+      delivery_id: first.delivery.id,
+      state: "replied",
+      work_id: first.delivery.work_id ?? undefined,
+      continuation_ref: first.delivery.continuation_ref ?? undefined,
+    });
+    const postResolveLateAck = await nextDeliveryState(serve, first.delivery.id, "waiting_owner");
+    expect(postResolveLateAck.delivery).toMatchObject({ id: first.delivery.id, state: "waiting_owner" });
     const duplicate = await resolveDecision(slug, owner.token, asked.body!.seq, "must not duplicate");
     expect(duplicate.response.status).toBe(200);
     expect(duplicate.body?.reply.seq).toBe(resolved.body?.reply.seq);
@@ -285,6 +303,68 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
     expect(rows.find((row) => row.id === first.delivery.id)).toMatchObject({
       state: "replied",
       reply_seq: final.seq,
+    });
+    serve.close();
+  });
+
+  it("rejects stale REST lineage atomically before message, decision, or waiting state", async () => {
+    const { slug, owner, agent, serve } = await fixture();
+    const origin = await sendWork(slug, owner.token, agent.name, "atomic lineage");
+    const source = await serve.nextOfType("delivery");
+    const stale = await askDecision(
+      slug,
+      agent.token,
+      origin.seq,
+      "must not persist",
+      {},
+      {
+        delivery_id: `${source.delivery.id}-stale`,
+        work_id: source.delivery.work_id!,
+        continuation_ref: source.delivery.continuation_ref!,
+      },
+    );
+    expect(stale.response.status).toBe(400);
+    expect(await stale.response.json()).toMatchObject({
+      error: { code: "bad_request", message: expect.stringContaining("lineage") },
+    });
+    expect((await deliveryRows(slug))[0]).toMatchObject({ state: "claimed" });
+
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, async (_instance: ChannelDO, state) => {
+      expect(
+        Number(state.storage.sql.exec("SELECT COUNT(*) AS n FROM messages WHERE decision_state IS NOT NULL").one().n),
+      ).toBe(0);
+      expect(
+        Number(state.storage.sql.exec("SELECT COUNT(*) AS n FROM messages WHERE body = 'must not persist'").one().n),
+      ).toBe(0);
+    });
+
+    const accepted = await askDecision(
+      slug,
+      agent.token,
+      null,
+      "persist exact lineage",
+      {},
+      {
+        delivery_id: source.delivery.id,
+        work_id: source.delivery.work_id!,
+        continuation_ref: source.delivery.continuation_ref!,
+      },
+    );
+    expect(accepted.response.status).toBe(200);
+    expect(accepted.body?.decision_request).toEqual({
+      kind: "approval",
+      prompt: "persist exact lineage",
+      options: ["approve", "reject"],
+    });
+    await nextDeliveryState(serve, source.delivery.id, "waiting_owner");
+    expect((await deliveryRows(slug))[0]).toMatchObject({ state: "waiting_owner" });
+    await runInDurableObject(stub, async (_instance: ChannelDO, state) => {
+      expect(
+        state.storage.sql
+          .exec("SELECT reply_to FROM messages WHERE seq = ?", accepted.body!.seq)
+          .one(),
+      ).toMatchObject({ reply_to: origin.seq });
     });
     serve.close();
   });
@@ -329,6 +409,61 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
     expect(rows.filter((row) => row.state === "waiting_owner")).toHaveLength(0);
     expect(rows.filter((row) => row.cause === "owner_answer")).toHaveLength(2);
     expect(rows.every((row) => row.state === "replied")).toBe(true);
+    serve.close();
+  });
+
+  it("converges owner-answer chains deeper than 32 levels to the earliest parked source", async () => {
+    const { slug, serve, source } = await parkSourceWork();
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, async (instance: ChannelDO, state) => {
+      const root = state.storage.sql
+        .exec("SELECT * FROM directed_deliveries WHERE id = ?", source.delivery.id)
+        .one();
+      let parentId = String(root.id);
+      const now = Date.now();
+      for (let depth = 1; depth <= 40; depth++) {
+        const id = `deep-owner-answer-${depth}`;
+        state.storage.sql.exec(
+          `INSERT INTO directed_deliveries (
+             id, message_seq, target_name, target_owner, cause, state, attempt,
+             work_id, continuation_ref, parent_delivery_id, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'owner_answer', ?, 1, ?, ?, ?, ?, ?)`,
+          id,
+          Number(root.message_seq) + 10_000 + depth,
+          String(root.target_name),
+          String(root.target_owner),
+          depth === 40 ? "claimed" : "waiting_owner",
+          String(root.work_id),
+          String(root.continuation_ref),
+          parentId,
+          now + depth,
+          now + depth,
+        );
+        parentId = id;
+      }
+      const terminal = (
+        instance as unknown as {
+          transitionDirectedDeliveryTerminal(
+            id: string,
+            state: "replied",
+            now: number,
+            options: { replySeq: number; expectedStates: string[] },
+          ): Record<string, unknown> | undefined;
+        }
+      ).transitionDirectedDeliveryTerminal(parentId, "replied", now + 100, {
+        replySeq: 4242,
+        expectedStates: ["claimed"],
+      });
+      expect(terminal).toMatchObject({ id: parentId, state: "replied" });
+      const rows = state.storage.sql
+        .exec(
+          "SELECT state, reply_seq FROM directed_deliveries WHERE id = ? OR id LIKE 'deep-owner-answer-%'",
+          source.delivery.id,
+        )
+        .toArray();
+      expect(rows).toHaveLength(41);
+      expect(rows.every((row) => row.state === "replied" && Number(row.reply_seq) === 4242)).toBe(true);
+    });
     serve.close();
   });
 
@@ -386,6 +521,7 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
     await closeServeAndWait(slug, owner.token, agent.name, serve);
     const resolved = await resolveDecision(slug, owner.token, asked.seq, "old principal answer");
     expect(resolved.response.status).toBe(200);
+    const answerId = (await deliveryRows(slug)).find((row) => row.cause === "owner_answer")!.id;
     await env.DB.prepare("UPDATE tokens SET owner = ? WHERE name = ?")
       .bind(`${uniq("replacement-owner")}@example.com`, agent.name)
       .run();
@@ -394,7 +530,7 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
     replacement.send({ type: "hello", since: 0, directed_delivery: "v1" });
     replacement.send({ type: "serve_lease", op: "claim" });
     await replacement.nextOfType("serve_lease");
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await nextDeliveryState(replacement, answerId, "failed");
     expectOwnerAnswerChainFailed(await deliveryRows(slug));
     replacement.close();
   });
@@ -405,6 +541,7 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
     const resolved = await resolveDecision(slug, owner.token, asked.seq, "message will disappear");
     expect(resolved.response.status).toBe(200);
     const answerSeq = resolved.body!.reply.seq;
+    const answerId = (await deliveryRows(slug)).find((row) => row.cause === "owner_answer")!.id;
     const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
     await runInDurableObject(stub, async (_instance: ChannelDO, state) => {
       state.storage.sql.exec("DELETE FROM messages WHERE seq = ?", answerSeq);
@@ -414,7 +551,7 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
     replacement.send({ type: "hello", since: 0, directed_delivery: "v1" });
     replacement.send({ type: "serve_lease", op: "claim" });
     await replacement.nextOfType("serve_lease");
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await nextDeliveryState(replacement, answerId, "failed");
     const rows = await deliveryRows(slug);
     expectOwnerAnswerChainFailed(rows);
     expect(rows.find((row) => row.cause === "owner_answer")?.last_error).toBe("source message is no longer retained");
@@ -519,10 +656,10 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
     const asked = await askDecision(slug, agent.token, origin.seq, "auto choose");
     expect(asked.response.status).toBe(200);
     expect(asked.body?.decision_resolution).toMatchObject({ state: "auto_resolved", chosen_option: "approve" });
-    expect(asked.body?.decision_request).toMatchObject({
-      delivery_id: delivery.delivery.id,
-      work_id: delivery.delivery.work_id,
-      continuation_ref: delivery.delivery.continuation_ref,
+    expect(asked.body?.decision_request).toEqual({
+      kind: "approval",
+      prompt: "auto choose",
+      options: ["approve", "reject"],
     });
     expect((await deliveryRows(slug))[0]).toMatchObject({ state: "claimed" });
     const done = await reply(slug, agent.token, origin.seq, "continued and done");
@@ -541,11 +678,14 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
     expect((await observer.nextOfType("msg")).seq).toBe(origin.seq);
     const asked = await askDecision(slug, agent.token, origin.seq, "keep secrets private?");
     expect(asked.response.status).toBe(200);
-    expect(asked.body?.decision_request).toMatchObject({
-      delivery_id: source.delivery.id,
-      work_id: source.delivery.work_id,
-      continuation_ref: source.delivery.continuation_ref,
+    expect(asked.body?.decision_request).toEqual({
+      kind: "approval",
+      prompt: "keep secrets private?",
+      options: ["approve", "reject"],
     });
+    expect(JSON.stringify(asked.body)).not.toContain(source.delivery.id);
+    expect(JSON.stringify(asked.body)).not.toContain(source.delivery.work_id!);
+    expect(JSON.stringify(asked.body)).not.toContain(source.delivery.continuation_ref!);
 
     const liveQuestion = await observer.nextOfType("msg");
     expect(liveQuestion.seq).toBe(asked.body!.seq);

@@ -6,6 +6,7 @@ import { join, sep } from "node:path";
 import {
   createBuiltinRunner,
   createSdkRunner,
+  EXIT_SIGNAL_TERM,
   projectAgentCleanupCommand,
   projectAgentChildName,
   projectAgentReadyNote,
@@ -1718,7 +1719,11 @@ describe("project profile daemon", () => {
               await expect(opts.refreshAvailableUpgrade?.(notice)).rejects.toThrow("version endpoint offline");
             })();
           }
-          return new Promise<number>(() => {});
+          return new Promise<number>((resolve) => {
+            const stop = () => resolve(EXIT_SIGNAL_TERM);
+            opts.signal?.addEventListener("abort", stop, { once: true });
+            if (opts.signal?.aborted) stop();
+          });
         },
         sleep: async () => {
           sleeps += 1;

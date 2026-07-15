@@ -373,9 +373,9 @@ export function connect(
         } catch {
           continue;
         }
-        // #373：收到首个可解析业务帧 = 连接真实可用（accept-then-close 永远走不到这里），
-        // 此刻才把指数退避清零；幂等，之后每帧再置 0 无副作用。
-        attempt = 0;
+        // #373：只有握手/业务帧能证明这次连接恢复了应用层服务。pong 只证明传输层仍有
+        // 回包；过载或半坏实例若只回 pong 后断开，不能借此把指数退避反复清零。
+        if (frame.type !== "pong") attempt = 0;
         // 全量同步（hello since=0）会带上每条消息的当前状态，历史修订无需单独补——
         // 直接采纳服务端的修订水位，避免下次连接重收一遍
         if (frame.type === "welcome" && helloSince === 0 && typeof frame.last_rev_seq === "number") {

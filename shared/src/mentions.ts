@@ -8,8 +8,8 @@
 
 export const MENTION_TOKEN_MAX_LENGTH = 64;
 
-const MENTION_VALUE_RE = /^[\p{L}\p{N}][\p{L}\p{N}._-]*/u;
-const MENTION_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$/u;
+const MENTION_VALUE_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}._-]*/u;
+const MENTION_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}._-]{0,63}$/u;
 const ASCII_NAME_CHAR_RE = /[A-Za-z0-9._@-]/;
 const CJK_CHAR_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 const EMAIL_LOCAL_CHAR_RE = /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]/u;
@@ -34,7 +34,7 @@ export interface MentionAlias {
 }
 
 export type MentionResolution =
-  | { status: "resolved"; target: string; matchedAlias: string }
+  | { status: "resolved"; target: string; matchedAlias: string; matchedEnd: number }
   | { status: "unknown" }
   | { status: "ambiguous"; targets: string[] };
 
@@ -228,15 +228,41 @@ export function mentionMatchKey(value: string): string {
   return /^[A-Za-z0-9._-]+$/.test(normalized) ? normalized.toLowerCase() : normalized;
 }
 
-function uniqueTargets(matches: MentionAlias[]): string[] {
-  return [...new Set(matches.map((entry) => entry.target))].sort((a, b) => a.localeCompare(b));
+interface MentionAliasMatch {
+  entry: MentionAlias;
+  /** UTF-16 offset in the original, non-normalized mention value. */
+  matchedEnd: number;
 }
 
-function finish(matches: MentionAlias[]): MentionResolution | null {
+function uniqueTargets(matches: MentionAliasMatch[]): string[] {
+  return [...new Set(matches.map(({ entry }) => entry.target))].sort((a, b) => a.localeCompare(b));
+}
+
+function finish(matches: MentionAliasMatch[]): MentionResolution | null {
   const targets = uniqueTargets(matches);
   if (targets.length === 0) return null;
   if (targets.length > 1) return { status: "ambiguous", targets };
-  return { status: "resolved", target: targets[0]!, matchedAlias: matches[0]!.alias };
+  // One target can have several equivalent aliases. Consume the longest raw
+  // prefix so a shorter nickname cannot leave part of the matched identity in
+  // prose. `matchedEnd` is measured in the original value, not its NFC form.
+  const preferred = matches.reduce((best, match) =>
+    match.matchedEnd > best.matchedEnd ? match : best
+  );
+  return {
+    status: "resolved",
+    target: targets[0]!,
+    matchedAlias: preferred.entry.alias,
+    matchedEnd: preferred.matchedEnd,
+  };
+}
+
+function originalPrefixEnd(value: string, normalizedAlias: string): number | null {
+  let end = 0;
+  for (const codePoint of value) {
+    end += codePoint.length;
+    if (mentionMatchKey(value.slice(0, end)) === normalizedAlias) return end;
+  }
+  return null;
 }
 
 // Exact canonical/handle/nickname matches outrank a coincidentally equal
@@ -247,20 +273,24 @@ function finish(matches: MentionAlias[]): MentionResolution | null {
 // Multiple possible target prefixes are rejected instead of guessing.
 export function resolveMentionToken(value: string, aliases: MentionAlias[]): MentionResolution {
   const normalized = mentionMatchKey(value);
-  const exact = aliases.filter((entry) => mentionMatchKey(entry.alias) === normalized);
-  const exactStrong = finish(exact.filter((entry) => entry.kind !== "display"));
+  const exact = aliases
+    .filter((entry) => mentionMatchKey(entry.alias) === normalized)
+    .map((entry) => ({ entry, matchedEnd: value.length }));
+  const exactStrong = finish(exact.filter(({ entry }) => entry.kind !== "display"));
   if (exactStrong !== null) return exactStrong;
-  const exactDisplay = finish(exact.filter((entry) => entry.kind === "display"));
+  const exactDisplay = finish(exact.filter(({ entry }) => entry.kind === "display"));
   if (exactDisplay !== null) return exactDisplay;
 
-  const prefixes = aliases.filter((entry) => {
+  const prefixes = aliases.flatMap((entry): MentionAliasMatch[] => {
     const alias = mentionMatchKey(entry.alias);
-    if (alias === "" || alias.length >= normalized.length || !normalized.startsWith(alias)) return false;
-    const suffix = value.slice(entry.alias.length);
-    return suffix !== "" && CJK_CHAR_RE.test(suffix[0]!);
+    if (alias === "" || alias.length >= normalized.length || !normalized.startsWith(alias)) return [];
+    const matchedEnd = originalPrefixEnd(value, alias);
+    if (matchedEnd === null || matchedEnd >= value.length) return [];
+    const firstSuffixCodePoint = [...value.slice(matchedEnd)][0] ?? "";
+    return CJK_CHAR_RE.test(firstSuffixCodePoint) ? [{ entry, matchedEnd }] : [];
   });
-  const prefixStrong = finish(prefixes.filter((entry) => entry.kind !== "display"));
+  const prefixStrong = finish(prefixes.filter(({ entry }) => entry.kind !== "display"));
   if (prefixStrong !== null) return prefixStrong;
-  const prefixDisplay = finish(prefixes.filter((entry) => entry.kind === "display"));
+  const prefixDisplay = finish(prefixes.filter(({ entry }) => entry.kind === "display"));
   return prefixDisplay ?? { status: "unknown" };
 }

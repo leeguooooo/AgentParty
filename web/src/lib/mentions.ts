@@ -207,15 +207,18 @@ export function activeMentionQuery(text: string, caret: number): { start: number
   // React/DOM selection snapshots can briefly point one code unit past a freshly updated draft.
   // Clamp that stale caret instead of letting an out-of-range character participate in the lexer.
   const boundedCaret = Math.max(0, Math.min(caret, text.length));
-  let i = boundedCaret - 1;
-  while (i >= 0 && /[\p{L}\p{N}._-]/u.test(text[i]!)) i--;
-  if (i < 0 || text[i] !== "@") return null;
-  if (!isMentionStart(text, i)) return null;
-  if (boundedCaret === i + 1) return { start: i, query: "" };
-  const parsed = readMentionToken(text.slice(0, boundedCaret), i);
+  const prefix = text.slice(0, boundedCaret);
+  // A suffix regex walks Unicode code points, unlike text[i], which can split
+  // supplementary-plane letters into two surrogate code units.
+  const active = /@[\p{L}\p{N}\p{M}._-]*$/u.exec(prefix);
+  if (active === null) return null;
+  const start = active.index;
+  if (!isMentionStart(text, start)) return null;
+  if (boundedCaret === start + 1) return { start, query: "" };
+  const parsed = readMentionToken(prefix, start);
   // `readMentionToken` leaves terminal sentence punctuation out of the token,
   // so a caret after "@codex." is no longer treated as an active completion.
-  return parsed !== null && parsed.end === boundedCaret ? { start: i, query: parsed.value } : null;
+  return parsed !== null && parsed.end === boundedCaret ? { start, query: parsed.value } : null;
 }
 
 // 单个 @ 目标的存活判断（发送前预览 + 发送后回执共用）。tier 复用候选逻辑，额外带出
@@ -255,7 +258,11 @@ export function parseDraftMentions(text: string, knownNames: readonly string[] =
   const seen = new Set<string>();
   for (const mention of extractMentionTokens(text)) {
     const ascii = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}/.exec(mention.value)?.[0];
-    const lexicalValue = ascii ?? mention.value;
+    // A decomposed Unicode alias can begin with ASCII (A + combining diaeresis).
+    // Do not apply the legacy ASCII-prefix shortcut across that combining mark.
+    const lexicalValue = ascii !== undefined && !/^\p{M}/u.test(mention.value.slice(ascii.length))
+      ? ascii
+      : mention.value;
     const resolution = aliases.length === 0 ? null : resolveMentionToken(lexicalValue, aliases);
     const name = resolution?.status === "resolved" ? resolution.target : lexicalValue;
     const key = mentionMatchKey(name);

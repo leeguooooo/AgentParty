@@ -373,10 +373,12 @@ export async function mintProjectAgentRuntimeToken(
   server: string,
   token: string,
   handle: string,
+  signal?: AbortSignal,
 ): Promise<ProjectAgentRuntime> {
   return (await req(server, `/api/agent-profiles/${encodeURIComponent(handle)}/runtime-token`, {
     method: "POST",
     headers: bearerJson(token),
+    signal,
   })) as ProjectAgentRuntime;
 }
 
@@ -384,9 +386,13 @@ export async function listProjectAgentInvites(
   server: string,
   token: string,
   handle?: string,
+  signal?: AbortSignal,
 ): Promise<ChannelProjectAgentInvite[]> {
   const suffix = handle === undefined ? "" : `?handle=${encodeURIComponent(handle)}`;
-  const body = await req(server, `/api/agent-profiles/invites${suffix}`, { headers: bearerJson(token) });
+  const body = await req(server, `/api/agent-profiles/invites${suffix}`, {
+    headers: bearerJson(token),
+    signal,
+  });
   const invites = (body as Record<string, unknown> | null)?.invites;
   return Array.isArray(invites) ? (invites as ChannelProjectAgentInvite[]) : [];
 }
@@ -398,11 +404,13 @@ export async function ensureProjectAgentChannelRuntime(
   ownerAccount: string,
   handle: string,
   childName: string,
+  signal?: AbortSignal,
 ): Promise<ProjectAgentChannelRuntime> {
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/project-agents/runtime-token`, {
     method: "POST",
     headers: bearerJson(token),
     body: JSON.stringify({ owner_account: ownerAccount, handle, name: childName }),
+    signal,
   })) as ProjectAgentChannelRuntime;
 }
 
@@ -498,9 +506,15 @@ export async function listChannels(server: string, token: string): Promise<Chann
   return Array.isArray(channels) ? (channels as ChannelInfo[]) : [];
 }
 
-export async function fetchChannelCharter(server: string, token: string, slug: string): Promise<ChannelCharter> {
+export async function fetchChannelCharter(
+  server: string,
+  token: string,
+  slug: string,
+  signal?: AbortSignal,
+): Promise<ChannelCharter> {
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/charter`, {
     headers: bearerJson(token),
+    signal,
   })) as ChannelCharter;
 }
 
@@ -1213,6 +1227,7 @@ export async function postMessage(
   token: string,
   slug: string,
   payload: MessagePayload,
+  signal?: AbortSignal,
 ): Promise<{
   seq: number;
   completion_review?: CompletionReview;
@@ -1228,6 +1243,7 @@ export async function postMessage(
     method: "POST",
     headers: bearerJson(token),
     body: JSON.stringify(body),
+    signal,
   })) as {
     seq: number;
     completion_review?: CompletionReview;

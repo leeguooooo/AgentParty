@@ -23,11 +23,12 @@ import {
   type StuckWake,
 } from "../config";
 import { resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
-import { formatMsg } from "../format";
+import { formatMsg, stripTerminalControls } from "../format";
 import { fetchMe, fetchMessages, fetchRecentMessages, handleRestError, postMessage } from "../rest";
 import { buildContext } from "./status";
 import { MAX_TIMEOUT_SEC, isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 import { jsonFrame, nowTs } from "../json";
+import { randomUUID } from "node:crypto";
 import {
   clearStatuslineListener,
   heartbeatPatch,
@@ -42,6 +43,7 @@ const WATCH_SKIP_PAGE_SIZE = 1000;
 const WATCH_SKIP_SCAN_LIMIT = 10_000;
 const WATCH_DELIVERY_ACK_TIMEOUT_MS = 5_000;
 const WATCH_DELIVERY_ACK_POLL_MS = 10;
+const terminalOutput = (value: string) => stripTerminalControls(value);
 const HELP = `usage: party watch [channel|--channel C] [--timeout N] [--mentions-only] [--exclude-self] [--follow|--once] [--latest|--since seq] [--json] [--allow-multiple]
 
 Watch a channel for new messages. By default this waits up to 240 seconds.
@@ -156,18 +158,18 @@ async function confirmWatchDeliveryRunning(
   timeoutMs: number,
   interrupted: () => boolean,
 ): Promise<void> {
+  const requestId = randomUUID();
   const isExpectedAck = (frame: ReturnType<typeof conn.pendingFrames>[number]) =>
     frame.type === "delivery_state" &&
+    frame.request_id === requestId &&
     frame.delivery.id === delivery.id &&
     frame.delivery.target_name === expectedTarget &&
     frame.delivery.state === "running";
-  // A broadcast can already be queued before our update. It is not proof that this send was
-  // accepted, so require one additional exact acknowledgement after send.
-  const existingAckCount = conn.pendingFrames().filter(isExpectedAck).length;
   const existingErrors = new Set(conn.pendingFrames().filter((frame) => frame.type === "error"));
   const update = {
     type: "delivery_update" as const,
     delivery_id: delivery.id,
+    request_id: requestId,
     state: "running" as const,
     ...(delivery.work_id === null ? {} : { work_id: delivery.work_id }),
     ...(delivery.continuation_ref === null ? {} : { continuation_ref: delivery.continuation_ref }),
@@ -179,7 +181,7 @@ async function confirmWatchDeliveryRunning(
   for (;;) {
     if (interrupted()) throw new Error("connection interrupted before running acknowledgement");
     const pending = conn.pendingFrames();
-    if (pending.filter(isExpectedAck).length > existingAckCount) return;
+    if (pending.some(isExpectedAck)) return;
     const rejection = pending.find((frame) => frame.type === "error" && !existingErrors.has(frame));
     if (rejection?.type === "error") throw new Error(`${rejection.code}: ${rejection.message}`);
     if (Date.now() >= deadline) {
@@ -271,7 +273,8 @@ async function resolveExplicitWatchCursor(
 }
 
 export async function runWatch(o: WatchOptions): Promise<number> {
-  const out = o.out ?? ((line: string) => console.log(line));
+  const rawOut = o.out ?? ((line: string) => console.log(line));
+  const out = (line: string) => rawOut(o.json ? line : terminalOutput(line));
   // Only the single-shot watcher whose caller can persist and acknowledge directed debt is an
   // actionable v1 adapter. Declare this in the first hello so the Worker never has to guess in the
   // welcome -> register window; observers deliberately omit the capability.
@@ -367,9 +370,9 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         const mine = frame.presence?.find((p) => p.name === self);
         selfPaused = mine?.paused === true;
         if (selfPaused) {
-          console.error(
+          console.error(terminalOutput(
             `watch: 当前处于暂停接待状态——被 @ 也不作为 --once 唤醒信号${typeof mine?.resume_at === "number" ? `，将于 ${new Date(mine.resume_at).toISOString()} 恢复` : "（等人工恢复）"}。消息仍进历史。`,
-          );
+          ));
         }
         // 不要用 welcome.read_cursors 快进 --once 的游标（#172 的诱人错解）。
         // read cursor 是**身份级「已读」**：protocol.ts 明确「网页 tab / serve / watch --follow
@@ -417,9 +420,9 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         if (selfPaused) {
           // Worker 正常不会把 paused identity 的 work 分配给 watch；若竞态中收到，保持未消费、
           // 不落本地 debt，让恢复后的同一 delivery 新租约仍可真正唤醒。
-          console.error(
+          console.error(terminalOutput(
             `watch: ⏸ 暂停接待中，delivery=${frame.delivery.id} 不作为唤醒信号（未确认，等待重放）。`,
-          );
+          ));
           continue;
         }
 
@@ -445,9 +448,9 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         try {
           o.onStuck!(directedDebt);
         } catch (error) {
-          console.error(
+          console.error(terminalOutput(
             `watch: delivery=${frame.delivery.id} 本地 debt 持久化失败，未发送 running: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          ));
           code = EXIT_STREAM_ENDED;
           break;
         }
@@ -462,9 +465,9 @@ export async function runWatch(o: WatchOptions): Promise<number> {
             () => timedOut || connectionGeneration !== claimConnectionGeneration,
           );
         } catch (error) {
-          console.error(
+          console.error(terminalOutput(
             `watch: delivery=${frame.delivery.id} running 确认失败，未输出唤醒: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          ));
           code = EXIT_STREAM_ENDED;
           break;
         }
@@ -474,9 +477,9 @@ export async function runWatch(o: WatchOptions): Promise<number> {
             throw new Error("directed debt changed before accepted state could be persisted");
           }
         } catch (error) {
-          console.error(
+          console.error(terminalOutput(
             `watch: delivery=${frame.delivery.id} running 已确认，但本地 accepted 状态落盘失败；unknown outcome，未输出唤醒: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          ));
           code = EXIT_STREAM_ENDED;
           break;
         }
@@ -533,7 +536,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         if (o.json) {
           out(JSON.stringify(jsonFrame({ ...frame, retryable: false, ts: nowTs() })));
         }
-        else console.error(`error: ${frame.code} ${frame.message}`);
+        else console.error(terminalOutput(`error: ${frame.code} ${frame.message}`));
         if (frame.code === "unauthorized") code = EXIT_AUTH;
         else if (frame.code === "loop_guard") code = EXIT_LOOP_GUARD;
         else if (frame.code === "archived") code = EXIT_ARCHIVED;
@@ -546,11 +549,11 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         const nextPaused = frame.paused === true;
         if (nextPaused !== selfPaused) {
           selfPaused = nextPaused;
-          console.error(
+          console.error(terminalOutput(
             selfPaused
               ? `watch: 已被暂停接待——被 @ 也不再作为 --once 唤醒信号${typeof frame.resume_at === "number" ? `，将于 ${new Date(frame.resume_at).toISOString()} 恢复` : "（等人工恢复）"}。消息仍进历史。`
               : "watch: 已恢复接待——@ 重新作为唤醒信号。",
-          );
+          ));
         }
         continue;
       }
@@ -621,10 +624,10 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       // 会以为手上这条就是频道现状，照着几小时前的上下文回话，而身后还压着一摞没读的。
       // 暂停接待中被 @：不退出、不唤醒；发一条 stderr 提示交代这条 @ 已在历史里，恢复后自行补看。
       if (o.once && qualifies && fresh && selfPaused) {
-        console.error(
+        console.error(terminalOutput(
           `watch: ⏸ 暂停接待中，seq=${msg.seq} 的 @ 不作为 --once 唤醒信号（消息已在历史）。` +
             ` 恢复后补看：party history ${o.channel} --since ${msg.seq}`,
-        );
+        ));
       }
       if (o.once && qualifies && wakes) {
         onceDone = true;
@@ -737,19 +740,19 @@ export async function run(argv: string[]): Promise<number> {
   // 确认的 @ 丢掉。REST 精确补拉后立即退出，避免重新挂起一个可能又被 harness 回收的后台任务。
   if (flags.once === true && stuck !== null) {
     if (stuck.source !== "watch") {
-      console.error(
+      console.error(terminalOutput(
         `error: #${channel} has a pending serve wake at seq=${stuck.seq}; ` +
           "watch will not overwrite that delivery debt. Resume the existing party serve supervisor first.",
-      );
+      ));
       return 1;
     }
     // Directed debt 在 running ACK 前只是 unknown outcome。按旧 seq-only 路径直接重放会与
     // Worker 租约超时后的重新分配并发执行同一 work；保持 debt，重新注册等该 delivery 的新 claim。
     if (stuck.delivery_id !== undefined && stuck.delivery_acceptance !== "accepted") {
-      console.error(
+      console.error(terminalOutput(
         `watch: directed delivery=${stuck.delivery_id} 尚未确认 running；不会本地回放 seq=${stuck.seq}，` +
           "正在重新挂接，等待服务端重新授予合法 claim。",
-      );
+      ));
     } else {
       try {
         const [pendingPage, tail] = await Promise.all([
@@ -758,18 +761,18 @@ export async function run(argv: string[]): Promise<number> {
         ]);
         const pending = pendingPage.find((msg) => msg.seq === stuck.seq);
         if (pending === undefined) {
-          console.error(
+          console.error(terminalOutput(
             `error: pending watch wake seq=${stuck.seq} is no longer retained; debt was preserved. ` +
               `Inspect channel history before clearing or advancing this workspace state.`,
-          );
+          ));
           return 1;
         }
         const replay = { ...stuck, attempts: stuck.attempts + 1 };
         if (!saveWatchStuck(channel, replay)) {
-          console.error(
+          console.error(terminalOutput(
             `error: #${channel} acquired a pending serve wake while replaying seq=${stuck.seq}; ` +
               "watch preserved that delivery debt and did not acknowledge this wake.",
-          );
+          ));
           return 1;
         }
         const channelLastSeq = Math.max(stuck.channel_last_seq ?? 0, tail.at(-1)?.seq ?? 0, pending.seq);
@@ -796,7 +799,7 @@ export async function run(argv: string[]): Promise<number> {
             ),
           );
         } else {
-          console.log(
+          console.log(terminalOutput(
             `watch: replaying pending unacknowledged wake seq=${stuck.seq} attempt=${replay.attempts}; ` +
               (stuck.delivery_id !== undefined
                 ? `delivery=${stuck.delivery_id}${stuck.work_id !== undefined ? ` work_id=${stuck.work_id}` : ""}${stuck.continuation_ref !== undefined ? ` continuation_ref=${stuck.continuation_ref}` : ""}; `
@@ -805,7 +808,7 @@ export async function run(argv: string[]): Promise<number> {
               `skipped_mention_seqs=${JSON.stringify(skippedMentionSeqs)}; ` +
               `send a reply/status after handling it to clear this debt.` +
               (lag > 0 ? ` 补上下文：party history ${channel} --since ${stuck.seq}` : ""),
-          );
+          ));
           console.log(formatMsg(pending));
         }
         if (flags.json !== true) console.error(ONCE_REARM_ADVISORY);

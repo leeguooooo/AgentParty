@@ -210,6 +210,12 @@ interface ResolvedMentionFrame {
   agentTargets: string[];
 }
 
+interface ExpectedDecisionLineage {
+  delivery_id: string;
+  work_id: string;
+  continuation_ref: string;
+}
+
 export const ERROR_STATUS: Record<ErrorCode, number> = {
   bad_request: 400,
   unavailable: 503,
@@ -404,6 +410,31 @@ function parseDecisionRequest(input: unknown): DecisionRequest | undefined | nul
   }
   if (options.length < 2 || options.length > DECISION_OPTIONS_MAX) return null;
   return { kind, prompt, options };
+}
+
+// Authenticated REST decision asks may carry a compare-and-set precondition. It is intentionally
+// separate from decision_request: the latter is public message content, while these identifiers are
+// executor capabilities used only to reject a stale/wrong runner before any message is committed.
+function parseExpectedDecisionLineage(input: unknown): ExpectedDecisionLineage | undefined | null {
+  if (input === undefined) return undefined;
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  if (
+    typeof raw.delivery_id !== "string" ||
+    raw.delivery_id.length < 1 ||
+    raw.delivery_id.length > 128 ||
+    typeof raw.work_id !== "string" ||
+    raw.work_id.length < 1 ||
+    raw.work_id.length > DELIVERY_WORK_ID_LIMIT ||
+    typeof raw.continuation_ref !== "string" ||
+    raw.continuation_ref.length < 1 ||
+    raw.continuation_ref.length > DELIVERY_CONTINUATION_REF_LIMIT
+  ) return null;
+  return {
+    delivery_id: raw.delivery_id,
+    work_id: raw.work_id,
+    continuation_ref: raw.continuation_ref,
+  };
 }
 
 // decision lineage is server-owned. The public send parser above intentionally drops any client
@@ -1163,8 +1194,9 @@ function parseDeliveryUpdateFrame(input: unknown): DeliveryUpdateFrame | null {
   };
   const workId = optionalText(f.work_id, DELIVERY_WORK_ID_LIMIT);
   const continuationRef = optionalText(f.continuation_ref, DELIVERY_CONTINUATION_REF_LIMIT);
+  const requestId = optionalText(f.request_id, 128);
   const error = optionalText(f.error, DECISION_REASON_LIMIT);
-  if (workId === null || continuationRef === null || error === null) return null;
+  if (workId === null || continuationRef === null || requestId === null || error === null) return null;
   const replySeq =
     f.reply_seq === undefined
       ? undefined
@@ -1178,6 +1210,7 @@ function parseDeliveryUpdateFrame(input: unknown): DeliveryUpdateFrame | null {
   return {
     type: "delivery_update",
     delivery_id: f.delivery_id,
+    ...(requestId === undefined ? {} : { request_id: requestId }),
     state: f.state,
     ...(workId === undefined ? {} : { work_id: workId }),
     ...(continuationRef === undefined ? {} : { continuation_ref: continuationRef }),
@@ -2136,10 +2169,6 @@ export class ChannelDO extends Server<Env> {
         helloPending: false,
         helloExpired: false,
       }) ?? st;
-      if (st.kind === "agent") {
-        if (st.serveCandidate) this.reconcileServeLease(st.name);
-        else this.dispatchNextDirectedDelivery(st.name);
-      }
       const sinceRev =
         typeof frame.since_rev === "number" && frame.since_rev >= 0 ? Math.floor(frame.since_rev) : null;
       // 带 since_rev 的新客户端：修订快照只重放 rev_seq 更大的那些（issue #33）；
@@ -2193,6 +2222,10 @@ export class ChannelDO extends Server<Env> {
       this.replayDirectedDeliveryStates(connection);
       // A connection may upgrade its declaration after an earlier legacy lease claim. Re-run the
       // election only after backfill so a newly capable executor cannot receive work before history.
+      if (st.kind === "agent") {
+        if (st.serveCandidate) this.reconcileServeLease(st.name);
+        else this.dispatchNextDirectedDelivery(st.name);
+      }
       return;
     }
     if (frame.type === "seen") {
@@ -2244,7 +2277,11 @@ export class ChannelDO extends Server<Env> {
         // change state, and the CLI must not advance durable work until it sees server confirmation.
         const row = this.directedDeliveryRow(update.delivery_id);
         if (row !== undefined) {
-          this.sendFrame(connection, { type: "delivery_state", delivery: this.deliveryStateForConnection(connection, row) });
+          this.sendFrame(connection, {
+            type: "delivery_state",
+            delivery: this.deliveryStateForConnection(connection, row),
+            ...(update.request_id === undefined ? {} : { request_id: update.request_id }),
+          });
         }
       }
       return;
@@ -5287,7 +5324,21 @@ export class ChannelDO extends Server<Env> {
         }
         return Response.json({ error: { code: "bad_request", message: sendRejectMessage(raw) } }, { status: 400 });
       }
-      const out = await this.handleSend(identity, send, { countRate: true });
+      const expectedDecisionLineage = parseExpectedDecisionLineage(
+        typeof raw === "object" && raw !== null
+          ? (raw as Record<string, unknown>).expected_decision_lineage
+          : undefined,
+      );
+      if (expectedDecisionLineage === null) {
+        return Response.json(
+          { error: { code: "bad_request", message: "invalid expected_decision_lineage" } },
+          { status: 400 },
+        );
+      }
+      const out = await this.handleSend(identity, send, {
+        countRate: true,
+        ...(expectedDecisionLineage === undefined ? {} : { expectedDecisionLineage }),
+      });
       if (!out.ok) {
         return Response.json(
           { error: { code: out.code, message: out.message } },
@@ -5314,7 +5365,9 @@ export class ChannelDO extends Server<Env> {
       return Response.json({
         seq: out.seq,
         ...(sent.completion_review === undefined ? {} : { completion_review: sent.completion_review }),
-        ...(sent.decision_request === undefined ? {} : { decision_request: sent.decision_request }),
+        ...(sent.decision_request === undefined
+          ? {}
+          : { decision_request: publicDecisionRequest(sent.decision_request) }),
         ...(sent.decision_resolution === undefined ? {} : { decision_resolution: sent.decision_resolution }),
       });
     }
@@ -5890,7 +5943,11 @@ export class ChannelDO extends Server<Env> {
   private async handleSend(
     identity: Identity,
     frame: SendFrame,
-    options: { countRate?: boolean; sessionId?: string } = {},
+    options: {
+      countRate?: boolean;
+      sessionId?: string;
+      expectedDecisionLineage?: ExpectedDecisionLineage;
+    } = {},
   ): Promise<SendOutcome> {
     if (this.isArchived()) {
       return { ok: false, code: "archived", message: "channel is archived" };
@@ -6054,12 +6111,39 @@ export class ChannelDO extends Server<Env> {
         message: "decision request cannot be bound: sender has multiple active directed deliveries",
       };
     }
+    if (options.expectedDecisionLineage !== undefined) {
+      if (parsedDecisionRequest === undefined || activeDecision === undefined) {
+        return {
+          ok: false,
+          code: "bad_request",
+          message: "decision continuation lineage has no active delivery; message was not stored",
+        };
+      }
+      const expected = options.expectedDecisionLineage;
+      if (
+        activeDecision.lineage.delivery_id !== expected.delivery_id ||
+        activeDecision.lineage.work_id !== expected.work_id ||
+        activeDecision.lineage.continuation_ref !== expected.continuation_ref
+      ) {
+        return {
+          ok: false,
+          code: "bad_request",
+          message: "decision continuation lineage does not match active delivery; message was not stored",
+        };
+      }
+    }
     const decisionRequest =
       parsedDecisionRequest === undefined
         ? undefined
         : activeDecision === undefined
           ? parsedDecisionRequest
           : { ...parsedDecisionRequest, ...activeDecision.lineage };
+    const decisionReplyTo =
+      decisionRequest?.delivery_id !== undefined && activeDecision !== undefined
+        ? activeDecision.lineage.origin_seq
+        : frame.kind === "message"
+          ? frame.reply_to
+          : null;
     // 无人值守模式（unattended）：落库即自动放行第一项，agent 不必等人；approval 模式则挂起等人类。
     const decisionMode = (this.getMeta("decision_mode") ?? "approval") as DecisionMode;
     const decisionResolution: DecisionResolution | undefined =
@@ -6105,7 +6189,7 @@ export class ChannelDO extends Server<Env> {
             kind: "message",
             body: frame.body,
             mentions: frame.mentions,
-            reply_to: frame.reply_to,
+            reply_to: decisionReplyTo,
             state: null,
             note: null,
             status: null,
@@ -6144,7 +6228,29 @@ export class ChannelDO extends Server<Env> {
           };
     let stagedOutcome: SendSuccessOutcome | undefined;
     let rateFailure: SendErrorOutcome | null = null;
+    let decisionPreconditionFailure: SendErrorOutcome | null = null;
     const atomicEffects = this.captureAtomicDeliveryEffects(() => {
+      // Re-read the compare-and-set lineage inside the same SQLite transaction that writes the
+      // question and parks its source. A stale runner can therefore produce neither a message nor a
+      // decision/waiting_owner state, even if storage changed after the earlier validation work.
+      if (options.expectedDecisionLineage !== undefined) {
+        const current = this.activeDecisionDelivery(identity);
+        const expected = options.expectedDecisionLineage;
+        if (
+          current === undefined ||
+          "ambiguous" in current ||
+          current.lineage.delivery_id !== expected.delivery_id ||
+          current.lineage.work_id !== expected.work_id ||
+          current.lineage.continuation_ref !== expected.continuation_ref
+        ) {
+          decisionPreconditionFailure = {
+            ok: false,
+            code: "bad_request",
+            message: "decision continuation lineage changed before commit; message was not stored",
+          };
+          return;
+        }
+      }
       if (options.countRate !== false) {
         const rate = this.consumeRate(identity.name, now);
         if (rate !== null) {
@@ -6387,6 +6493,7 @@ export class ChannelDO extends Server<Env> {
       deliveryTargetOwners,
     };
     });
+    if (decisionPreconditionFailure !== null) return decisionPreconditionFailure;
     if (rateFailure !== null) return rateFailure;
     if (stagedOutcome === undefined) throw new Error("atomic send produced no outcome");
     return { ...stagedOutcome, atomicEffects };
@@ -7105,7 +7212,8 @@ export class ChannelDO extends Server<Env> {
                 completion_artifact_json = NULL, completion_review_state = NULL, completion_review_policy = NULL,
                 completion_reviewed_by = NULL, completion_reviewed_by_kind = NULL, completion_reviewed_by_owner = NULL,
                 completion_reviewed_at = NULL, completion_review_reason = NULL,
-                decision_request_json = NULL, decision_resolution_json = NULL, decision_response_json = NULL,
+                decision_request_json = NULL, decision_state = NULL,
+                decision_resolution_json = NULL, decision_response_json = NULL,
                 sender_owner = NULL, sender_lineage_json = NULL, sender_role = NULL, sender_role_source = NULL,
                 sender_handle = NULL, sender_display_name = NULL, sender_avatar_url = NULL, sender_avatar_thumb = NULL,
                 attachments_json = NULL, edited_by = NULL, retracted_by = NULL, idempotency_key = NULL,
@@ -8095,26 +8203,10 @@ export class ChannelDO extends Server<Env> {
       return terminal !== undefined && String(terminal.state) === update.state;
     }
 
-    this.ctx.storage.sql.exec(
-      `UPDATE directed_deliveries
-          SET state = 'waiting_owner',
-              last_lease_connection_id = COALESCE(lease_connection_id, last_lease_connection_id),
-              lease_connection_id = NULL, lease_until = NULL, lease_adapter = NULL,
-              last_error = NULL, terminal_reason = NULL, updated_at = ?
-        WHERE id = ? AND target_name = ? AND target_owner = ?
-          AND lease_connection_id = ? AND state IN ('claimed', 'running')`,
-      now,
-      update.delivery_id,
-      identity.name,
-      this.identityDeliveryPrincipal(identity),
-      connectionId,
-    );
-    const updated = this.directedDeliveryRow(update.delivery_id);
-    if (updated === undefined || String(updated.state) !== "waiting_owner") return false;
-    this.broadcastDirectedDelivery(updated);
-    this.broadcastPresenceFor(identity.name);
-    this.dispatchNextDirectedDelivery(identity.name);
-    return true;
+    // waiting_owner is not a client-declared terminal receipt. Only handleSend may create it while
+    // atomically storing a valid pending question. Accepting a bare update here would release the
+    // next work item with no owner decision capable of resuming this one.
+    return false;
   }
 
   /**
@@ -8239,7 +8331,7 @@ export class ChannelDO extends Server<Env> {
     let answer = completedAnswer;
     const visited = new Set<string>();
     const presenceTargets = new Set<string>();
-    for (let depth = 0; depth < 32 && String(answer.cause) === "owner_answer"; depth++) {
+    while (String(answer.cause) === "owner_answer") {
       const answerId = String(answer.id);
       if (visited.has(answerId)) break;
       visited.add(answerId);

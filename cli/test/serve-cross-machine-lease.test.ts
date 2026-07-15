@@ -171,5 +171,6 @@ describe("serve 跨机租约客户端互斥（#99）", () => {
     const claim = clientFrames.find((f) => (f as { type: string }).type === "serve_lease");
     expect(claim).toBeDefined();
     expect((claim as { op?: string }).op).toBe("claim");
+    expect(clientFrames.indexOf(hello!)).toBeLessThan(clientFrames.indexOf(claim!));
   });
 });

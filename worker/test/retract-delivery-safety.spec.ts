@@ -50,6 +50,28 @@ interface WebhookTestSurface {
   redeliverDeadLetters(name: string | null): Promise<unknown>;
 }
 
+function blockNextOutboundFetch() {
+  const downstream = globalThis.fetch;
+  let enteredResolve!: () => void;
+  let releaseResolve!: () => void;
+  let blocked = false;
+  const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
+  const released = new Promise<void>((resolve) => { releaseResolve = resolve; });
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (!blocked) {
+      blocked = true;
+      enteredResolve();
+      await released;
+    }
+    return downstream(input, init);
+  }) as typeof globalThis.fetch;
+  return {
+    entered,
+    release: releaseResolve,
+    restore: () => { globalThis.fetch = downstream; },
+  };
+}
+
 async function inChannel<T>(slug: string, fn: (instance: ChannelDO, sql: SqlStorage) => T | Promise<T>) {
   const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
   return runInDurableObject(stub, (instance: ChannelDO, state) => fn(instance, state.storage.sql));
@@ -609,15 +631,21 @@ describe("retract is a durable webhook persistence barrier", () => {
     fetchMock
       .get("https://retract-race.test")
       .intercept({ path: "/wake", method: "POST" })
-      .reply(503, "down")
-      .delay(120);
+      .reply(503, "down");
 
-    const pending = inChannel(context.slug, (instance) =>
-      (instance as unknown as WebhookTestSurface).dispatchWebhooks(context.stale),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect((await retract(context.slug, context.sender.token, context.seq)).status).toBe(200);
-    await pending;
+    const barrier = blockNextOutboundFetch();
+    try {
+      const pending = inChannel(context.slug, (instance) =>
+        (instance as unknown as WebhookTestSurface).dispatchWebhooks(context.stale),
+      );
+      await barrier.entered;
+      expect((await retract(context.slug, context.sender.token, context.seq)).status).toBe(200);
+      barrier.release();
+      await pending;
+    } finally {
+      barrier.release();
+      barrier.restore();
+    }
     expect(await webhookArtifactCounts(context.slug, context.seq)).toEqual({ queue: 0, dead: 0 });
   });
 
@@ -642,15 +670,21 @@ describe("retract is a durable webhook persistence barrier", () => {
     fetchMock
       .get("https://retract-race.test")
       .intercept({ path: "/wake", method: "POST" })
-      .reply(503, "still down")
-      .delay(120);
+      .reply(503, "still down");
 
-    const pending = inChannel(context.slug, (instance) =>
-      (instance as unknown as WebhookTestSurface).retryWebhooks(Date.now()),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect((await retract(context.slug, context.sender.token, context.seq)).status).toBe(200);
-    await pending;
+    const barrier = blockNextOutboundFetch();
+    try {
+      const pending = inChannel(context.slug, (instance) =>
+        (instance as unknown as WebhookTestSurface).retryWebhooks(Date.now()),
+      );
+      await barrier.entered;
+      expect((await retract(context.slug, context.sender.token, context.seq)).status).toBe(200);
+      barrier.release();
+      await pending;
+    } finally {
+      barrier.release();
+      barrier.restore();
+    }
     expect(await webhookArtifactCounts(context.slug, context.seq)).toEqual({ queue: 0, dead: 0 });
   });
 
@@ -675,15 +709,21 @@ describe("retract is a durable webhook persistence barrier", () => {
     fetchMock
       .get("https://retract-race.test")
       .intercept({ path: "/wake", method: "POST" })
-      .reply(503, "still down")
-      .delay(120);
+      .reply(503, "still down");
 
-    const pending = inChannel(context.slug, (instance) =>
-      (instance as unknown as WebhookTestSurface).redeliverDeadLetters(context.name),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect((await retract(context.slug, context.sender.token, context.seq)).status).toBe(200);
-    await pending;
+    const barrier = blockNextOutboundFetch();
+    try {
+      const pending = inChannel(context.slug, (instance) =>
+        (instance as unknown as WebhookTestSurface).redeliverDeadLetters(context.name),
+      );
+      await barrier.entered;
+      expect((await retract(context.slug, context.sender.token, context.seq)).status).toBe(200);
+      barrier.release();
+      await pending;
+    } finally {
+      barrier.release();
+      barrier.restore();
+    }
     expect(await webhookArtifactCounts(context.slug, context.seq)).toEqual({ queue: 0, dead: 0 });
   });
 

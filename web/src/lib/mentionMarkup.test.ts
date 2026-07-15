@@ -124,6 +124,19 @@ describe("mention 美化：真实管线集成（#131）", () => {
     expect(unicode.calls).toEqual([{ name: "Ägent", display: "Unicode Agent" }]);
   });
 
+  it("NFC 等价 alias 按原文偏移消费，不吞中文紧邻正文", () => {
+    const decomposed = "A\u0308gent";
+    const composedIdentity = spy({ Ägent: { display: "Unicode Agent", kind: "agent" } });
+    expect(composedIdentity.render(`@${decomposed}看一下`)).toBe(
+      '<p><span class="ap-mention" title="@Ägent">@Unicode Agent</span>看一下</p>',
+    );
+
+    const decomposedIdentity = spy({ [decomposed]: { display: "Decomposed Agent", kind: "agent" } });
+    expect(decomposedIdentity.render("@Ägent看一下")).toBe(
+      `<p><span class="ap-mention" title="@${decomposed}">@Decomposed Agent</span>看一下</p>`,
+    );
+  });
+
   it("可读邮箱 display 作为 span 渲染，@ 原样保留", () => {
     const raw = "61ec302c-6c31-4bca-a1df-88152372f6d9";
     expect(R(`@${raw} hello`)).toBe(

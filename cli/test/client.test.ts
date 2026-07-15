@@ -469,6 +469,38 @@ describe("ws client", () => {
     expect(first.readyState).toBe(ProbeWebSocket.CLOSED);
   });
 
+  test("pong keeps the reconnect backoff while an application frame resets it", () => {
+    jest.useFakeTimers();
+    useProbeWebSocket();
+    conn = connect("https://party.invalid", "ap_tok", "dev", 0, {
+      backoffBaseMs: 10,
+      backoffMaxMs: 100,
+      pingIntervalMs: 1_000,
+      inboundIdleTimeoutMs: 10_000,
+    });
+
+    const first = ProbeWebSocket.instances[0]!;
+    first.open();
+    first.deliver({ type: "pong" });
+    first.emitClose();
+    jest.advanceTimersByTime(10);
+
+    const second = ProbeWebSocket.instances[1]!;
+    second.open();
+    second.deliver({ type: "pong" });
+    second.emitClose();
+    jest.advanceTimersByTime(10);
+    expect(ProbeWebSocket.instances).toHaveLength(2);
+    jest.advanceTimersByTime(10);
+
+    const third = ProbeWebSocket.instances[2]!;
+    third.open();
+    third.deliver(welcomeFrame(0));
+    third.emitClose();
+    jest.advanceTimersByTime(10);
+    expect(ProbeWebSocket.instances).toHaveLength(4);
+  });
+
   test("explicit close clears the inbound watchdog and never reconnects", async () => {
     jest.useFakeTimers();
     useProbeWebSocket();

@@ -65,10 +65,15 @@ export function channelReducer(state: ChannelState, action: ChannelAction): Chan
   switch (action.type) {
     case "status":
       return { ...state, status: action.status };
-    case "trim":
-      return state.messages.length <= action.keep
+    case "trim": {
+      const messages = state.messages.length <= action.keep
+        ? state.messages
+        : state.messages.slice(-action.keep);
+      const directedDeliveries = retainDeliveriesForMessages(state.directedDeliveries, messages);
+      return messages === state.messages && directedDeliveries === state.directedDeliveries
         ? state
-        : { ...state, messages: state.messages.slice(-action.keep) };
+        : { ...state, messages, directedDeliveries };
+    }
     case "guard_reset":
       return { ...state, loopGuard: null, loopGuardBaselineSeq: null, sendError: null };
     case "send_failed":
@@ -145,6 +150,15 @@ function upsertDirectedDelivery(
     }
   }
   return { ...deliveries, [delivery.id]: delivery };
+}
+
+function retainDeliveriesForMessages(
+  deliveries: Record<string, PublicDirectedDelivery>,
+  messages: readonly MsgFrame[],
+): Record<string, PublicDirectedDelivery> {
+  const retainedSeqs = new Set(messages.map((message) => message.seq));
+  const retained = Object.entries(deliveries).filter(([, delivery]) => retainedSeqs.has(delivery.message_seq));
+  return retained.length === Object.keys(deliveries).length ? deliveries : Object.fromEntries(retained);
 }
 
 /**
@@ -260,7 +274,12 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
       );
       // delivery.message is a transport convenience, not a message revision. Never let an older delivery
       // snapshot overwrite a message_update that the page already applied.
-      const messages = state.messages.some((message) => message.seq === frame.message.seq)
+      const alreadyLoaded = state.messages.some((message) => message.seq === frame.message.seq);
+      const belowWindowFloor =
+        !alreadyLoaded &&
+        state.messages.length > 0 &&
+        frame.message.seq < state.messages[0]!.seq;
+      const messages = alreadyLoaded || belowWindowFloor
         ? state.messages
         : insertMessage(state.messages, frame.message);
       if (directedDeliveries === null && messages === state.messages) return state;

@@ -53,6 +53,7 @@ const idleObservationMs = Number(process.env.MCP_HTTP_IDLE_MS ?? 20_000);
 const idleDelayMs = Number(process.env.MCP_HTTP_NOTIFICATION_DELAY_MS ?? 10_000);
 const activeHoldMs = Number(process.env.MCP_HTTP_ACTIVE_HOLD_MS ?? 1_500);
 const turnTimeoutMs = Number(process.env.MCP_HTTP_TURN_TIMEOUT_MS ?? 180_000);
+const appServerShutdownGraceMs = Number(process.env.MCP_HTTP_SHUTDOWN_GRACE_MS ?? 2_000);
 const codexBin = resolve(process.env.MCP_HTTP_CODEX_BIN ?? Bun.which("codex") ?? "codex");
 const sourceCodexHome = resolve(process.env.CODEX_HOME ?? `${homedir()}/.codex`);
 const isolatedCodexHome = mkdtempSync(`${tmpdir()}/agentparty-ap553-http-codex-home-`);
@@ -61,7 +62,13 @@ const runs: ProbeRun[] = [];
 const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: McpServer }>();
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
 
-for (const [name, value] of Object.entries({ idleObservationMs, idleDelayMs, activeHoldMs, turnTimeoutMs })) {
+for (const [name, value] of Object.entries({
+  idleObservationMs,
+  idleDelayMs,
+  activeHoldMs,
+  turnTimeoutMs,
+  appServerShutdownGraceMs,
+})) {
   if (!Number.isFinite(value) || value < 250) throw new Error(`${name} must be at least 250ms`);
 }
 if (!existsSync(codexBin)) throw new Error(`Codex binary not found: ${codexBin}`);
@@ -301,8 +308,39 @@ for (const key of safeAppEnvKeys) {
 
 const child = Bun.spawn(
   [codexBin, "app-server", "--stdio", "-c", `mcp_servers.ap553_http.url=${JSON.stringify(endpoint)}`],
-  { cwd: workspace, stdin: "pipe", stdout: "pipe", stderr: "pipe", env: appEnv },
+  {
+    cwd: workspace,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: appEnv,
+    detached: process.platform !== "win32",
+  },
 );
+let childExitCode: number | null = null;
+const childExited = child.exited.then((code) => {
+  childExitCode = code;
+  return code;
+});
+
+function signalAppServer(signal: NodeJS.Signals): void {
+  if (childExitCode !== null) return;
+  if (process.platform !== "win32") {
+    try { process.kill(-child.pid, signal); } catch { /* leader fallback below */ }
+  }
+  try { child.kill(signal); } catch { /* already exited */ }
+}
+
+async function stopAppServer(): Promise<number> {
+  try { child.stdin.end(); } catch { /* stdin may already be closed after an early app-server exit */ }
+  signalAppServer("SIGTERM");
+  const stopped = await Promise.race([
+    childExited.then(() => true),
+    Bun.sleep(appServerShutdownGraceMs).then(() => false),
+  ]);
+  if (!stopped) signalAppServer("SIGKILL");
+  return await childExited;
+}
 const version = Bun.spawnSync([codexBin, "--version"], { env: appEnv }).stdout.toString().trim();
 const binarySha256 = Bun.spawnSync(["shasum", "-a", "256", codexBin]).stdout.toString().trim().split(/\s+/)[0];
 
@@ -555,9 +593,12 @@ try {
     (send) => send.ts_ms >= activeStartedAt && send.ts_ms < activeCompletedAt,
   );
   const idleAfterCompleted = idleRun.sends.every((send) => send.ts_ms > idleCompletedAt);
+  const activeRunCount = runs.filter((run) => run.phase === "active").length;
+  const idleRunCount = runs.filter((run) => run.phase === "idle").length;
 
   record("active_probe_result", {
     run_id: activeRun.run_id,
+    phase_run_count: activeRunCount,
     server_hidden_marker: activeRun.marker,
     server_sent: activeRun.sends,
     exact_notification_set: exactNotificationSet(activeRun),
@@ -569,6 +610,7 @@ try {
   });
   record("idle_probe_result", {
     run_id: idleRun.run_id,
+    phase_run_count: idleRunCount,
     server_hidden_marker: idleRun.marker,
     completed_to_first_send_ms: idleRun.sends.length > 0 ? idleRun.sends[0]!.ts_ms - idleCompletedAt : null,
     server_sent: idleRun.sends,
@@ -590,6 +632,8 @@ try {
   });
 
   const passed =
+    activeRunCount === 1 &&
+    idleRunCount === 1 &&
     exactNotificationSet(activeRun) &&
     exactNotificationSet(idleRun) &&
     activeDuringTurn &&
@@ -617,9 +661,8 @@ try {
 } finally {
   for (const timer of pendingTimers) clearTimeout(timer);
   pendingTimers.clear();
-  child.kill("SIGTERM");
-  child.stdin.end();
-  await Promise.allSettled([child.exited, stdoutLoop, stderrLoop]);
+  await stopAppServer();
+  await Promise.allSettled([stdoutLoop, stderrLoop]);
   for (const session of sessions.values()) await session.server.close().catch(() => undefined);
   sessions.clear();
   await new Promise<void>((resolveClose) => httpServer.close(() => resolveClose()));

@@ -109,10 +109,11 @@ describe("watch durable directed-delivery adapter (#551)", () => {
         sock.send({ type: "delivery_state", delivery: deliveryState(work, { target_name: "other", state: "running" }) });
         sock.send({ type: "delivery_state", delivery: deliveryState(work, { state: "claimed" }) });
         sock.send({ type: "delivery_state", delivery: deliveryState(work, { state: "failed" }) });
+        sock.send({ type: "delivery_state", request_id: "stale-request", delivery: deliveryState(work, { state: "running" }) });
         setTimeout(() => {
           outputCountBeforeExactAck = o.lines.length;
           exactAckSent = true;
-          sock.send({ type: "delivery_state", delivery: deliveryState(work, { state: "running" }) });
+          sock.send({ type: "delivery_state", request_id: frame.request_id, delivery: deliveryState(work, { state: "running" }) });
         }, 20);
       }
     });
@@ -129,13 +130,14 @@ describe("watch durable directed-delivery adapter (#551)", () => {
     expect(await runWatch(o)).toBe(0);
 
     expect(clientFrames).toContainEqual({ type: "delivery_adapter", adapter: "watch", op: "register" });
-    expect(clientFrames).toContainEqual({
+    expect(clientFrames).toContainEqual(expect.objectContaining({
       type: "delivery_update",
       delivery_id: work.id,
       state: "running",
       work_id: work.work_id,
       continuation_ref: work.continuation_ref,
-    });
+      request_id: expect.any(String),
+    }));
     expect(stuckCountAtRunning).toBe(1);
     expect(outputCountBeforeExactAck).toBe(0);
     expect(acceptedAfterExactAck).toBe(true);
@@ -179,7 +181,7 @@ describe("watch durable directed-delivery adapter (#551)", () => {
         return;
       }
       if (frame.type === "delivery_update") {
-        sock.send({ type: "delivery_state", delivery: deliveryState(work, { state: "running" }) });
+        sock.send({ type: "delivery_state", request_id: frame.request_id, delivery: deliveryState(work, { state: "running" }) });
       }
     });
 
@@ -286,7 +288,10 @@ describe("watch durable directed-delivery adapter (#551)", () => {
 
   test("a rejected running update produces no success output", async () => {
     const msg = message(6);
-    const work = delivery(6);
+    const work = delivery(6, { id: "delivery-\u001b]52;c;clipboard\u0007-six" });
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
     server = startMockServer((frame, sock) => {
       if (frame.type === "hello") {
         sock.send({ ...welcomeFrame(6, "me"), directed_delivery: "v1" });
@@ -298,13 +303,23 @@ describe("watch durable directed-delivery adapter (#551)", () => {
         return;
       }
       if (frame.type === "delivery_update") {
-        sock.send({ type: "error", code: "bad_request", message: "lease rejected" });
+        sock.send({
+          type: "error",
+          code: "bad_request",
+          message: "lease \u001b[31mrejected\u001b[0m\u0007",
+        });
       }
     });
 
-    const o = opts({ server: server.url, json: true, onStuck: () => {} });
-    expect(await runWatch(o)).toBe(EXIT_STREAM_ENDED);
-    expect(o.lines).toEqual([]);
+    try {
+      const o = opts({ server: server.url, json: true, onStuck: () => {} });
+      expect(await runWatch(o)).toBe(EXIT_STREAM_ENDED);
+      expect(o.lines).toEqual([]);
+    } finally {
+      console.error = originalError;
+    }
+    expect(errors.join("\n")).not.toMatch(/[\u001b\u0007]/);
+    expect(errors.join("\n")).toContain("lease rejected");
   });
 
   test("a disconnect before the running ACK produces no success output", async () => {
@@ -361,7 +376,7 @@ describe("watch durable directed-delivery adapter (#551)", () => {
         return;
       }
       if (frame.type === "delivery_update") {
-        sock.send({ type: "delivery_state", delivery: deliveryState(work, { state: "running" }) });
+        sock.send({ type: "delivery_state", request_id: frame.request_id, delivery: deliveryState(work, { state: "running" }) });
       }
     });
 

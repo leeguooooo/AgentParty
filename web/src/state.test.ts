@@ -348,6 +348,41 @@ describe("channel state", () => {
     expect(lateDeliverySnapshot.directedDeliveries["delivery-1"]?.state).toBe("running");
   });
 
+  test("trim evicts delivery rows whose messages left the loaded window", () => {
+    let state = initialChannelState;
+    for (const seq of [1, 2, 3, 4]) {
+      state = channelReducer(state, { type: "frame", frame: msgFrame(seq, `message ${seq}`) });
+      state = channelReducer(state, {
+        type: "frame",
+        frame: {
+          type: "delivery_state",
+          delivery: delivery({ id: `delivery-${seq}`, message_seq: seq, updated_at: 100 + seq }),
+        },
+      });
+    }
+
+    const trimmed = channelReducer(state, { type: "trim", keep: 2 });
+    expect(trimmed.messages.map((message) => message.seq)).toEqual([3, 4]);
+    expect(Object.keys(trimmed.directedDeliveries).sort()).toEqual(["delivery-3", "delivery-4"]);
+  });
+
+  test("a late delivery below the message window updates status without widening the pagination floor", () => {
+    let state = channelReducer(initialChannelState, { type: "frame", frame: msgFrame(100, "window floor") });
+    state = channelReducer(state, { type: "frame", frame: msgFrame(101, "latest") });
+
+    const late = channelReducer(state, {
+      type: "frame",
+      frame: {
+        type: "delivery",
+        delivery: delivery({ id: "delivery-old", message_seq: 12, state: "running", updated_at: 200 }),
+        message: msgFrame(12, "old delivery payload"),
+      },
+    });
+
+    expect(late.messages.map((message) => message.seq)).toEqual([100, 101]);
+    expect(late.directedDeliveries["delivery-old"]?.state).toBe("running");
+  });
+
   test("preserves lineage on incremental presence frames", () => {
     const frame: PresenceFrame = {
       type: "presence",

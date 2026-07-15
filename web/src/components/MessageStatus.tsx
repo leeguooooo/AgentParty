@@ -49,7 +49,8 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
   const deliveryTargets = useMemo(() => new Set(deliveries.map((delivery) => delivery.target_name)), [deliveries]);
   // v1 directed delivery is authoritative. Keep legacy wake receipts only for targets without a durable delivery row.
   const visibleReceipts = receipts.filter((receipt) => !deliveryTargets.has(receipt.name));
-  if (!hasRead && visibleReceipts.length === 0 && deliveries.length === 0) return null;
+  const hasDetails = hasRead || visibleReceipts.length > 0 || deliveries.length > 0;
+  if (!hasDetails) return null;
 
   const receiptText = (r: MentionReceipt): string => {
     const base = t(`WakeReceipt.state.${r.state}`, { detail: r.detail ?? "" });
@@ -74,18 +75,27 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
   return (
     <div className="msg-status-bar">
       <div className="msg-status-line">
-        {hasRead && (
+        {hasDetails && (
           <button
             type="button"
             className={"msg-status-summary" + (open ? " is-open" : "")}
             aria-expanded={open}
+            aria-label={t(open ? "WakeReceipt.details.collapse" : "WakeReceipt.details.expand")}
             onClick={() => setOpen((v) => !v)}
           >
-            <span className="msg-status-read">
-              <span className="ap-sprite ap-sprite--success" aria-hidden="true" /> {t("WakeReceipt.read.read", { n: readers.length })}
-            </span>
-            {unread.length > 0 && (
-              <span className="msg-status-unread"> · {t("WakeReceipt.read.unread", { n: unread.length })}</span>
+            {hasRead ? (
+              <>
+                <span className="msg-status-read">
+                  <span className="ap-sprite ap-sprite--success" aria-hidden="true" /> {t("WakeReceipt.read.read", { n: readers.length })}
+                </span>
+                {unread.length > 0 && (
+                  <span className="msg-status-unread"> · {t("WakeReceipt.read.unread", { n: unread.length })}</span>
+                )}
+              </>
+            ) : (
+              <span className="msg-status-unread">
+                {t(deliveries.length > 0 ? "WakeReceipt.delivery.section" : "WakeReceipt.read.mentionSection")}
+              </span>
             )}
             <span className="msg-status-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
           </button>
@@ -95,6 +105,8 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
             key={delivery.id}
             className={`msg-receipt msg-delivery msg-delivery--${delivery.state}`}
             title={deliveryTitle(delivery)}
+            aria-label={deliveryTitle(delivery)}
+            tabIndex={0}
             data-delivery-id={delivery.id}
           >
             <span className={`msg-receipt-icon ap-sprite ap-sprite--${DELIVERY_ICON[delivery.state]}`} aria-hidden="true" />
@@ -103,32 +115,40 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
           </span>
         ))}
         {visibleReceipts.map((r) => (
-          <span key={r.name} className={`msg-receipt msg-receipt--${r.state}`} title={receiptTitle(r)}>
+          <span
+            key={r.name}
+            className={`msg-receipt msg-receipt--${r.state}`}
+            title={receiptTitle(r)}
+            aria-label={receiptTitle(r)}
+            tabIndex={0}
+          >
             <span className={`msg-receipt-icon ap-sprite ap-sprite--${RECEIPT_ICON[r.state]}`} aria-hidden="true" />
             <span className="msg-receipt-name t-mono">@{display(r.name)}</span>
             <span className="msg-receipt-label">{receiptText(r)}</span>
           </span>
         ))}
       </div>
-      {open && hasRead && (
+      {open && hasDetails && (
         <div className="msg-status-pop" role="group">
-          <section className="msg-status-group">
-            <h4 className="msg-status-group-head">{t("WakeReceipt.read.readSection", { n: readers.length })}</h4>
-            {readers.length === 0 ? (
-              <p className="msg-status-empty">{t("WakeReceipt.read.none")}</p>
-            ) : (
-              <ul className="msg-status-names">
-                {readers.map((e) => (
-                  <li key={e.name} className="msg-status-name">
-                    <span className={`msg-status-kind msg-status-kind--${e.kind ?? "agent"}`} aria-hidden="true">
-                      {kindLabel(e.kind)}
-                    </span>{" "}
-                    <span className="t-mono">{display(e.name)}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+          {hasRead && (
+            <section className="msg-status-group">
+              <h4 className="msg-status-group-head">{t("WakeReceipt.read.readSection", { n: readers.length })}</h4>
+              {readers.length === 0 ? (
+                <p className="msg-status-empty">{t("WakeReceipt.read.none")}</p>
+              ) : (
+                <ul className="msg-status-names">
+                  {readers.map((e) => (
+                    <li key={e.name} className="msg-status-name">
+                      <span className={`msg-status-kind msg-status-kind--${e.kind ?? "agent"}`} aria-hidden="true">
+                        {kindLabel(e.kind)}
+                      </span>{" "}
+                      <span className="t-mono">{display(e.name)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
           {unread.length > 0 && (
             <section className="msg-status-group">
               <h4 className="msg-status-group-head">{t("WakeReceipt.read.unreadSection", { n: unread.length })}</h4>
@@ -154,6 +174,8 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
                     key={delivery.id}
                     className={`msg-status-name msg-delivery--${delivery.state}`}
                     title={deliveryTitle(delivery)}
+                    aria-label={deliveryTitle(delivery)}
+                    tabIndex={0}
                   >
                     <span className={`msg-receipt-icon ap-sprite ap-sprite--${DELIVERY_ICON[delivery.state]}`} aria-hidden="true" />{" "}
                     <span className="t-mono">@{display(delivery.target_name)}</span>
@@ -169,7 +191,13 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
               <p className="msg-status-note">{t("WakeReceipt.read.agentNote")}</p>
               <ul className="msg-status-names">
                 {visibleReceipts.map((r) => (
-                  <li key={r.name} className={`msg-status-name msg-receipt--${r.state}`} title={receiptTitle(r)}>
+                  <li
+                    key={r.name}
+                    className={`msg-status-name msg-receipt--${r.state}`}
+                    title={receiptTitle(r)}
+                    aria-label={receiptTitle(r)}
+                    tabIndex={0}
+                  >
                     <span className={`msg-receipt-icon ap-sprite ap-sprite--${RECEIPT_ICON[r.state]}`} aria-hidden="true" />{" "}
                     <span className="t-mono">@{display(r.name)}</span>
                     <span className="msg-status-name-state"> — {receiptText(r)}</span>

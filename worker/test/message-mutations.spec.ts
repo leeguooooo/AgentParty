@@ -156,6 +156,8 @@ describe("message edit/retract/supersede", () => {
     const live = await WsClient.open(slug, writer.token);
     await live.nextOfType("welcome");
     live.send({ type: "hello", since: seq });
+    live.send({ type: "ping" });
+    await live.nextOfType("pong");
 
     const retracted = await api(`/api/channels/${slug}/messages/${seq}/retract`, owner.token, { method: "POST" });
     expect(retracted.status).toBe(200);
@@ -436,6 +438,8 @@ describe("message edit/retract/supersede", () => {
     const ws = await WsClient.open(slug, writer.token);
     await ws.nextOfType("welcome");
     ws.send({ type: "hello", since: seq });
+    ws.send({ type: "ping" });
+    await ws.nextOfType("pong");
 
     const edit = await api(`/api/channels/${slug}/messages/${seq}/edit`, writer.token, {
       method: "POST",

@@ -73,7 +73,7 @@ export function mentionExtension(
 
       // CJK 无空格正文可能被词法层读成 "小明看一下"。只消费实际命中的 alias，
       // 余下 "看一下" 继续交给 marked 渲染，不能吞进 mention span。
-      const raw = `@${parsed.value.slice(0, resolution.matchedAlias.length)}`;
+      const raw = `@${parsed.value.slice(0, resolution.matchedEnd)}`;
       const token: MentionToken = { type: "apMention", raw, name, display };
       return token;
     },

@@ -2,12 +2,36 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EXIT_SIGNAL_TERM, runServe, ServeShutdownError } from "../src/commands/serve";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 
 const dirs: string[] = [];
 const servers: MockServer[] = [];
+type TrackedProcess = {
+  kill(signal?: NodeJS.Signals | number): void;
+  exited: Promise<number>;
+};
+const processes: TrackedProcess[] = [];
 
-afterEach(() => {
+function trackProcess<T extends TrackedProcess>(process: T): T {
+  processes.push(process);
+  return process;
+}
+
+async function stopProcess(process: TrackedProcess): Promise<void> {
+  try { process.kill("SIGTERM"); } catch { /* already exited */ }
+  const stopped = await Promise.race([
+    process.exited.then(() => true),
+    Bun.sleep(100).then(() => false),
+  ]);
+  if (!stopped) {
+    try { process.kill("SIGKILL"); } catch { /* already exited */ }
+  }
+  await process.exited.catch(() => undefined);
+}
+
+afterEach(async () => {
+  for (const process of processes.splice(0)) await stopProcess(process);
   for (const server of servers.splice(0)) server.stop();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -19,6 +43,74 @@ async function waitForFile(path: string, timeoutMs = 3_000): Promise<void> {
 }
 
 describe("serve process shutdown barrier", () => {
+  test("an inherited abort interrupts the initial charter fetch and still releases serve resources", async () => {
+    const controller = new AbortController();
+    const lockDir = mkdtempSync(join(tmpdir(), "ap-charter-abort-lock-"));
+    dirs.push(lockDir);
+    const server = startMockServer(() => {});
+    servers.push(server);
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let receivedSignal: AbortSignal | undefined;
+    const running = runServe({
+      server: server.url,
+      token: "ap_test",
+      channel: "dev",
+      since: 0,
+      cmd: "true",
+      mentionsOnly: true,
+      lockDir,
+      signal: controller.signal,
+      out: () => {},
+      fetchCharter: async (signal) => {
+        receivedSignal = signal;
+        markStarted();
+        return await new Promise<never>(() => {});
+      },
+    });
+    await started;
+
+    controller.abort(new ServeShutdownError("SIGTERM"));
+    expect(await running).toBe(EXIT_SIGNAL_TERM);
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(existsSync(join(lockDir, "serve-dev.lock"))).toBe(false);
+  });
+
+  test("an inherited abort interrupts a stuck welcome advertisement", async () => {
+    const controller = new AbortController();
+    const lockDir = mkdtempSync(join(tmpdir(), "ap-advertise-abort-lock-"));
+    dirs.push(lockDir);
+    const server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") sock.send(welcomeFrame(0, "me"));
+    });
+    servers.push(server);
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let receivedSignal: AbortSignal | undefined;
+    const running = runServe({
+      server: server.url,
+      token: "ap_test",
+      channel: "dev",
+      since: 0,
+      cmd: "true",
+      mentionsOnly: true,
+      lockDir,
+      signal: controller.signal,
+      out: () => {},
+      advertise: async (signal) => {
+        receivedSignal = signal;
+        markStarted();
+        return await new Promise<never>(() => {});
+      },
+    });
+    await started;
+
+    controller.abort(new ServeShutdownError("SIGTERM"));
+    expect(await running).toBe(EXIT_SIGNAL_TERM);
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(existsSync(join(lockDir, "serve-dev.lock"))).toBe(false);
+  });
+
   test("SIGINT reaps an ignoring child/grandchild tree before exit and never starts the next wake", async () => {
     if (process.platform === "win32") return;
     const dir = mkdtempSync(join(tmpdir(), "ap-serve-shutdown-"));
@@ -47,7 +139,7 @@ describe("serve process shutdown barrier", () => {
       });
       process.exit(code);
     `;
-    const serve = Bun.spawn(["bun", "-e", script], { stdout: "pipe", stderr: "pipe" });
+    const serve = trackProcess(Bun.spawn(["bun", "-e", script], { stdout: "pipe", stderr: "pipe" }));
     await waitForFile(grandchildPidFile);
     const grandchildPid = Number(readFileSync(grandchildPidFile, "utf8").trim());
 
@@ -71,4 +163,45 @@ describe("serve process shutdown barrier", () => {
     expect(alive).toBe(false);
     expect(readFileSync(runsFile, "utf8").trim().split(/\s+/)).toEqual(["1"]);
   }, 10_000);
+
+  test("profile SIGTERM stops the outer invite poll and returns 143", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ap-profile-shutdown-"));
+    dirs.push(dir);
+    const readyFile = join(dir, "ready");
+    const serveModule = new URL("../src/commands/serve.ts", import.meta.url).pathname;
+    const script = `
+      import { writeFileSync } from "node:fs";
+      import { runProfileServe } from ${JSON.stringify(serveModule)};
+      const profile = {
+        owner_account: "owner@example.com", handle: "codex", name: "codex",
+        runner: "codex", repo_url: null, workdir: null, base_branch: "main",
+        worktree_strategy: "shared", rules: "", invitable_by: "anyone",
+        created_at: 1, updated_at: 1,
+      };
+      const code = await runProfileServe({
+        server: "http://agentparty.test", humanToken: "acc-test",
+        ownerAccount: profile.owner_account, handle: profile.handle, mentionsOnly: true,
+        mintRuntime: async () => ({ token: "ap_runtime", profile }),
+        listInvites: async () => {
+          writeFileSync(${JSON.stringify(readyFile)}, "ready");
+          return [];
+        },
+        pollIntervalMs: 60_000,
+        out: () => {},
+      });
+      process.exit(code);
+    `;
+    const profileServe = trackProcess(Bun.spawn(["bun", "-e", script], {
+      stdout: "pipe",
+      stderr: "pipe",
+    }));
+    await waitForFile(readyFile);
+
+    profileServe.kill("SIGTERM");
+    const code = await Promise.race([
+      profileServe.exited,
+      Bun.sleep(3_000).then(() => -999),
+    ]);
+    expect(code).toBe(143);
+  }, 5_000);
 });

@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { EXIT_ARCHIVED, EXIT_STREAM_ENDED, type DirectedDelivery, type MsgFrame } from "@agentparty/shared";
+import {
+  EXIT_ARCHIVED,
+  EXIT_STREAM_ENDED,
+  type ClientFrame,
+  type DirectedDelivery,
+  type MsgFrame,
+  type ServerFrame,
+} from "@agentparty/shared";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runServe, type ServeOptions, type ServeRunner } from "../src/commands/serve";
+import { confirmDeliveryUpdate, runServe, type ServeOptions, type ServeRunner } from "../src/commands/serve";
 import { writeConfig, writeState } from "../src/config";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 import { startRestMock } from "./rest-mock";
@@ -49,6 +56,40 @@ function opts(over: Partial<ServeOptions> & Pick<ServeOptions, "server">): Serve
 }
 
 describe("serve durable directed delivery (#551)", () => {
+  test("terminal ACK ignores stale same-state broadcasts without the matching request id", async () => {
+    const work = delivery(1);
+    const publicWork = {
+      id: work.id,
+      message_seq: work.message_seq,
+      target_name: work.target_name,
+      state: "replied" as const,
+      reply_seq: null,
+      created_at: work.created_at,
+      updated_at: work.updated_at,
+    };
+    const frames: ServerFrame[] = [{ type: "delivery_state", delivery: publicWork }];
+    let exactAckSent = false;
+    const conn = {
+      send(frame: ClientFrame) {
+        if (frame.type !== "delivery_update") return false;
+        frames.push({ type: "delivery_state", request_id: "stale-request", delivery: publicWork });
+        setTimeout(() => {
+          exactAckSent = true;
+          frames.push({ type: "delivery_state", request_id: frame.request_id, delivery: publicWork });
+        }, 20);
+        return true;
+      },
+      pendingFrames: () => frames,
+    };
+
+    expect(await confirmDeliveryUpdate(conn, {
+      type: "delivery_update",
+      delivery_id: work.id,
+      state: "replied",
+    }, 200)).toMatchObject({ id: work.id, state: "replied" });
+    expect(exactAckSent).toBe(true);
+  });
+
   test("custom decision resumes as a fresh process on the served channel with exact lineage context", async () => {
     const home = mkdtempSync(join(tmpdir(), "ap-custom-continuation-"));
     const evidencePath = join(home, "owner-answer.json");
@@ -140,14 +181,14 @@ describe("serve durable directed delivery (#551)", () => {
         }
         if (frame.type !== "delivery_update") return;
         if (frame.delivery_id === source.id && frame.state === "running") {
-          sock.send({ type: "delivery_state", delivery: { ...source, state: "running", updated_at: Date.now() } });
+          sock.send({ type: "delivery_state", request_id: frame.request_id, delivery: { ...source, state: "running", updated_at: Date.now() } });
         } else if (frame.delivery_id === source.id && frame.state === "replied") {
-          sock.send({ type: "delivery_state", delivery: { ...source, state: "waiting_owner", updated_at: Date.now() } });
+          sock.send({ type: "delivery_state", request_id: frame.request_id, delivery: { ...source, state: "waiting_owner", updated_at: Date.now() } });
           sock.send({ type: "delivery", delivery: owner, message: ownerMessage });
         } else if (frame.delivery_id === owner.id && frame.state === "running") {
-          sock.send({ type: "delivery_state", delivery: { ...owner, state: "running", updated_at: Date.now() } });
+          sock.send({ type: "delivery_state", request_id: frame.request_id, delivery: { ...owner, state: "running", updated_at: Date.now() } });
         } else if (frame.delivery_id === owner.id && frame.state === "replied") {
-          sock.send({ type: "delivery_state", delivery: { ...owner, state: "replied", updated_at: Date.now() } });
+          sock.send({ type: "delivery_state", request_id: frame.request_id, delivery: { ...owner, state: "replied", updated_at: Date.now() } });
           sock.send({ type: "error", code: "archived", message: "done" });
         }
       });
@@ -175,8 +216,12 @@ describe("serve durable directed delivery (#551)", () => {
           },
           decision_response: {
             request_seq: 70,
+            chosen_index: 0,
             chosen_option: "approve",
+            prompt: "custom approval",
             delivery_id: source.id,
+            origin_seq: source.message_seq,
+            origin_channel: "serve-b",
             work_id: source.work_id,
             continuation_ref: source.continuation_ref,
           },
@@ -203,6 +248,7 @@ describe("serve durable directed delivery (#551)", () => {
     }) as unknown as MsgFrame;
     const work = delivery(1);
     const events: string[] = [];
+    let auditCalls = 0;
     let releaseDownload!: (value: Uint8Array) => void;
     let releaseUpgrade!: () => void;
     let releasePrepare!: () => void;
@@ -221,7 +267,7 @@ describe("serve durable directed delivery (#551)", () => {
         sock.send({ type: "delivery", delivery: work, message });
       } else if (frame.type === "delivery_update") {
         events.push(`delivery:${frame.state}`);
-        sock.send({ type: "delivery_state", delivery: { ...work, state: frame.state, updated_at: Date.now() } });
+        sock.send({ type: "delivery_state", request_id: frame.request_id, delivery: { ...work, state: frame.state, updated_at: Date.now() } });
         if (frame.state === "replied") sock.send({ type: "error", code: "archived", message: "done" });
       }
     });
@@ -247,7 +293,10 @@ describe("serve durable directed delivery (#551)", () => {
       },
       upgradeProbeIntervalMs: 0,
       // The audit POST intentionally never resolves. It must be fire-and-forget after running ACK.
-      post: async () => await new Promise<never>(() => {}),
+      post: () => {
+        auditCalls += 1;
+        return new Promise<never>(() => {});
+      },
       runCommand: runner,
     }));
 
@@ -271,6 +320,7 @@ describe("serve durable directed delivery (#551)", () => {
     ]));
     expect(events.indexOf("prepare:done")).toBeLessThan(events.indexOf("delivery:running"));
     expect(events.indexOf("delivery:running")).toBeLessThan(events.indexOf("model"));
+    expect(auditCalls).toBeGreaterThan(0);
   });
 
   test("ordinary mention advances the read cursor but only its delivery frame runs the command", async () => {
@@ -295,6 +345,7 @@ describe("serve durable directed delivery (#551)", () => {
         updates.push(frame as unknown as Record<string, unknown>);
         sock.send({
           type: "delivery_state",
+          request_id: frame.request_id,
           delivery: { ...work, state: frame.state, updated_at: Date.now() },
         });
         if (frame.state !== "running") sock.send({ type: "error", code: "archived", message: "done" });
@@ -316,14 +367,20 @@ describe("serve durable directed delivery (#551)", () => {
     expect(cursors).toEqual([1]);
     expect(receivedContext).toMatchObject({ id: work.id, work_id: "work-1", continuation_ref: "codex:thread-1" });
     expect(updates).toEqual([
-      {
+      expect.objectContaining({
         type: "delivery_update",
         delivery_id: work.id,
         state: "running",
         work_id: work.work_id,
         continuation_ref: work.continuation_ref,
-      },
-      { type: "delivery_update", delivery_id: work.id, state: "replied" },
+        request_id: expect.any(String),
+      }),
+      expect.objectContaining({
+        type: "delivery_update",
+        delivery_id: work.id,
+        state: "replied",
+        request_id: expect.any(String),
+      }),
     ]);
   });
 
@@ -344,6 +401,7 @@ describe("serve durable directed delivery (#551)", () => {
       if (frame.type === "delivery_update") {
         sock.send({
           type: "delivery_state",
+          request_id: frame.request_id,
           delivery: { ...work, state: frame.state, updated_at: Date.now() },
         });
         if (frame.state !== "running") sock.send({ type: "error", code: "archived", message: "done" });
@@ -359,6 +417,28 @@ describe("serve durable directed delivery (#551)", () => {
 
     expect(code).toBe(EXIT_ARCHIVED);
     expect(seen).toEqual([3]);
+  });
+
+  test("terminal output strips control sequences from remote delivery fields", async () => {
+    const message = msgFrame(6, "invalid remote delivery", { mentions: ["me"] }) as unknown as MsgFrame;
+    const work = delivery(6, {
+      id: "delivery-\u001b]52;c;clipboard\u0007-six",
+      target_name: "other\u001b[31m",
+    });
+    const lines: string[] = [];
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send({ ...welcomeFrame(0, "me"), directed_delivery: "v1" });
+      } else if (frame.type === "serve_lease") {
+        sock.send({ type: "serve_lease", name: "me", held: true });
+        sock.send({ type: "delivery", delivery: work, message });
+        setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 10);
+      }
+    });
+
+    expect(await runServe(opts({ server: server.url, out: (line) => lines.push(line) }))).toBe(EXIT_ARCHIVED);
+    expect(lines.some((line) => line.includes("ignored invalid delivery"))).toBe(true);
+    expect(lines.join("\n")).not.toMatch(/[\u001b\u0007]/);
   });
 
   test("an exhausted runner reports the delivery failed instead of silently releasing it", async () => {
@@ -379,6 +459,7 @@ describe("serve durable directed delivery (#551)", () => {
         updates.push(frame as unknown as Record<string, unknown>);
         sock.send({
           type: "delivery_state",
+          request_id: frame.request_id,
           delivery: { ...work, state: frame.state, last_error: frame.error ?? null, updated_at: Date.now() },
         });
         if (frame.state !== "running") sock.send({ type: "error", code: "archived", message: "done" });
@@ -432,6 +513,7 @@ describe("serve durable directed delivery (#551)", () => {
         if (frame.state === "running") {
           sock.send({
             type: "delivery_state",
+            request_id: frame.request_id,
             delivery: { ...work, state: "running", updated_at: Date.now() },
           });
         } else {

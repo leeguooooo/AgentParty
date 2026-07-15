@@ -10,6 +10,7 @@ import {
   type WebhookMode,
 } from "../rest";
 import { isName, isSlug } from "../validation";
+import { stripTerminalControls } from "../format";
 
 const FILTERS: WebhookFilter[] = ["mentions", "status", "needs-human", "all"];
 const MODES: WebhookMode[] = ["notify", "agent"];
@@ -37,6 +38,20 @@ Options:
   --secret S            bearer/HMAC secret
   --filter mentions|status|needs-human|all delivery filter (default: mentions)
   --mode notify|agent   delivery mode (default: notify)`;
+
+function webhookColumn(value: unknown): string {
+  return stripTerminalControls(String(value ?? "")).replace(/[\r\n\t]+/g, " ");
+}
+
+export function formatWebhookListRow(webhook: {
+  name: unknown;
+  filter: unknown;
+  url: unknown;
+  mode?: unknown;
+}): string {
+  const mode = webhook.mode === "agent" || webhook.mode === "notify" ? webhook.mode : "notify";
+  return [webhook.name, webhook.filter, webhook.url, mode].map(webhookColumn).join("\t");
+}
 
 function isPrivateIpv4(host: string): boolean {
   const parts = host.split(".");
@@ -192,7 +207,7 @@ export async function run(argv: string[]): Promise<number> {
         for (const w of webhooks) {
           // Preserve the established name/filter/url columns; append mode so existing parsers that
           // consume the first three columns keep working while new clients can distinguish claims.
-          console.log(`${w.name}\t${w.filter}\t${w.url}\t${w.mode ?? "notify"}`);
+          console.log(formatWebhookListRow(w));
         }
         return 0;
       }

@@ -23,7 +23,7 @@ import { readAccount } from "../account";
 import { connect } from "../client";
 import { clearStuck, loadCursor, loadRevCursor, loadStuck, resolveChannel, saveCursor, saveRevCursor, saveStuck, writeWorkspaceConfigOnly, type StuckWake } from "../config";
 import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from "../instance-lock";
-import { formatMsg } from "../format";
+import { formatMsg, stripTerminalControls } from "../format";
 import { clearHealthCache, writeHealthCache } from "../health-cache";
 import { ensureFreshAccess, resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import {
@@ -47,6 +47,7 @@ import {
 
 const PROTOCOL_REMINDER =
   "被 @ 唤起：先读本文件 charter 了解频道约定；若发现 charter 与频道现状矛盾，视为一个待办上报。需要更多上下文再 `party history <channel 字段的频道>`；需要产出结论时，先用 `party send --reply-to <seq>` 把 final synthesis 发回频道，再 status done；别只回本地。" +
+  " 需要跨本轮保留或交付的文件必须写入持久 workdir/repo；不要把成果只放在 TMPDIR 或临时上下文目录。" +
   " 需要 owner 补充信息或批准时，必须用 `party decision ask` 在本频道创建结构化决策，不能用普通 `party send` 提问；approval 返回 pending 后结束本轮，让 serve 立即恢复监听，unattended 返回 auto_resolved 时可按返回选择继续。不要把 account/email 当 mention 名。禁止在 runner 子进程里调用 AskUserQuestion、request_user_input 或停住等待人工输入，否则整个频道监听会被串行阻塞。" +
   " 全程只用 party CLI 在【本频道】里协作：不要触发项目自带的其它频道/工作流机制（如 trellis 等 app-server 建频道流程）另建频道，也不要用 tmux/后台守护/子代理去接管这次唤醒——这一轮就在当前会话里用 party 回完即可。" +
   " 维护任务台账（#371）：认领活先 `party task claim <id>`（没有就 `party task create`），开工 `party status working --task <id>`，完成 `party status done --task <id>`（或 `party task done <id>`）——让台账反映真实进度，别和 GitHub issue/实际漂移。";
@@ -151,6 +152,22 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
   });
 }
 
+function delayWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 // 有界重放（#198）：同一条 seq 连续送达失败到顶就响亮放弃，既不无限重放也不静默丢弃
 // env 里保留的正文上限。完整正文走 stdin 与 context file。
 const AP_BODY_MAX = 4_000;
@@ -182,6 +199,10 @@ function readyNoteField(value: string, maxLength: number): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, maxLength);
+}
+
+function terminalOutput(value: string): string {
+  return stripTerminalControls(value);
 }
 
 function sanitizeBlockedError(error: string): string {
@@ -697,7 +718,7 @@ export interface ServeOptions {
   runCommand?: ServeRunner;
   sdkRunner?: SdkRunnerOptions;
   // serve 挂上后声明自己「可被唤醒」的钩子；run() 注入真实实现，测试可省略/替换
-  advertise?: () => Promise<void>;
+  advertise?: (signal?: AbortSignal) => Promise<void>;
   /**
    * 首个 welcome 已被本次 runServe 实际消费。外层 supervisor 只能在这个边界后
    * 把后续连接视为「内部重启」；连 welcome 都没收到的失败仍必须保留用户的
@@ -706,7 +727,7 @@ export interface ServeOptions {
   onWelcome?: () => void;
   charter?: ChannelCharter | null;
   projectAgent?: ProjectAgentRunContext | null;
-  fetchCharter?: () => Promise<ChannelCharter>;
+  fetchCharter?: (signal?: AbortSignal) => Promise<ChannelCharter>;
   // 唤醒间隙发现磁盘装了更新的 party 就自动 re-exec 新版（issue #45）；默认只提示不动。
   autoUpgrade?: boolean;
   upgradeDeps?: UpgradeDeps; // 测试注入版本读取/re-exec
@@ -724,12 +745,18 @@ export interface ServeOptions {
   now?: () => number;
   /** 单次 runner 的硬超时；默认 30 分钟。到点后恢复监听，不再让 task heartbeat 无限伪装健康。 */
   runnerTimeoutMs?: number;
+  /** 外层 profile/supervisor 持有的生命周期；存在时 runServe 不再注册进程级 signal listener。 */
+  signal?: AbortSignal;
 }
 
 // serve 一挂上就把 presence 标成可唤醒：residency=supervised + wake.kind=serve。
 // 没这一步，agent 跑了 serve 但 presence 仍是 null → 别人 party wake test @你 会判 not_auto_wakeable，
 // agent 得自己再手动 party status --wake-kind serve --residency supervised 才行（外部 agent 就卡在这半天）。
-export async function advertiseServeWake(auth: ResolvedAuthDetailed, channel: string): Promise<void> {
+export async function advertiseServeWake(
+  auth: ResolvedAuthDetailed,
+  channel: string,
+  signal?: AbortSignal,
+): Promise<void> {
   if (!auth.server || !auth.token) return;
   await postMessage(auth.server, auth.token, channel, {
     kind: "status",
@@ -739,7 +766,7 @@ export async function advertiseServeWake(auth: ResolvedAuthDetailed, channel: st
     residency: "supervised",
     wake: { kind: "serve" },
     context: buildContext(auth),
-  });
+  }, signal);
 }
 
 // 默认执行器：把上下文写成 context file → sh -c <cmd>（cmd 里的 {file} 替成路径，也放进 AP_CONTEXT_FILE）。
@@ -1986,9 +2013,11 @@ export interface PrepareProfileWorkspaceOptions {
   child: Pick<ProjectAgentChannelRuntime, "name" | "owner" | "channel_scope">;
   runGit?: RunnerProcess;
   env?: Record<string, string | undefined>;
+  signal?: AbortSignal;
 }
 
 export async function prepareProfileChannelWorkspace(opts: PrepareProfileWorkspaceOptions): Promise<PreparedProfileWorkspace> {
+  if (opts.signal?.aborted) throw opts.signal.reason;
   const origin = canonicalServerOrigin(opts.server);
   const serverNamespace = stableNamespace([origin]);
   const profileNamespace = stableNamespace([
@@ -2037,7 +2066,12 @@ export async function prepareProfileChannelWorkspace(opts: PrepareProfileWorkspa
       mkdirSync(baseDir, { recursive: true });
     } else {
       mkdirSync(join(root, "source-parent"), { recursive: true });
-      const clone = await runGit(["git", "clone", opts.profile.repo_url, baseDir], { cwd: root, env });
+      const clone = await runGit(["git", "clone", opts.profile.repo_url, baseDir], {
+        cwd: root,
+        env,
+        signal: opts.signal,
+      });
+      if (opts.signal?.aborted) throw opts.signal.reason;
       if (clone.code !== 0) {
         throw new Error(`git clone failed for project agent profile: ${clone.stderr || clone.stdout}`);
       }
@@ -2051,7 +2085,9 @@ export async function prepareProfileChannelWorkspace(opts: PrepareProfileWorkspa
     const added = await runGit(["git", "-C", baseDir, "worktree", "add", "-B", branch, worktreeDir, opts.profile.base_branch], {
       cwd: root,
       env,
+      signal: opts.signal,
     });
+    if (opts.signal?.aborted) throw opts.signal.reason;
     if (added.code !== 0) {
       throw new Error(`git worktree add failed for #${opts.channel}: ${added.stderr || added.stdout}`);
     }
@@ -2104,6 +2140,8 @@ export interface ProfileServeOptions {
   runChannelServe?: (opts: ServeOptions) => Promise<number>;
   post?: typeof postMessage;
   sleep?: (ms: number) => Promise<void>;
+  /** 嵌入/测试方持有的生命周期；CLI 默认由 profile 层独占 SIGINT/SIGTERM。 */
+  signal?: AbortSignal;
 }
 
 function profileContext(profile: ProjectAgentProfile, prepared: PreparedProfileWorkspace): ProjectAgentRunContext {
@@ -2158,13 +2196,48 @@ export function projectAgentReadyNote(profile: ProjectAgentProfile, channel: str
 }
 
 export async function runProfileServe(opts: ProfileServeOptions): Promise<number> {
-  const out = opts.out ?? ((line: string) => console.error(line));
+  const rawOut = opts.out ?? ((line: string) => console.error(line));
+  const out = (line: string) => rawOut(terminalOutput(line));
   const mintRuntime = opts.mintRuntime ?? mintProjectAgentRuntimeToken;
   const listInvites = opts.listInvites ?? listProjectAgentInvites;
   const ensureChannelRuntime = opts.ensureChannelRuntime ?? ensureProjectAgentChannelRuntime;
   const runChannelServe = opts.runChannelServe ?? runServe;
   const post = opts.post ?? postMessage;
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const injectedSleep = opts.sleep;
+  const lifecycleController = new AbortController();
+  const lifecycleSignal = lifecycleController.signal;
+  let shutdownError: ServeShutdownError | null = null;
+  const requestShutdown = (signal: "SIGINT" | "SIGTERM") => {
+    if (shutdownError !== null) return;
+    shutdownError = new ServeShutdownError(signal);
+    lifecycleController.abort(shutdownError);
+  };
+  const onInterrupt = () => requestShutdown("SIGINT");
+  const onTerminate = () => requestShutdown("SIGTERM");
+  const onInheritedAbort = () => {
+    if (shutdownError !== null) return;
+    shutdownError = opts.signal?.reason instanceof ServeShutdownError
+      ? opts.signal.reason
+      : new ServeShutdownError("SIGTERM");
+    lifecycleController.abort(shutdownError);
+  };
+  if (opts.signal === undefined) {
+    // Keep one idempotent handler installed through the full child cleanup barrier. A second signal
+    // must not restore Node's default exit while runner process groups are still terminating.
+    process.on("SIGINT", onInterrupt);
+    process.on("SIGTERM", onTerminate);
+  } else {
+    opts.signal.addEventListener("abort", onInheritedAbort, { once: true });
+    if (opts.signal.aborted) onInheritedAbort();
+  }
+  // The production timer itself must be cancelled on shutdown. Racing a regular setTimeout
+  // rejects promptly but leaves the timer alive, which can keep the profile daemon process open.
+  const abortableSleep = injectedSleep === undefined
+    ? (ms: number) => delayWithAbort(ms, lifecycleSignal)
+    : (ms: number) => awaitWithAbort(injectedSleep(ms), lifecycleSignal);
+  const running = new Map<string, Promise<number>>();
+  const attaching = new Map<string, Promise<void>>();
+  const terminalChannels = new Set<string>();
   const upgradeProbeIntervalMs = opts.upgradeProbeIntervalMs ?? 5 * 60_000;
   const refreshAvailableUpgrade = opts.refreshAvailableUpgrade;
   let currentAvailableUpgrade = opts.availableUpgrade ?? null;
@@ -2183,16 +2256,19 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
         }
         return sharedUpgradeProbe;
       };
-  const runtime = await mintRuntime(opts.server, opts.humanToken, opts.handle);
+  try {
+  const runtime = await awaitWithAbort(
+    mintRuntime(opts.server, opts.humanToken, opts.handle, lifecycleSignal),
+    lifecycleSignal,
+  );
   const profile = runtime.profile;
   if (profile.owner_account !== opts.ownerAccount || profile.handle !== opts.handle) {
     throw new Error(`profile token mismatch: requested ${opts.ownerAccount}/${opts.handle}, got ${profile.owner_account}/${profile.handle}`);
   }
-  const running = new Map<string, Promise<number>>();
-  const terminalChannels = new Set<string>();
   out(`serving project agent ${profile.owner_account}/${profile.handle} — runner=${profile.runner}`);
 
-  const startInvite = async (invite: ChannelProjectAgentInvite) => {
+  const attachInvite = async (invite: ChannelProjectAgentInvite) => {
+    if (lifecycleSignal.aborted) throw lifecycleSignal.reason;
     const channel = invite.channel_slug;
     if (running.has(channel) || terminalChannels.has(channel)) return;
     const child: ProjectAgentChannelRuntime = await ensureChannelRuntime(
@@ -2202,7 +2278,9 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       profile.owner_account,
       profile.handle,
       projectAgentChildName(profile.handle, channel),
+      lifecycleSignal,
     );
+    if (lifecycleSignal.aborted) throw lifecycleSignal.reason;
     if (child.owner !== profile.owner_account || child.channel_scope !== channel) {
       throw new Error(
         `profile child identity mismatch for #${channel}: owner=${child.owner} scope=${child.channel_scope}`,
@@ -2216,7 +2294,9 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       channel,
       child,
       runGit: opts.runGit,
+      signal: lifecycleSignal,
     });
+    if (lifecycleSignal.aborted) throw lifecycleSignal.reason;
     const ctx = profileContext(profile, prepared);
     // The resident profile daemon is authenticated as the owner/runtime token,
     // while each invited channel has a distinct least-privilege child token.
@@ -2254,7 +2334,8 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       refreshAvailableUpgrade: sharedRefreshAvailableUpgrade,
       upgradeProbeIntervalMs,
       runnerTimeoutMs: opts.runnerTimeoutMs,
-      advertise: async () => {
+      signal: lifecycleSignal,
+      advertise: async (signal) => {
         const note = projectAgentReadyNote(profile, channel, prepared);
         await post(opts.server, child.token, channel, {
           kind: "status",
@@ -2268,15 +2349,15 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
             workspace_label: `${profile.owner_account}/${profile.handle}`,
             worktree_label: `${child.name}:${profile.worktree_strategy}:${profile.base_branch}`,
           },
-        });
+        }, signal);
         await post(opts.server, child.token, channel, {
           kind: "message",
           body: `${profile.name || profile.handle} joined #${channel} as front agent ${child.name}; workers should spawn under team ${profile.handle}. ${note}`,
           mentions: [],
           reply_to: null,
-        });
+        }, signal);
       },
-      fetchCharter: () => fetchChannelCharter(opts.server, child.token, channel),
+      fetchCharter: (signal) => fetchChannelCharter(opts.server, child.token, channel, signal),
       builtinRunner: profile.runner === "codex" || profile.runner === "claude"
         ? {
             server: opts.server,
@@ -2318,7 +2399,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
         });
       },
       maxRestarts: opts.once ? 0 : undefined,
-      sleep,
+      sleep: abortableSleep,
       onLifecycle: (line) => out(`profile child #${channel}: ${line}`),
     })
       .then((code) => {
@@ -2329,6 +2410,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
         return code;
       })
       .catch((error) => {
+        if (error instanceof ServeShutdownError) return error.exitCode;
         // Never leave a rejected child promise unobserved; the invite poll may attach it again.
         out(`profile child #${channel} crashed: ${errText(error)} (will retry next poll)`);
         return EXIT_STREAM_ENDED;
@@ -2336,6 +2418,20 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       .finally(() => running.delete(channel));
     running.set(channel, promise);
     out(`attached project agent ${profile.owner_account}/${profile.handle} to #${channel}`);
+  };
+
+  const startInvite = (invite: ChannelProjectAgentInvite): Promise<void> => {
+    const channel = invite.channel_slug;
+    const current = attaching.get(channel);
+    if (current !== undefined) return current;
+    if (running.has(channel) || terminalChannels.has(channel)) return Promise.resolve();
+    const attach = attachInvite(invite);
+    attaching.set(channel, attach);
+    const clear = () => {
+      if (attaching.get(channel) === attach) attaching.delete(channel);
+    };
+    void attach.then(clear, clear);
+    return attach;
   };
 
   // 控制面必须比数据面更耐操（#115）：一次 DNS 抖动 / 5xx / 单频道 clone 失败，都不该
@@ -2346,31 +2442,52 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
 
   for (;;) {
     try {
-      const invites = await listInvites(opts.server, runtime.token, opts.handle);
+      const invites = await awaitWithAbort(
+        listInvites(opts.server, runtime.token, opts.handle, lifecycleSignal),
+        lifecycleSignal,
+      );
       // 单个 invite 起不来（clone 失败、token 铸不出）不连坐其它频道
       for (const invite of invites) {
         try {
-          await startInvite(invite);
+          await awaitWithAbort(startInvite(invite), lifecycleSignal);
         } catch (err) {
+          if (lifecycleSignal.aborted) throw lifecycleSignal.reason;
           out(`failed to attach #${invite.channel_slug}: ${errText(err)} (will retry next poll)`);
         }
       }
       consecutiveFailures = 0;
     } catch (err) {
+      if (lifecycleSignal.aborted) throw lifecycleSignal.reason;
       // 401/403 是终局：token 被撤或无权，重试只会刷日志（同 watch 的 EXIT_AUTH 语义）
       if (err instanceof RestError && (err.status === 401 || err.status === 403)) throw err;
       consecutiveFailures += 1;
       const backoff = Math.min(basePollMs * 2 ** (consecutiveFailures - 1), maxBackoffMs);
       out(`invite poll failed (${consecutiveFailures}x): ${errText(err)}; retrying in ${Math.round(backoff / 1000)}s`);
       if (opts.once) throw err;
-      await sleep(backoff);
+      await abortableSleep(backoff);
       continue;
     }
     if (opts.once) {
       await Promise.all([...running.values()]);
       return 0;
     }
-    await sleep(basePollMs);
+    await abortableSleep(basePollMs);
+  }
+  } catch (error) {
+    if (!lifecycleSignal.aborted) lifecycleController.abort(error);
+    // An attach can cross the abort edge while it is minting a child or terminating a detached git
+    // process. Wait for those barriers first; only then snapshot child serves, because a finishing
+    // attach may have inserted a new child into `running` immediately before it observed the abort.
+    await Promise.allSettled([...attaching.values()]);
+    await Promise.allSettled([...running.values()]);
+    if (lifecycleSignal.reason instanceof ServeShutdownError) {
+      return lifecycleSignal.reason.exitCode;
+    }
+    throw error;
+  } finally {
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onTerminate);
+    opts.signal?.removeEventListener("abort", onInheritedAbort);
   }
 }
 
@@ -2415,13 +2532,17 @@ export async function confirmDeliveryUpdate(
   update: DeliveryUpdateFrame,
   timeoutMs = DELIVERY_UPDATE_ACK_TIMEOUT_MS,
 ): Promise<PublicDirectedDelivery> {
-  if (!conn.send(update)) throw new Error("websocket is not open");
+  const requestId = randomUUID();
+  const existingErrors = new Set(conn.pendingFrames().filter((frame) => frame.type === "error"));
+  if (!conn.send({ ...update, request_id: requestId })) throw new Error("websocket is not open");
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const pending = conn.pendingFrames();
     const ack = [...pending].reverse().find(
       (frame): frame is Extract<ServerFrame, { type: "delivery_state" }> =>
-        frame.type === "delivery_state" && frame.delivery.id === update.delivery_id,
+        frame.type === "delivery_state" &&
+        frame.request_id === requestId &&
+        frame.delivery.id === update.delivery_id,
     );
     if (ack !== undefined) {
       if (ack.delivery.state === update.state) return ack.delivery;
@@ -2434,7 +2555,8 @@ export async function confirmDeliveryUpdate(
       }
     }
     const error = [...pending].reverse().find(
-      (frame): frame is Extract<ServerFrame, { type: "error" }> => frame.type === "error",
+      (frame): frame is Extract<ServerFrame, { type: "error" }> =>
+        frame.type === "error" && !existingErrors.has(frame),
     );
     if (error !== undefined) throw new Error(`${error.code}: ${error.message}`);
     if (Date.now() >= deadline) throw new Error(`delivery update acknowledgement timed out after ${timeoutMs}ms`);
@@ -2498,7 +2620,8 @@ export async function runWithRunnerTimeout(
 }
 
 export async function runServe(o: ServeOptions): Promise<number> {
-  const out = o.out ?? ((line: string) => console.error(line));
+  const rawOut = o.out ?? ((line: string) => console.error(line));
+  const out = (line: string) => rawOut(terminalOutput(line));
   // busy 生命周期（#103）：只有内建 serve runner（builtin/sdk）在 working 帧里自报 busy=true，
   // 因此也只有它们需要 runServe 在收尾时补一条「busy=false 空闲」把 busy 清干净。注入 runCommand
   // 的测试、以及 --cmd 裸执行器（自管 presence）不参与，避免覆盖它们自己的收尾状态。
@@ -2568,18 +2691,29 @@ export async function runServe(o: ServeOptions): Promise<number> {
   }
   const lifecycleController = new AbortController();
   let shutdownError: ServeShutdownError | null = null;
-  const requestShutdown = (signal: "SIGINT" | "SIGTERM") => {
+  const requestShutdown = (error: ServeShutdownError) => {
     if (shutdownError !== null) return;
-    shutdownError = new ServeShutdownError(signal);
+    shutdownError = error;
     lifecycleController.abort(shutdownError);
     // Wake an idle frame iterator. Active runners observe the same signal and finish their
     // process-group TERM -> KILL barrier before runServe reaches its finally block.
     conn.close();
   };
-  const onInterrupt = () => requestShutdown("SIGINT");
-  const onTerminate = () => requestShutdown("SIGTERM");
-  process.once("SIGINT", onInterrupt);
-  process.once("SIGTERM", onTerminate);
+  const onInterrupt = () => requestShutdown(new ServeShutdownError("SIGINT"));
+  const onTerminate = () => requestShutdown(new ServeShutdownError("SIGTERM"));
+  const onInheritedAbort = () => {
+    const reason = o.signal?.reason;
+    requestShutdown(
+      reason instanceof ServeShutdownError ? reason : new ServeShutdownError("SIGTERM"),
+    );
+  };
+  if (o.signal === undefined) {
+    process.on("SIGINT", onInterrupt);
+    process.on("SIGTERM", onTerminate);
+  } else {
+    o.signal.addEventListener("abort", onInheritedAbort, { once: true });
+    if (o.signal.aborted) onInheritedAbort();
+  }
   // issue #522：runner 的模型 session 是可恢复句柄，不是 websocket session。连接建立后把它作为
   // presence-only 元数据自报；每次 runner 冷起/续会并刷新本地 wake-session.json 后再覆盖一次。
   const reportAgentSession = (session: AgentSessionInfo) => {
@@ -2661,30 +2795,36 @@ export async function runServe(o: ServeOptions): Promise<number> {
     if (!o.fetchCharter) return;
     if (expectedRev !== undefined && charter !== null && charter.charter_rev >= expectedRev) return;
     try {
-      charter = await o.fetchCharter();
+      charter = await awaitWithAbort(
+        o.fetchCharter(lifecycleController.signal),
+        lifecycleController.signal,
+      );
     } catch (e) {
+      if (lifecycleController.signal.aborted) throw lifecycleController.signal.reason;
       out(`  charter 刷新失败（${reason}）: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
-  await refreshCharter("attach");
   // 触发消息之前的最近频道消息（滚动窗口），随 context file 递给 runner
   const recent: MsgFrame[] = [];
-  out(
-    `serving #${o.channel} — 每条${o.mentionsOnly ? " @你 的" : ""}消息触发一次命令（Ctrl-C 停）`,
-  );
   // Heartbeat on a clock, not only on traffic — see watch.ts; a quiet channel
   // must not read as "listener down" on status bars.
   let heartbeat: ReturnType<typeof setInterval> | null = null;
-  if (o.statusline === true) {
-    heartbeat = setInterval(() => {
-      bestEffortLocalState(() => writeStatuslineCache({
-          ...localStatuslineBase(o.channel),
-          ...heartbeatPatch("serve", Date.now(), { mentionsOnly: o.mentionsOnly }),
-        }));
-    }, 60_000);
-    if (typeof heartbeat.unref === "function") heartbeat.unref();
-  }
   try {
+    // Initial control-plane work belongs to the same lifecycle as the frame loop. If SIGTERM lands
+    // here, the shared finally below must still release the socket, lock, listeners and context dir.
+    await refreshCharter("attach");
+    out(
+      `serving #${o.channel} — 每条${o.mentionsOnly ? " @你 的" : ""}消息触发一次命令（Ctrl-C 停）`,
+    );
+    if (o.statusline === true) {
+      heartbeat = setInterval(() => {
+        bestEffortLocalState(() => writeStatuslineCache({
+            ...localStatuslineBase(o.channel),
+            ...heartbeatPatch("serve", Date.now(), { mentionsOnly: o.mentionsOnly }),
+          }));
+      }, 60_000);
+      if (typeof heartbeat.unref === "function") heartbeat.unref();
+    }
     frameLoop: for await (const incoming of conn.frames) {
       const directedDelivery = incoming.type === "delivery" ? incoming.delivery : null;
       const frame = incoming.type === "delivery" ? incoming.message : incoming;
@@ -2742,15 +2882,21 @@ export async function runServe(o: ServeOptions): Promise<number> {
         if (!advertised) {
           advertised = true;
           try {
-            await o.advertise?.();
+            if (o.advertise !== undefined) {
+              await awaitWithAbort(
+                o.advertise(lifecycleController.signal),
+                lifecycleController.signal,
+              );
+            }
           } catch (e) {
+            if (lifecycleController.signal.aborted) throw lifecycleController.signal.reason;
             out(`  wake 能力声明失败（不影响服务，可稍后手动 party status 声明）: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
         continue;
       }
       if (frame.type === "error") {
-        console.error(`error: ${frame.code} ${frame.message}`);
+        console.error(terminalOutput(`error: ${frame.code} ${frame.message}`));
         code =
           frame.code === "unauthorized"
             ? EXIT_AUTH
@@ -3271,6 +3417,16 @@ export async function runServe(o: ServeOptions): Promise<number> {
         out(`serve: 磁盘已装 party v${up.pending}（当前跑的是旧版）——重启 serve 或加 --auto-upgrade 以采用`);
       }
     }
+  } catch (error) {
+    if (error instanceof ServeShutdownError) {
+      shutdownError = error;
+    } else if (lifecycleController.signal.aborted) {
+      shutdownError = lifecycleController.signal.reason instanceof ServeShutdownError
+        ? lifecycleController.signal.reason
+        : new ServeShutdownError("SIGTERM");
+    } else {
+      throw error;
+    }
   } finally {
     // 私有目录里躺着 charter / recent 正文。失败的唤醒把它留到本次排查结束，
     // 但绝不在进程退出后继续留在共享 tmpdir 里（#208 门禁 P2）。
@@ -3279,6 +3435,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
     if (heartbeat) clearInterval(heartbeat);
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onTerminate);
+    o.signal?.removeEventListener("abort", onInheritedAbort);
     if (!lifecycleController.signal.aborted) {
       lifecycleController.abort(new ServeShutdownError("SIGTERM"));
     }
@@ -3517,7 +3674,7 @@ export async function run(argv: string[]): Promise<number> {
       return 1;
     }
     const availableUpgrade = await resolveAvailableUpgrade(account.session.server);
-    if (availableUpgrade !== null) console.error(`serve: ${availableUpgrade.message}\n  ${availableUpgrade.command}`);
+    if (availableUpgrade !== null) console.error(terminalOutput(`serve: ${availableUpgrade.message}\n  ${availableUpgrade.command}`));
     return runProfileServe({
       server: account.session.server,
       humanToken: account.token,
@@ -3556,7 +3713,7 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
   const availableUpgrade = await resolveAvailableUpgrade(server);
-  if (availableUpgrade !== null) console.error(`serve: ${availableUpgrade.message}\n  ${availableUpgrade.command}`);
+  if (availableUpgrade !== null) console.error(terminalOutput(`serve: ${availableUpgrade.message}\n  ${availableUpgrade.command}`));
   const explicitRunnerWorkdir = str(flags.workdir);
   let runnerWorkdirPath = explicitRunnerWorkdir === undefined
     ? null
@@ -3568,7 +3725,7 @@ export async function run(argv: string[]): Promise<number> {
   try {
     const initialBoundary = await verifyServeIdentityBoundary(server, auth, identityState);
     if (!initialBoundary.ok) {
-      console.error(initialBoundary.reason);
+      console.error(terminalOutput(initialBoundary.reason));
       return initialBoundary.code;
     }
     if (runnerWorkdirPath === null) {
@@ -3582,7 +3739,7 @@ export async function run(argv: string[]): Promise<number> {
   const lifecycle = (line: string) => {
     const record = `${new Date().toISOString()} ${line}`;
     if (runnerWorkdirPath !== null) appendServeLifecycleLog(runnerWorkdirPath, record);
-    console.error(`serve supervisor: ${line}`);
+    console.error(terminalOutput(`serve supervisor: ${line}`));
   };
   return superviseServe({
     onLifecycle: lifecycle,
@@ -3597,7 +3754,7 @@ export async function run(argv: string[]): Promise<number> {
       // rotation is safe only inside that boundary; config switching must start a new serve process.
       const boundary = await verifyServeIdentityBoundary(server, currentAuth, identityState);
       if (!boundary.ok) {
-        console.error(`${boundary.reason}; exiting`);
+        console.error(terminalOutput(`${boundary.reason}; exiting`));
         return boundary.code;
       }
       const currentRunnerWorkdir = runnerWorkdirPath ?? defaultRunnerWorkdir(channel, boundary.namespace);
@@ -3619,8 +3776,8 @@ export async function run(argv: string[]): Promise<number> {
         onWelcome: () => { firstAttach = false; },
         onCursor: (c) => saveCursor(channel, c),
         onRevCursor: (r) => saveRevCursor(channel, r),
-        advertise: () => advertiseServeWake(currentAuth, channel),
-        fetchCharter: () => fetchChannelCharter(currentServer, currentToken, channel),
+        advertise: (signal) => advertiseServeWake(currentAuth, channel, signal),
+        fetchCharter: (signal) => fetchChannelCharter(currentServer, currentToken, channel, signal),
         autoUpgrade: flags["auto-upgrade"] === true,
         availableUpgrade,
         refreshAvailableUpgrade: (current) => resolveAvailableUpgrade(currentServer, current),

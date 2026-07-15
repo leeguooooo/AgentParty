@@ -2668,6 +2668,13 @@ export function ChannelPage({
   const charterRevRef = useRef(0);
   oldestSeqRef.current = state.messages.length > 0 ? state.messages[0]!.seq : 0;
   charterRevRef.current = charter?.charter_rev ?? 0;
+  // 发送、编辑和草稿状态条必须使用同一份最终补全候选。否则中文紧邻正文
+  // （例如“请@小明看一下”）会在预览中解析正确，提交时却把正文后缀吞进目标名。
+  const mentionOptions = useMemo(
+    () => mentionCandidates(state.participants, state.presence, state.self, teamNow, channelIdentities, channelRoles, channelSquads, Object.values(state.mentionSenders)),
+    [channelIdentities, channelRoles, channelSquads, state.mentionSenders, state.participants, state.presence, state.self, teamNow],
+  );
+  const mentionNames = useMemo(() => mentionOptions.map((candidate) => candidate.name), [mentionOptions]);
 
   const loadCharter = useCallback(() => {
     return fetchChannelCharter(token, slug)
@@ -3299,7 +3306,7 @@ export function ChannelPage({
     // 有附件时允许空正文（纯图片/文件消息）
     if (body === "" && attachments.length === 0) return;
     // 与草稿 chips / 服务端 BODY_MENTION_RE 同一份语义：@ 前须行首或非标识符字符，不吃 email 里的 @
-    const mentions = parseDraftMentions(body);
+    const mentions = parseDraftMentions(body, mentionNames);
     const ok =
       sockRef.current?.send({
         type: "send",
@@ -3319,7 +3326,7 @@ export function ChannelPage({
     } else {
       dispatch({ type: "send_failed", message: tRef.current("Channel.error.sendNotConnected") });
     }
-  }, [draft, replyTo, attachments, uploads]);
+  }, [draft, replyTo, attachments, uploads, mentionNames]);
 
   // 单文件上传：先落一条 uploading 态，成功转入 attachments、失败转 error 态（可重试）。
   const runUpload = useCallback(
@@ -3698,7 +3705,7 @@ export function ChannelPage({
     setEditSaving(true);
     setMessageActionBusySeq(editingSeq);
     setMessageActionError(null);
-    const mentions = parseDraftMentions(editDraft);
+    const mentions = parseDraftMentions(editDraft, mentionNames);
     reviseMessage(slug, editingSeq, "edit", { body: editDraft, mentions })
       .then(({ message }) => {
         dispatch({ type: "frame", frame: message });
@@ -3716,7 +3723,7 @@ export function ChannelPage({
         setEditSaving(false);
         setMessageActionBusySeq((current) => (current === editingSeq ? null : current));
       });
-  }, [editDraft, editSaving, editingMessage, editingSeq, slug, t]);
+  }, [editDraft, editSaving, editingMessage, editingSeq, mentionNames, slug, t]);
 
   const retractMessage = useCallback((seq: number) => {
     if (messageActionBusySeq !== null) return;
@@ -3809,11 +3816,6 @@ export function ChannelPage({
     () => buildHostBoard(slug, Object.values(state.presence), state.messages, tasks, teamNow, { loopGuardActive: state.loopGuard !== null }),
     [slug, state.loopGuard, state.messages, state.presence, tasks, teamNow],
   );
-  // @ 补全候选：participants ∪ presence，分档（在线/可唤醒/最近）。teamNow 30s 刷新驱动 stale 判定。
-  const mentionOptions = useMemo(
-    () => mentionCandidates(state.participants, state.presence, state.self, teamNow, channelIdentities, channelRoles, channelSquads, Object.values(state.mentionSenders)),
-    [channelIdentities, channelRoles, channelSquads, state.mentionSenders, state.participants, state.presence, state.self, teamNow],
-  );
   const identityDisplay = useMemo(
     () =>
       buildIdentityDisplay({
@@ -3865,13 +3867,13 @@ export function ChannelPage({
   const draftMentionStatuses = useMemo<DraftMentionStatus[]>(() => {
     // 以补全菜单的最终结果为唯一身份集合：消息 sender、handle 与 squad 都不会再和状态条各算一套。
     const known = new Map(mentionOptions.map((candidate) => [candidate.name, candidate]));
-    return parseDraftMentions(draft, mentionOptions.map((candidate) => candidate.name))
+    return parseDraftMentions(draft, mentionNames)
       .filter((name) => known.has(name) && name !== state.self)
       .map((name) => {
         const candidate = known.get(name)!;
         return { name, display: candidate.display, tier: candidate.tier, wakeKind: candidate.wakeKind ?? null };
       });
-  }, [draft, mentionOptions, state.self]);
+  }, [draft, mentionNames, mentionOptions, state.self]);
   // 轮询 @ 唤醒台账（仅 webhook 侧有行；serve/watch 靠 presence + 回复链接补齐）。用 ref 保持 7s 稳定
   // 间隔，不因每条新消息重挂定时器；标签页隐藏或频道无 agent @ 时跳过，端点失败也不影响其余回执渲染。
   const messagesRef = useRef(state.messages);

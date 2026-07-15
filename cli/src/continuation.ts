@@ -72,6 +72,12 @@ function isSqliteBusy(error: unknown): boolean {
     (typeof body.message === "string" && /database is (?:locked|busy)/i.test(body.message));
 }
 
+function isUnsupportedDirectoryFsync(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "ENOSYS";
+}
+
 /** Cross-process serialization for continuation read-modify-rename transactions. */
 export function withRunnerContinuationLock<T>(
   path: string,
@@ -133,8 +139,10 @@ function writeRunnerContinuationUnlocked(path: string, state: RunnerContinuation
     try {
       directoryFd = openSync(directory, "r");
       fsyncSync(directoryFd);
-    } catch {
-      // Unsupported by this filesystem.
+    } catch (error) {
+      // Some platforms/filesystems do not support fsync on a directory descriptor. Only that
+      // explicit capability gap is safe to ignore; ENOSPC/EIO/EACCES must fail the commit.
+      if (!isUnsupportedDirectoryFsync(error)) throw error;
     } finally {
       if (directoryFd !== null) closeSync(directoryFd);
     }
