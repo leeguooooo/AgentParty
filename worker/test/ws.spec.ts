@@ -95,12 +95,16 @@ describe("websocket", () => {
     await seedToken("agent", "agent-a");
     const nicknameTarget = await seedToken("agent");
     const unicodeCaseTarget = await seedToken("agent");
+    const asciiCaseTarget = await seedToken("agent");
     await env.DB.prepare(
       "INSERT INTO agent_nicknames (name, nickname, created_at, updated_at) VALUES (?, ?, ?, ?)",
     ).bind(nicknameTarget.name, "程序员小明", Date.now(), Date.now()).run();
     await env.DB.prepare(
       "INSERT INTO agent_nicknames (name, nickname, created_at, updated_at) VALUES (?, ?, ?, ?)",
     ).bind(unicodeCaseTarget.name, "Éclair", Date.now(), Date.now()).run();
+    await env.DB.prepare(
+      "INSERT INTO agent_nicknames (name, nickname, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    ).bind(asciiCaseTarget.name, "CaseNick", Date.now(), Date.now()).run();
     await env.DB.prepare(
       `INSERT INTO account_profiles (account, handle, created_at, updated_at, display_name)
        VALUES (?, ?, ?, ?, ?)`,
@@ -146,6 +150,9 @@ describe("websocket", () => {
       code: "bad_request",
       message: "unknown mention @éclair",
     });
+    ws.send({ type: "send", kind: "message", body: "请 @casenick 确认", mentions: [], reply_to: null });
+    await ws.nextOfType("sent");
+    expect((await ws.nextOfType("msg")).mentions).toEqual([asciiCaseTarget.name]);
 
     await seedToken("agent", "collision552");
     const ambiguousTarget = await seedToken("agent");

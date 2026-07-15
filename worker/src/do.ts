@@ -3969,6 +3969,18 @@ export class ChannelDO extends Server<Env> {
     const candidates = mentions.filter((t) => t.length <= 64);
     if (candidates.length === 0) return { frame };
     const placeholders = candidates.map(() => "?").join(", ");
+    const asciiCandidates = candidates.filter((candidate) => /^[A-Za-z0-9._-]+$/.test(candidate));
+    const unicodeCandidates = candidates.filter((candidate) => !/^[A-Za-z0-9._-]+$/.test(candidate));
+    const aliasExactClause = (column: "nickname" | "display_name") => {
+      const clauses: string[] = [];
+      if (asciiCandidates.length > 0) {
+        clauses.push(`${column} COLLATE NOCASE IN (${asciiCandidates.map(() => "?").join(", ")})`);
+      }
+      if (unicodeCandidates.length > 0) {
+        clauses.push(`${column} IN (${unicodeCandidates.map(() => "?").join(", ")})`);
+      }
+      return clauses.join(" OR ");
+    };
     // Pure-CJK aliases have no lexical boundary before following prose
     // (`请@小明看一下`). Load aliases that are prefixes of the raw token; the
     // resolver below applies longest-match and still fails closed on ties.
@@ -3993,8 +4005,8 @@ export class ChannelDO extends Server<Env> {
         ).bind(...candidates).all<AliasRow>(),
         this.env.DB.prepare(
           `SELECT name AS target, nickname AS alias FROM agent_nicknames
-            WHERE nickname IN (${placeholders})${nicknamePrefixClause}`,
-        ).bind(...candidates, ...cjkPrefixCandidates).all<AliasRow>(),
+            WHERE ${aliasExactClause("nickname")}${nicknamePrefixClause}`,
+        ).bind(...asciiCandidates, ...unicodeCandidates, ...cjkPrefixCandidates).all<AliasRow>(),
         this.env.DB.prepare(
           `SELECT handle AS target, handle AS alias FROM account_profiles
             WHERE handle COLLATE NOCASE IN (${placeholders})`,
@@ -4002,8 +4014,8 @@ export class ChannelDO extends Server<Env> {
         this.env.DB.prepare(
           `SELECT handle AS target, display_name AS alias FROM account_profiles
             WHERE display_name IS NOT NULL
-              AND (display_name IN (${placeholders})${displayNamePrefixClause})`,
-        ).bind(...candidates, ...cjkPrefixCandidates).all<AliasRow>(),
+              AND (${aliasExactClause("display_name")}${displayNamePrefixClause})`,
+        ).bind(...asciiCandidates, ...unicodeCandidates, ...cjkPrefixCandidates).all<AliasRow>(),
         this.env.DB.prepare(
           `SELECT name AS target, name AS alias FROM channel_squads
             WHERE channel_slug = ? AND name COLLATE NOCASE IN (${placeholders})`,
