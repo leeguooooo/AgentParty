@@ -60,6 +60,7 @@ export function AgentDetailModal({ name, display, kind, owner, online, presence,
   const role = presence?.role ?? null;
   const reportsTo = presence?.lineage?.parent_agent ?? null;
   const clientVersion = presence?.client_version ?? null;
+  const agentSession = presence?.agent_session ?? null;
 
   return (
     <div className="channel-panel-overlay agent-detail-overlay" role="dialog" aria-modal="true" aria-label={t("AgentDetailModal.title", { name: display })}>
@@ -169,6 +170,20 @@ export function AgentDetailModal({ name, display, kind, owner, online, presence,
                   <dt>{t("AgentDetailModal.clientVersion")}</dt>
                   <dd className="t-mono">v{clientVersion}</dd>
                 </div>
+              )}
+              {agentSession !== null && (
+                <>
+                  <div className="agent-detail-fact">
+                    <dt>{t("AgentDetailModal.session")}</dt>
+                    <dd className="t-mono">{agentSession.harness}:{agentSession.session_id}</dd>
+                  </div>
+                  {agentSession.cwd !== undefined && (
+                    <div className="agent-detail-fact">
+                      <dt>{t("AgentDetailModal.sessionCwd")}</dt>
+                      <dd className="t-mono">{agentSession.cwd}</dd>
+                    </div>
+                  )}
+                </>
               )}
             </dl>
           </section>

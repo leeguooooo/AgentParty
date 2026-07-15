@@ -99,7 +99,7 @@ describe("AgentDetailModal (#272)", () => {
     return { name: "worker-a", state: "working", note: null, ts: 1, kind: "agent", ...overrides };
   }
 
-  test("renders the agent's presence fields: state, busy/queue, current task, paused, wake", () => {
+  test("renders the agent's presence fields: state, busy/queue, current task, paused, wake, resume session", () => {
     const root = render({
       name: "worker-a",
       display: "worker-a",
@@ -114,6 +114,12 @@ describe("AgentDetailModal (#272)", () => {
         paused: true,
         wake: { kind: "serve" },
         residency: "supervised",
+        agent_session: {
+          harness: "codex",
+          session_id: "019f35d9-0000-7000-8000-000000000522",
+          updated_at: Date.now(),
+          cwd: "/workspace/agentparty",
+        },
       }),
       messages: [],
       onClose: () => {},
@@ -122,6 +128,9 @@ describe("AgentDetailModal (#272)", () => {
     expect(text).toContain("忙碌 · 排队 3 条");
     expect(text).toContain("510");
     expect(text).toContain("已暂停");
+    expect(text).toContain("codex");
+    expect(text).toContain("019f35d9-0000-7000-8000-000000000522");
+    expect(text).toContain("/workspace/agentparty");
   });
 
   test("history section lists only that agent's messages", () => {

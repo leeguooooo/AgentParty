@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { PresenceEntry } from "@agentparty/shared";
-import { busyNote, classify, identityNote, taskNote, terminalIdentityText } from "../src/commands/who";
+import { busyNote, classify, identityNote, sessionNote, taskNote, terminalIdentityText } from "../src/commands/who";
 
 const NOW = 1_000_000_000;
 
@@ -189,6 +189,27 @@ describe("who 身份分层（#110：who --json 不再对 presence 已有的身�
 
   test("terminalIdentityText：控制字符变空格，并折叠多余空白", () => {
     expect(terminalIdentityText(" a\n\tb\u001b[31m\u009bc\u007f\u0085 ")).toBe("a b [31m c");
+  });
+});
+
+describe("who agent session（#522）", () => {
+  test("JSON 保留完整 resume 信息，终端行显示可直接复用的 harness + session id", () => {
+    const r = classify(p({
+      name: "resume-agent",
+      agent_session: {
+        harness: "codex",
+        session_id: "019f35d9-0000-7000-8000-000000000522",
+        updated_at: NOW,
+        cwd: "/workspace/agentparty",
+      },
+    }), NOW)!;
+    expect(JSON.parse(JSON.stringify(r)).agent_session).toEqual({
+      harness: "codex",
+      session_id: "019f35d9-0000-7000-8000-000000000522",
+      updated_at: NOW,
+      cwd: "/workspace/agentparty",
+    });
+    expect(sessionNote(r)).toBe(" · session codex:019f35d9-0000-7000-8000-000000000522");
   });
 });
 

@@ -35,7 +35,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/wake/wake_unverified/busy/queue_depth/current_task/task_started_at/heartbeat_at/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/wake/wake_unverified/busy/queue_depth/current_task/task_started_at/heartbeat_at/agent_session/account/handle/display_name/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -74,6 +74,8 @@ interface Row {
   current_task?: number;
   task_started_at?: number;
   heartbeat_at?: number;
+  // runner 自报、worker 持久化的模型会话句柄（#522）；不是 websocket session。
+  agent_session?: PresenceEntry["agent_session"];
 }
 
 // kind 已知取 kind；旧 presence 行没回填时 UUID 名判 human（网页登录会话），其余判 agent。
@@ -132,6 +134,7 @@ export function classify(e: PresenceEntry, now: number): Row | null {
           ...(typeof e.heartbeat_at === "number" ? { heartbeat_at: e.heartbeat_at } : {}),
         }
       : {}),
+    ...(e.agent_session === undefined ? {} : { agent_session: e.agent_session }),
     age_ms: age,
     ...(typeof e.connection_count === "number" && e.connection_count > 1
       ? { connection_count: e.connection_count }
@@ -189,6 +192,14 @@ export function taskNote(r: Row, now: number): string {
   const beat =
     typeof r.heartbeat_at === "number" ? ` · ♥ ${humanAge(Math.max(0, now - r.heartbeat_at))}` : " · ♥ (none)";
   return ` · ▶ seq ${r.current_task}${beat}`;
+}
+
+export function sessionNote(r: Row): string {
+  const session = r.agent_session;
+  if (session === undefined) return "";
+  const harness = terminalIdentityText(session.harness);
+  const id = terminalIdentityText(session.session_id);
+  return harness === "" || id === "" ? "" : ` · session ${harness}:${id}`;
 }
 
 function humanAge(ms: number): string {
@@ -282,7 +293,7 @@ export async function run(argv: string[]): Promise<number> {
           ? ` · ${r.wake_unverified === true ? "unverified" : "verified"}${r.wake ? ` (${r.wake})` : ""}`
           : "";
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${taskNote(r, now)}${wake}${read}${duplicate}${age}`);
+      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${taskNote(r, now)}${sessionNote(r)}${wake}${read}${duplicate}${age}`);
     }
     return 0;
   } catch (e) {

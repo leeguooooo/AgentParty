@@ -33,6 +33,7 @@ import {
   WAKE_BUDGET_MAX_WINDOW_MS,
   WAKE_BUDGET_MIN_WINDOW_MS,
   type AgentLineage,
+  type AgentSessionInfo,
   type Attachment,
   type ErrorCode,
   type AgentContext,
@@ -891,6 +892,8 @@ function parseSendFrame(input: unknown): SendFrame | null {
           ? Math.min(f.queue_depth, 100_000)
           : null;
     if (queueDepth === null) return null;
+    const agentSession = f.agent_session === undefined ? undefined : parseAgentSessionInfo(f.agent_session);
+    if (f.agent_session !== undefined && agentSession === undefined) return null;
     return {
       type: "send",
       kind: "status",
@@ -908,6 +911,7 @@ function parseSendFrame(input: unknown): SendFrame | null {
       ...(workflow !== undefined ? { workflow } : {}),
       ...(busy !== undefined ? { busy } : {}),
       ...(queueDepth !== undefined ? { queue_depth: queueDepth } : {}),
+      ...(agentSession === undefined ? {} : { agent_session: agentSession }),
       ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
     };
   }
@@ -918,6 +922,29 @@ export interface ParsedTaskHeartbeat {
   current_task: number | null;
   task_started_at: number | null;
   heartbeat_at: number | null;
+  agent_session?: AgentSessionInfo;
+}
+
+function parseAgentSessionInfo(input: unknown): AgentSessionInfo | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const value = input as Record<string, unknown>;
+  if (value.harness !== "codex" && value.harness !== "claude" && value.harness !== "codex-sdk") return undefined;
+  if (typeof value.session_id !== "string" || !/^[A-Za-z0-9._:-]{1,256}$/u.test(value.session_id)) return undefined;
+  if (typeof value.updated_at !== "number" || !Number.isSafeInteger(value.updated_at) || value.updated_at < 0) return undefined;
+  const optionalPath = (field: unknown): string | undefined | false => {
+    if (field === undefined) return undefined;
+    return typeof field === "string" && field.length > 0 && field.length <= 2048 ? field : false;
+  };
+  const cwd = optionalPath(value.cwd);
+  const workdir = optionalPath(value.workdir);
+  if (cwd === false || workdir === false) return undefined;
+  return {
+    harness: value.harness,
+    session_id: value.session_id,
+    updated_at: value.updated_at,
+    ...(cwd === undefined ? {} : { cwd }),
+    ...(workdir === undefined ? {} : { workdir }),
+  };
 }
 
 // 每任务心跳帧校验（#228）：三字段要么全是非负整数（活跃任务），要么各自 null（清除）。
@@ -934,7 +961,14 @@ function parseHeartbeatFrame(input: unknown): ParsedTaskHeartbeat | null {
   const started = field(f.task_started_at);
   const heartbeat = field(f.heartbeat_at);
   if (current === undefined || started === undefined || heartbeat === undefined) return null;
-  return { current_task: current, task_started_at: started, heartbeat_at: heartbeat };
+  const agentSession = f.agent_session === undefined ? undefined : parseAgentSessionInfo(f.agent_session);
+  if (f.agent_session !== undefined && agentSession === undefined) return null;
+  return {
+    current_task: current,
+    task_started_at: started,
+    heartbeat_at: heartbeat,
+    ...(agentSession === undefined ? {} : { agent_session: agentSession }),
+  };
 }
 
 async function hmacSha256Hex(secret: string, body: string): Promise<string> {
@@ -1146,6 +1180,7 @@ export class ChannelDO extends Server<Env> {
       kind TEXT,
       account TEXT,
       client_version TEXT,
+      agent_session_json TEXT,
       PRIMARY KEY (name, session_id)
     )`);
     for (const ddl of [
@@ -1171,6 +1206,8 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE presence ADD COLUMN avatar_url TEXT",
       "ALTER TABLE presence ADD COLUMN avatar_thumb TEXT",
       "ALTER TABLE presence ADD COLUMN client_version TEXT",
+      // issue #522：runner 自报的 Codex/Claude 模型会话句柄；与 websocket session_id 不同。
+      "ALTER TABLE presence ADD COLUMN agent_session_json TEXT",
       // 人为「暂停接待」（issue #180）：paused_at 非 NULL 即暂停；paused_resume_at 为定时恢复时刻（epoch ms）。
       "ALTER TABLE presence ADD COLUMN paused_at INTEGER",
       "ALTER TABLE presence ADD COLUMN paused_resume_at INTEGER",
@@ -1391,6 +1428,7 @@ export class ChannelDO extends Server<Env> {
         current_task INTEGER,
         task_started_at INTEGER,
         heartbeat_at INTEGER,
+        agent_session_json TEXT,
         PRIMARY KEY (name, session_id)
       )`);
       sql.exec(`INSERT INTO presence_session_v2 (
@@ -1399,14 +1437,14 @@ export class ChannelDO extends Server<Env> {
         status_decision_json, status_workflow_json, role, role_source, residency, wake_kind,
         wake_verified_at, context_json, lineage_json, kind, account, client_version, handle,
         display_name, avatar_url, avatar_thumb, paused_at, paused_resume_at, busy, queue_depth,
-        current_task, task_started_at, heartbeat_at
+        current_task, task_started_at, heartbeat_at, agent_session_json
       ) SELECT
         name, COALESCE(NULLIF(session_id, ''), '${LEGACY_SESSION_ID}'), state, note, updated_at,
         status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
         status_decision_json, status_workflow_json, role, role_source, residency, wake_kind,
         wake_verified_at, context_json, lineage_json, kind, account, client_version, handle,
         display_name, avatar_url, avatar_thumb, paused_at, paused_resume_at, busy, queue_depth,
-        current_task, task_started_at, heartbeat_at
+        current_task, task_started_at, heartbeat_at, agent_session_json
       FROM presence`);
       sql.exec("DROP TABLE presence");
       sql.exec("ALTER TABLE presence_session_v2 RENAME TO presence");
@@ -2150,7 +2188,7 @@ export class ChannelDO extends Server<Env> {
     if (entry) this.broadcastFrame({ type: "presence", ...entry });
   }
 
-  // 每任务进度/心跳（#228）：只更新 presence 上的 current_task/task_started_at/heartbeat_at 三列，
+  // 每任务进度/心跳（#228）+ runner session 自报（#522）：只更新 presence，不落 history。
   // 不碰 state/note/busy、不落 history（presence-only，不刷屏）。仅当已有这行 presence 时才更新+广播；
   // 从没发过 presence（连 status 都没发）就无从附着，直接忽略。current_task=null 即清除（任务结束）。
   private applyTaskHeartbeat(name: string, sessionId: string, hb: ParsedTaskHeartbeat) {
@@ -2160,10 +2198,13 @@ export class ChannelDO extends Server<Env> {
         .toArray().length > 0;
     if (!exists) return;
     this.ctx.storage.sql.exec(
-      `UPDATE presence SET current_task = ?, task_started_at = ?, heartbeat_at = ? WHERE name = ? AND session_id = ?`,
+      `UPDATE presence SET current_task = ?, task_started_at = ?, heartbeat_at = ?,
+         agent_session_json = COALESCE(?, agent_session_json)
+       WHERE name = ? AND session_id = ?`,
       hb.current_task,
       hb.task_started_at,
       hb.heartbeat_at,
+      hb.agent_session === undefined ? null : JSON.stringify(hb.agent_session),
       name,
       sessionId,
     );
@@ -4159,9 +4200,9 @@ export class ChannelDO extends Server<Env> {
            name, session_id, kind, account, handle, display_name, avatar_url, avatar_thumb,
            state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
            status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at, context_json,
-           lineage_json, busy, queue_depth
+           lineage_json, busy, queue_depth, agent_session_json
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name, session_id) DO UPDATE SET
            kind = excluded.kind,
            account = COALESCE(excluded.account, presence.account),
@@ -4192,7 +4233,8 @@ export class ChannelDO extends Server<Env> {
            context_json = COALESCE(excluded.context_json, presence.context_json),
            lineage_json = excluded.lineage_json,
            busy = excluded.busy,
-           queue_depth = excluded.queue_depth`,
+           queue_depth = excluded.queue_depth,
+           agent_session_json = COALESCE(excluded.agent_session_json, presence.agent_session_json)`,
         identity.name,
         options.sessionId ?? LEGACY_SESSION_ID,
         identity.kind,
@@ -4221,6 +4263,7 @@ export class ChannelDO extends Server<Env> {
         // （waiting/done/blocked 等）自然把 busy 清回 0，这就是「任务结束即清 busy」的落点。
         frame.busy === true ? 1 : 0,
         frame.queue_depth ?? 0,
+        frame.agent_session === undefined ? null : JSON.stringify(frame.agent_session),
         wakeProvided,
         wakeProvided,
       );
@@ -5123,7 +5166,7 @@ export class ChannelDO extends Server<Env> {
                 state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json, paused_at, paused_resume_at, busy, queue_depth,
-                current_task, task_started_at, heartbeat_at`;
+                current_task, task_started_at, heartbeat_at, agent_session_json`;
 
   private presenceList(): PresenceEntry[] {
     const liveCounts = this.liveConnectionCounts();
@@ -5283,6 +5326,15 @@ export class ChannelDO extends Server<Env> {
             ...(r.heartbeat_at === null || r.heartbeat_at === undefined ? {} : { heartbeat_at: Number(r.heartbeat_at) }),
           }
         : {}),
+      ...(() => {
+        if (typeof r.agent_session_json !== "string" || r.agent_session_json === "") return {};
+        try {
+          const session = parseAgentSessionInfo(JSON.parse(r.agent_session_json) as unknown);
+          return session === undefined ? {} : { agent_session: session };
+        } catch {
+          return {};
+        }
+      })(),
     };
   }
 

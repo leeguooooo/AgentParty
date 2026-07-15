@@ -372,6 +372,20 @@ export interface Sender {
   connection_count?: number;
 }
 
+/**
+ * Agent 自报的可恢复模型会话（issue #522）。它是 runner 的 Codex/Claude 会话句柄，
+ * 不是 AgentParty websocket/登录 session。频道 ACL 保护 presence；旧客户端忽略该字段。
+ */
+export interface AgentSessionInfo {
+  harness: "codex" | "claude" | "codex-sdk";
+  session_id: string;
+  updated_at: number;
+  /** 模型进程实际运行目录；恢复时应回到同一目录，避免 resume 到错误项目。 */
+  cwd?: string;
+  /** 持久化 wake-session.json / 隔离 CODEX_HOME 的 runner 目录。 */
+  workdir?: string;
+}
+
 export interface PresenceEntry {
   name: string;
   /** 最近一次有效 CLI hello 上报的 package version；旧客户端或非 CLI 客户端缺失时省略。 */
@@ -445,6 +459,8 @@ export interface PresenceEntry {
    * 心跳还在推进 = 活着，长时间不动 = 卡死。不参与可达性/租约判定。
    */
   heartbeat_at?: number;
+  /** Agent 自报并由频道持久化的模型会话句柄；供重启后精确 resume（issue #522）。 */
+  agent_session?: AgentSessionInfo;
 }
 
 export interface ChannelRoleAssignment {
@@ -647,6 +663,8 @@ export interface SendStatusFrame {
   busy?: boolean;
   /** 当前排在身后、尚未处理的 wake 数（issue #103）。0/缺省 = 无积压。非负整数。 */
   queue_depth?: number;
+  /** Agent 主动上报的可恢复模型会话；适用于非 builtin runner 的交互式 agent（issue #522）。 */
+  agent_session?: AgentSessionInfo;
 }
 
 export type SendFrame = SendMessageFrame | SendStatusFrame;
@@ -677,6 +695,11 @@ export interface HeartbeatFrame {
   task_started_at: number | null;
   /** 本次心跳时刻（epoch ms），周期性推进；随 current_task 一起清空。 */
   heartbeat_at: number | null;
+  /**
+   * 可选的模型会话自报。可与任务心跳同帧，也可在三个任务字段均为 null 时单独上报；
+   * 服务端持久化但不落聊天 history。缺省表示不更新已有会话。
+   */
+  agent_session?: AgentSessionInfo;
 }
 
 // 同名 serve 跨机租约（#99）：一个 serve 连接声明「我是这个 name 的 serve runner，想当唯一在跑的那个」。
@@ -1370,6 +1393,8 @@ export interface PresenceFrame {
   task_started_at?: number;
   /** 当前任务最近心跳；与 current_task 同生共死。 */
   heartbeat_at?: number;
+  /** Agent 自报并由频道持久化的模型会话句柄；供重启后精确 resume（issue #522）。 */
+  agent_session?: AgentSessionInfo;
   /** 同一身份当前活跃连接数。 */
   connection_count?: number;
 }

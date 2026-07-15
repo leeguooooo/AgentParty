@@ -23,6 +23,73 @@ async function presence(slug: string, token: string, name: string): Promise<Pres
 }
 
 describe("same-name websocket session isolation (#363)", () => {
+  it("persists an agent-reported model session in presence for restart resume (#522)", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    const ws = await WsClient.open(slug, agent.token);
+    await ws.nextOfType("welcome");
+    await sendStatus(ws, "waiting", "ready");
+
+    ws.send({
+      type: "heartbeat",
+      current_task: null,
+      task_started_at: null,
+      heartbeat_at: null,
+      agent_session: {
+        harness: "codex",
+        session_id: "019f35d9-0000-7000-8000-000000000522",
+        updated_at: 1_700_000_000_000,
+        cwd: "/workspace/agentparty",
+        workdir: "/home/agent/.agentparty/runners/test",
+      },
+    });
+    await ws.nextOfType("presence");
+
+    expect(await presence(slug, agent.token, agent.name)).toMatchObject({
+      agent_session: {
+        harness: "codex",
+        session_id: "019f35d9-0000-7000-8000-000000000522",
+        updated_at: 1_700_000_000_000,
+        cwd: "/workspace/agentparty",
+        workdir: "/home/agent/.agentparty/runners/test",
+      },
+    });
+
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, async (_instance: ChannelDO, state) => {
+      const row = state.storage.sql
+        .exec("SELECT agent_session_json FROM presence WHERE name = ?", agent.name)
+        .one();
+      expect(JSON.parse(String(row.agent_session_json))).toMatchObject({ harness: "codex" });
+    });
+    ws.close();
+  });
+
+  it("accepts an interactive agent session on a normal status frame (#522)", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    const ws = await WsClient.open(slug, agent.token);
+    await ws.nextOfType("welcome");
+    await sendStatus(ws, "working", "interactive session", {
+      agent_session: {
+        harness: "claude",
+        session_id: "019f35d9-0000-7000-8000-000000000523",
+        updated_at: 1_700_000_000_001,
+        cwd: "/workspace/manual",
+      },
+    });
+
+    expect(await presence(slug, agent.token, agent.name)).toMatchObject({
+      state: "working",
+      agent_session: {
+        harness: "claude",
+        session_id: "019f35d9-0000-7000-8000-000000000523",
+        cwd: "/workspace/manual",
+      },
+    });
+    ws.close();
+  });
+
   it("keeps status, busy, and task state per connection while aggregating the active session", async () => {
     const agent = await seedToken("agent");
     const slug = await createChannel(agent.token);

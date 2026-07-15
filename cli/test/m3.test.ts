@@ -732,6 +732,27 @@ describe("party status/history channel flag", () => {
     expect((req.body as { context: { worktree_label?: string } }).context.worktree_label).toContain(":");
   });
 
+  test("status lets an interactive agent self-report its restart-resume session (#522)", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli([
+      "status", "dev", "working",
+      "--session-harness", "claude",
+      "--session-id", "019f35d9-0000-7000-8000-000000000522",
+      "--session-cwd", "/workspace/agentparty",
+    ]);
+    expect(r.code).toBe(0);
+    const req = reqsOf(mock, "POST", "/api/channels/dev/messages")[0]!;
+    expect(req.body).toMatchObject({
+      agent_session: {
+        harness: "claude",
+        session_id: "019f35d9-0000-7000-8000-000000000522",
+        cwd: "/workspace/agentparty",
+        updated_at: expect.any(Number),
+      },
+    });
+  });
+
   test("status --task scopes the status and updates the task ledger", async () => {
     mock = startRestMock((req) => {
       if (req.method === "PATCH" && req.path === "/api/channels/dev/tasks/12") {

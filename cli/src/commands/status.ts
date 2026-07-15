@@ -1,6 +1,7 @@
 // party status — 发 status 消息（rest）
 import type {
   AgentContext,
+  AgentSessionInfo,
   CollaborationRole,
   HostDecisionKind,
   Residency,
@@ -21,6 +22,7 @@ const STATES: StatusState[] = ["working", "waiting", "blocked", "done"];
 const COLLAB_ROLES: CollaborationRole[] = ["host", "worker", "reviewer", "observer"];
 const RESIDENCIES: Residency[] = ["supervised", "webhook", "bare", "human_driven", "unknown"];
 const WAKE_KINDS: WakeKind[] = ["none", "watch", "serve", "webhook"];
+const SESSION_HARNESSES: AgentSessionInfo["harness"][] = ["codex", "claude", "codex-sdk"];
 const DECISION_KINDS: HostDecisionKind[] = ["decision", "handoff", "takeover"];
 const WORKFLOW_KINDS: WorkflowKind[] = ["pipeline", "parallel", "orchestrator-workers", "evaluator-optimizer"];
 const WORKFLOW_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
@@ -34,6 +36,10 @@ const STATUS_FLAGS = [
   "role",
   "residency",
   "wake-kind",
+  "session-id",
+  "session-harness",
+  "session-cwd",
+  "session-workdir",
   "decision-kind",
   "decision",
   "next",
@@ -63,6 +69,12 @@ Options:
   --role role      collaboration role: host|worker|reviewer|observer
   --residency r    wake residency: supervised|webhook|bare|human_driven|unknown
   --wake-kind k    wake layer kind: none|watch|serve|webhook
+  --session-id id  report the model session id used for restart resume (#522)
+  --session-harness h
+                   model harness: codex|claude|codex-sdk (required with --session-id)
+  --session-cwd dir model working directory; defaults to the current directory
+  --session-workdir dir
+                   runner state directory containing wake-session.json (optional)
   --decision text  structured host decision/handoff note
   --decision-kind k
                    decision type: decision|handoff|takeover
@@ -131,6 +143,10 @@ export async function run(argv: string[]): Promise<number> {
       "role",
       "residency",
       "wake-kind",
+      "session-id",
+      "session-harness",
+      "session-cwd",
+      "session-workdir",
       "decision-kind",
       "decision",
       "next",
@@ -209,6 +225,36 @@ export async function run(argv: string[]): Promise<number> {
     console.error(`--wake-kind must be one of: ${WAKE_KINDS.join("|")}`);
     return 1;
   }
+  const sessionId = str(flags["session-id"]);
+  const sessionHarness = str(flags["session-harness"]);
+  const sessionCwd = str(flags["session-cwd"]);
+  const sessionWorkdir = str(flags["session-workdir"]);
+  const sessionFlagUsed = sessionId !== undefined || sessionHarness !== undefined || sessionCwd !== undefined || sessionWorkdir !== undefined;
+  if (sessionFlagUsed && (sessionId === undefined || sessionHarness === undefined)) {
+    console.error("--session-id and --session-harness are required when reporting a resume session");
+    return 1;
+  }
+  if (sessionId !== undefined && !/^[A-Za-z0-9._:-]{1,256}$/u.test(sessionId)) {
+    console.error("--session-id must be 1-256 safe identifier characters");
+    return 1;
+  }
+  if (sessionHarness !== undefined && !SESSION_HARNESSES.includes(sessionHarness as AgentSessionInfo["harness"])) {
+    console.error(`--session-harness must be one of: ${SESSION_HARNESSES.join("|")}`);
+    return 1;
+  }
+  if ([sessionCwd, sessionWorkdir].some((value) => value !== undefined && (value.length === 0 || value.length > 2048))) {
+    console.error("--session-cwd/--session-workdir must be non-empty and at most 2048 characters");
+    return 1;
+  }
+  const agentSession: AgentSessionInfo | undefined = sessionId === undefined || sessionHarness === undefined
+    ? undefined
+    : {
+        harness: sessionHarness as AgentSessionInfo["harness"],
+        session_id: sessionId,
+        updated_at: Date.now(),
+        cwd: sessionCwd ?? process.cwd(),
+        ...(sessionWorkdir === undefined ? {} : { workdir: sessionWorkdir }),
+      };
   const decisionKind = str(flags["decision-kind"]);
   if (decisionKind !== undefined && !DECISION_KINDS.includes(decisionKind as HostDecisionKind)) {
     console.error(`--decision-kind must be one of: ${DECISION_KINDS.join("|")}`);
@@ -319,6 +365,7 @@ export async function run(argv: string[]): Promise<number> {
       ...(role !== undefined ? { role: role as CollaborationRole } : {}),
       ...(residency !== undefined ? { residency: residency as Residency } : {}),
       ...(wakeKind !== undefined ? { wake: { kind: wakeKind as WakeKind } } : {}),
+      ...(agentSession === undefined ? {} : { agent_session: agentSession }),
       ...(decision !== undefined ? { decision } : {}),
       ...(workflow !== undefined ? { workflow } : {}),
       context: buildContext(auth),

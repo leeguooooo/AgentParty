@@ -265,6 +265,41 @@ describe("runServe", () => {
     expect(beats.lastIndexOf(active[active.length - 1]!)).toBeLessThan(beats.indexOf(clears[0]!));
   });
 
+  test("restart resume: serve reports the persisted runner session on welcome (#522)", async () => {
+    const workdir = tempDir();
+    writeFileSync(join(workdir, "wake-session.json"), JSON.stringify({
+      harness: "codex",
+      session_id: uuid(22),
+      created_at: 1000,
+      last_wake_ts: 2000,
+      wakes: 3,
+      cwd: "/workspace/project",
+      workdir,
+    }));
+    const clientFrames: Array<Record<string, unknown>> = [];
+    server = startMockServer((frame, sock) => {
+      clientFrames.push(frame as unknown as Record<string, unknown>);
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(0, "me"));
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 40);
+    });
+    const o = opts({
+      server: server.url,
+      builtinRunner: { server: server.url, token: "ap_tok", channel: "dev", harness: "codex", workdir },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(clientFrames).toContainEqual(expect.objectContaining({
+      type: "heartbeat",
+      current_task: null,
+      agent_session: expect.objectContaining({
+        harness: "codex",
+        session_id: uuid(22),
+        cwd: "/workspace/project",
+      }),
+    }));
+  });
+
   // runner_started 审计（#228）：presence 心跳不落 history、任务结束即清 —— custom runner 跑完后频道
   // 历史里此前零证据它曾启动。现在 wrap 点补发一条落 history 的 working status「runner started for seq X」。
   test("runner_started audit: custom runner posts an auditable working status to history on start", async () => {
@@ -741,6 +776,7 @@ describe("builtin runner", () => {
     const { post } = postRecorder();
     const workdir = tempDir();
     const calls: string[][] = [];
+    const reported: Array<{ session_id: string; harness: string }> = [];
     const runProcess: RunnerProcess = async (args) => {
       calls.push(args);
       const out = args[args.indexOf("-o") + 1]!;
@@ -759,6 +795,7 @@ describe("builtin runner", () => {
       workdir,
       runProcess,
       post,
+      onSession: (session) => reported.push(session),
     });
 
     await run(triggerFrame(1), runnerCtx());
@@ -766,6 +803,10 @@ describe("builtin runner", () => {
 
     const state = JSON.parse(readFileSync(join(workdir, "wake-session.json"), "utf8"));
     expect(state).toMatchObject({ harness: "codex", session_id: uuid(1), wakes: 2 });
+    expect(reported).toEqual([
+      expect.objectContaining({ harness: "codex", session_id: uuid(1) }),
+      expect.objectContaining({ harness: "codex", session_id: uuid(1) }),
+    ]);
     expect(calls[0]!.slice(0, 2)).toEqual(["codex", "exec"]);
     expect(calls[1]!.slice(0, 4)).toEqual(["codex", "exec", "resume", uuid(1)]);
     const log = readFileSync(join(workdir, "serve-runner.log"), "utf8");
