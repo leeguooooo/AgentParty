@@ -49,6 +49,7 @@ export function mentionMatchKey(value: string): string {
 }
 
 export function extractMentionTokens(text: string, limit: number = MAX_MENTIONS): string[] {
+  if (limit <= 0) return [];
   const out: string[] = [];
   const seen = new Set<string>();
   for (const match of text.matchAll(BODY_MENTION_RE)) {

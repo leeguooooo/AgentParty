@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import type { MsgFrame, PresenceEntry, Sender } from "@agentparty/shared";
+import { extractMentionTokens, type MsgFrame, type PresenceEntry, type Sender } from "@agentparty/shared";
 import { activeMentionQuery, filterCandidates, mentionCandidates, parseDraftMentions } from "./mentions";
 
 const NOW = 1_000_000_000;
+
+test("shared mention lexer respects a zero limit", () => {
+  expect(extractMentionTokens("@alice", 0)).toEqual([]);
+});
 
 function presence(over: Partial<PresenceEntry> & { name: string }): PresenceEntry {
   return { state: "waiting", note: null, ts: NOW, last_seen: NOW, ...over };
