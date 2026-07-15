@@ -273,6 +273,16 @@ afterEach(async () => {
 
 describe("App desktop server pairing behavior", () => {
   test("a restored human session clears a stale desktop watch credential", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    const fetchBeforeRestore = globalThis.fetch;
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: async (input: string | URL | Request, init?: RequestInit) => {
+        const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+        requests.push({ url: String(input), authorization: headers.get("authorization") });
+        return fetchBeforeRestore(input, init);
+      },
+    });
     applyShareToken("stale-watch-token");
     expect(isShareMode()).toBe(true);
 
@@ -286,7 +296,34 @@ describe("App desktop server pairing behavior", () => {
 
     expect(isShareMode()).toBe(false);
     expect(currentShareToken()).toBeNull();
+    expect(requests).toContainEqual({
+      url: `${activeOrigin}/api/channels`,
+      authorization: "Bearer old-access",
+    });
+    expect(requests.some((request) => request.url.includes("stale-watch-token"))).toBe(false);
     expect(renderer!.root.findByProps({ className: "app-settings-btn" })).toBeTruthy();
+  });
+
+  test("a missing restored human credential preserves an active watch session", async () => {
+    storedCredential = null;
+    let credentialReads = 0;
+    const invokeBeforeMissingCredential = invokeHandler;
+    invokeHandler = async (command, args) => {
+      if (command === "desktop_credential_read") credentialReads += 1;
+      return invokeBeforeMissingCredential(command, args);
+    };
+    applyShareToken("stale-watch-token");
+
+    act(() => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+    });
+    await waitForCondition(
+      () => credentialReads === 1,
+      "the desktop restore without a credential",
+    );
+
+    expect(isShareMode()).toBe(true);
+    expect(currentShareToken()).toBe("stale-watch-token");
   });
 
   test("hidden desktop startup defers Keychain restore until the main window is shown", async () => {

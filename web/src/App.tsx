@@ -148,7 +148,7 @@ export function App() {
   // restore is an explicit return to the signed-in human session. Clear both the in-memory and
   // sessionStorage share markers before installing that credential, otherwise ChannelSocket sends
   // the human token through the readonly query-token path while the rest of the app treats it as owner.
-  const activateDesktopHumanSession = useCallback((accessToken: string | null) => {
+  const activateDesktopHumanSession = useCallback((accessToken: string) => {
     clearShareToken();
     setToken(accessToken);
   }, []);
@@ -221,7 +221,7 @@ export function App() {
     setDesktopNotice(null);
     return restoreDesktopAccess(desktopCredentialVaultForOrigin(activeOrigin), activeOrigin)
       .then((accessToken) => {
-        activateDesktopHumanSession(accessToken);
+        if (accessToken !== null) activateDesktopHumanSession(accessToken);
         setDesktopRestoreFailure("retryable");
         setDesktopBoot("ready");
         return accessToken;
@@ -239,7 +239,7 @@ export function App() {
     setDesktopNotice(null);
     return restoreDesktopAccessInteractive(desktopCredentialVaultForOrigin(activeOrigin), activeOrigin)
       .then((accessToken) => {
-        activateDesktopHumanSession(accessToken);
+        if (accessToken !== null) activateDesktopHumanSession(accessToken);
         setDesktopRestoreFailure("retryable");
         setDesktopBoot("ready");
         return accessToken;
@@ -444,7 +444,7 @@ export function App() {
       return await restoreDesktopAccess(desktopCredentialVaultForOrigin(startupOrigin), startupOrigin);
     })().then((accessToken) => {
         if (!alive) return;
-        activateDesktopHumanSession(accessToken);
+        if (accessToken !== null) activateDesktopHumanSession(accessToken);
         setDesktopRestoreFailure("retryable");
         setDesktopBoot("ready");
       })
