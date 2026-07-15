@@ -18,10 +18,12 @@ describe("division agent summary", () => {
   });
 
   test("uses explicit agent identities when stale unknown or human role rows coexist", () => {
-    expect(declaredAgentRoles([
+    const roles = declaredAgentRoles([
       ...screenshotRoles,
       { name: "human", display: "Leo", kind: "human", role: "host" },
-    ]).map((role) => role.name)).not.toContain("lark:on_owner");
+    ]);
+    expect(roles.map((role) => role.name)).not.toContain("lark:on_owner");
+    expect(roles.map((role) => role.name)).not.toContain("human");
   });
 
   test("keeps legacy unknown agent rows when no typed agent identity is available", () => {

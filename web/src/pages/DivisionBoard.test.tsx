@@ -391,8 +391,8 @@ describe("DivisionBoard sync-to-charter (#150)", () => {
     );
     const btn = renderer!.root.find((n) => n.props.className === "d-btn role-sync-charter-btn");
     act(() => btn.props.onClick());
-    expect(synced).toContain("ai-girl-host-codex");
-    expect(synced).toContain("ai-girl");
+    expect(synced).toContain("**ai-girl-host-codex**（未归属 agent）— host");
+    expect(synced).toContain("**ai-girl**（未归属 agent）— worker");
     expect(synced).not.toContain("lark:on_owner");
   });
 
