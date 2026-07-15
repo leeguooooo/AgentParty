@@ -30,6 +30,28 @@ export const ROLE_RESPONSIBILITY_LIMIT = 500;
 // 保留名：不得铸成真实 token。"system" 是 webhook 失败通告的发信名，dispatchWebhooks 靠它跳过投递；
 // 若被铸成真实 token，其消息（含被 @）会静默永不触发 webhook。
 export const RESERVED_NAMES: readonly string[] = ["system"];
+export const MAX_MENTIONS = 50;
+
+// Shared lexer for message bodies and the web composer. ASCII identifiers
+// win the alternation, so `请@agent-a看一下` stops at the Chinese prose after
+// the agent name. Mentions that start in CJK still accept full Unicode
+// nicknames. The left boundary rejects ASCII identifier/email characters but
+// accepts adjacent CJK prose and full-width punctuation.
+const BODY_MENTION_RE =
+  /(^|[^A-Za-z0-9._@-])@(?:([A-Za-z0-9][A-Za-z0-9._-]{0,63})|([\p{L}\p{N}][\p{L}\p{N}._-]{0,63}))/gu;
+
+export function extractMentionTokens(text: string, limit: number = MAX_MENTIONS): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(BODY_MENTION_RE)) {
+    const token = match[2] ?? match[3];
+    if (!token || token === "system" || seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
 export const MAX_WEBHOOK_QUEUE_ROWS = 200;
 export const WEBHOOK_RETRY_BATCH_SIZE = 25;
 // 死信保留上限（#105）：重试耗尽 / 队列满而被永久放弃的投递不再静默丢弃，落死信表待人重投。

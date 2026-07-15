@@ -90,20 +90,56 @@ describe("websocket", () => {
 
   it("extracts @name from the body into mentions (bare send should wake the target)", async () => {
     const { token } = await seedToken("agent");
+    await seedToken("agent", "bob");
+    await seedToken("agent", "carol.dev");
+    await seedToken("agent", "agent-a");
+    const nicknameTarget = await seedToken("agent");
+    await env.DB.prepare(
+      "INSERT INTO agent_nicknames (name, nickname, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    ).bind(nicknameTarget.name, "程序员小明", Date.now(), Date.now()).run();
     const slug = await createChannel(token);
     const ws = await WsClient.open(slug, token);
     await ws.nextOfType("welcome");
     // 正文打 @bob，mentions 数组留空——服务端应把 bob 提取进 mentions
-    ws.send({ type: "send", kind: "message", body: "hey @bob and @carol.dev, ping", mentions: [], reply_to: null });
+    ws.send({ type: "send", kind: "message", body: "hey @BOB and @carol.dev, ping", mentions: [], reply_to: null });
     await ws.nextOfType("sent");
     const echo = await ws.nextOfType("msg");
-    expect(echo.mentions).toContain("bob");
-    expect(echo.mentions).toContain("carol.dev");
+    expect(echo.mentions).toEqual(["bob", "carol.dev"]);
     // email 里的 @ 不算，显式 mention 与正文 @ 去重合并
     ws.send({ type: "send", kind: "message", body: "mail me@x.com about @bob", mentions: ["bob"], reply_to: null });
     await ws.nextOfType("sent");
     const echo2 = await ws.nextOfType("msg");
     expect(echo2.mentions).toEqual(["bob"]); // 去重，且 me@x.com 不误提
+    ws.send({
+      type: "send",
+      kind: "message",
+      body: "请@agent-a看一下，（@程序员小明）也帮忙；a@example.com 不算",
+      mentions: [],
+      reply_to: null,
+    });
+    await ws.nextOfType("sent");
+    const echo3 = await ws.nextOfType("msg");
+    expect(echo3.mentions).toEqual(["agent-a", nicknameTarget.name]);
+
+    await seedToken("agent", "collision552");
+    const ambiguousTarget = await seedToken("agent");
+    await env.DB.prepare(
+      "INSERT INTO agent_nicknames (name, nickname, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    ).bind(ambiguousTarget.name, "collision552", Date.now(), Date.now()).run();
+    ws.send({ type: "send", kind: "message", body: "请@collision552看一下", mentions: [], reply_to: null });
+    expect(await ws.nextOfType("error")).toMatchObject({
+      code: "bad_request",
+      message: "ambiguous mention @collision552",
+    });
+
+    ws.send({ type: "send", kind: "message", body: "请@ghost看一下", mentions: [], reply_to: null });
+    const error = await ws.nextOfType("error");
+    expect(error).toMatchObject({ code: "bad_request", message: "unknown mention @ghost" });
+    ws.send({ type: "send", kind: "message", body: "请 @全体 看一下", mentions: [], reply_to: null });
+    expect(await ws.nextOfType("error")).toMatchObject({
+      code: "bad_request",
+      message: "unsupported mention @全体",
+    });
     ws.close();
   });
 

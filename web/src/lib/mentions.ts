@@ -1,7 +1,7 @@
 // @ 提及候选（issue #39）：把 participants（WS 连着）∪ presence（含 wake 信息）合成一个
 // 分档的候选列表，供 Composer 的 @ 补全下拉用。"可 @" ≠ "在线连接"——本产品最特别的一档是
 // 「可唤醒」：人不在但 @ 了会被 serve/watch/webhook 拉起来。
-import { autoWakeReachable, type ChannelRoleAssignment, type ChannelSquad, type PresenceEntry, type Sender, type WakeKind } from "@agentparty/shared";
+import { autoWakeReachable, extractMentionTokens, type ChannelRoleAssignment, type ChannelSquad, type PresenceEntry, type Sender, type WakeKind } from "@agentparty/shared";
 import { MENTION_SENDER_RETENTION_MS, mergeSenderIdentity, type SenderIdentitySnapshot } from "./senderIdentity";
 
 export type MentionTier = "online" | "wakeable" | "recent";
@@ -199,7 +199,7 @@ export function activeMentionQuery(text: string, caret: number): { start: number
   let i = caret - 1;
   while (i >= 0 && /[\p{L}\p{N}._-]/u.test(text[i]!)) i--;
   if (i < 0 || text[i] !== "@") return null;
-  if (i > 0 && !/\s/.test(text[i - 1]!)) return null; // @ 前不是空白/行首 → 是 email 之类，不触发
+  if (i > 0 && /[A-Za-z0-9._@-]/.test(text[i - 1]!)) return null;
   return { start: i, query: text.slice(i + 1, caret) };
 }
 
@@ -230,21 +230,11 @@ export function mentionLiveness(
   return { tier, wakeKind, reachable: tier === "online" || tier === "wakeable" };
 }
 
-// 从草稿正文里提取 @name（与服务端 BODY_MENTION_RE 一致：@ 前须行首/空白，不吃 email 里的 @）。
+// 从草稿正文里提取 @name（与 shared/server 一致：允许 CJK 正文相邻，不吃 ASCII email 里的 @）。
 // 去重、保序，供发送前状态条渲染。
-// #165：放开为 unicode（含中文昵称）。@ 前的边界字符类同样排除 unicode 字母/数字，@ 前是标识符
-// （含中文）就不当 mention（email/句中 @ 安全）；捕获 token 上界 64（{0,63}）。
-const DRAFT_MENTION_RE = /(^|[^\p{L}\p{N}._@-])@([\p{L}\p{N}][\p{L}\p{N}._-]{0,63})/gu;
+// #165/#552：放开 unicode 昵称；ASCII token 分支优先，避免把紧跟 agent 名的中文正文吞进去。
 export function parseDraftMentions(text: string): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const m of text.matchAll(DRAFT_MENTION_RE)) {
-    const name = m[2]!;
-    if (name === "system" || seen.has(name)) continue;
-    seen.add(name);
-    out.push(name);
-  }
-  return out;
+  return extractMentionTokens(text);
 }
 
 export function filterCandidates(cands: MentionCandidate[], query: string, limit = 8): MentionCandidate[] {

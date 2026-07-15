@@ -1,6 +1,6 @@
 // party send — rest 一次性发消息，成功后推进游标
 import { basename } from "node:path";
-import type { Attachment } from "@agentparty/shared";
+import { extractMentionTokens, type Attachment } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError, type Parsed } from "../args";
 import { advanceCursorPastOwnMessage, resolveChannel, type Config } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
@@ -184,10 +184,19 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
       `note: 正发到绑定频道「${channel}」；若想发到「${positionals[0]}」，用：party send --channel ${positionals[0]} "..."（首个词已被当作正文的一部分）`,
     );
   }
-  const mentions = strArray(flags.mention) ?? [];
-  if (mentions.some((mention) => !isName(mention))) {
+  const explicitMentions = strArray(flags.mention) ?? [];
+  if (explicitMentions.some((mention) => !isName(mention))) {
     console.error("--mention must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");
     return null;
+  }
+  // Keep CLI, Web and Worker on the same body-mention contract. Explicit
+  // --mention values stay first; body tokens are appended in source order.
+  const mentions = [...explicitMentions];
+  const seenMentions = new Set(mentions);
+  for (const mention of extractMentionTokens(text)) {
+    if (seenMentions.has(mention)) continue;
+    seenMentions.add(mention);
+    mentions.push(mention);
   }
   return {
     channel,
