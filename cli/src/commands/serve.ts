@@ -1172,7 +1172,7 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
         harness: "codex-sdk",
         session_id: session.thread_id,
         updated_at: now,
-        ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
+        cwd: session.cwd ?? opts.workdir,
         workdir: opts.workdir,
       });
       // 交付走统一路径：超限正文改走 R2 附件（#109），不再 inline 撞 413。上传失败落进下面的 catch。
@@ -1201,7 +1201,7 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
           harness: "codex-sdk",
           session_id: session.thread_id,
           updated_at: now,
-          ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
+          cwd: session.cwd ?? opts.workdir,
           workdir: opts.workdir,
         });
       }
@@ -1829,6 +1829,18 @@ export async function runServe(o: ServeOptions): Promise<number> {
   // held=false 转 standby（不跑 runner，且保留未确认 wake），held=true（持租/顶替）恢复并重放。
   let hasLease = true;
   let leaseKnown = false; // 是否至少收到过一次 serve_lease（用于只在真 standby 时打印提示）
+  let pendingPersistedSession: AgentSessionInfo | null = null;
+  let persistedSessionFallback: ReturnType<typeof setTimeout> | null = null;
+  const clearPersistedSessionFallback = () => {
+    if (persistedSessionFallback !== null) clearTimeout(persistedSessionFallback);
+    persistedSessionFallback = null;
+  };
+  const reportPendingPersistedSession = () => {
+    if (pendingPersistedSession === null) return;
+    reportAgentSession(pendingPersistedSession);
+    pendingPersistedSession = null;
+    clearPersistedSessionFallback();
+  };
   // standby 收到的最早可唤醒消息。它以及后续帧都不推进 cursor；接管租约时由 Connection
   // 把已消费但未 ack 的帧按 seq 重排到队首，避免持租者中途退出时静默吞掉在飞 wake（#465）。
   let deferredLeaseSeq: number | null = null;
@@ -1871,8 +1883,17 @@ export async function runServe(o: ServeOptions): Promise<number> {
         // 服务端在同名多条 serve 里选唯一持租者并回 serve_lease。老服务端不认识它、直接忽略（hasLease
         // 默认 true → 旧行为）。重连每次 welcome 都重新 claim（连接换了，租约候选身份也换了）。
         conn.send({ type: "serve_lease", op: "claim" });
-        const persistedSession = persistedAgentSession(o);
-        if (persistedSession !== null) reportAgentSession(persistedSession);
+        // 新服务端先等租约裁决：standby 机器上的旧 wake-session.json 不能覆盖持租者更新的 session。
+        // 老服务端不认识 serve_lease，250ms 内不会回裁决；届时沿用既有默认持租语义并上报。
+        leaseKnown = false;
+        pendingPersistedSession = persistedAgentSession(o);
+        clearPersistedSessionFallback();
+        if (pendingPersistedSession !== null) {
+          persistedSessionFallback = setTimeout(() => {
+            if (!leaseKnown && hasLease) reportPendingPersistedSession();
+          }, 250);
+          if (typeof persistedSessionFallback.unref === "function") persistedSessionFallback.unref();
+        }
         // 连上时若自己已被暂停接待（#180），从 welcome 的 presence 快照里认出来——重连也不误唤醒。
         const mine = frame.presence?.find((p) => p.name === self);
         selfPaused = mine?.paused === true;
@@ -1964,6 +1985,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
           );
         }
         leaseKnown = true;
+        if (hasLease) reportPendingPersistedSession();
+        else clearPersistedSessionFallback();
         continue;
       }
       if (frame.type !== "msg") continue;
@@ -2248,6 +2271,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
     rmSync(contextDir, { recursive: true, force: true });
     lock?.release?.();
     if (heartbeat) clearInterval(heartbeat);
+    clearPersistedSessionFallback();
     conn.close();
     if (o.statusline === true) clearStatuslineListener();
     // 进程真退出了：health.json 不该继续显示 ws_connected=true 骗 watchdog（只清自己写的记录）。

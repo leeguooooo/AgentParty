@@ -175,7 +175,9 @@ export function AgentDetailModal({ name, display, kind, owner, online, presence,
                 <>
                   <div className="agent-detail-fact">
                     <dt>{t("AgentDetailModal.session")}</dt>
-                    <dd className="t-mono">{agentSession.harness}:{agentSession.session_id}</dd>
+                    <dd className="t-mono">
+                      {agentSession.harness}:{agentSession.session_id} · {fmtRel(agentSession.updated_at, now)}
+                    </dd>
                   </div>
                   {agentSession.cwd !== undefined && (
                     <div className="agent-detail-fact">
