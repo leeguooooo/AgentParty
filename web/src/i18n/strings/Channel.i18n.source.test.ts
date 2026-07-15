@@ -195,11 +195,19 @@ describe("Channel i18n source guard (#350)", () => {
       'className="d-btn archive-channel-btn"',
     ];
     const positions = controls.map((control) => toolbar.indexOf(control));
+    const headerControlsStart = presence.indexOf("headerControls={");
+    const headerControlsEndMarker = "\n        ) : null}";
+    const headerControlsEnd = presence.indexOf(headerControlsEndMarker, headerControlsStart);
+    const headerControls = presence.slice(
+      headerControlsStart,
+      headerControlsEnd + headerControlsEndMarker.length,
+    );
 
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
-    expect(presence).toContain("headerControls=");
-    expect(presence).toContain("<VisibilityToggle");
+    expect(headerControlsStart).toBeGreaterThanOrEqual(0);
+    expect(headerControlsEnd).toBeGreaterThan(headerControlsStart);
+    expect(headerControls).toContain("<VisibilityToggle");
     expect(toolbar).not.toContain("<VisibilityToggle");
     expect(toolbar).toContain('className="chan-admin-group chan-admin-group--agents"');
     expect(toolbar).toContain('className="chan-admin-group chan-admin-group--access"');
