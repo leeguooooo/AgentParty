@@ -95,19 +95,60 @@ describe("Lark OAuth human presence (#527)", () => {
     const reconnectWelcome = await reconnected.nextOfType("welcome");
     expect(reconnectWelcome.presence).toContainEqual(expect.objectContaining(expectedPresence));
 
-    const secondSlug = await createChannel(session.access_token);
-    const second = await WsClient.open(secondSlug, session.access_token);
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/authen/v2/oauth/token", method: "POST" })
+      .reply(200, { code: 0, access_token: "oauth-user-token-refreshed", expires_in: 3600 });
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/authen/v1/user_info", method: "GET" })
+      .reply(200, {
+        code: 0,
+        data: {
+          open_id: openId,
+          name: displayName,
+          avatar_url: avatarUrl,
+          avatar_thumb: avatarThumb,
+          tenant_key: "tenant-test",
+        },
+      });
+    const refreshedCallback = await SELF.fetch("http://ap.test/api/auth/lark-main/callback", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "oauth-code-refreshed", redirect_uri: "https://app.example/callback" }),
+    });
+    expect(refreshedCallback.status).toBe(200);
+    const refreshedSession = (await refreshedCallback.json()) as { access_token: string };
+    expect(refreshedSession.access_token).not.toBe(session.access_token);
+
+    reconnected.close();
+    await watcherWs.nextOfType("presence");
+    const refreshed = await WsClient.open(firstSlug, refreshedSession.access_token);
+    const refreshedWelcome = await refreshed.nextOfType("welcome");
+    expect(refreshedWelcome.presence).toContainEqual(expect.objectContaining(expectedPresence));
+
+    refreshed.send({ type: "send", kind: "message", body: "profile after refresh", mentions: [], reply_to: null });
+    await refreshed.nextOfType("sent");
+    const refreshedSent = await watcherWs.nextOfType("msg");
+    expect(refreshedSent.sender).toMatchObject({
+      kind: "human",
+      handle: profile!.handle,
+      display_name: displayName,
+      avatar_url: avatarUrl,
+      avatar_thumb: avatarThumb,
+    });
+
+    const secondSlug = await createChannel(refreshedSession.access_token);
+    const second = await WsClient.open(secondSlug, refreshedSession.access_token);
     const secondWelcome = await second.nextOfType("welcome");
     expect(secondWelcome.presence).toContainEqual(expect.objectContaining(expectedPresence));
 
-    const restPresence = await api(`/api/channels/${secondSlug}/presence`, session.access_token);
+    const restPresence = await api(`/api/channels/${secondSlug}/presence`, refreshedSession.access_token);
     expect(restPresence.status).toBe(200);
     expect((await restPresence.json()) as unknown).toMatchObject({
       presence: [expect.objectContaining(expectedPresence)],
     });
 
     second.close();
-    reconnected.close();
+    refreshed.close();
     watcherWs.close();
   });
 });
