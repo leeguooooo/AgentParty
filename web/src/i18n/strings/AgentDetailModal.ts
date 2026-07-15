@@ -29,6 +29,8 @@ export const AgentDetailModalStrings: LocaleDict = {
     "AgentDetailModal.roleNone": "no declared role",
     "AgentDetailModal.reportsTo": "reports to",
     "AgentDetailModal.clientVersion": "client version",
+    "AgentDetailModal.session": "resume session",
+    "AgentDetailModal.sessionCwd": "resume cwd",
   },
   zh: {
     "AgentDetailModal.title": "{name} — Agent 详情",
@@ -57,6 +59,8 @@ export const AgentDetailModalStrings: LocaleDict = {
     "AgentDetailModal.roleNone": "尚未声明角色",
     "AgentDetailModal.reportsTo": "汇报给",
     "AgentDetailModal.clientVersion": "客户端版本",
+    "AgentDetailModal.session": "可恢复会话",
+    "AgentDetailModal.sessionCwd": "恢复目录",
   },
 };
 

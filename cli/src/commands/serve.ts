@@ -1,7 +1,7 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
-import { BODY_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type Attachment, type MsgFrame, type ServerFrame } from "@agentparty/shared";
+import { BODY_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type MsgFrame, type ServerFrame } from "@agentparty/shared";
 import { maybeReexecUpgrade, serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import {
   appendFileSync,
@@ -193,6 +193,8 @@ interface WakeSessionState {
   created_at: number;
   last_wake_ts: number;
   wakes: number;
+  cwd?: string;
+  workdir?: string;
 }
 
 interface SdkWakeSessionState {
@@ -201,6 +203,8 @@ interface SdkWakeSessionState {
   created_at: number;
   last_wake_ts: number;
   wakes: number;
+  cwd?: string;
+  workdir?: string;
 }
 
 export interface BuiltinRunnerOptions {
@@ -218,6 +222,8 @@ export interface BuiltinRunnerOptions {
   post?: typeof postMessage;
   /** 交付物上传（#109）；默认真 REST。测试注入 mock。 */
   uploadAttachment?: typeof uploadAttachment;
+  /** 模型 session 落盘后自报给频道 presence（issue #522）。 */
+  onSession?: (session: AgentSessionInfo) => void;
 }
 
 export interface ThreadLike {
@@ -242,6 +248,8 @@ export interface SdkRunnerOptions {
   post?: typeof postMessage;
   /** 交付物上传（#109）；默认真 REST。测试注入 mock。 */
   uploadAttachment?: typeof uploadAttachment;
+  /** 模型 session 落盘后自报给频道 presence（issue #522）。 */
+  onSession?: (session: AgentSessionInfo) => void;
 }
 
 export interface ProjectAgentRunContext {
@@ -857,6 +865,32 @@ function writeSdkSession(path: string, state: SdkWakeSessionState): void {
   writeFileSync(path, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
 }
 
+function persistedAgentSession(o: Pick<ServeOptions, "builtinRunner" | "sdkRunner">): AgentSessionInfo | null {
+  if (o.builtinRunner !== undefined) {
+    const state = readSession(join(o.builtinRunner.workdir, RUNNER_SESSION_FILE), o.builtinRunner.harness);
+    if (state === null) return null;
+    return {
+      harness: state.harness,
+      session_id: state.session_id,
+      updated_at: state.last_wake_ts,
+      cwd: state.cwd ?? o.builtinRunner.cwd ?? o.builtinRunner.workdir,
+      workdir: state.workdir ?? o.builtinRunner.workdir,
+    };
+  }
+  if (o.sdkRunner !== undefined) {
+    const state = readSdkSession(join(o.sdkRunner.workdir, RUNNER_SESSION_FILE));
+    if (state === null) return null;
+    return {
+      harness: "codex-sdk",
+      session_id: state.thread_id,
+      updated_at: state.last_wake_ts,
+      cwd: state.cwd ?? o.sdkRunner.workdir,
+      workdir: state.workdir ?? o.sdkRunner.workdir,
+    };
+  }
+  return null;
+}
+
 function shortSid(sid: string | null | undefined): string {
   return sid ? sid.slice(0, 8) : "unknown";
 }
@@ -1131,8 +1165,16 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
         ...baseSession,
         last_wake_ts: now,
         wakes: baseSession.wakes + 1,
+        workdir: opts.workdir,
       };
       writeSdkSession(sessionPath, session);
+      opts.onSession?.({
+        harness: "codex-sdk",
+        session_id: session.thread_id,
+        updated_at: now,
+        ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
+        workdir: opts.workdir,
+      });
       // 交付走统一路径：超限正文改走 R2 附件（#109），不再 inline 撞 413。上传失败落进下面的 catch。
       await deliverRunnerMessage({
         post,
@@ -1152,9 +1194,16 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
       const now = opts.now?.() ?? Date.now();
       const message = err instanceof Error ? err.message : String(err);
       if (session) {
-        session = { ...session, last_wake_ts: now, wakes: session.wakes + 1 };
+        session = { ...session, last_wake_ts: now, wakes: session.wakes + 1, workdir: opts.workdir };
         writeSdkSession(sessionPath, session);
         threadId = session.thread_id;
+        opts.onSession?.({
+          harness: "codex-sdk",
+          session_id: session.thread_id,
+          updated_at: now,
+          ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
+          workdir: opts.workdir,
+        });
       }
       appendRunnerLog(
         opts.workdir,
@@ -1256,6 +1305,15 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
       created_at: prior ? prior.created_at : now,
       last_wake_ts: now,
       wakes,
+      cwd,
+      workdir: opts.workdir,
+    });
+    opts.onSession?.({
+      harness: opts.harness,
+      session_id: finalSid,
+      updated_at: now,
+      cwd,
+      workdir: opts.workdir,
     });
 
     // resume 非零不再 cold-start（#206 门禁 P1②），所以不存在 session reset 这条路径了。
@@ -1651,7 +1709,6 @@ export function pendingWakeDepth(
 
 export async function runServe(o: ServeOptions): Promise<number> {
   const out = o.out ?? ((line: string) => console.error(line));
-  const run = o.runCommand ?? (o.sdkRunner ? createSdkRunner(o.sdkRunner) : o.builtinRunner ? createBuiltinRunner(o.builtinRunner) : defaultRun);
   // busy 生命周期（#103）：只有内建 serve runner（builtin/sdk）在 working 帧里自报 busy=true，
   // 因此也只有它们需要 runServe 在收尾时补一条「busy=false 空闲」把 busy 清干净。注入 runCommand
   // 的测试、以及 --cmd 裸执行器（自管 presence）不参与，避免覆盖它们自己的收尾状态。
@@ -1709,6 +1766,38 @@ export async function runServe(o: ServeOptions): Promise<number> {
     lock?.release?.();
     throw error;
   }
+  // issue #522：runner 的模型 session 是可恢复句柄，不是 websocket session。连接建立后把它作为
+  // presence-only 元数据自报；每次 runner 冷起/续会并刷新本地 wake-session.json 后再覆盖一次。
+  const reportAgentSession = (session: AgentSessionInfo) => {
+    try {
+      conn.send({
+        type: "heartbeat",
+        current_task: null,
+        task_started_at: null,
+        heartbeat_at: null,
+        agent_session: session,
+      });
+    } catch {
+      // 重连 welcome 会从本地 wake-session.json 再报；一次 WS 窗口失败不阻断 runner。
+    }
+  };
+  const run = o.runCommand ?? (o.sdkRunner
+    ? createSdkRunner({
+        ...o.sdkRunner,
+        onSession: (session) => {
+          o.sdkRunner?.onSession?.(session);
+          reportAgentSession(session);
+        },
+      })
+    : o.builtinRunner
+      ? createBuiltinRunner({
+          ...o.builtinRunner,
+          onSession: (session) => {
+            o.builtinRunner?.onSession?.(session);
+            reportAgentSession(session);
+          },
+        })
+      : defaultRun);
   // 挂载之初就落一份 health 基线：即便还没收到第一帧，watchdog 也能看到「这个 pid 认领了这个频道」，
   // 而不是文件缺失时无法区分「serve 没起来」和「serve 起来了但还没写过健康数据」。
   writeHealthCache({ channel: o.channel, ws_connected: false, reconnecting: false, reconnect_count: 0, last_frame_at: null, last_error: null, connected_since: null });
@@ -1782,6 +1871,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
         // 服务端在同名多条 serve 里选唯一持租者并回 serve_lease。老服务端不认识它、直接忽略（hasLease
         // 默认 true → 旧行为）。重连每次 welcome 都重新 claim（连接换了，租约候选身份也换了）。
         conn.send({ type: "serve_lease", op: "claim" });
+        const persistedSession = persistedAgentSession(o);
+        if (persistedSession !== null) reportAgentSession(persistedSession);
         // 连上时若自己已被暂停接待（#180），从 welcome 的 presence 快照里认出来——重连也不误唤醒。
         const mine = frame.presence?.find((p) => p.name === self);
         selfPaused = mine?.paused === true;
