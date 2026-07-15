@@ -130,6 +130,7 @@ describe("AgentDetailModal (#272)", () => {
     expect(text).toContain("已暂停");
     expect(text).toContain("codex");
     expect(text).toContain("019f35d9-0000-7000-8000-000000000522");
+    expect(text).toContain('" · ","now"');
     expect(text).toContain("/workspace/agentparty");
   });
 

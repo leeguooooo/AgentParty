@@ -281,7 +281,8 @@ describe("runServe", () => {
       clientFrames.push(frame as unknown as Record<string, unknown>);
       if (frame.type !== "hello") return;
       sock.send(welcomeFrame(0, "me"));
-      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 40);
+      setTimeout(() => sock.send({ type: "serve_lease", name: "me", held: true }), 20);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 60);
     });
     const o = opts({
       server: server.url,
@@ -1592,6 +1593,28 @@ describe("codex-sdk runner", () => {
       thread_id: "thread_first_12345678",
       wakes: 1,
     });
+  });
+
+  test("session reports fall back to workdir when the SDK does not provide cwd", async () => {
+    const { post } = postRecorder();
+    const workdir = tempDir();
+    const reported: Array<{ cwd?: string; workdir?: string }> = [];
+    const thread: ThreadLike = {
+      id: "thread_cwd_12345678",
+      run: async () => ({ final_response: "ok" }),
+    };
+
+    await sdkRunner({
+      workdir,
+      post,
+      onSession: (session) => reported.push(session),
+      codexFactory: () => ({
+        startThread: () => thread,
+        resumeThread: () => thread,
+      }),
+    })(triggerFrame(101), runnerCtx());
+
+    expect(reported).toContainEqual(expect.objectContaining({ cwd: workdir, workdir }));
   });
 
   test("persists the thread id after the first run when the SDK fills it lazily", async () => {

@@ -4,7 +4,7 @@
 // 从不下发 serve_lease → 客户端默认持租（held 未知即照跑），不回归。
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ClientFrame } from "@agentparty/shared";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runServe, type ServeOptions } from "../src/commands/serve";
@@ -56,6 +56,38 @@ describe("serve 跨机租约客户端互斥（#99）", () => {
     expect(ran).toBe(0); // 不持租：runner 一次都没跑
     expect(cursors).not.toContain(1); // standby 保留未确认，租约接管后才能重放
     expect(o.lines.some((l) => l.includes("standby") || l.includes("租约"))).toBe(true);
+  });
+
+  test("held=false 不会上报 standby 机器持久化的旧 agent session", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "ap-standby-session-"));
+    tempDirs.push(workdir);
+    writeFileSync(join(workdir, "wake-session.json"), JSON.stringify({
+      harness: "codex",
+      session_id: "codex-standby-session",
+      created_at: 1000,
+      last_wake_ts: 2000,
+      wakes: 3,
+      cwd: "/workspace/stale",
+      workdir,
+    }));
+    const clientFrames: ClientFrame[] = [];
+    server = startMockServer((frame, sock) => {
+      clientFrames.push(frame);
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(0, "me"));
+      // 故意晚于旧实现的 250ms 猜测窗口，证明网络慢时也不会先泄漏 standby session。
+      setTimeout(() => sock.send(leaseFrame(false)), 300);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 360);
+    });
+
+    await runServe(opts({
+      server: server.url,
+      builtinRunner: { server: server.url, token: "ap_tok", channel: "dev", harness: "codex", workdir },
+    }));
+
+    expect(clientFrames.some((frame) =>
+      frame.type === "heartbeat" && frame.agent_session?.session_id === "codex-standby-session"
+    )).toBe(false);
   });
 
   test("held=true（本台持租）：@我 正常唤醒 runner", async () => {
