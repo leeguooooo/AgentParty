@@ -4147,15 +4147,6 @@ export function ChannelPage({
             <span>{t("Channel.tools.search")}</span>
             {q !== "" && <span className="t-mono chan-tool-badge">{searchLoading ? "..." : searchHits.length}</span>}
           </button>
-          {canModerate && (
-            <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("settings")}>
-              <span className="ap-sprite ap-sprite--settings" aria-hidden="true" />
-              <span>{t("Channel.tools.settings")}</span>
-              <span className="t-mono chan-tool-badge">
-                {localLoopGuardEnabled ? localLoopGuardLimit : t("Channel.settings.unlimited")}
-              </span>
-            </button>
-          )}
           </>
         }
         actions={
@@ -4167,60 +4158,71 @@ export function ChannelPage({
             onJump={jumpToMention}
             onDismiss={dismissToast}
           />
-          {(canMintAgent || canModerate) && !state.archived && (
+          {((canMintAgent && !state.archived) || canModerate) && (
             <div className="chan-admin-actions">
-              {canMintAgent && accountKey !== null && (
-                <AgentJoin
-                  slug={slug}
-                  token={token}
-                  namePrefix={agentNamePrefix}
-                  inviterName={inviterName}
-                  charter={charter}
-                  accountKey={accountKey}
-                  active={activeAdminSurface === "agentJoin"}
-                  onActiveChange={(open) => setAdminSurface("agentJoin", open)}
-                />
+              {canMintAgent && accountKey !== null && !state.archived && (
+                <div className="chan-admin-group chan-admin-group--agents">
+                  <AgentJoin
+                    slug={slug}
+                    token={token}
+                    namePrefix={agentNamePrefix}
+                    inviterName={inviterName}
+                    charter={charter}
+                    accountKey={accountKey}
+                    active={activeAdminSurface === "agentJoin"}
+                    onActiveChange={(open) => setAdminSurface("agentJoin", open)}
+                  />
+                  <AgentTokens
+                    slug={slug}
+                    token={token}
+                    accountKey={accountKey}
+                    inviterName={inviterName}
+                    onAuthFailed={onAuthFailed}
+                    active={activeAdminSurface === "agentTokens"}
+                    onActiveChange={(open) => setAdminSurface("agentTokens", open)}
+                  />
+                </div>
               )}
-              {canMintAgent && accountKey !== null && (
-                <AgentTokens
-                  slug={slug}
-                  token={token}
-                  accountKey={accountKey}
-                  inviterName={inviterName}
-                  onAuthFailed={onAuthFailed}
-                  active={activeAdminSurface === "agentTokens"}
-                  onActiveChange={(open) => setAdminSurface("agentTokens", open)}
-                />
+              {canModerate && !state.archived && (
+                <div className="chan-admin-group chan-admin-group--access">
+                  <VisibilityToggle
+                    slug={slug}
+                    token={token}
+                    visibility={localVisibility}
+                    onChanged={setLocalVisibility}
+                    onAuthFailed={onAuthFailed}
+                  />
+                  <JoinLink
+                    slug={slug}
+                    token={token}
+                    larkDirectoryEnabled={larkDirectoryEnabled}
+                    onAuthFailed={onAuthFailed}
+                    active={activeAdminSurface === "joinLink"}
+                    onActiveChange={(open) => setAdminSurface("joinLink", open)}
+                  />
+                </div>
               )}
               {canModerate && (
-                <VisibilityToggle
-                  slug={slug}
-                  token={token}
-                  visibility={localVisibility}
-                  onChanged={setLocalVisibility}
-                  onAuthFailed={onAuthFailed}
-                />
-              )}
-              {canModerate && (
-                <JoinLink
-                  slug={slug}
-                  token={token}
-                  larkDirectoryEnabled={larkDirectoryEnabled}
-                  onAuthFailed={onAuthFailed}
-                  active={activeAdminSurface === "joinLink"}
-                  onActiveChange={(open) => setAdminSurface("joinLink", open)}
-                />
-              )}
-              {canModerate && (
-                <button
-                  type="button"
-                  className="d-btn archive-channel-btn"
-                  disabled={archiving}
-                  onClick={archiveCurrentChannel}
-                  title={t("Channel.archive.buttonTitle")}
-                >
-                  {archiving ? t("Channel.archive.archiving") : t("Channel.archive.button")}
-                </button>
+                <div className="chan-admin-group chan-admin-group--channel">
+                  <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("settings")}>
+                    <span className="ap-sprite ap-sprite--settings" aria-hidden="true" />
+                    <span>{t("Channel.tools.settings")}</span>
+                    <span className="t-mono chan-tool-badge">
+                      {localLoopGuardEnabled ? localLoopGuardLimit : t("Channel.settings.unlimited")}
+                    </span>
+                  </button>
+                  {!state.archived && (
+                    <button
+                      type="button"
+                      className="d-btn archive-channel-btn"
+                      disabled={archiving}
+                      onClick={archiveCurrentChannel}
+                      title={t("Channel.archive.buttonTitle")}
+                    >
+                      {archiving ? t("Channel.archive.archiving") : t("Channel.archive.button")}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           )}

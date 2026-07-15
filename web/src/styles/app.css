@@ -3130,7 +3130,8 @@
 }
 .chan-tool-buttons,
 .chan-tool-actions,
-.chan-admin-actions {
+.chan-admin-actions,
+.chan-admin-group {
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
@@ -3146,6 +3147,15 @@
 }
 .chan-admin-actions {
   flex: 0 0 auto;
+  gap: 0;
+}
+.chan-admin-group {
+  flex: 0 0 auto;
+}
+.chan-admin-group + .chan-admin-group {
+  margin-left: 8px;
+  padding-left: 10px;
+  border-left: 1.4px solid var(--t-faint);
 }
 .chan-tool-btn {
   gap: 5px;
@@ -5593,7 +5603,8 @@
   .chan-toolstrip-content::-webkit-scrollbar-thumb { border-width: 1px; }
   .chan-tool-buttons,
   .chan-tool-actions,
-  .chan-admin-actions {
+  .chan-admin-actions,
+  .chan-admin-group {
     flex: 0 0 auto;
     flex-wrap: nowrap;
     gap: 7px;
@@ -5608,6 +5619,7 @@
     margin-left: 0;
     justify-content: flex-start;
   }
+  .chan-admin-actions { gap: 0; }
   .chan-tool-btn {
     white-space: nowrap;
     min-height: 36px;
