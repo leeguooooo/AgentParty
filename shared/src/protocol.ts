@@ -46,10 +46,15 @@ export function extractMentionTokens(text: string, limit: number = MAX_MENTIONS)
   const out: string[] = [];
   const seen = new Set<string>();
   for (const token of extractMentionSpans(text)) {
-    const key = mentionKey(token.value);
+    // This compatibility API has no known-alias directory. Preserve the established
+    // ASCII-first contract so `@agent-a看一下` yields `agent-a`; Unicode-first aliases
+    // still keep their full token and are resolved authoritatively by the server.
+    const asciiPrefix = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}/.exec(token.value)?.[0];
+    const value = asciiPrefix ?? [...token.value].slice(0, 64).join("");
+    const key = mentionKey(value);
     if (key === "system" || seen.has(key)) continue;
     seen.add(key);
-    out.push(token.value);
+    out.push(value);
     if (out.length >= limit) break;
   }
   return out;
