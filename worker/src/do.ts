@@ -3965,28 +3965,38 @@ export class ChannelDO extends Server<Env> {
     const candidates = mentions.filter((t) => t !== "system" && t.length <= 64);
     if (candidates.length === 0) return { frame };
     const placeholders = candidates.map(() => "?").join(", ");
+    // Pure-CJK aliases have no lexical boundary before following prose
+    // (`请@小明看一下`). Load aliases that are prefixes of the raw token; the
+    // resolver below applies longest-match and still fails closed on ties.
+    const nicknamePrefixes = candidates.map(() => "? LIKE nickname || '%'").join(" OR ");
+    const displayNamePrefixes = candidates.map(() => "? LIKE display_name || '%'").join(" OR ");
     type AliasRow = { target: string; alias: string };
     let remote: AliasRow[];
     try {
-      const [tokens, nicknames, handles, squads] = await Promise.all([
+      const [tokens, nicknames, handles, displayNames, squads] = await Promise.all([
         this.env.DB.prepare(
           `SELECT name AS target, name AS alias FROM tokens
             WHERE revoked_at IS NULL AND name COLLATE NOCASE IN (${placeholders})`,
         ).bind(...candidates).all<AliasRow>(),
         this.env.DB.prepare(
           `SELECT name AS target, nickname AS alias FROM agent_nicknames
-            WHERE nickname COLLATE NOCASE IN (${placeholders})`,
-        ).bind(...candidates).all<AliasRow>(),
+            WHERE nickname COLLATE NOCASE IN (${placeholders}) OR (${nicknamePrefixes})`,
+        ).bind(...candidates, ...candidates).all<AliasRow>(),
         this.env.DB.prepare(
           `SELECT handle AS target, handle AS alias FROM account_profiles
             WHERE handle COLLATE NOCASE IN (${placeholders})`,
         ).bind(...candidates).all<AliasRow>(),
         this.env.DB.prepare(
+          `SELECT handle AS target, display_name AS alias FROM account_profiles
+            WHERE display_name IS NOT NULL
+              AND (display_name COLLATE NOCASE IN (${placeholders}) OR (${displayNamePrefixes}))`,
+        ).bind(...candidates, ...candidates).all<AliasRow>(),
+        this.env.DB.prepare(
           `SELECT name AS target, name AS alias FROM channel_squads
             WHERE channel_slug = ? AND name COLLATE NOCASE IN (${placeholders})`,
         ).bind(this.name, ...candidates).all<AliasRow>(),
       ]);
-      remote = [...tokens.results, ...nicknames.results, ...handles.results, ...squads.results];
+      remote = [...tokens.results, ...nicknames.results, ...handles.results, ...displayNames.results, ...squads.results];
     } catch {
       return { frame, error: "mention validation unavailable; retry" };
     }
@@ -3994,12 +4004,12 @@ export class ChannelDO extends Server<Env> {
     // Recent channel identities remain valid routing targets even if their token was later rotated/revoked.
     const local = this.ctx.storage.sql
       .exec(
-        `SELECT sender_name, sender_kind, sender_handle FROM messages
+        `SELECT sender_name, sender_kind, sender_handle, sender_display_name FROM messages
           WHERE sender_name IS NOT NULL ORDER BY seq DESC LIMIT 1000`,
       )
       .toArray();
     const localPresence = this.ctx.storage.sql
-      .exec("SELECT name, kind, handle FROM presence")
+      .exec("SELECT name, kind, handle, display_name FROM presence")
       .toArray();
     const localWebhooks = this.ctx.storage.sql
       .exec("SELECT name FROM webhooks")
@@ -4019,11 +4029,21 @@ export class ChannelDO extends Server<Env> {
       if (String(row.sender_kind) === "human" && row.sender_handle !== null) {
         add(String(row.sender_handle), String(row.sender_handle));
       }
+      if (row.sender_display_name !== null) {
+        const target = String(row.sender_kind) === "human" && row.sender_handle !== null
+          ? String(row.sender_handle)
+          : name;
+        add(String(row.sender_display_name), target);
+      }
     }
     for (const row of localPresence) {
       const name = String(row.name);
       add(name, name);
       if (String(row.kind) === "human" && row.handle !== null) add(String(row.handle), String(row.handle));
+      if (row.display_name !== null) {
+        const target = String(row.kind) === "human" && row.handle !== null ? String(row.handle) : name;
+        add(String(row.display_name), target);
+      }
     }
     for (const row of localWebhooks) add(String(row.name), String(row.name));
 
@@ -4033,7 +4053,21 @@ export class ChannelDO extends Server<Env> {
       if (raw.toLocaleLowerCase("en-US") === "all" || raw === "全体") {
         return { frame, error: `unsupported mention @${raw}` };
       }
-      const targets = aliases.get(raw.toLocaleLowerCase("en-US"));
+      const key = raw.toLocaleLowerCase("en-US");
+      let targets = aliases.get(key);
+      if (!targets) {
+        let longest = 0;
+        for (const [alias, aliasTargets] of aliases) {
+          if (!key.startsWith(alias) || alias.length < longest) continue;
+          if (alias.length > longest) {
+            longest = alias.length;
+            targets = new Set(aliasTargets);
+          } else {
+            targets ??= new Set<string>();
+            for (const target of aliasTargets) targets.add(target);
+          }
+        }
+      }
       if (!targets || targets.size === 0) return { frame, error: `unknown mention @${raw}` };
       if (targets.size !== 1) return { frame, error: `ambiguous mention @${raw}` };
       const target = [...targets][0]!;

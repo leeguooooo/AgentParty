@@ -97,6 +97,10 @@ describe("websocket", () => {
     await env.DB.prepare(
       "INSERT INTO agent_nicknames (name, nickname, created_at, updated_at) VALUES (?, ?, ?, ?)",
     ).bind(nicknameTarget.name, "程序员小明", Date.now(), Date.now()).run();
+    await env.DB.prepare(
+      `INSERT INTO account_profiles (account, handle, created_at, updated_at, display_name)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind("account-552", "display552", Date.now(), Date.now(), "测试同事").run();
     const slug = await createChannel(token);
     const ws = await WsClient.open(slug, token);
     await ws.nextOfType("welcome");
@@ -113,13 +117,23 @@ describe("websocket", () => {
     ws.send({
       type: "send",
       kind: "message",
-      body: "请@agent-a看一下，（@程序员小明）也帮忙；a@example.com 不算",
+      body: "请@agent-a看一下，也请@程序员小明帮忙；a@example.com 不算",
       mentions: [],
       reply_to: null,
     });
     await ws.nextOfType("sent");
     const echo3 = await ws.nextOfType("msg");
     expect(echo3.mentions).toEqual(["agent-a", nicknameTarget.name]);
+    ws.send({
+      type: "send",
+      kind: "message",
+      body: "请@测试同事确认一下",
+      mentions: [],
+      reply_to: null,
+    });
+    await ws.nextOfType("sent");
+    const echo4 = await ws.nextOfType("msg");
+    expect(echo4.mentions).toEqual(["display552"]);
 
     await seedToken("agent", "collision552");
     const ambiguousTarget = await seedToken("agent");
