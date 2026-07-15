@@ -66,6 +66,43 @@ describe("send --attach parsing", () => {
     const parsed = parseArgs(["--channel", "c"], sendSpec);
     expect(await resolveSendInput(parsed)).toBeNull();
   });
+
+  test("正文 mention 与 Web/Worker 复用同一套 CJK、全角标点和 email 契约", async () => {
+    const parsed = parseArgs([
+      "请@agent-a看一下，（@程序员小明）；a@example.com 不算",
+      "--channel",
+      "c",
+      "--mention",
+      "explicit",
+    ], sendSpec);
+    const input = await resolveSendInput(parsed);
+    expect(input?.mentions).toEqual(["explicit", "agent-a", "程序员小明"]);
+  });
+
+  test("正文保留 @all 交给服务端给出明确不支持错误", async () => {
+    const parsed = parseArgs(["请 @all 看一下", "--channel", "c"], sendSpec);
+    const input = await resolveSendInput(parsed);
+    expect(input?.mentions).toEqual(["all"]);
+  });
+
+  test("显式和正文 mention 的总数不超过共享上限", async () => {
+    const flags = Array.from({ length: 50 }, (_, i) => ["--mention", `agent-${i}`]).flat();
+    const parsed = parseArgs(["正文 @overflow", "--channel", "c", ...flags], sendSpec);
+    const input = await resolveSendInput(parsed);
+    expect(input?.mentions).toHaveLength(50);
+    expect(input?.mentions).not.toContain("overflow");
+
+    const tooMany = parseArgs(["正文", "--channel", "c", ...flags, "--mention", "agent-50"], sendSpec);
+    expect(await resolveSendInput(tooMany)).toBeNull();
+  });
+
+  test("ASCII mention 大小写去重并拒绝保留名 system", async () => {
+    const deduped = parseArgs(["正文 @agent", "--channel", "c", "--mention", "Agent"], sendSpec);
+    expect((await resolveSendInput(deduped))?.mentions).toEqual(["Agent"]);
+
+    const reserved = parseArgs(["正文", "--channel", "c", "--mention", "SYSTEM"], sendSpec);
+    expect(await resolveSendInput(reserved)).toBeNull();
+  });
 });
 
 describe("resolveAttachments", () => {

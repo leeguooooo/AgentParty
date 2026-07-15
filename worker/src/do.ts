@@ -2,12 +2,14 @@
 import {
   applyLiveConnection,
   BODY_LIMIT,
+  extractMentionTokens,
   IDEMPOTENCY_KEY_MAX,
   IDEMPOTENCY_WINDOW_MS,
   LOOP_GUARD_AGENT_N,
   LOOP_GUARD_AGENT_PARTY_N,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
+  mentionMatchKey,
   MAX_WEBHOOKS_PER_CHANNEL,
   MAX_MESSAGE_AUDIT_ROWS,
   MAX_WEBHOOK_DEAD_LETTERS,
@@ -221,18 +223,17 @@ function parseMentions(input: unknown): string[] | null {
   return input as string[];
 }
 
-// 正文里的 @name（@ 须在行首或空白后，避开 email 的 @）。serve/webhook 唤醒只看 mentions
+// 正文里的 @name（允许紧邻 CJK 正文/全角标点，ASCII 标识符左边界仍避开 email）。serve/webhook 唤醒只看 mentions
 // 数组——若发送方只在正文打 @ 没进数组（裸 party send "@name"），目标永不被唤醒。故服务端
 // 从 body/note 兜底提取并 union 进 mentions，去重、剔除 system、总量截到 MAX_MENTIONS。
 // 误报无害：wake ledger 只投给真实可唤醒目标，无对应者的 @ 不会触发任何投递。
-// #165：放开首字为 unicode 字母/数字，能捕获 @中文昵称。@ 前仍须行首/空白（不吃 email 的 @），
+// #165/#552：放开首字为 unicode 字母/数字，能捕获 @中文昵称；ASCII token 优先，
+// 所以 `请@agent-a看一下` 不会把后面的中文正文吞进 token。
 // 长度仍上界 64（[\p{L}\p{N}._-]{0,63}）。捕获到的 @昵称 由 resolveNicknameMentions 解析成真实 name。
-const BODY_MENTION_RE = /(?:^|\s)@([\p{L}\p{N}][\p{L}\p{N}._-]{0,63})/gu;
 function mergeBodyMentions(explicit: string[], text: string): string[] {
   const seen = new Set(explicit);
   const out = [...explicit];
-  for (const match of text.matchAll(BODY_MENTION_RE)) {
-    const name = match[1]!;
+  for (const name of extractMentionTokens(text, MAX_MENTIONS)) {
     if (name === "system" || seen.has(name)) continue;
     seen.add(name);
     out.push(name);
@@ -3956,30 +3957,151 @@ export class ChannelDO extends Server<Env> {
     return withExpandedMentions(frame, [...routed]);
   }
 
-  // #165：把正文/显式 mentions 里的 @昵称（含中文）解析成目标 agent 的真实 ASCII name，union 进 mentions。
-  // 手法镜像 expandSquadMentions（读 D1、大小写不敏感匹配、再重写 mentions），且同样跑在 INSERT 之前——
-  // 这样 serve/watch（msg.mentions.includes(name)）与 webhook（shouldDeliverWebhook 按 hookName=name）
-  // 都能凭真实 name 命中被 @ 的 agent。昵称是全局唯一的，故一个 token 匹配即定位到唯一 agent。
-  private async resolveNicknameMentions(frame: SendFrame): Promise<SendFrame> {
+  // #165/#552：把正文/显式 mentions 的 token 解析成权威 target。agent name、昵称、human handle
+  // 与 squad 全部按 NOCASE 匹配；同一 alias 若指向多个 target 则 fail closed。不存在的 @ 也必须明确
+  // 拒绝，不能落一条看似成功、实际永远不会进入 wake/delivery 的消息。
+  private async resolveMentionTargets(frame: SendFrame): Promise<{ frame: SendFrame; error?: string }> {
     const mentions = frame.mentions ?? [];
-    if (mentions.length === 0) return frame;
-    const candidates = mentions.filter((t) => t !== "system" && t.length <= 64);
-    if (candidates.length === 0) return frame;
-    const placeholders = candidates.map(() => "?").join(", ");
-    const rows = await this.env.DB.prepare(
-      `SELECT name, nickname FROM agent_nicknames WHERE nickname COLLATE NOCASE IN (${placeholders})`,
-    )
-      .bind(...candidates)
-      .all<{ name: string; nickname: string }>()
-      .catch(() => ({ results: [] as { name: string; nickname: string }[] }));
-    if (rows.results.length === 0) return frame;
-    const routed = new Set(mentions);
-    for (const row of rows.results) {
-      if (typeof row.name !== "string" || !MENTION_NAME_RE.test(row.name)) continue;
-      routed.add(row.name);
-      if (routed.size >= MAX_MENTIONS) break;
+    if (mentions.length === 0) return { frame };
+    if (mentions.some((mention) => mentionMatchKey(mention) === "system")) {
+      return { frame, error: "reserved mention @system" };
     }
-    return withExpandedMentions(frame, [...routed]);
+    const candidates = mentions.filter((t) => t.length <= 64);
+    if (candidates.length === 0) return { frame };
+    const placeholders = candidates.map(() => "?").join(", ");
+    const asciiCandidates = candidates.filter((candidate) => /^[A-Za-z0-9._-]+$/.test(candidate));
+    const unicodeCandidates = candidates.filter((candidate) => !/^[A-Za-z0-9._-]+$/.test(candidate));
+    const aliasExactClause = (column: "nickname" | "display_name") => {
+      const clauses: string[] = [];
+      if (asciiCandidates.length > 0) {
+        clauses.push(`${column} COLLATE NOCASE IN (${asciiCandidates.map(() => "?").join(", ")})`);
+      }
+      if (unicodeCandidates.length > 0) {
+        clauses.push(`${column} IN (${unicodeCandidates.map(() => "?").join(", ")})`);
+      }
+      return clauses.join(" OR ");
+    };
+    // Pure-CJK aliases have no lexical boundary before following prose
+    // (`请@小明看一下`). Load aliases that are prefixes of the raw token; the
+    // resolver below applies longest-match and still fails closed on ties.
+    // ASCII names never need this fallback: accepting it would turn unknown
+    // `@bobcat` into the existing `bob` target.
+    const cjkPrefixCandidates = candidates.filter((candidate) =>
+      /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(candidate)
+    );
+    const nicknamePrefixClause = cjkPrefixCandidates.length === 0
+      ? ""
+      : ` OR (${cjkPrefixCandidates.map(() => "substr(?, 1, length(nickname)) = nickname").join(" OR ")})`;
+    const displayNamePrefixClause = cjkPrefixCandidates.length === 0
+      ? ""
+      : ` OR (${cjkPrefixCandidates.map(() => "substr(?, 1, length(display_name)) = display_name").join(" OR ")})`;
+    type AliasRow = { target: string; alias: string };
+    let remote: AliasRow[];
+    try {
+      const [tokens, nicknames, handles, displayNames, squads] = await Promise.all([
+        this.env.DB.prepare(
+          `SELECT name AS target, name AS alias FROM tokens
+            WHERE revoked_at IS NULL AND name COLLATE NOCASE IN (${placeholders})`,
+        ).bind(...candidates).all<AliasRow>(),
+        this.env.DB.prepare(
+          `SELECT name AS target, nickname AS alias FROM agent_nicknames
+            WHERE ${aliasExactClause("nickname")}${nicknamePrefixClause}`,
+        ).bind(...asciiCandidates, ...unicodeCandidates, ...cjkPrefixCandidates).all<AliasRow>(),
+        this.env.DB.prepare(
+          `SELECT handle AS target, handle AS alias FROM account_profiles
+            WHERE handle COLLATE NOCASE IN (${placeholders})`,
+        ).bind(...candidates).all<AliasRow>(),
+        this.env.DB.prepare(
+          `SELECT handle AS target, display_name AS alias FROM account_profiles
+            WHERE display_name IS NOT NULL
+              AND (${aliasExactClause("display_name")}${displayNamePrefixClause})`,
+        ).bind(...asciiCandidates, ...unicodeCandidates, ...cjkPrefixCandidates).all<AliasRow>(),
+        this.env.DB.prepare(
+          `SELECT name AS target, name AS alias FROM channel_squads
+            WHERE channel_slug = ? AND name COLLATE NOCASE IN (${placeholders})`,
+        ).bind(this.name, ...candidates).all<AliasRow>(),
+      ]);
+      remote = [...tokens.results, ...nicknames.results, ...handles.results, ...displayNames.results, ...squads.results];
+    } catch {
+      return { frame, error: "mention validation unavailable; retry" };
+    }
+
+    // Recent channel identities remain valid routing targets even if their token was later rotated/revoked.
+    const local = this.ctx.storage.sql
+      .exec(
+        `SELECT sender_name, sender_kind, sender_handle, sender_display_name FROM messages
+          WHERE sender_name IS NOT NULL ORDER BY seq DESC LIMIT 1000`,
+      )
+      .toArray();
+    const localPresence = this.ctx.storage.sql
+      .exec("SELECT name, kind, handle, display_name FROM presence")
+      .toArray();
+    const localWebhooks = this.ctx.storage.sql
+      .exec("SELECT name FROM webhooks")
+      .toArray();
+    const aliases = new Map<string, Set<string>>();
+    const add = (alias: unknown, target: unknown) => {
+      if (typeof alias !== "string" || typeof target !== "string" || alias === "" || target === "") return;
+      const key = mentionMatchKey(alias);
+      const targets = aliases.get(key) ?? new Set<string>();
+      targets.add(target);
+      aliases.set(key, targets);
+    };
+    for (const row of remote) add(row.alias, row.target);
+    for (const row of local) {
+      const name = String(row.sender_name);
+      add(name, name);
+      if (String(row.sender_kind) === "human" && row.sender_handle !== null) {
+        add(String(row.sender_handle), String(row.sender_handle));
+      }
+      if (row.sender_display_name !== null) {
+        const target = String(row.sender_kind) === "human" && row.sender_handle !== null
+          ? String(row.sender_handle)
+          : name;
+        add(String(row.sender_display_name), target);
+      }
+    }
+    for (const row of localPresence) {
+      const name = String(row.name);
+      add(name, name);
+      if (String(row.kind) === "human" && row.handle !== null) add(String(row.handle), String(row.handle));
+      if (row.display_name !== null) {
+        const target = String(row.kind) === "human" && row.handle !== null ? String(row.handle) : name;
+        add(String(row.display_name), target);
+      }
+    }
+    for (const row of localWebhooks) add(String(row.name), String(row.name));
+
+    const routed: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of candidates) {
+      if (mentionMatchKey(raw) === "all" || raw.startsWith("全体")) {
+        return { frame, error: `unsupported mention @${raw.startsWith("全体") ? "全体" : raw}` };
+      }
+      const key = mentionMatchKey(raw);
+      let targets = aliases.get(key);
+      if (!targets && cjkPrefixCandidates.includes(raw)) {
+        let longest = 0;
+        for (const [alias, aliasTargets] of aliases) {
+          if (!key.startsWith(alias) || alias.length < longest) continue;
+          if (alias.length > longest) {
+            longest = alias.length;
+            targets = new Set(aliasTargets);
+          } else {
+            targets ??= new Set<string>();
+            for (const target of aliasTargets) targets.add(target);
+          }
+        }
+      }
+      if (!targets || targets.size === 0) return { frame, error: `unknown mention @${raw}` };
+      if (targets.size !== 1) return { frame, error: `ambiguous mention @${raw}` };
+      const target = [...targets][0]!;
+      if (target === "system" || seen.has(target)) continue;
+      seen.add(target);
+      routed.push(target);
+      if (routed.length >= MAX_MENTIONS) break;
+    }
+    return { frame: withExpandedMentions(frame, routed) };
   }
 
   // #544：reply_to 本身就是一条明确的定向消息。若原消息作者是 agent，即使回复正文没有再写
@@ -4049,9 +4171,14 @@ export class ChannelDO extends Server<Env> {
     if (byteLength(payload) > BODY_LIMIT) {
       return { ok: false, code: "too_large", message: `body exceeds ${BODY_LIMIT} bytes` };
     }
-    frame = this.expandAgentReplyMention(frame, identity.name);
+    const resolvedMentions = await this.resolveMentionTargets(frame);
+    if (resolvedMentions.error !== undefined) {
+      return { ok: false, code: "bad_request", message: resolvedMentions.error };
+    }
+    // reply_to author comes from this channel's authoritative message row and
+    // must not depend on the bounded recent-alias lookup above.
+    frame = this.expandAgentReplyMention(resolvedMentions.frame, identity.name);
     frame = await this.expandSquadMentions(frame);
-    frame = await this.resolveNicknameMentions(frame);
     const workflowGuard = this.workflowGuardDecision(identity, frame);
     if (workflowGuard !== null) {
       const row = this.workflowGuardRow(workflowGuard.workflow.workflow_id);

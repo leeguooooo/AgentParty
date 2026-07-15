@@ -147,12 +147,16 @@ describe("#107 serve/watch wakes land in the server-side wake ledger", () => {
     }
   });
 
-  it("does NOT record a serve/watch row for a mention with no wakeable presence", async () => {
+  it("rejects an unknown mention and does NOT record a serve/watch row", async () => {
     const sender = await seedToken("agent");
     const ghost = uniq("ghost"); // never registered any presence
     const slug = await createChannel(sender.token);
 
-    expect((await sendMessage(slug, sender.token, `@${ghost} anybody?`, [ghost])).status).toBe(200);
+    const res = await sendMessage(slug, sender.token, `@${ghost} anybody?`, [ghost]);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: { code: "bad_request", message: `unknown mention @${ghost}` },
+    });
     await new Promise((r) => setTimeout(r, 50));
 
     expect(await ledgerRows(slug)).toEqual([]);
