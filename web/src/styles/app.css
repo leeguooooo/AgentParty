@@ -3113,7 +3113,7 @@
 .chan-toolstrip {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px 10px;
   padding: 0 4px 2px;
 }
@@ -3121,27 +3121,31 @@
   display: none;
 }
 .chan-toolstrip-content {
-  display: contents;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 6px;
+  overflow: visible;
 }
 .chan-tool-buttons,
 .chan-tool-actions,
 .chan-admin-actions {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px;
   min-width: 0;
 }
 .chan-tool-buttons {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
 }
 .chan-tool-actions {
-  flex: 0 1 auto;
-  justify-content: flex-end;
-  margin-left: auto;
+  flex: 0 0 auto;
+  justify-content: flex-start;
 }
 .chan-admin-actions {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
 }
 .chan-tool-btn {
   gap: 5px;
@@ -3280,55 +3284,37 @@
 .vis-seg-btn:last-child { border-right: 0; }
 .vis-seg-btn.is-on { background: var(--d-ink); color: var(--t-panel); }
 .vis-seg-btn:disabled:not(.is-on) { opacity: 0.55; cursor: default; }
-.vis-help {
-  flex: none;
-  max-width: min(300px, 15vw);
-  margin: 0;
-  overflow: hidden;
-  color: var(--t-dim);
-  font-size: 11.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 常规桌面宽度固定成“功能 / 管理”两行。视觉皮不变，只阻止嵌套 flex
-   因说明文字的固有宽度额外折出第三行。 */
-@media (min-width: 1360px) {
-  .chan-toolstrip {
-    display: block;
-  }
+/* 功能与管理控件共用一条横向轨道。常见宽屏直接铺开；空间不足时滚动，
+   邀请面板改为视口底部浮层，避免被滚动容器裁切。 */
+@media (max-width: 1759px) {
   .chan-toolstrip-content {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    padding-bottom: 2px;
   }
-  .chan-tool-buttons,
-  .chan-tool-actions {
-    width: 100%;
-  }
-  .chan-tool-actions {
-    flex-wrap: nowrap;
-    justify-content: flex-start;
-    margin-left: 0;
-  }
-  .chan-admin-actions,
-  .vis-toggle {
-    flex-wrap: nowrap;
-  }
-  .chan-admin-actions {
-    flex: 1 1 auto;
-  }
-  .vis-toggle {
-    min-width: 0;
-    margin-left: 0;
+  .joinlink-panel {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    top: auto;
+    bottom: 12px;
+    width: auto;
+    max-width: 620px;
+    max-height: 72vh;
+    margin-left: auto;
+    overflow-y: auto;
+    z-index: 60;
   }
 }
-
-/* 中等桌面保留可见性帮助按钮，省去与其 tooltip 重复的长句，防止管理行折行。 */
-@media (min-width: 761px) and (max-width: 1359px) {
-  .vis-help {
-    display: none;
-  }
+.chan-admin-actions,
+.vis-toggle {
+  flex-wrap: nowrap;
+}
+.vis-toggle {
+  min-width: 0;
+  margin-left: 0;
 }
 
 /* ---- 小图雪碧图（app 运行界面，替代散落 emoji/符号） ---- */
@@ -3380,6 +3366,36 @@
 .notify-toggle-btn .ap-sprite { --ap-icon-size: 21px; }
 .notify-toggle-btn.is-active { border-color: var(--d-yellow); background: var(--d-yellow); }
 .notify-toggle-hint { font-size: 12px; color: var(--t-dim); }
+.app-channel-notify {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.app-channel-notify .notify-toggle {
+  flex-wrap: nowrap;
+  gap: 5px;
+}
+.app-channel-notify .feature-tip-bubble {
+  top: calc(100% + 8px);
+  bottom: auto;
+  left: auto;
+  right: 0;
+  transform: none;
+}
+.app-channel-notify .notify-toggle-hint {
+  position: absolute;
+  z-index: 75;
+  top: calc(100% + 8px);
+  right: 0;
+  width: max-content;
+  max-width: min(320px, 80vw);
+  padding: 7px 9px;
+  border: 1.6px solid var(--d-ink);
+  background: var(--t-panel);
+  box-shadow: 4px 4px 0 var(--d-shadow);
+  white-space: normal;
+}
 .vis-confirm {
   display: flex;
   align-items: center;

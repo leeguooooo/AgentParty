@@ -13,21 +13,12 @@ function ruleBody(selector: string): string {
   return css.slice(start, end);
 }
 
-describe("issue #443 visibility controls layout", () => {
-  test("the current visibility description stays inline with its controls", () => {
-    const body = ruleBody(".vis-help");
-    expect(body).not.toContain("flex-basis: 100%");
-    expect(body).not.toContain("margin: 2px 0 0");
-    expect(body).toContain("flex: none");
-    expect(body).toContain("max-width: min(300px, 15vw)");
-    expect(body).toContain("text-overflow: ellipsis");
-    expect(body).toContain("white-space: nowrap");
-    expect(body).toContain("margin: 0");
-  });
-
-  test("wide desktop tool controls use two fixed rows", () => {
-    expect(css).toMatch(/@media \(min-width: 1360px\)[\s\S]*\.chan-toolstrip-content\s*{[^}]*flex-direction:\s*column;[^}]*gap:\s*6px;/s);
-    expect(css).toMatch(/@media \(min-width: 1360px\)[\s\S]*\.chan-tool-actions\s*{[^}]*flex-wrap:\s*nowrap;[^}]*margin-left:\s*0;/s);
-    expect(css).toMatch(/@media \(min-width: 761px\) and \(max-width: 1359px\)[\s\S]*\.vis-help\s*{[^}]*display:\s*none;/s);
+describe("channel visibility controls layout", () => {
+  test("the toolbar uses one non-wrapping horizontal track", () => {
+    expect(ruleBody(".chan-toolstrip")).toContain("flex-wrap: nowrap");
+    expect(ruleBody(".chan-toolstrip-content")).toContain("overflow: visible");
+    expect(css).toMatch(/@media \(max-width: 1759px\)[\s\S]*\.chan-toolstrip-content\s*{[^}]*overflow-x:\s*auto;/s);
+    expect(css).toMatch(/\.chan-tool-buttons,\s*\.chan-tool-actions,\s*\.chan-admin-actions\s*{[^}]*flex-wrap:\s*nowrap;/s);
+    expect(ruleBody(".chan-toolstrip-content")).not.toContain("flex-direction: column");
   });
 });

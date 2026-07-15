@@ -14,7 +14,6 @@ import { Composer, type UploadItem } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
 import { MessageCard } from "../components/MessageCard";
 import { MentionHeaderNotice, type MentionToastItem } from "../components/MentionToast";
-import { NotifyToggle, readNotifyOptin } from "../components/NotifyToggle";
 import { PresenceBar } from "../components/PresenceBar";
 import { AttachmentList } from "../components/AttachmentList";
 import { OrgTreePreview } from "../components/OrgTreePreview";
@@ -114,6 +113,7 @@ interface Props {
   accountKey: string | null;
   inviterName: string; // 当前邀请人的频道身份名，接入包报到时 @ 他
   selfHandle: string | null; // 当前人类账号的 @handle（Task C2 被@通知用；agent/未设置 handle 时为 null）
+  notifyOptin: boolean; // 全局 header 中的铃铛状态；频道 ws 只消费，不在工具条重复渲染
   joinRequestStatus: ChannelJoinRequestState | "submitting" | "login_required" | "error";
   joinRequestReason: string | null;
   joinRequestError: string | null;
@@ -2507,6 +2507,7 @@ export function ChannelPage({
   accountKey,
   inviterName,
   selfHandle,
+  notifyOptin,
   joinRequestStatus,
   joinRequestReason,
   joinRequestError,
@@ -2596,12 +2597,11 @@ export function ChannelPage({
   const [messageActionBusySeq, setMessageActionBusySeq] = useState<number | null>(null);
   // 频道决策协议（#284）：人类/moderator 在频道内对某条 decision_request 拍板
   const [decisionBusySeq, setDecisionBusySeq] = useState<number | null>(null);
-  // 被@浏览器通知（Task C2）：opt-in 是全局 localStorage 设置，铃铛开关组件读/写；这里只持有一份
-  // 供 ws 入帧点判定用。optin/selfHandle/t 都放 ref：onFrame 挂在 socket 连接的 effect 里，
+  // 被@浏览器通知（Task C2）：opt-in 由 App header 的铃铛持有；频道只供 ws 入帧点判定。
+  // optin/selfHandle/t 都放 ref：onFrame 挂在 socket 连接的 effect 里，
   // 若把它们放进依赖数组，切铃铛/切语言会连累整个 ws 重连——用 ref 让判定读到最新值又不触发重连。
-  const [optin, setOptin] = useState<boolean>(() => readNotifyOptin());
-  const optinRef = useRef(optin);
-  optinRef.current = optin;
+  const optinRef = useRef(notifyOptin);
+  optinRef.current = notifyOptin;
   const selfHandleRef = useRef(selfHandle);
   selfHandleRef.current = selfHandle;
   const selfNameRef = useRef(state.self);
@@ -4150,7 +4150,6 @@ export function ChannelPage({
             onJump={jumpToMention}
             onDismiss={dismissToast}
           />
-          <NotifyToggle optin={optin} onChange={setOptin} />
           {(canMintAgent || canModerate) && !state.archived && (
             <div className="chan-admin-actions">
               {canMintAgent && accountKey !== null && (
