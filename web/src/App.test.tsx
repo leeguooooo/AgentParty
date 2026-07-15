@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "./i18n/locale";
 import { apiBase, clearApiBase } from "./lib/base";
+import { applyShareToken, clearShareToken, currentShareToken, isShareMode } from "./lib/api";
 import {
   __resetDesktopRuntimeForTests,
   __setDesktopRuntimeDependenciesForTests,
@@ -49,6 +50,16 @@ let notificationActionHandler: ((notification: { extra?: Record<string, unknown>
 let desktopFocusCalls: string[] = [];
 let pushedPaths: string[] = [];
 let desktopWindowShownHandler: (() => void) | null = null;
+
+async function waitForCondition(condition: () => boolean, description: string, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}`);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+}
 
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -245,6 +256,7 @@ afterEach(async () => {
   renderer = null;
   __resetDesktopRuntimeForTests();
   clearApiBase();
+  clearShareToken();
   for (const key of [
     "IS_REACT_ACT_ENVIRONMENT",
     "__TAURI_INTERNALS__",
@@ -260,6 +272,23 @@ afterEach(async () => {
 });
 
 describe("App desktop server pairing behavior", () => {
+  test("a restored human session clears a stale desktop watch credential", async () => {
+    applyShareToken("stale-watch-token");
+    expect(isShareMode()).toBe(true);
+
+    act(() => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+    });
+    await waitForCondition(
+      () => !isShareMode() && (renderer?.root.findAllByProps({ className: "app-settings-btn" }).length ?? 0) === 1,
+      "the restored human desktop session",
+    );
+
+    expect(isShareMode()).toBe(false);
+    expect(currentShareToken()).toBeNull();
+    expect(renderer!.root.findByProps({ className: "app-settings-btn" })).toBeTruthy();
+  });
+
   test("hidden desktop startup defers Keychain restore until the main window is shown", async () => {
     let credentialReads = 0;
     invokeHandler = async (command, args) => {
