@@ -145,6 +145,14 @@ export function App() {
   });
   const [serverPairingFlow, setServerPairingFlow] = useState(() => initialDesktopServerPairingFlow(activeOrigin));
   const [token, setToken] = useState<string | null>(() => initialTokenForRuntime(desktop, getToken));
+  // A desktop watch invite deliberately enters share mode, but every successful Keychain/pairing
+  // restore is an explicit return to the signed-in human session. Clear both the in-memory and
+  // sessionStorage share markers before installing that credential, otherwise ChannelSocket sends
+  // the human token through the readonly query-token path while the rest of the app treats it as owner.
+  const activateDesktopHumanSession = useCallback((accessToken: string) => {
+    clearShareToken();
+    setToken(accessToken);
+  }, []);
   // 本标签当前身份（access token 的 sub）。共享 localStorage 里的 session 是否可用，
   // 必须与它比对——只比 token 字符串没用：同身份续期后 access token 本来就会变。
   const identityRef = useRef<string | null>(null);
@@ -215,7 +223,7 @@ export function App() {
     setDesktopNotice(null);
     return restoreDesktopAccess(desktopCredentialVaultForOrigin(activeOrigin), activeOrigin)
       .then((accessToken) => {
-        setToken(accessToken);
+        if (accessToken !== null) activateDesktopHumanSession(accessToken);
         setDesktopRestoreFailure("retryable");
         setDesktopBoot("ready");
         return accessToken;
@@ -226,14 +234,14 @@ export function App() {
         setDesktopBoot("error");
         throw cause;
       });
-  }, [activeOrigin]);
+  }, [activeOrigin, activateDesktopHumanSession]);
 
   const restoreDesktopInteractive = useCallback(() => {
     setDesktopBoot("loading");
     setDesktopNotice(null);
     return restoreDesktopAccessInteractive(desktopCredentialVaultForOrigin(activeOrigin), activeOrigin)
       .then((accessToken) => {
-        setToken(accessToken);
+        if (accessToken !== null) activateDesktopHumanSession(accessToken);
         setDesktopRestoreFailure("retryable");
         setDesktopBoot("ready");
         return accessToken;
@@ -244,7 +252,7 @@ export function App() {
         setDesktopBoot("error");
         throw cause;
       });
-  }, [activeOrigin]);
+  }, [activeOrigin, activateDesktopHumanSession]);
 
   // 桌面版贴观看邀请链接（#297）：/c/<slug>?t=<token> 的观看 token 直接落进分享态（复用 #186），
   // 换成只读会话打开频道——与网页命中 ?t= 等价，只是桌面没有地址栏，token 从粘贴框进来。
@@ -401,10 +409,10 @@ export function App() {
     setChannels(null);
     setListError(null);
     setMe(null);
-    setToken(result.accessToken);
+    activateDesktopHumanSession(result.accessToken);
     setDesktopBoot("ready");
     replace("/");
-  }, [replace]);
+  }, [activateDesktopHumanSession, replace]);
 
   useEffect(() => {
     if (!desktop) return;
@@ -438,7 +446,7 @@ export function App() {
       return await restoreDesktopAccess(desktopCredentialVaultForOrigin(startupOrigin), startupOrigin);
     })().then((accessToken) => {
         if (!alive) return;
-        setToken(accessToken);
+        if (accessToken !== null) activateDesktopHumanSession(accessToken);
         setDesktopRestoreFailure("retryable");
         setDesktopBoot("ready");
       })
@@ -449,7 +457,7 @@ export function App() {
         setDesktopBoot("error");
       });
     return () => { alive = false; };
-  }, [desktop]);
+  }, [activateDesktopHumanSession, desktop]);
 
   // 全局设置面板（#273）：语言/主题/通知/账号（身份 + @别名编辑 + 退出）都收进这里，由顶栏齿轮开合。
   // 账号 @handle / 昵称编辑复用 HandleSetup，放进面板的账号区（不再在顶栏单独挂一个浮层入口）。
@@ -889,7 +897,7 @@ export function App() {
             setAuthError(null);
             setActiveOrigin(origin);
             setServerPairingFlow(initialDesktopServerPairingFlow(origin));
-            setToken(accessToken);
+            activateDesktopHumanSession(accessToken);
           }}
         />
         <DesktopRecoveryUpdater />
@@ -926,7 +934,7 @@ export function App() {
           setChannels(null);
           setListError(null);
           setMe(null);
-          setToken(accessToken);
+          activateDesktopHumanSession(accessToken);
         }}
       />
     );

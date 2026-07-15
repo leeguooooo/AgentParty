@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "./i18n/locale";
 import { apiBase, clearApiBase } from "./lib/base";
+import { applyShareToken, clearShareToken, currentShareToken, isShareMode } from "./lib/api";
 import {
   __resetDesktopRuntimeForTests,
   __setDesktopRuntimeDependenciesForTests,
@@ -49,6 +50,16 @@ let notificationActionHandler: ((notification: { extra?: Record<string, unknown>
 let desktopFocusCalls: string[] = [];
 let pushedPaths: string[] = [];
 let desktopWindowShownHandler: (() => void) | null = null;
+
+async function waitForCondition(condition: () => boolean, description: string, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}`);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+}
 
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -245,6 +256,7 @@ afterEach(async () => {
   renderer = null;
   __resetDesktopRuntimeForTests();
   clearApiBase();
+  clearShareToken();
   for (const key of [
     "IS_REACT_ACT_ENVIRONMENT",
     "__TAURI_INTERNALS__",
@@ -260,6 +272,61 @@ afterEach(async () => {
 });
 
 describe("App desktop server pairing behavior", () => {
+  test("a restored human session clears a stale desktop watch credential", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    const fetchBeforeRestore = globalThis.fetch;
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: async (input: string | URL | Request, init?: RequestInit) => {
+        const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+        requests.push({ url: String(input), authorization: headers.get("authorization") });
+        return fetchBeforeRestore(input, init);
+      },
+    });
+    applyShareToken("stale-watch-token");
+    expect(isShareMode()).toBe(true);
+
+    act(() => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+    });
+    await waitForCondition(
+      () => !isShareMode() && (renderer?.root.findAllByProps({ className: "app-settings-btn" }).length ?? 0) === 1,
+      "the restored human desktop session",
+    );
+
+    expect(isShareMode()).toBe(false);
+    expect(currentShareToken()).toBeNull();
+    expect(requests).toContainEqual({
+      url: `${activeOrigin}/api/channels`,
+      authorization: "Bearer old-access",
+    });
+    expect(requests.some((request) => request.url.includes("stale-watch-token"))).toBe(false);
+    expect(renderer!.root.findByProps({ className: "app-settings-btn" })).toBeTruthy();
+  });
+
+  test("a missing restored human credential preserves an active watch session", async () => {
+    storedCredential = null;
+    let credentialReads = 0;
+    const invokeBeforeMissingCredential = invokeHandler;
+    invokeHandler = async (command, args) => {
+      if (command === "desktop_credential_read") credentialReads += 1;
+      return invokeBeforeMissingCredential(command, args);
+    };
+    applyShareToken("stale-watch-token");
+
+    act(() => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+    });
+    await waitForCondition(
+      () => credentialReads === 1,
+      "the desktop restore without a credential",
+    );
+
+    expect(isShareMode()).toBe(true);
+    expect(currentShareToken()).toBe("stale-watch-token");
+    expect(renderer!.root.findAllByProps({ className: "app-settings-btn" })).toHaveLength(0);
+  });
+
   test("hidden desktop startup defers Keychain restore until the main window is shown", async () => {
     let credentialReads = 0;
     invokeHandler = async (command, args) => {
