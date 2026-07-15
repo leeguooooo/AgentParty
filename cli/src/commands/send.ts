@@ -193,10 +193,6 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     console.error("--mention cannot target reserved name system");
     return null;
   }
-  if (explicitMentions.length > MAX_MENTIONS) {
-    console.error(`too many mentions (max ${MAX_MENTIONS})`);
-    return null;
-  }
   // Keep CLI, Web and Worker on the same body-mention contract. Explicit
   // --mention values stay first; body tokens are appended in source order.
   const mentions: string[] = [];
@@ -206,6 +202,10 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     if (seenMentions.has(key)) continue;
     seenMentions.add(key);
     mentions.push(mention);
+  }
+  if (mentions.length > MAX_MENTIONS) {
+    console.error(`too many mentions (max ${MAX_MENTIONS})`);
+    return null;
   }
   for (const mention of extractMentionTokens(text)) {
     if (mentions.length >= MAX_MENTIONS) break;
