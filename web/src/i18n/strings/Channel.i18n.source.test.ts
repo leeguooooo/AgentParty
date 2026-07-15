@@ -174,6 +174,32 @@ describe("Channel i18n source guard (#350)", () => {
     expect(source).toContain("onlineAgentCount");
   });
 
+  test("orders channel tools by content, members, access, then channel management", () => {
+    const toolbar = source.slice(
+      source.indexOf("<ChannelToolstrip"),
+      source.indexOf("{activePanel !== null"),
+    );
+    const controls = [
+      'openPanel("charter")',
+      'openPanel("team")',
+      'openPanel("tasks")',
+      'openPanel("search")',
+      "<AgentJoin",
+      "<AgentTokens",
+      "<VisibilityToggle",
+      "<JoinLink",
+      'openPanel("settings")',
+      'className="d-btn archive-channel-btn"',
+    ];
+    const positions = controls.map((control) => toolbar.indexOf(control));
+
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(toolbar).toContain('className="chan-admin-group chan-admin-group--agents"');
+    expect(toolbar).toContain('className="chan-admin-group chan-admin-group--access"');
+    expect(toolbar).toContain('className="chan-admin-group chan-admin-group--channel"');
+  });
+
   test("reject actions no longer use a browser prompt", () => {
     expect(source).not.toContain("window.prompt");
   });

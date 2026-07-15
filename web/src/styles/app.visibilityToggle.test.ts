@@ -18,7 +18,9 @@ describe("channel visibility controls layout", () => {
     expect(ruleBody(".chan-toolstrip")).toContain("flex-wrap: nowrap");
     expect(ruleBody(".chan-toolstrip-content")).toContain("overflow: visible");
     expect(css).toMatch(/@media \(max-width: 1759px\)[\s\S]*\.chan-toolstrip-content\s*{[^}]*overflow-x:\s*auto;/s);
-    expect(css).toMatch(/\.chan-tool-buttons,\s*\.chan-tool-actions,\s*\.chan-admin-actions\s*{[^}]*flex-wrap:\s*nowrap;/s);
+    expect(css).toMatch(/\.chan-tool-buttons,\s*\.chan-tool-actions,\s*\.chan-admin-actions,\s*\.chan-admin-group\s*{[^}]*flex-wrap:\s*nowrap;/s);
+    expect(ruleBody(".chan-admin-actions")).toContain("gap: 0");
+    expect(ruleBody(".chan-admin-group + .chan-admin-group")).toContain("border-left: 1.4px solid var(--t-faint)");
     expect(ruleBody(".chan-toolstrip-content")).not.toContain("flex-direction: column");
   });
 });
