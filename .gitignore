@@ -10,3 +10,5 @@ cli/party.exe
 assets/generated/
 .secrets/
 .superpowers/
+/cli/.probe-results/
+/mcp-notification-probe.jsonl

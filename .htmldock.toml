@@ -1,0 +1,8 @@
+team = "legacy"
+project_slug = "agentparty"
+sync = true
+visibility = "team"
+default_owner = ""
+module_root = "docs"
+ignore = ["draft/**", "scratch/*.html"]
+auto_module = true

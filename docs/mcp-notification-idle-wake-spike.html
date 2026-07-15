@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentParty #553 · MCP notification idle-wake 实验</title>
+  <style>
+    :root {
+      --fg: #202124;
+      --muted: #5f6368;
+      --accent: #2457c5;
+      --border: #d9dde5;
+      --soft: #f5f7fa;
+      --code: #eef1f5;
+      --ok: #166534;
+      --warn: #9a3412;
+    }
+    * { box-sizing: border-box; }
+    body {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 2rem 1.4rem 5rem;
+      color: var(--fg);
+      font: 16px/1.65 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header { border-bottom: 3px solid var(--accent); padding-bottom: 1.1rem; margin-bottom: 2rem; }
+    h1 { margin: 0 0 .45rem; font-size: 1.75rem; line-height: 1.25; }
+    h2 { margin-top: 2.4rem; padding-left: .65rem; border-left: 4px solid var(--accent); font-size: 1.25rem; }
+    h3 { margin-top: 1.6rem; font-size: 1.05rem; }
+    p, li { max-width: 92ch; }
+    a { color: var(--accent); }
+    .meta { color: var(--muted); font-size: .9rem; }
+    .meta span { display: inline-block; margin-right: 1.2rem; }
+    .verdict {
+      margin: 1.4rem 0;
+      padding: 1rem 1.1rem;
+      border: 1px solid var(--border);
+      border-left: 5px solid var(--warn);
+      background: var(--soft);
+    }
+    .verdict strong { color: var(--warn); }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+    th, td { border: 1px solid var(--border); padding: .55rem .65rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); }
+    .yes { color: var(--ok); font-weight: 650; }
+    .no { color: var(--warn); font-weight: 650; }
+    code { background: var(--code); border-radius: 3px; padding: .08em .3em; font: .88em "SFMono-Regular", Menlo, Consolas, monospace; }
+    pre { overflow-x: auto; padding: .9rem 1rem; background: var(--code); border: 1px solid var(--border); border-radius: 6px; font-size: .82rem; line-height: 1.55; }
+    pre code { padding: 0; background: transparent; }
+    aside { margin: 1rem 0; padding: .75rem 1rem; background: var(--soft); border-left: 4px solid var(--accent); }
+    .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; margin: 1.1rem 0; }
+    .flow span { padding: .65rem; text-align: center; border: 1px solid var(--border); background: var(--soft); font-size: .9rem; }
+    .flow span + span::before { content: "→ "; color: var(--accent); font-weight: 700; }
+    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .88rem; }
+    @media (max-width: 800px) {
+      body { padding-inline: .8rem; }
+      .flow { grid-template-columns: 1fr; }
+      .flow span + span::before { content: "↓ "; }
+      table { display: block; overflow-x: auto; white-space: normal; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MCP notification 能否唤醒 idle Codex / Claude Code</h1>
+    <p class="meta">
+      <span>Issue <a href="https://github.com/leeguooooo/AgentParty/issues/553">#553</a></span>
+      <span>实验日期 2026-07-15</span>
+      <span>范围 stdio · localhost Streamable HTTP · 指定客户端版本</span>
+    </p>
+  </header>
+
+  <section aria-labelledby="verdict">
+    <h2 id="verdict">结论</h2>
+    <div class="verdict">
+      <strong>这些版本里的 MCP notification 不满足 AgentParty 的无人值守唤醒要求。</strong>
+      四类 notification 都在已完成 turn 之后发出。Codex CLI 0.144.4、Codex Desktop 内置的 0.144.2 app-server 后端和 Claude Code 2.1.210 的 stdio 格都没有因此创建新 turn。Codex CLI 0.144.4 的 localhost Streamable HTTP 格结果相同：客户端诊断端渲染了 logging marker，但没有自动创建模型 turn。后续人工验证 turn 的模型输出也没有出现随机 marker。
+    </div>
+    <p>这个结果只说明两件事：没有观察到 notification 触发的新 turn；模型输出没有出现 marker。它不能证明 payload 从未进入客户端内部状态，也不能证明 payload 不在任何模型上下文路径里。server-side send 成功同样不能当作模型收件回执。</p>
+    <p>产品实现仍走 AgentParty 自己的持久 delivery。MCP 保留给 tools、resources 和诊断事件，不参与“消息已经交给模型”的正确性判断。</p>
+    <div class="flow" aria-label="AgentParty 可靠唤醒链路">
+      <span>频道消息持久化</span><span>定向 delivery 入队</span><span>serve claim + ACK</span><span>runner turn + final ACK</span>
+    </div>
+  </section>
+
+  <section aria-labelledby="matrix">
+    <h2 id="matrix">实验矩阵</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Harness / 状态</th>
+          <th>server send / client 观测</th>
+          <th>notification 后的新 turn</th>
+          <th>模型输出出现 marker</th>
+          <th>notification 触发的模型成本</th>
+          <th>验证 turn，另计</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Claude Code · active tool call</td>
+          <td class="yes">send 4/4；无独立 client receipt</td>
+          <td class="no">新增 0</td>
+          <td class="no">否</td>
+          <td>0 turn / 0 token</td>
+          <td>现有 active turn：$0.0415934；未采集 token。</td>
+        </tr>
+        <tr>
+          <td>Claude Code · TUI turn ended / idle</td>
+          <td class="yes">send 4/4；TUI 无新 turn</td>
+          <td class="no">0</td>
+          <td class="no">否；人工下一轮输出仍无 marker</td>
+          <td>0 turn / 0 token</td>
+          <td>人工 follow-up；未采集 token。</td>
+        </tr>
+        <tr>
+          <td>Claude Code · background agent done</td>
+          <td class="yes">send 4/4；状态仍为 idle/done</td>
+          <td class="no">0</td>
+          <td class="no">无新模型输出</td>
+          <td>0 turn / 0 token</td>
+          <td>只查状态和日志：0 model turn / 0 token。</td>
+        </tr>
+        <tr>
+          <td>Codex CLI · active tool call</td>
+          <td class="yes">send 4/4；logging 被渲染成诊断日志</td>
+          <td class="no">新增 0</td>
+          <td class="no">否</td>
+          <td>0 turn / 0 token</td>
+          <td>现有 active turn：input 59,710，cached 47,360，output 172，reasoning 45。</td>
+        </tr>
+        <tr>
+          <td>Codex CLI · TUI turn ended / idle</td>
+          <td class="yes">send 4/4；TUI 无新 turn</td>
+          <td class="no">0</td>
+          <td class="no">否；人工下一轮输出仍无 marker</td>
+          <td>0 turn / 0 token</td>
+          <td>人工 follow-up；未采集 token。</td>
+        </tr>
+        <tr>
+          <td>Codex CLI 0.144.4 app-server · Streamable HTTP active</td>
+          <td class="yes">send 4/4；stderr logging handler 渲染随机 marker</td>
+          <td>不适用；notification 发生在人工启动的 active turn 内</td>
+          <td class="no">否</td>
+          <td>增量成本无法从 active turn 中单独分离</td>
+          <td>该 turn：input 17,176，cached 16,128，output 26，reasoning 0。</td>
+        </tr>
+        <tr>
+          <td>Codex CLI 0.144.4 app-server · Streamable HTTP completed / idle</td>
+          <td class="yes">send 4/4；stderr logging handler 渲染随机 marker</td>
+          <td class="no">30.004 秒内为 0</td>
+          <td class="no">否；人工下一轮输出仍无 marker</td>
+          <td>0 turn / 0 token</td>
+          <td>arming：17,686 total；人工 follow-up：17,758 total。</td>
+        </tr>
+        <tr>
+          <td>Codex Desktop 内置 app-server 0.144.2 · idle / restart</td>
+          <td class="yes">send 4/4；logging 在后端 stderr 中有记录</td>
+          <td class="no">30.004 秒内为 0</td>
+          <td class="no">否；follow-up 与重启后恢复验证都返回 null</td>
+          <td>0 turn / 0 token</td>
+          <td>arming：35,186 total；follow-up：17,928 total；restart：71,327 total。三者都不是 notification 自动产生的 turn。</td>
+        </tr>
+      </tbody>
+    </table>
+    <aside>“输出没有 marker”是输出层观察，不等于“marker 肯定没进上下文”。每格的 0 token 指 notification 没有创建模型 turn，因此没有 notification-triggered turn 的 token；arming、follow-up 和 restart 验证成本单独列出。active 格没有可分离的 notification 增量成本。</aside>
+  </section>
+
+  <section aria-labelledby="desktop-proof">
+    <h2 id="desktop-proof">Desktop 证据纠正</h2>
+    <p>旧记录把 PATH 中的 Codex CLI 0.144.4 写成了 Desktop 后端。本轮改为直接启动 ChatGPT.app 内置 binary，并记录版本与 SHA-256：</p>
+    <table>
+      <tbody>
+        <tr><th>Binary</th><td><code>/Applications/ChatGPT.app/Contents/Resources/codex</code></td></tr>
+        <tr><th>Version</th><td><code>codex-cli 0.144.2</code></td></tr>
+        <tr><th>SHA-256</th><td><code>4a9e84ad1c9622e8f6a50dafd75710eaee4af79dc5bcf8bafd4471763255fe18</code></td></tr>
+        <tr><th>隔离</th><td>临时 <code>CODEX_HOME</code>、空 workspace、read-only sandbox；不加载用户 config、plugins、hooks 或既有 MCP。证据不记录 auth 内容。</td></tr>
+        <tr><th>时序</th><td>arming turn 在 <code>1784103497260</code> ms 完成；四次 send 在 <code>1784103499686–1784103499687</code> ms 发生，均晚于 completed。</td></tr>
+        <tr><th>观察</th><td>idle 30.004 秒，unsolicited turn 为 0；严格 JSON follow-up 与新 app-server 进程恢复验证的输出都没有 marker。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section aria-labelledby="setup">
+    <h2 id="setup">环境与通知类型</h2>
+    <table>
+      <tbody>
+        <tr><th>Codex CLI</th><td><code>0.144.4</code></td><th>Desktop 内置后端</th><td><code>0.144.2</code></td></tr>
+        <tr><th>Claude Code</th><td><code>2.1.210</code></td><th>AgentParty CLI / Bun</th><td><code>0.2.117</code> / <code>1.3.14</code></td></tr>
+        <tr><th>Transport</th><td><code>stdio</code> + <code>Streamable HTTP</code></td><th>Probe</th><td><code>mcp-notification-probe.ts</code> + <code>codex-app-mcp-notification-probe.ts</code> + <code>codex-http-mcp-notification-probe.ts</code></td></tr>
+      </tbody>
+    </table>
+    <table>
+      <thead><tr><th>通知</th><th>实验用途</th></tr></thead>
+      <tbody>
+        <tr><td><code>logging/message</code></td><td>查看客户端是否渲染诊断日志。日志可见不代表模型已收到。</td></tr>
+        <tr><td><code>resources/updated</code></td><td>发送 resource 更新事件。</td></tr>
+        <tr><td><code>resources/list_changed</code></td><td>发送 resource discovery 变化事件。</td></tr>
+        <tr><td><code>tools/list_changed</code></td><td>发送 tool discovery 变化事件。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section aria-labelledby="repro">
+    <h2 id="repro">复现命令</h2>
+    <h3>通用 stdio probe</h3>
+    <pre><code>cd cli
+bun build scripts/mcp-notification-probe.ts \
+  --target=bun --outfile=/tmp/agentparty-mcp-notification-probe.js
+
+# MCP child 的 stdout 只走协议；事件写入单独 JSONL
+MCP_PROBE_LOG=/tmp/ap553/server.jsonl \
+  bun run scripts/mcp-notification-probe.ts</code></pre>
+
+    <h3>Codex Desktop 内置后端</h3>
+    <pre><code>cd /ABS/PATH/agentparty
+MCP_APP_CODEX_BIN=/Applications/ChatGPT.app/Contents/Resources/codex \
+MCP_APP_PROBE_LOG=/tmp/ap553/desktop.jsonl \
+MCP_PROBE_LOG=/tmp/ap553/desktop-mcp.jsonl \
+MCP_APP_IDLE_MS=30000 \
+MCP_APP_NOTIFICATION_DELAY_MS=5000 \
+  bun cli/scripts/codex-app-mcp-notification-probe.ts
+
+# 默认使用临时 CODEX_HOME 与空 workspace，退出后清理。
+# 只有重启恢复格使用 MCP_APP_KEEP_ISOLATED_STATE=1；验证完再删除临时目录。
+jq -c 'select(.event == "idle_observation_finished" or .event == "probe_summary")' \
+  /tmp/ap553/desktop.jsonl</code></pre>
+
+    <h3>Codex CLI 0.144.4 · Streamable HTTP</h3>
+    <pre><code>cd /ABS/PATH/agentparty
+MCP_HTTP_PROBE_LOG=/tmp/ap553/http.jsonl \
+MCP_HTTP_IDLE_MS=30000 \
+MCP_HTTP_NOTIFICATION_DELAY_MS=10000 \
+  bun cli/scripts/codex-http-mcp-notification-probe.ts
+
+# 脚本绑定随机 localhost 端口，跑完 active、completed/idle 和人工 follow-up 后，
+# 自动关闭 HTTP/SSE 与 app-server，并删除临时 CODEX_HOME 和 workspace。
+jq -c 'select(.event == "active_probe_result" or .event == "idle_probe_result" or .event == "probe_summary")' \
+  /tmp/ap553/http.jsonl</code></pre>
+
+    <h3>Claude Code active</h3>
+    <pre><code>probe="$PWD/cli/scripts/mcp-notification-probe.ts"
+log="/tmp/ap553/claude-active.jsonl"
+mcp=$(jq -nc --arg probe "$probe" --arg log "$log" \
+  '{mcpServers:{"wake-probe":{command:"bun",args:["run",$probe],env:{MCP_PROBE_LOG:$log}}}}')
+
+claude -p --model haiku --setting-sources local --disable-slash-commands \
+  --strict-mcp-config --mcp-config "$mcp" \
+  --output-format stream-json --verbose \
+  'Call mcp__wake-probe__probe_active with hold_ms=1500. Return JSON with run_id, saw_unsolicited_notification_token, exact_token_or_null.'</code></pre>
+  </section>
+
+  <section aria-labelledby="evidence">
+    <h2 id="evidence">脱敏事件摘录</h2>
+    <pre><code>{"event":"app_server_started","ts_ms":1784103485727,
+ "codex_version":"codex-cli 0.144.2","existing_user_config_loaded":false,
+ "binary_sha256":"4a9e84ad1c9622e8f6a50dafd75710eaee4af79dc5bcf8bafd4471763255fe18"}
+{"event":"completed_turn_then_notifications_then_idle_observation",
+ "turn_completed_at_ms":1784103497260,
+ "send_ms":[1784103499686,1784103499687,1784103499687,1784103499687],
+ "all_after_completed":true,"idle_elapsed_ms":30004,"unsolicited_turn_count":0}
+{"event":"verification_output",
+ "followup":{"saw_unsolicited_notification_token":false,"exact_token_or_null":null},
+ "marker_in_model_output":false}
+{"event":"restart_verification_output",
+ "after_restart_saw_unsolicited_notification_token":false,"exact_token_or_null":null}
+{"event":"streamable_http_active","codex_version":"codex-cli 0.144.4",
+ "server_sent":4,"client_stderr_rendered_logging_marker":true,
+ "marker_in_model_output":false}
+{"event":"streamable_http_completed_idle","all_sends_after_completed":true,
+ "completed_to_first_send_ms":7589,"idle_observation_ms":30004,
+ "unsolicited_turn_count":0,"marker_in_followup_model_output":false}</code></pre>
+    <p><a href="evidence/mcp-notification-probe-2026-07-15.jsonl"><code>docs/evidence/mcp-notification-probe-2026-07-15.jsonl</code></a> 保存结构化结果和脱敏原始事件摘录。它保留 binary 版本、SHA、实验 invocation、随机 marker、send 时序、观察窗口、输出与模型成本；删除 thread、turn、message、background-agent 等会话标识，也不包含本机 auth、用户 config 或临时目录。</p>
+  </section>
+
+  <section aria-labelledby="limits">
+    <h2 id="limits">边界</h2>
+    <p>HTTP 格使用 localhost 上的 sessionful Streamable HTTP 与长连接事件流，证明这个客户端版本在该 transport 路径上的行为；它没有覆盖公网、TLS、代理、断网重连或高延迟网络。stdio 结果不外推到其他客户端，HTTP 结果也不外推到 SSE 兼容层或未来 transport。Desktop 格驱动的是应用内置 app-server 的 agent 后端，不声称 GUI shell 展示了 receipt。客户端若发布 notification→new-turn 的明确契约，需要按新版本和对应 transport 重跑。</p>
+  </section>
+
+  <section aria-labelledby="decision">
+    <h2 id="decision">落到 AgentParty</h2>
+    <table>
+      <thead><tr><th>用途</th><th>处理</th><th>原因</th></tr></thead>
+      <tbody>
+        <tr><td>MCP tools/resources</td><td class="yes">继续使用</td><td>适合结构化调用、schema 和资源发现。</td></tr>
+        <tr><td>UI 刷新 / 诊断日志</td><td class="yes">只做 best-effort</td><td>客户端可以渲染协议事件，但这不是模型收件证据。</td></tr>
+        <tr><td>notification 携带私密频道正文</td><td class="no">禁止</td><td>没有 model delivery 保证，正文还可能出现在诊断日志里。</td></tr>
+        <tr><td>notification 充当 delivery ACK</td><td class="no">禁止</td><td>server send 成功不等于模型已处理。</td></tr>
+        <tr><td>无人值守 wake</td><td class="no">不依赖 MCP notification</td><td>使用持久 delivery、claim/lease、authoritative ACK、replay 与 serve supervisor。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    关联实现：<code>party mcp --help</code> 说明协议边界；#551 负责可靠消息路径，#548 负责 owner 非阻塞续接，#550 负责 serve 自愈。
+  </footer>
+</body>
+</html>
