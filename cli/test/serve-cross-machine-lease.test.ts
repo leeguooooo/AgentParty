@@ -160,17 +160,18 @@ describe("serve 跨机租约客户端互斥（#99）", () => {
     const clientFrames: ClientFrame[] = [];
     server = startMockServer((frame, sock) => {
       clientFrames.push(frame);
-      if (frame.type !== "hello") return;
+      if (frame.type !== "serve_lease") return;
+      sock.send(leaseFrame(true));
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 20);
+    }, (sock) => {
+      // Production sends welcome from onConnect, before it has processed the client's hello.
       sock.send(welcomeFrame(0, "me"));
-      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 40);
     });
     const o = opts({ server: server.url, runCommand: async () => {} });
     await runServe(o);
-    const hello = clientFrames.find((f) => f.type === "hello");
-    expect(hello).toMatchObject({ directed_delivery: "v1" });
-    const claim = clientFrames.find((f) => (f as { type: string }).type === "serve_lease");
-    expect(claim).toBeDefined();
-    expect((claim as { op?: string }).op).toBe("claim");
-    expect(clientFrames.indexOf(hello!)).toBeLessThan(clientFrames.indexOf(claim!));
+    expect(clientFrames.slice(0, 2)).toMatchObject([
+      { type: "hello", directed_delivery: "v1" },
+      { type: "serve_lease", op: "claim" },
+    ]);
   });
 });

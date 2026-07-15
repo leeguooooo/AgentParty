@@ -1301,6 +1301,10 @@ function snippetFor(frame: MsgFrame, field: SearchHit["match_field"]): string {
 export class ChannelDO extends Server<Env> {
   static options = { hibernate: true };
   private atomicDeliveryEffects: AtomicDeliveryEffects | null = null;
+  // partyserver can invoke async WebSocket handlers for the same connection while an earlier
+  // frame is awaiting I/O. Preserve wire order explicitly: hello must finish token validation and
+  // capability setup before an immediately-following serve lease / adapter / send frame runs.
+  private readonly wsMessageTails = new Map<string, Promise<void>>();
 
   onStart() {
     const sql = this.ctx.storage.sql;
@@ -2100,6 +2104,21 @@ export class ChannelDO extends Server<Env> {
   }
 
   async onMessage(connection: Connection<ConnState>, message: WSMessage) {
+    const previous = this.wsMessageTails.get(connection.id) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(() => this.onMessageSerial(connection, message));
+    this.wsMessageTails.set(connection.id, current);
+    try {
+      await current;
+    } finally {
+      if (this.wsMessageTails.get(connection.id) === current) {
+        this.wsMessageTails.delete(connection.id);
+      }
+    }
+  }
+
+  private async onMessageSerial(connection: Connection<ConnState>, message: WSMessage) {
     const badRequest = () =>
       this.sendFrame(connection, { type: "error", code: "bad_request", message: "invalid frame" });
     if (typeof message !== "string") {
@@ -2366,7 +2385,11 @@ export class ChannelDO extends Server<Env> {
     }
   }
 
-  onClose(connection: Connection<ConnState>) {
+  async onClose(connection: Connection<ConnState>) {
+    // A close event is ordered after all data frames already received on this socket. Do not
+    // reclaim its delivery/serve leases while one of those frames is still queued behind hello or
+    // awaiting D1; otherwise a final replied update can be undone by premature disconnect cleanup.
+    await this.wsMessageTails.get(connection.id)?.catch(() => undefined);
     const st = connection.state;
     if (!st || !st.name || st.archived) return;
     // #551：work 租约属于具体连接，不属于模糊的在线身份。尚未启动的 v1 claim 可安全

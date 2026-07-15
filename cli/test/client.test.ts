@@ -405,6 +405,25 @@ describe("ws client", () => {
     expect(statuses.map((s) => s.status)).toEqual(["open", "reconnecting", "open"]);
   });
 
+  test("puts hello on the wire before an open callback can synchronously send an actionable frame", () => {
+    useProbeWebSocket();
+    conn = connect("https://party.invalid", "ap_tok", "dev", 0, {
+      onStatus: (status) => {
+        if (status !== "open") return;
+        expect(conn?.send({
+          type: "heartbeat",
+          current_task: null,
+          task_started_at: null,
+          heartbeat_at: null,
+        })).toBe(true);
+      },
+    });
+
+    const socket = ProbeWebSocket.instances[0]!;
+    socket.open();
+    expect(socket.sent.map((raw) => JSON.parse(raw).type)).toEqual(["hello", "heartbeat"]);
+  });
+
   test("onStatus reports closed with the fatal reason on a terminal 1008 close, and never reconnecting", async () => {
     server = startMockServer((frame, sock) => {
       if (frame.type === "hello") {

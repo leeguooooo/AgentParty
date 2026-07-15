@@ -520,6 +520,68 @@ describe("持久定向投递（issue #551）", () => {
     standby.close();
   });
 
+  it("processes an already-received terminal update before disconnect cleanup", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("target"));
+    const slug = await createChannel(sender.token);
+    const holder = await WsClient.open(slug, target.token);
+    await holder.nextOfType("welcome");
+    expect((await claim(holder)).held).toBe(true);
+    await sendMention(slug, sender.token, target.name, "reply then close");
+    const work = (await holder.nextOfType("delivery")) as DirectedDeliveryFrame;
+
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, async (instance: ChannelDO) => {
+      const runtime = instance as unknown as {
+        isTokenActive(tokenHash: string): Promise<boolean>;
+        onMessage(connection: unknown, message: string): Promise<void>;
+        onClose(connection: unknown): void | Promise<void>;
+      };
+      const connection = [...instance.getConnections<{ name?: string; serveLeaseHeld?: boolean }>()]
+        .find((candidate) =>
+          candidate.state?.name === target.name && candidate.state?.serveLeaseHeld === true
+        );
+      expect(connection).toBeDefined();
+
+      const realIsTokenActive = runtime.isTokenActive.bind(instance);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let entered!: () => void;
+      const validationEntered = new Promise<void>((resolve) => { entered = resolve; });
+      runtime.isTokenActive = async (tokenHash: string) => {
+        entered();
+        await gate;
+        return realIsTokenActive(tokenHash);
+      };
+      try {
+        const update = runtime.onMessage(connection!, JSON.stringify({
+          type: "delivery_update",
+          delivery_id: work.delivery.id,
+          request_id: "reply-before-close",
+          state: "replied",
+          work_id: work.delivery.work_id,
+          continuation_ref: work.delivery.continuation_ref,
+        }));
+        await validationEntered;
+        const close = Promise.resolve(runtime.onClose(connection!));
+        release();
+        await Promise.all([update, close]);
+      } finally {
+        release();
+        runtime.isTokenActive = realIsTokenActive;
+      }
+    });
+
+    expect((await deliveryRows(slug))[0]).toMatchObject({
+      id: work.delivery.id,
+      state: "replied",
+      attempt: 1,
+      lease_connection_id: null,
+      lease_adapter: null,
+    });
+    holder.close();
+  });
+
   it("权威 running ACK 后 heartbeat 续租；租约到期显式 failed 而不重放未知副作用", async () => {
     const sender = await seedToken("agent", uniq("sender"));
     const target = await seedToken("agent", uniq("target"));
