@@ -372,6 +372,30 @@ describe("DivisionBoard org-structure relationships (#168)", () => {
 // 把当前已声明分工（assigned + self）拼成 markdown 小节、合并进现有公告文本、
 // 再把结果通过 onSyncToCharter 交给上层去落盘——按钮本身不发网络请求。
 describe("DivisionBoard sync-to-charter (#150)", () => {
+  test("syncs typed agent names and drops a stale unresolved owner role", () => {
+    let synced: string | null = null;
+    render(
+      baseProps({
+        canModerate: true,
+        charterText: "# Team charter",
+        roles: [
+          { name: "lark:on_owner", role: "host", responsibility: "大脑", assigned_by: "leo", assigned_at: 1 },
+          { name: "ai-girl", role: "worker", responsibility: "服务中台", assigned_by: "leo", assigned_at: 1, kind: "agent", display: "ai-girl" },
+        ],
+        presence: {
+          "ai-girl-host-codex": presenceEntry({ name: "ai-girl-host-codex", role: "host", role_source: "self", note: "大脑大脑" }),
+          "ai-girl": presenceEntry({ name: "ai-girl" }),
+        },
+        onSyncToCharter: (text: string) => { synced = text; },
+      }),
+    );
+    const btn = renderer!.root.find((n) => n.props.className === "d-btn role-sync-charter-btn");
+    act(() => btn.props.onClick());
+    expect(synced).toContain("ai-girl-host-codex");
+    expect(synced).toContain("ai-girl");
+    expect(synced).not.toContain("lark:on_owner");
+  });
+
   test("moderator sees a sync button that merges declared roles into the existing charter text", () => {
     let synced: string | null = null;
     render(
