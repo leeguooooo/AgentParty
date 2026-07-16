@@ -66,8 +66,8 @@ describe("responsive product-shell polish", () => {
     const mobileCards = mediaBlockContaining("@media (max-width: 760px)", ".msg-agent-card");
 
     expect(css).toMatch(/\.msg-agent-card\s*\{[^}]*display:\s*none;/s);
-    expect(css).toMatch(/\.msg-agent-popover:not\(\.msg-agent-popover--closed\):hover \.msg-agent-card,\s*\.msg-agent-popover:not\(\.msg-agent-popover--closed\):focus-within \.msg-agent-card,\s*\.msg-agent-popover--open \.msg-agent-card\s*\{[^}]*display:\s*block;/s);
-    expect(desktopCards).toMatch(/\.msg-agent-popover:not\(\.msg-agent-popover--closed\):hover::after,[\s\S]*\.msg-agent-popover--open::after\s*\{[^}]*width:\s*min\(360px,\s*calc\(100vw - 32px\)\);[^}]*height:\s*7px;/s);
+    expect(css).toMatch(/\.msg-agent-popover--hover-open \.msg-agent-card,\s*\.msg-agent-popover:not\(\.msg-agent-popover--closed\):focus-within \.msg-agent-card,\s*\.msg-agent-popover--open \.msg-agent-card\s*\{[^}]*display:\s*block;/s);
+    expect(desktopCards).toMatch(/\.msg-agent-popover--hover-open::after,[\s\S]*\.msg-agent-popover--open::after\s*\{[^}]*width:\s*min\(360px,\s*calc\(100vw - 32px\)\);[^}]*height:\s*7px;/s);
     expect(desktopCards).toMatch(/\.msg-agent-popover--align-end::after\s*\{[^}]*left:\s*auto;[^}]*right:\s*0;/s);
     expect(desktopCards).toMatch(/\.msg-agent-popover--align-end \.msg-agent-card\s*\{[^}]*left:\s*auto;[^}]*right:\s*0;/s);
     expect(mobileCards).toMatch(/\.msg-agent-card\s*\{[^}]*inset:\s*auto 10px/s);

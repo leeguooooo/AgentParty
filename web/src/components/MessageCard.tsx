@@ -153,6 +153,8 @@ function activityLine(message: MsgFrame): string {
   return `${line.slice(0, 88)}…`;
 }
 
+export const AGENT_CARD_HOVER_DELAY_MS = 240;
+
 /** Returns whether a desktop agent card must anchor to the trigger's end edge. */
 export function shouldAlignAgentCardEnd(
   triggerLeft: number,
@@ -186,20 +188,36 @@ function AgentInfoPopover({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
+  const [hoverOpen, setHoverOpen] = useState(false);
   const [suppressed, setSuppressed] = useState(false);
   const [alignCardEnd, setAlignCardEnd] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearHoverTimer = useCallback(() => {
+    if (hoverTimerRef.current === null) return;
+    clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = null;
+  }, []);
+  const scheduleHoverOpen = useCallback(() => {
+    clearHoverTimer();
+    hoverTimerRef.current = setTimeout(() => {
+      hoverTimerRef.current = null;
+      setHoverOpen(true);
+    }, AGENT_CARD_HOVER_DELAY_MS);
+  }, [clearHoverTimer]);
   const syncCardAlignment = useCallback(() => {
     const trigger = triggerRef.current;
     if (trigger === null || typeof trigger.getBoundingClientRect !== "function" || typeof window === "undefined") return;
     setAlignCardEnd(shouldAlignAgentCardEnd(trigger.getBoundingClientRect().left, window.innerWidth));
   }, []);
   const dismiss = useCallback(() => {
+    clearHoverTimer();
+    setHoverOpen(false);
     triggerRef.current?.blur();
     setOpen(false);
     setSuppressed(true);
-  }, []);
+  }, [clearHoverTimer]);
   const leader = assignment?.reports_to ?? entry?.lineage?.parent_agent ?? null;
   const role = assignment?.role ?? entry?.role ?? null;
   const responsibility = assignment?.responsibility?.trim() || null;
@@ -221,16 +239,24 @@ function AgentInfoPopover({
     window.addEventListener("resize", syncCardAlignment);
     return () => window.removeEventListener("resize", syncCardAlignment);
   }, [open, syncCardAlignment]);
+  useEffect(() => clearHoverTimer, [clearHoverTimer]);
   return (
     <div
       ref={rootRef}
-      className={`msg-agent-popover${open ? " msg-agent-popover--open" : ""}${suppressed ? " msg-agent-popover--closed" : ""}${alignCardEnd ? " msg-agent-popover--align-end" : ""}`}
+      className={`msg-agent-popover${open ? " msg-agent-popover--open" : ""}${hoverOpen ? " msg-agent-popover--hover-open" : ""}${suppressed ? " msg-agent-popover--closed" : ""}${alignCardEnd ? " msg-agent-popover--align-end" : ""}`}
       onMouseEnter={() => {
         syncCardAlignment();
-        if (!open) setSuppressed(false);
+        if (!open) {
+          setSuppressed(false);
+          scheduleHoverOpen();
+        }
       }}
       onMouseLeave={() => {
-        if (!open) setSuppressed(false);
+        clearHoverTimer();
+        if (!open) {
+          setHoverOpen(false);
+          setSuppressed(false);
+        }
       }}
     >
       <button
@@ -240,6 +266,8 @@ function AgentInfoPopover({
         aria-describedby={id}
         aria-expanded={open}
         onClick={(event) => {
+          clearHoverTimer();
+          setHoverOpen(false);
           syncCardAlignment();
           if (open) {
             event.currentTarget.blur();
@@ -251,6 +279,8 @@ function AgentInfoPopover({
           }
         }}
         onFocus={() => {
+          clearHoverTimer();
+          setHoverOpen(false);
           syncCardAlignment();
           setSuppressed(false);
         }}

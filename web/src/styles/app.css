@@ -2690,7 +2690,7 @@
     left: auto;
     right: 0;
   }
-  .msg-agent-popover:not(.msg-agent-popover--closed):hover::after,
+  .msg-agent-popover--hover-open::after,
   .msg-agent-popover:not(.msg-agent-popover--closed):focus-within::after,
   .msg-agent-popover--open::after {
     content: "";
@@ -2706,7 +2706,7 @@
     right: 0;
   }
 }
-.msg-agent-popover:not(.msg-agent-popover--closed):hover .msg-agent-card,
+.msg-agent-popover--hover-open .msg-agent-card,
 .msg-agent-popover:not(.msg-agent-popover--closed):focus-within .msg-agent-card,
 .msg-agent-popover--open .msg-agent-card {
   display: block;

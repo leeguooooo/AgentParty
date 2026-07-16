@@ -8,7 +8,7 @@ import { LocaleProvider } from "../i18n/locale";
 
 // Markdown 正文经 DOMPurify（需真实 DOM）；本用例只关心悬停 title，桩掉渲染避免拉起 DOM。
 mock.module("../lib/markdown", () => ({ renderMarkdown: (s: string) => s }));
-const { MessageCard, agentInfoTitleBits, presenceTitleBits } = await import("./MessageCard");
+const { AGENT_CARD_HOVER_DELAY_MS, MessageCard, agentInfoTitleBits, presenceTitleBits } = await import("./MessageCard");
 
 let renderer: ReactTestRenderer | null = null;
 let windowEvents: TestEventTarget;
@@ -247,6 +247,24 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     expect(mentionTrigger(root).props["aria-expanded"]).toBe(false);
     expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--closed");
     expect(blurred).toBe(true);
+  });
+
+  test("鼠标悬停 @提及不会立刻弹出，短暂停留后才展示信息卡", async () => {
+    const root = render(baseMsg({ mentions: ["planner"] }), {
+      presence: { planner: presenceEntry({ note: "实现中" }) },
+    });
+    const popover = mentionCard(root).parent!;
+
+    act(() => popover.props.onMouseEnter());
+    expect(mentionCard(root).parent?.props.className).not.toContain("msg-agent-popover--hover-open");
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, AGENT_CARD_HOVER_DELAY_MS + 20));
+    });
+    expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--hover-open");
+
+    act(() => mentionCard(root).parent?.props.onMouseLeave());
+    expect(mentionCard(root).parent?.props.className).not.toContain("msg-agent-popover--hover-open");
   });
 
   test("信息卡打开和 resize 会重算边缘对齐，卸载时移除监听器", () => {
