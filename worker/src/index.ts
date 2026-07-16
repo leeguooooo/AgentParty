@@ -85,6 +85,7 @@ import {
 } from "./management-audit";
 import {
   browseLarkOrganization,
+  browseScopedLarkUsers,
   buildMentionCard,
   getLarkDirectoryUser,
   inferReceiveIdType,
@@ -3648,10 +3649,12 @@ app.get("/api/channels/:slug/lark-organization", async (c) => {
   const userCursor = url.searchParams.get("user_cursor");
   const includeDepartments = url.searchParams.get("departments") !== "0";
   const includeUsers = url.searchParams.get("users") !== "0";
+  const flat = url.searchParams.get("flat") === "1";
   if (
     !LARK_DEPARTMENT_ID_RE.test(departmentId) || !Number.isInteger(limit) || limit < 1 || limit > LARK_DIRECTORY_MAX_LIMIT ||
+    (flat && (departmentId !== "0" || includeDepartments)) ||
     (departmentCursor !== null && (departmentCursor.length === 0 || departmentCursor.length > 512)) ||
-    (userCursor !== null && (userCursor.length === 0 || userCursor.length > 512))
+    (userCursor !== null && (userCursor.length === 0 || userCursor.length > (flat ? 1024 : 512)))
   ) {
     return c.json(errorBody("bad_request", "department_id, limit, or cursor is invalid"), 400);
   }
@@ -3660,16 +3663,46 @@ app.get("/api/channels/:slug/lark-organization", async (c) => {
     return c.json(errorBody("rate_limited", "too many Lark directory requests"), 429, { "retry-after": String(retryAfter) });
   }
   try {
-    const page = await browseLarkOrganization(
-      c.env,
-      provider,
-      departmentId,
-      limit,
-      departmentCursor,
-      userCursor,
-      includeDepartments,
-      includeUsers,
-    );
+    let limited = flat;
+    let page: Awaited<ReturnType<typeof browseLarkOrganization>>;
+    try {
+      if (flat) {
+        const scopedPage = await browseScopedLarkUsers(c.env, provider, userCursor, limit);
+        page = {
+          departments: [],
+          users: scopedPage.users,
+          nextDepartmentCursor: null,
+          nextUserCursor: scopedPage.nextCursor,
+        };
+      } else {
+        page = await browseLarkOrganization(
+          c.env,
+          provider,
+          departmentId,
+          limit,
+          departmentCursor,
+          userCursor,
+          includeDepartments,
+          includeUsers,
+        );
+      }
+    } catch (error) {
+      if (
+        error instanceof LarkDirectoryError && error.kind === "department_permission" &&
+        departmentId === "0" && departmentCursor === null && userCursor === null && includeUsers
+      ) {
+        const scopedPage = await browseScopedLarkUsers(c.env, provider, null, limit);
+        page = {
+          departments: [],
+          users: scopedPage.users,
+          nextDepartmentCursor: null,
+          nextUserCursor: scopedPage.nextCursor,
+        };
+        limited = true;
+      } else {
+        throw error;
+      }
+    }
     const profiles = await c.env.DB.prepare(
       "SELECT account, provider_user_id FROM account_profiles WHERE provider = ? AND tenant_key = ?",
     ).bind(provider.id, profile.tenant_key).all<{ account: string; provider_user_id: string | null }>();
@@ -3692,6 +3725,7 @@ app.get("/api/channels/:slug/lark-organization", async (c) => {
       }),
       next_department_cursor: page.nextDepartmentCursor,
       next_user_cursor: page.nextUserCursor,
+      department_names_available: !limited,
     });
   } catch (error) {
     if (error instanceof LarkDirectoryError) {

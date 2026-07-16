@@ -51,6 +51,7 @@ export function LarkMemberInvite({
   const [userCursor, setUserCursor] = useState<string | null>(null);
   const [organizationBusy, setOrganizationBusy] = useState(false);
   const [organizationUnavailable, setOrganizationUnavailable] = useState(false);
+  const [organizationLimited, setOrganizationLimited] = useState(false);
   const organizationVersion = useRef(0);
 
   function isDirectoryPermissionError(cause: unknown): boolean {
@@ -77,6 +78,7 @@ export function LarkMemberInvite({
     setDepartmentCursor(null);
     setUserCursor(null);
     setOrganizationUnavailable(false);
+    setOrganizationLimited(false);
   }
 
   function errorLabel(cause: unknown, fallbackKey: string): string {
@@ -177,6 +179,7 @@ export function LarkMemberInvite({
       setOrganizationUsers([]);
       setDepartmentCursor(null);
       setUserCursor(null);
+      setOrganizationLimited(false);
     }
     try {
       const page = await browse(
@@ -188,6 +191,7 @@ export function LarkMemberInvite({
         mode === "users" ? userCursor : null,
         mode !== "users",
         mode !== "departments",
+        organizationLimited && mode !== "replace",
       );
       if (version !== organizationVersion.current) return;
       if (mode !== "users") {
@@ -198,6 +202,7 @@ export function LarkMemberInvite({
         setOrganizationUsers((current) => mode === "replace" ? page.users : mergeUsers(current, page.users));
         setUserCursor(page.next_user_cursor);
       }
+      if (mode === "replace") setOrganizationLimited(page.department_names_available === false);
     } catch (cause) {
       if (version !== organizationVersion.current) return;
       if (isDirectoryPermissionError(cause)) disableDirectoryActions();
@@ -285,6 +290,9 @@ export function LarkMemberInvite({
                   <button type="button" key={department.id} onClick={() => selectBreadcrumb(index)}>{department.name}</button>
                 ))}
               </nav>
+              {organizationLimited && (
+                <p className="lark-invite-unavailable" role="status">{t("LarkInvite.organization.limited")}</p>
+              )}
               {organizationBusy && departments.length === 0 && organizationUsers.length === 0 && (
                 <p className="lark-invite-empty" role="status">{t("LarkInvite.organization.loading")}</p>
               )}

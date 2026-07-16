@@ -152,6 +152,38 @@ test("keeps name search available when department-name permission is missing", a
   expect(renderer!.root.findByProps({ className: "d-btn lark-org-toggle" }).props.disabled).toBe(true);
 });
 
+test("shows visible employees and keeps flat pagination usable while department names await approval", async () => {
+  const flatModes: boolean[] = [];
+  let calls = 0;
+  act(() => {
+    renderer = create(
+      <LocaleProvider>
+        <LarkMemberInvite
+          slug="room"
+          token="token"
+          browse={async (_token, _slug, _departmentId, _limit, _departmentCursor, _userCursor, _departments, _users, flat) => {
+            flatModes.push(flat ?? false);
+            calls += 1;
+            return {
+              departments: [],
+              users: [{ id: calls === 1 ? "on_evan" : "on_alice", name: calls === 1 ? "陈文捷" : "Alice", avatar_url: null, already_member: false }],
+              next_department_cursor: null,
+              next_user_cursor: calls === 1 ? "next" : null,
+              department_names_available: false,
+            };
+          }}
+        />
+      </LocaleProvider>,
+    );
+  });
+  await act(async () => renderer!.root.findByProps({ className: "d-btn lark-org-toggle" }).props.onClick());
+  expect(renderer!.root.findByProps({ role: "status" }).children.join(" ")).toContain("awaiting admin approval");
+  expect(renderer!.root.findByProps({ "data-lark-user-id": "on_evan" })).toBeTruthy();
+  await act(async () => renderer!.root.findByProps({ className: "d-btn lark-invite-more" }).props.onClick());
+  expect(renderer!.root.findByProps({ "data-lark-user-id": "on_alice" })).toBeTruthy();
+  expect(flatModes).toEqual([false, true]);
+});
+
 test("renders Chinese labels and a contact-permission error", async () => {
   localStorage.setItem("ap_locale", "zh");
   act(() => {

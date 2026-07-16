@@ -118,6 +118,50 @@ describe("Lark organization member invitations (#358)", () => {
       users: [{ id: "on_evan", name: "陈文捷", avatar_url: null, already_member: false }],
       next_department_cursor: null,
       next_user_cursor: null,
+      department_names_available: true,
+    });
+  });
+
+  it("falls back to the visible employee directory while department names await approval", async () => {
+    const owner = await larkHuman();
+    const slug = await createChannel(owner.token);
+    mockTenantToken();
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({
+        path: "/open-apis/contact/v3/departments/0/children?department_id_type=open_department_id&fetch_child=false&page_size=50",
+        method: "GET",
+      })
+      .reply(200, {
+        code: 0,
+        data: { has_more: false, items: [{ open_department_id: "od_app" }] },
+      });
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({
+        path: "/open-apis/contact/v3/scopes?user_id_type=union_id&department_id_type=open_department_id&page_size=100",
+        method: "GET",
+      })
+      .reply(200, {
+        code: 0,
+        data: { has_more: false, department_ids: ["od_app"], user_ids: [] },
+      });
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({
+        path: "/open-apis/contact/v3/users/find_by_department?user_id_type=union_id&department_id_type=open_department_id&department_id=od_app&page_size=50",
+        method: "GET",
+      })
+      .reply(200, {
+        code: 0,
+        data: { has_more: false, items: [{ union_id: "on_evan", name: "陈文捷" }] },
+      });
+
+    const response = await api(`/api/channels/${slug}/lark-organization?department_id=0&limit=50`, owner.token);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      departments: [],
+      users: [{ id: "on_evan", name: "陈文捷", avatar_url: null, already_member: false }],
+      next_department_cursor: null,
+      next_user_cursor: null,
+      department_names_available: false,
     });
   });
 
