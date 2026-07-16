@@ -110,6 +110,36 @@ describe("channels", () => {
     expect(found).toMatchObject({ owned: false, member: false });
   });
 
+  it("REST POST message returns 200 with the stored seq even when a CORS origin header is present (#549)", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    // Browser / desktop clients send an Origin header, so the /api/* CORS post-middleware appends
+    // access-control-allow-origin to the response. The channel DO response has immutable headers, so
+    // before the fix that header write threw "Can't modify immutable headers" → Hono 500 — even though
+    // handleSend had already durably stored the message. That is #549: store-ok + misleading 500.
+    const res = await SELF.fetch(`http://ap.test/api/channels/${slug}/messages`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        origin: "http://ap.test",
+      },
+      body: JSON.stringify({ kind: "message", body: "hello over rest", mentions: [], reply_to: null }),
+    });
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as { seq?: unknown };
+    expect(typeof payload.seq).toBe("number");
+    expect(payload.seq as number).toBeGreaterThan(0);
+    // The fix must keep the response usable, not silently swallow CORS: the advisory header must still
+    // be attached so browsers can actually read the 200 (mutable copy, not a dropped header).
+    expect(res.headers.get("access-control-allow-origin")).toBe("http://ap.test");
+
+    // Store-ok: the message really is in the channel (this held even while the POST wrongly returned 500).
+    const get = await api(`/api/channels/${slug}/messages?since=0&limit=100`, token);
+    const { messages } = (await get.json()) as { messages: { body: string }[] };
+    expect(messages.map((m) => m.body)).toContain("hello over rest");
+  });
+
   it("409 on slug conflict", async () => {
     const { token } = await seedToken("agent");
     const slug = uniq("ch");
