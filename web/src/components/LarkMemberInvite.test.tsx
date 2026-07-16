@@ -47,6 +47,33 @@ test("searches and directly invites a Lark organization user", async () => {
   expect(JSON.stringify(renderer!.toJSON())).toContain("Added");
 });
 
+test("keeps the added member visible and reports a bot notification failure", async () => {
+  act(() => {
+    renderer = create(
+      <LocaleProvider>
+        <LarkMemberInvite
+          slug="room"
+          token="token"
+          search={async () => ({ users: [{ id: "on_alice", name: "Alice", avatar_url: null, already_member: false }], next_cursor: null })}
+          invite={async (_token, _slug, id) => ({
+            id,
+            name: "Alice",
+            avatar_url: null,
+            already_member: false,
+            notification_status: "failed",
+          })}
+        />
+      </LocaleProvider>,
+    );
+  });
+  const input = renderer!.root.findByProps({ "aria-label": "Search Lark organization" });
+  act(() => input.props.onChange({ target: { value: "Alice" } }));
+  await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+  await act(async () => renderer!.root.findByProps({ "data-lark-user-id": "on_alice" }).props.onClick());
+  expect(JSON.stringify(renderer!.toJSON())).toContain("Added");
+  expect(renderer!.root.findByProps({ role: "alert" }).children.join(" ")).toContain("bot could not send");
+});
+
 test("serializes invitations until the active request finishes", async () => {
   let finishAlice!: () => void;
   const alicePending = new Promise<void>((resolve) => { finishAlice = resolve; });

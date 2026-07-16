@@ -148,6 +148,7 @@ export function LarkMemberInvite({
       setUsers((current) => current.map((item) => item.id === user.id ? { ...item, already_member: true } : item));
       setOrganizationUsers((current) => current.map((item) => item.id === user.id ? { ...item, already_member: true } : item));
       onInvited?.(added);
+      if (added.notification_status === "failed") setError(t("LarkInvite.error.notification"));
     } catch (cause) {
       if (isDirectoryPermissionError(cause)) disableDirectoryActions();
       else setError(errorLabel(cause, "LarkInvite.error.invite"));
