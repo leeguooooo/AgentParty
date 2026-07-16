@@ -79,6 +79,7 @@ describe("Lark organization member invitations (#358)", () => {
     expect(document.paths["/api/channels/{slug}/lark-directory"]).toBeDefined();
     expect(document.paths["/api/channels/{slug}/lark-organization"]).toBeDefined();
     expect(document.paths["/api/channels/{slug}/lark-members"]).toBeDefined();
+    expect(document.paths["/api/channels/{slug}/lark-members/{userId}"]).toBeDefined();
     expect(JSON.stringify({
       search: document.paths["/api/channels/{slug}/lark-directory"],
       organization: document.paths["/api/channels/{slug}/lark-organization"],
@@ -610,6 +611,52 @@ describe("Lark organization member invitations (#358)", () => {
     ).bind(slug, "lark-main:on_bob").first()).not.toBeNull();
     expect(warning).toHaveBeenCalledOnce();
     warning.mockRestore();
+  });
+
+  it("removes a Lark member, revokes all channel-scoped agents, and blocks global agents from the channel", async () => {
+    const owner = await larkHuman();
+    const slug = await createChannel(owner.token);
+    const account = "lark-main:on_remove";
+    const now = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO account_profiles (
+         account, handle, display_name, provider, provider_user_id, tenant_key, created_at, updated_at
+       ) VALUES (?, ?, 'Remove Me', 'lark-main', 'on_remove', 'tenant-test', ?, ?)`,
+    ).bind(account, uniq("remove_me"), now, now).run();
+    await env.DB.prepare(
+      "INSERT INTO channel_members (channel_slug, account, added_by, added_at) VALUES (?, ?, ?, ?)",
+    ).bind(slug, account, owner.account, now).run();
+    const scoped = await seedToken("agent", uniq("scoped_remove"), { owner: account, channelScope: slug });
+    const global = await seedToken("agent", uniq("global_remove"), { owner: account });
+    const other = await seedToken("agent", uniq("other_remove"), { owner: account, channelScope: uniq("other") });
+
+    const response = await api(`/api/channels/${slug}/lark-members/on_remove`, owner.token, { method: "DELETE" });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ memberRemoved: true, revokedAgents: 1 });
+    expect(await env.DB.prepare(
+      "SELECT account FROM channel_members WHERE channel_slug = ? AND account = ?",
+    ).bind(slug, account).first()).toBeNull();
+    const tokens = await env.DB.prepare(
+      "SELECT name, revoked_at FROM tokens WHERE name IN (?, ?, ?) ORDER BY name",
+    ).bind(scoped.name, global.name, other.name).all<{ name: string; revoked_at: number | null }>();
+    expect(tokens.results.find((token) => token.name === scoped.name)?.revoked_at).not.toBeNull();
+    expect(tokens.results.find((token) => token.name === global.name)?.revoked_at).toBeNull();
+    expect(tokens.results.find((token) => token.name === other.name)?.revoked_at).toBeNull();
+    expect(await env.DB.prepare(
+      "SELECT account FROM channel_account_bans WHERE channel_slug = ? AND account = ?",
+    ).bind(slug, account).first()).toEqual({ account });
+    expect((await api(`/api/channels/${slug}/messages`, global.token)).status).toBe(403);
+    expect((await api(`/api/channels/${slug}/messages`, scoped.token)).status).toBe(401);
+
+    await env.DB.prepare("UPDATE channels SET visibility = 'public' WHERE slug = ?").bind(slug).run();
+    expect((await api(`/api/channels/${slug}/messages`, global.token)).status).toBe(403);
+
+    expect((await api(`/api/channels/${slug}/members/${encodeURIComponent(account)}`, owner.token, { method: "PUT" })).status).toBe(200);
+    expect(await env.DB.prepare(
+      "SELECT account FROM channel_account_bans WHERE channel_slug = ? AND account = ?",
+    ).bind(slug, account).first()).toBeNull();
+    expect((await api(`/api/channels/${slug}/messages`, global.token)).status).toBe(200);
   });
 
   it("reuses an open_id profile during a union_id invite and migrates it to the stable id", async () => {

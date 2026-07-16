@@ -128,6 +128,19 @@ export async function inviteLarkMember(
   return (await res.json()) as LarkDirectoryUser;
 }
 
+export async function removeLarkMember(token: string, slug: string, userId: string): Promise<void> {
+  const res = await fetchApi(
+    `/api/channels/${encodeURIComponent(slug)}/lark-members/${encodeURIComponent(userId)}`,
+    {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${token}` },
+    },
+  );
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("only a Lark channel moderator can remove members");
+  if (!res.ok) throw await larkDirectoryError(res);
+}
+
 export function urlToken(): string | null {
   if (typeof window === "undefined") return null; // SSR/单测无 window 时不崩（无 URL token）
   return new URLSearchParams(window.location.search).get("t");

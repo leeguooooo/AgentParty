@@ -22,7 +22,11 @@ beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
 });
-afterEach(() => { act(() => renderer?.unmount()); renderer = null; });
+afterEach(() => {
+  act(() => renderer?.unmount());
+  renderer = null;
+  Reflect.deleteProperty(globalThis, "confirm");
+});
 
 test("searches and directly invites a Lark organization user", async () => {
   const invited: string[] = [];
@@ -44,7 +48,7 @@ test("searches and directly invites a Lark organization user", async () => {
   const button = renderer!.root.findByProps({ "data-lark-user-id": "on_alice" });
   await act(async () => button.props.onClick());
   expect(invited).toEqual(["on_alice"]);
-  expect(JSON.stringify(renderer!.toJSON())).toContain("Added");
+  expect(JSON.stringify(renderer!.toJSON())).toContain("Remove");
 });
 
 test("keeps the added member visible and reports a bot notification failure", async () => {
@@ -70,8 +74,31 @@ test("keeps the added member visible and reports a bot notification failure", as
   act(() => input.props.onChange({ target: { value: "Alice" } }));
   await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
   await act(async () => renderer!.root.findByProps({ "data-lark-user-id": "on_alice" }).props.onClick());
-  expect(JSON.stringify(renderer!.toJSON())).toContain("Added");
+  expect(JSON.stringify(renderer!.toJSON())).toContain("Remove");
   expect(renderer!.root.findByProps({ role: "alert" }).children.join(" ")).toContain("bot could not send");
+});
+
+test("removes an existing member after confirmation and makes them inviteable again", async () => {
+  const removed: string[] = [];
+  Object.defineProperty(globalThis, "confirm", { configurable: true, value: () => true });
+  act(() => {
+    renderer = create(
+      <LocaleProvider>
+        <LarkMemberInvite
+          slug="room"
+          token="token"
+          search={async () => ({ users: [{ id: "on_alice", name: "Alice", avatar_url: null, already_member: true }], next_cursor: null })}
+          remove={async (_token, _slug, id) => { removed.push(id); }}
+        />
+      </LocaleProvider>,
+    );
+  });
+  const input = renderer!.root.findByProps({ "aria-label": "Search Lark organization" });
+  act(() => input.props.onChange({ target: { value: "Alice" } }));
+  await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+  await act(async () => renderer!.root.findByProps({ "data-lark-user-id": "on_alice" }).props.onClick());
+  expect(removed).toEqual(["on_alice"]);
+  expect(renderer!.root.findByProps({ "data-lark-user-id": "on_alice" }).children.join(" ")).toContain("Invite");
 });
 
 test("serializes invitations until the active request finishes", async () => {
@@ -158,7 +185,7 @@ test("browses departments and directly invites a selected organization user", as
   await act(async () => renderer!.root.findByProps({ "data-lark-user-id": "on_evan" }).props.onClick());
   expect(browsed).toEqual(["0", "od_app"]);
   expect(invited).toEqual(["on_evan"]);
-  expect(JSON.stringify(renderer!.toJSON())).toContain("Added");
+  expect(JSON.stringify(renderer!.toJSON())).toContain("Remove");
 });
 
 test("keeps name search available when department-name permission is missing", async () => {

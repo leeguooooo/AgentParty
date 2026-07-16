@@ -11,6 +11,9 @@ export const LarkMemberInviteStrings: LocaleDict = {
     "LarkInvite.invite": "Invite",
     "LarkInvite.inviting": "Inviting...",
     "LarkInvite.added": "Added",
+    "LarkInvite.remove": "Remove",
+    "LarkInvite.removing": "Removing...",
+    "LarkInvite.removeConfirm": "Remove {name} from this channel and block all of their agents from this channel?",
     "LarkInvite.more": "Load more",
     "LarkInvite.organization.show": "Browse organization",
     "LarkInvite.organization.hide": "Hide organization",
@@ -32,6 +35,7 @@ export const LarkMemberInviteStrings: LocaleDict = {
     "LarkInvite.error.browse": "The Lark organization could not be loaded.",
     "LarkInvite.error.invite": "The Lark member could not be invited.",
     "LarkInvite.error.notification": "The member was added, but the Lark bot could not send the invitation message.",
+    "LarkInvite.error.remove": "The Lark member could not be removed.",
   },
   zh: {
     "LarkInvite.title": "从 Lark 邀请",
@@ -43,6 +47,9 @@ export const LarkMemberInviteStrings: LocaleDict = {
     "LarkInvite.invite": "邀请",
     "LarkInvite.inviting": "邀请中...",
     "LarkInvite.added": "已添加",
+    "LarkInvite.remove": "移除",
+    "LarkInvite.removing": "移除中...",
+    "LarkInvite.removeConfirm": "将 {name} 移出本频道，并封禁其所有 agent 对本频道的访问？",
     "LarkInvite.more": "加载更多",
     "LarkInvite.organization.show": "浏览组织架构选人",
     "LarkInvite.organization.hide": "收起组织架构",
@@ -64,6 +71,7 @@ export const LarkMemberInviteStrings: LocaleDict = {
     "LarkInvite.error.browse": "暂时无法读取 Lark 组织架构。",
     "LarkInvite.error.invite": "无法邀请该 Lark 成员。",
     "LarkInvite.error.notification": "成员已加入频道，但 Lark 机器人未能发送邀请通知。",
+    "LarkInvite.error.remove": "无法移除该 Lark 成员。",
   },
 };
 

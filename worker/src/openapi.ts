@@ -413,6 +413,23 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/lark-members/{userId}": {
+      delete: {
+        summary: "remove a same-tenant Lark member and block their agents from this channel",
+        security: [{ bearer: [] }],
+        description: "Removes channel membership, creates a channel-level account ban, revokes every active agent token scoped to this channel, revokes active project-agent invitations owned by the account, and disconnects all of that account's active identities. Global agents remain usable elsewhere but cannot re-enter this channel, even if it is public, until a moderator explicitly re-invites the account.",
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "userId", in: "path", required: true, schema: { type: "string", minLength: 1, maxLength: 128 } },
+        ],
+        responses: {
+          "200": { description: "member removed and channel agent access revoked" },
+          "400": { description: "invalid user id or attempted owner removal" },
+          "403": { description: "not a same-tenant Lark human moderator" },
+          "404": { description: "channel not found" },
+        },
+      },
+    },
     "/api/channels/{slug}/join-requests/me": {
       get: {
         summary: "read the caller's channel join request",

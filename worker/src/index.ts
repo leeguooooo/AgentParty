@@ -1347,6 +1347,13 @@ async function isChannelMember(db: D1Database, slug: string, account: string | n
   return row !== null;
 }
 
+async function isChannelAccountBanned(db: D1Database, slug: string, account: string | null | undefined): Promise<boolean> {
+  if (account == null) return false;
+  return (await db.prepare(
+    "SELECT 1 FROM channel_account_bans WHERE channel_slug = ? AND account = ?",
+  ).bind(slug, account).first()) !== null;
+}
+
 function channelJoinRequestFromRow(row: ChannelJoinRequestRow) {
   let requesterProfile: Record<string, unknown> = {};
   try {
@@ -1425,6 +1432,7 @@ function optionalBoundedText(value: unknown, maxBytes: number): string | null | 
 }
 
 async function canAccessLoadedChannel(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
+  if (await isChannelAccountBanned(db, channel.slug, identity.account)) return false;
   if (canAccessChannel(identity, channel, await isChannelMember(db, channel.slug, identity.account))) return true;
   if (identity.role !== "agent" || identity.account == null) return false;
   const row = await db.prepare(
@@ -1446,6 +1454,7 @@ async function canAccessLoadedChannel(db: D1Database, identity: TokenIdentity, c
 // 仅 public_watch 频道 DO 才据此拦截；public/private 忽略此位，故对现有频道零行为变化。
 async function canParticipateInChannel(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
   if (identity.role === "readonly") return false;
+  if (await isChannelAccountBanned(db, channel.slug, identity.account)) return false;
   return canAccessLoadedChannel(db, identity, { ...channel, visibility: "private" });
 }
 
@@ -1684,6 +1693,96 @@ async function larkDirectoryMembership(
          WHERE channel_slug = ? AND account IN (${accounts.map(() => "?").join(", ")})`,
       ).bind(slug, ...accounts).all<{ account: string }>()).results.map((row) => row.account));
   return new Map([...accountsByUser].map(([userId, account]) => [userId, account !== null && members.has(account)]));
+}
+
+async function removeChannelMemberAndAgents(
+  env: AppEnv,
+  slug: string,
+  account: string,
+  identity: TokenIdentity,
+  removedAt = Date.now(),
+): Promise<{ memberRemoved: boolean; revokedAgents: number; revokedProjectAgentInvites: number }> {
+  const activeTokens = await env.DB.prepare(
+    `SELECT name, role, channel_scope
+       FROM tokens
+      WHERE owner = ?
+        AND revoked_at IS NULL
+        AND (
+          role = 'human'
+          OR (role = 'agent' AND (channel_scope IS NULL OR channel_scope = ?))
+        )`,
+  ).bind(account, slug).all<{ name: string; role: string; channel_scope: string | null }>();
+  const activeProjectAgentInvites = await env.DB.prepare(
+    `SELECT profile_handle
+       FROM channel_agent_invites
+      WHERE channel_slug = ? AND owner_account = ? AND revoked_at IS NULL`,
+  ).bind(slug, account).all<{ profile_handle: string }>();
+  const [removed, revokedAgents, revokedProjectAgents] = await env.DB.batch([
+    env.DB.prepare("DELETE FROM channel_members WHERE channel_slug = ? AND account = ?").bind(slug, account),
+    env.DB.prepare(
+      `UPDATE tokens
+          SET revoked_at = ?
+        WHERE owner = ? AND role = 'agent' AND channel_scope = ? AND revoked_at IS NULL`,
+    ).bind(removedAt, account, slug),
+    env.DB.prepare(
+      `UPDATE channel_agent_invites
+          SET revoked_at = ?
+        WHERE channel_slug = ? AND owner_account = ? AND revoked_at IS NULL`,
+    ).bind(removedAt, slug, account),
+    env.DB.prepare(
+      `INSERT INTO channel_account_bans (channel_slug, account, banned_by, banned_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(channel_slug, account) DO UPDATE SET
+         banned_by = excluded.banned_by,
+         banned_at = excluded.banned_at`,
+    ).bind(slug, account, identity.account ?? identity.name, removedAt),
+  ]);
+  const scopedAgents = activeTokens.results.filter((token) => token.role === "agent" && token.channel_scope === slug);
+  await Promise.all([
+    ...(removed.meta.changes > 0
+      ? [bestEffortRecordManagementAudit(env.DB, {
+          actor: managementAuditActor(identity),
+          action: "channel.member.remove",
+          resource: `channel/${slug}/members/${account}`,
+          channel: slug,
+          timestamp: removedAt,
+          metadata: {
+            revoked_agents: revokedAgents.meta.changes,
+            revoked_project_agent_invites: revokedProjectAgents.meta.changes,
+          },
+        })]
+      : []),
+    ...scopedAgents.map((token) => bestEffortRecordManagementAudit(env.DB, {
+      actor: managementAuditActor(identity),
+      action: "token.revoke",
+      resource: `token/${token.name}`,
+      channel: slug,
+      timestamp: removedAt,
+    })),
+    ...activeProjectAgentInvites.results.map((invite) => bestEffortRecordManagementAudit(env.DB, {
+      actor: managementAuditActor(identity),
+      action: "channel.project_agent.remove",
+      resource: `channel/${slug}/project-agents/${account}/${invite.profile_handle}`,
+      channel: slug,
+      timestamp: removedAt,
+    })),
+  ]);
+  await Promise.all((activeTokens.results ?? []).map(({ name }) =>
+    fetchChannelDO(
+      env,
+      slug,
+      new Request("https://do/internal/kick", {
+        method: "POST",
+        body: JSON.stringify({ name, mode: "remove" }),
+        headers: { "content-type": "application/json", "x-partykit-room": slug },
+      }),
+    ).catch(() => null),
+  ));
+  return {
+    memberRemoved: removed.meta.changes > 0,
+    revokedAgents: revokedAgents.meta.changes,
+    revokedProjectAgentInvites: revokedProjectAgents.meta.changes,
+  };
 }
 
 async function canEditCharter(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
@@ -3259,7 +3358,15 @@ app.get("/api/channels", async (c) => {
             .bind(identity.account, identity.name)
             .all<{ channel_slug: string }>()).results.map((row) => row.channel_slug),
         );
-  const visible = results.filter((row) => canAccessChannel(identity, row, memberSlugs.has(row.slug)) || projectAgentInviteSlugs.has(row.slug));
+  const bannedSlugs = identity.account == null
+    ? new Set<string>()
+    : new Set((await c.env.DB.prepare(
+        "SELECT channel_slug FROM channel_account_bans WHERE account = ?",
+      ).bind(identity.account).all<{ channel_slug: string }>()).results.map((row) => row.channel_slug));
+  const visible = results.filter((row) =>
+    !bannedSlugs.has(row.slug) &&
+    (canAccessChannel(identity, row, memberSlugs.has(row.slug)) || projectAgentInviteSlugs.has(row.slug)),
+  );
   const channels = await Promise.all(
     visible.map(async (full) => {
       // can_moderate：当前身份能否管理（转可见性/踢人/归档）。不回 owner 身份本身，只回布尔，
@@ -3809,9 +3916,12 @@ app.post("/api/channels/:slug/lark-members", async (c) => {
       tenantKey: profile.tenant_key,
     });
     const addedAt = Date.now();
-    const inserted = await c.env.DB.prepare(
-      "INSERT OR IGNORE INTO channel_members (channel_slug, account, added_by, added_at) VALUES (?, ?, ?, ?)",
-    ).bind(slug, account, identity.account, addedAt).run();
+    const [, inserted] = await c.env.DB.batch([
+      c.env.DB.prepare("DELETE FROM channel_account_bans WHERE channel_slug = ? AND account = ?").bind(slug, account),
+      c.env.DB.prepare(
+        "INSERT OR IGNORE INTO channel_members (channel_slug, account, added_by, added_at) VALUES (?, ?, ?, ?)",
+      ).bind(slug, account, identity.account, addedAt),
+    ]);
     const alreadyMember = inserted.meta.changes === 0;
     let notificationStatus: "sent" | "failed" | "skipped_already_member" = "skipped_already_member";
     if (!alreadyMember) {
@@ -3856,6 +3966,41 @@ app.post("/api/channels/:slug/lark-members", async (c) => {
     }
     return c.json(errorBody("unavailable", "Lark directory is unavailable"), 503);
   }
+});
+
+app.delete("/api/channels/:slug/lark-members/:userId", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (identity.kind !== "human" || identity.account == null || !isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only a Lark human moderator can remove organization members"), 403);
+  }
+  const profile = await c.env.DB.prepare(
+    "SELECT provider, tenant_key FROM account_profiles WHERE account = ?",
+  ).bind(identity.account).first<{ provider: string | null; tenant_key: string | null }>();
+  const provider = profile?.provider == null
+    ? undefined
+    : parseAuthProviders(c.env).find((candidate) => candidate.id === profile.provider);
+  if (provider === undefined || (provider.kind !== "lark" && provider.kind !== "feishu") || profile?.tenant_key == null || provider.tenantKey !== profile.tenant_key) {
+    return c.json(errorBody("forbidden", "Lark tenant does not match the configured organization"), 403);
+  }
+  const userId = c.req.param("userId").trim();
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(userId)) {
+    return c.json(errorBody("bad_request", "valid Lark user_id required"), 400);
+  }
+  const known = await c.env.DB.prepare(
+    `SELECT account FROM account_profiles
+      WHERE provider = ? AND tenant_key = ? AND provider_user_id = ?
+      LIMIT 1`,
+  ).bind(provider.id, profile.tenant_key, userId).first<{ account: string }>();
+  const account = known?.account ?? directoryAccount(provider.id, userId);
+  if (account === null) return c.json(errorBody("bad_request", "unsupported Lark user id"), 400);
+  if (account === channel.owner_account) {
+    return c.json(errorBody("bad_request", "channel owner cannot be removed"), 400);
+  }
+  const result = await removeChannelMemberAndAgents(c.env, slug, account, identity);
+  return c.json({ ok: true, user_id: userId, ...result });
 });
 
 app.get("/api/channels/:slug/perms", async (c) => {
@@ -3917,15 +4062,16 @@ app.put("/api/channels/:slug/members/:account", async (c) => {
   }
   const addedBy = identity.account ?? identity.name;
   const addedAt = Date.now();
-  await c.env.DB.prepare(
-    `INSERT INTO channel_members (channel_slug, account, added_by, added_at)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(channel_slug, account) DO UPDATE SET
-       added_by = excluded.added_by,
-       added_at = excluded.added_at`,
-  )
-    .bind(slug, account, addedBy, addedAt)
-    .run();
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM channel_account_bans WHERE channel_slug = ? AND account = ?").bind(slug, account),
+    c.env.DB.prepare(
+      `INSERT INTO channel_members (channel_slug, account, added_by, added_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(channel_slug, account) DO UPDATE SET
+         added_by = excluded.added_by,
+         added_at = excluded.added_at`,
+    ).bind(slug, account, addedBy, addedAt),
+  ]);
   await bestEffortRecordManagementAudit(c.env.DB, {
     actor: managementAuditActor(identity),
     action: "channel.member.add",
@@ -3952,20 +4098,8 @@ app.delete("/api/channels/:slug/members/:account", async (c) => {
   if (!isChannelModerator(identity, channel) && identity.account !== account) {
     return c.json(errorBody("forbidden", "only moderators can remove other members"), 403);
   }
-  const removedAt = Date.now();
-  const removed = await c.env.DB.prepare("DELETE FROM channel_members WHERE channel_slug = ? AND account = ?")
-    .bind(slug, account)
-    .run();
-  if (removed.meta.changes > 0) {
-    await bestEffortRecordManagementAudit(c.env.DB, {
-      actor: managementAuditActor(identity),
-      action: "channel.member.remove",
-      resource: `channel/${slug}/members/${account}`,
-      channel: slug,
-      timestamp: removedAt,
-    });
-  }
-  return c.json({ ok: true });
+  const result = await removeChannelMemberAndAgents(c.env, slug, account, identity);
+  return c.json({ ok: true, ...result });
 });
 
 app.post("/api/channels/:slug/join-links", async (c) => {
@@ -4388,6 +4522,11 @@ app.post("/api/channels/:slug/join-requests/:id/review", async (c) => {
            FROM channel_join_requests
           WHERE id = ? AND slug = ? AND state = 'approved' AND reviewed_at = ? AND reviewed_by = ?`,
       ).bind(reviewedBy, reviewedAt, id, slug, reviewedAt, reviewedBy),
+      c.env.DB.prepare(
+        `DELETE FROM channel_account_bans
+          WHERE channel_slug = ?
+            AND account = (SELECT account FROM channel_join_requests WHERE id = ? AND slug = ?)`,
+      ).bind(slug, id, slug),
     ]);
     changed = results[0]?.meta.changes ?? 0;
   } else {
@@ -4438,6 +4577,9 @@ app.post("/api/join/:code", async (c) => {
   if (link.expires_at !== null && link.expires_at <= now) return c.json(errorBody("not_found", "join link has expired"), 410);
   if (link.max_uses !== null && link.uses >= link.max_uses) {
     return c.json(errorBody("not_found", "join link has reached its max uses"), 410);
+  }
+  if (await isChannelAccountBanned(c.env.DB, link.channel_slug, identity.account)) {
+    return c.json(errorBody("forbidden", "this account was removed from the channel and must be re-invited by a moderator"), 403);
   }
   const addedBy = `join-link:${code.slice(0, 8)}`;
   const inserted = await c.env.DB.prepare(
