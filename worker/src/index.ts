@@ -6070,14 +6070,18 @@ app.post("/api/channels/:slug/messages", async (c) => {
       },
     }),
   );
-  if (!res.ok || taskId === undefined || !isRecord(parsedBody)) return res;
+  // #549：DO fetch 返回的响应 headers 不可变，直接回传会让 /api/* 的 CORS 建言中间件在
+  // c.res.headers.set(access-control-allow-origin) 处抛 "Can't modify immutable headers" → 500，
+  // 但消息此刻已落库（store-ok + 误导性 500，违反 REST 语义）。与 #495 对 webhook 路由同法：
+  // 先拷进可变响应，让中间件正常补 header 而非崩成 500。
+  if (!res.ok || taskId === undefined || !isRecord(parsedBody)) return mutableFetchResponse(res);
   const payload = (await res.clone().json().catch(() => null)) as { seq?: unknown; completion_review?: { state?: unknown } } | null;
   const seq = positiveInt(payload?.seq);
   if (seq !== null) {
     const state = payload?.completion_review?.state === "pending_review" ? "needs_review" : "done";
     await syncTaskCompletion(c.env, slug, taskId, parsedBody.completion_artifact, seq, state);
   }
-  return res;
+  return mutableFetchResponse(res);
 });
 
 // outbound webhook 注册 / 列表 / 删除（spec §7/§15），存储在频道 do 里
