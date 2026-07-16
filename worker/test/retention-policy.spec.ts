@@ -231,4 +231,69 @@ describe("channel retention policy (#421)", () => {
       expect(terminalAlarm!).toBeLessThanOrEqual(failedAt + 7 * 24 * 60 * 60 * 1000 + 1_000);
     });
   });
+
+  it("fails active deliveries created during R2 deletion before pruning expired rows", async () => {
+    const account = `${uniq("retention-race")}@example.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: account });
+    const target = await seedToken("agent", uniq("target"), { owner: account });
+    const slug = await createChannel(owner.token);
+    const oldResponse = await postMessage(slug, owner.token, "expired with race");
+    const oldSeq = ((await oldResponse.json()) as { seq: number }).seq;
+    await api(`/api/channels/${slug}/retention`, owner.token, {
+      method: "PUT",
+      body: JSON.stringify({ message_retention_ms: 60_000 }),
+    });
+    const attachmentKey = `${slug}/race-object`;
+    await env.ATTACHMENTS.put(attachmentKey, "secret");
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, async (instance: ChannelDO, state) => {
+      const now = Date.now();
+      state.storage.sql.exec(
+        "UPDATE messages SET ts = ?, attachments_json = ? WHERE seq = ?",
+        now - 61_000,
+        JSON.stringify([{ key: attachmentKey, filename: "race.txt", content_type: "text/plain", size: 6, url: `/api/channels/${slug}/attachments/race-object` }]),
+        oldSeq,
+      );
+      state.storage.sql.exec(
+        `CREATE TRIGGER block_active_delivery_delete
+         BEFORE DELETE ON directed_deliveries
+         WHEN OLD.state IN ('queued', 'claimed', 'running', 'waiting_owner')
+         BEGIN
+           SELECT RAISE(ABORT, 'active delivery deleted without terminal transition');
+         END`,
+      );
+      const bucket = env.ATTACHMENTS as unknown as { delete: (keys: string | string[]) => Promise<void> };
+      const originalDelete = bucket.delete.bind(bucket);
+      let injected = false;
+      bucket.delete = async (keys) => {
+        if (!injected) {
+          injected = true;
+          const id = crypto.randomUUID();
+          state.storage.sql.exec(
+            `INSERT INTO directed_deliveries (
+               id, message_seq, target_name, target_owner, cause, state, attempt,
+               lease_connection_id, last_lease_connection_id, lease_adapter, lease_until,
+               work_id, continuation_ref, reply_seq, last_error, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, 'mention_edit', 'queued', 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)`,
+            id,
+            oldSeq,
+            target.name,
+            account,
+            Date.now(),
+            Date.now(),
+          );
+        }
+        await originalDelete(keys);
+      };
+      try {
+        await instance.onAlarm();
+      } finally {
+        bucket.delete = originalDelete;
+        state.storage.sql.exec("DROP TRIGGER IF EXISTS block_active_delivery_delete");
+      }
+      expect(injected).toBe(true);
+      expect(Number(state.storage.sql.exec("SELECT COUNT(*) AS n FROM messages WHERE seq = ?", oldSeq).one().n)).toBe(0);
+      expect(Number(state.storage.sql.exec("SELECT COUNT(*) AS n FROM directed_deliveries WHERE message_seq = ?", oldSeq).one().n)).toBe(0);
+    });
+  });
 });

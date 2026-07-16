@@ -108,131 +108,219 @@ function isRetryableNetworkError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 }
 
+const SENDER_KINDS = new Set(["agent", "human"]);
+const MESSAGE_KINDS = new Set(["message", "status"]);
+const STATUS_STATES = new Set(["working", "waiting", "blocked", "done"]);
+const PRESENCE_STATES = new Set(["online", "offline", "working", "waiting", "blocked", "done"]);
+const CHANNEL_MODES = new Set(["public", "private", "personal", "public_watch"]);
+const TOKEN_ROLES = new Set(["agent", "readonly", "owner", "member", "moderator"]);
+const DELIVERY_STATES = new Set(["queued", "claimed", "running", "waiting_owner", "replied", "failed"]);
+const DELIVERY_CAUSES = new Set(["mention", "reply", "owner_answer", "retry"]);
+const ERROR_CODES = new Set([
+  "bad_request",
+  "unavailable",
+  "mention_not_found",
+  "mention_ambiguous",
+  "unauthorized",
+  "rate_limited",
+  "too_large",
+  "loop_guard",
+  "workflow_guard",
+  "archived",
+  "quota_exceeded",
+  "channel_full",
+  "not_found",
+]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 function isSender(value: unknown): boolean {
-  return isRecord(value) && typeof value.name === "string" && (value.kind === "agent" || value.kind === "human");
+  return isRecord(value) &&
+    typeof value.name === "string" &&
+    SENDER_KINDS.has(String(value.kind)) &&
+    (value.owner === undefined || typeof value.owner === "string") &&
+    (value.handle === undefined || typeof value.handle === "string") &&
+    (value.display_name === undefined || typeof value.display_name === "string") &&
+    (value.avatar_url === undefined || typeof value.avatar_url === "string") &&
+    (value.avatar_thumb === undefined || typeof value.avatar_thumb === "string") &&
+    (value.client_version === undefined || typeof value.client_version === "string") &&
+    (value.connection_count === undefined || isPositiveInteger(value.connection_count));
 }
 
-function isStringOrNull(value: unknown): boolean {
-  return value === null || typeof value === "string";
+function isStatusEvent(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.owner === "string" &&
+    STATUS_STATES.has(String(value.state)) &&
+    isStringArray(value.scope) &&
+    (value.summary_seq === null || isPositiveInteger(value.summary_seq)) &&
+    (value.blocked_reason === null || typeof value.blocked_reason === "string") &&
+    isFiniteNumber(value.updated_at);
 }
 
-function isFiniteNumberOrNull(value: unknown): boolean {
-  return value === null || Number.isFinite(value);
+function isPresenceEntry(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.name === "string" &&
+    PRESENCE_STATES.has(String(value.state)) &&
+    (value.note === null || typeof value.note === "string") &&
+    isFiniteNumber(value.ts) &&
+    (value.client_version === undefined || typeof value.client_version === "string") &&
+    (value.kind === undefined || SENDER_KINDS.has(String(value.kind))) &&
+    (value.account === undefined || typeof value.account === "string") &&
+    (value.last_seen === undefined || isFiniteNumber(value.last_seen)) &&
+    (value.status === undefined || isStatusEvent(value.status)) &&
+    (value.handle === undefined || typeof value.handle === "string") &&
+    (value.display_name === undefined || typeof value.display_name === "string") &&
+    (value.avatar_url === undefined || typeof value.avatar_url === "string") &&
+    (value.avatar_thumb === undefined || typeof value.avatar_thumb === "string") &&
+    (value.paused === undefined || typeof value.paused === "boolean") &&
+    (value.resume_at === undefined || isFiniteNumber(value.resume_at)) &&
+    (value.live === undefined || typeof value.live === "boolean") &&
+    (value.busy === undefined || typeof value.busy === "boolean") &&
+    (value.queue_depth === undefined || isNonNegativeInteger(value.queue_depth)) &&
+    (value.waiting_owner_count === undefined || isNonNegativeInteger(value.waiting_owner_count)) &&
+    (value.serve_standbys === undefined || isNonNegativeInteger(value.serve_standbys)) &&
+    (value.current_task === undefined || isPositiveInteger(value.current_task)) &&
+    (value.task_started_at === undefined || isFiniteNumber(value.task_started_at)) &&
+    (value.heartbeat_at === undefined || isFiniteNumber(value.heartbeat_at)) &&
+    (value.connection_count === undefined || isPositiveInteger(value.connection_count));
 }
 
-function isRecordOrNull(value: unknown): boolean {
-  return value === null || isRecord(value);
+function isReadCursor(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.name === "string" &&
+    (value.kind === undefined || SENDER_KINDS.has(String(value.kind))) &&
+    isNonNegativeInteger(value.last_seen_seq) &&
+    isFiniteNumber(value.updated_at);
 }
 
-// MsgFrame (shared/src/protocol.ts): only `type/seq/sender/kind/body/mentions/reply_to/
-// state/note/status/ts` are required. `state`/`note` are `string | null`, `status` is
-// `StatusEvent | null` (an object — status-type frames carry a StatusEvent). Everything
-// else on MsgFrame is optional (`?`) and is intentionally NOT required here.
 function isMessageFrame(value: unknown): boolean {
   return isRecord(value) &&
     (value.type === "msg" || value.type === "status") &&
-    Number.isSafeInteger(value.seq) &&
+    isPositiveInteger(value.seq) &&
     isSender(value.sender) &&
-    typeof value.kind === "string" &&
+    MESSAGE_KINDS.has(String(value.kind)) &&
     typeof value.body === "string" &&
-    Array.isArray(value.mentions) &&
-    value.mentions.every((m) => typeof m === "string") &&
-    isFiniteNumberOrNull(value.reply_to) &&
-    isStringOrNull(value.state) &&
-    isStringOrNull(value.note) &&
-    isRecordOrNull(value.status) &&
-    Number.isFinite(value.ts);
+    isStringArray(value.mentions) &&
+    (value.reply_to === null || isPositiveInteger(value.reply_to)) &&
+    (value.state === null || STATUS_STATES.has(String(value.state))) &&
+    (value.note === null || typeof value.note === "string") &&
+    (value.status === null || isStatusEvent(value.status)) &&
+    isFiniteNumber(value.ts) &&
+    (value.edited === undefined || value.edited === true) &&
+    (value.edited_at === undefined || isFiniteNumber(value.edited_at)) &&
+    (value.edited_by === undefined || typeof value.edited_by === "string") &&
+    (value.retracted === undefined || value.retracted === true) &&
+    (value.retracted_at === undefined || isFiniteNumber(value.retracted_at)) &&
+    (value.retracted_by === undefined || typeof value.retracted_by === "string") &&
+    (value.supersedes === undefined || isPositiveInteger(value.supersedes)) &&
+    (value.superseded_by === undefined || isPositiveInteger(value.superseded_by)) &&
+    (value.rev_seq === undefined || isPositiveInteger(value.rev_seq));
 }
 
-// Full DirectedDelivery, carried only by holder-only `delivery` frames. Nullable fields
-// (lease_until/work_id/continuation_ref/reply_seq/last_error) are validated only for type,
-// allowing null.
 function isDirectedDelivery(value: unknown): boolean {
   return isRecord(value) &&
     typeof value.id === "string" &&
-    Number.isSafeInteger(value.message_seq) &&
+    isPositiveInteger(value.message_seq) &&
     typeof value.target_name === "string" &&
-    typeof value.cause === "string" &&
-    typeof value.state === "string" &&
-    Number.isSafeInteger(value.attempt) &&
-    isFiniteNumberOrNull(value.lease_until) &&
-    isStringOrNull(value.work_id) &&
-    isStringOrNull(value.continuation_ref) &&
-    isFiniteNumberOrNull(value.reply_seq) &&
-    isStringOrNull(value.last_error) &&
-    Number.isFinite(value.created_at) &&
-    Number.isFinite(value.updated_at);
+    DELIVERY_CAUSES.has(String(value.cause)) &&
+    DELIVERY_STATES.has(String(value.state)) &&
+    isNonNegativeInteger(value.attempt) &&
+    (value.lease_until === null || isFiniteNumber(value.lease_until)) &&
+    (value.work_id === null || typeof value.work_id === "string") &&
+    (value.continuation_ref === null || typeof value.continuation_ref === "string") &&
+    (value.reply_seq === null || isPositiveInteger(value.reply_seq)) &&
+    (value.last_error === null || typeof value.last_error === "string") &&
+    isFiniteNumber(value.created_at) &&
+    isFiniteNumber(value.updated_at);
 }
 
-// PublicDirectedDelivery projection, carried by `delivery_state` frames. It intentionally
-// omits cause/attempt/lease_until/work_id/continuation_ref/last_error — those NEVER appear
-// on a state frame, so requiring them (as the old shared isDelivery did) wrongly rejected
-// every valid delivery_state frame.
-function isPublicDelivery(value: unknown): boolean {
+function isPublicDirectedDelivery(value: unknown): boolean {
   return isRecord(value) &&
     typeof value.id === "string" &&
-    Number.isSafeInteger(value.message_seq) &&
+    isPositiveInteger(value.message_seq) &&
     typeof value.target_name === "string" &&
-    typeof value.state === "string" &&
-    isFiniteNumberOrNull(value.reply_seq) &&
-    Number.isFinite(value.created_at) &&
-    Number.isFinite(value.updated_at);
+    DELIVERY_STATES.has(String(value.state)) &&
+    (value.reply_seq === null || isPositiveInteger(value.reply_seq)) &&
+    isFiniteNumber(value.created_at) &&
+    isFiniteNumber(value.updated_at);
 }
 
-/** JSON syntax alone is not a protocol heartbeat: validate the discriminant and required shape. */
+function asServerFrame(value: Record<string, unknown>): ServerFrame {
+  return value as unknown as ServerFrame;
+}
+
 function parseServerFrame(value: unknown): ServerFrame | null {
   if (!isRecord(value) || typeof value.type !== "string") return null;
   switch (value.type) {
     case "welcome":
-      return typeof value.channel === "string" && typeof value.self === "string" &&
-        Number.isSafeInteger(value.last_seq) &&
-        (value.participants === undefined || Array.isArray(value.participants)) &&
-        (value.presence === undefined || Array.isArray(value.presence))
-        ? value as unknown as ServerFrame
+      return typeof value.channel === "string" &&
+        typeof value.self === "string" &&
+        (value.mode === undefined || CHANNEL_MODES.has(String(value.mode))) &&
+        (value.role === undefined || TOKEN_ROLES.has(String(value.role))) &&
+        (value.loop_guard === undefined || value.loop_guard === null || typeof value.loop_guard === "string") &&
+        Array.isArray(value.participants) &&
+        value.participants.every(isSender) &&
+        isNonNegativeInteger(value.last_seq) &&
+        (value.last_rev_seq === undefined || isNonNegativeInteger(value.last_rev_seq)) &&
+        (value.charter_rev === undefined || isNonNegativeInteger(value.charter_rev)) &&
+        Array.isArray(value.presence) &&
+        value.presence.every(isPresenceEntry) &&
+        (value.read_cursors === undefined || (Array.isArray(value.read_cursors) && value.read_cursors.every(isReadCursor))) &&
+        (value.directed_delivery === undefined || value.directed_delivery === "v1")
+        ? asServerFrame(value)
         : null;
     case "participants":
-      return Array.isArray(value.participants) && value.participants.every(isSender)
-        ? value as unknown as ServerFrame
-        : null;
+      return Array.isArray(value.participants) && value.participants.every(isSender) ? asServerFrame(value) : null;
     case "msg":
     case "status":
-      return isMessageFrame(value) ? value as unknown as ServerFrame : null;
+      return isMessageFrame(value) ? asServerFrame(value) : null;
     case "message_update":
-      return Number.isSafeInteger(value.target_seq) && isMessageFrame(value.message)
-        ? value as unknown as ServerFrame
+      return isPositiveInteger(value.target_seq) &&
+        ["edit", "retract", "supersede", "review", "decision"].includes(String(value.action)) &&
+        isSender(value.actor) &&
+        isFiniteNumber(value.ts) &&
+        isMessageFrame(value.message)
+        ? asServerFrame(value)
         : null;
     case "sent":
-      return Number.isSafeInteger(value.seq) ? value as unknown as ServerFrame : null;
+      return isPositiveInteger(value.seq) ? asServerFrame(value) : null;
     case "presence":
-      return typeof value.name === "string" && typeof value.state === "string" && Number.isFinite(value.ts)
-        ? value as unknown as ServerFrame
-        : null;
+      return isPresenceEntry(value) ? asServerFrame(value) : null;
     case "read_cursor":
-      return typeof value.name === "string" && Number.isSafeInteger(value.last_seen_seq) && Number.isFinite(value.updated_at)
-        ? value as unknown as ServerFrame
-        : null;
+      return isReadCursor(value) ? asServerFrame(value) : null;
     case "error":
-      return typeof value.code === "string" && typeof value.message === "string"
-        ? value as unknown as ServerFrame
-        : null;
+      return ERROR_CODES.has(String(value.code)) && typeof value.message === "string" ? asServerFrame(value) : null;
     case "pong":
-      return value as unknown as ServerFrame;
+      return Object.keys(value).length === 1 ? asServerFrame(value) : null;
     case "serve_lease":
-      return typeof value.name === "string" && typeof value.held === "boolean"
-        ? value as unknown as ServerFrame
-        : null;
+      return typeof value.name === "string" && typeof value.held === "boolean" ? asServerFrame(value) : null;
     case "delivery_adapter":
-      return value.adapter === "watch" && value.registered === true ? value as unknown as ServerFrame : null;
+      return value.adapter === "watch" && value.registered === true ? asServerFrame(value) : null;
     case "delivery":
-      return isDirectedDelivery(value.delivery) && isMessageFrame(value.message)
-        ? value as unknown as ServerFrame
-        : null;
+      return isDirectedDelivery(value.delivery) && isMessageFrame(value.message) ? asServerFrame(value) : null;
     case "delivery_state":
-      return isPublicDelivery(value.delivery) ? value as unknown as ServerFrame : null;
+      return isPublicDirectedDelivery(value.delivery) &&
+        (value.request_id === undefined || typeof value.request_id === "string")
+        ? asServerFrame(value)
+        : null;
     default:
       return null;
   }
@@ -499,7 +587,7 @@ export function connect(
         if (!line.trim()) continue;
         let parsed: unknown;
         try {
-          parsed = JSON.parse(line) as unknown;
+          parsed = JSON.parse(line);
         } catch {
           continue;
         }

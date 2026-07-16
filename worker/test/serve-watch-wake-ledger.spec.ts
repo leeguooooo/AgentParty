@@ -125,8 +125,9 @@ describe("#107 serve/watch wakes land in the server-side wake ledger", () => {
   });
 
   it("treats a reply_to an agent as a durable wake target even without an explicit @ (#544)", async () => {
-    const sender = await seedToken("agent");
-    const bot = await seedToken("agent", uniq("reply-bot"));
+    const owner = `${uniq("owner")}@example.com`;
+    const sender = await seedToken("agent", uniq("sender"), { owner });
+    const bot = await seedToken("agent", uniq("reply-bot"), { owner });
     const slug = await createChannel(sender.token);
     const botWs = await registerWakeAgent(slug, bot.token, "watch");
     try {

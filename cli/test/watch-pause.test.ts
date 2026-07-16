@@ -15,6 +15,7 @@ function pausedWelcome(lastSeq: number, self = "me", over: Record<string, unknow
     channel: "dev",
     self,
     last_seq: lastSeq,
+    participants: [],
     presence: [
       { name: self, state: "online", note: null, ts: Date.now(), paused: true, resume_at: Date.now() + 3_600_000 },
     ],
@@ -23,7 +24,7 @@ function pausedWelcome(lastSeq: number, self = "me", over: Record<string, unknow
 }
 
 function plainWelcome(lastSeq: number, self = "me") {
-  return { type: "welcome", channel: "dev", self, last_seq: lastSeq, presence: [] };
+  return { type: "welcome", channel: "dev", self, last_seq: lastSeq, participants: [], presence: [] };
 }
 
 function presenceFrame(name: string, over: Record<string, unknown> = {}) {

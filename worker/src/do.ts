@@ -2566,7 +2566,23 @@ export class ChannelDO extends Server<Env> {
         for (let i = 0; i < keys.length; i += 1000) {
           await this.env.ATTACHMENTS.delete(keys.slice(i, i + 1000));
         }
-        this.ctx.storage.transactionSync(() => {
+        let invalidatedDecisionSeqs: number[] = [];
+        const atomicEffects = this.captureAtomicDeliveryEffects(() => {
+          const activeRoots = this.ctx.storage.sql.exec(
+            `SELECT d.*
+               FROM directed_deliveries d
+               JOIN messages m ON m.seq = d.message_seq
+              WHERE m.ts <= ?
+                AND d.state IN ('queued', 'claimed', 'running', 'waiting_owner')
+                AND (d.parent_delivery_id IS NULL OR NOT EXISTS (
+                  SELECT 1 FROM directed_deliveries parent WHERE parent.id = d.parent_delivery_id
+                ))`,
+            cutoff,
+          ).toArray();
+          invalidatedDecisionSeqs = this.failDeliveryTree(activeRoots, now, {
+            error: "source expired by channel message retention policy",
+            terminalReason: "source_retention_expired",
+          });
           this.ctx.storage.sql.exec(
             `DELETE FROM webhook_queue
               WHERE json_valid(payload)
@@ -2597,6 +2613,8 @@ export class ChannelDO extends Server<Env> {
             cutoff,
           );
         });
+        this.flushAtomicDeliveryEffects(atomicEffects);
+        this.broadcastInvalidatedDecisions(invalidatedDecisionSeqs, now);
       }
     }
     if (auditRetention !== null) {
@@ -6038,9 +6056,10 @@ export class ChannelDO extends Server<Env> {
       tokenRows = await this.env.DB.prepare(
         `SELECT name FROM tokens
           WHERE role = 'agent' AND revoked_at IS NULL
+            AND (channel_scope IS NULL OR channel_scope = ?)
             AND name COLLATE NOCASE IN (${tokenPlaceholders})`,
       )
-        .bind(...requestedTargets)
+        .bind(this.name, ...requestedTargets)
         .all<{ name: string }>();
     } catch {
       return {
@@ -6083,9 +6102,10 @@ export class ChannelDO extends Server<Env> {
       const rows = await this.env.DB.prepare(
         `SELECT name, owner, hash FROM tokens
           WHERE role = 'agent' AND revoked_at IS NULL
+            AND (channel_scope IS NULL OR channel_scope = ?)
             AND name COLLATE NOCASE IN (${placeholders})`,
       )
-        .bind(...targets)
+        .bind(this.name, ...targets)
         .all<{ name: string; owner: string | null; hash: string }>();
       const byName = new Map(
         rows.results
@@ -6135,14 +6155,19 @@ export class ChannelDO extends Server<Env> {
 
     const [tokens, nicknames, profiles, squads] = await Promise.all([
       this.env.DB.prepare(
-        `SELECT name, role FROM tokens WHERE revoked_at IS NULL AND (${whereFor("name")})`,
-      ).bind(...binds).all<{ name: string; role: string }>(),
+        `SELECT name, role FROM tokens
+          WHERE revoked_at IS NULL
+            AND (channel_scope IS NULL OR channel_scope = ?)
+            AND (${whereFor("name")})`,
+      ).bind(this.name, ...binds).all<{ name: string; role: string }>(),
       this.env.DB.prepare(
         `SELECT n.name, n.nickname
            FROM agent_nicknames n
            JOIN tokens t ON t.name = n.name
-          WHERE t.revoked_at IS NULL AND (${whereFor("n.nickname")})`,
-      ).bind(...binds).all<{ name: string; nickname: string }>(),
+          WHERE t.revoked_at IS NULL
+            AND (t.channel_scope IS NULL OR t.channel_scope = ?)
+            AND (${whereFor("n.nickname")})`,
+      ).bind(this.name, ...binds).all<{ name: string; nickname: string }>(),
       this.env.DB.prepare(
         `SELECT handle, display_name
            FROM account_profiles
@@ -6264,22 +6289,27 @@ export class ChannelDO extends Server<Env> {
   // #544：reply_to 本身就是一条明确的定向消息。若原消息作者是 agent，即使回复正文没有再写
   // @name，也要把它加入 mentions，才能进入 watch/serve/webhook 的持久唤醒与断线重放路径。
   // 只补 agent、排除自回，避免把普通人类楼中楼回复改造成额外 @ 通知。
-  private expandAgentReplyMention(frame: SendFrame, senderName: string): SendFrame {
-    if (frame.kind !== "message" || frame.reply_to === null) return frame;
+  private expandAgentReplyMention(
+    frame: SendFrame,
+    senderName: string,
+  ): { frame: SendFrame; targets: Array<{ name: string; owner: string }> } {
+    if (frame.kind !== "message" || frame.reply_to === null) return { frame, targets: [] };
     const row = this.ctx.storage.sql
-      .exec("SELECT sender_name, sender_kind FROM messages WHERE seq = ?", frame.reply_to)
+      .exec("SELECT sender_name, sender_kind, sender_owner FROM messages WHERE seq = ?", frame.reply_to)
       .toArray()[0];
-    if (row === undefined || String(row.sender_kind) !== "agent") return frame;
+    if (row === undefined || String(row.sender_kind) !== "agent") return { frame, targets: [] };
     const target = String(row.sender_name);
+    const targetOwner = typeof row.sender_owner === "string" && row.sender_owner.length > 0 ? row.sender_owner : null;
     const mentions = frame.mentions ?? [];
     if (
+      targetOwner === null ||
       target === senderName ||
       target === "system" ||
       !MENTION_NAME_RE.test(target) ||
       mentions.includes(target) ||
       mentions.length >= MAX_MENTIONS
-    ) return frame;
-    return withExpandedMentions(frame, [...mentions, target]);
+    ) return { frame, targets: [] };
+    return { frame: withExpandedMentions(frame, [...mentions, target]), targets: [{ name: target, owner: targetOwner }] };
   }
 
   /**
@@ -6293,11 +6323,9 @@ export class ChannelDO extends Server<Env> {
   ): Promise<RoutedMentionFrame | SendErrorOutcome> {
     const mentionResolution = await this.resolveMentions(frame);
     if ("ok" in mentionResolution) return mentionResolution;
-    const beforeReplyKeys = new Set((mentionResolution.frame.mentions ?? []).map(mentionMatchKey));
-    frame = this.expandAgentReplyMention(mentionResolution.frame, senderName);
-    const autoReplyTargets = (frame.mentions ?? []).filter(
-      (target) => !beforeReplyKeys.has(mentionMatchKey(target)),
-    );
+    const autoReplyExpansion = this.expandAgentReplyMention(mentionResolution.frame, senderName);
+    frame = autoReplyExpansion.frame;
+    const autoReplyTargets = autoReplyExpansion.targets;
     const squadExpansion = await this.expandSquadMentions(frame);
     if ("ok" in squadExpansion) return squadExpansion;
     frame = squadExpansion.frame;
@@ -6305,7 +6333,10 @@ export class ChannelDO extends Server<Env> {
       ...mentionResolution.agentTargets,
       ...squadExpansion.agentTargets,
     ])];
-    const candidateDeliveryTargets = [...new Set([...requiredDeliveryTargets, ...autoReplyTargets])];
+    const candidateDeliveryTargets = [...new Set([
+      ...requiredDeliveryTargets,
+      ...autoReplyTargets.map((target) => target.name),
+    ])];
     const ownerLookup = await this.agentOwnersForTargets(candidateDeliveryTargets);
     if (ownerLookup === null) {
       return {
@@ -6326,22 +6357,25 @@ export class ChannelDO extends Server<Env> {
     }
     // A reply to a historical/revoked agent must remain a valid channel reply, but it must not
     // create a name-only wake that a future owner could capture. Drop only the server-added mention
-    // when no current creation-time principal exists; explicit mentions keep their own validation.
-    const unboundAutoKeys = new Set(
+    // when the current principal cannot be proven to match the source message snapshot; explicit
+    // mentions keep their own validation.
+    const expectedAutoOwners = new Map(autoReplyTargets.map((target) => [mentionMatchKey(target.name), target.owner]));
+    const invalidAutoKeys = new Set(
       autoReplyTargets
-        .filter((target) => !Object.prototype.hasOwnProperty.call(ownerLookup, target))
-        .map(mentionMatchKey),
+        .filter((target) => ownerLookup[target.name] !== target.owner)
+        .map((target) => mentionMatchKey(target.name)),
     );
-    if (unboundAutoKeys.size > 0) {
+    if (invalidAutoKeys.size > 0) {
       frame = withExpandedMentions(
         frame,
-        (frame.mentions ?? []).filter((target) => !unboundAutoKeys.has(mentionMatchKey(target))),
+        (frame.mentions ?? []).filter((target) => !invalidAutoKeys.has(mentionMatchKey(target))),
       );
     }
     return {
       frame,
       deliveryTargets: candidateDeliveryTargets.filter((target) =>
-        Object.prototype.hasOwnProperty.call(ownerLookup, target)
+        Object.prototype.hasOwnProperty.call(ownerLookup, target) &&
+        (expectedAutoOwners.get(mentionMatchKey(target)) === undefined || !invalidAutoKeys.has(mentionMatchKey(target)))
       ),
       deliveryTargetOwners: ownerLookup,
     };
