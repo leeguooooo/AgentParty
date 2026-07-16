@@ -170,10 +170,11 @@ export function LarkMemberInvite({
     setInviting(user.id);
     setError(null);
     try {
-      await remove(token, slug, user.id);
+      const removed = await remove(token, slug, user.id);
       setUsers((current) => current.map((item) => item.id === user.id ? { ...item, already_member: false } : item));
       setOrganizationUsers((current) => current.map((item) => item.id === user.id ? { ...item, already_member: false } : item));
       onRemoved?.(user);
+      if (removed.notification_status === "failed") setError(t("LarkInvite.error.removeNotification"));
     } catch (cause) {
       if (isDirectoryPermissionError(cause)) disableDirectoryActions();
       else setError(errorLabel(cause, "LarkInvite.error.remove"));

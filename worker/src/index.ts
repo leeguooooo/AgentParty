@@ -87,6 +87,7 @@ import {
   browseLarkOrganization,
   browseScopedLarkUsers,
   buildChannelInviteCard,
+  buildChannelRemovalCard,
   buildMentionCard,
   getLarkDirectoryUser,
   inferReceiveIdType,
@@ -103,6 +104,7 @@ import { openapiDocument } from "./openapi";
 
 declare const __AGENTPARTY_BUILD_VERSION__: string | undefined;
 declare const __AGENTPARTY_BUILD_COMMIT__: string | undefined;
+const LARK_NOTIFICATION_TIMEOUT_MS = 5_000;
 declare const __AGENTPARTY_DEPLOYED_AT__: string | undefined;
 
 export { ChannelDO };
@@ -4000,7 +4002,28 @@ app.delete("/api/channels/:slug/lark-members/:userId", async (c) => {
     return c.json(errorBody("bad_request", "channel owner cannot be removed"), 400);
   }
   const result = await removeChannelMemberAndAgents(c.env, slug, account, identity);
-  return c.json({ ok: true, user_id: userId, ...result });
+  let notificationStatus: "sent" | "failed" | "skipped_not_member" = "skipped_not_member";
+  if (result.memberRemoved) {
+    try {
+      await sendLarkCard(
+        c.env,
+        provider,
+        userId,
+        inferReceiveIdType(userId),
+        buildChannelRemovalCard(slug),
+        AbortSignal.timeout(LARK_NOTIFICATION_TIMEOUT_MS),
+      );
+      notificationStatus = "sent";
+    } catch (notificationError) {
+      notificationStatus = "failed";
+      console.warn("Lark member removal notification failed", {
+        channel: slug,
+        provider: provider.id,
+        error: notificationError instanceof Error ? notificationError.message : String(notificationError),
+      });
+    }
+  }
+  return c.json({ ok: true, user_id: userId, notification_status: notificationStatus, ...result });
 });
 
 app.get("/api/channels/:slug/perms", async (c) => {
