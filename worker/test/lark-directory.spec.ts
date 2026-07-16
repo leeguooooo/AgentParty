@@ -629,11 +629,23 @@ describe("Lark organization member invitations (#358)", () => {
     const scoped = await seedToken("agent", uniq("scoped_remove"), { owner: account, channelScope: slug });
     const global = await seedToken("agent", uniq("global_remove"), { owner: account });
     const other = await seedToken("agent", uniq("other_remove"), { owner: account, channelScope: uniq("other") });
+    mockTenantToken();
+    let sentMessage: Record<string, unknown> | null = null;
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/im/v1/messages?receive_id_type=union_id", method: "POST" })
+      .reply(200, (options) => {
+        sentMessage = JSON.parse(String(options.body)) as Record<string, unknown>;
+        return { code: 0, data: { message_id: "om_removed" } };
+      });
 
     const response = await api(`/api/channels/${slug}/lark-members/on_remove`, owner.token, { method: "DELETE" });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ memberRemoved: true, revokedAgents: 1 });
+    expect(await response.json()).toMatchObject({ memberRemoved: true, revokedAgents: 1, notification_status: "sent" });
+    expect(sentMessage).toMatchObject({ receive_id: "on_remove", msg_type: "interactive" });
+    const removalCard = JSON.parse(String((sentMessage as unknown as Record<string, unknown>).content)) as Record<string, unknown>;
+    expect(JSON.stringify(removalCard)).toContain(`#${slug}`);
+    expect(JSON.stringify(removalCard)).toContain("agent");
     expect(await env.DB.prepare(
       "SELECT account FROM channel_members WHERE channel_slug = ? AND account = ?",
     ).bind(slug, account).first()).toBeNull();
@@ -657,6 +669,38 @@ describe("Lark organization member invitations (#358)", () => {
       "SELECT account FROM channel_account_bans WHERE channel_slug = ? AND account = ?",
     ).bind(slug, account).first()).toBeNull();
     expect((await api(`/api/channels/${slug}/messages`, global.token)).status).toBe(200);
+  });
+
+  it("keeps the member and agent removal when the Lark bot notification fails", async () => {
+    const owner = await larkHuman();
+    const slug = await createChannel(owner.token);
+    const account = "lark-main:on_remove_notify_fail";
+    const now = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO account_profiles (
+         account, handle, display_name, provider, provider_user_id, tenant_key, created_at, updated_at
+       ) VALUES (?, ?, 'Remove Notify Fail', 'lark-main', 'on_remove_notify_fail', 'tenant-test', ?, ?)`,
+    ).bind(account, uniq("remove_notify_fail"), now, now).run();
+    await env.DB.prepare(
+      "INSERT INTO channel_members (channel_slug, account, added_by, added_at) VALUES (?, ?, ?, ?)",
+    ).bind(slug, account, owner.account, now).run();
+    const scoped = await seedToken("agent", uniq("scoped_notify_fail"), { owner: account, channelScope: slug });
+    mockTenantToken();
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/im/v1/messages?receive_id_type=union_id", method: "POST" })
+      .reply(200, { code: 999, msg: "permission denied" });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const response = await api(`/api/channels/${slug}/lark-members/on_remove_notify_fail`, owner.token, { method: "DELETE" });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ memberRemoved: true, revokedAgents: 1, notification_status: "failed" });
+    expect(await env.DB.prepare(
+      "SELECT account FROM channel_members WHERE channel_slug = ? AND account = ?",
+    ).bind(slug, account).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT revoked_at FROM tokens WHERE name = ?").bind(scoped.name).first<{ revoked_at: number | null }>())
+      .toMatchObject({ revoked_at: expect.any(Number) });
+    expect(warning).toHaveBeenCalledOnce();
   });
 
   it("reuses an open_id profile during a union_id invite and migrates it to the stable id", async () => {

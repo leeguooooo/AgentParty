@@ -35,6 +35,7 @@ export const LarkMemberInviteStrings: LocaleDict = {
     "LarkInvite.error.browse": "The Lark organization could not be loaded.",
     "LarkInvite.error.invite": "The Lark member could not be invited.",
     "LarkInvite.error.notification": "The member was added, but the Lark bot could not send the invitation message.",
+    "LarkInvite.error.removeNotification": "The member and their agents were blocked, but the Lark bot could not send the removal notice.",
     "LarkInvite.error.remove": "The Lark member could not be removed.",
   },
   zh: {
@@ -71,6 +72,7 @@ export const LarkMemberInviteStrings: LocaleDict = {
     "LarkInvite.error.browse": "暂时无法读取 Lark 组织架构。",
     "LarkInvite.error.invite": "无法邀请该 Lark 成员。",
     "LarkInvite.error.notification": "成员已加入频道，但 Lark 机器人未能发送邀请通知。",
+    "LarkInvite.error.removeNotification": "成员及其 agent 已被封禁，但 Lark 机器人未能发送移除通知。",
     "LarkInvite.error.remove": "无法移除该 Lark 成员。",
   },
 };

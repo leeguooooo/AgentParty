@@ -55,6 +55,15 @@ export interface LarkDirectoryUser {
   notification_status?: "sent" | "failed" | "skipped_already_member";
 }
 
+export interface LarkMemberRemovalResult {
+  ok: true;
+  user_id: string;
+  memberRemoved: boolean;
+  revokedAgents: number;
+  revokedProjectAgentInvites: number;
+  notification_status: "sent" | "failed" | "skipped_not_member";
+}
+
 export interface LarkDirectoryPage {
   users: LarkDirectoryUser[];
   next_cursor: string | null;
@@ -128,7 +137,7 @@ export async function inviteLarkMember(
   return (await res.json()) as LarkDirectoryUser;
 }
 
-export async function removeLarkMember(token: string, slug: string, userId: string): Promise<void> {
+export async function removeLarkMember(token: string, slug: string, userId: string): Promise<LarkMemberRemovalResult> {
   const res = await fetchApi(
     `/api/channels/${encodeURIComponent(slug)}/lark-members/${encodeURIComponent(userId)}`,
     {
@@ -139,6 +148,7 @@ export async function removeLarkMember(token: string, slug: string, userId: stri
   if (res.status === 401) throw new AuthError("invalid or revoked token");
   if (res.status === 403) throw new ForbiddenError("only a Lark channel moderator can remove members");
   if (!res.ok) throw await larkDirectoryError(res);
+  return (await res.json()) as LarkMemberRemovalResult;
 }
 
 export function urlToken(): string | null {

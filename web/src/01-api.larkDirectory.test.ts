@@ -43,13 +43,21 @@ describe("Lark directory API", () => {
     let request: Request | null = null;
     globalThis.fetch = (async (input, init) => {
       request = new Request(new URL(String(input), "https://web.test"), init);
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({
+        ok: true,
+        user_id: "on_alice",
+        memberRemoved: true,
+        revokedAgents: 2,
+        revokedProjectAgentInvites: 1,
+        notification_status: "sent",
+      }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
 
-    await removeLarkMember("session-token", "private room", "on_alice");
+    const result = await removeLarkMember("session-token", "private room", "on_alice");
     expect(request!.method).toBe("DELETE");
     expect(request!.url).toContain("/api/channels/private%20room/lark-members/on_alice");
     expect(request!.headers.get("authorization")).toBe("Bearer session-token");
+    expect(result).toMatchObject({ memberRemoved: true, revokedAgents: 2, notification_status: "sent" });
   });
 
   test("encodes organization browsing and independent pagination", async () => {

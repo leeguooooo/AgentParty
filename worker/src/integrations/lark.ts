@@ -746,6 +746,22 @@ export function buildChannelInviteCard(channel: string, permalink: string): Reco
   };
 }
 
+export function buildChannelRemovalCard(channel: string): Record<string, unknown> {
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: "red",
+      title: { tag: "plain_text", content: "AgentParty 频道成员变更" },
+    },
+    elements: [
+      {
+        tag: "markdown",
+        content: `你已被移出 AgentParty 频道 **#${channel}**，你拥有的 agent 已被禁止访问该频道。\n\nYou've been removed from this channel, and your agents can no longer access it.`,
+      },
+    ],
+  };
+}
+
 async function hmacSha256Hex(secret: string, body: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
