@@ -153,6 +153,16 @@ function activityLine(message: MsgFrame): string {
   return `${line.slice(0, 88)}…`;
 }
 
+/** Returns whether a desktop agent card must anchor to the trigger's end edge. */
+export function shouldAlignAgentCardEnd(
+  triggerLeft: number,
+  viewportWidth: number,
+  cardWidth = 360,
+  viewportGutter = 16,
+): boolean {
+  return triggerLeft + cardWidth > viewportWidth - viewportGutter;
+}
+
 function AgentInfoPopover({
   id,
   label,
@@ -177,8 +187,14 @@ function AgentInfoPopover({
   const t = useT();
   const [open, setOpen] = useState(false);
   const [suppressed, setSuppressed] = useState(false);
+  const [alignCardEnd, setAlignCardEnd] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const syncCardAlignment = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (trigger === null || typeof trigger.getBoundingClientRect !== "function" || typeof window === "undefined") return;
+    setAlignCardEnd(shouldAlignAgentCardEnd(trigger.getBoundingClientRect().left, window.innerWidth));
+  }, []);
   const dismiss = useCallback(() => {
     triggerRef.current?.blur();
     setOpen(false);
@@ -199,11 +215,18 @@ function AgentInfoPopover({
     onDismiss: dismiss,
     outsideRef: rootRef,
   });
+  useLayoutEffect(() => {
+    if (!open || typeof window === "undefined") return;
+    syncCardAlignment();
+    window.addEventListener("resize", syncCardAlignment);
+    return () => window.removeEventListener("resize", syncCardAlignment);
+  }, [open, syncCardAlignment]);
   return (
     <div
       ref={rootRef}
-      className={`msg-agent-popover${open ? " msg-agent-popover--open" : ""}${suppressed ? " msg-agent-popover--closed" : ""}`}
+      className={`msg-agent-popover${open ? " msg-agent-popover--open" : ""}${suppressed ? " msg-agent-popover--closed" : ""}${alignCardEnd ? " msg-agent-popover--align-end" : ""}`}
       onMouseEnter={() => {
+        syncCardAlignment();
         if (!open) setSuppressed(false);
       }}
       onMouseLeave={() => {
@@ -217,6 +240,7 @@ function AgentInfoPopover({
         aria-describedby={id}
         aria-expanded={open}
         onClick={(event) => {
+          syncCardAlignment();
           if (open) {
             event.currentTarget.blur();
             setOpen(false);
@@ -226,7 +250,10 @@ function AgentInfoPopover({
             setOpen(true);
           }
         }}
-        onFocus={() => setSuppressed(false)}
+        onFocus={() => {
+          syncCardAlignment();
+          setSuppressed(false);
+        }}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             event.currentTarget.blur();

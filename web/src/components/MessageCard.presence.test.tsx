@@ -13,12 +13,14 @@ const { MessageCard, agentInfoTitleBits, presenceTitleBits } = await import("./M
 let renderer: ReactTestRenderer | null = null;
 let windowEvents: TestEventTarget;
 let documentEvents: TestEventTarget;
+let triggerLeft: number;
 const insidePopoverTarget = {};
 
 const noop = () => undefined;
 
 class TestEventTarget {
   private listeners = new Map<string, Set<(event: unknown) => void>>();
+  innerWidth = 1024;
 
   addEventListener(type: string, listener: (event: unknown) => void) {
     const listeners = this.listeners.get(type) ?? new Set();
@@ -54,6 +56,7 @@ function memoryStorage(): Storage {
 beforeEach(() => {
   windowEvents = new TestEventTarget();
   documentEvents = new TestEventTarget();
+  triggerLeft = 120;
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
   Object.defineProperty(globalThis, "window", { configurable: true, value: windowEvents });
@@ -119,7 +122,12 @@ function render(msg: MsgFrame, extra: Record<string, unknown> = {}, locale: "en"
           if (className.includes("msg-agent-popover")) {
             return { contains: (target: unknown) => target === insidePopoverTarget };
           }
-          if (className.includes("msg-agent-trigger")) return { blur: noop };
+          if (className.includes("msg-agent-trigger")) {
+            return {
+              blur: noop,
+              getBoundingClientRect: () => ({ left: triggerLeft }),
+            };
+          }
           return {};
         },
       },
@@ -239,6 +247,24 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     expect(mentionTrigger(root).props["aria-expanded"]).toBe(false);
     expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--closed");
     expect(blurred).toBe(true);
+  });
+
+  test("信息卡打开和 resize 会重算边缘对齐，卸载时移除监听器", () => {
+    triggerLeft = 700;
+    const root = render(baseMsg({ mentions: ["planner"] }));
+    const clickEvent = { currentTarget: { blur: noop } };
+
+    act(() => mentionTrigger(root).props.onClick(clickEvent));
+    expect(mentionCard(root).parent?.props.className).toContain("msg-agent-popover--align-end");
+    expect(windowEvents.count("resize")).toBe(1);
+
+    triggerLeft = 120;
+    act(() => windowEvents.emit("resize", {}));
+    expect(mentionCard(root).parent?.props.className).not.toContain("msg-agent-popover--align-end");
+
+    act(() => renderer?.unmount());
+    renderer = null;
+    expect(windowEvents.count("resize")).toBe(0);
   });
 
   test("打开 @提及信息卡后，站内点击保留，站外点击与 Escape 都会收起", () => {
