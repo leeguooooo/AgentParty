@@ -1,7 +1,7 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { PresenceEntry, Sender, TaskRecord } from "@agentparty/shared";
+import type { MsgFrame, PresenceEntry, PublicDirectedDelivery, Sender, TaskRecord } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 
 const { AgentBoardPanel, agentPresenceSummary } = await import("./Channel");
@@ -37,6 +37,30 @@ function task(
   };
 }
 
+function message(seq: number, body: string): MsgFrame {
+  return {
+    type: "msg", seq, sender: { name: "human-owner", kind: "human" }, kind: "message", body,
+    mentions: [], reply_to: null, state: null, note: null, status: null, ts: seq,
+  };
+}
+
+function delivery(
+  id: string,
+  targetName: string,
+  messageSeq: number,
+  state: PublicDirectedDelivery["state"],
+): PublicDirectedDelivery {
+  return {
+    id,
+    message_seq: messageSeq,
+    target_name: targetName,
+    state,
+    reply_seq: null,
+    created_at: messageSeq,
+    updated_at: messageSeq,
+  };
+}
+
 let renderer: ReactTestRenderer | null = null;
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -52,11 +76,23 @@ function render(
   presenceList: PresenceEntry[],
   tasks: TaskRecord[],
   participants: Sender[] = [],
+  deliveries: PublicDirectedDelivery[] = [],
+  messages: MsgFrame[] = [],
 ): ReactTestRenderer {
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage({ ap_locale: locale }) });
   let r!: ReactTestRenderer;
   void act(() => {
-    r = create(<LocaleProvider><AgentBoardPanel presence={presenceList} participants={participants} tasks={tasks} /></LocaleProvider>);
+    r = create(
+      <LocaleProvider>
+        <AgentBoardPanel
+          presence={presenceList}
+          participants={participants}
+          tasks={tasks}
+          deliveries={deliveries}
+          messages={messages}
+        />
+      </LocaleProvider>,
+    );
   });
   renderer = r;
   return r;
@@ -159,6 +195,60 @@ describe("AgentBoardPanel (#187)", () => {
     const offlineLane = r.root.findByProps({ "data-status": "offline" });
     expect(treeText(idleLane)).toContain("fresh-agent");
     expect(treeText(offlineLane)).not.toContain("fresh-agent");
+  });
+
+  test("treats presence.busy as busy and shows the current message instead of only a status label", () => {
+    const r = render(
+      "zh",
+      [presence("evan-agent", { state: "waiting", live: true, busy: true, current_task: 42, heartbeat_at: 100 })],
+      [],
+      [],
+      [],
+      [message(42, "核对 KYC 外部 token 的签发方和 claim 契约")],
+    );
+
+    const busyLane = r.root.findByProps({ "data-status": "busy" });
+    expect(treeText(busyLane)).toContain("evan-agent");
+    expect(treeText(busyLane)).toContain("# 42");
+    expect(treeText(busyLane)).toContain("核对 KYC 外部 token");
+    expect(treeText(busyLane)).toContain("处理中");
+  });
+
+  test("surfaces a delivery-only target and its queued work in the visible busy lane", () => {
+    const r = render(
+      "zh",
+      [],
+      [],
+      [],
+      [delivery("delivery-evan", "Evan-Claude-Kyc", 147, "queued")],
+      [message(147, "确认 message-bottle token 的归属和验证方式")],
+    );
+
+    const busyLane = r.root.findByProps({ "data-status": "busy" });
+    expect(treeText(busyLane)).toContain("Evan-Claude-Kyc");
+    expect(treeText(busyLane)).toContain("# 147");
+    expect(treeText(busyLane)).toContain("确认 message-bottle token");
+    expect(treeText(busyLane)).toContain("已排队");
+    expect(treeText(r.root.findByProps({ "data-status": "offline" }))).not.toContain("Evan-Claude-Kyc");
+  });
+
+  test("puts waiting-owner work in the blocked lane and ignores terminal deliveries", () => {
+    const r = render(
+      "en",
+      [],
+      [],
+      [],
+      [
+        delivery("waiting", "needs-owner", 51, "waiting_owner"),
+        delivery("done", "finished-agent", 52, "replied"),
+      ],
+      [message(51, "Choose the production rollout window"), message(52, "Already complete")],
+    );
+
+    expect(treeText(r.root.findByProps({ "data-status": "blocked" }))).toContain("needs-owner");
+    expect(allText(r)).toContain("waiting for owner");
+    expect(allText(r)).not.toContain("finished-agent");
+    expect(allText(r)).not.toContain("Already complete");
   });
 
   test("live participants override a stale persisted offline row (#514)", () => {
