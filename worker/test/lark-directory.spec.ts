@@ -72,6 +72,27 @@ function mockDirectoryPage(options: { permissionDenied?: boolean; persist?: bool
 }
 
 describe("Lark organization member invitations (#358)", () => {
+  it("passes an already-expired notification deadline to tenant token acquisition", async () => {
+    const larkEnv = env as unknown as Parameters<typeof resolveLarkProvider>[0];
+    const provider = resolveLarkProvider(larkEnv, "lark-main");
+    expect(provider).not.toBeNull();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(
+      AbortSignal.abort(new DOMException("The operation timed out", "TimeoutError")),
+    );
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/auth/v3/tenant_access_token/internal", method: "POST" })
+      .reply(200, () => {
+        throw new DOMException("The operation was aborted", "AbortError");
+      });
+    try {
+      await expect(getTenantAccessToken(larkEnv, provider!, AbortSignal.timeout(5_000)))
+        .rejects.toMatchObject({ name: "AbortError" });
+      expect(timeout).toHaveBeenCalledWith(5_000);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
   it("publishes the moderator-only search and direct-invite contracts without any access token field", async () => {
     const response = await api("/openapi.json", "unused");
     expect(response.status).toBe(200);
