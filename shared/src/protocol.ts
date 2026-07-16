@@ -865,6 +865,12 @@ export interface PublicDirectedDelivery {
   reply_seq: number | null;
   created_at: number;
   updated_at: number;
+  /**
+   * 目标消息正文的单行截断预览（投影时从 messages 现查，仍不复制存储）。Agent 看板靠它展示
+   * 「在忙什么」，否则 delivery 指向的老消息不在客户端已加载窗口时只能显示占位符。
+   * 已撤回消息为 null；旧 worker 不下发该字段。
+   */
+  preview?: string | null;
 }
 
 /** 只发给目标身份当前持有 serve lease 的连接；message 正文仍引用原 messages 行，不复制存储。 */

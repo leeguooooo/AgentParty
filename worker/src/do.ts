@@ -7868,6 +7868,20 @@ export class ChannelDO extends Server<Env> {
     };
   }
 
+  /**
+   * 目标消息正文的单行截断预览。投影时从 messages 现查（不复制存储），供 Agent 看板展示
+   * 「在忙什么」——delivery 指向的消息常在客户端已加载窗口之外。已撤回消息回 null。
+   */
+  private deliveryMessagePreview(messageSeq: number): string | null {
+    const row = this.ctx.storage.sql
+      .exec("SELECT body, retracted_at FROM messages WHERE seq = ?", messageSeq)
+      .toArray()[0];
+    if (row === undefined || (row.retracted_at !== null && row.retracted_at !== undefined)) return null;
+    const compact = String(row.body).replace(/\s+/g, " ").trim();
+    if (compact === "") return null;
+    return compact.length > 160 ? `${compact.slice(0, 157)}…` : compact;
+  }
+
   private rowToPublicDirectedDelivery(
     row: Record<string, unknown>,
     detailedState = false,
@@ -7885,6 +7899,7 @@ export class ChannelDO extends Server<Env> {
       reply_seq: delivery.reply_seq,
       created_at: delivery.created_at,
       updated_at: delivery.updated_at,
+      preview: this.deliveryMessagePreview(delivery.message_seq),
     };
   }
 

@@ -696,7 +696,7 @@ describe("decision ↔ durable delivery lineage (#548)", () => {
     });
     const publicWaiting = await nextDeliveryState(observer, source.delivery.id, "running");
     expect(Object.keys(publicWaiting.delivery).sort()).toEqual(
-      ["created_at", "id", "message_seq", "reply_seq", "state", "target_name", "updated_at"].sort(),
+      ["created_at", "id", "message_seq", "preview", "reply_seq", "state", "target_name", "updated_at"].sort(),
     );
 
     const resolved = await resolveDecision(slug, owner.token, asked.body!.seq, "approved privately");
