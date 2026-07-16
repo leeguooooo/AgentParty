@@ -70,6 +70,7 @@ export interface LarkOrganizationPage {
   users: LarkDirectoryUser[];
   next_department_cursor: string | null;
   next_user_cursor: string | null;
+  department_names_available?: boolean;
 }
 
 export async function searchLarkDirectory(
@@ -97,12 +98,14 @@ export async function browseLarkOrganization(
   userCursor: string | null = null,
   includeDepartments = true,
   includeUsers = true,
+  flat = false,
 ): Promise<LarkOrganizationPage> {
   const params = new URLSearchParams({ department_id: departmentId, limit: String(limit) });
   if (departmentCursor !== null) params.set("department_cursor", departmentCursor);
   if (userCursor !== null) params.set("user_cursor", userCursor);
   if (!includeDepartments) params.set("departments", "0");
   if (!includeUsers) params.set("users", "0");
+  if (flat) params.set("flat", "1");
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/lark-organization?${params.toString()}`, {
     headers: { authorization: `Bearer ${token}` },
   });

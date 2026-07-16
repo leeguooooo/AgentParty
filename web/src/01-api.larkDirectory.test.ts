@@ -58,4 +58,22 @@ describe("Lark directory API", () => {
     expect(request!.url).toContain("departments=0");
     expect(request!.headers.get("authorization")).toBe("Bearer session-token");
   });
+
+  test("marks follow-up organization requests as flat-directory pagination", async () => {
+    let request: Request | null = null;
+    globalThis.fetch = (async (input, init) => {
+      request = new Request(new URL(String(input), "https://web.test"), init);
+      return new Response(JSON.stringify({
+        departments: [],
+        users: [],
+        next_department_cursor: null,
+        next_user_cursor: null,
+        department_names_available: false,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    await browseLarkOrganization("session-token", "private room", "0", 50, null, "flat/cursor", false, true, true);
+    expect(request!.url).toContain("departments=0");
+    expect(request!.url).toContain("flat=1");
+  });
 });

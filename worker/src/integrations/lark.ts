@@ -529,6 +529,19 @@ async function scopedLarkDirectorySearch(
   return { users, nextCursor: hasMore ? await encodeDirectoryCursor(secret, state) : null };
 }
 
+export async function browseScopedLarkUsers(
+  env: EnvLike,
+  provider: LarkProviderConfig,
+  cursor: string | null,
+  pageSize: number,
+): Promise<{ users: LarkDirectoryUser[]; nextCursor: string | null }> {
+  const normalizedQuery = "";
+  const state = cursor === null
+    ? null
+    : await decodeDirectoryCursor(providerSecret(env, provider), cursor, normalizedQuery, provider.id);
+  return scopedLarkDirectorySearch(env, provider, normalizedQuery, pageSize, state);
+}
+
 export async function searchLarkDirectory(
   env: EnvLike,
   provider: LarkProviderConfig,
