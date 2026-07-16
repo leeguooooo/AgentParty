@@ -36,6 +36,7 @@ export function LarkMemberInvite({
   const [searched, setSearched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [inviting, setInviting] = useState<string | null>(null);
+  const invitingUser = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const activeQuery = useRef("");
   const queryVersion = useRef(0);
@@ -136,6 +137,8 @@ export function LarkMemberInvite({
   }
 
   async function add(user: LarkDirectoryUser) {
+    if (invitingUser.current !== null) return;
+    invitingUser.current = user.id;
     setInviting(user.id);
     setError(null);
     try {
@@ -147,7 +150,8 @@ export function LarkMemberInvite({
       if (isDirectoryPermissionError(cause)) disableDirectoryActions();
       else setError(errorLabel(cause, "LarkInvite.error.invite"));
     } finally {
-      setInviting(null);
+      if (invitingUser.current === user.id) invitingUser.current = null;
+      setInviting((current) => current === user.id ? null : current);
     }
   }
 
@@ -244,7 +248,7 @@ export function LarkMemberInvite({
               type="button"
               className="d-btn"
               data-lark-user-id={user.id}
-              disabled={user.already_member || inviting === user.id}
+              disabled={user.already_member || inviting !== null}
               onClick={() => add(user)}
             >
               {user.already_member
