@@ -8,7 +8,7 @@ import { formatMsg, stripTerminalControls } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { fetchMessages, handleRestError, postMessage, respondDecision, setDecisionMode } from "../rest";
-import type { DecisionMode, MsgFrame } from "@agentparty/shared";
+import type { DecisionMode, DecisionRequest, DecisionResolution, MsgFrame } from "@agentparty/shared";
 import { isName, isSlug } from "../validation";
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
@@ -184,6 +184,95 @@ export function prepareDecisionContinuation(
   };
 }
 
+/** prepareDecisionContinuation 拒绝入场（POST 尚未发生）与 POST 之后的 REST 失败必须能被调用方区分开。 */
+export class DecisionAskRefusedError extends Error {}
+
+export interface AskDecisionInput {
+  prompt: string;
+  /** 非空 → choice；空/缺省 → approval。 */
+  options?: string[];
+  mentions?: string[];
+  /** 方案正文；缺省用 prompt。 */
+  body?: string;
+}
+
+export interface AskDecisionResult {
+  seq: number;
+  state: "auto_resolved" | "waiting_owner" | "pending";
+  chosen_option?: string;
+  decision_request?: DecisionRequest;
+  decision_resolution?: DecisionResolution;
+  continuation: DecisionContinuationContext | null;
+}
+
+// runAsk（CLI）与 party_decision_ask（MCP）共用的核心（#503）：构造 decision_request、准备
+// continuation、POST、推进游标、解读服务端的即时 resolution。两条入口只做各自的参数/输出适配，
+// 绝不各自复刻这段业务逻辑。
+export async function askDecision(
+  auth: { server: string; token: string },
+  channel: string,
+  input: AskDecisionInput,
+): Promise<AskDecisionResult> {
+  const options = input.options ?? [];
+  const decisionRequest =
+    options.length > 0
+      ? { kind: "choice" as const, prompt: input.prompt, options }
+      : { kind: "approval" as const, prompt: input.prompt };
+  let continuation: DecisionContinuationContext | null;
+  try {
+    // This is deliberately the last local step before POST. Once the Worker parks the delivery,
+    // a process crash must still leave enough durable state for the future owner_answer wake.
+    continuation = prepareDecisionContinuation();
+  } catch (error) {
+    throw new DecisionAskRefusedError(error instanceof Error ? error.message : String(error));
+  }
+  const payload: Parameters<typeof postMessage>[3] & {
+    expected_decision_lineage?: {
+      delivery_id: string;
+      work_id: string;
+      continuation_ref: string;
+    };
+  } = {
+    kind: "message",
+    body: input.body ?? input.prompt,
+    mentions: input.mentions ?? [],
+    reply_to: null,
+    decision_request: decisionRequest,
+    ...(continuation === null
+      ? {}
+      : {
+          expected_decision_lineage: {
+            delivery_id: continuation.deliveryId,
+            work_id: continuation.workId,
+            continuation_ref: continuation.continuationRef,
+          },
+        }),
+  };
+  const posted = await postMessage(auth.server, auth.token, channel, payload);
+  const { seq } = posted;
+  advanceCursorPastOwnMessage(channel, seq);
+  const immediate = posted.decision_resolution;
+  // A serve-owned work must never park its single runner in a local poll loop. The Worker has
+  // durably moved it to waiting_owner and released the next delivery; owner resolution will create
+  // a new owner_answer delivery for the same work/continuation.
+  const state: AskDecisionResult["state"] =
+    immediate?.state === "auto_resolved"
+      ? "auto_resolved"
+      : continuation !== null && immediate?.state === "pending"
+        ? "waiting_owner"
+        : "pending";
+  return {
+    seq,
+    state,
+    ...(state === "auto_resolved" && immediate?.chosen_option !== undefined
+      ? { chosen_option: immediate.chosen_option }
+      : {}),
+    ...(posted.decision_request !== undefined ? { decision_request: posted.decision_request } : {}),
+    ...(immediate !== undefined ? { decision_resolution: immediate } : {}),
+    continuation,
+  };
+}
+
 function resolveSlug(flags: Flags): string | null {
   const channel = resolveChannel(str(flags.channel));
   if (!channel) {
@@ -235,58 +324,28 @@ async function runAsk(argv: string[]): Promise<number> {
     console.error("no config, run: party login or party init --server URL --token T");
     return 1;
   }
-  const decisionRequest =
-    options.length > 0 ? { kind: "choice" as const, prompt, options } : { kind: "approval" as const, prompt };
-  let continuation: DecisionContinuationContext | null;
+  // 核心逻辑在 askDecision（与 MCP 的 party_decision_ask 共用）；这里只做 CLI 的输出/退出码适配。
+  let result: AskDecisionResult;
   try {
-    // This is deliberately the last local step before POST. Once the Worker parks the delivery,
-    // a process crash must still leave enough durable state for the future owner_answer wake.
-    continuation = prepareDecisionContinuation();
+    result = await askDecision(auth, channel, { prompt, options, mentions, body });
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    console.error(`decision ask refused before POST: ${terminalText(reason)}`);
-    return 1;
+    if (error instanceof DecisionAskRefusedError) {
+      console.error(`decision ask refused before POST: ${terminalText(error.message)}`);
+      return 1;
+    }
+    return handleRestError(error);
   }
   try {
-    const payload: Parameters<typeof postMessage>[3] & {
-      expected_decision_lineage?: {
-        delivery_id: string;
-        work_id: string;
-        continuation_ref: string;
-      };
-    } = {
-      kind: "message",
-      body,
-      mentions,
-      reply_to: null,
-      decision_request: decisionRequest,
-      ...(continuation === null
-        ? {}
-        : {
-            expected_decision_lineage: {
-              delivery_id: continuation.deliveryId,
-              work_id: continuation.workId,
-              continuation_ref: continuation.continuationRef,
-            },
-          }),
-    };
-    const posted = await postMessage(auth.server, auth.token, channel, payload);
-    const { seq } = posted;
-    advanceCursorPastOwnMessage(channel, seq);
-    const publicRequest = posted.decision_request;
-    const immediate = posted.decision_resolution;
-    if (immediate?.state === "auto_resolved") {
+    const { seq, decision_request: publicRequest, decision_resolution: immediate, continuation } = result;
+    if (result.state === "auto_resolved") {
       if (flags.json === true) {
         console.log(JSON.stringify({ seq, decision_request: publicRequest, decision_resolution: immediate }));
       } else {
-        console.log(`decision #${seq} auto_resolved → ${terminalText(immediate.chosen_option ?? "?")}`);
+        console.log(`decision #${seq} auto_resolved → ${terminalText(immediate?.chosen_option ?? "?")}`);
       }
       return 0;
     }
-    // A serve-owned work must never park its single runner in the CLI poll loop. The Worker has
-    // durably moved it to waiting_owner and released the next delivery; owner resolution will create
-    // a new owner_answer delivery for the same work/continuation.
-    if (continuation !== null && immediate?.state === "pending") {
+    if (continuation !== null && result.state === "waiting_owner") {
       if (flags.json === true) {
         console.log(JSON.stringify({ seq, state: "waiting_owner", decision_request: publicRequest, decision_resolution: immediate }));
       } else {

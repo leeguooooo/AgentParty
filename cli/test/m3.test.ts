@@ -115,7 +115,7 @@ describe("party invite", () => {
     expect(scopeGuardIndex).toBeLessThan(initIndex);
     expect(r.stdout).toContain("only the supplied party commands");
     expect(r.stdout).toContain("Do not create or select another channel");
-    expect(r.stdout).toContain("app-server, MCP, or project-local channel workflow (for example, Trellis)");
+    expect(r.stdout).toContain("third-party or project-local channel workflows (for example, Trellis)");
     expect(r.stdout).toContain("do not delegate onboarding");
     // 自包含简报要内联教会 agent 待命模型，核心是保住 agent 自己会话的上下文：
     // Claude Code 走后台 watch --once（同会话唤醒），其它 harness 走 serve + 续会话 runner

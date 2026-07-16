@@ -117,6 +117,19 @@ export async function collectAttachments(
   return refs;
 }
 
+// 本地路径 → 已上传引用一条龙（#503）：CLI --attach 与 MCP party_send attach 共用，
+// 校验/读文件/逐个上传的语义只有这一份。任一路径失败即整体抛错，不发半套附件。
+export async function uploadAttachmentPaths(
+  server: string,
+  token: string,
+  channel: string,
+  paths: string[],
+  upload: typeof uploadAttachment = uploadAttachment,
+): Promise<Attachment[]> {
+  const sources = await resolveAttachments(paths);
+  return collectAttachments(server, token, channel, sources, upload);
+}
+
 export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null> {
   const { positionals, flags } = parsed;
   const unknown = unknownFlagError(flags, SEND_FLAGS);
@@ -233,22 +246,18 @@ export async function doSend(cfg: Config, input: SendInput): Promise<number | { 
   // 先把 --attach 的文件上传到 R2，拿到引用；解析/上传任一失败就直接退，不发一条空引用的消息。
   let attachments: Attachment[] | undefined;
   if (input.attachPaths.length > 0) {
-    let sources: AttachSource[];
     try {
-      sources = await resolveAttachments(input.attachPaths);
+      attachments = await uploadAttachmentPaths(cfg.server, cfg.token, input.channel, input.attachPaths);
     } catch (e) {
-      console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
-      return 1;
-    }
-    try {
-      attachments = await collectAttachments(cfg.server, cfg.token, input.channel, sources);
-    } catch (e) {
-      // 上传阶段 413 给「max 25MB」贴切文案（服务端消息是字节数，可读性差）；其余走契约退出码。
+      // 上传阶段 413 给「max 25MB」贴切文案（服务端消息是字节数，可读性差）；
+      // 本地校验错（不存在/空文件/超限）带路径直出；其余 REST 错走契约退出码。
       if (e instanceof RestError && (e.code === "too_large" || e.status === 413)) {
         console.error("error: attachment too large (max 25MB)");
         return 1;
       }
-      return handleRestError(e);
+      if (e instanceof RestError) return handleRestError(e);
+      console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
+      return 1;
     }
     for (const ref of attachments) console.error(`uploaded ${ref.filename} (${formatSize(ref.size)})`);
   }
