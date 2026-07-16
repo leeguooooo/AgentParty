@@ -1548,6 +1548,12 @@ function agentWorkSummary(body: string): string {
   return compact.length > 160 ? `${compact.slice(0, 157)}…` : compact;
 }
 
+// 已撤回消息的本地行是 [retracted] 占位甚至历史残留，正文和 delivery.preview 都不可再展示。
+function agentWorkSummaryFor(message: MsgFrame | undefined, preview?: string | null): string {
+  if (message?.retracted === true) return "";
+  return agentWorkSummary(message?.body ?? "") || (preview ?? "");
+}
+
 export function agentPresenceSummary(
   presence: PresenceEntry[],
   participants: Sender[],
@@ -1659,14 +1665,14 @@ export function AgentBoardPanel({
         seq: delivery.message_seq,
         state: delivery.state,
         // 优先本地已加载正文（含实时编辑），窗口外的老消息退回 worker 投影时带的 preview。
-        summary: agentWorkSummary(messagesBySeq.get(delivery.message_seq)?.body ?? "") || (delivery.preview ?? ""),
+        summary: agentWorkSummaryFor(messagesBySeq.get(delivery.message_seq), delivery.preview),
       }));
       if (typeof p?.current_task === "number" && !knownDeliverySeqs.has(p.current_task)) {
         activeWork.unshift({
           id: `presence-${name}-${p.current_task}`,
           seq: p.current_task,
           state: "running",
-          summary: agentWorkSummary(messagesBySeq.get(p.current_task)?.body ?? ""),
+          summary: agentWorkSummaryFor(messagesBySeq.get(p.current_task)),
         });
       }
       // #187 第4项「排期」：surface presence 里的暂停/定时恢复（resume_at），看板本行直接可见。

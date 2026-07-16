@@ -1036,4 +1036,23 @@ describe("持久定向投递（issue #551）", () => {
     expect(preview!.endsWith("…")).toBe(true);
     viewer.close();
   });
+
+  it("已擦除（[erased] 墓碑）消息的 delivery_state preview 回 null", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("erased-target"));
+    const slug = await createChannel(sender.token);
+    const posted = await sendMention(slug, sender.token, target.name, "identity to erase");
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, async (_instance: ChannelDO, state) => {
+      state.storage.sql.exec("UPDATE messages SET body = '[erased]' WHERE seq = ?", posted.seq);
+    });
+
+    const viewer = await WsClient.open(slug, sender.token);
+    await viewer.nextOfType("welcome");
+    viewer.send({ type: "hello", since: 0, since_rev: 0 });
+    const frame = await viewer.nextOfType("delivery_state");
+    expect(frame.delivery).toMatchObject({ message_seq: posted.seq, state: "queued" });
+    expect(frame.delivery.preview).toBeNull();
+    viewer.close();
+  });
 });

@@ -7876,7 +7876,12 @@ export class ChannelDO extends Server<Env> {
     const row = this.ctx.storage.sql
       .exec("SELECT body, retracted_at FROM messages WHERE seq = ?", messageSeq)
       .toArray()[0];
-    if (row === undefined || (row.retracted_at !== null && row.retracted_at !== undefined)) return null;
+    // [erased] 是身份擦除的墓碑（不设 retracted_at），和撤回一样不可展示。
+    if (
+      row === undefined ||
+      String(row.body) === "[erased]" ||
+      (row.retracted_at !== null && row.retracted_at !== undefined)
+    ) return null;
     const compact = String(row.body).replace(/\s+/g, " ").trim();
     if (compact === "") return null;
     return compact.length > 160 ? `${compact.slice(0, 157)}…` : compact;
@@ -7885,6 +7890,7 @@ export class ChannelDO extends Server<Env> {
   private rowToPublicDirectedDelivery(
     row: Record<string, unknown>,
     detailedState = false,
+    preview?: string | null,
   ): PublicDirectedDelivery {
     const delivery = this.rowToDirectedDelivery(row);
     const state =
@@ -7899,7 +7905,7 @@ export class ChannelDO extends Server<Env> {
       reply_seq: delivery.reply_seq,
       created_at: delivery.created_at,
       updated_at: delivery.updated_at,
-      preview: this.deliveryMessagePreview(delivery.message_seq),
+      preview: preview !== undefined ? preview : this.deliveryMessagePreview(delivery.message_seq),
     };
   }
 
@@ -7944,8 +7950,9 @@ export class ChannelDO extends Server<Env> {
   private deliveryStateForConnection(
     connection: Connection<ConnState>,
     row: Record<string, unknown>,
+    preview?: string | null,
   ): PublicDirectedDelivery {
-    return this.rowToPublicDirectedDelivery(row, this.canViewDetailedDeliveryState(connection, row));
+    return this.rowToPublicDirectedDelivery(row, this.canViewDetailedDeliveryState(connection, row), preview);
   }
 
   private captureAtomicDeliveryEffects(run: () => void): AtomicDeliveryEffects {
@@ -7981,10 +7988,12 @@ export class ChannelDO extends Server<Env> {
       this.atomicDeliveryEffects.deliveryStateIds.add(String(row.id));
       return;
     }
+    // preview 每批广播只查一次，避免 fan-out 时按连接数放大 messages 查询。
+    const preview = this.deliveryMessagePreview(Number(row.message_seq));
     for (const connection of this.getConnections<ConnState>()) {
       this.sendFrame(connection, {
         type: "delivery_state",
-        delivery: this.deliveryStateForConnection(connection, row),
+        delivery: this.deliveryStateForConnection(connection, row, preview),
       });
     }
   }

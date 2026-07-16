@@ -37,10 +37,10 @@ function task(
   };
 }
 
-function message(seq: number, body: string): MsgFrame {
+function message(seq: number, body: string, over: Partial<MsgFrame> = {}): MsgFrame {
   return {
     type: "msg", seq, sender: { name: "human-owner", kind: "human" }, kind: "message", body,
-    mentions: [], reply_to: null, state: null, note: null, status: null, ts: seq,
+    mentions: [], reply_to: null, state: null, note: null, status: null, ts: seq, ...over,
   };
 }
 
@@ -248,6 +248,23 @@ describe("AgentBoardPanel (#187)", () => {
     const busyLane = r.root.findByProps({ "data-status": "busy" });
     expect(treeText(busyLane)).toContain("为压缩全链路联调时间");
     expect(treeText(busyLane)).not.toContain("工作内容暂不可用");
+  });
+
+  test("never shows a retracted message's local body or a stale preview for it", () => {
+    // 撤回后本地行是 [retracted] 占位；delivery.preview 是撤回前的历史残留——都不能上看板。
+    const r = render(
+      "zh",
+      [],
+      [],
+      [],
+      [delivery("retracted-work", "tidy-agent", 42, "queued", "撤回前的敏感内容")],
+      [message(42, "[retracted]", { retracted: true, retracted_at: 42 })],
+    );
+
+    const busyLane = treeText(r.root.findByProps({ "data-status": "busy" }));
+    expect(busyLane).not.toContain("[retracted]");
+    expect(busyLane).not.toContain("撤回前的敏感内容");
+    expect(busyLane).toContain("工作内容暂不可用");
   });
 
   test("collapses a deep queued backlog into a summary row instead of listing every delivery", () => {
