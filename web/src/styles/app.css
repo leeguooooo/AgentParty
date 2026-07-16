@@ -2666,6 +2666,7 @@
 }
 .msg-agent-card {
   position: absolute;
+  display: none;
   z-index: 65;
   top: calc(100% + 7px);
   left: 0;
@@ -2684,9 +2685,31 @@
   transform: translateY(-2px);
   transition: opacity 60ms linear, transform 60ms linear, visibility 0s linear 60ms;
 }
+@media (min-width: 761px) {
+  .msg-agent-popover--align-end .msg-agent-card {
+    left: auto;
+    right: 0;
+  }
+  .msg-agent-popover:not(.msg-agent-popover--closed):hover::after,
+  .msg-agent-popover:not(.msg-agent-popover--closed):focus-within::after,
+  .msg-agent-popover--open::after {
+    content: "";
+    position: absolute;
+    z-index: 64;
+    top: 100%;
+    left: 0;
+    width: min(360px, calc(100vw - 32px));
+    height: 7px;
+  }
+  .msg-agent-popover--align-end::after {
+    left: auto;
+    right: 0;
+  }
+}
 .msg-agent-popover:not(.msg-agent-popover--closed):hover .msg-agent-card,
 .msg-agent-popover:not(.msg-agent-popover--closed):focus-within .msg-agent-card,
 .msg-agent-popover--open .msg-agent-card {
+  display: block;
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
@@ -3331,19 +3354,6 @@
     margin-left: 4px;
     padding-left: 5px;
   }
-  .joinlink-panel {
-    position: fixed;
-    left: 12px;
-    right: 12px;
-    top: auto;
-    bottom: 12px;
-    width: auto;
-    max-width: 620px;
-    max-height: 72vh;
-    margin-left: auto;
-    overflow-y: auto;
-    z-index: 60;
-  }
 }
 .chan-admin-actions,
 .vis-toggle {
@@ -3545,6 +3555,23 @@
 .joinrequest-status-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: joinrequest-spin 700ms linear infinite; }
 @keyframes joinrequest-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .joinrequest-status-spinner { animation: none; } }
+/* Keep the desktop popover bound to the viewport. This override must follow the
+   base absolute rule above so top and bottom cannot constrain it to 25px. */
+@media (min-width: 761px) and (max-width: 1759px) {
+  .joinlink-panel {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    top: auto;
+    bottom: 12px;
+    width: auto;
+    max-width: 620px;
+    max-height: 72vh;
+    margin-left: auto;
+    overflow-y: auto;
+    z-index: 60;
+  }
+}
 /* 桌面版贴邀请链接（#297）：入口在左侧栏，浮层左对齐（joinlink 默认右对齐是给顶栏用的）。 */
 .invite-paste { margin-bottom: 8px; }
 .invite-paste-btn { width: 100%; }
@@ -5685,6 +5712,22 @@
     overflow-y: auto;
     z-index: 60;
   }
+  .joinlink-gen-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .joinlink-expiry {
+    display: grid;
+    min-width: 0;
+    align-items: stretch;
+    gap: 4px;
+  }
+  .joinlink-expiry select { width: 100%; min-width: 0; }
+  .joinlink-gen-row > .d-btn {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
   .agent-join {
     flex: none;
     flex-wrap: nowrap;
@@ -5716,6 +5759,9 @@
   .channel-panel-card {
     width: 100%;
     max-height: calc(100vh - 16px);
+  }
+  .channel-panel-card:has(.guard-settings) {
+    align-self: flex-start;
   }
   .channel-panel-head {
     padding: 10px 11px 9px;
@@ -5836,6 +5882,25 @@
 .app-docs,
 .app-product-link { border: 1.4px solid var(--t-faint); border-radius: 0; }
 
+/* At tablet and compact desktop widths, keep one useful header row by dropping
+   copy already represented by the avatar/name. Primary account controls remain. */
+@media (min-width: 761px) and (max-width: 1100px) {
+  .app-head {
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: 10px 14px;
+  }
+  .app-tag { display: none; }
+  .app-me {
+    max-width: min(250px, 30vw);
+    gap: 4px;
+  }
+  .app-me-prefix,
+  .app-me-owner { display: none; }
+  .handlesetup-trigger { max-width: 140px; }
+  .app-me + .app-signout { margin-left: 4px; }
+}
+
 /* 满铺框线布局：侧栏贴左带右框线，主区自己留白（桌面端；窄屏保留原媒体查询布局） */
 @media (min-width: 761px) {
   .app-shell { gap: 0; padding: 0; }
@@ -5886,6 +5951,11 @@
 .chan-cat-btn { border-radius: 0; }
 .lang-switch-btn.is-active,
 .chan-cat-btn.is-active { background: var(--d-ink); color: var(--t-bg); }
+.settings-panel .lang-switch {
+  display: inline-flex;
+  width: max-content;
+  max-width: 100%;
+}
 
 /* 归档入口 → 终端提示行 */
 .side-archived-toggle { font-family: var(--t-mono); }
@@ -6164,6 +6234,11 @@
 .feature-tip:focus-within .feature-tip-bubble {
   opacity: 1;
   visibility: visible;
+}
+.vis-toggle > .feature-tip .feature-tip-bubble {
+  left: auto;
+  right: 0;
+  transform: none;
 }
 
 /* @ 唤醒提示（#145）：贴着发送按钮底部对齐，不撑高插话框行。 */
@@ -6774,3 +6849,13 @@
   color: var(--t-muted); font: 12px var(--t-mono); cursor: pointer;
 }
 .task-ledger-panel .task-blog-more:hover { background: var(--t-panel); color: var(--t-text); }
+
+@media (max-width: 760px) {
+  .task-ledger-panel .task-card-main {
+    flex-wrap: wrap;
+  }
+  .task-ledger-panel .task-card-title {
+    order: -1;
+    flex: 1 0 100%;
+  }
+}
