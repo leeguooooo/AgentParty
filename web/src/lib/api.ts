@@ -52,6 +52,7 @@ export interface LarkDirectoryUser {
   name: string;
   avatar_url: string | null;
   already_member: boolean;
+  notification_status?: "sent" | "failed" | "skipped_already_member";
 }
 
 export interface LarkDirectoryPage {

@@ -721,6 +721,31 @@ export function buildMentionCard(payload: LarkWebhookPayload): Record<string, un
   };
 }
 
+export function buildChannelInviteCard(channel: string, permalink: string): Record<string, unknown> {
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: "blue",
+      title: { tag: "plain_text", content: "AgentParty 频道邀请" },
+    },
+    elements: [
+      {
+        tag: "markdown",
+        content: `你已被邀请加入 AgentParty 私有频道 **#${channel}**。\n\nYou've been invited to a private AgentParty channel.`,
+      },
+      {
+        tag: "action",
+        actions: [{
+          tag: "button",
+          text: { tag: "plain_text", content: "打开频道 / Open channel" },
+          type: "primary",
+          url: permalink,
+        }],
+      },
+    ],
+  };
+}
+
 async function hmacSha256Hex(secret: string, body: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",

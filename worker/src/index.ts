@@ -86,6 +86,7 @@ import {
 import {
   browseLarkOrganization,
   browseScopedLarkUsers,
+  buildChannelInviteCard,
   buildMentionCard,
   getLarkDirectoryUser,
   inferReceiveIdType,
@@ -94,6 +95,7 @@ import {
   searchLarkDirectory,
   sendLarkCard,
   verifyWebhookSignature,
+  type LarkDirectoryUser,
   type LarkReceiveIdType,
   type LarkWebhookPayload,
 } from "./integrations/lark";
@@ -1651,6 +1653,37 @@ async function consumeLarkDirectorySearchLimit(db: D1Database, account: string):
 function directoryAccount(providerId: string, providerUserId: string): string | null {
   const account = `${providerId}:${providerUserId}`;
   return account.length <= OWNER_MAX && OWNER_RE.test(account) ? account : null;
+}
+
+async function larkDirectoryMembership(
+  db: D1Database,
+  providerId: string,
+  tenantKey: string,
+  slug: string,
+  users: LarkDirectoryUser[],
+): Promise<Map<string, boolean>> {
+  const identifiers = [...new Set(users.flatMap((user) => user.identifiers))];
+  const profiles = identifiers.length === 0
+    ? []
+    : (await db.prepare(
+        `SELECT account, provider_user_id FROM account_profiles
+         WHERE provider = ? AND tenant_key = ?
+           AND provider_user_id IN (${identifiers.map(() => "?").join(", ")})`,
+      ).bind(providerId, tenantKey, ...identifiers).all<{ account: string; provider_user_id: string }>()).results;
+  const knownAccounts = new Map(profiles.map((row) => [row.provider_user_id, row.account]));
+  const accountsByUser = new Map(users.map((user) => [
+    user.id,
+    user.identifiers.map((identifier) => knownAccounts.get(identifier)).find((account) => account !== undefined)
+      ?? directoryAccount(providerId, user.id),
+  ]));
+  const accounts = [...new Set([...accountsByUser.values()].filter((account): account is string => account !== null))];
+  const members = accounts.length === 0
+    ? new Set<string>()
+    : new Set((await db.prepare(
+        `SELECT account FROM channel_members
+         WHERE channel_slug = ? AND account IN (${accounts.map(() => "?").join(", ")})`,
+      ).bind(slug, ...accounts).all<{ account: string }>()).results.map((row) => row.account));
+  return new Map([...accountsByUser].map(([userId, account]) => [userId, account !== null && members.has(account)]));
 }
 
 async function canEditCharter(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
@@ -3594,21 +3627,14 @@ app.get("/api/channels/:slug/lark-directory", async (c) => {
   }
   try {
     const page = await searchLarkDirectory(c.env, provider, query, cursor, limit);
-    const profiles = await c.env.DB.prepare(
-      "SELECT account, provider_user_id FROM account_profiles WHERE provider = ? AND tenant_key = ?",
-    ).bind(provider.id, profile.tenant_key).all<{ account: string; provider_user_id: string | null }>();
-    const knownAccounts = new Map(
-      profiles.results.filter((row) => row.provider_user_id !== null).map((row) => [row.provider_user_id!, row.account]),
-    );
-    const members = new Set((await c.env.DB.prepare(
-      "SELECT account FROM channel_members WHERE channel_slug = ?",
-    ).bind(slug).all<{ account: string }>()).results.map((row) => row.account));
+    const membership = await larkDirectoryMembership(c.env.DB, provider.id, profile.tenant_key, slug, page.users);
     return c.json({
-      users: page.users.map((user) => {
-        const account = user.identifiers.map((identifier) => knownAccounts.get(identifier)).find((known) => known !== undefined)
-          ?? directoryAccount(provider.id, user.id);
-        return { id: user.id, name: user.name, avatar_url: user.avatarUrl, already_member: account !== null && members.has(account) };
-      }),
+      users: page.users.map((user) => ({
+        id: user.id,
+        name: user.name,
+        avatar_url: user.avatarUrl,
+        already_member: membership.get(user.id) === true,
+      })),
       next_cursor: page.nextCursor,
     });
   } catch (error) {
@@ -3703,26 +3729,19 @@ app.get("/api/channels/:slug/lark-organization", async (c) => {
         throw error;
       }
     }
-    const profiles = await c.env.DB.prepare(
-      "SELECT account, provider_user_id FROM account_profiles WHERE provider = ? AND tenant_key = ?",
-    ).bind(provider.id, profile.tenant_key).all<{ account: string; provider_user_id: string | null }>();
-    const knownAccounts = new Map(
-      profiles.results.filter((row) => row.provider_user_id !== null).map((row) => [row.provider_user_id!, row.account]),
-    );
-    const members = new Set((await c.env.DB.prepare(
-      "SELECT account FROM channel_members WHERE channel_slug = ?",
-    ).bind(slug).all<{ account: string }>()).results.map((row) => row.account));
+    const membership = await larkDirectoryMembership(c.env.DB, provider.id, profile.tenant_key, slug, page.users);
     return c.json({
       departments: page.departments.map((department) => ({
         id: department.id,
         name: department.name,
         parent_id: department.parentId,
       })),
-      users: page.users.map((user) => {
-        const account = user.identifiers.map((identifier) => knownAccounts.get(identifier)).find((known) => known !== undefined)
-          ?? directoryAccount(provider.id, user.id);
-        return { id: user.id, name: user.name, avatar_url: user.avatarUrl, already_member: account !== null && members.has(account) };
-      }),
+      users: page.users.map((user) => ({
+        id: user.id,
+        name: user.name,
+        avatar_url: user.avatarUrl,
+        already_member: membership.get(user.id) === true,
+      })),
       next_department_cursor: page.nextDepartmentCursor,
       next_user_cursor: page.nextUserCursor,
       department_names_available: !limited,
@@ -3794,6 +3813,7 @@ app.post("/api/channels/:slug/lark-members", async (c) => {
       "INSERT OR IGNORE INTO channel_members (channel_slug, account, added_by, added_at) VALUES (?, ?, ?, ?)",
     ).bind(slug, account, identity.account, addedAt).run();
     const alreadyMember = inserted.meta.changes === 0;
+    let notificationStatus: "sent" | "failed" | "skipped_already_member" = "skipped_already_member";
     if (!alreadyMember) {
       await bestEffortRecordManagementAudit(c.env.DB, {
         actor: managementAuditActor(identity),
@@ -3802,8 +3822,32 @@ app.post("/api/channels/:slug/lark-members", async (c) => {
         channel: slug,
         timestamp: addedAt,
       });
+      try {
+        const channelUrl = new URL(`/c/${encodeURIComponent(slug)}`, c.req.url).toString();
+        await sendLarkCard(
+          c.env,
+          provider,
+          user.id,
+          inferReceiveIdType(user.id),
+          buildChannelInviteCard(slug, channelUrl),
+        );
+        notificationStatus = "sent";
+      } catch (notificationError) {
+        notificationStatus = "failed";
+        console.warn("Lark member invite notification failed", {
+          channel: slug,
+          provider: provider.id,
+          error: notificationError instanceof Error ? notificationError.message : String(notificationError),
+        });
+      }
     }
-    return c.json({ id: user.id, name: user.name, avatar_url: user.avatarUrl, already_member: alreadyMember }, alreadyMember ? 200 : 201);
+    return c.json({
+      id: user.id,
+      name: user.name,
+      avatar_url: user.avatarUrl,
+      already_member: alreadyMember,
+      notification_status: notificationStatus,
+    }, alreadyMember ? 200 : 201);
   } catch (error) {
     if (error instanceof LarkDirectoryError) {
       if (error.kind === "permission") return c.json(errorBody("lark_contact_permission_required", "Lark contact permission is not enabled"), 503);

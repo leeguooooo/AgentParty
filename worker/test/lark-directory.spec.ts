@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { clearLarkTokenCache } from "../src/integrations/lark";
 import { api, createChannel, seedToken, uniq } from "./helpers";
 import { fetchMock } from "./fetch-mock";
@@ -14,6 +14,7 @@ beforeAll(() => {
 afterEach(() => {
   clearLarkTokenCache();
   fetchMock.assertNoPendingInterceptors();
+  vi.restoreAllMocks();
 });
 
 afterAll(() => fetchMock.deactivate());
@@ -111,6 +112,7 @@ describe("Lark organization member invitations (#358)", () => {
         data: { has_more: false, items: [{ union_id: "on_evan", name: "陈文捷" }] },
       });
 
+    const prepare = vi.spyOn(env.DB, "prepare");
     const response = await api(`/api/channels/${slug}/lark-organization?department_id=0&limit=50`, owner.token);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
@@ -120,6 +122,11 @@ describe("Lark organization member invitations (#358)", () => {
       next_user_cursor: null,
       department_names_available: true,
     });
+    const queries = prepare.mock.calls.map(([query]) => query.replace(/\s+/g, " ").trim());
+    expect(queries).toContainEqual(expect.stringMatching(/account_profiles .*provider_user_id IN \(\?\)/));
+    expect(queries).toContainEqual(expect.stringMatching(/channel_members .*account IN \(\?\)/));
+    expect(queries).not.toContain("SELECT account, provider_user_id FROM account_profiles WHERE provider = ? AND tenant_key = ?");
+    expect(queries).not.toContain("SELECT account FROM channel_members WHERE channel_slug = ?");
   });
 
   it("falls back to the visible employee directory while department names await approval", async () => {
@@ -478,6 +485,13 @@ describe("Lark organization member invitations (#358)", () => {
         data: { user: { union_id: "on_alice", name: "Alice Zhang", avatar: { avatar_72: "https://cdn.example/alice.png" } } },
       })
       .times(2);
+    let sentMessage: Record<string, unknown> | null = null;
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/im/v1/messages?receive_id_type=union_id", method: "POST" })
+      .reply(200, (options) => {
+        sentMessage = JSON.parse(String(options.body)) as Record<string, unknown>;
+        return { code: 0, data: { message_id: "om_invite" } };
+      });
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const invited = await api(`/api/channels/${slug}/lark-members`, owner.token, {
@@ -485,8 +499,17 @@ describe("Lark organization member invitations (#358)", () => {
         body: JSON.stringify({ user_id: "on_alice" }),
       });
       expect(invited.status).toBe(attempt === 0 ? 201 : 200);
-      expect(await invited.json()).toMatchObject({ name: "Alice Zhang", already_member: attempt === 1 });
+      expect(await invited.json()).toMatchObject({
+        name: "Alice Zhang",
+        already_member: attempt === 1,
+        notification_status: attempt === 0 ? "sent" : "skipped_already_member",
+      });
     }
+
+    expect(sentMessage).toMatchObject({ receive_id: "on_alice", msg_type: "interactive" });
+    const inviteCard = JSON.parse(String((sentMessage as unknown as Record<string, unknown>).content)) as Record<string, unknown>;
+    expect(JSON.stringify(inviteCard)).toContain(`#${slug}`);
+    expect(JSON.stringify(inviteCard)).toContain(`/c/${slug}`);
 
     const members = await env.DB.prepare(
       "SELECT account, added_by FROM channel_members WHERE channel_slug = ? AND account = ?",
@@ -496,6 +519,32 @@ describe("Lark organization member invitations (#358)", () => {
     const audit = await api(`/api/channels/${slug}/management-audit?limit=100`, owner.token);
     const entries = ((await audit.json()) as { audit: Array<{ action: string; resource: string }> }).audit;
     expect(entries.filter((entry) => entry.action === "channel.member.add" && entry.resource === `channel/${slug}/members/lark-main:on_alice`)).toHaveLength(1);
+  });
+
+  it("keeps the member addition when the Lark bot notification fails", async () => {
+    const owner = await larkHuman();
+    const slug = await createChannel(owner.token);
+    mockTenantToken();
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/contact/v3/users/on_bob?user_id_type=union_id", method: "GET" })
+      .reply(200, { code: 0, data: { user: { union_id: "on_bob", name: "Bob" } } });
+    fetchMock.get(LARK_ORIGIN)
+      .intercept({ path: "/open-apis/im/v1/messages?receive_id_type=union_id", method: "POST" })
+      .reply(200, { code: 999, msg: "permission denied" });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const response = await api(`/api/channels/${slug}/lark-members`, owner.token, {
+      method: "POST",
+      body: JSON.stringify({ user_id: "on_bob" }),
+    });
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ already_member: false, notification_status: "failed" });
+    expect(await env.DB.prepare(
+      "SELECT account FROM channel_members WHERE channel_slug = ? AND account = ?",
+    ).bind(slug, "lark-main:on_bob").first()).not.toBeNull();
+    expect(warning).toHaveBeenCalledOnce();
+    warning.mockRestore();
   });
 
   it("reuses an open_id profile during a union_id invite and migrates it to the stable id", async () => {

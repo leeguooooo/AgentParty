@@ -389,7 +389,7 @@ export const openapiDocument = {
       post: {
         summary: "directly invite a same-tenant Lark user as a channel member",
         security: [{ bearer: [] }],
-        description: "Available only to human channel moderators signed in through Lark or Feishu. The server revalidates the selected union id against the configured tenant, inserts channel_members idempotently, and writes management audit on the first add.",
+        description: "Available only to human channel moderators signed in through Lark or Feishu. The server revalidates the selected union id against the configured tenant, inserts channel_members idempotently, writes management audit, and asks the Lark bot to send the new member a channel card on the first add. A notification failure does not roll back membership.",
         parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
           required: true,
@@ -404,8 +404,8 @@ export const openapiDocument = {
           },
         },
         responses: {
-          "200": { description: "user was already a channel member" },
-          "201": { description: "user added to channel_members" },
+          "200": { description: "user was already a channel member; notification_status=skipped_already_member" },
+          "201": { description: "user added to channel_members; notification_status is sent or failed" },
           "400": { description: "invalid user id" },
           "403": { description: "not a same-tenant Lark human moderator" },
           "404": { description: "channel or Lark user not found" },
