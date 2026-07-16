@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
   EXIT_SIGNAL_TERM,
   projectAgentChildName,
+  projectAgentWorkerName,
   runProfileServe,
   ServeShutdownError,
   type RunnerProcess,
@@ -61,7 +62,7 @@ function baseOpts(over: Partial<Parameters<typeof runProfileServe>[0]>) {
       post: async () => {},
       mintRuntime: async () => ({ token: "ap_profile_runtime", profile }),
       ensureChannelRuntime: async (_s: string, _t: string, slug: string, owner: string, handle: string, childName: string) => ({
-        token: `ap_child_${slug}`,
+        token: `ap_child_${childName}`,
         name: childName,
         role: "agent" as const,
         owner,
@@ -108,7 +109,10 @@ describe("profile daemon resilience (#115)", () => {
     });
 
     // 关键断言：前两次失败没有中止 daemon，第三次成功仍然挂上了频道
-    expect(served.map((o) => o.channel)).toEqual(["alpha"]);
+    expect(served).toHaveLength(2);
+    expect(served.every((o) => o.channel === "alpha")).toBe(true);
+    expect(served.map((o) => o.projectAgent?.runtime_role).sort()).toEqual(["front", "worker"]);
+    expect(new Set(served.map((o) => o.token)).size).toBe(2);
     expect(logs.filter((l) => l.includes("invite poll failed"))).toHaveLength(2);
     expect(logs.some((l) => l.includes("EAI_AGAIN"))).toBe(true);
     expect(logs.some((l) => l.includes("retrying in"))).toBe(true);
@@ -141,7 +145,7 @@ describe("profile daemon resilience (#115)", () => {
       ensureChannelRuntime: async (_s: string, _t: string, slug: string, owner: string, handle: string, childName: string) => {
         if (slug === "boom") throw new Error("git clone failed for project agent profile");
         return {
-          token: `ap_child_${slug}`,
+          token: `ap_child_${childName}`,
           name: childName,
           role: "agent" as const,
           owner,
@@ -157,30 +161,44 @@ describe("profile daemon resilience (#115)", () => {
     });
 
     // alpha 和 gamma 照常挂上，只有 boom 掉队
-    expect(served.map((o) => o.channel).sort()).toEqual(["alpha", "gamma"]);
+    expect(served.some((o) => o.channel === "boom")).toBe(false);
+    for (const channel of ["alpha", "gamma"]) {
+      const lanes = served.filter((o) => o.channel === channel);
+      expect(lanes).toHaveLength(2);
+      expect(lanes.map((o) => o.projectAgent?.runtime_role).sort()).toEqual(["front", "worker"]);
+      expect(new Set(lanes.map((o) => o.token)).size).toBe(2);
+    }
     expect(logs.some((l) => l.includes("failed to attach #boom"))).toBe(true);
     expect(logs.some((l) => l.includes("will retry next poll"))).toBe(true);
   });
 
   test("a profile child keeps its initial backlog policy across failures before welcome", async () => {
-    let attempts = 0;
+    const attempts = { front: 0, worker: 0 };
     let invitePolls = 0;
-    const policies: Array<boolean | undefined> = [];
+    const policies: Array<{ role: "front" | "worker"; skipBacklog: boolean | undefined }> = [];
     const { opts } = baseOpts({
       once: false,
       skipBacklog: true,
       listInvites: async () => {
         invitePolls += 1;
-        if (attempts >= 2) throw new RestError(401, "unauthorized", "stop after child retry");
+        if (attempts.worker >= 2) throw new RestError(401, "unauthorized", "stop after child retry");
         // Keep returning the same invite while its child supervisor owns the running slot.
         return [invite("alpha")];
       },
       runChannelServe: async (serveOpts) => {
-        policies.push(serveOpts.skipBacklog);
-        attempts += 1;
-        if (attempts === 1) throw new Error("pre-welcome child crash"); // no welcome callback
+        const role = serveOpts.projectAgent?.runtime_role;
+        if (role !== "front" && role !== "worker") throw new Error("missing managed lane role");
+        policies.push({ role, skipBacklog: serveOpts.skipBacklog });
+        attempts[role] += 1;
+        if (role === "worker" && attempts.worker === 1) {
+          throw new Error("pre-welcome child crash"); // no welcome callback
+        }
         serveOpts.onWelcome?.();
-        return 0;
+        return await new Promise<number>((resolve) => {
+          const finish = () => resolve(EXIT_SIGNAL_TERM);
+          serveOpts.signal?.addEventListener("abort", finish, { once: true });
+          if (serveOpts.signal?.aborted) finish();
+        });
       },
       sleep: async () => { await Promise.resolve(); },
     });
@@ -190,7 +208,8 @@ describe("profile daemon resilience (#115)", () => {
     });
 
     expect(invitePolls).toBeGreaterThanOrEqual(1);
-    expect(policies).toEqual([true, true]);
+    expect(policies.filter(({ role }) => role === "worker").map(({ skipBacklog }) => skipBacklog)).toEqual([true, true]);
+    expect(policies.filter(({ role }) => role === "front").map(({ skipBacklog }) => skipBacklog)).toEqual([true]);
   });
 
   test("one profile lifecycle abort stops invite polling and every child serve", async () => {
@@ -216,11 +235,14 @@ describe("profile daemon resilience (#115)", () => {
 
     await withHome(async () => {
       const running = runProfileServe(opts);
-      for (let i = 0; i < 100 && served.length === 0; i++) await Bun.sleep(5);
-      expect(served).toHaveLength(1);
-      expect(served[0]!.signal).toBeDefined();
+      for (let i = 0; i < 100 && served.length < 2; i++) await Bun.sleep(5);
+      expect(served).toHaveLength(2);
+      expect(served.map((o) => o.projectAgent?.runtime_role).sort()).toEqual(["front", "worker"]);
+      expect(new Set(served.map((o) => o.token)).size).toBe(2);
+      expect(served.every((o) => o.signal !== undefined)).toBe(true);
       controller.abort(new ServeShutdownError("SIGTERM"));
       expect(await running).toBe(EXIT_SIGNAL_TERM);
+      expect(served.every((o) => o.signal?.aborted)).toBe(true);
     });
   });
 
@@ -272,6 +294,10 @@ describe("profile daemon resilience (#115)", () => {
   });
 
   test("projectAgentChildName stays stable (guard against fixture drift)", () => {
-    expect(projectAgentChildName("herness-dev", "alpha")).toBe(projectAgentChildName("herness-dev", "alpha"));
+    const front = projectAgentChildName("herness-dev", "alpha");
+    const worker = projectAgentWorkerName("herness-dev", "alpha");
+    expect(front).toBe(projectAgentChildName("herness-dev", "alpha"));
+    expect(worker).toBe(projectAgentWorkerName("herness-dev", "alpha"));
+    expect(front).not.toBe(worker);
   });
 });

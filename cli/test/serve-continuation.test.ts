@@ -208,13 +208,15 @@ describe("builtin per-work continuations (#548)", () => {
     // A new serve process must recover the same exact slot, not the legacy channel-wide session.
     await makeRunner()(message(5), context(delivery(5, "work-A", refA, "owner_answer")));
 
-    expect(calls.map(({ args }) => args.slice(0, 4))).toEqual([
-      ["codex", "exec", "--skip-git-repo-check", "--sandbox"],
-      ["codex", "exec", "--skip-git-repo-check", "--sandbox"],
-      ["codex", "exec", "resume", sidB],
-      ["codex", "exec", "resume", sidA],
-      ["codex", "exec", "resume", sidA],
-    ]);
+    expect(calls.map(({ args }) => {
+      const resume = args.indexOf("resume");
+      return resume < 0 ? null : args[resume + 1];
+    })).toEqual([null, null, sidB, sidA, sidA]);
+    expect(calls.every(({ args }) =>
+      args[0] === "codex" &&
+      args[1] === "exec" &&
+      (!args.includes("resume") || args.indexOf("--sandbox") < args.indexOf("resume"))
+    )).toBe(true);
     expect(calls[0]!.env).toMatchObject({
       AGENTPARTY_CONFIG: "/safe/profile-child.json",
       AGENTPARTY_CHANNEL: "dev",

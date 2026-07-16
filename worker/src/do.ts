@@ -18,6 +18,7 @@ import {
   DECISION_OPTIONS_MAX,
   DECISION_OPTION_LIMIT,
   DECISION_REASON_LIMIT,
+  DECISION_RESPONDER_OWNER_LIMIT,
   MAX_CONNECTIONS_PER_CHANNEL,
   PRESENCE_TIMEOUT_MS,
   RATE_LIMIT_PER_MIN,
@@ -447,6 +448,20 @@ function parseDecisionRequest(input: unknown): DecisionRequest | undefined | nul
   return { kind, prompt, options };
 }
 
+// Managed REST asks keep the responder account beside the public decision payload. Like lineage,
+// this is an authenticated compare-and-set capability and never enters a public message frame.
+function parseExpectedDecisionResponderOwner(input: unknown): string | undefined | null {
+  if (input === undefined) return undefined;
+  if (typeof input !== "string") return null;
+  const owner = input.trim();
+  if (
+    owner.length < 1 ||
+    byteLength(owner) > DECISION_RESPONDER_OWNER_LIMIT ||
+    /[\u0000-\u001f\u007f-\u009f]/u.test(owner)
+  ) return null;
+  return owner;
+}
+
 // Authenticated REST decision asks may carry a compare-and-set precondition. It is intentionally
 // separate from decision_request: the latter is public message content, while these identifiers are
 // executor capabilities used only to reject a stale/wrong runner before any message is committed.
@@ -472,8 +487,9 @@ function parseExpectedDecisionLineage(input: unknown): ExpectedDecisionLineage |
   };
 }
 
-// decision lineage is server-owned. The public send parser above intentionally drops any client
-// supplied fields; only persisted Worker output comes through this stricter all-or-nothing parser.
+// Decision lineage and the responder binding are server-owned. The public send parser above
+// intentionally drops client-supplied nested fields; only persisted Worker output comes through
+// these stricter parsers.
 function parseStoredDecisionLineage(raw: Record<string, unknown>): DecisionDeliveryLineage | undefined {
   const fields = [raw.delivery_id, raw.origin_seq, raw.origin_channel, raw.work_id, raw.continuation_ref];
   if (fields.every((value) => value === undefined)) return undefined;
@@ -515,6 +531,9 @@ function parseStoredDecisionRequest(input: unknown): DecisionRequest | undefined
       ? raw as Record<string, unknown>
       : undefined;
     const lineage = rawRecord === undefined ? undefined : parseStoredDecisionLineage(rawRecord);
+    const expectedResponderOwner = rawRecord === undefined
+      ? undefined
+      : parseExpectedDecisionResponderOwner(rawRecord.expected_responder_owner);
     // Server-owned lineage is all-or-nothing. Treat a partially retained/corrupted capability as
     // an invalid decision request rather than silently downgrading it to an unbound question.
     if (
@@ -523,7 +542,12 @@ function parseStoredDecisionRequest(input: unknown): DecisionRequest | undefined
       ["delivery_id", "origin_seq", "origin_channel", "work_id", "continuation_ref"]
         .some((key) => Object.prototype.hasOwnProperty.call(rawRecord, key))
     ) return undefined;
-    return lineage === undefined ? parsed : { ...parsed, ...lineage };
+    if (expectedResponderOwner === null) return undefined;
+    return {
+      ...parsed,
+      ...(lineage === undefined ? {} : lineage),
+      ...(expectedResponderOwner === undefined ? {} : { expected_responder_owner: expectedResponderOwner }),
+    };
   } catch {
     return undefined;
   }
@@ -5334,6 +5358,16 @@ export class ChannelDO extends Server<Env> {
       }
       const currentState = row.decision_state === null || row.decision_state === undefined ? null : String(row.decision_state);
       const senderName = String(row.sender_name);
+      const expectedResponderOwner = decisionReq.expected_responder_owner;
+      if (
+        expectedResponderOwner !== undefined &&
+        (identity.kind !== "human" || identity.owner !== expectedResponderOwner)
+      ) {
+        return Response.json(
+          { error: { code: "forbidden", message: "only the requested human owner can respond to this decision" } },
+          { status: 403 },
+        );
+      }
       if (identity.name === senderName) {
         return Response.json({ error: { code: "forbidden", message: "the requesting agent cannot answer its own decision" } }, { status: 403 });
       }
@@ -5492,10 +5526,17 @@ export class ChannelDO extends Server<Env> {
           this.ctx.storage.sql.exec(
             `UPDATE messages
                 SET decision_state = 'resolved', decision_resolution_json = ?, rev_seq = ?
-              WHERE seq = ? AND decision_state = 'pending'`,
+              WHERE seq = ? AND decision_state = 'pending'
+                AND (
+                  ? IS NULL OR
+                  (? = 'human' AND json_extract(decision_request_json, '$.expected_responder_owner') = ?)
+                )`,
             JSON.stringify(resolution),
             decisionRev,
             seq,
+            expectedResponderOwner ?? null,
+            identity.kind,
+            identity.owner ?? null,
           );
           const changed = Number(this.ctx.storage.sql.exec("SELECT changes() AS count").one().count);
           if (changed !== 1) throw casLost;
@@ -5696,9 +5737,21 @@ export class ChannelDO extends Server<Env> {
           { status: 400 },
         );
       }
+      const expectedDecisionResponderOwner = parseExpectedDecisionResponderOwner(
+        typeof raw === "object" && raw !== null
+          ? (raw as Record<string, unknown>).expected_decision_responder_owner
+          : undefined,
+      );
+      if (expectedDecisionResponderOwner === null) {
+        return Response.json(
+          { error: { code: "bad_request", message: "invalid expected_decision_responder_owner" } },
+          { status: 400 },
+        );
+      }
       const out = await this.handleSend(identity, send, {
         countRate: true,
         ...(expectedDecisionLineage === undefined ? {} : { expectedDecisionLineage }),
+        ...(expectedDecisionResponderOwner === undefined ? {} : { expectedDecisionResponderOwner }),
       });
       if (!out.ok) {
         return Response.json(
@@ -6389,6 +6442,7 @@ export class ChannelDO extends Server<Env> {
       countRate?: boolean;
       sessionId?: string;
       expectedDecisionLineage?: ExpectedDecisionLineage;
+      expectedDecisionResponderOwner?: string;
     } = {},
   ): Promise<SendOutcome> {
     if (this.isArchived()) {
@@ -6410,6 +6464,24 @@ export class ChannelDO extends Server<Env> {
     if (!(await this.isTokenActive(identity.tokenHash))) {
       return { ok: false, code: "unauthorized", message: "invalid or revoked token" };
     }
+    const privateDecisionRequest =
+      frame.kind === "message" ? (frame.decision_request as DecisionRequest | undefined) : undefined;
+    if (options.expectedDecisionResponderOwner !== undefined) {
+      if (privateDecisionRequest === undefined) {
+        return {
+          ok: false,
+          code: "bad_request",
+          message: "expected_decision_responder_owner requires a decision_request",
+        };
+      }
+      if (identity.owner !== options.expectedDecisionResponderOwner) {
+        return {
+          ok: false,
+          code: "unauthorized",
+          message: "expected_decision_responder_owner must match the sender's authenticated owner",
+        };
+      }
+    }
     // 幂等去重（#98）：必须在 rate/loop/workflow guard 与 INSERT 之前——重试是网络产物而非第二条消息，
     // 不能重复消耗配额、不能重复触发熔断，更不能重复落库/重复唤醒。命中就原样返回首发那条的 seq。
     // 窗口 IDEMPOTENCY_WINDOW_MS 内、同一 sender_name 的同一 key 才去重；DO 单线程 + 重试串行发生，
@@ -6424,6 +6496,16 @@ export class ChannelDO extends Server<Env> {
         )
         .toArray()[0];
       if (priorRow !== undefined) {
+        if (options.expectedDecisionResponderOwner !== undefined) {
+          const priorDecision = parseStoredDecisionRequest(priorRow.decision_request_json);
+          if (priorDecision?.expected_responder_owner !== options.expectedDecisionResponderOwner) {
+            return {
+              ok: false,
+              code: "bad_request",
+              message: "idempotent decision responder binding does not match the stored request",
+            };
+          }
+        }
         return { ok: true, seq: Number(priorRow.seq), frames: [this.rowToFrame(priorRow)], deduped: true };
       }
     }
@@ -6531,8 +6613,19 @@ export class ChannelDO extends Server<Env> {
       parsedDecisionRequest === undefined
         ? undefined
         : activeDecision === undefined
-          ? parsedDecisionRequest
-          : { ...parsedDecisionRequest, ...activeDecision.lineage };
+          ? {
+              ...parsedDecisionRequest,
+              ...(options.expectedDecisionResponderOwner === undefined
+                ? {}
+                : { expected_responder_owner: options.expectedDecisionResponderOwner }),
+            }
+          : {
+              ...parsedDecisionRequest,
+              ...activeDecision.lineage,
+              ...(options.expectedDecisionResponderOwner === undefined
+                ? {}
+                : { expected_responder_owner: options.expectedDecisionResponderOwner }),
+            };
     const decisionReplyTo =
       decisionRequest?.delivery_id !== undefined && activeDecision !== undefined
         ? activeDecision.lineage.origin_seq

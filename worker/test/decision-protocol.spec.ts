@@ -39,7 +39,14 @@ async function fixture(mode?: "approval" | "unattended") {
 async function postDecision(
   slug: string,
   token: string,
-  opts: { prompt?: string; kind?: "approval" | "choice"; options?: string[]; body?: string; mentions?: string[] } = {},
+  opts: {
+    prompt?: string;
+    kind?: "approval" | "choice";
+    options?: string[];
+    body?: string;
+    mentions?: string[];
+    expectedResponderOwner?: string;
+  } = {},
 ) {
   return api(`/api/channels/${slug}/messages`, token, {
     method: "POST",
@@ -53,6 +60,9 @@ async function postDecision(
         ...(opts.kind === undefined ? {} : { kind: opts.kind }),
         ...(opts.options === undefined ? {} : { options: opts.options }),
       },
+      ...(opts.expectedResponderOwner === undefined
+        ? {}
+        : { expected_decision_responder_owner: opts.expectedResponderOwner }),
     }),
   });
 }
@@ -116,6 +126,69 @@ describe("channel decision protocol (#284)", () => {
     });
     expect(repeated.reply.seq).toBe(payload.reply.seq);
     expect((await history(slug, human.token)).filter((message) => message.decision_response?.request_seq === seq)).toHaveLength(1);
+  });
+
+  it("binds a managed decision to its exact owner account without exposing the binding", async () => {
+    const expectedOwner = `${uniq("expected")}@example.com`;
+    const moderatorAgent = await seedToken("agent", uniq("moderator-agent"), { owner: expectedOwner });
+    const slug = await createChannel(moderatorAgent.token);
+    const boundAgent = await seedToken("agent", uniq("bound-agent"), {
+      owner: expectedOwner,
+      channelScope: slug,
+    });
+    const expectedHuman = await seedToken("human", uniq("expected-human"), {
+      owner: expectedOwner,
+      channelScope: slug,
+    });
+    const wrongHuman = await seedToken("human", uniq("wrong-human"), {
+      owner: `${uniq("wrong")}@example.com`,
+      channelScope: slug,
+    });
+    const asked = await postDecision(slug, boundAgent.token, {
+      expectedResponderOwner: `  ${expectedOwner}  `,
+    });
+    expect(asked.status).toBe(200);
+    const question = (await asked.json()) as MsgLike;
+    expect(question.decision_request).not.toHaveProperty("expected_responder_owner");
+
+    const denied = await api(`/api/channels/${slug}/messages/${question.seq}/decision`, wrongHuman.token, {
+      method: "POST",
+      body: JSON.stringify({ action: "approve" }),
+    });
+    expect(denied.status).toBe(403);
+    expect((await denied.json()) as { error: { code: string } }).toMatchObject({ error: { code: "forbidden" } });
+    const moderatorDenied = await api(
+      `/api/channels/${slug}/messages/${question.seq}/decision`,
+      moderatorAgent.token,
+      {
+        method: "POST",
+        body: JSON.stringify({ action: "approve" }),
+      },
+    );
+    expect(moderatorDenied.status).toBe(403);
+    const pending = (await history(slug, expectedHuman.token)).find((message) => message.seq === question.seq);
+    expect(pending?.decision_resolution).toEqual({ state: "pending" });
+    expect(pending?.decision_request).not.toHaveProperty("expected_responder_owner");
+
+    const resolved = await api(`/api/channels/${slug}/messages/${question.seq}/decision`, expectedHuman.token, {
+      method: "POST",
+      body: JSON.stringify({ action: "approve" }),
+    });
+    expect(resolved.status).toBe(200);
+    const payload = (await resolved.json()) as { message: MsgLike; reply: MsgLike };
+    expect(payload.message.decision_resolution).toMatchObject({
+      state: "resolved",
+      responder: { name: expectedHuman.name },
+    });
+  });
+
+  it("rejects an owner binding that does not match the requesting principal", async () => {
+    const { slug, agent, human } = await fixture();
+    const asked = await postDecision(slug, agent.token, {
+      expectedResponderOwner: `${uniq("forged")}@example.com`,
+    });
+    expect(asked.status).toBe(403);
+    expect((await history(slug, human.token)).filter((message) => message.body === "here is the plan")).toHaveLength(0);
   });
 
   it("resolves a reject with a public reason mentioning the requester", async () => {

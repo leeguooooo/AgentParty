@@ -1,7 +1,7 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
-import { BODY_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ServerFrame } from "@agentparty/shared";
+import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type SendDecisionRequest, type ServerFrame } from "@agentparty/shared";
 import { createHash, randomUUID } from "node:crypto";
 import { downloadPartyUpgrade, maybeReexecUpgrade, serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import {
@@ -9,19 +9,21 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   readlinkSync,
   rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readAccount } from "../account";
 import { connect } from "../client";
-import { clearStuck, loadCursor, loadRevCursor, loadStuck, resolveChannel, saveCursor, saveRevCursor, saveStuck, writeWorkspaceConfigOnly, type StuckWake } from "../config";
+import { clearStuck, clearStuckForConfig, loadCursor, loadCursorForConfig, loadRevCursor, loadRevCursorForConfig, loadStuck, loadStuckForConfig, resolveChannel, saveCursor, saveCursorForConfig, saveRevCursor, saveRevCursorForConfig, saveStuck, saveStuckForConfig, type StuckWake } from "../config";
 import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from "../instance-lock";
 import { formatMsg, stripTerminalControls } from "../format";
 import { clearHealthCache, writeHealthCache } from "../health-cache";
@@ -34,7 +36,7 @@ import {
   unreadFromCursor,
   writeStatuslineCache,
 } from "../statusline-cache";
-import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
+import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
 import { buildContext } from "./status";
 import {
@@ -46,12 +48,75 @@ import {
   type RunnerContinuationState,
 } from "../continuation";
 
-const PROTOCOL_REMINDER =
-  "被 @ 唤起：先读本文件 charter 了解频道约定；若发现 charter 与频道现状矛盾，视为一个待办上报。需要更多上下文再 `party history <channel 字段的频道>`；需要产出结论时，先用 `party send --reply-to <seq>` 把 final synthesis 发回频道，再 status done；别只回本地。" +
-  " 需要跨本轮保留或交付的文件必须写入持久 workdir/repo；不要把成果只放在 TMPDIR 或临时上下文目录。" +
-  " 需要 owner 补充信息或批准时，必须用 `party decision ask` 在本频道创建结构化决策，不能用普通 `party send` 提问；approval 返回 pending 后结束本轮，让 serve 立即恢复监听，unattended 返回 auto_resolved 时可按返回选择继续。不要把 account/email 当 mention 名。禁止在 runner 子进程里调用 AskUserQuestion、request_user_input 或停住等待人工输入，否则整个频道监听会被串行阻塞。" +
-  " 全程只用 party CLI 在【本频道】里协作：不要触发项目自带的其它频道/工作流机制（如 trellis 等 app-server 建频道流程）另建频道，也不要用 tmux/后台守护/子代理去接管这次唤醒——这一轮就在当前会话里用 party 回完即可。" +
-  " 维护任务台账（#371）：认领活先 `party task claim <id>`（没有就 `party task create`），开工 `party status working --task <id>`，完成 `party status done --task <id>`（或 `party task done <id>`）——让台账反映真实进度，别和 GitHub issue/实际漂移。";
+export type ServeExecutionRole = "front" | "worker";
+
+const COMMON_PROTOCOL_REMINDER =
+  "被 @ 唤起：先读本文件 charter 了解频道约定；若发现 charter 与频道现状矛盾，视为一个待办上报。" +
+  " 不要在 runner 里调用 AskUserQuestion、request_user_input 或停住等人；不要另建频道、启动 tmux/后台守护进程，或切到项目自带的其它工作流。";
+
+const ADVISORY_FRONT_REMINDER =
+  " 你是留在主频道沟通和调度的 front agent。简短对话和一次只读路由检查可直接处理；代码修改、多步排查、浏览器/运维及其它耗时工作必须交给 harness 的 subagent/worker。" +
+  " 当前是兼容模式，CLI 不能证明 worker 已启动；如果 harness 无法创建 worker，必须在频道明确报 blocked，不能静默改成自己执行。" +
+  " 需要更多上下文用 `party history <channel>`；结论用 `party send --reply-to <seq>` 发回本频道。";
+
+const MANAGED_FRONT_REMINDER =
+  " 你是 managed front agent，是三个方向的通信与调度控制面：对频道交流、对 owner 请求决定、对子 worker 派工/追问/验收；执行 worker 已由 supervisor 独立常驻。你没有执行面权限，也不要调用 party CLI。" +
+  " 每次严格只输出一个 JSON 对象，固定包含 action、body、instruction、prompt、options、reason 六个字段；当前动作不用的字段必须为 null。" +
+  " 对频道简短交流或 worker 回报汇总：action=channel_reply，body=给频道的回复。" +
+  " 对代码修改、多步排查、浏览器/运维或其它耗时工作：action=worker_dispatch，instruction=给 worker 的完整任务、范围和验收标准；需要返工/补证据时用 worker_feedback，instruction 也必须自包含。" +
+  " 需要 owner 做权限、取舍或批准时：action=owner_decision，prompt=具体问题；approve/reject 时 options=[]，自定义选择必须给 2-10 个选项。" +
+  " 如果缺少无法自行取得的关键权限或输入：action=blocked，reason=需要人处理的具体阻塞。" +
+  " 不得输出 JSON 之外的文字，不得把执行工作包装成 channel_reply 自己完成。";
+
+const WORKER_REMINDER =
+  " 你是 execution worker，不是频道 front。只执行这条有界派工，不再派生其它 agent；完成必要的代码、调查、浏览器或运维工作，并返回证据、风险和验收结果。" +
+  " 不要调用 party CLI，也不要直接面向人做最终承诺；supervisor 会把你的回报作为执行记录送回 front，由 front 汇总。";
+
+function protocolReminder(projectAgent: ProjectAgentRunContext | null): string {
+  if (projectAgent?.runtime_role === "worker") return COMMON_PROTOCOL_REMINDER + WORKER_REMINDER;
+  if (projectAgent?.runtime_role === "front" && projectAgent.workers.length > 0) {
+    return COMMON_PROTOCOL_REMINDER + MANAGED_FRONT_REMINDER;
+  }
+  return COMMON_PROTOCOL_REMINDER + ADVISORY_FRONT_REMINDER;
+}
+
+function operatingContract(projectAgent: ProjectAgentRunContext | null) {
+  if (projectAgent?.runtime_role === "worker") {
+    return {
+      role: "execution_worker",
+      enforcement: "managed_profile",
+      front_agent: projectAgent.front_agent,
+      direct_actions: ["bounded_delegated_execution"],
+      delegate_actions: [],
+      result_boundary: "return evidence and results to the front agent through the supervisor-managed worker report",
+    } as const;
+  }
+  const managed = projectAgent?.runtime_role === "front" && projectAgent.workers.length > 0;
+  return {
+    role: "front_agent",
+    enforcement: managed ? "managed_profile" : "advisory",
+    workers: projectAgent?.workers ?? [],
+    direct_actions: [
+      "short_channel_conversation",
+      "single_read_only_check_needed_to_route_work",
+      "worker_result_synthesis",
+    ],
+    delegate_actions: [
+      "code_changes",
+      "multi_step_investigation",
+      "browser_or_operations_work",
+      "other_long_running_execution",
+    ],
+    front_agent_responsibilities: [
+      "channel_communication_and_visible_status",
+      "owner_permission_tradeoff_and_decision_communication",
+      "worker_dispatch_followup_acceptance_and_synthesis",
+    ],
+    unsupported_behavior: managed
+      ? "managed front output is restricted to channel_reply, owner_decision, worker_dispatch, worker_feedback, or blocked actions"
+      : "report blocked when no worker runtime is available; do not silently execute worker work in the front agent",
+  } as const;
+}
 
 /**
  * 读取服务器发布版并生成 #485 提醒。探测失败时保留上一个已知结果，
@@ -151,11 +216,11 @@ export const EXIT_SIGNAL_INT = 128 + 2;
 export const EXIT_SIGNAL_TERM = 128 + 15;
 
 /** 传给 builtin runner 的提示：只给路径，不给正文（#120）。 */
-function wakePrompt(contextFile: string): string {
+function wakePrompt(contextFile: string, projectAgent: ProjectAgentRunContext | null): string {
   return (
     `你在 AgentParty 频道里被 @ 了。唤醒上下文是一个 JSON 文件：${contextFile}\n` +
     `先读它（含 channel / seq / sender / body / mentions / charter / recent），再动手。\n` +
-    `${PROTOCOL_REMINDER}`
+    protocolReminder(projectAgent)
   );
 }
 
@@ -281,6 +346,31 @@ export type RunnerProcess = (
   opts: RunnerProcessOptions,
 ) => Promise<RunnerProcessResult>;
 
+export interface RoutedRunnerMessage {
+  replyTo: number;
+  text: string;
+  mentions?: string[];
+  /** Complete the current directed wake when the human-facing reply targets an earlier origin. */
+  completionSummarySeq?: number;
+  completionState?: "done" | "blocked";
+  blockedReason?: string;
+  decisionRequest?: SendDecisionRequest;
+  expectedDecisionLineage?: {
+    delivery_id: string;
+    work_id: string;
+    continuation_ref: string;
+  };
+  /** Server-private account constraint for a managed owner decision. */
+  expectedDecisionResponderOwner?: string;
+}
+
+export type RunnerResultRoute = (
+  frame: MsgFrame,
+  text: string,
+  marker: string | null,
+  delivery: DirectedDelivery | null,
+) => RoutedRunnerMessage | Promise<RoutedRunnerMessage>;
+
 interface KillableRunnerProcess {
   pid: number;
   kill(signal?: NodeJS.Signals | number): void;
@@ -396,6 +486,16 @@ export interface BuiltinRunnerOptions {
   cwd?: string;
   /** Child-only CLI identity pinned into the model process (#548). */
   agentpartyConfigPath?: string;
+  /** Prevent the model process from inheriting any usable AgentParty identity. */
+  isolateModelPartyAccess?: boolean;
+  /** Front control plane is read-only; execution workers keep workspace-write. */
+  sandbox?: "read-only" | "workspace-write";
+  /** Supervisor-owned routing for managed front/worker results. */
+  resultRoute?: RunnerResultRoute;
+  /** Harness-enforced final response schema for the managed control plane. */
+  outputSchema?: Record<string, unknown>;
+  /** null disables host-file markers; a path confines them to that real workspace tree. */
+  attachmentRoot?: string | null;
   repo?: string;
   runProcess?: RunnerProcess;
   runGit?: RunnerProcess;
@@ -411,7 +511,7 @@ export interface BuiltinRunnerOptions {
 export interface ThreadLike {
   id?: string | null;
   thread_id?: string | null;
-  run(prompt: string, opts: { sandbox: string; signal?: AbortSignal }): Promise<unknown>;
+  run(prompt: string, opts: { sandbox: string; signal?: AbortSignal; outputSchema?: Record<string, unknown> }): Promise<unknown>;
 }
 
 export interface CodexThreadOptions {
@@ -437,6 +537,11 @@ export interface SdkRunnerOptions {
   cwd?: string;
   /** Child-only CLI identity pinned into the SDK-spawned Codex process (#548). */
   agentpartyConfigPath?: string;
+  isolateModelPartyAccess?: boolean;
+  resultRoute?: RunnerResultRoute;
+  outputSchema?: Record<string, unknown>;
+  /** null disables host-file markers; a path confines them to that real workspace tree. */
+  attachmentRoot?: string | null;
   sandbox?: string;
   codexFactory?: (options?: CodexClientOptions) => CodexLike | Promise<CodexLike>;
   now?: () => number;
@@ -457,6 +562,12 @@ export interface ProjectAgentRunContext {
   base_branch: string;
   worktree_strategy: string;
   rules: string | null;
+  /** managed profile 的控制面/执行面角色；普通 serve 不设置。 */
+  runtime_role: ServeExecutionRole;
+  /** 本频道的可对话 front identity。 */
+  front_agent: string;
+  /** supervisor 已启动、可接 durable delivery 的 execution workers。 */
+  workers: readonly string[];
   channel_workdir: string;
   runner_workdir: string;
   delivery_workflow: {
@@ -594,7 +705,8 @@ function buildWakeContext(
       recent_messages_available: recent.length,
       recent_truncated: recentBodyTruncated,
     },
-    protocol_reminder: PROTOCOL_REMINDER,
+    operating_contract: operatingContract(projectAgent),
+    protocol_reminder: protocolReminder(projectAgent),
   };
 }
 
@@ -637,6 +749,29 @@ function builtinRunnerContextDir(workdir: string): string {
   const dir = join(workdir, "wake-context");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
+}
+
+function isolatedModelPartyEnv(workdir: string, server: string): Record<string, string> {
+  const home = join(workdir, "model-agentparty-denied");
+  const config = join(home, "config.json");
+  rmSync(home, { recursive: true, force: true });
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  // A previous model turn controls files in its workspace. Never trust an existing path here: it
+  // could be a symlink or a config rewritten with a discovered credential. Recreate the denied
+  // file before every model boundary so the supervisor does not follow attacker-controlled links.
+  writeFileSync(config, JSON.stringify({ server, token: "" }) + "\n", { mode: 0o600, flag: "wx" });
+  return {
+    AGENTPARTY_HOME: home,
+    AGENTPARTY_CONFIG: config,
+    AGENTPARTY_TOKEN: "",
+  };
+}
+
+function writeRunnerOutputSchema(workdir: string, schema: Record<string, unknown>): string {
+  const path = join(workdir, "runner-output-schema.json");
+  mkdirSync(workdir, { recursive: true, mode: 0o700 });
+  writeFileSync(path, JSON.stringify(schema) + "\n", { mode: 0o600 });
+  return path;
 }
 
 /**
@@ -899,6 +1034,24 @@ function attachmentPathFromRunnerText(text: string): string | null {
   return null;
 }
 
+function resolveRunnerAttachmentPath(path: string, attachmentRoot: string | null | undefined): string {
+  if (attachmentRoot === null) {
+    throw new WakeBlockedError("managed front host-file attachments are disabled", false);
+  }
+  if (attachmentRoot === undefined) return path;
+  const realRoot = realpathSync(attachmentRoot);
+  if (!statSync(realRoot).isDirectory()) {
+    throw new WakeBlockedError(`runner attachment root is not a directory: ${attachmentRoot}`, false);
+  }
+  const realPath = realpathSync(path);
+  const fromRoot = relative(realRoot, realPath);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    throw new WakeBlockedError(`runner attachment escapes allowed workspace: ${path}`, false);
+  }
+  // Read the resolved target, not the model-controlled symlink path checked above.
+  return realPath;
+}
+
 const ATTACH_LINE_RE = /^\[attach:[^\]\r\n]+\]$/;
 
 // worker 存什么 content-type 就回什么（它 split(";")[0] 归一化）。给常见交付物一个像样的类型，
@@ -1006,27 +1159,49 @@ async function deliverRunnerMessage(opts: {
   replyTo: number;
   text: string;
   marker: string | null;
-}): Promise<void> {
-  const { post, upload, server, token, channel, replyTo, text, marker } = opts;
+  mentions?: string[];
+  decisionRequest?: SendDecisionRequest;
+  expectedDecisionLineage?: RoutedRunnerMessage["expectedDecisionLineage"];
+  expectedDecisionResponderOwner?: RoutedRunnerMessage["expectedDecisionResponderOwner"];
+  attachmentRoot?: string | null;
+}): Promise<Awaited<ReturnType<typeof postMessage>>> {
+  const {
+    post,
+    upload,
+    server,
+    token,
+    channel,
+    replyTo,
+    text,
+    marker,
+    mentions = [],
+    decisionRequest,
+    expectedDecisionLineage,
+    expectedDecisionResponderOwner,
+    attachmentRoot,
+  } = opts;
   // [attach:/abs/path]：交付物永远走 R2 附件（相对路径在此抛错，与旧行为一致）。
   const attachPath = attachmentPathFromRunnerText(text);
+  if (decisionRequest !== undefined && attachPath !== null) {
+    throw new Error("managed owner decision cannot be delivered as an attachment");
+  }
   if (attachPath !== null) {
-    const bytes = readFileSync(attachPath); // Buffer：逐字节，不做 utf8 往返，保住 #41 的完整性
-    const filename = safeAttachmentFilename(basename(attachPath));
+    const allowedPath = resolveRunnerAttachmentPath(attachPath, attachmentRoot);
+    const bytes = readFileSync(allowedPath); // Buffer：逐字节，不做 utf8 往返，保住 #41 的完整性
+    const filename = safeAttachmentFilename(basename(allowedPath));
     const ref = await upload(server, token, channel, filename, bytes, guessAttachmentContentType(filename));
     const rest = stripAttachLines(text);
     const parts: string[] = [];
     if (marker) parts.push(marker);
     if (rest) parts.push(rest);
     if (parts.length === 0) parts.push(`[attached ${filename}]`);
-    await post(server, token, channel, {
+    return await post(server, token, channel, {
       kind: "message",
       body: clampInlineBody(parts.join("\n")),
-      mentions: [],
+      mentions,
       reply_to: replyTo,
       attachments: [ref],
     });
-    return;
   }
 
   const inline = marker ? `${marker}\n${text}` : text;
@@ -1035,22 +1210,114 @@ async function deliverRunnerMessage(opts: {
     // 正文超 inline 上限：整段传成 R2 附件，正文只留一行指引（#109），不再撞 413。
     const filename = `delivery-seq${replyTo}.md`;
     const ref = await upload(server, token, channel, filename, Buffer.from(inline, "utf8"), "text/markdown; charset=utf-8");
-    await post(server, token, channel, {
+    return await post(server, token, channel, {
       kind: "message",
       body: `[reply body ${inlineBytes} bytes exceeded the ${BODY_LIMIT}-byte inline limit; delivered as attachment ${filename}]`,
-      mentions: [],
+      mentions,
       reply_to: replyTo,
       attachments: [ref],
     });
-    return;
   }
 
-  await post(server, token, channel, {
+  const payload: Parameters<typeof post>[3] & {
+    expected_decision_lineage?: RoutedRunnerMessage["expectedDecisionLineage"];
+    expected_decision_responder_owner?: RoutedRunnerMessage["expectedDecisionResponderOwner"];
+  } = {
     kind: "message",
     body: inline,
-    mentions: [],
+    mentions,
     reply_to: replyTo,
+    ...(decisionRequest === undefined ? {} : { decision_request: decisionRequest }),
+    ...(expectedDecisionLineage === undefined ? {} : { expected_decision_lineage: expectedDecisionLineage }),
+    ...(expectedDecisionResponderOwner === undefined
+      ? {}
+      : { expected_decision_responder_owner: expectedDecisionResponderOwner }),
+  };
+  return await post(server, token, channel, payload);
+}
+
+interface AutoDecisionContinuation {
+  requestSeq: number;
+  prompt: string;
+  chosenOption: string;
+}
+
+interface RunnerDeliveryOutcome {
+  autoDecision?: AutoDecisionContinuation;
+}
+
+const MAX_AUTO_DECISION_CONTINUATIONS = 4;
+
+function autoDecisionContinuationPrompt(decision: AutoDecisionContinuation): string {
+  return (
+    `频道处于 unattended 决策模式；你刚才的 owner_decision #${decision.requestSeq} 已自动选择：${decision.chosenOption}。\n` +
+    `原问题：${decision.prompt}\n` +
+    "继续履行 managed front 的三向沟通职责，并按同一个六字段 JSON schema 只输出下一步动作。"
+  );
+}
+
+async function deliverRunnerResult(opts: {
+  frame: MsgFrame;
+  text: string;
+  marker: string | null;
+  delivery?: DirectedDelivery | null;
+  route?: RunnerResultRoute;
+  post: typeof postMessage;
+  upload: typeof uploadAttachment;
+  server: string;
+  token: string;
+  channel: string;
+  attachmentRoot?: string | null;
+}): Promise<RunnerDeliveryOutcome> {
+  const routed = opts.route === undefined
+    ? { replyTo: opts.frame.seq, text: opts.text }
+    : await opts.route(opts.frame, opts.text, opts.marker, opts.delivery ?? null);
+  const delivered = await deliverRunnerMessage({
+    post: opts.post,
+    upload: opts.upload,
+    server: opts.server,
+    token: opts.token,
+    channel: opts.channel,
+    replyTo: routed.replyTo,
+    text: routed.text,
+    marker: opts.route === undefined ? opts.marker : null,
+    mentions: routed.mentions,
+    decisionRequest: routed.decisionRequest,
+    expectedDecisionLineage: routed.expectedDecisionLineage,
+    expectedDecisionResponderOwner: routed.expectedDecisionResponderOwner,
+    // A supervisor-owned route is managed. It is fail-closed unless that lane explicitly grants a
+    // real workspace root; legacy non-routed runners preserve their historical attachment behavior.
+    attachmentRoot: opts.route === undefined ? opts.attachmentRoot : opts.attachmentRoot ?? null,
   });
+  if (routed.completionSummarySeq !== undefined) {
+    const completionState = routed.completionState ?? "done";
+    await opts.post(opts.server, opts.token, opts.channel, {
+      kind: "status",
+      state: completionState,
+      note: completionState === "blocked"
+        ? routed.blockedReason ?? `managed front blocked for seq=${routed.completionSummarySeq}`
+        : `front synthesis delivered for seq=${routed.completionSummarySeq}`,
+      mentions: [],
+      summary_seq: routed.completionSummarySeq,
+      ...(completionState === "blocked"
+        ? { blocked_reason: routed.blockedReason ?? "managed front reported blocked" }
+        : {}),
+    });
+  }
+  const resolution = delivered?.decision_resolution;
+  if (resolution?.state === "auto_resolved") {
+    if (routed.decisionRequest === undefined || typeof resolution.chosen_option !== "string") {
+      throw new Error("auto-resolved managed decision is missing its continuation payload");
+    }
+    return {
+      autoDecision: {
+        requestSeq: delivered.seq,
+        prompt: routed.decisionRequest.prompt,
+        chosenOption: resolution.chosen_option,
+      },
+    };
+  }
+  return {};
 }
 
 async function defaultRunnerProcess(
@@ -1343,6 +1610,9 @@ function parseClaudeJson(stdout: string): { sessionId: string | null; text: stri
   try {
     const body = JSON.parse(stdout) as Record<string, unknown>;
     const sessionId = typeof body.session_id === "string" ? body.session_id : null;
+    if (body.structured_output !== undefined) {
+      return { sessionId, text: JSON.stringify(body.structured_output) };
+    }
     for (const key of ["result", "text", "message", "content"]) {
       if (typeof body[key] === "string") return { sessionId, text: body[key] };
     }
@@ -1434,8 +1704,22 @@ async function runHarness(
   };
   if (opts.harness === "codex") {
     const outFile = join(opts.workdir, `runner-${seq}-${Date.now()}.out`);
-    const base = ["--skip-git-repo-check", "--sandbox", "workspace-write", "-o", outFile, prompt];
-    const args = sid ? ["codex", "exec", "resume", sid, ...base] : ["codex", "exec", ...base];
+    const schemaArgs = opts.outputSchema === undefined
+      ? []
+      : ["--output-schema", writeRunnerOutputSchema(opts.workdir, opts.outputSchema)];
+    const flags = [
+      "--skip-git-repo-check",
+      "--sandbox",
+      opts.sandbox ?? "workspace-write",
+      ...schemaArgs,
+      "-o",
+      outFile,
+    ];
+    // exec-level flags must precede the `resume` subcommand.  Putting --sandbox after the session
+    // id is parsed as a resume-only flag and current Codex rejects the second managed turn.
+    const args = sid
+      ? ["codex", "exec", ...flags, "resume", sid, prompt]
+      : ["codex", "exec", ...flags, prompt];
     const result = await runProcess(args, { cwd, env, signal });
     const text = result.code === 0 && existsSync(outFile) ? readFileSync(outFile, "utf8").trimEnd() : "";
     return { result, text, sessionId: sid ? sid : parseCodexSessionId(result.stdout), outFile };
@@ -1449,13 +1733,18 @@ async function runHarness(
   // Claude accepts an official UUID session handle on cold start. Allocate it during preflight so
   // nested `party decision ask` can durably park the exact handle before this turn returns. Parsing
   // a session id from stdout is too late: the Worker may already have released an owner_answer.
+  const permissionArgs = opts.sandbox === "read-only" ? ["--permission-mode", "plan"] : [];
+  const schemaArgs = opts.outputSchema === undefined ? [] : ["--json-schema", JSON.stringify(opts.outputSchema)];
+  const jsonOutputArgs = opts.outputSchema === undefined ? [] : ["--output-format", "json"];
   const args = sid
-    ? ["claude", "-p", "--disallowed-tools", "AskUserQuestion", "--resume", sid, prompt]
+    ? ["claude", "-p", "--disallowed-tools", "AskUserQuestion", ...permissionArgs, ...schemaArgs, ...jsonOutputArgs, "--resume", sid, prompt]
     : [
         "claude",
         "-p",
         "--disallowed-tools",
         "AskUserQuestion",
+        ...permissionArgs,
+        ...schemaArgs,
         "--session-id",
         coldSessionId!,
         "--output-format",
@@ -1463,9 +1752,9 @@ async function runHarness(
         prompt,
       ];
   const result = await runProcess(args, { cwd, env, signal });
-  if (sid) return { result, text: result.stdout.trimEnd(), sessionId: sid };
+  if (sid && opts.outputSchema === undefined) return { result, text: result.stdout.trimEnd(), sessionId: sid };
   const parsed = parseClaudeJson(result.stdout);
-  return { result, text: parsed.text.trimEnd(), sessionId: coldSessionId };
+  return { result, text: parsed.text.trimEnd(), sessionId: sid ?? coldSessionId };
 }
 
 export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOptions["runCommand"]> {
@@ -1491,7 +1780,11 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
     env: definedEnv({
       ...process.env,
       AGENTPARTY_CHANNEL: opts.channel,
-      ...(opts.agentpartyConfigPath ? { AGENTPARTY_CONFIG: opts.agentpartyConfigPath } : {}),
+      ...(opts.isolateModelPartyAccess
+        ? isolatedModelPartyEnv(opts.workdir, opts.server)
+        : opts.agentpartyConfigPath
+          ? { AGENTPARTY_CONFIG: opts.agentpartyConfigPath }
+          : {}),
       AP_RUNNER_WORKDIR: opts.workdir,
       AP_RUNNER_HARNESS: "codex-sdk",
       ...(sessionId === null ? {} : { AP_RUNNER_SESSION_ID: sessionId }),
@@ -1702,57 +1995,72 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
           ? ctx.signal.reason
           : new WakeBlockedError("builtin codex-sdk runner aborted", false);
       }
-      // Await the SDK promise itself.  Racing it with AbortSignal would let an SDK implementation
-      // that ignores cancellation keep running in the background while serve starts the next wake.
-      const result = await active.thread.run(sdkPrompt(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null, ctx.attachments, ctx.delivery ?? null), {
-        sandbox: opts.sandbox ?? "full_access",
-        signal: ctx.signal,
-      });
-      if (ctx.signal?.aborted) {
-        throw ctx.signal.reason instanceof Error ? ctx.signal.reason : new WakeBlockedError("builtin codex-sdk runner aborted", false);
+      let nextPrompt = sdkPrompt(frame, ctx.channel, ctx.self, ctx.recent, ctx.charter ?? null, ctx.projectAgent ?? null, ctx.cliUpgrade ?? null, ctx.attachments, ctx.delivery ?? null);
+      let autoContinuations = 0;
+      for (;;) {
+        // Await the SDK promise itself. Racing it with AbortSignal would let an SDK implementation
+        // that ignores cancellation keep running while serve starts the next wake.
+        const result = await active.thread.run(nextPrompt, {
+          sandbox: opts.sandbox ?? "full_access",
+          signal: ctx.signal,
+          ...(opts.outputSchema === undefined ? {} : { outputSchema: opts.outputSchema }),
+        });
+        if (ctx.signal?.aborted) {
+          throw ctx.signal.reason instanceof Error ? ctx.signal.reason : new WakeBlockedError("builtin codex-sdk runner aborted", false);
+        }
+        // run() 之后 thread id 一定就位；懒初始化的 session 在这里补建
+        threadId = slot.session?.thread_id ?? active.session?.thread_id ?? sdkThreadId(active.thread);
+        if (!threadId) throw new Error("@openai/codex-sdk thread did not expose an id/thread_id after run");
+        const body = finalText(result);
+        const now = opts.now?.() ?? Date.now();
+        const baseSession = slot.session ?? active.session ?? {
+          harness: "codex-sdk" as const,
+          thread_id: threadId,
+          created_at: started,
+          last_wake_ts: started,
+          wakes: 0,
+          ...(scope.directed ? { work_id: scope.workId!, continuation_ref: scope.ref! } : {}),
+        };
+        slot.session = writeSdkSession(sessionPath, {
+          ...baseSession,
+          last_wake_ts: now,
+          wakes: baseSession.wakes + 1,
+          workdir: opts.workdir,
+        });
+        opts.onSession?.({
+          harness: "codex-sdk",
+          session_id: slot.session.thread_id,
+          updated_at: now,
+          cwd: slot.session.cwd ?? opts.workdir,
+          workdir: opts.workdir,
+        });
+        // 交付走统一路径：超限正文改走 R2 附件（#109），不再 inline 撞 413。上传失败落进下面的 catch。
+        const outcome = await deliverRunnerResult({
+          frame,
+          text: body,
+          marker: null,
+          delivery: ctx.delivery ?? null,
+          route: opts.resultRoute,
+          post,
+          upload: opts.uploadAttachment ?? uploadAttachment,
+          server: opts.server,
+          token: opts.token,
+          channel: opts.channel,
+          attachmentRoot: opts.attachmentRoot,
+        });
+        if (outcome.autoDecision === undefined) {
+          appendRunnerLog(
+            opts.workdir,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(threadId)} duration_ms=${now - started} status=ok auto_continuations=${autoContinuations}`,
+          );
+          break;
+        }
+        autoContinuations += 1;
+        if (autoContinuations > MAX_AUTO_DECISION_CONTINUATIONS) {
+          throw new WakeBlockedError("managed front exceeded unattended decision continuation limit", false);
+        }
+        nextPrompt = autoDecisionContinuationPrompt(outcome.autoDecision);
       }
-      // run() 之后 thread id 一定就位；懒初始化的 session 在这里补建
-      threadId = active.session?.thread_id ?? sdkThreadId(active.thread);
-      if (!threadId) throw new Error("@openai/codex-sdk thread did not expose an id/thread_id after run");
-      const body = finalText(result);
-      const now = opts.now?.() ?? Date.now();
-      const baseSession = active.session ?? {
-        harness: "codex-sdk" as const,
-        thread_id: threadId,
-        created_at: started,
-        last_wake_ts: started,
-        wakes: 0,
-        ...(scope.directed ? { work_id: scope.workId!, continuation_ref: scope.ref! } : {}),
-      };
-      slot.session = {
-        ...baseSession,
-        last_wake_ts: now,
-        wakes: baseSession.wakes + 1,
-        workdir: opts.workdir,
-      };
-      slot.session = writeSdkSession(sessionPath, slot.session);
-      opts.onSession?.({
-        harness: "codex-sdk",
-        session_id: slot.session.thread_id,
-        updated_at: now,
-        cwd: slot.session.cwd ?? opts.workdir,
-        workdir: opts.workdir,
-      });
-      // 交付走统一路径：超限正文改走 R2 附件（#109），不再 inline 撞 413。上传失败落进下面的 catch。
-      await deliverRunnerMessage({
-        post,
-        upload: opts.uploadAttachment ?? uploadAttachment,
-        server: opts.server,
-        token: opts.token,
-        channel: opts.channel,
-        replyTo: frame.seq,
-        text: body,
-        marker: null,
-      });
-      appendRunnerLog(
-        opts.workdir,
-        `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(threadId)} duration_ms=${now - started} status=ok`,
-      );
     } catch (err) {
       const now = opts.now?.() ?? Date.now();
       const message = err instanceof Error ? err.message : String(err);
@@ -1876,7 +2184,11 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
     const env = {
       ...baseEnv,
       AGENTPARTY_CHANNEL: opts.channel,
-      ...(opts.agentpartyConfigPath ? { AGENTPARTY_CONFIG: opts.agentpartyConfigPath } : {}),
+      ...(opts.isolateModelPartyAccess
+        ? isolatedModelPartyEnv(opts.workdir, opts.server)
+        : opts.agentpartyConfigPath
+          ? { AGENTPARTY_CONFIG: opts.agentpartyConfigPath }
+          : {}),
       // Nested `party decision ask` must be able to commit the current model handle before its POST
       // parks the server-side work. Cold harnesses expose CODEX_THREAD_ID / CLAUDE_SESSION_ID to tool
       // subprocesses; resumed turns additionally receive this explicit, runner-owned handle.
@@ -1937,115 +2249,120 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
     // 顺带证伪 issue 里「大消息 E2BIG」那半：macOS 上 argv 单条到 ~2MB 才 E2BIG，
     // 而最坏 context ≈ 230KB（BODY_LIMIT 100KB + CHARTER_LIMIT 16KB + recent 20×400B）。
     // 当前限额下炸不了；真正当下就成立的是上面这条泄漏。
-    const prompt = wakePrompt(contextFile);
-
-    // resume 子进程一旦启动，任何非零都可能发生在模型或交付副作用之后；即使输出里带结构化
-    // session_not_found，也只能清理句柄供下一条独立 wake 使用，绝不能 cold-start 重跑当前 wake。
-    let run: HarnessRun;
+    let nextPrompt = wakePrompt(contextFile, ctx.projectAgent ?? null);
+    let autoContinuations = 0;
     try {
-      run = await runHarness(opts, prompt, oldSid, coldSessionId, cwd, env, frame.seq, ctx.signal);
-    } catch (error) {
-      if (error instanceof ServeShutdownError) {
-        if (prior !== null) {
-          blockRunnerContinuation(
-            sessionPath,
-            `${opts.harness} runner stopped during shutdown; previous turn outcome unknown, refusing resume`,
-            opts.now?.() ?? Date.now(),
-          );
+      for (;;) {
+        // resume 子进程一旦启动，任何非零都可能发生在模型或交付副作用之后；即使输出里带结构化
+        // session_not_found，也只能清理句柄供下一条独立 wake 使用，绝不能 cold-start 重跑当前 wake。
+        let run: HarnessRun;
+        try {
+          run = await runHarness(opts, nextPrompt, oldSid, coldSessionId, cwd, env, frame.seq, ctx.signal);
+        } catch (error) {
+          if (error instanceof ServeShutdownError && prior !== null) {
+            blockRunnerContinuation(
+              sessionPath,
+              `${opts.harness} runner stopped during shutdown; previous turn outcome unknown, refusing resume`,
+              opts.now?.() ?? Date.now(),
+            );
+          }
+          throw error;
         }
-        try { unlinkSync(contextFile); } catch { /* best effort */ }
+        if (oldSid !== null && run.result.code !== 0 && isInvalidPersistedSessionFailure(run.result)) {
+          const resetAt = opts.now?.() ?? Date.now();
+          appendRunnerLog(
+            opts.workdir,
+            `${new Date(resetAt).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} session_reset=invalid_after_process exit=${run.result.code}`,
+          );
+          const durable = readSession(sessionPath, opts.harness);
+          if (durable?.resume_blocked_reason === undefined) rmSync(sessionPath, { force: true });
+          prior = null;
+          oldSid = null;
+          finalSid = null;
+        }
+        exitCode = run.result.code;
+        const now = opts.now?.() ?? Date.now();
+        if (run.result.code !== 0) {
+          appendRunnerLog(
+            opts.workdir,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}`,
+          );
+          throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: exit code ${run.result.code}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
+        }
+
+        finalSid = run.sessionId;
+        if (!finalSid) {
+          appendRunnerLog(
+            opts.workdir,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=unknown duration_ms=${now - started} exit=${exitCode ?? 0} missing_session_id=true`,
+          );
+          throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: no session id parsed; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
+        }
+
+        const committed = writeSession(sessionPath, {
+          harness: opts.harness,
+          session_id: finalSid,
+          created_at: prior ? prior.created_at : now,
+          last_wake_ts: now,
+          wakes: prior ? prior.wakes + 1 : 1,
+          cwd,
+          workdir: opts.workdir,
+          ...(scope.directed ? { work_id: scope.workId!, continuation_ref: scope.ref! } : {}),
+        });
+        opts.onSession?.({
+          harness: opts.harness,
+          session_id: committed.session_id,
+          updated_at: now,
+          cwd,
+          workdir: opts.workdir,
+        });
+
+        const marker = oldSid ? null : `[session start: ${shortSid(finalSid)}]`;
+        let outcome: RunnerDeliveryOutcome;
+        try {
+          outcome = await deliverRunnerResult({
+            frame,
+            text: run.text,
+            marker,
+            delivery: ctx.delivery ?? null,
+            route: opts.resultRoute,
+            post,
+            upload: opts.uploadAttachment ?? uploadAttachment,
+            server: opts.server,
+            token: opts.token,
+            channel: opts.channel,
+            attachmentRoot: opts.attachmentRoot,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          appendRunnerLog(
+            opts.workdir,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} attach_error=${JSON.stringify(message)}`,
+          );
+          throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: ${message}`);
+        }
+        if (outcome.autoDecision === undefined) {
+          appendRunnerLog(
+            opts.workdir,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} duration_ms=${now - started} exit=${exitCode ?? 0} auto_continuations=${autoContinuations}`,
+          );
+          break;
+        }
+        autoContinuations += 1;
+        if (autoContinuations > MAX_AUTO_DECISION_CONTINUATIONS) {
+          throw new WakeBlockedError("managed front exceeded unattended decision continuation limit", false);
+        }
+        prior = committed;
+        oldSid = finalSid;
+        nextPrompt = autoDecisionContinuationPrompt(outcome.autoDecision);
       }
-      throw error;
+    } finally {
+      try {
+        unlinkSync(contextFile);
+      } catch {
+        /* 保留失败的清理不影响唤醒结果 */
+      }
     }
-    if (oldSid !== null && run.result.code !== 0 && isInvalidPersistedSessionFailure(run.result)) {
-      const resetAt = opts.now?.() ?? Date.now();
-      appendRunnerLog(
-        opts.workdir,
-        `${new Date(resetAt).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} session_reset=invalid_after_process exit=${run.result.code}`,
-      );
-      const durable = readSession(sessionPath, opts.harness);
-      if (durable?.resume_blocked_reason === undefined) rmSync(sessionPath, { force: true });
-      prior = null;
-      oldSid = null;
-      finalSid = null;
-    }
-    exitCode = run.result.code;
-
-    try {
-      unlinkSync(contextFile);
-    } catch {
-      /* 保留失败的清理不影响唤醒结果 */
-    }
-
-    const now = opts.now?.() ?? Date.now();
-    if (run.result.code !== 0) {
-      appendRunnerLog(
-        opts.workdir,
-        `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}`,
-      );
-      // 只回报失败信号，不发频道：外层还要重试，瞬态失败不该把频道标成 blocked，
-      // 每次尝试发一条更会给 loop guard 上膛（worker/src/do.ts:2582 对 status 也计数）。
-      // 最终那一条 blocked 由 runServe 在预算耗尽时统一发（#206 门禁 P1②）。
-      throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: exit code ${run.result.code}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
-    }
-
-    finalSid = run.sessionId;
-    if (!finalSid) {
-      appendRunnerLog(
-        opts.workdir,
-        `${new Date(now).toISOString()} seq=${frame.seq} sid=unknown duration_ms=${now - started} exit=${exitCode ?? 0} missing_session_id=true`,
-      );
-      throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: no session id parsed; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
-    }
-
-    const wakes = prior ? prior.wakes + 1 : 1;
-    const committed = writeSession(sessionPath, {
-      harness: opts.harness,
-      session_id: finalSid,
-      created_at: prior ? prior.created_at : now,
-      last_wake_ts: now,
-      wakes,
-      cwd,
-      workdir: opts.workdir,
-      ...(scope.directed ? { work_id: scope.workId!, continuation_ref: scope.ref! } : {}),
-    });
-    opts.onSession?.({
-      harness: opts.harness,
-      session_id: committed.session_id,
-      updated_at: now,
-      cwd,
-      workdir: opts.workdir,
-    });
-
-    // resume 非零不再 cold-start（#206 门禁 P1②），所以不存在 session reset 这条路径了。
-    const marker = oldSid ? null : `[session start: ${shortSid(finalSid)}]`;
-    // 交付：[attach] 交付物 / 超限正文改走 R2 附件（#109）。上传+发送整体包进 try —— 旧代码里
-    // 那次 post（含 413）在 try 外逃逸，交付物静默丢失；现在失败一律转 WakeBlockedError，
-    // 由 runServe 统一发 blocked（带原因）。
-    try {
-      await deliverRunnerMessage({
-        post,
-        upload: opts.uploadAttachment ?? uploadAttachment,
-        server: opts.server,
-        token: opts.token,
-        channel: opts.channel,
-        replyTo: frame.seq,
-        text: run.text,
-        marker,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      appendRunnerLog(
-        opts.workdir,
-        `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} attach_error=${JSON.stringify(message)}`,
-      );
-      throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: ${message}`);
-    }
-
-    appendRunnerLog(
-      opts.workdir,
-      `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} duration_ms=${now - started} exit=${exitCode ?? 0}`,
-    );
   };
   runner.prepare = prepare;
   runner.onDeliveryTerminal = (delivery) => {
@@ -2225,12 +2542,17 @@ export interface ProfileServeOptions {
   ensureChannelRuntime?: typeof ensureProjectAgentChannelRuntime;
   runChannelServe?: (opts: ServeOptions) => Promise<number>;
   post?: typeof postMessage;
+  fetchMessages?: typeof fetchMessages;
   sleep?: (ms: number) => Promise<void>;
   /** 嵌入/测试方持有的生命周期；CLI 默认由 profile 层独占 SIGINT/SIGTERM。 */
   signal?: AbortSignal;
 }
 
-function profileContext(profile: ProjectAgentProfile, prepared: PreparedProfileWorkspace): ProjectAgentRunContext {
+function profileContext(
+  profile: ProjectAgentProfile,
+  prepared: PreparedProfileWorkspace,
+  runtime: { role: ServeExecutionRole; frontAgent: string; workers: readonly string[] },
+): ProjectAgentRunContext {
   return {
     owner_account: profile.owner_account,
     handle: profile.handle,
@@ -2241,6 +2563,9 @@ function profileContext(profile: ProjectAgentProfile, prepared: PreparedProfileW
     base_branch: profile.base_branch,
     worktree_strategy: profile.worktree_strategy,
     rules: profile.rules,
+    runtime_role: runtime.role,
+    front_agent: runtime.frontAgent,
+    workers: runtime.workers,
     channel_workdir: prepared.channelWorkdir,
     runner_workdir: prepared.runnerWorkdir,
     delivery_workflow: {
@@ -2266,11 +2591,293 @@ function checksum(input: string): string {
   return (hash >>> 0).toString(36);
 }
 
+export type ManagedFrontAction =
+  | { action: "channel_reply"; body: string }
+  | { action: "worker_dispatch"; instruction: string }
+  | { action: "worker_feedback"; instruction: string }
+  | { action: "owner_decision"; prompt: string; options?: string[] }
+  | { action: "blocked"; reason: string };
+
+const MANAGED_FRONT_ACTION_KEYS = ["action", "body", "instruction", "prompt", "options", "reason"] as const;
+
+// OpenAI Structured Outputs requires one root object, every property required, and nullable
+// placeholders for action-specific fields.  The parser below still enforces the discriminated
+// semantics so Claude/Codex output can never smuggle a second action through an unused field.
+export const MANAGED_FRONT_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    action: {
+      type: "string",
+      enum: ["channel_reply", "worker_dispatch", "worker_feedback", "owner_decision", "blocked"],
+    },
+    body: { type: ["string", "null"] },
+    instruction: { type: ["string", "null"] },
+    prompt: { type: ["string", "null"] },
+    options: {
+      type: ["array", "null"],
+      items: { type: "string" },
+      maxItems: DECISION_OPTIONS_MAX,
+    },
+    reason: { type: ["string", "null"] },
+  },
+  required: [...MANAGED_FRONT_ACTION_KEYS],
+  additionalProperties: false,
+};
+
+function boundedActionText(value: unknown, field: string, maxBytes = BODY_LIMIT - 1024): string {
+  if (typeof value !== "string") throw new WakeBlockedError(`managed front action requires string ${field}`, false);
+  const text = value.trim();
+  if (text.length === 0) throw new WakeBlockedError(`managed front action requires non-empty ${field}`, false);
+  if (Buffer.byteLength(text, "utf8") > maxBytes) {
+    throw new WakeBlockedError(`managed front action ${field} exceeds message limit`, false);
+  }
+  return text;
+}
+
+export function parseManagedFrontAction(text: string): ManagedFrontAction {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text.trim());
+  } catch {
+    throw new WakeBlockedError("managed front must return exactly one JSON action", false);
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new WakeBlockedError("managed front action must be a JSON object", false);
+  }
+  const record = raw as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const expectedKeys = [...MANAGED_FRONT_ACTION_KEYS].sort();
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+    throw new WakeBlockedError(`managed front action must contain exactly ${MANAGED_FRONT_ACTION_KEYS.join(", ")}`, false);
+  }
+  const requireNull = (...fields: Array<Exclude<(typeof MANAGED_FRONT_ACTION_KEYS)[number], "action">>) => {
+    for (const field of fields) {
+      if (record[field] !== null) {
+        throw new WakeBlockedError(`managed front action requires unused ${field} to be null`, false);
+      }
+    }
+  };
+  if (record.action === "channel_reply") {
+    requireNull("instruction", "prompt", "options", "reason");
+    return { action: "channel_reply", body: boundedActionText(record.body, "body") };
+  }
+  if (record.action === "worker_dispatch" || record.action === "worker_feedback") {
+    requireNull("body", "prompt", "options", "reason");
+    return { action: record.action, instruction: boundedActionText(record.instruction, "instruction") };
+  }
+  if (record.action === "owner_decision") {
+    requireNull("body", "instruction", "reason");
+    const prompt = boundedActionText(record.prompt, "prompt", DECISION_PROMPT_LIMIT);
+    if (!Array.isArray(record.options) || record.options.length > DECISION_OPTIONS_MAX) {
+      throw new WakeBlockedError(`managed front owner_decision options must contain 0-${DECISION_OPTIONS_MAX} values`, false);
+    }
+    if (record.options.length === 0) return { action: "owner_decision", prompt };
+    if (record.options.length < 2) {
+      throw new WakeBlockedError("managed front choice decision requires at least 2 options", false);
+    }
+    const options = record.options.map((option, index) =>
+      boundedActionText(option, `options[${index}]`, DECISION_OPTION_LIMIT));
+    return { action: "owner_decision", prompt, options };
+  }
+  if (record.action === "blocked") {
+    requireNull("body", "instruction", "prompt", "options");
+    return { action: "blocked", reason: boundedActionText(record.reason, "reason", 2_000) };
+  }
+  throw new WakeBlockedError(
+    "managed front action must be channel_reply, owner_decision, worker_dispatch, worker_feedback, or blocked",
+    false,
+  );
+}
+
 export function projectAgentChildName(handle: string, channel: string): string {
   const cleanHandle = safeSegment(handle).replace(/^[^A-Za-z0-9]+/, "") || "agent";
   const cleanChannel = safeSegment(channel).replace(/^[^A-Za-z0-9]+/, "") || "channel";
   const suffix = checksum(`${handle}/${channel}`);
   return `${cleanHandle.slice(0, 24)}-${cleanChannel.slice(0, 24)}-${suffix}`.slice(0, 64);
+}
+
+export function projectAgentWorkerName(handle: string, channel: string): string {
+  const cleanHandle = safeSegment(handle).replace(/^[^A-Za-z0-9]+/, "") || "agent";
+  const cleanChannel = safeSegment(channel).replace(/^[^A-Za-z0-9]+/, "") || "channel";
+  const suffix = checksum(`${handle}/${channel}/worker`);
+  return `${cleanHandle.slice(0, 20)}-${cleanChannel.slice(0, 20)}-worker-${suffix}`.slice(0, 64);
+}
+
+function managedWorkerResultRoute(): RunnerResultRoute {
+  return (frame, text) => ({
+    replyTo: frame.seq,
+    text: `[worker report for origin #${frame.reply_to ?? frame.seq}]\n${text.trim() || "worker returned no result"}`,
+  });
+}
+
+function assertManagedWorkerWake(
+  frame: MsgFrame,
+  delivery: DirectedDelivery | null,
+  projectAgent: ProjectAgentRunContext | null,
+  self: string,
+): void {
+  if (projectAgent?.runtime_role !== "worker") return;
+  const dispatchPrefix = `已派工 ${self}：`;
+  const feedbackPrefix = `已要求补充/返工 ${self}`;
+  const feedbackSeparator = frame.body.indexOf("：", feedbackPrefix.length);
+  const routedDispatch = frame.body.startsWith(dispatchPrefix) && frame.body.slice(dispatchPrefix.length).trim().length > 0;
+  const routedFeedback = frame.body.startsWith(feedbackPrefix) &&
+    feedbackSeparator >= feedbackPrefix.length &&
+    frame.body.slice(feedbackSeparator + 1).trim().length > 0;
+  const allowedCause = delivery?.cause === "mention" || delivery?.cause === "mention_edit" || delivery?.cause === "retry";
+  if (
+    delivery === null ||
+    delivery.message_seq !== frame.seq ||
+    delivery.target_name !== self ||
+    delivery.state !== "claimed" ||
+    !allowedCause ||
+    frame.kind !== "message" ||
+    frame.sender.kind !== "agent" ||
+    frame.sender.name !== projectAgent.front_agent ||
+    frame.sender.owner !== projectAgent.owner_account ||
+    frame.reply_to === null ||
+    !frame.mentions.includes(self) ||
+    (!routedDispatch && !routedFeedback)
+  ) {
+    throw new WakeBlockedError(
+      `managed worker rejected unverified wake: expected dispatch/feedback from ${projectAgent.front_agent} owned by ${projectAgent.owner_account}`,
+      false,
+    );
+  }
+}
+
+export function createManagedFrontResultRoute(opts: {
+  server: string;
+  token: string;
+  channel: string;
+  frontName: string;
+  workerName: string;
+  ownerAccount: string;
+  fetch?: typeof fetchMessages;
+}): RunnerResultRoute {
+  const fetch = opts.fetch ?? fetchMessages;
+  const readExact = async (seq: number): Promise<MsgFrame> => {
+    const message = (await fetch(opts.server, opts.token, opts.channel, Math.max(0, seq - 1), 1))
+      .find((candidate) => candidate.seq === seq);
+    if (message === undefined) throw new WakeBlockedError(`managed front lineage message #${seq} is unavailable`, false);
+    return message;
+  };
+  interface ResolvedOrigin {
+    seq: number;
+    workerReportSeq?: number;
+    workerDispatchSeq?: number;
+  }
+  const resolveFrame = async (frame: MsgFrame, seen: Set<number>, depth: number): Promise<ResolvedOrigin> => {
+    if (depth > 12 || seen.has(frame.seq)) {
+      throw new WakeBlockedError("managed front lineage is cyclic or too deep", false);
+    }
+    seen.add(frame.seq);
+    if (frame.sender.name === opts.workerName) {
+      if (frame.sender.owner !== opts.ownerAccount || frame.reply_to === null) {
+        throw new WakeBlockedError("worker report principal or dispatch link could not be verified", false);
+      }
+      const dispatch = await readExact(frame.reply_to);
+      if (
+        dispatch.sender.name !== opts.frontName ||
+        dispatch.sender.owner !== opts.ownerAccount ||
+        !dispatch.mentions.includes(opts.workerName) ||
+        dispatch.reply_to === null ||
+        dispatch.seq >= frame.seq
+      ) {
+        throw new WakeBlockedError("worker report dispatch lineage could not be verified", false);
+      }
+      const root = await resolveFrame(await readExact(dispatch.reply_to), seen, depth + 1);
+      return {
+        ...root,
+        workerReportSeq: frame.seq,
+        workerDispatchSeq: dispatch.seq,
+      };
+    }
+    if (frame.decision_response !== undefined) {
+      const question = await readExact(frame.decision_response.request_seq);
+      if (
+        frame.sender.kind !== "human" ||
+        frame.sender.owner !== opts.ownerAccount ||
+        frame.reply_to !== frame.decision_response.request_seq ||
+        question.sender.name !== opts.frontName ||
+        question.sender.owner !== opts.ownerAccount ||
+        question.decision_request === undefined ||
+        question.reply_to === null ||
+        question.seq >= frame.seq
+      ) {
+        throw new WakeBlockedError("owner decision question lineage could not be verified", false);
+      }
+      return resolveFrame(await readExact(question.reply_to), seen, depth + 1);
+    }
+    return { seq: frame.seq };
+  };
+  const continuationOrigin = async (
+    frame: MsgFrame,
+    delivery: DirectedDelivery | null,
+  ): Promise<ResolvedOrigin | null> => {
+    if (frame.sender.name === opts.workerName) return resolveFrame(frame, new Set(), 0);
+    if (frame.decision_response === undefined) return null;
+    if (
+      delivery?.cause !== "owner_answer" ||
+      delivery.work_id === null ||
+      delivery.continuation_ref === null ||
+      frame.decision_response.work_id !== delivery.work_id ||
+      frame.decision_response.continuation_ref !== delivery.continuation_ref
+    ) {
+      throw new WakeBlockedError("owner answer delivery lineage could not be verified", false);
+    }
+    return resolveFrame(frame, new Set(), 0);
+  };
+  return async (frame, text, _marker, delivery) => {
+    const action = parseManagedFrontAction(text);
+    const origin = await continuationOrigin(frame, delivery);
+    const replyTo = origin?.seq ?? frame.seq;
+    const completionSummarySeq = origin === null ? undefined : frame.seq;
+    if (action.action === "worker_dispatch" || action.action === "worker_feedback") {
+      const lineage = action.action === "worker_feedback" && origin?.workerReportSeq !== undefined
+        ? ` (report #${origin.workerReportSeq}, dispatch #${origin.workerDispatchSeq}, origin #${origin.seq})`
+        : "";
+      return {
+        replyTo,
+        text: `${action.action === "worker_feedback" ? "已要求补充/返工" : "已派工"} ${opts.workerName}${lineage}：${action.instruction}`,
+        mentions: [opts.workerName],
+        ...(completionSummarySeq === undefined ? {} : { completionSummarySeq }),
+      };
+    }
+    if (action.action === "owner_decision") {
+      if (delivery === null || delivery.work_id === null || delivery.continuation_ref === null) {
+        throw new WakeBlockedError("managed owner decision requires an active durable delivery", false);
+      }
+      const decisionRequest: SendDecisionRequest = action.options === undefined
+        ? { kind: "approval", prompt: action.prompt }
+        : { kind: "choice", prompt: action.prompt, options: action.options };
+      return {
+        replyTo,
+        text: action.prompt,
+        decisionRequest,
+        expectedDecisionLineage: {
+          delivery_id: delivery.id,
+          work_id: delivery.work_id,
+          continuation_ref: delivery.continuation_ref,
+        },
+        expectedDecisionResponderOwner: opts.ownerAccount,
+      };
+    }
+    if (action.action === "channel_reply") {
+      return {
+        replyTo,
+        text: action.body,
+        ...(completionSummarySeq === undefined ? {} : { completionSummarySeq }),
+      };
+    }
+    return {
+      replyTo,
+      text: `暂时阻塞：${action.reason}`,
+      completionSummarySeq: frame.seq,
+      completionState: "blocked",
+      blockedReason: action.reason,
+    };
+  };
 }
 
 export function projectAgentReadyNote(profile: ProjectAgentProfile, channel: string, prepared: PreparedProfileWorkspace): string {
@@ -2357,7 +2964,10 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
     if (lifecycleSignal.aborted) throw lifecycleSignal.reason;
     const channel = invite.channel_slug;
     if (running.has(channel) || terminalChannels.has(channel)) return;
-    const child: ProjectAgentChannelRuntime = await ensureChannelRuntime(
+    if (profile.runner === "shell") {
+      throw new Error("project agent runner shell is not supported by party serve --profile");
+    }
+    const front: ProjectAgentChannelRuntime = await ensureChannelRuntime(
       opts.server,
       runtime.token,
       channel,
@@ -2366,144 +2976,237 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       projectAgentChildName(profile.handle, channel),
       lifecycleSignal,
     );
+    const worker: ProjectAgentChannelRuntime = await ensureChannelRuntime(
+      opts.server,
+      runtime.token,
+      channel,
+      profile.owner_account,
+      profile.handle,
+      projectAgentWorkerName(profile.handle, channel),
+      lifecycleSignal,
+    );
     if (lifecycleSignal.aborted) throw lifecycleSignal.reason;
-    if (child.owner !== profile.owner_account || child.channel_scope !== channel) {
+    for (const principal of [front, worker]) {
+      if (principal.owner === profile.owner_account && principal.channel_scope === channel) continue;
       throw new Error(
-        `profile child identity mismatch for #${channel}: owner=${child.owner} scope=${child.channel_scope}`,
+        `profile child identity mismatch for #${channel}: owner=${principal.owner} scope=${principal.channel_scope}`,
       );
     }
+    if (front.name === worker.name) throw new Error(`profile front and worker identities collide in #${channel}`);
     // The authoritative child principal/channel scope must exist before choosing any session path.
     // Same-named profiles or children on another server therefore cannot share continuation files.
-    const prepared = await prepareProfileChannelWorkspace({
+    const frontPrepared = await prepareProfileChannelWorkspace({
       server: opts.server,
       profile,
       channel,
-      child,
+      child: front,
+      runGit: opts.runGit,
+      signal: lifecycleSignal,
+    });
+    const workerPrepared = await prepareProfileChannelWorkspace({
+      server: opts.server,
+      profile,
+      channel,
+      child: worker,
       runGit: opts.runGit,
       signal: lifecycleSignal,
     });
     if (lifecycleSignal.aborted) throw lifecycleSignal.reason;
-    const ctx = profileContext(profile, prepared);
-    // The resident profile daemon is authenticated as the owner/runtime token,
-    // while each invited channel has a distinct least-privilege child token.
-    // Persist the child identity under that channel's private runner state and
-    // pin the returned path into only its model process. Nested party CLI calls
-    // must never fall back to the daemon owner's AGENTPARTY_CONFIG/global config.
-    const childConfigPath = writeWorkspaceConfigOnly(
-      { server: opts.server, token: child.token },
-      // `shared` profiles intentionally reuse one model cwd across channels.  The
-      // runner state directory is channel-scoped, so key the nested CLI identity
-      // there instead of letting two children overwrite the same workspace config.
-      prepared.runnerWorkdir,
-    );
-    const serveOpts: ServeOptions = {
-      ...profileChildServeOptions({
-        server: opts.server,
-        token: child.token,
-        channel,
-        mentionsOnly: opts.mentionsOnly,
-        skipBacklog: opts.skipBacklog,
-      }),
-      server: opts.server,
-      token: child.token,
-      channel,
-      since: loadCursor(channel),
-      stuck: loadStuck(channel),
-      onStuck: (st) => (st === null ? clearStuck(channel) : saveStuck(channel, st)),
-      sinceRev: loadRevCursor(channel),
-      cmd: "",
-      mentionsOnly: opts.mentionsOnly,
-      onCursor: (c) => saveCursor(channel, c),
-      onRevCursor: (r) => saveRevCursor(channel, r),
-      projectAgent: ctx,
-      availableUpgrade: currentAvailableUpgrade,
-      refreshAvailableUpgrade: sharedRefreshAvailableUpgrade,
-      upgradeProbeIntervalMs,
-      runnerTimeoutMs: opts.runnerTimeoutMs,
-      signal: lifecycleSignal,
-      advertise: async (signal) => {
-        const note = projectAgentReadyNote(profile, channel, prepared);
-        await post(opts.server, child.token, channel, {
-          kind: "status",
-          state: "waiting",
-          role: "host",
-          note,
-          mentions: [],
-          residency: "supervised",
-          wake: { kind: "serve" },
-          context: {
-            workspace_label: `${profile.owner_account}/${profile.handle}`,
-            worktree_label: `${child.name}:${profile.worktree_strategy}:${profile.base_branch}`,
-          },
-        }, signal);
-        await post(opts.server, child.token, channel, {
-          kind: "message",
-          body: `${profile.name || profile.handle} joined #${channel} as front agent ${child.name}; workers should spawn under team ${profile.handle}. ${note}`,
-          mentions: [],
-          reply_to: null,
-        }, signal);
-      },
-      fetchCharter: (signal) => fetchChannelCharter(opts.server, child.token, channel, signal),
-      builtinRunner: profile.runner === "codex" || profile.runner === "claude"
-        ? {
-            server: opts.server,
-            token: child.token,
-            channel,
-            harness: profile.runner,
-            workdir: prepared.runnerWorkdir,
-            cwd: prepared.channelWorkdir,
-            agentpartyConfigPath: childConfigPath,
-          }
-        : undefined,
-      sdkRunner: profile.runner === "codex-sdk"
-        ? {
-            server: opts.server,
-            token: child.token,
-            channel,
-            workdir: prepared.runnerWorkdir,
-            cwd: prepared.channelWorkdir,
-            agentpartyConfigPath: childConfigPath,
-          }
-        : undefined,
+    const frontContext = profileContext(profile, frontPrepared, {
+      role: "front",
+      frontAgent: front.name,
+      workers: [worker.name],
+    });
+    const workerContext = profileContext(profile, workerPrepared, {
+      role: "worker",
+      frontAgent: front.name,
+      workers: [],
+    });
+    // Managed child tokens are supervisor capabilities and stay memory-only.  Cursor/debt helpers
+    // need only a stable namespace key; writing a real AgentParty config would let the model find
+    // and reuse the front/worker bearer token even though its inherited env points at a denied home.
+    const frontStateKey = join(frontPrepared.runnerWorkdir, "supervisor-front.state-key");
+    const workerStateKey = join(workerPrepared.runnerWorkdir, "supervisor-worker.state-key");
+    const channelController = new AbortController();
+    const channelSignal = channelController.signal;
+    const abortChannel = () => {
+      if (!channelSignal.aborted) channelController.abort(lifecycleSignal.reason ?? new ServeShutdownError("SIGTERM"));
     };
-    if (profile.runner === "shell") {
-      throw new Error("project agent runner shell is not supported by party serve --profile");
-    }
-    let firstChildAttach = true;
-    const promise = superviseServe({
-      runOnce: () => {
-        const skipBacklog = firstChildAttach ? serveOpts.skipBacklog : false;
-        return runChannelServe({
-          ...serveOpts,
-          since: loadCursor(channel),
-          stuck: loadStuck(channel),
-          sinceRev: loadRevCursor(channel),
-          skipBacklog,
-          // A failed TCP/WS attempt before welcome is still the initial attachment.  Keep the
-          // user's backlog policy until the child proves that it consumed a welcome frame.
-          onWelcome: () => { firstChildAttach = false; },
-        });
-      },
-      maxRestarts: opts.once ? 0 : undefined,
-      sleep: abortableSleep,
-      onLifecycle: (line) => out(`profile child #${channel}: ${line}`),
-    })
-      .then((code) => {
-        if (isTerminalServeExit(code)) {
-          terminalChannels.add(channel);
-          out(`profile child #${channel} stopped terminally with code=${code}`);
-        }
-        return code;
-      })
-      .catch((error) => {
+    lifecycleSignal.addEventListener("abort", abortChannel, { once: true });
+    if (lifecycleSignal.aborted) abortChannel();
+    const channelSleep = injectedSleep === undefined
+      ? (ms: number) => delayWithAbort(ms, channelSignal)
+      : (ms: number) => awaitWithAbort(injectedSleep(ms), channelSignal);
+
+    const buildLane = (
+      role: ServeExecutionRole,
+      principal: ProjectAgentChannelRuntime,
+      prepared: PreparedProfileWorkspace,
+      stateKey: string,
+      context: ProjectAgentRunContext,
+    ): ServeOptions => {
+      const resultRoute = role === "front"
+        ? createManagedFrontResultRoute({
+            server: opts.server,
+            token: principal.token,
+            channel,
+            frontName: front.name,
+            workerName: worker.name,
+            ownerAccount: profile.owner_account,
+            fetch: opts.fetchMessages,
+          })
+        : managedWorkerResultRoute();
+      return {
+        ...profileChildServeOptions({
+          server: opts.server,
+          token: principal.token,
+          channel,
+          mentionsOnly: role === "worker" ? true : opts.mentionsOnly,
+          skipBacklog: opts.skipBacklog,
+        }),
+        server: opts.server,
+        token: principal.token,
+        channel,
+        since: loadCursorForConfig(channel, stateKey),
+        stuck: loadStuckForConfig(channel, stateKey),
+        onStuck: (stuck) => stuck === null
+          ? clearStuckForConfig(channel, stateKey)
+          : saveStuckForConfig(channel, stuck, stateKey),
+        sinceRev: loadRevCursorForConfig(channel, stateKey),
+        cmd: "",
+        mentionsOnly: role === "worker" ? true : opts.mentionsOnly,
+        onCursor: (cursor) => saveCursorForConfig(channel, cursor, stateKey),
+        onRevCursor: (revCursor) => saveRevCursorForConfig(channel, revCursor, stateKey),
+        projectAgent: context,
+        availableUpgrade: currentAvailableUpgrade,
+        refreshAvailableUpgrade: sharedRefreshAvailableUpgrade,
+        upgradeProbeIntervalMs,
+        runnerTimeoutMs: role === "front"
+          ? Math.min(opts.runnerTimeoutMs ?? 60_000, 60_000)
+          : opts.runnerTimeoutMs,
+        signal: channelSignal,
+        advertise: async (signal) => {
+          if (role === "front") {
+            const note = projectAgentReadyNote(profile, channel, prepared);
+            await post(opts.server, principal.token, channel, {
+              kind: "status",
+              state: "waiting",
+              role: "host",
+              note: `${note} worker=${worker.name}`,
+              mentions: [],
+              residency: "supervised",
+              wake: { kind: "serve" },
+              context: {
+                workspace_label: `${profile.owner_account}/${profile.handle}`,
+                worktree_label: `${principal.name}:${profile.worktree_strategy}:${profile.base_branch}`,
+              },
+            }, signal);
+            await post(opts.server, principal.token, channel, {
+              kind: "message",
+              body: `${profile.name || profile.handle} joined #${channel}: front=${front.name}, execution worker=${worker.name}.`,
+              mentions: [],
+              reply_to: null,
+            }, signal);
+            return;
+          }
+          await post(opts.server, principal.token, channel, {
+            kind: "status",
+            state: "waiting",
+            role: "worker",
+            note: `execution worker ready; reports to ${front.name}`,
+            mentions: [],
+            residency: "supervised",
+            wake: { kind: "serve" },
+            context: {
+              workspace_label: `${profile.owner_account}/${profile.handle}`,
+              worktree_label: `${principal.name}:${profile.worktree_strategy}:${profile.base_branch}`,
+            },
+          }, signal);
+        },
+        fetchCharter: (signal) => fetchChannelCharter(opts.server, principal.token, channel, signal),
+        builtinRunner: profile.runner === "codex" || profile.runner === "claude"
+          ? {
+              server: opts.server,
+              token: principal.token,
+              channel,
+              harness: profile.runner,
+              workdir: prepared.runnerWorkdir,
+              cwd: prepared.channelWorkdir,
+              isolateModelPartyAccess: true,
+              sandbox: role === "front" ? "read-only" : "workspace-write",
+              resultRoute,
+              outputSchema: role === "front" ? MANAGED_FRONT_OUTPUT_SCHEMA : undefined,
+              attachmentRoot: role === "front" ? null : prepared.channelWorkdir,
+            }
+          : undefined,
+        sdkRunner: profile.runner === "codex-sdk"
+          ? {
+              server: opts.server,
+              token: principal.token,
+              channel,
+              workdir: prepared.runnerWorkdir,
+              cwd: prepared.channelWorkdir,
+              isolateModelPartyAccess: true,
+              sandbox: role === "front" ? "read_only" : "full_access",
+              resultRoute,
+              outputSchema: role === "front" ? MANAGED_FRONT_OUTPUT_SCHEMA : undefined,
+              attachmentRoot: role === "front" ? null : prepared.channelWorkdir,
+            }
+          : undefined,
+      };
+    };
+
+    const frontServeOpts = buildLane("front", front, frontPrepared, frontStateKey, frontContext);
+    const workerServeOpts = buildLane("worker", worker, workerPrepared, workerStateKey, workerContext);
+    const startLane = (label: ServeExecutionRole, lane: ServeOptions, stateKey: string): Promise<number> => {
+      let firstAttach = true;
+      return superviseServe({
+        runOnce: () => {
+          const skipBacklog = firstAttach ? lane.skipBacklog : false;
+          return runChannelServe({
+            ...lane,
+            since: loadCursorForConfig(channel, stateKey),
+            stuck: loadStuckForConfig(channel, stateKey),
+            sinceRev: loadRevCursorForConfig(channel, stateKey),
+            skipBacklog,
+            onWelcome: () => { firstAttach = false; },
+          });
+        },
+        maxRestarts: opts.once ? 0 : undefined,
+        // A per-lane wake circuit is an execution fault, not channel/profile revocation. Restart
+        // that lane after backoff while its sibling (especially the front control plane) stays up.
+        isTerminal: (code) => isTerminalServeExit(code) && code !== EXIT_WAKE_ABANDON_CIRCUIT,
+        sleep: channelSleep,
+        onLifecycle: (line) => out(`profile ${label} #${channel}: ${line}`),
+      }).catch((error) => {
         if (error instanceof ServeShutdownError) return error.exitCode;
-        // Never leave a rejected child promise unobserved; the invite poll may attach it again.
-        out(`profile child #${channel} crashed: ${errText(error)} (will retry next poll)`);
+        out(`profile ${label} #${channel} crashed: ${errText(error)}`);
         return EXIT_STREAM_ENDED;
+      });
+    };
+    // Start the execution lane first.  A front dispatch that races its first websocket is still
+    // safe because the directed delivery remains queued until this worker claims it.
+    const workerPromise = startLane("worker", workerServeOpts, workerStateKey);
+    const frontPromise = startLane("front", frontServeOpts, frontStateKey);
+    const promise = Promise.race([
+      frontPromise.then((code) => ({ lane: "front" as const, code })),
+      workerPromise.then((code) => ({ lane: "worker" as const, code })),
+    ])
+      .then(async (first) => {
+        if (!channelSignal.aborted) channelController.abort(new ServeShutdownError("SIGTERM"));
+        await Promise.allSettled([frontPromise, workerPromise]);
+        if (isTerminalServeExit(first.code)) {
+          terminalChannels.add(channel);
+          out(`profile ${first.lane} #${channel} stopped terminally with code=${first.code}`);
+        }
+        return first.code;
       })
-      .finally(() => running.delete(channel));
+      .finally(() => {
+        lifecycleSignal.removeEventListener("abort", abortChannel);
+        running.delete(channel);
+      });
     running.set(channel, promise);
-    out(`attached project agent ${profile.owner_account}/${profile.handle} to #${channel}`);
+    out(`attached project agent ${profile.owner_account}/${profile.handle} to #${channel} (front=${front.name}, worker=${worker.name})`);
   };
 
   const startInvite = (invite: ChannelProjectAgentInvite): Promise<void> => {
@@ -3164,6 +3867,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
         let preflightFailed = false;
         for (;;) {
           try {
+            // A managed execution identity is not a generally addressable agent. Reject direct
+            // member mentions and stale/same-name principals before downloads, `running`, or model.
+            assertManagedWorkerWake(frame, directedDelivery, o.projectAgent ?? null, self);
             wakeAttachments = await awaitWithAbort(materializeWakeAttachments(
               o.server,
               o.token,
@@ -3625,6 +4331,8 @@ export interface ServeSupervisorOptions {
   maxDelayMs?: number;
   /** 测试/嵌入方的上限；CLI 默认无限自愈，直到终局退出。 */
   maxRestarts?: number;
+  /** Override terminal policy for composed lanes (managed front/worker keep healing after a circuit). */
+  isTerminal?: (code: number) => boolean;
   onLifecycle?: (line: string) => void;
 }
 
@@ -3663,7 +4371,7 @@ export async function superviseServe(opts: ServeSupervisorOptions): Promise<numb
       error = sanitizeBlockedError(cause instanceof Error ? cause.message : String(cause));
     }
     reportServeLifecycle(opts, `event=exit attempt=${restarts + 1} code=${code}${error ? ` error=${JSON.stringify(error)}` : ""}`);
-    if (isTerminalServeExit(code)) return code;
+    if ((opts.isTerminal ?? isTerminalServeExit)(code)) return code;
     if (opts.maxRestarts !== undefined && restarts >= opts.maxRestarts) return code;
     const waitMs = Math.min(baseDelayMs * 2 ** restarts, maxDelayMs);
     restarts += 1;

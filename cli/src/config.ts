@@ -686,3 +686,67 @@ export function saveRevCursor(channel: string, revCursor: number, cwd?: string):
     cwd,
   );
 }
+
+// Resident profile daemons run several identities concurrently in one process. They cannot switch
+// process.env.AGENTPARTY_CONFIG per lane, and cwd-based state still obeys that process-wide override.
+// These helpers pin cursor/debt state to a caller-owned lane namespace key. The key need not contain
+// a readable config (managed profiles intentionally keep child bearer tokens memory-only).
+function configChannelCursor(config: string, channel: string): ChannelCursor {
+  return channelCursor(readStateFile(configScopedStatePath(config)), channel);
+}
+
+function updateConfigChannelCursor(
+  config: string,
+  channel: string,
+  update: (current: ChannelCursor) => ChannelCursor | null,
+): void {
+  const path = configScopedStatePath(config);
+  withStateLock(path, () => {
+    const state = readStateFile(path) ?? { channel, cursor: 0 };
+    const next = update(channelCursor(state, channel));
+    if (next === null) return;
+    const merged: WorkspaceState = {
+      ...state,
+      cursors: { ...(state.cursors ?? {}), [channel]: next },
+    };
+    if (state.channel === channel) {
+      merged.cursor = next.cursor;
+      if (next.rev_cursor === undefined) delete merged.rev_cursor;
+      else merged.rev_cursor = next.rev_cursor;
+    }
+    atomicWriteJson(path, merged);
+  });
+}
+
+export function loadCursorForConfig(channel: string, config: string): number {
+  return configChannelCursor(config, channel).cursor;
+}
+
+export function saveCursorForConfig(channel: string, cursor: number, config: string): void {
+  updateConfigChannelCursor(config, channel, (current) =>
+    cursor <= current.cursor ? null : { ...current, cursor });
+}
+
+export function loadRevCursorForConfig(channel: string, config: string): number {
+  return configChannelCursor(config, channel).rev_cursor ?? 0;
+}
+
+export function saveRevCursorForConfig(channel: string, revCursor: number, config: string): void {
+  updateConfigChannelCursor(config, channel, (current) =>
+    revCursor <= (current.rev_cursor ?? 0) ? null : { ...current, rev_cursor: revCursor });
+}
+
+export function loadStuckForConfig(channel: string, config: string): StuckWake | null {
+  return configChannelCursor(config, channel).stuck ?? null;
+}
+
+export function saveStuckForConfig(channel: string, stuck: StuckWake, config: string): void {
+  updateConfigChannelCursor(config, channel, (current) => ({ ...current, stuck }));
+}
+
+export function clearStuckForConfig(channel: string, config: string): void {
+  updateConfigChannelCursor(config, channel, (current) => {
+    const { stuck: _removed, ...rest } = current;
+    return rest;
+  });
+}

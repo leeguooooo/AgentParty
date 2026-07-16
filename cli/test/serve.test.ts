@@ -1,14 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { EXIT_ARCHIVED, type Attachment, type MsgFrame } from "@agentparty/shared";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { EXIT_ARCHIVED, type Attachment, type DirectedDelivery, type MsgFrame } from "@agentparty/shared";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import {
   createBuiltinRunner,
+  createManagedFrontResultRoute,
   createSdkRunner,
   EXIT_SIGNAL_TERM,
+  MANAGED_FRONT_OUTPUT_SCHEMA,
+  parseManagedFrontAction,
   projectAgentCleanupCommand,
   projectAgentChildName,
+  projectAgentWorkerName,
   projectAgentReadyNote,
   pendingWakeDepth,
   prepareProfileChannelWorkspace,
@@ -79,8 +83,55 @@ function runnerCtx() {
   return { cmd: "", channel: "dev", self: "me", contextDir: tempDir("ap-ctx-"), recent: [] as MsgFrame[] };
 }
 
+function managedAction(
+  action: "channel_reply" | "worker_dispatch" | "worker_feedback" | "owner_decision" | "blocked",
+  fields: Partial<Record<"body" | "instruction" | "prompt" | "options" | "reason", unknown>>,
+): string {
+  return JSON.stringify({
+    action,
+    body: null,
+    instruction: null,
+    prompt: null,
+    options: null,
+    reason: null,
+    ...fields,
+  });
+}
+
+function directedDelivery(messageSeq: number, cause: DirectedDelivery["cause"] = "mention"): DirectedDelivery {
+  return {
+    id: `delivery-${messageSeq}`,
+    message_seq: messageSeq,
+    target_name: "front",
+    cause,
+    state: "claimed",
+    attempt: 1,
+    lease_until: Date.now() + 60_000,
+    work_id: "work-1",
+    continuation_ref: "continuation-1",
+    reply_seq: null,
+    last_error: null,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+  };
+}
+
 function uuid(n: number): string {
   return `019f35d9-0000-7000-8000-00000000000${n}`;
+}
+
+function allFileText(root: string): string {
+  if (!existsSync(root)) return "";
+  const chunks: string[] = [];
+  const visit = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile()) chunks.push(readFileSync(path, "utf8"));
+    }
+  };
+  visit(root);
+  return chunks.join("\n");
 }
 
 function postRecorder() {
@@ -497,10 +548,18 @@ describe("runServe", () => {
         recent_truncated: true,
       });
       expect(ctx.protocol_reminder).toContain("party history");
-      expect(ctx.protocol_reminder).toContain("trellis");
-      expect(ctx.protocol_reminder).toContain("不要触发项目自带的其它频道/工作流机制");
-      expect(ctx.protocol_reminder).toContain("禁止在 runner 子进程里调用 AskUserQuestion");
-      expect(ctx.protocol_reminder).toContain("让 serve 立即恢复监听");
+      expect(ctx.protocol_reminder).toContain("front agent");
+      expect(ctx.protocol_reminder).toContain("AskUserQuestion");
+      expect(ctx.protocol_reminder).toContain("兼容模式");
+      expect(ctx.protocol_reminder).toContain("必须交给 harness 的 subagent/worker");
+      expect(ctx.protocol_reminder).toContain("明确报 blocked");
+      expect(ctx.protocol_reminder).not.toContain("不要用 tmux/后台守护/子代理去接管这次唤醒");
+      expect(ctx.operating_contract).toMatchObject({
+        role: "front_agent",
+        enforcement: "advisory",
+        direct_actions: expect.arrayContaining(["short_channel_conversation", "single_read_only_check_needed_to_route_work"]),
+        delegate_actions: expect.arrayContaining(["code_changes", "multi_step_investigation"]),
+      });
     } finally {
       unlinkSync(path);
     }
@@ -778,6 +837,146 @@ describe("runServe", () => {
   });
 });
 
+describe("managed front protocol", () => {
+  test("accepts only the fixed six-field action envelope", () => {
+    expect(parseManagedFrontAction(managedAction("channel_reply", { body: "收到" }))).toEqual({
+      action: "channel_reply",
+      body: "收到",
+    });
+    expect(parseManagedFrontAction(managedAction("worker_dispatch", { instruction: "实现并跑测试" }))).toEqual({
+      action: "worker_dispatch",
+      instruction: "实现并跑测试",
+    });
+    expect(parseManagedFrontAction(managedAction("owner_decision", { prompt: "是否发布？", options: [] }))).toEqual({
+      action: "owner_decision",
+      prompt: "是否发布？",
+    });
+    expect(parseManagedFrontAction(managedAction("owner_decision", { prompt: "选方案", options: ["A", "B"] }))).toEqual({
+      action: "owner_decision",
+      prompt: "选方案",
+      options: ["A", "B"],
+    });
+    expect(() => parseManagedFrontAction(JSON.stringify({ action: "channel_reply", body: "missing envelope" })))
+      .toThrow(/exactly action, body, instruction, prompt, options, reason/);
+    expect(() => parseManagedFrontAction(managedAction("channel_reply", { body: "ok", instruction: "hidden work" })))
+      .toThrow(/unused instruction/);
+    expect(() => parseManagedFrontAction(managedAction("owner_decision", { prompt: "bad choice", options: ["only"] })))
+      .toThrow(/at least 2 options/);
+    expect(MANAGED_FRONT_OUTPUT_SCHEMA).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["action", "body", "instruction", "prompt", "options", "reason"],
+    });
+    expect(MANAGED_FRONT_OUTPUT_SCHEMA).not.toHaveProperty("oneOf");
+  });
+
+  test("resolves worker and nested owner-decision replies back to the original channel message", async () => {
+    const owner = "fan@example.com";
+    const original = msgFrame(10, "please fix", {
+      sender: { name: "leo", kind: "human", owner },
+    }) as unknown as MsgFrame;
+    const dispatch = msgFrame(11, "dispatch", {
+      sender: { name: "front", kind: "agent", owner },
+      mentions: ["worker"],
+      reply_to: 10,
+    }) as unknown as MsgFrame;
+    const report = msgFrame(12, "report", {
+      sender: { name: "worker", kind: "agent", owner },
+      reply_to: 11,
+    }) as unknown as MsgFrame;
+    const question = msgFrame(13, "approve?", {
+      sender: { name: "front", kind: "agent", owner },
+      reply_to: 12,
+      decision_request: { kind: "approval", prompt: "approve?", options: ["approve", "reject"] },
+    }) as unknown as MsgFrame;
+    const answer = msgFrame(14, "approved", {
+      sender: { name: "leo", kind: "human", owner },
+      reply_to: 13,
+      decision_response: {
+        request_seq: 13,
+        chosen_index: 0,
+        chosen_option: "approve",
+        delivery_id: "delivery-12",
+        origin_seq: 12,
+        origin_channel: "dev",
+        work_id: "work-1",
+        continuation_ref: "continuation-1",
+      },
+    }) as unknown as MsgFrame;
+    const nestedQuestion = msgFrame(15, "confirm again", {
+      sender: { name: "front", kind: "agent", owner },
+      reply_to: 14,
+      decision_request: { kind: "approval", prompt: "confirm again", options: ["approve", "reject"] },
+    }) as unknown as MsgFrame;
+    const nestedAnswer = msgFrame(16, "confirmed", {
+      sender: { name: "leo", kind: "human", owner },
+      reply_to: 15,
+      decision_response: {
+        request_seq: 15,
+        chosen_index: 0,
+        chosen_option: "approve",
+        delivery_id: "delivery-14",
+        origin_seq: 14,
+        origin_channel: "dev",
+        work_id: "work-1",
+        continuation_ref: "continuation-1",
+      },
+    }) as unknown as MsgFrame;
+    const history = [original, dispatch, report, question, answer, nestedQuestion, nestedAnswer];
+    const route = createManagedFrontResultRoute({
+      server: "http://agentparty.test",
+      token: "ap_front",
+      channel: "dev",
+      frontName: "front",
+      workerName: "worker",
+      ownerAccount: owner,
+      fetch: async (_server, _token, _channel, since, limit) =>
+        history.filter((message) => message.seq > (since ?? 0)).slice(0, limit),
+    });
+
+    await expect(route(report, managedAction("channel_reply", { body: "完成" }), null, directedDelivery(12, "reply")))
+      .resolves.toMatchObject({ replyTo: 10, text: "完成", completionSummarySeq: 12 });
+    await expect(route(report, managedAction("worker_feedback", { instruction: "补测试证据" }), null, directedDelivery(12, "reply")))
+      .resolves.toMatchObject({
+        replyTo: 10,
+        mentions: ["worker"],
+        completionSummarySeq: 12,
+        text: expect.stringContaining("report #12, dispatch #11, origin #10"),
+      });
+    await expect(route(original, managedAction("owner_decision", { prompt: "是否发布？", options: [] }), null, directedDelivery(10)))
+      .resolves.toMatchObject({
+        replyTo: 10,
+        decisionRequest: { kind: "approval", prompt: "是否发布？" },
+        expectedDecisionResponderOwner: owner,
+      });
+    await expect(route(answer, managedAction("channel_reply", { body: "已批准并完成" }), null, directedDelivery(14, "owner_answer")))
+      .resolves.toMatchObject({ replyTo: 10, completionSummarySeq: 14 });
+    await expect(route(nestedAnswer, managedAction("channel_reply", { body: "最终完成" }), null, directedDelivery(16, "owner_answer")))
+      .resolves.toMatchObject({ replyTo: 10, completionSummarySeq: 16 });
+    await expect(route(original, managedAction("blocked", { reason: "缺少生产权限" }), null, directedDelivery(10)))
+      .resolves.toMatchObject({
+        replyTo: 10,
+        completionSummarySeq: 10,
+        completionState: "blocked",
+      blockedReason: "缺少生产权限",
+    });
+    const wrongOwnerAnswer = {
+      ...answer,
+      sender: { name: "not-owner", kind: "human" as const, owner: "other@example.com" },
+    };
+    await expect(route(wrongOwnerAnswer, managedAction("channel_reply", { body: "越权" }), null, directedDelivery(14, "owner_answer")))
+      .rejects.toThrow(/owner decision question lineage/);
+    for (const invalidAnswer of [
+      { ...answer, sender: { name: "owner-agent", kind: "agent" as const, owner } },
+      { ...answer, sender: { name: "owner-without-account", kind: "human" as const } },
+      { ...answer, reply_to: 12 },
+    ]) {
+      await expect(route(invalidAnswer, managedAction("channel_reply", { body: "越权" }), null, directedDelivery(14, "owner_answer")))
+        .rejects.toThrow(/owner decision question lineage/);
+    }
+  });
+});
+
 describe("builtin runner", () => {
   test("codex cold-starts, persists the session id, then resumes it on the next wake", async () => {
     const { post } = postRecorder();
@@ -815,7 +1014,9 @@ describe("builtin runner", () => {
       expect.objectContaining({ harness: "codex", session_id: uuid(1) }),
     ]);
     expect(calls[0]!.slice(0, 2)).toEqual(["codex", "exec"]);
-    expect(calls[1]!.slice(0, 4)).toEqual(["codex", "exec", "resume", uuid(1)]);
+    expect(calls[1]!.slice(0, 2)).toEqual(["codex", "exec"]);
+    expect(calls[1]!.slice(calls[1]!.indexOf("resume"), calls[1]!.indexOf("resume") + 2)).toEqual(["resume", uuid(1)]);
+    expect(calls[1]!.indexOf("--sandbox")).toBeLessThan(calls[1]!.indexOf("resume"));
     const log = readFileSync(join(workdir, "serve-runner.log"), "utf8");
     expect(log).toContain("seq=1 sid=019f35d9");
     expect(log).toContain("seq=2 sid=019f35d9");
@@ -860,6 +1061,93 @@ describe("builtin runner", () => {
     expect(msg.body).not.toBe(bytes);
     expect(msg.attachments).toHaveLength(1);
     expect(msg.attachments![0]!.filename).toBe("delivery.diff");
+  });
+
+  test("managed front output cannot activate a host-file [attach] marker", async () => {
+    const { posts, post } = postRecorder();
+    const { uploads, upload } = uploadRecorder();
+    const workdir = tempDir();
+    const secret = join(tempDir(), "host-secret.txt");
+    writeFileSync(secret, "must never leave the host");
+    const runProcess: RunnerProcess = async (args) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, managedAction("channel_reply", { body: `[attach:${secret}]` }));
+      return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
+    };
+    const route = createManagedFrontResultRoute({
+      server: "http://agentparty.test",
+      token: "ap_front",
+      channel: "dev",
+      frontName: "front",
+      workerName: "worker",
+      ownerAccount: "owner@example.com",
+    });
+
+    await expect(createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_front",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      runProcess,
+      post,
+      uploadAttachment: upload,
+      resultRoute: route,
+      attachmentRoot: null,
+    })(triggerFrame(42), runnerCtx())).rejects.toThrow("managed front host-file attachments are disabled");
+
+    expect(uploads).toHaveLength(0);
+    expect(posts.some((entry) => (entry.body as { kind?: string }).kind === "message")).toBe(false);
+  });
+
+  test("managed worker attachments stay inside the real workspace and reject symlink escape", async () => {
+    const { posts, post } = postRecorder();
+    const { uploads, upload } = uploadRecorder();
+    const workspace = tempDir("ap-worker-workspace-");
+    const allowed = join(workspace, "result.txt");
+    writeFileSync(allowed, "allowed artifact");
+    const route = (frame: MsgFrame, text: string) => ({ replyTo: frame.seq, text });
+    const allowedWorkdir = tempDir();
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_worker",
+      channel: "dev",
+      harness: "codex",
+      workdir: allowedWorkdir,
+      runProcess: async (args) => {
+        writeFileSync(args[args.indexOf("-o") + 1]!, `[attach:${allowed}]`);
+        return { code: 0, stdout: `session id: ${uuid(1)}\n`, stderr: "" };
+      },
+      post,
+      uploadAttachment: upload,
+      resultRoute: route,
+      attachmentRoot: workspace,
+    })(triggerFrame(43), runnerCtx());
+    expect(uploads).toHaveLength(1);
+    expect(Buffer.from(uploads[0]!.bytes).toString("utf8")).toBe("allowed artifact");
+
+    const outside = join(tempDir("ap-worker-outside-"), "secret.txt");
+    writeFileSync(outside, "outside secret");
+    const escape = join(workspace, "escape.txt");
+    symlinkSync(outside, escape);
+    const escapeWorkdir = tempDir();
+    await expect(createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_worker",
+      channel: "dev",
+      harness: "codex",
+      workdir: escapeWorkdir,
+      runProcess: async (args) => {
+        writeFileSync(args[args.indexOf("-o") + 1]!, `[attach:${escape}]`);
+        return { code: 0, stdout: `session id: ${uuid(2)}\n`, stderr: "" };
+      },
+      post,
+      uploadAttachment: upload,
+      resultRoute: route,
+      attachmentRoot: workspace,
+    })(triggerFrame(44), runnerCtx())).rejects.toThrow("runner attachment escapes allowed workspace");
+    expect(uploads).toHaveLength(1);
+    expect(posts.filter((entry) => (entry.body as { kind?: string }).kind === "message")).toHaveLength(1);
   });
 
   test("oversize reply body is uploaded to R2 and referenced as an attachment, never a 413 (#109)", async () => {
@@ -1179,6 +1467,119 @@ describe("builtin runner", () => {
     ]);
   });
 
+  test("managed Codex continues an unattended owner decision in the same session", async () => {
+    const owner = "fan@example.com";
+    const workdir = tempDir();
+    const calls: string[][] = [];
+    const posts: Array<MessagePayload> = [];
+    const post = async (_server: string, _token: string, _channel: string, body: MessagePayload) => {
+      posts.push(body);
+      if (body.kind === "message" && body.decision_request !== undefined) {
+        return {
+          seq: 50,
+          decision_resolution: { state: "auto_resolved" as const, chosen_index: 0, chosen_option: "approve" },
+        };
+      }
+      return { seq: 51 };
+    };
+    const runProcess: RunnerProcess = async (args) => {
+      calls.push(args);
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, calls.length === 1
+        ? managedAction("owner_decision", { prompt: "允许发布？", options: [] })
+        : managedAction("channel_reply", { body: "已自动批准并继续完成" }));
+      return { code: 0, stdout: calls.length === 1 ? `session id: ${uuid(6)}\n` : "", stderr: "" };
+    };
+    const route = createManagedFrontResultRoute({
+      server: "http://agentparty.test",
+      token: "ap_front",
+      channel: "dev",
+      frontName: "front",
+      workerName: "worker",
+      ownerAccount: owner,
+    });
+    const frame = msgFrame(20, "ship it", {
+      sender: { name: "leo", kind: "human", owner },
+      mentions: ["front"],
+    }) as unknown as MsgFrame;
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_front",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      runProcess,
+      post,
+      outputSchema: MANAGED_FRONT_OUTPUT_SCHEMA,
+      resultRoute: route,
+    })(frame, { ...runnerCtx(), self: "front", delivery: directedDelivery(20) });
+
+    expect(calls).toHaveLength(2);
+    expect(calls.every((args) => args.includes("--output-schema"))).toBe(true);
+    expect(calls[1]!.indexOf("--output-schema")).toBeLessThan(calls[1]!.indexOf("resume"));
+    expect(String(calls[1]!.at(-1))).toContain("已自动选择：approve");
+    const messages = posts.filter((body) => body.kind === "message");
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      decision_request: { prompt: "允许发布？" },
+      expected_decision_responder_owner: owner,
+    });
+    expect(messages[1]).toMatchObject({ body: "已自动批准并继续完成", reply_to: 20 });
+  });
+
+  test("managed Claude reads structured_output on cold start and resume", async () => {
+    const owner = "fan@example.com";
+    const workdir = tempDir();
+    const calls: string[][] = [];
+    const { posts, post } = postRecorder();
+    let sessionId = "";
+    const runProcess: RunnerProcess = async (args) => {
+      calls.push(args);
+      if (!args.includes("--resume")) sessionId = args[args.indexOf("--session-id") + 1]!;
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          session_id: sessionId,
+          structured_output: JSON.parse(managedAction("channel_reply", {
+            body: args.includes("--resume") ? "resume structured" : "cold structured",
+          })),
+          result: "must not win",
+        }),
+        stderr: "",
+      };
+    };
+    const route = createManagedFrontResultRoute({
+      server: "http://agentparty.test",
+      token: "ap_front",
+      channel: "dev",
+      frontName: "front",
+      workerName: "worker",
+      ownerAccount: owner,
+    });
+    const run = createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_front",
+      channel: "dev",
+      harness: "claude",
+      workdir,
+      runProcess,
+      post,
+      outputSchema: MANAGED_FRONT_OUTPUT_SCHEMA,
+      resultRoute: route,
+      sandbox: "read-only",
+    });
+
+    await run(msgFrame(30, "first", { sender: { name: "leo", kind: "human", owner } }) as unknown as MsgFrame, runnerCtx());
+    await run(msgFrame(31, "second", { sender: { name: "leo", kind: "human", owner } }) as unknown as MsgFrame, runnerCtx());
+
+    expect(calls).toHaveLength(2);
+    expect(calls.every((args) => args.includes("--json-schema") && args.includes("--output-format"))).toBe(true);
+    expect(calls.every((args) => args.includes("--permission-mode") && args.includes("plan"))).toBe(true);
+    expect(posts.filter((entry) => (entry.body as MessagePayload).kind === "message").map((entry) =>
+      (entry.body as Extract<MessagePayload, { kind: "message" }>).body)).toEqual(["cold structured", "resume structured"]);
+  });
+
   test("builtin claude runner writes wake context inside the runner workdir (#479)", async () => {
     const { post } = postRecorder();
     const workdir = tempDir();
@@ -1442,6 +1843,79 @@ describe("project profile daemon", () => {
     expect(note).not.toContain("x".repeat(241));
   });
 
+  test("front lane stays independently runnable while its execution worker is busy", async () => {
+    const home = tempDir();
+    const oldHome = process.env.AGENTPARTY_HOME;
+    process.env.AGENTPARTY_HOME = home;
+    const profile = {
+      owner_account: "fan@example.com",
+      handle: "parallel-front",
+      name: "Parallel Front",
+      runner: "codex-sdk" as const,
+      repo_url: null,
+      workdir: null,
+      base_branch: "main",
+      worktree_strategy: "shared" as const,
+      rules: null,
+      invitable_by: "anyone" as const,
+      created_at: 1,
+      updated_at: 1,
+    };
+    let workerStarted = false;
+    let workerAborted = false;
+    let frontStarted = false;
+    try {
+      expect(await runProfileServe({
+        server: "http://agentparty.test",
+        humanToken: "acc-human",
+        ownerAccount: profile.owner_account,
+        handle: profile.handle,
+        mentionsOnly: true,
+        once: true,
+        mintRuntime: async () => ({ token: "ap_profile", profile }),
+        listInvites: async () => [{
+          id: 1,
+          channel_slug: "dev",
+          owner_account: profile.owner_account,
+          profile_handle: profile.handle,
+          invited_by: "owner@example.com",
+          invited_at: 1,
+          profile,
+        }],
+        ensureChannelRuntime: async (_server, _token, channel, _owner, _handle, childName) => ({
+          token: `ap_${childName}`,
+          name: childName,
+          role: "agent",
+          owner: profile.owner_account,
+          channel_scope: channel,
+          lineage: { parent_agent: profile.handle, root_agent: profile.handle, team_id: profile.handle, depth: 1, expires_at: null },
+          profile,
+        }),
+        runChannelServe: async (options) => {
+          if (options.projectAgent?.runtime_role === "worker") {
+            workerStarted = true;
+            return await new Promise<number>((resolve) => {
+              const stop = () => {
+                workerAborted = true;
+                resolve(EXIT_SIGNAL_TERM);
+              };
+              options.signal?.addEventListener("abort", stop, { once: true });
+              if (options.signal?.aborted) stop();
+            });
+          }
+          expect(workerStarted).toBe(true);
+          frontStarted = true;
+          return 0;
+        },
+      })).toBe(0);
+    } finally {
+      if (oldHome === undefined) delete process.env.AGENTPARTY_HOME;
+      else process.env.AGENTPARTY_HOME = oldHome;
+    }
+    expect(frontStarted).toBe(true);
+    expect(workerAborted).toBe(true);
+  });
+
   test("one resident daemon fans out to invited channels with scoped child tokens and distinct sessions", async () => {
     const home = tempDir();
     const oldHome = process.env.AGENTPARTY_HOME;
@@ -1497,8 +1971,9 @@ describe("project profile daemon", () => {
           expect(owner).toBe(profile.owner_account);
           expect(handle).toBe(profile.handle);
           channelRuntimeCalls.push({ slug, childName });
+          const lane = childName === projectAgentWorkerName(profile.handle, slug) ? "worker" : "front";
           return {
-            token: `ap_child_${slug}`,
+            token: `ap_${lane}_${slug}`,
             name: childName,
             role: "agent",
             owner,
@@ -1521,23 +1996,30 @@ describe("project profile daemon", () => {
       else process.env.AGENTPARTY_CONFIG = oldConfig;
     }
 
-    expect(served.map((o) => o.channel).sort()).toEqual(["alpha", "beta", "gamma"]);
-    expect(served.map((o) => o.token).sort()).toEqual(["ap_child_alpha", "ap_child_beta", "ap_child_gamma"]);
-    expect(new Set(served.map((o) => o.sdkRunner?.workdir)).size).toBe(3);
-    expect(new Set(served.map((o) => o.sdkRunner?.agentpartyConfigPath)).size).toBe(3);
+    expect(served.map((o) => o.channel).sort()).toEqual(["alpha", "alpha", "beta", "beta", "gamma", "gamma"]);
+    expect(served.map((o) => o.token).sort()).toEqual([
+      "ap_front_alpha", "ap_front_beta", "ap_front_gamma",
+      "ap_worker_alpha", "ap_worker_beta", "ap_worker_gamma",
+    ]);
+    expect(new Set(served.map((o) => o.sdkRunner?.workdir)).size).toBe(6);
+    expect(served.every((o) => o.sdkRunner?.agentpartyConfigPath === undefined)).toBe(true);
+    expect(served.filter((o) => o.projectAgent?.runtime_role === "front")).toHaveLength(3);
+    expect(served.filter((o) => o.projectAgent?.runtime_role === "worker")).toHaveLength(3);
+    expect(served.filter((o) => o.projectAgent?.runtime_role === "front").every((o) =>
+      o.sdkRunner?.outputSchema === MANAGED_FRONT_OUTPUT_SCHEMA &&
+      o.sdkRunner?.sandbox === "read_only" &&
+      o.sdkRunner?.attachmentRoot === null)).toBe(true);
+    expect(served.filter((o) => o.projectAgent?.runtime_role === "worker").every((o) =>
+      o.sdkRunner?.outputSchema === undefined &&
+      o.sdkRunner?.sandbox === "full_access" &&
+      o.sdkRunner?.attachmentRoot === o.projectAgent?.channel_workdir)).toBe(true);
     expect(served.every((o) => o.sdkRunner?.cwd === o.projectAgent?.channel_workdir)).toBe(true);
-    for (const item of served) {
-      const path = item.sdkRunner?.agentpartyConfigPath;
-      expect(path).toBeTruthy();
-      expect(JSON.parse(readFileSync(path!, "utf8"))).toEqual({
-        server: "http://agentparty.test",
-        token: `ap_child_${item.channel}`,
-      });
-    }
     expect(JSON.parse(readFileSync(ownerConfig, "utf8"))).toEqual({
       server: "http://agentparty.test",
       token: "ap_owner",
     });
+    expect(allFileText(home)).not.toContain("ap_front_");
+    expect(allFileText(home)).not.toContain("ap_worker_");
     await Promise.all(served.map((o) => o.refreshAvailableUpgrade?.(null)));
     expect(upgradeProbes).toBe(1);
     expect(new Set(served.map((o) => o.projectAgent?.channel_workdir)).size).toBe(3);
@@ -1548,21 +2030,26 @@ describe("project profile daemon", () => {
     expect(served.every((o) => o.projectAgent?.delivery_workflow.cleanup_guard.includes("dirty or unmerged"))).toBe(true);
     expect(channelRuntimeCalls).toEqual([
       { slug: "alpha", childName: projectAgentChildName("herness-dev", "alpha") },
+      { slug: "alpha", childName: projectAgentWorkerName("herness-dev", "alpha") },
       { slug: "beta", childName: projectAgentChildName("herness-dev", "beta") },
+      { slug: "beta", childName: projectAgentWorkerName("herness-dev", "beta") },
       { slug: "gamma", childName: projectAgentChildName("herness-dev", "gamma") },
+      { slug: "gamma", childName: projectAgentWorkerName("herness-dev", "gamma") },
     ]);
-    expect(posts).toHaveLength(6);
+    expect(posts).toHaveLength(9);
     const statusPosts = posts.filter((p) => (p.body as { kind: string }).kind === "status");
     const joinPosts = posts.filter((p) => (p.body as { kind: string }).kind === "message");
-    expect(statusPosts).toHaveLength(3);
-    expect(statusPosts.every((p) => (p.body as { role?: string }).role === "host")).toBe(true);
-    expect(posts.every((p) => p.token.startsWith("ap_child_"))).toBe(true);
-    expect(String((posts[0]!.body as { note: string }).note)).toContain("front agent ready");
-    expect(String((posts[0]!.body as { note: string }).note)).toContain("team=herness-dev");
-    expect(String((posts[0]!.body as { note: string }).note)).toContain("worktree=branch");
-    expect(String((posts[0]!.body as { note: string }).note)).toContain("delivery=worktree->PR->channel-link->deploy-verify->safe-prune");
-    expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("front agent"))).toBe(true);
-    expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("workers should spawn under team herness-dev"))).toBe(true);
+    expect(statusPosts).toHaveLength(6);
+    expect(statusPosts.filter((p) => (p.body as { role?: string }).role === "host")).toHaveLength(3);
+    expect(statusPosts.filter((p) => (p.body as { role?: string }).role === "worker")).toHaveLength(3);
+    expect(posts.every((p) => p.token.startsWith("ap_front_") || p.token.startsWith("ap_worker_"))).toBe(true);
+    const frontReady = statusPosts.find((p) => (p.body as { role?: string }).role === "host")!;
+    expect(String((frontReady.body as { note: string }).note)).toContain("front agent ready");
+    expect(String((frontReady.body as { note: string }).note)).toContain("team=herness-dev");
+    expect(String((frontReady.body as { note: string }).note)).toContain("worktree=branch");
+    expect(String((frontReady.body as { note: string }).note)).toContain("delivery=worktree->PR->channel-link->deploy-verify->safe-prune");
+    expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("front="))).toBe(true);
+    expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("execution worker="))).toBe(true);
   });
 
   test("shared profile channels keep distinct child identities without overwriting the shared workspace config", async () => {
@@ -1609,9 +2096,9 @@ describe("project profile daemon", () => {
           invited_at: index + 1,
           profile,
         })),
-        ensureChannelRuntime: async (_server, _token, channel) => ({
-          token: `ap_child_${channel}`,
-          name: `child-${channel}`,
+        ensureChannelRuntime: async (_server, _token, channel, _owner, _handle, childName) => ({
+          token: `ap_child_${childName}`,
+          name: childName,
           role: "agent",
           owner: profile.owner_account,
           channel_scope: channel,
@@ -1628,16 +2115,10 @@ describe("project profile daemon", () => {
       else process.env.AGENTPARTY_HOME = oldHome;
     }
 
-    expect(served).toHaveLength(2);
+    expect(served).toHaveLength(4);
     expect(new Set(served.map((item) => item.sdkRunner?.cwd))).toEqual(new Set([sharedCwd]));
-    const configPaths = served.map((item) => item.sdkRunner?.agentpartyConfigPath ?? "");
-    expect(new Set(configPaths).size).toBe(2);
-    for (const item of served) {
-      expect(JSON.parse(readFileSync(item.sdkRunner!.agentpartyConfigPath!, "utf8"))).toEqual({
-        server: "http://agentparty.test",
-        token: `ap_child_${item.channel}`,
-      });
-    }
+    expect(served.every((item) => item.sdkRunner?.agentpartyConfigPath === undefined)).toBe(true);
+    expect(new Set(served.map((item) => item.token)).size).toBe(4);
     expect(JSON.parse(readFileSync(sharedConfigPath, "utf8"))).toEqual({
       server: "http://agentparty.test",
       token: "ap_workspace_owner",
@@ -1702,9 +2183,9 @@ describe("project profile daemon", () => {
             profile,
           }));
         },
-        ensureChannelRuntime: async (_server, _token, channel) => ({
-          token: `ap_child_${channel}`,
-          name: `child-${channel}`,
+        ensureChannelRuntime: async (_server, _token, channel, _owner, _handle, childName) => ({
+          token: `ap_child_${childName}`,
+          name: childName,
           role: "agent",
           owner: profile.owner_account,
           channel_scope: channel,
@@ -1763,6 +2244,96 @@ describe("codex-sdk runner", () => {
       ...over,
     });
   }
+
+  test("managed SDK continues an unattended owner decision before completing the delivery", async () => {
+    const owner = "fan@example.com";
+    const workdir = tempDir();
+    const prompts: string[] = [];
+    const posts: MessagePayload[] = [];
+    const thread: ThreadLike = {
+      id: "thread_auto_decision",
+      run: async (prompt, options) => {
+        prompts.push(prompt);
+        expect(options.outputSchema).toBe(MANAGED_FRONT_OUTPUT_SCHEMA);
+        return {
+          final_response: prompts.length === 1
+            ? managedAction("owner_decision", { prompt: "允许继续？", options: [] })
+            : managedAction("channel_reply", { body: "自动批准后已完成" }),
+        };
+      },
+    };
+    const post = async (_server: string, _token: string, _channel: string, body: MessagePayload) => {
+      posts.push(body);
+      if (body.kind === "message" && body.decision_request !== undefined) {
+        return {
+          seq: 70,
+          decision_resolution: { state: "auto_resolved" as const, chosen_index: 0, chosen_option: "approve" },
+        };
+      }
+      return { seq: 71 };
+    };
+    const route = createManagedFrontResultRoute({
+      server: "http://agentparty.test",
+      token: "ap_front",
+      channel: "dev",
+      frontName: "front",
+      workerName: "worker",
+      ownerAccount: owner,
+    });
+    const run = sdkRunner({
+      workdir,
+      outputSchema: MANAGED_FRONT_OUTPUT_SCHEMA,
+      resultRoute: route,
+      post,
+      codexFactory: () => ({
+        startThread: () => thread,
+        resumeThread: () => thread,
+      }),
+    });
+    const frame = msgFrame(40, "continue", {
+      sender: { name: "leo", kind: "human", owner },
+    }) as unknown as MsgFrame;
+
+    await run(frame, { ...runnerCtx(), self: "front", delivery: directedDelivery(40) });
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("已自动选择：approve");
+    const messages = posts.filter((body) => body.kind === "message");
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({ expected_decision_responder_owner: owner });
+  });
+
+  test("managed blocked action publishes blocked presence instead of only a normal reply", async () => {
+    const owner = "fan@example.com";
+    const { posts, post } = postRecorder();
+    const thread: ThreadLike = {
+      id: "thread_blocked",
+      run: async () => ({ final_response: managedAction("blocked", { reason: "缺少部署权限" }) }),
+    };
+    const run = sdkRunner({
+      workdir: tempDir(),
+      post,
+      outputSchema: MANAGED_FRONT_OUTPUT_SCHEMA,
+      resultRoute: createManagedFrontResultRoute({
+        server: "http://agentparty.test",
+        token: "ap_front",
+        channel: "dev",
+        frontName: "front",
+        workerName: "worker",
+        ownerAccount: owner,
+      }),
+      codexFactory: () => ({ startThread: () => thread, resumeThread: () => thread }),
+    });
+    const frame = msgFrame(41, "deploy", { sender: { name: "leo", kind: "human", owner } }) as unknown as MsgFrame;
+
+    await run(frame, { ...runnerCtx(), self: "front", delivery: directedDelivery(41) });
+
+    expect(posts.some((entry) => (entry.body as MessagePayload).kind === "message" &&
+      (entry.body as Extract<MessagePayload, { kind: "message" }>).body.includes("暂时阻塞"))).toBe(true);
+    expect(posts.some((entry) => (entry.body as MessagePayload).kind === "status" &&
+      (entry.body as Extract<MessagePayload, { kind: "status" }>).state === "blocked" &&
+      (entry.body as Extract<MessagePayload, { kind: "status" }>).blocked_reason === "缺少部署权限")).toBe(true);
+  });
 
   test("first start calls startThread and persists the thread id", async () => {
     const { post } = postRecorder();

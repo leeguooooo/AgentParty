@@ -23,6 +23,12 @@ describe("buildMinimalAgentCommand", () => {
     expect(command).toContain("Do not create or select another channel");
     expect(command).toContain("app-server, MCP, or project-local channel workflow (for example, Trellis)");
     expect(command).toContain("do not delegate onboarding");
+    expect(command).toContain("After onboarding, you are the front agent with three responsibilities");
+    expect(command).toContain("stay in the main channel and communicate with its members");
+    expect(command).toContain("communicate with the owner for permissions, trade-offs, and decisions");
+    expect(command).toContain("dispatch work to sub-agents/workers, follow up, accept their evidence");
+    expect(command).toContain("long-running execution MUST go to a harness sub-agent/worker");
+    expect(command).toContain("report blocked instead of doing worker work yourself");
   });
 
   test("#530 桌面接入包：把传入的真实后端 server 原样写进 party init --server", () => {

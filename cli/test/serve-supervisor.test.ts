@@ -73,6 +73,20 @@ describe("serve lifecycle supervisor (#550)", () => {
     expect(calls).toBe(1);
   });
 
+  test("composed profile lanes may heal a wake circuit without changing the global default", async () => {
+    const codes = [EXIT_WAKE_ABANDON_CIRCUIT, EXIT_SIGNAL_TERM];
+    const sleeps: number[] = [];
+    const code = await superviseServe({
+      runOnce: async () => codes.shift()!,
+      isTerminal: (candidate) => candidate !== EXIT_WAKE_ABANDON_CIRCUIT,
+      baseDelayMs: 5,
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+
+    expect(code).toBe(EXIT_SIGNAL_TERM);
+    expect(sleeps).toEqual([5]);
+  });
+
   test("SIGINT and SIGTERM exits are terminal and never restart the serve", async () => {
     for (const signalExit of [EXIT_SIGNAL_INT, EXIT_SIGNAL_TERM]) {
       let calls = 0;

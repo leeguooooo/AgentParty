@@ -211,6 +211,8 @@ export const DECISION_PROMPT_LIMIT = 4_000;
 export const DECISION_OPTIONS_MAX = 10;
 export const DECISION_OPTION_LIMIT = 200;
 export const DECISION_REASON_LIMIT = 2_000;
+/** Maximum UTF-8 bytes in an account principal bound to an owner-only decision request. */
+export const DECISION_RESPONDER_OWNER_LIMIT = 128;
 
 export interface WakeInfo {
   kind: WakeKind;
@@ -942,6 +944,11 @@ export interface DecisionRequest extends DecisionDeliveryLineage {
   prompt: string;
   /** 可选项文本；approval 恒为 ["approve","reject"]，choice 为 agent 自带的 1..N 个。 */
   options: string[];
+  /**
+   * Optional account principal allowed to resolve this request. The Worker persists this field but
+   * removes it from public message projections; it is an authorization constraint, not UI content.
+   */
+  expected_responder_owner?: string;
 }
 
 export interface DecisionResolution {
