@@ -370,7 +370,7 @@ export const openapiDocument = {
           { name: "department_id", in: "query", schema: { type: "string", default: "0", maxLength: 64 } },
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 50, default: 50 } },
           { name: "department_cursor", in: "query", schema: { type: "string", maxLength: 512 } },
-          { name: "user_cursor", in: "query", description: "opaque pagination cursor; up to 1024 characters with flat=1, otherwise up to 512", schema: { type: "string", maxLength: 1024 } },
+          { name: "user_cursor", in: "query", description: "opaque pagination cursor", schema: { type: "string", maxLength: 1024 } },
           { name: "departments", in: "query", description: "set to 0 when paginating only users", schema: { type: "string", enum: ["0"] } },
           { name: "users", in: "query", description: "set to 0 when paginating only departments", schema: { type: "string", enum: ["0"] } },
           { name: "flat", in: "query", description: "set to 1 with departments=0 to continue a permission-limited employee listing", schema: { type: "string", enum: ["1"] } },
