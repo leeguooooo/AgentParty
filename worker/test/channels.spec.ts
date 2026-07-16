@@ -140,6 +140,25 @@ describe("channels", () => {
     expect(messages.map((m) => m.body)).toContain("hello over rest");
   });
 
+  it("REST DO proxy reads return mutable CORS responses when Origin is present (#563)", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    expect((await postMessage(slug, token, "searchable proxy message")).status).toBe(200);
+
+    for (const path of [
+      `/api/channels/${slug}/messages?limit=1`,
+      `/api/channels/${slug}/presence`,
+      `/api/channels/${slug}/loop-guard`,
+      `/api/channels/${slug}/search?q=searchable`,
+      `/api/channels/${slug}/wake-deliveries?limit=1`,
+      `/api/channels/${slug}/read-cursors`,
+    ]) {
+      const res = await api(path, token, { headers: { origin: "http://ap.test" } });
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get("access-control-allow-origin"), path).toBe("http://ap.test");
+    }
+  });
+
   it("409 on slug conflict", async () => {
     const { token } = await seedToken("agent");
     const slug = uniq("ch");

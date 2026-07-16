@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { compareVersions, maybeReexecUpgrade, pendingUpgrade } from "../src/upgrade";
+import { writeFileSync } from "node:fs";
+import { compareVersions, downloadPartyUpgrade, maybeReexecUpgrade, pendingUpgrade } from "../src/upgrade";
+
+function sha256(bytes: Uint8Array): string {
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(bytes);
+  return hash.digest("hex");
+}
 
 describe("upgrade", () => {
   test("compareVersions orders by numeric segments", () => {
@@ -52,5 +59,67 @@ describe("upgrade", () => {
       pending: null,
       reexeced: false,
     });
+  });
+
+  test("downloadPartyUpgrade fetches release assets, verifies sha256, and atomically installs", async () => {
+    const archive = new TextEncoder().encode("fake tarball");
+    const calls: Array<{ source: string; target: string }> = [];
+    const result = await downloadPartyUpgrade({ version: "0.2.61" }, {
+      runningVersion: "0.2.60",
+      execPath: "/usr/local/bin/party",
+      platform: "darwin",
+      arch: "arm64",
+      fetchBytes: async (url) => url.endsWith(".sha256")
+        ? new TextEncoder().encode(`${sha256(archive)}  party-darwin-arm64.tar.gz\n`)
+        : archive,
+      extractPartyBinary: async (_archivePath, outDir) => {
+        const binary = `${outDir}/party`;
+        writeFileSync(binary, "binary");
+        return binary;
+      },
+      installBinary: (source, target) => calls.push({ source, target }),
+    });
+    expect(result).toMatchObject({
+      running_version: "0.2.60",
+      target_version: "0.2.61",
+      target: "darwin-arm64",
+      installed: true,
+      install_path: "/usr/local/bin/party",
+    });
+    expect(result.asset_url).toContain("/v0.2.61/party-darwin-arm64.tar.gz");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.target).toBe("/usr/local/bin/party");
+  });
+
+  test("downloadPartyUpgrade refuses a checksum mismatch before install", async () => {
+    const archive = new TextEncoder().encode("fake tarball");
+    const installs: string[] = [];
+    await expect(downloadPartyUpgrade({ version: "0.2.61" }, {
+      runningVersion: "0.2.60",
+      execPath: "/usr/local/bin/party",
+      platform: "linux",
+      arch: "x64",
+      fetchBytes: async (url) => url.endsWith(".sha256")
+        ? new TextEncoder().encode(`${"0".repeat(64)}  party-linux-x64.tar.gz\n`)
+        : archive,
+      installBinary: (_source, target) => installs.push(target),
+    })).rejects.toThrow("sha256 mismatch");
+    expect(installs).toHaveLength(0);
+  });
+
+  test("downloadPartyUpgrade refuses dev execPath and check mode never installs", async () => {
+    await expect(downloadPartyUpgrade({ version: "0.2.61" }, {
+      runningVersion: "0.2.60",
+      execPath: "/opt/homebrew/bin/bun",
+    })).rejects.toThrow("compiled party binary");
+
+    const result = await downloadPartyUpgrade({ version: "0.2.60", checkOnly: true }, {
+      runningVersion: "0.2.60",
+      execPath: "/usr/local/bin/party",
+      platform: "linux",
+      arch: "arm64",
+      installBinary: () => { throw new Error("must not install"); },
+    });
+    expect(result).toMatchObject({ installed: false, target: "linux-arm64", target_version: "0.2.60" });
   });
 });

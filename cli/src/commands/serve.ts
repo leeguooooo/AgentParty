@@ -3,7 +3,7 @@
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
 import { BODY_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ServerFrame } from "@agentparty/shared";
 import { createHash, randomUUID } from "node:crypto";
-import { maybeReexecUpgrade, serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
+import { downloadPartyUpgrade, maybeReexecUpgrade, serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import {
   appendFileSync,
   existsSync,
@@ -60,12 +60,41 @@ const PROTOCOL_REMINDER =
 export async function resolveAvailableUpgrade(
   server: string,
   current: CliUpgradeNotice | null = null,
+  options: { autoDownload?: boolean; upgradeDeps?: UpgradeDeps; out?: (line: string) => void } = {},
 ): Promise<CliUpgradeNotice | null> {
   try {
-    return serverVersionUpgradeNotice((await fetchServerVersion(server)).version);
+    const notice = serverVersionUpgradeNotice((await fetchServerVersion(server)).version, options.upgradeDeps);
+    if (notice === null) return null;
+    if (options.autoDownload !== true) return notice;
+    const installed = upgradeNotice(true, options.upgradeDeps);
+    if (installed !== null && compareUpgradeVersion(installed.available_version, notice.available_version) >= 0) return installed;
+    try {
+      const result = await downloadPartyUpgrade({ version: notice.available_version }, options.upgradeDeps);
+      return {
+        ...notice,
+        installed_version: result.target_version,
+        auto_upgrade: true,
+        action_required: "auto_reexec",
+        message: `AgentParty 服务器已发布 party CLI v${notice.available_version}，已下载并校验新版二进制。本轮唤醒结束后 serve 会自动 re-exec 新版。`,
+      };
+    } catch (error) {
+      options.out?.(`serve: 自动下载 party v${notice.available_version} 失败，保留人工升级提示: ${error instanceof Error ? error.message : String(error)}`);
+      return notice;
+    }
   } catch {
     return current;
   }
+}
+
+function compareUpgradeVersion(left: string, right: string): number {
+  const parse = (version: string) => version.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const a = parse(left);
+  const b = parse(right);
+  for (let index = 0; index < 3; index += 1) {
+    const diff = (a[index] ?? 0) - (b[index] ?? 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return 0;
 }
 
 // 唤醒未送达（runner 非零退出 / 无 session id / SDK 抛错 / [attach] 被拒）。
@@ -3807,7 +3836,11 @@ export async function run(argv: string[]): Promise<number> {
       console.error("--profile-poll-interval must be an integer >= 500 milliseconds");
       return 1;
     }
-    const availableUpgrade = await resolveAvailableUpgrade(account.session.server);
+    const autoDownloadUpgrade = flags["auto-upgrade"] === true;
+    const availableUpgrade = await resolveAvailableUpgrade(account.session.server, null, {
+      autoDownload: autoDownloadUpgrade,
+      out: (line) => console.error(terminalOutput(line)),
+    });
     if (availableUpgrade !== null) console.error(terminalOutput(`serve: ${availableUpgrade.message}\n  ${availableUpgrade.command}`));
     return runProfileServe({
       server: account.session.server,
@@ -3816,7 +3849,10 @@ export async function run(argv: string[]): Promise<number> {
       handle: profileRef.handle,
       mentionsOnly: flags.all !== true,
       availableUpgrade,
-      refreshAvailableUpgrade: (current) => resolveAvailableUpgrade(account.session.server, current),
+      refreshAvailableUpgrade: (current) => resolveAvailableUpgrade(account.session.server, current, {
+        autoDownload: autoDownloadUpgrade,
+        out: (line) => console.error(terminalOutput(line)),
+      }),
       skipBacklog: flags["replay-backlog"] !== true,
       once: flags["profile-once"] === true,
       pollIntervalMs,
@@ -3846,7 +3882,11 @@ export async function run(argv: string[]): Promise<number> {
     console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
     return 1;
   }
-  const availableUpgrade = await resolveAvailableUpgrade(server);
+  const autoDownloadUpgrade = flags["auto-upgrade"] === true;
+  const availableUpgrade = await resolveAvailableUpgrade(server, null, {
+    autoDownload: autoDownloadUpgrade,
+    out: (line) => console.error(terminalOutput(line)),
+  });
   if (availableUpgrade !== null) console.error(terminalOutput(`serve: ${availableUpgrade.message}\n  ${availableUpgrade.command}`));
   const explicitRunnerWorkdir = str(flags.workdir);
   let runnerWorkdirPath = explicitRunnerWorkdir === undefined
@@ -3914,7 +3954,10 @@ export async function run(argv: string[]): Promise<number> {
         fetchCharter: (signal) => fetchChannelCharter(currentServer, currentToken, channel, signal),
         autoUpgrade: flags["auto-upgrade"] === true,
         availableUpgrade,
-        refreshAvailableUpgrade: (current) => resolveAvailableUpgrade(currentServer, current),
+        refreshAvailableUpgrade: (current) => resolveAvailableUpgrade(currentServer, current, {
+          autoDownload: flags["auto-upgrade"] === true,
+          out: (line) => console.error(terminalOutput(line)),
+        }),
         statusline: true,
         runnerTimeoutMs,
         builtinRunner: harness

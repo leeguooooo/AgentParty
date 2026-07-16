@@ -219,8 +219,8 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
         participants: frame.participants,
         presence,
         readCursors,
-        // welcome 首帧即知角色，readonly 分享链接不闪现输入框（spec §9）
-        readonly: frame.role === "readonly" ? true : state.readonly,
+        // welcome 是连接身份的权威来源。只读分享链接不闪输入框；重新以成员身份连接时也必须清掉旧只读状态。
+        readonly: frame.role === "readonly",
         loopGuard: frame.loop_guard ?? state.loopGuard,
         loopGuardBaselineSeq: frame.loop_guard != null ? frame.last_seq : state.loopGuardBaselineSeq,
       };

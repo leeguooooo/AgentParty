@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { fetchServerVersion } from "../src/rest";
 import { RUNNING_VERSION, serverMinVersionNotice, serverVersionUpgradeNotice } from "../src/upgrade";
+import { resolveAvailableUpgrade } from "../src/commands/serve";
+
+function sha256(bytes: Uint8Array): string {
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(bytes);
+  return hash.digest("hex");
+}
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -80,5 +88,40 @@ describe("CLI↔worker version negotiation (issue #137)", () => {
     expect(serverVersionUpgradeNotice("dev", { runningVersion: "0.2.107" })).toBeNull();
     expect(serverVersionUpgradeNotice("0.2.108-rc.1", { runningVersion: "0.2.107" })).toBeNull();
     expect(serverVersionUpgradeNotice("v0.2.108+build.7", { runningVersion: "0.2.107" })?.available_version).toBe("0.2.108");
+  });
+
+  test("resolveAvailableUpgrade downloads the release binary when serve --auto-upgrade is enabled (#559)", async () => {
+    globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) =>
+      Response.json({ version: "0.2.108", commit: "abc", deployed_at: null })) as typeof fetch;
+    const archive = new TextEncoder().encode("fake tarball");
+    const installs: string[] = [];
+
+    const notice = await resolveAvailableUpgrade("https://ap.test", null, {
+      autoDownload: true,
+      upgradeDeps: {
+        runningVersion: "0.2.107",
+        execPath: "/usr/local/bin/party",
+        platform: "darwin",
+        arch: "x64",
+        fetchBytes: async (url) => url.endsWith(".sha256")
+          ? new TextEncoder().encode(`${sha256(archive)}  party-darwin-x64.tar.gz\n`)
+          : archive,
+        extractPartyBinary: async (_archivePath, outDir) => {
+          const binary = `${outDir}/party`;
+          writeFileSync(binary, "binary");
+          return binary;
+        },
+        installBinary: (_source, target) => installs.push(target),
+      },
+    });
+
+    expect(notice).toMatchObject({
+      running_version: "0.2.107",
+      available_version: "0.2.108",
+      installed_version: "0.2.108",
+      auto_upgrade: true,
+      action_required: "auto_reexec",
+    });
+    expect(installs).toEqual(["/usr/local/bin/party"]);
   });
 });
