@@ -21,6 +21,7 @@ import {
   type ShareLinkInfo,
 } from "../lib/api";
 import { useT, type TFunc } from "../i18n/useT";
+import { apiOrigin } from "../lib/base";
 import { useDismissableLayer } from "./useDismissableLayer";
 import { LarkMemberInvite } from "./LarkMemberInvite";
 import "../i18n/strings/JoinLink";
@@ -54,8 +55,11 @@ function usesOptions(t: TFunc): { label: string; max?: number }[] {
   ];
 }
 
+// #530 同款坑：桌面版(Tauri)里 location.origin 是 agentparty-ui://localhost，复制出去的链接
+// 别人打不开。列表接口不回 url，兜底必须拼真实后端 origin（worker 同源服务 /join 落地页）；
+// 同源 web 部署 apiBase 为空，仍回退 location.origin。
 function linkUrl(link: JoinLinkInfo): string {
-  return link.url ?? `${location.origin}/join/${link.code}`;
+  return link.url ?? `${apiOrigin()}/join/${link.code}`;
 }
 
 function expiryLabel(link: JoinLinkInfo, t: TFunc): string {

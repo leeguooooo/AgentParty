@@ -40,8 +40,9 @@ export function apiUrl(path: string): string {
   return `${apiBase()}${path}`;
 }
 
-export function apiOrigin(fallbackOrigin = location.origin): string {
-  return apiBase() || fallbackOrigin;
+export function apiOrigin(fallbackOrigin?: string): string {
+  // fallback 惰性求值：apiBase 已配置（桌面版）时不能碰 location——非浏览器测试环境没有它。
+  return apiBase() || fallbackOrigin || location.origin;
 }
 
 export function wsUrl(path: string): string {
