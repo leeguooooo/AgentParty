@@ -3154,7 +3154,8 @@
 }
 .chan-toolstrip-content {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   flex: 1 1 auto;
   min-width: 0;
   gap: 6px;
@@ -3175,11 +3176,12 @@
 }
 .chan-tool-actions {
   flex: 0 0 auto;
-  margin-left: auto;
-  justify-content: flex-start;
+  margin-left: 0;
+  justify-content: flex-end;
 }
 .chan-admin-actions {
   flex: 0 0 auto;
+  margin-left: auto;
   gap: 0;
 }
 .chan-admin-group {

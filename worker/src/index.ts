@@ -215,6 +215,15 @@ export function mutableFetchResponse(response: Response): Response {
   });
 }
 
+async function fetchMutableChannelDO(
+  env: AppEnv,
+  slug: string,
+  request: Request | (() => Request),
+  retries = 1,
+): Promise<Response> {
+  return mutableFetchResponse(await fetchChannelDO(env, slug, request, retries));
+}
+
 function parseRoleResponsibility(body: Record<string, unknown> | null): { present: boolean; value: string | null } | null {
   if (body === null || !Object.prototype.hasOwnProperty.call(body, "responsibility")) {
     return { present: false, value: null };
@@ -4793,7 +4802,7 @@ app.get("/api/channels/:slug/messages", async (c) => {
     return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
   }
   const search = new URL(c.req.url).search;
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request(`https://do/internal/messages${search}`, {
@@ -4810,7 +4819,7 @@ app.get("/api/channels/:slug/presence", async (c) => {
   if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
     return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
   }
-  return fetchChannelDO(c.env, slug, new Request("https://do/internal/presence", { headers: { "x-partykit-room": slug } }));
+  return fetchMutableChannelDO(c.env, slug, new Request("https://do/internal/presence", { headers: { "x-partykit-room": slug } }));
 });
 
 app.get("/api/channels/:slug/loop-guard", async (c) => {
@@ -4822,7 +4831,7 @@ app.get("/api/channels/:slug/loop-guard", async (c) => {
   if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
     return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
   }
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request("https://do/internal/guard", {
@@ -4902,7 +4911,7 @@ app.get("/api/channels/:slug/search", async (c) => {
     return c.json(errorBody("bad_request", "q required"), 400);
   }
   const search = new URL(c.req.url).search;
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request(`https://do/internal/search${search}`, {
@@ -4919,7 +4928,7 @@ app.get("/api/channels/:slug/wake-deliveries", async (c) => {
     return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
   }
   const search = new URL(c.req.url).search;
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request(`https://do/internal/wake-deliveries${search}`, {
@@ -4938,7 +4947,7 @@ app.get("/api/channels/:slug/wake-budget/:name", async (c) => {
   }
   const name = c.req.param("name");
   if (!name || name.length > 256) return c.json(errorBody("bad_request", "valid name required"), 400);
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request(`https://do/internal/wake-budget/${encodeURIComponent(name)}`, {
@@ -4961,7 +4970,7 @@ app.put("/api/channels/:slug/wake-budget/:name", async (c) => {
     return c.json(errorBody("forbidden", "only the agent itself or a channel moderator can set a wake budget"), 403);
   }
   const body = await c.req.json().catch(() => null);
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request(`https://do/internal/wake-budget/${encodeURIComponent(name)}`, {
@@ -4979,7 +4988,7 @@ app.get("/api/channels/:slug/read-cursors", async (c) => {
   if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
     return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
   }
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request("https://do/internal/read-cursors", {
@@ -6062,7 +6071,7 @@ app.post("/api/channels/:slug/messages/:seq/review", async (c) => {
       },
     }),
   );
-  if (!res.ok) return res;
+  if (!res.ok) return mutableFetchResponse(res);
   const payload = (await res.clone().json().catch(() => null)) as { message?: MsgFrame } | null;
   const message = payload?.message;
   const taskId = message?.completion_artifact?.task_id;
@@ -6074,7 +6083,7 @@ app.post("/api/channels/:slug/messages/:seq/review", async (c) => {
       await syncTaskCompletion(c.env, slug, taskId, message.completion_artifact, message.seq, "in_progress");
     }
   }
-  return res;
+  return mutableFetchResponse(res);
 });
 
 // 人类决策回应（#284）：人类/moderator 在频道内对某条 decision_request 点选项/审批。
@@ -6115,7 +6124,7 @@ app.post("/api/channels/:slug/messages/:seq/decision", async (c) => {
       },
     }),
   );
-  return res;
+  return mutableFetchResponse(res);
 });
 
 app.post("/api/channels/:slug/messages/:seq/:action", async (c) => {
@@ -6136,7 +6145,7 @@ app.post("/api/channels/:slug/messages/:seq/:action", async (c) => {
     return c.json(errorBody("bad_request", "action must be edit|retract|supersede"), 400);
   }
   const assignedRole = await loadAssignedRole(c.env.DB, slug, identity);
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request(`https://do/internal/messages/${seq}/${action}`, {
@@ -6174,7 +6183,7 @@ app.get("/api/channels/:slug/messages/:seq/audit", async (c) => {
   }
   const seq = positiveInt(Number(c.req.param("seq")));
   if (seq === null) return c.json(errorBody("bad_request", "seq must be a positive integer"), 400);
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request(`https://do/internal/messages/${seq}/audit`, {
@@ -6197,7 +6206,7 @@ app.get("/api/channels/:slug/identity/:name/data", async (c) => {
   if (!name || name.length > 256) {
     return c.json(errorBody("bad_request", "valid name required"), 400);
   }
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request(`https://do/internal/identity/${encodeURIComponent(name)}/data${new URL(c.req.url).search}`, {
@@ -6249,7 +6258,7 @@ app.delete("/api/channels/:slug/identity/:name/data", async (c) => {
       metadata: summary ?? {},
     });
   }
-  return res;
+  return mutableFetchResponse(res);
 });
 
 // 附件上传（#176）：blob 进 R2，返回引用元数据；发消息时把引用带在 attachments 字段里。
@@ -6525,7 +6534,7 @@ app.get("/api/channels/:slug/webhooks", async (c) => {
   if (channel.archived_at !== null) {
     return c.json(errorBody("archived", "channel is archived"), 410);
   }
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request("https://do/internal/webhooks", { headers: { "x-partykit-room": slug } }),
@@ -6572,7 +6581,7 @@ app.get("/api/channels/:slug/webhooks/dead-letters", async (c) => {
   if (!isChannelModerator(c.get("identity"), channel)) {
     return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage webhooks"), 403);
   }
-  return fetchChannelDO(
+  return fetchMutableChannelDO(
     c.env,
     slug,
     new Request("https://do/internal/dead-letters", { headers: { "x-partykit-room": slug } }),
@@ -6779,7 +6788,7 @@ app.post("/api/channels/:slug/presence/:name/pause", async (c) => {
       metadata: { resume_at: body?.resume_at ?? null },
     });
   }
-  return res;
+  return mutableFetchResponse(res);
 });
 
 app.post("/api/channels/:slug/presence/:name/resume", async (c) => {
@@ -6814,7 +6823,7 @@ app.post("/api/channels/:slug/presence/:name/resume", async (c) => {
       channel: slug,
     });
   }
-  return res;
+  return mutableFetchResponse(res);
 });
 
 app.post("/api/channels/:slug/reset-guard", async (c) => {
@@ -6844,7 +6853,7 @@ app.post("/api/channels/:slug/reset-guard", async (c) => {
       metadata: { guard: "loop" },
     });
   }
-  return res;
+  return mutableFetchResponse(res);
 });
 
 app.post("/api/channels/:slug/workflows/:workflow_id/reset-guard", async (c) => {

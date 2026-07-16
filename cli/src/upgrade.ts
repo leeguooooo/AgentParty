@@ -1,5 +1,9 @@
 // 自升级支持（issue #45）：已在跑的 serve 是内存里的旧二进制，但 process.execPath 指向的磁盘文件
 // 会被 install.sh 换成新版。这里网络-free 地读磁盘二进制版本、比对、在唤醒间隙 re-exec 新版。
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, renameSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import pkg from "../package.json" with { type: "json" };
 
 export const RUNNING_VERSION = pkg.version;
@@ -26,6 +30,13 @@ export interface UpgradeDeps {
   execPath?: string;
   readInstalledVersion?: (execPath: string) => string | null;
   reexec?: (execPath: string, argv: string[]) => void;
+  fetch?: typeof fetch;
+  fetchBytes?: (url: string) => Promise<Uint8Array>;
+  extractPartyBinary?: (archivePath: string, outDir: string, platform: NodeJS.Platform) => Promise<string>;
+  installBinary?: (sourcePath: string, targetPath: string) => void;
+  platform?: NodeJS.Platform;
+  arch?: string;
+  mirror?: string;
 }
 
 export interface CliUpgradeNotice {
@@ -51,14 +62,176 @@ function defaultReadInstalledVersion(execPath: string): string | null {
   }
 }
 
+export function isPartyBinaryPath(execPath: string): boolean {
+  return basename(execPath).includes("party");
+}
+
+function normalizeReleaseVersion(version: string): string | null {
+  const trimmed = version.trim().replace(/^v/, "");
+  return /^\d+\.\d+\.\d+$/.test(trimmed) ? trimmed : null;
+}
+
+export function detectReleaseTarget(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string | null {
+  const os =
+    platform === "darwin" ? "darwin" :
+    platform === "linux" ? "linux" :
+    platform === "win32" ? "windows" :
+    null;
+  const cpu =
+    arch === "x64" || arch === "amd64" ? "x64" :
+    arch === "arm64" || arch === "aarch64" ? "arm64" :
+    null;
+  if (os === null || cpu === null) return null;
+  if (os === "windows" && cpu !== "x64") return null;
+  return `${os}-${cpu}`;
+}
+
+async function resolveLatestReleaseVersion(fetcher: typeof fetch): Promise<string> {
+  const api = await fetcher(`https://api.github.com/repos/${OWNER_REPO}/releases/latest`, {
+    headers: { accept: "application/vnd.github+json" },
+  }).catch(() => null);
+  if (api?.ok) {
+    const body = (await api.json().catch(() => null)) as { tag_name?: unknown } | null;
+    const version = typeof body?.tag_name === "string" ? normalizeReleaseVersion(body.tag_name) : null;
+    if (version !== null) return version;
+  }
+  const redirected = await fetcher(`https://github.com/${OWNER_REPO}/releases/latest`, {
+    method: "HEAD",
+    redirect: "follow",
+  });
+  const match = redirected.url.match(/\/tag\/v?(\d+\.\d+\.\d+)/);
+  if (match) return match[1]!;
+  throw new Error("cannot resolve latest release version");
+}
+
+async function defaultFetchBytes(url: string): Promise<Uint8Array> {
+  if (url.startsWith("file://")) return new Uint8Array(readFileSync(fileURLToPath(url)));
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`download failed: ${url} (${res.status})`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+  const hash = new Bun.CryptoHasher("sha256");
+  hash.update(bytes);
+  return hash.digest("hex");
+}
+
+async function defaultExtractPartyBinary(archivePath: string, outDir: string, platform: NodeJS.Platform): Promise<string> {
+  const proc = Bun.spawn(["tar", "-xzf", archivePath, "-C", outDir], { stdout: "ignore", stderr: "pipe" });
+  const code = await proc.exited;
+  if (code !== 0) {
+    const stderr = new TextDecoder().decode(await new Response(proc.stderr).arrayBuffer()).trim();
+    throw new Error(`tar extraction failed${stderr ? `: ${stderr}` : ""}`);
+  }
+  const binary = join(outDir, platform === "win32" ? "party.exe" : "party");
+  if (!existsSync(binary)) throw new Error("archive missing party binary");
+  return binary;
+}
+
+function defaultInstallBinary(sourcePath: string, targetPath: string): void {
+  const dir = dirname(targetPath);
+  mkdirSync(dir, { recursive: true });
+  const tmp = join(dir, `.party.${process.pid}.${Date.now()}.tmp`);
+  try {
+    copyFileSync(sourcePath, tmp);
+    chmodSync(tmp, 0o755);
+    renameSync(tmp, targetPath);
+  } catch (error) {
+    rmSync(tmp, { force: true });
+    throw error;
+  }
+}
+
+export interface PartyUpgradeOptions {
+  version?: string;
+  checkOnly?: boolean;
+}
+
+export interface PartyUpgradeResult {
+  running_version: string;
+  target_version: string;
+  target: string;
+  asset_url: string;
+  installed: boolean;
+  install_path: string;
+  reason?: "already_current";
+}
+
+export async function downloadPartyUpgrade(
+  options: PartyUpgradeOptions = {},
+  deps: UpgradeDeps = {},
+): Promise<PartyUpgradeResult> {
+  const running = deps.runningVersion ?? RUNNING_VERSION;
+  const execPath = deps.execPath ?? process.execPath;
+  if (!isPartyBinaryPath(execPath)) {
+    throw new Error(`party upgrade must be run from a compiled party binary; fallback: ${INSTALL_LINE}`);
+  }
+  const platform = deps.platform ?? process.platform;
+  const target = detectReleaseTarget(platform, deps.arch ?? process.arch);
+  if (target === null) throw new Error(`unsupported platform for party upgrade: ${platform}/${deps.arch ?? process.arch}`);
+  const fetcher = deps.fetch ?? fetch;
+  const requested = options.version ?? "latest";
+  const explicitVersion = requested !== "latest";
+  const targetVersion = explicitVersion
+    ? normalizeReleaseVersion(requested)
+    : await resolveLatestReleaseVersion(fetcher);
+  if (targetVersion === null) throw new Error(`invalid release version: ${requested}`);
+  const versionDelta = compareVersions(targetVersion, running);
+  if (!explicitVersion && versionDelta < 0) {
+    throw new Error(`refusing downgrade from ${running} to ${targetVersion}`);
+  }
+  if (versionDelta === 0) {
+    return {
+      running_version: running,
+      target_version: targetVersion,
+      target,
+      asset_url: "",
+      installed: false,
+      install_path: execPath,
+      reason: "already_current",
+    };
+  }
+  const mirror = deps.mirror ?? process.env.AGENTPARTY_MIRROR ?? `https://github.com/${OWNER_REPO}/releases/download`;
+  if (!mirror.startsWith("https://") && !mirror.startsWith("file://")) {
+    throw new Error("AGENTPARTY_MIRROR must use https:// or file://");
+  }
+  const base = `${mirror.replace(/\/$/, "")}/v${targetVersion}`;
+  const asset = `party-${target}.tar.gz`;
+  const assetUrl = `${base}/${asset}`;
+  if (options.checkOnly === true) {
+    return { running_version: running, target_version: targetVersion, target, asset_url: assetUrl, installed: false, install_path: execPath };
+  }
+  const fetchBytes = deps.fetchBytes ?? defaultFetchBytes;
+  const [archiveBytes, checksumBytes] = await Promise.all([
+    fetchBytes(assetUrl),
+    fetchBytes(`${assetUrl}.sha256`),
+  ]);
+  const want = new TextDecoder().decode(checksumBytes).trim().split(/\s+/)[0] ?? "";
+  if (!/^[0-9a-fA-F]{64}$/.test(want)) throw new Error("release checksum file is invalid");
+  const got = sha256Hex(archiveBytes);
+  if (got.toLowerCase() !== want.toLowerCase()) {
+    throw new Error(`sha256 mismatch: want ${want} got ${got}`);
+  }
+  const tmpRoot = mkdtempSync(join(tmpdir(), "party-upgrade-"));
+  try {
+    const archivePath = join(tmpRoot, asset);
+    writeFileSync(archivePath, archiveBytes);
+    const extracted = await (deps.extractPartyBinary ?? defaultExtractPartyBinary)(archivePath, tmpRoot, platform);
+    (deps.installBinary ?? defaultInstallBinary)(extracted, execPath);
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+  return { running_version: running, target_version: targetVersion, target, asset_url: assetUrl, installed: true, install_path: execPath };
+}
+
 // 磁盘二进制比运行版新 → 返回新版本号，否则 null。
 export function pendingUpgrade(deps: UpgradeDeps = {}): string | null {
   const running = deps.runningVersion ?? RUNNING_VERSION;
   const execPath = deps.execPath ?? process.execPath;
   const read = deps.readInstalledVersion ?? defaultReadInstalledVersion;
   // 只有 execPath 看起来是 party 二进制（basename 含 party）才比——dev 下 execPath=bun，跳过。
-  const base = execPath.split("/").pop() ?? "";
-  if (!base.includes("party")) return null;
+  if (!isPartyBinaryPath(execPath)) return null;
   const installed = read(execPath);
   if (!installed) return null;
   return compareVersions(installed, running) > 0 ? installed : null;

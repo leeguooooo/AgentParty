@@ -38,7 +38,7 @@ export async function run(argv: string[]): Promise<number> {
   console.log(`latest:    ${latest}`);
   const cmp = compareVersions(latest, RUNNING_VERSION);
   if (cmp > 0) {
-    console.log(`\n有新版可升 → 升级：\n  ${INSTALL_LINE}\n升级后【重启在跑的 serve/watch】才生效（issue #45）。`);
+    console.log(`\n有新版可升 → 升级：\n  party upgrade\n  ${INSTALL_LINE}\n升级后【重启在跑的 serve/watch】才生效；serve --auto-upgrade 会在安全点自动 re-exec。`);
   } else {
     console.log("\n已是最新。");
   }

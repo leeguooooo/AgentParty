@@ -40,6 +40,40 @@ function delivery(over: Partial<DirectedDelivery> = {}): DirectedDelivery {
 }
 
 describe("channel state", () => {
+  test("welcome role clears a previous readonly share-link state when a writable member reconnects", () => {
+    const readonly = channelReducer(initialChannelState, {
+      type: "frame",
+      frame: {
+        type: "welcome",
+        self: "watcher",
+        last_seq: 0,
+        presence: [],
+        participants: [],
+        read_cursors: [],
+        role: "readonly",
+        mode: "normal",
+        loop_guard: null,
+      },
+    });
+    expect(readonly.readonly).toBe(true);
+
+    const writable = channelReducer(readonly, {
+      type: "frame",
+      frame: {
+        type: "welcome",
+        self: "leo",
+        last_seq: 0,
+        presence: [],
+        participants: [],
+        read_cursors: [],
+        role: "human",
+        mode: "normal",
+        loop_guard: null,
+      },
+    });
+    expect(writable.readonly).toBe(false);
+  });
+
   test("ignores duplicate history frames without revision metadata", () => {
     const first = channelReducer(initialChannelState, { type: "frame", frame: msgFrame(6, "original") });
     const duplicate = channelReducer(first, { type: "frame", frame: msgFrame(6, "stale duplicate") });
