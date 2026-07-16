@@ -10,6 +10,7 @@ const shareCalls: Array<{ slug: string }> = [];
 const reviewCalls: Array<{ id: string | number; body: { action: "approve" } | { action: "reject"; reason: string } }> = [];
 let pendingRequests: Array<{ id: string | number; state: string; requester_name: string; requester_handle?: string; note: string | null }> = [];
 let pendingError: Error | null = null;
+let joinLinksList: Array<Record<string, unknown>> = [];
 
 mock.module("../lib/api", () => ({
   AuthError: class AuthError extends Error {},
@@ -24,7 +25,7 @@ mock.module("../lib/api", () => ({
     shareCalls.push({ slug });
     return { name: "watch_deadbeef", created_at: 0, url: `https://x/c/${slug}?t=ap_watchtoken`, token: "ap_watchtoken" };
   }),
-  listJoinLinks: async () => [],
+  listJoinLinks: async () => joinLinksList,
   listShareLinks: async () => [],
   listChannelJoinRequests: async () => {
     if (pendingError) throw pendingError;
@@ -49,6 +50,7 @@ mock.module("../lib/api", () => ({
 }));
 
 const { JoinLink } = await import("./JoinLink");
+const { setApiBase, clearApiBase } = await import("../lib/base");
 
 let renderer: ReactTestRenderer | null = null;
 let windowEvents: TestEventTarget;
@@ -85,6 +87,8 @@ beforeEach(() => {
     { id: "jr_1", state: "pending", requester_name: "Alice", requester_handle: "alice", note: "I can help" },
   ];
   pendingError = null;
+  joinLinksList = [];
+  clearApiBase();
   windowEvents = new TestEventTarget();
   documentEvents = new TestEventTarget();
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -144,6 +148,21 @@ describe("JoinLink invite mode selector", () => {
     await act(async () => {});
     expect(joinCalls).toEqual([{ slug: "devchan" }]);
     expect(shareCalls).toEqual([]);
+  });
+
+  test("listed links without url fall back to the API origin, not the desktop custom scheme", async () => {
+    // 桌面版(Tauri)里 location.origin 是 agentparty-ui://localhost；列表兜底必须拼真实后端 origin。
+    setApiBase("https://party.example");
+    joinLinksList = [
+      { code: "zzz", channel_slug: "devchan", created_by: "o", created_at: 0, expires_at: null, max_uses: null, uses: 0, revoked_at: null },
+    ];
+    const r = render();
+    clickPrimary(r); // generate → refresh → listJoinLinks
+    await act(async () => {});
+    const urls = r.root
+      .findAllByProps({ className: "joinlink-url t-mono" })
+      .map((node) => node.children.join(""));
+    expect(urls).toContain("https://party.example/join/zzz");
   });
 
   test("selecting watch mode wires generate into createShareLink (readonly), not createJoinLink", async () => {

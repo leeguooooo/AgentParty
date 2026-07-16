@@ -37,10 +37,10 @@ function task(
   };
 }
 
-function message(seq: number, body: string): MsgFrame {
+function message(seq: number, body: string, over: Partial<MsgFrame> = {}): MsgFrame {
   return {
     type: "msg", seq, sender: { name: "human-owner", kind: "human" }, kind: "message", body,
-    mentions: [], reply_to: null, state: null, note: null, status: null, ts: seq,
+    mentions: [], reply_to: null, state: null, note: null, status: null, ts: seq, ...over,
   };
 }
 
@@ -49,6 +49,7 @@ function delivery(
   targetName: string,
   messageSeq: number,
   state: PublicDirectedDelivery["state"],
+  preview?: string | null,
 ): PublicDirectedDelivery {
   return {
     id,
@@ -58,6 +59,7 @@ function delivery(
     reply_seq: null,
     created_at: messageSeq,
     updated_at: messageSeq,
+    ...(preview === undefined ? {} : { preview }),
   };
 }
 
@@ -230,6 +232,52 @@ describe("AgentBoardPanel (#187)", () => {
     expect(treeText(busyLane)).toContain("确认 message-bottle token");
     expect(treeText(busyLane)).toContain("已排队");
     expect(treeText(r.root.findByProps({ "data-status": "offline" }))).not.toContain("Evan-Claude-Kyc");
+  });
+
+  test("falls back to the worker preview when the delivery message is outside the loaded window", () => {
+    // 排队投递常指向历史窗口之外的老消息——此时用 worker 投影带的 preview，而不是占位符。
+    const r = render(
+      "zh",
+      [],
+      [],
+      [],
+      [delivery("old-work", "backlog-agent", 400, "queued", "为压缩全链路联调时间，两件事：kyc-claude 先接 SDK")],
+      [],
+    );
+
+    const busyLane = r.root.findByProps({ "data-status": "busy" });
+    expect(treeText(busyLane)).toContain("为压缩全链路联调时间");
+    expect(treeText(busyLane)).not.toContain("工作内容暂不可用");
+  });
+
+  test("never shows a retracted message's local body or a stale preview for it", () => {
+    // 撤回后本地行是 [retracted] 占位；delivery.preview 是撤回前的历史残留——都不能上看板。
+    const r = render(
+      "zh",
+      [],
+      [],
+      [],
+      [delivery("retracted-work", "tidy-agent", 42, "queued", "撤回前的敏感内容")],
+      [message(42, "[retracted]", { retracted: true, retracted_at: 42 })],
+    );
+
+    const busyLane = treeText(r.root.findByProps({ "data-status": "busy" }));
+    expect(busyLane).not.toContain("[retracted]");
+    expect(busyLane).not.toContain("撤回前的敏感内容");
+    expect(busyLane).toContain("工作内容暂不可用");
+  });
+
+  test("collapses a deep queued backlog into a summary row instead of listing every delivery", () => {
+    const deliveries = Array.from({ length: 8 }, (_, i) =>
+      delivery(`d${i}`, "swamped-agent", 100 + i, "queued", `任务 ${100 + i}`));
+    const r = render("zh", [], [], [], deliveries, []);
+
+    const busyLane = treeText(r.root.findByProps({ "data-status": "busy" }));
+    // updated_at 倒序：展示最近 5 条（107..103），其余折叠成一行计数。
+    expect(busyLane).toContain("任务 107");
+    expect(busyLane).toContain("任务 103");
+    expect(busyLane).not.toContain("任务 102");
+    expect(busyLane).toContain("还有 3 条");
   });
 
   test("puts waiting-owner work in the blocked lane and ignores terminal deliveries", () => {

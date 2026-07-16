@@ -932,7 +932,7 @@ describe("持久定向投递（issue #551）", () => {
     });
     expect(publicFailure.delivery).toMatchObject({ id: oldRow.id, state: "failed" });
     expect(Object.keys(publicFailure.delivery).sort()).toEqual(
-      ["created_at", "id", "message_seq", "reply_seq", "state", "target_name", "updated_at"].sort(),
+      ["created_at", "id", "message_seq", "preview", "reply_seq", "state", "target_name", "updated_at"].sort(),
     );
     expect(publicFailure.delivery).not.toHaveProperty("work_id");
     expect(publicFailure.delivery).not.toHaveProperty("continuation_ref");
@@ -1009,6 +1009,50 @@ describe("持久定向投递（issue #551）", () => {
       new Set(["queued", "running", "failed", "replied"]),
     );
     expect(replayed.every((delivery) => !("work_id" in delivery) && !("last_error" in delivery))).toBe(true);
+    viewer.close();
+  });
+
+  it("delivery_state 投影携带目标消息的单行截断 preview（Agent 看板不再依赖客户端消息窗口）", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("preview-target"));
+    const slug = await createChannel(sender.token);
+    const posted = await sendMention(
+      slug,
+      sender.token,
+      target.name,
+      `@${target.name} 核对  KYC\n外部 token ${"x".repeat(200)}`,
+    );
+
+    const viewer = await WsClient.open(slug, sender.token);
+    await viewer.nextOfType("welcome");
+    viewer.send({ type: "hello", since: 0, since_rev: 0 });
+    const frame = await viewer.nextOfType("delivery_state");
+    expect(frame.delivery).toMatchObject({ message_seq: posted.seq, target_name: target.name, state: "queued" });
+    const preview = frame.delivery.preview;
+    expect(typeof preview).toBe("string");
+    // 空白（含换行）折叠成单个空格，超长截到 160 以内并以省略号结尾。
+    expect(preview).toContain("核对 KYC 外部 token");
+    expect(preview!.length).toBeLessThanOrEqual(160);
+    expect(preview!.endsWith("…")).toBe(true);
+    viewer.close();
+  });
+
+  it("已擦除（[erased] 墓碑）消息的 delivery_state preview 回 null", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("erased-target"));
+    const slug = await createChannel(sender.token);
+    const posted = await sendMention(slug, sender.token, target.name, "identity to erase");
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    await runInDurableObject(stub, async (_instance: ChannelDO, state) => {
+      state.storage.sql.exec("UPDATE messages SET body = '[erased]' WHERE seq = ?", posted.seq);
+    });
+
+    const viewer = await WsClient.open(slug, sender.token);
+    await viewer.nextOfType("welcome");
+    viewer.send({ type: "hello", since: 0, since_rev: 0 });
+    const frame = await viewer.nextOfType("delivery_state");
+    expect(frame.delivery).toMatchObject({ message_seq: posted.seq, state: "queued" });
+    expect(frame.delivery.preview).toBeNull();
     viewer.close();
   });
 });

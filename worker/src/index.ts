@@ -4197,7 +4197,9 @@ app.get("/api/channels/:slug/join-links", async (c) => {
   )
     .bind(slug)
     .all();
-  return c.json({ links: results });
+  // 和 POST 一样带完整 url：桌面版 location.origin 是 agentparty-ui://localhost，客户端兜底拼不出可用链接。
+  const origin = new URL(c.req.url).origin;
+  return c.json({ links: results.map((link) => ({ ...link, url: `${origin}/join/${String(link.code)}` })) });
 });
 
 app.delete("/api/channels/:slug/join-links/:code", async (c) => {

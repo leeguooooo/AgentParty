@@ -1536,6 +1536,8 @@ export function TeamPanel({ teams }: { teams: TeamSummary[] }) {
 type AgentBoardStatus = "busy" | "blocked" | "idle" | "offline";
 const AGENT_STATUS_ORDER: Record<AgentBoardStatus, number> = { busy: 0, blocked: 1, idle: 2, offline: 3 };
 const ACTIVE_DELIVERY_STATES = new Set<PublicDirectedDelivery["state"]>(["queued", "claimed", "running", "waiting_owner"]);
+// 一个 agent 积压几十条排队投递时，卡片不能被撑成整屏——只展示最近几条，其余折叠成一行计数。
+const AGENT_BOARD_MAX_WORK_ROWS = 5;
 
 export function activeDeliveryTargets(deliveries: PublicDirectedDelivery[]): string[] {
   return [...new Set(deliveries.filter((delivery) => ACTIVE_DELIVERY_STATES.has(delivery.state)).map((delivery) => delivery.target_name))];
@@ -1544,6 +1546,12 @@ export function activeDeliveryTargets(deliveries: PublicDirectedDelivery[]): str
 function agentWorkSummary(body: string): string {
   const compact = body.replace(/\s+/g, " ").trim();
   return compact.length > 160 ? `${compact.slice(0, 157)}…` : compact;
+}
+
+// 已撤回消息的本地行是 [retracted] 占位甚至历史残留，正文和 delivery.preview 都不可再展示。
+function agentWorkSummaryFor(message: MsgFrame | undefined, preview?: string | null): string {
+  if (message?.retracted === true) return "";
+  return agentWorkSummary(message?.body ?? "") || (preview ?? "");
 }
 
 export function agentPresenceSummary(
@@ -1656,14 +1664,15 @@ export function AgentBoardPanel({
         id: delivery.id,
         seq: delivery.message_seq,
         state: delivery.state,
-        summary: agentWorkSummary(messagesBySeq.get(delivery.message_seq)?.body ?? ""),
+        // 优先本地已加载正文（含实时编辑），窗口外的老消息退回 worker 投影时带的 preview。
+        summary: agentWorkSummaryFor(messagesBySeq.get(delivery.message_seq), delivery.preview),
       }));
       if (typeof p?.current_task === "number" && !knownDeliverySeqs.has(p.current_task)) {
         activeWork.unshift({
           id: `presence-${name}-${p.current_task}`,
           seq: p.current_task,
           state: "running",
-          summary: agentWorkSummary(messagesBySeq.get(p.current_task)?.body ?? ""),
+          summary: agentWorkSummaryFor(messagesBySeq.get(p.current_task)),
         });
       }
       // #187 第4项「排期」：surface presence 里的暂停/定时恢复（resume_at），看板本行直接可见。
@@ -1741,7 +1750,7 @@ export function AgentBoardPanel({
                 </div>
                 {row.activeWork.length > 0 && (
                   <ol className="agent-board-task-list agent-board-work-list">
-                    {row.activeWork.map((work) => (
+                    {row.activeWork.slice(0, AGENT_BOARD_MAX_WORK_ROWS).map((work) => (
                       <li key={work.id} className={`agent-board-task agent-board-work agent-board-work--${work.state}`}>
                         <span className="t-mono agent-board-task-id">#{work.seq}</span>
                         <span className="agent-board-task-title" title={work.summary || undefined}>
@@ -1750,6 +1759,11 @@ export function AgentBoardPanel({
                         <span className="t-mono agent-board-task-state">{t(`WakeReceipt.delivery.state.${work.state}`)}</span>
                       </li>
                     ))}
+                    {row.activeWork.length > AGENT_BOARD_MAX_WORK_ROWS && (
+                      <li className="agent-board-task agent-board-work agent-board-work-more t-mono">
+                        {t("Channel.agentBoard.workMore", { count: String(row.activeWork.length - AGENT_BOARD_MAX_WORK_ROWS) })}
+                      </li>
+                    )}
                   </ol>
                 )}
                 {row.tasks.length > 0 && (
