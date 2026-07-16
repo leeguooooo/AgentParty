@@ -64,6 +64,14 @@ async function deliveryRows(
   );
 }
 
+async function messageMentions(slug: string, seq: number): Promise<string[]> {
+  const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+  return runInDurableObject(stub, async (_instance: ChannelDO, state) => {
+    const row = state.storage.sql.exec("SELECT mentions_json FROM messages WHERE seq = ?", seq).toArray()[0];
+    return JSON.parse(String(row?.mentions_json ?? "[]")) as string[];
+  });
+}
+
 async function expectUpgradeRequiredWithoutRaw(ws: WsClient, forbiddenSeq?: number) {
   for (;;) {
     const frame = await ws.next();
@@ -79,6 +87,58 @@ async function expectUpgradeRequiredWithoutRaw(ws: WsClient, forbiddenSeq?: numb
 }
 
 describe("持久定向投递（issue #551）", () => {
+  it("does not route explicit mentions to an agent token scoped to another channel", async () => {
+    const owner = `${uniq("owner")}@example.com`;
+    const sender = await seedToken("agent", uniq("sender"), { owner });
+    const scopedElsewhere = await seedToken("agent", uniq("scoped"), { owner, channelScope: "other-channel" });
+    const slug = await createChannel(sender.token);
+
+    const response = await api(`/api/channels/${slug}/messages`, sender.token, {
+      method: "POST",
+      body: JSON.stringify({ kind: "message", body: "cross scope", mentions: [scopedElsewhere.name], reply_to: null }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(await deliveryRows(slug)).toEqual([]);
+  });
+
+  it("does not expand squad members whose agent tokens are scoped to another channel", async () => {
+    const owner = `${uniq("owner")}@example.com`;
+    const sender = await seedToken("agent", uniq("sender"), { owner });
+    const inScope = await seedToken("agent", uniq("in-scope"), { owner });
+    const outOfScope = await seedToken("agent", uniq("out-scope"), { owner, channelScope: "other-channel" });
+    const slug = await createChannel(sender.token);
+    const squad = uniq("squad").toLowerCase();
+    await env.DB.prepare(
+      "INSERT INTO channel_squads (channel_slug, name, leader_name, members_json, created_by, created_by_kind, created_at, updated_at) VALUES (?, ?, NULL, ?, ?, 'agent', ?, ?)",
+    ).bind(slug, squad, JSON.stringify([inScope.name, outOfScope.name]), sender.name, Date.now(), Date.now()).run();
+
+    const posted = await sendMention(slug, sender.token, squad, "team work");
+
+    expect(await messageMentions(slug, posted.seq)).toEqual([squad, inScope.name]);
+    expect(await deliveryRows(slug)).toMatchObject([{ target_name: inScope.name }]);
+  });
+
+  it("keeps historical agent replies ordinary when the current owner no longer matches sender_owner", async () => {
+    const oldOwner = `${uniq("old-owner")}@example.com`;
+    const newOwner = `${uniq("new-owner")}@example.com`;
+    const human = await seedToken("human", uniq("human"), { owner: oldOwner });
+    const target = await seedToken("agent", uniq("reply-agent"), { owner: oldOwner });
+    const slug = await createChannel(human.token);
+    const posted = await sendMention(slug, human.token, target.name, "old owner question");
+    await env.DB.prepare("UPDATE tokens SET owner = ? WHERE name = ?").bind(newOwner, target.name).run();
+
+    const reply = await api(`/api/channels/${slug}/messages`, human.token, {
+      method: "POST",
+      body: JSON.stringify({ kind: "message", body: "following up", mentions: [], reply_to: posted.seq }),
+    });
+
+    expect(reply.status).toBe(200);
+    const replySeq = ((await reply.json()) as { seq: number }).seq;
+    expect(await messageMentions(slug, replySeq)).toEqual([]);
+    expect(await deliveryRows(slug)).toHaveLength(1);
+  });
+
   it("pause keeps the original delivery queued and resume dispatches that exact work once", async () => {
     const sender = await seedToken("agent", uniq("sender"));
     const target = await seedToken("agent", uniq("target"));

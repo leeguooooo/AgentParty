@@ -94,6 +94,7 @@ export function welcomeFrame(lastSeq: number, self = "me", readCursors?: Array<{
     channel: "dev",
     self,
     last_seq: lastSeq,
+    participants: [],
     presence: [],
     ...(readCursors ? { read_cursors: readCursors } : {}),
   };

@@ -22,6 +22,16 @@ interface ExportShape {
   presence: { name: string }[];
 }
 
+function normalizeRows(rows: Record<string, unknown>[]) {
+  return rows.map((row) => Object.fromEntries(
+    Object.entries(row).map(([key, value]) => [key, value === undefined ? null : value]),
+  ));
+}
+
+function deliverySnapshot(state: DurableObjectState) {
+  return normalizeRows(state.storage.sql.exec("SELECT * FROM directed_deliveries ORDER BY id").toArray());
+}
+
 async function fixture() {
   const acct = `${uniq("acct")}@leeguoo.com`;
   const owner = await seedToken("agent", uniq("owner"), { owner: acct });
@@ -157,6 +167,7 @@ describe("gdpr identity erasure + export (#421)", () => {
     expect(exportedDecision).not.toHaveProperty("delivery_id");
     expect(exportedDecision).not.toHaveProperty("work_id");
     expect(exportedDecision).not.toHaveProperty("continuation_ref");
+    const deliveriesBeforeErase = await runInDurableObject(stub, async (_instance: ChannelDO, state) => deliverySnapshot(state));
 
     // 擦除（moderator）：返回各表命中数。
     const eraseRes = await api(`/api/channels/${slug}/identity/${encodeURIComponent(writer.name)}/data`, owner.token, {
@@ -195,6 +206,7 @@ describe("gdpr identity erasure + export (#421)", () => {
       expect(
         Number(state.storage.sql.exec("SELECT COUNT(*) AS n FROM directed_deliveries WHERE target_name = ?", other.name).one().n),
       ).toBe(1);
+      expect(deliverySnapshot(state)).toEqual(deliveriesBeforeErase.filter((row) => row.target_name !== writer.name));
       expect(
         Number(state.storage.sql.exec(
           "SELECT COUNT(*) AS n FROM messages WHERE sender_name = ? AND decision_state IS NOT NULL",

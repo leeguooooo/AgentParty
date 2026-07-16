@@ -440,6 +440,21 @@ describe("ws client", () => {
     expect(statuses).toEqual([{ status: "open" }, { status: "closed", error: "token revoked, re-run: party init" }]);
   });
 
+  test("drops malformed server frames before delivery to consumers", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send({ type: "welcome", channel: "dev", self: "me", last_seq: 2, presence: [] });
+        sock.send({ ...msgFrame(1, "missing timestamp"), ts: undefined });
+        sock.send(welcomeFrame(2));
+        sock.send(msgFrame(3, "valid"));
+      }
+    });
+    conn = connect(server.url, "ap_tok", "dev", 0, { backoffBaseMs: 20 });
+    const frames = await collect(conn, 2);
+    expect(frames.map((frame) => frame.type)).toEqual(["welcome", "msg"]);
+    expect(frames[1]).toMatchObject({ seq: 3, body: "valid" });
+  });
+
   test("inbound watchdog retires a half-open socket and reconnects even without a close event", async () => {
     jest.useFakeTimers();
     useProbeWebSocket();
@@ -505,13 +520,15 @@ describe("ws client", () => {
     const first = ProbeWebSocket.instances[0]!;
     first.open();
 
-    jest.advanceTimersByTime(20);
+    jest.advanceTimersByTime(10);
     first.deliver("{not-json");
-    jest.advanceTimersByTime(20);
+    jest.advanceTimersByTime(10);
     first.deliver("null");
     jest.advanceTimersByTime(10);
     first.deliver("{}");
     jest.advanceTimersByTime(10);
+    first.deliver({ type: "pong", extra: true });
+    jest.advanceTimersByTime(20);
 
     expect(first.closeCalls).toContainEqual({ code: 1011, reason: "inbound idle timeout" });
     expect(first.readyState).toBe(ProbeWebSocket.CLOSED);
