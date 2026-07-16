@@ -80,6 +80,7 @@ describe("Lark organization member invitations (#358)", () => {
     expect(document.paths["/api/channels/{slug}/lark-members"]).toBeDefined();
     expect(JSON.stringify({
       search: document.paths["/api/channels/{slug}/lark-directory"],
+      organization: document.paths["/api/channels/{slug}/lark-organization"],
       invite: document.paths["/api/channels/{slug}/lark-members"],
     })).not.toMatch(/access.?token/i);
   });

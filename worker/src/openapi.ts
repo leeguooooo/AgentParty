@@ -380,7 +380,7 @@ export const openapiDocument = {
           "403": { description: "not a same-tenant Lark human moderator" },
           "404": { description: "channel not found" },
           "429": { description: "per-account directory request limit reached; Retry-After included" },
-          "503": { description: "Lark contact permission is missing or the directory is unavailable" },
+          "503": { description: "directory unavailable: lark_contact_permission_required when contact access is missing, or lark_department_permission_required when department name fields are missing" },
         },
       },
     },

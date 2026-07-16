@@ -51,11 +51,11 @@ describe("Lark directory API", () => {
       }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
 
-    await browseLarkOrganization("session-token", "private room", "od_app", 50, "departments/next", null, true, false);
+    await browseLarkOrganization("session-token", "private room", "od_app", 50, null, "users/next", false, true);
     expect(request!.url).toContain("/api/channels/private%20room/lark-organization?");
     expect(request!.url).toContain("department_id=od_app");
-    expect(request!.url).toContain("department_cursor=departments%2Fnext");
-    expect(request!.url).toContain("users=0");
+    expect(request!.url).toContain("user_cursor=users%2Fnext");
+    expect(request!.url).toContain("departments=0");
     expect(request!.headers.get("authorization")).toBe("Bearer session-token");
   });
 });
