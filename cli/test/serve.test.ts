@@ -1017,6 +1017,8 @@ describe("builtin runner", () => {
     expect(calls[0]!.slice(0, 2)).toEqual(["codex", "exec"]);
     expect(calls[1]!.slice(0, 2)).toEqual(["codex", "exec"]);
     expect(calls[1]!.slice(calls[1]!.indexOf("resume"), calls[1]!.indexOf("resume") + 2)).toEqual(["resume", uuid(1)]);
+    // 先断言 --sandbox 真的存在：indexOf 缺失时返回 -1，只比顺序会放过 sandbox 护栏被删的回归。
+    expect(calls[1]!).toContain("--sandbox");
     expect(calls[1]!.indexOf("--sandbox")).toBeLessThan(calls[1]!.indexOf("resume"));
     const log = readFileSync(join(workdir, "serve-runner.log"), "utf8");
     expect(log).toContain("seq=1 sid=019f35d9");

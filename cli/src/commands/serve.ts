@@ -2741,21 +2741,22 @@ export function projectAgentWorkerName(handle: string, channel: string): string 
 export function migrateLegacyProfileFrontLane(channel: string, frontStateKey: string, frontRunnerWorkdir: string): void {
   const marker = join(frontRunnerWorkdir, ".front-lane-init");
   if (existsSync(marker)) return;
-  try {
-    const legacyCursor = loadCursor(channel);
-    const legacyStuck = loadStuck(channel);
-    const legacyRev = loadRevCursor(channel);
-    const hasLegacy = legacyCursor > 0 || legacyStuck !== null || legacyRev > 0;
-    if (hasLegacy && loadCursorForConfig(channel, frontStateKey) <= 0) {
-      if (legacyCursor > 0) saveCursorForConfig(channel, legacyCursor, frontStateKey);
-      if (legacyRev > 0) saveRevCursorForConfig(channel, legacyRev, frontStateKey);
-      if (legacyStuck !== null) saveStuckForConfig(channel, legacyStuck, frontStateKey);
-      try { rmSync(join(frontRunnerWorkdir, RUNNER_SESSION_FILE), { force: true }); } catch { /* 无所谓 */ }
-      try { rmSync(join(frontRunnerWorkdir, RUNNER_CONTINUATIONS_DIR), { recursive: true, force: true }); } catch { /* 无所谓 */ }
-    }
-  } finally {
-    try { writeFileSync(marker, "v1\n", { flag: "w" }); } catch { /* 无所谓 */ }
+  const legacyCursor = loadCursor(channel);
+  const legacyStuck = loadStuck(channel);
+  const legacyRev = loadRevCursor(channel);
+  const hasLegacy = legacyCursor > 0 || legacyStuck !== null || legacyRev > 0;
+  if (hasLegacy && loadCursorForConfig(channel, frontStateKey) <= 0) {
+    // 修订游标/欠账先迁，会话痕迹再清，游标（本函数的迁移完成信号）最后落。任一步抛错就让它冒到
+    // attachInvite 的按频道重试里，下次挂载重跑整段——绝不能半套就落哨兵永久跳过（正是 #118/#198
+    // 反复强调的静默丢失）。故哨兵只在全部成功后写，不放进 finally。
+    if (legacyRev > 0) saveRevCursorForConfig(channel, legacyRev, frontStateKey);
+    if (legacyStuck !== null) saveStuckForConfig(channel, legacyStuck, frontStateKey);
+    try { rmSync(join(frontRunnerWorkdir, RUNNER_SESSION_FILE), { force: true }); } catch { /* 无所谓 */ }
+    try { rmSync(join(frontRunnerWorkdir, RUNNER_CONTINUATIONS_DIR), { recursive: true, force: true }); } catch { /* 无所谓 */ }
+    if (legacyCursor > 0) saveCursorForConfig(channel, legacyCursor, frontStateKey);
   }
+  // 走到这里说明迁移已整段成功（或本就无遗产）：落哨兵，后续挂载不再重试。
+  writeFileSync(marker, "v1\n", { flag: "w" });
 }
 
 function managedWorkerResultRoute(): RunnerResultRoute {

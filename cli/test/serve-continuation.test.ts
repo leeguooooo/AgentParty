@@ -215,7 +215,9 @@ describe("builtin per-work continuations (#548)", () => {
     expect(calls.every(({ args }) =>
       args[0] === "codex" &&
       args[1] === "exec" &&
-      (!args.includes("resume") || args.indexOf("--sandbox") < args.indexOf("resume"))
+      // resume 分支必须真的带 --sandbox 且在 resume 之前——indexOf 在缺失时返回 -1，只比顺序会放过
+      // sandbox 护栏被整段删除的安全回归（正是 #578 review 里 worker sandbox 被架空那类问题）。
+      (!args.includes("resume") || (args.includes("--sandbox") && args.indexOf("--sandbox") < args.indexOf("resume")))
     )).toBe(true);
     expect(calls[0]!.env).toMatchObject({
       AGENTPARTY_CONFIG: "/safe/profile-child.json",
