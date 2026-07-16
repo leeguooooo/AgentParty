@@ -231,6 +231,10 @@ function assertOwnerAnswerLineage(context: WakeContext, env: NodeJS.ProcessEnv):
   if (response.chosen_option !== "continue" && response.chosen_option !== "stop") {
     throw new Error("owner response chose an option outside the smoke request");
   }
+  const expectedIndex = response.chosen_option === "continue" ? 0 : 1;
+  if (response.chosen_index !== expectedIndex) {
+    throw new Error("owner response chosen_index does not match chosen_option");
+  }
   return response;
 }
 
@@ -357,7 +361,11 @@ export async function executeIssue543LiveRunner(
       "unattended decision",
     );
     const resolution = recordOf(decision.decision_resolution);
-    if (resolution?.state !== "auto_resolved" || resolution.chosen_option !== "proceed") {
+    if (
+      resolution?.state !== "auto_resolved"
+      || resolution.chosen_index !== 0
+      || resolution.chosen_option !== "proceed"
+    ) {
       throw new Error("unattended decision was not auto_resolved to the first option");
     }
     const seq = decisionSeq(decision, "unattended decision");
@@ -403,13 +411,21 @@ export async function executeIssue543LiveRunner(
   return { kind: "linked_reply", triggerSeq: context.seq, node };
 }
 
+// Strip C0 (0x00-0x1F), DEL (0x7F), and C1 (0x80-0x9F) control characters so
+// untrusted server/command output cannot inject terminal escape sequences.
+export function terminalSafe(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+}
+
 export async function main(): Promise<number> {
   try {
     const outcome = await executeIssue543LiveRunner();
     console.log(JSON.stringify({ ok: true, ...outcome }));
     return 0;
   } catch (error) {
-    console.error(`issue-543 live runner failed: ${error instanceof Error ? error.message : String(error)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`issue-543 live runner failed: ${terminalSafe(message)}`);
     return 1;
   }
 }

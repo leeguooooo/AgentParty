@@ -149,6 +149,23 @@ describe("#543 reusable live runner", () => {
     expect(calls).toBe(1);
   });
 
+  test("unattended marker rejects a decision whose index and option disagree", async () => {
+    const file = contextFile({ body: "QA543-UNATTENDED" });
+    let calls = 0;
+    await expect(executeIssue543LiveRunner({
+      env: env(file),
+      runParty: async () => {
+        calls += 1;
+        return successful(JSON.stringify({
+          seq: 54,
+          // Self-contradictory receipt: option "proceed" but index points at the second option.
+          decision_resolution: { state: "auto_resolved", chosen_index: 1, chosen_option: "proceed" },
+        }));
+      },
+    })).rejects.toThrow("was not auto_resolved");
+    expect(calls).toBe(1);
+  });
+
   test("owner marker parks one lineage-bound decision without posting a premature reply", async () => {
     const file = contextFile({ body: "QA543-OWNER-ASK" });
     const calls: string[][] = [];

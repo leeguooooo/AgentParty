@@ -116,21 +116,69 @@ function isSender(value: unknown): boolean {
   return isRecord(value) && typeof value.name === "string" && (value.kind === "agent" || value.kind === "human");
 }
 
+function isStringOrNull(value: unknown): boolean {
+  return value === null || typeof value === "string";
+}
+
+function isFiniteNumberOrNull(value: unknown): boolean {
+  return value === null || Number.isFinite(value);
+}
+
+function isRecordOrNull(value: unknown): boolean {
+  return value === null || isRecord(value);
+}
+
+// MsgFrame (shared/src/protocol.ts): only `type/seq/sender/kind/body/mentions/reply_to/
+// state/note/status/ts` are required. `state`/`note` are `string | null`, `status` is
+// `StatusEvent | null` (an object — status-type frames carry a StatusEvent). Everything
+// else on MsgFrame is optional (`?`) and is intentionally NOT required here.
 function isMessageFrame(value: unknown): boolean {
   return isRecord(value) &&
     (value.type === "msg" || value.type === "status") &&
     Number.isSafeInteger(value.seq) &&
     isSender(value.sender) &&
+    typeof value.kind === "string" &&
     typeof value.body === "string" &&
-    Array.isArray(value.mentions);
+    Array.isArray(value.mentions) &&
+    value.mentions.every((m) => typeof m === "string") &&
+    isFiniteNumberOrNull(value.reply_to) &&
+    isStringOrNull(value.state) &&
+    isStringOrNull(value.note) &&
+    isRecordOrNull(value.status) &&
+    Number.isFinite(value.ts);
 }
 
-function isDelivery(value: unknown): boolean {
+// Full DirectedDelivery, carried only by holder-only `delivery` frames. Nullable fields
+// (lease_until/work_id/continuation_ref/reply_seq/last_error) are validated only for type,
+// allowing null.
+function isDirectedDelivery(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.id === "string" &&
+    Number.isSafeInteger(value.message_seq) &&
+    typeof value.target_name === "string" &&
+    typeof value.cause === "string" &&
+    typeof value.state === "string" &&
+    Number.isSafeInteger(value.attempt) &&
+    isFiniteNumberOrNull(value.lease_until) &&
+    isStringOrNull(value.work_id) &&
+    isStringOrNull(value.continuation_ref) &&
+    isFiniteNumberOrNull(value.reply_seq) &&
+    isStringOrNull(value.last_error) &&
+    Number.isFinite(value.created_at) &&
+    Number.isFinite(value.updated_at);
+}
+
+// PublicDirectedDelivery projection, carried by `delivery_state` frames. It intentionally
+// omits cause/attempt/lease_until/work_id/continuation_ref/last_error — those NEVER appear
+// on a state frame, so requiring them (as the old shared isDelivery did) wrongly rejected
+// every valid delivery_state frame.
+function isPublicDelivery(value: unknown): boolean {
   return isRecord(value) &&
     typeof value.id === "string" &&
     Number.isSafeInteger(value.message_seq) &&
     typeof value.target_name === "string" &&
     typeof value.state === "string" &&
+    isFiniteNumberOrNull(value.reply_seq) &&
     Number.isFinite(value.created_at) &&
     Number.isFinite(value.updated_at);
 }
@@ -180,11 +228,11 @@ function parseServerFrame(value: unknown): ServerFrame | null {
     case "delivery_adapter":
       return value.adapter === "watch" && value.registered === true ? value as unknown as ServerFrame : null;
     case "delivery":
-      return isDelivery(value.delivery) && isMessageFrame(value.message)
+      return isDirectedDelivery(value.delivery) && isMessageFrame(value.message)
         ? value as unknown as ServerFrame
         : null;
     case "delivery_state":
-      return isDelivery(value.delivery) ? value as unknown as ServerFrame : null;
+      return isPublicDelivery(value.delivery) ? value as unknown as ServerFrame : null;
     default:
       return null;
   }

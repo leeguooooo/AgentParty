@@ -2740,7 +2740,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
         reconnecting: true,
         reconnect_count: reconnectCount,
         connected_since: null,
-        last_error: detail?.error ?? null,
+        // 无新错误详情时保留上一条重连原因，避免 inbound timeout 后的替换连接在收到
+        // 有效帧前再次断开时把 last_error 覆盖成 null（丢失原因）。
+        ...(detail?.error === undefined ? {} : { last_error: detail.error }),
       }));
     } else {
       bestEffortLocalState(() => writeHealthCache({ channel: o.channel, ws_connected: false, reconnecting: false, connected_since: null, last_error: detail?.error ?? null }));

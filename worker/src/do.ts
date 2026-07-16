@@ -6738,9 +6738,13 @@ export class ChannelDO extends Server<Env> {
       }
     }
     if (seq % 100 === 0) {
+      // 按数量裁剪也必须尊重终态保留窗口：只删已过 DIRECTED_DELIVERY_TERMINAL_RETENTION_MS
+      // 的非活跃 delivery，否则刚终止的审计行会在下一个第 100 条消息时被立即抹掉，绕过
+      // pruneDirectedDeliveryRetention 的 7 天窗口。
       sql.exec(
         `DELETE FROM directed_deliveries
-          WHERE message_seq IN (
+          WHERE updated_at <= ?
+            AND message_seq IN (
             SELECT m.seq FROM messages m
              WHERE m.seq <= ?
                AND (m.completion_review_state IS NULL OR m.completion_review_state != 'pending_review')
@@ -6751,8 +6755,12 @@ export class ChannelDO extends Server<Env> {
                     AND active.state IN ('queued', 'claimed', 'running', 'waiting_owner')
                )
           )`,
+        now - DIRECTED_DELIVERY_TERMINAL_RETENTION_MS,
         seq - RETAIN_N,
       );
+      // 消息删除也要等 delivery 审计行清空后再动，否则保留期内的终态 delivery 会指向已删消息。
+      // 上面的 delivery 裁剪先跑，剩下的 directed_deliveries 只会是活跃行或仍在保留期的终态行；
+      // 任一残留都保住消息，等下一轮 delivery 过期后再一并回收。
       sql.exec(
         `DELETE FROM messages AS m
           WHERE m.seq <= ?
@@ -6761,7 +6769,6 @@ export class ChannelDO extends Server<Env> {
             AND NOT EXISTS (
               SELECT 1 FROM directed_deliveries d
                WHERE d.message_seq = m.seq
-                 AND d.state IN ('queued', 'claimed', 'running', 'waiting_owner')
             )`,
         seq - RETAIN_N,
       );
