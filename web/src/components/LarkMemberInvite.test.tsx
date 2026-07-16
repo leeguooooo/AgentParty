@@ -47,6 +47,51 @@ test("searches and directly invites a Lark organization user", async () => {
   expect(JSON.stringify(renderer!.toJSON())).toContain("Added");
 });
 
+test("serializes invitations until the active request finishes", async () => {
+  let finishAlice!: () => void;
+  const alicePending = new Promise<void>((resolve) => { finishAlice = resolve; });
+  const invited: string[] = [];
+  act(() => {
+    renderer = create(
+      <LocaleProvider>
+        <LarkMemberInvite
+          slug="room"
+          token="token"
+          search={async () => ({
+            users: [
+              { id: "on_alice", name: "Alice", avatar_url: null, already_member: false },
+              { id: "on_bob", name: "Bob", avatar_url: null, already_member: false },
+            ],
+            next_cursor: null,
+          })}
+          invite={async (_token, _slug, id) => {
+            invited.push(id);
+            if (id === "on_alice") await alicePending;
+            return { id, name: id === "on_alice" ? "Alice" : "Bob", avatar_url: null, already_member: false };
+          }}
+        />
+      </LocaleProvider>,
+    );
+  });
+  const input = renderer!.root.findByProps({ "aria-label": "Search Lark organization" });
+  act(() => input.props.onChange({ target: { value: "team" } }));
+  await act(async () => renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+  let aliceRequest!: Promise<void>;
+  await act(async () => {
+    aliceRequest = renderer!.root.findByProps({ "data-lark-user-id": "on_alice" }).props.onClick();
+    await Promise.resolve();
+  });
+  const bob = renderer!.root.findByProps({ "data-lark-user-id": "on_bob" });
+  expect(bob.props.disabled).toBe(true);
+  await act(async () => bob.props.onClick());
+  expect(invited).toEqual(["on_alice"]);
+  await act(async () => {
+    finishAlice();
+    await aliceRequest;
+  });
+  expect(renderer!.root.findByProps({ "data-lark-user-id": "on_bob" }).props.disabled).toBe(false);
+});
+
 test("browses departments and directly invites a selected organization user", async () => {
   const browsed: string[] = [];
   const invited: string[] = [];
