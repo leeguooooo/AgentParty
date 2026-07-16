@@ -214,11 +214,10 @@ describe("serve durable directed delivery (#551)", () => {
     }))).toBe(EXIT_ARCHIVED);
 
     expect(harnessCalls).toBe(0);
+    // 定向投递照常 settle 为 failed（不再重投），但 managed worker 的非派工 wake 是静默的：
+    // 不在频道刷一条 blocked 状态（ManagedWorkerUndispatchedError，#3），否则每条闲聊回复都刷噪声。
     expect(updates).toEqual(["failed"]);
-    expect(posts).toContainEqual(expect.objectContaining({
-      state: "blocked",
-      blocked_reason: expect.stringContaining("managed worker rejected unverified wake"),
-    }));
+    expect(posts).not.toContainEqual(expect.objectContaining({ state: "blocked" }));
   });
 
   test("custom decision resumes as a fresh process on the served channel with exact lineage context", async () => {

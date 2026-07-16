@@ -835,6 +835,12 @@ export interface WelcomeFrame {
   read_cursors?: ReadCursor[];
   /** 服务端会把定向 @ 作为独立 delivery 帧重放；新 serve 应以它为唤醒真值，普通 read cursor 仅管阅读。 */
   directed_delivery?: "v1";
+  /**
+   * 服务端会强制 owner 决策的应答人绑定：owner_decision 携带 expected_decision_responder_owner 时，
+   * 只有该 owner 账号本人能应答（在 CAS 里校验）。旧服务端不发这个能力位，会静默丢弃绑定字段——
+   * managed front 据此判断能否安全发起 owner 决策，不支持就 fail closed，不静默降级授权。
+   */
+  owner_decision_binding?: "v1";
 }
 
 export interface DirectedDelivery {

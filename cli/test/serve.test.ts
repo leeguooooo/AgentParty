@@ -551,8 +551,8 @@ describe("runServe", () => {
       expect(ctx.protocol_reminder).toContain("front agent");
       expect(ctx.protocol_reminder).toContain("AskUserQuestion");
       expect(ctx.protocol_reminder).toContain("兼容模式");
-      expect(ctx.protocol_reminder).toContain("必须交给 harness 的 subagent/worker");
-      expect(ctx.protocol_reminder).toContain("明确报 blocked");
+      expect(ctx.protocol_reminder).toContain("优先交给 harness 的 subagent/worker");
+      expect(ctx.protocol_reminder).toContain("不要只报 blocked");
       expect(ctx.protocol_reminder).not.toContain("不要用 tmux/后台守护/子代理去接管这次唤醒");
       expect(ctx.operating_contract).toMatchObject({
         role: "front_agent",
@@ -930,6 +930,7 @@ describe("managed front protocol", () => {
       frontName: "front",
       workerName: "worker",
       ownerAccount: owner,
+      ownerDecisionBindingEnforced: () => true,
       fetch: async (_server, _token, _channel, since, limit) =>
         history.filter((message) => message.seq > (since ?? 0)).slice(0, limit),
     });
@@ -1063,7 +1064,7 @@ describe("builtin runner", () => {
     expect(msg.attachments![0]!.filename).toBe("delivery.diff");
   });
 
-  test("managed front output cannot activate a host-file [attach] marker", async () => {
+  test("managed front output treats a host-file [attach] marker as inert literal text (#6)", async () => {
     const { posts, post } = postRecorder();
     const { uploads, upload } = uploadRecorder();
     const workdir = tempDir();
@@ -1081,9 +1082,11 @@ describe("builtin runner", () => {
       frontName: "front",
       workerName: "worker",
       ownerAccount: "owner@example.com",
+      ownerDecisionBindingEnforced: () => true,
     });
 
-    await expect(createBuiltinRunner({
+    // attachmentRoot===null（managed front 无附件能力）：marker 不再抛 blocked，而是原样透传成普通文字。
+    await createBuiltinRunner({
       server: "http://agentparty.test",
       token: "ap_front",
       channel: "dev",
@@ -1094,10 +1097,15 @@ describe("builtin runner", () => {
       uploadAttachment: upload,
       resultRoute: route,
       attachmentRoot: null,
-    })(triggerFrame(42), runnerCtx())).rejects.toThrow("managed front host-file attachments are disabled");
+    })(triggerFrame(42), runnerCtx());
 
+    // 附件语法既没触发上传，也没把主机文件内容读进来——只是当作字面量发进频道。
     expect(uploads).toHaveLength(0);
-    expect(posts.some((entry) => (entry.body as { kind?: string }).kind === "message")).toBe(false);
+    const message = posts.find((entry) => (entry.body as { kind?: string }).kind === "message");
+    expect(message).toBeDefined();
+    const body = (message!.body as { body: string }).body;
+    expect(body).toContain(`[attach:${secret}]`);
+    expect(body).not.toContain("must never leave the host");
   });
 
   test("managed worker attachments stay inside the real workspace and reject symlink escape", async () => {
@@ -1497,6 +1505,7 @@ describe("builtin runner", () => {
       frontName: "front",
       workerName: "worker",
       ownerAccount: owner,
+      ownerDecisionBindingEnforced: () => true,
     });
     const frame = msgFrame(20, "ship it", {
       sender: { name: "leo", kind: "human", owner },
@@ -1556,6 +1565,7 @@ describe("builtin runner", () => {
       frontName: "front",
       workerName: "worker",
       ownerAccount: owner,
+      ownerDecisionBindingEnforced: () => true,
     });
     const run = createBuiltinRunner({
       server: "http://agentparty.test",
@@ -2011,7 +2021,7 @@ describe("project profile daemon", () => {
       o.sdkRunner?.attachmentRoot === null)).toBe(true);
     expect(served.filter((o) => o.projectAgent?.runtime_role === "worker").every((o) =>
       o.sdkRunner?.outputSchema === undefined &&
-      o.sdkRunner?.sandbox === "full_access" &&
+      o.sdkRunner?.sandbox === "workspace-write" &&
       o.sdkRunner?.attachmentRoot === o.projectAgent?.channel_workdir)).toBe(true);
     expect(served.every((o) => o.sdkRunner?.cwd === o.projectAgent?.channel_workdir)).toBe(true);
     expect(JSON.parse(readFileSync(ownerConfig, "utf8"))).toEqual({
@@ -2279,6 +2289,7 @@ describe("codex-sdk runner", () => {
       frontName: "front",
       workerName: "worker",
       ownerAccount: owner,
+      ownerDecisionBindingEnforced: () => true,
     });
     const run = sdkRunner({
       workdir,
@@ -2321,6 +2332,7 @@ describe("codex-sdk runner", () => {
         frontName: "front",
         workerName: "worker",
         ownerAccount: owner,
+        ownerDecisionBindingEnforced: () => true,
       }),
       codexFactory: () => ({ startThread: () => thread, resumeThread: () => thread }),
     });

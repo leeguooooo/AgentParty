@@ -45,6 +45,7 @@ import {
   deleteRunnerContinuation,
   mergeRunnerContinuation,
   readRunnerContinuation,
+  RUNNER_CONTINUATIONS_DIR,
   type RunnerContinuationState,
 } from "../continuation";
 
@@ -55,9 +56,9 @@ const COMMON_PROTOCOL_REMINDER =
   " 不要在 runner 里调用 AskUserQuestion、request_user_input 或停住等人；不要另建频道、启动 tmux/后台守护进程，或切到项目自带的其它工作流。";
 
 const ADVISORY_FRONT_REMINDER =
-  " 你是留在主频道沟通和调度的 front agent。简短对话和一次只读路由检查可直接处理；代码修改、多步排查、浏览器/运维及其它耗时工作必须交给 harness 的 subagent/worker。" +
-  " 当前是兼容模式，CLI 不能证明 worker 已启动；如果 harness 无法创建 worker，必须在频道明确报 blocked，不能静默改成自己执行。" +
-  " 需要更多上下文用 `party history <channel>`；结论用 `party send --reply-to <seq>` 发回本频道。";
+  " 你是留在主频道沟通和调度的 front agent。简短对话和一次只读路由检查可直接处理；代码修改、多步排查、浏览器/运维及其它耗时工作，优先交给 harness 的 subagent/worker，让它回报证据由你汇总。" +
+  " 这是兼容模式（CLI 不能证明 worker 已启动）：harness 支持子 agent 就委派；确实无法创建 worker 时，就在本会话内把活干完，不要只报 blocked 停住。" +
+  " 需要 owner 给权限、取舍或批准时用 `party decision ask <问题> [--option ...]`；需要更多上下文用 `party history <channel>`；结论用 `party send --reply-to <seq>` 发回本频道。";
 
 const MANAGED_FRONT_REMINDER =
   " 你是 managed front agent，是三个方向的通信与调度控制面：对频道交流、对 owner 请求决定、对子 worker 派工/追问/验收；执行 worker 已由 supervisor 独立常驻。你没有执行面权限，也不要调用 party CLI。" +
@@ -114,7 +115,7 @@ function operatingContract(projectAgent: ProjectAgentRunContext | null) {
     ],
     unsupported_behavior: managed
       ? "managed front output is restricted to channel_reply, owner_decision, worker_dispatch, worker_feedback, or blocked actions"
-      : "report blocked when no worker runtime is available; do not silently execute worker work in the front agent",
+      : "prefer delegating heavy work to a worker; when the harness cannot create one, complete it in this session rather than reporting blocked; use `party decision ask` for owner approval",
   } as const;
 }
 
@@ -189,6 +190,18 @@ export class RunnerTimeoutError extends WakeBlockedError {
     super(`runner timed out after ${timeoutMs}ms`, false);
     this.name = "RunnerTimeoutError";
     this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * managed worker 收到的这条 wake 根本不是 front 派给它的活（例如有人回复了 worker 的报告，服务端
+ * 据 #544 自动补了一条 cause=reply 的定向投递）。worker 不是频道参与者，对这类 wake「无话可说」：
+ * 定向投递照常 settle（不再重投），但不在频道刷一条 blocked 状态——否则每条闲聊回复都刷一次噪声。
+ */
+export class ManagedWorkerUndispatchedError extends WakeBlockedError {
+  constructor(message: string) {
+    super(message, false);
+    this.name = "ManagedWorkerUndispatchedError";
   }
 }
 
@@ -272,6 +285,11 @@ const DEFAULT_WAKE_RETRY_DELAY_MS = 500;
 // 无人值守 runner 的硬上限。owner 问答必须走 decision/waiting_owner，不能靠一个
 // headless 子进程永久占住 serve。CLI 可按任务体量覆盖，测试直接注入毫秒值。
 export const DEFAULT_RUNNER_TIMEOUT_MS = 30 * 60_000;
+// managed front 单次 wake 的默认预算：这一个计时窗口要罩住初轮 + 最多 4 次 unattended 决策续轮、
+// 血缘 REST 拉取与投递（见 MAX_AUTO_DECISION_CONTINUATIONS）。60s 罩不住多轮，单个 SDK/claude 轮
+// 读 JSON wake context 就常常超 60s，会把决策已 POST 的 wake 判成不可重试超时并锁死会话。给足
+// 余量，同时保留 --runner-timeout-seconds 向上/向下覆盖（不再用 Math.min 硬顶死 60s）。
+export const DEFAULT_FRONT_RUNNER_TIMEOUT_MS = 10 * 60_000;
 // 每任务心跳节奏（#228）：任务运行期间每隔这么久刷一次「还活着、正在处理 seq=X」。
 // 15s 足够让频道/本机在几分钟的长任务里持续看到新鲜度，又远比逐 tick 便宜（presence-only，不落 history）。
 const DEFAULT_TASK_HEARTBEAT_MS = 15_000;
@@ -894,6 +912,8 @@ export interface ServeOptions {
    * 首次 backlog 策略。
    */
   onWelcome?: () => void;
+  /** 每个 welcome 上报服务端能力位（用于 managed front 判断 owner 决策绑定是否被强制）。 */
+  onServerCapabilities?: (caps: { ownerDecisionBinding: boolean }) => void;
   charter?: ChannelCharter | null;
   projectAgent?: ProjectAgentRunContext | null;
   fetchCharter?: (signal?: AbortSignal) => Promise<ChannelCharter>;
@@ -1181,7 +1201,10 @@ async function deliverRunnerMessage(opts: {
     attachmentRoot,
   } = opts;
   // [attach:/abs/path]：交付物永远走 R2 附件（相对路径在此抛错，与旧行为一致）。
-  const attachPath = attachmentPathFromRunnerText(text);
+  // attachmentRoot===null 表示这个 lane（managed front）根本没有附件能力：此时 marker 只是普通
+  // 文字（例如 front 在给 worker 的派工指令里引用这行语法），原样带过去即可，绝不能因为「提到」
+  // 附件语法就把整次 wake 判成 blocked。
+  const attachPath = attachmentRoot === null ? null : attachmentPathFromRunnerText(text);
   if (decisionRequest !== undefined && attachPath !== null) {
     throw new Error("managed owner decision cannot be delivered as an attachment");
   }
@@ -2668,14 +2691,18 @@ export function parseManagedFrontAction(text: string): ManagedFrontAction {
   if (record.action === "owner_decision") {
     requireNull("body", "instruction", "reason");
     const prompt = boundedActionText(record.prompt, "prompt", DECISION_PROMPT_LIMIT);
-    if (!Array.isArray(record.options) || record.options.length > DECISION_OPTIONS_MAX) {
+    // approve/reject 决策没有选项。schema 把 options 声明为 ["array","null"]，reminder 也要求
+    // 「当前动作不用的字段必须为 null」，所以合法的批准型输出会带 options:null——按 [] 处理，
+    // 不能把一个 schema 合法的输出判成非法而 brick 整个 wake。
+    const rawOptions = record.options === null ? [] : record.options;
+    if (!Array.isArray(rawOptions) || rawOptions.length > DECISION_OPTIONS_MAX) {
       throw new WakeBlockedError(`managed front owner_decision options must contain 0-${DECISION_OPTIONS_MAX} values`, false);
     }
-    if (record.options.length === 0) return { action: "owner_decision", prompt };
-    if (record.options.length < 2) {
+    if (rawOptions.length === 0) return { action: "owner_decision", prompt };
+    if (rawOptions.length < 2) {
       throw new WakeBlockedError("managed front choice decision requires at least 2 options", false);
     }
-    const options = record.options.map((option, index) =>
+    const options = rawOptions.map((option, index) =>
       boundedActionText(option, `options[${index}]`, DECISION_OPTION_LIMIT));
     return { action: "owner_decision", prompt, options };
   }
@@ -2703,11 +2730,56 @@ export function projectAgentWorkerName(handle: string, channel: string): string 
   return `${cleanHandle.slice(0, 20)}-${cleanChannel.slice(0, 20)}-worker-${suffix}`.slice(0, 64);
 }
 
+// #578 升级迁移（每个 front lane 只跑一次，以 runnerWorkdir 里的哨兵文件为闸）：
+// main 的单 lane profile serve 用全局 state（loadCursor(channel)）与同一个 child 的自由文本会话。
+// 分成 front/worker 双 lane 后 front 改用独立 state namespace + 严格 JSON 输出模式。首次挂载时：
+//  - (#7) 把升级前的游标/欠账/修订游标迁进 front namespace，否则升级前没送达的那条 @（欠账 #198）
+//    会因新 namespace 游标=0 被当积压跳过而静默丢失；
+//  - (#10) 清掉 front runnerWorkdir 里升级前的会话指针（wake-session.json 与 continuations/，都是
+//    agentparty 自己的会话文件、不是工作树内容），否则严格 JSON 的 front 会续用那份自由文本会话、
+//    反复吐非 JSON 让 wake 一次次作废。哨兵文件保证只做一次，绝不误清升级后新建的会话。
+export function migrateLegacyProfileFrontLane(channel: string, frontStateKey: string, frontRunnerWorkdir: string): void {
+  const marker = join(frontRunnerWorkdir, ".front-lane-init");
+  if (existsSync(marker)) return;
+  try {
+    const legacyCursor = loadCursor(channel);
+    const legacyStuck = loadStuck(channel);
+    const legacyRev = loadRevCursor(channel);
+    const hasLegacy = legacyCursor > 0 || legacyStuck !== null || legacyRev > 0;
+    if (hasLegacy && loadCursorForConfig(channel, frontStateKey) <= 0) {
+      if (legacyCursor > 0) saveCursorForConfig(channel, legacyCursor, frontStateKey);
+      if (legacyRev > 0) saveRevCursorForConfig(channel, legacyRev, frontStateKey);
+      if (legacyStuck !== null) saveStuckForConfig(channel, legacyStuck, frontStateKey);
+      try { rmSync(join(frontRunnerWorkdir, RUNNER_SESSION_FILE), { force: true }); } catch { /* 无所谓 */ }
+      try { rmSync(join(frontRunnerWorkdir, RUNNER_CONTINUATIONS_DIR), { recursive: true, force: true }); } catch { /* 无所谓 */ }
+    }
+  } finally {
+    try { writeFileSync(marker, "v1\n", { flag: "w" }); } catch { /* 无所谓 */ }
+  }
+}
+
 function managedWorkerResultRoute(): RunnerResultRoute {
   return (frame, text) => ({
     replyTo: frame.seq,
     text: `[worker report for origin #${frame.reply_to ?? frame.seq}]\n${text.trim() || "worker returned no result"}`,
   });
+}
+
+// managed front 派工/返工信封的文案是 worker lane 验证「这条 wake 确实来自 front 派工」的唯一依据
+// （consumer=assertManagedWorkerWake，producer=createManagedFrontResultRoute，相隔上百行）。两侧
+// 必须共用同一份动词前缀，否则任何一侧改词/改标点都会让所有派工被判成 unverified wake 而全线挂。
+// Phase 2（#581）会把它换成结构化 delivery 字段，届时可删。
+const WORKER_DISPATCH_VERB = "已派工";
+const WORKER_FEEDBACK_VERB = "已要求补充/返工";
+
+function formatWorkerEnvelope(
+  kind: "worker_dispatch" | "worker_feedback",
+  worker: string,
+  lineage: string,
+  instruction: string,
+): string {
+  const verb = kind === "worker_feedback" ? WORKER_FEEDBACK_VERB : WORKER_DISPATCH_VERB;
+  return `${verb} ${worker}${lineage}：${instruction}`;
 }
 
 function assertManagedWorkerWake(
@@ -2717,8 +2789,8 @@ function assertManagedWorkerWake(
   self: string,
 ): void {
   if (projectAgent?.runtime_role !== "worker") return;
-  const dispatchPrefix = `已派工 ${self}：`;
-  const feedbackPrefix = `已要求补充/返工 ${self}`;
+  const dispatchPrefix = `${WORKER_DISPATCH_VERB} ${self}：`;
+  const feedbackPrefix = `${WORKER_FEEDBACK_VERB} ${self}`;
   const feedbackSeparator = frame.body.indexOf("：", feedbackPrefix.length);
   const routedDispatch = frame.body.startsWith(dispatchPrefix) && frame.body.slice(dispatchPrefix.length).trim().length > 0;
   const routedFeedback = frame.body.startsWith(feedbackPrefix) &&
@@ -2739,9 +2811,8 @@ function assertManagedWorkerWake(
     !frame.mentions.includes(self) ||
     (!routedDispatch && !routedFeedback)
   ) {
-    throw new WakeBlockedError(
+    throw new ManagedWorkerUndispatchedError(
       `managed worker rejected unverified wake: expected dispatch/feedback from ${projectAgent.front_agent} owned by ${projectAgent.owner_account}`,
-      false,
     );
   }
 }
@@ -2754,6 +2825,12 @@ export function createManagedFrontResultRoute(opts: {
   workerName: string;
   ownerAccount: string;
   fetch?: typeof fetchMessages;
+  /**
+   * 服务端是否强制 owner 决策应答人绑定（welcome 的 owner_decision_binding=v1）。默认（未提供或返回
+   * false）视为不支持：managed front 拒绝发起 owner 决策而不是静默发一条任何人都能应答的绑定，
+   * 以免旧服务端下授权被无声降级（部署顺序必须先升级 Worker）。
+   */
+  ownerDecisionBindingEnforced?: () => boolean;
 }): RunnerResultRoute {
   const fetch = opts.fetch ?? fetchMessages;
   const readExact = async (seq: number): Promise<MsgFrame> => {
@@ -2839,7 +2916,7 @@ export function createManagedFrontResultRoute(opts: {
         : "";
       return {
         replyTo,
-        text: `${action.action === "worker_feedback" ? "已要求补充/返工" : "已派工"} ${opts.workerName}${lineage}：${action.instruction}`,
+        text: formatWorkerEnvelope(action.action, opts.workerName, lineage, action.instruction),
         mentions: [opts.workerName],
         ...(completionSummarySeq === undefined ? {} : { completionSummarySeq }),
       };
@@ -2847,6 +2924,14 @@ export function createManagedFrontResultRoute(opts: {
     if (action.action === "owner_decision") {
       if (delivery === null || delivery.work_id === null || delivery.continuation_ref === null) {
         throw new WakeBlockedError("managed owner decision requires an active durable delivery", false);
+      }
+      // 旧服务端会静默丢弃 expected_decision_responder_owner，任何人都能替 owner 拍板。宁可在这里
+      // fail closed（front 会据此报 blocked，提示先升级 Worker），也不发一条授权无声降级的决策。
+      if (opts.ownerDecisionBindingEnforced?.() !== true) {
+        throw new WakeBlockedError(
+          "server does not enforce owner_decision responder binding (owner_decision_binding v1); upgrade the Worker before managed owner decisions",
+          false,
+        );
       }
       const decisionRequest: SendDecisionRequest = action.options === undefined
         ? { kind: "approval", prompt: action.prompt }
@@ -3045,6 +3130,10 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       stateKey: string,
       context: ProjectAgentRunContext,
     ): ServeOptions => {
+      // 升级迁移只对 front lane（频道对话的继承者）做一次：迁旧游标/欠账 + 清旧自由文本会话（#7/#10）。
+      if (role === "front") migrateLegacyProfileFrontLane(channel, stateKey, prepared.runnerWorkdir);
+      // 每个 welcome 刷新一次；owner 决策路由在 wake（必在 welcome 之后）里读它决定能否发决策。
+      let serverOwnerDecisionBinding = false;
       const resultRoute = role === "front"
         ? createManagedFrontResultRoute({
             server: opts.server,
@@ -3054,9 +3143,11 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
             workerName: worker.name,
             ownerAccount: profile.owner_account,
             fetch: opts.fetchMessages,
+            ownerDecisionBindingEnforced: () => serverOwnerDecisionBinding,
           })
         : managedWorkerResultRoute();
       return {
+        onServerCapabilities: (caps) => { serverOwnerDecisionBinding = caps.ownerDecisionBinding; },
         ...profileChildServeOptions({
           server: opts.server,
           token: principal.token,
@@ -3082,7 +3173,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
         refreshAvailableUpgrade: sharedRefreshAvailableUpgrade,
         upgradeProbeIntervalMs,
         runnerTimeoutMs: role === "front"
-          ? Math.min(opts.runnerTimeoutMs ?? 60_000, 60_000)
+          ? opts.runnerTimeoutMs ?? DEFAULT_FRONT_RUNNER_TIMEOUT_MS
           : opts.runnerTimeoutMs,
         signal: channelSignal,
         advertise: async (signal) => {
@@ -3147,7 +3238,10 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
               workdir: prepared.runnerWorkdir,
               cwd: prepared.channelWorkdir,
               isolateModelPartyAccess: true,
-              sandbox: role === "front" ? "read_only" : "full_access",
+              // worker 与 builtin lane 一致给 workspace-write，绝不能是 full_access（sdkSandboxMode
+              // 会映射成 danger-full-access = 完全无沙箱）；否则 SDK worker 能读任意主机文件、拷进
+              // channelWorkdir 再 [attach:] 上传，绕过本 PR 对 worker 的主机文件边界。
+              sandbox: role === "front" ? "read_only" : "workspace-write",
               resultRoute,
               outputSchema: role === "front" ? MANAGED_FRONT_OUTPUT_SCHEMA : undefined,
               attachmentRoot: role === "front" ? null : prepared.channelWorkdir,
@@ -3670,6 +3764,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
           welcomeReported = true;
         }
         directedDeliveryMode = frame.directed_delivery === "v1";
+        o.onServerCapabilities?.({ ownerDecisionBinding: frame.owner_decision_binding === "v1" });
         // 挂上/重连即向服务端 claim serve 租约（#99）。best-effort：ws 此刻是 OPEN，claim 会送出；
         // 服务端在同名多条 serve 里选唯一持租者并回 serve_lease。老服务端不认识它、直接忽略（hasLease
         // 默认 true → 旧行为）。重连每次 welcome 都重新 claim（连接换了，租约候选身份也换了）。
@@ -3865,6 +3960,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
         let wakeAttachments: WakeContextAttachment[] = [];
         let cliUpgrade: CliUpgradeNotice | null = availableUpgrade;
         let preflightFailed = false;
+        // managed worker 的非派工 wake：settle 投递但不刷频道 blocked（见 ManagedWorkerUndispatchedError）。
+        let preflightSilentSkip = false;
         for (;;) {
           try {
             // A managed execution identity is not a generally addressable agent. Reject direct
@@ -3920,6 +4017,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
             attemptFloor = attemptsUsed;
             lastError = errText(error);
             retriable = error instanceof WakeBlockedError && error.retriable;
+            if (error instanceof ManagedWorkerUndispatchedError) preflightSilentSkip = true;
             out(`  runner 预处理失败 (${attemptsUsed}/${maxAttempts})，未发送 running、未启动模型: ${lastError}`);
             if (directedDelivery === null) {
               setStuck({ seq: frame.seq, attempts: attemptsUsed, last_error: lastError, retriable });
@@ -3936,17 +4034,23 @@ export async function runServe(o: ServeOptions): Promise<number> {
           const note =
             `wake undelivered before model start, giving up: seq=${frame.seq}; ` +
             `attempts=${attemptsUsed}/${maxAttempts}; retry_delay_ms=${retryDelayMs}; last error: ${lastError}`;
-          try {
-            await (o.post ?? postMessage)(o.server, o.token, o.channel, {
-              kind: "status",
-              state: "blocked",
-              note,
-              mentions: [],
-              blocked_reason: note,
-            }, lifecycleController.signal);
-          } catch {
-            code = EXIT_WAKE_UNANNOUNCED;
-            break frameLoop;
+          // 非派工的 managed worker wake 不刷频道 blocked（worker 不是频道参与者，闲聊回复不该刷噪声）；
+          // 投递仍在下方 settle，绝不重投。其它预处理失败照常公开宣告放弃。
+          if (preflightSilentSkip) {
+            out(`  managed worker 忽略非派工 wake，静默 settle（不刷频道 blocked）: seq=${frame.seq}`);
+          } else {
+            try {
+              await (o.post ?? postMessage)(o.server, o.token, o.channel, {
+                kind: "status",
+                state: "blocked",
+                note,
+                mentions: [],
+                blocked_reason: note,
+              }, lifecycleController.signal);
+            } catch {
+              code = EXIT_WAKE_UNANNOUNCED;
+              break frameLoop;
+            }
           }
           if (directedDelivery !== null) {
             try {

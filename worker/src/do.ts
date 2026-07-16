@@ -2179,6 +2179,7 @@ export class ChannelDO extends Server<Env> {
       last_seq: this.lastSeq(),
       last_rev_seq: this.lastRevSeq(),
       directed_delivery: "v1",
+      owner_decision_binding: "v1",
       ...(this.charterRev() > 0 ? { charter_rev: this.charterRev() } : {}),
       presence: this.presenceList(),
       read_cursors: this.readCursors(),
