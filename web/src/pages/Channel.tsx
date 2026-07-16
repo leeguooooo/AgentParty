@@ -93,6 +93,7 @@ import { useT, type TFunc } from "../i18n/useT";
 import { ChannelToolstrip } from "../components/ChannelToolstrip";
 import "../i18n/strings/Channel";
 import "../i18n/strings/Composer";
+import "../i18n/strings/WakeReceipt";
 
 const EMPTY_RECENT_MESSAGES: MsgFrame[] = [];
 
@@ -1531,9 +1532,19 @@ export function TeamPanel({ teams }: { teams: TeamSummary[] }) {
 }
 
 // #187：agent 维度看板——每个 agent 在忙/空闲/阻塞/离线，手里在做/排队/待审/受阻多少任务。
-// 纯只读聚合：数据全来自已有的 presence（状态/note）+ task 台账（按 assignee 归组），不新增后端。
+// 纯只读聚合：合并 presence、task 台账与可靠投递状态；delivery/current_task 反指消息正文，直接说明在忙什么。
 type AgentBoardStatus = "busy" | "blocked" | "idle" | "offline";
 const AGENT_STATUS_ORDER: Record<AgentBoardStatus, number> = { busy: 0, blocked: 1, idle: 2, offline: 3 };
+const ACTIVE_DELIVERY_STATES = new Set<PublicDirectedDelivery["state"]>(["queued", "claimed", "running", "waiting_owner"]);
+
+export function activeDeliveryTargets(deliveries: PublicDirectedDelivery[]): string[] {
+  return [...new Set(deliveries.filter((delivery) => ACTIVE_DELIVERY_STATES.has(delivery.state)).map((delivery) => delivery.target_name))];
+}
+
+function agentWorkSummary(body: string): string {
+  const compact = body.replace(/\s+/g, " ").trim();
+  return compact.length > 160 ? `${compact.slice(0, 157)}…` : compact;
+}
 
 export function agentPresenceSummary(
   presence: PresenceEntry[],
@@ -1579,12 +1590,27 @@ export function AgentBoardPanel({
   presence,
   participants = [],
   tasks,
+  deliveries = [],
+  messages = [],
 }: {
   presence: PresenceEntry[];
   participants?: Sender[];
   tasks: TaskRecord[];
+  deliveries?: PublicDirectedDelivery[];
+  messages?: MsgFrame[];
 }) {
   const t = useT();
+  const messagesBySeq = new Map(messages.map((message) => [message.seq, message]));
+  const activeDeliveriesByName = new Map<string, PublicDirectedDelivery[]>();
+  for (const delivery of deliveries) {
+    if (!ACTIVE_DELIVERY_STATES.has(delivery.state)) continue;
+    const assigned = activeDeliveriesByName.get(delivery.target_name) ?? [];
+    assigned.push(delivery);
+    activeDeliveriesByName.set(delivery.target_name, assigned);
+  }
+  for (const assigned of activeDeliveriesByName.values()) {
+    assigned.sort((a, b) => b.updated_at - a.updated_at || b.message_seq - a.message_seq || a.id.localeCompare(b.id));
+  }
   const tasksByName = new Map<string, TaskRecord[]>();
   for (const task of tasks) {
     const name = agentBoardTaskAssignee(task);
@@ -1608,25 +1634,47 @@ export function AgentBoardPanel({
     );
   }
   const presenceByName = new Map(presence.map((p) => [p.name, p]));
-  const presenceSummary = agentPresenceSummary(presence, participants, tasksByName.keys());
+  const presenceSummary = agentPresenceSummary(presence, participants, [...tasksByName.keys(), ...activeDeliveriesByName.keys()]);
   const names = new Set(presenceSummary.agentNames);
-  const statusOf = (name: string, p: PresenceEntry | undefined): AgentBoardStatus => {
+  const statusOf = (name: string, p: PresenceEntry | undefined, activeDeliveries: PublicDirectedDelivery[]): AgentBoardStatus => {
+    if (p?.state === "blocked" || activeDeliveries.some((delivery) => delivery.state === "waiting_owner")) return "blocked";
+    if (
+      p?.busy === true
+      || p?.state === "working"
+      || activeDeliveries.some((delivery) => delivery.state === "queued" || delivery.state === "claimed" || delivery.state === "running")
+    ) return "busy";
     if (!presenceSummary.onlineNames.has(name)) return "offline";
-    if (p?.state === "blocked") return "blocked";
-    if (p?.state === "working") return "busy";
     return "idle";
   };
   const rows = [...names]
     .map((name) => {
       const p = presenceByName.get(name);
       const assigned = tasksByName.get(name) ?? [];
+      const activeDeliveries = activeDeliveriesByName.get(name) ?? [];
+      const knownDeliverySeqs = new Set(activeDeliveries.map((delivery) => delivery.message_seq));
+      const activeWork = activeDeliveries.map((delivery) => ({
+        id: delivery.id,
+        seq: delivery.message_seq,
+        state: delivery.state,
+        summary: agentWorkSummary(messagesBySeq.get(delivery.message_seq)?.body ?? ""),
+      }));
+      if (typeof p?.current_task === "number" && !knownDeliverySeqs.has(p.current_task)) {
+        activeWork.unshift({
+          id: `presence-${name}-${p.current_task}`,
+          seq: p.current_task,
+          state: "running",
+          summary: agentWorkSummary(messagesBySeq.get(p.current_task)?.body ?? ""),
+        });
+      }
       // #187 第4项「排期」：surface presence 里的暂停/定时恢复（resume_at），看板本行直接可见。
       return {
         name,
-        status: statusOf(name, p),
+        status: statusOf(name, p, activeDeliveries),
+        online: presenceSummary.onlineNames.has(name),
         note: p?.note ?? null,
         paused: p?.paused === true,
         resumeAt: p?.resume_at ?? null,
+        activeWork,
         tasks: assigned,
         inProgress: assigned.filter((task) => task.state === "in_progress").length,
         queued: assigned.filter((task) => task.state === "assigned").length,
@@ -1674,7 +1722,7 @@ export function AgentBoardPanel({
             {laneRows.map((row) => (
               <article key={row.name} className={`agent-board-row agent-board-row--${row.status}`} data-agent={row.name}>
                 <div className="agent-board-row-head">
-                  <span className="agent-board-name"><span className={`agent-board-live-dot${row.status === "offline" ? "" : " is-online"}`} aria-hidden="true" />{row.name}</span>
+                  <span className="agent-board-name"><span className={`agent-board-live-dot${row.online ? " is-online" : ""}`} aria-hidden="true" />{row.name}</span>
                   <span className={`t-mono agent-board-status agent-board-status--${row.status}`}>{statusLabel}</span>
                 </div>
                 {row.note !== null && row.note.trim() !== "" && <p className="agent-board-note">{row.note}</p>}
@@ -1691,6 +1739,19 @@ export function AgentBoardPanel({
                   <span title={t("Channel.agents.count.review")}>👁 {row.review}</span>
                   {row.blocked > 0 && <span className="agent-board-count-blocked" title={t("Channel.agents.count.blocked")}>⛔ {row.blocked}</span>}
                 </div>
+                {row.activeWork.length > 0 && (
+                  <ol className="agent-board-task-list agent-board-work-list">
+                    {row.activeWork.map((work) => (
+                      <li key={work.id} className={`agent-board-task agent-board-work agent-board-work--${work.state}`}>
+                        <span className="t-mono agent-board-task-id">#{work.seq}</span>
+                        <span className="agent-board-task-title" title={work.summary || undefined}>
+                          {work.summary || t("Channel.agentBoard.workUnavailable")}
+                        </span>
+                        <span className="t-mono agent-board-task-state">{t(`WakeReceipt.delivery.state.${work.state}`)}</span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
                 {row.tasks.length > 0 && (
                   <ol className="agent-board-task-list">
                     {row.tasks.map((task) => (
@@ -3933,9 +3994,12 @@ export function ChannelPage({
     () => agentPresenceSummary(
       Object.values(state.presence),
       state.participants,
-      tasks.map(agentBoardTaskAssignee).filter((name): name is string => name !== null),
+      [
+        ...tasks.map(agentBoardTaskAssignee).filter((name): name is string => name !== null),
+        ...activeDeliveryTargets(Object.values(state.directedDeliveries)),
+      ],
     ),
-    [state.participants, state.presence, tasks],
+    [state.directedDeliveries, state.participants, state.presence, tasks],
   );
   const onlineAgentCount = agentPresence.online;
   // #504 团队面板博客风页签的角标：离线 agent 数 / 未认领分工数 / @我未读数。
@@ -4338,7 +4402,15 @@ export function ChannelPage({
                   onOpenAgentDetail={setOpenAgentDetail}
                 />
               }
-              board={<AgentBoardPanel presence={Object.values(state.presence)} participants={state.participants} tasks={tasks} />}
+              board={(
+                <AgentBoardPanel
+                  presence={Object.values(state.presence)}
+                  participants={state.participants}
+                  tasks={tasks}
+                  deliveries={Object.values(state.directedDeliveries)}
+                  messages={state.messages}
+                />
+              )}
               coordination={coordinationContent}
             />
           )}
