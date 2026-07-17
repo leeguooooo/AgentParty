@@ -23,6 +23,9 @@ export function charterSnapshotBodyLines(text: string): string[] {
     .map((line) => line.replace(ANSI_CSI, "").replace(TERMINAL_CONTROL, ""));
 }
 
+/** agent/成员名的合法形状（与 cli/src/validation.ts 的 NAME_RE 同一约束）。 */
+export const AGENT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+
 export function mcpServerName(agentName: string): string {
   const cleaned = agentName.replace(/[^a-zA-Z0-9_-]/g, "-");
   if (cleaned === agentName) return `party-${agentName}`;

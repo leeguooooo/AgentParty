@@ -1,4 +1,4 @@
-import { mcpServerName } from "@agentparty/shared/onboarding";
+import { AGENT_NAME_RE, mcpServerName } from "@agentparty/shared/onboarding";
 import { MIN_CLI, VERSION_GE_SNIPPET } from "./joinPack";
 
 const VAULT_KEY = "ap_agent_token_vault:v1";
@@ -104,6 +104,10 @@ export function buildMinimalAgentCommand(input: {
 }): string {
   const configPath = `$HOME/.agentparty/agents/agentparty-${input.name}-${input.slug}.json`;
   const mcpName = mcpServerName(input.name);
+  // #597：inviter 是 account id（lark:on_xxx）时 --mention 会被 CLI 拒绝，降级为不 @。
+  const checkin = AGENT_NAME_RE.test(input.inviterName)
+    ? `party send "${input.checkinMessage}" --channel ${input.slug} --mention ${input.inviterName}`
+    : `party send "${input.checkinMessage}" --channel ${input.slug}`;
   return [
     `# AgentParty onboarding scope: join the existing channel #${input.slug} using only the supplied party commands.`,
     "# Do not create or select another channel; do not use third-party or project-local channel workflows (for example, Trellis); do not delegate onboarding.",
@@ -115,7 +119,7 @@ export function buildMinimalAgentCommand(input: {
     `need=${MIN_CLI}; have="$(party --version 2>/dev/null || echo 0)"; version_ge "$have" "$need" || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
     `export AGENTPARTY_CONFIG="${configPath}"`,
     `party init --server ${input.server} --token ${input.token} --channel ${input.slug}`,
-    `party send "${input.checkinMessage}" --channel ${input.slug} --mention ${input.inviterName}`,
+    checkin,
     "# Register the AgentParty MCP server with your harness, then use the party_* tools (party_send / party_status / party_history / party_decision_ask ...) for all channel actions — they carry your identity automatically, no AGENTPARTY_CONFIG prefix needed per command:",
     `claude mcp add ${mcpName} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug}`,
     `# Codex: codex mcp add ${mcpName} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug}`,

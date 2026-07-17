@@ -2,7 +2,7 @@
 // （AgentTokens）都调这一份，两个入口的产物从结构上逐字节同构，杜绝再漂移（#584 复盘）。
 // 独立成模块而不放 agentTokenVault：AgentJoin 的测试整体 mock 了 vault 模块，
 // builder 放那边会让组件测试拿到假实现。
-import { charterSnapshotBodyLines, mcpServerName } from "@agentparty/shared/onboarding";
+import { AGENT_NAME_RE, charterSnapshotBodyLines, mcpServerName } from "@agentparty/shared/onboarding";
 import type { ChannelCharter } from "./api";
 import type { TFunc } from "../i18n/useT";
 import "../i18n/strings/AgentJoin";
@@ -47,7 +47,11 @@ export interface FullJoinPackInput {
 
 // 完整接入脚本：init 只写配置不发消息，必须带「报到发言」，否则网页上看不到 agent。
 export function buildFullJoinPack(input: FullJoinPackInput): string {
-  const { slug, agentName, agentToken, server, inviterName, charter, t } = input;
+  const { slug, agentName, agentToken, server, charter, t } = input;
+  // #597：邀请人的「频道身份」可能是 account id（lark:on_xxx / github:xxx），不满足 mention
+  // 的 name 正则——渲染出的 --mention 会被 CLI 直接拒绝，新 agent 第一条报到就报错。
+  // 校验不过就整体降级为不 @：报到照发，blocked 指引改教它用 party who 反查 handle。
+  const inviterName = AGENT_NAME_RE.test(input.inviterName) ? input.inviterName : null;
   return [
     t("AgentJoin.cmd.header", { slug }),
     t("AgentJoin.cmd.intro1"),
@@ -77,8 +81,10 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     ``,
     t("AgentJoin.cmd.step3"),
     `party init --server ${server} --token ${agentToken} --channel ${slug}`,
-    t("AgentJoin.cmd.step3note"),
-    `party send "${t("AgentJoin.cmd.checkinMessage", { agentName })}" --channel ${slug} --mention ${inviterName}`,
+    inviterName === null ? t("AgentJoin.cmd.step3noteNoMention", { slug }) : t("AgentJoin.cmd.step3note"),
+    inviterName === null
+      ? `party send "${t("AgentJoin.cmd.checkinMessage", { agentName })}" --channel ${slug}`
+      : `party send "${t("AgentJoin.cmd.checkinMessage", { agentName })}" --channel ${slug} --mention ${inviterName}`,
     ``,
     t("AgentJoin.cmd.step4"),
     `claude mcp add ${mcpServerName(agentName)} --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.json" -- party mcp --channel ${slug}`,
@@ -92,7 +98,9 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     t("AgentJoin.cmd.contextAnchor2", { agentName, slug }),
     t("AgentJoin.cmd.contextAnchor3"),
     t("AgentJoin.cmd.blocked1", { slug }),
-    t("AgentJoin.cmd.blocked2", { slug, inviterName }),
+    inviterName === null
+      ? t("AgentJoin.cmd.blocked2NoMention", { slug })
+      : t("AgentJoin.cmd.blocked2", { slug, inviterName }),
     t("AgentJoin.cmd.stayReachable"),
     t("AgentJoin.cmd.mcpWakeNote"),
     t("AgentJoin.cmd.claudeMode1"),
