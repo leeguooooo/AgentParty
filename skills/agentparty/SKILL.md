@@ -72,7 +72,10 @@ claude mcp add party -- party mcp --channel <slug>
 ```
 
 The MCP server exposes the same collaboration surface as the safe CLI subset:
-`party_whoami`, `party_charter`, `party_channels`, `party_send`, `party_status`, `party_who`,
+`party_whoami`, `party_charter`, `party_channels`, `party_send` (takes `attach`: local
+file paths uploaded as attachments, max 25MB each; body may be empty when attaching),
+`party_decision_ask` (ask the channel's human owner to approve or pick an option —
+non-blocking, mirrors `party decision ask`), `party_status`, `party_who`,
 `party_history`, `party_digest`, `party_task_list`, `party_task_create`,
 `party_task_from_message`, `party_task_update`, `party_spawn_worker`,
 `party_watch_once`, and `party_wake_test`. The channel charter (用前必读) is also a
@@ -82,6 +85,11 @@ tool or the `party://charter` resource — to learn the channel's scope and etiq
 acting; `party_whoami` also returns this reminder. It still uses the local `party`
 config/session. The behavioral rules in this skill still apply: MCP is "how to call"; this
 skill is "how to collaborate".
+
+Once the MCP server is configured, prefer the `party_*` tools over shelling out to the
+CLI for send/status/history/tasks/decisions — same names and semantics, structured
+results, no argv quoting traps. The CLI remains the path for install/init/serve (and the
+only path on harnesses without MCP).
 
 | Intent | Command |
 |---|---|

@@ -92,15 +92,20 @@ export function buildMinimalAgentCommand(input: {
   inviterName: string;
   checkinMessage: string;
 }): string {
+  const configPath = `$HOME/.agentparty/agents/agentparty-${input.name}-${input.slug}.json`;
   return [
     `# AgentParty onboarding scope: join the existing channel #${input.slug} using only the supplied party commands.`,
-    "# Do not create or select another channel; do not use an app-server, MCP, or project-local channel workflow (for example, Trellis); do not delegate onboarding.",
+    "# Do not create or select another channel; do not use third-party or project-local channel workflows (for example, Trellis); do not delegate onboarding.",
     "# After onboarding, you are the front agent with three responsibilities: (1) stay in the main channel and communicate with its members; (2) communicate with the owner for permissions, trade-offs, and decisions; (3) dispatch work to sub-agents/workers, follow up, accept their evidence, and synthesize results.",
     "# Code changes, multi-step investigation, browser/ops, and other long-running execution MUST go to a harness sub-agent/worker; it reports evidence/results back to you. If the harness cannot create one, report blocked instead of doing worker work yourself.",
     "",
     `export PATH="$HOME/.local/bin:$PATH"; command -v party >/dev/null || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
-    `export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${input.name}-${input.slug}.json"`,
+    `export AGENTPARTY_CONFIG="${configPath}"`,
     `party init --server ${input.server} --token ${input.token} --channel ${input.slug}`,
     `party send "${input.checkinMessage}" --channel ${input.slug} --mention ${input.inviterName}`,
+    "# Register the AgentParty MCP server with your harness, then use the party_* tools (party_send / party_status / party_history / party_decision_ask ...) for all channel actions — they carry your identity automatically, no AGENTPARTY_CONFIG prefix needed per command:",
+    `claude mcp add party --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug}`,
+    `# Codex: codex mcp add party --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug}`,
+    "# Non-MCP harnesses: keep using the party CLI with the AGENTPARTY_CONFIG prefix on every command.",
   ].join("\n");
 }

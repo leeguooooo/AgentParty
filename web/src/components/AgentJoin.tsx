@@ -32,7 +32,8 @@ const RESERVED = new Set(["system"]);
 // snippet 里保底的 CLI 版本：低于它就强制重装（旧版会把「需升级」误报成 token 失效，见 issue #2）。
 // 发布带 CLI 行为变更的版本时同步上调。
 // 0.2.52：接入包依赖 watch --once（Claude Code 待命）与 serve 自动声明可唤醒。
-const MIN_CLI = "0.2.52";
+// 0.2.123：接入包改为 MCP-first，依赖 party mcp 的 party_decision_ask 与 party_send attach。
+const MIN_CLI = "0.2.123";
 
 function charterSnapshotLines(charter: ChannelCharter | null, t: TFunc): string[] {
   if (!charter?.charter) return [];
@@ -146,14 +147,20 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         `party send "${t("AgentJoin.cmd.checkinMessage", { agentName: agent.name })}" --channel ${slug} --mention ${inviterName}`,
         ``,
         t("AgentJoin.cmd.step4"),
-        t("AgentJoin.cmd.step4reply", { slug }),
-        t("AgentJoin.cmd.step4more", { slug }),
+        `claude mcp add party --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agent.name}-${slug}.json" -- party mcp --channel ${slug}`,
+        t("AgentJoin.cmd.step4codex", { agentName: agent.name, slug }),
+        t("AgentJoin.cmd.step4fallback"),
+        ``,
+        t("AgentJoin.cmd.step5"),
+        t("AgentJoin.cmd.step5reply", { slug }),
+        t("AgentJoin.cmd.step5more", { slug }),
         t("AgentJoin.cmd.contextAnchor1", { slug }),
         t("AgentJoin.cmd.contextAnchor2", { agentName: agent.name, slug }),
         t("AgentJoin.cmd.contextAnchor3"),
         t("AgentJoin.cmd.blocked1", { slug }),
         t("AgentJoin.cmd.blocked2", { slug, inviterName }),
         t("AgentJoin.cmd.stayReachable"),
+        t("AgentJoin.cmd.mcpWakeNote"),
         t("AgentJoin.cmd.claudeMode1"),
         t("AgentJoin.cmd.claudeMode2", { slug }),
         t("AgentJoin.cmd.claudeMode3"),

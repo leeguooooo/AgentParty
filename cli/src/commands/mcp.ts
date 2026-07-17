@@ -4,6 +4,7 @@ import type { MsgFrame, StatusState, TaskAssigneeKind, TaskState } from "@agentp
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { stripTerminalControls } from "../format";
 import pkg from "../../package.json" with { type: "json" };
 import {
   advanceCursorPastOwnMessage,
@@ -34,6 +35,8 @@ import {
   type Identity,
 } from "../rest";
 import { isName, isSlug } from "../validation";
+import { askDecision } from "./decision";
+import { uploadAttachmentPaths } from "./send";
 import { buildContext } from "./status";
 import { runWatch } from "./watch";
 
@@ -55,7 +58,8 @@ Tools:
   party_whoami
   party_charter
   party_channels
-  party_send
+  party_send        (attach: upload local files as attachments)
+  party_decision_ask
   party_status
   party_who
   party_history
@@ -81,9 +85,12 @@ const StateSchema = z.enum(["working", "waiting", "blocked", "done"]);
 const TaskStateSchema = z.enum(["triage", "backlog", "assigned", "in_progress", "needs_review", "done", "blocked"]);
 const TaskAssigneeKindSchema = z.enum(["agent", "human", "squad"]);
 
+// MCP 客户端常把 content.text 直接在终端渲染，而异常消息、附件路径、chosen_option 等可能由
+// 远端/用户控制。统一在 ok/fail 出口剥掉控制字符，防终端注入（structuredContent 是程序消费的
+// JSON，不经此路径）。
 function ok(data: Record<string, unknown>, text?: string): CallToolResult {
   return {
-    content: [{ type: "text", text: text ?? JSON.stringify(data, null, 2) }],
+    content: [{ type: "text", text: stripTerminalControls(text ?? JSON.stringify(data, null, 2)) }],
     structuredContent: data,
   };
 }
@@ -91,7 +98,7 @@ function ok(data: Record<string, unknown>, text?: string): CallToolResult {
 function fail(message: string): CallToolResult {
   return {
     isError: true,
-    content: [{ type: "text", text: message }],
+    content: [{ type: "text", text: stripTerminalControls(message) }],
   };
 }
 
@@ -306,27 +313,94 @@ export function createMcpServer(defaultChannel?: string): McpServer {
       description: "Send a message to an AgentParty channel.",
       inputSchema: {
         channel: z.string().optional().describe("Channel slug. Defaults to the workspace-bound channel."),
-        body: z.string().min(1),
+        body: z.string().optional().describe("Message body. May be empty only when attaching."),
         mentions: z.array(z.string()).optional(),
         reply_to: z.number().int().positive().nullable().optional(),
+        attach: z
+          .array(z.string())
+          .optional()
+          .describe("Local file paths to upload as attachments (max 25MB each). Body may be empty only when attaching."),
       },
     },
-    async ({ channel, body, mentions, reply_to }) => {
+    async ({ channel, body, mentions, reply_to, attach }) => {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
         const normalizedMentions = normalizeMentions(mentions);
+        const attachPaths = attach ?? [];
+        const effectiveBody = body ?? "";
+        // 与 CLI 语义对齐（#176）：纯附件消息允许空正文；无附件时正文必填。
+        if (effectiveBody === "" && attachPaths.length === 0) {
+          throw new Error("missing message body (pass body, or attach a file)");
+        }
+        // 附件复用 CLI --attach 的同一条 validate+read+upload 链路（#503），任一失败整体不发消息。
+        const attachments =
+          attachPaths.length > 0
+            ? await uploadAttachmentPaths(cfg.server, cfg.token, resolved, attachPaths)
+            : undefined;
         const { seq } = await postMessage(cfg.server, cfg.token, resolved, {
           kind: "message",
-          body,
+          body: effectiveBody,
           mentions: normalizedMentions,
           reply_to: reply_to ?? null,
+          ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
         });
         advanceCursorPastOwnMessage(resolved, seq);
-        return ok({ type: "send", channel: resolved, seq });
+        return ok({
+          type: "send",
+          channel: resolved,
+          seq,
+          ...(attachments !== undefined
+            ? { attachments: attachments.map((a) => ({ filename: a.filename, size: a.size, url: a.url })) }
+            : {}),
+        });
       } catch (e) {
         const code = handleRestError(e);
         return fail(code === 1 && e instanceof Error ? e.message : `send failed with exit ${code}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "party_decision_ask",
+    {
+      title: "Ask the channel owner for a decision",
+      description:
+        "Ask the channel's human owner for a decision/approval (choice or approval). Use for permissions, trade-offs, and irreversible actions. Non-blocking: post and continue; a human resolves it later.",
+      inputSchema: {
+        channel: z.string().optional().describe("Channel slug. Defaults to the workspace-bound channel."),
+        prompt: z.string().min(1).describe("One-line question / plan title."),
+        options: z
+          .array(z.string())
+          .max(10)
+          .optional()
+          .describe("Choice options. Empty or absent makes it an approve/reject request."),
+        mentions: z.array(z.string()).optional(),
+        body: z.string().optional().describe("Plan body. Defaults to the prompt."),
+      },
+    },
+    async ({ channel, prompt, options, mentions, body }) => {
+      try {
+        const cfg = await auth();
+        const resolved = normalizeChannel(channel, defaultChannel);
+        const normalizedMentions = normalizeMentions(mentions);
+        // 业务核心与 `party decision ask` 完全同一份（askDecision，#503）；这里不提供 --wait 等价物：
+        // MCP 工具不阻塞轮询，pending/waiting_owner 都交给人类 + serve/owner_answer 唤醒闭环。
+        const result = await askDecision(cfg, resolved, { prompt, options, mentions: normalizedMentions, body });
+        const data = {
+          type: "decision",
+          channel: resolved,
+          seq: result.seq,
+          state: result.state,
+          ...(result.chosen_option !== undefined ? { chosen_option: result.chosen_option } : {}),
+        };
+        const hint =
+          result.state === "auto_resolved"
+            ? `decision #${result.seq} auto_resolved → ${result.chosen_option ?? "?"} (channel decision mode is unattended)`
+            : `decision #${result.seq} posted (${result.state}) — a HUMAN resolves it; this tool does not wait. Check later with party_history, or the serve/owner-answer wake resumes the parked work. Do not busy-poll.`;
+        return ok(data, hint);
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
       }
     },
   );
