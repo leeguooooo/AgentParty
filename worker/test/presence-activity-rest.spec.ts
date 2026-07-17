@@ -76,6 +76,9 @@ describe("interactive-lane activity self-report (issue #615)", () => {
     expect(asHuman.status).toBe(403);
     const garbage = await postActivity(slug, agent.token, agent.name, { phase: "hacking", ts: Date.now() });
     expect(garbage.status).toBe(400);
+    // 远未来时间戳拒收：ts 是 TTL 的输入，放进来会让僵活动永不过期
+    const future = await postActivity(slug, agent.token, agent.name, { phase: "working", ts: Date.now() + 10 * 60_000 });
+    expect(future.status).toBe(400);
     ws.close();
   });
 

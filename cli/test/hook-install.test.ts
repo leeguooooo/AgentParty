@@ -79,6 +79,8 @@ describe("shouldPushActivity (#615)", () => {
     expect(shouldPushActivity(tool, NOW - PUSH_INTERVAL_MS, NOW)).toBe(true);
     expect(shouldPushActivity(perm, NOW - PUSH_INTERVAL_URGENT_MS + 1, NOW)).toBe(false);
     expect(shouldPushActivity(perm, NOW - PUSH_INTERVAL_URGENT_MS, NOW)).toBe(true);
+    // 未来标记（时钟回跳残留）视为无效：立即放行，而不是永久静默到时钟追上
+    expect(shouldPushActivity(tool, NOW + 60_000, NOW)).toBe(true);
   });
 });
 
@@ -160,6 +162,8 @@ describe("party hook push end-to-end (#615)", () => {
     writeActivityFile(file, { phase: "tool", tool: "Bash", ts: Date.now() - 10 * 60_000 });
     expect(await runPush(file)).toBe(0); // 超 TTL → 不发也不炸
 
+    // 缺配置断言前恢复新鲜活动：确保这条走的是「无配置静默」路径，而不是搭 TTL 的便车。
+    writeActivityFile(file, { phase: "tool", tool: "Bash", ts: Date.now() });
     rmSync(join(home, "config.json"));
     expect(await runPush(file)).toBe(0); // 无配置 → 静默
   });

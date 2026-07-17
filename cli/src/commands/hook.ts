@@ -77,10 +77,12 @@ export function activityTargetFile(
 
 // ---- 交互 lane 直报（#615）----
 
-/** 节流判定（导出仅为单测）：sidecar 记上次上报时刻，waiting_permission 用更紧的紧急间隔。 */
+/** 节流判定（导出仅为单测）：sidecar 记上次上报时刻，waiting_permission 用更紧的紧急间隔。
+ * 未来时间戳（时钟回跳后残留的标记）视为无效——否则时钟追上前会永久静默。 */
 export function shouldPushActivity(activity: AgentActivity, lastPushTs: number | null, now: number): boolean {
+  if (lastPushTs === null || lastPushTs > now) return true;
   const interval = activity.phase === "waiting_permission" ? PUSH_INTERVAL_URGENT_MS : PUSH_INTERVAL_MS;
-  return lastPushTs === null || now - lastPushTs >= interval;
+  return now - lastPushTs >= interval;
 }
 
 function pushMarkerFile(activityFile: string): string {
@@ -163,10 +165,28 @@ interface HookEntry {
   hooks: Array<{ type: string; command: string; timeout?: number }>;
 }
 
+function isOurCommand(hook: unknown): boolean {
+  return typeof (hook as { command?: unknown })?.command === "string" &&
+    ((hook as { command: string }).command.includes(HOOK_COMMAND_MARKER));
+}
+
 function isOurEntry(entry: unknown): boolean {
   if (typeof entry !== "object" || entry === null) return false;
   const hooks = (entry as HookEntry).hooks;
-  return Array.isArray(hooks) && hooks.some((h) => typeof h?.command === "string" && h.command.includes(HOOK_COMMAND_MARKER));
+  return Array.isArray(hooks) && hooks.some(isOurCommand);
+}
+
+// 逐命令摘除：用户若把自己的命令混进了含我们命令的条目里，只摘我们的那条，绝不整条目连坐。
+// 摘空 hooks 数组的条目才整体删除。
+function stripOurCommands(entries: unknown[]): unknown[] {
+  return entries
+    .map((entry) => {
+      if (!isOurEntry(entry)) return entry;
+      const rec = entry as HookEntry;
+      const kept = rec.hooks.filter((h) => !isOurCommand(h));
+      return kept.length > 0 ? { ...rec, hooks: kept } : null;
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 }
 
 export function settingsPath(scope: "project" | "user", cwd: string = process.cwd()): string {
@@ -185,12 +205,14 @@ export function mergeHookSettings(source: string | null, hookSettingsJson: strin
     throw new Error("settings file is not a JSON object");
   }
   const ours = JSON.parse(hookSettingsJson) as { hooks: Record<string, HookEntry[]> };
-  const hooks = (typeof settings.hooks === "object" && settings.hooks !== null && !Array.isArray(settings.hooks)
-    ? settings.hooks
-    : {}) as Record<string, unknown>;
+  // hooks 键存在但不是对象（用户写坏了）：拒绝覆盖，和坏 JSON 同等对待——绝不静默吞掉用户内容。
+  if (settings.hooks !== undefined && (typeof settings.hooks !== "object" || settings.hooks === null || Array.isArray(settings.hooks))) {
+    throw new Error("settings.hooks is not a JSON object");
+  }
+  const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
   for (const [event, entries] of Object.entries(ours.hooks)) {
     const existing = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
-    const kept = existing.filter((entry) => !isOurEntry(entry));
+    const kept = stripOurCommands(existing);
     hooks[event] = [...kept, ...entries];
   }
   settings.hooks = hooks;
@@ -207,7 +229,7 @@ export function removeHookSettings(source: string): string {
     const record = hooks as Record<string, unknown>;
     for (const event of Object.keys(record)) {
       if (!Array.isArray(record[event])) continue;
-      const kept = (record[event] as unknown[]).filter((entry) => !isOurEntry(entry));
+      const kept = stripOurCommands(record[event] as unknown[]);
       if (kept.length > 0) record[event] = kept;
       else delete record[event];
     }
@@ -217,7 +239,16 @@ export function removeHookSettings(source: string): string {
 }
 
 function hookScope(argv: string[]): "project" | "user" {
-  return argv.includes("--user") ? "user" : "project";
+  // 只认 `--` 终止符之前的 --user；`hook install -- --user` 保持 project 作用域。
+  const boundary = argv.indexOf("--");
+  const flags = boundary === -1 ? argv : argv.slice(0, boundary);
+  return flags.includes("--user") ? "user" : "project";
+}
+
+// 终端输出的动态部分（路径/异常消息）统一剥控制字符——路径可能来自不受信的 repo 目录名。
+function termText(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
 }
 
 async function runInstall(argv: string[]): Promise<number> {
@@ -230,12 +261,12 @@ async function runInstall(argv: string[]): Promise<number> {
   try {
     next = mergeHookSettings(source, claudeHookSettingsJson());
   } catch (e) {
-    console.error(`无法解析 ${path}（${e instanceof Error ? e.message : String(e)}）；请先手工修复该文件`);
+    console.error(`无法解析 ${termText(path)}（${termText(e instanceof Error ? e.message : String(e))}）；请先手工修复该文件`);
     return 1;
   }
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, next);
-  console.log(`hooks installed -> ${path}`);
+  console.log(`hooks installed -> ${termText(path)}`);
   console.log("任何在此生效范围内的 Claude Code session（交互或 -p）都会把活动上报进频道 presence。");
   return 0;
 }
@@ -244,18 +275,18 @@ async function runUninstall(argv: string[]): Promise<number> {
   const scope = hookScope(argv);
   const path = settingsPath(scope);
   if (!existsSync(path)) {
-    console.log(`nothing to remove（${path} 不存在）`);
+    console.log(`nothing to remove（${termText(path)} 不存在）`);
     return 0;
   }
   let next: string;
   try {
     next = removeHookSettings(readFileSync(path, "utf8"));
   } catch (e) {
-    console.error(`无法解析 ${path}（${e instanceof Error ? e.message : String(e)}）；请先手工修复该文件`);
+    console.error(`无法解析 ${termText(path)}（${termText(e instanceof Error ? e.message : String(e))}）；请先手工修复该文件`);
     return 1;
   }
   writeFileSync(path, next);
-  console.log(`hooks removed <- ${path}`);
+  console.log(`hooks removed <- ${termText(path)}`);
   return 0;
 }
 
@@ -269,11 +300,11 @@ function runStatus(argv: string[]): number {
       const hooks = (JSON.parse(source) as { hooks?: Record<string, unknown[]> }).hooks ?? {};
       installed = Object.values(hooks).some((entries) => Array.isArray(entries) && entries.some(isOurEntry));
     } catch {
-      console.error(`无法解析 ${path}`);
+      console.error(`无法解析 ${termText(path)}`);
       return 1;
     }
   }
-  console.log(`${installed ? "installed" : "not installed"} (${path})`);
+  console.log(`${installed ? "installed" : "not installed"} (${termText(path)})`);
   return installed ? 0 : 1;
 }
 

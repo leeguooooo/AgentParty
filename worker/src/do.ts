@@ -1398,6 +1398,9 @@ function snippetFor(frame: MsgFrame, field: SearchHit["match_field"]): string {
 export class ChannelDO extends Server<Env> {
   static options = { hibernate: true };
   private atomicDeliveryEffects: AtomicDeliveryEffects | null = null;
+  // 交互 lane 活动直报（#615）的服务端时钟节流标记：name → 上次接受时刻。内存态即可——
+  // DO 休眠清空的代价只是偶尔多接受一次，而 client 自带 ts 不可信、不能当节流依据。
+  private readonly activityPushAcceptedAt = new Map<string, number>();
   // partyserver can invoke async WebSocket handlers for the same connection while an earlier
   // frame is awaiting I/O. Preserve wire order explicitly: hello must finish token validation and
   // capability setup before an immediately-following serve lease / adapter / send frame runs.
@@ -3475,7 +3478,11 @@ export class ChannelDO extends Server<Env> {
       hb.current_task,
       hb.task_started_at,
       hb.heartbeat_at,
-      hb.current_task === null || hb.activity === undefined ? null : JSON.stringify(hb.activity),
+      // 未来时间戳与 REST 直报同口径按脏值丢弃（容忍 60s 抖动）——ts 是序列化 TTL 的输入，
+      // 远未来值会让僵活动永不过期。
+      hb.current_task === null || hb.activity === undefined || hb.activity.ts - Date.now() > 60_000
+        ? null
+        : JSON.stringify(hb.activity),
       hb.runner_health === undefined ? null : JSON.stringify(hb.runner_health),
       hb.agent_session === undefined ? null : JSON.stringify(hb.agent_session),
       name,
@@ -6140,23 +6147,22 @@ export class ChannelDO extends Server<Env> {
       }
       const body = (await request.json().catch(() => null)) as { activity?: unknown } | null;
       const activity = parseAgentActivity(body?.activity);
+      const now = Date.now();
       if (activity === undefined) {
         return Response.json({ error: { code: "bad_request", message: "valid activity required" } }, { status: 400 });
       }
-      // 兜底节流（客户端已 15s 节流，这里防绕过）：3s 内的重复上报直接吞，不写不播。
-      const prior = this.ctx.storage.sql
-        .exec("SELECT activity_json FROM presence WHERE name = ? AND activity_json IS NOT NULL LIMIT 1", name)
-        .toArray()[0];
-      if (prior !== undefined) {
-        try {
-          const previous = parseAgentActivity(JSON.parse(String(prior.activity_json)) as unknown);
-          if (previous !== undefined && activity.ts - previous.ts < 3_000 && previous.phase === activity.phase) {
-            return Response.json({ ok: true, throttled: true });
-          }
-        } catch {
-          // 旧值坏了就当没有，照常覆盖
-        }
+      // 未来时间戳拒收（容忍 60s 时钟抖动）：ts 是序列化侧 TTL 的输入，放进来一个远未来值
+      // 会让僵活动永不过期地钉在 presence 上。
+      if (activity.ts - now > 60_000) {
+        return Response.json({ error: { code: "bad_request", message: "activity.ts is in the future" } }, { status: 400 });
       }
+      // 兜底节流（客户端已 15s 节流，这里防绕过）：按**服务端时钟**记上次接受时刻——client 提供的
+      // ts 不可信，不能当节流依据。DO 休眠会清掉内存标记，代价只是偶尔多接受一次，可承受。
+      const lastAccepted = this.activityPushAcceptedAt.get(name);
+      if (lastAccepted !== undefined && now - lastAccepted < 3_000) {
+        return Response.json({ ok: true, throttled: true });
+      }
+      this.activityPushAcceptedAt.set(name, now);
       const updated = this.ctx.storage.sql.exec(
         "UPDATE presence SET activity_json = ? WHERE name = ?",
         JSON.stringify(activity),
