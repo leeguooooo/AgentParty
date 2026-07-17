@@ -3520,6 +3520,20 @@
   background: var(--t-panel);
   color: var(--fg, inherit);
 }
+/* 外部协作者邀请（#593）：预设昵称输入框，与 select 同风格 */
+.joinlink-nickname-input {
+  font-size: 12.5px;
+  padding: 3px 6px;
+  width: 110px;
+  border: 1.6px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: var(--fg, inherit);
+}
+.joinlink-nickname-input:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--d-yellow);
+}
 .joinlink-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .joinlink-item {
   display: flex;
@@ -5178,6 +5192,33 @@
 }
 .gate-hint::before { content: "$ "; color: var(--t-accent); }
 .gate-lang { margin-top: 20px; }
+
+/* ---- 外部协作者邀请落地页（#593）：频道 + 预设昵称预览 ---- */
+.invite-preview {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.invite-preview-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.invite-preview-row dt {
+  margin: 0;
+  flex: none;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--t-dim);
+}
+.invite-preview-row dd {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
 
 /* ---- Desktop pairing / browser approval ---- */
 .desktop-pairing-card,

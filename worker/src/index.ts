@@ -134,6 +134,9 @@ type AppEnv = Env & {
   FREE_CHANNEL_CAP?: string;
   FREE_ATTACHMENT_SIZE_LIMIT?: string;
   HOSTED_MEMBERSHIP_GATING?: string;
+  // 实例邀请制（#593）：开启后 human 账号会话必须在 instance_members 册上才能过 API，
+  // 未入册 403 invite_required；外部协作者凭频道邀请面板发的一次性邀请码入册。
+  INSTANCE_INVITE_ONLY?: string;
 };
 
 type AppContext = {
@@ -298,6 +301,28 @@ function resolveFreeAttachmentLimit(env: AppEnv): number {
 
 export function hostedMembershipGating(env: Pick<AppEnv, "HOSTED_MEMBERSHIP_GATING">): boolean {
   return env.HOSTED_MEMBERSHIP_GATING === "true" || env.HOSTED_MEMBERSHIP_GATING === "1";
+}
+
+// 实例邀请制（#593）：human 账号会话的准入闸。agent/readonly token 不走此闸——它们本来就
+// 出自 admin/human 之手，已有铸造闸；legacy 无 account 的 human token 也放行（无锚点可查）。
+export function instanceInviteOnly(env: Pick<AppEnv, "INSTANCE_INVITE_ONLY">): boolean {
+  return env.INSTANCE_INVITE_ONLY === "true" || env.INSTANCE_INVITE_ONLY === "1";
+}
+
+// 兑换端点自身必须对未入册者开放，否则邀请码永远兑不了（先有鸡先有蛋）。
+const INSTANCE_REDEEM_PATH_RE = /^\/api\/instance\/invites\/[^/]+\/redeem$/;
+
+async function isInstanceMember(db: D1Database, account: string): Promise<boolean> {
+  return (await db.prepare("SELECT 1 FROM instance_members WHERE account = ?").bind(account).first()) !== null;
+}
+
+// 幂等入册；返回是否新增（调用方据此决定要不要落审计）。
+async function enrollInstanceMember(db: D1Database, account: string, addedBy: string): Promise<boolean> {
+  const result = await db
+    .prepare("INSERT OR IGNORE INTO instance_members (account, added_by, added_at) VALUES (?, ?, ?)")
+    .bind(account, addedBy, Date.now())
+    .run();
+  return result.meta.changes > 0;
 }
 
 // 会员申请指引：拒绝时附在错误信息里，告诉调用方「为什么」+「怎么解锁」。
@@ -1302,6 +1327,20 @@ const requireBearer = createMiddleware<AppContext>(async (c, next) => {
     }
     c.set("identity", identity);
   }
+  // 实例邀请制（#593）：human 账号会话须已入册；兑换端点豁免（未入册者靠它进门）。
+  const gated = c.get("identity");
+  if (
+    instanceInviteOnly(c.env) &&
+    gated.role === "human" &&
+    gated.account != null &&
+    !INSTANCE_REDEEM_PATH_RE.test(c.req.path) &&
+    !(await isInstanceMember(c.env.DB, gated.account))
+  ) {
+    return c.json(
+      errorBody("invite_required", "this instance is invite-only; redeem an invite code to continue"),
+      403,
+    );
+  }
   await next();
 });
 
@@ -2264,6 +2303,15 @@ app.post("/api/auth/:provider/callback", async (c) => {
   const tokenName = await oauthTokenName(provider.id, exchanged.account);
   const sess = await upsertHumanSessionToken(c.env.DB, tokenName, exchanged.account);
   await ensureDefaultHandle(c.env.DB, exchanged);
+  // 实例邀请制（#593）：企业 IdP（Lark/Feishu）换码成功即公司成员，自动入册。
+  if (await enrollInstanceMember(c.env.DB, exchanged.account, `oauth:${provider.id}`)) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: { account: exchanged.account, kind: "human" },
+      action: "instance.member.add",
+      resource: `instance/members/${exchanged.account}`,
+      metadata: { added_by: `oauth:${provider.id}` },
+    });
+  }
   return c.json({
     access_token: sess.token,
     token_type: "Bearer",
@@ -2520,6 +2568,11 @@ app.post("/api/tokens", requireAdmin, async (c) => {
     return c.json(errorBody("conflict", "token name already exists, revoke it first"), 409);
   }
   const { token } = result;
+  // 实例邀请制（#593）：ADMIN_SECRET 亲手铸的 human token 视同邀请，归属账号直接入册，
+  // 否则开闸实例上 admin 发出去的 token 会被自己的门挡住。
+  if (role === "human") {
+    await enrollInstanceMember(c.env.DB, owner, "admin-token");
+  }
   await bestEffortRecordManagementAudit(c.env.DB, {
     actor: managementAuditAdminActor,
     action: "token.issue",
@@ -4226,6 +4279,284 @@ app.delete("/api/channels/:slug/join-links/:code", async (c) => {
     timestamp: revokedAt,
   });
   return c.json({ ok: true });
+});
+
+// 外部协作者邀请（#593）：房主在频道邀请面板生成一次性邀请码，外部人（账号中心 OIDC 注册的
+// 非企业成员）凭码完成「入册实例 + 入频道 + 预设昵称」三合一。恒绑频道（产品拍板：一切邀请
+// 从频道发起）；preset_handle 生成时即校验并占坑（handleConflict 查 pending 邀请）。
+app.post("/api/channels/:slug/external-invites", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage external invites"), 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as { handle?: unknown; expires_in_sec?: unknown } | null;
+  const handle = validateHandleFormat(body?.handle);
+  if (handle === null) {
+    return c.json(errorBody("bad_request", "handle must match ^[a-zA-Z0-9][a-zA-Z0-9._-]{1,31}$"), 400);
+  }
+  const expiresInSec = body?.expires_in_sec === undefined || body?.expires_in_sec === null ? null : positiveInt(body.expires_in_sec);
+  if (expiresInSec === null && body?.expires_in_sec !== undefined && body.expires_in_sec !== null) {
+    return c.json(errorBody("bad_request", "expires_in_sec must be a positive integer"), 400);
+  }
+  const conflict = await handleConflict(c.env.DB, handle, null);
+  if (conflict !== null) {
+    return c.json(errorBody("conflict", `handle unavailable (${conflict})`), 409);
+  }
+  const now = Date.now();
+  const expiresAt = expiresInSec === null ? null : now + expiresInSec * 1000;
+  // 过期未兑换的旧邀请先自动撤销释放昵称——否则 pending 唯一索引会把「重发同昵称邀请」也拦下。
+  await c.env.DB.prepare(
+    `UPDATE instance_invites SET revoked_at = ?
+      WHERE preset_handle = ? COLLATE NOCASE AND redeemed_by IS NULL AND revoked_at IS NULL
+        AND expires_at IS NOT NULL AND expires_at <= ?`,
+  )
+    .bind(now, handle, now)
+    .run();
+  let code = randomJoinCode();
+  for (let i = 0; i < 3; i++) {
+    try {
+      const createdBy = identity.account ?? identity.name;
+      await c.env.DB.prepare(
+        `INSERT INTO instance_invites (code, channel_slug, preset_handle, created_by, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(code, slug, handle, createdBy, now, expiresAt)
+        .run();
+      await bestEffortRecordManagementAudit(c.env.DB, {
+        actor: managementAuditActor(identity),
+        action: "channel.external_invite.create",
+        resource: `channel/${slug}/external-invites/${code}`,
+        channel: slug,
+        timestamp: now,
+        metadata: { preset_handle: handle },
+      });
+      const url = new URL(c.req.url);
+      return c.json(
+        {
+          code,
+          url: `${url.origin}/invite/${code}`,
+          channel_slug: slug,
+          preset_handle: handle,
+          created_by: createdBy,
+          created_at: now,
+          expires_at: expiresAt,
+          redeemed_by: null,
+          redeemed_at: null,
+          revoked_at: null,
+        },
+        201,
+      );
+    } catch (e) {
+      // 只有唯一键冲突才值得重试/转 409；数据库不可用等异常必须原样冒泡成 5xx，不能伪装成冲突。
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.includes("UNIQUE")) throw e;
+      if (msg.includes("preset_handle")) {
+        // pending 昵称唯一索引兜住了 handleConflict 先查后插的并发窗口
+        return c.json(errorBody("conflict", "handle unavailable (invite_pending)"), 409);
+      }
+      code = randomJoinCode();
+    }
+  }
+  return c.json(errorBody("conflict", "could not allocate invite code"), 409);
+});
+
+app.get("/api/channels/:slug/external-invites", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!isChannelModerator(c.get("identity"), channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage external invites"), 403);
+  }
+  const { results } = await c.env.DB.prepare(
+    `SELECT code, channel_slug, preset_handle, created_by, created_at, expires_at, redeemed_by, redeemed_at, revoked_at
+       FROM instance_invites
+      WHERE channel_slug = ?
+      ORDER BY created_at DESC`,
+  )
+    .bind(slug)
+    .all();
+  const origin = new URL(c.req.url).origin;
+  return c.json({ invites: results.map((invite) => ({ ...invite, url: `${origin}/invite/${String(invite.code)}` })) });
+});
+
+app.delete("/api/channels/:slug/external-invites/:code", async (c) => {
+  const slug = c.req.param("slug");
+  const code = c.req.param("code");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage external invites"), 403);
+  }
+  const revokedAt = Date.now();
+  // 已兑换的邀请不可撤销：撤销会把同账号重放打成 410、预览态从 redeemed 翻成 revoked，破坏幂等契约。
+  const result = await c.env.DB.prepare(
+    `UPDATE instance_invites SET revoked_at = COALESCE(revoked_at, ?)
+      WHERE code = ? AND channel_slug = ? AND redeemed_by IS NULL`,
+  )
+    .bind(revokedAt, code, slug)
+    .run();
+  if (result.meta.changes === 0) {
+    const existing = await c.env.DB.prepare(
+      "SELECT redeemed_by FROM instance_invites WHERE code = ? AND channel_slug = ?",
+    )
+      .bind(code, slug)
+      .first<{ redeemed_by: string | null }>();
+    if (existing?.redeemed_by != null) {
+      return c.json(errorBody("conflict", "invite has already been redeemed and cannot be revoked"), 409);
+    }
+    return c.json(errorBody("not_found", "external invite not found"), 404);
+  }
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.external_invite.revoke",
+    resource: `channel/${slug}/external-invites/${code}`,
+    channel: slug,
+    timestamp: revokedAt,
+  });
+  return c.json({ ok: true });
+});
+
+// 邀请预览：/invite/<code> 落地页在登录前展示「你被邀请进频道 X、昵称 Y」。免认证——码本身即凭证，
+// 与观看链接同一信任模型；只回展示所需最小字段，不泄露创建者/频道成员。
+app.get("/api/instance/invites/:code", async (c) => {
+  const code = c.req.param("code");
+  const invite = await c.env.DB.prepare(
+    `SELECT code, channel_slug, preset_handle, expires_at, redeemed_by, revoked_at
+       FROM instance_invites WHERE code = ?`,
+  )
+    .bind(code)
+    .first<{ code: string; channel_slug: string; preset_handle: string; expires_at: number | null; redeemed_by: string | null; revoked_at: number | null }>();
+  if (!invite) return c.json(errorBody("not_found", "invite not found"), 404);
+  const state =
+    invite.revoked_at !== null
+      ? "revoked"
+      : invite.redeemed_by !== null
+        ? "redeemed"
+        : invite.expires_at !== null && invite.expires_at <= Date.now()
+          ? "expired"
+          : "pending";
+  const channel = await c.env.DB.prepare("SELECT title FROM channels WHERE slug = ?")
+    .bind(invite.channel_slug)
+    .first<{ title: string | null }>();
+  return c.json({
+    channel_slug: invite.channel_slug,
+    channel_title: channel?.title ?? null,
+    preset_handle: invite.preset_handle,
+    state,
+  });
+});
+
+// 兑换（#593）：入册实例 + 设 handle + 入频道，一步完成。requireBearer 的实例闸对本路径豁免。
+// 一次性：原子 UPDATE 抢占 redeemed_by；同账号重放幂等（断网重试/刷新不烧码）。
+app.post("/api/instance/invites/:code/redeem", requireBearer, async (c) => {
+  const identity = c.get("identity");
+  if (identity.role !== "human" || identity.account == null) {
+    return c.json(errorBody("forbidden", "redeeming an invite requires a human account session"), 403);
+  }
+  const account = identity.account;
+  const code = c.req.param("code");
+  const now = Date.now();
+  const invite = await c.env.DB.prepare(
+    `SELECT code, channel_slug, preset_handle, expires_at, redeemed_by, revoked_at
+       FROM instance_invites WHERE code = ?`,
+  )
+    .bind(code)
+    .first<{ code: string; channel_slug: string; preset_handle: string; expires_at: number | null; redeemed_by: string | null; revoked_at: number | null }>();
+  if (!invite) return c.json(errorBody("not_found", "invite not found"), 404);
+  if (invite.revoked_at !== null) return c.json(errorBody("not_found", "invite has been revoked"), 410);
+  if (invite.redeemed_by !== null && invite.redeemed_by !== account) {
+    return c.json(errorBody("not_found", "invite has already been redeemed"), 410);
+  }
+  if (invite.redeemed_by === null && invite.expires_at !== null && invite.expires_at <= now) {
+    return c.json(errorBody("not_found", "invite has expired"), 410);
+  }
+  if (await isChannelAccountBanned(c.env.DB, invite.channel_slug, account)) {
+    return c.json(errorBody("forbidden", "this account was removed from the channel and must be re-invited by a moderator"), 403);
+  }
+  if (invite.redeemed_by === null) {
+    // 原子抢占：并发两账号同码兑换只有一个赢。
+    const claimed = await c.env.DB.prepare(
+      `UPDATE instance_invites SET redeemed_by = ?, redeemed_at = ?
+        WHERE code = ? AND redeemed_by IS NULL AND revoked_at IS NULL
+          AND (expires_at IS NULL OR expires_at > ?)`,
+    )
+      .bind(account, now, code, now)
+      .run();
+    if (claimed.meta.changes === 0) {
+      // 抢占失败再核对归属：同账号的并发重放（两请求都读到 redeemed_by=NULL）仍要幂等成功，
+      // 只有真被别的账号抢走才 410。
+      const current = await c.env.DB.prepare("SELECT redeemed_by FROM instance_invites WHERE code = ?")
+        .bind(code)
+        .first<{ redeemed_by: string | null }>();
+      if (current?.redeemed_by !== account) {
+        return c.json(errorBody("not_found", "invite has already been redeemed"), 410);
+      }
+    }
+  }
+  if (await enrollInstanceMember(c.env.DB, account, `invite:${code.slice(0, 8)}`)) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(identity),
+      action: "instance.member.add",
+      resource: `instance/members/${account}`,
+      channel: invite.channel_slug,
+      timestamp: now,
+      metadata: { added_by: `invite:${code.slice(0, 8)}` },
+    });
+  }
+  // 预设昵称：仅在账号还没有 handle 时写入（已有身份的成员兑换补票，不覆盖其既有昵称）。
+  // 冲突竞态（极罕见）不 fail 整个兑换——入册/入频道照走，昵称留给用户稍后自设。
+  let handleSet = false;
+  const existingProfile = await c.env.DB.prepare("SELECT handle FROM account_profiles WHERE account = ?")
+    .bind(account)
+    .first<{ handle: string }>();
+  if (!existingProfile) {
+    const conflict = await handleConflict(c.env.DB, invite.preset_handle, account, { excludeInviteCode: code });
+    if (conflict === null) {
+      try {
+        await c.env.DB.prepare(
+          `INSERT INTO account_profiles (account, handle, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+        )
+          .bind(account, invite.preset_handle, now, now)
+          .run();
+        handleSet = true;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!msg.includes("UNIQUE")) throw e;
+      }
+    }
+  }
+  const addedBy = `external-invite:${code.slice(0, 8)}`;
+  const inserted = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO channel_members (channel_slug, account, added_by, added_at) VALUES (?, ?, ?, ?)",
+  )
+    .bind(invite.channel_slug, account, addedBy, now)
+    .run();
+  if (inserted.meta.changes > 0) {
+    await bestEffortRecordManagementAudit(c.env.DB, {
+      actor: managementAuditActor(identity),
+      action: "channel.member.add",
+      resource: `channel/${invite.channel_slug}/members/${account}`,
+      channel: invite.channel_slug,
+      timestamp: now,
+    });
+  }
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "channel.external_invite.redeem",
+    resource: `channel/${invite.channel_slug}/external-invites/${code}`,
+    channel: invite.channel_slug,
+    timestamp: now,
+    metadata: { preset_handle: invite.preset_handle },
+  });
+  return c.json({
+    channel_slug: invite.channel_slug,
+    handle: handleSet ? invite.preset_handle : existingProfile?.handle ?? null,
+    joined: inserted.meta.changes > 0,
+  });
 });
 
 // 观看模式邀请（#186）：房主自助铸「频道内只读分享 token」，返回 /c/<slug>?t=<token> 围观链接。

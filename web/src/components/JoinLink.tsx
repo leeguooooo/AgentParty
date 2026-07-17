@@ -8,14 +8,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AuthError,
+  createExternalInvite,
   createJoinLink,
   createShareLink,
   listChannelJoinRequests,
+  listExternalInvites,
   listJoinLinks,
   listShareLinks,
   reviewChannelJoinRequest,
+  revokeExternalInvite,
   revokeJoinLink,
   revokeShareLink,
+  type ExternalInviteInfo,
   type JoinLinkInfo,
   type ChannelJoinRequest,
   type ShareLinkInfo,
@@ -35,7 +39,8 @@ interface Props {
   larkDirectoryEnabled?: boolean;
 }
 
-type InviteMode = "participate" | "watch";
+// external（#593）：外部协作者一次性邀请码——对方登录账号中心后自动入册实例 + 入频道 + 拿到预设昵称。
+type InviteMode = "participate" | "watch" | "external";
 
 function expiryOptions(t: TFunc): { label: string; sec?: number }[] {
   return [
@@ -45,6 +50,9 @@ function expiryOptions(t: TFunc): { label: string; sec?: number }[] {
     { label: t("JoinLink.expiry.never") }, // sec undefined
   ];
 }
+
+// 外部邀请的预设昵称：与服务端 HANDLE_RE 同步（2-32 位 ASCII，首字符字母数字）。
+const NICKNAME_INPUT_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{1,31}$/;
 
 // 默认单次失效（一个链接只能一个人用）——私有频道更看重隐私。用尽即失效。
 function usesOptions(t: TFunc): { label: string; max?: number }[] {
@@ -62,7 +70,7 @@ function linkUrl(link: JoinLinkInfo): string {
   return link.url ?? `${apiOrigin()}/join/${link.code}`;
 }
 
-function expiryLabel(link: JoinLinkInfo, t: TFunc): string {
+function expiryLabel(link: Pick<JoinLinkInfo, "expires_at">, t: TFunc): string {
   if (link.expires_at === null) return t("JoinLink.neverExpires");
   const left = link.expires_at - Date.now();
   if (left <= 0) return t("JoinLink.expired");
@@ -80,6 +88,8 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
   const [mode, setMode] = useState<InviteMode>("participate");
   const [links, setLinks] = useState<JoinLinkInfo[] | null>(null);
   const [shareLinks, setShareLinks] = useState<ShareLinkInfo[] | null>(null);
+  const [externalInvites, setExternalInvites] = useState<ExternalInviteInfo[] | null>(null);
+  const [nickname, setNickname] = useState("");
   const [watchUrl, setWatchUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -116,6 +126,14 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
   const refreshShare = useCallback(async () => {
     try {
       setShareLinks(await listShareLinks(token, slug));
+    } catch (e) {
+      handleErr(e);
+    }
+  }, [token, slug, handleErr]);
+
+  const refreshExternal = useCallback(async () => {
+    try {
+      setExternalInvites(await listExternalInvites(token, slug));
     } catch (e) {
       handleErr(e);
     }
@@ -164,6 +182,7 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
     setExpiryIdx(0);
     setUsesIdx(0);
     setCopied(null);
+    setNickname("");
   }, [isOpen]);
 
   const selectMode = useCallback(
@@ -172,14 +191,26 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
       setError(null);
       if (next === "watch" && shareLinks === null) void refreshShare();
       if (next === "participate" && links === null) void refresh();
+      if (next === "external" && externalInvites === null) void refreshExternal();
     },
-    [shareLinks, links, refreshShare, refresh],
+    [shareLinks, links, externalInvites, refreshShare, refresh, refreshExternal],
   );
 
   async function generate() {
     setBusy(true);
     setError(null);
     try {
+      if (mode === "external") {
+        const invite = await createExternalInvite(token, slug, {
+          handle: nickname.trim(),
+          expiresInSec: EXPIRY_OPTIONS[expiryIdx]?.sec,
+        });
+        await refreshExternal();
+        setBusy(false);
+        setNickname("");
+        copy(invite.url ?? `${apiOrigin()}/invite/${invite.code}`);
+        return;
+      }
       if (mode === "watch") {
         const link = await createShareLink(token, slug);
         await refreshShare();
@@ -239,6 +270,18 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
     }
   }
 
+  async function revokeExternal(code: string) {
+    setBusy(true);
+    try {
+      await revokeExternalInvite(token, slug, code);
+      await refreshExternal();
+    } catch (e) {
+      handleErr(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function review(request: ChannelJoinRequest, action: "approve" | "reject") {
     if (request.id === undefined) return;
     const reason = rejectReason.trim();
@@ -264,6 +307,10 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
   }
 
   const activeLinks = (links ?? []).filter((l) => l.revoked_at === null && (l.expires_at === null || l.expires_at > Date.now()));
+  // 外部邀请列表：pending 未过期的可复制/撤销；已兑换的留档展示（谁的昵称已被用掉）；过期未兑换的隐藏。
+  const activeExternalInvites = (externalInvites ?? []).filter(
+    (i) => i.revoked_at === null && (i.redeemed_by !== null || i.expires_at === null || i.expires_at > Date.now()),
+  );
 
   return (
     <div className="joinlink" ref={rootRef}>
@@ -273,7 +320,7 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
       {isOpen && (
         <div className="joinlink-panel" role="dialog" aria-modal="true" aria-label={t("JoinLink.button")}>
           <div className="joinlink-mode" role="radiogroup" aria-label={t("JoinLink.modeLabel")}>
-            {(["participate", "watch"] as InviteMode[]).map((m) => (
+            {(["participate", "watch", "external"] as InviteMode[]).map((m) => (
               <label key={m} className={`joinlink-mode-opt${mode === m ? " is-active" : ""}`}>
                 <input
                   type="radio"
@@ -318,7 +365,7 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
                 </button>
               </div>
             </div>
-          ) : (
+          ) : mode === "watch" ? (
             <div className="joinlink-gen">
               <span className="joinlink-hint">{t("JoinLink.watch.hint")}</span>
               <div className="joinlink-gen-row">
@@ -335,6 +382,41 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
                   </button>
                 </div>
               )}
+            </div>
+          ) : (
+            <div className="joinlink-gen">
+              <span className="joinlink-hint">{t("JoinLink.external.hint")}</span>
+              <div className="joinlink-gen-row">
+                <label className="joinlink-expiry joinlink-nickname">
+                  {t("JoinLink.external.nicknameLabel")}
+                  <input
+                    className="t-mono joinlink-nickname-input"
+                    type="text"
+                    value={nickname}
+                    placeholder={t("JoinLink.external.nicknamePlaceholder")}
+                    disabled={busy}
+                    onChange={(e) => setNickname(e.target.value)}
+                  />
+                </label>
+                <label className="joinlink-expiry">
+                  {t("JoinLink.expiryLabel")}
+                  <select value={expiryIdx} onChange={(e) => setExpiryIdx(Number(e.target.value))} disabled={busy}>
+                    {EXPIRY_OPTIONS.map((o, i) => (
+                      <option key={o.label} value={i}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="d-btn d-btn--primary"
+                  disabled={busy || !NICKNAME_INPUT_RE.test(nickname.trim())}
+                  onClick={generate}
+                >
+                  {busy ? t("JoinLink.generating") : t("JoinLink.generate")}
+                </button>
+              </div>
             </div>
           )}
 
@@ -371,7 +453,7 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
               )}
               {links !== null && activeLinks.length === 0 && <p className="joinlink-empty">{t("JoinLink.empty")}</p>}
             </>
-          ) : (
+          ) : mode === "watch" ? (
             <>
               {(shareLinks ?? []).length > 0 && (
                 <ul className="joinlink-list">
@@ -389,6 +471,50 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
                 </ul>
               )}
               {shareLinks !== null && (shareLinks ?? []).length === 0 && <p className="joinlink-empty">{t("JoinLink.watch.empty")}</p>}
+            </>
+          ) : (
+            <>
+              {activeExternalInvites.length > 0 && (
+                <ul className="joinlink-list">
+                  {activeExternalInvites.map((invite) => {
+                    // 桌面版 location.origin 是 agentparty-ui://localhost，兜底必须拼真实后端 origin
+                    const url = invite.url ?? `${apiOrigin()}/invite/${invite.code}`;
+                    const redeemed = invite.redeemed_by !== null;
+                    return (
+                      <li key={invite.code} className="joinlink-item">
+                        <code className="joinlink-url t-mono">{redeemed ? `@${invite.preset_handle}` : url}</code>
+                        <span className="joinlink-meta">
+                          <span className="joinlink-tag">{t("JoinLink.tag.external")}</span>
+                          {" · @"}
+                          {invite.preset_handle}
+                          {" · "}
+                          {redeemed
+                            ? t("JoinLink.external.redeemed")
+                            : expiryLabel({ expires_at: invite.expires_at }, t)}
+                        </span>
+                        {!redeemed && (
+                          <button type="button" className="d-btn joinlink-copy" onClick={() => copy(url)}>
+                            {copied === url ? t("JoinLink.copied") : t("JoinLink.copy")}
+                          </button>
+                        )}
+                        {!redeemed && (
+                          <button
+                            type="button"
+                            className="d-btn joinlink-revoke"
+                            disabled={busy}
+                            onClick={() => revokeExternal(invite.code)}
+                          >
+                            {t("JoinLink.revoke")}
+                          </button>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              {externalInvites !== null && activeExternalInvites.length === 0 && (
+                <p className="joinlink-empty">{t("JoinLink.external.empty")}</p>
+              )}
             </>
           )}
 

@@ -23,6 +23,10 @@ export type ManagementAuditAction =
   | "channel.join_request.reject"
   | "channel.project_agent.invite"
   | "channel.project_agent.remove"
+  | "channel.external_invite.create"
+  | "channel.external_invite.revoke"
+  | "channel.external_invite.redeem"
+  | "instance.member.add"
   | "channel.guard.update"
   | "channel.guard.reset"
   | "channel.webhook.add"
@@ -83,6 +87,14 @@ function safeMetadata(action: ManagementAuditAction, input: unknown): Record<str
     }
     if (typeof metadata.channel_scope === "string") result.channel_scope = metadata.channel_scope;
     return result;
+  }
+  if (action === "channel.external_invite.create" || action === "channel.external_invite.redeem") {
+    const result: Record<string, unknown> = {};
+    if (typeof metadata.preset_handle === "string") result.preset_handle = metadata.preset_handle;
+    return result;
+  }
+  if (action === "instance.member.add") {
+    return typeof metadata.added_by === "string" ? { added_by: metadata.added_by } : {};
   }
   if (action === "channel.permissions.update") {
     const fields = Array.isArray(metadata.permission_fields)
