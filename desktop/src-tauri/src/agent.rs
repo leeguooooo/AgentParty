@@ -518,7 +518,9 @@ impl AgentManager {
                 "party sidecar did not exit within the stop timeout".to_string(),
             );
         }
-        Ok(agent.runtime.clone())
+        let runtime = agent.runtime.clone();
+        evict_terminal_overflow(&mut instances);
+        Ok(runtime)
     }
 
     /// 旧 stop 命令语义：停掉所有活跃实例（旧 UI 只可能起过一个，行为等价）。
@@ -760,7 +762,9 @@ pub(crate) fn desktop_agent_start(
                 agent.runtime.mark_exited(None, Some(&message));
                 AgentManager::push_log(agent, message);
             }
-            return Ok(agent.runtime.clone());
+            let runtime = agent.runtime.clone();
+            evict_terminal_overflow(&mut instances);
+            return Ok(runtime);
         }
     };
 
@@ -823,6 +827,8 @@ pub(crate) fn desktop_agent_start(
                         }
                     };
                     AgentManager::push_log(agent, message);
+                    // 每个转入终止态的路径都立即收敛历史上限，不等下一次 start（CodeRabbit #618）。
+                    evict_terminal_overflow(&mut instances);
                     return;
                 }
                 _ => {}
@@ -851,6 +857,7 @@ pub(crate) fn desktop_agent_start(
                             "party sidecar event stream closed unexpectedly".to_string(),
                         );
                     }
+                    evict_terminal_overflow(&mut instances);
                 }
             }
         }
