@@ -10,9 +10,10 @@ import {
   ForbiddenError,
   ValidationError,
 } from "../lib/api";
-import { copyText, MIN_CLI, mcpServerName, saveAgentToken, VERSION_GE_SNIPPET } from "../lib/agentTokenVault";
+import { copyText, saveAgentToken } from "../lib/agentTokenVault";
+import { buildFullJoinPack } from "../lib/joinPack";
 import { apiOrigin } from "../lib/base";
-import { useT, type TFunc } from "../i18n/useT";
+import { useT } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
 import "../i18n/strings/AgentJoin";
 
@@ -29,19 +30,8 @@ interface Props {
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const RESERVED = new Set(["system"]);
-// MIN_CLI（保底 CLI 版本，低于强制重装）与 version_ge 片段挪到 agentTokenVault 与桌面最小
-// 接入包共用一份，防两处漂移；版本上调历史见那边注释（旧版误报见 issue #2）。
-
-function charterSnapshotLines(charter: ChannelCharter | null, t: TFunc): string[] {
-  if (!charter?.charter) return [];
-  return [
-    t("AgentJoin.cmd.charterHeader"),
-    t("AgentJoin.cmd.charterBegin"),
-    charter.charter,
-    t("AgentJoin.cmd.charterEnd"),
-    ``,
-  ];
-}
+// 完整接入包 builder（含 MIN_CLI 版本闸、charter 快照、待命指引）在 lib/joinPack ——
+// 与 vault「复制接入包」共用同一份，两个入口的产物逐字节同构（#584 复盘）。
 
 // 从前缀清洗出一个合法的名字词根（小写、仅 [a-z0-9._-]、去首尾非字母数字）。
 function cleanBase(prefix: string): string {
@@ -113,70 +103,15 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
       // http://tauri.localhost / dev 的 127.0.0.1:5173，agent 拿去 `party init --server` 会因非 http(s)
       // 报错或连不上。优先用打包注入的 apiBase(VITE_API_BASE=真后端)，仅同源 web 部署(apiBase 为空)回退 location.origin。
       const server = apiOrigin();
-      // 复制的是完整接入脚本：init 只写配置不发消息，必须带「报到发言」，否则网页上看不到 agent。
-      const command = [
-        t("AgentJoin.cmd.header", { slug }),
-        t("AgentJoin.cmd.intro1"),
-        t("AgentJoin.cmd.intro2"),
-        ``,
-        t("AgentJoin.cmd.scope1", { slug }),
-        t("AgentJoin.cmd.scope2"),
-        ``,
-        ...charterSnapshotLines(charter, t),
-        t("AgentJoin.cmd.step1"),
-        // PATH 必须先于版本检查：install.sh 装到 ~/.local/bin，若检查时查的是系统 PATH 里
-        // 另一个够新的 party、后续命令却用回 ~/.local/bin 的旧版，版本闸就被绕过了。
-        `export PATH="\$HOME/.local/bin:\$PATH"`,
-        VERSION_GE_SNIPPET,
-        `need=${MIN_CLI}; have="$(party --version 2>/dev/null || echo 0)"; version_ge "$have" "$need" || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
-        t("AgentJoin.cmd.pathNote1"),
-        t("AgentJoin.cmd.pathNote2"),
-        `command -v party >/dev/null || alias party="\$HOME/.local/bin/party"`,
-        ``,
-        t("AgentJoin.cmd.step2"),
-        `mkdir -p "$HOME/.agentparty/agents"`,
-        `export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agent.name}-${slug}.json"`,
-        t("AgentJoin.cmd.turnWarn1"),
-        t("AgentJoin.cmd.turnWarn2"),
-        t("AgentJoin.cmd.turnWarn3"),
-        t("AgentJoin.cmd.turnWarn4", { agentName: agent.name, slug }),
-        ``,
-        t("AgentJoin.cmd.step3"),
-        `party init --server ${server} --token ${agent.token} --channel ${slug}`,
-        t("AgentJoin.cmd.step3note"),
-        `party send "${t("AgentJoin.cmd.checkinMessage", { agentName: agent.name })}" --channel ${slug} --mention ${inviterName}`,
-        ``,
-        t("AgentJoin.cmd.step4"),
-        `claude mcp add ${mcpServerName(agent.name)} --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agent.name}-${slug}.json" -- party mcp --channel ${slug}`,
-        t("AgentJoin.cmd.step4codex", { mcpName: mcpServerName(agent.name), agentName: agent.name, slug }),
-        t("AgentJoin.cmd.step4fallback"),
-        ``,
-        t("AgentJoin.cmd.step5"),
-        t("AgentJoin.cmd.step5reply", { slug }),
-        t("AgentJoin.cmd.step5more", { slug }),
-        t("AgentJoin.cmd.contextAnchor1", { slug }),
-        t("AgentJoin.cmd.contextAnchor2", { agentName: agent.name, slug }),
-        t("AgentJoin.cmd.contextAnchor3"),
-        t("AgentJoin.cmd.blocked1", { slug }),
-        t("AgentJoin.cmd.blocked2", { slug, inviterName }),
-        t("AgentJoin.cmd.stayReachable"),
-        t("AgentJoin.cmd.mcpWakeNote"),
-        t("AgentJoin.cmd.claudeMode1"),
-        t("AgentJoin.cmd.claudeMode2", { slug }),
-        t("AgentJoin.cmd.claudeMode3"),
-        t("AgentJoin.cmd.otherMode1"),
-        t("AgentJoin.cmd.otherMode2"),
-        t("AgentJoin.cmd.otherMode3", { slug }),
-        t("AgentJoin.cmd.otherMode4"),
-        `#        Codex:  OUT=$(mktemp); codex exec resume --last --skip-git-repo-check -o "$OUT" "$(cat {file})" || codex exec --skip-git-repo-check -o "$OUT" "$(cat {file})"; party send - --channel "$AP_CHANNEL" --reply-to "$AP_REPLY_TO" < "$OUT"`,
-        `#        Claude: claude -p -c "$(cat {file})" || claude -p "$(cat {file})"`,
-        t("AgentJoin.cmd.sandboxWarn1"),
-        t("AgentJoin.cmd.sandboxWarn2"),
-        t("AgentJoin.cmd.sandboxWarn3"),
-        t("AgentJoin.cmd.sandboxWarn4"),
-        t("AgentJoin.cmd.watchNote", { slug }),
-        t("AgentJoin.cmd.etiquette"),
-      ].join("\n");
+      const command = buildFullJoinPack({
+        slug,
+        agentName: agent.name,
+        agentToken: agent.token,
+        server,
+        inviterName,
+        charter,
+        t,
+      });
       saveAgentToken({
         account: accountKey,
         slug,
