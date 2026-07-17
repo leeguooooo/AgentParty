@@ -8,6 +8,21 @@
  * 消毒有损时（a.b 与 a-b 会同形）追加原名短哈希保持单射，
  * 别让「防覆盖」的规则自己引入新的覆盖面（#583 评审）。
  */
+// 公告快照正文的清洗（#587 评审）：charter 由对方频道管理员可控。`#` 前缀防 shell 执行，
+// 但 ESC/CSI/CR 等控制字节能伪造终端输出、视觉覆盖注释前缀（人眼看到「裸命令」照抄就中招）。
+// 先归一化换行再剥 C0（保留 \t）/DEL/C1/CSI——字符集与 cli/src/format.ts 的
+// stripTerminalControls 同一套，web/cli 两个接入包出口共用这一份。
+const ANSI_CSI = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+// eslint-disable-next-line no-control-regex
+const TERMINAL_CONTROL = /[\x00-\x08\x0B-\x1F\x7F-\x9F]/g;
+
+export function charterSnapshotBodyLines(text: string): string[] {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(ANSI_CSI, "").replace(TERMINAL_CONTROL, ""));
+}
+
 export function mcpServerName(agentName: string): string {
   const cleaned = agentName.replace(/[^a-zA-Z0-9_-]/g, "-");
   if (cleaned === agentName) return `party-${agentName}`;
