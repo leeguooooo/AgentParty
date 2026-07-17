@@ -1,6 +1,6 @@
 // party who — 从终端看频道里谁在线/可唤醒/最近，便于接着 party send --mention 把人拉进来/唤醒。
 // Claude Code 原生 @ 只认本地文件/技能，塞不进远程动态列表；本命令就是那个「动态在线列表」。
-import { autoWakeReachable, type PresenceEntry, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
+import { autoWakeReachable, type AgentActivity, type PresenceEntry, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
@@ -35,7 +35,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/wake/wake_unverified/busy/queue_depth/waiting_owner_count/current_task/task_started_at/heartbeat_at/agent_session/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/wake/wake_unverified/busy/queue_depth/waiting_owner_count/current_task/task_started_at/heartbeat_at/activity/agent_session/account/handle/display_name/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -76,6 +76,9 @@ interface Row {
   current_task?: number;
   task_started_at?: number;
   heartbeat_at?: number;
+  // 模型 session 活动（#602）：hook 落盘、serve 心跳捎带的「正在干什么」——比 current_task 更细：
+  // 正在跑哪个工具 / 卡权限确认 / compact / turn 已结束。仅在有活跃任务时带出。
+  activity?: AgentActivity;
   // runner 自报、worker 持久化的模型会话句柄（#522）；不是 websocket session。
   agent_session?: PresenceEntry["agent_session"];
 }
@@ -137,6 +140,7 @@ export function classify(e: PresenceEntry, now: number): Row | null {
           current_task: e.current_task,
           ...(typeof e.task_started_at === "number" ? { task_started_at: e.task_started_at } : {}),
           ...(typeof e.heartbeat_at === "number" ? { heartbeat_at: e.heartbeat_at } : {}),
+          ...(e.activity === undefined ? {} : { activity: e.activity }),
         }
       : {}),
     ...(e.agent_session === undefined ? {} : { agent_session: e.agent_session }),
@@ -203,6 +207,34 @@ export function taskNote(r: Row, now: number): string {
   const beat =
     typeof r.heartbeat_at === "number" ? ` · ♥ ${humanAge(Math.max(0, now - r.heartbeat_at))}` : " · ♥ (none)";
   return ` · ▶ seq ${r.current_task}${beat}`;
+}
+
+// 模型 session 活动标注（#602）：比「▶ seq X」再细一层——具体在干什么。waiting_permission 是
+// 无人值守最致命的静默挂法（headless 权限确认没人点），单独用 ⏸ 高亮出来。
+export function activityNote(r: Row, now: number): string {
+  const activity = r.activity;
+  if (activity === undefined) return "";
+  const age = humanAge(Math.max(0, now - activity.ts));
+  // tool 名来自远端 presence（REST 路径不过帧校验），渲染前统一归一化控制字符，防终端转义注入。
+  const tool = activity.tool === undefined ? undefined : terminalIdentityText(activity.tool) || undefined;
+  switch (activity.phase) {
+    case "tool":
+      return ` · ⚙ ${tool ?? "tool"} (${age})`;
+    case "waiting_permission":
+      return ` · ⏸ awaiting permission${tool !== undefined ? `: ${tool}` : ""} (${age})`;
+    case "waiting_input":
+      return ` · ⏸ awaiting input (${age})`;
+    case "compacting":
+      return ` · ⚙ compacting (${age})`;
+    case "starting":
+      return ` · ⚙ starting (${age})`;
+    case "working":
+      return ` · ⚙ thinking (${age})`;
+    case "idle":
+      return ` · ⚙ turn done (${age})`;
+    default:
+      return "";
+  }
 }
 
 export function sessionNote(r: Row): string {
@@ -304,7 +336,7 @@ export async function run(argv: string[]): Promise<number> {
           ? ` · ${r.wake_unverified === true ? "unverified" : "verified"}${r.wake ? ` (${r.wake})` : ""}`
           : "";
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${taskNote(r, now)}${sessionNote(r)}${wake}${read}${duplicate}${age}`);
+      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${taskNote(r, now)}${activityNote(r, now)}${sessionNote(r)}${wake}${read}${duplicate}${age}`);
     }
     return 0;
   } catch (e) {

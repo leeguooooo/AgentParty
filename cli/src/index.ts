@@ -41,6 +41,7 @@ commands:
   resume    <name> [--channel C]                           resume a paused agent's reception (moderator)
   wake-budget <name> [--limit N [--window D]|--off]        cap an agent's wakes per window; over-budget @ withheld (#108)
   health    [--json] [--channel C] [--stale-after ms]      local serve WS health probe (pid alive != ws alive, #254)
+  hook      report                                          Claude Code hook adapter: record model activity for presence (#602)
   upgrade   [--version X.Y.Z] [--check]                    download release binary, verify sha256, atomically replace party
   charter   [slug] [--json] | set [slug] -f file.md|-m text|- | template
   history   [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]
@@ -157,6 +158,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/doctor")).run(rest);
     case "health":
       return (await import("./commands/health")).run(rest);
+    case "hook":
+      return (await import("./commands/hook")).run(rest);
     case "upgrade":
       return (await import("./commands/upgrade")).run(rest);
     case "worktree":

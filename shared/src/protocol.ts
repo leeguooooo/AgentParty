@@ -514,8 +514,57 @@ export interface PresenceEntry {
    * 心跳还在推进 = 活着，长时间不动 = 卡死。不参与可达性/租约判定。
    */
   heartbeat_at?: number;
+  /**
+   * 模型 session 内的细粒度活动（issue #602）：正在跑哪个工具、是否卡在权限确认、是否在 compact。
+   * 由 Claude Code hooks 落盘、serve 的任务心跳帧捎带上行；与 current_task 同生共死（任务结束即清），
+   * 仅 state != offline 且有活跃任务时下发。旧客户端忽略。
+   */
+  activity?: AgentActivity;
   /** Agent 自报并由频道持久化的模型会话句柄；供重启后精确 resume（issue #522）。 */
   agent_session?: AgentSessionInfo;
+}
+
+// 模型 session 活动阶段（issue #602）。busy/current_task 只说「在忙哪条」，activity 说「具体在干什么」：
+// waiting_permission 是无人值守最致命的静默挂法（headless 权限确认没人点），必须让频道看得见。
+export const AGENT_ACTIVITY_PHASES = [
+  "starting", // SessionStart：session 刚起
+  "working", // 模型在推理/工具间隙（UserPromptSubmit/PostToolUse）
+  "tool", // PreToolUse：正在跑某个工具（tool 字段带工具名）
+  "waiting_permission", // Notification 权限请求：卡在权限确认
+  "waiting_input", // Notification 等输入：交互式 session 空闲等人
+  "compacting", // PreCompact：正在压缩上下文
+  "idle", // Stop/SessionEnd：turn 结束
+] as const;
+export type AgentActivityPhase = (typeof AGENT_ACTIVITY_PHASES)[number];
+
+export interface AgentActivity {
+  phase: AgentActivityPhase;
+  /** 仅 phase=tool / waiting_permission 时可带：工具名（绝不带入参正文，防 secret 泄漏）。 */
+  tool?: string;
+  /** 该活动的发生时刻（epoch ms）；消费方据 now-ts 判新鲜度。 */
+  ts: number;
+}
+
+// activity 校验的统一口径：CLI 读 hook 落盘文件、DO 收 heartbeat 帧共用。
+// 脏值返回 undefined（调用方各自决定丢字段还是丢整帧）。tool 名截断到 64 字符——只是展示用途；
+// 剥掉 ESC/C0/C1 控制字符（tool 名来自远端，会被直接渲染进终端，不给转义序列注入留门）。
+export function parseAgentActivity(input: unknown): AgentActivity | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const value = input as Record<string, unknown>;
+  if (!AGENT_ACTIVITY_PHASES.includes(value.phase as AgentActivityPhase)) return undefined;
+  if (typeof value.ts !== "number" || !Number.isSafeInteger(value.ts) || value.ts < 0) return undefined;
+  // tool 只在 tool / waiting_permission 阶段有意义（见 AgentActivity 注释）；其余阶段丢字段留活动，兼容旧客户端。
+  const allowsTool = value.phase === "tool" || value.phase === "waiting_permission";
+  const tool =
+    allowsTool && typeof value.tool === "string" && value.tool.length > 0
+      ? // eslint-disable-next-line no-control-regex
+        value.tool.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 64)
+      : undefined;
+  return {
+    phase: value.phase as AgentActivityPhase,
+    ...(tool === undefined || tool === "" ? {} : { tool }),
+    ts: value.ts,
+  };
 }
 
 export interface ChannelRoleAssignment {
@@ -756,6 +805,11 @@ export interface HeartbeatFrame {
   task_started_at: number | null;
   /** 本次心跳时刻（epoch ms），周期性推进；随 current_task 一起清空。 */
   heartbeat_at: number | null;
+  /**
+   * 模型 session 内的细粒度活动（issue #602）：serve 每拍从 hook 落盘文件读到什么就捎带什么。
+   * 缺省即「本拍无活动信息」，服务端把 activity 清空（活动新鲜度与心跳同生共死，绝不留僵值）。
+   */
+  activity?: AgentActivity;
   /**
    * 可选的模型会话自报。可与任务心跳同帧，也可在三个任务字段均为 null 时单独上报；
    * 服务端持久化但不落聊天 history。缺省表示不更新已有会话。

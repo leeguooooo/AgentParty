@@ -37,6 +37,8 @@ import {
   DELIVERY_CONTINUATION_REF_LIMIT,
   DELIVERY_ORIGIN_CHANNEL_LIMIT,
   DELIVERY_WORK_ID_LIMIT,
+  parseAgentActivity,
+  type AgentActivity,
   type AgentLineage,
   type AgentSessionInfo,
   type Attachment,
@@ -1214,6 +1216,7 @@ export interface ParsedTaskHeartbeat {
   current_task: number | null;
   task_started_at: number | null;
   heartbeat_at: number | null;
+  activity?: AgentActivity;
   agent_session?: AgentSessionInfo;
 }
 
@@ -1255,10 +1258,14 @@ function parseHeartbeatFrame(input: unknown): ParsedTaskHeartbeat | null {
   if (current === undefined || started === undefined || heartbeat === undefined) return null;
   const agentSession = f.agent_session === undefined ? undefined : parseAgentSessionInfo(f.agent_session);
   if (f.agent_session !== undefined && agentSession === undefined) return null;
+  // 模型 session 活动（#602）：可选捎带；脏 activity 与脏 agent_session 同口径——整帧丢弃。
+  const activity = f.activity === undefined ? undefined : parseAgentActivity(f.activity);
+  if (f.activity !== undefined && activity === undefined) return null;
   return {
     current_task: current,
     task_started_at: started,
     heartbeat_at: heartbeat,
+    ...(activity === undefined ? {} : { activity }),
     ...(agentSession === undefined ? {} : { agent_session: agentSession }),
   };
 }
@@ -1568,6 +1575,9 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE presence ADD COLUMN current_task INTEGER",
       "ALTER TABLE presence ADD COLUMN task_started_at INTEGER",
       "ALTER TABLE presence ADD COLUMN heartbeat_at INTEGER",
+      // 模型 session 活动（#602）：hook 落盘、serve 心跳捎带的「正在干什么」快照 JSON。
+      // 与心跳字段同生共死（任务结束/离线即清）。
+      "ALTER TABLE presence ADD COLUMN activity_json TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -2086,6 +2096,7 @@ export class ChannelDO extends Server<Env> {
         current_task INTEGER,
         task_started_at INTEGER,
         heartbeat_at INTEGER,
+        activity_json TEXT,
         agent_session_json TEXT,
         PRIMARY KEY (name, session_id)
       )`);
@@ -2095,14 +2106,14 @@ export class ChannelDO extends Server<Env> {
         status_decision_json, status_workflow_json, role, role_source, residency, wake_kind,
         wake_verified_at, context_json, lineage_json, kind, account, client_version, handle,
         display_name, avatar_url, avatar_thumb, paused_at, paused_resume_at, busy, queue_depth,
-        current_task, task_started_at, heartbeat_at, agent_session_json
+        current_task, task_started_at, heartbeat_at, activity_json, agent_session_json
       ) SELECT
         name, COALESCE(NULLIF(session_id, ''), '${LEGACY_SESSION_ID}'), state, note, updated_at,
         status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
         status_decision_json, status_workflow_json, role, role_source, residency, wake_kind,
         wake_verified_at, context_json, lineage_json, kind, account, client_version, handle,
         display_name, avatar_url, avatar_thumb, paused_at, paused_resume_at, busy, queue_depth,
-        current_task, task_started_at, heartbeat_at, agent_session_json
+        current_task, task_started_at, heartbeat_at, activity_json, agent_session_json
       FROM presence`);
       sql.exec("DROP TABLE presence");
       sql.exec("ALTER TABLE presence_session_v2 RENAME TO presence");
@@ -3318,7 +3329,7 @@ export class ChannelDO extends Server<Env> {
       // 会借尸还魂显示成「还在处理」。心跳字段与「活着」正交，离线即无任务，直接清空最干净。
       `INSERT INTO presence (name, session_id, state, note, updated_at) VALUES (?, ?, 'offline', NULL, ?)
        ON CONFLICT(name, session_id) DO UPDATE SET state = 'offline', updated_at = excluded.updated_at,
-         current_task = NULL, task_started_at = NULL, heartbeat_at = NULL,
+         current_task = NULL, task_started_at = NULL, heartbeat_at = NULL, activity_json = NULL,
          -- #454：watch 只有活着的本地 listener 才能接住 @。最后一条连接断开后立即撤销 wake 声明，
          -- 不让被 harness kill 的 watch --once 继续以 wakeable 身份吸收 mention。serve/webhook 有独立
          -- supervisor/服务端投递语义，保持原样；watch 重挂后会由 advertiseWatchWake 重新声明。
@@ -3429,12 +3440,16 @@ export class ChannelDO extends Server<Env> {
         .toArray().length > 0;
     if (!exists) return;
     this.ctx.storage.sql.exec(
+      // activity（#602）不走 COALESCE：新鲜度与心跳同生共死，本拍没带就清空，绝不留僵值。
+      // 清除帧（current_task=null）即便捎带了 activity 也一并清——没有任务就没有活动可言。
       `UPDATE presence SET current_task = ?, task_started_at = ?, heartbeat_at = ?,
+         activity_json = ?,
          agent_session_json = COALESCE(?, agent_session_json)
        WHERE name = ? AND session_id = ?`,
       hb.current_task,
       hb.task_started_at,
       hb.heartbeat_at,
+      hb.current_task === null || hb.activity === undefined ? null : JSON.stringify(hb.activity),
       hb.agent_session === undefined ? null : JSON.stringify(hb.agent_session),
       name,
       sessionId,
@@ -6874,7 +6889,7 @@ export class ChannelDO extends Server<Env> {
       // are left alone. The CLI's later clear heartbeat remains idempotent.
       this.ctx.storage.sql.exec(
         `UPDATE presence
-            SET busy = 0, current_task = NULL, task_started_at = NULL, heartbeat_at = NULL
+            SET busy = 0, current_task = NULL, task_started_at = NULL, heartbeat_at = NULL, activity_json = NULL
           WHERE name = ? AND (current_task = ? OR current_task IS NULL)`,
         identity.name,
         activeDecision.lineage.origin_seq,
@@ -9175,7 +9190,7 @@ export class ChannelDO extends Server<Env> {
                 state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json, paused_at, paused_resume_at, busy, queue_depth,
-                current_task, task_started_at, heartbeat_at, agent_session_json`;
+                current_task, task_started_at, heartbeat_at, activity_json, agent_session_json`;
 
   private presenceList(): PresenceEntry[] {
     const liveCounts = this.liveConnectionCounts();
@@ -9362,6 +9377,16 @@ export class ChannelDO extends Server<Env> {
             current_task: Number(r.current_task),
             ...(r.task_started_at === null || r.task_started_at === undefined ? {} : { task_started_at: Number(r.task_started_at) }),
             ...(r.heartbeat_at === null || r.heartbeat_at === undefined ? {} : { heartbeat_at: Number(r.heartbeat_at) }),
+            // 模型 session 活动（#602）：与心跳同生共死，只在有活跃任务时带出。
+            ...(() => {
+              if (typeof r.activity_json !== "string" || r.activity_json === "") return {};
+              try {
+                const activity = parseAgentActivity(JSON.parse(r.activity_json) as unknown);
+                return activity === undefined ? {} : { activity };
+              } catch {
+                return {};
+              }
+            })(),
           }
         : {}),
       ...(() => {

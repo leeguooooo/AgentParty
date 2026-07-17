@@ -12,6 +12,7 @@ import {
   writeManagedManifest,
   writeManagedWake,
 } from "../managed";
+import { clearActivityFile, readActivityFile, runnerActivityFile } from "../activity";
 import {
   appendFileSync,
   existsSync,
@@ -1754,6 +1755,31 @@ interface HarnessRun {
   outFile?: string;
 }
 
+// 活动上报（#602）：给 builtin claude runner 注入 session 级 hooks——每个关键 hook 事件都管道进
+// `party hook report`，把「正在跑哪个工具 / 卡权限 / compact / turn 结束」落成 AP_ACTIVITY_FILE
+// 指向的本地文件，serve 的 15s 任务心跳捎带上行。编译版二进制用绝对路径（runner 的 PATH 里未必有
+// party）；dev（bun run）下 execPath 是 bun，回退裸 `party`。timeout 收紧到 10s：hook 挂死不许拖模型。
+export function claudeHookSettingsJson(execPath: string = process.execPath): string {
+  const partyBin = isPartyBinaryPath(execPath) ? execPath : "party";
+  // hook command 是交给 shell 的一整串：绝对路径一律 JSON.stringify 包双引号并转义（空白、引号、
+  // 反斜杠都盖住；双引号在 POSIX sh 与 cmd 下都成立——单引号会破 Windows）。裸 `party` 不引，
+  // 保持 PATH 查找语义。路径里的 `$` 反引号属 POSIX 双引号残余风险，party 安装路径不含此类字符。
+  const command = `${partyBin === "party" ? partyBin : JSON.stringify(partyBin)} hook report`;
+  const hook = [{ hooks: [{ type: "command", command, timeout: 10 }] }];
+  return JSON.stringify({
+    hooks: {
+      PreToolUse: hook,
+      PostToolUse: hook,
+      Notification: hook,
+      Stop: hook,
+      SessionStart: hook,
+      SessionEnd: hook,
+      PreCompact: hook,
+      UserPromptSubmit: hook,
+    },
+  });
+}
+
 async function runHarness(
   opts: BuiltinRunnerOptions,
   prompt: string,
@@ -1830,8 +1856,11 @@ async function runHarness(
         "--strict-mcp-config",
         "--allowedTools", "mcp__party",
       ];
+  // 活动上报（#602）：session 级注入 hooks，把模型「正在干什么」经 `party hook report` 落盘，
+  // 由外层 serve 心跳捎带进频道 presence。--settings 只作用于本次 session，不碰用户/项目 settings。
+  const hookArgs = ["--settings", claudeHookSettingsJson()];
   const args = sid
-    ? ["claude", "-p", "--disallowed-tools", "AskUserQuestion", ...permissionArgs, ...schemaArgs, ...jsonOutputArgs, ...mcpArgs, "--resume", sid, prompt]
+    ? ["claude", "-p", "--disallowed-tools", "AskUserQuestion", ...permissionArgs, ...schemaArgs, ...jsonOutputArgs, ...mcpArgs, ...hookArgs, "--resume", sid, prompt]
     : [
         "claude",
         "-p",
@@ -1840,6 +1869,7 @@ async function runHarness(
         ...permissionArgs,
         ...schemaArgs,
         ...mcpArgs,
+        ...hookArgs,
         "--session-id",
         coldSessionId!,
         "--output-format",
@@ -2271,6 +2301,8 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
     if (prepared.has(frame)) return;
     const started = opts.now?.() ?? Date.now();
     mkdirSync(opts.workdir, { recursive: true });
+    // 活动上报（#602）：新 wake 冷起前清掉上一轮残留，首个 hook 到来前不展示旧活动。
+    if (opts.harness === "claude") clearActivityFile(runnerActivityFile(opts.workdir));
     const baseEnv = opts.harness === "codex" ? prepareCodexHome(opts.workdir, opts.authSourceFile) : { ...process.env };
     const scope = continuationScope(opts.workdir, ctx.delivery);
     const sessionPath = scope.path;
@@ -2289,6 +2321,9 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
       // subprocesses; resumed turns additionally receive this explicit, runner-owned handle.
       AP_RUNNER_WORKDIR: opts.workdir,
       AP_RUNNER_HARNESS: opts.harness,
+      // 活动上报（#602）：hook 子进程继承这个路径落盘，serve 心跳读同一路径——双方对文件位置
+      // 显式约定，不靠 session_id 映射（resume 会换 id）。codex 无 hooks 机制，不设。
+      ...(opts.harness === "claude" ? { AP_ACTIVITY_FILE: runnerActivityFile(opts.workdir) } : {}),
       AP_RUNNER_SESSION_ID: prior?.session_id ?? coldSessionId ?? "",
       AP_DELIVERY_ID: ctx.delivery?.id ?? "",
       AP_WORK_ID: ctx.delivery?.work_id ?? "",
@@ -4270,17 +4305,21 @@ export async function runServe(o: ServeOptions): Promise<number> {
         const nowFn = o.now ?? (() => Date.now());
         const taskStartedAt = nowFn();
         const heartbeatIntervalMs = o.heartbeatIntervalMs ?? DEFAULT_TASK_HEARTBEAT_MS;
+        // 活动上报（#602）：builtin claude runner 的 hooks 会把「正在干什么」落到约定文件；
+        // 每拍读一次捎带进心跳帧。其它 runner（codex/sdk/custom）没有 hook 落盘，恒不带。
+        const activityFile = o.builtinRunner?.harness === "claude" ? runnerActivityFile(o.builtinRunner.workdir) : null;
         const emitTaskBeat = (active: boolean, at: number) => {
           const fields = active
             ? { current_task: frame.seq, task_started_at: taskStartedAt, heartbeat_at: at }
             : { current_task: null, task_started_at: null, heartbeat_at: null };
+          const activity = active && activityFile !== null ? readActivityFile(activityFile, at) : null;
           try {
             bestEffortLocalState(() => writeHealthCache({ channel: o.channel, ...fields }));
           } catch {
             /* 本机 health 落盘失败不影响唤醒 */
           }
           try {
-            conn.send({ type: "heartbeat", ...fields });
+            conn.send({ type: "heartbeat", ...fields, ...(activity === null ? {} : { activity }) });
           } catch {
             /* WS 未就绪就漏一拍：本机 health 仍新鲜，且下一拍/清除会补 */
           }

@@ -28,6 +28,7 @@ import {
   type ServeOptions,
   type ThreadLike,
 } from "../src/commands/serve";
+import { runnerActivityFile, writeActivityFile } from "../src/activity";
 import type { MessagePayload } from "../src/rest";
 import { writeWorkspaceConfigOnly } from "../src/config";
 import type { CliUpgradeNotice } from "../src/upgrade";
@@ -320,6 +321,43 @@ describe("runServe", () => {
     const clears = beats.filter((b) => b.current_task === null);
     expect(clears.length, "must clear the running task once it finishes").toBeGreaterThanOrEqual(1);
     expect(beats.lastIndexOf(active[active.length - 1]!)).toBeLessThan(beats.indexOf(clears[0]!));
+  });
+
+  // 模型 session 活动（#602）：builtin claude runner 的 hooks 把「正在干什么」落到 workdir 的
+  // activity.json，serve 每拍心跳读一次捎带上行；清除帧（current_task=null）不带 activity。
+  test("task heartbeat: carries the hook-reported model activity for a claude builtin runner (#602)", async () => {
+    const beats: Array<{ current_task: number | null; activity?: { phase: string; tool?: string } }> = [];
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "heartbeat") {
+        beats.push(frame as unknown as (typeof beats)[number]);
+        return;
+      }
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(0, "me"));
+      setTimeout(() => sock.send(msgFrame(1, "long task", { mentions: ["me"] })), 10);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 250);
+    });
+    const workdir = tempDir();
+    const o = opts({
+      server: server.url,
+      heartbeatIntervalMs: 8,
+      // builtinRunner 只为提供 activity 文件约定（harness=claude + workdir）；实际执行仍走注入的
+      // runCommand（它扮演「hook 已落盘」的模型进程）。
+      builtinRunner: { server: "http://unused", token: "t", channel: "dev", harness: "claude", workdir },
+      runCommand: async () => {
+        writeActivityFile(runnerActivityFile(workdir), { phase: "tool", tool: "Bash", ts: Date.now() });
+        await new Promise((r) => setTimeout(r, 70));
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+
+    const withActivity = beats.filter((b) => b.current_task === 1 && b.activity !== undefined);
+    expect(withActivity.length, "periodic beats must pick up the hook-written activity").toBeGreaterThanOrEqual(1);
+    expect(withActivity[withActivity.length - 1]!.activity).toMatchObject({ phase: "tool", tool: "Bash" });
+    const clear = beats.find((b) => b.current_task === null);
+    expect(clear, "task must still clear on completion").toBeDefined();
+    expect(clear!.activity).toBeUndefined();
   });
 
   test("restart resume: serve reports the persisted runner session on welcome (#522)", async () => {
@@ -1489,7 +1527,8 @@ describe("builtin runner", () => {
     expect(calls[0]).toContain("--output-format");
     expect(calls[0]).toContain("--session-id");
     expect(calls[1]).toEqual([
-      "claude", "-p", "--disallowed-tools", "AskUserQuestion", "--resume", coldSessionId, expect.any(String),
+      "claude", "-p", "--disallowed-tools", "AskUserQuestion", "--settings", expect.any(String),
+      "--resume", coldSessionId, expect.any(String),
     ]);
   });
 
