@@ -289,7 +289,9 @@ describe("supervisor 侧回执治理与入口参数（#592 评审）", () => {
 });
 
 describe("runProfileServe 协议装配（buildLane 回归网，#592 评审）", () => {
+  const assemblyOut: string[] = [];
   async function assembleLanes(runner: "codex" | "codex-sdk", protocol?: "mcp" | "text"): Promise<ServeOptions[]> {
+    assemblyOut.length = 0;
     const home = tempDir();
     const oldHome = process.env.AGENTPARTY_HOME;
     const oldConfig = process.env.AGENTPARTY_CONFIG;
@@ -345,6 +347,7 @@ describe("runProfileServe 协议装配（buildLane 回归网，#592 评审）", 
           served.push(opts);
           return 0;
         },
+        out: (line) => assemblyOut.push(line),
       });
       expect(code).toBe(0);
     } finally {
@@ -381,10 +384,12 @@ describe("runProfileServe 协议装配（buildLane 回归网，#592 评审）", 
     expect(front.projectAgent?.protocol).toBe("text");
   });
 
-  test("codex-sdk 默认被强制 text（本期无 MCP 注入面）", async () => {
+  test("codex-sdk 默认被强制 text（本期无 MCP 注入面）：警告可见、不写 manifest", async () => {
     const served = await assembleLanes("codex-sdk");
     const front = served.find((lane) => lane.projectAgent?.runtime_role === "front")!;
     expect(front.sdkRunner?.outputSchema).toBeDefined();
     expect(front.projectAgent?.protocol).toBe("text");
+    expect(assemblyOut.some((line) => line.includes("no MCP injection surface"))).toBe(true);
+    expect(existsSync(join(front.sdkRunner!.workdir, "mcp", "managed.json"))).toBe(false);
   });
 });

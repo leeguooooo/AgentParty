@@ -18,7 +18,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
   BODY_LIMIT,
@@ -33,11 +33,10 @@ import {
   appendManagedAction,
   createManagedLineageResolver,
   ManagedActionError,
-  readManagedActions,
   readManagedManifest,
   readManagedWake,
+  reserveManagedExclusive,
   snapshotManagedAttachment,
-  type ManagedActionRecord,
   type ManagedLaneManifest,
   type ManagedWakeState,
 } from "../managed";
@@ -72,9 +71,6 @@ function laneAuth(manifest: ManagedLaneManifest): LaneAuth {
   }
   return { server: manifest.server, token: raw.token };
 }
-
-/** 每回合动作幂等闸：同一 wake 内重复调用同名独占动作直接拒，防模型循环刷屏。 */
-const EXCLUSIVE_ACTIONS = new Set(["owner_decision"]);
 
 /**
  * completion status（血缘续接的收尾遥测，与文本协议路由同语义）：best-effort——
@@ -113,16 +109,6 @@ export function createManagedMcpServer(stateDir: string): McpServer {
       ...(decisionState === undefined ? {} : { decision_state: decisionState }),
       at: Date.now(),
     });
-  };
-  // 幂等闸以 outcome 回执为事实源（持久）：codex 每次 exec 都 spawn 新 MCP 进程，内存态跨
-  // 回合恒空；supervisor 在每个新 wake 的 prepare 里清同 seq 回执，所以这里读到的记录一定
-  // 属于当前回合。失败的尝试不落回执，天然不堵重试；post 成功与 record 落盘之间的崩溃窗口
-  // 存在但极窄（且该回合会因 runner 崩溃按非可重试处理，不会自动重放）。
-  const assertExclusiveUnused = (seq: number, action: ManagedActionRecord["action"]) => {
-    if (!EXCLUSIVE_ACTIONS.has(action)) return;
-    if (readManagedActions(stateDir, seq).some((record) => record.action === action)) {
-      throw new ManagedActionError(`${action} already issued for this wake`);
-    }
   };
 
   const lineage = () => {
@@ -283,11 +269,16 @@ export function createManagedMcpServer(stateDir: string): McpServer {
         try {
           const auth = laneAuth(manifest);
           const state = wake();
-          assertExclusiveUnused(state.frame.seq, "owner_decision");
+          // 原子预约（O_EXCL 锁文件，#592 评审）：并发工具调用只有一个能通过；持久于磁盘，
+          // codex 每 exec 新进程也拦得住；post 失败释放预约，不堵同回合重试。
+          // supervisor 在新 wake 的 prepare 里连同回执一起清。
+          const releaseReservation = reserveManagedExclusive(stateDir, state.frame.seq, "owner_decision");
           if (state.delivery === null || state.delivery.work_id === null || state.delivery.continuation_ref === null) {
+            releaseReservation();
             throw new ManagedActionError("managed owner decision requires an active durable delivery");
           }
           if (state.owner_decision_binding !== true) {
+            releaseReservation();
             throw new ManagedActionError(
               "server does not enforce owner_decision responder binding (owner_decision_binding v1); upgrade the Worker before managed owner decisions",
             );
@@ -295,9 +286,16 @@ export function createManagedMcpServer(stateDir: string): McpServer {
           // null / 缺省 / 空数组统一按 approval（#578 finding 1 的 schema-合法输出绝不再被拒）。
           const normalizedOptions = options ?? [];
           if (normalizedOptions.length === 1) {
+            releaseReservation();
             throw new ManagedActionError("choice decision requires at least 2 options");
           }
-          const origin = await lineage()(state.frame, state.delivery);
+          let origin;
+          try {
+            origin = await lineage()(state.frame, state.delivery);
+          } catch (error) {
+            releaseReservation();
+            throw error;
+          }
           const decisionRequest: SendDecisionRequest = normalizedOptions.length === 0
             ? { kind: "approval", prompt }
             : { kind: "choice", prompt, options: normalizedOptions };
@@ -317,7 +315,13 @@ export function createManagedMcpServer(stateDir: string): McpServer {
             },
             expected_decision_responder_owner: manifest.owner_account,
           };
-          const posted = await postMessage(auth.server, auth.token, manifest.channel, payload);
+          let posted;
+          try {
+            posted = await postMessage(auth.server, auth.token, manifest.channel, payload);
+          } catch (error) {
+            releaseReservation();
+            throw error;
+          }
           const resolution: DecisionResolution | undefined = posted.decision_resolution;
           const decisionState = resolution?.state === "auto_resolved" ? "auto_resolved" : "pending";
           record(state.frame.seq, "owner_decision", posted.seq, decisionState);
@@ -362,11 +366,18 @@ export function createManagedMcpServer(stateDir: string): McpServer {
           // 围栏 + TOCTOU 快照先行：校验后立刻以 O_NOFOLLOW fd 读出字节、落到 supervisor 私有
           // 目录再上传——任何一个路径越界或非普通文件，整个报告不发（#592 评审）。
           const snapshotDir = join(stateDir, `attach-${state.frame.seq}`);
-          const snapshots = (attach ?? []).map((path) =>
-            snapshotManagedAttachment(path, manifest.attachment_root, snapshotDir));
-          const attachments = snapshots.length > 0
-            ? await uploadAttachmentPaths(auth.server, auth.token, manifest.channel, snapshots)
-            : undefined;
+          let attachments;
+          try {
+            const snapshots = (attach ?? []).map((path) =>
+              snapshotManagedAttachment(path, manifest.attachment_root, snapshotDir));
+            attachments = snapshots.length > 0
+              ? await uploadAttachmentPaths(auth.server, auth.token, manifest.channel, snapshots)
+              : undefined;
+          } finally {
+            // 快照只为「读取瞬间的字节」服务，上传后即弃——不清会按每 wake 最多 8 个大文件
+            // 的速度吃磁盘（#592 评审）。
+            rmSync(snapshotDir, { recursive: true, force: true });
+          }
           const posted = await postMessage(auth.server, auth.token, manifest.channel, {
             kind: "message",
             body: body.trim(),

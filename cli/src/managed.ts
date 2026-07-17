@@ -137,6 +137,8 @@ export function resolveManagedAttachmentPath(path: string, attachmentRoot: strin
  * 从同一个 fd 读出字节，再落到 supervisor 私有目录（工作区之外）的不可变快照——上传只碰快照，
  * 模型此后怎么动工作区都影响不到已读内容。
  */
+export const MANAGED_ATTACHMENT_SIZE_LIMIT = 25 * 1024 * 1024;
+
 export function snapshotManagedAttachment(path: string, attachmentRoot: string | null, snapshotDir: string): string {
   const realPath = resolveManagedAttachmentPath(path, attachmentRoot);
   let fd: number;
@@ -146,18 +148,34 @@ export function snapshotManagedAttachment(path: string, attachmentRoot: string |
     throw new ManagedActionError(`runner attachment is not a plain readable file: ${path}`);
   }
   try {
-    if (!fstatSync(fd).isFile()) {
+    const opened = fstatSync(fd);
+    if (!opened.isFile()) {
       throw new ManagedActionError(`runner attachment is not a regular file: ${path}`);
+    }
+    // 读入内存之前先按上传上限拒超大文件——否则模型可用一个巨型文件把本进程 OOM（#592 评审）。
+    if (opened.size > MANAGED_ATTACHMENT_SIZE_LIMIT) {
+      throw new ManagedActionError(`runner attachment exceeds 25MB limit: ${path}`);
+    }
+    // O_NOFOLLOW 只挡最后一段 symlink；祖先目录仍可能在 realpath 之后被换成指向工作区外的
+    // 链接。开 fd 后重新做一次 realpath+围栏校验，并以 dev/ino 核对「校验过的路径」就是
+    // 「已打开的这个文件」——fd 的身份不可再被换。同 uid 的 hardlink/主动拷贝不在本围栏的
+    // 威胁模型内（sandbox 本就允许模型读全盘，围栏的价值是边界显式，不是保密）。
+    const recheck = resolveManagedAttachmentPath(path, attachmentRoot);
+    const rechecked = statSync(recheck);
+    if (rechecked.dev !== opened.dev || rechecked.ino !== opened.ino) {
+      throw new ManagedActionError(`runner attachment changed during validation: ${path}`);
     }
     const bytes = readFileSync(fd);
     mkdirSync(snapshotDir, { recursive: true, mode: 0o700 });
-    // 保留 basename（上传链按文件名定 content-type/展示名）；同名冲突加序号。
+    // 保留 basename（上传链按文件名定 content-type/展示名）；同名冲突加序号，
+    // 只对 EEXIST 重试——磁盘满等永久错误必须立即冒出去（#592 评审）。
     let target = join(snapshotDir, basename(realPath));
     for (let index = 1; ; index += 1) {
       try {
         writeFileSync(target, bytes, { mode: 0o600, flag: "wx" });
         break;
-      } catch {
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         target = join(snapshotDir, `${index}-${basename(realPath)}`);
       }
     }
@@ -165,6 +183,29 @@ export function snapshotManagedAttachment(path: string, attachmentRoot: string |
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * owner 决策的原子预约（#592 评审）：并发工具调用都可能在回执尚未落盘时通过读检查。
+ * O_EXCL 锁文件是同一 wake 内的原子闸——先到先得，后来者直接拒；post 失败时释放预约。
+ */
+export function reserveManagedExclusive(stateDir: string, seq: number, action: string): () => void {
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const lockPath = join(stateDir, `${action}-${seq}.lock`);
+  try {
+    closeSync(openSync(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new ManagedActionError(`${action} already issued for this wake`);
+    }
+    throw error;
+  }
+  return () => rmSync(lockPath, { force: true });
+}
+
+/** 供 supervisor 在新 wake 的 prepare 里连同回执一起清理。 */
+export function clearManagedExclusiveLocks(stateDir: string, seq: number): void {
+  rmSync(join(stateDir, `owner_decision-${seq}.lock`), { force: true });
 }
 
 export interface ManagedOrigin {
