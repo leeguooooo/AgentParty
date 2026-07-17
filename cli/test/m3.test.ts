@@ -124,6 +124,15 @@ describe("party invite", () => {
     expect(r.stdout).toContain('$HOME/.agentparty/agents/agentparty-fix-login-bug-guest-fix-login-bug.json');
     expect(r.stdout).toContain("TMPDIR 清理会抹掉身份和 cursor");
     expect(r.stdout).not.toContain("${TMPDIR");
+    // #585：CLI 邀请包与 web 接入包同一套 MCP-first 世界观——注册名按 agent 唯一（shared mcpServerName），
+    // 附 Codex 行 + 非 MCP 兜底 + 「MCP 通知叫不醒 harness」提醒。
+    expect(r.stdout).toContain(
+      'claude mcp add party-fix-login-bug-guest --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-fix-login-bug-guest-fix-login-bug.json" -- party mcp --channel fix-login-bug',
+    );
+    expect(r.stdout).toContain("# Codex：codex mcp add party-fix-login-bug-guest --env");
+    expect(r.stdout).toContain("非 MCP 的 harness：跳过这步");
+    expect(r.stdout).toContain("party_decision_ask");
+    expect(r.stdout).toContain("MCP 通知叫不醒空闲的 harness");
     expect(r.stdout).toContain("party serve fix-login-bug --on-mention");
     expect(r.stdout).toContain("Codex CLI / Codex tool-call shell：不要用 watch 当 wake 层");
     expect(r.stdout).toContain("watch --follow：只适合 tail/debug");

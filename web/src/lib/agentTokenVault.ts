@@ -1,3 +1,5 @@
+import { mcpServerName } from "@agentparty/shared/onboarding";
+
 const VAULT_KEY = "ap_agent_token_vault:v1";
 
 export interface AgentTokenRecord {
@@ -95,17 +97,8 @@ export const MIN_CLI = "0.2.124";
 export const VERSION_GE_SNIPPET =
   `version_ge(){ awk -v a="$1" -v b="$2" 'BEGIN{split(a,A,".");split(b,B,".");for(i=1;i<=3;i++){A[i]+=0;B[i]+=0;if(A[i]>B[i])exit 0;if(A[i]<B[i])exit 1}exit 0}'; }`;
 
-// MCP server 注册名必须按 agent 唯一：同一目录跑多个 agent 时，固定叫 `party` 会让后注册的
-// 覆盖先注册的身份 env——重启会话后静默串号（比 CLI 忘带前缀更难察觉）。agent 名本身是
-// NAME_RE 约束的 ASCII，但 `.` 在 Codex 的 TOML 键等处不安全，消毒成 `-`；消毒有损时
-//（a.b 与 a-b 会同形）追加原名短哈希保持单射，别让「防覆盖」的改动自己引入新的覆盖面。
-export function mcpServerName(agentName: string): string {
-  const cleaned = agentName.replace(/[^a-zA-Z0-9_-]/g, "-");
-  if (cleaned === agentName) return `party-${agentName}`;
-  let h = 5381;
-  for (let i = 0; i < agentName.length; i += 1) h = (Math.imul(h, 33) ^ agentName.charCodeAt(i)) >>> 0;
-  return `party-${cleaned}-${h.toString(36)}`;
-}
+// MCP server 注册名规则挪到 shared 与 cli 的 party invite 共用一份（#585）；语义与来由见那边注释。
+export { mcpServerName } from "@agentparty/shared/onboarding";
 
 export function buildMinimalAgentCommand(input: {
   server: string;
