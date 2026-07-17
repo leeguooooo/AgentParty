@@ -6962,14 +6962,8 @@ export class ChannelDO extends Server<Env> {
   // 别人的普通回帖不能伪造成「被唤醒」证据（校验必须来自真实的 @→resume 闭环）。
   private messageMentions(seq: number): string[] {
     const rows = this.ctx.storage.sql.exec("SELECT mentions_json FROM messages WHERE seq = ?", seq).toArray();
-    const raw = rows[0]?.mentions_json;
-    if (typeof raw !== "string") return [];
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      return Array.isArray(parsed) ? parsed.filter((m): m is string => typeof m === "string") : [];
-    } catch {
-      return [];
-    }
+    // 与 rowToFrame 共用同一个存储 mentions 解析器，避免两处对空/坏值的语义漂移。
+    return parseStoredMentions(rows[0]?.mentions_json);
   }
 
   // #191：服务端对某 agent 的 serve/watch wake layer 记下「已验证可唤醒」的时间戳。
