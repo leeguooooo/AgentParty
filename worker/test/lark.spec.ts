@@ -126,6 +126,42 @@ describe("lark notification integration", () => {
     expect(await webhookRows(slug)).toEqual([]);
   });
 
+  it("#595: adding a lark member auto-enrolls the mention subscription (idempotent, optout respected)", async () => {
+    const ownerAccount = `lark-email:${uniq("owner")}@example.com`;
+    await seedLarkProfile(ownerAccount, "larkowner");
+    const owner = await seedToken("human", uniq("human"), { owner: ownerAccount });
+    const slug = await createChannel(owner.token);
+
+    const memberAccount = "lark:on_auto_enroll_target";
+    const memberProfile = await seedLarkProfile(memberAccount, "larkkarl");
+    // 被拉进频道 → waitUntil 自动入册。
+    const add = await api(`/api/channels/${slug}/members/${encodeURIComponent(memberAccount)}`, owner.token, { method: "PUT" });
+    expect(add.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const sub = await env.DB.prepare(
+      "SELECT target_name FROM lark_notify_subscriptions WHERE channel_slug = ? AND account = ?",
+    ).bind(slug, memberAccount).first<{ target_name: string }>();
+    expect(sub?.target_name).toBe(memberProfile.handle);
+    expect((await webhookRows(slug)).some((row) => row.name === memberProfile.handle)).toBe(true);
+
+    // 显式退订 → optout 记忆；再次入会不得重开。
+    const member = await seedToken("human", uniq("member"), { owner: memberAccount });
+    expect((await api(`/api/channels/${slug}/lark-notify`, member.token, { method: "DELETE" })).status).toBe(200);
+    expect((await api(`/api/channels/${slug}/members/${encodeURIComponent(memberAccount)}`, owner.token, { method: "PUT" })).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const after = await env.DB.prepare(
+      "SELECT 1 FROM lark_notify_subscriptions WHERE channel_slug = ? AND account = ?",
+    ).bind(slug, memberAccount).first();
+    expect(after).toBeNull();
+
+    // 手动重新开启 → optout 撤销。
+    expect((await api(`/api/channels/${slug}/lark-notify`, member.token, { method: "POST" })).status).toBe(201);
+    const optout = await env.DB.prepare(
+      "SELECT 1 FROM lark_notify_optouts WHERE channel_slug = ? AND account = ?",
+    ).bind(slug, memberAccount).first();
+    expect(optout).toBeNull();
+  });
+
   it("relays a valid signed mention webhook to a Lark private card", async () => {
     const account = `lark-email:${uniq("relay")}@example.com`;
     const profile = await seedLarkProfile(account, "larkrelay");

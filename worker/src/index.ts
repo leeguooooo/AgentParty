@@ -2312,6 +2312,8 @@ app.post("/api/auth/:provider/callback", async (c) => {
       metadata: { added_by: `oauth:${provider.id}` },
     });
   }
+  // #595：Lark 登录即把该账号所有成员频道的 @ 通知自动入册（异步、幂等、尊重 optout、失败静默）。
+  c.executionCtx.waitUntil(autoEnrollLarkNotify(c.env, new URL(c.req.url).origin, exchanged.account));
   return c.json({
     access_token: sess.token,
     token_type: "Bearer",
@@ -3211,6 +3213,91 @@ app.get("/api/channels/:slug/management-audit", async (c) => {
 });
 app.use("/api/join/*", requireBearer);
 
+// #595：Lark DM 通知自动入册。此前唯一开关是 CLI `party lark notify on`——web 没有任何入口、
+// 登录也不自动订阅，Lark 用户被 @ 后收不到任何 DM（xdream 实锤：全库仅 owner 手动开过一条）。
+// 成员的 @ 通知应当默认在场：Lark 登录与被拉进频道时自动 ensure。幂等；显式退订（DELETE）落
+// lark_notify_optouts，自动入册永不压过用户手选；任何失败静默——登录/加成员绝不因通知挂掉。
+async function ensureLarkNotifySubscription(
+  env: AppEnv,
+  requestOrigin: string,
+  account: string,
+  slug: string,
+): Promise<"created" | "exists" | "skipped"> {
+  const existing = await env.DB.prepare(
+    "SELECT target_name FROM lark_notify_subscriptions WHERE channel_slug = ? AND account = ?",
+  ).bind(slug, account).first<{ target_name: string }>();
+  if (existing) return "exists";
+  const optedOut = await env.DB.prepare(
+    "SELECT 1 FROM lark_notify_optouts WHERE channel_slug = ? AND account = ?",
+  ).bind(slug, account).first();
+  if (optedOut) return "skipped";
+  const profile = await env.DB.prepare(
+    "SELECT handle, provider, provider_user_id FROM account_profiles WHERE account = ?",
+  ).bind(account).first<{ handle: string | null; provider: string | null; provider_user_id: string | null }>();
+  if (!profile?.handle || !NAME_RE.test(profile.handle) || !profile.provider || !profile.provider_user_id) {
+    return "skipped";
+  }
+  const provider = resolveLarkProvider(env, profile.provider);
+  if (!provider || provider.id !== profile.provider) return "skipped";
+  const channel = await loadChannel(env.DB, slug);
+  if (!channel || channel.archived_at !== null) return "skipped";
+  const secret = randomToken();
+  const relayUrl = new URL(requestOrigin);
+  relayUrl.pathname = "/api/integrations/lark/relay";
+  relayUrl.search = "";
+  const doRes = await fetchChannelDO(
+    env,
+    slug,
+    new Request("https://do/internal/webhooks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: profile.handle,
+        url: relayUrl.toString().replace(/^http:/, "https:"),
+        secret,
+        filter: "mentions",
+      }),
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+  if (!doRes.ok) return "skipped";
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO lark_notify_subscriptions (
+       channel_slug, account, target_name, provider_id, provider_kind,
+       receive_id, receive_id_type, secret, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(channel_slug, account) DO NOTHING`,
+  )
+    .bind(
+      slug,
+      account,
+      profile.handle,
+      provider.id,
+      provider.kind,
+      profile.provider_user_id,
+      inferReceiveIdType(profile.provider_user_id),
+      secret,
+      now,
+      now,
+    )
+    .run();
+  return "created";
+}
+
+// 登录后把该账号所有成员频道逐一 ensure（waitUntil 异步，有界，失败静默）。
+async function autoEnrollLarkNotify(env: AppEnv, requestOrigin: string, account: string): Promise<void> {
+  try {
+    const rows = await env.DB.prepare(
+      "SELECT channel_slug FROM channel_members WHERE account = ? LIMIT 50",
+    ).bind(account).all<{ channel_slug: string }>();
+    for (const row of rows.results ?? []) {
+      await ensureLarkNotifySubscription(env, requestOrigin, account, row.channel_slug).catch(() => "skipped");
+    }
+  } catch {
+    // 自动入册是增益：任何失败都不打扰登录主流程。
+  }
+}
+
 app.get("/api/channels/:slug/lark-notify", async (c) => {
   const identity = c.get("identity");
   if (identity.role !== "human" || identity.account == null) {
@@ -3290,6 +3377,10 @@ app.post("/api/channels/:slug/lark-notify", async (c) => {
       }),
     ).catch(() => null);
   }
+  // 手动开启即撤销显式退订（#595）：用户意图以最后一次手选为准。
+  await c.env.DB.prepare("DELETE FROM lark_notify_optouts WHERE channel_slug = ? AND account = ?")
+    .bind(slug, identity.account)
+    .run();
   const secret = randomToken();
   const relayUrl = new URL(c.req.url);
   relayUrl.pathname = "/api/integrations/lark/relay";
@@ -3369,6 +3460,11 @@ app.delete("/api/channels/:slug/lark-notify", async (c) => {
       .bind(slug, identity.account)
       .run();
   }
+  // 显式退订要被记住（#595）：自动入册（登录/入会）见 optout 即跳过，绝不压过用户手选。
+  await c.env.DB.prepare(
+    `INSERT INTO lark_notify_optouts (channel_slug, account, opted_out_at) VALUES (?, ?, ?)
+     ON CONFLICT(channel_slug, account) DO UPDATE SET opted_out_at = excluded.opted_out_at`,
+  ).bind(slug, identity.account, Date.now()).run();
   return c.json({ enabled: false, channel_slug: slug });
 });
 
@@ -4164,6 +4260,10 @@ app.put("/api/channels/:slug/members/:account", async (c) => {
     channel: slug,
     timestamp: addedAt,
   });
+  // #595：Lark 人类被拉进频道即自动订阅 @ 通知（幂等，尊重 optout，失败静默）。
+  c.executionCtx.waitUntil(
+    ensureLarkNotifySubscription(c.env, new URL(c.req.url).origin, account, slug).then(() => undefined, () => undefined),
+  );
   return c.json({ account, added_by: addedBy, added_at: addedAt });
 });
 
