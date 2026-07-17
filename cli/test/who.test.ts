@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { PresenceEntry } from "@agentparty/shared";
-import { busyNote, classify, identityNote, sessionNote, taskNote, terminalIdentityText, waitingOwnerNote } from "../src/commands/who";
+import { busyNote, classify, identityNote, livenessNote, sessionNote, taskNote, terminalIdentityText, waitingOwnerNote } from "../src/commands/who";
 
 const NOW = 1_000_000_000;
 
@@ -308,5 +308,32 @@ describe("who busy + queue depth (#103)", () => {
     // 离线 presence 服务端本就不下发这些字段；即便脏数据混进来，classify 也不该把它当成「正在处理」。
     const offline = classify(p({ name: "bot", state: "offline", wake: { kind: "serve" } }), NOW);
     expect(offline?.current_task).toBeUndefined();
+  });
+});
+
+// 探活分级（#603）：listening（服务端派生「没在听」）与 runner_health（自报「干不动」）的展示与透传。
+describe("who liveness tiers (#603)", () => {
+  test("classify 透传 listening 与 runner_health（缺省即无恙、不无中生有）", () => {
+    const row = classify(p({ name: "bot", live: true, listening: "deaf", runner_health: { ok: false, consecutive_failures: 3, last_error: "boom" } }), NOW);
+    expect(row?.listening).toBe("deaf");
+    expect(row?.runner_health).toMatchObject({ ok: false, consecutive_failures: 3 });
+    const clean = classify(p({ name: "ok-bot", live: true }), NOW);
+    expect(clean?.listening).toBeUndefined();
+    expect(clean?.runner_health).toBeUndefined();
+  });
+
+  test("livenessNote：deaf/suspect 与 runner 连败分别标注，健康时为空", () => {
+    const deaf = classify(p({ name: "bot", live: true, listening: "deaf" }), NOW)!;
+    expect(livenessNote(deaf)).toContain("not listening");
+    const suspect = classify(p({ name: "bot", live: true, listening: "suspect" }), NOW)!;
+    expect(livenessNote(suspect)).toContain("slow to consume");
+    const failing = classify(p({ name: "bot", live: true, runner_health: { ok: false, consecutive_failures: 2, last_error: "spawn ENOENT" } }), NOW)!;
+    expect(livenessNote(failing)).toContain("runner failing x2");
+    expect(livenessNote(failing)).toContain("spawn ENOENT");
+    // 单次失败（ok=true）不告警：有重试兜底，别制造噪音
+    const single = classify(p({ name: "bot", live: true, runner_health: { ok: true, consecutive_failures: 1 } }), NOW)!;
+    expect(livenessNote(single)).toBe("");
+    const healthy = classify(p({ name: "bot", live: true }), NOW)!;
+    expect(livenessNote(healthy)).toBe("");
   });
 });

@@ -1,6 +1,6 @@
 // party who — 从终端看频道里谁在线/可唤醒/最近，便于接着 party send --mention 把人拉进来/唤醒。
 // Claude Code 原生 @ 只认本地文件/技能，塞不进远程动态列表；本命令就是那个「动态在线列表」。
-import { autoWakeReachable, type AgentActivity, type PresenceEntry, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
+import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type RunnerHealth, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
@@ -35,7 +35,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/wake/wake_unverified/busy/queue_depth/waiting_owner_count/current_task/task_started_at/heartbeat_at/activity/agent_session/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/wake/wake_unverified/busy/queue_depth/waiting_owner_count/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/account/handle/display_name/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -79,6 +79,10 @@ interface Row {
   // 模型 session 活动（#602）：hook 落盘、serve 心跳捎带的「正在干什么」——比 current_task 更细：
   // 正在跑哪个工具 / 卡权限确认 / compact / turn 已结束。仅在有活跃任务时带出。
   activity?: AgentActivity;
+  // 探活分级（#603）：listening 是服务端从 delivery 租约状态机派生的「在线但没在听」；
+  // runner_health 是 serve 自报的「在线但干不动」（runner 连败）。两者正交，都缺省即无恙。
+  listening?: ListeningVerdict;
+  runner_health?: RunnerHealth;
   // runner 自报、worker 持久化的模型会话句柄（#522）；不是 websocket session。
   agent_session?: PresenceEntry["agent_session"];
 }
@@ -143,6 +147,9 @@ export function classify(e: PresenceEntry, now: number): Row | null {
           ...(e.activity === undefined ? {} : { activity: e.activity }),
         }
       : {}),
+    // 探活分级（#603）：服务端只对有活连接的身份下发 listening；runner_health 独立于任务生命周期。
+    ...(e.listening === "suspect" || e.listening === "deaf" ? { listening: e.listening } : {}),
+    ...(e.runner_health === undefined ? {} : { runner_health: e.runner_health }),
     ...(e.agent_session === undefined ? {} : { agent_session: e.agent_session }),
     age_ms: age,
     ...(typeof e.connection_count === "number" && e.connection_count > 1
@@ -207,6 +214,19 @@ export function taskNote(r: Row, now: number): string {
   const beat =
     typeof r.heartbeat_at === "number" ? ` · ♥ ${humanAge(Math.max(0, now - r.heartbeat_at))}` : " · ♥ (none)";
   return ` · ▶ seq ${r.current_task}${beat}`;
+}
+
+// 探活分级标注（#603）：live 只证明连接活着，这两条说的是「活着但没在用」——
+// listening（服务端从 delivery 租约派生：投喂了不吃）与 runner_health（自报：唤醒了起不来）。
+export function livenessNote(r: Row): string {
+  const parts: string[] = [];
+  if (r.listening === "deaf") parts.push("⚠ not listening (deliveries expiring)");
+  else if (r.listening === "suspect") parts.push("⚠ slow to consume (1 delivery lease expired)");
+  if (r.runner_health !== undefined && !r.runner_health.ok) {
+    const err = r.runner_health.last_error !== undefined ? `: ${r.runner_health.last_error}` : "";
+    parts.push(`⚠ runner failing x${r.runner_health.consecutive_failures}${err}`);
+  }
+  return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
 }
 
 // 模型 session 活动标注（#602）：比「▶ seq X」再细一层——具体在干什么。waiting_permission 是
@@ -336,7 +356,7 @@ export async function run(argv: string[]): Promise<number> {
           ? ` · ${r.wake_unverified === true ? "unverified" : "verified"}${r.wake ? ` (${r.wake})` : ""}`
           : "";
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${taskNote(r, now)}${activityNote(r, now)}${sessionNote(r)}${wake}${read}${duplicate}${age}`);
+      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${sessionNote(r)}${wake}${read}${duplicate}${age}`);
     }
     return 0;
   } catch (e) {
