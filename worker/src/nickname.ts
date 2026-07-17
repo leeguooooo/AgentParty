@@ -32,6 +32,18 @@ export async function nicknameConflict(
     .bind(nickname)
     .first<{ name: string }>();
   if (owner && owner.name !== forName) return "taken";
+  // #593：pending 外部邀请的预设昵称也在同一 @ 命名空间占坑，agent 昵称不得抢注。
+  const invite = await db
+    .prepare(
+      `SELECT 1 FROM instance_invites
+        WHERE preset_handle = ? COLLATE NOCASE
+          AND revoked_at IS NULL AND redeemed_by IS NULL
+          AND (expires_at IS NULL OR expires_at > ?)
+        LIMIT 1`,
+    )
+    .bind(nickname, Date.now())
+    .first();
+  if (invite) return "handle";
   return null;
 }
 

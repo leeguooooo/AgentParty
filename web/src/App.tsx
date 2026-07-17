@@ -29,6 +29,7 @@ import {
   fetchMe,
   getToken,
   getMyChannelJoinRequest,
+  InviteRequiredError,
   isShareMode,
   listChannels,
   type MeInfo,
@@ -105,12 +106,15 @@ import {
 import { ChannelPage } from "./pages/Channel";
 import { Home } from "./pages/Home";
 import { extractPairingCodeAndSanitizeUrl, PairPage } from "./pages/Pair";
-import { matchChannel, matchJoin, matchPair, useRoute } from "./router";
+import { matchChannel, matchInvite, matchJoin, matchPair, useRoute } from "./router";
+import { InviteLanding, InviteRequiredGate } from "./components/InviteLanding";
 import { useT } from "./i18n/useT";
 import "./i18n/strings/App";
 
 // 邀请链接兑换：未登录时跳 OIDC 会离开页面，用 sessionStorage 把 code 带过登录、回来接着兑换。
 const PENDING_JOIN_KEY = "ap_pending_join";
+// 外部协作者邀请（#593）：/invite/<code> 同款跨登录暂存。
+const PENDING_INVITE_KEY = "ap_pending_invite";
 function meTitle(me: MeInfo): string {
   const parts = [`token: ${me.name}`, `kind: ${me.kind}`, `role: ${me.role}`];
   if (me.display_name !== null) parts.push(`display: ${me.display_name}`);
@@ -174,6 +178,8 @@ export function App() {
   const [authProvidersResolved, setAuthProvidersResolved] = useState(false);
   // 邀请链接落地页状态（/join/<code>）：正在加入 / 失败
   const [joinStatus, setJoinStatus] = useState<{ phase: "joining" | "error"; message?: string } | null>(null);
+  // 实例邀请制（#593）：登录有效但未入册（403 invite_required）→ 渲染邀请码输入门
+  const [inviteRequired, setInviteRequired] = useState(false);
   const [channelJoinRequest, setChannelJoinRequest] = useState<{
     slug: string;
     state: ChannelJoinRequestState | "submitting" | "login_required" | "error";
@@ -643,10 +649,20 @@ export function App() {
           setListError(null);
           setToken(sess.accessToken);
           setOidcPending(false);
-          // 若登录前是去兑换邀请链接，回到 /join/<code> 让下面的 effect（此时已有 token）完成加入
+          // 若登录前是去兑换邀请链接，回到 /join/<code>（或外部邀请 /invite/<code>）让下面的
+          // effect（此时已有 token）完成加入/兑换
           const pendingJoin = sessionStorage.getItem(PENDING_JOIN_KEY);
+          const pendingInvite = sessionStorage.getItem(PENDING_INVITE_KEY);
           const pendingPair = readPendingPairing(sessionStorage).routePending;
-          replace(pendingPair ? "/pair" : pendingJoin ? `/join/${pendingJoin}` : "/");
+          replace(
+            pendingPair
+              ? "/pair"
+              : pendingJoin
+                ? `/join/${pendingJoin}`
+                : pendingInvite
+                  ? `/invite/${pendingInvite}`
+                  : "/",
+          );
         })
         .catch((err: unknown) => {
           if (!alive) return;
@@ -663,6 +679,7 @@ export function App() {
   // 邀请链接落地：访问 /join/<code> 时——已登录则直接兑换（加入频道→跳进去）；未登录则存下 code
   // 并跳 OIDC 登录，回来后 callback 会重新落到 /join/<code>、此时有 token 走兑换分支。
   const joinCode = matchJoin(path);
+  const inviteCode = matchInvite(path);
   const joinAuthAction = decideJoinAuthAction({
     joinCode,
     hasToken: token !== null,
@@ -764,6 +781,7 @@ export function App() {
       .catch((err: unknown) => {
         if (channelReloadGeneration.current !== generation) return;
         if (err instanceof AuthError) onAuthFailed(t("App.error.tokenInvalid"));
+        else if (err instanceof InviteRequiredError) setInviteRequired(true);
         else setListError(t("App.error.channelsLoadFailed"));
       })
       .finally(() => {
@@ -978,6 +996,39 @@ export function App() {
     );
   }
 
+  // 外部协作者邀请落地（#593）：登录前先见预览+登录按钮；已登录直接兑换。
+  // 无 redirect provider 的 runtime 落回 TokenGate 粘贴 token，粘贴后仍在 /invite/<code> 继续兑换。
+  if (inviteCode !== null && (token !== null || !authProvidersResolved || authProviders.length > 0)) {
+    return (
+      <InviteLanding
+        code={inviteCode}
+        token={token}
+        providers={authProviders}
+        providersResolved={authProvidersResolved}
+        onBeforeLogin={() => {
+          setAuthError(null);
+          sessionStorage.setItem(PENDING_INVITE_KEY, inviteCode);
+        }}
+        onLoginFailed={() => setAuthError(t("App.error.startSignInFailed"))}
+        onRedeemed={(joinedSlug) => {
+          setInviteRequired(false);
+          sessionStorage.removeItem(PENDING_INVITE_KEY);
+          const goto = () => replace(`/c/${joinedSlug}`);
+          if (token === null) {
+            goto();
+            return;
+          }
+          // 新加入的频道要先出现在列表里再跳，否则频道页会「not available」（与 /join 同一竞态）
+          listChannels(token)
+            .then(setChannels)
+            .catch(() => {})
+            .finally(goto);
+        }}
+        onAuthFailed={onAuthFailed}
+      />
+    );
+  }
+
   if (token === null) {
     return (
       <TokenGate
@@ -1022,6 +1073,22 @@ export function App() {
           setToken(null);
         }}
         onDecisionComplete={() => clearPendingPairing(sessionStorage)}
+      />
+    );
+  }
+
+  // 实例邀请制兜底门（#593）：直接登录（没走邀请链接）的未入册账号，引导输入邀请码或退出。
+  if (inviteRequired) {
+    return (
+      <InviteRequiredGate
+        onSubmitCode={(code) => {
+          setInviteRequired(false);
+          navigate(`/invite/${code}`);
+        }}
+        onSignOut={() => {
+          setInviteRequired(false);
+          void signOut();
+        }}
       />
     );
   }

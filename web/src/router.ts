@@ -36,6 +36,12 @@ export function matchJoin(path: string): string | null {
   return m?.[1] ?? null;
 }
 
+// 外部协作者邀请落地（#593）：/invite/<code>。登录前展示预览，登录后自动兑换（入册+入频道+设昵称）。
+export function matchInvite(path: string): string | null {
+  const m = path.match(/^\/invite\/([A-Za-z0-9_-]+)\/?$/);
+  return m?.[1] ?? null;
+}
+
 export function matchPair(path: string): boolean {
   return /^\/pair\/?$/.test(path);
 }

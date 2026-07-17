@@ -1,0 +1,46 @@
+import { registerDict, type LocaleDict } from "../dict";
+
+export const InviteLandingStrings: LocaleDict = {
+  en: {
+    "InviteLanding.loading": "Loading invite…",
+    "InviteLanding.notFound": "This invite doesn't exist.",
+    "InviteLanding.state.revoked": "This invite has been revoked.",
+    "InviteLanding.state.redeemed": "This invite has already been used.",
+    "InviteLanding.state.expired": "This invite has expired.",
+    "InviteLanding.heading": "You're invited",
+    "InviteLanding.channelLabel": "channel",
+    "InviteLanding.nicknameLabel": "your nickname",
+    "InviteLanding.signInHint": "Sign in to join — your nickname is already set up:",
+    "InviteLanding.joining": "Joining…",
+    "InviteLanding.failed": "Could not redeem this invite.",
+    "InviteLanding.backHome": "back to home",
+    "InviteLanding.noProviders": "This instance has no sign-in method configured — contact the person who invited you.",
+    "InviteRequired.title": "This instance is invite-only",
+    "InviteRequired.desc": "You're signed in, but this instance only admits invited members. Open your invite link, or enter the invite code:",
+    "InviteRequired.placeholder": "invite code",
+    "InviteRequired.submit": "use invite code",
+    "InviteRequired.signOut": "sign out",
+  },
+  zh: {
+    "InviteLanding.loading": "正在读取邀请…",
+    "InviteLanding.notFound": "邀请不存在。",
+    "InviteLanding.state.revoked": "该邀请已被撤销。",
+    "InviteLanding.state.redeemed": "该邀请已被使用。",
+    "InviteLanding.state.expired": "该邀请已过期。",
+    "InviteLanding.heading": "你收到一份邀请",
+    "InviteLanding.channelLabel": "频道",
+    "InviteLanding.nicknameLabel": "你的昵称",
+    "InviteLanding.signInHint": "登录后即自动加入——昵称已为你设好：",
+    "InviteLanding.joining": "正在加入…",
+    "InviteLanding.failed": "邀请兑换失败。",
+    "InviteLanding.backHome": "回首页",
+    "InviteLanding.noProviders": "该实例未配置登录方式，请联系邀请你的人。",
+    "InviteRequired.title": "此实例仅限受邀成员",
+    "InviteRequired.desc": "你已登录，但该实例只对受邀成员开放。请打开邀请链接，或输入邀请码：",
+    "InviteRequired.placeholder": "邀请码",
+    "InviteRequired.submit": "使用邀请码",
+    "InviteRequired.signOut": "退出登录",
+  },
+};
+
+registerDict(InviteLandingStrings);

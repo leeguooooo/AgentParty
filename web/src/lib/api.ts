@@ -17,6 +17,9 @@ export class AuthError extends Error {}
 export class ForbiddenError extends Error {}
 // 铸 agent token 时同名已存在（worker 409）——上层据此换名重试。
 export class ConflictError extends Error {}
+// 实例邀请制（#593）：登录有效但账号未入册（403 invite_required）。上层渲染「输入邀请码」界面，
+// 与 ForbiddenError 区分——后者是单频道 ACL 拒入，前者是整个实例的门。
+export class InviteRequiredError extends Error {}
 // 名字非法 / 保留名 / scope 非法（worker 400）——文案层面走内联红字。
 export class ValidationError extends Error {}
 export class LarkDirectoryApiError extends Error {
@@ -388,6 +391,13 @@ export async function listChannels(token: string): Promise<ChannelInfo[]> {
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) {
+    // 实例邀请制（#593）：登录有效但未入册。App 据此渲染「输入邀请码」界面而非报错。
+    const b = (await res.json().catch(() => ({}))) as { error?: { code?: string; message?: string } };
+    if (b.error?.code === "invite_required") {
+      throw new InviteRequiredError(b.error.message ?? "this instance is invite-only");
+    }
+  }
   if (!res.ok) throw new Error(`GET /api/channels failed (${res.status})`);
   const data = (await res.json()) as { channels: ChannelInfo[] };
   return data.channels;
@@ -988,6 +998,102 @@ export async function createJoinLink(
   if (res.status === 400) throw new ValidationError("invalid expiry or max-uses");
   if (!res.ok) throw new Error(`POST /api/channels/${slug}/join-links failed (${res.status})`);
   return (await res.json()) as JoinLinkInfo;
+}
+
+// 外部协作者邀请（#593）：一次性邀请码，兑换 = 入册实例 + 入频道 + 预设昵称三合一。
+export interface ExternalInviteInfo {
+  code: string;
+  url?: string;
+  channel_slug: string;
+  preset_handle: string;
+  created_by: string;
+  created_at: number;
+  expires_at: number | null;
+  redeemed_by: string | null;
+  redeemed_at: number | null;
+  revoked_at: number | null;
+}
+
+export async function createExternalInvite(
+  token: string,
+  slug: string,
+  opts: { handle: string; expiresInSec?: number },
+): Promise<ExternalInviteInfo> {
+  const body: Record<string, string | number> = { handle: opts.handle };
+  if (opts.expiresInSec !== undefined) body.expires_in_sec = opts.expiresInSec;
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/external-invites`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("only the channel owner can create external invites");
+  if (res.status === 400) throw new ValidationError("invalid nickname or expiry");
+  if (res.status === 409) {
+    const b = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+    throw new ValidationError(b.error?.message ?? "nickname is unavailable");
+  }
+  if (!res.ok) throw new Error(`POST /api/channels/${slug}/external-invites failed (${res.status})`);
+  return (await res.json()) as ExternalInviteInfo;
+}
+
+export async function listExternalInvites(token: string, slug: string): Promise<ExternalInviteInfo[]> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/external-invites`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("only the channel owner can list external invites");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/external-invites failed (${res.status})`);
+  const data = (await res.json()) as { invites: ExternalInviteInfo[] };
+  return data.invites;
+}
+
+export async function revokeExternalInvite(token: string, slug: string, code: string): Promise<void> {
+  const res = await fetchApi(
+    `/api/channels/${encodeURIComponent(slug)}/external-invites/${encodeURIComponent(code)}`,
+    { method: "DELETE", headers: { authorization: `Bearer ${token}` } },
+  );
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("only the channel owner can revoke external invites");
+  if (!res.ok && res.status !== 404) throw new Error(`DELETE external-invite failed (${res.status})`);
+}
+
+// 邀请预览（免认证——码即凭证）：/invite/<code> 落地页登录前展示「你被邀请进频道 X、昵称 Y」。
+export interface InvitePreview {
+  channel_slug: string;
+  channel_title: string | null;
+  preset_handle: string;
+  state: "pending" | "revoked" | "expired" | "redeemed";
+}
+
+export async function getInvitePreview(code: string): Promise<InvitePreview> {
+  const res = await fetchApi(`/api/instance/invites/${encodeURIComponent(code)}`, {});
+  if (res.status === 404) throw new ValidationError("this invite doesn't exist");
+  if (!res.ok) throw new Error(`GET /api/instance/invites/${code} failed (${res.status})`);
+  return (await res.json()) as InvitePreview;
+}
+
+// 兑换外部邀请：需登录的 human 账号会话；服务端对本端点豁免实例闸（未入册者靠它进门）。
+export async function redeemExternalInvite(
+  token: string,
+  code: string,
+): Promise<{ channel_slug: string; handle: string | null; joined: boolean }> {
+  const res = await fetchApi(`/api/instance/invites/${encodeURIComponent(code)}/redeem`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) {
+    const b = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+    throw new ForbiddenError(b.error?.message ?? "redeeming an invite requires a signed-in human account");
+  }
+  if (res.status === 404) throw new ValidationError("this invite doesn't exist");
+  if (res.status === 410) {
+    const b = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+    throw new ValidationError(b.error?.message ?? "this invite is no longer valid (expired / revoked / already redeemed)");
+  }
+  if (!res.ok) throw new Error(`POST /api/instance/invites/${code}/redeem failed (${res.status})`);
+  return (await res.json()) as { channel_slug: string; handle: string | null; joined: boolean };
 }
 
 // 兑换邀请链接（访问 /join/<code> 的落地页调用）。需登录的人类账号；把当前账号加进频道成员。
