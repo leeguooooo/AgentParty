@@ -1,4 +1,5 @@
 import { mcpServerName } from "@agentparty/shared/onboarding";
+import { MIN_CLI, VERSION_GE_SNIPPET } from "./joinPack";
 
 const VAULT_KEY = "ap_agent_token_vault:v1";
 
@@ -86,16 +87,9 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
-// snippet 里保底的 CLI 版本：低于它就强制重装。AgentJoin 的完整接入包与下面的桌面最小
-// 接入包共用这一份，防止两处漂移。发布带 CLI 行为变更的版本时同步上调。
-// 0.2.124：接入包 MCP-first，依赖 party mcp 的 party_decision_ask 与 party_send attach
-//（不能写 0.2.123——该版已从 #579 发布、不含这两个工具，锁它会让过闸的 CLI 缺工具）。
-export const MIN_CLI = "0.2.124";
-
-// 与 AgentJoin 完整接入包同一份 awk 三段版本比较；桌面最小包也要过版本闸，
-// 只查 command -v 会放过装着旧版、缺 MCP 工具的机器。
-export const VERSION_GE_SNIPPET =
-  `version_ge(){ awk -v a="$1" -v b="$2" 'BEGIN{split(a,A,".");split(b,B,".");for(i=1;i<=3;i++){A[i]+=0;B[i]+=0;if(A[i]>B[i])exit 0;if(A[i]<B[i])exit 1}exit 0}'; }`;
+// MIN_CLI / version_ge 真值搬进 joinPack（完整包 builder 所在地），这里 re-export 保住既有
+// 消费者；桌面最小包与完整包仍共用同一份，防两处漂移。版本上调历史见 joinPack 注释。
+export { MIN_CLI, VERSION_GE_SNIPPET } from "./joinPack";
 
 // MCP server 注册名规则挪到 shared 与 cli 的 party invite 共用一份（#585）；语义与来由见那边注释。
 export { mcpServerName } from "@agentparty/shared/onboarding";

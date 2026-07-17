@@ -4282,6 +4282,7 @@ export function ChannelPage({
                     token={token}
                     accountKey={accountKey}
                     inviterName={inviterName}
+                    charter={charter}
                     onAuthFailed={onAuthFailed}
                     active={activeAdminSurface === "agentTokens"}
                     onActiveChange={(open) => setAdminSurface("agentTokens", open)}

@@ -2,6 +2,7 @@ import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, u
 import {
   AuthError,
   type ChannelAgentInfo,
+  type ChannelCharter,
   ConflictError,
   ForbiddenError,
   type ProjectAgentInvitableBy,
@@ -24,6 +25,7 @@ import {
   saveAgentToken,
 } from "../lib/agentTokenVault";
 import { apiOrigin } from "../lib/base";
+import { buildFullJoinPack } from "../lib/joinPack";
 import { useT } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
 import "../i18n/strings/AgentTokens";
@@ -33,6 +35,8 @@ interface Props {
   token: string;
   accountKey: string;
   inviterName: string;
+  /** 频道公告快照（与 AgentJoin 同源）；复制接入包时嵌入，null 则省略该段。 */
+  charter: ChannelCharter | null;
   onAuthFailed(message: string): void;
   active?: boolean;
   onActiveChange?(open: boolean): void;
@@ -61,7 +65,7 @@ const EMPTY_PROFILE_FORM: ProfileForm = {
   rules: "",
 };
 
-export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed, active, onActiveChange }: Props) {
+export function AgentTokens({ slug, token, accountKey, inviterName, charter, onAuthFailed, active, onActiveChange }: Props) {
   const t = useT();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
@@ -186,15 +190,18 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
 
   // #584：vault 里存的 command 是生成时刻的冻结文本，会带着旧世界观（TMPDIR 配置路径、
   // 旧 MIN_CLI、无 MCP 步骤）继续流通。复制永远现场重建，存量 command 字段只留作兼容不再读。
+  // 重建走 buildFullJoinPack——与「＋ 让 agent 加入」同一份 builder，产物逐字节同构，
+  // 含 charter 快照与待命/唤醒指引（只发最小包的话，新 agent 报到完就不知道怎么挂 watch/serve）。
   function freshCommand(record: { name: string; token: string }): string {
-    return buildMinimalAgentCommand({
+    return buildFullJoinPack({
+      slug,
+      agentName: record.name,
+      agentToken: record.token,
       // #530：桌面版 location.origin 是 tauri://localhost，接入包会报错；优先真实后端 apiBase，同源 web 回退 origin。
       server: apiOrigin(),
-      slug,
-      name: record.name,
-      token: record.token,
       inviterName,
-      checkinMessage: t("AgentTokens.checkinMessage", { name: record.name }),
+      charter,
+      t,
     });
   }
 

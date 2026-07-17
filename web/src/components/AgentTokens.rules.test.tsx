@@ -154,6 +154,7 @@ function baseProps() {
     token: "tok-1",
     accountKey: "acct-1",
     inviterName: "host",
+    charter: null,
     onAuthFailed: () => {},
   };
 }
