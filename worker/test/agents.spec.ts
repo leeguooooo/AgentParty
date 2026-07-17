@@ -488,7 +488,9 @@ describe("DELETE /api/channels/:slug/agents/:name", () => {
 
     const res = await del(session, slug, agent.name);
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { deleted: boolean }).deleted).toBe(true);
+    const body = (await res.json()) as { deleted: boolean; kicked: boolean };
+    expect(body.deleted).toBe(true);
+    expect(body.kicked).toBe(true);
     expect((await api(`/api/channels/${slug}/messages`, agent.token)).status).toBe(401);
     expect((await del(session, slug, agent.name)).status).toBe(404);
   });

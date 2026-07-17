@@ -230,7 +230,11 @@ export function AgentTokens({ slug, token, accountKey, inviterName, charter, onA
       await refresh();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
-      else setError(t("AgentTokens.errDelete"));
+      else if (err instanceof ValidationError) {
+        // 404 = 服务端早已没有这个 agent（别处已删/已撤销）——本地清理照做，幂等收尾。
+        removeSavedAgentToken(accountKey, slug, name);
+        await refresh();
+      } else setError(t("AgentTokens.errDelete"));
     } finally {
       setBusyName(null);
     }

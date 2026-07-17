@@ -2977,25 +2977,43 @@ app.delete("/api/channels/:slug/agents/:name", requireBearer, async (c) => {
   }
   const now = Date.now();
   // child token（managed lane / spawn 子身份）随父一起吊销——父死子活会留下无人监管的可用身份。
-  await c.env.DB.prepare(
-    `UPDATE tokens SET revoked_at = ?
-      WHERE channel_scope = ? AND revoked_at IS NULL
-        AND (name = ? OR parent_agent = ?)`,
-  ).bind(now, slug, name, name).run();
-  await c.env.DB.prepare(
-    "DELETE FROM channel_members WHERE channel_slug = ? AND account = ?",
-  ).bind(slug, name).run();
+  // 撤销前先取 child 名单：child 以自己的身份连接，撤 token 只挡新连接，存活会话必须逐个踢。
+  const children = await c.env.DB.prepare(
+    "SELECT name FROM tokens WHERE channel_scope = ? AND parent_agent = ? AND revoked_at IS NULL",
+  ).bind(slug, name).all<{ name: string }>();
+  // 撤 token 与清成员同一批次原子提交（CodeRabbit #610）：分开写时前者成功后者失败，重试会被
+  // revoked_at IS NULL 的存在性检查挡成 404，成员行就永远清不掉了。
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE tokens SET revoked_at = ?
+        WHERE channel_scope = ? AND revoked_at IS NULL
+          AND (name = ? OR parent_agent = ?)`,
+    ).bind(now, slug, name, name),
+    c.env.DB.prepare(
+      "DELETE FROM channel_members WHERE channel_slug = ? AND account = ?",
+    ).bind(slug, name),
+  ]);
   // 复用 kick 的 DO 通道，mode=remove：断开存活连接、清 presence、广播 offline——
-  // 删除是永久动作，presence 残留会让成员列表继续显示一个已不存在的身份。
-  await fetchChannelDO(
-    c.env,
-    slug,
-    new Request("https://do/internal/kick", {
-      method: "POST",
-      body: JSON.stringify({ name, mode: "remove" }),
-      headers: { "content-type": "application/json", "x-partykit-room": slug },
-    }),
-  ).catch(() => null);
+  // 删除是永久动作，presence 残留会让成员列表继续显示一个已不存在的身份。父与所有 child
+  // 会话都要断（token 已死只挡重连，不断已建立的 WS）。失败不回滚撤销（撤销才是事实源），
+  // 以 kicked 回给调用方；没踢掉的连接在下次重连时被死 token 挡死。
+  const kickTargets = [name, ...(children.results ?? []).map((child) => child.name)];
+  const kickResults = await Promise.all(
+    kickTargets.map((target) =>
+      fetchChannelDO(
+        c.env,
+        slug,
+        new Request("https://do/internal/kick", {
+          method: "POST",
+          body: JSON.stringify({ name: target, mode: "remove" }),
+          headers: { "content-type": "application/json", "x-partykit-room": slug },
+        }),
+      )
+        .then((res) => res.ok)
+        .catch(() => false),
+    ),
+  );
+  const kicked = kickResults.every(Boolean);
   await bestEffortRecordManagementAudit(c.env.DB, {
     actor: managementAuditActor(identity),
     action: "token.revoke",
@@ -3003,7 +3021,7 @@ app.delete("/api/channels/:slug/agents/:name", requireBearer, async (c) => {
     channel: slug,
     timestamp: now,
   });
-  return c.json({ deleted: true, name });
+  return c.json({ deleted: true, name, kicked });
 });
 
 app.put("/api/channels/:slug/agents/:name/nickname", requireBearer, async (c) => {
