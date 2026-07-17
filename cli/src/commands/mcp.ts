@@ -26,6 +26,7 @@ import {
   fetchMessages,
   fetchPresence,
   fetchRecentMessages,
+  fetchServerVersion,
   handleRestError,
   listChannels,
   listTasks,
@@ -34,6 +35,7 @@ import {
   updateTask,
   type Identity,
 } from "../rest";
+import { serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import { isName, isSlug } from "../validation";
 import { askDecision } from "./decision";
 import { uploadAttachmentPaths } from "./send";
@@ -214,6 +216,56 @@ function charterReminder(boundChannel: string | undefined): string {
   return `read the channel charter first (${where}) — it defines this channel's scope and etiquette before you act.`;
 }
 
+// MCP server 是长驻进程，#485 给 serve 做的升级闭环没有覆盖这里（#588）：磁盘 party 升级后
+// 本进程仍是旧二进制，新注册的 party_* 工具不会出现；服务端发新版时旧进程同样不自知。
+// 两层检测，提示挂在 whoami / watch_once 两个「重锚点」的结构化结果上：
+//   a) 磁盘二进制 > 运行版（upgradeNotice）——命中即短路，零网络。MCP 语境下无需重装、
+//      无需重新注册（注册命令按 PATH 解析 party），重启 harness 会话即可加载新版。
+//      不做 serve 式 auto re-exec：stdio server 自杀会掐断 MCP 连接、丢掉在途工具调用。
+//   b) 服务端 /api/version > 运行版（serverVersionUpgradeNotice）——10 分钟节流缓存；
+//      探测失败（老 worker 无该端点、网络错）静默跳过，绝不为提示挡住或拖慢工具调用。
+const SERVER_VERSION_PROBE_TTL_MS = 10 * 60_000;
+let serverVersionProbe: { at: number; version: string | null } = { at: 0, version: null };
+
+/** 测试缝隙：注入 UpgradeDeps 走磁盘路径、重置节流缓存。 */
+export function resetServerVersionProbeForTest(): void {
+  serverVersionProbe = { at: 0, version: null };
+}
+
+export async function mcpUpgradeNotice(
+  server: string,
+  deps: UpgradeDeps = {},
+  options: { probe?: boolean } = {},
+): Promise<(CliUpgradeNotice & { mcp_note: string }) | null> {
+  const disk = upgradeNotice(false, deps);
+  if (disk !== null) {
+    return {
+      ...disk,
+      mcp_note:
+        "the party binary on disk is already newer than this running MCP server — no reinstall needed. Restart the harness session so the server respawns on the new binary; the MCP registration resolves `party` from PATH, so re-registration is NOT needed.",
+    };
+  }
+  // probe=false（watch_once 唤醒路径）只读缓存：唤醒 replay 是延迟敏感的极简路径（#551 的
+  // 测试固定了它的请求数），版本探测只允许发生在 whoami 这类非关键调用里。
+  const now = Date.now();
+  if (options.probe !== false && now - serverVersionProbe.at > SERVER_VERSION_PROBE_TTL_MS) {
+    serverVersionProbe = { at: now, version: null };
+    try {
+      serverVersionProbe.version = (await fetchServerVersion(server)).version;
+    } catch {
+      // 静默：升级提示是增益信号，不是墙。
+    }
+  }
+  if (serverVersionProbe.version === null) return null;
+  const notice = serverVersionUpgradeNotice(serverVersionProbe.version, deps);
+  if (notice === null) return null;
+  return {
+    ...notice,
+    mcp_note:
+      "after upgrading (`party upgrade`, or the install.sh one-liner), restart the harness session so this MCP server respawns on the new binary. The MCP registration resolves `party` from PATH — do NOT re-register.",
+  };
+}
+
 async function charterData(channel: string): Promise<Record<string, unknown>> {
   const cfg = await auth();
   const body = await fetchChannelCharter(cfg.server, cfg.token, channel);
@@ -250,7 +302,15 @@ export function createMcpServer(defaultChannel?: string): McpServer {
       try {
         const cfg = await auth();
         const me = await fetchMe(cfg.server, cfg.token);
-        return ok({ type: "me", server: cfg.server, identity: me, protocol_reminder: reminder });
+        const upgrade = await mcpUpgradeNotice(cfg.server);
+        return ok({
+          type: "me",
+          server: cfg.server,
+          cli_version: pkg.version,
+          identity: me,
+          protocol_reminder: reminder,
+          ...(upgrade !== null ? { cli_upgrade: upgrade } : {}),
+        });
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -915,7 +975,16 @@ export function createMcpServer(defaultChannel?: string): McpServer {
             lag: Math.max(0, channelLastSeq - pending.seq),
             skipped_mention_seqs: stuck.skipped_mention_seqs ?? [],
           });
-          return ok({ type: "watch_once", channel: resolved, exit_code: 0, frames: [frame] });
+          // 唤醒返回帧＝一轮的起点：旧进程/旧版的升级提示在这里最可能被看见并转达 owner（#588）。
+          // probe:false——唤醒路径零额外网络（磁盘检测 + whoami 已填充的缓存）。
+          const replayUpgrade = await mcpUpgradeNotice(cfg.server, {}, { probe: false });
+          return ok({
+            type: "watch_once",
+            channel: resolved,
+            exit_code: 0,
+            frames: [frame],
+            ...(replayUpgrade !== null ? { cli_upgrade: replayUpgrade } : {}),
+          });
         }
 
         const lines: string[] = [];
@@ -945,7 +1014,15 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           out: (line) => lines.push(line),
         });
         const frames = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
-        const data = { type: "watch_once", channel: resolved, exit_code: code, frames };
+        // 同 replay 路径：唤醒返回帧带缓存化的升级提示（probe:false，零额外网络）。
+        const liveUpgrade = await mcpUpgradeNotice(cfg.server, {}, { probe: false });
+        const data = {
+          type: "watch_once",
+          channel: resolved,
+          exit_code: code,
+          frames,
+          ...(liveUpgrade !== null ? { cli_upgrade: liveUpgrade } : {}),
+        };
         return code === 0 ? ok(data) : { ...fail(lines.join("\n") || `watch_once failed with exit ${code}`), structuredContent: data };
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
