@@ -19,12 +19,15 @@ describe("mcpUpgradeNotice 磁盘路径（deps 注入，零网络）", () => {
       readInstalledVersion: () => "0.2.101",
     });
     expect(notice).not.toBeNull();
+    expect(notice!.source).toBe("disk");
     expect(notice!.installed_version).toBe("0.2.101");
     expect(notice!.running_version).toBe("0.2.100");
-    // MCP 语境的关键话术：无需重装、无需重新注册、重启会话即可。
-    expect(notice!.mcp_note).toContain("no reinstall needed");
-    expect(notice!.mcp_note).toContain("re-registration is NOT needed");
-    expect(notice!.mcp_note).toContain("Restart the harness session");
+    // MCP 专属话术全部收敛进 message，不再继承 serve 的「重启 serve / 重装」矛盾指令；
+    // 磁盘路径没有可跑的命令——command 必须缺席，否则 runner 会把安装命令当必要步骤。
+    expect(notice!.message).toContain("No reinstall and no re-registration needed");
+    expect(notice!.message).toContain("restart this harness session");
+    expect(notice!.message).not.toMatch(/\bserve\b/); // serve 专属话术不得渗入（“server” 不算）
+    expect(notice!.command).toBeUndefined();
   });
 
   test("磁盘与运行版一致且服务端不可达 → null（静默，不因提示报错）", async () => {
@@ -112,8 +115,14 @@ describe("party mcp 服务端版本路径（真 stdio server + mock /api/version
       expect(typeof c1.cli_version).toBe("string");
       expect(c1.cli_upgrade).toBeDefined();
       expect(c1.cli_upgrade!.available_version).toBe("9.9.9");
-      expect(String(c1.cli_upgrade!.mcp_note)).toContain("restart the harness session");
-      expect(String(c1.cli_upgrade!.mcp_note)).toContain("do NOT re-register");
+      expect(c1.cli_upgrade!.source).toBe("server");
+      // server 路径的三件套必须互不矛盾：message 讲清升级+重启会话+不重注册，command 是
+      // 真正要跑的安装命令，action_required 走 runner 既有的 ask_user 流。
+      expect(String(c1.cli_upgrade!.message)).toContain("restart this harness session");
+      expect(String(c1.cli_upgrade!.message)).toContain("do NOT re-register");
+      expect(String(c1.cli_upgrade!.message)).not.toContain("serve 会自动");
+      expect(String(c1.cli_upgrade!.command)).toContain("install.sh");
+      expect(c1.cli_upgrade!.action_required).toBe("ask_user");
 
       const r2 = await client.callTool({ name: "party_whoami", arguments: {} });
       expect((r2.structuredContent as { cli_upgrade?: unknown }).cli_upgrade).toBeDefined();

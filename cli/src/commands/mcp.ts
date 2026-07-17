@@ -35,7 +35,7 @@ import {
   updateTask,
   type Identity,
 } from "../rest";
-import { serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
+import { serverVersionUpgradeNotice, upgradeNotice, type UpgradeDeps } from "../upgrade";
 import { isName, isSlug } from "../validation";
 import { askDecision } from "./decision";
 import { uploadAttachmentPaths } from "./send";
@@ -232,17 +232,43 @@ export function resetServerVersionProbeForTest(): void {
   serverVersionProbe = { at: 0, version: null };
 }
 
+// MCP 语境的升级提示用自己的形状，不复用 CliUpgradeNotice 的 message/command——那套话术是
+// serve 专属（「重启 serve」「auto re-exec」「重装命令」），在 MCP 场景是矛盾指令（磁盘已新
+// 无需重装；重启对象是 harness 会话不是 serve）。保留 action_required=ask_user 让 runner
+// 复用同一条询问用户的处理流；command 只在真有命令要跑时才给（server 路径的升级命令）。
+export interface McpUpgradeNotice {
+  running_version: string;
+  available_version: string;
+  /** 磁盘路径才有：已安装、等待会话重启加载的版本。 */
+  installed_version?: string;
+  source: "disk" | "server";
+  action_required: "ask_user";
+  message: string;
+  /** 需要用户真的跑命令时才给（server 路径的安装/升级命令）；磁盘路径无命令可跑。 */
+  command?: string;
+}
+
+// 服务端探测是可选增益：3 秒等不到就放弃本轮（缓存留空、下轮再试），
+// 绝不让 whoami 被 rest 默认 30s 超时拖住。
+const SERVER_VERSION_PROBE_TIMEOUT_MS = 3_000;
+
 export async function mcpUpgradeNotice(
   server: string,
   deps: UpgradeDeps = {},
   options: { probe?: boolean } = {},
-): Promise<(CliUpgradeNotice & { mcp_note: string }) | null> {
+): Promise<McpUpgradeNotice | null> {
   const disk = upgradeNotice(false, deps);
   if (disk !== null) {
     return {
-      ...disk,
-      mcp_note:
-        "the party binary on disk is already newer than this running MCP server — no reinstall needed. Restart the harness session so the server respawns on the new binary; the MCP registration resolves `party` from PATH, so re-registration is NOT needed.",
+      running_version: disk.running_version,
+      available_version: disk.available_version,
+      ...(disk.installed_version !== undefined ? { installed_version: disk.installed_version } : {}),
+      source: "disk",
+      action_required: "ask_user",
+      message:
+        `party CLI on disk is already v${disk.available_version} while this MCP server still runs v${disk.running_version}. ` +
+        "No reinstall and no re-registration needed (the MCP registration resolves `party` from PATH) — " +
+        "ask the user to restart this harness session so the server respawns on the new binary.",
     };
   }
   // probe=false（watch_once 唤醒路径）只读缓存：唤醒 replay 是延迟敏感的极简路径（#551 的
@@ -251,7 +277,12 @@ export async function mcpUpgradeNotice(
   if (options.probe !== false && now - serverVersionProbe.at > SERVER_VERSION_PROBE_TTL_MS) {
     serverVersionProbe = { at: now, version: null };
     try {
-      serverVersionProbe.version = (await fetchServerVersion(server)).version;
+      serverVersionProbe.version = await Promise.race([
+        fetchServerVersion(server).then((v) => v.version),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("probe timeout")), SERVER_VERSION_PROBE_TIMEOUT_MS),
+        ),
+      ]);
     } catch {
       // 静默：升级提示是增益信号，不是墙。
     }
@@ -260,9 +291,15 @@ export async function mcpUpgradeNotice(
   const notice = serverVersionUpgradeNotice(serverVersionProbe.version, deps);
   if (notice === null) return null;
   return {
-    ...notice,
-    mcp_note:
-      "after upgrading (`party upgrade`, or the install.sh one-liner), restart the harness session so this MCP server respawns on the new binary. The MCP registration resolves `party` from PATH — do NOT re-register.",
+    running_version: notice.running_version,
+    available_version: notice.available_version,
+    source: "server",
+    action_required: "ask_user",
+    message:
+      `AgentParty server has published party CLI v${notice.available_version}; this MCP server still runs v${notice.running_version}. ` +
+      "Ask the user to upgrade with the command below, then restart this harness session so the server respawns on the new binary — " +
+      "do NOT re-register (the MCP registration resolves `party` from PATH).",
+    command: notice.command,
   };
 }
 
