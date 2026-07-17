@@ -4,6 +4,7 @@ import type { MsgFrame, StatusState, TaskAssigneeKind, TaskState } from "@agentp
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { stripTerminalControls } from "../format";
 import pkg from "../../package.json" with { type: "json" };
 import {
   advanceCursorPastOwnMessage,
@@ -84,9 +85,12 @@ const StateSchema = z.enum(["working", "waiting", "blocked", "done"]);
 const TaskStateSchema = z.enum(["triage", "backlog", "assigned", "in_progress", "needs_review", "done", "blocked"]);
 const TaskAssigneeKindSchema = z.enum(["agent", "human", "squad"]);
 
+// MCP 客户端常把 content.text 直接在终端渲染，而异常消息、附件路径、chosen_option 等可能由
+// 远端/用户控制。统一在 ok/fail 出口剥掉控制字符，防终端注入（structuredContent 是程序消费的
+// JSON，不经此路径）。
 function ok(data: Record<string, unknown>, text?: string): CallToolResult {
   return {
-    content: [{ type: "text", text: text ?? JSON.stringify(data, null, 2) }],
+    content: [{ type: "text", text: stripTerminalControls(text ?? JSON.stringify(data, null, 2)) }],
     structuredContent: data,
   };
 }
@@ -94,7 +98,7 @@ function ok(data: Record<string, unknown>, text?: string): CallToolResult {
 function fail(message: string): CallToolResult {
   return {
     isError: true,
-    content: [{ type: "text", text: message }],
+    content: [{ type: "text", text: stripTerminalControls(message) }],
   };
 }
 
