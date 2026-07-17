@@ -6929,3 +6929,25 @@
     flex: 1 0 100%;
   }
 }
+
+/* 探活分级 + 模型活动 chip（#608，消费 #602/#603 的 presence 字段） */
+.presence-liveness--bad {
+  border-color: var(--d-red);
+  background: var(--d-red-soft);
+  color: var(--d-red);
+}
+.presence-liveness--warn {
+  border-color: var(--d-amber);
+  background: var(--d-amber-soft);
+  color: var(--d-amber);
+}
+.presence-activity {
+  border-color: var(--t-faint);
+  background: var(--t-panel2);
+  color: var(--t-dim);
+}
+.presence-activity--alert {
+  border-color: var(--d-amber);
+  background: var(--d-amber-soft);
+  color: var(--d-amber);
+}

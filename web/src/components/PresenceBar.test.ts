@@ -3,7 +3,7 @@ import type { PresenceEntry, Sender } from "@agentparty/shared";
 import { createElement } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import { buildGroups, busyLabel, countLiveGroups, ownerKey, pauseResumeAt, PresenceBar, taskLabel, waitingOwnerLabel, wakeabilityBadge, type Item } from "./PresenceBar";
+import { ACTIVITY_TTL_MS, activityBadge, buildGroups, busyLabel, countLiveGroups, livenessBadge, ownerKey, pauseResumeAt, PresenceBar, taskLabel, waitingOwnerLabel, wakeabilityBadge, type Item } from "./PresenceBar";
 
 function item(over: Partial<Item> = {}): Item {
   return {
@@ -38,9 +38,74 @@ function item(over: Partial<Item> = {}): Item {
     waitingOwnerCount: 0,
     currentTask: null,
     heartbeatAt: null,
+    activity: null,
+    listening: null,
+    runnerHealth: null,
     ...over,
   };
 }
+
+// #608：探活分级 + 模型活动 chip（消费 #602/#603 字段），口径对齐 cli/src/commands/who.ts。
+describe("livenessBadge / activityBadge (#608)", () => {
+  const NOW = 10_000_000;
+
+  test("runner 连败优先级最高，title 带 last_error", () => {
+    const badge = livenessBadge(
+      item({
+        runnerHealth: { ok: false, consecutive_failures: 3, last_error: "spawn ENOENT" },
+        listening: "deaf",
+      }),
+    );
+    expect(badge).toEqual({
+      key: "PresenceBar.runnerFailing",
+      vars: { count: 3 },
+      tone: "bad",
+      title: "spawn ENOENT",
+    });
+  });
+
+  test("runner ok=true 不告警（单次失败降噪口径）；listening 分 deaf/suspect 两档", () => {
+    expect(livenessBadge(item({ runnerHealth: { ok: true, consecutive_failures: 1 } }))).toBeNull();
+    expect(livenessBadge(item({ listening: "deaf" }))!.tone).toBe("bad");
+    expect(livenessBadge(item({ listening: "suspect" }))!.tone).toBe("warn");
+    expect(livenessBadge(item())).toBeNull();
+  });
+
+  test("activity：tool 阶段普通展示，waiting_permission 高亮", () => {
+    const tool = activityBadge(item({ activity: { phase: "tool", tool: "Bash", ts: NOW - 5_000 } }), NOW);
+    expect(tool!.key).toBe("PresenceBar.activityTool");
+    expect(tool!.highlight).toBe(false);
+    const perm = activityBadge(
+      item({ activity: { phase: "waiting_permission", tool: "Bash", ts: NOW - 5_000 } }),
+      NOW,
+    );
+    expect(perm!.key).toBe("PresenceBar.activityWaitingPermissionTool");
+    expect(perm!.highlight).toBe(true);
+  });
+
+  test("livenessBadge 各分支 key 与 i18n 定义一致", () => {
+    expect(livenessBadge(item({ listening: "deaf" }))!.key).toBe("PresenceBar.listeningDeaf");
+    expect(livenessBadge(item({ listening: "suspect" }))!.key).toBe("PresenceBar.listeningSuspect");
+  });
+
+  test("activityBadge 其余 phase 的 key/高亮映射（防 i18n key 拼写回归）", () => {
+    const at = (phase: NonNullable<Item["activity"]>["phase"], tool?: string) =>
+      activityBadge(item({ activity: { phase, tool, ts: NOW - 5_000 } }), NOW);
+    expect(at("waiting_permission")).toMatchObject({ key: "PresenceBar.activityWaitingPermission", highlight: true });
+    expect(at("waiting_input")).toMatchObject({ key: "PresenceBar.activityWaitingInput", highlight: true });
+    expect(at("compacting")).toMatchObject({ key: "PresenceBar.activityCompacting", highlight: false });
+    expect(at("starting")).toMatchObject({ key: "PresenceBar.activityStarting", highlight: false });
+    expect(at("working")).toMatchObject({ key: "PresenceBar.activityWorking", highlight: false });
+    expect(at("idle")).toMatchObject({ key: "PresenceBar.activityIdle", highlight: false });
+  });
+
+  test("超 5 分钟陈旧 / 未来时间戳（>1min）不展示；缺省无恙", () => {
+    expect(activityBadge(item({ activity: { phase: "working", ts: NOW - ACTIVITY_TTL_MS - 1 } }), NOW)).toBeNull();
+    expect(activityBadge(item({ activity: { phase: "working", ts: NOW + 61_000 } }), NOW)).toBeNull();
+    expect(activityBadge(item({ activity: { phase: "working", ts: NOW - 1_000 } }), NOW)).not.toBeNull();
+    expect(activityBadge(item(), NOW)).toBeNull();
+  });
+});
 
 describe("wakeabilityBadge (#191 可唤醒·待命 + 服务端校验)", () => {
   const NOW = 2_000_000;
