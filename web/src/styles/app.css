@@ -313,7 +313,14 @@
   gap: 8px;
   min-width: 0;
 }
-.desktop-agent-instance-name { font-size: 12px; flex: none; }
+.desktop-agent-instance-name {
+  font-size: 12px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .desktop-agent-instance-dir {
   font-size: 11px;
   color: var(--t-dim);

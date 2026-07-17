@@ -154,6 +154,26 @@ pub(crate) struct AgentManager(Arc<Mutex<HashMap<String, ManagedAgent>>>);
 /// 活跃（starting/running/stopping）实例上限：桌面机资源兜底，不是产品限制。
 const MAX_ACTIVE_INSTANCES: usize = 8;
 
+/// 终止态（stopped/failed）实例的保留上限：超出按 started_at 淘汰最旧——历史与日志
+/// 不能随「用过的频道数」无限长（CodeRabbit #618 finding）。
+const MAX_TERMINAL_INSTANCES: usize = 16;
+
+/// 淘汰多余的终止态实例。只动非活跃项；活跃实例永不淘汰。
+fn evict_terminal_overflow(instances: &mut HashMap<String, ManagedAgent>) {
+    let mut terminal: Vec<(String, Option<u64>)> = instances
+        .iter()
+        .filter(|(_, agent)| !is_active_phase(agent.runtime.phase))
+        .map(|(key, agent)| (key.clone(), agent.runtime.started_at))
+        .collect();
+    if terminal.len() <= MAX_TERMINAL_INSTANCES {
+        return;
+    }
+    terminal.sort_by_key(|(_, started_at)| *started_at);
+    for (key, _) in terminal.iter().take(terminal.len() - MAX_TERMINAL_INSTANCES) {
+        instances.remove(key);
+    }
+}
+
 fn instance_key(config_id: &str, channel: &str) -> String {
     format!("{config_id}:{channel}")
 }
@@ -678,8 +698,11 @@ pub(crate) fn desktop_agent_start(
             .values()
             .filter(|agent| is_active_phase(agent.runtime.phase))
             .count();
-        let entry = instances.entry(key.clone()).or_default();
-        if is_active_phase(entry.runtime.phase) {
+        // 上限校验先于插入：拒绝路径绝不留下字段全空的幽灵记录（CodeRabbit #618 finding）。
+        if instances
+            .get(&key)
+            .is_some_and(|existing| is_active_phase(existing.runtime.phase))
+        {
             return Err("this desktop agent instance is already running".to_string());
         }
         if active >= MAX_ACTIVE_INSTANCES {
@@ -687,6 +710,8 @@ pub(crate) fn desktop_agent_start(
                 "at most {MAX_ACTIVE_INSTANCES} desktop agent instances can run at once"
             ));
         }
+        evict_terminal_overflow(&mut instances);
+        let entry = instances.entry(key.clone()).or_default();
         entry.generation = entry.generation.wrapping_add(1);
         entry.logs.clear();
         entry.stop_requested = false;
@@ -1066,6 +1091,24 @@ mod tests {
         assert!(super::validate_repo("https://x.com/a b").is_err());
         assert!(super::validate_repo("file:///etc").is_err());
         assert!(super::validate_repo(&format!("https://x.com/{}", "a".repeat(600))).is_err());
+    }
+
+    #[test]
+    fn terminal_history_is_capped_and_never_evicts_active() {
+        use std::collections::HashMap;
+        let mut instances: HashMap<String, super::ManagedAgent> = HashMap::new();
+        for index in 0..30u64 {
+            let mut agent = super::ManagedAgent::default();
+            agent.runtime.started_at = Some(index);
+            agent.runtime.phase = if index == 0 { AgentPhase::Running } else { AgentPhase::Stopped };
+            instances.insert(format!("cfg:{index}"), agent);
+        }
+        super::evict_terminal_overflow(&mut instances);
+        // 活跃实例（index 0）永不淘汰；终止态收敛到上限，且留下的是最新的。
+        assert!(instances.contains_key("cfg:0"));
+        assert_eq!(instances.len(), 1 + 16);
+        assert!(instances.contains_key("cfg:29"));
+        assert!(!instances.contains_key("cfg:1"));
     }
 
     #[test]
