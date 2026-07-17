@@ -3631,6 +3631,8 @@ export class ChannelDO extends Server<Env> {
     this.recordServeWatchWakes(msg);
     // 首投移出发送关键路径：坏/慢端点不再让每条消息阻塞 N×10s 才返回 seq（DoS 频道）
     this.ctx.waitUntil(this.dispatchWebhooks(msg));
+    // #607：@ 到「谁都收不到」的人类时给发送者可见反馈，不再静默吞。
+    this.ctx.waitUntil(this.warnUnreachableHumanMentions(msg));
     if (this.getMeta("ckind") === "temp" && !this.isArchived()) {
       await this.ensureAlarmAt(msg.ts + this.tempIdleMs());
     }
@@ -4230,6 +4232,71 @@ export class ChannelDO extends Server<Env> {
 
   // 频道内可观测：预算用尽时通告一条 system status。按窗口去重（一个窗口内只播一次），避免
   // 高频 @ 把频道刷屏。用 waiting 而非 blocked——这是节流不是熔断，blocked 会让守 etiquette 的 agent 停手。
+  // #607：mention 决议走全实例 handle 面（account_profiles 不分频道），所以 @ 一个从未连过
+  // 本频道、也没订阅任何通知渠道的人类会正常落库，然后无声无息（生产实例：@karl 在么 → karl
+  // 不在 presence、无 lark-notify webhook → 无人收到、无任何反馈）。消息落库后异步核对每个
+  // 非 agent mention 的可达面：presence 非 offline（按 name 或 human handle 匹配）、或本频道
+  // 任一同名 webhook（lark-notify 订阅在此注册）。全都没有 → 落一条 system status 让发送者
+  // 看见。agent 目标不归这里管（离线 agent 有 directed delivery 持久重放），squad 会另行展开。
+  private async warnUnreachableHumanMentions(msg: MsgFrame): Promise<void> {
+    if (msg.sender.name === "system") return;
+    const mentions = msg.mentions ?? [];
+    if (mentions.length === 0) return;
+    const reachable = new Set<string>();
+    for (const row of this.ctx.storage.sql.exec("SELECT name, handle, state FROM presence").toArray()) {
+      if (String(row.state) === "offline") continue;
+      reachable.add(mentionMatchKey(String(row.name)));
+      if (row.handle !== null && row.handle !== undefined) reachable.add(mentionMatchKey(String(row.handle)));
+    }
+    for (const row of this.ctx.storage.sql.exec("SELECT name FROM webhooks").toArray()) {
+      reachable.add(mentionMatchKey(String(row.name)));
+    }
+    const candidates = mentions.filter((mention) => !reachable.has(mentionMatchKey(mention)));
+    if (candidates.length === 0) return;
+    const placeholders = candidates.map(() => "?").join(", ");
+    let excluded: Set<string>;
+    try {
+      const [agents, squads] = await Promise.all([
+        this.env.DB.prepare(
+          `SELECT name FROM tokens
+            WHERE revoked_at IS NULL AND role = 'agent'
+              AND (channel_scope IS NULL OR channel_scope = ?)
+              AND name IN (${placeholders})`,
+        ).bind(this.name, ...candidates).all<{ name: string }>(),
+        this.env.DB.prepare(
+          `SELECT name FROM channel_squads WHERE channel_slug = ? AND name IN (${placeholders})`,
+        ).bind(this.name, ...candidates).all<{ name: string }>(),
+      ]);
+      excluded = new Set([...agents.results, ...squads.results].map((row) => mentionMatchKey(row.name)));
+    } catch {
+      // 纯观测性告警：目录查询抖动时宁可少报一次，也不能让 waitUntil 抛错。
+      return;
+    }
+    const now = Date.now();
+    // 写入前顺手清掉已出窗的去重键（CodeRabbit #611）：每个新 handle 都会永久占一行 meta，
+    // 长寿频道会无界增长；清理后存储只保留活跃窗口内的键。
+    this.ctx.storage.sql.exec(
+      "DELETE FROM meta WHERE key LIKE 'unreachable_mention_warned:%' AND CAST(value AS INTEGER) < ?",
+      now - 30 * 60_000,
+    );
+    const unreachable = candidates.filter((mention) => {
+      if (excluded.has(mentionMatchKey(mention))) return false;
+      // per-target 30 分钟去重（仿 wake budget 通告）：反复 @ 同一个不可达的人只提醒一次。
+      const key = `unreachable_mention_warned:${mentionMatchKey(mention)}`;
+      const last = Number(this.getMeta(key) ?? "");
+      if (Number.isInteger(last) && now - last < 30 * 60_000) return false;
+      this.setMeta(key, String(now));
+      return true;
+    });
+    if (unreachable.length === 0) return;
+    this.insertSystemStatus(
+      `${unreachable.map((name) => `@${name}`).join(" ")} won't see this mention: offline and not subscribed to any notification for this channel (they can enable Lark notify or open the channel page)`,
+      now,
+      false,
+      { state: "waiting" },
+    );
+  }
+
   private alertWakeBudget(name: string, now: number) {
     const cfg = this.wakeBudgetConfig(name);
     if (cfg === null) return;
