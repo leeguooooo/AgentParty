@@ -83,6 +83,22 @@ describe("livenessBadge / activityBadge (#608)", () => {
     expect(perm!.highlight).toBe(true);
   });
 
+  test("livenessBadge 各分支 key 与 i18n 定义一致", () => {
+    expect(livenessBadge(item({ listening: "deaf" }))!.key).toBe("PresenceBar.listeningDeaf");
+    expect(livenessBadge(item({ listening: "suspect" }))!.key).toBe("PresenceBar.listeningSuspect");
+  });
+
+  test("activityBadge 其余 phase 的 key/高亮映射（防 i18n key 拼写回归）", () => {
+    const at = (phase: NonNullable<Item["activity"]>["phase"], tool?: string) =>
+      activityBadge(item({ activity: { phase, tool, ts: NOW - 5_000 } }), NOW);
+    expect(at("waiting_permission")).toMatchObject({ key: "PresenceBar.activityWaitingPermission", highlight: true });
+    expect(at("waiting_input")).toMatchObject({ key: "PresenceBar.activityWaitingInput", highlight: true });
+    expect(at("compacting")).toMatchObject({ key: "PresenceBar.activityCompacting", highlight: false });
+    expect(at("starting")).toMatchObject({ key: "PresenceBar.activityStarting", highlight: false });
+    expect(at("working")).toMatchObject({ key: "PresenceBar.activityWorking", highlight: false });
+    expect(at("idle")).toMatchObject({ key: "PresenceBar.activityIdle", highlight: false });
+  });
+
   test("超 5 分钟陈旧 / 未来时间戳（>1min）不展示；缺省无恙", () => {
     expect(activityBadge(item({ activity: { phase: "working", ts: NOW - ACTIVITY_TTL_MS - 1 } }), NOW)).toBeNull();
     expect(activityBadge(item({ activity: { phase: "working", ts: NOW + 61_000 } }), NOW)).toBeNull();
