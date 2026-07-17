@@ -9357,8 +9357,9 @@ export class ChannelDO extends Server<Env> {
 
   private bumpListeningStreak(name: string, now: number) {
     this.ctx.storage.sql.exec(
+      // 判定只区分 1（suspect）与 ≥2（deaf），封顶 1000 防长期僵尸把计数器涨成天文数字。
       `INSERT INTO listening_health (name, streak, updated_at) VALUES (?, 1, ?)
-       ON CONFLICT(name) DO UPDATE SET streak = streak + 1, updated_at = excluded.updated_at`,
+       ON CONFLICT(name) DO UPDATE SET streak = MIN(streak + 1, 1000), updated_at = excluded.updated_at`,
       name,
       now,
     );
