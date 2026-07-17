@@ -18,12 +18,15 @@ export const MIN_CLI = "0.2.124";
 export const VERSION_GE_SNIPPET =
   `version_ge(){ awk -v a="$1" -v b="$2" 'BEGIN{split(a,A,".");split(b,B,".");for(i=1;i<=3;i++){A[i]+=0;B[i]+=0;if(A[i]>B[i])exit 0;if(A[i]<B[i])exit 1}exit 0}'; }`;
 
+// 公告正文必须整体注释化：接入包的约定是「不带 # 的行是要执行的命令」，而 charter 由频道
+// 管理员可控——逐字插入等于让对方频道的管理员向接入方的终端注入任意命令（跨公司信任边界上
+// 的 RCE）。每行加 "# " 前缀让内容只可读、不可执行；空行补 "#" 防止段落断开处漏出裸行。
 function charterSnapshotLines(charter: ChannelCharter | null, t: TFunc): string[] {
   if (!charter?.charter) return [];
   return [
     t("AgentJoin.cmd.charterHeader"),
     t("AgentJoin.cmd.charterBegin"),
-    charter.charter,
+    ...charter.charter.split("\n").map((line) => (line === "" ? "#" : `# ${line}`)),
     t("AgentJoin.cmd.charterEnd"),
     ``,
   ];

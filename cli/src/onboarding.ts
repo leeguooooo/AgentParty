@@ -12,7 +12,9 @@ export function formatCharterSnapshotForOnboarding(charter: ChannelCharter | nul
   return [
     "# 频道公告 / 用前必读（生成接入包时的快照；活文档用 party charter 看最新）",
     "# ----- BEGIN CHANNEL CHARTER -----",
-    charter.charter,
+    // 公告正文必须整体注释化：接入包约定「不带 # 的行是要执行的命令」，charter 由频道管理员
+    // 可控——逐字插入等于让对方频道的管理员向接入方终端注入任意命令。空行补 "#" 防漏出裸行。
+    ...charter.charter.split("\n").map((line) => (line === "" ? "#" : `# ${line}`)),
     "# ----- END CHANNEL CHARTER -----",
     "",
   ];
