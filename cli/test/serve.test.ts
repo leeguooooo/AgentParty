@@ -334,12 +334,28 @@ describe("runServe", () => {
       workdir,
     }));
     const clientFrames: Array<Record<string, unknown>> = [];
+    // #590：归档必须事件驱动。welcome 后 serve 才异步读 wake-session.json 并自报 agent_session
+    // 心跳；固定 60ms 掐线在慢 CI 上会赶在心跳前收摊（本用例曾一天咬掉两个无关 PR 的首跑）。
+    // 收到目标心跳立即归档；5s 兜底让回归（心跳缺席）收敛为断言失败而非用例超时。
+    let archived = false;
     server = startMockServer((frame, sock) => {
       clientFrames.push(frame as unknown as Record<string, unknown>);
-      if (frame.type !== "hello") return;
-      sock.send(welcomeFrame(0, "me"));
-      setTimeout(() => sock.send({ type: "serve_lease", name: "me", held: true }), 20);
-      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 60);
+      const archive = () => {
+        if (archived) return;
+        archived = true;
+        try {
+          sock.send({ type: "error", code: "archived", message: "done" });
+        } catch {
+          // 兜底定时器可能在用例收摊、socket 已关后触发——静默即可。
+        }
+      };
+      if (frame.type === "hello") {
+        sock.send(welcomeFrame(0, "me"));
+        setTimeout(() => sock.send({ type: "serve_lease", name: "me", held: true }), 20);
+        setTimeout(archive, 5000);
+        return;
+      }
+      if (frame.type === "heartbeat" && frame.agent_session !== undefined) archive();
     });
     const o = opts({
       server: server.url,
