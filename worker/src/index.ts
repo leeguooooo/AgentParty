@@ -2947,6 +2947,85 @@ app.get("/api/channels/:slug/agents", requireBearer, async (c) => {
 
 // #165 页面入口：human owner 可给自己铸造的 channel-scoped agent 设置全局昵称。
 // 授权按 token.owner + channel_scope 双重绑定，不因“是频道 owner”就能改别家公司 agent 的全局身份。
+// #605：人类删除自己的 agent——撤销该 channel-scoped agent token 并断开其在线连接。
+// 授权面：agent 的归属账号本人，或频道 moderator（与 kick remove 同级）。不可逆（token 无法
+// 找回，只能重新铸造），但 agent 的历史消息保留（身份留痕，audit 可查）。
+app.delete("/api/channels/:slug/agents/:name", requireBearer, async (c) => {
+  const identity = c.get("identity");
+  if (identity.role !== "human" || identity.account == null) {
+    return c.json(errorBody("forbidden", "deleting an agent requires a human account session"), 403);
+  }
+  const slug = c.req.param("slug");
+  const name = c.req.param("name");
+  if (!NAME_RE.test(name) || RESERVED_NAMES.includes(name)) {
+    return c.json(errorBody("bad_request", "valid agent name required"), 400);
+  }
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const row = await c.env.DB.prepare(
+    `SELECT owner
+       FROM tokens
+      WHERE channel_scope = ? AND name = ? AND role = 'agent'
+        AND revoked_at IS NULL AND parent_agent IS NULL`,
+  ).bind(slug, name).first<{ owner: string | null }>();
+  if (!row) {
+    return c.json(errorBody("not_found", "agent not found in this channel"), 404);
+  }
+  if (row.owner !== identity.account && !isChannelModerator(identity, channel)) {
+    return c.json(errorBody("forbidden", "only the agent's owner or a channel moderator can delete it"), 403);
+  }
+  const now = Date.now();
+  // child token（managed lane / spawn 子身份）随父一起吊销——父死子活会留下无人监管的可用身份。
+  // 撤销前先取 child 名单：child 以自己的身份连接，撤 token 只挡新连接，存活会话必须逐个踢。
+  const children = await c.env.DB.prepare(
+    "SELECT name FROM tokens WHERE channel_scope = ? AND parent_agent = ? AND revoked_at IS NULL",
+  ).bind(slug, name).all<{ name: string }>();
+  // 撤 token 与清成员同一批次原子提交（CodeRabbit #610）：分开写时前者成功后者失败，重试会被
+  // revoked_at IS NULL 的存在性检查挡成 404，成员行就永远清不掉了。
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE tokens SET revoked_at = ?
+        WHERE channel_scope = ? AND revoked_at IS NULL
+          AND (name = ? OR parent_agent = ?)`,
+    ).bind(now, slug, name, name),
+    c.env.DB.prepare(
+      "DELETE FROM channel_members WHERE channel_slug = ? AND account = ?",
+    ).bind(slug, name),
+  ]);
+  // 复用 kick 的 DO 通道，mode=remove：断开存活连接、清 presence、广播 offline——
+  // 删除是永久动作，presence 残留会让成员列表继续显示一个已不存在的身份。父与所有 child
+  // 会话都要断（token 已死只挡重连，不断已建立的 WS）。失败不回滚撤销（撤销才是事实源），
+  // 以 kicked 回给调用方；没踢掉的连接在下次重连时被死 token 挡死。
+  const kickTargets = [name, ...(children.results ?? []).map((child) => child.name)];
+  const kickResults = await Promise.all(
+    kickTargets.map((target) =>
+      fetchChannelDO(
+        c.env,
+        slug,
+        new Request("https://do/internal/kick", {
+          method: "POST",
+          body: JSON.stringify({ name: target, mode: "remove" }),
+          headers: { "content-type": "application/json", "x-partykit-room": slug },
+        }),
+      )
+        .then((res) => res.ok)
+        .catch(() => false),
+    ),
+  );
+  const kicked = kickResults.every(Boolean);
+  await bestEffortRecordManagementAudit(c.env.DB, {
+    actor: managementAuditActor(identity),
+    action: "token.revoke",
+    resource: `token/${name}`,
+    channel: slug,
+    timestamp: now,
+  });
+  return c.json({ deleted: true, name, kicked });
+});
+
 app.put("/api/channels/:slug/agents/:name/nickname", requireBearer, async (c) => {
   const identity = c.get("identity");
   const slug = c.req.param("slug");
