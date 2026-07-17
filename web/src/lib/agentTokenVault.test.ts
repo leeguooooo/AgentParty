@@ -59,6 +59,20 @@ describe("buildMinimalAgentCommand", () => {
     expect(command).toContain("Non-MCP harnesses: keep using the party CLI with the AGENTPARTY_CONFIG prefix");
   });
 
+  test("#597：inviter 是 account id（lark:on_xxx）时降级为不 @，--mention 不渲染非法值", () => {
+    const command = buildMinimalAgentCommand({
+      server: "https://agentparty.example.com",
+      slug: "bug-7744",
+      name: "helper",
+      token: "ap_fixture",
+      inviterName: "lark:on_22608d74bd2d7f39f6dc67d0da248fa5",
+      checkinMessage: "checking in",
+    });
+    expect(command).toContain('party send "checking in" --channel bug-7744');
+    expect(command).not.toContain("--mention lark:");
+    expect(command).not.toContain("lark:on_22608d74");
+  });
+
   test("mcpServerName：`.` 消毒成 `-`，且消毒必须单射——a.b 与 a-b 不得同名（否则同目录注册互相覆盖=串号）", () => {
     expect(mcpServerName("desktop-worker")).toBe("party-desktop-worker");
     // 有损清洗追加原名短哈希；无损名字保持干净、稳定。
