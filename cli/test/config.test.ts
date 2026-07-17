@@ -5,16 +5,23 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import {
   bindWorkspaceConfigPointer,
+  clearStuckForConfig,
   cwdStatePath,
   durableConfigPointerPath,
   globalConfigPath,
   loadCursor,
+  loadCursorForConfig,
+  loadRevCursorForConfig,
+  loadStuckForConfig,
   readConfig,
   readConfigWithSource,
   readState,
   refreshConfigInPlace,
   resolveChannel,
   saveCursor,
+  saveCursorForConfig,
+  saveRevCursorForConfig,
+  saveStuckForConfig,
   slugifyBasename,
   statePath,
   tokenFingerprint,
@@ -234,6 +241,40 @@ describe("workspace state", () => {
     // 绑定频道仍镜像到顶层，兼容旧读者
     expect(readState(cwd)?.cursor).toBe(9);
     expect(readState(cwd)?.channel).toBe("dev");
+  });
+
+  test("config-scoped cursor, revision, and debt stay isolated for the same channel", () => {
+    const channel = "shared";
+    const configA = join(home, "front.json");
+    const configB = join(home, "worker.json");
+    process.env.AGENTPARTY_CONFIG = join(home, "owner.json");
+
+    saveCursorForConfig(channel, 11, configA);
+    saveRevCursorForConfig(channel, 101, configA);
+    saveStuckForConfig(channel, { seq: 11, attempts: 1, delivery_id: "delivery-front" }, configA);
+
+    saveCursorForConfig(channel, 22, configB);
+    saveRevCursorForConfig(channel, 202, configB);
+    saveStuckForConfig(channel, { seq: 22, attempts: 2, delivery_id: "delivery-worker" }, configB);
+
+    expect(loadCursorForConfig(channel, configA)).toBe(11);
+    expect(loadRevCursorForConfig(channel, configA)).toBe(101);
+    expect(loadStuckForConfig(channel, configA)).toMatchObject({
+      seq: 11,
+      attempts: 1,
+      delivery_id: "delivery-front",
+    });
+    expect(loadCursorForConfig(channel, configB)).toBe(22);
+    expect(loadRevCursorForConfig(channel, configB)).toBe(202);
+    expect(loadStuckForConfig(channel, configB)).toMatchObject({
+      seq: 22,
+      attempts: 2,
+      delivery_id: "delivery-worker",
+    });
+
+    clearStuckForConfig(channel, configA);
+    expect(loadStuckForConfig(channel, configA)).toBeNull();
+    expect(loadStuckForConfig(channel, configB)?.delivery_id).toBe("delivery-worker");
   });
 
   test("resolveChannel prefers explicit over bound", () => {

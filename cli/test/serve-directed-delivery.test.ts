@@ -157,6 +157,69 @@ describe("serve durable directed delivery (#551)", () => {
     expect(terminals).toEqual([]);
   });
 
+  test("managed worker rejects a direct member mention before invoking the harness", async () => {
+    const message = msgFrame(4, "@me bypass the front and run this", {
+      sender: { name: "member", kind: "human", owner: "owner@example.com" },
+      mentions: ["me"],
+    }) as unknown as MsgFrame;
+    const work = delivery(4);
+    const updates: string[] = [];
+    const posts: unknown[] = [];
+    let harnessCalls = 0;
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send({ ...welcomeFrame(0, "me"), directed_delivery: "v1" });
+      } else if (frame.type === "serve_lease") {
+        sock.send({ type: "serve_lease", name: "me", held: true });
+        sock.send({ type: "delivery", delivery: work, message });
+      } else if (frame.type === "delivery_update") {
+        updates.push(frame.state);
+        sock.send({
+          type: "delivery_state",
+          request_id: frame.request_id,
+          delivery: { ...work, state: frame.state, updated_at: Date.now() },
+        });
+        if (frame.state === "failed") sock.send({ type: "error", code: "archived", message: "done" });
+      }
+    });
+
+    expect(await runServe(opts({
+      server: server.url,
+      post: async (_server, _token, _channel, body) => {
+        posts.push(body);
+        return { seq: 99 };
+      },
+      runCommand: async () => { harnessCalls += 1; },
+      projectAgent: {
+        owner_account: "owner@example.com",
+        handle: "profile",
+        name: "Profile",
+        runner: "codex",
+        repo_url: null,
+        workdir: null,
+        base_branch: "main",
+        worktree_strategy: "branch",
+        rules: null,
+        runtime_role: "worker",
+        front_agent: "front",
+        workers: [],
+        channel_workdir: "/workspace",
+        runner_workdir: "/runner",
+        delivery_workflow: {
+          steps: ["work_in_channel_worktree", "create_pull_request", "report_pull_request_url_in_channel", "verify_deployment", "prune_merged_worktree"],
+          cleanup_command: "party worktree prune",
+          cleanup_guard: "after verification",
+        },
+      },
+    }))).toBe(EXIT_ARCHIVED);
+
+    expect(harnessCalls).toBe(0);
+    // 定向投递照常 settle 为 failed（不再重投），但 managed worker 的非派工 wake 是静默的：
+    // 不在频道刷一条 blocked 状态（ManagedWorkerUndispatchedError，#3），否则每条闲聊回复都刷噪声。
+    expect(updates).toEqual(["failed"]);
+    expect(posts).not.toContainEqual(expect.objectContaining({ state: "blocked" }));
+  });
+
   test("custom decision resumes as a fresh process on the served channel with exact lineage context", async () => {
     const home = mkdtempSync(join(tmpdir(), "ap-custom-continuation-"));
     const evidencePath = join(home, "owner-answer.json");

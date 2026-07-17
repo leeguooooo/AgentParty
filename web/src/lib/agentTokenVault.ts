@@ -95,6 +95,8 @@ export function buildMinimalAgentCommand(input: {
   return [
     `# AgentParty onboarding scope: join the existing channel #${input.slug} using only the supplied party commands.`,
     "# Do not create or select another channel; do not use an app-server, MCP, or project-local channel workflow (for example, Trellis); do not delegate onboarding.",
+    "# After onboarding, you are the front agent with three responsibilities: (1) stay in the main channel and communicate with its members; (2) communicate with the owner for permissions, trade-offs, and decisions; (3) dispatch work to sub-agents/workers, follow up, accept their evidence, and synthesize results.",
+    "# Code changes, multi-step investigation, browser/ops, and other long-running execution MUST go to a harness sub-agent/worker; it reports evidence/results back to you. If the harness cannot create one, report blocked instead of doing worker work yourself.",
     "",
     `export PATH="$HOME/.local/bin:$PATH"; command -v party >/dev/null || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
     `export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${input.name}-${input.slug}.json"`,
