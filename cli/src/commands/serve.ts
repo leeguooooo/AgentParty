@@ -3,7 +3,15 @@
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
 import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type SendDecisionRequest, type ServerFrame } from "@agentparty/shared";
 import { createHash, randomUUID } from "node:crypto";
-import { downloadPartyUpgrade, maybeReexecUpgrade, serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
+import { downloadPartyUpgrade, isPartyBinaryPath, maybeReexecUpgrade, serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
+import {
+  clearManagedActions,
+  clearManagedExclusiveLocks,
+  MANAGED_CONFIG_FILE,
+  readManagedActions,
+  writeManagedManifest,
+  writeManagedWake,
+} from "../managed";
 import {
   appendFileSync,
   existsSync,
@@ -73,10 +81,26 @@ const WORKER_REMINDER =
   " 你是 execution worker，不是频道 front。只执行这条有界派工，不再派生其它 agent；完成必要的代码、调查、浏览器或运维工作，并返回证据、风险和验收结果。" +
   " 不要调用 party CLI，也不要直接面向人做最终承诺；supervisor 会把你的回报作为执行记录送回 front，由 front 汇总。";
 
+// #581 Phase 2：MCP 协议 lane 的提醒——动作面即工具面，模型文本输出只进日志。
+const MANAGED_FRONT_MCP_REMINDER =
+  " 你是 managed front agent，是三个方向的通信与调度控制面：对频道交流、对 owner 请求决定、对子 worker 派工/追问/验收；执行 worker 已由 supervisor 独立常驻。你没有执行面权限，也不要调用 party CLI。" +
+  " 一切频道动作都必须通过 party MCP 工具完成：对频道简短交流或 worker 回报汇总用 party_reply；" +
+  " 代码修改、多步排查、浏览器/运维或其它耗时工作用 party_worker_dispatch（instruction 必须自包含：完整任务、范围和验收标准）；需要返工/补证据用 party_worker_feedback；" +
+  " 需要 owner 做权限、取舍或批准用 party_decision_ask（返回 waiting_owner 就结束本轮，owner 的答复会带上下文再次唤醒你）。" +
+  " 你的自由文本输出不会进频道（只进日志）；没有任何工具调用的回合会被判定为未送达。";
+
+const WORKER_MCP_REMINDER =
+  " 你是 execution worker，不是频道 front。只执行这条有界派工，不再派生其它 agent；完成必要的代码、调查、浏览器或运维工作。" +
+  " 完成后必须调用 party MCP 工具 party_worker_report 回报证据、风险和验收结果（交付物用 attach 从频道工作区上传）；" +
+  " 你的自由文本输出不会进频道（只进日志），不调用 party_worker_report 的回合会被判定为未送达。不要调用 party CLI。";
+
 function protocolReminder(projectAgent: ProjectAgentRunContext | null): string {
-  if (projectAgent?.runtime_role === "worker") return COMMON_PROTOCOL_REMINDER + WORKER_REMINDER;
+  const mcp = projectAgent?.protocol === "mcp";
+  if (projectAgent?.runtime_role === "worker") {
+    return COMMON_PROTOCOL_REMINDER + (mcp ? WORKER_MCP_REMINDER : WORKER_REMINDER);
+  }
   if (projectAgent?.runtime_role === "front" && projectAgent.workers.length > 0) {
-    return COMMON_PROTOCOL_REMINDER + MANAGED_FRONT_REMINDER;
+    return COMMON_PROTOCOL_REMINDER + (mcp ? MANAGED_FRONT_MCP_REMINDER : MANAGED_FRONT_REMINDER);
   }
   return COMMON_PROTOCOL_REMINDER + ADVISORY_FRONT_REMINDER;
 }
@@ -514,6 +538,11 @@ export interface BuiltinRunnerOptions {
   outputSchema?: Record<string, unknown>;
   /** null disables host-file markers; a path confines them to that real workspace tree. */
   attachmentRoot?: string | null;
+  /**
+   * #581：managed MCP 协议 lane。runner 给 harness 注入 `party mcp --managed <stateDir>`
+   * 的角色裁剪工具面；每个 wake 前 supervisor 写 wake.json，回合结束读动作回执结算。
+   */
+  managedMcp?: { stateDir: string; ownerDecisionBinding: () => boolean };
   repo?: string;
   runProcess?: RunnerProcess;
   runGit?: RunnerProcess;
@@ -582,6 +611,8 @@ export interface ProjectAgentRunContext {
   rules: string | null;
   /** managed profile 的控制面/执行面角色；普通 serve 不设置。 */
   runtime_role: ServeExecutionRole;
+  /** #581：managed lane 协议。mcp=动作走角色裁剪的 MCP 工具；缺省按 text（旧文本信封）处理。 */
+  protocol?: "mcp" | "text";
   /** 本频道的可对话 front identity。 */
   front_agent: string;
   /** supervisor 已启动、可接 durable delivery 的 execution workers。 */
@@ -785,6 +816,26 @@ function isolatedModelPartyEnv(workdir: string, server: string): Record<string, 
   };
 }
 
+// #581：给 harness 注入的 party 可执行体。编译版直接用自身路径（不受 PATH 漂移影响）；
+// dev（bun test）下回落 PATH 上的 party。
+export function managedPartyBinary(): string {
+  return isPartyBinaryPath(process.execPath) ? process.execPath : "party";
+}
+
+// #581：claude --mcp-config 只认文件/JSON 串；写进 stateDir（0700）与其余 managed 握手文件同处。
+function writeManagedClaudeMcpConfig(stateDir: string): string {
+  const path = join(stateDir, "mcp-config.json");
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    path,
+    JSON.stringify({
+      mcpServers: { party: { command: managedPartyBinary(), args: ["mcp", "--managed", stateDir] } },
+    }) + "\n",
+    { mode: 0o600 },
+  );
+  return path;
+}
+
 function writeRunnerOutputSchema(workdir: string, schema: Record<string, unknown>): string {
   const path = join(workdir, "runner-output-schema.json");
   mkdirSync(workdir, { recursive: true, mode: 0o700 });
@@ -817,7 +868,7 @@ export function defaultRunnerWorkdir(channel: string, namespace: string): string
   return runnerWorkdir(join(stateRoot, "runners"), channel, namespace);
 }
 
-const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "replay-backlog", "profile", "profile-once", "profile-poll-interval", "runner-timeout-seconds"];
+const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "replay-backlog", "profile", "profile-once", "profile-poll-interval", "runner-timeout-seconds", "protocol"];
 const HELP = `usage: party serve [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all]
        party serve --profile <owner>/<handle>
 
@@ -836,6 +887,8 @@ Options:
   --runner-timeout-seconds N
                        terminate one stuck runner after N seconds (default: ${DEFAULT_RUNNER_TIMEOUT_MS / 1000})
   --profile ref        run the reusable project-agent profile as one resident daemon across all invites
+  --protocol mcp|text  managed lane protocol (default mcp: role-trimmed party MCP tools; text is a
+                       deprecated escape hatch kept for one minor cycle)
   --auto-upgrade       between wakes, if a newer party binary is on disk, re-exec it (issue #45)
   --replay-backlog     on attach, replay the offline backlog one wake per message
                        (default: skip the backlog, advance the cursor, and print
@@ -1730,11 +1783,20 @@ async function runHarness(
     const schemaArgs = opts.outputSchema === undefined
       ? []
       : ["--output-schema", writeRunnerOutputSchema(opts.workdir, opts.outputSchema)];
+    // #581：注入角色裁剪的 party MCP server。command/args 都是 TOML 字面量，路径经 JSON.stringify
+    // 得到合法 TOML basic string；server 自身从 stateDir 读清单/凭据，不需要 env。
+    const mcpArgs = opts.managedMcp === undefined
+      ? []
+      : [
+          "-c", `mcp_servers.party.command=${JSON.stringify(managedPartyBinary())}`,
+          "-c", `mcp_servers.party.args=["mcp","--managed",${JSON.stringify(opts.managedMcp.stateDir)}]`,
+        ];
     const flags = [
       "--skip-git-repo-check",
       "--sandbox",
       opts.sandbox ?? "workspace-write",
       ...schemaArgs,
+      ...mcpArgs,
       "-o",
       outFile,
     ];
@@ -1759,8 +1821,17 @@ async function runHarness(
   const permissionArgs = opts.sandbox === "read-only" ? ["--permission-mode", "plan"] : [];
   const schemaArgs = opts.outputSchema === undefined ? [] : ["--json-schema", JSON.stringify(opts.outputSchema)];
   const jsonOutputArgs = opts.outputSchema === undefined ? [] : ["--output-format", "json"];
+  // #581：--strict-mcp-config 只用注入的 server（隔离用户全局 MCP 配置）；
+  // --allowedTools mcp__party 放行整个 party server 的工具，headless 下不弹权限。
+  const mcpArgs = opts.managedMcp === undefined
+    ? []
+    : [
+        "--mcp-config", writeManagedClaudeMcpConfig(opts.managedMcp.stateDir),
+        "--strict-mcp-config",
+        "--allowedTools", "mcp__party",
+      ];
   const args = sid
-    ? ["claude", "-p", "--disallowed-tools", "AskUserQuestion", ...permissionArgs, ...schemaArgs, ...jsonOutputArgs, "--resume", sid, prompt]
+    ? ["claude", "-p", "--disallowed-tools", "AskUserQuestion", ...permissionArgs, ...schemaArgs, ...jsonOutputArgs, ...mcpArgs, "--resume", sid, prompt]
     : [
         "claude",
         "-p",
@@ -1768,6 +1839,7 @@ async function runHarness(
         "AskUserQuestion",
         ...permissionArgs,
         ...schemaArgs,
+        ...mcpArgs,
         "--session-id",
         coldSessionId!,
         "--output-format",
@@ -2223,6 +2295,28 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
       AP_CONTINUATION_REF: ctx.delivery?.continuation_ref ?? "",
       AP_DELIVERY_ATTEMPT: ctx.delivery ? String(ctx.delivery.attempt) : "",
     };
+    // #581 managed MCP：每个 wake 前覆写 wake.json——工具 handler 即读即用，天然跟上当前 wake；
+    // owner 决策绑定取 welcome 声明的当前值（prepare 必在 welcome 之后）。
+    if (opts.managedMcp !== undefined) {
+      // 消息编辑会复用原 seq 但产生新 delivery：新回合开工前清同 seq 的历史回执，
+      // 旧动作绝不能替新回合的零动作充数（#592 评审）。
+      clearManagedActions(opts.managedMcp.stateDir, frame.seq);
+      clearManagedExclusiveLocks(opts.managedMcp.stateDir, frame.seq);
+      writeManagedWake(opts.managedMcp.stateDir, {
+        version: 1,
+        seq: frame.seq,
+        frame,
+        delivery: ctx.delivery
+          ? {
+              id: ctx.delivery.id,
+              cause: ctx.delivery.cause,
+              work_id: ctx.delivery.work_id,
+              continuation_ref: ctx.delivery.continuation_ref,
+            }
+          : null,
+        owner_decision_binding: opts.managedMcp.ownerDecisionBinding(),
+      });
+    }
     // Clone/pull and continuation validation are model-free and can be slow. They must finish while
     // the durable delivery is still only `claimed`; a crash here is safe for the Worker to requeue.
     const repoCwd = await ensureRepo(opts, env, ctx.signal);
@@ -2340,6 +2434,23 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
           workdir: opts.workdir,
         });
 
+        // #581 managed MCP：动作已由工具即时落频道，文本输出只进日志。这里只验收「本回合
+        // 至少发生一个频道动作」——零动作=未送达（WakeBlockedError，不推游标不吞 @）。
+        // auto-decision 续跑循环也随之退役：unattended 决策在工具返回里就地续行，同一回合完成。
+        if (opts.managedMcp !== undefined) {
+          const actions = readManagedActions(opts.managedMcp.stateDir, frame.seq);
+          appendRunnerLog(
+            opts.workdir,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(finalSid)} duration_ms=${now - started} exit=${exitCode ?? 0} mcp_actions=${actions.length} text_bytes=${Buffer.byteLength(run.text, "utf8")}`,
+          );
+          if (actions.length === 0) {
+            throw new WakeBlockedError(
+              "managed mcp runner made no channel action: every channel effect must be a party MCP tool call (party_reply / party_worker_dispatch / party_worker_feedback / party_decision_ask / party_worker_report); free-text output is logged only",
+              false,
+            );
+          }
+          break;
+        }
         const marker = oldSid ? null : `[session start: ${shortSid(finalSid)}]`;
         let outcome: RunnerDeliveryOutcome;
         try {
@@ -2545,6 +2656,11 @@ export function profileChildServeOptions(base: {
 }
 
 export interface ProfileServeOptions {
+  /**
+   * #581：managed lane 协议。mcp（默认）=角色裁剪的 MCP 工具面；text=旧文本信封（deprecated，
+   * 保留一个 minor 周期作为逃生舱）。codex-sdk runner 本期尚无 MCP 注入面，强制走 text。
+   */
+  protocol?: "mcp" | "text";
   /** 由 --replay-backlog 决定；透传给每个频道的子 serve。 */
   skipBacklog?: boolean;
   server: string;
@@ -2574,9 +2690,10 @@ export interface ProfileServeOptions {
 function profileContext(
   profile: ProjectAgentProfile,
   prepared: PreparedProfileWorkspace,
-  runtime: { role: ServeExecutionRole; frontAgent: string; workers: readonly string[] },
+  runtime: { role: ServeExecutionRole; frontAgent: string; workers: readonly string[]; protocol?: "mcp" | "text" },
 ): ProjectAgentRunContext {
   return {
+    ...(runtime.protocol === undefined ? {} : { protocol: runtime.protocol }),
     owner_account: profile.owner_account,
     handle: profile.handle,
     name: profile.name,
@@ -2657,6 +2774,8 @@ function boundedActionText(value: unknown, field: string, maxBytes = BODY_LIMIT 
   return text;
 }
 
+// DEPRECATED（#581）：text 信封协议的解析器，仅 --protocol text 逃生舱使用，
+// 保留一个 minor 周期后与 MANAGED_FRONT_OUTPUT_SCHEMA / formatWorkerEnvelope / 前缀比对一并删除。
 export function parseManagedFrontAction(text: string): ManagedFrontAction {
   let raw: unknown;
   try {
@@ -2785,13 +2904,16 @@ function formatWorkerEnvelope(
   return `${verb} ${worker}${lineage}：${instruction}`;
 }
 
-function assertManagedWorkerWake(
+export function assertManagedWorkerWake(
   frame: MsgFrame,
   delivery: DirectedDelivery | null,
   projectAgent: ProjectAgentRunContext | null,
   self: string,
 ): void {
   if (projectAgent?.runtime_role !== "worker") return;
+  // #581 mcp 协议：验收纯结构化。front 的 party_reply 没有 mentions 能力，任何 front @worker 的
+  // 消息在结构上只能出自 dispatch/feedback 工具——文本前缀比对（#578 finding 3 的根源）不再参与。
+  const structuralOnly = projectAgent.protocol === "mcp";
   const dispatchPrefix = `${WORKER_DISPATCH_VERB} ${self}：`;
   const feedbackPrefix = `${WORKER_FEEDBACK_VERB} ${self}`;
   const feedbackSeparator = frame.body.indexOf("：", feedbackPrefix.length);
@@ -2812,7 +2934,7 @@ function assertManagedWorkerWake(
     frame.sender.owner !== projectAgent.owner_account ||
     frame.reply_to === null ||
     !frame.mentions.includes(self) ||
-    (!routedDispatch && !routedFeedback)
+    (!structuralOnly && !routedDispatch && !routedFeedback)
   ) {
     throw new ManagedWorkerUndispatchedError(
       `managed worker rejected unverified wake: expected dispatch/feedback from ${projectAgent.front_agent} owned by ${projectAgent.owner_account}`,
@@ -3104,11 +3226,13 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       role: "front",
       frontAgent: front.name,
       workers: [worker.name],
+      protocol: profile.runner === "codex-sdk" ? "text" : opts.protocol ?? "mcp",
     });
     const workerContext = profileContext(profile, workerPrepared, {
       role: "worker",
       frontAgent: front.name,
       workers: [],
+      protocol: profile.runner === "codex-sdk" ? "text" : opts.protocol ?? "mcp",
     });
     // Managed child tokens are supervisor capabilities and stay memory-only.  Cursor/debt helpers
     // need only a stable namespace key; writing a real AgentParty config would let the model find
@@ -3126,6 +3250,16 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       ? (ms: number) => delayWithAbort(ms, channelSignal)
       : (ms: number) => awaitWithAbort(injectedSleep(ms), channelSignal);
 
+    // #581：协议分流。codex-sdk 本期没有 MCP 注入面，强制 text；builtin 默认 mcp。
+    const requestedProtocol = opts.protocol ?? "mcp";
+    const laneProtocol: "mcp" | "text" = profile.runner === "codex-sdk" ? "text" : requestedProtocol;
+    if (laneProtocol === "text") {
+      out(
+        profile.runner === "codex-sdk" && requestedProtocol === "mcp"
+          ? `profile #${channel}: codex-sdk runner has no MCP injection surface yet; falling back to the deprecated text envelope protocol`
+          : `profile #${channel}: text envelope protocol is DEPRECATED and will be removed after one minor cycle; drop --protocol text to use MCP tools`,
+      );
+    }
     const buildLane = (
       role: ServeExecutionRole,
       principal: ProjectAgentChannelRuntime,
@@ -3135,9 +3269,34 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
     ): ServeOptions => {
       // 升级迁移只对 front lane（频道对话的继承者）做一次：迁旧游标/欠账 + 清旧自由文本会话（#7/#10）。
       if (role === "front") migrateLegacyProfileFrontLane(channel, stateKey, prepared.runnerWorkdir);
+      // #581 managed MCP：lane 清单 + child token config 落到 runnerWorkdir/mcp（0600）。
+      // 注意这是 #578「child token 纯内存」边界的有意放宽（issue #581 拍板）：MCP server 进程
+      // 要持有身份就必须能读到它；模型 env 仍是 denied-home，token 不进模型环境。
+      const mcpStateDir = join(prepared.runnerWorkdir, "mcp");
+      if (laneProtocol === "mcp") {
+        writeManagedManifest(mcpStateDir, {
+          version: 1,
+          server: opts.server,
+          channel,
+          role,
+          self: principal.name,
+          front: front.name,
+          worker: worker.name,
+          owner_account: profile.owner_account,
+          config: join(mcpStateDir, MANAGED_CONFIG_FILE),
+          attachment_root: role === "worker" ? prepared.channelWorkdir : null,
+        });
+        writeFileSync(
+          join(mcpStateDir, MANAGED_CONFIG_FILE),
+          JSON.stringify({ server: opts.server, token: principal.token }) + "\n",
+          { mode: 0o600 },
+        );
+      }
       // 每个 welcome 刷新一次；owner 决策路由在 wake（必在 welcome 之后）里读它决定能否发决策。
       let serverOwnerDecisionBinding = false;
-      const resultRoute = role === "front"
+      const resultRoute = laneProtocol === "mcp"
+        ? undefined
+        : role === "front"
         ? createManagedFrontResultRoute({
             server: opts.server,
             token: principal.token,
@@ -3229,8 +3388,16 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
               isolateModelPartyAccess: true,
               sandbox: role === "front" ? "read-only" : "workspace-write",
               resultRoute,
-              outputSchema: role === "front" ? MANAGED_FRONT_OUTPUT_SCHEMA : undefined,
+              outputSchema: laneProtocol === "mcp" ? undefined : role === "front" ? MANAGED_FRONT_OUTPUT_SCHEMA : undefined,
               attachmentRoot: role === "front" ? null : prepared.channelWorkdir,
+              ...(laneProtocol === "mcp"
+                ? {
+                    managedMcp: {
+                      stateDir: mcpStateDir,
+                      ownerDecisionBinding: () => serverOwnerDecisionBinding,
+                    },
+                  }
+                : {}),
             }
           : undefined,
         sdkRunner: profile.runner === "codex-sdk"
@@ -4609,7 +4776,7 @@ export async function run(argv: string[]): Promise<number> {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["channel", "on-mention", "runner", "workdir", "repo", "profile", "profile-poll-interval", "runner-timeout-seconds"]);
+  const flagError = valueFlagError(flags, ["channel", "on-mention", "runner", "workdir", "repo", "profile", "profile-poll-interval", "runner-timeout-seconds", "protocol"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -4651,6 +4818,12 @@ export async function run(argv: string[]): Promise<number> {
       console.error("--profile-poll-interval must be an integer >= 500 milliseconds");
       return 1;
     }
+    // #581：managed lane 协议开关。默认 mcp；text 是一个 minor 周期的逃生舱（deprecated）。
+    const protocolFlag = str(flags.protocol);
+    if (protocolFlag !== undefined && protocolFlag !== "mcp" && protocolFlag !== "text") {
+      console.error("--protocol must be mcp or text");
+      return 1;
+    }
     const autoDownloadUpgrade = flags["auto-upgrade"] === true;
     const availableUpgrade = await resolveAvailableUpgrade(account.session.server, null, {
       autoDownload: autoDownloadUpgrade,
@@ -4672,6 +4845,7 @@ export async function run(argv: string[]): Promise<number> {
       once: flags["profile-once"] === true,
       pollIntervalMs,
       runnerTimeoutMs,
+      ...(protocolFlag === undefined ? {} : { protocol: protocolFlag }),
     });
   }
   if ((cmd ? 1 : 0) + (runner ? 1 : 0) !== 1) {
