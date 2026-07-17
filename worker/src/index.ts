@@ -7299,6 +7299,36 @@ async function isActiveAgentReceptionTarget(db: D1Database, slug: string, name: 
 // 人为暂停/恢复某 agent 的接待（issue #180/#439）。房主 / legacy ap_ 保持原权限；频道 host agent
 // 也可在本频道止损，但只能控制有效且未被 scope 到其他频道的 agent token，不能借此管理人类。
 // 暂停后该 agent 被 @ 也不唤醒（webhook 不投、serve/watch 自我抑制），消息仍进历史；可带 resume_at 定时恢复。
+// 交互 lane 活动自报（issue #615）：不跑 serve 的 Claude Code session 由 hook 经此端点直报
+// 「正在干什么」。只准 agent 自报（name 必须等于 token 身份），presence-only、不落 history。
+app.post("/api/channels/:slug/presence/:name/activity", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  const name = c.req.param("name");
+  if (!name || name.length > 256) {
+    return c.json(errorBody("bad_request", "valid name required"), 400);
+  }
+  if (identity.kind !== "agent" || identity.name !== name) {
+    return c.json(errorBody("forbidden", "an agent may only report its own activity"), 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as { activity?: unknown } | null;
+  if (body?.activity === undefined) {
+    return c.json(errorBody("bad_request", "activity required"), 400);
+  }
+  const res = await fetchMutableChannelDO(
+    c.env,
+    slug,
+    new Request(`https://do/internal/presence/${encodeURIComponent(name)}/activity`, {
+      method: "POST",
+      body: JSON.stringify({ activity: body.activity }),
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+  return mutableFetchResponse(res);
+});
+
 app.post("/api/channels/:slug/presence/:name/pause", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);

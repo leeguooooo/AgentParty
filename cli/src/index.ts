@@ -41,7 +41,7 @@ commands:
   resume    <name> [--channel C]                           resume a paused agent's reception (moderator)
   wake-budget <name> [--limit N [--window D]|--off]        cap an agent's wakes per window; over-budget @ withheld (#108)
   health    [--json] [--channel C] [--stale-after ms]      local serve WS health probe (pid alive != ws alive, #254)
-  hook      report                                          Claude Code hook adapter: record model activity for presence (#602)
+  hook      install|uninstall|status [--user] | report      Claude Code hooks: report model activity into presence; install makes any session visible without serve (#602/#615)
   upgrade   [--version X.Y.Z] [--check]                    download release binary, verify sha256, atomically replace party
   charter   [slug] [--json] | set [slug] -f file.md|-m text|- | template
   history   [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]

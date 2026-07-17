@@ -37,6 +37,7 @@ import {
   DELIVERY_CONTINUATION_REF_LIMIT,
   DELIVERY_ORIGIN_CHANNEL_LIMIT,
   DELIVERY_WORK_ID_LIMIT,
+  AGENT_ACTIVITY_TTL_MS,
   parseAgentActivity,
   parseRunnerHealth,
   type AgentActivity,
@@ -6129,6 +6130,41 @@ export class ChannelDO extends Server<Env> {
       }
       return Response.json({ ok: true, owners: [...owners] });
     }
+    // 交互 lane 活动直报（issue #615）：不跑 serve 的 Claude Code session 经 REST 自报活动。
+    // 授权在 worker 侧已判（agent 只准自报），do 只落状态。presence 无行则无从附着，静默吞。
+    const activityMatch = url.pathname.match(/^\/internal\/presence\/([^/]+)\/activity$/);
+    if (activityMatch && request.method === "POST") {
+      const name = decodeURIComponent(activityMatch[1] ?? "");
+      if (!name) {
+        return Response.json({ error: { code: "bad_request", message: "name required" } }, { status: 400 });
+      }
+      const body = (await request.json().catch(() => null)) as { activity?: unknown } | null;
+      const activity = parseAgentActivity(body?.activity);
+      if (activity === undefined) {
+        return Response.json({ error: { code: "bad_request", message: "valid activity required" } }, { status: 400 });
+      }
+      // 兜底节流（客户端已 15s 节流，这里防绕过）：3s 内的重复上报直接吞，不写不播。
+      const prior = this.ctx.storage.sql
+        .exec("SELECT activity_json FROM presence WHERE name = ? AND activity_json IS NOT NULL LIMIT 1", name)
+        .toArray()[0];
+      if (prior !== undefined) {
+        try {
+          const previous = parseAgentActivity(JSON.parse(String(prior.activity_json)) as unknown);
+          if (previous !== undefined && activity.ts - previous.ts < 3_000 && previous.phase === activity.phase) {
+            return Response.json({ ok: true, throttled: true });
+          }
+        } catch {
+          // 旧值坏了就当没有，照常覆盖
+        }
+      }
+      const updated = this.ctx.storage.sql.exec(
+        "UPDATE presence SET activity_json = ? WHERE name = ?",
+        JSON.stringify(activity),
+        name,
+      );
+      if (updated.rowsWritten > 0) this.broadcastPresenceFor(name);
+      return Response.json({ ok: true, attached: updated.rowsWritten > 0 });
+    }
     // 人为暂停/恢复接待（issue #180）。授权在 worker 侧已判（moderator），do 只落状态。
     const pauseMatch = url.pathname.match(/^\/internal\/presence\/([^/]+)\/(pause|resume)$/);
     if (pauseMatch && request.method === "POST") {
@@ -9516,18 +9552,21 @@ export class ChannelDO extends Server<Env> {
             current_task: Number(r.current_task),
             ...(r.task_started_at === null || r.task_started_at === undefined ? {} : { task_started_at: Number(r.task_started_at) }),
             ...(r.heartbeat_at === null || r.heartbeat_at === undefined ? {} : { heartbeat_at: Number(r.heartbeat_at) }),
-            // 模型 session 活动（#602）：与心跳同生共死，只在有活跃任务时带出。
-            ...(() => {
-              if (typeof r.activity_json !== "string" || r.activity_json === "") return {};
-              try {
-                const activity = parseAgentActivity(JSON.parse(r.activity_json) as unknown);
-                return activity === undefined ? {} : { activity };
-              } catch {
-                return {};
-              }
-            })(),
           }
         : {}),
+      // 模型 session 活动（#602/#615）：不再绑死 current_task——交互 lane（不跑 serve）经 REST 直报
+      // 的活动没有任务上下文。改按 TTL 判新鲜：serve lane 任务结束仍主动清（activity_json=NULL），
+      // 交互 lane 靠 TTL 自然过期，不留僵活动。offline 一律不带。
+      ...(() => {
+        if (state === "offline" || typeof r.activity_json !== "string" || r.activity_json === "") return {};
+        try {
+          const activity = parseAgentActivity(JSON.parse(r.activity_json) as unknown);
+          if (activity === undefined || Date.now() - activity.ts > AGENT_ACTIVITY_TTL_MS) return {};
+          return { activity };
+        } catch {
+          return {};
+        }
+      })(),
       // runner 健康（#603）：独立于 current_task——空闲期也要能看见「干不动」；offline 不带。
       ...(() => {
         if (state === "offline" || typeof r.runner_health_json !== "string" || r.runner_health_json === "") return {};
