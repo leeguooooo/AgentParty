@@ -460,35 +460,71 @@ pub(crate) async fn desktop_duty_adopt(
             let _ = fs::remove_file(&tmp);
             return Err(format!("adopted config failed validation: {error}"));
         }
-        // rename 会覆盖同名旧配置：先留备份，后续任何失败都恢复原状（无旧文件则删除新文件）。
-        let backup = fs::read(&config_path).ok();
+        // rename 会覆盖同名旧配置：先留备份。备份读取失败 ≠ 无旧文件——读不出来就中止，
+        // 绝不冒着丢原配置的风险继续（CodeRabbit #621 复审）。
+        let backup = match fs::read(&config_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                let _ = fs::remove_file(&tmp);
+                return Err(format!("cannot back up the existing agent config: {error}"));
+            }
+        };
         if let Err(error) = fs::rename(&tmp, &config_path) {
             let _ = fs::remove_file(&tmp);
             return Err(format!("cannot install agent config: {error}"));
         }
+        // 恢复失败必须传播——静默吞掉等于用户在不知情下丢了原身份文件。
         let restore = |reason: String| -> String {
-            match &backup {
-                Some(bytes) => {
-                    let _ = fs::write(&config_path, bytes);
+            let outcome: Result<(), std::io::Error> = match &backup {
+                Some(bytes) => fs::write(&config_path, bytes).map(|()| {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
                         let _ = fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600));
                     }
-                }
-                None => {
-                    let _ = fs::remove_file(&config_path);
-                }
+                }),
+                None => match fs::remove_file(&config_path) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                    _ => Ok(()),
+                },
+            };
+            match outcome {
+                Ok(()) => reason,
+                Err(error) => format!("{reason}; ALSO failed to restore the previous agent config: {error}"),
             }
-            reason
         };
         let config_id = match crate::agent::config_id(&config_path) {
             Ok(value) => value,
             Err(error) => return Err(restore(error)),
         };
+        // launchd 面同样要可回滚：记录 persist 之前该 label 的 plist 原状（不存在 / 原内容）。
+        let label = duty_label(&format!("{config_id}:{channel}"));
+        let plist_path = duty_plist_path(&home, &label);
+        let old_plist = match fs::read(&plist_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(restore(format!("cannot back up the existing duty plist: {error}"))),
+        };
         match duty_persist_inner(&app, &agent_state, &config_id, &channel, &runner, None, None).await {
             Ok(entry) => Ok(entry),
-            Err(error) => Err(restore(error)),
+            Err(error) => {
+                // 卸掉可能已装上的新任务，plist 恢复原状（原有旧值守则连内容带加载态一起还原）。
+                let domain = gui_domain();
+                let _ = launchctl(&["bootout", &format!("{domain}/{label}")]);
+                match &old_plist {
+                    Some(bytes) => {
+                        let plist_restored = fs::write(&plist_path, bytes).is_ok();
+                        if plist_restored {
+                            let _ = launchctl(&["bootstrap", &domain, &plist_path.to_string_lossy()]);
+                        }
+                    }
+                    None => {
+                        let _ = fs::remove_file(&plist_path);
+                    }
+                }
+                Err(restore(error))
+            }
         }
     }
 }

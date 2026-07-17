@@ -546,11 +546,12 @@ impl AgentManager {
     pub(crate) async fn stop_instance_for_duty(&self, instance_id: &str) -> Result<(), String> {
         match self.stop_instance_key(instance_id).await {
             Ok(runtime) => {
-                let kill_failed = runtime
-                    .last_error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("failed to stop party sidecar"));
-                if is_active_phase(runtime.phase) || kill_failed {
+                // 两条已知的「停失败」文案都算失败：kill 报错 与 停止超时（进程可能仍活着）。
+                let stop_failed = runtime.last_error.as_deref().is_some_and(|error| {
+                    error.contains("failed to stop party sidecar")
+                        || error.contains("did not exit within the stop timeout")
+                });
+                if is_active_phase(runtime.phase) || stop_failed {
                     return Err(
                         "could not stop the in-app instance; refusing to install a resident duty alongside it"
                             .to_string(),
