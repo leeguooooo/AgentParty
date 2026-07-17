@@ -11,7 +11,7 @@ import {
   ValidationError,
 } from "../lib/api";
 import { copyText, saveAgentToken } from "../lib/agentTokenVault";
-import { buildFullJoinPack } from "../lib/joinPack";
+import { buildJoinPack, type JoinPackMode } from "../lib/joinPack";
 import { apiOrigin } from "../lib/base";
 import { useT } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
@@ -53,19 +53,23 @@ type Phase =
   | { kind: "idle" }
   | { kind: "compose" } // 起名中
   | { kind: "loading" }
-  | { kind: "done"; name: string; command: string }
+  | { kind: "done"; name: string; command: string; mode: JoinPackMode }
   | { kind: "error"; message: string };
 
 export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accountKey, active, onActiveChange }: Props) {
   const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [name, setName] = useState("");
+  // #612：无人值守值守预设——unattended 生成「装 CLI → init → party serve --runner claude」的
+  // 运维脚本，interactive 仍是贴给 agent harness 的完整接入包。
+  const [mode, setMode] = useState<JoinPackMode>("interactive");
   const [nameErr, setNameErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const open = useCallback(() => {
     onActiveChange?.(true);
     setName(suggestName(namePrefix, slug));
+    setMode("interactive");
     setNameErr(null);
     setPhase({ kind: "compose" });
   }, [namePrefix, onActiveChange, slug]);
@@ -103,7 +107,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
       // http://tauri.localhost / dev 的 127.0.0.1:5173，agent 拿去 `party init --server` 会因非 http(s)
       // 报错或连不上。优先用打包注入的 apiBase(VITE_API_BASE=真后端)，仅同源 web 部署(apiBase 为空)回退 location.origin。
       const server = apiOrigin();
-      const command = buildFullJoinPack({
+      const command = buildJoinPack(mode, {
         slug,
         agentName: agent.name,
         agentToken: agent.token,
@@ -118,10 +122,11 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         name: agent.name,
         token: agent.token,
         command,
+        mode,
         savedAt: Date.now(),
       });
       setCopied(false);
-      setPhase({ kind: "done", name: agent.name, command });
+      setPhase({ kind: "done", name: agent.name, command, mode });
     } catch (err) {
       // 同名占用 → 停在起名步，让用户换个有意义的名字（不静默塞随机后缀）
       if (err instanceof ConflictError) {
@@ -139,7 +144,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
               : t("AgentJoin.errGeneric");
       setPhase({ kind: "error", message });
     }
-  }, [accountKey, charter, inviterName, name, slug, token, t]);
+  }, [accountKey, charter, inviterName, mode, name, slug, token, t]);
 
   const onCopy = useCallback(async () => {
     if (phase.kind !== "done") return;
@@ -201,6 +206,28 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
             )}
             <p className="agent-join-hint t-mono">{t("AgentJoin.nameHint")}</p>
 
+            <fieldset className="agent-join-mode">
+              <legend className="agent-join-namelabel t-mono">{t("AgentJoin.modeLabel")}</legend>
+              {(["interactive", "unattended"] as const).map((value) => (
+                <label key={value} className="agent-join-mode-option">
+                  <input
+                    type="radio"
+                    name="agent-join-mode"
+                    value={value}
+                    checked={mode === value}
+                    onChange={() => setMode(value)}
+                    disabled={phase.kind === "loading"}
+                  />
+                  <span className="t-mono">
+                    {t(value === "interactive" ? "AgentJoin.modeInteractive" : "AgentJoin.modeUnattended")}
+                  </span>
+                  <span className="agent-join-mode-desc">
+                    {t(value === "interactive" ? "AgentJoin.modeInteractiveDesc" : "AgentJoin.modeUnattendedDesc")}
+                  </span>
+                </label>
+              ))}
+            </fieldset>
+
             <div className="agent-join-actions">
               <button
                 type="button"
@@ -228,7 +255,9 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
               </button>
             </header>
 
-            <p className="agent-join-lead">{t("AgentJoin.doneLead")}</p>
+            <p className="agent-join-lead">
+              {t(phase.mode === "unattended" ? "AgentJoin.doneLeadUnattended" : "AgentJoin.doneLead")}
+            </p>
 
             <div className="agent-join-cmd">
               <pre className="t-mono agent-join-cmd-text">{phase.command}</pre>

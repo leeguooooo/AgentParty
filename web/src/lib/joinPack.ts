@@ -120,3 +120,53 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     t("AgentJoin.cmd.etiquette"),
   ].join("\n");
 }
+
+// 无人值守值守包（#612 公司大群）：serve --runner claude 的一键预设。0.2.127 起 serve 的
+// builtin runner 默认走角色裁剪的 party MCP 工具协议（#581 Phase 2），锁更低版本会拿到
+// 文本信封的旧行为。
+export const MIN_CLI_UNATTENDED = "0.2.127";
+
+export type JoinPackMode = "interactive" | "unattended";
+
+export function buildJoinPack(mode: JoinPackMode, input: FullJoinPackInput): string {
+  return mode === "unattended" ? buildUnattendedJoinPack(input) : buildFullJoinPack(input);
+}
+
+// 无人值守包给「人」跑而不是贴给 agent：装 CLI → 写身份配置 → party serve --runner claude
+// 常驻，被 @ 即自动唤醒一次 claude -p（headless）处理。与完整接入包同源共享 charter 快照
+// 注释化（管理员可控文本绝不落成可执行行）与版本闸三段比较。
+export function buildUnattendedJoinPack(input: FullJoinPackInput): string {
+  const { slug, agentName, agentToken, server, charter, t } = input;
+  const inviterName = AGENT_NAME_RE.test(input.inviterName) ? input.inviterName : null;
+  return [
+    t("AgentJoin.ua.header", { slug }),
+    t("AgentJoin.ua.intro1"),
+    t("AgentJoin.ua.intro2"),
+    ``,
+    ...charterSnapshotLines(charter, t),
+    t("AgentJoin.ua.step1", { min: MIN_CLI_UNATTENDED }),
+    `export PATH="\$HOME/.local/bin:\$PATH"`,
+    VERSION_GE_SNIPPET,
+    `need=${MIN_CLI_UNATTENDED}; have="$(party --version 2>/dev/null || echo 0)"; version_ge "$have" "$need" || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
+    `command -v party >/dev/null || alias party="\$HOME/.local/bin/party"`,
+    ``,
+    t("AgentJoin.ua.step2"),
+    `mkdir -p "$HOME/.agentparty/agents"`,
+    `export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.json"`,
+    `party init --server ${server} --token ${agentToken} --channel ${slug}`,
+    inviterName === null
+      ? `party send "${t("AgentJoin.ua.checkinMessage", { agentName })}" --channel ${slug}`
+      : `party send "${t("AgentJoin.ua.checkinMessage", { agentName })}" --channel ${slug} --mention ${inviterName}`,
+    ``,
+    t("AgentJoin.ua.step3"),
+    t("AgentJoin.ua.step3a"),
+    t("AgentJoin.ua.step3b"),
+    t("AgentJoin.ua.step3c", { agentName }),
+    `party serve --channel ${slug} --runner claude`,
+    ``,
+    t("AgentJoin.ua.note1"),
+    t("AgentJoin.ua.note2"),
+    t("AgentJoin.ua.note3"),
+    t("AgentJoin.ua.note4"),
+  ].join("\n");
+}
