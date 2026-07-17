@@ -32,6 +32,7 @@ mock.module("../lib/api", () => ({
   inviteProjectAgent: async () => {},
   listChannelAgents: async () => agentsFixture,
   listProjectAgentProfiles: async () => [],
+  deleteChannelAgent: async () => {},
   rotateChannelAgent: async (_token: string, _slug: string, name: string) => ({ name, token: "ap_rotated" }),
   setChannelAgentNickname: async (_token: string, _slug: string, name: string, nickname: string) => ({ name, nickname }),
 }));
