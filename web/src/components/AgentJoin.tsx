@@ -124,11 +124,14 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         ``,
         ...charterSnapshotLines(charter, t),
         t("AgentJoin.cmd.step1"),
+        // PATH 必须先于版本检查：install.sh 装到 ~/.local/bin，若检查时查的是系统 PATH 里
+        // 另一个够新的 party、后续命令却用回 ~/.local/bin 的旧版，版本闸就被绕过了。
+        `export PATH="\$HOME/.local/bin:\$PATH"`,
         VERSION_GE_SNIPPET,
         `need=${MIN_CLI}; have="$(party --version 2>/dev/null || echo 0)"; version_ge "$have" "$need" || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
         t("AgentJoin.cmd.pathNote1"),
         t("AgentJoin.cmd.pathNote2"),
-        `export PATH="\$HOME/.local/bin:\$PATH"; command -v party >/dev/null || alias party="\$HOME/.local/bin/party"`,
+        `command -v party >/dev/null || alias party="\$HOME/.local/bin/party"`,
         ``,
         t("AgentJoin.cmd.step2"),
         `mkdir -p "$HOME/.agentparty/agents"`,
