@@ -2751,8 +2751,10 @@ export function migrateLegacyProfileFrontLane(channel: string, frontStateKey: st
     // 反复强调的静默丢失）。故哨兵只在全部成功后写，不放进 finally。
     if (legacyRev > 0) saveRevCursorForConfig(channel, legacyRev, frontStateKey);
     if (legacyStuck !== null) saveStuckForConfig(channel, legacyStuck, frontStateKey);
-    try { rmSync(join(frontRunnerWorkdir, RUNNER_SESSION_FILE), { force: true }); } catch { /* 无所谓 */ }
-    try { rmSync(join(frontRunnerWorkdir, RUNNER_CONTINUATIONS_DIR), { recursive: true, force: true }); } catch { /* 无所谓 */ }
+    // rmSync 失败不吞：force:true 已把「文件不存在」当成功，剩下的权限/IO 错误必须冒出去，让哨兵
+    // 不落、下次挂载重试整段。吞掉的话会话没清成却照样落哨兵，#10 的会话清理被静默架空。
+    rmSync(join(frontRunnerWorkdir, RUNNER_SESSION_FILE), { force: true });
+    rmSync(join(frontRunnerWorkdir, RUNNER_CONTINUATIONS_DIR), { recursive: true, force: true });
     if (legacyCursor > 0) saveCursorForConfig(channel, legacyCursor, frontStateKey);
   }
   // 走到这里说明迁移已整段成功（或本就无遗产）：落哨兵，后续挂载不再重试。
