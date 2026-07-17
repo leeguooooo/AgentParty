@@ -7313,6 +7313,12 @@ app.post("/api/channels/:slug/presence/:name/activity", async (c) => {
   if (identity.kind !== "agent" || identity.name !== name) {
     return c.json(errorBody("forbidden", "an agent may only report its own activity"), 403);
   }
+  // 防御纵深（#617 评审）：现状 token 名全局唯一 + scoped token 无法 attach 到 scope 外频道，
+  // 本无冒充面；但同族端点（pause/resume）的惯例是显式拒 scope 外频道——安全在本端点自证，
+  // 不依赖远处那张表的唯一约束永远成立。
+  if (identity.channel_scope != null && identity.channel_scope !== slug) {
+    return c.json(errorBody("forbidden", "token is scoped to another channel"), 403);
+  }
   const body = (await c.req.json().catch(() => null)) as { activity?: unknown } | null;
   if (body?.activity === undefined) {
     return c.json(errorBody("bad_request", "activity required"), 400);

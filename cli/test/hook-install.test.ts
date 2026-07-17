@@ -85,6 +85,12 @@ describe("shouldPushActivity (#615)", () => {
     // 未来标记（时钟回跳残留）视为无效：立即放行，而不是永久静默到时钟追上
     expect(shouldPushActivity(tool, NOW + 60_000, NOW)).toBe(true);
   });
+
+  test("waiting_input 与 waiting_permission 同级紧急档（#617 评审 follow-up）", () => {
+    const input = { phase: "waiting_input" as const, ts: NOW };
+    expect(shouldPushActivity(input, NOW - PUSH_INTERVAL_URGENT_MS + 1, NOW)).toBe(false);
+    expect(shouldPushActivity(input, NOW - PUSH_INTERVAL_URGENT_MS, NOW)).toBe(true);
+  });
 });
 
 describe("party hook install end-to-end (project scope)", () => {

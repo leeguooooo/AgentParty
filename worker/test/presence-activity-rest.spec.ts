@@ -82,6 +82,14 @@ describe("interactive-lane activity self-report (issue #615)", () => {
     ws.close();
   });
 
+  it("a token scoped to another channel is rejected even for its own name (#617 follow-up)", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    const scoped = await seedToken("agent", uniq("scoped"), { channelScope: uniq("elsewhere") });
+    const res = await postActivity(slug, scoped.token, scoped.name, { phase: "working", ts: Date.now() });
+    expect(res.status).toBe(403);
+  });
+
   it("a stale activity (past the 5min TTL) is not serialized into presence", async () => {
     const agent = await seedToken("agent");
     const slug = await createChannel(agent.token);

@@ -10,13 +10,13 @@
 //   1. stdout 永远为空——hook 的 stdout 会被灌进模型上下文；
 //   2. 任何失败都静默 exit 0——exit 2 会 block 模型的工具调用，坏 JSON/写盘失败都不配阻断模型；
 //   3. 本体不等网络——上行要么归 serve 心跳，要么交给 detached 子进程。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { AGENT_ACTIVITY_TTL_MS, type AgentActivity } from "@agentparty/shared";
 import { activityFromHookEvent, readActivityFile, writeActivityFile } from "../activity";
 import { agentpartyHome, readState } from "../config";
-import { atomicWriteJson } from "../atomic-json";
+import { atomicWriteJson, atomicWriteText } from "../atomic-json";
 import { isHelpArg } from "../args";
 import { isPartyBinaryPath } from "../upgrade";
 
@@ -81,7 +81,10 @@ export function activityTargetFile(
  * 未来时间戳（时钟回跳后残留的标记）视为无效——否则时钟追上前会永久静默。 */
 export function shouldPushActivity(activity: AgentActivity, lastPushTs: number | null, now: number): boolean {
   if (lastPushTs === null || lastPushTs > now) return true;
-  const interval = activity.phase === "waiting_permission" ? PUSH_INTERVAL_URGENT_MS : PUSH_INTERVAL_MS;
+  // waiting_input 与 waiting_permission 同级：都是「无人值守卡死等人」，#608 UI 也同级高亮。
+  const interval = activity.phase === "waiting_permission" || activity.phase === "waiting_input"
+    ? PUSH_INTERVAL_URGENT_MS
+    : PUSH_INTERVAL_MS;
   return now - lastPushTs >= interval;
 }
 
@@ -268,8 +271,8 @@ async function runInstall(argv: string[]): Promise<number> {
     console.error(`无法解析 ${termText(path)}（${termText(e instanceof Error ? e.message : String(e))}）；请先手工修复该文件`);
     return 1;
   }
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, next);
+  // 进程死在写中途会留半截 JSON——毁掉的正是 merge 拼命保护的用户手写配置（#617 评审）。
+  atomicWriteText(path, next);
   console.log(`hooks installed -> ${termText(path)}`);
   console.log("任何在此生效范围内的 Claude Code session（交互或 -p）都会把活动上报进频道 presence。");
   return 0;
@@ -289,7 +292,7 @@ async function runUninstall(argv: string[]): Promise<number> {
     console.error(`无法解析 ${termText(path)}（${termText(e instanceof Error ? e.message : String(e))}）；请先手工修复该文件`);
     return 1;
   }
-  writeFileSync(path, next);
+  atomicWriteText(path, next);
   console.log(`hooks removed <- ${termText(path)}`);
   return 0;
 }
