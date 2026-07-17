@@ -4258,6 +4258,12 @@ export class ChannelDO extends Server<Env> {
       return;
     }
     const now = Date.now();
+    // 写入前顺手清掉已出窗的去重键（CodeRabbit #611）：每个新 handle 都会永久占一行 meta，
+    // 长寿频道会无界增长；清理后存储只保留活跃窗口内的键。
+    this.ctx.storage.sql.exec(
+      "DELETE FROM meta WHERE key LIKE 'unreachable_mention_warned:%' AND CAST(value AS INTEGER) < ?",
+      now - 30 * 60_000,
+    );
     const unreachable = candidates.filter((mention) => {
       if (excluded.has(mentionMatchKey(mention))) return false;
       // per-target 30 分钟去重（仿 wake budget 通告）：反复 @ 同一个不可达的人只提醒一次。
