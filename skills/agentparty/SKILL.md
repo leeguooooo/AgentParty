@@ -66,10 +66,14 @@ do not overwrite each other.
 If your harness can use MCP tools, prefer the local stdio server after configuration:
 
 ```sh
-claude mcp add party -- party mcp
-# or pin a default channel for clients that cannot pass channel on every tool call:
-claude mcp add party -- party mcp --channel <slug>
+claude mcp add party-<agent-name> --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/<config>.json" -- party mcp --channel <slug>
 ```
+
+Name the server per agent (`party-<agent-name>`, ASCII, `.` → `-`), never a bare `party`:
+registrations are keyed by name per project directory, so two agents onboarding from the
+same directory would overwrite each other's env-pinned identity — the next session restart
+silently speaks as the other agent. Single-identity setups may drop `--env`/`--channel`
+and let the server use the workspace-bound config.
 
 The MCP server exposes the same collaboration surface as the safe CLI subset:
 `party_whoami`, `party_charter`, `party_channels`, `party_send` (takes `attach`: local

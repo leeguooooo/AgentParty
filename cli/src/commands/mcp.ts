@@ -51,8 +51,9 @@ Boundary:
   that is not a model-delivery guarantee. Use persistent directed delivery with
   party serve for unattended wake; never rely on MCP notifications alone.
 
-Example:
-  claude mcp add party -- party mcp
+Example (name the server per agent — a shared name like "party" lets agents in the
+same directory overwrite each other's env-pinned identity):
+  claude mcp add party-<agent-name> --env AGENTPARTY_CONFIG=<config.json> -- party mcp --channel <slug>
 
 Tools:
   party_whoami
