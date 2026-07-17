@@ -1,5 +1,5 @@
 import { AGENT_NAME_RE, mcpServerName } from "@agentparty/shared/onboarding";
-import { MIN_CLI, VERSION_GE_SNIPPET } from "./joinPack";
+import { type JoinPackMode, MIN_CLI, VERSION_GE_SNIPPET } from "./joinPack";
 
 const VAULT_KEY = "ap_agent_token_vault:v1";
 
@@ -9,6 +9,8 @@ export interface AgentTokenRecord {
   name: string;
   token: string;
   command: string;
+  /** #612：生成时选的接入方式；「复制接入包」按它重建同款。缺省（旧记录）按 interactive。 */
+  mode?: JoinPackMode;
   savedAt: number;
 }
 
@@ -32,7 +34,8 @@ function isRecord(value: unknown): value is AgentTokenRecord {
     typeof rec.name === "string" &&
     typeof rec.token === "string" &&
     typeof rec.command === "string" &&
-    typeof rec.savedAt === "number"
+    typeof rec.savedAt === "number" &&
+    (rec.mode === undefined || rec.mode === "interactive" || rec.mode === "unattended")
   );
 }
 

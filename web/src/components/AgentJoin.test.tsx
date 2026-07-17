@@ -199,6 +199,63 @@ describe("AgentJoin dismiss behavior", () => {
   });
 });
 
+describe("AgentJoin 无人值守值守预设 (#612)", () => {
+  function pickUnattended(r: ReactTestRenderer) {
+    act(() =>
+      r.root
+        .find((node) => node.props.name === "agent-join-mode" && node.props.value === "unattended")
+        .props.onChange(),
+    );
+  }
+  async function generate(r: ReactTestRenderer) {
+    await act(async () => {
+      await r.root.find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick).props.onClick();
+    });
+  }
+
+  test("选无人值守 → 生成 serve --runner claude 的运维脚本，vault 记 mode", async () => {
+    const r = render();
+    open(r);
+    pickUnattended(r);
+    await generate(r);
+
+    const saved = savedAgents[0]! as { command: string; mode?: string };
+    expect(saved.mode).toBe("unattended");
+    expect(saved.command).toContain("party serve --channel demo --runner claude");
+    expect(saved.command).toContain("need=0.2.127");
+    expect(saved.command).toContain("party init --server ");
+    // 值守机脚本给人跑，不该出现交互包的 harness 步骤
+    expect(saved.command).not.toContain("claude mcp add");
+    expect(saved.command).not.toContain("party watch");
+  });
+
+  test("无人值守包的 charter 快照仍整体注释化（管理员可控文本不落成可执行行）", async () => {
+    const r = render(undefined, {
+      charter: "MODERATOR CONTROLLED CHARTER",
+      charter_rev: 1,
+      updated_at: 1,
+      updated_by: "moderator",
+    });
+    open(r);
+    pickUnattended(r);
+    await generate(r);
+
+    const command = savedAgents[0]!.command;
+    expect(command).toContain("# MODERATOR CONTROLLED CHARTER");
+    expect(command).not.toMatch(/^MODERATOR CONTROLLED CHARTER$/m);
+  });
+
+  test("默认仍是交互接入：不动选择器时产物与原完整包同款", async () => {
+    const r = render();
+    open(r);
+    await generate(r);
+    const saved = savedAgents[0]! as { command: string; mode?: string };
+    expect(saved.mode).toBe("interactive");
+    expect(saved.command).toContain("claude mcp add");
+    expect(saved.command).not.toContain("--runner claude");
+  });
+});
+
 describe("AgentJoin 接入包 server 域名 (#530)", () => {
   // 桌面版(Tauri)里 location.origin 是 tauri://localhost，接入包若用它拼 `party init --server`
   // 会让 agent 报错/连不上。修复要求：apiBase() 非空(桌面注入了真后端)时用 apiBase()，

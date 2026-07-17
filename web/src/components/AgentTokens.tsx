@@ -27,7 +27,7 @@ import {
   saveAgentToken,
 } from "../lib/agentTokenVault";
 import { apiOrigin } from "../lib/base";
-import { buildFullJoinPack } from "../lib/joinPack";
+import { buildJoinPack, type JoinPackMode } from "../lib/joinPack";
 import { useT } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
 import "../i18n/strings/AgentTokens";
@@ -194,8 +194,9 @@ export function AgentTokens({ slug, token, accountKey, inviterName, charter, onA
   // 旧 MIN_CLI、无 MCP 步骤）继续流通。复制永远现场重建，存量 command 字段只留作兼容不再读。
   // 重建走 buildFullJoinPack——与「＋ 让 agent 加入」同一份 builder，产物逐字节同构，
   // 含 charter 快照与待命/唤醒指引（只发最小包的话，新 agent 报到完就不知道怎么挂 watch/serve）。
-  function freshCommand(record: { name: string; token: string }): string {
-    return buildFullJoinPack({
+  // #612：unattended 记录重建同款无人值守包（serve --runner claude），别把值守机脚本换成交互包。
+  function freshCommand(record: { name: string; token: string; mode?: JoinPackMode }): string {
+    return buildJoinPack(record.mode ?? "interactive", {
       slug,
       agentName: record.name,
       agentToken: record.token,
@@ -262,6 +263,8 @@ export function AgentTokens({ slug, token, accountKey, inviterName, charter, onA
         name: next.name,
         token: next.token,
         command,
+        // #612：换 token 不换接入方式——无人值守 agent 轮换后复制的仍是值守机脚本。
+        mode: findSavedAgentToken(accountKey, slug, name)?.mode,
         savedAt: Date.now(),
       });
       await refresh();
