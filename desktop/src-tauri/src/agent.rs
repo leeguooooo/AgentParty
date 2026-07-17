@@ -541,10 +541,23 @@ impl AgentManager {
     }
 
     /// #616 phase 3：转系统常驻前停掉 app 内同键实例（同身份双 serve 会互抢租约）。
-    /// 实例不存在不是错——常驻可以直接从表单发起。
+    /// 实例不存在不是错——常驻可以直接从表单发起。停完必须确认不再活跃且 kill 没失败：
+    /// 进程可能还活着（kill 失败只会把 runtime 标成 Failed），带病装常驻就是双跑。
     pub(crate) async fn stop_instance_for_duty(&self, instance_id: &str) -> Result<(), String> {
         match self.stop_instance_key(instance_id).await {
-            Ok(_) => Ok(()),
+            Ok(runtime) => {
+                let kill_failed = runtime
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("failed to stop party sidecar"));
+                if is_active_phase(runtime.phase) || kill_failed {
+                    return Err(
+                        "could not stop the in-app instance; refusing to install a resident duty alongside it"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
             Err(error) if error.contains("unknown desktop agent instance") => Ok(()),
             Err(error) => Err(error),
         }

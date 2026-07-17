@@ -306,8 +306,8 @@ async fn duty_persist_inner(
     let label = duty_label(&instance_id);
 
     // 同一实例不允许 app 内 child 与 launchd 常驻双跑（同身份两个 serve 会互抢租约）：
-    // 先停掉 app 内的同键实例。
-    let _ = agent_state.stop_instance_for_duty(&instance_id).await;
+    // 先停掉 app 内的同键实例。停不掉（kill 失败/超时后仍活跃）必须中止，不能带病装常驻。
+    agent_state.stop_instance_for_duty(&instance_id).await?;
 
     let party_bin = ensure_duty_binary(app, &home)?;
     let log_path = duty_log_path(&home, &label);
@@ -343,12 +343,25 @@ async fn duty_persist_inner(
             detail.trim().chars().take(200).collect::<String>()
         ));
     }
+    // bootstrap 返回成功但任务未必立刻可见——短轮询确认；确认不了按失败报，
+    // 绝不把 loaded=false 包装成成功让 UI 显示「已常驻」（CodeRabbit #621）。
+    let mut loaded = false;
+    for _ in 0..10 {
+        if duty_loaded(&label) {
+            loaded = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if !loaded {
+        return Err("launchctl bootstrap reported success but the duty job is not loaded".to_string());
+    }
     Ok(DutyEntry {
         label: label.clone(),
         instance_id,
         plist_path: plist_path.to_string_lossy().into_owned(),
         log_path: log_path.to_string_lossy().into_owned(),
-        loaded: duty_loaded(&label),
+        loaded: true,
     })
 }
 
@@ -420,23 +433,63 @@ pub(crate) async fn desktop_duty_adopt(
                     .unwrap_or(0),
             },
         });
-        // 0600 + tmp/rename：token 文件既不给同机他人可读，也不落半截。
+        // tmp 从创建那一刻就是 0600（create_new + mode）——敏感内容一个瞬间也不以宽权限存在；
+        // 任何失败都清掉 tmp（CodeRabbit #621）。
         let tmp = config_path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?)
-            .map_err(|error| format!("cannot write agent config: {error}"))?;
-        #[cfg(unix)]
+        let body = serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?;
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+            use std::io::Write;
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&tmp)
+                .map_err(|error| format!("cannot create agent config tmp: {error}"))?;
+            if let Err(error) = file.write_all(&body) {
+                drop(file);
+                let _ = fs::remove_file(&tmp);
+                return Err(format!("cannot write agent config: {error}"));
+            }
         }
-        fs::rename(&tmp, &config_path).map_err(|error| format!("cannot install agent config: {error}"))?;
-        // 写完立刻用现有解析器回验（server 白名单、identity 完整性都在里面）；不合格就删掉退出。
-        if let Err(error) = crate::agent::parse_config_summary(&config_path) {
-            let _ = fs::remove_file(&config_path);
+        // 先验 tmp 再替换：坏内容绝不覆盖同名旧配置（CodeRabbit #621）。
+        if let Err(error) = crate::agent::parse_config_summary(&tmp) {
+            let _ = fs::remove_file(&tmp);
             return Err(format!("adopted config failed validation: {error}"));
         }
-        let config_id = crate::agent::config_id(&config_path)?;
-        duty_persist_inner(&app, &agent_state, &config_id, &channel, &runner, None, None).await
+        // rename 会覆盖同名旧配置：先留备份，后续任何失败都恢复原状（无旧文件则删除新文件）。
+        let backup = fs::read(&config_path).ok();
+        if let Err(error) = fs::rename(&tmp, &config_path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("cannot install agent config: {error}"));
+        }
+        let restore = |reason: String| -> String {
+            match &backup {
+                Some(bytes) => {
+                    let _ = fs::write(&config_path, bytes);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600));
+                    }
+                }
+                None => {
+                    let _ = fs::remove_file(&config_path);
+                }
+            }
+            reason
+        };
+        let config_id = match crate::agent::config_id(&config_path) {
+            Ok(value) => value,
+            Err(error) => return Err(restore(error)),
+        };
+        match duty_persist_inner(&app, &agent_state, &config_id, &channel, &runner, None, None).await {
+            Ok(entry) => Ok(entry),
+            Err(error) => Err(restore(error)),
+        }
     }
 }
 

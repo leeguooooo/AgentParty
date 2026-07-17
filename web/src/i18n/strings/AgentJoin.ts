@@ -98,7 +98,7 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.adoptButton": "⚡ Keep resident on this Mac (launchd)",
     "AgentJoin.adoptBusy": "setting up…",
     "AgentJoin.adoptDone": "resident ✓",
-    "AgentJoin.adoptHint": "one click: writes the identity locally and installs a launchd duty — the token never leaves this machine. The script below stays for servers.",
+    "AgentJoin.adoptHint": "one click: hands the token to the app over local IPC (never via URL, clipboard, or terminal), stores it in a 0600 config file, and installs a launchd duty. The script below stays for servers.",
     "AgentJoin.adoptDoneHint": "duty installed — survives quitting the app and reboots. Manage it in desktop settings.",
   },
   zh: {
@@ -196,7 +196,7 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.adoptButton": "⚡ 在本机常驻值守（launchd）",
     "AgentJoin.adoptBusy": "配置中…",
     "AgentJoin.adoptDone": "已常驻 ✓",
-    "AgentJoin.adoptHint": "一键完成：身份写入本机 + 装 launchd 常驻，token 全程不出本机。下方脚本保留给服务器场景。",
+    "AgentJoin.adoptHint": "一键完成：token 经本机 IPC 交给 App（不走 URL / 剪贴板 / 终端），落成 0600 权限的配置文件并装 launchd 常驻。下方脚本保留给服务器场景。",
     "AgentJoin.adoptDoneHint": "常驻已装好——退出 App、重启机器都不断线。可在桌面设置里管理。",
   },
 };

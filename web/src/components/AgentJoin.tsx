@@ -14,6 +14,12 @@ import { copyText, saveAgentToken } from "../lib/agentTokenVault";
 import { buildJoinPack, type JoinPackMode } from "../lib/joinPack";
 import { desktopAgentAdapter, type DesktopAgentAdapter } from "../lib/desktopAgent";
 import { isDesktopRuntime } from "../lib/desktopRuntime";
+
+// #616 phase 4 的常驻是 launchd（macOS-only）：非 mac 桌面端不渲染接管按钮，
+// 免得点了必然吃后端 unsupported 错误。
+function isMacDesktop(): boolean {
+  return isDesktopRuntime() && /mac/i.test(globalThis.navigator?.userAgent ?? "");
+}
 import { apiOrigin } from "../lib/base";
 import { useT } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
@@ -61,7 +67,7 @@ type Phase =
   | { kind: "done"; name: string; token: string; command: string; mode: JoinPackMode }
   | { kind: "error"; message: string };
 
-export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accountKey, active, onActiveChange, dutyAdapter = desktopAgentAdapter, desktopDetect = isDesktopRuntime }: Props) {
+export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accountKey, active, onActiveChange, dutyAdapter = desktopAgentAdapter, desktopDetect = isMacDesktop }: Props) {
   const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [name, setName] = useState("");
