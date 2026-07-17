@@ -84,6 +84,13 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
+// MCP server 注册名必须按 agent 唯一：同一目录跑多个 agent 时，固定叫 `party` 会让后注册的
+// 覆盖先注册的身份 env——重启会话后静默串号（比 CLI 忘带前缀更难察觉）。agent 名本身是
+// NAME_RE 约束的 ASCII，但 `.` 在 Codex 的 TOML 键等处不安全，统一消毒成 `-`。
+export function mcpServerName(agentName: string): string {
+  return `party-${agentName.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
 export function buildMinimalAgentCommand(input: {
   server: string;
   slug: string;
@@ -93,6 +100,7 @@ export function buildMinimalAgentCommand(input: {
   checkinMessage: string;
 }): string {
   const configPath = `$HOME/.agentparty/agents/agentparty-${input.name}-${input.slug}.json`;
+  const mcpName = mcpServerName(input.name);
   return [
     `# AgentParty onboarding scope: join the existing channel #${input.slug} using only the supplied party commands.`,
     "# Do not create or select another channel; do not use third-party or project-local channel workflows (for example, Trellis); do not delegate onboarding.",
@@ -104,8 +112,8 @@ export function buildMinimalAgentCommand(input: {
     `party init --server ${input.server} --token ${input.token} --channel ${input.slug}`,
     `party send "${input.checkinMessage}" --channel ${input.slug} --mention ${input.inviterName}`,
     "# Register the AgentParty MCP server with your harness, then use the party_* tools (party_send / party_status / party_history / party_decision_ask ...) for all channel actions — they carry your identity automatically, no AGENTPARTY_CONFIG prefix needed per command:",
-    `claude mcp add party --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug}`,
-    `# Codex: codex mcp add party --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug}`,
+    `claude mcp add ${mcpName} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug}`,
+    `# Codex: codex mcp add ${mcpName} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug}`,
     "# Non-MCP harnesses: keep using the party CLI with the AGENTPARTY_CONFIG prefix on every command.",
   ].join("\n");
 }

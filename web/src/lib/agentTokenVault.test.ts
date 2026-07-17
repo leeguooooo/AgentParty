@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildMinimalAgentCommand } from "./agentTokenVault";
+import { buildMinimalAgentCommand, mcpServerName } from "./agentTokenVault";
 
 describe("buildMinimalAgentCommand", () => {
   test("stores the agent config in a persistent per-agent directory", () => {
@@ -44,16 +44,24 @@ describe("buildMinimalAgentCommand", () => {
     // Check-in stays CLI (the harness only gains tools after MCP registration/restart)…
     const checkinIndex = command.indexOf('party send "checking in" --channel release-room');
     // …then the pack registers the MCP server carrying identity via env + the channel binding.
+    // Server name is per-agent (`party-<name>`), never the bare `party`: two agents onboarding
+    // from the same project directory must not overwrite each other's registration (env-pinned
+    // identity — last writer would silently impersonate the first after a session restart).
     const mcpAddLine =
-      'claude mcp add party --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-desktop-worker-release-room.json" -- party mcp --channel release-room';
+      'claude mcp add party-desktop-worker --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-desktop-worker-release-room.json" -- party mcp --channel release-room';
     expect(checkinIndex).toBeGreaterThan(-1);
     expect(command.indexOf(mcpAddLine)).toBeGreaterThan(checkinIndex);
     expect(command).toContain(
-      '# Codex: codex mcp add party --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-desktop-worker-release-room.json" -- party mcp --channel release-room',
+      '# Codex: codex mcp add party-desktop-worker --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-desktop-worker-release-room.json" -- party mcp --channel release-room',
     );
     expect(command).toContain("use the party_* tools");
     expect(command).toContain("carry your identity automatically");
     expect(command).toContain("Non-MCP harnesses: keep using the party CLI with the AGENTPARTY_CONFIG prefix");
+  });
+
+  test("mcpServerName：名字里 NAME_RE 允许的 `.` 要消毒成 `-`（Codex TOML 键等处不安全）", () => {
+    expect(mcpServerName("desktop-worker")).toBe("party-desktop-worker");
+    expect(mcpServerName("leo.g_2")).toBe("party-leo-g_2");
   });
 
   test("#530 桌面接入包：把传入的真实后端 server 原样写进 party init --server", () => {

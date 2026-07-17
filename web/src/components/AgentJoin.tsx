@@ -10,7 +10,7 @@ import {
   ForbiddenError,
   ValidationError,
 } from "../lib/api";
-import { copyText, saveAgentToken } from "../lib/agentTokenVault";
+import { copyText, mcpServerName, saveAgentToken } from "../lib/agentTokenVault";
 import { apiOrigin } from "../lib/base";
 import { useT, type TFunc } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
@@ -32,8 +32,9 @@ const RESERVED = new Set(["system"]);
 // snippet 里保底的 CLI 版本：低于它就强制重装（旧版会把「需升级」误报成 token 失效，见 issue #2）。
 // 发布带 CLI 行为变更的版本时同步上调。
 // 0.2.52：接入包依赖 watch --once（Claude Code 待命）与 serve 自动声明可唤醒。
-// 0.2.123：接入包改为 MCP-first，依赖 party mcp 的 party_decision_ask 与 party_send attach。
-const MIN_CLI = "0.2.123";
+// 0.2.124：接入包改为 MCP-first，依赖 party mcp 的 party_decision_ask 与 party_send attach。
+//（不能写 0.2.123——该版已从 #579 发布、不含这两个工具，锁它会让过闸的 CLI 缺工具。）
+const MIN_CLI = "0.2.124";
 
 function charterSnapshotLines(charter: ChannelCharter | null, t: TFunc): string[] {
   if (!charter?.charter) return [];
@@ -147,8 +148,8 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         `party send "${t("AgentJoin.cmd.checkinMessage", { agentName: agent.name })}" --channel ${slug} --mention ${inviterName}`,
         ``,
         t("AgentJoin.cmd.step4"),
-        `claude mcp add party --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agent.name}-${slug}.json" -- party mcp --channel ${slug}`,
-        t("AgentJoin.cmd.step4codex", { agentName: agent.name, slug }),
+        `claude mcp add ${mcpServerName(agent.name)} --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agent.name}-${slug}.json" -- party mcp --channel ${slug}`,
+        t("AgentJoin.cmd.step4codex", { mcpName: mcpServerName(agent.name), agentName: agent.name, slug }),
         t("AgentJoin.cmd.step4fallback"),
         ``,
         t("AgentJoin.cmd.step5"),
