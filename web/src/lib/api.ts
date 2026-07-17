@@ -752,6 +752,18 @@ export async function deleteChannelRole(token: string, slug: string, name: strin
   if (!res.ok) throw new Error(`DELETE /api/channels/${slug}/roles/${name} failed (${res.status})`);
 }
 
+// #605：删除自己的 agent（撤 token + 断连）。不可逆；历史消息保留。
+export async function deleteChannelAgent(token: string, slug: string, name: string): Promise<void> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/agents/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw new ForbiddenError("only the agent's owner or a channel moderator can delete it");
+  if (res.status === 404) throw new ValidationError("agent not found in this channel");
+  if (!res.ok) throw new Error(`DELETE /api/channels/${slug}/agents/${name} failed (${res.status})`);
+}
+
 export async function rotateChannelAgent(token: string, slug: string, name: string): Promise<ChannelAgent> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/agents/${encodeURIComponent(name)}/rotate`, {
     method: "POST",

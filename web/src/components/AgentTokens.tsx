@@ -13,6 +13,7 @@ import {
   inviteProjectAgent,
   listChannelAgents,
   listProjectAgentProfiles,
+  deleteChannelAgent,
   rotateChannelAgent,
   setChannelAgentNickname,
   ValidationError,
@@ -22,6 +23,7 @@ import {
   copyText,
   findSavedAgentToken,
   listSavedAgentTokens,
+  removeSavedAgentToken,
   saveAgentToken,
 } from "../lib/agentTokenVault";
 import { apiOrigin } from "../lib/base";
@@ -214,6 +216,24 @@ export function AgentTokens({ slug, token, accountKey, inviterName, charter, onA
     const key = `${name}:${kind}` as CopyTarget;
     setCopied(key);
     window.setTimeout(() => setCopied((current) => (current === key ? null : current)), 1500);
+  }
+
+  // #605：删除自己的 agent——撤 token、断连、清本地 vault 记录。不可逆，二次确认。
+  async function removeAgent(name: string) {
+    const ok = window.confirm(t("AgentTokens.deleteConfirm", { name }));
+    if (!ok) return;
+    setBusyName(name);
+    setError(null);
+    try {
+      await deleteChannelAgent(token, slug, name);
+      removeSavedAgentToken(accountKey, slug, name);
+      await refresh();
+    } catch (err) {
+      if (err instanceof AuthError) onAuthFailed(err.message);
+      else setError(t("AgentTokens.errDelete"));
+    } finally {
+      setBusyName(null);
+    }
   }
 
   async function rotate(name: string) {
@@ -453,6 +473,14 @@ export function AgentTokens({ slug, token, accountKey, inviterName, charter, onA
                           </button>
                         </>
                       ) : null}
+                      <button
+                        type="button"
+                        className="d-btn agenttokens-delete"
+                        disabled={busyName === agent.name}
+                        onClick={() => void removeAgent(agent.name)}
+                      >
+                        {t("AgentTokens.delete")}
+                      </button>
                       <button
                         type="button"
                         className="d-btn agenttokens-rotate"

@@ -459,3 +459,100 @@ describe("project agent profiles", () => {
     ).toBe(403);
   });
 });
+
+// #605：人类删除自己的 agent——撤 token（含 child）+ 清 presence/member，历史消息保留。
+describe("DELETE /api/channels/:slug/agents/:name", () => {
+  async function seedChannelAgent(session: string, slug: string): Promise<{ name: string; token: string }> {
+    const minted = await mintAgent(session, { name: uniq("bot"), channel_scope: slug });
+    expect(minted.status).toBe(201);
+    return (await minted.json()) as { name: string; token: string };
+  }
+
+  function del(session: string, slug: string, name: string): Promise<Response> {
+    return api(`/api/channels/${slug}/agents/${encodeURIComponent(name)}`, session, { method: "DELETE" });
+  }
+
+  it("owner deletes own agent: token dies immediately, second delete is 404", async () => {
+    const session = await humanSession("del-owner@leeguoo.com");
+    const slug = uniq("del");
+    expect(
+      (
+        await api("/api/channels", session, {
+          method: "POST",
+          body: JSON.stringify({ slug, kind: "standing", visibility: "private" }),
+        })
+      ).status,
+    ).toBe(201);
+    const agent = await seedChannelAgent(session, slug);
+    expect((await api(`/api/channels/${slug}/messages`, agent.token)).status).toBe(200);
+
+    const res = await del(session, slug, agent.name);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { deleted: boolean }).deleted).toBe(true);
+    expect((await api(`/api/channels/${slug}/messages`, agent.token)).status).toBe(401);
+    expect((await del(session, slug, agent.name)).status).toBe(404);
+  });
+
+  it("a non-owner non-moderator account cannot delete someone else's agent", async () => {
+    const owner = await humanSession("del-a@leeguoo.com");
+    const other = await humanSession("del-b@leeguoo.com");
+    const slug = uniq("del");
+    expect(
+      (
+        await api("/api/channels", owner, {
+          method: "POST",
+          body: JSON.stringify({ slug, kind: "standing", visibility: "public" }),
+        })
+      ).status,
+    ).toBe(201);
+    const agent = await seedChannelAgent(other, slug);
+    const third = await humanSession("del-c@leeguoo.com");
+    expect((await del(third, slug, agent.name)).status).toBe(403);
+    // agent 自己（非 human 会话）也不能走这个端点
+    expect((await del(agent.token, slug, agent.name)).status).toBe(403);
+    // token 仍然活着
+    expect((await api(`/api/channels/${slug}/messages`, agent.token)).status).toBe(200);
+  });
+
+  it("the channel owner (moderator) can delete another account's agent", async () => {
+    const owner = await humanSession("del-mod@leeguoo.com");
+    const other = await humanSession("del-guest@leeguoo.com");
+    const slug = uniq("del");
+    expect(
+      (
+        await api("/api/channels", owner, {
+          method: "POST",
+          body: JSON.stringify({ slug, kind: "standing", visibility: "public" }),
+        })
+      ).status,
+    ).toBe(201);
+    const agent = await seedChannelAgent(other, slug);
+    expect((await del(owner, slug, agent.name)).status).toBe(200);
+    expect((await api(`/api/channels/${slug}/messages`, agent.token)).status).toBe(401);
+  });
+
+  it("deleting a parent also revokes its spawned child tokens", async () => {
+    const session = await humanSession("del-parent@leeguoo.com");
+    const slug = uniq("del");
+    expect(
+      (
+        await api("/api/channels", session, {
+          method: "POST",
+          body: JSON.stringify({ slug, kind: "standing", visibility: "private" }),
+        })
+      ).status,
+    ).toBe(201);
+    const parent = await seedChannelAgent(session, slug);
+    const spawned = await api("/api/spawn", parent.token, {
+      method: "POST",
+      body: JSON.stringify({ name: uniq("child") }),
+    });
+    expect(spawned.status).toBe(201);
+    const child = (await spawned.json()) as { token: string };
+    expect((await api(`/api/channels/${slug}/messages`, child.token)).status).toBe(200);
+
+    expect((await del(session, slug, parent.name)).status).toBe(200);
+    expect((await api(`/api/channels/${slug}/messages`, parent.token)).status).toBe(401);
+    expect((await api(`/api/channels/${slug}/messages`, child.token)).status).toBe(401);
+  });
+});
