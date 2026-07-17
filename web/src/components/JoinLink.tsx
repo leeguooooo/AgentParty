@@ -208,7 +208,7 @@ export function JoinLink({ slug, token, onAuthFailed, active, onActiveChange, la
         await refreshExternal();
         setBusy(false);
         setNickname("");
-        if (invite.url) copy(invite.url);
+        copy(invite.url ?? `${apiOrigin()}/invite/${invite.code}`);
         return;
       }
       if (mode === "watch") {

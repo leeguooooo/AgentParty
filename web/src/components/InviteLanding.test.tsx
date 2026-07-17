@@ -59,7 +59,6 @@ function render(props: Partial<Parameters<typeof InviteLanding>[0]> = {}) {
           providers={[OIDC_PROVIDER]}
           providersResolved={true}
           onBeforeLogin={() => {}}
-          onLoginFailed={() => {}}
           onRedeemed={() => {}}
           onAuthFailed={() => {}}
           {...props}

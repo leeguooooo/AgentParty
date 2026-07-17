@@ -142,6 +142,40 @@ describe("external invites (#593)", () => {
     // 兑换后预览显示 redeemed
     const preview = await SELF.fetch(`http://ap.test/api/instance/invites/${invite.code}`);
     expect(((await preview.json()) as { state: string }).state).toBe("redeemed");
+
+    // 已兑换的邀请不可撤销（撤销会破坏同账号重放幂等）→ 409，且预览态保持 redeemed
+    const revoke = await api(`/api/channels/${slug}/external-invites/${invite.code}`, owner.token, { method: "DELETE" });
+    expect(revoke.status).toBe(409);
+    const preview2 = await SELF.fetch(`http://ap.test/api/instance/invites/${invite.code}`);
+    expect(((await preview2.json()) as { state: string }).state).toBe("redeemed");
+  });
+
+  it("keeps concurrent same-account redeems idempotent and frees expired handles for re-invite", async () => {
+    const owner = await seedToken("human", uniq("owner"), { owner: "owner6@example.com" });
+    const slug = await createChannel(owner.token);
+
+    // 并发同账号兑换：都成功（抢占失败方核对归属后继续），绝不 410
+    const invite = await createInvite(owner.token, slug, uniq("race").replaceAll("-", ""));
+    const guest = await seedToken("human", uniq("guest"), { owner: "race-guest@example.com" });
+    const [a, b] = await Promise.all([
+      api(`/api/instance/invites/${invite.code}/redeem`, guest.token, { method: "POST" }),
+      api(`/api/instance/invites/${invite.code}/redeem`, guest.token, { method: "POST" }),
+    ]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+
+    // 过期未兑换的邀请占着昵称：重发同昵称邀请时先被自动撤销释放（pending 唯一索引不拦重发）
+    const handle = uniq("expire").replaceAll("-", "");
+    const stale = await createInvite(owner.token, slug, handle);
+    await env.DB.prepare("UPDATE instance_invites SET expires_at = ? WHERE code = ?")
+      .bind(Date.now() - 1000, stale.code)
+      .run();
+    const reissued = await createInvite(owner.token, slug, handle);
+    expect(reissued.code).not.toBe(stale.code);
+    const staleRow = await env.DB.prepare("SELECT revoked_at FROM instance_invites WHERE code = ?")
+      .bind(stale.code)
+      .first<{ revoked_at: number | null }>();
+    expect(staleRow?.revoked_at).not.toBeNull();
   });
 
   it("keeps an existing handle, rejects agents, and blocks expired codes", async () => {
@@ -176,10 +210,10 @@ describe("external invites (#593)", () => {
 
 describe("INSTANCE_INVITE_ONLY gate (#593)", () => {
   beforeAll(() => {
-    (env as Record<string, unknown>).INSTANCE_INVITE_ONLY = "true";
+    (env as unknown as Record<string, unknown>).INSTANCE_INVITE_ONLY = "true";
   });
   afterAll(() => {
-    delete (env as Record<string, unknown>).INSTANCE_INVITE_ONLY;
+    delete (env as unknown as Record<string, unknown>).INSTANCE_INVITE_ONLY;
   });
 
   it("blocks un-enrolled human accounts with invite_required, admits enrolled ones", async () => {

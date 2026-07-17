@@ -718,7 +718,9 @@ export function App() {
     if (joinAuthAction === "begin-provider-login") {
       const primaryProvider = authProviders[0];
       if (primaryProvider === undefined) return;
-      // 浏览器未登录：存 code 跨登录重定向，跳 provider 登录。
+      // 浏览器未登录：存 code 跨登录重定向，跳 provider 登录。pending 路由互斥——
+      // 残留的外部邀请 code 会在回调里劫持本次 join 登录（反之亦然）。
+      sessionStorage.removeItem(PENDING_INVITE_KEY);
       sessionStorage.setItem(PENDING_JOIN_KEY, joinCode);
       beginLogin(primaryProvider).catch(() => setJoinStatus({ phase: "error", message: t("App.join.loginFailed") }));
     }
@@ -775,6 +777,7 @@ export function App() {
     const promise = listChannels(token)
       .then((cs) => {
         if (channelReloadGeneration.current !== generation) return;
+        setInviteRequired(false); // 入册成功/服务端关闸后，别把人永远关在邀请码门里
         setChannels(cs);
         setListError(null);
       })
@@ -1007,9 +1010,10 @@ export function App() {
         providersResolved={authProvidersResolved}
         onBeforeLogin={() => {
           setAuthError(null);
+          // pending 路由互斥：残留的 join code 会在回调里把本次外部邀请登录重定向去错误页面
+          sessionStorage.removeItem(PENDING_JOIN_KEY);
           sessionStorage.setItem(PENDING_INVITE_KEY, inviteCode);
         }}
-        onLoginFailed={() => setAuthError(t("App.error.startSignInFailed"))}
         onRedeemed={(joinedSlug) => {
           setInviteRequired(false);
           sessionStorage.removeItem(PENDING_INVITE_KEY);

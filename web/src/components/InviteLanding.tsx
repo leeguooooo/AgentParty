@@ -22,7 +22,6 @@ interface Props {
   providersResolved: boolean;
   /** 登录前落存 pending code（跨 OIDC 重定向），由 App 提供 */
   onBeforeLogin(): void;
-  onLoginFailed(): void;
   /** 兑换成功：App 负责刷新频道列表并跳转 /c/<slug> */
   onRedeemed(channelSlug: string): void;
   /** token 失效：App 清 token 回登录闸 */
@@ -35,7 +34,6 @@ export function InviteLanding({
   providers,
   providersResolved,
   onBeforeLogin,
-  onLoginFailed,
   onRedeemed,
   onAuthFailed,
 }: Props) {
@@ -43,9 +41,22 @@ export function InviteLanding({
   const [preview, setPreview] = useState<InvitePreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [redeemError, setRedeemError] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
   const redeeming = useRef(false);
+  // 兑换结果必须送达：App 每次 render 都会换 onRedeemed 身份，若把它放进 effect deps，
+  // in-flight 请求的结果会被 cleanup 丢弃、页面卡死在「正在加入」。回调走 ref，effect 只随 token/code 重跑。
+  const onRedeemedRef = useRef(onRedeemed);
+  const onAuthFailedRef = useRef(onAuthFailed);
+  onRedeemedRef.current = onRedeemed;
+  onAuthFailedRef.current = onAuthFailed;
 
   useEffect(() => {
+    // 组件实例会在 /invite/a → /invite/b 间复用：先清掉上一个 code 的状态
+    setPreview(null);
+    setPreviewError(null);
+    setRedeemError(null);
+    setLoginError(null);
+    redeeming.current = false;
     let alive = true;
     getInvitePreview(code)
       .then((p) => {
@@ -64,24 +75,19 @@ export function InviteLanding({
   useEffect(() => {
     if (token === null || redeeming.current) return;
     redeeming.current = true;
-    let alive = true;
     redeemExternalInvite(token, code)
       .then((r) => {
-        if (alive) onRedeemed(r.channel_slug);
+        onRedeemedRef.current(r.channel_slug);
       })
       .catch((e: unknown) => {
-        if (!alive) return;
         redeeming.current = false;
         if (e instanceof AuthError) {
-          onAuthFailed(e.message);
+          onAuthFailedRef.current(e.message);
           return;
         }
         setRedeemError(e instanceof Error ? e.message : t("InviteLanding.failed"));
       });
-    return () => {
-      alive = false;
-    };
-  }, [token, code, onRedeemed, onAuthFailed, t]);
+  }, [token, code, t]);
 
   const stateBlocked =
     preview !== null && preview.state !== "pending" ? t(`InviteLanding.state.${preview.state}`) : null;
@@ -128,6 +134,11 @@ export function InviteLanding({
           ) : (
             <>
               <p className="gate-social">{t("InviteLanding.signInHint")}</p>
+              {loginError !== null && (
+                <p className="banner banner--red" role="alert">
+                  {loginError}
+                </p>
+              )}
               {providersResolved && providers.length === 0 ? (
                 <p className="banner banner--red" role="alert">
                   {t("InviteLanding.noProviders")}
@@ -139,8 +150,9 @@ export function InviteLanding({
                     className="d-btn d-btn--primary gate-btn"
                     type="button"
                     onClick={() => {
+                      setLoginError(null);
                       onBeforeLogin();
-                      beginLogin(provider).catch(() => onLoginFailed());
+                      beginLogin(provider).catch(() => setLoginError(t("InviteLanding.loginFailed")));
                     }}
                   >
                     {provider.label ||

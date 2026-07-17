@@ -31,8 +31,12 @@ CREATE TABLE instance_invites (
 );
 
 CREATE INDEX idx_instance_invites_channel ON instance_invites(channel_slug, created_at DESC);
--- pending 邀请的 preset_handle 在 @ 命名空间占坑，冲突检查按 NOCASE 查
-CREATE INDEX idx_instance_invites_handle ON instance_invites(preset_handle COLLATE NOCASE);
+-- pending 邀请的 preset_handle 在 @ 命名空间占坑：部分唯一索引把 handleConflict「先查后插」的
+-- 并发窗口在数据库层原子兜住（同昵称同时只允许一张未兑换未撤销的邀请；兑换/撤销即释放，
+-- 过期未兑换的由创建端点先自动撤销再插入新邀请）。
+CREATE UNIQUE INDEX idx_instance_invites_pending_handle
+  ON instance_invites(preset_handle COLLATE NOCASE)
+  WHERE revoked_at IS NULL AND redeemed_by IS NULL;
 
 -- 审计动作扩列：SQLite 不能原地扩 CHECK，重建保留全部行/索引（与 0036 同工艺）。
 CREATE TABLE management_audit_new (

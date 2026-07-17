@@ -4307,6 +4307,14 @@ app.post("/api/channels/:slug/external-invites", async (c) => {
   }
   const now = Date.now();
   const expiresAt = expiresInSec === null ? null : now + expiresInSec * 1000;
+  // 过期未兑换的旧邀请先自动撤销释放昵称——否则 pending 唯一索引会把「重发同昵称邀请」也拦下。
+  await c.env.DB.prepare(
+    `UPDATE instance_invites SET revoked_at = ?
+      WHERE preset_handle = ? COLLATE NOCASE AND redeemed_by IS NULL AND revoked_at IS NULL
+        AND expires_at IS NOT NULL AND expires_at <= ?`,
+  )
+    .bind(now, handle, now)
+    .run();
   let code = randomJoinCode();
   for (let i = 0; i < 3; i++) {
     try {
@@ -4341,7 +4349,14 @@ app.post("/api/channels/:slug/external-invites", async (c) => {
         },
         201,
       );
-    } catch {
+    } catch (e) {
+      // 只有唯一键冲突才值得重试/转 409；数据库不可用等异常必须原样冒泡成 5xx，不能伪装成冲突。
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.includes("UNIQUE")) throw e;
+      if (msg.includes("preset_handle")) {
+        // pending 昵称唯一索引兜住了 handleConflict 先查后插的并发窗口
+        return c.json(errorBody("conflict", "handle unavailable (invite_pending)"), 409);
+      }
       code = randomJoinCode();
     }
   }
@@ -4377,12 +4392,24 @@ app.delete("/api/channels/:slug/external-invites/:code", async (c) => {
     return c.json(errorBody("forbidden", "only the channel owner or an ap_ token can manage external invites"), 403);
   }
   const revokedAt = Date.now();
+  // 已兑换的邀请不可撤销：撤销会把同账号重放打成 410、预览态从 redeemed 翻成 revoked，破坏幂等契约。
   const result = await c.env.DB.prepare(
-    "UPDATE instance_invites SET revoked_at = COALESCE(revoked_at, ?) WHERE code = ? AND channel_slug = ?",
+    `UPDATE instance_invites SET revoked_at = COALESCE(revoked_at, ?)
+      WHERE code = ? AND channel_slug = ? AND redeemed_by IS NULL`,
   )
     .bind(revokedAt, code, slug)
     .run();
-  if (result.meta.changes === 0) return c.json(errorBody("not_found", "external invite not found"), 404);
+  if (result.meta.changes === 0) {
+    const existing = await c.env.DB.prepare(
+      "SELECT redeemed_by FROM instance_invites WHERE code = ? AND channel_slug = ?",
+    )
+      .bind(code, slug)
+      .first<{ redeemed_by: string | null }>();
+    if (existing?.redeemed_by != null) {
+      return c.json(errorBody("conflict", "invite has already been redeemed and cannot be revoked"), 409);
+    }
+    return c.json(errorBody("not_found", "external invite not found"), 404);
+  }
   await bestEffortRecordManagementAudit(c.env.DB, {
     actor: managementAuditActor(identity),
     action: "channel.external_invite.revoke",
@@ -4451,7 +4478,7 @@ app.post("/api/instance/invites/:code/redeem", requireBearer, async (c) => {
     return c.json(errorBody("forbidden", "this account was removed from the channel and must be re-invited by a moderator"), 403);
   }
   if (invite.redeemed_by === null) {
-    // 原子抢占：并发两账号同码兑换只有一个赢；输家走顶部 already-redeemed 分支的语义（410）。
+    // 原子抢占：并发两账号同码兑换只有一个赢。
     const claimed = await c.env.DB.prepare(
       `UPDATE instance_invites SET redeemed_by = ?, redeemed_at = ?
         WHERE code = ? AND redeemed_by IS NULL AND revoked_at IS NULL
@@ -4460,7 +4487,14 @@ app.post("/api/instance/invites/:code/redeem", requireBearer, async (c) => {
       .bind(account, now, code, now)
       .run();
     if (claimed.meta.changes === 0) {
-      return c.json(errorBody("not_found", "invite has already been redeemed"), 410);
+      // 抢占失败再核对归属：同账号的并发重放（两请求都读到 redeemed_by=NULL）仍要幂等成功，
+      // 只有真被别的账号抢走才 410。
+      const current = await c.env.DB.prepare("SELECT redeemed_by FROM instance_invites WHERE code = ?")
+        .bind(code)
+        .first<{ redeemed_by: string | null }>();
+      if (current?.redeemed_by !== account) {
+        return c.json(errorBody("not_found", "invite has already been redeemed"), 410);
+      }
     }
   }
   if (await enrollInstanceMember(c.env.DB, account, `invite:${code.slice(0, 8)}`)) {
