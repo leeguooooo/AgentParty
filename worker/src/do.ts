@@ -911,6 +911,14 @@ function parseStoredLineage(input: unknown): AgentLineage | undefined {
   }
 }
 
+// DO 未捕获异常的应用级日志：Cloudflare 对 DO 抛出的异常只回不透明的 "internal error; reference"，
+// tail 里 exceptions 也是空的，等于对自己的异常完全失明。在 onRequest/onMessage 边界记一条带频道与
+// 真实堆栈的日志，让下次同类瞬时故障能直接在 wrangler tail 里定位，而不是靠猜。
+function logDoException(entry: string, channel: string, err: unknown, ctx = ""): void {
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  console.error(`ChannelDO ${entry} uncaught channel=${channel}${ctx ? ` ${ctx}` : ""}: ${detail}`);
+}
+
 // mentions_json 是唯一没兜底的读路径 JSON 解析（其余都 try/catch 或走 parseStored* 守卫）。
 // 一旦某行存进空串或坏 JSON（NOT NULL DEFAULT '[]' 挡得住漏写，挡不住显式写入 ''），
 // 裸 JSON.parse('') 会抛未捕获异常，整条频道的 messages/hello 回填全 500。按其余存储解析同样
@@ -2187,6 +2195,12 @@ export class ChannelDO extends Server<Env> {
     this.wsMessageTails.set(connection.id, current);
     try {
       await current;
+    } catch (err) {
+      // DO 抛未捕获异常时 Cloudflare 只回不透明的 "internal error; reference"，不留任何应用日志
+      // （kyc/seamail 那次 30 分钟只能靠猜就是因为这里没日志）。落一条带频道/连接的真实堆栈，
+      // 让下次同类故障在 wrangler tail 里直接可诊断；行为不变，照旧向上抛。
+      logDoException("onMessage", this.name, err, `conn=${connection.id}`);
+      throw err;
     } finally {
       if (this.wsMessageTails.get(connection.id) === current) {
         this.wsMessageTails.delete(connection.id);
@@ -4650,6 +4664,16 @@ export class ChannelDO extends Server<Env> {
 
   // worker 转发来的内部 rest
   async onRequest(request: Request): Promise<Response> {
+    // 见 onMessage：未捕获异常否则只剩 Cloudflare 不透明 500。包一层落真实堆栈再原样抛。
+    try {
+      return await this.onRequestImpl(request);
+    } catch (err) {
+      logDoException("onRequest", this.name, err, `${request.method} ${new URL(request.url).pathname}`);
+      throw err;
+    }
+  }
+
+  private async onRequestImpl(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/internal/summary" && request.method === "GET") {
       // 频道列表页聚合用：最近一条消息（正文截断）+ presence 快照（spec §9 第 1 块）
