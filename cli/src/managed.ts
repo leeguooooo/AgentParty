@@ -2,8 +2,8 @@
 // supervisor（serve）与角色裁剪的 MCP server（party mcp --managed）之间的文件握手协议、
 // front 血缘解析、worker 附件工作区围栏。serve.ts 与 mcp-managed.ts 都从这里取——
 // 生产/消费两侧的事实源只有这一份（#578 的教训：前缀协议两侧相隔百行，改一侧全线挂）。
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { appendFileSync, closeSync, constants as fsConstants, fstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import type { MsgFrame } from "@agentparty/shared";
 import { fetchMessages } from "./rest";
 
@@ -76,7 +76,16 @@ export function readManagedWake(stateDir: string): ManagedWakeState {
 }
 
 export function appendManagedAction(stateDir: string, seq: number, record: ManagedActionRecord): void {
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   appendFileSync(outcomeFile(stateDir, seq), JSON.stringify(record) + "\n", { mode: 0o600 });
+}
+
+/**
+ * 新 wake 开工前清掉同 seq 的历史回执（supervisor 在 prepare 里调）：消息编辑会复用原 seq 但
+ * 产生新 delivery，旧回执绝不能替新回合充数（CodeRabbit #592 finding）。
+ */
+export function clearManagedActions(stateDir: string, seq: number): void {
+  rmSync(outcomeFile(stateDir, seq), { force: true });
 }
 
 export function readManagedActions(stateDir: string, seq: number): ManagedActionRecord[] {
@@ -120,6 +129,42 @@ export function resolveManagedAttachmentPath(path: string, attachmentRoot: strin
     throw new ManagedActionError(`runner attachment escapes allowed workspace: ${path}`);
   }
   return realPath;
+}
+
+/**
+ * 附件快照（#592 评审的 TOCTOU 修复）：realpath 围栏校验和上传打开之间，worker 可把工作区内
+ * 文件换成指向外部的 symlink。这里在校验后立刻以 O_NOFOLLOW 打开、fstat 验普通文件、
+ * 从同一个 fd 读出字节，再落到 supervisor 私有目录（工作区之外）的不可变快照——上传只碰快照，
+ * 模型此后怎么动工作区都影响不到已读内容。
+ */
+export function snapshotManagedAttachment(path: string, attachmentRoot: string | null, snapshotDir: string): string {
+  const realPath = resolveManagedAttachmentPath(path, attachmentRoot);
+  let fd: number;
+  try {
+    fd = openSync(realPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch {
+    throw new ManagedActionError(`runner attachment is not a plain readable file: ${path}`);
+  }
+  try {
+    if (!fstatSync(fd).isFile()) {
+      throw new ManagedActionError(`runner attachment is not a regular file: ${path}`);
+    }
+    const bytes = readFileSync(fd);
+    mkdirSync(snapshotDir, { recursive: true, mode: 0o700 });
+    // 保留 basename（上传链按文件名定 content-type/展示名）；同名冲突加序号。
+    let target = join(snapshotDir, basename(realPath));
+    for (let index = 1; ; index += 1) {
+      try {
+        writeFileSync(target, bytes, { mode: 0o600, flag: "wx" });
+        break;
+      } catch {
+        target = join(snapshotDir, `${index}-${basename(realPath)}`);
+      }
+    }
+    return target;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export interface ManagedOrigin {

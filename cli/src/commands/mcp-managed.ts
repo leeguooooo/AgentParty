@@ -19,7 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import {
   BODY_LIMIT,
   DECISION_OPTION_LIMIT,
@@ -33,9 +33,11 @@ import {
   appendManagedAction,
   createManagedLineageResolver,
   ManagedActionError,
+  readManagedActions,
   readManagedManifest,
   readManagedWake,
-  resolveManagedAttachmentPath,
+  snapshotManagedAttachment,
+  type ManagedActionRecord,
   type ManagedLaneManifest,
   type ManagedWakeState,
 } from "../managed";
@@ -74,11 +76,29 @@ function laneAuth(manifest: ManagedLaneManifest): LaneAuth {
 /** 每回合动作幂等闸：同一 wake 内重复调用同名独占动作直接拒，防模型循环刷屏。 */
 const EXCLUSIVE_ACTIONS = new Set(["owner_decision"]);
 
+/**
+ * completion status（血缘续接的收尾遥测，与文本协议路由同语义）：best-effort——
+ * 主动作已发布且已落账，这条失败只以字段回报给模型，绝不抛错诱发主消息重发（#592 评审）。
+ */
+async function postCompletionStatus(auth: LaneAuth, channel: string, summarySeq: number): Promise<string | null> {
+  try {
+    await postMessage(auth.server, auth.token, channel, {
+      kind: "status",
+      state: "done",
+      note: `front synthesis delivered for seq=${summarySeq}`,
+      mentions: [],
+      summary_seq: summarySeq,
+    } as Parameters<typeof postMessage>[3]);
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
 export function createManagedMcpServer(stateDir: string): McpServer {
   const manifest = readManagedManifest(stateDir);
   const role = manifest.role;
   const server = new McpServer({ name: `agentparty-managed-${role}`, version: "1.0.0" });
-  const seenExclusive = new Map<number, Set<string>>();
 
   const wake = (): ManagedWakeState => readManagedWake(stateDir);
   const record = (
@@ -94,18 +114,15 @@ export function createManagedMcpServer(stateDir: string): McpServer {
       at: Date.now(),
     });
   };
-  // 幂等闸分两步：调用前只查、动作成功后才落标——失败的尝试不许堵死本回合的重试。
-  const assertExclusiveUnused = (seq: number, action: string) => {
+  // 幂等闸以 outcome 回执为事实源（持久）：codex 每次 exec 都 spawn 新 MCP 进程，内存态跨
+  // 回合恒空；supervisor 在每个新 wake 的 prepare 里清同 seq 回执，所以这里读到的记录一定
+  // 属于当前回合。失败的尝试不落回执，天然不堵重试；post 成功与 record 落盘之间的崩溃窗口
+  // 存在但极窄（且该回合会因 runner 崩溃按非可重试处理，不会自动重放）。
+  const assertExclusiveUnused = (seq: number, action: ManagedActionRecord["action"]) => {
     if (!EXCLUSIVE_ACTIONS.has(action)) return;
-    if (seenExclusive.get(seq)?.has(action) === true) {
+    if (readManagedActions(stateDir, seq).some((record) => record.action === action)) {
       throw new ManagedActionError(`${action} already issued for this wake`);
     }
-  };
-  const markExclusive = (seq: number, action: string) => {
-    if (!EXCLUSIVE_ACTIONS.has(action)) return;
-    const seen = seenExclusive.get(seq) ?? new Set<string>();
-    seen.add(action);
-    seenExclusive.set(seq, seen);
   };
 
   const lineage = () => {
@@ -183,18 +200,17 @@ export function createManagedMcpServer(stateDir: string): McpServer {
             mentions: [],
             reply_to: replyTo,
           });
-          // 血缘续接（worker 报告/owner 答复）时补一条 completion status，与文本协议路由同语义。
-          if (origin !== null) {
-            await postMessage(auth.server, auth.token, manifest.channel, {
-              kind: "status",
-              state: "done",
-              note: `front synthesis delivered for seq=${state.frame.seq}`,
-              mentions: [],
-              summary_seq: state.frame.seq,
-            } as Parameters<typeof postMessage>[3]);
-          }
+          // 主动作先落账（回执=幂等事实源）；completion status 是可观测性增益，失败绝不能把
+          // 已发布的主消息变成「可重试失败」诱发重复发布（#592 评审）。
           record(state.frame.seq, "channel_reply", posted.seq);
-          return ok({ type: "reply", channel: manifest.channel, seq: posted.seq, reply_to: replyTo });
+          const completionError = origin === null ? null : await postCompletionStatus(auth, manifest.channel, state.frame.seq);
+          return ok({
+            type: "reply",
+            channel: manifest.channel,
+            seq: posted.seq,
+            reply_to: replyTo,
+            ...(completionError === null ? {} : { completion_status_error: completionError }),
+          });
         } catch (e) {
           return fail(e instanceof Error ? e.message : String(e));
         }
@@ -215,17 +231,16 @@ export function createManagedMcpServer(stateDir: string): McpServer {
             mentions: [manifest.worker],
             reply_to: replyTo,
           });
-          if (origin !== null) {
-            await postMessage(auth.server, auth.token, manifest.channel, {
-              kind: "status",
-              state: "done",
-              note: `front synthesis delivered for seq=${state.frame.seq}`,
-              mentions: [],
-              summary_seq: state.frame.seq,
-            } as Parameters<typeof postMessage>[3]);
-          }
           record(state.frame.seq, kind, posted.seq);
-          return ok({ type: kind, channel: manifest.channel, seq: posted.seq, worker: manifest.worker, reply_to: replyTo });
+          const completionError = origin === null ? null : await postCompletionStatus(auth, manifest.channel, state.frame.seq);
+          return ok({
+            type: kind,
+            channel: manifest.channel,
+            seq: posted.seq,
+            worker: manifest.worker,
+            reply_to: replyTo,
+            ...(completionError === null ? {} : { completion_status_error: completionError }),
+          });
         } catch (e) {
           return fail(e instanceof Error ? e.message : String(e));
         }
@@ -261,7 +276,7 @@ export function createManagedMcpServer(stateDir: string): McpServer {
           "Ask the human owner to approve or choose. Non-blocking: after this returns pending, END your turn — the owner's answer wakes you later with full context. Do not poll.",
         inputSchema: {
           prompt: z.string().min(1).max(DECISION_PROMPT_LIMIT),
-          options: z.array(z.string().min(1).max(DECISION_OPTION_LIMIT)).max(DECISION_OPTIONS_MAX).optional(),
+          options: z.array(z.string().min(1).max(DECISION_OPTION_LIMIT)).max(DECISION_OPTIONS_MAX).nullable().optional(),
         },
       },
       async ({ prompt, options }) => {
@@ -277,13 +292,15 @@ export function createManagedMcpServer(stateDir: string): McpServer {
               "server does not enforce owner_decision responder binding (owner_decision_binding v1); upgrade the Worker before managed owner decisions",
             );
           }
-          if (options !== undefined && options.length === 1) {
+          // null / 缺省 / 空数组统一按 approval（#578 finding 1 的 schema-合法输出绝不再被拒）。
+          const normalizedOptions = options ?? [];
+          if (normalizedOptions.length === 1) {
             throw new ManagedActionError("choice decision requires at least 2 options");
           }
           const origin = await lineage()(state.frame, state.delivery);
-          const decisionRequest: SendDecisionRequest = options === undefined || options.length === 0
+          const decisionRequest: SendDecisionRequest = normalizedOptions.length === 0
             ? { kind: "approval", prompt }
-            : { kind: "choice", prompt, options };
+            : { kind: "choice", prompt, options: normalizedOptions };
           const payload: Parameters<typeof postMessage>[3] & {
             expected_decision_lineage?: { delivery_id: string; work_id: string; continuation_ref: string };
             expected_decision_responder_owner?: string;
@@ -303,7 +320,6 @@ export function createManagedMcpServer(stateDir: string): McpServer {
           const posted = await postMessage(auth.server, auth.token, manifest.channel, payload);
           const resolution: DecisionResolution | undefined = posted.decision_resolution;
           const decisionState = resolution?.state === "auto_resolved" ? "auto_resolved" : "pending";
-          markExclusive(state.frame.seq, "owner_decision");
           record(state.frame.seq, "owner_decision", posted.seq, decisionState);
           if (decisionState === "auto_resolved") {
             return ok(
@@ -343,10 +359,13 @@ export function createManagedMcpServer(stateDir: string): McpServer {
         try {
           const auth = laneAuth(manifest);
           const state = wake();
-          // 围栏先行：任何一个路径越界，整个报告不发（与 CLI attach 的整体失败语义一致）。
-          const realPaths = (attach ?? []).map((path) => resolveManagedAttachmentPath(path, manifest.attachment_root));
-          const attachments = realPaths.length > 0
-            ? await uploadAttachmentPaths(auth.server, auth.token, manifest.channel, realPaths)
+          // 围栏 + TOCTOU 快照先行：校验后立刻以 O_NOFOLLOW fd 读出字节、落到 supervisor 私有
+          // 目录再上传——任何一个路径越界或非普通文件，整个报告不发（#592 评审）。
+          const snapshotDir = join(stateDir, `attach-${state.frame.seq}`);
+          const snapshots = (attach ?? []).map((path) =>
+            snapshotManagedAttachment(path, manifest.attachment_root, snapshotDir));
+          const attachments = snapshots.length > 0
+            ? await uploadAttachmentPaths(auth.server, auth.token, manifest.channel, snapshots)
             : undefined;
           const posted = await postMessage(auth.server, auth.token, manifest.channel, {
             kind: "message",

@@ -216,6 +216,24 @@ describe("front 角色工具面（#581）", () => {
       });
       expect((r.content as { text: string }[])[0]!.text).toContain("END this turn");
       expect(readManagedActions(stateDir, 50).at(-1)).toMatchObject({ action: "owner_decision", decision_state: "pending" });
+
+      // 幂等闸持久于 outcome 回执：同一 wake 内第二次决策直接拒（哪怕换一个 MCP 进程也一样）。
+      const dup = await client.callTool({ name: "party_decision_ask", arguments: { prompt: "再问一次？" } });
+      expect(dup.isError).toBe(true);
+      expect((dup.content as { text: string }[])[0]!.text).toContain("already issued");
+      expect(messagePosts().filter((post) => post.decision_request !== undefined)).toHaveLength(1);
+    } finally {
+      await client.close();
+    }
+  }, 20000);
+
+  test("party_decision_ask：options:null 是 schema 合法输入，按 approval 处理（#578 finding 1 语义）", async () => {
+    writeLane("front", { owner_decision_binding: true });
+    const client = await connect();
+    try {
+      const r = await client.callTool({ name: "party_decision_ask", arguments: { prompt: "可以发布吗？", options: null } });
+      expect(r.isError).not.toBe(true);
+      expect(messagePosts()[0]!.decision_request).toMatchObject({ kind: "approval", prompt: "可以发布吗？" });
     } finally {
       await client.close();
     }

@@ -5,6 +5,7 @@ import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMP
 import { createHash, randomUUID } from "node:crypto";
 import { downloadPartyUpgrade, isPartyBinaryPath, maybeReexecUpgrade, serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import {
+  clearManagedActions,
   MANAGED_CONFIG_FILE,
   readManagedActions,
   writeManagedManifest,
@@ -2296,6 +2297,9 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
     // #581 managed MCP：每个 wake 前覆写 wake.json——工具 handler 即读即用，天然跟上当前 wake；
     // owner 决策绑定取 welcome 声明的当前值（prepare 必在 welcome 之后）。
     if (opts.managedMcp !== undefined) {
+      // 消息编辑会复用原 seq 但产生新 delivery：新回合开工前清同 seq 的历史回执，
+      // 旧动作绝不能替新回合的零动作充数（#592 评审）。
+      clearManagedActions(opts.managedMcp.stateDir, frame.seq);
       writeManagedWake(opts.managedMcp.stateDir, {
         version: 1,
         seq: frame.seq,

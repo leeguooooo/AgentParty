@@ -1142,7 +1142,8 @@ export async function run(argv: string[]): Promise<number> {
   // --managed <stateDir>：supervisor（party serve --profile）替 managed lane 拉起的角色裁剪
   // 工具面（#581 Phase 2），与通用工具面互斥——见 cli/src/commands/mcp-managed.ts。
   if (argv[0] === "--managed") {
-    if (argv.length !== 2 || argv[1] === undefined || argv[1] === "") {
+    // "-" 开头（含 "--" 终止符）不是目录：当缺参报错，别去打开一个叫 "--" 的目录。
+    if (argv.length !== 2 || argv[1] === undefined || argv[1] === "" || argv[1].startsWith("-")) {
       console.error("usage: party mcp --managed <stateDir>");
       return 1;
     }

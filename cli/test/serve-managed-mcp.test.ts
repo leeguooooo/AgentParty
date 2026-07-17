@@ -13,10 +13,14 @@ import {
   assertManagedWorkerWake,
   createBuiltinRunner,
   ManagedWorkerUndispatchedError,
+  runProfileServe,
   WakeBlockedError,
   type ProjectAgentRunContext,
+  type ServeOptions,
 } from "../src/commands/serve";
-import { appendManagedAction, readManagedWake, writeManagedManifest, writeManagedWake } from "../src/managed";
+import { run as runMcpCommand } from "../src/commands/mcp";
+import { appendManagedAction, readManagedActions, readManagedManifest, readManagedWake } from "../src/managed";
+import { existsSync } from "node:fs";
 import { msgFrame } from "./mock-server";
 
 const dirs: string[] = [];
@@ -258,5 +262,129 @@ describe("已派工前缀退役方向（#581 验收：mcp 主路径零前缀）"
     const mcpManaged = readFileSync(join(import.meta.dir, "..", "src", "commands", "mcp-managed.ts"), "utf8");
     expect(mcpManaged).not.toContain("已派工");
     expect(mcpManaged).not.toContain("已要求补充/返工");
+  });
+});
+
+describe("supervisor 侧回执治理与入口参数（#592 评审）", () => {
+  test("新 wake 的 prepare 清掉同 seq 的历史回执：旧动作不能替新回合充数", async () => {
+    const workdir = tempDir();
+    const stateDir = join(workdir, "mcp");
+    // 上一条 delivery（比如消息编辑前）留下的旧回执。
+    appendManagedAction(stateDir, 30, { action: "channel_reply", seq: 77, at: 1 });
+    const run = createBuiltinRunner(managedRunnerOpts(workdir, stateDir, {
+      runProcess: async (args: string[]) => {
+        writeFileSync(args[args.indexOf("-o") + 1]!, "本回合什么工具都没调\n");
+        return { code: 0, stdout: "session id: 019f35d9-0000-7000-8000-000000000030\n", stderr: "" };
+      },
+    }));
+    await expect(run(message(30), context(delivery(30)))).rejects.toThrow(/no channel action/);
+    expect(readManagedActions(stateDir, 30)).toHaveLength(0);
+  });
+
+  test("party mcp --managed 拒绝 '-' 开头的 stateDir（含 '--' 终止符）", async () => {
+    expect(await runMcpCommand(["--managed", "--"])).toBe(1);
+    expect(await runMcpCommand(["--managed", "-x"])).toBe(1);
+    expect(await runMcpCommand(["--managed"])).toBe(1);
+  });
+});
+
+describe("runProfileServe 协议装配（buildLane 回归网，#592 评审）", () => {
+  async function assembleLanes(runner: "codex" | "codex-sdk", protocol?: "mcp" | "text"): Promise<ServeOptions[]> {
+    const home = tempDir();
+    const oldHome = process.env.AGENTPARTY_HOME;
+    const oldConfig = process.env.AGENTPARTY_CONFIG;
+    process.env.AGENTPARTY_HOME = home;
+    const ownerConfig = join(home, "owner.json");
+    writeFileSync(ownerConfig, JSON.stringify({ server: "http://agentparty.test", token: "ap_owner" }));
+    process.env.AGENTPARTY_CONFIG = ownerConfig;
+    const profile = {
+      owner_account: "asm@example.com",
+      handle: "asm-dev",
+      name: "Asm Dev",
+      runner,
+      repo_url: null,
+      workdir: null,
+      base_branch: "main",
+      worktree_strategy: "branch" as const,
+      rules: null,
+      invitable_by: "owner" as const,
+      created_at: 1,
+      updated_at: 1,
+    };
+    const served: ServeOptions[] = [];
+    try {
+      const code = await runProfileServe({
+        server: "http://agentparty.test",
+        humanToken: "acc-human",
+        ownerAccount: profile.owner_account,
+        handle: profile.handle,
+        mentionsOnly: true,
+        once: true,
+        ...(protocol === undefined ? {} : { protocol }),
+        post: async () => ({ seq: 1 }),
+        mintRuntime: async () => ({ token: "ap_rt", profile }),
+        listInvites: async () => [{
+          id: 1,
+          channel_slug: "asm",
+          owner_account: profile.owner_account,
+          profile_handle: profile.handle,
+          invited_by: "owner@example.com",
+          invited_at: 1,
+          profile,
+        }],
+        ensureChannelRuntime: async (_s, _t, slug, owner, _h, childName) => ({
+          token: `ap_${childName}`,
+          name: childName,
+          role: "agent" as const,
+          owner,
+          channel_scope: slug,
+          lineage: { parent_agent: profile.handle, root_agent: profile.handle, team_id: profile.handle, depth: 1, expires_at: null },
+          profile,
+        }),
+        runChannelServe: async (opts) => {
+          served.push(opts);
+          return 0;
+        },
+      });
+      expect(code).toBe(0);
+    } finally {
+      if (oldHome === undefined) delete process.env.AGENTPARTY_HOME;
+      else process.env.AGENTPARTY_HOME = oldHome;
+      if (oldConfig === undefined) delete process.env.AGENTPARTY_CONFIG;
+      else process.env.AGENTPARTY_CONFIG = oldConfig;
+    }
+    return served;
+  }
+
+  test("builtin 默认 mcp：managedMcp 装配、schema 退场、manifest 落盘且角色/围栏正确", async () => {
+    const served = await assembleLanes("codex");
+    expect(served).toHaveLength(2);
+    for (const lane of served) {
+      expect(lane.builtinRunner?.managedMcp).toBeDefined();
+      expect(lane.builtinRunner?.outputSchema).toBeUndefined();
+      expect(lane.builtinRunner?.resultRoute).toBeUndefined();
+      const manifest = readManagedManifest(lane.builtinRunner!.managedMcp!.stateDir);
+      expect(manifest.role).toBe(lane.projectAgent!.runtime_role);
+      if (manifest.role === "worker") expect(manifest.attachment_root).toBe(lane.builtinRunner!.cwd!);
+      else expect(manifest.attachment_root).toBeNull();
+      expect(lane.projectAgent?.protocol).toBe("mcp");
+    }
+  });
+
+  test("--protocol text：不写 manifest，front 仍带六字段 schema（逃生舱原样）", async () => {
+    const served = await assembleLanes("codex", "text");
+    const front = served.find((lane) => lane.projectAgent?.runtime_role === "front")!;
+    expect(front.builtinRunner?.managedMcp).toBeUndefined();
+    expect(front.builtinRunner?.outputSchema).toBeDefined();
+    expect(front.builtinRunner?.resultRoute).toBeDefined();
+    expect(existsSync(join(front.builtinRunner!.workdir, "mcp", "managed.json"))).toBe(false);
+    expect(front.projectAgent?.protocol).toBe("text");
+  });
+
+  test("codex-sdk 默认被强制 text（本期无 MCP 注入面）", async () => {
+    const served = await assembleLanes("codex-sdk");
+    const front = served.find((lane) => lane.projectAgent?.runtime_role === "front")!;
+    expect(front.sdkRunner?.outputSchema).toBeDefined();
+    expect(front.projectAgent?.protocol).toBe("text");
   });
 });
