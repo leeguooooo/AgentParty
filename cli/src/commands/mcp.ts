@@ -1139,6 +1139,16 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
+  // --managed <stateDir>：supervisor（party serve --profile）替 managed lane 拉起的角色裁剪
+  // 工具面（#581 Phase 2），与通用工具面互斥——见 cli/src/commands/mcp-managed.ts。
+  if (argv[0] === "--managed") {
+    if (argv.length !== 2 || argv[1] === undefined || argv[1] === "") {
+      console.error("usage: party mcp --managed <stateDir>");
+      return 1;
+    }
+    const { runManagedMcp } = await import("./mcp-managed");
+    return runManagedMcp(argv[1]);
+  }
   let defaultChannel: string | undefined;
   if (argv.length === 2 && argv[0] === "--channel") {
     defaultChannel = argv[1];
