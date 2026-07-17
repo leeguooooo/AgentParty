@@ -548,6 +548,10 @@ export const AGENT_ACTIVITY_PHASES = [
 ] as const;
 export type AgentActivityPhase = (typeof AGENT_ACTIVITY_PHASES)[number];
 
+// 活动新鲜度统一口径（#602 serve 心跳捎带 / #615 交互 lane 直报共用）：
+// 超过这个岁数的活动视为陈旧——写它的 session 大概率已死，不再展示、不再上行。
+export const AGENT_ACTIVITY_TTL_MS = 5 * 60_000;
+
 export interface AgentActivity {
   phase: AgentActivityPhase;
   /** 仅 phase=tool / waiting_permission 时可带：工具名（绝不带入参正文，防 secret 泄漏）。 */

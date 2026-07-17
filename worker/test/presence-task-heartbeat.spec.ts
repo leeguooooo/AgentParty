@@ -118,16 +118,18 @@ describe("presence per-task heartbeat (issue #228)", () => {
     // 排掉 seedPresence 自己触发的 presence 广播，后续每个 nextOfType("presence") 都对齐一拍心跳
     await ws.nextOfType("presence");
 
+    // ts 用当前时间：#615 起序列化按 TTL(5min) 判新鲜，远古时间戳会被正确过滤（另有专测）。
+    const activityTs = Date.now();
     ws.send({
       type: "heartbeat",
       current_task: 7,
       task_started_at: 1000,
       heartbeat_at: 1000,
-      activity: { phase: "tool", tool: "Bash", ts: 1000 },
+      activity: { phase: "tool", tool: "Bash", ts: activityTs },
     });
     await ws.nextOfType("presence");
     let entry = (await fetchPresence(slug, agent.token)).find((e) => e.name === agent.name);
-    expect(entry).toMatchObject({ current_task: 7, activity: { phase: "tool", tool: "Bash", ts: 1000 } });
+    expect(entry).toMatchObject({ current_task: 7, activity: { phase: "tool", tool: "Bash", ts: activityTs } });
 
     // 下一拍没带 activity（hook 文件缺失/过期）→ 清空，绝不留僵值
     ws.send({ type: "heartbeat", current_task: 7, task_started_at: 1000, heartbeat_at: 2000 });
@@ -152,7 +154,7 @@ describe("presence per-task heartbeat (issue #228)", () => {
       current_task: 7,
       task_started_at: 1000,
       heartbeat_at: 1000,
-      activity: { phase: "waiting_permission", tool: "Bash", ts: 1000 },
+      activity: { phase: "waiting_permission", tool: "Bash", ts: Date.now() },
     });
     await ws.nextOfType("presence");
     // 清除帧即便捎带 activity 也一并清：没有任务就没有活动可言
@@ -161,7 +163,7 @@ describe("presence per-task heartbeat (issue #228)", () => {
       current_task: null,
       task_started_at: null,
       heartbeat_at: null,
-      activity: { phase: "idle", ts: 2000 },
+      activity: { phase: "idle", ts: Date.now() },
     });
     await ws.nextOfType("presence");
 
@@ -187,21 +189,22 @@ describe("presence per-task heartbeat (issue #228)", () => {
       current_task: 5,
       task_started_at: 1000,
       heartbeat_at: 1000,
-      activity: { phase: "hacking", ts: 1000 },
+      activity: { phase: "hacking", ts: Date.now() },
     });
+    const cleanTs = Date.now();
     ws.send({
       type: "heartbeat",
       current_task: 6,
       task_started_at: 1000,
       heartbeat_at: 1000,
-      activity: { phase: "working", ts: 1000 },
+      activity: { phase: "working", ts: cleanTs },
     });
     // 排掉 seed 后第一条到达的 presence 就是干净帧的广播——脏帧被丢弃、从未广播
     const frame = await ws.nextOfType("presence");
-    expect(frame).toMatchObject({ name: agent.name, current_task: 6, activity: { phase: "working", ts: 1000 } });
+    expect(frame).toMatchObject({ name: agent.name, current_task: 6, activity: { phase: "working", ts: cleanTs } });
 
     const entry = (await fetchPresence(slug, agent.token)).find((e) => e.name === agent.name);
-    expect(entry).toMatchObject({ current_task: 6, activity: { phase: "working", ts: 1000 } });
+    expect(entry).toMatchObject({ current_task: 6, activity: { phase: "working", ts: cleanTs } });
     ws.close();
   });
 

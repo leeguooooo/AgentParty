@@ -4,11 +4,11 @@
 // 双方对同一路径达成一致，完全绕开「hook 的 session_id 与 serve 已知句柄对不上」的映射问题。
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { parseAgentActivity, type AgentActivity, type AgentActivityPhase } from "@agentparty/shared";
+import { AGENT_ACTIVITY_TTL_MS, parseAgentActivity, type AgentActivity, type AgentActivityPhase } from "@agentparty/shared";
 import { atomicWriteJson } from "./atomic-json";
 
 /** hook 落盘超过这个岁数即视为陈旧，不再随心跳上行（模型进程可能已死，别让频道看僵活动）。 */
-export const ACTIVITY_TTL_MS = 5 * 60_000;
+export const ACTIVITY_TTL_MS: number = AGENT_ACTIVITY_TTL_MS;
 
 /** serve 为某个 runner workdir 约定的 activity 文件路径；经 AP_ACTIVITY_FILE 递给 runner。 */
 export function runnerActivityFile(workdir: string): string {

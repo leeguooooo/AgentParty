@@ -37,6 +37,7 @@ import {
   DELIVERY_CONTINUATION_REF_LIMIT,
   DELIVERY_ORIGIN_CHANNEL_LIMIT,
   DELIVERY_WORK_ID_LIMIT,
+  AGENT_ACTIVITY_TTL_MS,
   parseAgentActivity,
   parseRunnerHealth,
   type AgentActivity,
@@ -1397,6 +1398,9 @@ function snippetFor(frame: MsgFrame, field: SearchHit["match_field"]): string {
 export class ChannelDO extends Server<Env> {
   static options = { hibernate: true };
   private atomicDeliveryEffects: AtomicDeliveryEffects | null = null;
+  // 交互 lane 活动直报（#615）的服务端时钟节流标记：name → 上次接受时刻。内存态即可——
+  // DO 休眠清空的代价只是偶尔多接受一次，而 client 自带 ts 不可信、不能当节流依据。
+  private readonly activityPushAcceptedAt = new Map<string, number>();
   // partyserver can invoke async WebSocket handlers for the same connection while an earlier
   // frame is awaiting I/O. Preserve wire order explicitly: hello must finish token validation and
   // capability setup before an immediately-following serve lease / adapter / send frame runs.
@@ -3474,7 +3478,11 @@ export class ChannelDO extends Server<Env> {
       hb.current_task,
       hb.task_started_at,
       hb.heartbeat_at,
-      hb.current_task === null || hb.activity === undefined ? null : JSON.stringify(hb.activity),
+      // 未来时间戳与 REST 直报同口径按脏值丢弃（容忍 60s 抖动）——ts 是序列化 TTL 的输入，
+      // 远未来值会让僵活动永不过期。
+      hb.current_task === null || hb.activity === undefined || hb.activity.ts - Date.now() > 60_000
+        ? null
+        : JSON.stringify(hb.activity),
       hb.runner_health === undefined ? null : JSON.stringify(hb.runner_health),
       hb.agent_session === undefined ? null : JSON.stringify(hb.agent_session),
       name,
@@ -6128,6 +6136,40 @@ export class ChannelDO extends Server<Env> {
         this.insertSystemStatus(`removed ${name} from channel`, now, false, { state: "done" });
       }
       return Response.json({ ok: true, owners: [...owners] });
+    }
+    // 交互 lane 活动直报（issue #615）：不跑 serve 的 Claude Code session 经 REST 自报活动。
+    // 授权在 worker 侧已判（agent 只准自报），do 只落状态。presence 无行则无从附着，静默吞。
+    const activityMatch = url.pathname.match(/^\/internal\/presence\/([^/]+)\/activity$/);
+    if (activityMatch && request.method === "POST") {
+      const name = decodeURIComponent(activityMatch[1] ?? "");
+      if (!name) {
+        return Response.json({ error: { code: "bad_request", message: "name required" } }, { status: 400 });
+      }
+      const body = (await request.json().catch(() => null)) as { activity?: unknown } | null;
+      const activity = parseAgentActivity(body?.activity);
+      const now = Date.now();
+      if (activity === undefined) {
+        return Response.json({ error: { code: "bad_request", message: "valid activity required" } }, { status: 400 });
+      }
+      // 未来时间戳拒收（容忍 60s 时钟抖动）：ts 是序列化侧 TTL 的输入，放进来一个远未来值
+      // 会让僵活动永不过期地钉在 presence 上。
+      if (activity.ts - now > 60_000) {
+        return Response.json({ error: { code: "bad_request", message: "activity.ts is in the future" } }, { status: 400 });
+      }
+      // 兜底节流（客户端已 15s 节流，这里防绕过）：按**服务端时钟**记上次接受时刻——client 提供的
+      // ts 不可信，不能当节流依据。DO 休眠会清掉内存标记，代价只是偶尔多接受一次，可承受。
+      const lastAccepted = this.activityPushAcceptedAt.get(name);
+      if (lastAccepted !== undefined && now - lastAccepted < 3_000) {
+        return Response.json({ ok: true, throttled: true });
+      }
+      this.activityPushAcceptedAt.set(name, now);
+      const updated = this.ctx.storage.sql.exec(
+        "UPDATE presence SET activity_json = ? WHERE name = ?",
+        JSON.stringify(activity),
+        name,
+      );
+      if (updated.rowsWritten > 0) this.broadcastPresenceFor(name);
+      return Response.json({ ok: true, attached: updated.rowsWritten > 0 });
     }
     // 人为暂停/恢复接待（issue #180）。授权在 worker 侧已判（moderator），do 只落状态。
     const pauseMatch = url.pathname.match(/^\/internal\/presence\/([^/]+)\/(pause|resume)$/);
@@ -9516,18 +9558,21 @@ export class ChannelDO extends Server<Env> {
             current_task: Number(r.current_task),
             ...(r.task_started_at === null || r.task_started_at === undefined ? {} : { task_started_at: Number(r.task_started_at) }),
             ...(r.heartbeat_at === null || r.heartbeat_at === undefined ? {} : { heartbeat_at: Number(r.heartbeat_at) }),
-            // 模型 session 活动（#602）：与心跳同生共死，只在有活跃任务时带出。
-            ...(() => {
-              if (typeof r.activity_json !== "string" || r.activity_json === "") return {};
-              try {
-                const activity = parseAgentActivity(JSON.parse(r.activity_json) as unknown);
-                return activity === undefined ? {} : { activity };
-              } catch {
-                return {};
-              }
-            })(),
           }
         : {}),
+      // 模型 session 活动（#602/#615）：不再绑死 current_task——交互 lane（不跑 serve）经 REST 直报
+      // 的活动没有任务上下文。改按 TTL 判新鲜：serve lane 任务结束仍主动清（activity_json=NULL），
+      // 交互 lane 靠 TTL 自然过期，不留僵活动。offline 一律不带。
+      ...(() => {
+        if (state === "offline" || typeof r.activity_json !== "string" || r.activity_json === "") return {};
+        try {
+          const activity = parseAgentActivity(JSON.parse(r.activity_json) as unknown);
+          if (activity === undefined || Date.now() - activity.ts > AGENT_ACTIVITY_TTL_MS) return {};
+          return { activity };
+        } catch {
+          return {};
+        }
+      })(),
       // runner 健康（#603）：独立于 current_task——空闲期也要能看见「干不动」；offline 不带。
       ...(() => {
         if (state === "offline" || typeof r.runner_health_json !== "string" || r.runner_health_json === "") return {};
