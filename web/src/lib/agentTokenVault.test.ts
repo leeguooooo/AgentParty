@@ -73,6 +73,18 @@ describe("buildMinimalAgentCommand", () => {
     expect(command).not.toContain("lark:on_22608d74");
   });
 
+  test("#597：合法邀请人（NAME_RE 命中）仍然照常 @ ——降级不许误伤正路径", () => {
+    const command = buildMinimalAgentCommand({
+      server: "https://agentparty.example.com",
+      slug: "bug-7744",
+      name: "helper",
+      token: "ap_fixture",
+      inviterName: "leo",
+      checkinMessage: "checking in",
+    });
+    expect(command).toContain('party send "checking in" --channel bug-7744 --mention leo');
+  });
+
   test("mcpServerName：`.` 消毒成 `-`，且消毒必须单射——a.b 与 a-b 不得同名（否则同目录注册互相覆盖=串号）", () => {
     expect(mcpServerName("desktop-worker")).toBe("party-desktop-worker");
     // 有损清洗追加原名短哈希；无损名字保持干净、稳定。
