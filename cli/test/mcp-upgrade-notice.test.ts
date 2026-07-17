@@ -120,7 +120,7 @@ describe("party mcp 服务端版本路径（真 stdio server + mock /api/version
       // 真正要跑的安装命令，action_required 走 runner 既有的 ask_user 流。
       expect(String(c1.cli_upgrade!.message)).toContain("restart this harness session");
       expect(String(c1.cli_upgrade!.message)).toContain("do NOT re-register");
-      expect(String(c1.cli_upgrade!.message)).not.toContain("serve 会自动");
+      expect(String(c1.cli_upgrade!.message)).not.toMatch(/\bserve\b/); // 任何 serve 指令（含 restart serve）都不得出现
       expect(String(c1.cli_upgrade!.command)).toContain("install.sh");
       expect(c1.cli_upgrade!.action_required).toBe("ask_user");
 
