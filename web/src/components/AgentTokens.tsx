@@ -184,6 +184,20 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
     );
   };
 
+  // #584：vault 里存的 command 是生成时刻的冻结文本，会带着旧世界观（TMPDIR 配置路径、
+  // 旧 MIN_CLI、无 MCP 步骤）继续流通。复制永远现场重建，存量 command 字段只留作兼容不再读。
+  function freshCommand(record: { name: string; token: string }): string {
+    return buildMinimalAgentCommand({
+      // #530：桌面版 location.origin 是 tauri://localhost，接入包会报错；优先真实后端 apiBase，同源 web 回退 origin。
+      server: apiOrigin(),
+      slug,
+      name: record.name,
+      token: record.token,
+      inviterName,
+      checkinMessage: t("AgentTokens.checkinMessage", { name: record.name }),
+    });
+  }
+
   async function copy(name: string, kind: "token" | "command", text: string) {
     const ok = await copyText(text);
     if (!ok) {
@@ -427,7 +441,7 @@ export function AgentTokens({ slug, token, accountKey, inviterName, onAuthFailed
                           <button type="button" className="d-btn" onClick={() => copy(agent.name, "token", saved.token)}>
                             {copied === `${agent.name}:token` ? t("AgentTokens.copied") : t("AgentTokens.copyToken")}
                           </button>
-                          <button type="button" className="d-btn" onClick={() => copy(agent.name, "command", saved.command)}>
+                          <button type="button" className="d-btn" onClick={() => copy(agent.name, "command", freshCommand(saved))}>
                             {copied === `${agent.name}:command` ? t("AgentTokens.copied") : t("AgentTokens.copyPack")}
                           </button>
                         </>
