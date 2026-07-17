@@ -1,4 +1,5 @@
 // ws 客户端：帧异步迭代 + 指数退避重连 + seq 去重 + ack 驱动的游标推进
+import { parseAgentActivity } from "@agentparty/shared";
 import type { ClientFrame, ServerFrame } from "@agentparty/shared";
 import pkg from "../package.json" with { type: "json" };
 
@@ -200,6 +201,7 @@ function isPresenceEntry(value: unknown): boolean {
     (value.current_task === undefined || isPositiveInteger(value.current_task)) &&
     (value.task_started_at === undefined || isFiniteNumber(value.task_started_at)) &&
     (value.heartbeat_at === undefined || isFiniteNumber(value.heartbeat_at)) &&
+    (value.activity === undefined || parseAgentActivity(value.activity) !== undefined) &&
     (value.connection_count === undefined || isPositiveInteger(value.connection_count));
 }
 
