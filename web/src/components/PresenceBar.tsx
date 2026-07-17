@@ -86,6 +86,12 @@ export interface Item {
   // 「还在干、活到 T」与「卡死」。null = 无活跃任务。
   currentTask: number | null;
   heartbeatAt: number | null; // 最近心跳（epoch ms）；据 now-heartbeatAt 算新鲜度
+  // 模型 session 活动（#602）：具体在干什么（工具名/等权限/压缩上下文…）。服务端只在活跃任务期间下发。
+  activity: NonNullable<PresenceEntry["activity"]> | null;
+  // 探活分级（#603）：listening = 服务端从 delivery 租约派生的「在线但没在听」；
+  // runnerHealth = serve 自报的「在线但干不动」（连败计数 + 最后错误）。
+  listening: NonNullable<PresenceEntry["listening"]> | null;
+  runnerHealth: NonNullable<PresenceEntry["runner_health"]> | null;
 }
 
 export interface PresenceGroup {
@@ -148,6 +154,56 @@ export function taskLabel(item: Item, now: number): string | null {
   if (item.currentTask === null) return null;
   const beat = item.heartbeatAt !== null ? ` · ♥ ${fmtRel(item.heartbeatAt, now)}` : "";
   return `▶ #${item.currentTask}${beat}`;
+}
+
+// 活动 chip 的新鲜度口径与 CLI（cli/src/activity.ts 的 ACTIVITY_TTL_MS）一致：超 5 分钟视为陈旧
+// 不展示（模型进程可能已死，别让频道看僵活动）；未来时间戳按脏值丢弃（容忍 1 分钟时钟抖动）。
+export const ACTIVITY_TTL_MS = 5 * 60_000;
+
+// 探活分级 chip（#603），优先级对齐 cli/src/commands/who.ts 的 livenessNote：
+// runner 连败（最需要 owner 行动）> 没在听（deaf）> 消费缓慢（suspect）。
+// 单次失败 ok=true 不告警（降噪口径同 CLI）。
+export function livenessBadge(item: Item): { key: string; vars?: Record<string, string | number>; tone: "bad" | "warn"; title: string | null } | null {
+  if (item.runnerHealth !== null && item.runnerHealth.ok === false) {
+    return {
+      key: "PresenceBar.runnerFailing",
+      vars: { count: item.runnerHealth.consecutive_failures },
+      tone: "bad",
+      title: item.runnerHealth.last_error ?? null,
+    };
+  }
+  if (item.listening === "deaf") return { key: "PresenceBar.listeningDeaf", tone: "bad", title: null };
+  if (item.listening === "suspect") return { key: "PresenceBar.listeningSuspect", tone: "warn", title: null };
+  return null;
+}
+
+// 模型 session 活动 chip（#602），文案对齐 cli/src/commands/who.ts 的 activityNote。
+// waiting_permission 单独 highlight——headless 权限确认没人点是无人值守最致命的静默挂法。
+export function activityBadge(item: Item, now: number): { key: string; vars: Record<string, string | number>; highlight: boolean } | null {
+  const activity = item.activity;
+  if (activity === null) return null;
+  if (activity.ts - now > 60_000 || now - activity.ts > ACTIVITY_TTL_MS) return null;
+  const age = fmtRel(activity.ts, now);
+  switch (activity.phase) {
+    case "tool":
+      return { key: "PresenceBar.activityTool", vars: { tool: activity.tool ?? "tool", age }, highlight: false };
+    case "waiting_permission":
+      return activity.tool !== undefined
+        ? { key: "PresenceBar.activityWaitingPermissionTool", vars: { tool: activity.tool, age }, highlight: true }
+        : { key: "PresenceBar.activityWaitingPermission", vars: { age }, highlight: true };
+    case "waiting_input":
+      return { key: "PresenceBar.activityWaitingInput", vars: { age }, highlight: true };
+    case "compacting":
+      return { key: "PresenceBar.activityCompacting", vars: { age }, highlight: false };
+    case "starting":
+      return { key: "PresenceBar.activityStarting", vars: { age }, highlight: false };
+    case "working":
+      return { key: "PresenceBar.activityWorking", vars: { age }, highlight: false };
+    case "idle":
+      return { key: "PresenceBar.activityIdle", vars: { age }, highlight: false };
+    default:
+      return null;
+  }
 }
 
 // #191：presence 的可唤醒徽章。三档一律走共享的 wakeableState（与 CLI `party who` / 服务端同口径），
@@ -313,6 +369,10 @@ export function PresenceBar({
       // 每任务进度/心跳（#228）：服务端只在 state != offline 且有活跃任务时下发 current_task，故离线项天然为 null。
       currentTask: typeof entry?.current_task === "number" ? entry.current_task : null,
       heartbeatAt: typeof entry?.current_task === "number" && typeof entry?.heartbeat_at === "number" ? entry.heartbeat_at : null,
+      // #602/#603：三组字段全可选、缺省即无恙（旧 worker 不下发时 UI 无任何变化）。
+      activity: entry?.activity ?? null,
+      listening: entry?.listening ?? null,
+      runnerHealth: entry?.runner_health ?? null,
     };
     if (!connected) {
       // owner 本就仅连接中的参与者可知（见上方字段注释）；handle 依赖同一份可信度，一并置空，
@@ -423,6 +483,8 @@ export function PresenceBar({
     const busy = busyLabel(it);
     const waitingOwner = localizeWaitingOwner(it);
     const task = taskLabel(it, now);
+    const liveness = livenessBadge(it);
+    const activityChip = activityBadge(it, now);
     const taskTitle =
       it.currentTask === null
         ? null
@@ -521,6 +583,21 @@ export function PresenceBar({
         {task !== null && (
           <span className="t-mono presence-busy presence-task" title={taskTitle ?? undefined}>
             {task}
+          </span>
+        )}
+        {liveness !== null && (
+          <span
+            className={`t-mono presence-busy presence-liveness presence-liveness--${liveness.tone}`}
+            title={liveness.title ?? undefined}
+          >
+            {t(liveness.key, liveness.vars)}
+          </span>
+        )}
+        {activityChip !== null && (
+          <span
+            className={`t-mono presence-busy presence-activity${activityChip.highlight ? " presence-activity--alert" : ""}`}
+          >
+            {t(activityChip.key, activityChip.vars)}
           </span>
         )}
         {full && it.lineage !== null && (
