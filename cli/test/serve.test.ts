@@ -360,6 +360,86 @@ describe("runServe", () => {
     expect(clear!.activity).toBeUndefined();
   });
 
+  // runner 健康自报（#603）：连败计数随任务收尾拍上行——熔断前那段「presence 全绿但 @ 了没人应」
+  // 的窗口从此可见。单次失败 ok 仍为 true（有重试兜底），≥2 连败才翻 false。
+  test("task heartbeat: reports runner_health on consecutive failures with the last error (#603)", async () => {
+    const beats: Array<{
+      current_task: number | null;
+      runner_health?: { ok: boolean; consecutive_failures: number; last_error?: string };
+    }> = [];
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "heartbeat") {
+        beats.push(frame as unknown as (typeof beats)[number]);
+        return;
+      }
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(0, "me"));
+      // 两条 @ 先后失败（第一条放弃宣告后欠账即了结、游标前移，第二条照常触发）→ 连败 2。
+      setTimeout(() => sock.send(msgFrame(1, "doomed wake", { mentions: ["me"] })), 10);
+      setTimeout(() => sock.send(msgFrame(2, "doomed again", { mentions: ["me"] })), 90);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 180);
+    });
+    const o = opts({
+      server: server.url,
+      maxWakeAttempts: 1,
+      wakeRetryDelayMs: 0,
+      post: async () => ({ seq: 99 }),
+      runCommand: async () => {
+        throw new Error("runner boom");
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+
+    const clears = beats.filter((b) => b.current_task === null);
+    expect(clears.length).toBeGreaterThanOrEqual(2);
+    // 第一次放弃：failures=1、ok 仍 true、带脱敏后的错误摘要
+    expect(clears[0]!.runner_health).toMatchObject({ ok: true, consecutive_failures: 1 });
+    expect(clears[0]!.runner_health!.last_error).toContain("runner boom");
+    // 第二次放弃：failures=2 → ok=false（「在线但干不动」）
+    expect(clears[1]!.runner_health).toMatchObject({ ok: false, consecutive_failures: 2 });
+    // 活跃拍也携带既有连败（第二条任务开跑时频道还能看见此前的失败史）
+    const secondStart = beats.filter((b) => b.current_task === 2 && b.runner_health !== undefined);
+    expect(secondStart.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("task heartbeat: in-task retry that ends delivered reports no runner_health (#603)", async () => {
+    const beats: Array<{
+      current_task: number | null;
+      runner_health?: { ok: boolean; consecutive_failures: number };
+    }> = [];
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "heartbeat") {
+        beats.push(frame as unknown as (typeof beats)[number]);
+        return;
+      }
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(0, "me"));
+      setTimeout(() => sock.send(msgFrame(1, "flaky then fine", { mentions: ["me"] })), 10);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 120);
+    });
+    let calls = 0;
+    const o = opts({
+      server: server.url,
+      maxWakeAttempts: 2,
+      wakeRetryDelayMs: 0,
+      post: async () => ({ seq: 99 }),
+      runCommand: async () => {
+        calls += 1;
+        // 第一次尝试失败（可重试），第二次成功——最终送达的任务不算 runner 失败。
+        if (calls === 1) throw new WakeBlockedError("spawn boom", true);
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+
+    expect(calls).toBe(2);
+    const clears = beats.filter((b) => b.current_task === null);
+    expect(clears.length).toBeGreaterThanOrEqual(1);
+    // 任务内重试后仍然送达 → 收尾拍不带 runner_health（服务端据此保持/恢复健康档）
+    expect(clears[clears.length - 1]!.runner_health).toBeUndefined();
+  });
+
   test("restart resume: serve reports the persisted runner session on welcome (#522)", async () => {
     const workdir = tempDir();
     writeFileSync(join(workdir, "wake-session.json"), JSON.stringify({

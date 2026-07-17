@@ -198,6 +198,66 @@ function freshServeWatchPresence(kind: "serve" | "watch") {
   };
 }
 
+// ── 探活分级（#603）：timeout 不再一锅端，按 presence 的负面证据细分为可处置结论 ──
+describe("wake test liveness tiers (#603)", () => {
+  function tieredMock(extra: Record<string, unknown>) {
+    return startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/presence") {
+        return Response.json({ presence: [{ ...freshServeWatchPresence("serve"), ...extra }] });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ seq: 50 });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/wake-deliveries") {
+        return Response.json({ deliveries: [] });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ messages: [] });
+      }
+      return undefined;
+    });
+  }
+
+  test("deaf presence refines timeout to not_listening with a supervisor-restart hint", async () => {
+    mock = tieredMock({ live: true, listening: "deaf" });
+    writeCfg(mock.url);
+
+    const r = await runCli(["wake", "test", "@agent", "dev", "--timeout", "1", "--json"]);
+    expect(r.code).toBe(2);
+    const frame = JSON.parse(r.stdout.trim());
+    expect(frame).toMatchObject({ type: "wake_test", result: "not_listening" });
+    expect(frame.reason).toContain("not consuming deliveries");
+    expect(frame.reason).toContain("restart its serve/watch supervisor");
+    expect(frame.presence.listening).toBe("deaf");
+  });
+
+  test("failing runner_health refines timeout to runner_failing and outranks the listening verdict", async () => {
+    mock = tieredMock({
+      live: true,
+      listening: "suspect",
+      runner_health: { ok: false, consecutive_failures: 2, last_error: "spawn claude ENOENT" },
+    });
+    writeCfg(mock.url);
+
+    const r = await runCli(["wake", "test", "@agent", "dev", "--timeout", "1", "--json"]);
+    expect(r.code).toBe(2);
+    const frame = JSON.parse(r.stdout.trim());
+    expect(frame).toMatchObject({ type: "wake_test", result: "runner_failing" });
+    expect(frame.reason).toContain("spawn claude ENOENT");
+    expect(frame.reason).toContain("fix the runner environment");
+    expect(frame.presence.runner_health).toMatchObject({ ok: false, consecutive_failures: 2 });
+  });
+
+  test("no adverse evidence keeps the plain timeout verdict", async () => {
+    mock = tieredMock({ live: true });
+    writeCfg(mock.url);
+
+    const r = await runCli(["wake", "test", "@agent", "dev", "--timeout", "1", "--json"]);
+    expect(r.code).toBe(2);
+    expect(JSON.parse(r.stdout.trim())).toMatchObject({ type: "wake_test", result: "timeout" });
+  });
+});
+
 describe("wake test audits serve/watch ledger (#107)", () => {
   test("serve broadcast (not yet consumed): wake_invoked reads the ledger, not 'not audited'", async () => {
     mock = startRestMock((req) => {

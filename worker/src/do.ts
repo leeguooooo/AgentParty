@@ -38,7 +38,10 @@ import {
   DELIVERY_ORIGIN_CHANNEL_LIMIT,
   DELIVERY_WORK_ID_LIMIT,
   parseAgentActivity,
+  parseRunnerHealth,
   type AgentActivity,
+  type ListeningVerdict,
+  type RunnerHealth,
   type AgentLineage,
   type AgentSessionInfo,
   type Attachment,
@@ -1217,6 +1220,7 @@ export interface ParsedTaskHeartbeat {
   task_started_at: number | null;
   heartbeat_at: number | null;
   activity?: AgentActivity;
+  runner_health?: RunnerHealth;
   agent_session?: AgentSessionInfo;
 }
 
@@ -1261,11 +1265,15 @@ function parseHeartbeatFrame(input: unknown): ParsedTaskHeartbeat | null {
   // 模型 session 活动（#602）：可选捎带；脏 activity 与脏 agent_session 同口径——整帧丢弃。
   const activity = f.activity === undefined ? undefined : parseAgentActivity(f.activity);
   if (f.activity !== undefined && activity === undefined) return null;
+  // runner 健康自报（#603）：同口径。
+  const runnerHealth = f.runner_health === undefined ? undefined : parseRunnerHealth(f.runner_health);
+  if (f.runner_health !== undefined && runnerHealth === undefined) return null;
   return {
     current_task: current,
     task_started_at: started,
     heartbeat_at: heartbeat,
     ...(activity === undefined ? {} : { activity }),
+    ...(runnerHealth === undefined ? {} : { runner_health: runnerHealth }),
     ...(agentSession === undefined ? {} : { agent_session: agentSession }),
   };
 }
@@ -1578,6 +1586,9 @@ export class ChannelDO extends Server<Env> {
       // 模型 session 活动（#602）：hook 落盘、serve 心跳捎带的「正在干什么」快照 JSON。
       // 与心跳字段同生共死（任务结束/离线即清）。
       "ALTER TABLE presence ADD COLUMN activity_json TEXT",
+      // runner 健康自报（#603）：serve runner 连败计数 + 最后错误。独立于 current_task 生命周期
+      //（空闲期也要能看见「干不动」）；恢复由心跳缺省即清，离线一并清。
+      "ALTER TABLE presence ADD COLUMN runner_health_json TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -1586,6 +1597,13 @@ export class ChannelDO extends Server<Env> {
       }
     }
     this.migratePresenceSessionSchema();
+    // 监听力判定（#603）：directed delivery 租约对「仍活着的连接」过期的连续次数，按身份聚合。
+    // live 只证明 TCP 活着；这张表回答「投喂了吃不吃」。任何一次被目标确认的 delivery 更新即清零。
+    sql.exec(`CREATE TABLE IF NOT EXISTS listening_health (
+      name TEXT PRIMARY KEY,
+      streak INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`);
     sql.exec(`CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -2097,6 +2115,7 @@ export class ChannelDO extends Server<Env> {
         task_started_at INTEGER,
         heartbeat_at INTEGER,
         activity_json TEXT,
+        runner_health_json TEXT,
         agent_session_json TEXT,
         PRIMARY KEY (name, session_id)
       )`);
@@ -2106,14 +2125,14 @@ export class ChannelDO extends Server<Env> {
         status_decision_json, status_workflow_json, role, role_source, residency, wake_kind,
         wake_verified_at, context_json, lineage_json, kind, account, client_version, handle,
         display_name, avatar_url, avatar_thumb, paused_at, paused_resume_at, busy, queue_depth,
-        current_task, task_started_at, heartbeat_at, activity_json, agent_session_json
+        current_task, task_started_at, heartbeat_at, activity_json, runner_health_json, agent_session_json
       ) SELECT
         name, COALESCE(NULLIF(session_id, ''), '${LEGACY_SESSION_ID}'), state, note, updated_at,
         status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
         status_decision_json, status_workflow_json, role, role_source, residency, wake_kind,
         wake_verified_at, context_json, lineage_json, kind, account, client_version, handle,
         display_name, avatar_url, avatar_thumb, paused_at, paused_resume_at, busy, queue_depth,
-        current_task, task_started_at, heartbeat_at, activity_json, agent_session_json
+        current_task, task_started_at, heartbeat_at, activity_json, runner_health_json, agent_session_json
       FROM presence`);
       sql.exec("DROP TABLE presence");
       sql.exec("ALTER TABLE presence_session_v2 RENAME TO presence");
@@ -2418,6 +2437,9 @@ export class ChannelDO extends Server<Env> {
       if (update === null || !this.applyDirectedDeliveryUpdate(st, connection.id, update, Date.now())) {
         badRequest();
       } else {
+        // 监听力判定（#603）：任何一次被接受的 delivery 更新（running/waiting_owner/replied/failed
+        // 都证明目标在消费投递，failed 也是「听见了」）即清零负面 streak，并把恢复广播出去。
+        if (this.clearListeningStreak(st.name)) this.broadcastPresenceFor(st.name);
         // Explicit per-connection ACK. A broadcast alone is insufficient: idempotent retries do not
         // change state, and the CLI must not advance durable work until it sees server confirmation.
         const row = this.directedDeliveryRow(update.delivery_id);
@@ -3330,6 +3352,7 @@ export class ChannelDO extends Server<Env> {
       `INSERT INTO presence (name, session_id, state, note, updated_at) VALUES (?, ?, 'offline', NULL, ?)
        ON CONFLICT(name, session_id) DO UPDATE SET state = 'offline', updated_at = excluded.updated_at,
          current_task = NULL, task_started_at = NULL, heartbeat_at = NULL, activity_json = NULL,
+         runner_health_json = NULL,
          -- #454：watch 只有活着的本地 listener 才能接住 @。最后一条连接断开后立即撤销 wake 声明，
          -- 不让被 harness kill 的 watch --once 继续以 wakeable 身份吸收 mention。serve/webhook 有独立
          -- supervisor/服务端投递语义，保持原样；watch 重挂后会由 advertiseWatchWake 重新声明。
@@ -3440,16 +3463,19 @@ export class ChannelDO extends Server<Env> {
         .toArray().length > 0;
     if (!exists) return;
     this.ctx.storage.sql.exec(
-      // activity（#602）不走 COALESCE：新鲜度与心跳同生共死，本拍没带就清空，绝不留僵值。
+      // activity（#602）/ runner_health（#603）不走 COALESCE：本拍没带就清空，绝不留僵值
+      //（activity 新鲜度与心跳同生共死；runner_health 恢复即自动清零）。
       // 清除帧（current_task=null）即便捎带了 activity 也一并清——没有任务就没有活动可言。
       `UPDATE presence SET current_task = ?, task_started_at = ?, heartbeat_at = ?,
          activity_json = ?,
+         runner_health_json = ?,
          agent_session_json = COALESCE(?, agent_session_json)
        WHERE name = ? AND session_id = ?`,
       hb.current_task,
       hb.task_started_at,
       hb.heartbeat_at,
       hb.current_task === null || hb.activity === undefined ? null : JSON.stringify(hb.activity),
+      hb.runner_health === undefined ? null : JSON.stringify(hb.runner_health),
       hb.agent_session === undefined ? null : JSON.stringify(hb.agent_session),
       name,
       sessionId,
@@ -6097,6 +6123,7 @@ export class ChannelDO extends Server<Env> {
         const now = Date.now();
         this.setMeta(this.removedPresenceKey(name), String(now));
         this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", name);
+        this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
         this.broadcastFrame({ type: "presence", name, state: "offline", note: null, ts: now });
         this.insertSystemStatus(`removed ${name} from channel`, now, false, { state: "done" });
       }
@@ -7885,6 +7912,8 @@ export class ChannelDO extends Server<Env> {
       sql.exec("DELETE FROM read_cursor WHERE name = ?", name);
       presence_deleted = countOne("SELECT COUNT(*) AS n FROM presence WHERE name = ?", name);
       sql.exec("DELETE FROM presence WHERE name = ?", name);
+      // 监听力 streak（#603）按身份聚合，同属可识别数据，随擦除一并物理删除。
+      sql.exec("DELETE FROM listening_health WHERE name = ?", name);
     });
     const erasedAt = Date.now();
     for (const seq of updatedSeqs) {
@@ -8707,12 +8736,19 @@ export class ChannelDO extends Server<Env> {
       const expiredConnectionId = expiredConnections.get(targetName);
       if (expiredConnectionId !== undefined) {
         for (const connection of this.getConnections<ConnState>()) {
-          if (connection.id === expiredConnectionId) connection.close(1012, "delivery lease expired");
+          if (connection.id === expiredConnectionId) {
+            // 监听力判定（#603）：租约过期时连接还活着 = 「投喂了不吃」的实锤（断连的租约由
+            // requeueDirectedDeliveriesForConnection 即时回收，不会走到这里）。计一次负面 streak，
+            // presence 据此下发 suspect/deaf——过去这里只默默换人，谁在反复超时频道看不见。
+            this.bumpListeningStreak(targetName, now);
+            connection.close(1012, "delivery lease expired");
+          }
         }
       }
       // 明确排除超时 runner，让同名 standby 立即接棒；没有 standby 时 work 留在 queued 等重连。
       this.reconcileServeLease(targetName, expiredConnectionId);
       this.dispatchNextDirectedDelivery(targetName, expiredConnectionId);
+      this.broadcastPresenceFor(targetName);
     }
   }
 
@@ -9257,7 +9293,7 @@ export class ChannelDO extends Server<Env> {
                 state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json, paused_at, paused_resume_at, busy, queue_depth,
-                current_task, task_started_at, heartbeat_at, activity_json, agent_session_json`;
+                current_task, task_started_at, heartbeat_at, activity_json, runner_health_json, agent_session_json`;
 
   private presenceList(): PresenceEntry[] {
     const liveCounts = this.liveConnectionCounts();
@@ -9274,12 +9310,14 @@ export class ChannelDO extends Server<Env> {
       group.push(row);
       grouped.set(name, group);
     }
+    const listeningStreaks = this.listeningStreaks();
     return [...grouped.entries()].map(([name, group]) =>
       this.withLivePresence(
         this.presenceRowToEntry(this.aggregatePresenceRow(name, group, liveSessions)),
         liveCounts,
         serveCounts,
         waitingOwnerCounts,
+        listeningStreaks,
       ),
     );
   }
@@ -9298,6 +9336,7 @@ export class ChannelDO extends Server<Env> {
           liveCounts,
           serveCounts,
           waitingOwnerCounts,
+          this.listeningStreaks(),
         )
       : null;
   }
@@ -9356,6 +9395,7 @@ export class ChannelDO extends Server<Env> {
     liveCounts: Map<string, number>,
     serveCounts?: Map<string, number>,
     waitingOwnerCounts?: Map<string, number>,
+    listeningStreaks?: Map<string, number>,
   ): PresenceEntry {
     const count = liveCounts.get(entry.name) ?? 0;
     const live = applyLiveConnection(entry, count > 0);
@@ -9365,7 +9405,39 @@ export class ChannelDO extends Server<Env> {
     const standbys = (serveCounts?.get(entry.name) ?? 0) - 1;
     const withStandbys = standbys > 0 ? { ...withCount, serve_standbys: standbys } : withCount;
     const waitingOwner = waitingOwnerCounts?.get(entry.name) ?? 0;
-    return waitingOwner > 0 ? { ...withStandbys, waiting_owner_count: waitingOwner } : withStandbys;
+    const withWaiting = waitingOwner > 0 ? { ...withStandbys, waiting_owner_count: waitingOwner } : withStandbys;
+    // 监听力判定（#603）：只对「当前有活连接」的身份下发——没有连接的身份是 offline/wakeable，
+    // 不是 deaf。streak 1 次 = suspect，连续 ≥2 次 = deaf。缺省 = 无恙。
+    const streak = count > 0 ? (listeningStreaks?.get(entry.name) ?? 0) : 0;
+    const listening: ListeningVerdict | null = streak >= 2 ? "deaf" : streak === 1 ? "suspect" : null;
+    return listening === null ? withWaiting : { ...withWaiting, listening };
+  }
+
+  // 监听力 streak（#603）：directed delivery 租约对活连接过期的连续次数，按身份聚合。
+  private listeningStreaks(): Map<string, number> {
+    const map = new Map<string, number>();
+    for (const row of this.ctx.storage.sql.exec("SELECT name, streak FROM listening_health").toArray()) {
+      map.set(String(row.name), Number(row.streak));
+    }
+    return map;
+  }
+
+  private bumpListeningStreak(name: string, now: number) {
+    this.ctx.storage.sql.exec(
+      // 判定只区分 1（suspect）与 ≥2（deaf），封顶 1000 防长期僵尸把计数器涨成天文数字。
+      `INSERT INTO listening_health (name, streak, updated_at) VALUES (?, 1, ?)
+       ON CONFLICT(name) DO UPDATE SET streak = MIN(streak + 1, 1000), updated_at = excluded.updated_at`,
+      name,
+      now,
+    );
+  }
+
+  /** 返回是否真的清掉了一条负面记录（调用方据此决定要不要广播 presence 变化）。 */
+  private clearListeningStreak(name: string): boolean {
+    const existed =
+      this.ctx.storage.sql.exec("SELECT 1 FROM listening_health WHERE name = ? LIMIT 1", name).toArray().length > 0;
+    if (existed) this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
+    return existed;
   }
 
   private waitingOwnerCounts(): Map<string, number> {
@@ -9456,6 +9528,16 @@ export class ChannelDO extends Server<Env> {
             })(),
           }
         : {}),
+      // runner 健康（#603）：独立于 current_task——空闲期也要能看见「干不动」；offline 不带。
+      ...(() => {
+        if (state === "offline" || typeof r.runner_health_json !== "string" || r.runner_health_json === "") return {};
+        try {
+          const health = parseRunnerHealth(JSON.parse(r.runner_health_json) as unknown);
+          return health === undefined ? {} : { runner_health: health };
+        } catch {
+          return {};
+        }
+      })(),
       ...(() => {
         if (typeof r.agent_session_json !== "string" || r.agent_session_json === "") return {};
         try {

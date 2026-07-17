@@ -520,6 +520,17 @@ export interface PresenceEntry {
    * 仅 state != offline 且有活跃任务时下发。旧客户端忽略。
    */
   activity?: AgentActivity;
+  /**
+   * runner 健康自报（issue #603）：serve runner 连败中（“在线但干不动”）。仅 state != offline 且
+   * 有连败（consecutive_failures ≥ 1）时下发；恢复由后续心跳缺省即清。旧客户端忽略。
+   */
+  runner_health?: RunnerHealth;
+  /**
+   * 服务端派生的监听力判定（issue #603）：directed delivery 租约对活连接过期 → suspect，
+   * 连续 ≥2 次 → deaf（“在线但没在听”）。仅有活 WS 连接且存在负面信号时下发；缺省 = 无恙。
+   * 目标任何一次确认 delivery 更新即清零。旧客户端忽略。
+   */
+  listening?: ListeningVerdict;
   /** Agent 自报并由频道持久化的模型会话句柄；供重启后精确 resume（issue #522）。 */
   agent_session?: AgentSessionInfo;
 }
@@ -544,6 +555,45 @@ export interface AgentActivity {
   /** 该活动的发生时刻（epoch ms）；消费方据 now-ts 判新鲜度。 */
   ts: number;
 }
+
+// runner 健康自报（issue #603）：serve 的 runner 连败（spawn 失败/硬超时/放弃）时，频道视角是
+// 「@ 了没人应」而 presence 全绿——熔断（MAX_CONSECUTIVE_WAKE_ABANDONS）退出前那段窗口完全不可见。
+// serve 把连败计数与最后错误随心跳帧自报；单次失败有重试兜底不算不健康（ok 在 ≥2 连败才翻 false）。
+export interface RunnerHealth {
+  ok: boolean;
+  consecutive_failures: number;
+  /** 最后一次失败的截断摘要（≤160 字符，已过 serve 侧脱敏）。 */
+  last_error?: string;
+}
+
+export function parseRunnerHealth(input: unknown): RunnerHealth | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const value = input as Record<string, unknown>;
+  if (typeof value.ok !== "boolean") return undefined;
+  if (
+    typeof value.consecutive_failures !== "number" ||
+    !Number.isInteger(value.consecutive_failures) ||
+    value.consecutive_failures < 0 ||
+    value.consecutive_failures > 1_000_000
+  ) return undefined;
+  // last_error 会被 who/wake 直接拼进终端输出：与 activity.tool 同口径剥 ESC/C0/C1，防转义序列注入。
+  const cleanedError =
+    typeof value.last_error === "string"
+      ? // eslint-disable-next-line no-control-regex
+        value.last_error.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 160)
+      : "";
+  const lastError = cleanedError.length > 0 ? cleanedError : undefined;
+  return {
+    ok: value.ok,
+    consecutive_failures: value.consecutive_failures,
+    ...(lastError === undefined ? {} : { last_error: lastError }),
+  };
+}
+
+// 监听力判定（issue #603）：live 只证明 TCP+握手活着；这里由服务端从 directed delivery 租约
+// 状态机派生「投喂了吃不吃」——租约对活连接过期一次 = suspect，连续 ≥2 次 = deaf。
+// 任何一次被目标确认的 delivery 更新（running/waiting_owner/replied/failed 都证明它在听）即清零。
+export type ListeningVerdict = "suspect" | "deaf";
 
 // activity 校验的统一口径：CLI 读 hook 落盘文件、DO 收 heartbeat 帧共用。
 // 脏值返回 undefined（调用方各自决定丢字段还是丢整帧）。tool 名截断到 64 字符——只是展示用途；
@@ -810,6 +860,11 @@ export interface HeartbeatFrame {
    * 缺省即「本拍无活动信息」，服务端把 activity 清空（活动新鲜度与心跳同生共死，绝不留僵值）。
    */
   activity?: AgentActivity;
+  /**
+   * runner 健康自报（issue #603）：serve 在任务收尾拍（含清除帧）带上连败计数。
+   * 缺省即「无连败」，服务端把已存的 runner_health 清空（恢复自动清零，绝不留僵值）。
+   */
+  runner_health?: RunnerHealth;
   /**
    * 可选的模型会话自报。可与任务心跳同帧，也可在三个任务字段均为 null 时单独上报；
    * 服务端持久化但不落聊天 history。缺省表示不更新已有会话。

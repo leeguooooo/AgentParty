@@ -3895,6 +3895,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
   let code = 0;
   let consecutiveWakeAbandons = 0;
   let wakeAbandonCircuitTripped = false;
+  // runner 健康自报（#603）：连败计数 + 最后错误，随任务心跳（含清除帧）上行。熔断
+  // （MAX_CONSECUTIVE_WAKE_ABANDONS）退出前那段「presence 全绿但 @ 了没人应」的窗口，
+  // 频道从此看得见「在线但干不动」。送达一次即清零（与 consecutiveWakeAbandons 同口径）。
+  let runnerHealth: { consecutive_failures: number; last_error?: string } = { consecutive_failures: 0 };
   let advertised = false;
   // 人为暂停接待（#180）：服务端对 webhook 已抑制，但 serve 是本地 supervisor、消息照样广播给它。
   // 收到自己的 paused presence 帧就自我抑制唤醒——被 @ 也不触发 runner，直到收到恢复帧。消息仍进历史。
@@ -4305,6 +4309,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
         const nowFn = o.now ?? (() => Date.now());
         const taskStartedAt = nowFn();
         const heartbeatIntervalMs = o.heartbeatIntervalMs ?? DEFAULT_TASK_HEARTBEAT_MS;
+        // runner 健康（#603）：finally 里的结账以「当时的 delivered」为准；随后的 completion probe
+        // 可能把 delivered 翻成 false（silent runner）。记住任务前的连败基数，供 probe 纠账。
+        const runnerFailuresBeforeTask = runnerHealth.consecutive_failures;
         // 活动上报（#602）：builtin claude runner 的 hooks 会把「正在干什么」落到约定文件；
         // 每拍读一次捎带进心跳帧。其它 runner（codex/sdk/custom）没有 hook 落盘，恒不带。
         const activityFile = o.builtinRunner?.harness === "claude" ? runnerActivityFile(o.builtinRunner.workdir) : null;
@@ -4313,13 +4320,23 @@ export async function runServe(o: ServeOptions): Promise<number> {
             ? { current_task: frame.seq, task_started_at: taskStartedAt, heartbeat_at: at }
             : { current_task: null, task_started_at: null, heartbeat_at: null };
           const activity = active && activityFile !== null ? readActivityFile(activityFile, at) : null;
+          // runner 健康（#603）：有连败才带；恢复后缺省即清（服务端不 COALESCE）。
+          const runnerHealthField = runnerHealth.consecutive_failures > 0
+            ? {
+                runner_health: {
+                  ok: runnerHealth.consecutive_failures < 2,
+                  consecutive_failures: runnerHealth.consecutive_failures,
+                  ...(runnerHealth.last_error === undefined ? {} : { last_error: runnerHealth.last_error }),
+                },
+              }
+            : {};
           try {
             bestEffortLocalState(() => writeHealthCache({ channel: o.channel, ...fields }));
           } catch {
             /* 本机 health 落盘失败不影响唤醒 */
           }
           try {
-            conn.send({ type: "heartbeat", ...fields, ...(activity === null ? {} : { activity }) });
+            conn.send({ type: "heartbeat", ...fields, ...(activity === null ? {} : { activity }), ...runnerHealthField });
           } catch {
             /* WS 未就绪就漏一拍：本机 health 仍新鲜，且下一拍/清除会补 */
           }
@@ -4399,6 +4416,16 @@ export async function runServe(o: ServeOptions): Promise<number> {
           // 任务收尾：无论送达、放弃还是抛异常穿透，都停心跳并清除本机+频道的「正在处理」状态。
           // 若身后还有排队的 wake，下一条自己的 started 拍会把 current_task 覆盖成新 seq。
           clearInterval(taskBeat);
+          // runner 健康（#603）先于清除帧结账：让这一拍就把「本条送达/放弃」的结论带给频道。
+          // 关停（shutdown）不算 runner 失败——那是 supervisor 生命周期，不是执行力问题。
+          if (shutdownError === null) {
+            runnerHealth = delivered
+              ? { consecutive_failures: 0 }
+              : {
+                  consecutive_failures: runnerHealth.consecutive_failures + 1,
+                  ...(lastError === "" ? {} : { last_error: sanitizeBlockedError(lastError).slice(0, 160) }),
+                };
+          }
           emitTaskBeat(false, nowFn());
           // WebSocket.send 只把帧交给本地发送队列；若服务端的终局帧已在入站队列里，下一轮会
           // 立刻 break 并 close socket。让出一拍，确保仍处于 OPEN 的连接有机会把 idle-clear
@@ -4424,6 +4451,12 @@ export async function runServe(o: ServeOptions): Promise<number> {
               deliveryConfirmed = true;
               lastError = "runner exited successfully without a linked channel reply";
               attemptsUsed = Math.max(attemptsUsed, attemptFloor + 1);
+              // runner 健康纠账（#603）：finally 已按「当时 delivered=true」清零；silent runner 是
+              // 真失败，按任务前基数 +1 恢复连败计数（下一拍心跳把纠正带给频道）。
+              runnerHealth = {
+                consecutive_failures: runnerFailuresBeforeTask + 1,
+                last_error: sanitizeBlockedError(lastError).slice(0, 160),
+              };
               out(`  ${lastError}: seq=${frame.seq}`);
               // The first completion probe already made `failed` authoritative in the Worker.
               // Clean exact local continuation state now; a disconnect before the redundant

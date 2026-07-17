@@ -26,7 +26,10 @@ Options:
   --timeout N    seconds to wait for linked ack/status (default: 30)
   --json         emit one structured wake_test frame`;
 
-type WakeResult = "not_auto_wakeable" | "healthy" | "timeout" | "self_target";
+// #603：把笼统的 timeout 按 presence 的探活分级细分——not_listening（服务端观测到 delivery
+// 租约对活连接反复过期）与 runner_failing（serve 自报 runner 连败）。处置完全不同：
+// 前者重启 supervisor / 查事件循环，后者修 runner 环境（二进制/凭据/沙箱）。
+type WakeResult = "not_auto_wakeable" | "healthy" | "timeout" | "self_target" | "not_listening" | "runner_failing";
 type AckEvidence = "reply_to" | "status.summary_seq";
 
 interface WakePresence {
@@ -35,6 +38,9 @@ interface WakePresence {
   wake_kind: string | null;
   wake_verified_at: number | null;
   last_seen: number | null;
+  // 探活分级（#603）：缺省即无恙。
+  listening?: PresenceEntry["listening"];
+  runner_health?: PresenceEntry["runner_health"];
 }
 
 interface WakeTestFrame extends Record<string, unknown> {
@@ -65,6 +71,8 @@ function summarizePresence(p: PresenceEntry | null): WakePresence {
     wake_kind: p?.wake?.kind ?? null,
     wake_verified_at: p?.wake?.verified_at ?? null,
     last_seen: p?.last_seen ?? p?.ts ?? null,
+    ...(p?.listening === undefined ? {} : { listening: p.listening }),
+    ...(p?.runner_health === undefined ? {} : { runner_health: p.runner_health }),
   };
 }
 
@@ -205,6 +213,11 @@ function printHuman(frame: WakeTestFrame) {
     frame.presence.state ? `state=${frame.presence.state}` : null,
     frame.presence.residency ? `residency=${frame.presence.residency}` : null,
     frame.presence.wake_kind ? `wake=${frame.presence.wake_kind}` : null,
+    // 探活分级（#603）：有负面证据才展示，缺省即无恙。
+    frame.presence.listening ? `listening=${frame.presence.listening}` : null,
+    frame.presence.runner_health && !frame.presence.runner_health.ok
+      ? `runner=failing x${frame.presence.runner_health.consecutive_failures}`
+      : null,
   ].filter((bit): bit is string => bit !== null);
   if (presenceBits.length > 0) console.log(`presence: ${presenceBits.join(" ")}`);
   console.log(
@@ -379,13 +392,37 @@ export async function run(argv: string[]): Promise<number> {
     // 只要它真的答复了就是可达的）。没 ack 时，若 heartbeat 视角本就负面（没声明适配器），
     // 结论仍是 not_auto_wakeable 但标注「探针已投递、未答复、未确认」——把 heartbeat 判定
     // 和投递判定摊开，而不是当初那句不可证伪的 mention: not sent。
-    const result: WakeResult = ack !== null ? "healthy" : gate.advisory !== null ? "not_auto_wakeable" : "timeout";
-    const frameReason =
+    let result: WakeResult = ack !== null ? "healthy" : gate.advisory !== null ? "not_auto_wakeable" : "timeout";
+    let frameReason =
       ack !== null
         ? null
         : gate.advisory !== null
           ? `${gate.advisory} (unconfirmed — probe delivered #${seq}, no reply within ${timeoutSec}s)`
           : timeoutReason;
+    // 探活分级（#603）：timeout 不再一锅端。重取一次 presence——若服务端/自报已给出证据，
+    // 细分为可处置的结论：runner_failing（修 runner 环境）优先于 not_listening（重启 supervisor），
+    // 因为「唤醒了起不来」比「没在消费」更接近根因。
+    let finalPresence = presence;
+    if (result === "timeout") {
+      try {
+        finalPresence = (await fetchPresence(cfg.server, cfg.token, channel)).find((p) => p.name === target) ?? presence;
+      } catch {
+        /* 刷新失败就用探针前的快照定级 */
+      }
+      const health = finalPresence?.runner_health;
+      if (health !== undefined && !health.ok) {
+        result = "runner_failing";
+        frameReason =
+          `probe delivered #${seq} but the target's runner keeps failing (x${health.consecutive_failures}` +
+          `${health.last_error !== undefined ? `: ${health.last_error}` : ""}) — fix the runner environment ` +
+          "(binary/credentials/sandbox) instead of re-mentioning";
+      } else if (finalPresence?.listening === "deaf" || finalPresence?.listening === "suspect") {
+        result = "not_listening";
+        frameReason =
+          `probe delivered #${seq} but the target's live connection is not consuming deliveries ` +
+          `(listening=${finalPresence.listening}) — restart its serve/watch supervisor instead of re-mentioning`;
+      }
+    }
     const wakeInvoked =
       gate.advisory !== null && wakeDelivery === null
         ? { ok: false as const, adapter, evidence: gate.advisory }
@@ -399,7 +436,7 @@ export async function run(argv: string[]): Promise<number> {
       result,
       generated_at: nowTs(),
       timeout_sec: timeoutSec,
-      presence: summarizePresence(presence),
+      presence: summarizePresence(finalPresence),
       phases: {
         mention_delivered: { ok: true, seq, evidence: "message accepted by channel history" },
         wake_invoked: wakeInvoked,

@@ -205,6 +205,66 @@ describe("presence per-task heartbeat (issue #228)", () => {
     ws.close();
   });
 
+  // runner 健康自报（issue #603）：serve 在任务收尾拍带上连败计数；独立于 current_task 生命周期
+  //（空闲期也要能看见「干不动」），恢复由后续心跳缺省即清。
+  it("stamps runner_health from a clear beat and keeps it visible while idle (#603)", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    const ws = await WsClient.open(slug, agent.token);
+    await ws.nextOfType("welcome");
+    ws.send({ type: "hello", since: 0 });
+    await seedPresence(ws);
+    // 排掉 seedPresence 的 presence 广播，后续 nextOfType("presence") 对齐一拍心跳（防竞态）
+    await ws.nextOfType("presence");
+
+    // 任务放弃后的清除帧：task 字段全 null，但 runner_health 留在 presence 上（空闲期可见）
+    ws.send({
+      type: "heartbeat",
+      current_task: null,
+      task_started_at: null,
+      heartbeat_at: null,
+      runner_health: { ok: false, consecutive_failures: 2, last_error: "spawn claude ENOENT" },
+    });
+    await ws.nextOfType("presence");
+    let entry = (await fetchPresence(slug, agent.token)).find((e) => e.name === agent.name);
+    expect(entry).toMatchObject({
+      runner_health: { ok: false, consecutive_failures: 2, last_error: "spawn claude ENOENT" },
+    });
+    expect(entry).not.toHaveProperty("current_task");
+
+    // 恢复：下一拍缺省 runner_health 即清空
+    ws.send({ type: "heartbeat", current_task: null, task_started_at: null, heartbeat_at: null });
+    await ws.nextOfType("presence");
+    entry = (await fetchPresence(slug, agent.token)).find((e) => e.name === agent.name);
+    expect(entry).not.toHaveProperty("runner_health");
+    ws.close();
+  });
+
+  it("drops a heartbeat carrying a malformed runner_health (#603)", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    const ws = await WsClient.open(slug, agent.token);
+    await ws.nextOfType("welcome");
+    ws.send({ type: "hello", since: 0 });
+    await seedPresence(ws);
+    await ws.nextOfType("presence");
+
+    ws.send({
+      type: "heartbeat",
+      current_task: 5,
+      task_started_at: 1000,
+      heartbeat_at: 1000,
+      runner_health: { ok: "nope", consecutive_failures: -1 },
+    });
+    ws.send({ type: "heartbeat", current_task: 6, task_started_at: 1000, heartbeat_at: 1000 });
+    await ws.nextOfType("presence");
+
+    const entry = (await fetchPresence(slug, agent.token)).find((e) => e.name === agent.name);
+    expect(entry).toMatchObject({ current_task: 6 });
+    expect(entry).not.toHaveProperty("runner_health");
+    ws.close();
+  });
+
   it("ignores a malformed heartbeat (negative / non-integer) without erroring the socket", async () => {
     const agent = await seedToken("agent");
     const slug = await createChannel(agent.token);
@@ -220,6 +280,32 @@ describe("presence per-task heartbeat (issue #228)", () => {
 
     const entry = (await fetchPresence(slug, agent.token)).find((e) => e.name === agent.name);
     expect(entry).toMatchObject({ current_task: 9 });
+    ws.close();
+  });
+});
+
+
+// runner_health.last_error 会被 who/wake 直接拼进终端：控制字符在协议校验层统一剥离（#603 复审）。
+describe("runner_health last_error hygiene (#603)", () => {
+  it("strips control characters from last_error before persisting", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    const ws = await WsClient.open(slug, agent.token);
+    await ws.nextOfType("welcome");
+    ws.send({ type: "hello", since: 0 });
+    await seedPresence(ws);
+    await ws.nextOfType("presence");
+
+    ws.send({
+      type: "heartbeat",
+      current_task: null,
+      task_started_at: null,
+      heartbeat_at: null,
+      runner_health: { ok: false, consecutive_failures: 2, last_error: "boom\u001b[31mevil\u0007end" },
+    });
+    await ws.nextOfType("presence");
+    const entry = (await fetchPresence(slug, agent.token)).find((e) => e.name === agent.name);
+    expect(entry?.runner_health?.last_error).toBe("boom[31mevilend");
     ws.close();
   });
 });
