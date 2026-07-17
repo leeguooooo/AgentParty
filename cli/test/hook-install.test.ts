@@ -67,6 +67,9 @@ describe("mergeHookSettings / removeHookSettings (#615)", () => {
   test("refuses to touch a broken settings file", () => {
     expect(() => mergeHookSettings("{not json", ours)).toThrow();
     expect(() => removeHookSettings("[1,2,3]")).toThrow();
+    // hooks 键或某个事件值不是期望形状：拒改，绝不静默吞掉用户内容
+    expect(() => mergeHookSettings(JSON.stringify({ hooks: "broken" }), ours)).toThrow();
+    expect(() => mergeHookSettings(JSON.stringify({ hooks: { Stop: { not: "array" } } }), ours)).toThrow();
   });
 });
 

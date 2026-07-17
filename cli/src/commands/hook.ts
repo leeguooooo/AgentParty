@@ -211,8 +211,12 @@ export function mergeHookSettings(source: string | null, hookSettingsJson: strin
   }
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
   for (const [event, entries] of Object.entries(ours.hooks)) {
-    const existing = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
-    const kept = stripOurCommands(existing);
+    // 事件值存在但不是数组（用户写坏了）：拒绝覆盖——「仅管理自身 hook」不容许吞掉用户内容。
+    const current = hooks[event];
+    if (current !== undefined && !Array.isArray(current)) {
+      throw new Error(`settings.hooks.${event} is not an array`);
+    }
+    const kept = stripOurCommands((current ?? []) as unknown[]);
     hooks[event] = [...kept, ...entries];
   }
   settings.hooks = hooks;
