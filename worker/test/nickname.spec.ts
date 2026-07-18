@@ -53,6 +53,15 @@ describe("agent 设昵称 + 全局唯一（#165）", () => {
     expect((await setNickname(a2.token, "唯一名")).status).toBe(409);
   });
 
+  it("#644: 保留名大小写不敏感——agent 不能用 System/SYSTEM 变体抢注保留 @ 命名空间", async () => {
+    const agent = await seedToken("agent", uniq("a"));
+    // RESERVED_NAMES=["system"]；@ 解析大小写不敏感，若保留名闸区分大小写，变体就能遮蔽广播语义。
+    // 修复前这些变体不撞保留名、也不撞任何 token/handle → 会 200 通过；修复后一律判冲突（409）。
+    expect((await setNickname(agent.token, "System")).status).toBe(409);
+    expect((await setNickname(agent.token, "SYSTEM")).status).toBe(409);
+    expect((await setNickname(agent.token, "SyStEm")).status).toBe(409);
+  });
+
   it("昵称不能撞人类 handle（共用 @ 命名空间）", async () => {
     const owner = uniq("acct");
     const human = await seedToken("human", uniq("h"), { owner });

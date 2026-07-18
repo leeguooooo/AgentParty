@@ -160,6 +160,66 @@ describe("channel attachments (R2)", () => {
     });
   });
 
+  it("#624: re-anchors a client-forged attachment url to the channel download path (no token exfil)", async () => {
+    const { token } = await seedToken("agent", uniq("owner"), { owner: "owner@ap.test" });
+    const slug = await createChannel(token);
+    const bytes = new TextEncoder().encode("real bytes");
+    const meta = (await (await upload(slug, token, "doc.pdf", bytes, "application/pdf")).json()) as {
+      key: string;
+      filename: string;
+      content_type: string;
+      size: number;
+      url: string;
+    };
+    // 客户端伪造 url 指向攻击者源（key 仍是合法频道 key）。服务端必须落库/回传时锚定回同源路径，
+    // 否则其他成员的客户端携带自己的 bearer token 去 fetch 该 url 就外泄了 token。
+    const send = await api(`/api/channels/${slug}/messages`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "message",
+        body: "forged url",
+        mentions: [],
+        reply_to: null,
+        attachments: [{ ...meta, url: "https://attacker.example/steal" }],
+      }),
+    });
+    expect(send.status).toBe(200);
+
+    const list = await api(`/api/channels/${slug}/messages`, token);
+    const { messages } = (await list.json()) as { messages: MsgFrame[] };
+    const served = messages.find((m) => m.body === "forged url")?.attachments?.[0]?.url ?? "";
+    expect(served).not.toContain("attacker.example");
+    expect(served.startsWith(`/api/channels/${slug}/attachments/`)).toBe(true);
+    expect(served).toBe(meta.url);
+  });
+
+  it("#625: forces Content-Disposition attachment for uploader-controlled text/html; images stay inline", async () => {
+    const { token } = await seedToken("agent", uniq("owner"), { owner: "owner@ap.test" });
+    const slug = await createChannel(token);
+    // 上传者可控 content_type；text/html 内联渲染就是存储型 XSS（nosniff 挡不住显式类型）。
+    const html = (await (await upload(
+      slug,
+      token,
+      "x.html",
+      new TextEncoder().encode("<script>alert(document.cookie)</script>"),
+      "text/html",
+    )).json()) as { url: string };
+    const dl = await download(slug, token, html.url.split("/attachments/")[1]!);
+    expect(dl.status).toBe(200);
+    expect(dl.headers.get("content-disposition") ?? "").toContain("attachment");
+
+    // 栅格图仍可内联，图片预览不受影响。
+    const png = (await (await upload(
+      slug,
+      token,
+      "p.png",
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]),
+      "image/png",
+    )).json()) as { url: string };
+    const pdl = await download(slug, token, png.url.split("/attachments/")[1]!);
+    expect(pdl.headers.get("content-disposition")).toBeNull();
+  });
+
   it("dedupes by content hash: same bytes+filename → same key; different bytes → different key (#387)", async () => {
     const { token } = await seedToken("agent", uniq("owner"), { owner: "owner@ap.test" });
     const slug = await createChannel(token);

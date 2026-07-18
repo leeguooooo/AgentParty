@@ -19,7 +19,10 @@ export async function nicknameConflict(
   nickname: string,
   forName: string,
 ): Promise<"reserved" | "token_name" | "handle" | "taken" | null> {
-  if (RESERVED_NAMES.includes(nickname)) return "reserved";
+  // #644：保留名比较必须大小写不敏感——其余各项都用 COLLATE NOCASE，而 @ 解析也是大小写不敏感的，
+  // 若这里区分大小写，agent 就能用 "Everyone"/"OWNER" 等变体抢注保留 @ 命名空间、遮蔽广播语义。
+  const loweredNickname = nickname.toLowerCase();
+  if (RESERVED_NAMES.some((reserved) => reserved.toLowerCase() === loweredNickname)) return "reserved";
   const tok = await db.prepare("SELECT 1 FROM tokens WHERE name = ? COLLATE NOCASE").bind(nickname).first();
   if (tok) return "token_name";
   const handle = await db

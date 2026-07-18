@@ -29,6 +29,24 @@ export function parseAttachments(raw: unknown): Attachment[] | null | undefined 
   return out;
 }
 
+// #624：把每个附件的 url 强制锚定到本频道的下载端点（由 key 推导），绝不信任客户端传入的 url。
+// 否则频道成员可把 url 指向攻击者源；其他成员的客户端渲染时会携带自己的 bearer token 去 fetch 该
+// url（见 web AttachmentList useAttachmentBlobUrl / resolveAttachmentDownloadUrl），token 即外泄。
+// 下载端点（GET /api/channels/:slug/attachments/:path）按 URL 里的 slug 从 R2 取对象，key 只是引用，
+// 所以这里只需保证落库/回传的 url 永远是同源相对路径。key 未按频道前缀（上传端点构造为 `${slug}/…`）
+// 时仍强制锚定成同源路径——最坏是个无效链接，绝不外泄。入站落库与出站回传两侧都要过一遍。
+export function anchorAttachmentUrls(
+  attachments: Attachment[] | undefined,
+  slug: string,
+): Attachment[] | undefined {
+  if (attachments === undefined) return undefined;
+  const prefix = `${slug}/`;
+  return attachments.map((a) => ({
+    ...a,
+    url: `/api/channels/${slug}/attachments/${a.key.startsWith(prefix) ? a.key.slice(prefix.length) : a.key}`,
+  }));
+}
+
 // 出站：库里存的 attachments_json 字符串 → Attachment[]（非法/空 → undefined，序列化时省略字段）。
 export function parseStoredAttachments(input: unknown): Attachment[] | undefined {
   if (typeof input !== "string" || input === "") return undefined;
