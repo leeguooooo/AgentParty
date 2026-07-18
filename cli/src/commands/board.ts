@@ -2,6 +2,7 @@
 import type { TaskRecord, TaskState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
+import { sanitizeSingleLine } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { fetchMe, handleRestError, listTasks } from "../rest";
@@ -30,10 +31,13 @@ function compact(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-function formatTask(task: TaskRecord): string {
+export function formatTask(task: TaskRecord): string {
   const assignee = task.assignee === null ? "unassigned" : `@${task.assignee.name}`;
   const labels = task.labels.length > 0 ? ` [${task.labels.join(",")}]` : "";
-  return `  #${task.id} P${task.priority} ${assignee}${labels} ${compact(task.title)}`;
+  // #629/#652：title/assignee/labels 都是服务端存的参与者可控自由文本。整行单列（无可信 TAB 分隔），
+  // 故整行过 sanitizeSingleLine：既剥离终端控制序列（同 task.ts:93），又把残留 TAB/换行折叠成空格，
+  // 防止塞入 \n 伪造整行、塞入 \t 伪造列。
+  return sanitizeSingleLine(`  #${task.id} P${task.priority} ${assignee}${labels} ${compact(task.title)}`);
 }
 
 function summarize(tasks: TaskRecord[]) {

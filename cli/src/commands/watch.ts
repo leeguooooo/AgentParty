@@ -612,7 +612,10 @@ export async function runWatch(o: WatchOptions): Promise<number> {
           out(o.json ? JSON.stringify(jsonFrame(frame as unknown as Record<string, unknown>)) : formatMsg(msg));
         }
         printed++;
-        displayedMessageSeqs.add(msg.seq);
+        // #643：displayedMessageSeqs 只有 --once 的 directed 去重路径（line ~504，受 acceptsDirectedDelivery
+        // 门控，要求 o.once）会读它。--follow / 默认模式永远读不到，逐条 add 会随频道消息无界增长（内存泄漏）。
+        // 只在 --once 下写：once 收到首个唤醒即 break，集合天然有界。
+        if (o.once === true) displayedMessageSeqs.add(msg.seq);
       }
       // 打印（或有意跳过）之后才推进游标，退出时入队未消费的消息留给下次补拉
       if (msg.seq > 0) conn.ack(msg.seq);
@@ -746,87 +749,121 @@ export async function run(argv: string[]): Promise<number> {
   else if (flags.once === true && isCodexRuntimeEnv()) console.error(ONCE_CODEX_ADVISORY);
   if (flags.once === true && flags.latest === true) console.error(ONCE_LATEST_ADVISORY);
   const localCursor = loadCursor(channel);
-  const stuck = loadStuck(channel);
+  let stuck = loadStuck(channel);
   // pending wake 比任何显式快进选择都优先。即使调用者误用 --latest，也不能先把仍未被模型
   // 确认的 @ 丢掉。REST 精确补拉后立即退出，避免重新挂起一个可能又被 harness 回收的后台任务。
   if (flags.once === true && stuck !== null) {
-    if (stuck.source !== "watch") {
+    // #643：pending-wake 重放本身就是一次唤醒投递，必须走与正常路径同一把单实例锁。否则两个并发的
+    // `watch --once` 重挂会各自读到同一条 debt、各自重放同一条 @ → agent 把同一条消息回两遍
+    // （instance-lock.ts 头注释描述的正是这种重复唤醒）。锁的目标/目录与 runWatch 的默认路径一致。
+    // 无论重放成功、拒绝，还是 directed-未确认落回正常路径交给 runWatch 重新抢锁，都在 finally 里释放。
+    const replayLockDir = defaultInstanceLockDir();
+    const replayLockTarget = instanceLockTarget(cfg.server, cfg.token, channel);
+    const replayLock =
+      flags["allow-multiple"] === true ? null : acquireInstanceLock("watch", replayLockTarget, replayLockDir);
+    if (replayLock && !replayLock.ok) {
       console.error(terminalOutput(
-        `error: #${channel} has a pending serve wake at seq=${stuck.seq}; ` +
-          "watch will not overwrite that delivery debt. Resume the existing party serve supervisor first.",
+        `watch: 已有 watcher 挂在 #${channel} 上（pid ${replayLock.heldByPid}）；` +
+          ` 不重放 pending wake seq=${stuck.seq}，避免同一条 @ 被回两遍——欠账已保留。` +
+          ` 等它退出或 kill ${replayLock.heldByPid}；确实想并存请加 --allow-multiple。`,
       ));
-      return 1;
+      return EXIT_ALREADY_WATCHING;
     }
-    // Directed debt 在 running ACK 前只是 unknown outcome。按旧 seq-only 路径直接重放会与
-    // Worker 租约超时后的重新分配并发执行同一 work；保持 debt，重新注册等该 delivery 的新 claim。
-    if (stuck.delivery_id !== undefined && stuck.delivery_acceptance !== "accepted") {
-      console.error(terminalOutput(
-        `watch: directed delivery=${stuck.delivery_id} 尚未确认 running；不会本地回放 seq=${stuck.seq}，` +
-          "正在重新挂接，等待服务端重新授予合法 claim。",
-      ));
-    } else {
-      try {
-        const [pendingPage, tail] = await Promise.all([
-          fetchMessages(cfg.server, cfg.token, channel, Math.max(0, stuck.seq - 1), 1),
-          fetchRecentMessages(cfg.server, cfg.token, channel, 1),
-        ]);
-        const pending = pendingPage.find((msg) => msg.seq === stuck.seq);
-        if (pending === undefined) {
-          console.error(terminalOutput(
-            `error: pending watch wake seq=${stuck.seq} is no longer retained; debt was preserved. ` +
-              `Inspect channel history before clearing or advancing this workspace state.`,
-          ));
-          return 1;
-        }
-        const replay = { ...stuck, attempts: stuck.attempts + 1 };
-        if (!saveWatchStuck(channel, replay)) {
-          console.error(terminalOutput(
-            `error: #${channel} acquired a pending serve wake while replaying seq=${stuck.seq}; ` +
-              "watch preserved that delivery debt and did not acknowledge this wake.",
-          ));
-          return 1;
-        }
-        const channelLastSeq = Math.max(stuck.channel_last_seq ?? 0, tail.at(-1)?.seq ?? 0, pending.seq);
-        const lag = Math.max(0, channelLastSeq - pending.seq);
-        const skippedMentionSeqs = stuck.skipped_mention_seqs ?? [];
-        if (flags.json === true) {
-          console.log(
-            JSON.stringify(
-              jsonFrame({
-                ...(pending as unknown as Record<string, unknown>),
-                watch_replay: true,
-                pending_ack: true,
-                replay_attempt: replay.attempts,
-                ...(stuck.delivery_id !== undefined ? { delivery_id: stuck.delivery_id } : {}),
-                ...(stuck.work_id !== undefined ? { work_id: stuck.work_id } : {}),
-                ...(stuck.continuation_ref !== undefined ? { continuation_ref: stuck.continuation_ref } : {}),
-                ...(stuck.delivery_acceptance !== undefined
-                  ? { delivery_acceptance: stuck.delivery_acceptance }
-                  : {}),
-                channel_last_seq: channelLastSeq,
-                lag,
-                skipped_mention_seqs: skippedMentionSeqs,
-              }),
-            ),
-          );
-        } else {
-          console.log(terminalOutput(
-            `watch: replaying pending unacknowledged wake seq=${stuck.seq} attempt=${replay.attempts}; ` +
-              (stuck.delivery_id !== undefined
-                ? `delivery=${stuck.delivery_id}${stuck.work_id !== undefined ? ` work_id=${stuck.work_id}` : ""}${stuck.continuation_ref !== undefined ? ` continuation_ref=${stuck.continuation_ref}` : ""}; `
-                : "") +
-              `channel_last_seq=${channelLastSeq} lag=${lag} ` +
-              `skipped_mention_seqs=${JSON.stringify(skippedMentionSeqs)}; ` +
-              `send a reply/status after handling it to clear this debt (or \`party ack --seq ${stuck.seq}\` if it needs no response).` +
-              (lag > 0 ? ` 补上下文：party history ${channel} --since ${stuck.seq}` : ""),
-          ));
-          console.log(formatMsg(pending));
-        }
-        if (flags.json !== true) console.error(ONCE_REARM_ADVISORY);
+    try {
+      // #652：拿到锁后**权威重读** debt。上面的 stuck 是锁前快照——两个并发 `watch --once` 会各自
+      // 在锁前读到同一条 debt；先抢到锁的重放并释放后，另一个若还用锁前的过期快照，就会重放已被处理
+      // 的同一条 wake（TOCTOU）。锁内重读把决策基准换成当前真值：另一进程已清账则本次不再重放。
+      stuck = loadStuck(channel);
+      if (stuck === null) {
+        console.error(terminalOutput(
+          `watch: #${channel} 的 pending wake 已被另一进程重放/清账，本次不再重放。`,
+        ));
         return 0;
-      } catch (e) {
-        return handleRestError(e);
       }
+      if (stuck.source !== "watch") {
+        console.error(terminalOutput(
+          `error: #${channel} has a pending serve wake at seq=${stuck.seq}; ` +
+            "watch will not overwrite that delivery debt. Resume the existing party serve supervisor first.",
+        ));
+        return 1;
+      }
+      // Directed debt 在 running ACK 前只是 unknown outcome。按旧 seq-only 路径直接重放会与
+      // Worker 租约超时后的重新分配并发执行同一 work；保持 debt，重新注册等该 delivery 的新 claim。
+      if (stuck.delivery_id !== undefined && stuck.delivery_acceptance !== "accepted") {
+        console.error(terminalOutput(
+          `watch: directed delivery=${stuck.delivery_id} 尚未确认 running；不会本地回放 seq=${stuck.seq}，` +
+            "正在重新挂接，等待服务端重新授予合法 claim。",
+        ));
+      } else {
+        try {
+          // #652：stuck 现在是 let（锁内会被权威重读重新赋值），闭包捕获 let 会被 TS 放宽回可空。
+          // 上面已 `if (stuck === null) return 0`，这里锁内的 stuck 必非空——把 seq 固定成 const 供闭包使用。
+          const pendingSeq = stuck.seq;
+          const [pendingPage, tail] = await Promise.all([
+            fetchMessages(cfg.server, cfg.token, channel, Math.max(0, pendingSeq - 1), 1),
+            fetchRecentMessages(cfg.server, cfg.token, channel, 1),
+          ]);
+          const pending = pendingPage.find((msg) => msg.seq === pendingSeq);
+          if (pending === undefined) {
+            console.error(terminalOutput(
+              `error: pending watch wake seq=${stuck.seq} is no longer retained; debt was preserved. ` +
+                `Inspect channel history before clearing or advancing this workspace state.`,
+            ));
+            return 1;
+          }
+          const replay = { ...stuck, attempts: stuck.attempts + 1 };
+          if (!saveWatchStuck(channel, replay)) {
+            console.error(terminalOutput(
+              `error: #${channel} acquired a pending serve wake while replaying seq=${stuck.seq}; ` +
+                "watch preserved that delivery debt and did not acknowledge this wake.",
+            ));
+            return 1;
+          }
+          const channelLastSeq = Math.max(stuck.channel_last_seq ?? 0, tail.at(-1)?.seq ?? 0, pending.seq);
+          const lag = Math.max(0, channelLastSeq - pending.seq);
+          const skippedMentionSeqs = stuck.skipped_mention_seqs ?? [];
+          if (flags.json === true) {
+            console.log(
+              JSON.stringify(
+                jsonFrame({
+                  ...(pending as unknown as Record<string, unknown>),
+                  watch_replay: true,
+                  pending_ack: true,
+                  replay_attempt: replay.attempts,
+                  ...(stuck.delivery_id !== undefined ? { delivery_id: stuck.delivery_id } : {}),
+                  ...(stuck.work_id !== undefined ? { work_id: stuck.work_id } : {}),
+                  ...(stuck.continuation_ref !== undefined ? { continuation_ref: stuck.continuation_ref } : {}),
+                  ...(stuck.delivery_acceptance !== undefined
+                    ? { delivery_acceptance: stuck.delivery_acceptance }
+                    : {}),
+                  channel_last_seq: channelLastSeq,
+                  lag,
+                  skipped_mention_seqs: skippedMentionSeqs,
+                }),
+              ),
+            );
+          } else {
+            console.log(terminalOutput(
+              `watch: replaying pending unacknowledged wake seq=${stuck.seq} attempt=${replay.attempts}; ` +
+                (stuck.delivery_id !== undefined
+                  ? `delivery=${stuck.delivery_id}${stuck.work_id !== undefined ? ` work_id=${stuck.work_id}` : ""}${stuck.continuation_ref !== undefined ? ` continuation_ref=${stuck.continuation_ref}` : ""}; `
+                  : "") +
+                `channel_last_seq=${channelLastSeq} lag=${lag} ` +
+                `skipped_mention_seqs=${JSON.stringify(skippedMentionSeqs)}; ` +
+                `send a reply/status after handling it to clear this debt (or \`party ack --seq ${stuck.seq}\` if it needs no response).` +
+                (lag > 0 ? ` 补上下文：party history ${channel} --since ${stuck.seq}` : ""),
+            ));
+            console.log(formatMsg(pending));
+          }
+          if (flags.json !== true) console.error(ONCE_REARM_ADVISORY);
+          return 0;
+        } catch (e) {
+          return handleRestError(e);
+        }
+      }
+    } finally {
+      // directed-未确认落回正常路径前必须先放锁，否则 runWatch 会把同 pid 的自己误判成"已有 watcher"而被闭。
+      replayLock?.release?.();
     }
   }
   const initialLatest =

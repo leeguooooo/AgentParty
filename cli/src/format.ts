@@ -13,6 +13,14 @@ export function stripTerminalControls(text: string): string {
   return text.replace(ANSI_CSI, "").replace(TERMINAL_CONTROL, "");
 }
 
+// #652 单行字段清理：stripTerminalControls 特意保留了 \t\n（formatMsg 的多行结构靠它们），但渲染成
+// 「一行一条」的 list/table 行时，服务端可控自由文本里的 \n 能伪造整行、\t 能伪造列。这些字段必须先
+// 过本函数把残留 TAB/换行折叠成单个空格，再和可信的结构分隔符（列 TAB、换行）拼接。多行消息体仍用
+// 纯 stripTerminalControls，不要在那里折叠换行。
+export function sanitizeSingleLine(text: string): string {
+  return stripTerminalControls(text).replace(/[\t\n]+/g, " ");
+}
+
 function formatSender(m: MsgFrame): string {
   const owner = m.sender.owner && m.sender.owner !== m.sender.name ? ` owner=${m.sender.owner}` : "";
   const lineage = m.sender.lineage ? ` parent=${m.sender.lineage.parent_agent} team=${m.sender.lineage.team_id}` : "";
