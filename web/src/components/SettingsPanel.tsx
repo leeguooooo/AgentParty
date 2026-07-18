@@ -51,6 +51,12 @@ export function SettingsPanel({
   const [notifyOptin, setNotifyOptin] = useState<boolean>(readNotifyOptin);
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // #654 复审：把 onClose 固化进 ref，让焦点陷阱 effect 只按挂载/卸载跑一次。
+  // 否则父级传内联箭头函数（onClose={() => setShow(false)}）每次渲染都换新身份，
+  // effect 依赖 [onClose] 会反复清理+重挂——清理阶段抢先把焦点还给触发元素（焦点闪出闪回），
+  // 重挂时 previouslyFocused 变成面板内元素，最终关闭把焦点恢复到已卸载节点，焦点恢复失效。
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   // #637 a11y：真正 trap focus——打开时把焦点移进面板、Tab 只在面板内循环、关闭恢复到触发元素；
   // 外加 Esc 关闭。此前注释声称「锁焦点」实则只挂了 Esc。
@@ -70,7 +76,7 @@ export function SettingsPanel({
     (focusables()[0] ?? panelRef.current)?.focus?.();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key !== "Tab") return;
@@ -98,7 +104,8 @@ export function SettingsPanel({
       // 关闭时把焦点交还给打开面板的触发元素。
       previouslyFocused?.focus?.();
     };
-  }, [onClose]);
+    // 依赖固定为空数组：trap+restore 只按开合各跑一次，不随 onClose 身份变化重挂。
+  }, []);
 
   const pickTheme = useCallback((next: Theme) => {
     applyTheme(next);

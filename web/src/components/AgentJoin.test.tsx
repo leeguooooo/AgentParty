@@ -368,6 +368,7 @@ describe("AgentJoin 复制反馈 (#642)", () => {
   });
 
   test("复制成功不显示错误横幅、按钮切到已复制", async () => {
+    localStorage.setItem("ap_locale", "en");
     copyResult = true;
     const r = render();
     open(r);
@@ -376,5 +377,9 @@ describe("AgentJoin 复制反馈 (#642)", () => {
       await r.root.find((node) => node.props.className === "d-btn agent-join-copy").props.onClick();
     });
     expect(r.root.findAll((node) => node.props.className === "banner banner--red agent-join-copyerr")).toHaveLength(0);
+    // #654 复审：不止「没有错误横幅」，还要确认按钮切到「已复制」文案——
+    // 这样删掉 setCopied(ok) 会让本条挂掉（否则仅靠错误横幅缺席，删了也照样绿）。
+    const copyBtn = r.root.find((node) => node.props.className === "d-btn agent-join-copy");
+    expect(String(copyBtn.children[0] ?? "")).toBe("copied ✓");
   });
 });
