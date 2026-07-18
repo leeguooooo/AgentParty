@@ -3317,8 +3317,10 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       const mcpStateDir = `${prepared.runnerWorkdir}.mcp`;
       if (laneProtocol === "mcp") {
         // 兜底 fail-closed：万一某种策略下路径推导仍落进沙箱，拒绝启动而不是把 token 暴露给模型。
+        // rel === "" 表示 mcpStateDir 与沙箱根**相等**，同样越界（CodeRabbit #651）；rel 不以 .. 开头
+        // 且非绝对路径表示嵌套在沙箱内。两种都拒。
         const relToWorkspace = relative(prepared.channelWorkdir, mcpStateDir);
-        if (relToWorkspace !== "" && !relToWorkspace.startsWith("..") && !isAbsolute(relToWorkspace)) {
+        if (!relToWorkspace.startsWith("..") && !isAbsolute(relToWorkspace)) {
           throw new Error(
             `refusing managed MCP: state dir ${mcpStateDir} is inside the worker sandbox ${prepared.channelWorkdir} ` +
               "(would leak the child token / manifest to the sandboxed model)",
@@ -3580,7 +3582,13 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       if (!lifecycleSignal.aborted) lifecycleController.abort(new ServeShutdownError("SIGTERM"));
       await Promise.allSettled([...attaching.values()]);
       await Promise.allSettled([...running.values()]);
-      maybeReexecUpgrade(true, opts.upgradeDeps);
+      // re-exec 失败（execv 抛错）也必须返回 EXIT_UPGRADED，让外层 supervisor（launchd/tmux）用新
+      // 二进制拉起，而不是把异常抛出 daemon（CodeRabbit #651）。lane 已排空，此刻退出干净。
+      try {
+        maybeReexecUpgrade(true, opts.upgradeDeps);
+      } catch (error) {
+        out(`serve: re-exec 失败，退出让 supervisor 用新版拉起: ${errText(error)}`);
+      }
       return EXIT_UPGRADED;
     }
     if (opts.once) {
