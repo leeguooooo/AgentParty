@@ -1983,6 +1983,79 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_lowers_the_high_water_mark_so_the_restored_build_stays_servable() {
+        let app_data = tempdir().unwrap();
+        let store = UiUpdateStore::new(app_data.path());
+        let verifier = RecordingVerifier::default();
+        let limits = UpdateLimits::default();
+
+        // 上一版 A：默认 published_at 2026-07-11。
+        let first_bundle = archive(&[("index.html", b"v1", None), ("assets/app.js", b"1", None)]);
+        let first = signed_manifest(&first_bundle)
+            .verify_for_core("0.2.94", SUPPORTED_UI_ABI, &verifier)
+            .unwrap()
+            .verify_archive(&first_bundle, &verifier)
+            .unwrap();
+        let first_staged = store.stage(&first, &first_bundle, &limits).unwrap();
+        store.activate(&first_staged).unwrap();
+        store
+            .mark_ready(first.build_id(), SUPPORTED_UI_ABI)
+            .unwrap();
+
+        // 新版 B：published_at 严格晚于 A，并且 mark_ready 后是一个“已证实”的当前
+        // 构建——这正是 quarantine_current（而非 fail_and_rollback）的入口：确认过的
+        // 构建在服务期才暴露故障。
+        let second_bundle = archive(&[("index.html", b"v2", None), ("assets/app.js", b"2", None)]);
+        let mut second_manifest = signed_manifest(&second_bundle).manifest;
+        second_manifest.version = "1.5.0".to_string();
+        second_manifest.build_id = "a33a665e06f3b3dcb1d45f9cccbad0be83581637".to_string();
+        second_manifest.published_at = "2026-07-12T07:30:00Z".to_string();
+        second_manifest.archive.name = "agentparty-desktop-ui-v1.5.0.tar.gz".to_string();
+        second_manifest.archive.url = "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/agentparty-desktop-ui-v1.5.0.tar.gz".to_string();
+        let second = SignedUiManifest::new(second_manifest, "manifest-signature")
+            .unwrap()
+            .verify_for_core("0.2.94", SUPPORTED_UI_ABI, &verifier)
+            .unwrap()
+            .verify_archive(&second_bundle, &verifier)
+            .unwrap();
+        let second_staged = store.stage(&second, &second_bundle, &limits).unwrap();
+        let t_a = first_staged.published_at;
+        let t_b = second_staged.published_at;
+        assert!(t_b > t_a, "fixture must have a strictly newer failed build");
+        store.activate(&second_staged).unwrap();
+        store
+            .mark_ready(second.build_id(), SUPPORTED_UI_ABI)
+            .unwrap();
+
+        // activate 乐观地把 high-water 前移到 B，mark_ready 不改动它。
+        assert_eq!(store.load_metadata().unwrap().highest_published_at, Some(t_b));
+
+        store
+            .quarantine_current(second.build_id(), FailureReason::BootFailed)
+            .unwrap();
+
+        let failed = store.load_metadata().unwrap();
+        assert_eq!(failed.current.as_deref(), Some(first.build_id()));
+        assert_eq!(failed.status, UpdateStatus::Failed);
+        // 隔离后 high-water 降回 A 的 published_at，而不是停在被隔离的 B 上。
+        assert_eq!(failed.highest_published_at, Some(t_a));
+
+        // 关键回归：服务层用 Some(highest) 作 minimum 时，恢复的 A 仍可服务，
+        // 不再被自身的降级校验当成 rollback 拒绝（修复前这里会返回 RollbackRejected）。
+        let served = store
+            .verified_current_archive_at_least(
+                "0.2.94",
+                SUPPORTED_UI_ABI,
+                &verifier,
+                &limits,
+                failed.highest_published_at,
+            )
+            .unwrap()
+            .expect("restored previous build must still be servable after quarantine");
+        assert_eq!(served.build_id(), first.build_id());
+    }
+
+    #[test]
     fn rejects_a_signed_manifest_older_than_the_accepted_high_water_mark() {
         let app_data = tempdir().unwrap();
         let store = UiUpdateStore::new(app_data.path());

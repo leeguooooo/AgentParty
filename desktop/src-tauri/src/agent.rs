@@ -1222,6 +1222,14 @@ mod tests {
         // 复现 #645：stop_instance_key 的 kill 失败路径把实例标 Failed。若不淘汰，
         // 反复 kill 失败会让终止态历史超出 MAX_TERMINAL_INSTANCES。这里断言 Failed
         // 实例与其它终止态一样参与收敛，且活跃实例永不被淘汰。
+        //
+        // 为什么测不到 stop_instance_key 本体（CodeRabbit #655 复审）：那条 kill 失败分支
+        // 需要一个 .kill() 会报错的真实子进程——child 字段是 tauri_plugin_shell 的
+        // CommandChild，无公开构造函数，只能由 AppHandle 背后的 shell 运行时 spawn 得到；
+        // 而 stop_instance_key 又是 AgentManager 上的 async 方法。单元测试里既造不出会失败
+        // 的 CommandChild，也起不了 Tauri 运行时。因此这里改测该分支所依赖的不变量：kill
+        // 失败落 Failed 后（见 stop_instance_key 第 504、509 行的 mark_exited + evict），
+        // evict_terminal_overflow 会把 Failed 与其它终止态一并收敛、且不碰活跃实例。
         let mut instances: HashMap<String, super::ManagedAgent> = HashMap::new();
         let mut active = super::ManagedAgent::default();
         active.runtime.started_at = Some(1000);
