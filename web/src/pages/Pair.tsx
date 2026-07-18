@@ -4,9 +4,15 @@ import "../i18n/strings/Pair";
 import { normalizePairingCode } from "../lib/desktopPairing";
 import { normalizeServerOrigin } from "../lib/serverProfiles";
 
+// worker/src/desktop-pairing.ts 的 pairingView 计算的状态：pending 才可决策，其余均为已决/失效终态。
+export type PairingStatus = "pending" | "approved" | "denied" | "consumed" | "expired";
+
 export interface PairingInspection {
   pairing_id: string;
   user_code: string;
+  // #638：worker 每次 inspect 都返回 status，已决（approved/denied/consumed/expired）时前端必须读它
+  // 走只读态，别再渲染点了必 409 的 Approve/Deny。
+  status?: PairingStatus | null;
   device?: {
     name?: string | null;
     platform?: string | null;
@@ -15,11 +21,21 @@ export interface PairingInspection {
   device_name?: string | null;
   platform?: string | null;
   app_version?: string | null;
-  expires_at?: string | null;
+  // #638：worker 发的是 expires_in（剩余秒数），此前前端读的 expires_at 永远为空，Expires 行是死字段。
+  expires_in?: number | null;
 }
 
 type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 type PairingDecision = "approve" | "deny";
+
+// 把 worker 的 expires_in（剩余秒数）格式化成紧凑相对时长，供复审的「Expires」行显示。
+export function formatExpiresIn(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86400)}d`;
+}
 
 export function extractPairingCodeAndSanitizeUrl(href: string): {
   userCode: string | null;
@@ -104,8 +120,8 @@ export function PairingReview({ inspection, pending, onDecision }: ReviewProps) 
         <div><dt>{t("Pair.device.name")}</dt><dd>{name}</dd></div>
         <div><dt>{t("Pair.device.platform")}</dt><dd>{platform}</dd></div>
         <div><dt>{t("Pair.device.version")}</dt><dd>{version}</dd></div>
-        {inspection.expires_at && (
-          <div><dt>{t("Pair.device.expires")}</dt><dd>{inspection.expires_at}</dd></div>
+        {typeof inspection.expires_in === "number" && (
+          <div><dt>{t("Pair.device.expires")}</dt><dd>{formatExpiresIn(inspection.expires_in)}</dd></div>
         )}
       </dl>
       <div className="pair-actions">
@@ -117,6 +133,25 @@ export function PairingReview({ inspection, pending, onDecision }: ReviewProps) 
         </button>
       </div>
     </section>
+  );
+}
+
+// #638：已决/失效的配对以只读横幅呈现，而非可点的 Approve/Deny（点了必被 worker 409 拒）。
+export function PairingResolvedNotice({ status }: { status: Exclude<PairingStatus, "pending"> }) {
+  const t = useT();
+  const key =
+    status === "approved"
+      ? "Pair.resolved.approved"
+      : status === "denied"
+        ? "Pair.resolved.denied"
+        : status === "consumed"
+          ? "Pair.resolved.consumed"
+          : "Pair.resolved.expired";
+  const negative = status === "denied" || status === "expired";
+  return (
+    <p className={`banner${negative ? " banner--red" : ""}`} role="status">
+      {t(key)}
+    </p>
   );
 }
 
@@ -242,9 +277,12 @@ export function PairPage({ serverOrigin, token, initialCode, onRequireHuman, onD
                 {pending ? t("Pair.inspect.loading") : t("Pair.inspect")}
               </button>
             </form>
-            {inspection !== null && (
-              <PairingReview inspection={inspection} pending={pending} onDecision={(next) => void submitDecision(next)} />
-            )}
+            {inspection !== null &&
+              (inspection.status == null || inspection.status === "pending" ? (
+                <PairingReview inspection={inspection} pending={pending} onDecision={(next) => void submitDecision(next)} />
+              ) : (
+                <PairingResolvedNotice status={inspection.status} />
+              ))}
           </>
         )}
         {error !== null && <p className="banner banner--red" role="alert">{error}</p>}

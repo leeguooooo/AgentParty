@@ -46,6 +46,11 @@ hljs.registerLanguage("yaml", langYaml);
 // 每次渲染新建一个 Marked 实例：代码块高亮 renderer 恒定，mention 扩展按本条消息的
 // identities 闭包注入。mention 在解析后的 token 流上美化，代码块/行内代码/自动链接 URL
 // 天然被排除（见 mentionMarkup.ts 与 #131），不再往原文里塞裸 HTML。
+// 把裸 HTML token 的原文转义成可见文本（用于中和用户消息里的 inline/block HTML）。
+function escapeRawHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
 function createMarked(identities: IdentityDisplayMap | undefined): Marked {
   const instance = new Marked();
   instance.use({
@@ -56,6 +61,14 @@ function createMarked(identities: IdentityDisplayMap | undefined): Marked {
           ? hljs.highlight(text, { language }).value
           : hljs.highlightAuto(text).value;
         return `<pre><code class="hljs">${html}</code></pre>`;
+      },
+      // #642 安全：消息 body 里的裸 HTML（inline <span …> 与 block）一律转义成可见文本，
+      // 绝不作为真实 DOM 渲染。否则用户可写 `<span class="ap-mention" title="@owner">@owner</span>`
+      // 借用应用样式伪造一个没真正 @、也不通知任何人的 @mention（或用 hljs-* 借样式）——
+      // DOMPurify 的 class 白名单按名字放行，无法辨别来源，挡不住。真正的 mention span 由
+      // mentionExtension 在解析后生成（apMention token，不走这条 html renderer），不受影响。
+      html({ text }) {
+        return escapeRawHtml(text);
       },
     },
   });

@@ -14,8 +14,10 @@ mock.module("../lib/api", () => ({
   createChannelAgent: mock(async (_slug: string, name: string) => ({ name, token: "ap_created" })),
 }));
 
+// #642：可翻转的复制结果——默认成功（存量用例语义不变），失败用例里置 false。
+let copyResult = true;
 mock.module("../lib/agentTokenVault", () => ({
-  copyText: async () => true,
+  copyText: async () => copyResult,
   MIN_CLI: "0.2.124",
   VERSION_GE_SNIPPET: "version_ge(){ :; }",
   mcpServerName: (agentName: string) => `party-${agentName.replace(/[^a-zA-Z0-9_-]/g, "-")}`,
@@ -53,6 +55,7 @@ let storedLocale: string | null;
 beforeEach(() => {
   savedAgents.length = 0;
   storedLocale = null;
+  copyResult = true;
   windowEvents = new TestEventTarget();
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "window", {
@@ -343,5 +346,35 @@ describe("AgentJoin 接入包 server 域名 (#530)", () => {
     expect(command).toContain("party init --server https://agentparty.leeguoo.com ");
     // 绝不能回退到 location.origin(桌面端的伪源，此处以 https://party.test 代表)
     expect(command).not.toContain("party init --server https://party.test");
+  });
+});
+
+describe("AgentJoin 复制反馈 (#642)", () => {
+  async function generate(r: ReactTestRenderer) {
+    await act(async () => {
+      await r.root.find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick).props.onClick();
+    });
+  }
+
+  test("复制失败弹出错误横幅，不再静默（命令带只展示一次的 token）", async () => {
+    copyResult = false;
+    const r = render();
+    open(r);
+    await generate(r);
+    await act(async () => {
+      await r.root.find((node) => node.props.className === "d-btn agent-join-copy").props.onClick();
+    });
+    expect(r.root.findAll((node) => node.props.className === "banner banner--red agent-join-copyerr")).toHaveLength(1);
+  });
+
+  test("复制成功不显示错误横幅、按钮切到已复制", async () => {
+    copyResult = true;
+    const r = render();
+    open(r);
+    await generate(r);
+    await act(async () => {
+      await r.root.find((node) => node.props.className === "d-btn agent-join-copy").props.onClick();
+    });
+    expect(r.root.findAll((node) => node.props.className === "banner banner--red agent-join-copyerr")).toHaveLength(0);
   });
 });

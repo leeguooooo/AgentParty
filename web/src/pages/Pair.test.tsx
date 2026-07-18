@@ -6,8 +6,10 @@ import { PairStrings } from "../i18n/strings/Pair";
 import {
   decideDesktopPairing,
   extractPairingCodeAndSanitizeUrl,
+  formatExpiresIn,
   inspectDesktopPairing,
   PairHumanRequiredAction,
+  PairingResolvedNotice,
   PairingReview,
   PairPage,
   type PairingInspection,
@@ -16,12 +18,13 @@ import {
 const inspection: PairingInspection = {
   pairing_id: "pair-1",
   user_code: "AB12C-DE34F",
+  status: "pending",
   device: {
     name: "Leo's Mac",
     platform: "macos",
     app_version: "0.2.85",
   },
-  expires_at: "2026-07-10T12:00:00Z",
+  expires_in: 300,
 };
 
 describe("pair URL handling", () => {
@@ -139,5 +142,49 @@ describe("PairPage", () => {
     );
     expect(html).toContain("Switch to a human account");
     expect(html).toContain('class="d-btn pair-human-login"');
+  });
+});
+
+describe("#638 pairing expiry + already-decided state", () => {
+  test("formatExpiresIn renders the worker's expires_in seconds as a compact duration", () => {
+    expect(formatExpiresIn(45)).toBe("45s");
+    expect(formatExpiresIn(300)).toBe("5m");
+    expect(formatExpiresIn(7200)).toBe("2h");
+    expect(formatExpiresIn(0)).toBe("0s");
+    expect(formatExpiresIn(-10)).toBe("0s");
+  });
+
+  test("PairingReview shows the Expires row derived from expires_in (previously a dead field)", () => {
+    const html = renderToStaticMarkup(
+      <LocaleProvider>
+        <PairingReview inspection={inspection} pending={false} onDecision={() => {}} />
+      </LocaleProvider>,
+    );
+    expect(html).toContain("Expires");
+    expect(html).toContain("5m");
+  });
+
+  test("an already-decided pairing renders a read-only notice, not failing Approve/Deny buttons", () => {
+    const html = renderToStaticMarkup(
+      <LocaleProvider>
+        <PairingResolvedNotice status="approved" />
+      </LocaleProvider>,
+    );
+    expect(html).toContain("This pairing was already approved.");
+    expect(html).not.toContain("pair-deny");
+    expect(html).not.toContain("Approve this device");
+  });
+
+  test("registers read-only status copy in both locales", () => {
+    for (const locale of ["en", "zh"] as const) {
+      for (const key of [
+        "Pair.resolved.approved",
+        "Pair.resolved.denied",
+        "Pair.resolved.consumed",
+        "Pair.resolved.expired",
+      ]) {
+        expect(PairStrings[locale][key]).toBeTruthy();
+      }
+    }
   });
 });

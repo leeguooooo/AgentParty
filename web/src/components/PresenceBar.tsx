@@ -137,9 +137,12 @@ function residencyBadge(item: Item): string | null {
 }
 
 // busy 标签（#103）：「⏳ busy」或「⏳ busy · N queued」。null = 不忙，不渲染。
-export function busyLabel(item: Item): string | null {
+// #639：返回 { key, vars } 走 t()，别写死英文——zh 界面也要翻译。
+export function busyLabel(item: Item): { key: string; vars?: { count: number } } | null {
   if (!item.busy) return null;
-  return item.queueDepth !== null ? `⏳ busy · ${item.queueDepth} queued` : "⏳ busy";
+  return item.queueDepth !== null
+    ? { key: "PresenceBar.busyQueued", vars: { count: item.queueDepth } }
+    : { key: "PresenceBar.busy" };
 }
 
 export function waitingOwnerLabel(item: Item): { key: string; vars: { count: number } } | null {
@@ -150,10 +153,12 @@ export function waitingOwnerLabel(item: Item): { key: string; vars: { count: num
 
 // 每任务进度/心跳 chip（#228）：「▶ #510」或「▶ #510 · ♥ 8s」。比 busy 更细——不仅「在忙」，还标明
 // 正在处理哪条 wake（触发 seq）和心跳新鲜度。心跳还在推进 = 活着；很旧 = 大概率卡死。null = 无活跃任务。
-export function taskLabel(item: Item, now: number): string | null {
+// #639：走已存在的 taskChip/taskChipBeat i18n 键（曾是死键），别写死 chip 文本。
+export function taskLabel(item: Item, now: number): { key: string; vars: { seq: number; age?: string } } | null {
   if (item.currentTask === null) return null;
-  const beat = item.heartbeatAt !== null ? ` · ♥ ${fmtRel(item.heartbeatAt, now)}` : "";
-  return `▶ #${item.currentTask}${beat}`;
+  return item.heartbeatAt !== null
+    ? { key: "PresenceBar.taskChipBeat", vars: { seq: item.currentTask, age: fmtRel(item.heartbeatAt, now) } }
+    : { key: "PresenceBar.taskChip", vars: { seq: item.currentTask } };
 }
 
 // 活动 chip 的新鲜度口径与 CLI（cli/src/activity.ts 的 ACTIVITY_TTL_MS）一致：超 5 分钟视为陈旧
@@ -483,6 +488,7 @@ export function PresenceBar({
     const busy = busyLabel(it);
     const waitingOwner = localizeWaitingOwner(it);
     const task = taskLabel(it, now);
+    const taskText = task === null ? null : t(task.key, task.vars);
     const liveness = livenessBadge(it);
     const activityChip = activityBadge(it, now);
     const taskTitle =
@@ -495,7 +501,11 @@ export function PresenceBar({
     const full = mode === "full";
     const titleParts = [
       it.owner !== null && it.owner !== it.name ? `${it.name} · ${it.owner}` : it.name,
-      it.busy ? `busy${it.queueDepth !== null ? ` · ${it.queueDepth} queued` : ""} (reachable, reply may be slow — do not re-@)` : null,
+      it.busy
+        ? it.queueDepth !== null
+          ? t("PresenceBar.busyTitleQueued", { count: it.queueDepth })
+          : t("PresenceBar.busyTitle")
+        : null,
       it.waitingOwnerCount > 0 ? t("PresenceBar.waitingOwnerTitle", { count: it.waitingOwnerCount }) : null,
       taskTitle,
       it.handle !== null && it.handle !== "" ? `handle: ${it.handle}` : null,
@@ -542,6 +552,9 @@ export function PresenceBar({
         onKeyDown={
           onOpenAgentDetail !== undefined
             ? (e) => {
+                // #635：焦点落在嵌套的 pause/resume/kick 控件上时，键盘激活会冒泡到本 pill；
+                // 只在事件 target 就是 pill 自身时才接管（对齐 renderGroup 的守卫）。
+                if (e.target !== e.currentTarget) return;
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   openAgentDetail(it.name);
@@ -578,11 +591,11 @@ export function PresenceBar({
             {badge}
           </span>
         )}
-        {busy !== null && <span className="t-mono presence-busy">{busy}</span>}
+        {busy !== null && <span className="t-mono presence-busy">{t(busy.key, busy.vars)}</span>}
         {waitingOwner !== null && <span className="t-mono presence-busy presence-waiting-owner">{waitingOwner}</span>}
-        {task !== null && (
+        {taskText !== null && (
           <span className="t-mono presence-busy presence-task" title={taskTitle ?? undefined}>
-            {task}
+            {taskText}
           </span>
         )}
         {liveness !== null && (
@@ -703,6 +716,9 @@ export function PresenceBar({
     return (
       <section
         key={group.key}
+        // #637 a11y：本 section 是可键盘激活的 disclosure toggle，必须显式 role="button"，
+        // 否则 aria-expanded 不被 AT 暴露、只当成普通 region 播报。
+        role="button"
         tabIndex={0}
         aria-expanded={full}
         className={
@@ -750,7 +766,10 @@ export function PresenceBar({
         </div>
         {!full && (
           <div className="presence-group-agents" aria-label={`agents owned by ${group.label}`}>
-            {previewAgents.map((agent) => (
+            {previewAgents.map((agent) => {
+              const agentBusy = busyLabel(agent);
+              const agentTask = taskLabel(agent, now);
+              return (
               <span
                 key={agent.name}
                 className={`presence-agent-chip${onOpenAgentDetail !== undefined ? " presence-agent-chip--clickable" : ""}`}
@@ -800,17 +819,20 @@ export function PresenceBar({
                 )}
                 {agent.connectionCount > 1 && <span className="t-mono presence-agent-duplicate">x{agent.connectionCount}</span>}
                 {roleBadge(agent, now) !== null && <span className="t-mono presence-agent-role">{roleBadge(agent, now)}</span>}
-                {busyLabel(agent) !== null && <span className="t-mono presence-busy presence-busy--chip">{busyLabel(agent)}</span>}
+                {agentBusy !== null && (
+                  <span className="t-mono presence-busy presence-busy--chip">{t(agentBusy.key, agentBusy.vars)}</span>
+                )}
                 {agent.waitingOwnerCount > 0 && (
                   <span className="t-mono presence-busy presence-busy--chip presence-waiting-owner">
                     {t("PresenceBar.waitingOwnerChip", { count: agent.waitingOwnerCount })}
                   </span>
                 )}
-                {taskLabel(agent, now) !== null && (
-                  <span className="t-mono presence-busy presence-busy--chip presence-task">{taskLabel(agent, now)}</span>
+                {agentTask !== null && (
+                  <span className="t-mono presence-busy presence-busy--chip presence-task">{t(agentTask.key, agentTask.vars)}</span>
                 )}
               </span>
-            ))}
+              );
+            })}
             {hiddenAgents > 0 && <span className="t-mono presence-agent-more">+{hiddenAgents}</span>}
           </div>
         )}

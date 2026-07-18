@@ -21,6 +21,7 @@ function memoryStorage(): Storage {
 }
 
 let renderer: ReactTestRenderer | null = null;
+let keyHandlers: Array<(e: { key: string }) => void> = [];
 
 function render(props: Parameters<typeof OnboardingGuide>[0] = {}) {
   act(() => {
@@ -40,6 +41,18 @@ function steps() {
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
+  keyHandlers = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      addEventListener: (type: string, fn: (e: { key: string }) => void) => {
+        if (type === "keydown") keyHandlers.push(fn);
+      },
+      removeEventListener: (type: string, fn: (e: { key: string }) => void) => {
+        if (type === "keydown") keyHandlers = keyHandlers.filter((h) => h !== fn);
+      },
+    },
+  });
 });
 
 afterEach(() => {
@@ -47,6 +60,7 @@ afterEach(() => {
     act(() => renderer!.unmount());
     renderer = null;
   }
+  Reflect.deleteProperty(globalThis, "window");
 });
 
 describe("OnboardingGuide (#146)", () => {
@@ -76,6 +90,15 @@ describe("OnboardingGuide (#146)", () => {
     act(() => { dismissBtn.props.onClick(); });
 
     // 关掉后：标记落库 + 浮层消失
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("1");
+    expect(steps().length).toBe(0);
+  });
+
+  test("Escape 关闭模态并落库（#637 与其它模态一致）", () => {
+    render();
+    expect(steps().length).toBe(4);
+    // 模拟按下 Esc：触发挂到 window 的 keydown 监听
+    act(() => { keyHandlers.forEach((h) => h({ key: "Escape" })); });
     expect(localStorage.getItem(STORAGE_KEY)).toBe("1");
     expect(steps().length).toBe(0);
   });

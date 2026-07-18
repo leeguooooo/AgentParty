@@ -202,9 +202,21 @@ export function DesktopAgentPanel({ t, adapter = desktopAgentAdapter, scheduler 
   const toggleLogs = async () => {
     const nextOpen = !logsOpen;
     setLogsOpen(nextOpen);
-    if (!nextOpen || logs !== null) return;
+    // #642：底部聚合日志切换是「聚合视图」。若之前打开过某个实例的日志（logsFor 被锁死），
+    // 必须在这里解除锁定并丢弃其缓存——否则聚合视图会被那个实例永久劫持，adapter.logs() 永远拿不到。
+    const wasInstance = logsFor !== null;
+    if (wasInstance) {
+      setLogsFor(null);
+      setLogs(null);
+    }
+    if (!nextOpen) return;
+    // 源从单实例切回聚合时必须重拉；否则命中聚合缓存就跳过。
+    if (logs !== null && !wasInstance) return;
+    setLogs(null);
+    // 显式走聚合 adapter.logs()：此刻 setLogsFor(null) 尚未落到 fetchLogs 闭包里的 logsFor，
+    // 直接用 fetchLogs 会读到旧值仍指向实例。
     try {
-      const nextLogs = (await fetchLogs()).map(safeError);
+      const nextLogs = (await adapter.logs()).map(safeError);
       if (aliveRef.current) setLogs(nextLogs);
     } catch (cause) {
       if (aliveRef.current) setError(safeError(cause));

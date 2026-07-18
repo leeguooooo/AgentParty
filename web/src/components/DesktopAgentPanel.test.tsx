@@ -139,6 +139,48 @@ describe("DesktopAgentPanel 多实例 (#616)", () => {
     expect(stops).toEqual(["local-main:agentparty"]);
   });
 
+  // #642：打开过某实例日志后，底部聚合日志切换必须回到 adapter.logs()，不能被该实例永久劫持。
+  test("聚合日志切换清除单实例锁定，重开走 adapter.logs() 而非实例", async () => {
+    const noopScheduler: DesktopAgentScheduler = { every: () => () => {} };
+    let aggregate = 0;
+    const instanceCalls: string[] = [];
+    const root = await render(
+      adapter({
+        statusAll: async () => [running],
+        logs: async () => {
+          aggregate += 1;
+          return ["aggregate-line"];
+        },
+        logsInstance: async (id: string) => {
+          instanceCalls.push(id);
+          return ["instance-line"];
+        },
+      }),
+      noopScheduler,
+    );
+
+    // 打开某实例的日志 → 锁定 logsFor=local-main:agentparty，显示实例日志
+    await act(async () => {
+      await button("Logs local-main:agentparty").props.onClick();
+    });
+    expect(instanceCalls).toEqual(["local-main:agentparty"]);
+    expect(JSON.stringify(renderer!.toJSON())).toContain("instance-line");
+
+    // 底部聚合日志切换：此刻是展开态 → 点一次收起（顺带清 logsFor），再点一次重新展开聚合视图
+    const toggle = () => root.find((n) => n.props.className === "desktop-agent-logs-toggle");
+    await act(async () => {
+      await toggle().props.onClick();
+    });
+    await act(async () => {
+      await toggle().props.onClick();
+    });
+
+    // 关键回归：重开聚合走 adapter.logs()，且没有再打实例日志
+    expect(aggregate).toBeGreaterThan(0);
+    expect(instanceCalls).toEqual(["local-main:agentparty"]);
+    expect(JSON.stringify(renderer!.toJSON())).toContain("aggregate-line");
+  });
+
   test("start 透传 workdir/repo；同键实例活跃时禁用启动", async () => {
     const starts: DesktopAgentStartInput[] = [];
     const root = await render(adapter({

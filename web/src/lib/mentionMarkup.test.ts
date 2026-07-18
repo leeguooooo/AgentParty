@@ -158,6 +158,22 @@ describe("mention 美化：真实管线集成（#131）", () => {
     expect(R("hi @self there")).toBe("<p>hi @self there</p>");
   });
 
+  // #642 安全：用户消息里的裸 HTML 不得借样式伪造 @mention（ap-mention span）或系统 UI（hljs span）。
+  // 用一个不在 IDS 里的名字（owner），确保正文里没有真 mention 干扰断言——只看假标签有没有被中和。
+  it("用户裸 HTML 里的 ap-mention span 被转义成可见文本，不冒充真 mention", () => {
+    const out = R('<span class="ap-mention" title="@owner">@owner</span>');
+    // 假 span 已被 marked 层转义，不再是真实 DOM 元素（没有一个活的 ap-mention 元素）
+    expect(out).not.toContain('<span class="ap-mention"');
+    expect(out).toContain("&lt;span");
+    expect(out).toContain("&lt;/span&gt;");
+  });
+
+  it("用户裸 HTML 里的 hljs span 也被转义，不能借代码高亮样式", () => {
+    const out = R('<span class="hljs-keyword">fake</span>');
+    expect(out).not.toContain('<span class="hljs-keyword"');
+    expect(out).toContain("&lt;span");
+  });
+
   it("句首、以及 /、* 等真实边界后的 @name 都识别为 mention", () => {
     expect(R("@alice")).toBe('<p><span class="ap-mention" title="@alice">@Alice</span></p>');
     expect(R("path /@alice/x")).toContain(

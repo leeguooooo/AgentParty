@@ -48,3 +48,34 @@ describe("issue #504 team blog board layout", () => {
     expect(css).not.toContain('.agent-board-lane--offline[data-empty="true"]');
   });
 });
+
+describe("issue #636 undefined CSS variables", () => {
+  test("the agent board 'busy' accent tracks the themed amber token instead of a fixed blue", () => {
+    expect(ruleBody(".agent-board-row--busy")).toContain("border-left-color: var(--p-busy)");
+    expect(ruleBody(".agent-board-status--busy")).toContain("color: var(--p-busy)");
+    // 死透的离主题蓝彻底消失
+    expect(css).not.toContain("#4a9eff");
+  });
+
+  test("the agent board lanes/rows/notes no longer lean on undefined --border/--muted fallbacks", () => {
+    const section = css.slice(css.indexOf(".agent-board-empty"), css.indexOf("/* #273 全局设置面板 */"));
+    expect(section).not.toContain("var(--border, #2a2a2a)");
+    expect(section).not.toContain("var(--muted, #888)");
+    expect(section).not.toContain("var(--muted, #999)");
+    expect(section).not.toContain("var(--danger, #e5534b)");
+    expect(section).toContain("var(--t-faint)");
+    expect(section).toContain("var(--t-muted)");
+  });
+
+  test("composer attachment/upload borders and presence chips resolve to defined theme tokens", () => {
+    // 未定义变量无兜底时整条 border/background 会失效（computed-value-time invalid → none/transparent）。
+    // 全站不得再出现裸 var(--border) / var(--bg) / var(--accent, var(--fg))。
+    expect(css).not.toMatch(/var\(--border\)/);
+    expect(css).not.toMatch(/var\(--bg\)/);
+    expect(css).not.toContain("var(--accent, var(--fg))");
+    expect(ruleBody(".composer-attachment")).toContain("border: 1px solid var(--t-faint)");
+    expect(ruleBody(".composer-upload-spinner")).toContain("border: 2px solid var(--t-faint)");
+    expect(ruleBody(".composer-upload-spinner")).toContain("border-top-color: var(--t-text)");
+    expect(ruleBody(".composer--dragging")).toContain("outline: 2px dashed var(--t-accent)");
+  });
+});

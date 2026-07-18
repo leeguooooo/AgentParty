@@ -23,11 +23,23 @@ function memoryStorage(seed: Record<string, string> = {}): Storage {
 let renderer: ReactTestRenderer | null = null;
 let store: Storage;
 let themeAttribute: string | null = null;
+let keyHandlers: Array<(e: { key: string; shiftKey?: boolean; preventDefault?: () => void }) => void> = [];
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   store = memoryStorage({ ap_locale: "en" });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });
-  Object.defineProperty(globalThis, "window", { configurable: true, value: globalThis });
+  keyHandlers = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      addEventListener: (type: string, fn: (e: { key: string }) => void) => {
+        if (type === "keydown") keyHandlers.push(fn);
+      },
+      removeEventListener: (type: string, fn: (e: { key: string }) => void) => {
+        if (type === "keydown") keyHandlers = keyHandlers.filter((h) => h !== fn);
+      },
+    },
+  });
   themeAttribute = null;
   Object.defineProperty(globalThis, "document", {
     configurable: true,
@@ -169,5 +181,18 @@ describe("SettingsPanel (#273)", () => {
     const txt = allText(render({ me: null, canSetHandle: false, onClose: () => {}, onLogout: null }));
     expect(txt).toContain("Language");
     expect(txt).not.toContain("Account");
+  });
+
+  // #637 a11y：aria-modal 对话框现在真正接管键盘——Esc 关闭由焦点陷阱 effect 统一处理。
+  test("dialog is focusable and Escape invokes onClose (focus-trap effect)", () => {
+    let closes = 0;
+    const r = render({ me, canSetHandle: false, onClose: () => { closes += 1; }, onLogout: () => {} });
+    // 面板本身可作为焦点回退目标（tabindex=-1）
+    const panel = findByClass(r.toJSON(), "settings-panel");
+    expect(panel?.props.tabIndex).toBe(-1);
+    // effect 已把 keydown 监听挂到 window；模拟 Esc
+    expect(keyHandlers.length).toBeGreaterThan(0);
+    void act(() => { keyHandlers.forEach((h) => h({ key: "Escape" })); });
+    expect(closes).toBe(1);
   });
 });
