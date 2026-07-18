@@ -3510,7 +3510,9 @@ app.post("/api/channels/:slug/lark-notify", async (c) => {
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );
-  if (!doRes.ok) return doRes;
+  // #644：DO 响应的 headers 不可变；直接透传会让下游 CORS 中间件改 header 时抛异常 → 500 掩盖真错。
+  // 重建成 headers 可变的响应再回传，让真实错误码/正文透出来。
+  if (!doRes.ok) return new Response(doRes.body, { status: doRes.status, headers: new Headers(doRes.headers) });
   const now = Date.now();
   await c.env.DB.prepare(
     `INSERT INTO lark_notify_subscriptions (
@@ -5240,8 +5242,9 @@ app.put("/api/channels/:slug/visibility", async (c) => {
     timestamp: now,
     metadata: { visibility },
   });
-  const ok = await insertSystemStatus(c.env, slug, `visibility changed to ${visibility} by ${identity.name}`, "waiting", now);
-  if (!ok) return c.json(errorBody("unavailable", "visibility changed but audit status failed"), 503);
+  // #644：visibility 改动此刻已提交（init 已成、审计已落）。系统状态是 best-effort 旁路，写失败
+  // 绝不能反回 503 让客户端以为整体失败——忽略其结果，照常返回成功。
+  await insertSystemStatus(c.env, slug, `visibility changed to ${visibility} by ${identity.name}`, "waiting", now);
   const recentSpeakers =
     visibility === "private" ? await recentNonMemberSpeakers(c.env.DB, c.env, slug, channel.owner_account) : [];
   return c.json({
@@ -6901,6 +6904,17 @@ app.get("/api/channels/:slug/attachments/:path{.+}", async (c) => {
   if (!headers.has("content-type")) headers.set("content-type", "application/octet-stream");
   // nosniff：即便 content-type 被伪造也不让浏览器嗅探成可执行类型，缓解存储型 XSS
   headers.set("x-content-type-options", "nosniff");
+  // #625：content_type 是上传者可控的。nosniff 挡不住【显式】的 text/html 或 image/svg+xml——
+  // 直接在浏览器打开该 url 就会内联渲染、在 worker 源上执行脚本，窃取同源 ap_token。除了少数
+  // 一定安全内联的栅格图，其余一律 Content-Disposition: attachment 强制下载而非渲染。
+  const servedType = (headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  const INLINE_SAFE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
+  if (!INLINE_SAFE_TYPES.has(servedType)) {
+    const rawName = object.customMetadata?.filename;
+    const downloadName = typeof rawName === "string" && rawName.length > 0 ? rawName : "download";
+    // filename* 走 RFC 5987 百分号编码，杜绝借文件名注入 header。
+    headers.set("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(downloadName)}`);
+  }
   headers.set("referrer-policy", "no-referrer");
   if (signedRequest) headers.set("cache-control", "private, max-age=900");
   return new Response(object.body, { headers });

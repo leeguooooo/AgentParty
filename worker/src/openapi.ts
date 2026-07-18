@@ -487,13 +487,13 @@ export const openapiDocument = {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["name", "role"],
+                required: ["name", "role", "owner"],
                 properties: {
                   name: { type: "string" },
                   role: { type: "string", enum: ["agent", "human", "readonly"] },
                   owner: {
                     type: "string",
-                    description: "optional owner label (printable ascii, <= 128 chars)",
+                    description: "owner account label (printable ascii, <= 128 chars) — required since P1",
                   },
                 },
               },
@@ -611,6 +611,11 @@ export const openapiDocument = {
                   title: { type: "string" },
                   kind: { type: "string", enum: ["standing", "temp"] },
                   mode: { type: "string", enum: ["normal", "party"], default: "normal" },
+                  visibility: {
+                    type: "string",
+                    enum: ["public", "private", "public_watch"],
+                    default: "private",
+                  },
                 },
               },
             },
@@ -618,9 +623,10 @@ export const openapiDocument = {
         },
         responses: {
           "201": { description: "created" },
-          "400": { description: "invalid slug/kind/mode" },
+          "400": { description: "invalid slug/kind/mode/visibility" },
           "403": { description: "readonly token" },
           "409": { description: "slug conflict" },
+          "429": { description: "channel creation rate limit exceeded" },
           "503": { description: "temp channel initialization failed" },
         },
       },
@@ -1539,6 +1545,12 @@ export const openapiDocument = {
                     enum: ["mentions", "status", "needs-human", "all"],
                     default: "mentions",
                   },
+                  mode: {
+                    type: "string",
+                    enum: ["notify", "agent"],
+                    default: "notify",
+                    description: "notify = fire-and-forget wake; agent = the webhook acts as a channel agent",
+                  },
                 },
               },
             },
@@ -1546,7 +1558,7 @@ export const openapiDocument = {
         },
         responses: {
           "201": { description: "registered (same name overwrites)" },
-          "400": { description: "invalid name/url/secret/filter" },
+          "400": { description: "invalid name/url/secret/filter/mode" },
           "403": { description: "readonly token" },
           "410": { description: "channel archived" },
         },

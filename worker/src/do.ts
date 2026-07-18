@@ -98,7 +98,7 @@ import {
   resolveMentionToken,
   type MentionAlias,
 } from "@agentparty/shared/mentions";
-import { parseAttachments, parseStoredAttachments } from "./attachments";
+import { anchorAttachmentUrls, parseAttachments, parseStoredAttachments } from "./attachments";
 import { sha256Hex } from "./auth";
 import { Server, type Connection, type ConnectionContext, type WSMessage } from "partyserver";
 
@@ -4466,7 +4466,7 @@ export class ChannelDO extends Server<Env> {
     notifyWebhooks = false,
     options: { mentions?: string[]; workflow?: StatusWorkflow; broadcast?: boolean; state?: StatusState } = {},
   ): MsgFrame {
-    const seq = this.lastSeq() + 1;
+    const seq = this.nextSeq();
     // 默认 waiting 而非 blocked（#143）：信息类系统事件是常态、blocked 是例外，默认值失误的方向
     // 必须是安全的。blocked 会让守 etiquette 的 agent 停手等人类，误报的代价远大于漏报。
     const state = options.state ?? "waiting";
@@ -4514,7 +4514,7 @@ export class ChannelDO extends Server<Env> {
   }
 
   private insertReviewerReply(identity: Identity, body: string, mentions: string[], replyTo: number, now: number): MsgFrame {
-    const seq = this.lastSeq() + 1;
+    const seq = this.nextSeq();
     const effectiveRole = identity.collabRole;
     const roleSource: CollaborationRoleSource | undefined = identity.collabRole === undefined ? undefined : "assigned";
     this.ctx.storage.sql.exec(
@@ -4554,7 +4554,7 @@ export class ChannelDO extends Server<Env> {
     response: DecisionResponse,
     now: number,
   ): MsgFrame {
-    const seq = this.lastSeq() + 1;
+    const seq = this.nextSeq();
     const effectiveRole = identity.collabRole;
     const roleSource: CollaborationRoleSource | undefined = identity.collabRole === undefined ? undefined : "assigned";
     this.ctx.storage.sql.exec(
@@ -5468,7 +5468,14 @@ export class ChannelDO extends Server<Env> {
       const mentions = action === "reject" ? [senderName] : [];
       const reply = this.insertReviewerReply(identity, replyBody, mentions, seq, now);
       this.broadcastFrame(reply);
-      await this.afterSend(reply, String(row.sender_kind) === "agent" ? [senderName] : []);
+      // #627：驳回回复 @ 原作者（agent）必须绑定 creation-time principal，否则 ensureDirectedDeliveries
+      // 存 target_owner=null，dispatchNextDirectedDelivery 的 null-principal 守卫立即把行置 failed
+      // (delivery_failed 不在 REVIVABLE_DELIVERY_FAILURES)→ agent 永远不被唤醒重交。镜像决策回应路径
+      // 的 agentOwnersForTargets 绑定。
+      const rejectTargets = String(row.sender_kind) === "agent" ? [senderName] : [];
+      const rejectTargetOwners =
+        rejectTargets.length > 0 ? ((await this.agentOwnersForTargets([senderName])) ?? {}) : {};
+      await this.afterSend(reply, rejectTargets, false, rejectTargetOwners);
       return Response.json({ message: publicMsgFrame(message), reply: publicMsgFrame(reply) });
     }
     // 人类决策回应（#284）：镜像 completion review 的收口——resolve 请求 + 广播 message_update("decision")
@@ -6735,7 +6742,7 @@ export class ChannelDO extends Server<Env> {
     const now = Date.now();
 
     const sql = this.ctx.storage.sql;
-    const seq = this.lastSeq() + 1;
+    const seq = this.nextSeq();
     const sender: Sender = senderFromIdentity(identity);
     const hostDecision = frame.kind === "status" ? hostDecisionFromSend(frame.decision, identity.name) : undefined;
     const workflow = frame.kind === "status" ? statusWorkflowFromSend(frame.workflow) : undefined;
@@ -6764,7 +6771,8 @@ export class ChannelDO extends Server<Env> {
     const completionGate = this.getMeta("completion_gate");
     const completionReviewPolicy = (this.getMeta("completion_review_policy") ?? "sender") as CompletionReviewPolicy;
     const completionArtifact = frame.kind === "message" ? frame.completion_artifact : undefined;
-    const attachments = frame.kind === "message" ? frame.attachments : undefined;
+    // #624：落库前把附件 url 强制锚定到本频道（由 key 推导），不信任客户端传入的 url，杜绝 token 外泄。
+    const attachments = frame.kind === "message" ? anchorAttachmentUrls(frame.attachments, this.name) : undefined;
     // decision_request（#284/#548）：public parser 只保留 prompt/kind/options，并主动丢掉客户端
     // 自称的 delivery/work/thread。仅 sender 恰好有一条 active durable work 时由服务端绑定血缘；
     // 多条 active 说明 invariant 已破坏，fail closed，不能猜错 owner answer 应恢复哪一条。
@@ -7755,9 +7763,26 @@ export class ChannelDO extends Server<Env> {
     }
   }
 
+  // seq 计数器同样落 meta，绝不从 MAX(seq) 派生（#626）。与 rev_seq 同源的坑：保留期修剪
+  // 按 ts 删行（DELETE FROM messages WHERE ts <= cutoff，无「保留最后 N 条」下限），一个配了
+  // message_retention_ms 的频道久静默后会把整张表清空；此时 MAX(seq) 塌回 0，下条消息从 seq=1
+  // 重启、复用已被在线端消费过的号。recordSeen 因老 read_cursor 已 >= 复用 seq 而不推进，
+  // 流式消费端（serve/watch/web）按 seq > cursor 过滤 → 新 @ 帧被当积压丢掉，永久漏收唤醒。
+  // 首次读取时从 MAX(seq) 播种，存量 DO 无需迁移即可平滑升级。
   private lastSeq(): number {
+    const cached = this.getMeta("seq");
+    if (cached !== null) return Number(cached);
     const row = this.ctx.storage.sql.exec("SELECT COALESCE(MAX(seq), 0) AS last FROM messages").one();
-    return Number(row.last);
+    const seeded = Number(row.last);
+    this.setMeta("seq", String(seeded));
+    return seeded;
+  }
+
+  // 单调递增，且立即落盘——即便本次写入随后失败，号也不会被复用（与 nextRevSeq 一致）。
+  private nextSeq(): number {
+    const next = this.lastSeq() + 1;
+    this.setMeta("seq", String(next));
+    return next;
   }
 
   // 已读游标快照（welcome 首帧下发）。
@@ -9651,7 +9676,8 @@ export class ChannelDO extends Server<Env> {
       if (decisionResponse !== undefined) frame.decision_response = decisionResponse;
       const workflowRef = parseStoredStatusWorkflow(r.message_workflow_json);
       if (workflowRef !== undefined) frame.workflow_ref = workflowRef;
-      const attachments = parseStoredAttachments(r.attachments_json);
+      // #624 出站防御：即便库里存了历史/恶意的绝对 url，回传前也一律锚定成同源相对路径。
+      const attachments = anchorAttachmentUrls(parseStoredAttachments(r.attachments_json), this.name);
       if (attachments !== undefined) frame.attachments = attachments;
     }
     if (r.edited_at !== null && r.edited_at !== undefined) {
