@@ -213,6 +213,20 @@ fn candidate_config_paths(home: &Path) -> Vec<PathBuf> {
             }
         }
     }
+    // ~/.agentparty/agents/*.json — the join-pack AGENTPARTY_CONFIG convention and where
+    // desktop_duty_adopt writes the adopted identity file. Without this the adopted config is
+    // undiscoverable, so resolve_config (and thus duty_persist_inner) always fails and adopt rolls
+    // back. Skip the *.json.tmp staging files (extension is "tmp", not "json").
+    if let Ok(entries) = fs::read_dir(home.join("agents")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_file())
+                && path.extension().is_some_and(|ext| ext == "json")
+            {
+                paths.push(path);
+            }
+        }
+    }
     paths
 }
 
@@ -954,6 +968,45 @@ mod tests {
         assert_eq!(config_id(&first).unwrap(), first_id);
         assert_ne!(config_id(&second).unwrap(), first_id);
         assert_eq!(first_id.len(), 64);
+    }
+
+    #[test]
+    fn trusted_configs_discovers_adopted_configs_under_agents_dir() {
+        // desktop_duty_adopt writes ~/.agentparty/agents/agentparty-<name>-<channel>.json; resolve_config
+        // must find it there or one-click adopt always fails (config undiscoverable -> persist rolls back).
+        let home = TempDir::new().unwrap();
+        let agents = home.path().join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        let adopted = agents.join("agentparty-bot-dev.json");
+        fs::write(
+            &adopted,
+            r#"{
+                "server":"https://party.example.com",
+                "token":"ap_adopted-secret-token",
+                "identity":{
+                    "name":"bot",
+                    "kind":"agent",
+                    "role":"agent",
+                    "channel_scope":"dev"
+                }
+            }"#,
+        )
+        .unwrap();
+        // the 0600 staging tmp must be ignored — it is not a real config (extension is .tmp, not .json).
+        fs::write(agents.join("agentparty-bot-dev.json.tmp"), "{ partial").unwrap();
+
+        let configs = trusted_configs(home.path()).unwrap();
+        let found = configs.iter().find(|(path, _)| {
+            path.file_name().and_then(|n| n.to_str()) == Some("agentparty-bot-dev.json")
+        });
+        assert!(
+            found.is_some(),
+            "adopted config under agents/ must be discoverable by resolve_config"
+        );
+        let (path, summary) = found.unwrap();
+        assert_eq!(summary.name, "bot");
+        assert_eq!(summary.channel.as_deref(), Some("dev"));
+        assert_eq!(summary.config_id, config_id(path).unwrap());
     }
 
     #[test]
