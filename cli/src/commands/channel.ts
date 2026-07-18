@@ -1,7 +1,7 @@
 // party channel create|list|archive|reset-guard
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
-import { stripTerminalControls } from "../format";
+import { sanitizeSingleLine } from "../format";
 import { resolveAuth } from "../oidc-cli";
 import {
   createJoinLink,
@@ -654,9 +654,11 @@ export async function run(argv: string[]): Promise<number> {
           }
           const roles = await listChannelRoles(cfg.server, cfg.token, slug);
           for (const r of roles) {
-            const responsibility = r.responsibility === null ? "" : `\t${r.responsibility}`;
-            // #629：name/assigned_by/responsibility 都是服务端存的参与者可控自由文本，整行剥离终端控制序列后再打印。
-            console.log(stripTerminalControls(`${r.name}\t${r.role}\t${r.assigned_by}\t${new Date(r.assigned_at).toISOString()}${responsibility}`));
+            const responsibility = r.responsibility === null ? "" : `\t${sanitizeSingleLine(r.responsibility)}`;
+            // #629/#652：name/role/assigned_by/responsibility 都是服务端存的参与者可控自由文本，且这一行用 TAB 分列。
+            // 逐字段过 sanitizeSingleLine（剥离终端控制序列 + 折叠残留 TAB/换行），再拼接可信的列 TAB，
+            // 否则字段里塞 \n 能伪造整行、塞 \t 能伪造列。ISO 时间戳是本地生成的可信值，无需清理。
+            console.log(`${sanitizeSingleLine(r.name)}\t${sanitizeSingleLine(r.role)}\t${sanitizeSingleLine(r.assigned_by)}\t${new Date(r.assigned_at).toISOString()}${responsibility}`);
           }
           return 0;
         }

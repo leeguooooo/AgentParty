@@ -749,7 +749,7 @@ export async function run(argv: string[]): Promise<number> {
   else if (flags.once === true && isCodexRuntimeEnv()) console.error(ONCE_CODEX_ADVISORY);
   if (flags.once === true && flags.latest === true) console.error(ONCE_LATEST_ADVISORY);
   const localCursor = loadCursor(channel);
-  const stuck = loadStuck(channel);
+  let stuck = loadStuck(channel);
   // pending wake 比任何显式快进选择都优先。即使调用者误用 --latest，也不能先把仍未被模型
   // 确认的 @ 丢掉。REST 精确补拉后立即退出，避免重新挂起一个可能又被 harness 回收的后台任务。
   if (flags.once === true && stuck !== null) {
@@ -770,6 +770,16 @@ export async function run(argv: string[]): Promise<number> {
       return EXIT_ALREADY_WATCHING;
     }
     try {
+      // #652：拿到锁后**权威重读** debt。上面的 stuck 是锁前快照——两个并发 `watch --once` 会各自
+      // 在锁前读到同一条 debt；先抢到锁的重放并释放后，另一个若还用锁前的过期快照，就会重放已被处理
+      // 的同一条 wake（TOCTOU）。锁内重读把决策基准换成当前真值：另一进程已清账则本次不再重放。
+      stuck = loadStuck(channel);
+      if (stuck === null) {
+        console.error(terminalOutput(
+          `watch: #${channel} 的 pending wake 已被另一进程重放/清账，本次不再重放。`,
+        ));
+        return 0;
+      }
       if (stuck.source !== "watch") {
         console.error(terminalOutput(
           `error: #${channel} has a pending serve wake at seq=${stuck.seq}; ` +
@@ -786,11 +796,14 @@ export async function run(argv: string[]): Promise<number> {
         ));
       } else {
         try {
+          // #652：stuck 现在是 let（锁内会被权威重读重新赋值），闭包捕获 let 会被 TS 放宽回可空。
+          // 上面已 `if (stuck === null) return 0`，这里锁内的 stuck 必非空——把 seq 固定成 const 供闭包使用。
+          const pendingSeq = stuck.seq;
           const [pendingPage, tail] = await Promise.all([
-            fetchMessages(cfg.server, cfg.token, channel, Math.max(0, stuck.seq - 1), 1),
+            fetchMessages(cfg.server, cfg.token, channel, Math.max(0, pendingSeq - 1), 1),
             fetchRecentMessages(cfg.server, cfg.token, channel, 1),
           ]);
-          const pending = pendingPage.find((msg) => msg.seq === stuck.seq);
+          const pending = pendingPage.find((msg) => msg.seq === pendingSeq);
           if (pending === undefined) {
             console.error(terminalOutput(
               `error: pending watch wake seq=${stuck.seq} is no longer retained; debt was preserved. ` +
