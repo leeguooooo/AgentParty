@@ -992,8 +992,22 @@ mod tests {
             }"#,
         )
         .unwrap();
-        // the 0600 staging tmp must be ignored — it is not a real config (extension is .tmp, not .json).
-        fs::write(agents.join("agentparty-bot-dev.json.tmp"), "{ partial").unwrap();
+        // The 0600 staging tmp must be excluded by EXTENSION, not merely by a parse failure — give it
+        // valid contents + a distinct identity so a broken/removed filter would surface "bot-staging".
+        fs::write(
+            agents.join("agentparty-bot-dev.json.tmp"),
+            r#"{
+                "server":"https://party.example.com",
+                "token":"ap_staging-tmp-distinct-token",
+                "identity":{
+                    "name":"bot-staging",
+                    "kind":"agent",
+                    "role":"agent",
+                    "channel_scope":"dev"
+                }
+            }"#,
+        )
+        .unwrap();
 
         let configs = trusted_configs(home.path()).unwrap();
         let found = configs.iter().find(|(path, _)| {
@@ -1007,6 +1021,10 @@ mod tests {
         assert_eq!(summary.name, "bot");
         assert_eq!(summary.channel.as_deref(), Some("dev"));
         assert_eq!(summary.config_id, config_id(path).unwrap());
+        assert!(
+            !configs.iter().any(|(_, s)| s.name == "bot-staging"),
+            ".json.tmp staging config must be excluded by extension, not discovered"
+        );
     }
 
     #[test]
