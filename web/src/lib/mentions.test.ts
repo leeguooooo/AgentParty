@@ -1,11 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import { extractMentionTokens, type MsgFrame, type PresenceEntry, type Sender } from "@agentparty/shared";
+import { isValidMentionToken, MENTION_TOKEN_MAX_LENGTH } from "@agentparty/shared/mentions";
 import { activeMentionQuery, filterCandidates, mentionCandidates, parseDraftMentions } from "./mentions";
 
 const NOW = 1_000_000_000;
 
 test("shared mention lexer respects a zero limit", () => {
   expect(extractMentionTokens("@alice", 0)).toEqual([]);
+});
+
+// #641：MENTION_TOKEN_MAX_LENGTH 曾是无人引用的死常量（真正的上限写死在正则 {0,63} 里）。
+// 现已用它构造 MENTION_TOKEN_RE，成为 64 字符上限的单一来源——正好卡在 MAX、超一位即拒。
+test("mention token max length is the single source of truth for isValidMentionToken", () => {
+  expect(MENTION_TOKEN_MAX_LENGTH).toBe(64);
+  const atMax = "a".repeat(MENTION_TOKEN_MAX_LENGTH);
+  const overMax = "a".repeat(MENTION_TOKEN_MAX_LENGTH + 1);
+  expect(atMax.length).toBe(64);
+  expect(isValidMentionToken(atMax)).toBe(true);
+  expect(isValidMentionToken(overMax)).toBe(false);
 });
 
 function presence(over: Partial<PresenceEntry> & { name: string }): PresenceEntry {

@@ -2,7 +2,7 @@
 // 纯前端；通知偏好读写 localStorage 的 ap_notify_optin（与 NotifyToggle 同键），语言走 LanguageSwitcher，
 // 主题走 lib/theme（doodle↔midnight，写 <html data-theme> + localStorage）。账号 @handle/昵称编辑复用
 // HandleSetup——顶栏不再单独挂浮层入口，编辑归位到这里。不动顶栏原有的桌面专属控件。
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useT } from "../i18n/useT";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { HandleSetup } from "./HandleSetup";
@@ -50,15 +50,62 @@ export function SettingsPanel({
   const t = useT();
   const [notifyOptin, setNotifyOptin] = useState<boolean>(readNotifyOptin);
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  // #654 复审：把 onClose 固化进 ref，让焦点陷阱 effect 只按挂载/卸载跑一次。
+  // 否则父级传内联箭头函数（onClose={() => setShow(false)}）每次渲染都换新身份，
+  // effect 依赖 [onClose] 会反复清理+重挂——清理阶段抢先把焦点还给触发元素（焦点闪出闪回），
+  // 重挂时 previouslyFocused 变成面板内元素，最终关闭把焦点恢复到已卸载节点，焦点恢复失效。
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
-  // Esc 关闭；打开时锁焦点在面板（简版：Esc + 点遮罩关）。
+  // #637 a11y：真正 trap focus——打开时把焦点移进面板、Tab 只在面板内循环、关闭恢复到触发元素；
+  // 外加 Esc 关闭。此前注释声称「锁焦点」实则只挂了 Esc。
   useEffect(() => {
+    const doc = typeof document === "undefined" ? null : document;
+    const previouslyFocused = (doc?.activeElement ?? null) as HTMLElement | null;
+    const focusables = (): HTMLElement[] => {
+      const panel = panelRef.current;
+      if (panel === null || typeof panel.querySelectorAll !== "function") return [];
+      return Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+    };
+    // 打开即把焦点移进面板：首个可聚焦元素，退回面板容器本身。
+    (focusables()[0] ?? panelRef.current)?.focus?.();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = focusables();
+      const panel = panelRef.current;
+      if (items.length === 0) {
+        e.preventDefault();
+        panel?.focus?.();
+        return;
+      }
+      const first = items[0]!;
+      const last = items[items.length - 1]!;
+      const active = (doc?.activeElement ?? null) as HTMLElement | null;
+      if (e.shiftKey && (active === first || active === panel)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      // 关闭时把焦点交还给打开面板的触发元素。
+      previouslyFocused?.focus?.();
+    };
+    // 依赖固定为空数组：trap+restore 只按开合各跑一次，不随 onClose 身份变化重挂。
+  }, []);
 
   const pickTheme = useCallback((next: Theme) => {
     applyTheme(next);
@@ -87,7 +134,7 @@ export function SettingsPanel({
 
   return (
     <div className="settings-overlay" role="dialog" aria-modal="true" aria-label={t("App.settings.title")} onClick={onClose}>
-      <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
+      <div className="settings-panel" ref={panelRef} tabIndex={-1} onClick={(e) => e.stopPropagation()}>
         <header className="settings-head">
           <h2 className="settings-title">{t("App.settings.title")}</h2>
           <button type="button" className="settings-close" aria-label={t("App.settings.close")} onClick={onClose}>

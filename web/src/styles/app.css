@@ -423,7 +423,7 @@
   padding: 1px 5px;
   border: 1.4px solid var(--d-ink);
   border-radius: 0;
-  background: var(--bg);
+  background: var(--t-panel);
   color: var(--t-muted);
   font-size: 10px;
   font-weight: 700;
@@ -437,7 +437,7 @@
   flex: none;
   padding: 1px 5px;
   border: 1.4px dashed var(--d-ink);
-  background: var(--bg);
+  background: var(--t-panel);
   color: var(--t-muted);
   font-size: 10px;
   font-weight: 700;
@@ -1626,7 +1626,7 @@
   padding: 1px 5px;
   border: 1.4px solid var(--d-ink);
   border-radius: 0;
-  background: var(--bg);
+  background: var(--t-panel);
   color: var(--t-muted);
   font-size: 10px;
   font-weight: 700;
@@ -1756,7 +1756,7 @@
   padding: 1px 4px;
   border: 1.4px solid var(--d-ink);
   border-radius: 0;
-  background: var(--bg);
+  background: var(--t-panel);
   color: var(--t-muted);
   font: inherit;
   font-size: 11px;
@@ -4603,7 +4603,7 @@
   align-items: stretch;
   gap: 12px;
   padding: 2px 6px 6px 2px;
-  background: var(--bg);
+  background: var(--t-panel);
 }
 /* @ 提及补全下拉（issue #39）：浮在插话框上方，doodle 边框，分档徽章 */
 .mention-menu {
@@ -5003,7 +5003,7 @@
   align-items: center;
   gap: 0.35rem;
   padding: 0.15rem 0.5rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--t-faint);
   border-radius: 4px;
   font-size: 0.8rem;
 }
@@ -5022,7 +5022,7 @@
 .composer-attachment--img {
   position: relative;
   padding: 0;
-  border: 1px solid var(--border);
+  border: 1px solid var(--t-faint);
   border-radius: 6px;
   overflow: hidden;
   width: 56px;
@@ -5057,7 +5057,7 @@
 
 /* 拖拽上传高亮（#176）：composer 相对定位，dropzone 覆盖其上 */
 .composer { position: relative; }
-.composer--dragging { outline: 2px dashed var(--accent, var(--fg)); outline-offset: 2px; }
+.composer--dragging { outline: 2px dashed var(--t-accent); outline-offset: 2px; }
 .composer-dropzone {
   position: absolute;
   inset: 0;
@@ -5086,7 +5086,7 @@
   align-items: center;
   gap: 0.4rem;
   padding: 0.15rem 0.5rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--t-faint);
   border-radius: 4px;
   font-size: 0.8rem;
   max-width: 100%;
@@ -5115,8 +5115,8 @@
 .composer-upload-spinner {
   width: 0.85rem;
   height: 0.85rem;
-  border: 2px solid var(--border);
-  border-top-color: var(--fg, inherit);
+  border: 2px solid var(--t-faint);
+  border-top-color: var(--t-text);
   border-radius: 50%;
   animation: composer-upload-spin 0.7s linear infinite;
 }
@@ -5125,7 +5125,7 @@
   .composer-upload-spinner { animation-duration: 2s; }
 }
 .composer-upload-retry {
-  border: 1px solid var(--border);
+  border: 1px solid var(--t-faint);
   background: none;
   cursor: pointer;
   color: var(--fg, inherit);
@@ -5162,7 +5162,7 @@
   width: auto;
   height: auto;
   border-radius: 6px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--t-faint);
   display: block;
   cursor: zoom-in;
 }
@@ -6375,10 +6375,10 @@
   overflow-x: auto;
   padding-bottom: 4px;
 }
-.agent-board-empty { color: var(--muted, #888); font-size: 13px; }
+.agent-board-empty { color: var(--t-muted); font-size: 13px; }
 .agent-board-lane {
   min-width: 220px;
-  border: 1px solid var(--border, #2a2a2a);
+  border: 1px solid var(--t-faint);
   border-radius: 8px;
   background: var(--t-faint, rgba(127, 127, 127, 0.06));
   overflow: hidden;
@@ -6389,7 +6389,7 @@
   justify-content: space-between;
   gap: 8px;
   padding: 8px 10px;
-  border-bottom: 1px solid var(--border, #2a2a2a);
+  border-bottom: 1px solid var(--t-faint);
 }
 .agent-board-lane-title { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
 .agent-board-lane-count {
@@ -6397,40 +6397,40 @@
   padding: 1px 6px;
   border-radius: 999px;
   background: var(--t-panel, #fff);
-  color: var(--muted, #888);
+  color: var(--t-muted);
   font-size: 11px;
   text-align: center;
 }
 .agent-board-lane-cards { display: flex; flex-direction: column; gap: 8px; padding: 8px; }
-.agent-board-lane-empty { margin: 8px 2px; color: var(--muted, #888); font-size: 12px; text-align: center; }
+.agent-board-lane-empty { margin: 8px 2px; color: var(--t-muted); font-size: 12px; text-align: center; }
 .agent-board-row {
-  border: 1px solid var(--border, #2a2a2a);
-  border-left: 3px solid var(--border, #2a2a2a);
+  border: 1px solid var(--t-faint);
+  border-left: 3px solid var(--t-faint);
   border-radius: 6px;
   padding: 8px 10px;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
-.agent-board-row--busy { border-left-color: var(--accent, #4a9eff); }
-.agent-board-row--blocked { border-left-color: var(--danger, #e5534b); }
-.agent-board-row--idle { border-left-color: var(--ok, #57ab5a); }
+.agent-board-row--busy { border-left-color: var(--p-busy); }
+.agent-board-row--blocked { border-left-color: var(--p-blocked); }
+.agent-board-row--idle { border-left-color: var(--t-green); }
 .agent-board-row--offline { opacity: 0.6; }
 .agent-board-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .agent-board-name { font-weight: 600; }
-.agent-board-status { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted, #888); }
-.agent-board-status--busy { color: var(--accent, #4a9eff); }
-.agent-board-status--blocked { color: var(--danger, #e5534b); }
-.agent-board-note { margin: 0; font-size: 12px; color: var(--muted, #999); }
-.agent-board-counts { display: flex; gap: 12px; font-size: 12px; color: var(--muted, #999); }
-.agent-board-count-blocked { color: var(--danger, #e5534b); }
+.agent-board-status { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--t-muted); }
+.agent-board-status--busy { color: var(--p-busy); }
+.agent-board-status--blocked { color: var(--p-blocked); }
+.agent-board-note { margin: 0; font-size: 12px; color: var(--t-muted); }
+.agent-board-counts { display: flex; gap: 12px; font-size: 12px; color: var(--t-muted); }
+.agent-board-count-blocked { color: var(--p-blocked); }
 .agent-board-task-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
   margin: 3px 0 0;
   padding: 7px 0 0;
-  border-top: 1px solid var(--border, #2a2a2a);
+  border-top: 1px solid var(--t-faint);
   list-style: none;
 }
 .agent-board-task {
@@ -6441,10 +6441,10 @@
   font-size: 11px;
   line-height: 1.35;
 }
-.agent-board-task-id { color: var(--muted, #999); }
+.agent-board-task-id { color: var(--t-muted); }
 .agent-board-task-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-board-task-state { color: var(--muted, #999); font-size: 10px; white-space: nowrap; }
-.agent-board-task--blocked .agent-board-task-state { color: var(--danger, #e5534b); }
+.agent-board-task-state { color: var(--t-muted); font-size: 10px; white-space: nowrap; }
+.agent-board-task--blocked .agent-board-task-state { color: var(--p-blocked); }
 
 /* #273 全局设置面板 */
 .app-settings-btn {

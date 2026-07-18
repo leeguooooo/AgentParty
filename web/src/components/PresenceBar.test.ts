@@ -359,11 +359,14 @@ describe("presence header controls", () => {
 // busy + 队列深度（#103）：serve 串行处理长任务时，presence 要显式表达「忙 + N 待处理」，
 // 与 working 蜡笔点区分，让人别把「@ 了没立刻回」当失联。
 describe("busy indicator + queue depth (#103)", () => {
-  test("busyLabel: 忙无队列 / 忙有队列 / 不忙三态", () => {
+  test("busyLabel: 忙无队列 / 忙有队列 / 不忙三态（#639 走 i18n key）", () => {
     const it = (over: Partial<Item>) =>
       ({ name: "a", busy: false, queueDepth: null, ...over }) as Item;
-    expect(busyLabel(it({ busy: true, queueDepth: null }))).toBe("⏳ busy");
-    expect(busyLabel(it({ busy: true, queueDepth: 4 }))).toBe("⏳ busy · 4 queued");
+    expect(busyLabel(it({ busy: true, queueDepth: null }))).toEqual({ key: "PresenceBar.busy" });
+    expect(busyLabel(it({ busy: true, queueDepth: 4 }))).toEqual({
+      key: "PresenceBar.busyQueued",
+      vars: { count: 4 },
+    });
     expect(busyLabel(it({ busy: false }))).toBeNull();
   });
 
@@ -395,9 +398,16 @@ describe("busy indicator + queue depth (#103)", () => {
     const it = (over: Partial<Item>) =>
       ({ name: "a", busy: false, queueDepth: null, currentTask: null, heartbeatAt: null, ...over }) as Item;
     // 新鲜心跳（<45s）显示 "now" = 还活着；很旧则显示 "2m"/"1h" = 大概率卡死。
-    expect(taskLabel(it({ currentTask: 510, heartbeatAt: now - 5_000 }), now)).toBe("▶ #510 · ♥ now");
-    expect(taskLabel(it({ currentTask: 510, heartbeatAt: now - 120_000 }), now)).toBe("▶ #510 · ♥ 2m");
-    expect(taskLabel(it({ currentTask: 7 }), now)).toBe("▶ #7");
+    // #639：走 taskChip/taskChipBeat i18n key（原为死键），不再写死 chip 文本。
+    expect(taskLabel(it({ currentTask: 510, heartbeatAt: now - 5_000 }), now)).toEqual({
+      key: "PresenceBar.taskChipBeat",
+      vars: { seq: 510, age: "now" },
+    });
+    expect(taskLabel(it({ currentTask: 510, heartbeatAt: now - 120_000 }), now)).toEqual({
+      key: "PresenceBar.taskChipBeat",
+      vars: { seq: 510, age: "2m" },
+    });
+    expect(taskLabel(it({ currentTask: 7 }), now)).toEqual({ key: "PresenceBar.taskChip", vars: { seq: 7 } });
     expect(taskLabel(it({ currentTask: null }), now)).toBeNull();
   });
 
@@ -416,6 +426,22 @@ describe("busy indicator + queue depth (#103)", () => {
     const badges = nodesWithClass(r, "presence-busy");
     expect(badges.some((n) => n.children.join("") === "⏳ busy")).toBe(true);
     expect(badges.some((n) => n.children.join("").includes("queued"))).toBe(false);
+  });
+
+  // #639：busy/queued chip 曾写死英文，zh 界面不翻译。改走 t() 后中文 locale 必须译。
+  test("busy chip follows the active en/zh locale (#639)", async () => {
+    const entry = busyEntry({ queue_depth: 3 });
+    const en = renderPresence(entry, true);
+    expect(nodesWithClass(en, "presence-busy").some((n) => n.children.join("") === "⏳ busy · 3 queued")).toBe(true);
+
+    await act(async () => en.unmount());
+    renderer = null;
+    localStorage.setItem("ap_locale", "zh");
+    const zh = renderPresence(entry, true);
+    const zhBadges = nodesWithClass(zh, "presence-busy");
+    expect(zhBadges.some((n) => n.children.join("") === "⏳ 忙 · 3 排队")).toBe(true);
+    // 关键回归：中文界面里绝不再出现写死的英文 "busy"
+    expect(zhBadges.some((n) => n.children.join("").includes("busy"))).toBe(false);
   });
 
   test("不忙的 working 项：不渲染 busy 徽章或汇总", () => {
@@ -655,5 +681,49 @@ describe("presence 暂停接待（#180）", () => {
     await openPopover(r);
     expect(nodesWithClass(r, "presence-pause-select")).toHaveLength(0);
     expect(nodesWithClass(r, "presence-resume")).toHaveLength(0);
+  });
+});
+
+// #635 / #637 a11y 修复
+describe("presence a11y (#635 pill 键劫持 / #637 group button role)", () => {
+  async function openPopover(r: ReactTestRenderer): Promise<void> {
+    const section = nodesWithClass(r, "presence-group")[0];
+    await act(async () => {
+      section?.props.onFocus({ currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 0 }) } });
+    });
+  }
+
+  // #635：pill 的 onKeyDown 只在 target 就是 pill 自身时才接管；焦点落在嵌套 kick 按钮上时冒泡不劫持。
+  test("pill onKeyDown 忽略来自嵌套控件的键盘事件，只响应 pill 自身", async () => {
+    const opened: string[] = [];
+    const r = renderWith(
+      { name: "agent-a", kind: "agent", state: "working", note: null, ts: Date.now() },
+      { canModerate: true, onRemoveParticipant: () => {}, onOpenAgentDetail: (name: string) => opened.push(name) },
+      true,
+    );
+    await openPopover(r);
+    const pill = nodesWithClass(r, "presence-pill")[0];
+    expect(pill).toBeDefined();
+    expect(pill?.props.role).toBe("button");
+    const self = {};
+    const child = {};
+    // 焦点在嵌套 kick 按钮（target !== currentTarget）→ 不触发详情弹窗
+    await act(async () => {
+      pill?.props.onKeyDown({ key: "Enter", target: child, currentTarget: self, preventDefault: () => {} });
+    });
+    expect(opened).toEqual([]);
+    // 焦点就在 pill 自身（target === currentTarget）→ 正常打开详情
+    await act(async () => {
+      pill?.props.onKeyDown({ key: "Enter", target: self, currentTarget: self, preventDefault: () => {} });
+    });
+    expect(opened).toEqual(["agent-a"]);
+  });
+
+  // #637：可键盘激活的 disclosure section 必须暴露 button role + aria-expanded。
+  test("presence-group section 暴露 role=button 与 aria-expanded", () => {
+    const r = renderPresenceRoster(2, true);
+    const section = nodesWithClass(r, "presence-group")[0];
+    expect(section?.props.role).toBe("button");
+    expect(section?.props["aria-expanded"]).toBe(false);
   });
 });

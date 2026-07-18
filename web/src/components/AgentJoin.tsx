@@ -79,6 +79,8 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
   const [adoptError, setAdoptError] = useState<string | null>(null);
   const [nameErr, setNameErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // #642：复制失败要给用户明确反馈，别静默——join 命令带着只展示一次的 channel-scoped token。
+  const [copyErr, setCopyErr] = useState(false);
 
   const open = useCallback(() => {
     onActiveChange?.(true);
@@ -92,6 +94,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
     setPhase({ kind: "idle" });
     setName("");
     setCopied(false);
+    setCopyErr(false);
     setNameErr(null);
   }, []);
 
@@ -140,6 +143,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         savedAt: Date.now(),
       });
       setCopied(false);
+      setCopyErr(false);
       setAdoptState("idle");
       setAdoptError(null);
       setPhase({ kind: "done", name: agent.name, token: agent.token, command, mode });
@@ -185,6 +189,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
     if (phase.kind !== "done") return;
     const ok = await copyText(phase.command);
     setCopied(ok);
+    setCopyErr(!ok);
   }, [phase]);
 
   return (
@@ -325,6 +330,11 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
                 {copied ? t("AgentJoin.copied") : t("AgentJoin.copy")}
               </button>
             </div>
+            {copyErr && (
+              <p className="banner banner--red agent-join-copyerr" role="alert">
+                {t("AgentJoin.errCopy")}
+              </p>
+            )}
 
             <p className="banner banner--yellow agent-join-warn" role="status">
               {t("AgentJoin.tokenWarn")}

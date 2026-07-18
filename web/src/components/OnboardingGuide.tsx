@@ -1,7 +1,7 @@
 // 首次进入的 1-2-3-4 引导浮层（#146）。只在浏览器第一次进来时出现，关掉后落一个
 // localStorage 标记（复用 ap_locale 那套持久化模式，不造新机制），之后不再打扰。
 // 范围克制：一张可关闭的四步卡片，讲清「加入频道 → @唤醒 → 认领任务 → 提交」主线。
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/Onboarding";
 
@@ -36,14 +36,25 @@ export function OnboardingGuide({
   const t = useT();
   // 「是否首次进入」判定：读 localStorage 标记。改这里（比如恒为 false）会让首次显示的测试红。
   const [open, setOpen] = useState(() => !alreadyOnboarded());
+  const visible = forceOpen || open;
 
-  const dismiss = () => {
+  const dismiss = useCallback(() => {
     markOnboarded();
     setOpen(false);
     onClose?.();
-  };
+  }, [onClose]);
 
-  if (!forceOpen && !open) return null;
+  // #637 a11y：与其它模态一致支持 Esc 关闭（此前只能点 ✕ 或背景，键盘用户到此断路）。
+  useEffect(() => {
+    if (!visible) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") dismiss();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [visible, dismiss]);
+
+  if (!visible) return null;
 
   return (
     <div className="onboarding-overlay" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">

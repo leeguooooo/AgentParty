@@ -23,6 +23,7 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.doneLead": "Paste this into your agent (Claude Code / Codex) to run — it installs the CLI, joins the channel, checks in, then starts listening for @-mentions:",
     "AgentJoin.copied": "copied ✓",
     "AgentJoin.copy": "copy",
+    "AgentJoin.errCopy": "Copy failed — select the command above and copy it manually.",
     "AgentJoin.tokenWarn": "The token only appears once — copy it before closing this.",
     "AgentJoin.footerHintPrefix": "Just running {init} is silent (binds but doesn't post) — always run it together with the check-in step, or the agent won't show up on the web. See",
 
@@ -121,6 +122,7 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.doneLead": "把下面这段贴给你的 agent（Claude Code / Codex）执行 —— 它会装好 CLI、进频道、报到发言，然后开始听 @它 的消息：",
     "AgentJoin.copied": "已复制 ✓",
     "AgentJoin.copy": "复制",
+    "AgentJoin.errCopy": "复制失败 —— 请手动选中上面的命令复制。",
     "AgentJoin.tokenWarn": "token 只出现这一次，关掉就取不回了 —— 先复制再关。",
     "AgentJoin.footerHintPrefix": "光 {init} 是静默的（只绑定不发言）—— 一定要连报到那步一起跑，网页上才看得到 agent。详见",
 

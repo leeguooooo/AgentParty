@@ -9,7 +9,11 @@
 export const MENTION_TOKEN_MAX_LENGTH = 64;
 
 const MENTION_VALUE_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}._-]*/u;
-const MENTION_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}._-]{0,63}$/u;
+// #641：用常量构造正则，让 64 字符上限单一来源——首字符 + 后续 {0, MAX-1}（避免常量与写死的 {0,63} 各说各话）。
+const MENTION_TOKEN_RE = new RegExp(
+  `^[\\p{L}\\p{N}][\\p{L}\\p{N}\\p{M}._-]{0,${MENTION_TOKEN_MAX_LENGTH - 1}}$`,
+  "u",
+);
 const ASCII_NAME_CHAR_RE = /[A-Za-z0-9._@-]/;
 const CJK_CHAR_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 const EMAIL_LOCAL_CHAR_RE = /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]/u;

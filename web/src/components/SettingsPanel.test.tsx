@@ -23,11 +23,28 @@ function memoryStorage(seed: Record<string, string> = {}): Storage {
 let renderer: ReactTestRenderer | null = null;
 let store: Storage;
 let themeAttribute: string | null = null;
+let keyHandlers: Array<(e: { key: string; shiftKey?: boolean; preventDefault?: () => void }) => void> = [];
+// 统计 keydown 监听的挂/摘次数——用来验证焦点陷阱 effect 只跑一次、不随 onClose 身份变化重挂。
+let keydownAdds = 0;
+let keydownRemoves = 0;
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   store = memoryStorage({ ap_locale: "en" });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });
-  Object.defineProperty(globalThis, "window", { configurable: true, value: globalThis });
+  keyHandlers = [];
+  keydownAdds = 0;
+  keydownRemoves = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      addEventListener: (type: string, fn: (e: { key: string }) => void) => {
+        if (type === "keydown") { keyHandlers.push(fn); keydownAdds += 1; }
+      },
+      removeEventListener: (type: string, fn: (e: { key: string }) => void) => {
+        if (type === "keydown") { keyHandlers = keyHandlers.filter((h) => h !== fn); keydownRemoves += 1; }
+      },
+    },
+  });
   themeAttribute = null;
   Object.defineProperty(globalThis, "document", {
     configurable: true,
@@ -169,5 +186,44 @@ describe("SettingsPanel (#273)", () => {
     const txt = allText(render({ me: null, canSetHandle: false, onClose: () => {}, onLogout: null }));
     expect(txt).toContain("Language");
     expect(txt).not.toContain("Account");
+  });
+
+  // #637 a11y：aria-modal 对话框现在真正接管键盘——Esc 关闭由焦点陷阱 effect 统一处理。
+  test("dialog is focusable and Escape invokes onClose (focus-trap effect)", () => {
+    let closes = 0;
+    const r = render({ me, canSetHandle: false, onClose: () => { closes += 1; }, onLogout: () => {} });
+    // 面板本身可作为焦点回退目标（tabindex=-1）
+    const panel = findByClass(r.toJSON(), "settings-panel");
+    expect(panel?.props.tabIndex).toBe(-1);
+    // effect 已把 keydown 监听挂到 window；模拟 Esc
+    expect(keyHandlers.length).toBeGreaterThan(0);
+    void act(() => { keyHandlers.forEach((h) => h({ key: "Escape" })); });
+    expect(closes).toBe(1);
+  });
+
+  // #654 复审：onClose 身份不稳定（父级传内联箭头）时，焦点陷阱 effect 不应重挂——
+  // 否则清理阶段会抢先恢复焦点、重挂后 previouslyFocused 指向面板内元素，焦点恢复失效。
+  test("focus-trap effect survives an unstable onClose (no teardown+re-arm on identity change)", () => {
+    let closes = 0;
+    const r = render({ me, canSetHandle: false, onClose: () => { closes += 1; }, onLogout: () => {} });
+    // 挂载时只挂一次 keydown，尚未摘除。
+    expect(keydownAdds).toBe(1);
+    expect(keydownRemoves).toBe(0);
+
+    // 父级重渲染并传入全新 onClose 身份（模拟内联箭头函数）。
+    void act(() => {
+      r.update(
+        <LocaleProvider>
+          <SettingsPanel me={me} canSetHandle={false} onClose={() => { closes += 2; }} onLogout={() => {}} />
+        </LocaleProvider>,
+      );
+    });
+    // effect 依赖 []：既不摘旧监听也不挂新监听，焦点恢复不会被提前触发。
+    expect(keydownAdds).toBe(1);
+    expect(keydownRemoves).toBe(0);
+
+    // Esc 仍经 ref 走到最新的 onClose。
+    void act(() => { keyHandlers.forEach((h) => h({ key: "Escape" })); });
+    expect(closes).toBe(2);
   });
 });

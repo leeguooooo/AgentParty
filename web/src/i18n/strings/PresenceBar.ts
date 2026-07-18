@@ -23,6 +23,11 @@ export const PresenceBarStrings: LocaleDict = {
     "PresenceBar.pausedManual": "Paused — won't be woken by @-mentions until resumed manually",
     "PresenceBar.pausedUntil": "Paused — won't be woken by @-mentions; auto-resumes {time}",
     "PresenceBar.waitingOwnerChip": "💬 {count} waiting owner",
+    // busy（#103 / #639）：走 t() 而非写死英文——zh 界面也翻译。
+    "PresenceBar.busy": "⏳ busy",
+    "PresenceBar.busyQueued": "⏳ busy · {count} queued",
+    "PresenceBar.busyTitle": "busy (reachable, reply may be slow — do not re-@)",
+    "PresenceBar.busyTitleQueued": "busy · {count} queued (reachable, reply may be slow — do not re-@)",
     "PresenceBar.runnerFailing": "✗ runner failing ×{count}",
     "PresenceBar.listeningDeaf": "⚠ not listening",
     "PresenceBar.listeningSuspect": "⚠ consuming slowly",
@@ -67,6 +72,11 @@ export const PresenceBarStrings: LocaleDict = {
     "PresenceBar.pausedManual": "已暂停接待——被 @ 也不唤醒，需手动恢复",
     "PresenceBar.pausedUntil": "已暂停接待——被 @ 也不唤醒；将于 {time} 自动恢复",
     "PresenceBar.waitingOwnerChip": "💬 {count} 项等待 owner",
+    // busy（#103 / #639）
+    "PresenceBar.busy": "⏳ 忙",
+    "PresenceBar.busyQueued": "⏳ 忙 · {count} 排队",
+    "PresenceBar.busyTitle": "忙碌中（可达，回复可能较慢——请勿重复 @）",
+    "PresenceBar.busyTitleQueued": "忙碌中 · {count} 项排队（可达，回复可能较慢——请勿重复 @）",
     "PresenceBar.runnerFailing": "✗ runner 连败 ×{count}",
     "PresenceBar.listeningDeaf": "⚠ 没在听",
     "PresenceBar.listeningSuspect": "⚠ 消费缓慢",

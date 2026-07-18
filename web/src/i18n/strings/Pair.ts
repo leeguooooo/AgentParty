@@ -23,6 +23,11 @@ export const PairStrings: LocaleDict = {
     "Pair.decision.failed": "The decision could not be saved. Try again.",
     "Pair.status.approved": "Device approved. You can return to the desktop app.",
     "Pair.status.denied": "Pairing rejected.",
+    // #638：重新查看一个已决/失效的配对时，显示只读态而非会 409 的 Approve/Deny。
+    "Pair.resolved.approved": "This pairing was already approved.",
+    "Pair.resolved.denied": "This pairing was already rejected.",
+    "Pair.resolved.consumed": "This pairing was already used by the desktop app.",
+    "Pair.resolved.expired": "This pairing code has expired. Ask the desktop app for a new one.",
   },
   zh: {
     "Pair.title": "配对桌面端",
@@ -46,6 +51,11 @@ export const PairStrings: LocaleDict = {
     "Pair.decision.failed": "无法保存决定，请重试。",
     "Pair.status.approved": "设备已批准，可以返回桌面端。",
     "Pair.status.denied": "已拒绝配对。",
+    // #638：重新查看已决/失效的配对时，展示只读态而非会 409 的批准/拒绝按钮。
+    "Pair.resolved.approved": "此配对已被批准。",
+    "Pair.resolved.denied": "此配对已被拒绝。",
+    "Pair.resolved.consumed": "此配对已被桌面端使用。",
+    "Pair.resolved.expired": "此配对短码已失效，请在桌面端重新获取。",
   },
 };
 
