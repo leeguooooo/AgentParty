@@ -511,8 +511,14 @@ pub enum FailureReason {
 pub struct UiUpdateMetadata {
     pub current: Option<String>,
     pub current_ui_abi: Option<u32>,
+    // current/previous 各自的 published_at，用于回滚时把服务层的 high-water 地板
+    // 降回被恢复构建自身满足的值（否则 highest 停在失败构建上，恢复的旧构建被自身
+    // 降级校验当成 rollback 丢弃）。老 metadata 缺该字段时 default 为 None，随下一次
+    // activate 自愈。
+    pub current_published_at: Option<i64>,
     pub previous: Option<String>,
     pub previous_ui_abi: Option<u32>,
+    pub previous_published_at: Option<i64>,
     pub pending: Option<String>,
     pub pending_ui_abi: Option<u32>,
     pub status: UpdateStatus,
@@ -527,8 +533,10 @@ impl Default for UiUpdateMetadata {
         Self {
             current: None,
             current_ui_abi: None,
+            current_published_at: None,
             previous: None,
             previous_ui_abi: None,
+            previous_published_at: None,
             pending: None,
             pending_ui_abi: None,
             status: UpdateStatus::Ready,
@@ -813,8 +821,10 @@ impl UiUpdateStore {
 
         metadata.previous = metadata.current.take();
         metadata.previous_ui_abi = metadata.current_ui_abi.take();
+        metadata.previous_published_at = metadata.current_published_at.take();
         metadata.current = Some(staged.build_id.clone());
         metadata.current_ui_abi = Some(staged.ui_abi);
+        metadata.current_published_at = Some(staged.published_at);
         metadata.pending = Some(staged.build_id.clone());
         metadata.pending_ui_abi = Some(staged.ui_abi);
         metadata.status = UpdateStatus::Pending;
@@ -880,9 +890,15 @@ impl UiUpdateStore {
         metadata.failure_count = metadata.failure_count.saturating_add(1);
         metadata.current = metadata.previous.take();
         metadata.current_ui_abi = metadata.previous_ui_abi.take();
+        metadata.current_published_at = metadata.previous_published_at.take();
         metadata.pending = None;
         metadata.pending_ui_abi = None;
         metadata.status = UpdateStatus::Failed;
+        // 回滚失败构建后，high-water 必须降回被恢复构建自身的 published_at，否则它会被
+        // 服务层的降级校验（verified_current_archive_at_least 的 minimum）当成 rollback
+        // 拒绝，进而被 quarantine 到 current=None，退回 bundled UI。恢复的构建是当下最新
+        // 的可用构建，用它的 published_at 作地板即正确的防回滚下限。
+        metadata.highest_published_at = metadata.current_published_at;
         self.write_metadata(&metadata)
     }
 
@@ -901,9 +917,13 @@ impl UiUpdateStore {
         metadata.failure_count = metadata.failure_count.saturating_add(1);
         metadata.current = metadata.previous.take();
         metadata.current_ui_abi = metadata.previous_ui_abi.take();
+        metadata.current_published_at = metadata.previous_published_at.take();
         metadata.pending = None;
         metadata.pending_ui_abi = None;
         metadata.status = UpdateStatus::Failed;
+        // 同 fail_and_rollback：隔离当前构建、恢复上一版后，high-water 降回恢复构建的
+        // published_at，避免它被自身降级校验拒绝。恢复到 None 时 high-water 也随之清空。
+        metadata.highest_published_at = metadata.current_published_at;
         self.write_metadata(&metadata)
     }
 
@@ -1891,6 +1911,75 @@ mod tests {
             .join("index.html")
             .is_file());
         assert!(!store.metadata_path().with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn rollback_lowers_the_high_water_mark_so_the_restored_build_stays_servable() {
+        let app_data = tempdir().unwrap();
+        let store = UiUpdateStore::new(app_data.path());
+        let verifier = RecordingVerifier::default();
+        let limits = UpdateLimits::default();
+
+        // 上一版 A：默认 published_at 2026-07-11。
+        let first_bundle = archive(&[("index.html", b"v1", None), ("assets/app.js", b"1", None)]);
+        let first = signed_manifest(&first_bundle)
+            .verify_for_core("0.2.94", SUPPORTED_UI_ABI, &verifier)
+            .unwrap()
+            .verify_archive(&first_bundle, &verifier)
+            .unwrap();
+        let first_staged = store.stage(&first, &first_bundle, &limits).unwrap();
+        store.activate(&first_staged).unwrap();
+        store
+            .mark_ready(first.build_id(), SUPPORTED_UI_ABI)
+            .unwrap();
+
+        // 待命更新 B：published_at 严格晚于 A（生产里 published_at 单调递增），
+        // 这正是旧的同 published_at 测试夹具遮住本 bug 的地方。
+        let second_bundle = archive(&[("index.html", b"v2", None), ("assets/app.js", b"2", None)]);
+        let mut second_manifest = signed_manifest(&second_bundle).manifest;
+        second_manifest.version = "1.5.0".to_string();
+        second_manifest.build_id = "a33a665e06f3b3dcb1d45f9cccbad0be83581637".to_string();
+        second_manifest.published_at = "2026-07-12T07:30:00Z".to_string();
+        second_manifest.archive.name = "agentparty-desktop-ui-v1.5.0.tar.gz".to_string();
+        second_manifest.archive.url = "https://github.com/leeguooooo/AgentParty/releases/download/desktop-ui/agentparty-desktop-ui-v1.5.0.tar.gz".to_string();
+        let second = SignedUiManifest::new(second_manifest, "manifest-signature")
+            .unwrap()
+            .verify_for_core("0.2.94", SUPPORTED_UI_ABI, &verifier)
+            .unwrap()
+            .verify_archive(&second_bundle, &verifier)
+            .unwrap();
+        let second_staged = store.stage(&second, &second_bundle, &limits).unwrap();
+        let t_a = first_staged.published_at;
+        let t_b = second_staged.published_at;
+        assert!(t_b > t_a, "fixture must have a strictly newer failed build");
+        store.activate(&second_staged).unwrap();
+
+        // activate 乐观地把 high-water 前移到未证实的 B。
+        assert_eq!(store.load_metadata().unwrap().highest_published_at, Some(t_b));
+
+        store
+            .fail_and_rollback(second.build_id(), FailureReason::BootFailed)
+            .unwrap();
+
+        let failed = store.load_metadata().unwrap();
+        assert_eq!(failed.current.as_deref(), Some(first.build_id()));
+        assert_eq!(failed.status, UpdateStatus::Failed);
+        // 回滚后 high-water 降回 A 的 published_at，而不是停在失败构建 B 上。
+        assert_eq!(failed.highest_published_at, Some(t_a));
+
+        // 关键回归：服务层用 Some(highest) 作 minimum 时，恢复的 A 仍可服务，
+        // 不再被当成 rollback 拒绝（修复前这里会返回 StoreError::RollbackRejected）。
+        let served = store
+            .verified_current_archive_at_least(
+                "0.2.94",
+                SUPPORTED_UI_ABI,
+                &verifier,
+                &limits,
+                failed.highest_published_at,
+            )
+            .unwrap()
+            .expect("restored previous build must still be servable after rollback");
+        assert_eq!(served.build_id(), first.build_id());
     }
 
     #[test]

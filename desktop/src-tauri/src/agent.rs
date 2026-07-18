@@ -504,7 +504,10 @@ impl AgentManager {
                 agent.runtime.mark_exited(None, Some(&message));
                 Self::push_log(agent, message);
             }
-            return Ok(agent.runtime.clone());
+            // kill 失败也是转入终止态，和超时兜底路径一样立即收敛历史上限（CodeRabbit #618）。
+            let runtime = agent.runtime.clone();
+            evict_terminal_overflow(&mut instances);
+            return Ok(runtime);
         }
 
         for _ in 0..80 {
@@ -1211,6 +1214,33 @@ mod tests {
         assert_eq!(instances.len(), 1 + 16);
         assert!(instances.contains_key("cfg:29"));
         assert!(!instances.contains_key("cfg:1"));
+    }
+
+    #[test]
+    fn evict_converges_terminal_history_after_kill_error_failures() {
+        use std::collections::HashMap;
+        // 复现 #645：stop_instance_key 的 kill 失败路径把实例标 Failed。若不淘汰，
+        // 反复 kill 失败会让终止态历史超出 MAX_TERMINAL_INSTANCES。这里断言 Failed
+        // 实例与其它终止态一样参与收敛，且活跃实例永不被淘汰。
+        let mut instances: HashMap<String, super::ManagedAgent> = HashMap::new();
+        let mut active = super::ManagedAgent::default();
+        active.runtime.started_at = Some(1000);
+        active.runtime.phase = AgentPhase::Running;
+        instances.insert("cfg:active".to_string(), active);
+        for index in 0..30u64 {
+            let mut agent = super::ManagedAgent::default();
+            agent.runtime.started_at = Some(index);
+            // kill 失败落到 Failed（mark_exited 带错误信息即 Failed）。
+            agent.runtime.mark_exited(None, Some("failed to stop party sidecar"));
+            assert_eq!(agent.runtime.phase, AgentPhase::Failed);
+            instances.insert(format!("cfg:{index}"), agent);
+        }
+        super::evict_terminal_overflow(&mut instances);
+        assert!(instances.contains_key("cfg:active"));
+        assert_eq!(instances.len(), 1 + super::MAX_TERMINAL_INSTANCES);
+        // 最新的终止态保留，最旧的被淘汰。
+        assert!(instances.contains_key("cfg:29"));
+        assert!(!instances.contains_key("cfg:0"));
     }
 
     #[test]

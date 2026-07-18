@@ -191,6 +191,11 @@ fn valid_value(key: &str, value: &str) -> bool {
         "ap_onboarded" => value == "1",
         "ap_desktop_updater_diagnostic" => valid_updater_diagnostic(value),
         "ap_desktop_updater_last_success" => valid_non_negative_integer(value),
+        // 与 web/src/lib/desktopStorage.ts 的 validValue 对齐：更新器写入的两个版本键
+        // （notified/shown），漏掉任意一个都会让整个 settings 快照校验失败并静默丢弃。
+        "ap_desktop_updater_notified_version" | "ap_desktop_updater_shown_version" => {
+            SAFE_VERSION_PATTERN.is_match(value)
+        }
         "ap_locale" => matches!(value, "en" | "zh"),
         "ap_server_profiles_v1" => valid_server_profiles(value),
         "ap_theme" => matches!(value, "doodle" | "midnight"),
@@ -362,6 +367,14 @@ mod tests {
                 r#"{"status":"success","source":"manual","stage":"check","category":null,"timestamp":1720000000000,"appVersion":"0.2.94"}"#.to_string(),
             ),
             (
+                "ap_desktop_updater_notified_version".to_string(),
+                "0.2.130".to_string(),
+            ),
+            (
+                "ap_desktop_updater_shown_version".to_string(),
+                "0.2.130".to_string(),
+            ),
+            (
                 "ap_active_server_origin_v1".to_string(),
                 "https://private.example".to_string(),
             ),
@@ -465,6 +478,29 @@ mod tests {
                 write_snapshot(root.path(), &entries).is_err(),
                 "accepted {key}={value}"
             );
+        }
+    }
+
+    #[test]
+    fn accepts_updater_notified_and_shown_version_keys_and_rejects_bad_versions() {
+        let root = tempdir().unwrap();
+        // 两个键必须与 TS 侧一样接受合法 semver 并原样往返，否则更新器一跑快照就全废。
+        for key in [
+            "ap_desktop_updater_notified_version",
+            "ap_desktop_updater_shown_version",
+        ] {
+            for version in ["0.2.130", "1.4.0", "0.2.130-beta.1+build.7"] {
+                let entries = BTreeMap::from([(key.to_string(), version.to_string())]);
+                write_snapshot(root.path(), &entries).unwrap();
+                assert_eq!(read_snapshot(root.path()).unwrap(), entries);
+            }
+            for bad in ["latest", "1.2", "1.2.3.4", "not a version", ""] {
+                let entries = BTreeMap::from([(key.to_string(), bad.to_string())]);
+                assert!(
+                    write_snapshot(root.path(), &entries).is_err(),
+                    "accepted {key}={bad}"
+                );
+            }
         }
     }
 
