@@ -7,6 +7,7 @@ import {
 } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
+import { stripTerminalControls } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { fetchMessages, fetchPresence, fetchRecentMessages, handleRestError, listTasks } from "../rest";
@@ -98,42 +99,44 @@ function printBoard(board: HostBoard, window: BoardWindow) {
   console.log(`host board ${board.channel} last_seq=${board.last_seq}`);
   for (const line of formatWindowLines(window)) console.log(line);
   console.log(`hosts: ${board.hosts.length}`);
+  // #629：board 逐条行里 name/owner/scope/blocked_reason/note/decision/reason/stale_reason 等都是服务端存的
+  // 参与者可控自由文本，整行剥离终端控制序列后再打印（同 format.ts/formatMsg），避免 OSC52/CSI 注入。
   for (const host of board.hosts) {
     const reason = host.stale_reason === null ? "" : ` reason=${host.stale_reason}`;
-    console.log(`- ${host.name} ${host.lease} residency=${host.residency} wake=${host.wake_kind}${reason}`);
+    console.log(stripTerminalControls(`- ${host.name} ${host.lease} residency=${host.residency} wake=${host.wake_kind}${reason}`));
   }
   console.log(`open claims: ${board.open_claims.length}`);
   for (const claim of board.open_claims) {
     const blocked = claim.blocked_reason === null ? "" : ` blocked=${claim.blocked_reason}`;
     const workflow = claim.workflow === null ? "" : ` workflow=${claim.workflow.workflow_id}/${claim.workflow.kind}`;
-    console.log(`- ${claimRef(claim)} ${claim.owner} ${claim.state} scope=${scopeLabel(claim.scope)}${workflow}${blocked}`);
+    console.log(stripTerminalControls(`- ${claimRef(claim)} ${claim.owner} ${claim.state} scope=${scopeLabel(claim.scope)}${workflow}${blocked}`));
   }
   console.log(`blockers: ${board.blockers.length}`);
   for (const blocker of board.blockers) {
-    console.log(`- ${claimRef(blocker)} ${blocker.owner} ${blocker.blocked_reason ?? blocker.note ?? "blocked"}`);
+    console.log(stripTerminalControls(`- ${claimRef(blocker)} ${blocker.owner} ${blocker.blocked_reason ?? blocker.note ?? "blocked"}`));
   }
   console.log(`conflicts: ${board.conflicts.length}`);
   for (const conflict of board.conflicts) {
     const claims = conflict.claims.map((claim) => `${claimRef(claim)} ${claim.owner}`).join(" vs ");
-    console.log(`- ${conflict.scope}: ${claims}`);
+    console.log(stripTerminalControls(`- ${conflict.scope}: ${claims}`));
   }
   console.log(`decisions: ${board.decisions.length}`);
   for (const decision of board.decisions) {
     const handoff = decision.handoff_to === null ? "" : ` handoff=${decision.handoff_to}`;
     const takeover = decision.takeover_from === null ? "" : ` takeover=${decision.takeover_from}`;
-    console.log(`- #${decision.seq} ${decision.owner} ${decision.kind}: ${decision.decision}${handoff}${takeover}`);
+    console.log(stripTerminalControls(`- #${decision.seq} ${decision.owner} ${decision.kind}: ${decision.decision}${handoff}${takeover}`));
   }
   // #204 legacy 段：没有对应 task 的历史 status claim。独立成段、不混进 open claims；给出转成 task 的命令。
   console.log(`unlinked status claims (no task, legacy): ${board.unlinked_claims.length}`);
   for (const claim of board.unlinked_claims) {
-    console.log(`- ${claimRef(claim)} ${claim.owner} ${claim.state} scope=${scopeLabel(claim.scope)}  (no task; run: party task from ${claim.seq})`);
+    console.log(stripTerminalControls(`- ${claimRef(claim)} ${claim.owner} ${claim.state} scope=${scopeLabel(claim.scope)}  (no task; run: party task from ${claim.seq})`));
   }
   console.log(`recommended actions: ${board.recommended_actions.length}`);
   for (const action of board.recommended_actions) {
     const human = action.requires_human ? " human" : "";
     const target = action.target === null ? "" : ` target=${action.target}`;
     const command = action.command === null ? "" : ` command=${action.command}`;
-    console.log(`- ${action.kind}${human}${target}: ${action.reason}${command}`);
+    console.log(stripTerminalControls(`- ${action.kind}${human}${target}: ${action.reason}${command}`));
   }
 }
 

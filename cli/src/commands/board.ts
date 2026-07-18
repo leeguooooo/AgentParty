@@ -2,6 +2,7 @@
 import type { TaskRecord, TaskState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
+import { stripTerminalControls } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { fetchMe, handleRestError, listTasks } from "../rest";
@@ -30,10 +31,11 @@ function compact(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-function formatTask(task: TaskRecord): string {
+export function formatTask(task: TaskRecord): string {
   const assignee = task.assignee === null ? "unassigned" : `@${task.assignee.name}`;
   const labels = task.labels.length > 0 ? ` [${task.labels.join(",")}]` : "";
-  return `  #${task.id} P${task.priority} ${assignee}${labels} ${compact(task.title)}`;
+  // #629：title/assignee/labels 都是服务端存的参与者可控自由文本，剥离终端控制序列后再打印（同 task.ts:93）。
+  return stripTerminalControls(`  #${task.id} P${task.priority} ${assignee}${labels} ${compact(task.title)}`);
 }
 
 function summarize(tasks: TaskRecord[]) {

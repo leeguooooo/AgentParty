@@ -72,6 +72,10 @@ class FrameQueue {
 
 export const DEFAULT_MAX_UNACKED_FRAMES = 4096;
 
+// #628：升级被拒后的 REST 探测必须带超时，否则半开/黑洞网络下 fetch promise 永不 settle，
+// onclose 的 .then/.catch 都不触发，重连永不推进（rest.ts 每个请求同样用 30s 超时兜底，#116）。
+const PROBE_TIMEOUT_MS = 10_000;
+
 const RETRYABLE_NETWORK_CODES = new Set([
   "EAI_AGAIN",
   "ECONNABORTED",
@@ -487,7 +491,8 @@ export function connect(
     try {
       const res = await fetch(
         `${httpBase}/api/channels/${encodeURIComponent(slug)}/messages?since=0&limit=1`,
-        { headers: { authorization: `Bearer ${token}` } },
+        // #628：带超时的探测——超时抛 TimeoutError，isRetryableNetworkError 认它可重试，落回 scheduleReconnect()。
+        { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) },
       );
       if (res.status === 401) {
         return { type: "error", code: "unauthorized", message: "invalid or revoked token, re-run: party init" };
@@ -497,6 +502,13 @@ export function connect(
       }
       if (res.status === 404) {
         return { type: "error", code: "not_found", message: `channel not found: ${slug}` };
+      }
+      // #628：429（限流）与 5xx（滚动部署 / Cloudflare 过载）是瞬时的，返回 null 让 onclose
+      // 退避重连，而非致命化——否则一次瞬时抖动就把长跑的 serve/watch 打死。只有真正非预期
+      // 的状态（400 等，重试也不会好）才走 throw → queue.fail 终止帧流。
+      if (res.status === 429 || res.status >= 500) {
+        console.debug(`party ws probe: transient HTTP ${res.status}; reconnecting`);
+        return null;
       }
       if (!res.ok) {
         throw new Error(`websocket probe failed: HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`);

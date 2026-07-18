@@ -741,4 +741,65 @@ describe("ws client", () => {
     await Bun.sleep(15);
     expect(ProbeWebSocket.instances).toHaveLength(1);
   });
+
+  // #628：半开/黑洞网络下探测 fetch 永不自行 settle。修复给它挂了 AbortSignal.timeout，
+  // 超时抛 TimeoutError（isRetryableNetworkError 认可），落回 scheduleReconnect() 而非永久卡死。
+  test("a fatal probe that never settles is aborted by its timeout and reconnects instead of hanging", async () => {
+    jest.useFakeTimers();
+    useProbeWebSocket();
+    let capturedSignal: AbortSignal | null = null;
+    globalThis.fetch = ((_url: string, init?: RequestInit) => {
+      capturedSignal = init?.signal ?? null;
+      // 半开网络：只有超时 signal 触发才 settle（按 TimeoutError 拒绝），否则永远挂起。
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation timed out.", "TimeoutError")),
+        );
+      });
+    }) as unknown as typeof fetch;
+    console.debug = () => {};
+    const statuses: string[] = [];
+    conn = connect("https://party.invalid", "ap_tok", "dev", 0, {
+      backoffBaseMs: 5,
+      backoffMaxMs: 5,
+      onStatus: (status) => statuses.push(status),
+    });
+    ProbeWebSocket.instances[0]!.failHandshake();
+
+    // 探测 fetch 已带上超时 signal；未到时间前探测挂起，连接既不重连也不终止（正是修复前的僵尸态）。
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    expect(statuses).not.toContain("reconnecting");
+    expect(ProbeWebSocket.instances).toHaveLength(1);
+
+    // 超时触发 → 探测按 TimeoutError 拒绝 → 退避重连。
+    jest.advanceTimersByTime(10_000);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    jest.advanceTimersByTime(5);
+    expect(statuses).toContain("reconnecting");
+    expect(ProbeWebSocket.instances.length).toBeGreaterThan(1);
+  });
+
+  // #628：探测 GET 命中瞬时 429/5xx（限流 / 滚动部署 / Cloudflare 过载）时退避重连，
+  // 而非把长跑的 serve/watch 打成致命终局。
+  test("a transient 429/5xx from the fatal probe reconnects with backoff instead of failing fatally", async () => {
+    for (const status of [429, 503]) {
+      useProbeWebSocket();
+      console.debug = () => {};
+      const statuses: Array<{ status: string; error?: string }> = [];
+      globalThis.fetch = (async () => new Response(null, { status })) as unknown as typeof fetch;
+      conn = connect("https://party.invalid", "ap_tok", "dev", 0, {
+        backoffBaseMs: 5,
+        backoffMaxMs: 5,
+        onStatus: (s, detail) => statuses.push({ status: s, ...(detail?.error ? { error: detail.error } : {}) }),
+      });
+      ProbeWebSocket.instances[0]!.failHandshake();
+      await Bun.sleep(20);
+
+      expect(statuses.map((s) => s.status)).toContain("reconnecting");
+      expect(statuses.map((s) => s.status)).not.toContain("closed");
+      expect(ProbeWebSocket.instances.length).toBeGreaterThan(1);
+      conn.close();
+      conn = null;
+    }
+  });
 });

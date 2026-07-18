@@ -2,6 +2,7 @@
 import type { ChannelSquad } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
+import { stripTerminalControls } from "../format";
 import { resolveAuth } from "../oidc-cli";
 import { createSquad, deleteSquad, handleRestError, listSquads, updateSquad } from "../rest";
 import { isName, isSlug } from "../validation";
@@ -40,10 +41,11 @@ function leaderFrom(raw: string | undefined): string | null | undefined {
   return cleanName(raw);
 }
 
-function formatSquad(squad: ChannelSquad): string {
+export function formatSquad(squad: ChannelSquad): string {
   const leader = squad.leader === null ? "" : ` leader:@${squad.leader}`;
   const title = squad.title === null ? "" : ` ${squad.title}`;
-  return `@${squad.name}\t${squad.members.length} members${leader}\t${squad.members.map((m) => `@${m}`).join(",")}${title}`;
+  // #629：name/leader/members/title 都是服务端存的参与者可控自由文本，整行剥离终端控制序列后再打印。
+  return stripTerminalControls(`@${squad.name}\t${squad.members.length} members${leader}\t${squad.members.map((m) => `@${m}`).join(",")}${title}`);
 }
 
 export async function run(argv: string[]): Promise<number> {
