@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
 import { clearApiBase, setApiBase } from "../lib/base";
+// 版本闸跟随刚发布的 CLI（joinPack 从 cli/package.json 派生），断言引用常量而非写死数字，杜绝再漂移。
+import { MIN_CLI_UNATTENDED } from "../lib/joinPack";
 
 const savedAgents: Array<{ name: string; token: string; command: string }> = [];
 
@@ -227,7 +229,7 @@ describe("AgentJoin 无人值守值守预设 (#612)", () => {
     const saved = savedAgents[0]! as { command: string; mode?: string };
     expect(saved.mode).toBe("unattended");
     expect(saved.command).toContain("party serve --channel demo --runner claude");
-    expect(saved.command).toContain("need=0.2.127");
+    expect(saved.command).toContain(`need=${MIN_CLI_UNATTENDED}`);
     expect(saved.command).toContain("party init --server ");
     // 值守机脚本给人跑，不该出现交互包的 harness 步骤
     expect(saved.command).not.toContain("claude mcp add");
