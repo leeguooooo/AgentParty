@@ -789,8 +789,10 @@
 .msg-body th, .msg-body td {
   padding: 5px 10px;
   border: 1px solid var(--t-border);
-  text-align: left;
 }
+/* 只给未显式 align 的单元格默认左对齐（否则 <th> 浏览器默认居中）；带 align="center|right" 的
+   保留 GFM 列对齐——若无这层 :not([align])，text-align:left 会盖掉刚放行的 align 属性（CodeRabbit #657）。 */
+.msg-body th:not([align]), .msg-body td:not([align]) { text-align: left; }
 .msg-body th { background: var(--t-panel2); font-weight: 700; }
 .msg-body tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--t-panel2) 55%, transparent); }
 
