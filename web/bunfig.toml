@@ -1,0 +1,5 @@
+# bun 单测没有 Vite 的 define，用 preload 把 cli/package.json 的发布版号注入全局，
+# 让 releaseVersion.ts 走真实发布版而非兜底字面量——测试因此永远对齐发布版、版本闸漂移当场暴露，
+# 也无需每次发布手改兜底值。仅影响 web 的 bun test（cwd=web 时自动加载），不碰 vite build。
+[test]
+preload = ["./test/inject-cli-version.ts"]

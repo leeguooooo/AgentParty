@@ -5,14 +5,14 @@
 import { AGENT_NAME_RE, charterSnapshotBodyLines, mcpServerName } from "@agentparty/shared/onboarding";
 import type { ChannelCharter } from "./api";
 import type { TFunc } from "../i18n/useT";
+import { RELEASE_CLI_VERSION } from "./releaseVersion";
 import "../i18n/strings/AgentJoin";
 
-// snippet 里保底的 CLI 版本：低于它就强制重装（旧版会把「需升级」误报成 token 失效，见 issue #2）。
-// 发布带 CLI 行为变更的版本时同步上调。
-// 0.2.52：接入包依赖 watch --once（Claude Code 待命）与 serve 自动声明可唤醒。
-// 0.2.124：接入包 MCP-first，依赖 party mcp 的 party_decision_ask 与 party_send attach
-//（不能写 0.2.123——该版已从 #579 发布、不含这两个工具，锁它会让过闸的 CLI 缺工具）。
-export const MIN_CLI = "0.2.124";
+// snippet 里 need= 的 CLI 版本：低于它就强制重装（旧版会把「需升级」误报成 token 失效，见 issue #2）。
+// 跟随刚发布的 CLI（RELEASE_CLI_VERSION 源自 cli/package.json，构建时注入）——不再手改常量、不再漂移。
+// 接入包 MCP-first，依赖 party mcp 的 party_decision_ask 与 party_send attach（0.2.124 起提供），
+// 而每次发布的 CLI 天然都在其上，所以用「刚发布版」当闸既满足依赖、又永远新鲜。
+export const MIN_CLI = RELEASE_CLI_VERSION;
 
 // 与桌面最小接入包共用同一份 awk 三段版本比较；只查 command -v 会放过装着旧版、缺 MCP 工具的机器。
 export const VERSION_GE_SNIPPET =
@@ -121,10 +121,10 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
   ].join("\n");
 }
 
-// 无人值守值守包（#612 公司大群）：serve --runner claude 的一键预设。0.2.127 起 serve 的
-// builtin runner 默认走角色裁剪的 party MCP 工具协议（#581 Phase 2），锁更低版本会拿到
-// 文本信封的旧行为。
-export const MIN_CLI_UNATTENDED = "0.2.127";
+// 无人值守值守包（#612 公司大群）：serve --runner claude 的一键预设。serve 的 builtin runner
+// 默认走角色裁剪的 party MCP 工具协议（#581 Phase 2，0.2.127 起提供）；同样以「刚发布版」当闸，
+// 一键预设永远落到最新的 serve/runner，不再手改。
+export const MIN_CLI_UNATTENDED = RELEASE_CLI_VERSION;
 
 export type JoinPackMode = "interactive" | "unattended";
 
