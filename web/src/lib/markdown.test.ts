@@ -30,4 +30,36 @@ describe("markdown 解析", () => {
     expect(html).toContain("<pre>");
     expect(html).toContain("<code");
   });
+
+  test("纯 HTML 注释被丢弃（charter 的 ap:division marker 不再漏成可见文字），正文照常渲染", () => {
+    const section = "<!-- ap:division:start -->\n### Division of labor (synced)\n- **leo-claude**（lark:x）— host：#126\n<!-- ap:division:end -->";
+    const html = markdownToHtmlUnsafe(section);
+    // marker 注释不落任何可见文本（既不裸露也不被转义成 &lt;!--）
+    expect(html).not.toContain("ap:division");
+    expect(html).not.toContain("&lt;!--");
+    // marker 之间的正文正常渲染
+    expect(html).toContain("<h3>Division of labor (synced)</h3>");
+    expect(html).toContain("<strong>leo-claude</strong>");
+  });
+
+  test("#642 不回归：混了内容的裸 HTML 仍转义成可见文本，绝不真渲染", () => {
+    // 只有「整段就是一个注释」才丢弃；注释后跟内容的混合 token 仍走转义，不给伪造 UI 的绕过面。
+    const html = markdownToHtmlUnsafe('<span class="ap-mention" title="@owner">@owner</span>');
+    expect(html).toContain("&lt;span");
+    expect(html).not.toContain('<span class="ap-mention"');
+  });
+
+  test("#642 边界：注释后紧跟正文（<!-- -->evil）不因注释判断而丢正文，整段仍转义成可见文本", () => {
+    // marked 把 `<!-- -->evil` 收成单个 html token——纯注释分支绝不能匹配它、把 evil 一起吞掉。
+    const html = markdownToHtmlUnsafe("<!-- x -->evil");
+    expect(html).toContain("evil"); // 正文不被丢弃
+    expect(html).toContain("&lt;!--"); // 注释头也转义成可见文本，而非当注释隐藏
+    expect(html).not.toContain("<!-- x -->"); // 绝不作为真实注释/HTML 渲染
+  });
+
+  test("缩进注释（marked 保留的 0–3 空格）也被丢弃，不漏成可见文字", () => {
+    const html = markdownToHtmlUnsafe("   <!-- ap:division:start -->");
+    expect(html).not.toContain("ap:division");
+    expect(html).not.toContain("&lt;!--");
+  });
 });
