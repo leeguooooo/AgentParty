@@ -48,4 +48,18 @@ describe("markdown 解析", () => {
     expect(html).toContain("&lt;span");
     expect(html).not.toContain('<span class="ap-mention"');
   });
+
+  test("#642 边界：注释后紧跟正文（<!-- -->evil）不因注释判断而丢正文，整段仍转义成可见文本", () => {
+    // marked 把 `<!-- -->evil` 收成单个 html token——纯注释分支绝不能匹配它、把 evil 一起吞掉。
+    const html = markdownToHtmlUnsafe("<!-- x -->evil");
+    expect(html).toContain("evil"); // 正文不被丢弃
+    expect(html).toContain("&lt;!--"); // 注释头也转义成可见文本，而非当注释隐藏
+    expect(html).not.toContain("<!-- x -->"); // 绝不作为真实注释/HTML 渲染
+  });
+
+  test("缩进注释（marked 保留的 0–3 空格）也被丢弃，不漏成可见文字", () => {
+    const html = markdownToHtmlUnsafe("   <!-- ap:division:start -->");
+    expect(html).not.toContain("ap:division");
+    expect(html).not.toContain("&lt;!--");
+  });
 });

@@ -72,8 +72,9 @@ function createMarked(identities: IdentityDisplayMap | undefined): Marked {
         // 而 DOMPurify 默认也会剥注释——把它转义成可见文字纯属副作用，会让内部注释 marker
         // （如 charter 的 ap:division 合并 marker，见 divisionCharter.ts）漏成一行乱码。
         // 因此纯注释 token 直接丢弃；其余裸 HTML 仍按 #642 转义成可见文本、绝不真渲染。
-        // 只在整段就是一个注释时丢弃，`<!-- -->evil` 之类混合内容仍走转义，不给绕过面。
-        if (/^<!--[\s\S]*?-->\s*$/.test(text)) return "";
+        // 只在整段就是一个注释时丢弃：允许 marked 保留的 0–3 空格缩进（前导 \s*），但用非贪婪
+        // 匹配到首个 `-->` 后要求余下全是空白——`<!-- -->evil` 之类混合内容不匹配，仍走转义，不给绕过面。
+        if (/^\s*<!--[\s\S]*?-->\s*$/.test(text)) return "";
         return escapeRawHtml(text);
       },
     },
