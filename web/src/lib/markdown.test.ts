@@ -30,4 +30,22 @@ describe("markdown 解析", () => {
     expect(html).toContain("<pre>");
     expect(html).toContain("<code");
   });
+
+  test("纯 HTML 注释被丢弃（charter 的 ap:division marker 不再漏成可见文字），正文照常渲染", () => {
+    const section = "<!-- ap:division:start -->\n### Division of labor (synced)\n- **leo-claude**（lark:x）— host：#126\n<!-- ap:division:end -->";
+    const html = markdownToHtmlUnsafe(section);
+    // marker 注释不落任何可见文本（既不裸露也不被转义成 &lt;!--）
+    expect(html).not.toContain("ap:division");
+    expect(html).not.toContain("&lt;!--");
+    // marker 之间的正文正常渲染
+    expect(html).toContain("<h3>Division of labor (synced)</h3>");
+    expect(html).toContain("<strong>leo-claude</strong>");
+  });
+
+  test("#642 不回归：混了内容的裸 HTML 仍转义成可见文本，绝不真渲染", () => {
+    // 只有「整段就是一个注释」才丢弃；注释后跟内容的混合 token 仍走转义，不给伪造 UI 的绕过面。
+    const html = markdownToHtmlUnsafe('<span class="ap-mention" title="@owner">@owner</span>');
+    expect(html).toContain("&lt;span");
+    expect(html).not.toContain('<span class="ap-mention"');
+  });
 });
