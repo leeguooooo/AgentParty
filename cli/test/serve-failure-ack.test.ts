@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT_ARCHIVED, type MsgFrame } from "@agentparty/shared";
-import { createBuiltinRunner, createSdkRunner, EXIT_WAKE_ABANDON_CIRCUIT, profileChildServeOptions, runServe, WakeBlockedError, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
+import { createBuiltinRunner, createSdkRunner, EXIT_WAKE_ABANDON_CIRCUIT, isRunnerEnvFailure, profileChildServeOptions, runServe, WakeBlockedError, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
 import type { StuckWake } from "../src/config";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 
@@ -187,6 +187,95 @@ describe("serve wake delivery (#118 / #198)", () => {
     await expect(run(triggerFrame(1), runnerCtx())).rejects.toThrow(/blocked|exit code 3/);
     // 但它**不该自己发** blocked：外层还要重试，瞬态失败不该污染频道状态（#206 门禁 P1②）
     expect(posts.some((p) => p.state === "blocked")).toBe(false);
+  });
+
+  // #690：认证过期 / 二进制缺失等环境性失败在模型启动前就崩，别归为「model may have run」。
+  test("an auth-failure runner exit is flagged environment=true and says the model did not run (#690)", async () => {
+    const run = createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "claude",
+      workdir: tempDir(),
+      // 复刻 #690 现场：`claude -p` 秒退 exit 1，stderr 是 OAuth 过期。
+      runProcess: async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "Failed to authenticate: OAuth session expired and could not be refreshed",
+      }),
+      post: async () => ({ seq: 1 }),
+    });
+
+    let caught: unknown;
+    try {
+      await run(triggerFrame(1), runnerCtx());
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(WakeBlockedError);
+    const err = caught as WakeBlockedError;
+    expect(err.environment).toBe(true);
+    expect(err.retriable).toBe(false); // 认证没修好前立刻重试是白烧
+    expect(err.message).toContain("runner environment failure");
+    expect(err.message).toContain("model did not run");
+    expect(err.message).not.toContain("model may have run");
+  });
+
+  test("isRunnerEnvFailure matches environment fingerprints and ignores ordinary model failures (#690)", () => {
+    const env = [
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+      "OAuth token could not be refreshed",
+      "error: not logged in — please run `claude login`",
+      "Invalid API key provided",
+      "sh: claude: command not found",
+      "spawn claude ENOENT",
+      "permission denied",
+      "HTTP 401 Unauthorized",
+    ];
+    for (const stderr of env) {
+      expect(isRunnerEnvFailure({ stderr })).toBe(true);
+    }
+    const notEnv = [
+      "diff apply conflict in src/foo.ts",
+      "TypeError: cannot read property 'x' of undefined",
+      "the model produced no channel action",
+      "git push rejected: non-fast-forward",
+      "",
+    ];
+    for (const stderr of notEnv) {
+      expect(isRunnerEnvFailure({ stderr })).toBe(false);
+    }
+  });
+
+  // CodeRabbit #693：只扫 stderr。模型 stdout 里恰好写了环境错字样，不该被误判成「model did not run」。
+  test("isRunnerEnvFailure ignores environment fingerprints that appear only in model stdout (#690)", () => {
+    for (const noise of ["unauthorized", "spawn foo ENOENT", "permission denied", "command not found", "401 Unauthorized"]) {
+      // stdout 命中但 stderr 干净 → 不算环境失败（模型真跑过、只是它的输出里提到了这些词）。
+      const result: { stdout: string; stderr: string } = { stdout: noise, stderr: "" };
+      expect(isRunnerEnvFailure(result)).toBe(false);
+    }
+  });
+
+  test("a non-environment runner failure keeps environment=false (no false positives)", async () => {
+    const run = createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir: tempDir(),
+      // 模型真跑过后在交付阶段崩：不含任何认证/二进制指纹——绝不能误标成环境错。
+      runProcess: async () => ({ code: 1, stdout: "partial model output...", stderr: "diff apply conflict in src/foo.ts" }),
+      post: async () => ({ seq: 1 }),
+    });
+
+    let caught: unknown;
+    try {
+      await run(triggerFrame(1), runnerCtx());
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(WakeBlockedError);
+    expect((caught as WakeBlockedError).environment).toBe(false);
   });
 
   test("a succeeding runner advances the cursor and leaves no debt", async () => {

@@ -199,10 +199,18 @@ export class WakeBlockedError extends Error {
    * 只有「runner 根本没起来」（spawn 失败）才置 true。
    */
   readonly retriable: boolean;
-  constructor(message: string, retriable = false) {
+  /**
+   * #690：runner **环境性**失败——认证过期 / 二进制缺失 / 沙箱拒权等在**模型启动之前**就崩的错。
+   * 与 retriable 正交：environment=true 时模型确定没跑（放弃留痕不该再说「model may have run」），
+   * 但认证/二进制没修好前立刻重试也是白烧（默认仍 retriable=false，快速放弃、把清晰的环境错拍进 runner_health
+   * 让 owner 从 `party who` / `party wake test` 看得见），修好后由下一条 @ 或重连自愈。
+   */
+  readonly environment: boolean;
+  constructor(message: string, retriable = false, opts?: { environment?: boolean }) {
     super(message);
     this.name = "WakeBlockedError";
     this.retriable = retriable;
+    this.environment = opts?.environment ?? false;
   }
 }
 
@@ -1560,6 +1568,36 @@ function isInvalidPersistedSessionError(error: unknown): boolean {
   return structuredErrorCode(error) !== null;
 }
 
+// #690：识别 runner **环境性**失败——凭据过期 / 未登录 / 二进制缺失 / 沙箱拒权。这类错在模型启动**之前**
+// 就把 runner 崩掉（`claude -p` 秒退 exit 1），既非「model may have run」也非可 cold-start 重跑的 session 失效。
+// 只匹配明确的环境指纹（保守：宁可漏判也不把真实的模型失败误标成环境错），命中即：
+//   ① 放弃留痕说「runner environment failure — model did not run」而非「model may have run」；
+//   ② 拍进 runner_health.last_error，owner 从 `party who` / `party wake test` 看得见（#603 观测面）。
+const RUNNER_ENV_FAILURE_PATTERNS: readonly RegExp[] = [
+  /oauth[^\n]*(expired|refresh)/i,
+  /(session|token|credential)[^\n]*expired/i,
+  /failed to authenticate/i,
+  /authentication[_\s-]*(error|failed|required)/i,
+  /not (logged in|authenticated)/i,
+  /please run\b[^\n]*login/i,
+  /\bclaude (login|setup-token)\b/i,
+  /invalid api key/i,
+  /\b(401|403)\b[^\n]*(unauthorized|forbidden)/i,
+  /\bunauthorized\b/i,
+  // 二进制缺失 / 无法执行（spawn 前后都可能落到 stderr）。
+  /command not found/i,
+  /no such file or directory/i,
+  /\benoent\b/i,
+  /permission denied/i,
+];
+
+// 只扫 stderr，绝不扫 stdout：环境错（认证/spawn/权限）都落 stderr；而 stdout 是**模型输出**——若模型正好
+// 写了「unauthorized」「permission denied」之类的字样，扫进来就会把一次真实的模型运行误判成「model did not run」，
+// 正好颠倒 environment 标志的语义（CodeRabbit #693）。stderr-only 既覆盖真实指纹又杜绝这条误报路径。
+export function isRunnerEnvFailure(result: Pick<RunnerProcessResult, "stderr">): boolean {
+  return RUNNER_ENV_FAILURE_PATTERNS.some((re) => re.test(result.stderr));
+}
+
 function writeSdkSession(path: string, state: SdkWakeSessionState): SdkWakeSessionState {
   return mergeRunnerContinuation(path, state) as SdkWakeSessionState;
 }
@@ -2435,11 +2473,17 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         exitCode = run.result.code;
         const now = opts.now?.() ?? Date.now();
         if (run.result.code !== 0) {
+          // #690：认证过期 / 二进制缺失 / 沙箱拒权等环境性失败在模型启动前就崩，别归为「model may have run」。
+          const envFailure = isRunnerEnvFailure(run.result);
           appendRunnerLog(
             opts.workdir,
-            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}`,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}${envFailure ? " env_failure=true" : ""}`,
           );
-          throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: exit code ${run.result.code}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
+          throw new WakeBlockedError(
+            `builtin ${opts.harness} runner blocked: exit code ${run.result.code}${envFailure ? " (runner environment failure: credentials/binary/sandbox — model did not run)" : ""}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`,
+            false,
+            { environment: envFailure },
+          );
         }
 
         finalSid = run.sessionId;
@@ -4436,7 +4480,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
               // 抛错不等于「模型没跑过」。只有 runner 明确声明可重试（spawn 都没成功）才重试；
               // 否则重跑会重复模型与外部副作用（git push / 开 PR）。见门禁 P1③。
               retriable = e instanceof WakeBlockedError ? e.retriable : false;
-              if (!retriable) lastError += " (not retriable: model may have run)";
+              // #690：环境性失败（认证/二进制/沙箱）模型确定没跑——别再挂「model may have run」的免责标签，
+              // 那会误导 owner 以为副作用可能已发生。说清是环境坏了、修好再 @ 即可（保守：仅明确指纹命中）。
+              const envFailure = e instanceof WakeBlockedError && e.environment;
+              if (!retriable) {
+                lastError += envFailure
+                  ? " (runner environment failure: model did not run — fix credentials/binary/sandbox, e.g. `claude login`, then re-mention)"
+                  : " (not retriable: model may have run)";
+              }
               out(`  命令失败 (${attempt}/${maxAttempts}): ${lastError}`);
               // 先落盘再重试：此刻进程崩掉，重启后不会把已经烧掉的次数忘干净
               // Directed work has its own server-side lease/state machine. Mirroring it into the

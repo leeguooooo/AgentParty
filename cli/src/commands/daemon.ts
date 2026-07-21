@@ -52,8 +52,17 @@ flags:
   --channel C     目标频道（也可作为位置参数）；缺省用 party init 绑定的频道
   --timeout N     跑 N 秒后退出（默认 0 = 常驻）；主要给冒烟测试用
 
-auth：内嵌 SDK 走**订阅**凭据，从环境变量 CLAUDE_CODE_OAUTH_TOKEN 读取（Phase-1 live 已验证，零 API key）。
-  起 daemon 前请确保该变量是有效的订阅 token/session；过期时 SDK 会话会失败并回一条失败提示（不崩进程）。
+auth（#692①，认证隔离）：内嵌 SDK 走**订阅**凭据，零 API key。强烈建议起 daemon 前 \`claude setup-token\` 生成
+  专用 token 并 export CLAUDE_CODE_OAUTH_TOKEN——daemon 优先用它，与交互式 \`claude\` 的凭据 churn（近过期并发
+  refresh 互相打架 / 多账号选错默认账号）隔离开。未设则回退共享 OAuth creds（有上述竞态风险）。token 过期时 SDK
+  会话失败并回一条失败提示（不崩进程）。
+
+scope（#692②，别继承交互式全家桶）：SDK session 被收口到 settingSources:[]（不读全局 ~/.claude 设置 / MCP
+  servers / hooks / CLAUDE.md）、allowedTools:[]（不授予任何工具）、permissionMode:dontAsk（headless 不挂权限询问）。
+  daemon 只产文本回帖。
+
+quota（#692③，订阅额度感知）：每次 SDK 调用与交互式 Claude Code 吃**同一个订阅额度**。常驻高频被 @ 会啃上限——
+  酌情限流。
 
 experimental：仅供 spike/live 验证，未接入 onboarding / join-pack。声明一级 wake_kind:daemon（residency=daemon），
   处理 delivery 期间周期续租（delivery_update running），>90s 会话不再被服务端重派。`;
@@ -103,15 +112,45 @@ export interface DaemonOptions {
 }
 
 /**
+ * #692 Phase-2.2：收口 SDK `options`，别继承交互式 Claude Code 的「全家桶」。
+ *
+ * SDK `query()` 跑的是完整 Claude Code 引擎，默认继承全局 `~/.claude` 设置、**MCP servers、hooks、CLAUDE.md**。
+ * 常驻 daemon 被一条 @ 唤起时，那个 agent 会带着 owner 所有 MCP 工具 + 全部 hooks 触发 + 全局规则跑——几乎
+ * 都不是想要的，还平白扩大权限面。这里把 options scope 到「无头、纯文本、零工具、不读全局配置」的最小面：
+ *   - `permissionMode:"dontAsk"`（#691 评审 Major）：headless 无 TTY，默认 'default' 遇到需批准的工具会挂起；
+ *     dontAsk = 不提示、未预批工具一律拒绝。
+ *   - `settingSources:[]`：不加载全局 ~/.claude 设置 / MCP servers / hooks / CLAUDE.md。
+ *   - `allowedTools:[]`：不授予任何工具（与 dontAsk 叠成 defense-in-depth：既不问、也无工具可用）。daemon 只产文本回帖。
+ *   - 认证隔离（#692①）：设了专用 `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token`）就显式喂给 SDK 子进程 env——
+ *     把 daemon 的 auth 与交互式 CLI 的凭据 churn（近过期并发 refresh 互相打架 / 多账号选错默认凭据）隔离开。
+ *
+ * 后续（owner/worker 边界的 `canUseTool` → 三方边界、AskUserQuestion→decision_request #284）在此基础上放开受控工具。
+ * 调用方可用 overrides 覆盖任意默认（如 live 调试临时放开某工具）。
+ */
+export function buildSdkOptions(
+  overrides?: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    permissionMode: "dontAsk",
+    settingSources: [],
+    allowedTools: [],
+  };
+  const oauthToken = env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (oauthToken) {
+    // 保留其余环境（PATH 等），只把专用订阅 token 钉进子进程 env——SDK 优先用它，绕开共享 OAuth creds 文件的
+    // refresh 竞态。未设时不加 env 键：SDK 走默认凭据路径（多账号下可能不是当前登录账号，见 run() 的启动告警）。
+    base.env = { ...env, CLAUDE_CODE_OAUTH_TOKEN: oauthToken };
+  }
+  return { ...base, ...(overrides ?? {}) };
+}
+
+/**
  * 生产 SDK 运行器：懒加载官方 @anthropic-ai/claude-agent-sdk 的 query()，收集最终 result 文本。
  * 懒加载（dynamic import）保证只有真跑 daemon 才载入 SDK——注入了 mock 的单测永远不会触碰它。
  */
 export function createSdkRunner(options?: Record<string, unknown>): SdkRunner {
-  // #691 评审(Major)：无头 daemon 必须显式设 permissionMode。SDK 默认 'default' 会在 headless（无 TTY、
-  // 未提供 canUseTool）下遇到需批准的工具时挂起/行为不定。'dontAsk' = 不提示、未预批的工具一律拒绝——
-  // experimental daemon 只产文本、绝不被一条 @ 触发任意工具执行（安全）。完整的 owner/worker 边界权限模型
-  // （canUseTool → 三方边界、allowedTools、scope options）见 Phase-2.2 #692；调用方可覆盖本默认。
-  const sdkOptions: Record<string, unknown> = { permissionMode: "dontAsk", ...(options ?? {}) };
+  const sdkOptions = buildSdkOptions(options);
   return {
     async run(prompt: string, ctx: SdkRunContext): Promise<string> {
       const { query } = await import("@anthropic-ai/claude-agent-sdk");
@@ -370,8 +409,23 @@ export async function run(argv: string[]): Promise<number> {
       "runs an in-process SDK session on each @-mention, receiving durable directed deliveries " +
       "(directedDelivery:v1). It advertises a first-class wake_kind:'daemon' (residency=daemon) and renews " +
       "the delivery lease (delivery_update running) so >90s turns are not re-dispatched. " +
-      "Subscription auth comes from CLAUDE_CODE_OAUTH_TOKEN. Not wired into onboarding.",
+      "The SDK session is scoped (settingSources:[], allowedTools:[], permissionMode:dontAsk) so it does NOT " +
+      "inherit your global ~/.claude MCP servers / hooks / CLAUDE.md — it only produces text replies. " +
+      "Not wired into onboarding.",
   );
+  // #692①：认证隔离。有专用 CLAUDE_CODE_OAUTH_TOKEN（`claude setup-token`）→ daemon 走它，与交互式 CLI 的凭据
+  // churn 隔离；没有 → 回退共享 OAuth creds，近过期并发 refresh 会互相打架、多账号下可能选错默认账号。明说，别静默。
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    console.error("party daemon: using dedicated CLAUDE_CODE_OAUTH_TOKEN (auth isolated from interactive `claude` CLI).");
+  } else {
+    console.error(
+      "party daemon: CLAUDE_CODE_OAUTH_TOKEN not set — falling back to the shared Claude Code OAuth credentials. " +
+        "Near expiry the daemon and an interactive `claude` may fight over refresh, and on multi-account machines the " +
+        "SDK may pick the wrong (default) account. Recommended: run `claude setup-token` and export CLAUDE_CODE_OAUTH_TOKEN " +
+        "before launching the daemon. Every SDK call also draws on the SAME subscription quota as interactive Claude Code — " +
+        "a high-frequency @-driven daemon can exhaust it.",
+    );
+  }
 
   const controller = new AbortController();
   let signalCode = 0;

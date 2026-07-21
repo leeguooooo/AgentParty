@@ -1,7 +1,7 @@
 // #672 Phase-1/2 spike：party daemon 单测。用真 connect + WS mock server 驱动帧流，注入 SDK runner
 // 与 postReply 捕获回帖——CI 永不触碰真 @anthropic-ai/claude-agent-sdk（SDK 无法在 CI 跑）。
 import { afterEach, describe, expect, test } from "bun:test";
-import { runDaemon, type DaemonOptions, type PostReply, type SdkRunner } from "../src/commands/daemon";
+import { buildSdkOptions, runDaemon, type DaemonOptions, type PostReply, type SdkRunner } from "../src/commands/daemon";
 import {
   deliveryFrame,
   msgFrame,
@@ -59,6 +59,34 @@ function recordingRunner(reply: string): { runner: SdkRunner; calls: Captured["r
     },
   };
 }
+
+// #692 Phase-2.2：SDK options 收口——别继承交互式 Claude Code 的 MCP / hooks / CLAUDE.md，并隔离认证。
+describe("party daemon buildSdkOptions scoping (#692)", () => {
+  test("scopes to text-only: settingSources:[], allowedTools:[], permissionMode:dontAsk", () => {
+    const opts = buildSdkOptions(undefined, {});
+    expect(opts.permissionMode).toBe("dontAsk");
+    expect(opts.settingSources).toEqual([]);
+    expect(opts.allowedTools).toEqual([]);
+    // 未设专用 token → 不注入 env（走默认凭据路径，run() 会告警）。
+    expect(opts.env).toBeUndefined();
+  });
+
+  test("dedicated CLAUDE_CODE_OAUTH_TOKEN is pinned into the SDK subprocess env (auth isolation)", () => {
+    const opts = buildSdkOptions(undefined, { PATH: "/usr/bin", CLAUDE_CODE_OAUTH_TOKEN: "sk-oauth-xyz" });
+    const env = opts.env as Record<string, string>;
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-oauth-xyz");
+    // 保留其余环境（PATH 等），只把订阅 token 钉进去。
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  test("caller overrides win over the scoped defaults", () => {
+    const opts = buildSdkOptions({ permissionMode: "default", allowedTools: ["Read"] }, {});
+    expect(opts.permissionMode).toBe("default");
+    expect(opts.allowedTools).toEqual(["Read"]);
+    // 未被覆盖的默认仍在。
+    expect(opts.settingSources).toEqual([]);
+  });
+});
 
 describe("party daemon (#672 Phase-1/2 spike)", () => {
   test("@-mention → SDK invoked with mention text → SDK output posted back", async () => {
