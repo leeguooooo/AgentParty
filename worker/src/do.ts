@@ -206,6 +206,8 @@ type SendSuccessOutcome =
       /** Durable delivery rows whose state changed while handling the send. Broadcast by id only. */
       deliveryStateIds?: string[];
       atomicEffects?: AtomicDeliveryEffects;
+      /** 正文便利提取未能路由、降级为文本的原始 token（#663）；回执 SentFrame.unresolved_mentions 的来源，空=省略。 */
+      unresolvedMentions?: string[];
     };
 
 type SendOutcome =
@@ -217,6 +219,11 @@ interface ResolvedMentionFrame {
   frame: SendFrame;
   /** Canonical agent identities proven by the same directory read that validated the mentions. */
   agentTargets: string[];
+  /**
+   * 正文便利提取（body_mentions）里无法路由的原始 token（#663）：未命中/歧义/保留字。这些被降级为普通文本，
+   * 绝不阻断发送；服务端把它们回给发送方作非阻断 warning。显式 mentions 的未命中不入此列——那会直接报错。
+   */
+  unresolved?: string[];
 }
 
 interface RoutedMentionFrame {
@@ -224,6 +231,8 @@ interface RoutedMentionFrame {
   /** Canonical, creation-time-bound agent targets that must receive durable work. */
   deliveryTargets: string[];
   deliveryTargetOwners: Record<string, string>;
+  /** 正文便利提取未能路由、降级为文本的原始 token（#663）；空=无。 */
+  unresolved?: string[];
 }
 
 interface ExpectedDecisionLineage {
@@ -337,6 +346,31 @@ function mergeBodyMentions(explicit: string[], text: string): string[] | null {
     if (out.length >= MAX_MENTIONS) return null;
     seen.add(key);
     out.push(name);
+  }
+  return byteLength(JSON.stringify(out)) <= MENTIONS_JSON_LIMIT ? out : null;
+}
+
+// #663：正文便利提取的 @token 收进 body_mentions（soft），与显式 mentions（hard）分道。来源有二并集去重：
+// 客户端显式传的 body_mentions（新 CLI/Web），以及服务端就地从正文文本再提取一遍（旧客户端或漏传时兜底，
+// 且服务端不轻信客户端提取的完整性）。已在 explicit 里的 key 跳过（显式优先，resolveMentions 会再 dedup）。
+// 词法规则与显式 mentions 共用 @agentparty/shared/mentions；总量仍受 MAX_MENTIONS / JSON 上限约束（DoS 守卫）。
+function collectBodyMentions(explicit: string[], clientBody: string[], text: string): string[] | null {
+  const explicitKeys = new Set(explicit.map(mentionMatchKey));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (name: string): boolean => {
+    const key = mentionMatchKey(name);
+    if (explicitKeys.has(key) || seen.has(key)) return true;
+    if (explicit.length + out.length >= MAX_MENTIONS) return false;
+    seen.add(key);
+    out.push(name);
+    return true;
+  };
+  for (const name of clientBody) {
+    if (!push(name)) return null;
+  }
+  for (const mention of extractMentionTokens(text)) {
+    if (!push(mention.value)) return null;
   }
   return byteLength(JSON.stringify(out)) <= MENTIONS_JSON_LIMIT ? out : null;
 }
@@ -1111,9 +1145,13 @@ function parseSendFrame(input: unknown): SendFrame | null {
     if (typeof f.body !== "string") return null;
     const explicit = parseMentions(f.mentions);
     if (explicit === null) return null;
-    // 正文里的 @name 也当 mention（否则裸 party send "@name" 不会唤醒目标）
-    const mentions = mergeBodyMentions(explicit, f.body);
-    if (mentions === null) return null;
+    // #663：显式 mentions 保持权威（拼错硬拒）；正文 @token 归入 body_mentions（未命中降级为文本、不阻断）。
+    // client body_mentions（新客户端）与服务端就地再提取的正文 token 取并集，旧客户端漏传也能兜底。
+    const clientBodyMentions = parseMentions(f.body_mentions);
+    if (clientBodyMentions === null) return null;
+    const bodyMentions = collectBodyMentions(explicit, clientBodyMentions, f.body);
+    if (bodyMentions === null) return null;
+    const mentions = explicit;
     const reply_to =
       f.reply_to === undefined || f.reply_to === null
         ? null
@@ -1139,6 +1177,7 @@ function parseSendFrame(input: unknown): SendFrame | null {
       kind: "message",
       body: f.body,
       mentions,
+      ...(bodyMentions.length > 0 ? { body_mentions: bodyMentions } : {}),
       reply_to,
       ...(completionArtifact !== undefined ? { completion_artifact: completionArtifact } : {}),
       ...(decisionRequest !== undefined ? { decision_request: decisionRequest } : {}),
@@ -2526,7 +2565,14 @@ export class ChannelDO extends Server<Env> {
       // not leave a committed queued webhook waiting for unrelated future traffic to wake the DO.
       this.flushAtomicDeliveryEffects(out.atomicEffects);
       // sent 先于 raw self-echo 到达发送方，客户端先推进游标再看到自己的回声。
-      this.sendFrame(connection, { type: "sent", seq: out.seq });
+      // unresolved_mentions（#663）：正文便利提取里未能路由、已降级为文本的 token，供客户端打非阻断 warning。
+      this.sendFrame(connection, {
+        type: "sent",
+        seq: out.seq,
+        ...(out.unresolvedMentions !== undefined && out.unresolvedMentions.length > 0
+          ? { unresolved_mentions: out.unresolvedMentions }
+          : {}),
+      });
       // 广播必须紧跟 INSERT，中间不能有任何 await（#114）：
       // 并发发送时 A 落库 seq=N 后若在这里等 D1，B 落库 N+1 先广播，watcher ack 了 N+1，
       // 后到的 N 就被客户端当作「已消费」永久丢弃（client.ts: seq <= cursor 静默丢），
@@ -5954,6 +6000,10 @@ export class ChannelDO extends Server<Env> {
       const sent = out.frames[0] as MsgFrame;
       return Response.json({
         seq: out.seq,
+        // #663：正文便利提取未能路由、已降级为文本的 token；CLI 据此打非阻断 warning，不影响发送成功。
+        ...(out.unresolvedMentions !== undefined && out.unresolvedMentions.length > 0
+          ? { unresolved_mentions: out.unresolvedMentions }
+          : {}),
         ...(sent.completion_review === undefined ? {} : { completion_review: sent.completion_review }),
         ...(sent.decision_request === undefined
           ? {}
@@ -6503,11 +6553,16 @@ export class ChannelDO extends Server<Env> {
   // are rejected to the sender instead of being stored as an ordinary, unwakeable message. This also
   // canonicalizes case-insensitive agent names and agent nicknames for exact includes(self) consumers.
   private async resolveMentions(frame: SendFrame): Promise<ResolvedMentionFrame | SendErrorOutcome> {
+    // 权威显式 mention（--mention / mentions[]）与正文便利提取（body_mentions，#663）走同一目录读、两套判罚：
+    // 显式未命中/歧义/保留字 → 硬拒（发送方明确指定了目标，拼错应可见失败）；
+    // 正文未命中/歧义/保留字 → 跳过、降级为普通文本、绝不阻断，原始 token 汇总进 unresolved 回执。
     const mentions = frame.mentions ?? [];
-    if (mentions.length === 0) return { frame, agentTargets: [] };
+    const bodyMentions = frame.kind === "message" ? frame.body_mentions ?? [] : [];
+    if (mentions.length === 0 && bodyMentions.length === 0) return { frame, agentTargets: [], unresolved: [] };
     let directory: Awaited<ReturnType<ChannelDO["mentionAliasDirectory"]>>;
     try {
-      directory = await this.mentionAliasDirectory(mentions);
+      // 目录读同时覆盖显式与正文候选，正文 token 才有机会命中真 handle 并照常路由/唤醒。
+      directory = await this.mentionAliasDirectory([...mentions, ...bodyMentions]);
     } catch {
       return {
         ok: false,
@@ -6515,11 +6570,20 @@ export class ChannelDO extends Server<Env> {
         message: "mention directory is temporarily unavailable; message was not stored",
       };
     }
+    const RESERVED = ["all", "everyone", "here", "system"];
     const routed: string[] = [];
     const agentTargets = new Set<string>();
     const seen = new Set<string>();
+    const addRouted = (target: string) => {
+      const key = mentionMatchKey(target);
+      if (seen.has(key)) return;
+      seen.add(key);
+      routed.push(target);
+      if (directory.agentTargets.has(key)) agentTargets.add(target);
+    };
+    // 1) 显式 mentions：保持硬拒行为，任何未命中/歧义/保留字即整条报错（回归守卫：真拼错仍要失败）。
     for (const mention of mentions) {
-      if (["all", "everyone", "here", "system"].includes(mentionMatchKey(mention))) {
+      if (RESERVED.includes(mentionMatchKey(mention))) {
         return {
           ok: false,
           code: "mention_not_found",
@@ -6541,13 +6605,30 @@ export class ChannelDO extends Server<Env> {
           message: `mention target @${mention} is ambiguous; use an exact channel handle`,
         };
       }
-      const key = mentionMatchKey(resolution.target);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      routed.push(resolution.target);
-      if (directory.agentTargets.has(key)) agentTargets.add(resolution.target);
+      addRouted(resolution.target);
     }
-    return { frame: withExpandedMentions(frame, routed), agentTargets: [...agentTargets] };
+    // 2) 正文 body_mentions：命中即照常路由；未命中/歧义/保留字降级为文本、收进 unresolved，绝不阻断。
+    const unresolved: string[] = [];
+    const unresolvedSeen = new Set<string>();
+    const markUnresolved = (token: string) => {
+      const key = mentionMatchKey(token);
+      if (unresolvedSeen.has(key)) return;
+      unresolvedSeen.add(key);
+      unresolved.push(token);
+    };
+    for (const token of bodyMentions) {
+      if (RESERVED.includes(mentionMatchKey(token))) {
+        markUnresolved(token);
+        continue;
+      }
+      const resolution = resolveMentionToken(token, directory.aliases);
+      if (resolution.status === "unknown" || resolution.status === "ambiguous") {
+        markUnresolved(token);
+        continue;
+      }
+      addRouted(resolution.target);
+    }
+    return { frame: withExpandedMentions(frame, routed), agentTargets: [...agentTargets], unresolved };
   }
 
   // #544：reply_to 本身就是一条明确的定向消息。若原消息作者是 agent，即使回复正文没有再写
@@ -6587,6 +6668,7 @@ export class ChannelDO extends Server<Env> {
   ): Promise<RoutedMentionFrame | SendErrorOutcome> {
     const mentionResolution = await this.resolveMentions(frame);
     if ("ok" in mentionResolution) return mentionResolution;
+    const unresolved = mentionResolution.unresolved ?? [];
     const autoReplyExpansion = this.expandAgentReplyMention(mentionResolution.frame, senderName);
     frame = autoReplyExpansion.frame;
     const autoReplyTargets = autoReplyExpansion.targets;
@@ -6642,6 +6724,7 @@ export class ChannelDO extends Server<Env> {
         (expectedAutoOwners.get(mentionMatchKey(target)) === undefined || !invalidAutoKeys.has(mentionMatchKey(target)))
       ),
       deliveryTargetOwners: ownerLookup,
+      unresolved,
     };
   }
 
@@ -6728,6 +6811,7 @@ export class ChannelDO extends Server<Env> {
     if ("ok" in mentionRouting) return mentionRouting;
     frame = mentionRouting.frame;
     const { deliveryTargets, deliveryTargetOwners } = mentionRouting;
+    const unresolvedBodyMentions = mentionRouting.unresolved ?? [];
     const workflowGuard = this.workflowGuardDecision(identity, frame);
     if (workflowGuard !== null) {
       const row = this.workflowGuardRow(workflowGuard.workflow.workflow_id);
@@ -7199,6 +7283,7 @@ export class ChannelDO extends Server<Env> {
       frames,
       deliveryTargets,
       deliveryTargetOwners,
+      ...(unresolvedBodyMentions.length > 0 ? { unresolvedMentions: unresolvedBodyMentions } : {}),
     };
     });
     if (decisionPreconditionFailure !== null) return decisionPreconditionFailure;

@@ -3406,14 +3406,18 @@ export function ChannelPage({
     if (uploads.some((u) => u.status === "uploading")) return;
     // 有附件时允许空正文（纯图片/文件消息）
     if (body === "" && attachments.length === 0) return;
-    // 与草稿 chips / 服务端 BODY_MENTION_RE 同一份语义：@ 前须行首或非标识符字符，不吃 email 里的 @
-    const mentions = parseDraftMentions(body, mentionNames);
+    // 与草稿 chips / 服务端 BODY_MENTION_RE 同一份语义：@ 前须行首或非标识符字符，不吃 email 里的 @。
+    // #663：网页没有独立的「显式 mention」输入口，所有 @ 都来自正文提取，故整体走 body_mentions——
+    // 命中的照常路由/唤醒，未命中的（如自然语言「@我」）由服务端降级为文本，绝不硬拒整条发送。
+    // 权威 mentions 留空，与 CLI/Worker 共享同一条「显式 vs 正文」契约。
+    const bodyMentions = parseDraftMentions(body, mentionNames);
     const ok =
       sockRef.current?.send({
         type: "send",
         kind: "message",
         body,
-        mentions,
+        mentions: [],
+        ...(bodyMentions.length > 0 ? { body_mentions: bodyMentions } : {}),
         reply_to: replyTo,
         ...(attachments.length > 0 ? { attachments } : {}),
       }) ?? false;

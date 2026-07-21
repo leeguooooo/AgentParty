@@ -426,8 +426,9 @@ describe("parseDraftMentions", () => {
   test("去重且保序", () => {
     expect(parseDraftMentions("@bob @alice @Bob")).toEqual(["bob", "alice"]);
   });
-  test("过滤 system", () => {
-    // 保留并上报：服务端会明确拒绝不可路由的保留名，不能静默降级成普通正文。
+  test("保留字仍被提取上报（映射到 body_mentions，由服务端裁决）", () => {
+    // #663：网页把提取结果整体放进 body_mentions（正文便利提取，非权威）。这里仍原样提取保留名/未知 token，
+    // 交给服务端——命中即路由，未命中/保留字（如 system）降级为普通文本并回执 unresolved_mentions，绝不硬拒整条。
     expect(parseDraftMentions("@system hi @bob")).toEqual(["system", "bob"]);
   });
   test("没有 mention 时返回空数组", () => {

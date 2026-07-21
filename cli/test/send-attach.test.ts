@@ -76,13 +76,16 @@ describe("send --attach parsing", () => {
       "explicit",
     ], sendSpec);
     const input = await resolveSendInput(parsed);
-    expect(input?.mentions).toEqual(["explicit", "agent-a", "程序员小明"]);
+    // #663：显式 --mention 是权威列表；正文提取的 @ 归入 body_mentions（未命中不阻断）。email 内 @ 不算。
+    expect(input?.mentions).toEqual(["explicit"]);
+    expect(input?.bodyMentions).toEqual(["agent-a", "程序员小明"]);
   });
 
-  test("正文保留 @all 交给服务端给出明确不支持错误", async () => {
+  test("正文 @all 归入 body_mentions，交给服务端降级为文本而非硬拒（#663）", async () => {
     const parsed = parseArgs(["请 @all 看一下", "--channel", "c"], sendSpec);
     const input = await resolveSendInput(parsed);
-    expect(input?.mentions).toEqual(["all"]);
+    expect(input?.mentions).toEqual([]);
+    expect(input?.bodyMentions).toEqual(["all"]);
   });
 
   test("显式和正文 mention 的总数不超过共享上限", async () => {

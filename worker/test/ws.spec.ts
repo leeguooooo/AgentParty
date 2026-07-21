@@ -181,11 +181,11 @@ describe("websocket", () => {
     ws.send({ type: "send", kind: "message", body: "请 @Éclair 确认", mentions: [], reply_to: null });
     await ws.nextOfType("sent");
     expect((await ws.nextOfType("msg")).mentions).toEqual([unicodeCaseTarget.name]);
+    // #663：正文里未命中的 @（大小写不符/歧义/未知/保留字）不再硬拒整条 send——降级为普通文本，原始 token
+    // 进 sent.unresolved_mentions；消息照常落库、正文原样、mentions 只保留命中的目标。反转 #552 的过度阻断。
     ws.send({ type: "send", kind: "message", body: "请 @éclair 确认", mentions: [], reply_to: null });
-    expect(await ws.nextOfType("error")).toMatchObject({
-      code: "mention_not_found",
-      message: expect.stringContaining("@éclair"),
-    });
+    expect((await ws.nextOfType("sent")).unresolved_mentions).toEqual(["éclair"]);
+    expect((await ws.nextOfType("msg")).mentions).toEqual([]);
     ws.send({ type: "send", kind: "message", body: "请 @casenick 确认", mentions: [], reply_to: null });
     await ws.nextOfType("sent");
     expect((await ws.nextOfType("msg")).mentions).toEqual([asciiCaseTarget.name]);
@@ -195,30 +195,23 @@ describe("websocket", () => {
     await env.DB.prepare(
       "INSERT INTO agent_nicknames (name, nickname, created_at, updated_at) VALUES (?, ?, ?, ?)",
     ).bind(ambiguousTarget.name, "collision552", Date.now(), Date.now()).run();
-    ws.send({ type: "send", kind: "message", body: "请@collision552看一下", mentions: [], reply_to: null });
-    expect(await ws.nextOfType("error")).toMatchObject({
-      code: "mention_ambiguous",
-      message: expect.stringContaining("@collision552"),
-    });
+    // 正文里歧义 @：不再报 mention_ambiguous，降级为文本。
+    ws.send({ type: "send", kind: "message", body: "请 @collision552 看一下", mentions: [], reply_to: null });
+    expect((await ws.nextOfType("sent")).unresolved_mentions).toEqual(["collision552"]);
+    expect((await ws.nextOfType("msg")).mentions).toEqual([]);
 
-    ws.send({ type: "send", kind: "message", body: "请@ghost看一下", mentions: [], reply_to: null });
-    const error = await ws.nextOfType("error");
-    expect(error).toMatchObject({ code: "mention_not_found", message: expect.stringContaining("@ghost") });
-    ws.send({ type: "send", kind: "message", body: "请@bobcat看一下", mentions: [], reply_to: null });
-    expect(await ws.nextOfType("error")).toMatchObject({
-      code: "mention_not_found",
-      message: expect.stringContaining("@bobcat"),
-    });
+    // 正文里未知/保留字 @：同样降级为文本，绝不阻断整条发送。
+    ws.send({ type: "send", kind: "message", body: "请 @ghost 看一下", mentions: [], reply_to: null });
+    expect((await ws.nextOfType("sent")).unresolved_mentions).toEqual(["ghost"]);
+    expect((await ws.nextOfType("msg")).mentions).toEqual([]);
+    ws.send({ type: "send", kind: "message", body: "请 @bobcat 看一下", mentions: [], reply_to: null });
+    expect((await ws.nextOfType("sent")).unresolved_mentions).toEqual(["bobcat"]);
+    expect((await ws.nextOfType("msg")).mentions).toEqual([]);
     ws.send({ type: "send", kind: "message", body: "请 @全体 看一下", mentions: [], reply_to: null });
-    expect(await ws.nextOfType("error")).toMatchObject({
-      code: "mention_not_found",
-      message: expect.stringContaining("@全体"),
-    });
-    ws.send({ type: "send", kind: "message", body: "请@全体看一下", mentions: [], reply_to: null });
-    expect(await ws.nextOfType("error")).toMatchObject({
-      code: "mention_not_found",
-      message: expect.stringContaining("@全体"),
-    });
+    expect((await ws.nextOfType("sent")).unresolved_mentions).toEqual(["全体"]);
+    expect((await ws.nextOfType("msg")).mentions).toEqual([]);
+
+    // 显式 mentions 数组里的保留字仍硬拒（发送方明确指定目标，回归守卫：真拼错/误用仍要可见失败）。
     ws.send({ type: "send", kind: "message", body: "reserved", mentions: ["SYSTEM"], reply_to: null });
     expect(await ws.nextOfType("error")).toMatchObject({
       code: "mention_not_found",

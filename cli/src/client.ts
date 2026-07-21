@@ -315,7 +315,11 @@ function parseServerFrame(value: unknown): ServerFrame | null {
         ? asServerFrame(value)
         : null;
     case "sent":
-      return isPositiveInteger(value.seq) ? asServerFrame(value) : null;
+      // unresolved_mentions（#663）：正文便利提取里服务端未能路由的 token，已降级为文本；缺省=无未解析项。
+      return isPositiveInteger(value.seq) &&
+        (value.unresolved_mentions === undefined || isStringArray(value.unresolved_mentions))
+        ? asServerFrame(value)
+        : null;
     case "presence":
       return isPresenceEntry(value) ? asServerFrame(value) : null;
     case "read_cursor":
