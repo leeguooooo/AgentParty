@@ -158,6 +158,103 @@ describe("wake test falsifiability (#181)", () => {
   });
 });
 
+// ── #689：headless runner 已唤起、正在处理本探针（presence.current_task 命中），30s 内无最终回复不是失败 ──
+describe("wake test wake_pending when runner is actively processing the probe (#689)", () => {
+  // 复刻 #689 现场：builtin claude runner 被 serve 唤起、正在跑（current_task=353），但 presence 没同步
+  // wake 适配器声明（advisory「no wake adapter」）。旧行为误报 not_auto_wakeable/失败；新行为判 wake_pending。
+  test("no advertised adapter but current_task==probe seq: wake_pending, exit 0, wake invoked yes", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/presence") {
+        const now = Date.now();
+        return Response.json({
+          presence: [
+            { name: "bot", state: "working", note: null, ts: now, last_seen: now, residency: "supervised", current_task: 91 },
+          ],
+        });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ seq: 91 });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ messages: [] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url, "me");
+
+    const r = await runCli(["wake", "test", "@bot", "dev", "--timeout", "1", "--json"]);
+    // 关键回归：不再退 EXIT_TIMEOUT(2)——唤醒确凿即成功
+    expect(r.code).toBe(0);
+    expect(reqsOf(mock, "POST", "/api/channels/dev/messages")).toHaveLength(1);
+    const frame = JSON.parse(r.stdout.trim());
+    expect(frame).toMatchObject({
+      type: "wake_test",
+      result: "wake_pending",
+      phases: {
+        mention_delivered: { ok: true, seq: 91 },
+        wake_invoked: { ok: true },
+        agent_resumed: { ok: false, seq: null },
+      },
+    });
+    expect(frame.phases.wake_invoked.evidence).toContain("wake invoked");
+    expect(frame.phases.wake_invoked.evidence).toContain("reply pending");
+    expect(frame.reason).toContain("current_task=#91");
+    expect(frame.presence.current_task).toBe(91);
+  });
+
+  test("current_task outranks a plain serve/watch timeout verdict", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/presence") {
+        return Response.json({
+          presence: [{ ...freshServeWatchPresence("serve"), live: true, current_task: 92 }],
+        });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ seq: 92 });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/wake-deliveries") {
+        return Response.json({ deliveries: [] });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ messages: [] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+
+    const r = await runCli(["wake", "test", "@agent", "dev", "--timeout", "1", "--json"]);
+    expect(r.code).toBe(0);
+    const frame = JSON.parse(r.stdout.trim());
+    expect(frame).toMatchObject({ type: "wake_test", result: "wake_pending" });
+  });
+
+  test("human output shows 'wake invoked: yes (reply pending)' and 'resumed: pending'", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/channels/dev/presence") {
+        const now = Date.now();
+        return Response.json({
+          presence: [
+            { name: "bot", state: "working", note: null, ts: now, last_seen: now, residency: "supervised", current_task: 93 },
+          ],
+        });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ seq: 93 });
+      }
+      if (req.method === "GET" && req.path === "/api/channels/dev/messages") {
+        return Response.json({ messages: [] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url, "me");
+
+    const r = await runCli(["wake", "test", "@bot", "dev", "--timeout", "1"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("wake invoked: yes (reply pending)");
+    expect(r.stdout).toContain("resumed: pending");
+  });
+});
+
 // ── #194：目标解析为自己身份时，别发真探针、别等满 timeout，立刻失败 ──
 describe("wake test self-target fast-fail (#194)", () => {
   test("self-target (cached identity) fails immediately with no probe and no network call", async () => {

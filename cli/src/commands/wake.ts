@@ -29,7 +29,10 @@ Options:
 // #603：把笼统的 timeout 按 presence 的探活分级细分——not_listening（服务端观测到 delivery
 // 租约对活连接反复过期）与 runner_failing（serve 自报 runner 连败）。处置完全不同：
 // 前者重启 supervisor / 查事件循环，后者修 runner 环境（二进制/凭据/沙箱）。
-type WakeResult = "not_auto_wakeable" | "healthy" | "timeout" | "self_target" | "not_listening" | "runner_failing";
+// #689：headless runner（builtin claude/codex）处理一条 @ 要数分钟，30s 探测窗口内不可能有最终回复。
+// 但只要 presence.current_task 指向本探针的 seq，就证明 runner 已被唤起、正在处理——这是「wake invoked: yes」
+// 的明确信号，不该误报失败。wake_pending = 唤醒确凿、最终回复待定（介于 healthy 与 timeout 之间的成功态）。
+type WakeResult = "not_auto_wakeable" | "healthy" | "wake_pending" | "timeout" | "self_target" | "not_listening" | "runner_failing";
 type AckEvidence = "reply_to" | "status.summary_seq";
 
 interface WakePresence {
@@ -41,6 +44,8 @@ interface WakePresence {
   // 探活分级（#603）：缺省即无恙。
   listening?: PresenceEntry["listening"];
   runner_health?: PresenceEntry["runner_health"];
+  // #689：runner 当前正在处理的触发 seq（缺省=空闲）。等于本探针 seq 即「已唤起、正在处理这条 @」。
+  current_task?: PresenceEntry["current_task"];
 }
 
 interface WakeTestFrame extends Record<string, unknown> {
@@ -73,6 +78,7 @@ function summarizePresence(p: PresenceEntry | null): WakePresence {
     last_seen: p?.last_seen ?? p?.ts ?? null,
     ...(p?.listening === undefined ? {} : { listening: p.listening }),
     ...(p?.runner_health === undefined ? {} : { runner_health: p.runner_health }),
+    ...(p?.current_task === undefined ? {} : { current_task: p.current_task }),
   };
 }
 
@@ -230,7 +236,10 @@ function printHuman(frame: WakeTestFrame) {
       frame.phases.wake_invoked.ok === null
         ? frame.phases.wake_invoked.evidence
         : frame.phases.wake_invoked.ok
-          ? "yes"
+          ? // #689：唤起确凿但最终回复未到（headless runner 数分钟）——明说 reply pending，别让读者误当彻底成功或失败。
+            frame.result === "wake_pending"
+            ? "yes (reply pending)"
+            : "yes"
           : "no"
     }`,
   );
@@ -238,7 +247,9 @@ function printHuman(frame: WakeTestFrame) {
     `resumed: ${
       frame.phases.agent_resumed.ok
         ? `yes #${frame.phases.agent_resumed.seq} evidence=${frame.phases.agent_resumed.evidence}`
-        : "no"
+        : frame.result === "wake_pending"
+          ? "pending (runner still working)"
+          : "no"
     }`,
   );
 }
@@ -399,36 +410,56 @@ export async function run(argv: string[]): Promise<number> {
         : gate.advisory !== null
           ? `${gate.advisory} (unconfirmed — probe delivered #${seq}, no reply within ${timeoutSec}s)`
           : timeoutReason;
-    // 探活分级（#603）：timeout 不再一锅端。重取一次 presence——若服务端/自报已给出证据，
-    // 细分为可处置的结论：runner_failing（修 runner 环境）优先于 not_listening（重启 supervisor），
-    // 因为「唤醒了起不来」比「没在消费」更接近根因。
+    // 探活分级（#603/#689）：没收到最终回复不再一锅端。重取一次 presence——若服务端/自报已给出证据，
+    // 细分为可处置的结论。优先级（先真、再故障、后不消费）：
+    //   ① current_task==本探针 seq → runner 已唤起、正在处理这条 @：wake_pending（唤醒确凿，reply pending）。
+    //      #689：headless runner 跑一条要数分钟，30s 内没有最终回复是正常的，绝不能误报「no wake adapter」/失败。
+    //      这条对「没声明适配器」(advisory) 与「timeout」两条路径都适用——current_task 是活体执行的直接证据，
+    //      不依赖 presence 是否同步了 wake 适配器声明。
+    //   ② runner_health 报连败 → runner_failing（修 runner 环境，优先于不消费——「唤醒了起不来」更接近根因）。
+    //   ③ listening=deaf/suspect → not_listening（重启 supervisor）。
     let finalPresence = presence;
-    if (result === "timeout") {
+    if (ack === null) {
       try {
         finalPresence = (await fetchPresence(cfg.server, cfg.token, channel)).find((p) => p.name === target) ?? presence;
       } catch {
         /* 刷新失败就用探针前的快照定级 */
       }
-      const health = finalPresence?.runner_health;
-      if (health !== undefined && !health.ok) {
-        result = "runner_failing";
+      if (finalPresence?.current_task === seq) {
+        result = "wake_pending";
         frameReason =
-          `probe delivered #${seq} but the target's runner keeps failing (x${health.consecutive_failures}` +
-          `${health.last_error !== undefined ? `: ${health.last_error}` : ""}) — fix the runner environment ` +
-          "(binary/credentials/sandbox) instead of re-mentioning";
-      } else if (finalPresence?.listening === "deaf" || finalPresence?.listening === "suspect") {
-        result = "not_listening";
-        frameReason =
-          `probe delivered #${seq} but the target's live connection is not consuming deliveries ` +
-          `(listening=${finalPresence.listening}) — restart its serve/watch supervisor instead of re-mentioning`;
+          `probe delivered #${seq}; target's runner is actively processing it (presence.current_task=#${seq}) — ` +
+          "wake invoked, final reply pending (a headless builtin runner may take minutes to reply)";
+      } else if (result === "timeout") {
+        const health = finalPresence?.runner_health;
+        if (health !== undefined && !health.ok) {
+          result = "runner_failing";
+          frameReason =
+            `probe delivered #${seq} but the target's runner keeps failing (x${health.consecutive_failures}` +
+            `${health.last_error !== undefined ? `: ${health.last_error}` : ""}) — fix the runner environment ` +
+            "(binary/credentials/sandbox) instead of re-mentioning";
+        } else if (finalPresence?.listening === "deaf" || finalPresence?.listening === "suspect") {
+          result = "not_listening";
+          frameReason =
+            `probe delivered #${seq} but the target's live connection is not consuming deliveries ` +
+            `(listening=${finalPresence.listening}) — restart its serve/watch supervisor instead of re-mentioning`;
+        }
       }
     }
+    // #689：runner 正在处理本探针（current_task 命中）是唤醒确凿的最强证据——盖过「没声明适配器」的负面 heartbeat
+    // 视角与 ledger 未审计。此时 wake_invoked 直接判 yes、reply pending。
     const wakeInvoked =
-      gate.advisory !== null && wakeDelivery === null
-        ? { ok: false as const, adapter, evidence: gate.advisory }
-        : adapter === "serve" || adapter === "watch"
-          ? summarizeServeWatchDelivery(wakeDelivery, adapter)
-          : summarizeWakeDelivery(wakeDelivery, adapter);
+      result === "wake_pending"
+        ? {
+            ok: true as const,
+            adapter,
+            evidence: `target's runner is processing mention #${seq} (presence.current_task) — wake invoked; final reply pending`,
+          }
+        : gate.advisory !== null && wakeDelivery === null
+          ? { ok: false as const, adapter, evidence: gate.advisory }
+          : adapter === "serve" || adapter === "watch"
+            ? summarizeServeWatchDelivery(wakeDelivery, adapter)
+            : summarizeWakeDelivery(wakeDelivery, adapter);
     const frame: WakeTestFrame = {
       type: "wake_test",
       channel,
@@ -446,7 +477,8 @@ export async function run(argv: string[]): Promise<number> {
     };
     if (flags.json === true) console.log(JSON.stringify(jsonFrame(frame)));
     else printHuman(frame);
-    return ack === null ? EXIT_TIMEOUT : 0;
+    // #689：wake_pending（唤醒确凿、reply pending）与 healthy 同为成功——不再退 EXIT_TIMEOUT 误报失败。
+    return ack !== null || result === "wake_pending" ? 0 : EXIT_TIMEOUT;
   } catch (e) {
     return handleRestError(e);
   }
