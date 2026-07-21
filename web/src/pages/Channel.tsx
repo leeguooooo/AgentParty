@@ -10,6 +10,7 @@ import { AgentTokens } from "../components/AgentTokens";
 import { VisibilityToggle } from "../components/VisibilityToggle";
 import { JoinLink } from "../components/JoinLink";
 import { JoinRequestBanner } from "../components/JoinRequestBanner";
+import { OutdatedAgentsNotice } from "../components/OutdatedAgentsNotice";
 import { Composer, type UploadItem } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
 import { MessageCard } from "../components/MessageCard";
@@ -4241,6 +4242,16 @@ export function ChannelPage({
       {kickError !== null && <p className="banner banner--red">{kickError}</p>}
       {pauseError !== null && <p className="banner banner--red">{pauseError}</p>}
       {archiveError !== null && <p className="banner banner--red">{archiveError}</p>}
+      {/* #662：owner 进入/刷新页面时，主动提醒名下跑着过时 CLI 的 agent，引导用接入包升级。
+          CTA 打开 AgentJoin 接入面板（复用 join-pack 生成）；只有能铸 agent 的 owner 才挂该面板，
+          故 onUpgrade 仅在 canMintAgent && accountKey!=null 时接线，否则退化为纯提醒（无升级按钮）。 */}
+      {!state.archived && (
+        <OutdatedAgentsNotice
+          presence={state.presence}
+          accountKey={accountKey}
+          onUpgrade={canMintAgent && accountKey !== null ? () => setAdminSurface("agentJoin", true) : undefined}
+        />
+      )}
       <ChannelToolstrip
         buttons={
           <>

@@ -4607,6 +4607,30 @@
 .banner--yellow { background: var(--d-yellow); }
 .banner--gray { background: var(--t-panel2); color: var(--t-muted); }
 .banner--red { background: var(--d-red-soft); }
+/* #662：过时 CLI 提醒——黄底告警，列出名下过时 agent + 每个一个「用接入包升级」按钮。 */
+.outdated-agents-notice { display: flex; flex-direction: column; gap: 6px; }
+.outdated-agents-notice-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.outdated-agents-notice-title { font-weight: 600; }
+.outdated-agents-notice-dismiss { flex: none; font-size: 12px; }
+.outdated-agents-notice-lead { margin: 0; font-size: 12px; opacity: 0.85; }
+.outdated-agents-notice-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.outdated-agents-notice-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.outdated-agents-notice-name { font-weight: 600; }
+.outdated-agents-notice-ver { font-size: 11px; opacity: 0.8; }
+.outdated-agents-notice-upgrade { flex: none; margin-left: auto; font-size: 12px; }
+@media (max-width: 640px) {
+  .outdated-agents-notice-upgrade { margin-left: 0; }
+}
 .reply-banner {
   display: flex;
   align-items: center;
