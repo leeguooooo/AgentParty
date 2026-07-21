@@ -190,6 +190,27 @@ describe("party daemon (#672 Phase-1/2 spike)", () => {
     expect(helloDirected).toBe("v1");
   });
 
+  test("welcome 后发 delivery_adapter register，否则服务端永不实时派发 delivery（#688 live 验证发现）", async () => {
+    // live 验证：只声明 directedDelivery:v1 还不够——服务端仅向「已注册的 delivery adapter」实时派发
+    // （do.ts:2490 收到 register 才 dispatchNextDirectedDelivery）。不发 register → daemon 常驻却收不到任何 @。
+    let registered = false;
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send(welcomeDirectedFrame(0, "me"));
+        setTimeout(() => sock.close(), 40);
+        return;
+      }
+      const f = frame as unknown as { type?: string; adapter?: string; op?: string };
+      if (f.type === "delivery_adapter" && f.adapter === "watch" && f.op === "register") registered = true;
+    });
+
+    const { runner } = recordingRunner("noop");
+    const { opts } = harness({ runner, server: server.url });
+    await runDaemon(opts);
+
+    expect(registered).toBe(true);
+  });
+
   test("delivery frame for self (claimed) → SDK runs on message body → reply linked via reply_to", async () => {
     // delivery 没有 read-cursor 去重（是独立 work cursor），真服务端了结后不再重投——mock 用 connIndex
     // 只在首连投递一次来模拟：否则重连会把同一条 claimed delivery 反复重投、SDK 重跑。

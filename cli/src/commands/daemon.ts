@@ -214,6 +214,12 @@ export async function runDaemon(o: DaemonOptions): Promise<number> {
       if (incoming.type === "welcome") {
         self = incoming.self;
         directedDeliveryMode = incoming.directed_delivery === "v1";
+        // #688：声明 directedDelivery:v1 还不够——服务端只把「已注册的 live delivery adapter」当作
+        // 可实时派发目标(do.ts:2490)。必须像 watch 一样发一帧 register,服务端才会 dispatchNextDirectedDelivery
+        // 把投给本身份的 delivery 实时推过来。逐连接状态,每次重连收到 welcome 都要重发。
+        if (directedDeliveryMode) {
+          conn.send({ type: "delivery_adapter", adapter: "watch", op: "register" });
+        }
         out(
           `daemon: attached to #${o.channel} as @${self} (experimental, SDK-in-process` +
             `${directedDeliveryMode ? ", directed-delivery v1" : ""})`,
