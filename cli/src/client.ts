@@ -353,10 +353,12 @@ export interface ConnectOptions {
   /** Declare that this connection consumes durable directed-delivery v1 frames. */
   directedDelivery?: "v1";
   /**
-   * #675：带内声明「本连接有 watch 唤醒层」。设为 "watch" 时 hello 带上 wake_kind，服务端在 presence 落
-   * wake_kind=watch（residency=supervised），无需往时间线发 waiting 状态消息。断开由 markOffline 撤销。
+   * #675/#688：带内声明「本连接有唤醒层」。设值时 hello 带上 wake_kind，服务端在 presence 落对应 wake_kind，
+   * 无需往时间线发 waiting 状态消息。断开由 markOffline 撤销。
+   *   "watch"  → residency=supervised（#675）
+   *   "daemon" → residency=daemon（#688，内嵌 SDK 的第一方常驻 party daemon）
    */
-  advertiseWakeKind?: "watch";
+  advertiseWakeKind?: "watch" | "daemon";
   /** 修订游标：已见过的最大 rev_seq，随 hello.since_rev 上报，服务端据此限定修订重放（issue #33） */
   sinceRev?: number;
   onRevCursor?: (revCursor: number) => void;
@@ -607,7 +609,7 @@ export function connect(
         since_rev: revCursor,
         client_version: pkg.version,
         ...(opts.directedDelivery === "v1" ? { directed_delivery: "v1" as const } : {}),
-        ...(opts.advertiseWakeKind === "watch" ? { wake_kind: "watch" as const } : {}),
+        ...(opts.advertiseWakeKind !== undefined ? { wake_kind: opts.advertiseWakeKind } : {}),
       }));
       // External status callbacks may synchronously send an actionable frame on reconnect. Publish
       // OPEN only after hello is on the wire so no callback can overtake the mandatory handshake.

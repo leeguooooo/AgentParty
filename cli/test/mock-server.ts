@@ -102,3 +102,50 @@ export function welcomeFrame(lastSeq: number, self = "me", readCursors?: Array<{
     ...(readCursors ? { read_cursors: readCursors } : {}),
   };
 }
+
+// A welcome that advertises directed-delivery v1 — the server routes real agent @-mentions as durable
+// `delivery` frames only after this negotiation (see cli/src/commands/serve.ts + daemon.ts).
+export function welcomeDirectedFrame(lastSeq: number, self = "me") {
+  return { ...welcomeFrame(lastSeq, self), directed_delivery: "v1" };
+}
+
+// A durable directed-delivery frame: `{ delivery, message }` where message is the @-mention MsgFrame and
+// delivery is the server-owned work row. Mirrors DirectedDelivery in shared/src/protocol.ts; the client
+// validator (parseServerFrame → isDirectedDelivery) requires every field below.
+export function deliveryFrame(
+  seq: number,
+  body: string,
+  over: {
+    target_name?: string;
+    state?: string;
+    sender?: { name: string; kind: string };
+    mentions?: string[];
+    id?: string;
+    work_id?: string | null;
+    continuation_ref?: string | null;
+  } = {},
+) {
+  const now = Date.now();
+  return {
+    type: "delivery",
+    delivery: {
+      id: over.id ?? `del-${seq}`,
+      message_seq: seq,
+      target_name: over.target_name ?? "me",
+      cause: "mention",
+      state: over.state ?? "claimed",
+      attempt: 1,
+      lease_until: now + 90_000,
+      work_id: over.work_id ?? `work-${seq}`,
+      continuation_ref: over.continuation_ref ?? `cont-${seq}`,
+      reply_seq: null,
+      last_error: null,
+      created_at: now,
+      updated_at: now,
+    },
+    message: msgFrame(seq, body, {
+      ...(over.sender ? { sender: over.sender } : {}),
+      mentions: over.mentions ?? [over.target_name ?? "me"],
+    }),
+  };
+}

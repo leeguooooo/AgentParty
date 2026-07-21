@@ -69,6 +69,8 @@ interface MemberDraft {
 
 const RESIDENCY_RANK: Record<TeamResidency, number> = {
   webhook: 5,
+  // daemon（#688）：内嵌 SDK 的第一方常驻活体，与 supervised 同为「服务端见其在线」的强档，同 rank。
+  daemon: 4,
   supervised: 4,
   bare: 3,
   human_driven: 2,
