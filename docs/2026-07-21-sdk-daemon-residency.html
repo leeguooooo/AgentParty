@@ -127,7 +127,7 @@
     </tbody>
   </table>
   <p>
-    关键（已按实现更正）：webhook 是唯一<strong>凭构造 verified</strong> 的档（服务端持端点、进程离线也能投）。<span class="new">daemon 刻意<strong>不</strong>如此</span>——它与 serve/watch 同档：活着/新鲜时靠 <code>autoWakeReachable(live=true)</code> 判为<strong>可达</strong>，但<strong>只有服务端亲眼观测到「被 @ 后回帖 resume」并盖下 <code>verified_at</code> 才算 <code>wakeable_verified</code></strong>（DO 侧 <code>markWakeVerified</code> 已纳入 daemon）。绝不因「声明了 daemon / 有心跳」就打包票 verified——那正是 <a href="#">#665</a> 的 false-online 陷阱。WS 断/心跳过期（adapter 随之注销）即如实转 stale，<code>evaluateHostLease()</code> 复用。</p>
+    关键（已按实现更正）：webhook 是唯一<strong>凭构造 verified</strong> 的档（服务端持端点、进程离线也能投）。<span class="new">daemon 刻意<strong>不</strong>如此</span>——它与 serve/watch 同档：活着/新鲜时靠 <code>autoWakeReachable(live=true)</code> 判为<strong>可达</strong>，但<strong>只有服务端亲眼观测到「被 @ 后回帖 resume」并盖下 <code>verified_at</code> 才算 <code>wakeable_verified</code></strong>（DO 侧 <code>markWakeVerified</code> 已纳入 daemon）。绝不因「声明了 daemon / 有心跳」就打包票 verified——那正是 #665 的 false-online 陷阱。WS 断/心跳过期（adapter 随之注销）即如实转 stale，<code>evaluateHostLease()</code> 复用。</p>
 
   <h3>3.2 唤醒流（对比今天）</h3>
   <p><strong>今天（watch）：</strong></p>
