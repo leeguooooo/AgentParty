@@ -787,7 +787,18 @@ export interface SendMessageFrame {
   type: "send";
   kind: "message";
   body: string;
+  /**
+   * 权威显式 mention 列表：来自 `--mention` / MCP `mentions[]`。服务端硬解析——未命中/歧义/保留字一律报错，
+   * 因为发送方明确指定了目标，拼错应当可见地失败（回归守卫，见 #663）。
+   */
   mentions: string[];
+  /**
+   * 正文便利提取的 `@token`（#663）：来自 `extractMentionTokens(body)`，属于「顺手识别」而非权威指定。
+   * 服务端逐个尝试解析——命中即照常路由/唤醒，未命中/歧义/保留字则**跳过、降级为普通文本、绝不阻断整条发送**，
+   * 未解析的原始 token 汇总进回执 SentFrame.unresolved_mentions。缺省（旧客户端）→ 行为与今天一致（正文 @ 曾并入
+   * mentions，仍走硬拒，这是可接受的向后兼容）。
+   */
+  body_mentions?: string[];
   reply_to: number | null;
   completion_artifact?: CompletionArtifact;
   /** 人类决策请求（#284）；带上它 = 这条 message 是一个 decision_request。与 completion_artifact 互斥。 */
@@ -1641,6 +1652,12 @@ export interface MessageUpdateFrame {
 export interface SentFrame {
   type: "sent";
   seq: number;
+  /**
+   * 正文便利提取（SendMessageFrame.body_mentions）里服务端**未能路由**的原始 token（#663）：未命中/歧义/保留字，
+   * 已降级为普通文本随消息原样发出。客户端据此打一条非阻断 warning，兑现 #552「未命中要给发送方可见反馈」的诉求，
+   * 但不再拒发。空则省略（无未解析项）。显式 mentions 的未命中不走这里——那会直接 mention_not_found 报错。
+   */
+  unresolved_mentions?: string[];
 }
 
 export interface PresenceFrame {

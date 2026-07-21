@@ -438,7 +438,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           attachPaths.length > 0
             ? await uploadAttachmentPaths(cfg.server, cfg.token, resolved, attachPaths)
             : undefined;
-        const { seq } = await postMessage(cfg.server, cfg.token, resolved, {
+        const { seq, unresolved_mentions } = await postMessage(cfg.server, cfg.token, resolved, {
           kind: "message",
           body: effectiveBody,
           mentions: normalizedMentions,
@@ -450,6 +450,10 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           type: "send",
           channel: resolved,
           seq,
+          // #663：正文里未能路由的 @token（如自然语言「@我」）已按文本原样发出；回执告知调用方，绝不阻断发送。
+          ...(unresolved_mentions !== undefined && unresolved_mentions.length > 0
+            ? { unresolved_mentions }
+            : {}),
           ...(attachments !== undefined
             ? { attachments: attachments.map((a) => ({ filename: a.filename, size: a.size, url: a.url })) }
             : {}),

@@ -1230,6 +1230,8 @@ export async function postMessage(
   signal?: AbortSignal,
 ): Promise<{
   seq: number;
+  /** 正文便利提取里服务端未能路由、已降级为文本的 token（#663）；空/缺省=无。 */
+  unresolved_mentions?: string[];
   completion_review?: CompletionReview;
   decision_request?: DecisionRequest;
   decision_resolution?: DecisionResolution;

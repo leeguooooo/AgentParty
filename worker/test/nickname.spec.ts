@@ -189,7 +189,7 @@ describe("@中文昵称 解析成真实 name 并唤醒（#165）", () => {
     ws.close();
   });
 
-  it("唯一 display 可路由；同名 display 明确报 mention_ambiguous", async () => {
+  it("唯一 display 可路由；同名 display 在正文里降级为文本（#663，不再硬拒）", async () => {
     const now = Date.now();
     const uniqueHandle = uniq("humanhandle");
     const uniqueDisplay = uniq("ReadableHuman");
@@ -213,24 +213,30 @@ describe("@中文昵称 解析成真实 name 并唤醒（#165）", () => {
          VALUES (?, ?, ?, ?, ?)`,
       ).bind(uniq(`account-${suffix}`), uniq(`handle-${suffix}`), duplicateDisplay, now, now).run();
     }
+    // #663：正文里的歧义 @ 不再报 mention_ambiguous——降级为普通文本，原始 token 进 sent.unresolved_mentions，
+    // 消息照常落库、mentions 不含它。显式 mentions 里的歧义仍走硬拒（见下方用例）。
     ws.send({ type: "send", kind: "message", body: `@${duplicateDisplay} hello`, mentions: [], reply_to: null });
-    const error = await ws.nextOfType("error");
-    expect(error.code).toBe("mention_ambiguous");
-    expect(error.message).toContain(`@${duplicateDisplay}`);
+    expect((await ws.nextOfType("sent")).unresolved_mentions).toEqual([duplicateDisplay]);
+    expect((await ws.nextOfType("msg")).mentions).toEqual([]);
     ws.close();
   });
 
-  it("unknown、@all 和显式 ghost target 都明确失败，不落成普通消息", async () => {
+  it("正文里 unknown/@all 降级为文本（#663）；显式 ghost target 仍硬拒", async () => {
     const sender = await seedToken("agent", uniq("sender"));
     const slug = await createChannel(sender.token);
     const ws = await WsClient.open(slug, sender.token);
     await completeCapabilityHello(ws);
 
+    // 正文里未知 @：不再硬拒，降级为文本。
     ws.send({ type: "send", kind: "message", body: "@ghost-target ping", mentions: [], reply_to: null });
-    expect((await ws.nextOfType("error")).code).toBe("mention_not_found");
+    expect((await ws.nextOfType("sent")).unresolved_mentions).toEqual(["ghost-target"]);
+    expect((await ws.nextOfType("msg")).mentions).toEqual([]);
+    // 正文里保留字 @all：同样降级为文本。
     ws.send({ type: "send", kind: "message", body: "@all ping", mentions: [], reply_to: null });
-    expect((await ws.nextOfType("error")).code).toBe("mention_not_found");
+    expect((await ws.nextOfType("sent")).unresolved_mentions).toEqual(["all"]);
+    expect((await ws.nextOfType("msg")).mentions).toEqual([]);
 
+    // 显式 mentions[] 里的未知目标仍硬拒（发送方明确指定，回归守卫）。
     const rest = await api(`/api/channels/${slug}/messages`, sender.token, {
       method: "POST",
       body: JSON.stringify({ kind: "message", body: "explicit ghost", mentions: ["missing-agent"], reply_to: null }),

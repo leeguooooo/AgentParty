@@ -71,7 +71,10 @@ export interface AttachSource {
 export interface SendInput {
   channel: string;
   body: string;
+  /** 权威显式 mention：来自 `--mention`。服务端硬解析——拼错即整条报错（#663）。 */
   mentions: string[];
+  /** 正文便利提取的 `@token`（#663）：服务端命中即路由、未命中降级为文本，绝不阻断发送。 */
+  bodyMentions: string[];
   replyTo: number | null;
   attachPaths: string[];
 }
@@ -207,8 +210,10 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     console.error("--mention cannot target reserved name system");
     return null;
   }
-  // Keep CLI, Web and Worker on the same body-mention contract. Explicit
-  // --mention values stay first; body tokens are appended in source order.
+  // Keep CLI, Web and Worker on the same split contract (#663): explicit `--mention` values are the
+  // AUTHORITATIVE list (server hard-rejects typos); body-extracted `@tokens` are convenience-only and
+  // go into a separate `body_mentions` — the server routes the ones that resolve and silently downgrades
+  // the rest to plain text, so a natural-language `@我` in prose can never hard-fail the whole send.
   const mentions: string[] = [];
   const seenMentions = new Set<string>();
   for (const mention of explicitMentions) {
@@ -221,17 +226,19 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     console.error(`too many mentions (max ${MAX_MENTIONS})`);
     return null;
   }
+  const bodyMentions: string[] = [];
   for (const mention of extractMentionTokens(text)) {
-    if (mentions.length >= MAX_MENTIONS) break;
+    if (mentions.length + bodyMentions.length >= MAX_MENTIONS) break;
     const key = mentionMatchKey(mention);
     if (seenMentions.has(key)) continue;
     seenMentions.add(key);
-    mentions.push(mention);
+    bodyMentions.push(mention);
   }
   return {
     channel,
     body: text,
     mentions,
+    bodyMentions,
     replyTo: replyTo ?? null,
     attachPaths,
   };
@@ -264,13 +271,22 @@ export async function doSend(cfg: Config, input: SendInput): Promise<number | { 
     for (const ref of attachments) console.error(`uploaded ${ref.filename} (${formatSize(ref.size)})`);
   }
   try {
-    const { seq } = await postMessage(cfg.server, cfg.token, input.channel, {
+    const { seq, unresolved_mentions } = await postMessage(cfg.server, cfg.token, input.channel, {
       kind: "message",
       body: input.body,
       mentions: input.mentions,
+      ...(input.bodyMentions.length > 0 ? { body_mentions: input.bodyMentions } : {}),
       reply_to: input.replyTo,
       ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
     });
+    // #663：正文里的 @token 服务端未能路由，已按普通文本原样发出。打一条非阻断 warning（不改变发送成功），
+    // 兑现 #552「未命中要给发送方可见反馈」的诉求，同时不再把正文自然语言 @（如「@我」）整条硬拒。
+    if (unresolved_mentions !== undefined && unresolved_mentions.length > 0) {
+      const tokens = unresolved_mentions.map((t) => `@${stripTerminalControls(t)}`).join(", ");
+      console.error(
+        `warn: ${unresolved_mentions.length} @-token(s) in body were not routable and sent as text: ${tokens}`,
+      );
+    }
     advanceCursorPastOwnMessage(input.channel, seq);
     writeStatuslineCache({
       ...localStatuslineBase(input.channel),
