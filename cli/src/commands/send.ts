@@ -282,7 +282,7 @@ export async function doSend(cfg: Config, input: SendInput): Promise<number | { 
     // #663：正文里的 @token 服务端未能路由，已按普通文本原样发出。打一条非阻断 warning（不改变发送成功），
     // 兑现 #552「未命中要给发送方可见反馈」的诉求，同时不再把正文自然语言 @（如「@我」）整条硬拒。
     if (unresolved_mentions !== undefined && unresolved_mentions.length > 0) {
-      const tokens = unresolved_mentions.map((t) => `@${t}`).join(", ");
+      const tokens = unresolved_mentions.map((t) => `@${stripTerminalControls(t)}`).join(", ");
       console.error(
         `warn: ${unresolved_mentions.length} @-token(s) in body were not routable and sent as text: ${tokens}`,
       );

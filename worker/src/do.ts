@@ -356,6 +356,10 @@ function mergeBodyMentions(explicit: string[], text: string): string[] | null {
 // 词法规则与显式 mentions 共用 @agentparty/shared/mentions；总量仍受 MAX_MENTIONS / JSON 上限约束（DoS 守卫）。
 function collectBodyMentions(explicit: string[], clientBody: string[], text: string): string[] | null {
   const explicitKeys = new Set(explicit.map(mentionMatchKey));
+  // 服务端就地从正文提取 = 权威集合。客户端提交的 body_mentions **只有确实出现在正文里**才被采信——
+  // 否则可用 body:"无需通知" 搭配 body_mentions:[agent] 制造正文里根本看不见的隐形路由/唤醒（#673 评审）。
+  const extracted = extractMentionTokens(text).map((m) => m.value);
+  const extractedKeys = new Set(extracted.map(mentionMatchKey));
   const seen = new Set<string>();
   const out: string[] = [];
   const push = (name: string): boolean => {
@@ -366,11 +370,14 @@ function collectBodyMentions(explicit: string[], clientBody: string[], text: str
     out.push(name);
     return true;
   };
+  // 客户端 body_mentions 先按其顺序纳入，但丢弃任何正文中不存在的 token（防隐形唤醒）。
   for (const name of clientBody) {
+    if (!extractedKeys.has(mentionMatchKey(name))) continue;
     if (!push(name)) return null;
   }
-  for (const mention of extractMentionTokens(text)) {
-    if (!push(mention.value)) return null;
+  // 服务端提取兜底（旧客户端漏传 body_mentions 时仍能识别正文 @）。
+  for (const mention of extracted) {
+    if (!push(mention)) return null;
   }
   return byteLength(JSON.stringify(out)) <= MENTIONS_JSON_LIMIT ? out : null;
 }

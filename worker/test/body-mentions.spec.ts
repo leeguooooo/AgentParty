@@ -113,6 +113,28 @@ describe("#663 explicit vs body mentions", () => {
     expect(row?.mentions).toContain(agent.name);
   });
 
+  it("client body_mentions NOT present in the body are dropped — no invisible wake (#673 review)", async () => {
+    const acct = "s663-e@leeguoo.com";
+    const sender = await seedToken("human", uniq("sender"), { owner: acct });
+    const agent = await seedToken("agent", uniq("worker663hidden"), { owner: acct });
+    const slug = await createChannel(sender.token);
+
+    // 恶意/异常客户端：正文里根本没有 @agent，却在 body_mentions 塞入该 agent 想偷偷路由/唤醒它。
+    const res = await send(slug, sender.token, {
+      body: "无需通知任何人",
+      mentions: [],
+      body_mentions: [agent.name],
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { seq: number; unresolved_mentions?: string[] };
+    const listed = await api(`/api/channels/${slug}/messages?limit=200`, sender.token);
+    const { messages } = (await listed.json()) as { messages: Array<{ seq: number; mentions: string[] }> };
+    const row = messages.find((m) => m.seq === json.seq);
+    // 正文中不存在该 @ → 绝不进 mentions[]（不路由、不唤醒），也不算 unresolved（它压根不该出现）。
+    expect(row?.mentions ?? []).not.toContain(agent.name);
+    expect(json.unresolved_mentions ?? []).not.toContain(agent.name);
+  });
+
   it("reserved-word body @全体/@all downgrade to text (unresolved), never hard-fail", async () => {
     const sender = await seedToken("human", uniq("sender"), { owner: "s663-e@leeguoo.com" });
     const slug = await createChannel(sender.token);
