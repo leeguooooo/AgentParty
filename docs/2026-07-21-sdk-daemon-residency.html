@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentParty · SDK-backed daemon residency（第一方常驻 runner）</title>
+  <style>
+    :root {
+      --fg: #202124;
+      --muted: #5f6368;
+      --accent: #2457c5;
+      --border: #d9dde5;
+      --soft: #f5f7fa;
+      --code: #eef1f5;
+      --ok: #166534;
+      --warn: #9a3412;
+    }
+    * { box-sizing: border-box; }
+    body {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 2rem 1.4rem 5rem;
+      color: var(--fg);
+      font: 16px/1.65 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header { border-bottom: 3px solid var(--accent); padding-bottom: 1.1rem; margin-bottom: 2rem; }
+    h1 { margin: 0 0 .45rem; font-size: 1.75rem; line-height: 1.25; }
+    h2 { margin-top: 2.4rem; padding-left: .65rem; border-left: 4px solid var(--accent); font-size: 1.25rem; }
+    h3 { margin-top: 1.6rem; font-size: 1.05rem; }
+    p, li { max-width: 92ch; }
+    a { color: var(--accent); }
+    .meta { color: var(--muted); font-size: .9rem; }
+    .meta span { display: inline-block; margin-right: 1.2rem; }
+    .verdict {
+      margin: 1.4rem 0;
+      padding: 1rem 1.1rem;
+      border: 1px solid var(--border);
+      border-left: 5px solid var(--accent);
+      background: var(--soft);
+    }
+    .verdict strong { color: var(--accent); }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+    th, td { border: 1px solid var(--border); padding: .55rem .65rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); }
+    .yes { color: var(--ok); font-weight: 650; }
+    .no { color: var(--warn); font-weight: 650; }
+    .new { color: var(--accent); font-weight: 650; }
+    code { background: var(--code); border-radius: 3px; padding: .08em .3em; font: .88em "SFMono-Regular", Menlo, Consolas, monospace; }
+    pre { overflow-x: auto; padding: .9rem 1rem; background: var(--code); border: 1px solid var(--border); border-radius: 6px; font-size: .82rem; line-height: 1.55; }
+    pre code { padding: 0; background: transparent; }
+    aside { margin: 1rem 0; padding: .75rem 1rem; background: var(--soft); border-left: 4px solid var(--accent); }
+    .flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: .5rem; margin: 1.1rem 0; }
+    .flow span { padding: .65rem; text-align: center; border: 1px solid var(--border); background: var(--soft); font-size: .85rem; }
+    .flow span + span::before { content: "→ "; color: var(--accent); font-weight: 700; }
+    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .88rem; }
+    ol.phases > li { margin-bottom: .6rem; }
+    @media (max-width: 800px) {
+      body { padding-inline: .8rem; }
+      .flow { grid-template-columns: 1fr; }
+      .flow span + span::before { content: "↓ "; }
+      table { display: block; overflow-x: auto; white-space: normal; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SDK-backed <code>daemon</code> residency —— 让「可唤醒」从谎报变成真</h1>
+    <p class="meta">
+      <span>状态：提案（待 owner 拍板）</span>
+      <span>日期：2026-07-21</span>
+      <span>范围：presence / wake / runtime</span>
+    </p>
+  </header>
+
+  <div class="verdict">
+    <strong>TL;DR。</strong> AgentParty 是协调层，但它<strong>不拥有 agent 运行时</strong>——靠外部 harness（Claude Code <code>run_in_background</code> watcher、codex）去真正跑 agent。一整条 bug 血脉（#665 watcher 被 turn 边界回收、#508、#29、#199、唤醒债风暴）都源于此：<code>party watch --once</code> 是个<strong>单发子进程</strong>，命悬于外部 harness 的回合边界，所以 presence 里的「可唤醒」本质是谎报。
+    提案：引入一个<strong>第一方常驻 runner</strong>（<code>party daemon</code>），嵌入官方 <code>@anthropic-ai/claude-agent-sdk</code>，作为一个新的 <span class="new">daemon</span> residency / wake kind 接进现有 <code>Residency</code>/<code>WakeKind</code>/lease 模型。它持有真实心跳租约、被 @ 时直接跑 SDK session、不依赖任何 harness turn 边界——把「wakeable」从<em>暴露悲伤事实</em>升级为<em>真的成立</em>。<strong>但不 all-in</strong>：跨 harness/跨厂商是护城河，daemon 只作为最高档 residency 与 watch/serve/webhook/codex 并存。
+  </div>
+
+  <h2>1 · 问题：运行时是借来的</h2>
+  <p>
+    AgentParty 的每个 agent「实例」并不是它自己拉起来的进程，而是某个外部 harness 里的一次性子任务。<code>party watch --once</code> 是 single-shot：被 @ 唤醒一次、处理、退出，然后<strong>必须靠 harness 在下一回合重新挂上</strong>。当 harness（如 Claude Code）在 turn 边界回收后台任务时，watcher 就此消失——而 presence 层无从当场得知。
+  </p>
+  <p>下面这些 issue 不是各自独立的 bug，而是<strong>同一个根因的不同切面</strong>：</p>
+  <table>
+    <thead><tr><th>Issue</th><th>切面</th><th>根</th></tr></thead>
+    <tbody>
+      <tr><td>#665</td><td>watcher 被回收后 presence 仍显示可唤醒，三条 @ 石沉大海</td><td rowspan="5">agent 不是常驻 daemon，是每回合被拉起又被杀的子进程；「可唤醒」无真实心跳背书</td></tr>
+      <tr><td>#664</td><td>send --mention 到无 wake adapter 目标，发送方零反馈</td></tr>
+      <tr><td>#508 / #29</td><td>后台 watch 静默退出 / turn 边界回收，漏收 @</td></tr>
+      <tr><td>#199</td><td>watch --once 只重放最旧一条未读，不报落后量</td></tr>
+      <tr><td>唤醒债风暴</td><td>每次 watch --once 只清一条旧 seq，债越滚越多</td></tr>
+    </tbody>
+  </table>
+  <aside>
+    我们正在做的 <strong>#664 / #665 / #666</strong> 三个修复，本质是<strong>如实暴露「watch 不可靠」这个事实</strong>（send 时警告、presence 转 stale、网页标 unreachable）。这是必要的止血，但不是根治——它让用户<em>看见</em>不可靠，没让它<em>变可靠</em>。
+  </aside>
+
+  <h2>2 · <code>@anthropic-ai/claude-agent-sdk</code> 是什么</h2>
+  <p>
+    Anthropic 官方的 <strong>Agent SDK</strong>：Claude Code 背后同一套 harness，做成可嵌入你自己进程的库。一次依赖即得：agentic loop、tool use、MCP server 挂载、子代理（Task）、<code>canUseTool</code> 权限门、hooks、<strong>AskUserQuestion 拦截</strong>、session 持久化 / resume、streaming、skills、<code>effort</code> / <code>permissionMode</code>。
+  </p>
+  <p>
+    参考实现：<a href="https://github.com/sorrycc/Helm">helm-agent</a>（陈成 / sorrycc）——它的 daemon 本质就是「把 SDK session 包成常驻服务 + HTTP/SSE + 桌面 UI」。它的 contracts 直接引用 SDK 类型（<code>McpSdkServerConfigWithInstance</code>、<code>parent_tool_use_id</code>、<code>effort</code>、permission modes）。<strong>helm 没有我们这条 reaped-watcher bug 血脉——因为它拥有运行时。</strong>
+  </p>
+
+  <h2>3 · 提案：<code>daemon</code> residency</h2>
+  <p>
+    出一个第一方常驻 runner —— <code>party daemon</code>（工作名）—— 内嵌 <code>@anthropic-ai/claude-agent-sdk</code>。它：
+  </p>
+  <ul>
+    <li>以一个<strong>长期进程</strong>注册进频道，持有<strong>真实心跳租约</strong>的 presence——不是「自报可唤醒」，是「服务端每 N 秒收到活体心跳」。</li>
+    <li>被 @ 时，daemon 直接在本地跑一个 SDK session 处理该 mention，<strong>不依赖任何 harness turn 边界</strong>；处理完回复 + 落 ack，不退出。</li>
+    <li>天然拿到 <code>canUseTool</code> 权限门（对接我们的 owner/worker/front 边界）、hooks、AskUserQuestion（对接 <code>decision_request</code> #284）。</li>
+  </ul>
+
+  <h3>3.1 接进现有模型（不是另起炉灶）</h3>
+  <p>当前 <code>shared/src/protocol.ts</code> 已有一套成熟的 residency / wake / lease 抽象，daemon 只是新增一档：</p>
+  <table>
+    <thead><tr><th><code>WakeKind</code></th><th><code>Residency</code></th><th>谁控制投递 / 存活</th><th>服务端可验证？</th><th>被 harness 回收？</th></tr></thead>
+    <tbody>
+      <tr><td><code>watch</code></td><td><code>supervised</code></td><td>外部 harness 重挂 watcher</td><td class="no">否（自报）</td><td class="no">会（根因）</td></tr>
+      <tr><td><code>serve</code></td><td><code>supervised</code></td><td>常驻 serve 循环 + 租约</td><td>部分</td><td>较少</td></tr>
+      <tr><td><code>webhook</code></td><td><code>webhook</code></td><td>服务端 POST 投递</td><td class="yes">是（天然）</td><td class="yes">否</td></tr>
+      <tr><td><code>none</code></td><td><code>bare</code> / <code>human_driven</code></td><td>靠人 / 无</td><td class="no">否</td><td>—</td></tr>
+      <tr><td class="new">daemon <em>(新)</em></td><td class="new">daemon <em>(新)</em></td><td class="new">第一方 SDK 常驻进程 + 心跳租约</td><td class="yes">是（心跳 = 活体证据）</td><td class="yes">否（自持进程）</td></tr>
+    </tbody>
+  </table>
+  <p>
+    关键：<code>wakeableState()</code> 今天只有 webhook 能算 <code>wakeable_verified</code>（服务端持端点）。<span class="new">daemon 的心跳本身就是服务端可观测的活体证据</span>，所以它也能<strong>凭构造进入 verified 档</strong>——而不是像 watch 那样要等 <code>verified_at</code> 被动盖章。租约到期（<code>PRESENCE_TIMEOUT_MS = 60s</code> 没心跳）即如实转 stale，<code>evaluateHostLease()</code> 直接复用。</p>
+
+  <h3>3.2 唤醒流（对比今天）</h3>
+  <p><strong>今天（watch）：</strong></p>
+  <div class="flow">
+    <span>@mention</span><span>DO 落 delivery ledger</span><span>等 harness 下回合重挂 watch</span><span>watch --once 醒、拉一条</span><span>处理后退出（债留存）</span>
+  </div>
+  <p><strong>提案（daemon）：</strong></p>
+  <div class="flow">
+    <span>@mention</span><span>DO 查 daemon 租约=active</span><span>推送/长连唤醒常驻 daemon</span><span>SDK session 就地处理</span><span>回复+清债，进程续存</span>
+  </div>
+
+  <h3>3.3 权限与决策（顺带解锁）</h3>
+  <table>
+    <thead><tr><th>SDK 能力</th><th>接进 AgentParty</th></tr></thead>
+    <tbody>
+      <tr><td><code>canUseTool</code> 权限回调 + per-tool 风险分级</td><td>owner / worker / front 三方边界的<strong>运行时执行点</strong>；可借鉴 helm 的 <code>risk.ts</code>（low/medium/high + destructive-token 正则）</td></tr>
+      <tr><td>AskUserQuestion 拦截</td><td>直接映射到 <code>decision_request</code>（#284）——daemon 把 SDK 的提问转成频道里的人类决策请求</td></tr>
+      <tr><td><code>permissionMode</code> / <code>effort</code> 级联</td><td>per-channel / per-agent 策略（可借鉴 helm 的 session-policy cascade：sidecar → workspace → config default）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4 · 不 all-in：daemon 只是最高档，不取代协调层</h2>
+  <p>
+    AgentParty 的差异化是<strong>跨 harness、跨厂商</strong>——它协调 Claude Code + codex + 人类。把运行时锁死到 Anthropic SDK 会收窄这个护城河。所以：
+  </p>
+  <ul>
+    <li><span class="new">daemon</span> 是<strong>新增</strong>的一档 residency，不是替换。watch / serve / webhook / codex / human_driven 全部保留，覆盖 SDK 之外的 harness 与人类。</li>
+    <li>daemon 成为「wakeable 真的成立」的<strong>金标准档</strong>；其余档继续存在，只是如实标注可靠性（这正是 #664/#665/#666 在做的）。</li>
+    <li>用户可选：要「叫得醒、不掉线」就用 <code>party daemon</code>；要「继续用我的 Claude Code / codex 会话」就用 watch/serve，接受其 harness 语义。</li>
+  </ul>
+
+  <h2>5 · 分阶段落地</h2>
+  <ol class="phases">
+    <li><strong>Spike（1）</strong>：最小 <code>party daemon</code> —— 嵌 SDK，起一个能被 party @ 唤醒、就地跑 SDK session 回复的常驻进程。协议不动，先证明「常驻 + 可被唤醒」成立。</li>
+    <li><strong>协议接入（2）</strong>：加 <code>WakeKind:"daemon"</code> + <code>Residency:"daemon"</code>；心跳租约走 <code>evaluateHostLease</code>；<code>wakeableState</code> 让 daemon 凭心跳进 verified。<em>（注意 #622 教训：<code>client.ts</code> 校验词表须逐字镜像；建议同时评估 zod 单源，见附录。）</em></li>
+    <li><strong>权限与决策（3）</strong>：接 <code>canUseTool</code> → owner/worker 边界 + 风险分级；AskUserQuestion → <code>decision_request</code>。</li>
+    <li><strong>Dogfood（4）</strong>：在一个频道用 daemon 跑一个真 agent，与 watch 对照，验证「不再石沉大海 / 不再滚债」。</li>
+    <li><strong>桌面/接入包（5）</strong>：把 daemon 作为接入包的一种模式（对照 helm 的 daemon + selfsigned 本地 HTTPS + QR 配对）。</li>
+  </ol>
+
+  <h2>6 · 风险与未决</h2>
+  <table>
+    <thead><tr><th>风险 / 问题</th><th>取向</th></tr></thead>
+    <tbody>
+      <tr><td>常驻进程的部署/托管（谁来 7×24 跑 daemon？）</td><td>本地机器（桌面端）/ 用户自托管；先不强上云。心跳租约天然处理「机器睡了」= 转 stale。</td></tr>
+      <tr><td>SDK 版本/计费绑定 Anthropic</td><td>可接受——它只是<strong>一档</strong> residency；其它 harness 不受影响。</td></tr>
+      <tr><td>与 serve 的边界（serve 已是常驻+租约）</td><td>daemon = serve + <strong>自带 SDK 运行时</strong>（serve 仍要外部 agent 进程；daemon 自己就是 agent）。需在设计里划清，或让 daemon 成为 serve 的一种 runner 后端。</td></tr>
+      <tr><td>多 daemon 实例 / 抢占</td><td>复用现有同名 serve 实例待命 + 租约裁决逻辑。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>附录 · 从 helm-agent 顺手可借鉴的模式</h2>
+  <p>（<code>helm-agent</code> 源码 <code>license: UNLICENSED</code>——借<strong>思路</strong>不抄码。）</p>
+  <table>
+    <thead><tr><th>helm 模式</th><th>对 AgentParty 的价值</th></tr></thead>
+    <tbody>
+      <tr><td><strong>zod 契约 = 单一真源</strong>，事件用带 tag 的 discriminated union，两端同一处 import</td><td>根治 <strong>#622</strong> 的「<code>client.ts</code> 手写 allow-list 与 <code>protocol.ts</code> 漂移」——结构上不可能漂移</td></tr>
+      <tr><td><strong><code>state</code> 与 <code>tempo</code> 正交</strong>（生命周期 vs「此刻是否在等用户」），idle reaper 在 <code>blocked</code> 时不回收</td><td>正是 <strong>#664/#665/#666</strong> 的正解：presence 别把「在线」和「可唤醒」糊在一起；blocked-on-user 的会话不该被当空闲杀</td></tr>
+      <tr><td><strong>结构化错误变体</strong>（每个错误是带上下文的类型，如 <code>stale_in_progress{stuckIssueIds,hint}</code>）</td><td>#663/#664 想要的「可见、可操作反馈」——取代 stringly <code>errorBody(code,message)</code></td></tr>
+      <tr><td><strong>磁盘持久化 session-status 作真源</strong>，原子写于状态机跃迁点，消费方读盘</td><td>presence 真值分层：落盘真源 + 流只管细节</td></tr>
+      <tr><td><strong>插件能力注册表</strong>（type-only 公共面、id 自动命名空间、warn-and-ignore 降级）</td><td>把现有硬编码的 Lark/Discord/微信 channel adapter 正式化为可扩展注册表</td></tr>
+    </tbody>
+  </table>
+
+  <footer>
+    AgentParty 内部设计提案 · 2026-07-21 · 基于 <code>shared/src/protocol.ts</code>（<code>Residency</code> / <code>WakeKind</code> / <code>evaluateHostLease</code> / <code>wakeableState</code> / <code>PRESENCE_TIMEOUT_MS</code>）实况核对 · 参考 helm-agent 0.0.31 contracts。
+  </footer>
+</body>
+</html>
