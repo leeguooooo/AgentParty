@@ -179,6 +179,30 @@
     </tbody>
   </table>
 
+  <h2>7 · 实现进展（已 live 验收，2026-07-21）</h2>
+  <p>本提案已从设计走到<strong>实测可用</strong>（分支 <code>spike/672-daemon-phase2</code>，PR #691；取代 Phase-1 草稿 #685）：</p>
+  <table>
+    <thead><tr><th>阶段</th><th>内容</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>Phase-1</td><td>嵌 SDK、connect 常驻、被 @ 就地跑 SDK 回帖</td><td class="yes">✅ live</td></tr>
+      <tr><td>Phase-2</td><td>真接住 durable directed delivery：<code>directedDelivery:"v1"</code> + welcome 后 <code>delivery_adapter register</code>（<strong>live 抓到的关键 bug</strong>：只声明 v1 不注册 adapter，服务端永不实时派发）→ 收 <code>delivery</code> 帧、认领、跑 SDK、<code>reply_to</code> 回帖标 <code>replied</code></td><td class="yes">✅ live</td></tr>
+      <tr><td>Phase-2.1</td><td>一级 <code>WakeKind/Residency:"daemon"</code>（不再伪装 watch；<code>wakeableState</code> 只认服务端观测 verified，不重蹈 #665 假在线）+ 投递续租（SDK 跑期间发 <code>delivery_update running</code> 顶 <code>lease_until</code>，解 >90s 重派）</td><td class="yes">✅ live</td></tr>
+      <tr><td>真 SDK 往返</td><td>隔离频道 connect→真 @→真订阅 SDK→回帖→replied，全绿（零 API key，用订阅登录）</td><td class="yes">✅ live</td></tr>
+    </tbody>
+  </table>
+  <aside><strong>部署顺序</strong>：presence 显示 <code>daemon</code> 与协议枚举需<strong>先部署 worker</strong>；旧服务端下客户端发 <code>daemon</code> 无害、delivery 靠 <code>delivery_adapter register</code> 照常（向后兼容，已实测）。</aside>
+
+  <h2>8 · daemon ↔ 交互式 Claude CLI 共存（Phase-2.2 · #692）</h2>
+  <p>SDK 就是 Claude Code 打包成库——能与同机 <code>claude</code> CLI 并存（<strong>无硬冲突</strong>），但<strong>共享几处</strong>，生产化前须处理：</p>
+  <table>
+    <thead><tr><th>共享面</th><th>取向</th></tr></thead>
+    <tbody>
+      <tr><td><strong>凭据 + refresh 竞态</strong>：两边读同一份 OAuth，近过期并发刷新会互相打架；多账号时默认路径可能选错账号</td><td>daemon 用<strong>专用 <code>CLAUDE_CODE_OAUTH_TOKEN</code></strong>（<code>claude setup-token</code>）隔离，不蹭交互式凭据 churn</td></tr>
+      <tr><td><strong>配置继承</strong>：<code>query()</code> 默认继承全局 <code>~/.claude</code> 设置、MCP servers、hooks、CLAUDE.md → daemon agent 带全家桶 + hooks 全触发</td><td>起 SDK 时 scope <code>options</code>（<code>cwd</code>/<code>settingSources</code>/allowed-tools/<code>permissionMode</code>）；无头常驻不设 permissionMode 会卡 tool 权限询问</td></tr>
+      <tr><td><strong>订阅额度</strong>：daemon SDK 调用与交互式同池</td><td>文档提示；必要时限流/预算</td></tr>
+    </tbody>
+  </table>
+
   <h2>附录 · 从 helm-agent 顺手可借鉴的模式</h2>
   <p>（<code>helm-agent</code> 源码 <code>license: UNLICENSED</code>——借<strong>思路</strong>不抄码。）</p>
   <table>
