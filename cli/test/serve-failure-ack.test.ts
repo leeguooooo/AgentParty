@@ -233,7 +233,7 @@ describe("serve wake delivery (#118 / #198)", () => {
       "HTTP 401 Unauthorized",
     ];
     for (const stderr of env) {
-      expect(isRunnerEnvFailure({ stdout: "", stderr })).toBe(true);
+      expect(isRunnerEnvFailure({ stderr })).toBe(true);
     }
     const notEnv = [
       "diff apply conflict in src/foo.ts",
@@ -243,7 +243,16 @@ describe("serve wake delivery (#118 / #198)", () => {
       "",
     ];
     for (const stderr of notEnv) {
-      expect(isRunnerEnvFailure({ stdout: "", stderr })).toBe(false);
+      expect(isRunnerEnvFailure({ stderr })).toBe(false);
+    }
+  });
+
+  // CodeRabbit #693：只扫 stderr。模型 stdout 里恰好写了环境错字样，不该被误判成「model did not run」。
+  test("isRunnerEnvFailure ignores environment fingerprints that appear only in model stdout (#690)", () => {
+    for (const noise of ["unauthorized", "spawn foo ENOENT", "permission denied", "command not found", "401 Unauthorized"]) {
+      // stdout 命中但 stderr 干净 → 不算环境失败（模型真跑过、只是它的输出里提到了这些词）。
+      const result: { stdout: string; stderr: string } = { stdout: noise, stderr: "" };
+      expect(isRunnerEnvFailure(result)).toBe(false);
     }
   });
 

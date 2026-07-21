@@ -1591,9 +1591,11 @@ const RUNNER_ENV_FAILURE_PATTERNS: readonly RegExp[] = [
   /permission denied/i,
 ];
 
-export function isRunnerEnvFailure(result: Pick<RunnerProcessResult, "stdout" | "stderr">): boolean {
-  const haystack = `${result.stderr}\n${result.stdout}`;
-  return RUNNER_ENV_FAILURE_PATTERNS.some((re) => re.test(haystack));
+// 只扫 stderr，绝不扫 stdout：环境错（认证/spawn/权限）都落 stderr；而 stdout 是**模型输出**——若模型正好
+// 写了「unauthorized」「permission denied」之类的字样，扫进来就会把一次真实的模型运行误判成「model did not run」，
+// 正好颠倒 environment 标志的语义（CodeRabbit #693）。stderr-only 既覆盖真实指纹又杜绝这条误报路径。
+export function isRunnerEnvFailure(result: Pick<RunnerProcessResult, "stderr">): boolean {
+  return RUNNER_ENV_FAILURE_PATTERNS.some((re) => re.test(result.stderr));
 }
 
 function writeSdkSession(path: string, state: SdkWakeSessionState): SdkWakeSessionState {
