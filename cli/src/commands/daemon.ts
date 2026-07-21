@@ -1,13 +1,24 @@
-// party daemon — 实验性：内嵌 @anthropic-ai/claude-agent-sdk 的常驻 party runner（SPIKE，#672 Phase 1）。
+// party daemon — 实验性：内嵌 @anthropic-ai/claude-agent-sdk 的常驻 party runner（SPIKE，#672 Phase 2）。
 //
 // 动机（#672）：`party watch --once` 是单发子进程，harness 在 turn 边界把它回收即静默——presence 的
 // 「可唤醒」本质是谎报，这是 #665/#664/#508/#29/#199 唤醒债风暴的共同根因。daemon 是一档**第一方常驻**
 // runner：长期进程持 WS（真实心跳），被 @ 时就地跑内嵌的官方 Agent SDK session，处理完回帖、进程续存，
 // **不依赖 harness turn 边界**。
 //
-// ⚠️ Phase-1 边界（协议不动）：本命令暂**不**新增 WakeKind:"daemon" / Residency:"daemon"（那是 doc 里的
-// Phase 2）。为了让 wire 保持不变，daemon 复用现有 serve/watch 风格的唤醒声明——即随 hello 上报
-// `advertiseWakeKind: "watch"`。这是刻意的 Phase-1 捷径，见报告与 #672。
+// #688 Phase-2（本次）：Phase-1 只处理普通 `msg` 帧、connect 不声明 directed_delivery——真被 agent @ 时
+// 服务端把 @ 走**持久化 directed delivery**，daemon 收到 `upgrade_required` 报错就崩（`● online` 一被 @
+// 就死，正是 #665 假在线陷阱）。本阶段移植 serve 的 directed-delivery 接收路径：connect 声明
+// `directedDelivery:"v1"`，握手进 directedDeliveryMode 后接住 `delivery` 帧、认领投给本身份的 delivery、
+// 跑 SDK、把回复**带 reply_to 链回 delivery 的原消息**——服务端据此把 delivery 从 claimed 推到 replied
+// （见 worker/src/do.ts `linkWakeResume`→`completeDirectedDelivery`：目标身份 + reply_to==message_seq 即
+// 标 replied，无需 work_id/continuation_ref）。SDK 出错也回一条带 reply_to 的失败提示，同样了结 delivery，
+// 避免它租约过期后被无限重投。
+//
+// ⚠️ 仍是 Phase-1 捷径（协议不动）：本命令暂**不**新增 WakeKind:"daemon" / Residency:"daemon"（那是 doc 里
+// 更后的阶段）。为了让 wire 保持不变，daemon 复用现有 serve/watch 风格的唤醒声明——即随 hello 上报
+// `advertiseWakeKind: "watch"`。且**不**跑 serve 的完整 delivery 状态机（不发 delivery_update running/replied
+// 的显式回执，靠 reply_to 隐式了结）——因此长于 delivery 租约（90s，DIRECTED_DELIVERY_LEASE_MS）的 SDK 会话
+// 有被重投/重跑的窗口。取舍见报告与 #672/#688。
 import {
   EXIT_ARCHIVED,
   EXIT_AUTH,
@@ -24,17 +35,22 @@ import { isSlug } from "../validation";
 export const EXIT_SIGNAL_INT = 128 + 2;
 export const EXIT_SIGNAL_TERM = 128 + 15;
 
-const HELP = `party daemon — 实验性：内嵌 Claude Agent SDK 的常驻 party runner（SPIKE，#672）
+const HELP = `party daemon — 实验性：内嵌 Claude Agent SDK 的常驻 party runner（SPIKE，#672 Phase 2）
 
 usage: party daemon [channel|--channel C] [--timeout N]
 
   连上频道并常驻（长期进程、真实心跳）。被 @ 到本身份时，就地用内嵌的官方
   @anthropic-ai/claude-agent-sdk 跑一个 session，把最终文本回帖到频道——不经 harness、无 turn 边界。
-  SDK 出错则回一条简短失败提示、进程续存。收到 SIGTERM/SIGINT 干净断开（presence 随之清除）。
+  真 agent 的 @ 走持久化 directed delivery：daemon connect 声明 directedDelivery:"v1"，认领投给本身份的
+  delivery、跑 SDK、回复带 reply_to 链回原消息使服务端把 delivery 标为 replied。SDK 出错则回一条带
+  reply_to 的失败提示（同样了结 delivery），进程续存。收到 SIGTERM/SIGINT 干净断开（presence 随之清除）。
 
 flags:
   --channel C     目标频道（也可作为位置参数）；缺省用 party init 绑定的频道
   --timeout N     跑 N 秒后退出（默认 0 = 常驻）；主要给冒烟测试用
+
+auth：内嵌 SDK 走**订阅**凭据，从环境变量 CLAUDE_CODE_OAUTH_TOKEN 读取（Phase-1 live 已验证，零 API key）。
+  起 daemon 前请确保该变量是有效的订阅 token/session；过期时 SDK 会话会失败并回一条失败提示（不崩进程）。
 
 experimental：仅供 spike/live 验证，未接入 onboarding / join-pack；协议未改动（复用 watch 唤醒声明）。`;
 
@@ -107,8 +123,9 @@ export function createSdkRunner(options?: Record<string, unknown>): SdkRunner {
 
 /**
  * daemon 主循环：连上频道、常驻、被 @ 时跑 SDK 并回帖。
- * Phase-1 spike 有意最小化——只处理 plain `msg` 帧的新 @self；status/delivery/message_update 等一律忽略
- * （durable directed-delivery / 暂停接待 / squad 等留给后续阶段）。
+ * #688 Phase-2：既接住持久化 `delivery` 帧（真 agent @ 的主路径），也保留 plain `msg` 帧的 @self 唤醒
+ * （老服务端 / 非持久投递的兜底）。status/presence/message_update 等一律忽略（暂停接待 / squad 等留给后续
+ * 阶段）。delivery 的了结靠回复带 reply_to 链回原消息——服务端据此标 replied（见文件头注释）。
  */
 export async function runDaemon(o: DaemonOptions): Promise<number> {
   const out = o.out ?? ((line: string) => console.log(line));
@@ -126,11 +143,17 @@ export async function runDaemon(o: DaemonOptions): Promise<number> {
   const conn = (o.connectImpl ?? connect)(o.server, o.token, o.channel, o.since, {
     ...(o.onCursor ? { onCursor: o.onCursor } : {}),
     ...(o.backoffBaseMs !== undefined ? { backoffBaseMs: o.backoffBaseMs } : {}),
+    // #688：声明本连接消费持久化 directed-delivery v1 帧——不声明就会在真被 @（durable 投递）时收到
+    // `upgrade_required` 报错并退出（Phase-1 的崩溃根因）。
+    directedDelivery: "v1",
     // Phase-1 捷径：复用现有 watch 唤醒声明，协议不动（见文件头注释 / #672）。
     advertiseWakeKind: "watch",
   });
 
   let self = "";
+  // 服务端是否按 directed-delivery v1 路由 @：为 true 时普通 @self 的 `msg` 帧由 delivery 帧接管，
+  // plain-msg 路径不再据此唤醒（避免同一条 @ 双跑）。老服务端不发 directed_delivery → 保持 msg 路径唤醒。
+  let directedDeliveryMode = false;
   let code = 0;
   let timedOut = false;
   let aborted = false;
@@ -152,57 +175,93 @@ export async function runDaemon(o: DaemonOptions): Promise<number> {
     }, o.timeoutSec * 1000);
   }
 
+  // 跑 SDK 并回帖的公共路径：delivery 与 plain-msg 两条唤醒都汇到这里。回复始终带 reply_to=msg.seq——
+  // 对 delivery 而言这就是了结机制（服务端见目标身份 + reply_to==message_seq 即把 delivery 标 replied，
+  // 见文件头 / worker/src/do.ts）；失败提示同样带 reply_to，一样了结 delivery，避免租约过期后被重投。
+  const wake = async (msg: { seq: number; body: string; sender: { name: string } }): Promise<void> => {
+    out(`daemon: woken by seq=${msg.seq} from ${msg.sender.name}`);
+    let reply: string;
+    try {
+      reply = await o.runner.run(msg.body, { channel: o.channel, sender: msg.sender.name, seq: msg.seq });
+    } catch (error) {
+      const em = error instanceof Error ? error.message : String(error);
+      out(`daemon: sdk session failed on seq=${msg.seq}: ${em}`);
+      // graceful：回一条简短失败提示而非崩溃；提示本身失败也吞掉（best-effort），进程续存。
+      // 该回帖带 reply_to → 即使 SDK 失败也把 delivery 标 replied（一次交付语义），不留悬挂重投。
+      try {
+        await post({
+          body: `⚠️ daemon SDK 会话失败（${em}）——本条 @ 未能就地处理，请重试或改走 human/serve。`,
+          mentions: [msg.sender.name],
+          replyTo: msg.seq,
+        });
+      } catch (postErr) {
+        out(`daemon: failed to post failure note for seq=${msg.seq}: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
+      }
+      return;
+    }
+
+    const body = reply.trim() || "(daemon: SDK 返回空结果)";
+    try {
+      await post({ body, mentions: [msg.sender.name], replyTo: msg.seq });
+      out(`daemon: replied to seq=${msg.seq}`);
+    } catch (error) {
+      out(`daemon: failed to post reply for seq=${msg.seq}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   try {
-    for await (const frame of conn.frames) {
-      if (frame.type === "welcome") {
-        self = frame.self;
-        out(`daemon: attached to #${o.channel} as @${self} (experimental, SDK-in-process)`);
+    for await (const incoming of conn.frames) {
+      if (incoming.type === "welcome") {
+        self = incoming.self;
+        directedDeliveryMode = incoming.directed_delivery === "v1";
+        out(
+          `daemon: attached to #${o.channel} as @${self} (experimental, SDK-in-process` +
+            `${directedDeliveryMode ? ", directed-delivery v1" : ""})`,
+        );
         continue;
       }
-      if (frame.type === "error") {
-        out(`daemon: error ${frame.code}: ${frame.message}`);
-        if (frame.code === "unauthorized") code = EXIT_AUTH;
-        else if (frame.code === "archived") code = EXIT_ARCHIVED;
+      if (incoming.type === "error") {
+        out(`daemon: error ${incoming.code}: ${incoming.message}`);
+        if (incoming.code === "unauthorized") code = EXIT_AUTH;
+        else if (incoming.code === "archived") code = EXIT_ARCHIVED;
         else code = 1;
         break;
       }
-      // spike：只有 plain 消息帧能唤醒。status/presence/delivery/message_update 等留给后续阶段。
-      if (frame.type !== "msg") continue;
-      const msg = frame;
+
+      // #688：真 agent 的 @ 走持久化 directed delivery。像 serve 一样把 delivery 帧拆成 delivery 元信息 +
+      // 内嵌的原消息（frame.message）。plain `msg` 帧则 delivery=null、msg=frame 自身。
+      const directedDelivery = incoming.type === "delivery" ? incoming.delivery : null;
+      const msg = incoming.type === "delivery" ? incoming.message : incoming;
+
+      // delivery 帧内嵌的永远是 message，其余（status/presence/…）一律忽略——留给后续阶段。
+      if (msg.type !== "msg") continue;
+
+      // ── 持久化 directed delivery 路径（真 @ 的主路径）──
+      if (directedDelivery !== null) {
+        // 只处理认领给本身份、且处于 claimed 的 delivery；其余（别人的、或状态不对的）记一笔即忽略。
+        if (directedDelivery.target_name !== self || directedDelivery.state !== "claimed") {
+          out(
+            `daemon: ignored invalid delivery ${directedDelivery.id} for target=${directedDelivery.target_name} state=${directedDelivery.state}`,
+          );
+          continue;
+        }
+        // 自己发的 @ 不唤醒自己。delivery 是独立 work cursor，不看 conn.cursor 的 fresh。
+        if (msg.sender.name === self) continue;
+        await wake(msg);
+        continue;
+      }
+
+      // ── plain `msg` 路径（老服务端 / 非持久投递的兜底）──
       const fromSelf = msg.sender.name === self;
       const mentioned = msg.mentions.includes(self);
       const fresh = msg.seq > conn.cursor;
       // 无论是否唤醒都推进游标（并持久化）：daemon 是常驻读者，读过即已读。
       if (msg.seq > 0) conn.ack(msg.seq);
+      // directedDeliveryMode 下，@self 的普通 msg 由 delivery 帧接管——这里不再据它唤醒（否则同一条 @ 双跑）。
+      if (directedDeliveryMode && mentioned) continue;
       if (fromSelf || !mentioned || !fresh) continue;
 
-      out(`daemon: woken by seq=${msg.seq} from ${msg.sender.name}`);
-      let reply: string;
-      try {
-        reply = await o.runner.run(msg.body, { channel: o.channel, sender: msg.sender.name, seq: msg.seq });
-      } catch (error) {
-        const em = error instanceof Error ? error.message : String(error);
-        out(`daemon: sdk session failed on seq=${msg.seq}: ${em}`);
-        // graceful：回一条简短失败提示而非崩溃；提示本身失败也吞掉（best-effort），进程续存。
-        try {
-          await post({
-            body: `⚠️ daemon SDK 会话失败（${em}）——本条 @ 未能就地处理，请重试或改走 human/serve。`,
-            mentions: [msg.sender.name],
-            replyTo: msg.seq,
-          });
-        } catch (postErr) {
-          out(`daemon: failed to post failure note for seq=${msg.seq}: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
-        }
-        continue;
-      }
-
-      const body = reply.trim() || "(daemon: SDK 返回空结果)";
-      try {
-        await post({ body, mentions: [msg.sender.name], replyTo: msg.seq });
-        out(`daemon: replied to seq=${msg.seq}`);
-      } catch (error) {
-        out(`daemon: failed to post reply for seq=${msg.seq}: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      await wake(msg);
     }
   } finally {
     if (timer) clearTimeout(timer);
@@ -257,9 +316,10 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   console.error(
-    "party daemon is EXPERIMENTAL (#672 Phase-1 spike): it embeds @anthropic-ai/claude-agent-sdk and " +
-      "runs an in-process SDK session on each @-mention. Protocol is unchanged — it advertises as a " +
-      "watch-style wake for now. Not wired into onboarding.",
+    "party daemon is EXPERIMENTAL (#672 Phase-2 spike): it embeds @anthropic-ai/claude-agent-sdk and " +
+      "runs an in-process SDK session on each @-mention, receiving durable directed deliveries " +
+      "(directedDelivery:v1). Protocol is unchanged — it still advertises as a watch-style wake. " +
+      "Subscription auth comes from CLAUDE_CODE_OAUTH_TOKEN. Not wired into onboarding.",
   );
 
   const controller = new AbortController();

@@ -1,8 +1,15 @@
-// #672 Phase-1 spike：party daemon 单测。用真 connect + WS mock server 驱动帧流，注入 SDK runner
+// #672 Phase-1/2 spike：party daemon 单测。用真 connect + WS mock server 驱动帧流，注入 SDK runner
 // 与 postReply 捕获回帖——CI 永不触碰真 @anthropic-ai/claude-agent-sdk（SDK 无法在 CI 跑）。
 import { afterEach, describe, expect, test } from "bun:test";
 import { runDaemon, type DaemonOptions, type PostReply, type SdkRunner } from "../src/commands/daemon";
-import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
+import {
+  deliveryFrame,
+  msgFrame,
+  startMockServer,
+  welcomeDirectedFrame,
+  welcomeFrame,
+  type MockServer,
+} from "./mock-server";
 
 let server: MockServer | null = null;
 
@@ -53,7 +60,7 @@ function recordingRunner(reply: string): { runner: SdkRunner; calls: Captured["r
   };
 }
 
-describe("party daemon (#672 Phase-1 spike)", () => {
+describe("party daemon (#672 Phase-1/2 spike)", () => {
   test("@-mention → SDK invoked with mention text → SDK output posted back", async () => {
     server = startMockServer((frame, sock) => {
       if (frame.type !== "hello") return;
@@ -162,6 +169,138 @@ describe("party daemon (#672 Phase-1 spike)", () => {
 
     expect(captured.reply).toHaveLength(1);
     expect(captured.reply[0]!.body.length).toBeGreaterThan(0);
+  });
+
+  // ── #688 Phase-2：持久化 directed delivery 接收路径 ──
+
+  test("hello advertises directed_delivery v1 so durable @ deliveries are received", async () => {
+    let helloDirected: unknown = "unset";
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      helloDirected = (frame as unknown as { directed_delivery?: unknown }).directed_delivery;
+      sock.send(welcomeDirectedFrame(0, "me"));
+      setTimeout(() => sock.close(), 30);
+    });
+
+    const { runner } = recordingRunner("noop");
+    const { opts } = harness({ runner, server: server.url });
+    await runDaemon(opts);
+
+    // 不声明就会在真被 @（durable 投递）时收到 upgrade_required 并崩——Phase-1 的根因。
+    expect(helloDirected).toBe("v1");
+  });
+
+  test("delivery frame for self (claimed) → SDK runs on message body → reply linked via reply_to", async () => {
+    // delivery 没有 read-cursor 去重（是独立 work cursor），真服务端了结后不再重投——mock 用 connIndex
+    // 只在首连投递一次来模拟：否则重连会把同一条 claimed delivery 反复重投、SDK 重跑。
+    server = startMockServer((frame, sock, connIndex) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeDirectedFrame(0, "me"));
+      if (connIndex !== 0) return;
+      // 真 agent @dbot：服务端投递一条持久 directed delivery（target=me, state=claimed）。
+      sock.send(deliveryFrame(7, "run the migration", { target_name: "me" }));
+      setTimeout(() => sock.close(), 80);
+    });
+
+    const { runner, calls } = recordingRunner("migration complete");
+    const { opts, captured } = harness({ runner, server: server.url });
+    await runDaemon(opts);
+
+    // SDK 拿到的是 delivery 内嵌原消息的正文。
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.prompt).toBe("run the migration");
+    expect(calls[0]!.seq).toBe(7);
+
+    // 回复带 reply_to=message_seq——这正是服务端把 delivery 标 replied 的了结机制（do.ts completeDirectedDelivery）。
+    expect(captured.reply).toHaveLength(1);
+    expect(captured.reply[0]).toEqual({
+      body: "migration complete",
+      mentions: ["bob"],
+      replyTo: 7,
+    });
+  });
+
+  test("delivery for a different target is ignored (no SDK, no reply)", async () => {
+    server = startMockServer((frame, sock, connIndex) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeDirectedFrame(0, "me"));
+      if (connIndex !== 0) return;
+      // 投给别人（target=other）——本 daemon 不认领。
+      sock.send(deliveryFrame(8, "not for me", { target_name: "other" }));
+      setTimeout(() => sock.close(), 60);
+    });
+
+    const { runner, calls } = recordingRunner("should not run");
+    const { opts, captured } = harness({ runner, server: server.url });
+    await runDaemon(opts);
+
+    expect(calls).toHaveLength(0);
+    expect(captured.reply).toHaveLength(0);
+  });
+
+  test("delivery in a non-claimed state is ignored (no SDK, no reply)", async () => {
+    server = startMockServer((frame, sock, connIndex) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeDirectedFrame(0, "me"));
+      if (connIndex !== 0) return;
+      // 已是 running（例如别处已认领）——不重复处理。
+      sock.send(deliveryFrame(9, "already claimed elsewhere", { target_name: "me", state: "running" }));
+      setTimeout(() => sock.close(), 60);
+    });
+
+    const { runner, calls } = recordingRunner("should not run");
+    const { opts, captured } = harness({ runner, server: server.url });
+    await runDaemon(opts);
+
+    expect(calls).toHaveLength(0);
+    expect(captured.reply).toHaveLength(0);
+  });
+
+  test("SDK error on a delivery → posts a failure note linked via reply_to, does not crash", async () => {
+    server = startMockServer((frame, sock, connIndex) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeDirectedFrame(0, "me"));
+      if (connIndex !== 0) return;
+      sock.send(deliveryFrame(10, "do the thing", { target_name: "me" }));
+      sock.send(deliveryFrame(11, "again", { target_name: "me" }));
+      setTimeout(() => sock.close(), 100);
+    });
+
+    let calls = 0;
+    const runner: SdkRunner = {
+      async run() {
+        calls++;
+        throw new Error("model unavailable");
+      },
+    };
+    const { opts, captured } = harness({ runner, server: server.url });
+    await runDaemon(opts);
+
+    // 两条 delivery 都被尝试（第一条报错未崩溃）。
+    expect(calls).toBe(2);
+    // 失败提示同样带 reply_to（=message_seq）——即便 SDK 失败也了结 delivery，避免租约过期后被无限重投。
+    expect(captured.reply).toHaveLength(2);
+    expect(captured.reply[0]!.body).toContain("model unavailable");
+    expect(captured.reply[0]!.replyTo).toBe(10);
+    expect(captured.reply[1]!.replyTo).toBe(11);
+  });
+
+  test("in directed-delivery mode a plain @self msg is not double-woken (delivery owns it)", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeDirectedFrame(0, "me"));
+      // 服务端也把 @ 作为普通 msg 广播进时间线；directedDeliveryMode 下它由 delivery 帧接管，
+      // plain-msg 路径绝不能据它再唤醒一次（否则同一条 @ 双跑）。
+      sock.send(msgFrame(12, "please help", { mentions: ["me"] }));
+      setTimeout(() => sock.close(), 60);
+    });
+
+    const { runner, calls } = recordingRunner("should not run twice");
+    const { opts, captured } = harness({ runner, server: server.url });
+    await runDaemon(opts);
+
+    expect(calls).toHaveLength(0);
+    expect(captured.reply).toHaveLength(0);
   });
 
   test("abortSignal (SIGTERM) closes the connection and returns cleanly", async () => {
