@@ -280,7 +280,7 @@ function presenceRank(item: Item, now: number): number {
   if (item.state === "blocked") return 1;
   if (item.state === "working") return 2;
   if (item.state !== "offline") return 3;
-  if (item.wakeKind === "serve" || item.wakeKind === "watch" || item.wakeKind === "webhook") return 4;
+  if (item.wakeKind === "serve" || item.wakeKind === "watch" || item.wakeKind === "webhook" || item.wakeKind === "daemon") return 4;
   return 5;
 }
 

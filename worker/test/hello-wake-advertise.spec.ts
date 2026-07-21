@@ -41,6 +41,45 @@ describe("hello.wake_kind 带内 watch presence 声明 (#675)", () => {
     ws.close();
   });
 
+  it("hello 带 wake_kind=daemon → presence 落 wake_kind=daemon + residency=daemon，零时间线消息 (#688)", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    const before = await messageCount(slug, agent.token);
+
+    const ws = await WsClient.open(slug, agent.token);
+    await ws.nextOfType("welcome");
+    ws.send({ type: "hello", since: 0, directed_delivery: "v1", wake_kind: "daemon" });
+    await ws.nextOfType("presence");
+
+    const me = (await fetchPresence(slug, agent.token)).find((p) => p.name === agent.name)!;
+    expect(me.wake?.kind).toBe("daemon");
+    expect(me.residency).toBe("daemon");
+    // #688/#665：daemon 与 serve/watch 同档——自报绝不算已验证，未盖 verified_at 前是 unverified。
+    expect(me.wake?.verified_at).toBeUndefined();
+    expect(wakeableState(me, Date.now())).toBe("wakeable_unverified");
+
+    // 默认静默：没有往时间线塞任何消息。
+    expect(await messageCount(slug, agent.token)).toBe(before);
+    ws.close();
+  });
+
+  it("wake_kind=daemon 的连接断开后撤销 wake 声明（活体死了不再吸收 @）(#688)", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+
+    const ws = await WsClient.open(slug, agent.token);
+    await ws.nextOfType("welcome");
+    ws.send({ type: "hello", since: 0, directed_delivery: "v1", wake_kind: "daemon" });
+    await ws.nextOfType("presence");
+    expect((await fetchPresence(slug, agent.token)).find((p) => p.name === agent.name)?.wake?.kind).toBe("daemon");
+
+    ws.close();
+    // 断连回收后 wake_kind 撤销（markOffline 对 wake_kind IN ('watch','daemon') 清零）。
+    await new Promise((r) => setTimeout(r, 50));
+    const after = (await fetchPresence(slug, agent.token)).find((p) => p.name === agent.name);
+    expect(after?.wake?.kind ?? undefined).toBeUndefined();
+  });
+
   it("不带 wake_kind 的 hello 不改 wake_kind（旧客户端保持旧行为）", async () => {
     const agent = await seedToken("agent");
     const slug = await createChannel(agent.token);

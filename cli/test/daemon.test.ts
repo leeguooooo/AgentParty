@@ -89,7 +89,7 @@ describe("party daemon (#672 Phase-1/2 spike)", () => {
     });
   });
 
-  test("hello advertises a wake kind so presence sees a live wake channel (Phase-1: watch)", async () => {
+  test("hello advertises a first-class wake_kind:daemon (#688 Phase-2.1, not the watch shortcut)", async () => {
     let helloWakeKind: unknown = "unset";
     server = startMockServer((frame, sock) => {
       if (frame.type !== "hello") return;
@@ -102,8 +102,8 @@ describe("party daemon (#672 Phase-1/2 spike)", () => {
     const { opts } = harness({ runner, server: server.url });
     await runDaemon(opts);
 
-    // Phase-1 捷径：daemon 复用 watch 唤醒声明，协议不动。
-    expect(helloWakeKind).toBe("watch");
+    // #688：一级 daemon 唤醒声明（服务端落 wake_kind='daemon'、residency='daemon'），不再是 Phase-1 的 watch 捷径。
+    expect(helloWakeKind).toBe("daemon");
   });
 
   test("SDK error → posts a short failure note, does not crash, keeps serving", async () => {
@@ -239,6 +239,67 @@ describe("party daemon (#672 Phase-1/2 spike)", () => {
       mentions: ["bob"],
       replyTo: 7,
     });
+  });
+
+  test("slow delivery turn (> renew interval) → daemon renews the lease with ≥1 delivery_update running (#688 B)", async () => {
+    // >90s SDK 会话若不续租，服务端租约到期会重派/重跑（重复模型副作用）。跑 SDK 期间 daemon 周期性发
+    // delivery_update running 顶住 lease_until。这里把续租间隔压到 20ms、runner 拖 150ms，验证真发了续租。
+    const updates: Array<{ delivery_id: string; state: string; work_id?: string; continuation_ref?: string }> = [];
+    server = startMockServer((frame, sock, connIndex) => {
+      if (frame.type === "delivery_update") {
+        updates.push(frame as unknown as (typeof updates)[number]);
+        return;
+      }
+      if (frame.type !== "hello") return;
+      sock.send(welcomeDirectedFrame(0, "me"));
+      if (connIndex !== 0) return;
+      sock.send(deliveryFrame(20, "long migration", { target_name: "me", id: "del-20", work_id: "w20", continuation_ref: "c20" }));
+      setTimeout(() => sock.close(), 300);
+    });
+
+    const runner: SdkRunner = {
+      async run() {
+        await new Promise((r) => setTimeout(r, 150));
+        return "done";
+      },
+    };
+    const { opts, captured } = harness({ runner, server: server.url });
+    opts.leaseRenewIntervalMs = 20;
+    await runDaemon(opts);
+
+    // 至少一拍续租，且都是这条 delivery 的 running、带 work_id/continuation_ref（镜像 serve 的 running 帧参数）。
+    const running = updates.filter((u) => u.state === "running" && u.delivery_id === "del-20");
+    expect(running.length).toBeGreaterThanOrEqual(1);
+    expect(running[0]!.work_id).toBe("w20");
+    expect(running[0]!.continuation_ref).toBe("c20");
+    // 续租不影响正常了结：SDK turn 结束后照常回帖（reply_to=message_seq 使服务端标 replied）。
+    expect(captured.reply).toHaveLength(1);
+    expect(captured.reply[0]!.replyTo).toBe(20);
+  });
+
+  test("fast delivery turn (< renew interval) → zero lease renewals, normal completion (#688 B)", async () => {
+    // 快 turn：定时器一拍未到就被 finally 清掉，零续租，只走终局 reply——不给频道刷多余的 running。
+    const updates: Array<{ state: string }> = [];
+    server = startMockServer((frame, sock, connIndex) => {
+      if (frame.type === "delivery_update") {
+        updates.push(frame as unknown as (typeof updates)[number]);
+        return;
+      }
+      if (frame.type !== "hello") return;
+      sock.send(welcomeDirectedFrame(0, "me"));
+      if (connIndex !== 0) return;
+      sock.send(deliveryFrame(21, "quick question", { target_name: "me", id: "del-21" }));
+      setTimeout(() => sock.close(), 120);
+    });
+
+    const { runner } = recordingRunner("instant"); // 立即返回，远快于续租间隔
+    const { opts, captured } = harness({ runner, server: server.url });
+    opts.leaseRenewIntervalMs = 500; // 远大于 turn 时长
+    await runDaemon(opts);
+
+    expect(updates.filter((u) => u.state === "running")).toHaveLength(0);
+    expect(captured.reply).toHaveLength(1);
+    expect(captured.reply[0]!.replyTo).toBe(21);
   });
 
   test("delivery for a different target is ignored (no SDK, no reply)", async () => {

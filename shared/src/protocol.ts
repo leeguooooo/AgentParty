@@ -193,8 +193,11 @@ export type StatusState = "working" | "waiting" | "blocked" | "done";
 export type PresenceState = StatusState | "offline";
 export type CollaborationRole = "host" | "worker" | "reviewer" | "observer";
 export type CollaborationRoleSource = "self" | "assigned";
-export type Residency = "supervised" | "webhook" | "bare" | "human_driven" | "unknown";
-export type WakeKind = "none" | "watch" | "serve" | "webhook";
+// daemon（#672/#688）：内嵌官方 Agent SDK 的**第一方常驻** runner——长期进程持 WS（真实心跳）、注册
+// delivery adapter，被 @ 时就地跑 SDK 并回帖，不依赖 harness turn 边界。是 supervised 的等价活体（服务端
+// 亲眼看它在线），故在 host 租约 / autoWake 处与 supervised/webhook 同列（见 evaluateHostLease / wakeReachable）。
+export type Residency = "supervised" | "webhook" | "bare" | "human_driven" | "unknown" | "daemon";
+export type WakeKind = "none" | "watch" | "serve" | "webhook" | "daemon";
 export type HostDecisionKind = "decision" | "handoff" | "takeover";
 export type WorkflowKind = "pipeline" | "parallel" | "orchestrator-workers" | "evaluator-optimizer";
 export type HostLeaseState = "active" | "stale";
@@ -662,7 +665,9 @@ export function wakeReachable(
   live = false,
 ): boolean {
   if (kind === "webhook") return true;
-  return (kind === "serve" || kind === "watch") && (live || ageMs < staleMs);
+  // daemon 与 serve/watch 同类：靠一条活着的本地常驻进程接住 @——WS 断/心跳过期（adapter 随之注销）就叫不醒，
+  // 故同样受 live/新鲜度约束。只有 webhook（服务端持端点、离线也能 POST）不受此限。
+  return (kind === "serve" || kind === "watch" || kind === "daemon") && (live || ageMs < staleMs);
 }
 
 // issue #97：presence 的新鲜度不变量没人维护。presence.updated_at 只由 status 帧和 markOffline 写，
@@ -720,7 +725,12 @@ export function wakeableState(
   if (entry.residency === "human_driven") return "offline";
   // webhook：服务端持有端点、自己 POST 投递 → 天然可服务端验证，离线也真能唤醒。
   if (kind === "webhook") return "wakeable_verified";
-  // serve/watch：只有服务端记录过「近期成功唤醒」（verified_at，由 DO 盖，非客户端自报）才算已验证。
+  // daemon（#688）：**刻意与 serve/watch 同档，而非 webhook**。虽是第一方常驻、服务端能看它在线，但它的
+  // 实时投递能力绑定在活着的 WS 上（断连即 markOffline 注销 delivery adapter），和 serve 的 supervisor 一样
+  // 会随进程死去——honesty #665：绝不因「声明了 daemon」就打包票 verified（那正是 false-online 陷阱），
+  // 只认服务端亲眼观测到「被 @ 后回帖 resume」盖下的 verified_at（DO 侧 markWakeVerified 已纳入 daemon）。
+  // 活着但尚未验证的 daemon 仍会被 autoWakeReachable(live=true) 判为可达，不会因此被误标叫不醒。
+  // serve/watch/daemon：只有服务端记录过「近期成功唤醒」（verified_at，由 DO 盖，非客户端自报）才算已验证。
   const verifiedAt = entry.wake?.verified_at;
   if (typeof verifiedAt === "number" && verifiedAt > 0 && now - verifiedAt <= verifyTtlMs) {
     return "wakeable_verified";
@@ -741,7 +751,8 @@ export function evaluateHostLease(
     return { lease: "stale", reason: `role=${entry.role ?? "missing"}`, last_seen: seen, residency, wake_kind: wakeKind };
   }
   if (entry.state === "offline") return { lease: "stale", reason: "offline", last_seen: seen, residency, wake_kind: wakeKind };
-  if (residency !== "supervised" && residency !== "webhook") {
+  // daemon（#688）是 supervised 的等价活体（第一方常驻、服务端见其在线），与 supervised/webhook 同样可持 host 租约。
+  if (residency !== "supervised" && residency !== "webhook" && residency !== "daemon") {
     return { lease: "stale", reason: `residency=${residency}`, last_seen: seen, residency, wake_kind: wakeKind };
   }
   if (wakeKind === "none" || wakeKind === "unknown") {
@@ -775,9 +786,11 @@ export interface HelloFrame {
    * #675：带内 presence 声明「本连接有 watch 唤醒层」（residency=supervised + wake.kind=watch），
    * 取代原先每次挂载往时间线发一条 waiting 状态消息（per-turn 重挂刷屏、推高 seq）。
    * 服务端在这条连接的 presence 行上落 wake_kind，最后一条连接断开时由 markOffline 撤销（#454）。
-   * 旧客户端不带 → 服务端不改 wake_kind（保持旧行为）。仅 'watch' 合法；其余值服务端忽略。
+   * 旧客户端不带 → 服务端不改 wake_kind（保持旧行为）。
+   * 'watch'（#675，residency=supervised）与 'daemon'（#688，residency=daemon，内嵌 SDK 的第一方常驻）合法；
+   * 其余值服务端忽略。两者断连都由 markOffline 撤销（活体死了就不该继续以 wakeable 身份吸收 @）。
    */
-  wake_kind?: "watch";
+  wake_kind?: "watch" | "daemon";
 }
 
 /**

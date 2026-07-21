@@ -132,6 +132,16 @@ describe("wakeabilityBadge (#191 可唤醒·待命 + 服务端校验)", () => {
     });
   });
 
+  test("daemon（#688）与 serve/watch 同档：无 verified_at → unverified，有 → verified", () => {
+    expect(wakeabilityBadge(item({ wakeKind: "daemon", wakeVerifiedAt: null, residency: "daemon" }), NOW)?.key).toBe(
+      "PresenceBar.wake.unverified",
+    );
+    expect(wakeabilityBadge(item({ wakeKind: "daemon", wakeVerifiedAt: NOW - 1000, residency: "daemon" }), NOW)).toEqual({
+      key: "PresenceBar.wake.verified",
+      tone: "on",
+    });
+  });
+
   test("wake=none / human_driven / bare → not wakeable（off）", () => {
     expect(wakeabilityBadge(item({ wakeKind: "none" }), NOW)?.key).toBe("PresenceBar.wake.off");
     expect(wakeabilityBadge(item({ wakeKind: "watch", wakeVerifiedAt: NOW, residency: "human_driven" }), NOW)?.tone).toBe("off");

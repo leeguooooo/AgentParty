@@ -282,8 +282,8 @@ export const HELLO_TIMEOUT_MS = 8_000;
 const STATUS_STATES: readonly string[] = ["working", "waiting", "blocked", "done"];
 const COLLAB_ROLES: readonly string[] = ["host", "worker", "reviewer", "observer"];
 const ROLE_SOURCES: readonly string[] = ["self", "assigned"];
-const RESIDENCIES: readonly string[] = ["supervised", "webhook", "bare", "human_driven", "unknown"];
-const WAKE_KINDS: readonly string[] = ["none", "watch", "serve", "webhook"];
+const RESIDENCIES: readonly string[] = ["supervised", "webhook", "bare", "human_driven", "unknown", "daemon"];
+const WAKE_KINDS: readonly string[] = ["none", "watch", "serve", "webhook", "daemon"];
 // agent-webhook 接到 2xx 只证明通知越过 HTTP 边界，不能冒充 replied。给外部 harness
 // 留出完成模型 turn 并回频道的时间；期间同一 principal 的 serve/watch 不得重复执行。
 const DIRECTED_WEBHOOK_LEASE_MS = 10 * 60_000;
@@ -2389,10 +2389,15 @@ export class ChannelDO extends Server<Env> {
       if (clientVersion !== null) {
         this.recordClientVersion(st.name, connection.id, clientVersion, Date.now());
       }
-      // #675：带内 watch presence 声明。取代原先挂载往时间线发 waiting 状态消息（刷屏 + 推高 seq）。
-      // 只 agent 连接可声明可唤醒；wake_kind 断连由 markOffline 撤销。仅 'watch' 合法，其余忽略。
-      if (frame.wake_kind === "watch" && st.kind === "agent") {
-        this.advertiseWatchWakePresence(st.name, connection.id, Date.now());
+      // #675/#688：带内唤醒声明。取代原先挂载往时间线发 waiting 状态消息（刷屏 + 推高 seq）。
+      // 只 agent 连接可声明可唤醒；wake_kind 断连由 markOffline 撤销。'watch'（residency=supervised）与
+      // 'daemon'（residency=daemon，内嵌 SDK 的第一方常驻）合法，其余忽略。
+      if (st.kind === "agent") {
+        if (frame.wake_kind === "watch") {
+          this.advertiseWatchWakePresence(st.name, connection.id, Date.now());
+        } else if (frame.wake_kind === "daemon") {
+          this.advertiseDaemonWakePresence(st.name, connection.id, Date.now());
+        }
       }
       // Finish capability identity before replay. Live broadcasts were withheld while helloPending;
       // DO message handling is serialized, so dispatch + backfill below form one gap-free handoff.
@@ -3443,11 +3448,11 @@ export class ChannelDO extends Server<Env> {
        ON CONFLICT(name, session_id) DO UPDATE SET state = 'offline', updated_at = excluded.updated_at,
          current_task = NULL, task_started_at = NULL, heartbeat_at = NULL, activity_json = NULL,
          runner_health_json = NULL,
-         -- #454：watch 只有活着的本地 listener 才能接住 @。最后一条连接断开后立即撤销 wake 声明，
-         -- 不让被 harness kill 的 watch --once 继续以 wakeable 身份吸收 mention。serve/webhook 有独立
-         -- supervisor/服务端投递语义，保持原样；watch 重挂后会由 advertiseWatchWake 重新声明。
-         wake_verified_at = CASE WHEN wake_kind = 'watch' THEN NULL ELSE wake_verified_at END,
-         wake_kind = CASE WHEN wake_kind = 'watch' THEN NULL ELSE wake_kind END`,
+         -- #454/#688：watch / daemon 都只有活着的本地进程才能接住 @。最后一条连接断开后立即撤销 wake 声明，
+         -- 不让被 harness kill 的 watch --once（或已死的 daemon）继续以 wakeable 身份吸收 mention。serve/webhook
+         -- 有独立 supervisor/服务端投递语义，保持原样；watch/daemon 重挂后由 advertiseWatch/DaemonWake 重新声明。
+         wake_verified_at = CASE WHEN wake_kind IN ('watch', 'daemon') THEN NULL ELSE wake_verified_at END,
+         wake_kind = CASE WHEN wake_kind IN ('watch', 'daemon') THEN NULL ELSE wake_kind END`,
       name,
       sessionId,
       ts,
@@ -3556,6 +3561,28 @@ export class ChannelDO extends Server<Env> {
          wake_verified_at = CASE WHEN presence.wake_kind IS 'watch' THEN presence.wake_verified_at ELSE NULL END,
          wake_kind = 'watch',
          residency = COALESCE(presence.residency, 'supervised')`,
+      name,
+      sessionId,
+      ts,
+    );
+    const entry = this.presenceFor(name);
+    if (entry) this.broadcastFrame({ type: "presence", ...entry });
+  }
+
+  // #688：带内声明 daemon 唤醒层——内嵌 SDK 的第一方常驻 runner（长期进程持 WS、注册 delivery adapter、
+  // 被 @ 时就地跑 SDK 回帖）。与 watch 同机制：只在这条连接的 presence 行落 wake_kind='daemon' +
+  // residency='daemon'，不落 history、不产生 seq；断开由 markOffline 撤销（活体死了就不该继续以 wakeable
+  // 身份吸收 @）。wake_verified_at 绝不吃客户端自报——kind 变了就清空，等服务端观测到「被 @ 后回帖 resume」
+  // 才由 markWakeVerified 盖（#191/#665 honesty：daemon 的 verified 也只认服务端事实，不因声明就打包票）。
+  private advertiseDaemonWakePresence(name: string, sessionId: string, ts: number) {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO presence (name, session_id, state, note, updated_at, wake_kind, residency)
+         VALUES (?, ?, 'waiting', NULL, ?, 'daemon', 'daemon')
+       ON CONFLICT(name, session_id) DO UPDATE SET
+         updated_at = excluded.updated_at,
+         wake_verified_at = CASE WHEN presence.wake_kind IS 'daemon' THEN presence.wake_verified_at ELSE NULL END,
+         wake_kind = 'daemon',
+         residency = 'daemon'`,
       name,
       sessionId,
       ts,
@@ -7437,8 +7464,10 @@ export class ChannelDO extends Server<Env> {
   // 只在观测到真实 @→resume 闭环时调用；只盖 serve/watch（webhook 本就服务端投递、恒 verified，
   // wake=none/缺失不无中生有）。这是「可唤醒·已验证」区别于「自称可唤醒·未验证」的唯一可信来源。
   private markWakeVerified(name: string, now: number) {
+    // #688：daemon 与 serve/watch 一样，只有服务端亲眼观测到「被 @ 后回帖 resume」才盖 verified_at
+    // （wakeableState 据此把 daemon 从 unverified 升级为 verified）。webhook 不进此表（天然 verified）。
     this.ctx.storage.sql.exec(
-      "UPDATE presence SET wake_verified_at = ? WHERE name = ? AND wake_kind IN ('serve', 'watch')",
+      "UPDATE presence SET wake_verified_at = ? WHERE name = ? AND wake_kind IN ('serve', 'watch', 'daemon')",
       now,
       name,
     );

@@ -14,15 +14,18 @@
 // 标 replied，无需 work_id/continuation_ref）。SDK 出错也回一条带 reply_to 的失败提示，同样了结 delivery，
 // 避免它租约过期后被无限重投。
 //
-// ⚠️ 仍是 Phase-1 捷径（协议不动）：本命令暂**不**新增 WakeKind:"daemon" / Residency:"daemon"（那是 doc 里
-// 更后的阶段）。为了让 wire 保持不变，daemon 复用现有 serve/watch 风格的唤醒声明——即随 hello 上报
-// `advertiseWakeKind: "watch"`。且**不**跑 serve 的完整 delivery 状态机（不发 delivery_update running/replied
-// 的显式回执，靠 reply_to 隐式了结）——因此长于 delivery 租约（90s，DIRECTED_DELIVERY_LEASE_MS）的 SDK 会话
-// 有被重投/重跑的窗口。取舍见报告与 #672/#688。
+// #688 Phase-2.1（本次）：daemon 升为**一级唤醒类型**——不再复用 watch 捷径。
+//   ① 随 hello 上报 `advertiseWakeKind: "daemon"`：服务端在 presence 落 wake_kind='daemon'、residency='daemon'
+//      （见 worker/src/do.ts advertiseDaemonWakePresence）。who / PresenceBar 据此把它显式标为第一方常驻的强可唤醒档。
+//   ② delivery 租约续期：跑 SDK 期间周期性发 `delivery_update running`（间隔远小于 90s 租约，默认 45s）把
+//      lease_until 顶上去；turn 一结束即停。修掉「SDK 会话长于 DIRECTED_DELIVERY_LEASE_MS(90s) → 服务端租约到期
+//      重派/重跑（重复模型副作用）」的窗口（#688 B）。快 turn（<45s）不发续租、只走终局 reply（reply_to 了结）。
 import {
+  DIRECTED_DELIVERY_LEASE_MS,
   EXIT_ARCHIVED,
   EXIT_AUTH,
   EXIT_STREAM_ENDED,
+  type DirectedDelivery,
 } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
@@ -52,7 +55,8 @@ flags:
 auth：内嵌 SDK 走**订阅**凭据，从环境变量 CLAUDE_CODE_OAUTH_TOKEN 读取（Phase-1 live 已验证，零 API key）。
   起 daemon 前请确保该变量是有效的订阅 token/session；过期时 SDK 会话会失败并回一条失败提示（不崩进程）。
 
-experimental：仅供 spike/live 验证，未接入 onboarding / join-pack；协议未改动（复用 watch 唤醒声明）。`;
+experimental：仅供 spike/live 验证，未接入 onboarding / join-pack。声明一级 wake_kind:daemon（residency=daemon），
+  处理 delivery 期间周期续租（delivery_update running），>90s 会话不再被服务端重派。`;
 
 /**
  * SDK 会话运行器抽象——daemon 与具体 SDK 之间的唯一接触面。
@@ -89,6 +93,11 @@ export interface DaemonOptions {
   backoffBaseMs?: number;
   /** 0 = 常驻（默认）；>0 跑满 N 秒后主动关闭连接退出（冒烟测试用）。 */
   timeoutSec?: number;
+  /**
+   * #688 B：处理一条 claimed delivery 期间的租约续期间隔（发 delivery_update running 的周期）。
+   * 默认 DIRECTED_DELIVERY_LEASE_MS/2(≈45s)，远小于 90s 租约。测试注入极小值以在毫秒级验证续租。
+   */
+  leaseRenewIntervalMs?: number;
   /** 干净关停信号（SIGTERM/SIGINT）；abort 时关闭连接、presence 随之清除。 */
   abortSignal?: AbortSignal;
 }
@@ -146,8 +155,9 @@ export async function runDaemon(o: DaemonOptions): Promise<number> {
     // #688：声明本连接消费持久化 directed-delivery v1 帧——不声明就会在真被 @（durable 投递）时收到
     // `upgrade_required` 报错并退出（Phase-1 的崩溃根因）。
     directedDelivery: "v1",
-    // Phase-1 捷径：复用现有 watch 唤醒声明，协议不动（见文件头注释 / #672）。
-    advertiseWakeKind: "watch",
+    // #688 Phase-2.1：一级 daemon 唤醒声明（不再是 watch 捷径）。服务端据此落 wake_kind='daemon'、
+    // residency='daemon'（第一方常驻活体），who / PresenceBar 显式标强可唤醒档。断连由 markOffline 撤销。
+    advertiseWakeKind: "daemon",
   });
 
   let self = "";
@@ -178,8 +188,32 @@ export async function runDaemon(o: DaemonOptions): Promise<number> {
   // 跑 SDK 并回帖的公共路径：delivery 与 plain-msg 两条唤醒都汇到这里。回复始终带 reply_to=msg.seq——
   // 对 delivery 而言这就是了结机制（服务端见目标身份 + reply_to==message_seq 即把 delivery 标 replied，
   // 见文件头 / worker/src/do.ts）；失败提示同样带 reply_to，一样了结 delivery，避免租约过期后被重投。
-  const wake = async (msg: { seq: number; body: string; sender: { name: string } }): Promise<void> => {
+  const wake = async (
+    msg: { seq: number; body: string; sender: { name: string } },
+    delivery: DirectedDelivery | null,
+  ): Promise<void> => {
     out(`daemon: woken by seq=${msg.seq} from ${msg.sender.name}`);
+    // #688 B：claimed delivery 的租约续期。SDK 会话可能长于 DIRECTED_DELIVERY_LEASE_MS(90s)——期间不续租，
+    // 服务端租约到期会把这条 delivery 重新派发/重跑（重复模型副作用）。跑 SDK 期间用一个 setInterval 周期性
+    // 发 delivery_update running（间隔远小于租约）把 lease_until 顶上去；SDK turn 一结束（成功/失败/早退）由
+    // 下方 finally 停表。fire-and-forget：丢一拍无妨，下一拍或终局 reply(reply_to 了结)会补。带 work_id/
+    // continuation_ref 精确锁定这条 work（镜像 serve confirmDeliveryUpdate 的 running 帧参数）。
+    // 快 turn（< 续租间隔）→ 定时器一拍未到就被 finally 清掉，零续租，只走终局 reply。
+    let renewTimer: ReturnType<typeof setInterval> | null = null;
+    if (delivery !== null) {
+      const intervalMs = o.leaseRenewIntervalMs ?? Math.floor(DIRECTED_DELIVERY_LEASE_MS / 2);
+      renewTimer = setInterval(() => {
+        conn.send({
+          type: "delivery_update",
+          delivery_id: delivery.id,
+          state: "running",
+          ...(delivery.work_id === null ? {} : { work_id: delivery.work_id }),
+          ...(delivery.continuation_ref === null ? {} : { continuation_ref: delivery.continuation_ref }),
+        });
+        out(`daemon: renewed delivery ${delivery.id} lease (delivery_update running)`);
+      }, intervalMs);
+      if (typeof renewTimer.unref === "function") renewTimer.unref();
+    }
     let reply: string;
     try {
       reply = await o.runner.run(msg.body, { channel: o.channel, sender: msg.sender.name, seq: msg.seq });
@@ -198,6 +232,10 @@ export async function runDaemon(o: DaemonOptions): Promise<number> {
         out(`daemon: failed to post failure note for seq=${msg.seq}: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
       }
       return;
+    } finally {
+      // SDK turn 结束即停续租——无论成功、失败早退还是抛穿。之后的终局 reply（带 reply_to）负责把 delivery
+      // 从 running 推到 replied，不再需要续租。
+      if (renewTimer) clearInterval(renewTimer);
     }
 
     const body = reply.trim() || "(daemon: SDK 返回空结果)";
@@ -253,7 +291,7 @@ export async function runDaemon(o: DaemonOptions): Promise<number> {
         }
         // 自己发的 @ 不唤醒自己。delivery 是独立 work cursor，不看 conn.cursor 的 fresh。
         if (msg.sender.name === self) continue;
-        await wake(msg);
+        await wake(msg, directedDelivery);
         continue;
       }
 
@@ -267,7 +305,8 @@ export async function runDaemon(o: DaemonOptions): Promise<number> {
       if (directedDeliveryMode && mentioned) continue;
       if (fromSelf || !mentioned || !fresh) continue;
 
-      await wake(msg);
+      // plain-msg 兜底路径没有 delivery 租约，无需续租。
+      await wake(msg, null);
     }
   } finally {
     if (timer) clearTimeout(timer);
@@ -322,9 +361,10 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   console.error(
-    "party daemon is EXPERIMENTAL (#672 Phase-2 spike): it embeds @anthropic-ai/claude-agent-sdk and " +
+    "party daemon is EXPERIMENTAL (#672/#688 Phase-2.1 spike): it embeds @anthropic-ai/claude-agent-sdk and " +
       "runs an in-process SDK session on each @-mention, receiving durable directed deliveries " +
-      "(directedDelivery:v1). Protocol is unchanged — it still advertises as a watch-style wake. " +
+      "(directedDelivery:v1). It advertises a first-class wake_kind:'daemon' (residency=daemon) and renews " +
+      "the delivery lease (delivery_update running) so >90s turns are not re-dispatched. " +
       "Subscription auth comes from CLAUDE_CODE_OAUTH_TOKEN. Not wired into onboarding.",
   );
 

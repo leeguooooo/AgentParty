@@ -21,6 +21,15 @@ describe("wakeableState (#191 可唤醒离线待命 + 服务端校验)", () => {
     expect(wakeableState(e({ name: "b2", wake: { kind: "serve" } }), NOW)).toBe("wakeable_unverified");
   });
 
+  test("daemon（#688）刻意与 serve/watch 同档，而非 webhook：只有服务端盖过 verified_at 才 verified", () => {
+    // 声明了 daemon 但服务端从没观测到「被 @ 后回帖 resume」→ 未验证（honesty #665：不因声明就打包票）。
+    expect(wakeableState(e({ name: "dbot", residency: "daemon", wake: { kind: "daemon" } }), NOW)).toBe("wakeable_unverified");
+    // 服务端 markWakeVerified 盖过 verified_at → 升级为 verified（DO 观测到真回帖，非客户端自报）。
+    expect(
+      wakeableState(e({ name: "dbot2", residency: "daemon", wake: { kind: "daemon", verified_at: NOW - 1000 } }), NOW),
+    ).toBe("wakeable_verified");
+  });
+
   test("没有 wake layer（none / 缺失）→ offline（进程没了，@ 它落不了地）", () => {
     expect(wakeableState(e({ name: "bot", wake: { kind: "none" } }), NOW)).toBe("offline");
     expect(wakeableState(e({ name: "b2" }), NOW)).toBe("offline");

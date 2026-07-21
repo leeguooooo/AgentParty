@@ -20,8 +20,8 @@ import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
 const STATES: StatusState[] = ["working", "waiting", "blocked", "done"];
 const COLLAB_ROLES: CollaborationRole[] = ["host", "worker", "reviewer", "observer"];
-const RESIDENCIES: Residency[] = ["supervised", "webhook", "bare", "human_driven", "unknown"];
-const WAKE_KINDS: WakeKind[] = ["none", "watch", "serve", "webhook"];
+const RESIDENCIES: Residency[] = ["supervised", "webhook", "bare", "human_driven", "unknown", "daemon"];
+const WAKE_KINDS: WakeKind[] = ["none", "watch", "serve", "webhook", "daemon"];
 const SESSION_HARNESSES: AgentSessionInfo["harness"][] = ["codex", "claude", "codex-sdk"];
 const DECISION_KINDS: HostDecisionKind[] = ["decision", "handoff", "takeover"];
 const WORKFLOW_KINDS: WorkflowKind[] = ["pipeline", "parallel", "orchestrator-workers", "evaluator-optimizer"];
