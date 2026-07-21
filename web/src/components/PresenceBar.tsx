@@ -1,6 +1,6 @@
 // 顶部 presence 条：每参与者一个手绘胶囊（名字 + 蜡笔状态点 + note + 相对时间），
 // 右端挂连接状态。"对方卡在哪"一眼可见（spec §9 第 3 块）。
-import { autoWakeReachable, evaluateHostLease, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
+import { autoWakeReachable, evaluateHostLease, PRESENCE_TIMEOUT_MS, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import { agentHue } from "../lib/agentColor";
 import { fmtRel } from "../lib/time";
@@ -232,7 +232,8 @@ export function wakeabilityBadge(item: Item, now: number): { key: string; tone: 
   return { key: "PresenceBar.wake.off", tone: "off" };}
 
 // 与 CLI who.ts 的 STALE_MS / DO presence 扫描一致：last_seen 超过它且无活连接即视为不新鲜、不可达。
-export const PRESENCE_STALE_MS = 60_000;
+// 复用协议侧 freshness 常量，避免前端与 shared 的陈旧判定分叉（#671 评审）。
+export const PRESENCE_STALE_MS = PRESENCE_TIMEOUT_MS;
 
 export type PresenceTier = "online" | "wakeable" | "recent";
 
