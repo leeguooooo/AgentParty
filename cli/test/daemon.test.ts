@@ -1,7 +1,7 @@
 // #672 Phase-1/2 spike：party daemon 单测。用真 connect + WS mock server 驱动帧流，注入 SDK runner
 // 与 postReply 捕获回帖——CI 永不触碰真 @anthropic-ai/claude-agent-sdk（SDK 无法在 CI 跑）。
 import { afterEach, describe, expect, test } from "bun:test";
-import { buildSdkOptions, runDaemon, type DaemonOptions, type PostReply, type SdkRunner } from "../src/commands/daemon";
+import { buildSdkOptions, daemonWorkdir, runDaemon, type DaemonOptions, type PostReply, type SdkRunner } from "../src/commands/daemon";
 import {
   deliveryFrame,
   msgFrame,
@@ -85,6 +85,25 @@ describe("party daemon buildSdkOptions scoping (#692)", () => {
     expect(opts.allowedTools).toEqual(["Read"]);
     // 未被覆盖的默认仍在。
     expect(opts.settingSources).toEqual([]);
+  });
+
+  test("controlled cwd flows through as an override alongside the scoped defaults", () => {
+    const opts = buildSdkOptions({ cwd: "/home/u/.agentparty/daemon/dev" }, {});
+    expect(opts.cwd).toBe("/home/u/.agentparty/daemon/dev");
+    expect(opts.settingSources).toEqual([]);
+    expect(opts.allowedTools).toEqual([]);
+  });
+
+  test("daemonWorkdir isolates per-channel under the agentparty home (#692)", () => {
+    const home = process.env.AGENTPARTY_HOME;
+    try {
+      process.env.AGENTPARTY_HOME = "/tmp/ap-home";
+      expect(daemonWorkdir("dev")).toBe("/tmp/ap-home/daemon/dev");
+      expect(daemonWorkdir("guessadmin")).toBe("/tmp/ap-home/daemon/guessadmin");
+    } finally {
+      if (home === undefined) delete process.env.AGENTPARTY_HOME;
+      else process.env.AGENTPARTY_HOME = home;
+    }
   });
 });
 
