@@ -411,16 +411,23 @@ describe("AgentTokens 转为常驻", () => {
     agentsFixture = [{ name: "planner", owner: "acct-1", channel_scope: "demo", created_at: 0 }];
     saveAgentToken({ account: "acct-1", slug: "demo", name: "planner", token: "ap_saved", command: "x", savedAt: 1 });
     const adopted: unknown[] = [];
+    // 可控目录选择 Promise：双击发生在它 pending 期间，释放后再确定性 flush 后续链路（不靠固定计时）。
+    let resolveDir!: (value: string) => void;
+    const dirPromise = new Promise<string>((resolve) => { resolveDir = resolve; });
     const r = await renderResident({
       canMakeResident: true,
-      pickDirectory: async () => { await new Promise((res) => setTimeout(res, 5)); return "/picked/dir"; },
+      pickDirectory: () => dirPromise,
       dutyAdapter: { dutyAdopt: async () => { adopted.push(1); return {}; } },
     });
     await act(async () => {
       const btn = findClass(r, "d-btn agenttokens-resident");
-      btn.props.onClick(); // 第一次：同步上锁 ref，随后 await pickDirectory
+      btn.props.onClick(); // 第一次：同步上锁 ref，随后 await pickDirectory（pending）
       btn.props.onClick(); // 第二次：ref 非空 → 立即返回，不并发
-      await new Promise((res) => setTimeout(res, 40));
+    });
+    await act(async () => {
+      resolveDir("/picked/dir");
+      await dirPromise;
+      for (let i = 0; i < 4; i++) await Promise.resolve();
     });
     expect(adopted).toHaveLength(1);
   });
