@@ -1186,15 +1186,19 @@ describe("builtin runner", () => {
     // 答案照常投递到频道
     const finalPost = posts.at(-1)!;
     expect(finalPost.body).toMatchObject({ kind: "message", reply_to: 659 });
-    expect((finalPost.body as { body: string }).body).toContain("answer without a parsable session id");
+    const deliveredBody = (finalPost.body as { body: string }).body;
+    expect(deliveredBody).toContain("answer without a parsable session id");
+    // 无 sid 不打 "[session start: unknown]" marker 噪声
+    expect(deliveredBody).not.toContain("[session start");
     // 没 sid → 不持久化会话、不上报 onSession（下次冷启动）
     expect(reported).toEqual([]);
     expect(existsSync(join(workdir, "wake-session.json"))).toBe(false);
-    // 运维告警落日志:交付了但续跑不可用
+    // 运维告警落日志:sid 未知、续跑不可用（但不抢先写 delivered=true，交付结果由后续日志行落账）
     const log = readFileSync(join(workdir, "serve-runner.log"), "utf8");
     expect(log).toContain("seq=659 sid=unknown");
     expect(log).toContain("missing_session_id=true");
-    expect(log).toContain("delivered=true");
+    expect(log).toContain("note=session_continuity_unavailable");
+    expect(log).not.toContain("delivered=true");
   });
 
   test("codex session id 落 stderr 或写作 session_id 仍能解析（#726 宽松匹配）", async () => {
@@ -1204,8 +1208,8 @@ describe("builtin runner", () => {
     const runProcess: RunnerProcess = async (args) => {
       const out = args[args.indexOf("-o") + 1]!;
       writeFileSync(out, "answer\n");
-      // 下划线写法 + 落 stderr，两处都得能捞到
-      return { code: 0, stdout: "no id here\n", stderr: `session_id: ${uuid(1)}\n` };
+      // 下划线写法 + 大小写变体 + 落 stderr，都得能捞到（宽松匹配）
+      return { code: 0, stdout: "no id here\n", stderr: `Session_ID: ${uuid(1)}\n` };
     };
 
     await createBuiltinRunner({

@@ -2498,9 +2498,11 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         // 落一条运维告警到 serve-runner.log，正常走投递；只跳过 writeSession/onSession。
         let committed: WakeSessionState | null = null;
         if (!finalSid) {
+          // 只记录「解析不到 sid、将走无续跑投递」——真正的送达结果由下面投递/验收后的日志行落账,
+          // 这里别抢先写 delivered=true(附件/发送失败或 managed 零动作时会留下假的已交付审计,#728 CodeRabbit)。
           appendRunnerLog(
             opts.workdir,
-            `${new Date(now).toISOString()} seq=${frame.seq} sid=unknown duration_ms=${now - started} exit=${exitCode ?? 0} missing_session_id=true delivered=true text_bytes=${Buffer.byteLength(run.text, "utf8")} note=session_continuity_unavailable`,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=unknown duration_ms=${now - started} exit=${exitCode ?? 0} missing_session_id=true text_bytes=${Buffer.byteLength(run.text, "utf8")} note=session_continuity_unavailable`,
           );
         } else {
           committed = writeSession(sessionPath, {
