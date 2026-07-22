@@ -68,7 +68,25 @@ describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
     expect(yml).toContain("required check job did not pass");
   });
 
-  test("build/desktop 仍 needs: check（聚合门禁是发布前置）", () => {
-    expect(yml).toMatch(/needs: check\b/);
+  test("build/desktop 解耦门禁：各只等相关 check，publish 经 build+desktop 传递闭包仍覆盖全部 check（全绿才发布）", () => {
+    const buildJob = yml.slice(yml.indexOf("  build:\n"), yml.indexOf("  desktop:\n"));
+    const desktopJob = yml.slice(yml.indexOf("  desktop:\n"), yml.indexOf("  release:\n"));
+    const releaseJob = yml.slice(yml.indexOf("  release:\n"));
+    // build（CLI 交叉编译）等非 desktop 的 check + 版本契约，不被最慢的 macOS check-desktop 拖住。
+    for (const dep of ["check-cli", "check-rest", "check-worker", "check-worker-types", "version-contract"]) {
+      expect(buildJob).toContain(`- ${dep}`);
+    }
+    expect(buildJob).not.toContain("- check-desktop");
+    // 整行负向断言：build 不得回归依赖聚合 check（否则解耦悄悄失效，又被最慢那个拖住）。
+    expect(buildJob).not.toMatch(/^\s+- check\s*$/m);
+    // desktop 只等 macOS check-desktop + 版本契约。
+    expect(desktopJob).toContain("- check-desktop");
+    expect(desktopJob).toContain("- version-contract");
+    // 同样禁 desktop 回归依赖聚合 check 或 build（否则又被非桌面检查拖慢）。
+    expect(desktopJob).not.toMatch(/^\s+- check\s*$/m);
+    expect(desktopJob).not.toMatch(/^\s+- build\s*$/m);
+    // publish（release）仍 needs build + desktop —— 传递闭包 = 全部 check，"全绿才发布"不变。
+    expect(releaseJob).toContain("- build");
+    expect(releaseJob).toContain("- desktop");
   });
 });
