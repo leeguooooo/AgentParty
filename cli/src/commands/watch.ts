@@ -26,7 +26,7 @@ import {
 import { resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import { formatMsg, stripTerminalControls } from "../format";
 import { fetchMe, fetchMessages, fetchRecentMessages, fetchServerVersion, handleRestError, postMessage } from "../rest";
-import { upgradeHintForServer } from "../upgrade";
+import { INSTALL_LINE, upgradeHintForServer } from "../upgrade";
 import { shouldProbeUpgrade } from "../upgrade-hint-cache";
 import { buildContext } from "./status";
 import { MAX_TIMEOUT_SEC, isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
@@ -90,7 +90,9 @@ Options:
   --exclude-self    explicitly skip this agent's own messages (default)
   --follow          keep watching after the first matching message
   --once            exit 0 right after the first matching message
-  --latest          skip backlog: drain pending wake debt, then attach at head
+  --latest          skip backlog: drain pending wake debt, then attach at head.
+                    ⚠️  almost always MISSES messages on 0.2.114+ (it discards unacked pending
+                    backlog). Only old CLIs (<0.2.91) needed it. Normally omit --latest.
   --since seq       explicitly start after seq (mutually exclusive with --latest)
   --drain           one-shot: advance cursor to head + clear all pending debt, exit 0
   --ensure          idempotent re-mount: if a same-identity watcher is already
@@ -123,10 +125,14 @@ export const ONCE_REARM_ADVISORY =
   "note: --once is single-shot and harness-scoped. Re-arm it every turn without --latest; pending wakes are replayed until this identity sends a message/status. " +
   "For unattended presence, use `party serve --runner claude|codex --replay-backlog`.";
 
+// #711：--latest 语义跨版本反转过——旧版（<0.2.91）不带会空转所以「必须带」，0.2.114+ 带了反而
+// 跳过未 ack 的 pending backlog、漏消息所以「必须不带」。带着旧认知的人极易踩坑，且此前只是一条混在
+// 多行里的 warning。加醒目前缀顶格喊，把「几乎总是别带 --latest」说死。
 export const ONCE_LATEST_ADVISORY =
-  "warning: re-arming `party watch --once` with --latest explicitly discards backlog: it drains any " +
-  "pending unacknowledged wake (no replay) and attaches at the current channel head. " +
-  "To keep the backlog and replay pending wakes one at a time, omit --latest.";
+  "⚠️  WARNING: `party watch --once --latest` almost always MISSES messages on this CLI. " +
+  "--latest here DISCARDS the backlog: it drains any pending unacknowledged wake (no replay) and attaches at head — " +
+  "the opposite of old CLIs (<0.2.91) where --latest was required to avoid replaying all history. " +
+  "Re-arm WITHOUT --latest to keep the backlog and replay pending wakes one at a time.";
 
 /** Claude Code 环境：可做回合内 --once，但 run_in_background 可能在回合边界被回收（#454）。 */
 export function isClaudeCodeEnv(env: Record<string, string | undefined> = process.env): boolean {
@@ -601,6 +607,8 @@ export async function runWatch(o: WatchOptions): Promise<number> {
               " (CLI >= 0.2.127), or `party serve`; --follow observers cannot attach while a directed delivery" +
               " is pending for this identity.",
           ));
+          // #712：upgrade_required 本质是 CLI 太旧，错误里必须给出升级命令，别让人 strings 扒二进制才找到。
+          console.error(terminalOutput(`      升级：party upgrade（原地换二进制、免重绑；回退：${INSTALL_LINE}）`));
         }
         if (frame.code === "unauthorized") code = EXIT_AUTH;
         else if (frame.code === "loop_guard") code = EXIT_LOOP_GUARD;

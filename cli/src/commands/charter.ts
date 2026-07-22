@@ -117,7 +117,10 @@ export async function run(argv: string[]): Promise<number> {
       }
       return 0;
     }
-    const slug = resolveChannel(positionals[0]);
+    // #713：兼容 `party charter get <slug>`——与 `set` 对称、符合直觉。把 get 当读取子命令，
+    // slug 取下一个位置参数（缺省则回退到绑定频道），别把 "get" 当频道名去查、报误导性的「频道不存在」。
+    const readSlugArg = positionals[0] === "get" ? positionals[1] : positionals[0];
+    const slug = resolveChannel(readSlugArg);
     if (!slug) {
       console.error("no channel, pass one or bind with: party init --channel C");
       return 1;

@@ -116,6 +116,13 @@ describe("party history 参数解析（#151）", () => {
     expect(stderr.join("\n")).toContain("no config");
   });
 
+  test("#714：--since 传时间戳给出点破语义的报错（需要 seq，不是时间戳）", async () => {
+    expect(await run(["dev", "--since", "2026-07-15T12:00:00Z"])).toBe(1);
+    const err = stderr.join("\n");
+    expect(err).toContain("seq");
+    expect(err).toContain("时间戳");
+  });
+
   test("attachment-only history output contains actionable metadata (#362)", async () => {
     globalThis.fetch = (async () => Response.json({
       messages: [{
