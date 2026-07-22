@@ -306,6 +306,16 @@
   flex-wrap: wrap;
   margin: 0 0 10px;
 }
+/* 已选工作目录（转常驻直接运行）：单独一行等宽显示完整路径 */
+.agent-join-adopt-dir { flex-basis: 100%; word-break: break-all; }
+/* 手动命令折叠（桌面首选一键运行，命令收进 details 作后备） */
+.agent-join-manual { flex-basis: 100%; margin-top: 4px; }
+.agent-join-manual > summary { cursor: pointer; font-size: 12px; color: var(--t-dim); }
+.agent-join-manual > summary:hover { color: var(--t-text); }
+/* web 无人值守：引导装桌面版 */
+.agent-join-install-desktop { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--t-faint); border-radius: 4px; }
+.agent-join-install-desktop > .agent-join-lead { margin: 0 0 8px; }
+.agent-join-install-btn { text-decoration: none; }
 
 /* #616 phase 3：常驻值守 */
 .desktop-agent-persist {

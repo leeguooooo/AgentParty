@@ -13,7 +13,10 @@ import {
 import { copyText, saveAgentToken } from "../lib/agentTokenVault";
 import { buildJoinPack, type JoinPackMode } from "../lib/joinPack";
 import { desktopAgentAdapter, type DesktopAgentAdapter } from "../lib/desktopAgent";
-import { isDesktopRuntime } from "../lib/desktopRuntime";
+import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
+
+// 桌面版下载/说明页——web 上无人值守引导装桌面版时指过去。
+const DESKTOP_DOWNLOAD_HREF = "/docs/desktop";
 
 // #616 phase 4 的常驻是 launchd（macOS-only）：非 mac 桌面端不渲染接管按钮，
 // 免得点了必然吃后端 unsupported 错误。
@@ -30,6 +33,7 @@ interface Props {
   /** 测试注入；生产恒为默认值。 */
   dutyAdapter?: Pick<DesktopAgentAdapter, "dutyAdopt">;
   desktopDetect?: () => boolean;
+  pickDirectory?: (title?: string) => Promise<string | null>;
   token: string; // 当前登录人类会话 token（铸造凭据）
   namePrefix: string; // 生成 agent 名的前缀来源（email/name 前缀，退回 slug）
   inviterName: string; // 邀请人在频道里的身份名，报到时 @ 他让他知道你来了
@@ -67,7 +71,30 @@ type Phase =
   | { kind: "done"; name: string; token: string; command: string; mode: JoinPackMode }
   | { kind: "error"; message: string };
 
-export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accountKey, active, onActiveChange, dutyAdapter = desktopAgentAdapter, desktopDetect = isMacDesktop }: Props) {
+// 「命令 + 复制按钮」块——桌面折叠内、web 教程、interactive 三处复用同一份，
+// 免得文案/样式/按钮行为漂移（#724 CodeRabbit）。
+function CommandBlock({
+  command,
+  copied,
+  onCopy,
+  t,
+}: {
+  command: string;
+  copied: boolean;
+  onCopy: () => void;
+  t: ReturnType<typeof useT>;
+}) {
+  return (
+    <div className="agent-join-cmd">
+      <pre className="t-mono agent-join-cmd-text">{command}</pre>
+      <button type="button" className="d-btn agent-join-copy" onClick={onCopy}>
+        {copied ? t("AgentJoin.copied") : t("AgentJoin.copy")}
+      </button>
+    </div>
+  );
+}
+
+export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accountKey, active, onActiveChange, dutyAdapter = desktopAgentAdapter, desktopDetect = isMacDesktop, pickDirectory = pickDirectoryDefault }: Props) {
   const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [name, setName] = useState("");
@@ -77,6 +104,8 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
   // #616 phase 4：桌面 webview 内的无人值守一键接管状态
   const [adoptState, setAdoptState] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [adoptError, setAdoptError] = useState<string | null>(null);
+  // 已选的工作目录（转常驻直接运行——不复制接入包，而是选目录就地跑）。
+  const [adoptDir, setAdoptDir] = useState<string | null>(null);
   const [nameErr, setNameErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // #642：复制失败要给用户明确反馈，别静默——join 命令带着只展示一次的 channel-scoped token。
@@ -146,6 +175,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
       setCopyErr(false);
       setAdoptState("idle");
       setAdoptError(null);
+      setAdoptDir(null); // 新 agent 的 done 态必须清掉上一次选的目录，否则 UI 误显残留路径
       setPhase({ kind: "done", name: agent.name, token: agent.token, command, mode });
     } catch (err) {
       // 同名占用 → 停在起名步，让用户换个有意义的名字（不静默塞随机后缀）
@@ -166,8 +196,12 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
     }
   }, [accountKey, charter, inviterName, mode, name, slug, token, t]);
 
+  // 无人值守直接运行：选工作目录（不手填、不复制接入包）→ dutyAdopt 就地落成 launchd 常驻。
   const adopt = useCallback(async () => {
     if (phase.kind !== "done" || adoptState === "busy" || adoptState === "done") return;
+    const dir = await pickDirectory(phase.name);
+    if (dir === null) return; // 取消选目录 = 放弃
+    setAdoptDir(dir);
     setAdoptState("busy");
     setAdoptError(null);
     try {
@@ -177,13 +211,14 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         name: phase.name,
         channel: slug,
         runner: "claude",
+        workdir: dir,
       });
       setAdoptState("done");
     } catch (err) {
       setAdoptState("error");
       setAdoptError(err instanceof Error ? err.message : String(err));
     }
-  }, [adoptState, dutyAdapter, phase, slug]);
+  }, [adoptState, dutyAdapter, phase, slug, pickDirectory]);
 
   const onCopy = useCallback(async () => {
     if (phase.kind !== "done") return;
@@ -299,37 +334,53 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
               {t(phase.mode === "unattended" ? "AgentJoin.doneLeadUnattended" : "AgentJoin.doneLead")}
             </p>
 
-            {phase.mode === "unattended" && desktopDetect() && (
-              <div className="agent-join-adopt">
-                <button
-                  type="button"
-                  className="d-btn d-btn--primary"
-                  disabled={adoptState === "busy" || adoptState === "done"}
-                  onClick={() => void adopt()}
-                >
-                  {t(
-                    adoptState === "busy"
-                      ? "AgentJoin.adoptBusy"
-                      : adoptState === "done"
-                        ? "AgentJoin.adoptDone"
-                        : "AgentJoin.adoptButton",
+            {phase.mode === "unattended" ? (
+              desktopDetect() ? (
+                // 桌面：选工作目录 + 直接就地运行（不复制接入包）。手动命令收进折叠作后备。
+                <div className="agent-join-adopt">
+                  <button
+                    type="button"
+                    className="d-btn d-btn--primary"
+                    disabled={adoptState === "busy" || adoptState === "done"}
+                    onClick={() => void adopt()}
+                  >
+                    {t(
+                      adoptState === "busy"
+                        ? "AgentJoin.adoptBusy"
+                        : adoptState === "done"
+                          ? "AgentJoin.adoptDone"
+                          : "AgentJoin.adoptButton",
+                    )}
+                  </button>
+                  {adoptDir !== null && <span className="agent-join-hint t-mono agent-join-adopt-dir">{adoptDir}</span>}
+                  <span className="agent-join-hint t-mono">
+                    {adoptState === "done" ? t("AgentJoin.adoptDoneHint") : t("AgentJoin.adoptHint")}
+                  </span>
+                  {adoptState === "error" && adoptError !== null && (
+                    <p className="banner banner--red" role="alert">{adoptError}</p>
                   )}
-                </button>
-                <span className="agent-join-hint t-mono">
-                  {adoptState === "done" ? t("AgentJoin.adoptDoneHint") : t("AgentJoin.adoptHint")}
-                </span>
-                {adoptState === "error" && adoptError !== null && (
-                  <p className="banner banner--red" role="alert">{adoptError}</p>
-                )}
-              </div>
+                  <details className="agent-join-manual">
+                    <summary>{t("AgentJoin.manualSummary")}</summary>
+                    <CommandBlock command={phase.command} copied={copied} onCopy={onCopy} t={t} />
+                  </details>
+                </div>
+              ) : (
+                // web：无人值守首选桌面版（选目录一键常驻）；没装则给手动贴命令的教程。
+                <>
+                  <div className="agent-join-install-desktop">
+                    <p className="agent-join-lead">{t("AgentJoin.installDesktopLead")}</p>
+                    <a href={DESKTOP_DOWNLOAD_HREF} className="d-btn d-btn--primary agent-join-install-btn">
+                      {t("AgentJoin.installDesktopBtn")}
+                    </a>
+                  </div>
+                  <p className="agent-join-hint">{t("AgentJoin.manualWebLead")}</p>
+                  <CommandBlock command={phase.command} copied={copied} onCopy={onCopy} t={t} />
+                </>
+              )
+            ) : (
+              // interactive：复制接入命令，贴进 agent 自己的 harness。
+              <CommandBlock command={phase.command} copied={copied} onCopy={onCopy} t={t} />
             )}
-
-            <div className="agent-join-cmd">
-              <pre className="t-mono agent-join-cmd-text">{phase.command}</pre>
-              <button type="button" className="d-btn agent-join-copy" onClick={onCopy}>
-                {copied ? t("AgentJoin.copied") : t("AgentJoin.copy")}
-              </button>
-            </div>
             {copyErr && (
               <p className="banner banner--red agent-join-copyerr" role="alert">
                 {t("AgentJoin.errCopy")}
