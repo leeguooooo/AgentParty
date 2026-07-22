@@ -31,7 +31,9 @@ describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
   });
 
   test("cli + web/shared/scripts 各自 check:* 都在 workflow 里（漏配某个 = 漏测该 workspace）", () => {
-    expect(yml).toContain("bun run check:cli");
+    // cli 分片：bun test --shard + 独立 tsc（替代原 `bun run check:cli` 串行）。
+    expect(yml).toContain("bun test --shard=${{ matrix.shard }}/6");
+    expect(yml).toContain("bunx tsc --noEmit");
     // web/shared/scripts 走 matrix：bun run check:${{ matrix.ws }}
     expect(yml).toContain("bun run check:${{ matrix.ws }}");
     expect(yml).toContain("ws: [web, shared, scripts]");
@@ -51,13 +53,17 @@ describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
     expect(yml).toContain("if: needs.changes.outputs.cli_only != 'true'");
   });
 
-  test("check-cli 无条件跑（cli 在快路径与全量下都要测）", () => {
-    expect(yml).toMatch(/check-cli:\s*\n\s*needs: changes\s*\n\s*runs-on:/);
+  test("check-cli 分片无条件跑 + tsc 单列（cli 在快路径与全量下都要测）", () => {
+    expect(yml).toMatch(/check-cli:\s*\n\s*name: check cli \(shard/);
+    expect(yml).toContain("bun test --shard=${{ matrix.shard }}/6");
+    expect(yml).toContain("shard: [1, 2, 3, 4, 5, 6]");
+    expect(yml).toMatch(/check-cli-types:\s*\n\s*name: check cli \(types\)/);
+    expect(yml).toContain("bunx tsc --noEmit");
   });
 
   test('聚合 "full check" needs 全部 workspace job（含 worker 分片与 types），且 if: always()', () => {
     expect(yml).toMatch(/check:\s*\n\s*name: full check/);
-    for (const dep of ["check-cli", "check-rest", "check-worker", "check-worker-types", "version-contract"]) {
+    for (const dep of ["check-cli", "check-cli-types", "check-rest", "check-worker", "check-worker-types", "version-contract"]) {
       expect(yml).toContain(`- ${dep}`);
     }
     expect(yml).toContain("if: always()");
@@ -73,7 +79,7 @@ describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
     const desktopJob = yml.slice(yml.indexOf("  desktop:\n"), yml.indexOf("  release:\n"));
     const releaseJob = yml.slice(yml.indexOf("  release:\n"));
     // build（CLI 交叉编译）等非 desktop 的 check + 版本契约，不被最慢的 macOS check-desktop 拖住。
-    for (const dep of ["check-cli", "check-rest", "check-worker", "check-worker-types", "version-contract"]) {
+    for (const dep of ["check-cli", "check-cli-types", "check-rest", "check-worker", "check-worker-types", "version-contract"]) {
       expect(buildJob).toContain(`- ${dep}`);
     }
     expect(buildJob).not.toContain("- check-desktop");

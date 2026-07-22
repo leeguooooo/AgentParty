@@ -49,8 +49,27 @@ jobs:
   # 按「PR + cli 变更 + 无任何非 cli 变更」判定，配错只多跑绝不漏测；tag/main push
   # 非 PR，cli_only 恒 false，5 个 workspace 全跑。
 
-  # cli 在两条路径下都要跑，所以无条件执行。
+  # cli 在两条路径下都要跑，所以无条件执行。bun test 原生支持 --shard：按文件切 6 片并行，
+  # 墙上时间 ≈ 最重那一片而非全部串行（原 ~2m36s → ~1min）。tsc 单独一次跑，见 check-cli-types。
   check-cli:
+    name: check cli (shard ${{ matrix.shard }}/6)
+    needs: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/bun-install
+      - working-directory: cli
+        run: bun test --shard=${{ matrix.shard }}/6
+
+  # cli tsc 只跑一次（不放进分片，避免每片重复 typecheck）。
+  check-cli-types:
+    name: check cli (types)
     needs: changes
     runs-on: ubuntu-latest
     permissions:
@@ -58,7 +77,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/bun-install
-      - run: bun run check:cli
+      - working-directory: cli
+        run: bunx tsc --noEmit
 
   # web/shared/scripts：非纯 CLI（或非 PR）才跑，纯 CLI 快路径下 skip。
   # worker 因为一个 workerd 串行跑 43 个 spec 太慢（~6min），单独拆分片 job，见下。
@@ -212,6 +232,7 @@ jobs:
     name: full check
     needs:
       - check-cli
+      - check-cli-types
       - check-rest
       - check-worker
       - check-worker-types
@@ -225,6 +246,7 @@ jobs:
       - name: aggregate workspace check results
         env:
           R_CLI: ${{ needs.check-cli.result }}
+          R_CLI_TYPES: ${{ needs.check-cli-types.result }}
           R_REST: ${{ needs.check-rest.result }}
           R_WORKER: ${{ needs.check-worker.result }}
           R_WORKER_TYPES: ${{ needs.check-worker-types.result }}
@@ -232,9 +254,9 @@ jobs:
           R_VERSION: ${{ needs.version-contract.result }}
         run: |
           set -euo pipefail
-          echo "cli=$R_CLI rest=$R_REST worker=$R_WORKER worker-types=$R_WORKER_TYPES desktop=$R_DESKTOP version=$R_VERSION"
+          echo "cli=$R_CLI cli-types=$R_CLI_TYPES rest=$R_REST worker=$R_WORKER worker-types=$R_WORKER_TYPES desktop=$R_DESKTOP version=$R_VERSION"
           fail=0
-          for r in "$R_CLI" "$R_REST" "$R_WORKER" "$R_WORKER_TYPES" "$R_DESKTOP" "$R_VERSION"; do
+          for r in "$R_CLI" "$R_CLI_TYPES" "$R_REST" "$R_WORKER" "$R_WORKER_TYPES" "$R_DESKTOP" "$R_VERSION"; do
             case "$r" in
               success|skipped) ;;
               *) echo "::error::required check job did not pass: result=$r"; fail=1 ;;
@@ -252,6 +274,7 @@ jobs:
     # 故 union 仍覆盖全部 check——"全绿才发布"的保证不变，只是各 build 一拿到自己那份绿就开跑。
     needs:
       - check-cli
+      - check-cli-types
       - check-rest
       - check-worker
       - check-worker-types
