@@ -121,9 +121,13 @@ export const ONCE_CLAUDE_ADVISORY =
   "This --once listener is only a turn-scoped wait; re-arm it every turn and do not claim durable presence. " +
   "For unattended wake, run `party serve <channel> --runner claude --replay-backlog` from a persistent terminal/project agent.";
 
+// #710：pending wake 是逐投递（per-delivery）追踪的——`--reply-to A` 只清 A，不连带清掉 B；未清的会
+// 每次重挂重放（易被误以为 bug）。纯客套的 @（「收工」「辛苦」）不必再回一条刷屏，用 `party ack` 显式清账。
 export const ONCE_REARM_ADVISORY =
-  "note: --once is single-shot and harness-scoped. Re-arm it every turn without --latest; pending wakes are replayed until this identity sends a message/status. " +
-  "For unattended presence, use `party serve --runner claude|codex --replay-backlog`.";
+  "note: --once is single-shot and harness-scoped. Re-arm it every turn without --latest. " +
+  "Pending wakes are tracked PER DELIVERY and each replays until cleared: `party send --reply-to A` clears only A, " +
+  "not other pending @s. For an @ you won't reply to, clear it with `party ack` (or `party ack --all`/`--through N`) " +
+  "instead of posting filler. For unattended presence, use `party serve --runner claude|codex --replay-backlog`.";
 
 // #711：--latest 语义跨版本反转过——旧版（<0.2.91）不带会空转所以「必须带」，0.2.114+ 带了反而
 // 跳过未 ack 的 pending backlog、漏消息所以「必须不带」。带着旧认知的人极易踩坑，且此前只是一条混在
