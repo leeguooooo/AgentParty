@@ -316,6 +316,51 @@
 .desktop-agent-duties { margin-top: 12px; }
 .desktop-agent-duties-title { font-size: 12px; color: var(--t-dim); }
 
+/* #700 本机 agent 概览：按频道分组 + 可检索 */
+.local-agents { margin-top: 10px; }
+.local-agents-head { margin-bottom: 8px; }
+.local-agents-subtitle { margin: 2px 0 0; font-size: 11px; color: var(--t-dim); }
+.local-agents-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 8px 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid var(--t-faint);
+  background: var(--d-bg, transparent);
+  color: inherit;
+}
+.local-agents-empty { font-size: 12px; color: var(--t-dim); margin: 10px 0; }
+.local-agents-groups { display: flex; flex-direction: column; gap: 12px; }
+.local-agents-group-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--t-faint);
+  padding-bottom: 2px;
+}
+.local-agents-group-count { font-size: 10px; font-weight: 400; color: var(--t-dim); }
+.local-agents-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.local-agents-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.local-agents-badge {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--t-dim);
+  border: 1px solid var(--t-faint);
+  border-radius: 3px;
+  padding: 0 4px;
+  flex: 0 0 auto;
+}
+.local-agents-badge--duty { color: var(--d-green-dark, var(--d-green)); }
+.local-agents-name { font-size: 12px; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-agents-runner { font-size: 11px; color: var(--t-dim); flex: 0 0 auto; }
+.local-agents-stop, .local-agents-unload { margin-left: auto; flex: 0 0 auto; }
+
 /* #616 多实例值守列表 */
 .desktop-agent-instances {
   list-style: none;
