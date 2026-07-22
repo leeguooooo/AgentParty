@@ -96,7 +96,10 @@ export function instanceLockHolderPid(kind: InstanceKind, target: string, dir: s
   // 比 holderAlive 更保守:--stop 会真的 SIGTERM,必须**正向确认**这就是原持有者,否则宁可当作
   // 「没在跑」而不停(#742 CodeRabbit)。holderAlive 在缺出生时间(legacy 锁 / Windows / ps 读不到)时
   // 会退回「PID 还活着就算同一个」——那正好会把已被系统复用的 PID 误当持有者、误杀无辜进程。
-  if (typeof holder?.pid !== "number" || holder.started_at === undefined) return null;
+  // 严格类型校验:pid 与 started_at 都必须是数字。锁文件可能被手改/半写/旧格式,非数字的
+  // started_at 会让下面的 Math.abs 变 NaN、比较恒 false,虽也返回 null,但显式挡在前面更清楚(#742)。
+  if (typeof holder?.pid !== "number" || !Number.isFinite(holder.pid)) return null;
+  if (typeof holder.started_at !== "number" || !Number.isFinite(holder.started_at)) return null;
   const info = inspectProcess(holder.pid);
   if (!info.alive || info.startedAt === undefined) return null;
   return Math.abs(holder.started_at - info.startedAt) <= 2000 ? holder.pid : null;

@@ -75,6 +75,21 @@ describe("instanceLockHolderPid / stopOwnInstance (#741)", () => {
     expect(kill.mock.calls.some(([, sig]) => sig === "SIGTERM")).toBe(false);
   });
 
+  test("真发 SIGTERM:目标进程确实退出(#742)", async () => {
+    const d = dir();
+    const child = spawn("sleep", ["300"], { stdio: "ignore" });
+    kids.push(child);
+    const exited = new Promise<"exited">((resolve) => child.once("exit", () => resolve("exited")));
+    await new Promise((r) => setTimeout(r, 80)); // 等 ps 能看到子进程
+    writeLock(d, "serve", instanceLockTarget(SERVER, "tokReal", "dev"), child.pid!);
+    expect(stopOwnInstance("serve", SERVER, "tokReal", "dev", () => {}, d)).toBe(0); // 真 SIGTERM,不 mock
+    const result = await Promise.race([
+      exited,
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 3000)),
+    ]);
+    expect(result).toBe("exited"); // SIGTERM 后进程真的退出了
+  });
+
   test("只 SIGTERM 目标实例:身份(token)与 kind 都隔离,不误伤同频道别人", async () => {
     const d = dir();
     const pidA = sleeper();
