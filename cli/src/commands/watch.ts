@@ -90,7 +90,8 @@ Options:
   --exclude-self    explicitly skip this agent's own messages (default)
   --follow          keep watching after the first matching message
   --once            exit 0 right after the first matching message
-  --latest          skip backlog: drain pending wake debt, then attach at head.
+  --latest          skip backlog: discard watch-owned pending wake debt, then attach at head.
+                    Serve-owned durable delivery is preserved (resume party serve).
                     ⚠️  almost always MISSES messages on 0.2.114+ (it discards unacked pending
                     backlog). Only old CLIs (<0.2.91) needed it. Normally omit --latest.
   --since seq       explicitly start after seq (mutually exclusive with --latest)
@@ -139,8 +140,9 @@ export const ONCE_REARM_ADVISORY =
 // 多行里的 warning。加醒目前缀顶格喊，把「几乎总是别带 --latest」说死。
 export const ONCE_LATEST_ADVISORY =
   "⚠️  WARNING: `party watch --once --latest` almost always MISSES messages on this CLI. " +
-  "--latest here DISCARDS the backlog: it drains any pending unacknowledged wake (no replay) and attaches at head — " +
+  "--latest here DISCARDS the backlog: it discards watch-owned pending wake debt (no replay) and attaches at head — " +
   "the opposite of old CLIs (<0.2.91) where --latest was required to avoid replaying all history. " +
+  "(Serve-owned durable delivery is preserved; resume `party serve` for that.) " +
   "Re-arm WITHOUT --latest to keep the backlog and replay pending wakes one at a time.";
 
 /** Claude Code 环境：可做回合内 --once，但 run_in_background 可能在回合边界被回收（#454）。 */
