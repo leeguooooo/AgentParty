@@ -82,6 +82,9 @@ describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
     // desktop 只等 macOS check-desktop + 版本契约。
     expect(desktopJob).toContain("- check-desktop");
     expect(desktopJob).toContain("- version-contract");
+    // 同样禁 desktop 回归依赖聚合 check 或 build（否则又被非桌面检查拖慢）。
+    expect(desktopJob).not.toMatch(/^\s+- check\s*$/m);
+    expect(desktopJob).not.toMatch(/^\s+- build\s*$/m);
     // publish（release）仍 needs build + desktop —— 传递闭包 = 全部 check，"全绿才发布"不变。
     expect(releaseJob).toContain("- build");
     expect(releaseJob).toContain("- desktop");
