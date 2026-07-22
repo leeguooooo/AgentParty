@@ -2,6 +2,10 @@
 // 纯渲染视图——数据全来自已有的 presence + 任务台账 + 未闭合决策（见 lib/channelFocus），
 // 就地更新、不产生 seq、不发帧（不重蹈 #675 刷屏）。三态用不同颜色/图标区分，stalled 单列第四态
 // 提示「可能停滞」而非谎报在做（#665）。栏空（无在途项且无 override）时不渲染，不占屏。
+//
+// 布局（用户反馈：初版全宽带边框卡片顶成了头部第三条）：改成折进 presence-head 的一条紧凑内联行
+// ——同一行横排小 chip、无卡片描边，头部回到 2 条（presence + 工具条）。三态语气色/图标、「在等你」
+// 珊瑚红高亮、下钻回调全部保留，只是从纵向堆叠卡片压成横向内联。
 import { useT } from "../i18n/useT";
 import "../i18n/strings/ChannelFocusBar";
 import type { ChannelFocus, FocusItem, FocusItemState } from "../lib/channelFocus";
@@ -52,66 +56,105 @@ export function ChannelFocusBar({
 
   const meLabel = viewerIsModerator ? t("ChannelFocusBar.waitingOnMeOwner") : t("ChannelFocusBar.waitingOnMe");
 
-  const renderItem = (item: FocusItem, opts: { me?: boolean } = {}) => {
+  const renderItem = (item: FocusItem) => {
     const onClick = drill(item);
     const title = drillTitle(item);
     const cls =
       `focus-item focus-item--${item.state}` +
       (item.waitingOnMe ? " focus-item--me" : "") +
       (onClick !== undefined ? " focus-item--drill" : "");
+    // 紧凑内联：dot + 名字 + 状态标签（stalled 才带 hint），标题/note 收进 title 悬停，避免撑长头部。
     const body = (
       <>
         <span className={`focus-dot focus-dot--${item.state}`} aria-hidden="true">{STATE_ICON[item.state]}</span>
         <span className="focus-item-name">{item.name}</span>
-        <span className="focus-item-label" title={item.label}>{item.label}</span>
-        <span className={`focus-item-state focus-item-state--${item.state}`} title={item.state === "stalled" ? t("ChannelFocusBar.stalledHint") : undefined}>
+        <span
+          className={`focus-item-state focus-item-state--${item.state}`}
+          title={item.state === "stalled" ? t("ChannelFocusBar.stalledHint") : undefined}
+        >
           {stateLabel(item, t)}
         </span>
-        {opts.me === true && <span className="focus-item-me-badge t-mono">{meLabel}</span>}
       </>
     );
+    const chipTitle = [item.name, stateLabel(item, t), item.label !== item.name ? item.label : null]
+      .filter((part): part is string => part !== null)
+      .join(" · ");
     if (onClick !== undefined) {
       return (
-        <li key={item.key} className={cls}>
+        <li key={item.key} className={cls} title={chipTitle}>
           <button type="button" className="focus-item-btn" onClick={onClick} title={title}>{body}</button>
         </li>
       );
     }
-    return <li key={item.key} className={cls}>{body}</li>;
+    return <li key={item.key} className={cls} title={chipTitle}>{body}</li>;
   };
 
+  // 硬两行、永不折（用户反馈）：内联只展开 owner 最关心的「在等你」高亮 chip，且封顶两个；其余全部
+  // 状态压成一个定宽小计数丸 ●3 ■1 ◆1 ◌1，点开进任务台账看全部。这样再忙再窄也不会把可见性开关挤下行。
+  const WAITING_CAP = 2;
+  const waitingShown = focus.waitingOnMe.slice(0, WAITING_CAP);
+  const waitingOverflow = focus.waitingOnMe.length - waitingShown.length;
+  const openTasks = onOpenTask; // 计数丸/溢出 +N 一律回到任务台账（Channel 里忽略具体 id，只负责开面板）。
+  const firstTaskId = focus.items.find((item) => item.taskId !== null)?.taskId ?? 0;
+
+  // 计数丸的分段：非零状态才列，各自带本态语气色圆点，保留「三态视觉可区分」的原契约（#682）。
+  const countSegments = ([
+    ["working", focus.counts.working],
+    ["blocked", focus.counts.blocked],
+    ["waiting_decision", focus.counts.waitingDecision],
+    ["stalled", focus.counts.stalled],
+  ] as const).filter(([, n]) => n > 0);
+  const countsTitle = t("ChannelFocusBar.counts", {
+    working: focus.counts.working,
+    blocked: focus.counts.blocked,
+    decision: focus.counts.waitingDecision,
+    stalled: focus.counts.stalled,
+  });
+
   return (
-    <section className="channel-focus-bar" aria-label={t("ChannelFocusBar.aria")}>
-      <header className="focus-head">
-        <span className="t-mono focus-heading">{t("ChannelFocusBar.heading")}</span>
-        {focus.focus !== null && <span className="focus-line">{focus.focus}</span>}
-        <span className="t-mono focus-counts" aria-hidden="true">
-          {t("ChannelFocusBar.counts", {
-            working: focus.counts.working,
-            blocked: focus.counts.blocked,
-            decision: focus.counts.waitingDecision,
-            stalled: focus.counts.stalled,
-          })}
-        </span>
-      </header>
+    <div className="focus-inline" aria-label={t("ChannelFocusBar.aria")}>
+      <span className="t-mono focus-heading">{t("ChannelFocusBar.heading")}</span>
+      {focus.focus !== null && <span className="focus-line" title={focus.focus}>{focus.focus}</span>}
 
       {focus.waitingOnMe.length > 0 && (
-        <div className="focus-me" role="group" aria-label={meLabel}>
+        <span className="focus-me" role="group" aria-label={meLabel}>
           <span className="t-mono focus-me-label">{meLabel}</span>
           <ul className="focus-list focus-list--me">
-            {focus.waitingOnMe.map((item) => renderItem(item, { me: false }))}
+            {waitingShown.map((item) => renderItem(item))}
           </ul>
-        </div>
+          {waitingOverflow > 0 && (
+            openTasks !== undefined ? (
+              <button type="button" className="t-mono focus-more" onClick={() => openTasks(firstTaskId)} title={countsTitle}>
+                +{waitingOverflow}
+              </button>
+            ) : (
+              <span className="t-mono focus-more" title={countsTitle}>+{waitingOverflow}</span>
+            )
+          )}
+        </span>
       )}
 
-      {focus.items.length > 0 && (
-        <>
-          <span className="t-mono focus-waiting-label">{t("ChannelFocusBar.waitingOn")}</span>
-          <ul className="focus-list">
-            {focus.items.map((item) => renderItem(item))}
-          </ul>
-        </>
+      {countSegments.length > 0 && (
+        openTasks !== undefined ? (
+          <button type="button" className="t-mono focus-counts focus-counts--btn" onClick={() => openTasks(firstTaskId)} title={countsTitle}>
+            {countSegments.map(([state, n]) => (
+              <span key={state} className={`focus-count focus-count--${state}`}>
+                <span className={`focus-dot focus-dot--${state}`} aria-hidden="true">{STATE_ICON[state]}</span>
+                {n}
+              </span>
+            ))}
+          </button>
+        ) : (
+          <span className="t-mono focus-counts" title={countsTitle}>
+            {countSegments.map(([state, n]) => (
+              <span key={state} className={`focus-count focus-count--${state}`}>
+                <span className={`focus-dot focus-dot--${state}`} aria-hidden="true">{STATE_ICON[state]}</span>
+                {n}
+              </span>
+            ))}
+          </span>
+        )
       )}
-    </section>
+    </div>
   );
 }

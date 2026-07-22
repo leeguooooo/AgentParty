@@ -2659,25 +2659,21 @@
   overflow-wrap: anywhere;
 }
 
-/* 频道常驻焦点栏（#682）：进频道第一屏就看到「球在谁手里、在等谁、谁在等我」。
-   墨线硬边 + 米纸底，三态各自语气色；「在等你」区块用主色珊瑚红把 owner 的目光钉住。 */
-.channel-focus-bar {
+/* 频道焦点（#682）：初版是全宽带边框卡片，顶成了头部第三条；改成折进 presence-head 的一条
+   紧凑内联行（横排小 chip、无卡片描边），头部回到 2 条。三态语气色/图标、「在等你」珊瑚红高亮、
+   下钻悬停全部保留，只是从纵向堆叠卡片压成横向内联。 */
+.focus-inline {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 6px 0 2px;
-  padding: 8px 10px;
-  border: 1.6px solid var(--d-ink);
-  border-radius: 0;
-  background: var(--t-panel2);
-  box-shadow: 3px 3px 0 var(--d-shadow);
-}
-.focus-head {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 5px 8px;
   min-width: 0;
+  /* 内容已由组件封顶（≤2 个「在等你」chip + 定宽计数丸），本身就短。
+     flex 不缩（0 0 auto）、不裁（无 overflow:hidden）：桌面宽度下 bounded 内容单行放得下，
+     可见性开关/连接态靠 margin-left:auto 稳在右端不被挤下行（用户要求「硬两行、永不折」）；
+     真到手机窄屏放不下时，让 presence-head 自然换行、把开关整组挪到下一行，
+     而不是把焦点内容裁掉丢信息（pr_agent #706 评审：overflow:hidden 会在窄屏隐藏关键信息）。 */
+  flex: 0 0 auto;
 }
 .focus-heading {
   flex: none;
@@ -2688,17 +2684,13 @@
 }
 .focus-line {
   min-width: 0;
+  max-width: 32ch;
   color: var(--t-text);
   font-weight: 600;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.focus-counts {
-  margin-left: auto;
-  flex: none;
-  font-size: 10px;
-  color: var(--t-dim);
-}
-.focus-waiting-label,
 .focus-me-label {
   font-size: 10px;
   letter-spacing: 0.06em;
@@ -2707,18 +2699,18 @@
 }
 .focus-list {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 2px 0 0;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 5px;
+  margin: 0;
   padding: 0;
   list-style: none;
+  min-width: 0;
 }
 .focus-item {
   min-width: 0;
 }
 .focus-item-btn {
-  width: 100%;
-  text-align: left;
   cursor: pointer;
   background: none;
   border: 0;
@@ -2732,14 +2724,14 @@
 }
 .focus-item-btn,
 .focus-item > :not(button) {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   min-width: 0;
 }
 .focus-dot {
   flex: none;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1;
 }
 .focus-dot--working { color: var(--p-working); }
@@ -2750,19 +2742,13 @@
   flex: none;
   font-weight: 600;
   color: var(--t-text);
-}
-.focus-item-label {
-  min-width: 0;
-  flex: 1;
-  color: var(--t-body);
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .focus-item-state {
   flex: none;
-  padding: 0 6px;
+  padding: 0 5px;
   font-size: 10px;
+  white-space: nowrap;
   border: 1.2px solid currentColor;
   border-radius: 0;
 }
@@ -2770,23 +2756,57 @@
 .focus-item-state--blocked { color: var(--p-blocked); background: var(--d-red-soft); }
 .focus-item-state--waiting_decision { color: var(--t-purple); background: var(--d-blue-soft); }
 .focus-item-state--stalled { color: var(--t-muted); background: var(--t-panel); }
-/* 「在等你」区块：珊瑚红左描边 + 软底，owner 一眼扫到 */
+/* 「在等你」区块：珊瑚红描边 + 软底，owner 一眼扫到；内联横排。 */
 .focus-me {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 5px 8px;
-  border-left: 3px solid var(--t-accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 7px;
+  border: 1.2px solid var(--t-accent);
   background: var(--d-red-soft);
 }
 .focus-me-label { color: var(--t-accent); font-weight: 700; }
-.focus-item-me-badge {
-  flex: none;
-  padding: 0 6px;
-  font-size: 9.5px;
-  color: var(--t-accent-ink);
-  background: var(--t-accent);
+/* 「在等你」chip 封顶宽度：决策 prompt / 阻塞原因过长时省略号收尾，别把整条头部撑长。 */
+.focus-list--me .focus-item { max-width: 30ch; }
+.focus-list--me .focus-item-state {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+/* 溢出 +N：还有几条「在等你」没展开，点开进任务台账。 */
+.focus-more {
+  flex: none;
+  padding: 0 5px;
+  font-size: 10px;
+  color: var(--t-accent);
+  background: none;
+  border: 1.2px solid var(--t-accent);
+  border-radius: 0;
+  cursor: pointer;
+}
+/* 定宽计数丸：其余全部在途项按状态计数，非零段各带本态语气色圆点（保留三态视觉可区分）。 */
+.focus-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  padding: 1px 7px;
+  border: 1.2px solid var(--t-faint);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: var(--t-dim);
+}
+.focus-counts--btn { cursor: pointer; font: inherit; }
+.focus-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.focus-count--working { color: var(--p-working); }
+.focus-count--blocked { color: var(--p-blocked); }
+.focus-count--waiting_decision { color: var(--t-purple); }
+.focus-count--stalled { color: var(--t-muted); }
 
 /* 频道搜索行：server-side retained-history search + sender/time filters */
 .chan-search-panel {
