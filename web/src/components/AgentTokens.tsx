@@ -29,6 +29,7 @@ import {
 import { apiOrigin } from "../lib/base";
 import { desktopAgentAdapter, type DesktopAgentAdapter } from "../lib/desktopAgent";
 import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
+import { LocalAgentsOverview } from "./LocalAgentsOverview";
 import { buildJoinPack, type JoinPackMode } from "../lib/joinPack";
 import { useT } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
@@ -490,6 +491,12 @@ export function AgentTokens({
             </button>
           </div>
           <p className="agenttokens-hint">{t("AgentTokens.hint")}</p>
+          {/* 合并「本机 agent」入口（原独立按钮）——桌面端在此直接看/管本机运行态，与身份/接入并列。 */}
+          {isDesktopRuntime() && (
+            <section className="agenttokens-local">
+              <LocalAgentsOverview t={t} scopeChannel={slug} />
+            </section>
+          )}
           {error !== null && <p className="agenttokens-error">{error}</p>}
           {residentError !== null && <p className="agenttokens-error" role="alert">{residentError}</p>}
           {(agents === null || profiles === null) && error === null && <p className="agenttokens-empty">{t("AgentTokens.loading")}</p>}

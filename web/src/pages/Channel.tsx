@@ -11,7 +11,6 @@ import { VisibilityToggle } from "../components/VisibilityToggle";
 import { JoinLink } from "../components/JoinLink";
 import { JoinRequestBanner } from "../components/JoinRequestBanner";
 import { OutdatedAgentsNotice } from "../components/OutdatedAgentsNotice";
-import { LocalAgentsOverview } from "../components/LocalAgentsOverview";
 import { Composer, type UploadItem } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
 import { MessageCard } from "../components/MessageCard";
@@ -199,7 +198,7 @@ export interface RoleDraft {
   responsibility: string;
 }
 
-type ChannelPanel = "charter" | "team" | "tasks" | "search" | "settings" | "localAgents";
+type ChannelPanel = "charter" | "team" | "tasks" | "search" | "settings";
 type AdminSurface = "agentJoin" | "agentTokens" | "joinLink";
 const TASK_BOARD_STATES: readonly TaskState[] = ["triage", "backlog", "assigned", "in_progress", "needs_review", "blocked", "done"];
 
@@ -4339,13 +4338,7 @@ export function ChannelPage({
             <span>{t("Channel.tools.search")}</span>
             {q !== "" && seqFromQuery(q) === null && <span className="t-mono chan-tool-badge">{searchLoading ? "..." : searchHits.length}</span>}
           </button>
-          {/* #700：本机 agent 概览——桌面端才有本机 agent，故仅桌面壳露此入口；打开的面板预过滤到本频道。 */}
-          {isDesktopRuntime() && (
-            <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("localAgents")}>
-              <span className="ap-sprite ap-sprite--agent" aria-hidden="true" />
-              <span>{t("LocalAgents.title")}</span>
-            </button>
-          )}
+          {/* #700 的「本机 agent」独立入口已并入「我的 agent」(AgentTokens) 面板的本机运行段，此处不再单列。 */}
           </>
         }
         actions={
@@ -4429,7 +4422,6 @@ export function ChannelPage({
             activePanel === "team" ? t("Channel.tools.team") :
             activePanel === "tasks" ? t("Channel.tasks.title") :
             activePanel === "settings" ? t("Channel.tools.settings") :
-            activePanel === "localAgents" ? t("LocalAgents.title") :
             t("Channel.tools.search")
           }
           subtitle={
@@ -4564,8 +4556,6 @@ export function ChannelPage({
             />
           )}
           {activePanel === "search" && searchContent}
-          {/* #700：本机 agent 概览，预过滤到本频道（点①「频道里能管理」）。桌面专属，非桌面壳该入口不渲染。 */}
-          {activePanel === "localAgents" && <LocalAgentsOverview t={t} scopeChannel={slug} />}
         </ChannelPanelModal>
       )}
       {openAgentDetail !== null && (
