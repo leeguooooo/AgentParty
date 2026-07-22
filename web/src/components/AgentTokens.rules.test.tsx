@@ -56,6 +56,7 @@ mock.module("../lib/api", () => ({
 }));
 
 const { AgentTokens } = await import("./AgentTokens");
+const { saveAgentToken, findSavedAgentToken } = await import("../lib/agentTokenVault");
 
 function memoryStorage(seed: Record<string, string> = {}): Storage {
   const values = new Map<string, string>(Object.entries(seed));
@@ -121,6 +122,7 @@ beforeEach(() => {
   nicknameCalls.length = 0;
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage({ ap_locale: "en" }) });
+  Object.defineProperty(globalThis, "location", { configurable: true, value: { origin: "https://ap.test" } });
   windowEvents = new TestEventTarget();
   documentEvents = new TestEventTarget();
   Object.defineProperty(globalThis, "window", {
@@ -147,6 +149,7 @@ afterEach(async () => {
   Reflect.deleteProperty(globalThis, "window");
   Reflect.deleteProperty(globalThis, "document");
   Reflect.deleteProperty(globalThis, "localStorage");
+  Reflect.deleteProperty(globalThis, "location");
 });
 
 function baseProps() {
@@ -345,5 +348,93 @@ describe("AgentTokens dismiss behavior", () => {
     act(() => documentEvents.emit("pointerdown", { target: {} }));
     expect(changes).toEqual([false]);
     expect(renderer!.root.findAll((node) => node.props.className === "agenttokens-panel")).toHaveLength(1);
+  });
+});
+
+describe("AgentTokens 转为常驻", () => {
+  const nodeMock = {
+    createNodeMock(element: { props: unknown }) {
+      return (element.props as { className?: string }).className === "agenttokens"
+        ? { contains: () => false, getBoundingClientRect: () => ({ bottom: 40, right: 700 }) }
+        : {};
+    },
+  };
+
+  async function renderResident(extra: Record<string, unknown>): Promise<ReactTestRenderer> {
+    let r!: ReactTestRenderer;
+    await act(async () => {
+      r = create(<LocaleProvider><AgentTokens {...baseProps()} {...extra} /></LocaleProvider>, nodeMock);
+    });
+    renderer = r;
+    await act(async () => { r.root.find((n) => n.props.className === "d-btn agenttokens-btn").props.onClick(); });
+    await act(async () => {});
+    return r;
+  }
+
+  test("选目录后用本地 vault token 调 dutyAdopt（带 workdir，不 rotate）", async () => {
+    agentsFixture = [{ name: "planner", owner: "acct-1", channel_scope: "demo", created_at: 0 }];
+    saveAgentToken({ account: "acct-1", slug: "demo", name: "planner", token: "ap_saved", command: "x", savedAt: 1 });
+    let confirmCalled = false;
+    (globalThis as unknown as { window: { confirm: () => boolean } }).window.confirm = () => { confirmCalled = true; return true; };
+    const adopted: Array<Record<string, unknown>> = [];
+    const r = await renderResident({
+      canMakeResident: true,
+      pickDirectory: async () => "/picked/dir",
+      dutyAdapter: { dutyAdopt: async (input: Record<string, unknown>) => { adopted.push(input); return {}; } },
+    });
+    await act(async () => {
+      findClass(r, "d-btn agenttokens-resident").props.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(confirmCalled).toBe(false); // 本地有 token → 不 rotate、不动线上
+    expect(adopted).toHaveLength(1);
+    expect(adopted[0]).toMatchObject({ name: "planner", channel: "demo", token: "ap_saved", workdir: "/picked/dir" });
+  });
+
+  test("取消选目录 → 不 adopt", async () => {
+    agentsFixture = [{ name: "planner", owner: "acct-1", channel_scope: "demo", created_at: 0 }];
+    saveAgentToken({ account: "acct-1", slug: "demo", name: "planner", token: "ap_saved", command: "x", savedAt: 1 });
+    const adopted: unknown[] = [];
+    const r = await renderResident({
+      canMakeResident: true,
+      pickDirectory: async () => null,
+      dutyAdapter: { dutyAdopt: async () => { adopted.push(1); return {}; } },
+    });
+    await act(async () => {
+      findClass(r, "d-btn agenttokens-resident").props.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(adopted).toHaveLength(0);
+  });
+
+  test("连点两次只 adopt 一次（ref 同步锁，#721 评审）", async () => {
+    agentsFixture = [{ name: "planner", owner: "acct-1", channel_scope: "demo", created_at: 0 }];
+    saveAgentToken({ account: "acct-1", slug: "demo", name: "planner", token: "ap_saved", command: "x", savedAt: 1 });
+    const adopted: unknown[] = [];
+    // 可控目录选择 Promise：双击发生在它 pending 期间，释放后再确定性 flush 后续链路（不靠固定计时）。
+    let resolveDir!: (value: string) => void;
+    const dirPromise = new Promise<string>((resolve) => { resolveDir = resolve; });
+    const r = await renderResident({
+      canMakeResident: true,
+      pickDirectory: () => dirPromise,
+      dutyAdapter: { dutyAdopt: async () => { adopted.push(1); return {}; } },
+    });
+    await act(async () => {
+      const btn = findClass(r, "d-btn agenttokens-resident");
+      btn.props.onClick(); // 第一次：同步上锁 ref，随后 await pickDirectory（pending）
+      btn.props.onClick(); // 第二次：ref 非空 → 立即返回，不并发
+    });
+    await act(async () => {
+      resolveDir("/picked/dir");
+      await dirPromise;
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+    });
+    expect(adopted).toHaveLength(1);
+  });
+
+  test("非 mac 桌面（canMakeResident=false）→ 不渲染转常驻按钮", async () => {
+    agentsFixture = [{ name: "planner", owner: "acct-1", channel_scope: "demo", created_at: 0 }];
+    const r = await renderResident({ canMakeResident: false });
+    expect(r.root.findAll((n) => n.props.className === "d-btn agenttokens-resident")).toHaveLength(0);
   });
 });

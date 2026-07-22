@@ -27,6 +27,9 @@ import {
   saveAgentToken,
 } from "../lib/agentTokenVault";
 import { apiOrigin } from "../lib/base";
+import { desktopAgentAdapter, type DesktopAgentAdapter } from "../lib/desktopAgent";
+import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
+import { LocalAgentsOverview } from "./LocalAgentsOverview";
 import { buildJoinPack, type JoinPackMode } from "../lib/joinPack";
 import { useT } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
@@ -42,6 +45,11 @@ interface Props {
   onAuthFailed(message: string): void;
   active?: boolean;
   onActiveChange?(open: boolean): void;
+  // 转为常驻（launchd）注入点——测试用；默认走真实桌面适配器 / 目录选择器 / mac 桌面探测。
+  dutyAdapter?: Pick<DesktopAgentAdapter, "dutyAdopt">;
+  pickDirectory?: (title?: string) => Promise<string | null>;
+  // 常驻是 macOS launchd，仅 mac 桌面可用；测试注入覆盖。
+  canMakeResident?: boolean;
 }
 
 type CopyTarget = `${string}:token` | `${string}:command`;
@@ -67,9 +75,26 @@ const EMPTY_PROFILE_FORM: ProfileForm = {
   rules: "",
 };
 
-export function AgentTokens({ slug, token, accountKey, inviterName, charter, onAuthFailed, active, onActiveChange }: Props) {
+export function AgentTokens({
+  slug,
+  token,
+  accountKey,
+  inviterName,
+  charter,
+  onAuthFailed,
+  active,
+  onActiveChange,
+  dutyAdapter = desktopAgentAdapter,
+  pickDirectory = pickDirectoryDefault,
+  canMakeResident = isDesktopRuntime() && /mac/i.test(globalThis.navigator?.userAgent ?? ""),
+}: Props) {
   const t = useT();
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // 转为常驻状态：busy 名 / 已完成集 / 错误。residentBusyRef 是同步锁（state 更新晚于 await，见 makeResident）。
+  const [residentBusy, setResidentBusy] = useState<string | null>(null);
+  const residentBusyRef = useRef<string | null>(null);
+  const [residentDone, setResidentDone] = useState<Set<string>>(() => new Set());
+  const [residentError, setResidentError] = useState<string | null>(null);
   const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
   const [open, setOpen] = useState(false);
   const [agents, setAgents] = useState<ChannelAgentInfo[] | null>(null);
@@ -241,32 +266,38 @@ export function AgentTokens({ slug, token, accountKey, inviterName, charter, onA
     }
   }
 
+  // rotate token + 重建接入命令 + 存回 vault 的共享流程（rotate 与转常驻都用）。返回新明文 token。
+  // #612：换 token 不换接入方式——沿用旧记录的 mode，让「复制接入包」仍是同款脚本。
+  // #530：桌面版 location.origin 是 tauri://localhost，接入包会报错；优先真实后端 apiBase，同源 web 回退 origin。
+  async function regenerateAndSaveToken(name: string): Promise<string> {
+    const next = await rotateChannelAgent(token, slug, name);
+    const command = buildMinimalAgentCommand({
+      server: apiOrigin(),
+      slug,
+      name: next.name,
+      token: next.token,
+      inviterName,
+      checkinMessage: t("AgentTokens.checkinMessage", { name: next.name }),
+    });
+    saveAgentToken({
+      account: accountKey,
+      slug,
+      name: next.name,
+      token: next.token,
+      command,
+      mode: findSavedAgentToken(accountKey, slug, name)?.mode,
+      savedAt: Date.now(),
+    });
+    return next.token;
+  }
+
   async function rotate(name: string) {
     const ok = window.confirm(t("AgentTokens.rotateConfirm", { name }));
     if (!ok) return;
     setBusyName(name);
     setError(null);
     try {
-      const next = await rotateChannelAgent(token, slug, name);
-      const command = buildMinimalAgentCommand({
-        // #530：桌面版 location.origin 是 tauri://localhost，接入包会报错；优先真实后端 apiBase，同源 web 回退 origin。
-        server: apiOrigin(),
-        slug,
-        name: next.name,
-        token: next.token,
-        inviterName,
-        checkinMessage: t("AgentTokens.checkinMessage", { name: next.name }),
-      });
-      saveAgentToken({
-        account: accountKey,
-        slug,
-        name: next.name,
-        token: next.token,
-        command,
-        // #612：换 token 不换接入方式——无人值守 agent 轮换后复制的仍是值守机脚本。
-        mode: findSavedAgentToken(accountKey, slug, name)?.mode,
-        savedAt: Date.now(),
-      });
+      await regenerateAndSaveToken(name);
       await refresh();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
@@ -274,6 +305,47 @@ export function AgentTokens({ slug, token, accountKey, inviterName, charter, onA
       else setError(t("AgentTokens.errRotate"));
     } finally {
       setBusyName(null);
+    }
+  }
+
+  // 拿到该 agent 可用的明文 token：本地 vault 有就用（不动线上）；没有则征得同意后 rotate
+  // 生成新 token（旧 token 立即失效——若在别处正跑会掉线），并存回 vault 供复制/后续复用。
+  async function tokenForResidency(name: string): Promise<string | null> {
+    const saved = findSavedAgentToken(accountKey, slug, name);
+    if (saved) return saved.token;
+    if (!window.confirm(t("AgentTokens.residentRegenConfirm", { name }))) return null;
+    return regenerateAndSaveToken(name);
+  }
+
+  // 把某个 agent 身份转成本机 launchd 常驻：先选工作目录（必选，不手填），再 dutyAdopt 落地。
+  // #721 评审：用 ref 同步上锁——residentBusy 是 state，要等 await pickDirectory 后才生效，
+  // 连点会绕过 state 守卫并发触发 rotate/dutyAdopt（第二次 rotate 作废第一次的 token）。
+  async function makeResident(name: string) {
+    if (!canMakeResident || residentBusyRef.current !== null) return;
+    residentBusyRef.current = name;
+    setResidentBusy(name);
+    setResidentError(null);
+    try {
+      const dir = await pickDirectory(t("AgentTokens.residentPickTitle", { name }));
+      if (dir === null) return; // 取消选目录 = 放弃整个操作
+      const agentToken = await tokenForResidency(name);
+      if (agentToken === null) return; // 未同意重新生成
+      await dutyAdapter.dutyAdopt({
+        server: apiOrigin(),
+        token: agentToken,
+        name,
+        channel: slug,
+        runner: "claude",
+        workdir: dir,
+      });
+      setResidentDone((s) => new Set(s).add(name));
+      await refresh();
+    } catch (err) {
+      if (err instanceof AuthError) onAuthFailed(err.message);
+      else setResidentError(err instanceof Error ? err.message : String(err));
+    } finally {
+      residentBusyRef.current = null;
+      setResidentBusy(null);
     }
   }
 
@@ -420,7 +492,14 @@ export function AgentTokens({ slug, token, accountKey, inviterName, charter, onA
             </button>
           </div>
           <p className="agenttokens-hint">{t("AgentTokens.hint")}</p>
+          {/* 合并「本机 agent」入口（原独立按钮）——桌面端在此直接看/管本机运行态，与身份/接入并列。 */}
+          {isDesktopRuntime() && (
+            <section className="agenttokens-local">
+              <LocalAgentsOverview t={t} scopeChannel={slug} />
+            </section>
+          )}
           {error !== null && <p className="agenttokens-error">{error}</p>}
+          {residentError !== null && <p className="agenttokens-error" role="alert">{residentError}</p>}
           {(agents === null || profiles === null) && error === null && <p className="agenttokens-empty">{t("AgentTokens.loading")}</p>}
           {agents !== null && agents.length === 0 && localOnly.length === 0 && (
             <p className="agenttokens-empty">{t("AgentTokens.empty")}</p>
@@ -496,6 +575,21 @@ export function AgentTokens({ slug, token, accountKey, inviterName, charter, onA
                       >
                         {busyName === agent.name ? t("AgentTokens.rotating") : t("AgentTokens.rotate")}
                       </button>
+                      {/* 转为常驻——仅 mac 桌面（launchd）；选工作目录后 dutyAdopt 落成本机常驻。 */}
+                      {canMakeResident && (
+                        <button
+                          type="button"
+                          className="d-btn agenttokens-resident"
+                          disabled={residentBusy !== null}
+                          onClick={() => void makeResident(agent.name)}
+                        >
+                          {residentBusy === agent.name
+                            ? t("AgentTokens.residentBusy")
+                            : residentDone.has(agent.name)
+                              ? t("AgentTokens.residentDone")
+                              : t("AgentTokens.resident")}
+                        </button>
+                      )}
                     </div>
                   </li>
                 );

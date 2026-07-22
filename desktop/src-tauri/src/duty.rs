@@ -409,10 +409,11 @@ pub(crate) async fn desktop_duty_adopt(
     name: String,
     channel: String,
     runner: String,
+    workdir: Option<String>,
 ) -> Result<DutyEntry, String> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, agent_state, server, token, name, channel, runner);
+        let _ = (app, agent_state, server, token, name, channel, runner, workdir);
         return Err("system-level duty is currently macOS-only (launchd)".to_string());
     }
     #[cfg(target_os = "macos")]
@@ -420,6 +421,9 @@ pub(crate) async fn desktop_duty_adopt(
         validate_channel(&channel)?;
         validate_runner(&runner)?;
         validate_adopt_inputs(&server, &token, &name)?;
+        if let Some(dir) = workdir.as_deref() {
+            crate::agent::validate_workdir(dir)?;
+        }
         let home = home_dir()?;
         // 与 join pack 的 AGENTPARTY_CONFIG 约定同路径：CLI 与桌面端看见的是同一个身份文件。
         let config_dir = home.join(".agentparty/agents");
@@ -514,7 +518,7 @@ pub(crate) async fn desktop_duty_adopt(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(restore(format!("cannot back up the existing duty plist: {error}"))),
         };
-        match duty_persist_inner(&app, &agent_state, &config_id, &channel, &runner, None, None).await {
+        match duty_persist_inner(&app, &agent_state, &config_id, &channel, &runner, workdir.as_deref(), None).await {
             Ok(entry) => Ok(entry),
             Err(error) => {
                 // 卸掉可能已装上的新任务，plist 恢复原状（原有旧值守则连内容带加载态一起还原）。
