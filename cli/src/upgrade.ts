@@ -310,6 +310,25 @@ export function serverMinVersionNotice(
   };
 }
 
+// #703：给挂在 watch 上的 agent 一条「该升级了」的单行非阻断提示。
+// 优先级：低于服务端 min（协议可能已破，enforced 时更急）> 落后于最新发布版。都不落后则返回 null。
+// 引导用 `party upgrade`——原地校验+替换二进制、**无需重跑接入包 / party init 重绑**（这正是 #703
+// owner 的痛点：agent 常年靠人肉 curl install.sh + 重绑）。装二进制失败的兜底安装串仍随附。
+export function upgradeHintForServer(
+  serverVersion: { version: string; min_client_version: string; min_client_enforced: boolean },
+  deps: { runningVersion?: string } = {},
+): string | null {
+  const min = serverMinVersionNotice(serverVersion.min_client_version, serverVersion.min_client_enforced, deps);
+  if (min !== null) {
+    return `${min.message} 原地升级：party upgrade（回退：${INSTALL_LINE}）`;
+  }
+  const behind = serverVersionUpgradeNotice(serverVersion.version, deps);
+  if (behind !== null) {
+    return `party CLI 有新版 v${behind.available_version}（当前 v${behind.running_version}）。原地升级：party upgrade，无需重跑接入包/重绑。`;
+  }
+  return null;
+}
+
 // re-exec 磁盘上的新二进制：spawn 同 argv、继承 stdio、detach，然后让调用方退出。
 // PID 会变——launchctl KeepAlive 天然重启；nohup 场景新进程接管（旧进程退出）。
 function defaultReexec(execPath: string, argv: string[]): void {

@@ -6,7 +6,7 @@ function safeChannel(channel: string): string {
   return channel.replace(/[^a-zA-Z0-9._-]/g, "_") || "channel";
 }
 
-export function cacheSlotPath(kind: "health" | "statusline", channel: string, cwd: string): string {
+export function cacheSlotPath(kind: "health" | "statusline" | "upgrade-hint", channel: string, cwd: string): string {
   const { source } = readConfigWithSource(cwd);
   const fingerprint = createHash("sha256")
     .update(JSON.stringify({ channel, kind: source.kind, path: source.path, token: source.token_fingerprint }))
