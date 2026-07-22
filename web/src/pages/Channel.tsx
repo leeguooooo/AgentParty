@@ -1269,7 +1269,9 @@ export function ChannelSearchPanel({
 }: ChannelSearchPanelProps) {
   const t = useT();
   // #716：纯 seq 号查询——面板给直达按钮，且搜索 effect 会跳过全文检索（见下方 seq 短路）。
+  // isSeqQuery 时屏蔽所有全文检索专属 UI（计数/结果/空态），否则会与「跳到 #N」并存出现「0 命中」误导（#718 评审）。
   const seqQuery = seqFromQuery(search);
+  const isSeqQuery = seqQuery !== null;
   const selectHit = (seq: number) => {
     onClose();
     onJump(seq);
@@ -1288,7 +1290,7 @@ export function ChannelSearchPanel({
           aria-label={t("Channel.search.aria")}
           autoFocus
         />
-        {query !== "" && (
+        {query !== "" && !isSeqQuery && (
           <span className="t-mono chan-search-count" role="status" aria-live="polite">
             {searchLoading
               ? t("Channel.search.searching")
@@ -1308,7 +1310,7 @@ export function ChannelSearchPanel({
           {t("Channel.search.jumpToSeq", { seq: String(seqQuery) })}
         </button>
       )}
-      {query !== "" && (
+      {query !== "" && !isSeqQuery && (
         <div className="chan-search-filters">
           <input
             className="t-mono chan-filter-input"
@@ -1357,15 +1359,15 @@ export function ChannelSearchPanel({
           {searchError}
         </p>
       )}
-      {query !== "" && visibleSearchHits.map((hit) => (
+      {query !== "" && !isSeqQuery && visibleSearchHits.map((hit) => (
         <SearchHitCard key={hit.seq} hit={hit} onJump={selectHit} />
       ))}
-      {query !== "" && !searchLoading && searchHits.length === 0 && searchInputError === null && searchError === null && (
+      {query !== "" && !isSeqQuery && !searchLoading && searchHits.length === 0 && searchInputError === null && searchError === null && (
         <p className="d-empty" role="status" aria-live="polite">
           {t("Channel.search.noMatch", { query: search.trim() })}
         </p>
       )}
-      {query !== "" && !searchLoading && searchHits.length > 0 && visibleSearchHits.length === 0 && (
+      {query !== "" && !isSeqQuery && !searchLoading && searchHits.length > 0 && visibleSearchHits.length === 0 && (
         <p className="d-empty" role="status" aria-live="polite">
           {t("Channel.empty.searchFiltered")}
         </p>
@@ -4335,7 +4337,7 @@ export function ChannelPage({
           <button type="button" className={"d-btn chan-tool-btn" + (q !== "" ? " is-active" : "")} onClick={() => openPanel("search")}>
             <span className="ap-sprite ap-sprite--search" aria-hidden="true" />
             <span>{t("Channel.tools.search")}</span>
-            {q !== "" && <span className="t-mono chan-tool-badge">{searchLoading ? "..." : searchHits.length}</span>}
+            {q !== "" && seqFromQuery(q) === null && <span className="t-mono chan-tool-badge">{searchLoading ? "..." : searchHits.length}</span>}
           </button>
           {/* #700：本机 agent 概览——桌面端才有本机 agent，故仅桌面壳露此入口；打开的面板预过滤到本频道。 */}
           {isDesktopRuntime() && (
@@ -4435,7 +4437,7 @@ export function ChannelPage({
             activePanel === "team" ? t("Channel.team.subtitle", { roles: String(structuredRoleCount), online: String(onlineAgentCount) }) :
             activePanel === "tasks" ? t("Channel.tasks.subtitle", { open: taskOpenCount, review: taskReviewCount, blocked: taskBlockedCount }) :
             activePanel === "settings" ? (localLoopGuardEnabled ? t("Channel.settings.enabled") : t("Channel.settings.unlimited")) :
-            activePanel === "search" && q !== "" ? t("Channel.search.hits", { count: searchHits.length }) :
+            activePanel === "search" && q !== "" && seqFromQuery(q) === null ? t("Channel.search.hits", { count: searchHits.length }) :
             undefined
           }
           onClose={() => setActivePanel(null)}
