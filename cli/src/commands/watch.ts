@@ -8,7 +8,7 @@ import {
   type DirectedDelivery,
   type MsgFrame,
 } from "@agentparty/shared";
-import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from "../instance-lock";
+import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget, stopOwnInstance } from "../instance-lock";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
 import {
@@ -41,7 +41,7 @@ import {
   writeStatuslineCache,
 } from "../statusline-cache";
 
-const WATCH_FLAGS = ["channel", "timeout", "follow", "once", "mentions-only", "exclude-self", "json", "allow-multiple", "latest", "since", "ensure", "drain", "status", "no-status", "quiet"];
+const WATCH_FLAGS = ["channel", "timeout", "follow", "once", "mentions-only", "exclude-self", "json", "allow-multiple", "latest", "since", "ensure", "drain", "status", "no-status", "quiet", "stop"];
 const WATCH_SKIP_PAGE_SIZE = 1000;
 const WATCH_SKIP_SCAN_LIMIT = 10_000;
 const WATCH_DELIVERY_ACK_TIMEOUT_MS = 5_000;
@@ -100,6 +100,8 @@ Options:
                     attached, exit 0 ("no-op") instead of exit 10 (for per-turn harnesses)
   --status          also post a human-visible waiting status on mount (default: silent)
   --no-status       explicit opt-out of the mount status (alias: --quiet; this is the default)
+  --stop            stop only THIS identity's watcher on the channel (safe on multi-agent hosts;
+                    resolves your own listener via the instance lock — unlike pkill -f, issue #741)
   --json            emit structured NDJSON frames`;
 
 // --follow 的假在线陷阱（issue #55/#60）：watcher 打印了 mention、presence 也新鲜，但多数
@@ -349,6 +351,8 @@ export async function runWatch(o: WatchOptions): Promise<number> {
   // 先抢锁，再连服务端：第二个 watcher 连 WS 都不该建，否则它已经开始消费 @ 了（#195）
   const lockDir = o.lockDir ?? defaultInstanceLockDir();
   const lockTarget = o.lockDir === undefined ? instanceLockTarget(o.server, o.token, o.channel) : o.channel;
+  // #741:进程标题带上 lockTarget(<hash>-<channel>),让 ps/pkill -f 能区分同机多 agent 的 watch。best-effort。
+  try { process.title = `party watch ${lockTarget}`; } catch { /* 某些运行时 title 只读 */ }
   const lock = o.allowMultiple === true ? null : acquireInstanceLock("watch", lockTarget, lockDir);
   if (lock && !lock.ok) {
     // #669：--ensure 让 harness 的每轮例行重挂在「同身份已挂」时幂等收场（exit 0, no-op），
@@ -360,7 +364,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
     out(
       `watch: 已有 watcher 挂在 #${o.channel} 上（pid ${lock.heldByPid}）。` +
         ` 再挂一个会让同一条 @ 触发 N 次唤醒——agent 会把同一条消息回 N 遍，并给 loop guard 上膛。` +
-        ` 要么等它退出，要么 kill ${lock.heldByPid}；确实想并存请加 --allow-multiple 或 --ensure 幂等重挂。`,
+        ` 要么等它退出，要么用 \`party watch ${o.channel} --stop\`（只停本身份这台，别用 pkill -f 会误杀同机别人的）；确实想并存请加 --allow-multiple 或 --ensure 幂等重挂。`,
     );
     return EXIT_ALREADY_WATCHING;
   }
@@ -770,7 +774,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["follow", "once", "mentions-only", "exclude-self", "json", "allow-multiple", "latest", "ensure", "drain", "status", "no-status", "quiet"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["follow", "once", "mentions-only", "exclude-self", "json", "allow-multiple", "latest", "ensure", "drain", "status", "no-status", "quiet", "stop"] });
   if (flags.follow === true && flags.once === true) {
     console.error("--follow and --once are mutually exclusive: follow keeps watching, once exits after the first match");
     return 1;
@@ -825,6 +829,10 @@ export async function run(argv: string[]): Promise<number> {
   if (!isSlug(channel)) {
     console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
     return 1;
+  }
+  // #741：只停「本身份」在这个频道跑的 watch,不像 `pkill -f` 那样误杀同机其它 agent 的 listener。
+  if (flags.stop === true) {
+    return stopOwnInstance("watch", cfg.server, cfg.token, channel, (line) => console.error(line));
   }
   if (flags.follow === true) console.error(FOLLOW_WAKE_ADVISORY);
   if (flags.once === true && isClaudeCodeEnv()) console.error(ONCE_CLAUDE_ADVISORY);

@@ -85,6 +85,47 @@ export function currentProcessStartedAt(): number {
   return PROCESS_STARTED_AT;
 }
 
+/**
+ * 读取某实例锁当前**存活**持有者的 pid（#741 --stop 用来自我定位:同机同频道多 agent 时,
+ * 靠这个只停「本身份」那个 serve/watch,不像 `pkill -f` 那样误杀别人的 listener）。
+ * target 必须与 acquireInstanceLock 时传入的一致(通常是 instanceLockTarget 的 `<hash>-<channel>`)。
+ * 没有锁文件、或持有者已死/PID 被复用 → 返回 null。
+ */
+export function instanceLockHolderPid(kind: InstanceKind, target: string, dir: string): number | null {
+  const holder = readHolder(lockPath(kind, target, dir));
+  return holderAlive(holder) ? holder.pid : null;
+}
+
+/**
+ * 只停「本身份(server+token)」在某频道跑的那个 serve/watch(#741)。同机同频道多 agent 时,
+ * `pkill -f "party watch <ch>"` 会误杀所有人的 listener;这条靠实例锁按身份精确定位、只 SIGTERM 自己那个。
+ * 返回退出码:成功停 / 无在跑的都算 0;发信号失败算 1。
+ */
+export function stopOwnInstance(
+  kind: InstanceKind,
+  server: string,
+  token: string,
+  channel: string,
+  log: (line: string) => void,
+  dir: string = defaultInstanceLockDir(),
+): number {
+  const target = instanceLockTarget(server, token, channel);
+  const pid = instanceLockHolderPid(kind, target, dir);
+  if (pid === null) {
+    log(`no running ${kind} for this identity on #${channel} (nothing to stop)`);
+    return 0;
+  }
+  if (pid === process.pid) return 0; // 不给自己发(理论上不会走到)
+  try {
+    process.kill(pid, "SIGTERM");
+    log(`stopped ${kind} on #${channel} (pid=${pid})`);
+    return 0;
+  } catch (error) {
+    log(`failed to stop ${kind} pid=${pid}: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+}
+
 interface LockHolder {
   pid?: number;
   id?: string;
