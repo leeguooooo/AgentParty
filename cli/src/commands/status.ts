@@ -8,14 +8,13 @@ import type {
   SendHostDecision,
   SendStatusWorkflow,
   StatusState,
-  TaskState,
   WakeKind,
   WorkflowKind,
 } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
 import { advanceCursorPastOwnMessage, resolveChannel, workspaceId, workspaceLabel, worktreeLabel } from "../config";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
-import { fetchMe, handleRestError, postMessage, updateTask } from "../rest";
+import { fetchMe, handleRestError, postMessage, taskStateFromReportedStatus, updateTask } from "../rest";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
 const STATES: StatusState[] = ["working", "waiting", "blocked", "done"];
@@ -371,11 +370,9 @@ export async function run(argv: string[]): Promise<number> {
       context: buildContext(auth),
     });
     if (taskId !== undefined) {
-      const taskState: TaskState =
-        state === "working" ? "in_progress" :
-        state === "waiting" ? "assigned" :
-        state as TaskState;
-      await updateTask(auth.server, auth.token, channel, taskId, { state: taskState });
+      // #737:worker 报自己那端 blocked 不再拉黑父任务全局 state(见 taskStateFromReportedStatus)。
+      const taskState = taskStateFromReportedStatus(state);
+      if (taskState !== null) await updateTask(auth.server, auth.token, channel, taskId, { state: taskState });
     }
     advanceCursorPastOwnMessage(channel, seq);
     console.log(`status seq=${seq}`);
