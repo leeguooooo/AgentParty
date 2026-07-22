@@ -1,13 +1,19 @@
 // #738:同步睡眠不能依赖 SharedArrayBuffer——某些运行时/沙箱里它未定义,原来在模块顶层
 // new SharedArrayBuffer 会让 import 直接抛,常驻 serve 日志被刷屏。
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { sleepSyncMs } from "../src/sync-sleep";
 
-const realSAB = globalThis.SharedArrayBuffer;
+// 逐字保存原始属性描述符再原样还原——直接 defineProperty({configurable,value}) 会丢掉
+// writable/enumerable,让后续代码/用例看到一个语义不同的 SharedArrayBuffer(#739 CodeRabbit)。
+let sabDescriptor: PropertyDescriptor | undefined;
+
+beforeEach(() => {
+  sabDescriptor = Object.getOwnPropertyDescriptor(globalThis, "SharedArrayBuffer");
+});
 
 afterEach(() => {
-  // 还原(某些用例会临时删掉 SharedArrayBuffer)
-  Object.defineProperty(globalThis, "SharedArrayBuffer", { configurable: true, value: realSAB });
+  if (sabDescriptor === undefined) Reflect.deleteProperty(globalThis, "SharedArrayBuffer");
+  else Object.defineProperty(globalThis, "SharedArrayBuffer", sabDescriptor);
 });
 
 describe("sleepSyncMs (#738)", () => {
