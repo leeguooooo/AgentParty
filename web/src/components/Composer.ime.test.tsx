@@ -12,7 +12,9 @@ let rafQueue: Array<() => void> = [];
 const savedDescriptors: Record<string, PropertyDescriptor | undefined> = {};
 
 function stubGlobal(key: string, value: unknown) {
-  savedDescriptors[key] = Object.getOwnPropertyDescriptor(globalThis, key);
+  // 只在本周期首次替换该 key 时存原始描述符——否则同一用例里二次 stub(如把 rAF 改成 undefined)
+  // 会用「上一个 stub 的描述符」覆盖掉真·原始值,afterEach 还原就会漏(#735 CodeRabbit)。
+  if (!(key in savedDescriptors)) savedDescriptors[key] = Object.getOwnPropertyDescriptor(globalThis, key);
   Object.defineProperty(globalThis, key, { configurable: true, value });
 }
 
