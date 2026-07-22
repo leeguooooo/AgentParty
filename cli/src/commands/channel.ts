@@ -45,6 +45,7 @@ const CHANNEL_FLAGS = [
   "temp",
   "party",
   "public",
+  "exact",
   "policy",
   "confirm",
   "expires",
@@ -199,7 +200,7 @@ export async function run(argv: string[]): Promise<number> {
     return 0;
   }
   const { positionals, flags } = parseArgs(argv, {
-    booleans: ["temp", "party", "public", "confirm", "remove", "json"],
+    booleans: ["temp", "party", "public", "exact", "confirm", "remove", "json"],
     repeatable: ["agent", "members-agent"],
     aliases: { m: "responsibility" },
   });

@@ -2603,12 +2603,14 @@ describe("party channel create mode", () => {
     writeCfg(mock.url);
     const r = await runCli(["channel", "create", "war-room", "--party", "--title", "作战室"]);
     expect(r.code).toBe(0);
+    // #695：channel create 默认带 auto_suffix=true，撞名让服务端取下一个空位而非硬 409。
     expect(reqsOf(mock, "POST", "/api/channels")[0]!.body).toEqual({
       slug: "war-room",
       title: "作战室",
       kind: "standing",
       mode: "party",
       visibility: "private",
+      auto_suffix: true,
     });
   });
 
@@ -2622,6 +2624,7 @@ describe("party channel create mode", () => {
       kind: "standing",
       mode: "normal",
       visibility: "private",
+      auto_suffix: true,
     });
   });
 
@@ -2635,6 +2638,21 @@ describe("party channel create mode", () => {
       kind: "standing",
       mode: "normal",
       visibility: "public",
+      auto_suffix: true,
+    });
+  });
+
+  test("--exact 发送 auto_suffix=false（撞名仍硬 409）", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "create", "dev", "--exact"]);
+    expect(r.code).toBe(0);
+    expect(reqsOf(mock, "POST", "/api/channels")[0]!.body).toEqual({
+      slug: "dev",
+      kind: "standing",
+      mode: "normal",
+      visibility: "private",
+      auto_suffix: false,
     });
   });
 
