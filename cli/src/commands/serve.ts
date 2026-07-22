@@ -33,7 +33,7 @@ import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../
 import { readAccount } from "../account";
 import { connect } from "../client";
 import { clearStuck, clearStuckForConfig, loadCursor, loadCursorForConfig, loadRevCursor, loadRevCursorForConfig, loadStuck, loadStuckForConfig, resolveChannel, saveCursor, saveCursorForConfig, saveRevCursor, saveRevCursorForConfig, saveStuck, saveStuckForConfig, type StuckWake } from "../config";
-import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from "../instance-lock";
+import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget, stopOwnInstance } from "../instance-lock";
 import { formatMsg, stripTerminalControls } from "../format";
 import { clearHealthCache, writeHealthCache } from "../health-cache";
 import { ensureFreshAccess, resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
@@ -877,7 +877,7 @@ export function defaultRunnerWorkdir(channel: string, namespace: string): string
   return runnerWorkdir(join(stateRoot, "runners"), channel, namespace);
 }
 
-const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "replay-backlog", "profile", "profile-once", "profile-poll-interval", "runner-timeout-seconds", "protocol"];
+const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "replay-backlog", "profile", "profile-once", "profile-poll-interval", "runner-timeout-seconds", "protocol", "stop"];
 const HELP = `usage: party serve [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all]
        party serve --profile <owner>/<handle>
 
@@ -899,6 +899,8 @@ Options:
   --protocol mcp|text  managed lane protocol (default mcp: role-trimmed party MCP tools; text is a
                        deprecated escape hatch kept for one minor cycle)
   --auto-upgrade       between wakes, if a newer party binary is on disk, re-exec it (issue #45)
+  --stop               stop only THIS identity's serve on the channel (safe on multi-agent hosts;
+                       resolves your own listener via the instance lock — unlike pkill -f, issue #741)
   --replay-backlog     on attach, replay the offline backlog one wake per message
                        (default: skip the backlog, advance the cursor, and print
                        how many were skipped — serve wakes only for messages that
@@ -3876,12 +3878,16 @@ export async function runServe(o: ServeOptions): Promise<number> {
   // 这把锁只挡同机；跨机器重复执行需要服务端租约（do.ts 广播发给同名所有连接）。
   const lockDir = o.lockDir ?? defaultInstanceLockDir();
   const lockTarget = o.lockDir === undefined ? instanceLockTarget(o.server, o.token, o.channel) : o.channel;
+  // #741:给进程起个可区分的标题——同机同频道多 agent 时,身份藏在 AGENTPARTY_CONFIG 环境变量里、
+  // ps 命令列看不到,两个 serve 长得一模一样。把 lockTarget(<hash>-<channel>)写进 title,
+  // 让 ps/pkill -f 能定位到具体某个(配合 `party serve <ch> --stop` 更稳)。best-effort,平台不支持就算了。
+  try { process.title = `party serve ${lockTarget}`; } catch { /* 某些运行时 title 只读 */ }
   const lock = o.allowMultiple === true ? null : acquireInstanceLock("serve", lockTarget, lockDir);
   if (lock && !lock.ok) {
     out(
       `serve: 已有 serve 挂在 #${o.channel} 上（pid ${lock.heldByPid}）。` +
         ` 再挂一个会让同一条 @ 触发两次完整 runner——双份回帖，git push 类副作用执行两遍。` +
-        ` 要么等它退出，要么 kill ${lock.heldByPid}；确实想并存请加 --allow-multiple。`,
+        ` 要么等它退出，要么用 \`party serve ${o.channel} --stop\`（只停本身份这台，别用 pkill -f 会误杀同机别人的）；确实想并存请加 --allow-multiple。`,
     );
     return EXIT_ALREADY_SERVING;
   }
@@ -4951,7 +4957,7 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "auto-upgrade", "replay-backlog", "profile-once"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "auto-upgrade", "replay-backlog", "profile-once", "stop"] });
   const auth = await resolveAuthDetailed();
   if (!auth.server || !auth.token) {
     console.error("no config, run: party login or party init --server URL --token T");
@@ -5041,6 +5047,21 @@ export async function run(argv: string[]): Promise<number> {
       ...(protocolFlag === undefined ? {} : { protocol: protocolFlag }),
     });
   }
+  // 频道先解析:--stop 需要它,且必须在 runner/on-mention 校验之前处理——否则
+  // `party serve <ch> --stop`（不带 --runner）会先撞上「必须二选一」而永远到不了 --stop(#742 CodeRabbit)。
+  const channel = resolveChannel(str(flags.channel) ?? positionals[0]);
+  if (!channel) {
+    console.error("no channel, pass one or bind with: party init --channel C");
+    return 1;
+  }
+  if (!isSlug(channel)) {
+    console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
+    return 1;
+  }
+  // #741：只停「本身份」在这个频道跑的 serve,不像 `pkill -f` 那样误杀同机其它 agent 的 serve。
+  if (flags.stop === true) {
+    return stopOwnInstance("serve", server, auth.token, channel, (line) => console.error(line));
+  }
   if ((cmd ? 1 : 0) + (runner ? 1 : 0) !== 1) {
     console.error(
       'choose exactly one of --on-mention or --runner.\n' +
@@ -5055,15 +5076,6 @@ export async function run(argv: string[]): Promise<number> {
   }
   const harness = runner === "codex" || runner === "claude" ? runner : undefined;
   const useSdkRunner = runner === "codex-sdk";
-  const channel = resolveChannel(str(flags.channel) ?? positionals[0]);
-  if (!channel) {
-    console.error("no channel, pass one or bind with: party init --channel C");
-    return 1;
-  }
-  if (!isSlug(channel)) {
-    console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
-    return 1;
-  }
   const autoDownloadUpgrade = flags["auto-upgrade"] === true;
   const availableUpgrade = await resolveAvailableUpgrade(server, null, {
     autoDownload: autoDownloadUpgrade,
