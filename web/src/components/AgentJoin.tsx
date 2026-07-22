@@ -12,7 +12,7 @@ import {
 } from "../lib/api";
 import { copyText, saveAgentToken } from "../lib/agentTokenVault";
 import { buildJoinPack, type JoinPackMode } from "../lib/joinPack";
-import { desktopAgentAdapter, type DesktopAgentAdapter, type DesktopAgentRunner } from "../lib/desktopAgent";
+import { desktopAgentAdapter, type DesktopAgentAdapter } from "../lib/desktopAgent";
 import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
 
 // 桌面版下载/说明页——web 上无人值守引导装桌面版时指过去。
@@ -106,8 +106,6 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
   const [adoptError, setAdoptError] = useState<string | null>(null);
   // 已选的工作目录（转常驻直接运行——不复制接入包，而是选目录就地跑）。
   const [adoptDir, setAdoptDir] = useState<string | null>(null);
-  // #725：无人值守就地运行也要能选 codex/claude(默认 codex,与本机 agent 默认一致)。
-  const [adoptRunner, setAdoptRunner] = useState<DesktopAgentRunner>("codex");
   const [nameErr, setNameErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // #642：复制失败要给用户明确反馈，别静默——join 命令带着只展示一次的 channel-scoped token。
@@ -212,7 +210,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         token: phase.token,
         name: phase.name,
         channel: slug,
-        runner: adoptRunner,
+        runner: "claude",
         workdir: dir,
       });
       setAdoptState("done");
@@ -220,7 +218,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
       setAdoptState("error");
       setAdoptError(err instanceof Error ? err.message : String(err));
     }
-  }, [adoptState, dutyAdapter, phase, slug, pickDirectory, adoptRunner]);
+  }, [adoptState, dutyAdapter, phase, slug, pickDirectory]);
 
   const onCopy = useCallback(async () => {
     if (phase.kind !== "done") return;
@@ -338,18 +336,8 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
 
             {phase.mode === "unattended" ? (
               desktopDetect() ? (
-                // 桌面：选 runner + 工作目录 + 直接就地运行（不复制接入包）。手动命令收进折叠作后备。
+                // 桌面：选工作目录 + 直接就地运行（不复制接入包）。手动命令收进折叠作后备。
                 <div className="agent-join-adopt">
-                  <select
-                    className="d-input agent-join-adopt-runner"
-                    aria-label={t("AgentJoin.adoptRunnerLabel")}
-                    value={adoptRunner}
-                    disabled={adoptState === "busy" || adoptState === "done"}
-                    onChange={(event) => setAdoptRunner(event.target.value as DesktopAgentRunner)}
-                  >
-                    <option value="codex">codex</option>
-                    <option value="claude">claude</option>
-                  </select>
                   <button
                     type="button"
                     className="d-btn d-btn--primary"

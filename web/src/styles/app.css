@@ -306,8 +306,6 @@
   flex-wrap: wrap;
   margin: 0 0 10px;
 }
-/* 转常驻 runner 选择（codex/claude）：紧凑,和一键运行按钮同排 */
-.agent-join-adopt-runner { flex: 0 0 auto; min-width: 84px; }
 /* 已选工作目录（转常驻直接运行）：单独一行等宽显示完整路径 */
 .agent-join-adopt-dir { flex-basis: 100%; word-break: break-all; }
 /* 手动命令折叠（桌面首选一键运行，命令收进 details 作后备） */
