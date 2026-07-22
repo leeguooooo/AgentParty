@@ -4032,6 +4032,11 @@
   border-color: var(--d-red);
   color: var(--d-red);
 }
+/* 转为常驻：绿色强调（常驻=在跑），与红色的重新生成/删除区分 */
+.agenttokens-resident {
+  border-color: var(--d-green-dark, var(--d-green));
+  color: var(--d-green-dark, var(--d-green));
+}
 .agenttokens-project {
   display: flex;
   flex-direction: column;
