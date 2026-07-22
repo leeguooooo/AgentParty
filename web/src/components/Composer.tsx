@@ -159,6 +159,9 @@ export function Composer({
   // 确认候选时 compositionend 先于确认键的 keydown 触发，那一刻 isComposing 已是 false，
   // 回车会把半成品误发出去。用一个 ref 顶住合成期，并延到下一帧才放开，盖住那次确认 keydown。
   const composingRef = useRef(false);
+  // 合成周期代号:每次 compositionstart 自增,延迟放开只在「还是同一周期」时才清护栏——
+  // 否则上一周期的延迟回调会误清掉新周期刚立起的护栏(#735 CodeRabbit)。
+  const composingGenRef = useRef(0);
   const activeMentionRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<MentionMenuState | null>(null);
 
@@ -230,13 +233,15 @@ export function Composer({
   );
 
   const onCompositionStart = () => {
+    composingGenRef.current += 1;
     composingRef.current = true;
   };
   const onCompositionEnd = () => {
     // WebKit/WKWebView 里确认候选的 compositionend 早于确认键 keydown——保持护栏到本轮事件结束后
     // 的下一帧再放开，确保那次 Enter 的 keydown 仍被拦住。没有 rAF（测试/SSR）时退回微任务。
+    const gen = composingGenRef.current;
     const release = () => {
-      composingRef.current = false;
+      if (gen === composingGenRef.current) composingRef.current = false; // 新周期已开始就别清
     };
     if (typeof requestAnimationFrame === "function") requestAnimationFrame(release);
     else void Promise.resolve().then(release);

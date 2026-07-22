@@ -9,6 +9,12 @@ import { Composer } from "./Composer";
 
 let renderer: ReactTestRenderer | null = null;
 let rafQueue: Array<() => void> = [];
+const savedDescriptors: Record<string, PropertyDescriptor | undefined> = {};
+
+function stubGlobal(key: string, value: unknown) {
+  savedDescriptors[key] = Object.getOwnPropertyDescriptor(globalThis, key);
+  Object.defineProperty(globalThis, key, { configurable: true, value });
+}
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>([["ap_locale", "en"]]);
@@ -24,20 +30,22 @@ function memoryStorage(): Storage {
 
 beforeEach(() => {
   rafQueue = [];
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
-  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
-  Object.defineProperty(globalThis, "window", { configurable: true, value: { innerHeight: 844 } });
+  stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  stubGlobal("localStorage", memoryStorage());
+  stubGlobal("window", { innerHeight: 844 });
   // 可控 rAF:攒起来,由测试决定何时放开护栏。
-  Object.defineProperty(globalThis, "requestAnimationFrame", {
-    configurable: true,
-    value: (cb: () => void) => { rafQueue.push(cb); return rafQueue.length; },
-  });
+  stubGlobal("requestAnimationFrame", (cb: () => void) => { rafQueue.push(cb); return rafQueue.length; });
 });
 
 afterEach(() => {
   act(() => renderer?.unmount());
   renderer = null;
-  Reflect.deleteProperty(globalThis, "requestAnimationFrame");
+  // 还原被替换的全局对象,避免泄漏到后续用例/文件(#735 CodeRabbit)。
+  for (const [key, desc] of Object.entries(savedDescriptors)) {
+    if (desc === undefined) Reflect.deleteProperty(globalThis, key);
+    else Object.defineProperty(globalThis, key, desc);
+    delete savedDescriptors[key];
+  }
 });
 
 function render(onSend: () => void) {
@@ -89,5 +97,29 @@ describe("Composer 输入法回车不误发 (#729)", () => {
     const ta = render(() => { sends += 1; });
     act(() => ta.props.onKeyDown(enter(false)));
     expect(sends).toBe(1);
+  });
+
+  test("无 requestAnimationFrame(SSR/测试环境)时走微任务回退,仍在合成周期内拦住 Enter", async () => {
+    stubGlobal("requestAnimationFrame", undefined); // 触发 Promise 微任务回退分支
+    let sends = 0;
+    const ta = render(() => { sends += 1; });
+    act(() => ta.props.onCompositionStart());
+    act(() => ta.props.onCompositionEnd()); // 放开动作压进微任务(未 flush)
+    act(() => ta.props.onKeyDown(enter(false)));
+    expect(sends).toBe(0);
+    await act(async () => { await Promise.resolve(); }); // flush 微任务 → 放开护栏
+    act(() => ta.props.onKeyDown(enter(false)));
+    expect(sends).toBe(1);
+  });
+
+  test("旧合成周期的延迟回调不清掉新周期的护栏(#735)", () => {
+    let sends = 0;
+    const ta = render(() => { sends += 1; });
+    act(() => ta.props.onCompositionStart()); // 周期1
+    act(() => ta.props.onCompositionEnd());    // 压入周期1的放开(gen=1)
+    act(() => ta.props.onCompositionStart()); // 周期2 立起新护栏(gen=2)
+    act(() => { rafQueue.forEach((cb) => cb()); }); // 周期1的放开触发,但 gen 已变 → 不清
+    act(() => ta.props.onKeyDown(enter(false))); // 仍在周期2合成中 → 不发
+    expect(sends).toBe(0);
   });
 });
