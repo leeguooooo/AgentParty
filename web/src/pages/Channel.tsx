@@ -79,6 +79,7 @@ import {
   agentFilterSearch,
   filterByAgent,
   parseAgentFilter,
+  seqFromQuery,
   setKind,
   toggleAgent,
   type AgentFilter,
@@ -1295,6 +1296,16 @@ export function ChannelSearchPanel({
           </span>
         )}
       </div>
+      {/* #716：搜索框直接输入 seq 号 → 给一个「跳到 #N」直达按钮（定位到聊天），无需先全文检索。 */}
+      {seqFromQuery(search) !== null && (
+        <button
+          type="button"
+          className="d-btn chan-search-seq-jump"
+          onClick={() => selectHit(seqFromQuery(search)!)}
+        >
+          {t("Channel.search.jumpToSeq", { seq: String(seqFromQuery(search)) })}
+        </button>
+      )}
       {query !== "" && (
         <div className="chan-search-filters">
           <input

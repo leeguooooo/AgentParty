@@ -4,6 +4,7 @@ import {
   filterByAgent,
   matchesAgentFilter,
   parseAgentFilter,
+  seqFromQuery,
   setKind,
   toggleAgent,
   type AgentFilter,
@@ -128,5 +129,24 @@ describe("agent filters", () => {
       { seq: 3, sender: { name: "bob", kind: "human" as const } },
     ];
     expect(filterByAgent(items, { mode: "only", agents: ["alice"], kind: "human" })).toEqual([items[0]]);
+  });
+});
+
+describe("seqFromQuery (#716)", () => {
+  test("纯数字（>0）识别为 seq", () => {
+    expect(seqFromQuery("634")).toBe(634);
+    expect(seqFromQuery("  42 ")).toBe(42);
+    expect(seqFromQuery("007")).toBe(7);
+  });
+  test("非纯数字 / 0 / 空 → null（走全文检索）", () => {
+    expect(seqFromQuery("")).toBeNull();
+    expect(seqFromQuery("0")).toBeNull();
+    expect(seqFromQuery("hello")).toBeNull();
+    expect(seqFromQuery("12a")).toBeNull();
+    expect(seqFromQuery("-5")).toBeNull();
+    expect(seqFromQuery("1.5")).toBeNull();
+  });
+  test("超出安全整数 → null（不误当 seq）", () => {
+    expect(seqFromQuery("99999999999999999999")).toBeNull();
   });
 });

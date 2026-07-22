@@ -1,3 +1,12 @@
+// #716：搜索框直接输入 seq 号即可定位到该消息。纯数字（去空白后全为数字、>0）识别为 seq 查询，
+// 面板据此给一个「跳到 #N」直达按钮；非纯数字仍走全文检索。前导零/超大值容错：Number 解析 + 有限正整数。
+export function seqFromQuery(search: string): number | null {
+  const trimmed = search.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const seq = Number(trimmed);
+  return Number.isSafeInteger(seq) && seq > 0 ? seq : null;
+}
+
 export type AgentFilterMode = "only" | "except";
 export type AgentFilterKind = "human" | "agent";
 
