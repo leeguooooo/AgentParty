@@ -27,7 +27,7 @@ import {
   saveAgentToken,
 } from "../lib/agentTokenVault";
 import { apiOrigin } from "../lib/base";
-import { desktopAgentAdapter, type DesktopAgentAdapter } from "../lib/desktopAgent";
+import { desktopAgentAdapter, type DesktopAgentAdapter, type DesktopAgentRunner } from "../lib/desktopAgent";
 import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
 import { LocalAgentsOverview } from "./LocalAgentsOverview";
 import { buildJoinPack, type JoinPackMode } from "../lib/joinPack";
@@ -95,6 +95,9 @@ export function AgentTokens({
   const residentBusyRef = useRef<string | null>(null);
   const [residentDone, setResidentDone] = useState<Set<string>>(() => new Set());
   const [residentError, setResidentError] = useState<string | null>(null);
+  // #725：转常驻要能选 codex/claude(默认 codex,与本机 agent 默认一致)。按 agent 名各记一份。
+  const [residentRunnerByName, setResidentRunnerByName] = useState<Record<string, DesktopAgentRunner>>({});
+  const residentRunnerFor = (name: string): DesktopAgentRunner => residentRunnerByName[name] ?? "codex";
   const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
   const [open, setOpen] = useState(false);
   const [agents, setAgents] = useState<ChannelAgentInfo[] | null>(null);
@@ -335,7 +338,7 @@ export function AgentTokens({
         token: agentToken,
         name,
         channel: slug,
-        runner: "claude",
+        runner: residentRunnerFor(name),
         workdir: dir,
       });
       setResidentDone((s) => new Set(s).add(name));
@@ -575,20 +578,37 @@ export function AgentTokens({
                       >
                         {busyName === agent.name ? t("AgentTokens.rotating") : t("AgentTokens.rotate")}
                       </button>
-                      {/* 转为常驻——仅 mac 桌面（launchd）；选工作目录后 dutyAdopt 落成本机常驻。 */}
+                      {/* 转为常驻——仅 mac 桌面（launchd）；先选 runner(codex/claude) 与工作目录,再 dutyAdopt 落地。 */}
                       {canMakeResident && (
-                        <button
-                          type="button"
-                          className="d-btn agenttokens-resident"
-                          disabled={residentBusy !== null}
-                          onClick={() => void makeResident(agent.name)}
-                        >
-                          {residentBusy === agent.name
-                            ? t("AgentTokens.residentBusy")
-                            : residentDone.has(agent.name)
-                              ? t("AgentTokens.residentDone")
-                              : t("AgentTokens.resident")}
-                        </button>
+                        <>
+                          <select
+                            className="d-input agenttokens-resident-runner"
+                            aria-label={t("AgentTokens.residentRunnerLabel", { name: agent.name })}
+                            value={residentRunnerFor(agent.name)}
+                            disabled={residentBusy !== null}
+                            onChange={(event) =>
+                              setResidentRunnerByName((current) => ({
+                                ...current,
+                                [agent.name]: event.target.value as DesktopAgentRunner,
+                              }))
+                            }
+                          >
+                            <option value="codex">codex</option>
+                            <option value="claude">claude</option>
+                          </select>
+                          <button
+                            type="button"
+                            className="d-btn agenttokens-resident"
+                            disabled={residentBusy !== null}
+                            onClick={() => void makeResident(agent.name)}
+                          >
+                            {residentBusy === agent.name
+                              ? t("AgentTokens.residentBusy")
+                              : residentDone.has(agent.name)
+                                ? t("AgentTokens.residentDone")
+                                : t("AgentTokens.resident")}
+                          </button>
+                        </>
                       )}
                     </div>
                   </li>

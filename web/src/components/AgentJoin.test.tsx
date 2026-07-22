@@ -313,11 +313,41 @@ describe("AgentJoin 桌面一键接管 (#616 phase 4)", () => {
         token: "ap_created",
         name: "leo-demo",
         channel: "demo",
-        runner: "claude",
+        runner: "codex", // #725：默认 codex,可在 done 态下拉切 claude
         workdir: "/picked/dir",
       },
     ]);
     expect(JSON.stringify(renderer!.toJSON())).toContain("resident ✓");
+  });
+
+  test("#725：done 态可选 runner，选 claude 后 dutyAdopt 带 runner=claude", async () => {
+    localStorage.setItem("ap_locale", "en");
+    setApiBase("https://agentparty.leeguoo.com");
+    const adopts: Array<{ runner: string }> = [];
+    const r = render(undefined, null, {
+      desktopDetect: () => true,
+      pickDirectory: async () => "/picked/dir",
+      dutyAdapter: {
+        dutyAdopt: async (input: { runner: string }) => {
+          adopts.push(input);
+          return { label: "l", instanceId: "x:demo", plistPath: "/p", logPath: "/l", loaded: true };
+        },
+      },
+    });
+    open(r);
+    pickUnattended(r);
+    await generate(r);
+    // 切到 claude
+    const runnerSelect = r.root.find(
+      (node) => node.type === "select" && node.props.className === "d-input agent-join-adopt-runner",
+    );
+    act(() => runnerSelect.props.onChange({ target: { value: "claude" } }));
+    const adoptBtn = r.root.find(
+      (node) => node.type === "button" && String(node.children[0] ?? "").includes("Choose a folder"),
+    );
+    await act(async () => { await adoptBtn.props.onClick(); });
+    expect(adopts).toHaveLength(1);
+    expect(adopts[0]!.runner).toBe("claude");
   });
 
   test("桌面 + 无人值守：取消选目录 → 不 adopt", async () => {
