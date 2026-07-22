@@ -339,6 +339,38 @@ describe("AgentJoin 桌面一键接管 (#616 phase 4)", () => {
     expect(adopts).toEqual([]);
   });
 
+  test("接管成功后重开生成新 agent：不残留上一次选的目录（#724 adoptDir 复位）", async () => {
+    localStorage.setItem("ap_locale", "en");
+    setApiBase("https://agentparty.leeguoo.com");
+    const r = render(undefined, null, {
+      desktopDetect: () => true,
+      pickDirectory: async () => "/picked/dir",
+      dutyAdapter: {
+        dutyAdopt: async () => ({
+          label: "com.agentparty.duty.x.demo",
+          instanceId: "x:demo",
+          plistPath: "/p",
+          logPath: "/l",
+          loaded: true,
+        }),
+      },
+    });
+    open(r);
+    pickUnattended(r);
+    await generate(r);
+    const adoptBtn = r.root.find(
+      (node) => node.type === "button" && String(node.children[0] ?? "").includes("Choose a folder"),
+    );
+    await act(async () => { await adoptBtn.props.onClick(); });
+    expect(JSON.stringify(renderer!.toJSON())).toContain("/picked/dir");
+    // 关掉重开，为下一个 agent 再生成无人值守命令——旧目录必须消失
+    act(() => windowEvents.emit("keydown", { key: "Escape" }));
+    open(r);
+    pickUnattended(r);
+    await generate(r);
+    expect(JSON.stringify(renderer!.toJSON())).not.toContain("/picked/dir");
+  });
+
   test("web（非桌面）+ 无人值守：不渲染运行按钮，改引导装桌面版 + 手动命令", async () => {
     localStorage.setItem("ap_locale", "en");
     const r = render(undefined, null, { desktopDetect: () => false });

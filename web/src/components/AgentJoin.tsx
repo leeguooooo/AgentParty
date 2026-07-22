@@ -71,6 +71,29 @@ type Phase =
   | { kind: "done"; name: string; token: string; command: string; mode: JoinPackMode }
   | { kind: "error"; message: string };
 
+// 「命令 + 复制按钮」块——桌面折叠内、web 教程、interactive 三处复用同一份，
+// 免得文案/样式/按钮行为漂移（#724 CodeRabbit）。
+function CommandBlock({
+  command,
+  copied,
+  onCopy,
+  t,
+}: {
+  command: string;
+  copied: boolean;
+  onCopy: () => void;
+  t: ReturnType<typeof useT>;
+}) {
+  return (
+    <div className="agent-join-cmd">
+      <pre className="t-mono agent-join-cmd-text">{command}</pre>
+      <button type="button" className="d-btn agent-join-copy" onClick={onCopy}>
+        {copied ? t("AgentJoin.copied") : t("AgentJoin.copy")}
+      </button>
+    </div>
+  );
+}
+
 export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accountKey, active, onActiveChange, dutyAdapter = desktopAgentAdapter, desktopDetect = isMacDesktop, pickDirectory = pickDirectoryDefault }: Props) {
   const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
@@ -152,6 +175,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
       setCopyErr(false);
       setAdoptState("idle");
       setAdoptError(null);
+      setAdoptDir(null); // 新 agent 的 done 态必须清掉上一次选的目录，否则 UI 误显残留路径
       setPhase({ kind: "done", name: agent.name, token: agent.token, command, mode });
     } catch (err) {
       // 同名占用 → 停在起名步，让用户换个有意义的名字（不静默塞随机后缀）
@@ -337,12 +361,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
                   )}
                   <details className="agent-join-manual">
                     <summary>{t("AgentJoin.manualSummary")}</summary>
-                    <div className="agent-join-cmd">
-                      <pre className="t-mono agent-join-cmd-text">{phase.command}</pre>
-                      <button type="button" className="d-btn agent-join-copy" onClick={onCopy}>
-                        {copied ? t("AgentJoin.copied") : t("AgentJoin.copy")}
-                      </button>
-                    </div>
+                    <CommandBlock command={phase.command} copied={copied} onCopy={onCopy} t={t} />
                   </details>
                 </div>
               ) : (
@@ -355,22 +374,12 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
                     </a>
                   </div>
                   <p className="agent-join-hint">{t("AgentJoin.manualWebLead")}</p>
-                  <div className="agent-join-cmd">
-                    <pre className="t-mono agent-join-cmd-text">{phase.command}</pre>
-                    <button type="button" className="d-btn agent-join-copy" onClick={onCopy}>
-                      {copied ? t("AgentJoin.copied") : t("AgentJoin.copy")}
-                    </button>
-                  </div>
+                  <CommandBlock command={phase.command} copied={copied} onCopy={onCopy} t={t} />
                 </>
               )
             ) : (
               // interactive：复制接入命令，贴进 agent 自己的 harness。
-              <div className="agent-join-cmd">
-                <pre className="t-mono agent-join-cmd-text">{phase.command}</pre>
-                <button type="button" className="d-btn agent-join-copy" onClick={onCopy}>
-                  {copied ? t("AgentJoin.copied") : t("AgentJoin.copy")}
-                </button>
-              </div>
+              <CommandBlock command={phase.command} copied={copied} onCopy={onCopy} t={t} />
             )}
             {copyErr && (
               <p className="banner banner--red agent-join-copyerr" role="alert">
