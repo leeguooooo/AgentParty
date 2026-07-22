@@ -43,6 +43,7 @@ export function ResidentDutyLogs({ t, adapter = desktopAgentAdapter }: Props) {
     async (label: string) => {
       const seq = ++loadSeqRef.current;
       setSelected(label);
+      setLog(""); // 先清掉旧日志,别让上一条实例的内容残留在新标题下(加载中会显示 loading)
       setLogBusy(true);
       setLogError(null);
       try {

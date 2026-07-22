@@ -604,7 +604,9 @@ pub(crate) fn desktop_duty_log_read(label: String, max_bytes: Option<usize>) -> 
             .map_err(|error| format!("cannot seek duty log: {error}"))?;
     }
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
+    // take(cap):serve 正在往日志追加,seek 后到 EOF 可能已超过 cap——硬性封顶到 cap 字节。
+    file.take(cap)
+        .read_to_end(&mut buf)
         .map_err(|error| format!("cannot read duty log: {error}"))?;
     // seek 可能切在多字节字符中间——tail_utf8 前移到字符边界。
     Ok(tail_utf8(&buf, buf.len()))
