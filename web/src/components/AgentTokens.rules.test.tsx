@@ -407,6 +407,24 @@ describe("AgentTokens 转为常驻", () => {
     expect(adopted).toHaveLength(0);
   });
 
+  test("连点两次只 adopt 一次（ref 同步锁，#721 评审）", async () => {
+    agentsFixture = [{ name: "planner", owner: "acct-1", channel_scope: "demo", created_at: 0 }];
+    saveAgentToken({ account: "acct-1", slug: "demo", name: "planner", token: "ap_saved", command: "x", savedAt: 1 });
+    const adopted: unknown[] = [];
+    const r = await renderResident({
+      canMakeResident: true,
+      pickDirectory: async () => { await new Promise((res) => setTimeout(res, 5)); return "/picked/dir"; },
+      dutyAdapter: { dutyAdopt: async () => { adopted.push(1); return {}; } },
+    });
+    await act(async () => {
+      const btn = findClass(r, "d-btn agenttokens-resident");
+      btn.props.onClick(); // 第一次：同步上锁 ref，随后 await pickDirectory
+      btn.props.onClick(); // 第二次：ref 非空 → 立即返回，不并发
+      await new Promise((res) => setTimeout(res, 40));
+    });
+    expect(adopted).toHaveLength(1);
+  });
+
   test("非 mac 桌面（canMakeResident=false）→ 不渲染转常驻按钮", async () => {
     agentsFixture = [{ name: "planner", owner: "acct-1", channel_scope: "demo", created_at: 0 }];
     const r = await renderResident({ canMakeResident: false });

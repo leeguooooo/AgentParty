@@ -90,8 +90,9 @@ export function AgentTokens({
 }: Props) {
   const t = useT();
   const rootRef = useRef<HTMLDivElement | null>(null);
-  // 转为常驻状态：busy 名 / 已完成集 / 错误。
+  // 转为常驻状态：busy 名 / 已完成集 / 错误。residentBusyRef 是同步锁（state 更新晚于 await，见 makeResident）。
   const [residentBusy, setResidentBusy] = useState<string | null>(null);
+  const residentBusyRef = useRef<string | null>(null);
   const [residentDone, setResidentDone] = useState<Set<string>>(() => new Set());
   const [residentError, setResidentError] = useState<string | null>(null);
   const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
@@ -265,32 +266,38 @@ export function AgentTokens({
     }
   }
 
+  // rotate token + 重建接入命令 + 存回 vault 的共享流程（rotate 与转常驻都用）。返回新明文 token。
+  // #612：换 token 不换接入方式——沿用旧记录的 mode，让「复制接入包」仍是同款脚本。
+  // #530：桌面版 location.origin 是 tauri://localhost，接入包会报错；优先真实后端 apiBase，同源 web 回退 origin。
+  async function regenerateAndSaveToken(name: string): Promise<string> {
+    const next = await rotateChannelAgent(token, slug, name);
+    const command = buildMinimalAgentCommand({
+      server: apiOrigin(),
+      slug,
+      name: next.name,
+      token: next.token,
+      inviterName,
+      checkinMessage: t("AgentTokens.checkinMessage", { name: next.name }),
+    });
+    saveAgentToken({
+      account: accountKey,
+      slug,
+      name: next.name,
+      token: next.token,
+      command,
+      mode: findSavedAgentToken(accountKey, slug, name)?.mode,
+      savedAt: Date.now(),
+    });
+    return next.token;
+  }
+
   async function rotate(name: string) {
     const ok = window.confirm(t("AgentTokens.rotateConfirm", { name }));
     if (!ok) return;
     setBusyName(name);
     setError(null);
     try {
-      const next = await rotateChannelAgent(token, slug, name);
-      const command = buildMinimalAgentCommand({
-        // #530：桌面版 location.origin 是 tauri://localhost，接入包会报错；优先真实后端 apiBase，同源 web 回退 origin。
-        server: apiOrigin(),
-        slug,
-        name: next.name,
-        token: next.token,
-        inviterName,
-        checkinMessage: t("AgentTokens.checkinMessage", { name: next.name }),
-      });
-      saveAgentToken({
-        account: accountKey,
-        slug,
-        name: next.name,
-        token: next.token,
-        command,
-        // #612：换 token 不换接入方式——无人值守 agent 轮换后复制的仍是值守机脚本。
-        mode: findSavedAgentToken(accountKey, slug, name)?.mode,
-        savedAt: Date.now(),
-      });
+      await regenerateAndSaveToken(name);
       await refresh();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
@@ -307,27 +314,20 @@ export function AgentTokens({
     const saved = findSavedAgentToken(accountKey, slug, name);
     if (saved) return saved.token;
     if (!window.confirm(t("AgentTokens.residentRegenConfirm", { name }))) return null;
-    const next = await rotateChannelAgent(token, slug, name);
-    const command = buildMinimalAgentCommand({
-      server: apiOrigin(),
-      slug,
-      name: next.name,
-      token: next.token,
-      inviterName,
-      checkinMessage: t("AgentTokens.checkinMessage", { name: next.name }),
-    });
-    saveAgentToken({ account: accountKey, slug, name: next.name, token: next.token, command, savedAt: Date.now() });
-    return next.token;
+    return regenerateAndSaveToken(name);
   }
 
   // 把某个 agent 身份转成本机 launchd 常驻：先选工作目录（必选，不手填），再 dutyAdopt 落地。
+  // #721 评审：用 ref 同步上锁——residentBusy 是 state，要等 await pickDirectory 后才生效，
+  // 连点会绕过 state 守卫并发触发 rotate/dutyAdopt（第二次 rotate 作废第一次的 token）。
   async function makeResident(name: string) {
-    if (!canMakeResident || residentBusy !== null) return;
-    const dir = await pickDirectory(t("AgentTokens.residentPickTitle", { name }));
-    if (dir === null) return; // 取消选目录 = 放弃整个操作
+    if (!canMakeResident || residentBusyRef.current !== null) return;
+    residentBusyRef.current = name;
     setResidentBusy(name);
     setResidentError(null);
     try {
+      const dir = await pickDirectory(t("AgentTokens.residentPickTitle", { name }));
+      if (dir === null) return; // 取消选目录 = 放弃整个操作
       const agentToken = await tokenForResidency(name);
       if (agentToken === null) return; // 未同意重新生成
       await dutyAdapter.dutyAdopt({
@@ -344,6 +344,7 @@ export function AgentTokens({
       if (err instanceof AuthError) onAuthFailed(err.message);
       else setResidentError(err instanceof Error ? err.message : String(err));
     } finally {
+      residentBusyRef.current = null;
       setResidentBusy(null);
     }
   }

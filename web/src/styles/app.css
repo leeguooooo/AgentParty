@@ -313,7 +313,10 @@
   align-items: center;
   gap: 8px;
 }
-/* #工作目录选择器：手填框 + 「选择目录」按钮并排 */
+/* #工作目录选择器：手填框 + 「选择目录」按钮并排。字段容器是 div（按钮不能嵌 label 内，#721 评审），
+   补回 .desktop-agent-fields label 的网格单元样式，内部 label 复现原 span 的块级标题。 */
+.desktop-agent-fields .desktop-agent-workdir-field { min-width: 0; color: var(--t-dim); font-size: 9px; }
+.desktop-agent-fields .desktop-agent-workdir-field > label { display: block; margin-bottom: 3px; }
 .desktop-agent-workdir-row { display: flex; gap: 6px; align-items: stretch; }
 .desktop-agent-workdir-input { flex: 1 1 auto; min-width: 0; }
 .desktop-agent-workdir-pick { flex: 0 0 auto; white-space: nowrap; }

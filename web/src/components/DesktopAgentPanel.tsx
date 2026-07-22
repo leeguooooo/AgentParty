@@ -355,10 +355,11 @@ export function DesktopAgentPanel({ t, adapter = desktopAgentAdapter, scheduler 
               {RUNNERS.map((value) => <option key={value} value={value}>{value}</option>)}
             </select>
           </label>
-          <label>
-            <span>{t("DesktopSettings.agent.workdir")}</span>
+          <div className="desktop-agent-workdir-field">
+            <label htmlFor="desktop-agent-workdir">{t("DesktopSettings.agent.workdir")}</label>
             <span className="desktop-agent-workdir-row">
               <input
+                id="desktop-agent-workdir"
                 className="t-mono desktop-agent-workdir-input"
                 name="desktop-agent-workdir"
                 value={workdir}
@@ -382,7 +383,7 @@ export function DesktopAgentPanel({ t, adapter = desktopAgentAdapter, scheduler 
                 {t("DesktopSettings.agent.workdirPick")}
               </button>
             </span>
-          </label>
+          </div>
           <label className="desktop-agent-persist">
             <input
               type="checkbox"
