@@ -54,19 +54,31 @@ describe("release.yml 并行门禁 + CI 拆分不变量 (#247 phase 2)", () => {
   });
 
   test("check-cli 分片无条件跑 + tsc 单列（cli 在快路径与全量下都要测）", () => {
-    expect(yml).toMatch(/check-cli:\s*\n\s*name: check cli \(shard/);
-    expect(yml).toContain("bun test --shard=${{ matrix.shard }}/6");
-    expect(yml).toContain("shard: [1, 2, 3, 4, 5, 6]");
-    expect(yml).toMatch(/check-cli-types:\s*\n\s*name: check cli \(types\)/);
-    expect(yml).toContain("bunx tsc --noEmit");
+    // 截到各自 job 片段验证，别用全局 yml（否则别的 job 的命令也能让断言通过，#723 评审）。
+    const cliJob = yml.slice(yml.indexOf("  check-cli:\n"), yml.indexOf("  check-cli-types:\n"));
+    const cliTypesJob = yml.slice(yml.indexOf("  check-cli-types:\n"), yml.indexOf("  check-rest:\n"));
+    expect(cliJob).toContain("name: check cli (shard");
+    expect(cliJob).toContain("bun test --shard=${{ matrix.shard }}/6");
+    expect(cliJob).toContain("shard: [1, 2, 3, 4, 5, 6]");
+    expect(cliJob).toContain("working-directory: cli");
+    expect(cliTypesJob).toContain("name: check cli (types)");
+    expect(cliTypesJob).toContain("bunx tsc --noEmit");
+    // 无条件跑：cli 在 cli_only 快路径下也要测，故两个 job 都不带 if: 门。
+    expect(cliJob).not.toMatch(/^\s+if:/m);
+    expect(cliTypesJob).not.toMatch(/^\s+if:/m);
   });
 
-  test('聚合 "full check" needs 全部 workspace job（含 worker 分片与 types），且 if: always()', () => {
+  test('聚合 "full check" needs 全部 workspace job（含 worker 分片与 types + desktop），且 if: always()', () => {
     expect(yml).toMatch(/check:\s*\n\s*name: full check/);
-    for (const dep of ["check-cli", "check-cli-types", "check-rest", "check-worker", "check-worker-types", "version-contract"]) {
-      expect(yml).toContain(`- ${dep}`);
+    // 限定在 check job 片段内，且把 check-desktop 一并纳入断言（漏了 desktop 依赖也该红，#723 评审）。
+    const fullCheckJob = yml.slice(yml.indexOf("  check:\n"), yml.indexOf("  build:\n"));
+    for (const dep of ["check-cli", "check-cli-types", "check-rest", "check-worker", "check-worker-types", "check-desktop", "version-contract"]) {
+      expect(fullCheckJob).toContain(`- ${dep}`);
     }
-    expect(yml).toContain("if: always()");
+    // check-cli-types 不仅进 needs，还要进失败判定（env + for 循环），否则 types 挂了聚合仍绿。
+    expect(fullCheckJob).toContain("R_CLI_TYPES: ${{ needs.check-cli-types.result }}");
+    expect(fullCheckJob).toMatch(/for r in[\s\S]*"\$R_CLI_TYPES"/);
+    expect(fullCheckJob).toContain("if: always()");
   });
 
   test("聚合门禁把 failure/cancelled 变成自己失败，只有 success|skipped 通过（漏配不漏测）", () => {

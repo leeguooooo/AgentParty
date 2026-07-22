@@ -227,7 +227,9 @@ jobs:
 
   # 唯一的 required 门禁，名字保持 "full check"（分支保护映射的就是它，不用改设置）。
   # if: always() → 无论上游成功/跳过/失败都跑；任一 workspace job 结论为 failure/cancelled
-  # 则本 job 失败，skipped（快路径跳过的）与 success 都算通过。build/desktop 仍 needs: check。
+  # 则本 job 失败，skipped（快路径跳过的）与 success 都算通过。
+  # 注：build/desktop 已解耦、各自只 needs 相关 check（#719），不再 needs 这个聚合 job；
+  # 但 publish 经 build+desktop 的传递闭包仍覆盖全部 check，"全绿才发布"不变。
   check:
     name: full check
     needs:
