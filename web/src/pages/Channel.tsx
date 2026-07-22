@@ -3824,7 +3824,15 @@ export function ChannelPage({
 
   const saveEdit = useCallback(() => {
     if (editingSeq === null || editSaving || editingMessage === null || editingMessage.kind !== "message") return;
-    if (editDraft.trim() === "" || editDraft === editingMessage.body) return;
+    if (editDraft.trim() === "") return;
+    // #722：未改动就点保存 → 直接关掉编辑器(等价取消),不发无谓请求。保存键不再因此变灰,
+    // 所以这里必须把「无变化」当成一次干净的关闭,而不是静默 no-op(否则又变成点了没反应)。
+    if (editDraft.trim() === editingMessage.body.trim()) {
+      setEditingSeq(null);
+      setEditDraft("");
+      setMessageActionError(null);
+      return;
+    }
     setEditSaving(true);
     setMessageActionBusySeq(editingSeq);
     setMessageActionError(null);

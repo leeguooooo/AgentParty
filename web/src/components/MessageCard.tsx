@@ -433,7 +433,10 @@ function MessageCardImpl({
   const canTask = canReply && canCreateTask;
   const canEdit = canReply && canRevise;
   const canRetract = canReply && canRevise;
-  const saveDisabled = editSaving || editDraft.trim() === "" || editDraft === msg.body;
+  // #722：只在「保存中」或「空」时禁用。原来还带 `editDraft === msg.body`——编辑器一打开草稿
+  // 就等于原文,保存键当场变灰、看着像坏了(用户报「编辑后点不了保存」)。改为始终可点:未改动就
+  // 点保存时由 onEditSave 直接关掉编辑器(见 Channel.saveEdit),不发无谓请求。
+  const saveDisabled = editSaving || editDraft.trim() === "";
   const menuItemCount = Number(canReply) + Number(canTask) + Number(canEdit) + Number(canRetract) + 1;
   // 引用预览：quotedMessage 为 null 有两种含义——没引用，或引用目标不在已加载窗口内；
   // 后者在渲染处降级回纯编号 ↩ #N（见下方 JSX），这里只在真有内容时才算标签/预览文字。
