@@ -4050,6 +4050,8 @@
   border-color: var(--d-green-dark, var(--d-green));
   color: var(--d-green-dark, var(--d-green));
 }
+/* 转常驻的 runner 选择（codex/claude），紧贴在「转为常驻」按钮前 */
+.agenttokens-resident-runner { min-width: 78px; }
 .agenttokens-project {
   display: flex;
   flex-direction: column;
