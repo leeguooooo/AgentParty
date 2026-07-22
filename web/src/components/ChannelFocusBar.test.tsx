@@ -87,7 +87,9 @@ describe("ChannelFocusBar (#682)", () => {
     expect(renderer!.toJSON()).toBeNull();
   });
 
-  test("renders the three states with visually distinct modifier classes", () => {
+  // 紧凑内联版（用户要求「硬两行、永不折」）：非「在等你」的在途项不再逐条铺开，而是压进定宽计数丸——
+  // 每个非零状态段各带本态语气色圆点，保留「三态视觉可区分」的原契约。
+  test("summarizes non-waiting states as a distinct-per-state counts pill", () => {
     render({
       focus: focus({
         items: [
@@ -100,20 +102,64 @@ describe("ChannelFocusBar (#682)", () => {
       }),
     });
     const cls = classNames().join(" ");
-    expect(cls).toContain("focus-item--working");
-    expect(cls).toContain("focus-item--blocked");
-    expect(cls).toContain("focus-item--waiting_decision");
-    expect(cls).toContain("focus-item--stalled");
-    // distinct dots per state
+    // 计数丸按状态分段，各段带本态类 + 本态色圆点。
+    expect(cls).toContain("focus-count--working");
+    expect(cls).toContain("focus-count--blocked");
+    expect(cls).toContain("focus-count--waiting_decision");
+    expect(cls).toContain("focus-count--stalled");
     expect(cls).toContain("focus-dot--working");
     expect(cls).toContain("focus-dot--blocked");
     expect(cls).toContain("focus-dot--waiting_decision");
     expect(cls).toContain("focus-dot--stalled");
   });
 
-  test("blocked item shows the blocked reason inline", () => {
-    render({ focus: focus({ items: [item({ key: "b", state: "blocked", blockedOn: "等 KycFeign 结果", label: "x" })] }) });
+  test("zero-count states are omitted from the counts pill", () => {
+    render({
+      focus: focus({
+        items: [item({ key: "a", name: "Evan", state: "working" })],
+        counts: { working: 1, blocked: 0, waitingDecision: 0, stalled: 0 },
+      }),
+    });
+    const cls = classNames().join(" ");
+    expect(cls).toContain("focus-count--working");
+    expect(cls).not.toContain("focus-count--blocked");
+    expect(cls).not.toContain("focus-count--stalled");
+  });
+
+  // 「在等你」是 owner 最关心的一类，仍逐条展开成高亮 chip（含阻塞原因），不折进计数丸。
+  test("expands a waiting-on-you item as a highlighted chip with its blocked reason", () => {
+    render({
+      focus: focus({
+        items: [item({ key: "b", name: "kw", state: "blocked", blockedOn: "等 KycFeign 结果", label: "x", waitingOnMe: true })],
+        counts: { working: 0, blocked: 1, waitingDecision: 0, stalled: 0 },
+      }),
+      viewerIsModerator: true,
+    });
     expect(JSON.stringify(renderer!.toJSON())).toContain("等 KycFeign 结果");
+  });
+
+  // 「在等你」封顶两个，其余折成 +N 溢出计数，点开进任务台账。
+  test("caps waiting-on-you chips at two and shows a +N overflow", () => {
+    const opened: number[] = [];
+    const mine = [1, 2, 3, 4].map((n) =>
+      item({ key: `d${n}`, name: `front${n}`, state: "waiting_decision", label: "approve", seq: n, waitingOnMe: true }),
+    );
+    render({
+      focus: focus({ items: mine, counts: { working: 0, blocked: 0, waitingDecision: 4, stalled: 0 } }),
+      viewerIsModerator: true,
+      onOpenTask: (id) => opened.push(id),
+    });
+    // 只展开前两个 chip，其余折成 +N（4 - 2 = 2）。
+    const chips = renderer!.root.findAll(
+      (n) => typeof n.props.className === "string" && n.props.className.includes("focus-item--me"),
+    );
+    expect(chips.length).toBe(2);
+    const overflow = renderer!.root.findAll(
+      (n) => typeof n.props.className === "string" && n.props.className.includes("focus-more"),
+    )[0];
+    expect(overflow!.props.children).toEqual(["+", 2]);
+    act(() => { overflow!.props.onClick(); });
+    expect(opened.length).toBe(1);
   });
 
   test("highlights the 'waiting on you' block for owner/moderator", () => {
@@ -126,26 +172,47 @@ describe("ChannelFocusBar (#682)", () => {
     expect(JSON.stringify(renderer!.toJSON())).toContain("needs your call");
   });
 
-  test("wires task drill-down to onOpenTask and decision drill-down to onJumpSeq", () => {
+  // 下钻只从展开的「在等你」chip 触发（其余项已折进计数丸）：task 派生项 → onOpenTask，decision 派生项 → onJumpSeq。
+  test("wires waiting-on-you task drill-down to onOpenTask and decision drill-down to onJumpSeq", () => {
     const openedTasks: number[] = [];
     const jumped: number[] = [];
     render({
       focus: focus({
         items: [
-          item({ key: "task-3", state: "working", taskId: 3 }),
-          item({ key: "decision-9", name: "front", state: "waiting_decision", label: "d", seq: 9 }),
+          item({ key: "task-3", name: "me", state: "blocked", taskId: 3, waitingOnMe: true }),
+          item({ key: "decision-9", name: "front", state: "waiting_decision", label: "d", seq: 9, waitingOnMe: true }),
         ],
+        counts: { working: 0, blocked: 1, waitingDecision: 1, stalled: 0 },
       }),
       onOpenTask: (id) => openedTasks.push(id),
       onJumpSeq: (seq) => jumped.push(seq),
     });
-    // find the two drill buttons and click them
-    const buttons = renderer!.root.findAllByType("button");
-    expect(buttons.length).toBeGreaterThanOrEqual(2);
-    act(() => { buttons[0]!.props.onClick(); });
-    act(() => { buttons[1]!.props.onClick(); });
+    // 两个 chip 的下钻按钮 + 计数丸按钮都可点；chip 按 items 顺序在前。
+    const drills = renderer!.root.findAll(
+      (n) => typeof n.props.className === "string" && n.props.className.includes("focus-item-btn"),
+    );
+    expect(drills.length).toBe(2);
+    act(() => { drills[0]!.props.onClick(); });
+    act(() => { drills[1]!.props.onClick(); });
     expect(openedTasks).toEqual([3]);
     expect(jumped).toEqual([9]);
+  });
+
+  // 计数丸点开回任务台账（Channel 里忽略具体 id，只负责开面板）。
+  test("counts pill opens the task board via onOpenTask", () => {
+    const opened: number[] = [];
+    render({
+      focus: focus({
+        items: [item({ key: "a", name: "Evan", state: "working" })],
+        counts: { working: 1, blocked: 0, waitingDecision: 0, stalled: 0 },
+      }),
+      onOpenTask: (id) => opened.push(id),
+    });
+    const pill = renderer!.root.findAll(
+      (n) => typeof n.props.className === "string" && n.props.className.includes("focus-counts--btn"),
+    )[0];
+    act(() => { pill!.props.onClick(); });
+    expect(opened.length).toBe(1);
   });
 
   test("shows a manual focus line when host set an override even with no items", () => {

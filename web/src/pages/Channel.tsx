@@ -4253,12 +4253,14 @@ export function ChannelPage({
             onAuthFailed={onAuthFailed}
           />
         ) : null}
-      />
-      <ChannelFocusBar
-        focus={channelFocus}
-        viewerIsModerator={canModerate}
-        onOpenTask={() => openPanel("tasks")}
-        onJumpSeq={jumpToMention}
+        focus={
+          <ChannelFocusBar
+            focus={channelFocus}
+            viewerIsModerator={canModerate}
+            onOpenTask={() => openPanel("tasks")}
+            onJumpSeq={jumpToMention}
+          />
+        }
       />
       {kickError !== null && <p className="banner banner--red">{kickError}</p>}
       {pauseError !== null && <p className="banner banner--red">{pauseError}</p>}

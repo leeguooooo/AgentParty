@@ -24,6 +24,8 @@ interface Props {
   onResumeAgent?: (name: string) => void;
   roles?: ChannelRoleAssignment[];
   headerControls?: ReactElement | null;
+  // 频道焦点栏（#682）折进头部主行：紧凑内联渲染「球在谁手里 / 在等你」，不再单占一条（用户反馈）。
+  focus?: ReactElement | null;
   // issue #272（审计重开）：点 presence roster 里的某个人/agent，打开它的单 Agent 详情弹窗。
   onOpenAgentDetail?: (name: string) => void;
 }
@@ -355,6 +357,7 @@ export function PresenceBar({
   onResumeAgent,
   roles = [],
   headerControls,
+  focus,
   onOpenAgentDetail,
 }: Props) {
   const t = useT();
@@ -938,6 +941,7 @@ export function PresenceBar({
             <span className="presence-toggle-arrow" aria-hidden="true">{rosterOpen ? "▾" : "▸"}</span>
           </button>
         </div>
+        {focus !== undefined && focus !== null && focus}
         {headerControls !== undefined && headerControls !== null && (
           <div className="presence-channel-controls">{headerControls}</div>
         )}
