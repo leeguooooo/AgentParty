@@ -277,12 +277,13 @@ describe("AgentJoin 桌面一键接管 (#616 phase 4)", () => {
     });
   }
 
-  test("桌面环境 + 无人值守：一键接管调 dutyAdopt，token 走 IPC 而非 URL", async () => {
+  test("桌面环境 + 无人值守：选工作目录后调 dutyAdopt（带 workdir），token 走 IPC 而非 URL", async () => {
     localStorage.setItem("ap_locale", "en");
     setApiBase("https://agentparty.leeguoo.com");
     const adopts: unknown[] = [];
     const r = render(undefined, null, {
       desktopDetect: () => true,
+      pickDirectory: async () => "/picked/dir",
       dutyAdapter: {
         dutyAdopt: async (input: unknown) => {
           adopts.push(input);
@@ -301,7 +302,7 @@ describe("AgentJoin 桌面一键接管 (#616 phase 4)", () => {
     await generate(r);
 
     const adoptBtn = r.root.find(
-      (node) => node.type === "button" && String(node.children[0] ?? "").includes("Keep resident on this Mac"),
+      (node) => node.type === "button" && String(node.children[0] ?? "").includes("Choose a folder"),
     );
     await act(async () => {
       await adoptBtn.props.onClick();
@@ -313,20 +314,44 @@ describe("AgentJoin 桌面一键接管 (#616 phase 4)", () => {
         name: "leo-demo",
         channel: "demo",
         runner: "claude",
+        workdir: "/picked/dir",
       },
     ]);
     expect(JSON.stringify(renderer!.toJSON())).toContain("resident ✓");
   });
 
-  test("非桌面环境或交互模式：不渲染接管按钮", async () => {
+  test("桌面 + 无人值守：取消选目录 → 不 adopt", async () => {
+    localStorage.setItem("ap_locale", "en");
+    setApiBase("https://agentparty.leeguoo.com");
+    const adopts: unknown[] = [];
+    const r = render(undefined, null, {
+      desktopDetect: () => true,
+      pickDirectory: async () => null,
+      dutyAdapter: { dutyAdopt: async (input: unknown) => { adopts.push(input); return {} as never; } },
+    });
+    open(r);
+    pickUnattended(r);
+    await generate(r);
+    const adoptBtn = r.root.find(
+      (node) => node.type === "button" && String(node.children[0] ?? "").includes("Choose a folder"),
+    );
+    await act(async () => { await adoptBtn.props.onClick(); });
+    expect(adopts).toEqual([]);
+  });
+
+  test("web（非桌面）+ 无人值守：不渲染运行按钮，改引导装桌面版 + 手动命令", async () => {
     localStorage.setItem("ap_locale", "en");
     const r = render(undefined, null, { desktopDetect: () => false });
     open(r);
     pickUnattended(r);
     await generate(r);
+    // 没有「选工作目录并运行」按钮
     expect(
-      r.root.findAll((node) => node.type === "button" && String(node.children[0] ?? "").includes("Keep resident")),
+      r.root.findAll((node) => node.type === "button" && String(node.children[0] ?? "").includes("Choose a folder")),
     ).toHaveLength(0);
+    // 有「安装桌面版」入口
+    const json = JSON.stringify(renderer!.toJSON());
+    expect(json).toContain("Install the desktop app");
   });
 });
 
