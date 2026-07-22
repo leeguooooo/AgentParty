@@ -15,6 +15,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { agentpartyHome } from "./config";
+import { sleepSyncMs } from "./sync-sleep";
 
 export type InstanceKind = "watch" | "serve";
 
@@ -145,7 +146,7 @@ export function acquireInstanceLock(kind: InstanceKind, channel: string, dir: st
           /* Another contender already removed the stale reclaim lock. */
         }
       } else {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+        sleepSyncMs(1);
       }
       continue;
     }
