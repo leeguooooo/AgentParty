@@ -1,5 +1,6 @@
 import { isTauriEnvironment } from "./desktopUpdater";
 import { parsePairDeepLink, resolveAllowedVerificationUrl, type PairDeepLink } from "./desktopPairing";
+import { parseChannelDeepLink, type ChannelDeepLink } from "./channelLink";
 
 export type DesktopNotificationPermission =
   | "granted"
@@ -305,6 +306,30 @@ export async function listenForDesktopPairLinks(
       for (const input of urls) {
         const parsed = parsePairDeepLink(input, allowedOrigins);
         if (parsed !== null) onPairLink(parsed);
+      }
+    };
+    const unlisten = await deepLink.onOpenUrl(deliver);
+    const current = await deepLink.getCurrent();
+    if (current !== null) deliver(current);
+    return unlisten;
+  } catch {
+    return () => {};
+  }
+}
+
+// 桌面版：接住外部工具打来的「直达频道」deep link（agentparty://channel/<slug>?server=<origin>）。
+// 结构与 listenForDesktopPairLinks 对称——onOpenUrl 收 live 链接、getCurrent 收冷启动链接，逐条解析后
+// 分发给宿主导航。channel host 与 pair host 靠 hostname 分流，两个 listener 各取所需、互不误吞。
+export async function listenForDesktopChannelLinks(
+  onChannelLink: (link: ChannelDeepLink) => void,
+): Promise<() => void> {
+  if (!isDesktopRuntime()) return () => {};
+  try {
+    const deepLink = await dependencies.loadDeepLink();
+    const deliver = (urls: string[]) => {
+      for (const input of urls) {
+        const parsed = parseChannelDeepLink(input);
+        if (parsed !== null) onChannelLink(parsed);
       }
     };
     const unlisten = await deepLink.onOpenUrl(deliver);
