@@ -2884,6 +2884,12 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+/* #716：输入 seq 号时的「跳到 #N」直达按钮，顶格醒目 */
+.chan-search-seq-jump {
+  align-self: flex-start;
+  font-size: 12px;
+  font-weight: 600;
+}
 .chan-filter-input {
   flex: 1 1 150px;
   min-width: 0;
