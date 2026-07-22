@@ -39,6 +39,30 @@ function opts(over: Partial<ServeOptions> & { server: string }): ServeOptions {
   };
 }
 
+describe("serve --auto-upgrade 启动提醒 (#720)", () => {
+  function archiveAfterWelcome(): MockServer {
+    return startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(1, "me"));
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 30);
+    });
+  }
+
+  test("没开 --auto-upgrade：启动时提醒一次不会自升级", async () => {
+    server = archiveAfterWelcome();
+    const lines: string[] = [];
+    await runServe(opts({ server: server.url, runCommand: async () => {}, out: (l) => lines.push(l) }));
+    expect(lines.filter((l) => l.includes("未开 --auto-upgrade")).length).toBe(1);
+  });
+
+  test("开了 --auto-upgrade：不提醒", async () => {
+    server = archiveAfterWelcome();
+    const lines: string[] = [];
+    await runServe(opts({ server: server.url, autoUpgrade: true, runCommand: async () => {}, out: (l) => lines.push(l) }));
+    expect(lines.some((l) => l.includes("未开 --auto-upgrade"))).toBe(false);
+  });
+});
+
 describe("serve writes local WS health (#254)", () => {
   test("welcome + frames mark ws_connected and stamp a fresh last_frame_at", async () => {
     server = startMockServer((frame, sock) => {

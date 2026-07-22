@@ -4039,6 +4039,11 @@ export async function runServe(o: ServeOptions): Promise<number> {
     out(
       `serving #${o.channel} — 每条${o.mentionsOnly ? " @你 的" : ""}消息触发一次命令（Ctrl-C 停）`,
     );
+    // #720：没开 --auto-upgrade 的常驻会卡在旧版——权限墙拦 `curl … | sh`、重启又自毁本轮会话。
+    // 提醒一次:加 --auto-upgrade(唤醒间隙自行下载+校验+re-exec,无需人工),或用桌面版 launchd 常驻(默认带)。
+    if (o.autoUpgrade !== true) {
+      out("serve: 未开 --auto-upgrade——本进程不会自升级，落后版本需人工重启。加 --auto-upgrade 让它在唤醒间隙自行换新，或用桌面版「转为常驻」(launchd，默认带)。");
+    }
     if (o.statusline === true) {
       heartbeat = setInterval(() => {
         bestEffortLocalState(() => writeStatuslineCache({
