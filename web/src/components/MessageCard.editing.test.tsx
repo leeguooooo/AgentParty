@@ -255,4 +255,13 @@ describe("save button 可点性 (#722：编辑后点不了保存)", () => {
     expect(saveCalls).toBe(1);
     expect(saveEvent.wasPrevented()).toBe(true);
   });
+
+  test("草稿等于原文时 Ctrl+Enter(非 mac)同样触发 onEditSave", () => {
+    let saveCalls = 0;
+    const textarea = renderEditor({ editDraft: "original", onEditSave: () => { saveCalls += 1; } });
+    const saveEvent = keyEvent("Enter", { ctrlKey: true });
+    act(() => textarea.props.onKeyDown(saveEvent));
+    expect(saveCalls).toBe(1);
+    expect(saveEvent.wasPrevented()).toBe(true);
+  });
 });
