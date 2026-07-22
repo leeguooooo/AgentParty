@@ -48,7 +48,9 @@ export async function run(argv: string[]): Promise<number> {
   }
   const since = parseNonNegativeIntFlag(str(flags.since), "since");
   if (typeof since === "string") {
-    console.error(since);
+    // #714：--since 收的是消息 seq（整数），不是时间戳。「since」这词强烈暗示时间，报错要点破语义，
+    // 别只甩「必须是非负整数」让人一头雾水。
+    console.error(`${since} — --since 需要消息 seq（整数），不是时间戳；先跑 party history <channel> 看当前 seq`);
     return 1;
   }
   const before = parseNonNegativeIntFlag(str(flags.before), "before");

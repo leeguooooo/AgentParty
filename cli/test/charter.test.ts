@@ -61,4 +61,36 @@ describe("party charter command", () => {
     expect(charter).toBe("updated charter");
     expect(stderr).toEqual([]);
   });
+
+  test("#713：party charter get <slug> 与 set 对称，按 slug 读取而非把 get 当频道名", async () => {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(String(input), init);
+      const url = new URL(req.url);
+      if (url.pathname === "/api/channels/dev/charter" && req.method === "GET") {
+        return Response.json({ charter: "hello charter", charter_rev: 1, updated_at: 1, updated_by: "a" });
+      }
+      // 若把 "get" 误当频道名，会打到 /api/channels/get/charter → 这里 404 → 命令报「channel not found」
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    expect(await run(["get", "dev", "--json"])).toBe(0);
+    expect(JSON.parse(stdout.pop() ?? "{}").charter).toBe("hello charter");
+    expect(stderr).toEqual([]);
+  });
+
+  test("#717：`charter get`（无后续 slug）仍按字面读名为 get 的频道，不被兼容语法吃掉", async () => {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(String(input), init);
+      const url = new URL(req.url);
+      if (url.pathname === "/api/channels/get/charter" && req.method === "GET") {
+        return Response.json({ charter: "the get channel", charter_rev: 1, updated_at: 1, updated_by: "a" });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    // 没有第二个位置参数 → "get" 当作频道名，而不是读取子命令
+    expect(await run(["get", "--json"])).toBe(0);
+    expect(JSON.parse(stdout.pop() ?? "{}").charter).toBe("the get channel");
+    expect(stderr).toEqual([]);
+  });
 });
