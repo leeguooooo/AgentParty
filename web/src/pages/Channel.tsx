@@ -1349,12 +1349,12 @@ export function ChannelSearchPanel({
           />
         </div>
       )}
-      {searchInputError !== null && (
+      {!isSeqQuery && searchInputError !== null && (
         <p className="banner banner--yellow" role="alert">
           {searchInputError}
         </p>
       )}
-      {searchError !== null && searchInputError === null && (
+      {!isSeqQuery && searchError !== null && searchInputError === null && (
         <p className="banner banner--red" role="alert">
           {searchError}
         </p>
