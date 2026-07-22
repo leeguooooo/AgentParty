@@ -697,6 +697,17 @@ export async function createTask(
   })) as TaskRecord;
 }
 
+// worker 的 `status --task N` 报的是「它自己这一端」的进度,不该把父任务的**全局** state 拉黑(#737):
+// blocked → 返回 null = 不传播到任务全局 state(worker 的 blocked 仍在它的 status 帧 + task:N scope 里
+// 可见;父任务是否 blocked 由 host 用 `party task block` 显式决定)。其余状态仍映射并传播。
+// status.ts(CLI)与 mcp.ts(内置 runner 的 party_status 工具)共用这一份,免两处漂移。
+export function taskStateFromReportedStatus(state: string): TaskState | null {
+  if (state === "blocked") return null;
+  if (state === "working") return "in_progress";
+  if (state === "waiting") return "assigned";
+  return state as TaskState;
+}
+
 export async function updateTask(
   server: string,
   token: string,

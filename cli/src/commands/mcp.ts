@@ -33,6 +33,7 @@ import {
   listTasks,
   postMessage,
   spawnAgent,
+  taskStateFromReportedStatus,
   updateTask,
   type Identity,
 } from "../rest";
@@ -543,11 +544,9 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         });
         let task = undefined;
         if (task_id !== undefined) {
-          const taskState: TaskState =
-            state === "working" ? "in_progress" :
-            state === "waiting" ? "assigned" :
-            state as TaskState;
-          task = await updateTask(authInfo.server, authInfo.token, resolved, task_id, { state: taskState });
+          // #737:worker 报自己那端 blocked 不再拉黑父任务全局 state(见 taskStateFromReportedStatus)。
+          const taskState = taskStateFromReportedStatus(state);
+          if (taskState !== null) task = await updateTask(authInfo.server, authInfo.token, resolved, task_id, { state: taskState });
         }
         advanceCursorPastOwnMessage(resolved, seq);
         return ok({ type: "status", channel: resolved, seq, state, ...(task !== undefined ? { task } : {}) });
