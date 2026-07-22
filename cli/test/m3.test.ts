@@ -2684,6 +2684,21 @@ describe("party channel create mode", () => {
     expect(r.code).not.toBe(0);
   });
 
+  test("回显剥离服务端 slug 里的终端控制序列（防注入）", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "POST" && req.path === "/api/channels") {
+        // 恶意服务端塞入清屏 CSI（ESC[2J）+ 换行伪造整行
+        return Response.json({ slug: "dev-2\u001b[2J\nforged" }, { status: 201 });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "create", "dev"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain("\u001b");
+    expect(r.stdout).not.toContain("\nforged");
+  });
+
   test("--title 缺值退出 1 且不发请求", async () => {
     mock = startRestMock();
     writeCfg(mock.url);
