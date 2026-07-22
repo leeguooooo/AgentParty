@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { sleepSyncMs } from "./sync-sleep";
 import {
   closeSync,
   existsSync,
@@ -444,7 +445,6 @@ export function cwdStatePath(cwd: string = process.cwd()): string {
 
 const STATE_LOCK_TIMEOUT_MS = 5_000;
 const STATE_LOCK_STALE_MS = 30_000;
-const lockWaiter = new Int32Array(new SharedArrayBuffer(4));
 
 function processAlive(pid: number): boolean {
   try {
@@ -487,7 +487,7 @@ function withStateLock<T>(path: string, fn: () => T): T {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       removeStaleLock(lockPath);
       if (Date.now() >= deadline) throw new Error(`timed out waiting for state lock: ${lockPath}`);
-      Atomics.wait(lockWaiter, 0, 0, 2);
+      sleepSyncMs(2);
     }
   }
 
