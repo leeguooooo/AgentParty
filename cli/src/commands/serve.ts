@@ -1641,8 +1641,14 @@ function appendServeLifecycleLog(workdir: string, line: string): void {
   appendFileSync(join(workdir, SERVE_LIFECYCLE_LOG_FILE), line + "\n");
 }
 
-function parseCodexSessionId(stdout: string): string | null {
-  return stdout.match(/session id:\s*([0-9a-fA-F][0-9a-fA-F-]{7,})/i)?.[1] ?? null;
+// Codex 打印 session id 的格式在版本间漂移过（`session id:` / `session_id:`，有时落 stderr）。
+// 宽松匹配 id/_id、大小写无关、两个流都扫，避免因一行文案变化就丢掉会话续跑（#726）。
+function parseCodexSessionId(...streams: (string | null | undefined)[]): string | null {
+  for (const s of streams) {
+    const m = s?.match(/session[ _]id:\s*([0-9a-fA-F][0-9a-fA-F-]{7,})/i)?.[1];
+    if (m) return m;
+  }
+  return null;
 }
 
 function sdkPrompt(
@@ -1871,7 +1877,7 @@ async function runHarness(
       : ["codex", "exec", ...flags, prompt];
     const result = await runProcess(args, { cwd, env, signal });
     const text = result.code === 0 && existsSync(outFile) ? readFileSync(outFile, "utf8").trimEnd() : "";
-    return { result, text, sessionId: sid ? sid : parseCodexSessionId(result.stdout), outFile };
+    return { result, text, sessionId: sid ? sid : parseCodexSessionId(result.stdout, result.stderr), outFile };
   }
 
   // A resident unattended serve must never let Claude block its one serial consumer on an
@@ -2487,31 +2493,34 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         }
 
         finalSid = run.sessionId;
+        // 解析不到 session id 不再吞掉本回合答案（#726）：codex 已 exit 0 且产出在 run.text 里，
+        // 唯一代价是无法持久化可续跑句柄——下一次 @ 冷启动而非 resume，远好于静默丢答案。
+        // 落一条运维告警到 serve-runner.log，正常走投递；只跳过 writeSession/onSession。
+        let committed: WakeSessionState | null = null;
         if (!finalSid) {
           appendRunnerLog(
             opts.workdir,
-            `${new Date(now).toISOString()} seq=${frame.seq} sid=unknown duration_ms=${now - started} exit=${exitCode ?? 0} missing_session_id=true`,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=unknown duration_ms=${now - started} exit=${exitCode ?? 0} missing_session_id=true delivered=true text_bytes=${Buffer.byteLength(run.text, "utf8")} note=session_continuity_unavailable`,
           );
-          throw new WakeBlockedError(`builtin ${opts.harness} runner blocked: no session id parsed; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`);
+        } else {
+          committed = writeSession(sessionPath, {
+            harness: opts.harness,
+            session_id: finalSid,
+            created_at: prior ? prior.created_at : now,
+            last_wake_ts: now,
+            wakes: prior ? prior.wakes + 1 : 1,
+            cwd,
+            workdir: opts.workdir,
+            ...(scope.directed ? { work_id: scope.workId!, continuation_ref: scope.ref! } : {}),
+          });
+          opts.onSession?.({
+            harness: opts.harness,
+            session_id: committed.session_id,
+            updated_at: now,
+            cwd,
+            workdir: opts.workdir,
+          });
         }
-
-        const committed = writeSession(sessionPath, {
-          harness: opts.harness,
-          session_id: finalSid,
-          created_at: prior ? prior.created_at : now,
-          last_wake_ts: now,
-          wakes: prior ? prior.wakes + 1 : 1,
-          cwd,
-          workdir: opts.workdir,
-          ...(scope.directed ? { work_id: scope.workId!, continuation_ref: scope.ref! } : {}),
-        });
-        opts.onSession?.({
-          harness: opts.harness,
-          session_id: committed.session_id,
-          updated_at: now,
-          cwd,
-          workdir: opts.workdir,
-        });
 
         // #581 managed MCP：动作已由工具即时落频道，文本输出只进日志。这里只验收「本回合
         // 至少发生一个频道动作」——零动作=未送达（WakeBlockedError，不推游标不吞 @）。
@@ -2530,7 +2539,8 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
           }
           break;
         }
-        const marker = oldSid ? null : `[session start: ${shortSid(finalSid)}]`;
+        // 无 sid（#726 续跑不可用）不打 "[session start: unknown]" 噪声——告警已进 runner 日志。
+        const marker = finalSid && !oldSid ? `[session start: ${shortSid(finalSid)}]` : null;
         let outcome: RunnerDeliveryOutcome;
         try {
           outcome = await deliverRunnerResult({
