@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { fetchServerVersion } from "../src/rest";
-import { RUNNING_VERSION, serverMinVersionNotice, serverVersionUpgradeNotice } from "../src/upgrade";
+import { RUNNING_VERSION, serverMinVersionNotice, serverVersionUpgradeNotice, upgradeHintForServer } from "../src/upgrade";
 import { resolveAvailableUpgrade } from "../src/commands/serve";
 
 function sha256(bytes: Uint8Array): string {
@@ -123,5 +123,46 @@ describe("CLI↔worker version negotiation (issue #137)", () => {
       action_required: "auto_reexec",
     });
     expect(installs).toEqual(["/usr/local/bin/party"]);
+  });
+});
+
+describe("upgradeHintForServer（#703：watch 挂载升级提示）", () => {
+  const server = (over: Partial<{ version: string; min_client_version: string; min_client_enforced: boolean }> = {}) => ({
+    version: "0.2.100",
+    min_client_version: "0.0.0",
+    min_client_enforced: false,
+    ...over,
+  });
+
+  test("已是最新且不低于 min → 无提示", () => {
+    expect(upgradeHintForServer(server({ version: "0.2.100" }), { runningVersion: "0.2.100" })).toBeNull();
+    expect(upgradeHintForServer(server({ version: "0.2.90" }), { runningVersion: "0.2.100" })).toBeNull();
+  });
+
+  test("落后于最新发布版 → 提示原地 party upgrade、免重绑", () => {
+    const hint = upgradeHintForServer(server({ version: "0.2.136" }), { runningVersion: "0.2.100" });
+    expect(hint).not.toBeNull();
+    expect(hint).toContain("party upgrade");
+    expect(hint).toContain("0.2.136");
+    expect(hint).toContain("无需重跑接入包");
+  });
+
+  test("低于 min 优先于落后提示（协议可能已破）", () => {
+    // 同时落后最新且低于 min：min 提示优先
+    const hint = upgradeHintForServer(
+      server({ version: "0.2.136", min_client_version: "0.2.120", min_client_enforced: false }),
+      { runningVersion: "0.2.100" },
+    );
+    expect(hint).not.toBeNull();
+    expect(hint).toContain("最低");
+    expect(hint).toContain("party upgrade");
+  });
+
+  test("enforced min → 提示措辞更硬（已被拒绝）", () => {
+    const hint = upgradeHintForServer(
+      server({ min_client_version: "9.9.9", min_client_enforced: true }),
+      { runningVersion: "0.2.100" },
+    );
+    expect(hint).toContain("已被拒绝");
   });
 });

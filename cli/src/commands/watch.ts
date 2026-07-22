@@ -25,7 +25,9 @@ import {
 } from "../config";
 import { resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import { formatMsg, stripTerminalControls } from "../format";
-import { fetchMe, fetchMessages, fetchRecentMessages, handleRestError, postMessage } from "../rest";
+import { fetchMe, fetchMessages, fetchRecentMessages, fetchServerVersion, handleRestError, postMessage } from "../rest";
+import { upgradeHintForServer } from "../upgrade";
+import { shouldProbeUpgrade } from "../upgrade-hint-cache";
 import { buildContext } from "./status";
 import { MAX_TIMEOUT_SEC, isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 import { jsonFrame, nowTs } from "../json";
@@ -161,6 +163,9 @@ export interface WatchOptions {
   out?: (line: string) => void;
   backoffBaseMs?: number;
   statusline?: boolean;
+  /** #703：挂载时 best-effort 探一次服务端版本，落后/低于 min 就打非阻断升级提示（磁盘节流 6h 一次）。
+   *  命令层默认开；单测构造 WatchOptions 不设 → 不探测、不发网络，既有用例零影响。 */
+  probeUpgrade?: boolean;
   /** 单实例锁目录（#195/#465）。默认全机共享、再按 server/token 身份隔离；测试注入。 */
   lockDir?: string;
   /** 关掉单实例保护（逃生舱）。 */
@@ -297,6 +302,19 @@ async function resolveExplicitWatchCursor(
   };
 }
 
+// #703：挂在 watch 上的 agent 此前收不到「你落后于最新 / 低于 min」的升级提示（只有 serve/mcp 有），
+// 于是常年靠人肉重发接入包 + curl install.sh + 重绑。挂载时 best-effort 探一次服务端版本，落后就打一条
+// 非阻断 stderr 提示，引导 `party upgrade`（原地换二进制、免重绑）。磁盘节流每 6h 一次，探测失败静默。
+async function emitWatchUpgradeHint(server: string, channel: string): Promise<void> {
+  if (!shouldProbeUpgrade(channel, process.cwd(), Date.now())) return;
+  try {
+    const hint = upgradeHintForServer(await fetchServerVersion(server));
+    if (hint !== null) console.error(stripTerminalControls(`watch: ${hint}`));
+  } catch {
+    // 版本探测是增益信号，不是墙——拿不到就静默，绝不因它把 watch 搞挂。
+  }
+}
+
 export async function runWatch(o: WatchOptions): Promise<number> {
   const rawOut = o.out ?? ((line: string) => console.log(line));
   const out = (line: string) => rawOut(o.json ? line : terminalOutput(line));
@@ -329,6 +347,10 @@ export async function runWatch(o: WatchOptions): Promise<number> {
     );
     return EXIT_ALREADY_WATCHING;
   }
+  // #703：升级提示放在抢到实例锁之后——只有持锁的那个 watcher 会探测，靠既有实例锁串行化，
+  // 天然消除「两个进程都过节流读取、各自探测」的竞态（#715 评审），无需另造原子租约。
+  // 非 json、命令层开启时才探；fire-and-forget，不阻塞 attach；磁盘节流仍限 6h/次。
+  if (o.probeUpgrade === true && !o.json) void emitWatchUpgradeHint(o.server, o.channel);
   // Capture transport interruptions by generation. A delivery received after an earlier reconnect
   // may proceed, but a disconnect between update and ACK invalidates that exact claim attempt.
   let connectionGeneration = 0;
@@ -1087,6 +1109,8 @@ export async function run(argv: string[]): Promise<number> {
     statusline: true,
     allowMultiple: flags["allow-multiple"] === true,
     ensure,
+    // #703：真实 watch 调用默认探升级提示（磁盘节流 6h/次）；单测直接构造 WatchOptions 不设此项，行为不变。
+    probeUpgrade: true,
     // #675：可唤醒声明改走带内 presence（hello.wake_kind），默认不往时间线发 waiting 状态消息。
     advertiseWakeKind: "watch",
     // 只有 --status 显式要人类可见的挂载广播时才往时间线发一条（旧行为，opt-in）。
