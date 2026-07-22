@@ -313,6 +313,11 @@
   align-items: center;
   gap: 8px;
 }
+/* #工作目录选择器：手填框 + 「选择目录」按钮并排 */
+.desktop-agent-workdir-row { display: flex; gap: 6px; align-items: stretch; }
+.desktop-agent-workdir-input { flex: 1 1 auto; min-width: 0; }
+.desktop-agent-workdir-pick { flex: 0 0 auto; white-space: nowrap; }
+
 .desktop-agent-duties { margin-top: 12px; }
 .desktop-agent-duties-title { font-size: 12px; color: var(--t-dim); }
 

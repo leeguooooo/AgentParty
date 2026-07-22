@@ -76,6 +76,10 @@ interface DeepLinkModule {
   onOpenUrl(handler: (urls: string[]) => void): Promise<() => void>;
 }
 
+interface DialogModule {
+  open(options?: { directory?: boolean; multiple?: boolean; title?: string; defaultPath?: string }): Promise<string | string[] | null>;
+}
+
 export interface DesktopRuntimeDependencies {
   isTauri(): boolean;
   loadNotification(): Promise<NotificationModule>;
@@ -84,6 +88,7 @@ export interface DesktopRuntimeDependencies {
   loadEvent(): Promise<EventModule>;
   loadOpener(): Promise<OpenerModule>;
   loadDeepLink(): Promise<DeepLinkModule>;
+  loadDialog(): Promise<DialogModule>;
 }
 
 const defaultDependencies: DesktopRuntimeDependencies = {
@@ -94,9 +99,23 @@ const defaultDependencies: DesktopRuntimeDependencies = {
   loadEvent: () => import("@tauri-apps/api/event"),
   loadOpener: () => import("@tauri-apps/plugin-opener"),
   loadDeepLink: () => import("@tauri-apps/plugin-deep-link"),
+  loadDialog: () => import("@tauri-apps/plugin-dialog"),
 };
 
 let dependencies = defaultDependencies;
+
+// 原生目录选择器（tauri dialog plugin）。用于「工作目录」——让用户点选而非手填绝对路径。
+// 非桌面运行时或用户取消一律返回 null（调用方保留手填输入作后备）。
+export async function pickDirectory(title?: string): Promise<string | null> {
+  if (!isDesktopRuntime()) return null;
+  try {
+    const dialog = await dependencies.loadDialog();
+    const selected = await dialog.open({ directory: true, multiple: false, ...(title === undefined ? {} : { title }) });
+    return typeof selected === "string" ? selected : null;
+  } catch {
+    return null;
+  }
+}
 
 export function isDesktopRuntime(): boolean {
   try {

@@ -8,6 +8,7 @@ import {
   type DesktopAgentStatus,
   type DesktopDutyEntry,
 } from "../lib/desktopAgent";
+import { pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
 
 const RUNNERS: readonly DesktopAgentRunner[] = ["codex", "claude", "codex-sdk"];
 
@@ -26,6 +27,8 @@ interface Props {
   t: TFunc;
   adapter?: DesktopAgentAdapter;
   scheduler?: DesktopAgentScheduler;
+  // 原生目录选择器（测试可注入）；默认走 tauri dialog。返回 null=非桌面/取消。
+  pickDirectory?: (title?: string) => Promise<string | null>;
 }
 
 function safeError(value: unknown): string {
@@ -55,7 +58,7 @@ function derivePrimary(instances: DesktopAgentStatus[]): DesktopAgentStatus | nu
   );
 }
 
-export function DesktopAgentPanel({ t, adapter = desktopAgentAdapter, scheduler = defaultScheduler }: Props) {
+export function DesktopAgentPanel({ t, adapter = desktopAgentAdapter, scheduler = defaultScheduler, pickDirectory = pickDirectoryDefault }: Props) {
   const [configs, setConfigs] = useState<DesktopAgentConfig[] | null>(null);
   const [status, setStatus] = useState<DesktopAgentStatus | null>(null);
   const [instances, setInstances] = useState<DesktopAgentStatus[] | null>(null);
@@ -354,16 +357,31 @@ export function DesktopAgentPanel({ t, adapter = desktopAgentAdapter, scheduler 
           </label>
           <label>
             <span>{t("DesktopSettings.agent.workdir")}</span>
-            <input
-              className="t-mono"
-              name="desktop-agent-workdir"
-              value={workdir}
-              placeholder="/absolute/path"
-              disabled={busy || configs === null}
-              onChange={(event) => setWorkdir(event.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-            />
+            <span className="desktop-agent-workdir-row">
+              <input
+                className="t-mono desktop-agent-workdir-input"
+                name="desktop-agent-workdir"
+                value={workdir}
+                placeholder="/absolute/path"
+                disabled={busy || configs === null}
+                onChange={(event) => setWorkdir(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                className="d-btn desktop-agent-workdir-pick"
+                disabled={busy || configs === null}
+                aria-label={t("DesktopSettings.agent.workdirPick")}
+                onClick={() => {
+                  void pickDirectory(t("DesktopSettings.agent.workdirPick")).then((dir) => {
+                    if (dir !== null && aliveRef.current) setWorkdir(dir);
+                  });
+                }}
+              >
+                {t("DesktopSettings.agent.workdirPick")}
+              </button>
+            </span>
           </label>
           <label className="desktop-agent-persist">
             <input

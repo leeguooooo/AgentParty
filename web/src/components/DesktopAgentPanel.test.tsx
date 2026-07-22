@@ -455,3 +455,41 @@ describe("DesktopAgentPanel", () => {
     }
   });
 });
+
+describe("DesktopAgentPanel 工作目录选择器", () => {
+  test("点「选择目录」调 pickDirectory，把返回路径填进工作目录（不再手填）", async () => {
+    const a = adapter();
+    await act(async () => {
+      renderer = create(
+        <LocaleProvider>
+          <DesktopAgentPanel
+            adapter={a}
+            scheduler={{ every: () => () => {} }}
+            t={t}
+            pickDirectory={async () => "/picked/dir"}
+          />
+        </LocaleProvider>,
+      );
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const pick = button("Choose…");
+    await act(async () => { pick.props.onClick(); await Promise.resolve(); });
+    const input = renderer!.root.find((n) => n.props.name === "desktop-agent-workdir");
+    expect(input.props.value).toBe("/picked/dir");
+  });
+
+  test("pickDirectory 返回 null（取消/非桌面）→ 工作目录不变", async () => {
+    const a = adapter();
+    await act(async () => {
+      renderer = create(
+        <LocaleProvider>
+          <DesktopAgentPanel adapter={a} scheduler={{ every: () => () => {} }} t={t} pickDirectory={async () => null} />
+        </LocaleProvider>,
+      );
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { button("Choose…").props.onClick(); await Promise.resolve(); });
+    const input = renderer!.root.find((n) => n.props.name === "desktop-agent-workdir");
+    expect(input.props.value).toBe("");
+  });
+});

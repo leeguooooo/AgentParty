@@ -7,7 +7,7 @@
     },
     "cli": {
       "name": "@agentparty/cli",
-      "version": "0.2.133",
+      "version": "0.2.137",
       "bin": {
         "party": "src/index.ts",
       },
@@ -30,7 +30,7 @@
     },
     "desktop": {
       "name": "@agentparty/desktop",
-      "version": "0.2.133",
+      "version": "0.2.137",
       "devDependencies": {
         "@tauri-apps/cli": "^2.6.2",
       },
@@ -48,6 +48,7 @@
         "@tauri-apps/api": "2.11.1",
         "@tauri-apps/plugin-autostart": "2.5.1",
         "@tauri-apps/plugin-deep-link": "2.4.9",
+        "@tauri-apps/plugin-dialog": "^2.3.0",
         "@tauri-apps/plugin-notification": "2.3.3",
         "@tauri-apps/plugin-opener": "2.5.4",
         "@tauri-apps/plugin-process": "^2.3.1",
@@ -355,6 +356,8 @@
     "@tauri-apps/plugin-autostart": ["@tauri-apps/plugin-autostart@2.5.1", "", { "dependencies": { "@tauri-apps/api": "^2.8.0" } }, "sha512-zS/xx7yzveCcotkA+8TqkI2lysmG2wvQXv2HGAVExITmnFfHAdj1arGsbbfs3o6EktRHf6l34pJxc3YGG2mg7w=="],
 
     "@tauri-apps/plugin-deep-link": ["@tauri-apps/plugin-deep-link@2.4.9", "", { "dependencies": { "@tauri-apps/api": "^2.11.0" } }, "sha512-u0SKOUHnJ1wqeqXsDFq2+kASCBj9xxbG0g9XZWPy9SOmU4wXtp6b/wiYpm6oH6/5fBTQsLqnLhIvqLBRpgHJlA=="],
+
+    "@tauri-apps/plugin-dialog": ["@tauri-apps/plugin-dialog@2.7.2", "", { "dependencies": { "@tauri-apps/api": "^2.11.0" } }, "sha512-pX0IGm1I3I6wc+zeKYcq1GSqogK6okCNX5fOdaNU5ab1AjGS6l1E5wFNjEb7meg7ZFSp0JUs+0jQGQNyOvLrsg=="],
 
     "@tauri-apps/plugin-notification": ["@tauri-apps/plugin-notification@2.3.3", "", { "dependencies": { "@tauri-apps/api": "^2.8.0" } }, "sha512-Zw+ZH18RJb41G4NrfHgIuofJiymusqN+q8fGUIIV7vyCH+5sSn5coqRv/MWB9qETsUs97vmU045q7OyseCV3Qg=="],
 
