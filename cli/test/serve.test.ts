@@ -1160,6 +1160,74 @@ describe("builtin runner", () => {
     expect(log).toContain("exit=0");
   });
 
+  test("codex 无 session id 也交付答案而非吞掉（#726：exit 0 有产出，只是没解析出 sid）", async () => {
+    const { posts, post } = postRecorder();
+    const workdir = tempDir();
+    const reported: Array<{ session_id: string }> = [];
+    const runProcess: RunnerProcess = async (args) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, "answer without a parsable session id\n");
+      // codex exit 0、有答案，但 stdout/stderr 都不含 `session id:` 行（版本漂移症状）
+      return { code: 0, stdout: "done\n", stderr: "" };
+    };
+
+    // 不抛 WakeBlockedError（不吞 @）
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      runProcess,
+      post,
+      onSession: (session) => reported.push(session),
+    })(triggerFrame(659), runnerCtx());
+
+    // 答案照常投递到频道
+    const finalPost = posts.at(-1)!;
+    expect(finalPost.body).toMatchObject({ kind: "message", reply_to: 659 });
+    const deliveredBody = (finalPost.body as { body: string }).body;
+    expect(deliveredBody).toContain("answer without a parsable session id");
+    // 无 sid 不打 "[session start: unknown]" marker 噪声
+    expect(deliveredBody).not.toContain("[session start");
+    // 没 sid → 不持久化会话、不上报 onSession（下次冷启动）
+    expect(reported).toEqual([]);
+    expect(existsSync(join(workdir, "wake-session.json"))).toBe(false);
+    // 运维告警落日志:sid 未知、续跑不可用（但不抢先写 delivered=true，交付结果由后续日志行落账）
+    const log = readFileSync(join(workdir, "serve-runner.log"), "utf8");
+    expect(log).toContain("seq=659 sid=unknown");
+    expect(log).toContain("missing_session_id=true");
+    expect(log).toContain("note=session_continuity_unavailable");
+    expect(log).not.toContain("delivered=true");
+  });
+
+  test("codex session id 落 stderr 或写作 session_id 仍能解析（#726 宽松匹配）", async () => {
+    const { post } = postRecorder();
+    const workdir = tempDir();
+    const reported: Array<{ session_id: string }> = [];
+    const runProcess: RunnerProcess = async (args) => {
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, "answer\n");
+      // 下划线写法 + 大小写变体 + 落 stderr，都得能捞到（宽松匹配）
+      return { code: 0, stdout: "no id here\n", stderr: `Session_ID: ${uuid(1)}\n` };
+    };
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      runProcess,
+      post,
+      onSession: (session) => reported.push(session),
+    })(triggerFrame(1), runnerCtx());
+
+    const state = JSON.parse(readFileSync(join(workdir, "wake-session.json"), "utf8"));
+    expect(state).toMatchObject({ harness: "codex", session_id: uuid(1) });
+    expect(reported).toEqual([expect.objectContaining({ session_id: uuid(1) })]);
+  });
+
   test("[attach:path] uploads the file to R2 and references it as an attachment, not inlined (#41/#109)", async () => {
     const { posts, post } = postRecorder();
     const { uploads, upload } = uploadRecorder();
