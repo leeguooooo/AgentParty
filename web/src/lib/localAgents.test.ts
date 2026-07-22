@@ -55,13 +55,22 @@ describe("aggregateLocalAgents", () => {
     expect(dty).toMatchObject({ channel: "bug001", name: "cfg2", state: "loaded", runner: null });
   });
 
-  test("unloaded duty reports state 'unloaded'; null instance channel → empty", () => {
+  test("unloaded duty reports state 'unloaded'; null channel + null instanceId → empty", () => {
     const rows = aggregateLocalAgents(
       [instance({ channel: null, instanceId: null, configId: "c", name: "x" })],
       [duty({ instanceId: "c:ch", loaded: false })],
     );
     expect(rows.find((r) => r.kind === "instance")!.channel).toBe("");
     expect(rows.find((r) => r.kind === "duty")!.state).toBe("unloaded");
+  });
+
+  test("channel 为 null 但 instanceId 含 configId:channel → 从 instanceId 回退频道（#707 评审）", () => {
+    const rows = aggregateLocalAgents(
+      [instance({ channel: null, instanceId: "cfg:web", name: "planner" })],
+      [],
+    );
+    // 不因 channel 字段缺失就误归「未分配」——否则频道页 scopeChannel 会过滤掉它
+    expect(rows[0]!.channel).toBe("web");
   });
 });
 

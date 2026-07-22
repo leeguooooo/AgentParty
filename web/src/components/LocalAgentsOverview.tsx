@@ -42,8 +42,12 @@ export function LocalAgentsOverview({ t, adapter = desktopAgentAdapter, schedule
   const [busy, setBusy] = useState(false);
   const aliveRef = useRef(true);
   const opRef = useRef(false);
+  // #707 评审：挂载刷新 / 轮询 / 操作后刷新可并发，早发的请求后到会把新快照覆盖成旧的。
+  // 单调序号——只让「最新一次 refresh」的结果落地，乱序完成的旧结果丢弃。
+  const refreshSeqRef = useRef(0);
 
   const refresh = async (): Promise<void> => {
+    const seq = ++refreshSeqRef.current;
     let anyOk = false;
     let nextInstances: DesktopAgentStatus[] = [];
     try {
@@ -65,7 +69,7 @@ export function LocalAgentsOverview({ t, adapter = desktopAgentAdapter, schedule
     } catch {
       // 非 macOS / 旧壳：无常驻，忽略
     }
-    if (!aliveRef.current) return;
+    if (!aliveRef.current || seq !== refreshSeqRef.current) return;
     // 只列活跃/存在的实例：stopped 且无 instanceId 的空位不进概览（与启动器的完整实例表不同）。
     setInstances(nextInstances.filter((item) => item.state !== "stopped" || item.instanceId !== null));
     setDuties(nextDuties);
@@ -78,6 +82,7 @@ export function LocalAgentsOverview({ t, adapter = desktopAgentAdapter, schedule
     const cancel = scheduler.every(() => void refresh(), 3_000);
     return () => {
       aliveRef.current = false;
+      refreshSeqRef.current += 1;
       cancel();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

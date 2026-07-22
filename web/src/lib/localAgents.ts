@@ -47,7 +47,9 @@ export function aggregateLocalAgents(
     rows.push({
       key: `instance:${instanceId ?? `${item.configId ?? "?"}:${item.channel ?? "?"}`}`,
       kind: "instance",
-      channel: item.channel ?? "",
+      // channel 字段优先；缺失时从 instanceId(configId:channel) 回退解析，别把带 instanceId 的实例
+      // 误归「未分配」而被频道页 scopeChannel 过滤掉（#707 评审）。
+      channel: item.channel ?? (instanceId === null ? "" : channelOfInstanceId(instanceId)),
       name: item.name ?? item.configId ?? "?",
       runner: item.runner,
       state: item.state,
