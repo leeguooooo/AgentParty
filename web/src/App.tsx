@@ -81,10 +81,12 @@ import {
 } from "./lib/desktopCredentials";
 import {
   isDesktopRuntime,
+  listenForDesktopChannelLinks,
   listenForDesktopNotificationActions,
   showAndFocusDesktopWindow,
   waitForDesktopWindowShown,
 } from "./lib/desktopRuntime";
+import type { ChannelDeepLink } from "./lib/channelLink";
 import { setApiBase } from "./lib/base";
 import {
   addCustomServerProfile,
@@ -405,7 +407,9 @@ export function App() {
     replace(`/c/${slug}`);
   }, [path, replace, temporaryHumanToken, t]);
 
-  const switchDesktopOrigin = useCallback(async (origin: string, restoredAccessToken?: string) => {
+  // destination 缺省回 Home；跨实例直达频道时传 `/c/<slug>`，让「切实例」和「落频道」在同一次
+  // replace 里完成——否则先 replace("/") 再由外层微任务 navigate，中间会闪一帧空 channels 的 Home。
+  const switchDesktopOrigin = useCallback(async (origin: string, restoredAccessToken?: string, destination = "/") => {
     const result = restoredAccessToken === undefined
       ? await switchActiveDesktopServer(origin)
       : activateDesktopServerWithAccessToken(origin, restoredAccessToken);
@@ -417,8 +421,46 @@ export function App() {
     setMe(null);
     activateDesktopHumanSession(result.accessToken);
     setDesktopBoot("ready");
-    replace("/");
+    replace(destination);
   }, [activateDesktopHumanSession, replace]);
+
+  // 桌面版：外部工具（如 claude-statusbar 的 `cs hud`）通过 agentparty://channel/<slug>?server=<origin>
+  // 直达频道。scheme 已在 Tauri 侧注册，这里接住 onOpenUrl → 聚焦窗口 → 切到目标实例（仅当 server 指向
+  // 另一台已配对实例）→ 跳频道页。与配对 deep link（agentparty://pair/...）靠 hostname 分流，互不干扰。
+  // 用 ref 存回调、effect 只依赖 desktop：listener 只注册一次，冷启动链接经 getCurrent 也只投递一次，
+  // 避免 activeOrigin / 频道列表变化时重挂 listener 反复触发同一次跳转。
+  const channelLinkHandler = useRef<(link: ChannelDeepLink) => void>(() => {});
+  channelLinkHandler.current = (link) => {
+    void showAndFocusDesktopWindow();
+    const target =
+      link.serverOrigin !== null &&
+      link.serverOrigin !== activeOrigin &&
+      serverProfiles.some((profile) => profile.origin === link.serverOrigin)
+        ? link.serverOrigin
+        : null;
+    if (target !== null) {
+      // 目标是另一台已配对实例：切服并在同一次 replace 里落到频道页（不闪 Home）。切服失败也不应
+      // 把用户卡在原地，退化成在当前实例按 slug 打开即可。
+      void switchDesktopOrigin(target, undefined, `/c/${link.slug}`)
+        .catch(() => navigate(`/c/${link.slug}`));
+    } else {
+      navigate(`/c/${link.slug}`);
+    }
+  };
+
+  useEffect(() => {
+    if (!desktop) return;
+    let alive = true;
+    let stop = () => {};
+    void listenForDesktopChannelLinks((link) => channelLinkHandler.current(link)).then((unlisten) => {
+      if (alive) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      alive = false;
+      stop();
+    };
+  }, [desktop]);
 
   useEffect(() => {
     if (!desktop) return;

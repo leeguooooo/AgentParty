@@ -47,6 +47,9 @@ let renderer: ReactTestRenderer | null = null;
 let credentialDeletes = 0;
 let storedCredential: string | null = null;
 let notificationActionHandler: ((notification: { extra?: Record<string, unknown> }) => void) | null = null;
+// 认证态桌面下，只有 App 级的 listenForDesktopChannelLinks 会注册 onOpenUrl（配对 listener 只在
+// 配对闸里挂），所以这里抓到的就是频道 deep link 的投递回调，测试可拿它模拟外部 open 链接。
+let channelLinkOpenHandler: ((urls: string[]) => void) | null = null;
 let desktopFocusCalls: string[] = [];
 let pushedPaths: string[] = [];
 let desktopWindowShownHandler: (() => void) | null = null;
@@ -116,6 +119,7 @@ beforeEach(() => {
   saveActiveServerOrigin(localStorage, activeOrigin);
   credentialDeletes = 0;
   notificationActionHandler = null;
+  channelLinkOpenHandler = null;
   desktopFocusCalls = [];
   pushedPaths = [];
   desktopWindowShownHandler = null;
@@ -147,7 +151,10 @@ beforeEach(() => {
     isTauri: () => true,
     loadDeepLink: async () => ({
       getCurrent: async () => null,
-      onOpenUrl: async () => () => {},
+      onOpenUrl: async (handler) => {
+        channelLinkOpenHandler = handler;
+        return () => {};
+      },
     }),
     loadNotification: async () => ({
       isPermissionGranted: async () => true,
@@ -406,6 +413,105 @@ describe("App desktop server pairing behavior", () => {
     expect(desktopFocusCalls).toEqual(["show", "unminimize", "focus"]);
     expect(pushedPaths).toContain("/c/general");
     expect(location.hash).toBe("#msg-42");
+  });
+
+  test("channel deep link focuses the window and opens the channel on the current server", async () => {
+    await act(async () => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(channelLinkOpenHandler).not.toBeNull();
+    await act(async () => {
+      // 无 server：直接在当前实例按 slug 跳。
+      channelLinkOpenHandler?.(["agentparty://channel/general"]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(desktopFocusCalls).toEqual(["show", "unminimize", "focus"]);
+    expect(pushedPaths).toContain("/c/general");
+
+    await act(async () => {
+      // server 指向未配对实例（不在 profiles 里）：忽略 server，仍在当前实例跳，绝不切服。
+      channelLinkOpenHandler?.([`agentparty://channel/off-server?server=${encodeURIComponent(unpairedOrigin)}`]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(pushedPaths).toContain("/c/off-server");
+    expect(loadActiveServerOrigin(localStorage)).toBe(activeOrigin);
+  });
+
+  test("channel deep link with a paired other server switches instances then lands on the channel", async () => {
+    const privateOrigin = "https://private.example.com";
+    const replacements: string[] = [];
+    history.replaceState = (_state: unknown, _unused: string, url?: string | URL | null) => {
+      const next = String(url ?? "");
+      replacements.push(next);
+      location.pathname = next.split(/[?#]/)[0] || "/";
+    };
+
+    const credentials = new Map([
+      [activeOrigin, storedCredential!],
+      [privateOrigin, JSON.stringify({
+        refreshToken: "private-refresh",
+        deviceSecret: "private-device-secret",
+        serverOrigin: privateOrigin,
+        sessionId: "private-session",
+      })],
+    ]);
+    invokeHandler = async (command, args) => {
+      const origin = String(args?.origin ?? "");
+      if (command === "desktop_window_has_been_shown") return true;
+      if (command === "desktop_credential_migrate") return null;
+      if (command === "desktop_credential_read") return credentials.get(origin) ?? null;
+      if (command === "desktop_credential_write") {
+        credentials.set(origin, String(args?.credential));
+        return null;
+      }
+      if (command === "desktop_credential_delete") {
+        credentials.delete(origin);
+        return null;
+      }
+      throw new Error(`unexpected native command: ${command}`);
+    };
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.endsWith("/api/desktop/sessions/refresh")) {
+          const isPrivate = url.startsWith(privateOrigin);
+          return new Response(JSON.stringify({
+            access_token: isPrivate ? "private-access" : "old-access",
+            refresh_token: isPrivate ? "rotated-private-refresh" : "rotated-old-refresh",
+            expires_in: 600,
+            session_id: isPrivate ? "private-session" : "old-session",
+          }), { status: 200 });
+        }
+        if (url.endsWith("/api/config")) return new Response("{}", { status: 200 });
+        if (url.endsWith("/api/channels")) return new Response('{"channels":[]}', { status: 200 });
+        if (url.endsWith("/api/me")) return new Response(JSON.stringify({
+          name: "human", email: null, kind: "human", handle: null, display_name: "Human",
+          avatar_url: null, avatar_thumb: null, provider: "oidc", tenant_key: null, role: "human", owner: null,
+        }), { status: 200 });
+        throw new Error(`unexpected request: ${url}`);
+      },
+    });
+
+    await act(async () => {
+      renderer = create(<LocaleProvider><App /></LocaleProvider>);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await act(async () => {
+      channelLinkOpenHandler?.([`agentparty://channel/team?server=${encodeURIComponent(privateOrigin)}`]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(loadActiveServerOrigin(localStorage)).toBe(privateOrigin);
+    // 切服与落频道同帧完成：replace 直接到 /c/team，不经中转的 Home（"/"）。
+    expect(replacements).toContain("/c/team");
+    expect(replacements).not.toContain("/");
   });
 
   test("successful server switch leaves a channel route from the previous server", async () => {

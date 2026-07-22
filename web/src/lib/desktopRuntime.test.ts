@@ -7,6 +7,7 @@ import {
   isAutostartEnabled,
   isDesktopNotificationPermissionGranted,
   isDesktopNotificationSupported,
+  listenForDesktopChannelLinks,
   listenForDesktopNotificationActions,
   listenForDesktopPairLinks,
   openDesktopVerificationUrl,
@@ -84,6 +85,8 @@ describe("browser fallback", () => {
     expect(await sendMentionNotification({ title: "Mention", body: "hello", slug: "general", seq: 7 })).toBe(false);
     const stopNotificationActions = await listenForDesktopNotificationActions(() => {});
     stopNotificationActions();
+    const stopChannelLinks = await listenForDesktopChannelLinks(() => {});
+    stopChannelLinks();
     expect(await setDesktopBadge(4)).toBe(false);
     expect(await showAndFocusDesktopWindow()).toBe(false);
     const unlisten = await listenForDesktopUpdateChecks(() => {});
@@ -382,6 +385,42 @@ describe("desktop window", () => {
       "AB12C-DE34F:https://agentparty.leeguoo.com",
       "ZX90Y-WV87U:null",
     ]);
+  });
+
+  test("delivers cold-start and live channel deep links, ignoring pairing links", async () => {
+    let liveHandler: ((urls: string[]) => void) | null = null;
+    let unlistened = false;
+    const links: string[] = [];
+    __setDesktopRuntimeDependenciesForTests({
+      isTauri: () => true,
+      loadDeepLink: async () => ({
+        // 冷启动：混着一条 channel 链接和一条配对链接——只有 channel 那条应被投递。
+        getCurrent: async () => [
+          "agentparty://channel/guessadmin?server=https%3A%2F%2Fagentparty.pwtk-dev.work",
+          "agentparty://pair/AB12C-DE34F",
+        ],
+        onOpenUrl: async (handler) => {
+          liveHandler = handler;
+          return () => { unlistened = true; };
+        },
+      }),
+    });
+
+    const unlisten = await listenForDesktopChannelLinks(
+      (link) => links.push(`${link.slug}:${link.serverOrigin}`),
+    );
+    // live：一条无 server 的 channel 链接 + 一条配对链接（后者被 hostname 分流丢弃）。
+    liveHandler?.([
+      "agentparty://channel/general",
+      "agentparty://pair/ZX90Y-WV87U",
+    ]);
+    unlisten();
+
+    expect(links).toEqual([
+      "guessadmin:https://agentparty.pwtk-dev.work",
+      "general:null",
+    ]);
+    expect(unlistened).toBe(true);
   });
 
   test("forwards native tray update checks and exposes cleanup", async () => {
