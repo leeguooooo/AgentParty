@@ -2603,12 +2603,14 @@ describe("party channel create mode", () => {
     writeCfg(mock.url);
     const r = await runCli(["channel", "create", "war-room", "--party", "--title", "作战室"]);
     expect(r.code).toBe(0);
+    // #695：channel create 默认带 auto_suffix=true，撞名让服务端取下一个空位而非硬 409。
     expect(reqsOf(mock, "POST", "/api/channels")[0]!.body).toEqual({
       slug: "war-room",
       title: "作战室",
       kind: "standing",
       mode: "party",
       visibility: "private",
+      auto_suffix: true,
     });
   });
 
@@ -2622,6 +2624,7 @@ describe("party channel create mode", () => {
       kind: "standing",
       mode: "normal",
       visibility: "private",
+      auto_suffix: true,
     });
   });
 
@@ -2635,7 +2638,65 @@ describe("party channel create mode", () => {
       kind: "standing",
       mode: "normal",
       visibility: "public",
+      auto_suffix: true,
     });
+  });
+
+  test("--exact 发送 auto_suffix=false（撞名仍硬 409）", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "create", "dev", "--exact"]);
+    expect(r.code).toBe(0);
+    expect(reqsOf(mock, "POST", "/api/channels")[0]!.body).toEqual({
+      slug: "dev",
+      kind: "standing",
+      mode: "normal",
+      visibility: "private",
+      auto_suffix: false,
+    });
+  });
+
+  test("撞名取变体时回显服务端返回的真实 slug", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "POST" && req.path === "/api/channels") {
+        return Response.json(
+          { slug: "dev-2", kind: "standing", mode: "normal", visibility: "private" },
+          { status: 201 },
+        );
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "create", "dev"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('created dev-2 ("dev" was taken)');
+  });
+
+  test("--exact 撞名时服务端 409 → CLI 失败退出", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "POST" && req.path === "/api/channels") {
+        return Response.json({ error: { code: "conflict", message: "slug already exists" } }, { status: 409 });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "create", "dev", "--exact"]);
+    expect(r.code).not.toBe(0);
+  });
+
+  test("回显剥离服务端 slug 里的终端控制序列（防注入）", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "POST" && req.path === "/api/channels") {
+        // 恶意服务端塞入清屏 CSI（ESC[2J）+ 换行伪造整行
+        return Response.json({ slug: "dev-2\u001b[2J\nforged" }, { status: 201 });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "create", "dev"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain("\u001b");
+    expect(r.stdout).not.toContain("\nforged");
   });
 
   test("--title 缺值退出 1 且不发请求", async () => {
