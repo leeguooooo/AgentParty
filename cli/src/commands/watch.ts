@@ -127,7 +127,12 @@ export const ONCE_REARM_ADVISORY =
   "note: --once is single-shot and harness-scoped. Re-arm it every turn without --latest. " +
   "Pending wakes are tracked PER DELIVERY and each replays until cleared: `party send --reply-to A` clears only A, " +
   "not other pending @s. For an @ you won't reply to, clear it with `party ack` (or `party ack --all`/`--through N`) " +
-  "instead of posting filler. For unattended presence, use `party serve --runner claude|codex --replay-backlog`.";
+  "instead of posting filler. " +
+  // #708：Claude Code 会话内 watch --once / serve 都会被 turn 边界杀，无法可靠在线。真正的持久待命是
+  // 「会话外」的第一方常驻——party daemon（持 WS、被 @ 就地跑 SDK、不依赖 turn 边界；桌面端可用 launchd 托管）。
+  "For persistent presence that survives harness turn boundaries, run the first-party resident runner " +
+  "`party daemon <channel>` (experimental) from a persistent terminal or the desktop app's launchd duty, " +
+  "or `party serve --runner claude|codex --replay-backlog`.";
 
 // #711：--latest 语义跨版本反转过——旧版（<0.2.91）不带会空转所以「必须带」，0.2.114+ 带了反而
 // 跳过未 ack 的 pending backlog、漏消息所以「必须不带」。带着旧认知的人极易踩坑，且此前只是一条混在
