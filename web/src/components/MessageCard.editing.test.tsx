@@ -221,3 +221,47 @@ describe("message edit keyboard shortcuts (#343)", () => {
     expect(saveEvent.wasPrevented()).toBe(false);
   });
 });
+
+describe("save button 可点性 (#722：编辑后点不了保存)", () => {
+  function saveButton(): ReactTestInstance {
+    return renderer!.root.findAll((node) => node.type === "button" && node.props.className === "d-btn d-btn--primary")[0]!;
+  }
+
+  test("草稿等于原文时保存键仍可点(不再一打开就变灰)", () => {
+    renderEditor({ editDraft: "original" }); // baseMsg().body === "original"
+    expect(saveButton().props.disabled).toBe(false);
+  });
+
+  test("草稿有改动时保存键可点", () => {
+    renderEditor({ editDraft: "original edited" });
+    expect(saveButton().props.disabled).toBe(false);
+  });
+
+  test("空 / 纯空白草稿禁用保存(避免存出空消息)", () => {
+    renderEditor({ editDraft: "   " });
+    expect(saveButton().props.disabled).toBe(true);
+  });
+
+  test("保存中禁用保存(防重复提交)", () => {
+    renderEditor({ editDraft: "original", editSaving: true });
+    expect(saveButton().props.disabled).toBe(true);
+  });
+
+  test("草稿等于原文时 Cmd+Enter 会触发 onEditSave(交由上层关掉编辑器)", () => {
+    let saveCalls = 0;
+    const textarea = renderEditor({ editDraft: "original", onEditSave: () => { saveCalls += 1; } });
+    const saveEvent = keyEvent("Enter", { metaKey: true });
+    act(() => textarea.props.onKeyDown(saveEvent));
+    expect(saveCalls).toBe(1);
+    expect(saveEvent.wasPrevented()).toBe(true);
+  });
+
+  test("草稿等于原文时 Ctrl+Enter(非 mac)同样触发 onEditSave", () => {
+    let saveCalls = 0;
+    const textarea = renderEditor({ editDraft: "original", onEditSave: () => { saveCalls += 1; } });
+    const saveEvent = keyEvent("Enter", { ctrlKey: true });
+    act(() => textarea.props.onKeyDown(saveEvent));
+    expect(saveCalls).toBe(1);
+    expect(saveEvent.wasPrevented()).toBe(true);
+  });
+});
