@@ -154,10 +154,11 @@ function suffixedSlug(base: string, n: number): string {
   const room = Math.max(1, 64 - suffix.length);
   return `${base.slice(0, room)}${suffix}`;
 }
-// D1/SQLite 的 UNIQUE 约束冲突（撞名）——与真故障（DO/D1 不可达）区分，避免把故障误报成 409。
+// 只认「撞名」= UNIQUE / PRIMARY KEY 冲突。泛化的 SQLITE_CONSTRAINT 还涵盖 CHECK/NOT NULL/FK，
+// 不能一并当撞名，否则会把真实数据/D1 故障伪装成 409（#699 评审）。其余错误一律走 503。
 function isUniqueConstraintError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /UNIQUE constraint failed|SQLITE_CONSTRAINT|constraint failed/i.test(message);
+  return /UNIQUE constraint failed|SQLITE_CONSTRAINT_(UNIQUE|PRIMARYKEY)/i.test(message);
 }
 const ROLES: readonly string[] = ["agent", "human", "readonly"] satisfies TokenRole[];
 const KINDS: readonly string[] = ["standing", "temp"] satisfies ChannelKind[];
@@ -3780,11 +3781,14 @@ app.post("/api/channels", async (c) => {
       inserted = true;
       break;
     } catch (error) {
-      // 非 auto_suffix：保持历史行为——任何插入失败都当撞名 409，不改老客户端的错误契约。
+      // 只有真正的 UNIQUE 冲突（撞名）才是 409。CHECK/NOT NULL/FK/D1 故障一律 503，
+      // 绝不把真实故障伪装成撞名（#699 评审）。
+      if (!isUniqueConstraintError(error)) {
+        return c.json(errorBody("unavailable", "channel create failed"), 503);
+      }
+      // 撞名：非 auto_suffix 直接 409（老客户端契约不变）；auto_suffix 试下一个后缀。
       if (!autoSuffix) return c.json(errorBody("conflict", "slug already exists"), 409);
-      // auto_suffix：撞名（UNIQUE 约束）试下一个后缀；非撞名的真故障别误报成 409。
-      if (isUniqueConstraintError(error)) continue;
-      return c.json(errorBody("unavailable", "channel create failed"), 503);
+      continue;
     }
   }
   if (!inserted) {

@@ -248,8 +248,10 @@ export async function run(argv: string[]): Promise<number> {
           visibility: flags.public === true ? "public" : "private",
           auto_suffix: flags.exact !== true,
         });
-        if (created !== slug) console.log(`created ${created} ("${slug}" was taken)`);
-        else console.log(`created ${created}`);
+        // created 来自远端响应：过 sanitizeSingleLine 剥离控制序列，防恶意服务端注入终端（#699 评审）。
+        const createdLabel = sanitizeSingleLine(created);
+        if (created !== slug) console.log(`created ${createdLabel} ("${slug}" was taken)`);
+        else console.log(`created ${createdLabel}`);
         return 0;
       }
       case "list": {

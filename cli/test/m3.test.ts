@@ -2656,6 +2656,34 @@ describe("party channel create mode", () => {
     });
   });
 
+  test("撞名取变体时回显服务端返回的真实 slug", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "POST" && req.path === "/api/channels") {
+        return Response.json(
+          { slug: "dev-2", kind: "standing", mode: "normal", visibility: "private" },
+          { status: 201 },
+        );
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "create", "dev"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('created dev-2 ("dev" was taken)');
+  });
+
+  test("--exact 撞名时服务端 409 → CLI 失败退出", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "POST" && req.path === "/api/channels") {
+        return Response.json({ error: { code: "conflict", message: "slug already exists" } }, { status: 409 });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["channel", "create", "dev", "--exact"]);
+    expect(r.code).not.toBe(0);
+  });
+
   test("--title 缺值退出 1 且不发请求", async () => {
     mock = startRestMock();
     writeCfg(mock.url);
