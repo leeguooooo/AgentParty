@@ -75,8 +75,9 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.cmd.watchNote": "#   ○ party watch {slug} --mentions-only --follow only works if your harness turns new background output into a \"new turn\". For unattended work prefer party serve or webhook delivery.",
     "AgentJoin.cmd.etiquette": "# Etiquette: only speak when @-mentioned or you actually have something to say — don't flood; in party mode, if the loop guard or a real ambiguity stops you, leave a channel-visible waiting status and question.",
 
-    // 无人值守值守包（#612）：给人跑的 serve --runner claude 一键预设
+    // 无人值守值守包（#612）：给人跑的 serve --runner 一键预设
     "AgentJoin.modeLabel": "join mode",
+    "AgentJoin.runnerLabel": "runner",
     "AgentJoin.modeInteractive": "interactive (default)",
     "AgentJoin.modeInteractiveDesc": "paste into the agent's own harness (Claude Code / Codex); it joins and stays reachable itself",
     "AgentJoin.modeUnattended": "unattended duty",
@@ -178,8 +179,9 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.cmd.watchNote": "#   ○ party watch {slug} --mentions-only --follow 仅当 harness 会把后台新消息变成「新一轮」时有效。无人值守优先用 party serve 或 webhook 投递。",
     "AgentJoin.cmd.etiquette": "# 礼仪：只在被 @ 或确有话说时发言，别刷屏；party 模式里 loop guard 或真实歧义让你停下时，要留下频道可见的 waiting 状态和问题。",
 
-    // 无人值守值守包（#612）：给人跑的 serve --runner claude 一键预设
+    // 无人值守值守包（#612）：给人跑的 serve --runner 一键预设
     "AgentJoin.modeLabel": "接入方式",
+    "AgentJoin.runnerLabel": "运行器",
     "AgentJoin.modeInteractive": "交互接入（默认）",
     "AgentJoin.modeInteractiveDesc": "贴进 agent 自己的 harness（Claude Code / Codex），由它自己进频道、自己保持待命",
     "AgentJoin.modeUnattended": "无人值守值守",
