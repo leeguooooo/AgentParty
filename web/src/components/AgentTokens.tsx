@@ -291,6 +291,8 @@ export function AgentTokens({
       token: next.token,
       command,
       mode: findSavedAgentToken(accountKey, slug, name)?.mode,
+      // #749：轮换 token 也要保留已选 runner,否则已选 claude 的 unattended 记录轮换后复制包会回退 codex。
+      runner: findSavedAgentToken(accountKey, slug, name)?.runner,
       savedAt: Date.now(),
     });
     return next.token;
