@@ -62,6 +62,7 @@ pub(crate) fn runner_launch_path(home: &Path) -> String {
     let home = home.to_string_lossy();
     let mut parts = vec![
         format!("{home}/.local/bin"),
+        format!("{home}/.npm-global/bin"), // `npm config set prefix ~/.npm-global` 的 codex/claude 装这
         format!("{home}/.bun/bin"),
         format!("{home}/.deno/bin"),
         "/opt/homebrew/bin".to_string(),
@@ -644,7 +645,7 @@ pub(crate) fn desktop_duty_log_read(label: String, max_bytes: Option<usize>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{duty_label, duty_plist_content, instance_id_from_label, tail_utf8, DutyPlistSpec};
+    use super::{duty_label, duty_plist_content, instance_id_from_label, runner_launch_path, tail_utf8, DutyPlistSpec};
 
     #[test]
     fn tail_utf8_keeps_char_boundary_and_caps_length() {
@@ -716,6 +717,7 @@ mod tests {
         // #741:launchd serve 的 PATH 必须含 codex/claude 常见安装位置,否则 runner not found。
         let path = runner_launch_path(std::path::Path::new("/Users/leo"));
         assert!(path.contains("/Users/leo/.local/bin"), "缺 ~/.local/bin(install.sh 默认): {path}");
+        assert!(path.contains("/Users/leo/.npm-global/bin"), "缺 ~/.npm-global/bin(npm global): {path}");
         assert!(path.contains("/opt/homebrew/bin"), "缺 homebrew: {path}");
         assert!(path.contains("/usr/local/bin"), "缺 /usr/local/bin(npm 默认): {path}");
         assert!(path.contains("/usr/bin:/bin:/usr/sbin:/sbin"), "缺系统默认兜底: {path}");
