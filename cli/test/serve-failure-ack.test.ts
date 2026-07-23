@@ -282,6 +282,10 @@ describe("serve wake delivery (#118 / #198)", () => {
     // 非 JSON（resume 明文输出）→ 优雅返回 false，交回 stderr 判定。
     expect(claudeJsonEnvFailure("plain text answer mentioning unauthorized")).toBe(false);
     expect(claudeJsonEnvFailure("")).toBe(false);
+    // 合法但非对象的 JSON（null / 数字 / 字符串 / 数组 / 布尔）→ 绝不能对其取属性抛异常(CodeRabbit #752)。
+    for (const legal of ["null", "42", "\"unauthorized\"", "[]", "true"]) {
+      expect(claudeJsonEnvFailure(legal)).toBe(false);
+    }
   });
 
   test("a non-environment runner failure keeps environment=false (no false positives)", async () => {

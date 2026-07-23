@@ -1660,12 +1660,16 @@ export function isRunnerEnvFailure(result: Pick<RunnerProcessResult, "stderr">):
 // 这里只吃**结构化字段**：仅当 `is_error===true && terminal_reason==="api_error"` 且 `result` 命中环境错指纹
 // 才判 env failure——正常模型输出 `is_error:false`（即便正文含「unauthorized」），绝不误报，不重犯 #693。
 export function claudeJsonEnvFailure(stdout: string): boolean {
-  let body: Record<string, unknown>;
+  let parsed: unknown;
   try {
-    body = JSON.parse(stdout) as Record<string, unknown>;
+    parsed = JSON.parse(stdout);
   } catch {
     return false;
   }
+  // JSON.parse 对 "null"/数字/字符串等合法 JSON 返回非对象值——直接取属性会抛(合法 null 更会),
+  // 别让失败处理自身崩(CodeRabbit #752)。只认对象体。
+  if (typeof parsed !== "object" || parsed === null) return false;
+  const body = parsed as Record<string, unknown>;
   if (body.is_error !== true || body.terminal_reason !== "api_error") return false;
   const result = typeof body.result === "string" ? body.result : "";
   return RUNNER_ENV_FAILURE_PATTERNS.some((re) => re.test(result));
