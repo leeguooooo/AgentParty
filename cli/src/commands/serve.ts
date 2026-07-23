@@ -3,6 +3,7 @@
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
 import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type SendDecisionRequest, type ServerFrame } from "@agentparty/shared";
 import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { downloadPartyUpgrade, isPartyBinaryPath, maybeReexecUpgrade, serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
 import {
   clearManagedActions,
@@ -260,6 +261,55 @@ export const EXIT_ALREADY_SERVING = 10;
 /** Conventional shell exit codes for an explicitly interrupted resident serve. */
 export const EXIT_SIGNAL_INT = 128 + 2;
 export const EXIT_SIGNAL_TERM = 128 + 15;
+
+/** 桌面「转为常驻」生成的 launchd job label 前缀(须与 desktop/src-tauri/src/duty.rs 的 DUTY_LABEL_PREFIX 一致)。 */
+const DUTY_LABEL_PREFIX = "com.agentparty.duty.";
+
+/**
+ * #744:launchd 常驻下,「终局不该重启」的退出(熔断 EXIT_WAKE_ABANDON_CIRCUIT / 撤销 EXIT_AUTH)必须
+ * 让 launchd 别 KeepAlive 重启——否则熔断的安全停机被绕过、或对着被撤 token 空转,且 launchd 还以为在线。
+ * serve 自己 `launchctl bootout` 掉自己那个 job:launchd 移除它 → 不再重启,launchctl print/health/presence
+ * 一致显示停机,人工重新「转为常驻」才复活。普通崩溃 / stream-ended **不** bootout,照常由 KeepAlive 自愈。
+ * 只在 plist 传了 AP_DUTY_LABEL(桌面「转为常驻」会传)且 macOS 时生效;不改退出码契约,tmux/手动 supervisor 无感。
+ * best-effort:bootout 失败也照常退出(退出码仍对,只是少了自卸载)。可注入 spawn 供测试。
+ */
+export function selfBootoutTerminalDuty(
+  code: number,
+  out: (line: string) => void,
+  deps?: { platform?: string; uid?: number | null; label?: string; spawn?: typeof spawnSync },
+): boolean {
+  const label = deps?.label ?? process.env.AP_DUTY_LABEL;
+  if (label === undefined || label === "") return false;
+  const platform = deps?.platform ?? process.platform;
+  if (platform !== "darwin") return false;
+  if (code !== EXIT_WAKE_ABANDON_CIRCUIT && code !== EXIT_AUTH) return false;
+  // 严格校验注入的 label(@macmini #744 评审):只接受我们自己生成的 duty label(前缀 + launchd 合法字符),
+  // 否则拒绝——绝不拿一个猜的/被篡改的 label 去 bootout,免得卸载错的甚至宽泛目标。
+  if (!label.startsWith(DUTY_LABEL_PREFIX) || !/^[A-Za-z0-9.-]+$/.test(label)) {
+    // 不回显未验证的 label 原值(#745 CodeRabbit):非法即无信息价值,还可能是被塞的脏数据。
+    out("serve: 拒绝自卸载——AP_DUTY_LABEL 不是合法的 duty label");
+    return false;
+  }
+  const uid = deps?.uid ?? (typeof process.getuid === "function" ? process.getuid() : null);
+  if (uid === null) return false;
+  const target = `gui/${uid}/${label}`;
+  const reason = code === EXIT_WAKE_ABANDON_CIRCUIT ? "circuit-breaker" : "auth-revoked";
+  out(`serve: 终局退出(${reason}, code=${code})——从 launchd 卸载自身(${label}),不再自动重启;修好后重新「转为常驻」。`);
+  // bootout 必须是最后动作(@macmini #744 评审):它可能给 serve 发 SIGTERM,其后不能再有必需的清理/日志。
+  // 必须检查返回值(#745 CodeRabbit):spawnSync 把非零退出/超时/命令找不到写进 result(不总是抛),
+  // 只 try/catch 会静默吞掉——那样日志说「已卸载」但 job 还在、KeepAlive 照样重启,假的安全停机。
+  try {
+    const result = (deps?.spawn ?? spawnSync)("launchctl", ["bootout", target], { timeout: 5000 });
+    // 成功仅当 status===0 且无 error;非零退出、超时/信号杀(status=null+signal)、命令找不到一律算失败。
+    if (result.error !== undefined || result.status !== 0) {
+      const why = result.error?.message ?? (result.signal != null ? `killed by ${result.signal}` : `exit ${result.status}`);
+      out(`serve: ⚠ launchctl bootout 失败(${why})——自卸载未生效,launchd 可能仍 KeepAlive 重启;请人工:launchctl bootout ${target}`);
+    }
+  } catch (error) {
+    out(`serve: ⚠ launchctl bootout 抛错(${error instanceof Error ? error.message : String(error)})——自卸载未生效;请人工:launchctl bootout ${target}`);
+  }
+  return true;
+}
 
 /** 传给 builtin runner 的提示：只给路径，不给正文（#120）。 */
 function wakePrompt(contextFile: string, projectAgent: ProjectAgentRunContext | null): string {
@@ -5109,7 +5159,7 @@ export async function run(argv: string[]): Promise<number> {
     if (runnerWorkdirPath !== null) appendServeLifecycleLog(runnerWorkdirPath, record);
     console.error(terminalOutput(`serve supervisor: ${line}`));
   };
-  return superviseServe({
+  const superviseExit = await superviseServe({
     onLifecycle: lifecycle,
     runOnce: async () => {
       // 每次自愈都重读本地凭据与 OIDC 状态，避免用启动时快照把一次可恢复的 token
@@ -5180,4 +5230,7 @@ export async function run(argv: string[]): Promise<number> {
       return result;
     },
   });
+  // #744:终局不该重启的退出(熔断/撤销)在 launchd 常驻下自卸载,别让 KeepAlive 绕过安全停机/空转。
+  selfBootoutTerminalDuty(superviseExit, (line) => console.error(terminalOutput(`serve supervisor: ${line}`)));
+  return superviseExit;
 }
