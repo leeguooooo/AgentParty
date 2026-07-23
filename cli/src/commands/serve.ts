@@ -68,7 +68,10 @@ const COMMON_PROTOCOL_REMINDER =
 const ADVISORY_FRONT_REMINDER =
   " 你是留在主频道沟通和调度的 front agent。简短对话和一次只读路由检查可直接处理；代码修改、多步排查、浏览器/运维及其它耗时工作，优先交给 harness 的 subagent/worker，让它回报证据由你汇总。" +
   " 这是兼容模式（CLI 不能证明 worker 已启动）：harness 支持子 agent 就委派；确实无法创建 worker 时，就在本会话内把活干完，不要只报 blocked 停住。" +
-  " 需要 owner 给权限、取舍或批准时用 `party decision ask <问题> [--option ...]`；需要更多上下文用 `party history <channel>`；结论用 `party send --reply-to <seq>` 发回本频道。";
+  " 你的最终输出会由 serve 自动发回本频道（上下文里的 reply_to 已指好这条）——直接把回复写成你的输出即可，" +
+  "【不要自己调用 `party send`】：会重复投递，且常驻的 codex runner 跑在无网络沙箱里根本发不出去、还会把『连接失败』误写进回复。" +
+  " 同理 `party history` / `party decision ask` 等直连服务的 CLI 在该沙箱也会失败——上下文已含 charter 与 recent，据此作答；" +
+  " 确需 owner 决策或更多上下文却当前拿不到时，在你的输出里说清（由 serve 发回频道请人跟进），不要反复重试直连命令。";
 
 const MANAGED_FRONT_REMINDER =
   " 你是 managed front agent，是三个方向的通信与调度控制面：对频道交流、对 owner 请求决定、对子 worker 派工/追问/验收；执行 worker 已由 supervisor 独立常驻。你没有执行面权限，也不要调用 party CLI。" +
@@ -312,7 +315,7 @@ export function selfBootoutTerminalDuty(
 }
 
 /** 传给 builtin runner 的提示：只给路径，不给正文（#120）。 */
-function wakePrompt(contextFile: string, projectAgent: ProjectAgentRunContext | null): string {
+export function wakePrompt(contextFile: string, projectAgent: ProjectAgentRunContext | null): string {
   return (
     `你在 AgentParty 频道里被 @ 了。唤醒上下文是一个 JSON 文件：${contextFile}\n` +
     `先读它（含 channel / seq / sender / body / mentions / charter / recent），再动手。\n` +
