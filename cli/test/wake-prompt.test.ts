@@ -25,4 +25,22 @@ describe("wakePrompt 内置 runner 投递契约", () => {
     expect(prompt).toContain("/tmp/ctx.json");
     expect(prompt).toContain("先读它");
   });
+
+  // 隔离验证(#747 CodeRabbit):ADVISORY_FRONT_REMINDER 的改动不得泄漏到 managed/worker 路径——
+  // 它们各自用 MANAGED_FRONT_/WORKER_ reminder,不该出现内置 advisory 特有的「serve 自动发回」措辞。
+  const managedFront = { runtime_role: "front", protocol: "mcp", workers: [{ name: "w1" }] } as never;
+  const worker = { runtime_role: "worker", protocol: "mcp", workers: [] } as never;
+
+  test("managed front(有 worker)路径不受影响:走 JSON 契约、无内置 advisory 措辞", () => {
+    const p = wakePrompt("/tmp/ctx.json", managedFront);
+    expect(p).not.toContain("serve 自动发回");
+    expect(p).not.toContain("不要自己调用 `party send`");
+    expect(p).toContain("managed front agent"); // managed front 自己的契约仍在
+  });
+
+  test("worker 路径不受影响:走 execution worker 契约、无内置 advisory 措辞", () => {
+    const p = wakePrompt("/tmp/ctx.json", worker);
+    expect(p).not.toContain("serve 自动发回");
+    expect(p).toContain("execution worker"); // worker 契约仍在
+  });
 });
