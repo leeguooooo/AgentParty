@@ -41,6 +41,7 @@ describe("wakePrompt 内置 runner 投递契约", () => {
   test("worker 路径不受影响:走 execution worker 契约、无内置 advisory 措辞", () => {
     const p = wakePrompt("/tmp/ctx.json", worker);
     expect(p).not.toContain("serve 自动发回");
+    expect(p).not.toContain("不要自己调用 `party send`");
     expect(p).toContain("execution worker"); // worker 契约仍在
   });
 });
