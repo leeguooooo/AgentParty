@@ -117,6 +117,9 @@ pub(crate) fn duty_plist_content(spec: &DutyPlistSpec<'_>) -> String {
     <string>{config}</string>
     <key>PATH</key>
     <string>{path}</string>
+    <!-- #744:让 serve 知道自己这个 launchd job 的 label,熔断/token 撤销等终局退出时自卸载,不被 KeepAlive 重启 -->
+    <key>AP_DUTY_LABEL</key>
+    <string>{label}</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -688,6 +691,9 @@ mod tests {
         assert!(plist.contains("<key>AGENTPARTY_CONFIG</key>"));
         // #741:PATH 必须进 EnvironmentVariables,否则 launchd 精简 PATH 找不到 codex/claude runner。
         assert!(plist.contains("<key>PATH</key>"));
+        // #744:AP_DUTY_LABEL 让 serve 熔断/撤销时能 bootout 自身 job(值即 label)。
+        assert!(plist.contains("<key>AP_DUTY_LABEL</key>"));
+        assert!(plist.contains("com.agentparty.duty.x.dev"));
         assert!(plist.contains("/Users/leo/.local/bin"));
         // --repo 未指定时绝不出现
         assert!(!plist.contains("--repo"));
