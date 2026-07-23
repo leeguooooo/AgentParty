@@ -43,6 +43,15 @@ describe("selfBootoutTerminalDuty (#744)", () => {
     expect(r.calls).toEqual([]);
   });
 
+  test("label 非法(非 duty 前缀 / 含非法字符)→ 拒绝,绝不 bootout(@macmini 评审)", () => {
+    for (const bad of ["com.other.job", "com.agentparty.duty.x dev", "com.agentparty.duty.x;rm", "system/"]) {
+      const r = recorder();
+      const did = selfBootoutTerminalDuty(EXIT_WAKE_ABANDON_CIRCUIT, r.out, { ...base({ label: bad }), spawn: r.spawn } as never);
+      expect(did).toBe(false);
+      expect(r.calls).toEqual([]);
+    }
+  });
+
   test("非 macOS 不碰 launchctl", () => {
     const r = recorder();
     const did = selfBootoutTerminalDuty(EXIT_WAKE_ABANDON_CIRCUIT, r.out, { ...base({ platform: "linux" }), spawn: r.spawn } as never);

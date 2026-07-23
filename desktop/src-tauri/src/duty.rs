@@ -691,9 +691,8 @@ mod tests {
         assert!(plist.contains("<key>AGENTPARTY_CONFIG</key>"));
         // #741:PATH 必须进 EnvironmentVariables,否则 launchd 精简 PATH 找不到 codex/claude runner。
         assert!(plist.contains("<key>PATH</key>"));
-        // #744:AP_DUTY_LABEL 让 serve 熔断/撤销时能 bootout 自身 job(值即 label)。
-        assert!(plist.contains("<key>AP_DUTY_LABEL</key>"));
-        assert!(plist.contains("com.agentparty.duty.x.dev"));
+        // #744:AP_DUTY_LABEL 的值必须紧跟其 key(不能只是碰巧 label 在别处出现,#745 CodeRabbit)。
+        assert!(plist.contains("<key>AP_DUTY_LABEL</key>\n    <string>com.agentparty.duty.x.dev</string>"));
         assert!(plist.contains("/Users/leo/.local/bin"));
         // --repo 未指定时绝不出现
         assert!(!plist.contains("--repo"));

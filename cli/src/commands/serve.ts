@@ -262,6 +262,9 @@ export const EXIT_ALREADY_SERVING = 10;
 export const EXIT_SIGNAL_INT = 128 + 2;
 export const EXIT_SIGNAL_TERM = 128 + 15;
 
+/** 桌面「转为常驻」生成的 launchd job label 前缀(须与 desktop/src-tauri/src/duty.rs 的 DUTY_LABEL_PREFIX 一致)。 */
+const DUTY_LABEL_PREFIX = "com.agentparty.duty.";
+
 /**
  * #744:launchd 常驻下,「终局不该重启」的退出(熔断 EXIT_WAKE_ABANDON_CIRCUIT / 撤销 EXIT_AUTH)必须
  * 让 launchd 别 KeepAlive 重启——否则熔断的安全停机被绕过、或对着被撤 token 空转,且 launchd 还以为在线。
@@ -280,14 +283,21 @@ export function selfBootoutTerminalDuty(
   const platform = deps?.platform ?? process.platform;
   if (platform !== "darwin") return false;
   if (code !== EXIT_WAKE_ABANDON_CIRCUIT && code !== EXIT_AUTH) return false;
+  // 严格校验注入的 label(@macmini #744 评审):只接受我们自己生成的 duty label(前缀 + launchd 合法字符),
+  // 否则拒绝——绝不拿一个猜的/被篡改的 label 去 bootout,免得卸载错的甚至宽泛目标。
+  if (!label.startsWith(DUTY_LABEL_PREFIX) || !/^[A-Za-z0-9.-]+$/.test(label)) {
+    out(`serve: 拒绝自卸载——AP_DUTY_LABEL 非法(${label})`);
+    return false;
+  }
   const uid = deps?.uid ?? (typeof process.getuid === "function" ? process.getuid() : null);
   if (uid === null) return false;
   const reason = code === EXIT_WAKE_ABANDON_CIRCUIT ? "circuit-breaker" : "auth-revoked";
   out(`serve: 终局退出(${reason}, code=${code})——从 launchd 卸载自身(${label}),不再自动重启;修好后重新「转为常驻」。`);
+  // bootout 必须是最后动作(@macmini #744 评审):它可能给 serve 发 SIGTERM,其后不能再有必需的清理/日志。
   try {
     (deps?.spawn ?? spawnSync)("launchctl", ["bootout", `gui/${uid}/${label}`], { timeout: 5000 });
   } catch {
-    /* best-effort */
+    /* best-effort:卸载失败也照常退出,退出码仍对 */
   }
   return true;
 }
