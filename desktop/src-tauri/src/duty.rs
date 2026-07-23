@@ -50,6 +50,32 @@ pub(crate) struct DutyPlistSpec<'a> {
     pub(crate) workdir: Option<&'a str>,
     pub(crate) repo: Option<&'a str>,
     pub(crate) log_path: &'a str,
+    /// launchd 起的进程 PATH 被精简成 /usr/bin:/bin:/usr/sbin:/sbin,找不到 codex/claude
+    /// runner(#741 频道实测:serve 起来了但 runner not found → wake 全 abandon)。plist 必须显式设 PATH。
+    pub(crate) path: &'a str,
+}
+
+/// 给 launchd 常驻的 serve 用的 PATH:显式补上 runner(codex/claude)常见安装目录 + adopt 时进程
+/// 自身的 PATH(从终端启动的 app 会带用户完整 PATH,覆盖 nvm 等自定义位置)+ 系统默认兜底。
+/// launchd 不展开 ~/$HOME,所以全用绝对路径;PATH 允许重复项,不必去重。
+pub(crate) fn runner_launch_path(home: &Path) -> String {
+    let home = home.to_string_lossy();
+    let mut parts = vec![
+        format!("{home}/.local/bin"),
+        format!("{home}/.npm-global/bin"), // `npm config set prefix ~/.npm-global` 的 codex/claude 装这
+        format!("{home}/.bun/bin"),
+        format!("{home}/.deno/bin"),
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+    ];
+    if let Some(inherited) = env::var_os("PATH") {
+        let inherited = inherited.to_string_lossy();
+        if !inherited.is_empty() {
+            parts.push(inherited.into_owned());
+        }
+    }
+    parts.push("/usr/bin:/bin:/usr/sbin:/sbin".to_string());
+    parts.join(":")
 }
 
 /// 生成 LaunchAgent plist。token 绝不入内——只引用 config 文件路径。
@@ -89,6 +115,8 @@ pub(crate) fn duty_plist_content(spec: &DutyPlistSpec<'_>) -> String {
   <dict>
     <key>AGENTPARTY_CONFIG</key>
     <string>{config}</string>
+    <key>PATH</key>
+    <string>{path}</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -106,6 +134,7 @@ pub(crate) fn duty_plist_content(spec: &DutyPlistSpec<'_>) -> String {
         label = xml_escape(spec.label),
         args_xml = args_xml,
         config = xml_escape(spec.config_path),
+        path = xml_escape(spec.path),
         log = xml_escape(spec.log_path),
     )
 }
@@ -332,6 +361,7 @@ async fn duty_persist_inner(
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("cannot create duty log dir: {error}"))?;
     }
+    let launch_path = runner_launch_path(&home);
     let plist = duty_plist_content(&DutyPlistSpec {
         label: &label,
         party_bin: &party_bin.to_string_lossy(),
@@ -341,6 +371,7 @@ async fn duty_persist_inner(
         workdir,
         repo,
         log_path: &log_path.to_string_lossy(),
+        path: &launch_path,
     });
     let plist_path = duty_plist_path(&home, &label);
     if let Some(parent) = plist_path.parent() {
@@ -614,7 +645,7 @@ pub(crate) fn desktop_duty_log_read(label: String, max_bytes: Option<usize>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{duty_label, duty_plist_content, instance_id_from_label, tail_utf8, DutyPlistSpec};
+    use super::{duty_label, duty_plist_content, instance_id_from_label, runner_launch_path, tail_utf8, DutyPlistSpec};
 
     #[test]
     fn tail_utf8_keeps_char_boundary_and_caps_length() {
@@ -647,6 +678,7 @@ mod tests {
             workdir: Some("/srv/<duty>"),
             repo: None,
             log_path: "/Users/leo/.agentparty/desktop/logs/x.log",
+            path: "/Users/leo/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
         });
         assert!(plist.contains("a&amp;b"));
         assert!(plist.contains("&lt;duty&gt;"));
@@ -654,6 +686,9 @@ mod tests {
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<string>--auto-upgrade</string>"));
         assert!(plist.contains("<key>AGENTPARTY_CONFIG</key>"));
+        // #741:PATH 必须进 EnvironmentVariables,否则 launchd 精简 PATH 找不到 codex/claude runner。
+        assert!(plist.contains("<key>PATH</key>"));
+        assert!(plist.contains("/Users/leo/.local/bin"));
         // --repo 未指定时绝不出现
         assert!(!plist.contains("--repo"));
     }
@@ -669,10 +704,22 @@ mod tests {
             workdir: Some("/srv/duty"),
             repo: Some("https://github.com/org/repo.git"),
             log_path: "/log",
+            path: "/x/bin:/usr/bin:/bin",
         });
         assert!(plist.contains("<string>--workdir</string>"));
         assert!(plist.contains("<string>/srv/duty</string>"));
         assert!(plist.contains("<string>--repo</string>"));
         assert!(plist.contains("<string>https://github.com/org/repo.git</string>"));
+    }
+
+    #[test]
+    fn runner_launch_path_has_common_runner_dirs_and_system_defaults() {
+        // #741:launchd serve 的 PATH 必须含 codex/claude 常见安装位置,否则 runner not found。
+        let path = runner_launch_path(std::path::Path::new("/Users/leo"));
+        assert!(path.contains("/Users/leo/.local/bin"), "缺 ~/.local/bin(install.sh 默认): {path}");
+        assert!(path.contains("/Users/leo/.npm-global/bin"), "缺 ~/.npm-global/bin(npm global): {path}");
+        assert!(path.contains("/opt/homebrew/bin"), "缺 homebrew: {path}");
+        assert!(path.contains("/usr/local/bin"), "缺 /usr/local/bin(npm 默认): {path}");
+        assert!(path.contains("/usr/bin:/bin:/usr/sbin:/sbin"), "缺系统默认兜底: {path}");
     }
 }
