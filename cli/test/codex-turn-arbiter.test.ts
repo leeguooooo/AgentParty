@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CodexBridgeJournalOverflowError,
   CodexBridgeQueueFullError,
   CodexInteractiveMutationBlockedError,
   CodexRetryableBeforeWriteError,
@@ -827,6 +828,93 @@ describe("Codex app-server single-writer arbiter", () => {
     );
   });
 
+  test("large shell history uses one stable anchor and still identifies only the new item", async () => {
+    const mock = transport();
+    const arbiter = new CodexTurnArbiter("thread-1", mock.value);
+    const historicalItems = Array.from({ length: 2_000 }, (_, index) => ({
+      type: "commandExecution",
+      id: `historical-shell-${index}`,
+      source: "userShell",
+      status: "completed",
+    }));
+    await arbiter.observeResume({
+      thread: {
+        status: { type: "idle" },
+        turns: [{
+          id: "historical-shell-turn",
+          status: "completed",
+          items: historicalItems,
+        }],
+      },
+    });
+    expect(
+      (arbiter as unknown as { lastObservedUserShellItemId: string | null })
+        .lastObservedUserShellItemId,
+    ).toBe("historical-shell-1999");
+
+    await arbiter.runInteractiveMutation(
+      "thread/shellCommand",
+      { threadId: "thread-1", command: "pwd" },
+      async () => ({}),
+    );
+    expect(
+      (arbiter as unknown as {
+        shellLifecycle: { baselineItemId: string | null } | null;
+      }).shellLifecycle?.baselineItemId,
+    ).toBe("historical-shell-1999");
+    await arbiter.submit(input("after-large-shell-history"));
+
+    // If the baseline anchor disappears, one unrelated terminal item must not
+    // be mistaken for this request's commandExecution item.
+    await arbiter.observeResume({
+      thread: {
+        status: { type: "idle" },
+        turns: [{
+          id: "truncated-shell-turn",
+          status: "completed",
+          items: [{
+            type: "commandExecution",
+            id: "unrelated-shell-item",
+            source: "userShell",
+            status: "completed",
+          }],
+        }],
+      },
+    });
+    expect(arbiter.snapshot().phase.type).toBe("shell");
+    expect(mock.starts).toHaveLength(0);
+
+    await arbiter.observeResume({
+      thread: {
+        status: { type: "idle" },
+        turns: [
+          {
+            id: "historical-shell-turn",
+            status: "completed",
+            items: historicalItems,
+          },
+          {
+            id: "new-shell-turn",
+            status: "completed",
+            items: [{
+              type: "commandExecution",
+              id: "new-shell-item",
+              source: "userShell",
+              status: "completed",
+            }],
+          },
+        ],
+      },
+    });
+    expect(mock.starts.map((entry) => entry.clientUserMessageId)).toEqual([
+      "agentparty:after-large-shell-history",
+    ]);
+    expect(
+      (arbiter as unknown as { lastObservedUserShellItemId: string | null })
+        .lastObservedUserShellItemId,
+    ).toBe("new-shell-item");
+  });
+
   test("backend-crash recovery aborts a lossy interrupted shell without replaying it", async () => {
     const mock = transport();
     const arbiter = new CodexTurnArbiter("thread-1", mock.value);
@@ -861,6 +949,59 @@ describe("Codex app-server single-writer arbiter", () => {
     expect(mock.starts[0]!.clientUserMessageId).toBe(
       "agentparty:after-lossy-shell-crash",
     );
+  });
+
+  test("backend restart releases a shell whose start item was permanently omitted", async () => {
+    const mock = transport();
+    const arbiter = new CodexTurnArbiter("thread-1", mock.value);
+    await arbiter.observeResume({
+      thread: {
+        status: { type: "idle" },
+        turns: [{
+          id: "prior-shell-turn",
+          status: "completed",
+          items: [{
+            type: "commandExecution",
+            id: "prior-shell-item",
+            source: "userShell",
+            status: "completed",
+          }],
+        }],
+      },
+    });
+    await arbiter.runInteractiveMutation(
+      "thread/shellCommand",
+      { threadId: "thread-1", command: "pwd" },
+      async () => ({}),
+    );
+    await arbiter.submit(input("after-omitted-shell-item"));
+
+    const truncatedIdle = {
+      thread: {
+        status: { type: "idle" as const },
+        turns: [{
+          id: "unrelated-terminal-turn",
+          status: "completed" as const,
+          items: [{
+            type: "commandExecution",
+            id: "unrelated-shell-item",
+            source: "userShell",
+            status: "completed",
+          }],
+        }],
+      },
+    };
+    await arbiter.observeResume(truncatedIdle);
+    expect(arbiter.snapshot()).toMatchObject({
+      phase: { type: "shell" },
+      queueDepth: 1,
+    });
+    expect(mock.starts).toHaveLength(0);
+
+    await arbiter.observeResume(truncatedIdle, { backendRestarted: true });
+    expect(mock.starts.map((entry) => entry.clientUserMessageId)).toEqual([
+      "agentparty:after-omitted-shell-item",
+    ]);
   });
 
   test("cold resume recognizes an active standalone user shell and never steers into it", async () => {
@@ -1277,6 +1418,197 @@ describe("Codex app-server single-writer arbiter", () => {
       "agentparty:abandoned-first",
       "agentparty:queued-after-abandonment",
     ]);
+  });
+
+  test("terminal journal is bounded without pruning uncertain or queued correctness state", async () => {
+    const writes: string[] = [];
+    const arbiter = new CodexTurnArbiter("thread-1", {
+      async turnStart(params) {
+        writes.push(params.clientUserMessageId ?? "missing-client-id");
+        return { turn: { id: "long-running-turn" } };
+      },
+      async turnSteer(params) {
+        const clientId = params.clientUserMessageId ?? "missing-client-id";
+        writes.push(clientId);
+        if (clientId === "agentparty:bounded-uncertain") {
+          throw new Error("response lost after write");
+        }
+        return { turnId: params.expectedTurnId };
+      },
+    }, { maxTerminalJournalEntries: 8 });
+    await arbiter.observeTurnStarted("long-running-turn");
+
+    const uncertain = input("bounded-uncertain");
+    expect(await arbiter.submit(uncertain)).toMatchObject({ kind: "uncertain" });
+    expect(await arbiter.submit(input("bounded-queued"))).toMatchObject({
+      kind: "queued",
+      reason: "unknown_outcome",
+    });
+
+    // A full-history reconciliation can contain many old ids. It must retain
+    // only the bounded terminal window, remove an accepted queued input, and
+    // leave the unrelated transport-unknown write fenced.
+    await arbiter.observeResume({
+      thread: {
+        status: { type: "active" },
+        turns: [
+          {
+            id: "completed-history",
+            status: "completed",
+            items: Array.from({ length: 100 }, (_, index) => ({
+              type: "userMessage",
+              clientId: `agentparty:bounded-terminal-${index}`,
+            })),
+          },
+          {
+            id: "long-running-turn",
+            status: "inProgress",
+            items: [
+              { type: "userMessage", clientId: "agentparty:bounded-queued" },
+              { type: "userMessage", clientId: "agentparty:current-turn-recent" },
+            ],
+          },
+        ],
+      },
+    });
+    const internals = arbiter as unknown as {
+      journal: Map<string, string>;
+      terminalJournalOrder: Map<string, undefined>;
+      activeTurnAcceptedClientIds: Set<string>;
+      uncertainInputs: Map<string, unknown>;
+    };
+    expect(internals.terminalJournalOrder.size).toBe(8);
+    expect(internals.activeTurnAcceptedClientIds.size).toBe(2);
+    expect(internals.journal.size).toBe(11);
+    expect(internals.uncertainInputs.size).toBe(1);
+    expect(arbiter.snapshot()).toMatchObject({ queueDepth: 0, uncertainCount: 1 });
+    expect(arbiter.unresolvedUnknownInputs()).toEqual([uncertain]);
+
+    const writesBeforeDuplicate = writes.length;
+    expect(await arbiter.submit(input("current-turn-recent"))).toEqual({ kind: "duplicate" });
+    expect(writes).toHaveLength(writesBeforeDuplicate);
+
+    expect(await arbiter.resolveUnknownOutcome(uncertain, "abandoned")).toEqual({
+      kind: "duplicate",
+    });
+    expect(internals.terminalJournalOrder.size).toBe(8);
+    expect(internals.journal.size).toBe(10);
+    expect(internals.uncertainInputs.size).toBe(0);
+    expect(await arbiter.submit(uncertain)).toEqual({ kind: "duplicate" });
+    expect(writes).toHaveLength(writesBeforeDuplicate);
+  });
+
+  test("active-turn ids stay pinned across terminal churn and backpressure at their own cap", async () => {
+    const mock = transport();
+    const arbiter = new CodexTurnArbiter("thread-1", mock.value, {
+      maxTerminalJournalEntries: 1,
+      maxActiveTurnJournalEntries: 2,
+    });
+    await arbiter.observeTurnStarted("bounded-active-turn");
+
+    expect(await arbiter.submit(input("active-a"))).toMatchObject({ kind: "steered" });
+    expect(await arbiter.submit(input("active-b"))).toMatchObject({ kind: "steered" });
+    expect(await arbiter.submit(input("active-a"))).toEqual({ kind: "duplicate" });
+    expect(mock.steers.map((entry) => entry.clientUserMessageId)).toEqual([
+      "agentparty:active-a",
+      "agentparty:active-b",
+    ]);
+
+    expect(await arbiter.submit(input("active-c"))).toMatchObject({
+      kind: "queued",
+      reason: "steer_rejected",
+    });
+    expect(arbiter.snapshot().queueDepth).toBe(1);
+    await arbiter.observeTurnCompleted("bounded-active-turn");
+    expect(mock.starts.map((entry) => entry.clientUserMessageId)).toEqual([
+      "agentparty:active-c",
+    ]);
+
+    const internals = arbiter as unknown as {
+      journal: Map<string, string>;
+      terminalJournalOrder: Map<string, undefined>;
+      activeTurnAcceptedClientIds: Set<string>;
+    };
+    expect(internals.terminalJournalOrder.size).toBe(1);
+    expect(internals.activeTurnAcceptedClientIds.size).toBe(1);
+    expect(internals.journal.size).toBe(2);
+  });
+
+  test("authoritative active-turn overflow stays fail-closed after the turn completes", async () => {
+    const mock = transport();
+    const arbiter = new CodexTurnArbiter("thread-1", mock.value, {
+      maxTerminalJournalEntries: 1,
+      maxActiveTurnJournalEntries: 2,
+    });
+    await arbiter.observeTurnStarted("overflowed-active-turn", [
+      "agentparty:overflow-a",
+      "agentparty:overflow-b",
+    ]);
+    await arbiter.observeTurnStarted("overflowed-active-turn", [
+      "agentparty:overflow-c",
+    ]);
+    await arbiter.observeTurnStarted("overflowed-active-turn", [
+      "agentparty:overflow-d",
+    ]);
+
+    expect(arbiter.snapshot()).toMatchObject({
+      phase: { type: "normal", turnId: "overflowed-active-turn" },
+      queueDepth: 0,
+      uncertainCount: 1,
+    });
+    await expect(
+      arbiter.submit(input("overflow-c")),
+    ).rejects.toBeInstanceOf(CodexBridgeJournalOverflowError);
+    await arbiter.observeTurnCompleted("overflowed-active-turn");
+    expect(mock.starts).toHaveLength(0);
+    await expect(
+      arbiter.submit(input("fresh-after-overflow")),
+    ).rejects.toBeInstanceOf(CodexBridgeJournalOverflowError);
+
+    const internals = arbiter as unknown as {
+      journal: Map<string, string>;
+      terminalJournalOrder: Map<string, undefined>;
+      activeTurnAcceptedClientIds: Set<string>;
+    };
+    expect(internals.terminalJournalOrder.size).toBe(1);
+    expect(internals.activeTurnAcceptedClientIds.size).toBe(0);
+    expect(internals.journal.size).toBe(1);
+  });
+
+  test("accepted reconciliation removes the queued input and its rollback debt together", async () => {
+    let rollbackAttempts = 0;
+    const arbiter = new CodexTurnArbiter("thread-1", {
+      async turnStart() {
+        throw new Error("must not start");
+      },
+      async turnSteer() {
+        throw rpcError();
+      },
+    });
+    await arbiter.observeTurnStarted("reconciled-turn");
+    const reconciled = {
+      ...input("reconciled-rollback"),
+      onWriteRejected: () => {
+        rollbackAttempts += 1;
+        throw new Error("rollback storage unavailable");
+      },
+    };
+    expect(await arbiter.submit(reconciled)).toMatchObject({
+      kind: "queued",
+      reason: "steer_rejected",
+    });
+    const internals = arbiter as unknown as {
+      rollbackDebts: Map<string, unknown>;
+    };
+    expect(internals.rollbackDebts.size).toBe(1);
+
+    await arbiter.observeTurnStarted("reconciled-turn", [
+      reconciled.clientUserMessageId,
+    ]);
+    expect(arbiter.snapshot().queueDepth).toBe(0);
+    expect(internals.rollbackDebts.size).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 125));
+    expect(rollbackAttempts).toBe(1);
   });
 
   test("unresolved unknown inputs contain only unreconciled defensive snapshots", async () => {

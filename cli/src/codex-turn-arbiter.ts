@@ -49,7 +49,7 @@ interface CodexShellLifecycle {
   basePhase: CodexShellBasePhase;
   baseTurnId: string | null;
   baseCompleted: boolean;
-  baselineItemIds: ReadonlySet<string>;
+  baselineItemId: string | null;
   requestOutcome: "pending" | "accepted" | "uncertain";
   standaloneTurnId: string | null;
   standaloneCompleted: boolean;
@@ -64,7 +64,7 @@ export interface CodexBridgeInput {
   /**
    * Durable proxy-owned command id, e.g. `agentparty:<delivery-id>`.
    * Codex stores this as ThreadItem.userMessage.clientId but does NOT dedupe it;
-   * the arbiter journal below owns deduplication.
+   * the arbiter's bounded hot journal and durable delivery ledger own deduplication.
    */
   clientUserMessageId: string;
   metadata?: Record<string, string>;
@@ -107,6 +107,16 @@ export class CodexBridgeQueueFullError extends Error {
   constructor(readonly limit: number) {
     super(`Codex session bridge queue is full (${limit})`);
     this.name = "CodexBridgeQueueFullError";
+  }
+}
+
+export class CodexBridgeJournalOverflowError extends Error {
+  constructor(readonly limit: number) {
+    super(
+      `Codex active-turn duplicate fence exceeded its safe limit (${limit}); ` +
+        "restart with a new session before accepting more input",
+    );
+    this.name = "CodexBridgeJournalOverflowError";
   }
 }
 
@@ -156,6 +166,10 @@ export class CodexInteractiveMutationBlockedError extends Error {
 
 export interface CodexTurnArbiterOptions {
   maxQueue?: number;
+  /** Recent terminal ids retained for in-process duplicate suppression. */
+  maxTerminalJournalEntries?: number;
+  /** Accepted ids pinned until their active turn reaches a terminal boundary. */
+  maxActiveTurnJournalEntries?: number;
   onQueuedDispatch?: (entry: {
     id: number;
     input: CodexBridgeInput;
@@ -187,6 +201,7 @@ function compactInput(input: CodexBridgeInput): CodexBridgeInput {
 }
 
 type JournalState = "queued" | "accepted" | "abandoned" | "uncertain";
+const DEFAULT_MAX_TERMINAL_JOURNAL_ENTRIES = 4_096;
 
 function rpcErrorData(error: unknown): unknown {
   if (typeof error !== "object" || error === null) return undefined;
@@ -232,10 +247,21 @@ export class CodexTurnArbiter {
   private nextQueueId = 1;
   private exclusive: Promise<void> = Promise.resolve();
   private readonly maxQueue: number;
+  private readonly maxTerminalJournalEntries: number;
+  private readonly maxActiveTurnJournalEntries: number;
   private readonly journal = new Map<string, JournalState>();
+  private readonly terminalJournalOrder = new Map<string, undefined>();
+  private activeTurnId: string | null = null;
+  private readonly activeTurnAcceptedClientIds = new Set<string>();
+  /**
+   * Sticky fail-closed fence. Once authoritative history contains more active
+   * ids than can be retained exactly, accepting any unknown id could replay an
+   * evicted write. A fresh arbiter/session is required to restore exactness.
+   */
+  private activeTurnJournalOverflowed = false;
   private readonly uncertainInputs = new Map<string, CodexBridgeInput>();
   private readonly rollbackDebts = new Map<string, () => Promise<void>>();
-  private readonly observedUserShellItemIds = new Set<string>();
+  private lastObservedUserShellItemId: string | null = null;
   private shellLifecycle: CodexShellLifecycle | null = null;
   private flushRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private flushRetryAttempt = 0;
@@ -248,6 +274,22 @@ export class CodexTurnArbiter {
     this.maxQueue = options.maxQueue ?? 128;
     if (!Number.isSafeInteger(this.maxQueue) || this.maxQueue <= 0) {
       throw new Error("maxQueue must be a positive integer");
+    }
+    this.maxTerminalJournalEntries = options.maxTerminalJournalEntries ??
+      DEFAULT_MAX_TERMINAL_JOURNAL_ENTRIES;
+    if (
+      !Number.isSafeInteger(this.maxTerminalJournalEntries) ||
+      this.maxTerminalJournalEntries <= 0
+    ) {
+      throw new Error("maxTerminalJournalEntries must be a positive integer");
+    }
+    this.maxActiveTurnJournalEntries = options.maxActiveTurnJournalEntries ??
+      DEFAULT_MAX_TERMINAL_JOURNAL_ENTRIES;
+    if (
+      !Number.isSafeInteger(this.maxActiveTurnJournalEntries) ||
+      this.maxActiveTurnJournalEntries <= 0
+    ) {
+      throw new Error("maxActiveTurnJournalEntries must be a positive integer");
     }
   }
 
@@ -272,7 +314,7 @@ export class CodexTurnArbiter {
   }
 
   private uncertainCount(): number {
-    return [...this.journal.values()].filter((state) => state === "uncertain").length;
+    return this.uncertainInputs.size + (this.activeTurnJournalOverflowed ? 1 : 0);
   }
 
   private hasUncertainOutcome(): boolean {
@@ -283,6 +325,76 @@ export class CodexTurnArbiter {
     const run = this.exclusive.then(operation, operation);
     this.exclusive = run.then(() => {}, () => {});
     return run;
+  }
+
+  private setJournalState(clientId: string, state: JournalState): void {
+    this.activeTurnAcceptedClientIds.delete(clientId);
+    this.terminalJournalOrder.delete(clientId);
+    this.journal.set(clientId, state);
+    if (state !== "accepted" && state !== "abandoned") return;
+
+    // Queued and transport-unknown writes are correctness state and are never
+    // evicted. Accepted/abandoned ids are a hot duplicate-suppression cache;
+    // the durable delivery ledger owns older terminal history.
+    this.terminalJournalOrder.set(clientId, undefined);
+    while (this.terminalJournalOrder.size > this.maxTerminalJournalEntries) {
+      const oldest = this.terminalJournalOrder.keys().next().value;
+      if (oldest === undefined) break;
+      this.terminalJournalOrder.delete(oldest);
+      const oldestState = this.journal.get(oldest);
+      if (oldestState === "accepted" || oldestState === "abandoned") {
+        this.journal.delete(oldest);
+      }
+    }
+  }
+
+  private deleteJournalState(clientId: string): void {
+    this.activeTurnAcceptedClientIds.delete(clientId);
+    this.terminalJournalOrder.delete(clientId);
+    this.journal.delete(clientId);
+  }
+
+  private setAcceptedJournalState(clientId: string, turnId: string | null): void {
+    if (turnId !== null && turnId === this.activeTurnId) {
+      if (
+        !this.activeTurnAcceptedClientIds.has(clientId) &&
+        this.activeTurnAcceptedClientIds.size >= this.maxActiveTurnJournalEntries
+      ) {
+        // Never demote a still-active accepted id into the evictable terminal
+        // cache. We can no longer distinguish that id from a future retry, so
+        // preserve bounded memory and stop every unknown write fail-closed.
+        this.activeTurnJournalOverflowed = true;
+        return;
+      }
+      this.terminalJournalOrder.delete(clientId);
+      this.journal.set(clientId, "accepted");
+      this.activeTurnAcceptedClientIds.add(clientId);
+      return;
+    }
+    this.setJournalState(clientId, "accepted");
+  }
+
+  private setActiveTurn(turnId: string | null): void {
+    if (this.activeTurnId === turnId) return;
+    const completedTurnClientIds = [...this.activeTurnAcceptedClientIds];
+    this.activeTurnAcceptedClientIds.clear();
+    this.activeTurnId = turnId;
+    for (const clientId of completedTurnClientIds) {
+      this.setJournalState(clientId, "accepted");
+    }
+  }
+
+  private canAcceptIntoActiveTurn(clientId: string, turnId: string): boolean {
+    if (this.activeTurnJournalOverflowed) return false;
+    if (this.activeTurnId !== turnId) this.setActiveTurn(turnId);
+    return this.activeTurnAcceptedClientIds.has(clientId) ||
+      this.activeTurnAcceptedClientIds.size < this.maxActiveTurnJournalEntries;
+  }
+
+  private rememberUserShellHistory(items: ReadonlyArray<{ itemId: string }>): void {
+    this.lastObservedUserShellItemId = items.length === 0
+      ? null
+      : items[items.length - 1]!.itemId;
   }
 
   private enqueue(input: CodexBridgeInput, reason: QueuedInput["reason"]): CodexDispatch {
@@ -297,7 +409,7 @@ export class CodexTurnArbiter {
     }
     if (this.queue.length >= this.maxQueue) throw new CodexBridgeQueueFullError(this.maxQueue);
     this.queue.push({ id: this.nextQueueId++, input, reason });
-    this.journal.set(input.clientUserMessageId, "queued");
+    this.setJournalState(input.clientUserMessageId, "queued");
     return {
       kind: "queued",
       queuePosition: this.queue.length,
@@ -356,8 +468,9 @@ export class CodexTurnArbiter {
     }
     try {
       const response = await this.transport.turnStart(this.startParams(input));
+      this.setActiveTurn(response.turn.id);
       this.phase = { type: "normal", turnId: response.turn.id };
-      this.journal.set(input.clientUserMessageId, "accepted");
+      this.setAcceptedJournalState(input.clientUserMessageId, response.turn.id);
       this.uncertainInputs.delete(input.clientUserMessageId);
       return { kind: "started", turnId: response.turn.id };
     } catch (error) {
@@ -386,7 +499,7 @@ export class CodexTurnArbiter {
       // Network close/timeout has an unknown outcome. Codex does not dedupe
       // clientUserMessageId, so never retry until a resume/read reconciliation
       // proves whether ThreadItem.userMessage.clientId exists.
-      this.journal.set(input.clientUserMessageId, "uncertain");
+      this.setJournalState(input.clientUserMessageId, "uncertain");
       this.uncertainInputs.set(input.clientUserMessageId, input);
       return { kind: "uncertain", reason: "unknown_outcome" };
     }
@@ -422,8 +535,9 @@ export class CodexTurnArbiter {
       const response = await this.transport.turnSteer(this.steerParams(input, expectedTurnId));
       // A valid response retains the same active turn. Do not accept a response
       // as authority to change the CAS id; turn/started is the authority.
+      this.setActiveTurn(expectedTurnId);
       this.phase = { type: "normal", turnId: expectedTurnId };
-      this.journal.set(input.clientUserMessageId, "accepted");
+      this.setAcceptedJournalState(input.clientUserMessageId, expectedTurnId);
       this.uncertainInputs.delete(input.clientUserMessageId);
       return { kind: "steered", turnId: response.turnId };
     } catch (error) {
@@ -441,7 +555,7 @@ export class CodexTurnArbiter {
       }
       if (!isDefinitiveRpcRejection(error) && !isProvenNotWritten(error)) {
         this.phase = { type: "unknown", turnId: null };
-        this.journal.set(input.clientUserMessageId, "uncertain");
+        this.setJournalState(input.clientUserMessageId, "uncertain");
         this.uncertainInputs.set(input.clientUserMessageId, input);
         return { kind: "uncertain", reason: "unknown_outcome" };
       }
@@ -488,6 +602,9 @@ export class CodexTurnArbiter {
       if (journal === "accepted" || journal === "abandoned") return { kind: "duplicate" };
       if (journal === "uncertain") return { kind: "uncertain", reason: "unknown_outcome" };
       if (journal === "queued") return this.enqueue(normalized, "steer_rejected");
+      if (this.activeTurnJournalOverflowed) {
+        throw new CodexBridgeJournalOverflowError(this.maxActiveTurnJournalEntries);
+      }
       if (this.queue.length > 0) {
         const reason = this.phase.type === "idle"
           ? "start_rejected"
@@ -495,7 +612,16 @@ export class CodexTurnArbiter {
             ? "steer_rejected"
             : this.phase.type;
         const dispatch = this.enqueue(normalized, reason);
-        if (this.phase.type === "idle" || this.phase.type === "normal") {
+        if (
+          this.phase.type === "idle" ||
+          (
+            this.phase.type === "normal" &&
+            this.canAcceptIntoActiveTurn(
+              this.queue[0]!.input.clientUserMessageId,
+              this.phase.turnId,
+            )
+          )
+        ) {
           this.scheduleFlushRetry();
         }
         return dispatch;
@@ -505,7 +631,12 @@ export class CodexTurnArbiter {
       // input may start or steer. Retain it in the bounded queue instead.
       if (this.hasUncertainOutcome()) return this.enqueue(normalized, "unknown_outcome");
       if (this.phase.type === "idle") return await this.start(normalized);
-      if (this.phase.type === "normal") return await this.steer(normalized, this.phase.turnId);
+      if (this.phase.type === "normal") {
+        if (!this.canAcceptIntoActiveTurn(normalized.clientUserMessageId, this.phase.turnId)) {
+          return this.enqueue(normalized, "steer_rejected");
+        }
+        return await this.steer(normalized, this.phase.turnId);
+      }
       return this.enqueue(normalized, this.phase.type);
     });
   }
@@ -524,7 +655,7 @@ export class CodexTurnArbiter {
       );
       if (index < 0) return false;
       this.queue.splice(index, 1);
-      this.journal.delete(clientUserMessageId);
+      this.deleteJournalState(clientUserMessageId);
       this.rollbackDebts.delete(clientUserMessageId);
       if (this.queue.length === 0 && this.flushRetryTimer !== null) {
         clearTimeout(this.flushRetryTimer);
@@ -636,7 +767,7 @@ export class CodexTurnArbiter {
           basePhase,
           baseTurnId: "turnId" in basePhase ? basePhase.turnId : null,
           baseCompleted: basePhase.type === "idle",
-          baselineItemIds: new Set(this.observedUserShellItemIds),
+          baselineItemId: this.lastObservedUserShellItemId,
           requestOutcome: "pending",
           standaloneTurnId: null,
           standaloneCompleted: false,
@@ -655,6 +786,7 @@ export class CodexTurnArbiter {
         const response = await operation();
         if (method === "turn/start") {
           const turnId = responseTurnId(response);
+          this.setActiveTurn(turnId);
           this.phase = turnId === null
             ? { type: "unknown", turnId: null }
             : { type: "normal", turnId };
@@ -662,6 +794,7 @@ export class CodexTurnArbiter {
         } else if (method === "turn/steer") {
           const expected = typeof params.expectedTurnId === "string" ? params.expectedTurnId : null;
           const turnId = responseTurnId(response) ?? expected;
+          this.setActiveTurn(turnId);
           this.phase = turnId === null
             ? { type: "unknown", turnId: null }
             : { type: "normal", turnId };
@@ -763,14 +896,24 @@ export class CodexTurnArbiter {
             : []
         )
       );
-      this.reconcileAcceptedClientIds(acceptedClientIds);
+      const runningTurns = response.thread.turns.filter((turn) => turn.status === "inProgress");
+      const resumedActiveTurn = runningTurns.length === 1 ? runningTurns[0]! : null;
+      this.setActiveTurn(resumedActiveTurn?.id ?? null);
+      const activeClientIds = resumedActiveTurn === null
+        ? []
+        : (resumedActiveTurn.items ?? [])
+          .filter((item) => item.type === "userMessage" && typeof item.clientId === "string")
+          .map((item) => item.clientId as string);
+      this.reconcileAcceptedClientIds(acceptedClientIds, activeClientIds);
       if (this.shellLifecycle) {
         const shell = this.shellLifecycle;
         const historyMatch = shell.itemId === null
           ? (() => {
-            const candidates = userShellItems.filter((item) =>
-              !shell.baselineItemIds.has(item.itemId)
-            );
+            const baselineIndex = shell.baselineItemId === null
+              ? -1
+              : userShellItems.findIndex((item) => item.itemId === shell.baselineItemId);
+            if (shell.baselineItemId !== null && baselineIndex < 0) return null;
+            const candidates = userShellItems.slice(baselineIndex + 1);
             return candidates.length === 1 ? candidates[0]! : null;
           })()
           : userShellItems.find((item) =>
@@ -805,6 +948,23 @@ export class CodexTurnArbiter {
         }
         if (
           historyMatch === null &&
+          shell.itemId === null &&
+          shell.requestOutcome !== "pending" &&
+          options.backendRestarted === true &&
+          response.thread.status.type === "idle"
+        ) {
+          // A restarted backend cannot still be executing the shell. Codex
+          // history may permanently omit the commandExecution item, including
+          // when its start notification was lost with the old transport.
+          // Abort (never replay) the shell and release only the local fence.
+          shell.itemCompleted = true;
+          shell.itemAborted = true;
+          this.rememberUserShellHistory(userShellItems);
+          await this.finishShellIdle();
+          return;
+        }
+        if (
+          historyMatch === null &&
           shell.itemId !== null &&
           shell.itemTurnId !== null &&
           options.backendRestarted === true &&
@@ -829,7 +989,7 @@ export class CodexTurnArbiter {
             }
           }
         }
-        for (const item of userShellItems) this.observedUserShellItemIds.add(item.itemId);
+        this.rememberUserShellHistory(userShellItems);
         if (response.thread.status.type === "idle") {
           // A reconnect can race both the shell request and stale idle
           // notifications from the base turn. Without the exact
@@ -890,7 +1050,7 @@ export class CodexTurnArbiter {
         this.phase = { type: "shell", turnId: shell.standaloneTurnId ?? shell.baseTurnId };
         return;
       }
-      for (const item of userShellItems) this.observedUserShellItemIds.add(item.itemId);
+      this.rememberUserShellHistory(userShellItems);
       if (response.thread.status.type === "idle") {
         this.phase = { type: "idle" };
         await this.flushFromIdle();
@@ -958,9 +1118,7 @@ export class CodexTurnArbiter {
                 basePhase,
                 baseTurnId: basePhase.type === "idle" ? null : active.id,
                 baseCompleted: basePhase.type === "idle",
-                baselineItemIds: new Set(
-                  [...this.observedUserShellItemIds].filter((id) => id !== shellItem.id),
-                ),
+                baselineItemId: null,
                 requestOutcome: "accepted",
                 standaloneTurnId: basePhase.type === "idle" ? active.id : null,
                 standaloneCompleted: false,
@@ -1008,7 +1166,8 @@ export class CodexTurnArbiter {
 
   async observeTurnStarted(turnId: string, clientIds: string[] = []): Promise<void> {
     await this.serialize(async () => {
-      this.reconcileAcceptedClientIds(clientIds);
+      this.setActiveTurn(turnId);
+      this.reconcileAcceptedClientIds(clientIds, clientIds);
       // A review/compact request remains non-steerable even if it internally
       // emits turn/started. Only its completion/idle event opens the queue.
       if (
@@ -1046,6 +1205,7 @@ export class CodexTurnArbiter {
 
   async observeTurnCompleted(turnId: string): Promise<void> {
     await this.serialize(async () => {
+      if (this.activeTurnId === turnId) this.setActiveTurn(null);
       if (this.phase.type === "shell" && this.shellLifecycle) {
         const shell = this.shellLifecycle;
         if (shell.standaloneTurnId === turnId) {
@@ -1074,6 +1234,7 @@ export class CodexTurnArbiter {
 
   async observeThreadIdle(): Promise<void> {
     await this.serialize(async () => {
+      this.setActiveTurn(null);
       if (this.phase.type === "shell" && this.shellLifecycle) {
         const shell = this.shellLifecycle;
         if (shell.standaloneTurnId !== null) {
@@ -1104,7 +1265,7 @@ export class CodexTurnArbiter {
     await this.serialize(async () => {
       if (this.phase.type !== "shell" || !this.shellLifecycle) return;
       const shell = this.shellLifecycle;
-      this.observedUserShellItemIds.add(itemId);
+      this.lastObservedUserShellItemId = itemId;
       if (shell.itemId !== null) {
         // Only the commandExecution item that authoritatively started this
         // shell request may release the fence.
@@ -1130,7 +1291,6 @@ export class CodexTurnArbiter {
     await this.serialize(async () => {
       if (this.phase.type !== "shell" || !this.shellLifecycle) return;
       const shell = this.shellLifecycle;
-      this.observedUserShellItemIds.add(itemId);
       if (shell.itemId !== itemId || shell.itemTurnId !== turnId) return;
       shell.itemCompleted = true;
       if (shell.standaloneTurnId !== null) {
@@ -1189,7 +1349,7 @@ export class CodexTurnArbiter {
           : this.enqueue(normalized, "steer_rejected");
       }
       if (outcome === "accepted") {
-        this.journal.set(normalized.clientUserMessageId, "accepted");
+        this.setAcceptedJournalState(normalized.clientUserMessageId, this.activeTurnId);
         this.uncertainInputs.delete(normalized.clientUserMessageId);
         await this.flushAuthoritativePhase();
         return { kind: "duplicate" };
@@ -1200,26 +1360,37 @@ export class CodexTurnArbiter {
         // still not a negative idempotency proof. The delivery layer first
         // records a visible terminal-unknown failure, then abandons this exact
         // write without replaying it so later independent work can proceed.
-        this.journal.set(normalized.clientUserMessageId, "abandoned");
+        this.setJournalState(normalized.clientUserMessageId, "abandoned");
         await this.flushAuthoritativePhase();
         return { kind: "duplicate" };
       }
-      this.journal.delete(normalized.clientUserMessageId);
+      this.deleteJournalState(normalized.clientUserMessageId);
       const dispatch = this.enqueue(normalized, "steer_rejected");
       await this.flushAuthoritativePhase();
       return dispatch;
     });
   }
 
-  private reconcileAcceptedClientIds(clientIds: Iterable<string>): void {
+  private reconcileAcceptedClientIds(
+    clientIds: Iterable<string>,
+    activeClientIds: Iterable<string> = [],
+  ): void {
     const accepted = new Set(clientIds);
     if (accepted.size === 0) return;
-    for (const clientId of accepted) {
-      this.journal.set(clientId, "accepted");
-      this.uncertainInputs.delete(clientId);
-    }
+    const active = new Set(activeClientIds);
     for (let index = this.queue.length - 1; index >= 0; index -= 1) {
-      if (accepted.has(this.queue[index]!.input.clientUserMessageId)) this.queue.splice(index, 1);
+      const clientId = this.queue[index]!.input.clientUserMessageId;
+      if (!accepted.has(clientId)) continue;
+      this.queue.splice(index, 1);
+      this.rollbackDebts.delete(clientId);
+    }
+    for (const clientId of accepted) {
+      this.uncertainInputs.delete(clientId);
+      if (active.has(clientId)) {
+        this.setAcceptedJournalState(clientId, this.activeTurnId);
+      } else {
+        this.setJournalState(clientId, "accepted");
+      }
     }
   }
 
@@ -1267,7 +1438,7 @@ export class CodexTurnArbiter {
 
   private restoreQueuedAfterFlushError(entry: QueuedInput, error: unknown): void {
     this.queue.unshift(entry);
-    this.journal.set(entry.input.clientUserMessageId, "queued");
+    this.setJournalState(entry.input.clientUserMessageId, "queued");
     this.notifyQueuedError(entry, error);
     this.scheduleFlushRetry();
   }
@@ -1276,7 +1447,7 @@ export class CodexTurnArbiter {
     if (this.hasUncertainOutcome()) return;
     const entry = this.queue.shift();
     if (!entry) return;
-    this.journal.delete(entry.input.clientUserMessageId);
+    this.deleteJournalState(entry.input.clientUserMessageId);
     let dispatch: CodexDispatch;
     try {
       dispatch = await this.start(entry.input);
@@ -1295,10 +1466,14 @@ export class CodexTurnArbiter {
     while (
       !this.hasUncertainOutcome() &&
       this.phase.type === "normal" &&
-      this.queue.length > 0
+      this.queue.length > 0 &&
+      this.canAcceptIntoActiveTurn(
+        this.queue[0]!.input.clientUserMessageId,
+        this.phase.turnId,
+      )
     ) {
       const entry = this.queue.shift()!;
-      this.journal.delete(entry.input.clientUserMessageId);
+      this.deleteJournalState(entry.input.clientUserMessageId);
       const expectedTurnId = this.phase.turnId;
       let dispatch: CodexDispatch;
       try {
