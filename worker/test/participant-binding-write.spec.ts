@@ -2,6 +2,22 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { api, createChannel, postMessage, seedToken, uniq, WsClient } from "./helpers";
 
+async function waitForParticipantBinding(
+  slug: string,
+  participantName: string,
+  timeoutMs = 2_000,
+): Promise<{ account: string } | null> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const binding = await env.DB.prepare(
+      "SELECT account FROM channel_participant_bindings WHERE channel_slug = ? AND participant_name = ?",
+    ).bind(slug, participantName).first<{ account: string }>();
+    if (binding !== null) return binding;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  } while (Date.now() < deadline);
+  return null;
+}
+
 describe("channel participant binding writes", () => {
   it("does not turn successful channel reads into D1 writes", async () => {
     const account = `${uniq("reader")}@example.com`;
@@ -32,9 +48,7 @@ describe("channel participant binding writes", () => {
     await socket.nextOfType("welcome");
 
     expect(
-      await env.DB.prepare(
-        "SELECT account FROM channel_participant_bindings WHERE channel_slug = ? AND participant_name = ?",
-      ).bind(slug, participant.name).first<{ account: string }>(),
+      await waitForParticipantBinding(slug, participant.name),
     ).toEqual({ account });
     socket.close();
   });
