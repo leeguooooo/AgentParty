@@ -1,6 +1,7 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
 import { DesktopSettingsStrings } from "../i18n/strings/DesktopSettings";
 import {
@@ -15,13 +16,15 @@ import {
   updateDesktopSettingsFocus,
 } from "./DesktopSettings";
 
+Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+
 const translations: Record<string, string> = {
   "DesktopSettings.control.label": "Application settings",
   "DesktopSettings.panel.title": "Application settings",
   "DesktopSettings.autostart.label": "Launch at login",
   "DesktopSettings.autostart.description": "Open AgentParty when you sign in.",
   "DesktopSettings.autostart.loading": "Reading system setting",
-  "DesktopSettings.autostart.error": "Couldn't update this setting.",
+  "DesktopSettings.autostart.error": "Couldn't read or update this system setting.",
   "DesktopSettings.version.desktop": "Desktop",
   "DesktopSettings.version.channel": "Release",
   "DesktopSettings.version.server": "Server",
@@ -49,6 +52,17 @@ function renderSettings(runtimeValue: DesktopSettingsRuntime): string {
   return renderToStaticMarkup(
     <LocaleProvider><DesktopSettings runtime={runtimeValue} /></LocaleProvider>,
   );
+}
+
+async function renderEmbeddedSettings(runtimeValue: DesktopSettingsRuntime): Promise<ReactTestRenderer> {
+  let renderer: ReactTestRenderer | null = null;
+  await act(async () => {
+    renderer = create(
+      <LocaleProvider><DesktopSettings runtime={runtimeValue} embedded /></LocaleProvider>,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  return renderer!;
 }
 
 describe("DesktopSettings", () => {
@@ -129,7 +143,7 @@ describe("DesktopSettingsPanel", () => {
     );
 
     expect(html).toContain("disabled");
-    expect(html).toContain("update this setting.");
+    expect(html).toContain("read or update this system setting.");
     expect(html).toContain("Keychain access again");
   });
 });
@@ -224,6 +238,52 @@ describe("desktop autostart behavior", () => {
 
     expect(result).toEqual({ enabled: false, failed: true });
     expect(calls).toEqual(["write", "read"]);
+  });
+
+  test("leaves initialization loading and surfaces an error when the system read rejects", async () => {
+    const renderer = await renderEmbeddedSettings(runtime({
+      isAutostartEnabled: async () => {
+        throw new Error("launchd unavailable");
+      },
+    }));
+
+    const toggle = renderer.root.findByProps({ role: "switch" });
+    expect(toggle.props.disabled).toBe(false);
+    expect(toggle.props["aria-checked"]).toBe(false);
+    expect(renderer.root.findByProps({ role: "alert" }).children.join("")).toContain(
+      "read or update this system setting.",
+    );
+
+    await act(async () => renderer.unmount());
+  });
+
+  test("restores the authoritative state and unlocks the switch when a write rejects", async () => {
+    const writes: boolean[] = [];
+    let reads = 0;
+    const renderer = await renderEmbeddedSettings(runtime({
+      isAutostartEnabled: async () => {
+        reads += 1;
+        return reads > 1;
+      },
+      setAutostartEnabled: async (next) => {
+        writes.push(next);
+        throw new Error("native write failed");
+      },
+    }));
+
+    await act(async () => {
+      renderer.root.findByProps({ role: "switch" }).props.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const toggle = renderer.root.findByProps({ role: "switch" });
+    expect(toggle.props.disabled).toBe(false);
+    expect(toggle.props["aria-checked"]).toBe(true);
+    expect(renderer.root.findByProps({ role: "alert" })).toBeTruthy();
+    expect(writes).toEqual([true]);
+    expect(reads).toBe(2);
+
+    await act(async () => renderer.unmount());
   });
 });
 
