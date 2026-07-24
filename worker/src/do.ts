@@ -2143,6 +2143,7 @@ export class ChannelDO extends Server<Env> {
     // Re-arm upgraded active and terminal delivery deadlines on hydration so bounded retention is a
     // real clock guarantee rather than something that only runs if unrelated traffic wakes the DO.
     this.scheduleDirectedDeliveryRetentionAlarm();
+    this.scheduleParticipantRemovalMetaRetentionAlarm();
   }
 
   private hasCompositeSessionPrimaryKey(table: "presence" | "read_cursor"): boolean {
@@ -2305,7 +2306,7 @@ export class ChannelDO extends Server<Env> {
     }
     if (connection.state?.authorizationRevoked === true) return;
     if (await this.isParticipantRemoved(state.name, state.owner)) {
-      this.setMeta(this.participantRemovalKey(state.name), String(connectedAt));
+      this.setParticipantRemovalMeta(this.participantRemovalKey(state.name), connectedAt);
       this.sendFrame(connection, {
         type: "error",
         code: "unauthorized",
@@ -3550,6 +3551,10 @@ export class ChannelDO extends Server<Env> {
     if (auditRetention !== null) {
       const oldest = this.ctx.storage.sql.exec("SELECT MIN(created_at) AS t FROM message_audit").one().t;
       if (oldest !== null) candidates.push(Number(oldest) + auditRetention);
+    }
+    const participantRemovalMetaRetentionAt = this.participantRemovalMetaRetentionAt();
+    if (participantRemovalMetaRetentionAt !== null) {
+      candidates.push(participantRemovalMetaRetentionAt);
     }
     if (candidates.length > 0) {
       await this.ctx.storage.setAlarm(Math.max(Math.min(...candidates), now + 1000));
@@ -5048,6 +5053,27 @@ export class ChannelDO extends Server<Env> {
   private async ensureAlarmAt(ts: number) {
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current > ts) await this.ctx.storage.setAlarm(ts);
+  }
+
+  private participantRemovalMetaRetentionAt(): number | null {
+    const oldest = this.ctx.storage.sql
+      .exec(
+        `SELECT MIN(CAST(value AS INTEGER)) AS t
+           FROM meta
+          WHERE key LIKE 'participant-removal:%'
+             OR key LIKE 'removed-presence:%'`,
+      )
+      .one().t;
+    return oldest === null
+      ? null
+      : Number(oldest) + PARTICIPANT_REMOVAL_META_RETENTION_MS;
+  }
+
+  private scheduleParticipantRemovalMetaRetentionAlarm() {
+    const retentionAt = this.participantRemovalMetaRetentionAt();
+    if (retentionAt !== null) {
+      this.ctx.waitUntil(this.ensureAlarmAt(Math.max(retentionAt, Date.now() + 1000)));
+    }
   }
 
   private scheduleDirectedDeliveryRetentionAlarm() {
@@ -6619,7 +6645,7 @@ export class ChannelDO extends Server<Env> {
         }
         const requestedRemovedAt = Number(body.removed_at);
         const now = Number.isFinite(requestedRemovedAt) && requestedRemovedAt > 0 ? requestedRemovedAt : Date.now();
-        this.setMeta(this.removedPresenceKey(name), String(now));
+        this.setParticipantRemovalMeta(this.removedPresenceKey(name), now);
         this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", name);
         this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
         this.removeParticipantDeliveryAdapters(name, now);
@@ -6672,7 +6698,7 @@ export class ChannelDO extends Server<Env> {
       for (const connection of this.getConnections<ConnState>()) {
         if (connection.state?.name === name) this.closeRevokedConnection(connection);
       }
-      this.setMeta(this.removedPresenceKey(name), String(removedAt));
+      this.setParticipantRemovalMeta(this.removedPresenceKey(name), removedAt);
       this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", name);
       this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
       this.removeParticipantDeliveryAdapters(name, removedAt);
@@ -6986,7 +7012,7 @@ export class ChannelDO extends Server<Env> {
       if (removedAt !== undefined) affected.set(name, removedAt);
     }
     for (const [name, removedAt] of affected) {
-      this.setMeta(this.removedPresenceKey(name), String(removedAt));
+      this.setParticipantRemovalMeta(this.removedPresenceKey(name), removedAt);
       this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", name);
       this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", name);
       this.removeParticipantDeliveryAdapters(name, removedAt);
@@ -7012,7 +7038,7 @@ export class ChannelDO extends Server<Env> {
   }
 
   private removeParticipantDeliveryAdapters(name: string, now: number) {
-    this.setMeta(this.participantRemovalKey(name), String(now));
+    this.setParticipantRemovalMeta(this.participantRemovalKey(name), now);
     this.ctx.storage.sql.exec("DELETE FROM webhooks WHERE name = ?", name);
     this.ctx.storage.sql.exec("DELETE FROM webhook_queue WHERE webhook_name = ?", name);
     this.ctx.storage.sql.exec("DELETE FROM webhook_dead_letters WHERE webhook_name = ?", name);
@@ -10436,6 +10462,15 @@ export class ChannelDO extends Server<Env> {
 
   private participantRemovalKey(name: string): string {
     return `participant-removal:${name}`;
+  }
+
+  private setParticipantRemovalMeta(key: string, observedAt: number) {
+    this.setMeta(key, String(observedAt));
+    this.ctx.waitUntil(
+      this.ensureAlarmAt(
+        Math.max(observedAt + PARTICIPANT_REMOVAL_META_RETENTION_MS, Date.now() + 1000),
+      ),
+    );
   }
 
   private charterRev(): number {
