@@ -613,6 +613,53 @@ describe("DesktopAgentPanel 系统常驻 (#616 phase 3)", () => {
     expect(state.children.join("")).toBe("repair required");
     expect(String(state.props.className)).toContain("desktop-agent-state--stopped");
   });
+
+  test("即使本机 agent 已停止也轮询 duty，并丢弃晚到的旧列表响应", async () => {
+    const oldDuties = deferred<DesktopDutyEntry[]>();
+    const currentDuties = deferred<DesktopDutyEntry[]>();
+    const polls: Array<() => void> = [];
+    let dutyReads = 0;
+    const scheduler: DesktopAgentScheduler = {
+      every: (callback) => {
+        polls.push(callback);
+        return () => {};
+      },
+    };
+    await render(adapter({
+      dutyList: () => {
+        dutyReads += 1;
+        if (dutyReads === 1) return Promise.resolve([{ ...duty }]);
+        return dutyReads === 2 ? oldDuties.promise : currentDuties.promise;
+      },
+    }), scheduler);
+
+    expect(dutyReads).toBe(1);
+    expect(polls).toHaveLength(1);
+    await act(async () => {
+      polls[0]?.();
+      polls[0]?.();
+      await Promise.resolve();
+    });
+    expect(dutyReads).toBe(3);
+
+    await act(async () => {
+      currentDuties.resolve([{
+        ...duty,
+        terminalBlocked: true,
+        terminalReason: "circuit-breaker",
+      }]);
+      await currentDuties.promise;
+      await Promise.resolve();
+    });
+    await act(async () => {
+      oldDuties.resolve([{ ...duty, terminalBlocked: false }]);
+      await oldDuties.promise;
+      await Promise.resolve();
+    });
+
+    const state = renderer!.root.find((node) => node.props.title === "circuit-breaker");
+    expect(state.children.join("")).toBe("repair required");
+  });
 });
 
 describe("DesktopAgentPanel", () => {
@@ -759,13 +806,16 @@ describe("DesktopAgentPanel", () => {
     }), scheduler);
 
     expect(statusReads).toBe(1);
-    await act(async () => { polls[0]?.(); });
+    expect(polls).toHaveLength(2);
+    await act(async () => {
+      for (const poll of polls) poll();
+    });
     expect(statusReads).toBe(2);
 
     await act(async () => renderer?.unmount());
     renderer = null;
-    expect(cancelled).toBe(1);
-    polls[0]?.();
+    expect(cancelled).toBe(2);
+    for (const poll of polls) poll();
     await Promise.resolve();
     expect(statusReads).toBe(2);
   });
