@@ -40,6 +40,7 @@ import {
   DeliveryRecoveryJournal,
   type DeliveryRecoveryEntry,
 } from "./delivery-recovery-journal";
+import { stripTerminalControls } from "./format";
 
 export type JsonRpcId = string | number | null;
 
@@ -211,6 +212,12 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function terminalSafeLogger(
+  sink: (line: string) => void = (line) => console.error(line),
+): (line: string) => void {
+  return (line) => sink(stripTerminalControls(line));
+}
+
 /**
  * Reconnecting JSON-RPC client over `codex app-server proxy --sock …` stdio.
  *
@@ -240,7 +247,7 @@ export class CodexRpcClient {
   private readonly log: (line: string) => void;
 
   constructor(private readonly options: CodexRpcClientOptions) {
-    this.log = options.log ?? ((line) => console.error(line));
+    this.log = terminalSafeLogger(options.log);
     this.reconnectDelay = options.reconnectDelayMs ?? 100;
   }
 
@@ -533,23 +540,30 @@ export class CodexRpcClient {
     return await this.rawRequest(method, params);
   }
 
+  private disconnectedRequestBeforeWrite(
+    method: string,
+    expectedGeneration?: number,
+  ): CodexRpcDisconnectedError | null {
+    const generationChanged =
+      expectedGeneration !== undefined && expectedGeneration !== this.generation;
+    if (this.child && this.initializeValue !== null && !generationChanged) {
+      return null;
+    }
+    return new CodexRpcDisconnectedError(
+      generationChanged
+        ? `Codex app-server generation changed before ${method} request write`
+        : "Codex app-server control connection closed before request write",
+      { requestWritten: false },
+    );
+  }
+
   requestConnected(
     method: string,
     params?: unknown,
     expectedGeneration?: number,
   ): Promise<unknown> {
-    if (
-      !this.child ||
-      this.initializeValue === null ||
-      (expectedGeneration !== undefined && expectedGeneration !== this.generation)
-    ) {
-      return Promise.reject(new CodexRpcDisconnectedError(
-        expectedGeneration !== undefined && expectedGeneration !== this.generation
-          ? `Codex app-server generation changed before ${method} request write`
-          : "Codex app-server control connection closed before request write",
-        { requestWritten: false },
-      ));
-    }
+    const disconnected = this.disconnectedRequestBeforeWrite(method, expectedGeneration);
+    if (disconnected) return Promise.reject(disconnected);
     return this.rawRequest(method, params);
   }
 
@@ -559,18 +573,8 @@ export class CodexRpcClient {
     expectedGeneration: number | undefined,
     applyResponse: (result: unknown) => void | Promise<void>,
   ): Promise<unknown> {
-    if (
-      !this.child ||
-      this.initializeValue === null ||
-      (expectedGeneration !== undefined && expectedGeneration !== this.generation)
-    ) {
-      return Promise.reject(new CodexRpcDisconnectedError(
-        expectedGeneration !== undefined && expectedGeneration !== this.generation
-          ? `Codex app-server generation changed before ${method} request write`
-          : "Codex app-server control connection closed before request write",
-        { requestWritten: false },
-      ));
-    }
+    const disconnected = this.disconnectedRequestBeforeWrite(method, expectedGeneration);
+    if (disconnected) return Promise.reject(disconnected);
     return this.rawRequest(method, params, applyResponse);
   }
 
@@ -852,6 +856,9 @@ export class CodexSessionController {
   private readonly unresolvedUnknownListeners = new Set<UnresolvedUnknownListener>();
   private readonly turnByClientId = new Map<string, string>();
   private readonly turns = new Map<string, CodexTurn>();
+  private readonly retainedTurnBytesById = new Map<string, number>();
+  private retainedCompletedTurnBytes = 0;
+  private retainedCompletedTurnCount = 0;
   private readonly agentMessagesByTurn =
     new Map<string, Map<string, AccumulatedAgentMessage>>();
   private readonly log: (line: string) => void;
@@ -879,7 +886,7 @@ export class CodexSessionController {
       recoveryRetryDelayMs?: number;
     } = {},
   ) {
-    this.log = options.log ?? ((line) => console.error(line));
+    this.log = terminalSafeLogger(options.log);
     rpc.onMessage((message) => this.handleBackendMessage(message));
     const hasDisconnectBoundary = rpc.onDisconnect !== undefined;
     rpc.onDisconnect?.((disconnectedGeneration) => {
@@ -1096,42 +1103,59 @@ export class CodexSessionController {
 
   private storeTurn(turn: CodexTurn): CodexTurn {
     const retained = this.retainedTurn(turn);
+    const previous = this.turns.get(retained.id);
+    if (previous?.status !== undefined && previous.status !== "inProgress") {
+      this.retainedCompletedTurnBytes -=
+        this.retainedTurnBytesById.get(retained.id) ?? 0;
+      this.retainedCompletedTurnCount -= 1;
+    }
+    const retainedBytes = this.retainedTurnBytes(retained);
     this.turns.set(retained.id, retained);
+    this.retainedTurnBytesById.set(retained.id, retainedBytes);
+    if (retained.status !== "inProgress") {
+      this.retainedCompletedTurnBytes += retainedBytes;
+      this.retainedCompletedTurnCount += 1;
+    }
     this.trimRetainedTurns();
     return retained;
   }
 
   private trimRetainedTurns(): void {
+    if (
+      this.retainedCompletedTurnCount <= MAX_RETAINED_COMPLETED_TURNS &&
+      this.retainedCompletedTurnBytes <= MAX_RETAINED_COMPLETED_TURN_BYTES
+    ) {
+      return;
+    }
     const completed = [...this.turns.entries()]
       .filter(([, turn]) => turn.status !== "inProgress")
       .map(([turnId, turn]) => ({
         turnId,
         turn,
-        bytes: this.retainedTurnBytes(turn),
+        bytes: this.retainedTurnBytesById.get(turnId) ?? 0,
         bootstrapProof: (turn.items ?? []).some((item) =>
           item.type === "userMessage" &&
           item.clientId === null &&
           Object.prototype.hasOwnProperty.call(item, "content")
         ),
       }));
-    let bytes = completed.reduce((total, entry) => total + entry.bytes, 0);
-    let count = completed.length;
     while (
-      count > MAX_RETAINED_COMPLETED_TURNS ||
-      bytes > MAX_RETAINED_COMPLETED_TURN_BYTES
+      this.retainedCompletedTurnCount > MAX_RETAINED_COMPLETED_TURNS ||
+      this.retainedCompletedTurnBytes > MAX_RETAINED_COMPLETED_TURN_BYTES
     ) {
       const index = completed.findIndex((entry) => !entry.bootstrapProof);
       if (index < 0) break;
       const [evicted] = completed.splice(index, 1);
       if (!evicted) break;
       this.turns.delete(evicted.turnId);
+      this.retainedTurnBytesById.delete(evicted.turnId);
       for (const [clientId, turnId] of this.turnByClientId) {
         if (turnId === evicted.turnId) {
           this.turnByClientId.delete(clientId);
         }
       }
-      bytes -= evicted.bytes;
-      count -= 1;
+      this.retainedCompletedTurnBytes -= evicted.bytes;
+      this.retainedCompletedTurnCount -= 1;
     }
   }
 
@@ -1153,6 +1177,16 @@ export class CodexSessionController {
     }
     const existing = messages.get(item.id);
     const itemText = typeof item.text === "string" ? item.text : "";
+    if (
+      completed &&
+      existing?.completed === true &&
+      itemText.trim() === ""
+    ) {
+      // item/completed is the authoritative terminal item. A later
+      // turn/completed snapshot can contain only an empty shell for the same
+      // id; do not erase the final text/phase already observed.
+      return;
+    }
     const text =
       completed
         ? itemText
@@ -1269,13 +1303,17 @@ export class CodexSessionController {
     ) {
       return canonicalTurn;
     }
-    const fallback = finalAgentItem(
+    const accumulatedFallback = finalAgentItem(
       accumulated
         ? [...accumulated.values()]
           .filter(({ completed }) => completed)
           .map(({ item, text }) => ({ ...item, text }))
-        : agentMessageItems(previous),
+        : [],
     );
+    const fallback = accumulatedFallback ??
+      (previous?.status !== "inProgress"
+        ? finalAgentItem(agentMessageItems(previous))
+        : null);
     if (!fallback) return canonicalTurn;
 
     const items = [...(canonicalTurn.items ?? [])];
@@ -1294,6 +1332,7 @@ export class CodexSessionController {
         ...fallback,
         ...existing,
         text: fallback.text,
+        phase: fallback.phase,
       };
     } else {
       items.push(fallback);
@@ -1616,6 +1655,9 @@ export class CodexSessionController {
     // Rebuild affinity indexes even for the same thread so rollback cannot
     // leave a removed source clientId cached and authorize owner_answer.
     this.turns.clear();
+    this.retainedTurnBytesById.clear();
+    this.retainedCompletedTurnBytes = 0;
+    this.retainedCompletedTurnCount = 0;
     this.turnByClientId.clear();
     this.agentMessagesByTurn.clear();
     this.threadId = thread.id;
@@ -2438,6 +2480,12 @@ export const CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES =
 // payload. This bounds queue object overhead without treating an arbitrary
 // message count as a protocol limit.
 export const CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_ENTRY_COST_BYTES = 1_024;
+// Bun's backpressure buffer and this bridge queue are independent. In the
+// worst serialized-data case they can retain roughly 257 MiB combined before
+// JavaScript string/object and native framing overhead, so surface a warning
+// before the bridge-owned half reaches its hard limit.
+const CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_WARNING_BYTES =
+  Math.floor(CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES / 2);
 
 /**
  * Private Unix WebSocket JSON-RPC endpoint used by
@@ -2466,6 +2514,7 @@ export class CodexUnixJsonRpcProxy {
     bytes: number;
   }> = [];
   private outboundQueueBytes = 0;
+  private outboundQueueWarningEmitted = false;
   private readonly pendingServerRequestsByBackendId =
     new Map<string, PendingFrontendServerRequest>();
   private readonly pendingServerRequestsByFrontendId =
@@ -2478,7 +2527,7 @@ export class CodexUnixJsonRpcProxy {
     private readonly controller: CodexSessionController,
     options: { log?: (line: string) => void } = {},
   ) {
-    this.log = options.log ?? ((line) => console.error(line));
+    this.log = terminalSafeLogger(options.log);
     this.unsubscribeMessages = controller.onFrontendMessage((message) => {
       let outbound: JsonRpcRequest | JsonRpcNotification = message;
       if ("id" in message) {
@@ -2579,6 +2628,7 @@ export class CodexUnixJsonRpcProxy {
     this.backpressuredSocket = null;
     this.outboundQueue.length = 0;
     this.outboundQueueBytes = 0;
+    this.outboundQueueWarningEmitted = false;
     try {
       socket.close(1012, reason);
     } catch (error) {
@@ -2628,6 +2678,19 @@ export class CodexUnixJsonRpcProxy {
         );
         return;
       }
+      if (
+        !this.outboundQueueWarningEmitted &&
+        estimatedQueueBytes >= CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_WARNING_BYTES
+      ) {
+        this.outboundQueueWarningEmitted = true;
+        this.log(
+          `codex-bridge: outbound queue crossed its warning threshold ` +
+            `(entries=${this.outboundQueue.length + 1}, ` +
+            `bytes=${this.outboundQueueBytes + bytes}, ` +
+            `estimated=${estimatedQueueBytes}, ` +
+            `limit=${CodexUnixJsonRpcProxy.MAX_OUTBOUND_QUEUE_BYTES})`,
+        );
+      }
       this.outboundQueue.push({ socket, payload, bytes });
       this.outboundQueueBytes += bytes;
       return;
@@ -2656,6 +2719,7 @@ export class CodexUnixJsonRpcProxy {
     this.backpressuredSocket = null;
     this.outboundQueue.length = 0;
     this.outboundQueueBytes = 0;
+    this.outboundQueueWarningEmitted = false;
     this.log(`codex-bridge: ${reason}; closing the unhealthy TUI socket`);
     socket.close(1011, reason);
   }
@@ -2755,6 +2819,7 @@ export class CodexUnixJsonRpcProxy {
     this.backpressuredSocket = null;
     this.outboundQueue.length = 0;
     this.outboundQueueBytes = 0;
+    this.outboundQueueWarningEmitted = false;
   }
 
   async listen(socketPath: string): Promise<void> {
@@ -2807,6 +2872,7 @@ export class CodexUnixJsonRpcProxy {
           self.backpressuredSocket = null;
           self.outboundQueue.length = 0;
           self.outboundQueueBytes = 0;
+          self.outboundQueueWarningEmitted = false;
           self.log("codex-bridge: TUI disconnected; bridge remains ready for the same session to reattach");
         },
       },
@@ -2825,6 +2891,7 @@ export class CodexUnixJsonRpcProxy {
     this.backpressuredSocket = null;
     this.outboundQueue.length = 0;
     this.outboundQueueBytes = 0;
+    this.outboundQueueWarningEmitted = false;
     const server = this.server;
     this.server = null;
     if (!server) return;
@@ -3044,7 +3111,7 @@ export class CodexAgentPartyBridge {
     if (options.requireDeliveryRecovery === true && options.recoveryJournal === undefined) {
       throw new Error("Codex delivery recovery requires a durable recovery journal");
     }
-    this.log = options.log ?? ((line) => console.error(line));
+    this.log = terminalSafeLogger(options.log);
     this.unsubscribeDispatch = options.session.onDispatch((input, dispatch) => {
       this.observeDispatch(input, dispatch);
     });

@@ -21,6 +21,7 @@ import {
   DeliveryRecoveryJournal,
   deliveryRecoveryJournalPath,
 } from "../delivery-recovery-journal";
+import { stripTerminalControls } from "../format";
 import {
   acquireInstanceLock,
   defaultInstanceLockDir,
@@ -692,7 +693,8 @@ export async function runCodexSessionBridge(
   options: CodexBridgeRuntimeOptions,
   deps: CodexBridgeRuntimeDeps = {},
 ): Promise<number> {
-  const log = deps.log ?? ((line) => console.error(line));
+  const logSink = deps.log ?? ((line: string) => console.error(line));
+  const log = (line: string) => logSink(stripTerminalControls(line));
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
   let lock: InstanceLock | null = null;

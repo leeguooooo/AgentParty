@@ -824,6 +824,107 @@ describe("Codex Unix WebSocket single-writer proxy", () => {
     expect(internal.frontendReady).toBe(true);
   });
 
+  test("warns once per connection at high-water without logging payloads", () => {
+    const rpc = new FakeRpcPeer();
+    const session = new CodexSessionController(rpc);
+    const logs: string[] = [];
+    proxy = new CodexUnixJsonRpcProxy(session, { log: (line) => logs.push(line) });
+    const socket = {
+      data: { connectionId: "high-water-backpressure" },
+      send: (payload: string) => Buffer.byteLength(payload),
+      close: () => {},
+    };
+    const internal = proxy as unknown as {
+      socket: typeof socket | null;
+      frontendReady: boolean;
+      backpressuredSocket: typeof socket | null;
+      send: (message: JsonRpcNotification) => void;
+      drain: (target: typeof socket) => void;
+      accept: (target: typeof socket) => void;
+      outboundQueue: Array<{
+        socket: typeof socket;
+        payload: string;
+        bytes: number;
+      }>;
+      outboundQueueBytes: number;
+      outboundQueueWarningEmitted: boolean;
+    };
+    internal.socket = socket;
+    internal.frontendReady = true;
+    const nearThreshold =
+      Math.floor(CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES / 2) -
+      CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_ENTRY_COST_BYTES;
+    const seedEpisode = (target = socket) => {
+      internal.backpressuredSocket = target;
+      internal.outboundQueue.push({ socket: target, payload: "{}", bytes: nearThreshold });
+      internal.outboundQueueBytes = nearThreshold;
+    };
+
+    seedEpisode();
+    internal.send({
+      method: "thread/name/updated",
+      params: { name: "SECRET_PAYLOAD_MUST_NOT_BE_LOGGED" },
+    });
+    internal.send({
+      method: "thread/name/updated",
+      params: { name: "SECOND_SECRET_MUST_NOT_BE_LOGGED" },
+    });
+
+    expect(logs.filter((line) => line.includes("warning threshold"))).toHaveLength(1);
+    expect(logs.join("\n")).not.toContain("SECRET");
+    expect(internal.outboundQueueWarningEmitted).toBe(true);
+
+    internal.drain(socket);
+    expect(internal.outboundQueue).toHaveLength(0);
+    expect(internal.outboundQueueBytes).toBe(0);
+    expect(internal.outboundQueueWarningEmitted).toBe(true);
+
+    seedEpisode();
+    internal.send({ method: "thread/name/updated", params: { name: "later episode" } });
+    expect(logs.filter((line) => line.includes("warning threshold"))).toHaveLength(1);
+
+    const replacement = {
+      data: { connectionId: "replacement-high-water" },
+      send: (payload: string) => Buffer.byteLength(payload),
+      close: () => {},
+    };
+    internal.socket = null;
+    internal.accept(replacement);
+    internal.frontendReady = true;
+    seedEpisode(replacement);
+    internal.send({ method: "thread/name/updated", params: { name: "new connection" } });
+    expect(logs.filter((line) => line.includes("warning threshold"))).toHaveLength(2);
+  });
+
+  test("strips terminal controls from bridge diagnostics", () => {
+    const rpc = new FakeRpcPeer();
+    const session = new CodexSessionController(rpc);
+    const logs: string[] = [];
+    proxy = new CodexUnixJsonRpcProxy(session, { log: (line) => logs.push(line) });
+    const socket = {
+      data: { connectionId: "terminal-safe-log" },
+      send: () => 1,
+      close: () => {},
+    };
+    const internal = proxy as unknown as {
+      socket: typeof socket | null;
+      frontendReady: boolean;
+      failFrontendSocket: (target: typeof socket, reason: string) => void;
+    };
+    internal.socket = socket;
+    internal.frontendReady = true;
+
+    internal.failFrontendSocket(
+      socket,
+      "backend \u001B]52;c;clipboard\u0007\r\u001B[31mred\u001B[0m",
+    );
+
+    expect(logs).toEqual([
+      "codex-bridge: backend ]52;c;clipboardred; closing the unhealthy TUI socket",
+    ]);
+    expect(logs[0]).not.toMatch(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/);
+  });
+
   test("the aggregate backpressure backlog remains fail-closed at its byte ceiling", () => {
     const rpc = new FakeRpcPeer();
     const session = new CodexSessionController(rpc);

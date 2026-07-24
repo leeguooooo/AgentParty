@@ -375,9 +375,10 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
                   },
                 },
               });
-              if (${generation} === 1) {
-                setTimeout(() => process.exit(77), 10);
-              }
+              return;
+            }
+            if (frame.method === "mock/exit") {
+              process.exit(77);
               return;
             }
             send({ id: frame.id, result: {} });
@@ -416,6 +417,7 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
     );
 
     await oldApplyEntered.promise;
+    rpc.notifyConnected("mock/exit");
     await expect(disconnected.promise).resolves.toBe(1);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(oldRequestSettled).toBe(false);
@@ -943,6 +945,9 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
       const state = session as unknown as {
         turns: Map<string, CodexTurn>;
         turnByClientId: Map<string, string>;
+        retainedTurnBytesById: Map<string, number>;
+        retainedCompletedTurnBytes: number;
+        retainedCompletedTurnCount: number;
       };
       if (order === "notification-first") {
         await expect(snapshotRequest).resolves.toMatchObject({
@@ -951,6 +956,9 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
         expect(session.turnForClientId(clientId)).toBeNull();
         expect(state.turns.has(turnId)).toBe(false);
         expect(state.turnByClientId.has(clientId)).toBe(false);
+        expect(state.retainedTurnBytesById.size).toBe(0);
+        expect(state.retainedCompletedTurnBytes).toBe(0);
+        expect(state.retainedCompletedTurnCount).toBe(0);
       } else {
         await waitFor(
           () => session.turnForClientId(clientId) !== null,
@@ -962,6 +970,9 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
         });
         expect(state.turns.has(turnId)).toBe(true);
         expect(state.turnByClientId.get(clientId)).toBe(turnId);
+        expect(state.retainedTurnBytesById.has(turnId)).toBe(true);
+        expect(state.retainedCompletedTurnBytes).toBe(0);
+        expect(state.retainedCompletedTurnCount).toBe(0);
       }
     }
   });
@@ -1073,7 +1084,77 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
         type: "agentMessage",
         id: "agent-final",
         text: "authoritative final",
+        phase: "final_answer",
       }));
+    }
+
+    for (const [suffix, phase] of [
+      ["explicit-final", "final_answer"],
+      ["legacy-final", undefined],
+    ] as const) {
+      const turnId = `turn-${suffix}`;
+      const itemId = `agent-${suffix}`;
+      await rpc.emit({
+        method: "turn/started",
+        params: {
+          threadId: "thread-agent-text",
+          turn: {
+            id: turnId,
+            status: "inProgress",
+            items: [],
+            itemsView: "notLoaded",
+          },
+        },
+      });
+      await rpc.emit({
+        method: "item/completed",
+        params: {
+          threadId: "thread-agent-text",
+          turnId,
+          item: {
+            type: "agentMessage",
+            id: itemId,
+            text: `${suffix} authoritative text`,
+            ...(phase === undefined ? {} : { phase }),
+          },
+        },
+      });
+      // Some app-server snapshots reuse the item id but contain only an empty
+      // commentary shell. Text and phase must both come from the completed
+      // lifecycle item; keeping the shell's phase would hide a valid final.
+      const emptyShellCompletion = {
+        method: "turn/completed",
+        params: {
+          threadId: "thread-agent-text",
+          turn: {
+            id: turnId,
+            status: "completed",
+            items: [{
+              type: "agentMessage",
+              id: itemId,
+              text: "",
+              phase: "commentary",
+            }],
+          },
+        },
+      } satisfies JsonRpcNotification;
+      const completedBefore = completed.length;
+      await rpc.emit(emptyShellCompletion);
+      await rpc.emit(emptyShellCompletion);
+      expect(completed.slice(completedBefore)).toHaveLength(2);
+      for (const completedTurn of completed.slice(completedBefore)) {
+        const finalItem = completedTurn.items?.find((item) => item.id === itemId);
+        expect(finalItem).toMatchObject({
+          type: "agentMessage",
+          id: itemId,
+          text: `${suffix} authoritative text`,
+        });
+        if (phase === undefined) {
+          expect(finalItem?.phase).toBeUndefined();
+        } else {
+          expect(finalItem?.phase).toBe(phase);
+        }
+      }
     }
 
     await rpc.emit({
@@ -1313,6 +1394,72 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
     ).toHaveLength(1);
   });
 
+  test("updates retained turn byte accounting without rescanning completed history", () => {
+    const session = new CodexSessionController(new ScriptedCodexRpc());
+    const internal = session as unknown as {
+      turns: Map<string, CodexTurn>;
+      retainedTurnBytesById: Map<string, number>;
+      retainedCompletedTurnBytes: number;
+      retainedCompletedTurnCount: number;
+      retainedTurnBytes: (turn: CodexTurn) => number;
+      storeTurn: (turn: CodexTurn) => CodexTurn;
+    };
+    const retainedTurnBytes = internal.retainedTurnBytes.bind(session);
+    let serializedTurns = 0;
+    internal.retainedTurnBytes = (turn) => {
+      serializedTurns += 1;
+      return retainedTurnBytes(turn);
+    };
+
+    for (let index = 0; index < 16; index += 1) {
+      internal.storeTurn({
+        id: `completed-${index}`,
+        status: "completed",
+        items: [{
+          type: "agentMessage",
+          id: `final-${index}`,
+          text: `final ${index}`,
+          phase: "final_answer",
+        }],
+      });
+    }
+    const completedBytes = internal.retainedCompletedTurnBytes;
+    serializedTurns = 0;
+
+    internal.storeTurn({ id: "active", status: "inProgress", items: [] });
+    expect(serializedTurns).toBe(1);
+    expect(internal.retainedCompletedTurnCount).toBe(16);
+    expect(internal.retainedCompletedTurnBytes).toBe(completedBytes);
+
+    const replacedBytes = internal.retainedTurnBytesById.get("completed-0")!;
+    internal.storeTurn({ id: "completed-0", status: "inProgress", items: [] });
+    expect(serializedTurns).toBe(2);
+    expect(internal.retainedCompletedTurnCount).toBe(15);
+    expect(internal.retainedCompletedTurnBytes).toBe(completedBytes - replacedBytes);
+
+    internal.storeTurn({
+      id: "completed-0",
+      status: "completed",
+      items: [{
+        type: "agentMessage",
+        id: "replacement-final",
+        text: "replacement final",
+        phase: "final_answer",
+      }],
+    });
+    expect(serializedTurns).toBe(3);
+    expect(internal.retainedCompletedTurnCount).toBe(16);
+    expect(internal.retainedCompletedTurnBytes).toBe(
+      [...internal.turns.entries()]
+        .filter(([, turn]) => turn.status !== "inProgress")
+        .reduce(
+          (total, [turnId]) =>
+            total + (internal.retainedTurnBytesById.get(turnId) ?? 0),
+          0,
+        ),
+    );
+  });
+
   test("drops multi-megabyte tool lifecycle payloads and bounds completed turn affinity", async () => {
     const rpc = new ScriptedCodexRpc();
     rpc.queue("thread/start", idleThread("thread-retention"));
@@ -1387,6 +1534,9 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
     const privateState = session as unknown as {
       turns: Map<string, CodexTurn>;
       turnByClientId: Map<string, string>;
+      retainedTurnBytesById: Map<string, number>;
+      retainedCompletedTurnBytes: number;
+      retainedCompletedTurnCount: number;
     };
     expect(privateState.turns.get(heavyTurnId)).toEqual({
       id: heavyTurnId,
@@ -1450,6 +1600,12 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
     // evicts their clientId affinity in lockstep.
     expect(privateState.turns.size).toBe(256);
     expect(privateState.turnByClientId.size).toBe(256);
+    expect(privateState.retainedTurnBytesById.size).toBe(privateState.turns.size);
+    expect(privateState.retainedCompletedTurnCount).toBe(256);
+    expect(privateState.retainedCompletedTurnBytes).toBe(
+      [...privateState.retainedTurnBytesById.values()]
+        .reduce((total, bytes) => total + bytes, 0),
+    );
     expect(session.turnForClientId(heavyClientId)).toBeNull();
     expect(session.turnForClientId("agentparty:retained-0")).toBeNull();
     expect(session.turnForClientId("agentparty:retained-259")).toMatchObject({
