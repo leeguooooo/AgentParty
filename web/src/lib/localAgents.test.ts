@@ -64,6 +64,14 @@ describe("aggregateLocalAgents", () => {
     expect(rows.find((r) => r.kind === "duty")!.state).toBe("unloaded");
   });
 
+  test("terminal-blocked duty stays abnormal even if launchd has not finished bootout", () => {
+    const rows = aggregateLocalAgents(
+      [],
+      [duty({ instanceId: "c:ops", loaded: true, terminalBlocked: true })],
+    );
+    expect(rows[0]!.state).toBe("unloaded");
+  });
+
   test("channel 为 null 但 instanceId 含 configId:channel → 从 instanceId 回退频道（#707 评审）", () => {
     const rows = aggregateLocalAgents(
       [instance({ channel: null, instanceId: "cfg:web", name: "planner" })],

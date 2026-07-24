@@ -8,6 +8,7 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
@@ -16,6 +17,22 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::agent::{validate_channel, validate_runner};
+
+mod reconcile;
+
+use reconcile::duty_repair_reason;
+
+#[cfg(all(desktop, target_os = "macos"))]
+use reconcile::{
+    acquire_duty_filesystem_lock, acquire_duty_filesystem_lock_blocking, acquire_duty_operation,
+    acquire_duty_operation_blocking, capture_duty_install, clear_duty_blocked_marker,
+    conflicting_duty_labels, duty_disabled_checked, duty_disabled_labels_checked,
+    duty_loaded_checked, duty_quarantined_plist_path, enable_duty_for_repair,
+    finish_duty_reinstall, launchctl_action, prepare_duty_reinstall, rollback_duty_install,
+};
+
+#[cfg(all(desktop, target_os = "macos"))]
+pub(crate) use reconcile::start_duty_reconciler;
 
 pub(crate) const DUTY_LABEL_PREFIX: &str = "com.agentparty.duty.";
 
@@ -56,6 +73,9 @@ pub(crate) struct DutyPlistSpec<'a> {
     /// builtin runner 的绝对路径。PATH 只留给 runner 内部工具；启动 runner 本身不能再依赖 launchd
     /// 继承/拼装出来的 PATH（Finder、launchd、版本管理器的环境都可能不同）。
     pub(crate) runner_bin: Option<&'a str>,
+    /// 每次 persist 生成新的安装代次。终局 marker 必须与当前 plist 代次一致，避免旧 serve
+    /// 在重配竞态里晚写 marker、把刚装好的新 job 误标成终局停机。
+    pub(crate) generation: Option<&'a str>,
 }
 
 /// 给 launchd 常驻的 serve 用的 PATH：已解析 runner 的父目录必须排第一；已解析 Node runtime
@@ -159,7 +179,11 @@ fn runner_search_dirs(home: &Path, inherited_path: Option<&std::ffi::OsStr>) -> 
     ] {
         push_unique_path(&mut paths, path);
     }
-    append_versioned_bin_dirs(&mut paths, &home.join(".nvm/versions/node"), Path::new("bin"));
+    append_versioned_bin_dirs(
+        &mut paths,
+        &home.join(".nvm/versions/node"),
+        Path::new("bin"),
+    );
     append_versioned_bin_dirs(
         &mut paths,
         &home.join(".local/share/fnm/node-versions"),
@@ -269,7 +293,10 @@ struct DutyPlistMetadata {
 fn duty_plist_metadata(value: &str) -> DutyPlistMetadata {
     let args = value
         .split_once("<key>ProgramArguments</key>")
-        .and_then(|(_, rest)| rest.split_once("</array>").map(|(array, _)| plist_strings(array)))
+        .and_then(|(_, rest)| {
+            rest.split_once("</array>")
+                .map(|(array, _)| plist_strings(array))
+        })
         .unwrap_or_default();
     let argument = |flag: &str| {
         args.iter()
@@ -347,6 +374,12 @@ pub(crate) fn duty_plist_content(spec: &DutyPlistSpec<'_>) -> String {
             xml_escape(runner_bin)
         )
     });
+    let generation_xml = spec.generation.map_or_else(String::new, |generation| {
+        format!(
+            "    <key>AP_DUTY_GENERATION</key>\n    <string>{}</string>\n",
+            xml_escape(generation)
+        )
+    });
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -363,7 +396,7 @@ pub(crate) fn duty_plist_content(spec: &DutyPlistSpec<'_>) -> String {
     <string>{config}</string>
     <key>PATH</key>
     <string>{path}</string>
-{runner_bin_xml}    <!-- #744:让 serve 知道自己这个 launchd job 的 label,熔断/token 撤销等终局退出时自卸载,不被 KeepAlive 重启 -->
+{runner_bin_xml}{generation_xml}    <!-- #744:让 serve 知道自己这个 launchd job 的 label,熔断/token 撤销等终局退出时自卸载,不被 KeepAlive 重启 -->
     <key>AP_DUTY_LABEL</key>
     <string>{label}</string>
   </dict>
@@ -385,6 +418,7 @@ pub(crate) fn duty_plist_content(spec: &DutyPlistSpec<'_>) -> String {
         config = xml_escape(spec.config_path),
         path = xml_escape(spec.path),
         runner_bin_xml = runner_bin_xml,
+        generation_xml = generation_xml,
         log = xml_escape(spec.log_path),
     )
 }
@@ -396,19 +430,23 @@ fn home_dir() -> Result<PathBuf, String> {
 }
 
 pub(crate) fn duty_plist_path(home: &Path, label: &str) -> PathBuf {
-    home.join("Library/LaunchAgents").join(format!("{label}.plist"))
+    home.join("Library/LaunchAgents")
+        .join(format!("{label}.plist"))
 }
 
 pub(crate) fn duty_log_path(home: &Path, label: &str) -> PathBuf {
-    home.join(".agentparty/desktop/logs").join(format!("{label}.log"))
+    home.join(".agentparty/desktop/logs")
+        .join(format!("{label}.log"))
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DutyPlistSnapshot {
     contents: Option<Vec<u8>>,
     loaded: bool,
 }
 
+#[cfg(test)]
 fn replace_duty_plist_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -423,10 +461,8 @@ fn replace_duty_plist_atomically(path: &Path, contents: &[u8]) -> Result<(), Str
     Ok(())
 }
 
-fn restore_duty_plist_file(
-    path: &Path,
-    snapshot: &DutyPlistSnapshot,
-) -> Result<(), String> {
+#[cfg(test)]
+fn restore_duty_plist_file(path: &Path, snapshot: &DutyPlistSnapshot) -> Result<(), String> {
     match snapshot.contents.as_deref() {
         Some(contents) => replace_duty_plist_atomically(path, contents),
         None => match fs::remove_file(path) {
@@ -439,6 +475,7 @@ fn restore_duty_plist_file(
 
 /// launchctl 本身不能在单测里安全运行；把回滚的文件状态机与 job 操作分开注入。
 /// 返回值是要附在原始失败后的可读回滚结果，成功/失败都不能吞。
+#[cfg(test)]
 fn rollback_duty_install_with<Bootout, Bootstrap>(
     plist_path: &Path,
     snapshot: &DutyPlistSnapshot,
@@ -488,6 +525,11 @@ where
     }
 }
 
+#[cfg(test)]
+fn failure_with_rollback(original: String, rollback: String) -> String {
+    format!("{original}; rollback: {rollback}")
+}
+
 /// 取日志尾部 cap 字节，并前移到 UTF-8 字符边界（不截断多字节字符）。#725：桌面看常驻日志。
 fn tail_utf8(bytes: &[u8], cap: usize) -> String {
     let mut start = bytes.len().saturating_sub(cap);
@@ -515,6 +557,8 @@ pub(crate) struct DutyEntry {
     pub(crate) repo: Option<String>,
     pub(crate) runner_executable: Option<String>,
     pub(crate) dependency_state: String,
+    pub(crate) terminal_blocked: bool,
+    pub(crate) terminal_reason: Option<String>,
 }
 
 /// 从 plist 文件名还原 instance_id 的展示形态：label 里 config_id 与 channel 以最后一个 '.' 相接。
@@ -546,96 +590,13 @@ fn gui_domain() -> String {
     format!("gui/{uid}")
 }
 
-#[cfg(all(desktop, target_os = "macos"))]
-fn duty_loaded(label: &str) -> bool {
-    launchctl(&["print", &format!("{}/{label}", gui_domain())])
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-#[cfg(all(desktop, target_os = "macos"))]
-fn duty_loaded_checked(label: &str) -> Result<bool, String> {
-    launchctl(&["print", &format!("{}/{label}", gui_domain())])
-        .map(|output| output.status.success())
-}
-
-#[cfg(all(desktop, target_os = "macos"))]
-fn launchctl_checked(args: &[&str], action: &str) -> Result<(), String> {
-    let output = launchctl(args)?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let detail = String::from_utf8_lossy(&output.stderr);
-    let detail = detail.trim().chars().take(200).collect::<String>();
-    if detail.is_empty() {
-        Err(format!("{action} failed"))
-    } else {
-        Err(format!("{action} failed: {detail}"))
-    }
-}
-
-#[cfg(all(desktop, target_os = "macos"))]
-fn snapshot_duty_plist(path: &Path, label: &str) -> Result<DutyPlistSnapshot, String> {
-    let contents = match fs::read(path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("cannot back up the existing duty plist: {error}")),
-    };
-    let loaded = duty_loaded_checked(label)?;
-    Ok(DutyPlistSnapshot { contents, loaded })
-}
-
-#[cfg(all(desktop, target_os = "macos"))]
-fn rollback_duty_install(
-    domain: &str,
-    label: &str,
-    plist_path: &Path,
-    snapshot: &DutyPlistSnapshot,
-) -> String {
-    let result = rollback_duty_install_with(
-        plist_path,
-        snapshot,
-        || {
-            if !duty_loaded_checked(label)? {
-                return Ok(());
-            }
-            launchctl_checked(
-                &["bootout", &format!("{domain}/{label}")],
-                "launchctl rollback bootout",
-            )
-        },
-        |restored_path| {
-            launchctl_checked(
-                &["bootstrap", domain, &restored_path.to_string_lossy()],
-                "launchctl rollback bootstrap",
-            )
-        },
-    );
-    if !snapshot.loaded || result.starts_with("incomplete:") {
-        return result;
-    }
-    match duty_loaded_checked(label) {
-        Ok(true) => result,
-        Ok(false) => {
-            "incomplete: previous plist was restored and bootstrap succeeded, but the previous job is not loaded"
-                .to_string()
-        }
-        Err(error) => format!(
-            "incomplete: previous plist was restored and bootstrap succeeded, but loaded-state verification failed: {error}"
-        ),
-    }
-}
-
-fn failure_with_rollback(original: String, rollback: String) -> String {
-    format!("{original}; rollback: {rollback}")
-}
-
 /// 把当前 app 内嵌的 party sidecar 拷贝到稳定路径（bundle 路径随 app 更新/挪动失效）。
 #[cfg(desktop)]
 fn ensure_duty_binary(home: &Path) -> Result<PathBuf, String> {
     let target = duty_bin_path(home);
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("cannot create duty bin dir: {error}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create duty bin dir: {error}"))?;
     }
     // externalBin sidecar 运行期就躺在主可执行文件旁（tauri externalBin 约定）。#696：
     // 别用 tauri 的 BaseDirectory::Executable —— 它映射到 dirs::executable_dir()（XDG $EXE 目录），
@@ -655,16 +616,15 @@ fn ensure_duty_binary(home: &Path) -> Result<PathBuf, String> {
         fs::read_dir(&dir)
             .ok()
             .and_then(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .find(|path| {
-                        path.file_name()
-                            .and_then(|name| name.to_str())
-                            .is_some_and(|name| name.starts_with("party"))
-                    })
+                entries.flatten().map(|entry| entry.path()).find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("party"))
+                })
             })
-            .ok_or_else(|| "party sidecar binary not found next to the app executable".to_string())?
+            .ok_or_else(|| {
+                "party sidecar binary not found next to the app executable".to_string()
+            })?
     };
     // 先写临时名再原子 rename：正在运行的旧常驻进程继续持有旧 inode，不会被写坏。
     let tmp = target.with_extension("tmp");
@@ -684,17 +644,46 @@ pub(crate) fn desktop_duty_list() -> Result<Vec<DutyEntry>, String> {
     let home = home_dir()?;
     let agents_dir = home.join("Library/LaunchAgents");
     let mut entries = Vec::new();
+    #[cfg(target_os = "macos")]
+    let disabled_labels = duty_disabled_labels_checked()?;
     let Ok(dir) = fs::read_dir(&agents_dir) else {
         return Ok(entries);
     };
     for item in dir.flatten() {
         let name = item.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(label) = name.strip_suffix(".plist") else { continue };
+        let (label, quarantined) =
+            if let Some(label) = name.strip_suffix(".plist.terminal-disabled") {
+                (label, true)
+            } else if let Some(label) = name.strip_suffix(".plist") {
+                (label, false)
+            } else {
+                continue;
+            };
         if !label.starts_with(DUTY_LABEL_PREFIX) {
             continue;
         }
-        let Some(instance_id) = instance_id_from_label(label) else { continue };
+        // repair 成功清理 quarantine 的极短窗口里可能两份都可见；active plist 优先，避免
+        // 同一个 label 在 React 列表出现重复 key。失败回滚时 active 会被移除/恢复旧值。
+        if quarantined && duty_plist_path(&home, label).exists() {
+            continue;
+        }
+        let Some(instance_id) = instance_id_from_label(label) else {
+            continue;
+        };
+        #[cfg(target_os = "macos")]
+        let loaded = duty_loaded_checked(label)?;
+        #[cfg(not(target_os = "macos"))]
+        let loaded = false;
+        #[cfg(target_os = "macos")]
+        let disabled = disabled_labels.contains(label);
+        #[cfg(not(target_os = "macos"))]
+        let disabled = false;
+        let terminal_reason = if quarantined {
+            Some("terminal-stop-quarantined".to_string())
+        } else {
+            duty_repair_reason(&home, label, loaded, disabled)
+        };
         let metadata = fs::read_to_string(item.path())
             .ok()
             .map(|value| duty_plist_metadata(&value))
@@ -709,15 +698,14 @@ pub(crate) fn desktop_duty_list() -> Result<Vec<DutyEntry>, String> {
             instance_id,
             plist_path: item.path().to_string_lossy().into_owned(),
             log_path: duty_log_path(&home, label).to_string_lossy().into_owned(),
-            #[cfg(target_os = "macos")]
-            loaded: duty_loaded(label),
-            #[cfg(not(target_os = "macos"))]
-            loaded: false,
+            loaded,
             runner: metadata.runner,
             workdir: metadata.workdir,
             repo: metadata.repo,
             runner_executable,
             dependency_state: dependency_state.to_string(),
+            terminal_blocked: terminal_reason.is_some(),
+            terminal_reason,
         });
     }
     entries.sort_by(|left, right| left.label.cmp(&right.label));
@@ -750,6 +738,7 @@ pub(crate) async fn desktop_duty_persist(
         if let Some(url) = repo.as_deref() {
             crate::agent::validate_repo(url)?;
         }
+        let _operation = acquire_duty_operation().await;
         duty_persist_inner(
             &app,
             &agent_state,
@@ -782,6 +771,15 @@ async fn duty_persist_inner(
     let home = home_dir()?;
     let instance_id = format!("{config_id}:{channel}");
     let label = duty_label(&instance_id);
+    let _filesystem_lock = acquire_duty_filesystem_lock(&home, &label).await?;
+    let conflicts = conflicting_duty_labels(&home, &label, &config_path, channel)?;
+    if !conflicts.is_empty() {
+        return Err(format!(
+            "channel already has another resident duty ({}); remove it before installing this config",
+            conflicts.join(", ")
+        ));
+    }
+
     // 必须先验证依赖，再停止 app 内同键实例。缺 runner 时保留当前健康实例，不做破坏性切换。
     let inherited_path = env::var_os("PATH");
     let runner_bin = resolve_runner_executable(runner, &home)?;
@@ -791,10 +789,6 @@ async fn duty_persist_inner(
     let runner_bin_string = runner_bin
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
-    let plist_path = duty_plist_path(&home, &label);
-    // Repair 必须先快照旧 plist 与 loaded 状态。之后任何 bootout/bootstrap/确认失败都用它恢复，
-    // 不能让一次“修复”把原本还在工作的旧常驻变成离线。
-    let previous = snapshot_duty_plist(&plist_path, &label)?;
 
     // 同一实例不允许 app 内 child 与 launchd 常驻双跑（同身份两个 serve 会互抢租约）：
     // 先停掉 app 内的同键实例。停不掉（kill 失败/超时后仍活跃）必须中止，不能带病装常驻。
@@ -803,7 +797,8 @@ async fn duty_persist_inner(
     let party_bin = ensure_duty_binary(&home)?;
     let log_path = duty_log_path(&home, &label);
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("cannot create duty log dir: {error}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create duty log dir: {error}"))?;
     }
     // runner 与 Node 可能分处独立 npm prefix 和版本管理器目录；两者都必须进入 launchd
     // PATH，Finder 启动的 app 没有交互 shell PATH 可兜底。
@@ -812,6 +807,14 @@ async fn duty_persist_inner(
         runner_bin.as_deref(),
         node_bin.as_deref(),
         inherited_path.as_deref(),
+    );
+    let generation = format!(
+        "{:x}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        std::process::id()
     );
     let plist = duty_plist_content(&DutyPlistSpec {
         label: &label,
@@ -824,47 +827,47 @@ async fn duty_persist_inner(
         log_path: &log_path.to_string_lossy(),
         path: &launch_path,
         runner_bin: runner_bin_string.as_deref(),
+        generation: Some(&generation),
     });
-    replace_duty_plist_atomically(&plist_path, plist.as_bytes())?;
-
-    // 已加载的旧实例先卸再装（幂等重装）。从覆盖 plist 开始，任何错误都必须走同一个回滚出口。
+    let plist_path = duty_plist_path(&home, &label);
+    if let Some(parent) = plist_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create LaunchAgents dir: {error}"))?;
+    }
+    let snapshot = capture_duty_install(&home, &label)?;
+    let tmp = plist_path.with_extension("plist.tmp");
+    fs::write(&tmp, plist).map_err(|error| format!("cannot write duty plist: {error}"))?;
     let domain = gui_domain();
-    let unload = duty_loaded_checked(&label).and_then(|loaded| {
-        if loaded {
-            launchctl_checked(
-                &["bootout", &format!("{domain}/{label}")],
-                "launchctl bootout",
-            )
-        } else {
-            Ok(())
+    let install = async {
+        // 必须先确认旧 job 已卸载，再把 G1 plist 放到 active path；否则旧 G0 serve 的终局
+        // self-bootout 可能按同一 label 误伤已经启动的新 job。
+        prepare_duty_reinstall(&label, &snapshot)?;
+        fs::rename(&tmp, &plist_path)
+            .map_err(|error| format!("cannot install duty plist: {error}"))?;
+        // 显式 persist/repair 是 owner 对终局停机的恢复动作。新 generation 原子落盘后再清
+        // marker；staging 失败时旧 marker 会继续保护旧 job。
+        clear_duty_blocked_marker(&home, &label)?;
+        // CLI marker 写失败时会用 launchctl disable 持久兜底；repair 是唯一允许 enable 的路径。
+        enable_duty_for_repair(&label)?;
+        launchctl_action(
+            &["bootstrap", &domain, &plist_path.to_string_lossy()],
+            "launchctl duty install bootstrap",
+        )?;
+        // bootstrap 返回成功但任务未必立刻可见——短轮询确认；确认不了按失败报，
+        // 绝不把 loaded=false 包装成成功让 UI 显示「已常驻」（CodeRabbit #621）。
+        for _ in 0..10 {
+            if duty_loaded_checked(&label)? {
+                finish_duty_reinstall(&home, &label)?;
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
-    });
-    if let Err(original) = unload {
-        let rollback = rollback_duty_install(&domain, &label, &plist_path, &previous);
-        return Err(failure_with_rollback(original, rollback));
+        Err("launchctl bootstrap reported success but the duty job is not loaded".to_string())
     }
-    if let Err(original) = launchctl_checked(
-        &["bootstrap", &domain, &plist_path.to_string_lossy()],
-        "launchctl bootstrap",
-    ) {
-        let rollback = rollback_duty_install(&domain, &label, &plist_path, &previous);
-        return Err(failure_with_rollback(original, rollback));
-    }
-    // bootstrap 返回成功但任务未必立刻可见——短轮询确认；确认不了按失败报，
-    // 绝不把 loaded=false 包装成成功让 UI 显示「已常驻」（CodeRabbit #621）。
-    let mut loaded = false;
-    for _ in 0..10 {
-        if duty_loaded(&label) {
-            loaded = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-    if !loaded {
-        let original =
-            "launchctl bootstrap reported success but the duty job is not loaded".to_string();
-        let rollback = rollback_duty_install(&domain, &label, &plist_path, &previous);
-        return Err(failure_with_rollback(original, rollback));
+    .await;
+    if let Err(error) = install {
+        let _ = fs::remove_file(&tmp);
+        return Err(rollback_duty_install(&home, &label, snapshot, error).await);
     }
     Ok(DutyEntry {
         label: label.clone(),
@@ -881,6 +884,8 @@ async fn duty_persist_inner(
         } else {
             "ready".to_string()
         },
+        terminal_blocked: false,
+        terminal_reason: None,
     })
 }
 
@@ -892,19 +897,28 @@ fn validate_adopt_inputs(server: &str, token: &str, name: &str) -> Result<(), St
     if !token.starts_with("ap_")
         || token.len() <= 3
         || token.len() > 256
-        || token.chars().any(|value| value.is_whitespace() || value.is_control())
+        || token
+            .chars()
+            .any(|value| value.is_whitespace() || value.is_control())
     {
         return Err("token must be a valid agent token".to_string());
     }
     let name_ok = name.len() <= 64
-        && name.chars().next().is_some_and(|value| value.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|value| value.is_ascii_alphanumeric())
         && name
             .chars()
             .all(|value| value.is_ascii_alphanumeric() || matches!(value, '.' | '_' | '-'));
     if !name_ok {
         return Err("name must match the agent name grammar".to_string());
     }
-    if server.len() > 512 || server.chars().any(|value| value.is_whitespace() || value.is_control()) {
+    if server.len() > 512
+        || server
+            .chars()
+            .any(|value| value.is_whitespace() || value.is_control())
+    {
         return Err("server origin is invalid".to_string());
     }
     Ok(())
@@ -924,7 +938,16 @@ pub(crate) async fn desktop_duty_adopt(
 ) -> Result<DutyEntry, String> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, agent_state, server, token, name, channel, runner, workdir);
+        let _ = (
+            app,
+            agent_state,
+            server,
+            token,
+            name,
+            channel,
+            runner,
+            workdir,
+        );
         return Err("system-level duty is currently macOS-only (launchd)".to_string());
     }
     #[cfg(target_os = "macos")]
@@ -935,12 +958,16 @@ pub(crate) async fn desktop_duty_adopt(
         if let Some(dir) = workdir.as_deref() {
             crate::agent::validate_workdir(dir)?;
         }
+        // guard 覆盖 config 写入、duty install 与两者的失败回滚；不能让 30s reconcile
+        // 在 inner 返回 Err 到 adopt 恢复旧文件之间插入。
+        let _operation = acquire_duty_operation().await;
         let home = home_dir()?;
         // adopt 接下来会写含 token 的身份配置并准备 launchd 回滚；依赖缺失必须在任何落盘/bootout 前失败。
         resolve_runner_executable(&runner, &home)?;
         // 与 join pack 的 AGENTPARTY_CONFIG 约定同路径：CLI 与桌面端看见的是同一个身份文件。
         let config_dir = home.join(".agentparty/agents");
-        fs::create_dir_all(&config_dir).map_err(|error| format!("cannot create agents dir: {error}"))?;
+        fs::create_dir_all(&config_dir)
+            .map_err(|error| format!("cannot create agents dir: {error}"))?;
         let config_path = config_dir.join(format!("agentparty-{name}-{channel}.json"));
         let config = serde_json::json!({
             "server": server,
@@ -1006,7 +1033,8 @@ pub(crate) async fn desktop_duty_adopt(
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600));
+                        let _ =
+                            fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600));
                     }
                 }),
                 None => match fs::remove_file(&config_path) {
@@ -1016,16 +1044,28 @@ pub(crate) async fn desktop_duty_adopt(
             };
             match outcome {
                 Ok(()) => reason,
-                Err(error) => format!("{reason}; ALSO failed to restore the previous agent config: {error}"),
+                Err(error) => {
+                    format!("{reason}; ALSO failed to restore the previous agent config: {error}")
+                }
             }
         };
         let config_id = match crate::agent::config_id(&config_path) {
             Ok(value) => value,
             Err(error) => return Err(restore(error)),
         };
-        // duty_persist_inner 自己原子快照/恢复 launchd plist 与 loaded 状态；adopt 这里只负责
-        // 身份配置回滚，避免内层已恢复旧 job 后外层再次 bootout 的“双回滚”。
-        match duty_persist_inner(&app, &agent_state, &config_id, &channel, &runner, workdir.as_deref(), None).await {
+        // duty_persist_inner 自己原子快照并恢复 plist、marker、disabled 与 loaded 状态；
+        // adopt 只恢复身份配置，避免内层已恢复旧 job 后外层再次 bootout 的“双回滚”。
+        match duty_persist_inner(
+            &app,
+            &agent_state,
+            &config_id,
+            &channel,
+            &runner,
+            workdir.as_deref(),
+            None,
+        )
+        .await
+        {
             Ok(entry) => Ok(entry),
             Err(error) => Err(restore(error)),
         }
@@ -1042,13 +1082,44 @@ pub(crate) fn desktop_duty_unpersist(instance_id: String) -> Result<(), String> 
     }
     #[cfg(target_os = "macos")]
     {
+        let _operation = acquire_duty_operation_blocking()?;
         let home = home_dir()?;
         let label = duty_label(&instance_id);
+        let _filesystem_lock = acquire_duty_filesystem_lock_blocking(&home, &label)?;
         let plist_path = duty_plist_path(&home, &label);
+        let quarantined_path = duty_quarantined_plist_path(&home, &label);
+        let was_disabled = duty_disabled_checked(&label)?;
         // 先 bootout 再删 plist：顺序反了会留一个「加载中但文件已没了」的孤儿任务。
-        let _ = launchctl(&["bootout", &format!("{}/{label}", gui_domain())]);
-        if plist_path.exists() {
-            fs::remove_file(&plist_path).map_err(|error| format!("cannot remove duty plist: {error}"))?;
+        if duty_loaded_checked(&label)? {
+            launchctl_action(
+                &["bootout", &format!("{}/{label}", gui_domain())],
+                "launchctl duty uninstall bootout",
+            )?;
+            if duty_loaded_checked(&label)? {
+                return Err(
+                    "launchctl bootout succeeded but the duty job is still loaded; plist was preserved"
+                        .to_string(),
+                );
+            }
+        }
+        for path in [&plist_path, &quarantined_path] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "cannot remove duty plist {}: {error}",
+                        path.display()
+                    ))
+                }
+            }
+        }
+        clear_duty_blocked_marker(&home, &label)?;
+        if was_disabled {
+            launchctl_action(
+                &["enable", &format!("{}/{label}", gui_domain())],
+                "launchctl duty uninstall enable",
+            )?;
         }
         Ok(())
     }
@@ -1058,7 +1129,10 @@ pub(crate) fn desktop_duty_unpersist(instance_id: String) -> Result<(), String> 
 /// 只按 label 派生路径、且 label 必须是我们生成的前缀——杜绝任意路径读取。日志不存在时返回空串。
 #[cfg(desktop)]
 #[tauri::command]
-pub(crate) fn desktop_duty_log_read(label: String, max_bytes: Option<usize>) -> Result<String, String> {
+pub(crate) fn desktop_duty_log_read(
+    label: String,
+    max_bytes: Option<usize>,
+) -> Result<String, String> {
     if !label.starts_with(DUTY_LABEL_PREFIX) {
         return Err("not a duty label".to_string());
     }
@@ -1097,8 +1171,8 @@ pub(crate) fn desktop_duty_log_read(label: String, max_bytes: Option<usize>) -> 
 mod tests {
     use super::{
         duty_label, duty_plist_content, duty_plist_metadata, failure_with_rollback,
-        find_runner_executable, instance_id_from_label, rollback_duty_install_with,
-        resolve_node_executable, runner_launch_path, runner_search_dirs, tail_utf8,
+        find_runner_executable, instance_id_from_label, resolve_node_executable,
+        rollback_duty_install_with, runner_launch_path, runner_search_dirs, tail_utf8,
         DutyPlistMetadata, DutyPlistSnapshot, DutyPlistSpec,
     };
 
@@ -1108,7 +1182,10 @@ mod tests {
         let full = "abc日志日志".to_string();
         let bytes = full.as_bytes();
         let tail = tail_utf8(bytes, 5); // 落在某个多字节字符中间
-        assert!(!tail.contains('\u{FFFD}'), "tail must not split a multibyte char: {tail:?}");
+        assert!(
+            !tail.contains('\u{FFFD}'),
+            "tail must not split a multibyte char: {tail:?}"
+        );
         assert!(full.ends_with(&tail));
         assert_eq!(tail_utf8(bytes, 9999), full); // cap 超长 → 原样
         assert_eq!(tail_utf8(b"", 10), ""); // 空输入
@@ -1118,7 +1195,10 @@ mod tests {
     fn label_maps_colon_to_dot_and_round_trips() {
         let label = duty_label("abc123:native-r4");
         assert_eq!(label, "com.agentparty.duty.abc123.native-r4");
-        assert_eq!(instance_id_from_label(&label).as_deref(), Some("abc123:native-r4"));
+        assert_eq!(
+            instance_id_from_label(&label).as_deref(),
+            Some("abc123:native-r4")
+        );
         assert_eq!(instance_id_from_label("com.other.thing"), None);
     }
 
@@ -1135,6 +1215,7 @@ mod tests {
             log_path: "/Users/leo/.agentparty/desktop/logs/x.log",
             path: "/Users/leo/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
             runner_bin: Some("/Users/leo/.local/bin/claude"),
+            generation: Some("install-42"),
         });
         assert!(plist.contains("a&amp;b"));
         assert!(plist.contains("&lt;duty&gt;"));
@@ -1148,7 +1229,9 @@ mod tests {
             "<key>AGENTPARTY_RUNNER_BIN</key>\n    <string>/Users/leo/.local/bin/claude</string>"
         ));
         // #744:AP_DUTY_LABEL 的值必须紧跟其 key(不能只是碰巧 label 在别处出现,#745 CodeRabbit)。
-        assert!(plist.contains("<key>AP_DUTY_LABEL</key>\n    <string>com.agentparty.duty.x.dev</string>"));
+        assert!(plist
+            .contains("<key>AP_DUTY_LABEL</key>\n    <string>com.agentparty.duty.x.dev</string>"));
+        assert!(plist.contains("<key>AP_DUTY_GENERATION</key>\n    <string>install-42</string>"));
         assert!(plist.contains("/Users/leo/.local/bin"));
         // --repo 未指定时绝不出现
         assert!(!plist.contains("--repo"));
@@ -1167,6 +1250,7 @@ mod tests {
             log_path: "/log",
             path: "/x/bin:/usr/bin:/bin",
             runner_bin: Some("/x/bin/codex"),
+            generation: None,
         });
         assert!(plist.contains("<string>--workdir</string>"));
         assert!(plist.contains("<string>/srv/duty</string>"));
@@ -1196,9 +1280,13 @@ mod tests {
             log_path: "/log",
             path: "/usr/bin:/bin",
             runner_bin: None,
+            generation: None,
         });
         assert!(!plist.contains("AGENTPARTY_RUNNER_BIN"));
-        assert_eq!(duty_plist_metadata(&plist).runner.as_deref(), Some("codex-sdk"));
+        assert_eq!(
+            duty_plist_metadata(&plist).runner.as_deref(),
+            Some("codex-sdk")
+        );
     }
 
     #[test]
@@ -1222,18 +1310,33 @@ mod tests {
             find_runner_executable("codex", &[first, second]),
             Some(executable)
         );
-        assert_eq!(find_runner_executable("claude", &[temp.path().to_path_buf()]), None);
+        assert_eq!(
+            find_runner_executable("claude", &[temp.path().to_path_buf()]),
+            None
+        );
     }
 
     #[test]
     fn runner_launch_path_has_common_runner_dirs_and_system_defaults() {
         // #741:launchd serve 的 PATH 必须含 codex/claude 常见安装位置,否则 runner not found。
         let path = runner_launch_path(std::path::Path::new("/Users/leo"), None, None, None);
-        assert!(path.contains("/Users/leo/.local/bin"), "缺 ~/.local/bin(install.sh 默认): {path}");
-        assert!(path.contains("/Users/leo/.npm-global/bin"), "缺 ~/.npm-global/bin(npm global): {path}");
+        assert!(
+            path.contains("/Users/leo/.local/bin"),
+            "缺 ~/.local/bin(install.sh 默认): {path}"
+        );
+        assert!(
+            path.contains("/Users/leo/.npm-global/bin"),
+            "缺 ~/.npm-global/bin(npm global): {path}"
+        );
         assert!(path.contains("/opt/homebrew/bin"), "缺 homebrew: {path}");
-        assert!(path.contains("/usr/local/bin"), "缺 /usr/local/bin(npm 默认): {path}");
-        assert!(path.contains("/usr/bin:/bin:/usr/sbin:/sbin"), "缺系统默认兜底: {path}");
+        assert!(
+            path.contains("/usr/local/bin"),
+            "缺 /usr/local/bin(npm 默认): {path}"
+        );
+        assert!(
+            path.contains("/usr/bin:/bin:/usr/sbin:/sbin"),
+            "缺系统默认兜底: {path}"
+        );
     }
 
     #[test]
@@ -1259,9 +1362,9 @@ mod tests {
 
     #[test]
     fn separated_npm_prefix_and_version_manager_node_reach_finder_launch_path() {
-        use std::{ffi::OsStr, fs};
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
+        use std::{ffi::OsStr, fs};
 
         let temp = tempfile::tempdir().expect("tempdir");
         let runner_dir = temp.path().join(".npm-global/bin");
@@ -1279,10 +1382,8 @@ mod tests {
         fs::write(&node, b"#!/bin/sh\n").expect("node");
         #[cfg(unix)]
         {
-            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755))
-                .expect("chmod runner");
-            fs::set_permissions(&node, fs::Permissions::from_mode(0o755))
-                .expect("chmod node");
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).expect("chmod runner");
+            fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).expect("chmod node");
         }
 
         let finder_path = OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin");
@@ -1292,7 +1393,10 @@ mod tests {
         let resolved_node =
             resolve_node_executable(temp.path(), Some(finder_path)).expect("version-manager node");
         assert_eq!(resolved_runner, runner);
-        assert_eq!(resolved_node, node, "non-executable earlier candidate must be ignored");
+        assert_eq!(
+            resolved_node, node,
+            "non-executable earlier candidate must be ignored"
+        );
 
         let path = runner_launch_path(
             temp.path(),

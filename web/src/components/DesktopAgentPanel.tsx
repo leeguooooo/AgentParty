@@ -98,6 +98,7 @@ export function DesktopAgentPanel({
   const operationRef = useRef(false);
   const initializedRef = useRef(false);
   const statusRequestSeqRef = useRef(0);
+  const dutyRequestSeqRef = useRef(0);
   const logRequestSeqRef = useRef(0);
   // null=未探测，true/false=statusAll 是否可用（探测一次，之后不再打旧 shell 的未知命令）。
   const multiRef = useRef<boolean | null>(null);
@@ -121,6 +122,14 @@ export function DesktopAgentPanel({
     return { requestSeq, status: await adapter.status() };
   };
 
+  const fetchDuties = async (): Promise<{
+    requestSeq: number;
+    entries: DesktopDutyEntry[];
+  }> => {
+    const requestSeq = ++dutyRequestSeqRef.current;
+    return { requestSeq, entries: await adapter.dutyList() };
+  };
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -133,15 +142,19 @@ export function DesktopAgentPanel({
     if (!active) {
       aliveRef.current = false;
       statusRequestSeqRef.current += 1;
+      dutyRequestSeqRef.current += 1;
       return () => {
         requestActive = false;
         aliveRef.current = false;
         statusRequestSeqRef.current += 1;
+        dutyRequestSeqRef.current += 1;
       };
     }
     aliveRef.current = true;
-    void adapter.dutyList().then((entries) => {
-      if (requestActive) setDuties(entries);
+    void fetchDuties().then((snapshot) => {
+      if (requestActive && snapshot.requestSeq === dutyRequestSeqRef.current) {
+        setDuties(snapshot.entries);
+      }
     }).catch(() => {
       // 非 macOS / 旧 shell：常驻不可用，静默隐藏
     });
@@ -166,9 +179,35 @@ export function DesktopAgentPanel({
       requestActive = false;
       aliveRef.current = false;
       statusRequestSeqRef.current += 1;
+      dutyRequestSeqRef.current += 1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, adapter, loadAttempt]);
+
+  useEffect(() => {
+    if (!active) return;
+    let polling = true;
+    const cancel = scheduler.every(() => {
+      if (!polling) return;
+      void fetchDuties().then((snapshot) => {
+        if (
+          polling &&
+          aliveRef.current &&
+          snapshot.requestSeq === dutyRequestSeqRef.current
+        ) {
+          setDuties(snapshot.entries);
+        }
+      }).catch(() => {
+        // 非 macOS / 旧 shell：与首次探测一致，静默保持常驻区块不可用。
+      });
+    }, 2_000);
+    return () => {
+      polling = false;
+      dutyRequestSeqRef.current += 1;
+      cancel();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, adapter, scheduler]);
 
   const anyActive = isActive(status) || (instances ?? []).some((item) => isActive(item));
 
@@ -292,8 +331,10 @@ export function DesktopAgentPanel({
           repo: repo.trim() === "" ? undefined : repo.trim(),
         });
       if (!aliveRef.current) return;
-      const entries = await adapter.dutyList();
-      if (aliveRef.current) setDuties(entries);
+      const snapshot = await fetchDuties();
+      if (aliveRef.current && snapshot.requestSeq === dutyRequestSeqRef.current) {
+        setDuties(snapshot.entries);
+      }
       // 转常驻会顺带停掉 app 内同键实例——刷新实例表别让两处状态漂移
       if (multiRef.current === true) {
         try {
@@ -321,8 +362,10 @@ export function DesktopAgentPanel({
     try {
       await adapter.dutyUnpersist(instanceId);
       if (!aliveRef.current) return;
-      const entries = await adapter.dutyList();
-      if (aliveRef.current) setDuties(entries);
+      const snapshot = await fetchDuties();
+      if (aliveRef.current && snapshot.requestSeq === dutyRequestSeqRef.current) {
+        setDuties(snapshot.entries);
+      }
     } catch (cause) {
       if (aliveRef.current) setError(safeError(cause));
     } finally {
@@ -468,8 +511,19 @@ export function DesktopAgentPanel({
                 entry.dependencyState === "missing" || entry.dependencyState === "repair-required";
               return (
                 <li key={entry.label} className="desktop-agent-instance">
-                  <span className={`desktop-agent-state desktop-agent-state--${entry.loaded ? "running" : "stopped"}`}>
-                    {t(entry.loaded ? "DesktopSettings.agent.dutyLoaded" : "DesktopSettings.agent.dutyNotLoaded")}
+                  <span
+                    className={`desktop-agent-state desktop-agent-state--${entry.loaded && entry.terminalBlocked !== true ? "running" : "stopped"}`}
+                    title={entry.terminalReason ?? undefined}
+                  >
+                    {t(entry.terminalReason === "legacy-duty-needs-repair"
+                      ? "DesktopSettings.agent.dutyLegacyRepair"
+                      : entry.terminalReason === "terminal-stop-quarantined"
+                        ? "DesktopSettings.agent.dutyQuarantined"
+                        : entry.terminalBlocked === true
+                          ? "DesktopSettings.agent.dutyTerminalBlocked"
+                          : entry.loaded
+                            ? "DesktopSettings.agent.dutyLoaded"
+                            : "DesktopSettings.agent.dutyNotLoaded")}
                   </span>
                   <span className="t-mono desktop-agent-instance-name">{entry.instanceId}</span>
                   <span className="t-mono desktop-agent-instance-dir" title={entry.logPath}>{entry.logPath}</span>

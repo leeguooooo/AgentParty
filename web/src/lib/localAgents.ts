@@ -64,7 +64,9 @@ export function aggregateLocalAgents(
       channel: channelOfInstanceId(duty.instanceId),
       name: configIdOfInstanceId(duty.instanceId),
       runner: duty.runner ?? null,
-      state: duty.loaded ? "loaded" : "unloaded",
+      // 终局标记即使遇到 bootout 失败而暂时仍 loaded，也必须按异常态展示；reconcile 会继续
+      // 尝试卸载，不能给 owner 一个绿色「常驻中」假象。
+      state: duty.terminalBlocked === true ? "unloaded" : duty.loaded ? "loaded" : "unloaded",
       instanceId: duty.instanceId,
       duty,
     });

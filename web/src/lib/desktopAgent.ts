@@ -68,6 +68,9 @@ export interface DesktopDutyEntry {
   /** Absolute executable bound into the launchd job, or the repair candidate for a legacy job. */
   runnerExecutable?: string | null;
   dependencyState?: DesktopDutyDependencyState;
+  /** 终局熔断/撤销留下的持久停机意图；旧 desktop shell 不返回这两个字段。 */
+  terminalBlocked?: boolean;
+  terminalReason?: string | null;
 }
 
 export interface DesktopAgentAdapter {
@@ -174,7 +177,9 @@ function parseDutyEntry(value: unknown): DesktopDutyEntry {
     typeof value.instanceId !== "string" ||
     typeof value.plistPath !== "string" ||
     typeof value.logPath !== "string" ||
-    typeof value.loaded !== "boolean"
+    typeof value.loaded !== "boolean" ||
+    (value.terminalBlocked !== undefined && typeof value.terminalBlocked !== "boolean") ||
+    (value.terminalReason !== undefined && !isNullableString(value.terminalReason))
   ) throw new Error("invalid desktop duty entry");
   const runner = value.runner === undefined || value.runner === null
     ? null
@@ -208,6 +213,8 @@ function parseDutyEntry(value: unknown): DesktopDutyEntry {
     repo: typeof value.repo === "string" ? value.repo : null,
     runnerExecutable: typeof value.runnerExecutable === "string" ? value.runnerExecutable : null,
     dependencyState,
+    terminalBlocked: value.terminalBlocked === true,
+    terminalReason: typeof value.terminalReason === "string" ? value.terminalReason : null,
   };
 }
 

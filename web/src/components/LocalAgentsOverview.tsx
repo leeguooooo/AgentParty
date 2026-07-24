@@ -190,9 +190,20 @@ export function LocalAgentsOverview({
                         </span>
                         <span className="t-mono local-agents-name">{row.name}</span>
                         {row.runner !== null && <span className="local-agents-runner">{row.runner}</span>}
-                        <span className={`desktop-agent-state desktop-agent-state--${row.state}`}>
+                        <span
+                          className={`desktop-agent-state desktop-agent-state--${row.state}`}
+                          title={row.kind === "duty" ? row.duty!.terminalReason ?? undefined : undefined}
+                        >
                           {row.kind === "duty"
-                            ? t(row.duty!.loaded ? "DesktopSettings.agent.dutyLoaded" : "DesktopSettings.agent.dutyNotLoaded")
+                            ? t(row.duty!.terminalReason === "legacy-duty-needs-repair"
+                              ? "DesktopSettings.agent.dutyLegacyRepair"
+                              : row.duty!.terminalReason === "terminal-stop-quarantined"
+                                ? "DesktopSettings.agent.dutyQuarantined"
+                                : row.duty!.terminalBlocked === true
+                                  ? "DesktopSettings.agent.dutyTerminalBlocked"
+                                  : row.duty!.loaded
+                                    ? "DesktopSettings.agent.dutyLoaded"
+                                    : "DesktopSettings.agent.dutyNotLoaded")
                             : t(`DesktopSettings.agent.state.${row.state}`)}
                         </span>
                         {row.kind === "duty" && (
