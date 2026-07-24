@@ -93,4 +93,19 @@ describe("party charter command", () => {
     expect(JSON.parse(stdout.pop() ?? "{}").charter).toBe("the get channel");
     expect(stderr).toEqual([]);
   });
+
+  test("strips terminal control sequences from remotely managed charter text", async () => {
+    globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) =>
+      Response.json({
+        charter: "\x1b[2Jvisible\x1b]52;c;cHduZWQ=\x07 text",
+        charter_rev: 1,
+        updated_at: 1,
+        updated_by: "a",
+      })) as typeof fetch;
+
+    expect(await run(["dev"])).toBe(0);
+    expect(stdout.join("\n")).toContain("visible]52;c;cHduZWQ= text");
+    // eslint-disable-next-line no-control-regex
+    expect(stdout.join("\n")).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+  });
 });

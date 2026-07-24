@@ -96,6 +96,13 @@ import {
 } from "../lib/filters";
 import { isOwnMention, nextMentionBadgeCount, shouldMarkSeen, shouldNotify, shouldToast } from "../lib/notify";
 import { historyFallbackRecovered } from "../lib/historyRecovery";
+import {
+  beginCharterRead,
+  canApplyCharterRead,
+  canApplyCharterWrite,
+  commitCharterWrite,
+} from "../lib/charterRequestGeneration";
+import { useCharterRequestGeneration } from "../lib/useCharterRequestGeneration";
 import { isNearBottom, pinToBottom } from "../lib/scrollPin";
 import { summarizeReplyPreview } from "../lib/replyPreview";
 import { fmtTime } from "../lib/time";
@@ -2934,7 +2941,12 @@ export function ChannelPage({
   const [memberDetailRoute, setMemberDetailRoute] = useState<MemberDetailRoute | null>(null);
   const [charterEditing, setCharterEditing] = useState(false);
   const [charterDraft, setCharterDraft] = useState("");
-  const [charterSaving, setCharterSaving] = useState(false);
+  const {
+    generationRef: charterRequestGenerationRef,
+    saving: charterSaving,
+    beginWrite: beginCharterWriteRequest,
+    finishWrite: finishCharterWriteRequest,
+  } = useCharterRequestGeneration(slug);
   const [charterError, setCharterError] = useState<string | null>(null);
   const [channelRoles, setChannelRoles] = useState<ChannelRoleInfo[]>([]);
   // 跨 WS/REST 链路共享的成员删除墓碑：participant_removed 可能先于/晚于
@@ -3081,7 +3093,6 @@ export function ChannelPage({
   const [olderStatus, setOlderStatus] = useState<"idle" | "loading" | "error" | "end">("idle");
   const initialCursorRef = useRef(0); // ws hello 的起始游标 = 初始页最后一条 seq
   const initialHistoryRequestRef = useRef(0);
-  const charterRequestRef = useRef(0);
   const pendingAnchorRef = useRef<{ height: number; top: number } | null>(null); // prepend 前的滚动锚
   const oldestSeqRef = useRef(0);
   oldestSeqRef.current = state.messages.length > 0 ? state.messages[0]!.seq : 0;
@@ -3197,16 +3208,16 @@ export function ChannelPage({
   }, []);
 
   const loadCharter = useCallback(() => {
-    const requestId = ++charterRequestRef.current;
+    const request = beginCharterRead(charterRequestGenerationRef.current);
     return fetchChannelCharter(token, slug)
       .then((body) => {
-        if (requestId !== charterRequestRef.current) return;
+        if (!canApplyCharterRead(charterRequestGenerationRef.current, request)) return;
         setCharter(body);
         setCharterDraft(body.charter ?? "");
         setCharterError(null);
       })
       .catch((err: unknown) => {
-        if (requestId !== charterRequestRef.current) return;
+        if (!canApplyCharterRead(charterRequestGenerationRef.current, request)) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (!(err instanceof ForbiddenError)) setCharterError(tRef.current("Channel.charter.error.loadFailed"));
       });
@@ -3578,9 +3589,6 @@ export function ChannelPage({
     void loadIdentities();
     void loadRoles();
     void loadSquads();
-    return () => {
-      charterRequestRef.current += 1;
-    };
   }, [loadCharter, loadIdentities, loadRoles, loadSquads, slug]);
 
   // IM 式初始加载：先用 rest 拉最新一页（打开即到底部），把 ws 起始游标 seed 到页尾，
@@ -4192,12 +4200,12 @@ export function ChannelPage({
 
   const saveCharter = useCallback(() => {
     if (charterSaving) return;
-    const requestId = ++charterRequestRef.current;
-    setCharterSaving(true);
+    const requestId = beginCharterWriteRequest();
+    if (requestId === null) return;
     setCharterError(null);
     setChannelCharter(token, slug, charterDraft)
       .then((body) => {
-        if (requestId !== charterRequestRef.current) return;
+        if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         setCharter(body);
         setCharterDraft(body.charter ?? "");
         setCharterEditing(false);
@@ -4205,26 +4213,35 @@ export function ChannelPage({
         setSeenCharterRev(body.charter_rev);
       })
       .catch((err: unknown) => {
-        if (requestId !== charterRequestRef.current) return;
+        if (!canApplyCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
         else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
         else setCharterError(tRef.current("Channel.charter.error.saveFailed"));
       })
-      .finally(() => setCharterSaving(false));
-  }, [charterDraft, charterSaving, slug, token]);
+      .finally(() => {
+        finishCharterWriteRequest(requestId);
+      });
+  }, [
+    beginCharterWriteRequest,
+    charterDraft,
+    charterSaving,
+    finishCharterWriteRequest,
+    slug,
+    token,
+  ]);
 
   // issue #150：分工面板「同步到公告」——DivisionBoard 已经把分工内容拼好、合并进
   // 现有公告文本，这里只负责落盘，复用与 saveCharter 相同的 setChannelCharter 写路径
   // 和错误处理，唯一区别是写入的文本来自调用方而不是 charterDraft 状态。
   const syncDivisionToCharter = useCallback((nextText: string) => {
     if (charterSaving) return;
-    const requestId = ++charterRequestRef.current;
-    setCharterSaving(true);
+    const requestId = beginCharterWriteRequest();
+    if (requestId === null) return;
     setCharterError(null);
     setChannelCharter(token, slug, nextText)
       .then((body) => {
-        if (requestId !== charterRequestRef.current) return;
+        if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         setCharter(body);
         setCharterDraft(body.charter ?? "");
         setCharterEditing(false);
@@ -4232,14 +4249,22 @@ export function ChannelPage({
         setSeenCharterRev(body.charter_rev);
       })
       .catch((err: unknown) => {
-        if (requestId !== charterRequestRef.current) return;
+        if (!canApplyCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
         else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
         else setCharterError(tRef.current("Channel.charter.error.saveFailed"));
       })
-      .finally(() => setCharterSaving(false));
-  }, [charterSaving, slug, token]);
+      .finally(() => {
+        finishCharterWriteRequest(requestId);
+      });
+  }, [
+    beginCharterWriteRequest,
+    charterSaving,
+    finishCharterWriteRequest,
+    slug,
+    token,
+  ]);
 
   // issue #171：分工面板到 AgentTokens（已有的 project-agent 规则查看/编辑面板，
   // commit 7f7e8e1）的入口——复用 setAdminSurface（关掉分工弹层，打开 AgentTokens），
