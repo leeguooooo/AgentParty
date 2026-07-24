@@ -1,5 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import {
+  extractIndexDefinition,
+  extractTriggerDefinition,
+  normalizeSqlDefinition,
+} from "./schema-contract.mjs";
 
 const database = process.env.AGENTPARTY_D1_DATABASE ?? "agentparty";
 const wranglerConfig = process.env.AGENTPARTY_WRANGLER_CONFIG;
@@ -240,40 +245,6 @@ const schemaMigrationSources = [
   readFileSync(new URL("../migrations/0042_channel_decisions.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0043_channel_role_revision.sql", import.meta.url), "utf8"),
 ];
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function extractTriggerDefinition(source, name) {
-  const start = new RegExp(`^CREATE\\s+TRIGGER\\s+${escapeRegExp(name)}\\b`, "im").exec(source);
-  if (start === null) return null;
-  const tail = source.slice(start.index);
-  const end = /^END;[ \t]*$/m.exec(tail);
-  if (end === null) return null;
-  return tail.slice(0, end.index + end[0].length);
-}
-
-function extractIndexDefinition(source, name) {
-  const start = new RegExp(
-    `^CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+${escapeRegExp(name)}\\b`,
-    "im",
-  ).exec(source);
-  if (start === null) return null;
-  const tail = source.slice(start.index);
-  const end = tail.indexOf(";");
-  return end === -1 ? null : tail.slice(0, end + 1);
-}
-
-function normalizeSqlDefinition(sql) {
-  if (typeof sql !== "string") return "";
-  return sql
-    .replace(/--[^\n\r]*/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/;\s*$/, "")
-    .trim()
-    .toLowerCase();
-}
 
 const requiredTriggerDefinitions = Object.fromEntries(
   Object.values(requiredTriggers).flat().map((name) => {
