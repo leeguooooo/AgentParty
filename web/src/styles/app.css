@@ -222,7 +222,7 @@
   width: auto;
   max-height: none;
   overflow: visible;
-  padding: 14px 0;
+  padding: 0;
   border: 0;
   border-radius: 0;
   box-shadow: none;
@@ -6790,7 +6790,8 @@
 .agent-board-task--blocked .agent-board-task-state { color: var(--p-blocked); }
 
 /* #273 全局设置面板 */
-.app-settings-btn {
+.app-settings-btn,
+.app-agent-center-btn {
   flex: 0 0 auto;
   border: 1px solid var(--border, #ccc);
   background: transparent;
@@ -6801,8 +6802,11 @@
   line-height: 1;
   color: var(--fg, inherit);
 }
-.app-settings-btn:hover { background: var(--t-faint, rgba(0,0,0,0.05)); }
-.app-settings-btn .ap-sprite { --ap-icon-size: 22px; }
+.app-settings-btn:hover,
+.app-agent-center-btn:hover { background: var(--t-faint, rgba(0,0,0,0.05)); }
+.app-settings-btn .ap-sprite,
+.app-agent-center-btn .ap-sprite { --ap-icon-size: 22px; }
+.app-agent-center-btn[aria-expanded="true"] { border-color: var(--t-accent, #ff5447); }
 .settings-overlay {
   position: fixed;
   inset: 0;
@@ -6815,16 +6819,62 @@
   overflow-y: auto;
 }
 .settings-panel {
-  width: min(440px, 100%);
+  width: min(760px, 100%);
+  max-height: min(720px, calc(100vh - 96px));
+  display: flex;
+  flex-direction: column;
   background: var(--t-bg, #fff);
   border: 1px solid var(--border, #ccc);
   border-radius: 10px;
   box-shadow: 0 12px 40px rgba(0,0,0,0.2);
   padding: 4px 20px 20px;
+  overflow: hidden;
 }
+.settings-panel--agent-center { width: min(920px, 100%); }
 .settings-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; }
 .settings-title { margin: 0; font-size: 16px; }
 .settings-close { border: 0; background: transparent; font-size: 20px; line-height: 1; cursor: pointer; color: var(--t-dim, #888); }
+.settings-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  border-top: 1px solid var(--t-faint, #eee);
+}
+.settings-nav {
+  min-width: 0;
+  padding: 14px 14px 14px 0;
+  border-right: 1px solid var(--t-faint, #eee);
+}
+.settings-tabs { display: flex; flex-direction: column; gap: 4px; }
+.settings-tab {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--t-dim, #888);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-tab:hover { color: var(--t-body, #2a2820); background: var(--t-faint, #eee); }
+.settings-tab:focus-visible { outline: 2px solid var(--t-accent, #ff5447); outline-offset: -2px; }
+.settings-tab.is-active {
+  border-color: var(--d-ink, #1a1a1a);
+  background: var(--d-yellow, #f5e6a8);
+  color: var(--d-ink, #1a1a1a);
+}
+.settings-content {
+  min-width: 0;
+  overflow: auto;
+  padding: 14px 0 14px 20px;
+}
+.settings-module[hidden] { display: none; }
+.settings-module-title { margin: 0 0 8px; font-size: 15px; }
+.settings-module > .settings-section:first-of-type { border-top: 0; }
 .settings-section { padding: 14px 0; border-top: 1px solid var(--t-faint, #eee); }
 .settings-label { font-size: 12px; color: var(--t-dim, #888); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.04em; }
 .settings-toggle {
@@ -6874,6 +6924,33 @@
    密度不受影响。不要用 viewport 加 maximum-scale=1 的方案（破坏可访问性缩放）。
    ========================================================================== */
 @media (max-width: 760px) {
+  .settings-overlay { padding: 12px; }
+  .settings-panel {
+    max-height: calc(100vh - 24px);
+    padding: 4px 14px 14px;
+  }
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .settings-nav {
+    padding: 8px 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--t-faint, #eee);
+    overflow-x: auto;
+  }
+  .settings-tabs {
+    flex-direction: row;
+    width: max-content;
+    min-width: 100%;
+  }
+  .settings-tab {
+    width: auto;
+    white-space: nowrap;
+    text-align: center;
+  }
+  .settings-content {
+    padding: 14px 0 0;
+  }
   .composer-input,
   .newchan-input,
   .msg-edit-input,
@@ -6882,6 +6959,7 @@
   .role-name-input,
   .handlesetup-input,
   .guard-limit-input,
+  .local-agents-search,
   .desktop-agent-fields input,
   .desktop-agent-fields select {
     font-size: 16px;

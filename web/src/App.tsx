@@ -11,7 +11,8 @@ import { DesktopInvitePaste } from "./components/DesktopInvitePaste";
 import { DesktopPairingGate } from "./components/DesktopPairingGate";
 import { DesktopUpdater } from "./components/DesktopUpdater";
 import { TokenGate } from "./components/TokenGate";
-import { SettingsPanel } from "./components/SettingsPanel";
+import { SettingsPanel, type SettingsSectionId } from "./components/SettingsPanel";
+import { LocalAgentCenter } from "./components/LocalAgentCenter";
 import { OnboardingGuide } from "./components/OnboardingGuide";
 import { NotifyToggle, readNotifyOptin } from "./components/NotifyToggle";
 import { ServerProfileAddGate, ServerSwitcher } from "./components/ServerProfiles";
@@ -511,10 +512,18 @@ export function App() {
   // 账号 @handle / 昵称编辑复用 HandleSetup，放进面板的账号区（不再在顶栏单独挂一个浮层入口）。
   // banner 关闭态只在本次会话内记，不落盘。
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSectionId>("preferences");
+  const [localAgentCenterOpen, setLocalAgentCenterOpen] = useState(false);
   const [handleBannerDismissed, setHandleBannerDismissed] = useState(false);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const settingsReturnFocusRef = useRef<HTMLButtonElement | null>(null);
-  const openSettings = useCallback((event?: { currentTarget?: HTMLButtonElement }) => {
+  const localAgentCenterButtonRef = useRef<HTMLButtonElement | null>(null);
+  const openSettings = useCallback((
+    event?: { currentTarget?: HTMLButtonElement },
+    section: SettingsSectionId = "preferences",
+  ) => {
+    setLocalAgentCenterOpen(false);
+    setSettingsInitialSection(section);
     settingsReturnFocusRef.current = event?.currentTarget ?? settingsButtonRef.current;
     setSettingsOpen(true);
   }, []);
@@ -522,6 +531,14 @@ export function App() {
     setSettingsOpen(false);
     const target = settingsReturnFocusRef.current;
     (target?.isConnected === false ? settingsButtonRef.current : target ?? settingsButtonRef.current)?.focus();
+  }, []);
+  const openLocalAgentCenter = useCallback(() => {
+    setSettingsOpen(false);
+    setLocalAgentCenterOpen(true);
+  }, []);
+  const closeLocalAgentCenter = useCallback(() => {
+    setLocalAgentCenterOpen(false);
+    localAgentCenterButtonRef.current?.focus?.();
   }, []);
 
   // oidc 配置存 ref，供 onAuthFailed/续期在稳定回调里读到最新值（避免进 effect 依赖引发重跑）
@@ -1216,7 +1233,7 @@ export function App() {
           <button
             type="button"
             className="d-btn handlesetup-trigger handlesetup-trigger--cta"
-            onClick={openSettings}
+            onClick={(event) => openSettings(event, "account")}
             title={t("App.handle.setCta")}
           >
             <span className="handlesetup-trigger-edit" aria-hidden="true">
@@ -1238,6 +1255,19 @@ export function App() {
           />
         )}
         <DesktopUpdater />
+        {desktop && (
+          <button
+            ref={localAgentCenterButtonRef}
+            type="button"
+            className="app-agent-center-btn"
+            aria-label={t("App.localAgentCenter.open")}
+            title={t("App.localAgentCenter.open")}
+            aria-expanded={localAgentCenterOpen}
+            onClick={openLocalAgentCenter}
+          >
+            <span className="ap-sprite ap-sprite--agent" aria-hidden="true" />
+          </button>
+        )}
         {slug !== null && (
           <div className="app-channel-notify" aria-label={t("Channel.notify.headerLabel")}>
             <NotifyToggle optin={notifyOptin} onChange={setNotifyOptin} />
@@ -1257,8 +1287,10 @@ export function App() {
       {settingsOpen && (
         <SettingsPanel
           me={me}
+          notifyOptin={notifyOptin}
           canSetHandle={canSetHandle}
           onClose={closeSettings}
+          onNotifyOptinChange={setNotifyOptin}
           onLogout={
             isShareMode() || desktopLogoutPending
               ? null
@@ -1275,14 +1307,18 @@ export function App() {
             setSettingsOpen(false);
             setGuideOpen(true);
           }}
-          desktopSettings={<DesktopSettings embedded serverOrigin={activeOrigin} />}
+          desktopAppSettings={desktop ? <DesktopSettings embedded serverOrigin={activeOrigin} /> : null}
+          initialSection={settingsInitialSection}
         />
       )}
-      {canSetHandle && me !== null && me.handle === null && !handleBannerDismissed && !settingsOpen && (
+      {localAgentCenterOpen && (
+        <LocalAgentCenter onClose={closeLocalAgentCenter} />
+      )}
+      {canSetHandle && me !== null && me.handle === null && !handleBannerDismissed && !settingsOpen && !localAgentCenterOpen && (
         <p className="banner banner--yellow handle-banner" role="status">
           <span className="handle-banner-text">{t("App.handle.banner")}</span>
           <span className="handle-banner-actions">
-            <button type="button" className="d-btn" onClick={openSettings}>
+            <button type="button" className="d-btn" onClick={(event) => openSettings(event, "account")}>
               {t("App.handle.bannerAction")}
             </button>
             <button

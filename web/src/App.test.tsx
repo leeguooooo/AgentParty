@@ -214,9 +214,11 @@ beforeEach(() => {
   });
 });
 
-test("desktop renders one settings entry and keeps desktop controls in the global panel", async () => {
+test("desktop separates personal settings from the local-agent control center", async () => {
   const settingsFocus = mock(() => undefined);
   localStorage.setItem("ap_onboarded", "1");
+  location.pathname = "/c/test-channel";
+  location.href = `${activeOrigin}/c/test-channel`;
   await act(async () => {
     renderer = create(<LocaleProvider><App /></LocaleProvider>, {
       createNodeMock: (element) => {
@@ -232,6 +234,7 @@ test("desktop renders one settings entry and keeps desktop controls in the globa
 
   const root = renderer!.root;
   expect(root.findAllByProps({ className: "app-settings-btn" })).toHaveLength(1);
+  expect(root.findAllByProps({ className: "app-agent-center-btn" })).toHaveLength(1);
   expect(root.findAllByProps({ className: "desktop-settings-trigger" })).toHaveLength(0);
   expect(root.findByProps({ className: "app-settings-btn" }).findByProps({
     className: "ap-sprite ap-sprite--settings",
@@ -240,11 +243,26 @@ test("desktop renders one settings entry and keeps desktop controls in the globa
   await act(async () => root.findByProps({ className: "app-settings-btn" }).props.onClick());
 
   expect(root.findByProps({ id: "desktop-settings-panel" })).toBeTruthy();
-  expect(root.findByProps({ className: "desktop-agent" })).toBeTruthy();
+  expect(root.findAllByProps({ className: "desktop-agent" })).toHaveLength(0);
+  expect(root.findAllByProps({ className: "local-agents" })).toHaveLength(0);
+  expect(root.findByProps({ className: "d-btn notify-toggle-btn" }).props["aria-pressed"]).toBe(false);
+
+  await act(async () => root.findByProps({ className: "settings-toggle" }).props.onClick());
+
+  expect(root.findByProps({ className: "d-btn notify-toggle-btn is-active" }).props["aria-pressed"]).toBe(true);
+  expect(root.findByProps({ className: "settings-toggle is-on" }).props["aria-pressed"]).toBe(true);
 
   await act(async () => root.findByProps({ className: "settings-close" }).props.onClick());
   expect(root.findAllByProps({ className: "settings-panel" })).toHaveLength(0);
   expect(settingsFocus).toHaveBeenCalledTimes(1);
+
+  await act(async () => root.findByProps({ className: "app-agent-center-btn" }).props.onClick());
+
+  expect(root.findByProps({ id: "local-agent-center-title" })).toBeTruthy();
+  expect(root.findByProps({ className: "local-agents" })).toBeTruthy();
+  expect(root.findAllByProps({ id: "desktop-settings-panel" })).toHaveLength(0);
+
+  await act(async () => root.findByProps({ className: "settings-close" }).props.onClick());
 
   await act(async () => root.findByProps({ className: "app-settings-btn" }).props.onClick());
 

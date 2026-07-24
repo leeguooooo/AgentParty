@@ -17,12 +17,27 @@ export function readNotifyOptin(): boolean {
   }
 }
 
-function writeNotifyOptin(on: boolean) {
+export function writeNotifyOptin(on: boolean) {
   try {
     localStorage.setItem(OPTIN_KEY, on ? "1" : "0");
   } catch {
     // 写入失败不阻断本次切换，只是刷新/换标签页后会回落到默认关闭
   }
+}
+
+/**
+ * One permission path for every notification preference surface.
+ * The preference remains enabled when system permission is unavailable because
+ * in-app mention toasts do not require that permission.
+ */
+export async function requestNotifySystemPermission(): Promise<boolean> {
+  if (isDesktopRuntime()) {
+    return (await requestDesktopNotificationPermission()) === "granted";
+  }
+  if (typeof window === "undefined" || !("Notification" in window)) return false;
+  if (Notification.permission === "granted") return true;
+  if (Notification.permission === "denied") return false;
+  return (await Notification.requestPermission()) === "granted";
 }
 
 interface Props {
@@ -33,8 +48,6 @@ interface Props {
 export function NotifyToggle({ optin, onChange }: Props) {
   const t = useT();
   const [hint, setHint] = useState<string | null>(null);
-  const desktop = isDesktopRuntime();
-  const supported = desktop || (typeof window !== "undefined" && "Notification" in window);
 
   const toggle = () => {
     setHint(null);
@@ -47,24 +60,9 @@ export function NotifyToggle({ optin, onChange }: Props) {
     // 开启：立即生效——页内 toast 不需要浏览器授权，铃铛先开起来
     writeNotifyOptin(true);
     onChange(true);
-    // 额外能力：切走标签时的系统通知需要浏览器授权，best-effort 申请；拒绝/不支持不回滚 optin，只提示
-    if (!supported) {
-      setHint(t("Channel.notify.inAppOnly"));
-      return;
-    }
-    if (desktop) {
-      void requestDesktopNotificationPermission().then((permission) => {
-        if (permission !== "granted") setHint(t("Channel.notify.inAppOnly"));
-      });
-      return;
-    }
-    if (Notification.permission === "granted") return;
-    if (Notification.permission === "denied") {
-      setHint(t("Channel.notify.inAppOnly"));
-      return;
-    }
-    void Notification.requestPermission().then((permission) => {
-      if (permission !== "granted") setHint(t("Channel.notify.inAppOnly"));
+    // 系统通知只是额外能力；拒绝/不支持不回滚页内通知，只提示降级。
+    void requestNotifySystemPermission().then((granted) => {
+      if (!granted) setHint(t("Channel.notify.inAppOnly"));
     });
   };
 
