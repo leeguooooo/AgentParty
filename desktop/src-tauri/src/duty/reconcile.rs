@@ -12,7 +12,10 @@ use std::{
 #[cfg(all(desktop, target_os = "macos"))]
 use std::{
     io::Write as _,
+    os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
+    process::{Command, Output, Stdio},
     sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
 };
 
 use super::{duty_plist_path, instance_id_from_label, xml_escape};
@@ -24,6 +27,18 @@ const DUTY_BLOCKED_MARKER_SCHEMA: &str = "agentparty.duty-blocked.v1";
 
 #[cfg(all(desktop, target_os = "macos"))]
 const DUTY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+
+#[cfg(all(desktop, target_os = "macos"))]
+const DUTY_RELEASE_SYNC_ATTEMPTS: usize = 8;
+
+#[cfg(all(desktop, target_os = "macos"))]
+const DUTY_RELEASE_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+
+#[cfg(all(desktop, target_os = "macos"))]
+const DUTY_PROCESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(all(desktop, target_os = "macos"))]
+const DUTY_PROCESS_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[cfg(all(desktop, target_os = "macos"))]
 static DUTY_OPERATION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -73,16 +88,18 @@ pub(super) fn acquire_duty_operation_blocking() -> Result<DutyOperationGuard, St
 pub(super) struct DutyFilesystemLock {
     path: PathBuf,
     owner: String,
+    device: u64,
+    inode: u64,
 }
 
 #[cfg(all(desktop, target_os = "macos"))]
 impl Drop for DutyFilesystemLock {
     fn drop(&mut self) {
-        let owner_path = self.path.join("owner");
-        if fs::read_to_string(&owner_path).is_ok_and(|owner| owner.trim() == self.owner.as_str()) {
-            let _ = fs::remove_file(owner_path);
-            let _ = fs::remove_dir(&self.path);
-        }
+        release_or_defer_owned_duty_filesystem_lock(
+            &self.path,
+            &self.owner,
+            (self.device, self.inode),
+        );
     }
 }
 
@@ -95,15 +112,39 @@ enum ProcessStartIdentity {
 }
 
 #[cfg(all(desktop, target_os = "macos"))]
+fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Output> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(DUTY_PROCESS_PROBE_POLL_INTERVAL);
+            }
+            Ok(None) | Err(_) => {
+                // `kill` 后必须 `wait` 回收子进程；超时/探测错误都不是 owner 已死的证据。
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
 fn process_start_identity(pid: u32) -> ProcessStartIdentity {
-    let output = std::process::Command::new("ps")
+    let mut command = Command::new("ps");
+    command
         .args(["-o", "lstart=", "-p", &pid.to_string()])
         // Node sidecar 使用完全相同的固定 locale；否则同一启动时间会在英文/日文环境下
         // 变成不同字符串，双方误判 PID 已复用并强拆对方的活锁。
         .env("LC_ALL", "C")
-        .env("LC_TIME", "C")
-        .output();
-    let Ok(output) = output else {
+        .env("LC_TIME", "C");
+    let Some(output) = command_output_with_timeout(&mut command, DUTY_PROCESS_PROBE_TIMEOUT) else {
         return ProcessStartIdentity::Unknown;
     };
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -130,6 +171,359 @@ fn process_identity_is_stale(identity: &ProcessStartIdentity, expected_start: &s
         ProcessStartIdentity::Dead => true,
         ProcessStartIdentity::Unknown => false,
     }
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn write_private_new_file(path: &Path, value: &str) -> std::io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(value.as_bytes())
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn duty_lock_path_is_stale_with_fallback(
+    path: &Path,
+    fallback_modified: Option<SystemTime>,
+) -> bool {
+    let fallback_is_stale = || {
+        fallback_modified
+            .or_else(|| {
+                fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+            })
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > Duration::from_secs(10))
+    };
+    match fs::read_to_string(path.join("owner")) {
+        Ok(owner) => {
+            let mut parts = owner.trim().splitn(3, '|');
+            match (
+                parts.next().and_then(|pid| pid.parse::<u32>().ok()),
+                parts.next(),
+                parts.next(),
+            ) {
+                (Some(pid), Some(expected_start), Some(_token)) => {
+                    process_identity_is_stale(&process_start_identity(pid), expected_start)
+                }
+                _ => fallback_is_stale(),
+            }
+        }
+        Err(_) => fallback_is_stale(),
+    }
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn duty_lock_path_is_stale(path: &Path) -> bool {
+    duty_lock_path_is_stale_with_fallback(path, None)
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+struct DutyLockReclaimGuard {
+    path: PathBuf,
+    owner: String,
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+impl Drop for DutyLockReclaimGuard {
+    fn drop(&mut self) {
+        let owner_path = self.path.join("owner");
+        if fs::read_to_string(&owner_path).is_ok_and(|owner| owner.trim() == self.owner.as_str()) {
+            let _ = fs::remove_file(owner_path);
+            let _ = fs::remove_dir(&self.path);
+        }
+    }
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn try_clear_stale_duty_reclaim_claim(path: &Path) -> bool {
+    let owner_path = path.join("owner");
+    let expected_owner = fs::read_to_string(&owner_path)
+        .ok()
+        .map(|owner| owner.trim().to_string());
+    if !duty_lock_path_is_stale(path) {
+        return false;
+    }
+    if let Some(expected_owner) = expected_owner {
+        // 两个清理者可能同时观察到旧 claim；删除前再比对，绝不 unlink 后来者的新 owner。
+        if !fs::read_to_string(&owner_path)
+            .is_ok_and(|owner| owner.trim() == expected_owner.as_str())
+        {
+            return false;
+        }
+        match fs::remove_file(&owner_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+    }
+    // 只删除空目录。若后来者刚 create_dir 但还没写 owner，它的写入会失败并放弃本轮，
+    // 不会拿着一个被旧清理者移除的 claim 继续操作 canonical lock。
+    fs::remove_dir(path).is_ok()
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn try_acquire_duty_internal_claim_with_process_start(
+    path: &Path,
+    process_start: &str,
+) -> Result<Option<DutyLockReclaimGuard>, String> {
+    let reclaim_path = path.join(".reclaim");
+    match fs::create_dir(&reclaim_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = try_clear_stale_duty_reclaim_claim(&reclaim_path);
+            return Ok(None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot acquire duty internal claim: {error}")),
+    }
+    let claim_owner = format!(
+        "{}|{}|{}",
+        std::process::id(),
+        process_start,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    if let Err(error) = write_private_new_file(&reclaim_path.join("owner"), &claim_owner) {
+        let _ = fs::remove_dir(&reclaim_path);
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::AlreadyExists
+        ) {
+            return Ok(None);
+        }
+        return Err(format!("cannot initialize duty internal claim: {error}"));
+    }
+    Ok(Some(DutyLockReclaimGuard {
+        path: reclaim_path,
+        owner: claim_owner,
+    }))
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn try_acquire_duty_internal_claim(path: &Path) -> Result<Option<DutyLockReclaimGuard>, String> {
+    let ProcessStartIdentity::Alive(process_start) = process_start_identity(std::process::id())
+    else {
+        return Err(
+            "cannot identify current process start time for duty internal claim".to_string(),
+        );
+    };
+    try_acquire_duty_internal_claim_with_process_start(path, &process_start)
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn duty_lock_owner_process_start(owner: &str) -> Option<&str> {
+    let mut parts = owner.trim().splitn(3, '|');
+    let pid = parts.next()?.parse::<u32>().ok()?;
+    let process_start = parts.next()?;
+    let token = parts.next()?;
+    (pid == std::process::id() && !process_start.is_empty() && !token.is_empty())
+        .then_some(process_start)
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn try_release_owned_duty_filesystem_lock(
+    path: &Path,
+    owner: &str,
+    acquired_identity: (u64, u64),
+) -> bool {
+    let owner_path = path.join("owner");
+    let same_owner_and_directory = fs::metadata(path).ok().is_some_and(|metadata| {
+        (metadata.dev(), metadata.ino()) == acquired_identity
+            && fs::read_to_string(&owner_path).is_ok_and(|current| current.trim() == owner)
+    });
+    if !same_owner_and_directory {
+        return true;
+    }
+    // canonical owner 是本 guard 取得锁时已经验证过的 pid|start|token；release 复用该
+    // start identity，不能因之后 `ps` 瞬时或持续不可用而永远遗留 live owner。
+    let Some(process_start) = duty_lock_owner_process_start(owner) else {
+        return false;
+    };
+    let claim = match try_acquire_duty_internal_claim_with_process_start(path, process_start) {
+        Ok(Some(claim)) => claim,
+        Ok(None) | Err(_) => return false,
+    };
+    let still_owned = fs::metadata(path).ok().is_some_and(|metadata| {
+        (metadata.dev(), metadata.ino()) == acquired_identity
+            && fs::read_to_string(&owner_path).is_ok_and(|current| current.trim() == owner)
+    });
+    if !still_owned {
+        return true;
+    }
+    let tombstone = path.with_extension(format!(
+        "lock.released-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    if fs::rename(path, &tombstone).is_ok() {
+        // rename 后只删除绑定旧 inode 的私有 tombstone；canonical 可安全交给后来者。
+        let _ = fs::remove_dir_all(tombstone);
+        drop(claim);
+        return true;
+    }
+    drop(claim);
+    // rename 失败后再看一次；若 canonical 已换代或 owner 已变，旧 guard 已无需清理。
+    !fs::metadata(path).ok().is_some_and(|metadata| {
+        (metadata.dev(), metadata.ino()) == acquired_identity
+            && fs::read_to_string(&owner_path).is_ok_and(|current| current.trim() == owner)
+    })
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn release_owned_duty_filesystem_lock(
+    path: &Path,
+    owner: &str,
+    acquired_identity: (u64, u64),
+) -> bool {
+    for attempt in 0..DUTY_RELEASE_SYNC_ATTEMPTS {
+        if try_release_owned_duty_filesystem_lock(path, owner, acquired_identity) {
+            return true;
+        }
+        if attempt + 1 < DUTY_RELEASE_SYNC_ATTEMPTS {
+            std::thread::sleep(DUTY_RELEASE_RETRY_INTERVAL);
+        }
+    }
+    false
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn release_owned_duty_filesystem_lock_until_complete(
+    path: &Path,
+    owner: &str,
+    acquired_identity: (u64, u64),
+) {
+    loop {
+        if try_release_owned_duty_filesystem_lock(path, owner, acquired_identity) {
+            return;
+        }
+        std::thread::sleep(DUTY_RELEASE_RETRY_INTERVAL);
+    }
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn release_or_defer_owned_duty_filesystem_lock(
+    path: &Path,
+    owner: &str,
+    acquired_identity: (u64, u64),
+) {
+    if release_owned_duty_filesystem_lock(path, owner, acquired_identity) {
+        return;
+    }
+    let path = path.to_path_buf();
+    let owner = owner.to_string();
+    let deferred_path = path.clone();
+    let deferred_owner = owner.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("agentparty-duty-lock-release".to_string())
+        .spawn(move || {
+            // 长事务可以暂时持有内部 claim；不阻塞桌面调用线程，但也不遗留一个由
+            // 长寿 desktop PID 持有、之后永远不会被判 stale 的 canonical owner。
+            release_owned_duty_filesystem_lock_until_complete(
+                &deferred_path,
+                &deferred_owner,
+                acquired_identity,
+            );
+        })
+    {
+        eprintln!(
+            "desktop duty lock deferred release thread unavailable ({error}); retrying synchronously"
+        );
+        // 资源耗尽导致线程创建失败时不能静默遗留 live owner。仍只走 inode/owner、
+        // internal claim、rename tombstone 这套协议；代价是极端情况下阻塞当前 Drop。
+        release_owned_duty_filesystem_lock_until_complete(&path, &owner, acquired_identity);
+    }
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn try_reclaim_stale_duty_lock_with<F>(path: &Path, is_stale: F) -> Result<bool, String>
+where
+    F: FnOnce(Option<SystemTime>) -> bool,
+{
+    let observed = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect duty lock before reclamation: {error}"
+            ))
+        }
+    };
+    let observed_modified = observed.modified().ok();
+    let observed_identity = (observed.dev(), observed.ino());
+    let Some(claim) = try_acquire_duty_internal_claim(path)? else {
+        return Ok(false);
+    };
+
+    let current = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "cannot recheck duty lock before reclamation: {error}"
+            ))
+        }
+    };
+    if (current.dev(), current.ino()) != observed_identity {
+        return Ok(false);
+    }
+    // 内部 claim 会让普通 owner 的 remove_dir 失败，从而钉住同一个目录 inode。
+    // 创建 claim 会更新目录 mtime；损坏/缺失 owner 的兜底必须使用 claim 前快照。
+    if !is_stale(observed_modified) {
+        return Ok(false);
+    }
+
+    let tombstone = path.with_extension(format!(
+        "lock.stale-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    match fs::rename(path, &tombstone) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot quarantine stale duty lock: {error}")),
+    }
+    // canonical path 已经原子空出；后来者可以取得新锁，回收者从此只删除自己的 tombstone。
+    fs::remove_dir_all(&tombstone)
+        .map_err(|error| format!("cannot remove quarantined stale duty lock: {error}"))?;
+    drop(claim);
+    Ok(true)
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn wait_for_duty_lock_publication(path: &Path, owner: &str, acquired_identity: (u64, u64)) -> bool {
+    let owner_path = path.join("owner");
+    let reclaim_path = path.join(".reclaim");
+    for _ in 0..200 {
+        let same_owner_and_directory = fs::metadata(path).ok().is_some_and(|metadata| {
+            (metadata.dev(), metadata.ino()) == acquired_identity
+                && fs::read_to_string(&owner_path).is_ok_and(|current| current.trim() == owner)
+        });
+        if !same_owner_and_directory {
+            return false;
+        }
+        if !reclaim_path.exists() {
+            // claim pathname 也会随 canonical rename 到 tombstone；absence 后必须再核对，
+            // 否则可能在“第一次 stat 成功、随后被 rename”窗口误报发布成功。
+            return fs::metadata(path).ok().is_some_and(|metadata| {
+                (metadata.dev(), metadata.ino()) == acquired_identity
+                    && fs::read_to_string(&owner_path).is_ok_and(|current| current.trim() == owner)
+            });
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
 }
 
 #[cfg(all(desktop, target_os = "macos"))]
@@ -164,41 +558,42 @@ fn try_acquire_duty_filesystem_lock(
                     .unwrap_or_default()
                     .as_nanos()
             );
-            if let Err(error) = fs::write(path.join("owner"), &owner) {
+            if let Err(error) = write_private_new_file(&path.join("owner"), &owner) {
                 let _ = fs::remove_dir(&path);
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Ok(None);
+                }
                 return Err(format!("cannot initialize duty lock owner: {error}"));
             }
-            Ok(Some(DutyFilesystemLock { path, owner }))
+            let metadata = match fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if fs::read_to_string(path.join("owner"))
+                        .is_ok_and(|current| current.trim() == owner)
+                    {
+                        let _ = fs::remove_file(path.join("owner"));
+                        let _ = fs::remove_dir(&path);
+                    }
+                    return Err(format!("cannot inspect acquired duty lock: {error}"));
+                }
+            };
+            let acquired_identity = (metadata.dev(), metadata.ino());
+            if !wait_for_duty_lock_publication(&path, &owner, acquired_identity) {
+                release_or_defer_owned_duty_filesystem_lock(&path, &owner, acquired_identity);
+                return Ok(None);
+            }
+            Ok(Some(DutyFilesystemLock {
+                path,
+                owner,
+                device: acquired_identity.0,
+                inode: acquired_identity.1,
+            }))
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let owner_path = path.join("owner");
-            let stale = match fs::read_to_string(&owner_path) {
-                Ok(owner) => {
-                    let mut parts = owner.trim().splitn(3, '|');
-                    match (
-                        parts.next().and_then(|pid| pid.parse::<u32>().ok()),
-                        parts.next(),
-                        parts.next(),
-                    ) {
-                        (Some(pid), Some(expected_start), Some(_token)) => {
-                            process_identity_is_stale(&process_start_identity(pid), expected_start)
-                        }
-                        _ => fs::metadata(&path)
-                            .and_then(|metadata| metadata.modified())
-                            .ok()
-                            .and_then(|modified| modified.elapsed().ok())
-                            .is_some_and(|age| age > Duration::from_secs(10)),
-                    }
-                }
-                Err(_) => fs::metadata(&path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age > Duration::from_secs(10)),
-            };
-            if stale {
-                let _ = fs::remove_file(owner_path);
-                let _ = fs::remove_dir(&path);
+            if duty_lock_path_is_stale(&path) {
+                let _ = try_reclaim_stale_duty_lock_with(&path, |fallback_modified| {
+                    duty_lock_path_is_stale_with_fallback(&path, fallback_modified)
+                })?;
             }
             Ok(None)
         }
@@ -2010,5 +2405,190 @@ mod tests {
             &ProcessStartIdentity::Alive("different-start".to_string()),
             &started_at
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn duty_lock_process_probe_timeout_kills_and_reaps_child() {
+        use super::command_output_with_timeout;
+        use std::{
+            process::Command,
+            time::{Duration, Instant},
+        };
+
+        let mut command = Command::new("/bin/sleep");
+        command.arg("5");
+        let started = Instant::now();
+        assert!(
+            command_output_with_timeout(&mut command, Duration::from_millis(25)).is_none(),
+            "timed-out probe must not report process output"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "timed-out probe must kill and reap the child promptly"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn internal_reclaim_claim_pins_old_inode_until_recheck_finishes() {
+        use super::try_reclaim_stale_duty_lock_with;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let lock_path = temp.path().join("duty.lock");
+        std::fs::create_dir(&lock_path).expect("old canonical lock");
+        std::fs::write(lock_path.join("owner"), "old-stale-owner").expect("old owner");
+
+        assert!(try_reclaim_stale_duty_lock_with(&lock_path, |_| {
+            // 旧 owner 在回收者重判期间正常 release：内部 claim 令 remove_dir 失败，
+            // 所以后来的 owner 还不能在 canonical pathname 发布新锁。
+            std::fs::remove_file(lock_path.join("owner")).expect("old owner release");
+            assert!(std::fs::remove_dir(&lock_path).is_err());
+            assert!(std::fs::create_dir(&lock_path).is_err());
+            true
+        })
+        .expect("stale reclaim"));
+
+        std::fs::create_dir(&lock_path).expect("new canonical lock");
+        std::fs::write(lock_path.join("owner"), "new-live-owner").expect("new owner");
+        assert_eq!(
+            std::fs::read_to_string(lock_path.join("owner")).expect("preserved owner"),
+            "new-live-owner"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn initializer_publication_loses_to_an_already_decided_reclaimer() {
+        use super::{
+            try_reclaim_stale_duty_lock_with, wait_for_duty_lock_publication,
+            write_private_new_file,
+        };
+        use std::{os::unix::fs::MetadataExt as _, sync::mpsc};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let lock_path = temp.path().join("duty.lock");
+        std::fs::create_dir(&lock_path).expect("ownerless canonical");
+        let (stale_read_tx, stale_read_rx) = mpsc::channel();
+        let (publish_tx, publish_rx) = mpsc::channel();
+        let reclaim_path = lock_path.clone();
+        let reclaimer = std::thread::spawn(move || {
+            try_reclaim_stale_duty_lock_with(&reclaim_path, |_| {
+                stale_read_tx.send(()).expect("stale decision ready");
+                publish_rx.recv().expect("initializer published");
+                true
+            })
+            .expect("reclaim result")
+        });
+
+        stale_read_rx
+            .recv()
+            .expect("reclaimer holds internal claim");
+        assert!(lock_path.join(".reclaim").exists());
+        let owner = format!("{}|late-initializer|token", std::process::id());
+        write_private_new_file(&lock_path.join("owner"), &owner).expect("late owner publish");
+        let metadata = std::fs::metadata(&lock_path).expect("published canonical");
+        let identity = (metadata.dev(), metadata.ino());
+        publish_tx.send(()).expect("release reclaimer");
+
+        let publication_won = wait_for_duty_lock_publication(&lock_path, &owner, identity);
+        let reclaimed = reclaimer.join().expect("reclaimer thread");
+        assert!(
+            !publication_won,
+            "publication escaped claim: reclaimed={reclaimed} path_exists={} claim_exists={}",
+            lock_path.exists(),
+            lock_path.join(".reclaim").exists()
+        );
+        assert!(reclaimed);
+        assert!(!lock_path.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn owner_publication_is_exclusive_for_lock_and_reclaim_claim() {
+        use super::write_private_new_file;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let owner_path = temp.path().join("owner");
+        write_private_new_file(&owner_path, "winner").expect("first publisher");
+        let error = write_private_new_file(&owner_path, "late-writer")
+            .expect_err("late publisher must lose");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(owner_path).expect("winner preserved"),
+            "winner"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn crashed_internal_reclaim_claim_is_recoverable() {
+        use super::try_reclaim_stale_duty_lock_with;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let lock_path = temp.path().join("duty.lock");
+        let reclaim_path = lock_path.join(".reclaim");
+        std::fs::create_dir(&lock_path).expect("canonical lock");
+        std::fs::write(lock_path.join("owner"), "old-stale-owner").expect("old owner");
+        std::fs::create_dir(&reclaim_path).expect("crashed claim");
+        std::fs::write(
+            reclaim_path.join("owner"),
+            format!("{}|different-start|crashed", std::process::id()),
+        )
+        .expect("crashed claim owner");
+
+        // 第一次只安全清掉 stale 内部 claim；下一轮再取得 claim 并回收 canonical。
+        assert!(
+            !try_reclaim_stale_duty_lock_with(&lock_path, |_| true).expect("clear crashed claim")
+        );
+        assert!(!reclaim_path.exists());
+        assert!(try_reclaim_stale_duty_lock_with(&lock_path, |_| true).expect("reclaim canonical"));
+        assert!(!lock_path.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn deferred_release_cleans_canonical_after_live_claim_finishes() {
+        use super::{try_acquire_duty_internal_claim, DutyFilesystemLock, ProcessStartIdentity};
+        use std::os::unix::fs::MetadataExt as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let lock_path = temp.path().join("duty.lock");
+        std::fs::create_dir(&lock_path).expect("canonical lock");
+        let owner = match super::process_start_identity(std::process::id()) {
+            ProcessStartIdentity::Alive(started_at) => {
+                format!("{}|{started_at}|deferred-release-test", std::process::id())
+            }
+            identity => panic!("current process must be identifiable: {identity:?}"),
+        };
+        std::fs::write(lock_path.join("owner"), &owner).expect("canonical owner");
+        let metadata = std::fs::metadata(&lock_path).expect("canonical metadata");
+        let identity = (metadata.dev(), metadata.ino());
+        let live_claim = try_acquire_duty_internal_claim(&lock_path)
+            .expect("claim attempt")
+            .expect("live internal claim");
+
+        drop(DutyFilesystemLock {
+            path: lock_path.clone(),
+            owner,
+            device: identity.0,
+            inode: identity.1,
+        });
+        assert!(
+            lock_path.exists(),
+            "live internal claim must pin canonical during synchronous release"
+        );
+
+        drop(live_claim);
+        for _ in 0..200 {
+            if !lock_path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            !lock_path.exists(),
+            "deferred release must remove the owned canonical after the claim finishes"
+        );
     }
 }

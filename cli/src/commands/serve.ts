@@ -23,6 +23,7 @@ import {
   readFileSync,
   readlinkSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -326,9 +327,224 @@ export function dutyLockPath(label: string, home: string = homedir()): string {
   return join(home, ".agentparty", "desktop", "duty-locks", `${label}.lock`);
 }
 
+function dutyLockPathIsStale(path: string, fallbackMtimeMs?: number): boolean {
+  try {
+    const owner = readFileSync(join(path, "owner"), "utf8").trim();
+    const decision = dutyLockOwnerIsStale(owner);
+    return decision ?? Date.now() - (fallbackMtimeMs ?? statSync(path).mtimeMs) > 10_000;
+  } catch {
+    try {
+      return Date.now() - (fallbackMtimeMs ?? statSync(path).mtimeMs) > 10_000;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function releaseDutyReclaimClaim(claimPath: string, owner: string): void {
+  try {
+    const ownerPath = join(claimPath, "owner");
+    if (readFileSync(ownerPath, "utf8").trim() !== owner) return;
+    unlinkSync(ownerPath);
+    rmdirSync(claimPath);
+  } catch {
+    // claim 已移动进 tombstone、已被回收，或已经不属于本进程；都不能再碰 pathname。
+  }
+}
+
+function tryClearStaleDutyReclaimClaim(claimPath: string): boolean {
+  let expectedOwner: string | null = null;
+  try {
+    expectedOwner = readFileSync(join(claimPath, "owner"), "utf8").trim();
+  } catch {
+    // 创建 claim 后进程可能在写 owner 前崩溃；只按目录年龄回收。
+  }
+  if (!dutyLockPathIsStale(claimPath)) return false;
+  try {
+    if (expectedOwner !== null) {
+      const ownerPath = join(claimPath, "owner");
+      // 两个清理者可能同时观察到旧 claim；删除前再比对，绝不 unlink 后来者的新 owner。
+      if (readFileSync(ownerPath, "utf8").trim() !== expectedOwner) return false;
+      unlinkSync(ownerPath);
+    }
+    // 只删除空目录。若后来者刚 mkdir 但还没写 owner，它的写入会失败并放弃本轮，
+    // 不会拿着一个被旧清理者移除的 claim 继续操作 canonical lock。
+    rmdirSync(claimPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface DutyInternalClaim {
+  path: string;
+  owner: string;
+  release: () => void;
+}
+
+function tryAcquireDutyInternalClaim(path: string): DutyInternalClaim | null {
+  const claimPath = join(path, ".reclaim");
+  try {
+    mkdirSync(claimPath, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      tryClearStaleDutyReclaimClaim(claimPath);
+      return null;
+    }
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+
+  const processIdentity = processStartIdentity(process.pid);
+  if (processIdentity.state !== "alive") {
+    try {
+      rmdirSync(claimPath);
+    } catch {
+      // 下一轮按 stale claim 恢复。
+    }
+    throw new Error("cannot identify current process start time for duty internal claim");
+  }
+  const claimOwner = `${process.pid}|${processIdentity.startedAt}|${randomUUID()}`;
+  try {
+    writeFileSync(join(claimPath, "owner"), claimOwner, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    });
+  } catch (error) {
+    try {
+      rmdirSync(claimPath);
+    } catch {
+      // stale 清理者可能已移除本轮空 claim；绝不能递归删除路径。
+    }
+    if (
+      (error as NodeJS.ErrnoException).code === "ENOENT" ||
+      (error as NodeJS.ErrnoException).code === "EEXIST"
+    ) return null;
+    throw error;
+  }
+  return {
+    path: claimPath,
+    owner: claimOwner,
+    release: () => releaseDutyReclaimClaim(claimPath, claimOwner),
+  };
+}
+
+/**
+ * 在 canonical lock 目录内部取得跨语言 reclaim claim。内部 claim 会让普通 owner 的
+ * rmdir 失败，从而钉住同一个目录 inode；旧观察者不可能在重判后 rename 到后来者的新锁。
+ * claim 自带进程身份，崩溃遗留可由下一轮安全回收，不形成永久人工锁。
+ */
+export function tryReclaimStaleDutyLock(
+  path: string,
+  isStale?: () => boolean,
+): boolean {
+  let observed: ReturnType<typeof statSync>;
+  try {
+    observed = statSync(path);
+  } catch {
+    return false;
+  }
+  const claim = tryAcquireDutyInternalClaim(path);
+  if (claim === null) return false;
+
+  try {
+    const current = statSync(path);
+    if (current.dev !== observed.dev || current.ino !== observed.ino) return false;
+    // 创建内部 claim 会更新目录 mtime；损坏/缺失 owner 的 10 秒兜底必须使用 claim 前快照。
+    if (!(isStale?.() ?? dutyLockPathIsStale(path, observed.mtimeMs))) return false;
+    const tombstone = `${path}.stale-${process.pid}-${randomUUID()}`;
+    try {
+      renameSync(path, tombstone);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    // canonical path 已经原子空出；后来者可以安全取得新锁，回收者从此只碰自己的 tombstone。
+    rmSync(tombstone, { recursive: true, force: true });
+    return true;
+  } finally {
+    claim.release();
+  }
+}
+
 export function dutyGenerationFromPlist(value: string): string | null {
   const match = value.match(/<key>\s*AP_DUTY_GENERATION\s*<\/key>\s*<string>([^<]+)<\/string>/);
   return match?.[1] ?? null;
+}
+
+function releaseOwnedDutyFilesystemLock(
+  path: string,
+  owner: string,
+  acquired: { dev: number; ino: number },
+): void {
+  const ownerPath = join(path, "owner");
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      const current = statSync(path);
+      if (current.dev !== acquired.dev || current.ino !== acquired.ino) return;
+      if (readFileSync(ownerPath, "utf8").trim() !== owner) return;
+    } catch {
+      return;
+    }
+    let claim: DutyInternalClaim | null;
+    try {
+      claim = tryAcquireDutyInternalClaim(path);
+    } catch {
+      // owner 仍完整留在原 inode；失败关闭，不制造 ownerless canonical。
+      return;
+    }
+    if (claim === null) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      continue;
+    }
+    try {
+      const current = statSync(path);
+      if (current.dev !== acquired.dev || current.ino !== acquired.ino) return;
+      if (readFileSync(ownerPath, "utf8").trim() !== owner) return;
+      const tombstone = `${path}.released-${process.pid}-${randomUUID()}`;
+      renameSync(path, tombstone);
+      // rename 后只删除绑定旧 inode 的私有 tombstone；canonical 可安全交给后来者。
+      rmSync(tombstone, { recursive: true, force: true });
+      return;
+    } catch {
+      // release 是 best-effort；失败时 owner 仍在旧 inode，或旧 inode 已进私有 tombstone。
+      return;
+    } finally {
+      claim.release();
+    }
+  }
+  // 极端长 claim 下 owner 仍完整留在原 inode；宁可失败关闭，也不写/删 canonical pathname。
+}
+
+function waitForDutyLockPublication(
+  path: string,
+  owner: string,
+  acquired: { dev: number; ino: number },
+): boolean {
+  const ownerPath = join(path, "owner");
+  const reclaimPath = join(path, ".reclaim");
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      const current = statSync(path);
+      if (current.dev !== acquired.dev || current.ino !== acquired.ino) return false;
+      if (readFileSync(ownerPath, "utf8").trim() !== owner) return false;
+    } catch {
+      return false;
+    }
+    if (!existsSync(reclaimPath)) {
+      try {
+        const current = statSync(path);
+        return current.dev === acquired.dev &&
+          current.ino === acquired.ino &&
+          readFileSync(ownerPath, "utf8").trim() === owner;
+      } catch {
+        return false;
+      }
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+  }
+  return false;
 }
 
 function acquireDutyFilesystemLock(path: string): () => void {
@@ -338,38 +554,50 @@ function acquireDutyFilesystemLock(path: string): () => void {
       mkdirSync(path, { mode: 0o700 });
       const processIdentity = processStartIdentity(process.pid);
       if (processIdentity.state !== "alive") {
-        rmSync(path, { recursive: true, force: true });
+        try {
+          rmdirSync(path);
+        } catch {
+          // 目录已被回收/替换或已有 owner；绝不能递归删除 canonical pathname。
+        }
         throw new Error("cannot identify current process start time for duty lock");
       }
       const owner = `${process.pid}|${processIdentity.startedAt}|${randomUUID()}`;
       try {
         writeFileSync(join(path, "owner"), owner, { encoding: "utf8", mode: 0o600, flag: "wx" });
       } catch (error) {
-        rmSync(path, { recursive: true, force: true });
+        try {
+          rmdirSync(path);
+        } catch {
+          // 另一个 contender 可能已在被替换的目录发布 owner；只删除空目录。
+        }
         throw error;
       }
-      return () => {
+      let acquired: ReturnType<typeof statSync>;
+      try {
+        acquired = statSync(path);
+      } catch (error) {
         try {
-          if (readFileSync(join(path, "owner"), "utf8").trim() !== owner) return;
-          rmSync(path, { recursive: true, force: true });
+          const ownerPath = join(path, "owner");
+          if (readFileSync(ownerPath, "utf8").trim() === owner) {
+            unlinkSync(ownerPath);
+            rmdirSync(path);
+          }
         } catch {
-          // 已不是自己的 lock（或持有期间目录被外部移除）就绝不能删后来者的锁。
+          // pathname 已被替换就不再清理。
         }
-      };
+        throw error;
+      }
+      if (!waitForDutyLockPublication(path, owner, acquired)) {
+        releaseOwnedDutyFilesystemLock(path, owner, acquired);
+        continue;
+      }
+      return () => releaseOwnedDutyFilesystemLock(path, owner, acquired);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       try {
-        let stale = false;
-        try {
-          const owner = readFileSync(join(path, "owner"), "utf8").trim();
-          const decision = dutyLockOwnerIsStale(owner);
-          stale = decision ?? Date.now() - statSync(path).mtimeMs > 10_000;
-        } catch {
-          stale = Date.now() - statSync(path).mtimeMs > 10_000;
-        }
-        if (stale) rmSync(path, { recursive: true, force: true });
+        if (dutyLockPathIsStale(path)) tryReclaimStaleDutyLock(path);
       } catch {
-        // 锁持有者可能刚释放；下一轮原子 mkdir 决定归属。
+        // 锁持有者可能刚释放，或另一个进程正持有 reclaim claim；下一轮原子 mkdir 决定归属。
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }

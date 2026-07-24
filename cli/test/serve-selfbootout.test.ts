@@ -1,6 +1,16 @@
 // #744:launchd 常驻下,终局不该重启的退出(熔断/撤销)要 serve 自 bootout,别被 KeepAlive 绕过安全停机。
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  rmdirSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT_AUTH, EXIT_STREAM_ENDED } from "@agentparty/shared";
@@ -12,6 +22,7 @@ import {
   dutyQuarantinedPlistPath,
   EXIT_WAKE_ABANDON_CIRCUIT,
   selfBootoutTerminalDuty,
+  tryReclaimStaleDutyLock,
 } from "../src/commands/serve";
 
 const LABEL = "com.agentparty.duty.abc.dev";
@@ -175,6 +186,68 @@ describe("selfBootoutTerminalDuty (#744)", () => {
     }))).toBe(true);
     expect(dutyLockOwnerIsStale(owner, () => ({ state: "unknown" }))).toBe(false);
     expect(dutyLockOwnerIsStale("partial-owner", () => ({ state: "dead" }))).toBeNull();
+  });
+
+  test("目录内 reclaim claim 钉住旧 inode，重判期间不能发布后来者的新锁", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentparty-duty-lock-reclaim-"));
+    const lockPath = join(dir, "duty.lock");
+    try {
+      mkdirSync(lockPath);
+      writeFileSync(join(lockPath, "owner"), "old-stale-owner");
+      expect(tryReclaimStaleDutyLock(lockPath, () => {
+        // 旧 owner 在回收者重判期间正常 release：内部 claim 令 rmdir 失败，
+        // 所以后来的 owner 还不能在 canonical pathname 发布新锁。
+        unlinkSync(join(lockPath, "owner"));
+        expect(() => rmdirSync(lockPath)).toThrow();
+        expect(() => mkdirSync(lockPath)).toThrow();
+        return true;
+      })).toBe(true);
+
+      mkdirSync(lockPath);
+      writeFileSync(join(lockPath, "owner"), "new-live-owner");
+      expect(readFileSync(join(lockPath, "owner"), "utf8")).toBe("new-live-owner");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("owner 发布窗口遇到已判 stale 的回收者时，initializer 不能进入临界区", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentparty-duty-lock-publish-"));
+    const lockPath = join(dir, "duty.lock");
+    try {
+      mkdirSync(lockPath);
+      expect(tryReclaimStaleDutyLock(lockPath, () => {
+        // 模拟 initializer 在回收者已取得内部 claim 并读完 ownerless 状态后恢复。
+        writeFileSync(join(lockPath, "owner"), "late-initializer", { flag: "wx" });
+        expect(existsSync(join(lockPath, ".reclaim"))).toBe(true);
+        return true;
+      })).toBe(true);
+      // 回收者赢得旧 inode；initializer 发布后的门禁会看到 pathname/inode 已失效并重试。
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("崩溃遗留的 reclaim claim 可恢复，不永久卡死 duty repair", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentparty-duty-lock-crashed-claim-"));
+    const lockPath = join(dir, "duty.lock");
+    const reclaimPath = join(lockPath, ".reclaim");
+    try {
+      mkdirSync(lockPath);
+      writeFileSync(join(lockPath, "owner"), "old-stale-owner");
+      mkdirSync(reclaimPath);
+      const old = new Date(Date.now() - 20_000);
+      utimesSync(reclaimPath, old, old);
+
+      // 第一次只安全清掉 stale 内部 claim；下一轮再取得 claim 并回收 canonical。
+      expect(tryReclaimStaleDutyLock(lockPath, () => true)).toBe(false);
+      expect(existsSync(reclaimPath)).toBe(false);
+      expect(tryReclaimStaleDutyLock(lockPath, () => true)).toBe(true);
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("plist generation 解析与旧 serve 防误伤新安装", () => {
