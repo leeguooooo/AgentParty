@@ -4353,6 +4353,22 @@ export async function runServe(o: ServeOptions): Promise<number> {
           frame.seq,
           directedDeliveryMode,
         );
+        // #646：busy 清除（#103）由所有终局路径共用——包括在模型启动前失败的 preflight。
+        // 只在队列真排空时清：还有 @ 排队就保持 busy=true，等下一条 wake 的 working 帧继续覆盖
+        // queue_depth（避免闪烁）。
+        const takeBusyClearIfDrained = (force = false): { busy?: false; queue_depth?: 0 } => {
+          if (!busyReported) return {};
+          const remaining = pendingWakeDepth(
+            conn.pendingFrames(),
+            self,
+            o.mentionsOnly === true,
+            conn.cursor,
+            directedDeliveryMode,
+          );
+          if (!force && remaining !== 0) return {};
+          busyReported = false;
+          return { busy: false, queue_depth: 0 };
+        };
         // 先把入站附件放进本 serve 实例的 0700 临时目录。runner 只拿 0600 本地文件与
         // 鉴权端点元数据，context 中绝不出现 bearer token；单个下载失败也不吞掉整次唤醒。
         let wakeAttachments: WakeContextAttachment[] = [];
@@ -4452,6 +4468,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
                 note,
                 mentions: [],
                 blocked_reason: note,
+                // 上一条 wake 因身后仍有积压而延续 busy 时，本条 preflight 终局负责在排空后
+                // 原子清掉它；若仍有其它 wake，则继续保持 busy，避免中途闪成空闲。
+                ...takeBusyClearIfDrained(),
               }, lifecycleController.signal);
             } catch {
               code = EXIT_WAKE_UNANNOUNCED;
@@ -4681,22 +4700,6 @@ export async function runServe(o: ServeOptions): Promise<number> {
             stopAfterFrame = true;
           }
         }
-        // #646：busy 清除（#103）抽成闭包，送达与放弃两条终局都要调用——否则放弃分支永不清 busy，
-        // 任务结束后 presence 永远卡在「忙」（假忙）。只在队列真排空时清：还有 @ 排队就保持 busy=true，
-        // 等下一条 wake 的 working 帧继续覆盖 queue_depth（避免闪烁）。
-        const takeBusyClearIfDrained = (force = false): { busy?: false; queue_depth?: 0 } => {
-          if (!busyReported) return {};
-          const remaining = pendingWakeDepth(
-            conn.pendingFrames(),
-            self,
-            o.mentionsOnly === true,
-            conn.cursor,
-            directedDeliveryMode,
-          );
-          if (!force && remaining !== 0) return {};
-          busyReported = false;
-          return { busy: false, queue_depth: 0 };
-        };
         const clearBusyIfDrained = async (idleNote: string) => {
           const busyClear = takeBusyClearIfDrained();
           if (busyClear.busy !== false) return;
