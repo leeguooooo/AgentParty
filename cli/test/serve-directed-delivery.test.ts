@@ -10,7 +10,13 @@ import {
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { confirmDeliveryUpdate, runServe, type ServeOptions, type ServeRunner } from "../src/commands/serve";
+import {
+  confirmDeliveryCompletion,
+  confirmDeliveryUpdate,
+  runServe,
+  type ServeOptions,
+  type ServeRunner,
+} from "../src/commands/serve";
 import { writeConfig, writeState } from "../src/config";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 import { startRestMock } from "./rest-mock";
@@ -121,6 +127,46 @@ describe("serve durable directed delivery (#551)", () => {
       delivery_id: work.id,
       state: "replied",
     }, 200, undefined, ["failed"])).toMatchObject({ id: work.id, state: "failed" });
+  });
+
+  test("completion confirmation retries an invalid-frame rolling window without restarting work", async () => {
+    const work = delivery(21);
+    const frames: ServerFrame[] = [];
+    let sends = 0;
+    const conn = {
+      send(frame: ClientFrame) {
+        if (frame.type !== "delivery_update") return false;
+        sends += 1;
+        if (sends === 1) {
+          frames.push({ type: "error", code: "bad_request", message: "invalid frame" });
+        } else {
+          frames.push({
+            type: "delivery_state",
+            request_id: frame.request_id,
+            delivery: {
+              id: work.id,
+              message_seq: work.message_seq,
+              target_name: work.target_name,
+              state: "replied",
+              reply_seq: 42,
+              created_at: work.created_at,
+              updated_at: Date.now(),
+            },
+          });
+        }
+        return true;
+      },
+      pendingFrames: () => frames,
+    };
+    const retries: string[] = [];
+
+    expect(await confirmDeliveryCompletion(conn, work.id, undefined, {
+      timeoutMs: 100,
+      retryDelayMs: 0,
+      onRetry: (error) => retries.push(String(error)),
+    })).toMatchObject({ id: work.id, state: "replied", reply_seq: 42 });
+    expect(sends).toBe(2);
+    expect(retries).toEqual([expect.stringContaining("bad_request: invalid frame")]);
   });
 
   test("waiting_owner is parked work and never triggers terminal continuation cleanup", async () => {
@@ -763,7 +809,7 @@ describe("serve durable directed delivery (#551)", () => {
     expect(terminals).toEqual([{ id: work.id, state: "failed" }]);
   });
 
-  test("a disconnect that loses the terminal update exits unknown-outcome and never runs a redelivery", async () => {
+  test("a disconnect that loses the terminal ACK reconnects, confirms, and ignores buffered redelivery", async () => {
     const message = msgFrame(9, "do not duplicate", { mentions: ["me"] }) as unknown as MsgFrame;
     const work = delivery(9);
     const lines: string[] = [];
@@ -774,10 +820,9 @@ describe("serve durable directed delivery (#551)", () => {
       if (frame.type === "hello") {
         sock.send({ ...welcomeFrame(0, "me"), directed_delivery: "v1" });
         if (connectionIndex > 0) {
-          // The replacement connection can already have the same durable work buffered. The first
-          // run's unknown terminal outcome must stop this runServe invocation before it consumes it.
+          // The replacement socket may receive a stale redelivery before the idempotent terminal
+          // probe is acknowledged. The same runServe invocation must settle first, then ignore it.
           sock.send({ type: "delivery", delivery: work, message });
-          sock.send({ type: "error", code: "archived", message: "replacement connection" });
         }
         return;
       }
@@ -794,9 +839,16 @@ describe("serve durable directed delivery (#551)", () => {
             request_id: frame.request_id,
             delivery: { ...work, state: "running", updated_at: Date.now() },
           });
-        } else {
+        } else if (connectionIndex === 0) {
           // Drop the connection before an authoritative terminal delivery_state can echo the update.
           sock.close();
+        } else {
+          sock.send({
+            type: "delivery_state",
+            request_id: frame.request_id,
+            delivery: { ...work, state: "replied", reply_seq: 99, updated_at: Date.now() },
+          });
+          sock.send({ type: "error", code: "archived", message: "done" });
         }
       }
     });
@@ -809,14 +861,16 @@ describe("serve durable directed delivery (#551)", () => {
       server: server.url,
       out: (line) => lines.push(line),
       runCommand: runner,
+      deliveryUpdateAckTimeoutMs: 100,
     }));
 
-    expect(code).toBe(EXIT_STREAM_ENDED);
+    expect(code).toBe(EXIT_ARCHIVED);
     expect(runnerCalls).toBe(1);
-    expect(updateCalls).toBe(2);
-    expect(terminals).toEqual([]);
-    expect(lines.some((line) => line.includes("完成回执发送失败"))).toBe(true);
-  });
+    expect(updateCalls).toBe(3);
+    expect(terminals).toEqual([{ id: work.id, state: "replied" }]);
+    expect(lines.some((line) => line.includes("保持本轮并重连补确认"))).toBe(true);
+    expect(lines.some((line) => line.includes("ignored already-settled redelivery"))).toBe(true);
+  }, 10_000);
 
   test("a disconnect before the authoritative running acknowledgement never starts the runner", async () => {
     const message = msgFrame(12, "must not start", { mentions: ["me"] }) as unknown as MsgFrame;

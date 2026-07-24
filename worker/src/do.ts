@@ -10003,19 +10003,27 @@ export class ChannelDO extends Server<Env> {
     const ownsCurrentLease = String(row.lease_connection_id ?? "") === connectionId;
     const ownsFormerLease = String(row.last_lease_connection_id ?? "") === connectionId;
     // handleSend can persist the question and detach the lease before the runner's success receipt
-    // arrives. ACK that exact former holder as a no-op and return the authoritative waiting_owner
-    // row; never let the generic replied receipt erase the human handoff.
+    // arrives. ACK a same-principal no-op and return the authoritative waiting_owner row; never let
+    // the generic replied receipt erase the human handoff.
     if (oldState === "waiting_owner") {
-      return ownsFormerLease && (update.state === "waiting_owner" || update.state === "replied");
+      // A websocket replacement changes connectionId while preserving the authenticated delivery
+      // principal. This is a read-only terminal probe: accepting it cannot release or mutate work.
+      return update.state === "waiting_owner" || update.state === "replied";
     }
 
     // Terminal receipts detach the current lease but retain its last holder for idempotent ACKs.
     // Only an explicitly typed unknown outcome (or a legacy untyped row) may converge on a late
     // success. Policy/retract failures are final and must never be revived by a stale receipt.
-    if (oldState === "replied") return update.state === "replied" && (ownsCurrentLease || ownsFormerLease);
+    if (oldState === "replied") {
+      // Same-principal reconnects must recover an ACK lost after a linked REST reply. Active rows
+      // still require exact lease ownership below, so a standby cannot forge success.
+      return update.state === "replied";
+    }
     if (oldState === "failed") {
-      if (!(ownsCurrentLease || ownsFormerLease)) return false;
+      // Confirming an already-failed row is likewise a no-op. Reviving an explicitly recoverable
+      // unknown outcome to replied remains restricted to the exact current/former lease holder.
       if (update.state === "failed") return true;
+      if (!(ownsCurrentLease || ownsFormerLease)) return false;
       if (update.state !== "replied") return false;
       if (!this.isFailedDeliveryRevivable(row)) return false;
     } else if (!ownsCurrentLease) {

@@ -429,6 +429,9 @@ const MAX_SUPERVISOR_RESTART_DELAY_MS = 30_000;
 const RUNNER_TERMINATION_GRACE_MS = 1_000;
 const RUNNER_TERMINATION_BARRIER_MS = RUNNER_TERMINATION_GRACE_MS + 500;
 const DELIVERY_UPDATE_ACK_TIMEOUT_MS = 5_000;
+const DELIVERY_TERMINAL_RETRY_MIN_MS = 250;
+const DELIVERY_TERMINAL_RETRY_MAX_MS = 5_000;
+const RECENTLY_SETTLED_DELIVERY_MAX = 256;
 
 export type RunnerHarness = "codex" | "claude";
 
@@ -1002,6 +1005,11 @@ export interface ServeOptions {
   // 但「积压」与「欠账」是两回事（#198）：跳过的只能是**已离线堆积、从未送达**的历史；
   // 送达失败被钉住的 stuck 无论多旧都必须重放，否则 #118 救下的那条 @ 会被这里吃掉。
   skipBacklog?: boolean;
+  /**
+   * 首次成功挂载时的频道水位。内部 supervisor 重启沿用它区分“启动前积压”和“重启窗口新消息”：
+   * 前者继续跳过，后者仍可由 legacy 服务消费；V1 work 另由 durable delivery 帧保证。
+   */
+  backlogCutoff?: number;
   /** 单实例锁目录（#99/#465）。默认全机共享、再按 server/token 身份隔离；测试注入。 */
   lockDir?: string;
   /** 关掉单实例保护（逃生舱）。 */
@@ -1015,6 +1023,8 @@ export interface ServeOptions {
   /** 有界重放：同一条 seq 连续送达失败上限，到顶就响亮放弃。 */
   maxWakeAttempts?: number;
   wakeRetryDelayMs?: number;
+  /** Delivery ACK timeout override for deterministic tests; production defaults to 5 seconds. */
+  deliveryUpdateAckTimeoutMs?: number;
   post?: typeof postMessage;
   /** 入站附件下载注入点；默认走当前 server 的鉴权 REST 路径。 */
   downloadAttachment?: typeof downloadAttachment;
@@ -1028,7 +1038,7 @@ export interface ServeOptions {
    * 把后续连接视为「内部重启」；连 welcome 都没收到的失败仍必须保留用户的
    * 首次 backlog 策略。
    */
-  onWelcome?: () => void;
+  onWelcome?: (lastSeq: number) => void;
   /** 每个 welcome 上报服务端能力位（用于 managed front 判断 owner 决策绑定是否被强制）。 */
   onServerCapabilities?: (caps: { ownerDecisionBinding: boolean }) => void;
   charter?: ChannelCharter | null;
@@ -3642,17 +3652,20 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
     const frontServeOpts = buildLane("front", front, frontPrepared, frontStateKey, frontContext);
     const workerServeOpts = buildLane("worker", worker, workerPrepared, workerStateKey, workerContext);
     const startLane = (label: ServeExecutionRole, lane: ServeOptions, stateKey: string): Promise<number> => {
-      let firstAttach = true;
+      let backlogCutoff: number | null = null;
       return superviseServe({
         runOnce: () => {
-          const skipBacklog = firstAttach ? lane.skipBacklog : false;
           return runChannelServe({
             ...lane,
             since: loadCursorForConfig(channel, stateKey),
             stuck: loadStuckForConfig(channel, stateKey),
             sinceRev: loadRevCursorForConfig(channel, stateKey),
-            skipBacklog,
-            onWelcome: () => { firstAttach = false; },
+            skipBacklog: lane.skipBacklog,
+            ...(backlogCutoff === null ? {} : { backlogCutoff }),
+            onWelcome: (lastSeq) => {
+              if (backlogCutoff === null) backlogCutoff = lastSeq;
+              lane.onWelcome?.(lastSeq);
+            },
           });
         },
         maxRestarts: opts.once ? 0 : undefined,
@@ -3865,6 +3878,56 @@ export async function confirmDeliveryUpdate(
   }
 }
 
+/**
+ * A runner that has crossed its side-effect boundary must never be restarted merely because the
+ * terminal ACK raced a websocket replacement. Keep the same runServe invocation parked and resend
+ * the idempotent completion probe until the current socket returns the authoritative delivery row.
+ */
+export async function confirmDeliveryCompletion(
+  conn: Pick<ReturnType<typeof connect>, "send" | "pendingFrames">,
+  deliveryId: string,
+  signal?: AbortSignal,
+  options: {
+    timeoutMs?: number;
+    retryDelayMs?: number;
+    onRetry?: (error: unknown, attempt: number) => void;
+  } = {},
+): Promise<PublicDirectedDelivery> {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await confirmDeliveryUpdate(
+        conn,
+        {
+          type: "delivery_update",
+          delivery_id: deliveryId,
+          state: "replied",
+        },
+        options.timeoutMs,
+        signal,
+        ["failed"],
+      );
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      const fatal = [...conn.pendingFrames()].reverse().find(
+        (frame): frame is Extract<ServerFrame, { type: "error" }> =>
+          frame.type === "error" && (frame.code === "unauthorized" || frame.code === "archived"),
+      );
+      if (fatal !== undefined) throw error;
+      attempt += 1;
+      options.onRetry?.(error, attempt);
+      const baseDelay = Math.max(0, options.retryDelayMs ?? DELIVERY_TERMINAL_RETRY_MIN_MS);
+      const retryDelay = Math.min(
+        baseDelay * (2 ** Math.min(attempt - 1, 8)),
+        DELIVERY_TERMINAL_RETRY_MAX_MS,
+      );
+      if (retryDelay === 0) await Promise.resolve();
+      else if (signal === undefined) await delay(retryDelay);
+      else await delayWithAbort(retryDelay, signal);
+    }
+  }
+}
+
 export async function runWithRunnerTimeout(
   run: NonNullable<ServeOptions["runCommand"]>,
   frame: MsgFrame,
@@ -4071,7 +4134,20 @@ export async function runServe(o: ServeOptions): Promise<number> {
           },
         })
       : defaultRun);
+  const recentlySettledDeliveryIds = new Set<string>();
+  const rememberSettledDelivery = (deliveryId: string) => {
+    recentlySettledDeliveryIds.delete(deliveryId);
+    recentlySettledDeliveryIds.add(deliveryId);
+    while (recentlySettledDeliveryIds.size > RECENTLY_SETTLED_DELIVERY_MAX) {
+      const oldest = recentlySettledDeliveryIds.values().next().value;
+      if (oldest === undefined) break;
+      recentlySettledDeliveryIds.delete(oldest);
+    }
+  };
   const settleRunnerDelivery = async (delivery: DirectedDelivery, state: "replied" | "failed") => {
+    // A reconnect may already have buffered a stale redelivery before the terminal probe is ACKed.
+    // Remember authority before best-effort local cleanup so that stale frame cannot run the model.
+    rememberSettledDelivery(delivery.id);
     try {
       await run.onDeliveryTerminal?.(delivery, state);
     } catch (error) {
@@ -4178,10 +4254,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
         last_frame_at: Date.now(),
         last_error: null,
       }));
+      if (directedDelivery !== null && recentlySettledDeliveryIds.has(directedDelivery.id)) {
+        out(`serve: ignored already-settled redelivery ${directedDelivery.id}`);
+        continue;
+      }
       if (frame.type === "welcome") {
         self = frame.self;
         if (!welcomeReported) {
-          o.onWelcome?.();
+          o.onWelcome?.(frame.last_seq);
           welcomeReported = true;
         }
         directedDeliveryMode = frame.directed_delivery === "v1";
@@ -4208,14 +4288,30 @@ export async function runServe(o: ServeOptions): Promise<number> {
           attachHead = frame.last_seq;
           const pending = Math.max(0, attachHead - o.since);
           if (pending > 0) {
-            const range = `seq ${o.since + 1}..${attachHead}`;
             const debt = stuck !== null && stuck.seq <= attachHead ? ` 欠账 seq=${stuck.seq} 不在跳过之列，将重放（#198）。` : "";
-            out(
-              skipBacklog
-                ? `serve: 跳过 ${pending} 条离线积压（${range}）——不逐条唤醒 runner。${debt}` +
-                    ` 查看：party history ${o.channel}；要逐条重放请重启并加 --replay-backlog`
-                : `serve: --replay-backlog：将逐条重放 ${pending} 条离线积压（${range}），每条唤醒一次 runner（可能重放副作用）`,
-            );
+            if (skipBacklog) {
+              const cutoff = Math.min(attachHead, Math.max(0, o.backlogCutoff ?? attachHead));
+              const skipped = Math.max(0, cutoff - o.since);
+              const recoveryStart = Math.max(o.since, cutoff) + 1;
+              const recovery = Math.max(0, attachHead - Math.max(o.since, cutoff));
+              if (skipped > 0) {
+                out(
+                  `serve: 跳过 ${skipped} 条离线积压（启动前，seq ${o.since + 1}..${cutoff}）——不逐条唤醒 runner。${debt}` +
+                    ` 查看：party history ${o.channel}；要逐条重放请重启并加 --replay-backlog`,
+                );
+              }
+              if (recovery > 0) {
+                out(
+                  `serve: 内部恢复，继续处理重启窗口内 ${recovery} 条新消息` +
+                    `（seq ${recoveryStart}..${attachHead}）；未启用 --replay-backlog。`,
+                );
+              }
+            } else {
+              out(
+                `serve: --replay-backlog：将逐条重放 ${pending} 条离线积压` +
+                  `（seq ${o.since + 1}..${attachHead}），每条唤醒一次 runner（可能重放副作用）`,
+              );
+            }
           }
         }
         if (o.statusline === true) {
@@ -4313,7 +4409,11 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // 反例（190-codex-dev on PR #206）：--all 下一条非 mention 失败留下欠账，重启回默认
       // mentions-only 后 qualifies=false → 不重试、不清欠账、却无条件 ack 越过它。
       const isDebt = stuck !== null && frame.seq === stuck.seq;
-      const isBacklog = directedDelivery === null && skipBacklog && attachHead !== null && frame.seq <= attachHead;
+      const isBacklog =
+        directedDelivery === null &&
+        skipBacklog &&
+        attachHead !== null &&
+        frame.seq <= Math.min(attachHead, Math.max(0, o.backlogCutoff ?? attachHead));
       const mentionOwnedByDelivery =
         directedDeliveryMode && directedDelivery === null && frame.mentions.includes(self);
       const passesFilter =
@@ -4682,11 +4782,20 @@ export async function runServe(o: ServeOptions): Promise<number> {
         let deliveryConfirmed = directedDelivery === null;
         if (delivered && directedDelivery !== null) {
           try {
-            const completion = await confirmDeliveryUpdate(conn, {
-              type: "delivery_update",
-              delivery_id: directedDelivery.id,
-              state: "replied",
-            }, undefined, lifecycleController.signal, ["failed"]);
+            const completion = await confirmDeliveryCompletion(
+              conn,
+              directedDelivery.id,
+              lifecycleController.signal,
+              {
+                timeoutMs: o.deliveryUpdateAckTimeoutMs,
+                onRetry: (error, attempt) => {
+                  out(
+                    `  delivery ${directedDelivery.id} 完成确认未落地，保持本轮并重连补确认` +
+                    `（attempt=${attempt}）: ${errText(error)}`,
+                  );
+                },
+              },
+            );
             if (completion.state === "failed") {
               // Worker is the race-free authority: if a linked REST reply committed, the row was
               // already replied before that HTTP request returned. A still-active row receiving a
@@ -4716,9 +4825,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
             }
           } catch (error) {
             const message = errText(error);
-            // 不伪称已确认：退出本轮。服务端仍保留 claimed/running，随后按明确的
-            // unknown-outcome 规则收口；绝不在本地把 fire-and-forget 当 durable ack。
-            out(`  delivery ${directedDelivery.id} 完成回执发送失败，重连核对: ${message}`);
+            // Only lifecycle abort or a terminal server error can escape confirmDeliveryCompletion;
+            // transient disconnects and rolling-upgrade protocol windows stay in the same turn.
+            out(`  delivery ${directedDelivery.id} 完成确认被终局中断: ${message}`);
             code = EXIT_STREAM_ENDED;
             stopAfterFrame = true;
           }
@@ -5223,7 +5332,7 @@ export async function run(argv: string[]): Promise<number> {
     // A transient startup outage should not prevent the WS supervisor from doing its own retry.
     // The first successful /api/me below establishes the immutable identity boundary.
   }
-  let firstAttach = true;
+  let backlogCutoff: number | null = null;
   const lifecycle = (line: string) => {
     const record = `${new Date().toISOString()} ${line}`;
     if (runnerWorkdirPath !== null) appendServeLifecycleLog(runnerWorkdirPath, record);
@@ -5247,7 +5356,6 @@ export async function run(argv: string[]): Promise<number> {
       }
       const currentRunnerWorkdir = runnerWorkdirPath ?? defaultRunnerWorkdir(channel, boundary.namespace);
       runnerWorkdirPath = currentRunnerWorkdir;
-      const skipBacklogThisAttach = firstAttach ? flags["replay-backlog"] !== true : false;
       const result = await runServe({
         server: currentServer,
         token: currentToken,
@@ -5258,10 +5366,13 @@ export async function run(argv: string[]): Promise<number> {
         sinceRev: loadRevCursor(channel),
         cmd: cmd ?? "",
         mentionsOnly: flags.all !== true,
-        // Only the process's first attachment applies the user's backlog policy.  Internal recovery
-        // always resumes from the durable cursor, so mentions received during the restart gap survive.
-        skipBacklog: skipBacklogThisAttach,
-        onWelcome: () => { firstAttach = false; },
+        // Internal recovery is not user-requested replay. Keep the first attach cutoff so legacy
+        // messages from the restart gap still run while pre-existing history remains skipped.
+        skipBacklog: flags["replay-backlog"] !== true,
+        ...(backlogCutoff === null ? {} : { backlogCutoff }),
+        onWelcome: (lastSeq) => {
+          if (backlogCutoff === null) backlogCutoff = lastSeq;
+        },
         onCursor: (c) => saveCursor(channel, c),
         onRevCursor: (r) => saveRevCursor(channel, r),
         advertise: (signal) => advertiseServeWake(currentAuth, channel, signal),

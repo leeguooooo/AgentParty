@@ -193,7 +193,7 @@ describe("profile daemon resilience (#115)", () => {
         if (role === "worker" && attempts.worker === 1) {
           throw new Error("pre-welcome child crash"); // no welcome callback
         }
-        serveOpts.onWelcome?.();
+        serveOpts.onWelcome?.(0);
         return await new Promise<number>((resolve) => {
           const finish = () => resolve(EXIT_SIGNAL_TERM);
           serveOpts.signal?.addEventListener("abort", finish, { once: true });

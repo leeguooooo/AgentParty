@@ -153,7 +153,7 @@ describe("serve lifecycle supervisor (#550)", () => {
     expect(calls).toBe(2);
   });
 
-  test("an internal restart replays mentions that arrived after the first attach instead of classifying them as backlog", async () => {
+  test("an internal restart preserves skip-backlog while processing only messages after the first attach cutoff", async () => {
     const server = startMockServer((frame, sock, connection) => {
       if (frame.type !== "hello") return;
       if (connection === 0) {
@@ -167,14 +167,14 @@ describe("serve lifecycle supervisor (#550)", () => {
     });
     const seen: number[] = [];
     let cursor = 0;
-    let firstAttach = true;
-    const policies: boolean[] = [];
+    let backlogCutoff: number | null = null;
+    const cutoffs: Array<number | null> = [];
     try {
       const code = await superviseServe({
         baseDelayMs: 0,
         sleep: async () => {},
         runOnce: () => {
-          policies.push(firstAttach);
+          cutoffs.push(backlogCutoff);
           return runServe({
             server: server.url,
             token: "ap_test",
@@ -182,8 +182,11 @@ describe("serve lifecycle supervisor (#550)", () => {
             since: cursor,
             cmd: "",
             mentionsOnly: true,
-            skipBacklog: firstAttach,
-            onWelcome: () => { firstAttach = false; },
+            skipBacklog: true,
+            ...(backlogCutoff === null ? {} : { backlogCutoff }),
+            onWelcome: (lastSeq) => {
+              if (backlogCutoff === null) backlogCutoff = lastSeq;
+            },
             allowMultiple: true,
             advertise: async () => {},
             post: async () => ({ seq: 99 }),
@@ -196,7 +199,7 @@ describe("serve lifecycle supervisor (#550)", () => {
       expect(code).toBe(EXIT_ARCHIVED);
       expect(seen).toEqual([1]);
       expect(cursor).toBe(1);
-      expect(policies).toEqual([true, false]);
+      expect(cutoffs).toEqual([null, 0]);
       expect(server.hellos).toEqual([0, 0]);
     } finally {
       server.stop();
@@ -214,15 +217,15 @@ describe("serve lifecycle supervisor (#550)", () => {
       sock.send(msgFrame(1, "offline backlog", { mentions: ["me"] }));
       setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 20);
     });
-    let firstAttach = true;
-    const policies: boolean[] = [];
+    let backlogCutoff: number | null = null;
+    const cutoffs: Array<number | null> = [];
     const seen: number[] = [];
     try {
       const code = await superviseServe({
         baseDelayMs: 0,
         sleep: async () => {},
         runOnce: () => {
-          policies.push(firstAttach);
+          cutoffs.push(backlogCutoff);
           return runServe({
             server: server.url,
             token: "ap_test",
@@ -230,8 +233,11 @@ describe("serve lifecycle supervisor (#550)", () => {
             since: 0,
             cmd: "",
             mentionsOnly: true,
-            skipBacklog: firstAttach,
-            onWelcome: () => { firstAttach = false; },
+            skipBacklog: true,
+            ...(backlogCutoff === null ? {} : { backlogCutoff }),
+            onWelcome: (lastSeq) => {
+              if (backlogCutoff === null) backlogCutoff = lastSeq;
+            },
             allowMultiple: true,
             advertise: async () => {},
             post: async () => ({ seq: 99 }),
@@ -241,7 +247,7 @@ describe("serve lifecycle supervisor (#550)", () => {
       });
 
       expect(code).toBe(EXIT_ARCHIVED);
-      expect(policies).toEqual([true, true]);
+      expect(cutoffs).toEqual([null, null]);
       expect(seen).toEqual([]);
     } finally {
       server.stop();
