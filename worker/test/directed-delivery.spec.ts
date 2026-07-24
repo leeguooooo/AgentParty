@@ -216,6 +216,57 @@ describe("持久定向投递（issue #551）", () => {
     holder.close();
   });
 
+  it("same-principal reconnect can idempotently confirm a linked reply after the original socket is gone", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("target"));
+    const slug = await createChannel(sender.token);
+    const holder = await WsClient.open(slug, target.token);
+    await holder.nextOfType("welcome");
+    expect((await claim(holder)).held).toBe(true);
+
+    const posted = await sendMention(slug, sender.token, target.name, "reply across reconnect");
+    const work = (await holder.nextOfType("delivery")) as DirectedDeliveryFrame;
+    holder.send({
+      type: "delivery_update",
+      delivery_id: work.delivery.id,
+      request_id: "reconnect-running",
+      state: "running",
+    });
+    await nextDeliveryState(holder, work.delivery.id, "running", "reconnect-running");
+
+    const reply = await api(`/api/channels/${slug}/messages`, target.token, {
+      method: "POST",
+      body: JSON.stringify({ kind: "message", body: "already committed", mentions: [], reply_to: posted.seq }),
+    });
+    expect(reply.status).toBe(200);
+    const replySeq = ((await reply.json()) as { seq: number }).seq;
+    await nextDeliveryState(holder, work.delivery.id, "replied");
+    holder.close();
+
+    const replacement = await WsClient.open(slug, target.token);
+    await replacement.nextOfType("welcome");
+    replacement.send({ type: "hello", since: replySeq, directed_delivery: "v1" });
+    replacement.send({
+      type: "delivery_update",
+      delivery_id: work.delivery.id,
+      request_id: "reconnect-terminal",
+      state: "replied",
+    });
+    const confirmation = await nextDeliveryState(
+      replacement,
+      work.delivery.id,
+      "replied",
+      "reconnect-terminal",
+    );
+    expect(confirmation.delivery.reply_seq).toBe(replySeq);
+    expect(await deliveryRows(slug)).toMatchObject([{
+      id: work.delivery.id,
+      state: "replied",
+      reply_seq: replySeq,
+    }]);
+    replacement.close();
+  });
+
   it("legacy serve 已持租时保持 holder，后来的 v1 为 standby 且不重复领取", async () => {
     const sender = await seedToken("agent", uniq("sender"));
     const target = await seedToken("agent", uniq("target"));
