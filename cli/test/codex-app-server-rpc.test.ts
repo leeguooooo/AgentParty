@@ -1158,6 +1158,138 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
     }
 
     await rpc.emit({
+      method: "turn/started",
+      params: {
+        threadId: "thread-agent-text",
+        turn: {
+          id: "turn-delta-final",
+          status: "inProgress",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "item/started",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-delta-final",
+        item: {
+          type: "agentMessage",
+          id: "agent-delta-final",
+          text: "",
+          phase: "final_answer",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-delta-final",
+        itemId: "agent-delta-final",
+        delta: "final retained from delta",
+      },
+    });
+    await rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-delta-final",
+        item: {
+          type: "agentMessage",
+          id: "agent-delta-final",
+          text: "",
+          phase: "final_answer",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-agent-text",
+        turn: {
+          id: "turn-delta-final",
+          status: "completed",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    expect(completed.at(-1)?.items).toContainEqual(expect.objectContaining({
+      type: "agentMessage",
+      id: "agent-delta-final",
+      text: "final retained from delta",
+      phase: "final_answer",
+    }));
+
+    await rpc.emit({
+      method: "turn/started",
+      params: {
+        threadId: "thread-agent-text",
+        turn: {
+          id: "turn-empty-delta",
+          status: "inProgress",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "item/started",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-empty-delta",
+        item: {
+          type: "agentMessage",
+          id: "agent-empty-delta",
+          text: "non-authoritative started text",
+          phase: "final_answer",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-empty-delta",
+        itemId: "agent-empty-delta",
+        delta: "",
+      },
+    });
+    await rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-empty-delta",
+        item: {
+          type: "agentMessage",
+          id: "agent-empty-delta",
+          text: "",
+          phase: "final_answer",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-agent-text",
+        turn: {
+          id: "turn-empty-delta",
+          status: "completed",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    expect(completed.at(-1)?.items).toContainEqual(expect.objectContaining({
+      type: "agentMessage",
+      id: "agent-empty-delta",
+      text: "",
+      phase: "final_answer",
+    }));
+
+    await rpc.emit({
       method: "item/started",
       params: {
         threadId: "thread-agent-text",

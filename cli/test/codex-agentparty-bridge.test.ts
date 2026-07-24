@@ -1595,6 +1595,15 @@ describe("Codex AgentParty delivery integration", () => {
       bridgeA = null;
 
       const journalB = new DeliveryRecoveryJournal(path, "dev", "codex");
+      const journalBUpdate = journalB.update.bind(journalB);
+      let rejectFirstRecoveredReplyPosted = true;
+      journalB.update = (deliveryId, patch) => {
+        if (patch.phase === "reply_posted" && rejectFirstRecoveredReplyPosted) {
+          rejectFirstRecoveredReplyPosted = false;
+          throw new Error(`recovered reply_posted WAL is full for ${deliveryId}`);
+        }
+        return journalBUpdate(deliveryId, patch);
+      };
       const rpcB = new DeliveryRpcPeer();
       const sessionB = new CodexSessionController(rpcB);
       await sessionB.request("thread/resume", { threadId: "thread-delivery" });
@@ -1607,6 +1616,7 @@ describe("Codex AgentParty delivery integration", () => {
         requireDeliveryRecovery: true,
         leaseRenewIntervalMs: 60_000,
         deliveryAckTimeoutMs: 1_000,
+        retryDelayMs: 1,
         confirmDeliveryUpdate: async (update) =>
           update.state === "replied" &&
             update.delivery_id === "delivery-response-lost-crash"
@@ -1648,6 +1658,7 @@ describe("Codex AgentParty delivery integration", () => {
         "same-key re-POST did not reconstruct the waiting_owner binding",
       );
       expect(postKeys).toEqual([
+        "codex-bridge-reply:delivery-response-lost-crash",
         "codex-bridge-reply:delivery-response-lost-crash",
         "codex-bridge-reply:delivery-response-lost-crash",
       ]);

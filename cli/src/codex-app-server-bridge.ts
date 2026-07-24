@@ -660,6 +660,8 @@ interface AccumulatedAgentMessage {
   item: CodexThreadItem;
   text: string;
   completed: boolean;
+  hasStarted: boolean;
+  hasDelta: boolean;
 }
 
 const MAX_RETAINED_COMPLETED_TURNS = 256;
@@ -1163,6 +1165,7 @@ export class CodexSessionController {
     turnId: string,
     item: CodexThreadItem,
     completed: boolean,
+    started = false,
   ): void {
     if (
       item.type !== "agentMessage" ||
@@ -1189,7 +1192,12 @@ export class CodexSessionController {
     }
     const text =
       completed
-        ? itemText
+        ? itemText.trim() === "" &&
+            existing?.hasStarted === true &&
+            existing?.hasDelta === true &&
+            existing.text.length > 0
+          ? existing.text
+          : itemText
         : existing?.text.length
           ? existing.text
           : itemText;
@@ -1205,6 +1213,8 @@ export class CodexSessionController {
       },
       text,
       completed: completed || existing?.completed === true,
+      hasStarted: started || existing?.hasStarted === true,
+      hasDelta: existing?.hasDelta === true,
     });
   }
 
@@ -1225,7 +1235,10 @@ export class CodexSessionController {
     // item/completed is authoritative. Ignore a duplicate/late delta instead
     // of appending it after the final item text.
     if (existing?.completed) return;
-    const text = `${existing?.text ?? ""}${params.delta}`;
+    const hadDelta = existing?.hasDelta === true;
+    // item/started text is not streamed output. Seed this buffer only from
+    // actual deltas so an empty delta cannot promote provisional item text.
+    const text = `${hadDelta ? existing.text : ""}${params.delta}`;
     messages.set(params.itemId, {
       item: {
         ...(existing?.item ?? {}),
@@ -1235,6 +1248,8 @@ export class CodexSessionController {
       },
       text,
       completed: false,
+      hasStarted: existing?.hasStarted === true,
+      hasDelta: hadDelta || params.delta.length > 0,
     });
   }
 
@@ -2197,6 +2212,7 @@ export class CodexSessionController {
               params.turnId,
               item,
               message.method === "item/completed",
+              message.method === "item/started",
             );
           } else if (
             item?.type === "commandExecution" &&
@@ -3630,11 +3646,18 @@ export class CodexAgentPartyBridge {
           idempotencyKey: pending.replyIdempotencyKey,
         });
         pending.replySeq = posted.seq;
-        this.options.recoveryJournal?.update(pending.delivery.id, {
-          phase: "reply_posted",
-          replyBody: pending.replyBody,
-          replySeq: posted.seq,
-        });
+        try {
+          this.options.recoveryJournal?.update(pending.delivery.id, {
+            phase: "reply_posted",
+            replyBody: pending.replyBody,
+            replySeq: posted.seq,
+          });
+        } catch (error) {
+          // A stable idempotency key makes the REST result safe to ask for
+          // again, but the in-memory sequence must not outrun durable recovery.
+          pending.replySeq = null;
+          throw error;
+        }
       }
       const replySeq = pending.replySeq;
       if (replySeq === null) throw new Error("recovered reply has no persisted sequence");
