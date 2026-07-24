@@ -8,7 +8,14 @@ import {
   type DirectedDelivery,
   type MsgFrame,
 } from "@agentparty/shared";
-import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget, stopOwnInstance } from "../instance-lock";
+import {
+  acquireInstanceLock,
+  captureParentProcessOwner,
+  defaultInstanceLockDir,
+  instanceLockTarget,
+  stopOwnInstance,
+  type ProcessOwner,
+} from "../instance-lock";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect } from "../client";
 import {
@@ -160,6 +167,7 @@ export function isCodexRuntimeEnv(env: Record<string, string | undefined> = proc
 }
 
 export const EXIT_ALREADY_WATCHING = 10;
+const WATCH_PARENT_CHECK_MS = 1_000;
 
 export interface WatchOptions {
   server: string;
@@ -198,6 +206,10 @@ export interface WatchOptions {
   advertiseWakeKind?: "watch";
   /** #669：同身份 watcher 已挂时，幂等退出 0（no-op）而非 exit 10 报错，供 harness 每轮例行重挂。 */
   ensure?: boolean;
+  /** `watch --once` 启动者身份；生产自动捕获，测试可注入。 */
+  parentOwner?: ProcessOwner;
+  /** 启动者存活检查周期；生产 1s，测试可缩短。 */
+  parentCheckMs?: number;
 }
 
 async function confirmWatchDeliveryRunning(
@@ -351,9 +363,21 @@ export async function runWatch(o: WatchOptions): Promise<number> {
   // 先抢锁，再连服务端：第二个 watcher 连 WS 都不该建，否则它已经开始消费 @ 了（#195）
   const lockDir = o.lockDir ?? defaultInstanceLockDir();
   const lockTarget = o.lockDir === undefined ? instanceLockTarget(o.server, o.token, o.channel) : o.channel;
+  const parentOwner = o.once === true ? (o.parentOwner ?? captureParentProcessOwner()) : null;
+  const orphanExit = () => {
+    console.error("watch exited: parent process is gone; released orphaned --once listener");
+    return 1;
+  };
   // #741:进程标题带上 lockTarget(<hash>-<channel>),让 ps/pkill -f 能区分同机多 agent 的 watch。best-effort。
   try { process.title = `party watch ${lockTarget}`; } catch { /* 某些运行时 title 只读 */ }
-  const lock = o.allowMultiple === true ? null : acquireInstanceLock("watch", lockTarget, lockDir);
+  // 启动者在命令真正 attach 前已经退出时，连 WS 都不能建：否则第一个 1s guard tick 前仍可能
+  // claim delivery / 推进游标，而它的输出已经无人承接。
+  if (parentOwner !== null && !parentOwner.alive()) return orphanExit();
+  const lock = o.allowMultiple === true
+    ? null
+    : acquireInstanceLock("watch", lockTarget, lockDir, {
+        ...(parentOwner === null ? {} : { parentOwner }),
+      });
   if (lock && !lock.ok) {
     // #669：--ensure 让 harness 的每轮例行重挂在「同身份已挂」时幂等收场（exit 0, no-op），
     // 不再以 exit 10 报错刷「background task failed」假失败。不带 --ensure 仍保留 exit 10 硬拒。
@@ -367,6 +391,11 @@ export async function runWatch(o: WatchOptions): Promise<number> {
         ` 要么等它退出，要么用 \`party watch ${o.channel} --stop\`（只停本身份这台，别用 pkill -f 会误杀同机别人的）；确实想并存请加 --allow-multiple 或 --ensure 幂等重挂。`,
     );
     return EXIT_ALREADY_WATCHING;
+  }
+  // 父进程可能在抢锁期间退出；成功持锁后再核一次，失败必须先释放再返回。
+  if (parentOwner !== null && !parentOwner.alive()) {
+    lock?.release?.();
+    return orphanExit();
   }
   // #703：升级提示放在抢到实例锁之后——只有持锁的那个 watcher 会探测，靠既有实例锁串行化，
   // 天然消除「两个进程都过节流读取、各自探测」的竞态（#715 评审），无需另造原子租约。
@@ -392,6 +421,12 @@ export async function runWatch(o: WatchOptions): Promise<number> {
     lock?.release?.();
     throw error;
   }
+  // connect 构造与上面的核验之间仍有极窄竞态；进入帧循环前最后同步挡住。
+  if (parentOwner !== null && !parentOwner.alive()) {
+    conn.close();
+    lock?.release?.();
+    return orphanExit();
+  }
 
   let self = "";
   let lastSeq = 0;
@@ -409,6 +444,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
   let selfPaused = false;
   // 挂上即声明「有 watch 唤醒层」（best-effort，只做一次；重连再收 welcome 不重复刷）——见 advertiseWatchWake。
   let advertised = false;
+  let orphaned = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   if (o.timeoutSec > 0) {
     timer = setTimeout(() => {
@@ -428,6 +464,18 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       });
     }, 60_000);
     if (typeof heartbeat.unref === "function") heartbeat.unref();
+  }
+  // #755：`watch --once &` 的启动 shell / harness 退出后，watch 进程可能继续存活，却已没有任何
+  // 上游会读取它的输出并开启新 turn。它既唤不醒人，又占着唯一锁。绑定父进程后主动收口；锁文件
+  // 中同一份 parent identity 也让下一次重挂能立即把它判为 stale 并接管。
+  let parentGuard: ReturnType<typeof setInterval> | null = null;
+  if (parentOwner !== null) {
+    parentGuard = setInterval(() => {
+      if (parentOwner.alive()) return;
+      orphaned = true;
+      conn.close();
+    }, o.parentCheckMs ?? WATCH_PARENT_CHECK_MS);
+    if (typeof parentGuard.unref === "function") parentGuard.unref();
   }
 
   try {
@@ -540,7 +588,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
             frame.delivery,
             self,
             o.deliveryAckTimeoutMs ?? WATCH_DELIVERY_ACK_TIMEOUT_MS,
-            () => timedOut || connectionGeneration !== claimConnectionGeneration,
+            () => orphaned || timedOut || connectionGeneration !== claimConnectionGeneration,
           );
         } catch (error) {
           console.error(terminalOutput(
@@ -744,10 +792,14 @@ export async function runWatch(o: WatchOptions): Promise<number> {
     lock?.release?.();
     if (timer) clearTimeout(timer);
     if (heartbeat) clearInterval(heartbeat);
+    if (parentGuard) clearInterval(parentGuard);
     conn.close();
     if (o.statusline === true) clearStatuslineListener();
   }
 
+  if (orphaned) {
+    return orphanExit();
+  }
   // 超时判定：--once 只有 onceDone 才算被唤醒（打印过重放的修订快照不算）；
   // 非 follow/once 沿用「打印过即成功」；follow 超时一律 TIMEOUT
   const unfulfilled = o.once === true ? !onceDone : printed === 0;
@@ -937,7 +989,9 @@ export async function run(argv: string[]): Promise<number> {
     const replayLockDir = defaultInstanceLockDir();
     const replayLockTarget = instanceLockTarget(cfg.server, cfg.token, channel);
     const replayLock =
-      flags["allow-multiple"] === true ? null : acquireInstanceLock("watch", replayLockTarget, replayLockDir);
+      flags["allow-multiple"] === true
+        ? null
+        : acquireInstanceLock("watch", replayLockTarget, replayLockDir);
     if (replayLock && !replayLock.ok) {
       // #669：--ensure 幂等——同身份 watcher 已挂时，重挂不重放（欠账留给活着的那个 watcher），退出 0 no-op。
       if (ensure) {

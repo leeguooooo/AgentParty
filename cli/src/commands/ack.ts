@@ -28,10 +28,13 @@ here: serve replays it durably and clearing it by hand would silently drop an @.
 
 Options:
   --channel C   channel to ack in (defaults to the bound channel)
-  --seq N       only ack if the pending debt is exactly seq N (guard against races)
+  --seq N       acknowledge through exactly N; a newer pending wake is preserved
   --all         drain: advance cursor to channel head + clear all pending watch debt
   --through N   drain everything up to and including seq N (advance cursor to N)
-  --before N    drain everything strictly before seq N (advance cursor to N-1)`;
+  --before N    drain everything strictly before seq N (advance cursor to N-1)
+
+A successful later \`party send\` or status update acknowledges an earlier watch wake.
+Use \`party ack --seq N\` when no channel message is warranted.`;
 
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
@@ -136,8 +139,17 @@ export async function run(argv: string[]): Promise<number> {
       );
       return 1;
     case "seq_mismatch":
-      console.error(`refusing to ack: pending watch debt is seq=${acked.seq}, not seq=${seqFlag}`);
+      console.error(
+        `refusing to ack seq=${seqFlag}: older pending watch debt seq=${acked.seq} must be handled first` +
+          " (or explicitly drain with --through)",
+      );
       return 1;
+    case "acknowledged_prior":
+      console.log(
+        `acked watch wake through seq=${acked.seq} in #${channel}; ` +
+          `newer pending wake seq=${acked.pendingSeq} was preserved`,
+      );
+      return 0;
     case "cleared":
       console.log(`acked watch wake seq=${acked.seq} in #${channel}`);
       return 0;

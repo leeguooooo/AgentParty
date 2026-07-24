@@ -1097,7 +1097,9 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         "Clear the pending watch wake debt without posting a message (#594). Use after party_watch_once delivered a frame that warrants no reply — replying with empty acks burns the loop guard; leaving the debt makes every later watch replay the same frame. Serve-owned debt is never touched.",
       inputSchema: {
         channel: z.string().optional().describe("Channel slug. Defaults to the workspace-bound channel."),
-        seq: z.number().int().positive().optional().describe("Only ack if the pending debt is exactly this seq."),
+        seq: z.number().int().positive().optional().describe(
+          "Acknowledge through this exact seq; a newer pending watch wake is preserved and reported.",
+        ),
       },
     },
     async ({ channel, seq }) => {
@@ -1113,7 +1115,20 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           );
         }
         if (acked.outcome === "seq_mismatch") {
-          return fail(`refusing to ack: pending watch debt is seq=${acked.seq}, not seq=${seq}`);
+          return fail(
+            `refusing to ack seq=${seq}: older pending watch debt seq=${acked.seq} must be handled first` +
+              " (or explicitly drained with party ack --through)",
+          );
+        }
+        if (acked.outcome === "acknowledged_prior") {
+          return ok({
+            type: "ack",
+            channel: resolved,
+            acked: true,
+            seq: acked.seq,
+            pending_preserved: true,
+            pending_seq: acked.pendingSeq,
+          });
         }
         return ok({ type: "ack", channel: resolved, acked: true, seq: acked.seq });
       } catch (e) {

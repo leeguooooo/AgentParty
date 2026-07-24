@@ -9,7 +9,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT_ALREADY_WATCHING, runWatch } from "../src/commands/watch";
-import { acquireInstanceLock, currentProcessStartedAt, defaultInstanceLockDir, instanceLockTarget } from "../src/instance-lock";
+import {
+  acquireInstanceLock,
+  captureParentProcessOwner,
+  currentProcessStartedAt,
+  defaultInstanceLockDir,
+  instanceLockTarget,
+  processStartedAt,
+} from "../src/instance-lock";
 import { startMockServer, welcomeFrame } from "./mock-server";
 
 const dirs: string[] = [];
@@ -77,6 +84,46 @@ describe("watch 单实例保护 (#195)", () => {
     const d = dir();
     writeFileSync(join(d, "watch-dev.lock"), JSON.stringify({ pid: process.pid, channel: "dev" }));
     const lock = acquireInstanceLock("watch", "dev", d);
+    expect(lock.ok).toBe(false);
+    expect(lock.heldByPid).toBe(process.pid);
+  });
+
+  test("parent-bound watcher 启动者已死但旧 pid 未退时拒绝重叠接管 (#755)", () => {
+    const d = dir();
+    const deadParent = 999_999;
+    expect(() => process.kill(deadParent, 0)).toThrow();
+    writeFileSync(
+      join(d, "watch-dev.lock"),
+      JSON.stringify({
+        pid: process.pid,
+        started_at: currentProcessStartedAt(),
+        parent_bound: true,
+        parent_pid: deadParent,
+        channel: "dev",
+      }),
+    );
+
+    const lock = acquireInstanceLock("watch", "dev", d, { parentOwner: captureParentProcessOwner() });
+    expect(lock.ok).toBe(false);
+    expect(lock.heldByPid).toBe(process.pid);
+  });
+
+  test("parent-bound watcher 的启动者仍是原进程时不会误接管", () => {
+    const d = dir();
+    const parentStartedAt = processStartedAt(process.ppid);
+    writeFileSync(
+      join(d, "watch-dev.lock"),
+      JSON.stringify({
+        pid: process.pid,
+        started_at: currentProcessStartedAt(),
+        parent_bound: true,
+        parent_pid: process.ppid,
+        ...(parentStartedAt === undefined ? {} : { parent_started_at: parentStartedAt }),
+        channel: "dev",
+      }),
+    );
+
+    const lock = acquireInstanceLock("watch", "dev", d, { parentOwner: captureParentProcessOwner() });
     expect(lock.ok).toBe(false);
     expect(lock.heldByPid).toBe(process.pid);
   });
@@ -283,6 +330,74 @@ describe("runWatch 接线 (#195)", () => {
         backoffBaseMs: 20,
       });
       expect(code).not.toBe(EXIT_ALREADY_WATCHING);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--allow-multiple 只关闭互斥，不关闭 --once 的父进程孤儿守卫 (#755)", async () => {
+    const d = dir();
+    let connections = 0;
+    const server = startMockServer((f, sock) => {
+      if (f.type === "hello") {
+        connections++;
+        sock.send(welcomeFrame(0, "me"));
+      }
+    });
+    try {
+      const code = await runWatch({
+        server: server.url,
+        token: "ap_tok",
+        channel: "dev",
+        since: 0,
+        timeoutSec: 2,
+        follow: false,
+        mentionsOnly: true,
+        once: true,
+        lockDir: d,
+        allowMultiple: true,
+        parentOwner: { pid: 999_999, alive: () => false },
+        parentCheckMs: 5,
+        out: () => {},
+        backoffBaseMs: 20,
+      });
+      expect(code).toBe(1);
+      expect(connections).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("父进程孤儿守卫关闭默认 watcher 后释放锁，下一次重挂可接管 (#755)", async () => {
+    const d = dir();
+    let parentAlive = true;
+    const server = startMockServer((f, sock) => {
+      if (f.type === "hello") {
+        sock.send(welcomeFrame(0, "me"));
+        parentAlive = false;
+      }
+    });
+    try {
+      const code = await runWatch({
+        server: server.url,
+        token: "ap_tok",
+        channel: "dev",
+        since: 0,
+        timeoutSec: 2,
+        follow: false,
+        mentionsOnly: true,
+        once: true,
+        lockDir: d,
+        parentOwner: { pid: 999_999, alive: () => parentAlive },
+        parentCheckMs: 5,
+        out: () => {},
+        backoffBaseMs: 20,
+      });
+      expect(code).toBe(1);
+
+      const replacement = acquireInstanceLock("watch", "dev", d);
+      expect(replacement.ok).toBe(true);
+      replacement.release?.();
     } finally {
       server.stop();
     }

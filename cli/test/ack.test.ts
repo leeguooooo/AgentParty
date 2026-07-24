@@ -49,11 +49,32 @@ describe("party ack（#594）", () => {
     expect(await runAck(["--channel", "dev"])).toBe(0);
   });
 
-  test("--seq 不匹配拒绝清账", async () => {
+  test("--seq 高于当前 debt 时拒绝清账", async () => {
     expect(saveWatchStuck("dev", watchDebt(19))).toBe(true);
     expect(await runAck(["--channel", "dev", "--seq", "20"])).toBe(1);
     expect(loadStuck("dev")).not.toBeNull();
     expect(await runAck(["--channel", "dev", "--seq", "19"])).toBe(0);
+    expect(loadStuck("dev")).toBeNull();
+  });
+
+  test("--seq 可确认较早 wake，同时保留处理期间到达的较新 debt (#755)", async () => {
+    saveCursor("dev", 5);
+    expect(saveWatchStuck("dev", watchDebt(20))).toBe(true);
+
+    expect(await runAck(["--channel", "dev", "--seq", "19"])).toBe(0);
+    expect(loadCursor("dev")).toBe(19);
+    expect(loadStuck("dev")?.seq).toBe(20);
+
+    expect(await runAck(["--channel", "dev", "--seq", "20"])).toBe(0);
+    expect(loadCursor("dev")).toBe(20);
+    expect(loadStuck("dev")).toBeNull();
+  });
+
+  test("精确 ack 会原子推进落后游标，避免清 debt 后再次作为普通新消息重放", async () => {
+    saveCursor("dev", 5);
+    expect(saveWatchStuck("dev", watchDebt(19))).toBe(true);
+    expect(await runAck(["--channel", "dev", "--seq", "19"])).toBe(0);
+    expect(loadCursor("dev")).toBe(19);
     expect(loadStuck("dev")).toBeNull();
   });
 
