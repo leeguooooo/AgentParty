@@ -1,4 +1,4 @@
--- #736: 频道「当前已定稿」权威锚点。
+-- #736 / migration 0042: 频道「当前已定稿」权威锚点。
 -- ledger 永不 UPDATE/DELETE；channel_decision_heads 只保存每个 topic 当前 active 的指针。
 -- supersede 通过新行显式引用旧行，既保留完整历史，又能 O(1) 拉取新人接入所需的当前态。
 CREATE TABLE channel_decisions (
