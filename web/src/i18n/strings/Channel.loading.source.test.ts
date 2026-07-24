@@ -71,6 +71,8 @@ describe("Channel loading and recovery surfaces (#344 #345 #346 #354)", () => {
     const syncDivision = channelSource.slice(syncDivisionStart, syncDivisionEnd);
     expect(channelSource).toContain("charterEditingRef.current = editing");
     expect(channelSource).toContain("const charterEditBaseRevRef = useRef<number | null>(null);");
+    expect(channelSource).toContain('className="d-btn charter-edit" type="button" disabled={charter === null}');
+    expect(channelSource).toContain("const editCharter = useCallback(() => {\n    if (charter === null) {");
     expect(loadCharter).toContain(
       'if (!charterEditingRef.current) setCharterDraft(body.charter ?? "");',
     );
@@ -78,8 +80,10 @@ describe("Channel loading and recovery surfaces (#344 #345 #346 #354)", () => {
     expect(syncDivision).toContain("if (!charterEditingRef.current) {");
     expect(syncDivision).toContain('setCharterDraft(body.charter ?? "");');
     expect(syncDivision).toContain("updateCharterEditing(false);");
-    expect(channelSource).toContain("charterEditBaseRevRef.current ?? undefined");
-    expect(channelSource).toContain("setChannelCharter(token, slug, nextText, charter?.charter_rev)");
+    expect(channelSource).toContain("const expectedRev = charterEditBaseRevRef.current;");
+    expect(channelSource).toContain("if (expectedRev === null) {");
+    expect(channelSource).toContain("setChannelCharter(token, slug, nextText, charter.charter_rev)");
+    expect(syncDivision).toContain("if (charter === null) {");
     expect(channelSource).toContain("err instanceof ConflictError");
     expect(channelSource).toContain('loadCharter(true)');
     expect(refreshEffect).not.toContain("updateCharterEditing(false)");

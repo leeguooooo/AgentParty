@@ -60,6 +60,37 @@ BEGIN
     )
     THEN RAISE(ABORT, 'decision head must match decision channel and topic')
   END;
+  SELECT CASE
+    WHEN NEW.decision_id != OLD.decision_id AND NOT EXISTS (
+      SELECT 1
+        FROM channel_decisions d
+       WHERE d.id = NEW.decision_id
+         AND d.supersedes_id = OLD.decision_id
+    )
+    THEN RAISE(ABORT, 'decision head must advance through explicit supersedes lineage')
+  END;
+END;
+
+CREATE TRIGGER channel_decision_heads_reject_delete
+BEFORE DELETE ON channel_decision_heads
+WHEN EXISTS (SELECT 1 FROM channels c WHERE c.slug = OLD.channel_slug)
+BEGIN
+  SELECT RAISE(ABORT, 'active decision head is append-only');
+END;
+
+CREATE TRIGGER channel_decisions_reject_update
+BEFORE UPDATE ON channel_decisions
+BEGIN
+  SELECT RAISE(ABORT, 'channel decision ledger is append-only');
+END;
+
+-- Parent-channel deletion may still cascade the entire ledger. A direct row delete while
+-- the channel exists is never valid: superseding is represented by a new immutable row.
+CREATE TRIGGER channel_decisions_reject_delete
+BEFORE DELETE ON channel_decisions
+WHEN EXISTS (SELECT 1 FROM channels c WHERE c.slug = OLD.channel_slug)
+BEGIN
+  SELECT RAISE(ABORT, 'channel decision ledger is append-only');
 END;
 
 -- 新 topic 只允许在还没有 active head 时写入；已有结论必须显式 supersede。

@@ -28,6 +28,7 @@ const required = {
     "members_list_policy",
     "members_list_agents",
     "members_list_agent_allowlist_json",
+    "role_rev",
   ],
   tokens: ["id", "hash", "name", "role", "owner", "created_at", "revoked_at"],
   account_profiles: [
@@ -193,7 +194,26 @@ const requiredIndexes = {
 };
 
 const requiredTriggers = {
-  channel_decisions: ["channel_decisions_validate_insert"],
+  channel_decisions: [
+    "channel_decisions_validate_insert",
+    "channel_decisions_reject_update",
+    "channel_decisions_reject_delete",
+  ],
+  channel_decision_heads: [
+    "channel_decision_heads_validate_insert",
+    "channel_decision_heads_validate_update",
+    "channel_decision_heads_reject_delete",
+  ],
+  channel_roles: [
+    "channel_roles_bump_revision_insert",
+    "channel_roles_bump_revision_update",
+    "channel_roles_bump_revision_delete",
+  ],
+  tokens: [
+    "tokens_bump_role_revision_insert",
+    "tokens_bump_role_revision_update",
+    "tokens_bump_role_revision_delete",
+  ],
 };
 
 function run(args) {

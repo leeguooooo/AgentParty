@@ -292,6 +292,36 @@ describe("authoritative channel decision ledger (#736)", () => {
         "UPDATE channel_decision_heads SET topic = ? WHERE channel_slug = ? AND topic = ? COLLATE NOCASE",
       ).bind("Transport", slug, "Storage").run(),
     ).rejects.toThrow(/decision head must match decision channel and topic/i);
+
+    const supersedeResponse = await recordDecision(slug, owner.token, {
+      topic: "Storage",
+      summary: "Advance only through an explicit supersedes edge.",
+      supersedes_id: decision.id,
+    });
+    expect(supersedeResponse.status).toBe(201);
+    const supersede = await responseJson<ChannelDecisionRecord>(supersedeResponse);
+
+    await expect(
+      env.DB.prepare(
+        "UPDATE channel_decision_heads SET decision_id = ? WHERE channel_slug = ? AND topic = ? COLLATE NOCASE",
+      ).bind(decision.id, slug, "Storage").run(),
+    ).rejects.toThrow(/decision head must advance through explicit supersedes lineage/i);
+
+    await expect(
+      env.DB.prepare("UPDATE channel_decisions SET topic = ? WHERE id = ?")
+        .bind("Transport", supersede.id)
+        .run(),
+    ).rejects.toThrow(/channel decision ledger is append-only/i);
+    await expect(
+      env.DB.prepare("DELETE FROM channel_decisions WHERE id = ?")
+        .bind(supersede.id)
+        .run(),
+    ).rejects.toThrow(/channel decision ledger is append-only/i);
+    await expect(
+      env.DB.prepare(
+        "DELETE FROM channel_decision_heads WHERE channel_slug = ? AND topic = ? COLLATE NOCASE",
+      ).bind(slug, "Storage").run(),
+    ).rejects.toThrow(/active decision head is append-only/i);
   });
 
   it("keeps the ledger read-only after archival at the database boundary", async () => {
@@ -428,6 +458,30 @@ describe("authoritative channel decision ledger (#736)", () => {
         })
       ).status,
     ).toBe(200);
+    const roleRevision = await env.DB.prepare("SELECT role_rev FROM channels WHERE slug = ?")
+      .bind(slug)
+      .first<{ role_rev: number }>();
+    const claimantToken = await env.DB.prepare("SELECT owner FROM tokens WHERE name = ? AND revoked_at IS NULL")
+      .bind(claimant.name)
+      .first<{ owner: string }>();
+    expect(roleRevision?.role_rev).toBeGreaterThan(1);
+    expect(claimantToken).not.toBeNull();
+    const staleRolePush = await env.CHANNELS.get(env.CHANNELS.idFromName(slug)).fetch(
+      "http://ap.test/internal/roles",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-partykit-room": slug },
+        body: JSON.stringify({
+          name: claimant.name,
+          role: "host",
+          assigned_owner: claimantToken!.owner,
+          assigned_host: claimant.name,
+          revision: roleRevision!.role_rev - 1,
+        }),
+      },
+    );
+    expect(staleRolePush.status).toBe(200);
+    expect(await responseJson(staleRolePush)).toMatchObject({ ok: true, stale: true });
     ws.send({
       type: "send",
       kind: "status",
@@ -449,6 +503,11 @@ describe("authoritative channel decision ledger (#736)", () => {
 
     // #101：role 绑定 principal（owner account），不能只按同名放行。旧 token 撤销后，
     // 另一账号重铸相同 name 仍是 self-claim，应明确告警。
+    const beforeTokenPrincipalChange = await env.DB.prepare(
+      "SELECT role_rev FROM channels WHERE slug = ?",
+    )
+      .bind(slug)
+      .first<{ role_rev: number }>();
     expect(
       (
         await api(`/api/tokens/${assigned.name}`, "unused", {
@@ -468,6 +527,12 @@ describe("authoritative channel decision ledger (#736)", () => {
       }),
     });
     expect(reminted.status).toBe(201);
+    const afterTokenPrincipalChange = await env.DB.prepare(
+      "SELECT role_rev FROM channels WHERE slug = ?",
+    )
+      .bind(slug)
+      .first<{ role_rev: number }>();
+    expect(afterTokenPrincipalChange!.role_rev).toBeGreaterThan(beforeTokenPrincipalChange!.role_rev);
     const sameNameDifferentAccount = await responseJson<{ token: string }>(reminted);
     const impersonatedClaim = await postHostStatus(
       slug,
@@ -478,5 +543,104 @@ describe("authoritative channel decision ledger (#736)", () => {
     expect(await responseJson<{ role_warning?: string }>(impersonatedClaim)).toMatchObject({
       role_warning: expect.stringContaining(`assigned host @${assigned.name}`),
     });
+    const remintedPresence = await responseJson<{
+      presence: Array<{ name: string; role_source?: string }>;
+    }>(await api(`/api/channels/${slug}/presence`, owner.token));
+    expect(remintedPresence.presence.find((entry) => entry.name === assigned.name)?.role_source)
+      .not.toBe("assigned");
+  });
+
+  it("advances the host fence when an ordering-only role update changes the winning host", async () => {
+    const owner = await seedToken("agent", uniq("owner"), {
+      owner: `${uniq("owner")}@example.com`,
+    });
+    const slug = await createChannel(owner.token);
+    const first = await seedToken("agent", uniq("first-host"), {
+      owner: `${uniq("first")}@example.com`,
+      channelScope: slug,
+    });
+    const second = await seedToken("agent", uniq("second-host"), {
+      owner: `${uniq("second")}@example.com`,
+      channelScope: slug,
+    });
+    const claimant = await seedToken("agent", uniq("claimant"), {
+      owner: `${uniq("claimant")}@example.com`,
+      channelScope: slug,
+    });
+    for (const host of [first, second]) {
+      expect(
+        (
+          await api(`/api/channels/${slug}/roles/${host.name}`, owner.token, {
+            method: "PUT",
+            body: JSON.stringify({ role: "host" }),
+          })
+        ).status,
+      ).toBe(200);
+    }
+    await env.DB.prepare(
+      `UPDATE channel_roles
+          SET assigned_at = CASE agent_name WHEN ? THEN 10 ELSE 20 END
+        WHERE channel_slug = ? AND agent_name IN (?, ?)`,
+    ).bind(first.name, slug, first.name, second.name).run();
+    const before = await env.DB.prepare("SELECT role_rev FROM channels WHERE slug = ?")
+      .bind(slug)
+      .first<{ role_rev: number }>();
+    expect(before).not.toBeNull();
+    expect(await responseJson<{ role_warning?: string }>(
+      await postHostStatus(slug, claimant.token, "second host should win"),
+    )).toMatchObject({
+      role_warning: expect.stringContaining(`assigned host @${second.name}`),
+    });
+
+    await env.DB.prepare(
+      "UPDATE channel_roles SET assigned_at = 30 WHERE channel_slug = ? AND agent_name = ?",
+    ).bind(slug, first.name).run();
+    const after = await env.DB.prepare("SELECT role_rev FROM channels WHERE slug = ?")
+      .bind(slug)
+      .first<{ role_rev: number }>();
+    expect(after!.role_rev).toBeGreaterThan(before!.role_rev);
+    expect(await responseJson<{ role_warning?: string }>(
+      await postHostStatus(slug, claimant.token, "first host should now win"),
+    )).toMatchObject({
+      role_warning: expect.stringContaining(`assigned host @${first.name}`),
+    });
+  });
+
+  it("advances both channel fences when a role row moves between channels", async () => {
+    const owner = await seedToken("agent", uniq("owner"), {
+      owner: `${uniq("owner")}@example.com`,
+    });
+    const sourceSlug = await createChannel(owner.token);
+    const targetSlug = await createChannel(owner.token);
+    const host = await seedToken("agent", uniq("moving-host"), {
+      owner: `${uniq("host")}@example.com`,
+      channelScope: sourceSlug,
+    });
+    expect(
+      (
+        await api(`/api/channels/${sourceSlug}/roles/${host.name}`, owner.token, {
+          method: "PUT",
+          body: JSON.stringify({ role: "host" }),
+        })
+      ).status,
+    ).toBe(200);
+    const before = await env.DB.prepare(
+      "SELECT slug, role_rev FROM channels WHERE slug IN (?, ?)",
+    )
+      .bind(sourceSlug, targetSlug)
+      .all<{ slug: string; role_rev: number }>();
+    const beforeBySlug = new Map(before.results.map((row) => [row.slug, row.role_rev]));
+
+    await env.DB.prepare(
+      "UPDATE channel_roles SET channel_slug = ? WHERE channel_slug = ? AND agent_name = ?",
+    ).bind(targetSlug, sourceSlug, host.name).run();
+    const after = await env.DB.prepare(
+      "SELECT slug, role_rev FROM channels WHERE slug IN (?, ?)",
+    )
+      .bind(sourceSlug, targetSlug)
+      .all<{ slug: string; role_rev: number }>();
+    const afterBySlug = new Map(after.results.map((row) => [row.slug, row.role_rev]));
+    expect(afterBySlug.get(sourceSlug)).toBeGreaterThan(beforeBySlug.get(sourceSlug)!);
+    expect(afterBySlug.get(targetSlug)).toBeGreaterThan(beforeBySlug.get(targetSlug)!);
   });
 });

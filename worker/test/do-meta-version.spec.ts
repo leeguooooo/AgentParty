@@ -14,6 +14,7 @@ type MetaHeaders = {
   workflowLimit?: string;
   charterRev?: string;
   assignedHost?: string;
+  roleRevision?: string;
 };
 
 function headers(h: MetaHeaders): Record<string, string> {
@@ -28,6 +29,7 @@ function headers(h: MetaHeaders): Record<string, string> {
     "x-ap-workflow-guard-limit": h.workflowLimit ?? "30",
     "x-ap-charter-rev": h.charterRev ?? "0",
     "x-ap-assigned-host": h.assignedHost ?? "",
+    "x-ap-role-revision": h.roleRevision ?? "0",
     "x-ap-host": "ap.test",
   };
 }
@@ -61,7 +63,7 @@ async function incidentalSnapshot(slug: string, h: MetaHeaders) {
   });
 }
 
-async function authoritativeRolePush(slug: string, assignedHost: string | null) {
+async function authoritativeRolePush(slug: string, assignedHost: string | null, revision: number) {
   const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
   await runInDurableObject(stub, async (instance: ChannelDO) => {
     ensureSchema(instance);
@@ -74,6 +76,7 @@ async function authoritativeRolePush(slug: string, assignedHost: string | null) 
           role: assignedHost === null ? null : "host",
           assigned_owner: assignedHost === null ? null : "owner@example.com",
           assigned_host: assignedHost,
+          revision,
         }),
       }),
     );
@@ -158,23 +161,32 @@ describe("DO meta config cache — 在途旧快照不得回滚 guard/charter_rev
     const agent = await seedToken("agent");
     const slug = await createChannel(agent.token);
 
-    await authoritativeRolePush(slug, "host-a");
+    await authoritativeRolePush(slug, "host-a", 1);
     expect(await meta(slug, "assigned_host")).toBe("host-a");
     expect(await meta(slug, "assigned_host_initialized")).toBe("1");
 
-    await incidentalSnapshot(slug, { assignedHost: "stale-host" });
+    await incidentalSnapshot(slug, { assignedHost: "stale-host", roleRevision: "0" });
     expect(await meta(slug, "assigned_host")).toBe("host-a");
-    await authoritativePush(slug, { assignedHost: "stale-init-host" });
+    await authoritativePush(slug, { assignedHost: "stale-init-host", roleRevision: "0" });
     expect(await meta(slug, "assigned_host")).toBe("host-a");
 
-    await authoritativeRolePush(slug, null);
+    await authoritativeRolePush(slug, null, 2);
     expect(await meta(slug, "assigned_host")).toBeNull();
     expect(await meta(slug, "assigned_host_initialized")).toBe("1");
 
-    await incidentalSnapshot(slug, { assignedHost: "host-a" });
+    await incidentalSnapshot(slug, { assignedHost: "host-a", roleRevision: "1" });
     expect(await meta(slug, "assigned_host")).toBeNull();
 
-    await authoritativeRolePush(slug, "host-b");
+    await authoritativeRolePush(slug, "host-b", 3);
     expect(await meta(slug, "assigned_host")).toBe("host-b");
+
+    await authoritativeRolePush(slug, "stale-host", 2);
+    expect(await meta(slug, "assigned_host")).toBe("host-b");
+
+    // A later ordinary REST/WS snapshot can repair an /internal/roles delivery
+    // failure, but only when its D1 revision is genuinely newer.
+    await incidentalSnapshot(slug, { roleRevision: "4" });
+    expect(await meta(slug, "assigned_host")).toBeNull();
+    expect(await meta(slug, "assigned_host_revision")).toBe("4");
   });
 });

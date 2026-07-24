@@ -519,7 +519,7 @@ function CharterBanner({
           </button>
         )}
         {canModerate && (
-          <button className="d-btn charter-edit" type="button" onClick={onEdit}>
+          <button className="d-btn charter-edit" type="button" disabled={charter === null} onClick={onEdit}>
             {t("Channel.charter.edit")}
           </button>
         )}
@@ -754,6 +754,7 @@ export function DivisionBoard({
     }),
   );
   const syncDivisionToCharter = () => {
+    if (charterText === null) return;
     onSyncToCharter(nextCharterText);
   };
 
@@ -773,6 +774,7 @@ export function DivisionBoard({
   const lastAutoSyncedRef = useRef<string | null>(null);
   useEffect(() => {
     if (!canModerate) return;
+    if (charterText === null) return;
     if (syncingCharter) return;
     if (declared.length === 0 && !charterHasDivisionSection(currentCharterText)) return;
     if (nextCharterText === currentCharterText) return;
@@ -784,7 +786,7 @@ export function DivisionBoard({
     return () => clearTimeout(timer);
     // declared.length \u8986\u76d6\u300c\u5206\u5de5\u6570\u91cf\u53d8\u5316\u300d\uff1bnextCharterText \u8986\u76d6\u300c\u5206\u5de5\u5185\u5bb9/\u516c\u544a\u5e95\u7a3f\u53d8\u5316\u300d\u3002
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nextCharterText, currentCharterText, canModerate, syncingCharter, declared.length]);
+  }, [nextCharterText, currentCharterText, canModerate, charterText, syncingCharter, declared.length]);
 
   return (
     <details className="role-board" aria-label={t("Channel.roles.label")} open={forceOpen ? true : undefined}>
@@ -808,7 +810,7 @@ export function DivisionBoard({
             <button
               type="button"
               className="d-btn role-sync-charter-btn"
-              disabled={syncingCharter}
+              disabled={syncingCharter || charterText === null}
               onClick={syncDivisionToCharter}
             >
               {syncingCharter ? t("Channel.roles.syncingCharter") : t("Channel.roles.syncToCharter")}
@@ -4193,11 +4195,15 @@ export function ChannelPage({
   }, []);
 
   const editCharter = useCallback(() => {
-    charterEditBaseRevRef.current = charter?.charter_rev ?? null;
+    if (charter === null) {
+      void loadCharter();
+      return;
+    }
+    charterEditBaseRevRef.current = charter.charter_rev;
     updateCharterEditing(true);
     setCharterDraft(charter?.charter ?? "");
     setCharterError(null);
-  }, [charter, updateCharterEditing]);
+  }, [charter, loadCharter, updateCharterEditing]);
 
   const cancelCharterEdit = useCallback(() => {
     charterEditBaseRevRef.current = null;
@@ -4208,6 +4214,12 @@ export function ChannelPage({
 
   const saveCharter = useCallback(() => {
     if (charterSaving) return;
+    const expectedRev = charterEditBaseRevRef.current;
+    if (expectedRev === null) {
+      setCharterError(tRef.current("Channel.charter.error.loadFailed"));
+      void loadCharter();
+      return;
+    }
     const requestId = beginCharterWriteRequest();
     if (requestId === null) return;
     let reloadAfterConflict = false;
@@ -4216,7 +4228,7 @@ export function ChannelPage({
       token,
       slug,
       charterDraft,
-      charterEditBaseRevRef.current ?? undefined,
+      expectedRev,
     )
       .then((body) => {
         if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
@@ -4257,11 +4269,15 @@ export function ChannelPage({
   // 和错误处理，唯一区别是写入的文本来自调用方而不是 charterDraft 状态。
   const syncDivisionToCharter = useCallback((nextText: string) => {
     if (charterSaving) return;
+    if (charter === null) {
+      void loadCharter();
+      return;
+    }
     const requestId = beginCharterWriteRequest();
     if (requestId === null) return;
     let reloadAfterConflict = false;
     setCharterError(null);
-    setChannelCharter(token, slug, nextText, charter?.charter_rev)
+    setChannelCharter(token, slug, nextText, charter.charter_rev)
       .then((body) => {
         if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         setCharter(body);

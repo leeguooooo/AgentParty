@@ -504,6 +504,24 @@ describe("DivisionBoard auto-sync-to-charter (#150)", () => {
     assigned_at: 1, kind: "agent" as const, account: "leo", display: "leo-claude",
   };
 
+  test("does not write before the authoritative charter snapshot has loaded", async () => {
+    let synced: string | null = null;
+    render(
+      baseProps({
+        canModerate: true,
+        charterText: null,
+        roles: [hostRole],
+        presence: { "leo-claude": presenceEntry({ name: "leo-claude", account: "leo" }) },
+        onSyncToCharter: (text: string) => { synced = text; },
+      }),
+    );
+    const btn = renderer!.root.find((node) => node.props.className === "d-btn role-sync-charter-btn");
+    expect(btn.props.disabled).toBe(true);
+    act(() => btn.props.onClick());
+    await flushAutoSync();
+    expect(synced).toBeNull();
+  });
+
   test("moderator auto-syncs declared roles into the charter with no button click", async () => {
     let synced: string | null = null;
     render(

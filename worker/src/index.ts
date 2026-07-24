@@ -183,6 +183,10 @@ function isTaskState(input: unknown): input is TaskState {
   return typeof input === "string" && TASK_STATES.includes(input);
 }
 
+function isCollaborationRole(input: unknown): input is CollaborationRole {
+  return typeof input === "string" && COLLAB_ROLES.includes(input);
+}
+
 const HUMAN_METADATA_POLICIES = ["owner", "moderators", "members"] as const;
 const AGENT_METADATA_POLICIES = ["off", "moderators", "members", "allowlist"] as const;
 
@@ -309,6 +313,100 @@ async function loadAssignedHostName(db: D1Database, slug: string): Promise<strin
     .first<{ agent_name: string }>();
   return row?.agent_name ?? null;
 }
+
+async function loadChannelRoleRevision(db: D1Database, slug: string): Promise<number> {
+  const row = await db.prepare(
+    "SELECT role_rev FROM channels WHERE slug = ?",
+  )
+    .bind(slug)
+    .first<{ role_rev: number }>();
+  if (row === null || !Number.isSafeInteger(row.role_rev) || row.role_rev < 0) {
+    throw new Error("invalid channel role revision");
+  }
+  return row.role_rev;
+}
+
+async function loadAuthoritativeRoleTarget(
+  db: D1Database,
+  slug: string,
+  name: string,
+): Promise<{
+  role: CollaborationRole | null;
+  assignedOwner: string | null;
+}> {
+  const row = await db.prepare(
+    `SELECT cr.role, cr.owner_account, t.owner, t.channel_scope
+       FROM channel_roles cr
+       LEFT JOIN tokens t
+         ON t.name = cr.agent_name
+        AND t.revoked_at IS NULL
+      WHERE cr.channel_slug = ? AND cr.agent_name = ?`,
+  )
+    .bind(slug, name)
+    .first<{
+      role: string;
+      owner_account: string | null;
+      owner: string | null;
+      channel_scope: string | null;
+    }>();
+  const role = row !== null &&
+    row.owner_account !== null &&
+    row.owner !== null &&
+    row.owner_account === row.owner &&
+    (row.channel_scope === null || row.channel_scope === slug) &&
+    isCollaborationRole(row.role)
+    ? row.role
+    : null;
+  return {
+    role,
+    assignedOwner: role === null ? null : row!.owner,
+  };
+}
+
+async function syncAuthoritativeRoleSnapshots(
+  env: AppEnv,
+  slug: string,
+  names: readonly string[],
+): Promise<boolean> {
+  const targets = [...new Set(names)].filter((name) => NAME_RE.test(name) && !RESERVED_NAMES.includes(name));
+  if (targets.length === 0) return true;
+
+  // D1 has no multi-statement read transaction API. Read the revision on both sides
+  // of the snapshot and retry if another role mutation interleaved, so stale role
+  // data is never stamped with a newer fence.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const beforeRevision = await loadChannelRoleRevision(env.DB, slug);
+    const [assignedHost, roleTargets] = await Promise.all([
+      loadAssignedHostName(env.DB, slug),
+      Promise.all(targets.map((name) => loadAuthoritativeRoleTarget(env.DB, slug, name))),
+    ]);
+    const afterRevision = await loadChannelRoleRevision(env.DB, slug);
+    if (beforeRevision !== afterRevision) continue;
+
+    const results = await Promise.all(targets.map(async (name, index) => {
+      const snapshot = roleTargets[index]!;
+      return fetchChannelDO(
+        env,
+        slug,
+        new Request("https://do/internal/roles", {
+          method: "POST",
+          body: JSON.stringify({
+            name,
+            role: snapshot.role,
+            assigned_owner: snapshot.assignedOwner,
+            assigned_host: assignedHost,
+            revision: afterRevision,
+          }),
+          headers: { "content-type": "application/json", "x-partykit-room": slug },
+        }),
+      )
+        .then((response) => response.ok)
+        .catch(() => false);
+    }));
+    return results.every(Boolean);
+  }
+  return false;
+}
 const WEBHOOK_FILTERS: readonly string[] = ["mentions", "status", "needs-human", "all"] satisfies WebhookFilter[];
 const WEBHOOK_MODES = ["notify", "agent"] as const;
 type WebhookMode = (typeof WEBHOOK_MODES)[number];
@@ -393,6 +491,7 @@ const AP_FORWARD_HEADERS = [
   "x-ap-collab-role",
   "x-ap-role-source",
   "x-ap-assigned-host",
+  "x-ap-role-revision",
   "x-ap-handle",
   // #381：频道可见性 + 「本连接能否参与写」都是 worker 权威值，客户端注入必须先剥离
   "x-ap-visibility",
@@ -1625,7 +1724,7 @@ async function loadChannel(db: D1Database, slug: string) {
               completion_gate, completion_review_policy, decision_mode, loop_guard_enabled, loop_guard_limit,
               workflow_guard_enabled, workflow_guard_limit,
               message_retention_ms, audit_retention_ms,
-              charter, charter_rev, charter_updated_at, charter_updated_by,
+              charter, charter_rev, role_rev, charter_updated_at, charter_updated_by,
               charter_write_policy, charter_write_agents, charter_write_agent_allowlist_json,
               members_list_policy, members_list_agents, members_list_agent_allowlist_json
          FROM channels WHERE slug = ?`,
@@ -1650,6 +1749,7 @@ async function loadChannel(db: D1Database, slug: string) {
       audit_retention_ms: number | null;
       charter: string | null;
       charter_rev: number;
+      role_rev: number;
       charter_updated_at: number | null;
       charter_updated_by: string | null;
       charter_write_policy: string;
@@ -1974,6 +2074,7 @@ function channelHeaders(
     message_retention_ms?: number | null;
     audit_retention_ms?: number | null;
     charter_rev?: number;
+    role_rev?: number;
   },
   requestUrl: string,
 ) {
@@ -1992,6 +2093,7 @@ function channelHeaders(
     "x-ap-message-retention-ms": channel.message_retention_ms == null ? "" : String(channel.message_retention_ms),
     "x-ap-audit-retention-ms": channel.audit_retention_ms == null ? "" : String(channel.audit_retention_ms),
     "x-ap-charter-rev": String(channel.charter_rev ?? 0),
+    "x-ap-role-revision": String(channel.role_rev ?? 0),
     "x-ap-host": new URL(requestUrl).host,
   };
 }
@@ -2162,7 +2264,24 @@ async function removeChannelMemberAndAgents(
        FROM channel_agent_invites
       WHERE channel_slug = ? AND owner_account = ? AND revoked_at IS NULL`,
   ).bind(slug, account).all<{ profile_handle: string }>();
-  const [removed, , , , revokedAgents, revokedProjectAgents] = await env.DB.batch([
+  const affectedRoleRows = await env.DB.prepare(
+    `SELECT agent_name
+       FROM channel_roles
+      WHERE channel_slug = ?
+        AND (
+          owner_account = ?
+          OR agent_name IN (
+            SELECT name
+              FROM tokens
+             WHERE owner = ?
+               AND (
+                 role = 'human'
+                 OR (role = 'agent' AND (channel_scope IS NULL OR channel_scope = ?))
+               )
+          )
+        )`,
+  ).bind(slug, account, account, slug).all<{ agent_name: string }>();
+  const [removed, , removedRoles, , revokedAgents, revokedProjectAgents] = await env.DB.batch([
     env.DB.prepare("DELETE FROM channel_members WHERE channel_slug = ? AND account = ?").bind(slug, account),
     setChannelParticipantRemoval(env.DB, {
       slug,
@@ -2271,7 +2390,13 @@ async function removeChannelMemberAndAgents(
     ...(activeTokens.results ?? []).map(({ name }) => name),
     ...(boundParticipants.results ?? []).map(({ name }) => name),
     ...(activeProjectAgentInvites.results ?? []).map(({ profile_handle }) => profile_handle),
+    ...(affectedRoleRows.results ?? []).map(({ agent_name }) => agent_name),
   ])];
+  if (removedRoles.meta.changes > 0) {
+    // D1 remains authoritative even if the DO is temporarily unavailable. Every
+    // later REST/WS snapshot carries role_rev and will retry host reconciliation.
+    await syncAuthoritativeRoleSnapshots(env, slug, affectedNames).catch(() => false);
+  }
   await Promise.all(affectedNames.map(async (name) => {
     await fetchChannelDO(
       env,
@@ -3510,7 +3635,7 @@ app.delete("/api/channels/:slug/agents/:name", requireBearer, async (c) => {
   const removedBy = identity.account ?? identity.name;
   // Child discovery and revocation share one D1 transaction. INSERT...SELECT prevents a child
   // minted between an out-of-transaction snapshot and UPDATE from escaping without a tombstone.
-  await c.env.DB.batch([
+  const deletionResults = await c.env.DB.batch([
     setChannelParticipantRemoval(c.env.DB, {
       slug,
       principalType: "name",
@@ -3565,6 +3690,10 @@ app.delete("/api/channels/:slug/agents/:name", requireBearer, async (c) => {
       ORDER BY principal`,
   ).bind(slug, removalEpoch).all<{ name: string }>();
   const kickTargets = tombstoned.results.map((target) => target.name);
+  const removedRoles = deletionResults[3];
+  if ((removedRoles?.meta.changes ?? 0) > 0) {
+    await syncAuthoritativeRoleSnapshots(c.env, slug, kickTargets).catch(() => false);
+  }
   // 复用 kick 的 DO 通道，mode=remove：断开存活连接、清 presence、广播 offline——
   // 删除是永久动作，presence 残留会让成员列表继续显示一个已不存在的身份。父与所有 child
   // 会话都要断（token 已死只挡重连，不断已建立的 WS）。失败不回滚撤销（撤销才是事实源），
@@ -3847,6 +3976,7 @@ app.delete("/api/tokens/:name", requireAdmin, async (c) => {
   const { results } = scopedSlugs;
   await Promise.all(
     results.map(async ({ slug }) => {
+      await syncAuthoritativeRoleSnapshots(c.env, slug, [name]).catch(() => false);
       try {
         await fetchChannelDO(
           c.env,
@@ -4723,6 +4853,10 @@ app.delete("/api/channels/:slug/project-agents", async (c) => {
       ORDER BY principal`,
   ).bind(slug, removalEpoch).all<{ name: string }>();
   const removalTargets = tombstoned.results.map((target) => target.name);
+  const removedRoles = batchResults[4];
+  if ((removedRoles?.meta.changes ?? 0) > 0) {
+    await syncAuthoritativeRoleSnapshots(c.env, slug, removalTargets).catch(() => false);
+  }
   await bestEffortRecordManagementAudit(c.env.DB, {
     actor: managementAuditActor(identity),
     action: "channel.project_agent.remove",
@@ -7563,27 +7697,9 @@ app.put("/api/channels/:slug/roles/:name", async (c) => {
   if (savedRole.meta.changes === 0) {
     return c.json(errorBody("participant_removed", "the participant must be explicitly re-added before assigning a role"), 409);
   }
-  const assignedHost = await loadAssignedHostName(c.env.DB, slug);
-  const effectiveRole =
-    tokenBinding?.revoked_at === null &&
-    ownerAccount !== null &&
-    (tokenBinding?.channel_scope === null || tokenBinding?.channel_scope === slug)
-      ? role
-      : null;
-  await fetchChannelDO(
-    c.env,
-    slug,
-    new Request("https://do/internal/roles", {
-      method: "POST",
-      body: JSON.stringify({
-        name,
-        role: effectiveRole,
-        assigned_owner: effectiveRole === null ? null : ownerAccount,
-        assigned_host: assignedHost,
-      }),
-      headers: { "content-type": "application/json", "x-partykit-room": slug },
-    }),
-  );
+  if (!(await syncAuthoritativeRoleSnapshots(c.env, slug, [name]))) {
+    return c.json(errorBody("unavailable", "role was saved but the live channel snapshot did not update"), 503);
+  }
   await bestEffortRecordManagementAudit(c.env.DB, {
     actor: managementAuditActor(identity),
     action: "channel.role.assign",
@@ -7612,16 +7728,9 @@ app.delete("/api/channels/:slug/roles/:name", async (c) => {
   const removed = await c.env.DB.prepare("DELETE FROM channel_roles WHERE channel_slug = ? AND agent_name = ?")
     .bind(slug, name)
     .run();
-  const assignedHost = await loadAssignedHostName(c.env.DB, slug);
-  await fetchChannelDO(
-    c.env,
-    slug,
-    new Request("https://do/internal/roles", {
-      method: "POST",
-      body: JSON.stringify({ name, role: null, assigned_owner: null, assigned_host: assignedHost }),
-      headers: { "content-type": "application/json", "x-partykit-room": slug },
-    }),
-  );
+  if (!(await syncAuthoritativeRoleSnapshots(c.env, slug, [name]))) {
+    return c.json(errorBody("unavailable", "role was removed but the live channel snapshot did not update"), 503);
+  }
   if (removed.meta.changes > 0) {
     await bestEffortRecordManagementAudit(c.env.DB, {
       actor: managementAuditActor(identity),
@@ -8681,6 +8790,7 @@ app.post("/api/channels/:slug/kick", async (c) => {
       channel: slug,
       timestamp: removedAt,
     });
+    await syncAuthoritativeRoleSnapshots(c.env, slug, [name]).catch(() => false);
   }
   const effectiveRemoval = await loadChannelParticipantRemoval(c.env.DB, slug, "name", name);
   if (effectiveRemoval === null) {
@@ -9180,6 +9290,7 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-workflow-guard-enabled", String(channel.workflow_guard_enabled));
   fwd.headers.set("x-ap-workflow-guard-limit", String(channel.workflow_guard_limit));
   fwd.headers.set("x-ap-charter-rev", String(channel.charter_rev ?? 0));
+  fwd.headers.set("x-ap-role-revision", String(channel.role_rev ?? 0));
   fwd.headers.set("x-ap-host", new URL(c.req.url).host);
   // #381：把频道可见性 + 「本连接能否写」权威传给 DO。可见性缓存进 meta 供 handleSend 判 public_watch；
   // can-write 定死在连接建立时（与 role/archived 同快照语义），public_watch 频道 DO 据此拦发。
