@@ -1309,6 +1309,7 @@ export function App() {
           }}
           desktopAppSettings={desktop ? <DesktopSettings embedded serverOrigin={activeOrigin} /> : null}
           initialSection={settingsInitialSection}
+          restoreFocusOnUnmount={false}
         />
       )}
       {localAgentCenterOpen && (
@@ -1418,7 +1419,11 @@ export function App() {
         </main>
       </div>
       {/* 首次自动显示仍由组件记忆；设置入口可显式重开（#146 / #357）。 */}
-      <OnboardingGuide forceOpen={guideOpen} onClose={() => setGuideOpen(false)} />
+      <OnboardingGuide
+        forceOpen={guideOpen}
+        onClose={() => setGuideOpen(false)}
+        returnFocusRef={guideOpen ? settingsButtonRef : undefined}
+      />
     </div>
   );
 }
