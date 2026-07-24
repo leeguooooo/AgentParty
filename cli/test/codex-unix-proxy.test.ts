@@ -5,7 +5,11 @@ import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CODEX_TUI_WEBSOCKET_BACKPRESSURE_LIMIT_BYTES,
   CODEX_TUI_WEBSOCKET_IDLE_TIMEOUT_SECONDS,
+  CODEX_TUI_WEBSOCKET_MAX_FRAME_BYTES,
+  CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_ENTRY_COST_BYTES,
+  CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES,
   CodexSessionController,
   CodexUnixJsonRpcProxy,
   type CodexRpcPeer,
@@ -246,6 +250,19 @@ afterEach(async () => {
 describe("Codex Unix WebSocket single-writer proxy", () => {
   test("disables Bun's idle timeout for long-lived quiet Codex sessions", () => {
     expect(CODEX_TUI_WEBSOCKET_IDLE_TIMEOUT_SECONDS).toBe(0);
+  });
+
+  test("keeps the WebSocket and proxy backlog limits large enough for bounded multi-megabyte app-server frames", () => {
+    expect(CODEX_TUI_WEBSOCKET_MAX_FRAME_BYTES).toBeGreaterThanOrEqual(
+      128 * 1_024 * 1_024,
+    );
+    expect(CODEX_TUI_WEBSOCKET_BACKPRESSURE_LIMIT_BYTES).toBeGreaterThanOrEqual(
+      CODEX_TUI_WEBSOCKET_MAX_FRAME_BYTES,
+    );
+    expect(CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES).toBeGreaterThan(
+      CODEX_TUI_WEBSOCKET_MAX_FRAME_BYTES,
+    );
+    expect(CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_ENTRY_COST_BYTES).toBeGreaterThan(0);
   });
 
   test("routes the real bootstrap wire shape and serializes TUI start with AgentParty steer", async () => {
@@ -734,7 +751,130 @@ describe("Codex Unix WebSocket single-writer proxy", () => {
     ]);
   });
 
-  test("a backpressured TUI cannot grow the proxy outbound queue without bound", () => {
+  test("preserves one multi-megabyte response behind temporary TUI backpressure", () => {
+    const rpc = new FakeRpcPeer();
+    const session = new CodexSessionController(rpc);
+    proxy = new CodexUnixJsonRpcProxy(session, { log: () => {} });
+    const payloads: string[] = [];
+    const closes: Array<{ code: number; reason: string }> = [];
+    let blocked = true;
+    const socket = {
+      data: { connectionId: "large-bootstrap-response" },
+      send: (payload: string) => {
+        payloads.push(payload);
+        return blocked ? -1 : Buffer.byteLength(payload);
+      },
+      close: (code: number, reason: string) => {
+        closes.push({ code, reason });
+      },
+    };
+    const internal = proxy as unknown as {
+      socket: typeof socket | null;
+      frontendReady: boolean;
+      send: (message: JsonRpcNotification | JsonRpcResponse) => void;
+      drain: (target: typeof socket) => void;
+      outboundQueue: unknown[];
+      outboundQueueBytes: number;
+      backpressuredSocket: typeof socket | null;
+    };
+    internal.socket = socket;
+    internal.frontendReady = true;
+
+    const first = {
+      method: "thread/status/changed",
+      params: { status: { type: "idle" } },
+    } satisfies JsonRpcNotification;
+    internal.send(first);
+    const response = {
+      id: "startup-list-response",
+      result: { catalog: "" },
+    };
+    const emptyPayload = JSON.stringify(response);
+    const targetBytes = 3_199_295;
+    response.result.catalog = "x".repeat(targetBytes - Buffer.byteLength(emptyPayload));
+    const expectedResponsePayload = JSON.stringify(response);
+    expect(Buffer.byteLength(expectedResponsePayload)).toBe(targetBytes);
+    internal.send(response);
+
+    expect(closes).toEqual([]);
+    expect(payloads).toEqual([JSON.stringify(first)]);
+    expect(internal.socket).toBe(socket);
+    expect(internal.backpressuredSocket).toBe(socket);
+    expect(internal.outboundQueue).toHaveLength(1);
+    expect(internal.outboundQueueBytes).toBe(targetBytes);
+    expect(internal.outboundQueueBytes).toBeLessThanOrEqual(
+      CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES,
+    );
+
+    blocked = false;
+    internal.drain(socket);
+
+    expect(closes).toEqual([]);
+    expect(payloads).toEqual([JSON.stringify(first), expectedResponsePayload]);
+    expect(payloads.filter((payload) => payload === JSON.stringify(first))).toHaveLength(1);
+    expect(
+      payloads.filter((payload) =>
+        (JSON.parse(payload) as { id?: unknown }).id === response.id
+      ),
+    ).toHaveLength(1);
+    expect(internal.socket).toBe(socket);
+    expect(internal.backpressuredSocket).toBeNull();
+    expect(internal.outboundQueue).toHaveLength(0);
+    expect(internal.outboundQueueBytes).toBe(0);
+    expect(internal.frontendReady).toBe(true);
+  });
+
+  test("the aggregate backpressure backlog remains fail-closed at its byte ceiling", () => {
+    const rpc = new FakeRpcPeer();
+    const session = new CodexSessionController(rpc);
+    const logs: string[] = [];
+    proxy = new CodexUnixJsonRpcProxy(session, { log: (line) => logs.push(line) });
+    const closes: Array<{ code: number; reason: string }> = [];
+    const socket = {
+      data: { connectionId: "byte-bounded-backpressure" },
+      send: () => -1,
+      close: (code: number, reason: string) => {
+        closes.push({ code, reason });
+      },
+    };
+    const internal = proxy as unknown as {
+      socket: typeof socket | null;
+      frontendReady: boolean;
+      backpressuredSocket: typeof socket | null;
+      send: (message: JsonRpcNotification) => void;
+      outboundQueue: Array<{
+        socket: typeof socket;
+        payload: string;
+        bytes: number;
+      }>;
+      outboundQueueBytes: number;
+    };
+    internal.socket = socket;
+    internal.frontendReady = true;
+    internal.backpressuredSocket = socket;
+    internal.outboundQueue.push({
+      socket,
+      payload: "{}",
+      bytes: CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES,
+    });
+    internal.outboundQueueBytes = CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES;
+
+    internal.send({ method: "thread/name/updated", params: { name: "one too many" } });
+
+    expect(closes).toHaveLength(1);
+    expect(closes[0]).toMatchObject({
+      code: 1011,
+    });
+    expect(closes[0]!.reason).toContain("outbound queue exceeded its safety limit");
+    expect(logs.at(-1)).toContain(
+      `bytes=${CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES}`,
+    );
+    expect(internal.frontendReady).toBe(false);
+    expect(internal.outboundQueue).toHaveLength(0);
+    expect(internal.outboundQueueBytes).toBe(0);
+  });
+
+  test("does not treat 1,024 small lossless frames as a protocol limit", () => {
     const rpc = new FakeRpcPeer();
     const session = new CodexSessionController(rpc);
     proxy = new CodexUnixJsonRpcProxy(session, { log: () => {} });
@@ -761,8 +901,8 @@ describe("Codex Unix WebSocket single-writer proxy", () => {
         params: { delta: `token-${index}` },
       });
     }
-    expect(closes).toEqual([1011]);
-    expect(internal.frontendReady).toBe(false);
-    expect(internal.outboundQueue).toHaveLength(0);
+    expect(closes).toEqual([]);
+    expect(internal.frontendReady).toBe(true);
+    expect(internal.outboundQueue).toHaveLength(1_025);
   });
 });

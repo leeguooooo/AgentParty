@@ -205,6 +205,1262 @@ function idleThread(id: string): {
 }
 
 describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
+  test("serializes inbound messages without blocking JSON-RPC responses", async () => {
+    const statePath = join(temp, "state.json");
+    const logs: string[] = [];
+    const rpc = new CodexRpcClient({
+      log: (line) => logs.push(line),
+      spawnProxy: () => spawn("bun", ["run", fixture], {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, MOCK_CODEX_STATE_PATH: statePath },
+      }),
+    });
+    clients.push(rpc);
+
+    const firstGate = deferred<void>();
+    const firstEntered = deferred<void>();
+    const received: string[] = [];
+    rpc.onMessage(async (message) => {
+      received.push(`slow:${message.method}`);
+      if (message.method === "mock/ordered/first") {
+        firstEntered.resolve(undefined);
+        await firstGate.promise;
+        throw new Error("expected listener failure");
+      }
+    });
+    rpc.onMessage((message) => {
+      received.push(`fast:${message.method}`);
+    });
+
+    await rpc.start();
+    const response = rpc.request("mock/messageOrdering", {});
+    await firstEntered.promise;
+
+    try {
+      expect(received).toEqual([
+        "slow:mock/ordered/first",
+        "fast:mock/ordered/first",
+      ]);
+      await expect(Promise.race([
+        response,
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () => reject(new Error("JSON-RPC response waited for message listeners")),
+            1_000,
+          );
+        }),
+      ])).resolves.toEqual({ ordered: true });
+      expect(received).toEqual([
+        "slow:mock/ordered/first",
+        "fast:mock/ordered/first",
+      ]);
+    } finally {
+      firstGate.resolve(undefined);
+    }
+
+    await waitFor(
+      () => received.includes("fast:mock/ordered/second"),
+      "second notification was not dispatched after the first listener settled",
+    );
+    expect(received).toEqual([
+      "slow:mock/ordered/first",
+      "fast:mock/ordered/first",
+      "slow:mock/ordered/second",
+      "fast:mock/ordered/second",
+    ]);
+    expect(logs).toContain(
+      "codex-bridge: JSON-RPC listener failed: expected listener failure",
+    );
+  });
+
+  test("fences queued old-generation messages without letting a replacement overtake", async () => {
+    const statePath = join(temp, "state.json");
+    const rpc = new CodexRpcClient({
+      reconnectDelayMs: 60_000,
+      maxReconnectDelayMs: 60_000,
+      spawnProxy: () => spawn("bun", ["run", fixture], {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, MOCK_CODEX_STATE_PATH: statePath },
+      }),
+    });
+    clients.push(rpc);
+
+    const firstGate = deferred<void>();
+    const firstEntered = deferred<void>();
+    const disconnected = deferred<number>();
+    const received: string[] = [];
+    rpc.onMessage(async (message) => {
+      received.push(message.method);
+      if (message.method === "mock/disconnect/first") {
+        firstEntered.resolve(undefined);
+        await firstGate.promise;
+      }
+    });
+    rpc.onDisconnect((generation) => disconnected.resolve(generation));
+
+    await rpc.start();
+    const lostRequest = rpc.request("mock/messageOrderingDisconnect", {});
+    void lostRequest.catch(() => {});
+    await firstEntered.promise;
+    await expect(disconnected.promise).resolves.toBe(1);
+    await expect(lostRequest).rejects.toBeInstanceOf(CodexRpcDisconnectedError);
+
+    await rpc.start();
+    expect(rpc.connectionGeneration).toBe(2);
+    const replacementResponse = rpc.request("mock/messageOrdering", {});
+    try {
+      await expect(Promise.race([
+        replacementResponse,
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () => reject(new Error("replacement response waited for the old listener")),
+            1_000,
+          );
+        }),
+      ])).resolves.toEqual({ ordered: true });
+      expect(received).toEqual(["mock/disconnect/first"]);
+    } finally {
+      firstGate.resolve(undefined);
+    }
+
+    await waitFor(
+      () => received.includes("mock/ordered/second"),
+      "replacement generation did not resume ordered message dispatch",
+    );
+    expect(received).toEqual([
+      "mock/disconnect/first",
+      "mock/ordered/first",
+      "mock/ordered/second",
+    ]);
+  });
+
+  test("rejects a disconnected applying snapshot before the next generation can install its snapshot", async () => {
+    let spawnGeneration = 0;
+    const disconnected = deferred<number>();
+    const oldApplyEntered = deferred<void>();
+    const releaseOldApply = deferred<void>();
+    const appliedSnapshots: string[] = [];
+    let installedSnapshot: string | null = null;
+    const currentInstalledSnapshot = (): string | null => installedSnapshot;
+    const rpc = new CodexRpcClient({
+      reconnectDelayMs: 60_000,
+      maxReconnectDelayMs: 60_000,
+      spawnProxy: () => {
+        const generation = ++spawnGeneration;
+        const server = `
+          const { createInterface } = require("node:readline");
+          const input = createInterface({ input: process.stdin });
+          const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+          input.on("line", (line) => {
+            const frame = JSON.parse(line);
+            if (frame.method === "initialized") return;
+            if (frame.method === "initialize") {
+              send({
+                id: frame.id,
+                result: {
+                  userAgent: "disconnect-apply-test/${generation}",
+                  platformFamily: "unix",
+                },
+              });
+              return;
+            }
+            if (frame.method === "thread/read") {
+              send({
+                id: frame.id,
+                result: {
+                  thread: {
+                    id: "snapshot-generation-${generation}",
+                    status: { type: "idle" },
+                    turns: [],
+                  },
+                },
+              });
+              if (${generation} === 1) {
+                setTimeout(() => process.exit(77), 10);
+              }
+              return;
+            }
+            send({ id: frame.id, result: {} });
+          });
+        `;
+        return spawn("bun", ["-e", server], {
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      },
+    });
+    clients.push(rpc);
+    rpc.onDisconnect((generation) => disconnected.resolve(generation));
+
+    await rpc.start();
+    expect(rpc.connectionGeneration).toBe(1);
+    const oldRequest = rpc.requestConnectedApplied(
+      "thread/read",
+      { threadId: "snapshot-generation-1", includeTurns: true },
+      1,
+      async (result) => {
+        oldApplyEntered.resolve(undefined);
+        await releaseOldApply.promise;
+        const threadId = (result as { thread: { id: string } }).thread.id;
+        appliedSnapshots.push(threadId);
+        installedSnapshot = threadId;
+      },
+    );
+    let oldRequestSettled = false;
+    void oldRequest.then(
+      () => {
+        oldRequestSettled = true;
+      },
+      () => {
+        oldRequestSettled = true;
+      },
+    );
+
+    await oldApplyEntered.promise;
+    await expect(disconnected.promise).resolves.toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(oldRequestSettled).toBe(false);
+    expect(currentInstalledSnapshot()).toBeNull();
+
+    await rpc.start();
+    expect(rpc.connectionGeneration).toBe(2);
+    let newApplyEntered = false;
+    const newRequest = rpc.requestConnectedApplied(
+      "thread/read",
+      { threadId: "snapshot-generation-2", includeTurns: true },
+      2,
+      async (result) => {
+        newApplyEntered = true;
+        const threadId = (result as { thread: { id: string } }).thread.id;
+        appliedSnapshots.push(threadId);
+        installedSnapshot = threadId;
+      },
+    );
+    const privateState = rpc as unknown as {
+      pending: Map<string, { responseReceived: boolean }>;
+    };
+    await waitFor(
+      () =>
+        [...privateState.pending.values()].filter(
+          ({ responseReceived }) => responseReceived,
+        ).length === 2,
+      "both generations' snapshot responses were not received",
+    );
+    expect(oldRequestSettled).toBe(false);
+    expect(newApplyEntered).toBe(false);
+    expect(appliedSnapshots).toEqual([]);
+
+    releaseOldApply.resolve(undefined);
+    await expect(oldRequest).rejects.toBeInstanceOf(CodexRpcDisconnectedError);
+    await expect(newRequest).resolves.toMatchObject({
+      thread: { id: "snapshot-generation-2" },
+    });
+    expect(appliedSnapshots).toEqual([
+      "snapshot-generation-1",
+      "snapshot-generation-2",
+    ]);
+    expect(currentInstalledSnapshot()).toBe("snapshot-generation-2");
+    expect(privateState.pending.size).toBe(0);
+  });
+
+  test("rejects a disconnected snapshot queued behind a slow notification without applying it", async () => {
+    const notificationEntered = deferred<void>();
+    const releaseNotification = deferred<void>();
+    const disconnected = deferred<number>();
+    let applyCalls = 0;
+    const server = `
+      const { createInterface } = require("node:readline");
+      const input = createInterface({ input: process.stdin });
+      const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+      input.on("line", (line) => {
+        const frame = JSON.parse(line);
+        if (frame.method === "initialized") return;
+        if (frame.method === "initialize") {
+          send({
+            id: frame.id,
+            result: {
+              userAgent: "queued-disconnect-test/1",
+              platformFamily: "unix",
+            },
+          });
+          return;
+        }
+        if (frame.method === "thread/read") {
+          const frames = [
+            {
+              method: "mock/gated-notification",
+              params: { generation: 1 },
+            },
+            {
+              id: frame.id,
+              result: {
+                thread: {
+                  id: "snapshot-queued-before-disconnect",
+                  status: { type: "idle" },
+                  turns: [],
+                },
+              },
+            },
+          ];
+          process.stdout.write(
+            frames.map((value) => JSON.stringify(value) + "\\n").join(""),
+            () => setTimeout(() => process.exit(78), 100),
+          );
+          return;
+        }
+        send({ id: frame.id, result: {} });
+      });
+    `;
+    const rpc = new CodexRpcClient({
+      reconnectDelayMs: 60_000,
+      maxReconnectDelayMs: 60_000,
+      spawnProxy: () => spawn("bun", ["-e", server], {
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
+    });
+    clients.push(rpc);
+    rpc.onMessage(async (message) => {
+      if (message.method !== "mock/gated-notification") return;
+      notificationEntered.resolve(undefined);
+      await releaseNotification.promise;
+    });
+    rpc.onDisconnect((generation) => disconnected.resolve(generation));
+
+    await rpc.start();
+    const request = rpc.requestConnectedApplied(
+      "thread/read",
+      {
+        threadId: "snapshot-queued-before-disconnect",
+        includeTurns: true,
+      },
+      1,
+      async () => {
+        applyCalls += 1;
+      },
+    );
+    void request.catch(() => {});
+    const privateState = rpc as unknown as {
+      pending: Map<string, {
+        responseReceived: boolean;
+        applyStarted: boolean;
+      }>;
+      messageDispatchTail: Promise<void>;
+    };
+
+    try {
+      await notificationEntered.promise;
+      await waitFor(
+        () =>
+          [...privateState.pending.values()].some(
+            ({ responseReceived, applyStarted }) =>
+              responseReceived && !applyStarted,
+          ),
+        "snapshot response was not queued behind the slow notification",
+      );
+      expect(applyCalls).toBe(0);
+      await expect(disconnected.promise).resolves.toBe(1);
+
+      await expect(Promise.race([
+        request,
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () => reject(new Error("queued snapshot request did not reject after disconnect")),
+            500,
+          );
+        }),
+      ])).rejects.toBeInstanceOf(CodexRpcDisconnectedError);
+      expect(applyCalls).toBe(0);
+      expect(privateState.pending.size).toBe(0);
+    } finally {
+      releaseNotification.resolve(undefined);
+    }
+
+    await privateState.messageDispatchTail;
+    expect(applyCalls).toBe(0);
+    expect(privateState.pending.size).toBe(0);
+  });
+
+  test("holds a disconnected same-thread snapshot applier ahead of generation-2 recovery and fences its nested write", async () => {
+    const callsPath = join(temp, "snapshot-session-lane-calls.jsonl");
+    let spawnGeneration = 0;
+    const disconnected = deferred<number>();
+    const oldApplyEntered = deferred<void>();
+    const releaseOldApply = deferred<void>();
+    const recovered = deferred<CodexFrontendRecovery>();
+    const rpc = new CodexRpcClient({
+      reconnectDelayMs: 60_000,
+      maxReconnectDelayMs: 60_000,
+      spawnProxy: () => {
+        const generation = ++spawnGeneration;
+        const server = `
+          const { appendFileSync } = require("node:fs");
+          const { createInterface } = require("node:readline");
+          const input = createInterface({ input: process.stdin });
+          const record = (method) => appendFileSync(
+            ${JSON.stringify(callsPath)},
+            JSON.stringify({ generation: ${generation}, method }) + "\\n",
+          );
+          const send = (id, result) =>
+            process.stdout.write(JSON.stringify({ id, result }) + "\\n");
+          const thread = {
+            thread: {
+              id: "thread-session-lane",
+              status: { type: "idle" },
+              turns: [],
+            },
+          };
+          input.on("line", (line) => {
+            const frame = JSON.parse(line);
+            record(frame.method || "<response>");
+            if (frame.method === "initialized") return;
+            if (frame.method === "initialize") {
+              send(frame.id, {
+                userAgent: "session-lane-test/${generation}",
+                platformFamily: "unix",
+              });
+              return;
+            }
+            if (
+              frame.method === "thread/start" ||
+              frame.method === "thread/resume" ||
+              frame.method === "thread/read"
+            ) {
+              send(frame.id, thread);
+              if (${generation} === 1 && frame.method === "thread/read") {
+                setTimeout(() => process.exit(79), 10);
+              }
+              return;
+            }
+            if (frame.method === "turn/start") {
+              send(frame.id, { turn: { id: "unexpected-cross-generation-turn" } });
+              return;
+            }
+            send(frame.id, {});
+          });
+        `;
+        return spawn("bun", ["-e", server], {
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      },
+    });
+    clients.push(rpc);
+    rpc.onDisconnect((generation) => disconnected.resolve(generation));
+    const session = new CodexSessionController(rpc);
+    session.onFrontendRecovery((event) => {
+      if (event.generation === 2) recovered.resolve(event);
+    });
+
+    await session.start();
+    await session.request("thread/start", {});
+    await session.request("turn/start", {
+      threadId: "thread-session-lane",
+      clientUserMessageId: null,
+      input: [{
+        type: "text",
+        text: "finish the bootstrap before probing snapshot recovery",
+        text_elements: [],
+      }],
+    });
+
+    const privateSession = session as unknown as {
+      routeThreadResponse: (
+        method: string,
+        result: unknown,
+        params: Record<string, unknown>,
+      ) => Promise<void>;
+      requestConnected: (method: string, params?: unknown) => Promise<unknown>;
+    };
+    const originalRouteThreadResponse =
+      privateSession.routeThreadResponse.bind(session);
+    let interceptedOldRead = false;
+    privateSession.routeThreadResponse = async (method, result, params) => {
+      if (method === "thread/read" && !interceptedOldRead) {
+        interceptedOldRead = true;
+        oldApplyEntered.resolve(undefined);
+        await releaseOldApply.promise;
+        // attachThread may flush a queued AgentParty input. Model that nested
+        // write explicitly so this regression proves the old generation fence
+        // survives while the snapshot callback is awaiting.
+        await privateSession.requestConnected("turn/start", {
+          threadId: "thread-session-lane",
+          input: [],
+        });
+        return;
+      }
+      await originalRouteThreadResponse(method, result, params);
+    };
+
+    const oldRead = session.request("thread/read", {
+      threadId: "thread-session-lane",
+      includeTurns: true,
+    });
+    void oldRead.catch(() => {});
+    await oldApplyEntered.promise;
+    await expect(disconnected.promise).resolves.toBe(1);
+
+    await rpc.start();
+    expect(rpc.connectionGeneration).toBe(2);
+    const recordedCalls = (): RpcCall[] => {
+      try {
+        return readFileSync(callsPath, "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as RpcCall);
+      } catch {
+        return [];
+      }
+    };
+    await waitFor(
+      () =>
+        recordedCalls().some(({ generation, method }) =>
+          generation === 2 && method === "initialized"
+        ),
+      "replacement app-server did not finish its initialize handshake",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(
+      recordedCalls()
+        .filter(({ generation }) => generation === 2)
+        .map(({ method }) => method),
+    ).toEqual(["initialize", "initialized"]);
+
+    releaseOldApply.resolve(undefined);
+    await expect(oldRead).rejects.toBeInstanceOf(CodexRpcDisconnectedError);
+    await expect(recovered.promise).resolves.toEqual({
+      disposition: "resume",
+      threadId: "thread-session-lane",
+      generation: 2,
+    });
+    await waitFor(
+      () =>
+        recordedCalls().some(({ generation, method }) =>
+          generation === 2 && method === "thread/read"
+        ),
+      "generation-2 recovery did not complete its authoritative read",
+    );
+    const generationTwoMethods = recordedCalls()
+      .filter(({ generation }) => generation === 2)
+      .map(({ method }) => method);
+    expect(generationTwoMethods).toEqual([
+      "initialize",
+      "initialized",
+      "thread/resume",
+      "thread/read",
+    ]);
+    expect(generationTwoMethods).not.toContain("turn/start");
+  });
+
+  test("orders same-chunk item notifications and read or rollback snapshots in both directions", async () => {
+    for (
+      const [method, order] of [
+        ["thread/read", "notification-first"],
+        ["thread/rollback", "notification-first"],
+        ["thread/read", "response-first"],
+        ["thread/rollback", "response-first"],
+      ] as const
+    ) {
+      const suffix = `${method.replace("/", "-")}-${order}`;
+      const threadId = `thread-wire-barrier-${suffix}`;
+      const turnId = `turn-wire-barrier-${suffix}`;
+      const clientId = `agentparty:wire-barrier-${suffix}`;
+      const server = `
+        const { createInterface } = require("node:readline");
+        const input = createInterface({ input: process.stdin });
+        const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+        const snapshot = {
+          thread: {
+            id: ${JSON.stringify(threadId)},
+            status: { type: "idle" },
+            turns: [],
+          },
+        };
+        input.on("line", (line) => {
+          const frame = JSON.parse(line);
+          const params = frame.params || {};
+          if (frame.method === "initialized") return;
+          if (frame.method === "initialize") {
+            send({
+              id: frame.id,
+              result: {
+                userAgent: "wire-barrier-test/0.144.4",
+                platformFamily: "unix",
+              },
+            });
+            return;
+          }
+          if (frame.method === "thread/start") {
+            send({ id: frame.id, result: snapshot });
+            return;
+          }
+          if (frame.method === "thread/read" && params.listenerProbe === true) {
+            send({ id: frame.id, result: snapshot });
+            return;
+          }
+          if (frame.method === ${JSON.stringify(method)}) {
+            const notification = {
+              method: "item/completed",
+              params: {
+                threadId: ${JSON.stringify(threadId)},
+                turnId: ${JSON.stringify(turnId)},
+                item: {
+                  type: "userMessage",
+                  id: "user-wire-barrier",
+                  clientId: ${JSON.stringify(clientId)},
+                  content: [],
+                },
+              },
+            };
+            const response = { id: frame.id, result: snapshot };
+            const frames = ${JSON.stringify(order)} === "notification-first"
+              ? [notification, response]
+              : [response, notification];
+            process.stdout.write(
+              frames.map((value) => JSON.stringify(value) + "\\n").join(""),
+            );
+            return;
+          }
+          send({ id: frame.id, result: {} });
+        });
+      `;
+      const rpc = new CodexRpcClient({
+        spawnProxy: () => spawn("bun", ["-e", server], {
+          stdio: ["pipe", "pipe", "pipe"],
+        }),
+      });
+      clients.push(rpc);
+
+      const notificationEntered = deferred<void>();
+      const releaseNotification = deferred<void>();
+      const listenerRead = deferred<unknown>();
+      let listenerApplyCount = 0;
+      const delayedPeer: CodexRpcPeer = {
+        get initializeResult() {
+          return rpc.initializeResult;
+        },
+        get connected() {
+          return rpc.connected;
+        },
+        get connectionGeneration() {
+          return rpc.connectionGeneration;
+        },
+        start: () => rpc.start(),
+        request: (rpcMethod, params) => rpc.request(rpcMethod, params),
+        requestConnected: (rpcMethod, params, expectedGeneration) =>
+          rpc.requestConnected(rpcMethod, params, expectedGeneration),
+        requestConnectedApplied: (
+          rpcMethod,
+          params,
+          expectedGeneration,
+          applyResponse,
+        ) => rpc.requestConnectedApplied(
+          rpcMethod,
+          params,
+          expectedGeneration,
+          applyResponse,
+        ),
+        notify: (rpcMethod, params) => rpc.notify(rpcMethod, params),
+        notifyConnected: (rpcMethod, params) => rpc.notifyConnected(rpcMethod, params),
+        respond: (id, result, error) => rpc.respond(id, result, error),
+        onMessage: (listener) =>
+          rpc.onMessage(async (message) => {
+            const params = message.params as Record<string, unknown> | undefined;
+            const item = params?.item as Record<string, unknown> | undefined;
+            if (
+              message.method === "item/completed" &&
+              item?.clientId === clientId
+            ) {
+              notificationEntered.resolve(undefined);
+              await releaseNotification.promise;
+              // Snapshot methods issued from inside the dispatch listener must
+              // bypass their own barrier; otherwise this request waits on the
+              // dispatch that is awaiting it.
+              listenerRead.resolve(await rpc.requestConnectedApplied(
+                "thread/read",
+                {
+                  threadId,
+                  includeTurns: true,
+                  listenerProbe: true,
+                },
+                rpc.connectionGeneration ?? undefined,
+                async () => {
+                  listenerApplyCount += 1;
+                },
+              ));
+            }
+            await listener(message);
+          }),
+        onReconnect: (listener) => rpc.onReconnect(listener),
+        onDisconnect: (listener) => rpc.onDisconnect(listener),
+      };
+      const session = new CodexSessionController(delayedPeer);
+
+      await session.start();
+      await session.request("thread/start", {});
+      const snapshotRequest = session.request(method, {
+        threadId,
+        ...(method === "thread/read" ? { includeTurns: true } : {}),
+      });
+      let snapshotSettled = false;
+      void snapshotRequest.then(
+        () => {
+          snapshotSettled = true;
+        },
+        () => {
+          snapshotSettled = true;
+        },
+      );
+      if (order === "notification-first") {
+        await notificationEntered.promise;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(snapshotSettled).toBe(false);
+        expect(session.turnForClientId(clientId)).toBeNull();
+      } else {
+        await expect(snapshotRequest).resolves.toMatchObject({
+          thread: { id: threadId, turns: [] },
+        });
+        await notificationEntered.promise;
+        expect(snapshotSettled).toBe(true);
+        expect(session.turnForClientId(clientId)).toBeNull();
+      }
+
+      releaseNotification.resolve(undefined);
+      await expect(Promise.race([
+        listenerRead.promise,
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () => reject(new Error(`${method} listener RPC deadlocked on its own dispatch`)),
+            2_000,
+          );
+        }),
+      ])).resolves.toEqual({
+        thread: {
+          id: threadId,
+          status: { type: "idle" },
+          turns: [],
+        },
+      });
+      expect(listenerApplyCount).toBe(1);
+      const state = session as unknown as {
+        turns: Map<string, CodexTurn>;
+        turnByClientId: Map<string, string>;
+      };
+      if (order === "notification-first") {
+        await expect(snapshotRequest).resolves.toMatchObject({
+          thread: { id: threadId, turns: [] },
+        });
+        expect(session.turnForClientId(clientId)).toBeNull();
+        expect(state.turns.has(turnId)).toBe(false);
+        expect(state.turnByClientId.has(clientId)).toBe(false);
+      } else {
+        await waitFor(
+          () => session.turnForClientId(clientId) !== null,
+          `${method} response-first item notification was not retained`,
+        );
+        expect(session.turnForClientId(clientId)).toMatchObject({
+          id: turnId,
+          status: "inProgress",
+        });
+        expect(state.turns.has(turnId)).toBe(true);
+        expect(state.turnByClientId.get(clientId)).toBe(turnId);
+      }
+    }
+  });
+
+  test("uses authoritative completed items after reattach and terminal lifecycle duplicates", async () => {
+    const rpc = new ScriptedCodexRpc();
+    rpc.queue("thread/start", idleThread("thread-agent-text"));
+    rpc.queue("thread/read", {
+      thread: {
+        id: "thread-agent-text",
+        status: { type: "active" },
+        turns: [{
+          id: "turn-agent-text",
+          status: "inProgress",
+          items: [],
+        }],
+      },
+    });
+    const session = new CodexSessionController(rpc);
+    const completed: CodexTurn[] = [];
+    session.onTurnCompleted((turn) => {
+      completed.push(turn);
+    });
+
+    await session.start();
+    await session.request("thread/start", {});
+    await rpc.emit({
+      method: "turn/started",
+      params: {
+        threadId: "thread-agent-text",
+        turn: {
+          id: "turn-agent-text",
+          status: "inProgress",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-agent-text",
+        itemId: "agent-final",
+        delta: "streamed partial",
+      },
+    });
+
+    // A thread/read snapshot is authoritative even on the same thread. Do not
+    // let pre-snapshot deltas resurrect items removed by rollback/recovery.
+    await session.request("thread/read", {
+      threadId: "thread-agent-text",
+      includeTurns: true,
+    });
+    expect(
+      (session as unknown as {
+        agentMessagesByTurn: Map<string, unknown>;
+      }).agentMessagesByTurn.size,
+    ).toBe(0);
+    const completedItem = {
+      type: "agentMessage",
+      id: "agent-final",
+      text: "authoritative final",
+      phase: "final_answer",
+    };
+    await rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-agent-text",
+        item: completedItem,
+      },
+    });
+    await rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-agent-text",
+        item: completedItem,
+      },
+    });
+    await rpc.emit({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-agent-text",
+        itemId: "agent-final",
+        delta: " duplicate late delta",
+      },
+    });
+    const unloadedCompletion = {
+      method: "turn/completed",
+      params: {
+        threadId: "thread-agent-text",
+        turn: {
+          id: "turn-agent-text",
+          status: "completed",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    } satisfies JsonRpcNotification;
+    await rpc.emit(unloadedCompletion);
+    await rpc.emit(unloadedCompletion);
+
+    expect(completed).toHaveLength(2);
+    for (const turn of completed) {
+      expect(turn.items).toContainEqual(expect.objectContaining({
+        type: "agentMessage",
+        id: "agent-final",
+        text: "authoritative final",
+      }));
+    }
+
+    await rpc.emit({
+      method: "item/started",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-partial-only",
+        item: {
+          type: "agentMessage",
+          id: "agent-partial-only",
+          text: "not terminal",
+          phase: "final_answer",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-agent-text",
+        turn: {
+          id: "turn-partial-only",
+          status: "completed",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    expect(completed.at(-1)).toMatchObject({
+      id: "turn-partial-only",
+      status: "completed",
+      items: [],
+    });
+
+    // Interleaved terminal turns keep independent item buffers. Their status
+    // remains authoritative, so a delivery layer will still reject either.
+    await rpc.emit({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-interrupted",
+        itemId: "agent-interrupted",
+        delta: "interrupted text",
+      },
+    });
+    await rpc.emit({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-agent-text",
+        turnId: "turn-failed",
+        itemId: "agent-failed",
+        delta: "failed text",
+      },
+    });
+    await rpc.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-agent-text",
+        turn: {
+          id: "turn-interrupted",
+          status: "interrupted",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-agent-text",
+        turn: {
+          id: "turn-failed",
+          status: "failed",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+
+    expect(completed.at(-2)).toMatchObject({
+      id: "turn-interrupted",
+      status: "interrupted",
+      items: [],
+    });
+    expect(completed.at(-1)).toMatchObject({
+      id: "turn-failed",
+      status: "failed",
+      items: [],
+    });
+    expect(
+      (session as unknown as {
+        agentMessagesByTurn: Map<string, unknown>;
+      }).agentMessagesByTurn.size,
+    ).toBe(0);
+  });
+
+  test("associates a client id and canonical items from item lifecycle events", async () => {
+    const rpc = new ScriptedCodexRpc();
+    rpc.queue("thread/start", idleThread("thread-item-lifecycle"));
+    const session = new CodexSessionController(rpc);
+    const dispatches: Array<{
+      clientId: string;
+      turnId: string | null;
+    }> = [];
+    session.onDispatch((input, dispatch) => {
+      dispatches.push({
+        clientId: input.clientUserMessageId,
+        turnId: dispatch.turnId ?? null,
+      });
+    });
+
+    await session.start();
+    await session.request("thread/start", {});
+    await rpc.emit({
+      method: "turn/started",
+      params: {
+        threadId: "thread-item-lifecycle",
+        turn: {
+          id: "turn-item-lifecycle",
+          status: "inProgress",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-item-lifecycle",
+        turnId: "turn-item-lifecycle",
+        item: {
+          type: "userMessage",
+          id: "user-item",
+          clientId: "agentparty:late-accepted",
+          content: [],
+        },
+      },
+    });
+    await rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-item-lifecycle",
+        turnId: "turn-item-lifecycle",
+        item: {
+          type: "userMessage",
+          id: "user-item",
+          clientId: "agentparty:late-accepted",
+          content: [],
+        },
+      },
+    });
+    await rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-item-lifecycle",
+        turnId: "turn-item-lifecycle",
+        item: {
+          type: "agentMessage",
+          id: "agent-item",
+          text: "late authoritative reply",
+          phase: "final_answer",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-item-lifecycle",
+        turn: {
+          id: "turn-item-lifecycle",
+          status: "completed",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+
+    expect(dispatches).toContainEqual({
+      clientId: "agentparty:late-accepted",
+      turnId: "turn-item-lifecycle",
+    });
+    expect(
+      dispatches.filter(({ clientId }) => clientId === "agentparty:late-accepted"),
+    ).toHaveLength(1);
+    expect(session.turnForClientId("agentparty:late-accepted")).toMatchObject({
+      id: "turn-item-lifecycle",
+      status: "completed",
+      items: [
+        expect.objectContaining({
+          type: "userMessage",
+          clientId: "agentparty:late-accepted",
+        }),
+        expect.objectContaining({
+          type: "agentMessage",
+          text: "late authoritative reply",
+        }),
+      ],
+    });
+
+    await rpc.emit({
+      method: "turn/started",
+      params: {
+        threadId: "thread-item-lifecycle",
+        turn: {
+          id: "turn-duplicate-user-lifecycle",
+          status: "inProgress",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    const duplicateUserItem = {
+      type: "userMessage",
+      id: "duplicate-user-item",
+      clientId: "agentparty:duplicate-lifecycle",
+      content: [],
+    };
+    await rpc.emit({
+      method: "item/started",
+      params: {
+        threadId: "thread-item-lifecycle",
+        turnId: "turn-duplicate-user-lifecycle",
+        item: duplicateUserItem,
+      },
+    });
+    await rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-item-lifecycle",
+        turnId: "turn-duplicate-user-lifecycle",
+        item: duplicateUserItem,
+      },
+    });
+    expect(
+      dispatches.filter(({ clientId }) =>
+        clientId === "agentparty:duplicate-lifecycle"
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("drops multi-megabyte tool lifecycle payloads and bounds completed turn affinity", async () => {
+    const rpc = new ScriptedCodexRpc();
+    rpc.queue("thread/start", idleThread("thread-retention"));
+    const session = new CodexSessionController(rpc);
+    await session.start();
+    await session.request("thread/start", {});
+
+    const heavyTurnId = "turn-heavy-lifecycle";
+    const heavyClientId = "agentparty:heavy-lifecycle";
+    const multiMegabytePayload =
+      `MULTI_MEGABYTE_TOOL_PAYLOAD:${"x".repeat(3 * 1_024 * 1_024)}`;
+    await rpc.emit({
+      method: "turn/started",
+      params: {
+        threadId: "thread-retention",
+        turn: {
+          id: heavyTurnId,
+          status: "inProgress",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    await rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-retention",
+        turnId: heavyTurnId,
+        item: {
+          type: "userMessage",
+          id: "user-heavy-lifecycle",
+          clientId: heavyClientId,
+          content: [{ type: "text", text: "retain only affinity" }],
+        },
+      },
+    });
+    for (const item of [
+      {
+        type: "commandExecution",
+        id: "command-heavy-lifecycle",
+        command: "/usr/bin/printf payload",
+        aggregatedOutput: multiMegabytePayload,
+        status: "completed",
+      },
+      {
+        type: "mcpToolCall",
+        id: "mcp-heavy-lifecycle",
+        server: "large-fixture",
+        tool: "return_payload",
+        result: { content: multiMegabytePayload },
+        status: "completed",
+      },
+    ]) {
+      await rpc.emit({
+        method: "item/started",
+        params: {
+          threadId: "thread-retention",
+          turnId: heavyTurnId,
+          item,
+        },
+      });
+      await rpc.emit({
+        method: "item/completed",
+        params: {
+          threadId: "thread-retention",
+          turnId: heavyTurnId,
+          item,
+        },
+      });
+    }
+
+    const privateState = session as unknown as {
+      turns: Map<string, CodexTurn>;
+      turnByClientId: Map<string, string>;
+    };
+    expect(privateState.turns.get(heavyTurnId)).toEqual({
+      id: heavyTurnId,
+      status: "inProgress",
+      items: [{
+        type: "userMessage",
+        id: "user-heavy-lifecycle",
+        clientId: heavyClientId,
+      }],
+    });
+    expect(JSON.stringify([...privateState.turns.values()])).not.toContain(
+      "MULTI_MEGABYTE_TOOL_PAYLOAD",
+    );
+
+    await rpc.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-retention",
+        turn: {
+          id: heavyTurnId,
+          status: "completed",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    for (let index = 0; index < 260; index += 1) {
+      const turnId = `turn-retained-${index}`;
+      const clientId = `agentparty:retained-${index}`;
+      await rpc.emit({
+        method: "turn/started",
+        params: {
+          threadId: "thread-retention",
+          turn: {
+            id: turnId,
+            status: "inProgress",
+            items: [{
+              type: "userMessage",
+              id: `user-retained-${index}`,
+              clientId,
+              content: [{ type: "text", text: `input ${index}` }],
+            }],
+          },
+        },
+      });
+      await rpc.emit({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-retention",
+          turn: {
+            id: turnId,
+            status: "completed",
+            items: [],
+            itemsView: "notLoaded",
+          },
+        },
+      });
+    }
+
+    // The implementation deliberately keeps at most 256 completed turns and
+    // evicts their clientId affinity in lockstep.
+    expect(privateState.turns.size).toBe(256);
+    expect(privateState.turnByClientId.size).toBe(256);
+    expect(session.turnForClientId(heavyClientId)).toBeNull();
+    expect(session.turnForClientId("agentparty:retained-0")).toBeNull();
+    expect(session.turnForClientId("agentparty:retained-259")).toMatchObject({
+      id: "turn-retained-259",
+      status: "completed",
+    });
+    const retainedJson = JSON.stringify([...privateState.turns.values()]);
+    expect(retainedJson).not.toContain("MULTI_MEGABYTE_TOOL_PAYLOAD");
+    expect(Buffer.byteLength(retainedJson)).toBeLessThan(256 * 1_024);
+  });
+
   for (const method of ["thread/start", "thread/resume"] as const) {
     test(`${method} serializes a concurrent submit behind the thread switch`, async () => {
       const rpc = new ScriptedCodexRpc();
@@ -628,6 +1884,92 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
         }]);
       }
     }
+  });
+
+  test("reprojects accepted unknown bootstrap proof without retaining content beyond the cache cap", async () => {
+    const rpc = new ScriptedCodexRpc();
+    const turnResponse = deferred<unknown>();
+    const recoveries: CodexFrontendRecovery[] = [];
+    const completed: CodexTurn[] = [];
+    const initialInput = [{
+      type: "text",
+      text: `BOOTSTRAP_PROOF_OVER_CAP:${"b".repeat(16 * 1_024 * 1_024)}`,
+      text_elements: [],
+    }];
+    const recoveredTurn = {
+      id: "turn-bootstrap-proof-over-cap",
+      status: "completed" as const,
+      items: [{
+        type: "userMessage",
+        id: "user-bootstrap-proof-over-cap",
+        clientId: null,
+        content: initialInput,
+      }],
+    };
+    rpc.queue("thread/start", idleThread("thread-bootstrap-proof-over-cap"));
+    rpc.queue("turn/start", () => turnResponse.promise);
+    rpc.queue("thread/resume", idleThread("thread-bootstrap-proof-over-cap"));
+    rpc.queue("thread/read", {
+      thread: {
+        id: "thread-bootstrap-proof-over-cap",
+        status: { type: "idle" },
+        turns: [recoveredTurn],
+      },
+    });
+    const session = new CodexSessionController(rpc);
+    session.onFrontendRecovery((event) => {
+      recoveries.push(event);
+    });
+    session.onTurnCompleted((turn) => {
+      completed.push(turn);
+    });
+
+    await session.request("thread/start", {});
+    const starting = session.request("turn/start", {
+      threadId: "thread-bootstrap-proof-over-cap",
+      clientUserMessageId: null,
+      input: initialInput,
+    });
+    await waitFor(
+      () => rpc.calls.some((call) => call.method === "turn/start"),
+      "oversized bootstrap prompt did not cross the scripted transport",
+    );
+    rpc.disconnect();
+    turnResponse.reject(new CodexRpcDisconnectedError("lost after oversized prompt write"));
+    await expect(starting).rejects.toBeInstanceOf(CodexRpcDisconnectedError);
+    await rpc.reconnect();
+
+    expect(recoveries).toEqual([{
+      disposition: "resume",
+      threadId: "thread-bootstrap-proof-over-cap",
+      generation: 2,
+    }]);
+    expect(completed).toHaveLength(1);
+    expect(Buffer.byteLength(JSON.stringify(completed[0]))).toBeGreaterThan(
+      16 * 1_024 * 1_024,
+    );
+    expect(completed[0]?.items?.[0]).toHaveProperty("content", initialInput);
+
+    const state = session as unknown as {
+      turns: Map<string, CodexTurn>;
+      bootstrapRecovery: unknown;
+      bootstrapThreadId: string | null;
+    };
+    expect(state.bootstrapRecovery).toBeNull();
+    expect(state.bootstrapThreadId).toBeNull();
+    expect(state.turns.get(recoveredTurn.id)).toEqual({
+      id: recoveredTurn.id,
+      status: "completed",
+      items: [{
+        type: "userMessage",
+        id: "user-bootstrap-proof-over-cap",
+        clientId: null,
+      }],
+    });
+    const retainedBytes = Buffer.byteLength(
+      JSON.stringify([...state.turns.values()]),
+    );
+    expect(retainedBytes).toBeLessThan(16 * 1_024 * 1_024);
   });
 
   test("an accepted initial turn resumes even if the backend drops before the TUI sees its response", async () => {

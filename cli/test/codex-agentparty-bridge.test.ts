@@ -429,17 +429,51 @@ describe("Codex AgentParty delivery integration", () => {
     expect(rpc.calls.filter((call) => call.method === "thread/start")).toHaveLength(1);
 
     rpc.emit({
+      method: "item/started",
+      params: {
+        threadId: "thread-delivery",
+        turnId: "turn-delivery",
+        item: {
+          type: "agentMessage",
+          id: "agent-final",
+          text: "",
+          phase: "final_answer",
+        },
+      },
+    });
+    rpc.emit({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-delivery",
+        turnId: "turn-delivery",
+        itemId: "agent-final",
+        delta: "same-session partial",
+      },
+    });
+    rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-delivery",
+        turnId: "turn-delivery",
+        item: {
+          type: "agentMessage",
+          id: "agent-final",
+          text: "same-session answer",
+          phase: "final_answer",
+        },
+      },
+    });
+    rpc.emit({
       method: "turn/completed",
       params: {
         threadId: "thread-delivery",
         turn: {
           id: "turn-delivery",
           status: "completed",
-          items: [{
-            type: "agentMessage",
-            id: "agent-final",
-            text: "same-session answer",
-          }],
+          // Codex 0.144.x intentionally leaves lifecycle turn snapshots
+          // unloaded; the authoritative agent item arrived above.
+          items: [],
+          itemsView: "notLoaded",
         },
       },
     });
@@ -459,6 +493,118 @@ describe("Codex AgentParty delivery integration", () => {
     }));
     expect(bridge.pendingCount).toBe(0);
     expect(rpc.calls.filter((call) => call.method === "turn/start")).toHaveLength(1);
+    bridge.close();
+  });
+
+  test("fails closed on an empty completed item or commentary-only output", async () => {
+    const rpc = new DeliveryRpcPeer();
+    rpc.turnIds = ["turn-empty-final", "turn-commentary-only"];
+    const session = new CodexSessionController(rpc);
+    const conn = fakeConnection();
+    const failures: string[] = [];
+    const posts: string[] = [];
+    const bridge = new CodexAgentPartyBridge({
+      channel: "dev",
+      connection: conn.connection,
+      session,
+      leaseRenewIntervalMs: 60_000,
+      confirmDeliveryUpdate: async (update) => {
+        if (update.state === "failed") failures.push(update.error ?? "");
+        return update.state;
+      },
+      postReply: async ({ body }) => {
+        posts.push(body);
+        return { seq: 1 };
+      },
+    });
+
+    await bridge.handleFrame(welcomeDirectedFrame(0, "me") as ServerFrame);
+    await session.request("thread/start", {});
+    await bridge.handleFrame(deliveryFrame(120, "must not post a partial", {
+      id: "delivery-empty-final",
+      target_name: "me",
+      sender: { name: "alice", kind: "human" },
+    }) as ServerFrame);
+    rpc.emit({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-delivery",
+        turnId: "turn-empty-final",
+        itemId: "agent-empty-final",
+        delta: "aborted partial output",
+      },
+    });
+    rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-delivery",
+        turnId: "turn-empty-final",
+        item: {
+          type: "agentMessage",
+          id: "agent-empty-final",
+          text: "",
+          phase: "final_answer",
+        },
+      },
+    });
+    rpc.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-delivery",
+        turn: {
+          id: "turn-empty-final",
+          status: "completed",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    await waitFor(() => failures.length === 1, "empty final item did not fail closed");
+
+    await bridge.handleFrame(deliveryFrame(121, "must not post commentary", {
+      id: "delivery-commentary-only",
+      target_name: "me",
+      sender: { name: "alice", kind: "human" },
+    }) as ServerFrame);
+    rpc.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-delivery",
+        turnId: "turn-commentary-only",
+        item: {
+          type: "agentMessage",
+          id: "agent-commentary",
+          text: "progress only",
+          phase: "commentary",
+        },
+      },
+    });
+    rpc.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-delivery",
+        turn: {
+          id: "turn-commentary-only",
+          status: "completed",
+          items: [],
+          itemsView: "notLoaded",
+        },
+      },
+    });
+    await waitFor(
+      () => failures.length === 2,
+      "commentary-only completion did not fail closed",
+    );
+    await waitFor(
+      () => bridge.pendingCount === 0,
+      "fail-closed completions did not clear their delivery ledgers",
+    );
+
+    expect(posts).toEqual([]);
+    expect(failures).toEqual([
+      expect.stringContaining("completed without a final agent message"),
+      expect.stringContaining("completed without a final agent message"),
+    ]);
     bridge.close();
   });
 
@@ -773,6 +919,222 @@ describe("Codex AgentParty delivery integration", () => {
       reply_seq: 91,
     }));
     bridge.close();
+  });
+
+  test("accepts an unsolicited authoritative replied state that wins the POST response race", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ap-codex-reply-race-"));
+    let bridge: CodexAgentPartyBridge | null = null;
+    try {
+      const rpc = new DeliveryRpcPeer();
+      rpc.turnIds = ["turn-reply-race"];
+      const session = new CodexSessionController(rpc);
+      const conn = fakeConnection();
+      const journal = new DeliveryRecoveryJournal(
+        join(root, "journal.json"),
+        "dev",
+        "codex",
+      );
+      const logs: string[] = [];
+      const updates: ClientFrame[] = [];
+      let posts = 0;
+      const incoming = deliveryFrame(127, "reply before the HTTP response returns", {
+        id: "delivery-reply-race",
+        target_name: "me",
+        sender: { name: "alice", kind: "human" },
+      }) as unknown as DirectedDeliveryFrame;
+      bridge = new CodexAgentPartyBridge({
+        channel: "dev",
+        connection: conn.connection,
+        session,
+        recoveryJournal: journal,
+        leaseRenewIntervalMs: 60_000,
+        log: (line) => logs.push(line),
+        confirmDeliveryUpdate: async (update) => {
+          updates.push(update);
+          return update.state;
+        },
+        postReply: async () => {
+          posts += 1;
+          await bridge!.handleFrame({
+            type: "delivery_state",
+            delivery: {
+              ...incoming.delivery,
+              state: "replied",
+              reply_seq: 1_271,
+            },
+          } as ServerFrame);
+          return { seq: 1_271 };
+        },
+      });
+
+      await bridge.handleFrame(welcomeDirectedFrame(0, "me") as ServerFrame);
+      await session.request("thread/start", {});
+      await bridge.handleFrame(incoming as ServerFrame);
+      rpc.emit({
+        method: "item/completed",
+        params: {
+          threadId: "thread-delivery",
+          turnId: "turn-reply-race",
+          item: {
+            type: "agentMessage",
+            id: "agent-reply-race",
+            text: "race-safe reply",
+            phase: "final_answer",
+          },
+        },
+      });
+      rpc.emit({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-delivery",
+          turn: {
+            id: "turn-reply-race",
+            status: "completed",
+            items: [],
+            itemsView: "notLoaded",
+          },
+        },
+      });
+
+      await waitFor(
+        () =>
+          bridge?.pendingCount === 0 &&
+          logs.includes("codex-bridge: replied to seq=127 with seq=1271"),
+        "unsolicited replied state did not settle the delivery",
+      );
+      expect(posts).toBe(1);
+      expect(journal.get(incoming.delivery.id)).toBeNull();
+      expect(updates.filter((update) =>
+        update.type === "delivery_update" && update.state === "replied"
+      )).toHaveLength(0);
+      expect(logs.filter((line) => line.includes("unknown persistence outcome"))).toEqual([]);
+      expect(logs.filter((line) =>
+        line === "codex-bridge: replied to seq=127 with seq=1271"
+      )).toHaveLength(1);
+    } finally {
+      bridge?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not swallow a reply journal failure without both authoritative replied fences", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ap-codex-reply-journal-fence-"));
+    let bridge: CodexAgentPartyBridge | null = null;
+    let releaseSecondPost = (): void => {};
+    try {
+      const rpc = new DeliveryRpcPeer();
+      rpc.turnIds = ["turn-reply-journal-fence"];
+      const session = new CodexSessionController(rpc);
+      const conn = fakeConnection();
+      const journal = new DeliveryRecoveryJournal(
+        join(root, "journal.json"),
+        "dev",
+        "codex",
+      );
+      const logs: string[] = [];
+      const postKeys: string[] = [];
+      const updates: ClientFrame[] = [];
+      const secondPostGate = new Promise<void>((resolve) => {
+        releaseSecondPost = resolve;
+      });
+      const originalUpdate = journal.update.bind(journal);
+      let rejectFirstReplyPosted = true;
+      journal.update = (deliveryId, patch) => {
+        if (patch.phase === "reply_posted" && rejectFirstReplyPosted) {
+          rejectFirstReplyPosted = false;
+          throw new Error(`no recovery journal entry for ${deliveryId}`);
+        }
+        return originalUpdate(deliveryId, patch);
+      };
+      const incoming = deliveryFrame(128, "do not broaden the replied race fence", {
+        id: "delivery-reply-journal-fence",
+        target_name: "me",
+        sender: { name: "alice", kind: "human" },
+      }) as unknown as DirectedDeliveryFrame;
+      bridge = new CodexAgentPartyBridge({
+        channel: "dev",
+        connection: conn.connection,
+        session,
+        recoveryJournal: journal,
+        leaseRenewIntervalMs: 60_000,
+        retryDelayMs: 1,
+        log: (line) => logs.push(line),
+        confirmDeliveryUpdate: async (update) => {
+          updates.push(update);
+          return update.state;
+        },
+        postReply: async ({ idempotencyKey }) => {
+          postKeys.push(idempotencyKey);
+          if (postKeys.length > 1) await secondPostGate;
+          return { seq: 1_281 };
+        },
+      });
+
+      await bridge.handleFrame(welcomeDirectedFrame(0, "me") as ServerFrame);
+      await session.request("thread/start", {});
+      await bridge.handleFrame(incoming as ServerFrame);
+      rpc.emit({
+        method: "item/completed",
+        params: {
+          threadId: "thread-delivery",
+          turnId: "turn-reply-journal-fence",
+          item: {
+            type: "agentMessage",
+            id: "agent-reply-journal-fence",
+            text: "retry behind the durable fence",
+            phase: "final_answer",
+          },
+        },
+      });
+      rpc.emit({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-delivery",
+          turn: {
+            id: "turn-reply-journal-fence",
+            status: "completed",
+            items: [],
+            itemsView: "notLoaded",
+          },
+        },
+      });
+
+      await waitFor(
+        () =>
+          postKeys.length === 2 &&
+          logs.some((line) => line.includes("unknown persistence outcome")),
+        "reply journal failure did not enter the stable-key retry path",
+      );
+      expect(bridge.pendingCount).toBe(1);
+      expect(journal.get(incoming.delivery.id)).not.toBeNull();
+      expect(updates.filter((update) =>
+        update.type === "delivery_update" && update.state === "replied"
+      )).toHaveLength(0);
+      expect(new Set(postKeys)).toEqual(
+        new Set(["codex-bridge-reply:delivery-reply-journal-fence"]),
+      );
+
+      releaseSecondPost();
+      await waitFor(
+        () => bridge?.pendingCount === 0,
+        "stable-key retry did not settle after the journal fence recovered",
+      );
+      expect(postKeys).toEqual([
+        "codex-bridge-reply:delivery-reply-journal-fence",
+        "codex-bridge-reply:delivery-reply-journal-fence",
+      ]);
+      expect(updates).toContainEqual(expect.objectContaining({
+        type: "delivery_update",
+        delivery_id: incoming.delivery.id,
+        state: "replied",
+        reply_seq: 1_281,
+      }));
+      expect(journal.get(incoming.delivery.id)).toBeNull();
+    } finally {
+      releaseSecondPost();
+      bridge?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("cold reconnect preserves an absent after-write input for one exact late reply without replay", async () => {
