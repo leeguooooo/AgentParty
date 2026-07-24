@@ -13,6 +13,7 @@ type MetaHeaders = {
   workflowEnabled?: string;
   workflowLimit?: string;
   charterRev?: string;
+  assignedHost?: string;
 };
 
 function headers(h: MetaHeaders): Record<string, string> {
@@ -26,6 +27,7 @@ function headers(h: MetaHeaders): Record<string, string> {
     "x-ap-workflow-guard-enabled": h.workflowEnabled ?? "0",
     "x-ap-workflow-guard-limit": h.workflowLimit ?? "30",
     "x-ap-charter-rev": h.charterRev ?? "0",
+    "x-ap-assigned-host": h.assignedHost ?? "",
     "x-ap-host": "ap.test",
   };
 }
@@ -54,6 +56,26 @@ async function incidentalSnapshot(slug: string, h: MetaHeaders) {
     ensureSchema(instance);
     const res = await instance.onRequest(
       new Request("https://do/internal/guard", { method: "GET", headers: headers(h) }),
+    );
+    expect(res.status).toBe(200);
+  });
+}
+
+async function authoritativeRolePush(slug: string, assignedHost: string | null) {
+  const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+  await runInDurableObject(stub, async (instance: ChannelDO) => {
+    ensureSchema(instance);
+    const res = await instance.onRequest(
+      new Request("https://do/internal/roles", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "role-target",
+          role: assignedHost === null ? null : "host",
+          assigned_owner: assignedHost === null ? null : "owner@example.com",
+          assigned_host: assignedHost,
+        }),
+      }),
     );
     expect(res.status).toBe(200);
   });
@@ -130,5 +152,29 @@ describe("DO meta config cache — 在途旧快照不得回滚 guard/charter_rev
     // 真正更新的 rev 仍然生效
     await incidentalSnapshot(slug, { charterRev: "7" });
     expect(await meta(slug, "charter_rev")).toBe("7");
+  });
+
+  it("incidental snapshots cannot roll back or resurrect the authoritative assigned host", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+
+    await authoritativeRolePush(slug, "host-a");
+    expect(await meta(slug, "assigned_host")).toBe("host-a");
+    expect(await meta(slug, "assigned_host_initialized")).toBe("1");
+
+    await incidentalSnapshot(slug, { assignedHost: "stale-host" });
+    expect(await meta(slug, "assigned_host")).toBe("host-a");
+    await authoritativePush(slug, { assignedHost: "stale-init-host" });
+    expect(await meta(slug, "assigned_host")).toBe("host-a");
+
+    await authoritativeRolePush(slug, null);
+    expect(await meta(slug, "assigned_host")).toBeNull();
+    expect(await meta(slug, "assigned_host_initialized")).toBe("1");
+
+    await incidentalSnapshot(slug, { assignedHost: "host-a" });
+    expect(await meta(slug, "assigned_host")).toBeNull();
+
+    await authoritativeRolePush(slug, "host-b");
+    expect(await meta(slug, "assigned_host")).toBe("host-b");
   });
 });

@@ -36,6 +36,7 @@ import {
   type ChannelIdentity,
   type ChannelRoleInfo,
   type ChannelJoinRequestState,
+  ConflictError,
   createTask,
   deleteChannelRole,
   ForbiddenError,
@@ -2941,6 +2942,7 @@ export function ChannelPage({
   const [memberDetailRoute, setMemberDetailRoute] = useState<MemberDetailRoute | null>(null);
   const [charterEditing, setCharterEditing] = useState(false);
   const charterEditingRef = useRef(false);
+  const charterEditBaseRevRef = useRef<number | null>(null);
   const updateCharterEditing = useCallback((editing: boolean) => {
     charterEditingRef.current = editing;
     setCharterEditing(editing);
@@ -3212,14 +3214,14 @@ export function ChannelPage({
     setMemberDetailRoute((current) => current?.name === removal.name ? null : current);
   }, []);
 
-  const loadCharter = useCallback(() => {
+  const loadCharter = useCallback((preserveError = false) => {
     const request = beginCharterRead(charterRequestGenerationRef.current);
     return fetchChannelCharter(token, slug)
       .then((body) => {
         if (!canApplyCharterRead(charterRequestGenerationRef.current, request)) return;
         setCharter(body);
         if (!charterEditingRef.current) setCharterDraft(body.charter ?? "");
-        setCharterError(null);
+        if (!preserveError) setCharterError(null);
       })
       .catch((err: unknown) => {
         if (!canApplyCharterRead(charterRequestGenerationRef.current, request)) return;
@@ -4191,12 +4193,14 @@ export function ChannelPage({
   }, []);
 
   const editCharter = useCallback(() => {
+    charterEditBaseRevRef.current = charter?.charter_rev ?? null;
     updateCharterEditing(true);
     setCharterDraft(charter?.charter ?? "");
     setCharterError(null);
   }, [charter, updateCharterEditing]);
 
   const cancelCharterEdit = useCallback(() => {
+    charterEditBaseRevRef.current = null;
     updateCharterEditing(false);
     setCharterDraft(charter?.charter ?? "");
     setCharterError(null);
@@ -4206,12 +4210,19 @@ export function ChannelPage({
     if (charterSaving) return;
     const requestId = beginCharterWriteRequest();
     if (requestId === null) return;
+    let reloadAfterConflict = false;
     setCharterError(null);
-    setChannelCharter(token, slug, charterDraft)
+    setChannelCharter(
+      token,
+      slug,
+      charterDraft,
+      charterEditBaseRevRef.current ?? undefined,
+    )
       .then((body) => {
         if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         setCharter(body);
         setCharterDraft(body.charter ?? "");
+        charterEditBaseRevRef.current = null;
         updateCharterEditing(false);
         writeSeenCharterRev(slug, body.charter_rev);
         setSeenCharterRev(body.charter_rev);
@@ -4220,17 +4231,22 @@ export function ChannelPage({
         if (!canApplyCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
-        else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
+        else if (err instanceof ConflictError) {
+          reloadAfterConflict = true;
+          setCharterError(tRef.current("Channel.charter.error.conflict"));
+        } else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
         else setCharterError(tRef.current("Channel.charter.error.saveFailed"));
       })
       .finally(() => {
-        finishCharterWriteRequest(requestId);
+        const finished = finishCharterWriteRequest(requestId);
+        if (finished && reloadAfterConflict) void loadCharter(true);
       });
   }, [
     beginCharterWriteRequest,
     charterDraft,
     charterSaving,
     finishCharterWriteRequest,
+    loadCharter,
     slug,
     token,
     updateCharterEditing,
@@ -4243,8 +4259,9 @@ export function ChannelPage({
     if (charterSaving) return;
     const requestId = beginCharterWriteRequest();
     if (requestId === null) return;
+    let reloadAfterConflict = false;
     setCharterError(null);
-    setChannelCharter(token, slug, nextText)
+    setChannelCharter(token, slug, nextText, charter?.charter_rev)
       .then((body) => {
         if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         setCharter(body);
@@ -4259,16 +4276,22 @@ export function ChannelPage({
         if (!canApplyCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
-        else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
+        else if (err instanceof ConflictError) {
+          reloadAfterConflict = true;
+          setCharterError(tRef.current("Channel.charter.error.conflict"));
+        } else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
         else setCharterError(tRef.current("Channel.charter.error.saveFailed"));
       })
       .finally(() => {
-        finishCharterWriteRequest(requestId);
+        const finished = finishCharterWriteRequest(requestId);
+        if (finished && reloadAfterConflict) void loadCharter(true);
       });
   }, [
     beginCharterWriteRequest,
+    charter,
     charterSaving,
     finishCharterWriteRequest,
+    loadCharter,
     slug,
     token,
     updateCharterEditing,

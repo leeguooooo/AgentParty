@@ -4104,7 +4104,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
                 worktree_label: `${principal.name}:${profile.worktree_strategy}:${profile.base_branch}`,
               },
             }, signal);
-            if (roleWarning !== undefined) out(`profile front #${channel}: warn: ${roleWarning}`);
+            if (roleWarning !== undefined) out(`profile front #${channel}: warn: ${terminalOutput(roleWarning)}`);
             await post(opts.server, principal.token, channel, {
               kind: "message",
               body: `${profile.name || profile.handle} joined #${channel}: front=${front.name}, execution worker=${worker.name}.`,

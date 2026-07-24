@@ -253,6 +253,47 @@ describe("authoritative channel decision ledger (#736)", () => {
     expect(bounded.decisions).toHaveLength(1);
   });
 
+  it("enforces head channel/topic integrity at the database boundary", async () => {
+    const owner = await seedToken("agent", uniq("owner"), {
+      owner: `${uniq("owner")}@example.com`,
+    });
+    const slug = await createChannel(owner.token);
+    const otherSlug = await createChannel(owner.token);
+    const response = await recordDecision(slug, owner.token, {
+      topic: "Storage",
+      summary: "Keep each head bound to its own decision lineage.",
+    });
+    expect(response.status).toBe(201);
+    const decision = await responseJson<ChannelDecisionRecord>(response);
+
+    await expect(
+      env.DB.prepare(
+        "INSERT INTO channel_decision_heads (channel_slug, topic, decision_id) VALUES (?, ?, ?)",
+      ).bind(otherSlug, "Storage", decision.id).run(),
+    ).rejects.toThrow(/decision head must match decision channel and topic/i);
+
+    await expect(
+      env.DB.prepare(
+        "INSERT INTO channel_decision_heads (channel_slug, topic, decision_id) VALUES (?, ?, ?)",
+      ).bind(slug, "Transport", decision.id).run(),
+    ).rejects.toThrow(/decision head must match decision channel and topic/i);
+
+    await env.DB.prepare(
+      "UPDATE channel_decision_heads SET topic = ? WHERE channel_slug = ? AND topic = ? COLLATE NOCASE",
+    ).bind("storage", slug, "Storage").run();
+    expect(
+      await env.DB.prepare(
+        "SELECT decision_id FROM channel_decision_heads WHERE channel_slug = ? AND topic = ? COLLATE NOCASE",
+      ).bind(slug, "Storage").first(),
+    ).toEqual({ decision_id: decision.id });
+
+    await expect(
+      env.DB.prepare(
+        "UPDATE channel_decision_heads SET topic = ? WHERE channel_slug = ? AND topic = ? COLLATE NOCASE",
+      ).bind("Transport", slug, "Storage").run(),
+    ).rejects.toThrow(/decision head must match decision channel and topic/i);
+  });
+
   it("keeps the ledger read-only after archival at the database boundary", async () => {
     const owner = await seedToken("agent", uniq("owner"), {
       owner: `${uniq("owner")}@example.com`,

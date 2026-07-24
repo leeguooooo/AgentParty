@@ -3850,12 +3850,21 @@ export class ChannelDO extends Server<Env> {
     }
     const decisionMode = h.get("x-ap-decision-mode");
     if (decisionMode === "approval" || decisionMode === "unattended") this.setMeta("decision_mode", decisionMode);
-    // #736：D1 的 owner 指派 host 是权威角色锚点。Worker 对 REST/WS 入场显式带此头
-    // （空串 = 当前没有 assigned host），角色管理路由还会经 /internal/roles 立即刷新。
-    if (h.has("x-ap-assigned-host")) {
+    // #736：D1 的 owner 指派 host 是权威角色锚点。REST/WS 与 /internal/init 携带的快照
+    // 只能首次播种；此后只有角色管理的 /internal/roles 能改，避免任何旧快照覆盖刚完成的改派
+    // （空串 = 当前没有 assigned host，initialized marker 用来保留这个权威“无 host”状态）。
+    if (
+      h.has("x-ap-assigned-host")
+      && this.getMeta("assigned_host_initialized") === null
+    ) {
       const assignedHost = h.get("x-ap-assigned-host") ?? "";
-      if (assignedHost === "") this.deleteMeta("assigned_host");
-      else if (MENTION_NAME_RE.test(assignedHost)) this.setMeta("assigned_host", assignedHost);
+      if (assignedHost === "") {
+        this.deleteMeta("assigned_host");
+        this.setMeta("assigned_host_initialized", "1");
+      } else if (MENTION_NAME_RE.test(assignedHost)) {
+        this.setMeta("assigned_host", assignedHost);
+        this.setMeta("assigned_host_initialized", "1");
+      }
     }
     // #381：缓存频道可见性，供 handleSend 判 public_watch 写门。缺失/非法值不覆盖已缓存值
     // （旧路径不带此头时保留旧值；PUT visibility 会经 /internal/init 权威刷新）。
@@ -6532,6 +6541,7 @@ export class ChannelDO extends Server<Env> {
       }
       if (assignedHost === null) this.deleteMeta("assigned_host");
       else this.setMeta("assigned_host", assignedHost);
+      this.setMeta("assigned_host_initialized", "1");
       // D1 role 是权威；已连接 socket 的身份快照也必须同步，否则改派后旧连接仍以旧 host
       // 权限/徽章继续发送，既绕过 self-host guard，又把 presence 回滚成 host。角色变更与每条
       // socket 的消息共用一条串行队列，避免 hello/send 在 await 后用旧 state 覆盖新角色。

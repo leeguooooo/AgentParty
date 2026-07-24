@@ -1027,14 +1027,23 @@ export async function fetchChannelCharter(token: string, slug: string): Promise<
   return (await res.json()) as ChannelCharter;
 }
 
-export async function setChannelCharter(token: string, slug: string, charter: string): Promise<ChannelCharter> {
+export async function setChannelCharter(
+  token: string,
+  slug: string,
+  charter: string,
+  expectedRev?: number,
+): Promise<ChannelCharter> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/charter`, {
     method: "PUT",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ charter }),
+    body: JSON.stringify({
+      charter,
+      ...(expectedRev === undefined ? {} : { expected_rev: expectedRev }),
+    }),
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
   if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 409) throw new ConflictError("charter revision changed");
   if (res.status === 413) throw new ValidationError("charter too large");
   if (!res.ok) throw new Error(`PUT /api/channels/${slug}/charter failed (${res.status})`);
   return (await res.json()) as ChannelCharter;

@@ -997,7 +997,7 @@ describe("runServe", () => {
           id: `decision_${String(index).padStart(32, "0")}`,
           channel: "dev",
           topic: `topic-${index}`,
-          summary: "D".repeat(200),
+          summary: "😀".repeat(200),
           source_seq: null,
           supersedes_id: null,
           superseded_by_id: null,
@@ -2399,7 +2399,8 @@ describe("project profile daemon", () => {
     const ownerConfig = join(home, "owner.json");
     writeFileSync(ownerConfig, JSON.stringify({ server: "http://agentparty.test", token: "ap_owner" }));
     process.env.AGENTPARTY_CONFIG = ownerConfig;
-    const { posts, post } = postRecorder("channel already has assigned host @owner-host");
+    const unsafeRoleWarning = "channel already has assigned host @owner-host\u001b[2Jforged";
+    const { posts, post } = postRecorder(unsafeRoleWarning);
     const profile = {
       owner_account: "fan@example.com",
       handle: "herness-dev",
@@ -2527,7 +2528,14 @@ describe("project profile daemon", () => {
     expect(String((frontReady.body as { note: string }).note)).toContain("delivery=worktree->PR->channel-link->deploy-verify->safe-prune");
     expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("front="))).toBe(true);
     expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("execution worker="))).toBe(true);
-    expect(profileLines.filter((line) => line.includes("warn: channel already has assigned host @owner-host"))).toHaveLength(3);
+    expect(
+      profileLines.filter(
+        (line) => line === "profile front #alpha: warn: channel already has assigned host @owner-hostforged"
+          || line === "profile front #beta: warn: channel already has assigned host @owner-hostforged"
+          || line === "profile front #gamma: warn: channel already has assigned host @owner-hostforged",
+      ),
+    ).toHaveLength(3);
+    expect(profileLines.join("\n")).not.toContain("\u001b");
   });
 
   test("shared profile channels keep distinct child identities without overwriting the shared workspace config", async () => {

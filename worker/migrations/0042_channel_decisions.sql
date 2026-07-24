@@ -30,6 +30,38 @@ CREATE TABLE channel_decision_heads (
   PRIMARY KEY (channel_slug, topic)
 );
 
+-- SQLite 的普通外键只能保证 decision_id 存在，无法保证 head 与 decision 属于同一频道/topic。
+-- 把这条复合不变量放到 DB 边界，避免绕过应用路由的写入制造跨频道或错 topic 的 active head。
+CREATE TRIGGER channel_decision_heads_validate_insert
+BEFORE INSERT ON channel_decision_heads
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1
+        FROM channel_decisions d
+       WHERE d.id = NEW.decision_id
+         AND d.channel_slug = NEW.channel_slug
+         AND d.topic COLLATE NOCASE = NEW.topic COLLATE NOCASE
+    )
+    THEN RAISE(ABORT, 'decision head must match decision channel and topic')
+  END;
+END;
+
+CREATE TRIGGER channel_decision_heads_validate_update
+BEFORE UPDATE ON channel_decision_heads
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1
+        FROM channel_decisions d
+       WHERE d.id = NEW.decision_id
+         AND d.channel_slug = NEW.channel_slug
+         AND d.topic COLLATE NOCASE = NEW.topic COLLATE NOCASE
+    )
+    THEN RAISE(ABORT, 'decision head must match decision channel and topic')
+  END;
+END;
+
 -- 新 topic 只允许在还没有 active head 时写入；已有结论必须显式 supersede。
 -- supersede 只允许指向【同频道、同 topic、当前 active】的旧行。DB.batch 中随后原子推进 head。
 CREATE TRIGGER channel_decisions_validate_insert
