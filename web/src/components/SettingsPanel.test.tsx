@@ -65,10 +65,19 @@ afterEach(async () => {
 
 const me: SettingsMe = { name: "alice", kind: "agent", role: "agent", handle: null, display_name: null, owner: null };
 
-function render(props: Parameters<typeof SettingsPanel>[0]): ReactTestRenderer {
+type SettingsProps = Parameters<typeof SettingsPanel>[0];
+type RenderProps = Omit<SettingsProps, "notifyOptin" | "onNotifyOptinChange"> &
+  Partial<Pick<SettingsProps, "notifyOptin" | "onNotifyOptinChange">>;
+
+function render(props: RenderProps): ReactTestRenderer {
+  const normalized: SettingsProps = {
+    notifyOptin: false,
+    onNotifyOptinChange: () => {},
+    ...props,
+  };
   let r!: ReactTestRenderer;
   void act(() => {
-    r = create(<LocaleProvider><SettingsPanel {...props} /></LocaleProvider>);
+    r = create(<LocaleProvider><SettingsPanel {...normalized} /></LocaleProvider>);
   });
   renderer = r;
   return r;
@@ -115,16 +124,55 @@ describe("SettingsPanel (#273)", () => {
   });
 
   test("notification toggle writes ap_notify_optin to localStorage", () => {
-    const r = render({ me, canSetHandle: false, onClose: () => {}, onLogout: () => {} });
+    let notifyOptin = false;
+    const onNotifyOptinChange = (next: boolean) => { notifyOptin = next; };
+    const common = { me, canSetHandle: false, onClose: () => {}, onLogout: () => {} };
+    const r = render({ ...common, notifyOptin, onNotifyOptinChange });
     expect(store.getItem("ap_notify_optin")).toBe(null);
     const toggle = findByClass(r.toJSON(), "settings-toggle");
     expect(toggle).not.toBeNull();
     void act(() => { (toggle!.props.onClick as () => void)(); });
     expect(store.getItem("ap_notify_optin")).toBe("1");
+    expect(notifyOptin).toBe(true);
+
+    void act(() => {
+      r.update(
+        <LocaleProvider>
+          <SettingsPanel
+            {...common}
+            notifyOptin={notifyOptin}
+            onNotifyOptinChange={onNotifyOptinChange}
+          />
+        </LocaleProvider>,
+      );
+    });
     // 再点一次关掉
     const toggle2 = findByClass(r.toJSON(), "settings-toggle");
     void act(() => { (toggle2!.props.onClick as () => void)(); });
-    expect(store.getItem("ap_notify_optin")).toBe(null);
+    expect(store.getItem("ap_notify_optin")).toBe("0");
+    expect(notifyOptin).toBe(false);
+  });
+
+  test("uses explicit sections and exposes only the selected panel", () => {
+    const r = render({
+      me,
+      canSetHandle: false,
+      onClose: () => {},
+      onLogout: () => {},
+      onShowOnboarding: () => {},
+      desktopAppSettings: <p>desktop module</p>,
+    });
+
+    expect(r.root.findAllByProps({ role: "tab" })).toHaveLength(4);
+    expect(r.root.findByProps({ id: "global-settings-tab-preferences" }).props["aria-selected"]).toBe(true);
+    expect(r.root.findByProps({ id: "global-settings-panel-preferences" }).props.hidden).toBe(false);
+    expect(r.root.findByProps({ id: "global-settings-panel-account" }).props.hidden).toBe(true);
+
+    void act(() => r.root.findByProps({ id: "global-settings-tab-account" }).props.onClick());
+
+    expect(r.root.findByProps({ id: "global-settings-tab-account" }).props["aria-selected"]).toBe(true);
+    expect(r.root.findByProps({ id: "global-settings-panel-preferences" }).props.hidden).toBe(true);
+    expect(r.root.findByProps({ id: "global-settings-panel-account" }).props.hidden).toBe(false);
   });
 
   test("theme buttons flip data-theme and persist to localStorage", () => {
@@ -214,7 +262,14 @@ describe("SettingsPanel (#273)", () => {
     void act(() => {
       r.update(
         <LocaleProvider>
-          <SettingsPanel me={me} canSetHandle={false} onClose={() => { closes += 2; }} onLogout={() => {}} />
+          <SettingsPanel
+            me={me}
+            notifyOptin={false}
+            canSetHandle={false}
+            onClose={() => { closes += 2; }}
+            onLogout={() => {}}
+            onNotifyOptinChange={() => {}}
+          />
         </LocaleProvider>,
       );
     });

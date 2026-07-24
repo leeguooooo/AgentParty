@@ -1,23 +1,19 @@
-// #273 全局设置：把散落的跨频道偏好收进一个面板——语言、主题、被@通知、账号（身份 + @别名编辑 + 退出）。
-// 纯前端；通知偏好读写 localStorage 的 ap_notify_optin（与 NotifyToggle 同键），语言走 LanguageSwitcher，
-// 主题走 lib/theme（doodle↔midnight，写 <html data-theme> + localStorage）。账号 @handle/昵称编辑复用
-// HandleSetup——顶栏不再单独挂浮层入口，编辑归位到这里。不动顶栏原有的桌面专属控件。
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+// 全局设置只承载个人与设备设置。跨频道的本机 Agent 监控、启停、常驻和日志
+// 已移到独立 LocalAgentCenter，避免打开偏好设置就启动多套本机 IPC/轮询。
+import { useCallback, useState, type ReactNode } from "react";
 import { useT } from "../i18n/useT";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { HandleSetup } from "./HandleSetup";
+import {
+  requestNotifySystemPermission,
+  writeNotifyOptin,
+} from "./NotifyToggle";
+import {
+  SectionedDialog,
+  type SectionedDialogSection,
+} from "./SectionedDialog";
 import { applyTheme, readStoredTheme, SUPPORTED_THEMES, type Theme } from "../lib/theme";
 import "../i18n/strings/App";
-
-const NOTIFY_OPTIN_KEY = "ap_notify_optin";
-
-function readNotifyOptin(): boolean {
-  try {
-    return typeof localStorage !== "undefined" && localStorage.getItem(NOTIFY_OPTIN_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
 
 export interface SettingsMe {
   name: string;
@@ -30,82 +26,33 @@ export interface SettingsMe {
   provider?: string | null;
 }
 
+export type SettingsSectionId = "preferences" | "account" | "desktop" | "help";
+
 export function SettingsPanel({
   me,
+  notifyOptin,
   canSetHandle = false,
   onClose,
   onLogout,
+  onNotifyOptinChange,
   onHandleSaved,
   onShowOnboarding,
-  desktopSettings = null,
+  desktopAppSettings = null,
+  initialSection = "preferences",
 }: {
   me: SettingsMe | null;
+  notifyOptin: boolean;
   canSetHandle?: boolean;
   onClose: () => void;
   onLogout: (() => void) | null;
+  onNotifyOptinChange: (value: boolean) => void;
   onHandleSaved?: (value: string) => void;
   onShowOnboarding?: () => void;
-  desktopSettings?: ReactNode;
+  desktopAppSettings?: ReactNode;
+  initialSection?: SettingsSectionId;
 }) {
   const t = useT();
-  const [notifyOptin, setNotifyOptin] = useState<boolean>(readNotifyOptin);
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  // #654 复审：把 onClose 固化进 ref，让焦点陷阱 effect 只按挂载/卸载跑一次。
-  // 否则父级传内联箭头函数（onClose={() => setShow(false)}）每次渲染都换新身份，
-  // effect 依赖 [onClose] 会反复清理+重挂——清理阶段抢先把焦点还给触发元素（焦点闪出闪回），
-  // 重挂时 previouslyFocused 变成面板内元素，最终关闭把焦点恢复到已卸载节点，焦点恢复失效。
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
-  // #637 a11y：真正 trap focus——打开时把焦点移进面板、Tab 只在面板内循环、关闭恢复到触发元素；
-  // 外加 Esc 关闭。此前注释声称「锁焦点」实则只挂了 Esc。
-  useEffect(() => {
-    const doc = typeof document === "undefined" ? null : document;
-    const previouslyFocused = (doc?.activeElement ?? null) as HTMLElement | null;
-    const focusables = (): HTMLElement[] => {
-      const panel = panelRef.current;
-      if (panel === null || typeof panel.querySelectorAll !== "function") return [];
-      return Array.from(
-        panel.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      );
-    };
-    // 打开即把焦点移进面板：首个可聚焦元素，退回面板容器本身。
-    (focusables()[0] ?? panelRef.current)?.focus?.();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onCloseRef.current();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const items = focusables();
-      const panel = panelRef.current;
-      if (items.length === 0) {
-        e.preventDefault();
-        panel?.focus?.();
-        return;
-      }
-      const first = items[0]!;
-      const last = items[items.length - 1]!;
-      const active = (doc?.activeElement ?? null) as HTMLElement | null;
-      if (e.shiftKey && (active === first || active === panel)) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      // 关闭时把焦点交还给打开面板的触发元素。
-      previouslyFocused?.focus?.();
-    };
-    // 依赖固定为空数组：trap+restore 只按开合各跑一次，不随 onClose 身份变化重挂。
-  }, []);
 
   const pickTheme = useCallback((next: Theme) => {
     applyTheme(next);
@@ -113,86 +60,68 @@ export function SettingsPanel({
   }, []);
 
   const toggleNotify = useCallback(() => {
-    setNotifyOptin((prev) => {
-      const next = !prev;
-      try {
-        if (next) {
-          localStorage.setItem(NOTIFY_OPTIN_KEY, "1");
-          // best-effort 申请浏览器通知权限；拒绝/不支持不回滚，页内 toast 仍可用。
-          if (typeof Notification !== "undefined" && Notification.requestPermission) {
-            void Notification.requestPermission();
-          }
-        } else {
-          localStorage.removeItem(NOTIFY_OPTIN_KEY);
-        }
-      } catch {
-        /* localStorage 不可用时仅内存态，忽略 */
-      }
-      return next;
-    });
-  }, []);
+    const next = !notifyOptin;
+    writeNotifyOptin(next);
+    onNotifyOptinChange(next);
+    if (next) void requestNotifySystemPermission();
+  }, [notifyOptin, onNotifyOptinChange]);
 
-  return (
-    <div className="settings-overlay" role="dialog" aria-modal="true" aria-label={t("App.settings.title")} onClick={onClose}>
-      <div className="settings-panel" ref={panelRef} tabIndex={-1} onClick={(e) => e.stopPropagation()}>
-        <header className="settings-head">
-          <h2 className="settings-title">{t("App.settings.title")}</h2>
-          <button type="button" className="settings-close" aria-label={t("App.settings.close")} onClick={onClose}>
-            ×
-          </button>
-        </header>
-
-        <section className="settings-section">
-          <div className="settings-label">{t("App.settings.language")}</div>
-          <LanguageSwitcher />
-        </section>
-
-        <section className="settings-section">
-          <div className="settings-label">{t("App.settings.theme")}</div>
-          <div className="settings-theme" role="group" aria-label={t("App.settings.theme")}>
-            {SUPPORTED_THEMES.map((option) => (
-              <button
-                key={option.code}
-                type="button"
-                data-theme-code={option.code}
-                className={"settings-theme-btn" + (option.code === theme ? " is-active" : "")}
-                aria-pressed={option.code === theme}
-                onClick={() => pickTheme(option.code)}
-              >
-                {t(option.labelKey)}
-              </button>
-            ))}
-          </div>
-        </section>
-
-        <section className="settings-section">
-          <div className="settings-label">{t("App.settings.notifications")}</div>
-          <button
-            type="button"
-            className={"settings-toggle" + (notifyOptin ? " is-on" : "")}
-            aria-pressed={notifyOptin}
-            onClick={toggleNotify}
-          >
-            <span className="settings-toggle-dot" aria-hidden="true" />
-            {notifyOptin ? t("App.settings.notify.on") : t("App.settings.notify.off")}
-          </button>
-          <p className="settings-hint">{t("App.settings.notify.hint")}</p>
-        </section>
-
-        {onShowOnboarding && (
+  const sections: SectionedDialogSection<SettingsSectionId>[] = [
+    {
+      id: "preferences",
+      label: t("App.settings.section.preferences"),
+      content: (
+        <>
+          <h3 className="settings-module-title">{t("App.settings.section.preferences")}</h3>
           <section className="settings-section">
-            <div className="settings-label">{t("App.settings.help")}</div>
-            <button type="button" className="d-btn settings-onboarding" onClick={onShowOnboarding}>
-              {t("App.settings.onboarding")}
-            </button>
+            <div className="settings-label">{t("App.settings.language")}</div>
+            <LanguageSwitcher />
           </section>
-        )}
 
-        {desktopSettings}
-
-        {me !== null && (
           <section className="settings-section">
-            <div className="settings-label">{t("App.settings.account")}</div>
+            <div className="settings-label">{t("App.settings.theme")}</div>
+            <div className="settings-theme" role="group" aria-label={t("App.settings.theme")}>
+              {SUPPORTED_THEMES.map((option) => (
+                <button
+                  key={option.code}
+                  type="button"
+                  data-theme-code={option.code}
+                  className={"settings-theme-btn" + (option.code === theme ? " is-active" : "")}
+                  aria-pressed={option.code === theme}
+                  onClick={() => pickTheme(option.code)}
+                >
+                  {t(option.labelKey)}
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-label">{t("App.settings.notifications")}</div>
+            <button
+              type="button"
+              className={"settings-toggle" + (notifyOptin ? " is-on" : "")}
+              aria-pressed={notifyOptin}
+              onClick={toggleNotify}
+            >
+              <span className="settings-toggle-dot" aria-hidden="true" />
+              {notifyOptin ? t("App.settings.notify.on") : t("App.settings.notify.off")}
+            </button>
+            <p className="settings-hint">{t("App.settings.notify.hint")}</p>
+          </section>
+        </>
+      ),
+    },
+  ];
+
+  if (me !== null) {
+    sections.push({
+      id: "account",
+      label: t("App.settings.section.account"),
+      content: (
+        <>
+          <h3 className="settings-module-title">{t("App.settings.section.account")}</h3>
+          <section className="settings-section">
             <div className="settings-account">
               <span className="settings-account-name">{me.display_name ?? me.handle ?? me.name}</span>
               <span className={`settings-account-chip settings-account-chip--${me.kind}`}>{me.kind}</span>
@@ -226,8 +155,45 @@ export function SettingsPanel({
               </button>
             )}
           </section>
-        )}
-      </div>
-    </div>
+        </>
+      ),
+    });
+  }
+
+  if (desktopAppSettings !== null) {
+    sections.push({
+      id: "desktop",
+      label: t("App.settings.section.desktop"),
+      content: desktopAppSettings,
+    });
+  }
+
+  if (onShowOnboarding !== undefined) {
+    sections.push({
+      id: "help",
+      label: t("App.settings.section.help"),
+      content: (
+        <>
+          <h3 className="settings-module-title">{t("App.settings.section.help")}</h3>
+          <section className="settings-section">
+            <button type="button" className="d-btn settings-onboarding" onClick={onShowOnboarding}>
+              {t("App.settings.onboarding")}
+            </button>
+          </section>
+        </>
+      ),
+    });
+  }
+
+  return (
+    <SectionedDialog
+      idPrefix="global-settings"
+      title={t("App.settings.title")}
+      closeLabel={t("App.settings.close")}
+      navigationLabel={t("App.settings.navigation")}
+      sections={sections}
+      initialSection={initialSection}
+      onClose={onClose}
+    />
   );
 }
