@@ -19,6 +19,17 @@ async function claim(ws: WsClient) {
   return ws.nextOfType("serve_lease");
 }
 
+async function claimWithRecovery(ws: WsClient) {
+  ws.send({
+    type: "hello",
+    since: 0,
+    directed_delivery: "v1",
+    delivery_recovery: "v1",
+  });
+  ws.send({ type: "serve_lease", op: "claim" });
+  return ws.nextOfType("serve_lease");
+}
+
 async function nextDeliveryState(
   ws: WsClient,
   deliveryId: string,
@@ -37,7 +48,12 @@ async function nextDeliveryState(
 
 async function deliveryRows(
   slug: string,
-): Promise<Array<DirectedDelivery & { lease_connection_id: string | null; lease_adapter: string | null; target_owner: string | null }>> {
+): Promise<Array<Omit<DirectedDelivery, "lease_token"> & {
+  lease_token: string | null;
+  lease_connection_id: string | null;
+  lease_adapter: string | null;
+  target_owner: string | null;
+}>> {
   const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
   return runInDurableObject(stub, async (_instance: ChannelDO, state) =>
     state.storage.sql
@@ -51,6 +67,7 @@ async function deliveryRows(
         cause: String(row.cause) as DirectedDelivery["cause"],
         state: String(row.state) as DirectedDelivery["state"],
         attempt: Number(row.attempt),
+        lease_token: row.lease_token === null ? null : String(row.lease_token),
         lease_until: row.lease_until === null ? null : Number(row.lease_until),
         lease_connection_id: row.lease_connection_id === null ? null : String(row.lease_connection_id),
         lease_adapter: row.lease_adapter === null ? null : String(row.lease_adapter),
@@ -682,7 +699,7 @@ describe("持久定向投递（issue #551）", () => {
     serve.close();
   });
 
-  it("holder 断连后保留可恢复 claim，到固定租约过期才由 standby 接管", async () => {
+  it("未声明 recovery 的 v1 holder 不拿 token，断连后立即 requeue 给 standby", async () => {
     const sender = await seedToken("agent", uniq("sender"));
     const target = await seedToken("agent", uniq("target"));
     const slug = await createChannel(sender.token);
@@ -693,8 +710,49 @@ describe("持久定向投递（issue #551）", () => {
     await standby.nextOfType("welcome");
     expect((await claim(standby)).held).toBe(false);
 
+    const posted = await sendMention(slug, sender.token, target.name, "legacy v1 disconnect");
+    const firstAttempt = await holder.nextOfType("delivery");
+    expect(firstAttempt.delivery.lease_token).toBeUndefined();
+    expect((await deliveryRows(slug))[0]).toMatchObject({
+      id: firstAttempt.delivery.id,
+      state: "claimed",
+      attempt: 1,
+      lease_token: null,
+    });
+
+    holder.close();
+    expect((await standby.nextOfType("serve_lease")).held).toBe(true);
+    const retry = await standby.nextOfType("delivery");
+    expect(retry.delivery).toMatchObject({
+      id: firstAttempt.delivery.id,
+      message_seq: posted.seq,
+      cause: "retry",
+      state: "claimed",
+      attempt: 2,
+    });
+    expect(retry.delivery.lease_token).toBeUndefined();
+    expect((await deliveryRows(slug))[0]).toMatchObject({
+      state: "claimed",
+      attempt: 2,
+      lease_token: null,
+    });
+    standby.close();
+  });
+
+  it("声明 recovery 的 holder 断连后保留 token claim，到固定租约过期才由 standby 接管", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("target"));
+    const slug = await createChannel(sender.token);
+    const holder = await WsClient.open(slug, target.token);
+    await holder.nextOfType("welcome");
+    expect((await claimWithRecovery(holder)).held).toBe(true);
+    const standby = await WsClient.open(slug, target.token);
+    await standby.nextOfType("welcome");
+    expect((await claimWithRecovery(standby)).held).toBe(false);
+
     const posted = await sendMention(slug, sender.token, target.name, "survive disconnect");
     const firstAttempt = await holder.nextOfType("delivery");
+    expect(firstAttempt.delivery.lease_token).toEqual(expect.any(String));
     holder.close();
     expect((await standby.nextOfType("serve_lease")).held).toBe(true);
 
@@ -706,7 +764,11 @@ describe("持久定向投递（issue #551）", () => {
       id: firstAttempt.delivery.id,
       state: "claimed",
       attempt: 1,
+      lease_token: firstAttempt.delivery.lease_token,
     });
+    await expect(standby.nextOfType("delivery", 100)).rejects.toThrow(
+      "timeout waiting for frame",
+    );
     const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
     await runInDurableObject(stub, async (instance: ChannelDO, state) => {
       state.storage.sql.exec(

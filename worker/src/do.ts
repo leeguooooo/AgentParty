@@ -10050,7 +10050,14 @@ export class ChannelDO extends Server<Env> {
       const webhookHolder = adapter === "webhook" ? matchingWebhooks[0] : undefined;
       const holderId = connectionHolder?.id ?? this.webhookHolderId(webhookHolder!.registrationId);
       const leaseUntil = now + (adapter === "webhook" ? DIRECTED_WEBHOOK_LEASE_MS : DIRECTED_DELIVERY_LEASE_MS);
-      const leaseToken = crypto.randomUUID();
+      // Token-fenced ownership is opt-in per websocket. Older directed-delivery
+      // v1 consumers can execute/ACK a delivery, but cannot recover a claim
+      // after their socket disappears. Giving those consumers a token would
+      // make disconnect cleanup retain an unrecoverable claim for the full
+      // lease window. Webhooks likewise have no websocket recovery handshake.
+      const recoveryCapable =
+        connectionHolder?.state?.deliveryRecoveryV1 === true;
+      const leaseToken = recoveryCapable ? crypto.randomUUID() : null;
       const claim = this.ctx.storage.sql.exec(
         `UPDATE directed_deliveries
             SET state = 'claimed', attempt = attempt + 1,
@@ -10091,7 +10098,7 @@ export class ChannelDO extends Server<Env> {
       if (connectionHolder !== undefined) {
         this.sendFrame(connectionHolder, {
           type: "delivery",
-          delivery: this.rowToDirectedDelivery(claimed),
+          delivery: this.rowToDirectedDelivery(claimed, recoveryCapable),
           message: messageFrame,
         });
       } else {
