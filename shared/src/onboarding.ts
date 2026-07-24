@@ -1,5 +1,6 @@
 // 接入包（web AgentJoin / cli party invite）共用的生成规则。两条邀请路径发出的
 // 命令必须逐字节同语义——规则只放这一份，别在 web/cli 各自复刻（#585）。
+import type { ChannelDecisionRecord } from "./protocol";
 
 /**
  * MCP server 注册名：必须按 agent 唯一。同一目录跑多个 agent 时，固定叫 `party` 会让
@@ -21,6 +22,25 @@ export function charterSnapshotBodyLines(text: string): string[] {
     .replace(/\r\n?/g, "\n")
     .split("\n")
     .map((line) => line.replace(ANSI_CSI, "").replace(TERMINAL_CONTROL, ""));
+}
+
+function safeSnapshotLine(text: string): string {
+  return charterSnapshotBodyLines(text)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** 当前 active 决策的紧凑、终端安全快照；调用方再统一加 shell 注释前缀。 */
+export function channelDecisionSnapshotBodyLines(decisions: readonly ChannelDecisionRecord[]): string[] {
+  if (decisions.length === 0) return [];
+  return [
+    "当前已定稿 / Active decisions（权威账本；变更请显式 supersede）",
+    ...decisions.map((decision) => {
+      const source = decision.source_seq === null ? "" : ` source=#${decision.source_seq}`;
+      return `- ${safeSnapshotLine(decision.topic)}: ${safeSnapshotLine(decision.summary)} [${safeSnapshotLine(decision.id)}]${source}`;
+    }),
+  ];
 }
 
 /** agent/成员名的合法形状（与 cli/src/validation.ts 的 NAME_RE 同一约束）。 */

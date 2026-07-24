@@ -4,12 +4,20 @@
 //   mode    切频道决策模式：approval（人类审批）↔ unattended（无人值守，自动放行）
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
 import { advanceCursorPastOwnMessage, resolveChannel } from "../config";
-import { formatMsg, stripTerminalControls } from "../format";
+import { formatMsg, sanitizeSingleLine, stripTerminalControls } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
-import { fetchMessages, handleRestError, postMessage, respondDecision, setDecisionMode } from "../rest";
+import {
+  fetchMessages,
+  handleRestError,
+  listChannelDecisions,
+  postMessage,
+  recordChannelDecision,
+  respondDecision,
+  setDecisionMode,
+} from "../rest";
 import type { DecisionMode, DecisionRequest, DecisionResolution, MsgFrame } from "@agentparty/shared";
-import { isName, isSlug } from "../validation";
+import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import {
@@ -25,6 +33,8 @@ const HELP = `usage:
   party decision ask <prompt|-> [--channel C] [--option opt]... [--body text|-] [--mention name]... [--wait] [--json]
   party decision respond <seq> <approve|reject|N|text> [-m reason] [--channel C] [--json]
   party decision mode approval|unattended [--channel C] [--json]
+  party decision list [--all] [--channel C] [--json]
+  party decision record <topic> -m "summary" [--source-seq N] [--supersedes ID] [--channel C] [--json]
 
 ask     upload a plan/question for a human to approve/reject or answer 1/2/3.
         With no --option it is an approve/reject request; --option turns it into
@@ -33,6 +43,8 @@ ask     upload a plan/question for a human to approve/reject or answer 1/2/3.
 respond a human (or moderator) settles a pending decision. Positional choice is
         approve|reject for approval requests, or a 1-based index / option text.
 mode    approval keeps requests pending for a human; unattended auto-resolves.
+list    show the channel's authoritative active decisions; --all includes up to 200 recent history rows.
+record  append an owner/assigned-host decision. An existing topic must be changed with --supersedes.
 
 Options:
   --channel C     act in channel C instead of the bound channel
@@ -40,12 +52,17 @@ Options:
   --body text|-   plan body (defaults to the prompt); "-" reads stdin
   --mention name  mention on the request; repeatable
   --wait          (ask) block until the decision resolves
-  -m, --message   (respond) reject reason / note
+  -m, --message   (respond) reject reason / note; (record) decision summary
+  --source-seq N  (record) source message/evidence seq
+  --supersedes ID (record) active decision id being replaced
+  --all           (list) include superseded history
   --json          emit frames as json`;
 
 const ASK_FLAGS = ["channel", "option", "body", "mention", "wait", "json"];
 const RESPOND_FLAGS = ["channel", "message", "json"];
 const MODE_FLAGS = ["channel", "json"];
+const LIST_FLAGS = ["channel", "json", "all"];
+const RECORD_FLAGS = ["channel", "json", "message", "source-seq", "supersedes"];
 const WAIT_TIMEOUT_MS = 240_000;
 const WAIT_POLL_MS = 2_000;
 
@@ -481,6 +498,107 @@ async function runMode(argv: string[]): Promise<number> {
   }
 }
 
+async function runList(argv: string[]): Promise<number> {
+  const { flags } = parseArgs(argv, { booleans: ["json", "all"] });
+  const unknown = unknownFlagError(flags, LIST_FLAGS);
+  if (unknown !== null) {
+    console.error(unknown);
+    return 1;
+  }
+  const flagError = valueFlagError(flags, ["channel"]);
+  if (flagError !== null) {
+    console.error(flagError);
+    return 1;
+  }
+  const channel = resolveSlug(flags);
+  if (!channel) return 1;
+  const auth = await resolveAuth();
+  if (!auth) {
+    console.error("no config, run: party login or party init --server URL --token T");
+    return 1;
+  }
+  try {
+    const { decisions, truncated } = await listChannelDecisions(
+      auth.server,
+      auth.token,
+      channel,
+      flags.all === true ? "all" : "active",
+    );
+    if (flags.json === true) {
+      console.log(JSON.stringify({ type: "channel_decision_list", channel, decisions, truncated }));
+      return 0;
+    }
+    console.log(
+      `${flags.all === true ? "recent decision ledger" : "active decisions"}: ${decisions.length}${truncated ? " (truncated)" : ""}`,
+    );
+    for (const decision of decisions) {
+      const source = decision.source_seq === null ? "" : ` source=#${decision.source_seq}`;
+      const superseded = decision.superseded_by_id === null ? "" : ` superseded_by=${decision.superseded_by_id}`;
+      console.log(
+        sanitizeSingleLine(
+          `- ${decision.id} ${decision.status} [${decision.topic}] ${decision.summary}${source}${superseded}`,
+        ),
+      );
+    }
+    return 0;
+  } catch (error) {
+    return handleRestError(error);
+  }
+}
+
+async function runRecord(argv: string[]): Promise<number> {
+  const { positionals, flags } = parseArgs(argv, {
+    booleans: ["json"],
+    aliases: { m: "message" },
+  });
+  const unknown = unknownFlagError(flags, RECORD_FLAGS);
+  if (unknown !== null) {
+    console.error(unknown);
+    return 1;
+  }
+  const flagError = valueFlagError(flags, ["channel", "message", "source-seq", "supersedes"]);
+  if (flagError !== null) {
+    console.error(flagError);
+    return 1;
+  }
+  const topic = positionals[0]?.trim();
+  const summary = str(flags.message)?.trim();
+  if (!topic || !summary) {
+    console.error('usage: party decision record <topic> -m "summary" [--source-seq N] [--supersedes ID]');
+    return 1;
+  }
+  const sourceSeq = parsePositiveIntFlag(str(flags["source-seq"]), "source-seq", Number.MAX_SAFE_INTEGER);
+  if (typeof sourceSeq === "string") {
+    console.error(sourceSeq);
+    return 1;
+  }
+  const supersedes = str(flags.supersedes);
+  if (supersedes !== undefined && !/^decision_[a-f0-9]{32}$/u.test(supersedes)) {
+    console.error("--supersedes must be a decision id");
+    return 1;
+  }
+  const channel = resolveSlug(flags);
+  if (!channel) return 1;
+  const auth = await resolveAuth();
+  if (!auth) {
+    console.error("no config, run: party login or party init --server URL --token T");
+    return 1;
+  }
+  try {
+    const decision = await recordChannelDecision(auth.server, auth.token, channel, {
+      topic,
+      summary,
+      ...(sourceSeq === undefined ? {} : { source_seq: sourceSeq }),
+      ...(supersedes === undefined ? {} : { supersedes_id: supersedes }),
+    });
+    if (flags.json === true) console.log(JSON.stringify(decision));
+    else console.log(sanitizeSingleLine(`decision recorded ${decision.id} [${decision.topic}] ${decision.summary}`));
+    return 0;
+  } catch (error) {
+    return handleRestError(error);
+  }
+}
+
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
@@ -494,8 +612,12 @@ export async function run(argv: string[]): Promise<number> {
       return runRespond(rest);
     case "mode":
       return runMode(rest);
+    case "list":
+      return runList(rest);
+    case "record":
+      return runRecord(rest);
     default:
-      console.error("usage: party decision ask|respond|mode ...");
+      console.error("usage: party decision ask|respond|mode|list|record ...");
       console.log(HELP);
       return 1;
   }

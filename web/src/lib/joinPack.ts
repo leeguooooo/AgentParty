@@ -2,7 +2,7 @@
 // （AgentTokens）都调这一份，两个入口的产物从结构上逐字节同构，杜绝再漂移（#584 复盘）。
 // 独立成模块而不放 agentTokenVault：AgentJoin 的测试整体 mock 了 vault 模块，
 // builder 放那边会让组件测试拿到假实现。
-import { AGENT_NAME_RE, charterSnapshotBodyLines, mcpServerName } from "@agentparty/shared/onboarding";
+import { AGENT_NAME_RE, channelDecisionSnapshotBodyLines, charterSnapshotBodyLines, mcpServerName } from "@agentparty/shared/onboarding";
 import type { ChannelCharter } from "./api";
 import type { DesktopAgentRunner } from "./desktopAgent";
 import type { TFunc } from "../i18n/useT";
@@ -24,12 +24,21 @@ export const VERSION_GE_SNIPPET =
 // 的 RCE）。每行加 "# " 前缀让内容只可读、不可执行；空行补 "#" 防止段落断开处漏出裸行；
 // 正文先过 charterSnapshotBodyLines 剥控制字节（ESC/CSI/CR 能视觉覆盖注释前缀，见 shared 注释）。
 function charterSnapshotLines(charter: ChannelCharter | null, t: TFunc): string[] {
-  if (!charter?.charter) return [];
+  const charterLines = charter?.charter
+    ? [
+        t("AgentJoin.cmd.charterBegin"),
+        ...charterSnapshotBodyLines(charter.charter).map((line) => (line === "" ? "#" : `# ${line}`)),
+        t("AgentJoin.cmd.charterEnd"),
+      ]
+    : [];
+  const decisionLines = channelDecisionSnapshotBodyLines(charter?.active_decisions ?? [])
+    .map((line) => `# ${line}`);
+  if (charterLines.length === 0 && decisionLines.length === 0) return [];
   return [
     t("AgentJoin.cmd.charterHeader"),
-    t("AgentJoin.cmd.charterBegin"),
-    ...charterSnapshotBodyLines(charter.charter).map((line) => (line === "" ? "#" : `# ${line}`)),
-    t("AgentJoin.cmd.charterEnd"),
+    ...charterLines,
+    ...(charterLines.length > 0 && decisionLines.length > 0 ? ["#"] : []),
+    ...decisionLines,
     ``,
   ];
 }

@@ -21,7 +21,7 @@ commands:
   send      <text|-> [--channel C] [--mention name]... [--reply-to seq]
   complete  <text|-> --kickoff-seq seq [--channel C] [--replies n] [--timeout] [--issue n]... [--pr n]...
   review    approve|reject <seq> [-m reason] [--channel C] [--json]
-  decision  ask <prompt> [--option opt]... [--wait] | respond <seq> approve|reject|N | mode approval|unattended [--channel C]
+  decision  ask|respond|mode (human approval) | list|record (authoritative channel ledger)
   edit      <seq> <text|-> [--channel C] [--json]
   retract   <seq> [--channel C] [--json]
   supersede <seq> <text|-> [--channel C] [--json]

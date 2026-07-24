@@ -4,6 +4,7 @@ import {
   type Attachment,
   type CaptureKind,
   type CaptureRecord,
+  type ChannelDecisionRecord,
   type ChannelKind,
   type ChannelMode,
   type ChannelRoleAssignment,
@@ -41,6 +42,7 @@ import { stripTerminalControls } from "./format";
 export type { ChannelMode, WebhookFilter };
 export type { CompletionGate, CompletionReview, CompletionReviewPolicy };
 export type { CaptureKind, CaptureRecord };
+export type { ChannelDecisionRecord };
 export type { TaskAssigneeKind, TaskRecord, TaskState };
 export type { ChannelSquad };
 
@@ -73,6 +75,8 @@ export interface ChannelCharter {
   charter_rev: number;
   updated_at: number | null;
   updated_by: string | null;
+  /** 旧 Worker 缺省；新版始终返回全部 active 决策（服务端限制最多 100 条）。 */
+  active_decisions?: ChannelDecisionRecord[];
   permissions?: ChannelPerms;
 }
 
@@ -914,6 +918,36 @@ export async function setDecisionMode(
   })) as { mode: DecisionMode };
 }
 
+export async function listChannelDecisions(
+  server: string,
+  token: string,
+  slug: string,
+  status: "active" | "all" = "active",
+): Promise<{ decisions: ChannelDecisionRecord[]; truncated: boolean }> {
+  const body = (await req(
+    server,
+    `/api/channels/${encodeURIComponent(slug)}/decisions?status=${status}&limit=${status === "active" ? 100 : 200}`,
+    { headers: bearerJson(token) },
+  )) as { decisions?: ChannelDecisionRecord[]; truncated?: boolean };
+  return {
+    decisions: Array.isArray(body.decisions) ? body.decisions : [],
+    truncated: body.truncated === true,
+  };
+}
+
+export async function recordChannelDecision(
+  server: string,
+  token: string,
+  slug: string,
+  input: { topic: string; summary: string; source_seq?: number; supersedes_id?: string },
+): Promise<ChannelDecisionRecord> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/decisions`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify(input),
+  })) as ChannelDecisionRecord;
+}
+
 export async function fetchWakeDeliveries(
   server: string,
   token: string,
@@ -1248,6 +1282,8 @@ export async function postMessage(
   seq: number;
   /** 正文便利提取里服务端未能路由、已降级为文本的 token（#663）；空/缺省=无。 */
   unresolved_mentions?: string[];
+  /** self-host 与 owner 指派 host 冲突；发送成功但应直接展示给调用者。 */
+  role_warning?: string;
   completion_review?: CompletionReview;
   decision_request?: DecisionRequest;
   decision_resolution?: DecisionResolution;
@@ -1264,6 +1300,8 @@ export async function postMessage(
     signal,
   })) as {
     seq: number;
+    unresolved_mentions?: string[];
+    role_warning?: string;
     completion_review?: CompletionReview;
     decision_request?: DecisionRequest;
     decision_resolution?: DecisionResolution;

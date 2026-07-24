@@ -1,7 +1,7 @@
 // rest 封装 + token 存取。
 // 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它，并立即从地址栏移除；
 // share token 只放 sessionStorage，本次标签页可刷新，避免长期落 localStorage。
-import type { Attachment, ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, ParticipantRemovedFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, TaskSummary, WakeDelivery } from "@agentparty/shared";
+import type { Attachment, ChannelDecisionRecord, ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, ParticipantRemovedFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, TaskSummary, WakeDelivery } from "@agentparty/shared";
 import { apiUrl } from "./base";
 import { isTauriEnvironment } from "./desktopUpdater";
 import type { WebSession } from "./oidc";
@@ -291,6 +291,7 @@ export interface ChannelCharter {
   charter_rev: number;
   updated_at: number | null;
   updated_by: string | null;
+  active_decisions?: ChannelDecisionRecord[];
 }
 
 export interface ChannelIdentity {

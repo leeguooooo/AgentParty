@@ -79,6 +79,18 @@ const required = {
     "completed_at",
   ],
   channel_roles: ["channel_slug", "agent_name", "role", "assigned_by", "assigned_at"],
+  channel_decisions: [
+    "id",
+    "channel_slug",
+    "topic",
+    "summary",
+    "source_seq",
+    "supersedes_id",
+    "created_by",
+    "created_by_kind",
+    "created_at",
+  ],
+  channel_decision_heads: ["channel_slug", "topic", "decision_id"],
   agent_profiles: [
     "owner_account",
     "handle",
@@ -168,12 +180,20 @@ const required = {
 };
 
 const requiredIndexes = {
+  channel_decisions: [
+    "idx_channel_decisions_supersedes",
+    "idx_channel_decisions_channel_created",
+  ],
   desktop_token_recoveries: ["idx_desktop_token_recoveries_expires_at"],
   management_audit: [
     "idx_management_audit_cursor_token",
     "idx_management_audit_timestamp",
     "idx_management_audit_channel",
   ],
+};
+
+const requiredTriggers = {
+  channel_decisions: ["channel_decisions_validate_insert"],
 };
 
 function run(args) {
@@ -237,4 +257,28 @@ for (const [table, indexes] of Object.entries(requiredIndexes)) {
   }
 }
 
-console.log(JSON.stringify({ ok: true, database, tables: Object.keys(required), indexes: requiredIndexes }));
+for (const [table, triggers] of Object.entries(requiredTriggers)) {
+  const output = run([
+    "d1",
+    "execute",
+    database,
+    "--remote",
+    "--json",
+    "--command",
+    `SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = '${table}'`,
+  ]);
+  const rows = parseD1Json(output).flatMap((entry) => entry.results ?? []);
+  const names = new Set(rows.map((row) => row.name));
+  const missing = triggers.filter((trigger) => !names.has(trigger));
+  if (missing.length > 0) {
+    throw new Error(`${table} missing triggers: ${missing.join(", ")}`);
+  }
+}
+
+console.log(JSON.stringify({
+  ok: true,
+  database,
+  tables: Object.keys(required),
+  indexes: requiredIndexes,
+  triggers: requiredTriggers,
+}));

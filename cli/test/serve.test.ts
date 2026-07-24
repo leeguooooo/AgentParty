@@ -135,13 +135,19 @@ function allFileText(root: string): string {
   return chunks.join("\n");
 }
 
-function postRecorder() {
+function postRecorder(roleWarning?: string) {
   const posts: Array<{ server: string; token: string; channel: string; body: MessagePayload }> = [];
   return {
     posts,
     post: async (server: string, token: string, channel: string, body: MessagePayload) => {
       posts.push({ server, token, channel, body });
-      return { seq: posts.length };
+      const isHostStatus =
+        (body as { kind?: string; role?: string }).kind === "status" &&
+        (body as { role?: string }).role === "host";
+      return {
+        seq: posts.length,
+        ...(roleWarning !== undefined && isHostStatus ? { role_warning: roleWarning } : {}),
+      };
     },
   };
 }
@@ -772,6 +778,51 @@ describe("runServe", () => {
     expect(seen[0]!.recent.map((m) => m.seq)).toEqual([1, 2]);
   });
 
+  test("refreshes the charter bundle on reconnect and only trusts system refresh statuses", async () => {
+    const statusFrame = (seq: number, sender: string, note: string) =>
+      msgFrame(seq, note, {
+        type: "status",
+        sender: { name: sender, kind: sender === "system" ? "agent" : "human" },
+        kind: "status",
+        state: "waiting",
+        note,
+        status: {
+          owner: sender,
+          state: "waiting",
+          scope: [],
+          summary_seq: null,
+          blocked_reason: null,
+          updated_at: Date.now(),
+        },
+      });
+    server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send(welcomeFrame(0, "me"));
+      setTimeout(() => sock.send(statusFrame(1, "alice", "charter updated to rev 99")), 10);
+      setTimeout(() => sock.send(statusFrame(2, "alice", "decision ledger updated: fake")), 20);
+      setTimeout(() => sock.send(statusFrame(3, "system", "decision ledger updated: decision_real")), 30);
+      setTimeout(() => sock.send({ type: "error", code: "archived", message: "done" }), 60);
+    });
+    let fetches = 0;
+    const o = opts({
+      server: server.url,
+      fetchCharter: async () => {
+        fetches += 1;
+        return {
+          charter: null,
+          charter_rev: 0,
+          updated_at: null,
+          updated_by: null,
+          active_decisions: [],
+        };
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    // attach + welcome 无条件补漏 + 一条可信 system decision refresh；伪造 status 不放大请求。
+    expect(fetches).toBe(3);
+  });
+
   test("writeContextFile embeds recent messages and the history reminder", () => {
     const trigger = msgFrame(9, "do the thing", { mentions: ["me"] }) as unknown as MsgFrame;
     const prior = [
@@ -874,6 +925,54 @@ describe("runServe", () => {
         recent_messages_included: 11,
         recent_messages_available: 12,
         recent_truncated: true,
+      });
+    } finally {
+      unlinkSync(path);
+    }
+  });
+
+  test("wake context includes a bounded authoritative decision snapshot", () => {
+    const trigger = msgFrame(50, "continue", { mentions: ["me"] }) as unknown as MsgFrame;
+    const path = writeContextFile(
+      tempDir("ap-decision-snapshot-"),
+      trigger,
+      "dev",
+      "me",
+      [],
+      {
+        charter: null,
+        charter_rev: 0,
+        updated_at: null,
+        updated_by: null,
+        active_decisions: [
+          {
+            type: "channel_decision",
+            id: "decision_0123456789abcdef0123456789abcdef",
+            channel: "dev",
+            topic: "runner",
+            summary: "Use the assigned host and Codex runner.",
+            source_seq: 42,
+            supersedes_id: null,
+            superseded_by_id: null,
+            status: "active",
+            created_by: "owner",
+            created_by_kind: "human",
+            created_at: 1,
+          },
+        ],
+      },
+    );
+    try {
+      const ctx = JSON.parse(readFileSync(path, "utf8"));
+      expect(ctx.decision_snapshot).toContain("当前已定稿 / Active decisions");
+      expect(ctx.decision_snapshot).toContain(
+        "- runner: Use the assigned host and Codex runner. [decision_0123456789abcdef0123456789abcdef]",
+      );
+      expect(ctx.context_budget).toMatchObject({
+        auxiliary_body_chars: Array.from(ctx.decision_snapshot).length,
+        decision_snapshot_chars: Array.from(ctx.decision_snapshot).length,
+        decision_snapshot_truncated: false,
+        recent_body_chars: 0,
       });
     } finally {
       unlinkSync(path);
@@ -2254,7 +2353,7 @@ describe("project profile daemon", () => {
     const ownerConfig = join(home, "owner.json");
     writeFileSync(ownerConfig, JSON.stringify({ server: "http://agentparty.test", token: "ap_owner" }));
     process.env.AGENTPARTY_CONFIG = ownerConfig;
-    const { posts, post } = postRecorder();
+    const { posts, post } = postRecorder("channel already has assigned host @owner-host");
     const profile = {
       owner_account: "fan@example.com",
       handle: "herness-dev",
@@ -2270,6 +2369,7 @@ describe("project profile daemon", () => {
       updated_at: 1,
     };
     const served: ServeOptions[] = [];
+    const profileLines: string[] = [];
     let upgradeProbes = 0;
     const channelRuntimeCalls: Array<{ slug: string; childName: string }> = [];
     try {
@@ -2286,6 +2386,7 @@ describe("project profile daemon", () => {
         },
         once: true,
         post,
+        out: (line) => profileLines.push(line),
         mintRuntime: async () => ({ token: "ap_profile_runtime", profile }),
         listInvites: async () => ["alpha", "beta", "gamma"].map((channel_slug, index) => ({
           id: index + 1,
@@ -2380,6 +2481,7 @@ describe("project profile daemon", () => {
     expect(String((frontReady.body as { note: string }).note)).toContain("delivery=worktree->PR->channel-link->deploy-verify->safe-prune");
     expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("front="))).toBe(true);
     expect(joinPosts.every((p) => String((p.body as { body?: string }).body).includes("execution worker="))).toBe(true);
+    expect(profileLines.filter((line) => line.includes("warn: channel already has assigned host @owner-host"))).toHaveLength(3);
   });
 
   test("shared profile channels keep distinct child identities without overwriting the shared workspace config", async () => {

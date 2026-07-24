@@ -218,6 +218,8 @@ type SendSuccessOutcome =
        * 回执 SentFrame.undeliverable_mentions 的来源，空=省略。人为 paused（#180）不计入。
        */
       undeliverableMentions?: string[];
+      /** self-host 与 owner 指派 host 冲突；发送成功但调用方必须直接提示。 */
+      roleWarning?: string;
     };
 
 type SendOutcome =
@@ -2348,24 +2350,31 @@ export class ChannelDO extends Server<Env> {
     await this.ensureAlarmAt(connectedAt + HELLO_TIMEOUT_MS);
   }
 
-  async onMessage(connection: Connection<ConnState>, message: WSMessage) {
+  private runConnectionSerial(
+    connection: Connection<ConnState>,
+    action: () => void | Promise<void>,
+  ): Promise<void> {
     const previous = this.wsMessageTails.get(connection.id) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
-      .then(() => this.onMessageSerial(connection, message));
+      .then(action);
     this.wsMessageTails.set(connection.id, current);
+    return current.finally(() => {
+      if (this.wsMessageTails.get(connection.id) === current) {
+        this.wsMessageTails.delete(connection.id);
+      }
+    });
+  }
+
+  async onMessage(connection: Connection<ConnState>, message: WSMessage) {
     try {
-      await current;
+      await this.runConnectionSerial(connection, () => this.onMessageSerial(connection, message));
     } catch (err) {
       // DO 抛未捕获异常时 Cloudflare 只回不透明的 "internal error; reference"，不留任何应用日志
       // （kyc/seamail 那次 30 分钟只能靠猜就是因为这里没日志）。落一条带频道/连接的真实堆栈，
       // 让下次同类故障在 wrangler tail 里直接可诊断；行为不变，照旧向上抛。
       logDoException("onMessage", this.name, err, `conn=${connection.id}`);
       throw err;
-    } finally {
-      if (this.wsMessageTails.get(connection.id) === current) {
-        this.wsMessageTails.delete(connection.id);
-      }
     }
   }
 
@@ -2645,6 +2654,7 @@ export class ChannelDO extends Server<Env> {
         this.sendFrame(connection, {
           type: "sent",
           seq: out.seq,
+          ...(out.roleWarning === undefined ? {} : { role_warning: out.roleWarning }),
           ...(out.undeliverableMentions !== undefined && out.undeliverableMentions.length > 0
             ? { undeliverable_mentions: out.undeliverableMentions }
             : {}),
@@ -2660,6 +2670,7 @@ export class ChannelDO extends Server<Env> {
       this.sendFrame(connection, {
         type: "sent",
         seq: out.seq,
+        ...(out.roleWarning === undefined ? {} : { role_warning: out.roleWarning }),
         ...(out.unresolvedMentions !== undefined && out.unresolvedMentions.length > 0
           ? { unresolved_mentions: out.unresolvedMentions }
           : {}),
@@ -3839,6 +3850,13 @@ export class ChannelDO extends Server<Env> {
     }
     const decisionMode = h.get("x-ap-decision-mode");
     if (decisionMode === "approval" || decisionMode === "unattended") this.setMeta("decision_mode", decisionMode);
+    // #736：D1 的 owner 指派 host 是权威角色锚点。Worker 对 REST/WS 入场显式带此头
+    // （空串 = 当前没有 assigned host），角色管理路由还会经 /internal/roles 立即刷新。
+    if (h.has("x-ap-assigned-host")) {
+      const assignedHost = h.get("x-ap-assigned-host") ?? "";
+      if (assignedHost === "") this.deleteMeta("assigned_host");
+      else if (MENTION_NAME_RE.test(assignedHost)) this.setMeta("assigned_host", assignedHost);
+    }
     // #381：缓存频道可见性，供 handleSend 判 public_watch 写门。缺失/非法值不覆盖已缓存值
     // （旧路径不带此头时保留旧值；PUT visibility 会经 /internal/init 权威刷新）。
     const visibility = h.get("x-ap-visibility");
@@ -6387,6 +6405,7 @@ export class ChannelDO extends Server<Env> {
       const sent = out.frames[0] as MsgFrame;
       return Response.json({
         seq: out.seq,
+        ...(out.roleWarning === undefined ? {} : { role_warning: out.roleWarning }),
         // #663：正文便利提取未能路由、已降级为文本的 token；CLI 据此打非阻断 warning，不影响发送成功。
         ...(out.unresolvedMentions !== undefined && out.unresolvedMentions.length > 0
           ? { unresolved_mentions: out.unresolvedMentions }
@@ -6482,12 +6501,56 @@ export class ChannelDO extends Server<Env> {
       return Response.json({ name: body.name, url: body.url, filter: body.filter, mode }, { status: 201 });
     }
     if (url.pathname === "/internal/roles" && request.method === "POST") {
-      const body = (await request.json().catch(() => null)) as { name?: unknown; role?: unknown } | null;
+      const body = (await request.json().catch(() => null)) as {
+        name?: unknown;
+        role?: unknown;
+        assigned_owner?: unknown;
+        assigned_host?: unknown;
+      } | null;
       const name = typeof body?.name === "string" ? body.name : "";
       const role = body?.role === null ? null : parseCollaborationRole(body?.role);
-      if (!name || role === undefined) {
+      const assignedOwner =
+        body?.assigned_owner === null
+          ? null
+          : typeof body?.assigned_owner === "string" && body.assigned_owner.length > 0
+            ? body.assigned_owner
+            : undefined;
+      const assignedHost =
+        body?.assigned_host === null
+          ? null
+          : typeof body?.assigned_host === "string" && MENTION_NAME_RE.test(body.assigned_host)
+            ? body.assigned_host
+            : undefined;
+      if (
+        !name ||
+        role === undefined ||
+        assignedOwner === undefined ||
+        (role !== null && assignedOwner === null) ||
+        assignedHost === undefined
+      ) {
         return Response.json({ error: { code: "bad_request", message: "invalid role assignment" } }, { status: 400 });
       }
+      if (assignedHost === null) this.deleteMeta("assigned_host");
+      else this.setMeta("assigned_host", assignedHost);
+      // D1 role 是权威；已连接 socket 的身份快照也必须同步，否则改派后旧连接仍以旧 host
+      // 权限/徽章继续发送，既绕过 self-host guard，又把 presence 回滚成 host。角色变更与每条
+      // socket 的消息共用一条串行队列，避免 hello/send 在 await 后用旧 state 覆盖新角色。
+      const roleUpdates: Promise<void>[] = [];
+      for (const connection of this.getConnections<ConnState>()) {
+        const state = connection.state;
+        if (state?.name !== name) continue;
+        roleUpdates.push(this.runConnectionSerial(connection, () => {
+          const current = connection.state;
+          if (current?.name !== name) return;
+          if (role !== null && current.owner !== assignedOwner) return;
+          connection.setState({
+            ...current,
+            collabRole: role ?? undefined,
+            collabRoleSource: role === null ? undefined : "assigned",
+          });
+        }));
+      }
+      await Promise.all(roleUpdates);
       if (role === null) {
         this.ctx.storage.sql.exec(
           "UPDATE presence SET role = NULL, role_source = NULL WHERE name = ? AND role_source = 'assigned'",
@@ -7616,6 +7679,14 @@ export class ChannelDO extends Server<Env> {
     if (!(await this.isTokenActive(identity.tokenHash))) {
       return { ok: false, code: "unauthorized", message: "invalid or revoked token" };
     }
+    const assignedHost = this.getMeta("assigned_host");
+    const roleWarning =
+      frame.kind === "status" &&
+      frame.role === "host" &&
+      identity.collabRole !== "host" &&
+      assignedHost !== null
+      ? `channel already has assigned host @${assignedHost}; ask the owner to reassign before taking host, or report --role worker`
+      : undefined;
     const privateDecisionRequest =
       frame.kind === "message" ? (frame.decision_request as DecisionRequest | undefined) : undefined;
     if (options.expectedDecisionResponderOwner !== undefined) {
@@ -7669,6 +7740,7 @@ export class ChannelDO extends Server<Env> {
           seq: Number(priorRow.seq),
           frames: [this.rowToFrame(priorRow)],
           deduped: true,
+          ...(roleWarning === undefined ? {} : { roleWarning }),
           ...(dedupUndeliverable.length > 0 ? { undeliverableMentions: dedupUndeliverable } : {}),
         };
       }
@@ -8155,6 +8227,7 @@ export class ChannelDO extends Server<Env> {
       frames,
       deliveryTargets,
       deliveryTargetOwners,
+      ...(roleWarning === undefined ? {} : { roleWarning }),
       ...(unresolvedBodyMentions.length > 0 ? { unresolvedMentions: unresolvedBodyMentions } : {}),
       ...(undeliverableMentions.length > 0 ? { undeliverableMentions } : {}),
     };

@@ -1,6 +1,7 @@
 // party mcp — stdio MCP server exposing AgentParty as structured tools.
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { MsgFrame, StatusState, TaskAssigneeKind, TaskState } from "@agentparty/shared";
+import type { ChannelDecisionRecord, MsgFrame, StatusState, TaskAssigneeKind, TaskState } from "@agentparty/shared";
+import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -314,9 +315,13 @@ async function charterData(channel: string): Promise<Record<string, unknown>> {
 
 function charterText(data: Record<string, unknown>): string {
   const charter = data.charter;
-  return typeof charter === "string" && charter.length > 0
+  const base = typeof charter === "string" && charter.length > 0
     ? charter
     : `# ${String(data.channel)} charter not set (rev ${String(data.charter_rev ?? 0)})`;
+  const decisions = Array.isArray(data.active_decisions)
+    ? channelDecisionSnapshotBodyLines(data.active_decisions as ChannelDecisionRecord[])
+    : [];
+  return decisions.length === 0 ? base : `${base}\n\n${decisions.join("\n")}`;
 }
 
 export function createMcpServer(defaultChannel?: string): McpServer {

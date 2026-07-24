@@ -493,6 +493,7 @@ function CharterBanner({
 }) {
   const t = useT();
   const hasCharter = Boolean(charter?.charter);
+  const activeDecisions = charter?.active_decisions ?? [];
   return (
     <section className={"charter-banner" + (updated ? " charter-banner--updated" : "")}>
       <header className="charter-head">
@@ -547,6 +548,27 @@ function CharterBanner({
             )
           ) : (
             <p className="charter-empty">{t("Channel.charter.empty")}</p>
+          )}
+          {activeDecisions.length > 0 && (
+            <section className="charter-decisions" aria-label={t("Channel.charter.decisionsLabel")}>
+              <header className="charter-decisions-head">
+                <strong>{t("Channel.charter.decisionsLabel")}</strong>
+                <span>{t("Channel.charter.decisionsHelp")}</span>
+              </header>
+              <ul className="charter-decisions-list">
+                {activeDecisions.map((decision) => (
+                  <li key={decision.id}>
+                    <span className="t-mono charter-decision-topic">{decision.topic}</span>
+                    <span className="charter-decision-summary">{decision.summary}</span>
+                    <span className="t-mono charter-decision-meta">
+                      {decision.source_seq === null
+                        ? decision.id
+                        : `${t("Channel.charter.decisionSource", { seq: String(decision.source_seq) })} · ${decision.id}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
           )}
         </div>
       )}
@@ -3059,11 +3081,10 @@ export function ChannelPage({
   const [olderStatus, setOlderStatus] = useState<"idle" | "loading" | "error" | "end">("idle");
   const initialCursorRef = useRef(0); // ws hello 的起始游标 = 初始页最后一条 seq
   const initialHistoryRequestRef = useRef(0);
+  const charterRequestRef = useRef(0);
   const pendingAnchorRef = useRef<{ height: number; top: number } | null>(null); // prepend 前的滚动锚
   const oldestSeqRef = useRef(0);
-  const charterRevRef = useRef(0);
   oldestSeqRef.current = state.messages.length > 0 ? state.messages[0]!.seq : 0;
-  charterRevRef.current = charter?.charter_rev ?? 0;
   const removedMemberNames = useMemo(
     () => new Set(Object.keys(state.removedParticipants)),
     [state.removedParticipants],
@@ -3176,13 +3197,16 @@ export function ChannelPage({
   }, []);
 
   const loadCharter = useCallback(() => {
+    const requestId = ++charterRequestRef.current;
     return fetchChannelCharter(token, slug)
       .then((body) => {
+        if (requestId !== charterRequestRef.current) return;
         setCharter(body);
         setCharterDraft(body.charter ?? "");
         setCharterError(null);
       })
       .catch((err: unknown) => {
+        if (requestId !== charterRequestRef.current) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (!(err instanceof ForbiddenError)) setCharterError(tRef.current("Channel.charter.error.loadFailed"));
       });
@@ -3554,6 +3578,9 @@ export function ChannelPage({
     void loadIdentities();
     void loadRoles();
     void loadSquads();
+    return () => {
+      charterRequestRef.current += 1;
+    };
   }, [loadCharter, loadIdentities, loadRoles, loadSquads, slug]);
 
   // IM 式初始加载：先用 rest 拉最新一页（打开即到底部），把 ws 起始游标 seed 到页尾，
@@ -3650,13 +3677,24 @@ export function ChannelPage({
             });
           }
           observePendingDecisionFrame(frame);
-          if (frame.type === "welcome" && typeof frame.charter_rev === "number" && frame.charter_rev > charterRevRef.current) {
+          // decision ledger 不推进 charter_rev；重连必须无条件拉 bundle，避免断线期间的刷新
+          // status 已落在 since cursor 之前而永久保留旧 active_decisions。requestRef 防旧请求反盖。
+          if (frame.type === "welcome") {
             void loadCharter();
           }
           if (
             (frame.type === "msg" || frame.type === "status") &&
             frame.kind === "status" &&
+            frame.sender.name === "system" &&
             (frame.note ?? frame.body).startsWith("charter updated to rev ")
+          ) {
+            void loadCharter();
+          }
+          if (
+            (frame.type === "msg" || frame.type === "status") &&
+            frame.kind === "status" &&
+            frame.sender.name === "system" &&
+            (frame.note ?? frame.body).startsWith("decision ledger updated: ")
           ) {
             void loadCharter();
           }
@@ -4154,10 +4192,12 @@ export function ChannelPage({
 
   const saveCharter = useCallback(() => {
     if (charterSaving) return;
+    const requestId = ++charterRequestRef.current;
     setCharterSaving(true);
     setCharterError(null);
     setChannelCharter(token, slug, charterDraft)
       .then((body) => {
+        if (requestId !== charterRequestRef.current) return;
         setCharter(body);
         setCharterDraft(body.charter ?? "");
         setCharterEditing(false);
@@ -4165,6 +4205,7 @@ export function ChannelPage({
         setSeenCharterRev(body.charter_rev);
       })
       .catch((err: unknown) => {
+        if (requestId !== charterRequestRef.current) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
         else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
@@ -4178,10 +4219,12 @@ export function ChannelPage({
   // 和错误处理，唯一区别是写入的文本来自调用方而不是 charterDraft 状态。
   const syncDivisionToCharter = useCallback((nextText: string) => {
     if (charterSaving) return;
+    const requestId = ++charterRequestRef.current;
     setCharterSaving(true);
     setCharterError(null);
     setChannelCharter(token, slug, nextText)
       .then((body) => {
+        if (requestId !== charterRequestRef.current) return;
         setCharter(body);
         setCharterDraft(body.charter ?? "");
         setCharterEditing(false);
@@ -4189,6 +4232,7 @@ export function ChannelPage({
         setSeenCharterRev(body.charter_rev);
       })
       .catch((err: unknown) => {
+        if (requestId !== charterRequestRef.current) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
         else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
