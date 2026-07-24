@@ -1327,9 +1327,19 @@ export class CodexSessionController {
     params: Record<string, unknown>,
     options: { backendRestarted?: boolean; deferQueuedInputs?: boolean } = {},
   ): Promise<void> {
-    const thread = responseThread(result);
-    if (!thread) return;
     if (method === "thread/read" && params.includeTurns !== true) return;
+    const thread = responseThread(result);
+    if (thread === null) {
+      throw new Error(`${method} returned no valid thread`);
+    }
+    const expectedThreadId =
+      (method === "thread/resume" || method === "thread/read" || method === "thread/rollback") &&
+        typeof params.threadId === "string"
+        ? params.threadId
+        : null;
+    if (expectedThreadId !== null && thread.id !== expectedThreadId) {
+      throw new Error(`${method} returned thread ${thread.id}, expected ${expectedThreadId}`);
+    }
     await this.attachThread(thread, options);
   }
 
@@ -1357,11 +1367,12 @@ export class CodexSessionController {
         try {
           const result = await this.requestConnected("thread/start", params);
           const thread = responseThread(result);
-          if (thread !== null) {
-            await this.attachThread(thread, {
-              deferQueuedInputs: this.options.expectBootstrapPrompt === true,
-            });
+          if (thread === null) {
+            throw new Error("thread/start returned no valid thread");
           }
+          await this.attachThread(thread, {
+            deferQueuedInputs: this.options.expectBootstrapPrompt === true,
+          });
           this.bootstrapThreadId = this.threadId;
           this.bootstrapRecovery = {
             disposition: "restart_thread_with_prompt",

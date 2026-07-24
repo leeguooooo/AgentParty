@@ -390,6 +390,61 @@ describe("Codex app-server stdio JSON-RPC and reconnect recovery", () => {
     }]);
   });
 
+  test("an invalid initial thread/start response fails closed and remains retryable", async () => {
+    const rpc = new ScriptedCodexRpc();
+    rpc.queue("thread/start", {});
+    rpc.queue("thread/start", idleThread("thread-after-invalid"));
+    const session = new CodexSessionController(rpc);
+
+    await expect(session.request("thread/start", {})).rejects.toThrow(
+      "thread/start returned no valid thread",
+    );
+    expect(session.activeThreadId).toBeNull();
+
+    await expect(session.request("thread/start", {})).resolves.toEqual(
+      idleThread("thread-after-invalid"),
+    );
+    expect(session.activeThreadId).toBe("thread-after-invalid");
+    expect(rpc.calls.filter((call) => call.method === "thread/start")).toHaveLength(2);
+  });
+
+  test("thread switching and authoritative snapshots reject invalid thread identity", async () => {
+    const rpc = new ScriptedCodexRpc();
+    rpc.queue("thread/start", idleThread("thread-current"));
+    rpc.queue("thread/start", {});
+    rpc.queue("thread/resume", idleThread("thread-wrong"));
+    rpc.queue("thread/read", idleThread("thread-wrong"));
+    rpc.queue("thread/rollback", idleThread("thread-wrong"));
+    const session = new CodexSessionController(rpc);
+
+    await session.request("thread/start", {});
+    await expect(session.request("thread/start", {})).rejects.toThrow(
+      "thread/start returned no valid thread",
+    );
+    await expect(
+      session.request("thread/resume", { threadId: "thread-requested" }),
+    ).rejects.toThrow(
+      "thread/resume returned thread thread-wrong, expected thread-requested",
+    );
+    await expect(
+      session.request("thread/read", {
+        threadId: "thread-current",
+        includeTurns: true,
+      }),
+    ).rejects.toThrow(
+      "thread/read returned thread thread-wrong, expected thread-current",
+    );
+    await expect(
+      session.request("thread/rollback", {
+        threadId: "thread-current",
+        numTurns: 1,
+      }),
+    ).rejects.toThrow(
+      "thread/rollback returned thread thread-wrong, expected thread-current",
+    );
+    expect(session.activeThreadId).toBe("thread-current");
+  });
+
   test("a created bootstrap thread replays its prompt without creating the thread twice", async () => {
     const rpc = new ScriptedCodexRpc();
     const recoveries: CodexFrontendRecovery[] = [];
