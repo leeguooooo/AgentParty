@@ -22,6 +22,7 @@ import {
   realpathSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -267,6 +268,142 @@ export const EXIT_SIGNAL_TERM = 128 + 15;
 
 /** 桌面「转为常驻」生成的 launchd job label 前缀(须与 desktop/src-tauri/src/duty.rs 的 DUTY_LABEL_PREFIX 一致)。 */
 const DUTY_LABEL_PREFIX = "com.agentparty.duty.";
+const DUTY_BLOCKED_MARKER_SCHEMA = "agentparty.duty-blocked.v1";
+
+/** 与 desktop duty reconcile 共享的终局停机标记路径。 */
+export function dutyBlockedMarkerPath(label: string, home: string = homedir()): string {
+  return join(home, ".agentparty", "desktop", "duty-blocked", `${label}.json`);
+}
+
+/** marker/launchctl disable 都失败时的最后持久兜底；desktop 会展示并允许显式 repair/unpersist。 */
+export function dutyQuarantinedPlistPath(label: string, home: string = homedir()): string {
+  return join(home, "Library", "LaunchAgents", `${label}.plist.terminal-disabled`);
+}
+
+function dutyPlistPath(label: string, home: string = homedir()): string {
+  return join(home, "Library", "LaunchAgents", `${label}.plist`);
+}
+
+export type DutyLockProcessIdentity =
+  | { state: "alive"; startedAt: string }
+  | { state: "dead" }
+  | { state: "unknown" };
+
+function processStartIdentity(pid: number): DutyLockProcessIdentity {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return { state: "dead" };
+    // EPERM/瞬时系统错误都不能证明 PID 已死；下面仍尝试只读 ps，失败则保守 unknown。
+  }
+  const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    encoding: "utf8",
+    timeout: 2000,
+    env: { ...process.env, LC_ALL: "C", LC_TIME: "C" },
+  });
+  if (result.error !== undefined || result.status !== 0) return { state: "unknown" };
+  const value = String(result.stdout ?? "").trim();
+  return value === "" ? { state: "unknown" } : { state: "alive", startedAt: value };
+}
+
+/** null 表示 owner 格式损坏；unknown 进程状态永远不是 stale，避免 ps 瞬时失败时强拆活锁。 */
+export function dutyLockOwnerIsStale(
+  owner: string,
+  inspect: (pid: number) => DutyLockProcessIdentity = processStartIdentity,
+): boolean | null {
+  const [rawPid, expectedStart, token] = owner.trim().split("|", 3);
+  const pid = Number.parseInt(rawPid ?? "", 10);
+  if (!Number.isInteger(pid) || pid <= 0 || expectedStart === undefined || token === undefined) {
+    return null;
+  }
+  const current = inspect(pid);
+  if (current.state === "dead") return true;
+  if (current.state === "unknown") return false;
+  return current.startedAt !== expectedStart;
+}
+
+export function dutyLockPath(label: string, home: string = homedir()): string {
+  return join(home, ".agentparty", "desktop", "duty-locks", `${label}.lock`);
+}
+
+export function dutyGenerationFromPlist(value: string): string | null {
+  const match = value.match(/<key>\s*AP_DUTY_GENERATION\s*<\/key>\s*<string>([^<]+)<\/string>/);
+  return match?.[1] ?? null;
+}
+
+function acquireDutyFilesystemLock(path: string): () => void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      mkdirSync(path, { mode: 0o700 });
+      const processIdentity = processStartIdentity(process.pid);
+      if (processIdentity.state !== "alive") {
+        rmSync(path, { recursive: true, force: true });
+        throw new Error("cannot identify current process start time for duty lock");
+      }
+      const owner = `${process.pid}|${processIdentity.startedAt}|${randomUUID()}`;
+      try {
+        writeFileSync(join(path, "owner"), owner, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      } catch (error) {
+        rmSync(path, { recursive: true, force: true });
+        throw error;
+      }
+      return () => {
+        try {
+          if (readFileSync(join(path, "owner"), "utf8").trim() !== owner) return;
+          rmSync(path, { recursive: true, force: true });
+        } catch {
+          // 已不是自己的 lock（或持有期间目录被外部移除）就绝不能删后来者的锁。
+        }
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        let stale = false;
+        try {
+          const owner = readFileSync(join(path, "owner"), "utf8").trim();
+          const decision = dutyLockOwnerIsStale(owner);
+          stale = decision ?? Date.now() - statSync(path).mtimeMs > 10_000;
+        } catch {
+          stale = Date.now() - statSync(path).mtimeMs > 10_000;
+        }
+        if (stale) rmSync(path, { recursive: true, force: true });
+      } catch {
+        // 锁持有者可能刚释放；下一轮原子 mkdir 决定归属。
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  throw new Error("another duty process is still changing this resident job");
+}
+
+function writeDutyBlockedMarker(path: string, body: string): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const staged = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(staged, body, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    renameSync(staged, path);
+  } finally {
+    rmSync(staged, { force: true });
+  }
+}
+
+interface TerminalDutyDeps {
+  platform?: string;
+  uid?: number | null;
+  label?: string;
+  spawn?: typeof spawnSync;
+  markerPath?: string;
+  writeMarker?: (path: string, body: string) => void;
+  plistPath?: string;
+  quarantinePath?: string;
+  quarantinePlist?: (source: string, target: string) => void;
+  readPlistGeneration?: (path: string) => string | null;
+  lockPath?: string;
+  acquireLock?: (path: string) => () => void;
+  now?: () => Date;
+  generation?: string | null;
+}
 
 /**
  * #744:launchd 常驻下,「终局不该重启」的退出(熔断 EXIT_WAKE_ABANDON_CIRCUIT / 撤销 EXIT_AUTH)必须
@@ -274,12 +411,14 @@ const DUTY_LABEL_PREFIX = "com.agentparty.duty.";
  * serve 自己 `launchctl bootout` 掉自己那个 job:launchd 移除它 → 不再重启,launchctl print/health/presence
  * 一致显示停机,人工重新「转为常驻」才复活。普通崩溃 / stream-ended **不** bootout,照常由 KeepAlive 自愈。
  * 只在 plist 传了 AP_DUTY_LABEL(桌面「转为常驻」会传)且 macOS 时生效;不改退出码契约,tmux/手动 supervisor 无感。
- * best-effort:bootout 失败也照常退出(退出码仍对,只是少了自卸载)。可注入 spawn 供测试。
+ * marker 落盘失败时先用 launchctl disable、再用 plist quarantine 作持久兜底；三者全失败
+ * 才拒绝 bootout。每个 label 级动作前校验 generation，旧 serve 不能误伤刚 repair 的新 job。
+ * bootout 本身仍是 best-effort。可注入依赖供测试。
  */
 export function selfBootoutTerminalDuty(
   code: number,
   out: (line: string) => void,
-  deps?: { platform?: string; uid?: number | null; label?: string; spawn?: typeof spawnSync },
+  deps?: TerminalDutyDeps,
 ): boolean {
   const label = deps?.label ?? process.env.AP_DUTY_LABEL;
   if (label === undefined || label === "") return false;
@@ -295,8 +434,127 @@ export function selfBootoutTerminalDuty(
   }
   const uid = deps?.uid ?? (typeof process.getuid === "function" ? process.getuid() : null);
   if (uid === null) return false;
+  let releaseLock: () => void;
+  try {
+    releaseLock = (deps?.acquireLock ?? acquireDutyFilesystemLock)(
+      deps?.lockPath ?? dutyLockPath(label),
+    );
+  } catch (error) {
+    out(
+      `serve: ⚠ 无法取得 duty 变更锁(${error instanceof Error ? error.message : String(error)})` +
+      "——拒绝操作 label，避免与 desktop repair 竞态。",
+    );
+    return false;
+  }
+  try {
   const target = `gui/${uid}/${label}`;
   const reason = code === EXIT_WAKE_ABANDON_CIRCUIT ? "circuit-breaker" : "auth-revoked";
+  const plistPath = deps?.plistPath ?? dutyPlistPath(label);
+  const ownGeneration = deps?.generation === undefined
+    ? process.env.AP_DUTY_GENERATION ?? null
+    : deps.generation;
+  const readGeneration = deps?.readPlistGeneration
+    ?? ((path: string) => dutyGenerationFromPlist(readFileSync(path, "utf8")));
+  let plistQuarantined = false;
+  const generationStillCurrent = (stage: string): boolean => {
+    if (!existsSync(plistPath)) {
+      // plist 已被本次终局兜底隔离，或外部已先卸载；两者都没有 reconcile 复活入口。
+      return plistQuarantined || !existsSync(deps?.quarantinePath ?? dutyQuarantinedPlistPath(label));
+    }
+    let currentGeneration: string | null;
+    try {
+      currentGeneration = readGeneration(plistPath);
+    } catch (error) {
+      out(
+        `serve: ⚠ ${stage} 前无法校验 duty generation(${error instanceof Error ? error.message : String(error)})` +
+        "——拒绝操作 label，避免旧 serve 误伤新安装。",
+      );
+      return false;
+    }
+    if (currentGeneration === ownGeneration) return true;
+    out("serve: 当前 duty plist 已是另一安装代次；旧 serve 只退出，不再 disable/隔离/bootout 新 job。");
+    return false;
+  };
+  if (!generationStillCurrent("写终局停机标记")) return false;
+  // reconcile 以后会主动恢复「plist 在但 job 不在」的意外掉线。终局停机必须先落一个原子标记，
+  // 否则下次桌面启动会把熔断/撤销误当故障复活，绕过 #744 的安全边界。
+  let markerPersisted = false;
+  try {
+    const markerPath = deps?.markerPath ?? dutyBlockedMarkerPath(label);
+    const marker = {
+      schema: DUTY_BLOCKED_MARKER_SCHEMA,
+      label,
+      reason,
+      code,
+      generation: ownGeneration,
+      created_at: (deps?.now ?? (() => new Date()))().toISOString(),
+    };
+    (deps?.writeMarker ?? writeDutyBlockedMarker)(markerPath, `${JSON.stringify(marker)}\n`);
+    markerPersisted = true;
+  } catch (error) {
+    out(
+      `serve: ⚠ 无法写入终局停机标记(${error instanceof Error ? error.message : String(error)})` +
+      "——尝试用 launchctl disable 持久阻止自动复活。",
+    );
+  }
+  let launchdDisabled = false;
+  if (!markerPersisted) {
+    if (!generationStillCurrent("launchctl disable")) return false;
+    try {
+      const disabled = (deps?.spawn ?? spawnSync)("launchctl", ["disable", target], { timeout: 5000 });
+      if (disabled.error !== undefined || disabled.status !== 0) {
+        const why = disabled.error?.message
+          ?? (disabled.signal != null ? `killed by ${disabled.signal}` : `exit ${disabled.status}`);
+        out(
+          `serve: ⚠ launchctl disable 失败(${why})——尝试隔离 LaunchAgent plist。`,
+        );
+      } else {
+        launchdDisabled = true;
+        out("serve: 终局停机标记写入失败，已用 launchctl disable 建立持久停机兜底。");
+      }
+    } catch (error) {
+      out(
+        `serve: ⚠ launchctl disable 抛错(${error instanceof Error ? error.message : String(error)})` +
+        "——尝试隔离 LaunchAgent plist。",
+      );
+    }
+  }
+  if (!markerPersisted && !launchdDisabled) {
+    if (!generationStillCurrent("隔离 duty plist")) return false;
+    const source = plistPath;
+    const quarantine = deps?.quarantinePath ?? dutyQuarantinedPlistPath(label);
+    try {
+      (deps?.quarantinePlist ?? ((from, to) => {
+        if (!existsSync(from)) return;
+        const before = readGeneration(from);
+        if (before !== ownGeneration) throw new Error("duty generation changed before quarantine");
+        renameSync(from, to);
+        const after = readGeneration(to);
+        if (after !== ownGeneration) {
+          renameSync(to, from);
+          throw new Error("duty generation changed during quarantine");
+        }
+      }))(source, quarantine);
+      plistQuarantined = true;
+      out("serve: marker 与 launchctl disable 均失败，已隔离 duty plist 作为持久停机兜底。");
+    } catch (error) {
+      out(
+        `serve: ⚠ 无法隔离 duty plist(${error instanceof Error ? error.message : String(error)})` +
+        "——没有建立持久停机边界，launchd 可能立即 KeepAlive 重启；请人工 disable + bootout。",
+      );
+      return false;
+    }
+  }
+  if (!generationStillCurrent("launchctl bootout")) {
+    if (launchdDisabled) {
+      try {
+        (deps?.spawn ?? spawnSync)("launchctl", ["enable", target], { timeout: 5000 });
+      } catch {
+        // 已有明确 generation 竞态告警；enable 的 best-effort 失败会由 repair 面板继续暴露。
+      }
+    }
+    return false;
+  }
   out(`serve: 终局退出(${reason}, code=${code})——从 launchd 卸载自身(${label}),不再自动重启;修好后重新「转为常驻」。`);
   // bootout 必须是最后动作(@macmini #744 评审):它可能给 serve 发 SIGTERM,其后不能再有必需的清理/日志。
   // 必须检查返回值(#745 CodeRabbit):spawnSync 把非零退出/超时/命令找不到写进 result(不总是抛),
@@ -312,6 +570,9 @@ export function selfBootoutTerminalDuty(
     out(`serve: ⚠ launchctl bootout 抛错(${error instanceof Error ? error.message : String(error)})——自卸载未生效;请人工:launchctl bootout ${target}`);
   }
   return true;
+  } finally {
+    releaseLock();
+  }
 }
 
 /** 传给 builtin runner 的提示：只给路径，不给正文（#120）。 */

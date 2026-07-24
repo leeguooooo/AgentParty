@@ -137,4 +137,32 @@ describe("desktop agent native adapter", () => {
       new Error("runner_dependency_missing:codex: codex CLI was not found"),
     )).toBe("codex");
   });
+
+  test("parses durable terminal duty marker fields and defaults old shells to unblocked", async () => {
+    const blocked = createDesktopAgentAdapter(async () => [{
+      label: "com.agentparty.duty.cfg.ops",
+      instanceId: "cfg:ops",
+      plistPath: "/Users/x/Library/LaunchAgents/com.agentparty.duty.cfg.ops.plist",
+      logPath: "/Users/x/.agentparty/desktop/logs/com.agentparty.duty.cfg.ops.log",
+      loaded: false,
+      terminalBlocked: true,
+      terminalReason: "auth-revoked",
+    }]);
+    const legacy = createDesktopAgentAdapter(async () => [{
+      label: "com.agentparty.duty.cfg.ops",
+      instanceId: "cfg:ops",
+      plistPath: "/p",
+      logPath: "/l",
+      loaded: false,
+    }]);
+
+    expect((await blocked.dutyList())[0]).toMatchObject({
+      terminalBlocked: true,
+      terminalReason: "auth-revoked",
+    });
+    expect((await legacy.dutyList())[0]).toMatchObject({
+      terminalBlocked: false,
+      terminalReason: null,
+    });
+  });
 });

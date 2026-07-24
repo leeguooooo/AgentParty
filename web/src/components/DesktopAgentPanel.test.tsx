@@ -599,6 +599,20 @@ describe("DesktopAgentPanel 系统常驻 (#616 phase 3)", () => {
     }]);
     expect(root.findAll((node) => node.props["aria-label"] === "Repair local-main:agentparty")).toHaveLength(0);
   });
+
+  test("终局停机标记与普通未加载分开展示，避免 reconcile 安全停机被误认成故障", async () => {
+    const root = await render(adapter({
+      dutyList: async () => [{
+        ...duty,
+        loaded: false,
+        terminalBlocked: true,
+        terminalReason: "circuit-breaker",
+      }],
+    }));
+    const state = root.find((node) => node.props.title === "circuit-breaker");
+    expect(state.children.join("")).toBe("repair required");
+    expect(String(state.props.className)).toContain("desktop-agent-state--stopped");
+  });
 });
 
 describe("DesktopAgentPanel", () => {

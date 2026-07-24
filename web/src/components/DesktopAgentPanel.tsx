@@ -468,8 +468,19 @@ export function DesktopAgentPanel({
                 entry.dependencyState === "missing" || entry.dependencyState === "repair-required";
               return (
                 <li key={entry.label} className="desktop-agent-instance">
-                  <span className={`desktop-agent-state desktop-agent-state--${entry.loaded ? "running" : "stopped"}`}>
-                    {t(entry.loaded ? "DesktopSettings.agent.dutyLoaded" : "DesktopSettings.agent.dutyNotLoaded")}
+                  <span
+                    className={`desktop-agent-state desktop-agent-state--${entry.loaded && entry.terminalBlocked !== true ? "running" : "stopped"}`}
+                    title={entry.terminalReason ?? undefined}
+                  >
+                    {t(entry.terminalReason === "legacy-duty-needs-repair"
+                      ? "DesktopSettings.agent.dutyLegacyRepair"
+                      : entry.terminalReason === "terminal-stop-quarantined"
+                        ? "DesktopSettings.agent.dutyQuarantined"
+                        : entry.terminalBlocked === true
+                          ? "DesktopSettings.agent.dutyTerminalBlocked"
+                          : entry.loaded
+                            ? "DesktopSettings.agent.dutyLoaded"
+                            : "DesktopSettings.agent.dutyNotLoaded")}
                   </span>
                   <span className="t-mono desktop-agent-instance-name">{entry.instanceId}</span>
                   <span className="t-mono desktop-agent-instance-dir" title={entry.logPath}>{entry.logPath}</span>

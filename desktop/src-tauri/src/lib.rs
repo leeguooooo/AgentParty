@@ -1207,6 +1207,8 @@ pub fn run() {
                 if let Err(error) = refresh_enabled_autostart(app.autolaunch().inner()) {
                     eprintln!("AgentParty could not refresh its login item: {error}");
                 }
+                #[cfg(target_os = "macos")]
+                duty::start_duty_reconciler();
                 #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
                 app.deep_link().register_all()?;
                 if !std::env::args().any(|arg| arg == "--hidden") {
