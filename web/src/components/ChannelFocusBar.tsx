@@ -31,10 +31,9 @@ function pendingDecisionStatusKey(
 ): string | null {
   const hasData = state.lastSuccessfulData !== null;
   if (state.error !== null) {
+    if (state.error.kind === "forbidden") return "ChannelFocusBar.decisions.forbidden";
     if (hasData) return "ChannelFocusBar.decisions.refreshFailed";
-    return state.error.kind === "forbidden"
-      ? "ChannelFocusBar.decisions.forbidden"
-      : "ChannelFocusBar.decisions.loadFailed";
+    return "ChannelFocusBar.decisions.loadFailed";
   }
   if (!state.loading) return null;
   return hasData
@@ -71,7 +70,7 @@ export function PendingDecisionLoadNotice({
           {text}
         </button>
       )}
-      {state.error !== null && onRetry !== undefined && (
+      {state.error !== null && state.error.kind !== "forbidden" && onRetry !== undefined && (
         <>
           {" "}
           <button type="button" className="d-btn focus-decision-retry" onClick={onRetry}>

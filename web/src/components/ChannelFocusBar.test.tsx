@@ -149,6 +149,29 @@ describe("ChannelFocusBar (#682)", () => {
     expect(rendered).toContain("last successful result");
   });
 
+  test("shows forbidden ahead of stale data and does not offer a meaningless retry", () => {
+    render({
+      focus: focus(),
+      decisionState: decisionState({
+        lastSuccessfulData: [{
+          seq: 7,
+          prompt: "ship?",
+          asker: "alice",
+          waitingOnMe: false,
+        }],
+        error: { kind: "forbidden" },
+      }),
+      onRetryDecisions: () => {
+        throw new Error("forbidden decisions must not be retried");
+      },
+    });
+
+    const rendered = JSON.stringify(renderer!.toJSON());
+    expect(rendered).toContain("not available to this account");
+    expect(rendered).not.toContain("last successful result");
+    expect(renderer!.root.findAllByProps({ className: "d-btn focus-decision-retry" })).toHaveLength(0);
+  });
+
   test("still renders nothing after a successful genuinely empty decision result", () => {
     render({
       focus: focus(),

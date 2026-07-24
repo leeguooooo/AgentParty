@@ -309,6 +309,10 @@ const MAX_COMPLETION_RELATED = 20;
 // 单次把最多 1 万行一并 toArray 序列化。改为按 seq 分页多批下发（每批 ≤ 此值）——单条查询恒有界，
 // 又不砍完整性：循环直到某页短于一页即判排空，跨批次仍下发全部消息（客户端逐帧消费，与不分页无差别）。
 const HELLO_BACKFILL_PAGE_SIZE = 1000;
+// Removal is also pushed directly into the DO by the authoritative REST mutation.
+// Keep a short polling fallback for missed callbacks without turning every heartbeat
+// and read-cursor frame into four serial D1 round trips.
+const PARTICIPANT_AUTHORITY_REFRESH_MS = 1_000;
 const COMPLETION_ARTIFACT_JSON_LIMIT = 4096;
 const REVIEW_REASON_LIMIT = 4000;
 // #106：workflow guard 近期 (step,state) 窗口大小。8 足以罩住多 agent 在若干状态间的环形 ping-pong
@@ -1470,6 +1474,7 @@ export class ChannelDO extends Server<Env> {
   // frame is awaiting I/O. Preserve wire order explicitly: hello must finish token validation and
   // capability setup before an immediately-following serve lease / adapter / send frame runs.
   private readonly wsMessageTails = new Map<string, Promise<void>>();
+  private participantAuthorityRefreshedAt = 0;
   // Authorization checks make dispatch asynchronous. Serialize each target so
   // two wakeups cannot select the same queued row before either claim commits.
   private readonly directedDeliveryDispatchTails = new Map<string, Promise<void>>();
@@ -2384,19 +2389,16 @@ export class ChannelDO extends Server<Env> {
     let st = connection.state;
     if (!st) return;
     const receivedAt = Date.now();
-    if (!(await this.reconcileRemovedConnections())) {
-      this.closeRevokedConnection(connection);
+    if (!(await this.reconcileRemovedConnectionsIfStale(receivedAt))) {
+      this.sendFrame(connection, {
+        type: "error",
+        code: "unavailable",
+        message: "participant authorization is temporarily unavailable",
+      });
+      connection.close(1013, "authorization_unavailable");
       return;
     }
     if (connection.state?.authorizationRevoked === true) return;
-    if (await this.isParticipantRemoved(st.name, st.owner)) {
-      this.setMeta(this.removedPresenceKey(st.name), String(receivedAt));
-      this.ctx.storage.sql.exec("DELETE FROM presence WHERE name = ?", st.name);
-      this.ctx.storage.sql.exec("DELETE FROM listening_health WHERE name = ?", st.name);
-      this.removeParticipantDeliveryAdapters(st.name, receivedAt);
-      this.closeRevokedConnection(connection);
-      return;
-    }
     st = connection.setState({ ...st, lastSeen: receivedAt });
     if (!st) return;
 
@@ -6980,7 +6982,20 @@ export class ChannelDO extends Server<Env> {
       this.cleanupPresenceSession(stale.name, stale.connection.id, now);
       this.removeStaleDeliveryPrincipal(stale.name, stale.principal, now);
     }
+    this.participantAuthorityRefreshedAt = now;
     return true;
+  }
+
+  private async reconcileRemovedConnectionsIfStale(now: number): Promise<boolean> {
+    const age = now - this.participantAuthorityRefreshedAt;
+    if (
+      this.participantAuthorityRefreshedAt > 0 &&
+      age >= 0 &&
+      age < PARTICIPANT_AUTHORITY_REFRESH_MS
+    ) {
+      return true;
+    }
+    return this.reconcileRemovedConnections();
   }
 
   private removeParticipantDeliveryAdapters(name: string, now: number) {
@@ -8488,11 +8503,30 @@ export class ChannelDO extends Server<Env> {
       return;
     }
     const publicFrame = publicServerFrame(frame);
-    for (const connection of this.getConnections<ConnState>()) {
+    const removalPrefix = "participant-removal:";
+    const connections = [...this.getConnections<ConnState>()];
+    const removalKeys = [...new Set(
+      connections
+        .map((connection) => connection.state?.name)
+        .filter((name): name is string => name !== undefined)
+        .map((name) => this.participantRemovalKey(name)),
+    )];
+    const removedNames = new Set(
+      removalKeys.length === 0
+        ? []
+        : this.ctx.storage.sql
+            .exec(
+              `SELECT key FROM meta WHERE key IN (${removalKeys.map(() => "?").join(", ")})`,
+              ...removalKeys,
+            )
+            .toArray()
+            .map((row) => String(row.key).slice(removalPrefix.length)),
+    );
+    for (const connection of connections) {
       if (connection.state?.authorizationRevoked === true) continue;
       if (
         connection.state?.name !== undefined &&
-        this.getMeta(this.participantRemovalKey(connection.state.name)) !== null
+        removedNames.has(connection.state.name)
       ) continue;
       if (
         connection.state?.helloPending === true &&

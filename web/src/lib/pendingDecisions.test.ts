@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { ServerFrame } from "@agentparty/shared";
 import { createElement } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { AuthError, type AuthoritativePendingDecision } from "./api";
+import { AuthError, ForbiddenError, type AuthoritativePendingDecision } from "./api";
 import {
   frameMayChangePendingDecisions,
   useAuthoritativePendingDecisions,
@@ -135,6 +135,24 @@ describe("useAuthoritativePendingDecisions", () => {
     expect(latest?.lastSuccessfulData).toEqual(recovered);
     expect(latest?.loading).toBe(false);
     expect(latest?.error).toBeNull();
+  });
+
+  test("drops stale decision prompts when channel permission is revoked", async () => {
+    let forbidden = false;
+    await renderHook(async () => {
+      if (forbidden) throw new ForbiddenError("forbidden");
+      return oldData;
+    });
+
+    expect(latest?.lastSuccessfulData).toEqual(oldData);
+    forbidden = true;
+    await act(async () => {
+      await latest!.refresh();
+    });
+
+    expect(latest?.lastSuccessfulData).toBeNull();
+    expect(latest?.loading).toBe(false);
+    expect(latest?.error).toEqual({ kind: "forbidden" });
   });
 
   test("continues to delegate authentication failures to the channel auth handler", async () => {

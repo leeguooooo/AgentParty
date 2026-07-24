@@ -1,7 +1,7 @@
 // 应用骨架：登录闸 → 头部 + 左侧频道列表 + 右侧（首页 | 频道页）
 import { isMember } from "@agentparty/shared";
 import { membershipApplyMailto, membershipStatusOf } from "./lib/membership";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChannelList } from "./components/ChannelList";
 import { CreateChannel } from "./components/CreateChannel";
 import { DesktopSettings } from "./components/DesktopSettings";
@@ -516,22 +516,40 @@ export function App() {
   const [localAgentCenterOpen, setLocalAgentCenterOpen] = useState(false);
   const [handleBannerDismissed, setHandleBannerDismissed] = useState(false);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
-  const settingsReturnFocusRef = useRef<HTMLButtonElement | null>(null);
+  const handleSetupButtonRef = useRef<HTMLButtonElement | null>(null);
+  const handleBannerButtonRef = useRef<HTMLButtonElement | null>(null);
+  const settingsFocusOriginRef = useRef<"settings" | "handle-setup" | "handle-banner">("settings");
+  const restoreSettingsFocusRef = useRef(false);
   const localAgentCenterButtonRef = useRef<HTMLButtonElement | null>(null);
+  const settingsFocusTarget = useCallback((): HTMLButtonElement | null => {
+    if (settingsFocusOriginRef.current === "handle-setup") return handleSetupButtonRef.current;
+    if (settingsFocusOriginRef.current === "handle-banner") return handleBannerButtonRef.current;
+    return settingsButtonRef.current;
+  }, []);
+  const onboardingReturnFocusRef = useMemo(() => ({
+    get current(): HTMLButtonElement | null {
+      return settingsFocusTarget() ?? settingsButtonRef.current;
+    },
+  }), [settingsFocusTarget]);
   const openSettings = useCallback((
-    event?: { currentTarget?: HTMLButtonElement },
+    _event?: { currentTarget?: HTMLButtonElement },
     section: SettingsSectionId = "preferences",
+    origin: "settings" | "handle-setup" | "handle-banner" = "settings",
   ) => {
     setLocalAgentCenterOpen(false);
     setSettingsInitialSection(section);
-    settingsReturnFocusRef.current = event?.currentTarget ?? settingsButtonRef.current;
+    settingsFocusOriginRef.current = origin;
     setSettingsOpen(true);
   }, []);
   const closeSettings = useCallback(() => {
+    restoreSettingsFocusRef.current = true;
     setSettingsOpen(false);
-    const target = settingsReturnFocusRef.current;
-    (target?.isConnected === false ? settingsButtonRef.current : target ?? settingsButtonRef.current)?.focus();
   }, []);
+  useEffect(() => {
+    if (settingsOpen || !restoreSettingsFocusRef.current) return;
+    restoreSettingsFocusRef.current = false;
+    (settingsFocusTarget() ?? settingsButtonRef.current)?.focus();
+  }, [settingsFocusTarget, settingsOpen]);
   const openLocalAgentCenter = useCallback(() => {
     setSettingsOpen(false);
     setLocalAgentCenterOpen(true);
@@ -1231,9 +1249,10 @@ export function App() {
         )}
         {canSetHandle && me !== null && me.handle === null && (
           <button
+            ref={handleSetupButtonRef}
             type="button"
             className="d-btn handlesetup-trigger handlesetup-trigger--cta"
-            onClick={(event) => openSettings(event, "account")}
+            onClick={(event) => openSettings(event, "account", "handle-setup")}
             title={t("App.handle.setCta")}
           >
             <span className="handlesetup-trigger-edit" aria-hidden="true">
@@ -1319,7 +1338,12 @@ export function App() {
         <p className="banner banner--yellow handle-banner" role="status">
           <span className="handle-banner-text">{t("App.handle.banner")}</span>
           <span className="handle-banner-actions">
-            <button type="button" className="d-btn" onClick={(event) => openSettings(event, "account")}>
+            <button
+              ref={handleBannerButtonRef}
+              type="button"
+              className="d-btn handle-banner-open"
+              onClick={(event) => openSettings(event, "account", "handle-banner")}
+            >
               {t("App.handle.bannerAction")}
             </button>
             <button
@@ -1422,7 +1446,7 @@ export function App() {
       <OnboardingGuide
         forceOpen={guideOpen}
         onClose={() => setGuideOpen(false)}
-        returnFocusRef={guideOpen ? settingsButtonRef : undefined}
+        returnFocusRef={guideOpen ? onboardingReturnFocusRef : undefined}
       />
     </div>
   );

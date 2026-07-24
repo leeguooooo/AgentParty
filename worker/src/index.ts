@@ -3232,6 +3232,7 @@ const requireActiveChannelParticipant = createMiddleware<AppContext>(async (c, n
   // tombstones, and projection failure cannot rewrite a committed 2xx into 500.
   if (
     slug !== "" &&
+    (c.res.status === 101 || !["GET", "HEAD", "OPTIONS"].includes(c.req.method)) &&
     (c.res.status === 101 || (c.res.status >= 200 && c.res.status < 400))
   ) {
     await recordChannelParticipantBinding(c.env.DB, slug, identity).catch(() => undefined);

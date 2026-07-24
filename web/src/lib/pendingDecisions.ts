@@ -94,12 +94,18 @@ export function useAuthoritativePendingDecisions({
         onAuthErrorRef.current();
         return;
       }
+      if (error instanceof ForbiddenError) {
+        setState({
+          lastSuccessfulData: null,
+          loading: false,
+          error: { kind: "forbidden" },
+        });
+        return;
+      }
       setState((current) => ({
         ...current,
         loading: false,
-        error: error instanceof ForbiddenError
-          ? { kind: "forbidden" }
-          : { kind: "load_failed" },
+        error: { kind: "load_failed" },
       }));
     }
   }, [load, slug, token]);
