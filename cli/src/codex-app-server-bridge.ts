@@ -20,6 +20,7 @@ import {
   type ServerFrame,
 } from "@agentparty/shared";
 import type { ServerWebSocket } from "bun";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync } from "node:fs";
@@ -39,6 +40,7 @@ import {
   DeliveryRecoveryJournal,
   type DeliveryRecoveryEntry,
 } from "./delivery-recovery-journal";
+import { stripTerminalControls } from "./format";
 
 export type JsonRpcId = string | number | null;
 
@@ -90,6 +92,10 @@ export class CodexRpcDisconnectedError extends Error {
 }
 
 interface PendingRpc {
+  fromMessageDispatch: boolean;
+  responseReceived: boolean;
+  applyStarted: boolean;
+  applyResponse?: (result: unknown) => void | Promise<void>;
   resolve: (result: unknown) => void;
   reject: (error: unknown) => void;
 }
@@ -206,6 +212,12 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function terminalSafeLogger(
+  sink: (line: string) => void = (line) => console.error(line),
+): (line: string) => void {
+  return (line) => sink(stripTerminalControls(line));
+}
+
 /**
  * Reconnecting JSON-RPC client over `codex app-server proxy --sock …` stdio.
  *
@@ -228,11 +240,14 @@ export class CodexRpcClient {
   private readonly messageListeners = new Set<MessageListener>();
   private readonly reconnectListeners = new Set<ReconnectListener>();
   private readonly disconnectListeners = new Set<DisconnectListener>();
+  private readonly messageDispatchContext = new AsyncLocalStorage<boolean>();
+  private messageDispatchGeneration = 0;
+  private messageDispatchTail: Promise<void> = Promise.resolve();
   private lastDisconnectedGeneration = 0;
   private readonly log: (line: string) => void;
 
   constructor(private readonly options: CodexRpcClientOptions) {
-    this.log = options.log ?? ((line) => console.error(line));
+    this.log = terminalSafeLogger(options.log);
     this.reconnectDelay = options.reconnectDelayMs ?? 100;
   }
 
@@ -277,10 +292,21 @@ export class CodexRpcClient {
     child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
-  private rawRequest(method: string, params?: unknown): Promise<unknown> {
+  private rawRequest(
+    method: string,
+    params?: unknown,
+    applyResponse?: (result: unknown) => void | Promise<void>,
+  ): Promise<unknown> {
     const id = `agentparty:${this.generation}:${this.requestSeq++}`;
     return new Promise((resolve, reject) => {
-      this.pending.set(rpcIdKey(id), { resolve, reject });
+      this.pending.set(rpcIdKey(id), {
+        fromMessageDispatch: this.messageDispatchContext.getStore() === true,
+        responseReceived: false,
+        applyStarted: false,
+        ...(applyResponse === undefined ? {} : { applyResponse }),
+        resolve,
+        reject,
+      });
       try {
         this.write({ id, method, ...(params === undefined ? {} : { params }) });
       } catch (error) {
@@ -290,9 +316,51 @@ export class CodexRpcClient {
     });
   }
 
-  private rejectPending(error: Error): void {
-    for (const pending of this.pending.values()) pending.reject(error);
-    this.pending.clear();
+  private rejectPending(
+    error: Error,
+    options: { preserveApplyingResponses?: boolean } = {},
+  ): void {
+    for (const [key, pending] of this.pending) {
+      if (
+        options.preserveApplyingResponses === true &&
+        pending.responseReceived &&
+        pending.applyStarted &&
+        pending.applyResponse !== undefined
+      ) {
+        continue;
+      }
+      this.pending.delete(key);
+      pending.reject(error);
+    }
+  }
+
+  private enqueueMessage(
+    message: JsonRpcRequest | JsonRpcNotification,
+    generation: number,
+  ): void {
+    // Preserve app-server wire order for stateful notifications and requests.
+    // Responses intentionally bypass this lane in handleLine so a listener can
+    // await its own RPC without deadlocking the dispatch queue.
+    const listeners = [...this.messageListeners];
+    const dispatch = async (): Promise<void> => {
+      if (
+        generation !== this.generation ||
+        generation !== this.messageDispatchGeneration
+      ) {
+        return;
+      }
+      await Promise.all(listeners.map(async (listener) => {
+        try {
+          await this.messageDispatchContext.run(
+            true,
+            async () => await listener(message),
+          );
+        } catch (error) {
+          this.log(`codex-bridge: JSON-RPC listener failed: ${errorDetail(error)}`);
+        }
+      }));
+    };
+    this.messageDispatchTail = this.messageDispatchTail.then(dispatch, dispatch);
   }
 
   private handleLine(line: string, generation: number): void {
@@ -312,21 +380,65 @@ export class CodexRpcClient {
       return;
     }
     if (isRpcResponse(message)) {
-      const pending = this.pending.get(rpcIdKey(message.id));
-      if (!pending) return;
-      this.pending.delete(rpcIdKey(message.id));
-      if (message.error) {
-        pending.reject(new CodexRpcError(message.error.code, message.error.message, message.error.data));
+      const key = rpcIdKey(message.id);
+      const pending = this.pending.get(key);
+      if (!pending || pending.responseReceived) return;
+      pending.responseReceived = true;
+      const settle = async (): Promise<void> => {
+        if (this.pending.get(key) !== pending) return;
+        const generationIsCurrent = (): boolean =>
+          generation === this.generation &&
+          generation === this.messageDispatchGeneration &&
+          this.child !== null &&
+          !this.child.stdin.destroyed &&
+          this.child.stdin.writable;
+        if (!generationIsCurrent()) {
+          this.pending.delete(key);
+          pending.reject(new CodexRpcDisconnectedError());
+          return;
+        }
+        if (message.error) {
+          this.pending.delete(key);
+          pending.reject(
+            new CodexRpcError(message.error.code, message.error.message, message.error.data),
+          );
+          return;
+        }
+        try {
+          if (pending.applyResponse) {
+            pending.applyStarted = true;
+            await this.messageDispatchContext.run(
+              true,
+              async () => await pending.applyResponse!(message.result),
+            );
+          }
+          if (this.pending.get(key) !== pending) return;
+          this.pending.delete(key);
+          if (generationIsCurrent()) {
+            pending.resolve(message.result);
+          } else {
+            pending.reject(new CodexRpcDisconnectedError());
+          }
+        } catch (error) {
+          if (this.pending.get(key) !== pending) return;
+          this.pending.delete(key);
+          pending.reject(
+            generationIsCurrent() ? error : new CodexRpcDisconnectedError(),
+          );
+        }
+      };
+      if (pending.applyResponse && !pending.fromMessageDispatch) {
+        // Installing an authoritative thread snapshot is itself a wire-order
+        // dispatch barrier: preceding notifications finish first, and later
+        // notifications cannot run until the snapshot has been applied.
+        const apply = async (): Promise<void> => await settle();
+        this.messageDispatchTail = this.messageDispatchTail.then(apply, apply);
       } else {
-        pending.resolve(message.result);
+        void settle();
       }
       return;
     }
-    for (const listener of this.messageListeners) {
-      void Promise.resolve(listener(message)).catch((error) => {
-        this.log(`codex-bridge: JSON-RPC listener failed: ${errorDetail(error)}`);
-      });
-    }
+    this.enqueueMessage(message, generation);
   }
 
   private scheduleReconnect(): void {
@@ -348,11 +460,15 @@ export class CodexRpcClient {
     if (generation !== this.generation) return;
     if (this.lastDisconnectedGeneration === generation) return;
     this.lastDisconnectedGeneration = generation;
+    this.messageDispatchGeneration = 0;
     this.reader?.close();
     this.reader = null;
     this.child = null;
     this.initializeValue = null;
-    this.rejectPending(new CodexRpcDisconnectedError());
+    this.rejectPending(
+      new CodexRpcDisconnectedError(),
+      { preserveApplyingResponses: true },
+    );
     if (!this.closing) {
       for (const listener of this.disconnectListeners) {
         try {
@@ -369,6 +485,7 @@ export class CodexRpcClient {
   private async connectOnce(): Promise<void> {
     if (this.closing) throw new CodexRpcDisconnectedError("Codex RPC client is closed");
     const generation = ++this.generation;
+    this.messageDispatchGeneration = generation;
     const child = this.options.spawnProxy();
     this.child = child;
     this.reader = createInterface({ input: child.stdout });
@@ -423,24 +540,42 @@ export class CodexRpcClient {
     return await this.rawRequest(method, params);
   }
 
+  private disconnectedRequestBeforeWrite(
+    method: string,
+    expectedGeneration?: number,
+  ): CodexRpcDisconnectedError | null {
+    const generationChanged =
+      expectedGeneration !== undefined && expectedGeneration !== this.generation;
+    if (this.child && this.initializeValue !== null && !generationChanged) {
+      return null;
+    }
+    return new CodexRpcDisconnectedError(
+      generationChanged
+        ? `Codex app-server generation changed before ${method} request write`
+        : "Codex app-server control connection closed before request write",
+      { requestWritten: false },
+    );
+  }
+
   requestConnected(
     method: string,
     params?: unknown,
     expectedGeneration?: number,
   ): Promise<unknown> {
-    if (
-      !this.child ||
-      this.initializeValue === null ||
-      (expectedGeneration !== undefined && expectedGeneration !== this.generation)
-    ) {
-      return Promise.reject(new CodexRpcDisconnectedError(
-        expectedGeneration !== undefined && expectedGeneration !== this.generation
-          ? `Codex app-server generation changed before ${method} request write`
-          : "Codex app-server control connection closed before request write",
-        { requestWritten: false },
-      ));
-    }
+    const disconnected = this.disconnectedRequestBeforeWrite(method, expectedGeneration);
+    if (disconnected) return Promise.reject(disconnected);
     return this.rawRequest(method, params);
+  }
+
+  requestConnectedApplied(
+    method: string,
+    params: unknown,
+    expectedGeneration: number | undefined,
+    applyResponse: (result: unknown) => void | Promise<void>,
+  ): Promise<unknown> {
+    const disconnected = this.disconnectedRequestBeforeWrite(method, expectedGeneration);
+    if (disconnected) return Promise.reject(disconnected);
+    return this.rawRequest(method, params, applyResponse);
   }
 
   async notify(method: string, params?: unknown): Promise<void> {
@@ -467,6 +602,7 @@ export class CodexRpcClient {
 
   close(): void {
     this.closing = true;
+    this.messageDispatchGeneration = 0;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.reader?.close();
@@ -488,6 +624,12 @@ export interface CodexRpcPeer {
     method: string,
     params?: unknown,
     expectedGeneration?: number,
+  ): Promise<unknown>;
+  requestConnectedApplied?(
+    method: string,
+    params: unknown,
+    expectedGeneration: number | undefined,
+    applyResponse: (result: unknown) => void | Promise<void>,
   ): Promise<unknown>;
   notify(method: string, params?: unknown): Promise<void>;
   notifyConnected?(method: string, params?: unknown): void | Promise<void>;
@@ -513,6 +655,17 @@ export interface CodexThread {
   status: { type: "idle" | "active" | "notLoaded" | "systemError" };
   turns: CodexTurn[];
 }
+
+interface AccumulatedAgentMessage {
+  item: CodexThreadItem;
+  text: string;
+  completed: boolean;
+  hasStarted: boolean;
+  hasDelta: boolean;
+}
+
+const MAX_RETAINED_COMPLETED_TURNS = 256;
+const MAX_RETAINED_COMPLETED_TURN_BYTES = 16 * 1024 * 1024;
 
 type DispatchListener = (input: CodexBridgeInput, dispatch: CodexDispatch) => void | Promise<void>;
 type CompletedTurnListener = (turn: CodexTurn) => void | Promise<void>;
@@ -705,6 +858,11 @@ export class CodexSessionController {
   private readonly unresolvedUnknownListeners = new Set<UnresolvedUnknownListener>();
   private readonly turnByClientId = new Map<string, string>();
   private readonly turns = new Map<string, CodexTurn>();
+  private readonly retainedTurnBytesById = new Map<string, number>();
+  private retainedCompletedTurnBytes = 0;
+  private retainedCompletedTurnCount = 0;
+  private readonly agentMessagesByTurn =
+    new Map<string, Map<string, AccumulatedAgentMessage>>();
   private readonly log: (line: string) => void;
   private beforeSessionFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private initialThreadStart: InitialThreadStartAttempt | null = null;
@@ -730,7 +888,7 @@ export class CodexSessionController {
       recoveryRetryDelayMs?: number;
     } = {},
   ) {
-    this.log = options.log ?? ((line) => console.error(line));
+    this.log = terminalSafeLogger(options.log);
     rpc.onMessage((message) => this.handleBackendMessage(message));
     const hasDisconnectBoundary = rpc.onDisconnect !== undefined;
     rpc.onDisconnect?.((disconnectedGeneration) => {
@@ -879,12 +1037,322 @@ export class CodexSessionController {
   }
 
   private emitCompleted(turn: CodexTurn): void {
-    this.turns.set(turn.id, turn);
+    const retainedTurn = this.storeTurn(turn);
     for (const listener of this.completedListeners) {
-      void Promise.resolve(listener(turn)).catch((error) => {
+      void Promise.resolve(listener(retainedTurn)).catch((error) => {
         this.log(`codex-bridge: completion listener failed: ${errorDetail(error)}`);
       });
     }
+  }
+
+  private retainedTurnItem(item: CodexThreadItem): CodexThreadItem | null {
+    const id = typeof item.id === "string" ? item.id : null;
+    if (item.type === "userMessage") {
+      const clientId =
+        typeof item.clientId === "string" || item.clientId === null
+          ? item.clientId
+          : undefined;
+      const bootstrapInput =
+        this.bootstrapRecovery?.disposition === "unknown"
+          ? this.bootstrapRecovery.initialInput
+          : undefined;
+      return {
+        type: "userMessage",
+        ...(id === null ? {} : { id }),
+        ...(clientId === undefined ? {} : { clientId }),
+        ...(clientId === null &&
+            bootstrapInput !== undefined &&
+            sameJsonValue(item.content, bootstrapInput)
+          ? { content: item.content }
+          : {}),
+      };
+    }
+    if (item.type === "agentMessage") {
+      return {
+        type: "agentMessage",
+        ...(id === null ? {} : { id }),
+        ...(typeof item.text === "string" ? { text: item.text } : {}),
+        ...(item.phase === "commentary" || item.phase === "final_answer"
+          ? { phase: item.phase }
+          : {}),
+      };
+    }
+    return null;
+  }
+
+  private retainedTurn(turn: CodexTurn): CodexTurn {
+    return {
+      id: turn.id,
+      status: turn.status,
+      ...(turn.items === undefined
+        ? {}
+        : {
+          items: turn.items.flatMap((item) => {
+            const retained = this.retainedTurnItem(item);
+            return retained === null ? [] : [retained];
+          }),
+        }),
+    };
+  }
+
+  private retainedTurnBytes(turn: CodexTurn): number {
+    try {
+      return Buffer.byteLength(JSON.stringify(turn));
+    } catch {
+      return MAX_RETAINED_COMPLETED_TURN_BYTES + 1;
+    }
+  }
+
+  private storeTurn(turn: CodexTurn): CodexTurn {
+    const retained = this.retainedTurn(turn);
+    const previous = this.turns.get(retained.id);
+    if (previous?.status !== undefined && previous.status !== "inProgress") {
+      this.retainedCompletedTurnBytes -=
+        this.retainedTurnBytesById.get(retained.id) ?? 0;
+      this.retainedCompletedTurnCount -= 1;
+    }
+    const retainedBytes = this.retainedTurnBytes(retained);
+    this.turns.set(retained.id, retained);
+    this.retainedTurnBytesById.set(retained.id, retainedBytes);
+    if (retained.status !== "inProgress") {
+      this.retainedCompletedTurnBytes += retainedBytes;
+      this.retainedCompletedTurnCount += 1;
+    }
+    this.trimRetainedTurns();
+    return retained;
+  }
+
+  private trimRetainedTurns(): void {
+    if (
+      this.retainedCompletedTurnCount <= MAX_RETAINED_COMPLETED_TURNS &&
+      this.retainedCompletedTurnBytes <= MAX_RETAINED_COMPLETED_TURN_BYTES
+    ) {
+      return;
+    }
+    const completed = [...this.turns.entries()]
+      .filter(([, turn]) => turn.status !== "inProgress")
+      .map(([turnId, turn]) => ({
+        turnId,
+        turn,
+        bytes: this.retainedTurnBytesById.get(turnId) ?? 0,
+        bootstrapProof: (turn.items ?? []).some((item) =>
+          item.type === "userMessage" &&
+          item.clientId === null &&
+          Object.prototype.hasOwnProperty.call(item, "content")
+        ),
+      }));
+    while (
+      this.retainedCompletedTurnCount > MAX_RETAINED_COMPLETED_TURNS ||
+      this.retainedCompletedTurnBytes > MAX_RETAINED_COMPLETED_TURN_BYTES
+    ) {
+      const index = completed.findIndex((entry) => !entry.bootstrapProof);
+      if (index < 0) break;
+      const [evicted] = completed.splice(index, 1);
+      if (!evicted) break;
+      this.turns.delete(evicted.turnId);
+      this.retainedTurnBytesById.delete(evicted.turnId);
+      for (const [clientId, turnId] of this.turnByClientId) {
+        if (turnId === evicted.turnId) {
+          this.turnByClientId.delete(clientId);
+        }
+      }
+      this.retainedCompletedTurnBytes -= evicted.bytes;
+      this.retainedCompletedTurnCount -= 1;
+    }
+  }
+
+  private observeAgentMessageItem(
+    turnId: string,
+    item: CodexThreadItem,
+    completed: boolean,
+    started = false,
+  ): void {
+    if (
+      item.type !== "agentMessage" ||
+      typeof item.id !== "string"
+    ) {
+      return;
+    }
+    let messages = this.agentMessagesByTurn.get(turnId);
+    if (!messages) {
+      messages = new Map();
+      this.agentMessagesByTurn.set(turnId, messages);
+    }
+    const existing = messages.get(item.id);
+    const itemText = typeof item.text === "string" ? item.text : "";
+    if (
+      completed &&
+      existing?.completed === true &&
+      itemText.trim() === ""
+    ) {
+      // item/completed is the authoritative terminal item. A later
+      // turn/completed snapshot can contain only an empty shell for the same
+      // id; do not erase the final text/phase already observed.
+      return;
+    }
+    const text =
+      completed
+        ? itemText.trim() === "" &&
+            existing?.hasStarted === true &&
+            existing?.hasDelta === true &&
+            existing.text.length > 0
+          ? existing.text
+          : itemText
+        : existing?.text.length
+          ? existing.text
+          : itemText;
+    const retainedItem = this.retainedTurnItem(item);
+    if (retainedItem === null) return;
+    messages.set(item.id, {
+      item: {
+        ...(existing?.item ?? {}),
+        ...retainedItem,
+        type: "agentMessage",
+        id: item.id,
+        text,
+      },
+      text,
+      completed: completed || existing?.completed === true,
+      hasStarted: started || existing?.hasStarted === true,
+      hasDelta: existing?.hasDelta === true,
+    });
+  }
+
+  private observeAgentMessageDelta(params: Record<string, unknown>): void {
+    if (
+      typeof params.turnId !== "string" ||
+      typeof params.itemId !== "string" ||
+      typeof params.delta !== "string"
+    ) {
+      return;
+    }
+    let messages = this.agentMessagesByTurn.get(params.turnId);
+    if (!messages) {
+      messages = new Map();
+      this.agentMessagesByTurn.set(params.turnId, messages);
+    }
+    const existing = messages.get(params.itemId);
+    // item/completed is authoritative. Ignore a duplicate/late delta instead
+    // of appending it after the final item text.
+    if (existing?.completed) return;
+    const hadDelta = existing?.hasDelta === true;
+    // item/started text is not streamed output. Seed this buffer only from
+    // actual deltas so an empty delta cannot promote provisional item text.
+    const text = `${hadDelta ? existing.text : ""}${params.delta}`;
+    messages.set(params.itemId, {
+      item: {
+        ...(existing?.item ?? {}),
+        type: "agentMessage",
+        id: params.itemId,
+        text,
+      },
+      text,
+      completed: false,
+      hasStarted: existing?.hasStarted === true,
+      hasDelta: hadDelta || params.delta.length > 0,
+    });
+  }
+
+  private observeTurnItem(turnId: string, item: CodexThreadItem): void {
+    const retainedItem = this.retainedTurnItem(item);
+    if (retainedItem === null) return;
+    const turn = this.turns.get(turnId) ?? {
+      id: turnId,
+      status: "inProgress",
+      items: [],
+    } satisfies CodexTurn;
+    const items = [...(turn.items ?? [])];
+    const itemId = typeof item.id === "string" ? item.id : null;
+    const existingIndex = itemId === null
+      ? -1
+      : items.findIndex((candidate) => candidate.id === itemId);
+    if (existingIndex >= 0) {
+      items[existingIndex] = {
+        ...items[existingIndex],
+        ...retainedItem,
+      };
+    } else {
+      items.push(retainedItem);
+    }
+    this.storeTurn({ ...turn, items });
+  }
+
+  private observeTurnAgentMessages(turn: CodexTurn, completed: boolean): void {
+    for (const item of turn.items ?? []) {
+      this.observeAgentMessageItem(turn.id, item, completed);
+    }
+  }
+
+  private completedTurnWithAgentText(
+    turn: CodexTurn,
+    previous = this.turns.get(turn.id),
+  ): CodexTurn {
+    const accumulated = this.agentMessagesByTurn.get(turn.id);
+    const canonicalItems = (previous?.items ?? []).filter((item) => {
+      if (item.type !== "agentMessage" || previous?.status !== "inProgress") {
+        return true;
+      }
+      return typeof item.id === "string" &&
+        accumulated?.get(item.id)?.completed === true;
+    });
+    for (const item of turn.items ?? []) {
+      const itemId = typeof item.id === "string" ? item.id : null;
+      const existingIndex = itemId === null
+        ? -1
+        : canonicalItems.findIndex((candidate) => candidate.id === itemId);
+      if (existingIndex >= 0) {
+        canonicalItems[existingIndex] = {
+          ...canonicalItems[existingIndex],
+          ...item,
+        };
+      } else {
+        canonicalItems.push(item);
+      }
+    }
+    const canonicalTurn = canonicalItems.length > 0
+      ? { ...turn, items: canonicalItems }
+      : turn;
+    const snapshotAgents = agentMessageItems(canonicalTurn);
+    if (
+      snapshotAgents.some((item) => item.phase !== "commentary")
+    ) {
+      return canonicalTurn;
+    }
+    const accumulatedFallback = finalAgentItem(
+      accumulated
+        ? [...accumulated.values()]
+          .filter(({ completed }) => completed)
+          .map(({ item, text }) => ({ ...item, text }))
+        : [],
+    );
+    const fallback = accumulatedFallback ??
+      (previous?.status !== "inProgress"
+        ? finalAgentItem(agentMessageItems(previous))
+        : null);
+    if (!fallback) return canonicalTurn;
+
+    const items = [...(canonicalTurn.items ?? [])];
+    const fallbackId = typeof fallback.id === "string" ? fallback.id : null;
+    const existingIndex = fallbackId === null
+      ? -1
+      : items.findIndex((item) =>
+        item.type === "agentMessage" && item.id === fallbackId
+      );
+    if (existingIndex >= 0) {
+      const existing = items[existingIndex]!;
+      if (typeof existing.text === "string" && existing.text.trim() !== "") {
+        return canonicalTurn;
+      }
+      items[existingIndex] = {
+        ...fallback,
+        ...existing,
+        text: fallback.text,
+        phase: fallback.phase,
+      };
+    } else {
+      items.push(fallback);
+    }
+    return { ...canonicalTurn, items };
   }
 
   private serializeSession<T>(operation: () => Promise<T>): Promise<T> {
@@ -1154,6 +1622,27 @@ export class CodexSessionController {
     );
   }
 
+  private async requestConnectedApplied(
+    method: string,
+    params: unknown,
+    applyResponse: (result: unknown) => void | Promise<void>,
+    expectedGeneration?: number,
+  ): Promise<unknown> {
+    const generation =
+      expectedGeneration ?? this.requestGenerationFence ?? undefined;
+    if (this.rpc.requestConnectedApplied) {
+      return await this.rpc.requestConnectedApplied(
+        method,
+        params,
+        generation,
+        applyResponse,
+      );
+    }
+    const result = await this.rpc.requestConnected(method, params, generation);
+    await applyResponse(result);
+    return result;
+  }
+
   private async notifyConnected(method: string, params?: unknown): Promise<void> {
     if (this.rpc.notifyConnected) {
       await this.rpc.notifyConnected(method, params);
@@ -1181,7 +1670,11 @@ export class CodexSessionController {
     // Rebuild affinity indexes even for the same thread so rollback cannot
     // leave a removed source clientId cached and authorize owner_answer.
     this.turns.clear();
+    this.retainedTurnBytesById.clear();
+    this.retainedCompletedTurnBytes = 0;
+    this.retainedCompletedTurnCount = 0;
     this.turnByClientId.clear();
+    this.agentMessagesByTurn.clear();
     this.threadId = thread.id;
     this.noThreadRecovery = null;
     if (replacing) {
@@ -1199,15 +1692,22 @@ export class CodexSessionController {
     await this.arbiter!.observeResume({ thread }, options);
 
     for (const turn of thread.turns) {
-      this.turns.set(turn.id, turn);
-      for (const clientId of clientIds(turn)) {
+      this.observeTurnAgentMessages(turn, turn.status !== "inProgress");
+      const observedTurn = turn.status === "inProgress"
+        ? turn
+        : this.completedTurnWithAgentText(turn);
+      const retainedTurn = this.storeTurn(observedTurn);
+      for (const clientId of clientIds(retainedTurn)) {
         this.turnByClientId.set(clientId, turn.id);
         this.emitDispatch(
           { text: "recovered AgentParty input", clientUserMessageId: clientId },
           { kind: "duplicate", turnId: turn.id },
         );
       }
-      if (turn.status !== "inProgress") this.emitCompleted(turn);
+      if (observedTurn.status !== "inProgress") {
+        this.emitCompleted(observedTurn);
+        this.agentMessagesByTurn.delete(observedTurn.id);
+      }
     }
 
     const bootstrapPromptPending =
@@ -1365,21 +1865,26 @@ export class CodexSessionController {
         this.throwIfInitialThreadStartCancelled(attempt);
         attempt.phase = "writing";
         try {
-          const result = await this.requestConnected("thread/start", params);
-          const thread = responseThread(result);
-          if (thread === null) {
-            throw new Error("thread/start returned no valid thread");
-          }
-          await this.attachThread(thread, {
-            deferQueuedInputs: this.options.expectBootstrapPrompt === true,
-          });
-          this.bootstrapThreadId = this.threadId;
-          this.bootstrapRecovery = {
-            disposition: "restart_thread_with_prompt",
-          };
-          if (this.options.expectBootstrapPrompt !== true) {
-            await this.flushBeforeSessionSafely();
-          }
+          const result = await this.requestConnectedApplied(
+            "thread/start",
+            params,
+            async (response) => {
+              const thread = responseThread(response);
+              if (thread === null) {
+                throw new Error("thread/start returned no valid thread");
+              }
+              await this.attachThread(thread, {
+                deferQueuedInputs: this.options.expectBootstrapPrompt === true,
+              });
+              this.bootstrapThreadId = this.threadId;
+              this.bootstrapRecovery = {
+                disposition: "restart_thread_with_prompt",
+              };
+              if (this.options.expectBootstrapPrompt !== true) {
+                await this.flushBeforeSessionSafely();
+              }
+            },
+          );
           attempt.outcome = "resume";
           return result;
         } catch (error) {
@@ -1548,9 +2053,11 @@ export class CodexSessionController {
             }
           }
         }
-        const result = await this.requestConnected(method, params);
-        await this.routeThreadResponse(method, result, record);
-        return result;
+        return await this.requestConnectedApplied(
+          method,
+          params,
+          async (result) => await this.routeThreadResponse(method, result, record),
+        );
       });
     }
 
@@ -1571,11 +2078,14 @@ export class CodexSessionController {
             targetThreadId: requestThreadId,
           });
         }
-        const result = await this.requestConnected(method, params);
         if (method === "thread/rollback") {
-          await this.routeThreadResponse(method, result, record);
+          return await this.requestConnectedApplied(
+            method,
+            params,
+            async (result) => await this.routeThreadResponse(method, result, record),
+          );
         }
-        return result;
+        return await this.requestConnected(method, params);
       });
     }
     if (INTERACTIVE_MUTATIONS.has(method as CodexInteractiveMutation)) {
@@ -1608,12 +2118,17 @@ export class CodexSessionController {
       }
     }
 
-    await this.ensureBackendReady();
-    const result = await this.requestConnected(method, params);
     if ((method === "thread/read" || method === "thread/resume") && requestThreadId === this.threadId) {
-      await this.routeThreadResponse(method, result, record);
+      return await this.withReadySession(async () =>
+        await this.requestConnectedApplied(
+          method,
+          params,
+          async (result) => await this.routeThreadResponse(method, result, record),
+        )
+      );
     }
-    return result;
+    await this.ensureBackendReady();
+    return await this.requestConnected(method, params);
   }
 
   async notify(method: string, params?: unknown): Promise<void> {
@@ -1636,35 +2151,78 @@ export class CodexSessionController {
         if (message.method === "turn/started") {
           const turn = asTurn(params.turn);
           if (turn) {
-            this.turns.set(turn.id, turn);
-            for (const clientId of clientIds(turn)) {
+            const previous = this.turns.get(turn.id);
+            const observedTurn =
+              (turn.items?.length ?? 0) === 0 && (previous?.items?.length ?? 0) > 0
+                ? { ...turn, items: [...previous!.items!] }
+                : turn;
+            this.observeTurnAgentMessages(observedTurn, false);
+            const retainedTurn = this.storeTurn(observedTurn);
+            for (const clientId of clientIds(retainedTurn)) {
               this.turnByClientId.set(clientId, turn.id);
               this.emitDispatch(
                 { text: "observed AgentParty input", clientUserMessageId: clientId },
                 { kind: "duplicate", turnId: turn.id },
               );
             }
-            await this.arbiter.observeTurnStarted(turn.id, clientIds(turn));
+            await this.arbiter.observeTurnStarted(
+              observedTurn.id,
+              clientIds(observedTurn),
+            );
           }
         } else if (message.method === "turn/completed") {
           const turn = asTurn(params.turn);
           if (turn) {
-            for (const clientId of clientIds(turn)) this.turnByClientId.set(clientId, turn.id);
-            this.emitCompleted(turn);
-            await this.arbiter.observeTurnCompleted(turn.id);
+            this.observeTurnAgentMessages(turn, true);
+            const completedTurn = this.completedTurnWithAgentText(turn);
+            for (const clientId of clientIds(completedTurn)) {
+              this.turnByClientId.set(clientId, completedTurn.id);
+            }
+            this.emitCompleted(completedTurn);
+            this.agentMessagesByTurn.delete(completedTurn.id);
+            await this.arbiter.observeTurnCompleted(completedTurn.id);
           }
+        } else if (
+          message.method === "item/agentMessage/delta"
+        ) {
+          this.observeAgentMessageDelta(params);
         } else if (
           (message.method === "item/started" || message.method === "item/completed") &&
           typeof params.turnId === "string" &&
           isObject(params.item) &&
-          typeof params.item.id === "string" &&
-          params.item.type === "commandExecution" &&
-          params.item.source === "userShell"
+          typeof params.item.id === "string"
         ) {
-          if (message.method === "item/started") {
-            await this.arbiter.observeUserShellStarted(params.turnId, params.item.id);
-          } else {
-            await this.arbiter.observeUserShellCompleted(params.turnId, params.item.id);
+          const item = asThreadItem(params.item)[0];
+          if (item) this.observeTurnItem(params.turnId, item);
+          if (item?.type === "userMessage" && typeof item.clientId === "string") {
+            const knownTurnId = this.turnByClientId.get(item.clientId);
+            this.turnByClientId.set(item.clientId, params.turnId);
+            if (knownTurnId !== params.turnId) {
+              this.emitDispatch(
+                {
+                  text: "observed AgentParty input",
+                  clientUserMessageId: item.clientId,
+                },
+                { kind: "duplicate", turnId: params.turnId },
+              );
+              await this.arbiter.observeTurnStarted(params.turnId, [item.clientId]);
+            }
+          } else if (item?.type === "agentMessage") {
+            this.observeAgentMessageItem(
+              params.turnId,
+              item,
+              message.method === "item/completed",
+              message.method === "item/started",
+            );
+          } else if (
+            item?.type === "commandExecution" &&
+            item.source === "userShell"
+          ) {
+            if (message.method === "item/started") {
+              await this.arbiter.observeUserShellStarted(params.turnId, params.item.id);
+            } else {
+              await this.arbiter.observeUserShellCompleted(params.turnId, params.item.id);
+            }
           }
         } else if (
           message.method === "thread/status/changed" &&
@@ -1761,19 +2319,22 @@ export class CodexSessionController {
         );
         this.assertRecoveryCurrent(state);
         requireRecoveryThreadIdentity(resumeResult, threadId, "thread/resume");
-        const result = await this.requestConnected(
+        await this.requestConnectedApplied(
           "thread/read",
           { threadId, includeTurns: true },
+          async (result) => {
+            this.assertRecoveryCurrent(state);
+            const restoredThread = requireRecoveryThreadSnapshot(result, threadId);
+            await this.attachThread(restoredThread, {
+              backendRestarted: true,
+              // A bootstrap prompt that is about to be replayed (or whose outcome
+              // is still unknown) always retains priority over pre-attach delivery.
+              deferQueuedInputs: this.bootstrapThreadId === threadId,
+            });
+            this.assertRecoveryCurrent(state);
+          },
           state.generation,
         );
-        this.assertRecoveryCurrent(state);
-        const restoredThread = requireRecoveryThreadSnapshot(result, threadId);
-        await this.attachThread(restoredThread, {
-          backendRestarted: true,
-          // A bootstrap prompt that is about to be replayed (or whose outcome
-          // is still unknown) always retains priority over pre-attach delivery.
-          deferQueuedInputs: this.bootstrapThreadId === threadId,
-        });
         this.assertRecoveryCurrent(state);
 
         let frontendEvent: CodexFrontendRecovery = {
@@ -1789,6 +2350,10 @@ export class CodexSessionController {
             if (this.recoveredBootstrapInput(bootstrap.initialInput)) {
               this.bootstrapThreadId = null;
               this.bootstrapRecovery = null;
+              for (const turn of [...this.turns.values()]) {
+                this.storeTurn(turn);
+              }
+              this.trimRetainedTurns();
               await this.flushBeforeSessionSafely();
               this.assertRecoveryCurrent(state);
             } else {
@@ -1919,6 +2484,24 @@ interface PendingFrontendServerRequest {
 }
 
 export const CODEX_TUI_WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
+// Codex's remote client accepts 128 MiB WebSocket messages. Its app-server
+// legitimately returns multi-megabyte startup/list responses, so the bridge
+// must not impose a smaller wire limit than the client it fronts.
+export const CODEX_TUI_WEBSOCKET_MAX_FRAME_BYTES = 128 * 1_024 * 1_024;
+export const CODEX_TUI_WEBSOCKET_BACKPRESSURE_LIMIT_BYTES =
+  CODEX_TUI_WEBSOCKET_MAX_FRAME_BYTES;
+export const CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES =
+  CODEX_TUI_WEBSOCKET_MAX_FRAME_BYTES + 1_024 * 1_024;
+// Charge a conservative fixed cost per queued frame as well as its UTF-8
+// payload. This bounds queue object overhead without treating an arbitrary
+// message count as a protocol limit.
+export const CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_ENTRY_COST_BYTES = 1_024;
+// Bun's backpressure buffer and this bridge queue are independent. In the
+// worst serialized-data case they can retain roughly 257 MiB combined before
+// JavaScript string/object and native framing overhead, so surface a warning
+// before the bridge-owned half reaches its hard limit.
+const CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_WARNING_BYTES =
+  Math.floor(CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES / 2);
 
 /**
  * Private Unix WebSocket JSON-RPC endpoint used by
@@ -1932,8 +2515,8 @@ export const CODEX_TUI_WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
  */
 export class CodexUnixJsonRpcProxy {
   private static readonly MAX_PENDING_SERVER_REQUESTS = 128;
-  private static readonly MAX_OUTBOUND_QUEUE_ENTRIES = 1_024;
-  private static readonly MAX_OUTBOUND_QUEUE_BYTES = 1_048_576;
+  private static readonly MAX_OUTBOUND_QUEUE_BYTES =
+    CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_MAX_BYTES;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private socket: ServerWebSocket<{ connectionId: string }> | null = null;
   private frontendReady = false;
@@ -1947,6 +2530,7 @@ export class CodexUnixJsonRpcProxy {
     bytes: number;
   }> = [];
   private outboundQueueBytes = 0;
+  private outboundQueueWarningEmitted = false;
   private readonly pendingServerRequestsByBackendId =
     new Map<string, PendingFrontendServerRequest>();
   private readonly pendingServerRequestsByFrontendId =
@@ -1959,7 +2543,7 @@ export class CodexUnixJsonRpcProxy {
     private readonly controller: CodexSessionController,
     options: { log?: (line: string) => void } = {},
   ) {
-    this.log = options.log ?? ((line) => console.error(line));
+    this.log = terminalSafeLogger(options.log);
     this.unsubscribeMessages = controller.onFrontendMessage((message) => {
       let outbound: JsonRpcRequest | JsonRpcNotification = message;
       if ("id" in message) {
@@ -2060,6 +2644,7 @@ export class CodexUnixJsonRpcProxy {
     this.backpressuredSocket = null;
     this.outboundQueue.length = 0;
     this.outboundQueueBytes = 0;
+    this.outboundQueueWarningEmitted = false;
     try {
       socket.close(1012, reason);
     } catch (error) {
@@ -2086,14 +2671,41 @@ export class CodexUnixJsonRpcProxy {
     payload: string,
   ): void {
     if (this.socket !== socket) return;
+    const bytes = Buffer.byteLength(payload);
+    if (bytes > CODEX_TUI_WEBSOCKET_MAX_FRAME_BYTES) {
+      this.failFrontendSocket(
+        socket,
+        `Codex bridge JSON-RPC frame exceeded its ${CODEX_TUI_WEBSOCKET_MAX_FRAME_BYTES}-byte safety limit`,
+      );
+      return;
+    }
     if (this.backpressuredSocket === socket) {
-      const bytes = Buffer.byteLength(payload);
-      if (
-        this.outboundQueue.length >= CodexUnixJsonRpcProxy.MAX_OUTBOUND_QUEUE_ENTRIES ||
-        this.outboundQueueBytes + bytes > CodexUnixJsonRpcProxy.MAX_OUTBOUND_QUEUE_BYTES
-      ) {
-        this.failFrontendSocket(socket, "Codex bridge outbound queue exceeded its safety limit");
+      const estimatedQueueBytes =
+        this.outboundQueueBytes +
+        bytes +
+        (this.outboundQueue.length + 1) *
+          CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_ENTRY_COST_BYTES;
+      if (estimatedQueueBytes > CodexUnixJsonRpcProxy.MAX_OUTBOUND_QUEUE_BYTES) {
+        this.failFrontendSocket(
+          socket,
+          `Codex bridge outbound queue exceeded its safety limit ` +
+            `(entries=${this.outboundQueue.length}, bytes=${this.outboundQueueBytes}, ` +
+            `incoming=${bytes}, estimated=${estimatedQueueBytes})`,
+        );
         return;
+      }
+      if (
+        !this.outboundQueueWarningEmitted &&
+        estimatedQueueBytes >= CODEX_TUI_WEBSOCKET_OUTBOUND_QUEUE_WARNING_BYTES
+      ) {
+        this.outboundQueueWarningEmitted = true;
+        this.log(
+          `codex-bridge: outbound queue crossed its warning threshold ` +
+            `(entries=${this.outboundQueue.length + 1}, ` +
+            `bytes=${this.outboundQueueBytes + bytes}, ` +
+            `estimated=${estimatedQueueBytes}, ` +
+            `limit=${CodexUnixJsonRpcProxy.MAX_OUTBOUND_QUEUE_BYTES})`,
+        );
       }
       this.outboundQueue.push({ socket, payload, bytes });
       this.outboundQueueBytes += bytes;
@@ -2123,6 +2735,7 @@ export class CodexUnixJsonRpcProxy {
     this.backpressuredSocket = null;
     this.outboundQueue.length = 0;
     this.outboundQueueBytes = 0;
+    this.outboundQueueWarningEmitted = false;
     this.log(`codex-bridge: ${reason}; closing the unhealthy TUI socket`);
     socket.close(1011, reason);
   }
@@ -2222,6 +2835,7 @@ export class CodexUnixJsonRpcProxy {
     this.backpressuredSocket = null;
     this.outboundQueue.length = 0;
     this.outboundQueueBytes = 0;
+    this.outboundQueueWarningEmitted = false;
   }
 
   async listen(socketPath: string): Promise<void> {
@@ -2242,6 +2856,13 @@ export class CodexUnixJsonRpcProxy {
         // A session bridge must remain attached while a user or approval is
         // legitimately quiet for longer than Bun's 120-second default.
         idleTimeout: CODEX_TUI_WEBSOCKET_IDLE_TIMEOUT_SECONDS,
+        // Match Codex remote's explicit per-frame ceiling. A legitimate
+        // app-server response can exceed both Bun's smaller defaults and the
+        // proxy's former 1 MiB queue cap; the second bounded queue absorbs a
+        // short burst while drain catches up.
+        maxPayloadLength: CODEX_TUI_WEBSOCKET_MAX_FRAME_BYTES,
+        backpressureLimit: CODEX_TUI_WEBSOCKET_BACKPRESSURE_LIMIT_BYTES,
+        closeOnBackpressureLimit: false,
         open(socket) {
           self.accept(socket);
         },
@@ -2267,6 +2888,7 @@ export class CodexUnixJsonRpcProxy {
           self.backpressuredSocket = null;
           self.outboundQueue.length = 0;
           self.outboundQueueBytes = 0;
+          self.outboundQueueWarningEmitted = false;
           self.log("codex-bridge: TUI disconnected; bridge remains ready for the same session to reattach");
         },
       },
@@ -2285,6 +2907,7 @@ export class CodexUnixJsonRpcProxy {
     this.backpressuredSocket = null;
     this.outboundQueue.length = 0;
     this.outboundQueueBytes = 0;
+    this.outboundQueueWarningEmitted = false;
     const server = this.server;
     this.server = null;
     if (!server) return;
@@ -2433,12 +3056,30 @@ function continuationKey(delivery: DirectedDelivery): string | null {
   return `${delivery.work_id}\u0000${delivery.continuation_ref}`;
 }
 
-function finalAgentText(turn: CodexTurn): string | null {
-  const agents = (turn.items ?? []).filter((item) =>
-    item.type === "agentMessage" && typeof item.text === "string"
+type AgentMessageItem = CodexThreadItem & { text: string };
+
+function agentMessageItems(turn: CodexTurn | null | undefined): AgentMessageItem[] {
+  return (turn?.items ?? []).filter((item): item is AgentMessageItem =>
+    item.type === "agentMessage" &&
+    typeof item.text === "string" &&
+    item.text.trim() !== ""
   );
-  const text = agents.length > 0 ? String(agents[agents.length - 1]!.text).trim() : "";
-  return text || null;
+}
+
+function finalAgentItem(items: AgentMessageItem[]): AgentMessageItem | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (item.text.trim() !== "" && item.phase === "final_answer") return item;
+  }
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (item.text.trim() !== "" && item.phase !== "commentary") return item;
+  }
+  return null;
+}
+
+function finalAgentText(turn: CodexTurn): string | null {
+  return finalAgentItem(agentMessageItems(turn))?.text.trim() || null;
 }
 
 class CodexDeliveryConnectionReplacedError extends Error {}
@@ -2486,7 +3127,7 @@ export class CodexAgentPartyBridge {
     if (options.requireDeliveryRecovery === true && options.recoveryJournal === undefined) {
       throw new Error("Codex delivery recovery requires a durable recovery journal");
     }
-    this.log = options.log ?? ((line) => console.error(line));
+    this.log = terminalSafeLogger(options.log);
     this.unsubscribeDispatch = options.session.onDispatch((input, dispatch) => {
       this.observeDispatch(input, dispatch);
     });
@@ -3005,11 +3646,18 @@ export class CodexAgentPartyBridge {
           idempotencyKey: pending.replyIdempotencyKey,
         });
         pending.replySeq = posted.seq;
-        this.options.recoveryJournal?.update(pending.delivery.id, {
-          phase: "reply_posted",
-          replyBody: pending.replyBody,
-          replySeq: posted.seq,
-        });
+        try {
+          this.options.recoveryJournal?.update(pending.delivery.id, {
+            phase: "reply_posted",
+            replyBody: pending.replyBody,
+            replySeq: posted.seq,
+          });
+        } catch (error) {
+          // A stable idempotency key makes the REST result safe to ask for
+          // again, but the in-memory sequence must not outrun durable recovery.
+          pending.replySeq = null;
+          throw error;
+        }
       }
       const replySeq = pending.replySeq;
       if (replySeq === null) throw new Error("recovered reply has no persisted sequence");
@@ -3585,6 +4233,7 @@ export class CodexAgentPartyBridge {
           throw new Error(`delivery state is ${state}, expected failed`);
         }
       }
+      this.log(`codex-bridge: failed seq=${pending.message.seq}: ${error}`);
       // Persist deletion of an owner answer and its parked source binding in
       // one snapshot before dropping the only retryable pending object.
       this.removeSettledJournalEntries(pending);
@@ -3953,11 +4602,28 @@ export class CodexAgentPartyBridge {
         });
         pending.replySeq = posted.seq;
         if (pending.delivery) {
-          this.options.recoveryJournal?.update(pending.delivery.id, {
-            phase: "reply_posted",
-            replyBody: pending.replyBody,
-            replySeq: posted.seq,
-          });
+          try {
+            this.options.recoveryJournal?.update(pending.delivery.id, {
+              phase: "reply_posted",
+              replyBody: pending.replyBody,
+              replySeq: posted.seq,
+            });
+          } catch (error) {
+            // The linked-reply POST can broadcast an unsolicited authoritative
+            // `replied` state before its HTTP response returns. That path
+            // removes the exact pending delivery and WAL entry. Once both
+            // fences confirm that terminal state, the successful POST response
+            // is not an unknown outcome and must not be retried.
+            if (
+              !this.pending.has(pending.clientId) &&
+              this.settledDeliveryIds.has(pending.delivery.id)
+            ) {
+              this.log(`codex-bridge: replied to seq=${pending.message.seq} with seq=${posted.seq}`);
+              return;
+            }
+            pending.replySeq = null;
+            throw error;
+          }
         }
         pending.retryAttempt = 0;
         if (pending.renewTimer) clearInterval(pending.renewTimer);

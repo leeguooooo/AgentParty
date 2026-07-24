@@ -154,6 +154,23 @@ input.on("line", (line) => {
     });
     return;
   }
+  if (frame.method === "mock/messageOrdering") {
+    send({ method: "mock/ordered/first" });
+    send({ method: "mock/ordered/second" });
+    send({ id: frame.id, result: { ordered: true } });
+    return;
+  }
+  if (frame.method === "mock/messageOrderingDisconnect") {
+    const frames = [
+      { method: "mock/disconnect/first" },
+      { method: "mock/disconnect/second" },
+    ];
+    process.stdout.write(
+      frames.map((value) => `${JSON.stringify(value)}\n`).join(""),
+      () => process.exit(75),
+    );
+    return;
+  }
   if (frame.method === "mock/disconnect") {
     process.exit(74);
   }
