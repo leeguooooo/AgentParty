@@ -2,6 +2,7 @@
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
 import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type SendDecisionRequest, type ServerFrame } from "@agentparty/shared";
+import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { downloadPartyUpgrade, isPartyBinaryPath, maybeReexecUpgrade, serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
@@ -910,6 +911,7 @@ const RECENT_BODY_MAX = 400;
 // 超出预算时显式标记，runner 可按需 `party charter/history` 补取，避免每次 wake 固定烧掉大段上下文（#436）。
 const WAKE_AUX_BODY_MAX = 8_000;
 const WAKE_CHARTER_BODY_MAX = 4_000;
+const WAKE_DECISION_BODY_MAX = 3_000;
 const RUNNER_SESSION_FILE = "wake-session.json";
 const RUNNER_LOG_FILE = "serve-runner.log";
 const SERVE_LIFECYCLE_LOG_FILE = "serve-lifecycle.log";
@@ -1209,6 +1211,19 @@ function truncateCodePoints(value: string, maxLength: number): string {
   return points.length <= maxLength ? value : points.slice(0, maxLength).join("");
 }
 
+function truncateCodePointsWithNotice(
+  value: string | null,
+  maxLength: number,
+  notice: string,
+): string | null {
+  if (value === null) return null;
+  if (codePointLength(value) <= maxLength) return value;
+  const noticeLength = codePointLength(notice);
+  return noticeLength >= maxLength
+    ? truncateCodePoints(notice, maxLength)
+    : truncateCodePoints(value, maxLength - noticeLength) + notice;
+}
+
 // 把一条 @mention 的完整上下文落成 JSON 文件，命令拿路径读——避开 env/stdin 的 shell quoting/注入，
 // 也让 runner 能一次拿全 channel/seq/sender/body/reply_to/recent/protocol_reminder（评审建议）。
 // recent = 触发消息之前、serve 在线期间看到的最近频道消息（含自己/未 @ 的闲聊，正文截断），
@@ -1227,16 +1242,26 @@ function buildWakeContext(
   const body = frame.kind === "message" ? frame.body : (frame.note ?? "");
   const rawCharter = charter?.charter ?? null;
   const charterNotice = `\n… [charter truncated; run \`party charter ${channel}\`]`;
-  const charterNoticeLength = codePointLength(charterNotice);
-  const boundedCharter = rawCharter === null
-    ? null
-    : codePointLength(rawCharter) <= WAKE_CHARTER_BODY_MAX
-      ? rawCharter
-      : charterNoticeLength >= WAKE_CHARTER_BODY_MAX
-        ? truncateCodePoints(charterNotice, WAKE_CHARTER_BODY_MAX)
-        : truncateCodePoints(rawCharter, WAKE_CHARTER_BODY_MAX - charterNoticeLength) + charterNotice;
+  const boundedCharter = truncateCodePointsWithNotice(
+    rawCharter,
+    WAKE_CHARTER_BODY_MAX,
+    charterNotice,
+  );
   const boundedCharterLength = boundedCharter === null ? 0 : codePointLength(boundedCharter);
-  let recentBudget = WAKE_AUX_BODY_MAX - boundedCharterLength;
+  const rawDecisionSnapshot = channelDecisionSnapshotBodyLines(charter?.active_decisions ?? []).join("\n") || null;
+  const decisionNotice = `\n… [decision snapshot truncated; run \`party decision list --channel ${channel}\`]`;
+  const decisionBudget = Math.min(
+    WAKE_DECISION_BODY_MAX,
+    Math.max(0, WAKE_AUX_BODY_MAX - boundedCharterLength),
+  );
+  const boundedDecisionSnapshot = truncateCodePointsWithNotice(
+    rawDecisionSnapshot,
+    decisionBudget,
+    decisionNotice,
+  );
+  const boundedDecisionLength =
+    boundedDecisionSnapshot === null ? 0 : codePointLength(boundedDecisionSnapshot);
+  let recentBudget = WAKE_AUX_BODY_MAX - boundedCharterLength - boundedDecisionLength;
   let recentBodyChars = 0;
   let recentBodyTruncated = false;
   const boundedRecent: Array<{
@@ -1292,17 +1317,24 @@ function buildWakeContext(
     decision_response: frame.decision_response ?? null,
     charter: boundedCharter,
     charter_rev: charter?.charter_rev ?? 0,
+    ...(boundedDecisionSnapshot === null ? {} : { decision_snapshot: boundedDecisionSnapshot }),
     project_agent: projectAgent,
     cli_upgrade: cliUpgrade,
     recent: boundedRecent,
     context_budget: {
       policy: "auxiliary-body-chars-v1",
       max_auxiliary_body_chars: WAKE_AUX_BODY_MAX,
-      auxiliary_body_chars: boundedCharterLength + recentBodyChars,
+      auxiliary_body_chars: boundedCharterLength + boundedDecisionLength + recentBodyChars,
       trigger_body_chars: codePointLength(body),
       trigger_body_truncated: false,
       charter_chars: boundedCharterLength,
       charter_truncated: rawCharter !== null && boundedCharter !== rawCharter,
+      ...(rawDecisionSnapshot === null
+        ? {}
+        : {
+            decision_snapshot_chars: boundedDecisionLength,
+            decision_snapshot_truncated: boundedDecisionSnapshot !== rawDecisionSnapshot,
+          }),
       recent_body_chars: recentBodyChars,
       recent_messages_included: boundedRecent.length,
       recent_messages_available: recent.length,
@@ -4059,7 +4091,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
         advertise: async (signal) => {
           if (role === "front") {
             const note = projectAgentReadyNote(profile, channel, prepared);
-            await post(opts.server, principal.token, channel, {
+            const { role_warning: roleWarning } = await post(opts.server, principal.token, channel, {
               kind: "status",
               state: "waiting",
               role: "host",
@@ -4072,6 +4104,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
                 worktree_label: `${principal.name}:${profile.worktree_strategy}:${profile.base_branch}`,
               },
             }, signal);
+            if (roleWarning !== undefined) out(`profile front #${channel}: warn: ${terminalOutput(roleWarning)}`);
             await post(opts.server, principal.token, channel, {
               kind: "message",
               body: `${profile.name || profile.handle} joined #${channel}: front=${front.name}, execution worker=${worker.name}.`,
@@ -4810,7 +4843,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
               unread: unreadFromCursor(frame.last_seq, o.channel),
             }));
         }
-        if (typeof frame.charter_rev === "number") await refreshCharter("welcome", frame.charter_rev);
+        // decision ledger 不推进 charter_rev。每次重连都重拉 bundle，补上断线期间可能已经越过
+        // cursor 的 ledger refresh status；只按 rev 比较会永久保留旧 active_decisions。
+        await refreshCharter("welcome");
         // 挂上即声明可唤醒（best-effort，只做一次；重连再收 welcome 不重复刷）
         if (!advertised) {
           advertised = true;
@@ -4841,10 +4876,19 @@ export async function runServe(o: ServeOptions): Promise<number> {
       if (
         (frame.type === "msg" || frame.type === "status") &&
         frame.kind === "status" &&
+        frame.sender.name === "system" &&
         (frame.note ?? frame.body).startsWith("charter updated to rev ")
       ) {
         const rev = Number((frame.note ?? frame.body).match(/^charter updated to rev (\d+)/)?.[1] ?? "");
         await refreshCharter("status", Number.isInteger(rev) ? rev : undefined);
+      }
+      if (
+        (frame.type === "msg" || frame.type === "status") &&
+        frame.kind === "status" &&
+        frame.sender.name === "system" &&
+        (frame.note ?? frame.body).startsWith("decision ledger updated: ")
+      ) {
+        await refreshCharter("decision-ledger");
       }
       // 人为暂停/恢复（#180）：跟踪自己的 paused 状态。moderator 一按暂停，DO 就广播这帧过来。
       if (frame.type === "presence" && frame.name === self) {

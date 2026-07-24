@@ -23,6 +23,7 @@ const REQUIRED_KEYS = [
   "Channel.upload.failed",
   "Channel.charter.error.loadFailed",
   "Channel.charter.error.forbidden",
+  "Channel.charter.error.conflict",
   "Channel.charter.error.tooLarge",
   "Channel.charter.error.saveFailed",
   "Channel.search.error.since",

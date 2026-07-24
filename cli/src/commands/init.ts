@@ -12,6 +12,7 @@ import {
 } from "../config";
 import { stripTerminalControls } from "../format";
 import { RestError, createChannel, fetchChannelCharter, fetchMe, handleRestError, listChannels } from "../rest";
+import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
 import { isSlug, normalizeServerUrl } from "../validation";
 
@@ -166,10 +167,15 @@ export async function run(argv: string[]): Promise<number> {
   if (channel) {
     try {
       const charter = await fetchChannelCharter(cfg.server, cfg.token, channel);
-      if (charter.charter) {
+      const decisionLines = channelDecisionSnapshotBodyLines(charter.active_decisions ?? []);
+      if (charter.charter || decisionLines.length > 0) {
         console.log(`\n# ${channel} charter rev ${charter.charter_rev}`);
         // #372/#587 同源：charter 远端可控，直出终端前剥控制字节，防转义序列注入/输出伪造。
-        console.log(stripTerminalControls(charter.charter));
+        if (charter.charter) console.log(stripTerminalControls(charter.charter));
+        if (decisionLines.length > 0) {
+          if (charter.charter) console.log("");
+          for (const line of decisionLines) console.log(line);
+        }
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

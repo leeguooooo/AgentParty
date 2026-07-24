@@ -211,6 +211,7 @@ export type DecisionMode = "approval" | "unattended";
 export type DecisionKind = "approval" | "choice";
 // pending：等人类；resolved：人类已选；auto_resolved：无人值守模式自动放行。
 export type DecisionState = "pending" | "resolved" | "auto_resolved";
+export type ChannelDecisionStatus = "active" | "superseded";
 export type DirectedDeliveryState = "queued" | "claimed" | "running" | "waiting_owner" | "replied" | "failed";
 export type DirectedDeliveryCause = "mention" | "mention_edit" | "reply" | "owner_answer" | "retry";
 // decision_request 上限（#284）：与 completion review 同量级，防把 prompt/选项当附加 payload 滥用。
@@ -335,6 +336,29 @@ export interface TaskRecord {
   updated_at: number;
   completed_at: number | null;
 }
+
+/**
+ * 频道级「当前已定稿」账本（#736）。每次变更都 append 新行；supersedes_id 显式指向
+ * 被替代的旧结论，服务端通过独立 head 指针投影 status / superseded_by_id。
+ */
+export interface ChannelDecisionRecord {
+  type: "channel_decision";
+  id: string;
+  channel: string;
+  topic: string;
+  summary: string;
+  source_seq: number | null;
+  supersedes_id: string | null;
+  superseded_by_id: string | null;
+  status: ChannelDecisionStatus;
+  created_by: string;
+  created_by_kind: SenderKind;
+  created_at: number;
+}
+
+export const CHANNEL_DECISION_TOPIC_LIMIT = 200;
+export const CHANNEL_DECISION_SUMMARY_LIMIT = 2_000;
+export const CHANNEL_DECISION_ACTIVE_MAX = 100;
 
 export interface TaskSummary {
   type: "task_summary";
@@ -1698,6 +1722,11 @@ export interface SentFrame {
    * 接续、非 wake 故障）与人为 paused 的 agent（#180，有意暂停）不计入。空则省略。
    */
   undeliverable_mentions?: string[];
+  /**
+   * self 上报 host 时频道已存在 owner 指派 host（#736）。状态仍成功落库，旧客户端保持原行为；
+   * 新客户端必须把这条非阻断警告直接展示给发送者，避免静默双 host。
+   */
+  role_warning?: string;
 }
 
 export interface PresenceFrame {

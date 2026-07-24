@@ -1,7 +1,7 @@
 // rest 封装 + token 存取。
 // 规则（spec §10 / M2 契约）：URL 带 ?t= 时优先用它，并立即从地址栏移除；
 // share token 只放 sessionStorage，本次标签页可刷新，避免长期落 localStorage。
-import type { Attachment, ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, ParticipantRemovedFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, TaskSummary, WakeDelivery } from "@agentparty/shared";
+import type { Attachment, ChannelDecisionRecord, ChannelRoleAssignment, ChannelSquad, CollaborationRole, MsgFrame, ParticipantRemovedFrame, PresenceEntry, SearchHit, TaskAssigneeKind, TaskRecord, TaskState, TaskSummary, WakeDelivery } from "@agentparty/shared";
 import { apiUrl } from "./base";
 import { isTauriEnvironment } from "./desktopUpdater";
 import type { WebSession } from "./oidc";
@@ -291,6 +291,7 @@ export interface ChannelCharter {
   charter_rev: number;
   updated_at: number | null;
   updated_by: string | null;
+  active_decisions?: ChannelDecisionRecord[];
 }
 
 export interface ChannelIdentity {
@@ -1026,14 +1027,23 @@ export async function fetchChannelCharter(token: string, slug: string): Promise<
   return (await res.json()) as ChannelCharter;
 }
 
-export async function setChannelCharter(token: string, slug: string, charter: string): Promise<ChannelCharter> {
+export async function setChannelCharter(
+  token: string,
+  slug: string,
+  charter: string,
+  expectedRev?: number,
+): Promise<ChannelCharter> {
   const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/charter`, {
     method: "PUT",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ charter }),
+    body: JSON.stringify({
+      charter,
+      ...(expectedRev === undefined ? {} : { expected_rev: expectedRev }),
+    }),
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
   if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 409) throw new ConflictError("charter revision changed");
   if (res.status === 413) throw new ValidationError("charter too large");
   if (!res.ok) throw new Error(`PUT /api/channels/${slug}/charter failed (${res.status})`);
   return (await res.json()) as ChannelCharter;

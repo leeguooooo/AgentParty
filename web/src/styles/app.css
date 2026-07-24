@@ -883,6 +883,30 @@
   color: var(--t-dim);
   font-size: 13px;
 }
+.charter-decisions {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1.4px dashed var(--t-faint);
+}
+.charter-decisions-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.charter-decisions-head span { color: var(--t-dim); }
+.charter-decisions-list {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.charter-decisions-list li { display: grid; gap: 2px; }
+.charter-decision-topic { font-size: 12px; font-weight: 700; }
+.charter-decision-summary { overflow-wrap: anywhere; }
+.charter-decision-meta { color: var(--t-dim); font-size: 10px; overflow-wrap: anywhere; }
 .charter-editor {
   display: flex;
   flex-direction: column;

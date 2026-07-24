@@ -27,7 +27,13 @@ describe("channel export backup (#422)", () => {
     const body = (await res.json()) as {
       backup_version: number;
       channel: { slug: string; visibility: string };
-      d1: { channel_roles: unknown[]; channel_tasks: unknown[]; channel_members: unknown[] };
+      d1: {
+        channel_roles: unknown[];
+        channel_tasks: unknown[];
+        channel_members: unknown[];
+        channel_decisions: unknown[];
+        channel_decision_heads: unknown[];
+      };
       durable_object: { tables: Record<string, { body: string }[]>; row_counts: Record<string, number> };
     };
     expect(body.backup_version).toBe(1);
@@ -37,6 +43,8 @@ describe("channel export backup (#422)", () => {
     expect(Array.isArray(body.d1.channel_roles)).toBe(true);
     expect(Array.isArray(body.d1.channel_tasks)).toBe(true);
     expect(Array.isArray(body.d1.channel_members)).toBe(true);
+    expect(Array.isArray(body.d1.channel_decisions)).toBe(true);
+    expect(Array.isArray(body.d1.channel_decision_heads)).toBe(true);
     // DO 面：messages 表含刚发的那条，且导出的是完整行（带 body），不是截断摘要
     const messages = body.durable_object.tables.messages;
     expect(Array.isArray(messages)).toBe(true);

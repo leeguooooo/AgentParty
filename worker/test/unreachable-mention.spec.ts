@@ -3,8 +3,15 @@
 // （presence 非 offline / 本频道同名 webhook），全都没有 → 频道内落一条 system status 警示，
 // 并按 target 30 分钟去重。agent 目标不警示（离线 agent 有 directed delivery 持久重放）。
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { fetchMock } from "./fetch-mock";
 import { api, createChannel, seedToken, uniq } from "./helpers";
+
+beforeAll(() => {
+  fetchMock.activate();
+  fetchMock.disableNetConnect();
+});
+afterEach(() => fetchMock.assertNoPendingInterceptors());
 
 async function seedProfile(handle: string): Promise<string> {
   const account = `lark:${uniq("acct")}`;
@@ -74,6 +81,7 @@ describe("#607 unreachable human mention warning", () => {
     const handle = uniq("subscribed");
     await seedProfile(handle);
     const slug = await createChannel(owner.token);
+    fetchMock.get("https://relay.test").intercept({ path: "/notify", method: "POST" }).reply(202, "accepted");
     const hook = await api(`/api/channels/${slug}/webhooks`, owner.token, {
       method: "POST",
       body: JSON.stringify({ name: handle, url: "https://relay.test/notify", secret: "s3cret" }),

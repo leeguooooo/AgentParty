@@ -13,6 +13,7 @@ import type {
 } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
 import { advanceCursorPastOwnMessage, resolveChannel, workspaceId, workspaceLabel, worktreeLabel } from "../config";
+import { stripTerminalControls } from "../format";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, handleRestError, postMessage, taskStateFromReportedStatus, updateTask } from "../rest";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
@@ -353,7 +354,7 @@ export async function run(argv: string[]): Promise<number> {
     }
     const taskScope = taskId === undefined ? [] : [`task:${taskId}`];
     const effectiveScope = [...scope, ...taskScope];
-    const { seq } = await postMessage(auth.server, auth.token, channel, {
+    const { seq, role_warning: roleWarning } = await postMessage(auth.server, auth.token, channel, {
       kind: "status",
       state: state as StatusState,
       note: str(flags.note) ?? "",
@@ -369,6 +370,7 @@ export async function run(argv: string[]): Promise<number> {
       ...(workflow !== undefined ? { workflow } : {}),
       context: buildContext(auth),
     });
+    if (roleWarning !== undefined) console.error(`warn: ${stripTerminalControls(roleWarning)}`);
     if (taskId !== undefined) {
       // #737:worker 报自己那端 blocked 不再拉黑父任务全局 state(见 taskStateFromReportedStatus)。
       const taskState = taskStateFromReportedStatus(state);

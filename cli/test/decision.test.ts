@@ -135,6 +135,46 @@ function decisionHandler(request: RestRequest): Response | undefined {
   if (request.method === "PUT" && request.path.endsWith("/decision-mode")) {
     return Response.json({ mode: (request.body as { mode: string }).mode });
   }
+  if (request.method === "GET" && request.path.endsWith("/decisions")) {
+    return Response.json({
+      decisions: [{
+        type: "channel_decision",
+        id: "decision_0123456789abcdef0123456789abcdef",
+        channel: "dev",
+        topic: "runner",
+        summary: "Use the assigned host.",
+        source_seq: 42,
+        supersedes_id: null,
+        superseded_by_id: null,
+        status: "active",
+        created_by: "owner",
+        created_by_kind: "human",
+        created_at: 1,
+      }],
+      truncated: request.query.status === "all",
+    });
+  }
+  if (request.method === "POST" && request.path.endsWith("/decisions")) {
+    const body = request.body as {
+      topic: string;
+      summary: string;
+      source_seq?: number;
+      supersedes_id?: string;
+    };
+    return Response.json({
+      type: "channel_decision",
+      id: "decision_fedcba9876543210fedcba9876543210",
+      channel: "dev",
+      ...body,
+      source_seq: body.source_seq ?? null,
+      supersedes_id: body.supersedes_id ?? null,
+      superseded_by_id: null,
+      status: "active",
+      created_by: "owner",
+      created_by_kind: "human",
+      created_at: 2,
+    }, { status: 201 });
+  }
   return undefined;
 }
 
@@ -360,5 +400,62 @@ describe("party decision mode", () => {
     const code = await decisionRun(["mode", "bogus"]);
     expect(code).toBe(1);
     expect(mock!.requests.some((r) => r.path.endsWith("/decision-mode"))).toBe(false);
+  });
+});
+
+describe("party decision authoritative ledger", () => {
+  test("lists active decisions and requests recent history with --all", async () => {
+    expect(await decisionRun(["list"])).toBe(0);
+    expect(logs.join("\n")).toContain("active decisions: 1");
+    expect(logs.join("\n")).toContain("[runner] Use the assigned host.");
+    expect(mock!.requests.at(-1)).toMatchObject({
+      method: "GET",
+      path: "/api/channels/dev/decisions",
+      query: { status: "active", limit: "100" },
+    });
+
+    expect(await decisionRun(["list", "--all"])).toBe(0);
+    expect(logs.join("\n")).toContain("recent decision ledger: 1 (truncated)");
+    expect(mock!.requests.at(-1)).toMatchObject({
+      method: "GET",
+      path: "/api/channels/dev/decisions",
+      query: { status: "all", limit: "200" },
+    });
+  });
+
+  test("records a decision with explicit evidence and supersession fields", async () => {
+    const supersedes = "decision_0123456789abcdef0123456789abcdef";
+    expect(
+      await decisionRun([
+        "record",
+        "runner",
+        "-m",
+        "Use Codex.",
+        "--source-seq",
+        "77",
+        "--supersedes",
+        supersedes,
+      ]),
+    ).toBe(0);
+    expect(mock!.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/api/channels/dev/decisions",
+      body: {
+        topic: "runner",
+        summary: "Use Codex.",
+        source_seq: 77,
+        supersedes_id: supersedes,
+      },
+    });
+    expect(logs.join("\n")).toContain("decision recorded decision_fedcba9876543210fedcba9876543210");
+  });
+
+  test("rejects unsafe source seq and malformed supersedes before the request", async () => {
+    const before = mock!.requests.length;
+    expect(await decisionRun(["record", "runner", "-m", "x", "--source-seq", "9007199254740992"])).toBe(1);
+    expect(errs.join("\n")).toContain("--source-seq must be <= 9007199254740991");
+    expect(await decisionRun(["record", "runner", "-m", "x", "--supersedes", "not-an-id"])).toBe(1);
+    expect(errs.join("\n")).toContain("--supersedes must be a decision id");
+    expect(mock!.requests).toHaveLength(before);
   });
 });

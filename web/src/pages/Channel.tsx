@@ -36,6 +36,7 @@ import {
   type ChannelIdentity,
   type ChannelRoleInfo,
   type ChannelJoinRequestState,
+  ConflictError,
   createTask,
   deleteChannelRole,
   ForbiddenError,
@@ -96,6 +97,13 @@ import {
 } from "../lib/filters";
 import { isOwnMention, nextMentionBadgeCount, shouldMarkSeen, shouldNotify, shouldToast } from "../lib/notify";
 import { historyFallbackRecovered } from "../lib/historyRecovery";
+import {
+  beginCharterRead,
+  canApplyCharterRead,
+  canApplyCharterWrite,
+  commitCharterWrite,
+} from "../lib/charterRequestGeneration";
+import { useCharterRequestGeneration } from "../lib/useCharterRequestGeneration";
 import { isNearBottom, pinToBottom } from "../lib/scrollPin";
 import { summarizeReplyPreview } from "../lib/replyPreview";
 import { fmtTime } from "../lib/time";
@@ -493,6 +501,7 @@ function CharterBanner({
 }) {
   const t = useT();
   const hasCharter = Boolean(charter?.charter);
+  const activeDecisions = charter?.active_decisions ?? [];
   return (
     <section className={"charter-banner" + (updated ? " charter-banner--updated" : "")}>
       <header className="charter-head">
@@ -510,7 +519,7 @@ function CharterBanner({
           </button>
         )}
         {canModerate && (
-          <button className="d-btn charter-edit" type="button" onClick={onEdit}>
+          <button className="d-btn charter-edit" type="button" disabled={charter === null} onClick={onEdit}>
             {t("Channel.charter.edit")}
           </button>
         )}
@@ -547,6 +556,27 @@ function CharterBanner({
             )
           ) : (
             <p className="charter-empty">{t("Channel.charter.empty")}</p>
+          )}
+          {activeDecisions.length > 0 && (
+            <section className="charter-decisions" aria-label={t("Channel.charter.decisionsLabel")}>
+              <header className="charter-decisions-head">
+                <strong>{t("Channel.charter.decisionsLabel")}</strong>
+                <span>{t("Channel.charter.decisionsHelp")}</span>
+              </header>
+              <ul className="charter-decisions-list">
+                {activeDecisions.map((decision) => (
+                  <li key={decision.id}>
+                    <span className="t-mono charter-decision-topic">{decision.topic}</span>
+                    <span className="charter-decision-summary">{decision.summary}</span>
+                    <span className="t-mono charter-decision-meta">
+                      {decision.source_seq === null
+                        ? decision.id
+                        : `${t("Channel.charter.decisionSource", { seq: String(decision.source_seq) })} · ${decision.id}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
           )}
         </div>
       )}
@@ -724,6 +754,7 @@ export function DivisionBoard({
     }),
   );
   const syncDivisionToCharter = () => {
+    if (charterText === null) return;
     onSyncToCharter(nextCharterText);
   };
 
@@ -743,6 +774,7 @@ export function DivisionBoard({
   const lastAutoSyncedRef = useRef<string | null>(null);
   useEffect(() => {
     if (!canModerate) return;
+    if (charterText === null) return;
     if (syncingCharter) return;
     if (declared.length === 0 && !charterHasDivisionSection(currentCharterText)) return;
     if (nextCharterText === currentCharterText) return;
@@ -754,7 +786,7 @@ export function DivisionBoard({
     return () => clearTimeout(timer);
     // declared.length \u8986\u76d6\u300c\u5206\u5de5\u6570\u91cf\u53d8\u5316\u300d\uff1bnextCharterText \u8986\u76d6\u300c\u5206\u5de5\u5185\u5bb9/\u516c\u544a\u5e95\u7a3f\u53d8\u5316\u300d\u3002
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nextCharterText, currentCharterText, canModerate, syncingCharter, declared.length]);
+  }, [nextCharterText, currentCharterText, canModerate, charterText, syncingCharter, declared.length]);
 
   return (
     <details className="role-board" aria-label={t("Channel.roles.label")} open={forceOpen ? true : undefined}>
@@ -778,7 +810,7 @@ export function DivisionBoard({
             <button
               type="button"
               className="d-btn role-sync-charter-btn"
-              disabled={syncingCharter}
+              disabled={syncingCharter || charterText === null}
               onClick={syncDivisionToCharter}
             >
               {syncingCharter ? t("Channel.roles.syncingCharter") : t("Channel.roles.syncToCharter")}
@@ -2911,8 +2943,19 @@ export function ChannelPage({
   // 两条路由共用外层 dialog，但各自由原面板负责恢复页签与焦点。
   const [memberDetailRoute, setMemberDetailRoute] = useState<MemberDetailRoute | null>(null);
   const [charterEditing, setCharterEditing] = useState(false);
+  const charterEditingRef = useRef(false);
+  const charterEditBaseRevRef = useRef<number | null>(null);
+  const updateCharterEditing = useCallback((editing: boolean) => {
+    charterEditingRef.current = editing;
+    setCharterEditing(editing);
+  }, []);
   const [charterDraft, setCharterDraft] = useState("");
-  const [charterSaving, setCharterSaving] = useState(false);
+  const {
+    generationRef: charterRequestGenerationRef,
+    saving: charterSaving,
+    beginWrite: beginCharterWriteRequest,
+    finishWrite: finishCharterWriteRequest,
+  } = useCharterRequestGeneration(slug);
   const [charterError, setCharterError] = useState<string | null>(null);
   const [channelRoles, setChannelRoles] = useState<ChannelRoleInfo[]>([]);
   // 跨 WS/REST 链路共享的成员删除墓碑：participant_removed 可能先于/晚于
@@ -3061,9 +3104,7 @@ export function ChannelPage({
   const initialHistoryRequestRef = useRef(0);
   const pendingAnchorRef = useRef<{ height: number; top: number } | null>(null); // prepend 前的滚动锚
   const oldestSeqRef = useRef(0);
-  const charterRevRef = useRef(0);
   oldestSeqRef.current = state.messages.length > 0 ? state.messages[0]!.seq : 0;
-  charterRevRef.current = charter?.charter_rev ?? 0;
   const removedMemberNames = useMemo(
     () => new Set(Object.keys(state.removedParticipants)),
     [state.removedParticipants],
@@ -3175,14 +3216,17 @@ export function ChannelPage({
     setMemberDetailRoute((current) => current?.name === removal.name ? null : current);
   }, []);
 
-  const loadCharter = useCallback(() => {
+  const loadCharter = useCallback((preserveError = false) => {
+    const request = beginCharterRead(charterRequestGenerationRef.current);
     return fetchChannelCharter(token, slug)
       .then((body) => {
+        if (!canApplyCharterRead(charterRequestGenerationRef.current, request)) return;
         setCharter(body);
-        setCharterDraft(body.charter ?? "");
-        setCharterError(null);
+        if (!charterEditingRef.current) setCharterDraft(body.charter ?? "");
+        if (!preserveError) setCharterError(null);
       })
       .catch((err: unknown) => {
+        if (!canApplyCharterRead(charterRequestGenerationRef.current, request)) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (!(err instanceof ForbiddenError)) setCharterError(tRef.current("Channel.charter.error.loadFailed"));
       });
@@ -3549,7 +3593,6 @@ export function ChannelPage({
 
   useEffect(() => {
     setSeenCharterRev(readSeenCharterRev(slug));
-    setCharterEditing(false);
     void loadCharter();
     void loadIdentities();
     void loadRoles();
@@ -3650,13 +3693,24 @@ export function ChannelPage({
             });
           }
           observePendingDecisionFrame(frame);
-          if (frame.type === "welcome" && typeof frame.charter_rev === "number" && frame.charter_rev > charterRevRef.current) {
+          // decision ledger 不推进 charter_rev；重连必须无条件拉 bundle，避免断线期间的刷新
+          // status 已落在 since cursor 之前而永久保留旧 active_decisions。requestRef 防旧请求反盖。
+          if (frame.type === "welcome") {
             void loadCharter();
           }
           if (
             (frame.type === "msg" || frame.type === "status") &&
             frame.kind === "status" &&
+            frame.sender.name === "system" &&
             (frame.note ?? frame.body).startsWith("charter updated to rev ")
+          ) {
+            void loadCharter();
+          }
+          if (
+            (frame.type === "msg" || frame.type === "status") &&
+            frame.kind === "status" &&
+            frame.sender.name === "system" &&
+            (frame.note ?? frame.body).startsWith("decision ledger updated: ")
           ) {
             void loadCharter();
           }
@@ -4141,61 +4195,123 @@ export function ChannelPage({
   }, []);
 
   const editCharter = useCallback(() => {
-    setCharterEditing(true);
+    if (charter === null) {
+      void loadCharter();
+      return;
+    }
+    charterEditBaseRevRef.current = charter.charter_rev;
+    updateCharterEditing(true);
     setCharterDraft(charter?.charter ?? "");
     setCharterError(null);
-  }, [charter]);
+  }, [charter, loadCharter, updateCharterEditing]);
 
   const cancelCharterEdit = useCallback(() => {
-    setCharterEditing(false);
+    charterEditBaseRevRef.current = null;
+    updateCharterEditing(false);
     setCharterDraft(charter?.charter ?? "");
     setCharterError(null);
-  }, [charter]);
+  }, [charter, updateCharterEditing]);
 
   const saveCharter = useCallback(() => {
     if (charterSaving) return;
-    setCharterSaving(true);
+    const expectedRev = charterEditBaseRevRef.current;
+    if (expectedRev === null) {
+      setCharterError(tRef.current("Channel.charter.error.loadFailed"));
+      void loadCharter();
+      return;
+    }
+    const requestId = beginCharterWriteRequest();
+    if (requestId === null) return;
+    let reloadAfterConflict = false;
     setCharterError(null);
-    setChannelCharter(token, slug, charterDraft)
+    setChannelCharter(
+      token,
+      slug,
+      charterDraft,
+      expectedRev,
+    )
       .then((body) => {
+        if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         setCharter(body);
         setCharterDraft(body.charter ?? "");
-        setCharterEditing(false);
+        charterEditBaseRevRef.current = null;
+        updateCharterEditing(false);
         writeSeenCharterRev(slug, body.charter_rev);
         setSeenCharterRev(body.charter_rev);
       })
       .catch((err: unknown) => {
+        if (!canApplyCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
-        else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
+        else if (err instanceof ConflictError) {
+          reloadAfterConflict = true;
+          setCharterError(tRef.current("Channel.charter.error.conflict"));
+        } else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
         else setCharterError(tRef.current("Channel.charter.error.saveFailed"));
       })
-      .finally(() => setCharterSaving(false));
-  }, [charterDraft, charterSaving, slug, token]);
+      .finally(() => {
+        const finished = finishCharterWriteRequest(requestId);
+        if (finished && reloadAfterConflict) void loadCharter(true);
+      });
+  }, [
+    beginCharterWriteRequest,
+    charterDraft,
+    charterSaving,
+    finishCharterWriteRequest,
+    loadCharter,
+    slug,
+    token,
+    updateCharterEditing,
+  ]);
 
   // issue #150：分工面板「同步到公告」——DivisionBoard 已经把分工内容拼好、合并进
   // 现有公告文本，这里只负责落盘，复用与 saveCharter 相同的 setChannelCharter 写路径
   // 和错误处理，唯一区别是写入的文本来自调用方而不是 charterDraft 状态。
   const syncDivisionToCharter = useCallback((nextText: string) => {
     if (charterSaving) return;
-    setCharterSaving(true);
+    if (charter === null) {
+      void loadCharter();
+      return;
+    }
+    const requestId = beginCharterWriteRequest();
+    if (requestId === null) return;
+    let reloadAfterConflict = false;
     setCharterError(null);
-    setChannelCharter(token, slug, nextText)
+    setChannelCharter(token, slug, nextText, charter.charter_rev)
       .then((body) => {
+        if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         setCharter(body);
-        setCharterDraft(body.charter ?? "");
-        setCharterEditing(false);
+        if (!charterEditingRef.current) {
+          setCharterDraft(body.charter ?? "");
+          updateCharterEditing(false);
+        }
         writeSeenCharterRev(slug, body.charter_rev);
         setSeenCharterRev(body.charter_rev);
       })
       .catch((err: unknown) => {
+        if (!canApplyCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
         else if (err instanceof ForbiddenError) setCharterError(tRef.current("Channel.charter.error.forbidden"));
-        else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
+        else if (err instanceof ConflictError) {
+          reloadAfterConflict = true;
+          setCharterError(tRef.current("Channel.charter.error.conflict"));
+        } else if (err instanceof ValidationError) setCharterError(tRef.current("Channel.charter.error.tooLarge"));
         else setCharterError(tRef.current("Channel.charter.error.saveFailed"));
       })
-      .finally(() => setCharterSaving(false));
-  }, [charterSaving, slug, token]);
+      .finally(() => {
+        const finished = finishCharterWriteRequest(requestId);
+        if (finished && reloadAfterConflict) void loadCharter(true);
+      });
+  }, [
+    beginCharterWriteRequest,
+    charter,
+    charterSaving,
+    finishCharterWriteRequest,
+    loadCharter,
+    slug,
+    token,
+    updateCharterEditing,
+  ]);
 
   // issue #171：分工面板到 AgentTokens（已有的 project-agent 规则查看/编辑面板，
   // commit 7f7e8e1）的入口——复用 setAdminSurface（关掉分工弹层，打开 AgentTokens），

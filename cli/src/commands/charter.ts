@@ -1,7 +1,9 @@
 // party charter — read/update the channel "用前必读" pointer document.
 import { readFileSync } from "node:fs";
+import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
+import { stripTerminalControls } from "../format";
 import { jsonFrame } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { fetchChannelCharter, handleRestError, setChannelCharter } from "../rest";
@@ -49,7 +51,8 @@ function printCharter(slug: string, body: Awaited<ReturnType<typeof fetchChannel
     console.log(JSON.stringify(jsonFrame({ type: "charter", channel: slug, ...body })));
     return;
   }
-  if (!body.charter) {
+  const decisionLines = channelDecisionSnapshotBodyLines(body.active_decisions ?? []);
+  if (!body.charter && decisionLines.length === 0) {
     console.log(`# ${slug} charter not set (rev ${body.charter_rev})`);
     return;
   }
@@ -58,7 +61,11 @@ function printCharter(slug: string, body: Awaited<ReturnType<typeof fetchChannel
       ? ""
       : ` updated=${new Date(body.updated_at).toISOString()}${body.updated_by ? ` by=${body.updated_by}` : ""}`;
   console.log(`# ${slug} charter rev ${body.charter_rev}${updated}`);
-  console.log(body.charter);
+  if (body.charter) console.log(stripTerminalControls(body.charter));
+  if (decisionLines.length > 0) {
+    if (body.charter) console.log("");
+    for (const line of decisionLines) console.log(line);
+  }
 }
 
 export async function run(argv: string[]): Promise<number> {

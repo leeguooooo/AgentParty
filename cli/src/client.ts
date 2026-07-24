@@ -328,7 +328,8 @@ function parseServerFrame(value: unknown): ServerFrame | null {
       // undeliverable_mentions（#665）：路由成功但对端 wake 通道不可达的 agent 目标；缺省=无不可达目标。
       return isPositiveInteger(value.seq) &&
         (value.unresolved_mentions === undefined || isStringArray(value.unresolved_mentions)) &&
-        (value.undeliverable_mentions === undefined || isStringArray(value.undeliverable_mentions))
+        (value.undeliverable_mentions === undefined || isStringArray(value.undeliverable_mentions)) &&
+        (value.role_warning === undefined || typeof value.role_warning === "string")
         ? asServerFrame(value)
         : null;
     case "presence":

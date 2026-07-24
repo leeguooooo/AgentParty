@@ -1,6 +1,9 @@
 // worker 入口 — rest 路由 + ws 升级转发
 import {
   CHANNEL_CREATE_WINDOW_MS,
+  CHANNEL_DECISION_ACTIVE_MAX,
+  CHANNEL_DECISION_SUMMARY_LIMIT,
+  CHANNEL_DECISION_TOPIC_LIMIT,
   CHARTER_LIMIT,
   DEFAULT_MEMBERSHIP,
   FREE_ATTACHMENT_SIZE_LIMIT,
@@ -24,6 +27,7 @@ import type {
   ChannelRoleAssignment,
   ChannelSquad,
   CaptureRecord,
+  ChannelDecisionRecord,
   CompletionGate,
   CompletionReviewPolicy,
   DecisionMode,
@@ -179,6 +183,10 @@ function isTaskState(input: unknown): input is TaskState {
   return typeof input === "string" && TASK_STATES.includes(input);
 }
 
+function isCollaborationRole(input: unknown): input is CollaborationRole {
+  return typeof input === "string" && COLLAB_ROLES.includes(input);
+}
+
 const HUMAN_METADATA_POLICIES = ["owner", "moderators", "members"] as const;
 const AGENT_METADATA_POLICIES = ["off", "moderators", "members", "allowlist"] as const;
 
@@ -292,6 +300,113 @@ async function loadChannelRoleAssignment(db: D1Database, slug: string, name: str
     .first<ChannelRoleRow>();
   return row === null ? null : channelRoleAssignmentFromRow(row);
 }
+
+async function loadAssignedHostName(db: D1Database, slug: string): Promise<string | null> {
+  const row = await db.prepare(
+    `SELECT agent_name
+       FROM channel_roles
+      WHERE channel_slug = ? AND role = 'host'
+      ORDER BY assigned_at DESC, agent_name ASC
+      LIMIT 1`,
+  )
+    .bind(slug)
+    .first<{ agent_name: string }>();
+  return row?.agent_name ?? null;
+}
+
+async function loadChannelRoleRevision(db: D1Database, slug: string): Promise<number> {
+  const row = await db.prepare(
+    "SELECT role_rev FROM channels WHERE slug = ?",
+  )
+    .bind(slug)
+    .first<{ role_rev: number }>();
+  if (row === null || !Number.isSafeInteger(row.role_rev) || row.role_rev < 0) {
+    throw new Error("invalid channel role revision");
+  }
+  return row.role_rev;
+}
+
+async function loadAuthoritativeRoleTarget(
+  db: D1Database,
+  slug: string,
+  name: string,
+): Promise<{
+  role: CollaborationRole | null;
+  assignedOwner: string | null;
+}> {
+  const row = await db.prepare(
+    `SELECT cr.role, cr.owner_account, t.owner, t.channel_scope
+       FROM channel_roles cr
+       LEFT JOIN tokens t
+         ON t.name = cr.agent_name
+        AND t.revoked_at IS NULL
+      WHERE cr.channel_slug = ? AND cr.agent_name = ?`,
+  )
+    .bind(slug, name)
+    .first<{
+      role: string;
+      owner_account: string | null;
+      owner: string | null;
+      channel_scope: string | null;
+    }>();
+  const role = row !== null &&
+    row.owner_account !== null &&
+    row.owner !== null &&
+    row.owner_account === row.owner &&
+    (row.channel_scope === null || row.channel_scope === slug) &&
+    isCollaborationRole(row.role)
+    ? row.role
+    : null;
+  return {
+    role,
+    assignedOwner: role === null ? null : row!.owner,
+  };
+}
+
+async function syncAuthoritativeRoleSnapshots(
+  env: AppEnv,
+  slug: string,
+  names: readonly string[],
+): Promise<boolean> {
+  const targets = [...new Set(names)].filter((name) => NAME_RE.test(name) && !RESERVED_NAMES.includes(name));
+  if (targets.length === 0) return true;
+
+  // D1 has no multi-statement read transaction API. Read the revision on both sides
+  // of the snapshot and retry if another role mutation interleaved, so stale role
+  // data is never stamped with a newer fence.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const beforeRevision = await loadChannelRoleRevision(env.DB, slug);
+    const [assignedHost, roleTargets] = await Promise.all([
+      loadAssignedHostName(env.DB, slug),
+      Promise.all(targets.map((name) => loadAuthoritativeRoleTarget(env.DB, slug, name))),
+    ]);
+    const afterRevision = await loadChannelRoleRevision(env.DB, slug);
+    if (beforeRevision !== afterRevision) continue;
+
+    const results = await Promise.all(targets.map(async (name, index) => {
+      const snapshot = roleTargets[index]!;
+      return fetchChannelDO(
+        env,
+        slug,
+        new Request("https://do/internal/roles", {
+          method: "POST",
+          body: JSON.stringify({
+            name,
+            role: snapshot.role,
+            assigned_owner: snapshot.assignedOwner,
+            assigned_host: assignedHost,
+            revision: afterRevision,
+          }),
+          headers: { "content-type": "application/json", "x-partykit-room": slug },
+        }),
+      )
+        .then((response) => response.ok)
+        .catch(() => false);
+    }));
+    return results.every(Boolean);
+  }
+  return false;
+}
 const WEBHOOK_FILTERS: readonly string[] = ["mentions", "status", "needs-human", "all"] satisfies WebhookFilter[];
 const WEBHOOK_MODES = ["notify", "agent"] as const;
 type WebhookMode = (typeof WEBHOOK_MODES)[number];
@@ -375,6 +490,8 @@ const AP_FORWARD_HEADERS = [
   "x-ap-archive-at",
   "x-ap-collab-role",
   "x-ap-role-source",
+  "x-ap-assigned-host",
+  "x-ap-role-revision",
   "x-ap-handle",
   // #381：频道可见性 + 「本连接能否参与写」都是 worker 权威值，客户端注入必须先剥离
   "x-ap-visibility",
@@ -992,6 +1109,91 @@ function parseTaskAssignee(input: unknown): { name: string; kind: TaskAssigneeKi
 
 type TaskRow = Parameters<typeof taskRowToRecord>[0];
 
+interface ChannelDecisionRow {
+  id: string;
+  channel_slug: string;
+  topic: string;
+  summary: string;
+  source_seq: number | null;
+  supersedes_id: string | null;
+  superseded_by_id: string | null;
+  status: string;
+  created_by: string;
+  created_by_kind: string;
+  created_at: number;
+}
+
+function channelDecisionFromRow(row: ChannelDecisionRow): ChannelDecisionRecord {
+  return {
+    type: "channel_decision",
+    id: row.id,
+    channel: row.channel_slug,
+    topic: row.topic,
+    summary: row.summary,
+    source_seq: row.source_seq,
+    supersedes_id: row.supersedes_id,
+    superseded_by_id: row.superseded_by_id,
+    status: row.status === "active" ? "active" : "superseded",
+    created_by: row.created_by,
+    created_by_kind: row.created_by_kind === "human" ? "human" : "agent",
+    created_at: row.created_at,
+  };
+}
+
+const CHANNEL_DECISION_SELECT = `SELECT d.id, d.channel_slug, d.topic, d.summary, d.source_seq, d.supersedes_id,
+                                        successor.id AS superseded_by_id,
+                                        CASE WHEN h.decision_id = d.id THEN 'active' ELSE 'superseded' END AS status,
+                                        d.created_by, d.created_by_kind, d.created_at
+                                   FROM channel_decisions d
+                                   LEFT JOIN channel_decision_heads h
+                                     ON h.channel_slug = d.channel_slug AND h.topic = d.topic COLLATE NOCASE
+                                   LEFT JOIN channel_decisions successor
+                                     ON successor.channel_slug = d.channel_slug AND successor.supersedes_id = d.id`;
+
+async function listChannelDecisions(
+  db: D1Database,
+  slug: string,
+  options: { activeOnly?: boolean; limit?: number } = {},
+): Promise<ChannelDecisionRecord[]> {
+  const activeOnly = options.activeOnly !== false;
+  // API callers may ask for one extra row to report whether a bounded page was truncated.
+  const limit = Math.max(1, Math.min(options.limit ?? CHANNEL_DECISION_ACTIVE_MAX, 201));
+  const { results } = await db.prepare(
+    `${CHANNEL_DECISION_SELECT}
+      WHERE d.channel_slug = ?
+        ${activeOnly ? "AND h.decision_id = d.id" : ""}
+      ORDER BY d.created_at DESC, d.id DESC
+      LIMIT ?`,
+  )
+    .bind(slug, limit)
+    .all<ChannelDecisionRow>();
+  return results.map(channelDecisionFromRow);
+}
+
+async function loadChannelDecision(
+  db: D1Database,
+  slug: string,
+  id: string,
+): Promise<ChannelDecisionRecord | null> {
+  const row = await db.prepare(
+    `${CHANNEL_DECISION_SELECT}
+      WHERE d.channel_slug = ? AND d.id = ?
+      LIMIT 1`,
+  )
+    .bind(slug, id)
+    .first<ChannelDecisionRow>();
+  return row === null ? null : channelDecisionFromRow(row);
+}
+
+function parseChannelDecisionText(input: unknown, maxBytes: number, singleLine: boolean): string | null {
+  if (typeof input !== "string") return null;
+  const value = input.trim();
+  if (value === "" || textEncoder.encode(value).byteLength > maxBytes) return null;
+  if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(value)) return null;
+  if (singleLine && /[\r\n]/u.test(value)) return null;
+  return value;
+}
+
 async function loadTaskRow(db: D1Database, slug: string, id: number): Promise<TaskRow | null> {
   return db.prepare("SELECT * FROM channel_tasks WHERE channel_slug = ? AND id = ?")
     .bind(slug, id)
@@ -1522,7 +1724,7 @@ async function loadChannel(db: D1Database, slug: string) {
               completion_gate, completion_review_policy, decision_mode, loop_guard_enabled, loop_guard_limit,
               workflow_guard_enabled, workflow_guard_limit,
               message_retention_ms, audit_retention_ms,
-              charter, charter_rev, charter_updated_at, charter_updated_by,
+              charter, charter_rev, role_rev, charter_updated_at, charter_updated_by,
               charter_write_policy, charter_write_agents, charter_write_agent_allowlist_json,
               members_list_policy, members_list_agents, members_list_agent_allowlist_json
          FROM channels WHERE slug = ?`,
@@ -1547,6 +1749,7 @@ async function loadChannel(db: D1Database, slug: string) {
       audit_retention_ms: number | null;
       charter: string | null;
       charter_rev: number;
+      role_rev: number;
       charter_updated_at: number | null;
       charter_updated_by: string | null;
       charter_write_policy: string;
@@ -1871,6 +2074,7 @@ function channelHeaders(
     message_retention_ms?: number | null;
     audit_retention_ms?: number | null;
     charter_rev?: number;
+    role_rev?: number;
   },
   requestUrl: string,
 ) {
@@ -1889,11 +2093,13 @@ function channelHeaders(
     "x-ap-message-retention-ms": channel.message_retention_ms == null ? "" : String(channel.message_retention_ms),
     "x-ap-audit-retention-ms": channel.audit_retention_ms == null ? "" : String(channel.audit_retention_ms),
     "x-ap-charter-rev": String(channel.charter_rev ?? 0),
+    "x-ap-role-revision": String(channel.role_rev ?? 0),
     "x-ap-host": new URL(requestUrl).host,
   };
 }
 
 async function canConfigureChannel(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
+  if (identity.role === "readonly") return false;
   if (
     await isChannelParticipantRemoved(db, channel.slug, identity) ||
     await isChannelAccountBanned(db, channel.slug, identity.account)
@@ -2058,7 +2264,24 @@ async function removeChannelMemberAndAgents(
        FROM channel_agent_invites
       WHERE channel_slug = ? AND owner_account = ? AND revoked_at IS NULL`,
   ).bind(slug, account).all<{ profile_handle: string }>();
-  const [removed, , , , revokedAgents, revokedProjectAgents] = await env.DB.batch([
+  const affectedRoleRows = await env.DB.prepare(
+    `SELECT agent_name
+       FROM channel_roles
+      WHERE channel_slug = ?
+        AND (
+          owner_account = ?
+          OR agent_name IN (
+            SELECT name
+              FROM tokens
+             WHERE owner = ?
+               AND (
+                 role = 'human'
+                 OR (role = 'agent' AND (channel_scope IS NULL OR channel_scope = ?))
+               )
+          )
+        )`,
+  ).bind(slug, account, account, slug).all<{ agent_name: string }>();
+  const [removed, , removedRoles, , revokedAgents, revokedProjectAgents] = await env.DB.batch([
     env.DB.prepare("DELETE FROM channel_members WHERE channel_slug = ? AND account = ?").bind(slug, account),
     setChannelParticipantRemoval(env.DB, {
       slug,
@@ -2167,7 +2390,13 @@ async function removeChannelMemberAndAgents(
     ...(activeTokens.results ?? []).map(({ name }) => name),
     ...(boundParticipants.results ?? []).map(({ name }) => name),
     ...(activeProjectAgentInvites.results ?? []).map(({ profile_handle }) => profile_handle),
+    ...(affectedRoleRows.results ?? []).map(({ agent_name }) => agent_name),
   ])];
+  if (removedRoles.meta.changes > 0) {
+    // D1 remains authoritative even if the DO is temporarily unavailable. Every
+    // later REST/WS snapshot carries role_rev and will retry host reconciliation.
+    await syncAuthoritativeRoleSnapshots(env, slug, affectedNames).catch(() => false);
+  }
   await Promise.all(affectedNames.map(async (name) => {
     await fetchChannelDO(
       env,
@@ -2366,6 +2595,8 @@ async function exchangeOAuthCode(
 //   - owner_account 非 null → 仅当 identity.account 严格相等才返回角色。
 // 于是「撤销旧 token → 他人重铸同名」拿不到残留角色（account 不符）；同账号重铸同名则保留（account 相等）。
 async function loadAssignedRole(db: D1Database, slug: string, identity: TokenIdentity): Promise<CollaborationRole | null> {
+  // channel_scope 是 agent 权限硬上限；公开频道可读写不等于能继承另一频道的管理角色。
+  if (identity.channel_scope !== undefined && identity.channel_scope !== slug) return null;
   const row = await db
     .prepare("SELECT role, owner_account FROM channel_roles WHERE channel_slug = ? AND agent_name = ?")
     .bind(slug, identity.name)
@@ -3404,7 +3635,7 @@ app.delete("/api/channels/:slug/agents/:name", requireBearer, async (c) => {
   const removedBy = identity.account ?? identity.name;
   // Child discovery and revocation share one D1 transaction. INSERT...SELECT prevents a child
   // minted between an out-of-transaction snapshot and UPDATE from escaping without a tombstone.
-  await c.env.DB.batch([
+  const deletionResults = await c.env.DB.batch([
     setChannelParticipantRemoval(c.env.DB, {
       slug,
       principalType: "name",
@@ -3459,6 +3690,10 @@ app.delete("/api/channels/:slug/agents/:name", requireBearer, async (c) => {
       ORDER BY principal`,
   ).bind(slug, removalEpoch).all<{ name: string }>();
   const kickTargets = tombstoned.results.map((target) => target.name);
+  const removedRoles = deletionResults[3];
+  if ((removedRoles?.meta.changes ?? 0) > 0) {
+    await syncAuthoritativeRoleSnapshots(c.env, slug, kickTargets).catch(() => false);
+  }
   // 复用 kick 的 DO 通道，mode=remove：断开存活连接、清 presence、广播 offline——
   // 删除是永久动作，presence 残留会让成员列表继续显示一个已不存在的身份。父与所有 child
   // 会话都要断（token 已死只挡重连，不断已建立的 WS）。失败不回滚撤销（撤销才是事实源），
@@ -3741,6 +3976,7 @@ app.delete("/api/tokens/:name", requireAdmin, async (c) => {
   const { results } = scopedSlugs;
   await Promise.all(
     results.map(async ({ slug }) => {
+      await syncAuthoritativeRoleSnapshots(c.env, slug, [name]).catch(() => false);
       try {
         await fetchChannelDO(
           c.env,
@@ -4617,6 +4853,10 @@ app.delete("/api/channels/:slug/project-agents", async (c) => {
       ORDER BY principal`,
   ).bind(slug, removalEpoch).all<{ name: string }>();
   const removalTargets = tombstoned.results.map((target) => target.name);
+  const removedRoles = batchResults[4];
+  if ((removedRoles?.meta.changes ?? 0) > 0) {
+    await syncAuthoritativeRoleSnapshots(c.env, slug, removalTargets).catch(() => false);
+  }
   await bestEffortRecordManagementAudit(c.env.DB, {
     actor: managementAuditActor(identity),
     action: "channel.project_agent.remove",
@@ -5720,10 +5960,14 @@ app.get("/api/channels/:slug/export", async (c) => {
     exported_at: number; row_counts: Record<string, number>; tables: Record<string, unknown[]>;
   } | null;
   if (doDump === null) return c.json(errorBody("unavailable", "channel state export returned invalid JSON"), 503);
-  const [roles, tasks, members] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM channel_roles WHERE channel_slug = ? ORDER BY agent_name").bind(slug).all(),
-    c.env.DB.prepare("SELECT * FROM channel_tasks WHERE channel_slug = ? ORDER BY id").bind(slug).all(),
-    c.env.DB.prepare("SELECT * FROM channel_members WHERE channel_slug = ? ORDER BY account").bind(slug).all(),
+  // D1 batch gives the related tables one transactional snapshot. In particular a decision head
+  // must never be exported without the ledger row it references while a concurrent supersede commits.
+  const [roles, tasks, members, decisions, decisionHeads] = await c.env.DB.batch([
+    c.env.DB.prepare("SELECT * FROM channel_roles WHERE channel_slug = ? ORDER BY agent_name").bind(slug),
+    c.env.DB.prepare("SELECT * FROM channel_tasks WHERE channel_slug = ? ORDER BY id").bind(slug),
+    c.env.DB.prepare("SELECT * FROM channel_members WHERE channel_slug = ? ORDER BY account").bind(slug),
+    c.env.DB.prepare("SELECT * FROM channel_decisions WHERE channel_slug = ? ORDER BY created_at, id").bind(slug),
+    c.env.DB.prepare("SELECT * FROM channel_decision_heads WHERE channel_slug = ? ORDER BY topic").bind(slug),
   ]);
   await bestEffortRecordManagementAudit(c.env.DB, {
     actor: managementAuditActor(identity),
@@ -5739,6 +5983,8 @@ app.get("/api/channels/:slug/export", async (c) => {
       channel_roles: roles.results ?? [],
       channel_tasks: tasks.results ?? [],
       channel_members: members.results ?? [],
+      channel_decisions: decisions.results ?? [],
+      channel_decision_heads: decisionHeads.results ?? [],
     },
     durable_object: doDump,
   });
@@ -6124,6 +6370,169 @@ app.put("/api/channels/:slug/visibility", async (c) => {
   });
 });
 
+app.get("/api/channels/:slug/decisions", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const url = new URL(c.req.url);
+  const status = url.searchParams.get("status") ?? "active";
+  if (status !== "active" && status !== "all") {
+    return c.json(errorBody("bad_request", "status must be active or all"), 400);
+  }
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? (status === "active" ? CHANNEL_DECISION_ACTIVE_MAX : 200) : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+    return c.json(errorBody("bad_request", "limit must be an integer between 1 and 200"), 400);
+  }
+  const page = await listChannelDecisions(c.env.DB, slug, {
+    activeOnly: status === "active",
+    limit: limit + 1,
+  });
+  return c.json({
+    decisions: page.slice(0, limit),
+    truncated: page.length > limit,
+  });
+});
+
+app.post("/api/channels/:slug/decisions", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  // 已指派 host 与频道 owner 才能改权威结论。self-host 不因此获得写权，避免 #736 的
+  // 「先自封 host，再重推已定稿方案」绕过账本。
+  if (!(await canConfigureChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "only the channel owner or an assigned host can record decisions"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const body = (await c.req.json().catch(() => null)) as {
+    topic?: unknown;
+    summary?: unknown;
+    source_seq?: unknown;
+    supersedes_id?: unknown;
+  } | null;
+  const topic = parseChannelDecisionText(body?.topic, CHANNEL_DECISION_TOPIC_LIMIT, true);
+  const summary = parseChannelDecisionText(body?.summary, CHANNEL_DECISION_SUMMARY_LIMIT, false);
+  if (topic === null || summary === null) {
+    return c.json(
+      errorBody(
+        "bad_request",
+        `topic must be one line <= ${CHANNEL_DECISION_TOPIC_LIMIT} bytes and summary <= ${CHANNEL_DECISION_SUMMARY_LIMIT} bytes`,
+      ),
+      400,
+    );
+  }
+  const sourceSeq =
+    body?.source_seq === undefined || body.source_seq === null
+      ? null
+      : typeof body.source_seq === "number" && Number.isSafeInteger(body.source_seq) && body.source_seq > 0
+        ? body.source_seq
+        : undefined;
+  if (sourceSeq === undefined) {
+    return c.json(errorBody("bad_request", "source_seq must be a positive integer or null"), 400);
+  }
+  const supersedesId =
+    body?.supersedes_id === undefined || body.supersedes_id === null
+      ? null
+      : typeof body.supersedes_id === "string" && /^decision_[a-f0-9]{32}$/u.test(body.supersedes_id)
+        ? body.supersedes_id
+        : undefined;
+  if (supersedesId === undefined) {
+    return c.json(errorBody("bad_request", "supersedes_id must be a decision id or null"), 400);
+  }
+
+  if (supersedesId === null) {
+    const active = await c.env.DB.prepare(
+      "SELECT decision_id FROM channel_decision_heads WHERE channel_slug = ? AND topic = ? COLLATE NOCASE",
+    )
+      .bind(slug, topic)
+      .first<{ decision_id: string }>();
+    if (active !== null) {
+      return c.json(
+        errorBody("conflict", `topic already has an active decision; supersede ${active.decision_id} explicitly`),
+        409,
+      );
+    }
+    const count = await c.env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM channel_decision_heads WHERE channel_slug = ?",
+    )
+      .bind(slug)
+      .first<{ count: number }>();
+    if (Number(count?.count ?? 0) >= CHANNEL_DECISION_ACTIVE_MAX) {
+      return c.json(errorBody("conflict", `channel already has ${CHANNEL_DECISION_ACTIVE_MAX} active decisions`), 409);
+    }
+  } else {
+    const active = await c.env.DB.prepare(
+      `SELECT d.id
+         FROM channel_decision_heads h
+         JOIN channel_decisions d ON d.id = h.decision_id
+        WHERE h.channel_slug = ? AND h.topic = ? COLLATE NOCASE AND h.decision_id = ?`,
+    )
+      .bind(slug, topic, supersedesId)
+      .first<{ id: string }>();
+    if (active === null) {
+      return c.json(
+        errorBody("conflict", "supersedes_id must reference the active decision for the same topic"),
+        409,
+      );
+    }
+  }
+
+  const id = `decision_${crypto.randomUUID().replaceAll("-", "")}`;
+  const createdAt = Date.now();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO channel_decisions (
+           id, channel_slug, topic, summary, source_seq, supersedes_id,
+           created_by, created_by_kind, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        id,
+        slug,
+        topic,
+        summary,
+        sourceSeq,
+        supersedesId,
+        identity.name,
+        identity.kind,
+        createdAt,
+      ),
+      supersedesId === null
+        ? c.env.DB.prepare(
+            "INSERT INTO channel_decision_heads (channel_slug, topic, decision_id) VALUES (?, ?, ?)",
+          ).bind(slug, topic, id)
+        : c.env.DB.prepare(
+            `UPDATE channel_decision_heads
+                SET topic = ?, decision_id = ?
+              WHERE channel_slug = ? AND topic = ? COLLATE NOCASE AND decision_id = ?`,
+          ).bind(topic, id, slug, topic, supersedesId),
+    ]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/channel is archived/i.test(message)) {
+      return c.json(errorBody("archived", "channel is archived"), 410);
+    }
+    if (
+      isUniqueConstraintError(error) ||
+      /active decision already exists|active decision limit reached|supersedes_id must reference the active decision/i.test(message)
+    ) {
+      return c.json(errorBody("conflict", "decision head changed; refresh the ledger and retry"), 409);
+    }
+    throw error;
+  }
+  const exact = await loadChannelDecision(c.env.DB, slug, id);
+  if (exact === null) return c.json(errorBody("unavailable", "decision was stored but could not be reloaded"), 503);
+  // 权威写入已提交；系统状态仅负责让在线 Web/serve 刷新快照，失败不能反转成功结果。
+  await insertSystemStatus(c.env, slug, `decision ledger updated: ${id}`, "waiting", createdAt).catch(() => false);
+  return c.json(exact, 201);
+});
+
 app.get("/api/channels/:slug/charter", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);
@@ -6131,11 +6540,13 @@ app.get("/api/channels/:slug/charter", async (c) => {
   if (!(await canAccessLoadedChannel(c.env.DB, c.get("identity"), channel))) {
     return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
   }
+  const activeDecisions = await listChannelDecisions(c.env.DB, slug);
   return c.json({
     charter: channel.charter,
     charter_rev: channel.charter_rev,
     updated_at: channel.charter_updated_at,
     updated_by: channel.charter_updated_by,
+    active_decisions: activeDecisions,
     permissions: channelPerms(channel),
   });
 });
@@ -6203,11 +6614,13 @@ app.put("/api/channels/:slug/charter", async (c) => {
     }),
   );
   if (!res.ok) return c.json(errorBody("unavailable", "charter updated but audit status failed"), 503);
+  const activeDecisions = await listChannelDecisions(c.env.DB, slug);
   return c.json({
     charter: updated?.charter ?? body.charter,
     charter_rev: rev,
     updated_at: now,
     updated_by: updatedBy,
+    active_decisions: activeDecisions,
     permissions: channelPerms(updated ?? channel),
   });
 });
@@ -7206,14 +7619,18 @@ app.put("/api/channels/:slug/roles/:name", async (c) => {
     }
   }
   const assignedAt = Date.now();
-  // 角色按账号锚定（#101）：绑定到该 name 当前【存活】token 的 owner。
-  // 若无存活 token（预分配「先分工再铸 token」）→ null，等 persistToken 在首次铸造时认领绑定。
-  const liveOwner = await c.env.DB.prepare(
-    "SELECT owner FROM tokens WHERE name = ? ORDER BY (revoked_at IS NULL) DESC, created_at DESC LIMIT 1",
+  // 角色按账号锚定（#101）：优先绑定到该 name 当前存活 token 的 owner；没有存活 token
+  // 时保留最近一次 owner 只供 participant-removal 校验，不能把已撤销身份同步成在线有效角色。
+  const tokenBinding = await c.env.DB.prepare(
+    `SELECT owner, channel_scope, revoked_at
+       FROM tokens
+      WHERE name = ?
+      ORDER BY (revoked_at IS NULL) DESC, created_at DESC
+      LIMIT 1`,
   )
     .bind(name)
-    .first<{ owner: string | null }>();
-  const ownerAccount = liveOwner?.owner ?? null;
+    .first<{ owner: string | null; channel_scope: string | null; revoked_at: number | null }>();
+  const ownerAccount = tokenBinding?.owner ?? null;
   const savedRole = await c.env.DB.prepare(
     `INSERT INTO channel_roles (channel_slug, agent_name, role, assigned_by, assigned_at, responsibility, owner_account, reports_to)
      SELECT ?, ?, ?, ?, ?, ?, ?, ?
@@ -7280,15 +7697,9 @@ app.put("/api/channels/:slug/roles/:name", async (c) => {
   if (savedRole.meta.changes === 0) {
     return c.json(errorBody("participant_removed", "the participant must be explicitly re-added before assigning a role"), 409);
   }
-  await fetchChannelDO(
-    c.env,
-    slug,
-    new Request("https://do/internal/roles", {
-      method: "POST",
-      body: JSON.stringify({ name, role }),
-      headers: { "content-type": "application/json", "x-partykit-room": slug },
-    }),
-  );
+  if (!(await syncAuthoritativeRoleSnapshots(c.env, slug, [name]))) {
+    return c.json(errorBody("unavailable", "role was saved but the live channel snapshot did not update"), 503);
+  }
   await bestEffortRecordManagementAudit(c.env.DB, {
     actor: managementAuditActor(identity),
     action: "channel.role.assign",
@@ -7317,15 +7728,9 @@ app.delete("/api/channels/:slug/roles/:name", async (c) => {
   const removed = await c.env.DB.prepare("DELETE FROM channel_roles WHERE channel_slug = ? AND agent_name = ?")
     .bind(slug, name)
     .run();
-  await fetchChannelDO(
-    c.env,
-    slug,
-    new Request("https://do/internal/roles", {
-      method: "POST",
-      body: JSON.stringify({ name, role: null }),
-      headers: { "content-type": "application/json", "x-partykit-room": slug },
-    }),
-  );
+  if (!(await syncAuthoritativeRoleSnapshots(c.env, slug, [name]))) {
+    return c.json(errorBody("unavailable", "role was removed but the live channel snapshot did not update"), 503);
+  }
   if (removed.meta.changes > 0) {
     await bestEffortRecordManagementAudit(c.env.DB, {
       actor: managementAuditActor(identity),
@@ -7976,7 +8381,10 @@ app.post("/api/channels/:slug/messages", async (c) => {
   if (taskId !== undefined && !(await loadTaskRow(c.env.DB, slug, taskId))) {
     return c.json(errorBody("not_found", "task not found in this channel"), 404);
   }
-  const assignedRole = await loadAssignedRole(c.env.DB, slug, identity);
+  const [assignedRole, assignedHost] = await Promise.all([
+    loadAssignedRole(c.env.DB, slug, identity),
+    loadAssignedHostName(c.env.DB, slug),
+  ]);
   const res = await fetchChannelDO(
     c.env,
     slug,
@@ -7993,6 +8401,7 @@ app.post("/api/channels/:slug/messages", async (c) => {
         "x-ap-token-hash": identity.hash,
         ...lineageHeaders(identity),
         ...assignedRoleHeaders(assignedRole),
+        "x-ap-assigned-host": assignedHost ?? "",
         ...channelHeaders(channel, c.req.url),
         // #381：public_watch 写门信号——非成员/未被邀者在 public_watch 频道会被 DO handleSend 拒发
         ...(await writeGateHeaders(c.env.DB, identity, channel)),
@@ -8381,6 +8790,7 @@ app.post("/api/channels/:slug/kick", async (c) => {
       channel: slug,
       timestamp: removedAt,
     });
+    await syncAuthoritativeRoleSnapshots(c.env, slug, [name]).catch(() => false);
   }
   const effectiveRemoval = await loadChannelParticipantRemoval(c.env.DB, slug, "name", name);
   if (effectiveRemoval === null) {
@@ -8861,11 +9271,15 @@ app.get("/api/channels/:slug/ws", async (c) => {
   if (identity.owner) fwd.headers.set("x-ap-owner", identity.owner);
   fwd.headers.set("x-ap-token-hash", identity.hash);
   for (const [key, value] of Object.entries(lineageHeaders(identity))) fwd.headers.set(key, value);
-  const assignedRole = await loadAssignedRole(c.env.DB, slug, identity);
+  const [assignedRole, assignedHost] = await Promise.all([
+    loadAssignedRole(c.env.DB, slug, identity),
+    loadAssignedHostName(c.env.DB, slug),
+  ]);
   if (assignedRole !== null) {
     fwd.headers.set("x-ap-collab-role", assignedRole);
     fwd.headers.set("x-ap-role-source", "assigned");
   }
+  fwd.headers.set("x-ap-assigned-host", assignedHost ?? "");
   fwd.headers.set("x-ap-mode", channel.mode);
   fwd.headers.set("x-ap-channel-kind", channel.kind);
   fwd.headers.set("x-ap-completion-gate", channel.completion_gate);
@@ -8876,6 +9290,7 @@ app.get("/api/channels/:slug/ws", async (c) => {
   fwd.headers.set("x-ap-workflow-guard-enabled", String(channel.workflow_guard_enabled));
   fwd.headers.set("x-ap-workflow-guard-limit", String(channel.workflow_guard_limit));
   fwd.headers.set("x-ap-charter-rev", String(channel.charter_rev ?? 0));
+  fwd.headers.set("x-ap-role-revision", String(channel.role_rev ?? 0));
   fwd.headers.set("x-ap-host", new URL(c.req.url).host);
   // #381：把频道可见性 + 「本连接能否写」权威传给 DO。可见性缓存进 meta 供 handleSend 判 public_watch；
   // can-write 定死在连接建立时（与 role/archived 同快照语义），public_watch 频道 DO 据此拦发。

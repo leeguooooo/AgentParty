@@ -1,4 +1,10 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import {
+  extractIndexDefinition,
+  extractTriggerDefinition,
+  normalizeSqlDefinition,
+} from "./schema-contract.mjs";
 
 const database = process.env.AGENTPARTY_D1_DATABASE ?? "agentparty";
 const wranglerConfig = process.env.AGENTPARTY_WRANGLER_CONFIG;
@@ -28,6 +34,7 @@ const required = {
     "members_list_policy",
     "members_list_agents",
     "members_list_agent_allowlist_json",
+    "role_rev",
   ],
   tokens: ["id", "hash", "name", "role", "owner", "created_at", "revoked_at"],
   account_profiles: [
@@ -79,6 +86,18 @@ const required = {
     "completed_at",
   ],
   channel_roles: ["channel_slug", "agent_name", "role", "assigned_by", "assigned_at"],
+  channel_decisions: [
+    "id",
+    "channel_slug",
+    "topic",
+    "summary",
+    "source_seq",
+    "supersedes_id",
+    "created_by",
+    "created_by_kind",
+    "created_at",
+  ],
+  channel_decision_heads: ["channel_slug", "topic", "decision_id"],
   agent_profiles: [
     "owner_account",
     "handle",
@@ -168,6 +187,11 @@ const required = {
 };
 
 const requiredIndexes = {
+  channel_decisions: [
+    "idx_channel_decisions_supersedes",
+    "idx_channel_decisions_channel_created",
+  ],
+  channel_roles: ["idx_channel_roles_agent_name"],
   desktop_token_recoveries: ["idx_desktop_token_recoveries_expires_at"],
   management_audit: [
     "idx_management_audit_cursor_token",
@@ -175,6 +199,76 @@ const requiredIndexes = {
     "idx_management_audit_channel",
   ],
 };
+
+const requiredIndexDefinitions = {
+  idx_channel_decisions_supersedes: {
+    columns: ["channel_slug", "supersedes_id"],
+    unique: true,
+    partial: true,
+  },
+  idx_channel_decisions_channel_created: {
+    columns: ["channel_slug", "created_at", "id"],
+    unique: false,
+    partial: false,
+  },
+  idx_channel_roles_agent_name: {
+    columns: ["agent_name", "channel_slug"],
+    unique: false,
+    partial: false,
+  },
+};
+
+const requiredTriggers = {
+  channel_decisions: [
+    "channel_decisions_validate_insert",
+    "channel_decisions_reject_update",
+    "channel_decisions_reject_delete",
+  ],
+  channel_decision_heads: [
+    "channel_decision_heads_validate_insert",
+    "channel_decision_heads_validate_update",
+    "channel_decision_heads_reject_delete",
+  ],
+  channel_roles: [
+    "channel_roles_bump_revision_insert",
+    "channel_roles_bump_revision_update",
+    "channel_roles_bump_revision_delete",
+  ],
+  tokens: [
+    "tokens_bump_role_revision_insert",
+    "tokens_bump_role_revision_update",
+    "tokens_bump_role_revision_delete",
+  ],
+};
+
+const schemaMigrationSources = [
+  readFileSync(new URL("../migrations/0042_channel_decisions.sql", import.meta.url), "utf8"),
+  readFileSync(new URL("../migrations/0043_channel_role_revision.sql", import.meta.url), "utf8"),
+];
+
+const requiredTriggerDefinitions = Object.fromEntries(
+  Object.values(requiredTriggers).flat().map((name) => {
+    const definition = schemaMigrationSources
+      .map((source) => extractTriggerDefinition(source, name))
+      .find((candidate) => candidate !== null);
+    if (definition === undefined) {
+      throw new Error(`could not load expected trigger definition for ${name}`);
+    }
+    return [name, normalizeSqlDefinition(definition)];
+  }),
+);
+
+const requiredIndexSqlDefinitions = Object.fromEntries(
+  Object.keys(requiredIndexDefinitions).map((name) => {
+    const definition = schemaMigrationSources
+      .map((source) => extractIndexDefinition(source, name))
+      .find((candidate) => candidate !== null);
+    if (definition === undefined) {
+      throw new Error(`could not load expected index definition for ${name}`);
+    }
+    return [name, normalizeSqlDefinition(definition)];
+  }),
+);
 
 function run(args) {
   const configArgs = wranglerConfig ? [...args, "--config", wranglerConfig] : args;
@@ -195,13 +289,7 @@ function parseD1Json(output) {
   return JSON.parse(output);
 }
 
-const migrations = run(["d1", "migrations", "list", database, "--remote"]);
-if (!migrations.includes("No migrations to apply")) {
-  process.stderr.write(migrations);
-  throw new Error("remote D1 migrations are not fully applied");
-}
-
-for (const [table, columns] of Object.entries(required)) {
+function queryRows(command) {
   const output = run([
     "d1",
     "execute",
@@ -209,9 +297,21 @@ for (const [table, columns] of Object.entries(required)) {
     "--remote",
     "--json",
     "--command",
-    `PRAGMA table_info(${table})`,
+    command,
   ]);
-  const rows = parseD1Json(output).flatMap((entry) => entry.results ?? []);
+  return parseD1Json(output).flatMap((entry) => entry.results ?? []);
+}
+
+const migrations = run(["d1", "migrations", "list", database, "--remote"]);
+if (!migrations.includes("No migrations to apply")) {
+  process.stderr.write(migrations);
+  throw new Error("remote D1 migrations are not fully applied");
+}
+
+const tableInfo = new Map();
+for (const [table, columns] of Object.entries(required)) {
+  const rows = queryRows(`PRAGMA table_info(${table})`);
+  tableInfo.set(table, rows);
   const names = new Set(rows.map((row) => row.name));
   const missing = columns.filter((column) => !names.has(column));
   if (missing.length > 0) {
@@ -219,22 +319,113 @@ for (const [table, columns] of Object.entries(required)) {
   }
 }
 
+const roleRevision = tableInfo
+  .get("channels")
+  ?.find((column) => column.name === "role_rev");
+if (
+  roleRevision === undefined ||
+  String(roleRevision.type).toUpperCase() !== "INTEGER" ||
+  Number(roleRevision.notnull) !== 1 ||
+  String(roleRevision.dflt_value ?? "").trim() !== "0"
+) {
+  throw new Error("channels.role_rev must be INTEGER NOT NULL DEFAULT 0");
+}
+const nullRoleRevisions = queryRows(
+  "SELECT COUNT(*) AS count FROM channels WHERE role_rev IS NULL",
+);
+if (Number(nullRoleRevisions[0]?.count ?? -1) !== 0) {
+  throw new Error("channels contains rows with NULL role_rev");
+}
+
+const decisionHeadPrimaryKey = (tableInfo.get("channel_decision_heads") ?? [])
+  .filter((column) => Number(column.pk) > 0)
+  .sort((left, right) => Number(left.pk) - Number(right.pk))
+  .map((column) => column.name);
+if (
+  decisionHeadPrimaryKey.length !== 2 ||
+  decisionHeadPrimaryKey[0] !== "channel_slug" ||
+  decisionHeadPrimaryKey[1] !== "topic"
+) {
+  throw new Error(
+    "channel_decision_heads must have PRIMARY KEY (channel_slug, topic)",
+  );
+}
+const decisionHeadTable = queryRows(
+  "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'channel_decision_heads'",
+);
+const decisionHeadSql = normalizeSqlDefinition(decisionHeadTable[0]?.sql);
+if (!decisionHeadSql.includes("topic text collate nocase not null")) {
+  throw new Error("channel_decision_heads.topic must use COLLATE NOCASE");
+}
+
 for (const [table, indexes] of Object.entries(requiredIndexes)) {
-  const output = run([
-    "d1",
-    "execute",
-    database,
-    "--remote",
-    "--json",
-    "--command",
-    `PRAGMA index_list(${table})`,
-  ]);
-  const rows = parseD1Json(output).flatMap((entry) => entry.results ?? []);
-  const names = new Set(rows.map((row) => row.name));
+  const rows = queryRows(`PRAGMA index_list(${table})`);
+  const byName = new Map(rows.map((row) => [row.name, row]));
+  const names = new Set(byName.keys());
   const missing = indexes.filter((index) => !names.has(index));
   if (missing.length > 0) {
     throw new Error(`${table} missing indexes: ${missing.join(", ")}`);
   }
+  for (const index of indexes) {
+    const expected = requiredIndexDefinitions[index];
+    if (expected === undefined) continue;
+    const actual = byName.get(index);
+    if (
+      Number(actual.unique) !== Number(expected.unique) ||
+      Number(actual.partial) !== Number(expected.partial)
+    ) {
+      throw new Error(`${index} uniqueness or partial-index contract does not match`);
+    }
+    const columns = queryRows(`PRAGMA index_info(${index})`)
+      .sort((left, right) => Number(left.seqno) - Number(right.seqno))
+      .map((row) => row.name);
+    if (
+      columns.length !== expected.columns.length ||
+      columns.some((column, position) => column !== expected.columns[position])
+    ) {
+      throw new Error(
+        `${index} columns must be (${expected.columns.join(", ")})`,
+      );
+    }
+  }
 }
 
-console.log(JSON.stringify({ ok: true, database, tables: Object.keys(required), indexes: requiredIndexes }));
+const shippedIndexes = queryRows(
+  `SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN (${
+    Object.keys(requiredIndexSqlDefinitions)
+      .map((name) => `'${name}'`)
+      .join(", ")
+  })`,
+);
+const shippedIndexSql = new Map(shippedIndexes.map((row) => [row.name, row.sql]));
+for (const [index, expected] of Object.entries(requiredIndexSqlDefinitions)) {
+  if (normalizeSqlDefinition(shippedIndexSql.get(index)) !== expected) {
+    throw new Error(`${index} definition does not match the shipped migration`);
+  }
+}
+
+for (const [table, triggers] of Object.entries(requiredTriggers)) {
+  const rows = queryRows(
+    `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = '${table}'`,
+  );
+  const byName = new Map(rows.map((row) => [row.name, row.sql]));
+  const names = new Set(byName.keys());
+  const missing = triggers.filter((trigger) => !names.has(trigger));
+  if (missing.length > 0) {
+    throw new Error(`${table} missing triggers: ${missing.join(", ")}`);
+  }
+  for (const trigger of triggers) {
+    const actual = normalizeSqlDefinition(byName.get(trigger));
+    if (actual !== requiredTriggerDefinitions[trigger]) {
+      throw new Error(`${trigger} definition does not match the shipped migration`);
+    }
+  }
+}
+
+console.log(JSON.stringify({
+  ok: true,
+  database,
+  tables: Object.keys(required),
+  indexes: requiredIndexes,
+  triggers: requiredTriggers,
+}));

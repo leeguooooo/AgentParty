@@ -266,7 +266,7 @@ describe("persistent channel participant removals", () => {
       (
         await api(`/api/channels/${slug}/roles/${victim.name}`, owner.token, {
           method: "PUT",
-          body: JSON.stringify({ role: "worker", responsibility: "removed atomically" }),
+          body: JSON.stringify({ role: "host", responsibility: "removed atomically" }),
         })
       ).status,
     ).toBe(200);
@@ -323,6 +323,17 @@ describe("persistent channel participant removals", () => {
     expect(token?.revoked_at).toBeNull();
     expect((await api("/api/me", victim.token)).status).toBe(200);
     expect((await api(`/api/channels/${slug}/messages`, victim.token)).status).toBe(403);
+
+    const assignedHost = await runInDurableObject(
+      env.CHANNELS.get(env.CHANNELS.idFromName(slug)),
+      async (_instance: ChannelDO, state) => {
+        const rows = state.storage.sql
+          .exec("SELECT value FROM meta WHERE key = 'assigned_host'")
+          .toArray();
+        return rows.length === 0 ? null : String(rows[0]!.value);
+      },
+    );
+    expect(assignedHost).toBeNull();
   });
 
   it("blocks stale roles/identities, public entry, ordinary rejoin, mentions, and queued webhooks", async () => {
