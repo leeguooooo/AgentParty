@@ -61,6 +61,7 @@ import {
   RUNNER_CONTINUATIONS_DIR,
   type RunnerContinuationState,
 } from "../continuation";
+import { resolveCodexLaunch, type CodexLaunchResolution } from "./bridge";
 
 export type ServeExecutionRole = "front" | "worker";
 
@@ -1080,6 +1081,15 @@ export interface BuiltinRunnerOptions {
   token: string;
   channel: string;
   harness: RunnerHarness;
+  /** Absolute/relative Codex CLI override. AGENTPARTY_CODEX_BIN is used when omitted. */
+  codexBinary?: string;
+  /** Fixed argv before Codex subcommands, supplied by a resolved Windows npm shim. */
+  codexArgsPrefix?: string[];
+  /**
+   * One immutable preflight result shared with the eventual wake. This prevents a
+   * later PATH/npm update from changing the executable after readiness was accepted.
+   */
+  codexLaunch?: Extract<CodexLaunchResolution, { ok: true }>;
   workdir: string;
   cwd?: string;
   /** Child-only CLI identity pinned into the model process (#548). */
@@ -1454,7 +1464,7 @@ export function defaultRunnerWorkdir(channel: string, namespace: string): string
   return runnerWorkdir(join(stateRoot, "runners"), channel, namespace);
 }
 
-const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "workdir", "repo", "auto-upgrade", "replay-backlog", "profile", "profile-once", "profile-poll-interval", "runner-timeout-seconds", "protocol", "stop"];
+const SERVE_FLAGS = ["channel", "on-mention", "all", "runner", "codex-bin", "workdir", "repo", "auto-upgrade", "replay-backlog", "profile", "profile-once", "profile-poll-interval", "runner-timeout-seconds", "protocol", "stop"];
 const HELP = `usage: party serve [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all]
        party serve --profile <owner>/<handle>
 
@@ -1468,6 +1478,8 @@ Options:
                        and decision_response in AP_CONTEXT_FILE; no model session is resumed
   --runner codex|claude|codex-sdk
                        use the built-in isolated wake runner instead of a custom command
+  --codex-bin PATH     Codex CLI override for --runner codex (or set AGENTPARTY_CODEX_BIN);
+                       otherwise search child PATH, Homebrew, Codex.app, and ChatGPT.app
   --workdir DIR        runner workdir (default: ~/.agentparty/runners/<principal-sha256>/<channel>)
   --repo URL           clone into workdir/repo once, then git pull --ff-only before each wake
   --runner-timeout-seconds N
@@ -2351,7 +2363,11 @@ function parseClaudeJson(stdout: string): { sessionId: string | null; text: stri
   }
 }
 
-function prepareCodexHome(workdir: string, authSourceFile?: string): Record<string, string | undefined> {
+function prepareCodexHome(
+  workdir: string,
+  authSourceFile?: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string | undefined> {
   const codexHome = join(workdir, ".codex");
   mkdirSync(codexHome, { recursive: true });
   const authDest = join(codexHome, "auth.json");
@@ -2376,7 +2392,7 @@ function prepareCodexHome(workdir: string, authSourceFile?: string): Record<stri
       symlinkSync(authSource, authDest);
     }
   }
-  return { ...process.env, CODEX_HOME: codexHome };
+  return { ...baseEnv, CODEX_HOME: codexHome };
 }
 
 async function ensureRepo(
@@ -2453,8 +2469,38 @@ export function builtinRunnerCommand(
   return configured;
 }
 
+/**
+ * Resolve the Codex executable using the same precedence at every resident-runner
+ * boundary: an explicit flag, AGENTPARTY_CODEX_BIN, then the desktop/launchd
+ * AGENTPARTY_RUNNER_BIN binding, and finally normal Codex discovery.
+ */
+export function resolveBuiltinCodexLaunch(
+  explicit: string | undefined,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): ReturnType<typeof resolveCodexLaunch> {
+  let configured = explicit;
+  if (
+    configured === undefined &&
+    !env.AGENTPARTY_CODEX_BIN?.trim() &&
+    env.AGENTPARTY_RUNNER_BIN?.trim()
+  ) {
+    try {
+      configured = builtinRunnerCommand("codex", env);
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+  return resolveCodexLaunch(configured, env, cwd);
+}
+
 async function runHarness(
   opts: BuiltinRunnerOptions,
+  codexBinary: string,
+  codexArgsPrefix: string[],
   prompt: string,
   sid: string | null,
   coldSessionId: string | null,
@@ -2478,7 +2524,6 @@ async function runHarness(
     }
   };
   if (opts.harness === "codex") {
-    const runnerCommand = builtinRunnerCommand("codex", env);
     const outFile = join(opts.workdir, `runner-${seq}-${Date.now()}.out`);
     const schemaArgs = opts.outputSchema === undefined
       ? []
@@ -2503,8 +2548,8 @@ async function runHarness(
     // exec-level flags must precede the `resume` subcommand.  Putting --sandbox after the session
     // id is parsed as a resume-only flag and current Codex rejects the second managed turn.
     const args = sid
-      ? [runnerCommand, "exec", ...flags, "resume", sid, prompt]
-      : [runnerCommand, "exec", ...flags, prompt];
+      ? [codexBinary, ...codexArgsPrefix, "exec", ...flags, "resume", sid, prompt]
+      : [codexBinary, ...codexArgsPrefix, "exec", ...flags, prompt];
     const result = await runProcess(args, { cwd, env, signal });
     const text = result.code === 0 && existsSync(outFile) ? readFileSync(outFile, "utf8").trimEnd() : "";
     return { result, text, sessionId: sid ? sid : parseCodexSessionId(result.stdout, result.stderr), outFile };
@@ -2978,6 +3023,8 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
     coldSessionId: string | null;
     env: Record<string, string | undefined>;
     cwd: string;
+    codexBinary: string;
+    codexArgsPrefix: string[];
   }
   const prepared = new WeakMap<MsgFrame, PreparedBuiltinRun>();
   const prepare = async (frame: MsgFrame, ctx: ServeRunnerContext): Promise<void> => {
@@ -2986,7 +3033,36 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
     mkdirSync(opts.workdir, { recursive: true });
     // 活动上报（#602）：新 wake 冷起前清掉上一轮残留，首个 hook 到来前不展示旧活动。
     if (opts.harness === "claude") clearActivityFile(runnerActivityFile(opts.workdir));
-    const baseEnv = opts.harness === "codex" ? prepareCodexHome(opts.workdir, opts.authSourceFile) : { ...process.env };
+    let baseEnv = opts.harness === "codex"
+      ? prepareCodexHome(opts.workdir, opts.authSourceFile, opts.codexLaunch?.env)
+      : { ...process.env };
+    let codexBinary = opts.codexLaunch?.codexBinary ??
+      (opts.harness === "codex" && opts.codexArgsPrefix !== undefined
+        ? opts.codexBinary ?? "codex"
+        : "codex");
+    let codexArgsPrefix = [
+      ...(opts.codexLaunch?.codexArgsPrefix ?? opts.codexArgsPrefix ?? []),
+    ];
+    // Production must resolve the same absolute executable and child PATH before a wake reaches the
+    // model boundary. GUI/launchd processes commonly have no Homebrew path, and Codex may exist only
+    // inside Codex.app or ChatGPT.app. Test doubles keep the historical literal command unless they
+    // explicitly ask to exercise this resolver.
+    if (
+      opts.harness === "codex" &&
+      opts.codexLaunch === undefined &&
+      opts.codexArgsPrefix === undefined &&
+      (opts.runProcess === undefined || opts.codexBinary !== undefined)
+    ) {
+      const launch = resolveBuiltinCodexLaunch(opts.codexBinary, baseEnv, process.cwd());
+      if (!launch.ok) {
+        throw new WakeBlockedError(`builtin codex runner did not start: ${launch.error}`, true, {
+          environment: true,
+        });
+      }
+      codexBinary = launch.codexBinary;
+      codexArgsPrefix = launch.codexArgsPrefix;
+      baseEnv = launch.env;
+    }
     const scope = continuationScope(opts.workdir, ctx.delivery);
     const sessionPath = scope.path;
     const prior = scopedSession(scope, (path) => readSession(path, opts.harness), `builtin ${opts.harness}`);
@@ -3046,6 +3122,8 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
       coldSessionId,
       env,
       cwd: opts.cwd ?? repoCwd ?? opts.workdir,
+      codexBinary,
+      codexArgsPrefix,
     });
   };
 
@@ -3053,7 +3131,7 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
     if (!prepared.has(frame)) await prepare(frame, ctx);
     const ready = prepared.get(frame)!;
     prepared.delete(frame);
-    const { started, scope, sessionPath, coldSessionId, env, cwd } = ready;
+    const { started, scope, sessionPath, coldSessionId, env, cwd, codexBinary, codexArgsPrefix } = ready;
     let prior = ready.prior;
     let oldSid = prior?.session_id ?? null;
     let exitCode: number | null = null;
@@ -3092,7 +3170,18 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         // session_not_found，也只能清理句柄供下一条独立 wake 使用，绝不能 cold-start 重跑当前 wake。
         let run: HarnessRun;
         try {
-          run = await runHarness(opts, nextPrompt, oldSid, coldSessionId, cwd, env, frame.seq, ctx.signal);
+          run = await runHarness(
+            opts,
+            codexBinary,
+            codexArgsPrefix,
+            nextPrompt,
+            oldSid,
+            coldSessionId,
+            cwd,
+            env,
+            frame.seq,
+            ctx.signal,
+          );
         } catch (error) {
           if (error instanceof ServeShutdownError && prior !== null) {
             blockRunnerContinuation(
@@ -3401,6 +3490,10 @@ export interface ProfileServeOptions {
   ownerAccount: string;
   handle: string;
   mentionsOnly: boolean;
+  /** Optional Codex CLI override propagated to every Codex profile lane. */
+  codexBinary?: string;
+  /** Test/embedding seam for proving that one preflight result reaches every profile lane. */
+  resolveCodexLaunch?: typeof resolveBuiltinCodexLaunch;
   availableUpgrade?: CliUpgradeNotice | null;
   refreshAvailableUpgrade?: (current: CliUpgradeNotice | null) => Promise<CliUpgradeNotice | null>;
   upgradeProbeIntervalMs?: number;
@@ -3903,6 +3996,26 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
   if (profile.owner_account !== opts.ownerAccount || profile.handle !== opts.handle) {
     throw new Error(`profile token mismatch: requested ${opts.ownerAccount}/${opts.handle}, got ${profile.owner_account}/${profile.handle}`);
   }
+  if (opts.codexBinary !== undefined && profile.runner !== "codex") {
+    throw new Error("--codex-bin can only be used with a codex project-agent profile");
+  }
+  let resolvedProfileCodexLaunch: Extract<CodexLaunchResolution, { ok: true }> | undefined;
+  const profileCodexLaunch = (): Extract<CodexLaunchResolution, { ok: true }> | undefined => {
+    if (profile.runner !== "codex") return undefined;
+    // Injected channel runners are test/embedding boundaries and may not launch a harness at all.
+    // Production resolves on the first invited channel, before either resident lane advertises
+    // readiness, so a GUI/launchd PATH failure cannot masquerade as an online project agent.
+    if (opts.runChannelServe !== undefined && opts.resolveCodexLaunch === undefined) return undefined;
+    if (resolvedProfileCodexLaunch !== undefined) return resolvedProfileCodexLaunch;
+    const launch = (opts.resolveCodexLaunch ?? resolveBuiltinCodexLaunch)(
+      opts.codexBinary,
+      process.env,
+      process.cwd(),
+    );
+    if (!launch.ok) throw new Error(`builtin codex runner did not start: ${launch.error}`);
+    resolvedProfileCodexLaunch = launch;
+    return resolvedProfileCodexLaunch;
+  };
   out(`serving project agent ${profile.owner_account}/${profile.handle} — runner=${profile.runner}`);
 
   const attachInvite = async (invite: ChannelProjectAgentInvite) => {
@@ -4134,6 +4247,11 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
               token: principal.token,
               channel,
               harness: profile.runner,
+              ...(profile.runner === "codex"
+                ? opts.runChannelServe !== undefined && opts.resolveCodexLaunch === undefined
+                  ? (opts.codexBinary === undefined ? {} : { codexBinary: opts.codexBinary })
+                  : { codexLaunch: profileCodexLaunch()! }
+                : {}),
               workdir: prepared.runnerWorkdir,
               cwd: prepared.channelWorkdir,
               isolateModelPartyAccess: true,
@@ -5621,6 +5739,14 @@ export interface ServePrincipal {
   owner: string | null;
 }
 
+export interface ServeCommandDeps {
+  resolveBuiltinCodexLaunch?: typeof resolveBuiltinCodexLaunch;
+  resolveAvailableUpgrade?: typeof resolveAvailableUpgrade;
+  verifyServeIdentityBoundary?: typeof verifyServeIdentityBoundary;
+  runServe?: typeof runServe;
+  superviseServe?: typeof superviseServe;
+}
+
 export type ServeIdentityBoundaryResult =
   | { ok: true; principal: ServePrincipal; namespace: string }
   | { ok: false; code: typeof EXIT_AUTH; reason: string };
@@ -5714,7 +5840,7 @@ export async function verifyServeIdentityBoundary(
   };
 }
 
-export async function run(argv: string[]): Promise<number> {
+export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
     return 0;
@@ -5726,18 +5852,24 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
   const server = auth.server;
+  const resolveCodexForServe = deps.resolveBuiltinCodexLaunch ?? resolveBuiltinCodexLaunch;
+  const resolveUpgradeForServe = deps.resolveAvailableUpgrade ?? resolveAvailableUpgrade;
+  const verifyIdentityForServe = deps.verifyServeIdentityBoundary ?? verifyServeIdentityBoundary;
+  const runServeForCommand = deps.runServe ?? runServe;
+  const superviseForCommand = deps.superviseServe ?? superviseServe;
   const unknown = unknownFlagError(flags, SERVE_FLAGS);
   if (unknown !== null) {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["channel", "on-mention", "runner", "workdir", "repo", "profile", "profile-poll-interval", "runner-timeout-seconds", "protocol"]);
+  const flagError = valueFlagError(flags, ["channel", "on-mention", "runner", "codex-bin", "workdir", "repo", "profile", "profile-poll-interval", "runner-timeout-seconds", "protocol"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
   }
   const cmd = str(flags["on-mention"]);
   const runner = str(flags.runner);
+  const codexBinaryFlag = str(flags["codex-bin"]);
   const runnerTimeoutSecondsRaw = str(flags["runner-timeout-seconds"]);
   // #646：flag 未显式提供时保持 undefined，让各 lane 用自己的默认（front 10min / worker+单 runner
   // 30min，见下游 `?? DEFAULT_FRONT_RUNNER_TIMEOUT_MS` / `?? DEFAULT_RUNNER_TIMEOUT_MS`）。此前这里
@@ -5786,7 +5918,7 @@ export async function run(argv: string[]): Promise<number> {
       return 1;
     }
     const autoDownloadUpgrade = flags["auto-upgrade"] === true;
-    const availableUpgrade = await resolveAvailableUpgrade(account.session.server, null, {
+    const availableUpgrade = await resolveUpgradeForServe(account.session.server, null, {
       autoDownload: autoDownloadUpgrade,
       out: (line) => console.error(terminalOutput(line)),
     });
@@ -5797,8 +5929,12 @@ export async function run(argv: string[]): Promise<number> {
       ownerAccount: profileRef.owner,
       handle: profileRef.handle,
       mentionsOnly: flags.all !== true,
+      ...(codexBinaryFlag === undefined ? {} : { codexBinary: codexBinaryFlag }),
+      ...(deps.resolveBuiltinCodexLaunch === undefined
+        ? {}
+        : { resolveCodexLaunch: deps.resolveBuiltinCodexLaunch }),
       availableUpgrade,
-      refreshAvailableUpgrade: (current) => resolveAvailableUpgrade(account.session.server, current, {
+      refreshAvailableUpgrade: (current) => resolveUpgradeForServe(account.session.server, current, {
         autoDownload: autoDownloadUpgrade,
         out: (line) => console.error(terminalOutput(line)),
       }),
@@ -5836,10 +5972,23 @@ export async function run(argv: string[]): Promise<number> {
     console.error("--runner must be codex, claude, or codex-sdk");
     return 1;
   }
+  if (codexBinaryFlag !== undefined && runner !== "codex") {
+    console.error("--codex-bin requires --runner codex");
+    return 1;
+  }
   const harness = runner === "codex" || runner === "claude" ? runner : undefined;
   const useSdkRunner = runner === "codex-sdk";
+  let codexLaunch: Extract<CodexLaunchResolution, { ok: true }> | undefined;
+  if (harness === "codex") {
+    const launch = resolveCodexForServe(codexBinaryFlag, process.env, process.cwd());
+    if (!launch.ok) {
+      console.error(`builtin codex runner did not start: ${launch.error}`);
+      return 1;
+    }
+    codexLaunch = launch;
+  }
   const autoDownloadUpgrade = flags["auto-upgrade"] === true;
-  const availableUpgrade = await resolveAvailableUpgrade(server, null, {
+  const availableUpgrade = await resolveUpgradeForServe(server, null, {
     autoDownload: autoDownloadUpgrade,
     out: (line) => console.error(terminalOutput(line)),
   });
@@ -5853,7 +6002,7 @@ export async function run(argv: string[]): Promise<number> {
     rejectedAccountToken: null,
   };
   try {
-    const initialBoundary = await verifyServeIdentityBoundary(server, auth, identityState);
+    const initialBoundary = await verifyIdentityForServe(server, auth, identityState);
     if (!initialBoundary.ok) {
       console.error(terminalOutput(initialBoundary.reason));
       return initialBoundary.code;
@@ -5871,7 +6020,7 @@ export async function run(argv: string[]): Promise<number> {
     if (runnerWorkdirPath !== null) appendServeLifecycleLog(runnerWorkdirPath, record);
     console.error(terminalOutput(`serve supervisor: ${line}`));
   };
-  const superviseExit = await superviseServe({
+  const superviseExit = await superviseForCommand({
     onLifecycle: lifecycle,
     runOnce: async () => {
       // 每次自愈都重读本地凭据与 OIDC 状态，避免用启动时快照把一次可恢复的 token
@@ -5882,14 +6031,14 @@ export async function run(argv: string[]): Promise<number> {
       const currentToken = currentAuth.token;
       // Cursor, stuck debt and model session are scoped to the original server+principal.  Token
       // rotation is safe only inside that boundary; config switching must start a new serve process.
-      const boundary = await verifyServeIdentityBoundary(server, currentAuth, identityState);
+      const boundary = await verifyIdentityForServe(server, currentAuth, identityState);
       if (!boundary.ok) {
         console.error(terminalOutput(`${boundary.reason}; exiting`));
         return boundary.code;
       }
       const currentRunnerWorkdir = runnerWorkdirPath ?? defaultRunnerWorkdir(channel, boundary.namespace);
       runnerWorkdirPath = currentRunnerWorkdir;
-      const result = await runServe({
+      const result = await runServeForCommand({
         server: currentServer,
         token: currentToken,
         channel,
@@ -5912,7 +6061,7 @@ export async function run(argv: string[]): Promise<number> {
         fetchCharter: (signal) => fetchChannelCharter(currentServer, currentToken, channel, signal),
         autoUpgrade: flags["auto-upgrade"] === true,
         availableUpgrade,
-        refreshAvailableUpgrade: (current) => resolveAvailableUpgrade(currentServer, current, {
+        refreshAvailableUpgrade: (current) => resolveUpgradeForServe(currentServer, current, {
           autoDownload: flags["auto-upgrade"] === true,
           out: (line) => console.error(terminalOutput(line)),
         }),
@@ -5924,6 +6073,7 @@ export async function run(argv: string[]): Promise<number> {
               token: currentToken,
               channel,
               harness,
+              ...(codexLaunch === undefined ? {} : { codexLaunch }),
               workdir: currentRunnerWorkdir,
               repo: str(flags.repo),
             }
