@@ -10,10 +10,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter as pathDelimiter, join } from "node:path";
+import { delimiter as pathDelimiter, dirname, join } from "node:path";
 import type { Connection } from "../src/client";
 import {
   buildCodexChildEnv,
+  executableCommandNames,
   parseCodexVersion,
   resolveCodexBinary,
   resolveCodexLaunch,
@@ -455,6 +456,142 @@ describe("party bridge codex capability and argv boundary", () => {
     ]));
   });
 
+  test("resolves the native codex.exe through Windows PATHEXT semantics", () => {
+    const root = tempDir();
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const codex = join(bin, "codex.exe");
+    writeFileSync(codex, "native codex fixture", { mode: 0o755 });
+
+    expect(
+      executableCommandNames("codex", {
+        PATHEXT: ".CMD;.EXE;.BAT;.COM",
+      }, "win32"),
+    ).toEqual(["codex.exe", "codex.com"]);
+    expect(
+      resolveCodexBinary(undefined, {
+        PATH: "bin",
+        PATHEXT: ".CMD;.EXE;.BAT;.COM",
+      }, root, { platform: "win32" }),
+    ).toBe(realpathSync(codex));
+  });
+
+  test("adapts the official Windows npm codex.cmd shim into a direct node invocation", () => {
+    const root = tempDir();
+    const bin = join(root, "bin");
+    const shim = join(bin, "codex.cmd");
+    const posixShim = join(bin, "codex");
+    const node = join(bin, "node.exe");
+    const entrypoint = join(bin, "node_modules", "@openai", "codex", "bin", "codex.js");
+    mkdirSync(dirname(entrypoint), { recursive: true });
+    writeFileSync(shim, "@echo off\r\n", { mode: 0o755 });
+    // npm's cmd-shim package also emits this POSIX wrapper on Windows. It is
+    // not a CreateProcess-compatible executable and must not mask codex.cmd.
+    writeFileSync(posixShim, "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(node, "native node fixture", { mode: 0o755 });
+    writeFileSync(entrypoint, "console.log('codex')\n");
+
+    const launch = resolveCodexLaunch(shim, {
+      PATH: "bin",
+      PATHEXT: ".CMD;.EXE;.BAT;.COM",
+    }, root, { platform: "win32" });
+
+    expect(launch).toMatchObject({
+      ok: true,
+      codexBinary: realpathSync(node),
+      codexArgsPrefix: [realpathSync(entrypoint)],
+    });
+  });
+
+  test("prefers native codex.exe over the Windows npm cmd shim", () => {
+    const root = tempDir();
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const native = join(bin, "codex.exe");
+    const shim = join(bin, "codex.cmd");
+    writeFileSync(native, "native codex fixture", { mode: 0o755 });
+    writeFileSync(shim, "@echo off\r\n", { mode: 0o755 });
+
+    const launch = resolveCodexLaunch(undefined, {
+      PATH: "bin",
+      PATHEXT: ".CMD;.EXE;.BAT;.COM",
+    }, root, { platform: "win32" });
+
+    expect(launch).toMatchObject({
+      ok: true,
+      codexBinary: realpathSync(native),
+      codexArgsPrefix: [],
+    });
+  });
+
+  test("rejects an explicit Windows cmd shim that is not the Codex npm package", () => {
+    const root = tempDir();
+    const shim = join(root, "codex.cmd");
+    writeFileSync(shim, "@echo off\r\n", { mode: 0o755 });
+
+    const launch = resolveCodexLaunch(shim, { PATH: "" }, root, { platform: "win32" });
+
+    expect(launch).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("expected @openai/codex entrypoint"),
+    });
+  });
+
+  test("does not replace a missing explicit Windows cmd binding with a PATH shim", () => {
+    const root = tempDir();
+    const bin = join(root, "bin");
+    const shim = join(bin, "codex.cmd");
+    const node = join(bin, "node.exe");
+    const entrypoint = join(bin, "node_modules", "@openai", "codex", "bin", "codex.js");
+    mkdirSync(dirname(entrypoint), { recursive: true });
+    writeFileSync(shim, "@echo off\r\n", { mode: 0o755 });
+    writeFileSync(node, "native node fixture", { mode: 0o755 });
+    writeFileSync(entrypoint, "console.log('codex')\n");
+
+    const launch = resolveCodexLaunch(join(root, "missing", "codex.cmd"), {
+      PATH: "bin",
+      PATHEXT: ".CMD;.EXE",
+    }, root, { platform: "win32" });
+
+    expect(launch).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("could not find an executable Codex CLI"),
+    });
+  });
+
+  test("rejects an explicit Windows bat wrapper instead of handing it to direct spawn", () => {
+    const root = tempDir();
+    const wrapper = join(root, "codex.bat");
+    writeFileSync(wrapper, "@echo off\r\n", { mode: 0o755 });
+
+    const launch = resolveCodexLaunch(wrapper, { PATH: "" }, root, { platform: "win32" });
+
+    expect(launch).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("cannot be launched safely without a shell"),
+    });
+  });
+
+  test("rejects the Windows npm shim when node.exe is absent from the child PATH", () => {
+    const root = tempDir();
+    const bin = join(root, "bin");
+    const shim = join(bin, "codex.cmd");
+    const entrypoint = join(bin, "node_modules", "@openai", "codex", "bin", "codex.js");
+    mkdirSync(dirname(entrypoint), { recursive: true });
+    writeFileSync(shim, "@echo off\r\n", { mode: 0o755 });
+    writeFileSync(entrypoint, "console.log('codex')\n");
+
+    const launch = resolveCodexLaunch(shim, {
+      PATH: "bin",
+      PATHEXT: ".CMD;.EXE",
+    }, root, { platform: "win32" });
+
+    expect(launch).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("requires node.exe on PATH"),
+    });
+  });
+
   test("honors AGENTPARTY_CODEX_BIN under a minimized GUI/launchd PATH", () => {
     const root = tempDir();
     const bin = join(root, "private-bin");
@@ -567,12 +704,14 @@ describe("party bridge codex process lifecycle", () => {
         }));
       }
       const launches: string[][] = [];
+      const appServerPrefixes: string[][] = [];
       let requestsAtConnect: string[] = [];
       let appServerSpawns = 0;
       const result = await runCodexSessionBridge(
         {
           channel: "dev",
           codexBinary: process.execPath,
+          codexArgsPrefix: ["/npm/@openai/codex/bin/codex.js"],
           codexArgs: [
             "--model",
             "gpt-5.4",
@@ -591,8 +730,9 @@ describe("party bridge codex process lifecycle", () => {
             config: { kind: "none", path: null },
             account: { present: false, path: join(root, "account.json") },
           }),
-          spawnAppServer: () => {
+          spawnAppServer: ({ codexArgsPrefix }) => {
             appServerSpawns += 1;
+            appServerPrefixes.push(codexArgsPrefix);
             return spawn(process.execPath, ["run", mockCodexFixture], {
               stdio: ["pipe", "pipe", "pipe"],
               env: { ...process.env, MOCK_CODEX_STATE_PATH: statePath },
@@ -624,6 +764,7 @@ describe("party bridge codex process lifecycle", () => {
       );
       return {
         appServerSpawns,
+        appServerPrefixes,
         launches,
         requestsAtConnect,
         result,
@@ -636,7 +777,9 @@ describe("party bridge codex process lifecycle", () => {
       const empty = await runWithThreads([]);
       expect(empty.result).toBe(0);
       expect(empty.appServerSpawns).toBe(1);
+      expect(empty.appServerPrefixes).toEqual([["/npm/@openai/codex/bin/codex.js"]]);
       expect(empty.launches).toEqual([[
+        "/npm/@openai/codex/bin/codex.js",
         "--remote",
         `unix://${join(empty.runtimePath, "codex.sock")}`,
         "--model",
@@ -649,7 +792,9 @@ describe("party bridge codex process lifecycle", () => {
       const exact = await runWithThreads(["thread-journal"]);
       expect(exact.result).toBe(0);
       expect(exact.appServerSpawns).toBe(1);
+      expect(exact.appServerPrefixes).toEqual([["/npm/@openai/codex/bin/codex.js"]]);
       expect(exact.launches).toEqual([[
+        "/npm/@openai/codex/bin/codex.js",
         "resume",
         "--remote",
         `unix://${join(exact.runtimePath, "codex.sock")}`,

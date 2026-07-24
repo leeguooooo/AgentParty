@@ -15,7 +15,7 @@ import {
   realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter as pathDelimiter, dirname, isAbsolute, resolve } from "node:path";
+import { delimiter as pathDelimiter, dirname, extname, isAbsolute, resolve } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { isPartyBinaryPath } from "../upgrade";
@@ -78,6 +78,7 @@ export interface BridgeDeps {
   probeCodexCapabilities?: (
     codexBinary: string,
     options: { cwd: string; env: NodeJS.ProcessEnv },
+    codexArgsPrefix?: string[],
   ) => Promise<CodexCapabilityProbe>;
   launch?: (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => Promise<number>;
   runCodexBridge?: (options: CodexBridgeRuntimeOptions) => Promise<number>;
@@ -120,6 +121,25 @@ function pathEntries(value: string | undefined): string[] {
 }
 
 /**
+ * Windows does not resolve an extensionless command name without consulting
+ * PATHEXT. Only return directly executable formats here: cmd/bat wrappers need
+ * a shell and must not be selected for the bridge's single-writer subprocesses.
+ */
+export function executableCommandNames(
+  command: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform !== "win32" || extname(command) !== "") return [command];
+  const configured = (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry === ".exe" || entry === ".com");
+  const extensions = [...new Set([".exe", ...configured, ".com"])];
+  return extensions.map((extension) => `${command}${extension}`);
+}
+
+/**
  * Construct the exact PATH inherited by both Codex children. The fallback
  * directories are deliberately explicit: launchd GUI sessions commonly omit
  * Homebrew and application bundle paths even when the same command works in a
@@ -147,14 +167,17 @@ function executableOnPath(
   command: string,
   env: NodeJS.ProcessEnv,
   cwd: string,
+  platform: NodeJS.Platform = process.platform,
 ): string | null {
   if (isAbsolute(command) || command.includes("/")) {
     const candidate = isAbsolute(command) ? command : resolve(cwd, command);
     return executable(candidate) ? candidate : null;
   }
   for (const entry of pathEntries(env.PATH)) {
-    const candidate = resolve(cwd, entry, command);
-    if (executable(candidate)) return candidate;
+    for (const name of executableCommandNames(command, env, platform)) {
+      const candidate = resolve(cwd, entry, name);
+      if (executable(candidate)) return candidate;
+    }
   }
   return null;
 }
@@ -168,13 +191,19 @@ export function resolveCodexBinary(
   explicit?: string,
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
+  options: { platform?: NodeJS.Platform } = {},
 ): string | null {
   const configured = explicit || env.AGENTPARTY_CODEX_BIN;
   if (configured) {
     const path = isAbsolute(configured) ? configured : resolve(cwd, configured);
     return executable(path) ? realpathSync(path) : null;
   }
-  const fromPath = executableOnPath("codex", buildCodexChildEnv(env), cwd);
+  const fromPath = executableOnPath(
+    "codex",
+    buildCodexChildEnv(env),
+    cwd,
+    options.platform,
+  );
   if (fromPath && executable(fromPath)) return realpathSync(fromPath);
   for (const appDir of CODEX_APP_DIRS) {
     const candidate = resolve(appDir, "codex");
@@ -206,7 +235,14 @@ function shebangEnvCommand(path: string): string | null {
 export type CodexLaunchResolution =
   | {
     ok: true;
+    /** The directly executable program shared by every Codex child. */
     codexBinary: string;
+    /**
+     * Fixed argv inserted before every Codex subcommand. This is empty for a
+     * native CLI and contains the npm package entrypoint for a Windows npm
+     * `codex.cmd` shim, so neither child needs a shell to invoke it.
+     */
+    codexArgsPrefix: string[];
     cwd: string;
     env: NodeJS.ProcessEnv;
   }
@@ -214,6 +250,60 @@ export type CodexLaunchResolution =
     ok: false;
     error: string;
   };
+
+function isWindowsCmdShim(path: string, platform: NodeJS.Platform): boolean {
+  return platform === "win32" && extname(path).toLowerCase() === ".cmd";
+}
+
+function isWindowsBatShim(path: string, platform: NodeJS.Platform): boolean {
+  return platform === "win32" && extname(path).toLowerCase() === ".bat";
+}
+
+function windowsNpmCodexCmdOnPath(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): string | null {
+  for (const entry of pathEntries(env.PATH)) {
+    const candidate = resolve(cwd, entry, "codex.cmd");
+    if (executable(candidate)) return candidate;
+  }
+  return null;
+}
+
+function resolveWindowsNpmCodexShim(
+  shim: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  platform: NodeJS.Platform,
+): CodexLaunchResolution {
+  const entrypoint = resolve(dirname(shim), "node_modules", "@openai", "codex", "bin", "codex.js");
+  if (!existsSync(entrypoint)) {
+    return {
+      ok: false,
+      error:
+        `Windows Codex npm shim ${shim} does not have the expected @openai/codex entrypoint. ` +
+        "Install Codex with the official Windows installer or pass --codex-bin pointing to codex.exe",
+    };
+  }
+  const nodeBinary = executableOnPath("node", env, cwd, platform);
+  if (nodeBinary === null) {
+    return {
+      ok: false,
+      error:
+        `Windows Codex npm shim ${shim} requires node.exe on PATH. ` +
+        "Install Node with the npm package or pass --codex-bin pointing to codex.exe",
+    };
+  }
+  const codexBinary = realpathSync(nodeBinary);
+  const childEnv = buildCodexChildEnv(env, [dirname(shim), dirname(codexBinary)]);
+  return {
+    ok: true,
+    codexBinary,
+    codexArgsPrefix: [realpathSync(entrypoint)],
+    cwd,
+    env: childEnv,
+  };
+}
 
 /**
  * Resolve binary, cwd, and environment as one unit. Probing with a different
@@ -224,7 +314,9 @@ export function resolveCodexLaunch(
   explicit?: string,
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
+  options: { platform?: NodeJS.Platform } = {},
 ): CodexLaunchResolution {
+  const platform = options.platform ?? process.platform;
   const configured = explicit || env.AGENTPARTY_CODEX_BIN;
   const configuredPath = configured
     ? (isAbsolute(configured) ? configured : resolve(cwd, configured))
@@ -233,8 +325,29 @@ export function resolveCodexLaunch(
     env,
     configuredPath === null ? [] : [dirname(configuredPath)],
   );
-  const codexBinary = resolveCodexBinary(explicit, lookupEnv, cwd);
-  if (!codexBinary) {
+  if (configuredPath !== null && isWindowsBatShim(configuredPath, platform)) {
+    return {
+      ok: false,
+      error:
+        `Windows batch wrapper ${configuredPath} cannot be launched safely without a shell. ` +
+        "Pass --codex-bin pointing to codex.exe or the official npm codex.cmd shim",
+    };
+  }
+  if (
+    configuredPath !== null &&
+    isWindowsCmdShim(configuredPath, platform) &&
+    executable(configuredPath)
+  ) {
+    return resolveWindowsNpmCodexShim(configuredPath, lookupEnv, cwd, platform);
+  }
+  const codexBinary = resolveCodexBinary(explicit, lookupEnv, cwd, options);
+  const npmShim = codexBinary === null && configuredPath === null && platform === "win32"
+    ? windowsNpmCodexCmdOnPath(lookupEnv, cwd)
+    : null;
+  if (npmShim !== null) {
+    return resolveWindowsNpmCodexShim(npmShim, lookupEnv, cwd, platform);
+  }
+  if (codexBinary === null) {
     return {
       ok: false,
       error:
@@ -254,7 +367,10 @@ export function resolveCodexLaunch(
       error: `could not inspect Codex CLI ${codexBinary}: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  if (envCommand && executableOnPath(envCommand, childEnv, cwd) === null) {
+  if (
+    envCommand &&
+    executableOnPath(envCommand, childEnv, cwd, options.platform) === null
+  ) {
     return {
       ok: false,
       error:
@@ -262,7 +378,7 @@ export function resolveCodexLaunch(
         "on the child PATH. Install its runtime or pass a standalone Codex binary",
     };
   }
-  return { ok: true, codexBinary, cwd, env: childEnv };
+  return { ok: true, codexBinary, codexArgsPrefix: [], cwd, env: childEnv };
 }
 
 /** Extract the first semver-looking tuple from `claude --version`. */
@@ -395,11 +511,12 @@ async function capture(
 async function defaultProbeCodexCapabilities(
   codexBinary: string,
   options: { cwd: string; env: NodeJS.ProcessEnv },
+  codexArgsPrefix: string[] = [],
 ): Promise<CodexCapabilityProbe> {
   const [version, rootHelp, appServerHelp] = await Promise.all([
-    capture([codexBinary, "--version"], options),
-    capture([codexBinary, "--help"], options),
-    capture([codexBinary, "app-server", "--help"], options),
+    capture([codexBinary, ...codexArgsPrefix, "--version"], options),
+    capture([codexBinary, ...codexArgsPrefix, "--help"], options),
+    capture([codexBinary, ...codexArgsPrefix, "app-server", "--help"], options),
   ]);
   return { version: version.trim(), rootHelp, appServerHelp };
 }
@@ -495,6 +612,7 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
       probe = await (deps.probeCodexCapabilities ?? defaultProbeCodexCapabilities)(
         launch.codexBinary,
         { cwd: launch.cwd, env: launch.env },
+        launch.codexArgsPrefix,
       );
     } catch (error) {
       console.error(`party bridge codex: ${error instanceof Error ? error.message : String(error)}`);
@@ -511,6 +629,7 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
     return await (deps.runCodexBridge ?? ((options) => runCodexSessionBridge(options)))({
       channel,
       codexBinary: launch.codexBinary,
+      codexArgsPrefix: launch.codexArgsPrefix,
       codexArgs: harnessArgs,
       cwd: launch.cwd,
       env: launch.env,

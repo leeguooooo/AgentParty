@@ -21,6 +21,7 @@ import {
   runProfileServe,
   runServe,
   RunnerTimeoutError,
+  superviseServe,
   WakeBlockedError,
   writeContextFile,
   type CodexLike,
@@ -1395,6 +1396,135 @@ describe("builtin runner", () => {
     expect(calls[0]!.slice(0, 2)).toEqual([realpathSync(process.execPath), "exec"]);
   });
 
+  test("codex keeps the Windows npm entrypoint prefix before ordinary serve exec", async () => {
+    const { post } = postRecorder();
+    const workdir = tempDir();
+    const calls: string[][] = [];
+    const runProcess: RunnerProcess = async (args) => {
+      calls.push(args);
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, "npm shim answer\n");
+      return { code: 0, stdout: `session id: ${uuid(0)}\n`, stderr: "" };
+    };
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      codexBinary: "C:/Program Files/nodejs/node.exe",
+      codexArgsPrefix: ["C:/Users/test/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.js"],
+      workdir,
+      runProcess,
+      post,
+    })(triggerFrame(701), runnerCtx());
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.slice(0, 3)).toEqual([
+      "C:/Program Files/nodejs/node.exe",
+      "C:/Users/test/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.js",
+      "exec",
+    ]);
+  });
+
+  test("codex wake uses the exact preflight launch after PATH changes", async () => {
+    const { post } = postRecorder();
+    const workdir = tempDir();
+    const calls: Array<{ args: string[]; path: string | undefined }> = [];
+    const runProcess: RunnerProcess = async (args, options) => {
+      calls.push({ args, path: options.env.PATH });
+      const out = args[args.indexOf("-o") + 1]!;
+      writeFileSync(out, "pinned preflight answer\n");
+      return { code: 0, stdout: `session id: ${uuid(0)}\n`, stderr: "" };
+    };
+
+    await createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      codexLaunch: {
+        ok: true,
+        codexBinary: "/preflight-a/node.exe",
+        codexArgsPrefix: ["/preflight-a/codex.js"],
+        cwd: "/preflight-a",
+        env: { PATH: "/preflight-a/bin" },
+      },
+      workdir,
+      runProcess,
+      post,
+    })(triggerFrame(702), runnerCtx());
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args.slice(0, 3)).toEqual([
+      "/preflight-a/node.exe",
+      "/preflight-a/codex.js",
+      "exec",
+    ]);
+    expect(calls[0]!.path).toBe("/preflight-a/bin");
+  });
+
+  test("ordinary serve reuses one preflight launch across supervisor attempts", async () => {
+    const home = tempDir();
+    const oldHome = process.env.AGENTPARTY_HOME;
+    const oldPath = process.env.PATH;
+    process.env.AGENTPARTY_HOME = home;
+    process.env.PATH = "/preflight-a/bin";
+    writeFileSync(join(home, "config.json"), JSON.stringify({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+    }));
+    const launch = {
+      ok: true as const,
+      codexBinary: "/preflight-a/node.exe",
+      codexArgsPrefix: ["/preflight-a/codex.js"],
+      cwd: "/preflight-a",
+      env: { PATH: "/preflight-a/bin" },
+    };
+    const attempts: ServeOptions[] = [];
+    let preflights = 0;
+    try {
+      expect(await runServeCommand(["dev", "--runner", "codex"], {
+        resolveBuiltinCodexLaunch: () => {
+          preflights += 1;
+          process.env.PATH = "/post-preflight-b/bin";
+          return launch;
+        },
+        resolveAvailableUpgrade: async () => null,
+        verifyServeIdentityBoundary: async () => ({
+          ok: true,
+          principal: {
+            server_origin: "http://agentparty.test",
+            name: "me",
+            kind: "agent",
+            owner: null,
+          },
+          namespace: "a".repeat(64),
+        }),
+        runServe: async (options) => {
+          attempts.push(options);
+          return attempts.length === 1 ? 1 : 0;
+        },
+        superviseServe: (options) => superviseServe({
+          ...options,
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          maxRestarts: 1,
+        }),
+      })).toBe(0);
+    } finally {
+      if (oldHome === undefined) delete process.env.AGENTPARTY_HOME;
+      else process.env.AGENTPARTY_HOME = oldHome;
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+    }
+
+    expect(preflights).toBe(1);
+    expect(attempts).toHaveLength(2);
+    expect(attempts.every((options) => options.builtinRunner?.codexLaunch === launch)).toBe(true);
+    expect(attempts.every((options) => options.builtinRunner?.codexLaunch?.env.PATH === "/preflight-a/bin")).toBe(true);
+  });
+
   test("codex cold-starts, persists the session id, then resumes it on the next wake", async () => {
     const { post } = postRecorder();
     const workdir = tempDir();
@@ -2287,6 +2417,177 @@ describe("builtin runner", () => {
 });
 
 describe("project profile daemon", () => {
+  test("all Codex profile lanes retain the same preflight launch after PATH changes", async () => {
+    const home = tempDir();
+    const oldHome = process.env.AGENTPARTY_HOME;
+    const oldPath = process.env.PATH;
+    process.env.AGENTPARTY_HOME = home;
+    process.env.PATH = "/preflight-a/bin";
+    const profile = {
+      owner_account: "fan@example.com",
+      handle: "pinned-codex",
+      name: "Pinned Codex",
+      runner: "codex" as const,
+      repo_url: null,
+      workdir: null,
+      base_branch: "main",
+      worktree_strategy: "none" as const,
+      rules: null,
+      invitable_by: "anyone" as const,
+      created_at: 1,
+      updated_at: 1,
+    };
+    const served: ServeOptions[] = [];
+    let preflights = 0;
+    const launch = {
+      ok: true as const,
+      codexBinary: "/preflight-a/node.exe",
+      codexArgsPrefix: ["/preflight-a/codex.js"],
+      cwd: "/preflight-a",
+      env: { PATH: "/preflight-a/bin" },
+    };
+    try {
+      expect(await runProfileServe({
+        server: "http://agentparty.test",
+        humanToken: "acc-human",
+        ownerAccount: profile.owner_account,
+        handle: profile.handle,
+        mentionsOnly: true,
+        once: true,
+        post: async () => ({ seq: 1 }),
+        mintRuntime: async () => ({ token: "ap_profile_runtime", profile }),
+        listInvites: async () => ["alpha", "beta"].map((channel_slug, index) => ({
+          id: index + 1,
+          channel_slug,
+          owner_account: profile.owner_account,
+          profile_handle: profile.handle,
+          invited_by: "owner@example.com",
+          invited_at: index + 1,
+          profile,
+        })),
+        ensureChannelRuntime: async (_server, _token, channel, _owner, _handle, childName) => ({
+          token: `ap_child_${childName}`,
+          name: childName,
+          role: "agent",
+          owner: profile.owner_account,
+          channel_scope: channel,
+          lineage: {
+            parent_agent: profile.handle,
+            root_agent: profile.handle,
+            team_id: profile.handle,
+            depth: 1,
+            expires_at: null,
+          },
+          profile,
+        }),
+        resolveCodexLaunch: () => {
+          preflights += 1;
+          process.env.PATH = "/post-preflight-b/bin";
+          return launch;
+        },
+        runChannelServe: async (options) => {
+          served.push(options);
+          return 0;
+        },
+      })).toBe(0);
+    } finally {
+      if (oldHome === undefined) delete process.env.AGENTPARTY_HOME;
+      else process.env.AGENTPARTY_HOME = oldHome;
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+    }
+
+    expect(preflights).toBe(1);
+    expect(served).toHaveLength(4);
+    expect(served.every((options) => options.builtinRunner?.codexLaunch === launch)).toBe(true);
+    expect(served.every((options) => options.builtinRunner?.codexLaunch?.env.PATH === "/preflight-a/bin")).toBe(true);
+  });
+
+  test("a failed Codex profile preflight remains offline and is retried without fallback", async () => {
+    const home = tempDir();
+    const oldHome = process.env.AGENTPARTY_HOME;
+    process.env.AGENTPARTY_HOME = home;
+    const profile = {
+      owner_account: "fan@example.com",
+      handle: "missing-codex",
+      name: "Missing Codex",
+      runner: "codex" as const,
+      repo_url: null,
+      workdir: null,
+      base_branch: "main",
+      worktree_strategy: "none" as const,
+      rules: null,
+      invitable_by: "anyone" as const,
+      created_at: 1,
+      updated_at: 1,
+    };
+    let polls = 0;
+    let preflights = 0;
+    let serves = 0;
+    let sleeps = 0;
+    const lines: string[] = [];
+    try {
+      await expect(runProfileServe({
+        server: "http://agentparty.test",
+        humanToken: "acc-human",
+        ownerAccount: profile.owner_account,
+        handle: profile.handle,
+        mentionsOnly: true,
+        pollIntervalMs: 500,
+        out: (line) => lines.push(line),
+        post: async () => ({ seq: 1 }),
+        mintRuntime: async () => ({ token: "ap_profile_runtime", profile }),
+        listInvites: async () => {
+          polls += 1;
+          return [{
+            id: 1,
+            channel_slug: "dev",
+            owner_account: profile.owner_account,
+            profile_handle: profile.handle,
+            invited_by: "owner@example.com",
+            invited_at: 1,
+            profile,
+          }];
+        },
+        ensureChannelRuntime: async (_server, _token, channel, _owner, _handle, childName) => ({
+          token: `ap_child_${childName}`,
+          name: childName,
+          role: "agent",
+          owner: profile.owner_account,
+          channel_scope: channel,
+          lineage: {
+            parent_agent: profile.handle,
+            root_agent: profile.handle,
+            team_id: profile.handle,
+            depth: 1,
+            expires_at: null,
+          },
+          profile,
+        }),
+        resolveCodexLaunch: () => {
+          preflights += 1;
+          return { ok: false, error: "codex preflight A is unavailable" };
+        },
+        runChannelServe: async () => {
+          serves += 1;
+          return 0;
+        },
+        sleep: async () => {
+          sleeps += 1;
+          if (sleeps >= 2) throw new Error("stop after repeated preflight");
+        },
+      })).rejects.toThrow("stop after repeated preflight");
+    } finally {
+      if (oldHome === undefined) delete process.env.AGENTPARTY_HOME;
+      else process.env.AGENTPARTY_HOME = oldHome;
+    }
+
+    expect(polls).toBe(2);
+    expect(preflights).toBe(2);
+    expect(serves).toBe(0);
+    expect(lines.filter((line) => line.includes("failed to attach #dev"))).toHaveLength(2);
+  });
+
   test("profile sessions isolate server, stable profile identity, and authoritative child principal", async () => {
     const home = tempDir();
     const previous = process.env.AGENTPARTY_HOME;

@@ -33,6 +33,8 @@ import { postMessage } from "../rest";
 export interface CodexBridgeRuntimeOptions {
   channel: string;
   codexBinary: string;
+  /** Fixed argv before Codex subcommands (used by the Windows npm adapter). */
+  codexArgsPrefix?: string[];
   codexArgs?: string[];
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -48,6 +50,7 @@ export interface CodexBridgeRuntimeDeps {
   connectAgentParty?: typeof connect;
   spawnAppServer?: (options: {
     codexBinary: string;
+    codexArgsPrefix: string[];
     cwd: string;
     env: NodeJS.ProcessEnv;
   }) => ChildProcessWithoutNullStreams;
@@ -369,10 +372,11 @@ export class CodexFrontendLifecycleQueue {
 
 function defaultSpawnAppServer(options: {
   codexBinary: string;
+  codexArgsPrefix: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
 }): ChildProcessWithoutNullStreams {
-  return spawn(options.codexBinary, ["app-server", "--stdio"], {
+  return spawn(options.codexBinary, [...options.codexArgsPrefix, "app-server", "--stdio"], {
     cwd: options.cwd,
     env: options.env,
     stdio: ["pipe", "pipe", "pipe"],
@@ -495,6 +499,7 @@ export interface CodexBridgeTerminalResult {
 export async function superviseCodexTui(options: {
   channel: string;
   codexBinary: string;
+  codexArgsPrefix?: string[];
   codexArgs?: string[];
   initialThreadId?: string | null;
   socketPath: string;
@@ -610,7 +615,7 @@ export async function superviseCodexTui(options: {
       );
       tui = options.launchTui(
         options.codexBinary,
-        tuiArgs,
+        [...(options.codexArgsPrefix ?? []), ...tuiArgs],
         { cwd: options.cwd, env: options.env },
       );
       options.onTuiChange?.(tui);
@@ -769,6 +774,7 @@ export async function runCodexSessionBridge(
       spawnProxy: () => {
         const child = (deps.spawnAppServer ?? defaultSpawnAppServer)({
           codexBinary: options.codexBinary,
+          codexArgsPrefix: options.codexArgsPrefix ?? [],
           cwd,
           env,
         });
@@ -888,6 +894,7 @@ export async function runCodexSessionBridge(
     return await superviseCodexTui({
       channel: options.channel,
       codexBinary: options.codexBinary,
+      codexArgsPrefix: options.codexArgsPrefix,
       codexArgs: options.codexArgs,
       initialThreadId,
       socketPath,
