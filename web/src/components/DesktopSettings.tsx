@@ -83,7 +83,12 @@ export async function applyAutostartSetting(
   next: boolean,
   previous: boolean,
 ): Promise<{ enabled: boolean; failed: boolean }> {
-  if (await runtime.setAutostartEnabled(next)) return { enabled: next, failed: false };
+  try {
+    if (await runtime.setAutostartEnabled(next)) return { enabled: next, failed: false };
+  } catch {
+    // The native bridge can reject (for example when launchd is unavailable).
+    // Re-read below so the switch reflects the authoritative system state.
+  }
   try {
     return { enabled: await runtime.isAutostartEnabled(), failed: true };
   } catch {
@@ -221,11 +226,17 @@ export function DesktopSettings({
     if (!desktop) return;
     let alive = true;
     setPending(true);
-    void loadAutostartSetting(runtime).then((next) => {
-      if (!alive) return;
-      setEnabled(next);
-      setPending(false);
-    });
+    setError(false);
+    void (async () => {
+      try {
+        const next = await loadAutostartSetting(runtime);
+        if (alive) setEnabled(next);
+      } catch {
+        if (alive) setError(true);
+      } finally {
+        if (alive) setPending(false);
+      }
+    })();
     return () => { alive = false; };
   }, [desktop, runtime]);
 
@@ -279,11 +290,19 @@ export function DesktopSettings({
     const previous = enabled;
     setPending(true);
     setError(false);
-    void applyAutostartSetting(runtime, !enabled, previous).then((result) => {
-      setEnabled(result.enabled);
-      setError(result.failed);
-      setPending(false);
-    });
+    void (async () => {
+      try {
+        const result = await applyAutostartSetting(runtime, !enabled, previous);
+        setEnabled(result.enabled);
+        setError(result.failed);
+      } catch {
+        // Keep this boundary defensive if the helper gains another native call.
+        setEnabled(previous);
+        setError(true);
+      } finally {
+        setPending(false);
+      }
+    })();
   };
 
   if (embedded) {
