@@ -4,7 +4,7 @@ import type { PresenceEntry } from "@agentparty/shared";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
 import type { ChannelInfo } from "../lib/api";
-import { ChannelList, PresenceDots } from "./ChannelList";
+import { ChannelList, lastMessagePreview, PresenceDots } from "./ChannelList";
 
 let renderer: ReactTestRenderer | null = null;
 
@@ -170,5 +170,32 @@ describe("PresenceDots priority", () => {
       "offline-1 — offline",
       "offline-2 — offline",
     ]);
+  });
+
+  test("treats an omitted presence field as an empty legacy response", () => {
+    const value = channel("legacy-response");
+    delete (value as Partial<ChannelInfo>).presence;
+    act(() => {
+      renderer = create(
+        <LocaleProvider>
+          <PresenceDots channel={value} />
+        </LocaleProvider>,
+      );
+    });
+
+    expect(
+      renderer!.root.findAll(
+        (node) => node.type === "span" && node.props.className === "d-dot d-dot--offline",
+      ),
+    ).toHaveLength(1);
+  });
+});
+
+describe("lastMessagePreview", () => {
+  test("treats an omitted last_message field as no preview", () => {
+    const value = channel("legacy-response");
+    delete (value as Partial<ChannelInfo>).last_message;
+
+    expect(lastMessagePreview(value)).toBeNull();
   });
 });

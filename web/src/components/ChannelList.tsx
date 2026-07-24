@@ -42,7 +42,7 @@ export function PresenceDots({ channel }: { channel: ChannelInfo }) {
   const t = useT();
   // 列表最多只能放四颗点：先把正在工作和其他在线成员提到离线记录前面，再截断。
   // sort 是稳定的，同一优先级内继续沿用服务端顺序，不让状态点在每次刷新时乱跳。
-  const entries = [...channel.presence]
+  const entries = [...(channel.presence ?? [])]
     .sort((a, b) => presenceDotPriority(a.state) - presenceDotPriority(b.state))
     .slice(0, MAX_DOTS);
   return (
@@ -56,7 +56,7 @@ export function PresenceDots({ channel }: { channel: ChannelInfo }) {
 }
 
 export function lastMessagePreview(c: ChannelInfo): string | null {
-  if (c.last_message === null) return null;
+  if (c.last_message == null) return null;
   const body = c.last_message.body.replace(/\s+/g, " ").trim();
   return `${c.last_message.sender}: ${body === "" ? `[${c.last_message.kind}]` : body}`;
 }
