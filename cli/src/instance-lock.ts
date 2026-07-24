@@ -26,6 +26,21 @@ export interface InstanceLock {
   release?: () => void;
 }
 
+export interface ProcessOwner {
+  pid: number;
+  startedAt?: number;
+  alive: () => boolean;
+}
+
+export interface InstanceLockOptions {
+  /**
+   * 把锁的有效期绑定到启动者。只用于 `watch --once`：父进程退出后，即使 watcher
+   * 本身还活着，也已无法唤醒原 harness。调用方还必须用同一 owner 主动关闭旧连接。
+   */
+  parentOwner?: ProcessOwner;
+}
+
+const PARENT_BOUND_RELEASE_WAIT_MS = 2_500;
 function lockPath(kind: InstanceKind, channel: string, dir: string): string {
   return join(dir, `${kind}-${channel.replace(/[^a-zA-Z0-9._-]/g, "_")}.lock`);
 }
@@ -73,16 +88,40 @@ function inspectProcess(pid: number): ProcessIdentity {
 const PROCESS_STARTED_AT =
   inspectProcess(process.pid).startedAt ?? Math.floor((Date.now() - process.uptime() * 1000) / 1000) * 1000;
 
+function sameLiveProcess(pid: number, startedAt?: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  const processIdentity = inspectProcess(pid);
+  if (!processIdentity.alive) return false;
+  if (startedAt === undefined || processIdentity.startedAt === undefined) return true;
+  return Math.abs(startedAt - processIdentity.startedAt) <= 2000;
+}
+
 function holderAlive(holder: LockHolder | null): holder is LockHolder & { pid: number } {
   if (typeof holder?.pid !== "number") return false;
-  const processIdentity = inspectProcess(holder.pid);
-  if (!processIdentity.alive) return false;
-  if (holder.started_at === undefined || processIdentity.startedAt === undefined) return true;
-  return Math.abs(holder.started_at - processIdentity.startedAt) <= 2000;
+  if (!sameLiveProcess(holder.pid, holder.started_at)) return false;
+  if (holder.parent_bound !== true) return true;
+  // pid=1 表示创建时已经是孤儿；它没有能承接一次性 wake 输出的上游，不能占住唯一 watcher 槽位。
+  if (typeof holder.parent_pid !== "number" || holder.parent_pid <= 1) return false;
+  return sameLiveProcess(holder.parent_pid, holder.parent_started_at);
+}
+
+function holderProcessAlive(holder: LockHolder | null): holder is LockHolder & { pid: number } {
+  return typeof holder?.pid === "number" && sameLiveProcess(holder.pid, holder.started_at);
 }
 
 export function currentProcessStartedAt(): number {
   return PROCESS_STARTED_AT;
+}
+
+/** 捕获启动本进程的父进程身份，PID 复用时用出生时间区分。 */
+export function captureParentProcessOwner(): ProcessOwner {
+  const pid = process.ppid;
+  const startedAt = inspectProcess(pid).startedAt;
+  return {
+    pid,
+    ...(startedAt === undefined ? {} : { startedAt }),
+    alive: () => pid > 1 && sameLiveProcess(pid, startedAt),
+  };
 }
 
 /**
@@ -144,6 +183,9 @@ interface LockHolder {
   pid?: number;
   id?: string;
   started_at?: number;
+  parent_bound?: boolean;
+  parent_pid?: number;
+  parent_started_at?: number;
 }
 
 function readHolder(path: string): LockHolder | null {
@@ -158,11 +200,31 @@ function isAlreadyExists(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "EEXIST";
 }
 
-export function acquireInstanceLock(kind: InstanceKind, channel: string, dir: string): InstanceLock {
+export function acquireInstanceLock(
+  kind: InstanceKind,
+  channel: string,
+  dir: string,
+  options: InstanceLockOptions = {},
+): InstanceLock {
   const path = lockPath(kind, channel, dir);
   const reclaimPath = `${path}.reclaim`;
   const lockId = randomUUID();
-  const body = JSON.stringify({ pid: process.pid, id: lockId, started_at: PROCESS_STARTED_AT, kind, channel, ts: Date.now() });
+  const parentIdentity = options.parentOwner ?? null;
+  const body = JSON.stringify({
+    pid: process.pid,
+    id: lockId,
+    started_at: PROCESS_STARTED_AT,
+    ...(parentIdentity === null
+      ? {}
+      : {
+          parent_bound: true,
+          parent_pid: parentIdentity.pid,
+          ...(parentIdentity.startedAt === undefined ? {} : { parent_started_at: parentIdentity.startedAt }),
+        }),
+    kind,
+    channel,
+    ts: Date.now(),
+  });
   let staleGeneration: string | null = null;
   mkdirSync(dir, { recursive: true });
 
@@ -177,6 +239,27 @@ export function acquireInstanceLock(kind: InstanceKind, channel: string, dir: st
     const held = readHolder(path);
     if (holderAlive(held)) {
       return { ok: false, heldByPid: held.pid };
+    }
+    if (holderProcessAlive(held)) {
+      // parent-bound holder 的进程还活着，只是启动者已死。旧 watcher 有 parent guard，会
+      // 主动 close + release；新实例在此等待它退场，绝不能先删锁建第二条 WS 形成双重 claim。
+      const observedGeneration = held.id ?? `legacy:${held.pid}`;
+      const deadline = Date.now() + PARENT_BOUND_RELEASE_WAIT_MS;
+      let current: LockHolder | null = held;
+      while (Date.now() < deadline) {
+        sleepSyncMs(10);
+        current = readHolder(path);
+        const generation = current?.id ?? `legacy:${current?.pid ?? "invalid"}`;
+        if (generation !== observedGeneration || !holderProcessAlive(current)) break;
+      }
+      const currentGeneration = current?.id ?? `legacy:${current?.pid ?? "invalid"}`;
+      if (currentGeneration !== observedGeneration) continue;
+      if (holderProcessAlive(current)) {
+        // guard 未能在有界时间内收口：保守拒绝，交给 `party watch --stop`，不冒险双挂。
+        return { ok: false, heldByPid: current.pid };
+      }
+      // 旧进程已经退场（锁文件可能还留着）；重新走一轮，按普通 stale generation 接管。
+      continue;
     }
     const generation = held?.id ?? `legacy:${held?.pid ?? "invalid"}`;
     // If the file changed since this contender observed the stale owner, another

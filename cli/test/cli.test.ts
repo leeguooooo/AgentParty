@@ -724,6 +724,16 @@ describe("cli subprocess", () => {
     expect(r.stderr).toContain("unknown command");
   });
 
+  test("non-zero CLI exits flush their diagnostic before process termination (#755)", async () => {
+    const attempts = await Promise.all(
+      Array.from({ length: 12 }, () => runCli(["watch", "--follow", "--once"])),
+    );
+    for (const result of attempts) {
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("--follow and --once are mutually exclusive");
+    }
+  });
+
   test("watch without config exits 1", async () => {
     const r = await runCli(["watch", "dev", "--timeout", "1"]);
     expect(r.code).toBe(1);

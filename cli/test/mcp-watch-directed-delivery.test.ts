@@ -281,4 +281,34 @@ describe("MCP party_watch_once durable delivery (#551)", () => {
       await client.close();
     }
   }, 20_000);
+
+  test("party_ack confirms an older seq while reporting and preserving the newer debt (#755)", async () => {
+    writeRuntime("http://127.0.0.1:1", {
+      seq: 20,
+      attempts: 0,
+      source: "watch",
+      last_error: "newer wake pending",
+    });
+    const client = await connectClient();
+    try {
+      const earlier = await client.callTool({ name: "party_ack", arguments: { seq: 19 } });
+      expect(earlier.isError).not.toBe(true);
+      expect(earlier.structuredContent).toMatchObject({
+        type: "ack",
+        channel: "dev",
+        acked: true,
+        seq: 19,
+        pending_preserved: true,
+        pending_seq: 20,
+      });
+      expect(readDebt()?.seq).toBe(20);
+
+      const current = await client.callTool({ name: "party_ack", arguments: { seq: 20 } });
+      expect(current.isError).not.toBe(true);
+      expect(current.structuredContent).toMatchObject({ acked: true, seq: 20 });
+      expect(readDebt()).toBeUndefined();
+    } finally {
+      await client.close();
+    }
+  }, 20_000);
 });

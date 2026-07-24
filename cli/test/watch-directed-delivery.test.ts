@@ -362,6 +362,43 @@ describe("watch durable directed-delivery adapter (#551)", () => {
     expect(o.lines).toEqual([]);
   });
 
+  test("parent death interrupts a running ACK wait before accepting the delivery (#755)", async () => {
+    const msg = message(81);
+    const work = delivery(81);
+    let parentAlive = true;
+    let accepted = false;
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send({ ...welcomeFrame(81, "me"), directed_delivery: "v1" });
+        return;
+      }
+      if (frame.type === "delivery_adapter") {
+        sock.send({ type: "delivery_adapter", adapter: "watch", registered: true });
+        sock.send({ type: "delivery", delivery: work, message: msg });
+        return;
+      }
+      if (frame.type === "delivery_update") parentAlive = false;
+    });
+
+    const startedAt = Date.now();
+    const o = opts({
+      server: server.url,
+      json: true,
+      onStuck: () => {},
+      onDirectedAccepted: () => {
+        accepted = true;
+        return true;
+      },
+      parentOwner: { pid: 123, alive: () => parentAlive },
+      parentCheckMs: 5,
+      deliveryAckTimeoutMs: 5_000,
+    });
+    expect(await runWatch(o)).toBe(1);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(accepted).toBe(false);
+    expect(o.lines).toEqual([]);
+  });
+
   test("accepted-state persistence failure after running ACK is unknown outcome and produces no output", async () => {
     const msg = message(9);
     const work = delivery(9);

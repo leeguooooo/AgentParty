@@ -174,12 +174,44 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
+const EXIT_FLUSH_TIMEOUT_MS = 500;
+
+async function flushBeforeExit(stream: NodeJS.WriteStream): Promise<void> {
+  if (stream.destroyed || !stream.writable) return;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = setTimeout(done, EXIT_FLUSH_TIMEOUT_MS);
+    timeout.unref();
+    try {
+      // Writable callbacks are ordered after earlier console writes on the same stream. Waiting for
+      // this empty write prevents process.exit() from truncating the only diagnostic (#755).
+      stream.write("", done);
+    } catch {
+      done();
+    }
+  });
+}
+
+async function exitAfterFlush(code: number): Promise<never> {
+  // Set this first: if a broken/destroyed stream lets the event loop empty before callbacks fire,
+  // natural exit still carries the command's real code.
+  process.exitCode = code;
+  await Promise.all([flushBeforeExit(process.stdout), flushBeforeExit(process.stderr)]);
+  process.exit(code);
+}
+
 if (import.meta.main) {
   main(process.argv.slice(2)).then(
-    (code) => process.exit(code),
+    (code) => void exitAfterFlush(code),
     (e) => {
       console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
-      process.exit(1);
+      void exitAfterFlush(1);
     },
   );
 }

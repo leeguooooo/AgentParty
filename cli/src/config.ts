@@ -661,7 +661,8 @@ export function markWatchDirectedStuckAccepted(channel: string, deliveryId: stri
  * 只清 watch 源；serve 债与 seq 不匹配都原样保留并回报原因。
  */
 export type AckWatchStuckOutcome =
-  | { outcome: "cleared"; seq: number }
+  | { outcome: "cleared"; seq: number; cursor: number }
+  | { outcome: "acknowledged_prior"; seq: number; pendingSeq: number; cursor: number }
   | { outcome: "none" }
   | { outcome: "serve_owned"; seq: number; source: string }
   | { outcome: "seq_mismatch"; seq: number };
@@ -679,13 +680,21 @@ export function ackWatchStuck(channel: string, expectedSeq?: number, cwd?: strin
       result = { outcome: "serve_owned", seq: stuck.seq, source: stuck.source ?? "unknown" };
       return null;
     }
-    if (expectedSeq !== undefined && stuck.seq !== expectedSeq) {
+    if (expectedSeq !== undefined && expectedSeq < stuck.seq) {
+      // #755：调用方正在确认一条已经处理完的较早 wake，而它处理期间新的 wake 已把单值 debt
+      // 指针推进到更高 seq。确认到 expectedSeq 即可；更晚的 debt 必须原样保留，不能谎称已处理。
+      const cursor = Math.max(cur.cursor, expectedSeq);
+      result = { outcome: "acknowledged_prior", seq: expectedSeq, pendingSeq: stuck.seq, cursor };
+      return cursor === cur.cursor ? null : { ...cur, cursor };
+    }
+    if (expectedSeq !== undefined && expectedSeq > stuck.seq) {
       result = { outcome: "seq_mismatch", seq: stuck.seq };
       return null;
     }
-    result = { outcome: "cleared", seq: stuck.seq };
+    const cursor = Math.max(cur.cursor, stuck.seq);
+    result = { outcome: "cleared", seq: stuck.seq, cursor };
     const { stuck: _dropped, ...rest } = cur;
-    return rest;
+    return { ...rest, cursor };
   }, cwd);
   return result;
 }
