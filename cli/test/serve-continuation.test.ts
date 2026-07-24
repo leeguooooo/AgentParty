@@ -335,13 +335,16 @@ describe("builtin per-work continuations (#548)", () => {
     for (const { args } of calls) {
       expect(args).toContain("--disallowed-tools");
       expect(args[args.indexOf("--disallowed-tools") + 1]).toBe("AskUserQuestion");
+      expect(args[args.indexOf("--permission-mode") + 1]).toBe("bypassPermissions");
     }
     expect(calls[0]!.args).toEqual([
-      "claude", "-p", "--disallowed-tools", "AskUserQuestion", "--settings", expect.any(String),
+      "claude", "-p", "--disallowed-tools", "AskUserQuestion",
+      "--permission-mode", "bypassPermissions", "--settings", expect.any(String),
       "--session-id", coldSessionId, "--output-format", "json", expect.any(String),
     ]);
     expect(calls[1]!.args).toEqual([
-      "claude", "-p", "--disallowed-tools", "AskUserQuestion", "--settings", expect.any(String),
+      "claude", "-p", "--disallowed-tools", "AskUserQuestion",
+      "--permission-mode", "bypassPermissions", "--settings", expect.any(String),
       "--resume", coldSessionId, expect.any(String),
     ]);
     expect(calls[1]!.env.AP_RUNNER_SESSION_ID).toBe(coldSessionId);

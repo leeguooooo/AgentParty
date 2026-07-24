@@ -282,6 +282,47 @@ describe("runServe", () => {
     expect(posts.indexOf(working!)).toBeLessThan(posts.indexOf(idle!));
   });
 
+  test("builtin failure clears busy on blocked without falling back to waiting (#756)", async () => {
+    const s = closeAfterOneMention();
+    const { posts, post } = postRecorder();
+    const workdir = tempDir();
+    const o = opts({
+      server: s.url,
+      post,
+      builtinRunner: {
+        server: s.url,
+        token: "ap_tok",
+        channel: "dev",
+        harness: "claude",
+        workdir,
+        runProcess: async () => ({
+          code: 1,
+          stdout: "",
+          stderr: "tool use requires approval, but no interactive approver is available",
+        }),
+        post,
+      },
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+
+    const blockedIdx = posts.findIndex((entry) =>
+      (entry.body as { state?: string; note?: string }).state === "blocked" &&
+      (entry.body as { note?: string }).note?.includes("wake undelivered")
+    );
+    expect(blockedIdx).toBeGreaterThanOrEqual(0);
+    expect(posts[blockedIdx]!.body).toMatchObject({
+      kind: "status",
+      state: "blocked",
+      busy: false,
+      queue_depth: 0,
+      blocked_reason: expect.stringContaining("builtin claude runner blocked"),
+    });
+    expect(posts.slice(blockedIdx + 1).some((entry) =>
+      (entry.body as { state?: string }).state === "waiting"
+    )).toBe(false);
+  });
+
   // 每任务进度/心跳（#228，扩 #103 busy）：run() 阻塞串行循环数分钟时，靠 setInterval 侧信道
   // 周期性发 presence-only 的 heartbeat 帧（不落 history），频道/本机都能看到「正在处理 seq=X、活到 T」。
   test("task heartbeat: while a wake runs, serve emits advancing heartbeats with current_task, then clears on completion", async () => {
@@ -1674,8 +1715,12 @@ describe("builtin runner", () => {
     expect(JSON.parse(readFileSync(join(workdir, "wake-session.json"), "utf8")).session_id).toBe(coldSessionId);
     expect(calls[0]).toContain("--output-format");
     expect(calls[0]).toContain("--session-id");
+    expect(calls.every((args) =>
+      args[args.indexOf("--permission-mode") + 1] === "bypassPermissions"
+    )).toBe(true);
     expect(calls[1]).toEqual([
-      "claude", "-p", "--disallowed-tools", "AskUserQuestion", "--settings", expect.any(String),
+      "claude", "-p", "--disallowed-tools", "AskUserQuestion",
+      "--permission-mode", "bypassPermissions", "--settings", expect.any(String),
       "--resume", coldSessionId, expect.any(String),
     ]);
   });
