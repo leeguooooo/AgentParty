@@ -313,6 +313,7 @@ const HELLO_BACKFILL_PAGE_SIZE = 1000;
 // Keep a short polling fallback for missed callbacks without turning every heartbeat
 // and read-cursor frame into four serial D1 round trips.
 const PARTICIPANT_AUTHORITY_REFRESH_MS = 1_000;
+const PARTICIPANT_REMOVAL_META_RETENTION_MS = 24 * 60 * 60 * 1000;
 const COMPLETION_ARTIFACT_JSON_LIMIT = 4096;
 const REVIEW_REASON_LIMIT = 4000;
 // #106：workflow guard 近期 (step,state) 窗口大小。8 足以罩住多 agent 在若干状态间的环形 ping-pong
@@ -2751,6 +2752,16 @@ export class ChannelDO extends Server<Env> {
     this.pruneWakeLedger(now);
     this.pruneMessageAudit();
     this.pruneReadCursors(now);
+    this.pruneParticipantRemovalMeta(now);
+  }
+
+  private pruneParticipantRemovalMeta(now: number) {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM meta
+        WHERE (key LIKE 'participant-removal:%' OR key LIKE 'removed-presence:%')
+          AND CAST(value AS INTEGER) <= ?`,
+      now - PARTICIPANT_REMOVAL_META_RETENTION_MS,
+    );
   }
 
   private retentionMs(key: "message_retention_ms" | "audit_retention_ms"): number | null {
@@ -5099,7 +5110,7 @@ export class ChannelDO extends Server<Env> {
         (request.method !== "GET" || projectsParticipantState) &&
         pathname !== "/internal/kick" &&
         pathname !== "/internal/participant-removed" &&
-        !(await this.reconcileRemovedConnections())
+        !(await this.reconcileRemovedConnectionsIfStale(Date.now()))
       ) {
         return Response.json(
           { error: { code: "unavailable", message: "participant removal authority is unavailable" } },
@@ -6890,35 +6901,37 @@ export class ChannelDO extends Server<Env> {
     let ownershipRows: { results: { name: string; account: string }[] };
     const now = Date.now();
     try {
-      rows = await this.env.DB.prepare(
-        `SELECT principal_type, principal, removed_at
-           FROM channel_participant_removals
-          WHERE channel_slug = ?`,
-      )
-        .bind(this.name)
-        .all<{ principal_type: "name" | "account"; principal: string; removed_at: number }>();
-      agentRows = await this.env.DB.prepare(
-        `SELECT name, owner, hash
-           FROM tokens
-          WHERE role = 'agent'
-            AND revoked_at IS NULL
-            AND (child_expires_at IS NULL OR child_expires_at > ?)
-            AND (channel_scope IS NULL OR channel_scope = ?)`,
-      )
-        .bind(now, this.name)
-        .all<{ name: string; owner: string | null; hash: string }>();
-      ownershipRows = await this.env.DB.prepare(
-        `SELECT participant_name AS name, account
-           FROM channel_participant_bindings
-          WHERE channel_slug = ?
-          UNION
-         SELECT name, owner AS account
-           FROM tokens
-          WHERE owner IS NOT NULL
-            AND (channel_scope IS NULL OR channel_scope = ?)`,
-      )
-        .bind(this.name, this.name)
-        .all<{ name: string; account: string }>();
+      [rows, agentRows, ownershipRows] = await Promise.all([
+        this.env.DB.prepare(
+          `SELECT principal_type, principal, removed_at
+             FROM channel_participant_removals
+            WHERE channel_slug = ?`,
+        )
+          .bind(this.name)
+          .all<{ principal_type: "name" | "account"; principal: string; removed_at: number }>(),
+        this.env.DB.prepare(
+          `SELECT name, owner, hash
+             FROM tokens
+            WHERE role = 'agent'
+              AND revoked_at IS NULL
+              AND (child_expires_at IS NULL OR child_expires_at > ?)
+              AND (channel_scope IS NULL OR channel_scope = ?)`,
+        )
+          .bind(now, this.name)
+          .all<{ name: string; owner: string | null; hash: string }>(),
+        this.env.DB.prepare(
+          `SELECT participant_name AS name, account
+             FROM channel_participant_bindings
+            WHERE channel_slug = ?
+            UNION
+           SELECT name, owner AS account
+             FROM tokens
+            WHERE owner IS NOT NULL
+              AND (channel_scope IS NULL OR channel_scope = ?)`,
+        )
+          .bind(this.name, this.name)
+          .all<{ name: string; account: string }>(),
+      ]);
     } catch {
       return false;
     }

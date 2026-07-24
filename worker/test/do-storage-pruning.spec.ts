@@ -54,6 +54,47 @@ function insertCursorRow(state: DurableObjectState, name: string, seq: number, u
 }
 
 describe("DO storage pruning (#128)", () => {
+  it("participant removal cache: prunes stale meta rows and keeps fresh rows", async () => {
+    const { token } = await seedToken("agent");
+    const slug = await createChannel(token);
+    const stub = await bootDO(slug, token);
+
+    await runInDurableObject(stub, async (instance: ChannelDO, state) => {
+      const now = Date.now();
+      const stale = now - 7 * 24 * 60 * 60 * 1000;
+      state.storage.sql.exec(
+        `INSERT INTO meta (key, value) VALUES
+           ('participant-removal:stale', ?),
+           ('removed-presence:stale', ?),
+           ('participant-removal:fresh', ?),
+           ('removed-presence:fresh', ?),
+           ('unrelated:test', 'keep')`,
+        String(stale),
+        String(stale),
+        String(now),
+        String(now),
+      );
+
+      await instance.onAlarm();
+
+      const keys = state.storage.sql
+        .exec(
+          `SELECT key FROM meta
+            WHERE key LIKE 'participant-removal:%'
+               OR key LIKE 'removed-presence:%'
+               OR key = 'unrelated:test'
+            ORDER BY key`,
+        )
+        .toArray()
+        .map((row) => String(row.key));
+      expect(keys).toEqual([
+        "participant-removal:fresh",
+        "removed-presence:fresh",
+        "unrelated:test",
+      ]);
+    });
+  });
+
   it("wake_delivery_ledger: prunes rows past the retention window, keeps budget-window rows", async () => {
     const { token } = await seedToken("agent");
     const slug = await createChannel(token);

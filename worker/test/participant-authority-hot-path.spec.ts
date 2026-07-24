@@ -48,6 +48,14 @@ describe("participant authority WebSocket hot path", () => {
       await socket.nextOfType("read_cursor");
       expect(reconcileQueries).toBe(0);
 
+      for (const pathname of ["/internal/summary", "/internal/presence", "/internal/identities"]) {
+        const response = await stub.fetch(
+          new Request(`https://do${pathname}`, { headers: { "x-partykit-room": slug } }),
+        );
+        expect(response.status).toBe(200);
+      }
+      expect(reconcileQueries).toBe(0);
+
       await runInDurableObject(stub, async (instance: ChannelDO) => {
         (instance as unknown as { participantAuthorityRefreshedAt: number })
           .participantAuthorityRefreshedAt = 0;
