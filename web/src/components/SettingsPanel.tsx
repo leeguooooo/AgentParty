@@ -1,13 +1,10 @@
 // 全局设置只承载个人与设备设置。跨频道的本机 Agent 监控、启停、常驻和日志
 // 已移到独立 LocalAgentCenter，避免打开偏好设置就启动多套本机 IPC/轮询。
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { useT } from "../i18n/useT";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { HandleSetup } from "./HandleSetup";
-import {
-  requestNotifySystemPermission,
-  writeNotifyOptin,
-} from "./NotifyToggle";
+import { useNotifyOptinToggle } from "./NotifyToggle";
 import {
   SectionedDialog,
   type SectionedDialogSection,
@@ -55,28 +52,17 @@ export function SettingsPanel({
 }) {
   const t = useT();
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
-  const [notifyHint, setNotifyHint] = useState<string | null>(null);
-  const notifyRequestRef = useRef(0);
 
   const pickTheme = useCallback((next: Theme) => {
     applyTheme(next);
     setTheme(next);
   }, []);
 
-  const toggleNotify = useCallback(() => {
-    const next = !notifyOptin;
-    const requestId = ++notifyRequestRef.current;
-    setNotifyHint(null);
-    writeNotifyOptin(next);
-    onNotifyOptinChange(next);
-    if (next) {
-      void requestNotifySystemPermission().then((granted) => {
-        if (requestId === notifyRequestRef.current && !granted) {
-          setNotifyHint(t("App.settings.notify.inAppOnly"));
-        }
-      });
-    }
-  }, [notifyOptin, onNotifyOptinChange, t]);
+  const { hint: notifyHint, toggle: toggleNotify } = useNotifyOptinToggle(
+    notifyOptin,
+    onNotifyOptinChange,
+    t("App.settings.notify.inAppOnly"),
+  );
 
   const sections: SectionedDialogSection<SettingsSectionId>[] = [
     {

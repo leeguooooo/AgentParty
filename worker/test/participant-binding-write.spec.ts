@@ -33,11 +33,7 @@ describe("channel participant binding writes", () => {
     ).toBeNull();
 
     expect((await postMessage(slug, reader.token, "bind on mutation")).status).toBe(200);
-    expect(
-      await env.DB.prepare(
-        "SELECT account FROM channel_participant_bindings WHERE channel_slug = ? AND participant_name = ?",
-      ).bind(slug, reader.name).first<{ account: string }>(),
-    ).toEqual({ account });
+    expect(await waitForParticipantBinding(slug, reader.name)).toEqual({ account });
   });
 
   it("still records an accepted WebSocket participant", async () => {

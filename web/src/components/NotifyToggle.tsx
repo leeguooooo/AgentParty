@@ -1,7 +1,7 @@
 // 被@浏览器通知的铃铛开关（Task C2）。opt-in 是全局设置（跨频道生效），落 localStorage；
 // 真正的“要不要弹”判定在纯函数 shouldNotify（lib/notify.ts）里，本组件只管开关本身：
 // 读/写 opt-in、申请浏览器通知权限、把结果上报给持有 optin state 的应用 header。
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useT } from "../i18n/useT";
 import { FeatureTip } from "./FeatureTip";
 import { isDesktopRuntime, requestDesktopNotificationPermission } from "../lib/desktopRuntime";
@@ -45,28 +45,37 @@ interface Props {
   onChange(next: boolean): void;
 }
 
-export function NotifyToggle({ optin, onChange }: Props) {
-  const t = useT();
+export function useNotifyOptinToggle(
+  optin: boolean,
+  onChange: (next: boolean) => void,
+  inAppOnlyHint: string,
+): { hint: string | null; toggle: () => void } {
   const [hint, setHint] = useState<string | null>(null);
   const requestRef = useRef(0);
 
-  const toggle = () => {
+  const toggle = useCallback(() => {
+    const next = !optin;
     const requestId = ++requestRef.current;
     setHint(null);
-    if (optin) {
-      // 关闭：立即生效
-      writeNotifyOptin(false);
-      onChange(false);
-      return;
+    writeNotifyOptin(next);
+    onChange(next);
+    if (next) {
+      void requestNotifySystemPermission().then((granted) => {
+        if (requestId === requestRef.current && !granted) setHint(inAppOnlyHint);
+      });
     }
-    // 开启：立即生效——页内 toast 不需要浏览器授权，铃铛先开起来
-    writeNotifyOptin(true);
-    onChange(true);
-    // 系统通知只是额外能力；拒绝/不支持不回滚页内通知，只提示降级。
-    void requestNotifySystemPermission().then((granted) => {
-      if (requestId === requestRef.current && !granted) setHint(t("Channel.notify.inAppOnly"));
-    });
-  };
+  }, [inAppOnlyHint, onChange, optin]);
+
+  return { hint, toggle };
+}
+
+export function NotifyToggle({ optin, onChange }: Props) {
+  const t = useT();
+  const { hint, toggle } = useNotifyOptinToggle(
+    optin,
+    onChange,
+    t("Channel.notify.inAppOnly"),
+  );
 
   return (
     <span className="notify-toggle">

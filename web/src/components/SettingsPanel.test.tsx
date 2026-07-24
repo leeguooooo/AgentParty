@@ -61,6 +61,7 @@ afterEach(async () => {
   Reflect.deleteProperty(globalThis, "localStorage");
   Reflect.deleteProperty(globalThis, "window");
   Reflect.deleteProperty(globalThis, "document");
+  Reflect.deleteProperty(globalThis, "Notification");
 });
 
 const me: SettingsMe = { name: "alice", kind: "agent", role: "agent", handle: null, display_name: null, owner: null };
@@ -173,6 +174,56 @@ describe("SettingsPanel (#273)", () => {
     expect(notifyOptin).toBe(true);
     expect(store.getItem("ap_notify_optin")).toBe("1");
     expect(allText(r)).toContain("System notifications are unavailable");
+  });
+
+  test("ignores an obsolete notification permission result after the setting is turned off", async () => {
+    let resolvePermission!: (permission: NotificationPermission) => void;
+    const permission = new Promise<NotificationPermission>((resolve) => {
+      resolvePermission = resolve;
+    });
+    const notification = {
+      permission: "default" as NotificationPermission,
+      requestPermission: () => permission,
+    };
+    Object.defineProperty(globalThis, "Notification", {
+      configurable: true,
+      value: notification,
+    });
+    Object.assign(window, { Notification: notification });
+
+    let notifyOptin = false;
+    const common = {
+      me,
+      canSetHandle: false,
+      onClose: () => {},
+      onLogout: () => {},
+      onNotifyOptinChange: (next: boolean) => { notifyOptin = next; },
+    };
+    const r = render({ ...common, notifyOptin });
+
+    void act(() => {
+      (findByClass(r.toJSON(), "settings-toggle")!.props.onClick as () => void)();
+    });
+    expect(notifyOptin).toBe(true);
+
+    void act(() => {
+      r.update(
+        <LocaleProvider>
+          <SettingsPanel {...common} notifyOptin={notifyOptin} />
+        </LocaleProvider>,
+      );
+    });
+    void act(() => {
+      (findByClass(r.toJSON(), "settings-toggle")!.props.onClick as () => void)();
+    });
+    expect(notifyOptin).toBe(false);
+
+    await act(async () => {
+      resolvePermission("denied");
+      await permission;
+    });
+
+    expect(allText(r)).not.toContain("System notifications are unavailable");
   });
 
   test("uses explicit sections and exposes only the selected panel", () => {
