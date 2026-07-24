@@ -5110,7 +5110,7 @@ export class ChannelDO extends Server<Env> {
         (request.method !== "GET" || projectsParticipantState) &&
         pathname !== "/internal/kick" &&
         pathname !== "/internal/participant-removed" &&
-        !(await this.reconcileRemovedConnectionsIfStale(Date.now()))
+        !(await this.reconcileRemovedConnections())
       ) {
         return Response.json(
           { error: { code: "unavailable", message: "participant removal authority is unavailable" } },
