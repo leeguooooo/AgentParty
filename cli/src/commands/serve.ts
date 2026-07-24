@@ -1965,7 +1965,15 @@ async function runHarness(
   // Claude accepts an official UUID session handle on cold start. Allocate it during preflight so
   // nested `party decision ask` can durably park the exact handle before this turn returns. Parsing
   // a session id from stdout is too late: the Worker may already have released an owner_answer.
-  const permissionArgs = opts.sandbox === "read-only" ? ["--permission-mode", "plan"] : [];
+  // `claude -p` has no human sitting at a TTY to approve tool calls. Leaving its default
+  // permission mode in a resident workspace-write lane turns every Read/Bash/Edit request into an
+  // unanswerable prompt: the process exits nonzero and the agent becomes an online-looking black
+  // hole. Read-only managed fronts stay in plan mode; an explicitly unattended execution lane must
+  // skip interactive permission prompts so it can actually do the work it was started to perform.
+  const permissionArgs = [
+    "--permission-mode",
+    opts.sandbox === "read-only" ? "plan" : "bypassPermissions",
+  ];
   const schemaArgs = opts.outputSchema === undefined ? [] : ["--json-schema", JSON.stringify(opts.outputSchema)];
   const jsonOutputArgs = opts.outputSchema === undefined ? [] : ["--output-format", "json"];
   // #581：--strict-mcp-config 只用注入的 server（隔离用户全局 MCP 配置）；
@@ -4345,6 +4353,22 @@ export async function runServe(o: ServeOptions): Promise<number> {
           frame.seq,
           directedDeliveryMode,
         );
+        // #646：busy 清除（#103）由所有终局路径共用——包括在模型启动前失败的 preflight。
+        // 只在队列真排空时清：还有 @ 排队就保持 busy=true，等下一条 wake 的 working 帧继续覆盖
+        // queue_depth（避免闪烁）。
+        const takeBusyClearIfDrained = (force = false): { busy?: false; queue_depth?: 0 } => {
+          if (!busyReported) return {};
+          const remaining = pendingWakeDepth(
+            conn.pendingFrames(),
+            self,
+            o.mentionsOnly === true,
+            conn.cursor,
+            directedDeliveryMode,
+          );
+          if (!force && remaining !== 0) return {};
+          busyReported = false;
+          return { busy: false, queue_depth: 0 };
+        };
         // 先把入站附件放进本 serve 实例的 0700 临时目录。runner 只拿 0600 本地文件与
         // 鉴权端点元数据，context 中绝不出现 bearer token；单个下载失败也不吞掉整次唤醒。
         let wakeAttachments: WakeContextAttachment[] = [];
@@ -4444,6 +4468,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
                 note,
                 mentions: [],
                 blocked_reason: note,
+                // 上一条 wake 因身后仍有积压而延续 busy 时，本条 preflight 终局负责在排空后
+                // 原子清掉它；若仍有其它 wake，则继续保持 busy，避免中途闪成空闲。
+                ...takeBusyClearIfDrained(),
               }, lifecycleController.signal);
             } catch {
               code = EXIT_WAKE_UNANNOUNCED;
@@ -4673,28 +4700,16 @@ export async function runServe(o: ServeOptions): Promise<number> {
             stopAfterFrame = true;
           }
         }
-        // #646：busy 清除（#103）抽成闭包，送达与放弃两条终局都要调用——否则放弃分支永不清 busy，
-        // 任务结束后 presence 永远卡在「忙」（假忙）。只在队列真排空时清：还有 @ 排队就保持 busy=true，
-        // 等下一条 wake 的 working 帧继续覆盖 queue_depth（避免闪烁）。
         const clearBusyIfDrained = async (idleNote: string) => {
-          if (!busyReported) return;
-          const remaining = pendingWakeDepth(
-            conn.pendingFrames(),
-            self,
-            o.mentionsOnly === true,
-            conn.cursor,
-            directedDeliveryMode,
-          );
-          if (remaining !== 0) return;
-          busyReported = false;
+          const busyClear = takeBusyClearIfDrained();
+          if (busyClear.busy !== false) return;
           try {
             await (o.post ?? postMessage)(o.server, o.token, o.channel, {
               kind: "status",
               state: "waiting",
               note: idleNote,
               mentions: [],
-              busy: false,
-              queue_depth: 0,
+              ...busyClear,
             }, lifecycleController.signal);
           } catch (e) {
             // 清 busy 只是锦上添花：发不出去就下条 wake 的 working 帧会重置 queue_depth，或下次排空再补。
@@ -4731,6 +4746,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
               note,
               mentions: [],
               blocked_reason: note,
+              // Failure is already the authoritative terminal status for this wake. Clear the
+              // busy bit on this same frame when the queue drained; a follow-up `waiting` frame
+              // would erase the blocker and make the broken resident look healthy again (#756).
+              ...takeBusyClearIfDrained(),
             }, lifecycleController.signal);
           } catch (e) {
             // 通告发不出去 = 没宣告过 = 没了结。此时清欠账 + ack 就是恢复 #118 的静默丢失。
@@ -4776,6 +4795,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
                 note: finalNote,
                 mentions: [],
                 blocked_reason: finalNote,
+                // A circuit exits without consuming buffered mentions, so force-clear busy while
+                // preserving `blocked` as the final externally visible state.
+                ...takeBusyClearIfDrained(true),
               }, lifecycleController.signal);
             } catch (e) {
               out(`  熔断通告发送失败，立即退出: ${sanitizeBlockedError(e instanceof Error ? e.message : String(e))}`);
@@ -4784,9 +4806,6 @@ export async function runServe(o: ServeOptions): Promise<number> {
             wakeAbandonCircuitTripped = true;
             code = EXIT_WAKE_ABANDON_CIRCUIT;
           }
-          // #646：放弃这条 wake 后若队列已排空，同样把 busy 清回 false（否则假忙永久卡住，
-          // 只有下一次真正送达的 wake 或进程退出才自愈）。已宣告过 blocked，这里只收 busy。
-          await clearBusyIfDrained(`idle: ${self} gave up wake seq=${frame.seq}, waiting for next @`);
         }
       }
       const heldForLease = deferredLeaseSeq !== null && frame.seq >= deferredLeaseSeq;

@@ -335,16 +335,61 @@ describe("builtin per-work continuations (#548)", () => {
     for (const { args } of calls) {
       expect(args).toContain("--disallowed-tools");
       expect(args[args.indexOf("--disallowed-tools") + 1]).toBe("AskUserQuestion");
+      expect(args[args.indexOf("--permission-mode") + 1]).toBe("bypassPermissions");
     }
     expect(calls[0]!.args).toEqual([
-      "claude", "-p", "--disallowed-tools", "AskUserQuestion", "--settings", expect.any(String),
+      "claude", "-p", "--disallowed-tools", "AskUserQuestion",
+      "--permission-mode", "bypassPermissions", "--settings", expect.any(String),
       "--session-id", coldSessionId, "--output-format", "json", expect.any(String),
     ]);
     expect(calls[1]!.args).toEqual([
-      "claude", "-p", "--disallowed-tools", "AskUserQuestion", "--settings", expect.any(String),
+      "claude", "-p", "--disallowed-tools", "AskUserQuestion",
+      "--permission-mode", "bypassPermissions", "--settings", expect.any(String),
       "--resume", coldSessionId, expect.any(String),
     ]);
     expect(calls[1]!.env.AP_RUNNER_SESSION_ID).toBe(coldSessionId);
+  });
+
+  test("Claude read-only cold start and owner-answer resume both use plan permission mode", async () => {
+    const workdir = tempDir();
+    const ref = "ref-C-read-only";
+    const workId = "work-C-read-only";
+    const calls: string[][] = [];
+    let coldSessionId = "";
+    const runProcess: RunnerProcess = async (args) => {
+      calls.push(args);
+      if (args.includes("--resume")) {
+        return { code: 0, stdout: "resumed", stderr: "" };
+      }
+      coldSessionId = args[args.indexOf("--session-id") + 1]!;
+      return { code: 0, stdout: JSON.stringify({ result: "cold" }), stderr: "" };
+    };
+    const run = createBuiltinRunner({
+      server: "http://agentparty.test",
+      token: "ap_test",
+      channel: "dev",
+      harness: "claude",
+      workdir,
+      sandbox: "read-only",
+      runProcess,
+      post,
+    });
+
+    await run(message(22), context(delivery(22, workId, ref)));
+    await run(message(23), context(delivery(23, workId, ref, "owner_answer")));
+
+    expect(calls).toHaveLength(2);
+    expect(calls.map((args) => args[args.indexOf("--permission-mode") + 1])).toEqual(["plan", "plan"]);
+    expect(calls[0]).toEqual([
+      "claude", "-p", "--disallowed-tools", "AskUserQuestion",
+      "--permission-mode", "plan", "--settings", expect.any(String),
+      "--session-id", coldSessionId, "--output-format", "json", expect.any(String),
+    ]);
+    expect(calls[1]).toEqual([
+      "claude", "-p", "--disallowed-tools", "AskUserQuestion",
+      "--permission-mode", "plan", "--settings", expect.any(String),
+      "--resume", coldSessionId, expect.any(String),
+    ]);
   });
 });
 
