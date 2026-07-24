@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   DEPLOY_TARGETS,
   buildDeployPlan,
@@ -90,5 +91,18 @@ describe("buildDeployPlan", () => {
 
   test("both targets map to distinct public bases", () => {
     expect(DEPLOY_TARGETS.prod.smokeBase).not.toBe(DEPLOY_TARGETS.xdream.smokeBase);
+  });
+});
+
+describe("remote D1 migration compatibility", () => {
+  test("trigger CASE guards are parenthesized so the remote query endpoint keeps the outer END", () => {
+    const migration = readFileSync(
+      new URL("../worker/migrations/0042_channel_decisions.sql", import.meta.url),
+      "utf8",
+    );
+
+    expect(migration).not.toMatch(/\bSELECT\s+CASE\b/i);
+    expect(migration.match(/\bSELECT\s*\(\s*CASE\b/gi)).toHaveLength(7);
+    expect(migration.match(/\bTHEN\s+RAISE\s*\(/gi)).toHaveLength(7);
   });
 });

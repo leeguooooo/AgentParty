@@ -31,3 +31,16 @@ export function normalizeSqlDefinition(sql) {
     .trim()
     .toLowerCase();
 }
+
+export function equivalentTriggerDefinitions(sql) {
+  const normalized = normalizeSqlDefinition(sql);
+  if (normalized.length === 0) return [];
+
+  const legacyBareCase = normalized.replace(
+    /\bselect\s+\(\s*case\b(.*?)\bend\s*\)\s*;/g,
+    "select case$1end;",
+  );
+  return legacyBareCase === normalized
+    ? [normalized]
+    : [normalized, legacyBareCase];
+}

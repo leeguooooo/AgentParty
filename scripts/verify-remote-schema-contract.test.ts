@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  equivalentTriggerDefinitions,
   extractIndexDefinition,
   extractTriggerDefinition,
   normalizeSqlDefinition,
@@ -60,5 +61,42 @@ CREATE INDEX idx_two ON records(created_at DESC);
       "create trigger guard before insert on records begin select raise(abort, 'nope'); end",
     );
     expect(normalizeSqlDefinition(null)).toBe("");
+  });
+
+  test("accepts only the remote-D1 CASE wrapper as an equivalent trigger definition", () => {
+    const parenthesized = `
+      CREATE TRIGGER guard BEFORE INSERT ON records
+      BEGIN
+        SELECT (CASE
+          WHEN NEW.id IS NULL
+          THEN RAISE(ABORT, 'missing id')
+        END);
+        SELECT (CASE
+          WHEN NEW.owner IS NULL
+          THEN RAISE(ABORT, 'missing owner')
+        END);
+      END;
+    `;
+    const legacyBareCase = `
+      CREATE TRIGGER guard BEFORE INSERT ON records
+      BEGIN
+        SELECT CASE
+          WHEN NEW.id IS NULL
+          THEN RAISE(ABORT, 'missing id')
+        END;
+        SELECT CASE
+          WHEN NEW.owner IS NULL
+          THEN RAISE(ABORT, 'missing owner')
+        END;
+      END;
+    `;
+    const changedGuard = legacyBareCase.replace("NEW.id IS NULL", "NEW.id < 0");
+    const hybridWrapper = parenthesized.replace("SELECT (CASE", "SELECT CASE");
+    const accepted = new Set(equivalentTriggerDefinitions(parenthesized));
+
+    expect(accepted).toContain(normalizeSqlDefinition(parenthesized));
+    expect(accepted).toContain(normalizeSqlDefinition(legacyBareCase));
+    expect(accepted).not.toContain(normalizeSqlDefinition(hybridWrapper));
+    expect(accepted).not.toContain(normalizeSqlDefinition(changedGuard));
   });
 });

@@ -35,7 +35,7 @@ CREATE TABLE channel_decision_heads (
 CREATE TRIGGER channel_decision_heads_validate_insert
 BEFORE INSERT ON channel_decision_heads
 BEGIN
-  SELECT CASE
+  SELECT (CASE
     WHEN NOT EXISTS (
       SELECT 1
         FROM channel_decisions d
@@ -44,13 +44,13 @@ BEGIN
          AND d.topic COLLATE NOCASE = NEW.topic COLLATE NOCASE
     )
     THEN RAISE(ABORT, 'decision head must match decision channel and topic')
-  END;
+  END);
 END;
 
 CREATE TRIGGER channel_decision_heads_validate_update
 BEFORE UPDATE ON channel_decision_heads
 BEGIN
-  SELECT CASE
+  SELECT (CASE
     WHEN NOT EXISTS (
       SELECT 1
         FROM channel_decisions d
@@ -59,8 +59,8 @@ BEGIN
          AND d.topic COLLATE NOCASE = NEW.topic COLLATE NOCASE
     )
     THEN RAISE(ABORT, 'decision head must match decision channel and topic')
-  END;
-  SELECT CASE
+  END);
+  SELECT (CASE
     WHEN NEW.decision_id != OLD.decision_id AND NOT EXISTS (
       SELECT 1
         FROM channel_decisions d
@@ -68,7 +68,7 @@ BEGIN
          AND d.supersedes_id = OLD.decision_id
     )
     THEN RAISE(ABORT, 'decision head must advance through explicit supersedes lineage')
-  END;
+  END);
 END;
 
 CREATE TRIGGER channel_decision_heads_reject_delete
@@ -98,31 +98,31 @@ END;
 CREATE TRIGGER channel_decisions_validate_insert
 BEFORE INSERT ON channel_decisions
 BEGIN
-  SELECT CASE
+  SELECT (CASE
     WHEN EXISTS (
       SELECT 1 FROM channels c
        WHERE c.slug = NEW.channel_slug
          AND c.archived_at IS NOT NULL
     )
     THEN RAISE(ABORT, 'channel is archived')
-  END;
-  SELECT CASE
+  END);
+  SELECT (CASE
     WHEN NEW.supersedes_id IS NULL AND EXISTS (
       SELECT 1 FROM channel_decision_heads h
        WHERE h.channel_slug = NEW.channel_slug
          AND h.topic = NEW.topic COLLATE NOCASE
     )
     THEN RAISE(ABORT, 'active decision already exists for topic')
-  END;
-  SELECT CASE
+  END);
+  SELECT (CASE
     -- Keep this literal aligned with shared/src/protocol.ts CHANNEL_DECISION_ACTIVE_MAX.
     WHEN NEW.supersedes_id IS NULL AND (
       SELECT COUNT(*) FROM channel_decision_heads h
        WHERE h.channel_slug = NEW.channel_slug
     ) >= 100
     THEN RAISE(ABORT, 'channel active decision limit reached')
-  END;
-  SELECT CASE
+  END);
+  SELECT (CASE
     WHEN NEW.supersedes_id IS NOT NULL AND NOT EXISTS (
       SELECT 1
         FROM channel_decision_heads h
@@ -133,5 +133,5 @@ BEGIN
          AND old.channel_slug = NEW.channel_slug
     )
     THEN RAISE(ABORT, 'supersedes_id must reference the active decision for the same topic')
-  END;
+  END);
 END;

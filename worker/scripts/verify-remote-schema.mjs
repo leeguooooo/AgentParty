@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
+  equivalentTriggerDefinitions,
   extractIndexDefinition,
   extractTriggerDefinition,
   normalizeSqlDefinition,
@@ -254,7 +255,7 @@ const requiredTriggerDefinitions = Object.fromEntries(
     if (definition === undefined) {
       throw new Error(`could not load expected trigger definition for ${name}`);
     }
-    return [name, normalizeSqlDefinition(definition)];
+    return [name, new Set(equivalentTriggerDefinitions(definition))];
   }),
 );
 
@@ -416,7 +417,7 @@ for (const [table, triggers] of Object.entries(requiredTriggers)) {
   }
   for (const trigger of triggers) {
     const actual = normalizeSqlDefinition(byName.get(trigger));
-    if (actual !== requiredTriggerDefinitions[trigger]) {
+    if (!requiredTriggerDefinitions[trigger].has(actual)) {
       throw new Error(`${trigger} definition does not match the shipped migration`);
     }
   }
