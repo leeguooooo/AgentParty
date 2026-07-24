@@ -2940,6 +2940,11 @@ export function ChannelPage({
   // 两条路由共用外层 dialog，但各自由原面板负责恢复页签与焦点。
   const [memberDetailRoute, setMemberDetailRoute] = useState<MemberDetailRoute | null>(null);
   const [charterEditing, setCharterEditing] = useState(false);
+  const charterEditingRef = useRef(false);
+  const updateCharterEditing = useCallback((editing: boolean) => {
+    charterEditingRef.current = editing;
+    setCharterEditing(editing);
+  }, []);
   const [charterDraft, setCharterDraft] = useState("");
   const {
     generationRef: charterRequestGenerationRef,
@@ -3213,7 +3218,7 @@ export function ChannelPage({
       .then((body) => {
         if (!canApplyCharterRead(charterRequestGenerationRef.current, request)) return;
         setCharter(body);
-        setCharterDraft(body.charter ?? "");
+        if (!charterEditingRef.current) setCharterDraft(body.charter ?? "");
         setCharterError(null);
       })
       .catch((err: unknown) => {
@@ -3584,7 +3589,6 @@ export function ChannelPage({
 
   useEffect(() => {
     setSeenCharterRev(readSeenCharterRev(slug));
-    setCharterEditing(false);
     void loadCharter();
     void loadIdentities();
     void loadRoles();
@@ -4187,16 +4191,16 @@ export function ChannelPage({
   }, []);
 
   const editCharter = useCallback(() => {
-    setCharterEditing(true);
+    updateCharterEditing(true);
     setCharterDraft(charter?.charter ?? "");
     setCharterError(null);
-  }, [charter]);
+  }, [charter, updateCharterEditing]);
 
   const cancelCharterEdit = useCallback(() => {
-    setCharterEditing(false);
+    updateCharterEditing(false);
     setCharterDraft(charter?.charter ?? "");
     setCharterError(null);
-  }, [charter]);
+  }, [charter, updateCharterEditing]);
 
   const saveCharter = useCallback(() => {
     if (charterSaving) return;
@@ -4208,7 +4212,7 @@ export function ChannelPage({
         if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         setCharter(body);
         setCharterDraft(body.charter ?? "");
-        setCharterEditing(false);
+        updateCharterEditing(false);
         writeSeenCharterRev(slug, body.charter_rev);
         setSeenCharterRev(body.charter_rev);
       })
@@ -4229,6 +4233,7 @@ export function ChannelPage({
     finishCharterWriteRequest,
     slug,
     token,
+    updateCharterEditing,
   ]);
 
   // issue #150：分工面板「同步到公告」——DivisionBoard 已经把分工内容拼好、合并进
@@ -4243,8 +4248,10 @@ export function ChannelPage({
       .then((body) => {
         if (!commitCharterWrite(charterRequestGenerationRef.current, requestId)) return;
         setCharter(body);
-        setCharterDraft(body.charter ?? "");
-        setCharterEditing(false);
+        if (!charterEditingRef.current) {
+          setCharterDraft(body.charter ?? "");
+          updateCharterEditing(false);
+        }
         writeSeenCharterRev(slug, body.charter_rev);
         setSeenCharterRev(body.charter_rev);
       })
@@ -4264,6 +4271,7 @@ export function ChannelPage({
     finishCharterWriteRequest,
     slug,
     token,
+    updateCharterEditing,
   ]);
 
   // issue #171：分工面板到 AgentTokens（已有的 project-agent 规则查看/编辑面板，

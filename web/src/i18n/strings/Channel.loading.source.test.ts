@@ -51,6 +51,29 @@ describe("Channel loading and recovery surfaces (#344 #345 #346 #354)", () => {
     expect(channelSource).toContain("onRetry={() => void loadCharter()}");
   });
 
+  test("background charter updates preserve an active editor draft", () => {
+    const loadCharter = channelSource.slice(
+      channelSource.indexOf("const loadCharter = useCallback"),
+      channelSource.indexOf("const loadIdentities = useCallback"),
+    );
+    const refreshEffect = channelSource.slice(
+      channelSource.indexOf("setSeenCharterRev(readSeenCharterRev(slug));"),
+      channelSource.indexOf("// IM 式初始加载"),
+    );
+    const syncDivision = channelSource.slice(
+      channelSource.indexOf("const syncDivisionToCharter = useCallback"),
+      channelSource.indexOf("const openAgentRulesFromDivision = useCallback"),
+    );
+    expect(channelSource).toContain("charterEditingRef.current = editing");
+    expect(loadCharter).toContain(
+      'if (!charterEditingRef.current) setCharterDraft(body.charter ?? "");',
+    );
+    expect(syncDivision).toContain("if (!charterEditingRef.current) {");
+    expect(syncDivision).toContain('setCharterDraft(body.charter ?? "");');
+    expect(syncDivision).toContain("updateCharterEditing(false);");
+    expect(refreshEffect).not.toContain("updateCharterEditing(false)");
+  });
+
   test("reuses an initial-history callback for retry and resets pagination refs", () => {
     expect(channelSource).toContain("const loadInitialPage = useCallback");
     expect(channelSource).toContain("onClick={loadInitialPage}");
