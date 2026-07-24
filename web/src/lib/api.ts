@@ -749,6 +749,8 @@ interface PendingDecisionPage {
   next_after: number | null;
 }
 
+const MAX_PENDING_DECISION_PAGES = 200;
+
 // Focus 的未决项来自 DO 持久 decision_state，不复用页面当前 300 条消息窗口。
 // 端点按 seq 分页；完整拉取保证长期未决问题不会因超过单页上限再次消失。
 export async function fetchPendingDecisions(
@@ -757,7 +759,9 @@ export async function fetchPendingDecisions(
 ): Promise<AuthoritativePendingDecision[]> {
   const bySeq = new Map<number, AuthoritativePendingDecision>();
   let after = 0;
+  let pages = 0;
   for (;;) {
+    pages += 1;
     const params = new URLSearchParams({ after: String(after), limit: "200" });
     const res = await fetchApi(
       `/api/channels/${encodeURIComponent(slug)}/pending-decisions?${params.toString()}`,
@@ -778,6 +782,9 @@ export async function fetchPendingDecisions(
     if (page.next_after === null) break;
     if (!Number.isInteger(page.next_after) || page.next_after <= after) {
       throw new Error("pending decision cursor did not advance");
+    }
+    if (pages >= MAX_PENDING_DECISION_PAGES) {
+      throw new Error("pending decisions exceeded max page count");
     }
     after = page.next_after;
   }
