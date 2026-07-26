@@ -453,26 +453,36 @@ function unassignedMembers(
   const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
   const participantByName = new Map(participants.map((participant) => [participant.name, participant]));
   const names = new Set([
-    ...participants.map((participant) => participant.name),
     ...Object.keys(presence),
     ...identities.map((identity) => identity.name),
+    ...participants.map((participant) => participant.name),
   ]);
   const members: UnassignedMember[] = [];
   for (const name of names) {
     if (name === "system" || known.has(name)) continue;
-    const member = resolveTeamMemberView({
-      name,
-      identity: identityByName.get(name),
-      presence: presence[name],
-      participant: participantByName.get(name),
-    });
-    const accountLabel = member.account ?? (member.kind === "human" ? member.display : t("Channel.roles.unowned"));
+    const entry = presence[name];
+    const identity = identityByName.get(name);
+    const participant = participantByName.get(name);
+    // Preserve the existing presence → identity authority for current runtime
+    // metadata. participants fills the fresh-connection gap but never lets a
+    // connection snapshot overwrite an already known presence/identity row.
+    const kind = entry?.kind ?? identity?.kind ?? participant?.kind ?? "agent";
+    const account = entry?.account ?? identity?.account ?? participant?.owner;
+    const participantDisplay = participant?.handle
+      ?? (participant?.kind === "human" ? participant.display_name ?? participant.owner : undefined);
+    const display = identity?.display ?? participantDisplay ?? name;
+    const accountLabel = account && account !== ""
+      ? account
+      : kind === "human"
+        ? display
+        : t("Channel.roles.unowned");
+    const owner = account && account !== display ? account : null;
     members.push({
       name,
-      display: member.display,
+      display,
       accountLabel,
-      owner: member.owner,
-      kind: member.kind,
+      owner,
+      kind,
     });
   }
   return members;

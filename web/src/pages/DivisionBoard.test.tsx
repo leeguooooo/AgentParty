@@ -172,6 +172,40 @@ describe("DivisionBoard roster completeness (#169)", () => {
     expect(personNames()).toContain("Participant Only");
   });
 
+  test("current presence metadata keeps priority over a stale identity snapshot", () => {
+    const buckets = teamRoleBuckets(
+      [],
+      {
+        conflict: presenceEntry({
+          name: "conflict",
+          kind: "human",
+          account: "current-owner",
+        }),
+      },
+      [{
+        name: "conflict",
+        kind: "agent",
+        account: "old-owner",
+        display: "Historic Display",
+      }],
+      [{
+        name: "conflict",
+        kind: "agent",
+        owner: "participant-owner",
+        handle: "Participant Display",
+      }],
+      ((key: string) => key) as Parameters<typeof teamRoleBuckets>[4],
+    );
+
+    expect(buckets.unassigned).toEqual([expect.objectContaining({
+      name: "conflict",
+      display: "Historic Display",
+      kind: "human",
+      accountLabel: "current-owner",
+      owner: "current-owner",
+    })]);
+  });
+
   test("self-reported roles stay visible but do not count as confirmed assignments", () => {
     render(
       baseProps({
