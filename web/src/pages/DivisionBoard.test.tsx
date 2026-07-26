@@ -178,6 +178,7 @@ describe("DivisionBoard roster completeness (#169)", () => {
       String(node.props.className ?? "").split(" ").includes("role-live-dot"),
     );
     expect(String(dot.props.className)).toContain("is-online");
+    expect(dot.props.role).toBe("img");
     expect(dot.props["aria-label"]).toBe("在线");
   });
 

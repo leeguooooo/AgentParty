@@ -946,6 +946,7 @@ export function DivisionBoard({
                         <div className="role-person" title={title}>
                           <span
                             className={`role-live-dot${online ? " is-online" : ""}`}
+                            role="img"
                             aria-label={t(online ? "Channel.team.member.online" : "Channel.team.member.offline")}
                           />
                           {onOpenAgentDetail !== undefined ? (
