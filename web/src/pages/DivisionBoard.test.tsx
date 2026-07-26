@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { PresenceEntry } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
-import { DivisionBoard, type DivisionBoardProps } from "./Channel";
+import { DivisionBoard, teamMemberOnlineNames, teamRoleBuckets, type DivisionBoardProps } from "./Channel";
 
 // issue #169:「频道四个 agent 分工面板只有两个」——分工面板此前只渲染
 // 已分配角色（roles）+ 自报角色（presence role_source==="self"）的成员，
@@ -25,11 +25,6 @@ function memoryStorage(): Storage {
 let renderer: ReactTestRenderer | null = null;
 
 const noop = () => {};
-
-// #150 自动同步用 800ms 去抖的 setTimeout；测试等它触发。留足余量避免 CI 抖动。
-const AUTO_SYNC_DEBOUNCE_MS = 800;
-const wait = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
-const flushAutoSync = () => wait(AUTO_SYNC_DEBOUNCE_MS + 250);
 
 function presenceEntry(overrides: Partial<PresenceEntry> & { name: string }): PresenceEntry {
   return {
@@ -56,7 +51,7 @@ function baseProps(overrides: Partial<DivisionBoardProps> = {}): DivisionBoardPr
     onRoleDraft: noop,
     onNewRoleName: noop,
     onNewRoleDraft: noop,
-    onSaveRole: noop,
+    onSaveRole: async () => true,
     onDeleteRole: noop,
     forceOpen: true,
     charterText: null,
@@ -106,6 +101,39 @@ afterEach(() => {
 });
 
 describe("DivisionBoard roster completeness (#169)", () => {
+  test("confirmed, pending, and unassigned counts share one roster projection", () => {
+    const assigned = [{
+      name: "confirmed",
+      role: "host" as const,
+      responsibility: "lead",
+      assigned_by: "leo",
+      assigned_at: 1,
+      kind: "agent" as const,
+    }];
+    const presence = Object.fromEntries([
+      ["confirmed", presenceEntry({ name: "confirmed", role: "host", role_source: "assigned" })],
+      ...Array.from({ length: 3 }, (_, index) => {
+        const name = `claim-${index}`;
+        return [name, presenceEntry({ name, role: "worker", role_source: "self" })] as const;
+      }),
+      ...Array.from({ length: 10 }, (_, index) => {
+        const name = `unassigned-${index}`;
+        return [name, presenceEntry({ name })] as const;
+      }),
+    ]);
+
+    const buckets = teamRoleBuckets(
+      assigned,
+      presence,
+      [],
+      ((key: string) => key) as Parameters<typeof teamRoleBuckets>[3],
+    );
+
+    expect(assigned).toHaveLength(1);
+    expect(buckets.selfReported).toHaveLength(3);
+    expect(buckets.unassigned).toHaveLength(10);
+  });
+
   test("self-reported roles stay visible but do not count as confirmed assignments", () => {
     render(
       baseProps({
@@ -126,7 +154,33 @@ describe("DivisionBoard roster completeness (#169)", () => {
     expect(JSON.stringify(renderer!.toJSON())).toContain("自报");
   });
 
-  test("role editing stays collapsed until requested and collapses again after save (#504)", () => {
+  test("connected human members use the same authoritative online projection as agents", () => {
+    const humanPresence = presenceEntry({ name: "human-owner", kind: "human", live: false });
+    render(
+      baseProps({
+        roles: [{
+          name: "human-owner",
+          role: "host",
+          responsibility: "approve",
+          assigned_by: "human-owner",
+          assigned_at: 1,
+          kind: "human",
+        }],
+        presence: { "human-owner": humanPresence },
+        onlineNames: teamMemberOnlineNames(
+          [humanPresence],
+          [{ name: "human-owner", kind: "human" }],
+        ),
+      }),
+    );
+
+    const dot = renderer!.root.find((node) =>
+      String(node.props.className ?? "").split(" ").includes("role-live-dot"),
+    );
+    expect(String(dot.props.className)).toContain("is-online");
+  });
+
+  test("role editing stays collapsed until requested and collapses only after a successful save (#504)", async () => {
     let savedName = "";
     render(
       baseProps({
@@ -144,7 +198,10 @@ describe("DivisionBoard roster completeness (#169)", () => {
           },
         ],
         presence: { "leo-claude": presenceEntry({ name: "leo-claude", account: "lark:on_leo", live: true }) },
-        onSaveRole: (name) => { savedName = name; },
+        onSaveRole: async (name) => {
+          savedName = name;
+          return true;
+        },
       }),
     );
     let card = renderer!.root.find((node) =>
@@ -162,7 +219,10 @@ describe("DivisionBoard roster completeness (#169)", () => {
     expect(card.findAllByType("input")).toHaveLength(1);
     const save = card.findAllByType("button").find((node) => String(node.props.children).includes("保存"));
     expect(save).toBeDefined();
-    act(() => save!.props.onClick());
+    await act(async () => {
+      save!.props.onClick();
+      await Promise.resolve();
+    });
 
     card = renderer!.root.find((node) =>
       String(node.props.className ?? "").split(" ").includes("role-row--card"),
@@ -171,6 +231,160 @@ describe("DivisionBoard roster completeness (#169)", () => {
     expect(card.findAllByType("select")).toHaveLength(0);
     expect(card.findByProps({ className: "d-btn role-edit-btn" })).toBeDefined();
     expect(personNames()).toContain("leo-claude");
+  });
+
+  test("a failed save keeps the editor open and cancel restores the server draft", async () => {
+    const restored: Array<{ role: string; responsibility: string }> = [];
+    const role = {
+      name: "worker-a",
+      role: "worker" as const,
+      responsibility: "server value",
+      assigned_by: "leo",
+      assigned_at: 1,
+      kind: "agent" as const,
+      account: "leo",
+      display: "worker-a",
+    };
+    render(
+      baseProps({
+        canModerate: true,
+        roles: [role],
+        roleDrafts: { "worker-a": { role: "reviewer", responsibility: "unsaved draft" } },
+        presence: { "worker-a": presenceEntry({ name: "worker-a", live: true }) },
+        onRoleDraft: (_name, draft) => { restored.push(draft); },
+        onSaveRole: async () => false,
+      }),
+    );
+
+    let card = renderer!.root.findByProps({ className: "role-row role-row--card role-row--worker" });
+    act(() => card.findByProps({ className: "d-btn role-edit-btn" }).props.onClick());
+    card = renderer!.root.findByProps({ className: "role-row role-row--card role-row--worker" });
+    const save = card.findAllByType("button").find((node) => String(node.props.children).includes("保存"))!;
+    await act(async () => {
+      save.props.onClick();
+      await Promise.resolve();
+    });
+    expect(card.findAllByType("select")).toHaveLength(1);
+
+    const cancel = card.findAllByType("button").find((node) => String(node.props.children).includes("取消"))!;
+    await act(async () => {
+      cancel.props.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    });
+    card = renderer!.root.findByProps({ className: "role-row role-row--card role-row--worker" });
+    expect(card.findAllByType("select")).toHaveLength(0);
+    expect(restored.at(-1)).toEqual({ role: "worker", responsibility: "server value" });
+  });
+
+  test("switching edit rows and closing Team discard every unsaved role draft", () => {
+    const restored: Array<{ name: string; responsibility: string }> = [];
+    const roles = [
+      { name: "lead", role: "host" as const, responsibility: "lead server", assigned_by: "leo", assigned_at: 1, kind: "agent" as const },
+      { name: "worker-a", role: "worker" as const, responsibility: "worker server", assigned_by: "leo", assigned_at: 1, kind: "agent" as const },
+    ];
+    render(baseProps({
+      canModerate: true,
+      roles,
+      roleDrafts: {
+        lead: { role: "host", responsibility: "dirty lead" },
+        "worker-a": { role: "worker", responsibility: "dirty worker" },
+      },
+      presence: {
+        lead: presenceEntry({ name: "lead", live: true }),
+        "worker-a": presenceEntry({ name: "worker-a", live: true }),
+      },
+      onRoleDraft: (name, draft) => {
+        restored.push({ name, responsibility: draft.responsibility });
+      },
+    }));
+
+    let worker = renderer!.root.findByProps({ className: "role-row role-row--card role-row--worker" });
+    act(() => worker.findByProps({ className: "d-btn role-edit-btn" }).props.onClick());
+    const lead = renderer!.root.findByProps({ className: "role-row role-row--card role-row--host" });
+    act(() => lead.findByProps({ className: "d-btn role-edit-btn" }).props.onClick());
+    expect(restored.at(-1)).toEqual({ name: "worker-a", responsibility: "worker server" });
+
+    act(() => renderer!.unmount());
+    renderer = null;
+    expect(restored.at(-1)).toEqual({ name: "lead", responsibility: "lead server" });
+  });
+
+  test("Escape cancels only the active role edit and every role control is disabled during a save", () => {
+    const restored: Array<{ role: string; responsibility: string }> = [];
+    const roles = [
+      { name: "lead", role: "host" as const, responsibility: "lead", assigned_by: "leo", assigned_at: 1, kind: "agent" as const },
+      { name: "worker-a", role: "worker" as const, responsibility: "ship", assigned_by: "leo", assigned_at: 1, kind: "agent" as const },
+    ];
+    const props = baseProps({
+      canModerate: true,
+      roles,
+      presence: {
+        lead: presenceEntry({ name: "lead", live: true }),
+        "worker-a": presenceEntry({ name: "worker-a", live: true }),
+      },
+      onRoleDraft: (_name, draft) => { restored.push(draft); },
+      onSetReportsTo: noop,
+    });
+    render(props);
+    let workerCard = renderer!.root.findByProps({ className: "role-row role-row--card role-row--worker" });
+    act(() => workerCard.findByProps({ className: "d-btn role-edit-btn" }).props.onClick());
+    act(() => {
+      renderer!.update(
+        <LocaleProvider>
+          <DivisionBoard {...props} roleSaving="worker-a" />
+        </LocaleProvider>,
+      );
+    });
+    workerCard = renderer!.root.findByProps({ className: "role-row role-row--card role-row--worker" });
+    let prevented = false;
+    let stopped = false;
+    act(() => workerCard.props.onKeyDown({
+      key: "Escape",
+      preventDefault: () => { prevented = true; },
+      stopPropagation: () => { stopped = true; },
+    }));
+    expect(prevented).toBe(true);
+    expect(stopped).toBe(true);
+    expect(restored).toHaveLength(0);
+    expect(workerCard.findAllByType("select")).toHaveLength(1);
+
+    act(() => {
+      renderer!.update(
+        <LocaleProvider>
+          <DivisionBoard {...props} roleSaving={null} />
+        </LocaleProvider>,
+      );
+    });
+    workerCard = renderer!.root.findByProps({ className: "role-row role-row--card role-row--worker" });
+    prevented = false;
+    stopped = false;
+    act(() => workerCard.props.onKeyDown({
+      key: "Escape",
+      preventDefault: () => { prevented = true; },
+      stopPropagation: () => { stopped = true; },
+    }));
+    expect(prevented).toBe(true);
+    expect(stopped).toBe(true);
+    expect(restored.at(-1)).toEqual({ role: "worker", responsibility: "ship" });
+    expect(workerCard.findAllByType("select")).toHaveLength(0);
+
+    act(() => {
+      renderer!.update(
+        <LocaleProvider>
+          <DivisionBoard {...props} roleSaving="lead" />
+        </LocaleProvider>,
+      );
+    });
+    const editButtons = renderer!.root.findAllByProps({ className: "d-btn role-edit-btn" });
+    expect(editButtons.every((button) => button.props.disabled === true)).toBe(true);
+    expect(renderer!.root.findByProps({ className: "role-name-input t-mono" }).props.disabled).toBe(true);
+    expect(renderer!.root.findByProps({ className: "role-name-input t-mono" }).props["aria-label"]).toBe("成员名称");
+
+    const orgToggle = renderer!.root.findByProps({ className: "d-btn role-org-toggle" });
+    act(() => orgToggle.props.onClick());
+    const reportSelectors = renderer!.root.findAllByProps({ className: "org-report-select" });
+    expect(reportSelectors.length).toBeGreaterThan(0);
+    expect(reportSelectors.every((select) => select.props.disabled === true)).toBe(true);
   });
 
   test("all 4 distinct agents render as rows even though only 2 have a declared role, and all share one owner", () => {
@@ -488,127 +702,44 @@ describe("DivisionBoard sync-to-charter (#150)", () => {
     expect(synced as unknown as string).toContain("Be kind to each other.");
   });
 
+  test("mounting and refreshing roles stay read-only until the moderator clicks sync", () => {
+    const synced: string[] = [];
+    const hostRole = {
+      name: "leo-claude", role: "host" as const, responsibility: "统筹", assigned_by: "leo",
+      assigned_at: 1, kind: "agent" as const, account: "leo", display: "leo-claude",
+    };
+    const props = baseProps({
+      canModerate: true,
+      charterText: "# Team charter\n\nBe kind.",
+      roles: [hostRole],
+      presence: { "leo-claude": presenceEntry({ name: "leo-claude", account: "leo" }) },
+      onSyncToCharter: (text: string) => { synced.push(text); },
+    });
+    render(props);
+    expect(synced).toEqual([]);
+
+    act(() => {
+      renderer!.update(
+        <LocaleProvider>
+          <DivisionBoard
+            {...props}
+            roles={[{ ...hostRole, responsibility: "统筹与验收" }]}
+          />
+        </LocaleProvider>,
+      );
+    });
+    expect(synced).toEqual([]);
+
+    const btn = renderer!.root.find((node) => node.props.className === "d-btn role-sync-charter-btn");
+    act(() => btn.props.onClick());
+    expect(synced).toHaveLength(1);
+    expect(synced[0]).toContain("统筹与验收");
+  });
+
   test("non-moderators do not see the sync-to-charter button", () => {
     render(baseProps({ canModerate: false }));
     const btn = renderer!.root.findAll((n) => n.props.className === "d-btn role-sync-charter-btn");
     expect(btn.length).toBe(0);
-  });
-});
-
-// issue #150（缺口）：头号诉求是「分工/角色变化即自动同步到公告」，此前只有手动按钮。
-// 这里测自动同步 effect：分工变化去抖后自动落盘、非 moderator 静默跳过、内容一致时
-// 幂等不重复写。手动按钮保留为兜底（上一组已覆盖），默认自动。
-describe("DivisionBoard auto-sync-to-charter (#150)", () => {
-  const hostRole = {
-    name: "leo-claude", role: "host" as const, responsibility: "统筹", assigned_by: "leo",
-    assigned_at: 1, kind: "agent" as const, account: "leo", display: "leo-claude",
-  };
-
-  test("does not write before the authoritative charter snapshot has loaded", async () => {
-    let synced: string | null = null;
-    render(
-      baseProps({
-        canModerate: true,
-        charterText: null,
-        roles: [hostRole],
-        presence: { "leo-claude": presenceEntry({ name: "leo-claude", account: "leo" }) },
-        onSyncToCharter: (text: string) => { synced = text; },
-      }),
-    );
-    const btn = renderer!.root.find((node) => node.props.className === "d-btn role-sync-charter-btn");
-    expect(btn.props.disabled).toBe(true);
-    act(() => btn.props.onClick());
-    await flushAutoSync();
-    expect(synced).toBeNull();
-  });
-
-  test("moderator auto-syncs declared roles into the charter with no button click", async () => {
-    let synced: string | null = null;
-    render(
-      baseProps({
-        canModerate: true,
-        charterText: "# Team charter\n\nBe kind to each other.",
-        roles: [hostRole],
-        presence: { "leo-claude": presenceEntry({ name: "leo-claude", account: "leo" }) },
-        onSyncToCharter: (text: string) => { synced = text; },
-      }),
-    );
-    // 没有任何点击——纯靠 effect + 去抖触发。
-    await flushAutoSync();
-    expect(synced).not.toBeNull();
-    expect(synced as unknown as string).toContain("leo-claude");
-    expect(synced as unknown as string).toContain("Be kind to each other.");
-  });
-
-  test("non-moderators never auto-write the charter (silent skip, no failing 403 write)", async () => {
-    let synced: string | null = null;
-    render(
-      baseProps({
-        canModerate: false,
-        charterText: "# Team charter",
-        roles: [hostRole],
-        presence: { "leo-claude": presenceEntry({ name: "leo-claude", account: "leo" }) },
-        onSyncToCharter: (text: string) => { synced = text; },
-      }),
-    );
-    await flushAutoSync();
-    expect(synced).toBeNull();
-  });
-
-  test("does not auto-write out of nothing when there is no division and no existing section", async () => {
-    let synced: string | null = null;
-    render(
-      baseProps({
-        canModerate: true,
-        charterText: "# Team charter\n\nBe kind.",
-        roles: [],
-        presence: {
-          "self-only": presenceEntry({
-            name: "self-only",
-            role: "worker",
-            role_source: "self",
-            note: "runtime claim only",
-          }),
-        },
-        onSyncToCharter: (text: string) => { synced = text; },
-      }),
-    );
-    await flushAutoSync();
-    expect(synced).toBeNull();
-  });
-
-  test("idempotent: no second auto-write once the charter already holds the up-to-date section", async () => {
-    // 第一阶段：空底稿 + 分工，自动写出合并结果。
-    let synced: string | null = null;
-    render(
-      baseProps({
-        canModerate: true,
-        charterText: "# Team charter\n\nBe kind.",
-        roles: [hostRole],
-        presence: { "leo-claude": presenceEntry({ name: "leo-claude", account: "leo" }) },
-        onSyncToCharter: (text: string) => { synced = text; },
-      }),
-    );
-    await flushAutoSync();
-    const firstWrite = synced;
-    expect(firstWrite).not.toBeNull();
-    act(() => renderer!.unmount());
-    renderer = null;
-
-    // 第二阶段：把「已同步好的公告」作为底稿重新渲染，同一份分工——合并结果与现状一致，
-    // 不应再触发任何写入（幂等，防重复堆叠 / 防自我循环）。
-    let secondWrite: string | null = null;
-    render(
-      baseProps({
-        canModerate: true,
-        charterText: firstWrite as unknown as string,
-        roles: [hostRole],
-        presence: { "leo-claude": presenceEntry({ name: "leo-claude", account: "leo" }) },
-        onSyncToCharter: (text: string) => { secondWrite = text; },
-      }),
-    );
-    await flushAutoSync();
-    expect(secondWrite).toBeNull();
   });
 });
 

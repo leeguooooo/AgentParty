@@ -1,49 +1,47 @@
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { useT } from "../i18n/useT";
 
-// #504 团队面板「博客风」外壳：把原来一整页长滚动的三段（分工 / Agent 看板 / 协调）
-// 收进三个页签，结构一目了然。页签带角标（分工=未认领数、协调=@数）。内部各段的数据
-// 逻辑不动——本组件只负责终端/博客风的头部 + 页签导航 + 页签切换。
+// #504 团队面板「博客风」外壳：把成员和工作收进两个页签，结构一目了然。
+// 内部各段的数据逻辑不动——本组件只负责终端/博客风的头部 + 页签导航 + 页签切换。
 
-export type TeamTab = "division" | "board" | "coordination";
+export type TeamTab = "division" | "board";
 
 export interface TeamTabsStats {
   roles: number;
   online: number;
   offline: number;
   unclaimed: number;
+  pendingClaims: number;
 }
 
 export interface TeamTabsProps {
   stats: TeamTabsStats;
-  mentionCount: number;
   division: ReactNode;
   board: ReactNode;
-  coordination: ReactNode;
   initialTab?: TeamTab;
   detail?: ReactNode;
   detailBackLabel?: string;
   onBackFromDetail?: () => void;
   // #504：博客风头自带关闭按钮（设计里 关闭 在头右上）。传入后 modal 隐藏它自己的头，避免双 header。
   onClose?: () => void;
+  closeDisabled?: boolean;
 }
 
 export function TeamTabs({
   stats,
-  mentionCount,
   division,
   board,
-  coordination,
   initialTab = "division",
   detail,
   detailBackLabel = "Back",
   onBackFromDetail,
   onClose,
+  closeDisabled = false,
 }: TeamTabsProps) {
   const t = useT();
   const [tab, setTab] = useState<TeamTab>(initialTab);
   const idPrefix = useId();
-  const tabRefs = useRef<Record<TeamTab, HTMLButtonElement | null>>({ division: null, board: null, coordination: null });
+  const tabRefs = useRef<Record<TeamTab, HTMLButtonElement | null>>({ division: null, board: null });
   const detailBackRef = useRef<HTMLButtonElement | null>(null);
 
   const tabs: Array<{
@@ -69,14 +67,6 @@ export function TeamTabs({
       badge: null,
       badgeHot: false,
       content: board,
-    },
-    {
-      id: "coordination",
-      no: "03",
-      label: t("Channel.team.tab.coordination"),
-      badge: mentionCount > 0 ? mentionCount : null,
-      badgeHot: true,
-      content: coordination,
     },
   ];
   const tabId = (id: TeamTab) => `${idPrefix}-team-tab-${id}`;
@@ -116,9 +106,21 @@ export function TeamTabs({
           >
             {t("Channel.team.badge.unclaimed", { count: String(stats.unclaimed) })}
           </span>
+          {stats.pendingClaims > 0 && (
+            <span className="t-mono team-blog-stat team-blog-stat--hot" role="listitem">
+              {t("Channel.team.badge.pendingClaims", { count: String(stats.pendingClaims) })}
+            </span>
+          )}
         </div>
         {onClose !== undefined && (
-          <button type="button" className="d-btn team-blog-close" onClick={onClose}>
+          <button
+            type="button"
+            className="d-btn team-blog-close"
+            disabled={closeDisabled}
+            onClick={() => {
+              if (!closeDisabled) onClose();
+            }}
+          >
             {t("Channel.tools.close")} ✕
           </button>
         )}
@@ -151,7 +153,7 @@ export function TeamTabs({
             <span className="team-blog-tab-label">{entry.label}</span>
             {entry.badge !== null && (
               <span className={"t-mono team-blog-tab-badge" + (entry.badgeHot ? " team-blog-tab-badge--hot" : "")}>
-                {entry.id === "coordination" ? `@${entry.badge}` : entry.badge}
+                {entry.badge}
               </span>
             )}
           </button>

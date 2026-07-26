@@ -1,7 +1,7 @@
 // 单 Agent 详情弹窗（#272 审计重开）：分工面板/presence roster 里点某个 agent，
 // 独立看它的工作状态（presence 已有字段）、历史工作内容（本频道已加载消息里过滤出它发的）、
 // 在线状态。不建新后端——所有数据来自调用方已经持有的 presence/messages。
-import type { CollaborationRole, MsgFrame, PresenceEntry, Sender } from "@agentparty/shared";
+import type { CollaborationRole, MsgFrame, PresenceEntry, Sender, TaskRecord } from "@agentparty/shared";
 import { autoWakeReachable, wakeableState } from "@agentparty/shared";
 import { useEffect } from "react";
 import { fmtRel } from "../lib/time";
@@ -25,6 +25,9 @@ export interface AgentDetailPanelProps {
   online: boolean;
   presence: PresenceEntry | null;
   messages: MsgFrame[];
+  tasks?: TaskRecord[];
+  onOpenTask?: (id: number) => void;
+  onOpenMessage?: (seq: number) => void | Promise<void>;
   /**
    * Resolved channel assignment. When omitted, presence role/lineage remains visible
    * as explicitly unconfirmed self-report; an assigned value replaces that fallback.
@@ -37,6 +40,14 @@ export interface AgentDetailModalProps extends AgentDetailPanelProps {
 }
 
 const HISTORY_LIMIT = 20;
+const TASK_STATE_ORDER: Partial<Record<TaskRecord["state"], number>> = {
+  in_progress: 0,
+  blocked: 1,
+  needs_review: 2,
+  assigned: 3,
+  backlog: 4,
+  triage: 5,
+};
 
 // 历史工作：从已加载的频道消息里过滤出这个 agent 发的，按 seq 倒序取最近 N 条。
 // 纯函数、单独导出——是这块唯一有「过滤对不对」这个是非判断的地方。
@@ -46,6 +57,26 @@ export function filterAgentHistory(messages: MsgFrame[], name: string, limit = H
     .slice()
     .sort((a, b) => b.seq - a.seq)
     .slice(0, limit);
+}
+
+export function filterMemberTasks(
+  tasks: TaskRecord[],
+  name: string,
+  kind: Sender["kind"],
+): TaskRecord[] {
+  return tasks
+    .filter((task) =>
+      task.state !== "done"
+      && task.assignee?.kind === kind
+      && task.assignee.name === name,
+    )
+    .slice()
+    .sort((left, right) =>
+      (TASK_STATE_ORDER[left.state] ?? 99) - (TASK_STATE_ORDER[right.state] ?? 99)
+      || right.priority - left.priority
+      || right.updated_at - left.updated_at
+      || left.id - right.id,
+    );
 }
 
 function firstLine(body: string): string {
@@ -62,6 +93,9 @@ function AgentDetailContent({
   online,
   presence,
   messages,
+  tasks,
+  onOpenTask,
+  onOpenMessage,
   assignment,
   onClose,
 }: AgentDetailPanelProps & { onClose?: () => void }) {
@@ -69,13 +103,25 @@ function AgentDetailContent({
 
   const now = Date.now();
   const history = filterAgentHistory(messages, name);
-  const state = presence !== null && presence.state !== "offline" ? presence.state : online ? "online" : "offline";
+  const assignedTasks = tasks === undefined ? [] : filterMemberTasks(tasks, name, kind);
+  const reportedState = presence?.state ?? null;
+  // The live roster is authoritative for connectivity. A persisted "working"
+  // presence row can outlive the socket that reported it, so never promote that
+  // stale row back to an online/busy primary status.
+  const state = online
+    ? reportedState !== null && reportedState !== "offline"
+      ? reportedState
+      : "online"
+    : "offline";
+  const staleReportedState = !online && reportedState !== null && reportedState !== "offline"
+    ? reportedState
+    : null;
   const wake = presence !== null ? wakeableState(presence, now) : null;
   // #666：wakeableState 只看 wake layer + 服务端校验，不看 freshness——一个被 harness 收割的 watch --once
   // 会仍报 wakeable_unverified，让人误以为叫得醒。离线且 autoWakeReachable 判不可达时，如实标 unreachable，
   // 与 PresenceBar 的未监听徽章同口径（watch 已退出 / 从未验证，@ 只进历史）。
   const unreachable = state === "offline" && wake !== null && wake !== "offline" && !(presence !== null && autoWakeReachable(presence, now));
-  const busy = presence?.busy === true;
+  const busy = online && presence?.busy === true;
   const queueDepth = busy && typeof presence?.queue_depth === "number" ? presence.queue_depth : null;
   const waitingOwnerCount =
     typeof presence?.waiting_owner_count === "number" && presence.waiting_owner_count > 0 ? presence.waiting_owner_count : 0;
@@ -137,6 +183,12 @@ function AgentDetailContent({
               <dt>{t("AgentDetailModal.state")}</dt>
               <dd className="t-mono">{state}</dd>
             </div>
+            {staleReportedState !== null && (
+              <div className="agent-detail-fact">
+                <dt>{t("AgentDetailModal.lastReportedState")}</dt>
+                <dd className="t-mono">{staleReportedState}</dd>
+              </div>
+            )}
             <div className="agent-detail-fact">
               <dt>{t("AgentDetailModal.waitingOwner")}</dt>
               <dd className="t-mono">
@@ -163,7 +215,9 @@ function AgentDetailContent({
             </div>
             {currentTask !== null && (
               <div className="agent-detail-fact">
-                <dt>{t("AgentDetailModal.currentTask")}</dt>
+                <dt>
+                  {t(online ? "AgentDetailModal.currentTask" : "AgentDetailModal.lastReportedTask")}
+                </dt>
                 <dd className="t-mono">
                   #{currentTask}
                   {heartbeatAt !== null ? ` · ♥ ${fmtRel(heartbeatAt, now)}` : ""}
@@ -190,6 +244,38 @@ function AgentDetailContent({
             )}
           </dl>
         </section>
+        {tasks !== undefined && (
+          <section className="agent-detail-section" aria-label={t("AgentDetailModal.tasks")}>
+            <h3>{t("AgentDetailModal.tasks")}</h3>
+            {assignedTasks.length === 0 ? (
+              <p className="t-mono agent-detail-empty">{t("AgentDetailModal.tasksEmpty")}</p>
+            ) : (
+              <ol className="agent-board-task-list">
+                {assignedTasks.map((task) => (
+                  <li key={task.id} className={`agent-board-task agent-board-task--${task.state}`}>
+                    <span className="t-mono agent-board-task-id">#{task.id}</span>
+                    {onOpenTask !== undefined ? (
+                      <button
+                        type="button"
+                        className="agent-board-task-title agent-board-name--button"
+                        title={task.title}
+                        aria-label={t("AgentDetailModal.openTask", { id: String(task.id), title: task.title })}
+                        onClick={() => onOpenTask(task.id)}
+                      >
+                        {task.title}
+                      </button>
+                    ) : (
+                      <span className="agent-board-task-title" title={task.title}>{task.title}</span>
+                    )}
+                    <span className="t-mono agent-board-task-state">
+                      {t(`AgentDetailModal.taskState.${task.state}`)}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+        )}
         <section className="agent-detail-section" aria-label={t("AgentDetailModal.history")}>
           <h3>{t("AgentDetailModal.history")}</h3>
           {history.length === 0 ? (
@@ -200,7 +286,22 @@ function AgentDetailContent({
                 <li key={m.seq} className="agent-detail-history-item">
                   <span className="t-mono agent-detail-history-seq">#{m.seq}</span>
                   <span className="t-mono agent-detail-history-time">{fmtRel(m.ts, now)}</span>
-                  <span className="agent-detail-history-body">{firstLine(m.body)}</span>
+                  {onOpenMessage !== undefined ? (
+                    <button
+                      type="button"
+                      className="agent-detail-history-body agent-board-name--button"
+                      title={m.body}
+                      aria-label={t("AgentDetailModal.openMessage", {
+                        seq: String(m.seq),
+                        summary: firstLine(m.body),
+                      })}
+                      onClick={() => { void onOpenMessage(m.seq); }}
+                    >
+                      {firstLine(m.body)}
+                    </button>
+                  ) : (
+                    <span className="agent-detail-history-body">{firstLine(m.body)}</span>
+                  )}
                 </li>
               ))}
             </ul>

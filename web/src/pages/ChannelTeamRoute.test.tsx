@@ -102,6 +102,29 @@ describe("Channel Team member route", () => {
     expect(closeCalls).toBe(1);
   });
 
+  test("a save-in-flight modal disables its scrim and ignores close requests", () => {
+    let closeCalls = 0;
+    act(() => {
+      renderer = create(
+        <LocaleProvider>
+          <ChannelPanelModal
+            title="Team"
+            hideHeader
+            closeDisabled
+            onClose={() => { closeCalls += 1; }}
+          >
+            <div>saving role</div>
+          </ChannelPanelModal>
+        </LocaleProvider>,
+      );
+    });
+
+    const scrim = renderer!.root.find((node) => node.props.className === "channel-panel-scrim");
+    expect(scrim.props.disabled).toBe(true);
+    act(() => scrim.props.onClick());
+    expect(closeCalls).toBe(0);
+  });
+
   test("Admin Members View and Escape return to Members and restore its View trigger", () => {
     let closeCalls = 0;
     let focusedBack = 0;
@@ -193,15 +216,13 @@ describe("Channel Team member route", () => {
           <ChannelPanelModal title="Team" hideHeader onClose={() => {}}>
             <TeamTabs
               initialTab="board"
-              stats={{ roles: 1, online: 1, offline: 0, unclaimed: 0 }}
-              mentionCount={0}
+              stats={{ roles: 1, online: 1, offline: 0, unclaimed: 0, pendingClaims: 0 }}
               division={<div>DIVISION</div>}
               board={(
                 <button type="button" data-team-member-open onClick={() => setShowDetail(true)}>
                   OPEN
                 </button>
               )}
-              coordination={<div>COORDINATION</div>}
               detail={showDetail ? <article data-team-member-detail>DETAIL</article> : null}
               detailBackLabel="Back to team"
               onBackFromDetail={() => setShowDetail(false)}
@@ -243,9 +264,9 @@ describe("Channel Team member route", () => {
     act(() => back.props.onClick());
 
     const teamTabs = r.root.findAllByProps({ role: "tab" });
-    expect(teamTabs.map((tab) => tab.props["aria-selected"])).toEqual([false, true, false]);
+    expect(teamTabs.map((tab) => tab.props["aria-selected"])).toEqual([false, true]);
     expect(r.root.findAllByProps({ role: "tabpanel" }).map((panel) => panel.props.hidden))
-      .toEqual([true, false, true]);
+      .toEqual([true, false]);
     expect(focusedTabId).toContain("team-tab-board");
     expect(r.root.findAll((node) => node.props["data-admin-section"] !== undefined)).toHaveLength(0);
   });

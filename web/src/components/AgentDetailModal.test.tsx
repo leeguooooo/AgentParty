@@ -1,9 +1,9 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
+import type { MsgFrame, PresenceEntry, TaskRecord } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
-import { AgentDetailModal, AgentDetailPanel, filterAgentHistory } from "./AgentDetailModal";
+import { AgentDetailModal, AgentDetailPanel, filterAgentHistory, filterMemberTasks } from "./AgentDetailModal";
 
 // issue #272（审计重开）：单 Agent 详情弹窗——点某个 agent 能看到它的工作状态、
 // 历史工作内容、在线状态，而不再只有频道级平铺看板。
@@ -37,6 +37,31 @@ function msg(overrides: Partial<MsgFrame> & { seq: number; senderName: string })
     sender: { name: senderName, kind: "agent" },
     ...rest,
   } as MsgFrame;
+}
+
+function task(overrides: Partial<TaskRecord> & { id: number; title: string }): TaskRecord {
+  return {
+    type: "task",
+    channel: "alpha",
+    desc: null,
+    state: "assigned",
+    assignee: { name: "worker-a", kind: "agent" },
+    created_by: "leo",
+    created_by_kind: "human",
+    priority: 1,
+    labels: [],
+    parent_id: null,
+    anchor_seqs: [],
+    scope: [],
+    blocked_reason: null,
+    external_ref: null,
+    completion_artifact: null,
+    workflow_id: null,
+    created_at: 1,
+    updated_at: 1,
+    completed_at: null,
+    ...overrides,
+  };
 }
 
 function render(props: Parameters<typeof AgentDetailModal>[0]) {
@@ -119,6 +144,21 @@ describe("filterAgentHistory (#272)", () => {
   });
 });
 
+describe("filterMemberTasks", () => {
+  test("keeps only non-done tasks assigned to the named member identity and kind", () => {
+    const tasks = [
+      task({ id: 1, title: "mine", state: "assigned" }),
+      task({ id: 2, title: "done", state: "done", completed_at: 2 }),
+      task({ id: 3, title: "another agent", assignee: { name: "worker-b", kind: "agent" } }),
+      task({ id: 4, title: "human assignment", assignee: { name: "worker-a", kind: "human" } }),
+      task({ id: 5, title: "unassigned", assignee: null }),
+    ];
+
+    expect(filterMemberTasks(tasks, "worker-a", "agent").map((item) => item.id)).toEqual([1]);
+    expect(filterMemberTasks(tasks, "worker-a", "human").map((item) => item.id)).toEqual([4]);
+  });
+});
+
 describe("AgentDetailModal (#272)", () => {
   function presenceEntry(overrides: Partial<PresenceEntry> = {}): PresenceEntry {
     return { name: "worker-a", state: "working", note: null, ts: 1, kind: "agent", ...overrides };
@@ -197,6 +237,34 @@ describe("AgentDetailModal (#272)", () => {
     expect(text).not.toContain("未监听");
   });
 
+  test("offline roster wins over stale working/busy presence while retaining last reported facts", () => {
+    renderPanel({
+      name: "worker-a",
+      display: "worker-a",
+      kind: "agent",
+      owner: null,
+      online: false,
+      presence: presenceEntry({
+        state: "working",
+        busy: true,
+        queue_depth: 3,
+        current_task: 510,
+      }),
+      messages: [],
+    });
+
+    const text = JSON.stringify(renderer!.toJSON());
+    expect(text).toContain('"状态"');
+    expect(text).toContain('"offline"');
+    expect(text).toContain("最后上报状态");
+    expect(text).toContain('"working"');
+    expect(text).toContain("空闲");
+    expect(text).not.toContain("忙碌 · 排队 3 条");
+    expect(text).toContain("最后上报任务");
+    expect(text).toContain("510");
+    expect(text).not.toContain("当前任务");
+  });
+
   test("history section lists only that agent's messages", () => {
     const root = render({
       name: "worker-a",
@@ -216,6 +284,115 @@ describe("AgentDetailModal (#272)", () => {
     const text = JSON.stringify(renderer!.toJSON());
     expect(text).toContain("did the thing");
     expect(text).not.toContain("unrelated message from someone else");
+  });
+
+  test("loaded message rows drill back into Timeline when a callback is supplied", () => {
+    let openedSeq: number | null = null;
+    const root = renderPanel({
+      name: "worker-a",
+      display: "worker-a",
+      kind: "agent",
+      owner: null,
+      online: true,
+      presence: null,
+      messages: [msg({ seq: 42, senderName: "worker-a", body: "shipped the fix" })],
+      onOpenMessage: (seq) => { openedSeq = seq; },
+    });
+
+    const button = root.find((node) =>
+      node.type === "button"
+      && String(node.props.className ?? "").includes("agent-detail-history-body"),
+    );
+    expect(button.props["aria-label"]).toContain("42");
+    act(() => button.props.onClick());
+    expect(openedSeq).toBe(42);
+  });
+
+  test("shows open tasks assigned to the member and drills into the real Tasks surface", () => {
+    let openedTask: number | null = null;
+    const root = renderPanel({
+      name: "worker-a",
+      display: "worker-a",
+      kind: "agent",
+      owner: null,
+      online: true,
+      presence: null,
+      messages: [],
+      tasks: [
+        task({ id: 11, title: "active work", state: "in_progress" }),
+        task({ id: 12, title: "blocked work", state: "blocked", blocked_reason: "waiting" }),
+        task({ id: 13, title: "finished work", state: "done", completed_at: 3 }),
+        task({ id: 14, title: "someone else's work", assignee: { name: "worker-b", kind: "agent" } }),
+        task({ id: 15, title: "human work", assignee: { name: "worker-a", kind: "human" } }),
+      ],
+      onOpenTask: (id) => { openedTask = id; },
+    });
+
+    const text = JSON.stringify(renderer!.toJSON());
+    expect(text).toContain("active work");
+    expect(text).toContain("blocked work");
+    expect(text).not.toContain("finished work");
+    expect(text).not.toContain("someone else's work");
+    expect(text).not.toContain("human work");
+
+    const taskButtons = root.findAll((node) =>
+      node.type === "button"
+      && String(node.props.className ?? "").includes("agent-board-task-title"),
+    );
+    expect(taskButtons).toHaveLength(2);
+    act(() => taskButtons[1]!.props.onClick());
+    expect(openedTask).toBe(12);
+  });
+
+  test("human detail shows human-assigned tasks without leaking same-name agent tasks", () => {
+    renderPanel({
+      name: "worker-a",
+      display: "Human A",
+      kind: "human",
+      owner: null,
+      online: true,
+      presence: null,
+      messages: [],
+      tasks: [
+        task({ id: 21, title: "human follow-up", assignee: { name: "worker-a", kind: "human" } }),
+        task({ id: 22, title: "agent follow-up", assignee: { name: "worker-a", kind: "agent" } }),
+      ],
+    });
+
+    const text = JSON.stringify(renderer!.toJSON());
+    expect(text).toContain("human follow-up");
+    expect(text).not.toContain("agent follow-up");
+  });
+
+  test("shows a scoped empty task state when task data is supplied", () => {
+    renderPanel({
+      name: "worker-a",
+      display: "worker-a",
+      kind: "agent",
+      owner: null,
+      online: true,
+      presence: null,
+      messages: [],
+      tasks: [task({ id: 13, title: "finished work", state: "done", completed_at: 3 })],
+    });
+
+    expect(JSON.stringify(renderer!.toJSON())).toContain("没有指派给这个成员的未完成任务");
+  });
+
+  test("empty history copy is scoped to the currently loaded messages", () => {
+    renderPanel({
+      name: "worker-a",
+      display: "worker-a",
+      kind: "agent",
+      owner: null,
+      online: true,
+      presence: null,
+      messages: [],
+    });
+
+    const text = JSON.stringify(renderer!.toJSON());
+    expect(text).toContain("当前已加载的消息里没有这个成员的发言");
+    expect(text).not.toContain("这个 agent 还没发过消息");
   });
 
   test("inline panel has no dialog chrome and installs no global keyboard listener", () => {

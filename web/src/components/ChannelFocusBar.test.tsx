@@ -99,6 +99,25 @@ describe("ChannelFocusBar (#682)", () => {
     expect(renderer!.toJSON()).toBeNull();
   });
 
+  test("keeps supplemental Host attention reachable when the normal focus list is empty", () => {
+    let opened = 0;
+    render({
+      focus: focus(),
+      supplementalOverview: {
+        label: "Host 0 · 1 alerts",
+        attention: true,
+      },
+      onOpenOverview: () => { opened += 1; },
+    });
+
+    const entry = renderer!.root.findByProps({
+      className: "t-mono focus-counts focus-counts--btn focus-counts--supplemental focus-counts--attention",
+    });
+    expect(String(entry.props.children)).toContain("1 alerts");
+    act(() => entry.props.onClick());
+    expect(opened).toBe(1);
+  });
+
   test("does not disguise the initial decision load as an empty focus bar", () => {
     render({
       focus: focus(),

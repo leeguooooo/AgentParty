@@ -4,7 +4,12 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { MsgFrame, PresenceEntry, PublicDirectedDelivery, Sender, TaskRecord } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 
-const { AgentBoardPanel, agentPresenceSummary } = await import("./Channel");
+const {
+  AgentBoardPanel,
+  agentPresenceSummary,
+  teamMemberOnlineNames,
+  teamMemberPresenceSummary,
+} = await import("./Channel");
 
 function memoryStorage(seed: Record<string, string> = {}): Storage {
   const values = new Map<string, string>(Object.entries(seed));
@@ -82,6 +87,8 @@ function render(
   messages: MsgFrame[] = [],
   onOpenAgentDetail?: (name: string) => void,
   memberNames?: ReadonlySet<string>,
+  onOpenTask?: (id: number) => void,
+  onOpenMessage?: (seq: number) => void | Promise<void>,
 ): ReactTestRenderer {
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage({ ap_locale: locale }) });
   let r!: ReactTestRenderer;
@@ -95,6 +102,8 @@ function render(
           deliveries={deliveries}
           messages={messages}
           onOpenAgentDetail={onOpenAgentDetail}
+          onOpenTask={onOpenTask}
+          onOpenMessage={onOpenMessage}
           memberNames={memberNames}
         />
       </LocaleProvider>,
@@ -238,6 +247,39 @@ describe("AgentBoardPanel (#187)", () => {
     expect(opened).toBe("alice");
   });
 
+  test("task, delivery, and current-work rows drill into their real destinations", () => {
+    const openedTasks: number[] = [];
+    const openedMessages: number[] = [];
+    const r = render(
+      "en",
+      [presence("alice", { state: "working", live: true, current_task: 42 })],
+      [task(7, "alice", "in_progress")],
+      [],
+      [delivery("delivery-43", "alice", 43, "running", "Delivery work")],
+      [message(42, "Current work"), message(43, "Delivery work")],
+      undefined,
+      undefined,
+      (id) => { openedTasks.push(id); },
+      (seq) => { openedMessages.push(seq); },
+    );
+
+    const taskButton = r.root.findByProps({ "aria-label": "#7 t7" });
+    const currentWorkButton = r.root.findByProps({ "aria-label": "#42 Current work" });
+    const deliveryButton = r.root.findByProps({ "aria-label": "#43 Delivery work" });
+    expect(taskButton.type).toBe("button");
+    expect(currentWorkButton.type).toBe("button");
+    expect(deliveryButton.type).toBe("button");
+
+    act(() => {
+      taskButton.props.onClick();
+      currentWorkButton.props.onClick();
+      deliveryButton.props.onClick();
+    });
+
+    expect(openedTasks).toEqual([7]);
+    expect(openedMessages).toEqual([42, 43]);
+  });
+
   test("treats presence.busy as busy and shows the current message instead of only a status label", () => {
     const r = render(
       "zh",
@@ -255,7 +297,7 @@ describe("AgentBoardPanel (#187)", () => {
     expect(treeText(busyLane)).toContain("处理中");
   });
 
-  test("surfaces a delivery-only target and its queued work in the visible busy lane", () => {
+  test("keeps a delivery-only queued target offline without authoritative online evidence", () => {
     const r = render(
       "zh",
       [],
@@ -265,12 +307,23 @@ describe("AgentBoardPanel (#187)", () => {
       [message(147, "确认 message-bottle token 的归属和验证方式")],
     );
 
-    const busyLane = r.root.findByProps({ "data-status": "busy" });
-    expect(treeText(busyLane)).toContain("Evan-Claude-Kyc");
-    expect(treeText(busyLane)).toContain("# 147");
-    expect(treeText(busyLane)).toContain("确认 message-bottle token");
-    expect(treeText(busyLane)).toContain("已排队");
-    expect(treeText(r.root.findByProps({ "data-status": "offline" }))).not.toContain("Evan-Claude-Kyc");
+    const offlineLane = r.root.findByProps({ "data-status": "offline" });
+    expect(treeText(offlineLane)).toContain("Evan-Claude-Kyc");
+    expect(treeText(offlineLane)).toContain("# 147");
+    expect(treeText(offlineLane)).toContain("确认 message-bottle token");
+    expect(treeText(offlineLane)).toContain("已排队");
+    expect(treeText(r.root.findByProps({ "data-status": "busy" }))).not.toContain("Evan-Claude-Kyc");
+  });
+
+  test("stale offline working and busy flags do not move an agent into the busy lane", () => {
+    const r = render(
+      "en",
+      [presence("stale-worker", { state: "working", live: false, busy: true })],
+      [task(9, "stale-worker", "in_progress")],
+    );
+
+    expect(treeText(r.root.findByProps({ "data-status": "offline" }))).toContain("stale-worker");
+    expect(treeText(r.root.findByProps({ "data-status": "busy" }))).not.toContain("stale-worker");
   });
 
   test("falls back to the worker preview when the delivery message is outside the loaded window", () => {
@@ -284,9 +337,9 @@ describe("AgentBoardPanel (#187)", () => {
       [],
     );
 
-    const busyLane = r.root.findByProps({ "data-status": "busy" });
-    expect(treeText(busyLane)).toContain("为压缩全链路联调时间");
-    expect(treeText(busyLane)).not.toContain("工作内容暂不可用");
+    const offlineLane = r.root.findByProps({ "data-status": "offline" });
+    expect(treeText(offlineLane)).toContain("为压缩全链路联调时间");
+    expect(treeText(offlineLane)).not.toContain("工作内容暂不可用");
   });
 
   test("never shows a retracted message's local body or a stale preview for it", () => {
@@ -300,10 +353,10 @@ describe("AgentBoardPanel (#187)", () => {
       [message(42, "[retracted]", { retracted: true, retracted_at: 42 })],
     );
 
-    const busyLane = treeText(r.root.findByProps({ "data-status": "busy" }));
-    expect(busyLane).not.toContain("[retracted]");
-    expect(busyLane).not.toContain("撤回前的敏感内容");
-    expect(busyLane).toContain("工作内容暂不可用");
+    const offlineLane = treeText(r.root.findByProps({ "data-status": "offline" }));
+    expect(offlineLane).not.toContain("[retracted]");
+    expect(offlineLane).not.toContain("撤回前的敏感内容");
+    expect(offlineLane).toContain("工作内容暂不可用");
   });
 
   test("collapses a deep queued backlog into a summary row instead of listing every delivery", () => {
@@ -311,7 +364,7 @@ describe("AgentBoardPanel (#187)", () => {
       delivery(`d${i}`, "swamped-agent", 100 + i, "queued", `任务 ${100 + i}`));
     const r = render("zh", [], [], [], deliveries, []);
 
-    const busyLane = treeText(r.root.findByProps({ "data-status": "busy" }));
+    const busyLane = treeText(r.root.findByProps({ "data-status": "offline" }));
     // updated_at 倒序：展示最近 5 条（107..103），其余折叠成一行计数。
     expect(busyLane).toContain("任务 107");
     expect(busyLane).toContain("任务 103");
@@ -319,7 +372,7 @@ describe("AgentBoardPanel (#187)", () => {
     expect(busyLane).toContain("还有 3 条");
   });
 
-  test("puts waiting-owner work in the blocked lane and ignores terminal deliveries", () => {
+  test("keeps offline waiting-owner work in the offline lane and ignores terminal deliveries", () => {
     const r = render(
       "en",
       [],
@@ -332,7 +385,8 @@ describe("AgentBoardPanel (#187)", () => {
       [message(51, "Choose the production rollout window"), message(52, "Already complete")],
     );
 
-    expect(treeText(r.root.findByProps({ "data-status": "blocked" }))).toContain("needs-owner");
+    expect(treeText(r.root.findByProps({ "data-status": "offline" }))).toContain("needs-owner");
+    expect(treeText(r.root.findByProps({ "data-status": "blocked" }))).not.toContain("needs-owner");
     expect(allText(r)).toContain("waiting for owner");
     expect(allText(r)).not.toContain("finished-agent");
     expect(allText(r)).not.toContain("Already complete");
@@ -403,5 +457,29 @@ describe("agentPresenceSummary (#514)", () => {
     expect([...summary.onlineNames].sort()).toEqual(["participant-only", "reconnected"]);
     expect(summary.online).toBe(2);
     expect(summary.offline).toBe(2);
+  });
+
+  test("member online projection includes connected humans as well as agents", () => {
+    const online = teamMemberOnlineNames(
+      [
+        presence("live-human", { kind: "human", live: true }),
+        presence("offline-human", { kind: "human", live: false }),
+      ],
+      [
+        { name: "participant-human", kind: "human" },
+        { name: "participant-agent", kind: "agent" },
+      ],
+    );
+
+    expect([...online].sort()).toEqual(["live-human", "participant-agent", "participant-human"]);
+  });
+
+  test("Team counts include connected humans and ignore online names outside the roster", () => {
+    const summary = teamMemberPresenceSummary(
+      new Set(["participant-human", "participant-agent", "offline-agent"]),
+      new Set(["participant-human", "participant-agent", "removed-human"]),
+    );
+
+    expect(summary).toEqual({ online: 2, offline: 1 });
   });
 });

@@ -75,7 +75,7 @@ import { buildReceipts, type MentionReceipt } from "../lib/wakeReceipt";
 import { completionMessages } from "../lib/completions";
 import { catchupKey, summarizeCatchup, type CatchupDigest } from "../lib/digest";
 import { buildOrgTree, type OrgMemberInput } from "../lib/orgTree";
-import { charterHasDivisionSection, formatDivisionSection, mergeDivisionIntoCharter, type DivisionCharterRole } from "../lib/divisionCharter";
+import { formatDivisionSection, mergeDivisionIntoCharter, type DivisionCharterRole } from "../lib/divisionCharter";
 import { declaredAgentRoles, formatAgentRoleSummary } from "../lib/divisionSummary";
 import {
   clearDeliveredMentionNotifications,
@@ -466,6 +466,22 @@ function unassignedMembers(
   return members;
 }
 
+export function teamRoleBuckets(
+  assignedRoles: ChannelRoleInfo[],
+  presence: Record<string, PresenceEntry>,
+  identities: ChannelIdentity[],
+  t: TFunc,
+): {
+  selfReported: ChannelRoleInfo[];
+  unassigned: UnassignedMember[];
+} {
+  const selfReported = selfReportedRoles(assignedRoles, presence, identities);
+  return {
+    selfReported,
+    unassigned: unassignedMembers(assignedRoles, selfReported, presence, identities, t),
+  };
+}
+
 function CharterBanner({
   charter,
   open,
@@ -595,10 +611,11 @@ export interface DivisionBoardProps {
   roleDraft: RoleDraft;
   identities: ChannelIdentity[];
   presence: Record<string, PresenceEntry>;
+  onlineNames?: ReadonlySet<string>;
   onRoleDraft: (name: string, draft: RoleDraft) => void;
   onNewRoleName: (name: string) => void;
   onNewRoleDraft: (draft: RoleDraft) => void;
-  onSaveRole: (name: string, draft: RoleDraft) => void;
+  onSaveRole: (name: string, draft: RoleDraft) => Promise<boolean>;
   onSetReportsTo?: (name: string, reportsTo: string | null) => void;
   onDeleteRole: (name: string) => void;
   forceOpen?: boolean;
@@ -628,6 +645,7 @@ export function DivisionBoard({
   roleDraft,
   identities,
   presence,
+  onlineNames,
   onRoleDraft,
   onNewRoleName,
   onNewRoleDraft,
@@ -646,6 +664,11 @@ export function DivisionBoard({
   const [selfHintOpen, setSelfHintOpen] = useState(false);
   const [selfHintCopied, setSelfHintCopied] = useState(false);
   const [editingRoleName, setEditingRoleName] = useState<string | null>(null);
+  const editingRoleNameRef = useRef<string | null>(null);
+  const editableRolesRef = useRef<Map<string, ChannelRoleInfo>>(new Map());
+  const onRoleDraftRef = useRef(onRoleDraft);
+  const editButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  onRoleDraftRef.current = onRoleDraft;
   const [unassignedOpen, setUnassignedOpen] = useState(false);
   // #504 还原度：组织架构树默认折叠（设计里是个按钮，不是常驻大卡），点开才展开，别顶乱分工列表。
   const [orgOpen, setOrgOpen] = useState(false);
@@ -666,10 +689,44 @@ export function DivisionBoard({
     }
   };
   const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
-  const selfRoles = selfReportedRoles(roles, presence, identities);
+  const roleBuckets = teamRoleBuckets(roles, presence, identities, t);
+  const selfRoles = roleBuckets.selfReported;
+  editableRolesRef.current = new Map(
+    [...roles, ...selfRoles].map((role) => [role.name, role]),
+  );
+  const resetRoleDraft = (name: string) => {
+    const source = editableRolesRef.current.get(name);
+    if (source !== undefined) onRoleDraftRef.current(name, roleDraftFrom(source));
+  };
+  const restoreEditButtonFocus = (name: string) => {
+    globalThis.setTimeout(() => editButtonRefs.current.get(name)?.focus(), 0);
+  };
+  const cancelRoleEdit = (name: string, restoreFocus = true) => {
+    if (roleSaving !== null) return;
+    resetRoleDraft(name);
+    editingRoleNameRef.current = null;
+    setEditingRoleName(null);
+    if (restoreFocus) restoreEditButtonFocus(name);
+  };
+  const beginRoleEdit = (name: string) => {
+    if (roleSaving !== null) return;
+    const previous = editingRoleNameRef.current;
+    if (previous !== null && previous !== name) resetRoleDraft(previous);
+    editingRoleNameRef.current = name;
+    setEditingRoleName(name);
+  };
+  const finishRoleEdit = (name: string) => {
+    editingRoleNameRef.current = null;
+    setEditingRoleName(null);
+    restoreEditButtonFocus(name);
+  };
+  useEffect(() => () => {
+    const name = editingRoleNameRef.current;
+    if (name !== null) resetRoleDraft(name);
+  }, []);
   // issue #169：unassigned 也并入同一份 roleViews，保证 roster 完整。header 的
   // 「N 个分工」只数正式 channel_roles；presence self report 仍显示，但标为待确认。
-  const unassigned = unassignedMembers(roles, selfRoles, presence, identities, t);
+  const unassigned = roleBuckets.unassigned;
   // 只有 channel_roles 是正式分工；presence 自报只是一条待确认 claim。
   const declaredCount = roles.length;
   const roleViews = [
@@ -717,9 +774,9 @@ export function DivisionBoard({
     }))
     .filter((item) => item.count > 0);
 
-  // issue #150\uff1a\u62ff\u5f53\u524d\u5df2\u58f0\u660e\u5206\u5de5\uff08assigned + self\uff0c\u4e0d\u542b\u672a\u5206\u5de5\u5360\u4f4d\uff09\u62fc\u6210 markdown
-  // \u5c0f\u8282\uff0c\u5408\u5e76\u8fdb\u73b0\u6709\u516c\u544a\u6587\u672c\u3002\u7eaf\u8ba1\u7b97\u653e\u5728\u6e32\u67d3\u671f\uff0c\u624b\u52a8\u6309\u94ae\u548c\u4e0b\u9762\u7684\u81ea\u52a8\u540c\u6b65 effect
-  // \u5171\u7528\u540c\u4e00\u4efd\u5408\u5e76\u7ed3\u679c nextCharterText\u2014\u2014\u4fdd\u8bc1\u300c\u624b\u70b9\u300d\u548c\u300c\u81ea\u52a8\u300d\u5199\u8fdb\u53bb\u7684\u6587\u672c\u4e00\u6a21\u4e00\u6837\u3002
+  // issue #150：拿当前正式分工（不含 self report 与未分工占位）拼成 markdown
+  // 小节，合并进现有公告文本。这里只计算候选文本；写入必须由 moderator 明确点击
+  // 「同步到公告」触发，挂载 Team、切换页签或刷新角色数据都不能产生隐式写操作。
   const declaredRoleIdentities = roleViews
     .filter(
       (view): view is typeof view & { role: NonNullable<typeof view.role> } =>
@@ -757,36 +814,6 @@ export function DivisionBoard({
     if (charterText === null) return;
     onSyncToCharter(nextCharterText);
   };
-
-  // issue #150\uff1a\u5934\u53f7\u8bc9\u6c42\u662f\u300c\u5206\u5de5\u53d8\u5316\u5373\u81ea\u52a8\u540c\u6b65\u5230\u516c\u544a\u300d\uff0c\u624b\u52a8\u6309\u94ae\u53ea\u505a\u515c\u5e95\u3002\u8fd9\u91cc\u76d1\u542c
-  // \u5408\u5e76\u7ed3\u679c\u7684\u53d8\u5316\uff0c\u53bb\u6296\u540e\u81ea\u52a8\u843d\u76d8\u3002\u5e42\u7b49/\u65ad\u73af\u9760 mergeDivisionIntoCharter\u2014\u2014\u5199\u8fdb\u53bb\u540e
-  // charterText \u4f1a\u53d8\u5f97\u4e0e\u5408\u5e76\u7ed3\u679c\u4e00\u81f4\uff0ceffect \u518d\u8dd1\u5c31 no-op\uff0c\u4e0d\u4f1a\u81ea\u6211\u5faa\u73af\u3002\u5b88\u536b\uff1a
-  //   - \u975e moderator \u9759\u9ed8\u8df3\u8fc7\uff08\u81ea\u52a8\u5199\u8def\u5f84\u4ecd\u8d70 moderator-only \u7684 setChannelCharter\uff0c
-  //     \u666e\u901a agent \u89e6\u53d1\u53ea\u4f1a 403\uff0c\u4e0d\u5982\u4e0d\u5199\u2014\u2014\u670d\u52a1\u7aef\u81ea\u52a8\u5199\u8005\u662f\u66f4\u5927\u6539\u52a8\uff0c\u7559 follow-up\uff09\uff1b
-  //   - \u5199\u5165\u5728\u9014\uff08syncingCharter\uff0c\u5373\u4e0a\u5c42 charterSaving\uff09\u65f6\u4e0d\u53e0\u5199\uff0c\u590d\u7528\u73b0\u6709\u5e76\u53d1\u5b88\u536b\uff1b
-  //   - \u53ea\u5728\u5408\u5e76\u7ed3\u679c\u4e0e\u5f53\u524d\u516c\u544a\u5b9e\u9645\u4e0d\u540c\u624d\u5199\uff08\u5e42\u7b49\uff0c\u9632\u91cd\u590d\u5806\u53e0\uff09\uff1b
-  //   - \u672c\u6765\u6ca1\u6709\u5206\u5de5\u3001\u516c\u544a\u91cc\u4e5f\u6ca1\u6709\u65e2\u5b58\u5206\u5de5\u533a\u5757\u65f6\u4e0d\u65e0\u4e2d\u751f\u6709\u5199\u7a7a\u533a\u5757\u2014\u2014\u90a3\u79cd\u300c\u663e\u5f0f\u7269\u5316
-  //     \u7a7a\u533a\u5757\u300d\u7684\u52a8\u4f5c\u7559\u7ed9\u624b\u52a8\u6309\u94ae\uff1b\u533a\u5757\u66fe\u5199\u8fc7\u3001\u5206\u5de5\u6e05\u96f6\u65f6\u4ecd\u4f1a\u81ea\u52a8\u5237\u65b0\u4e3a\u7a7a\uff1b
-  //   - lastAutoSyncedRef \u8bb0\u4f4f\u4e0a\u4e00\u6b21\u81ea\u52a8\u5199\u8fc7\u7684\u6587\u672c\uff0c\u4e07\u4e00\u670d\u52a1\u7aef\u56de\u5b58\u65f6\u505a\u4e86\u89c4\u8303\u5316
-  //     \uff08charterText \u4e0e\u6211\u4eec\u53d1\u51fa\u7684\u7565\u6709\u51fa\u5165\uff09\u4e5f\u4e0d\u4f1a\u6bcf\u4e2a\u53bb\u6296\u5468\u671f\u91cd\u590d\u5199\u3001\u6296\u6210\u6b7b\u5faa\u73af\u3002
-  const onSyncRef = useRef(onSyncToCharter);
-  onSyncRef.current = onSyncToCharter;
-  const lastAutoSyncedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!canModerate) return;
-    if (charterText === null) return;
-    if (syncingCharter) return;
-    if (declared.length === 0 && !charterHasDivisionSection(currentCharterText)) return;
-    if (nextCharterText === currentCharterText) return;
-    if (nextCharterText === lastAutoSyncedRef.current) return;
-    const timer = setTimeout(() => {
-      lastAutoSyncedRef.current = nextCharterText;
-      onSyncRef.current(nextCharterText);
-    }, 800);
-    return () => clearTimeout(timer);
-    // declared.length \u8986\u76d6\u300c\u5206\u5de5\u6570\u91cf\u53d8\u5316\u300d\uff1bnextCharterText \u8986\u76d6\u300c\u5206\u5de5\u5185\u5bb9/\u516c\u544a\u5e95\u7a3f\u53d8\u5316\u300d\u3002
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nextCharterText, currentCharterText, canModerate, charterText, syncingCharter, declared.length]);
 
   return (
     <details className="role-board" aria-label={t("Channel.roles.label")} open={forceOpen ? true : undefined}>
@@ -890,9 +917,13 @@ export function DivisionBoard({
                     // 未分工成员——只读展示占位文案，不接可编辑的 role-select/input（那需要一个
                     // 真实的 ChannelRoleInfo；moderator 要给他分工，走下面的「添加」新建行）。
                     const draftForRole = role !== null ? roleDrafts[role.name] ?? roleDraftFrom(role) : null;
+                    const savingThisRole =
+                      role !== null
+                      && (roleSaving === role.name || (source === "self" && roleSaving === "__new__"));
                     // issue #168：汇报对象是否在本频道 roster 里可见——不可见就提示，帮助
                     // 发现/避免跨出本频道边界的汇报关系。
                     const reportsToVisible = reportsTo !== null && knownAssignedNames.has(reportsTo);
+                    const online = onlineNames?.has(name) ?? presence[name]?.live === true;
                     const title = [
                       name !== display ? name : null,
                       t("Composer.owner", { account: accountLabel }),
@@ -904,11 +935,18 @@ export function DivisionBoard({
                       <div
                         key={name}
                         className={`role-row role-row--card role-row--${role?.role ?? "unassigned"}`}
+                        aria-busy={editingRoleName === role?.name && roleSaving !== null}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Escape" || role === null || editingRoleName !== role.name) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          cancelRoleEdit(role.name);
+                        }}
                       >
                         <div className="role-person" title={title}>
                           <span
-                            className={`role-live-dot${presence[name]?.live === true ? " is-online" : ""}`}
-                            aria-label={presence[name]?.live === true ? t("Channel.team.badge.online", { count: "1" }) : t("Channel.team.badge.offline", { count: "1" })}
+                            className={`role-live-dot${online ? " is-online" : ""}`}
+                            aria-label={online ? t("Channel.team.badge.online", { count: "1" }) : t("Channel.team.badge.offline", { count: "1" })}
                           />
                           {onOpenAgentDetail !== undefined ? (
                             <button
@@ -947,7 +985,10 @@ export function DivisionBoard({
                           <>
                             <select
                               className="role-select t-mono"
+                              aria-label={t("Channel.roles.roleLabel")}
                               value={draftForRole.role}
+                              disabled={roleSaving !== null}
+                              autoFocus
                               onChange={(e) => onRoleDraft(role.name, { ...draftForRole, role: e.target.value as CollaborationRole })}
                             >
                               {COLLAB_ROLES.map((item) => (
@@ -956,16 +997,39 @@ export function DivisionBoard({
                             </select>
                             <input
                               className="role-input"
+                              aria-label={t("Channel.roles.responsibilityLabel")}
                               value={draftForRole.responsibility}
+                              disabled={roleSaving !== null}
                               onChange={(e) => onRoleDraft(role.name, { ...draftForRole, responsibility: e.target.value })}
                               autoComplete="off"
                               placeholder={t("Channel.roles.responsibilityPlaceholder")}
                             />
-                            <button className="d-btn" type="button" disabled={roleSaving === role.name} onClick={() => { onSaveRole(role.name, draftForRole); setEditingRoleName(null); }}>
-                              {roleSaving === role.name ? t("Channel.roles.saving") : source === "self" ? t("Channel.roles.register") : t("Channel.roles.save")}
+                            <button
+                              className="d-btn"
+                              type="button"
+                              disabled={roleSaving !== null}
+                              onClick={() => {
+                                void onSaveRole(role.name, draftForRole).then((saved) => {
+                                  if (saved) finishRoleEdit(role.name);
+                                });
+                              }}
+                            >
+                              {savingThisRole
+                                ? t("Channel.roles.saving")
+                                : source === "self"
+                                  ? t("Channel.roles.saveAndConfirm")
+                                  : t("Channel.roles.save")}
+                            </button>
+                            <button
+                              className="d-btn"
+                              type="button"
+                              disabled={roleSaving !== null}
+                              onClick={() => cancelRoleEdit(role.name)}
+                            >
+                              {t("Channel.roles.cancel")}
                             </button>
                             {source === "assigned" && (
-                              <button className="d-btn" type="button" disabled={roleSaving === role.name} onClick={() => onDeleteRole(role.name)}>
+                              <button className="d-btn" type="button" disabled={roleSaving !== null} onClick={() => onDeleteRole(role.name)}>
                                 {t("Channel.roles.clear")}
                               </button>
                             )}
@@ -975,8 +1039,18 @@ export function DivisionBoard({
                             <span className="role-badge t-mono">{role.role}</span>
                             <span className="role-text">{role.responsibility ?? t("Channel.roles.noResponsibility")}</span>
                             {canModerate && (
-                              <button className="d-btn role-edit-btn" type="button" onClick={() => setEditingRoleName(role.name)}>
-                                {t("Channel.roles.edit")}
+                              <button
+                                className="d-btn role-edit-btn"
+                                type="button"
+                                data-role-edit={role.name}
+                                ref={(node) => {
+                                  if (node === null) editButtonRefs.current.delete(role.name);
+                                  else editButtonRefs.current.set(role.name, node);
+                                }}
+                                disabled={roleSaving !== null}
+                                onClick={() => beginRoleEdit(role.name)}
+                              >
+                                {source === "self" ? t("Channel.roles.confirm") : t("Channel.roles.edit")}
                               </button>
                             )}
                           </>
@@ -1014,6 +1088,7 @@ export function DivisionBoard({
                     type="button"
                     className="role-unassigned-chip role-person-name role-person-name--btn t-mono"
                     title={member.owner ?? member.accountLabel}
+                    disabled={roleSaving !== null}
                     onClick={() => onNewRoleName(member.name)}
                   >
                     {member.display}
@@ -1035,7 +1110,9 @@ export function DivisionBoard({
           <div className="role-row role-row--new">
             <input
               className="role-name-input t-mono"
+              aria-label={t("Channel.roles.nameLabel")}
               value={roleName}
+              disabled={roleSaving !== null}
               onChange={(e) => onNewRoleName(e.target.value)}
               list="channel-role-targets"
               autoComplete="off"
@@ -1044,7 +1121,9 @@ export function DivisionBoard({
             />
             <select
               className="role-select t-mono"
+              aria-label={t("Channel.roles.roleLabel")}
               value={roleDraft.role}
+              disabled={roleSaving !== null}
               onChange={(e) => onNewRoleDraft({ ...roleDraft, role: e.target.value as CollaborationRole })}
             >
               {COLLAB_ROLES.map((item) => (
@@ -1053,12 +1132,14 @@ export function DivisionBoard({
             </select>
             <input
               className="role-input"
+              aria-label={t("Channel.roles.responsibilityLabel")}
               value={roleDraft.responsibility}
+              disabled={roleSaving !== null}
               onChange={(e) => onNewRoleDraft({ ...roleDraft, responsibility: e.target.value })}
               autoComplete="off"
               placeholder={t("Channel.roles.responsibilityPlaceholder")}
             />
-            <button className="d-btn d-btn--primary" type="button" disabled={roleSaving === "__new__"} onClick={() => onSaveRole(roleName, roleDraft)}>
+            <button className="d-btn d-btn--primary" type="button" disabled={roleSaving !== null} onClick={() => { void onSaveRole(roleName, roleDraft); }}>
               {roleSaving === "__new__" ? t("Channel.roles.saving") : t("Channel.roles.add")}
             </button>
             <datalist id="channel-role-targets">
@@ -1068,7 +1149,7 @@ export function DivisionBoard({
             </datalist>
           </div>
         )}
-        {roleError !== null && <p className="banner banner--red">{roleError}</p>}
+        {roleError !== null && <p className="banner banner--red" role="alert">{roleError}</p>}
       </div>
     </details>
   );
@@ -1081,6 +1162,7 @@ export function ChannelPanelModal({
   onEscape,
   children,
   hideHeader = false,
+  closeDisabled = false,
   shouldRestoreFocus,
 }: {
   title: string;
@@ -1090,6 +1172,7 @@ export function ChannelPanelModal({
   children: ReactNode;
   // #504：内容自带头部（如团队面板博客风头）时隐藏 modal 默认头，避免双 header。
   hideHeader?: boolean;
+  closeDisabled?: boolean;
   /** A successful message jump deliberately leaves focus on the destination. */
   shouldRestoreFocus?: () => boolean;
 }) {
@@ -1097,6 +1180,9 @@ export function ChannelPanelModal({
   const cardRef = useRef<HTMLElement | null>(null);
   const shouldRestoreFocusRef = useRef(shouldRestoreFocus);
   shouldRestoreFocusRef.current = shouldRestoreFocus;
+  const requestClose = useCallback(() => {
+    if (!closeDisabled) onClose();
+  }, [closeDisabled, onClose]);
   const restoreFocusRef = useRef<HTMLElement | null>(
     typeof document !== "undefined"
       && typeof HTMLElement !== "undefined"
@@ -1120,7 +1206,8 @@ export function ChannelPanelModal({
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         if (event.defaultPrevented) return;
-        (onEscape ?? onClose)();
+        if (onEscape !== undefined) onEscape();
+        else requestClose();
         return;
       }
       if (event.key !== "Tab") return;
@@ -1156,7 +1243,7 @@ export function ChannelPanelModal({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [focusableElements, onClose, onEscape]);
+  }, [focusableElements, onEscape, requestClose]);
   useEffect(() => {
     if (typeof document === "undefined") return;
     const card = cardRef.current;
@@ -1175,7 +1262,13 @@ export function ChannelPanelModal({
 
   return (
     <div className="channel-panel-overlay" role="dialog" aria-modal="true" aria-label={title}>
-      <button className="channel-panel-scrim" type="button" aria-label={t("Channel.tools.close")} onClick={onClose} />
+      <button
+        className="channel-panel-scrim"
+        type="button"
+        aria-label={t("Channel.tools.close")}
+        disabled={closeDisabled}
+        onClick={requestClose}
+      />
       <section ref={cardRef} className="channel-panel-card" tabIndex={-1}>
         {!hideHeader && (
           <header className="channel-panel-head">
@@ -1183,7 +1276,7 @@ export function ChannelPanelModal({
               <h2>{title}</h2>
               {subtitle !== undefined && subtitle !== "" && <p className="t-mono">{subtitle}</p>}
             </div>
-            <button className="d-btn channel-panel-close" type="button" onClick={onClose}>
+            <button className="d-btn channel-panel-close" type="button" disabled={closeDisabled} onClick={requestClose}>
               {t("Channel.tools.close")}
             </button>
           </header>
@@ -1548,21 +1641,25 @@ export function ChannelSearchPanel({
   );
 }
 
-function CompletionPanel({
+export function CompletionPanel({
   completions,
   visible,
   enabled,
+  showItems = true,
   onToggle,
   onJump,
 }: {
   completions: MsgFrame[];
   visible: number;
   enabled: boolean;
+  showItems?: boolean;
   onToggle: () => void;
   onJump: (seq: number) => void;
 }) {
   const t = useT();
-  if (completions.length === 0) return null;
+  // The active filter must always retain its off switch. Search mode may hide
+  // the completion rows, but it cannot make an already-enabled filter inert.
+  if (completions.length === 0 && !enabled) return null;
 
   return (
     <section className="completion-panel" aria-label={t("Channel.completion.aria")}>
@@ -1575,7 +1672,7 @@ function CompletionPanel({
           <span>{enabled ? t("Channel.filter.all") : t("Channel.filter.only")}</span>
         </button>
       </div>
-      <ol className="completion-list">
+      {showItems && completions.length > 0 && <ol className="completion-list">
         {completions.slice(-6).reverse().map((message) => {
           const artifact = message.completion_artifact!;
           const meta = [
@@ -1593,47 +1690,7 @@ function CompletionPanel({
             </li>
           );
         })}
-      </ol>
-    </section>
-  );
-}
-
-function DecisionPanel({ messages }: { messages: MsgFrame[] }) {
-  const t = useT();
-  const decisions = messages
-    .filter((m) => m.kind === "status" && m.status?.decision !== undefined)
-    .slice(-5)
-    .reverse();
-  if (decisions.length === 0) return null;
-
-  return (
-    <section className="decision-panel" aria-label={t("Channel.decision.aria")}>
-      <div className="decision-panel-head">
-        <h2 className="decision-title">{t("Channel.heading.decisions")}</h2>
-        <span className="t-mono decision-count">{decisions.length}</span>
-      </div>
-      <ol className="decision-list">
-        {decisions.map((m) => {
-          const decision = m.status!.decision!;
-          const meta = [
-            decision.next !== null ? t("Channel.decision.meta.next", { value: decision.next }) : null,
-            decision.handoff_to !== undefined ? t("Channel.decision.meta.handoff", { value: decision.handoff_to }) : null,
-            decision.takeover_from !== undefined ? t("Channel.decision.meta.takeover", { value: decision.takeover_from }) : null,
-            decision.expires_at !== null ? t("Channel.decision.meta.expires", { time: fmtTime(decision.expires_at) }) : null,
-          ].filter((part): part is string => part !== null);
-          return (
-            <li key={m.seq} className="decision-item">
-              <div className="decision-item-head">
-                <span className={`t-mono decision-kind decision-kind--${decision.kind}`}>{decision.kind}</span>
-                <span className="decision-owner">{decision.owner}</span>
-                <span className="t-mono decision-seq">#{m.seq}</span>
-              </div>
-              <p>{decision.decision}</p>
-              {meta.length > 0 && <div className="t-mono decision-meta">{meta.join(" · ")}</div>}
-            </li>
-          );
-        })}
-      </ol>
+      </ol>}
     </section>
   );
 }
@@ -1786,6 +1843,28 @@ export function agentPresenceSummary(
   return { agentNames, onlineNames, online: onlineNames.size, offline: agentNames.size - onlineNames.size };
 }
 
+export function teamMemberOnlineNames(
+  presence: PresenceEntry[],
+  participants: Sender[],
+): Set<string> {
+  const onlineNames = new Set(participants.map((participant) => participant.name));
+  for (const entry of presence) {
+    if (entry.live === true) onlineNames.add(entry.name);
+  }
+  return onlineNames;
+}
+
+export function teamMemberPresenceSummary(
+  memberNames: ReadonlySet<string>,
+  onlineNames: ReadonlySet<string>,
+): { online: number; offline: number } {
+  let online = 0;
+  for (const name of memberNames) {
+    if (onlineNames.has(name)) online += 1;
+  }
+  return { online, offline: memberNames.size - online };
+}
+
 export function agentBoardTaskAssignee(task: TaskRecord): string | null {
   const name = task.assignee?.name;
   if (!name || task.assignee?.kind !== "agent") return null;
@@ -1801,6 +1880,8 @@ export function AgentBoardPanel({
   deliveries = [],
   messages = [],
   onOpenAgentDetail,
+  onOpenTask,
+  onOpenMessage,
   memberNames,
 }: {
   presence: PresenceEntry[];
@@ -1809,6 +1890,8 @@ export function AgentBoardPanel({
   deliveries?: PublicDirectedDelivery[];
   messages?: MsgFrame[];
   onOpenAgentDetail?: (name: string) => void;
+  onOpenTask?: (id: number) => void;
+  onOpenMessage?: (seq: number) => void | Promise<void>;
   /** Current channel roster; task/delivery/history cannot recreate a removed member. */
   memberNames?: ReadonlySet<string>;
 }) {
@@ -1857,13 +1940,13 @@ export function AgentBoardPanel({
   );
   const names = new Set(presenceSummary.agentNames);
   const statusOf = (name: string, p: PresenceEntry | undefined, activeDeliveries: PublicDirectedDelivery[]): AgentBoardStatus => {
+    if (!presenceSummary.onlineNames.has(name)) return "offline";
     if (p?.state === "blocked" || activeDeliveries.some((delivery) => delivery.state === "waiting_owner")) return "blocked";
     if (
       p?.busy === true
       || p?.state === "working"
       || activeDeliveries.some((delivery) => delivery.state === "queued" || delivery.state === "claimed" || delivery.state === "running")
     ) return "busy";
-    if (!presenceSummary.onlineNames.has(name)) return "offline";
     return "idle";
   };
   const rows = [...names]
@@ -1980,9 +2063,21 @@ export function AgentBoardPanel({
                     {row.activeWork.slice(0, AGENT_BOARD_MAX_WORK_ROWS).map((work) => (
                       <li key={work.id} className={`agent-board-task agent-board-work agent-board-work--${work.state}`}>
                         <span className="t-mono agent-board-task-id">#{work.seq}</span>
-                        <span className="agent-board-task-title" title={work.summary || undefined}>
-                          {work.summary || t("Channel.agentBoard.workUnavailable")}
-                        </span>
+                        {onOpenMessage !== undefined ? (
+                          <button
+                            type="button"
+                            className="agent-board-task-title agent-board-name--button"
+                            title={work.summary || undefined}
+                            aria-label={`#${work.seq} ${work.summary || t("Channel.agentBoard.workUnavailable")}`}
+                            onClick={() => { void onOpenMessage(work.seq); }}
+                          >
+                            {work.summary || t("Channel.agentBoard.workUnavailable")}
+                          </button>
+                        ) : (
+                          <span className="agent-board-task-title" title={work.summary || undefined}>
+                            {work.summary || t("Channel.agentBoard.workUnavailable")}
+                          </span>
+                        )}
                         <span className="t-mono agent-board-task-state">{t(`WakeReceipt.delivery.state.${work.state}`)}</span>
                       </li>
                     ))}
@@ -1998,7 +2093,19 @@ export function AgentBoardPanel({
                     {row.tasks.map((task) => (
                       <li key={task.id} className={`agent-board-task agent-board-task--${task.state}`}>
                         <span className="t-mono agent-board-task-id">#{task.id}</span>
-                        <span className="agent-board-task-title" title={task.title}>{task.title}</span>
+                        {onOpenTask !== undefined ? (
+                          <button
+                            type="button"
+                            className="agent-board-task-title agent-board-name--button"
+                            title={task.title}
+                            aria-label={`#${task.id} ${task.title}`}
+                            onClick={() => onOpenTask(task.id)}
+                          >
+                            {task.title}
+                          </button>
+                        ) : (
+                          <span className="agent-board-task-title" title={task.title}>{task.title}</span>
+                        )}
                         <span className="t-mono agent-board-task-state">{t(`Channel.tasks.state.${task.state}`)}</span>
                       </li>
                     ))}
@@ -3446,7 +3553,7 @@ export function ChannelPage({
   );
 
   // #204：host board 的 conflicts 与 resolve-conflict / review-blockers 建议都从任务台账派生。
-  // HostBoardPanel 在进频道时就渲染，若这里只拉 summary，board 会一直显示「无冲突」直到用户碰巧
+  // HostBoardPanel 已归入 Focus；若这里只拉 summary，Focus 会一直显示「无冲突」直到用户碰巧
   // 点开任务面板——空的 board 与「确实没有冲突」在界面上无法区分。故挂载时拉完整台账
   // （loadTaskLedger 同时取 tasks 与 summary，替代原先单拉 summary 的调用）。
   useEffect(() => {
@@ -4406,42 +4513,44 @@ export function ChannelPage({
     setRoleDrafts((current) => ({ ...current, [name]: next }));
   }, []);
 
-  const saveRole = useCallback((rawName: string, roleDraft: RoleDraft) => {
+  const saveRole = useCallback(async (rawName: string, roleDraft: RoleDraft): Promise<boolean> => {
     const name = rawName.trim();
-    if (name === "" || roleSaving !== null) return;
+    if (name === "" || roleSaving !== null) return false;
     const savingKey = channelRoles.some((role) => role.name === name) ? name : "__new__";
     setRoleSaving(savingKey);
     setRoleError(null);
-    setChannelRole(token, slug, name, roleDraft.role, roleDraft.responsibility)
-      .then((saved) => {
-        setChannelRoles((current) => {
-          if (removedChannelMembersRef.current.has(saved.name)) {
-            return current.filter((role) => role.name !== saved.name);
-          }
-          const previous = current.find((role) => role.name === saved.name);
-          return [...current.filter((role) => role.name !== saved.name), { ...previous, ...saved }];
-        });
-        setRoleDrafts((current) => {
-          if (!removedChannelMembersRef.current.has(saved.name)) {
-            return { ...current, [saved.name]: roleDraftFrom(saved) };
-          }
-          if (!(saved.name in current)) return current;
-          const next = { ...current };
-          delete next[saved.name];
-          return next;
-        });
-        if (savingKey === "__new__") {
-          setNewRoleName("");
-          setNewRoleDraft({ role: "worker", responsibility: "" });
+    try {
+      const saved = await setChannelRole(token, slug, name, roleDraft.role, roleDraft.responsibility);
+      setChannelRoles((current) => {
+        if (removedChannelMembersRef.current.has(saved.name)) {
+          return current.filter((role) => role.name !== saved.name);
         }
-      })
-      .catch((err: unknown) => {
-        if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
-        else if (err instanceof ForbiddenError) setRoleError(t("Channel.roles.forbidden"));
-        else if (err instanceof ValidationError) setRoleError(t("Channel.roles.invalid"));
-        else setRoleError(t("Channel.roles.saveFailed"));
-      })
-      .finally(() => setRoleSaving(null));
+        const previous = current.find((role) => role.name === saved.name);
+        return [...current.filter((role) => role.name !== saved.name), { ...previous, ...saved }];
+      });
+      setRoleDrafts((current) => {
+        if (!removedChannelMembersRef.current.has(saved.name)) {
+          return { ...current, [saved.name]: roleDraftFrom(saved) };
+        }
+        if (!(saved.name in current)) return current;
+        const next = { ...current };
+        delete next[saved.name];
+        return next;
+      });
+      if (savingKey === "__new__") {
+        setNewRoleName("");
+        setNewRoleDraft({ role: "worker", responsibility: "" });
+      }
+      return true;
+    } catch (err: unknown) {
+      if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
+      else if (err instanceof ForbiddenError) setRoleError(t("Channel.roles.forbidden"));
+      else if (err instanceof ValidationError) setRoleError(t("Channel.roles.invalid"));
+      else setRoleError(t("Channel.roles.saveFailed"));
+      return false;
+    } finally {
+      setRoleSaving(null);
+    }
   }, [channelRoles, roleSaving, slug, token, t]);
 
   // #370 组织树：就地设置某成员向谁汇报（reportsTo=null 清空）。沿用现有角色/职责，只改 reports_to。
@@ -4661,7 +4770,7 @@ export function ChannelPage({
   );
   const hostBoard = useMemo(
     // #204 open_claims / conflicts / blockers 改由任务台账派生：把已加载的 tasks 一并喂进 buildHostBoard。
-    // 注：tasks 目前在打开任务面板时惰性加载，未打开时 board 的 task 派生段为空（详见 loadTaskLedger）。
+    // Channel 挂载即拉完整台账，因此 Focus 里的 host actions 不依赖用户先打开 Tasks。
     () => buildHostBoard(slug, Object.values(state.presence), state.messages, tasks, teamNow, { loopGuardActive: state.loopGuard !== null }),
     [slug, state.loopGuard, state.messages, state.presence, tasks, teamNow],
   );
@@ -4750,28 +4859,6 @@ export function ChannelPage({
       participant: state.participants.find((participant) => participant.name === name) ?? null,
     });
   }, [channelRoles, identityDisplay, memberDetailRoute, state.participants, state.presence]);
-  const memberDetailContent = selectedTeamMember === null ? null : (
-    <AgentDetailPanel
-      name={selectedTeamMember.name}
-      display={selectedTeamMember.display}
-      kind={selectedTeamMember.kind}
-      owner={selectedTeamMember.owner}
-      online={selectedTeamMember.runtime.online}
-      presence={selectedTeamMember.runtime.presence}
-      messages={state.messages}
-      assignment={{
-        role: selectedTeamMember.role.role,
-        responsibility: selectedTeamMember.role.responsibility,
-        reportsTo: selectedTeamMember.role.reportsTo,
-        source:
-          selectedTeamMember.role.source === "channel_roles"
-            ? "assigned"
-            : selectedTeamMember.role.source === "presence"
-              ? "self_reported"
-              : "none",
-      }}
-    />
-  );
   // 只给「确定是 agent」的 @ 目标算回执：kind 已知 agent 才纳入，未知/人类不标（避免把人误标成待唤醒）。
   const isAgentMention = useMemo(() => {
     const kind = new Map<string, "agent" | "human">();
@@ -4873,29 +4960,27 @@ export function ChannelPage({
   const taskReviewCount = taskSummary?.needs_review ?? tasks.filter((task) => task.state === "needs_review").length;
   const taskBlockedCount = taskSummary?.blocked ?? tasks.filter((task) => task.state === "blocked").length;
   const taskMineCount = taskSummary?.mine ?? 0;
-  const agentPresence = useMemo(
-    () => agentPresenceSummary(
-      Object.values(state.presence),
-      state.participants,
-      [
-        ...tasks.map(agentBoardTaskAssignee).filter((name): name is string => name !== null),
-        ...activeDeliveryTargets(Object.values(state.directedDeliveries)),
-      ],
-      authoritativeMemberNames,
-    ),
-    [authoritativeMemberNames, state.directedDeliveries, state.participants, state.presence, tasks],
+  const memberOnlineNames = useMemo(
+    () => teamMemberOnlineNames(Object.values(state.presence), state.participants),
+    [state.participants, state.presence],
   );
-  const onlineAgentCount = agentPresence.online;
-  // #504 团队面板博客风页签的角标：离线 agent 数 / 未认领分工数 / @我未读数。
-  // 未认领复用 DivisionBoard 同款 unassignedMembers（assigned+self 之外的已连接成员），语义一致。
-  const offlineAgentCount = agentPresence.offline;
-  const unclaimedTeamCount = unassignedMembers(
+  const memberPresenceSummary = useMemo(
+    () => teamMemberPresenceSummary(authoritativeMemberNames, memberOnlineNames),
+    [authoritativeMemberNames, memberOnlineNames],
+  );
+  const onlineMemberCount = memberPresenceSummary.online;
+  // Team 头部和 Members 列表必须使用同一口径：presence 自报是「待确认」，不能再次
+  // 计入「未认领」。此前这里传空 selfRoles，实机会把 3 个待确认 + 10 个未分工显示成
+  // 13 个未认领，而 Members 折叠区仍是 10。
+  const offlineMemberCount = memberPresenceSummary.offline;
+  const teamRoleSummary = teamRoleBuckets(
     channelRoles,
-    [],
     state.presence,
     channelIdentities,
     t,
-  ).length;
+  );
+  const pendingRoleClaimCount = teamRoleSummary.selfReported.length;
+  const unclaimedTeamCount = teamRoleSummary.unassigned.length;
 
   // 频道常驻焦点栏（#682）：跨成员把任务台账 + presence/status + 未闭合决策聚成「球在谁手里」。
   // teamNow 已每秒推进（团队面板复用），焦点的 staleness/时间判定跟着刷新，无需另起计时器。
@@ -5081,6 +5166,38 @@ export function ChannelPage({
     return located;
   }, [activePanel, navigateToMessage]);
 
+  const memberDetailContent = selectedTeamMember === null ? null : (
+    <AgentDetailPanel
+      name={selectedTeamMember.name}
+      display={selectedTeamMember.display}
+      kind={selectedTeamMember.kind}
+      owner={selectedTeamMember.owner}
+      online={selectedTeamMember.runtime.online}
+      presence={selectedTeamMember.runtime.presence}
+      messages={state.messages}
+      tasks={tasks}
+      onOpenTask={openFocusedTask}
+      onOpenMessage={async (seq) => {
+        const located = await navigateToMessage(seq);
+        if (located) {
+          skipPanelFocusRestoreRef.current = true;
+          closeChannelPanel();
+        }
+      }}
+      assignment={{
+        role: selectedTeamMember.role.role,
+        responsibility: selectedTeamMember.role.responsibility,
+        reportsTo: selectedTeamMember.role.reportsTo,
+        source:
+          selectedTeamMember.role.source === "channel_roles"
+            ? "assigned"
+            : selectedTeamMember.role.source === "presence"
+              ? "self_reported"
+              : "none",
+      }}
+    />
+  );
+
   useEffect(() => {
     if (q === "") {
       setSearchHits([]);
@@ -5143,28 +5260,58 @@ export function ChannelPage({
     );
   }
 
-  const coordinationContent = (
-    <div className="team-coordination">
-      {catchupDigest !== null && catchupDigest.messages > 0 && seenSeq !== null && (
-        <CatchupPanel
-          digest={catchupDigest}
-          seenSeq={seenSeq}
-          latestSeq={lastSeq}
-          onCaughtUp={onCaughtUp}
-        />
-      )}
-      {q === "" && <HostBoardPanel board={hostBoard} />}
-      {q === "" && <TeamPanel teams={teamSummaries} />}
-      {q === "" && <DecisionPanel messages={state.messages} />}
-      {q === "" && (
-        <CompletionPanel
-          completions={completions}
-          visible={visibleCompletions.length}
-          enabled={completionOnly}
-          onToggle={() => setCompletionOnly((current) => !current)}
-          onJump={jumpToCompletion}
-        />
-      )}
+  const hostBoardAttentionCount =
+    hostBoard.recommended_actions.length + hostBoard.conflicts.length;
+  const hostBoardVisible =
+    hostBoard.hosts.length > 0 || hostBoardAttentionCount > 0;
+  const hostBoardSummary = t("ChannelFocusBar.hostSummary", {
+    hosts: String(hostBoard.hosts.length),
+    attention: String(hostBoardAttentionCount),
+  });
+
+  const searchContent = (
+    <div className="timeline-tools">
+      <ChannelSearchPanel
+        search={search}
+        query={q}
+        searchFrom={searchFrom}
+        searchSince={searchSince}
+        searchLimit={searchLimit}
+        senderListId={senderListId}
+        knownSenders={knownSenders}
+        searchLoading={searchLoading}
+        searchHits={searchHits}
+        visibleSearchHits={visibleSearchHits}
+        agentFilterActive={agentFilterActive}
+        searchInputError={searchInputError}
+        searchError={searchError}
+        jumpError={messageNavigationError}
+        onSearch={(value) => {
+          messageNavigationRequestRef.current += 1;
+          cancelPendingMessageNavigation();
+          setSearch(value);
+          setMessageNavigationError(null);
+        }}
+        onSearchFrom={setSearchFrom}
+        onSearchSince={setSearchSince}
+        onSearchLimit={setSearchLimit}
+        onClose={closeChannelPanel}
+        onJump={jumpToSearchHit}
+      />
+      <CompletionPanel
+        completions={completions}
+        visible={visibleCompletions.length}
+        enabled={completionOnly}
+        showItems={q === ""}
+        onToggle={() => setCompletionOnly((current) => !current)}
+        onJump={(seq) => {
+          void jumpToCompletion(seq).then((located) => {
+            if (!located) return;
+            skipPanelFocusRestoreRef.current = true;
+            closeChannelPanel();
+          });
+        }}
+      />
       {knownSenders.length > 0 && (
         <AgentFilterPanel
           senders={knownSenders}
@@ -5178,36 +5325,6 @@ export function ChannelPage({
         />
       )}
     </div>
-  );
-
-  const searchContent = (
-    <ChannelSearchPanel
-      search={search}
-      query={q}
-      searchFrom={searchFrom}
-      searchSince={searchSince}
-      searchLimit={searchLimit}
-      senderListId={senderListId}
-      knownSenders={knownSenders}
-      searchLoading={searchLoading}
-      searchHits={searchHits}
-      visibleSearchHits={visibleSearchHits}
-      agentFilterActive={agentFilterActive}
-      searchInputError={searchInputError}
-      searchError={searchError}
-      jumpError={messageNavigationError}
-      onSearch={(value) => {
-        messageNavigationRequestRef.current += 1;
-        cancelPendingMessageNavigation();
-        setSearch(value);
-        setMessageNavigationError(null);
-      }}
-      onSearchFrom={setSearchFrom}
-      onSearchSince={setSearchSince}
-      onSearchLimit={setSearchLimit}
-      onClose={closeChannelPanel}
-      onJump={jumpToSearchHit}
-    />
   );
 
   return (
@@ -5237,6 +5354,10 @@ export function ChannelPage({
           <ChannelFocusBar
             focus={channelFocus}
             decisionState={pendingDecisionLoadState}
+            supplementalOverview={hostBoardVisible ? {
+              label: hostBoardSummary,
+              attention: hostBoardAttentionCount > 0,
+            } : undefined}
             viewerIsModerator={canModerate}
             onOpenTask={openFocusedTask}
             onJumpSeq={jumpToMention}
@@ -5282,15 +5403,12 @@ export function ChannelPage({
             {charter !== null && <span className="t-mono chan-tool-badge">{t("Channel.charter.rev", { rev: charter.charter_rev })}</span>}
             {charterUpdated && <span className="t-mono chan-tool-badge chan-tool-badge--hot">{t("Channel.tools.updated")}</span>}
           </button>
-          {/* #370 方案A：分工/协调/Agent 合成单一「团队」入口——组织架构、分工、在线状态、协调一处看 */}
+          {/* Team 只承接成员、正式分工与工作视图；消息筛选/完成记录/Host 告警各回到所属模块。 */}
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("team")}>
             <span className="ap-sprite ap-sprite--division" aria-hidden="true" />
             <span>{t("Channel.tools.team")}</span>
             <span className="t-mono chan-tool-badge">{structuredRoleCount}</span>
-            <span className="t-mono chan-tool-badge">{t("Channel.team.onlineBadge", { count: String(onlineAgentCount) })}</span>
-            {(agentFilterActive || completionOnly) && (
-              <span className="t-mono chan-tool-badge chan-tool-badge--hot">{t("Channel.tools.active")}</span>
-            )}
+            <span className="t-mono chan-tool-badge">{t("Channel.team.onlineBadge", { count: String(onlineMemberCount) })}</span>
           </button>
           <button type="button" className="d-btn chan-tool-btn" onClick={() => openPanel("tasks")}>
             <span className="ap-sprite ap-sprite--tasks" aria-hidden="true" />
@@ -5305,10 +5423,17 @@ export function ChannelPage({
               {taskMineCount > 0 && <span className="t-mono chan-tool-badge">{t("Channel.tasks.summary.mine", { count: taskMineCount })}</span>}
             </div>
           )}
-          <button type="button" className={"d-btn chan-tool-btn" + (q !== "" ? " is-active" : "")} onClick={() => openPanel("search")}>
+          <button
+            type="button"
+            className={"d-btn chan-tool-btn" + (q !== "" || agentFilterActive || completionOnly ? " is-active" : "")}
+            onClick={() => openPanel("search")}
+          >
             <span className="ap-sprite ap-sprite--search" aria-hidden="true" />
-            <span>{t("Channel.tools.search")}</span>
+            <span>{t("Channel.tools.timeline")}</span>
             {q !== "" && seqFromQuery(q) === null && <span className="t-mono chan-tool-badge">{searchLoading ? "..." : searchHits.length}</span>}
+            {(agentFilterActive || completionOnly) && (
+              <span className="t-mono chan-tool-badge chan-tool-badge--hot">{t("Channel.tools.active")}</span>
+            )}
           </button>
           {/* #700 的「本机 agent」独立入口已并入「我的 agent」(AgentTokens) 面板的本机运行段，此处不再单列。 */}
           </>
@@ -5364,6 +5489,14 @@ export function ChannelPage({
           </>
         }
       />
+      {catchupDigest !== null && catchupDigest.messages > 0 && seenSeq !== null && (
+        <CatchupPanel
+          digest={catchupDigest}
+          seenSeq={seenSeq}
+          latestSeq={lastSeq}
+          onCaughtUp={onCaughtUp}
+        />
+      )}
       {activePanel !== null && (
         <ChannelPanelModal
           title={
@@ -5372,11 +5505,11 @@ export function ChannelPage({
             activePanel === "focus" ? t("ChannelFocusBar.overviewTitle") :
             activePanel === "tasks" ? t("Channel.tasks.title") :
             activePanel === "admin" ? t("ChannelAdmin.title") :
-            t("Channel.tools.search")
+            t("Channel.tools.timeline")
           }
           subtitle={
             activePanel === "charter" && charter !== null ? t("Channel.charter.rev", { rev: charter.charter_rev }) :
-            activePanel === "team" ? t("Channel.team.subtitle", { roles: String(structuredRoleCount), online: String(onlineAgentCount) }) :
+            activePanel === "team" ? t("Channel.team.subtitle", { roles: String(structuredRoleCount), online: String(onlineMemberCount) }) :
             activePanel === "focus" ? t("ChannelFocusBar.counts", {
               working: channelFocus.counts.working,
               blocked: channelFocus.counts.blocked,
@@ -5388,9 +5521,12 @@ export function ChannelPage({
             undefined
           }
           onClose={closeChannelPanel}
+          closeDisabled={activePanel === "team" && roleSaving !== null}
           onEscape={
             memberDetailRoute !== null && memberDetailRoute.source === activePanel
               ? closeMemberDetail
+              : activePanel === "team" && roleSaving !== null
+                ? () => {}
               : undefined
           }
           shouldRestoreFocus={() => !skipPanelFocusRestoreRef.current}
@@ -5426,18 +5562,18 @@ export function ChannelPage({
             </section>
           )}
           {activePanel === "team" && (
-            // #504 团队面板「博客风」：原来一整页长滚动（分工 + Agent 看板 + 协调）收进三个页签，
-            // 结构一目了然、页签带角标。各段数据逻辑不动（DivisionBoard 等原样），TeamTabs 只管外壳。
-            // 组织架构树仍在 DivisionBoard 顶部（OrgTreePreview）。
+            // Team 只保留两个闭环：成员/正式分工，以及可下钻任务或消息的工作视图。
+            // 原协调杂物页已拆到 Focus、消息时间线和频道级 catch-up。
             <TeamTabs
               onClose={closeChannelPanel}
+              closeDisabled={roleSaving !== null}
               stats={{
                 roles: structuredRoleCount,
-                online: onlineAgentCount,
-                offline: offlineAgentCount,
+                online: onlineMemberCount,
+                offline: offlineMemberCount,
                 unclaimed: unclaimedTeamCount,
+                pendingClaims: pendingRoleClaimCount,
               }}
-              mentionCount={catchupDigest?.mentions ?? 0}
               division={
                 <DivisionBoard
                   canModerate={canModerate}
@@ -5450,6 +5586,7 @@ export function ChannelPage({
                   roleDraft={newRoleDraft}
                   identities={channelIdentities}
                   presence={state.presence}
+                  onlineNames={memberOnlineNames}
                   forceOpen
                   onRoleDraft={updateRoleDraft}
                   onNewRoleName={setNewRoleName}
@@ -5466,17 +5603,27 @@ export function ChannelPage({
                 />
               }
               board={(
-                <AgentBoardPanel
-                  presence={Object.values(state.presence)}
-                  participants={state.participants}
-                  tasks={tasks}
-                  deliveries={Object.values(state.directedDeliveries)}
-                  messages={state.messages}
-                  onOpenAgentDetail={openTeamMember}
-                  memberNames={authoritativeMemberNames}
-                />
+                <div className="team-runtime">
+                  <AgentBoardPanel
+                    presence={Object.values(state.presence)}
+                    participants={state.participants}
+                    tasks={tasks}
+                    deliveries={Object.values(state.directedDeliveries)}
+                    messages={state.messages}
+                    onOpenAgentDetail={openTeamMember}
+                    onOpenTask={openFocusedTask}
+                    onOpenMessage={async (seq) => {
+                      const located = await navigateToMessage(seq);
+                      if (located) {
+                        skipPanelFocusRestoreRef.current = true;
+                        closeChannelPanel();
+                      }
+                    }}
+                    memberNames={authoritativeMemberNames}
+                  />
+                  <TeamPanel teams={teamSummaries} />
+                </div>
               )}
-              coordination={coordinationContent}
               detail={memberDetailRoute?.source === "team" ? memberDetailContent : null}
               detailBackLabel={t("Channel.team.member.back")}
               onBackFromDetail={closeMemberDetail}
@@ -5497,7 +5644,9 @@ export function ChannelPage({
                 }
                 return located;
               }}
-            />
+            >
+              {hostBoardVisible ? <HostBoardPanel board={hostBoard} /> : null}
+            </ChannelFocusPanel>
           )}
           {activePanel === "tasks" && (
             <TaskLedgerPanel
