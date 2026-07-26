@@ -53,6 +53,7 @@ afterEach(() => {
     act(() => renderer!.unmount());
     renderer = null;
   }
+  Reflect.deleteProperty(globalThis, "localStorage");
 });
 
 describe("CompletionPanel", () => {

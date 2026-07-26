@@ -263,9 +263,9 @@ describe("AgentBoardPanel (#187)", () => {
       (seq) => { openedMessages.push(seq); },
     );
 
-    const taskButton = r.root.findByProps({ "aria-label": "#7 t7" });
-    const currentWorkButton = r.root.findByProps({ "aria-label": "#42 Current work" });
-    const deliveryButton = r.root.findByProps({ "aria-label": "#43 Delivery work" });
+    const taskButton = r.root.findByProps({ "aria-label": "Open task #7: t7" });
+    const currentWorkButton = r.root.findByProps({ "aria-label": "Open message #42: Current work" });
+    const deliveryButton = r.root.findByProps({ "aria-label": "Open message #43: Delivery work" });
     expect(taskButton.type).toBe("button");
     expect(currentWorkButton.type).toBe("button");
     expect(deliveryButton.type).toBe("button");

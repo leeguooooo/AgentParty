@@ -946,7 +946,7 @@ export function DivisionBoard({
                         <div className="role-person" title={title}>
                           <span
                             className={`role-live-dot${online ? " is-online" : ""}`}
-                            aria-label={online ? t("Channel.team.badge.online", { count: "1" }) : t("Channel.team.badge.offline", { count: "1" })}
+                            aria-label={t(online ? "Channel.team.member.online" : "Channel.team.member.offline")}
                           />
                           {onOpenAgentDetail !== undefined ? (
                             <button
@@ -2068,7 +2068,10 @@ export function AgentBoardPanel({
                             type="button"
                             className="agent-board-task-title agent-board-name--button"
                             title={work.summary || undefined}
-                            aria-label={`#${work.seq} ${work.summary || t("Channel.agentBoard.workUnavailable")}`}
+                            aria-label={t("AgentDetailModal.openMessage", {
+                              seq: String(work.seq),
+                              summary: work.summary || t("Channel.agentBoard.workUnavailable"),
+                            })}
                             onClick={() => { void onOpenMessage(work.seq); }}
                           >
                             {work.summary || t("Channel.agentBoard.workUnavailable")}
@@ -2098,7 +2101,10 @@ export function AgentBoardPanel({
                             type="button"
                             className="agent-board-task-title agent-board-name--button"
                             title={task.title}
-                            aria-label={`#${task.id} ${task.title}`}
+                            aria-label={t("AgentDetailModal.openTask", {
+                              id: String(task.id),
+                              title: task.title,
+                            })}
                             onClick={() => onOpenTask(task.id)}
                           >
                             {task.title}

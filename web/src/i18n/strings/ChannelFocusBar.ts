@@ -21,7 +21,7 @@ export const ChannelFocusBarStrings: LocaleDict = {
     "ChannelFocusBar.overviewAria": "All current channel focus items",
     "ChannelFocusBar.overviewEmpty": "Nothing currently needs attention.",
     "ChannelFocusBar.counts": "{working} working · {blocked} blocked · {decision} awaiting decision · {stalled} stalled",
-    "ChannelFocusBar.hostSummary": "Host {hosts} · {attention} alerts",
+    "ChannelFocusBar.hostSummary": "Hosts {hosts} · Alerts {attention}",
     "ChannelFocusBar.decisions.loading": "Loading pending decisions…",
     "ChannelFocusBar.decisions.refreshing": "Refreshing pending decisions…",
     "ChannelFocusBar.decisions.loadFailed": "Pending decisions could not be loaded.",

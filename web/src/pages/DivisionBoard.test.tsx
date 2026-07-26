@@ -178,6 +178,7 @@ describe("DivisionBoard roster completeness (#169)", () => {
       String(node.props.className ?? "").split(" ").includes("role-live-dot"),
     );
     expect(String(dot.props.className)).toContain("is-online");
+    expect(dot.props["aria-label"]).toBe("在线");
   });
 
   test("role editing stays collapsed until requested and collapses only after a successful save (#504)", async () => {
