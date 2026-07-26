@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { ChannelFocus, FocusItem } from "../lib/channelFocus";
 import type { PendingDecisionLoadState } from "../lib/pendingDecisions";
 import { useT } from "../i18n/useT";
@@ -18,6 +19,7 @@ export function ChannelFocusPanel({
   onOpenTask,
   onJumpSeq,
   onRetryDecisions,
+  children,
 }: {
   focus: ChannelFocus;
   decisionState?: PendingDecisionLoadState;
@@ -25,6 +27,7 @@ export function ChannelFocusPanel({
   onOpenTask: (taskId: number) => void;
   onJumpSeq: (seq: number) => void;
   onRetryDecisions?: () => void;
+  children?: ReactNode;
 }) {
   const t = useT();
   const actionFor = (item: FocusItem): { label: string; run: () => void } | null => {
@@ -57,11 +60,12 @@ export function ChannelFocusPanel({
           {focus.focus}
         </p>
       )}
-      {focus.items.length === 0 && (
+      {children}
+      {focus.items.length === 0 && children == null && (
         decisionState === undefined || decisionState.lastSuccessfulData !== null
       ) ? (
         <p className="d-empty">{t("ChannelFocusBar.overviewEmpty")}</p>
-      ) : (
+      ) : focus.items.length > 0 ? (
         <ol className="focus-overview-list">
           {focus.items.map((item) => {
             const action = actionFor(item);
@@ -88,7 +92,7 @@ export function ChannelFocusPanel({
             );
           })}
         </ol>
-      )}
+      ) : null}
     </section>
   );
 }

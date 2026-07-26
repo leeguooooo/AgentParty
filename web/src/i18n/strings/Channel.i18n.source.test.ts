@@ -47,11 +47,6 @@ const REQUIRED_KEYS = [
   "Channel.filter.modeAria",
   "Channel.filter.kindAria",
   "Channel.empty.content",
-  "Channel.decision.aria",
-  "Channel.decision.meta.next",
-  "Channel.decision.meta.handoff",
-  "Channel.decision.meta.takeover",
-  "Channel.decision.meta.expires",
   "Channel.team.aria",
   "Channel.team.meta.root",
   "Channel.team.meta.parent",
@@ -169,10 +164,10 @@ describe("Channel i18n source guard (#350)", () => {
       expect(source).toContain(`t("${key}")`);
       expect(ChannelStrings.zh[key]).not.toBe(ChannelStrings.en[key]);
     }
-    // #370 方案A：Agent 面板并入「团队」——在线数从独立 Agent 按钮移到团队按钮的 onlineBadge。
+    // #370 方案A：在线数从独立 Agent 按钮移到团队按钮，并与 Members 的完整 roster 口径一致。
     expect(source).toContain('t("Channel.tools.team")');
     expect(source).toContain("Channel.team.onlineBadge");
-    expect(source).toContain("onlineAgentCount");
+    expect(source).toContain("onlineMemberCount");
   });
 
   test("keeps content tools before channel management and consolidates admin controls in one panel", () => {

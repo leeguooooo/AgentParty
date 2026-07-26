@@ -45,7 +45,7 @@ function OrgNodeRow({ node, t, interactive }: { node: OrgTreeNode; t: TFunc; int
           <select
             className="org-report-select"
             value={node.reportsTo ?? ""}
-            disabled={interactive.busyName === node.name}
+            disabled={interactive.busyName !== null}
             aria-label={t("Channel.org.setReportsToAria", { name: node.name })}
             onChange={(e) => interactive.onSetReportsTo(node.name, e.target.value === "" ? null : e.target.value)}
           >

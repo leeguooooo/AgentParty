@@ -85,6 +85,7 @@ export function PendingDecisionLoadNotice({
 export function ChannelFocusBar({
   focus,
   decisionState,
+  supplementalOverview,
   viewerIsModerator = false,
   onOpenTask,
   onJumpSeq,
@@ -93,6 +94,11 @@ export function ChannelFocusBar({
 }: {
   focus: ChannelFocus;
   decisionState?: PendingDecisionLoadState;
+  /** Extra attention owned by the Focus module (for example HostBoard), even when focus.items is empty. */
+  supplementalOverview?: {
+    label: string;
+    attention: boolean;
+  };
   /** owner/moderator 视角：把「在等你」文案换成「等你拍板」，更贴 owner 最关心的那一类。 */
   viewerIsModerator?: boolean;
   /** 下钻：点 task 派生项 → 打开任务台账（可定位到该 id）。 */
@@ -108,7 +114,12 @@ export function ChannelFocusBar({
   const showDecisionLoadState = decisionState !== undefined
     && (decisionState.loading || decisionState.error !== null);
   // 无 override 焦点 + 无任何在途项 = 什么都不显示（issue：nothing in flight → 不渲染）。
-  if (focus.empty && focus.focus === null && !showDecisionLoadState) return null;
+  if (
+    focus.empty
+    && focus.focus === null
+    && !showDecisionLoadState
+    && supplementalOverview === undefined
+  ) return null;
 
   const drill = (item: FocusItem): (() => void) | undefined => {
     if (item.taskId !== null && onOpenTask !== undefined) return () => onOpenTask(item.taskId!);
@@ -188,6 +199,30 @@ export function ChannelFocusBar({
           onOpenOverview={onOpenOverview}
           compact
         />
+      )}
+      {supplementalOverview !== undefined && (
+        onOpenOverview !== undefined ? (
+          <button
+            type="button"
+            className={
+              "t-mono focus-counts focus-counts--btn focus-counts--supplemental"
+              + (supplementalOverview.attention ? " focus-counts--attention" : "")
+            }
+            onClick={onOpenOverview}
+            title={supplementalOverview.label}
+          >
+            {supplementalOverview.label}
+          </button>
+        ) : (
+          <span
+            className={
+              "t-mono focus-counts focus-counts--supplemental"
+              + (supplementalOverview.attention ? " focus-counts--attention" : "")
+            }
+          >
+            {supplementalOverview.label}
+          </span>
+        )
       )}
 
       {focus.waitingOnMe.length > 0 && (

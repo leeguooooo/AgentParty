@@ -2901,6 +2901,12 @@
   color: var(--t-dim);
 }
 .focus-counts--btn { cursor: pointer; font: inherit; }
+.focus-counts--supplemental { white-space: nowrap; }
+.focus-counts--attention {
+  border-color: var(--t-accent);
+  color: var(--t-accent);
+  background: var(--d-red-soft);
+}
 .focus-count {
   display: inline-flex;
   align-items: center;
@@ -7120,7 +7126,7 @@
   margin: 4px 0;
 }
 
-/* #370 团队面板：分工/Agent状态/协调 三区分隔 */
+/* 旧版团队组合残留的通用分段容器，仍供兼容内容使用。 */
 .team-section { margin-top: 12px; border-top: 1px solid var(--t-faint); padding-top: 8px; }
 .team-section-head { font-size: 12px; font-weight: 700; color: var(--t-muted); margin: 0 0 6px; }
 
@@ -7134,7 +7140,7 @@
 .charter-division-text { font-size: 12px; color: var(--fg, inherit); }
 .charter-division-open { margin-left: auto; font-size: 11px; }
 
-/* #504 团队面板「博客风」页签外壳 —— 头部 + 三页签导航，复用 neo-brutalist terminal token。 */
+/* #504 团队面板外壳 —— 头部 + 成员/运行双页签导航。 */
 .team-blog { display: flex; flex-direction: column; gap: 0; }
 .team-blog-head {
   display: flex; align-items: flex-start; justify-content: flex-start; gap: 14px;
@@ -7175,7 +7181,7 @@
 .team-blog-panel { padding-top: 12px; }
 .team-blog-detail-back { margin-bottom: 2px; }
 
-/* #504 参考稿第二增量：分工卡、Agent 状态板和协调页的信息密度。 */
+/* #504 参考稿第二增量：分工卡与 Agent 状态板的信息密度。 */
 .team-blog .role-board {
   border: 0;
   box-shadow: none;
@@ -7308,14 +7314,16 @@
 .team-blog .agent-board-row--offline .agent-board-note { margin: 0; }
 .team-blog .agent-board-row--offline .agent-board-task-list { grid-column: 1 / -1; }
 .team-blog .agent-board-name { display: inline-flex; align-items: center; gap: 7px; font-family: var(--t-mono); }
-.team-blog .agent-board-name--button {
+.agent-board-name--button {
   padding: 0;
   border: 0;
   background: transparent;
   color: inherit;
+  font: inherit;
+  text-align: inherit;
   cursor: pointer;
 }
-.team-blog .agent-board-name--button:hover { color: var(--t-accent); }
+.agent-board-name--button:hover { color: var(--t-accent); }
 .team-blog .agent-board-lane-empty {
   margin: 0;
   padding: 8px;
@@ -7323,17 +7331,15 @@
   text-align: left;
 }
 
-.team-coordination { display: grid; gap: 14px; }
-.team-coordination .catchup-panel,
-.team-coordination .host-board-panel {
+.team-runtime,
+.timeline-tools { display: grid; gap: 14px; }
+.focus-overview .host-board-panel {
   margin: 0;
   border: 1.5px solid var(--t-border);
   box-shadow: 2px 2px 0 var(--d-shadow);
   background: var(--t-panel);
 }
-.team-coordination .catchup-items li { padding-left: 8px; border-left: 4px solid var(--t-accent); }
-.team-coordination .catchup-chip { border-color: var(--t-faint); }
-.team-coordination .host-action code {
+.focus-overview .host-action code {
   display: block;
   padding: 9px 10px;
   border: 0;
@@ -7341,7 +7347,7 @@
   color: #f5f2e8;
   overflow-x: auto;
 }
-.team-coordination .agent-filter-panel {
+.timeline-tools .agent-filter-panel {
   padding: 8px 0 0;
   border-top: 1px dashed var(--t-faint);
 }

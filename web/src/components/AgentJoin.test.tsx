@@ -7,6 +7,7 @@ import { clearApiBase, setApiBase } from "../lib/base";
 import { MIN_CLI_UNATTENDED } from "../lib/joinPack";
 
 const savedAgents: Array<{ name: string; token: string; command: string }> = [];
+const VAULT_KEY = "ap_agent_token_vault:v1";
 
 mock.module("../lib/api", () => ({
   AuthError: class AuthError extends Error {},
@@ -16,15 +17,9 @@ mock.module("../lib/api", () => ({
   createChannelAgent: mock(async (_slug: string, name: string) => ({ name, token: "ap_created" })),
 }));
 
-// #642：可翻转的复制结果——默认成功（存量用例语义不变），失败用例里置 false。
+// 用真实 vault 覆盖持久化和复制路径，避免 mock.module 污染同一 Bun 进程里的
+// agentTokenVault 单测。#642 仍通过受控的 execCommand 返回值覆盖成功/失败。
 let copyResult = true;
-mock.module("../lib/agentTokenVault", () => ({
-  copyText: async () => copyResult,
-  MIN_CLI: "0.2.124",
-  VERSION_GE_SNIPPET: "version_ge(){ :; }",
-  mcpServerName: (agentName: string) => `party-${agentName.replace(/[^a-zA-Z0-9_-]/g, "-")}`,
-  saveAgentToken: (record: { name: string; token: string; command: string }) => savedAgents.push(record),
-}));
 
 const { AgentJoin } = await import("./AgentJoin");
 
@@ -53,10 +48,14 @@ class TestEventTarget {
 let renderer: ReactTestRenderer | null = null;
 let windowEvents: TestEventTarget;
 let storedLocale: string | null;
+let storedVault: string | null;
+let originalDocumentDescriptor: PropertyDescriptor | undefined;
+let originalClipboardDescriptor: PropertyDescriptor | undefined;
 
 beforeEach(() => {
   savedAgents.length = 0;
   storedLocale = null;
+  storedVault = null;
   copyResult = true;
   windowEvents = new TestEventTarget();
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -71,10 +70,33 @@ beforeEach(() => {
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
     value: {
-      getItem: (key: string) => (key === "ap_locale" ? storedLocale : null),
+      getItem: (key: string) => (key === "ap_locale" ? storedLocale : key === VAULT_KEY ? storedVault : null),
       setItem: (key: string, value: string) => {
         if (key === "ap_locale") storedLocale = value;
+        if (key === VAULT_KEY) {
+          storedVault = value;
+          savedAgents.splice(0, savedAgents.length, ...JSON.parse(value));
+        }
       },
+    },
+  });
+  originalClipboardDescriptor = Object.getOwnPropertyDescriptor(globalThis.navigator, "clipboard");
+  Object.defineProperty(globalThis.navigator, "clipboard", { configurable: true, value: undefined });
+  originalDocumentDescriptor = Object.getOwnPropertyDescriptor(globalThis, "document");
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      createElement: () => ({
+        value: "",
+        setAttribute: () => {},
+        style: {},
+        select: () => {},
+      }),
+      body: {
+        appendChild: () => {},
+        removeChild: () => {},
+      },
+      execCommand: () => copyResult,
     },
   });
 });
@@ -86,6 +108,16 @@ afterEach(() => {
   Reflect.deleteProperty(globalThis, "window");
   Reflect.deleteProperty(globalThis, "location");
   Reflect.deleteProperty(globalThis, "localStorage");
+  if (originalClipboardDescriptor === undefined) {
+    Reflect.deleteProperty(globalThis.navigator, "clipboard");
+  } else {
+    Object.defineProperty(globalThis.navigator, "clipboard", originalClipboardDescriptor);
+  }
+  if (originalDocumentDescriptor === undefined) {
+    Reflect.deleteProperty(globalThis, "document");
+  } else {
+    Object.defineProperty(globalThis, "document", originalDocumentDescriptor);
+  }
 });
 
 function render(

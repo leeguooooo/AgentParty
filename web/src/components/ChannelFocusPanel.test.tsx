@@ -96,6 +96,22 @@ describe("ChannelFocusPanel", () => {
     expect(renderer!.root.findByProps({ className: "d-empty" }).props.children).toBeTruthy();
   });
 
+  test("supplemental attention content suppresses the empty claim", () => {
+    act(() => {
+      renderer = create(
+        <LocaleProvider>
+          <ChannelFocusPanel focus={focus([])} onOpenTask={() => {}} onJumpSeq={() => {}}>
+            <section data-host-attention>HOST_ATTENTION</section>
+          </ChannelFocusPanel>
+        </LocaleProvider>,
+      );
+    });
+
+    expect(renderer!.root.findByProps({ "data-host-attention": true })).toBeTruthy();
+    expect(renderer!.root.findAllByProps({ className: "d-empty" })).toHaveLength(0);
+    expect(renderer!.root.findAllByProps({ className: "focus-overview-list" })).toHaveLength(0);
+  });
+
   test("shows initial loading without claiming the focus list is empty", () => {
     act(() => {
       renderer = create(

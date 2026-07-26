@@ -2,20 +2,13 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import * as realVault from "../lib/agentTokenVault";
+import { MIN_CLI } from "../lib/joinPack";
 
 // #584：vault 里的 command 是生成时刻的冻结文本——旧包会带着 TMPDIR 配置路径、
 // MIN_CLI 0.2.52、无 MCP 步骤继续流通。复制按钮必须现场重建，绝不发存量文本。
 // 这里保留 vault 真实实现（buildMinimalAgentCommand / findSavedAgentToken 都要真的跑），
-// 只桩 copyText 捕获实际发到剪贴板的内容。
+// 并在浏览器剪贴板边界捕获文本，避免 mock.module 污染同一 Bun 进程里的 vault 单测。
 const copiedTexts: string[] = [];
-mock.module("../lib/agentTokenVault", () => ({
-  ...realVault,
-  copyText: async (text: string) => {
-    copiedTexts.push(text);
-    return true;
-  },
-}));
 
 type AgentFixture = { name: string; owner: string; channel_scope: string; created_at: number; nickname?: string | null };
 let agentsFixture: AgentFixture[] = [];
@@ -73,10 +66,20 @@ class TestEventTarget {
 
 let renderer: ReactTestRenderer | null = null;
 const insideTarget = {};
+let originalClipboardDescriptor: PropertyDescriptor | undefined;
 
 beforeEach(() => {
   agentsFixture = [];
   copiedTexts.length = 0;
+  originalClipboardDescriptor = Object.getOwnPropertyDescriptor(globalThis.navigator, "clipboard");
+  Object.defineProperty(globalThis.navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText: async (text: string) => {
+        copiedTexts.push(text);
+      },
+    },
+  });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
@@ -126,6 +129,11 @@ afterEach(async () => {
   Reflect.deleteProperty(globalThis, "document");
   Reflect.deleteProperty(globalThis, "localStorage");
   Reflect.deleteProperty(globalThis, "location");
+  if (originalClipboardDescriptor === undefined) {
+    Reflect.deleteProperty(globalThis.navigator, "clipboard");
+  } else {
+    Object.defineProperty(globalThis.navigator, "clipboard", originalClipboardDescriptor);
+  }
 });
 
 async function renderOpen(): Promise<ReactTestRenderer> {
@@ -191,7 +199,7 @@ describe("AgentTokens copy join pack (#584)", () => {
     expect(copiedTexts.length).toBe(1);
     const pack = copiedTexts[0]!;
     // 现场重建：带当前世界观（版本闸 + 持久配置目录 + 按 agent 唯一的 MCP 注册名 + 原 token）……
-    expect(pack).toContain(`need=${realVault.MIN_CLI}; have=`);
+    expect(pack).toContain(`need=${MIN_CLI}; have=`);
     expect(pack).toContain('AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-legacy-bot-demo.json"');
     expect(pack).toContain("claude mcp add party-legacy-bot --env");
     // #676：token 走 AGENTPARTY_TOKEN 环境变量传入，不写进 argv——可拷贝命令里不得再有明文 `--token ap`
