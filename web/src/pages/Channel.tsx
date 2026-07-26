@@ -438,30 +438,42 @@ interface UnassignedMember {
 // （presence role_source==="self"）的成员——已连接但从没声明过角色的 agent 会被
 // 整条跳过，界面上直接消失（"频道四个 agent 分工面板只有两个"）。这里把他们也
 // 收进名单，用「未分工」占位展示，而不是从 roster 里彻底丢失。
-// 名单来源取 presence（当前/最近连接过）∪ identities（channel 曾经见过的身份）
-// 的并集，与 PresenceBar 的 names 并集口径一致；已在 roles/selfRoles 里出现的
-// 名字（assigned 或 self）不重复收录。
+// 名单来源取 participants（当前连接）∪ presence（当前/最近连接过）∪ identities
+// （channel 曾经见过的身份）的并集，与 Team 头部的权威 roster 口径一致；已在
+// roles/selfRoles 里出现的名字（assigned 或 self）不重复收录。
 function unassignedMembers(
   assignedRoles: ChannelRoleInfo[],
   selfRoles: ChannelRoleInfo[],
   presence: Record<string, PresenceEntry>,
   identities: ChannelIdentity[],
+  participants: Sender[],
   t: TFunc,
 ): UnassignedMember[] {
   const known = new Set([...assignedRoles, ...selfRoles].map((role) => role.name));
   const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
-  const names = new Set([...Object.keys(presence), ...identities.map((identity) => identity.name)]);
+  const participantByName = new Map(participants.map((participant) => [participant.name, participant]));
+  const names = new Set([
+    ...participants.map((participant) => participant.name),
+    ...Object.keys(presence),
+    ...identities.map((identity) => identity.name),
+  ]);
   const members: UnassignedMember[] = [];
   for (const name of names) {
     if (name === "system" || known.has(name)) continue;
-    const entry = presence[name];
-    const identity = identityByName.get(name);
-    const kind = entry?.kind ?? identity?.kind ?? "agent";
-    const account = entry?.account ?? identity?.account;
-    const display = identity?.display ?? name;
-    const accountLabel = account && account !== "" ? account : kind === "human" ? display : t("Channel.roles.unowned");
-    const owner = account && account !== display ? account : null;
-    members.push({ name, display, accountLabel, owner, kind });
+    const member = resolveTeamMemberView({
+      name,
+      identity: identityByName.get(name),
+      presence: presence[name],
+      participant: participantByName.get(name),
+    });
+    const accountLabel = member.account ?? (member.kind === "human" ? member.display : t("Channel.roles.unowned"));
+    members.push({
+      name,
+      display: member.display,
+      accountLabel,
+      owner: member.owner,
+      kind: member.kind,
+    });
   }
   return members;
 }
@@ -470,6 +482,7 @@ export function teamRoleBuckets(
   assignedRoles: ChannelRoleInfo[],
   presence: Record<string, PresenceEntry>,
   identities: ChannelIdentity[],
+  participants: Sender[],
   t: TFunc,
 ): {
   selfReported: ChannelRoleInfo[];
@@ -478,7 +491,7 @@ export function teamRoleBuckets(
   const selfReported = selfReportedRoles(assignedRoles, presence, identities);
   return {
     selfReported,
-    unassigned: unassignedMembers(assignedRoles, selfReported, presence, identities, t),
+    unassigned: unassignedMembers(assignedRoles, selfReported, presence, identities, participants, t),
   };
 }
 
@@ -611,6 +624,7 @@ export interface DivisionBoardProps {
   roleDraft: RoleDraft;
   identities: ChannelIdentity[];
   presence: Record<string, PresenceEntry>;
+  participants: Sender[];
   onlineNames?: ReadonlySet<string>;
   onRoleDraft: (name: string, draft: RoleDraft) => void;
   onNewRoleName: (name: string) => void;
@@ -645,6 +659,7 @@ export function DivisionBoard({
   roleDraft,
   identities,
   presence,
+  participants,
   onlineNames,
   onRoleDraft,
   onNewRoleName,
@@ -689,7 +704,7 @@ export function DivisionBoard({
     }
   };
   const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
-  const roleBuckets = teamRoleBuckets(roles, presence, identities, t);
+  const roleBuckets = teamRoleBuckets(roles, presence, identities, participants, t);
   const selfRoles = roleBuckets.selfReported;
   editableRolesRef.current = new Map(
     [...roles, ...selfRoles].map((role) => [role.name, role]),
@@ -4984,6 +4999,7 @@ export function ChannelPage({
     channelRoles,
     state.presence,
     channelIdentities,
+    state.participants,
     t,
   );
   const pendingRoleClaimCount = teamRoleSummary.selfReported.length;
@@ -5593,6 +5609,7 @@ export function ChannelPage({
                   roleDraft={newRoleDraft}
                   identities={channelIdentities}
                   presence={state.presence}
+                  participants={state.participants}
                   onlineNames={memberOnlineNames}
                   forceOpen
                   onRoleDraft={updateRoleDraft}

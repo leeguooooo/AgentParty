@@ -69,13 +69,20 @@ function delivery(
 }
 
 let renderer: ReactTestRenderer | null = null;
+let originalActEnvironment: PropertyDescriptor | undefined;
+let originalLocalStorage: PropertyDescriptor | undefined;
 beforeEach(() => {
+  originalActEnvironment = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
 });
 afterEach(async () => {
   if (renderer !== null) await act(async () => renderer?.unmount());
   renderer = null;
-  Reflect.deleteProperty(globalThis, "localStorage");
+  if (originalActEnvironment === undefined) Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  else Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", originalActEnvironment);
+  if (originalLocalStorage === undefined) Reflect.deleteProperty(globalThis, "localStorage");
+  else Object.defineProperty(globalThis, "localStorage", originalLocalStorage);
 });
 
 function render(

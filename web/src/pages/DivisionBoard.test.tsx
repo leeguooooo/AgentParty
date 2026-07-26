@@ -1,7 +1,7 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { PresenceEntry } from "@agentparty/shared";
+import type { PresenceEntry, Sender } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 import { DivisionBoard, teamMemberOnlineNames, teamRoleBuckets, type DivisionBoardProps } from "./Channel";
 
@@ -23,6 +23,8 @@ function memoryStorage(): Storage {
 }
 
 let renderer: ReactTestRenderer | null = null;
+let originalActEnvironment: PropertyDescriptor | undefined;
+let originalLocalStorage: PropertyDescriptor | undefined;
 
 const noop = () => {};
 
@@ -48,6 +50,7 @@ function baseProps(overrides: Partial<DivisionBoardProps> = {}): DivisionBoardPr
     roleDraft: { role: "worker", responsibility: "" },
     identities: [],
     presence: {},
+    participants: [],
     onRoleDraft: noop,
     onNewRoleName: noop,
     onNewRoleDraft: noop,
@@ -89,6 +92,8 @@ function openUnassigned(): void {
 }
 
 beforeEach(() => {
+  originalActEnvironment = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
 });
@@ -98,6 +103,10 @@ afterEach(() => {
     act(() => renderer!.unmount());
     renderer = null;
   }
+  if (originalActEnvironment === undefined) Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  else Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", originalActEnvironment);
+  if (originalLocalStorage === undefined) Reflect.deleteProperty(globalThis, "localStorage");
+  else Object.defineProperty(globalThis, "localStorage", originalLocalStorage);
 });
 
 describe("DivisionBoard roster completeness (#169)", () => {
@@ -126,12 +135,41 @@ describe("DivisionBoard roster completeness (#169)", () => {
       assigned,
       presence,
       [],
-      ((key: string) => key) as Parameters<typeof teamRoleBuckets>[3],
+      [],
+      ((key: string) => key) as Parameters<typeof teamRoleBuckets>[4],
     );
 
     expect(assigned).toHaveLength(1);
     expect(buckets.selfReported).toHaveLength(3);
     expect(buckets.unassigned).toHaveLength(10);
+  });
+
+  test("a participant-only member stays visible in the unassigned roster", () => {
+    const participants: Sender[] = [{
+      name: "participant-only",
+      kind: "agent",
+      owner: "human-owner",
+      handle: "Participant Only",
+    }];
+    const buckets = teamRoleBuckets(
+      [],
+      {},
+      [],
+      participants,
+      ((key: string) => key) as Parameters<typeof teamRoleBuckets>[4],
+    );
+
+    expect(buckets.unassigned).toEqual([expect.objectContaining({
+      name: "participant-only",
+      display: "Participant Only",
+      kind: "agent",
+      accountLabel: "human-owner",
+      owner: "human-owner",
+    })]);
+
+    render(baseProps({ participants }));
+    openUnassigned();
+    expect(personNames()).toContain("Participant Only");
   });
 
   test("self-reported roles stay visible but do not count as confirmed assignments", () => {
