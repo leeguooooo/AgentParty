@@ -321,10 +321,9 @@ describe("runWatch", () => {
     });
     const cursors: number[] = [];
     const o = opts({ server: server.url, once: true, mentionsOnly: true, timeoutSec: 0, onCursor: (c) => cursors.push(c) });
-    const started = Date.now();
     expect(await runWatch(o)).toBe(0);
-    // 在 seq=4 到达前就退出（退出即 harness 的唤醒信号）
-    expect(Date.now() - started).toBeLessThan(180);
+    // 输出和游标都停在 seq=3，证明匹配后立即退出、没有消费后续 seq=4。
+    // 不用墙钟上限：事件循环受并行测试负载影响时，60ms 定时器本身也可能延迟。
     expect(o.lines).toEqual(["[3] bob(agent): wake", "watch: channel_last_seq=3 lag=0 skipped_mention_seqs=[]"]);
     // 游标推进过匹配消息，下次待命从 seq=3 之后继续
     expect(cursors).toEqual([1, 2, 3]);
