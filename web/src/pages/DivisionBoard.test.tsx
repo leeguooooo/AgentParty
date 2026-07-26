@@ -350,6 +350,48 @@ describe("DivisionBoard roster completeness (#169)", () => {
     expect(restored.at(-1)).toEqual({ role: "worker", responsibility: "server value" });
   });
 
+  test("rejected saves stay handled for existing and new roles", async () => {
+    const attempted: string[] = [];
+    const role = {
+      name: "worker-a",
+      role: "worker" as const,
+      responsibility: "server value",
+      assigned_by: "leo",
+      assigned_at: 1,
+      kind: "agent" as const,
+    };
+    render(
+      baseProps({
+        canModerate: true,
+        roles: [role],
+        roleDrafts: { "worker-a": { role: "worker", responsibility: "server value" } },
+        roleName: "new-worker",
+        presence: { "worker-a": presenceEntry({ name: "worker-a", live: true }) },
+        onSaveRole: async (name) => {
+          attempted.push(name);
+          throw new Error("save failed");
+        },
+      }),
+    );
+
+    let card = renderer!.root.findByProps({ className: "role-row role-row--card role-row--worker" });
+    act(() => card.findByProps({ className: "d-btn role-edit-btn" }).props.onClick());
+    card = renderer!.root.findByProps({ className: "role-row role-row--card role-row--worker" });
+    const save = card.findAllByType("button").find((node) => String(node.props.children).includes("保存"))!;
+    await act(async () => {
+      save.props.onClick();
+      await Promise.resolve();
+    });
+    expect(card.findAllByType("select")).toHaveLength(1);
+
+    const add = renderer!.root.findByProps({ className: "d-btn d-btn--primary" });
+    await act(async () => {
+      add.props.onClick();
+      await Promise.resolve();
+    });
+    expect(attempted).toEqual(["worker-a", "new-worker"]);
+  });
+
   test("switching edit rows and closing Team discard every unsaved role draft", () => {
     const restored: Array<{ name: string; responsibility: string }> = [];
     const roles = [

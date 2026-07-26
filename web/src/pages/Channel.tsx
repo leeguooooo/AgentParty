@@ -1035,9 +1035,11 @@ export function DivisionBoard({
                               type="button"
                               disabled={roleSaving !== null}
                               onClick={() => {
-                                void onSaveRole(role.name, draftForRole).then((saved) => {
-                                  if (saved) finishRoleEdit(role.name);
-                                });
+                                void onSaveRole(role.name, draftForRole)
+                                  .then((saved) => {
+                                    if (saved) finishRoleEdit(role.name);
+                                  })
+                                  .catch(() => undefined);
                               }}
                             >
                               {savingThisRole
@@ -1165,7 +1167,14 @@ export function DivisionBoard({
               autoComplete="off"
               placeholder={t("Channel.roles.responsibilityPlaceholder")}
             />
-            <button className="d-btn d-btn--primary" type="button" disabled={roleSaving !== null} onClick={() => { void onSaveRole(roleName, roleDraft); }}>
+            <button
+              className="d-btn d-btn--primary"
+              type="button"
+              disabled={roleSaving !== null}
+              onClick={() => {
+                void onSaveRole(roleName, roleDraft).catch(() => undefined);
+              }}
+            >
               {roleSaving === "__new__" ? t("Channel.roles.saving") : t("Channel.roles.add")}
             </button>
             <datalist id="channel-role-targets">
@@ -5005,12 +5014,15 @@ export function ChannelPage({
   // 计入「未认领」。此前这里传空 selfRoles，实机会把 3 个待确认 + 10 个未分工显示成
   // 13 个未认领，而 Members 折叠区仍是 10。
   const offlineMemberCount = memberPresenceSummary.offline;
-  const teamRoleSummary = teamRoleBuckets(
-    channelRoles,
-    state.presence,
-    channelIdentities,
-    state.participants,
-    t,
+  const teamRoleSummary = useMemo(
+    () => teamRoleBuckets(
+      channelRoles,
+      state.presence,
+      channelIdentities,
+      state.participants,
+      t,
+    ),
+    [channelIdentities, channelRoles, state.participants, state.presence, t],
   );
   const pendingRoleClaimCount = teamRoleSummary.selfReported.length;
   const unclaimedTeamCount = teamRoleSummary.unassigned.length;
