@@ -4,7 +4,12 @@ import { act, create, type ReactTestInstance, type ReactTestRenderer } from "rea
 import { LocaleProvider } from "../i18n/locale";
 import { DesktopSettingsStrings } from "../i18n/strings/DesktopSettings";
 import { LocalAgentsOverviewStrings } from "../i18n/strings/LocalAgentsOverview";
-import type { DesktopAgentAdapter, DesktopAgentStatus, DesktopDutyEntry } from "../lib/desktopAgent";
+import type {
+  DesktopAgentAdapter,
+  DesktopAgentConfig,
+  DesktopAgentStatus,
+  DesktopDutyEntry,
+} from "../lib/desktopAgent";
 import { LocalAgentsOverview } from "./LocalAgentsOverview";
 import type { DesktopAgentScheduler } from "./DesktopAgentPanel";
 
@@ -23,6 +28,22 @@ function inst(over: Partial<DesktopAgentStatus>): DesktopAgentStatus {
 }
 function duty(over: Partial<DesktopDutyEntry>): DesktopDutyEntry {
   return { label: "l", instanceId: "cfg:ops", plistPath: "/p", logPath: "/log", loaded: true, ...over };
+}
+function config(over: Partial<DesktopAgentConfig>): DesktopAgentConfig {
+  return {
+    configId: "cfg",
+    name: "planner",
+    serverOrigin: "https://agentparty.test",
+    channel: "ops",
+    kind: "agent",
+    role: "worker",
+    ...over,
+  };
+}
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
 }
 
 function adapter(over: Partial<DesktopAgentAdapter> = {}): DesktopAgentAdapter {
@@ -89,12 +110,114 @@ test("按频道分组渲染 app 实例 + 常驻，未分配排最后", async () 
       inst({ name: "orphan", channel: null, instanceId: null, configId: "o" }),
     ],
     dutyList: async () => [duty({ instanceId: "c:ops", loaded: true })],
+    listConfigs: async () => [config({ configId: "c", name: "ops-resident" })],
   }));
   // 频道升序 + 未分配(unassigned)最后
   expect(groupLabels(root)).toEqual(["ops", "web", "unassigned"]);
-  // ops 组内常驻(c)在实例(ops-builder)前
+  // ops 组内常驻(ops-resident)在实例(ops-builder)前
   const opsGroup = byClass(root, "local-agents-group")[0]!;
-  expect(byClass(opsGroup, "local-agents-name").map((n) => n.children.join(""))).toEqual(["c", "ops-builder"]);
+  expect(byClass(opsGroup, "local-agents-name").map((n) => n.children.join(""))).toEqual(["ops-resident", "ops-builder"]);
+});
+
+test("常驻行显示可信配置名，并在同一行展开日志与运行详情", async () => {
+  const logReads: string[] = [];
+  const root = await render(adapter({
+    listConfigs: async () => [config({
+      configId: "334a626a8ca73a4a9276083677692cbaf71f8d8acb616d426ce8c90e6459c47b",
+      name: "atvloadly",
+      role: "builder",
+    })],
+    dutyList: async () => [duty({
+      label: "com.agentparty.duty.atvloadly",
+      instanceId: "334a626a8ca73a4a9276083677692cbaf71f8d8acb616d426ce8c90e6459c47b:all",
+      runner: "claude",
+      workdir: "/workspace/atvloadly",
+      repo: "https://github.com/example/atvloadly.git",
+      logPath: "/tmp/atvloadly.log",
+    })],
+    dutyLogRead: async (label) => {
+      logReads.push(label);
+      return "serve supervisor: running\\nrunner ready";
+    },
+  }));
+
+  expect(names(root)).toEqual(["atvloadly"]);
+  await act(async () => {
+    byClass(root, "local-agents-details")[0]!.props.onClick();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  const rendered = JSON.stringify(renderer!.toJSON());
+  expect(logReads).toEqual(["com.agentparty.duty.atvloadly"]);
+  expect(rendered).toContain("serve supervisor: running");
+  expect(rendered).toContain("/workspace/atvloadly");
+  expect(rendered).toContain("/tmp/atvloadly.log");
+  expect(rendered).toContain("builder");
+});
+
+test("app 实例的详情直接读取该实例日志，而不是错误地打开常驻日志", async () => {
+  const instanceLogReads: string[] = [];
+  const root = await render(adapter({
+    statusAll: async () => [inst({ name: "planner", instanceId: "cfg:ops", runner: "codex" })],
+    logsInstance: async (instanceId) => {
+      instanceLogReads.push(instanceId);
+      return ["runner started", "waiting for @"];
+    },
+  }));
+
+  await act(async () => {
+    byClass(root, "local-agents-details")[0]!.props.onClick();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(instanceLogReads).toEqual(["cfg:ops"]);
+  expect(JSON.stringify(renderer!.toJSON())).toContain("waiting for @");
+});
+
+test("快速切换详情时，较慢的旧日志请求不能覆盖当前 agent", async () => {
+  const dutyLog = deferred<string>();
+  const instanceLog = deferred<string[]>();
+  const root = await render(adapter({
+    statusAll: async () => [inst({ name: "planner", instanceId: "cfg:ops" })],
+    dutyList: async () => [duty({ instanceId: "resident:ops", label: "resident-label" })],
+    listConfigs: async () => [config({ configId: "resident", name: "resident-bot" })],
+    dutyLogRead: async () => dutyLog.promise,
+    logsInstance: async () => instanceLog.promise,
+  }));
+
+  await act(async () => {
+    byClass(root, "local-agents-details")[0]!.props.onClick();
+  });
+  await act(async () => {
+    byClass(root, "local-agents-details")[1]!.props.onClick();
+  });
+  await act(async () => {
+    instanceLog.resolve(["current instance log"]);
+    await instanceLog.promise;
+  });
+  expect(JSON.stringify(renderer!.toJSON())).toContain("current instance log");
+
+  await act(async () => {
+    dutyLog.resolve("stale resident log");
+    await dutyLog.promise;
+  });
+  const rendered = JSON.stringify(renderer!.toJSON());
+  expect(rendered).toContain("current instance log");
+  expect(rendered).not.toContain("stale resident log");
+});
+
+test("配置已丢失时明确显示未识别身份，并把完整 ID 留在详情而非冒充名字", async () => {
+  const opaque = "334a626a8ca73a4a9276083677692cbaf71f8d8acb616d426ce8c90e6459c47b";
+  const root = await render(adapter({
+    dutyList: async () => [duty({ instanceId: `${opaque}:ops` })],
+  }));
+
+  expect(names(root)).toEqual(["Unknown identity"]);
+  await act(async () => {
+    byClass(root, "local-agents-details")[0]!.props.onClick();
+    await Promise.resolve();
+  });
+  expect(JSON.stringify(renderer!.toJSON())).toContain(opaque);
 });
 
 test("检索按频道/身份/runner/状态过滤", async () => {

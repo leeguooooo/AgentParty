@@ -1,7 +1,7 @@
 // #700：把「本机 agent」从设置里埋着的一段列表，抽成一个「全局按频道视角 + 可检索」的概览。
 // 数据来源两路——app 内实例（statusAll，DesktopAgentStatus）+ launchd 常驻（dutyList，DesktopDutyEntry），
 // 归一成 LocalAgentRow，按频道分组、可按频道/身份/runner/状态检索。纯函数，便于单测；渲染与动作在组件层。
-import type { DesktopAgentStatus, DesktopDutyEntry } from "./desktopAgent";
+import type { DesktopAgentConfig, DesktopAgentStatus, DesktopDutyEntry } from "./desktopAgent";
 
 export type LocalAgentKind = "instance" | "duty";
 
@@ -11,8 +11,11 @@ export interface LocalAgentRow {
   kind: LocalAgentKind;
   /** 归属频道；未知（拿不到）时为 ""，分组时归入「未分配」并排最后。 */
   channel: string;
-  /** 展示名：实例用 name，常驻用 instanceId 的 configId 段。 */
-  name: string;
+  /** 对人展示的身份名；配置已被删除或旧壳拿不到配置时为 null，绝不拿内部哈希冒充名字。 */
+  name: string | null;
+  /** 内部配置 ID 只用于诊断/检索，不作为主展示名。 */
+  configId: string | null;
+  config?: DesktopAgentConfig;
   runner: string | null;
   /** 归一状态标签：实例用 state；常驻用 loaded→"loaded"/"unloaded"。 */
   state: string;
@@ -40,17 +43,23 @@ export function configIdOfInstanceId(instanceId: string): string {
 export function aggregateLocalAgents(
   instances: readonly DesktopAgentStatus[],
   duties: readonly DesktopDutyEntry[],
+  configs: readonly DesktopAgentConfig[] = [],
 ): LocalAgentRow[] {
   const rows: LocalAgentRow[] = [];
+  const configsById = new Map(configs.map((config) => [config.configId, config]));
   for (const item of instances) {
     const instanceId = item.instanceId ?? (item.configId !== null && item.channel !== null ? `${item.configId}:${item.channel}` : null);
+    const configId = item.configId ?? (instanceId === null ? null : configIdOfInstanceId(instanceId));
+    const config = configId === null ? undefined : configsById.get(configId);
     rows.push({
       key: `instance:${instanceId ?? `${item.configId ?? "?"}:${item.channel ?? "?"}`}`,
       kind: "instance",
       // channel 字段优先；缺失时从 instanceId(configId:channel) 回退解析，别把带 instanceId 的实例
       // 误归「未分配」而被频道页 scopeChannel 过滤掉（#707 评审）。
       channel: item.channel ?? (instanceId === null ? "" : channelOfInstanceId(instanceId)),
-      name: item.name ?? item.configId ?? "?",
+      name: item.name ?? config?.name ?? null,
+      configId,
+      config,
       runner: item.runner,
       state: item.state,
       instanceId,
@@ -58,11 +67,15 @@ export function aggregateLocalAgents(
     });
   }
   for (const duty of duties) {
+    const configId = configIdOfInstanceId(duty.instanceId);
+    const config = configsById.get(configId);
     rows.push({
       key: `duty:${duty.instanceId}`,
       kind: "duty",
       channel: channelOfInstanceId(duty.instanceId),
-      name: configIdOfInstanceId(duty.instanceId),
+      name: config?.name ?? null,
+      configId,
+      config,
       runner: duty.runner ?? null,
       // 终局标记即使遇到 bootout 失败而暂时仍 loaded，也必须按异常态展示；reconcile 会继续
       // 尝试卸载，不能给 owner 一个绿色「常驻中」假象。
@@ -81,7 +94,10 @@ export function filterLocalAgents(rows: readonly LocalAgentRow[], query: string)
   return rows.filter((row) => {
     const haystack = [
       row.channel,
-      row.name,
+      row.name ?? "",
+      row.configId ?? "",
+      row.config?.role ?? "",
+      row.config?.kind ?? "",
       row.runner ?? "",
       row.state,
       row.kind,
@@ -113,6 +129,10 @@ export function groupLocalAgentsByChannel(rows: readonly LocalAgentRow[]): Local
   const kindRank: Record<LocalAgentKind, number> = { duty: 0, instance: 1 };
   return channels.map((channel) => ({
     channel,
-    rows: byChannel.get(channel)!.slice().sort((a, b) => kindRank[a.kind] - kindRank[b.kind] || a.name.localeCompare(b.name)),
+    rows: byChannel.get(channel)!.slice().sort((a, b) => {
+      const kindOrder = kindRank[a.kind] - kindRank[b.kind];
+      if (kindOrder !== 0) return kindOrder;
+      return (a.name ?? a.configId ?? "").localeCompare(b.name ?? b.configId ?? "");
+    }),
   }));
 }
