@@ -1,6 +1,6 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { describe, expect, test } from "bun:test";
-import type { DesktopAgentStatus, DesktopDutyEntry } from "./desktopAgent";
+import type { DesktopAgentConfig, DesktopAgentStatus, DesktopDutyEntry } from "./desktopAgent";
 import {
   aggregateLocalAgents,
   channelOfInstanceId,
@@ -31,6 +31,18 @@ function duty(over: Partial<DesktopDutyEntry>): DesktopDutyEntry {
   return { label: "l", instanceId: "cfg:ops", plistPath: "/p", logPath: "/log", loaded: true, ...over };
 }
 
+function config(over: Partial<DesktopAgentConfig>): DesktopAgentConfig {
+  return {
+    configId: "cfg",
+    name: "planner",
+    serverOrigin: "https://agentparty.test",
+    channel: "ops",
+    kind: "agent",
+    role: "worker",
+    ...over,
+  };
+}
+
 describe("channelOfInstanceId / configIdOfInstanceId", () => {
   test("splits at first colon", () => {
     expect(channelOfInstanceId("abc123:guessadmin")).toBe("guessadmin");
@@ -47,12 +59,24 @@ describe("aggregateLocalAgents", () => {
     const rows = aggregateLocalAgents(
       [instance({ name: "planner", channel: "ops", runner: "codex", state: "running", instanceId: "cfg:ops" })],
       [duty({ instanceId: "cfg2:bug001", loaded: true })],
+      [config({ configId: "cfg2", name: "release-bot", channel: "bug001" })],
     );
     expect(rows).toHaveLength(2);
     const inst = rows.find((r) => r.kind === "instance")!;
     expect(inst).toMatchObject({ channel: "ops", name: "planner", runner: "codex", state: "running" });
     const dty = rows.find((r) => r.kind === "duty")!;
-    expect(dty).toMatchObject({ channel: "bug001", name: "cfg2", state: "loaded", runner: null });
+    expect(dty).toMatchObject({
+      channel: "bug001",
+      name: "release-bot",
+      configId: "cfg2",
+      state: "loaded",
+      runner: null,
+    });
+  });
+
+  test("missing config never promotes an opaque config hash into the agent name", () => {
+    const [row] = aggregateLocalAgents([], [duty({ instanceId: "opaque-hash:ops" })]);
+    expect(row).toMatchObject({ name: null, configId: "opaque-hash" });
   });
 
   test("unloaded duty reports state 'unloaded'; null channel + null instanceId → empty", () => {
