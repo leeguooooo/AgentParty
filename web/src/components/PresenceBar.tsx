@@ -295,9 +295,10 @@ export function ownerKey(item: Item): string {
 }
 
 function ownerLabel(item: Item): string {
-  // 显示优先级：handle > SSO display name > owner/account（email）> 原始 name。agent 恒无 handle，不受影响。
+  // 人类显示优先级：SSO display name > handle > owner/account（email）> 原始 name。
+  // 这里只决定 UI 文案；@ 路由仍由服务端的唯一性/歧义规则裁决。
+  if (item.kind === "human" && item.displayName !== null && item.displayName !== "") return item.displayName;
   if (item.handle !== null && item.handle !== "") return item.handle;
-  if (item.displayName !== null && item.displayName !== "") return item.displayName;
   if (item.owner !== null && item.owner !== "") return item.owner;
   return item.name;
 }
@@ -405,7 +406,9 @@ export function PresenceBar({
       context: entry?.context ?? null,
       lineage: entry?.lineage ?? sender?.lineage ?? null,
       workflow: entry?.status?.workflow ?? null,
-      display: assigned?.display ?? handle ?? displayName ?? (kind === "human" && owner !== null ? owner : name),
+      display:
+        assigned?.display ??
+        (kind === "human" ? displayName ?? handle ?? owner ?? name : handle ?? displayName ?? name),
       displayName,
       avatarUrl: sender?.avatar_url ?? entry?.avatar_url ?? null,
       avatarThumb: sender?.avatar_thumb ?? entry?.avatar_thumb ?? null,

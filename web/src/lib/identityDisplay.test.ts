@@ -26,7 +26,7 @@ describe("buildIdentityDisplay", () => {
     expect(map[uuid]).toEqual({ display: "thejacks@163.com", kind: "human", account: "thejacks@163.com" });
   });
 
-  it("prefers a human's handle over owner/email for participants, presence and message senders", () => {
+  it("prefers a human display name over an opaque handle and owner/email", () => {
     const uuid = "61ec302c-6c31-4bca-a1df-88152372f6d9";
     const map = buildIdentityDisplay({
       channelIdentities: [],
@@ -37,18 +37,33 @@ describe("buildIdentityDisplay", () => {
           kind: "message",
           body: "hi",
           ts: 1,
-          sender: { name: uuid, kind: "human", owner: "thejacks@163.com", handle: "leo" },
+          sender: {
+            name: uuid,
+            kind: "human",
+            owner: "thejacks@163.com",
+            handle: "oidc-a1b2c3d4e5f60708",
+            display_name: "Jane Zhang",
+          },
           mentions: [],
           reply_to: null,
         } as MsgFrame,
       ],
-      participants: [{ name: uuid, kind: "human", owner: "thejacks@163.com", handle: "leo" }],
+      participants: [
+        {
+          name: uuid,
+          kind: "human",
+          owner: "thejacks@163.com",
+          handle: "oidc-a1b2c3d4e5f60708",
+          display_name: "Jane Zhang",
+        },
+      ],
       presence: {
         [uuid]: {
           name: uuid,
           kind: "human",
           account: "thejacks@163.com",
-          handle: "leo",
+          handle: "oidc-a1b2c3d4e5f60708",
+          display_name: "Jane Zhang",
           state: "working",
           note: null,
           ts: 1,
@@ -56,6 +71,6 @@ describe("buildIdentityDisplay", () => {
       },
     });
 
-    expect(map[uuid]).toEqual({ display: "leo", kind: "human", account: "thejacks@163.com" });
+    expect(map[uuid]).toEqual({ display: "Jane Zhang", kind: "human", account: "thejacks@163.com" });
   });
 });

@@ -299,7 +299,7 @@ describe("channels", () => {
     expect((await api(`/api/channels/${slug}/identities`, outsider.token)).status).toBe(403);
   });
 
-  it("identity map prefers human profile handles over opaque provider account ids", async () => {
+  it("identity map prefers human display names over handles and opaque provider account ids", async () => {
     const ownerName = "lark-ad72b3f9749e";
     const ownerAccount = "lark:on_22608d74bd2d7f39f6dc67d0da248fa5";
     const owner = await seedToken("human", ownerName, { owner: ownerAccount });
@@ -321,7 +321,7 @@ describe("channels", () => {
     }).identities;
 
     expect(identities).toContainEqual(
-      expect.objectContaining({ name: ownerName, display: handle, handle, kind: "human", account: ownerAccount }),
+      expect.objectContaining({ name: ownerName, display: "Leo", handle, kind: "human", account: ownerAccount }),
     );
   });
 });

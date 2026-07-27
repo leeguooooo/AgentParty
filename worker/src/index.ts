@@ -2638,10 +2638,15 @@ export async function handleHeader(db: D1Database, identity: TokenIdentity): Pro
   )
     .bind(identity.account)
     .first<{ handle: string | null; display_name: string | null; avatar_url: string | null; avatar_thumb: string | null }>();
-  if (!row) return {};
+  if (!row) {
+    return identity.displayName
+      ? { "x-ap-display-name": encodeURIComponent(identity.displayName) }
+      : {};
+  }
+  const displayName = row.display_name ?? identity.displayName;
   return {
     ...(row.handle ? { "x-ap-handle": encodeURIComponent(row.handle) } : {}),
-    ...(row.display_name ? { "x-ap-display-name": encodeURIComponent(row.display_name) } : {}),
+    ...(displayName ? { "x-ap-display-name": encodeURIComponent(displayName) } : {}),
     ...(row.avatar_url ? { "x-ap-avatar-url": row.avatar_url } : {}),
     ...(row.avatar_thumb ? { "x-ap-avatar-thumb": row.avatar_thumb } : {}),
   };
@@ -3024,7 +3029,7 @@ app.get("/api/me", requireBearer, async (c) => {
     channel_scope: id.channel_scope ?? null,
     lineage: id.lineage ?? null,
     handle: profile?.handle ?? agentNickname,
-    display_name: profile?.display_name ?? null,
+    display_name: profile?.display_name ?? id.displayName ?? null,
     avatar_url: profile?.avatar_url ?? null,
     avatar_thumb: profile?.avatar_thumb ?? null,
     provider: profile?.provider ?? null,
@@ -5820,9 +5825,19 @@ app.post("/api/instance/invites/:code/redeem", requireBearer, async (c) => {
     if (conflict === null) {
       try {
         await c.env.DB.prepare(
-          `INSERT INTO account_profiles (account, handle, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+          `INSERT INTO account_profiles (
+             account, handle, display_name, provider, provider_user_id, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-          .bind(account, invite.preset_handle, now, now)
+          .bind(
+            account,
+            invite.preset_handle,
+            identity.displayName ?? null,
+            identity.displayName === undefined ? null : "oidc",
+            identity.displayName === undefined ? null : identity.name,
+            now,
+            now,
+          )
           .run();
         handleSet = true;
       } catch (e) {
@@ -6780,7 +6795,7 @@ app.get("/api/channels/:slug/identities", async (c) => {
       .bind(account)
       .first<{ handle: string | null; display_name: string | null }>();
     const handle = profile?.handle || null;
-    const display = handle || profile?.display_name || null;
+    const display = profile?.display_name || handle || null;
     if (display === null) continue;
     for (const identity of identities.values()) {
       if (identity.kind === "human" && identity.account === account) add({ ...identity, display, handle });

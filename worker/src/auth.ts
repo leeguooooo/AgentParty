@@ -9,6 +9,8 @@ export interface TokenIdentity {
   hash: string;
   // OIDC 人类 token 携带 email；ap_ token 无此字段
   email?: string;
+  // OIDC 展示名。绝不参与账号锚点或 ACL；消息侧是否允许 display alias 由频道既有路由规则决定。
+  displayName?: string;
   // 所属人：机器 ap_ token 取 tokens.owner 列；人类 OIDC token 取 email（退回 sub）。无则省略
   owner?: string;
   // principal.account（账号模型 spec §5.1）：ACL 的唯一身份锚点。
@@ -255,6 +257,24 @@ interface OidcClaims {
   sub?: string;
   email?: string;
   name?: string;
+  preferred_username?: string;
+}
+
+function oidcDisplayName(claims: OidcClaims): string | undefined {
+  for (const value of [claims.name, claims.preferred_username]) {
+    if (typeof value !== "string") continue;
+    const safe = [...value.trim()]
+      .map((char) => {
+        const codePoint = char.codePointAt(0)!;
+        if (char.length === 1 && codePoint >= 0xd800 && codePoint <= 0xdfff) return "\ufffd";
+        if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) return "";
+        return char;
+      })
+      .join("")
+      .trim();
+    if (safe.length > 0) return [...safe].slice(0, 128).join("");
+  }
+  return undefined;
 }
 
 async function verifyOidcToken(token: string, oidc: OidcConfig): Promise<TokenIdentity | null> {
@@ -288,9 +308,11 @@ async function verifyOidcToken(token: string, oidc: OidcConfig): Promise<TokenId
   // email_verified 缺失或为 false → 忽略 email，回退到 sub（sub 由 IdP 保证唯一且不可伪造）。
   const emailVerified = claims.email_verified === true || claims.email_verified === "true";
   const email = emailVerified && typeof claims.email === "string" ? claims.email : undefined;
+  const displayName = oidcDisplayName(claims);
   return {
     name: claims.sub,
     email,
+    ...(displayName === undefined ? {} : { displayName }),
     role: "human",
     kind: "human",
     hash: `oidc:${claims.sub}`,

@@ -3,7 +3,7 @@ import { SELF, env } from "cloudflare:test";
 import { fetchMock } from "./fetch-mock";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { lookupToken, oidcConfigFromEnv } from "../src/auth";
-import { createChannel, uniq } from "./helpers";
+import { api, createChannel, seedToken, uniq } from "./helpers";
 
 const CLIENT_ID = "ap-web";
 const CONFIGURED_ISSUER = "https://oidc.test"; // 与 vitest.config 的静态绑定一致
@@ -100,6 +100,49 @@ describe("lookupToken OIDC verification", () => {
       // 账号锚点（spec §5.1）：OIDC 人类 account = email ?? sub
       account: "u@leeguoo.com",
     });
+  });
+
+  it("reads name as a display-only claim and falls back to preferred_username", async () => {
+    const namedIssuer = freshIssuer();
+    mockJwks(namedIssuer);
+    const named = await lookupToken(
+      env.DB,
+      await signJwt(claims(namedIssuer, { name: "  Jane Zhang  ", preferred_username: "jzhang" })),
+      oidc(namedIssuer),
+    );
+    expect(named).toMatchObject({
+      name: "user-abc",
+      account: "u@leeguoo.com",
+      displayName: "Jane Zhang",
+    });
+
+    const preferredIssuer = freshIssuer();
+    mockJwks(preferredIssuer);
+    const preferred = await lookupToken(
+      env.DB,
+      await signJwt(claims(preferredIssuer, { name: "   ", preferred_username: "jzhang" })),
+      oidc(preferredIssuer),
+    );
+    expect(preferred?.displayName).toBe("jzhang");
+
+    const emptyIssuer = freshIssuer();
+    mockJwks(emptyIssuer);
+    const empty = await lookupToken(
+      env.DB,
+      await signJwt(claims(emptyIssuer, { name: " ", preferred_username: "" })),
+      oidc(emptyIssuer),
+    );
+    expect(empty?.displayName).toBeUndefined();
+
+    const sanitizedIssuer = freshIssuer();
+    mockJwks(sanitizedIssuer);
+    const sanitized = await lookupToken(
+      env.DB,
+      await signJwt(claims(sanitizedIssuer, { name: `\u0000Jane\ud800${"界".repeat(140)}` })),
+      oidc(sanitizedIssuer),
+    );
+    expect(sanitized?.displayName).toBe(`Jane\ufffd${"界".repeat(123)}`);
+    expect([...(sanitized?.displayName ?? "")]).toHaveLength(128);
   });
 
   it("falls back owner to sub when the JWT has no email", async () => {
@@ -215,7 +258,7 @@ describe("oidc end-to-end via SELF.fetch", () => {
 
   it("accepts an OIDC human end-to-end: list, create channel, post message", async () => {
     mockJwks(CONFIGURED_ISSUER); // 首次验签拉一次 JWKS，其后命中缓存
-    const jwt = await signJwt(claims(CONFIGURED_ISSUER));
+    const jwt = await signJwt(claims(CONFIGURED_ISSUER, { name: "OIDCUser" }));
     const auth = { authorization: `Bearer ${jwt}`, "content-type": "application/json" };
 
     const list = await SELF.fetch("http://ap.test/api/channels", { headers: auth });
@@ -233,7 +276,7 @@ describe("oidc end-to-end via SELF.fetch", () => {
       channel_scope: null,
       lineage: null,
       handle: null,
-      display_name: null,
+      display_name: "OIDCUser",
       avatar_url: null,
       avatar_thumb: null,
       provider: null,
@@ -244,6 +287,10 @@ describe("oidc end-to-end via SELF.fetch", () => {
       // OIDC 人类：非 readonly 能发/建频道；有 account 能自助铸 agent；无 scope；spawn 只给 scoped parent agent
       caps: { send: true, create_channel: true, mint_agents: true, spawn_children: false, scoped_to: null },
     });
+    const profileBeforeInvite = await env.DB.prepare("SELECT handle FROM account_profiles WHERE account = ?")
+      .bind("u@leeguoo.com")
+      .first<{ handle: string }>();
+    expect(profileBeforeInvite).toBeNull();
 
     const cliAudJwt = await signJwt(
       claims(CONFIGURED_ISSUER, { aud: "agentparty-cli", sub: "cli-user", email: "cli@leeguoo.com" }),
@@ -266,6 +313,79 @@ describe("oidc end-to-end via SELF.fetch", () => {
     });
     expect(post.status).toBe(200);
     expect((await post.json()) as { seq: number }).toMatchObject({ seq: 1 });
+    const history = await SELF.fetch(`http://ap.test/api/channels/${slug}/messages`, { headers: auth });
+    expect(history.status).toBe(200);
+    const historyBody = (await history.json()) as {
+      messages: { sender: { owner?: string; handle?: string; display_name?: string } }[];
+    };
+    expect(historyBody.messages[0]?.sender).toMatchObject({
+      owner: "u@leeguoo.com",
+      display_name: "OIDCUser",
+    });
+    expect(historyBody.messages[0]?.sender.handle).toBeUndefined();
+
+    // 真正兑换外部邀请时才创建资料，并保留邀请预设的唯一 handle 与 OIDC 展示名。
+    const owner = await seedToken("human", uniq("invite-owner"), { owner: "invite-owner@example.com" });
+    const inviteSlug = await createChannel(owner.token);
+    const presetHandle = uniq("oidcguest").replaceAll("-", "");
+    const inviteResponse = await api(`/api/channels/${inviteSlug}/external-invites`, owner.token, {
+      method: "POST",
+      body: JSON.stringify({ handle: presetHandle }),
+    });
+    expect(inviteResponse.status).toBe(201);
+    const invite = (await inviteResponse.json()) as { code: string };
+    const inviteJwt = await signJwt(
+      claims(CONFIGURED_ISSUER, {
+        sub: "invited-user",
+        email: "invited@example.com",
+        name: "Invited User",
+      }),
+    );
+    const redeem = await SELF.fetch(`http://ap.test/api/instance/invites/${invite.code}/redeem`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${inviteJwt}` },
+    });
+    expect(redeem.status).toBe(200);
+    expect(await redeem.json()).toMatchObject({ channel_slug: inviteSlug, handle: presetHandle });
+    expect(
+      await env.DB.prepare(
+        "SELECT handle, display_name, provider, provider_user_id FROM account_profiles WHERE account = ?",
+      )
+        .bind("invited@example.com")
+        .first(),
+    ).toMatchObject({
+      handle: presetHandle,
+      display_name: "Invited User",
+      provider: "oidc",
+      provider_user_id: "invited-user",
+    });
+
+    // 邀请预设的唯一 handle 可路由。
+    const handleMention = await SELF.fetch(`http://ap.test/api/channels/${inviteSlug}/messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${inviteJwt}`, "content-type": "application/json" },
+      body: JSON.stringify({ kind: "message", body: "handle works", mentions: [presetHandle], reply_to: null }),
+    });
+    expect(handleMention.status).toBe(200);
+
+    // 无效邀请不能因为 token 带 name 就留下 account_profiles 副作用。
+    const invalidJwt = await signJwt(
+      claims(CONFIGURED_ISSUER, {
+        sub: "invalid-invite-user",
+        email: "invalid-invite@example.com",
+        name: "Invalid Invite User",
+      }),
+    );
+    const invalidRedeem = await SELF.fetch("http://ap.test/api/instance/invites/not-a-real-code/redeem", {
+      method: "POST",
+      headers: { authorization: `Bearer ${invalidJwt}` },
+    });
+    expect(invalidRedeem.status).toBe(404);
+    expect(
+      await env.DB.prepare("SELECT handle FROM account_profiles WHERE account = ?")
+        .bind("invalid-invite@example.com")
+        .first(),
+    ).toBeNull();
   });
 
 });
