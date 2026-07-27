@@ -121,6 +121,10 @@ export function dutyRuntimeState(entry: DesktopDutyEntry): DesktopDutyRuntimeSta
   return "starting";
 }
 
+export function canRestartDuty(state: DesktopDutyRuntimeState | null): boolean {
+  return state === "restarting" || state === "reconnecting" || state === "disconnected" || state === "stale";
+}
+
 export interface DesktopAgentAdapter {
   listConfigs(): Promise<DesktopAgentConfig[]>;
   status(): Promise<DesktopAgentStatus>;

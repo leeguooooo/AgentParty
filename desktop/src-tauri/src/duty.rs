@@ -634,7 +634,18 @@ struct DutyConfigToken {
 
 fn health_slot_path(home: &Path, config_path: &str, channel: &str) -> Option<PathBuf> {
     let config = serde_json::from_slice::<DutyConfigToken>(&fs::read(config_path).ok()?).ok()?;
-    let token_hash = crate::ui_update::sha256_hex(config.token.as_bytes());
+    let file_name = health_slot_file_name(config_path, &config.token, channel)?;
+    let root_hash = crate::ui_update::sha256_hex(b"/");
+    Some(
+        home.join(".agentparty/state")
+            .join(format!("workspace-{}", &root_hash[..16]))
+            .join("slots")
+            .join(file_name),
+    )
+}
+
+fn health_slot_file_name(config_path: &str, token: &str, channel: &str) -> Option<String> {
+    let token_hash = crate::ui_update::sha256_hex(token.as_bytes());
     let token_fingerprint = format!("sha256:{}", &token_hash[..12]);
     let evidence = serde_json::to_vec(&HealthSlotFingerprint {
         channel,
@@ -654,21 +665,15 @@ fn health_slot_path(home: &Path, config_path: &str, channel: &str) -> Option<Pat
             }
         })
         .collect();
-    let root_hash = crate::ui_update::sha256_hex(b"/");
-    Some(
-        home.join(".agentparty/state")
-            .join(format!("workspace-{}", &root_hash[..16]))
-            .join("slots")
-            .join(format!(
-                "health-{}-{}.json",
-                if safe_channel.is_empty() {
-                    "channel"
-                } else {
-                    &safe_channel
-                },
-                &slot_hash[..16]
-            )),
-    )
+    Some(format!(
+        "health-{}-{}.json",
+        if safe_channel.is_empty() {
+            "channel"
+        } else {
+            &safe_channel
+        },
+        &slot_hash[..16]
+    ))
 }
 
 fn read_duty_health(
@@ -691,11 +696,14 @@ fn read_duty_health(
         .map(|value| value.as_millis() as u64)
         .unwrap_or(0);
     let age_ms = raw.last_frame_at.map(|at| now.saturating_sub(at));
-    let stale = age_ms.is_none_or(|age| age > 90_000);
+    let stale = age_ms.map_or(true, |age| age > 90_000);
     let current = launchd_pid.is_some_and(|pid| pid == raw.pid);
-    let supervisor_state = raw
-        .supervisor_state
-        .filter(|value| matches!(value.as_str(), "starting" | "running" | "backoff" | "stopped"));
+    let supervisor_state = raw.supervisor_state.filter(|value| {
+        matches!(
+            value.as_str(),
+            "starting" | "running" | "backoff" | "stopped"
+        )
+    });
     let lease_state = raw
         .lease_state
         .filter(|value| matches!(value.as_str(), "unknown" | "held" | "standby"));
@@ -750,16 +758,21 @@ fn gui_domain() -> String {
     format!("gui/{uid}")
 }
 
-#[cfg(all(desktop, target_os = "macos"))]
-fn duty_pid_checked(label: &str) -> Option<u32> {
-    let target = format!("{}/{}", gui_domain(), label);
-    let output = launchctl(&["print", &target]).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
+fn launchctl_job_pid(stdout: &str) -> Option<u32> {
+    stdout
         .lines()
         .find_map(|line| line.trim().strip_prefix("pid = ")?.parse().ok())
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn duty_runtime_checked(label: &str) -> Result<(bool, Option<u32>), String> {
+    let target = format!("{}/{}", gui_domain(), label);
+    let output = launchctl(&["print", &target])?;
+    let loaded = output.status.success();
+    let pid = loaded
+        .then(|| launchctl_job_pid(&String::from_utf8_lossy(&output.stdout)))
+        .flatten();
+    Ok((loaded, pid))
 }
 
 /// 把当前 app 内嵌的 party sidecar 拷贝到稳定路径（bundle 路径随 app 更新/挪动失效）。
@@ -844,17 +857,13 @@ pub(crate) fn desktop_duty_list() -> Result<Vec<DutyEntry>, String> {
             continue;
         };
         #[cfg(target_os = "macos")]
-        let loaded = duty_loaded_checked(label)?;
+        let (loaded, pid) = duty_runtime_checked(label)?;
         #[cfg(not(target_os = "macos"))]
-        let loaded = false;
+        let (loaded, pid) = (false, None);
         #[cfg(target_os = "macos")]
         let disabled = disabled_labels.contains(label);
         #[cfg(not(target_os = "macos"))]
         let disabled = false;
-        #[cfg(target_os = "macos")]
-        let pid = duty_pid_checked(label);
-        #[cfg(not(target_os = "macos"))]
-        let pid = None;
         let terminal_reason = if quarantined {
             Some("terminal-stop-quarantined".to_string())
         } else {
@@ -873,12 +882,7 @@ pub(crate) fn desktop_duty_list() -> Result<Vec<DutyEntry>, String> {
             .rsplit_once(':')
             .map(|(_, channel)| channel)
             .unwrap_or_default();
-        let health = read_duty_health(
-            &home,
-            metadata.config_path.as_deref(),
-            channel,
-            pid,
-        );
+        let health = read_duty_health(&home, metadata.config_path.as_deref(), channel, pid);
         entries.push(DutyEntry {
             label: label.to_string(),
             instance_id,
@@ -1335,7 +1339,10 @@ pub(crate) fn desktop_duty_restart(instance_id: String) -> Result<(), String> {
         let _filesystem_lock = acquire_duty_filesystem_lock_blocking(&home, &label)?;
         let plist_path = duty_plist_path(&home, &label);
         if !plist_path.is_file() {
-            return Err(format!("duty plist does not exist: {}", plist_path.display()));
+            return Err(format!(
+                "duty plist does not exist: {}",
+                plist_path.display()
+            ));
         }
         if !duty_loaded_checked(&label)? {
             return Err("duty job is not loaded; repair or reinstall it first".to_string());
@@ -1345,7 +1352,9 @@ pub(crate) fn desktop_duty_restart(instance_id: String) -> Result<(), String> {
             "launchctl duty restart",
         )?;
         if !duty_loaded_checked(&label)? {
-            return Err("launchctl restart succeeded but the duty job is no longer loaded".to_string());
+            return Err(
+                "launchctl restart succeeded but the duty job is no longer loaded".to_string(),
+            );
         }
         Ok(())
     }
@@ -1397,10 +1406,10 @@ pub(crate) fn desktop_duty_log_read(
 mod tests {
     use super::{
         duty_label, duty_plist_content, duty_plist_metadata, failure_with_rollback,
-        find_runner_executable, health_slot_path, instance_id_from_label, read_duty_health,
-        resolve_node_executable,
-        rollback_duty_install_with, runner_launch_path, runner_search_dirs, tail_utf8,
-        DutyPlistMetadata, DutyPlistSnapshot, DutyPlistSpec,
+        find_runner_executable, health_slot_file_name, health_slot_path, instance_id_from_label,
+        launchctl_job_pid, read_duty_health, resolve_node_executable, rollback_duty_install_with,
+        runner_launch_path, runner_search_dirs, tail_utf8, DutyPlistMetadata, DutyPlistSnapshot,
+        DutyPlistSpec,
     };
 
     #[test]
@@ -1427,6 +1436,37 @@ mod tests {
             Some("abc123:native-r4")
         );
         assert_eq!(instance_id_from_label("com.other.thing"), None);
+    }
+
+    #[test]
+    fn parses_pid_from_one_launchctl_print_snapshot() {
+        assert_eq!(
+            launchctl_job_pid("state = running\n\tpid = 9614\n\tlast exit code = 0\n"),
+            Some(9614)
+        );
+        assert_eq!(launchctl_job_pid("state = waiting\n"), None);
+    }
+
+    #[test]
+    fn matches_the_shared_cli_health_slot_contract() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Contract {
+            channel: String,
+            config_path: String,
+            token: String,
+            expected_file: String,
+        }
+
+        let contract: Contract = serde_json::from_str(include_str!(
+            "../../../shared/fixtures/health-slot-contract.json"
+        ))
+        .expect("health slot contract");
+        assert_eq!(
+            health_slot_file_name(&contract.config_path, &contract.token, &contract.channel)
+                .as_deref(),
+            Some(contract.expected_file.as_str())
+        );
     }
 
     #[test]

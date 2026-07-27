@@ -18,9 +18,16 @@ describe("participant authority WebSocket hot path", () => {
     const slug = await createChannel(participant.token);
     const originalPrepare = env.DB.prepare.bind(env.DB);
     const authorityQueries: string[] = [];
+    const ownershipQueries: string[] = [];
     const prepare = vi.spyOn(env.DB, "prepare").mockImplementation((query: string) => {
       if (query.includes("SELECT name, owner, hash") && query.includes("FROM tokens")) {
         authorityQueries.push(query);
+      }
+      if (
+        query.includes("SELECT participant_name AS name, account") &&
+        query.includes("FROM channel_participant_bindings")
+      ) {
+        ownershipQueries.push(query);
       }
       return originalPrepare(query);
     });
@@ -32,6 +39,13 @@ describe("participant authority WebSocket hot path", () => {
       expect(authorityQueries).toHaveLength(1);
       expect(authorityQueries[0]).toContain(
         "hash IN (SELECT CAST(value AS TEXT) FROM json_each(?))",
+      );
+      expect(ownershipQueries).toHaveLength(1);
+      expect(ownershipQueries[0]).toContain(
+        "participant_name COLLATE NOCASE IN",
+      );
+      expect(ownershipQueries[0]).toContain(
+        "name IN (SELECT CAST(value AS TEXT) FROM json_each(?))",
       );
     } finally {
       prepare.mockRestore();

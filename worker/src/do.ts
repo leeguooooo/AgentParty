@@ -7231,6 +7231,9 @@ export class ChannelDO extends Server<Env> {
           `SELECT participant_name AS name, account
              FROM channel_participant_bindings
             WHERE channel_slug = ?
+              AND participant_name COLLATE NOCASE IN (
+                SELECT CAST(value AS TEXT) FROM json_each(?)
+              )
             UNION
            SELECT name, owner AS account
              FROM tokens
@@ -7238,7 +7241,12 @@ export class ChannelDO extends Server<Env> {
               AND name IN (SELECT CAST(value AS TEXT) FROM json_each(?))
               AND (channel_scope IS NULL OR channel_scope = ?)`,
         )
-          .bind(this.name, JSON.stringify(authorityNames), this.name)
+          .bind(
+            this.name,
+            JSON.stringify(authorityNames),
+            JSON.stringify(authorityNames),
+            this.name,
+          )
           .all<{ name: string; account: string }>(),
       ]);
     } catch {

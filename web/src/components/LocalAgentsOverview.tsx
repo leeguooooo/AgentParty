@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TFunc } from "../i18n/useT";
 import {
+  canRestartDuty,
   desktopAgentAdapter,
   dutyDependencyErrorRunner,
   dutyRepairInput,
@@ -52,10 +53,6 @@ function healthDiagnosticKey(state: ReturnType<typeof dutyRuntimeState>): string
     state === "disconnected" || state === "stale" || state === "standby"
     ? `LocalAgents.health.${state}`
     : null;
-}
-
-function canRestartDuty(state: ReturnType<typeof dutyRuntimeState> | null): boolean {
-  return state === "restarting" || state === "reconnecting" || state === "disconnected" || state === "stale";
 }
 
 export function LocalAgentsOverview({
