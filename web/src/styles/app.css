@@ -283,10 +283,13 @@
 .resident-logs-item { display: flex; align-items: center; gap: 8px; width: 100%; justify-content: flex-start; text-align: left; }
 .resident-logs-item--active { border-color: var(--d-blue); color: var(--d-blue); }
 .resident-logs-chan { font-weight: 600; }
+.resident-logs-agent { min-width: 0; overflow: hidden; color: var(--t-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .resident-logs-dot { color: var(--t-faint); font-size: 10px; }
 .resident-logs-dot--on { color: var(--d-green); }
 .resident-logs-state { font-size: 11px; color: var(--t-dim); }
 .resident-logs-view-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.resident-logs-selection { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.resident-logs-selection > strong { font-size: 11px; }
 .resident-logs-label { font-size: 11px; color: var(--t-dim); word-break: break-all; }
 .resident-logs-pre { max-height: 320px; overflow: auto; margin: 0; padding: 8px; font-size: 11px; line-height: 1.5; background: var(--t-faint); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
