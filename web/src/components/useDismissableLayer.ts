@@ -4,9 +4,16 @@ interface DismissableLayerOptions {
   active: boolean;
   onDismiss(): void;
   outsideRef?: RefObject<HTMLElement | null>;
+  /** Set false when a focus trap on the same layer already owns Escape, so one keypress dismisses once. */
+  dismissOnEscape?: boolean;
 }
 
-export function useDismissableLayer({ active, onDismiss, outsideRef }: DismissableLayerOptions) {
+export function useDismissableLayer({
+  active,
+  onDismiss,
+  outsideRef,
+  dismissOnEscape = true,
+}: DismissableLayerOptions) {
   useEffect(() => {
     if (!active) return;
 
@@ -19,11 +26,11 @@ export function useDismissableLayer({ active, onDismiss, outsideRef }: Dismissab
       onDismiss();
     };
 
-    window.addEventListener("keydown", onKeyDown);
+    if (dismissOnEscape) window.addEventListener("keydown", onKeyDown);
     if (outsideRef !== undefined) document.addEventListener("pointerdown", onPointerDown);
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
+      if (dismissOnEscape) window.removeEventListener("keydown", onKeyDown);
       if (outsideRef !== undefined) document.removeEventListener("pointerdown", onPointerDown);
     };
-  }, [active, onDismiss, outsideRef]);
+  }, [active, dismissOnEscape, onDismiss, outsideRef]);
 }

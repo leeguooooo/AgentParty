@@ -27,6 +27,7 @@ import {
 import { useT, type TFunc } from "../i18n/useT";
 import { apiOrigin } from "../lib/base";
 import { useDismissableLayer } from "./useDismissableLayer";
+import { useModalFocusTrap } from "./useModalFocusTrap";
 import { LarkMemberInvite } from "./LarkMemberInvite";
 import "../i18n/strings/JoinLink";
 
@@ -92,6 +93,8 @@ export function JoinLink({
 }: Props) {
   const t = useT();
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const toggleRef = useRef<HTMLButtonElement | null>(null);
   const EXPIRY_OPTIONS = expiryOptions(t);
   const USES_OPTIONS = usesOptions(t);
   const [open, setOpen] = useState(false);
@@ -184,7 +187,19 @@ export function JoinLink({
     onActiveChange?.(true);
   }, [active, close, isOpen, onActiveChange]);
 
-  useDismissableLayer({ active: isOpen && !embedded, onDismiss: close, outsideRef: rootRef });
+  // embedded 是内嵌 region、不是模态：既不抢焦点也不吃 Escape，只有独立弹出时才 trap。
+  useDismissableLayer({
+    active: isOpen && !embedded,
+    onDismiss: close,
+    outsideRef: rootRef,
+    dismissOnEscape: false,
+  });
+  useModalFocusTrap({
+    active: isOpen && !embedded,
+    containerRef: panelRef,
+    returnFocusRef: toggleRef,
+    onEscape: close,
+  });
 
   useEffect(() => {
     if (isOpen && links === null) void refresh();
@@ -335,16 +350,18 @@ export function JoinLink({
   return (
     <div className="joinlink" ref={rootRef}>
       {!embedded && (
-        <button type="button" className="d-btn joinlink-btn" onClick={toggle} aria-expanded={isOpen}>
+        <button ref={toggleRef} type="button" className="d-btn joinlink-btn" onClick={toggle} aria-expanded={isOpen}>
           {t("JoinLink.button")}
         </button>
       )}
       {isOpen && (
         <div
+          ref={panelRef}
           className={`joinlink-panel${embedded ? " joinlink-panel--embedded" : ""}`}
           role={embedded ? "region" : "dialog"}
           aria-modal={embedded ? undefined : true}
           aria-label={t("JoinLink.button")}
+          {...(embedded ? {} : { tabIndex: -1 })}
         >
           <div className="joinlink-mode" role="radiogroup" aria-label={t("JoinLink.modeLabel")}>
             {(["participate", "watch", "external"] as InviteMode[]).map((m) => (

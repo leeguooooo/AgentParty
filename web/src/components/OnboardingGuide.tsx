@@ -1,8 +1,9 @@
 // 首次进入的 1-2-3-4 引导浮层（#146）。只在浏览器第一次进来时出现，关掉后落一个
 // localStorage 标记（复用 ap_locale 那套持久化模式，不造新机制），之后不再打扰。
 // 范围克制：一张可关闭的四步卡片，讲清「加入频道 → @唤醒 → 认领任务 → 提交」主线。
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useRef, useState, type RefObject } from "react";
 import { useT } from "../i18n/useT";
+import { useModalFocusTrap } from "./useModalFocusTrap";
 import "../i18n/strings/Onboarding";
 
 const STORAGE_KEY = "ap_onboarded";
@@ -51,56 +52,13 @@ export function OnboardingGuide({
   }, []);
 
   // 与其它模态一致：显式接管焦点、困住 Tab、Esc 关闭，并在退出后还给来源控件。
-  useEffect(() => {
-    if (!visible) return;
-    const doc = typeof document === "undefined" ? null : document;
-    const previouslyFocused = (doc?.activeElement ?? null) as HTMLElement | null;
-    const focusables = (): HTMLElement[] => {
-      const card = cardRef.current;
-      if (card === null || typeof card.querySelectorAll !== "function") return [];
-      return Array.from(
-        card.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((element) => element.tabIndex >= 0);
-    };
-
-    (closeRef.current ?? focusables()[0] ?? cardRef.current)?.focus?.();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        dismiss();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const items = focusables();
-      const card = cardRef.current;
-      if (items.length === 0) {
-        e.preventDefault();
-        card?.focus?.();
-        return;
-      }
-      const first = items[0]!;
-      const last = items[items.length - 1]!;
-      const active = (doc?.activeElement ?? null) as HTMLElement | null;
-      if (e.shiftKey && (active === first || active === card)) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      const explicitTarget = returnFocusRef?.current;
-      if (explicitTarget !== null && explicitTarget !== undefined && explicitTarget.isConnected !== false) {
-        explicitTarget.focus?.();
-      } else if (previouslyFocused?.isConnected !== false) {
-        previouslyFocused?.focus?.();
-      }
-    };
-  }, [dismiss, returnFocusRef, visible]);
+  useModalFocusTrap({
+    active: visible,
+    containerRef: cardRef,
+    initialFocusRef: closeRef,
+    returnFocusRef,
+    onEscape: dismiss,
+  });
 
   if (!visible) return null;
 

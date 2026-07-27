@@ -3,9 +3,10 @@
 // 在线状态。不建新后端——所有数据来自调用方已经持有的 presence/messages。
 import type { CollaborationRole, MsgFrame, PresenceEntry, Sender, TaskRecord } from "@agentparty/shared";
 import { autoWakeReachable, wakeableState } from "@agentparty/shared";
-import { useEffect } from "react";
+import { useRef } from "react";
 import { fmtRel } from "../lib/time";
 import { useT } from "../i18n/useT";
+import { useModalFocusTrap } from "./useModalFocusTrap";
 import "../i18n/strings/AgentDetailModal";
 
 export type AgentDetailAssignmentSource = "assigned" | "self_reported" | "none";
@@ -373,16 +374,18 @@ export function AgentDetailPanel(props: AgentDetailPanelProps) {
 /** Backward-compatible modal wrapper for existing callers. */
 export function AgentDetailModal({ onClose, ...props }: AgentDetailModalProps) {
   const t = useT();
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useModalFocusTrap({ active: true, containerRef: dialogRef, onEscape: onClose });
 
   return (
-    <div className="channel-panel-overlay agent-detail-overlay" role="dialog" aria-modal="true" aria-label={t("AgentDetailModal.title", { name: props.display })}>
+    <div
+      ref={dialogRef}
+      className="channel-panel-overlay agent-detail-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("AgentDetailModal.title", { name: props.display })}
+      tabIndex={-1}
+    >
       <button className="channel-panel-scrim" type="button" aria-label={t("Channel.tools.close")} onClick={onClose} />
       <section className="channel-panel-card agent-detail-card">
         <AgentDetailContent {...props} onClose={onClose} />
