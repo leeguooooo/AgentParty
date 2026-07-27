@@ -44,16 +44,16 @@ export function displayForIdentity(name: string, identities: IdentityDisplayMap 
   return identities?.[name]?.display ?? name;
 }
 
-// 显示优先级：人类 handle（可 @ 昵称）> owner（人类专属，email）> 常规 identity 回退。
+// 显示优先级：人类 display_name > handle（可 @ 昵称）> owner（email）> 常规 identity 回退。
 // 消息头的 senderLabel 与引用预览块里"被引用者"的名字共用同一份逻辑，保证两处一致。
 export function resolveSenderLabel(sender: Sender, identities: IdentityDisplayMap | undefined): string {
-  return sender.handle
-    ? sender.handle
-    : sender.kind === "human" && sender.display_name
-      ? sender.display_name
-    : sender.kind === "human" && sender.owner
-      ? sender.owner
-      : displayForIdentity(sender.name, identities);
+  return sender.kind === "human" && sender.display_name
+    ? sender.display_name
+    : sender.handle
+      ? sender.handle
+      : sender.kind === "human" && sender.owner
+        ? sender.owner
+        : displayForIdentity(sender.name, identities);
 }
 
 export function buildIdentityDisplay(input: {
@@ -65,20 +65,20 @@ export function buildIdentityDisplay(input: {
 }): IdentityDisplayMap {
   const map: IdentityDisplayMap = {};
 
-  // 显示优先级：handle（人类=account handle，agent=自设昵称 #165）> SSO display name > owner/account（email）> 原始 name。
-  // agent 有昵称就显示昵称，没有则天然回退 name。map 的 key 仍是原始 name/UUID，不受此优先级影响。
+  // 人类显示优先级：SSO display name > account handle > owner/account（email）> 原始 name。
+  // agent 仍是昵称 > 原始 name。map 的 key 始终是可路由 identity，不用展示名做 key。
   for (const sender of input.participants) {
     addIdentity(map, sender.name, {
       kind: sender.kind,
       account: sender.owner,
-      display: sender.handle || (sender.kind === "human" ? sender.display_name || sender.owner : undefined) || sender.name,
+      display: (sender.kind === "human" ? sender.display_name || sender.handle || sender.owner : sender.handle) || sender.name,
     });
   }
   for (const entry of Object.values(input.presence)) {
     addIdentity(map, entry.name, {
       kind: entry.kind,
       account: entry.account,
-      display: entry.handle || (entry.kind === "human" ? entry.display_name || entry.account : undefined) || entry.name,
+      display: (entry.kind === "human" ? entry.display_name || entry.handle || entry.account : entry.handle) || entry.name,
     });
   }
   for (const message of input.messages) {
@@ -86,8 +86,9 @@ export function buildIdentityDisplay(input: {
       kind: message.sender.kind,
       account: message.sender.owner,
       display:
-        message.sender.handle ||
-        (message.sender.kind === "human" ? message.sender.display_name || message.sender.owner : undefined) ||
+        (message.sender.kind === "human"
+          ? message.sender.display_name || message.sender.handle || message.sender.owner
+          : message.sender.handle) ||
         message.sender.name,
     });
   }
