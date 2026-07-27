@@ -7238,7 +7238,9 @@ export class ChannelDO extends Server<Env> {
            SELECT name, owner AS account
              FROM tokens
             WHERE owner IS NOT NULL
-              AND name IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+              AND name COLLATE NOCASE IN (
+                SELECT CAST(value AS TEXT) FROM json_each(?)
+              )
               AND (channel_scope IS NULL OR channel_scope = ?)`,
         )
           .bind(
@@ -7262,12 +7264,13 @@ export class ChannelDO extends Server<Env> {
         .filter((row) => row.principal_type === "account")
         .map((row) => [row.principal, row.removed_at] as const),
     );
-    const currentAgentPrincipals = new Map(
-      agentRows.results.map((row) => [
-        row.hash,
-        row.owner === null ? `token-sha256:${row.hash}` : row.owner,
-      ] as const),
-    );
+    const currentAgentPrincipals = new Map<string, string>();
+    const currentAgentDeliveryPrincipals = new Set<string>();
+    for (const row of agentRows.results) {
+      const principal = row.owner === null ? `token-sha256:${row.hash}` : row.owner;
+      currentAgentPrincipals.set(row.hash, principal);
+      currentAgentDeliveryPrincipals.add(JSON.stringify([mentionMatchKey(row.name), principal]));
+    }
     const removedBoundNames = new Map<string, number>();
     for (const row of ownershipRows.results) {
       const removedAt = removedAccounts.get(row.account);
@@ -7310,7 +7313,10 @@ export class ChannelDO extends Server<Env> {
     }
     for (const stale of stalePrincipals) {
       this.cleanupPresenceSession(stale.name, stale.connection.id, now);
-      this.removeStaleDeliveryPrincipal(stale.name, stale.principal, now);
+      const deliveryPrincipalKey = JSON.stringify([mentionMatchKey(stale.name), stale.principal]);
+      if (!currentAgentDeliveryPrincipals.has(deliveryPrincipalKey)) {
+        this.removeStaleDeliveryPrincipal(stale.name, stale.principal, now);
+      }
     }
     this.participantAuthorityRefreshedAt = now;
     return true;
