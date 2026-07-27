@@ -257,4 +257,20 @@ describe("mcp party_send attach（#503）", () => {
       await client.close();
     }
   }, 20000);
+
+  // #777：纯空白 body（trim 后为空）且无附件也必须拒发——对齐 CLI send/ask 的 trim 语义，
+  // 避免 MCP 路径留下 `=== ""` 挡不住空白的对称坑。既不发消息、也不上传。
+  test("whitespace-only body with no attachment is rejected (#777)", async () => {
+    startRest();
+    const client = await connect();
+    try {
+      const blank = await client.callTool({ name: "party_send", arguments: { body: "   \t\n" } });
+      expect(blank.isError).toBe(true);
+      expect(firstText(blank)).toContain("missing message body");
+      expect(messagePosts().length).toBe(0);
+      expect(seen.some((s) => s.path.startsWith("/api/channels/dev/attachments"))).toBe(false);
+    } finally {
+      await client.close();
+    }
+  }, 20000);
 });

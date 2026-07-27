@@ -441,8 +441,9 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         const normalizedMentions = normalizeMentions(mentions);
         const attachPaths = attach ?? [];
         const effectiveBody = body ?? "";
-        // 与 CLI 语义对齐（#176）：纯附件消息允许空正文；无附件时正文必填。
-        if (effectiveBody === "" && attachPaths.length === 0) {
+        // 与 CLI 语义对齐（#176 / #777）：纯附件消息允许空正文；无附件时正文必填。
+        // #777：用 trim 判空，纯空白 body（如 "   "）与 CLI send/ask 一样拒发，避免留对称坑。
+        if (effectiveBody.trim() === "" && attachPaths.length === 0) {
           throw new Error("missing message body (pass body, or attach a file)");
         }
         // 附件复用 CLI --attach 的同一条 validate+read+upload 链路（#503），任一失败整体不发消息。
