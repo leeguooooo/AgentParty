@@ -204,6 +204,20 @@ function findClass(r: ReactTestRenderer, className: string) {
   return r.root.find((n) => n.props.className === className);
 }
 
+function findClassToken(r: ReactTestRenderer, className: string) {
+  return r.root.find((node) =>
+    typeof node.props.className === "string"
+    && node.props.className.split(/\s+/).includes(className)
+  );
+}
+
+function findButton(r: ReactTestRenderer, text: string) {
+  return r.root.find((node) =>
+    node.type === "button"
+    && node.children.some((child) => typeof child === "string" && child.includes(text))
+  );
+}
+
 describe("AgentTokens project-agent rules view", () => {
   test("shows an existing profile's rules text", async () => {
     profilesFixture = [profile({ rules: "always run the tests" })];
@@ -219,24 +233,60 @@ describe("AgentTokens project-agent rules view", () => {
   });
 });
 
+describe("AgentTokens functional workspaces", () => {
+  test("filters channel identities without duplicating their management controls", async () => {
+    agentsFixture = [
+      { name: "build-bot", owner: "acct-1", channel_scope: "demo", created_at: 1, nickname: "构建" },
+      { name: "release-bot", owner: "acct-1", channel_scope: "demo", created_at: 2, nickname: "发版" },
+    ];
+    const r = await renderOpen();
+    const search = r.root.find((node) => node.props.placeholder === "Search by agent name or nickname");
+    await act(async () => search.props.onChange({ target: { value: "release" } }));
+
+    const rows = r.root.findAll((node) =>
+      typeof node.props.className === "string"
+      && node.props.className.split(/\s+/).includes("agentmanager-list-item")
+    );
+    expect(rows).toHaveLength(1);
+    expect(allText(r)).toContain("release-bot");
+    expect(allText(r)).not.toContain("build-bot");
+  });
+
+  test("keeps project creation behind an explicit workflow when profiles already exist", async () => {
+    profilesFixture = [profile()];
+    const r = await renderOpen();
+    expect(r.root.findAll((node) => node.props.className === "agentmanager-profile-form")).toHaveLength(0);
+
+    await act(async () => findButton(r, "new project agent").props.onClick());
+    const form = findClass(r, "agentmanager-profile-form");
+    const handle = form.findAll((node) => node.props.className === "agenttokens-input t-mono")[0]!;
+    await act(async () => handle.props.onChange({ target: { value: "reviewer" } }));
+    await act(async () => form.props.onSubmit({ preventDefault: () => {} }));
+    await act(async () => {});
+
+    expect(createCalls.at(-1)?.body.handle).toBe("reviewer");
+    expect(r.root.findAll((node) => node.props.className === "agentmanager-profile-form")).toHaveLength(0);
+  });
+});
+
 describe("AgentTokens agent nickname management (#165)", () => {
   test("owner can set a Chinese nickname from the agent management panel", async () => {
     agentsFixture = [{ name: "build-bot", owner: "acct-1", channel_scope: "demo", created_at: 1, nickname: null }];
     const r = await renderOpen();
 
-    await act(async () => findClass(r, "d-btn agenttokens-edit-nickname").props.onClick());
+    await act(async () => findClassToken(r, "agenttokens-edit-nickname").props.onClick());
     const input = findClass(r, "agenttokens-input agenttokens-nickname-input");
     await act(async () => input.props.onChange({ target: { value: "  构建小助手  " } }));
     await act(async () => findClass(r, "d-btn d-btn--primary agenttokens-save-nickname").props.onClick());
 
     expect(nicknameCalls).toEqual([{ token: "tok-1", slug: "demo", name: "build-bot", nickname: "构建小助手" }]);
-    expect(findClass(r, "agenttokens-nickname").children.join("")).toBe("@构建小助手");
+    expect(allText(r)).toContain("构建小助手");
   });
 
   test("editing an existing nickname starts with the current value", async () => {
     agentsFixture = [{ name: "build-bot", owner: "acct-1", channel_scope: "demo", created_at: 1, nickname: "旧昵称" }];
     const r = await renderOpen();
-    await act(async () => findClass(r, "d-btn agenttokens-edit-nickname").props.onClick());
+    await act(async () => findClassToken(r, "agenttokens-edit-nickname").props.onClick());
     expect(findClass(r, "agenttokens-input agenttokens-nickname-input").props.value).toBe("旧昵称");
   });
 });
@@ -248,7 +298,7 @@ describe("AgentTokens project-agent rules edit", () => {
 
     // 进入编辑
     await act(async () => {
-      findClass(r, "d-btn agenttokens-edit-rules").props.onClick();
+      findClassToken(r, "agenttokens-edit-rules").props.onClick();
     });
     // textarea 预填旧值
     const textarea = r.root.find((n) => n.props["aria-label"] === "agent rules" && n.type === "textarea");
@@ -259,7 +309,7 @@ describe("AgentTokens project-agent rules edit", () => {
     });
     // 保存
     await act(async () => {
-      findClass(r, "d-btn agenttokens-save-rules").props.onClick();
+      findClassToken(r, "agenttokens-save-rules").props.onClick();
     });
     await act(async () => {});
 
@@ -281,7 +331,7 @@ describe("AgentTokens project-agent rules edit", () => {
     profilesFixture = [profile({ rules: "keep me" })];
     const r = await renderOpen();
     await act(async () => {
-      findClass(r, "d-btn agenttokens-edit-rules").props.onClick();
+      findClassToken(r, "agenttokens-edit-rules").props.onClick();
     });
     await act(async () => {
       findClass(r, "d-btn agenttokens-cancel-rules").props.onClick();
@@ -292,37 +342,42 @@ describe("AgentTokens project-agent rules edit", () => {
 });
 
 describe("AgentTokens dismiss behavior", () => {
-  test("exposes the panel as a modal dialog and ignores pointer presses inside the component", async () => {
+  test("exposes the manager as a shared modal dialog and keeps panel clicks inside", async () => {
     const r = await renderOpen();
-    const panel = findClass(r, "agenttokens-panel");
-    expect(panel.props.role).toBe("dialog");
-    expect(panel.props["aria-modal"]).toBe("true");
-
-    act(() => documentEvents.emit("pointerdown", { target: insideTarget }));
-    expect(r.root.findAll((node) => node.props.className === "agenttokens-panel")).toHaveLength(1);
+    const dialog = r.root.find((node) => node.props.role === "dialog");
+    expect(dialog.props["aria-modal"]).toBe("true");
+    let stopped = false;
+    act(() => findClass(r, "settings-panel settings-panel--agent-center agentmanager-dialog").props.onClick({
+      stopPropagation: () => { stopped = true; },
+    }));
+    expect(stopped).toBe(true);
+    expect(r.root.findAll((node) => node.props.role === "dialog")).toHaveLength(1);
   });
 
-  test("Escape and outside pointer presses close, clear drafts, and clean up listeners", async () => {
+  test("Escape and backdrop clicks close, clear drafts, and clean up listeners", async () => {
     profilesFixture = [profile()];
     const r = await renderOpen();
+    act(() => findButton(r, "Project agents").props.onClick());
+    act(() => findButton(r, "new project agent").props.onClick());
     const handleInput = r.root.findAll((node) => node.props.className === "agenttokens-input t-mono")[0]!;
     act(() => handleInput.props.onChange({ target: { value: "temporary" } }));
-    act(() => findClass(r, "d-btn agenttokens-edit-rules").props.onClick());
 
     expect(windowEvents.count("keydown")).toBe(1);
-    expect(documentEvents.count("pointerdown")).toBe(1);
+    expect(documentEvents.count("pointerdown")).toBe(0);
     act(() => windowEvents.emit("keydown", { key: "Escape" }));
-    expect(r.root.findAll((node) => node.props.className === "agenttokens-panel")).toHaveLength(0);
+    expect(r.root.findAll((node) => node.props.role === "dialog")).toHaveLength(0);
     expect(windowEvents.count("keydown")).toBe(0);
     expect(documentEvents.count("pointerdown")).toBe(0);
 
     act(() => r.root.find((node) => node.props.className === "d-btn agenttokens-btn").props.onClick());
+    expect(findButton(r, "Channel identities").props["aria-selected"]).toBe(true);
+    act(() => findButton(r, "new project agent").props.onClick());
     expect(r.root.findAll((node) => node.props.className === "agenttokens-input t-mono")[0]!.props.value).toBe("");
-    expect(r.root.findAll((node) => node.type === "textarea")).toHaveLength(0);
+    act(() => findButton(r, "cancel").props.onClick());
     expect(allText(r)).toContain("always run the tests");
 
-    act(() => documentEvents.emit("pointerdown", { target: {} }));
-    expect(r.root.findAll((node) => node.props.className === "agenttokens-panel")).toHaveLength(0);
+    act(() => findClass(r, "settings-overlay").props.onClick());
+    expect(r.root.findAll((node) => node.props.role === "dialog")).toHaveLength(0);
   });
 
   test("controlled dismiss requests onActiveChange without mutating the active prop", async () => {
@@ -345,9 +400,9 @@ describe("AgentTokens dismiss behavior", () => {
         },
       );
     });
-    act(() => documentEvents.emit("pointerdown", { target: {} }));
+    act(() => findClass(renderer!, "settings-overlay").props.onClick());
     expect(changes).toEqual([false]);
-    expect(renderer!.root.findAll((node) => node.props.className === "agenttokens-panel")).toHaveLength(1);
+    expect(renderer!.root.findAll((node) => node.props.role === "dialog")).toHaveLength(1);
   });
 });
 
