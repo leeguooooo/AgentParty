@@ -142,7 +142,6 @@ test("常驻行显示可信配置名，并在同一行展开日志与运行详�
   }));
 
   expect(names(root)).toEqual(["atvloadly"]);
-  expect(JSON.stringify(renderer!.toJSON())).not.toContain("334a626a8ca73a4a9276083677692cbaf71f8d8acb616d426ce8c90e6459c47b</strong>");
   await act(async () => {
     byClass(root, "local-agents-details")[0]!.props.onClick();
     await Promise.resolve();

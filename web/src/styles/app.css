@@ -430,7 +430,7 @@
   font-size: 10px;
   line-height: 1.45;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 /* #616 多实例值守列表 */
