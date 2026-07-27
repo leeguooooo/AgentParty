@@ -483,6 +483,47 @@ describe("ws client", () => {
     expect(statuses.map((s) => s.status)).toEqual(["open", "reconnecting", "open"]);
   });
 
+  test("a synchronous WebSocket constructor failure during reconnect schedules another retry", () => {
+    jest.useFakeTimers();
+    class FlakyProbeWebSocket extends ProbeWebSocket {
+      static constructorCalls = 0;
+
+      constructor() {
+        FlakyProbeWebSocket.constructorCalls += 1;
+        if (FlakyProbeWebSocket.constructorCalls === 2) {
+          throw new Error("synthetic constructor failure");
+        }
+        super();
+      }
+    }
+    ProbeWebSocket.instances = [];
+    globalThis.WebSocket = FlakyProbeWebSocket as unknown as typeof WebSocket;
+    const statuses: Array<{ status: string; error?: string }> = [];
+    conn = connect("https://party.invalid", "ap_tok", "dev", 0, {
+      backoffBaseMs: 5,
+      backoffMaxMs: 5,
+      onStatus: (status, detail) => statuses.push({
+        status,
+        ...(detail?.error === undefined ? {} : { error: detail.error }),
+      }),
+    });
+
+    const first = ProbeWebSocket.instances[0]!;
+    first.open();
+    first.emitClose();
+    jest.advanceTimersByTime(5);
+
+    expect(ProbeWebSocket.instances).toHaveLength(1);
+    expect(statuses).toEqual([
+      { status: "open" },
+      { status: "reconnecting" },
+      { status: "reconnecting", error: "synthetic constructor failure" },
+    ]);
+
+    jest.advanceTimersByTime(5);
+    expect(ProbeWebSocket.instances).toHaveLength(2);
+  });
+
   test("puts hello on the wire before an open callback can synchronously send an actionable frame", () => {
     useProbeWebSocket();
     conn = connect("https://party.invalid", "ap_tok", "dev", 0, {

@@ -4,10 +4,25 @@ import {
   createDesktopAgentAdapter,
   dutyDependencyErrorRunner,
   dutyRepairInput,
+  dutyRuntimeState,
   type DesktopAgentInvoker,
 } from "./desktopAgent";
 
 describe("desktop agent native adapter", () => {
+  test("maps resident restart to the exact native IPC command", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const adapter = createDesktopAgentAdapter(async (command, args) => {
+      calls.push({ command, args });
+      return null;
+    });
+
+    await adapter.dutyRestart("cfg:ops");
+    expect(calls).toEqual([{
+      command: "desktop_duty_restart",
+      args: { instanceId: "cfg:ops" },
+    }]);
+  });
+
   test("maps the public adapter to the native invoke contract", async () => {
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
     const invoke: DesktopAgentInvoker = async (command, args) => {
@@ -164,5 +179,60 @@ describe("desktop agent native adapter", () => {
       terminalBlocked: false,
       terminalReason: null,
     });
+  });
+
+  test("classifies websocket health, supervisor retry, and cross-machine standby separately", async () => {
+    const nativeHealth = {
+      current: true,
+      healthy: true,
+      stale: false,
+      ageMs: 500,
+      wsConnected: true,
+      reconnecting: false,
+      reconnectCount: 2,
+      lastFrameAt: 1000,
+      lastError: null,
+      connectedSince: 500,
+      supervisorState: "running",
+      supervisorAttempt: 3,
+      restartDelayMs: null,
+      lastExitCode: 1,
+      lastExitAt: 400,
+      supervisorError: null,
+      leaseState: "held",
+      serveStandbys: 1,
+    };
+    const entry = async (health: Record<string, unknown> | null) => {
+      const adapter = createDesktopAgentAdapter(async () => [{
+        label: "com.agentparty.duty.cfg.ops",
+        instanceId: "cfg:ops",
+        plistPath: "/p",
+        logPath: "/log",
+        loaded: true,
+        health,
+      }]);
+      return (await adapter.dutyList())[0]!;
+    };
+
+    expect(dutyRuntimeState(await entry(nativeHealth))).toBe("healthy");
+    expect(dutyRuntimeState(await entry({
+      ...nativeHealth,
+      healthy: false,
+      wsConnected: false,
+      reconnecting: true,
+    }))).toBe("reconnecting");
+    expect(dutyRuntimeState(await entry({
+      ...nativeHealth,
+      healthy: false,
+      wsConnected: false,
+      supervisorState: "backoff",
+      restartDelayMs: 30_000,
+    }))).toBe("restarting");
+    expect(dutyRuntimeState(await entry({
+      ...nativeHealth,
+      healthy: false,
+      leaseState: "standby",
+    }))).toBe("standby");
+    expect(dutyRuntimeState(await entry(null))).toBe("starting");
   });
 });

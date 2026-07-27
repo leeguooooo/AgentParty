@@ -4643,6 +4643,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
   let nudgedUpgrade = false;
   let availableUpgrade = o.availableUpgrade ?? null;
   let nextUpgradeProbeAt = 0;
+  let upgradeProbe: Promise<void> | null = null;
   // 本地连接健康探针（#254）：WS 生命周期转场（不是 presence 自报、不是 PID 推断）落 health.json，
   // 让 watchdog 能问「这个 serve 此刻真的还在收帧吗」而不是只能 pgrep。reconnect_count 数的是
   // 本进程生命周期内进入过几次 reconnecting，不是每次退避重试都加一——那样一次掉线会看起来像刷屏。
@@ -4656,6 +4657,32 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // A later heartbeat/frame will retry naturally; delivery stays authoritative on the server.
     }
   };
+  // 版本检查与二进制下载是可选维护工作，绝不能占住 welcome / wake 的串行数据面。
+  // 旧实现把它 await 在启动和 runner preflight 上：GitHub 下载卡住时，launchd 进程有 PID
+  // 却既不连 WS 也不写日志；收到 @ 时也会在模型启动前永久等待。现在首个 welcome 后后台
+  // 探测，原子安装完成后仍由既有安全点 maybeReexecUpgrade 接管。
+  const scheduleUpgradeRefresh = () => {
+    if (
+      o.refreshAvailableUpgrade === undefined ||
+      upgradeProbe !== null ||
+      Date.now() < nextUpgradeProbeAt
+    ) {
+      return;
+    }
+    // Even test/dev callers requesting 0 must not turn welcome + immediately queued delivery into
+    // duplicate concurrent release downloads. One second is still effectively immediate here.
+    nextUpgradeProbeAt = Date.now() + Math.max(1_000, o.upgradeProbeIntervalMs ?? 5 * 60_000);
+    upgradeProbe = o.refreshAvailableUpgrade(availableUpgrade)
+      .then((next) => {
+        availableUpgrade = next;
+      })
+      .catch(() => {
+        // Optional maintenance failure keeps the previous notice and never blocks delivery.
+      })
+      .finally(() => {
+        upgradeProbe = null;
+      });
+  };
   const onWsStatus = (status: "open" | "reconnecting" | "closed", detail?: { error?: string }) => {
     if (status === "open") {
       // A successful TCP/WS handshake is not proof that the application path is alive. Clear the
@@ -4668,6 +4695,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
         reconnecting: false,
         connected_since: Date.now(),
         last_frame_at: null,
+        lease_state: "unknown",
       }));
     } else if (status === "reconnecting") {
       reconnectCount += 1;
@@ -4677,12 +4705,20 @@ export async function runServe(o: ServeOptions): Promise<number> {
         reconnecting: true,
         reconnect_count: reconnectCount,
         connected_since: null,
+        lease_state: "unknown",
         // 无新错误详情时保留上一条重连原因，避免 inbound timeout 后的替换连接在收到
         // 有效帧前再次断开时把 last_error 覆盖成 null（丢失原因）。
         ...(detail?.error === undefined ? {} : { last_error: detail.error }),
       }));
     } else {
-      bestEffortLocalState(() => writeHealthCache({ channel: o.channel, ws_connected: false, reconnecting: false, connected_since: null, last_error: detail?.error ?? null }));
+      bestEffortLocalState(() => writeHealthCache({
+        channel: o.channel,
+        ws_connected: false,
+        reconnecting: false,
+        connected_since: null,
+        last_error: detail?.error ?? null,
+        lease_state: "unknown",
+      }));
     }
   };
   const skipBacklog = o.skipBacklog !== false; // 默认跳过离线积压（#193）
@@ -4798,7 +4834,18 @@ export async function runServe(o: ServeOptions): Promise<number> {
   };
   // 挂载之初就落一份 health 基线：即便还没收到第一帧，watchdog 也能看到「这个 pid 认领了这个频道」，
   // 而不是文件缺失时无法区分「serve 没起来」和「serve 起来了但还没写过健康数据」。
-  bestEffortLocalState(() => writeHealthCache({ channel: o.channel, ws_connected: false, reconnecting: false, reconnect_count: 0, last_frame_at: null, last_error: null, connected_since: null }));
+  bestEffortLocalState(() => writeHealthCache({
+    channel: o.channel,
+    ws_connected: false,
+    reconnecting: false,
+    reconnect_count: 0,
+    last_frame_at: null,
+    last_error: null,
+    connected_since: null,
+    supervisor_state: "starting",
+    lease_state: "unknown",
+    serve_standbys: 0,
+  }));
   // 本实例私有的上下文命名空间（#197 / #208 门禁）。退出时整目录删除：
   // 失败的唤醒会把上下文留在盘上供本次排查，但它带着 charter / recent 正文，
   // 不能在进程结束后继续躺在共享 tmpdir 里。
@@ -4893,12 +4940,16 @@ export async function runServe(o: ServeOptions): Promise<number> {
         channel: o.channel,
         last_frame_at: Date.now(),
         last_error: null,
+        supervisor_state: "running",
+        restart_delay_ms: null,
+        supervisor_error: null,
       }));
       if (directedDelivery !== null && recentlySettledDeliveryIds.has(directedDelivery.id)) {
         out(`serve: ignored already-settled redelivery ${directedDelivery.id}`);
         continue;
       }
       if (frame.type === "welcome") {
+        scheduleUpgradeRefresh();
         self = frame.self;
         if (!welcomeReported) {
           o.onWelcome?.(frame.last_seq);
@@ -4917,6 +4968,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
         pendingPersistedSession = persistedAgentSession(o);
         // 连上时若自己已被暂停接待（#180），从 welcome 的 presence 快照里认出来——重连也不误唤醒。
         const mine = frame.presence?.find((p) => p.name === self);
+        bestEffortLocalState(() => writeHealthCache({
+          channel: o.channel,
+          serve_standbys: mine?.serve_standbys ?? 0,
+        }));
         selfPaused = mine?.paused === true;
         if (selfPaused) {
           out(
@@ -5010,6 +5065,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
       }
       // 人为暂停/恢复（#180）：跟踪自己的 paused 状态。moderator 一按暂停，DO 就广播这帧过来。
       if (frame.type === "presence" && frame.name === self) {
+        bestEffortLocalState(() => writeHealthCache({
+          channel: o.channel,
+          serve_standbys: frame.serve_standbys ?? 0,
+        }));
         const nextPaused = frame.paused === true;
         if (nextPaused !== selfPaused) {
           selfPaused = nextPaused;
@@ -5039,6 +5098,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
           );
         }
         leaseKnown = true;
+        bestEffortLocalState(() => writeHealthCache({
+          channel: o.channel,
+          lease_state: hasLease ? "held" : "standby",
+        }));
         if (hasLease) reportPendingPersistedSession();
         continue;
       }
@@ -5163,18 +5226,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
               contextDir,
               o.downloadAttachment ?? downloadAttachment,
             ), lifecycleController.signal);
-            if (o.refreshAvailableUpgrade !== undefined && Date.now() >= nextUpgradeProbeAt) {
-              nextUpgradeProbeAt = Date.now() + (o.upgradeProbeIntervalMs ?? 5 * 60_000);
-              try {
-                availableUpgrade = await awaitWithAbort(
-                  o.refreshAvailableUpgrade(availableUpgrade),
-                  lifecycleController.signal,
-                );
-              } catch (error) {
-                if (lifecycleController.signal.aborted) throw error;
-                // A failed optional probe is a completed preflight with the previous known value.
-              }
-            }
+            scheduleUpgradeRefresh();
             cliUpgrade = upgradeNotice(o.autoUpgrade === true, o.upgradeDeps) ?? availableUpgrade;
             // #646：prepare（git clone/pull、SDK startThread、附件下载）此前只受 shutdown 信号约束，
             // 停滞远端会无界挂住串行 wake 消费者——正是 runner 硬超时的初衷。给 prepare 也套一个超时预算
@@ -5681,6 +5733,14 @@ export interface ServeSupervisorOptions {
   /** Override terminal policy for composed lanes (managed front/worker keep healing after a circuit). */
   isTerminal?: (code: number) => boolean;
   onLifecycle?: (line: string) => void;
+  onState?: (state: {
+    state: "starting" | "backoff" | "stopped";
+    attempt: number;
+    restartDelayMs: number | null;
+    lastExitCode: number | null;
+    lastExitAt: number | null;
+    error: string | null;
+  }) => void;
 }
 
 export function isTerminalServeExit(code: number): boolean {
@@ -5698,6 +5758,17 @@ function reportServeLifecycle(opts: ServeSupervisorOptions, line: string): void 
   }
 }
 
+function reportServeSupervisorState(
+  opts: ServeSupervisorOptions,
+  state: Parameters<NonNullable<ServeSupervisorOptions["onState"]>>[0],
+): void {
+  try {
+    opts.onState?.(state);
+  } catch {
+    // Local observability is best-effort for the same reason as lifecycle logging.
+  }
+}
+
 /**
  * CLI 外层常驻 supervisor。runServe 自己负责一条 WS 生命周期；若它仍以瞬态错误结束，
  * 这里从持久 cursor/stuck 重新构造下一轮，而不是把无人值守 agent 永久留在离线状态。
@@ -5708,6 +5779,14 @@ export async function superviseServe(opts: ServeSupervisorOptions): Promise<numb
   const maxDelayMs = Math.max(baseDelayMs, opts.maxDelayMs ?? MAX_SUPERVISOR_RESTART_DELAY_MS);
   let restarts = 0;
   for (;;) {
+    reportServeSupervisorState(opts, {
+      state: "starting",
+      attempt: restarts + 1,
+      restartDelayMs: null,
+      lastExitCode: null,
+      lastExitAt: null,
+      error: null,
+    });
     reportServeLifecycle(opts, `event=start attempt=${restarts + 1}`);
     let code: number;
     let error = "";
@@ -5717,11 +5796,40 @@ export async function superviseServe(opts: ServeSupervisorOptions): Promise<numb
       code = 1;
       error = sanitizeBlockedError(cause instanceof Error ? cause.message : String(cause));
     }
+    const exitAt = Date.now();
     reportServeLifecycle(opts, `event=exit attempt=${restarts + 1} code=${code}${error ? ` error=${JSON.stringify(error)}` : ""}`);
-    if ((opts.isTerminal ?? isTerminalServeExit)(code)) return code;
-    if (opts.maxRestarts !== undefined && restarts >= opts.maxRestarts) return code;
+    if ((opts.isTerminal ?? isTerminalServeExit)(code)) {
+      reportServeSupervisorState(opts, {
+        state: "stopped",
+        attempt: restarts + 1,
+        restartDelayMs: null,
+        lastExitCode: code,
+        lastExitAt: exitAt,
+        error: error || null,
+      });
+      return code;
+    }
+    if (opts.maxRestarts !== undefined && restarts >= opts.maxRestarts) {
+      reportServeSupervisorState(opts, {
+        state: "stopped",
+        attempt: restarts + 1,
+        restartDelayMs: null,
+        lastExitCode: code,
+        lastExitAt: exitAt,
+        error: error || null,
+      });
+      return code;
+    }
     const waitMs = Math.min(baseDelayMs * 2 ** restarts, maxDelayMs);
     restarts += 1;
+    reportServeSupervisorState(opts, {
+      state: "backoff",
+      attempt: restarts,
+      restartDelayMs: waitMs,
+      lastExitCode: code,
+      lastExitAt: exitAt,
+      error: error || null,
+    });
     reportServeLifecycle(opts, `event=restart next_attempt=${restarts + 1} delay_ms=${waitMs} previous_code=${code}`);
     if (waitMs > 0) await sleep(waitMs);
   }
@@ -5918,11 +6026,6 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
       return 1;
     }
     const autoDownloadUpgrade = flags["auto-upgrade"] === true;
-    const availableUpgrade = await resolveUpgradeForServe(account.session.server, null, {
-      autoDownload: autoDownloadUpgrade,
-      out: (line) => console.error(terminalOutput(line)),
-    });
-    if (availableUpgrade !== null) console.error(terminalOutput(`serve: ${availableUpgrade.message}\n  ${availableUpgrade.command}`));
     return runProfileServe({
       server: account.session.server,
       humanToken: account.token,
@@ -5933,7 +6036,7 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
       ...(deps.resolveBuiltinCodexLaunch === undefined
         ? {}
         : { resolveCodexLaunch: deps.resolveBuiltinCodexLaunch }),
-      availableUpgrade,
+      availableUpgrade: null,
       refreshAvailableUpgrade: (current) => resolveUpgradeForServe(account.session.server, current, {
         autoDownload: autoDownloadUpgrade,
         out: (line) => console.error(terminalOutput(line)),
@@ -5987,12 +6090,6 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
     }
     codexLaunch = launch;
   }
-  const autoDownloadUpgrade = flags["auto-upgrade"] === true;
-  const availableUpgrade = await resolveUpgradeForServe(server, null, {
-    autoDownload: autoDownloadUpgrade,
-    out: (line) => console.error(terminalOutput(line)),
-  });
-  if (availableUpgrade !== null) console.error(terminalOutput(`serve: ${availableUpgrade.message}\n  ${availableUpgrade.command}`));
   const explicitRunnerWorkdir = str(flags.workdir);
   let runnerWorkdirPath = explicitRunnerWorkdir === undefined
     ? null
@@ -6018,10 +6115,25 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
   const lifecycle = (line: string) => {
     const record = `${new Date().toISOString()} ${line}`;
     if (runnerWorkdirPath !== null) appendServeLifecycleLog(runnerWorkdirPath, record);
-    console.error(terminalOutput(`serve supervisor: ${line}`));
+    console.error(terminalOutput(`serve supervisor: ${record}`));
   };
   const superviseExit = await superviseForCommand({
     onLifecycle: lifecycle,
+    onState: (state) => {
+      try {
+        writeHealthCache({
+          channel,
+          supervisor_state: state.state,
+          supervisor_attempt: state.attempt,
+          restart_delay_ms: state.restartDelayMs,
+          ...(state.lastExitCode === null ? {} : { last_exit_code: state.lastExitCode }),
+          ...(state.lastExitAt === null ? {} : { last_exit_at: state.lastExitAt }),
+          ...(state.state === "starting" ? {} : { supervisor_error: state.error }),
+        });
+      } catch {
+        // A read-only/full disk must not disable the serve supervisor.
+      }
+    },
     runOnce: async () => {
       // 每次自愈都重读本地凭据与 OIDC 状态，避免用启动时快照把一次可恢复的 token
       // 刷新变成永久离线。终局 auth/archived 仍由 isTerminalServeExit 停止。
@@ -6060,7 +6172,7 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
         advertise: (signal) => advertiseServeWake(currentAuth, channel, signal),
         fetchCharter: (signal) => fetchChannelCharter(currentServer, currentToken, channel, signal),
         autoUpgrade: flags["auto-upgrade"] === true,
-        availableUpgrade,
+        availableUpgrade: null,
         refreshAvailableUpgrade: (current) => resolveUpgradeForServe(currentServer, current, {
           autoDownload: flags["auto-upgrade"] === true,
           out: (line) => console.error(terminalOutput(line)),

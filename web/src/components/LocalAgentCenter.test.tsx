@@ -38,6 +38,7 @@ const adapter: DesktopAgentAdapter = {
     loaded: true,
   }),
   dutyUnpersist: async () => {},
+  dutyRestart: async () => {},
   dutyAdopt: async () => ({
     label: "test",
     instanceId: "test:channel",

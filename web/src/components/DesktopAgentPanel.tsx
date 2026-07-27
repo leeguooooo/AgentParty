@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { TFunc } from "../i18n/useT";
 import {
+  canRestartDuty,
   desktopAgentAdapter,
   dutyDependencyErrorRunner,
   dutyRepairInput,
+  dutyRuntimeState,
   type DesktopAgentAdapter,
   type DesktopAgentConfig,
   type DesktopAgentRunner,
@@ -354,13 +356,13 @@ export function DesktopAgentPanel({
     }
   };
 
-  const unpersistDuty = async (instanceId: string) => {
+  const runDutyAction = async (operation: () => Promise<unknown>) => {
     if (operationRef.current) return;
     operationRef.current = true;
     setBusy(true);
     setError(null);
     try {
-      await adapter.dutyUnpersist(instanceId);
+      await operation();
       if (!aliveRef.current) return;
       const snapshot = await fetchDuties();
       if (aliveRef.current && snapshot.requestSeq === dutyRequestSeqRef.current) {
@@ -373,6 +375,12 @@ export function DesktopAgentPanel({
       if (mountedRef.current) setBusy(false);
     }
   };
+
+  const unpersistDuty = (instanceId: string) =>
+    runDutyAction(() => adapter.dutyUnpersist(instanceId));
+
+  const restartDuty = (instanceId: string) =>
+    runDutyAction(() => adapter.dutyRestart(instanceId));
 
   const openInstanceLogs = async (instanceId: string) => {
     setLogsFor(instanceId);
@@ -507,12 +515,13 @@ export function DesktopAgentPanel({
           <ul className="desktop-agent-instances">
             {duties.map((entry) => {
               const repairInput = dutyRepairInput(entry);
+              const runtimeState = dutyRuntimeState(entry);
               const dependencyProblem =
                 entry.dependencyState === "missing" || entry.dependencyState === "repair-required";
               return (
                 <li key={entry.label} className="desktop-agent-instance">
                   <span
-                    className={`desktop-agent-state desktop-agent-state--${entry.loaded && entry.terminalBlocked !== true ? "running" : "stopped"}`}
+                    className={`desktop-agent-state desktop-agent-state--${entry.terminalBlocked === true ? "stopped" : runtimeState}`}
                     title={entry.terminalReason ?? undefined}
                   >
                     {t(entry.terminalReason === "legacy-duty-needs-repair"
@@ -521,9 +530,7 @@ export function DesktopAgentPanel({
                         ? "DesktopSettings.agent.dutyQuarantined"
                         : entry.terminalBlocked === true
                           ? "DesktopSettings.agent.dutyTerminalBlocked"
-                          : entry.loaded
-                            ? "DesktopSettings.agent.dutyLoaded"
-                            : "DesktopSettings.agent.dutyNotLoaded")}
+                          : `DesktopSettings.agent.dutyState.${runtimeState}`)}
                   </span>
                   <span className="t-mono desktop-agent-instance-name">{entry.instanceId}</span>
                   <span className="t-mono desktop-agent-instance-dir" title={entry.logPath}>{entry.logPath}</span>
@@ -546,6 +553,17 @@ export function DesktopAgentPanel({
                       onClick={() => void persistDuty(repairInput)}
                     >
                       {t("DesktopSettings.agent.dutyRepair")}
+                    </button>
+                  )}
+                  {canRestartDuty(runtimeState) && (
+                    <button
+                      type="button"
+                      className="d-btn desktop-agent-duty-restart"
+                      aria-label={`${t("DesktopSettings.agent.dutyRestart")} ${entry.instanceId}`}
+                      disabled={busy}
+                      onClick={() => void restartDuty(entry.instanceId)}
+                    >
+                      {t("DesktopSettings.agent.dutyRestart")}
                     </button>
                   )}
                   <button

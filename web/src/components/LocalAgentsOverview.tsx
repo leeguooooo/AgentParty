@@ -5,9 +5,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TFunc } from "../i18n/useT";
 import {
+  canRestartDuty,
   desktopAgentAdapter,
   dutyDependencyErrorRunner,
   dutyRepairInput,
+  dutyRuntimeState,
   type DesktopAgentAdapter,
   type DesktopAgentConfig,
   type DesktopAgentStatus,
@@ -44,6 +46,13 @@ function isActive(state: string): boolean {
 
 function shortConfigId(configId: string): string {
   return configId.length <= 12 ? configId : `${configId.slice(0, 8)}…${configId.slice(-4)}`;
+}
+
+function healthDiagnosticKey(state: ReturnType<typeof dutyRuntimeState>): string | null {
+  return state === "unknown" || state === "starting" || state === "restarting" || state === "reconnecting" ||
+    state === "disconnected" || state === "stale" || state === "standby"
+    ? `LocalAgents.health.${state}`
+    : null;
 }
 
 export function LocalAgentsOverview({
@@ -266,6 +275,11 @@ export function LocalAgentsOverview({
                       const detailId = `local-agent-detail-${row.key}`;
                       const detailOpen = detailKey === row.key;
                       const rowLog = logView?.key === row.key ? logView : null;
+                      const dutyState = row.duty === undefined ? null : dutyRuntimeState(row.duty);
+                      const health = row.duty?.health ?? null;
+                      const healthDiagnostic = dutyState === null || row.duty?.terminalBlocked === true
+                        ? null
+                        : healthDiagnosticKey(dutyState);
                       return (
                         <li key={row.key} className={`local-agents-row local-agents-row--${row.kind}`}>
                           <div className="local-agents-summary">
@@ -282,7 +296,9 @@ export function LocalAgentsOverview({
                             </span>
                             {row.runner !== null && <span className="local-agents-runner">{row.runner}</span>}
                             <span
-                              className={`desktop-agent-state desktop-agent-state--${row.state}`}
+                              className={`desktop-agent-state desktop-agent-state--${
+                                row.duty?.terminalBlocked === true ? "stopped" : dutyState ?? row.state
+                              }`}
                               title={row.kind === "duty" ? row.duty!.terminalReason ?? undefined : undefined}
                             >
                               {row.kind === "duty"
@@ -292,9 +308,7 @@ export function LocalAgentsOverview({
                                     ? "DesktopSettings.agent.dutyQuarantined"
                                     : row.duty!.terminalBlocked === true
                                       ? "DesktopSettings.agent.dutyTerminalBlocked"
-                                      : row.duty!.loaded
-                                        ? "DesktopSettings.agent.dutyLoaded"
-                                        : "DesktopSettings.agent.dutyNotLoaded")
+                                      : `DesktopSettings.agent.dutyState.${dutyState}`)
                                 : t(`DesktopSettings.agent.state.${row.state}`)}
                             </span>
                             <span className="local-agents-actions">
@@ -337,6 +351,17 @@ export function LocalAgentsOverview({
                                       {t("DesktopSettings.agent.dutyRepair")}
                                     </button>
                                   )}
+                                  {canRestartDuty(dutyState) && (
+                                    <button
+                                      type="button"
+                                      className="d-btn local-agents-restart"
+                                      disabled={busy}
+                                      aria-label={`${t("DesktopSettings.agent.dutyRestart")} ${displayName}`}
+                                      onClick={() => void runAction(() => adapter.dutyRestart(row.instanceId!))}
+                                    >
+                                      {t("DesktopSettings.agent.dutyRestart")}
+                                    </button>
+                                  )}
                                   <button
                                     type="button"
                                     className="d-btn local-agents-unload"
@@ -362,6 +387,20 @@ export function LocalAgentsOverview({
                                   : "DesktopSettings.agent.dutyDependencyRepair",
                                 { runner: row.duty!.runner ?? "runner" },
                               )}
+                            </p>
+                          )}
+
+                          {row.kind === "duty" && healthDiagnostic !== null && (
+                            <p className="local-agents-health-note" role={dutyState === "standby" ? "status" : "alert"}>
+                              {t(healthDiagnostic, {
+                                delay: `${Math.round((health?.restartDelayMs ?? 0) / 1000)}s`,
+                              })}
+                            </p>
+                          )}
+
+                          {row.kind === "duty" && dutyState === "healthy" && (health?.serveStandbys ?? 0) > 0 && (
+                            <p className="local-agents-health-note local-agents-health-note--info" role="status">
+                              {t("LocalAgents.health.extraStandbys", { count: health!.serveStandbys })}
                             </p>
                           )}
 
@@ -413,15 +452,56 @@ export function LocalAgentsOverview({
                                   </div>
                                 )}
                                 {row.duty !== undefined && (
-                                  <div>
-                                    <dt>{t("LocalAgents.field.logPath")}</dt>
-                                    <dd className="t-mono">{row.duty.logPath}</dd>
-                                  </div>
+                                  <>
+                                    <div>
+                                      <dt>{t("LocalAgents.field.connection")}</dt>
+                                      <dd>{t(`DesktopSettings.agent.dutyState.${dutyState}`)}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>{t("LocalAgents.field.lastFrame")}</dt>
+                                      <dd>
+                                        {health?.ageMs == null
+                                          ? t("LocalAgents.age.never")
+                                          : t("LocalAgents.age.seconds", { count: Math.round(health.ageMs / 1000) })}
+                                      </dd>
+                                    </div>
+                                    <div>
+                                      <dt>{t("LocalAgents.field.reconnects")}</dt>
+                                      <dd>{health?.reconnectCount ?? 0}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>{t("LocalAgents.field.lease")}</dt>
+                                      <dd>{t(`LocalAgents.lease.${health?.leaseState ?? "unknown"}`)}</dd>
+                                    </div>
+                                    {health?.lastExitCode != null && (
+                                      <div>
+                                        <dt>{t("LocalAgents.field.lastExit")}</dt>
+                                        <dd className="t-mono">
+                                          code {health.lastExitCode}
+                                          {health.lastExitAt == null ? "" : ` · ${new Date(health.lastExitAt).toLocaleString()}`}
+                                        </dd>
+                                      </div>
+                                    )}
+                                    <div>
+                                      <dt>{t("LocalAgents.field.logPath")}</dt>
+                                      <dd className="t-mono">{row.duty.logPath}</dd>
+                                    </div>
+                                  </>
                                 )}
                               </dl>
                               {row.instance?.lastError && (
                                 <p className="desktop-agent-error local-agents-last-error" role="alert">
                                   <strong>{t("LocalAgents.field.lastError")}</strong> {row.instance.lastError}
+                                </p>
+                              )}
+                              {row.duty?.health?.lastError && (
+                                <p className="desktop-agent-error local-agents-last-error" role="alert">
+                                  <strong>{t("LocalAgents.field.lastError")}</strong> {row.duty.health.lastError}
+                                </p>
+                              )}
+                              {row.duty?.health?.supervisorError && row.duty.health.supervisorError !== row.duty.health.lastError && (
+                                <p className="desktop-agent-error local-agents-last-error" role="alert">
+                                  <strong>{t("LocalAgents.field.lastError")}</strong> {row.duty.health.supervisorError}
                                 </p>
                               )}
                               <div className="local-agents-log-head">

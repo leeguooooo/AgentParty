@@ -588,7 +588,16 @@ export function connect(
     opts.onStatus?.("reconnecting", error === undefined ? undefined : { error });
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      if (!closed) open();
+      if (closed) return;
+      try {
+        open();
+      } catch (error) {
+        // Bun can throw synchronously while constructing a replacement WebSocket (for example
+        // during a transient DNS/network failure). Letting that exception escape the timer leaves
+        // the long-running frame iterator alive with neither a socket nor another reconnect timer.
+        // Re-enter the normal backoff path so a resident serve never becomes a live-but-deaf process.
+        scheduleReconnect(errorMessage(error));
+      }
     }, delay);
   };
 

@@ -54,6 +54,7 @@ function adapter(overrides: Partial<DesktopAgentAdapter> = {}): DesktopAgentAdap
       throw new Error("duty persist unavailable");
     },
     dutyUnpersist: async () => {},
+    dutyRestart: async () => {},
     dutyAdopt: async () => {
       throw new Error("duty adopt unavailable");
     },
@@ -612,6 +613,54 @@ describe("DesktopAgentPanel 系统常驻 (#616 phase 3)", () => {
     const state = root.find((node) => node.props.title === "circuit-breaker");
     expect(state.children.join("")).toBe("repair required");
     expect(String(state.props.className)).toContain("desktop-agent-state--stopped");
+  });
+
+  test("连接无响应的常驻实例可在设置面板重启，恢复后入口消失", async () => {
+    const restarted: string[] = [];
+    let entries: DesktopDutyEntry[] = [{
+      ...duty,
+      pid: 42,
+      health: {
+        current: true,
+        healthy: false,
+        stale: true,
+        ageMs: 120_000,
+        wsConnected: true,
+        reconnecting: false,
+        reconnectCount: 1,
+        lastFrameAt: 1,
+        lastError: null,
+        connectedSince: 1,
+        supervisorState: "running",
+        supervisorAttempt: 1,
+        restartDelayMs: null,
+        lastExitCode: null,
+        lastExitAt: null,
+        supervisorError: null,
+        leaseState: "held",
+        serveStandbys: 0,
+      },
+    }];
+    const root = await render(adapter({
+      dutyList: async () => entries,
+      dutyRestart: async (instanceId) => {
+        restarted.push(instanceId);
+        entries = [{
+          ...entries[0]!,
+          health: { ...entries[0]!.health!, healthy: true, stale: false, ageMs: 0 },
+        }];
+      },
+    }));
+
+    await act(async () => {
+      button("Restart local-main:agentparty").props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(restarted).toEqual(["local-main:agentparty"]);
+    expect(root.findAll((node) => node.props["aria-label"] === "Restart local-main:agentparty"))
+      .toHaveLength(0);
   });
 
   test("即使本机 agent 已停止也轮询 duty，并丢弃晚到的旧列表响应", async () => {
