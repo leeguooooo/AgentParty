@@ -31,7 +31,7 @@ export interface UpgradeDeps {
   readInstalledVersion?: (execPath: string) => string | null;
   reexec?: (execPath: string, argv: string[]) => void;
   fetch?: typeof fetch;
-  fetchBytes?: (url: string) => Promise<Uint8Array>;
+  fetchBytes?: (url: string, signal?: AbortSignal) => Promise<Uint8Array>;
   extractPartyBinary?: (archivePath: string, outDir: string, platform: NodeJS.Platform) => Promise<string>;
   installBinary?: (sourcePath: string, targetPath: string) => void;
   platform?: NodeJS.Platform;
@@ -86,9 +86,13 @@ export function detectReleaseTarget(platform: NodeJS.Platform = process.platform
   return `${os}-${cpu}`;
 }
 
+const UPGRADE_NETWORK_TIMEOUT_MS = 60_000;
+
 async function resolveLatestReleaseVersion(fetcher: typeof fetch): Promise<string> {
+  const signal = AbortSignal.timeout(UPGRADE_NETWORK_TIMEOUT_MS);
   const api = await fetcher(`https://api.github.com/repos/${OWNER_REPO}/releases/latest`, {
     headers: { accept: "application/vnd.github+json" },
+    signal,
   }).catch(() => null);
   if (api?.ok) {
     const body = (await api.json().catch(() => null)) as { tag_name?: unknown } | null;
@@ -98,15 +102,16 @@ async function resolveLatestReleaseVersion(fetcher: typeof fetch): Promise<strin
   const redirected = await fetcher(`https://github.com/${OWNER_REPO}/releases/latest`, {
     method: "HEAD",
     redirect: "follow",
+    signal,
   });
   const match = redirected.url.match(/\/tag\/v?(\d+\.\d+\.\d+)/);
   if (match) return match[1]!;
   throw new Error("cannot resolve latest release version");
 }
 
-async function defaultFetchBytes(url: string): Promise<Uint8Array> {
+async function defaultFetchBytes(url: string, signal?: AbortSignal): Promise<Uint8Array> {
   if (url.startsWith("file://")) return new Uint8Array(readFileSync(fileURLToPath(url)));
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: signal ?? AbortSignal.timeout(UPGRADE_NETWORK_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`download failed: ${url} (${res.status})`);
   return new Uint8Array(await res.arrayBuffer());
 }
@@ -203,9 +208,10 @@ export async function downloadPartyUpgrade(
     return { running_version: running, target_version: targetVersion, target, asset_url: assetUrl, installed: false, install_path: execPath };
   }
   const fetchBytes = deps.fetchBytes ?? defaultFetchBytes;
+  const downloadSignal = AbortSignal.timeout(UPGRADE_NETWORK_TIMEOUT_MS);
   const [archiveBytes, checksumBytes] = await Promise.all([
-    fetchBytes(assetUrl),
-    fetchBytes(`${assetUrl}.sha256`),
+    fetchBytes(assetUrl, downloadSignal),
+    fetchBytes(`${assetUrl}.sha256`, downloadSignal),
   ]);
   const want = new TextDecoder().decode(checksumBytes).trim().split(/\s+/)[0] ?? "";
   if (!/^[0-9a-fA-F]{64}$/.test(want)) throw new Error("release checksum file is invalid");

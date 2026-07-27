@@ -695,7 +695,12 @@ export async function sendLarkCard(
 
 export function buildMentionCard(payload: LarkWebhookPayload): Record<string, unknown> {
   const title = `AgentParty @${payload.mentions.join(", @")}`;
-  const sender = payload.sender.display_name || payload.sender.handle || payload.sender.owner || payload.sender.name;
+  // Keep the Lark card aligned with the web sender label: an agent's owner is
+  // an account anchor (often an opaque lark:on_* id), not its display name.
+  const sender =
+    payload.sender.handle ||
+    (payload.sender.kind === "human" ? payload.sender.display_name || payload.sender.owner : undefined) ||
+    payload.sender.name;
   const body = payload.kind === "status" ? payload.note || payload.body : payload.body;
   const attachmentLinks = payload.attachments?.map((attachment) => {
     const markdownSafeUrl = attachment.url.replace(/\(/g, "%28").replace(/\)/g, "%29");

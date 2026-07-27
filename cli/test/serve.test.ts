@@ -1525,6 +1525,52 @@ describe("builtin runner", () => {
     expect(attempts.every((options) => options.builtinRunner?.codexLaunch?.env.PATH === "/preflight-a/bin")).toBe(true);
   });
 
+  test("--auto-upgrade never waits for optional release maintenance before starting the serve supervisor", async () => {
+    const home = tempDir();
+    const oldHome = process.env.AGENTPARTY_HOME;
+    process.env.AGENTPARTY_HOME = home;
+    writeFileSync(join(home, "config.json"), JSON.stringify({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+    }));
+    let upgradeCalls = 0;
+    const attempts: ServeOptions[] = [];
+    try {
+      const command = runServeCommand(["dev", "--on-mention", "true", "--auto-upgrade"], {
+        resolveAvailableUpgrade: async () => {
+          upgradeCalls += 1;
+          return new Promise<never>(() => {});
+        },
+        verifyServeIdentityBoundary: async () => ({
+          ok: true,
+          principal: {
+            server_origin: "http://agentparty.test",
+            name: "me",
+            kind: "agent",
+            owner: null,
+          },
+          namespace: "a".repeat(64),
+        }),
+        runServe: async (options) => {
+          attempts.push(options);
+          return 0;
+        },
+      });
+      expect(await Promise.race([
+        command,
+        Bun.sleep(250).then(() => "startup timed out" as const),
+      ])).toBe(0);
+    } finally {
+      if (oldHome === undefined) delete process.env.AGENTPARTY_HOME;
+      else process.env.AGENTPARTY_HOME = oldHome;
+    }
+
+    expect(upgradeCalls).toBe(0);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.availableUpgrade).toBeNull();
+    expect(typeof attempts[0]?.refreshAvailableUpgrade).toBe("function");
+  });
+
   test("codex cold-starts, persists the session id, then resumes it on the next wake", async () => {
     const { post } = postRecorder();
     const workdir = tempDir();

@@ -283,10 +283,13 @@
 .resident-logs-item { display: flex; align-items: center; gap: 8px; width: 100%; justify-content: flex-start; text-align: left; }
 .resident-logs-item--active { border-color: var(--d-blue); color: var(--d-blue); }
 .resident-logs-chan { font-weight: 600; }
+.resident-logs-agent { min-width: 0; overflow: hidden; color: var(--t-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .resident-logs-dot { color: var(--t-faint); font-size: 10px; }
 .resident-logs-dot--on { color: var(--d-green); }
 .resident-logs-state { font-size: 11px; color: var(--t-dim); }
 .resident-logs-view-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.resident-logs-selection { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.resident-logs-selection > strong { font-size: 11px; }
 .resident-logs-label { font-size: 11px; color: var(--t-dim); word-break: break-all; }
 .resident-logs-pre { max-height: 320px; overflow: auto; margin: 0; padding: 8px; font-size: 11px; line-height: 1.5; background: var(--t-faint); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -296,6 +299,14 @@
 .desktop-agent-state { color: var(--t-dim); font-size: 10px; font-weight: 700; }
 .desktop-agent-state--running { color: var(--d-green-dark, var(--d-green)); }
 .desktop-agent-state--failed { color: var(--d-red); }
+.desktop-agent-state--healthy { color: var(--d-green-dark, var(--d-green)); }
+.desktop-agent-state--starting,
+.desktop-agent-state--unknown,
+.desktop-agent-state--reconnecting,
+.desktop-agent-state--restarting,
+.desktop-agent-state--standby { color: var(--t-accent); }
+.desktop-agent-state--disconnected,
+.desktop-agent-state--stale { color: var(--d-red); }
 .desktop-agent-fields { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr); gap: 6px; margin-top: 8px; }
 .desktop-agent-fields label { min-width: 0; color: var(--t-dim); font-size: 9px; }
 .desktop-agent-fields label > span { display: block; margin-bottom: 3px; }
@@ -399,8 +410,19 @@
 .local-agents-config-id { font-size: 9px; color: var(--t-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .local-agents-runner { font-size: 11px; color: var(--t-dim); flex: 0 0 auto; }
 .local-agents-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
-.local-agents-details, .local-agents-stop, .local-agents-unload, .local-agents-repair { flex: 0 0 auto; }
+.local-agents-details, .local-agents-stop, .local-agents-unload, .local-agents-repair, .local-agents-restart { flex: 0 0 auto; }
 .local-agents-diagnostic { margin: 6px 0 0 34px; }
+.local-agents-health-note {
+  margin: 6px 0 0 34px;
+  padding-left: 8px;
+  border-left: 2px solid var(--d-red);
+  font-size: 11px;
+  color: var(--t-text);
+}
+.local-agents-health-note--info,
+.local-agents-row:has(.desktop-agent-state--standby) .local-agents-health-note {
+  border-left-color: var(--t-accent);
+}
 .local-agents-detail {
   margin: 8px 0 0 34px;
   padding: 10px;
@@ -7350,7 +7372,8 @@
     flex-wrap: wrap;
   }
   .local-agents-detail,
-  .local-agents-diagnostic { margin-left: 0; }
+  .local-agents-diagnostic,
+  .local-agents-health-note { margin-left: 0; }
   .local-agents-meta { grid-template-columns: minmax(0, 1fr); }
   .composer-input,
   .newchan-input,

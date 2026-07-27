@@ -1,8 +1,9 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { ReactElement } from "react";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import type { DesktopDutyEntry } from "../lib/desktopAgent";
+import type { DesktopAgentConfig, DesktopDutyEntry } from "../lib/desktopAgent";
 
 const { ResidentDutyLogs } = await import("./ResidentDutyLogs");
 
@@ -49,14 +50,20 @@ afterEach(() => {
 });
 
 async function renderPanel(
-  adapter: { dutyList: () => Promise<DesktopDutyEntry[]>; dutyLogRead: (label: string) => Promise<string> },
+  adapter: {
+    dutyList: () => Promise<DesktopDutyEntry[]>;
+    dutyLogRead: (label: string) => Promise<string>;
+    listConfigs?: () => Promise<DesktopAgentConfig[]>;
+  },
   active = true,
+  createNodeMock?: (element: ReactElement) => unknown,
 ): Promise<ReactTestRenderer> {
   await act(async () => {
     renderer = create(
       <LocaleProvider>
         <ResidentDutyLogs t={((k: string) => k) as never} adapter={adapter} active={active} />
       </LocaleProvider>,
+      createNodeMock === undefined ? undefined : { createNodeMock },
     );
   });
   return renderer!;
@@ -78,6 +85,22 @@ describe("ResidentDutyLogs (#725)", () => {
     expect(text).toContain('"dev"');
   });
 
+  test("常驻日志列表显示可信 Agent 名称", async () => {
+    const r = await renderPanel({
+      dutyList: async () => [entry({ instanceId: "abc123:kyc" })],
+      listConfigs: async () => [{
+        configId: "abc123",
+        name: "kyc-reviewer",
+        serverOrigin: "https://agentparty.test",
+        channel: "kyc",
+        kind: "agent",
+        role: "reviewer",
+      }],
+      dutyLogRead: async () => "",
+    });
+    expect(JSON.stringify(r.toJSON())).toContain("kyc-reviewer");
+  });
+
   test("点某个实例 → 读取并展示其日志尾部", async () => {
     const reads: string[] = [];
     const r = await renderPanel({
@@ -88,6 +111,21 @@ describe("ResidentDutyLogs (#725)", () => {
     await act(async () => { await item.props.onClick(); });
     expect(reads).toEqual(["com.agentparty.duty.abc123.kyc"]);
     expect(JSON.stringify(r.toJSON())).toContain("serve: online");
+  });
+
+  test("日志加载后默认定位到最新一行", async () => {
+    const logNode = { scrollTop: 0, scrollHeight: 640 };
+    const r = await renderPanel(
+      {
+        dutyList: async () => [entry()],
+        dutyLogRead: async () => "old failure\nrecovered",
+      },
+      true,
+      (element) => element.type === "pre" ? logNode : {},
+    );
+    const item = buttons(r).find((button) => JSON.stringify(button.props.className).includes("resident-logs-item"))!;
+    await act(async () => { await item.props.onClick(); });
+    expect(logNode.scrollTop).toBe(640);
   });
 
   test("快速切换条目:慢请求不覆盖后点击的日志(#734 排序保护)", async () => {

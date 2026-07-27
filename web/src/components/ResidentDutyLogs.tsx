@@ -2,12 +2,21 @@
 // 方便排查「设了常驻、@ 没反应」这类问题(日志里能看到 ▶ wake / serve: / runner 报错)。
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TFunc } from "../i18n/useT";
-import { desktopAgentAdapter, type DesktopAgentAdapter, type DesktopDutyEntry } from "../lib/desktopAgent";
+import {
+  desktopAgentAdapter,
+  type DesktopAgentAdapter,
+  type DesktopAgentConfig,
+  type DesktopDutyEntry,
+} from "../lib/desktopAgent";
+import { useAutoScrollToLatest } from "../lib/useAutoScrollToLatest";
 import "../i18n/strings/ResidentDutyLogs";
+
+type ResidentDutyAdapter = Pick<DesktopAgentAdapter, "dutyList" | "dutyLogRead"> &
+  Partial<Pick<DesktopAgentAdapter, "listConfigs">>;
 
 interface Props {
   t: TFunc;
-  adapter?: Pick<DesktopAgentAdapter, "dutyList" | "dutyLogRead">;
+  adapter?: ResidentDutyAdapter;
   active?: boolean;
 }
 
@@ -17,8 +26,18 @@ function channelOf(entry: DesktopDutyEntry): string {
   return idx >= 0 ? entry.instanceId.slice(idx + 1) : entry.instanceId;
 }
 
+function configIdOf(entry: DesktopDutyEntry): string {
+  const idx = entry.instanceId.indexOf(":");
+  return idx >= 0 ? entry.instanceId.slice(0, idx) : entry.instanceId;
+}
+
+function configNames(configs: readonly DesktopAgentConfig[]): Map<string, string> {
+  return new Map(configs.map((config) => [config.configId, config.name]));
+}
+
 export function ResidentDutyLogs({ t, adapter = desktopAgentAdapter, active = true }: Props) {
   const [entries, setEntries] = useState<DesktopDutyEntry[] | null>(null);
+  const [namesByConfigId, setNamesByConfigId] = useState<Map<string, string>>(() => new Map());
   const [listError, setListError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null); // 选中的 label
   const [log, setLog] = useState<string>("");
@@ -28,14 +47,18 @@ export function ResidentDutyLogs({ t, adapter = desktopAgentAdapter, active = tr
   const loadSeqRef = useRef(0);
   const listSeqRef = useRef(0);
   const listActiveRef = useRef(active);
+  const logPreRef = useAutoScrollToLatest<HTMLPreElement>(log, !logBusy && logError === null);
 
   const refreshList = useCallback(async () => {
     const seq = ++listSeqRef.current;
     setListError(null);
     try {
-      const list = await adapter.dutyList();
+      const configsRequest = adapter.listConfigs?.().catch(() => [] as DesktopAgentConfig[]) ??
+        Promise.resolve([] as DesktopAgentConfig[]);
+      const [list, configs] = await Promise.all([adapter.dutyList(), configsRequest]);
       if (!listActiveRef.current || seq !== listSeqRef.current) return;
       setEntries(list);
+      setNamesByConfigId(configNames(configs));
       // 选中项若已消失，清掉日志。
       setSelected((current) => (current !== null && list.some((e) => e.label === current) ? current : null));
     } catch (err) {
@@ -80,6 +103,13 @@ export function ResidentDutyLogs({ t, adapter = desktopAgentAdapter, active = tr
     };
   }, [active, refreshList]);
 
+  const agentNameOf = (entry: DesktopDutyEntry): string => {
+    const configId = configIdOf(entry);
+    return namesByConfigId.get(configId) ?? configId;
+  };
+
+  const selectedEntry = entries?.find((entry) => entry.label === selected) ?? null;
+
   return (
     <div className="resident-logs">
       <div className="resident-logs-head">
@@ -104,6 +134,7 @@ export function ResidentDutyLogs({ t, adapter = desktopAgentAdapter, active = tr
                 onClick={() => void loadLog(entry.label)}
               >
                 <span className="resident-logs-chan">#{channelOf(entry)}</span>
+                <span className="resident-logs-agent">{agentNameOf(entry)}</span>
                 <span className={`resident-logs-dot${entry.loaded ? " resident-logs-dot--on" : ""}`} aria-hidden="true">
                   ●
                 </span>
@@ -119,7 +150,10 @@ export function ResidentDutyLogs({ t, adapter = desktopAgentAdapter, active = tr
       {selected !== null && (
         <div className="resident-logs-view">
           <div className="resident-logs-view-head">
-            <span className="t-mono resident-logs-label">{selected}</span>
+            <span className="resident-logs-selection">
+              {selectedEntry !== null && <strong>{agentNameOf(selectedEntry)}</strong>}
+              <span className="t-mono resident-logs-label">{selected}</span>
+            </span>
             <button type="button" className="d-btn resident-logs-reload" disabled={logBusy} onClick={() => void loadLog(selected)}>
               {logBusy ? t("ResidentDutyLogs.loading") : t("ResidentDutyLogs.reload")}
             </button>
@@ -129,7 +163,7 @@ export function ResidentDutyLogs({ t, adapter = desktopAgentAdapter, active = tr
             (log.trim() === "" ? (
               <p className="resident-logs-empty">{t("ResidentDutyLogs.noLog")}</p>
             ) : (
-              <pre className="t-mono resident-logs-pre">{log}</pre>
+              <pre ref={logPreRef} className="t-mono resident-logs-pre">{log}</pre>
             ))}
         </div>
       )}

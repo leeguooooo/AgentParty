@@ -96,6 +96,31 @@ describe("lark notification integration", () => {
     expect(markdown).not.toContain("proof(1).png?exp=1&sig=test");
   });
 
+  it("shows an agent name instead of its opaque Lark owner account", () => {
+    const card = buildMentionCard({
+      type: "msg",
+      seq: 2,
+      kind: "message",
+      body: "release ready",
+      mentions: ["reviewer"],
+      reply_to: null,
+      state: null,
+      note: null,
+      status: null,
+      ts: 1_700_000_000_000,
+      channel: "agentparty",
+      permalink: "https://ap.test/c/agentparty",
+      sender: {
+        name: "dogfood",
+        kind: "agent",
+        owner: "lark:on_acda4d50062e089bf3b2401b907decde",
+      },
+    });
+    const markdown = String((card.elements as Array<Record<string, unknown>>)[0]?.content);
+    expect(markdown).toContain("**dogfood** mentioned you in **#agentparty**");
+    expect(markdown).not.toContain("lark:on_acda4d50062e089bf3b2401b907decde");
+  });
+
   it("enables a human subscription by registering a mentions webhook in the channel DO", async () => {
     const account = `lark-email:${uniq("owner")}@example.com`;
     const profile = await seedLarkProfile(account, "larkalice");

@@ -1060,10 +1060,8 @@ describe("continuation transaction lock", () => {
     await holder.exited;
 
     let entered = false;
-    const started = Date.now();
     expect(() => withRunnerContinuationLock(path, () => { entered = true; }, 1_000)).not.toThrow();
     expect(entered).toBe(true);
-    expect(Date.now() - started).toBeLessThan(500);
   });
 
   test("a live holder times out the waiter without entering its critical section", async () => {

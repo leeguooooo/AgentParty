@@ -1,0 +1,6 @@
+{
+  "channel": "all",
+  "configPath": "/tmp/agentparty-health-contract.json",
+  "token": "ap_test_health_contract",
+  "expectedFile": "health-all-6f9ff349aa5da4e3.json"
+}

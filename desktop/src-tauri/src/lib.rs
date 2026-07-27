@@ -1188,6 +1188,7 @@ pub fn run() {
             duty::desktop_duty_persist,
             duty::desktop_duty_adopt,
             duty::desktop_duty_unpersist,
+            duty::desktop_duty_restart,
             duty::desktop_duty_log_read
         ]);
 

@@ -41,6 +41,14 @@ describe("health cache contract", () => {
       current_task: null,
       task_started_at: null,
       heartbeat_at: null,
+      supervisor_state: "starting",
+      supervisor_attempt: 1,
+      restart_delay_ms: null,
+      last_exit_code: null,
+      last_exit_at: null,
+      supervisor_error: null,
+      lease_state: "unknown",
+      serve_standbys: 0,
       updated_at: 1234,
     });
     expect(statSync(healthCachePath(cwd)).mode & 0o777).toBe(0o600);
@@ -65,6 +73,33 @@ describe("health cache contract", () => {
     const cache = readHealthCache(cwd);
     expect(cache?.last_error).toBeNull();
     expect(cache?.connected_since).toBeNull();
+  });
+
+  test("persists supervisor and cross-machine lease state without disturbing websocket health", () => {
+    writeHealthCache({
+      channel: "dev",
+      ws_connected: true,
+      last_frame_at: 1000,
+      supervisor_state: "backoff",
+      supervisor_attempt: 4,
+      restart_delay_ms: 30_000,
+      last_exit_code: 1,
+      last_exit_at: 900,
+      supervisor_error: "connect failed",
+      lease_state: "standby",
+      serve_standbys: 2,
+    }, cwd, 1234);
+
+    expect(readHealthCache(cwd)).toMatchObject({
+      ws_connected: true,
+      supervisor_state: "backoff",
+      supervisor_attempt: 4,
+      restart_delay_ms: 30_000,
+      last_exit_code: 1,
+      supervisor_error: "connect failed",
+      lease_state: "standby",
+      serve_standbys: 2,
+    });
   });
 
   test("clearHealthCache only clears a record this process pid owns", () => {
