@@ -263,7 +263,7 @@ interface OidcClaims {
 function oidcDisplayName(claims: OidcClaims): string | undefined {
   for (const value of [claims.name, claims.preferred_username]) {
     if (typeof value !== "string") continue;
-    const safe = [...value.trim()]
+    const safe = [...value.slice(0, 512).trim()]
       .map((char) => {
         const codePoint = char.codePointAt(0)!;
         if (char.length === 1 && codePoint >= 0xd800 && codePoint <= 0xdfff) return "\ufffd";

@@ -5833,8 +5833,8 @@ app.post("/api/instance/invites/:code/redeem", requireBearer, async (c) => {
             account,
             invite.preset_handle,
             identity.displayName ?? null,
-            identity.displayName === undefined ? null : "oidc",
-            identity.displayName === undefined ? null : identity.name,
+            identity.hash.startsWith("oidc:") ? "oidc" : null,
+            identity.hash.startsWith("oidc:") ? identity.name : null,
             now,
             now,
           )

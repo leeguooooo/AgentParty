@@ -143,6 +143,15 @@ describe("lookupToken OIDC verification", () => {
     );
     expect(sanitized?.displayName).toBe(`Jane\ufffd${"界".repeat(123)}`);
     expect([...(sanitized?.displayName ?? "")]).toHaveLength(128);
+
+    const boundedIssuer = freshIssuer();
+    mockJwks(boundedIssuer);
+    const bounded = await lookupToken(
+      env.DB,
+      await signJwt(claims(boundedIssuer, { name: "界".repeat(10_000) })),
+      oidc(boundedIssuer),
+    );
+    expect(bounded?.displayName).toBe("界".repeat(128));
   });
 
   it("falls back owner to sub when the JWT has no email", async () => {
@@ -367,6 +376,37 @@ describe("oidc end-to-end via SELF.fetch", () => {
       body: JSON.stringify({ kind: "message", body: "handle works", mentions: [presetHandle], reply_to: null }),
     });
     expect(handleMention.status).toBe(200);
+
+    // OIDC 身份来源不能依赖可选的展示名；无 name/preferred_username 也要保留 provider 锚点。
+    const noNameHandle = uniq("oidcnoname").replaceAll("-", "");
+    const noNameInviteResponse = await api(`/api/channels/${inviteSlug}/external-invites`, owner.token, {
+      method: "POST",
+      body: JSON.stringify({ handle: noNameHandle }),
+    });
+    expect(noNameInviteResponse.status).toBe(201);
+    const noNameInvite = (await noNameInviteResponse.json()) as { code: string };
+    const noNameJwt = await signJwt(
+      claims(CONFIGURED_ISSUER, {
+        sub: "invited-no-name",
+        email: "invited-no-name@example.com",
+      }),
+    );
+    const noNameRedeem = await SELF.fetch(
+      `http://ap.test/api/instance/invites/${noNameInvite.code}/redeem`,
+      { method: "POST", headers: { authorization: `Bearer ${noNameJwt}` } },
+    );
+    expect(noNameRedeem.status).toBe(200);
+    expect(
+      await env.DB.prepare(
+        "SELECT display_name, provider, provider_user_id FROM account_profiles WHERE account = ?",
+      )
+        .bind("invited-no-name@example.com")
+        .first(),
+    ).toMatchObject({
+      display_name: null,
+      provider: "oidc",
+      provider_user_id: "invited-no-name",
+    });
 
     // 无效邀请不能因为 token 带 name 就留下 account_profiles 副作用。
     const invalidJwt = await signJwt(
