@@ -7184,6 +7184,29 @@ export class ChannelDO extends Server<Env> {
     let agentRows: { results: { name: string; owner: string | null; hash: string }[] };
     let ownershipRows: { results: { name: string; account: string }[] };
     const now = Date.now();
+    const connections = [...this.getConnections<ConnState>()];
+    const presenceRows = this.ctx.storage.sql.exec("SELECT name, account FROM presence").toArray();
+    // This runs before every newly accepted WebSocket gets its welcome. Scanning every unscoped
+    // agent token in D1 made connection latency grow with the entire deployment and eventually
+    // left otherwise healthy sockets open but frame-less until the client watchdog timed out.
+    // Only identities currently attached to this ChannelDO can require revocation/principal
+    // reconciliation, so bind those exact hashes/names as one JSON parameter each.
+    const liveAgentHashes = [
+      ...new Set(
+        connections
+          .map((connection) => connection.state)
+          .filter((state): state is ConnState => state?.kind === "agent")
+          .map((state) => state.tokenHash),
+      ),
+    ];
+    const authorityNames = [
+      ...new Set([
+        ...connections
+          .map((connection) => connection.state?.name)
+          .filter((name): name is string => typeof name === "string" && name !== ""),
+        ...presenceRows.map((row) => String(row.name)).filter((name) => name !== ""),
+      ]),
+    ];
     try {
       [rows, agentRows, ownershipRows] = await Promise.all([
         this.env.DB.prepare(
@@ -7195,13 +7218,14 @@ export class ChannelDO extends Server<Env> {
           .all<{ principal_type: "name" | "account"; principal: string; removed_at: number }>(),
         this.env.DB.prepare(
           `SELECT name, owner, hash
-             FROM tokens
+           FROM tokens
             WHERE role = 'agent'
               AND revoked_at IS NULL
               AND (child_expires_at IS NULL OR child_expires_at > ?)
-              AND (channel_scope IS NULL OR channel_scope = ?)`,
+              AND (channel_scope IS NULL OR channel_scope = ?)
+              AND hash IN (SELECT CAST(value AS TEXT) FROM json_each(?))`,
         )
-          .bind(now, this.name)
+          .bind(now, this.name, JSON.stringify(liveAgentHashes))
           .all<{ name: string; owner: string | null; hash: string }>(),
         this.env.DB.prepare(
           `SELECT participant_name AS name, account
@@ -7211,9 +7235,10 @@ export class ChannelDO extends Server<Env> {
            SELECT name, owner AS account
              FROM tokens
             WHERE owner IS NOT NULL
+              AND name IN (SELECT CAST(value AS TEXT) FROM json_each(?))
               AND (channel_scope IS NULL OR channel_scope = ?)`,
         )
-          .bind(this.name, this.name)
+          .bind(this.name, JSON.stringify(authorityNames), this.name)
           .all<{ name: string; account: string }>(),
       ]);
     } catch {
@@ -7231,7 +7256,7 @@ export class ChannelDO extends Server<Env> {
     );
     const currentAgentPrincipals = new Map(
       agentRows.results.map((row) => [
-        mentionMatchKey(row.name),
+        row.hash,
         row.owner === null ? `token-sha256:${row.hash}` : row.owner,
       ] as const),
     );
@@ -7242,7 +7267,7 @@ export class ChannelDO extends Server<Env> {
     }
     const affected = new Map<string, number>();
     const stalePrincipals: { connection: Connection<ConnState>; name: string; principal: string }[] = [];
-    for (const connection of this.getConnections<ConnState>()) {
+    for (const connection of connections) {
       const state = connection.state;
       if (!state) continue;
       const removedAt = removedNames.get(mentionMatchKey(state.name)) ??
@@ -7256,12 +7281,12 @@ export class ChannelDO extends Server<Env> {
       }
       if (state.kind !== "agent") continue;
       const principal = this.identityDeliveryPrincipal(state);
-      if (currentAgentPrincipals.get(mentionMatchKey(state.name)) === principal) continue;
+      if (currentAgentPrincipals.get(state.tokenHash) === principal) continue;
       stalePrincipals.push({ connection, name: state.name, principal });
       connection.setState({ ...state, authorizationRevoked: true });
       this.closeRevokedConnection(connection);
     }
-    for (const row of this.ctx.storage.sql.exec("SELECT name, account FROM presence").toArray()) {
+    for (const row of presenceRows) {
       const name = String(row.name);
       const account = typeof row.account === "string" ? row.account : undefined;
       const removedAt = removedNames.get(mentionMatchKey(name)) ??

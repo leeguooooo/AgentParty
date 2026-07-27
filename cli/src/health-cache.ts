@@ -34,6 +34,17 @@ export interface HealthCache {
   task_started_at: number | null;
   /** 最近一次任务心跳时刻（epoch ms）（#228）。周期性推进；与 last_frame_at（连接新鲜度）正交——它是「任务还在跑」。 */
   heartbeat_at: number | null;
+  /** 外层常驻 supervisor 的当前阶段；与 WS 状态正交。 */
+  supervisor_state: "starting" | "running" | "backoff" | "stopped";
+  supervisor_attempt: number;
+  restart_delay_ms: number | null;
+  last_exit_code: number | null;
+  last_exit_at: number | null;
+  supervisor_error: string | null;
+  /** 同名 serve 的跨机器执行租约。unknown 兼容未实现租约的旧服务端。 */
+  lease_state: "unknown" | "held" | "standby";
+  /** 服务端 presence 报告的同名备用连接数。 */
+  serve_standbys: number;
   updated_at: number;
 }
 
@@ -88,6 +99,14 @@ export function writeHealthCache(patch: HealthPatch, cwd: string = process.cwd()
     current_task: pick(patch, "current_task", prev?.current_task ?? null),
     task_started_at: pick(patch, "task_started_at", prev?.task_started_at ?? null),
     heartbeat_at: pick(patch, "heartbeat_at", prev?.heartbeat_at ?? null),
+    supervisor_state: pick(patch, "supervisor_state", prev?.supervisor_state ?? "starting"),
+    supervisor_attempt: pick(patch, "supervisor_attempt", prev?.supervisor_attempt ?? 1),
+    restart_delay_ms: pick(patch, "restart_delay_ms", prev?.restart_delay_ms ?? null),
+    last_exit_code: pick(patch, "last_exit_code", prev?.last_exit_code ?? null),
+    last_exit_at: pick(patch, "last_exit_at", prev?.last_exit_at ?? null),
+    supervisor_error: pick(patch, "supervisor_error", prev?.supervisor_error ?? null),
+    lease_state: pick(patch, "lease_state", prev?.lease_state ?? "unknown"),
+    serve_standbys: pick(patch, "serve_standbys", prev?.serve_standbys ?? 0),
     updated_at: now,
   };
 

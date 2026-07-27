@@ -9,6 +9,7 @@ import type {
   DesktopAgentConfig,
   DesktopAgentStatus,
   DesktopDutyEntry,
+  DesktopDutyHealth,
 } from "../lib/desktopAgent";
 import { LocalAgentsOverview } from "./LocalAgentsOverview";
 import type { DesktopAgentScheduler } from "./DesktopAgentPanel";
@@ -28,6 +29,29 @@ function inst(over: Partial<DesktopAgentStatus>): DesktopAgentStatus {
 }
 function duty(over: Partial<DesktopDutyEntry>): DesktopDutyEntry {
   return { label: "l", instanceId: "cfg:ops", plistPath: "/p", logPath: "/log", loaded: true, ...over };
+}
+function health(over: Partial<DesktopDutyHealth> = {}): DesktopDutyHealth {
+  return {
+    current: true,
+    healthy: true,
+    stale: false,
+    ageMs: 500,
+    wsConnected: true,
+    reconnecting: false,
+    reconnectCount: 2,
+    lastFrameAt: 1000,
+    lastError: null,
+    connectedSince: 500,
+    supervisorState: "running" as const,
+    supervisorAttempt: 1,
+    restartDelayMs: null,
+    lastExitCode: null,
+    lastExitAt: null,
+    supervisorError: null,
+    leaseState: "held" as const,
+    serveStandbys: 0,
+    ...over,
+  };
 }
 function config(over: Partial<DesktopAgentConfig>): DesktopAgentConfig {
   return {
@@ -59,6 +83,7 @@ function adapter(over: Partial<DesktopAgentAdapter> = {}): DesktopAgentAdapter {
     dutyList: async () => [],
     dutyPersist: async () => { throw new Error("na"); },
     dutyUnpersist: async () => {},
+    dutyRestart: async () => {},
     dutyAdopt: async () => { throw new Error("na"); },
     dutyLogRead: async () => "",
     ...over,
@@ -220,6 +245,46 @@ test("配置已丢失时明确显示未识别身份，并把完整 ID 留在详�
   expect(JSON.stringify(renderer!.toJSON())).toContain(opaque);
 });
 
+test("常驻连接失败、重启退避和租约待命不会再显示成笼统的 resident", async () => {
+  const root = await render(adapter({
+    dutyList: async () => [
+      duty({
+        instanceId: "retry:ops",
+        health: health({
+          healthy: false,
+          wsConnected: false,
+          supervisorState: "backoff",
+          restartDelayMs: 30_000,
+          lastExitCode: 1,
+          lastExitAt: 500,
+          lastError: "Unable to connect",
+        }),
+      }),
+      duty({
+        label: "standby",
+        instanceId: "standby:ops",
+        health: health({ healthy: false, leaseState: "standby" }),
+      }),
+    ],
+    listConfigs: async () => [
+      config({ configId: "retry", name: "retry-bot" }),
+      config({ configId: "standby", name: "standby-bot" }),
+    ],
+  }));
+
+  const rendered = JSON.stringify(renderer!.toJSON());
+  expect(rendered).toContain("retrying");
+  expect(rendered).toContain("supervisor will retry automatically after 30s");
+  expect(rendered).toContain("standby");
+  expect(rendered).toContain("Another same-name serve holds the execution lease");
+
+  await act(async () => {
+    byClass(root, "local-agents-details")[0]!.props.onClick();
+    await Promise.resolve();
+  });
+  expect(JSON.stringify(renderer!.toJSON())).toContain("Unable to connect");
+});
+
 test("检索按频道/身份/runner/状态过滤", async () => {
   const root = await render(adapter({
     statusAll: async () => [
@@ -278,6 +343,31 @@ test("停止活跃实例调 stopInstance；卸载常驻调 dutyUnpersist", async
   await act(async () => { byClass(root, "local-agents-unload")[0]!.props.onClick(); await Promise.resolve(); });
   expect(stopped).toEqual(["a:ops"]);
   expect(unloaded).toEqual(["d:ops"]);
+});
+
+test("连接无响应的常驻实例可就地重启，健康实例不显示重启入口", async () => {
+  const restarted: string[] = [];
+  let entries = [duty({
+    instanceId: "stale:ops",
+    loaded: true,
+    health: health({ healthy: false, stale: true, ageMs: 90_000 }),
+  })];
+  const root = await render(adapter({
+    dutyList: async () => entries,
+    dutyRestart: async (id) => {
+      restarted.push(id);
+      entries = [duty({ instanceId: id, loaded: true, health: health() })];
+    },
+  }));
+
+  expect(byClass(root, "local-agents-restart")).toHaveLength(1);
+  await act(async () => {
+    byClass(root, "local-agents-restart")[0]!.props.onClick();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(restarted).toEqual(["stale:ops"]);
+  expect(byClass(root, "local-agents-restart")).toHaveLength(0);
 });
 
 test("旧常驻 job 显示依赖诊断，并用原 runner/workdir/repo 一键修复", async () => {

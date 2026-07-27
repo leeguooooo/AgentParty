@@ -1,6 +1,16 @@
 export type DesktopAgentState = "stopped" | "starting" | "running" | "stopping" | "failed";
 export type DesktopAgentRunner = "codex" | "claude" | "codex-sdk";
 export type DesktopDutyDependencyState = "ready" | "missing" | "repair-required" | "not-required" | "unknown";
+export type DesktopDutyRuntimeState =
+  | "not-loaded"
+  | "unknown"
+  | "starting"
+  | "healthy"
+  | "restarting"
+  | "reconnecting"
+  | "disconnected"
+  | "stale"
+  | "standby";
 
 export interface DesktopAgentConfig {
   configId: string;
@@ -61,6 +71,8 @@ export interface DesktopDutyEntry {
   plistPath: string;
   logPath: string;
   loaded: boolean;
+  pid?: number | null;
+  health?: DesktopDutyHealth | null;
   /** Optional keeps older desktop shells and test adapters compatible. */
   runner?: DesktopAgentRunner | null;
   workdir?: string | null;
@@ -71,6 +83,42 @@ export interface DesktopDutyEntry {
   /** 终局熔断/撤销留下的持久停机意图；旧 desktop shell 不返回这两个字段。 */
   terminalBlocked?: boolean;
   terminalReason?: string | null;
+}
+
+export interface DesktopDutyHealth {
+  current: boolean;
+  healthy: boolean;
+  stale: boolean;
+  ageMs: number | null;
+  wsConnected: boolean;
+  reconnecting: boolean;
+  reconnectCount: number;
+  lastFrameAt: number | null;
+  lastError: string | null;
+  connectedSince: number | null;
+  supervisorState: "starting" | "running" | "backoff" | "stopped" | null;
+  supervisorAttempt: number | null;
+  restartDelayMs: number | null;
+  lastExitCode: number | null;
+  lastExitAt: number | null;
+  supervisorError: string | null;
+  leaseState: "unknown" | "held" | "standby" | null;
+  serveStandbys: number;
+}
+
+export function dutyRuntimeState(entry: DesktopDutyEntry): DesktopDutyRuntimeState {
+  if (!entry.loaded) return "not-loaded";
+  if (entry.health === undefined) return "unknown";
+  const health = entry.health;
+  if (health == null || !health.current) return "starting";
+  if (health.leaseState === "standby") return "standby";
+  if (health.reconnecting) return "reconnecting";
+  if (health.supervisorState === "backoff") return "restarting";
+  if (health.supervisorState === "stopped") return "disconnected";
+  if (health.healthy) return "healthy";
+  if (health.stale) return "stale";
+  if (!health.wsConnected) return "disconnected";
+  return "starting";
 }
 
 export interface DesktopAgentAdapter {
@@ -87,6 +135,8 @@ export interface DesktopAgentAdapter {
   dutyList(): Promise<DesktopDutyEntry[]>;
   dutyPersist(input: DesktopAgentStartInput): Promise<DesktopDutyEntry>;
   dutyUnpersist(instanceId: string): Promise<void>;
+  /** 运行态恢复：保留常驻配置，仅要求 launchd 终止并重新拉起该实例。 */
+  dutyRestart(instanceId: string): Promise<void>;
   /** #616 phase 4：web 无人值守流程一键接管——token 经本机 IPC 直达，绝不进 URL/剪贴板。 */
   dutyAdopt(input: { server: string; token: string; name: string; channel: string; runner: DesktopAgentRunner; workdir?: string }): Promise<DesktopDutyEntry>;
   /** #725：读某个常驻实例的 launchd 日志尾部（排查「@ 没反应」等）。日志不存在返回空串。 */
@@ -202,12 +252,19 @@ function parseDutyEntry(value: unknown): DesktopDutyEntry {
       dependencyState !== "unknown"
     )
   ) throw new Error("invalid desktop duty entry");
+  const health = value.health === undefined
+    ? undefined
+    : value.health === null
+      ? null
+    : parseDutyHealth(value.health);
   return {
     label: value.label,
     instanceId: value.instanceId,
     plistPath: value.plistPath,
     logPath: value.logPath,
     loaded: value.loaded,
+    pid: typeof value.pid === "number" ? value.pid : null,
+    health,
     runner,
     workdir: typeof value.workdir === "string" ? value.workdir : null,
     repo: typeof value.repo === "string" ? value.repo : null,
@@ -216,6 +273,37 @@ function parseDutyEntry(value: unknown): DesktopDutyEntry {
     terminalBlocked: value.terminalBlocked === true,
     terminalReason: typeof value.terminalReason === "string" ? value.terminalReason : null,
   };
+}
+
+function parseDutyHealth(value: unknown): DesktopDutyHealth {
+  if (!isRecord(value)) throw new Error("invalid desktop duty health");
+  const nullableNumber = (field: unknown): field is number | null =>
+    field === null || typeof field === "number";
+  const nullableString = (field: unknown): field is string | null =>
+    field === null || typeof field === "string";
+  if (
+    typeof value.current !== "boolean" ||
+    typeof value.healthy !== "boolean" ||
+    typeof value.stale !== "boolean" ||
+    !nullableNumber(value.ageMs) ||
+    typeof value.wsConnected !== "boolean" ||
+    typeof value.reconnecting !== "boolean" ||
+    typeof value.reconnectCount !== "number" ||
+    !nullableNumber(value.lastFrameAt) ||
+    !nullableString(value.lastError) ||
+    !nullableNumber(value.connectedSince) ||
+    !nullableString(value.supervisorState) ||
+    !nullableNumber(value.supervisorAttempt) ||
+    !nullableNumber(value.restartDelayMs) ||
+    !nullableNumber(value.lastExitCode) ||
+    !nullableNumber(value.lastExitAt) ||
+    !nullableString(value.supervisorError) ||
+    !nullableString(value.leaseState) ||
+    typeof value.serveStandbys !== "number" ||
+    ![null, "starting", "running", "backoff", "stopped"].includes(value.supervisorState) ||
+    ![null, "unknown", "held", "standby"].includes(value.leaseState)
+  ) throw new Error("invalid desktop duty health");
+  return value as unknown as DesktopDutyHealth;
 }
 
 function parseLogs(value: unknown): string[] {
@@ -275,6 +363,9 @@ export function createDesktopAgentAdapter(invoke: DesktopAgentInvoker): DesktopA
     },
     async dutyUnpersist(instanceId) {
       await invoke<unknown>("desktop_duty_unpersist", { instanceId });
+    },
+    async dutyRestart(instanceId) {
+      await invoke<unknown>("desktop_duty_restart", { instanceId });
     },
     async dutyAdopt(input) {
       return parseDutyEntry(await invoke<unknown>("desktop_duty_adopt", {

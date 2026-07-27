@@ -44,6 +44,7 @@ describe("serve lifecycle supervisor (#550)", () => {
     const codes = [EXIT_STREAM_ENDED, 1, 0];
     const sleeps: number[] = [];
     const lifecycle: string[] = [];
+    const states: string[] = [];
 
     const code = await superviseServe({
       runOnce: async () => codes.shift()!,
@@ -51,12 +52,21 @@ describe("serve lifecycle supervisor (#550)", () => {
       maxDelayMs: 15,
       sleep: async (ms) => { sleeps.push(ms); },
       onLifecycle: (line) => lifecycle.push(line),
+      onState: (state) => states.push(`${state.state}:${state.attempt}:${state.lastExitCode ?? "-"}`),
     });
 
     expect(code).toBe(0);
     expect(sleeps).toEqual([10, 15]);
     expect(lifecycle).toContain(`event=restart next_attempt=2 delay_ms=10 previous_code=${EXIT_STREAM_ENDED}`);
     expect(lifecycle).toContain("event=restart next_attempt=3 delay_ms=15 previous_code=1");
+    expect(states).toEqual([
+      "starting:1:-",
+      `backoff:1:${EXIT_STREAM_ENDED}`,
+      "starting:2:-",
+      "backoff:2:1",
+      "starting:3:-",
+      "stopped:3:0",
+    ]);
   });
 
   test("stops terminally when the wake-abandon circuit trips", async () => {

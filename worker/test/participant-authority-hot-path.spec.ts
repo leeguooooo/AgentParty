@@ -11,6 +11,34 @@ import {
 } from "./helpers";
 
 describe("participant authority WebSocket hot path", () => {
+  it("scopes token authority queries to identities attached to this ChannelDO", async () => {
+    const participant = await seedToken("agent", uniq("resident"), {
+      owner: `${uniq("account")}@example.com`,
+    });
+    const slug = await createChannel(participant.token);
+    const originalPrepare = env.DB.prepare.bind(env.DB);
+    const authorityQueries: string[] = [];
+    const prepare = vi.spyOn(env.DB, "prepare").mockImplementation((query: string) => {
+      if (query.includes("SELECT name, owner, hash") && query.includes("FROM tokens")) {
+        authorityQueries.push(query);
+      }
+      return originalPrepare(query);
+    });
+    let socket: WsClient | null = null;
+
+    try {
+      socket = await WsClient.open(slug, participant.token);
+      await socket.nextOfType("welcome");
+      expect(authorityQueries).toHaveLength(1);
+      expect(authorityQueries[0]).toContain(
+        "hash IN (SELECT CAST(value AS TEXT) FROM json_each(?))",
+      );
+    } finally {
+      prepare.mockRestore();
+      socket?.close();
+    }
+  });
+
   it("reuses a fresh channel snapshot and reports D1 outages as temporary", async () => {
     const participant = await seedToken("human", uniq("participant"), {
       owner: `${uniq("account")}@example.com`,

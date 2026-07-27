@@ -4,6 +4,7 @@ import {
   desktopAgentAdapter,
   dutyDependencyErrorRunner,
   dutyRepairInput,
+  dutyRuntimeState,
   type DesktopAgentAdapter,
   type DesktopAgentConfig,
   type DesktopAgentRunner,
@@ -507,12 +508,13 @@ export function DesktopAgentPanel({
           <ul className="desktop-agent-instances">
             {duties.map((entry) => {
               const repairInput = dutyRepairInput(entry);
+              const runtimeState = dutyRuntimeState(entry);
               const dependencyProblem =
                 entry.dependencyState === "missing" || entry.dependencyState === "repair-required";
               return (
                 <li key={entry.label} className="desktop-agent-instance">
                   <span
-                    className={`desktop-agent-state desktop-agent-state--${entry.loaded && entry.terminalBlocked !== true ? "running" : "stopped"}`}
+                    className={`desktop-agent-state desktop-agent-state--${entry.terminalBlocked === true ? "stopped" : runtimeState}`}
                     title={entry.terminalReason ?? undefined}
                   >
                     {t(entry.terminalReason === "legacy-duty-needs-repair"
@@ -521,9 +523,7 @@ export function DesktopAgentPanel({
                         ? "DesktopSettings.agent.dutyQuarantined"
                         : entry.terminalBlocked === true
                           ? "DesktopSettings.agent.dutyTerminalBlocked"
-                          : entry.loaded
-                            ? "DesktopSettings.agent.dutyLoaded"
-                            : "DesktopSettings.agent.dutyNotLoaded")}
+                          : `DesktopSettings.agent.dutyState.${runtimeState}`)}
                   </span>
                   <span className="t-mono desktop-agent-instance-name">{entry.instanceId}</span>
                   <span className="t-mono desktop-agent-instance-dir" title={entry.logPath}>{entry.logPath}</span>

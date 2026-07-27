@@ -54,6 +54,7 @@ function adapter(overrides: Partial<DesktopAgentAdapter> = {}): DesktopAgentAdap
       throw new Error("duty persist unavailable");
     },
     dutyUnpersist: async () => {},
+    dutyRestart: async () => {},
     dutyAdopt: async () => {
       throw new Error("duty adopt unavailable");
     },

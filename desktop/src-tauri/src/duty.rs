@@ -11,7 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[cfg(desktop)]
 use tauri::{AppHandle, State};
@@ -288,6 +288,7 @@ struct DutyPlistMetadata {
     workdir: Option<String>,
     repo: Option<String>,
     runner_bin: Option<String>,
+    config_path: Option<String>,
 }
 
 fn duty_plist_metadata(value: &str) -> DutyPlistMetadata {
@@ -309,6 +310,7 @@ fn duty_plist_metadata(value: &str) -> DutyPlistMetadata {
         workdir: argument("--workdir"),
         repo: argument("--repo"),
         runner_bin: plist_value_for_key(value, "AGENTPARTY_RUNNER_BIN"),
+        config_path: plist_value_for_key(value, "AGENTPARTY_CONFIG"),
     }
 }
 
@@ -552,6 +554,8 @@ pub(crate) struct DutyEntry {
     pub(crate) plist_path: String,
     pub(crate) log_path: String,
     pub(crate) loaded: bool,
+    pub(crate) pid: Option<u32>,
+    pub(crate) health: Option<DutyHealth>,
     pub(crate) runner: Option<String>,
     pub(crate) workdir: Option<String>,
     pub(crate) repo: Option<String>,
@@ -559,6 +563,162 @@ pub(crate) struct DutyEntry {
     pub(crate) dependency_state: String,
     pub(crate) terminal_blocked: bool,
     pub(crate) terminal_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DutyHealth {
+    pub(crate) current: bool,
+    pub(crate) healthy: bool,
+    pub(crate) stale: bool,
+    pub(crate) age_ms: Option<u64>,
+    pub(crate) ws_connected: bool,
+    pub(crate) reconnecting: bool,
+    pub(crate) reconnect_count: u64,
+    pub(crate) last_frame_at: Option<u64>,
+    pub(crate) last_error: Option<String>,
+    pub(crate) connected_since: Option<u64>,
+    pub(crate) supervisor_state: Option<String>,
+    pub(crate) supervisor_attempt: Option<u64>,
+    pub(crate) restart_delay_ms: Option<u64>,
+    pub(crate) last_exit_code: Option<i32>,
+    pub(crate) last_exit_at: Option<u64>,
+    pub(crate) supervisor_error: Option<String>,
+    pub(crate) lease_state: Option<String>,
+    pub(crate) serve_standbys: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct DutyHealthFile {
+    v: u8,
+    pid: u32,
+    ws_connected: bool,
+    last_frame_at: Option<u64>,
+    reconnecting: bool,
+    #[serde(default)]
+    reconnect_count: u64,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
+    connected_since: Option<u64>,
+    #[serde(default)]
+    supervisor_state: Option<String>,
+    #[serde(default)]
+    supervisor_attempt: Option<u64>,
+    #[serde(default)]
+    restart_delay_ms: Option<u64>,
+    #[serde(default)]
+    last_exit_code: Option<i32>,
+    #[serde(default)]
+    last_exit_at: Option<u64>,
+    #[serde(default)]
+    supervisor_error: Option<String>,
+    #[serde(default)]
+    lease_state: Option<String>,
+    #[serde(default)]
+    serve_standbys: u64,
+}
+
+#[derive(Serialize)]
+struct HealthSlotFingerprint<'a> {
+    channel: &'a str,
+    kind: &'static str,
+    path: &'a str,
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct DutyConfigToken {
+    token: String,
+}
+
+fn health_slot_path(home: &Path, config_path: &str, channel: &str) -> Option<PathBuf> {
+    let config = serde_json::from_slice::<DutyConfigToken>(&fs::read(config_path).ok()?).ok()?;
+    let token_hash = crate::ui_update::sha256_hex(config.token.as_bytes());
+    let token_fingerprint = format!("sha256:{}", &token_hash[..12]);
+    let evidence = serde_json::to_vec(&HealthSlotFingerprint {
+        channel,
+        kind: "explicit",
+        path: config_path,
+        token: token_fingerprint,
+    })
+    .ok()?;
+    let slot_hash = crate::ui_update::sha256_hex(&evidence);
+    let safe_channel: String = channel
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || matches!(value, '.' | '_' | '-') {
+                value
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let root_hash = crate::ui_update::sha256_hex(b"/");
+    Some(
+        home.join(".agentparty/state")
+            .join(format!("workspace-{}", &root_hash[..16]))
+            .join("slots")
+            .join(format!(
+                "health-{}-{}.json",
+                if safe_channel.is_empty() {
+                    "channel"
+                } else {
+                    &safe_channel
+                },
+                &slot_hash[..16]
+            )),
+    )
+}
+
+fn read_duty_health(
+    home: &Path,
+    config_path: Option<&str>,
+    channel: &str,
+    launchd_pid: Option<u32>,
+) -> Option<DutyHealth> {
+    let path = health_slot_path(home, config_path?, channel)?;
+    let metadata = fs::metadata(&path).ok()?;
+    if metadata.len() > 128 * 1024 {
+        return None;
+    }
+    let raw = serde_json::from_slice::<DutyHealthFile>(&fs::read(path).ok()?).ok()?;
+    if raw.v != 1 {
+        return None;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis() as u64)
+        .unwrap_or(0);
+    let age_ms = raw.last_frame_at.map(|at| now.saturating_sub(at));
+    let stale = age_ms.is_none_or(|age| age > 90_000);
+    let current = launchd_pid.is_some_and(|pid| pid == raw.pid);
+    let supervisor_state = raw
+        .supervisor_state
+        .filter(|value| matches!(value.as_str(), "starting" | "running" | "backoff" | "stopped"));
+    let lease_state = raw
+        .lease_state
+        .filter(|value| matches!(value.as_str(), "unknown" | "held" | "standby"));
+    Some(DutyHealth {
+        current,
+        healthy: current && raw.ws_connected && !raw.reconnecting && !stale,
+        stale,
+        age_ms,
+        ws_connected: raw.ws_connected,
+        reconnecting: raw.reconnecting,
+        reconnect_count: raw.reconnect_count,
+        last_frame_at: raw.last_frame_at,
+        last_error: raw.last_error,
+        connected_since: raw.connected_since,
+        supervisor_state,
+        supervisor_attempt: raw.supervisor_attempt,
+        restart_delay_ms: raw.restart_delay_ms,
+        last_exit_code: raw.last_exit_code,
+        last_exit_at: raw.last_exit_at,
+        supervisor_error: raw.supervisor_error,
+        lease_state,
+        serve_standbys: raw.serve_standbys,
+    })
 }
 
 /// 从 plist 文件名还原 instance_id 的展示形态：label 里 config_id 与 channel 以最后一个 '.' 相接。
@@ -588,6 +748,18 @@ fn gui_domain() -> String {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .unwrap_or_default();
     format!("gui/{uid}")
+}
+
+#[cfg(all(desktop, target_os = "macos"))]
+fn duty_pid_checked(label: &str) -> Option<u32> {
+    let target = format!("{}/{}", gui_domain(), label);
+    let output = launchctl(&["print", &target]).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("pid = ")?.parse().ok())
 }
 
 /// 把当前 app 内嵌的 party sidecar 拷贝到稳定路径（bundle 路径随 app 更新/挪动失效）。
@@ -679,6 +851,10 @@ pub(crate) fn desktop_duty_list() -> Result<Vec<DutyEntry>, String> {
         let disabled = disabled_labels.contains(label);
         #[cfg(not(target_os = "macos"))]
         let disabled = false;
+        #[cfg(target_os = "macos")]
+        let pid = duty_pid_checked(label);
+        #[cfg(not(target_os = "macos"))]
+        let pid = None;
         let terminal_reason = if quarantined {
             Some("terminal-stop-quarantined".to_string())
         } else {
@@ -693,12 +869,24 @@ pub(crate) fn desktop_duty_list() -> Result<Vec<DutyEntry>, String> {
             metadata.runner_bin.as_deref(),
             &home,
         );
+        let channel = instance_id
+            .rsplit_once(':')
+            .map(|(_, channel)| channel)
+            .unwrap_or_default();
+        let health = read_duty_health(
+            &home,
+            metadata.config_path.as_deref(),
+            channel,
+            pid,
+        );
         entries.push(DutyEntry {
             label: label.to_string(),
             instance_id,
             plist_path: item.path().to_string_lossy().into_owned(),
             log_path: duty_log_path(&home, label).to_string_lossy().into_owned(),
             loaded,
+            pid,
+            health,
             runner: metadata.runner,
             workdir: metadata.workdir,
             repo: metadata.repo,
@@ -875,6 +1063,8 @@ async fn duty_persist_inner(
         plist_path: plist_path.to_string_lossy().into_owned(),
         log_path: log_path.to_string_lossy().into_owned(),
         loaded: true,
+        pid: None,
+        health: None,
         runner: Some(runner.to_string()),
         workdir: workdir.map(str::to_string),
         repo: repo.map(str::to_string),
@@ -1125,6 +1315,42 @@ pub(crate) fn desktop_duty_unpersist(instance_id: String) -> Result<(), String> 
     }
 }
 
+/// 重新拉起一个已安装的 launchd 常驻实例，不改身份、runner 或 plist。
+///
+/// 这是运行态恢复动作：当进程仍在但 websocket 重连循环失活时，用户不应只能“卸载”整个
+/// 常驻配置。操作仍复用 duty 的进程内/跨进程锁，避免与 persist、unpersist、reconciler 竞态。
+#[cfg(desktop)]
+#[tauri::command]
+pub(crate) fn desktop_duty_restart(instance_id: String) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = instance_id;
+        Err("system-level duty is currently macOS-only (launchd)".to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _operation = acquire_duty_operation_blocking()?;
+        let home = home_dir()?;
+        let label = duty_label(&instance_id);
+        let _filesystem_lock = acquire_duty_filesystem_lock_blocking(&home, &label)?;
+        let plist_path = duty_plist_path(&home, &label);
+        if !plist_path.is_file() {
+            return Err(format!("duty plist does not exist: {}", plist_path.display()));
+        }
+        if !duty_loaded_checked(&label)? {
+            return Err("duty job is not loaded; repair or reinstall it first".to_string());
+        }
+        launchctl_action(
+            &["kickstart", "-k", &format!("{}/{label}", gui_domain())],
+            "launchctl duty restart",
+        )?;
+        if !duty_loaded_checked(&label)? {
+            return Err("launchctl restart succeeded but the duty job is no longer loaded".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// 读某个常驻实例的 launchd 日志尾部（#725：桌面排查常驻 agent）。
 /// 只按 label 派生路径、且 label 必须是我们生成的前缀——杜绝任意路径读取。日志不存在时返回空串。
 #[cfg(desktop)]
@@ -1171,7 +1397,8 @@ pub(crate) fn desktop_duty_log_read(
 mod tests {
     use super::{
         duty_label, duty_plist_content, duty_plist_metadata, failure_with_rollback,
-        find_runner_executable, instance_id_from_label, resolve_node_executable,
+        find_runner_executable, health_slot_path, instance_id_from_label, read_duty_health,
+        resolve_node_executable,
         rollback_duty_install_with, runner_launch_path, runner_search_dirs, tail_utf8,
         DutyPlistMetadata, DutyPlistSnapshot, DutyPlistSpec,
     };
@@ -1263,8 +1490,60 @@ mod tests {
                 workdir: Some("/srv/duty".to_string()),
                 repo: Some("https://github.com/org/repo.git".to_string()),
                 runner_bin: Some("/x/bin/codex".to_string()),
+                config_path: Some("/cfg.json".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn reads_the_exact_explicit_config_health_slot_and_checks_the_launchd_pid() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("agent.json");
+        std::fs::write(&config, r#"{"token":"ap_test_health"}"#).expect("config");
+        let config_path = config.to_string_lossy();
+        let slot = health_slot_path(temp.path(), &config_path, "all").expect("slot");
+        std::fs::create_dir_all(slot.parent().expect("slot parent")).expect("slot dir");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as u64;
+        std::fs::write(
+            &slot,
+            serde_json::json!({
+                "v": 1,
+                "pid": 42,
+                "ws_connected": true,
+                "last_frame_at": now,
+                "reconnecting": false,
+                "reconnect_count": 3,
+                "last_error": null,
+                "connected_since": now - 1000,
+                "supervisor_state": "running",
+                "supervisor_attempt": 2,
+                "restart_delay_ms": null,
+                "last_exit_code": 1,
+                "last_exit_at": now - 2000,
+                "supervisor_error": null,
+                "lease_state": "held",
+                "serve_standbys": 1,
+                "updated_at": now
+            })
+            .to_string(),
+        )
+        .expect("health");
+
+        let current = read_duty_health(temp.path(), Some(&config_path), "all", Some(42))
+            .expect("current health");
+        assert!(current.current);
+        assert!(current.healthy);
+        assert_eq!(current.reconnect_count, 3);
+        assert_eq!(current.lease_state.as_deref(), Some("held"));
+        assert_eq!(current.serve_standbys, 1);
+
+        let replaced = read_duty_health(temp.path(), Some(&config_path), "all", Some(99))
+            .expect("stale pid health");
+        assert!(!replaced.current);
+        assert!(!replaced.healthy);
     }
 
     #[test]

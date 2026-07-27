@@ -438,7 +438,7 @@ describe("serve durable directed delivery (#551)", () => {
     }
   }, 15_000);
 
-  test("running waits for every blocking preflight and runner_started audit never delays model start", async () => {
+  test("running waits for delivery preflights, while an optional upgrade probe never delays model start", async () => {
     const message = msgFrame(1, "preflight", {
       mentions: ["me"],
       attachments: [{
@@ -508,10 +508,13 @@ describe("serve durable directed delivery (#551)", () => {
     releaseDownload(new Uint8Array([1]));
     await waitFor("upgrade:start");
     expect(events.some((event) => event.startsWith("delivery:"))).toBe(false);
-    releaseUpgrade();
     await waitFor("prepare:start");
+    expect(events).not.toContain("upgrade:done");
     expect(events.some((event) => event.startsWith("delivery:"))).toBe(false);
     releasePrepare();
+    await waitFor("model");
+    expect(events).not.toContain("upgrade:done");
+    releaseUpgrade();
     expect(await running).toBe(EXIT_ARCHIVED);
     expect(events).toEqual(expect.arrayContaining([
       "download:done",
