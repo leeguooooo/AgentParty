@@ -497,6 +497,17 @@ describe("party send", () => {
     expect(mock.requests.length).toBe(0);
   });
 
+  test("空字符串或纯空白正文从命令入口拒绝并以非零状态退出", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    for (const body of ["", "   ", "\t\n "]) {
+      const r = await runCli(["send", body, "--channel", "dev"]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("message body is empty");
+    }
+    expect(mock.requests.length).toBe(0);
+  });
+
   test("send 不再把第一个 positional 当隐式 channel", async () => {
     mock = startRestMock();
     writeCfg(mock.url);
