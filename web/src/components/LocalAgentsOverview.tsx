@@ -22,6 +22,7 @@ import {
   type LocalAgentRow,
 } from "../lib/localAgents";
 import type { DesktopAgentScheduler } from "./DesktopAgentPanel";
+import { useAutoScrollToLatest } from "../lib/useAutoScrollToLatest";
 import "../i18n/strings/LocalAgentsOverview";
 
 const defaultScheduler: DesktopAgentScheduler = {
@@ -85,6 +86,10 @@ export function LocalAgentsOverview({
   // 单调序号——只让「最新一次 refresh」的结果落地，乱序完成的旧结果丢弃。
   const refreshSeqRef = useRef(0);
   const logSeqRef = useRef(0);
+  const logPreRef = useAutoScrollToLatest<HTMLPreElement>(
+    logView?.text,
+    logView?.busy !== true && logView?.error == null,
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -525,7 +530,7 @@ export function LocalAgentsOverview({
                               )}
                               {rowLog?.busy !== true && rowLog?.error == null && (
                                 rowLog?.text?.trim() ? (
-                                  <pre className="t-mono local-agents-log" tabIndex={0}>{rowLog.text}</pre>
+                                  <pre ref={logPreRef} className="t-mono local-agents-log" tabIndex={0}>{rowLog.text}</pre>
                                 ) : (
                                   <p className="local-agents-log-state">{t("LocalAgents.logsEmpty")}</p>
                                 )
