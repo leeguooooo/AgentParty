@@ -6,6 +6,7 @@ import { agentHue } from "../lib/agentColor";
 import { fmtRel } from "../lib/time";
 import type { SocketStatus } from "../lib/ws";
 import { useT } from "../i18n/useT";
+import { useModalFocusTrap } from "./useModalFocusTrap";
 import "../i18n/strings/PresenceBar";
 
 interface Props {
@@ -377,6 +378,7 @@ export function PresenceBar({
   const [rosterOpen, setRosterOpen] = useState(false);
   const rosterToggleRef = useRef<HTMLButtonElement | null>(null);
   const rosterCloseRef = useRef<HTMLButtonElement | null>(null);
+  const rosterDialogRef = useRef<HTMLDivElement | null>(null);
 
   // 在线 sender 带 owner；离线/最近 presence 带 account。两者都归到同一账号块。
   const byName = new Map(participants.map((p) => [p.name, p]));
@@ -503,15 +505,13 @@ export function PresenceBar({
   const activePopoverGroup =
     !rosterOpen || hoveredGroup === null ? null : sortedGroups.find((group) => group.key === hoveredGroup.key) ?? null;
 
-  useEffect(() => {
-    if (!rosterOpen) return;
-    rosterCloseRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeRoster();
-    };
-    window.addEventListener?.("keydown", onKeyDown);
-    return () => window.removeEventListener?.("keydown", onKeyDown);
-  }, [closeRoster, rosterOpen]);
+  useModalFocusTrap({
+    active: rosterOpen,
+    containerRef: rosterDialogRef,
+    initialFocusRef: rosterCloseRef,
+    returnFocusRef: rosterToggleRef,
+    onEscape: closeRoster,
+  });
 
   function openAgentDetail(name: string) {
     if (onOpenAgentDetail === undefined) return;
@@ -950,7 +950,14 @@ export function PresenceBar({
         </span>
       </div>
       {rosterOpen && (
-        <div className="channel-panel-overlay presence-roster-overlay" role="dialog" aria-modal="true" aria-labelledby="presence-roster-title">
+        <div
+          ref={rosterDialogRef}
+          className="channel-panel-overlay presence-roster-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="presence-roster-title"
+          tabIndex={-1}
+        >
           <button className="channel-panel-scrim" type="button" aria-label={t("PresenceBar.close")} onClick={closeRoster} />
           <section className="channel-panel-card presence-roster-card">
             <header className="channel-panel-head">

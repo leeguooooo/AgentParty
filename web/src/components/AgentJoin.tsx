@@ -1,7 +1,7 @@
 // 频道页「＋ 让 agent 加入」：登录人类先给 agent 起个能认出来的名字（默认 <你>-<频道>，
 // 可改成 drawstyle-review 这类），再铸一枚 channel-scoped agent token，弹出可复制的接入脚本。
 // 明文 token 只出现这一次（spec §10）。名字有意义 = 频道里一眼分清谁的哪个项目，不再是随机后缀。
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AuthError,
   type ChannelCharter,
@@ -26,6 +26,7 @@ function isMacDesktop(): boolean {
 import { apiOrigin } from "../lib/base";
 import { useT } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
+import { useModalFocusTrap } from "./useModalFocusTrap";
 import "../i18n/strings/AgentJoin";
 
 interface Props {
@@ -113,6 +114,9 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
   const [copied, setCopied] = useState(false);
   // #642：复制失败要给用户明确反馈，别静默——join 命令带着只展示一次的 channel-scoped token。
   const [copyErr, setCopyErr] = useState(false);
+  const composeDialogRef = useRef<HTMLDivElement | null>(null);
+  const doneDialogRef = useRef<HTMLDivElement | null>(null);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
 
   const open = useCallback(() => {
     onActiveChange?.(true);
@@ -140,7 +144,20 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
   }, [active, phase.kind, reset]);
 
   const dialogOpen = phase.kind === "compose" || phase.kind === "loading" || phase.kind === "done";
-  useDismissableLayer({ active: dialogOpen, onDismiss: close });
+  const composeOpen = phase.kind === "compose" || phase.kind === "loading";
+  useDismissableLayer({ active: dialogOpen, onDismiss: close, dismissOnEscape: false });
+  // compose 与 done 是两个互斥对话框，各自一个 trap——否则 mint 完成后焦点仍留在已卸载的输入框上。
+  useModalFocusTrap({
+    active: composeOpen,
+    containerRef: composeDialogRef,
+    initialFocusRef: nameInputRef,
+    onEscape: close,
+  });
+  useModalFocusTrap({
+    active: phase.kind === "done",
+    containerRef: doneDialogRef,
+    onEscape: close,
+  });
 
   const mint = useCallback(async () => {
     const wanted = name.trim();
@@ -249,8 +266,15 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         </p>
       )}
 
-      {(phase.kind === "compose" || phase.kind === "loading") && (
-        <div className="agent-join-overlay" role="dialog" aria-modal="true" aria-label={t("AgentJoin.dialogNameLabel")}>
+      {composeOpen && (
+        <div
+          ref={composeDialogRef}
+          className="agent-join-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("AgentJoin.dialogNameLabel")}
+          tabIndex={-1}
+        >
           <div className="agent-join-scrim" onClick={close} />
           <div className="d-card agent-join-card">
             <header className="agent-join-card-head">
@@ -267,6 +291,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
             <label className="agent-join-namerow">
               <span className="agent-join-namelabel t-mono">{t("AgentJoin.nameFieldLabel")}</span>
               <input
+                ref={nameInputRef}
                 className="t-mono agent-join-nameinput"
                 value={name}
                 autoFocus
@@ -343,7 +368,14 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
       )}
 
       {phase.kind === "done" && (
-        <div className="agent-join-overlay" role="dialog" aria-modal="true" aria-label={t("AgentJoin.doneTitleSuffix")}>
+        <div
+          ref={doneDialogRef}
+          className="agent-join-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("AgentJoin.doneTitleSuffix")}
+          tabIndex={-1}
+        >
           <div className="agent-join-scrim" onClick={close} />
           <div className="d-card agent-join-card">
             <header className="agent-join-card-head">
