@@ -108,6 +108,30 @@ describe("send --attach parsing", () => {
   });
 });
 
+describe("send empty-body rejection (#777)", () => {
+  test("空字符串正文（无附件、无 mention）应被拒绝而非发出空消息", async () => {
+    // `party send ""` → argv `[""]` → positional 是空串，text 变成 ""（非 undefined），
+    // 旧逻辑只挡 text===undefined，空串漏网、发出一条空消息污染频道。
+    const parsed = parseArgs(["", "--channel", "c"], sendSpec);
+    expect(await resolveSendInput(parsed)).toBeNull();
+  });
+
+  test("纯空白正文（trim 后为空）且无附件应被拒绝", async () => {
+    const spaces = parseArgs(["   ", "--channel", "c"], sendSpec);
+    expect(await resolveSendInput(spaces)).toBeNull();
+    const tabsNewlines = parseArgs(["\t\n ", "--channel", "c"], sendSpec);
+    expect(await resolveSendInput(tabsNewlines)).toBeNull();
+  });
+
+  test("边界：空正文 + --attach 仍允许（保留纯附件消息合法性）", async () => {
+    const parsed = parseArgs(["", "--channel", "c", "--attach", "a.png"], sendSpec);
+    const input = await resolveSendInput(parsed);
+    expect(input).not.toBeNull();
+    expect(input!.body).toBe("");
+    expect(input!.attachPaths).toEqual(["a.png"]);
+  });
+});
+
 describe("resolveAttachments", () => {
   test("reads a real file into an upload source with basename + size + type", async () => {
     const [src] = await resolveAttachments([png]);

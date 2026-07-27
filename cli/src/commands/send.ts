@@ -204,6 +204,12 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
       return null;
     }
   }
+  // #777：正文 trim 后为空且没有任何 --attach 时拒发——空消息只会污染频道、消费端毫无意义。
+  // 纯附件消息（attachPaths.length > 0）不受影响：上面已把空正文置为 ""，这里因有附件而放行。
+  if (text.trim() === "" && attachPaths.length === 0) {
+    console.error("message body is empty (use --attach to send an attachment-only message)");
+    return null;
+  }
   // send footgun 软提示（#6）：无 --channel、≥2 个裸 positional、首个像 slug 且 ≠ 目标频道 →
   // 很可能误把「send <频道> <正文>」当成了子命令用法（首个词其实被并进了正文，发到了绑定频道）。
   // 只提示不拦截：消息照发，仅 stderr 一行帮用户下次用 --channel。
