@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AuthError,
   type ChannelAgentInfo,
@@ -32,7 +32,7 @@ import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/
 import { LocalAgentsOverview } from "./LocalAgentsOverview";
 import { buildJoinPack, type JoinPackMode } from "../lib/joinPack";
 import { useT } from "../i18n/useT";
-import { useDismissableLayer } from "./useDismissableLayer";
+import { SectionedDialog, type SectionedDialogSection } from "./SectionedDialog";
 import "../i18n/strings/AgentTokens";
 
 interface Props {
@@ -53,6 +53,7 @@ interface Props {
 }
 
 type CopyTarget = `${string}:token` | `${string}:command`;
+type AgentManagerSection = "channel" | "projects" | "local";
 type ProfileForm = {
   handle: string;
   runner: ProjectAgentRunner;
@@ -89,7 +90,6 @@ export function AgentTokens({
   canMakeResident = isDesktopRuntime() && /mac/i.test(globalThis.navigator?.userAgent ?? ""),
 }: Props) {
   const t = useT();
-  const rootRef = useRef<HTMLDivElement | null>(null);
   // 转为常驻状态：busy 名 / 已完成集 / 错误。residentBusyRef 是同步锁（state 更新晚于 await，见 makeResident）。
   const [residentBusy, setResidentBusy] = useState<string | null>(null);
   const residentBusyRef = useRef<string | null>(null);
@@ -98,44 +98,105 @@ export function AgentTokens({
   // #725：转常驻要能选 codex/claude(默认 codex,与本机 agent 默认一致)。按 agent 名各记一份。
   const [residentRunnerByName, setResidentRunnerByName] = useState<Record<string, DesktopAgentRunner>>({});
   const residentRunnerFor = (name: string): DesktopAgentRunner => residentRunnerByName[name] ?? "codex";
-  const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
   const [open, setOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState<AgentManagerSection>("channel");
   const [agents, setAgents] = useState<ChannelAgentInfo[] | null>(null);
   const [profiles, setProfiles] = useState<ProjectAgentProfile[] | null>(null);
   const [profileForm, setProfileForm] = useState<ProfileForm>(EMPTY_PROFILE_FORM);
+  const [agentQuery, setAgentQuery] = useState("");
+  const [profileQuery, setProfileQuery] = useState("");
+  const [selectedAgentName, setSelectedAgentName] = useState<string | null>(null);
+  const [selectedProfileKey, setSelectedProfileKey] = useState<string | null>(null);
+  const [creatingProfile, setCreatingProfile] = useState(false);
   const [busyName, setBusyName] = useState<string | null>(null);
   const [editingNickname, setEditingNickname] = useState<string | null>(null);
   const [nicknameDraft, setNicknameDraft] = useState("");
   const [savingNickname, setSavingNickname] = useState<string | null>(null);
   const [busyProfile, setBusyProfile] = useState<string | null>(null);
-  const [creatingProfile, setCreatingProfile] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
   const [editingRules, setEditingRules] = useState<string | null>(null);
   const [rulesDraft, setRulesDraft] = useState("");
   const [savingRules, setSavingRules] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const agentRefreshSeqRef = useRef(0);
+  const profileRefreshSeqRef = useRef(0);
   const [copied, setCopied] = useState<CopyTarget | null>(null);
   const [revealed, setRevealed] = useState<Set<string>>(() => new Set());
   const isOpen = active ?? open;
+  const savedTokensByName = useMemo(
+    () => new Map(listSavedAgentTokens(accountKey, slug).map((record) => [record.name, record])),
+    [accountKey, agents, slug],
+  );
   const localOnly = useMemo(() => {
     const serverNames = new Set((agents ?? []).map((agent) => agent.name));
-    return listSavedAgentTokens(accountKey, slug).filter((rec) => !serverNames.has(rec.name));
-  }, [accountKey, agents, slug]);
+    return [...savedTokensByName.values()].filter((record) => !serverNames.has(record.name));
+  }, [agents, savedTokensByName]);
 
-  const refresh = useCallback(async () => {
-    setError(null);
+  const filteredAgents = useMemo(() => {
+    const query = agentQuery.trim().toLocaleLowerCase();
+    if (query === "") return agents ?? [];
+    return (agents ?? []).filter((agent) =>
+      `${agent.name} ${agent.nickname ?? ""}`.toLocaleLowerCase().includes(query)
+    );
+  }, [agentQuery, agents]);
+  const selectedAgent = filteredAgents.find((agent) => agent.name === selectedAgentName)
+    ?? filteredAgents[0]
+    ?? null;
+  const selectedAgentSaved = selectedAgent === null
+    ? null
+    : savedTokensByName.get(selectedAgent.name) ?? null;
+
+  const filteredProfiles = useMemo(() => {
+    const query = profileQuery.trim().toLocaleLowerCase();
+    if (query === "") return profiles ?? [];
+    return (profiles ?? []).filter((profile) =>
+      [
+        profile.handle,
+        profile.runner,
+        profile.repo_url ?? "",
+        profile.workdir ?? "",
+        profile.base_branch,
+        profile.rules ?? "",
+      ].join(" ").toLocaleLowerCase().includes(query)
+    );
+  }, [profileQuery, profiles]);
+  const selectedProfile = filteredProfiles.find(
+    (profile) => `${profile.owner_account}/${profile.handle}` === selectedProfileKey,
+  ) ?? filteredProfiles[0] ?? null;
+  const selectedProfileId = selectedProfile === null
+    ? null
+    : `${selectedProfile.owner_account}/${selectedProfile.handle}`;
+
+  const refreshAgents = useCallback(async () => {
+    const seq = ++agentRefreshSeqRef.current;
+    setAgentError(null);
     try {
-      const [nextAgents, nextProfiles] = await Promise.all([
-        listChannelAgents(token, slug),
-        listProjectAgentProfiles(token),
-      ]);
+      const nextAgents = await listChannelAgents(token, slug);
+      if (seq !== agentRefreshSeqRef.current) return;
       setAgents(nextAgents);
-      setProfiles(nextProfiles);
     } catch (err) {
+      if (seq !== agentRefreshSeqRef.current) return;
       if (err instanceof AuthError) onAuthFailed(err.message);
-      else if (err instanceof ForbiddenError) setError(t("AgentTokens.errForbidden"));
-      else setError(t("AgentTokens.errLoad"));
+      else if (err instanceof ForbiddenError) setAgentError(t("AgentTokens.errForbidden"));
+      else setAgentError(t("AgentTokens.errLoad"));
     }
   }, [onAuthFailed, slug, t, token]);
+
+  const refreshProfiles = useCallback(async () => {
+    const seq = ++profileRefreshSeqRef.current;
+    setProfileError(null);
+    try {
+      const nextProfiles = await listProjectAgentProfiles(token);
+      if (seq !== profileRefreshSeqRef.current) return;
+      setProfiles(nextProfiles);
+    } catch (err) {
+      if (seq !== profileRefreshSeqRef.current) return;
+      if (err instanceof AuthError) onAuthFailed(err.message);
+      else if (err instanceof ForbiddenError) setProfileError(t("AgentTokens.errProfileForbidden"));
+      else setProfileError(t("AgentTokens.errProfileLoad"));
+    }
+  }, [onAuthFailed, t, token]);
 
   const close = useCallback(() => {
     if (active === undefined) setOpen(false);
@@ -149,46 +210,29 @@ export function AgentTokens({
     }
     if (active === undefined) setOpen(true);
     onActiveChange?.(true);
-    if (agents === null) void refresh();
-  }, [active, agents, close, isOpen, onActiveChange, refresh]);
+  }, [active, close, isOpen, onActiveChange]);
 
-  useDismissableLayer({ active: isOpen, onDismiss: close, outsideRef: rootRef });
+  useEffect(() => {
+    if (!isOpen) return;
+    if (agents === null) void refreshAgents();
+    if (profiles === null) void refreshProfiles();
+  }, [agents, isOpen, profiles, refreshAgents, refreshProfiles]);
 
   useEffect(() => {
     if (isOpen) return;
-    setPanelStyle({});
+    setActiveSection("channel");
     setProfileForm(EMPTY_PROFILE_FORM);
+    setCreatingProfile(false);
     setEditingRules(null);
     setRulesDraft("");
     setEditingNickname(null);
     setNicknameDraft("");
-    setError(null);
+    setAgentQuery("");
+    setProfileQuery("");
+    setAgentError(null);
+    setProfileError(null);
     setCopied(null);
     setRevealed(new Set());
-  }, [isOpen]);
-
-  useLayoutEffect(() => {
-    if (!isOpen) return;
-
-    const updatePanelPosition = () => {
-      const anchor = rootRef.current?.getBoundingClientRect();
-      if (!anchor) return;
-      const gap = 6;
-      const margin = 12;
-      const width = Math.min(620, window.innerWidth - margin * 2);
-      const top = Math.min(anchor.bottom + gap, window.innerHeight - margin);
-      const left = Math.max(margin, Math.min(anchor.right - width, window.innerWidth - width - margin));
-      const maxHeight = Math.max(220, window.innerHeight - top - margin);
-      setPanelStyle({ left, top, width, maxHeight });
-    };
-
-    updatePanelPosition();
-    window.addEventListener("resize", updatePanelPosition);
-    window.addEventListener("scroll", updatePanelPosition, true);
-    return () => {
-      window.removeEventListener("resize", updatePanelPosition);
-      window.removeEventListener("scroll", updatePanelPosition, true);
-    };
   }, [isOpen]);
 
   const toggleReveal = useCallback((key: string) => {
@@ -241,7 +285,7 @@ export function AgentTokens({
   async function copy(name: string, kind: "token" | "command", text: string) {
     const ok = await copyText(text);
     if (!ok) {
-      setError(t("AgentTokens.errCopy"));
+      setAgentError(t("AgentTokens.errCopy"));
       return;
     }
     const key = `${name}:${kind}` as CopyTarget;
@@ -254,18 +298,18 @@ export function AgentTokens({
     const ok = window.confirm(t("AgentTokens.deleteConfirm", { name }));
     if (!ok) return;
     setBusyName(name);
-    setError(null);
+    setAgentError(null);
     try {
       await deleteChannelAgent(token, slug, name);
       removeSavedAgentToken(accountKey, slug, name);
-      await refresh();
+      await refreshAgents();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
       else if (err instanceof ValidationError) {
         // 404 = 服务端早已没有这个 agent（别处已删/已撤销）——本地清理照做，幂等收尾。
         removeSavedAgentToken(accountKey, slug, name);
-        await refresh();
-      } else setError(t("AgentTokens.errDelete"));
+        await refreshAgents();
+      } else setAgentError(t("AgentTokens.errDelete"));
     } finally {
       setBusyName(null);
     }
@@ -302,14 +346,14 @@ export function AgentTokens({
     const ok = window.confirm(t("AgentTokens.rotateConfirm", { name }));
     if (!ok) return;
     setBusyName(name);
-    setError(null);
+    setAgentError(null);
     try {
       await regenerateAndSaveToken(name);
-      await refresh();
+      await refreshAgents();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
-      else if (err instanceof ForbiddenError) setError(t("AgentTokens.errRotateForbidden"));
-      else setError(t("AgentTokens.errRotate"));
+      else if (err instanceof ForbiddenError) setAgentError(t("AgentTokens.errRotateForbidden"));
+      else setAgentError(t("AgentTokens.errRotate"));
     } finally {
       setBusyName(null);
     }
@@ -346,7 +390,7 @@ export function AgentTokens({
         workdir: dir,
       });
       setResidentDone((s) => new Set(s).add(name));
-      await refresh();
+      await refreshAgents();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
       else setResidentError(err instanceof Error ? err.message : String(err));
@@ -359,7 +403,7 @@ export function AgentTokens({
   function startEditNickname(agent: ChannelAgentInfo) {
     setEditingNickname(agent.name);
     setNicknameDraft(agent.nickname ?? "");
-    setError(null);
+    setAgentError(null);
   }
 
   function cancelEditNickname() {
@@ -370,21 +414,21 @@ export function AgentTokens({
   async function saveNickname(agent: ChannelAgentInfo) {
     const nickname = nicknameDraft.trim();
     if (nickname === "") {
-      setError(t("AgentTokens.errNicknameInvalid"));
+      setAgentError(t("AgentTokens.errNicknameInvalid"));
       return;
     }
     setSavingNickname(agent.name);
-    setError(null);
+    setAgentError(null);
     try {
       const saved = await setChannelAgentNickname(token, slug, agent.name, nickname);
       setAgents((current) => current?.map((entry) => entry.name === agent.name ? { ...entry, nickname: saved.nickname } : entry) ?? null);
       cancelEditNickname();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
-      else if (err instanceof ForbiddenError) setError(t("AgentTokens.errNicknameForbidden"));
-      else if (err instanceof ConflictError) setError(t("AgentTokens.errNicknameConflict"));
-      else if (err instanceof ValidationError) setError(t("AgentTokens.errNicknameInvalid"));
-      else setError(t("AgentTokens.errNicknameSave"));
+      else if (err instanceof ForbiddenError) setAgentError(t("AgentTokens.errNicknameForbidden"));
+      else if (err instanceof ConflictError) setAgentError(t("AgentTokens.errNicknameConflict"));
+      else if (err instanceof ValidationError) setAgentError(t("AgentTokens.errNicknameInvalid"));
+      else setAgentError(t("AgentTokens.errNicknameSave"));
     } finally {
       setSavingNickname(null);
     }
@@ -393,13 +437,13 @@ export function AgentTokens({
   async function createProfile() {
     const handle = profileForm.handle.trim();
     if (handle === "") {
-      setError(t("AgentTokens.errProfileInvalid"));
+      setProfileError(t("AgentTokens.errProfileInvalid"));
       return;
     }
-    setCreatingProfile(true);
-    setError(null);
+    setSavingProfile(true);
+    setProfileError(null);
     try {
-      await createProjectAgentProfile(token, {
+      const created = await createProjectAgentProfile(token, {
         handle,
         runner: profileForm.runner,
         ...(profileForm.repoUrl.trim() === "" ? {} : { repo_url: profileForm.repoUrl.trim() }),
@@ -410,21 +454,23 @@ export function AgentTokens({
         ...(profileForm.rules.trim() === "" ? {} : { rules: profileForm.rules.trim() }),
       });
       setProfileForm((current) => ({ ...current, handle: "", repoUrl: "", workdir: "", rules: "" }));
-      await refresh();
+      setSelectedProfileKey(`${created.owner_account}/${created.handle}`);
+      setCreatingProfile(false);
+      await refreshProfiles();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
-      else if (err instanceof ForbiddenError) setError(t("AgentTokens.errProfileForbidden"));
-      else if (err instanceof ValidationError) setError(t("AgentTokens.errProfileInvalid"));
-      else setError(t("AgentTokens.errProfileSave"));
+      else if (err instanceof ForbiddenError) setProfileError(t("AgentTokens.errProfileForbidden"));
+      else if (err instanceof ValidationError) setProfileError(t("AgentTokens.errProfileInvalid"));
+      else setProfileError(t("AgentTokens.errProfileSave"));
     } finally {
-      setCreatingProfile(false);
+      setSavingProfile(false);
     }
   }
 
   function startEditRules(profile: ProjectAgentProfile) {
     setEditingRules(`${profile.owner_account}/${profile.handle}`);
     setRulesDraft(profile.rules ?? "");
-    setError(null);
+    setProfileError(null);
   }
 
   function cancelEditRules() {
@@ -438,7 +484,7 @@ export function AgentTokens({
   async function saveProfileRules(profile: ProjectAgentProfile) {
     const key = `${profile.owner_account}/${profile.handle}`;
     setSavingRules(key);
-    setError(null);
+    setProfileError(null);
     try {
       await createProjectAgentProfile(token, {
         handle: profile.handle,
@@ -452,12 +498,12 @@ export function AgentTokens({
       });
       setEditingRules(null);
       setRulesDraft("");
-      await refresh();
+      await refreshProfiles();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
-      else if (err instanceof ForbiddenError) setError(t("AgentTokens.errProfileForbidden"));
-      else if (err instanceof ValidationError) setError(t("AgentTokens.errProfileInvalid"));
-      else setError(t("AgentTokens.errProfileSave"));
+      else if (err instanceof ForbiddenError) setProfileError(t("AgentTokens.errProfileForbidden"));
+      else if (err instanceof ValidationError) setProfileError(t("AgentTokens.errProfileInvalid"));
+      else setProfileError(t("AgentTokens.errProfileSave"));
     } finally {
       setSavingRules(null);
     }
@@ -466,317 +512,665 @@ export function AgentTokens({
   async function inviteProfile(profile: ProjectAgentProfile) {
     const key = `${profile.owner_account}/${profile.handle}`;
     setBusyProfile(key);
-    setError(null);
+    setProfileError(null);
     try {
       await inviteProjectAgent(token, slug, profile);
-      await refresh();
+      await refreshProfiles();
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
-      else if (err instanceof ForbiddenError) setError(t("AgentTokens.errInviteForbidden"));
-      else setError(t("AgentTokens.errInvite"));
+      else if (err instanceof ForbiddenError) setProfileError(t("AgentTokens.errInviteForbidden"));
+      else setProfileError(t("AgentTokens.errInvite"));
     } finally {
       setBusyProfile(null);
     }
   }
 
+  const plaintextCount = (agents ?? []).filter((agent) => savedTokensByName.has(agent.name)).length;
+  const worktreeLabel = (strategy: ProjectAgentWorktreeStrategy) => {
+    if (strategy === "shared") return t("AgentTokens.worktreeShared");
+    if (strategy === "none") return t("AgentTokens.worktreeNone");
+    return t("AgentTokens.worktreeBranch");
+  };
+  const invitableLabel = (value: ProjectAgentInvitableBy) => {
+    if (value === "org") return t("AgentTokens.invitableOrg");
+    if (value === "anyone") return t("AgentTokens.invitableAnyone");
+    return t("AgentTokens.invitableOwner");
+  };
+
+  const channelSection = (
+    <>
+      <header className="agentmanager-module-head">
+        <div>
+          <h3 className="settings-module-title">{t("AgentTokens.channelTitle")}</h3>
+          <p className="agentmanager-module-hint">{t("AgentTokens.channelHint", { slug })}</p>
+        </div>
+        <button type="button" className="d-btn" onClick={() => void refreshAgents()}>
+          {t("AgentTokens.refresh")}
+        </button>
+      </header>
+
+      <div className="agentmanager-summary" aria-label={t("AgentTokens.channelSummary")}>
+        <div>
+          <strong>{agents?.length ?? "—"}</strong>
+          <span>{t("AgentTokens.identityCount")}</span>
+        </div>
+        <div>
+          <strong>{agents === null ? "—" : plaintextCount}</strong>
+          <span>{t("AgentTokens.plaintextCount")}</span>
+        </div>
+        <div>
+          <strong>{agents === null ? "—" : localOnly.length}</strong>
+          <span>{t("AgentTokens.staleCount")}</span>
+        </div>
+      </div>
+
+      {agentError !== null && <p className="agenttokens-error" role="alert">{agentError}</p>}
+      {residentError !== null && <p className="agenttokens-error" role="alert">{residentError}</p>}
+
+      <label className="agentmanager-search">
+        <span className="agentmanager-sr-only">{t("AgentTokens.searchAgents")}</span>
+        <input
+          className="agenttokens-input"
+          type="search"
+          value={agentQuery}
+          onChange={(event) => setAgentQuery(event.target.value)}
+          placeholder={t("AgentTokens.searchAgents")}
+        />
+      </label>
+
+      {agents === null && agentError === null ? (
+        <p className="agenttokens-empty">{t("AgentTokens.loading")}</p>
+      ) : (
+        <div className="agentmanager-workspace">
+          <div className="agentmanager-list" aria-label={t("AgentTokens.channelList")}>
+            {filteredAgents.map((agent) => {
+              const saved = savedTokensByName.get(agent.name);
+              const selected = selectedAgent?.name === agent.name;
+              return (
+                <button
+                  key={agent.name}
+                  type="button"
+                  className={`agentmanager-list-item${selected ? " is-selected" : ""}`}
+                  aria-pressed={selected}
+                  onClick={() => {
+                    setSelectedAgentName(agent.name);
+                    cancelEditNickname();
+                    setAgentError(null);
+                  }}
+                >
+                  <span className="agentmanager-list-name">
+                    {agent.nickname ?? agent.name}
+                    {agent.nickname && <small>{agent.name}</small>}
+                  </span>
+                  <span className={`agentmanager-status${saved ? " is-ready" : " is-warning"}`}>
+                    {saved ? t("AgentTokens.plaintextReady") : t("AgentTokens.plaintextMissing")}
+                  </span>
+                </button>
+              );
+            })}
+            {agents !== null && filteredAgents.length === 0 && (
+              <p className="agentmanager-list-empty">
+                {agentQuery.trim() === "" ? t("AgentTokens.empty") : t("AgentTokens.noAgentMatches")}
+              </p>
+            )}
+
+            {localOnly.length > 0 && (
+              <details className="agentmanager-local-only">
+                <summary>
+                  {t("AgentTokens.localOnlyTitle")} · {localOnly.length}
+                </summary>
+                <div className="agentmanager-local-only-list">
+                  {localOnly.map((record) => (
+                    <div key={record.name} className="agentmanager-local-only-item">
+                      <strong>{record.name}</strong>
+                      <span>{t("AgentTokens.localOnlyMeta")}</span>
+                      {tokenField(`local:${record.name}`, record.token)}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+
+          <section className="agentmanager-detail" aria-live="polite">
+            {selectedAgent === null ? (
+              <div className="agentmanager-empty-state">
+                <strong>{t("AgentTokens.noAgentSelected")}</strong>
+                <p>{t("AgentTokens.noAgentSelectedHint")}</p>
+              </div>
+            ) : (
+              <>
+                <header className="agentmanager-detail-head">
+                  <div>
+                    <span className="agentmanager-eyebrow">{t("AgentTokens.channelIdentity")}</span>
+                    <h4>{selectedAgent.nickname ?? selectedAgent.name}</h4>
+                    {selectedAgent.nickname && <p className="t-mono">{selectedAgent.name}</p>}
+                  </div>
+                  <span className={`agentmanager-status${selectedAgentSaved ? " is-ready" : " is-warning"}`}>
+                    {selectedAgentSaved ? t("AgentTokens.plaintextReady") : t("AgentTokens.plaintextMissing")}
+                  </span>
+                </header>
+
+                {selectedAgentSaved ? (
+                  <section className="agentmanager-detail-section">
+                    <div className="agentmanager-section-head">
+                      <strong>{t("AgentTokens.credentialTitle")}</strong>
+                      <span>{t("AgentTokens.hasPlaintext")}</span>
+                    </div>
+                    {tokenField(`server:${selectedAgent.name}`, selectedAgentSaved.token)}
+                    <div className="agenttokens-actions">
+                      <button
+                        type="button"
+                        className="d-btn d-btn--primary"
+                        onClick={() => copy(selectedAgent.name, "command", freshCommand(selectedAgentSaved))}
+                      >
+                        {copied === `${selectedAgent.name}:command`
+                          ? t("AgentTokens.copied")
+                          : t("AgentTokens.copyPack")}
+                      </button>
+                      <button
+                        type="button"
+                        className="d-btn"
+                        onClick={() => copy(selectedAgent.name, "token", selectedAgentSaved.token)}
+                      >
+                        {copied === `${selectedAgent.name}:token`
+                          ? t("AgentTokens.copied")
+                          : t("AgentTokens.copyToken")}
+                      </button>
+                    </div>
+                  </section>
+                ) : (
+                  <section className="agentmanager-detail-section agentmanager-callout">
+                    <strong>{t("AgentTokens.noPlaintextTitle")}</strong>
+                    <p>{t("AgentTokens.noPlaintextHint")}</p>
+                    <button
+                      type="button"
+                      className="d-btn d-btn--primary"
+                      disabled={busyName === selectedAgent.name}
+                      onClick={() => void rotate(selectedAgent.name)}
+                    >
+                      {busyName === selectedAgent.name ? t("AgentTokens.rotating") : t("AgentTokens.rotateAndRecover")}
+                    </button>
+                  </section>
+                )}
+
+                <section className="agentmanager-detail-section">
+                  <div className="agentmanager-section-head">
+                    <strong>{t("AgentTokens.identityTitle")}</strong>
+                    {editingNickname !== selectedAgent.name && (
+                      <button
+                        type="button"
+                        className="agentmanager-text-action agenttokens-edit-nickname"
+                        onClick={() => startEditNickname(selectedAgent)}
+                      >
+                        {selectedAgent.nickname ? t("AgentTokens.changeNickname") : t("AgentTokens.setNickname")}
+                      </button>
+                    )}
+                  </div>
+                  <dl className="agentmanager-facts">
+                    <div><dt>{t("AgentTokens.handleLabel")}</dt><dd>{selectedAgent.name}</dd></div>
+                    <div>
+                      <dt>{t("AgentTokens.nicknameLabel")}</dt>
+                      <dd>{selectedAgent.nickname ?? t("AgentTokens.nicknameUnset")}</dd>
+                    </div>
+                  </dl>
+                  {editingNickname === selectedAgent.name && (
+                    <div className="agenttokens-nickname-edit">
+                      <input
+                        className="agenttokens-input agenttokens-nickname-input"
+                        value={nicknameDraft}
+                        maxLength={64}
+                        autoFocus
+                        onChange={(event) => setNicknameDraft(event.target.value)}
+                        placeholder={t("AgentTokens.nicknamePlaceholder")}
+                        aria-label={t("AgentTokens.nicknameLabel")}
+                      />
+                      <button
+                        type="button"
+                        className="d-btn d-btn--primary agenttokens-save-nickname"
+                        disabled={savingNickname === selectedAgent.name}
+                        onClick={() => void saveNickname(selectedAgent)}
+                      >
+                        {savingNickname === selectedAgent.name
+                          ? t("AgentTokens.savingNickname")
+                          : t("AgentTokens.saveNickname")}
+                      </button>
+                      <button
+                        type="button"
+                        className="d-btn agenttokens-cancel-nickname"
+                        disabled={savingNickname === selectedAgent.name}
+                        onClick={cancelEditNickname}
+                      >
+                        {t("AgentTokens.cancelNickname")}
+                      </button>
+                    </div>
+                  )}
+                </section>
+
+                {canMakeResident && (
+                  <section className="agentmanager-detail-section">
+                    <div className="agentmanager-section-head">
+                      <strong>{t("AgentTokens.runtimeTitle")}</strong>
+                      <span>{t("AgentTokens.runtimeHint")}</span>
+                    </div>
+                    <div className="agenttokens-actions">
+                      <select
+                        className="d-input agenttokens-resident-runner"
+                        aria-label={t("AgentTokens.residentRunnerLabel", { name: selectedAgent.name })}
+                        value={residentRunnerFor(selectedAgent.name)}
+                        disabled={residentBusy !== null}
+                        onChange={(event) =>
+                          setResidentRunnerByName((current) => ({
+                            ...current,
+                            [selectedAgent.name]: event.target.value as DesktopAgentRunner,
+                          }))
+                        }
+                      >
+                        <option value="codex">codex</option>
+                        <option value="claude">claude</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="d-btn agenttokens-resident"
+                        disabled={residentBusy !== null}
+                        onClick={() => void makeResident(selectedAgent.name)}
+                      >
+                        {residentBusy === selectedAgent.name
+                          ? t("AgentTokens.residentBusy")
+                          : residentDone.has(selectedAgent.name)
+                            ? t("AgentTokens.residentDone")
+                            : t("AgentTokens.resident")}
+                      </button>
+                    </div>
+                  </section>
+                )}
+
+                <section className="agentmanager-detail-section agentmanager-danger">
+                  <div className="agentmanager-section-head">
+                    <strong>{t("AgentTokens.dangerTitle")}</strong>
+                    <span>{t("AgentTokens.dangerHint")}</span>
+                  </div>
+                  <div className="agenttokens-actions">
+                    {selectedAgentSaved && (
+                      <button
+                        type="button"
+                        className="d-btn agenttokens-rotate"
+                        disabled={busyName === selectedAgent.name}
+                        onClick={() => void rotate(selectedAgent.name)}
+                      >
+                        {busyName === selectedAgent.name ? t("AgentTokens.rotating") : t("AgentTokens.rotate")}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="d-btn agenttokens-delete"
+                      disabled={busyName === selectedAgent.name}
+                      onClick={() => void removeAgent(selectedAgent.name)}
+                    >
+                      {t("AgentTokens.delete")}
+                    </button>
+                  </div>
+                </section>
+              </>
+            )}
+          </section>
+        </div>
+      )}
+    </>
+  );
+
+  const profileFormContent = (
+    <form
+      className="agentmanager-profile-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void createProfile();
+      }}
+    >
+      <div className="agentmanager-form-intro">
+        <span className="agentmanager-eyebrow">{t("AgentTokens.newProfileEyebrow")}</span>
+        <h4>{t("AgentTokens.newProfileTitle")}</h4>
+        <p>{t("AgentTokens.newProfileHint")}</p>
+      </div>
+      <label>
+        <span>{t("AgentTokens.profileHandle")}</span>
+        <input
+          className="agenttokens-input t-mono"
+          value={profileForm.handle}
+          required
+          aria-label={t("AgentTokens.profileHandle")}
+          onChange={(event) => setProfileForm((current) => ({ ...current, handle: event.target.value }))}
+        />
+      </label>
+      <label>
+        <span>{t("AgentTokens.profileRunner")}</span>
+        <select
+          className="agenttokens-input"
+          value={profileForm.runner}
+          onChange={(event) => setProfileForm((current) => ({
+            ...current,
+            runner: event.target.value as ProjectAgentRunner,
+          }))}
+        >
+          <option value="codex">codex</option>
+          <option value="claude">claude</option>
+          <option value="codex-sdk">codex-sdk</option>
+          <option value="shell">shell</option>
+        </select>
+      </label>
+      <label className="agentmanager-field-wide">
+        <span>{t("AgentTokens.profileRepo")}</span>
+        <input
+          className="agenttokens-input"
+          value={profileForm.repoUrl}
+          onChange={(event) => setProfileForm((current) => ({ ...current, repoUrl: event.target.value }))}
+          placeholder="https://github.com/owner/repo"
+        />
+      </label>
+      <label className="agentmanager-field-wide">
+        <span>{t("AgentTokens.profileWorkdir")}</span>
+        <input
+          className="agenttokens-input t-mono"
+          value={profileForm.workdir}
+          aria-label={t("AgentTokens.profileWorkdir")}
+          onChange={(event) => setProfileForm((current) => ({ ...current, workdir: event.target.value }))}
+          placeholder="/path/to/project"
+        />
+      </label>
+      <label>
+        <span>{t("AgentTokens.profileBase")}</span>
+        <input
+          className="agenttokens-input t-mono"
+          value={profileForm.baseBranch}
+          aria-label={t("AgentTokens.profileBase")}
+          onChange={(event) => setProfileForm((current) => ({ ...current, baseBranch: event.target.value }))}
+        />
+      </label>
+      <label>
+        <span>{t("AgentTokens.profileWorktree")}</span>
+        <select
+          className="agenttokens-input"
+          value={profileForm.worktree}
+          onChange={(event) => setProfileForm((current) => ({
+            ...current,
+            worktree: event.target.value as ProjectAgentWorktreeStrategy,
+          }))}
+        >
+          <option value="branch">{t("AgentTokens.worktreeBranch")}</option>
+          <option value="shared">{t("AgentTokens.worktreeShared")}</option>
+          <option value="none">{t("AgentTokens.worktreeNone")}</option>
+        </select>
+      </label>
+      <label className="agentmanager-field-wide">
+        <span>{t("AgentTokens.profileInvitableBy")}</span>
+        <select
+          className="agenttokens-input"
+          value={profileForm.invitableBy}
+          onChange={(event) => setProfileForm((current) => ({
+            ...current,
+            invitableBy: event.target.value as ProjectAgentInvitableBy,
+          }))}
+        >
+          <option value="owner">{t("AgentTokens.invitableOwner")}</option>
+          <option value="org">{t("AgentTokens.invitableOrg")}</option>
+          <option value="anyone">{t("AgentTokens.invitableAnyone")}</option>
+        </select>
+      </label>
+      <label className="agentmanager-field-wide">
+        <span>{t("AgentTokens.profileRules")}</span>
+        <textarea
+          className="agenttokens-input agentmanager-rules-input"
+          value={profileForm.rules}
+          onChange={(event) => setProfileForm((current) => ({ ...current, rules: event.target.value }))}
+          placeholder={t("AgentTokens.profileRulesHint")}
+        />
+      </label>
+      <div className="agentmanager-form-actions">
+        {profiles !== null && profiles.length > 0 && (
+          <button type="button" className="d-btn" disabled={savingProfile} onClick={() => setCreatingProfile(false)}>
+            {t("AgentTokens.cancelRules")}
+          </button>
+        )}
+        <button type="submit" className="d-btn d-btn--primary" disabled={savingProfile}>
+          {savingProfile ? t("AgentTokens.creatingProfile") : t("AgentTokens.createProfile")}
+        </button>
+      </div>
+    </form>
+  );
+
+  const projectsSection = (
+    <>
+      <header className="agentmanager-module-head">
+        <div>
+          <h3 className="settings-module-title">{t("AgentTokens.projectTitle")}</h3>
+          <p className="agentmanager-module-hint">{t("AgentTokens.projectHint")}</p>
+        </div>
+        <div className="agenttokens-actions">
+          <button type="button" className="d-btn" onClick={() => void refreshProfiles()}>
+            {t("AgentTokens.refresh")}
+          </button>
+          {!creatingProfile && profiles !== null && profiles.length > 0 && (
+            <button
+              type="button"
+              className="d-btn d-btn--primary"
+              onClick={() => {
+                setCreatingProfile(true);
+                setProfileError(null);
+              }}
+            >
+              {t("AgentTokens.newProfile")}
+            </button>
+          )}
+        </div>
+      </header>
+
+      {profileError !== null && <p className="agenttokens-error" role="alert">{profileError}</p>}
+
+      <label className="agentmanager-search">
+        <span className="agentmanager-sr-only">{t("AgentTokens.searchProfiles")}</span>
+        <input
+          className="agenttokens-input"
+          type="search"
+          value={profileQuery}
+          onChange={(event) => setProfileQuery(event.target.value)}
+          placeholder={t("AgentTokens.searchProfiles")}
+        />
+      </label>
+
+      {profiles === null && profileError === null ? (
+        <p className="agenttokens-empty">{t("AgentTokens.loading")}</p>
+      ) : (
+        <div className="agentmanager-workspace agentmanager-workspace--profiles">
+          <div className="agentmanager-list" aria-label={t("AgentTokens.projectList")}>
+            {filteredProfiles.map((profile) => {
+              const key = `${profile.owner_account}/${profile.handle}`;
+              const selected = !creatingProfile && selectedProfileId === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className={`agentmanager-list-item${selected ? " is-selected" : ""}`}
+                  aria-pressed={selected}
+                  onClick={() => {
+                    setSelectedProfileKey(key);
+                    setCreatingProfile(false);
+                    cancelEditRules();
+                    setProfileError(null);
+                  }}
+                >
+                  <span className="agentmanager-list-name">{profile.handle}</span>
+                  <span className="agentmanager-profile-meta">
+                    {profile.runner} · {profile.base_branch}
+                  </span>
+                </button>
+              );
+            })}
+            {profiles !== null && filteredProfiles.length === 0 && (
+              <div className="agentmanager-list-empty">
+                <p>
+                  {profileQuery.trim() === ""
+                    ? t("AgentTokens.noProfiles")
+                    : t("AgentTokens.noProfileMatches")}
+                </p>
+              </div>
+            )}
+          </div>
+
+          <section className="agentmanager-detail">
+            {creatingProfile || (profiles !== null && profiles.length === 0)
+              ? profileFormContent
+              : selectedProfile === null
+                ? (
+                    <div className="agentmanager-empty-state">
+                      <strong>{t("AgentTokens.noProfileSelected")}</strong>
+                      <p>{t("AgentTokens.noProfileSelectedHint")}</p>
+                    </div>
+                  )
+                : (
+                    <>
+                      <header className="agentmanager-detail-head">
+                        <div>
+                          <span className="agentmanager-eyebrow">{t("AgentTokens.projectProfile")}</span>
+                          <h4>{selectedProfile.handle}</h4>
+                          <p>{selectedProfile.owner_account}</p>
+                        </div>
+                        <span className="agentmanager-runner-chip">{selectedProfile.runner}</span>
+                      </header>
+
+                      <section className="agentmanager-detail-section">
+                        <strong>{t("AgentTokens.profileConfiguration")}</strong>
+                        <dl className="agentmanager-facts">
+                          <div><dt>{t("AgentTokens.profileRepo")}</dt><dd>{selectedProfile.repo_url ?? "—"}</dd></div>
+                          <div><dt>{t("AgentTokens.profileWorkdir")}</dt><dd>{selectedProfile.workdir ?? "—"}</dd></div>
+                          <div><dt>{t("AgentTokens.profileBase")}</dt><dd>{selectedProfile.base_branch}</dd></div>
+                          <div>
+                            <dt>{t("AgentTokens.profileWorktree")}</dt>
+                            <dd>{worktreeLabel(selectedProfile.worktree_strategy)}</dd>
+                          </div>
+                          <div>
+                            <dt>{t("AgentTokens.profileInvitableBy")}</dt>
+                            <dd>{invitableLabel(selectedProfile.invitable_by)}</dd>
+                          </div>
+                        </dl>
+                      </section>
+
+                      <section className="agentmanager-detail-section">
+                        <div className="agentmanager-section-head">
+                          <strong>{t("AgentTokens.profileRules")}</strong>
+                          {editingRules !== selectedProfileId && (
+                            <button
+                              type="button"
+                              className="agentmanager-text-action agenttokens-edit-rules"
+                              onClick={() => startEditRules(selectedProfile)}
+                            >
+                              {t("AgentTokens.editRules")}
+                            </button>
+                          )}
+                        </div>
+                        {editingRules === selectedProfileId ? (
+                          <div className="agenttokens-rules-edit-wrap">
+                            <textarea
+                              className="agenttokens-input agenttokens-rules-edit"
+                              value={rulesDraft}
+                              onChange={(event) => setRulesDraft(event.target.value)}
+                              placeholder={t("AgentTokens.profileRules")}
+                              aria-label={t("AgentTokens.rulesLabel")}
+                            />
+                            <div className="agenttokens-actions">
+                              <button
+                                type="button"
+                                className="d-btn d-btn--primary agenttokens-save-rules"
+                                disabled={savingRules === selectedProfileId}
+                                onClick={() => void saveProfileRules(selectedProfile)}
+                              >
+                                {savingRules === selectedProfileId
+                                  ? t("AgentTokens.savingRules")
+                                  : t("AgentTokens.saveRules")}
+                              </button>
+                              <button
+                                type="button"
+                                className="d-btn agenttokens-cancel-rules"
+                                disabled={savingRules === selectedProfileId}
+                                onClick={cancelEditRules}
+                              >
+                                {t("AgentTokens.cancelRules")}
+                              </button>
+                            </div>
+                          </div>
+                        ) : selectedProfile.rules !== null && selectedProfile.rules !== "" ? (
+                          <pre className="agenttokens-rules" aria-label={t("AgentTokens.rulesLabel")}>
+                            {selectedProfile.rules}
+                          </pre>
+                        ) : (
+                          <span className="agenttokens-rules-empty">{t("AgentTokens.noRules")}</span>
+                        )}
+                      </section>
+
+                      <section className="agentmanager-detail-section agentmanager-callout">
+                        <strong>{t("AgentTokens.inviteTitle")}</strong>
+                        <p>{t("AgentTokens.inviteHint", { slug })}</p>
+                        <button
+                          type="button"
+                          className="d-btn d-btn--primary"
+                          disabled={busyProfile === selectedProfileId}
+                          onClick={() => void inviteProfile(selectedProfile)}
+                        >
+                          {busyProfile === selectedProfileId
+                            ? t("AgentTokens.invitingProfile")
+                            : t("AgentTokens.inviteProfile")}
+                        </button>
+                      </section>
+                    </>
+                  )}
+          </section>
+        </div>
+      )}
+    </>
+  );
+
+  const sections: SectionedDialogSection<AgentManagerSection>[] = [
+    { id: "channel", label: t("AgentTokens.sectionChannel"), content: channelSection },
+    { id: "projects", label: t("AgentTokens.sectionProjects"), content: projectsSection },
+  ];
+  if (isDesktopRuntime()) {
+    sections.push({
+      id: "local",
+      label: t("AgentTokens.sectionLocal"),
+      content: (
+        <>
+          <header className="agentmanager-module-head">
+            <div>
+              <h3 className="settings-module-title">{t("AgentTokens.localRuntimeTitle")}</h3>
+              <p className="agentmanager-module-hint">{t("AgentTokens.localRuntimeHint", { slug })}</p>
+            </div>
+          </header>
+          <LocalAgentsOverview
+            t={t}
+            scopeChannel={slug}
+            active={isOpen && activeSection === "local"}
+          />
+        </>
+      ),
+    });
+  }
+
   return (
-    <div className="agenttokens" ref={rootRef}>
+    <div className="agenttokens">
       <button type="button" className="d-btn agenttokens-btn" onClick={toggle} aria-expanded={isOpen}>
         {t("AgentTokens.open")}
       </button>
       {isOpen && (
-        <div
-          className="agenttokens-panel"
-          style={panelStyle}
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("AgentTokens.title")}
-        >
-          <div className="agenttokens-head">
-            <span className="agenttokens-title">{t("AgentTokens.title")}</span>
-            <button type="button" className="d-btn agenttokens-refresh" onClick={refresh}>
-              {t("AgentTokens.refresh")}
-            </button>
-          </div>
-          <p className="agenttokens-hint">{t("AgentTokens.hint")}</p>
-          {/* 合并「本机 agent」入口（原独立按钮）——桌面端在此直接看/管本机运行态，与身份/接入并列。 */}
-          {isDesktopRuntime() && (
-            <section className="agenttokens-local">
-              <LocalAgentsOverview t={t} scopeChannel={slug} />
-            </section>
-          )}
-          {error !== null && <p className="agenttokens-error">{error}</p>}
-          {residentError !== null && <p className="agenttokens-error" role="alert">{residentError}</p>}
-          {(agents === null || profiles === null) && error === null && <p className="agenttokens-empty">{t("AgentTokens.loading")}</p>}
-          {agents !== null && agents.length === 0 && localOnly.length === 0 && (
-            <p className="agenttokens-empty">{t("AgentTokens.empty")}</p>
-          )}
-          {agents !== null && agents.length > 0 && (
-            <ul className="agenttokens-list">
-              {agents.map((agent) => {
-                const saved = findSavedAgentToken(accountKey, slug, agent.name);
-                const isEditingNickname = editingNickname === agent.name;
-                return (
-                  <li key={agent.name} className="agenttokens-item">
-                    <div className="agenttokens-main">
-                      <strong className="agenttokens-name">{agent.name}</strong>
-                      {agent.nickname && <span className="agenttokens-nickname">@{agent.nickname}</span>}
-                      <span className="agenttokens-meta">
-                        {saved ? t("AgentTokens.hasPlaintext") : t("AgentTokens.noPlaintext")}
-                      </span>
-                    </div>
-                    {saved ? tokenField(`server:${agent.name}`, saved.token) : null}
-                    {isEditingNickname && (
-                      <div className="agenttokens-nickname-edit">
-                        <input
-                          className="agenttokens-input agenttokens-nickname-input"
-                          value={nicknameDraft}
-                          maxLength={64}
-                          autoFocus
-                          onChange={(event) => setNicknameDraft(event.target.value)}
-                          placeholder={t("AgentTokens.nicknamePlaceholder")}
-                          aria-label={t("AgentTokens.nicknameLabel")}
-                        />
-                        <button
-                          type="button"
-                          className="d-btn d-btn--primary agenttokens-save-nickname"
-                          disabled={savingNickname === agent.name}
-                          onClick={() => void saveNickname(agent)}
-                        >
-                          {savingNickname === agent.name ? t("AgentTokens.savingNickname") : t("AgentTokens.saveNickname")}
-                        </button>
-                        <button type="button" className="d-btn agenttokens-cancel-nickname" disabled={savingNickname === agent.name} onClick={cancelEditNickname}>
-                          {t("AgentTokens.cancelNickname")}
-                        </button>
-                      </div>
-                    )}
-                    <div className="agenttokens-actions">
-                      {!isEditingNickname && (
-                        <button type="button" className="d-btn agenttokens-edit-nickname" onClick={() => startEditNickname(agent)}>
-                          {agent.nickname ? t("AgentTokens.changeNickname") : t("AgentTokens.setNickname")}
-                        </button>
-                      )}
-                      {saved ? (
-                        <>
-                          <button type="button" className="d-btn" onClick={() => copy(agent.name, "token", saved.token)}>
-                            {copied === `${agent.name}:token` ? t("AgentTokens.copied") : t("AgentTokens.copyToken")}
-                          </button>
-                          <button type="button" className="d-btn" onClick={() => copy(agent.name, "command", freshCommand(saved))}>
-                            {copied === `${agent.name}:command` ? t("AgentTokens.copied") : t("AgentTokens.copyPack")}
-                          </button>
-                        </>
-                      ) : null}
-                      <button
-                        type="button"
-                        className="d-btn agenttokens-delete"
-                        disabled={busyName === agent.name}
-                        onClick={() => void removeAgent(agent.name)}
-                      >
-                        {t("AgentTokens.delete")}
-                      </button>
-                      <button
-                        type="button"
-                        className="d-btn agenttokens-rotate"
-                        disabled={busyName === agent.name}
-                        onClick={() => rotate(agent.name)}
-                      >
-                        {busyName === agent.name ? t("AgentTokens.rotating") : t("AgentTokens.rotate")}
-                      </button>
-                      {/* 转为常驻——仅 mac 桌面（launchd）；先选 runner(codex/claude) 与工作目录,再 dutyAdopt 落地。 */}
-                      {canMakeResident && (
-                        <>
-                          <select
-                            className="d-input agenttokens-resident-runner"
-                            aria-label={t("AgentTokens.residentRunnerLabel", { name: agent.name })}
-                            value={residentRunnerFor(agent.name)}
-                            disabled={residentBusy !== null}
-                            onChange={(event) =>
-                              setResidentRunnerByName((current) => ({
-                                ...current,
-                                [agent.name]: event.target.value as DesktopAgentRunner,
-                              }))
-                            }
-                          >
-                            <option value="codex">codex</option>
-                            <option value="claude">claude</option>
-                          </select>
-                          <button
-                            type="button"
-                            className="d-btn agenttokens-resident"
-                            disabled={residentBusy !== null}
-                            onClick={() => void makeResident(agent.name)}
-                          >
-                            {residentBusy === agent.name
-                              ? t("AgentTokens.residentBusy")
-                              : residentDone.has(agent.name)
-                                ? t("AgentTokens.residentDone")
-                                : t("AgentTokens.resident")}
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-          {localOnly.length > 0 && (
-            <>
-              <p className="agenttokens-subtitle">{t("AgentTokens.localOnlyTitle")}</p>
-              <ul className="agenttokens-list">
-                {localOnly.map((rec) => (
-                  <li key={rec.name} className="agenttokens-item agenttokens-item--stale">
-                    <div className="agenttokens-main">
-                      <strong className="agenttokens-name">{rec.name}</strong>
-                      <span className="agenttokens-meta">{t("AgentTokens.localOnlyMeta")}</span>
-                    </div>
-                    {tokenField(`local:${rec.name}`, rec.token)}
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-          <div className="agenttokens-project">
-            <div className="agenttokens-project-head">
-              <p className="agenttokens-subtitle">{t("AgentTokens.projectTitle")}</p>
-              <span className="agenttokens-meta">{profiles === null ? "" : profiles.length}</span>
-            </div>
-            <div className="agenttokens-profile-form">
-              <input
-                className="agenttokens-input t-mono"
-                value={profileForm.handle}
-                onChange={(event) => setProfileForm((current) => ({ ...current, handle: event.target.value }))}
-                placeholder={t("AgentTokens.profileHandle")}
-                aria-label={t("AgentTokens.profileHandle")}
-              />
-              <select
-                className="agenttokens-input"
-                value={profileForm.runner}
-                onChange={(event) => setProfileForm((current) => ({ ...current, runner: event.target.value as ProjectAgentRunner }))}
-                aria-label={t("AgentTokens.profileRunner")}
-              >
-                <option value="codex">codex</option>
-                <option value="claude">claude</option>
-                <option value="codex-sdk">codex-sdk</option>
-                <option value="shell">shell</option>
-              </select>
-              <input
-                className="agenttokens-input"
-                value={profileForm.repoUrl}
-                onChange={(event) => setProfileForm((current) => ({ ...current, repoUrl: event.target.value }))}
-                placeholder={t("AgentTokens.profileRepo")}
-                aria-label={t("AgentTokens.profileRepo")}
-              />
-              <input
-                className="agenttokens-input"
-                value={profileForm.workdir}
-                onChange={(event) => setProfileForm((current) => ({ ...current, workdir: event.target.value }))}
-                placeholder={t("AgentTokens.profileWorkdir")}
-                aria-label={t("AgentTokens.profileWorkdir")}
-              />
-              <input
-                className="agenttokens-input t-mono"
-                value={profileForm.baseBranch}
-                onChange={(event) => setProfileForm((current) => ({ ...current, baseBranch: event.target.value }))}
-                placeholder={t("AgentTokens.profileBase")}
-                aria-label={t("AgentTokens.profileBase")}
-              />
-              <select
-                className="agenttokens-input"
-                value={profileForm.worktree}
-                onChange={(event) => setProfileForm((current) => ({ ...current, worktree: event.target.value as ProjectAgentWorktreeStrategy }))}
-                aria-label={t("AgentTokens.profileWorktree")}
-              >
-                <option value="branch">{t("AgentTokens.worktreeBranch")}</option>
-                <option value="shared">{t("AgentTokens.worktreeShared")}</option>
-                <option value="none">{t("AgentTokens.worktreeNone")}</option>
-              </select>
-              <select
-                className="agenttokens-input"
-                value={profileForm.invitableBy}
-                onChange={(event) => setProfileForm((current) => ({ ...current, invitableBy: event.target.value as ProjectAgentInvitableBy }))}
-                aria-label={t("AgentTokens.profileInvitableBy")}
-              >
-                <option value="owner">{t("AgentTokens.invitableOwner")}</option>
-                <option value="org">{t("AgentTokens.invitableOrg")}</option>
-                <option value="anyone">{t("AgentTokens.invitableAnyone")}</option>
-              </select>
-              <input
-                className="agenttokens-input agenttokens-input--wide"
-                value={profileForm.rules}
-                onChange={(event) => setProfileForm((current) => ({ ...current, rules: event.target.value }))}
-                placeholder={t("AgentTokens.profileRules")}
-                aria-label={t("AgentTokens.profileRules")}
-              />
-              <button type="button" className="d-btn agenttokens-create-profile" disabled={creatingProfile} onClick={createProfile}>
-                {creatingProfile ? t("AgentTokens.creatingProfile") : t("AgentTokens.createProfile")}
-              </button>
-            </div>
-            {profiles !== null && profiles.length > 0 && (
-              <ul className="agenttokens-list agenttokens-profile-list">
-                {profiles.map((profile) => {
-                  const key = `${profile.owner_account}/${profile.handle}`;
-                  const isEditing = editingRules === key;
-                  return (
-                    <li key={key} className="agenttokens-item">
-                      <div className="agenttokens-main">
-                        <strong className="agenttokens-name">{profile.handle}</strong>
-                        <span className="agenttokens-meta">
-                          {profile.runner} · {profile.base_branch} · {profile.worktree_strategy}
-                        </span>
-                      </div>
-                      {isEditing ? (
-                        <div className="agenttokens-rules-edit-wrap">
-                          <textarea
-                            className="agenttokens-input agenttokens-input--wide agenttokens-rules-edit"
-                            value={rulesDraft}
-                            onChange={(event) => setRulesDraft(event.target.value)}
-                            placeholder={t("AgentTokens.profileRules")}
-                            aria-label={t("AgentTokens.rulesLabel")}
-                          />
-                          <div className="agenttokens-actions">
-                            <button
-                              type="button"
-                              className="d-btn agenttokens-save-rules"
-                              disabled={savingRules === key}
-                              onClick={() => saveProfileRules(profile)}
-                            >
-                              {savingRules === key ? t("AgentTokens.savingRules") : t("AgentTokens.saveRules")}
-                            </button>
-                            <button
-                              type="button"
-                              className="d-btn agenttokens-cancel-rules"
-                              disabled={savingRules === key}
-                              onClick={cancelEditRules}
-                            >
-                              {t("AgentTokens.cancelRules")}
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          {profile.rules !== null && profile.rules !== "" ? (
-                            <pre className="agenttokens-rules" aria-label={t("AgentTokens.rulesLabel")}>{profile.rules}</pre>
-                          ) : (
-                            <span className="agenttokens-rules-empty">{t("AgentTokens.noRules")}</span>
-                          )}
-                          <div className="agenttokens-actions">
-                            <button type="button" className="d-btn agenttokens-edit-rules" onClick={() => startEditRules(profile)}>
-                              {t("AgentTokens.editRules")}
-                            </button>
-                            <button type="button" className="d-btn" disabled={busyProfile === key} onClick={() => inviteProfile(profile)}>
-                              {busyProfile === key ? t("AgentTokens.invitingProfile") : t("AgentTokens.inviteProfile")}
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-        </div>
+        <SectionedDialog<AgentManagerSection>
+          idPrefix="agent-manager"
+          title={t("AgentTokens.managerTitle")}
+          closeLabel={t("AgentTokens.close")}
+          navigationLabel={t("AgentTokens.navigation")}
+          sections={sections}
+          initialSection="channel"
+          onClose={close}
+          onActiveSectionChange={setActiveSection}
+          panelClassName="settings-panel--agent-center agentmanager-dialog"
+        />
       )}
     </div>
   );
