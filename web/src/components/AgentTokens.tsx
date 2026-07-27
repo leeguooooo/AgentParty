@@ -119,13 +119,19 @@ export function AgentTokens({
   const [savingRules, setSavingRules] = useState<string | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const agentRefreshSeqRef = useRef(0);
+  const profileRefreshSeqRef = useRef(0);
   const [copied, setCopied] = useState<CopyTarget | null>(null);
   const [revealed, setRevealed] = useState<Set<string>>(() => new Set());
   const isOpen = active ?? open;
+  const savedTokensByName = useMemo(
+    () => new Map(listSavedAgentTokens(accountKey, slug).map((record) => [record.name, record])),
+    [accountKey, agents, slug],
+  );
   const localOnly = useMemo(() => {
     const serverNames = new Set((agents ?? []).map((agent) => agent.name));
-    return listSavedAgentTokens(accountKey, slug).filter((rec) => !serverNames.has(rec.name));
-  }, [accountKey, agents, slug]);
+    return [...savedTokensByName.values()].filter((record) => !serverNames.has(record.name));
+  }, [agents, savedTokensByName]);
 
   const filteredAgents = useMemo(() => {
     const query = agentQuery.trim().toLocaleLowerCase();
@@ -139,7 +145,7 @@ export function AgentTokens({
     ?? null;
   const selectedAgentSaved = selectedAgent === null
     ? null
-    : findSavedAgentToken(accountKey, slug, selectedAgent.name);
+    : savedTokensByName.get(selectedAgent.name) ?? null;
 
   const filteredProfiles = useMemo(() => {
     const query = profileQuery.trim().toLocaleLowerCase();
@@ -158,13 +164,19 @@ export function AgentTokens({
   const selectedProfile = filteredProfiles.find(
     (profile) => `${profile.owner_account}/${profile.handle}` === selectedProfileKey,
   ) ?? filteredProfiles[0] ?? null;
+  const selectedProfileId = selectedProfile === null
+    ? null
+    : `${selectedProfile.owner_account}/${selectedProfile.handle}`;
 
   const refreshAgents = useCallback(async () => {
+    const seq = ++agentRefreshSeqRef.current;
     setAgentError(null);
     try {
       const nextAgents = await listChannelAgents(token, slug);
+      if (seq !== agentRefreshSeqRef.current) return;
       setAgents(nextAgents);
     } catch (err) {
+      if (seq !== agentRefreshSeqRef.current) return;
       if (err instanceof AuthError) onAuthFailed(err.message);
       else if (err instanceof ForbiddenError) setAgentError(t("AgentTokens.errForbidden"));
       else setAgentError(t("AgentTokens.errLoad"));
@@ -172,10 +184,14 @@ export function AgentTokens({
   }, [onAuthFailed, slug, t, token]);
 
   const refreshProfiles = useCallback(async () => {
+    const seq = ++profileRefreshSeqRef.current;
     setProfileError(null);
     try {
-      setProfiles(await listProjectAgentProfiles(token));
+      const nextProfiles = await listProjectAgentProfiles(token);
+      if (seq !== profileRefreshSeqRef.current) return;
+      setProfiles(nextProfiles);
     } catch (err) {
+      if (seq !== profileRefreshSeqRef.current) return;
       if (err instanceof AuthError) onAuthFailed(err.message);
       else if (err instanceof ForbiddenError) setProfileError(t("AgentTokens.errProfileForbidden"));
       else setProfileError(t("AgentTokens.errProfileLoad"));
@@ -194,9 +210,13 @@ export function AgentTokens({
     }
     if (active === undefined) setOpen(true);
     onActiveChange?.(true);
+  }, [active, close, isOpen, onActiveChange]);
+
+  useEffect(() => {
+    if (!isOpen) return;
     if (agents === null) void refreshAgents();
     if (profiles === null) void refreshProfiles();
-  }, [active, agents, close, isOpen, onActiveChange, profiles, refreshAgents, refreshProfiles]);
+  }, [agents, isOpen, profiles, refreshAgents, refreshProfiles]);
 
   useEffect(() => {
     if (isOpen) return;
@@ -423,7 +443,7 @@ export function AgentTokens({
     setSavingProfile(true);
     setProfileError(null);
     try {
-      await createProjectAgentProfile(token, {
+      const created = await createProjectAgentProfile(token, {
         handle,
         runner: profileForm.runner,
         ...(profileForm.repoUrl.trim() === "" ? {} : { repo_url: profileForm.repoUrl.trim() }),
@@ -434,7 +454,7 @@ export function AgentTokens({
         ...(profileForm.rules.trim() === "" ? {} : { rules: profileForm.rules.trim() }),
       });
       setProfileForm((current) => ({ ...current, handle: "", repoUrl: "", workdir: "", rules: "" }));
-      setSelectedProfileKey(`${accountKey}/${handle}`);
+      setSelectedProfileKey(`${created.owner_account}/${created.handle}`);
       setCreatingProfile(false);
       await refreshProfiles();
     } catch (err) {
@@ -505,9 +525,7 @@ export function AgentTokens({
     }
   }
 
-  const plaintextCount = (agents ?? []).filter(
-    (agent) => findSavedAgentToken(accountKey, slug, agent.name) !== null,
-  ).length;
+  const plaintextCount = (agents ?? []).filter((agent) => savedTokensByName.has(agent.name)).length;
   const worktreeLabel = (strategy: ProjectAgentWorktreeStrategy) => {
     if (strategy === "shared") return t("AgentTokens.worktreeShared");
     if (strategy === "none") return t("AgentTokens.worktreeNone");
@@ -566,7 +584,7 @@ export function AgentTokens({
         <div className="agentmanager-workspace">
           <div className="agentmanager-list" aria-label={t("AgentTokens.channelList")}>
             {filteredAgents.map((agent) => {
-              const saved = findSavedAgentToken(accountKey, slug, agent.name);
+              const saved = savedTokensByName.get(agent.name);
               const selected = selectedAgent?.name === agent.name;
               return (
                 <button
@@ -679,7 +697,7 @@ export function AgentTokens({
                 <section className="agentmanager-detail-section">
                   <div className="agentmanager-section-head">
                     <strong>{t("AgentTokens.identityTitle")}</strong>
-                    {!editingNickname && (
+                    {editingNickname !== selectedAgent.name && (
                       <button
                         type="button"
                         className="agentmanager-text-action agenttokens-edit-nickname"
@@ -820,6 +838,7 @@ export function AgentTokens({
           className="agenttokens-input t-mono"
           value={profileForm.handle}
           required
+          aria-label={t("AgentTokens.profileHandle")}
           onChange={(event) => setProfileForm((current) => ({ ...current, handle: event.target.value }))}
         />
       </label>
@@ -853,6 +872,7 @@ export function AgentTokens({
         <input
           className="agenttokens-input t-mono"
           value={profileForm.workdir}
+          aria-label={t("AgentTokens.profileWorkdir")}
           onChange={(event) => setProfileForm((current) => ({ ...current, workdir: event.target.value }))}
           placeholder="/path/to/project"
         />
@@ -862,6 +882,7 @@ export function AgentTokens({
         <input
           className="agenttokens-input t-mono"
           value={profileForm.baseBranch}
+          aria-label={t("AgentTokens.profileBase")}
           onChange={(event) => setProfileForm((current) => ({ ...current, baseBranch: event.target.value }))}
         />
       </label>
@@ -963,8 +984,7 @@ export function AgentTokens({
           <div className="agentmanager-list" aria-label={t("AgentTokens.projectList")}>
             {filteredProfiles.map((profile) => {
               const key = `${profile.owner_account}/${profile.handle}`;
-              const selected = !creatingProfile
-                && `${selectedProfile?.owner_account}/${selectedProfile?.handle}` === key;
+              const selected = !creatingProfile && selectedProfileId === key;
               return (
                 <button
                   key={key}
@@ -1037,7 +1057,7 @@ export function AgentTokens({
                       <section className="agentmanager-detail-section">
                         <div className="agentmanager-section-head">
                           <strong>{t("AgentTokens.profileRules")}</strong>
-                          {editingRules !== `${selectedProfile.owner_account}/${selectedProfile.handle}` && (
+                          {editingRules !== selectedProfileId && (
                             <button
                               type="button"
                               className="agentmanager-text-action agenttokens-edit-rules"
@@ -1047,7 +1067,7 @@ export function AgentTokens({
                             </button>
                           )}
                         </div>
-                        {editingRules === `${selectedProfile.owner_account}/${selectedProfile.handle}` ? (
+                        {editingRules === selectedProfileId ? (
                           <div className="agenttokens-rules-edit-wrap">
                             <textarea
                               className="agenttokens-input agenttokens-rules-edit"
@@ -1060,17 +1080,17 @@ export function AgentTokens({
                               <button
                                 type="button"
                                 className="d-btn d-btn--primary agenttokens-save-rules"
-                                disabled={savingRules === `${selectedProfile.owner_account}/${selectedProfile.handle}`}
+                                disabled={savingRules === selectedProfileId}
                                 onClick={() => void saveProfileRules(selectedProfile)}
                               >
-                                {savingRules === `${selectedProfile.owner_account}/${selectedProfile.handle}`
+                                {savingRules === selectedProfileId
                                   ? t("AgentTokens.savingRules")
                                   : t("AgentTokens.saveRules")}
                               </button>
                               <button
                                 type="button"
                                 className="d-btn agenttokens-cancel-rules"
-                                disabled={savingRules === `${selectedProfile.owner_account}/${selectedProfile.handle}`}
+                                disabled={savingRules === selectedProfileId}
                                 onClick={cancelEditRules}
                               >
                                 {t("AgentTokens.cancelRules")}
@@ -1092,10 +1112,10 @@ export function AgentTokens({
                         <button
                           type="button"
                           className="d-btn d-btn--primary"
-                          disabled={busyProfile === `${selectedProfile.owner_account}/${selectedProfile.handle}`}
+                          disabled={busyProfile === selectedProfileId}
                           onClick={() => void inviteProfile(selectedProfile)}
                         >
-                          {busyProfile === `${selectedProfile.owner_account}/${selectedProfile.handle}`
+                          {busyProfile === selectedProfileId
                             ? t("AgentTokens.invitingProfile")
                             : t("AgentTokens.inviteProfile")}
                         </button>

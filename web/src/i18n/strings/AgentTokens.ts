@@ -3,7 +3,6 @@ import { registerDict, type LocaleDict } from "../dict";
 export const AgentTokensStrings: LocaleDict = {
   en: {
     "AgentTokens.open": "my agents",
-    "AgentTokens.title": "Agent tokens for this account",
     "AgentTokens.managerTitle": "Agent management",
     "AgentTokens.close": "Close agent management",
     "AgentTokens.navigation": "Agent management sections",
@@ -11,7 +10,6 @@ export const AgentTokensStrings: LocaleDict = {
     "AgentTokens.sectionProjects": "Project agents",
     "AgentTokens.sectionLocal": "Local runtime",
     "AgentTokens.refresh": "refresh",
-    "AgentTokens.hint": "Only agents owned by the current account and scoped to this channel are listed. Old plaintext tokens cannot be recovered from the server; rotate them to get a new one.",
     "AgentTokens.channelTitle": "Channel identities",
     "AgentTokens.channelHint": "Credentials, join packs, and lifecycle controls for agents owned by this account in #{slug}.",
     "AgentTokens.channelSummary": "Channel identity summary",
@@ -48,7 +46,6 @@ export const AgentTokensStrings: LocaleDict = {
     "AgentTokens.loading": "loading...",
     "AgentTokens.empty": "No agent tokens for this channel yet",
     "AgentTokens.hasPlaintext": "plaintext saved in this browser",
-    "AgentTokens.noPlaintext": "plaintext unrecoverable",
     "AgentTokens.copyToken": "copy token",
     "AgentTokens.copyPack": "copy join pack",
     "AgentTokens.showToken": "reveal",
@@ -130,7 +127,6 @@ export const AgentTokensStrings: LocaleDict = {
   },
   zh: {
     "AgentTokens.open": "我的 agent",
-    "AgentTokens.title": "当前账号的 agent token",
     "AgentTokens.managerTitle": "Agent 管理",
     "AgentTokens.close": "关闭 Agent 管理",
     "AgentTokens.navigation": "Agent 管理分区",
@@ -138,7 +134,6 @@ export const AgentTokensStrings: LocaleDict = {
     "AgentTokens.sectionProjects": "项目 Agent",
     "AgentTokens.sectionLocal": "本机运行",
     "AgentTokens.refresh": "刷新",
-    "AgentTokens.hint": "这里只列 owner 是当前账号、scope 是本频道的 agent。旧 token 明文无法从服务器恢复，可重新生成。",
     "AgentTokens.channelTitle": "频道 Agent 身份",
     "AgentTokens.channelHint": "管理当前账号在 #{slug} 的身份、接入凭证与生命周期。",
     "AgentTokens.channelSummary": "频道 Agent 身份概览",
@@ -175,7 +170,6 @@ export const AgentTokensStrings: LocaleDict = {
     "AgentTokens.loading": "loading...",
     "AgentTokens.empty": "还没有这个频道的 agent token",
     "AgentTokens.hasPlaintext": "本浏览器有明文",
-    "AgentTokens.noPlaintext": "明文不可恢复",
     "AgentTokens.copyToken": "复制 token",
     "AgentTokens.copyPack": "复制接入包",
     "AgentTokens.showToken": "显示",

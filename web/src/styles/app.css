@@ -4099,6 +4099,7 @@
   margin: -1px;
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
 }
@@ -7257,6 +7258,13 @@
     padding: 14px 0 0;
   }
   .agentmanager-dialog { max-height: calc(100vh - 24px); }
+  .agentmanager-dialog .settings-close,
+  .agentmanager-dialog .settings-tab,
+  .agentmanager-dialog .d-btn,
+  .agentmanager-dialog .agenttokens-input {
+    min-height: 44px;
+  }
+  .agentmanager-dialog .settings-close { min-width: 44px; }
   .agentmanager-module-head {
     align-items: stretch;
     flex-direction: column;

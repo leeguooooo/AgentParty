@@ -23,6 +23,9 @@ type AgentFixture = { name: string; owner: string; channel_scope: string; create
 
 let profilesFixture: ProfileFixture[] = [];
 let agentsFixture: AgentFixture[] = [];
+let createdProfileOverride: ProfileFixture | null = null;
+let listAgentsImpl = async () => agentsFixture;
+let listProfilesImpl = async () => profilesFixture;
 const createCalls: Array<{ token: string; body: Record<string, unknown> }> = [];
 const nicknameCalls: Array<{ token: string; slug: string; name: string; nickname: string }> = [];
 
@@ -36,12 +39,20 @@ mock.module("../lib/api", () => ({
     createCalls.push({ token, body });
     // upsert：把新 rules 落回 fixture，模拟 worker 的 ON CONFLICT DO UPDATE
     const existing = profilesFixture.find((p) => p.handle === body.handle);
-    if (existing) existing.rules = (body.rules as string | undefined) ?? null;
-    return existing ?? profilesFixture[0];
+    if (existing) {
+      existing.rules = (body.rules as string | undefined) ?? null;
+      return existing;
+    }
+    const created = createdProfileOverride ?? profile({
+      handle: String(body.handle),
+      name: String(body.handle),
+    });
+    profilesFixture = [...profilesFixture, created];
+    return created;
   }),
   inviteProjectAgent: async () => {},
-  listChannelAgents: async () => agentsFixture,
-  listProjectAgentProfiles: async () => profilesFixture,
+  listChannelAgents: () => listAgentsImpl(),
+  listProjectAgentProfiles: () => listProfilesImpl(),
   deleteChannelAgent: async () => {},
   rotateChannelAgent: async (_token: string, _slug: string, name: string) => ({
     name,
@@ -118,6 +129,9 @@ class TestEventTarget {
 beforeEach(() => {
   profilesFixture = [];
   agentsFixture = [];
+  createdProfileOverride = null;
+  listAgentsImpl = async () => agentsFixture;
+  listProfilesImpl = async () => profilesFixture;
   createCalls.length = 0;
   nicknameCalls.length = 0;
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -161,6 +175,12 @@ function baseProps() {
     charter: null,
     onAuthFailed: () => {},
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 async function renderOpen(): Promise<ReactTestRenderer> {
@@ -214,7 +234,7 @@ function findClassToken(r: ReactTestRenderer, className: string) {
 function findButton(r: ReactTestRenderer, text: string) {
   return r.root.find((node) =>
     node.type === "button"
-    && node.children.some((child) => typeof child === "string" && child.includes(text))
+    && node.children.some((child) => child === text)
   );
 }
 
@@ -234,6 +254,64 @@ describe("AgentTokens project-agent rules view", () => {
 });
 
 describe("AgentTokens functional workspaces", () => {
+  test("loads channel and profile data when a controlled parent opens the manager", async () => {
+    agentsFixture = [{ name: "controlled-agent", owner: "acct-1", channel_scope: "demo", created_at: 1 }];
+    profilesFixture = [profile({ handle: "controlled-profile" })];
+    await act(async () => {
+      renderer = create(
+        <LocaleProvider><AgentTokens {...baseProps()} active={true} /></LocaleProvider>,
+      );
+    });
+    await act(async () => {});
+
+    expect(allText(renderer!)).toContain("controlled-agent");
+    expect(allText(renderer!)).toContain("controlled-profile");
+  });
+
+  test("ignores stale channel and profile refresh responses", async () => {
+    agentsFixture = [{ name: "initial-agent", owner: "acct-1", channel_scope: "demo", created_at: 1 }];
+    profilesFixture = [profile({ handle: "initial-profile" })];
+    const r = await renderOpen();
+    const firstAgents = deferred<AgentFixture[]>();
+    const secondAgents = deferred<AgentFixture[]>();
+    const firstProfiles = deferred<ProfileFixture[]>();
+    const secondProfiles = deferred<ProfileFixture[]>();
+    let agentCall = 0;
+    let profileCall = 0;
+    listAgentsImpl = () => (agentCall++ === 0 ? firstAgents.promise : secondAgents.promise);
+    listProfilesImpl = () => (profileCall++ === 0 ? firstProfiles.promise : secondProfiles.promise);
+    const channelPanel = r.root.find((node) => node.props.id === "agent-manager-panel-channel");
+    const projectPanel = r.root.find((node) => node.props.id === "agent-manager-panel-projects");
+    const channelRefresh = channelPanel.find((node) =>
+      node.type === "button" && node.children.some((child) => child === "refresh")
+    );
+    const projectRefresh = projectPanel.find((node) =>
+      node.type === "button" && node.children.some((child) => child === "refresh")
+    );
+
+    await act(async () => {
+      channelRefresh.props.onClick();
+      channelRefresh.props.onClick();
+      projectRefresh.props.onClick();
+      projectRefresh.props.onClick();
+    });
+    await act(async () => {
+      secondAgents.resolve([{ name: "newest-agent", owner: "acct-1", channel_scope: "demo", created_at: 2 }]);
+      secondProfiles.resolve([profile({ handle: "newest-profile" })]);
+      await Promise.all([secondAgents.promise, secondProfiles.promise]);
+    });
+    await act(async () => {
+      firstAgents.resolve([{ name: "stale-agent", owner: "acct-1", channel_scope: "demo", created_at: 3 }]);
+      firstProfiles.resolve([profile({ handle: "stale-profile" })]);
+      await Promise.all([firstAgents.promise, firstProfiles.promise]);
+    });
+
+    expect(allText(r)).toContain("newest-agent");
+    expect(allText(r)).toContain("newest-profile");
+    expect(allText(r)).not.toContain("stale-agent");
+    expect(allText(r)).not.toContain("stale-profile");
+  });
+
   test("filters channel identities without duplicating their management controls", async () => {
     agentsFixture = [
       { name: "build-bot", owner: "acct-1", channel_scope: "demo", created_at: 1, nickname: "构建" },
@@ -254,18 +332,29 @@ describe("AgentTokens functional workspaces", () => {
 
   test("keeps project creation behind an explicit workflow when profiles already exist", async () => {
     profilesFixture = [profile()];
+    createdProfileOverride = profile({
+      owner_account: "canonical-owner",
+      handle: "reviewer",
+      name: "reviewer",
+    });
     const r = await renderOpen();
     expect(r.root.findAll((node) => node.props.className === "agentmanager-profile-form")).toHaveLength(0);
 
     await act(async () => findButton(r, "new project agent").props.onClick());
     const form = findClass(r, "agentmanager-profile-form");
-    const handle = form.findAll((node) => node.props.className === "agenttokens-input t-mono")[0]!;
+    const handle = form.find((node) => node.props["aria-label"] === "handle");
     await act(async () => handle.props.onChange({ target: { value: "reviewer" } }));
     await act(async () => form.props.onSubmit({ preventDefault: () => {} }));
     await act(async () => {});
 
     expect(createCalls.at(-1)?.body.handle).toBe("reviewer");
     expect(r.root.findAll((node) => node.props.className === "agentmanager-profile-form")).toHaveLength(0);
+    const selectedRow = r.root.find((node) =>
+      typeof node.props.className === "string"
+      && node.props.className.split(/\s+/).includes("agentmanager-list-item")
+      && node.props["aria-pressed"] === true
+    );
+    expect(selectedRow.findAll((node) => node.children.some((child) => child === "reviewer"))).toHaveLength(1);
   });
 });
 
@@ -288,6 +377,20 @@ describe("AgentTokens agent nickname management (#165)", () => {
     const r = await renderOpen();
     await act(async () => findClassToken(r, "agenttokens-edit-nickname").props.onClick());
     expect(findClass(r, "agenttokens-input agenttokens-nickname-input").props.value).toBe("旧昵称");
+  });
+
+  test("keeps the nickname action reachable when search changes the selected agent", async () => {
+    agentsFixture = [
+      { name: "alpha", owner: "acct-1", channel_scope: "demo", created_at: 1, nickname: null },
+      { name: "beta", owner: "acct-1", channel_scope: "demo", created_at: 2, nickname: null },
+    ];
+    const r = await renderOpen();
+    await act(async () => findClassToken(r, "agenttokens-edit-nickname").props.onClick());
+    const search = r.root.find((node) => node.props.placeholder === "Search by agent name or nickname");
+    await act(async () => search.props.onChange({ target: { value: "beta" } }));
+
+    expect(findClassToken(r, "agenttokens-edit-nickname")).toBeDefined();
+    expect(r.root.findAll((node) => node.props.className === "agenttokens-input agenttokens-nickname-input")).toHaveLength(0);
   });
 });
 
@@ -359,7 +462,7 @@ describe("AgentTokens dismiss behavior", () => {
     const r = await renderOpen();
     act(() => findButton(r, "Project agents").props.onClick());
     act(() => findButton(r, "new project agent").props.onClick());
-    const handleInput = r.root.findAll((node) => node.props.className === "agenttokens-input t-mono")[0]!;
+    const handleInput = r.root.find((node) => node.props["aria-label"] === "handle");
     act(() => handleInput.props.onChange({ target: { value: "temporary" } }));
 
     expect(windowEvents.count("keydown")).toBe(1);
@@ -372,7 +475,7 @@ describe("AgentTokens dismiss behavior", () => {
     act(() => r.root.find((node) => node.props.className === "d-btn agenttokens-btn").props.onClick());
     expect(findButton(r, "Channel identities").props["aria-selected"]).toBe(true);
     act(() => findButton(r, "new project agent").props.onClick());
-    expect(r.root.findAll((node) => node.props.className === "agenttokens-input t-mono")[0]!.props.value).toBe("");
+    expect(r.root.find((node) => node.props["aria-label"] === "handle").props.value).toBe("");
     act(() => findButton(r, "cancel").props.onClick());
     expect(allText(r)).toContain("always run the tests");
 
