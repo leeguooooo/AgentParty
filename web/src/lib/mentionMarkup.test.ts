@@ -144,6 +144,20 @@ describe("mention 美化：真实管线集成（#131）", () => {
     );
   });
 
+  it("正文 @agent 使用调用方统一提供的归属标签，同时保留真实路由 identity", () => {
+    const raw = "lark-461bc7018484-apple-signin-revoke";
+    const identities: IdentityDisplayMap = {
+      [raw]: { display: raw, kind: "agent", account: "lark:on_owner" },
+    };
+    expect(
+      markdownToHtmlUnsafe(`请 @${raw} 检查`, identities, () =>
+        "ZHENG TONG 的 apple-signin-revoke Agent",
+      ).trim(),
+    ).toBe(
+      `<p>请 <span class="ap-mention" title="@${raw}">@ZHENG TONG 的 apple-signin-revoke Agent</span> 检查</p>`,
+    );
+  });
+
   it("注入前转义 display 里的 HTML 特殊字符", () => {
     expect(R("@weird hi")).toBe(
       '<p><span class="ap-mention" title="@weird">@a&lt;&amp;"b</span> hi</p>',

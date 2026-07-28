@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { MsgFrame } from "@agentparty/shared";
-import { buildIdentityDisplay, resolveAgentOwnerLabel } from "./identityDisplay";
+import {
+  buildIdentityDisplay,
+  formatIdentityPresentation,
+  resolveAgentOwnerLabel,
+  resolveIdentityPresentation,
+} from "./identityDisplay";
 
 describe("buildIdentityDisplay", () => {
   it("keeps readable server identity labels when mention candidates only have raw names", () => {
@@ -129,5 +134,60 @@ describe("resolveAgentOwnerLabel", () => {
     expect(
       resolveAgentOwnerLabel({ kind: "agent", owner: "team@example.com" }, identities),
     ).toBe("team@example.com");
+  });
+});
+
+describe("resolveIdentityPresentation", () => {
+  const identities = {
+    "lark-461bc7018484-apple-signin-revoke": {
+      display: "lark-461bc7018484-apple-signin-revoke",
+      kind: "agent" as const,
+      account: "lark:on_b81feb6f84d5225a462349bb36499262",
+    },
+    "human-session": {
+      display: "ZHENG TONG",
+      kind: "human" as const,
+      account: "lark:on_b81feb6f84d5225a462349bb36499262",
+    },
+  };
+
+  it("separates a generated technical identity into a readable role and human owner", () => {
+    expect(
+      resolveIdentityPresentation("lark-461bc7018484-apple-signin-revoke", identities),
+    ).toEqual({
+      label: "apple-signin-revoke",
+      ownerLabel: "ZHENG TONG",
+      technicalName: "lark-461bc7018484-apple-signin-revoke",
+      generated: true,
+      kind: "agent",
+    });
+  });
+
+  it("formats ownership without baking a locale into the shared identity model", () => {
+    const presentation = resolveIdentityPresentation(
+      "lark-461bc7018484-apple-signin-revoke",
+      identities,
+    );
+    expect(
+      formatIdentityPresentation(presentation, (owner, name) => `${owner} 的 ${name} Agent`),
+    ).toBe("ZHENG TONG 的 apple-signin-revoke Agent");
+  });
+
+  it("keeps a real agent nickname instead of replacing it with its owner", () => {
+    const presentation = resolveIdentityPresentation(
+      "lark-461bc7018484-apple-signin-revoke",
+      {
+        ...identities,
+        "lark-461bc7018484-apple-signin-revoke": {
+          display: "小火龙",
+          kind: "agent",
+          account: "lark:on_b81feb6f84d5225a462349bb36499262",
+        },
+      },
+    );
+    expect(presentation.label).toBe("小火龙");
+    expect(
+      formatIdentityPresentation(presentation, (owner, name) => `${owner} 的 ${name} Agent`),
+    ).toBe("ZHENG TONG 的 小火龙 Agent");
   });
 });

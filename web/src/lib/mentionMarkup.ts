@@ -40,6 +40,7 @@ interface MentionToken extends Tokens.Generic {
  */
 export function mentionExtension(
   identities: IdentityDisplayMap,
+  displayFor?: (name: string) => string,
 ): TokenizerAndRendererExtension {
   const aliases: MentionAlias[] = Object.keys(identities).map((name) => ({
     alias: name,
@@ -67,7 +68,7 @@ export function mentionExtension(
       const resolution = resolveMentionToken(parsed.value, aliases);
       if (resolution.status !== "resolved") return undefined;
       const name = resolution.target;
-      const display = identities[name]?.display;
+      const display = displayFor?.(name) ?? identities[name]?.display;
       // 没有映射、或映射回自身，就不接管这个 token：让 @name 以字面文本渲染。
       if (display === undefined || display === name) return undefined;
 

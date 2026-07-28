@@ -2,9 +2,15 @@
 // 与浏览器系统通知（未聚焦时）互补；页内 toast 不需要通知授权。
 import { useEffect } from "react";
 import type { Sender } from "@agentparty/shared";
-import { resolveSenderLabel, type IdentityDisplayMap } from "../lib/identityDisplay";
+import {
+  formatIdentityPresentation,
+  resolveIdentityPresentation,
+  resolveSenderLabel,
+  type IdentityDisplayMap,
+} from "../lib/identityDisplay";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/Channel";
+import "../i18n/strings/MessageCard";
 
 export interface MentionToastItem {
   seq: number;
@@ -37,7 +43,14 @@ function ToastCard({
     const timer = window.setTimeout(() => onDismiss(item.seq), AUTO_DISMISS_MS);
     return () => window.clearTimeout(timer);
   }, [item.seq, onDismiss]);
-  const senderLabel = resolveSenderLabel(item.sender, identityDisplay);
+  const senderPresentation = resolveIdentityPresentation(item.sender.name, identityDisplay, {
+    kind: item.sender.kind,
+    owner: item.sender.owner,
+    display: resolveSenderLabel(item.sender, identityDisplay),
+  });
+  const senderLabel = formatIdentityPresentation(senderPresentation, (owner, agentName) =>
+    t("MessageCard.agent.ownedLabel", { owner, name: agentName }),
+  );
   return (
     <div
       className="mention-toast"
@@ -89,7 +102,14 @@ export function MentionHeaderNotice({ items, channel, identityDisplay, onJump, o
   const t = useT();
   const item = items[items.length - 1];
   if (item === undefined) return null;
-  const senderLabel = resolveSenderLabel(item.sender, identityDisplay);
+  const senderPresentation = resolveIdentityPresentation(item.sender.name, identityDisplay, {
+    kind: item.sender.kind,
+    owner: item.sender.owner,
+    display: resolveSenderLabel(item.sender, identityDisplay),
+  });
+  const senderLabel = formatIdentityPresentation(senderPresentation, (owner, agentName) =>
+    t("MessageCard.agent.ownedLabel", { owner, name: agentName }),
+  );
   return (
     <div className="mention-header-notice" role="status" aria-live="polite">
       <button

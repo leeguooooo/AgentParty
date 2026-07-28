@@ -51,7 +51,10 @@ function escapeRawHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
-function createMarked(identities: IdentityDisplayMap | undefined): Marked {
+function createMarked(
+  identities: IdentityDisplayMap | undefined,
+  display?: (name: string) => string,
+): Marked {
   const instance = new Marked();
   instance.use({
     renderer: {
@@ -80,7 +83,7 @@ function createMarked(identities: IdentityDisplayMap | undefined): Marked {
     },
   });
   if (identities !== undefined) {
-    instance.use({ extensions: [mentionExtension(identities)] });
+    instance.use({ extensions: [mentionExtension(identities, display)] });
   }
   return instance;
 }
@@ -140,15 +143,23 @@ if (typeof DOMPurify.addHook === "function") {
 // DOM，在 bun 测试环境跑不起来（addHook 未定义）；这一步是纯 marked，可被单测覆盖，用来
 // 钉住「mention 在解析后美化、绝不在解析前注入」这条 #131 接线。DOMPurify 只做白名单，
 // 不改动 ap-mention span 的结构，所以这一步的输出即最终 HTML 的语义。
-export function markdownToHtmlUnsafe(md: string, identities?: IdentityDisplayMap): string {
+export function markdownToHtmlUnsafe(
+  md: string,
+  identities?: IdentityDisplayMap,
+  display?: (name: string) => string,
+): string {
   // Agent 回复经常用单换行划分「结论 / 风险 / 下一步」，CommonMark 默认会把这些换行
   // 折叠成一个空格，导致本来有结构的长回复在频道里挤成一堵文字墙。开启 breaks 只改变
   // 展示，不重写原文；代码块、GFM 列表和表格仍走原有 token 语义。
-  return createMarked(identities).parse(md, { async: false, breaks: true });
+  return createMarked(identities, display).parse(md, { async: false, breaks: true });
 }
 
-export function renderMarkdown(md: string, identities?: IdentityDisplayMap): string {
-  const raw = markdownToHtmlUnsafe(md, identities);
+export function renderMarkdown(
+  md: string,
+  identities?: IdentityDisplayMap,
+  display?: (name: string) => string,
+): string {
+  const raw = markdownToHtmlUnsafe(md, identities, display);
   return DOMPurify.sanitize(raw, {
     ALLOWED_TAGS,
     ALLOWED_ATTR,
