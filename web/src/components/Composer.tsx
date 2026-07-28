@@ -111,11 +111,11 @@ function sameCandidateNames(prev: MentionCandidate[], next: MentionCandidate[]):
   return prev.length === next.length && prev.every((item, index) => item.name === next[index]?.name);
 }
 
-function groupLabel(group: string, t: TFunc): string {
+function groupLabel(group: string, t: TFunc, ownerDisplay?: string): string {
   if (group === "human sessions") return t("Composer.group.humanSessions");
   if (group === "unowned agents") return t("Composer.group.unownedAgents");
   if (group === "squads") return t("Composer.group.squads");
-  return group;
+  return ownerDisplay ?? group;
 }
 
 export function Composer({
@@ -341,7 +341,11 @@ export function Composer({
           {menu.items.map((c, i) => {
             const prev = menu.items[i - 1];
             const showGroup = prev === undefined || prev.group !== c.group;
-            const owner = c.account && c.account !== c.display ? c.account : null;
+            const owner =
+              c.kind !== "agent"
+                ? null
+                : c.ownerDisplay
+                  ?? (c.account && c.account !== c.display ? c.account : null);
             const title = [
               c.display,
               owner ? t("Composer.owner", { account: owner }) : "",
@@ -355,7 +359,7 @@ export function Composer({
               <li key={c.name} className="mention-row">
                 {showGroup && (
                   <div className="mention-group" aria-hidden="true">
-                    {groupLabel(c.group, t)}
+                    {groupLabel(c.group, t, c.ownerDisplay)}
                   </div>
                 )}
                 <div

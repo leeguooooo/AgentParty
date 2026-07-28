@@ -48,7 +48,7 @@ function spy(identities: IdentityDisplayMap) {
 describe("mention 美化：真实管线集成（#131）", () => {
   it("prose 里的 @name 变成受控 span", () => {
     expect(R("hi @alice there")).toBe(
-      '<p>hi <span class="ap-mention" title="@alice">Alice</span> there</p>',
+      '<p>hi <span class="ap-mention" title="@alice">@Alice</span> there</p>',
     );
   });
 
@@ -97,29 +97,29 @@ describe("mention 美化：真实管线集成（#131）", () => {
 
   it("句末句号留在 mention span 外", () => {
     expect(R("ask @codex.")).toBe(
-      '<p>ask <span class="ap-mention" title="@codex">Codex</span>.</p>',
+      '<p>ask <span class="ap-mention" title="@codex">@Codex</span>.</p>',
     );
   });
 
   it("中文正文无需空格，且只消费唯一匹配的昵称前缀", () => {
     expect(R("请@小明看一下")).toBe(
-      '<p>请<span class="ap-mention" title="@小明">小明同学</span>看一下</p>',
+      '<p>请<span class="ap-mention" title="@小明">@小明同学</span>看一下</p>',
     );
     expect(R("请，@小明：看一下")).toBe(
-      '<p>请，<span class="ap-mention" title="@小明">小明同学</span>：看一下</p>',
+      '<p>请，<span class="ap-mention" title="@小明">@小明同学</span>：看一下</p>',
     );
   });
 
   it("agent handle 大小写不敏感匹配", () => {
     expect(R("hi @ALICE")).toBe(
-      '<p>hi <span class="ap-mention" title="@alice">Alice</span></p>',
+      '<p>hi <span class="ap-mention" title="@alice">@Alice</span></p>',
     );
   });
 
   it("Unicode alias 不做 locale 大小写折叠", () => {
     const unicode = spy({ Ägent: { display: "Unicode Agent", kind: "agent" } });
     expect(unicode.render("@Ägent @ÄGENT")).toBe(
-      '<p><span class="ap-mention" title="@Ägent">Unicode Agent</span> @ÄGENT</p>',
+      '<p><span class="ap-mention" title="@Ägent">@Unicode Agent</span> @ÄGENT</p>',
     );
     expect(unicode.calls).toEqual([{ name: "Ägent", display: "Unicode Agent" }]);
   });
@@ -128,39 +128,39 @@ describe("mention 美化：真实管线集成（#131）", () => {
     const decomposed = "A\u0308gent";
     const composedIdentity = spy({ Ägent: { display: "Unicode Agent", kind: "agent" } });
     expect(composedIdentity.render(`@${decomposed}看一下`)).toBe(
-      '<p><span class="ap-mention" title="@Ägent">Unicode Agent</span>看一下</p>',
+      '<p><span class="ap-mention" title="@Ägent">@Unicode Agent</span>看一下</p>',
     );
 
     const decomposedIdentity = spy({ [decomposed]: { display: "Decomposed Agent", kind: "agent" } });
     expect(decomposedIdentity.render("@Ägent看一下")).toBe(
-      `<p><span class="ap-mention" title="@${decomposed}">Decomposed Agent</span>看一下</p>`,
+      `<p><span class="ap-mention" title="@${decomposed}">@Decomposed Agent</span>看一下</p>`,
     );
   });
 
   it("可读邮箱 display 作为 span 渲染，路由 @ 只保留在 title", () => {
     const raw = "61ec302c-6c31-4bca-a1df-88152372f6d9";
     expect(R(`@${raw} hello`)).toBe(
-      `<p><span class="ap-mention" title="@${raw}">thejacks@163.com</span> hello</p>`,
+      `<p><span class="ap-mention" title="@${raw}">@thejacks@163.com</span> hello</p>`,
     );
   });
 
-  it("正文 @agent 使用调用方统一提供的归属标签，同时保留真实路由 identity", () => {
+  it("正文 @agent 使用短身份名，不把 owner 标签塞进句子，同时保留真实路由 identity", () => {
     const raw = "lark-461bc7018484-apple-signin-revoke";
     const identities: IdentityDisplayMap = {
       [raw]: { display: raw, kind: "agent", account: "lark:on_owner" },
     };
     expect(
       markdownToHtmlUnsafe(`请 @${raw} 检查`, identities, () =>
-        "ZHENG TONG · apple-signin-revoke",
+        "apple-signin-revoke",
       ).trim(),
     ).toBe(
-      `<p>请 <span class="ap-mention" title="@${raw}">ZHENG TONG · apple-signin-revoke</span> 检查</p>`,
+      `<p>请 <span class="ap-mention" title="@${raw}">@apple-signin-revoke</span> 检查</p>`,
     );
   });
 
   it("注入前转义 display 里的 HTML 特殊字符", () => {
     expect(R("@weird hi")).toBe(
-      '<p><span class="ap-mention" title="@weird">a&lt;&amp;"b</span> hi</p>',
+      '<p><span class="ap-mention" title="@weird">@a&lt;&amp;"b</span> hi</p>',
     );
   });
 
@@ -168,8 +168,10 @@ describe("mention 美化：真实管线集成（#131）", () => {
     expect(R("hi @nobody there")).toBe("<p>hi @nobody there</p>");
   });
 
-  it("display 与 name 相同时不注入", () => {
-    expect(R("hi @self there")).toBe("<p>hi @self there</p>");
+  it("display 与 name 相同时仍保留 @ 并高亮已知 mention", () => {
+    expect(R("hi @self there")).toBe(
+      '<p>hi <span class="ap-mention" title="@self">@self</span> there</p>',
+    );
   });
 
   // #642 安全：用户消息里的裸 HTML 不得借样式伪造 @mention（ap-mention span）或系统 UI（hljs span）。
@@ -189,12 +191,12 @@ describe("mention 美化：真实管线集成（#131）", () => {
   });
 
   it("句首、以及 /、* 等真实边界后的 @name 都识别为 mention", () => {
-    expect(R("@alice")).toBe('<p><span class="ap-mention" title="@alice">Alice</span></p>');
+    expect(R("@alice")).toBe('<p><span class="ap-mention" title="@alice">@Alice</span></p>');
     expect(R("path /@alice/x")).toContain(
-      '/<span class="ap-mention" title="@alice">Alice</span>/x',
+      '/<span class="ap-mention" title="@alice">@Alice</span>/x',
     );
     expect(R("**b**@alice")).toBe(
-      '<p><strong>b</strong><span class="ap-mention" title="@alice">Alice</span></p>',
+      '<p><strong>b</strong><span class="ap-mention" title="@alice">@Alice</span></p>',
     );
   });
 });

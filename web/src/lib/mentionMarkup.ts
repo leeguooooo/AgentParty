@@ -69,8 +69,8 @@ export function mentionExtension(
       if (resolution.status !== "resolved") return undefined;
       const name = resolution.target;
       const display = displayFor?.(name) ?? identities[name]?.display;
-      // 没有映射、或映射回自身，就不接管这个 token：让 @name 以字面文本渲染。
-      if (display === undefined || display === name) return undefined;
+      // 没有映射就不接管；已知目标即使显示名等于路由名，也保留 mention 高亮和 @ 语义。
+      if (display === undefined) return undefined;
 
       // CJK 无空格正文可能被词法层读成 "小明看一下"。只消费实际命中的 alias，
       // 余下 "看一下" 继续交给 marked 渲染，不能吞进 mention span。
@@ -80,7 +80,7 @@ export function mentionExtension(
     },
     renderer(token) {
       const { name, display } = token as MentionToken;
-      return `<span class="ap-mention" title="@${escapeHtmlAttr(name)}">${escapeHtmlText(display)}</span>`;
+      return `<span class="ap-mention" title="@${escapeHtmlAttr(name)}">@${escapeHtmlText(display)}</span>`;
     },
   };
 }

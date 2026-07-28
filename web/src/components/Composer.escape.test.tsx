@@ -54,6 +54,51 @@ function keyEvent(key: string, isComposing = false) {
 }
 
 describe("Composer Escape handling (#357)", () => {
+  test("searching a human shows the readable owner group and all of that human's agents", () => {
+    const account = "lark:on_luis";
+    const candidates = [
+      {
+        name: "luis",
+        display: "Luis",
+        kind: "human" as const,
+        tier: "online" as const,
+        group: account,
+        account,
+        ownerDisplay: "Luis",
+      },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        name: `agent-${index + 1}`,
+        display: `agent-${index + 1}`,
+        kind: "agent" as const,
+        tier: "recent" as const,
+        group: account,
+        account,
+        ownerDisplay: "Luis",
+      })),
+    ];
+    act(() => {
+      renderer = create(
+        <LocaleProvider>
+          <Composer
+            draft="@luis"
+            setDraft={() => undefined}
+            onSend={() => undefined}
+            ready
+            candidates={candidates}
+            mentionStatuses={[]}
+          />
+        </LocaleProvider>,
+      );
+    });
+
+    const textarea = renderer!.root.findByProps({ className: "composer-input t-mono" });
+    act(() => textarea.props.onClick({ currentTarget: { value: "@luis", selectionStart: 5 } }));
+
+    expect(renderer!.root.findAllByProps({ role: "option" })).toHaveLength(11);
+    expect(renderer!.root.findAllByProps({ className: "mention-group" })[0]?.children).toEqual(["Luis"]);
+    expect(renderer!.root.findAllByProps({ className: "mention-owner t-mono" })).toHaveLength(10);
+  });
+
   test("focuses and reveals the composer when reply mode starts", () => {
     const focus = mock(() => undefined);
     const scrollIntoView = mock(() => undefined);
