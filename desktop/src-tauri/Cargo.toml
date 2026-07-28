@@ -1,6 +1,6 @@
 [package]
 name = "agentparty-desktop"
-version = "0.2.166"
+version = "0.2.167"
 description = "AgentParty desktop shell"
 authors = ["AgentParty"]
 license = "BUSL-1.1"
