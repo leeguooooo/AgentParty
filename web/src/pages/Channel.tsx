@@ -5046,27 +5046,6 @@ export function ChannelPage({
     () => teamMemberOnlineNames(Object.values(state.presence), state.participants),
     [state.participants, state.presence],
   );
-  const memberPresenceSummary = useMemo(
-    () => teamMemberPresenceSummary(authoritativeMemberNames, memberOnlineNames),
-    [authoritativeMemberNames, memberOnlineNames],
-  );
-  const onlineMemberCount = memberPresenceSummary.online;
-  // Team 头部和 Members 列表必须使用同一口径：presence 自报是「待确认」，不能再次
-  // 计入「未认领」。此前这里传空 selfRoles，实机会把 3 个待确认 + 10 个未分工显示成
-  // 13 个未认领，而 Members 折叠区仍是 10。
-  const offlineMemberCount = memberPresenceSummary.offline;
-  const teamRoleSummary = useMemo(
-    () => teamRoleBuckets(
-      channelRoles,
-      state.presence,
-      channelIdentities,
-      state.participants,
-      t,
-    ),
-    [channelIdentities, channelRoles, state.participants, state.presence, t],
-  );
-  const pendingRoleClaimCount = teamRoleSummary.selfReported.length;
-  const unclaimedTeamCount = teamRoleSummary.unassigned.length;
   const teamIdentityStats = useMemo(() => {
     const byName = new Map<string, {
       name: string;
@@ -5098,16 +5077,39 @@ export function ChannelPage({
         display: identity.display,
       });
     }
-    const people = new Set<string>();
-    const agents = new Set<string>();
+    const people = new Map<string, boolean>();
+    const agents = new Map<string, boolean>();
     for (const member of byName.values()) {
       if (member.name === "system") continue;
-      if (member.kind === "human") people.add(member.account ?? member.display ?? member.name);
-      else agents.add(member.name);
+      const online = memberOnlineNames.has(member.name);
+      if (member.kind === "human") {
+        const key = member.account ?? member.display ?? member.name;
+        people.set(key, (people.get(key) ?? false) || online);
+      } else {
+        agents.set(member.name, online);
+      }
     }
-    return { people: people.size, agents: agents.size };
-  }, [channelIdentities, identityDisplay, state.participants, state.presence]);
-
+    const online = [...people.values(), ...agents.values()].filter(Boolean).length;
+    const total = people.size + agents.size;
+    return { people: people.size, agents: agents.size, online, offline: total - online };
+  }, [channelIdentities, identityDisplay, memberOnlineNames, state.participants, state.presence]);
+  const onlineMemberCount = teamIdentityStats.online;
+  // Team 头部和 Members 列表必须使用同一口径：presence 自报是「待确认」，不能再次
+  // 计入「未认领」。此前这里传空 selfRoles，实机会把 3 个待确认 + 10 个未分工显示成
+  // 13 个未认领，而 Members 折叠区仍是 10。
+  const offlineMemberCount = teamIdentityStats.offline;
+  const teamRoleSummary = useMemo(
+    () => teamRoleBuckets(
+      channelRoles,
+      state.presence,
+      channelIdentities,
+      state.participants,
+      t,
+    ),
+    [channelIdentities, channelRoles, state.participants, state.presence, t],
+  );
+  const pendingRoleClaimCount = teamRoleSummary.selfReported.length;
+  const unclaimedTeamCount = teamRoleSummary.unassigned.length;
   // 频道常驻焦点栏（#682）：跨成员把任务台账 + presence/status + 未闭合决策聚成「球在谁手里」。
   // teamNow 已每秒推进（团队面板复用），焦点的 staleness/时间判定跟着刷新，无需另起计时器。
   const channelFocus = useMemo(

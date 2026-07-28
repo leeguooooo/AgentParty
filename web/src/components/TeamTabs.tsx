@@ -117,12 +117,14 @@ export function TeamTabs({
           <span className="t-mono team-blog-stat" role="listitem">{t("Channel.team.badge.roles", { count: String(stats.roles) })}</span>
           <span className="t-mono team-blog-stat" role="listitem">{t("Channel.team.badge.online", { count: String(stats.online) })}</span>
           <span className="t-mono team-blog-stat" role="listitem">{t("Channel.team.badge.offline", { count: String(stats.offline) })}</span>
-          <span
-            className={`t-mono team-blog-stat${stats.unclaimed > 0 ? " team-blog-stat--hot" : ""}`}
-            role="listitem"
-          >
-            {t("Channel.team.badge.unclaimed", { count: String(stats.unclaimed) })}
-          </span>
+          {stats.people === undefined && stats.agents === undefined && (
+            <span
+              className={`t-mono team-blog-stat${stats.unclaimed > 0 ? " team-blog-stat--hot" : ""}`}
+              role="listitem"
+            >
+              {t("Channel.team.badge.unclaimed", { count: String(stats.unclaimed) })}
+            </span>
+          )}
           {stats.pendingClaims > 0 && (
             <span className="t-mono team-blog-stat team-blog-stat--hot" role="listitem">
               {t("Channel.team.badge.pendingClaims", { count: String(stats.pendingClaims) })}
