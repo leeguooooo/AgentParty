@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { MsgFrame } from "@agentparty/shared";
-import { buildIdentityDisplay } from "./identityDisplay";
+import { buildIdentityDisplay, resolveAgentOwnerLabel } from "./identityDisplay";
 
 describe("buildIdentityDisplay", () => {
   it("keeps readable server identity labels when mention candidates only have raw names", () => {
@@ -72,5 +72,41 @@ describe("buildIdentityDisplay", () => {
     });
 
     expect(map[uuid]).toEqual({ display: "Jane Zhang", kind: "human", account: "thejacks@163.com" });
+  });
+});
+
+describe("resolveAgentOwnerLabel", () => {
+  it("resolves an opaque agent owner account to the linked human display name", () => {
+    const identities = buildIdentityDisplay({
+      channelIdentities: [
+        {
+          name: "human-session",
+          display: "王路",
+          kind: "human",
+          account: "lark:on_184c134fbca61311e57a76d581763c84",
+        },
+      ],
+      mentionOptions: [],
+      messages: [],
+      participants: [],
+      presence: {},
+    });
+
+    expect(
+      resolveAgentOwnerLabel(
+        { kind: "agent", owner: "lark:on_184c134fbca61311e57a76d581763c84" },
+        identities,
+      ),
+    ).toBe("王路");
+  });
+
+  it("keeps a readable owner when no human identity is available", () => {
+    expect(resolveAgentOwnerLabel({ kind: "agent", owner: "team@example.com" }, undefined)).toBe(
+      "team@example.com",
+    );
+  });
+
+  it("does not expose an unresolved opaque owner account", () => {
+    expect(resolveAgentOwnerLabel({ kind: "agent", owner: "lark:on_unknown" }, undefined)).toBeNull();
   });
 });

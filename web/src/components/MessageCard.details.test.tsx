@@ -4,6 +4,7 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { DirectedDelivery, MsgFrame, PublicDirectedDelivery } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 import { ChannelStrings } from "../i18n/strings/Channel";
+import type { IdentityDisplayMap } from "../lib/identityDisplay";
 import type { MentionReceipt } from "../lib/wakeReceipt";
 
 mock.module("../lib/markdown", () => ({ renderMarkdown: (s: string) => s }));
@@ -44,6 +45,7 @@ function renderStatus(): ReturnType<ReactTestRenderer["root"]["findByProps"]> {
 function renderMessage(
   deliveries: PublicDirectedDelivery[] = [],
   receipts: MentionReceipt[] = [],
+  identityDisplay?: IdentityDisplayMap,
 ): ReturnType<ReactTestRenderer["root"]["findByProps"]> {
   const msg = {
     type: "msg", seq: 10, sender: { name: "builder", kind: "agent", owner: "team@example.com" }, kind: "message",
@@ -55,6 +57,7 @@ function renderMessage(
       msg={msg} self={null} quotedMessage={null} canModerate={false} onReply={noop} onEdit={noop}
       deliveries={deliveries}
       receipts={receipts}
+      identityDisplay={identityDisplay}
       onRetract={noop} canCreateTask={false} onCreateTask={noop} editing={false} editDraft=""
       editSaving={false} actionError={null} busy={false} onEditDraftChange={noop} onEditCancel={noop} onEditSave={noop}
     /></LocaleProvider>);
@@ -73,6 +76,18 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     expect(meta.findByProps({ className: "d-btn msg-menu-trigger" })).toBeDefined();
     expect(meta.findByProps({ className: "msg-seq" }).children).toEqual(["#", "10"]);
     expect(meta.findByProps({ className: "msg-time" })).toBeDefined();
+  });
+
+  test("shows the linked human owner directly in an agent message header", () => {
+    const root = renderMessage([], [], {
+      "human-session": {
+        display: "王路",
+        kind: "human",
+        account: "team@example.com",
+      },
+    });
+
+    expect(root.findByProps({ className: "msg-owner" }).children).toEqual(["Agent of 王路"]);
   });
 
   test("status full detail expands by click and keyboard", () => {

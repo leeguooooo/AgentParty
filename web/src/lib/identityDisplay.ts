@@ -10,6 +10,10 @@ export interface IdentityDisplay {
 
 export type IdentityDisplayMap = Record<string, IdentityDisplay>;
 
+function isOpaqueAccount(value: string): boolean {
+  return /^(?:lark|oidc|apple|github):/i.test(value);
+}
+
 function displayQuality(name: string, display: string): number {
   return display !== "" && display !== name ? 2 : 1;
 }
@@ -54,6 +58,26 @@ export function resolveSenderLabel(sender: Sender, identities: IdentityDisplayMa
       : sender.kind === "human" && sender.owner
         ? sender.owner
         : displayForIdentity(sender.name, identities);
+}
+
+export function resolveAgentOwnerLabel(
+  sender: Pick<Sender, "kind" | "owner">,
+  identities: IdentityDisplayMap | undefined,
+): string | null {
+  if (sender.kind !== "agent" || !sender.owner) return null;
+
+  const owner = sender.owner;
+  const human = Object.values(identities ?? {}).find(
+    (identity) =>
+      identity.kind === "human" &&
+      identity.account === owner &&
+      identity.display.trim() !== "" &&
+      identity.display !== owner &&
+      !isOpaqueAccount(identity.display),
+  );
+  if (human) return human.display;
+
+  return isOpaqueAccount(owner) ? null : owner;
 }
 
 export function buildIdentityDisplay(input: {

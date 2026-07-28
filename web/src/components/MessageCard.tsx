@@ -5,7 +5,12 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import type { CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
 import { isClientVersionOutdated, useMinClientVersion } from "../lib/clientVersion";
-import { displayForIdentity, resolveSenderLabel, type IdentityDisplayMap } from "../lib/identityDisplay";
+import {
+  displayForIdentity,
+  resolveAgentOwnerLabel,
+  resolveSenderLabel,
+  type IdentityDisplayMap,
+} from "../lib/identityDisplay";
 import { readStateFor } from "../lib/readList";
 import { summarizeReplyPreview } from "../lib/replyPreview";
 import { useT } from "../i18n/useT";
@@ -395,6 +400,13 @@ function MessageCardImpl({
   const clientVersion = msg.sender.client_version ?? null;
   const clientOutdated = isClientVersionOutdated(clientVersion, minClientVersion);
   const owner = msg.sender.owner && msg.sender.owner !== senderLabel ? msg.sender.owner : null;
+  const agentOwnerLabel = resolveAgentOwnerLabel(msg.sender, identityDisplay);
+  const agentOwnerText =
+    msg.sender.kind === "agent" && msg.sender.owner
+      ? agentOwnerLabel
+        ? t("MessageCard.owner.agent", { owner: agentOwnerLabel })
+        : t("MessageCard.owner.unresolved")
+      : null;
   const lineage = msg.sender.lineage ?? null;
   const lineageLabel = lineage === null ? null : `child of ${lineage.parent_agent}`;
   const senderTitle = [
@@ -626,8 +638,7 @@ function MessageCardImpl({
             recentMessages={recentMessages}
             triggerClassName="msg-sender"
           />
-          {/* owner(lark 长 id）不再每条平铺——它已在 senderTitle 里，悬停发送者名即见；
-             防冒充锚点保留在 tooltip + kind 徽章，行内只留重要内容（名字/类型/提及）。 */}
+          {/* 技术身份保留在悬浮卡片中；人的归属直接显示，避免用户从账号 ID 猜测。 */}
           {lineageLabel !== null && (
             <span className="t-mono msg-lineage" title={senderTitle}>
               {lineageLabel}
@@ -636,6 +647,11 @@ function MessageCardImpl({
           <span className={"msg-kind" + (msg.sender.kind === "human" ? " msg-kind--human" : "")}>
             {msg.sender.kind}
           </span>
+          {agentOwnerText !== null && (
+            <span className="msg-owner" title={owner ? `owner: ${owner}` : undefined}>
+              {agentOwnerText}
+            </span>
+          )}
           {clientVersion !== null && (
             <span
               className={"t-mono msg-client-version" + (clientOutdated ? " msg-client-version--outdated" : "")}
