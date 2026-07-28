@@ -1494,6 +1494,12 @@
   padding: 9px;
   background: var(--t-panel2);
 }
+.org-person-identities {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
 .org-person-name {
   border: 0;
   padding: 0;

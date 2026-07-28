@@ -27,15 +27,16 @@ describe("member directory", () => {
       unassigned: [
         node({ name: "human-session-a", display: "王路", kind: "human", accountLabel: account }),
         node({ name: "human-session-b", display: "王路", kind: "human", accountLabel: account }),
+        node({ name: "human-session-c", display: "王路（访客）", kind: "human", accountLabel: account }),
         node({ name: "lark-a1b2c3-demo", display: "lark-a1b2c3-demo", accountLabel: account }),
         node({ name: "reviewer", display: "代码审查", accountLabel: account }),
         node({ name: "orphan", display: "orphan", accountLabel: null }),
       ],
-      memberCount: 5,
+      memberCount: 6,
     });
 
     const owned = groups.find((group) => group.key === `account:${account}`);
-    expect(owned?.people.map((person) => person.display)).toEqual(["王路"]);
+    expect(owned?.people.map((person) => person.display)).toEqual(["王路", "王路（访客）"]);
     expect(owned?.agents.map((agent) => agent.name)).toEqual(["lark-a1b2c3-demo", "reviewer"]);
     expect(groups.find((group) => group.key === "unowned:orphan")?.agents).toHaveLength(1);
   });

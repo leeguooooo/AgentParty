@@ -704,9 +704,8 @@ describe("DivisionBoard org-structure relationships (#168)", () => {
     );
 
     expect(renderer!.root.findAll((node) => node.props.className === "role-lead-tag t-mono")).toHaveLength(0);
-    const toggle = renderer!.root.find((node) => node.props.className === "d-btn role-org-toggle");
-    act(() => toggle.props.onClick());
-    expect(renderer!.root.findAll((node) => node.props.className === "org-lead-tag t-mono")).toHaveLength(0);
+    const tree = renderer!.root.find((node) => node.type === "section" && node.props.id === "division-org-tree");
+    expect(tree.findAll((node) => node.props.className === "org-lead-tag t-mono")).toHaveLength(0);
   });
 
   test("flags when the reporting target isn't part of this channel's roster", () => {

@@ -138,21 +138,32 @@ function MemberDirectory({
       ) : (
         <ul className="org-person-list">
           {visible.map((group) => {
-            const person = group.people[0] ?? null;
+            const people = group.people;
             return (
               <li key={group.key} className="org-person-card">
                 <div className="org-person-head">
-                  {person !== null && interactive?.onOpenMember !== undefined ? (
-                    <button
-                      type="button"
-                      className="org-person-name"
-                      onClick={() => interactive.onOpenMember?.(person.name)}
-                    >
-                      {person.display}
-                    </button>
+                  {people.length > 0 ? (
+                    <div className="org-person-identities">
+                      {people.map((person) =>
+                        interactive?.onOpenMember !== undefined ? (
+                          <button
+                            key={person.name}
+                            type="button"
+                            className="org-person-name"
+                            onClick={() => interactive.onOpenMember?.(person.name)}
+                          >
+                            {person.display}
+                          </button>
+                        ) : (
+                          <strong key={person.name} className="org-person-name">
+                            {person.display}
+                          </strong>
+                        ),
+                      )}
+                    </div>
                   ) : (
                     <strong className="org-person-name">
-                      {person?.display ?? t("Channel.org.ownerUnknown")}
+                      {t("Channel.org.ownerUnknown")}
                     </strong>
                   )}
                   <span className="t-mono org-person-agent-count">
