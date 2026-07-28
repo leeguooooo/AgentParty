@@ -76,7 +76,6 @@ export function LocalAgentsOverview({
   const aliveRef = useRef(true);
   const mountedRef = useRef(true);
   const opRef = useRef(false);
-  const detailKeyRef = useRef<string | null>(null);
   // #707 评审：挂载刷新 / 轮询 / 操作后刷新可并发，早发的请求后到会把新快照覆盖成旧的。
   // 单调序号——只让「最新一次 refresh」的结果落地，乱序完成的旧结果丢弃。
   const refreshSeqRef = useRef(0);
@@ -124,7 +123,6 @@ export function LocalAgentsOverview({
   useEffect(() => {
     if (!active) {
       aliveRef.current = false;
-      detailKeyRef.current = null;
       setDetailKey(null);
       return () => {
         aliveRef.current = false;
@@ -154,7 +152,6 @@ export function LocalAgentsOverview({
 
   useEffect(() => {
     if (detailKey === null || rows.some((row) => row.key === detailKey)) return;
-    detailKeyRef.current = null;
     setDetailKey(null);
   }, [detailKey, rows]);
 
@@ -183,11 +180,9 @@ export function LocalAgentsOverview({
 
   const toggleRowDetails = (row: LocalAgentRow): void => {
     if (detailKey === row.key) {
-      detailKeyRef.current = null;
       setDetailKey(null);
       return;
     }
-    detailKeyRef.current = row.key;
     setDetailKey(row.key);
   };
 
@@ -277,6 +272,7 @@ export function LocalAgentsOverview({
                                 <button
                                   type="button"
                                   className="d-btn local-agents-open-logs"
+                                  aria-label={`${t("LocalAgents.openLogs")} ${displayName}`}
                                   onClick={() => onOpenLogs(row.key)}
                                 >
                                   {t("LocalAgents.openLogs")}
@@ -478,6 +474,7 @@ export function LocalAgentsOverview({
                                 <button
                                   type="button"
                                   className="d-btn local-agents-detail-open-logs"
+                                  aria-label={`${t("LocalAgents.openLogs")} ${displayName}`}
                                   onClick={() => onOpenLogs(row.key)}
                                 >
                                   {t("LocalAgents.openLogs")}

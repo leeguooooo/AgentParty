@@ -122,6 +122,14 @@ describe("DesktopAgentPanel launcher responsibilities", () => {
     expect(output).not.toContain("Show local agent logs");
   });
 
+  test("counts the running fallback status when an older shell has no multi-instance API", async () => {
+    await renderPanel(adapter({
+      statusAll: async () => { throw new Error("unknown command"); },
+      status: async () => running,
+    }));
+    expect(JSON.stringify(renderer!.toJSON())).toContain("1 app agent(s) running · 0 resident");
+  });
+
   test("starts the selected identity with channel, runner, workdir, and repo", async () => {
     const calls: DesktopAgentStartInput[] = [];
     await renderPanel(adapter({

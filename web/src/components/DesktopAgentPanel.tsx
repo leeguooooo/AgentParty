@@ -420,10 +420,10 @@ export function DesktopAgentPanel({
         </div>
       )}
 
-      {(activeCount > 0 || (duties?.length ?? 0) > 0) && (
+      {(anyActive || (duties?.length ?? 0) > 0) && (
         <p className="desktop-agent-manage-hint">
           {t("DesktopSettings.agent.manageHint", {
-            running: String(activeCount),
+            running: String(instances === null ? (isActive(status) ? 1 : 0) : activeCount),
             resident: String(duties?.length ?? 0),
           })}
         </p>

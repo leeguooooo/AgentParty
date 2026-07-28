@@ -104,6 +104,25 @@ describe("unified local agent logs", () => {
     expect(output).not.toContain("runner failed");
   });
 
+  test("keeps normal restart, standby, and skipped lifecycle lines out of Warn", async () => {
+    const root = await renderLogs({
+      dutyLogRead: async () => [
+        "serve supervisor: event=restart",
+        "serve switched to standby",
+        "skipped offline backlog",
+        "retry connection",
+        "reconnect socket",
+      ].join("\n"),
+    });
+    await act(async () => findButton(root, "Warn").props.onClick());
+    const output = JSON.stringify(renderer!.toJSON());
+    expect(output).toContain("retry connection");
+    expect(output).toContain("reconnect socket");
+    expect(output).not.toContain("event=restart");
+    expect(output).not.toContain("standby");
+    expect(output).not.toContain("skipped offline backlog");
+  });
+
   test("selecting one Agent reloads only that source", async () => {
     let dutyReads = 0;
     let instanceReads = 0;
@@ -156,5 +175,34 @@ describe("unified local agent logs", () => {
     const output = JSON.stringify(renderer!.toJSON());
     expect(output).toContain("Some agent logs could not be read");
     expect(output).toContain("app ready");
+  });
+
+  test("keeps recent lines from every Agent when the combined log reaches its cap", async () => {
+    const duties = Array.from({ length: 4 }, (_, index): DesktopDutyEntry => ({
+      ...duty,
+      label: `com.agentparty.duty.cfg${index}.ops${index}`,
+      instanceId: `cfg${index}:ops${index}`,
+    }));
+    const configs = duties.map((entry, index): DesktopAgentConfig => ({
+      ...config,
+      configId: `cfg${index}`,
+      name: `agent-${index}`,
+      channel: `ops${index}`,
+    }));
+    await renderLogs({
+      dutyList: async () => duties,
+      listConfigs: async () => configs,
+      statusAll: async () => [],
+      dutyLogRead: async (label: string) => {
+        const source = duties.findIndex((entry) => entry.label === label);
+        return Array.from({ length: 500 }, (_, line) =>
+          line === 499 ? `latest-marker-${source}` : `source-${source}-line-${line}`,
+        ).join("\n");
+      },
+    });
+    const output = JSON.stringify(renderer!.toJSON());
+    for (let source = 0; source < duties.length; source += 1) {
+      expect(output).toContain(`latest-marker-${source}`);
+    }
   });
 });

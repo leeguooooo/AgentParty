@@ -188,6 +188,8 @@ test("常驻行显示可信配置名，详情只展示运行元数据，日志�
   expect(rendered).toContain("/workspace/atvloadly");
   expect(rendered).toContain("/tmp/atvloadly.log");
   expect(rendered).toContain("builder");
+  expect(byClass(root, "local-agents-open-logs")[0]!.props["aria-label"]).toBe("View logs atvloadly");
+  expect(byClass(root, "local-agents-detail-open-logs")[0]!.props["aria-label"]).toBe("View logs atvloadly");
   await act(async () => {
     byClass(root, "local-agents-open-logs")[0]!.props.onClick();
   });

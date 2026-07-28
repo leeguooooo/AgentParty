@@ -33,7 +33,7 @@ interface LogEntry {
 
 function classifyLogLevel(line: string): LogLevel {
   if (/\b(error|failed?|fatal|panic|exception)\b|错误|失败|异常/i.test(line)) return "error";
-  if (/\b(warn(?:ing)?|retry|reconnect|restart|stale|standby|skip(?:ping|ped)?)\b|警告|重试|重连|跳过|待命/i.test(line)) {
+  if (/\b(warn(?:ing)?|retry|reconnect)\b|警告|重试|重连/i.test(line)) {
     return "warn";
   }
   return "info";
@@ -108,9 +108,9 @@ export function ResidentDutyLogs({
     try {
       const results = await Promise.allSettled(chosen.map(readRow));
       if (!activeRef.current || request !== requestRef.current) return;
+      const perSource = Math.max(1, Math.floor(1_500 / Math.max(1, chosen.length)));
       const nextEntries = results
-        .flatMap((result) => result.status === "fulfilled" ? result.value : [])
-        .slice(-1_500);
+        .flatMap((result) => result.status === "fulfilled" ? result.value.slice(-perSource) : []);
       setEntries(nextEntries);
       if (results.some((result) => result.status === "rejected")) {
         setLogError(t("ResidentDutyLogs.partialError"));

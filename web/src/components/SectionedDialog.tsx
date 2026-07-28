@@ -82,6 +82,7 @@ export function SectionedDialog<SectionId extends string>({
   const [tabOrientation, setTabOrientation] = useState<TabOrientation>(initialTabOrientation);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const tabRefs = useRef(new Map<SectionId, HTMLButtonElement>());
+  const previousControlledSectionRef = useRef(controlledSection);
   const onCloseRef = useRef(onClose);
   const onActiveSectionChangeRef = useRef(onActiveSectionChange);
   const restoreFocusOnUnmountRef = useRef(restoreFocusOnUnmount);
@@ -94,6 +95,13 @@ export function SectionedDialog<SectionId extends string>({
     setInternalSection(fallbackSection);
     onActiveSectionChangeRef.current?.(fallbackSection);
   }, [activeSection, fallbackSection, sections]);
+
+  useEffect(() => {
+    const previous = previousControlledSectionRef.current;
+    previousControlledSectionRef.current = controlledSection;
+    if (controlledSection === undefined || controlledSection === previous) return;
+    tabRefs.current.get(activeSection)?.focus?.();
+  }, [activeSection, controlledSection]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;

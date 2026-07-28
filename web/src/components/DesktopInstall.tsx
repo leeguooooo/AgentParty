@@ -7,8 +7,8 @@ import "../i18n/strings/App";
 export const DESKTOP_INSTALL_COMMAND =
   "curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install-desktop.sh | AGENTPARTY_ALLOW_UNNOTARIZED=1 sh";
 
-const PROMPT_DISMISSED_AT_KEY = "ap_desktop_install_prompt_dismissed_at_v1";
-const PROMPT_REPEAT_MS = 7 * 24 * 60 * 60 * 1_000;
+export const PROMPT_DISMISSED_AT_KEY = "ap_desktop_install_prompt_dismissed_at_v1";
+export const PROMPT_REPEAT_MS = 7 * 24 * 60 * 60 * 1_000;
 
 interface ButtonProps {
   className?: string;
