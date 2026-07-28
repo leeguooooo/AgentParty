@@ -1,29 +1,35 @@
-// #96：新建频道默认开启 loop guard。
-// c3c4cdb 把 guard 改成 opt-in 后，新频道一律无熔断——两个 agent 在无人值守下可以
-// 互相唤醒到天亮，唯一约束是 30 msg/min。产品的核心承诺（agents talk, humans watch）
-// 要求新频道开箱就有这道刹车；存量频道不动（强开会立刻熔断正在工作的频道）。
 import { describe, expect, it } from "vitest";
 import { api, createChannel, postMessage, seedToken, uniq } from "./helpers";
 
-describe("new channels enable the loop guard by default (#96)", () => {
-  it("a freshly created channel reports loop_guard_enabled = 1", async () => {
+describe("new channels keep optional guards off by default", () => {
+  it("a freshly created channel reports both guards disabled", async () => {
     const human = await seedToken("human", uniq("human"));
     const slug = await createChannel(human.token);
 
     const list = (await (await api("/api/channels", human.token)).json()) as {
-      channels: { slug: string; loop_guard_enabled?: number; loop_guard_limit?: number | null }[];
+      channels: {
+        slug: string;
+        loop_guard_enabled?: number;
+        loop_guard_limit?: number | null;
+        workflow_guard_enabled?: number;
+      }[];
     };
     const ch = list.channels.find((c) => c.slug === slug);
     expect(ch).toBeDefined();
-    expect(ch?.loop_guard_enabled).toBe(1);
-    // 不写死 limit：留空表示回退 mode 默认（normal 30 / party 200）
+    expect(ch?.loop_guard_enabled).toBe(0);
+    expect(ch?.workflow_guard_enabled).toBe(0);
     expect(ch?.loop_guard_limit ?? null).toBeNull();
   });
 
-  it("the default guard actually trips at the normal-channel threshold", async () => {
+  it("the loop guard still works after an owner explicitly enables it", async () => {
     const agentA = await seedToken("agent", uniq("ga"));
     const agentB = await seedToken("agent", uniq("gb"));
     const slug = await createChannel(agentA.token);
+    const enable = await api(`/api/channels/${slug}/loop-guard`, agentA.token, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true, limit: 30 }),
+    });
+    expect(enable.status).toBe(200);
 
     // LOOP_GUARD_N = 30：前 30 条连续 agent 消息放行，第 31 条熔断
     for (let i = 0; i < 30; i++) {
@@ -40,6 +46,11 @@ describe("new channels enable the loop guard by default (#96)", () => {
     const agentA = await seedToken("agent", uniq("sa"));
     const agentB = await seedToken("agent", uniq("sb"));
     const slug = await createChannel(agentA.token);
+    const enable = await api(`/api/channels/${slug}/loop-guard`, agentA.token, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true, limit: 30 }),
+    });
+    expect(enable.status).toBe(200);
 
     // status 是 presence 协调信息：即使达到消息阈值数量，也不应消耗熔断额度。
     for (let i = 0; i < 30; i++) {
@@ -62,7 +73,7 @@ describe("new channels enable the loop guard by default (#96)", () => {
     expect(((await tripped.json()) as { error: { code: string } }).error.code).toBe("loop_guard");
   });
 
-  it("owners can still turn the default guard off per channel", async () => {
+  it("owners can keep an already disabled guard off", async () => {
     const human = await seedToken("human", uniq("human"));
     const slug = await createChannel(human.token);
 

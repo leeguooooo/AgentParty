@@ -7,6 +7,7 @@ import { CreateChannel } from "./components/CreateChannel";
 import { DesktopSettings } from "./components/DesktopSettings";
 import { reportDesktopUiReady } from "./lib/desktopUi";
 import { DesktopDownloadLink } from "./components/DesktopDownloadLink";
+import { DesktopInstallPrompt } from "./components/DesktopInstall";
 import { DesktopInvitePaste } from "./components/DesktopInvitePaste";
 import { DesktopPairingGate } from "./components/DesktopPairingGate";
 import { DesktopUpdater } from "./components/DesktopUpdater";
@@ -88,10 +89,11 @@ import {
   waitForDesktopWindowShown,
 } from "./lib/desktopRuntime";
 import type { ChannelDeepLink } from "./lib/channelLink";
-import { setApiBase } from "./lib/base";
+import { apiOrigin, setApiBase } from "./lib/base";
 import {
   addCustomServerProfile,
   loadActiveServerOrigin,
+  isLeeguoooooDeployment,
   loadServerProfiles,
   normalizeServerOrigin,
   saveActiveServerOrigin,
@@ -1190,6 +1192,7 @@ export function App() {
   const channelPending = slug !== null && channels === null && listError === null;
   const unknownChannel =
     slug !== null && channels !== null && !channels.some((c) => c.slug === slug);
+  const deploymentOrigin = desktop ? activeOrigin : apiOrigin();
 
   return (
     <div className="app">
@@ -1223,7 +1226,7 @@ export function App() {
               <span className="app-me-owner">owner: {me.owner}</span>
             )}
             {/* 会员骨架（#277）：账号 free/member 状态就近展示（不进 #273 全局设置面板，避免并行冲突）。 */}
-            {me.kind === "human" && (
+            {me.kind === "human" && isLeeguoooooDeployment(deploymentOrigin) && (
               isMember(membershipStatusOf(me)) ? (
                 <span
                   className="app-me-chip app-me-chip--member"
@@ -1303,6 +1306,7 @@ export function App() {
           <span className="ap-sprite ap-sprite--settings" aria-hidden="true" />
         </button>
       </header>
+      <DesktopInstallPrompt desktop={desktop} />
       {settingsOpen && (
         <SettingsPanel
           me={me}

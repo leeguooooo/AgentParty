@@ -14,9 +14,7 @@ import { copyText, saveAgentToken } from "../lib/agentTokenVault";
 import { buildJoinPack, DEFAULT_JOIN_RUNNER, type JoinPackMode } from "../lib/joinPack";
 import { desktopAgentAdapter, type DesktopAgentAdapter, type DesktopAgentRunner } from "../lib/desktopAgent";
 import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
-
-// 桌面版下载/说明页——web 上无人值守引导装桌面版时指过去。
-const DESKTOP_DOWNLOAD_HREF = "/docs/desktop";
+import { DesktopInstallButton } from "./DesktopInstall";
 
 // #616 phase 4 的常驻是 launchd（macOS-only）：非 mac 桌面端不渲染接管按钮，
 // 免得点了必然吃后端 unsupported 错误。
@@ -426,9 +424,10 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
                 <>
                   <div className="agent-join-install-desktop">
                     <p className="agent-join-lead">{t("AgentJoin.installDesktopLead")}</p>
-                    <a href={DESKTOP_DOWNLOAD_HREF} className="d-btn d-btn--primary agent-join-install-btn">
-                      {t("AgentJoin.installDesktopBtn")}
-                    </a>
+                    <DesktopInstallButton
+                      className="d-btn d-btn--primary agent-join-install-btn"
+                      label={t("AgentJoin.installDesktopBtn")}
+                    />
                   </div>
                   <p className="agent-join-hint">{t("AgentJoin.manualWebLead")}</p>
                   <CommandBlock command={phase.command} copied={copied} onCopy={onCopy} t={t} />

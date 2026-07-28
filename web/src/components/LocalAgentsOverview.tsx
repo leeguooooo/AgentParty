@@ -22,7 +22,6 @@ import {
   type LocalAgentRow,
 } from "../lib/localAgents";
 import type { DesktopAgentScheduler } from "./DesktopAgentPanel";
-import { useAutoScrollToLatest } from "../lib/useAutoScrollToLatest";
 import "../i18n/strings/LocalAgentsOverview";
 
 const defaultScheduler: DesktopAgentScheduler = {
@@ -39,6 +38,7 @@ interface Props {
   active?: boolean;
   // 从频道页唤起时预过滤到该频道（点 ①「频道里能管理」）；全局打开则不传，看全部。
   scopeChannel?: string | null;
+  onOpenLogs?(targetKey: string): void;
 }
 
 function isActive(state: string): boolean {
@@ -62,6 +62,7 @@ export function LocalAgentsOverview({
   scheduler = defaultScheduler,
   active = true,
   scopeChannel = null,
+  onOpenLogs,
 }: Props) {
   // available=null 未探测；false=不可用（非 macOS/旧壳，statusAll 与 dutyList 都失败）。
   const [available, setAvailable] = useState<boolean | null>(null);
@@ -72,12 +73,6 @@ export function LocalAgentsOverview({
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [detailKey, setDetailKey] = useState<string | null>(null);
-  const [logView, setLogView] = useState<{
-    key: string;
-    text: string | null;
-    busy: boolean;
-    error: string | null;
-  } | null>(null);
   const aliveRef = useRef(true);
   const mountedRef = useRef(true);
   const opRef = useRef(false);
@@ -85,17 +80,11 @@ export function LocalAgentsOverview({
   // #707 评审：挂载刷新 / 轮询 / 操作后刷新可并发，早发的请求后到会把新快照覆盖成旧的。
   // 单调序号——只让「最新一次 refresh」的结果落地，乱序完成的旧结果丢弃。
   const refreshSeqRef = useRef(0);
-  const logSeqRef = useRef(0);
-  const logPreRef = useAutoScrollToLatest<HTMLPreElement>(
-    logView?.text,
-    logView?.busy !== true && logView?.error == null,
-  );
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      logSeqRef.current += 1;
     };
   }, []);
 
@@ -135,14 +124,11 @@ export function LocalAgentsOverview({
   useEffect(() => {
     if (!active) {
       aliveRef.current = false;
-      logSeqRef.current += 1;
       detailKeyRef.current = null;
       setDetailKey(null);
-      setLogView(null);
       return () => {
         aliveRef.current = false;
         refreshSeqRef.current += 1;
-        logSeqRef.current += 1;
       };
     }
     aliveRef.current = true;
@@ -151,7 +137,6 @@ export function LocalAgentsOverview({
     return () => {
       aliveRef.current = false;
       refreshSeqRef.current += 1;
-      logSeqRef.current += 1;
       cancel();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -169,10 +154,8 @@ export function LocalAgentsOverview({
 
   useEffect(() => {
     if (detailKey === null || rows.some((row) => row.key === detailKey)) return;
-    logSeqRef.current += 1;
     detailKeyRef.current = null;
     setDetailKey(null);
-    setLogView(null);
   }, [detailKey, rows]);
 
   const runAction = async (action: () => Promise<unknown>): Promise<void> => {
@@ -198,40 +181,14 @@ export function LocalAgentsOverview({
     }
   };
 
-  const loadRowLogs = async (row: LocalAgentRow): Promise<void> => {
-    const seq = ++logSeqRef.current;
-    setLogView({ key: row.key, text: null, busy: true, error: null });
-    try {
-      const text = row.kind === "duty"
-        ? await adapter.dutyLogRead(row.duty!.label)
-        : (row.instanceId === null
-          ? await adapter.logs()
-          : await adapter.logsInstance(row.instanceId)).join("\n");
-      if (!mountedRef.current || seq !== logSeqRef.current || detailKeyRef.current !== row.key) return;
-      setLogView({ key: row.key, text, busy: false, error: null });
-    } catch {
-      if (!mountedRef.current || seq !== logSeqRef.current || detailKeyRef.current !== row.key) return;
-      setLogView({
-        key: row.key,
-        text: null,
-        busy: false,
-        error: t("LocalAgents.logsLoadFailed"),
-      });
-    }
-  };
-
   const toggleRowDetails = (row: LocalAgentRow): void => {
     if (detailKey === row.key) {
-      logSeqRef.current += 1;
       detailKeyRef.current = null;
       setDetailKey(null);
-      setLogView(null);
       return;
     }
     detailKeyRef.current = row.key;
     setDetailKey(row.key);
-    setLogView(null);
-    void loadRowLogs(row);
   };
 
   const totalRows = groups.reduce((sum, g) => sum + g.rows.length, 0);
@@ -279,7 +236,6 @@ export function LocalAgentsOverview({
                       const displayName = row.name ?? t("LocalAgents.unknownIdentity");
                       const detailId = `local-agent-detail-${row.key}`;
                       const detailOpen = detailKey === row.key;
-                      const rowLog = logView?.key === row.key ? logView : null;
                       const dutyState = row.duty === undefined ? null : dutyRuntimeState(row.duty);
                       const health = row.duty?.health ?? null;
                       const healthDiagnostic = dutyState === null || row.duty?.terminalBlocked === true
@@ -317,6 +273,15 @@ export function LocalAgentsOverview({
                                 : t(`DesktopSettings.agent.state.${row.state}`)}
                             </span>
                             <span className="local-agents-actions">
+                              {onOpenLogs !== undefined && (
+                                <button
+                                  type="button"
+                                  className="d-btn local-agents-open-logs"
+                                  onClick={() => onOpenLogs(row.key)}
+                                >
+                                  {t("LocalAgents.openLogs")}
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 className="d-btn local-agents-details"
@@ -509,31 +474,14 @@ export function LocalAgentsOverview({
                                   <strong>{t("LocalAgents.field.lastError")}</strong> {row.duty.health.supervisorError}
                                 </p>
                               )}
-                              <div className="local-agents-log-head">
-                                <strong>{t("LocalAgents.logsTitle")}</strong>
+                              {onOpenLogs !== undefined && (
                                 <button
                                   type="button"
-                                  className="d-btn local-agents-log-reload"
-                                  disabled={rowLog?.busy === true}
-                                  onClick={() => void loadRowLogs(row)}
+                                  className="d-btn local-agents-detail-open-logs"
+                                  onClick={() => onOpenLogs(row.key)}
                                 >
-                                  {rowLog?.busy === true ? t("LocalAgents.logsLoading") : t("LocalAgents.logsReload")}
+                                  {t("LocalAgents.openLogs")}
                                 </button>
-                              </div>
-                              {rowLog?.busy === true && (
-                                <p className="local-agents-log-state" role="status" aria-live="polite">
-                                  {t("LocalAgents.logsLoading")}
-                                </p>
-                              )}
-                              {rowLog?.error !== null && rowLog?.error !== undefined && (
-                                <p className="desktop-agent-error" role="alert">{rowLog.error}</p>
-                              )}
-                              {rowLog?.busy !== true && rowLog?.error == null && (
-                                rowLog?.text?.trim() ? (
-                                  <pre ref={logPreRef} className="t-mono local-agents-log" tabIndex={0}>{rowLog.text}</pre>
-                                ) : (
-                                  <p className="local-agents-log-state">{t("LocalAgents.logsEmpty")}</p>
-                                )
                               )}
                             </section>
                           )}

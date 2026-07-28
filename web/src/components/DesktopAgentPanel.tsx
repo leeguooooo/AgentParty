@@ -1,11 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { TFunc } from "../i18n/useT";
 import {
-  canRestartDuty,
   desktopAgentAdapter,
   dutyDependencyErrorRunner,
-  dutyRepairInput,
-  dutyRuntimeState,
   type DesktopAgentAdapter,
   type DesktopAgentConfig,
   type DesktopAgentRunner,
@@ -91,9 +88,6 @@ export function DesktopAgentPanel({
   const [duties, setDuties] = useState<DesktopDutyEntry[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [logsOpen, setLogsOpen] = useState(false);
-  const [logsFor, setLogsFor] = useState<string | null>(null);
-  const [logs, setLogs] = useState<string[] | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const aliveRef = useRef(true);
   const mountedRef = useRef(true);
@@ -101,7 +95,6 @@ export function DesktopAgentPanel({
   const initializedRef = useRef(false);
   const statusRequestSeqRef = useRef(0);
   const dutyRequestSeqRef = useRef(0);
-  const logRequestSeqRef = useRef(0);
   // null=未探测，true/false=statusAll 是否可用（探测一次，之后不再打旧 shell 的未知命令）。
   const multiRef = useRef<boolean | null>(null);
 
@@ -213,25 +206,6 @@ export function DesktopAgentPanel({
 
   const anyActive = isActive(status) || (instances ?? []).some((item) => isActive(item));
 
-  const loadLogs = async (
-    source: string | null,
-    stillRelevant: () => boolean = () => true,
-  ): Promise<void> => {
-    const requestSeq = ++logRequestSeqRef.current;
-    try {
-      const next = source !== null && multiRef.current === true
-        ? await adapter.logsInstance(source)
-        : await adapter.logs();
-      if (mountedRef.current && stillRelevant() && requestSeq === logRequestSeqRef.current) {
-        setLogs(next.map(safeError));
-      }
-    } catch (cause) {
-      if (mountedRef.current && stillRelevant() && requestSeq === logRequestSeqRef.current) {
-        setError(safeError(cause));
-      }
-    }
-  };
-
   useEffect(() => {
     if (!active || busy || !anyActive) return;
     let polling = true;
@@ -244,25 +218,20 @@ export function DesktopAgentPanel({
       }).catch((cause) => {
         if (polling) setError(safeError(cause));
       });
-      if (logsOpen) {
-        void loadLogs(logsFor, () => polling);
-      }
     }, 2_000);
     return () => {
       polling = false;
       cancel();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, adapter, anyActive, busy, logsFor, logsOpen, scheduler, status?.state]);
+  }, [active, adapter, anyActive, busy, scheduler, status?.state]);
 
   const runOperation = async (operation: () => Promise<DesktopAgentStatus>) => {
     if (operationRef.current) return;
     operationRef.current = true;
     statusRequestSeqRef.current += 1;
-    logRequestSeqRef.current += 1;
     setBusy(true);
     setError(null);
-    setLogs(null);
     try {
       const next = await operation();
       if (aliveRef.current) {
@@ -278,9 +247,6 @@ export function DesktopAgentPanel({
             // 刷新失败不吞操作结果；下一轮轮询会补上。
           }
         }
-        if (logsOpen) {
-          await loadLogs(logsFor);
-        }
       }
     } catch (cause) {
       if (aliveRef.current) setError(safeError(cause));
@@ -294,28 +260,6 @@ export function DesktopAgentPanel({
     setConfigId(nextId);
     const next = configs?.find((item) => item.configId === nextId);
     if (next?.channel) setChannel(next.channel);
-  };
-
-  const toggleLogs = async () => {
-    const nextOpen = !logsOpen;
-    setLogsOpen(nextOpen);
-    // #642：底部聚合日志切换是「聚合视图」。若之前打开过某个实例的日志（logsFor 被锁死），
-    // 必须在这里解除锁定并丢弃其缓存——否则聚合视图会被那个实例永久劫持，adapter.logs() 永远拿不到。
-    const wasInstance = logsFor !== null;
-    if (wasInstance) {
-      setLogsFor(null);
-      setLogs(null);
-    }
-    if (!nextOpen) {
-      logRequestSeqRef.current += 1;
-      return;
-    }
-    // 源从单实例切回聚合时必须重拉；否则命中聚合缓存就跳过。
-    if (logs !== null && !wasInstance) return;
-    setLogs(null);
-    // 显式走聚合 adapter.logs()：此刻 setLogsFor(null) 尚未落到 fetchLogs 闭包里的 logsFor，
-    // 直接用 fetchLogs 会读到旧值仍指向实例。
-    await loadLogs(null);
   };
 
   const persistDuty = async (input?: DesktopAgentStartInput) => {
@@ -354,39 +298,6 @@ export function DesktopAgentPanel({
       operationRef.current = false;
       if (mountedRef.current) setBusy(false);
     }
-  };
-
-  const runDutyAction = async (operation: () => Promise<unknown>) => {
-    if (operationRef.current) return;
-    operationRef.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      await operation();
-      if (!aliveRef.current) return;
-      const snapshot = await fetchDuties();
-      if (aliveRef.current && snapshot.requestSeq === dutyRequestSeqRef.current) {
-        setDuties(snapshot.entries);
-      }
-    } catch (cause) {
-      if (aliveRef.current) setError(safeError(cause));
-    } finally {
-      operationRef.current = false;
-      if (mountedRef.current) setBusy(false);
-    }
-  };
-
-  const unpersistDuty = (instanceId: string) =>
-    runDutyAction(() => adapter.dutyUnpersist(instanceId));
-
-  const restartDuty = (instanceId: string) =>
-    runDutyAction(() => adapter.dutyRestart(instanceId));
-
-  const openInstanceLogs = async (instanceId: string) => {
-    setLogsFor(instanceId);
-    setLogsOpen(true);
-    setLogs(null);
-    await loadLogs(instanceId);
   };
 
   const stateLabel = status === null
@@ -509,118 +420,13 @@ export function DesktopAgentPanel({
         </div>
       )}
 
-      {duties !== null && duties.length > 0 && (
-        <section aria-label={t("DesktopSettings.agent.dutyTitle")} className="desktop-agent-duties">
-          <strong className="desktop-agent-duties-title">{t("DesktopSettings.agent.dutyTitle")}</strong>
-          <ul className="desktop-agent-instances">
-            {duties.map((entry) => {
-              const repairInput = dutyRepairInput(entry);
-              const runtimeState = dutyRuntimeState(entry);
-              const dependencyProblem =
-                entry.dependencyState === "missing" || entry.dependencyState === "repair-required";
-              return (
-                <li key={entry.label} className="desktop-agent-instance">
-                  <span
-                    className={`desktop-agent-state desktop-agent-state--${entry.terminalBlocked === true ? "stopped" : runtimeState}`}
-                    title={entry.terminalReason ?? undefined}
-                  >
-                    {t(entry.terminalReason === "legacy-duty-needs-repair"
-                      ? "DesktopSettings.agent.dutyLegacyRepair"
-                      : entry.terminalReason === "terminal-stop-quarantined"
-                        ? "DesktopSettings.agent.dutyQuarantined"
-                        : entry.terminalBlocked === true
-                          ? "DesktopSettings.agent.dutyTerminalBlocked"
-                          : `DesktopSettings.agent.dutyState.${runtimeState}`)}
-                  </span>
-                  <span className="t-mono desktop-agent-instance-name">{entry.instanceId}</span>
-                  <span className="t-mono desktop-agent-instance-dir" title={entry.logPath}>{entry.logPath}</span>
-                  {dependencyProblem && (
-                    <span className="desktop-agent-error" role="alert">
-                      {t(
-                        entry.dependencyState === "missing"
-                          ? "DesktopSettings.agent.dutyDependencyMissing"
-                          : "DesktopSettings.agent.dutyDependencyRepair",
-                        { runner: entry.runner ?? "runner" },
-                      )}
-                    </span>
-                  )}
-                  {dependencyProblem && repairInput !== null && (
-                    <button
-                      type="button"
-                      className="d-btn"
-                      aria-label={`${t("DesktopSettings.agent.dutyRepair")} ${entry.instanceId}`}
-                      disabled={busy}
-                      onClick={() => void persistDuty(repairInput)}
-                    >
-                      {t("DesktopSettings.agent.dutyRepair")}
-                    </button>
-                  )}
-                  {canRestartDuty(runtimeState) && (
-                    <button
-                      type="button"
-                      className="d-btn desktop-agent-duty-restart"
-                      aria-label={`${t("DesktopSettings.agent.dutyRestart")} ${entry.instanceId}`}
-                      disabled={busy}
-                      onClick={() => void restartDuty(entry.instanceId)}
-                    >
-                      {t("DesktopSettings.agent.dutyRestart")}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="d-btn"
-                    aria-label={`${t("DesktopSettings.agent.dutyUnload")} ${entry.instanceId}`}
-                    disabled={busy}
-                    onClick={() => void unpersistDuty(entry.instanceId)}
-                  >
-                    {t("DesktopSettings.agent.dutyUnload")}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
-      )}
-
-      {instances !== null && instances.length > 0 && (
-        <ul className="desktop-agent-instances" aria-label={t("DesktopSettings.agent.instances")}>
-          {instances.map((item) => (
-            <li key={item.instanceId ?? `${item.configId}:${item.channel}`} className="desktop-agent-instance">
-              <span className={`desktop-agent-state desktop-agent-state--${item.state}`}>
-                {t(`DesktopSettings.agent.state.${item.state}`)}
-              </span>
-              <span className="t-mono desktop-agent-instance-name">
-                {[item.name, item.channel ? `#${item.channel}` : null, item.runner].filter(Boolean).join(" · ")}
-              </span>
-              {item.workdir !== null && (
-                <span className="t-mono desktop-agent-instance-dir" title={item.workdir}>{item.workdir}</span>
-              )}
-              {item.instanceId !== null && (
-                <>
-                  <button
-                    type="button"
-                    className="d-btn"
-                    aria-label={`${t("DesktopSettings.agent.instanceLogs")} ${item.instanceId}`}
-                    onClick={() => void openInstanceLogs(item.instanceId!)}
-                  >
-                    {t("DesktopSettings.agent.instanceLogs")}
-                  </button>
-                  {isActive(item) && (
-                    <button
-                      type="button"
-                      className="d-btn"
-                      aria-label={`${t("DesktopSettings.agent.instanceStop")} ${item.instanceId}`}
-                      disabled={busy || item.state === "stopping"}
-                      onClick={() => runOperation(() => adapter.stopInstance(item.instanceId!))}
-                    >
-                      {t("DesktopSettings.agent.instanceStop")}
-                    </button>
-                  )}
-                </>
-              )}
-            </li>
-          ))}
-        </ul>
+      {(activeCount > 0 || (duties?.length ?? 0) > 0) && (
+        <p className="desktop-agent-manage-hint">
+          {t("DesktopSettings.agent.manageHint", {
+            running: String(activeCount),
+            resident: String(duties?.length ?? 0),
+          })}
+        </p>
       )}
 
       {instances === null && status !== null && status.state !== "stopped" && (
@@ -677,25 +483,7 @@ export function DesktopAgentPanel({
         >
           {t("DesktopSettings.agent.stop")}
         </button>
-        <button
-          type="button"
-          className="desktop-agent-logs-toggle"
-          aria-label={t(logsOpen ? "DesktopSettings.agent.logs.hide" : "DesktopSettings.agent.logs.show")}
-          aria-expanded={logsOpen}
-          aria-controls="desktop-agent-logs"
-          onClick={() => void toggleLogs()}
-        >
-          {t(logsOpen ? "DesktopSettings.agent.logs.hide" : "DesktopSettings.agent.logs.show")}
-        </button>
       </div>
-
-      {logsOpen && (
-        <pre id="desktop-agent-logs" className="desktop-agent-logs" aria-label={t("DesktopSettings.agent.logs.label")}>
-          {logs === null
-            ? t("DesktopSettings.agent.logs.loading")
-            : logs.length === 0 ? t("DesktopSettings.agent.logs.empty") : logs.join("\n")}
-        </pre>
-      )}
     </section>
   );
 }

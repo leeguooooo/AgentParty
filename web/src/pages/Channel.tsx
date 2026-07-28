@@ -315,7 +315,17 @@ export function GuardSettingsPanel({
 }: GuardSettingsPanelProps) {
   const t = useT();
   return (
-    <div className="guard-settings">
+    <details className="guard-settings">
+      <summary className="guard-settings-summary">
+        <span>
+          <strong>{t("Channel.settings.guardAdvanced")}</strong>
+          <small>{t("Channel.settings.guardAdvancedHint")}</small>
+        </span>
+        <span className="guard-settings-state">
+          {loopEnabled || workflowEnabled ? t("Channel.settings.enabled") : t("Channel.settings.off")}
+        </span>
+      </summary>
+      <div className="guard-settings-body">
       <section className="guard-setting-row">
         <div className="guard-setting-head">
           <h3>{t("Channel.settings.loopGuard")}</h3>
@@ -389,7 +399,8 @@ export function GuardSettingsPanel({
         </div>
       </section>
       {error !== null && <p className="guard-setting-error">{error}</p>}
-    </div>
+      </div>
+    </details>
   );
 }
 

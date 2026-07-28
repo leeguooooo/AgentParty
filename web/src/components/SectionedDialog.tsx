@@ -19,6 +19,7 @@ interface Props<SectionId extends string> {
   navigationLabel: string;
   sections: readonly SectionedDialogSection<SectionId>[];
   initialSection: SectionId;
+  activeSection?: SectionId;
   onClose(): void;
   onActiveSectionChange?(section: SectionId): void;
   restoreFocusOnUnmount?: boolean;
@@ -66,6 +67,7 @@ export function SectionedDialog<SectionId extends string>({
   navigationLabel,
   sections,
   initialSection,
+  activeSection: controlledSection,
   onClose,
   onActiveSectionChange,
   restoreFocusOnUnmount = true,
@@ -73,9 +75,10 @@ export function SectionedDialog<SectionId extends string>({
   panelClassName = "",
 }: Props<SectionId>) {
   const fallbackSection = sections[0]?.id ?? initialSection;
-  const [activeSection, setActiveSection] = useState<SectionId>(
+  const [internalSection, setInternalSection] = useState<SectionId>(
     sections.some((section) => section.id === initialSection) ? initialSection : fallbackSection,
   );
+  const activeSection = controlledSection ?? internalSection;
   const [tabOrientation, setTabOrientation] = useState<TabOrientation>(initialTabOrientation);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const tabRefs = useRef(new Map<SectionId, HTMLButtonElement>());
@@ -88,7 +91,7 @@ export function SectionedDialog<SectionId extends string>({
 
   useEffect(() => {
     if (sections.some((section) => section.id === activeSection)) return;
-    setActiveSection(fallbackSection);
+    setInternalSection(fallbackSection);
     onActiveSectionChangeRef.current?.(fallbackSection);
   }, [activeSection, fallbackSection, sections]);
 
@@ -166,13 +169,13 @@ export function SectionedDialog<SectionId extends string>({
     event.preventDefault();
     const next = sections[nextIndex];
     if (next === undefined) return;
-    setActiveSection(next.id);
+    setInternalSection(next.id);
     onActiveSectionChangeRef.current?.(next.id);
     tabRefs.current.get(next.id)?.focus();
   };
 
   const selectSection = (section: SectionId) => {
-    setActiveSection(section);
+    setInternalSection(section);
     onActiveSectionChangeRef.current?.(section);
   };
 

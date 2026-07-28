@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   OFFICIAL_SERVER_PROFILES,
   addCustomServerProfile,
+  isLeeguoooooDeployment,
   loadActiveServerOrigin,
   loadServerProfiles,
   normalizeServerOrigin,
@@ -44,6 +45,16 @@ describe("server origin validation", () => {
 });
 
 describe("server profiles", () => {
+  test("names the shared deployments by owner and recognizes membership billing scope", () => {
+    expect(OFFICIAL_SERVER_PROFILES.map((profile) => profile.label)).toEqual([
+      "leeguooooo",
+      "xdreamstart",
+    ]);
+    expect(isLeeguoooooDeployment("https://agentparty.leeguoo.com")).toBe(true);
+    expect(isLeeguoooooDeployment("https://agentparty.pwtk-dev.work")).toBe(false);
+    expect(isLeeguoooooDeployment("https://private.example.com")).toBe(false);
+  });
+
   test("always includes official prod/test and stores only custom label/origin", () => {
     const storage = memoryStorage();
     const snapshots: string[] = [];

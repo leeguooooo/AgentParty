@@ -8,6 +8,14 @@ import { describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
 import { api, createChannel, disableLoopGuard, postMessage, seedToken, uniq } from "./helpers";
 
+async function enableLoopGuard(slug: string, token: string, limit: number): Promise<void> {
+  const res = await api(`/api/channels/${slug}/loop-guard`, token, {
+    method: "PUT",
+    body: JSON.stringify({ enabled: true, limit }),
+  });
+  expect(res.status).toBe(200);
+}
+
 async function createPartyChannel(token: string): Promise<string> {
   const slug = uniq("party-agent-guard");
   const res = await api("/api/channels", token, {
@@ -48,6 +56,7 @@ describe("per-agent loop guard fairness", () => {
     const agentA = await seedToken("agent");
     const agentB = await seedToken("agent");
     const slug = await createChannel(agentA.token);
+    await enableLoopGuard(slug, agentA.token, LOOP_GUARD_N);
     expect((await postMessage(slug, agentA.token, "warm up")).status).toBe(200);
     await seedLoopGuardCounts(slug, agentA.name, LOOP_GUARD_AGENT_N - 1);
 
@@ -59,6 +68,7 @@ describe("per-agent loop guard fairness", () => {
   it("uses the 50-message per-agent quota in party mode", async () => {
     const agent = await seedToken("agent");
     const slug = await createPartyChannel(agent.token);
+    await enableLoopGuard(slug, agent.token, 200);
     expect((await postMessage(slug, agent.token, "warm up")).status).toBe(200);
     await seedLoopGuardCounts(slug, agent.name, LOOP_GUARD_AGENT_PARTY_N - 1);
 
@@ -70,6 +80,7 @@ describe("per-agent loop guard fairness", () => {
     const agent = await seedToken("agent");
     const human = await seedToken("human");
     const slug = await createChannel(agent.token);
+    await enableLoopGuard(slug, agent.token, LOOP_GUARD_N);
     expect((await postMessage(slug, agent.token, "warm up")).status).toBe(200);
     await seedLoopGuardCounts(slug, agent.name, LOOP_GUARD_AGENT_N);
 
@@ -90,6 +101,7 @@ describe("per-agent loop guard fairness", () => {
   it("lets a blocked agent publish status without consuming or clearing its message quota", async () => {
     const agent = await seedToken("agent");
     const slug = await createChannel(agent.token);
+    await enableLoopGuard(slug, agent.token, LOOP_GUARD_N);
     expect((await postMessage(slug, agent.token, "warm up")).status).toBe(200);
     await seedLoopGuardCounts(slug, agent.name, LOOP_GUARD_AGENT_N);
 
@@ -103,6 +115,7 @@ describe("per-agent loop guard fairness", () => {
     const agent = await seedToken("agent");
     const human = await seedToken("human");
     const slug = await createChannel(agent.token);
+    await enableLoopGuard(slug, agent.token, LOOP_GUARD_N);
     expect((await postMessage(slug, agent.token, "warm up")).status).toBe(200);
     await seedLoopGuardCounts(slug, agent.name, LOOP_GUARD_AGENT_N);
 

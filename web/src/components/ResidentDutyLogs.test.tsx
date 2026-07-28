@@ -3,211 +3,134 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { ReactElement } from "react";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import type { DesktopAgentConfig, DesktopDutyEntry } from "../lib/desktopAgent";
+import { ResidentDutyLogsStrings } from "../i18n/strings/ResidentDutyLogs";
+import type { DesktopAgentConfig, DesktopAgentStatus, DesktopDutyEntry } from "../lib/desktopAgent";
+import { ResidentDutyLogs } from "./ResidentDutyLogs";
 
-const { ResidentDutyLogs } = await import("./ResidentDutyLogs");
-
-function memoryStorage(): Storage {
-  const values = new Map<string, string>();
-  return {
-    getItem: (key) => values.get(key) ?? null,
-    setItem: (key, value) => { values.set(key, value); },
-    removeItem: (key) => { values.delete(key); },
-    clear: () => values.clear(),
-    key: (index) => [...values.keys()][index] ?? null,
-    get length() { return values.size; },
-  } as Storage;
-}
-
-function entry(over: Partial<DesktopDutyEntry> = {}): DesktopDutyEntry {
-  return {
-    label: "com.agentparty.duty.abc123.kyc",
-    instanceId: "abc123:kyc",
-    plistPath: "/p.plist",
-    logPath: "/l.log",
-    loaded: true,
-    ...over,
-  };
-}
-
+const duty: DesktopDutyEntry = {
+  label: "com.agentparty.duty.cfg.ops",
+  instanceId: "cfg:ops",
+  plistPath: "/p",
+  logPath: "/l",
+  loaded: true,
+};
+const config: DesktopAgentConfig = {
+  configId: "cfg",
+  name: "ops-reviewer",
+  serverOrigin: "https://party.example.com",
+  channel: "ops",
+  kind: "agent",
+  role: "reviewer",
+};
+const instance: DesktopAgentStatus = {
+  state: "running",
+  pid: 1,
+  configId: "app",
+  name: "app-builder",
+  channel: "build",
+  runner: "codex",
+  startedAt: null,
+  exitCode: null,
+  lastError: null,
+  instanceId: "app:build",
+  workdir: null,
+  repo: null,
+};
+const t = (key: string) => ResidentDutyLogsStrings.en[key] ?? key;
 let renderer: ReactTestRenderer | null = null;
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
-}
 
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
-  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: memoryStorage() });
-  localStorage.setItem("ap_locale", "en");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: { getItem: () => "en", setItem: () => {}, removeItem: () => {} },
+  });
 });
-
-afterEach(() => {
-  act(() => renderer?.unmount());
+afterEach(async () => {
+  if (renderer !== null) await act(async () => renderer?.unmount());
   renderer = null;
 });
 
-async function renderPanel(
-  adapter: {
-    dutyList: () => Promise<DesktopDutyEntry[]>;
-    dutyLogRead: (label: string) => Promise<string>;
-    listConfigs?: () => Promise<DesktopAgentConfig[]>;
-  },
-  active = true,
+async function renderLogs(
+  overrides: Record<string, unknown> = {},
   createNodeMock?: (element: ReactElement) => unknown,
-): Promise<ReactTestRenderer> {
+) {
+  const adapter = {
+    dutyList: async () => [duty],
+    dutyLogRead: async () => "serve online\nWARN reconnecting\nERROR runner failed",
+    listConfigs: async () => [config],
+    statusAll: async () => [instance],
+    logsInstance: async () => ["app ready"],
+    ...overrides,
+  };
   await act(async () => {
     renderer = create(
       <LocaleProvider>
-        <ResidentDutyLogs t={((k: string) => k) as never} adapter={adapter} active={active} />
+        <ResidentDutyLogs t={t} adapter={adapter as never} />
       </LocaleProvider>,
       createNodeMock === undefined ? undefined : { createNodeMock },
     );
   });
-  return renderer!;
+  return renderer!.root;
 }
 
-function buttons(r: ReactTestRenderer): ReactTestInstance[] {
-  return r.root.findAll((n) => n.type === "button");
+function findButton(root: ReactTestInstance, text: string) {
+  return root.findAllByType("button").find((node) =>
+    node.children.map((child) => typeof child === "string" ? child : child.children.join("")).join("").includes(text),
+  )!;
 }
 
-describe("ResidentDutyLogs (#725)", () => {
-  test("列出常驻实例并显示频道名", async () => {
-    const r = await renderPanel({
-      dutyList: async () => [entry({ instanceId: "abc:kyc" }), entry({ label: "com.agentparty.duty.def.dev", instanceId: "def:dev", loaded: false })],
-      dutyLogRead: async () => "",
+describe("unified local agent logs", () => {
+  test("loads all app and resident logs with human-readable identity and channel labels", async () => {
+    await renderLogs();
+    const output = JSON.stringify(renderer!.toJSON());
+    expect(output).toContain("ops-reviewer");
+    expect(output).toContain("#ops");
+    expect(output).toContain("app-builder");
+    expect(output).toContain("[ERROR] [ops-reviewer #ops] ERROR runner failed");
+    expect(output).toContain("[INFO] [app-builder #build] app ready");
+  });
+
+  test("filters Error, Warn, and Info without losing the source identity", async () => {
+    const root = await renderLogs();
+    await act(async () => findButton(root, "Error").props.onClick());
+    let output = JSON.stringify(renderer!.toJSON());
+    expect(output).toContain("runner failed");
+    expect(output).not.toContain("reconnecting");
+    await act(async () => findButton(root, "Warn").props.onClick());
+    output = JSON.stringify(renderer!.toJSON());
+    expect(output).toContain("reconnecting");
+    expect(output).not.toContain("runner failed");
+  });
+
+  test("selecting one Agent reloads only that source", async () => {
+    let dutyReads = 0;
+    let instanceReads = 0;
+    const root = await renderLogs({
+      dutyLogRead: async () => { dutyReads += 1; return "duty only"; },
+      logsInstance: async () => { instanceReads += 1; return ["instance only"]; },
     });
-    const text = JSON.stringify(r.toJSON());
-    // JSX 的 `#{channel}` 会被拆成 ["#","kyc"] 两个文本节点,断言频道名本身即可。
-    expect(text).toContain('"kyc"');
-    expect(text).toContain('"dev"');
-  });
-
-  test("常驻日志列表显示可信 Agent 名称", async () => {
-    const r = await renderPanel({
-      dutyList: async () => [entry({ instanceId: "abc123:kyc" })],
-      listConfigs: async () => [{
-        configId: "abc123",
-        name: "kyc-reviewer",
-        serverOrigin: "https://agentparty.test",
-        channel: "kyc",
-        kind: "agent",
-        role: "reviewer",
-      }],
-      dutyLogRead: async () => "",
-    });
-    expect(JSON.stringify(r.toJSON())).toContain("kyc-reviewer");
-  });
-
-  test("点某个实例 → 读取并展示其日志尾部", async () => {
-    const reads: string[] = [];
-    const r = await renderPanel({
-      dutyList: async () => [entry()],
-      dutyLogRead: async (label) => { reads.push(label); return "▶ wake seq=42\nserve: online"; },
-    });
-    const item = buttons(r).find((b) => JSON.stringify(b.props.className).includes("resident-logs-item"))!;
-    await act(async () => { await item.props.onClick(); });
-    expect(reads).toEqual(["com.agentparty.duty.abc123.kyc"]);
-    expect(JSON.stringify(r.toJSON())).toContain("serve: online");
-  });
-
-  test("日志加载后默认定位到最新一行", async () => {
-    const logNode = { scrollTop: 0, scrollHeight: 640 };
-    const r = await renderPanel(
-      {
-        dutyList: async () => [entry()],
-        dutyLogRead: async () => "old failure\nrecovered",
-      },
-      true,
-      (element) => element.type === "pre" ? logNode : {},
-    );
-    const item = buttons(r).find((button) => JSON.stringify(button.props.className).includes("resident-logs-item"))!;
-    await act(async () => { await item.props.onClick(); });
-    expect(logNode.scrollTop).toBe(640);
-  });
-
-  test("快速切换条目:慢请求不覆盖后点击的日志(#734 排序保护)", async () => {
-    const resolvers: Record<string, (v: string) => void> = {};
-    const r = await renderPanel({
-      dutyList: async () => [
-        entry({ label: "com.agentparty.duty.a.one", instanceId: "a:one" }),
-        entry({ label: "com.agentparty.duty.b.two", instanceId: "b:two" }),
-      ],
-      dutyLogRead: (label: string) => new Promise<string>((resolve) => { resolvers[label] = resolve; }),
-    });
-    const items = buttons(r).filter((b) => JSON.stringify(b.props.className).includes("resident-logs-item"));
-    await act(async () => { void items[0]!.props.onClick(); }); // 点 one(未 resolve)
-    await act(async () => { void items[1]!.props.onClick(); }); // 再点 two(未 resolve)
-    // two 先回,再让 one 回——one 是过期请求,不该覆盖 two 的日志
-    await act(async () => { resolvers["com.agentparty.duty.b.two"]!("LOG TWO"); });
-    await act(async () => { resolvers["com.agentparty.duty.a.one"]!("LOG ONE"); });
-    const text = JSON.stringify(r.toJSON());
-    expect(text).toContain("LOG TWO");
-    expect(text).not.toContain("LOG ONE");
-  });
-
-  test("切走再返回时，旧列表请求不能覆盖较新的列表", async () => {
-    const oldList = deferred<DesktopDutyEntry[]>();
-    const currentList = deferred<DesktopDutyEntry[]>();
-    let reads = 0;
-    const adapter = {
-      dutyList: () => {
-        reads += 1;
-        return reads === 1 ? oldList.promise : currentList.promise;
-      },
-      dutyLogRead: async () => "",
-    };
-    const r = await renderPanel(adapter);
-    expect(reads).toBe(1);
-
+    const select = root.findByType("select");
     await act(async () => {
-      renderer!.update(
-        <LocaleProvider>
-          <ResidentDutyLogs t={((k: string) => k) as never} adapter={adapter} active={false} />
-        </LocaleProvider>,
-      );
-    });
-    await act(async () => {
-      renderer!.update(
-        <LocaleProvider>
-          <ResidentDutyLogs t={((k: string) => k) as never} adapter={adapter} active />
-        </LocaleProvider>,
-      );
+      select.props.onChange({ currentTarget: { value: "duty:cfg:ops" } });
       await Promise.resolve();
     });
-    expect(reads).toBe(2);
-
-    await act(async () => {
-      currentList.resolve([entry({
-        label: "com.agentparty.duty.current",
-        instanceId: "cfg:fresh-channel-923",
-      })]);
-      await currentList.promise;
-      await Promise.resolve();
-    });
-    await act(async () => {
-      oldList.resolve([entry({
-        label: "com.agentparty.duty.stale",
-        instanceId: "cfg:stale-channel-517",
-      })]);
-      await oldList.promise;
-      await Promise.resolve();
-    });
-
-    const text = JSON.stringify(r.toJSON());
-    expect(text).toContain("fresh-channel-923");
-    expect(text).not.toContain("stale-channel-517");
+    expect(dutyReads).toBe(2);
+    expect(instanceReads).toBe(1);
+    expect(JSON.stringify(renderer!.toJSON())).toContain("duty only");
+    expect(JSON.stringify(renderer!.toJSON())).not.toContain("instance only");
   });
 
-  test("无常驻实例 → 空状态", async () => {
-    const r = await renderPanel({ dutyList: async () => [], dutyLogRead: async () => "" });
-    expect(JSON.stringify(r.toJSON())).toContain("ResidentDutyLogs.empty");
+  test("positions the combined log at the latest line", async () => {
+    const logNode = { scrollTop: 0, scrollHeight: 720 };
+    await renderLogs({}, (element) => element.type === "pre" ? logNode : {});
+    expect(logNode.scrollTop).toBe(720);
   });
 
-  test("dutyList 失败 → 展示错误横幅,不崩", async () => {
-    const r = await renderPanel({ dutyList: async () => { throw new Error("launchctl down"); }, dutyLogRead: async () => "" });
-    expect(JSON.stringify(r.toJSON())).toContain("launchctl down");
+  test("shows source failures without crashing or hiding readable sources", async () => {
+    await renderLogs({ dutyLogRead: async () => { throw new Error("log unavailable"); } });
+    const output = JSON.stringify(renderer!.toJSON());
+    expect(output).toContain("Some agent logs could not be read");
+    expect(output).toContain("app ready");
   });
 });

@@ -1,172 +1,264 @@
-// #725：桌面端「常驻 agent 日志」——枚举本机 launchd 常驻实例，点开看它的 serve 日志尾部，
-// 方便排查「设了常驻、@ 没反应」这类问题(日志里能看到 ▶ wake / serve: / runner 报错)。
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunc } from "../i18n/useT";
 import {
   desktopAgentAdapter,
   type DesktopAgentAdapter,
   type DesktopAgentConfig,
-  type DesktopDutyEntry,
 } from "../lib/desktopAgent";
+import { aggregateLocalAgents, type LocalAgentRow } from "../lib/localAgents";
 import { useAutoScrollToLatest } from "../lib/useAutoScrollToLatest";
 import "../i18n/strings/ResidentDutyLogs";
 
-type ResidentDutyAdapter = Pick<DesktopAgentAdapter, "dutyList" | "dutyLogRead"> &
-  Partial<Pick<DesktopAgentAdapter, "listConfigs">>;
+type LocalLogsAdapter = Pick<DesktopAgentAdapter, "dutyList" | "dutyLogRead"> &
+  Partial<Pick<DesktopAgentAdapter, "listConfigs" | "statusAll" | "status" | "logs" | "logsInstance">>;
 
 interface Props {
   t: TFunc;
-  adapter?: ResidentDutyAdapter;
+  adapter?: LocalLogsAdapter;
   active?: boolean;
+  initialTargetKey?: string | null;
 }
 
-// instanceId 形如 "<config_id>:<channel>"；频道名给人看，config 短哈希只作区分。
-function channelOf(entry: DesktopDutyEntry): string {
-  const idx = entry.instanceId.lastIndexOf(":");
-  return idx >= 0 ? entry.instanceId.slice(idx + 1) : entry.instanceId;
+type LogLevel = "error" | "warn" | "info";
+type LevelFilter = "all" | LogLevel;
+
+interface LogEntry {
+  id: string;
+  targetKey: string;
+  agentName: string;
+  channel: string;
+  level: LogLevel;
+  text: string;
 }
 
-function configIdOf(entry: DesktopDutyEntry): string {
-  const idx = entry.instanceId.indexOf(":");
-  return idx >= 0 ? entry.instanceId.slice(0, idx) : entry.instanceId;
+function classifyLogLevel(line: string): LogLevel {
+  if (/\b(error|failed?|fatal|panic|exception)\b|错误|失败|异常/i.test(line)) return "error";
+  if (/\b(warn(?:ing)?|retry|reconnect|restart|stale|standby|skip(?:ping|ped)?)\b|警告|重试|重连|跳过|待命/i.test(line)) {
+    return "warn";
+  }
+  return "info";
 }
 
-function configNames(configs: readonly DesktopAgentConfig[]): Map<string, string> {
-  return new Map(configs.map((config) => [config.configId, config.name]));
+function targetLabel(row: LocalAgentRow, t: TFunc): string {
+  return row.name ?? t("ResidentDutyLogs.unknownAgent");
 }
 
-export function ResidentDutyLogs({ t, adapter = desktopAgentAdapter, active = true }: Props) {
-  const [entries, setEntries] = useState<DesktopDutyEntry[] | null>(null);
-  const [namesByConfigId, setNamesByConfigId] = useState<Map<string, string>>(() => new Map());
+function splitLines(text: string): string[] {
+  return text.split(/\r?\n/).filter((line) => line.trim() !== "").slice(-500);
+}
+
+export function ResidentDutyLogs({
+  t,
+  adapter = desktopAgentAdapter,
+  active = true,
+  initialTargetKey = null,
+}: Props) {
+  const [targets, setTargets] = useState<LocalAgentRow[] | null>(null);
+  const [selected, setSelected] = useState("all");
+  const [entries, setEntries] = useState<LogEntry[]>([]);
+  const [level, setLevel] = useState<LevelFilter>("all");
+  const [query, setQuery] = useState("");
   const [listError, setListError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null); // 选中的 label
-  const [log, setLog] = useState<string>("");
-  const [logBusy, setLogBusy] = useState(false);
   const [logError, setLogError] = useState<string | null>(null);
-  // 请求排序保护:快速切换条目时,只让「最后一次点击」的结果落地,避免慢请求覆盖新选中的日志。
-  const loadSeqRef = useRef(0);
-  const listSeqRef = useRef(0);
-  const listActiveRef = useRef(active);
-  const logPreRef = useAutoScrollToLatest<HTMLPreElement>(log, !logBusy && logError === null);
+  const [busy, setBusy] = useState(false);
+  const requestRef = useRef(0);
+  const activeRef = useRef(active);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
 
-  const refreshList = useCallback(async () => {
-    const seq = ++listSeqRef.current;
-    setListError(null);
-    try {
-      const configsRequest = adapter.listConfigs?.().catch(() => [] as DesktopAgentConfig[]) ??
-        Promise.resolve([] as DesktopAgentConfig[]);
-      const [list, configs] = await Promise.all([adapter.dutyList(), configsRequest]);
-      if (!listActiveRef.current || seq !== listSeqRef.current) return;
-      setEntries(list);
-      setNamesByConfigId(configNames(configs));
-      // 选中项若已消失，清掉日志。
-      setSelected((current) => (current !== null && list.some((e) => e.label === current) ? current : null));
-    } catch (err) {
-      if (!listActiveRef.current || seq !== listSeqRef.current) return;
-      setEntries([]);
-      setListError(err instanceof Error ? err.message : String(err));
+  const readRow = useCallback(async (row: LocalAgentRow): Promise<LogEntry[]> => {
+    let text = "";
+    if (row.kind === "duty") {
+      text = await adapter.dutyLogRead(row.duty!.label);
+    } else if (row.instanceId !== null && adapter.logsInstance !== undefined) {
+      text = (await adapter.logsInstance(row.instanceId)).join("\n");
+    } else if (adapter.logs !== undefined) {
+      text = (await adapter.logs()).join("\n");
     }
-  }, [adapter]);
+    const name = targetLabel(row, t);
+    return splitLines(text).map((line, index) => ({
+      id: `${row.key}:${index}`,
+      targetKey: row.key,
+      agentName: name,
+      channel: row.channel,
+      level: classifyLogLevel(line),
+      text: line,
+    }));
+  }, [adapter, t]);
 
-  const loadLog = useCallback(
-    async (label: string) => {
-      const seq = ++loadSeqRef.current;
-      setSelected(label);
-      setLog(""); // 先清掉旧日志,别让上一条实例的内容残留在新标题下(加载中会显示 loading)
-      setLogBusy(true);
-      setLogError(null);
-      try {
-        const text = await adapter.dutyLogRead(label);
-        if (seq !== loadSeqRef.current) return; // 已被更晚的点击取代——丢弃这次结果
-        setLog(text);
-      } catch (err) {
-        if (seq !== loadSeqRef.current) return;
-        setLog("");
-        setLogError(err instanceof Error ? err.message : String(err));
-      } finally {
-        if (seq === loadSeqRef.current) setLogBusy(false);
+  const loadLogs = useCallback(async (nextTargets: LocalAgentRow[], nextSelected: string) => {
+    const request = ++requestRef.current;
+    const chosen = nextSelected === "all"
+      ? nextTargets
+      : nextTargets.filter((target) => target.key === nextSelected);
+    setBusy(true);
+    setLogError(null);
+    setEntries([]);
+    try {
+      const results = await Promise.allSettled(chosen.map(readRow));
+      if (!activeRef.current || request !== requestRef.current) return;
+      const nextEntries = results
+        .flatMap((result) => result.status === "fulfilled" ? result.value : [])
+        .slice(-1_500);
+      setEntries(nextEntries);
+      if (results.some((result) => result.status === "rejected")) {
+        setLogError(t("ResidentDutyLogs.partialError"));
       }
-    },
-    [adapter],
-  );
+    } finally {
+      if (activeRef.current && request === requestRef.current) setBusy(false);
+    }
+  }, [readRow, t]);
 
-  useEffect(() => {
-    listActiveRef.current = active;
-    if (!active) {
-      listSeqRef.current += 1;
+  const refresh = useCallback(async () => {
+    const request = ++requestRef.current;
+    setListError(null);
+    setLogError(null);
+    setBusy(true);
+    const configsRequest = adapter.listConfigs?.().catch(() => [] as DesktopAgentConfig[]) ??
+      Promise.resolve([] as DesktopAgentConfig[]);
+    const dutiesRequest = adapter.dutyList();
+    const instancesRequest = adapter.statusAll?.().catch(async () => {
+      const status = await adapter.status?.();
+      return status === undefined || (status.state === "stopped" && status.instanceId === null) ? [] : [status];
+    }) ?? Promise.resolve([]);
+
+    const [dutiesResult, instancesResult, configs] = await Promise.all([
+      dutiesRequest.then((value) => ({ ok: true as const, value })).catch((error: unknown) => ({ ok: false as const, error })),
+      instancesRequest.then((value) => ({ ok: true as const, value })).catch((error: unknown) => ({ ok: false as const, error })),
+      configsRequest,
+    ]);
+    if (!activeRef.current || request !== requestRef.current) return;
+    if (!dutiesResult.ok && !instancesResult.ok) {
+      const cause = dutiesResult.error;
+      setTargets([]);
+      setEntries([]);
+      setListError(cause instanceof Error ? cause.message : String(cause));
+      setBusy(false);
       return;
     }
-    void refreshList();
-    return () => {
-      listActiveRef.current = false;
-      listSeqRef.current += 1;
-    };
-  }, [active, refreshList]);
+    const rows = aggregateLocalAgents(
+      instancesResult.ok ? instancesResult.value : [],
+      dutiesResult.ok ? dutiesResult.value : [],
+      configs,
+    );
+    if (!dutiesResult.ok || !instancesResult.ok) {
+      const cause = !dutiesResult.ok ? dutiesResult.error : instancesResult.ok ? null : instancesResult.error;
+      if (cause !== null) setListError(cause instanceof Error ? cause.message : String(cause));
+    }
+    const preferred = initialTargetKey ?? selectedRef.current;
+    const nextSelected = preferred === "all" || rows.some((row) => row.key === preferred) ? preferred : "all";
+    setTargets(rows);
+    setSelected(nextSelected);
+    await loadLogs(rows, nextSelected);
+  }, [adapter, initialTargetKey, loadLogs]);
 
-  const agentNameOf = (entry: DesktopDutyEntry): string => {
-    const configId = configIdOf(entry);
-    return namesByConfigId.get(configId) ?? configId;
+  useEffect(() => {
+    activeRef.current = active;
+    if (!active) {
+      requestRef.current += 1;
+      return;
+    }
+    void refresh();
+    return () => {
+      activeRef.current = false;
+      requestRef.current += 1;
+    };
+  }, [active, refresh]);
+
+  const selectTarget = (key: string) => {
+    selectedRef.current = key;
+    setSelected(key);
+    if (targets !== null) void loadLogs(targets, key);
   };
 
-  const selectedEntry = entries?.find((entry) => entry.label === selected) ?? null;
+  const visibleEntries = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return entries.filter((entry) =>
+      (level === "all" || entry.level === level) &&
+      (
+        normalized === "" ||
+        `${entry.agentName} ${entry.channel} ${entry.text}`.toLowerCase().includes(normalized)
+      ));
+  }, [entries, level, query]);
+
+  const renderedLog = useMemo(
+    () => visibleEntries.map((entry) =>
+      `[${entry.level.toUpperCase()}] [${entry.agentName}${entry.channel ? ` #${entry.channel}` : ""}] ${entry.text}`,
+    ).join("\n"),
+    [visibleEntries],
+  );
+  const logPreRef = useAutoScrollToLatest<HTMLPreElement>(renderedLog, !busy);
+
+  const counts = useMemo(() => ({
+    all: entries.length,
+    error: entries.filter((entry) => entry.level === "error").length,
+    warn: entries.filter((entry) => entry.level === "warn").length,
+    info: entries.filter((entry) => entry.level === "info").length,
+  }), [entries]);
 
   return (
-    <div className="resident-logs">
+    <section className="resident-logs" aria-labelledby="local-agent-logs-title">
       <div className="resident-logs-head">
-        <h3 className="resident-logs-title">{t("ResidentDutyLogs.title")}</h3>
-        <button type="button" className="d-btn resident-logs-refresh" onClick={() => void refreshList()}>
-          {t("ResidentDutyLogs.refresh")}
+        <div>
+          <h3 className="resident-logs-title" id="local-agent-logs-title">{t("ResidentDutyLogs.title")}</h3>
+          <p className="resident-logs-lead">{t("ResidentDutyLogs.lead")}</p>
+        </div>
+        <button type="button" className="d-btn resident-logs-refresh" disabled={busy} onClick={() => void refresh()}>
+          {busy ? t("ResidentDutyLogs.loading") : t("ResidentDutyLogs.refresh")}
         </button>
       </div>
-      <p className="resident-logs-lead">{t("ResidentDutyLogs.lead")}</p>
 
       {listError !== null && <p className="banner banner--red" role="alert">{listError}</p>}
-
-      {entries !== null && entries.length === 0 && listError === null ? (
+      {targets !== null && targets.length === 0 && listError === null ? (
         <p className="resident-logs-empty">{t("ResidentDutyLogs.empty")}</p>
       ) : (
-        <ul className="resident-logs-list">
-          {(entries ?? []).map((entry) => (
-            <li key={entry.label}>
-              <button
-                type="button"
-                className={`d-btn resident-logs-item${selected === entry.label ? " resident-logs-item--active" : ""}`}
-                onClick={() => void loadLog(entry.label)}
-              >
-                <span className="resident-logs-chan">#{channelOf(entry)}</span>
-                <span className="resident-logs-agent">{agentNameOf(entry)}</span>
-                <span className={`resident-logs-dot${entry.loaded ? " resident-logs-dot--on" : ""}`} aria-hidden="true">
-                  ●
-                </span>
-                <span className="resident-logs-state">
-                  {entry.loaded ? t("ResidentDutyLogs.loaded") : t("ResidentDutyLogs.stopped")}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {selected !== null && (
-        <div className="resident-logs-view">
-          <div className="resident-logs-view-head">
-            <span className="resident-logs-selection">
-              {selectedEntry !== null && <strong>{agentNameOf(selectedEntry)}</strong>}
-              <span className="t-mono resident-logs-label">{selected}</span>
-            </span>
-            <button type="button" className="d-btn resident-logs-reload" disabled={logBusy} onClick={() => void loadLog(selected)}>
-              {logBusy ? t("ResidentDutyLogs.loading") : t("ResidentDutyLogs.reload")}
-            </button>
+        <>
+          <div className="resident-logs-toolbar">
+            <label>
+              <span>{t("ResidentDutyLogs.agentFilter")}</span>
+              <select value={selected} onChange={(event) => selectTarget(event.currentTarget.value)}>
+                <option value="all">{t("ResidentDutyLogs.allAgents")}</option>
+                {(targets ?? []).map((row) => (
+                  <option key={row.key} value={row.key}>
+                    {targetLabel(row, t)}{row.channel ? ` · #${row.channel}` : ""}
+                    {row.kind === "duty" ? ` · ${t("ResidentDutyLogs.resident")}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="resident-logs-search-label">
+              <span>{t("ResidentDutyLogs.searchLabel")}</span>
+              <input
+                type="search"
+                value={query}
+                placeholder={t("ResidentDutyLogs.searchPlaceholder")}
+                onChange={(event) => setQuery(event.currentTarget.value)}
+              />
+            </label>
           </div>
-          {logError !== null && <p className="banner banner--red" role="alert">{logError}</p>}
-          {logError === null &&
-            (log.trim() === "" ? (
-              <p className="resident-logs-empty">{t("ResidentDutyLogs.noLog")}</p>
-            ) : (
-              <pre ref={logPreRef} className="t-mono resident-logs-pre">{log}</pre>
+          <div className="resident-logs-levels" aria-label={t("ResidentDutyLogs.levelFilter")}>
+            {(["all", "error", "warn", "info"] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={`d-btn resident-logs-level resident-logs-level--${value}${level === value ? " is-active" : ""}`}
+                aria-pressed={level === value}
+                onClick={() => setLevel(value)}
+              >
+                {t(`ResidentDutyLogs.level.${value}`)} <span>{counts[value]}</span>
+              </button>
             ))}
-        </div>
+          </div>
+          {logError !== null && <p className="banner banner--yellow" role="status">{logError}</p>}
+          {busy ? (
+            <p className="resident-logs-empty" role="status">{t("ResidentDutyLogs.loading")}</p>
+          ) : renderedLog === "" ? (
+            <p className="resident-logs-empty">{t(entries.length === 0 ? "ResidentDutyLogs.noLog" : "ResidentDutyLogs.noMatch")}</p>
+          ) : (
+            <pre ref={logPreRef} className="t-mono resident-logs-pre" tabIndex={0}>{renderedLog}</pre>
+          )}
+        </>
       )}
-    </div>
+    </section>
   );
 }

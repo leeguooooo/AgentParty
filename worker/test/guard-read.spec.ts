@@ -1,6 +1,6 @@
 import { LOOP_GUARD_N } from "@agentparty/shared";
 import { describe, expect, it } from "vitest";
-import { api, createChannel, disableLoopGuard, postMessage, seedToken } from "./helpers";
+import { api, createChannel, postMessage, seedToken } from "./helpers";
 
 interface GuardState {
   enabled: boolean;
@@ -16,13 +16,21 @@ async function guardState(slug: string, token: string): Promise<GuardState> {
   return (await res.json()) as GuardState;
 }
 
+async function enableDefaultGuard(slug: string, token: string): Promise<void> {
+  const res = await api(`/api/channels/${slug}/loop-guard`, token, {
+    method: "PUT",
+    body: JSON.stringify({ enabled: true, limit: LOOP_GUARD_N }),
+  });
+  expect(res.status).toBe(200);
+}
+
 describe("loop guard read path", () => {
   it("exposes enabled/limit/streak/remaining/resets_on for a fresh channel", async () => {
     const agent = await seedToken("agent");
     const slug = await createChannel(agent.token);
-    // #96 起新频道默认开 guard，limit 落到 normal 默认
+    // 守卫默认关闭，但读取接口仍给出 normal 模式的建议阈值。
     expect(await guardState(slug, agent.token)).toEqual({
-      enabled: true,
+      enabled: false,
       limit: LOOP_GUARD_N,
       streak: 0,
       remaining: LOOP_GUARD_N,
@@ -34,6 +42,7 @@ describe("loop guard read path", () => {
     const agentA = await seedToken("agent");
     const agentB = await seedToken("agent");
     const slug = await createChannel(agentA.token);
+    await enableDefaultGuard(slug, agentA.token);
 
     expect((await guardState(slug, agentA.token)).streak).toBe(0);
 
@@ -57,6 +66,7 @@ describe("loop guard read path", () => {
     const agent = await seedToken("agent");
     const human = await seedToken("human");
     const slug = await createChannel(agent.token);
+    await enableDefaultGuard(slug, agent.token);
 
     await postMessage(slug, agent.token, "a0");
     await postMessage(slug, agent.token, "a1");
@@ -90,9 +100,7 @@ describe("loop guard read path", () => {
 
   it("reports enabled=false once a human disables the guard", async () => {
     const agent = await seedToken("agent");
-    const human = await seedToken("human");
     const slug = await createChannel(agent.token);
-    await disableLoopGuard(slug, human.token);
     const g = await guardState(slug, agent.token);
     expect(g.enabled).toBe(false);
   });
