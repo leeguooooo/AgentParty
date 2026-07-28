@@ -1862,7 +1862,7 @@ export class ChannelDO extends Server<Env> {
       if (!(await this.isTokenActive(identity.tokenHash))) {
         return Response.json({ error: { code: "unauthorized", message: "invalid or revoked token" } }, { status: 401 });
       }
-      const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+      const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).toArray()[0];
       if (!row) {
         return Response.json({ error: { code: "not_found", message: `message seq ${seq} not found` } }, { status: 404 });
       }
@@ -2010,7 +2010,7 @@ export class ChannelDO extends Server<Env> {
       if (byteLength(reason) > REVIEW_REASON_LIMIT) {
         return Response.json({ error: { code: "too_large", message: `reason exceeds ${REVIEW_REASON_LIMIT} bytes` } }, { status: 413 });
       }
-      const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+      const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).toArray()[0];
       if (!row) {
         return Response.json({ error: { code: "not_found", message: `message seq ${seq} not found` } }, { status: 404 });
       }
@@ -2454,7 +2454,7 @@ export class ChannelDO extends Server<Env> {
         ? frame.replaces
         : undefined;
     if (replacesSeq !== undefined) {
-      const replacedRow = sql.exec("SELECT * FROM messages WHERE seq = ?", replacesSeq).one();
+      const replacedRow = sql.exec("SELECT * FROM messages WHERE seq = ?", replacesSeq).toArray()[0];
       if (!replacedRow) {
         return { ok: false, code: "bad_request", message: `replacement target seq ${replacesSeq} not found` };
       }
