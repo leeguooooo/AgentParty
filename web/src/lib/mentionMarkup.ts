@@ -80,7 +80,7 @@ export function mentionExtension(
     },
     renderer(token) {
       const { name, display } = token as MentionToken;
-      return `<span class="ap-mention" title="@${escapeHtmlAttr(name)}">@${escapeHtmlText(display)}</span>`;
+      return `<span class="ap-mention" title="@${escapeHtmlAttr(name)}">${escapeHtmlText(display)}</span>`;
     },
   };
 }

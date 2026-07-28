@@ -321,7 +321,7 @@ function AgentInfoPopover({
           )}
           <div>
             <dt>{t("MessageCard.agentCard.technicalId")}</dt>
-            <dd className="t-mono" title={owner ? `owner: ${owner}` : undefined}>@{name}</dd>
+            <dd className="t-mono" title={owner ? `owner: ${owner}` : undefined}>{name}</dd>
           </div>
           <div>
             <dt>{t("MessageCard.agentCard.leader")}</dt>
@@ -427,12 +427,6 @@ function MessageCardImpl({
   const clientOutdated = isClientVersionOutdated(clientVersion, minClientVersion);
   const owner = msg.sender.owner && msg.sender.owner !== senderLabel ? msg.sender.owner : null;
   const agentOwnerLabel = resolveAgentOwnerLabel(msg.sender, identityDisplay);
-  const agentOwnerText =
-    msg.sender.kind === "agent" && msg.sender.owner
-      ? agentOwnerLabel
-        ? t("MessageCard.owner.agent", { owner: agentOwnerLabel })
-        : t("MessageCard.owner.unresolved")
-      : null;
   const identityLabel = useCallback(
     (
       name: string,
@@ -678,7 +672,7 @@ function MessageCardImpl({
           )}
           <AgentInfoPopover
             id={`agent-info-${msg.seq}-${msg.sender.name}`}
-            label={senderLabel}
+            label={senderOwnedLabel}
             name={msg.sender.name}
             kind={msg.sender.kind}
             owner={msg.sender.owner ?? null}
@@ -688,7 +682,7 @@ function MessageCardImpl({
             recentMessages={recentMessages}
             triggerClassName="msg-sender"
           />
-          {/* 技术身份保留在悬浮卡片中；人的归属直接显示，避免用户从账号 ID 猜测。 */}
+          {/* 技术身份保留在悬浮卡片中；消息头用「人 · agent」直接表达归属。 */}
           {lineageLabel !== null && (
             <span className="t-mono msg-lineage" title={senderTitle}>
               {lineageLabel}
@@ -697,11 +691,6 @@ function MessageCardImpl({
           <span className={"msg-kind" + (msg.sender.kind === "human" ? " msg-kind--human" : "")}>
             {msg.sender.kind}
           </span>
-          {agentOwnerText !== null && (
-            <span className="msg-owner" title={owner ? `owner: ${owner}` : undefined}>
-              {agentOwnerText}
-            </span>
-          )}
           {clientVersion !== null && (
             <span
               className={"t-mono msg-client-version" + (clientOutdated ? " msg-client-version--outdated" : "")}
@@ -740,11 +729,11 @@ function MessageCardImpl({
               <AgentInfoPopover
                 key={m}
                 id={`agent-info-${msg.seq}-mention-${m}`}
-                label={`@${identityLabel(m, {
+                label={identityLabel(m, {
                   kind: mentionedKind,
                   owner: mentionedOwner,
                   display: mentionedPresentation.label,
-                })}`}
+                })}
                 name={m}
                 kind={mentionedKind}
                 owner={mentionedOwner}
