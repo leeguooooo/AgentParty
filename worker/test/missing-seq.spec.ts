@@ -95,6 +95,8 @@ describe("missing seq returns 404 not 500 (#785)", () => {
 
     expect(res.status).toBe(400);
     const raw = await res.text();
+    const parsed = JSON.parse(raw) as { error?: { code?: string } };
+    expect(parsed.error?.code).toBe("bad_request");
     expect(raw).not.toMatch(/index\.js|\bat \w+.*\(|SqlStorage|SQLITE/i);
   });
 });
