@@ -291,6 +291,27 @@ describe("AgentTokens functional workspaces", () => {
     expect(allText(renderer!)).toContain("目标");
   });
 
+  test("falls back to the first owned agent when a stale focus target no longer exists", async () => {
+    agentsFixture = [
+      { name: "available-agent", owner: "acct-1", channel_scope: "demo", created_at: 1 },
+    ];
+    await act(async () => {
+      renderer = create(
+        <LocaleProvider>
+          <AgentTokens {...baseProps()} active={true} focusAgentName="deleted-agent" />
+        </LocaleProvider>,
+      );
+    });
+    await act(async () => {});
+
+    const selectedRow = renderer!.root.find((node) =>
+      typeof node.props.className === "string"
+      && node.props.className.split(/\s+/).includes("agentmanager-list-item")
+      && node.props["aria-pressed"] === true
+    );
+    expect(selectedRow.findAll((node) => node.children.some((child) => child === "available-agent"))).toHaveLength(1);
+  });
+
   test("ignores stale channel and profile refresh responses", async () => {
     agentsFixture = [{ name: "initial-agent", owner: "acct-1", channel_scope: "demo", created_at: 1 }];
     profilesFixture = [profile({ handle: "initial-profile" })];

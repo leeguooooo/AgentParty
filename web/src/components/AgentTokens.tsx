@@ -224,8 +224,9 @@ export function AgentTokens({
     if (!isOpen || focusAgentName === null) return;
     setActiveSection("channel");
     setAgentQuery("");
-    setSelectedAgentName(focusAgentName);
-  }, [focusAgentName, isOpen]);
+    if (agents === null) return;
+    setSelectedAgentName(agents.some((agent) => agent.name === focusAgentName) ? focusAgentName : null);
+  }, [agents, focusAgentName, isOpen]);
 
   useEffect(() => {
     if (isOpen) return;
