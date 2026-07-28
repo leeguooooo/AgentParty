@@ -10,6 +10,7 @@ import {
   resolveMentionToken,
   type MentionAlias,
 } from "@agentparty/shared/mentions";
+import { pinyin } from "pinyin-pro";
 import { MENTION_SENDER_RETENTION_MS, mergeSenderIdentity, type SenderIdentitySnapshot } from "./senderIdentity";
 
 export type MentionTier = "online" | "wakeable" | "recent";
@@ -47,6 +48,18 @@ const SYSTEM_HUMAN_SESSION_RE =
 // #165：昵称可含 unicode（中文），故放开首字为任意字母/数字（与后端 NICKNAME_RE 对齐）。
 const NAME_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$/u;
 const CANDIDATE_TIER_RANK: Record<MentionTier, number> = { online: 0, wakeable: 1, recent: 2 };
+const HAN_RE = /\p{Script=Han}/u;
+
+function ownerSearchKeys(ownerDisplay: string | undefined): string[] {
+  const readable = ownerDisplay?.trim().toLowerCase();
+  if (!readable) return [];
+  if (!HAN_RE.test(readable)) return [readable];
+  return [
+    readable,
+    pinyin(readable, { toneType: "none", type: "array" }).join("").toLowerCase(),
+    pinyin(readable, { pattern: "first", toneType: "none", type: "array" }).join("").toLowerCase(),
+  ];
+}
 
 // 档位：① 在线（当前有 WS 连接） ② 可唤醒（autoWakeReachable 统一口径 #47/#55：
 // serve/watch 需不 stale 且不能是 human_driven，webhook 服务端投递、离线也算） ③ 最近活跃（其余 presence）。
@@ -367,7 +380,7 @@ export function filterCandidates(cands: MentionCandidate[], query: string, limit
   const direct = [...pref, ...sub];
   const matchedOwnerGroups = new Set(
     uniqueCandidates
-      .filter((candidate) => q.length >= 2 && candidate.ownerDisplay?.toLowerCase().includes(q))
+      .filter((candidate) => q.length >= 2 && ownerSearchKeys(candidate.ownerDisplay).some((key) => key.includes(q)))
       .map((candidate) => candidate.account ?? `display:${candidate.ownerDisplay!.toLowerCase()}`),
   );
   if (matchedOwnerGroups.size === 0) return direct.slice(0, limit);

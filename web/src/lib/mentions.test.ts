@@ -525,6 +525,15 @@ describe("filterCandidates", () => {
         ownerDisplay: "王路",
       },
       {
+        name: "apple-signin-revoke",
+        display: "apple-signin-revoke",
+        kind: "agent" as const,
+        tier: "wakeable" as const,
+        group: wangAccount,
+        account: wangAccount,
+        ownerDisplay: "王路",
+      },
+      {
         name: "luis",
         display: "Luis",
         kind: "human" as const,
@@ -546,6 +555,7 @@ describe("filterCandidates", () => {
 
     expect(filterCandidates(candidates, "").map((candidate) => candidate.name)).toEqual([
       "karl",
+      "apple-signin-revoke",
       "luis",
       "奥创",
     ]);
@@ -554,6 +564,15 @@ describe("filterCandidates", () => {
       "奥创",
     ]);
     expect(filterCandidates(candidates, "luis").every((candidate) => candidate.account === luisAccount)).toBe(true);
+    expect(filterCandidates(candidates, "wang").map((candidate) => candidate.name)).toEqual([
+      "karl",
+      "apple-signin-revoke",
+    ]);
+    expect(filterCandidates(candidates, "wl").map((candidate) => candidate.name)).toEqual([
+      "karl",
+      "apple-signin-revoke",
+    ]);
+    expect(filterCandidates(candidates, "wang").every((candidate) => candidate.account === wangAccount)).toBe(true);
   });
 });
 
