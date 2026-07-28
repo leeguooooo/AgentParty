@@ -11,7 +11,7 @@ export interface IdentityDisplay {
 export type IdentityDisplayMap = Record<string, IdentityDisplay>;
 
 function isOpaqueAccount(value: string): boolean {
-  return /^(?:lark|oidc|apple|github):/i.test(value);
+  return /^(?:(?:lark|oidc|apple|github):|oidc-)/i.test(value);
 }
 
 function displayQuality(name: string, display: string): number {

@@ -109,4 +109,25 @@ describe("resolveAgentOwnerLabel", () => {
   it("does not expose an unresolved opaque owner account", () => {
     expect(resolveAgentOwnerLabel({ kind: "agent", owner: "lark:on_unknown" }, undefined)).toBeNull();
   });
+
+  it("does not expose an opaque OIDC handle as the linked human display name", () => {
+    const identities = buildIdentityDisplay({
+      channelIdentities: [
+        {
+          name: "human-session",
+          display: "oidc-a1b2c3d4e5f60708",
+          kind: "human",
+          account: "team@example.com",
+        },
+      ],
+      mentionOptions: [],
+      messages: [],
+      participants: [],
+      presence: {},
+    });
+
+    expect(
+      resolveAgentOwnerLabel({ kind: "agent", owner: "team@example.com" }, identities),
+    ).toBe("team@example.com");
+  });
 });
