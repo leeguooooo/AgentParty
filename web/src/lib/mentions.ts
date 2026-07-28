@@ -50,15 +50,25 @@ const NAME_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$/u;
 const CANDIDATE_TIER_RANK: Record<MentionTier, number> = { online: 0, wakeable: 1, recent: 2 };
 const HAN_RE = /\p{Script=Han}/u;
 
-function ownerSearchKeys(ownerDisplay: string | undefined): string[] {
-  const readable = ownerDisplay?.trim().toLowerCase();
-  if (!readable) return [];
-  if (!HAN_RE.test(readable)) return [readable];
-  return [
-    readable,
-    pinyin(readable, { toneType: "none", type: "array" }).join("").toLowerCase(),
-    pinyin(readable, { pattern: "first", toneType: "none", type: "array" }).join("").toLowerCase(),
-  ];
+function identitySearchKeys(...values: Array<string | undefined>): string[] {
+  const keys = new Set<string>();
+  for (const value of values) {
+    const readable = value?.trim().toLowerCase();
+    if (!readable) continue;
+    keys.add(readable);
+    if (!HAN_RE.test(readable)) continue;
+    keys.add(pinyin(readable, { toneType: "none", type: "array" }).join("").toLowerCase());
+    keys.add(
+      pinyin(readable, { pattern: "first", toneType: "none", type: "array" })
+        .join("")
+        .toLowerCase(),
+    );
+  }
+  return [...keys];
+}
+
+function generatedAgentRole(name: string): string | undefined {
+  return name.match(/^(?:lark-)?[0-9a-f]{12,}-(.+)$/i)?.[1]?.trim() || undefined;
 }
 
 // 档位：① 在线（当前有 WS 连接） ② 可唤醒（autoWakeReachable 统一口径 #47/#55：
@@ -198,15 +208,21 @@ export function mentionCandidates(
           : undefined;
       const handle = participantByName.get(name)?.handle ?? p?.handle ?? identityHandle ?? recentSender?.handle;
       // 人类网页会话名是 UUID，显示账号 email 才认得出「是谁」；agent 名本身可读，用 name。
-      const display = handle
-        ? handle
-        : identity?.display && identity.display !== ""
-          ? identity.display
-          : assigned?.display && assigned.display !== ""
-            ? assigned.display
-            : kind === "human" && account
-              ? recentSender?.display_name || account
-              : name;
+      const readableDisplay =
+        identity?.display?.trim()
+        || assigned?.display?.trim()
+        || participantByName.get(name)?.display_name?.trim()
+        || p?.display_name?.trim()
+        || recentSender?.display_name?.trim();
+      // handle 是稳定的 @ 路由 token，不等于用户应该看到的名字。人类优先显示 SSO 真名；
+      // 系统生成的 agent 名则只显示末尾角色，菜单里再配 ownerDisplay 说明归属。
+      const display = kind === "human"
+        ? readableDisplay || handle || account || name
+        : handle
+          || (readableDisplay && readableDisplay !== name ? readableDisplay : undefined)
+          || generatedAgentRole(name)
+          || readableDisplay
+          || name;
       const ownerDisplay =
         account === undefined
           ? undefined
@@ -367,29 +383,36 @@ export function filterCandidates(cands: MentionCandidate[], query: string, limit
   const uniqueCandidates = [...uniqueByName.values()];
   const q = query.toLowerCase();
   if (q === "") return uniqueCandidates.slice(0, limit);
-  // 前缀命中优先，其次子串命中
+  // 前缀命中优先，其次子串命中；中文显示名同时支持全拼和首字母。
   const pref: MentionCandidate[] = [];
   const sub: MentionCandidate[] = [];
   for (const c of uniqueCandidates) {
-    // 名字与可读显示名（人类的 email）都参与匹配——这样能直接搜 @thejacks 找到 UUID 会话
-    const n = c.name.toLowerCase();
-    const d = c.display.toLowerCase();
-    if (n.startsWith(q) || d.startsWith(q)) pref.push(c);
-    else if (n.includes(q) || d.includes(q)) sub.push(c);
+    const keys = identitySearchKeys(c.name, c.display);
+    if (keys.some((key) => key.startsWith(q))) pref.push(c);
+    else if (keys.some((key) => key.includes(q))) sub.push(c);
   }
   const direct = [...pref, ...sub];
   const matchedOwnerGroups = new Set(
     uniqueCandidates
-      .filter((candidate) => q.length >= 2 && ownerSearchKeys(candidate.ownerDisplay).some((key) => key.includes(q)))
+      .filter((candidate) => (
+        q.length >= 2
+        && identitySearchKeys(candidate.ownerDisplay).some((key) => key.includes(q))
+      ))
       .map((candidate) => candidate.account ?? `display:${candidate.ownerDisplay!.toLowerCase()}`),
   );
   if (matchedOwnerGroups.size === 0) return direct.slice(0, limit);
 
   // 搜人名时把这个人名下的全部 agent 一起带出。owner 组不受普通 8 条上限截断，
   // 否则 agent 较多的账号仍会出现“只看到本人、看不到自己的 agent”。
-  const ownerMatches = uniqueCandidates.filter((candidate) =>
-    matchedOwnerGroups.has(candidate.account ?? `display:${candidate.ownerDisplay?.toLowerCase() ?? ""}`),
-  );
+  const ownerMatches = uniqueCandidates
+    .filter((candidate) =>
+      matchedOwnerGroups.has(candidate.account ?? `display:${candidate.ownerDisplay?.toLowerCase() ?? ""}`),
+    )
+    .sort((left, right) =>
+      (left.kind === "human" ? 0 : 1) - (right.kind === "human" ? 0 : 1)
+      || CANDIDATE_TIER_RANK[left.tier] - CANDIDATE_TIER_RANK[right.tier]
+      || left.display.localeCompare(right.display),
+    );
   const ownerNames = new Set(ownerMatches.map((candidate) => candidate.name));
   const remaining = direct.filter((candidate) => !ownerNames.has(candidate.name));
   return [...ownerMatches, ...remaining.slice(0, Math.max(0, limit - ownerMatches.length))];

@@ -55,10 +55,10 @@ describe("responsive product-shell polish", () => {
   });
 
   test("mobile task cards reserve a full first row for their title", () => {
-    const mobileTasks = mediaBlockContaining("@media (max-width: 760px)", ".task-ledger-panel .task-card-main");
+    const mobileTasks = mediaBlockContaining("@media (max-width: 760px)", ".task-card-open");
 
-    expect(mobileTasks).toMatch(/\.task-ledger-panel \.task-card-main\s*\{[^}]*flex-wrap:\s*wrap;/s);
-    expect(mobileTasks).toMatch(/\.task-ledger-panel \.task-card-title\s*\{[^}]*order:\s*-1;[^}]*flex:\s*1 0 100%;/s);
+    expect(mobileTasks).toMatch(/\.task-card-open\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\) auto;/s);
+    expect(mobileTasks).toMatch(/\.task-card-copy\s*\{[^}]*grid-column:\s*1\s*\/\s*-2;[^}]*grid-row:\s*2;/s);
   });
 
   test("agent cards can align inward instead of widening the message stream", () => {

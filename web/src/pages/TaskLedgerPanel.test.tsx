@@ -1,7 +1,7 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { TaskRecord } from "@agentparty/shared";
+import type { Attachment, TaskRecord } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 
 // Channel.tsx 会 import dompurify（经 markdown 链路）——测试环境里存桩掉。
@@ -137,22 +137,20 @@ function findByAria(r: ReactTestRenderer, label: string) {
   return r.root.find((n) => n.props["aria-label"] === label);
 }
 
-// #504 博客风：任务卡默认折叠，详情/动作点开才渲染。测试要验动作/详情前先展开所有卡。
-async function expandCards(r: ReactTestRenderer) {
-  const toggles = r.root.findAll((n) => n.props.className === "task-card-toggle");
-  for (const toggle of toggles) {
-    await act(async () => { toggle.props.onClick(); });
-  }
+async function openTask(r: ReactTestRenderer, id = 1) {
+  await act(async () => {
+    r.root.findByProps({ "data-task-id": id }).findByProps({ className: "task-card-open" }).props.onClick();
+  });
 }
 
 describe("TaskLedgerPanel i18n", () => {
   test("renders Chinese action + column labels when locale is zh", async () => {
     const r = render("zh", baseProps());
-    await expandCards(r);
+    expect(allText(r)).toContain("新建任务");
+    await openTask(r);
     const text = allText(r);
-    expect(text).toContain("认领"); // Claim
+    expect(text).toContain("开始处理");
     expect(text).toContain("阻塞"); // Block
-    expect(text).toContain("新建任务"); // New task
     expect(text).toContain("待办"); // backlog state label
     expect(text).not.toContain("Claim");
     expect(text).not.toContain("New task");
@@ -160,17 +158,17 @@ describe("TaskLedgerPanel i18n", () => {
 
   test("renders English labels when locale is en", async () => {
     const r = render("en", baseProps());
-    await expandCards(r);
+    expect(allText(r)).toContain("New task");
+    await openTask(r);
     const text = allText(r);
-    expect(text).toContain("Claim");
-    expect(text).toContain("New task");
+    expect(text).toContain("Start work");
   });
 });
 
 describe("TaskLedgerPanel new-task entry", () => {
   test("opening the composer and submitting fires onCreateTask exactly once with the typed values", async () => {
-    const calls: Array<{ title: string; desc: string }> = [];
-    const onCreateTask = mock(async (input: { title: string; desc: string }) => {
+    const calls: Array<Parameters<PanelProps["onCreateTask"]>[0]> = [];
+    const onCreateTask = mock(async (input: Parameters<PanelProps["onCreateTask"]>[0]) => {
       calls.push(input);
       return true;
     });
@@ -190,7 +188,37 @@ describe("TaskLedgerPanel new-task entry", () => {
     });
 
     expect(onCreateTask).toHaveBeenCalledTimes(1);
-    expect(calls).toEqual([{ title: "ship it", desc: "", attachments: [] }]);
+    expect(calls).toEqual([{ title: "ship it", desc: "", priority: 0, assignee: null, attachments: [] }]);
+  });
+
+  test("creates with the selected owner type and priority", async () => {
+    const calls: Array<Parameters<PanelProps["onCreateTask"]>[0]> = [];
+    const onCreateTask = mock(async (input: Parameters<PanelProps["onCreateTask"]>[0]) => {
+      calls.push(input);
+      return true;
+    });
+    const r = render("en", baseProps({
+      identities: [{ name: "worker-a", display: "Luis · angel", kind: "agent" }],
+      onCreateTask,
+    }));
+
+    await act(async () => findByAria(r, "New task").props.onClick());
+    await act(async () => {
+      findByAria(r, "New task title").props.onChange({ currentTarget: { value: "ship owner controls" } });
+      findByAria(r, "New task owner").props.onChange({ currentTarget: { value: "worker-a" } });
+      findByAria(r, "New task priority").props.onChange({ currentTarget: { value: "2" } });
+    });
+    await act(async () => {
+      await r.root.find((n) => n.props.className === "task-new-form").props.onSubmit({ preventDefault() {} });
+    });
+
+    expect(calls).toEqual([{
+      title: "ship owner controls",
+      desc: "",
+      priority: 2,
+      assignee: { name: "worker-a", kind: "agent" },
+      attachments: [],
+    }]);
   });
 
   test("submitting with an empty title never calls onCreateTask", async () => {
@@ -206,6 +234,43 @@ describe("TaskLedgerPanel new-task entry", () => {
 
     expect(onCreateTask).toHaveBeenCalledTimes(0);
   });
+
+  test("Enter cannot submit while an attachment upload is still in flight", async () => {
+    const onCreateTask = mock(async () => true);
+    let finishUpload: ((attachment: Attachment) => void) | undefined;
+    const onUploadAttachment = mock(() => new Promise<Attachment>((resolve) => {
+      finishUpload = resolve;
+    }));
+    const r = render("en", baseProps({ onCreateTask, onUploadAttachment }));
+
+    await act(async () => findByAria(r, "New task").props.onClick());
+    await act(async () => {
+      findByAria(r, "New task title").props.onChange({ currentTarget: { value: "wait for upload" } });
+      r.root.find((node) => node.type === "input" && node.props.type === "file").props.onChange({
+        currentTarget: {
+          files: [{ name: "proof.txt" }],
+          value: "proof.txt",
+        },
+      });
+    });
+    await act(async () => {
+      r.root.find((node) => node.props.className === "task-new-form").props.onSubmit({ preventDefault() {} });
+    });
+
+    expect(onCreateTask).toHaveBeenCalledTimes(0);
+
+    await act(async () => {
+      finishUpload?.({
+        key: "proof",
+        filename: "proof.txt",
+        content_type: "text/plain",
+        size: 5,
+        url: "/attachments/proof",
+      });
+      await Promise.resolve();
+    });
+    expect(findByAria(r, "Remove proof.txt")).toBeDefined();
+  });
 });
 
 describe("TaskLedgerPanel inline rejection (#357)", () => {
@@ -217,7 +282,7 @@ describe("TaskLedgerPanel inline rejection (#357)", () => {
       onReview: (item, action, reason) => reviews.push({ id: item.id, action, reason }),
     }));
 
-    await expandCards(r);
+    await openTask(r);
     await act(async () => {
       r.root.find((n) => n.type === "button" && n.children.includes("Reject")).props.onClick();
     });
@@ -232,11 +297,47 @@ describe("TaskLedgerPanel inline rejection (#357)", () => {
     const onReview = mock(() => undefined);
     const reviewable = task({ state: "needs_review", completion_artifact: {}, anchor_seqs: [42] });
     const r = render("en", baseProps({ tasks: [reviewable], onReview }));
-    await expandCards(r);
+    await openTask(r);
     await act(async () => r.root.find((n) => n.type === "button" && n.children.includes("Reject")).props.onClick());
     await act(async () => r.root.find((n) => n.props.className === "task-action-btn task-reject-cancel").props.onClick());
     expect(r.root.findAll((n) => n.props.className === "task-new-form task-reject-form")).toHaveLength(0);
     expect(onReview).toHaveBeenCalledTimes(0);
+  });
+});
+
+describe("TaskLedgerPanel detail actions", () => {
+  test("blocking a task requires and forwards a trimmed reason", async () => {
+    const stateChanges: Array<[number, string, string | undefined]> = [];
+    const r = render("en", baseProps({
+      onSetState: (id, state, reason) => stateChanges.push([id, state, reason]),
+    }));
+
+    await openTask(r);
+    await act(async () => {
+      r.root.find((n) => n.type === "button" && n.children.includes("Block")).props.onClick();
+    });
+    const reason = findByAria(r, "Blocked reason for task 1");
+    await act(async () => reason.props.onChange({ currentTarget: { value: "  waiting for credentials  " } }));
+    await act(async () => {
+      r.root.find((n) => n.props.className === "task-new-form task-block-form")
+        .props.onSubmit({ preventDefault() {} });
+    });
+
+    expect(stateChanges).toEqual([[1, "blocked", "waiting for credentials"]]);
+  });
+
+  test("source messages navigate back to the original discussion", async () => {
+    const opened: number[] = [];
+    const r = render("en", baseProps({
+      tasks: [task({ anchor_seqs: [42, 43] })],
+      onOpenMessage: (seq) => { opened.push(seq); },
+    }));
+
+    await openTask(r);
+    await act(async () => {
+      r.root.find((n) => n.type === "button" && n.children.includes("Open message #42")).props.onClick();
+    });
+    expect(opened).toEqual([42]);
   });
 });
 
@@ -300,6 +401,40 @@ describe("TaskLedgerPanel assignee filter (#271)", () => {
     const r = render("en", baseProps());
     expect(r.root.findAll((n) => n.props["aria-label"] === "Filter by assignee")).toHaveLength(0);
   });
+
+  test("uses readable owner labels instead of raw agent routing names", () => {
+    const r = render("en", baseProps({
+      tasks: [task({ assignee: { name: "worker-a", kind: "agent" } })],
+      identities: [{ name: "worker-a", display: "Luis · angel", kind: "agent" }],
+    }));
+
+    expect(allText(r)).toContain("Owner: Luis · angel");
+    expect(allText(r)).not.toContain("Owner: worker-a");
+  });
+});
+
+describe("TaskLedgerPanel default scope", () => {
+  test("starts with unfinished work and reveals completed tasks only when requested", async () => {
+    const r = render("en", baseProps({
+      tasks: [
+        task({ id: 1, title: "open-task" }),
+        task({ id: 2, title: "completed-task", state: "done" }),
+      ],
+    }));
+
+    expect(allText(r)).toContain("open-task");
+    expect(allText(r)).not.toContain("completed-task");
+    expect(r.root.findAll((node) => node.props.className === "task-blog-chip task-blog-clear")).toHaveLength(0);
+    const stateFilters = findByAria(r, "Filter tasks by state");
+    await act(async () => {
+      stateFilters.findAllByType("button").at(-1)!.props.onClick();
+    });
+    expect(allText(r)).toContain("completed-task");
+    const clearFilters = r.root.find((node) => node.props.className === "task-blog-chip task-blog-clear");
+    await act(async () => clearFilters.props.onClick());
+    expect(allText(r)).not.toContain("completed-task");
+    expect(r.root.findAll((node) => node.props.className === "task-blog-chip task-blog-clear")).toHaveLength(0);
+  });
 });
 
 // #271(b)：指派输入框接 datalist，候选来自频道身份。
@@ -310,7 +445,7 @@ describe("TaskLedgerPanel assignee datalist (#271)", () => {
       { name: "human-b", display: "human-b · human" },
     ];
     const r = render("en", baseProps({ identities }));
-    await expandCards(r);
+    await openTask(r);
     const input = findByAria(r, "Assign task 1");
     expect(input.props.list).toBe("task-assignee-targets");
     const datalist = r.root.find((n) => n.type === "datalist");
@@ -371,16 +506,13 @@ describe("TaskLedgerPanel task detail (#271)", () => {
     Object.defineProperty(globalThis, "window", { configurable: true, value: fakeWindow });
     const r = render("en", baseProps({ tasks: [detailed] }), (element) => {
       const props = element.props as Record<string, unknown>;
-      if (props.className === "task-card-title") return titleNode;
+      if (props.className === "task-card-open") return titleNode;
       if (props.className === "d-btn task-detail-close") return backNode;
       return {};
     });
     expect(r.root.findAll((n) => n.props["aria-label"] === "task 7 details")).toHaveLength(0);
-    await expandCards(r); // 博客风：卡片内联 solution 展开后才渲染
-    expect(r.root.findAll((n) => n.props.className === "task-solution")).toHaveLength(1);
-    expect(allText(r)).toContain("solution.html");
 
-    await act(async () => { findByAria(r, "Open task 7 details").props.onClick(); });
+    await openTask(r, 7);
     findByAria(r, "task 7 details");
     expect(focused).toBe("back");
     expect(r.root.findAll((n) => n.props.role === "dialog")).toHaveLength(0);
@@ -389,8 +521,9 @@ describe("TaskLedgerPanel task detail (#271)", () => {
     const text = allText(r);
     expect(text).toContain("long description body");
     expect(text).toContain("created by"); // meta 标签只出现在详情里
-    expect(text).toContain("human-a · human");
-    expect(text).toContain("@worker-a · agent");
+    expect(text).toContain("human-a");
+    expect(text).toContain("worker-a");
+    expect(text).not.toContain("@worker-a");
     expect(text).toContain("Solution");
     expect(text).toContain("solution.html");
 
@@ -422,20 +555,17 @@ describe("TaskLedgerPanel task detail (#271)", () => {
 });
 
 describe("TaskLedgerPanel external task selection", () => {
-  test("reveals, expands, scrolls and focuses the selected task without resetting filters", async () => {
+  test("opens the selected task detail and preserves existing filters when returning", async () => {
     const first = task({ id: 1, title: "alpha-task", assignee: { name: "worker-a", kind: "agent" } });
     const selected = task({ id: 2, title: "bravo-task", state: "in_progress", assignee: { name: "worker-b", kind: "agent" } });
-    const focusCalls: number[] = [];
-    const scrollCalls: number[] = [];
+    let backFocusCount = 0;
     const initialProps = baseProps({ tasks: [first, selected] });
     const r = render("en", initialProps, (element) => {
       const props = element.props as Record<string, unknown>;
-      if (element.type !== "li" || typeof props["data-task-id"] !== "number") return {};
-      const id = props["data-task-id"] as number;
-      return {
-        focus: () => focusCalls.push(id),
-        scrollIntoView: () => scrollCalls.push(id),
-      };
+      if (props.className === "d-btn task-detail-close") {
+        return { focus: () => { backFocusCount += 1; } };
+      }
+      return {};
     });
 
     const search = findByAria(r, "Search tasks");
@@ -451,31 +581,32 @@ describe("TaskLedgerPanel external task selection", () => {
       );
     });
 
+    findByAria(r, "task 2 details");
+    expect(allText(r)).toContain("bravo-task");
+    expect(r.root.findAll((node) => node.props.className === "task-board")).toHaveLength(0);
+    expect(backFocusCount).toBe(1);
+
+    await act(async () => {
+      r.root.find((node) => node.props.className === "d-btn task-detail-close").props.onClick();
+    });
     expect(findByAria(r, "Search tasks").props.value).toBe("alpha");
     expect(allText(r)).toContain("alpha-task");
-    expect(allText(r)).toContain("bravo-task");
-    const selectedCard = r.root.findByProps({ "data-task-id": 2 });
-    expect(selectedCard.props.className).toContain("task-card--open");
-    expect(selectedCard.findByProps({ className: "task-card-toggle" }).props["aria-expanded"]).toBe(true);
-    expect(scrollCalls).toEqual([2]);
-    expect(focusCalls).toEqual([2]);
   });
 
-  test("keeps a selected completed task reachable beyond the collapsed done limit", async () => {
+  test("opens a selected completed task beyond the collapsed done limit", async () => {
     const completed = Array.from({ length: 8 }, (_, index) => task({
       id: index + 1,
       title: `completed-${index + 1}`,
       state: "done",
     }));
-    const r = render("en", baseProps({ tasks: completed, selectedTaskId: 8 }));
+    const r = render("en", baseProps({ tasks: completed, selectedTaskId: 8 }), (element) => {
+      const props = element.props as Record<string, unknown>;
+      return props.className === "d-btn task-detail-close" ? { focus: () => {} } : {};
+    });
     await act(async () => {});
 
-    const selectedCard = r.root.findByProps({ "data-task-id": 8 });
-    expect(selectedCard.props.className).toContain("task-card--open");
+    findByAria(r, "task 8 details");
     expect(allText(r)).toContain("completed-8");
-    expect(r.root.findAll((node) => (
-      typeof node.props.className === "string"
-      && node.props.className.startsWith("task-card task-card--done")
-    ))).toHaveLength(7);
+    expect(r.root.findAll((node) => node.props.className === "task-board")).toHaveLength(0);
   });
 });
