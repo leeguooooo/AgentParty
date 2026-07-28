@@ -2466,7 +2466,7 @@ export function TaskLedgerPanel({
   const submitNewTask = (event: { preventDefault: () => void }) => {
     event.preventDefault();
     const title = newTitle.trim();
-    if (title === "" || creating) return;
+    if (title === "" || creating || attUploading) return;
     const assigneeName = newAssignee.trim();
     void onCreateTask({
       title,
@@ -2910,7 +2910,7 @@ export function TaskLedgerPanel({
                           <button
                             type="button"
                             className="task-new-att-remove"
-                            aria-label={`remove ${att.filename}`}
+                            aria-label={t("Channel.tasks.attachRemoveAria", { filename: att.filename })}
                             onClick={() => setNewAtts((cur) => cur.filter((a) => a.key !== att.key))}
                           >
                             ×
@@ -3717,9 +3717,10 @@ export function ChannelPage({
   }, [loadTaskSummary, slug, taskActionBusyId, token, t]);
 
   const setTaskState = useCallback((id: number, state: TaskState, blockedReason?: string) => {
+    const reason = blockedReason?.trim();
     applyTaskUpdate(id, {
       state,
-      ...(state === "blocked" ? { blocked_reason: blockedReason?.trim() || null } : {}),
+      ...(state === "blocked" && reason !== undefined ? { blocked_reason: reason || null } : {}),
     });
   }, [applyTaskUpdate]);
 

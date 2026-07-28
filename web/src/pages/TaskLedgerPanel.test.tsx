@@ -1,7 +1,7 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { TaskRecord } from "@agentparty/shared";
+import type { Attachment, TaskRecord } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 
 // Channel.tsx 会 import dompurify（经 markdown 链路）——测试环境里存桩掉。
@@ -233,6 +233,43 @@ describe("TaskLedgerPanel new-task entry", () => {
     });
 
     expect(onCreateTask).toHaveBeenCalledTimes(0);
+  });
+
+  test("Enter cannot submit while an attachment upload is still in flight", async () => {
+    const onCreateTask = mock(async () => true);
+    let finishUpload: ((attachment: Attachment) => void) | undefined;
+    const onUploadAttachment = mock(() => new Promise<Attachment>((resolve) => {
+      finishUpload = resolve;
+    }));
+    const r = render("en", baseProps({ onCreateTask, onUploadAttachment }));
+
+    await act(async () => findByAria(r, "New task").props.onClick());
+    await act(async () => {
+      findByAria(r, "New task title").props.onChange({ currentTarget: { value: "wait for upload" } });
+      r.root.find((node) => node.type === "input" && node.props.type === "file").props.onChange({
+        currentTarget: {
+          files: [{ name: "proof.txt" }],
+          value: "proof.txt",
+        },
+      });
+    });
+    await act(async () => {
+      r.root.find((node) => node.props.className === "task-new-form").props.onSubmit({ preventDefault() {} });
+    });
+
+    expect(onCreateTask).toHaveBeenCalledTimes(0);
+
+    await act(async () => {
+      finishUpload?.({
+        key: "proof",
+        filename: "proof.txt",
+        content_type: "text/plain",
+        size: 5,
+        url: "/attachments/proof",
+      });
+      await Promise.resolve();
+    });
+    expect(findByAria(r, "Remove proof.txt")).toBeDefined();
   });
 });
 
