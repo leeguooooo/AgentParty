@@ -49,8 +49,8 @@ describe("server profile controls", () => {
         />
       </LocaleProvider>,
     );
-    expect(html).toContain("AgentParty Production");
-    expect(html).toContain("AgentParty Test");
+    expect(html).toContain("leeguooooo");
+    expect(html).toContain("xdreamstart");
     expect(html).toContain('type="url"');
     expect(html).toContain("Check and add server");
     expect(html).not.toContain("emoji");

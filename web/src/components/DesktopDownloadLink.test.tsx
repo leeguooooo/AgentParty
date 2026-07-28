@@ -7,7 +7,7 @@ import { DesktopDownloadLink } from "./DesktopDownloadLink";
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
 
 describe("DesktopDownloadLink", () => {
-  test("links browser users to the desktop product page", async () => {
+  test("opens the installer in-page instead of navigating away", async () => {
     let renderer!: ReactTestRenderer;
     await act(async () => {
       renderer = create(
@@ -17,9 +17,11 @@ describe("DesktopDownloadLink", () => {
       );
     });
 
-    const link = renderer.root.findByType("a");
-    expect(link.props.href).toBe("https://app.leeguoo.com/agentparty");
-    expect(link.children.join("")).toBe("desktop");
+    const button = renderer.root.findByType("button");
+    expect(button.children.join("")).toBe("desktop");
+    await act(async () => button.props.onClick());
+    expect(renderer.root.findByProps({ role: "dialog" })).toBeTruthy();
+    expect(renderer.root.findByType("textarea").props.value).toContain("install-desktop.sh");
   });
 
   test("is hidden inside the desktop runtime", async () => {

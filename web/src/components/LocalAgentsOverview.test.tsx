@@ -104,11 +104,21 @@ afterEach(async () => {
   renderer = null;
 });
 
-async function render(a: DesktopAgentAdapter, scopeChannel?: string | null): Promise<ReactTestInstance> {
+async function render(
+  a: DesktopAgentAdapter,
+  scopeChannel?: string | null,
+  onOpenLogs?: (targetKey: string) => void,
+): Promise<ReactTestInstance> {
   await act(async () => {
     renderer = create(
       <LocaleProvider>
-        <LocalAgentsOverview t={t} adapter={a} scheduler={noScheduler} scopeChannel={scopeChannel ?? null} />
+        <LocalAgentsOverview
+          t={t}
+          adapter={a}
+          scheduler={noScheduler}
+          scopeChannel={scopeChannel ?? null}
+          onOpenLogs={onOpenLogs}
+        />
       </LocaleProvider>,
     );
   });
@@ -144,8 +154,9 @@ test("按频道分组渲染 app 实例 + 常驻，未分配排最后", async () 
   expect(byClass(opsGroup, "local-agents-name").map((n) => n.children.join(""))).toEqual(["ops-resident", "ops-builder"]);
 });
 
-test("常驻行显示可信配置名，并在同一行展开日志与运行详情", async () => {
+test("常驻行显示可信配置名，详情只展示运行元数据，日志走统一入口", async () => {
   const logReads: string[] = [];
+  const opened: string[] = [];
   const root = await render(adapter({
     listConfigs: async () => [config({
       configId: "334a626a8ca73a4a9276083677692cbaf71f8d8acb616d426ce8c90e6459c47b",
@@ -164,7 +175,7 @@ test("常驻行显示可信配置名，并在同一行展开日志与运行详�
       logReads.push(label);
       return "serve supervisor: running\\nrunner ready";
     },
-  }));
+  }), null, (key) => opened.push(key));
 
   expect(names(root)).toEqual(["atvloadly"]);
   await act(async () => {
@@ -173,62 +184,51 @@ test("常驻行显示可信配置名，并在同一行展开日志与运行详�
     await Promise.resolve();
   });
   const rendered = JSON.stringify(renderer!.toJSON());
-  expect(logReads).toEqual(["com.agentparty.duty.atvloadly"]);
-  expect(rendered).toContain("serve supervisor: running");
+  expect(logReads).toEqual([]);
   expect(rendered).toContain("/workspace/atvloadly");
   expect(rendered).toContain("/tmp/atvloadly.log");
   expect(rendered).toContain("builder");
+  expect(byClass(root, "local-agents-open-logs")[0]!.props["aria-label"]).toBe("View logs atvloadly");
+  expect(byClass(root, "local-agents-detail-open-logs")[0]!.props["aria-label"]).toBe("View logs atvloadly");
+  await act(async () => {
+    byClass(root, "local-agents-open-logs")[0]!.props.onClick();
+  });
+  expect(opened).toEqual([
+    "duty:334a626a8ca73a4a9276083677692cbaf71f8d8acb616d426ce8c90e6459c47b:all",
+  ]);
 });
 
-test("app 实例的详情直接读取该实例日志，而不是错误地打开常驻日志", async () => {
+test("app 实例从统一日志入口带上准确实例 key", async () => {
   const instanceLogReads: string[] = [];
+  const opened: string[] = [];
   const root = await render(adapter({
     statusAll: async () => [inst({ name: "planner", instanceId: "cfg:ops", runner: "codex" })],
     logsInstance: async (instanceId) => {
       instanceLogReads.push(instanceId);
       return ["runner started", "waiting for @"];
     },
-  }));
+  }), null, (key) => opened.push(key));
 
   await act(async () => {
-    byClass(root, "local-agents-details")[0]!.props.onClick();
-    await Promise.resolve();
-    await Promise.resolve();
+    byClass(root, "local-agents-open-logs")[0]!.props.onClick();
   });
-  expect(instanceLogReads).toEqual(["cfg:ops"]);
-  expect(JSON.stringify(renderer!.toJSON())).toContain("waiting for @");
+  expect(opened).toEqual(["instance:cfg:ops"]);
+  expect(instanceLogReads).toEqual([]);
 });
 
-test("快速切换详情时，较慢的旧日志请求不能覆盖当前 agent", async () => {
-  const dutyLog = deferred<string>();
-  const instanceLog = deferred<string[]>();
+test("常驻与 app 实例各自路由到唯一日志目标", async () => {
+  const opened: string[] = [];
   const root = await render(adapter({
     statusAll: async () => [inst({ name: "planner", instanceId: "cfg:ops" })],
     dutyList: async () => [duty({ instanceId: "resident:ops", label: "resident-label" })],
     listConfigs: async () => [config({ configId: "resident", name: "resident-bot" })],
-    dutyLogRead: async () => dutyLog.promise,
-    logsInstance: async () => instanceLog.promise,
-  }));
-
+  }), null, (key) => opened.push(key));
+  const logButtons = byClass(root, "local-agents-open-logs");
   await act(async () => {
-    byClass(root, "local-agents-details")[0]!.props.onClick();
+    logButtons[0]!.props.onClick();
+    logButtons[1]!.props.onClick();
   });
-  await act(async () => {
-    byClass(root, "local-agents-details")[1]!.props.onClick();
-  });
-  await act(async () => {
-    instanceLog.resolve(["current instance log"]);
-    await instanceLog.promise;
-  });
-  expect(JSON.stringify(renderer!.toJSON())).toContain("current instance log");
-
-  await act(async () => {
-    dutyLog.resolve("stale resident log");
-    await dutyLog.promise;
-  });
-  const rendered = JSON.stringify(renderer!.toJSON());
-  expect(rendered).toContain("current instance log");
-  expect(rendered).not.toContain("stale resident log");
+  expect(opened).toEqual(["duty:resident:ops", "instance:cfg:ops"]);
 });
 
 test("配置已丢失时明确显示未识别身份，并把完整 ID 留在详情而非冒充名字", async () => {

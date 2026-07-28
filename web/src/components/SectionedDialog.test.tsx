@@ -135,9 +135,11 @@ afterEach(() => {
 function renderDialog({
   mobile = false,
   restoreFocusOnUnmount = true,
+  activeSection,
 }: {
   mobile?: boolean;
   restoreFocusOnUnmount?: boolean;
+  activeSection?: SectionId;
 } = {}) {
   const documentHarness: DocumentHarness = { activeElement: null };
   const previous = new FocusableHarness("trigger", documentHarness);
@@ -174,18 +176,23 @@ function renderDialog({
   Object.defineProperty(globalThis, "document", { configurable: true, value: documentHarness });
 
   let renderer!: ReactTestRenderer;
+  let controlledSection = activeSection;
+  const dialog = () => (
+    <SectionedDialog
+      idPrefix="test-dialog"
+      title="Test dialog"
+      closeLabel="Close"
+      navigationLabel="Sections"
+      sections={sections}
+      initialSection="general"
+      activeSection={controlledSection}
+      onClose={() => {}}
+      restoreFocusOnUnmount={restoreFocusOnUnmount}
+    />
+  );
   act(() => {
     renderer = create(
-      <SectionedDialog
-        idPrefix="test-dialog"
-        title="Test dialog"
-        closeLabel="Close"
-        navigationLabel="Sections"
-        sections={sections}
-        initialSection="general"
-        onClose={() => {}}
-        restoreFocusOnUnmount={restoreFocusOnUnmount}
-      />,
+      dialog(),
       {
         createNodeMock(element) {
           const props = element.props as Record<string, unknown>;
@@ -209,6 +216,10 @@ function renderDialog({
     close,
     tabs: tabElements,
     residentStop,
+    updateActiveSection(section: SectionId) {
+      controlledSection = section;
+      act(() => renderer.update(dialog()));
+    },
     removeResidentStop() {
       residentStop.isConnected = false;
       focusables.splice(focusables.indexOf(residentStop), 1);
@@ -291,6 +302,16 @@ describe("SectionedDialog focus lifecycle", () => {
 
     expect(rendered.document.activeElement).toBe(rendered.tabs.get("general")!);
     expect(rendered.previous.focusCount).toBe(1);
+  });
+
+  test("moves focus to the tab after a controlled section change", () => {
+    const rendered = renderDialog({ activeSection: "general" });
+    rendered.visibleAction.focus();
+
+    rendered.updateActiveSection("desktop");
+
+    expect(rendered.document.activeElement).toBe(rendered.tabs.get("desktop")!);
+    expect(selectedTab(rendered.renderer).props.id).toBe("test-dialog-tab-desktop");
   });
 });
 

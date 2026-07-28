@@ -56,8 +56,125 @@
   border-radius: 0;
   white-space: nowrap;
 }
+.app-product-link {
+  font-family: var(--t-mono);
+  background: var(--t-panel);
+  cursor: pointer;
+}
 .app-docs:hover,
 .app-product-link:hover { color: var(--t-accent); border-color: var(--t-accent); }
+
+.desktop-install-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 140;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: color-mix(in srgb, var(--d-ink) 44%, transparent);
+}
+.desktop-install-dialog {
+  width: min(680px, 100%);
+  max-height: min(720px, calc(100dvh - 32px));
+  overflow: auto;
+  padding: 24px;
+  border: 2px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--t-panel);
+  box-shadow: 7px 7px 0 var(--d-shadow);
+}
+.desktop-install-dialog:focus { outline: none; }
+.desktop-install-head,
+.desktop-install-actions,
+.desktop-install-prompt {
+  display: flex;
+  align-items: center;
+}
+.desktop-install-head { justify-content: space-between; gap: 16px; }
+.desktop-install-head h2 { margin: 2px 0 0; font-size: 24px; }
+.desktop-install-kicker {
+  margin: 0;
+  color: var(--d-green);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.desktop-install-close,
+.desktop-install-prompt-dismiss {
+  border: 0;
+  background: transparent;
+  color: var(--t-dim);
+  cursor: pointer;
+  font-size: 25px;
+  line-height: 1;
+}
+.desktop-install-close { width: 34px; height: 34px; }
+.desktop-install-close:hover,
+.desktop-install-prompt-dismiss:hover { color: var(--d-red); }
+.desktop-install-lead { margin: 18px 0 10px; color: var(--t-body); }
+.desktop-install-benefits {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 20px;
+  padding-left: 22px;
+  color: var(--t-muted);
+  font-size: 13px;
+}
+.desktop-install-command-label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--t-dim);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.desktop-install-command {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 82px;
+  resize: vertical;
+  padding: 12px;
+  border: 1.5px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--t-panel2);
+  color: var(--t-text);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.desktop-install-actions { gap: 10px; margin-top: 12px; }
+.desktop-install-note {
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--t-faint);
+  color: var(--t-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.desktop-install-prompt {
+  flex: none;
+  gap: 14px;
+  margin: 0 24px 10px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--d-ink);
+  background: var(--d-yellow);
+  box-shadow: 3px 3px 0 var(--d-shadow);
+}
+.desktop-install-prompt-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  margin-right: auto;
+}
+.desktop-install-prompt-copy strong { color: var(--d-ink); font-size: 13px; }
+.desktop-install-prompt-copy span { color: var(--t-body); font-size: 11px; }
+.desktop-install-prompt-action { flex: none; white-space: nowrap; }
+.desktop-install-prompt-dismiss { flex: none; width: 28px; height: 28px; }
+@media (max-width: 640px) {
+  .desktop-install-prompt { margin-inline: 12px; flex-wrap: wrap; }
+  .desktop-install-prompt-copy { flex-basis: calc(100% - 44px); }
+  .desktop-install-prompt-action { order: 3; width: 100%; }
+  .desktop-install-dialog { padding: 18px; }
+}
 .desktop-updater {
   position: relative;
   flex: none;
@@ -274,24 +391,51 @@
   line-height: 1.45;
 }
 /* #725：常驻 agent 日志查看器 */
-.resident-logs { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--t-faint); }
-.resident-logs-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.resident-logs-title { margin: 0; font-size: 12px; }
-.resident-logs-lead { margin: 4px 0 8px; font-size: 12px; color: var(--t-dim); }
-.resident-logs-empty { margin: 6px 0; font-size: 12px; color: var(--t-dim); }
-.resident-logs-list { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.resident-logs-item { display: flex; align-items: center; gap: 8px; width: 100%; justify-content: flex-start; text-align: left; }
-.resident-logs-item--active { border-color: var(--d-blue); color: var(--d-blue); }
-.resident-logs-chan { font-weight: 600; }
-.resident-logs-agent { min-width: 0; overflow: hidden; color: var(--t-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.resident-logs-dot { color: var(--t-faint); font-size: 10px; }
-.resident-logs-dot--on { color: var(--d-green); }
-.resident-logs-state { font-size: 11px; color: var(--t-dim); }
-.resident-logs-view-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
-.resident-logs-selection { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
-.resident-logs-selection > strong { font-size: 11px; }
-.resident-logs-label { font-size: 11px; color: var(--t-dim); word-break: break-all; }
-.resident-logs-pre { max-height: 320px; overflow: auto; margin: 0; padding: 8px; font-size: 11px; line-height: 1.5; background: var(--t-faint); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.resident-logs { display: grid; gap: 12px; }
+.resident-logs-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.resident-logs-title { margin: 0; font-size: 18px; }
+.resident-logs-lead { margin: 5px 0 0; font-size: 12px; color: var(--t-dim); }
+.resident-logs-empty { margin: 6px 0; padding: 14px; border: 1px solid var(--t-faint); font-size: 12px; color: var(--t-dim); }
+.resident-logs-toolbar {
+  display: grid;
+  grid-template-columns: minmax(210px, 1fr) minmax(210px, 1fr);
+  gap: 10px;
+}
+.resident-logs-toolbar label { display: grid; gap: 5px; color: var(--t-dim); font-size: 11px; }
+.resident-logs-toolbar select,
+.resident-logs-toolbar input {
+  min-width: 0;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1.4px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--t-panel);
+  color: var(--t-text);
+}
+.resident-logs-levels { display: flex; flex-wrap: wrap; gap: 6px; }
+.resident-logs-level { color: var(--t-dim); }
+.resident-logs-level span { color: inherit; opacity: .7; }
+.resident-logs-level.is-active { border-color: var(--d-blue); color: var(--d-blue); background: var(--t-panel2); }
+.resident-logs-level--error.is-active { border-color: var(--d-red); color: var(--d-red); }
+.resident-logs-level--warn.is-active { border-color: var(--d-yellow); color: var(--t-text); background: var(--d-yellow); }
+.resident-logs-pre {
+  min-height: 220px;
+  max-height: min(52dvh, 520px);
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1.4px solid var(--d-ink);
+  border-radius: 0;
+  background: var(--t-panel2);
+  color: var(--t-text);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 640px) {
+  .resident-logs-toolbar { grid-template-columns: 1fr; }
+}
 
 .desktop-agent { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--t-faint); }
 .desktop-agent-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -4678,8 +4822,38 @@
 }
 
 .guard-settings {
+  border: 1.4px solid var(--t-border);
+  background: var(--t-panel);
+}
+.guard-settings-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  cursor: pointer;
+  color: var(--t-text);
+}
+.guard-settings-summary > span:first-child {
+  display: grid;
+  gap: 3px;
+}
+.guard-settings-summary small {
+  color: var(--t-dim);
+  font-size: 11px;
+  font-weight: 400;
+}
+.guard-settings-state {
+  flex: none;
+  color: var(--t-dim);
+  font-size: 11px;
+  font-weight: 700;
+}
+.guard-settings-body {
   display: grid;
   gap: 12px;
+  padding: 0 14px 14px;
+  border-top: 1px solid var(--t-faint);
 }
 .guard-setting-row {
   display: grid;
@@ -4734,6 +4908,16 @@
   margin: 0;
   color: var(--t-red);
   font-size: 12px;
+}
+
+.desktop-agent-manage-hint {
+  margin: 10px 0 0;
+  padding: 9px 10px;
+  border-left: 3px solid var(--d-green);
+  background: var(--t-panel2);
+  color: var(--t-dim);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .task-ledger-panel {

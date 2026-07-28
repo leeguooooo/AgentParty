@@ -15,6 +15,10 @@ describe("guard config ACL (#119)", () => {
     const human = await seedToken("human", uniq("human"), { owner: ownerAccount });
     const agent = await seedToken("agent", uniq("agent"), { owner: ownerAccount });
     const slug = await createChannel(human.token);
+    expect((await api(`/api/channels/${slug}/loop-guard`, human.token, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true, limit: 30 }),
+    })).status).toBe(200);
 
     // agent 与房主同账号 → canConfigureChannel 放行，但 kind 是 agent
     const off = await api(`/api/channels/${slug}/loop-guard`, agent.token, {
@@ -33,6 +37,10 @@ describe("guard config ACL (#119)", () => {
     const human = await seedToken("human", uniq("human"), { owner: ownerAccount });
     const agent = await seedToken("agent", uniq("agent"), { owner: ownerAccount });
     const slug = await createChannel(human.token);
+    expect((await api(`/api/channels/${slug}/workflow-guard`, human.token, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true, limit: 30 }),
+    })).status).toBe(200);
 
     const off = await api(`/api/channels/${slug}/workflow-guard`, agent.token, {
       method: "PUT",
@@ -71,7 +79,7 @@ describe("guard config ACL (#119)", () => {
     const agent = await seedToken("agent", uniq("agent"), { owner: ownerAccount });
     const slug = await createChannel(human.token);
 
-    // 新频道默认 enabled=1、limit 空（回退 mode 默认 30）。调低到 5 = 加强 → 放行
+    // 新频道默认关闭。agent 开启并设为 5 = 加强 → 放行
     const tighten = await api(`/api/channels/${slug}/loop-guard`, agent.token, {
       method: "PUT",
       body: JSON.stringify({ enabled: true, limit: 5 }),

@@ -27,11 +27,22 @@ export function LocalAgentCenter({
 }: Props) {
   const t = useT();
   const [activeSection, setActiveSection] = useState<LocalAgentCenterSection>(initialSection);
+  const [logTarget, setLogTarget] = useState<string | null>(null);
   const sections: readonly SectionedDialogSection<LocalAgentCenterSection>[] = [
     {
       id: "overview",
       label: t("LocalAgentCenter.section.overview"),
-      content: <LocalAgentsOverview t={t} adapter={adapter} active={activeSection === "overview"} />,
+      content: (
+        <LocalAgentsOverview
+          t={t}
+          adapter={adapter}
+          active={activeSection === "overview"}
+          onOpenLogs={(targetKey) => {
+            setLogTarget(targetKey);
+            setActiveSection("logs");
+          }}
+        />
+      ),
     },
     {
       id: "launcher",
@@ -41,7 +52,14 @@ export function LocalAgentCenter({
     {
       id: "logs",
       label: t("LocalAgentCenter.section.logs"),
-      content: <ResidentDutyLogs t={t} adapter={adapter} active={activeSection === "logs"} />,
+      content: (
+        <ResidentDutyLogs
+          t={t}
+          adapter={adapter}
+          active={activeSection === "logs"}
+          initialTargetKey={logTarget}
+        />
+      ),
     },
   ];
 
@@ -53,6 +71,7 @@ export function LocalAgentCenter({
       navigationLabel={t("LocalAgentCenter.navigation")}
       sections={sections}
       initialSection={initialSection}
+      activeSection={activeSection}
       onClose={onClose}
       onActiveSectionChange={setActiveSection}
       panelClassName="settings-panel--agent-center"

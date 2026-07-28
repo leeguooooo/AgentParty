@@ -69,7 +69,8 @@ describe("DesktopPairingGate", () => {
     expect(html).toContain("Start pairing");
     expect(html).not.toContain("ap-token");
     expect(html).not.toContain("Sign in with");
-    expect(html).toContain("AgentParty Production");
+    expect(html).toContain("leeguooooo");
+    expect(html).toContain("xdreamstart");
   });
 
   test("shows the fixed-format code and cancellation while polling", () => {

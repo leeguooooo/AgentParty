@@ -28,20 +28,27 @@ export interface ServerProbeResult {
   providers: AuthProviderConfig[];
 }
 
+export const LEEGUOOOOO_SERVER_ORIGIN = "https://agentparty.leeguoo.com";
+export const XDREAMSTART_SERVER_ORIGIN = "https://agentparty.pwtk-dev.work";
+
 export const OFFICIAL_SERVER_PROFILES: readonly ServerProfile[] = [
   {
     id: "official:prod",
-    label: "AgentParty Production",
-    origin: "https://agentparty.leeguoo.com",
+    label: "leeguooooo",
+    origin: LEEGUOOOOO_SERVER_ORIGIN,
     kind: "official",
   },
   {
     id: "official:test",
-    label: "AgentParty Test",
-    origin: "https://agentparty.pwtk-dev.work",
+    label: "xdreamstart",
+    origin: XDREAMSTART_SERVER_ORIGIN,
     kind: "official",
   },
 ];
+
+export function isLeeguoooooDeployment(origin: string): boolean {
+  return normalizeServerOrigin(origin) === LEEGUOOOOO_SERVER_ORIGIN;
+}
 
 function isLoopbackHost(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();

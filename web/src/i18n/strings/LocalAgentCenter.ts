@@ -7,7 +7,7 @@ export const LocalAgentCenterStrings: LocaleDict = {
     "LocalAgentCenter.navigation": "Local agent center sections",
     "LocalAgentCenter.section.overview": "Overview",
     "LocalAgentCenter.section.launcher": "Start agent",
-    "LocalAgentCenter.section.logs": "Resident logs",
+    "LocalAgentCenter.section.logs": "Logs",
   },
   zh: {
     "LocalAgentCenter.title": "本机 Agent 控制中心",
@@ -15,7 +15,7 @@ export const LocalAgentCenterStrings: LocaleDict = {
     "LocalAgentCenter.navigation": "本机 Agent 控制中心分区",
     "LocalAgentCenter.section.overview": "运行概览",
     "LocalAgentCenter.section.launcher": "启动 Agent",
-    "LocalAgentCenter.section.logs": "常驻日志",
+    "LocalAgentCenter.section.logs": "日志",
   },
 };
 
