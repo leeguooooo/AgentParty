@@ -381,7 +381,9 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
         reviewer: presenceEntry({ name: "reviewer", kind: "agent", account: "owner-a" }),
       },
     });
-    expect(textContent(mentionCard(root))).toContain("Identityagent · owner-a");
+    expect(textContent(mentionCard(root))).toContain("IdentityagentOwned byowner-a");
+    expect(textContent(mentionCard(root))).not.toContain("Identityagent · owner-a");
+    expect(textContent(mentionCard(root))).toContain("Technical ID@reviewer");
   });
 
   test("离线 @human 从 identity map 恢复人类身份和账号", () => {

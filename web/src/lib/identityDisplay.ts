@@ -14,6 +14,28 @@ function isOpaqueAccount(value: string): boolean {
   return /^(?:(?:lark|oidc|apple|github):|oidc-)/i.test(value);
 }
 
+function generatedAgentRole(value: string): string | null {
+  const match = value.match(/^(?:lark-)?[0-9a-f]{12,}-(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
+export interface IdentityPresentation {
+  label: string;
+  ownerLabel: string | null;
+  technicalName: string;
+  generated: boolean;
+  kind?: "agent" | "human";
+}
+
+export function formatIdentityPresentation(
+  presentation: IdentityPresentation,
+  ownedAgent: (owner: string, name: string) => string,
+): string {
+  return presentation.kind === "agent" && presentation.ownerLabel !== null
+    ? ownedAgent(presentation.ownerLabel, presentation.label)
+    : presentation.label;
+}
+
 function displayQuality(name: string, display: string): number {
   return display !== "" && display !== name ? 2 : 1;
 }
@@ -48,16 +70,52 @@ export function displayForIdentity(name: string, identities: IdentityDisplayMap 
   return identities?.[name]?.display ?? name;
 }
 
+export function resolveIdentityPresentation(
+  name: string,
+  identities: IdentityDisplayMap | undefined,
+  hints: {
+    kind?: "agent" | "human";
+    owner?: string | null;
+    display?: string | null;
+  } = {},
+): IdentityPresentation {
+  const identity = identities?.[name];
+  const kind = hints.kind ?? identity?.kind;
+  const owner = hints.owner ?? identity?.account ?? null;
+  const preferredDisplay = hints.display?.trim() || identity?.display?.trim() || name;
+  const generatedRole = generatedAgentRole(name);
+  const generatedDisplayRole = generatedAgentRole(preferredDisplay);
+  const generated = kind === "agent" && generatedRole !== null;
+  const readableAlias =
+    preferredDisplay !== name &&
+    generatedDisplayRole === null &&
+    !isOpaqueAccount(preferredDisplay);
+  const ownerLabel =
+    kind === "agent"
+      ? resolveAgentOwnerLabel({ kind: "agent", owner: owner ?? undefined }, identities)
+      : null;
+
+  return {
+    label: generated && !readableAlias ? generatedRole : preferredDisplay,
+    ownerLabel,
+    technicalName: name,
+    generated,
+    ...(kind === undefined ? {} : { kind }),
+  };
+}
+
 // 显示优先级：人类 display_name > handle（可 @ 昵称）> owner（email）> 常规 identity 回退。
 // 消息头的 senderLabel 与引用预览块里"被引用者"的名字共用同一份逻辑，保证两处一致。
 export function resolveSenderLabel(sender: Sender, identities: IdentityDisplayMap | undefined): string {
-  return sender.kind === "human" && sender.display_name
-    ? sender.display_name
-    : sender.handle
-      ? sender.handle
-      : sender.kind === "human" && sender.owner
-        ? sender.owner
-        : displayForIdentity(sender.name, identities);
+  const display =
+    sender.kind === "human"
+      ? sender.display_name || sender.handle || sender.owner
+      : sender.handle;
+  return resolveIdentityPresentation(sender.name, identities, {
+    kind: sender.kind,
+    owner: sender.owner,
+    display,
+  }).label;
 }
 
 export function resolveAgentOwnerLabel(

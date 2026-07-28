@@ -13,6 +13,16 @@ const { MessageCard } = await import("./MessageCard");
 let renderer: ReactTestRenderer | null = null;
 const noop = () => undefined;
 
+function textContent(node: { children: Array<string | { children: unknown[] }> }): string {
+  return node.children
+    .map((child) =>
+      typeof child === "string"
+        ? child
+        : textContent(child as { children: Array<string | { children: unknown[] }> }),
+    )
+    .join("");
+}
+
 beforeEach(() => {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
@@ -65,6 +75,46 @@ function renderMessage(
   return renderer!.root;
 }
 
+function renderGeneratedAgentMention(): ReturnType<ReactTestRenderer["root"]["findByProps"]> {
+  const target = "lark-461bc7018484-apple-signin-revoke";
+  const owner = "lark:on_b81feb6f84d5225a462349bb36499262";
+  const msg = {
+    type: "msg",
+    seq: 11,
+    sender: { name: "builder", kind: "agent", owner: "team@example.com" },
+    kind: "message",
+    body: `请 @${target} 检查`,
+    mentions: [target],
+    reply_to: null,
+    state: null,
+    note: null,
+    status: null,
+    ts: 1_700_000_000_000,
+  } as unknown as MsgFrame;
+  const identities: IdentityDisplayMap = {
+    [target]: { display: target, kind: "agent", account: owner },
+    "human-session": { display: "ZHENG TONG", kind: "human", account: owner },
+  };
+  const deliveries: PublicDirectedDelivery[] = [{
+    id: "delivery-11-target",
+    message_seq: 11,
+    target_name: target,
+    state: "failed",
+    reply_seq: null,
+    created_at: 1_700_000_000_000,
+    updated_at: 1_700_000_001_000,
+  }];
+  act(() => {
+    renderer = create(<LocaleProvider><MessageCard
+      msg={msg} self={null} quotedMessage={null} canModerate={false} onReply={noop} onEdit={noop}
+      deliveries={deliveries} identityDisplay={identities}
+      onRetract={noop} canCreateTask={false} onCreateTask={noop} editing={false} editDraft=""
+      editSaving={false} actionError={null} busy={false} onEditDraftChange={noop} onEditCancel={noop} onEditSave={noop}
+    /></LocaleProvider>);
+  });
+  return renderer!.root;
+}
+
 describe("MessageCard touch and keyboard details (#357)", () => {
   test("identity and stable action metadata render in separate header groups", () => {
     const root = renderMessage();
@@ -88,6 +138,20 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     });
 
     expect(root.findByProps({ className: "msg-owner" }).children).toEqual(["Agent of 王路"]);
+  });
+
+  test("uses one readable owner-aware label for @mention, delivery, and agent details", () => {
+    const root = renderGeneratedAgentMention();
+    const readable = "ZHENG TONG's apple-signin-revoke Agent";
+    expect(root.findByProps({ className: "msg-mention msg-agent-trigger" }).children.join(""))
+      .toBe(`@${readable}`);
+    expect(root.findByProps({ className: "msg-receipt-name t-mono" }).children.join(""))
+      .toBe(`@${readable}`);
+    const card = root.findByProps({ id: "agent-info-11-mention-lark-461bc7018484-apple-signin-revoke" });
+    const text = textContent(card);
+    expect(text).toContain("Owned byZHENG TONG");
+    expect(text).toContain("Technical ID@lark-461bc7018484-apple-signin-revoke");
+    expect(text).not.toContain("Identityagent · lark:on_");
   });
 
   test("status full detail expands by click and keyboard", () => {

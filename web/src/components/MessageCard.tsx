@@ -6,8 +6,9 @@ import type { CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
 import { isClientVersionOutdated, useMinClientVersion } from "../lib/clientVersion";
 import {
-  displayForIdentity,
+  formatIdentityPresentation,
   resolveAgentOwnerLabel,
+  resolveIdentityPresentation,
   resolveSenderLabel,
   type IdentityDisplayMap,
 } from "../lib/identityDisplay";
@@ -176,6 +177,7 @@ function AgentInfoPopover({
   name,
   kind,
   owner,
+  ownerLabel,
   entry,
   assignment,
   recentMessages,
@@ -186,6 +188,7 @@ function AgentInfoPopover({
   name: string;
   kind: Sender["kind"] | null;
   owner: string | null;
+  ownerLabel: string | null;
   entry: PresenceEntry | undefined;
   assignment: ChannelRoleAssignment | undefined;
   recentMessages: MsgFrame[];
@@ -301,12 +304,24 @@ function AgentInfoPopover({
       <aside id={id} className="msg-agent-card" role="tooltip">
         <header className="msg-agent-card-head">
           <strong>{label}</strong>
-          <span className="t-mono">@{name}</span>
         </header>
         <dl className="msg-agent-card-facts">
           <div>
             <dt>{t("MessageCard.agentCard.identity")}</dt>
-            <dd>{[kind, owner].filter(Boolean).join(" · ") || t("MessageCard.agentCard.none")}</dd>
+            <dd>
+              {(kind === "agent" ? kind : [kind, owner].filter(Boolean).join(" · ")) ||
+                t("MessageCard.agentCard.none")}
+            </dd>
+          </div>
+          {kind === "agent" && (
+            <div>
+              <dt>{t("MessageCard.agentCard.owner")}</dt>
+              <dd>{ownerLabel ?? t("MessageCard.owner.unresolved")}</dd>
+            </div>
+          )}
+          <div>
+            <dt>{t("MessageCard.agentCard.technicalId")}</dt>
+            <dd className="t-mono" title={owner ? `owner: ${owner}` : undefined}>@{name}</dd>
           </div>
           <div>
             <dt>{t("MessageCard.agentCard.leader")}</dt>
@@ -395,7 +410,18 @@ function MessageCardImpl({
       ? readStateFor(msg.seq, msg.sender.name, participants ?? [], readCursors)
       : { readers: [], unread: [] };
   // owner/email 无论是否被 handle 取代，都作为防冒充锚点保留在下方副标签 + tooltip 中（见 senderTitle）。
-  const senderLabel = resolveSenderLabel(msg.sender, identityDisplay);
+  const senderPresentation = resolveIdentityPresentation(msg.sender.name, identityDisplay, {
+    kind: msg.sender.kind,
+    owner: msg.sender.owner,
+    display:
+      msg.sender.kind === "human"
+        ? msg.sender.display_name || msg.sender.handle || msg.sender.owner
+        : msg.sender.handle,
+  });
+  const senderLabel = senderPresentation.label;
+  const senderOwnedLabel = formatIdentityPresentation(senderPresentation, (ownerName, agentName) =>
+    t("MessageCard.agent.ownedLabel", { owner: ownerName, name: agentName }),
+  );
   // #434：发送方 CLI 版本（发送时快照）。落后于服务端最低版本时标警告；未知版本/未拉到下限时不标。
   const clientVersion = msg.sender.client_version ?? null;
   const clientOutdated = isClientVersionOutdated(clientVersion, minClientVersion);
@@ -407,6 +433,22 @@ function MessageCardImpl({
         ? t("MessageCard.owner.agent", { owner: agentOwnerLabel })
         : t("MessageCard.owner.unresolved")
       : null;
+  const identityLabel = useCallback(
+    (
+      name: string,
+      hints: { kind?: Sender["kind"] | null; owner?: string | null; display?: string | null } = {},
+    ): string => {
+      const presentation = resolveIdentityPresentation(name, identityDisplay, {
+        ...(hints.kind === null || hints.kind === undefined ? {} : { kind: hints.kind }),
+        ...(hints.owner === undefined ? {} : { owner: hints.owner }),
+        ...(hints.display === undefined ? {} : { display: hints.display }),
+      });
+      return formatIdentityPresentation(presentation, (ownerName, agentName) =>
+        t("MessageCard.agent.ownedLabel", { owner: ownerName, name: agentName }),
+      );
+    },
+    [identityDisplay, t],
+  );
   const lineage = msg.sender.lineage ?? null;
   const lineageLabel = lineage === null ? null : `child of ${lineage.parent_agent}`;
   const senderTitle = [
@@ -452,7 +494,14 @@ function MessageCardImpl({
   const menuItemCount = Number(canReply) + Number(canTask) + Number(canEdit) + Number(canRetract) + 1;
   // 引用预览：quotedMessage 为 null 有两种含义——没引用，或引用目标不在已加载窗口内；
   // 后者在渲染处降级回纯编号 ↩ #N（见下方 JSX），这里只在真有内容时才算标签/预览文字。
-  const quotedSenderLabel = quotedMessage !== null ? resolveSenderLabel(quotedMessage.sender, identityDisplay) : null;
+  const quotedSenderLabel =
+    quotedMessage !== null
+      ? identityLabel(quotedMessage.sender.name, {
+          kind: quotedMessage.sender.kind,
+          owner: quotedMessage.sender.owner,
+          display: resolveSenderLabel(quotedMessage.sender, identityDisplay),
+        })
+      : null;
   const quotedPreviewText =
     quotedMessage !== null
       ? quotedMessage.retracted
@@ -566,7 +615,7 @@ function MessageCardImpl({
           }}
           style={{ cursor: "pointer" }}
         >
-          <span className="msg-sender" title={senderTitle}>{senderLabel}</span>
+          <span className="msg-sender" title={senderTitle}>{senderOwnedLabel}</span>
           {" "}
           → {msg.state}
           {statusBits.length > 0 ? ` · ${statusBits.join(" · ")}` : ""} · {fmtTime(msg.ts)}
@@ -633,6 +682,7 @@ function MessageCardImpl({
             name={msg.sender.name}
             kind={msg.sender.kind}
             owner={msg.sender.owner ?? null}
+            ownerLabel={agentOwnerLabel}
             entry={presence?.[msg.sender.name]}
             assignment={agentRoles?.[msg.sender.name]}
             recentMessages={recentMessages}
@@ -673,14 +723,32 @@ function MessageCardImpl({
             const mentionedSender = participants?.find((participant) => participant.name === m);
             const mentionedPresence = presence?.[m];
             const mentionedIdentity = identityDisplay?.[m];
+            const mentionedKind =
+              mentionedSender?.kind ?? mentionedPresence?.kind ?? mentionedIdentity?.kind ?? null;
+            const mentionedOwner =
+              mentionedSender?.owner ?? mentionedPresence?.account ?? mentionedIdentity?.account ?? null;
+            const mentionedPresentation = resolveIdentityPresentation(m, identityDisplay, {
+              ...(mentionedKind === null ? {} : { kind: mentionedKind }),
+              owner: mentionedOwner,
+              display:
+                mentionedSender?.handle ??
+                mentionedPresence?.handle ??
+                mentionedIdentity?.display ??
+                null,
+            });
             return (
               <AgentInfoPopover
                 key={m}
                 id={`agent-info-${msg.seq}-mention-${m}`}
-                label={`@${displayForIdentity(m, identityDisplay)}`}
+                label={`@${identityLabel(m, {
+                  kind: mentionedKind,
+                  owner: mentionedOwner,
+                  display: mentionedPresentation.label,
+                })}`}
                 name={m}
-                kind={mentionedSender?.kind ?? mentionedPresence?.kind ?? mentionedIdentity?.kind ?? null}
-                owner={mentionedSender?.owner ?? mentionedPresence?.account ?? mentionedIdentity?.account ?? null}
+                kind={mentionedKind}
+                owner={mentionedOwner}
+                ownerLabel={mentionedPresentation.ownerLabel}
                 entry={mentionedPresence}
                 assignment={agentRoles?.[m]}
                 recentMessages={recentMessagesByAgent?.get(m) ?? (m === msg.sender.name ? recentMessages : [])}
@@ -757,7 +825,7 @@ function MessageCardImpl({
         deliveries={deliveries ?? []}
         readers={read.readers}
         unread={read.unread}
-        display={(name) => displayForIdentity(name, identityDisplay)}
+        display={(name) => identityLabel(name)}
       />
       {menu !== null && (
         <div ref={menuRef} className="msg-menu" style={{ left: menu.x, top: menu.y }}>
@@ -958,7 +1026,7 @@ function MessageCardImpl({
       ) : msg.retracted ? (
         <p className="msg-retracted">{t("MessageCard.retracted")}</p>
       ) : (
-        <Markdown source={msg.body} identities={identityDisplay} />
+        <Markdown source={msg.body} identities={identityDisplay} display={identityLabel} />
       )}
       {!editing && !msg.retracted && msg.attachments !== undefined && msg.attachments.length > 0 && (
         <AttachmentList attachments={msg.attachments} />
