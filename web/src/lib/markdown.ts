@@ -141,7 +141,10 @@ if (typeof DOMPurify.addHook === "function") {
 // 钉住「mention 在解析后美化、绝不在解析前注入」这条 #131 接线。DOMPurify 只做白名单，
 // 不改动 ap-mention span 的结构，所以这一步的输出即最终 HTML 的语义。
 export function markdownToHtmlUnsafe(md: string, identities?: IdentityDisplayMap): string {
-  return createMarked(identities).parse(md, { async: false });
+  // Agent 回复经常用单换行划分「结论 / 风险 / 下一步」，CommonMark 默认会把这些换行
+  // 折叠成一个空格，导致本来有结构的长回复在频道里挤成一堵文字墙。开启 breaks 只改变
+  // 展示，不重写原文；代码块、GFM 列表和表格仍走原有 token 语义。
+  return createMarked(identities).parse(md, { async: false, breaks: true });
 }
 
 export function renderMarkdown(md: string, identities?: IdentityDisplayMap): string {

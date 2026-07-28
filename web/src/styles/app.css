@@ -1025,7 +1025,25 @@
    这里补一套主题感知（明/暗都走 --t-* / --code-* token）的正文排版。代码块沿用 hljs 主题，不动。 */
 .msg-body > :first-child { margin-top: 0; }
 .msg-body > :last-child { margin-bottom: 0; }
-.msg-body p { margin: 6px 0; }
+.msg-card > .msg-body {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.72;
+  letter-spacing: 0.01em;
+}
+.msg-card > .msg-body > p,
+.msg-card > .msg-body > ul,
+.msg-card > .msg-body > ol,
+.msg-card > .msg-body > blockquote,
+.msg-card > .msg-body > h1,
+.msg-card > .msg-body > h2,
+.msg-card > .msg-body > h3,
+.msg-card > .msg-body > h4,
+.msg-card > .msg-body > h5,
+.msg-card > .msg-body > h6 {
+  max-width: 104ch;
+}
+.msg-body p { margin: 8px 0; }
 .msg-body a { color: var(--t-link); text-decoration: underline; text-underline-offset: 2px; }
 .msg-body h1, .msg-body h2, .msg-body h3,
 .msg-body h4, .msg-body h5, .msg-body h6 {
@@ -1037,8 +1055,8 @@
 .msg-body h2 { font-size: 1.2em; }
 .msg-body h3 { font-size: 1.08em; }
 .msg-body h4, .msg-body h5, .msg-body h6 { font-size: 1em; }
-.msg-body ul, .msg-body ol { margin: 6px 0; padding-left: 22px; }
-.msg-body li { margin: 2px 0; }
+.msg-body ul, .msg-body ol { margin: 8px 0; padding-left: 24px; }
+.msg-body li { margin: 5px 0; padding-left: 2px; }
 .msg-body li > input[type="checkbox"] { margin: 0 6px 0 0; vertical-align: middle; }
 /* GFM 任务列表项：复选框自己当标记，去掉圆点 */
 .msg-body li:has(> input[type="checkbox"]) { list-style: none; }
@@ -1434,6 +1452,122 @@
   padding: 4px 10px 10px;
   overflow-x: auto;
 }
+.org-directory {
+  display: grid;
+  gap: 8px;
+}
+.org-directory-head,
+.org-person-head,
+.org-agent-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.org-directory-head h4 {
+  margin: 0;
+  font-size: 14px;
+}
+.org-directory-head p,
+.org-person-empty {
+  margin: 2px 0 0;
+  color: var(--t-dim);
+  font-size: 11px;
+}
+.org-directory-search {
+  width: 100%;
+  border: 1.4px solid var(--t-faint);
+  background: var(--t-panel);
+  color: var(--t-text);
+  padding: 7px 9px;
+}
+.org-person-list,
+.org-agent-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.org-person-card {
+  border: 1.4px solid var(--t-faint);
+  padding: 9px;
+  background: var(--t-panel2);
+}
+.org-person-identities {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.org-person-name {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--t-text);
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+}
+button.org-person-name {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--t-faint);
+  text-underline-offset: 3px;
+}
+.org-person-agent-count {
+  color: var(--t-dim);
+  font-size: 11px;
+}
+.org-agent-list {
+  margin-top: 7px;
+}
+.org-agent-row {
+  border-top: 1px dashed var(--t-faint);
+  padding-top: 7px;
+}
+.org-agent-identity {
+  display: grid;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--t-text);
+  text-align: left;
+}
+.org-agent-identity:not(:disabled) {
+  cursor: pointer;
+}
+.org-agent-name {
+  font-weight: 650;
+}
+.org-agent-raw {
+  max-width: min(58vw, 680px);
+  overflow: hidden;
+  color: var(--t-dim);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.org-agent-manage {
+  flex: none;
+}
+.org-reporting,
+.org-unassigned {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1.4px dashed var(--t-faint);
+}
+.org-reporting > summary,
+.org-unassigned > summary {
+  cursor: pointer;
+  color: var(--t-dim);
+  font-size: 11px;
+}
+.org-reporting[open] > summary,
+.org-unassigned[open] > summary {
+  margin-bottom: 6px;
+}
 .org-roots,
 .org-children {
   list-style: none;
@@ -1497,9 +1631,7 @@
   cursor: help;
 }
 .org-unassigned {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1.4px dashed var(--t-faint);
+  display: block;
 }
 .org-unassigned-head {
   display: block;
@@ -1508,6 +1640,11 @@
   color: var(--t-dim);
 }
 @media (max-width: 560px) {
+  .org-directory-head,
+  .org-agent-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
   .org-children {
     margin-left: 4px;
     padding-left: 8px;
@@ -2344,15 +2481,45 @@
   list-style: none;
 }
 .catchup-items li {
-  display: grid;
-  grid-template-columns: minmax(92px, auto) 1fr;
-  gap: 8px;
-  align-items: baseline;
   min-width: 0;
   font-size: 13px;
   line-height: 1.35;
 }
-.catchup-items li span:last-child {
+.catchup-group {
+  display: grid;
+  gap: 5px;
+  padding-top: 2px;
+}
+.catchup-group--attention {
+  padding: 8px 10px;
+  background: var(--d-yellow);
+  border: 1.4px solid var(--d-ink);
+}
+.catchup-group-title {
+  margin: 0;
+  font-family: var(--d-marker);
+  font-size: 14px;
+}
+.catchup-item-button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(92px, auto) 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.catchup-item-button:hover,
+.catchup-item-button:focus-visible {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+}
+.catchup-item-button span:last-child {
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -5474,7 +5641,7 @@
   .guard-reset { align-self: flex-start; }
   .catchup-head { align-items: stretch; flex-direction: column; }
   .catchup-action { align-self: flex-start; }
-  .catchup-items li { grid-template-columns: 1fr; gap: 2px; }
+  .catchup-item-button { grid-template-columns: 1fr; gap: 2px; }
   .agent-filter-head { align-items: flex-start; flex-wrap: wrap; }
   .agent-filter-clear { margin-left: 0; }
 }

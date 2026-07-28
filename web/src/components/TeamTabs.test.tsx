@@ -92,6 +92,26 @@ describe("TeamTabs (#504 博客风页签)", () => {
     expect(stats.at(-1)!.props.className).toBe("t-mono team-blog-stat team-blog-stat--hot");
   });
 
+  test("新版成员目录优先显示去重后的人与 Agent，不再突出技术口径的未认领数", () => {
+    act(() => {
+      renderer = create(
+        <LocaleProvider>
+          <TeamTabs
+            stats={{ roles: 0, online: 6, offline: 5, unclaimed: 13, pendingClaims: 0, people: 6, agents: 5 }}
+            division={<div>DIVISION_PANEL</div>}
+            board={<div>BOARD_PANEL</div>}
+          />
+        </LocaleProvider>,
+      );
+    });
+    const text = allText(renderer!);
+    expect(text).toContain("6 people");
+    expect(text).toContain("5 agents");
+    expect(text).not.toContain("13 unclaimed");
+    const memberTabText = allText({ toJSON: () => tabButtons(renderer!)[0] } as unknown as ReactTestRenderer);
+    expect(memberTabText).toContain("11");
+  });
+
   test("saving a role disables Team close and ignores a direct close request", () => {
     let closeCalls = 0;
     act(() => {

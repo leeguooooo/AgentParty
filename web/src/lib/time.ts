@@ -1,19 +1,14 @@
-// 时间显示：消息用绝对 HH:MM:SS（mono），presence 用相对时间
+// 时间显示：消息始终带日期，避免跨天回看时把旧消息误认成今天；presence 用相对时间。
 const pad = (n: number) => String(n).padStart(2, "0");
-
-function sameLocalDate(left: Date, right: Date): boolean {
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  );
-}
 
 export function fmtTime(ts: number, now = Date.now()): string {
   const d = new Date(ts);
+  const current = new Date(now);
   const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  if (sameLocalDate(d, new Date(now))) return time;
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`;
+  const date = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return d.getFullYear() === current.getFullYear()
+    ? `${date} ${time}`
+    : `${d.getFullYear()}-${date} ${time}`;
 }
 
 export function fmtRel(ts: number, now = Date.now()): string {

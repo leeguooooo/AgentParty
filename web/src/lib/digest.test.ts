@@ -71,7 +71,7 @@ describe("web catchup digest", () => {
     );
     expect(digest.messages).toBe(1);
     expect(digest.mentions).toBe(1);
-    expect(digest.items[0]).toMatchObject({ seq: 11, label: "@me" });
+    expect(digest.items[0]).toMatchObject({ seq: 11, kind: "mention", attention: true });
   });
 
   test("counts open and responded mentions using reply_to", () => {
@@ -86,7 +86,7 @@ describe("web catchup digest", () => {
     expect(digest.mentions).toBe(1);
     expect(digest.respondedMentions).toBe(1);
     expect(digest.replies).toBe(1);
-    expect(digest.items.some((item) => item.label === "@me done")).toBe(true);
+    expect(digest.items.some((item) => item.kind === "handled")).toBe(true);
   });
 
   test("counts responded mentions using status summary_seq", () => {
@@ -117,7 +117,35 @@ describe("web catchup digest", () => {
     expect(digest.blocked).toBe(1);
     expect(digest.done).toBe(1);
     expect(digest.releases).toBe(1);
+    expect(digest.issues).toBe(1);
     expect(digest.questions).toBe(1);
+    expect(digest.attentionItems.map((item) => item.kind)).toEqual(["question", "blocked"]);
+    expect(digest.updateItems.map((item) => item.kind)).toEqual(["release"]);
+  });
+
+  test("puts actionable items before routine updates", () => {
+    const digest = summarizeCatchup(
+      [
+        msg({ seq: 60, body: "v0.2.30 released" }),
+        msg({ seq: 61, body: "@me please decide", mentions: ["me"] }),
+        msg({ seq: 62, body: "ordinary reply", replyTo: 60 }),
+      ],
+      "me",
+      59,
+    );
+    expect(digest.items.map((item) => item.seq)).toEqual([61, 62, 60]);
+    expect(digest.attentionItems).toHaveLength(1);
+  });
+
+  test("does not mislabel a plain issue or PR reference as a release", () => {
+    const digest = summarizeCatchup(
+      [msg({ seq: 70, body: "reviewed #783; two comments remain" })],
+      "me",
+      69,
+    );
+    expect(digest.releases).toBe(0);
+    expect(digest.issues).toBe(1);
+    expect(digest.updateItems.map((item) => item.kind)).toEqual(["issue"]);
   });
 
   test("compacts whitespace and clips long bodies", () => {

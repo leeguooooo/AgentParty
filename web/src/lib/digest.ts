@@ -6,7 +6,8 @@ const QUESTION_RE = /[?？]|\b(blocked|unknown|unclear|open question)\b/i;
 
 export interface CatchupItem {
   seq: number;
-  label: string;
+  kind: "mention" | "handled" | "blocked" | "done" | "release" | "issue" | "question" | "reply";
+  attention: boolean;
   text: string;
 }
 
@@ -19,8 +20,11 @@ export interface CatchupDigest {
   done: number;
   replies: number;
   releases: number;
+  issues: number;
   questions: number;
   items: CatchupItem[];
+  attentionItems: CatchupItem[];
+  updateItems: CatchupItem[];
 }
 
 export function catchupKey(slug: string, self: string): string {
@@ -52,13 +56,15 @@ export function summarizeCatchup(messages: MsgFrame[], self: string, seenSeq: nu
   let done = 0;
   let replies = 0;
   let releases = 0;
+  let issues = 0;
   let questions = 0;
 
   for (const msg of fresh) {
     const text = compactDigestText(msg);
     const mentioned = msg.mentions.includes(self);
     const responded = mentioned && hasResponse(messages, msg, self);
-    const release = RELEASE_RE.test(text) || ISSUE_RE.test(text);
+    const release = RELEASE_RE.test(text);
+    const issue = ISSUE_RE.test(text);
     const question = QUESTION_RE.test(text);
     if (mentioned) mentions++;
     if (responded) respondedMentions++;
@@ -67,18 +73,29 @@ export function summarizeCatchup(messages: MsgFrame[], self: string, seenSeq: nu
     if (msg.state === "done") done++;
     if (msg.reply_to !== null) replies++;
     if (release) releases++;
+    if (issue) issues++;
     if (question) questions++;
 
-    let label: string | null = null;
-    if (mentioned) label = responded ? `@${self} done` : `@${self}`;
-    else if (msg.state === "blocked") label = "blocked";
-    else if (msg.state === "done") label = "done";
-    else if (release) label = "release";
-    else if (question) label = "question";
-    else if (msg.reply_to !== null) label = "reply";
-    if (label !== null && text !== "") items.push({ seq: msg.seq, label, text });
+    let kind: CatchupItem["kind"] | null = null;
+    if (mentioned) kind = responded ? "handled" : "mention";
+    else if (msg.state === "blocked") kind = "blocked";
+    else if (question && msg.sender.name !== self) kind = "question";
+    else if (release) kind = "release";
+    else if (issue) kind = "issue";
+    else if (msg.state === "done") kind = "done";
+    else if (msg.reply_to !== null) kind = "reply";
+    if (kind !== null && text !== "") {
+      items.push({
+        seq: msg.seq,
+        kind,
+        attention: kind === "mention" || kind === "blocked" || kind === "question",
+        text,
+      });
+    }
   }
 
+  const attentionItems = items.filter((item) => item.attention).slice(-4).reverse();
+  const updateItems = items.filter((item) => !item.attention).slice(-4).reverse();
   return {
     messages: fresh.length,
     mentions,
@@ -88,7 +105,10 @@ export function summarizeCatchup(messages: MsgFrame[], self: string, seenSeq: nu
     done,
     replies,
     releases,
+    issues,
     questions,
-    items: items.slice(-4).reverse(),
+    items: [...attentionItems, ...updateItems].slice(0, 6),
+    attentionItems,
+    updateItems,
   };
 }

@@ -714,7 +714,13 @@ function MessageCardImpl({
             </button>
           )}
           <span className="msg-seq">#{msg.seq}</span>
-          <time className="msg-time">{fmtTime(msg.ts)}</time>
+          <time
+            className="msg-time"
+            dateTime={new Date(msg.ts).toISOString()}
+            title={new Date(msg.ts).toLocaleString()}
+          >
+            {fmtTime(msg.ts)}
+          </time>
         </div>
       </header>
       {msg.reply_to !== null && quotedMessage !== null && (

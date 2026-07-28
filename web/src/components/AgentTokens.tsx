@@ -45,6 +45,7 @@ interface Props {
   onAuthFailed(message: string): void;
   active?: boolean;
   onActiveChange?(open: boolean): void;
+  focusAgentName?: string | null;
   // 转为常驻（launchd）注入点——测试用；默认走真实桌面适配器 / 目录选择器 / mac 桌面探测。
   dutyAdapter?: Pick<DesktopAgentAdapter, "dutyAdopt">;
   pickDirectory?: (title?: string) => Promise<string | null>;
@@ -85,6 +86,7 @@ export function AgentTokens({
   onAuthFailed,
   active,
   onActiveChange,
+  focusAgentName = null,
   dutyAdapter = desktopAgentAdapter,
   pickDirectory = pickDirectoryDefault,
   canMakeResident = isDesktopRuntime() && /mac/i.test(globalThis.navigator?.userAgent ?? ""),
@@ -217,6 +219,14 @@ export function AgentTokens({
     if (agents === null) void refreshAgents();
     if (profiles === null) void refreshProfiles();
   }, [agents, isOpen, profiles, refreshAgents, refreshProfiles]);
+
+  useEffect(() => {
+    if (!isOpen || focusAgentName === null) return;
+    setActiveSection("channel");
+    setAgentQuery("");
+    if (agents === null) return;
+    setSelectedAgentName(agents.some((agent) => agent.name === focusAgentName) ? focusAgentName : null);
+  }, [agents, focusAgentName, isOpen]);
 
   useEffect(() => {
     if (isOpen) return;

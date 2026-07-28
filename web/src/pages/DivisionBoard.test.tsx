@@ -496,8 +496,6 @@ describe("DivisionBoard roster completeness (#169)", () => {
     expect(renderer!.root.findByProps({ className: "role-name-input t-mono" }).props.disabled).toBe(true);
     expect(renderer!.root.findByProps({ className: "role-name-input t-mono" }).props["aria-label"]).toBe("成员名称");
 
-    const orgToggle = renderer!.root.findByProps({ className: "d-btn role-org-toggle" });
-    act(() => orgToggle.props.onClick());
     const reportSelectors = renderer!.root.findAllByProps({ className: "org-report-select" });
     expect(reportSelectors.length).toBeGreaterThan(0);
     expect(reportSelectors.every((select) => select.props.disabled === true)).toBe(true);
@@ -606,7 +604,7 @@ describe("DivisionBoard org-structure relationships (#168)", () => {
     return [...findText("role-report t-mono"), ...findText("role-report role-report--external t-mono")];
   }
 
-  test("the compact org button is the single control for showing the full tree (#504)", () => {
+  test("the people-and-agents directory is visible by default and can still be collapsed", () => {
     render(
       baseProps({
         roles: [
@@ -617,16 +615,15 @@ describe("DivisionBoard org-structure relationships (#168)", () => {
     );
 
     const toggle = renderer!.root.find((node) => node.props.className === "d-btn role-org-toggle");
-    expect(toggle.props["aria-expanded"]).toBe(false);
+    expect(toggle.props["aria-expanded"]).toBe(true);
     expect(toggle.props["aria-controls"]).toBe("division-org-tree");
-    expect(renderer!.root.findAllByProps({ id: "division-org-tree" })).toHaveLength(0);
+    const tree = renderer!.root.find((node) => node.type === "section" && node.props.id === "division-org-tree");
+    expect(tree.findAll((node) => node.props.className === "org-directory")).toHaveLength(1);
 
     act(() => toggle.props.onClick());
 
-    expect(toggle.props["aria-expanded"]).toBe(true);
-    const tree = renderer!.root.find((node) => node.type === "section" && node.props.id === "division-org-tree");
-    expect(tree.type).toBe("section");
-    expect(tree.findAllByType("details")).toHaveLength(0);
+    expect(toggle.props["aria-expanded"]).toBe(false);
+    expect(renderer!.root.findAllByProps({ id: "division-org-tree" })).toHaveLength(0);
   });
 
   test("runtime lineage is not promoted to a formal reports-to relationship", () => {
@@ -707,9 +704,8 @@ describe("DivisionBoard org-structure relationships (#168)", () => {
     );
 
     expect(renderer!.root.findAll((node) => node.props.className === "role-lead-tag t-mono")).toHaveLength(0);
-    const toggle = renderer!.root.find((node) => node.props.className === "d-btn role-org-toggle");
-    act(() => toggle.props.onClick());
-    expect(renderer!.root.findAll((node) => node.props.className === "org-lead-tag t-mono")).toHaveLength(0);
+    const tree = renderer!.root.find((node) => node.type === "section" && node.props.id === "division-org-tree");
+    expect(tree.findAll((node) => node.props.className === "org-lead-tag t-mono")).toHaveLength(0);
   });
 
   test("flags when the reporting target isn't part of this channel's roster", () => {
@@ -758,8 +754,6 @@ describe("DivisionBoard org-structure relationships (#168)", () => {
       }),
     );
 
-    const toggle = renderer!.root.find((node) => node.props.className === "d-btn role-org-toggle");
-    act(() => toggle.props.onClick());
     const selects = renderer!.root.findAll((node) => node.props.className === "org-report-select");
     expect(selects).toHaveLength(1);
     expect(String(selects[0]!.props["aria-label"])).toContain("assigned-lead");
