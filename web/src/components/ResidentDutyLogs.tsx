@@ -64,7 +64,18 @@ export function ResidentDutyLogs({
   const requestRef = useRef(0);
   const activeRef = useRef(active);
   const selectedRef = useRef(selected);
+  const routedTargetPropRef = useRef(initialTargetKey);
+  const pendingRoutedTargetRef = useRef<string | null>(initialTargetKey);
   selectedRef.current = selected;
+  if (routedTargetPropRef.current !== initialTargetKey) {
+    routedTargetPropRef.current = initialTargetKey;
+    pendingRoutedTargetRef.current = initialTargetKey;
+  } else if (!active) {
+    // Re-entering Logs from Overview should honor the routed target again, even
+    // when the same row is opened twice. Once active, refreshes keep the user's
+    // current filter instead of snapping back to this route hint.
+    pendingRoutedTargetRef.current = initialTargetKey;
+  }
 
   const readRow = useCallback(async (row: LocalAgentRow): Promise<LogEntry[]> => {
     let text = "";
@@ -145,12 +156,13 @@ export function ResidentDutyLogs({
       const cause = !dutiesResult.ok ? dutiesResult.error : instancesResult.ok ? null : instancesResult.error;
       if (cause !== null) setListError(cause instanceof Error ? cause.message : String(cause));
     }
-    const preferred = initialTargetKey ?? selectedRef.current;
+    const preferred = pendingRoutedTargetRef.current ?? selectedRef.current;
+    pendingRoutedTargetRef.current = null;
     const nextSelected = preferred === "all" || rows.some((row) => row.key === preferred) ? preferred : "all";
     setTargets(rows);
     setSelected(nextSelected);
     await loadLogs(rows, nextSelected);
-  }, [adapter, initialTargetKey, loadLogs]);
+  }, [adapter, loadLogs]);
 
   useEffect(() => {
     activeRef.current = active;

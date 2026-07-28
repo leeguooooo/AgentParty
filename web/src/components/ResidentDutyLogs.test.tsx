@@ -54,6 +54,7 @@ afterEach(async () => {
 async function renderLogs(
   overrides: Record<string, unknown> = {},
   createNodeMock?: (element: ReactElement) => unknown,
+  initialTargetKey: string | null = null,
 ) {
   const adapter = {
     dutyList: async () => [duty],
@@ -66,7 +67,7 @@ async function renderLogs(
   await act(async () => {
     renderer = create(
       <LocaleProvider>
-        <ResidentDutyLogs t={t} adapter={adapter as never} />
+        <ResidentDutyLogs t={t} adapter={adapter as never} initialTargetKey={initialTargetKey} />
       </LocaleProvider>,
       createNodeMock === undefined ? undefined : { createNodeMock },
     );
@@ -119,6 +120,29 @@ describe("unified local agent logs", () => {
     expect(instanceReads).toBe(1);
     expect(JSON.stringify(renderer!.toJSON())).toContain("duty only");
     expect(JSON.stringify(renderer!.toJSON())).not.toContain("instance only");
+  });
+
+  test("refresh keeps the user's selected Agent after entering through a routed log target", async () => {
+    let dutyReads = 0;
+    let instanceReads = 0;
+    const root = await renderLogs({
+      dutyLogRead: async () => { dutyReads += 1; return "duty only"; },
+      logsInstance: async () => { instanceReads += 1; return ["instance only"]; },
+    }, undefined, "duty:cfg:ops");
+    const select = root.findByType("select");
+    await act(async () => {
+      select.props.onChange({ currentTarget: { value: "instance:app:build" } });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      root.find((node) => node.type === "button" && node.props.className?.includes("resident-logs-refresh"))
+        .props.onClick();
+      await Promise.resolve();
+    });
+    expect(dutyReads).toBe(1);
+    expect(instanceReads).toBe(2);
+    expect(JSON.stringify(renderer!.toJSON())).toContain("instance only");
+    expect(JSON.stringify(renderer!.toJSON())).not.toContain("duty only");
   });
 
   test("positions the combined log at the latest line", async () => {
