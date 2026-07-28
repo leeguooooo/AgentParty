@@ -7,7 +7,13 @@ import { ChannelStrings } from "../i18n/strings/Channel";
 import type { IdentityDisplayMap } from "../lib/identityDisplay";
 import type { MentionReceipt } from "../lib/wakeReceipt";
 
-mock.module("../lib/markdown", () => ({ renderMarkdown: (s: string) => s }));
+const markdownCalls: Array<{ display?: (name: string) => string }> = [];
+mock.module("../lib/markdown", () => ({
+  renderMarkdown: (_source: string, _identities: IdentityDisplayMap | undefined, display?: (name: string) => string) => {
+    markdownCalls.push({ display });
+    return "";
+  },
+}));
 const { MessageCard } = await import("./MessageCard");
 
 let renderer: ReactTestRenderer | null = null;
@@ -24,6 +30,7 @@ function textContent(node: { children: Array<string | { children: unknown[] }> }
 }
 
 beforeEach(() => {
+  markdownCalls.length = 0;
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
     getItem: () => "en", setItem() {}, removeItem() {}, clear() {}, key: () => null, length: 0,
@@ -153,6 +160,8 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     expect(text).toContain("Owned byZHENG TONG");
     expect(text).toContain("Technical IDlark-461bc7018484-apple-signin-revoke");
     expect(text).not.toContain("Identityagent · lark:on_");
+    expect(markdownCalls.at(-1)?.display?.("lark-461bc7018484-apple-signin-revoke"))
+      .toBe("apple-signin-revoke");
   });
 
   test("status full detail expands by click and keyboard", () => {

@@ -135,6 +135,33 @@ describe("mentionCandidates", () => {
     expect(c.role).toBe("worker");
   });
 
+  test("searching a human display name includes that human and every agent under the same account", () => {
+    const account = "lark:on_luis";
+    const identities = [
+      { name: "human-luis", display: "Luis", kind: "human" as const, account, handle: "luis" },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        name: `agent-${index + 1}`,
+        display: `agent-${index + 1}`,
+        kind: "agent" as const,
+        account,
+      })),
+    ];
+    const candidates = mentionCandidates(
+      [{ name: "human-luis", kind: "human", owner: account, handle: "luis" }],
+      {},
+      null,
+      NOW,
+      identities,
+    );
+    const matches = filterCandidates(candidates, "luis");
+
+    expect(matches).toHaveLength(11);
+    expect(matches.map((candidate) => candidate.name)).toContain("luis");
+    expect(matches.filter((candidate) => candidate.kind === "agent")).toHaveLength(10);
+    expect(matches.every((candidate) => candidate.ownerDisplay === "Luis")).toBe(true);
+    expect(matches.every((candidate) => candidate.group === account)).toBe(true);
+  });
+
   test("identity-only agents stay mentionable even without live presence", () => {
     const c = mentionCandidates([], {}, null, NOW, [
       { name: "LEO-MAIN", display: "LEO-MAIN", kind: "agent", account: "lark:on_owner" },

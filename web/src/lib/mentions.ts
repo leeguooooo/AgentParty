@@ -29,6 +29,7 @@ export interface MentionCandidate {
   tier: MentionTier;
   group: string; // UI 分组：账号 / 未归属
   account?: string; // 会话背后的账号（人类 = email）
+  ownerDisplay?: string; // 账号对应的人类显示名；用于按人搜索其名下 agent，不能替代路由 token
   role?: string; // 协作角色/职责（host/worker/reviewer/observer），hover 显示
   responsibility?: string; // 结构化职责说明（频道分工字段）
   note?: string; // 当前 status note
@@ -93,6 +94,40 @@ export function mentionCandidates(
     recentSenderByName.set(message.sender.name, mergeSenderIdentity(previous, message.sender));
     recentMentionNames.add(message.sender.name);
     if (message.sender.handle) recentMentionNames.add(message.sender.handle);
+  }
+  const ownerDisplayByAccount = new Map<string, string>();
+  const rememberOwnerDisplay = (
+    account: string | undefined,
+    display: string | null | undefined,
+  ) => {
+    const readable = display?.trim();
+    if (!account || !readable || readable === account || SYSTEM_HUMAN_SESSION_RE.test(readable)) return;
+    if (ownerDisplayByAccount.has(account)) return;
+    ownerDisplayByAccount.set(account, readable);
+  };
+  for (const identity of identities) {
+    if (identity.kind === "human") rememberOwnerDisplay(identity.account, identity.display || identity.handle);
+  }
+  for (const role of roles) {
+    if (role.kind === "human") rememberOwnerDisplay(role.account, role.display);
+  }
+  for (const participant of participants) {
+    if (participant.kind === "human") {
+      rememberOwnerDisplay(
+        participant.owner,
+        participant.display_name || participant.handle,
+      );
+    }
+  }
+  for (const entry of Object.values(presence)) {
+    if (entry.kind === "human") {
+      rememberOwnerDisplay(entry.account, entry.display_name || entry.handle);
+    }
+  }
+  for (const sender of recentSenderByName.values()) {
+    if (sender.kind === "human") {
+      rememberOwnerDisplay(sender.owner, sender.display_name || sender.handle);
+    }
   }
   const kindOf = new Map<string, "agent" | "human">();
   for (const p of participants) kindOf.set(p.name, p.kind);
@@ -159,6 +194,11 @@ export function mentionCandidates(
             : kind === "human" && account
               ? recentSender?.display_name || account
               : name;
+      const ownerDisplay =
+        account === undefined
+          ? undefined
+          : ownerDisplayByAccount.get(account)
+            ?? (kind === "human" && display !== account ? display : undefined);
       const group = account ?? (kind === "human" ? "human sessions" : "unowned agents");
       return {
         sourceName: name,
@@ -168,6 +208,7 @@ export function mentionCandidates(
         tier: tierFor(name, online, presence, now),
         group,
         account,
+        ownerDisplay,
         role: assigned?.role ?? p?.role,
         responsibility: assigned?.responsibility ?? undefined,
         note: p?.note ?? undefined,
@@ -305,5 +346,20 @@ export function filterCandidates(cands: MentionCandidate[], query: string, limit
     if (n.startsWith(q) || d.startsWith(q)) pref.push(c);
     else if (n.includes(q) || d.includes(q)) sub.push(c);
   }
-  return [...pref, ...sub].slice(0, limit);
+  const direct = [...pref, ...sub];
+  const matchedOwnerGroups = new Set(
+    cands
+      .filter((candidate) => q.length >= 2 && candidate.ownerDisplay?.toLowerCase().includes(q))
+      .map((candidate) => candidate.account ?? `display:${candidate.ownerDisplay!.toLowerCase()}`),
+  );
+  if (matchedOwnerGroups.size === 0) return direct.slice(0, limit);
+
+  // 搜人名时把这个人名下的全部 agent 一起带出。owner 组不受普通 8 条上限截断，
+  // 否则 agent 较多的账号仍会出现“只看到本人、看不到自己的 agent”。
+  const ownerMatches = cands.filter((candidate) =>
+    matchedOwnerGroups.has(candidate.account ?? `display:${candidate.ownerDisplay?.toLowerCase() ?? ""}`),
+  );
+  const ownerNames = new Set(ownerMatches.map((candidate) => candidate.name));
+  const remaining = direct.filter((candidate) => !ownerNames.has(candidate.name));
+  return [...ownerMatches, ...remaining.slice(0, Math.max(0, limit - ownerMatches.length))];
 }

@@ -443,6 +443,12 @@ function MessageCardImpl({
     },
     [identityDisplay, t],
   );
+  // 正文 mention 是句子的一部分，只保留短身份名与 @ 语义；“用户 · Agent”仅用于
+  // 消息头、投递状态和身份卡等独立身份界面，不能塞进“有异常 @angel 我即查”这类正文。
+  const inlineMentionLabel = useCallback(
+    (name: string): string => resolveIdentityPresentation(name, identityDisplay).label,
+    [identityDisplay],
+  );
   const lineage = msg.sender.lineage ?? null;
   const lineageLabel = lineage === null ? null : `child of ${lineage.parent_agent}`;
   const senderTitle = [
@@ -1015,7 +1021,7 @@ function MessageCardImpl({
       ) : msg.retracted ? (
         <p className="msg-retracted">{t("MessageCard.retracted")}</p>
       ) : (
-        <Markdown source={msg.body} identities={identityDisplay} display={identityLabel} />
+        <Markdown source={msg.body} identities={identityDisplay} display={inlineMentionLabel} />
       )}
       {!editing && !msg.retracted && msg.attachments !== undefined && msg.attachments.length > 0 && (
         <AttachmentList attachments={msg.attachments} />
