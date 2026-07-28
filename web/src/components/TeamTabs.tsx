@@ -12,6 +12,8 @@ export interface TeamTabsStats {
   offline: number;
   unclaimed: number;
   pendingClaims: number;
+  people?: number;
+  agents?: number;
 }
 
 export interface TeamTabsProps {
@@ -56,8 +58,13 @@ export function TeamTabs({
       id: "division",
       no: "01",
       label: t("Channel.team.tab.division"),
-      badge: stats.unclaimed > 0 ? stats.unclaimed : null,
-      badgeHot: true,
+      badge:
+        stats.people !== undefined && stats.agents !== undefined
+          ? stats.people + stats.agents
+          : stats.unclaimed > 0
+            ? stats.unclaimed
+            : null,
+      badgeHot: false,
       content: division,
     },
     {
@@ -97,6 +104,16 @@ export function TeamTabs({
           <span className="t-mono team-blog-prompt">{t("Channel.team.overview.prompt")}</span>
         </div>
         <div className="team-blog-stats" role="list">
+          {stats.people !== undefined && (
+            <span className="t-mono team-blog-stat" role="listitem">
+              {t("Channel.team.badge.people", { count: String(stats.people) })}
+            </span>
+          )}
+          {stats.agents !== undefined && (
+            <span className="t-mono team-blog-stat" role="listitem">
+              {t("Channel.team.badge.agents", { count: String(stats.agents) })}
+            </span>
+          )}
           <span className="t-mono team-blog-stat" role="listitem">{t("Channel.team.badge.roles", { count: String(stats.roles) })}</span>
           <span className="t-mono team-blog-stat" role="listitem">{t("Channel.team.badge.online", { count: String(stats.online) })}</span>
           <span className="t-mono team-blog-stat" role="listitem">{t("Channel.team.badge.offline", { count: String(stats.offline) })}</span>

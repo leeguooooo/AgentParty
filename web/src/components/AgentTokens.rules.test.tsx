@@ -268,6 +268,29 @@ describe("AgentTokens functional workspaces", () => {
     expect(allText(renderer!)).toContain("controlled-profile");
   });
 
+  test("opens the exact agent requested by an upgrade or directory action", async () => {
+    agentsFixture = [
+      { name: "alpha", owner: "acct-1", channel_scope: "demo", created_at: 1 },
+      { name: "target-agent", owner: "acct-1", channel_scope: "demo", created_at: 2, nickname: "目标" },
+    ];
+    await act(async () => {
+      renderer = create(
+        <LocaleProvider>
+          <AgentTokens {...baseProps()} active={true} focusAgentName="target-agent" />
+        </LocaleProvider>,
+      );
+    });
+    await act(async () => {});
+
+    const selectedRow = renderer!.root.find((node) =>
+      typeof node.props.className === "string"
+      && node.props.className.split(/\s+/).includes("agentmanager-list-item")
+      && node.props["aria-pressed"] === true
+    );
+    expect(selectedRow.findAll((node) => node.children.some((child) => child === "target-agent"))).toHaveLength(1);
+    expect(allText(renderer!)).toContain("目标");
+  });
+
   test("ignores stale channel and profile refresh responses", async () => {
     agentsFixture = [{ name: "initial-agent", owner: "acct-1", channel_scope: "demo", created_at: 1 }];
     profilesFixture = [profile({ handle: "initial-profile" })];

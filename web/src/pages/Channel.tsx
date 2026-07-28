@@ -663,7 +663,9 @@ export interface DivisionBoardProps {
   // commit 7f7e8e1 落地）的入口——门禁复用 Channel.tsx 里 AgentTokens 本身的门禁
   // （canMintAgent && accountKey !== null），不在这里重新定义一套。
   canManageAgentRules: boolean;
+  manageableAgentAccount?: string | null;
   onOpenAgentRules: () => void;
+  onOpenAgentRulesFor?: (name: string) => void;
   // issue #272（审计重开）：点分工面板里的某个成员，打开它的单 Agent 详情弹窗
   // （工作状态/历史工作内容/在线状态）。可选——未接的调用方（如既有测试）行内保持只读展示。
   onOpenAgentDetail?: (name: string) => void;
@@ -693,7 +695,9 @@ export function DivisionBoard({
   onSyncToCharter,
   syncingCharter,
   canManageAgentRules,
+  manageableAgentAccount,
   onOpenAgentRules,
+  onOpenAgentRulesFor,
   onOpenAgentDetail,
 }: DivisionBoardProps) {
   const t = useT();
@@ -707,7 +711,9 @@ export function DivisionBoard({
   onRoleDraftRef.current = onRoleDraft;
   const [unassignedOpen, setUnassignedOpen] = useState(false);
   // #504 还原度：组织架构树默认折叠（设计里是个按钮，不是常驻大卡），点开才展开，别顶乱分工列表。
-  const [orgOpen, setOrgOpen] = useState(false);
+  // 成员页首先回答「频道里有哪些人、每个人有哪些 agent」；汇报关系只是次级信息。
+  // 默认展开目录，避免用户进入 Members 后还要猜一次“组织架构”按钮才看得到 roster。
+  const [orgOpen, setOrgOpen] = useState(true);
   useEffect(() => {
     if (!selfHintCopied) return;
     const timer = window.setTimeout(() => setSelfHintCopied(false), 1400);
@@ -923,18 +929,17 @@ export function DivisionBoard({
             id="division-org-tree"
             tree={orgTree}
             t={t}
-            interactive={
-              canModerate && onSetReportsTo !== undefined
-                ? {
-                    canModerate,
-                    allNames: orgMembers
-                      .filter((member) => member.source === "assigned")
-                      .map((member) => member.name),
-                    busyName: roleSaving,
-                    onSetReportsTo,
-                  }
-                : undefined
-            }
+            interactive={{
+              canModerate,
+              allNames: orgMembers
+                .filter((member) => member.source === "assigned")
+                .map((member) => member.name),
+              busyName: roleSaving,
+              onSetReportsTo: onSetReportsTo ?? (() => {}),
+              onOpenMember: onOpenAgentDetail,
+              onManageAgent: canManageAgentRules ? onOpenAgentRulesFor : undefined,
+              manageableAccount: manageableAgentAccount,
+            }}
           />
         )}
         {groups.length > 0 ? (
@@ -1432,11 +1437,13 @@ function CatchupPanel({
   seenSeq,
   latestSeq,
   onCaughtUp,
+  onJump,
 }: {
   digest: CatchupDigest;
   seenSeq: number;
   latestSeq: number;
   onCaughtUp: () => void;
+  onJump: (seq: number) => void | Promise<void>;
 }) {
   const t = useT();
   const chips = [
@@ -1446,9 +1453,36 @@ function CatchupPanel({
     digest.blocked > 0 ? t("Channel.catchup.chip.blocked", { count: digest.blocked }) : null,
     digest.done > 0 ? t("Channel.catchup.chip.done", { count: digest.done }) : null,
     digest.releases > 0 ? t("Channel.catchup.chip.release", { count: digest.releases }) : null,
+    digest.issues > 0 ? t("Channel.catchup.chip.issues", { count: digest.issues }) : null,
     digest.questions > 0 ? t("Channel.catchup.chip.question", { count: digest.questions }) : null,
     digest.replies > 0 ? t("Channel.catchup.chip.replies", { count: digest.replies }) : null,
   ].filter((chip): chip is string => chip !== null);
+  const itemLabel = (item: CatchupDigest["items"][number]) =>
+    t(`Channel.catchup.item.${item.kind}`);
+  const group = (title: string, items: CatchupDigest["items"], attention: boolean) => (
+    items.length > 0 && (
+      <section className={`catchup-group${attention ? " catchup-group--attention" : ""}`}>
+        <h3 className="catchup-group-title">{title}</h3>
+        <ol className="catchup-items">
+          {items.map((item) => (
+            <li key={item.seq}>
+              <button
+                type="button"
+                className="catchup-item-button"
+                onClick={() => void onJump(item.seq)}
+                aria-label={t("Channel.catchup.jump", { seq: item.seq })}
+              >
+                <span className="t-mono catchup-item-meta">
+                  #{item.seq} {itemLabel(item)}
+                </span>
+                <span>{item.text}</span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      </section>
+    )
+  );
 
   return (
     <section className="catchup-panel" aria-label={t("Channel.catchup.aria")}>
@@ -1470,18 +1504,8 @@ function CatchupPanel({
           </span>
         ))}
       </div>
-      {digest.items.length > 0 && (
-        <ol className="catchup-items">
-          {digest.items.map((item) => (
-            <li key={item.seq}>
-              <span className="t-mono catchup-item-meta">
-                #{item.seq} {item.label}
-              </span>
-              <span>{item.text}</span>
-            </li>
-          ))}
-        </ol>
-      )}
+      {group(t("Channel.catchup.attention"), digest.attentionItems, true)}
+      {group(t("Channel.catchup.updates"), digest.updateItems, false)}
     </section>
   );
 }
@@ -3142,6 +3166,7 @@ export function ChannelPage({
   const [seenCharterRev, setSeenCharterRev] = useState(() => readSeenCharterRev(slug));
   const [activePanel, setActivePanel] = useState<ChannelPanel | null>(null);
   const [activeAdminSurface, setActiveAdminSurface] = useState<AdminSurface | null>(null);
+  const [agentManagerTarget, setAgentManagerTarget] = useState<string | null>(null);
   const [localLoopGuardEnabled, setLocalLoopGuardEnabled] = useState(loopGuardEnabled);
   const [localLoopGuardLimit, setLocalLoopGuardLimit] = useState(loopGuardLimit === null ? "" : String(loopGuardLimit));
   const [localWorkflowGuardEnabled, setLocalWorkflowGuardEnabled] = useState(workflowGuardEnabled);
@@ -4325,6 +4350,7 @@ export function ChannelPage({
     setActivePanel(null);
     setMemberDetailRoute(null);
     setActiveAdminSurface(open ? surface : null);
+    if (!open || surface !== "agentTokens") setAgentManagerTarget(null);
   }, []);
 
   const openTeamMember = useCallback((name: string) => {
@@ -4476,6 +4502,10 @@ export function ChannelPage({
   // commit 7f7e8e1）的入口——复用 setAdminSurface（关掉分工弹层，打开 AgentTokens），
   // 不重复造轮子。
   const openAgentRulesFromDivision = useCallback(() => {
+    setAdminSurface("agentTokens", true);
+  }, [setAdminSurface]);
+  const openAgentRulesFor = useCallback((name: string) => {
+    setAgentManagerTarget(name);
     setAdminSurface("agentTokens", true);
   }, [setAdminSurface]);
 
@@ -5037,6 +5067,46 @@ export function ChannelPage({
   );
   const pendingRoleClaimCount = teamRoleSummary.selfReported.length;
   const unclaimedTeamCount = teamRoleSummary.unassigned.length;
+  const teamIdentityStats = useMemo(() => {
+    const byName = new Map<string, {
+      name: string;
+      kind: Sender["kind"];
+      account: string | null;
+      display: string;
+    }>();
+    for (const participant of state.participants) {
+      byName.set(participant.name, {
+        name: participant.name,
+        kind: participant.kind,
+        account: participant.owner ?? null,
+        display: participant.display_name ?? participant.handle ?? participant.name,
+      });
+    }
+    for (const entry of Object.values(state.presence)) {
+      byName.set(entry.name, {
+        name: entry.name,
+        kind: entry.kind ?? byName.get(entry.name)?.kind ?? "agent",
+        account: entry.account ?? byName.get(entry.name)?.account ?? null,
+        display: identityDisplay[entry.name]?.display ?? byName.get(entry.name)?.display ?? entry.name,
+      });
+    }
+    for (const identity of channelIdentities) {
+      byName.set(identity.name, {
+        name: identity.name,
+        kind: identity.kind ?? byName.get(identity.name)?.kind ?? "agent",
+        account: identity.account ?? byName.get(identity.name)?.account ?? null,
+        display: identity.display,
+      });
+    }
+    const people = new Set<string>();
+    const agents = new Set<string>();
+    for (const member of byName.values()) {
+      if (member.name === "system") continue;
+      if (member.kind === "human") people.add(member.account ?? member.display ?? member.name);
+      else agents.add(member.name);
+    }
+    return { people: people.size, agents: agents.size };
+  }, [channelIdentities, identityDisplay, state.participants, state.presence]);
 
   // 频道常驻焦点栏（#682）：跨成员把任务台账 + presence/status + 未闭合决策聚成「球在谁手里」。
   // teamNow 已每秒推进（团队面板复用），焦点的 staleness/时间判定跟着刷新，无需另起计时器。
@@ -5443,7 +5513,10 @@ export function ChannelPage({
         <OutdatedAgentsNotice
           presence={state.presence}
           accountKey={accountKey}
-          onUpgrade={canMintAgent && accountKey !== null ? () => setAdminSurface("agentJoin", true) : undefined}
+          onUpgrade={canMintAgent && accountKey !== null ? (agentName) => {
+            setAgentManagerTarget(agentName);
+            setAdminSurface("agentTokens", true);
+          } : undefined}
         />
       )}
       <ChannelToolstrip
@@ -5526,6 +5599,7 @@ export function ChannelPage({
                     onAuthFailed={onAuthFailed}
                     active={activeAdminSurface === "agentTokens"}
                     onActiveChange={(open) => setAdminSurface("agentTokens", open)}
+                    focusAgentName={agentManagerTarget}
                   />
                 </div>
               )}
@@ -5551,6 +5625,9 @@ export function ChannelPage({
           seenSeq={seenSeq}
           latestSeq={lastSeq}
           onCaughtUp={onCaughtUp}
+          onJump={(seq) => {
+            void jumpToMention(seq);
+          }}
         />
       )}
       {activePanel !== null && (
@@ -5629,6 +5706,8 @@ export function ChannelPage({
                 offline: offlineMemberCount,
                 unclaimed: unclaimedTeamCount,
                 pendingClaims: pendingRoleClaimCount,
+                people: teamIdentityStats.people,
+                agents: teamIdentityStats.agents,
               }}
               division={
                 <DivisionBoard
@@ -5655,7 +5734,9 @@ export function ChannelPage({
                   onSyncToCharter={syncDivisionToCharter}
                   syncingCharter={charterSaving}
                   canManageAgentRules={canMintAgent && accountKey !== null}
+                  manageableAgentAccount={accountKey}
                   onOpenAgentRules={openAgentRulesFromDivision}
+                  onOpenAgentRulesFor={openAgentRulesFor}
                   onOpenAgentDetail={openTeamMember}
                 />
               }

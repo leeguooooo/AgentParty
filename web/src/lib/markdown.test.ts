@@ -7,6 +7,13 @@ import { describe, expect, test } from "bun:test";
 import { markdownToHtmlUnsafe } from "./markdown";
 
 describe("markdown 解析", () => {
+  test("保留 agent 正文里的单换行，避免结论和下一步挤成一段", () => {
+    const html = markdownToHtmlUnsafe("结论：需要修改\n风险：旧令牌仍会阻塞\n下一步：发补丁版");
+    expect(html.match(/<br>/g)?.length).toBe(2);
+    expect(html).toContain("结论：需要修改");
+    expect(html).toContain("下一步：发补丁版");
+  });
+
   test("GFM 表格解析成结构化 <table>（表头 + 数据单元格 + 列对齐）", () => {
     const html = markdownToHtmlUnsafe("| h1 | h2 | h3 |\n|:-:|--:|:--|\n| a | b | c |");
     expect(html).toContain("<table>");
