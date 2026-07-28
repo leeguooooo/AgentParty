@@ -128,7 +128,7 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     expect(meta.findByProps({ className: "msg-time" })).toBeDefined();
   });
 
-  test("shows the linked human owner directly in an agent message header", () => {
+  test("shows one compact owner-agent identity in the message header", () => {
     const root = renderMessage([], [], {
       "human-session": {
         display: "王路",
@@ -137,20 +137,21 @@ describe("MessageCard touch and keyboard details (#357)", () => {
       },
     });
 
-    expect(root.findByProps({ className: "msg-owner" }).children).toEqual(["Agent of 王路"]);
+    expect(root.findByProps({ className: "msg-sender msg-agent-trigger" }).children).toEqual(["王路 · builder"]);
+    expect(root.findAllByProps({ className: "msg-owner" })).toHaveLength(0);
   });
 
-  test("uses one readable owner-aware label for @mention, delivery, and agent details", () => {
+  test("uses one compact owner-agent label without a misleading @ prefix", () => {
     const root = renderGeneratedAgentMention();
-    const readable = "ZHENG TONG's apple-signin-revoke Agent";
+    const readable = "ZHENG TONG · apple-signin-revoke";
     expect(root.findByProps({ className: "msg-mention msg-agent-trigger" }).children.join(""))
-      .toBe(`@${readable}`);
+      .toBe(readable);
     expect(root.findByProps({ className: "msg-receipt-name t-mono" }).children.join(""))
-      .toBe(`@${readable}`);
+      .toBe(readable);
     const card = root.findByProps({ id: "agent-info-11-mention-lark-461bc7018484-apple-signin-revoke" });
     const text = textContent(card);
     expect(text).toContain("Owned byZHENG TONG");
-    expect(text).toContain("Technical ID@lark-461bc7018484-apple-signin-revoke");
+    expect(text).toContain("Technical IDlark-461bc7018484-apple-signin-revoke");
     expect(text).not.toContain("Identityagent · lark:on_");
   });
 
@@ -205,7 +206,7 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     expect(delivery.props.className).toContain("msg-delivery--running");
     expect(delivery.props.tabIndex).toBe(0);
     expect(delivery.children.map((child) => typeof child === "string" ? child : child.children.join("")).join(""))
-      .toContain("@builderrunning");
+      .toContain("builderrunning");
     expect(delivery.props.title).not.toContain("attempt 2");
     expect(delivery.props.title).not.toContain("work-10");
     expect(delivery.props.title).not.toContain("thread-10");

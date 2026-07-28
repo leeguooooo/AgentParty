@@ -169,8 +169,8 @@ describe("resolveIdentityPresentation", () => {
       identities,
     );
     expect(
-      formatIdentityPresentation(presentation, (owner, name) => `${owner} 的 ${name} Agent`),
-    ).toBe("ZHENG TONG 的 apple-signin-revoke Agent");
+      formatIdentityPresentation(presentation, (owner, name) => `${owner} · ${name}`),
+    ).toBe("ZHENG TONG · apple-signin-revoke");
   });
 
   it("keeps a real agent nickname instead of replacing it with its owner", () => {
@@ -187,7 +187,7 @@ describe("resolveIdentityPresentation", () => {
     );
     expect(presentation.label).toBe("小火龙");
     expect(
-      formatIdentityPresentation(presentation, (owner, name) => `${owner} 的 ${name} Agent`),
-    ).toBe("ZHENG TONG 的 小火龙 Agent");
+      formatIdentityPresentation(presentation, (owner, name) => `${owner} · ${name}`),
+    ).toBe("ZHENG TONG · 小火龙");
   });
 });

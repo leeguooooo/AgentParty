@@ -113,7 +113,7 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
             data-delivery-id={delivery.id}
           >
             <span className={`msg-receipt-icon ap-sprite ap-sprite--${DELIVERY_ICON[delivery.state]}`} aria-hidden="true" />
-            <span className="msg-receipt-name t-mono">@{display(delivery.target_name)}</span>
+            <span className="msg-receipt-name t-mono">{display(delivery.target_name)}</span>
             <span className="msg-receipt-label">{deliveryText(delivery)}</span>
           </span>
         ))}
@@ -126,7 +126,7 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
             tabIndex={0}
           >
             <span className={`msg-receipt-icon ap-sprite ap-sprite--${RECEIPT_ICON[r.state]}`} aria-hidden="true" />
-            <span className="msg-receipt-name t-mono">@{display(r.name)}</span>
+            <span className="msg-receipt-name t-mono">{display(r.name)}</span>
             <span className="msg-receipt-label">{receiptText(r)}</span>
           </span>
         ))}
@@ -181,7 +181,7 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
                     tabIndex={0}
                   >
                     <span className={`msg-receipt-icon ap-sprite ap-sprite--${DELIVERY_ICON[delivery.state]}`} aria-hidden="true" />{" "}
-                    <span className="t-mono">@{display(delivery.target_name)}</span>
+                    <span className="t-mono">{display(delivery.target_name)}</span>
                     <span className="msg-status-name-state"> — {deliveryText(delivery)}</span>
                   </li>
                 ))}
@@ -202,7 +202,7 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
                     tabIndex={0}
                   >
                     <span className={`msg-receipt-icon ap-sprite ap-sprite--${RECEIPT_ICON[r.state]}`} aria-hidden="true" />{" "}
-                    <span className="t-mono">@{display(r.name)}</span>
+                    <span className="t-mono">{display(r.name)}</span>
                     <span className="msg-status-name-state"> — {receiptText(r)}</span>
                   </li>
                 ))}

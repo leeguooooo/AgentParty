@@ -311,7 +311,8 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
   test("不传 presence（或查不到该名字）时 sender 信息卡明确显示未上报", () => {
     const root = render(baseMsg({}));
     const card = senderCardText(root);
-    expect(card).toContain("@planner");
+    expect(card).toContain("Technical IDplanner");
+    expect(card).not.toContain("@planner");
     expect(card).toContain("Current workNot reported");
   });
 
@@ -383,7 +384,7 @@ describe("发送者即时信息卡/@提及悬停展示实时状态 (#274/#490)",
     });
     expect(textContent(mentionCard(root))).toContain("IdentityagentOwned byowner-a");
     expect(textContent(mentionCard(root))).not.toContain("Identityagent · owner-a");
-    expect(textContent(mentionCard(root))).toContain("Technical ID@reviewer");
+    expect(textContent(mentionCard(root))).toContain("Technical IDreviewer");
   });
 
   test("离线 @human 从 identity map 恢复人类身份和账号", () => {
