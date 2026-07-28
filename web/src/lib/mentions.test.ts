@@ -162,6 +162,44 @@ describe("mentionCandidates", () => {
     expect(matches.every((candidate) => candidate.group === account)).toBe(true);
   });
 
+  test("中文成员保留真名展示，并可用全拼找到本人和名下 agent", () => {
+    const account = "lark:on_wang";
+    const identities = [
+      {
+        name: "lark-cca3ded25c1e",
+        display: "王路",
+        kind: "human" as const,
+        account,
+        handle: "karl",
+      },
+      {
+        name: account,
+        display: "王路",
+        kind: "human" as const,
+        account,
+        handle: "karl",
+      },
+      {
+        name: "lark-cca3ded25c1e-apple-signin-revoke",
+        display: "lark-cca3ded25c1e-apple-signin-revoke",
+        kind: "agent" as const,
+        account,
+      },
+    ];
+
+    const candidates = mentionCandidates([], {}, null, NOW, identities);
+    const matches = filterCandidates(candidates, "wang");
+
+    expect(matches.map(({ name, display }) => ({ name, display }))).toEqual([
+      { name: "karl", display: "王路" },
+      {
+        name: "lark-cca3ded25c1e-apple-signin-revoke",
+        display: "apple-signin-revoke",
+      },
+    ]);
+    expect(matches.every((candidate) => candidate.account === account)).toBe(true);
+  });
+
   test("identity-only agents stay mentionable even without live presence", () => {
     const c = mentionCandidates([], {}, null, NOW, [
       { name: "LEO-MAIN", display: "LEO-MAIN", kind: "agent", account: "lark:on_owner" },
@@ -307,7 +345,7 @@ describe("mentionCandidates", () => {
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({
       name: "Evan_Clauder",
-      display: "Evan_Clauder",
+      display: "Evan",
       account: "lark:on_cross_company",
       group: "lark:on_cross_company",
     });

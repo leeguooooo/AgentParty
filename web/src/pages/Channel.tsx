@@ -2299,6 +2299,7 @@ export function TaskLedgerPanel({
   onCreateTask,
   identities = [],
   onUploadAttachment,
+  onOpenMessage,
   onClose,
   selectedTaskId = null,
 }: {
@@ -2312,14 +2313,22 @@ export function TaskLedgerPanel({
   creating: boolean;
   createError: string | null;
   onRefresh: () => void;
-  onSetState: (id: number, state: TaskState) => void;
+  onSetState: (id: number, state: TaskState, blockedReason?: string) => void;
   onAssign: (id: number, name: string, kind: TaskAssigneeKind) => void;
   onReview: (task: TaskRecord, action: "approve" | "reject", reason?: string) => void;
-  onCreateTask: (input: { title: string; desc: string; attachments?: Attachment[] }) => Promise<boolean>;
+  onCreateTask: (input: {
+    title: string;
+    desc: string;
+    priority: number;
+    assignee: { name: string; kind: TaskAssigneeKind } | null;
+    attachments?: Attachment[];
+  }) => Promise<boolean>;
   // #271(b)：频道身份（presence/identities），给指派输入框做可检索的 datalist 候选。
   identities?: ChannelIdentity[];
   // #369：上传图片/文件到 R2 拿引用（Channel 提供 token/slug）。缺省则不显上传入口（如从消息建任务）。
   onUploadAttachment?: (file: File) => Promise<Attachment>;
+  // 任务必须能回到提出它的消息，否则详情页只剩一份与讨论脱节的静态记录。
+  onOpenMessage?: (seq: number) => void | Promise<void>;
   // 从 Focus 等外部入口精确跳转任务。仅临时穿透筛选，不重置面板内搜索、筛选或草稿。
   selectedTaskId?: number | null;
 }) {
@@ -2330,6 +2339,9 @@ export function TaskLedgerPanel({
   const [composerOpen, setComposerOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [newPriority, setNewPriority] = useState(0);
+  const [newAssignee, setNewAssignee] = useState("");
+  const [newAssigneeKind, setNewAssigneeKind] = useState<TaskAssigneeKind>("agent");
   // #369：新建任务的待发附件（先上传到 R2 拿引用，随 createTask 带上）。
   const [newAtts, setNewAtts] = useState<Attachment[]>([]);
   const [attUploading, setAttUploading] = useState(false);
@@ -2343,20 +2355,20 @@ export function TaskLedgerPanel({
   };
   const [rejectingTaskId, setRejectingTaskId] = useState<number | null>(null);
   const [rejectDraft, setRejectDraft] = useState("");
+  const [blockingTaskId, setBlockingTaskId] = useState<number | null>(null);
+  const [blockDraft, setBlockDraft] = useState("");
   // #271(a)：按受理人筛选看板。"all" 全量，"__unassigned__" 只看未指派。
   const [assigneeFilter, setAssigneeFilter] = useState("all");
-  // #504 博客风：状态筛选 chips（need/各状态/all）+ 关键词搜索 + 优先级 + 卡片折叠。
-  const [stateFilter, setStateFilter] = useState<"active" | "all" | TaskState>("all");
+  // 默认进入「未完成」而不是把历史完成项也塞进首屏；用户先看下一步，再按需翻历史。
+  const [stateFilter, setStateFilter] = useState<"active" | "all" | TaskState>("active");
   const [taskQuery, setTaskQuery] = useState("");
   const [prioFilter, setPrioFilter] = useState<number | null>(null);
-  const [openTaskId, setOpenTaskId] = useState<number | null>(null);
   // #504：已完成组默认只显 N 条，避免积累后无界渲染（CodeRabbit #517 指出）；点开加载更多。
   const [doneLimit, setDoneLimit] = useState(6);
   // #271(d)：展开放大——CSS class 切宽度，外层 channel-panel-card 用 :has() 跟随。
   const [expandedView, setExpandedView] = useState(false);
   // #271(c)：任务详情作为台账内路由。存 id 不存快照，刷新后始终显示最新记录。
   const [detailTaskId, setDetailTaskId] = useState<number | null>(null);
-  const taskCardRefs = useRef(new Map<number, HTMLLIElement>());
   const taskTitleRefs = useRef(new Map<number, HTMLButtonElement>());
   const detailBackRef = useRef<HTMLButtonElement | null>(null);
   const detailReturnFocusIdRef = useRef<number | null>(null);
@@ -2367,24 +2379,19 @@ export function TaskLedgerPanel({
   const detailTask = detailTaskId === null ? null : tasks.find((task) => task.id === detailTaskId) ?? null;
   useEffect(() => {
     if (resolvedSelectedTaskId === null) return;
-    setOpenTaskId(resolvedSelectedTaskId);
+    setDetailTaskId(resolvedSelectedTaskId);
   }, [resolvedSelectedTaskId]);
-  useEffect(() => {
-    if (resolvedSelectedTaskId === null || openTaskId !== resolvedSelectedTaskId) return;
-    const card = taskCardRefs.current.get(resolvedSelectedTaskId);
-    if (card === undefined) return;
-    card.scrollIntoView({ block: "nearest" });
-    card.focus({ preventScroll: true });
-  }, [openTaskId, resolvedSelectedTaskId]);
   useLayoutEffect(() => {
     if (detailTaskId !== null) {
-      detailBackRef.current?.focus();
+      const back = detailBackRef.current;
+      if (typeof back?.focus === "function") back.focus();
       return;
     }
     const returnFocusId = detailReturnFocusIdRef.current;
     if (returnFocusId === null) return;
     detailReturnFocusIdRef.current = null;
-    taskTitleRefs.current.get(returnFocusId)?.focus();
+    const trigger = taskTitleRefs.current.get(returnFocusId);
+    if (typeof trigger?.focus === "function") trigger.focus();
   }, [detailTaskId]);
   const closeTaskDetail = useCallback(() => {
     detailReturnFocusIdRef.current = detailTaskId;
@@ -2405,6 +2412,8 @@ export function TaskLedgerPanel({
     acc[task.state] = (acc[task.state] ?? 0) + 1;
     return acc;
   }, {});
+  const identityByName = new Map(identities.map((identity) => [identity.name, identity]));
+  const identityLabel = (name: string): string => identityByName.get(name)?.display ?? name;
   const assigneeOptions = [...new Set(
     tasks.flatMap((task) => (task.assignee !== null ? [task.assignee.name] : [])),
   )].sort();
@@ -2420,22 +2429,32 @@ export function TaskLedgerPanel({
     if (stateFilter !== "active" && stateFilter !== "all" && task.state !== stateFilter) return false;
     // 优先级
     if (prioFilter !== null && task.priority !== prioFilter) return false;
-    // 关键词：标题 / #编号 / 标签
+    // 关键词要覆盖用户实际会记住的上下文，而不只是标题/标签。
     if (q !== "" && !(
       task.title.toLowerCase().includes(q) ||
       `#${task.id}`.includes(q) ||
-      task.labels.join(" ").toLowerCase().includes(q)
+      task.labels.join(" ").toLowerCase().includes(q) ||
+      (task.desc ?? "").toLowerCase().includes(q) ||
+      (task.assignee?.name ?? "").toLowerCase().includes(q) ||
+      identityLabel(task.assignee?.name ?? "").toLowerCase().includes(q) ||
+      task.created_by.toLowerCase().includes(q) ||
+      identityLabel(task.created_by).toLowerCase().includes(q) ||
+      (task.blocked_reason ?? "").toLowerCase().includes(q) ||
+      task.scope.join(" ").toLowerCase().includes(q)
     )) return false;
     return true;
   });
   const tasksByState = new Map<TaskState, TaskRecord[]>(TASK_BOARD_STATES.map((state) => [state, []]));
   for (const task of visibleTasks) tasksByState.get(task.state)?.push(task);
   const activeCount = tasks.filter((task) => task.state !== "done").length;
-  const taskFiltered = stateFilter !== "all" || prioFilter !== null || q !== "" || assigneeFilter !== "all";
-  // 状态筛选 chips（need处理 / 待归类 / 进行中 / 受阻 / 已完成 / 全部），对齐设计。
+  const taskFiltered = stateFilter !== "active" || prioFilter !== null || q !== "" || assigneeFilter !== "all";
+  const unassignedActiveCount = tasks.filter((task) => task.state !== "done" && task.assignee === null).length;
+  // 每一种真实状态都可直接筛选；旧版漏掉 backlog/assigned，任务只能靠「全部」翻找。
   const stateChipDefs: Array<{ key: "active" | "all" | TaskState; label: string; count: number }> = [
     { key: "active", label: t("Channel.tasks.chip.active"), count: activeCount },
     { key: "triage", label: t("Channel.tasks.state.triage"), count: counts.triage ?? 0 },
+    { key: "backlog", label: t("Channel.tasks.state.backlog"), count: counts.backlog ?? 0 },
+    { key: "assigned", label: t("Channel.tasks.state.assigned"), count: counts.assigned ?? 0 },
     { key: "in_progress", label: t("Channel.tasks.state.in_progress"), count: counts.in_progress ?? 0 },
     { key: "needs_review", label: t("Channel.tasks.state.needs_review"), count: counts.needs_review ?? 0 },
     { key: "blocked", label: t("Channel.tasks.state.blocked"), count: counts.blocked ?? 0 },
@@ -2448,105 +2467,143 @@ export function TaskLedgerPanel({
     event.preventDefault();
     const title = newTitle.trim();
     if (title === "" || creating) return;
-    void onCreateTask({ title, desc: newDesc.trim(), attachments: newAtts }).then((ok) => {
+    const assigneeName = newAssignee.trim();
+    void onCreateTask({
+      title,
+      desc: newDesc.trim(),
+      priority: newPriority,
+      assignee: assigneeName === "" ? null : { name: assigneeName, kind: newAssigneeKind },
+      attachments: newAtts,
+    }).then((ok) => {
       if (!ok) return;
       setNewTitle("");
       setNewDesc("");
+      setNewPriority(0);
+      setNewAssignee("");
+      setNewAssigneeKind("agent");
       setNewAtts([]);
       setComposerOpen(false);
     });
   };
-  const renderTask = (task: TaskRecord) => {
+  const renderTaskControls = (task: TaskRecord) => {
     const taskBusy = busyTaskId === task.id;
     const assignDraft = assignDrafts[task.id] ?? task.assignee?.name ?? "";
     const assignKind = assignKinds[task.id] ?? task.assignee?.kind ?? "agent";
     const reviewSeq = taskCompletionSeq(task);
-    // #504 博客风：卡片默认折叠——摘要行(#id+优先级+标题+@人+标签+箭头)常显，详情/动作点开才展开。
-    const open = openTaskId === task.id;
     return (
-      <li
-        key={task.id}
-        ref={(node) => {
-          if (node === null) taskCardRefs.current.delete(task.id);
-          else taskCardRefs.current.set(task.id, node);
-        }}
-        data-task-id={task.id}
-        tabIndex={-1}
-        className={`task-card task-card--${task.state}` + (open ? " task-card--open" : "") + (dragTaskId === task.id ? " is-dragging" : "")}
-        draggable={!disabled && !taskBusy}
-        onDragStart={(event) => {
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", String(task.id));
-          setDragTaskId(task.id);
-        }}
-        onDragEnd={() => setDragTaskId(null)}
-      >
-        <div className="task-card-main">
-          <span className="t-mono task-id">#{task.id}</span>
-          <span className={`t-mono task-prio task-prio--p${task.priority}`}>P{task.priority}</span>
-          <button
-            type="button"
-            className="task-card-title"
-            ref={(node) => {
-              if (node === null) taskTitleRefs.current.delete(task.id);
-              else taskTitleRefs.current.set(task.id, node);
-            }}
-            aria-label={t("Channel.tasks.detailOpenAria", { id: task.id })}
-            onClick={() => setDetailTaskId(task.id)}
-          >
-            <strong>{task.title}</strong>
-          </button>
-          {task.assignee !== null && <span className="t-mono task-card-assignee">@{task.assignee.name}</span>}
-          {task.labels.map((label) => <span key={label} className="t-mono task-label">{label}</span>)}
-          <span className={`t-mono task-state task-state--${task.state}`}>{stateLabel(task.state)}</span>
-          <button
-            type="button"
-            className="task-card-toggle"
-            aria-expanded={open}
-            aria-label={t("Channel.tasks.toggleAria", { id: task.id })}
-            onClick={() => setOpenTaskId(open ? null : task.id)}
-          >
-            {open ? "▴" : "▸"}
-          </button>
-        </div>
-        {open && (<>
-        {task.desc !== null && <p className="task-card-desc">{task.desc}</p>}
-        {task.attachments !== undefined && task.attachments.length > 0 && (
-          <AttachmentList attachments={task.attachments} />
-        )}
-        {task.solution !== undefined && (
-          <section className="task-solution">
-            <span className="t-mono task-solution-label">{t("Channel.tasks.solution")}</span>
-            <AttachmentList attachments={[task.solution]} />
-          </section>
-        )}
-        <div className="task-card-meta">
-          <span className="t-mono">P{task.priority}</span>
-          {task.assignee !== null && <span className="t-mono">@{task.assignee.name}</span>}
-          {task.parent_id !== null && <span className="t-mono">{t("Channel.tasks.meta.parent", { id: task.parent_id })}</span>}
-          {task.anchor_seqs.map((seq) => <span key={seq} className="t-mono">{t("Channel.tasks.meta.msg", { seq })}</span>)}
-          {task.labels.map((label) => <span key={label} className="t-mono task-label">{label}</span>)}
-        </div>
-        <div className="task-card-actions">
-          <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "in_progress"} onClick={() => onSetState(task.id, "in_progress")}>
-            {t("Channel.tasks.action.claim")}
-          </button>
-          <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "blocked"} onClick={() => onSetState(task.id, "blocked")}>
-            {t("Channel.tasks.action.block")}
-          </button>
-          <button className="task-action-btn" type="button" disabled={disabled || taskBusy || task.state === "done"} onClick={() => onSetState(task.id, "done")}>
-            {t("Channel.tasks.action.done")}
-          </button>
-          {reviewSeq !== null && (
-            <>
-              <button className="task-action-btn task-action-btn--review" type="button" disabled={disabled || taskBusy} onClick={() => onReview(task, "approve")}>
-                {t("Channel.tasks.action.approve")}
+      <div className="task-detail-controls">
+        <section className="task-detail-control-group">
+          <h3>{t("Channel.tasks.detail.nextAction")}</h3>
+          <div className="task-card-actions">
+            {task.state === "done" ? (
+              <button className="task-action-btn task-action-btn--primary" type="button" disabled={disabled || taskBusy} onClick={() => onSetState(task.id, "in_progress")}>
+                {t("Channel.tasks.action.reopen")}
               </button>
-              <button className="task-action-btn" type="button" disabled={disabled || taskBusy} aria-expanded={rejectingTaskId === task.id} onClick={() => { setRejectingTaskId(task.id); setRejectDraft(""); }}>
-                {t("Channel.tasks.action.reject")}
+            ) : task.state === "blocked" ? (
+              <button className="task-action-btn task-action-btn--primary" type="button" disabled={disabled || taskBusy} onClick={() => onSetState(task.id, "in_progress")}>
+                {t("Channel.tasks.action.resume")}
               </button>
-            </>
+            ) : task.state !== "in_progress" && (
+              <button className="task-action-btn task-action-btn--primary" type="button" disabled={disabled || taskBusy} onClick={() => onSetState(task.id, "in_progress")}>
+                {t("Channel.tasks.action.start")}
+              </button>
+            )}
+            {task.state !== "done" && task.state !== "blocked" && (
+              <button
+                className="task-action-btn"
+                type="button"
+                disabled={disabled || taskBusy}
+                aria-expanded={blockingTaskId === task.id}
+                onClick={() => {
+                  setBlockingTaskId(task.id);
+                  setBlockDraft("");
+                }}
+              >
+                {t("Channel.tasks.action.block")}
+              </button>
+            )}
+            {task.state !== "done" && (
+              <button className="task-action-btn" type="button" disabled={disabled || taskBusy} onClick={() => onSetState(task.id, "done")}>
+                {t("Channel.tasks.action.done")}
+              </button>
+            )}
+            {reviewSeq !== null && (
+              <>
+                <button className="task-action-btn task-action-btn--review" type="button" disabled={disabled || taskBusy} onClick={() => onReview(task, "approve")}>
+                  {t("Channel.tasks.action.approve")}
+                </button>
+                <button className="task-action-btn" type="button" disabled={disabled || taskBusy} aria-expanded={rejectingTaskId === task.id} onClick={() => { setRejectingTaskId(task.id); setRejectDraft(""); }}>
+                  {t("Channel.tasks.action.reject")}
+                </button>
+              </>
+            )}
+          </div>
+          {blockingTaskId === task.id && (
+            <form
+              className="task-new-form task-block-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const reason = blockDraft.trim();
+                if (reason === "") return;
+                onSetState(task.id, "blocked", reason);
+                setBlockingTaskId(null);
+                setBlockDraft("");
+              }}
+            >
+              <textarea
+                className="task-new-desc"
+                aria-label={t("Channel.tasks.blockReasonAria", { id: task.id })}
+                placeholder={t("Channel.tasks.blockReasonPlaceholder")}
+                rows={3}
+                autoFocus
+                disabled={taskBusy}
+                value={blockDraft}
+                onChange={(event) => setBlockDraft(event.currentTarget.value)}
+              />
+              <div className="task-new-actions">
+                <button className="task-action-btn task-action-btn--primary" type="submit" disabled={taskBusy || blockDraft.trim() === ""}>
+                  {t("Channel.tasks.action.confirmBlock")}
+                </button>
+                <button className="task-action-btn" type="button" disabled={taskBusy} onClick={() => { setBlockingTaskId(null); setBlockDraft(""); }}>
+                  {t("Channel.reject.cancel")}
+                </button>
+              </div>
+            </form>
           )}
+          {rejectingTaskId === task.id && (
+            <div className="task-new-form task-reject-form">
+              <textarea
+                className="task-new-desc task-reject-reason"
+                aria-label={t("Channel.tasks.rejectReasonAria", { id: task.id })}
+                placeholder={t("Channel.tasks.rejectPrompt")}
+                rows={3}
+                autoFocus
+                disabled={taskBusy}
+                value={rejectDraft}
+                onChange={(event) => setRejectDraft(event.currentTarget.value)}
+              />
+              <div className="task-new-actions">
+                <button
+                  className="task-action-btn task-reject-confirm"
+                  type="button"
+                  disabled={taskBusy || rejectDraft.trim() === ""}
+                  onClick={() => {
+                    onReview(task, "reject", rejectDraft.trim());
+                    setRejectingTaskId(null);
+                    setRejectDraft("");
+                  }}
+                >
+                  {t("Channel.reject.confirm")}
+                </button>
+                <button className="task-action-btn task-reject-cancel" type="button" disabled={taskBusy} onClick={() => { setRejectingTaskId(null); setRejectDraft(""); }}>
+                  {t("Channel.reject.cancel")}
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+        <section className="task-detail-control-group">
+          <h3>{t("Channel.tasks.detail.assignment")}</h3>
           <form
             className="task-assign-form"
             onSubmit={(event) => {
@@ -2578,39 +2635,64 @@ export function TaskLedgerPanel({
               {t("Channel.tasks.action.assign")}
             </button>
           </form>
-        </div>
-        {rejectingTaskId === task.id && (
-          <div className="task-new-form task-reject-form">
-            <textarea
-              className="task-new-desc task-reject-reason"
-              aria-label={t("Channel.tasks.rejectReasonAria", { id: task.id })}
-              placeholder={t("Channel.tasks.rejectPrompt")}
-              rows={3}
-              autoFocus
-              disabled={taskBusy}
-              value={rejectDraft}
-              onChange={(event) => setRejectDraft(event.currentTarget.value)}
-            />
-            <div className="task-new-actions">
-              <button
-                className="task-action-btn task-reject-confirm"
-                type="button"
-                disabled={taskBusy || rejectDraft.trim() === ""}
-                onClick={() => {
-                  onReview(task, "reject", rejectDraft.trim());
-                  setRejectingTaskId(null);
-                  setRejectDraft("");
-                }}
-              >
-                {t("Channel.reject.confirm")}
-              </button>
-              <button className="task-action-btn task-reject-cancel" type="button" disabled={taskBusy} onClick={() => { setRejectingTaskId(null); setRejectDraft(""); }}>
-                {t("Channel.reject.cancel")}
-              </button>
-            </div>
-          </div>
-        )}
-        </>)}
+          {task.assignee !== null && (
+            <p className="task-detail-current-assignee">
+              {t("Channel.tasks.detail.currentAssignee", { name: identityLabel(task.assignee.name) })}
+            </p>
+          )}
+        </section>
+      </div>
+    );
+  };
+  const renderTask = (task: TaskRecord) => {
+    const taskBusy = busyTaskId === task.id;
+    const assignee = task.assignee === null
+      ? t("Channel.tasks.unassigned")
+      : identityLabel(task.assignee.name);
+    return (
+      <li
+        key={task.id}
+        data-task-id={task.id}
+        className={`task-card task-card--${task.state}` + (dragTaskId === task.id ? " is-dragging" : "")}
+        draggable={!disabled && !taskBusy}
+        onDragStart={(event) => {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", String(task.id));
+          setDragTaskId(task.id);
+        }}
+        onDragEnd={() => setDragTaskId(null)}
+      >
+        <button
+          type="button"
+          className="task-card-open"
+          ref={(node) => {
+            if (node === null) taskTitleRefs.current.delete(task.id);
+            else taskTitleRefs.current.set(task.id, node);
+          }}
+          aria-label={t("Channel.tasks.detailOpenAria", { id: task.id })}
+          onClick={() => setDetailTaskId(task.id)}
+        >
+          <span className="task-card-leading">
+            <span className="t-mono task-id">#{task.id}</span>
+            <span className={`t-mono task-prio task-prio--p${task.priority}`}>P{task.priority}</span>
+          </span>
+          <span className="task-card-copy">
+            <strong>{task.title}</strong>
+            <span className="task-card-context">
+              <span>{t("Channel.tasks.ownerLabel", { name: assignee })}</span>
+              <span>{t("Channel.tasks.updatedLabel", { time: fmtTime(task.updated_at) })}</span>
+              {task.anchor_seqs.length > 0 && (
+                <span>{t("Channel.tasks.sourceCount", { count: task.anchor_seqs.length })}</span>
+              )}
+            </span>
+          </span>
+          {task.labels.length > 0 && (
+            <span className="task-card-labels">
+              {task.labels.map((label) => <span key={label} className="t-mono task-label">{label}</span>)}
+            </span>
+          )}
+          <span className="task-card-enter">{t("Channel.tasks.view")}</span>
+        </button>
       </li>
     );
   };
@@ -2625,178 +2707,243 @@ export function TaskLedgerPanel({
         closeTaskDetail();
       }}
     >
+      <datalist id="task-assignee-targets">
+        {identities.map((identity) => (
+          <option key={identity.name} value={identity.name}>{identity.display}</option>
+        ))}
+      </datalist>
       {detailTask === null ? (
         <>
-          {/* #271(b)：所有任务卡的指派输入共用同一份候选（参照 channel-role-targets 的写法） */}
-          <datalist id="task-assignee-targets">
-            {identities.map((identity) => (
-              <option key={identity.name} value={identity.name}>{identity.display}</option>
-            ))}
-          </datalist>
           <header className="task-blog-head">
-        <div className="task-blog-title">
-          <h2 className="task-blog-name">{t("Channel.tasks.title")}</h2>
-          <span className="t-mono task-blog-prompt">{t("Channel.tasks.overviewPrompt", { count: tasks.length })}</span>
-        </div>
-        <div className="task-blog-stats" role="list">
-          <span className="t-mono task-blog-stat task-blog-stat--triage" role="listitem">{t("Channel.tasks.badge.triage", { count: counts.triage ?? 0 })}</span>
-          <span className="t-mono task-blog-stat" role="listitem">{t("Channel.tasks.badge.doing", { count: counts.in_progress ?? 0 })}</span>
-          <span className="t-mono task-blog-stat task-blog-stat--done" role="listitem">{t("Channel.tasks.badge.done", { count: counts.done ?? 0 })}</span>
-        </div>
-        <div className="task-blog-head-actions">
-          {canWrite && (
-            <button
-              className="d-btn task-new-btn task-blog-new"
-              type="button"
-              aria-label={t("Channel.tasks.new")}
-              aria-expanded={composerOpen}
-              disabled={loading}
-              onClick={() => setComposerOpen((open) => !open)}
-            >
-              ＋ {t("Channel.tasks.new")}
-            </button>
-          )}
-          <button className="d-btn" type="button" aria-label={t("Channel.tasks.refresh")} disabled={loading} onClick={onRefresh}>
-            {loading ? t("Channel.tasks.refreshing") : "↻"}
-          </button>
-          <button
-            className="d-btn task-expand-btn"
-            type="button"
-            aria-label={t("Channel.tasks.expandAria")}
-            aria-pressed={expandedView}
-            onClick={() => setExpandedView((open) => !open)}
-          >
-            {expandedView ? "⇲" : "⇱"}
-          </button>
-          {onClose !== undefined && (
-            <button type="button" className="d-btn task-blog-close" onClick={onClose}>
-              {t("Channel.tools.close")} ✕
-            </button>
-          )}
-        </div>
-          </header>
-          <div className="task-blog-filter">
-        <div className="task-blog-filter-row">
-          <span className="t-mono task-blog-grep">{t("Channel.tasks.grepState")}</span>
-          {stateChipDefs.map((chip) => (
-            <button
-              key={chip.key}
-              type="button"
-              className={"task-blog-chip" + (stateFilter === chip.key ? " task-blog-chip--on" : "") + (chip.count === 0 ? " task-blog-chip--dim" : "")}
-              onClick={() => setStateFilter(chip.key)}
-            >
-              {chip.label} <b>{chip.count}</b>
-            </button>
-          ))}
-        </div>
-        <div className="task-blog-filter-row">
-          <input
-            className="task-blog-search"
-            aria-label={t("Channel.tasks.searchAria")}
-            placeholder={t("Channel.tasks.searchPlaceholder")}
-            value={taskQuery}
-            onChange={(event) => setTaskQuery(event.currentTarget.value)}
-          />
-          {[1, 2, 3].map((p) => (
-            <button
-              key={p}
-              type="button"
-              className={"task-blog-chip task-blog-prio" + (prioFilter === p ? " task-blog-chip--on" : "")}
-              onClick={() => setPrioFilter(prioFilter === p ? null : p)}
-            >
-              P{p}
-            </button>
-          ))}
-          {assigneeOptions.length > 0 && (
-            <select
-              className="task-filter-select t-mono"
-              aria-label={t("Channel.tasks.filterAria")}
-              value={assigneeFilter}
-              onChange={(event) => setAssigneeFilter(event.currentTarget.value)}
-            >
-              <option value="all">{t("Channel.tasks.filterAll")}</option>
-              <option value="__unassigned__">{t("Channel.tasks.filterUnassigned")}</option>
-              {assigneeOptions.map((name) => (
-                <option key={name} value={name}>@{name}</option>
-              ))}
-            </select>
-          )}
-          {taskFiltered && (
-            <button
-              type="button"
-              className="task-blog-chip task-blog-clear"
-              onClick={() => { setStateFilter("all"); setPrioFilter(null); setTaskQuery(""); setAssigneeFilter("all"); }}
-            >
-              ✕ {t("Channel.tasks.clearFilters")}
-            </button>
-          )}
-        </div>
-          </div>
-          {composerOpen && canWrite && (
-        <form className="task-new-form" onSubmit={submitNewTask}>
-          <input
-            className="task-new-title"
-            aria-label={t("Channel.tasks.newTitleAria")}
-            placeholder={t("Channel.tasks.newTitlePlaceholder")}
-            value={newTitle}
-            disabled={creating}
-            autoFocus
-            onChange={(event) => setNewTitle(event.currentTarget.value)}
-          />
-          <textarea
-            className="task-new-desc"
-            aria-label={t("Channel.tasks.newDescAria")}
-            placeholder={t("Channel.tasks.newDescPlaceholder")}
-            value={newDesc}
-            disabled={creating}
-            rows={2}
-            onChange={(event) => setNewDesc(event.currentTarget.value)}
-          />
-          {onUploadAttachment !== undefined && (
-            <div className="task-new-attach">
-              <label className="task-attach-btn">
-                <input
-                  type="file"
-                  multiple
-                  disabled={creating || attUploading}
-                  onChange={(event) => { onPickTaskFiles(event.currentTarget.files); event.currentTarget.value = ""; }}
-                />
-                {attUploading ? t("Channel.tasks.attachUploading") : t("Channel.tasks.attach")}
-              </label>
-              {newAtts.length > 0 && (
-                <ul className="task-new-atts">
-                  {newAtts.map((att) => (
-                    <li key={att.key} className="task-new-att t-mono">
-                      <span className="task-new-att-name">{att.filename}</span>
-                      <button
-                        type="button"
-                        className="task-new-att-remove"
-                        aria-label={`remove ${att.filename}`}
-                        onClick={() => setNewAtts((cur) => cur.filter((a) => a.key !== att.key))}
-                      >
-                        ×
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+            <div className="task-blog-title">
+              <h2 className="task-blog-name">{t("Channel.tasks.title")}</h2>
+              <span className="task-blog-prompt">
+                {t("Channel.tasks.overviewSummary", {
+                  open: activeCount,
+                  unassigned: unassignedActiveCount,
+                  review: counts.needs_review ?? 0,
+                  blocked: counts.blocked ?? 0,
+                })}
+              </span>
+            </div>
+            <div className="task-blog-head-actions">
+              {canWrite && (
+                <button
+                  className="d-btn task-new-btn task-blog-new"
+                  type="button"
+                  aria-label={t("Channel.tasks.new")}
+                  aria-expanded={composerOpen}
+                  disabled={loading}
+                  onClick={() => setComposerOpen((open) => !open)}
+                >
+                  {t("Channel.tasks.new")}
+                </button>
+              )}
+              <button className="d-btn" type="button" aria-label={t("Channel.tasks.refresh")} disabled={loading} onClick={onRefresh}>
+                {loading ? t("Channel.tasks.refreshing") : t("Channel.tasks.refresh")}
+              </button>
+              <button
+                className="d-btn task-expand-btn"
+                type="button"
+                aria-label={t("Channel.tasks.expandAria")}
+                aria-pressed={expandedView}
+                onClick={() => setExpandedView((open) => !open)}
+              >
+                {expandedView ? t("Channel.tasks.collapse") : t("Channel.tasks.expand")}
+              </button>
+              {onClose !== undefined && (
+                <button type="button" className="d-btn task-blog-close" onClick={onClose}>
+                  {t("Channel.tools.close")}
+                </button>
               )}
             </div>
-          )}
-          {createError !== null && <p className="banner banner--red">{createError}</p>}
-          <div className="task-new-actions">
-            <button className="task-action-btn" type="submit" disabled={creating || attUploading || newTitle.trim() === ""}>
-              {creating ? t("Channel.tasks.newSubmitting") : t("Channel.tasks.newSubmit")}
-            </button>
-            <button
-              className="task-action-btn"
-              type="button"
-              disabled={creating}
-              onClick={() => { setComposerOpen(false); setNewTitle(""); setNewDesc(""); }}
-            >
-              {t("Channel.tasks.newCancel")}
-            </button>
+          </header>
+          <div className="task-blog-filter">
+            <div className="task-blog-filter-row" role="group" aria-label={t("Channel.tasks.stateFilterAria")}>
+              {stateChipDefs.map((chip) => (
+                <button
+                  key={chip.key}
+                  type="button"
+                  className={"task-blog-chip" + (stateFilter === chip.key ? " task-blog-chip--on" : "") + (chip.count === 0 ? " task-blog-chip--dim" : "")}
+                  aria-pressed={stateFilter === chip.key}
+                  onClick={() => setStateFilter(chip.key)}
+                >
+                  {chip.label} <b>{chip.count}</b>
+                </button>
+              ))}
+            </div>
+            <div className="task-blog-filter-row">
+              <input
+                className="task-blog-search"
+                aria-label={t("Channel.tasks.searchAria")}
+                placeholder={t("Channel.tasks.searchPlaceholder")}
+                value={taskQuery}
+                onChange={(event) => setTaskQuery(event.currentTarget.value)}
+              />
+              {assigneeOptions.length > 0 && (
+                <select
+                  className="task-filter-select"
+                  aria-label={t("Channel.tasks.filterAria")}
+                  value={assigneeFilter}
+                  onChange={(event) => setAssigneeFilter(event.currentTarget.value)}
+                >
+                  <option value="all">{t("Channel.tasks.filterAll")}</option>
+                  <option value="__unassigned__">{t("Channel.tasks.filterUnassigned")}</option>
+                  {assigneeOptions.map((name) => (
+                    <option key={name} value={name}>{identityLabel(name)}</option>
+                  ))}
+                </select>
+              )}
+              <div className="task-priority-filter" role="group" aria-label={t("Channel.tasks.priorityFilterAria")}>
+                {[0, 1, 2, 3].map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    className={"task-blog-chip task-blog-prio" + (prioFilter === p ? " task-blog-chip--on" : "")}
+                    aria-pressed={prioFilter === p}
+                    onClick={() => setPrioFilter(prioFilter === p ? null : p)}
+                  >
+                    P{p}
+                  </button>
+                ))}
+              </div>
+              {taskFiltered && (
+                <button
+                  type="button"
+                  className="task-blog-chip task-blog-clear"
+                  onClick={() => { setStateFilter("active"); setPrioFilter(null); setTaskQuery(""); setAssigneeFilter("all"); }}
+                >
+                  {t("Channel.tasks.clearFilters")}
+                </button>
+              )}
+            </div>
           </div>
-        </form>
+          {composerOpen && canWrite && (
+            <form className="task-new-form" onSubmit={submitNewTask}>
+              <div className="task-new-heading">
+                <strong>{t("Channel.tasks.newHeading")}</strong>
+                <span>{t("Channel.tasks.newHint")}</span>
+              </div>
+              <input
+                className="task-new-title"
+                aria-label={t("Channel.tasks.newTitleAria")}
+                placeholder={t("Channel.tasks.newTitlePlaceholder")}
+                value={newTitle}
+                disabled={creating}
+                autoFocus
+                onChange={(event) => setNewTitle(event.currentTarget.value)}
+              />
+              <textarea
+                className="task-new-desc"
+                aria-label={t("Channel.tasks.newDescAria")}
+                placeholder={t("Channel.tasks.newDescPlaceholder")}
+                value={newDesc}
+                disabled={creating}
+                rows={3}
+                onChange={(event) => setNewDesc(event.currentTarget.value)}
+              />
+              <div className="task-new-options">
+                <label>
+                  <span>{t("Channel.tasks.newAssignee")}</span>
+                  <select
+                    aria-label={t("Channel.tasks.newAssigneeAria")}
+                    value={newAssignee}
+                    disabled={creating}
+                    onChange={(event) => {
+                      const name = event.currentTarget.value;
+                      setNewAssignee(name);
+                      const kind = identityByName.get(name)?.kind;
+                      if (kind === "agent" || kind === "human") setNewAssigneeKind(kind);
+                    }}
+                  >
+                    <option value="">{t("Channel.tasks.filterUnassigned")}</option>
+                    {identities.map((identity) => (
+                      <option key={identity.name} value={identity.name}>{identity.display}</option>
+                    ))}
+                  </select>
+                </label>
+                {newAssignee !== "" && (
+                  <label>
+                    <span>{t("Channel.tasks.newAssigneeKind")}</span>
+                    <select
+                      aria-label={t("Channel.tasks.newAssigneeKindAria")}
+                      value={newAssigneeKind}
+                      disabled={creating}
+                      onChange={(event) => setNewAssigneeKind(event.currentTarget.value as TaskAssigneeKind)}
+                    >
+                      <option value="agent">{t("Channel.tasks.kind.agent")}</option>
+                      <option value="human">{t("Channel.tasks.kind.human")}</option>
+                      <option value="squad">{t("Channel.tasks.kind.squad")}</option>
+                    </select>
+                  </label>
+                )}
+                <label>
+                  <span>{t("Channel.tasks.newPriority")}</span>
+                  <select
+                    aria-label={t("Channel.tasks.newPriorityAria")}
+                    value={newPriority}
+                    disabled={creating}
+                    onChange={(event) => setNewPriority(Number(event.currentTarget.value))}
+                  >
+                    {[0, 1, 2, 3].map((priority) => (
+                      <option key={priority} value={priority}>{t("Channel.tasks.priorityOption", { priority })}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              {onUploadAttachment !== undefined && (
+                <div className="task-new-attach">
+                  <label className="task-attach-btn">
+                    <input
+                      type="file"
+                      multiple
+                      disabled={creating || attUploading}
+                      onChange={(event) => { onPickTaskFiles(event.currentTarget.files); event.currentTarget.value = ""; }}
+                    />
+                    {attUploading ? t("Channel.tasks.attachUploading") : t("Channel.tasks.attach")}
+                  </label>
+                  {newAtts.length > 0 && (
+                    <ul className="task-new-atts">
+                      {newAtts.map((att) => (
+                        <li key={att.key} className="task-new-att t-mono">
+                          <span className="task-new-att-name">{att.filename}</span>
+                          <button
+                            type="button"
+                            className="task-new-att-remove"
+                            aria-label={`remove ${att.filename}`}
+                            onClick={() => setNewAtts((cur) => cur.filter((a) => a.key !== att.key))}
+                          >
+                            ×
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              {createError !== null && <p className="banner banner--red">{createError}</p>}
+              <div className="task-new-actions">
+                <button className="task-action-btn task-action-btn--primary" type="submit" disabled={creating || attUploading || newTitle.trim() === ""}>
+                  {creating ? t("Channel.tasks.newSubmitting") : t("Channel.tasks.newSubmit")}
+                </button>
+                <button
+                  className="task-action-btn"
+                  type="button"
+                  disabled={creating}
+                  onClick={() => {
+                    setComposerOpen(false);
+                    setNewTitle("");
+                    setNewDesc("");
+                    setNewPriority(0);
+                    setNewAssignee("");
+                    setNewAssigneeKind("agent");
+                    setNewAtts([]);
+                  }}
+                >
+                  {t("Channel.tasks.newCancel")}
+                </button>
+              </div>
+            </form>
           )}
           {error !== null && <p className="banner banner--red">{error}</p>}
           {actionError !== null && <p className="banner banner--red">{actionError}</p>}
@@ -2865,77 +3012,110 @@ export function TaskLedgerPanel({
           aria-label={t("Channel.tasks.detailAria", { id: detailTask.id })}
         >
           <header className="task-detail-head">
-              <button
-                ref={detailBackRef}
-                className="d-btn task-detail-close"
-                type="button"
-                onClick={closeTaskDetail}
-              >
-                ← {t("Channel.tasks.detailBack")}
-              </button>
-              <span className="t-mono task-id">#{detailTask.id}</span>
-              <strong className="task-detail-title">{detailTask.title}</strong>
-              <span className={`t-mono task-state task-state--${detailTask.state}`}>{stateLabel(detailTask.state)}</span>
+            <button
+              ref={detailBackRef}
+              className="d-btn task-detail-close"
+              type="button"
+              onClick={closeTaskDetail}
+            >
+              {t("Channel.tasks.detailBack")}
+            </button>
+            <span className="t-mono task-id">#{detailTask.id}</span>
+            <span className={`t-mono task-state task-state--${detailTask.state}`}>{stateLabel(detailTask.state)}</span>
           </header>
-            {detailTask.desc !== null && detailTask.desc !== "" ? (
-              <p className="task-detail-desc">{detailTask.desc}</p>
-            ) : (
-              <p className="charter-empty">{t("Channel.tasks.detailNoDesc")}</p>
-            )}
-            {detailTask.solution !== undefined && (
-              <section className="task-solution task-solution--detail">
-                <strong>{t("Channel.tasks.solution")}</strong>
-                <AttachmentList attachments={[detailTask.solution]} />
-              </section>
-            )}
-            <dl className="task-detail-meta">
-              <dt>{t("Channel.tasks.detail.priority")}</dt>
-              <dd className="t-mono">P{detailTask.priority}</dd>
-              <dt>{t("Channel.tasks.detail.assignee")}</dt>
-              <dd className="t-mono">{detailTask.assignee !== null ? `@${detailTask.assignee.name} · ${detailTask.assignee.kind}` : "—"}</dd>
-              <dt>{t("Channel.tasks.detail.createdBy")}</dt>
-              <dd className="t-mono">{`${detailTask.created_by} · ${detailTask.created_by_kind}`}</dd>
-              {detailTask.labels.length > 0 && (
-                <>
-                  <dt>{t("Channel.tasks.detail.labels")}</dt>
-                  <dd className="t-mono">{detailTask.labels.join(", ")}</dd>
-                </>
+          <div className="task-detail-layout">
+            <main className="task-detail-main">
+              <h2 className="task-detail-title">{detailTask.title}</h2>
+              {detailTask.blocked_reason !== null && (
+                <section className="task-detail-blocker" role="status">
+                  <strong>{t("Channel.tasks.detail.blockedReason")}</strong>
+                  <p>{detailTask.blocked_reason}</p>
+                </section>
               )}
-              {detailTask.parent_id !== null && (
-                <>
-                  <dt>{t("Channel.tasks.detail.parent")}</dt>
-                  <dd className="t-mono">#{detailTask.parent_id}</dd>
-                </>
+              <section className="task-detail-section">
+                <h3>{t("Channel.tasks.detail.description")}</h3>
+                {detailTask.desc !== null && detailTask.desc !== "" ? (
+                  <p className="task-detail-desc">{detailTask.desc}</p>
+                ) : (
+                  <p className="charter-empty">{t("Channel.tasks.detailNoDesc")}</p>
+                )}
+              </section>
+              {detailTask.attachments !== undefined && detailTask.attachments.length > 0 && (
+                <section className="task-detail-section">
+                  <h3>{t("Channel.tasks.detail.attachments")}</h3>
+                  <AttachmentList attachments={detailTask.attachments} />
+                </section>
+              )}
+              {detailTask.solution !== undefined && (
+                <section className="task-solution task-solution--detail">
+                  <strong>{t("Channel.tasks.solution")}</strong>
+                  <AttachmentList attachments={[detailTask.solution]} />
+                </section>
               )}
               {detailTask.anchor_seqs.length > 0 && (
-                <>
-                  <dt>{t("Channel.tasks.detail.msgs")}</dt>
-                  <dd className="t-mono">{detailTask.anchor_seqs.map((seq) => `#${seq}`).join(", ")}</dd>
-                </>
+                <section className="task-detail-section">
+                  <h3>{t("Channel.tasks.detail.sourceMessages")}</h3>
+                  <p className="task-detail-section-hint">{t("Channel.tasks.detail.sourceHint")}</p>
+                  <div className="task-source-links">
+                    {detailTask.anchor_seqs.map((seq) => (
+                      <button
+                        key={seq}
+                        type="button"
+                        className="task-source-link"
+                        disabled={onOpenMessage === undefined}
+                        onClick={() => void onOpenMessage?.(seq)}
+                      >
+                        {t("Channel.tasks.detail.openMessage", { seq })}
+                      </button>
+                    ))}
+                  </div>
+                </section>
               )}
-              {detailTask.blocked_reason !== null && (
-                <>
-                  <dt>{t("Channel.tasks.detail.blockedReason")}</dt>
-                  <dd>{detailTask.blocked_reason}</dd>
-                </>
-              )}
-              {detailTask.external_ref !== null && (
-                <>
-                  <dt>{t("Channel.tasks.detail.externalRef")}</dt>
-                  <dd className="t-mono">{detailTask.external_ref}</dd>
-                </>
-              )}
-              <dt>{t("Channel.tasks.detail.created")}</dt>
-              <dd className="t-mono">{fmtTime(detailTask.created_at)}</dd>
-              <dt>{t("Channel.tasks.detail.updated")}</dt>
-              <dd className="t-mono">{fmtTime(detailTask.updated_at)}</dd>
-              {detailTask.completed_at !== null && (
-                <>
-                  <dt>{t("Channel.tasks.detail.completed")}</dt>
-                  <dd className="t-mono">{fmtTime(detailTask.completed_at)}</dd>
-                </>
-              )}
-          </dl>
+            </main>
+            <aside className="task-detail-sidebar">
+              <section className="task-detail-facts">
+                <h3>{t("Channel.tasks.detail.overview")}</h3>
+                <dl className="task-detail-meta">
+                  <dt>{t("Channel.tasks.detail.priority")}</dt>
+                  <dd className="t-mono">P{detailTask.priority}</dd>
+                  <dt>{t("Channel.tasks.detail.assignee")}</dt>
+                  <dd>{detailTask.assignee !== null ? identityLabel(detailTask.assignee.name) : t("Channel.tasks.unassigned")}</dd>
+                  <dt>{t("Channel.tasks.detail.createdBy")}</dt>
+                  <dd>{identityLabel(detailTask.created_by)}</dd>
+                  {detailTask.labels.length > 0 && (
+                    <>
+                      <dt>{t("Channel.tasks.detail.labels")}</dt>
+                      <dd className="t-mono">{detailTask.labels.join(", ")}</dd>
+                    </>
+                  )}
+                  {detailTask.parent_id !== null && (
+                    <>
+                      <dt>{t("Channel.tasks.detail.parent")}</dt>
+                      <dd className="t-mono">#{detailTask.parent_id}</dd>
+                    </>
+                  )}
+                  {detailTask.external_ref !== null && (
+                    <>
+                      <dt>{t("Channel.tasks.detail.externalRef")}</dt>
+                      <dd className="t-mono">{detailTask.external_ref}</dd>
+                    </>
+                  )}
+                  <dt>{t("Channel.tasks.detail.created")}</dt>
+                  <dd>{fmtTime(detailTask.created_at)}</dd>
+                  <dt>{t("Channel.tasks.detail.updated")}</dt>
+                  <dd>{fmtTime(detailTask.updated_at)}</dd>
+                  {detailTask.completed_at !== null && (
+                    <>
+                      <dt>{t("Channel.tasks.detail.completed")}</dt>
+                      <dd>{fmtTime(detailTask.completed_at)}</dd>
+                    </>
+                  )}
+                </dl>
+              </section>
+              {actionError !== null && <p className="banner banner--red">{actionError}</p>}
+              {renderTaskControls(detailTask)}
+            </aside>
+          </div>
         </section>
       )}
     </section>
@@ -3536,8 +3716,11 @@ export function ChannelPage({
       .finally(() => setTaskActionBusyId(null));
   }, [loadTaskSummary, slug, taskActionBusyId, token, t]);
 
-  const setTaskState = useCallback((id: number, state: TaskState) => {
-    applyTaskUpdate(id, { state });
+  const setTaskState = useCallback((id: number, state: TaskState, blockedReason?: string) => {
+    applyTaskUpdate(id, {
+      state,
+      ...(state === "blocked" ? { blocked_reason: blockedReason?.trim() || null } : {}),
+    });
   }, [applyTaskUpdate]);
 
   const assignTask = useCallback((id: number, rawName: string, kind: TaskAssigneeKind) => {
@@ -3551,13 +3734,21 @@ export function ChannelPage({
 
   // 面板内「新建任务」：复用后端既有 POST /api/channels/:slug/tasks（与 createTaskFromMessage 同一端点，
   // 不新造接口）。返回 boolean 让 composer 知道成功后才清空并收起。
-  const createTaskDraft = useCallback((input: { title: string; desc: string; attachments?: Attachment[] }): Promise<boolean> => {
+  const createTaskDraft = useCallback((input: {
+    title: string;
+    desc: string;
+    priority: number;
+    assignee: { name: string; kind: TaskAssigneeKind } | null;
+    attachments?: Attachment[];
+  }): Promise<boolean> => {
     if (taskCreating) return Promise.resolve(false);
     setTaskCreating(true);
     setTaskCreateError(null);
     return createTask(token, slug, {
       title: input.title,
       ...(input.desc === "" ? {} : { desc: input.desc }),
+      priority: input.priority,
+      assignee: input.assignee,
       ...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
     })
       .then((task) => {
@@ -5545,15 +5736,10 @@ export function ChannelPage({
             <span className="ap-sprite ap-sprite--tasks" aria-hidden="true" />
             <span>{t("Channel.tasks.title")}</span>
             <span className="t-mono chan-tool-badge">{taskOpenCount}</span>
+            {taskReviewCount > 0 && <span className="t-mono chan-tool-badge chan-tool-badge--hot">{t("Channel.tasks.summary.review", { count: taskReviewCount })}</span>}
+            {taskBlockedCount > 0 && <span className="t-mono chan-tool-badge task-strip-summary--blocked">{t("Channel.tasks.summary.blocked", { count: taskBlockedCount })}</span>}
+            {taskMineCount > 0 && <span className="t-mono chan-tool-badge">{t("Channel.tasks.summary.mine", { count: taskMineCount })}</span>}
           </button>
-          {(taskOpenCount > 0 || taskReviewCount > 0 || taskBlockedCount > 0 || taskMineCount > 0) && (
-            <div className="task-strip-summary" aria-label={t("Channel.tasks.summaryAria")}>
-              <span className="t-mono chan-tool-badge">{t("Channel.tasks.summary.open", { count: taskOpenCount })}</span>
-              {taskReviewCount > 0 && <span className="t-mono chan-tool-badge chan-tool-badge--hot">{t("Channel.tasks.summary.review", { count: taskReviewCount })}</span>}
-              {taskBlockedCount > 0 && <span className="t-mono chan-tool-badge task-strip-summary--blocked">{t("Channel.tasks.summary.blocked", { count: taskBlockedCount })}</span>}
-              {taskMineCount > 0 && <span className="t-mono chan-tool-badge">{t("Channel.tasks.summary.mine", { count: taskMineCount })}</span>}
-            </div>
-          )}
           <button
             type="button"
             className={"d-btn chan-tool-btn" + (q !== "" || agentFilterActive || completionOnly ? " is-active" : "")}
@@ -5806,6 +5992,13 @@ export function ChannelPage({
               identities={channelIdentities}
               selectedTaskId={selectedTaskId}
               onUploadAttachment={canWrite ? (file) => uploadAttachment(token, slug, file) : undefined}
+              onOpenMessage={async (seq) => {
+                const located = await navigateToMessage(seq);
+                if (located) {
+                  skipPanelFocusRestoreRef.current = true;
+                  closeChannelPanel();
+                }
+              }}
               onClose={closeChannelPanel}
             />
           )}

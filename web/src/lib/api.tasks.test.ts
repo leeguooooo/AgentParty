@@ -1,6 +1,6 @@
 // @ts-expect-error Bun executes this test, while the web tsconfig intentionally loads only Vite globals.
 import { afterEach, describe, expect, test } from "bun:test";
-import { createTask } from "./api";
+import { createTask, updateTask } from "./api";
 
 const original = Object.getOwnPropertyDescriptor(globalThis, "fetch");
 
@@ -41,5 +41,24 @@ describe("createTask REST wiring (the endpoint the panel's New task entry reuses
     await createTask("tok", "demo", { title: "t", desc: "why it matters" });
 
     expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ title: "t", desc: "why it matters" });
+  });
+});
+
+describe("updateTask REST wiring", () => {
+  test("forwards the blocked reason with the state transition", async () => {
+    const calls = captureFetch();
+
+    await updateTask("tok", "demo/room", 7, {
+      state: "blocked",
+      blocked_reason: "waiting for credentials",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toContain("/api/channels/demo%2Froom/tasks/7");
+    expect(calls[0]!.init?.method).toBe("PATCH");
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({
+      state: "blocked",
+      blocked_reason: "waiting for credentials",
+    });
   });
 });

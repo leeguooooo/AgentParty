@@ -681,6 +681,7 @@ export async function updateTask(
     assignee?: { name: string; kind: TaskAssigneeKind } | null;
     priority?: number;
     labels?: string[];
+    blocked_reason?: string | null;
     solution?: Attachment | null;
   },
 ): Promise<TaskRecord> {

@@ -8088,12 +8088,12 @@ button.org-person-name {
 
 /* #504 任务面板「博客风」头部 + $ grep 筛选栏，对齐 任务面板 博客风.dc.html。 */
 .task-blog-head {
-  display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   padding-bottom: 10px; border-bottom: 2px solid var(--t-border);
 }
 .task-blog-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .task-blog-name { margin: 0; font: 700 20px/1.1 var(--t-mono); color: var(--t-text); letter-spacing: -0.5px; }
-.task-blog-prompt { font-size: 12px; color: var(--t-muted); white-space: nowrap; }
+.task-blog-prompt { font-size: 12px; color: var(--t-muted); line-height: 1.45; }
 .task-blog-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .task-blog-stat { padding: 2px 7px; border: 1.4px solid var(--t-faint); color: var(--t-dim); background: var(--t-panel); font-size: 11px; white-space: nowrap; }
 .task-blog-stat--triage { background: var(--d-yellow); color: var(--t-text); border-color: var(--t-border); font-weight: 600; }
@@ -8102,7 +8102,7 @@ button.org-person-name {
 .task-blog-new { background: var(--t-border); color: var(--t-bg); }
 .task-blog-close { flex: none; }
 
-.task-blog-filter { display: flex; flex-direction: column; gap: 9px; padding: 12px 0; border-bottom: 1.5px dashed var(--t-faint); }
+.task-blog-filter { display: flex; flex-direction: column; gap: 9px; padding: 12px 0; border-bottom: 1.5px solid var(--t-faint); }
 .task-blog-filter-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .task-blog-grep { font-size: 12px; color: var(--t-muted); white-space: nowrap; }
 .task-blog-chip {
@@ -8117,6 +8117,32 @@ button.org-person-name {
 .task-blog-search {
   flex: 1; min-width: 180px; padding: 4px 10px; border: 1.5px solid var(--t-border);
   background: var(--t-panel); color: var(--t-text); font: 12.5px var(--t-mono);
+}
+.task-priority-filter { display: inline-flex; align-items: center; gap: 5px; }
+.task-filter-select { min-height: 30px; max-width: 240px; padding: 4px 8px; font: 12px var(--t-mono); }
+
+.task-new-form {
+  gap: 10px;
+  margin-top: 2px;
+  padding: 13px;
+  border: 1.5px solid var(--t-border);
+  border-radius: 0;
+  background: var(--t-panel2);
+}
+.task-new-heading { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.task-new-heading strong { font-size: 14px; }
+.task-new-heading span { color: var(--t-muted); font-size: 11.5px; }
+.task-new-title, .task-new-desc {
+  min-height: 36px;
+  border-color: var(--t-border);
+  background: var(--t-panel);
+  font-size: 13px;
+}
+.task-new-options { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.task-new-options label { display: grid; gap: 4px; min-width: 160px; color: var(--t-muted); font-size: 11.5px; }
+.task-new-options select {
+  min-height: 34px; padding: 4px 8px; border: 1.5px solid var(--t-border);
+  border-radius: 0; background: var(--t-panel); color: var(--t-text); font: 12px var(--t-mono);
 }
 
 /* #504 增量B：任务卡色条 + 分组头 chip + 隐藏空分组，对齐设计的分组色条列表。 */
@@ -8148,27 +8174,28 @@ button.org-person-name {
 
 /* #504 增量C：任务卡折叠——摘要行常显，详情/动作点开才展开。 */
 .task-ledger-panel .task-card { padding: 0; }
-.task-ledger-panel .task-card-main {
-  display: flex; align-items: center; gap: 9px; padding: 8px 13px;
-  cursor: default; min-width: 0;
-}
 .task-ledger-panel .task-id { flex: 0 0 auto; color: var(--t-dim); font-size: 11.5px; }
 .task-ledger-panel .task-prio { flex: 0 0 auto; padding: 0 6px; border: 1.4px solid var(--t-border); font-size: 10.5px; font-weight: 600; }
 .task-prio--p1 { background: var(--t-red); color: var(--t-accent-ink); }
 .task-prio--p2 { background: var(--d-yellow); color: var(--t-text); }
 .task-prio--p3 { background: var(--t-panel2); color: var(--t-text); }
-.task-ledger-panel .task-card-title { flex: 1 1 auto; min-width: 0; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; overflow: hidden; }
-.task-ledger-panel .task-card-title strong { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
-.task-ledger-panel .task-card-assignee { flex: 0 0 auto; color: var(--t-link); font-size: 11.5px; }
-.task-ledger-panel .task-card-main .task-label { flex: 0 0 auto; }
-.task-ledger-panel .task-card-main .task-state { flex: 0 0 auto; }
-.task-ledger-panel .task-card-toggle { flex: 0 0 auto; border: 0; background: none; color: var(--t-muted); cursor: pointer; font-size: 13px; padding: 0 2px; }
-.task-ledger-panel .task-card-desc,
-.task-ledger-panel .task-card-meta,
-.task-ledger-panel .task-card-actions,
-.task-ledger-panel .task-solution,
-.task-ledger-panel .task-reject-form { border-top: 1.5px dashed var(--t-faint); margin: 0; padding: 10px 13px; background: var(--t-panel2); }
-.task-ledger-panel .task-card-actions { border-top: 0; }
+.task-card-open {
+  width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  align-items: center; gap: 11px; padding: 10px 13px; border: 0; background: transparent;
+  color: var(--t-text); text-align: left; cursor: pointer;
+}
+.task-card-open:hover { background: var(--t-panel2); }
+.task-card-open:focus-visible { outline: 2px solid var(--t-accent); outline-offset: -3px; }
+.task-card-leading { display: inline-flex; align-items: center; gap: 6px; }
+.task-card-copy { display: grid; gap: 3px; min-width: 0; }
+.task-card-copy > strong {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13.5px;
+}
+.task-card-context { display: flex; align-items: center; gap: 9px; min-width: 0; color: var(--t-muted); font-size: 11px; }
+.task-card-context > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-card-labels { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.task-card-enter { color: var(--t-link); font-size: 11px; font-weight: 700; white-space: nowrap; }
 .task-ledger-panel .task-blog-more {
   align-self: flex-start; margin-top: 8px; padding: 3px 13px;
   border: 1.5px dashed var(--t-faint); background: var(--t-panel2);
@@ -8176,14 +8203,70 @@ button.org-person-name {
 }
 .task-ledger-panel .task-blog-more:hover { background: var(--t-panel); color: var(--t-text); }
 
+.task-detail-route {
+  width: 100%;
+  max-height: none;
+  overflow: visible;
+  gap: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.task-detail-route .task-detail-head {
+  padding-bottom: 10px;
+  border-bottom: 2px solid var(--t-border);
+}
+.task-detail-route .task-detail-title {
+  margin: 0;
+  font: 700 22px/1.28 var(--t-mono);
+}
+.task-detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, .8fr);
+  gap: 18px;
+  padding-top: 16px;
+}
+.task-detail-main { display: flex; flex-direction: column; gap: 15px; min-width: 0; }
+.task-detail-main > .task-detail-title { flex: none; }
+.task-detail-sidebar { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.task-detail-section, .task-detail-facts, .task-detail-control-group {
+  padding: 12px; border: 1.5px solid var(--t-faint); background: var(--t-panel2);
+}
+.task-detail-section h3, .task-detail-facts h3, .task-detail-control-group h3 {
+  margin: 0 0 8px; font-size: 12px; color: var(--t-muted);
+}
+.task-detail-section-hint { margin: -2px 0 9px; color: var(--t-muted); font-size: 11.5px; }
+.task-detail-blocker { padding: 11px 12px; border: 1.5px solid var(--p-blocked); background: color-mix(in srgb, var(--p-blocked) 9%, var(--t-panel)); }
+.task-detail-blocker strong { color: var(--p-blocked); }
+.task-detail-blocker p { margin: 5px 0 0; white-space: pre-wrap; }
+.task-detail-meta { grid-template-columns: minmax(80px, auto) minmax(0, 1fr); gap: 7px 12px; font-size: 11.5px; }
+.task-detail-meta dt { color: var(--t-muted); }
+.task-detail-controls { display: flex; flex-direction: column; gap: 12px; }
+.task-detail-control-group .task-card-actions { margin: 0; }
+.task-action-btn--primary { background: var(--t-border); color: var(--t-bg); }
+.task-block-form, .task-reject-form { margin-top: 10px; padding: 9px; background: var(--t-panel); }
+.task-detail-current-assignee { margin: 8px 0 0; color: var(--t-muted); font-size: 11.5px; }
+.task-detail-sidebar .task-assign-form { align-items: stretch; }
+.task-detail-sidebar .task-assign-form input { flex: 1 1 150px; width: auto; }
+.task-source-links { display: flex; flex-wrap: wrap; gap: 7px; }
+.task-source-link {
+  min-height: 30px; padding: 4px 9px; border: 1.5px solid var(--t-border);
+  background: var(--t-panel); color: var(--t-link); font: 700 11.5px var(--t-mono); cursor: pointer;
+}
+.task-source-link:hover:not(:disabled) { background: var(--d-yellow); }
+.task-source-link:disabled { color: var(--t-faint); cursor: not-allowed; }
+
 @media (max-width: 760px) {
-  .task-ledger-panel .task-card-main {
-    flex-wrap: wrap;
-  }
-  .task-ledger-panel .task-card-title {
-    order: -1;
-    flex: 1 0 100%;
-  }
+  .task-blog-head { align-items: flex-start; }
+  .task-blog-head-actions { width: 100%; margin-left: 0; }
+  .task-card-open { grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; }
+  .task-card-copy { grid-column: 1 / -2; grid-row: 2; }
+  .task-card-labels { display: none; }
+  .task-card-context { align-items: flex-start; flex-direction: column; gap: 2px; }
+  .task-card-context > span { white-space: normal; }
+  .task-detail-layout { grid-template-columns: 1fr; }
+  .task-new-options label { flex: 1 1 100%; }
 }
 
 /* 探活分级 + 模型活动 chip（#608，消费 #602/#603 的 presence 字段） */
