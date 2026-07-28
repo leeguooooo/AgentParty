@@ -46,6 +46,7 @@ const SYSTEM_HUMAN_SESSION_RE =
   /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|login-verify-.+)$/i;
 // #165：昵称可含 unicode（中文），故放开首字为任意字母/数字（与后端 NICKNAME_RE 对齐）。
 const NAME_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$/u;
+const CANDIDATE_TIER_RANK: Record<MentionTier, number> = { online: 0, wakeable: 1, recent: 2 };
 
 // 档位：① 在线（当前有 WS 连接） ② 可唤醒（autoWakeReachable 统一口径 #47/#55：
 // serve/watch 需不 stale 且不能是 human_driven，webhook 服务端投递、离线也算） ③ 最近活跃（其余 presence）。
@@ -152,7 +153,6 @@ export function mentionCandidates(
     ...roles.map((role) => role.name),
     ...recentSenderByName.keys(),
   ]);
-  const rank: Record<MentionTier, number> = { online: 0, wakeable: 1, recent: 2 };
   const base = [...names]
     // participant_removed only suppresses live addressing; retained sender
     // snapshots still back historical message labels. When the caller has a
@@ -236,7 +236,11 @@ export function mentionCandidates(
       if (!SYSTEM_HUMAN_SESSION_RE.test(c.name)) return true;
       return c.account !== undefined && c.display !== c.name;
     })
-    .sort((a, b) => a.group.localeCompare(b.group) || rank[a.tier] - rank[b.tier] || a.display.localeCompare(b.display))
+    .sort((a, b) =>
+      a.group.localeCompare(b.group)
+      || CANDIDATE_TIER_RANK[a.tier] - CANDIDATE_TIER_RANK[b.tier]
+      || a.display.localeCompare(b.display)
+    )
     .map(({ sourceName: _sourceName, ...candidate }) => candidate);
   const squadCandidates: MentionCandidate[] = squads
     .filter((squad) => squad.name !== self && squad.name !== "system")
@@ -334,12 +338,26 @@ export function parseDraftMentions(text: string, knownNames: readonly string[] =
 }
 
 export function filterCandidates(cands: MentionCandidate[], query: string, limit = 8): MentionCandidate[] {
+  // 同一个可路由昵称可能来自同一人的多个网页登录会话。菜单必须按最终 @ token 去重：
+  // 否则 React 会收到重复 key，在从「@」继续输入「luis」时把旧的 karl/其他 owner 行复用进新结果。
+  const uniqueByName = new Map<string, MentionCandidate>();
+  for (const candidate of cands) {
+    const key = mentionMatchKey(candidate.name);
+    const current = uniqueByName.get(key);
+    if (
+      current === undefined
+      || CANDIDATE_TIER_RANK[candidate.tier] < CANDIDATE_TIER_RANK[current.tier]
+    ) {
+      uniqueByName.set(key, candidate);
+    }
+  }
+  const uniqueCandidates = [...uniqueByName.values()];
   const q = query.toLowerCase();
-  if (q === "") return cands.slice(0, limit);
+  if (q === "") return uniqueCandidates.slice(0, limit);
   // 前缀命中优先，其次子串命中
   const pref: MentionCandidate[] = [];
   const sub: MentionCandidate[] = [];
-  for (const c of cands) {
+  for (const c of uniqueCandidates) {
     // 名字与可读显示名（人类的 email）都参与匹配——这样能直接搜 @thejacks 找到 UUID 会话
     const n = c.name.toLowerCase();
     const d = c.display.toLowerCase();
@@ -348,7 +366,7 @@ export function filterCandidates(cands: MentionCandidate[], query: string, limit
   }
   const direct = [...pref, ...sub];
   const matchedOwnerGroups = new Set(
-    cands
+    uniqueCandidates
       .filter((candidate) => q.length >= 2 && candidate.ownerDisplay?.toLowerCase().includes(q))
       .map((candidate) => candidate.account ?? `display:${candidate.ownerDisplay!.toLowerCase()}`),
   );
@@ -356,7 +374,7 @@ export function filterCandidates(cands: MentionCandidate[], query: string, limit
 
   // 搜人名时把这个人名下的全部 agent 一起带出。owner 组不受普通 8 条上限截断，
   // 否则 agent 较多的账号仍会出现“只看到本人、看不到自己的 agent”。
-  const ownerMatches = cands.filter((candidate) =>
+  const ownerMatches = uniqueCandidates.filter((candidate) =>
     matchedOwnerGroups.has(candidate.account ?? `display:${candidate.ownerDisplay?.toLowerCase() ?? ""}`),
   );
   const ownerNames = new Set(ownerMatches.map((candidate) => candidate.name));

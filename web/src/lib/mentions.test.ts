@@ -502,6 +502,59 @@ describe("filterCandidates", () => {
   test("empty query returns all (capped)", () => {
     expect(filterCandidates(cands, "").length).toBe(3);
   });
+  test("duplicate human sessions cannot leak stale rows into an owner search", () => {
+    const luisAccount = "lark:on_luis";
+    const wangAccount = "lark:on_wang";
+    const candidates = [
+      {
+        name: "karl",
+        display: "karl",
+        kind: "human" as const,
+        tier: "recent" as const,
+        group: wangAccount,
+        account: wangAccount,
+        ownerDisplay: "王路",
+      },
+      {
+        name: "karl",
+        display: "karl",
+        kind: "human" as const,
+        tier: "recent" as const,
+        group: wangAccount,
+        account: wangAccount,
+        ownerDisplay: "王路",
+      },
+      {
+        name: "luis",
+        display: "Luis",
+        kind: "human" as const,
+        tier: "online" as const,
+        group: luisAccount,
+        account: luisAccount,
+        ownerDisplay: "Luis",
+      },
+      {
+        name: "奥创",
+        display: "奥创",
+        kind: "agent" as const,
+        tier: "recent" as const,
+        group: luisAccount,
+        account: luisAccount,
+        ownerDisplay: "Luis",
+      },
+    ];
+
+    expect(filterCandidates(candidates, "").map((candidate) => candidate.name)).toEqual([
+      "karl",
+      "luis",
+      "奥创",
+    ]);
+    expect(filterCandidates(candidates, "luis").map((candidate) => candidate.name)).toEqual([
+      "luis",
+      "奥创",
+    ]);
+    expect(filterCandidates(candidates, "luis").every((candidate) => candidate.account === luisAccount)).toBe(true);
+  });
 });
 
 // 这个函数不只喂草稿状态条——发送/编辑路径也用它决定真正上报给服务端的 mentions 数组（issue #124），
