@@ -99,6 +99,75 @@ describe("Composer Escape handling (#357)", () => {
     expect(renderer!.root.findAllByProps({ className: "mention-owner t-mono" })).toHaveLength(10);
   });
 
+  test("typing an owner after the full menu cannot retain another owner's duplicate session rows", () => {
+    const luisAccount = "lark:on_luis";
+    const wangAccount = "lark:on_wang";
+    const candidates = [
+      {
+        name: "karl",
+        display: "karl",
+        kind: "human" as const,
+        tier: "recent" as const,
+        group: wangAccount,
+        account: wangAccount,
+        ownerDisplay: "王路",
+      },
+      {
+        name: "karl",
+        display: "karl",
+        kind: "human" as const,
+        tier: "recent" as const,
+        group: wangAccount,
+        account: wangAccount,
+        ownerDisplay: "王路",
+      },
+      {
+        name: "luis",
+        display: "Luis",
+        kind: "human" as const,
+        tier: "online" as const,
+        group: luisAccount,
+        account: luisAccount,
+        ownerDisplay: "Luis",
+      },
+      {
+        name: "奥创",
+        display: "奥创",
+        kind: "agent" as const,
+        tier: "recent" as const,
+        group: luisAccount,
+        account: luisAccount,
+        ownerDisplay: "Luis",
+      },
+    ];
+    act(() => {
+      renderer = create(
+        <LocaleProvider>
+          <Composer
+            draft="@"
+            setDraft={() => undefined}
+            onSend={() => undefined}
+            ready
+            candidates={candidates}
+            mentionStatuses={[]}
+          />
+        </LocaleProvider>,
+      );
+    });
+
+    const textarea = renderer!.root.findByProps({ className: "composer-input t-mono" });
+    act(() => textarea.props.onClick({ currentTarget: { value: "@", selectionStart: 1 } }));
+    expect(renderer!.root.findAllByProps({ role: "option" })).toHaveLength(3);
+
+    act(() => textarea.props.onChange({ target: { value: "@luis", selectionStart: 5 } }));
+    expect(
+      renderer!.root.findAllByProps({ className: "mention-name t-mono" }).map((node) => node.children[0]),
+    ).toEqual(["Luis", "奥创"]);
+    expect(renderer!.root.findAllByProps({ className: "mention-group" }).map((node) => node.children[0])).toEqual([
+      "Luis",
+    ]);
+  });
+
   test("focuses and reveals the composer when reply mode starts", () => {
     const focus = mock(() => undefined);
     const scrollIntoView = mock(() => undefined);
