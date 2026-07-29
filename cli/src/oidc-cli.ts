@@ -1,9 +1,10 @@
 // 回环重定向 PKCE 登录流 + 令牌刷新 + bearer 解析（spec §4）
 import { createHash, randomBytes } from "node:crypto";
 import { accountPath, readAccount, writeAccount, type AccountSession } from "./account";
-import { agentpartyHome, cwdStatePath, readConfigWithSource, type Config, type ConfigSourceInfo, type WorkspaceState } from "./config";
+import { agentpartyHome, cwdStatePath, readConfigWithSource, tokenFingerprint, type Config, type ConfigSourceInfo, type WorkspaceState } from "./config";
 import { fetchPublicConfig } from "./rest";
 import { healServerUrl } from "./validation";
+import { stripTerminalControls } from "./format";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -40,22 +41,24 @@ function boundChannel(): string | null {
 // 等于人类账号会话的 server）。安全约束：
 //   - 只在【恰好一个】匹配时恢复；0 或多个返回 null（调用方硬拒），绝不猜错身份；
 //   - 只认带 token 的 agent config，永不回退人类账号会话（守住 #42 冒充护栏）。
-function recoverAgentConfigForChannel(channel: string): { server: string; token: string; name: string } | null {
+function recoverAgentConfigForChannel(channel: string): { server: string; token: string; name: string; path: string } | null {
+  const dir = join(agentpartyHome(), "agents");
   let files: string[];
   try {
-    files = readdirSync(join(agentpartyHome(), "agents")).filter((f) => f.endsWith(".json"));
+    files = readdirSync(dir).filter((f) => f.endsWith(".json"));
   } catch {
     return null; // agents/ 不存在或不可读
   }
-  const matches: { server: string; token: string; name: string }[] = [];
+  const matches: { server: string; token: string; name: string; path: string }[] = [];
   for (const file of files) {
+    const path = join(dir, file);
     try {
-      const cfg = JSON.parse(readFileSync(join(agentpartyHome(), "agents", file), "utf8")) as Config;
+      const cfg = JSON.parse(readFileSync(path, "utf8")) as Config;
       if (!cfg?.token || !cfg?.server) continue;
       if (cfg.identity?.channel_scope !== channel) continue;
       const healed = healServerUrl(cfg.server);
       if (!healed) continue;
-      matches.push({ server: healed, token: cfg.token, name: cfg.identity?.name ?? "?" });
+      matches.push({ server: healed, token: cfg.token, name: cfg.identity?.name ?? "?", path });
     } catch {
       // 跳过损坏/非 config 的 json，不因单个坏文件放弃恢复
     }
@@ -422,16 +425,19 @@ export async function resolveAuthDetailed(): Promise<ResolvedAuthDetailed> {
       // 频道唯一匹配找回同一个 agent 的 config（用它自己的 server+token），避免 party 彻底不可用。
       const channel = boundChannel();
       const recovered = channel ? recoverAgentConfigForChannel(channel) : null;
-      if (recovered) {
+      if (recovered && channel) {
+        // name/channel 来自可能被恶意/损坏 config 污染的数据，打印前剥离终端控制字符，防 ANSI/OSC 注入。
         console.error(
-          `↻ bound agent config ${orphan} is missing; recovered ${recovered.name} from ~/.agentparty/agents/ (channel "${channel}"). ` +
+          `↻ bound agent config ${orphan} is missing; recovered ${stripTerminalControls(recovered.name)} from ~/.agentparty/agents/ (channel "${stripTerminalControls(channel)}"). ` +
             `set AGENTPARTY_CONFIG to that file to silence this notice.`,
         );
+        // config 来源反映真实的持久文件（与 readBreadcrumbConfig 一致：kind="explicit"+path），
+        // 让 whoami/serve 拿到正确的路径与来源，而非顶部探测的旧 source。
         return {
           server: recovered.server,
           token: recovered.token,
           auth_source: "runtime_config",
-          config: source,
+          config: { kind: "explicit", path: recovered.path, token_fingerprint: tokenFingerprint(recovered.token) },
           account: accountInfo(sess),
         };
       }

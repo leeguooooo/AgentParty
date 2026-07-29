@@ -227,6 +227,7 @@ describe("resolveAuth precedence", () => {
     writeState({ channel: "dev", cursor: 0, config_path: missing, bindings: { dev: missing } });
     // 持久 agent config：与孤儿不同文件名，但 identity.channel_scope 唯一匹配 "dev"。
     // 注意其 server 与账号会话 server 不同——恢复必须用 agent 自己的 server。
+    const durablePath = join(home, "agents", "durable-alice.json");
     writeAgentConfigFile("durable-alice.json", {
       server: "https://agent.example.com",
       token: "agent-tok",
@@ -244,12 +245,48 @@ describe("resolveAuth precedence", () => {
     console.error = (...args: unknown[]) => errors.push(args.join(" "));
     try {
       const auth = await resolveAuthDetailed();
-      expect(auth).toMatchObject({ server: "https://agent.example.com", token: "agent-tok", auth_source: "runtime_config" });
+      // 恢复后 config 来源必须反映真实的持久文件（供 whoami/serve 决策），不是顶部探测的旧 source。
+      expect(auth).toMatchObject({
+        server: "https://agent.example.com",
+        token: "agent-tok",
+        auth_source: "runtime_config",
+        config: { kind: "explicit", path: durablePath },
+      });
     } finally {
       console.error = originalError;
     }
     expect(errors.join("\n")).toContain("alice");
     expect(errors.join("\n")).not.toContain("refusing human-account fallback");
+  });
+
+  test("strips terminal control chars from recovered identity before printing (#518)", async () => {
+    const missing = join(home, "agents", "orphan-bound.json");
+    writeState({ channel: "dev", cursor: 0, config_path: missing, bindings: { dev: missing } });
+    // 恶意/损坏 config：name 里塞 ANSI/OSC 控制序列，若原样打印会注入终端。
+    // 剥离只去 ESC/BEL 等控制字节（OSC 载荷降级为可见文本），可读部分 "alice" 保留在前。
+    writeAgentConfigFile("evil.json", {
+      server: "https://agent.example.com",
+      token: "agent-tok",
+      identity: { name: "alice\x1b[31m\x1b]0;pwn\x07", email: null, kind: "agent", role: "agent", owner: "o", channel_scope: "dev", verified_at: 1 },
+    });
+    writeAccount({
+      server: "https://issuer.example.com",
+      refresh_token: "ref",
+      access_token: "acc-live",
+      expires_at: nowSec() + 3600,
+      email: "human@example.com",
+    });
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      await resolveAuthDetailed();
+    } finally {
+      console.error = originalError;
+    }
+    const out = errors.join("\n");
+    expect(out).not.toContain("\x1b"); // 无 ESC → 无控制序列注入
+    expect(out).toContain("alice"); // 剥离控制字符后可读身份仍在
   });
 
   test("refuses (no wrong-identity pick) when multiple persistent configs match the channel (#518)", async () => {
