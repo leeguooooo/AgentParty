@@ -1,10 +1,11 @@
 // 回环重定向 PKCE 登录流 + 令牌刷新 + bearer 解析（spec §4）
 import { createHash, randomBytes } from "node:crypto";
 import { accountPath, readAccount, writeAccount, type AccountSession } from "./account";
-import { cwdStatePath, readConfigWithSource, type ConfigSourceInfo, type WorkspaceState } from "./config";
+import { agentpartyHome, cwdStatePath, readConfigWithSource, type Config, type ConfigSourceInfo, type WorkspaceState } from "./config";
 import { fetchPublicConfig } from "./rest";
 import { healServerUrl } from "./validation";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 // cwd-state 有 config_path 指针、但指向的文件已不在 → 一个「本该是 agent 却丢了 config」的孤儿标记。
 function orphanedAgentPointer(): string | null {
@@ -21,6 +22,45 @@ function orphanedAgentPointer(): string | null {
   } catch {
     return null;
   }
+}
+
+// 孤儿指针绑定的频道（state 只存路径、不存身份，channel 是唯一可靠的匹配键）。
+function boundChannel(): string | null {
+  try {
+    const st = JSON.parse(readFileSync(cwdStatePath(), "utf8")) as WorkspaceState;
+    return st.channel ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// #518 孤儿恢复：绑定的 agent config 丢了（常见于放 $TMPDIR 被系统清理），但持久
+// ~/.agentparty/agents/ 里往往还留着同一个 agent 的 config。按 identity.channel_scope
+// 唯一匹配当前绑定频道 → 用【该 config 自己的 server+token】恢复（agent 的 server 未必
+// 等于人类账号会话的 server）。安全约束：
+//   - 只在【恰好一个】匹配时恢复；0 或多个返回 null（调用方硬拒），绝不猜错身份；
+//   - 只认带 token 的 agent config，永不回退人类账号会话（守住 #42 冒充护栏）。
+function recoverAgentConfigForChannel(channel: string): { server: string; token: string; name: string } | null {
+  let files: string[];
+  try {
+    files = readdirSync(join(agentpartyHome(), "agents")).filter((f) => f.endsWith(".json"));
+  } catch {
+    return null; // agents/ 不存在或不可读
+  }
+  const matches: { server: string; token: string; name: string }[] = [];
+  for (const file of files) {
+    try {
+      const cfg = JSON.parse(readFileSync(join(agentpartyHome(), "agents", file), "utf8")) as Config;
+      if (!cfg?.token || !cfg?.server) continue;
+      if (cfg.identity?.channel_scope !== channel) continue;
+      const healed = healServerUrl(cfg.server);
+      if (!healed) continue;
+      matches.push({ server: healed, token: cfg.token, name: cfg.identity?.name ?? "?" });
+    } catch {
+      // 跳过损坏/非 config 的 json，不因单个坏文件放弃恢复
+    }
+  }
+  return matches.length === 1 ? matches[0] : null;
 }
 
 const SCOPE = "openid profile email offline_access";
@@ -378,6 +418,23 @@ export async function resolveAuthDetailed(): Promise<ResolvedAuthDetailed> {
     // 避免 agent 静默以人类身份发言（冒充是安全问题）。
     const orphan = orphanedAgentPointer();
     if (orphan) {
+      // #518：绑定的 agent config 丢了。硬拒前先尝试从持久 ~/.agentparty/agents/ 里按
+      // 频道唯一匹配找回同一个 agent 的 config（用它自己的 server+token），避免 party 彻底不可用。
+      const channel = boundChannel();
+      const recovered = channel ? recoverAgentConfigForChannel(channel) : null;
+      if (recovered) {
+        console.error(
+          `↻ bound agent config ${orphan} is missing; recovered ${recovered.name} from ~/.agentparty/agents/ (channel "${channel}"). ` +
+            `set AGENTPARTY_CONFIG to that file to silence this notice.`,
+        );
+        return {
+          server: recovered.server,
+          token: recovered.token,
+          auth_source: "runtime_config",
+          config: source,
+          account: accountInfo(sess),
+        };
+      }
       console.error(
         `⚠ identity would resolve to human account (${sess.email ?? "logged-in user"}), but this workspace was bound to an agent config at ${orphan} which is now missing. ` +
           `refusing human-account fallback; restore that file or run every command with AGENTPARTY_CONFIG=<path> (issues #42/#518).`,
