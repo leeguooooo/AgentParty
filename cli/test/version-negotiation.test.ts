@@ -124,6 +124,82 @@ describe("CLI↔worker version negotiation (issue #137)", () => {
     });
     expect(installs).toEqual(["/usr/local/bin/party"]);
   });
+
+  test("resolveAvailableUpgrade treats a release asset 404 as publishing and retries successfully later (#805)", async () => {
+    const archive = new TextEncoder().encode("fake tarball");
+    const installs: string[] = [];
+    const output: string[] = [];
+    let assetsReady = false;
+    globalThis.fetch = (async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ap.test/api/version") {
+        return Response.json({ version: "0.2.108", commit: "abc", deployed_at: null });
+      }
+      if (!assetsReady) return new Response("not found", { status: 404 });
+      return url.endsWith(".sha256")
+        ? new Response(`${sha256(archive)}  party-darwin-x64.tar.gz\n`)
+        : new Response(archive);
+    }) as typeof fetch;
+    const options = {
+      autoDownload: true,
+      out: (line: string) => output.push(line),
+      upgradeDeps: {
+        runningVersion: "0.2.107",
+        execPath: "/usr/local/bin/party",
+        platform: "darwin" as const,
+        arch: "x64",
+        extractPartyBinary: async (_archivePath: string, outDir: string) => {
+          const binary = `${outDir}/party`;
+          writeFileSync(binary, "binary");
+          return binary;
+        },
+        installBinary: (_source: string, target: string) => installs.push(target),
+      },
+    };
+
+    expect(await resolveAvailableUpgrade("https://ap.test", null, options)).toBeNull();
+    expect(output).toEqual(["serve: party v0.2.108 的发布资产仍在生成，稍后会自动重试。"]);
+    expect(installs).toHaveLength(0);
+
+    assetsReady = true;
+    expect(await resolveAvailableUpgrade("https://ap.test", null, options)).toMatchObject({
+      available_version: "0.2.108",
+      installed_version: "0.2.108",
+      auto_upgrade: true,
+      action_required: "auto_reexec",
+    });
+    expect(installs).toEqual(["/usr/local/bin/party"]);
+  });
+
+  test("resolveAvailableUpgrade keeps the manual fallback for non-404 download failures (#805)", async () => {
+    const output: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://ap.test/api/version") {
+        return Response.json({ version: "0.2.108", commit: "abc", deployed_at: null });
+      }
+      return new Response("unavailable", { status: 503 });
+    }) as typeof fetch;
+
+    const notice = await resolveAvailableUpgrade("https://ap.test", null, {
+      autoDownload: true,
+      out: (line) => output.push(line),
+      upgradeDeps: {
+        runningVersion: "0.2.107",
+        execPath: "/usr/local/bin/party",
+        platform: "darwin",
+        arch: "x64",
+      },
+    });
+
+    expect(notice).toMatchObject({
+      available_version: "0.2.108",
+      auto_upgrade: false,
+      action_required: "ask_user",
+    });
+    expect(output[0]).toContain("自动下载 party v0.2.108 失败，保留人工升级提示");
+    expect(output[0]).toContain("(503)");
+  });
 });
 
 describe("upgradeHintForServer（#703：watch 挂载升级提示）", () => {

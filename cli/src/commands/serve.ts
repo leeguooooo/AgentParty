@@ -5,7 +5,16 @@ import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMP
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { downloadPartyUpgrade, isPartyBinaryPath, maybeReexecUpgrade, serverVersionUpgradeNotice, upgradeNotice, type CliUpgradeNotice, type UpgradeDeps } from "../upgrade";
+import {
+  downloadPartyUpgrade,
+  isPartyBinaryPath,
+  isReleaseAssetPublishing,
+  maybeReexecUpgrade,
+  serverVersionUpgradeNotice,
+  upgradeNotice,
+  type CliUpgradeNotice,
+  type UpgradeDeps,
+} from "../upgrade";
 import {
   clearManagedActions,
   clearManagedExclusiveLocks,
@@ -177,6 +186,10 @@ export async function resolveAvailableUpgrade(
         message: `AgentParty 服务器已发布 party CLI v${notice.available_version}，已下载并校验新版二进制。本轮唤醒结束后 serve 会自动 re-exec 新版。`,
       };
     } catch (error) {
+      if (isReleaseAssetPublishing(error)) {
+        options.out?.(`serve: party v${notice.available_version} 的发布资产仍在生成，稍后会自动重试。`);
+        return null;
+      }
       options.out?.(`serve: 自动下载 party v${notice.available_version} 失败，保留人工升级提示: ${error instanceof Error ? error.message : String(error)}`);
       return notice;
     }
