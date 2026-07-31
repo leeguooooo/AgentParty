@@ -2468,6 +2468,31 @@ button.org-person-name {
   padding: 5px 12px 6px;
   background: var(--d-yellow);
 }
+.catchup-priority-summary {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 13px;
+}
+.catchup-priority-summary strong {
+  font-family: var(--d-marker);
+  font-size: 15px;
+}
+.catchup-priority-summary span {
+  color: var(--t-muted);
+}
+.catchup-stats {
+  font-size: 12px;
+}
+.catchup-stats summary {
+  width: fit-content;
+  color: var(--t-muted);
+  cursor: pointer;
+}
+.catchup-stats[open] summary {
+  margin-bottom: 6px;
+}
 .catchup-chips {
   display: flex;
   flex-wrap: wrap;
@@ -2506,6 +2531,27 @@ button.org-person-name {
   margin: 0;
   font-family: var(--d-marker);
   font-size: 14px;
+}
+.catchup-overflow-note {
+  margin: 0;
+  color: var(--t-muted);
+  font-size: 12px;
+}
+.catchup-updates {
+  display: grid;
+  gap: 5px;
+}
+.catchup-updates-toggle {
+  width: fit-content;
+  padding: 2px 0;
+  color: var(--t-muted);
+  background: transparent;
+  border: 0;
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
 }
 .catchup-item-button {
   width: 100%;

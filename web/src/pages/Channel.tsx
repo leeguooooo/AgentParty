@@ -18,6 +18,7 @@ import { MentionHeaderNotice, type MentionToastItem } from "../components/Mentio
 import { PresenceBar } from "../components/PresenceBar";
 import { ChannelFocusBar } from "../components/ChannelFocusBar";
 import { ChannelFocusPanel } from "../components/ChannelFocusPanel";
+import { CatchupPanel } from "../components/CatchupPanel";
 import {
   buildHostCandidate,
   HostBoardPanel,
@@ -83,7 +84,7 @@ import {
 import { mentionCandidates, parseDraftMentions, type DraftMentionStatus } from "../lib/mentions";
 import { buildReceipts, type MentionReceipt } from "../lib/wakeReceipt";
 import { completionMessages } from "../lib/completions";
-import { catchupKey, summarizeCatchup, type CatchupDigest } from "../lib/digest";
+import { catchupKey, summarizeCatchup } from "../lib/digest";
 import { buildOrgTree, type OrgMemberInput } from "../lib/orgTree";
 import { formatDivisionSection, mergeDivisionIntoCharter, type DivisionCharterRole } from "../lib/divisionCharter";
 import { declaredAgentRoles, formatAgentRoleSummary } from "../lib/divisionSummary";
@@ -1445,84 +1446,6 @@ function AgentFilterPanel({
           })}
         </div>
       )}
-    </section>
-  );
-}
-
-function CatchupPanel({
-  digest,
-  seenSeq,
-  latestSeq,
-  onCaughtUp,
-  onJump,
-}: {
-  digest: CatchupDigest;
-  seenSeq: number;
-  latestSeq: number;
-  onCaughtUp: () => void;
-  onJump: (seq: number) => void | Promise<void>;
-}) {
-  const t = useT();
-  const chips = [
-    t("Channel.catchup.chip.new", { count: digest.messages }),
-    digest.mentions > 0 ? t("Channel.catchup.chip.mentions", { count: digest.mentions }) : null,
-    digest.respondedMentions > 0 ? t("Channel.catchup.chip.handled", { count: digest.respondedMentions }) : null,
-    digest.blocked > 0 ? t("Channel.catchup.chip.blocked", { count: digest.blocked }) : null,
-    digest.done > 0 ? t("Channel.catchup.chip.done", { count: digest.done }) : null,
-    digest.releases > 0 ? t("Channel.catchup.chip.release", { count: digest.releases }) : null,
-    digest.issues > 0 ? t("Channel.catchup.chip.issues", { count: digest.issues }) : null,
-    digest.questions > 0 ? t("Channel.catchup.chip.question", { count: digest.questions }) : null,
-    digest.replies > 0 ? t("Channel.catchup.chip.replies", { count: digest.replies }) : null,
-  ].filter((chip): chip is string => chip !== null);
-  const itemLabel = (item: CatchupDigest["items"][number]) =>
-    t(`Channel.catchup.item.${item.kind}`);
-  const group = (title: string, items: CatchupDigest["items"], attention: boolean) => (
-    items.length > 0 && (
-      <section className={`catchup-group${attention ? " catchup-group--attention" : ""}`}>
-        <h3 className="catchup-group-title">{title}</h3>
-        <ol className="catchup-items">
-          {items.map((item) => (
-            <li key={item.seq}>
-              <button
-                type="button"
-                className="catchup-item-button"
-                onClick={() => void onJump(item.seq)}
-                aria-label={t("Channel.catchup.jump", { seq: item.seq })}
-              >
-                <span className="t-mono catchup-item-meta">
-                  #{item.seq} {itemLabel(item)}
-                </span>
-                <span>{item.text}</span>
-              </button>
-            </li>
-          ))}
-        </ol>
-      </section>
-    )
-  );
-
-  return (
-    <section className="catchup-panel" aria-label={t("Channel.catchup.aria")}>
-      <div className="catchup-head">
-        <div>
-          <h2 className="catchup-title">{t("Channel.heading.catchup")}</h2>
-          <p className="catchup-range t-mono">
-            #{seenSeq + 1}..#{latestSeq}
-          </p>
-        </div>
-        <button className="d-btn catchup-action" type="button" onClick={onCaughtUp}>
-          <span>{t("Channel.caughtUp")}</span>
-        </button>
-      </div>
-      <div className="catchup-chips t-mono">
-        {chips.map((chip) => (
-          <span key={chip} className="catchup-chip">
-            {chip}
-          </span>
-        ))}
-      </div>
-      {group(t("Channel.catchup.attention"), digest.attentionItems, true)}
-      {group(t("Channel.catchup.updates"), digest.updateItems, false)}
     </section>
   );
 }
