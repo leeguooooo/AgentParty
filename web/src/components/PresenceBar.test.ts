@@ -3,7 +3,7 @@ import type { PresenceEntry, Sender } from "@agentparty/shared";
 import { createElement } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
-import { ACTIVITY_TTL_MS, activityBadge, buildGroups, busyLabel, countLiveGroups, livenessBadge, ownerKey, pauseResumeAt, PresenceBar, presenceTier, PRESENCE_STALE_MS, taskLabel, unreachableBadge, waitingOwnerLabel, wakeabilityBadge, type Item } from "./PresenceBar";
+import { ACTIVITY_TTL_MS, activityBadge, buildGroups, busyLabel, countLiveGroups, livenessBadge, ownerKey, pauseResumeAt, PresenceBar, presenceTier, PRESENCE_STALE_MS, taskLabel, unhandledMentionLabel, unreachableBadge, waitingOwnerLabel, wakeabilityBadge, type Item } from "./PresenceBar";
 
 function item(over: Partial<Item> = {}): Item {
   return {
@@ -36,6 +36,8 @@ function item(over: Partial<Item> = {}): Item {
     busy: false,
     queueDepth: null,
     waitingOwnerCount: 0,
+    unhandledMentionCount: 0,
+    oldestUnhandledMentionSeq: null,
     currentTask: null,
     heartbeatAt: null,
     activity: null,
@@ -465,6 +467,26 @@ describe("busy indicator + queue depth (#103)", () => {
       vars: { count: 2 },
     });
     expect(waitingOwnerLabel(item({ waitingOwnerCount: 0 }))).toBeNull();
+  });
+
+  test("未处理 @ 显示数量与最早来源消息", () => {
+    expect(unhandledMentionLabel(item({ unhandledMentionCount: 3, oldestUnhandledMentionSeq: 42 }))).toEqual({
+      key: "PresenceBar.unhandledMentionsChip",
+      vars: { count: 3, seq: 42 },
+    });
+    expect(unhandledMentionLabel(item({ unhandledMentionCount: 3, oldestUnhandledMentionSeq: null }))).toEqual({
+      key: "PresenceBar.unhandledMentionsChipCountOnly",
+      vars: { count: 3 },
+    });
+    expect(unhandledMentionLabel(item({ unhandledMentionCount: 3, oldestUnhandledMentionSeq: 0 }))).toEqual({
+      key: "PresenceBar.unhandledMentionsChipCountOnly",
+      vars: { count: 3 },
+    });
+    expect(unhandledMentionLabel(item({ unhandledMentionCount: 3, oldestUnhandledMentionSeq: -1 }))).toEqual({
+      key: "PresenceBar.unhandledMentionsChipCountOnly",
+      vars: { count: 3 },
+    });
+    expect(unhandledMentionLabel(item())).toBeNull();
   });
 
   test("waiting_owner chip follows the active en/zh locale", async () => {

@@ -1643,7 +1643,17 @@ describe("builtin runner", () => {
 
     // 答案照常投递到频道
     const finalPost = posts.at(-1)!;
-    expect(finalPost.body).toMatchObject({ kind: "message", reply_to: 659 });
+    expect(finalPost.body).toMatchObject({
+      kind: "message",
+      reply_to: 659,
+      response_source: {
+        kind: "reception_runner",
+        runner: "codex",
+        context: "isolated_channel_session",
+        session: "unavailable",
+        trigger_seq: 659,
+      },
+    });
     const deliveredBody = (finalPost.body as { body: string }).body;
     expect(deliveredBody).toContain("answer without a parsable session id");
     // 无 sid 不打 "[session start: unknown]" marker 噪声
@@ -2313,6 +2323,13 @@ describe("builtin runner", () => {
       kind: "message",
       reply_to: 44,
       body: "[session start: 019f35d9]\nanswer body",
+      response_source: {
+        kind: "reception_runner",
+        runner: "codex",
+        context: "isolated_channel_session",
+        session: "started",
+        trigger_seq: 44,
+      },
     });
   });
 
@@ -3481,7 +3498,17 @@ describe("codex-sdk runner", () => {
     })(triggerFrame(104), runnerCtx());
 
     const finalPost = posts.at(-1)!;
-    expect(finalPost.body).toMatchObject({ kind: "message", reply_to: 104 });
+    expect(finalPost.body).toMatchObject({
+      kind: "message",
+      reply_to: 104,
+      response_source: {
+        kind: "reception_runner",
+        runner: "codex-sdk",
+        context: "isolated_channel_session",
+        session: "started",
+        trigger_seq: 104,
+      },
+    });
     expect((finalPost.body as { body: string }).body).toBe(final);
   });
 

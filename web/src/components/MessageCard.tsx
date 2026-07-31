@@ -714,6 +714,16 @@ function MessageCardImpl({
               )}
             </span>
           )}
+          {msg.response_source !== undefined && (
+            <span
+              className="t-mono msg-reception-source"
+              title={t(`MessageCard.receptionReply.${msg.response_source.session}`, {
+                seq: String(msg.response_source.trigger_seq),
+              })}
+            >
+              {t("MessageCard.receptionReply", { runner: msg.response_source.runner })}
+            </span>
+          )}
           {msg.mentions.map((m) => {
             const mentionedSender = participants?.find((participant) => participant.name === m);
             const mentionedPresence = presence?.[m];

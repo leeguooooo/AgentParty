@@ -77,6 +77,7 @@ import {
   type PresenceEntry,
   type PresenceFrame,
   type ReadCursor,
+  type ResponseSource,
   type Residency,
   type SendHostDecision,
   type SendFrame,
@@ -1139,6 +1140,22 @@ function parseAgentContext(input: unknown): AgentContext | undefined | null {
   const workspaceId = safeContextString(raw.workspace_id, 128);
   const workspaceLabel = safeContextString(raw.workspace_label, 80);
   const worktreeLabel = safeContextString(raw.worktree_label, 120);
+  const receptionMode = raw.reception_mode;
+  const receptionRunner = raw.reception_runner;
+  const receptionContext = raw.reception_context;
+  if (receptionMode !== undefined && !["model", "custom"].includes(String(receptionMode))) return null;
+  if (
+    receptionRunner !== undefined &&
+    !["codex", "claude", "codex-sdk", "custom"].includes(String(receptionRunner))
+  ) {
+    return null;
+  }
+  if (
+    receptionContext !== undefined &&
+    !["isolated_channel_session", "fresh_process"].includes(String(receptionContext))
+  ) {
+    return null;
+  }
   if (configFingerprint === null || workspaceId === null || workspaceLabel === null || worktreeLabel === null) {
     return null;
   }
@@ -1148,7 +1165,43 @@ function parseAgentContext(input: unknown): AgentContext | undefined | null {
     ...(workspaceId === undefined ? {} : { workspace_id: workspaceId }),
     ...(workspaceLabel === undefined ? {} : { workspace_label: workspaceLabel }),
     ...(worktreeLabel === undefined ? {} : { worktree_label: worktreeLabel }),
+    ...(receptionMode === undefined
+      ? {}
+      : { reception_mode: String(receptionMode) as AgentContext["reception_mode"] }),
+    ...(receptionRunner === undefined
+      ? {}
+      : { reception_runner: String(receptionRunner) as AgentContext["reception_runner"] }),
+    ...(receptionContext === undefined
+      ? {}
+      : { reception_context: String(receptionContext) as AgentContext["reception_context"] }),
   };
+}
+
+function parseResponseSource(input: unknown): ResponseSource | undefined | null {
+  if (input === undefined) return undefined;
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  if (raw.kind !== "reception_runner") return null;
+  if (!["codex", "claude", "codex-sdk", "custom"].includes(String(raw.runner))) return null;
+  if (!["isolated_channel_session", "fresh_process"].includes(String(raw.context))) return null;
+  if (!["started", "resumed", "unavailable"].includes(String(raw.session))) return null;
+  if (typeof raw.trigger_seq !== "number" || !Number.isInteger(raw.trigger_seq) || raw.trigger_seq <= 0) return null;
+  return {
+    kind: "reception_runner",
+    runner: String(raw.runner) as ResponseSource["runner"],
+    context: String(raw.context) as ResponseSource["context"],
+    session: String(raw.session) as ResponseSource["session"],
+    trigger_seq: raw.trigger_seq,
+  };
+}
+
+function parseStoredResponseSource(input: unknown): ResponseSource | undefined {
+  if (typeof input !== "string" || input === "") return undefined;
+  try {
+    return parseResponseSource(JSON.parse(input) as unknown) ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // parseSendFrame 返回 null 时用它给出更具体的拒收原因：role 拼错是 agent 自报协作角色最常见的坑，
@@ -1203,6 +1256,8 @@ function parseSendFrame(input: unknown): SendFrame | null {
     if (decisionRequest !== undefined && completionArtifact !== undefined) return null;
     const attachments = parseAttachments(f.attachments);
     if (attachments === null) return null;
+    const responseSource = parseResponseSource(f.response_source);
+    if (responseSource === null) return null;
     let replaces: number | undefined;
     if (f.replaces !== undefined) {
       if (typeof f.replaces !== "number" || !Number.isInteger(f.replaces) || f.replaces <= 0) return null;
@@ -1218,6 +1273,7 @@ function parseSendFrame(input: unknown): SendFrame | null {
       ...(completionArtifact !== undefined ? { completion_artifact: completionArtifact } : {}),
       ...(decisionRequest !== undefined ? { decision_request: decisionRequest } : {}),
       ...(attachments !== undefined ? { attachments } : {}),
+      ...(responseSource !== undefined ? { response_source: responseSource } : {}),
       ...(completionArtifact !== undefined && replaces !== undefined ? { replaces } : {}),
       ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
     };
@@ -1596,6 +1652,7 @@ export class ChannelDO extends Server<Env> {
       retracted_by TEXT,
       supersedes INTEGER,
       superseded_by INTEGER,
+      response_source_json TEXT,
       ts INTEGER NOT NULL
     )`);
     // 历史消息也要带 sender 所属人：给早于本次的 do 表补列（新表已含，重复 ALTER 会抛，吞掉）
@@ -1662,6 +1719,8 @@ export class ChannelDO extends Server<Env> {
       // 网页据此显示「该条来自哪个 CLI 版本」，落后于服务端最低版本时标警告。同 messages 其余列走 DO 内建
       // SQLite 幂等补列（非 D1 迁移）。缺头/网页/旧客户端为 NULL，消费方省略展示。
       "ALTER TABLE messages ADD COLUMN sender_client_version TEXT",
+      // 常驻接待 runner 的结构化回复来源：区分 owner 交互会话与独立频道接待会话。
+      "ALTER TABLE messages ADD COLUMN response_source_json TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -7934,6 +7993,32 @@ export class ChannelDO extends Server<Env> {
     if (!(await this.isTokenActive(identity.tokenHash))) {
       return { ok: false, code: "unauthorized", message: "invalid or revoked token" };
     }
+    if (frame.kind === "message" && frame.response_source !== undefined) {
+      if (identity.kind !== "agent") {
+        return {
+          ok: false,
+          code: "unauthorized",
+          message: "only an authenticated agent can report reception runner provenance",
+        };
+      }
+      const directed = this.ctx.storage.sql
+        .exec(
+          `SELECT 1 FROM directed_deliveries
+            WHERE message_seq = ? AND target_name = ? AND target_owner = ?
+            LIMIT 1`,
+          frame.response_source.trigger_seq,
+          identity.name,
+          this.identityDeliveryPrincipal(identity),
+        )
+        .toArray();
+      if (directed.length === 0) {
+        return {
+          ok: false,
+          code: "bad_request",
+          message: "reception runner provenance must reference a directed delivery for this agent",
+        };
+      }
+    }
     const assignedHost = this.getMeta("assigned_host");
     const roleWarning =
       frame.kind === "status" &&
@@ -8182,6 +8267,7 @@ export class ChannelDO extends Server<Env> {
             ...(roleSource === undefined ? {} : { role_source: roleSource }),
             ...(completionArtifact !== undefined ? { completion_artifact: completionArtifact } : {}),
             ...(attachments !== undefined ? { attachments } : {}),
+            ...(frame.response_source === undefined ? {} : { response_source: frame.response_source }),
             ...(completionArtifact !== undefined && completionGate === "reviewer"
               ? {
                   completion_review: {
@@ -8251,9 +8337,9 @@ export class ChannelDO extends Server<Env> {
          status_decision_json, status_workflow_json, message_workflow_json,
          sender_role, sender_role_source, completion_artifact_json, completion_review_state, completion_review_policy,
          completion_review_replaces_seq, decision_request_json, decision_state, decision_resolution_json,
-         idempotency_key, attachments_json, sender_client_version, ts
+         idempotency_key, attachments_json, sender_client_version, response_source_json, ts
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       seq,
       identity.name,
       identity.kind,
@@ -8293,6 +8379,9 @@ export class ChannelDO extends Server<Env> {
       frame.idempotency_key ?? null,
       attachments === undefined ? null : JSON.stringify(attachments),
       identity.clientVersion ?? null,
+      frame.kind === "message" && frame.response_source !== undefined
+        ? JSON.stringify(frame.response_source)
+        : null,
       now,
     );
     this.ensureDirectedDeliveries(msg, deliveryTargets, deliveryTargetOwners);
@@ -9882,6 +9971,7 @@ export class ChannelDO extends Server<Env> {
       const inserted = this.directedDeliveryRow(id);
       if (inserted !== undefined) {
         this.broadcastDirectedDelivery(inserted);
+        this.broadcastPresenceFor(targetName);
         this.ctx.waitUntil(this.ensureAlarmAt(now + DIRECTED_DELIVERY_MAX_AGE_MS));
         // #667：即使频道随后无连接、alarm 长期不被重排，也保证排队超时闸能到点触发收敛。
         this.ctx.waitUntil(this.ensureAlarmAt(now + DIRECTED_DELIVERY_QUEUED_TIMEOUT_MS));
@@ -11283,6 +11373,7 @@ export class ChannelDO extends Server<Env> {
     const liveCounts = this.liveConnectionCounts();
     const serveCounts = this.serveCandidateCounts();
     const waitingOwnerCounts = this.waitingOwnerCounts();
+    const unhandledMentionDebt = this.unhandledMentionDebt();
     const liveSessions = this.livePresenceSessions();
     const rows = this.ctx.storage.sql
       .exec(`SELECT ${ChannelDO.PRESENCE_COLUMNS} FROM presence ORDER BY name`)
@@ -11302,6 +11393,7 @@ export class ChannelDO extends Server<Env> {
         serveCounts,
         waitingOwnerCounts,
         listeningStreaks,
+        unhandledMentionDebt,
       ),
     );
   }
@@ -11310,6 +11402,7 @@ export class ChannelDO extends Server<Env> {
     const liveCounts = this.liveConnectionCounts();
     const serveCounts = this.serveCandidateCounts();
     const waitingOwnerCounts = this.waitingOwnerCounts();
+    const unhandledMentionDebt = this.unhandledMentionDebt();
     const liveSessions = this.livePresenceSessions();
     const rows = this.ctx.storage.sql
       .exec(`SELECT ${ChannelDO.PRESENCE_COLUMNS} FROM presence WHERE name = ?`, name)
@@ -11321,6 +11414,7 @@ export class ChannelDO extends Server<Env> {
           serveCounts,
           waitingOwnerCounts,
           this.listeningStreaks(),
+          unhandledMentionDebt,
         )
       : null;
   }
@@ -11380,6 +11474,7 @@ export class ChannelDO extends Server<Env> {
     serveCounts?: Map<string, number>,
     waitingOwnerCounts?: Map<string, number>,
     listeningStreaks?: Map<string, number>,
+    unhandledMentionDebt?: Map<string, { count: number; oldestSeq: number }>,
   ): PresenceEntry {
     const count = liveCounts.get(entry.name) ?? 0;
     const live = applyLiveConnection(entry, count > 0);
@@ -11390,11 +11485,20 @@ export class ChannelDO extends Server<Env> {
     const withStandbys = standbys > 0 ? { ...withCount, serve_standbys: standbys } : withCount;
     const waitingOwner = waitingOwnerCounts?.get(entry.name) ?? 0;
     const withWaiting = waitingOwner > 0 ? { ...withStandbys, waiting_owner_count: waitingOwner } : withStandbys;
+    const mentionDebt = unhandledMentionDebt?.get(entry.name);
+    const withMentionDebt =
+      mentionDebt === undefined
+        ? withWaiting
+        : {
+            ...withWaiting,
+            unhandled_mention_count: mentionDebt.count,
+            oldest_unhandled_mention_seq: mentionDebt.oldestSeq,
+          };
     // 监听力判定（#603）：只对「当前有活连接」的身份下发——没有连接的身份是 offline/wakeable，
     // 不是 deaf。streak 1 次 = suspect，连续 ≥2 次 = deaf。缺省 = 无恙。
     const streak = count > 0 ? (listeningStreaks?.get(entry.name) ?? 0) : 0;
     const listening: ListeningVerdict | null = streak >= 2 ? "deaf" : streak === 1 ? "suspect" : null;
-    return listening === null ? withWaiting : { ...withWaiting, listening };
+    return listening === null ? withMentionDebt : { ...withMentionDebt, listening };
   }
 
   // 监听力 streak（#603）：directed delivery 租约对活连接过期的连续次数，按身份聚合。
@@ -11435,6 +11539,24 @@ export class ChannelDO extends Server<Env> {
       counts.set(String(row.target_name), Number(row.n));
     }
     return counts;
+  }
+
+  private unhandledMentionDebt(): Map<string, { count: number; oldestSeq: number }> {
+    const debt = new Map<string, { count: number; oldestSeq: number }>();
+    for (const row of this.ctx.storage.sql
+      .exec(
+        `SELECT target_name, COUNT(*) AS n, MIN(message_seq) AS oldest_seq
+           FROM directed_deliveries
+          WHERE cause IN ('mention', 'reply') AND state IN ('queued', 'claimed', 'running')
+          GROUP BY target_name`,
+      )
+      .toArray()) {
+      debt.set(String(row.target_name), {
+        count: Number(row.n),
+        oldestSeq: Number(row.oldest_seq),
+      });
+    }
+    return debt;
   }
 
   private presenceRowToEntry(r: Record<string, unknown>): PresenceEntry {
@@ -11596,6 +11718,8 @@ export class ChannelDO extends Server<Env> {
       // #624 出站防御：即便库里存了历史/恶意的绝对 url，回传前也一律锚定成同源相对路径。
       const attachments = anchorAttachmentUrls(parseStoredAttachments(r.attachments_json), this.name);
       if (attachments !== undefined) frame.attachments = attachments;
+      const responseSource = parseStoredResponseSource(r.response_source_json);
+      if (responseSource !== undefined) frame.response_source = responseSource;
     }
     if (r.edited_at !== null && r.edited_at !== undefined) {
       frame.edited = true;

@@ -1,7 +1,7 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
-import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type SendDecisionRequest, type ServerFrame } from "@agentparty/shared";
+import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ResponseSource, type SendDecisionRequest, type ServerFrame } from "@agentparty/shared";
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -1478,6 +1478,8 @@ Options:
                        and decision_response in AP_CONTEXT_FILE; no model session is resumed
   --runner codex|claude|codex-sdk
                        use the built-in isolated wake runner instead of a custom command
+                       it keeps a separate per-channel reception session and does NOT inherit
+                       the owner's currently open Codex/Claude conversation
   --codex-bin PATH     Codex CLI override for --runner codex (or set AGENTPARTY_CODEX_BIN);
                        otherwise search child PATH, Homebrew, Codex.app, and ChatGPT.app
   --workdir DIR        runner workdir (default: ~/.agentparty/runners/<principal-sha256>/<channel>)
@@ -1606,17 +1608,26 @@ export interface ServeOptions {
 export async function advertiseServeWake(
   auth: ResolvedAuthDetailed,
   channel: string,
+  runner: "codex" | "claude" | "codex-sdk" | "custom",
   signal?: AbortSignal,
 ): Promise<void> {
   if (!auth.server || !auth.token) return;
   await postMessage(auth.server, auth.token, channel, {
     kind: "status",
     state: "waiting",
-    note: "serve supervisor 已挂上——被 @ 才唤起你一次，等待零 token",
+    note:
+      runner === "custom"
+        ? "serve supervisor 已挂上——被 @ 时启动一次自定义进程"
+        : `serve supervisor 已挂上——被 @ 时由独立频道 ${runner} 接待会话回复`,
     mentions: [],
     residency: "supervised",
     wake: { kind: "serve" },
-    context: buildContext(auth),
+    context: {
+      ...buildContext(auth),
+      reception_mode: runner === "custom" ? "custom" : "model",
+      reception_runner: runner,
+      reception_context: runner === "custom" ? "fresh_process" : "isolated_channel_session",
+    },
   }, signal);
 }
 
@@ -1844,6 +1855,7 @@ async function deliverRunnerMessage(opts: {
   expectedDecisionLineage?: RoutedRunnerMessage["expectedDecisionLineage"];
   expectedDecisionResponderOwner?: RoutedRunnerMessage["expectedDecisionResponderOwner"];
   attachmentRoot?: string | null;
+  responseSource?: ResponseSource;
 }): Promise<Awaited<ReturnType<typeof postMessage>>> {
   const {
     post,
@@ -1859,6 +1871,7 @@ async function deliverRunnerMessage(opts: {
     expectedDecisionLineage,
     expectedDecisionResponderOwner,
     attachmentRoot,
+    responseSource,
   } = opts;
   // [attach:/abs/path]：交付物永远走 R2 附件（相对路径在此抛错，与旧行为一致）。
   // attachmentRoot===null 表示这个 lane（managed front）根本没有附件能力：此时 marker 只是普通
@@ -1884,6 +1897,7 @@ async function deliverRunnerMessage(opts: {
       mentions,
       reply_to: replyTo,
       attachments: [ref],
+      ...(responseSource === undefined ? {} : { response_source: responseSource }),
     });
   }
 
@@ -1899,6 +1913,7 @@ async function deliverRunnerMessage(opts: {
       mentions,
       reply_to: replyTo,
       attachments: [ref],
+      ...(responseSource === undefined ? {} : { response_source: responseSource }),
     });
   }
 
@@ -1915,6 +1930,7 @@ async function deliverRunnerMessage(opts: {
     ...(expectedDecisionResponderOwner === undefined
       ? {}
       : { expected_decision_responder_owner: expectedDecisionResponderOwner }),
+    ...(responseSource === undefined ? {} : { response_source: responseSource }),
   };
   return await post(server, token, channel, payload);
 }
@@ -1951,6 +1967,7 @@ async function deliverRunnerResult(opts: {
   token: string;
   channel: string;
   attachmentRoot?: string | null;
+  responseSource?: ResponseSource;
 }): Promise<RunnerDeliveryOutcome> {
   const routed = opts.route === undefined
     ? { replyTo: opts.frame.seq, text: opts.text }
@@ -1971,6 +1988,7 @@ async function deliverRunnerResult(opts: {
     // A supervisor-owned route is managed. It is fail-closed unless that lane explicitly grants a
     // real workspace root; legacy non-routed runners preserve their historical attachment behavior.
     attachmentRoot: opts.route === undefined ? opts.attachmentRoot : opts.attachmentRoot ?? null,
+    responseSource: opts.responseSource,
   });
   if (routed.completionSummarySeq !== undefined) {
     const completionState = routed.completionState ?? "done";
@@ -2900,6 +2918,13 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
           token: opts.token,
           channel: opts.channel,
           attachmentRoot: opts.attachmentRoot,
+          responseSource: {
+            kind: "reception_runner",
+            runner: "codex-sdk",
+            context: "isolated_channel_session",
+            session: baseSession.wakes > 0 ? "resumed" : "started",
+            trigger_seq: frame.seq,
+          },
         });
         if (outcome.autoDecision === undefined) {
           appendRunnerLog(
@@ -3108,6 +3133,13 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
               continuation_ref: ctx.delivery.continuation_ref,
             }
           : null,
+        response_source: {
+          kind: "reception_runner",
+          runner: opts.harness,
+          context: "isolated_channel_session",
+          session: prior === null ? "started" : "resumed",
+          trigger_seq: frame.seq,
+        },
         owner_decision_binding: opts.managedMcp.ownerDecisionBinding(),
       });
     }
@@ -3288,6 +3320,13 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
             token: opts.token,
             channel: opts.channel,
             attachmentRoot: opts.attachmentRoot,
+            responseSource: {
+              kind: "reception_runner",
+              runner: opts.harness,
+              context: "isolated_channel_session",
+              session: finalSid === null ? "unavailable" : oldSid === null ? "started" : "resumed",
+              trigger_seq: frame.seq,
+            },
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -4215,6 +4254,9 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
               context: {
                 workspace_label: `${profile.owner_account}/${profile.handle}`,
                 worktree_label: `${principal.name}:${profile.worktree_strategy}:${profile.base_branch}`,
+                reception_mode: "model",
+                reception_runner: profile.runner === "shell" ? "custom" : profile.runner,
+                reception_context: "isolated_channel_session",
               },
             }, signal);
             if (roleWarning !== undefined) out(`profile front #${channel}: warn: ${terminalOutput(roleWarning)}`);
@@ -4237,6 +4279,9 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
             context: {
               workspace_label: `${profile.owner_account}/${profile.handle}`,
               worktree_label: `${principal.name}:${profile.worktree_strategy}:${profile.base_branch}`,
+              reception_mode: "model",
+              reception_runner: profile.runner === "shell" ? "custom" : profile.runner,
+              reception_context: "isolated_channel_session",
             },
           }, signal);
         },
@@ -6169,7 +6214,13 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
         },
         onCursor: (c) => saveCursor(channel, c),
         onRevCursor: (r) => saveRevCursor(channel, r),
-        advertise: (signal) => advertiseServeWake(currentAuth, channel, signal),
+        advertise: (signal) =>
+          advertiseServeWake(
+            currentAuth,
+            channel,
+            (runner ?? "custom") as "codex" | "claude" | "codex-sdk" | "custom",
+            signal,
+          ),
         fetchCharter: (signal) => fetchChannelCharter(currentServer, currentToken, channel, signal),
         autoUpgrade: flags["auto-upgrade"] === true,
         availableUpgrade: null,

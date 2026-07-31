@@ -2203,6 +2203,13 @@ button.org-person-name {
   background: var(--d-red-soft);
   color: var(--d-red);
 }
+.presence-unhandled-mentions,
+.presence-alert--unhandled {
+  border-color: var(--d-red);
+  background: var(--d-red-soft);
+  color: var(--d-red);
+  font-weight: 700;
+}
 .d-dot--unreachable {
   background: var(--t-panel2);
   border-color: var(--d-red);
@@ -3614,6 +3621,14 @@ button.org-person-name {
   font-weight: 600;
 }
 .msg-client-version-warn { color: var(--d-amber); }
+.msg-reception-source {
+  padding: 1px 6px;
+  border: 1.4px solid var(--d-blue);
+  background: var(--d-blue-soft);
+  color: var(--d-blue);
+  font-size: 10px;
+  white-space: nowrap;
+}
 .msg-context {
   display: inline-block;
   max-width: min(180px, 34vw);
@@ -4926,6 +4941,24 @@ button.org-person-name {
 .agent-detail-section h3 {
   margin: 0 0 6px;
   font-size: 13px;
+}
+.agent-detail-reception {
+  padding: 10px 12px;
+  border-left: 4px solid var(--d-green);
+  background: var(--d-green-soft);
+}
+.agent-detail-reception--paused {
+  border-left-color: var(--d-amber);
+  background: var(--d-yellow);
+}
+.agent-detail-reception--unavailable {
+  border-left-color: var(--d-red);
+  background: var(--d-red-soft);
+}
+.agent-detail-unhandled-link {
+  color: var(--d-red);
+  font: inherit;
+  font-weight: 700;
 }
 .agent-detail-facts {
   display: grid;

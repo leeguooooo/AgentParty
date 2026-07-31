@@ -1,6 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type { PresenceEntry } from "@agentparty/shared";
-import { busyNote, classify, identityNote, livenessNote, sessionNote, taskNote, terminalIdentityText, waitingOwnerNote } from "../src/commands/who";
+import {
+  busyNote,
+  classify,
+  identityNote,
+  livenessNote,
+  sessionNote,
+  taskNote,
+  terminalIdentityText,
+  unhandledMentionNote,
+  waitingOwnerNote,
+} from "../src/commands/who";
 
 const NOW = 1_000_000_000;
 
@@ -318,6 +328,34 @@ describe("who busy + queue depth (#103)", () => {
     expect(row?.current_task).toBeUndefined();
     expect(waitingOwnerNote(row!)).toBe(" · 💬 2 waiting owner");
     expect(waitingOwnerNote({ name: "bot", kind: "agent", tier: "online", age_ms: 0 })).toBe("");
+  });
+
+  test("未处理 @ 债务带出计数和最早消息，终端提示对离线 agent 也有效", () => {
+    const row = classify(
+      p({
+        name: "bot",
+        state: "offline",
+        wake: { kind: "serve" },
+        unhandled_mention_count: 2,
+        oldest_unhandled_mention_seq: 518,
+      }),
+      NOW,
+    );
+    expect(row).toMatchObject({
+      unhandled_mention_count: 2,
+      oldest_unhandled_mention_seq: 518,
+    });
+    expect(unhandledMentionNote(row!)).toBe(" · ⚠ 2 unhandled @ · oldest #518");
+    expect(
+      unhandledMentionNote({
+        name: "bot",
+        kind: "agent",
+        tier: "online",
+        age_ms: 0,
+        unhandled_mention_count: 1,
+      }),
+    ).toBe(" · ⚠ 1 unhandled @");
+    expect(unhandledMentionNote({ name: "bot", kind: "agent", tier: "online", age_ms: 0 })).toBe("");
   });
 
   test("busyNote 渲染：忙、忙+队列、空闲三态", () => {

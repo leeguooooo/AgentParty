@@ -130,6 +130,22 @@ function AgentDetailContent({
   const heartbeatAt = currentTask !== null && typeof presence?.heartbeat_at === "number" ? presence.heartbeat_at : null;
   const paused = presence?.paused === true;
   const resumeAt = presence?.resume_at ?? null;
+  const receptionReachable = presence !== null && autoWakeReachable(presence, now);
+  const receptionState = paused ? "paused" : receptionReachable ? "active" : "unavailable";
+  const receptionMode = presence?.context?.reception_mode ?? null;
+  const receptionRunner = presence?.context?.reception_runner ?? null;
+  const receptionContext = presence?.context?.reception_context ?? null;
+  const unhandledMentionCount =
+    typeof presence?.unhandled_mention_count === "number" && presence.unhandled_mention_count > 0
+      ? presence.unhandled_mention_count
+      : 0;
+  const oldestUnhandledMentionSeq =
+    unhandledMentionCount > 0 &&
+    typeof presence?.oldest_unhandled_mention_seq === "number" &&
+    Number.isInteger(presence.oldest_unhandled_mention_seq) &&
+    presence.oldest_unhandled_mention_seq > 0
+      ? presence.oldest_unhandled_mention_seq
+      : null;
   const presenceRole = presence?.role ?? null;
   const hasSelfReportedRole = presence?.role_source === "self" && presenceRole !== null;
   const source =
@@ -177,6 +193,62 @@ function AgentDetailContent({
         )}
       </header>
       <div className="channel-panel-body agent-detail-body">
+        <section className={`agent-detail-section agent-detail-reception agent-detail-reception--${receptionState}`} aria-label={t("AgentDetailModal.reception")}>
+          <h3>{t("AgentDetailModal.reception")}</h3>
+          <dl className="agent-detail-facts">
+            <div className="agent-detail-fact">
+              <dt>{t("AgentDetailModal.receptionCapability")}</dt>
+              <dd className="t-mono">{t(`AgentDetailModal.reception.${receptionState}`)}</dd>
+            </div>
+            {receptionMode !== null && (
+              <div className="agent-detail-fact">
+                <dt>{t("AgentDetailModal.receptionMode")}</dt>
+                <dd className="t-mono">
+                  {t(`AgentDetailModal.receptionMode.${receptionMode}`, {
+                    runner: receptionRunner ?? "runner",
+                  })}
+                </dd>
+              </div>
+            )}
+            {receptionContext !== null && (
+              <div className="agent-detail-fact">
+                <dt>{t("AgentDetailModal.receptionContext")}</dt>
+                <dd>{t(`AgentDetailModal.receptionContext.${receptionContext}`)}</dd>
+              </div>
+            )}
+            <div className="agent-detail-fact">
+              <dt>{t("AgentDetailModal.unhandledMentions")}</dt>
+              <dd className="t-mono">
+                {unhandledMentionCount === 0
+                  ? t("AgentDetailModal.unhandledMentionsNone")
+                  : oldestUnhandledMentionSeq === null
+                    ? t("AgentDetailModal.unhandledMentionsCountOnly", {
+                        count: String(unhandledMentionCount),
+                      })
+                    : onOpenMessage === undefined
+                    ? t("AgentDetailModal.unhandledMentionsCount", {
+                        count: String(unhandledMentionCount),
+                        seq: String(oldestUnhandledMentionSeq),
+                      })
+                    : (
+                        <button
+                          type="button"
+                          className="agent-board-name--button agent-detail-unhandled-link"
+                          aria-label={t("AgentDetailModal.openUnhandledMention", {
+                            seq: String(oldestUnhandledMentionSeq),
+                          })}
+                          onClick={() => { void onOpenMessage(oldestUnhandledMentionSeq); }}
+                        >
+                          {t("AgentDetailModal.unhandledMentionsCount", {
+                            count: String(unhandledMentionCount),
+                            seq: String(oldestUnhandledMentionSeq),
+                          })}
+                        </button>
+                      )}
+              </dd>
+            </div>
+          </dl>
+        </section>
         <section className="agent-detail-section" aria-label={t("AgentDetailModal.status")}>
           <h3>{t("AgentDetailModal.status")}</h3>
           <dl className="agent-detail-facts">

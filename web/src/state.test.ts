@@ -657,6 +657,8 @@ describe("channel state", () => {
       busy: true,
       queue_depth: 2,
       waiting_owner_count: 3,
+      unhandled_mention_count: 4,
+      oldest_unhandled_mention_seq: 39,
       current_task: 45,
       task_started_at: 1_725_000_000_100,
       heartbeat_at: 1_725_000_001_000,
@@ -668,6 +670,8 @@ describe("channel state", () => {
       busy: true,
       queue_depth: 2,
       waiting_owner_count: 3,
+      unhandled_mention_count: 4,
+      oldest_unhandled_mention_seq: 39,
       current_task: 45,
       task_started_at: 1_725_000_000_100,
       heartbeat_at: 1_725_000_001_000,
@@ -675,9 +679,17 @@ describe("channel state", () => {
 
     const cleared = channelReducer(next, {
       type: "frame",
-      frame: { ...frame, ts: frame.ts + 1, waiting_owner_count: undefined },
+      frame: {
+        ...frame,
+        ts: frame.ts + 1,
+        waiting_owner_count: undefined,
+        unhandled_mention_count: undefined,
+        oldest_unhandled_mention_seq: undefined,
+      },
     });
     expect(cleared.presence["runner-a"]?.waiting_owner_count).toBeUndefined();
+    expect(cleared.presence["runner-a"]?.unhandled_mention_count).toBeUndefined();
+    expect(cleared.presence["runner-a"]?.oldest_unhandled_mention_seq).toBeUndefined();
   });
 
   test("carries activity / runner_health / listening through incremental presence frames (#608/#632)", () => {

@@ -40,6 +40,10 @@ function versionBadges(root: ReactTestInstance): ReactTestInstance[] {
   return root.findAll((n) => n.type === "span" && String(n.props.className ?? "").includes("msg-client-version"));
 }
 
+function receptionBadges(root: ReactTestInstance): ReactTestInstance[] {
+  return root.findAll((n) => n.type === "span" && String(n.props.className ?? "").includes("msg-reception-source"));
+}
+
 const base = {
   type: "msg", seq: 7, kind: "message", body: "hi", mentions: [], reply_to: null,
   state: null, note: null, status: null, ts: 1_700_000_000_000,
@@ -60,5 +64,24 @@ describe("MessageCard sender CLI version (#434)", () => {
   test("sender 无 client_version → 不渲染徽标", () => {
     const msg = { ...base, sender: { name: "planner", kind: "agent" } } as unknown as MsgFrame;
     expect(versionBadges(render(msg))).toHaveLength(0);
+  });
+
+  test("resident runner reply shows a visible source and context boundary", () => {
+    const msg = {
+      ...base,
+      sender: { name: "planner", kind: "agent" },
+      response_source: {
+        kind: "reception_runner",
+        runner: "codex",
+        context: "isolated_channel_session",
+        session: "resumed",
+        trigger_seq: 6,
+      },
+    } as unknown as MsgFrame;
+    const badges = receptionBadges(render(msg));
+    expect(badges).toHaveLength(1);
+    expect(badges[0]!.children.join("")).toBe("codex reception reply");
+    expect(String(badges[0]!.props.title)).toContain("does not inherit");
+    expect(String(badges[0]!.props.title)).toContain("#6");
   });
 });

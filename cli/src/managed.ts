@@ -4,7 +4,7 @@
 // 生产/消费两侧的事实源只有这一份（#578 的教训：前缀协议两侧相隔百行，改一侧全线挂）。
 import { appendFileSync, closeSync, constants as fsConstants, fstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
-import type { MsgFrame } from "@agentparty/shared";
+import type { MsgFrame, ResponseSource } from "@agentparty/shared";
 import { fetchMessages } from "./rest";
 
 /** 供 MCP server 每次工具调用即读的 lane 清单（attach 时写一次）。 */
@@ -30,6 +30,8 @@ export interface ManagedWakeState {
   seq: number;
   frame: MsgFrame;
   delivery: { id: string; cause: string; work_id: string | null; continuation_ref: string | null } | null;
+  /** Structured provenance applied to every channel message emitted by this model turn. */
+  response_source?: ResponseSource;
   /** welcome 声明的 owner 决策应答人绑定；false 时 front 决策工具 fail closed（同 #578 语义）。 */
   owner_decision_binding: boolean;
 }

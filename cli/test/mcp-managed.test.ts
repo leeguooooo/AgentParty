@@ -99,6 +99,13 @@ function writeLane(role: "front" | "worker", wakeOver: Partial<ManagedWakeState>
     seq: 50,
     frame: wakeFrame(50),
     delivery: { id: "d-50", cause: "mention", work_id: "w-50", continuation_ref: "ref-50" },
+    response_source: {
+      kind: "reception_runner",
+      runner: "codex",
+      context: "isolated_channel_session",
+      session: "resumed",
+      trigger_seq: 50,
+    },
     owner_decision_binding: false,
     ...wakeOver,
   });
@@ -165,7 +172,19 @@ describe("front 角色工具面（#581）", () => {
       expect(r.isError).not.toBe(true);
       const posts = messagePosts();
       expect(posts).toHaveLength(1);
-      expect(posts[0]).toMatchObject({ kind: "message", body: "这是一段随意的自然语言汇总。", reply_to: 50, mentions: [] });
+      expect(posts[0]).toMatchObject({
+        kind: "message",
+        body: "这是一段随意的自然语言汇总。",
+        reply_to: 50,
+        mentions: [],
+        response_source: {
+          kind: "reception_runner",
+          runner: "codex",
+          context: "isolated_channel_session",
+          session: "resumed",
+          trigger_seq: 50,
+        },
+      });
       const actions = readManagedActions(stateDir, 50);
       expect(actions).toHaveLength(1);
       expect(actions[0]).toMatchObject({ action: "channel_reply", seq: 101 });
@@ -204,6 +223,13 @@ describe("front 角色工具面（#581）", () => {
         seq: 50,
         frame: wakeFrame(50),
         delivery: { id: "d-50", cause: "mention", work_id: "w-50", continuation_ref: "ref-50" },
+        response_source: {
+          kind: "reception_runner",
+          runner: "codex",
+          context: "isolated_channel_session",
+          session: "resumed",
+          trigger_seq: 50,
+        },
         owner_decision_binding: true,
       });
       const r = await client.callTool({ name: "party_decision_ask", arguments: { prompt: "可以合并吗？" } });
@@ -264,7 +290,17 @@ describe("worker 角色工具面（#581）", () => {
       });
       expect(r.isError).not.toBe(true);
       const post = messagePosts()[0]!;
-      expect(post).toMatchObject({ body: "改完了，diff 附上。", reply_to: 50 });
+      expect(post).toMatchObject({
+        body: "改完了，diff 附上。",
+        reply_to: 50,
+        response_source: {
+          kind: "reception_runner",
+          runner: "codex",
+          context: "isolated_channel_session",
+          session: "resumed",
+          trigger_seq: 50,
+        },
+      });
       expect(Array.isArray(post.attachments)).toBe(true);
       expect(readManagedActions(stateDir, 50)[0]).toMatchObject({ action: "worker_report" });
     } finally {

@@ -185,6 +185,7 @@ export function createManagedMcpServer(stateDir: string): McpServer {
             body: body.trim(),
             mentions: [],
             reply_to: replyTo,
+            ...(state.response_source === undefined ? {} : { response_source: state.response_source }),
           });
           // 主动作先落账（回执=幂等事实源）；completion status 是可观测性增益，失败绝不能把
           // 已发布的主消息变成「可重试失败」诱发重复发布（#592 评审）。
@@ -216,6 +217,7 @@ export function createManagedMcpServer(stateDir: string): McpServer {
             body: instruction.trim(),
             mentions: [manifest.worker],
             reply_to: replyTo,
+            ...(state.response_source === undefined ? {} : { response_source: state.response_source }),
           });
           record(state.frame.seq, kind, posted.seq);
           const completionError = origin === null ? null : await postCompletionStatus(auth, manifest.channel, state.frame.seq);
@@ -314,6 +316,7 @@ export function createManagedMcpServer(stateDir: string): McpServer {
               continuation_ref: state.delivery.continuation_ref,
             },
             expected_decision_responder_owner: manifest.owner_account,
+            ...(state.response_source === undefined ? {} : { response_source: state.response_source }),
           };
           let posted;
           try {
@@ -384,6 +387,7 @@ export function createManagedMcpServer(stateDir: string): McpServer {
             mentions: [],
             reply_to: state.frame.seq,
             ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
+            ...(state.response_source === undefined ? {} : { response_source: state.response_source }),
           });
           record(state.frame.seq, "worker_report", posted.seq);
           return ok({
