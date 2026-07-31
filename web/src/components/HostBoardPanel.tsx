@@ -1,12 +1,32 @@
 import { useEffect, useMemo, useState } from "react";
 import type { HostBoard, RecommendedAction } from "@agentparty/shared";
 import { useT } from "../i18n/useT";
+import {
+  resolveIdentityPresentation,
+  type IdentityDisplayMap,
+} from "../lib/identityDisplay";
 import "../i18n/strings/Channel";
 
 export interface HostCandidate {
   name: string;
   label: string;
   online: boolean;
+}
+
+export function buildHostCandidate(
+  member: { name: string; display: string; account?: string | null },
+  identities: IdentityDisplayMap,
+  online: boolean,
+): HostCandidate {
+  const presentation = resolveIdentityPresentation(member.name, identities, {
+    kind: "agent",
+    owner: member.account ?? null,
+    display: member.display,
+  });
+  const label = presentation.ownerLabel === null
+    ? presentation.label
+    : `${presentation.ownerLabel} · ${presentation.label}`;
+  return { name: member.name, label, online };
 }
 
 const EMPTY_HOST_CANDIDATES: readonly HostCandidate[] = [];
