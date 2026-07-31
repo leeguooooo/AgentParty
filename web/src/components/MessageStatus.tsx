@@ -37,6 +37,7 @@ interface Props {
   display: (name: string) => string;
   deliveries?: PublicDirectedDelivery[];
   onOpenAgentDetail?: (name: string) => void;
+  canOpenAgentDetail?: (name: string) => boolean;
 }
 
 function kindLabel(kind: "agent" | "human" | undefined): string {
@@ -50,6 +51,7 @@ export function MessageStatus({
   display,
   deliveries = [],
   onOpenAgentDetail,
+  canOpenAgentDetail,
 }: Props) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -215,7 +217,8 @@ export function MessageStatus({
                         })}
                       </time>
                     </span>
-                    {onOpenAgentDetail !== undefined && (
+                    {onOpenAgentDetail !== undefined &&
+                      (canOpenAgentDetail?.(delivery.target_name) ?? true) && (
                       <button
                         type="button"
                         className="msg-status-agent-action"
@@ -252,7 +255,8 @@ export function MessageStatus({
                         </time>
                       )}
                     </span>
-                    {onOpenAgentDetail !== undefined && (
+                    {onOpenAgentDetail !== undefined &&
+                      (canOpenAgentDetail?.(r.name) ?? true) && (
                       <button
                         type="button"
                         className="msg-status-agent-action"

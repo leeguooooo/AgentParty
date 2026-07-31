@@ -63,6 +63,7 @@ function renderMessage(
   deliveries: PublicDirectedDelivery[] = [],
   receipts: MentionReceipt[] = [],
   identityDisplay?: IdentityDisplayMap,
+  onOpenAgentDetail?: (name: string) => void,
 ): ReturnType<ReactTestRenderer["root"]["findByProps"]> {
   const msg = {
     type: "msg", seq: 10, sender: { name: "builder", kind: "agent", owner: "team@example.com" }, kind: "message",
@@ -75,6 +76,7 @@ function renderMessage(
       deliveries={deliveries}
       receipts={receipts}
       identityDisplay={identityDisplay}
+      onOpenAgentDetail={onOpenAgentDetail}
       onRetract={noop} canCreateTask={false} onCreateTask={noop} editing={false} editDraft=""
       editSaving={false} actionError={null} busy={false} onEditDraftChange={noop} onEditCancel={noop} onEditSave={noop}
     /></LocaleProvider>);
@@ -210,7 +212,13 @@ describe("MessageCard touch and keyboard details (#357)", () => {
       created_at: 1_700_000_000_000,
       updated_at: 1_700_000_001_000,
     };
-    const root = renderMessage([maliciousDelivery], [{ name: "builder", state: "pending_wake", detail: null, at: null }]);
+    const opened: string[] = [];
+    const root = renderMessage(
+      [maliciousDelivery],
+      [{ name: "builder", state: "pending_wake", detail: null, at: null }],
+      undefined,
+      (name) => opened.push(name),
+    );
 
     const toggle = root.findByProps({ className: "msg-status-summary" });
     expect(textContent(toggle)).toContain("1 in progress");
@@ -234,6 +242,8 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     expect(root.findByProps({ className: "msg-status-pop" })).toBeDefined();
     expect(root.findAllByProps({ className: "msg-status-group-head" }).map((node) => node.children.join("")))
       .toContain("Reliable @ delivery");
+    act(() => root.findByProps({ className: "msg-status-agent-action" }).props.onClick());
+    expect(opened).toEqual(["builder"]);
   });
 
   test("queued shows the pending indicator while genuinely pending (#667)", () => {

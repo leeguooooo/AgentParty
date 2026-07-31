@@ -3057,6 +3057,7 @@ function TeamThread({
   canCreateTask,
   onCreateTask,
   onOpenAgentDetail,
+  canOpenAgentDetail,
   onEditDraftChange,
   onEditCancel,
   onEditSave,
@@ -3086,6 +3087,7 @@ function TeamThread({
   canCreateTask: boolean;
   onCreateTask: (seq: number) => void;
   onOpenAgentDetail?: (name: string) => void;
+  canOpenAgentDetail?: (name: string) => boolean;
   onEditDraftChange: (value: string) => void;
   onEditCancel: () => void;
   onEditSave: () => void;
@@ -3141,6 +3143,7 @@ function TeamThread({
             canCreateTask={canCreateTask}
             onCreateTask={onCreateTask}
             onOpenAgentDetail={onOpenAgentDetail}
+            canOpenAgentDetail={canOpenAgentDetail}
             editing={editingSeq === message.seq}
             editDraft={editingSeq === message.seq ? editDraft : message.body}
             editSaving={editSaving && editingSeq === message.seq}
@@ -4461,12 +4464,17 @@ export function ChannelPage({
   }, []);
 
   const openTeamMember = useCallback((name: string) => {
+    if (!authoritativeMemberNamesRef.current.has(name)) return;
     skipPanelFocusRestoreRef.current = false;
     setActiveAdminSurface(null);
     setMemberDetailRoute({ name, source: "team" });
     setActivePanel("team");
     void loadTaskLedger();
   }, [loadTaskLedger]);
+  const canOpenTeamMember = useCallback(
+    (name: string) => authoritativeMemberNamesRef.current.has(name),
+    [],
+  );
 
   const openAdminMember = useCallback((name: string) => {
     skipPanelFocusRestoreRef.current = false;
@@ -6079,6 +6087,7 @@ export function ChannelPage({
                   canCreateTask={canWrite}
                   onCreateTask={createTaskFromMessage}
                   onOpenAgentDetail={openTeamMember}
+                  canOpenAgentDetail={canOpenTeamMember}
                   editing={editingSeq === item.message.seq}
                   editDraft={editingSeq === item.message.seq ? editDraft : item.message.body}
                   editSaving={editSaving && editingSeq === item.message.seq}
@@ -6117,6 +6126,7 @@ export function ChannelPage({
                   canCreateTask={canWrite}
                   onCreateTask={createTaskFromMessage}
                   onOpenAgentDetail={openTeamMember}
+                  canOpenAgentDetail={canOpenTeamMember}
                   onEditDraftChange={setEditDraft}
                   onEditCancel={cancelEdit}
                   onEditSave={saveEdit}

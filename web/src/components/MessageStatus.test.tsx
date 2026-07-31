@@ -6,6 +6,8 @@ import { LocaleProvider } from "../i18n/locale";
 import { MessageStatus } from "./MessageStatus";
 
 let renderer: ReactTestRenderer | null = null;
+let originalActEnvironment: PropertyDescriptor | undefined;
+let originalLocalStorage: PropertyDescriptor | undefined;
 
 function delivery(
   id: string,
@@ -28,6 +30,7 @@ function delivery(
 function renderStatus(
   deliveries: PublicDirectedDelivery[],
   onOpenAgentDetail?: (name: string) => void,
+  canOpenAgentDetail?: (name: string) => boolean,
 ) {
   act(() => {
     renderer = create(
@@ -39,6 +42,7 @@ function renderStatus(
           deliveries={deliveries}
           display={(name) => `owner · ${name}`}
           onOpenAgentDetail={onOpenAgentDetail}
+          canOpenAgentDetail={canOpenAgentDetail}
         />
       </LocaleProvider>,
     );
@@ -47,6 +51,8 @@ function renderStatus(
 }
 
 beforeEach(() => {
+  originalActEnvironment = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
@@ -59,8 +65,15 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  act(() => renderer?.unmount());
-  renderer = null;
+  try {
+    act(() => renderer?.unmount());
+    renderer = null;
+  } finally {
+    if (originalActEnvironment === undefined) Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+    else Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", originalActEnvironment);
+    if (originalLocalStorage === undefined) Reflect.deleteProperty(globalThis, "localStorage");
+    else Object.defineProperty(globalThis, "localStorage", originalLocalStorage);
+  }
 });
 
 describe("MessageStatus delivery diagnostics (#806)", () => {
@@ -113,5 +126,16 @@ describe("MessageStatus delivery diagnostics (#806)", () => {
     const row = r.root.findByProps({ "data-delivery-id": "failed" });
     expect(row.props.tabIndex).toBeUndefined();
     expect(row.props.onClick).toBeUndefined();
+  });
+
+  test("does not offer agent detail for a historical target outside the current roster", () => {
+    const r = renderStatus(
+      [delivery("failed", "removed-agent", "failed")],
+      () => undefined,
+      () => false,
+    );
+    act(() => r.root.findByProps({ "aria-label": "展开消息送达详情" }).props.onClick());
+
+    expect(r.root.findAllByProps({ className: "msg-status-agent-action" })).toHaveLength(0);
   });
 });
