@@ -17,7 +17,10 @@ export interface AgentFilter {
   kind: AgentFilterKind | null;
 }
 
-const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+// Sender identities are not limited to agent handles. Account-backed human
+// sessions use names such as `lark:on_xxx`; keep those routable identities in
+// deep links while still rejecting path/control characters and oversized input.
+const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,127}$/;
 
 function cleanAgents(values: string[]): string[] {
   return [...new Set(values.map((v) => v.trim()).filter((v) => NAME_RE.test(v)))].sort((a, b) =>

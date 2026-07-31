@@ -74,7 +74,12 @@ import {
 } from "../lib/api";
 import type { AuthProviderConfig } from "../lib/oidc";
 import { agentHue } from "../lib/agentColor";
-import { buildIdentityDisplay, type IdentityDisplayMap } from "../lib/identityDisplay";
+import {
+  buildIdentityDisplay,
+  formatIdentityPresentation,
+  resolveIdentityPresentation,
+  type IdentityDisplayMap,
+} from "../lib/identityDisplay";
 import { mentionCandidates, parseDraftMentions, type DraftMentionStatus } from "../lib/mentions";
 import { buildReceipts, type MentionReceipt } from "../lib/wakeReceipt";
 import { completionMessages } from "../lib/completions";
@@ -1345,6 +1350,7 @@ export function ChannelPanelModal({
 
 function AgentFilterPanel({
   senders,
+  identityDisplay,
   filter,
   visible,
   total,
@@ -1354,6 +1360,7 @@ function AgentFilterPanel({
   onClear,
 }: {
   senders: string[];
+  identityDisplay: IdentityDisplayMap;
   filter: AgentFilter;
   visible: number;
   total: number;
@@ -1416,6 +1423,11 @@ function AgentFilterPanel({
         <div className="agent-filter-chips">
           {senders.map((name) => {
             const selected = filter.agents.includes(name);
+            const presentation = resolveIdentityPresentation(name, identityDisplay);
+            const label = formatIdentityPresentation(
+              presentation,
+              (owner, agent) => `${owner} · ${agent}`,
+            );
             return (
               <button
                 key={name}
@@ -1427,7 +1439,7 @@ function AgentFilterPanel({
                 onClick={() => onToggle(name)}
               >
                 <span className="agent-filter-dot" aria-hidden="true" />
-                <span>{name}</span>
+                <span>{label}</span>
               </button>
             );
           })}
@@ -1517,20 +1529,33 @@ function CatchupPanel({
 
 function SearchHitCard({
   hit,
+  identityDisplay,
   onJump,
   disabled,
 }: {
   hit: SearchHit;
+  identityDisplay: IdentityDisplayMap;
   onJump: (seq: number) => void | Promise<void>;
   disabled: boolean;
 }) {
   const t = useT();
   const hueStyle = { "--ah": agentHue(hit.sender.name) } as CSSProperties;
+  const senderPresentation = resolveIdentityPresentation(hit.sender.name, identityDisplay, {
+    kind: hit.sender.kind,
+    owner: hit.sender.owner,
+    display: hit.sender.kind === "human"
+      ? hit.sender.display_name || hit.sender.handle || hit.sender.owner
+      : hit.sender.handle,
+  });
+  const senderLabel = formatIdentityPresentation(
+    senderPresentation,
+    (owner, agent) => `${owner} · ${agent}`,
+  );
   return (
     <article className="d-card msg-card search-hit-card" style={hueStyle}>
       <header className="d-meta msg-head">
         <span className="msg-avatar" aria-hidden="true" />
-        <span className="msg-sender">{hit.sender.name}</span>
+        <span className="msg-sender">{senderLabel}</span>
         <span className={"msg-kind" + (hit.sender.kind === "human" ? " msg-kind--human" : "")}>
           {hit.sender.kind}
         </span>
@@ -1560,6 +1585,7 @@ export interface ChannelSearchPanelProps {
   searchLimit: string;
   senderListId: string;
   knownSenders: string[];
+  identityDisplay: IdentityDisplayMap;
   searchLoading: boolean;
   searchHits: SearchHit[];
   visibleSearchHits: SearchHit[];
@@ -1583,6 +1609,7 @@ export function ChannelSearchPanel({
   searchLimit,
   senderListId,
   knownSenders,
+  identityDisplay,
   searchLoading,
   searchHits,
   visibleSearchHits,
@@ -1657,9 +1684,14 @@ export function ChannelSearchPanel({
             aria-label={t("Channel.search.fromAria")}
           />
           <datalist id={senderListId}>
-            {knownSenders.map((name) => (
-              <option key={name} value={name} />
-            ))}
+            {knownSenders.map((name) => {
+              const presentation = resolveIdentityPresentation(name, identityDisplay);
+              const label = formatIdentityPresentation(
+                presentation,
+                (owner, agent) => `${owner} · ${agent}`,
+              );
+              return <option key={name} value={name} label={label} />;
+            })}
           </datalist>
           <input
             className="t-mono chan-filter-input"
@@ -1700,7 +1732,13 @@ export function ChannelSearchPanel({
         </p>
       )}
       {query !== "" && !isSeqQuery && visibleSearchHits.map((hit) => (
-        <SearchHitCard key={hit.seq} hit={hit} onJump={selectHit} disabled={jumpingSeq !== null} />
+        <SearchHitCard
+          key={hit.seq}
+          hit={hit}
+          identityDisplay={identityDisplay}
+          onJump={selectHit}
+          disabled={jumpingSeq !== null}
+        />
       ))}
       {query !== "" && !isSeqQuery && !searchLoading && searchHits.length === 0 && searchInputError === null && searchError === null && (
         <p className="d-empty" role="status" aria-live="polite">
@@ -5571,6 +5609,7 @@ export function ChannelPage({
         searchLimit={searchLimit}
         senderListId={senderListId}
         knownSenders={knownSenders}
+        identityDisplay={identityDisplay}
         searchLoading={searchLoading}
         searchHits={searchHits}
         visibleSearchHits={visibleSearchHits}
@@ -5607,6 +5646,7 @@ export function ChannelPage({
       {knownSenders.length > 0 && (
         <AgentFilterPanel
           senders={knownSenders}
+          identityDisplay={identityDisplay}
           filter={agentFilter}
           visible={visibleInView}
           total={totalInView}

@@ -5,6 +5,7 @@ import type { SearchHit } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
 import { ChannelStrings } from "../i18n/strings/Channel";
 import { ChannelPanelModal, ChannelSearchPanel, type ChannelSearchPanelProps } from "./Channel";
+import type { IdentityDisplayMap } from "../lib/identityDisplay";
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -32,6 +33,10 @@ const hit: SearchHit = {
 
 const noop = () => {};
 const acceptJump = () => true;
+const identityDisplay: IdentityDisplayMap = {
+  alice: { display: "deployment", kind: "agent", account: "acct-luis" },
+  luis: { display: "Luis", kind: "human", account: "acct-luis" },
+};
 let renderer: ReactTestRenderer | null = null;
 let fakeWindow: EventTarget | null = null;
 
@@ -44,6 +49,7 @@ function baseProps(overrides: Partial<ChannelSearchPanelProps> = {}): ChannelSea
     searchLimit: "100",
     senderListId: "senders-ops",
     knownSenders: ["alice"],
+    identityDisplay,
     searchLoading: false,
     searchHits: [hit],
     visibleSearchHits: [hit],
@@ -128,8 +134,18 @@ describe("Channel search modal (#351)", () => {
     const jump = dialog.findByProps({ title: ChannelStrings.en["Channel.search.jumpTitle"] });
 
     expect(dialog.findByProps({ className: "search-hit-snippet" }).props.children).toBe("deploy completed");
+    expect(dialog.findByProps({ className: "msg-sender" }).props.children).toBe("Luis · deployment");
     await act(async () => { await jump.props.onClick(); });
     expect(events).toEqual(["jump:42", "close"]);
+  });
+
+  test("keeps technical sender values routable while presenting readable owner and agent labels", () => {
+    const root = render(baseProps());
+    const dialog = root.findByProps({ role: "dialog" });
+    const option = dialog.findByType("option");
+
+    expect(option.props.value).toBe("alice");
+    expect(option.props.label).toBe("Luis · deployment");
   });
 
   test("keeps the search dialog open and shows the jump error when navigation fails", async () => {

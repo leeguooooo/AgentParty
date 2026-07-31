@@ -27,6 +27,15 @@ describe("agent filters", () => {
     });
   });
 
+  test("preserves account-backed human identities containing a colon", () => {
+    const identity = "lark:on_22608d74bd2d7f39f6dc67d0da248fa5";
+    const filter = toggleAgent({ mode: "only", agents: [], kind: null }, identity);
+
+    expect(filter.agents).toEqual([identity]);
+    expect(parseAgentFilter(`?${agentFilterSearch(filter)}`)).toEqual(filter);
+    expect(matchesAgentFilter({ name: identity, kind: "human" }, filter)).toBe(true);
+  });
+
   test("parses agentKind from url, ignoring unknown values", () => {
     expect(parseAgentFilter("?agentKind=human")).toEqual({ mode: "only", agents: [], kind: "human" });
     expect(parseAgentFilter("?agentKind=agent")).toEqual({ mode: "only", agents: [], kind: "agent" });
