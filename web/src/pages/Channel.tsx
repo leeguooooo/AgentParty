@@ -2,7 +2,7 @@
 // App 用 key={slug} 挂载本组件，切频道即整体重建（socket/状态零残留）。
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { buildHostBoard, type Attachment, type ChannelSquad, type CollaborationRole, type HostBoard, type MsgFrame, type ParticipantRemovedFrame, type PresenceEntry, type PublicDirectedDelivery, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
+import { buildHostBoard, type Attachment, type ChannelSquad, type CollaborationRole, type MsgFrame, type ParticipantRemovedFrame, type PresenceEntry, type PublicDirectedDelivery, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentDetailPanel } from "../components/AgentDetailModal";
 import { TeamTabs } from "../components/TeamTabs";
 import { AgentJoin } from "../components/AgentJoin";
@@ -18,6 +18,7 @@ import { MentionHeaderNotice, type MentionToastItem } from "../components/Mentio
 import { PresenceBar } from "../components/PresenceBar";
 import { ChannelFocusBar } from "../components/ChannelFocusBar";
 import { ChannelFocusPanel } from "../components/ChannelFocusPanel";
+import { HostBoardPanel, type HostCandidate } from "../components/HostBoardPanel";
 import { ChannelAdminView, type ChannelAdminMember } from "../components/ChannelAdminView";
 import { computeChannelFocus } from "../lib/channelFocus";
 import {
@@ -2228,61 +2229,6 @@ export function AgentBoardPanel({
   );
 }
 
-function HostBoardPanel({ board }: { board: HostBoard }) {
-  const t = useT();
-  if (board.hosts.length === 0 && board.recommended_actions.length === 0 && board.conflicts.length === 0) return null;
-
-  return (
-    <section className="host-board-panel" aria-label={t("Channel.hostBoard.aria")}>
-      <div className="host-board-head">
-        <h2 className="host-board-title">{t("Channel.heading.hostBoard")}</h2>
-        <span className="t-mono host-board-count">#{board.last_seq}</span>
-      </div>
-      {board.recommended_actions.length > 0 && (
-        <ol className="host-action-list">
-          {board.recommended_actions.map((action, index) => (
-            <li key={`${action.kind}:${action.target ?? "channel"}:${index}`} className={`host-action host-action--${action.kind}`}>
-              <div className="host-action-head">
-                <span className="t-mono host-action-kind">{action.kind}</span>
-                {action.target !== null && <span className="host-action-target">{action.target}</span>}
-                {action.requires_human && <span className="t-mono host-action-human">{t("Channel.hostBoard.human")}</span>}
-              </div>
-              <p>{action.reason}</p>
-              {action.command !== null && <code>{action.command}</code>}
-            </li>
-          ))}
-        </ol>
-      )}
-      {board.conflicts.length > 0 && (
-        <ol className="host-conflict-list">
-          {board.conflicts.map((conflict) => (
-            <li key={conflict.scope} className="host-conflict">
-              <span className="t-mono host-conflict-scope">{conflict.scope}</span>
-              <span>{conflict.owners.join(t("Channel.hostBoard.conflictSeparator"))}</span>
-            </li>
-          ))}
-        </ol>
-      )}
-      {board.hosts.length > 0 && (
-        <div className="host-board-hosts">
-          {board.hosts.map((host) => (
-            <span
-              key={host.name}
-              className={`t-mono host-board-host host-board-host--${host.lease}`}
-              title={[
-                t("Channel.hostBoard.hostTitle", { state: host.state, residency: host.residency, wake: host.wake_kind }),
-                host.stale_reason !== null ? t("Channel.hostBoard.reason", { reason: host.stale_reason }) : null,
-              ].filter((part): part is string => part !== null).join("\n")}
-            >
-              {host.name} · {host.lease}
-            </span>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
 export function TaskLedgerPanel({
   tasks,
   loading,
@@ -3343,6 +3289,7 @@ export function ChannelPage({
   const [newRoleDraft, setNewRoleDraft] = useState<RoleDraft>({ role: "worker", responsibility: "" });
   const [roleSaving, setRoleSaving] = useState<string | null>(null);
   const [roleError, setRoleError] = useState<string | null>(null);
+  const [hostAssignError, setHostAssignError] = useState<string | null>(null);
   const [seenCharterRev, setSeenCharterRev] = useState(() => readSeenCharterRev(slug));
   const [activePanel, setActivePanel] = useState<ChannelPanel | null>(null);
   const [activeAdminSurface, setActiveAdminSurface] = useState<AdminSurface | null>(null);
@@ -4787,12 +4734,16 @@ export function ChannelPage({
     setRoleDrafts((current) => ({ ...current, [name]: next }));
   }, []);
 
-  const saveRole = useCallback(async (rawName: string, roleDraft: RoleDraft): Promise<boolean> => {
+  const saveRole = useCallback(async (
+    rawName: string,
+    roleDraft: RoleDraft,
+    reportError: (message: string | null) => void = setRoleError,
+  ): Promise<boolean> => {
     const name = rawName.trim();
     if (name === "" || roleSaving !== null) return false;
     const savingKey = channelRoles.some((role) => role.name === name) ? name : "__new__";
     setRoleSaving(savingKey);
-    setRoleError(null);
+    reportError(null);
     try {
       const saved = await setChannelRole(token, slug, name, roleDraft.role, roleDraft.responsibility);
       setChannelRoles((current) => {
@@ -4818,14 +4769,21 @@ export function ChannelPage({
       return true;
     } catch (err: unknown) {
       if (err instanceof AuthError) authFailedRef.current(tRef.current("Channel.error.tokenRevoked"));
-      else if (err instanceof ForbiddenError) setRoleError(t("Channel.roles.forbidden"));
-      else if (err instanceof ValidationError) setRoleError(t("Channel.roles.invalid"));
-      else setRoleError(t("Channel.roles.saveFailed"));
+      else if (err instanceof ForbiddenError) reportError(t("Channel.roles.forbidden"));
+      else if (err instanceof ValidationError) reportError(t("Channel.roles.invalid"));
+      else reportError(t("Channel.roles.saveFailed"));
       return false;
     } finally {
       setRoleSaving(null);
     }
   }, [channelRoles, roleSaving, slug, token, t]);
+
+  const assignChannelHost = useCallback((name: string) => (
+    saveRole(name, {
+      role: "host",
+      responsibility: t("Channel.hostBoard.defaultResponsibility"),
+    }, setHostAssignError)
+  ), [saveRole, t]);
 
   // #370 组织树：就地设置某成员向谁汇报（reportsTo=null 清空）。沿用现有角色/职责，只改 reports_to。
   const setReportsTo = useCallback((name: string, reportsTo: string | null) => {
@@ -5237,6 +5195,18 @@ export function ChannelPage({
   const memberOnlineNames = useMemo(
     () => teamMemberOnlineNames(Object.values(state.presence), state.participants),
     [state.participants, state.presence],
+  );
+  const hostCandidates = useMemo<HostCandidate[]>(
+    () => activeChannelAdminMembers
+      .filter((member) => member.kind === "agent" && member.name !== "system")
+      .map((member) => ({
+        name: member.name,
+        label: member.display === member.name || member.display.includes(member.name)
+          ? member.display
+          : `${member.display} · ${member.name}`,
+        online: memberOnlineNames.has(member.name),
+      })),
+    [activeChannelAdminMembers, memberOnlineNames],
   );
   const teamIdentityStats = useMemo(() => {
     const byName = new Map<string, {
@@ -5972,7 +5942,16 @@ export function ChannelPage({
                 return located;
               }}
             >
-              {hostBoardVisible ? <HostBoardPanel board={hostBoard} /> : null}
+              {hostBoardVisible ? (
+                <HostBoardPanel
+                  board={hostBoard}
+                  candidates={hostCandidates}
+                  canAssignHost={canModerate && !state.archived}
+                  assigningHost={roleSaving !== null}
+                  assignError={hostAssignError}
+                  onAssignHost={assignChannelHost}
+                />
+              ) : null}
             </ChannelFocusPanel>
           )}
           {activePanel === "tasks" && (

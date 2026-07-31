@@ -5,6 +5,11 @@ import { resolve } from "node:path";
 import { ChannelStrings } from "./Channel";
 
 const source = readFileSync(resolve(import.meta.dir, "../../pages/Channel.tsx"), "utf8");
+const hostBoardSource = readFileSync(
+  resolve(import.meta.dir, "../../components/HostBoardPanel.tsx"),
+  "utf8",
+);
+const localizedSurfaceSource = `${source}\n${hostBoardSource}`;
 
 const REQUIRED_KEYS = [
   "Channel.banner.archived",
@@ -65,6 +70,19 @@ const REQUIRED_KEYS = [
   "Channel.agents.pausedManual",
   "Channel.hostBoard.aria",
   "Channel.hostBoard.human",
+  "Channel.hostBoard.assignAria",
+  "Channel.hostBoard.assignTitle",
+  "Channel.hostBoard.assignDescription",
+  "Channel.hostBoard.assignLabel",
+  "Channel.hostBoard.candidateOnline",
+  "Channel.hostBoard.candidateOffline",
+  "Channel.hostBoard.assignButton",
+  "Channel.hostBoard.assigning",
+  "Channel.hostBoard.assignNoCandidates",
+  "Channel.hostBoard.assignPermission",
+  "Channel.hostBoard.assignSuccess",
+  "Channel.hostBoard.cliFallback",
+  "Channel.hostBoard.defaultResponsibility",
   "Channel.hostBoard.conflictSeparator",
   "Channel.hostBoard.hostTitle",
   "Channel.hostBoard.reason",
@@ -125,7 +143,7 @@ describe("Channel i18n source guard (#350)", () => {
       expect(ChannelStrings.en[key], `missing English key: ${key}`).toBeTruthy();
       expect(ChannelStrings.zh[key], `missing Chinese key: ${key}`).toBeTruthy();
       expect(ChannelStrings.zh[key], `Chinese key still mirrors English: ${key}`).not.toBe(ChannelStrings.en[key]);
-      expect(source, `Channel.tsx does not use: ${key}`).toContain(key);
+      expect(localizedSurfaceSource, `Channel surface does not use: ${key}`).toContain(key);
     }
   });
 
