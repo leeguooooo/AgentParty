@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { HostBoard, RecommendedAction } from "@agentparty/shared";
 import { LocaleProvider } from "../i18n/locale";
-import { HostBoardPanel } from "./HostBoardPanel";
+import { buildHostCandidate, HostBoardPanel } from "./HostBoardPanel";
 
 let renderer: ReactTestRenderer | null = null;
 
@@ -39,6 +39,43 @@ const board = (recommendedActions: RecommendedAction[]): HostBoard => ({
 });
 
 describe("HostBoardPanel", () => {
+  test("labels a Host candidate with its human owner", () => {
+    expect(buildHostCandidate(
+      {
+        name: "codex-002",
+        display: "codex-002",
+        account: "lark:on_owner",
+      },
+      {
+        "human-session": {
+          display: "leo",
+          kind: "human",
+          account: "lark:on_owner",
+        },
+      },
+      true,
+    )).toEqual({
+      name: "codex-002",
+      label: "leo · codex-002",
+      online: true,
+    });
+  });
+
+  test("keeps an unresolved opaque owner out of the Host candidate label", () => {
+    const candidate = buildHostCandidate(
+      {
+        name: "codex-002",
+        display: "codex-002",
+        account: "lark:on_unknown",
+      },
+      {},
+      false,
+    );
+
+    expect(candidate.label).toBe("codex-002");
+    expect(candidate.label).not.toContain("lark:on_unknown");
+  });
+
   test("turns a missing-host warning into a direct assignment flow", async () => {
     const assigned: string[] = [];
     act(() => {

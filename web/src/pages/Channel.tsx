@@ -18,7 +18,11 @@ import { MentionHeaderNotice, type MentionToastItem } from "../components/Mentio
 import { PresenceBar } from "../components/PresenceBar";
 import { ChannelFocusBar } from "../components/ChannelFocusBar";
 import { ChannelFocusPanel } from "../components/ChannelFocusPanel";
-import { HostBoardPanel, type HostCandidate } from "../components/HostBoardPanel";
+import {
+  buildHostCandidate,
+  HostBoardPanel,
+  type HostCandidate,
+} from "../components/HostBoardPanel";
 import { ChannelAdminView, type ChannelAdminMember } from "../components/ChannelAdminView";
 import { computeChannelFocus } from "../lib/channelFocus";
 import {
@@ -5199,14 +5203,12 @@ export function ChannelPage({
   const hostCandidates = useMemo<HostCandidate[]>(
     () => activeChannelAdminMembers
       .filter((member) => member.kind === "agent" && member.name !== "system")
-      .map((member) => ({
-        name: member.name,
-        label: member.display === member.name || member.display.includes(member.name)
-          ? member.display
-          : `${member.display} · ${member.name}`,
-        online: memberOnlineNames.has(member.name),
-      })),
-    [activeChannelAdminMembers, memberOnlineNames],
+      .map((member) => buildHostCandidate(
+        member,
+        identityDisplay,
+        memberOnlineNames.has(member.name),
+      )),
+    [activeChannelAdminMembers, identityDisplay, memberOnlineNames],
   );
   const teamIdentityStats = useMemo(() => {
     const byName = new Map<string, {
