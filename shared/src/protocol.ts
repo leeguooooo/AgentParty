@@ -263,6 +263,9 @@ export interface SendStatusWorkflow {
 }
 
 export type ConfigSourceKind = "explicit" | "workspace" | "global" | "none";
+export type ReceptionMode = "model" | "custom";
+export type ReceptionRunner = "codex" | "claude" | "codex-sdk" | "custom";
+export type ReceptionContextBoundary = "isolated_channel_session" | "fresh_process";
 
 export interface AgentContext {
   config_kind?: ConfigSourceKind;
@@ -270,6 +273,14 @@ export interface AgentContext {
   workspace_id?: string;
   workspace_label?: string;
   worktree_label?: string;
+  /** How an unattended @-mention is handled by this resident agent. */
+  reception_mode?: ReceptionMode;
+  reception_runner?: ReceptionRunner;
+  /**
+   * Built-in model runners keep their own per-channel session. They do not inherit the owner's
+   * currently open Codex/Claude conversation. Custom commands start a fresh process for every wake.
+   */
+  reception_context?: ReceptionContextBoundary;
 }
 
 export interface WakeDelivery {
@@ -467,6 +478,18 @@ export interface AgentSessionInfo {
   workdir?: string;
 }
 
+/**
+ * Structured origin for a message posted by a resident reception runner.
+ * This makes a runner-generated reply distinguishable from the owner's interactive agent turn.
+ */
+export interface ResponseSource {
+  kind: "reception_runner";
+  runner: ReceptionRunner;
+  context: ReceptionContextBoundary;
+  session: "started" | "resumed" | "unavailable";
+  trigger_seq: number;
+}
+
 export interface PresenceEntry {
   name: string;
   /** 最近一次有效 CLI hello 上报的 package version；旧客户端或非 CLI 客户端缺失时省略。 */
@@ -525,6 +548,13 @@ export interface PresenceEntry {
    * 误显示成“agent 忙不过来”。旧客户端忽略。
    */
   waiting_owner_count?: number;
+  /**
+   * Durable @-mention deliveries that have not reached a terminal reply/failure yet.
+   * waiting_owner is excluded and remains represented by waiting_owner_count.
+   */
+  unhandled_mention_count?: number;
+  /** Oldest unresolved source message, for a direct jump from the reception UI. */
+  oldest_unhandled_mention_seq?: number;
   /**
    * 同名多机 serve 里，除持租者外仍挂着、处于 standby 的 serve 连接数（issue #99）。DO 从活连接里的
    * serve 租约候选权威判定：候选数 N ≥ 2 时下发 N-1（有几台在待命顶替），否则省略。用途：who / web
@@ -856,6 +886,8 @@ export interface SendMessageFrame {
   decision_request?: SendDecisionRequest;
   /** 附件引用（#176）；空/缺省视为无附件。上限见 do 侧 MAX_ATTACHMENTS_PER_MESSAGE。 */
   attachments?: Attachment[];
+  /** CLI-reported structured provenance for a resident reception runner reply. */
+  response_source?: ResponseSource;
   replaces?: number;
   /**
    * 幂等键（#98）：客户端每次发送生成一个唯一键（ULID）。同一条逻辑消息的重试（客户端超时重发、
@@ -1257,6 +1289,8 @@ export interface MsgFrame {
   decision_response?: DecisionResponse;
   /** 附件引用（#176）；仅 kind:"message" 携带，无附件时省略。 */
   attachments?: Attachment[];
+  /** Present when this message was posted by a resident reception runner. */
+  response_source?: ResponseSource;
   ts: number;
   edited?: true;
   edited_at?: number;
@@ -1815,6 +1849,10 @@ export interface PresenceFrame {
   queue_depth?: number;
   /** 已释放 runner、正在等待 owner 回答的持久 work 数；与 busy/queue_depth 分开。 */
   waiting_owner_count?: number;
+  /** 尚未进入终态回复/失败的 @ 投递数；与 PresenceEntry 同口径。 */
+  unhandled_mention_count?: number;
+  /** 最早一条未处理 @ 的来源消息 seq，供实时界面直接跳转。 */
+  oldest_unhandled_mention_seq?: number;
   /** 同名 serve 的待命实例数。 */
   serve_standbys?: number;
   /** 当前处理的触发消息 seq；仅活跃任务时下发。 */

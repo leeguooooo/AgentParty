@@ -392,6 +392,8 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
             busy: frame.busy,
             queue_depth: frame.queue_depth,
             waiting_owner_count: frame.waiting_owner_count,
+            unhandled_mention_count: frame.unhandled_mention_count,
+            oldest_unhandled_mention_seq: frame.oldest_unhandled_mention_seq,
             serve_standbys: frame.serve_standbys,
             current_task: frame.current_task,
             task_started_at: frame.task_started_at,

@@ -85,6 +85,8 @@ export interface Item {
   queueDepth: number | null; // 忙时身后排队、尚未处理的 wake 数；>0 才有值
   // 已挂起等待 owner 的 work 数；不占 runner，与 busy/queue 分开展示。
   waitingOwnerCount: number;
+  unhandledMentionCount: number;
+  oldestUnhandledMentionSeq: number | null;
   // 每任务进度/心跳（#228）：正在处理哪条 wake（触发 seq）、最近心跳时刻。比 busy 更细——能区分
   // 「还在干、活到 T」与「卡死」。null = 无活跃任务。
   currentTask: number | null;
@@ -151,6 +153,15 @@ export function busyLabel(item: Item): { key: string; vars?: { count: number } }
 export function waitingOwnerLabel(item: Item): { key: string; vars: { count: number } } | null {
   return item.waitingOwnerCount > 0
     ? { key: "PresenceBar.waitingOwnerChip", vars: { count: item.waitingOwnerCount } }
+    : null;
+}
+
+export function unhandledMentionLabel(item: Item): { key: string; vars: { count: number; seq: number } } | null {
+  return item.unhandledMentionCount > 0 && item.oldestUnhandledMentionSeq !== null
+    ? {
+        key: "PresenceBar.unhandledMentionsChip",
+        vars: { count: item.unhandledMentionCount, seq: item.oldestUnhandledMentionSeq },
+      }
     : null;
 }
 
@@ -423,6 +434,12 @@ export function PresenceBar({
       queueDepth: entry?.busy === true && typeof entry.queue_depth === "number" && entry.queue_depth > 0 ? entry.queue_depth : null,
       waitingOwnerCount:
         typeof entry?.waiting_owner_count === "number" && entry.waiting_owner_count > 0 ? entry.waiting_owner_count : 0,
+      unhandledMentionCount:
+        typeof entry?.unhandled_mention_count === "number" && entry.unhandled_mention_count > 0
+          ? entry.unhandled_mention_count
+          : 0,
+      oldestUnhandledMentionSeq:
+        typeof entry?.oldest_unhandled_mention_seq === "number" ? entry.oldest_unhandled_mention_seq : null,
       // 每任务进度/心跳（#228）：服务端只在 state != offline 且有活跃任务时下发 current_task，故离线项天然为 null。
       currentTask: typeof entry?.current_task === "number" ? entry.current_task : null,
       heartbeatAt: typeof entry?.current_task === "number" && typeof entry?.heartbeat_at === "number" ? entry.heartbeat_at : null,
@@ -504,6 +521,7 @@ export function PresenceBar({
   const blockedCount = items.filter((it) => it.state === "blocked").length;
   const busyCount = items.filter((it) => it.busy).length;
   const duplicateCount = items.filter((it) => it.connectionCount > 1).length;
+  const unhandledMentionCount = items.reduce((sum, item) => sum + item.unhandledMentionCount, 0);
   // 折叠态下 chip 不在 DOM 里，popover 也不该跟着冒出来。
   const activePopoverGroup =
     !rosterOpen || hoveredGroup === null ? null : sortedGroups.find((group) => group.key === hoveredGroup.key) ?? null;
@@ -537,6 +555,7 @@ export function PresenceBar({
     const wakeability = wakeabilityBadge(it, now);
     const busy = busyLabel(it);
     const waitingOwner = localizeWaitingOwner(it);
+    const unhandledMention = unhandledMentionLabel(it);
     const task = taskLabel(it, now);
     const taskText = task === null ? null : t(task.key, task.vars);
     const liveness = livenessBadge(it);
@@ -558,6 +577,7 @@ export function PresenceBar({
           : t("PresenceBar.busyTitle")
         : null,
       it.waitingOwnerCount > 0 ? t("PresenceBar.waitingOwnerTitle", { count: it.waitingOwnerCount }) : null,
+      unhandledMention === null ? null : t("PresenceBar.unhandledMentionsTitle", unhandledMention.vars),
       taskTitle,
       it.handle !== null && it.handle !== "" ? `handle: ${it.handle}` : null,
       it.role !== null ? `role: ${it.role}` : null,
@@ -646,6 +666,11 @@ export function PresenceBar({
         )}
         {busy !== null && <span className="t-mono presence-busy">{t(busy.key, busy.vars)}</span>}
         {waitingOwner !== null && <span className="t-mono presence-busy presence-waiting-owner">{waitingOwner}</span>}
+        {unhandledMention !== null && (
+          <span className="t-mono presence-busy presence-unhandled-mentions">
+            {t(unhandledMention.key, unhandledMention.vars)}
+          </span>
+        )}
         {taskText !== null && (
           <span className="t-mono presence-busy presence-task" title={taskTitle ?? undefined}>
             {taskText}
@@ -829,6 +854,7 @@ export function PresenceBar({
               const agentBusy = busyLabel(agent);
               const agentTask = taskLabel(agent, now);
               const agentUnreachable = unreachableBadge(agent, now);
+              const agentUnhandledMention = unhandledMentionLabel(agent);
               return (
               <span
                 key={agent.name}
@@ -889,6 +915,11 @@ export function PresenceBar({
                     {t("PresenceBar.waitingOwnerChip", { count: agent.waitingOwnerCount })}
                   </span>
                 )}
+                {agentUnhandledMention !== null && (
+                  <span className="t-mono presence-busy presence-busy--chip presence-unhandled-mentions">
+                    {t(agentUnhandledMention.key, agentUnhandledMention.vars)}
+                  </span>
+                )}
                 {agentTask !== null && (
                   <span className="t-mono presence-busy presence-busy--chip presence-task">{t(agentTask.key, agentTask.vars)}</span>
                 )}
@@ -921,6 +952,11 @@ export function PresenceBar({
           {busyCount > 0 && (
             <span className="t-mono presence-alert presence-alert--busy" title="serially handling a wake — reachable, reply may be slow">
               ⏳ {busyCount} busy
+            </span>
+          )}
+          {unhandledMentionCount > 0 && (
+            <span className="t-mono presence-alert presence-alert--unhandled">
+              {t("PresenceBar.unhandledMentionsSummary", { count: unhandledMentionCount })}
             </span>
           )}
           {duplicateCount > 0 && <span className="t-mono presence-alert presence-alert--duplicate">{duplicateCount} duplicate</span>}

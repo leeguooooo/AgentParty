@@ -31,6 +31,8 @@ The verified/unverified split is server-authoritative and does NOT trust the wak
 kind the client self-reports: prove a self-declared agent with: party wake test @name
 A "read #N / read ✓ / N behind" note shows how far a streaming reader (web, or an
 agent on serve / watch --follow) has read. No note = not a line-by-line reader.
+An "⚠ N unhandled @ · oldest #S" note is durable reception debt: the agent still
+owes a terminal reply/failure for N mentions, starting at message #S.
 Then bring one in: party send "@name …" --mention name
 A human is @-notified by their handle (their web client matches on handle, not the
 session name), so mention the "@handle" shown here — not a UUID session name.
@@ -38,7 +40,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/account/handle/display_name/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -79,6 +81,9 @@ interface Row {
   queue_depth?: number; // 忙时排在身后、尚未处理的 wake 数；>0 才带出
   // 等 owner 的 work 已释放 runner，不应冒充 busy/current_task；单独展示，避免“没在跑”被误判成已完成。
   waiting_owner_count?: number;
+  // 持久 @ 接待债务：不是瞬时在线状态，即使 agent 掉线也要显示，提醒 owner 回来处理。
+  unhandled_mention_count?: number;
+  oldest_unhandled_mention_seq?: number;
   // 每任务进度/心跳（#228）：正在处理哪条 wake（触发 seq）、何时开始、最近心跳。让频道区分
   // 「还在干、活到 T」与「卡死」——比裸 busy 更细。仅在有活跃任务时带出。
   current_task?: number;
@@ -150,6 +155,14 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     ...(typeof e.waiting_owner_count === "number" && e.waiting_owner_count > 0
       ? { waiting_owner_count: e.waiting_owner_count }
       : {}),
+    ...(typeof e.unhandled_mention_count === "number" && e.unhandled_mention_count > 0
+      ? {
+          unhandled_mention_count: e.unhandled_mention_count,
+          ...(typeof e.oldest_unhandled_mention_seq === "number" && e.oldest_unhandled_mention_seq > 0
+            ? { oldest_unhandled_mention_seq: e.oldest_unhandled_mention_seq }
+            : {}),
+        }
+      : {}),
     // 每任务进度/心跳（#228）：服务端只在 state != offline 且有活跃任务时下发 current_task，原样带出。
     ...(typeof e.current_task === "number"
       ? {
@@ -217,6 +230,17 @@ export function busyNote(r: Row): string {
 export function waitingOwnerNote(r: Row): string {
   const count = r.waiting_owner_count;
   return typeof count === "number" && count > 0 ? ` · 💬 ${count} waiting owner` : "";
+}
+
+// 未处理 @ 是服务端持久 delivery 的债务，与在线/离线无关；终端必须显眼提示 owner。
+export function unhandledMentionNote(r: Row): string {
+  const count = r.unhandled_mention_count;
+  if (typeof count !== "number" || count <= 0) return "";
+  const oldest =
+    typeof r.oldest_unhandled_mention_seq === "number" && r.oldest_unhandled_mention_seq > 0
+      ? ` · oldest #${r.oldest_unhandled_mention_seq}`
+      : "";
+  return ` · ⚠ ${count} unhandled @${oldest}`;
 }
 
 // 每任务进度/心跳标注（#228）：比 busy 更细——「▶ seq X」是正在处理哪条 wake，「♥ Ns」是心跳新鲜度。
@@ -358,7 +382,7 @@ export async function run(argv: string[]): Promise<number> {
           typeof r.resume_at === "number"
             ? ` · resumes in ${humanAge(Math.max(0, r.resume_at - now))}`
             : " · resume manually";
-        console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${read}${duplicate}`);
+        console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${read}${duplicate}`);
         continue;
       }
       // #191：可唤醒行明确标出「已验证 / 未验证」——verified＝服务端确认过（webhook，或观测到被 @ 后 resume），
@@ -370,7 +394,7 @@ export async function run(argv: string[]): Promise<number> {
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
       // #664：recent 档里真·不可达的（无活 wake 通道 + 陈旧）单独标出，别和「最近露面、或许在轮询」混淆。
       const unreach = r.unreachable === true ? " · ⚠ unreachable (mention lands in history only)" : "";
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
+      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
     }
     return 0;
   } catch (e) {

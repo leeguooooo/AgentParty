@@ -23,6 +23,10 @@ export const PresenceBarStrings: LocaleDict = {
     "PresenceBar.pausedManual": "Paused — won't be woken by @-mentions until resumed manually",
     "PresenceBar.pausedUntil": "Paused — won't be woken by @-mentions; auto-resumes {time}",
     "PresenceBar.waitingOwnerChip": "💬 {count} waiting owner",
+    "PresenceBar.unhandledMentionsChip": "⚠ {count} unhandled @ · oldest #{seq}",
+    "PresenceBar.unhandledMentionsTitle":
+      "{count} @-mention(s) have not reached a reply or terminal failure; oldest source message #{seq}",
+    "PresenceBar.unhandledMentionsSummary": "⚠ {count} unhandled @",
     // busy（#103 / #639）：走 t() 而非写死英文——zh 界面也翻译。
     "PresenceBar.busy": "⏳ busy",
     "PresenceBar.busyQueued": "⏳ busy · {count} queued",
@@ -76,6 +80,10 @@ export const PresenceBarStrings: LocaleDict = {
     "PresenceBar.pausedManual": "已暂停接待——被 @ 也不唤醒，需手动恢复",
     "PresenceBar.pausedUntil": "已暂停接待——被 @ 也不唤醒；将于 {time} 自动恢复",
     "PresenceBar.waitingOwnerChip": "💬 {count} 项等待 owner",
+    "PresenceBar.unhandledMentionsChip": "⚠ {count} 条 @ 未处理 · 最早 #{seq}",
+    "PresenceBar.unhandledMentionsTitle":
+      "{count} 条 @ 尚未回复、也未进入终局失败；最早来源消息 #{seq}",
+    "PresenceBar.unhandledMentionsSummary": "⚠ {count} 条 @ 未处理",
     // busy（#103 / #639）
     "PresenceBar.busy": "⏳ 忙",
     "PresenceBar.busyQueued": "⏳ 忙 · {count} 排队",

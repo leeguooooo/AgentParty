@@ -201,6 +201,42 @@ describe("AgentDetailModal (#272)", () => {
     expect(text).toContain("/workspace/agentparty");
   });
 
+  test("reception section explains the context boundary and links the oldest unresolved @", () => {
+    let opened = 0;
+    const root = render({
+      name: "worker-a",
+      display: "worker-a",
+      kind: "agent",
+      owner: "leo",
+      online: true,
+      presence: presenceEntry({
+        live: true,
+        wake: { kind: "serve", verified_at: Date.now() },
+        context: {
+          reception_mode: "model",
+          reception_runner: "codex",
+          reception_context: "isolated_channel_session",
+        },
+        unhandled_mention_count: 2,
+        oldest_unhandled_mention_seq: 41,
+      }),
+      messages: [],
+      onOpenMessage: (seq) => { opened = seq; },
+      onClose: () => {},
+    });
+    const text = JSON.stringify(renderer!.toJSON());
+    expect(text).toContain("正在自动接收 @");
+    expect(text).toContain("codex · 独立频道会话");
+    expect(text).toContain("不继承 owner 当前打开的 Codex/Claude 会话");
+    expect(text).toContain("2 条未处理 · 最早 #41");
+
+    const button = root.find(
+      (node) => node.type === "button" && String(node.props.className ?? "").includes("agent-detail-unhandled-link"),
+    );
+    act(() => button.props.onClick());
+    expect(opened).toBe(41);
+  });
+
   // #666：离线且不可达（被收割的 watch --once / 从未验证）时，wake 事实别再显示「可唤醒·未验证」——
   // 那会让人误以为叫得醒。改由 autoWakeReachable 判定后如实标 unreachable。
   test("offline + watch declared but stale last_seen → wake fact reads unreachable, not wakeable", () => {
