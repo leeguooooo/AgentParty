@@ -61,6 +61,21 @@ describe("HostBoardPanel", () => {
     });
   });
 
+  test("keeps an unresolved opaque owner out of the Host candidate label", () => {
+    const candidate = buildHostCandidate(
+      {
+        name: "codex-002",
+        display: "codex-002",
+        account: "lark:on_unknown",
+      },
+      {},
+      false,
+    );
+
+    expect(candidate.label).toBe("codex-002");
+    expect(candidate.label).not.toContain("lark:on_unknown");
+  });
+
   test("turns a missing-host warning into a direct assignment flow", async () => {
     const assigned: string[] = [];
     act(() => {
