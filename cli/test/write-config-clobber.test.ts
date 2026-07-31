@@ -27,6 +27,7 @@ import {
   type Config,
 } from "../src/config";
 import { startRestMock } from "./rest-mock";
+import { refreshServeIdentityCache } from "../src/commands/serve";
 
 let home = "";
 const dirs: string[] = [];
@@ -120,6 +121,68 @@ describe("无来源时不刷新 (#104)", () => {
     refreshConfigInPlace(cfg("ghost"), d);
     expect(existsSync(workspaceConfigPath(d))).toBe(false);
     expect(readConfig(d)).toBeNull();
+  });
+});
+
+describe("serve 自动补齐桌面端所属人缓存 (#809)", () => {
+  test("只刷新当前 runtime config，并保存可读 owner 资料", () => {
+    const dir = ws();
+    writeConfig(cfg("owned-agent", "ap_owned"), dir);
+    const updated = refreshServeIdentityCache(
+      {
+        server: "https://a.example",
+        token: "ap_owned",
+        auth_source: "runtime_config",
+        config: { kind: "workspace", path: workspaceConfigPath(dir) },
+        account: { present: false, path: "" },
+      },
+      {
+        name: "owned-agent",
+        email: null,
+        kind: "agent",
+        role: "agent",
+        owner: "lark:on_owner",
+        owner_handle: "luis",
+        owner_display_name: "Luis",
+        channel_scope: "ops",
+      },
+      dir,
+    );
+
+    expect(updated).toBe(true);
+    expect(readConfig(dir)?.identity).toMatchObject({
+      owner: "lark:on_owner",
+      owner_handle: "luis",
+      owner_display_name: "Luis",
+      channel_scope: "ops",
+    });
+  });
+
+  test("账号会话和已切换 token 都不能覆盖 Agent config", () => {
+    const dir = ws();
+    writeConfig(cfg("owned-agent", "ap_owned"), dir);
+    const base = {
+      server: "https://a.example",
+      auth_source: "runtime_config" as const,
+      config: { kind: "workspace" as const, path: workspaceConfigPath(dir) },
+      account: { present: false, path: "" },
+    };
+    const identity = {
+      name: "owned-agent",
+      email: null,
+      kind: "agent",
+      role: "agent",
+      owner: "lark:on_other",
+      owner_display_name: "Other",
+    };
+
+    expect(refreshServeIdentityCache({ ...base, token: "ap_other" }, identity, dir)).toBe(false);
+    expect(refreshServeIdentityCache({
+      ...base,
+      token: "ap_owned",
+      auth_source: "account_session",
+    }, identity, dir)).toBe(false);
+    expect(readConfig(dir)?.identity?.owner).toBeNull();
   });
 });
 

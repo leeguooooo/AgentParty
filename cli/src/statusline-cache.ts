@@ -93,6 +93,8 @@ export function cachedIdentity(identity: Identity, now: number = Date.now()): Ca
     kind: identity.kind,
     role: identity.role,
     owner: identity.owner,
+    owner_handle: identity.owner_handle ?? null,
+    owner_display_name: identity.owner_display_name ?? null,
     channel_scope: identity.channel_scope ?? null,
     verified_at: now,
   };

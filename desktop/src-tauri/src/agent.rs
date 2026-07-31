@@ -30,6 +30,9 @@ pub(crate) struct AgentConfigSummary {
     pub(crate) channel: Option<String>,
     pub(crate) kind: String,
     pub(crate) role: String,
+    pub(crate) owner: Option<String>,
+    pub(crate) owner_handle: Option<String>,
+    pub(crate) owner_display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +47,9 @@ struct AgentIdentity {
     name: Option<String>,
     kind: Option<String>,
     role: Option<String>,
+    owner: Option<String>,
+    owner_handle: Option<String>,
+    owner_display_name: Option<String>,
     channel_scope: Option<String>,
 }
 
@@ -342,6 +348,9 @@ pub(crate) fn parse_config_summary(path: &Path) -> Result<AgentConfigSummary, St
         channel: identity.channel_scope,
         kind,
         role,
+        owner: identity.owner.filter(|value| !value.trim().is_empty()),
+        owner_handle: identity.owner_handle.filter(|value| !value.trim().is_empty()),
+        owner_display_name: identity.owner_display_name.filter(|value| !value.trim().is_empty()),
     })
 }
 
@@ -936,6 +945,9 @@ mod tests {
                     "name":"worker-one",
                     "kind":"agent",
                     "role":"agent",
+                    "owner":"lark:on_owner",
+                    "owner_handle":"luis",
+                    "owner_display_name":"Luis",
                     "channel_scope":"native-r4"
                 }
             }"#,
@@ -949,6 +961,9 @@ mod tests {
         assert_eq!(summary.channel.as_deref(), Some("native-r4"));
         assert_eq!(summary.kind, "agent");
         assert_eq!(summary.role, "agent");
+        assert_eq!(summary.owner.as_deref(), Some("lark:on_owner"));
+        assert_eq!(summary.owner_handle.as_deref(), Some("luis"));
+        assert_eq!(summary.owner_display_name.as_deref(), Some("Luis"));
 
         let serialized = serde_json::to_string(&summary).unwrap();
         assert!(!serialized.contains("super-secret-token"));

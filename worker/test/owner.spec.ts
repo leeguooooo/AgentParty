@@ -1,6 +1,6 @@
 // 显示所属人（spec §10）：铸 token 时写入 owner → 该身份的 Sender（welcome participants / msg 帧 /
 // 历史补拉）都带 owner；/api/me 回显登录身份的 owner。无 owner 的 token 保持旧形状（不带 owner 字段）。
-import { SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { ADMIN_HEADERS, WsClient, completeCapabilityHello, createChannel, seedToken, uniq } from "./helpers";
 
@@ -91,6 +91,29 @@ describe("token owner propagation", () => {
       headers: { authorization: `Bearer ${plain.token}` },
     });
     expect(await mePlain.json()).toMatchObject({ kind: "agent", role: "agent", owner: null });
+  });
+
+  it("GET /api/me gives an owned Agent a readable owner profile without replacing its identity", async () => {
+    const owner = uniq("acct");
+    const handle = uniq("luis");
+    await env.DB.prepare(
+      `INSERT INTO account_profiles (account, handle, display_name, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind(owner, handle, "Luis", Date.now(), Date.now()).run();
+    const agent = await seedToken("agent", uniq("owned-agent"), {
+      owner,
+      channelScope: "ops",
+    });
+
+    const response = await SELF.fetch("http://ap.test/api/me", {
+      headers: { authorization: `Bearer ${agent.token}` },
+    });
+    expect(await response.json()).toMatchObject({
+      name: agent.name,
+      owner,
+      owner_handle: handle,
+      owner_display_name: "Luis",
+    });
   });
 
   it("GET /api/me exposes caps for scoped agent and readonly tokens", async () => {

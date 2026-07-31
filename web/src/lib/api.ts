@@ -323,6 +323,8 @@ export interface MeInfo {
   tenant_key: string | null;
   role: "agent" | "human" | "readonly";
   owner: string | null;
+  owner_handle?: string | null;
+  owner_display_name?: string | null;
   // 会员骨架（#277）：账号 free/member 层。旧 server 无这两个字段（可选）；缺失按 free 处理。
   membership_tier?: "free" | "member" | null;
   member_since?: number | null;

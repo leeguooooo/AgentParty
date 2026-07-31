@@ -33,6 +33,9 @@ export interface CachedIdentity {
   kind: string;
   role: string;
   owner: string | null;
+  /** 可读所属人资料；旧配置没有，桌面端按 null 安全回退。 */
+  owner_handle?: string | null;
+  owner_display_name?: string | null;
   channel_scope: string | null;
   verified_at: number;
 }

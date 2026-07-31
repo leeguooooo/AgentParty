@@ -59,7 +59,13 @@ describe("aggregateLocalAgents", () => {
     const rows = aggregateLocalAgents(
       [instance({ name: "planner", channel: "ops", runner: "codex", state: "running", instanceId: "cfg:ops" })],
       [duty({ instanceId: "cfg2:bug001", loaded: true })],
-      [config({ configId: "cfg2", name: "release-bot", channel: "bug001" })],
+      [config({
+        configId: "cfg2",
+        name: "release-bot",
+        channel: "bug001",
+        owner: "lark:on_luis",
+        ownerDisplayName: "Luis",
+      })],
     );
     expect(rows).toHaveLength(2);
     const inst = rows.find((r) => r.kind === "instance")!;
@@ -71,7 +77,25 @@ describe("aggregateLocalAgents", () => {
       configId: "cfg2",
       state: "loaded",
       runner: null,
+      owner: "lark:on_luis",
+      ownerLabel: "Luis",
     });
+  });
+
+  test("uses readable owner profile and never promotes an opaque account id", () => {
+    const [readable] = aggregateLocalAgents(
+      [],
+      [duty({ instanceId: "cfg:ops" })],
+      [config({ owner: "lark:on_luis", ownerHandle: "luis", ownerDisplayName: "Luis" })],
+    );
+    expect(readable).toMatchObject({ owner: "lark:on_luis", ownerLabel: "Luis" });
+
+    const [opaque] = aggregateLocalAgents(
+      [],
+      [duty({ instanceId: "cfg:ops" })],
+      [config({ owner: "lark:on_luis", ownerHandle: null, ownerDisplayName: null })],
+    );
+    expect(opaque).toMatchObject({ owner: "lark:on_luis", ownerLabel: null });
   });
 
   test("missing config never promotes an opaque config hash into the agent name", () => {
@@ -123,6 +147,15 @@ describe("filterLocalAgents", () => {
     expect(filterLocalAgents(rows, "PLANNER").map((r) => r.name)).toEqual(["planner"]);
     expect(filterLocalAgents(rows, "claude").map((r) => r.name)).toEqual(["builder"]);
     expect(filterLocalAgents(rows, "failed").map((r) => r.name)).toEqual(["builder"]);
+  });
+
+  test("matches by readable owner", () => {
+    const owned = aggregateLocalAgents(
+      [],
+      [duty({ instanceId: "cfg:ops" })],
+      [config({ owner: "lark:on_luis", ownerDisplayName: "Luis" })],
+    );
+    expect(filterLocalAgents(owned, "luis")).toHaveLength(1);
   });
 });
 
