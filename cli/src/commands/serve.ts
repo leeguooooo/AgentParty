@@ -36,7 +36,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readAccount } from "../account";
 import { connect } from "../client";
-import { clearStuck, clearStuckForConfig, loadCursor, loadCursorForConfig, loadRevCursor, loadRevCursorForConfig, loadStuck, loadStuckForConfig, resolveChannel, saveCursor, saveCursorForConfig, saveRevCursor, saveRevCursorForConfig, saveStuck, saveStuckForConfig, type StuckWake } from "../config";
+import { clearStuck, clearStuckForConfig, loadCursor, loadCursorForConfig, loadRevCursor, loadRevCursorForConfig, loadStuck, loadStuckForConfig, localAgentConfigsForChannel, readConfigWithSource, resolveChannel, saveCursor, saveCursorForConfig, saveRevCursor, saveRevCursorForConfig, saveStuck, saveStuckForConfig, type StuckWake } from "../config";
 import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget, stopOwnInstance } from "../instance-lock";
 import { formatMsg, stripTerminalControls } from "../format";
 import { clearHealthCache, writeHealthCache } from "../health-cache";
@@ -264,6 +264,10 @@ export const EXIT_WAKE_ABANDON_CIRCUIT = 11;
 
 /** 已有 serve 挂在同一 (server identity, channel, machine) 上：拒绝启动，避免重复执行（#99/#465）。 */
 export const EXIT_ALREADY_SERVING = 10;
+/** The selected server/identity does not contain the requested channel. Retrying cannot heal it. */
+export const EXIT_CHANNEL_NOT_FOUND = 12;
+/** A local builtin runner failed its startup authentication/executable preflight. */
+export const EXIT_RUNNER_UNAVAILABLE = 13;
 
 /** Conventional shell exit codes for an explicitly interrupted resident serve. */
 export const EXIT_SIGNAL_INT = 128 + 2;
@@ -636,7 +640,7 @@ interface TerminalDutyDeps {
 }
 
 /**
- * #744:launchd 常驻下,「终局不该重启」的退出(熔断 EXIT_WAKE_ABANDON_CIRCUIT / 撤销 EXIT_AUTH)必须
+ * #744/#802:launchd 常驻下,「终局不该重启」的退出(熔断 / 撤销 / 确定性配置错误)必须
  * 让 launchd 别 KeepAlive 重启——否则熔断的安全停机被绕过、或对着被撤 token 空转,且 launchd 还以为在线。
  * serve 自己 `launchctl bootout` 掉自己那个 job:launchd 移除它 → 不再重启,launchctl print/health/presence
  * 一致显示停机,人工重新「转为常驻」才复活。普通崩溃 / stream-ended **不** bootout,照常由 KeepAlive 自愈。
@@ -654,7 +658,12 @@ export function selfBootoutTerminalDuty(
   if (label === undefined || label === "") return false;
   const platform = deps?.platform ?? process.platform;
   if (platform !== "darwin") return false;
-  if (code !== EXIT_WAKE_ABANDON_CIRCUIT && code !== EXIT_AUTH) return false;
+  if (
+    code !== EXIT_WAKE_ABANDON_CIRCUIT
+    && code !== EXIT_AUTH
+    && code !== EXIT_CHANNEL_NOT_FOUND
+    && code !== EXIT_RUNNER_UNAVAILABLE
+  ) return false;
   // 严格校验注入的 label(@macmini #744 评审):只接受我们自己生成的 duty label(前缀 + launchd 合法字符),
   // 否则拒绝——绝不拿一个猜的/被篡改的 label 去 bootout,免得卸载错的甚至宽泛目标。
   if (!label.startsWith(DUTY_LABEL_PREFIX) || !/^[A-Za-z0-9.-]+$/.test(label)) {
@@ -678,7 +687,13 @@ export function selfBootoutTerminalDuty(
   }
   try {
   const target = `gui/${uid}/${label}`;
-  const reason = code === EXIT_WAKE_ABANDON_CIRCUIT ? "circuit-breaker" : "auth-revoked";
+  const reason = code === EXIT_WAKE_ABANDON_CIRCUIT
+    ? "circuit-breaker"
+    : code === EXIT_AUTH
+      ? "auth-revoked"
+      : code === EXIT_CHANNEL_NOT_FOUND
+        ? "channel-not-found"
+        : "runner-unavailable";
   const plistPath = deps?.plistPath ?? dutyPlistPath(label);
   const ownGeneration = deps?.generation === undefined
     ? process.env.AP_DUTY_GENERATION ?? null
@@ -905,6 +920,10 @@ function sanitizeBlockedError(error: string): string {
   return (compact || "unknown error").slice(0, BLOCKED_ERROR_MAX);
 }
 
+function isChannelNotFoundError(error: unknown): error is RestError {
+  return error instanceof RestError && (error.status === 404 || error.code === "not_found");
+}
+
 // context file 里附带的最近频道消息条数上限（冷起的 runner 不用先跑 history 也有基本上下文）
 const RECENT_MAX = 20;
 const RECENT_BODY_MAX = 400;
@@ -918,6 +937,7 @@ const RUNNER_LOG_FILE = "serve-runner.log";
 const SERVE_LIFECYCLE_LOG_FILE = "serve-lifecycle.log";
 const DEFAULT_SUPERVISOR_RESTART_DELAY_MS = 1_000;
 const MAX_SUPERVISOR_RESTART_DELAY_MS = 30_000;
+const RUNNER_STARTUP_CHECK_TIMEOUT_MS = 15_000;
 const RUNNER_TERMINATION_GRACE_MS = 1_000;
 const RUNNER_TERMINATION_BARRIER_MS = RUNNER_TERMINATION_GRACE_MS + 500;
 const DELIVERY_UPDATE_ACK_TIMEOUT_MS = 5_000;
@@ -1565,6 +1585,8 @@ export interface ServeOptions {
   downloadAttachment?: typeof downloadAttachment;
   // 测试注入点：默认用 sh -c 起子进程
   runCommand?: ServeRunner;
+  /** Local runner readiness gate. It must pass before opening the channel socket or claiming a lease. */
+  startupCheck?: (signal: AbortSignal) => Promise<void>;
   sdkRunner?: SdkRunnerOptions;
   // serve 挂上后声明自己「可被唤醒」的钩子；run() 注入真实实现，测试可省略/替换
   advertise?: (signal?: AbortSignal) => Promise<void>;
@@ -2214,6 +2236,27 @@ export function isRunnerEnvFailure(result: Pick<RunnerProcessResult, "stderr">):
   return RUNNER_ENV_FAILURE_PATTERNS.some((re) => re.test(result.stderr));
 }
 
+export function runnerDiagnosticExcerpt(
+  result: Pick<RunnerProcessResult, "stdout" | "stderr">,
+  harness: RunnerHarness,
+): string {
+  if (harness === "claude") {
+    try {
+      const body = JSON.parse(result.stdout) as Record<string, unknown>;
+      if (body.loggedIn === false) {
+        return "Claude authentication unavailable (loggedIn=false); run `claude login`";
+      }
+      if (body.is_error === true && typeof body.result === "string") {
+        return sanitizeBlockedError(body.result);
+      }
+    } catch {
+      // Fall through to the raw process evidence.
+    }
+  }
+  const raw = result.stderr.trim() || result.stdout.trim();
+  return raw === "" ? "runner exited without diagnostic output" : sanitizeBlockedError(raw);
+}
+
 // #748：claude `-p --output-format json` 命中环境性 auth/api 失败时，结构化错误落在 **stdout 的 JSON**
 // （`is_error:true, terminal_reason:"api_error", result:"...OAuth session expired..."`）而非 stderr，exit 1。
 // isRunnerEnvFailure 只扫 stderr（#693 为躲模型输出误报），会把这类漏判成通用「exit-1 / model may have run」：
@@ -2626,6 +2669,75 @@ async function runHarness(
   if (sid && opts.outputSchema === undefined) return { result, text: result.stdout.trimEnd(), sessionId: sid };
   const parsed = parseClaudeJson(result.stdout);
   return { result, text: parsed.text.trimEnd(), sessionId: sid ?? coldSessionId };
+}
+
+/**
+ * Verify the local harness before a serve socket is opened.
+ *
+ * These commands inspect local authentication only; they do not start a model turn.
+ * The successful result is cached for this process so a transient socket reconnect
+ * does not repeatedly spawn the same check.
+ */
+export function createBuiltinRunnerStartupCheck(
+  opts: BuiltinRunnerOptions,
+): NonNullable<ServeOptions["startupCheck"]> {
+  let ready = false;
+  return async (signal: AbortSignal): Promise<void> => {
+    if (ready) return;
+    mkdirSync(opts.workdir, { recursive: true, mode: 0o700 });
+    const cwd = opts.cwd ?? opts.workdir;
+    let env: Record<string, string | undefined> = opts.harness === "codex"
+      ? prepareCodexHome(opts.workdir, opts.authSourceFile, opts.codexLaunch?.env)
+      : { ...process.env };
+    let args: string[];
+    if (opts.harness === "codex") {
+      const launch = opts.codexLaunch ?? resolveBuiltinCodexLaunch(opts.codexBinary, env, process.cwd());
+      if (!launch.ok) {
+        throw new WakeBlockedError(
+          `builtin codex startup preflight failed: ${launch.error}`,
+          false,
+          { environment: true },
+        );
+      }
+      if (opts.codexLaunch === undefined) env = launch.env;
+      args = [launch.codexBinary, ...launch.codexArgsPrefix, "login", "status"];
+    } else {
+      args = [builtinRunnerCommand("claude", env), "auth", "status", "--json"];
+    }
+    const runProcess = opts.runProcess ?? defaultRunnerProcess;
+    let result: RunnerProcessResult;
+    try {
+      result = await runProcess(args, { cwd, env, signal });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      appendRunnerLog(
+        opts.workdir,
+        `${new Date((opts.now ?? Date.now)()).toISOString()} startup_preflight=true harness=${opts.harness} spawn_failed=true diagnostic=${JSON.stringify(sanitizeBlockedError(message))}`,
+      );
+      throw new WakeBlockedError(
+        `builtin ${opts.harness} startup preflight failed: ${message}`,
+        false,
+        { environment: true },
+      );
+    }
+    if (result.code !== 0) {
+      const diagnostic = runnerDiagnosticExcerpt(result, opts.harness);
+      appendRunnerLog(
+        opts.workdir,
+        `${new Date((opts.now ?? Date.now)()).toISOString()} startup_preflight=true harness=${opts.harness} exit=${result.code} env_failure=true diagnostic=${JSON.stringify(diagnostic)}`,
+      );
+      throw new WakeBlockedError(
+        `builtin ${opts.harness} startup preflight failed: ${diagnostic}`,
+        false,
+        { environment: true },
+      );
+    }
+    ready = true;
+    appendRunnerLog(
+      opts.workdir,
+      `${new Date((opts.now ?? Date.now)()).toISOString()} startup_preflight=true harness=${opts.harness} exit=0 ready=true`,
+    );
+  };
 }
 
 export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOptions["runCommand"]> {
@@ -3244,12 +3356,15 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
           const envFailure =
             isRunnerEnvFailure(run.result) ||
             (opts.harness === "claude" && claudeJsonEnvFailure(run.result.stdout));
+          const diagnostic = runnerDiagnosticExcerpt(run.result, opts.harness);
           appendRunnerLog(
             opts.workdir,
-            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}${envFailure ? " env_failure=true" : ""}`,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}${envFailure ? " env_failure=true" : ""} diagnostic=${JSON.stringify(diagnostic)}`,
           );
           throw new WakeBlockedError(
-            `builtin ${opts.harness} runner blocked: exit code ${run.result.code}${envFailure ? " (runner environment failure: credentials/binary/sandbox — model did not run)" : ""}; log: ${join(opts.workdir, RUNNER_LOG_FILE)}`,
+            `builtin ${opts.harness} runner blocked: exit code ${run.result.code}` +
+              `${envFailure ? ` (runner environment failure: ${diagnostic} — model did not run)` : ` (${diagnostic})`}; ` +
+              `log: ${join(opts.workdir, RUNNER_LOG_FILE)}`,
             false,
             { environment: envFailure },
           );
@@ -4784,6 +4899,16 @@ export async function runServe(o: ServeOptions): Promise<number> {
     );
     return EXIT_ALREADY_SERVING;
   }
+  if (o.startupCheck !== undefined) {
+    try {
+      await o.startupCheck(AbortSignal.timeout(RUNNER_STARTUP_CHECK_TIMEOUT_MS));
+    } catch (error) {
+      const message = sanitizeBlockedError(error instanceof Error ? error.message : String(error));
+      out(`serve: runner 启动预检失败，不连接频道、不领取租约：${message}`);
+      lock?.release?.();
+      return EXIT_RUNNER_UNAVAILABLE;
+    }
+  }
   let conn: ReturnType<typeof connect>;
   try {
     conn = connect(o.server, o.token, o.channel, o.since, {
@@ -4937,17 +5062,20 @@ export async function runServe(o: ServeOptions): Promise<number> {
   // 把已消费但未 ack 的帧按 seq 重排到队首，避免持租者中途退出时静默吞掉在飞 wake（#465）。
   let deferredLeaseSeq: number | null = null;
   let charter: ChannelCharter | null = o.charter ?? null;
-  const refreshCharter = async (reason: string, expectedRev?: number) => {
-    if (!o.fetchCharter) return;
-    if (expectedRev !== undefined && charter !== null && charter.charter_rev >= expectedRev) return;
+  const refreshCharter = async (reason: string, expectedRev?: number): Promise<unknown | null> => {
+    if (!o.fetchCharter) return null;
+    if (expectedRev !== undefined && charter !== null && charter.charter_rev >= expectedRev) return null;
     try {
       charter = await awaitWithAbort(
         o.fetchCharter(lifecycleController.signal),
         lifecycleController.signal,
       );
+      return null;
     } catch (e) {
       if (lifecycleController.signal.aborted) throw lifecycleController.signal.reason;
+      if (reason === "attach" && isChannelNotFoundError(e)) return e;
       out(`  charter 刷新失败（${reason}）: ${e instanceof Error ? e.message : String(e)}`);
+      return e;
     }
   };
   // 触发消息之前的最近频道消息（滚动窗口），随 context file 递给 runner
@@ -4958,14 +5086,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
   try {
     // Initial control-plane work belongs to the same lifecycle as the frame loop. If SIGTERM lands
     // here, the shared finally below must still release the socket, lock, listeners and context dir.
-    await refreshCharter("attach");
-    out(
-      `serving #${o.channel} — 每条${o.mentionsOnly ? " @你 的" : ""}消息触发一次命令（Ctrl-C 停）`,
-    );
-    // #720：没开 --auto-upgrade 的常驻会卡在旧版——权限墙拦 `curl … | sh`、重启又自毁本轮会话。
-    // 提醒一次:加 --auto-upgrade(唤醒间隙自行下载+校验+re-exec,无需人工),或用桌面版 launchd 常驻(默认带)。
-    if (o.autoUpgrade !== true) {
-      out("serve: 未开 --auto-upgrade——本进程不会自升级，落后版本需人工重启。加 --auto-upgrade 让它在唤醒间隙自行换新，或用桌面版「转为常驻」(launchd，默认带)。");
+    const attachCharterError = await refreshCharter("attach");
+    if (isChannelNotFoundError(attachCharterError)) {
+      out(`error: not_found ${attachCharterError.message}`);
+      return EXIT_CHANNEL_NOT_FOUND;
     }
     if (o.statusline === true) {
       heartbeat = setInterval(() => {
@@ -4999,6 +5123,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
         if (!welcomeReported) {
           o.onWelcome?.(frame.last_seq);
           welcomeReported = true;
+          out(
+            `serving #${o.channel} — 每条${o.mentionsOnly ? " @你 的" : ""}消息触发一次命令（Ctrl-C 停）`,
+          );
+          // #720：没开 --auto-upgrade 的常驻会卡在旧版。只有服务端 welcome 已确认频道存在后
+          // 才显示这条与 serving；失败连接不能先宣布“正在服务”再报错。
+          if (o.autoUpgrade !== true) {
+            out("serve: 未开 --auto-upgrade——本进程不会自升级，落后版本需人工重启。加 --auto-upgrade 让它在唤醒间隙自行换新，或用桌面版「转为常驻」(launchd，默认带)。");
+          }
         }
         directedDeliveryMode = frame.directed_delivery === "v1";
         o.onServerCapabilities?.({ ownerDecisionBinding: frame.owner_decision_binding === "v1" });
@@ -5088,7 +5220,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
             ? EXIT_AUTH
             : frame.code === "archived"
               ? EXIT_ARCHIVED
-              : 1;
+              : frame.code === "not_found"
+                ? EXIT_CHANNEL_NOT_FOUND
+                : 1;
         break;
       }
       if (
@@ -5226,6 +5360,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
         // custom/builtin runner 一旦可能已经执行过模型就不会重试；最终通告必须报告真实执行次数，
         // 不能把配置预算 maxAttempts 伪装成实际已跑次数（例如一次 SIGTERM 不能写成 3/3）。
         let attemptsUsed = attemptFloor;
+        let lastFailureEnvironment = false;
         // 身后已缓冲的 wake 深度（#103）：内建 runner 随 working 帧上报，presence 显示「忙 + N 待处理」。
         // 本帧正在处理，故只数它 seq 之后、够格触发唤醒的缓冲帧。
         const queueDepth = pendingWakeDepth(
@@ -5310,8 +5445,13 @@ export async function runServe(o: ServeOptions): Promise<number> {
             attemptFloor = attemptsUsed;
             lastError = errText(error);
             retriable = error instanceof WakeBlockedError && error.retriable;
+            lastFailureEnvironment = error instanceof WakeBlockedError && error.environment;
             if (error instanceof ManagedWorkerUndispatchedError) preflightSilentSkip = true;
-            out(`  runner 预处理失败 (${attemptsUsed}/${maxAttempts})，未发送 running、未启动模型: ${lastError}`);
+            out(
+              lastFailureEnvironment
+                ? `  runner 预处理失败（不重试：环境类错误），未发送 running、未启动模型: ${lastError}`
+                : `  runner 预处理失败 (${attemptsUsed}/${maxAttempts})，未发送 running、未启动模型: ${lastError}`,
+            );
             if (directedDelivery === null) {
               setStuck({ seq: frame.seq, attempts: attemptsUsed, last_error: lastError, retriable });
             }
@@ -5326,7 +5466,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
         if (preflightFailed) {
           const note =
             `wake undelivered before model start, giving up: seq=${frame.seq}; ` +
-            `attempts=${attemptsUsed}/${maxAttempts}; retry_delay_ms=${retryDelayMs}; last error: ${lastError}`;
+            (lastFailureEnvironment
+              ? `attempts=${attemptsUsed}; retry=disabled_environment; `
+              : `attempts=${attemptsUsed}/${maxAttempts}; retry_delay_ms=${retryDelayMs}; `) +
+            `last error: ${lastError}`;
           // 非派工的 managed worker wake 不刷频道 blocked（worker 不是频道参与者，闲聊回复不该刷噪声）；
           // 投递仍在下方 settle，绝不重投。其它预处理失败照常公开宣告放弃。
           if (preflightSilentSkip) {
@@ -5482,12 +5625,17 @@ export async function runServe(o: ServeOptions): Promise<number> {
               // #690：环境性失败（认证/二进制/沙箱）模型确定没跑——别再挂「model may have run」的免责标签，
               // 那会误导 owner 以为副作用可能已发生。说清是环境坏了、修好再 @ 即可（保守：仅明确指纹命中）。
               const envFailure = e instanceof WakeBlockedError && e.environment;
+              lastFailureEnvironment = envFailure;
               if (!retriable) {
                 lastError += envFailure
                   ? " (runner environment failure: model did not run — fix credentials/binary/sandbox, e.g. `claude login`, then re-mention)"
                   : " (not retriable: model may have run)";
               }
-              out(`  命令失败 (${attempt}/${maxAttempts}): ${lastError}`);
+              out(
+                envFailure
+                  ? `  命令失败（不重试：环境类错误）: ${lastError}`
+                  : `  命令失败 (${attempt}/${maxAttempts}): ${lastError}`,
+              );
               // 先落盘再重试：此刻进程崩掉，重启后不会把已经烧掉的次数忘干净
               // Directed work has its own server-side lease/state machine. Mirroring it into the
               // legacy seq debt would make a later ordinary backfill bypass delivery ownership and
@@ -5616,7 +5764,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
           // 没有 CLI flag，所以重试预算与退避必须**在频道里可见**：把常数藏进源码是不诚实的。
           const note =
             `wake undelivered, giving up: seq=${frame.seq}; ` +
-            `attempts=${attemptsUsed}/${maxAttempts}; retry_delay_ms=${retryDelayMs}; ` +
+            (lastFailureEnvironment
+              ? `attempts=${attemptsUsed}; retry=disabled_environment; `
+              : `attempts=${attemptsUsed}/${maxAttempts}; retry_delay_ms=${retryDelayMs}; `) +
             `last error: ${lastError}`;
           out(`  ${note}`);
           try {
@@ -5791,6 +5941,7 @@ export interface ServeSupervisorOptions {
 export function isTerminalServeExit(code: number): boolean {
   return code === 0 || code === EXIT_AUTH || code === EXIT_ARCHIVED || code === EXIT_UPGRADED ||
     code === EXIT_ALREADY_SERVING || code === EXIT_WAKE_ABANDON_CIRCUIT ||
+    code === EXIT_CHANNEL_NOT_FOUND || code === EXIT_RUNNER_UNAVAILABLE ||
     code === EXIT_SIGNAL_INT || code === EXIT_SIGNAL_TERM;
 }
 
@@ -5898,6 +6049,7 @@ export interface ServeCommandDeps {
   verifyServeIdentityBoundary?: typeof verifyServeIdentityBoundary;
   runServe?: typeof runServe;
   superviseServe?: typeof superviseServe;
+  createBuiltinRunnerStartupCheck?: typeof createBuiltinRunnerStartupCheck;
 }
 
 export type ServeIdentityBoundaryResult =
@@ -5991,6 +6143,56 @@ export async function verifyServeIdentityBoundary(
       deliveryPrincipal,
     ]),
   };
+}
+
+function homeRelativePath(path: string): string {
+  const home = homedir();
+  return path === home ? "~" : path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
+}
+
+export function formatServeProfileHints(input: {
+  channel: string;
+  currentName: string;
+  currentScope: string | null;
+  currentServer: string;
+  runner: RunnerHarness;
+  replayBacklog: boolean;
+  autoUpgrade: boolean;
+  candidates: ReturnType<typeof localAgentConfigsForChannel>;
+}): string[] {
+  if (input.candidates.length === 0) return [];
+  const lines = [
+    `  当前身份 ${input.currentName} (scope=${input.currentScope ?? "未限定"}, server=${input.currentServer})`,
+    `  本机有 ${input.candidates.length} 个 scope=${input.channel} 的候选 Agent 配置：`,
+  ];
+  for (const candidate of input.candidates.slice(0, 8)) {
+    lines.push(
+      `    ${candidate.name} (server=${candidate.server}, config=${homeRelativePath(candidate.path)})`,
+    );
+  }
+  if (input.candidates.length > 8) {
+    lines.push(`    …另有 ${input.candidates.length - 8} 个`);
+  }
+  const first = input.candidates[0]!;
+  const baseArgs = [
+    "party",
+    "serve",
+    input.channel,
+    "--runner",
+    input.runner,
+    ...(input.replayBacklog ? ["--replay-backlog"] : []),
+    ...(input.autoUpgrade ? ["--auto-upgrade"] : []),
+  ];
+  lines.push(
+    `  试试：AGENTPARTY_CONFIG=${shellQuote(first.path)} ${baseArgs.map(shellQuote).join(" ")}`,
+  );
+  if (first.owner !== null) {
+    lines.push(
+      `  若它是 project-agent profile：AGENTPARTY_CONFIG=${shellQuote(first.path)} ` +
+        `${["party", "serve", "--profile", `${first.owner}/${first.name}`].map(shellQuote).join(" ")}`,
+    );
+  }
+  return lines;
 }
 
 export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<number> {
@@ -6162,6 +6364,7 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
     if (runnerWorkdirPath !== null) appendServeLifecycleLog(runnerWorkdirPath, record);
     console.error(terminalOutput(`serve supervisor: ${record}`));
   };
+  let runnerStartupCheck: NonNullable<ServeOptions["startupCheck"]> | undefined;
   const superviseExit = await superviseForCommand({
     onLifecycle: lifecycle,
     onState: (state) => {
@@ -6195,6 +6398,22 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
       }
       const currentRunnerWorkdir = runnerWorkdirPath ?? defaultRunnerWorkdir(channel, boundary.namespace);
       runnerWorkdirPath = currentRunnerWorkdir;
+      const builtinRunnerOptions: BuiltinRunnerOptions | undefined = harness
+        ? {
+            server: currentServer,
+            token: currentToken,
+            channel,
+            harness,
+            ...(codexLaunch === undefined ? {} : { codexLaunch }),
+            workdir: currentRunnerWorkdir,
+            repo: str(flags.repo),
+          }
+        : undefined;
+      if (builtinRunnerOptions !== undefined && runnerStartupCheck === undefined) {
+        runnerStartupCheck = (deps.createBuiltinRunnerStartupCheck ?? createBuiltinRunnerStartupCheck)(
+          builtinRunnerOptions,
+        );
+      }
       const result = await runServeForCommand({
         server: currentServer,
         token: currentToken,
@@ -6230,17 +6449,8 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
         }),
         statusline: true,
         runnerTimeoutMs,
-        builtinRunner: harness
-          ? {
-              server: currentServer,
-              token: currentToken,
-              channel,
-              harness,
-              ...(codexLaunch === undefined ? {} : { codexLaunch }),
-              workdir: currentRunnerWorkdir,
-              repo: str(flags.repo),
-            }
-          : undefined,
+        builtinRunner: builtinRunnerOptions,
+        startupCheck: runnerStartupCheck,
         sdkRunner: useSdkRunner
           ? {
               server: currentServer,
@@ -6253,6 +6463,20 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
       if (result === EXIT_AUTH && currentAuth.auth_source === "account_session") {
         identityState.rejectedAccountToken = currentToken;
         return EXIT_STREAM_ENDED;
+      }
+      if (result === EXIT_CHANNEL_NOT_FOUND && harness !== undefined) {
+        const currentScope = readConfigWithSource().config?.identity?.channel_scope ?? null;
+        const hints = formatServeProfileHints({
+          channel,
+          currentName: boundary.principal.name,
+          currentScope,
+          currentServer,
+          runner: harness,
+          replayBacklog: flags["replay-backlog"] === true,
+          autoUpgrade: flags["auto-upgrade"] === true,
+          candidates: localAgentConfigsForChannel(channel, currentAuth.config.path),
+        });
+        for (const line of hints) console.error(terminalOutput(line));
       }
       return result;
     },

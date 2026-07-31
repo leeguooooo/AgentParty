@@ -9,12 +9,14 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
+  type Dirent,
 } from "node:fs";
 import { atomicWriteJson } from "./atomic-json";
 import { stripTerminalControls } from "./format";
@@ -117,6 +119,73 @@ export interface WorkspaceState {
 
 export function agentpartyHome(): string {
   return process.env.AGENTPARTY_HOME || join(homedir(), ".agentparty");
+}
+
+export interface LocalAgentConfigHint {
+  path: string;
+  server: string;
+  name: string;
+  owner: string | null;
+  channelScope: string;
+}
+
+/**
+ * Find durable local agent identities that are explicitly scoped to a channel.
+ *
+ * This is a diagnostics-only index: never return the token, never follow symlinks,
+ * and ignore malformed/oversized files. A stale cached identity is still useful as
+ * a routing hint, but callers must describe it as a local candidate rather than a
+ * verified live profile.
+ */
+export function localAgentConfigsForChannel(
+  channel: string,
+  currentConfigPath: string | null = null,
+): LocalAgentConfigHint[] {
+  const directory = join(agentpartyHome(), "agents");
+  const current = currentConfigPath === null ? null : canonicalPath(currentConfigPath);
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const hints: LocalAgentConfigHint[] = [];
+  for (const entry of entries.slice(0, 500)) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const path = join(directory, entry.name);
+    if (current !== null && canonicalPath(path) === current) continue;
+    try {
+      if (statSync(path).size > 1_000_000) continue;
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<Config>;
+      const identity = parsed.identity;
+      if (
+        typeof parsed.server !== "string"
+        || typeof parsed.token !== "string"
+        || parsed.token === ""
+        || identity === undefined
+        || identity.channel_scope !== channel
+        || typeof identity.name !== "string"
+        || identity.name === ""
+      ) {
+        continue;
+      }
+      hints.push({
+        path,
+        server: parsed.server.replace(/\/+$/, ""),
+        name: identity.name,
+        owner: typeof identity.owner === "string" && identity.owner !== "" ? identity.owner : null,
+        channelScope: channel,
+      });
+    } catch {
+      // One broken local profile must not hide the remaining actionable candidates.
+    }
+  }
+  return hints.sort(
+    (left, right) =>
+      left.server.localeCompare(right.server)
+      || left.name.localeCompare(right.name)
+      || left.path.localeCompare(right.path),
+  );
 }
 
 export function explicitConfigPath(): string | null {

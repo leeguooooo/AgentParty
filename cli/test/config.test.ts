@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -11,6 +11,7 @@ import {
   globalConfigPath,
   loadCursor,
   loadCursorForConfig,
+  localAgentConfigsForChannel,
   loadRevCursorForConfig,
   loadStuckForConfig,
   readConfig,
@@ -57,6 +58,47 @@ describe("config", () => {
   test("write/read roundtrip", () => {
     writeConfig({ server: "https://ap.example.com", token: "ap_x" });
     expect(readConfig()).toEqual({ server: "https://ap.example.com", token: "ap_x" });
+  });
+
+  test("channel diagnostics list only matching durable agent configs without exposing tokens (#802)", () => {
+    const agents = join(home, "agents");
+    mkdirSync(agents, { recursive: true });
+    const current = join(agents, "current.json");
+    const matching = join(agents, "matching.json");
+    const other = join(agents, "other.json");
+    const outside = join(home, "outside.json");
+    writeFileSync(current, JSON.stringify({
+      server: "https://current.example.com",
+      token: "ap_current_secret",
+      identity: { name: "current", owner: "acct:current", channel_scope: "short-video" },
+    }));
+    writeFileSync(matching, JSON.stringify({
+      server: "https://matching.example.com/",
+      token: "ap_matching_secret",
+      identity: { name: "backend-codex", owner: "lark:on_owner", channel_scope: "short-video" },
+    }));
+    writeFileSync(other, JSON.stringify({
+      server: "https://other.example.com",
+      token: "ap_other_secret",
+      identity: { name: "other", owner: null, channel_scope: "another-channel" },
+    }));
+    writeFileSync(join(agents, "broken.json"), "{not json");
+    writeFileSync(outside, JSON.stringify({
+      server: "https://outside.example.com",
+      token: "ap_outside_secret",
+      identity: { name: "outside", owner: null, channel_scope: "short-video" },
+    }));
+    symlinkSync(outside, join(agents, "linked.json"));
+
+    const hints = localAgentConfigsForChannel("short-video", current);
+    expect(hints).toEqual([{
+      path: matching,
+      server: "https://matching.example.com",
+      name: "backend-codex",
+      owner: "lark:on_owner",
+      channelScope: "short-video",
+    }]);
+    expect(JSON.stringify(hints)).not.toContain("secret");
   });
 
   test("readConfigWithSource reports workspace source and safe fingerprint", () => {

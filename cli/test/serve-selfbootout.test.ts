@@ -20,7 +20,10 @@ import {
   dutyLockOwnerIsStale,
   dutyLockPath,
   dutyQuarantinedPlistPath,
+  EXIT_CHANNEL_NOT_FOUND,
+  EXIT_RUNNER_UNAVAILABLE,
   EXIT_WAKE_ABANDON_CIRCUIT,
+  isTerminalServeExit,
   selfBootoutTerminalDuty,
   tryReclaimStaleDutyLock,
 } from "../src/commands/serve";
@@ -49,6 +52,25 @@ describe("selfBootoutTerminalDuty (#744)", () => {
     const did = selfBootoutTerminalDuty(EXIT_WAKE_ABANDON_CIRCUIT, r.out, { ...base(), spawn: r.spawn } as never);
     expect(did).toBe(true);
     expect(r.calls).toEqual([{ cmd: "launchctl", args: ["bootout", `gui/501/${LABEL}`] }]);
+  });
+
+  test("确定性频道与 runner 启动错误会终止 supervisor，并留下准确的 duty 停机原因 (#802/#803)", () => {
+    for (const [code, reason] of [
+      [EXIT_CHANNEL_NOT_FOUND, "channel-not-found"],
+      [EXIT_RUNNER_UNAVAILABLE, "runner-unavailable"],
+    ] as const) {
+      const bodies: string[] = [];
+      const r = recorder();
+      expect(isTerminalServeExit(code)).toBe(true);
+      expect(selfBootoutTerminalDuty(code, r.out, {
+        ...base({
+          writeMarker: (_path: string, body: string) => bodies.push(body),
+        }),
+        spawn: r.spawn,
+      } as never)).toBe(true);
+      expect(JSON.parse(bodies[0]!).reason).toBe(reason);
+      expect(r.calls).toEqual([{ cmd: "launchctl", args: ["bootout", `gui/501/${LABEL}`] }]);
+    }
   });
 
   test("终局先原子留停机标记再 bootout，供 desktop reconcile 避免误复活", () => {
