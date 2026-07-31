@@ -160,6 +160,19 @@ test("participant removal immediately clears identity, role, draft and open deta
   expect(callback).toContain("current?.name === removal.name ? null : current");
 });
 
+test("historical delivery targets cannot reopen removed member details", () => {
+  const openStart = source.indexOf("const openTeamMember = useCallback");
+  const openEnd = source.indexOf("const openAdminMember = useCallback", openStart);
+  expect(openStart).toBeGreaterThanOrEqual(0);
+  expect(openEnd).toBeGreaterThan(openStart);
+
+  const callback = source.slice(openStart, openEnd);
+  expect(callback).toContain("authoritativeMemberNamesRef.current.has(name)");
+  expect(callback.indexOf("authoritativeMemberNamesRef.current.has(name)"))
+    .toBeLessThan(callback.indexOf("setMemberDetailRoute"));
+  expect(source).toContain("canOpenAgentDetail={canOpenTeamMember}");
+});
+
 test("authoritative removal retains only a session-local account and name snapshot for re-add", () => {
   const removalStart = source.indexOf("const applyParticipantRemoval = useCallback");
   const removalEnd = source.indexOf("const loadCharter = useCallback", removalStart);

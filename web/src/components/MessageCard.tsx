@@ -59,6 +59,8 @@ interface Props {
   recentMessages?: MsgFrame[];
   // #490 follow-up：@提及也复用同一张完整信息卡，因此需要按被提及 agent 取最近工作。
   recentMessagesByAgent?: ReadonlyMap<string, MsgFrame[]>;
+  onOpenAgentDetail?: (name: string) => void;
+  canOpenAgentDetail?: (name: string) => boolean;
   // 频道决策协议（#284）：人类/moderator 是否可对本条 decision_request 拍板 + 回调。
   canRespondDecision?: boolean;
   decisionBusy?: boolean;
@@ -387,6 +389,8 @@ function MessageCardImpl({
   agentRoles,
   recentMessages = [],
   recentMessagesByAgent,
+  onOpenAgentDetail,
+  canOpenAgentDetail,
   canRespondDecision,
   decisionBusy,
   onDecisionRespond,
@@ -831,6 +835,8 @@ function MessageCardImpl({
         readers={read.readers}
         unread={read.unread}
         display={(name) => identityLabel(name)}
+        onOpenAgentDetail={onOpenAgentDetail}
+        canOpenAgentDetail={canOpenAgentDetail}
       />
       {menu !== null && (
         <div ref={menuRef} className="msg-menu" style={{ left: menu.x, top: menu.y }}>
