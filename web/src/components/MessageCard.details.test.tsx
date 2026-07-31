@@ -153,8 +153,9 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     const readable = "ZHENG TONG · apple-signin-revoke";
     expect(root.findByProps({ className: "msg-mention msg-agent-trigger" }).children.join(""))
       .toBe(readable);
-    expect(root.findByProps({ className: "msg-receipt-name t-mono" }).children.join(""))
-      .toBe(readable);
+    act(() => root.findByProps({ className: "msg-status-summary" }).props.onClick());
+    const delivery = root.findByProps({ "data-delivery-id": "delivery-11-target" });
+    expect(delivery.findByProps({ className: "t-mono" }).children.join("")).toBe(readable);
     const card = root.findByProps({ id: "agent-info-11-mention-lark-461bc7018484-apple-signin-revoke" });
     const text = textContent(card);
     expect(text).toContain("Owned byZHENG TONG");
@@ -211,11 +212,16 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     };
     const root = renderMessage([maliciousDelivery], [{ name: "builder", state: "pending_wake", detail: null, at: null }]);
 
+    const toggle = root.findByProps({ className: "msg-status-summary" });
+    expect(textContent(toggle)).toContain("1 in progress");
+    expect(root.findAllByProps({ "data-delivery-id": "delivery-10-builder" })).toHaveLength(0);
+    act(() => toggle.props.onClick());
+
     const delivery = root.findByProps({ "data-delivery-id": "delivery-10-builder" });
     expect(delivery.props.className).toContain("msg-delivery--running");
-    expect(delivery.props.tabIndex).toBe(0);
-    expect(delivery.children.map((child) => typeof child === "string" ? child : child.children.join("")).join(""))
-      .toContain("builderrunning");
+    expect(delivery.props.tabIndex).toBeUndefined();
+    expect(textContent(delivery)).toContain("builder");
+    expect(textContent(delivery)).toContain("running");
     expect(delivery.props.title).not.toContain("attempt 2");
     expect(delivery.props.title).not.toContain("work-10");
     expect(delivery.props.title).not.toContain("thread-10");
@@ -223,10 +229,8 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     expect(root.findAll((node) => String(node.props.className ?? "").includes("msg-receipt--pending_wake"))).toHaveLength(0);
 
     // 没有 read_cursor 时，可靠投递本身也必须能展开详情；按钮天然可键盘聚焦。
-    const toggle = root.findByProps({ className: "msg-status-summary" });
     expect(toggle.type).toBe("button");
-    expect(toggle.props["aria-expanded"]).toBe(false);
-    act(() => toggle.props.onClick());
+    expect(toggle.props["aria-expanded"]).toBe(true);
     expect(root.findByProps({ className: "msg-status-pop" })).toBeDefined();
     expect(root.findAllByProps({ className: "msg-status-group-head" }).map((node) => node.children.join("")))
       .toContain("Reliable @ delivery");
@@ -238,10 +242,11 @@ describe("MessageCard touch and keyboard details (#357)", () => {
       state: "queued", reply_seq: null, created_at: 1_700_000_000_000, updated_at: 1_700_000_000_000,
     };
     const root = renderMessage([queued]);
+    act(() => root.findByProps({ className: "msg-status-summary" }).props.onClick());
     const pill = root.findByProps({ "data-delivery-id": "delivery-10-queued" });
     expect(pill.props.className).toContain("msg-delivery--queued");
     expect(pill.props.className).not.toContain("msg-delivery--undelivered");
-    expect(pill.findByProps({ className: "msg-receipt-label" }).children.join("")).toBe("queued");
+    expect(pill.findByProps({ className: "msg-status-name-state" }).children.join("")).toBe("queued");
     // ⏳ 家族图标：waiting，不是 failed。
     expect(pill.findByProps({ className: "msg-receipt-icon ap-sprite ap-sprite--waiting" })).toBeDefined();
   });
@@ -253,12 +258,13 @@ describe("MessageCard touch and keyboard details (#357)", () => {
       created_at: 1_700_000_000_000, updated_at: 1_700_000_600_000,
     };
     const root = renderMessage([undelivered]);
+    act(() => root.findByProps({ className: "msg-status-summary" }).props.onClick());
     const pill = root.findByProps({ "data-delivery-id": "delivery-10-undelivered" });
     // 终态与 queued 明确区分：独立类名 + 独立文案。
     expect(pill.props.className).toContain("msg-delivery--undelivered");
     expect(pill.props.className).not.toContain("msg-delivery--queued");
     expect(pill.props.className).not.toContain("msg-delivery--failed");
-    expect(pill.findByProps({ className: "msg-receipt-label" }).children.join("")).toBe("undelivered");
+    expect(pill.findByProps({ className: "msg-status-name-state" }).children.join("")).toBe("undelivered");
   });
 
   test("replied (processed) stays visually distinct from queued (#667/#665)", () => {
@@ -267,8 +273,9 @@ describe("MessageCard touch and keyboard details (#357)", () => {
       state: "replied", reply_seq: 42, created_at: 1_700_000_000_000, updated_at: 1_700_000_600_000,
     };
     const root = renderMessage([replied]);
+    act(() => root.findByProps({ className: "msg-status-summary" }).props.onClick());
     const pill = root.findByProps({ "data-delivery-id": "delivery-10-replied" });
     expect(pill.props.className).toContain("msg-delivery--replied");
-    expect(pill.findByProps({ className: "msg-receipt-label" }).children.join("")).toBe("replied");
+    expect(pill.findByProps({ className: "msg-status-name-state" }).children.join("")).toBe("replied");
   });
 });

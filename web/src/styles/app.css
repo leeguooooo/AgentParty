@@ -6090,6 +6090,19 @@ button.org-person-name {
 .msg-status-unread {
   color: var(--t-muted, #8a8778);
 }
+.msg-status-delivery-summary {
+  color: var(--t-muted, #8a8778);
+}
+.msg-status-delivery-summary--attention {
+  color: #b3261e;
+  font-weight: 700;
+}
+.msg-status-delivery-summary--active {
+  color: var(--t-accent, #b4552d);
+}
+.msg-status-delivery-summary--complete {
+  color: var(--t-green);
+}
 .msg-status-caret {
   font-size: 9px;
   opacity: 0.7;
@@ -6127,6 +6140,45 @@ button.org-person-name {
   align-items: center;
   gap: 5px;
   color: var(--t-body);
+}
+.msg-status-delivery-row {
+  width: 100%;
+  align-items: flex-start;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--t-faint);
+}
+.msg-status-delivery-row:last-child {
+  border-bottom: 0;
+}
+.msg-status-delivery-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.msg-status-delivery-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+.msg-status-delivery-reason,
+.msg-status-delivery-time {
+  color: var(--t-muted, #8a8778);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+.msg-status-agent-action {
+  flex: none;
+  border: 0;
+  padding: 1px 0;
+  background: none;
+  color: var(--t-accent, #b4552d);
+  font: inherit;
+  font-size: 10.5px;
+  text-decoration: underline;
+  cursor: pointer;
 }
 .msg-status-kind {
   flex: none;

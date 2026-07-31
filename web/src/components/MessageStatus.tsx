@@ -36,13 +36,21 @@ interface Props {
   unread: ReadEntry[];
   display: (name: string) => string;
   deliveries?: PublicDirectedDelivery[];
+  onOpenAgentDetail?: (name: string) => void;
 }
 
 function kindLabel(kind: "agent" | "human" | undefined): string {
   return kind === "human" ? "H" : "A";
 }
 
-export function MessageStatus({ receipts, readers, unread, display, deliveries = [] }: Props) {
+export function MessageStatus({
+  receipts,
+  readers,
+  unread,
+  display,
+  deliveries = [],
+  onOpenAgentDetail,
+}: Props) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const hasRead = readers.length > 0 || unread.length > 0;
@@ -63,6 +71,13 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
     delivery.state === "failed" && delivery.undelivered === true ? "undelivered" : delivery.state;
   const deliveryText = (delivery: PublicDirectedDelivery): string =>
     t(`WakeReceipt.delivery.state.${deliveryStateKey(delivery)}`);
+  const deliveryReason = (delivery: PublicDirectedDelivery): string => {
+    const key = deliveryStateKey(delivery);
+    if (key === "replied" && delivery.reply_seq !== null) {
+      return t("WakeReceipt.delivery.reason.replied", { seq: delivery.reply_seq });
+    }
+    return t(`WakeReceipt.delivery.reason.${key}`);
+  };
   const deliveryTitle = (delivery: PublicDirectedDelivery): string =>
     [
       t("WakeReceipt.delivery.title", {
@@ -74,6 +89,29 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
       // or arbitrary runner errors into a cross-organization channel tooltip.
       delivery.reply_seq !== null ? `reply: #${delivery.reply_seq}` : null,
     ].filter((part): part is string => part !== null).join("\n");
+  const deliverySummary = (() => {
+    const failed =
+      deliveries.filter((delivery) => delivery.state === "failed").length +
+      visibleReceipts.filter((receipt) => receipt.state === "wake_failed").length;
+    if (failed > 0) return { text: t("WakeReceipt.delivery.summary.failed", { n: failed }), tone: "attention" };
+    const active =
+      deliveries.filter((delivery) =>
+        delivery.state === "queued" ||
+        delivery.state === "claimed" ||
+        delivery.state === "running" ||
+        delivery.state === "waiting_owner"
+      ).length +
+      visibleReceipts.filter((receipt) => receipt.state === "working" || receipt.state === "woke").length;
+    if (active > 0) return { text: t("WakeReceipt.delivery.summary.active", { n: active }), tone: "active" };
+    const replied =
+      deliveries.filter((delivery) => delivery.state === "replied").length +
+      visibleReceipts.filter((receipt) => receipt.state === "replied").length;
+    if (replied > 0) return { text: t("WakeReceipt.delivery.summary.replied", { n: replied }), tone: "complete" };
+    const pending = deliveries.length + visibleReceipts.length;
+    return pending > 0
+      ? { text: t("WakeReceipt.delivery.summary.pending", { n: pending }), tone: "pending" }
+      : null;
+  })();
 
   return (
     <div className="msg-status-bar">
@@ -94,42 +132,24 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
                 {unread.length > 0 && (
                   <span className="msg-status-unread"> · {t("WakeReceipt.read.unread", { n: unread.length })}</span>
                 )}
+                {deliverySummary !== null && (
+                  <span className={`msg-status-delivery-summary msg-status-delivery-summary--${deliverySummary.tone}`}>
+                    {" · "}{deliverySummary.text}
+                  </span>
+                )}
               </>
             ) : (
-              <span className="msg-status-unread">
-                {t(deliveries.length > 0 ? "WakeReceipt.delivery.section" : "WakeReceipt.read.mentionSection")}
+              <span
+                className={`msg-status-delivery-summary${
+                  deliverySummary === null ? "" : ` msg-status-delivery-summary--${deliverySummary.tone}`
+                }`}
+              >
+                {deliverySummary?.text ?? t("WakeReceipt.read.mentionSection")}
               </span>
             )}
             <span className="msg-status-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
           </button>
         )}
-        {deliveries.map((delivery) => (
-          <span
-            key={delivery.id}
-            className={`msg-receipt msg-delivery msg-delivery--${deliveryStateKey(delivery)}`}
-            title={deliveryTitle(delivery)}
-            aria-label={deliveryTitle(delivery)}
-            tabIndex={0}
-            data-delivery-id={delivery.id}
-          >
-            <span className={`msg-receipt-icon ap-sprite ap-sprite--${DELIVERY_ICON[delivery.state]}`} aria-hidden="true" />
-            <span className="msg-receipt-name t-mono">{display(delivery.target_name)}</span>
-            <span className="msg-receipt-label">{deliveryText(delivery)}</span>
-          </span>
-        ))}
-        {visibleReceipts.map((r) => (
-          <span
-            key={r.name}
-            className={`msg-receipt msg-receipt--${r.state}`}
-            title={receiptTitle(r)}
-            aria-label={receiptTitle(r)}
-            tabIndex={0}
-          >
-            <span className={`msg-receipt-icon ap-sprite ap-sprite--${RECEIPT_ICON[r.state]}`} aria-hidden="true" />
-            <span className="msg-receipt-name t-mono">{display(r.name)}</span>
-            <span className="msg-receipt-label">{receiptText(r)}</span>
-          </span>
-        ))}
       </div>
       {open && hasDetails && (
         <div className="msg-status-pop" role="group">
@@ -175,14 +195,35 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
                 {deliveries.map((delivery) => (
                   <li
                     key={delivery.id}
-                    className={`msg-status-name msg-delivery--${deliveryStateKey(delivery)}`}
+                    className={`msg-status-name msg-status-delivery-row msg-delivery--${deliveryStateKey(delivery)}`}
                     title={deliveryTitle(delivery)}
-                    aria-label={deliveryTitle(delivery)}
-                    tabIndex={0}
+                    data-delivery-id={delivery.id}
                   >
-                    <span className={`msg-receipt-icon ap-sprite ap-sprite--${DELIVERY_ICON[delivery.state]}`} aria-hidden="true" />{" "}
-                    <span className="t-mono">{display(delivery.target_name)}</span>
-                    <span className="msg-status-name-state"> — {deliveryText(delivery)}</span>
+                    <span className={`msg-receipt-icon ap-sprite ap-sprite--${DELIVERY_ICON[delivery.state]}`} aria-hidden="true" />
+                    <span className="msg-status-delivery-copy">
+                      <span className="msg-status-delivery-head">
+                        <span className="t-mono">{display(delivery.target_name)}</span>
+                        <span className="msg-status-name-state">{deliveryText(delivery)}</span>
+                      </span>
+                      <span className="msg-status-delivery-reason">{deliveryReason(delivery)}</span>
+                      <time
+                        className="msg-status-delivery-time"
+                        dateTime={new Date(delivery.updated_at).toISOString()}
+                      >
+                        {t("WakeReceipt.delivery.updated", {
+                          time: new Date(delivery.updated_at).toLocaleString(),
+                        })}
+                      </time>
+                    </span>
+                    {onOpenAgentDetail !== undefined && (
+                      <button
+                        type="button"
+                        className="msg-status-agent-action"
+                        onClick={() => onOpenAgentDetail(delivery.target_name)}
+                      >
+                        {t("WakeReceipt.delivery.openAgent")}
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -196,14 +237,30 @@ export function MessageStatus({ receipts, readers, unread, display, deliveries =
                 {visibleReceipts.map((r) => (
                   <li
                     key={r.name}
-                    className={`msg-status-name msg-receipt--${r.state}`}
+                    className={`msg-status-name msg-status-delivery-row msg-receipt--${r.state}`}
                     title={receiptTitle(r)}
-                    aria-label={receiptTitle(r)}
-                    tabIndex={0}
                   >
-                    <span className={`msg-receipt-icon ap-sprite ap-sprite--${RECEIPT_ICON[r.state]}`} aria-hidden="true" />{" "}
-                    <span className="t-mono">{display(r.name)}</span>
-                    <span className="msg-status-name-state"> — {receiptText(r)}</span>
+                    <span className={`msg-receipt-icon ap-sprite ap-sprite--${RECEIPT_ICON[r.state]}`} aria-hidden="true" />
+                    <span className="msg-status-delivery-copy">
+                      <span className="msg-status-delivery-head">
+                        <span className="t-mono">{display(r.name)}</span>
+                        <span className="msg-status-name-state">{receiptText(r)}</span>
+                      </span>
+                      {r.at !== null && (
+                        <time className="msg-status-delivery-time" dateTime={new Date(r.at).toISOString()}>
+                          {t("WakeReceipt.delivery.updated", { time: new Date(r.at).toLocaleString() })}
+                        </time>
+                      )}
+                    </span>
+                    {onOpenAgentDetail !== undefined && (
+                      <button
+                        type="button"
+                        className="msg-status-agent-action"
+                        onClick={() => onOpenAgentDetail(r.name)}
+                      >
+                        {t("WakeReceipt.delivery.openAgent")}
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>
