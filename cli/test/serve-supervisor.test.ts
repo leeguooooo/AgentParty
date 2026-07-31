@@ -3,7 +3,10 @@ import { EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED } from "@agentparty/shared"
 import {
   EXIT_SIGNAL_INT,
   EXIT_SIGNAL_TERM,
+  EXIT_CHANNEL_NOT_FOUND,
+  EXIT_RUNNER_UNAVAILABLE,
   EXIT_WAKE_ABANDON_CIRCUIT,
+  formatServeProfileHints,
   runServe,
   superviseServe,
   verifyServeIdentityBoundary,
@@ -40,6 +43,30 @@ const ownedIdentity = {
 };
 
 describe("serve lifecycle supervisor (#550)", () => {
+  test("profile mismatch hints name the active boundary and give a copyable local config command (#802)", () => {
+    const lines = formatServeProfileHints({
+      channel: "short-video",
+      currentName: "wrong-agent",
+      currentScope: "agentparty",
+      currentServer: "https://wrong.example.com",
+      runner: "claude",
+      replayBacklog: true,
+      autoUpgrade: false,
+      candidates: [{
+        path: "/Users/test/.agentparty/agents/right.json",
+        server: "https://right.example.com",
+        name: "backend-codex",
+        owner: "lark:on_owner",
+        channelScope: "short-video",
+      }],
+    });
+    expect(lines.join("\n")).toContain("当前身份 wrong-agent (scope=agentparty, server=https://wrong.example.com)");
+    expect(lines.join("\n")).toContain("backend-codex (server=https://right.example.com");
+    expect(lines.join("\n")).toContain("AGENTPARTY_CONFIG='/Users/test/.agentparty/agents/right.json'");
+    expect(lines.join("\n")).toContain("'--replay-backlog'");
+    expect(lines.join("\n")).toContain("'--profile' 'lark:on_owner/backend-codex'");
+  });
+
   test("restarts transient exits with bounded exponential backoff", async () => {
     const codes = [EXIT_STREAM_ENDED, 1, 0];
     const sleeps: number[] = [];
@@ -129,6 +156,68 @@ describe("serve lifecycle supervisor (#550)", () => {
     expect(code).toBe(EXIT_AUTH);
     expect(calls).toBe(1);
     expect(sleeps).toEqual([]);
+  });
+
+  test("does not retry deterministic channel/profile or runner startup failures (#802/#803)", async () => {
+    for (const terminalExit of [EXIT_CHANNEL_NOT_FOUND, EXIT_RUNNER_UNAVAILABLE]) {
+      let calls = 0;
+      const sleeps: number[] = [];
+      const code = await superviseServe({
+        runOnce: async () => {
+          calls += 1;
+          return terminalExit;
+        },
+        sleep: async (ms) => { sleeps.push(ms); },
+      });
+      expect(code).toBe(terminalExit);
+      expect(calls).toBe(1);
+      expect(sleeps).toEqual([]);
+    }
+  });
+
+  test("channel not found never prints a serving-success banner (#802)", async () => {
+    const lines: string[] = [];
+    const server = startMockServer((frame, sock) => {
+      if (frame.type !== "hello") return;
+      sock.send({ type: "error", code: "not_found", message: "channel not found: missing" });
+    });
+    try {
+      const code = await runServe({
+        server: server.url,
+        token: "ap_test",
+        channel: "missing",
+        since: 0,
+        cmd: "true",
+        mentionsOnly: true,
+        allowMultiple: true,
+        out: (line) => lines.push(line),
+      });
+      expect(code).toBe(EXIT_CHANNEL_NOT_FOUND);
+      expect(lines.some((line) => line.includes("serving #"))).toBe(false);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("runner startup preflight fails before a socket or lease exists (#803)", async () => {
+    const lines: string[] = [];
+    const code = await runServe({
+      server: "http://127.0.0.1:1",
+      token: "ap_test",
+      channel: "dev",
+      since: 0,
+      cmd: "",
+      mentionsOnly: true,
+      allowMultiple: true,
+      startupCheck: async () => {
+        throw new Error("Claude authentication unavailable; run `claude login`");
+      },
+      out: (line) => lines.push(line),
+    });
+    expect(code).toBe(EXIT_RUNNER_UNAVAILABLE);
+    expect(lines).toEqual([
+      expect.stringContaining("runner 启动预检失败，不连接频道、不领取租约"),
+    ]);
   });
 
   test("turns thrown transient failures into a logged restart", async () => {

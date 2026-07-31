@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
   builtinRunnerCommand,
+  createBuiltinRunnerStartupCheck,
   resolveBuiltinCodexLaunch,
 } from "../src/commands/serve";
 
@@ -77,5 +79,59 @@ describe("builtin runner executable binding", () => {
       ok: false,
       error: expect.stringContaining("AGENTPARTY_RUNNER_BIN must be absolute"),
     });
+  });
+
+  test("Claude startup preflight keeps the auth evidence in the runner log and stops before service (#803)", async () => {
+    const workdir = mkdtempSync(resolve(tmpdir(), "ap-runner-preflight-"));
+    try {
+      const check = createBuiltinRunnerStartupCheck({
+        server: "https://agentparty.test",
+        token: "ap_test",
+        channel: "dev",
+        harness: "claude",
+        workdir,
+        runProcess: async (args) => {
+          expect(args).toEqual(["claude", "auth", "status", "--json"]);
+          return {
+            code: 1,
+            stdout: JSON.stringify({ loggedIn: false, authMethod: "none" }),
+            stderr: "",
+          };
+        },
+      });
+      await expect(check(AbortSignal.timeout(1_000))).rejects.toThrow(
+        "Claude authentication unavailable (loggedIn=false); run `claude login`",
+      );
+      const log = readFileSync(resolve(workdir, "serve-runner.log"), "utf8");
+      expect(log).toContain("startup_preflight=true");
+      expect(log).toContain("env_failure=true");
+      expect(log).toContain("run `claude login`");
+      expect(log).not.toContain("ap_test");
+    } finally {
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("a successful local auth preflight is cached across socket supervisor attempts (#803)", async () => {
+    const workdir = mkdtempSync(resolve(tmpdir(), "ap-runner-preflight-"));
+    let calls = 0;
+    try {
+      const check = createBuiltinRunnerStartupCheck({
+        server: "https://agentparty.test",
+        token: "ap_test",
+        channel: "dev",
+        harness: "claude",
+        workdir,
+        runProcess: async () => {
+          calls += 1;
+          return { code: 0, stdout: JSON.stringify({ loggedIn: true }), stderr: "" };
+        },
+      });
+      await check(AbortSignal.timeout(1_000));
+      await check(AbortSignal.timeout(1_000));
+      expect(calls).toBe(1);
+    } finally {
+      rmSync(workdir, { recursive: true, force: true });
+    }
   });
 });

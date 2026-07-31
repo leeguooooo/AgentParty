@@ -191,12 +191,13 @@ describe("serve wake delivery (#118 / #198)", () => {
 
   // #690：认证过期 / 二进制缺失等环境性失败在模型启动前就崩，别归为「model may have run」。
   test("an auth-failure runner exit is flagged environment=true and says the model did not run (#690)", async () => {
+    const workdir = tempDir();
     const run = createBuiltinRunner({
       server: "http://agentparty.test",
       token: "ap_tok",
       channel: "dev",
       harness: "claude",
-      workdir: tempDir(),
+      workdir,
       // 复刻 #690 现场：`claude -p` 秒退 exit 1，stderr 是 OAuth 过期。
       runProcess: async () => ({
         code: 1,
@@ -217,8 +218,13 @@ describe("serve wake delivery (#118 / #198)", () => {
     expect(err.environment).toBe(true);
     expect(err.retriable).toBe(false); // 认证没修好前立刻重试是白烧
     expect(err.message).toContain("runner environment failure");
+    expect(err.message).toContain("OAuth session expired");
     expect(err.message).toContain("model did not run");
     expect(err.message).not.toContain("model may have run");
+    const log = readFileSync(join(workdir, "serve-runner.log"), "utf8");
+    expect(log).toContain("env_failure=true");
+    expect(log).toContain("OAuth session expired");
+    expect(log).not.toContain("ap_tok");
   });
 
   test("isRunnerEnvFailure matches environment fingerprints and ignores ordinary model failures (#690)", () => {
@@ -725,6 +731,40 @@ describe("重试不得重复模型副作用 (#206 门禁 P1③)", () => {
     const note = String(posts.find((p) => p.state === "blocked")!.note);
     expect(note).toContain("attempts=1/3");
     expect(note).toContain("not retriable");
+  });
+
+  test("environment failure says it will not retry instead of showing a misleading 1/3 budget (#803)", async () => {
+    const s = closeAfterOneMention();
+    const posts: Array<Record<string, unknown>> = [];
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: 1 };
+      },
+      runCommand: createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "claude",
+        workdir: tempDir(),
+        runProcess: async () => ({
+          code: 1,
+          stdout: "",
+          stderr: "Failed to authenticate: OAuth session expired and could not be refreshed",
+        }),
+        post: async () => ({ seq: 1 }),
+      }),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(o.lines.some((line) => line.includes("命令失败（不重试：环境类错误）"))).toBe(true);
+    expect(o.lines.some((line) => line.includes("命令失败 (1/3)"))).toBe(false);
+    const note = String(posts.find((post) => post.state === "blocked")?.note);
+    expect(note).toContain("attempts=1; retry=disabled_environment");
+    expect(note).toContain("OAuth session expired");
+    expect(note).not.toContain("attempts=1/3");
   });
 
   test("runner 根本没起来（spawn 失败）→ 模型没跑过，可以安全重试", async () => {
