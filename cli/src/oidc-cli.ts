@@ -1,7 +1,7 @@
 // 回环重定向 PKCE 登录流 + 令牌刷新 + bearer 解析（spec §4）
 import { createHash, randomBytes } from "node:crypto";
 import { accountPath, readAccount, writeAccount, type AccountSession } from "./account";
-import { agentpartyHome, cwdStatePath, readConfigWithSource, tokenFingerprint, type Config, type ConfigSourceInfo, type WorkspaceState } from "./config";
+import { agentpartyHome, cwdStatePath, readConfigWithSource, tokenFingerprint, type ConfigSourceInfo, type WorkspaceState } from "./config";
 import { fetchPublicConfig } from "./rest";
 import { healServerUrl } from "./validation";
 import { stripTerminalControls } from "./format";
@@ -53,12 +53,29 @@ function recoverAgentConfigForChannel(channel: string): { server: string; token:
   for (const file of files) {
     const path = join(dir, file);
     try {
-      const cfg = JSON.parse(readFileSync(path, "utf8")) as Config;
-      if (!cfg?.token || !cfg?.server) continue;
-      if (cfg.identity?.channel_scope !== channel) continue;
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+      if (typeof parsed !== "object" || parsed === null) continue;
+      const cfg = parsed as {
+        server?: unknown;
+        token?: unknown;
+        identity?: { channel_scope?: unknown; name?: unknown } | null;
+      };
+      if (
+        typeof cfg.token !== "string" ||
+        typeof cfg.server !== "string" ||
+        !cfg.token ||
+        !cfg.server
+      ) continue;
+      const identity = typeof cfg.identity === "object" && cfg.identity !== null ? cfg.identity : null;
+      if (identity?.channel_scope !== channel) continue;
       const healed = healServerUrl(cfg.server);
       if (!healed) continue;
-      matches.push({ server: healed, token: cfg.token, name: cfg.identity?.name ?? "?", path });
+      matches.push({
+        server: healed,
+        token: cfg.token,
+        name: typeof identity.name === "string" ? identity.name : "?",
+        path,
+      });
     } catch {
       // 跳过损坏/非 config 的 json，不因单个坏文件放弃恢复
     }
@@ -421,6 +438,7 @@ export async function resolveAuthDetailed(): Promise<ResolvedAuthDetailed> {
     // 避免 agent 静默以人类身份发言（冒充是安全问题）。
     const orphan = orphanedAgentPointer();
     if (orphan) {
+      const safeOrphan = stripTerminalControls(String(orphan));
       // #518：绑定的 agent config 丢了。硬拒前先尝试从持久 ~/.agentparty/agents/ 里按
       // 频道唯一匹配找回同一个 agent 的 config（用它自己的 server+token），避免 party 彻底不可用。
       const channel = boundChannel();
@@ -428,7 +446,7 @@ export async function resolveAuthDetailed(): Promise<ResolvedAuthDetailed> {
       if (recovered && channel) {
         // name/channel 来自可能被恶意/损坏 config 污染的数据，打印前剥离终端控制字符，防 ANSI/OSC 注入。
         console.error(
-          `↻ bound agent config ${orphan} is missing; recovered ${stripTerminalControls(recovered.name)} from ~/.agentparty/agents/ (channel "${stripTerminalControls(channel)}"). ` +
+          `↻ bound agent config ${safeOrphan} is missing; recovered ${stripTerminalControls(recovered.name)} from ~/.agentparty/agents/ (channel "${stripTerminalControls(channel)}"). ` +
             `set AGENTPARTY_CONFIG to that file to silence this notice.`,
         );
         // config 来源反映真实的持久文件（与 readBreadcrumbConfig 一致：kind="explicit"+path），
@@ -442,7 +460,7 @@ export async function resolveAuthDetailed(): Promise<ResolvedAuthDetailed> {
         };
       }
       console.error(
-        `⚠ identity would resolve to human account (${sess.email ?? "logged-in user"}), but this workspace was bound to an agent config at ${orphan} which is now missing. ` +
+        `⚠ identity would resolve to human account (${sess.email ?? "logged-in user"}), but this workspace was bound to an agent config at ${safeOrphan} which is now missing. ` +
           `refusing human-account fallback; restore that file or run every command with AGENTPARTY_CONFIG=<path> (issues #42/#518).`,
       );
       return {

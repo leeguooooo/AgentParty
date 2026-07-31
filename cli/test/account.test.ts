@@ -260,7 +260,7 @@ describe("resolveAuth precedence", () => {
   });
 
   test("strips terminal control chars from recovered identity before printing (#518)", async () => {
-    const missing = join(home, "agents", "orphan-bound.json");
+    const missing = join(home, "agents", "orphan-\x1b[31m\x07-bound.json");
     writeState({ channel: "dev", cursor: 0, config_path: missing, bindings: { dev: missing } });
     // 恶意/损坏 config：name 里塞 ANSI/OSC 控制序列，若原样打印会注入终端。
     // 剥离只去 ESC/BEL 等控制字节（OSC 载荷降级为可见文本），可读部分 "alice" 保留在前。
@@ -285,8 +285,35 @@ describe("resolveAuth precedence", () => {
       console.error = originalError;
     }
     const out = errors.join("\n");
-    expect(out).not.toContain("\x1b"); // 无 ESC → 无控制序列注入
+    expect(errors.join("")).not.toMatch(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/);
     expect(out).toContain("alice"); // 剥离控制字符后可读身份仍在
+  });
+
+  test("skips malformed persistent agent credentials and fails closed (#518)", async () => {
+    const missing = join(home, "agents", "orphan-bound.json");
+    writeState({ channel: "dev", cursor: 0, config_path: missing, bindings: { dev: missing } });
+    writeAgentConfigFile("malformed.json", {
+      server: "https://agent.example.com",
+      token: { unexpected: "object" },
+      identity: { name: ["alice"], channel_scope: "dev" },
+    });
+    writeAccount({
+      server: "https://issuer.example.com",
+      refresh_token: "ref",
+      access_token: "acc-live",
+      expires_at: nowSec() + 3600,
+      email: "human@example.com",
+    });
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      const auth = await resolveAuthDetailed();
+      expect(auth).toMatchObject({ token: null, auth_source: "none" });
+    } finally {
+      console.error = originalError;
+    }
+    expect(errors.join("\n")).toContain("refusing human-account fallback");
   });
 
   test("refuses (no wrong-identity pick) when multiple persistent configs match the channel (#518)", async () => {
