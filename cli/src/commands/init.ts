@@ -147,6 +147,8 @@ export async function run(argv: string[]): Promise<number> {
         kind: me.kind,
         role: me.role,
         owner: me.owner,
+        owner_handle: me.owner_handle ?? null,
+        owner_display_name: me.owner_display_name ?? null,
         channel_scope: me.channel_scope ?? null,
         verified_at: Date.now(),
       },

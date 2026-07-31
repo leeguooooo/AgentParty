@@ -273,6 +273,9 @@ export interface Identity {
   kind: string;
   role: string;
   owner: string | null;
+  /** Human-readable owner profile for an account-owned Agent. Older servers omit both fields. */
+  owner_handle?: string | null;
+  owner_display_name?: string | null;
   // 权限自省（whoami --caps）：旧 server 无这些字段（可选）
   channel_scope?: string | null;
   lineage?: AgentLineage | null;

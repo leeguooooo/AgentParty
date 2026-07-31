@@ -552,6 +552,15 @@
 .local-agents-identity { display: flex; flex-direction: column; flex: 0 1 auto; min-width: 120px; }
 .local-agents-name { font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .local-agents-config-id { font-size: 9px; color: var(--t-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-agents-owner {
+  max-width: 180px;
+  overflow: hidden;
+  color: var(--t-text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.local-agents-owner--pending { color: var(--t-dim); }
 .local-agents-runner { font-size: 11px; color: var(--t-dim); flex: 0 0 auto; }
 .local-agents-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 .local-agents-details, .local-agents-stop, .local-agents-unload, .local-agents-repair, .local-agents-restart { flex: 0 0 auto; }

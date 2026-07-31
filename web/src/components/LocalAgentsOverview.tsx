@@ -229,6 +229,7 @@ export function LocalAgentsOverview({
                   <ul className="local-agents-list">
                     {group.rows.map((row) => {
                       const displayName = row.name ?? t("LocalAgents.unknownIdentity");
+                      const ownerLabel = row.ownerLabel ?? t("LocalAgents.ownerPending");
                       const detailId = `local-agent-detail-${row.key}`;
                       const detailOpen = detailKey === row.key;
                       const dutyState = row.duty === undefined ? null : dutyRuntimeState(row.duty);
@@ -249,6 +250,12 @@ export function LocalAgentsOverview({
                                   {t("LocalAgents.configIdShort", { id: shortConfigId(row.configId) })}
                                 </span>
                               )}
+                            </span>
+                            <span
+                              className={`local-agents-owner${row.ownerLabel === null ? " local-agents-owner--pending" : ""}`}
+                              title={row.ownerLabel ?? t("LocalAgents.ownerPendingHelp")}
+                            >
+                              {t("LocalAgents.ownerSummary", { owner: ownerLabel })}
                             </span>
                             {row.runner !== null && <span className="local-agents-runner">{row.runner}</span>}
                             <span
@@ -380,6 +387,10 @@ export function LocalAgentsOverview({
                                 <div>
                                   <dt>{t("LocalAgents.field.name")}</dt>
                                   <dd className="t-mono">{displayName}</dd>
+                                </div>
+                                <div>
+                                  <dt>{t("LocalAgents.field.owner")}</dt>
+                                  <dd>{ownerLabel}</dd>
                                 </div>
                                 <div>
                                   <dt>{t("LocalAgents.field.channel")}</dt>

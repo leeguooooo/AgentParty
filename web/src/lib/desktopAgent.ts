@@ -19,6 +19,10 @@ export interface DesktopAgentConfig {
   channel: string | null;
   kind: string;
   role: string;
+  /** Older desktop shells omit owner profile fields. */
+  owner?: string | null;
+  ownerHandle?: string | null;
+  ownerDisplayName?: string | null;
 }
 
 export interface DesktopAgentStatus {
@@ -173,7 +177,10 @@ function parseConfig(value: unknown): DesktopAgentConfig | null {
     typeof value.serverOrigin !== "string" ||
     !isNullableString(value.channel) ||
     typeof value.kind !== "string" ||
-    typeof value.role !== "string"
+    typeof value.role !== "string" ||
+    (value.owner !== undefined && !isNullableString(value.owner)) ||
+    (value.ownerHandle !== undefined && !isNullableString(value.ownerHandle)) ||
+    (value.ownerDisplayName !== undefined && !isNullableString(value.ownerDisplayName))
   ) return null;
   return {
     configId: value.configId,
@@ -182,6 +189,9 @@ function parseConfig(value: unknown): DesktopAgentConfig | null {
     channel: value.channel,
     kind: value.kind,
     role: value.role,
+    owner: typeof value.owner === "string" ? value.owner : null,
+    ownerHandle: typeof value.ownerHandle === "string" ? value.ownerHandle : null,
+    ownerDisplayName: typeof value.ownerDisplayName === "string" ? value.ownerDisplayName : null,
   };
 }
 

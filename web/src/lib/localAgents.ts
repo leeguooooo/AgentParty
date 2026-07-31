@@ -16,6 +16,9 @@ export interface LocalAgentRow {
   /** 内部配置 ID 只用于诊断/检索，不作为主展示名。 */
   configId: string | null;
   config?: DesktopAgentConfig;
+  /** 原始 owner 只用于诊断；ownerLabel 才能进入主界面，绝不展示 opaque provider ID。 */
+  owner: string | null;
+  ownerLabel: string | null;
   runner: string | null;
   /** 归一状态标签：实例用 state；常驻用 loaded→"loaded"/"unloaded"。 */
   state: string;
@@ -35,6 +38,16 @@ export function channelOfInstanceId(instanceId: string): string {
 export function configIdOfInstanceId(instanceId: string): string {
   const idx = instanceId.indexOf(":");
   return idx >= 0 ? instanceId.slice(0, idx) : instanceId;
+}
+
+function readableOwner(config: DesktopAgentConfig | undefined): string | null {
+  if (config === undefined) return null;
+  for (const candidate of [config.ownerDisplayName, config.ownerHandle, config.owner]) {
+    const value = candidate?.trim() ?? "";
+    if (value === "" || /^(?:(?:lark|oidc|apple|github):|oidc-)/i.test(value)) continue;
+    return value;
+  }
+  return null;
 }
 
 // 归一两路数据源为统一行。instances 的 channel 直接来自字段（可能为 null → ""）；
@@ -60,6 +73,8 @@ export function aggregateLocalAgents(
       name: item.name ?? config?.name ?? null,
       configId,
       config,
+      owner: config?.owner ?? null,
+      ownerLabel: readableOwner(config),
       runner: item.runner,
       state: item.state,
       instanceId,
@@ -76,6 +91,8 @@ export function aggregateLocalAgents(
       name: config?.name ?? null,
       configId,
       config,
+      owner: config?.owner ?? null,
+      ownerLabel: readableOwner(config),
       runner: duty.runner ?? null,
       // 终局标记即使遇到 bootout 失败而暂时仍 loaded，也必须按异常态展示；reconcile 会继续
       // 尝试卸载，不能给 owner 一个绿色「常驻中」假象。
@@ -96,6 +113,8 @@ export function filterLocalAgents(rows: readonly LocalAgentRow[], query: string)
       row.channel,
       row.name ?? "",
       row.configId ?? "",
+      row.owner ?? "",
+      row.ownerLabel ?? "",
       row.config?.role ?? "",
       row.config?.kind ?? "",
       row.runner ?? "",

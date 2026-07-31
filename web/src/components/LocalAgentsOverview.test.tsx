@@ -162,6 +162,9 @@ test("常驻行显示可信配置名，详情只展示运行元数据，日志�
       configId: "334a626a8ca73a4a9276083677692cbaf71f8d8acb616d426ce8c90e6459c47b",
       name: "atvloadly",
       role: "builder",
+      owner: "lark:on_luis",
+      ownerHandle: "luis",
+      ownerDisplayName: "Luis",
     })],
     dutyList: async () => [duty({
       label: "com.agentparty.duty.atvloadly",
@@ -188,6 +191,7 @@ test("常驻行显示可信配置名，详情只展示运行元数据，日志�
   expect(rendered).toContain("/workspace/atvloadly");
   expect(rendered).toContain("/tmp/atvloadly.log");
   expect(rendered).toContain("builder");
+  expect(rendered).toContain("Owner: Luis");
   expect(byClass(root, "local-agents-open-logs")[0]!.props["aria-label"]).toBe("View logs atvloadly");
   expect(byClass(root, "local-agents-detail-open-logs")[0]!.props["aria-label"]).toBe("View logs atvloadly");
   await act(async () => {

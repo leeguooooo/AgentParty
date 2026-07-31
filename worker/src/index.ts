@@ -3026,6 +3026,11 @@ app.get("/api/me", requireBearer, async (c) => {
     kind: id.kind,
     role: id.role,
     owner: id.owner ?? null,
+    // Agent 的 owner 是账号 ID，本身通常是 lark:/oidc: 等不可读值。把账号资料显式
+    // 随 /api/me 返回给本地 CLI 缓存，桌面控制中心才能回答「这是谁的 Agent」；
+    // 不复用 display_name/handle，避免把 Agent 昵称与所属人的资料混成一个字段。
+    owner_handle: id.kind === "agent" ? profile?.handle ?? null : null,
+    owner_display_name: id.kind === "agent" ? profile?.display_name ?? null : null,
     channel_scope: id.channel_scope ?? null,
     lineage: id.lineage ?? null,
     handle: profile?.handle ?? agentNickname,

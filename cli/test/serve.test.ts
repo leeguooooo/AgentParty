@@ -1500,6 +1500,13 @@ describe("builtin runner", () => {
             owner: null,
           },
           namespace: "a".repeat(64),
+          identity: {
+            name: "me",
+            email: null,
+            kind: "agent",
+            role: "agent",
+            owner: null,
+          },
         }),
         runServe: async (options) => {
           attempts.push(options);
@@ -1550,6 +1557,13 @@ describe("builtin runner", () => {
             owner: null,
           },
           namespace: "a".repeat(64),
+          identity: {
+            name: "me",
+            email: null,
+            kind: "agent",
+            role: "agent",
+            owner: null,
+          },
         }),
         runServe: async (options) => {
           attempts.push(options);

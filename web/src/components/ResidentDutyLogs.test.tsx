@@ -5,7 +5,7 @@ import { act, create, type ReactTestInstance, type ReactTestRenderer } from "rea
 import { LocaleProvider } from "../i18n/locale";
 import { ResidentDutyLogsStrings } from "../i18n/strings/ResidentDutyLogs";
 import type { DesktopAgentConfig, DesktopAgentStatus, DesktopDutyEntry } from "../lib/desktopAgent";
-import { ResidentDutyLogs } from "./ResidentDutyLogs";
+import { formatLocalLogTime, parseLocalLogLine, ResidentDutyLogs } from "./ResidentDutyLogs";
 
 const duty: DesktopDutyEntry = {
   label: "com.agentparty.duty.cfg.ops",
@@ -21,6 +21,9 @@ const config: DesktopAgentConfig = {
   channel: "ops",
   kind: "agent",
   role: "reviewer",
+  owner: "lark:on_luis",
+  ownerHandle: "luis",
+  ownerDisplayName: "Luis",
 };
 const instance: DesktopAgentStatus = {
   state: "running",
@@ -36,7 +39,13 @@ const instance: DesktopAgentStatus = {
   workdir: null,
   repo: null,
 };
-const t = (key: string) => ResidentDutyLogsStrings.en[key] ?? key;
+const t = (key: string, vars?: Record<string, string | number>) => {
+  const raw = ResidentDutyLogsStrings.en[key] ?? key;
+  if (vars === undefined) return raw;
+  return raw.replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in vars ? String(vars[name]) : match
+  );
+};
 let renderer: ReactTestRenderer | null = null;
 
 beforeEach(() => {
@@ -86,10 +95,11 @@ describe("unified local agent logs", () => {
     await renderLogs();
     const output = JSON.stringify(renderer!.toJSON());
     expect(output).toContain("ops-reviewer");
+    expect(output).toContain("owner Luis");
     expect(output).toContain("#ops");
     expect(output).toContain("app-builder");
-    expect(output).toContain("[ERROR] [ops-reviewer #ops] ERROR runner failed");
-    expect(output).toContain("[INFO] [app-builder #build] app ready");
+    expect(output).toContain("[time unknown] [ERROR] [owner Luis · ops-reviewer · #ops] ERROR runner failed");
+    expect(output).toContain("[time unknown] [INFO] [owner pending refresh · app-builder · #build] app ready");
   });
 
   test("filters Error, Warn, and Info without losing the source identity", async () => {
@@ -164,10 +174,23 @@ describe("unified local agent logs", () => {
     expect(JSON.stringify(renderer!.toJSON())).not.toContain("duty only");
   });
 
-  test("positions the combined log at the latest line", async () => {
-    const logNode = { scrollTop: 0, scrollHeight: 720 };
-    await renderLogs({}, (element) => element.type === "pre" ? logNode : {});
-    expect(logNode.scrollTop).toBe(720);
+  test("uses explicit levels, strips duplicate source prefixes, and puts the newest timestamp first", async () => {
+    const older = "2026-07-30T11:47:38.886Z";
+    const newer = "2026-07-31T08:01:02.000Z";
+    await renderLogs({
+      dutyLogRead: async () => [
+        `[WARN] [ops-reviewer #ops] serve supervisor: ${older} retry scheduled`,
+        `[INFO] [ops-reviewer #ops] serve supervisor: ${newer} reconnect completed`,
+      ].join("\n"),
+      statusAll: async () => [],
+    });
+    const output = JSON.stringify(renderer!.toJSON());
+    expect(output.indexOf(formatLocalLogTime(Date.parse(newer)))).toBeLessThan(
+      output.indexOf(formatLocalLogTime(Date.parse(older))),
+    );
+    expect(output).toContain("[INFO] [owner Luis · ops-reviewer · #ops] serve supervisor: reconnect completed");
+    expect(output).not.toContain("[ops-reviewer #ops] serve supervisor");
+    expect(parseLocalLogLine(`[INFO] reconnect completed`).level).toBe("info");
   });
 
   test("shows source failures without crashing or hiding readable sources", async () => {

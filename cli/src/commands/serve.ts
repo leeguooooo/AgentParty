@@ -45,20 +45,21 @@ import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readAccount } from "../account";
 import { connect } from "../client";
-import { clearStuck, clearStuckForConfig, loadCursor, loadCursorForConfig, loadRevCursor, loadRevCursorForConfig, loadStuck, loadStuckForConfig, localAgentConfigsForChannel, readConfigWithSource, resolveChannel, saveCursor, saveCursorForConfig, saveRevCursor, saveRevCursorForConfig, saveStuck, saveStuckForConfig, type StuckWake } from "../config";
+import { clearStuck, clearStuckForConfig, loadCursor, loadCursorForConfig, loadRevCursor, loadRevCursorForConfig, loadStuck, loadStuckForConfig, localAgentConfigsForChannel, readConfigWithSource, refreshConfigInPlace, resolveChannel, saveCursor, saveCursorForConfig, saveRevCursor, saveRevCursorForConfig, saveStuck, saveStuckForConfig, type StuckWake } from "../config";
 import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget, stopOwnInstance } from "../instance-lock";
 import { formatMsg, stripTerminalControls } from "../format";
 import { clearHealthCache, writeHealthCache } from "../health-cache";
 import { ensureFreshAccess, resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
 import {
   clearStatuslineListener,
+  cachedIdentity,
   heartbeatPatch,
   lastMessageFromFrame,
   localStatuslineBase,
   unreadFromCursor,
   writeStatuslineCache,
 } from "../statusline-cache";
-import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
+import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type Identity, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
 import { buildContext } from "./status";
 import {
@@ -6066,8 +6067,47 @@ export interface ServeCommandDeps {
 }
 
 export type ServeIdentityBoundaryResult =
-  | { ok: true; principal: ServePrincipal; namespace: string }
+  | { ok: true; principal: ServePrincipal; namespace: string; identity: Identity }
   | { ok: false; code: typeof EXIT_AUTH; reason: string };
+
+/**
+ * A resident serve is the one process guaranteed to re-verify its Agent identity. Persist the
+ * readable owner profile into the exact config source it is already using, so Desktop can show
+ * ownership without a second credential-bearing network client. Token/server/source checks keep
+ * an account-session fallback or a concurrently switched config from being overwritten.
+ */
+export function refreshServeIdentityCache(
+  auth: ResolvedAuthDetailed,
+  identity: Identity,
+  cwd: string = process.cwd(),
+): boolean {
+  if (auth.auth_source !== "runtime_config" || auth.server === null || auth.token === null) return false;
+  const current = readConfigWithSource(cwd);
+  if (
+    current.config === null ||
+    current.source.path === null ||
+    current.source.path !== auth.config.path ||
+    current.config.server.replace(/\/+$/, "") !== auth.server.replace(/\/+$/, "") ||
+    current.config.token !== auth.token
+  ) {
+    return false;
+  }
+  const nextIdentity = cachedIdentity(identity);
+  const previous = current.config.identity;
+  if (
+    previous?.name === nextIdentity.name &&
+    previous.kind === nextIdentity.kind &&
+    previous.role === nextIdentity.role &&
+    previous.owner === nextIdentity.owner &&
+    previous.channel_scope === nextIdentity.channel_scope &&
+    (previous.owner_handle ?? null) === (nextIdentity.owner_handle ?? null) &&
+    (previous.owner_display_name ?? null) === (nextIdentity.owner_display_name ?? null)
+  ) {
+    return true;
+  }
+  refreshConfigInPlace({ ...current.config, identity: nextIdentity }, cwd);
+  return true;
+}
 
 /**
  * Validate one supervisor attachment before it opens a WebSocket.
@@ -6149,6 +6189,7 @@ export async function verifyServeIdentityBoundary(
   return {
     ok: true,
     principal,
+    identity: me,
     namespace: stableNamespace([
       principal.server_origin,
       principal.name,
@@ -6364,6 +6405,7 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
       console.error(terminalOutput(initialBoundary.reason));
       return initialBoundary.code;
     }
+    refreshServeIdentityCache(auth, initialBoundary.identity);
     if (runnerWorkdirPath === null) {
       runnerWorkdirPath = defaultRunnerWorkdir(channel, initialBoundary.namespace);
     }
@@ -6409,6 +6451,7 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
         console.error(terminalOutput(`${boundary.reason}; exiting`));
         return boundary.code;
       }
+      refreshServeIdentityCache(currentAuth, boundary.identity);
       const currentRunnerWorkdir = runnerWorkdirPath ?? defaultRunnerWorkdir(channel, boundary.namespace);
       runnerWorkdirPath = currentRunnerWorkdir;
       const builtinRunnerOptions: BuiltinRunnerOptions | undefined = harness
