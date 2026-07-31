@@ -88,6 +88,20 @@ export function detectReleaseTarget(platform: NodeJS.Platform = process.platform
 
 const UPGRADE_NETWORK_TIMEOUT_MS = 60_000;
 
+export class ReleaseAssetDownloadError extends Error {
+  constructor(
+    readonly url: string,
+    readonly status: number,
+  ) {
+    super(`download failed: ${url} (${status})`);
+    this.name = "ReleaseAssetDownloadError";
+  }
+}
+
+export function isReleaseAssetPublishing(error: unknown): boolean {
+  return error instanceof ReleaseAssetDownloadError && error.status === 404;
+}
+
 async function resolveLatestReleaseVersion(fetcher: typeof fetch): Promise<string> {
   const signal = AbortSignal.timeout(UPGRADE_NETWORK_TIMEOUT_MS);
   const api = await fetcher(`https://api.github.com/repos/${OWNER_REPO}/releases/latest`, {
@@ -112,7 +126,7 @@ async function resolveLatestReleaseVersion(fetcher: typeof fetch): Promise<strin
 async function defaultFetchBytes(url: string, signal?: AbortSignal): Promise<Uint8Array> {
   if (url.startsWith("file://")) return new Uint8Array(readFileSync(fileURLToPath(url)));
   const res = await fetch(url, { signal: signal ?? AbortSignal.timeout(UPGRADE_NETWORK_TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`download failed: ${url} (${res.status})`);
+  if (!res.ok) throw new ReleaseAssetDownloadError(url, res.status);
   return new Uint8Array(await res.arrayBuffer());
 }
 
