@@ -474,6 +474,18 @@ describe("busy indicator + queue depth (#103)", () => {
       key: "PresenceBar.unhandledMentionsChip",
       vars: { count: 3, seq: 42 },
     });
+    expect(unhandledMentionLabel(item({ unhandledMentionCount: 3, oldestUnhandledMentionSeq: null }))).toEqual({
+      key: "PresenceBar.unhandledMentionsChipCountOnly",
+      vars: { count: 3 },
+    });
+    expect(unhandledMentionLabel(item({ unhandledMentionCount: 3, oldestUnhandledMentionSeq: 0 }))).toEqual({
+      key: "PresenceBar.unhandledMentionsChipCountOnly",
+      vars: { count: 3 },
+    });
+    expect(unhandledMentionLabel(item({ unhandledMentionCount: 3, oldestUnhandledMentionSeq: -1 }))).toEqual({
+      key: "PresenceBar.unhandledMentionsChipCountOnly",
+      vars: { count: 3 },
+    });
     expect(unhandledMentionLabel(item())).toBeNull();
   });
 

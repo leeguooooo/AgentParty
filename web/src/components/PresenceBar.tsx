@@ -156,13 +156,17 @@ export function waitingOwnerLabel(item: Item): { key: string; vars: { count: num
     : null;
 }
 
-export function unhandledMentionLabel(item: Item): { key: string; vars: { count: number; seq: number } } | null {
-  return item.unhandledMentionCount > 0 && item.oldestUnhandledMentionSeq !== null
+export function unhandledMentionLabel(item: Item): { key: string; vars: { count: number; seq?: number } } | null {
+  if (item.unhandledMentionCount <= 0) return null;
+  return Number.isInteger(item.oldestUnhandledMentionSeq) && Number(item.oldestUnhandledMentionSeq) > 0
     ? {
         key: "PresenceBar.unhandledMentionsChip",
-        vars: { count: item.unhandledMentionCount, seq: item.oldestUnhandledMentionSeq },
+        vars: { count: item.unhandledMentionCount, seq: Number(item.oldestUnhandledMentionSeq) },
       }
-    : null;
+    : {
+        key: "PresenceBar.unhandledMentionsChipCountOnly",
+        vars: { count: item.unhandledMentionCount },
+      };
 }
 
 // 每任务进度/心跳 chip（#228）：「▶ #510」或「▶ #510 · ♥ 8s」。比 busy 更细——不仅「在忙」，还标明
@@ -577,7 +581,14 @@ export function PresenceBar({
           : t("PresenceBar.busyTitle")
         : null,
       it.waitingOwnerCount > 0 ? t("PresenceBar.waitingOwnerTitle", { count: it.waitingOwnerCount }) : null,
-      unhandledMention === null ? null : t("PresenceBar.unhandledMentionsTitle", unhandledMention.vars),
+      unhandledMention === null
+        ? null
+        : t(
+            unhandledMention.vars.seq === undefined
+              ? "PresenceBar.unhandledMentionsTitleCountOnly"
+              : "PresenceBar.unhandledMentionsTitle",
+            unhandledMention.vars,
+          ),
       taskTitle,
       it.handle !== null && it.handle !== "" ? `handle: ${it.handle}` : null,
       it.role !== null ? `role: ${it.role}` : null,

@@ -237,6 +237,35 @@ describe("AgentDetailModal (#272)", () => {
     expect(opened).toBe(41);
   });
 
+  test("reception section keeps a positive unresolved count without creating an invalid jump", () => {
+    for (const oldestSeq of [undefined, 0, -1]) {
+      const root = render({
+        name: "worker-a",
+        display: "worker-a",
+        kind: "agent",
+        owner: "leo",
+        online: false,
+        presence: presenceEntry({
+          unhandled_mention_count: 2,
+          ...(oldestSeq === undefined ? {} : { oldest_unhandled_mention_seq: oldestSeq }),
+        }),
+        messages: [],
+        onOpenMessage: () => {
+          throw new Error("invalid unresolved sequence must not be opened");
+        },
+        onClose: () => {},
+      });
+      expect(JSON.stringify(renderer!.toJSON())).toContain("2 条未处理");
+      expect(
+        root.findAll(
+          (node) => node.type === "button" && String(node.props.className ?? "").includes("agent-detail-unhandled-link"),
+        ),
+      ).toHaveLength(0);
+      act(() => renderer!.unmount());
+      renderer = null;
+    }
+  });
+
   // #666：离线且不可达（被收割的 watch --once / 从未验证）时，wake 事实别再显示「可唤醒·未验证」——
   // 那会让人误以为叫得醒。改由 autoWakeReachable 判定后如实标 unreachable。
   test("offline + watch declared but stale last_seen → wake fact reads unreachable, not wakeable", () => {

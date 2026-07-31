@@ -140,7 +140,10 @@ function AgentDetailContent({
       ? presence.unhandled_mention_count
       : 0;
   const oldestUnhandledMentionSeq =
-    unhandledMentionCount > 0 && typeof presence?.oldest_unhandled_mention_seq === "number"
+    unhandledMentionCount > 0 &&
+    typeof presence?.oldest_unhandled_mention_seq === "number" &&
+    Number.isInteger(presence.oldest_unhandled_mention_seq) &&
+    presence.oldest_unhandled_mention_seq > 0
       ? presence.oldest_unhandled_mention_seq
       : null;
   const presenceRole = presence?.role ?? null;
@@ -216,9 +219,13 @@ function AgentDetailContent({
             <div className="agent-detail-fact">
               <dt>{t("AgentDetailModal.unhandledMentions")}</dt>
               <dd className="t-mono">
-                {oldestUnhandledMentionSeq === null
+                {unhandledMentionCount === 0
                   ? t("AgentDetailModal.unhandledMentionsNone")
-                  : onOpenMessage === undefined
+                  : oldestUnhandledMentionSeq === null
+                    ? t("AgentDetailModal.unhandledMentionsCountOnly", {
+                        count: String(unhandledMentionCount),
+                      })
+                    : onOpenMessage === undefined
                     ? t("AgentDetailModal.unhandledMentionsCount", {
                         count: String(unhandledMentionCount),
                         seq: String(oldestUnhandledMentionSeq),

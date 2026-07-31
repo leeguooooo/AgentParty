@@ -8004,10 +8004,11 @@ export class ChannelDO extends Server<Env> {
       const directed = this.ctx.storage.sql
         .exec(
           `SELECT 1 FROM directed_deliveries
-            WHERE message_seq = ? AND target_name = ?
+            WHERE message_seq = ? AND target_name = ? AND target_owner = ?
             LIMIT 1`,
           frame.response_source.trigger_seq,
           identity.name,
+          this.identityDeliveryPrincipal(identity),
         )
         .toArray();
       if (directed.length === 0) {
@@ -11546,7 +11547,7 @@ export class ChannelDO extends Server<Env> {
       .exec(
         `SELECT target_name, COUNT(*) AS n, MIN(message_seq) AS oldest_seq
            FROM directed_deliveries
-          WHERE cause = 'mention' AND state IN ('queued', 'claimed', 'running')
+          WHERE cause IN ('mention', 'reply') AND state IN ('queued', 'claimed', 'running')
           GROUP BY target_name`,
       )
       .toArray()) {
