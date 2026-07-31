@@ -9,7 +9,11 @@ const hostBoardSource = readFileSync(
   resolve(import.meta.dir, "../../components/HostBoardPanel.tsx"),
   "utf8",
 );
-const localizedSurfaceSource = `${source}\n${hostBoardSource}`;
+const catchupSource = readFileSync(
+  resolve(import.meta.dir, "../../components/CatchupPanel.tsx"),
+  "utf8",
+);
+const localizedSurfaceSource = `${source}\n${hostBoardSource}\n${catchupSource}`;
 
 const REQUIRED_KEYS = [
   "Channel.banner.archived",
@@ -41,8 +45,19 @@ const REQUIRED_KEYS = [
   "Channel.catchup.chip.blocked",
   "Channel.catchup.chip.done",
   "Channel.catchup.chip.release",
+  "Channel.catchup.chip.issues",
   "Channel.catchup.chip.question",
   "Channel.catchup.chip.replies",
+  "Channel.catchup.attention",
+  "Channel.catchup.updates",
+  "Channel.catchup.summary.attention",
+  "Channel.catchup.summary.clear",
+  "Channel.catchup.summary.updates",
+  "Channel.catchup.stats",
+  "Channel.catchup.showUpdates",
+  "Channel.catchup.hideUpdates",
+  "Channel.catchup.moreAttention",
+  "Channel.catchup.markAllRead",
   "Channel.completion.aria",
   "Channel.completion.meta.kickoff",
   "Channel.completion.meta.replies",

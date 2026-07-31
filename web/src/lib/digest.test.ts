@@ -71,6 +71,7 @@ describe("web catchup digest", () => {
     );
     expect(digest.messages).toBe(1);
     expect(digest.mentions).toBe(1);
+    expect(digest.openMentions).toBe(1);
     expect(digest.items[0]).toMatchObject({ seq: 11, kind: "mention", attention: true });
   });
 
@@ -84,6 +85,7 @@ describe("web catchup digest", () => {
       19,
     );
     expect(digest.mentions).toBe(1);
+    expect(digest.openMentions).toBe(0);
     expect(digest.respondedMentions).toBe(1);
     expect(digest.replies).toBe(1);
     expect(digest.items.some((item) => item.kind === "handled")).toBe(true);
@@ -117,10 +119,12 @@ describe("web catchup digest", () => {
     expect(digest.blocked).toBe(1);
     expect(digest.done).toBe(1);
     expect(digest.releases).toBe(1);
-    expect(digest.issues).toBe(1);
+    expect(digest.issues).toBe(0);
     expect(digest.questions).toBe(1);
     expect(digest.attentionItems.map((item) => item.kind)).toEqual(["question", "blocked"]);
     expect(digest.updateItems.map((item) => item.kind)).toEqual(["release"]);
+    expect(digest.attentionCount).toBe(2);
+    expect(digest.updateCount).toBe(1);
   });
 
   test("puts actionable items before routine updates", () => {
@@ -146,6 +150,33 @@ describe("web catchup digest", () => {
     expect(digest.releases).toBe(0);
     expect(digest.issues).toBe(1);
     expect(digest.updateItems.map((item) => item.kind)).toEqual(["issue"]);
+  });
+
+  test("does not turn a self-authored question or a blocked status into a second question count", () => {
+    const digest = summarizeCatchup(
+      [
+        msg({ seq: 80, sender: "me", body: "should I follow up?" }),
+        status({ seq: 81, sender: "agent-a", state: "blocked", note: "blocked on owner?" }),
+      ],
+      "me",
+      79,
+    );
+    expect(digest.questions).toBe(0);
+    expect(digest.blocked).toBe(1);
+    expect(digest.attentionItems.map((item) => item.kind)).toEqual(["blocked"]);
+  });
+
+  test("keeps total action counts even when the visible priority list is capped", () => {
+    const digest = summarizeCatchup(
+      Array.from({ length: 6 }, (_, index) =>
+        msg({ seq: 90 + index, sender: "agent-a", body: `@me action ${index}`, mentions: ["me"] })
+      ),
+      "me",
+      89,
+    );
+    expect(digest.attentionItems).toHaveLength(4);
+    expect(digest.attentionCount).toBe(6);
+    expect(digest.updateCount).toBe(0);
   });
 
   test("compacts whitespace and clips long bodies", () => {

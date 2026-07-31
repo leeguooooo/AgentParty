@@ -14,6 +14,7 @@ export interface CatchupItem {
 export interface CatchupDigest {
   messages: number;
   mentions: number;
+  openMentions: number;
   respondedMentions: number;
   statuses: number;
   blocked: number;
@@ -25,6 +26,8 @@ export interface CatchupDigest {
   items: CatchupItem[];
   attentionItems: CatchupItem[];
   updateItems: CatchupItem[];
+  attentionCount: number;
+  updateCount: number;
 }
 
 export function catchupKey(slug: string, self: string): string {
@@ -64,8 +67,11 @@ export function summarizeCatchup(messages: MsgFrame[], self: string, seenSeq: nu
     const mentioned = msg.mentions.includes(self);
     const responded = mentioned && hasResponse(messages, msg, self);
     const release = RELEASE_RE.test(text);
-    const issue = ISSUE_RE.test(text);
-    const question = QUESTION_RE.test(text);
+    // A shipped release that references its PR is one update, not both a release and an open issue.
+    const issue = !release && ISSUE_RE.test(text);
+    // Only another participant's ordinary message can create an open-question action.
+    // Self-authored notes and blocked statuses already have their own, less ambiguous categories.
+    const question = msg.sender.name !== self && msg.kind === "message" && QUESTION_RE.test(text);
     if (mentioned) mentions++;
     if (responded) respondedMentions++;
     if (msg.kind === "status") statuses++;
@@ -79,7 +85,7 @@ export function summarizeCatchup(messages: MsgFrame[], self: string, seenSeq: nu
     let kind: CatchupItem["kind"] | null = null;
     if (mentioned) kind = responded ? "handled" : "mention";
     else if (msg.state === "blocked") kind = "blocked";
-    else if (question && msg.sender.name !== self) kind = "question";
+    else if (question) kind = "question";
     else if (release) kind = "release";
     else if (issue) kind = "issue";
     else if (msg.state === "done") kind = "done";
@@ -94,11 +100,14 @@ export function summarizeCatchup(messages: MsgFrame[], self: string, seenSeq: nu
     }
   }
 
-  const attentionItems = items.filter((item) => item.attention).slice(-4).reverse();
-  const updateItems = items.filter((item) => !item.attention).slice(-4).reverse();
+  const allAttentionItems = items.filter((item) => item.attention);
+  const allUpdateItems = items.filter((item) => !item.attention);
+  const attentionItems = allAttentionItems.slice(-4).reverse();
+  const updateItems = allUpdateItems.slice(-4).reverse();
   return {
     messages: fresh.length,
     mentions,
+    openMentions: Math.max(0, mentions - respondedMentions),
     respondedMentions,
     statuses,
     blocked,
@@ -110,5 +119,7 @@ export function summarizeCatchup(messages: MsgFrame[], self: string, seenSeq: nu
     items: [...attentionItems, ...updateItems].slice(0, 6),
     attentionItems,
     updateItems,
+    attentionCount: allAttentionItems.length,
+    updateCount: allUpdateItems.length,
   };
 }
