@@ -1,6 +1,6 @@
 // party login/logout/whoami/agent add + 账号会话 bearer 优先与自动刷新
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { accountPath, readAccount, writeAccount, clearAccount } from "../src/account";
@@ -212,6 +212,140 @@ describe("resolveAuth precedence", () => {
     }
     expect(errors.join("\n")).toContain("refusing human-account fallback");
     expect(errors.join("\n")).toContain(missing);
+  });
+
+  // #518 恢复：绑定的 agent config 丢了（常见于放 $TMPDIR 被系统清），但持久
+  // ~/.agentparty/agents/ 里有一个 channel 唯一匹配的 agent config → 自动恢复它
+  // （用它自己的 server+token），不再硬拒。绝不静默回退人类账号（#42 仍守住）。
+  function writeAgentConfigFile(name: string, cfg: Record<string, unknown>) {
+    mkdirSync(join(home, "agents"), { recursive: true });
+    writeFileSync(join(home, "agents", name), JSON.stringify(cfg));
+  }
+
+  test("recovers a channel-unique persistent agent config instead of refusing (#518)", async () => {
+    const missing = join(home, "agents", "orphan-bound.json");
+    writeState({ channel: "dev", cursor: 0, config_path: missing, bindings: { dev: missing } });
+    // 持久 agent config：与孤儿不同文件名，但 identity.channel_scope 唯一匹配 "dev"。
+    // 注意其 server 与账号会话 server 不同——恢复必须用 agent 自己的 server。
+    const durablePath = join(home, "agents", "durable-alice.json");
+    writeAgentConfigFile("durable-alice.json", {
+      server: "https://agent.example.com",
+      token: "agent-tok",
+      identity: { name: "alice", email: null, kind: "agent", role: "agent", owner: "o", channel_scope: "dev", verified_at: 1 },
+    });
+    writeAccount({
+      server: "https://issuer.example.com",
+      refresh_token: "ref",
+      access_token: "acc-live",
+      expires_at: nowSec() + 3600,
+      email: "human@example.com",
+    });
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      const auth = await resolveAuthDetailed();
+      // 恢复后 config 来源必须反映真实的持久文件（供 whoami/serve 决策），不是顶部探测的旧 source。
+      expect(auth).toMatchObject({
+        server: "https://agent.example.com",
+        token: "agent-tok",
+        auth_source: "runtime_config",
+        config: { kind: "explicit", path: durablePath },
+      });
+    } finally {
+      console.error = originalError;
+    }
+    expect(errors.join("\n")).toContain("alice");
+    expect(errors.join("\n")).not.toContain("refusing human-account fallback");
+  });
+
+  test("strips terminal control chars from recovered identity before printing (#518)", async () => {
+    const missing = join(home, "agents", "orphan-\x1b[31m\x07-bound.json");
+    writeState({ channel: "dev", cursor: 0, config_path: missing, bindings: { dev: missing } });
+    // 恶意/损坏 config：name 里塞 ANSI/OSC 控制序列，若原样打印会注入终端。
+    // 剥离只去 ESC/BEL 等控制字节（OSC 载荷降级为可见文本），可读部分 "alice" 保留在前。
+    writeAgentConfigFile("evil.json", {
+      server: "https://agent.example.com",
+      token: "agent-tok",
+      identity: { name: "alice\x1b[31m\x1b]0;pwn\x07", email: null, kind: "agent", role: "agent", owner: "o", channel_scope: "dev", verified_at: 1 },
+    });
+    writeAccount({
+      server: "https://issuer.example.com",
+      refresh_token: "ref",
+      access_token: "acc-live",
+      expires_at: nowSec() + 3600,
+      email: "human@example.com",
+    });
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      await resolveAuthDetailed();
+    } finally {
+      console.error = originalError;
+    }
+    const out = errors.join("\n");
+    expect(errors.join("")).not.toMatch(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/);
+    expect(out).toContain("alice"); // 剥离控制字符后可读身份仍在
+  });
+
+  test("skips malformed persistent agent credentials and fails closed (#518)", async () => {
+    const missing = join(home, "agents", "orphan-bound.json");
+    writeState({ channel: "dev", cursor: 0, config_path: missing, bindings: { dev: missing } });
+    writeAgentConfigFile("malformed.json", {
+      server: "https://agent.example.com",
+      token: { unexpected: "object" },
+      identity: { name: ["alice"], channel_scope: "dev" },
+    });
+    writeAccount({
+      server: "https://issuer.example.com",
+      refresh_token: "ref",
+      access_token: "acc-live",
+      expires_at: nowSec() + 3600,
+      email: "human@example.com",
+    });
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      const auth = await resolveAuthDetailed();
+      expect(auth).toMatchObject({ token: null, auth_source: "none" });
+    } finally {
+      console.error = originalError;
+    }
+    expect(errors.join("\n")).toContain("refusing human-account fallback");
+  });
+
+  test("refuses (no wrong-identity pick) when multiple persistent configs match the channel (#518)", async () => {
+    const missing = join(home, "agents", "orphan-bound.json");
+    writeState({ channel: "dev", cursor: 0, config_path: missing, bindings: { dev: missing } });
+    writeAgentConfigFile("a.json", {
+      server: "https://a.example.com",
+      token: "tok-a",
+      identity: { name: "alice", email: null, kind: "agent", role: "agent", owner: "o", channel_scope: "dev", verified_at: 1 },
+    });
+    writeAgentConfigFile("b.json", {
+      server: "https://b.example.com",
+      token: "tok-b",
+      identity: { name: "bob", email: null, kind: "agent", role: "agent", owner: "o", channel_scope: "dev", verified_at: 1 },
+    });
+    writeAccount({
+      server: "https://issuer.example.com",
+      refresh_token: "ref",
+      access_token: "acc-live",
+      expires_at: nowSec() + 3600,
+      email: "human@example.com",
+    });
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      const auth = await resolveAuthDetailed();
+      expect(auth).toMatchObject({ token: null, auth_source: "none" });
+    } finally {
+      console.error = originalError;
+    }
+    expect(errors.join("\n")).toContain("refusing human-account fallback");
   });
 
   test("null when neither present", async () => {

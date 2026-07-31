@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { atomicWriteJson } from "./atomic-json";
+import { stripTerminalControls } from "./format";
 
 export interface Config {
   server: string;
@@ -244,7 +245,9 @@ function readBreadcrumbConfig(cwd: string): ConfigWithSource | null {
       const cfg = JSON.parse(readFileSync(breadcrumb, "utf8")) as Config;
       return { config: cfg, source: sourceInfo("explicit", breadcrumb, cfg, cwd) };
     } catch {
-      console.error(`warning: workspace config breadcrumb is unreadable: ${breadcrumb}; falling back to global config`);
+      console.error(
+        `warning: workspace config breadcrumb is unreadable: ${stripTerminalControls(String(breadcrumb))}; falling back to global config`,
+      );
     }
   } catch {
     /* 无 cwd state */
