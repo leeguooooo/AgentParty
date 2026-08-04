@@ -2579,10 +2579,12 @@ describe("project profile daemon", () => {
     expect(served).toHaveLength(4);
     expect(served.every((options) => options.builtinRunner?.codexLaunch === launch)).toBe(true);
     expect(served.every((options) => options.builtinRunner?.codexLaunch?.env.PATH === "/preflight-a/bin")).toBe(true);
-    expect(served.filter((options) => options.projectAgent?.runtime_role === "front").every((options) =>
-      options.builtinRunner?.sandbox === "read-only")).toBe(true);
-    expect(served.filter((options) => options.projectAgent?.runtime_role === "worker").every((options) =>
-      options.builtinRunner?.sandbox === "workspace-write")).toBe(true);
+    const fronts = served.filter((options) => options.projectAgent?.runtime_role === "front");
+    const workers = served.filter((options) => options.projectAgent?.runtime_role === "worker");
+    expect(fronts.length).toBeGreaterThan(0);
+    expect(workers.length).toBeGreaterThan(0);
+    expect(fronts.every((options) => options.builtinRunner?.sandbox === "read-only")).toBe(true);
+    expect(workers.every((options) => options.builtinRunner?.sandbox === "workspace-write")).toBe(true);
   });
 
   test("a failed Codex profile preflight remains offline and is retried without fallback", async () => {
