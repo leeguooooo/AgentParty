@@ -1626,6 +1626,7 @@ describe("builtin runner", () => {
     // 先断言 --sandbox 真的存在：indexOf 缺失时返回 -1，只比顺序会放过 sandbox 护栏被删的回归。
     expect(calls[1]!).toContain("--sandbox");
     expect(calls[1]!.indexOf("--sandbox")).toBeLessThan(calls[1]!.indexOf("resume"));
+    expect(calls[1]![calls[1]!.indexOf("--sandbox") + 1]).toBe("danger-full-access");
     const log = readFileSync(join(workdir, "serve-runner.log"), "utf8");
     expect(log).toContain("seq=1 sid=019f35d9");
     expect(log).toContain("seq=2 sid=019f35d9");
@@ -2578,6 +2579,12 @@ describe("project profile daemon", () => {
     expect(served).toHaveLength(4);
     expect(served.every((options) => options.builtinRunner?.codexLaunch === launch)).toBe(true);
     expect(served.every((options) => options.builtinRunner?.codexLaunch?.env.PATH === "/preflight-a/bin")).toBe(true);
+    const fronts = served.filter((options) => options.projectAgent?.runtime_role === "front");
+    const workers = served.filter((options) => options.projectAgent?.runtime_role === "worker");
+    expect(fronts.length).toBeGreaterThan(0);
+    expect(workers.length).toBeGreaterThan(0);
+    expect(fronts.every((options) => options.builtinRunner?.sandbox === "danger-full-access")).toBe(true);
+    expect(workers.every((options) => options.builtinRunner?.sandbox === "danger-full-access")).toBe(true);
   });
 
   test("a failed Codex profile preflight remains offline and is retried without fallback", async () => {
@@ -2915,11 +2922,11 @@ describe("project profile daemon", () => {
     expect(served.filter((o) => o.projectAgent?.runtime_role === "worker")).toHaveLength(3);
     expect(served.filter((o) => o.projectAgent?.runtime_role === "front").every((o) =>
       o.sdkRunner?.outputSchema === MANAGED_FRONT_OUTPUT_SCHEMA &&
-      o.sdkRunner?.sandbox === "read_only" &&
+      o.sdkRunner?.sandbox === "full_access" &&
       o.sdkRunner?.attachmentRoot === null)).toBe(true);
     expect(served.filter((o) => o.projectAgent?.runtime_role === "worker").every((o) =>
       o.sdkRunner?.outputSchema === undefined &&
-      o.sdkRunner?.sandbox === "workspace-write" &&
+      o.sdkRunner?.sandbox === "full_access" &&
       o.sdkRunner?.attachmentRoot === o.projectAgent?.channel_workdir)).toBe(true);
     expect(served.every((o) => o.sdkRunner?.cwd === o.projectAgent?.channel_workdir)).toBe(true);
     expect(JSON.parse(readFileSync(ownerConfig, "utf8"))).toEqual({
