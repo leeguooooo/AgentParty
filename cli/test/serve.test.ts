@@ -2583,8 +2583,8 @@ describe("project profile daemon", () => {
     const workers = served.filter((options) => options.projectAgent?.runtime_role === "worker");
     expect(fronts.length).toBeGreaterThan(0);
     expect(workers.length).toBeGreaterThan(0);
-    expect(fronts.every((options) => options.builtinRunner?.sandbox === "read-only")).toBe(true);
-    expect(workers.every((options) => options.builtinRunner?.sandbox === "workspace-write")).toBe(true);
+    expect(fronts.every((options) => options.builtinRunner?.sandbox === "danger-full-access")).toBe(true);
+    expect(workers.every((options) => options.builtinRunner?.sandbox === "danger-full-access")).toBe(true);
   });
 
   test("a failed Codex profile preflight remains offline and is retried without fallback", async () => {
@@ -2922,11 +2922,11 @@ describe("project profile daemon", () => {
     expect(served.filter((o) => o.projectAgent?.runtime_role === "worker")).toHaveLength(3);
     expect(served.filter((o) => o.projectAgent?.runtime_role === "front").every((o) =>
       o.sdkRunner?.outputSchema === MANAGED_FRONT_OUTPUT_SCHEMA &&
-      o.sdkRunner?.sandbox === "read_only" &&
+      o.sdkRunner?.sandbox === "full_access" &&
       o.sdkRunner?.attachmentRoot === null)).toBe(true);
     expect(served.filter((o) => o.projectAgent?.runtime_role === "worker").every((o) =>
       o.sdkRunner?.outputSchema === undefined &&
-      o.sdkRunner?.sandbox === "workspace-write" &&
+      o.sdkRunner?.sandbox === "full_access" &&
       o.sdkRunner?.attachmentRoot === o.projectAgent?.channel_workdir)).toBe(true);
     expect(served.every((o) => o.sdkRunner?.cwd === o.projectAgent?.channel_workdir)).toBe(true);
     expect(JSON.parse(readFileSync(ownerConfig, "utf8"))).toEqual({

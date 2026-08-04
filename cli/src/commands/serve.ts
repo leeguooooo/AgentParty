@@ -1130,7 +1130,7 @@ export interface BuiltinRunnerOptions {
   agentpartyConfigPath?: string;
   /** Prevent the model process from inheriting any usable AgentParty identity. */
   isolateModelPartyAccess?: boolean;
-  /** Ordinary residents use full access; managed front/worker lanes explicitly stay constrained. */
+  /** Resident model lanes default to full host access; callers may still opt into a sandbox explicitly. */
   sandbox?: "read-only" | "workspace-write" | "danger-full-access";
   /** Supervisor-owned routing for managed front/worker results. */
   resultRoute?: RunnerResultRoute;
@@ -4340,21 +4340,18 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
       // #581 managed MCP：lane 清单 + child token config（0600）。这是 #578「child token 纯内存」
       // 边界的有意放宽（issue #581 拍板）：MCP server 进程要持有身份就必须能读到它；模型 env 仍是
       // denied-home，token 不进模型环境。
-      // #647：但它绝不能落在 worker 模型的 workspace-write 沙箱根（channelWorkdir）之内——否则模型能
-      // 读回自己的 token（绕过 denied-home 直接打 REST）并篡改 managed.json（放宽 attachment_root
-      // 越权上传宿主文件）。非 branch 策略下 channelWorkdir === runnerWorkdir，故不能再用 runnerWorkdir/mcp；
-      // 改用 runnerWorkdir 的**同级**目录（.mcp 后缀），在所有策略下都保证落在沙箱之外。MCP server
-      // 子进程（serve 起、非沙箱）照常读得到，被沙箱的只是模型本身。
+      // #647：状态目录仍必须落在 channelWorkdir 之外，避免 child token / managed manifest 被项目侧
+      // git、同步与附件流程被动收集。resident 模型按 owner 的信任边界运行 full access；这里是存储
+      // 卫生与显式能力分层，不把目录位置冒充成对模型保密的安全沙箱。
       const mcpStateDir = `${prepared.runnerWorkdir}.mcp`;
       if (laneProtocol === "mcp") {
-        // 兜底 fail-closed：万一某种策略下路径推导仍落进沙箱，拒绝启动而不是把 token 暴露给模型。
-        // rel === "" 表示 mcpStateDir 与沙箱根**相等**，同样越界（CodeRabbit #651）；rel 不以 .. 开头
-        // 且非绝对路径表示嵌套在沙箱内。两种都拒。
+        // rel === "" 表示 mcpStateDir 与频道工作区相等；rel 不以 .. 开头且非绝对路径表示嵌套。
+        // 两种都拒绝，确保 supervisor 状态不会进入项目工作区。
         const relToWorkspace = relative(prepared.channelWorkdir, mcpStateDir);
         if (!relToWorkspace.startsWith("..") && !isAbsolute(relToWorkspace)) {
           throw new Error(
-            `refusing managed MCP: state dir ${mcpStateDir} is inside the worker sandbox ${prepared.channelWorkdir} ` +
-              "(would leak the child token / manifest to the sandboxed model)",
+            `refusing managed MCP: state dir ${mcpStateDir} is inside the channel workspace ${prepared.channelWorkdir} ` +
+              "(would mix supervisor credentials with project files)",
           );
         }
         writeManagedManifest(mcpStateDir, {
@@ -4481,7 +4478,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
               workdir: prepared.runnerWorkdir,
               cwd: prepared.channelWorkdir,
               isolateModelPartyAccess: true,
-              sandbox: role === "front" ? "read-only" : "workspace-write",
+              sandbox: "danger-full-access",
               resultRoute,
               outputSchema: laneProtocol === "mcp" ? undefined : role === "front" ? MANAGED_FRONT_OUTPUT_SCHEMA : undefined,
               attachmentRoot: role === "front" ? null : prepared.channelWorkdir,
@@ -4503,10 +4500,10 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
               workdir: prepared.runnerWorkdir,
               cwd: prepared.channelWorkdir,
               isolateModelPartyAccess: true,
-              // worker 与 builtin lane 一致给 workspace-write，绝不能是 full_access（sdkSandboxMode
-              // 会映射成 danger-full-access = 完全无沙箱）；否则 SDK worker 能读任意主机文件、拷进
-              // channelWorkdir 再 [attach:] 上传，绕过本 PR 对 worker 的主机文件边界。
-              sandbox: role === "front" ? "read_only" : "workspace-write",
+              // Owner-operated resident lanes deliberately avoid Codex's filesystem sandbox.
+              // AgentParty identity isolation, role-cropped MCP tools, result routing, and the
+              // attachment allowlist remain supervisor-enforced boundaries.
+              sandbox: "full_access",
               resultRoute,
               outputSchema: role === "front" ? MANAGED_FRONT_OUTPUT_SCHEMA : undefined,
               attachmentRoot: role === "front" ? null : prepared.channelWorkdir,
