@@ -1818,6 +1818,13 @@ interface RunnerAttachment {
   contentType: string;
 }
 
+const GENERATED_IMAGE_FORMATS: Record<string, { extension: string; contentType: string }> = {
+  "image/png": { extension: "png", contentType: "image/png" },
+  "image/jpeg": { extension: "jpg", contentType: "image/jpeg" },
+  "image/gif": { extension: "gif", contentType: "image/gif" },
+  "image/webp": { extension: "webp", contentType: "image/webp" },
+};
+
 function generatedImageAttachments(result: unknown): RunnerAttachment[] {
   if (!result || typeof result !== "object") return [];
   const items = (result as Record<string, unknown>).items;
@@ -1834,14 +1841,14 @@ function generatedImageAttachments(result: unknown): RunnerAttachment[] {
       if (!block || typeof block !== "object") continue;
       const image = block as Record<string, unknown>;
       if (image.type !== "image" || typeof image.data !== "string" || typeof image.mimeType !== "string") continue;
+      const format = GENERATED_IMAGE_FORMATS[image.mimeType.split(";", 1)[0]!.trim().toLowerCase()];
+      if (format === undefined) continue;
       const bytes = Buffer.from(image.data, "base64");
       if (bytes.byteLength === 0) continue;
-      const contentType = image.mimeType.split(";", 1)[0]!.toLowerCase();
-      const extension = contentType === "image/jpeg" ? "jpg" : contentType.split("/")[1] ?? "bin";
       attachments.push({
-        filename: `generated-image-${attachments.length + 1}.${extension}`,
+        filename: `generated-image-${attachments.length + 1}.${format.extension}`,
         bytes: Uint8Array.from(bytes),
-        contentType,
+        contentType: format.contentType,
       });
     }
   }

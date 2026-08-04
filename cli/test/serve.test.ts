@@ -3300,7 +3300,10 @@ describe("codex-sdk runner", () => {
         items: [{
           type: "mcp_tool_call",
           result: {
-            content: [{ type: "image", data: Buffer.from(imageBytes).toString("base64"), mimeType: "image/png" }],
+            content: [
+              { type: "image", data: Buffer.from(imageBytes).toString("base64"), mimeType: "image/png" },
+              { type: "image", data: Buffer.from("unsafe").toString("base64"), mimeType: "image/p2\u001fdata" },
+            ],
             structured_content: null,
           },
         }],
