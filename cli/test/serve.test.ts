@@ -1626,6 +1626,7 @@ describe("builtin runner", () => {
     // 先断言 --sandbox 真的存在：indexOf 缺失时返回 -1，只比顺序会放过 sandbox 护栏被删的回归。
     expect(calls[1]!).toContain("--sandbox");
     expect(calls[1]!.indexOf("--sandbox")).toBeLessThan(calls[1]!.indexOf("resume"));
+    expect(calls[1]![calls[1]!.indexOf("--sandbox") + 1]).toBe("danger-full-access");
     const log = readFileSync(join(workdir, "serve-runner.log"), "utf8");
     expect(log).toContain("seq=1 sid=019f35d9");
     expect(log).toContain("seq=2 sid=019f35d9");
@@ -2578,6 +2579,10 @@ describe("project profile daemon", () => {
     expect(served).toHaveLength(4);
     expect(served.every((options) => options.builtinRunner?.codexLaunch === launch)).toBe(true);
     expect(served.every((options) => options.builtinRunner?.codexLaunch?.env.PATH === "/preflight-a/bin")).toBe(true);
+    expect(served.filter((options) => options.projectAgent?.runtime_role === "front").every((options) =>
+      options.builtinRunner?.sandbox === "read-only")).toBe(true);
+    expect(served.filter((options) => options.projectAgent?.runtime_role === "worker").every((options) =>
+      options.builtinRunner?.sandbox === "workspace-write")).toBe(true);
   });
 
   test("a failed Codex profile preflight remains offline and is retried without fallback", async () => {

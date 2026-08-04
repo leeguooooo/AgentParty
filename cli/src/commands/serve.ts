@@ -1130,8 +1130,8 @@ export interface BuiltinRunnerOptions {
   agentpartyConfigPath?: string;
   /** Prevent the model process from inheriting any usable AgentParty identity. */
   isolateModelPartyAccess?: boolean;
-  /** Front control plane is read-only; execution workers keep workspace-write. */
-  sandbox?: "read-only" | "workspace-write";
+  /** Ordinary residents use full access; managed front/worker lanes explicitly stay constrained. */
+  sandbox?: "read-only" | "workspace-write" | "danger-full-access";
   /** Supervisor-owned routing for managed front/worker results. */
   resultRoute?: RunnerResultRoute;
   /** Harness-enforced final response schema for the managed control plane. */
@@ -2665,7 +2665,7 @@ async function runHarness(
     const flags = [
       "--skip-git-repo-check",
       "--sandbox",
-      opts.sandbox ?? "workspace-write",
+      opts.sandbox ?? "danger-full-access",
       ...schemaArgs,
       ...mcpArgs,
       "-o",
