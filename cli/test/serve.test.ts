@@ -3289,6 +3289,42 @@ describe("codex-sdk runner", () => {
     });
   });
 
+  test("SDK MCP image results are uploaded as reply attachments", async () => {
+    const { posts, post } = postRecorder();
+    const { uploads, upload } = uploadRecorder();
+    const imageBytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+    const thread: ThreadLike = {
+      id: "thread_image_12345678",
+      run: async () => ({
+        finalResponse: "已生成图片",
+        items: [{
+          type: "mcp_tool_call",
+          result: {
+            content: [
+              { type: "image", data: Buffer.from(imageBytes).toString("base64"), mimeType: "image/png" },
+              { type: "image", data: Buffer.from("unsafe").toString("base64"), mimeType: "image/p2\u001fdata" },
+            ],
+            structured_content: null,
+          },
+        }],
+      }),
+    };
+
+    await sdkRunner({
+      workdir: tempDir(),
+      post,
+      uploadAttachment: upload,
+      codexFactory: () => ({ startThread: () => thread, resumeThread: () => thread }),
+    })(triggerFrame(103), runnerCtx());
+
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]).toMatchObject({ filename: "generated-image-1.png", contentType: "image/png" });
+    expect(uploads[0]!.bytes).toEqual(imageBytes);
+    const message = posts.at(-1)!.body as Extract<MessagePayload, { kind: "message" }>;
+    expect(message.attachments).toHaveLength(1);
+    expect(message.attachments![0]!.filename).toBe("generated-image-1.png");
+  });
+
   test("session reports fall back to workdir when the SDK does not provide cwd", async () => {
     const { post } = postRecorder();
     const workdir = tempDir();
