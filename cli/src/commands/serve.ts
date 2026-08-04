@@ -1812,6 +1812,42 @@ function guessAttachmentContentType(filename: string): string {
   return ATTACHMENT_CONTENT_TYPE_BY_EXT[ext] ?? "application/octet-stream";
 }
 
+interface RunnerAttachment {
+  filename: string;
+  bytes: Uint8Array;
+  contentType: string;
+}
+
+function generatedImageAttachments(result: unknown): RunnerAttachment[] {
+  if (!result || typeof result !== "object") return [];
+  const items = (result as Record<string, unknown>).items;
+  if (!Array.isArray(items)) return [];
+
+  const attachments: RunnerAttachment[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || (item as Record<string, unknown>).type !== "mcp_tool_call") continue;
+    const toolResult = (item as Record<string, unknown>).result;
+    if (!toolResult || typeof toolResult !== "object") continue;
+    const content = (toolResult as Record<string, unknown>).content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const image = block as Record<string, unknown>;
+      if (image.type !== "image" || typeof image.data !== "string" || typeof image.mimeType !== "string") continue;
+      const bytes = Buffer.from(image.data, "base64");
+      if (bytes.byteLength === 0) continue;
+      const contentType = image.mimeType.split(";", 1)[0]!.toLowerCase();
+      const extension = contentType === "image/jpeg" ? "jpg" : contentType.split("/")[1] ?? "bin";
+      attachments.push({
+        filename: `generated-image-${attachments.length + 1}.${extension}`,
+        bytes: Uint8Array.from(bytes),
+        contentType,
+      });
+    }
+  }
+  return attachments;
+}
+
 // worker 端 filename 校验：/^[^/\\\x00-\x1f\x7f]{1,255}$/（单段、无控制符）。消毒到合法单段。
 function safeAttachmentFilename(name: string): string {
   const cleaned = name.replace(/[/\\\x00-\x1f\x7f]/g, "_").slice(0, 255);
@@ -1891,6 +1927,7 @@ async function deliverRunnerMessage(opts: {
   expectedDecisionLineage?: RoutedRunnerMessage["expectedDecisionLineage"];
   expectedDecisionResponderOwner?: RoutedRunnerMessage["expectedDecisionResponderOwner"];
   attachmentRoot?: string | null;
+  attachments?: RunnerAttachment[];
   responseSource?: ResponseSource;
 }): Promise<Awaited<ReturnType<typeof postMessage>>> {
   const {
@@ -1907,6 +1944,7 @@ async function deliverRunnerMessage(opts: {
     expectedDecisionLineage,
     expectedDecisionResponderOwner,
     attachmentRoot,
+    attachments = [],
     responseSource,
   } = opts;
   // [attach:/abs/path]：交付物永远走 R2 附件（相对路径在此抛错，与旧行为一致）。
@@ -1917,6 +1955,9 @@ async function deliverRunnerMessage(opts: {
   if (decisionRequest !== undefined && attachPath !== null) {
     throw new Error("managed owner decision cannot be delivered as an attachment");
   }
+  const uploadedAttachments = await Promise.all(
+    attachments.map((attachment) => upload(server, token, channel, attachment.filename, attachment.bytes, attachment.contentType)),
+  );
   if (attachPath !== null) {
     const allowedPath = resolveRunnerAttachmentPath(attachPath, attachmentRoot);
     const bytes = readFileSync(allowedPath); // Buffer：逐字节，不做 utf8 往返，保住 #41 的完整性
@@ -1932,7 +1973,7 @@ async function deliverRunnerMessage(opts: {
       body: clampInlineBody(parts.join("\n")),
       mentions,
       reply_to: replyTo,
-      attachments: [ref],
+      attachments: [ref, ...uploadedAttachments],
       ...(responseSource === undefined ? {} : { response_source: responseSource }),
     });
   }
@@ -1948,7 +1989,7 @@ async function deliverRunnerMessage(opts: {
       body: `[reply body ${inlineBytes} bytes exceeded the ${BODY_LIMIT}-byte inline limit; delivered as attachment ${filename}]`,
       mentions,
       reply_to: replyTo,
-      attachments: [ref],
+      attachments: [ref, ...uploadedAttachments],
       ...(responseSource === undefined ? {} : { response_source: responseSource }),
     });
   }
@@ -1967,6 +2008,7 @@ async function deliverRunnerMessage(opts: {
       ? {}
       : { expected_decision_responder_owner: expectedDecisionResponderOwner }),
     ...(responseSource === undefined ? {} : { response_source: responseSource }),
+    ...(uploadedAttachments.length === 0 ? {} : { attachments: uploadedAttachments }),
   };
   return await post(server, token, channel, payload);
 }
@@ -2003,6 +2045,7 @@ async function deliverRunnerResult(opts: {
   token: string;
   channel: string;
   attachmentRoot?: string | null;
+  attachments?: RunnerAttachment[];
   responseSource?: ResponseSource;
 }): Promise<RunnerDeliveryOutcome> {
   const routed = opts.route === undefined
@@ -2024,6 +2067,7 @@ async function deliverRunnerResult(opts: {
     // A supervisor-owned route is managed. It is fail-closed unless that lane explicitly grants a
     // real workspace root; legacy non-routed runners preserve their historical attachment behavior.
     attachmentRoot: opts.route === undefined ? opts.attachmentRoot : opts.attachmentRoot ?? null,
+    attachments: opts.attachments,
     responseSource: opts.responseSource,
   });
   if (routed.completionSummarySeq !== undefined) {
@@ -3036,6 +3080,7 @@ export function createSdkRunner(opts: SdkRunnerOptions): NonNullable<ServeOption
           frame,
           text: body,
           marker: null,
+          attachments: generatedImageAttachments(result),
           delivery: ctx.delivery ?? null,
           route: opts.resultRoute,
           post,
