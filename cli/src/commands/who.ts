@@ -6,6 +6,7 @@ import { resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
 import { fetchPresence, fetchReadCursors, handleRestError } from "../rest";
 import { localStatuslineBase, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
+import { sanitizeSingleLine } from "../format";
 import { isSlug } from "../validation";
 
 const WHO_FLAGS = ["channel", "json"];
@@ -42,6 +43,12 @@ answered by a resident runner in a SEPARATE per-channel session — it does not
 inherit that person's open conversation, so it does not know what they did today
 or which of their conclusions have since been overturned. Weigh its replies
 accordingly, and read the same tag on individual messages in party history.
+A "🔒 repo:foo,repo:bar" note is what that agent has CLAIMED it is touching right
+now (declare yours with: party status working --scope repo:foo). A "⚠" on a scope
+plus "(also held by X)" means someone else claimed the same thing — nothing is
+blocked, but you now know before you edit, instead of finding out from the diff.
+Channel charter describes long-term ownership; scope describes who is touching
+what at this moment. They are different questions.
 Then bring one in: party send "@name …" --mention name
 A human is @-notified by their handle (their web client matches on handle, not the
 session name), so mention the "@handle" shown here — not a UUID session name.
@@ -49,7 +56,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/reception_mode/reception_runner/reception_context/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -115,6 +122,12 @@ interface Row {
   reception_mode?: ReceptionMode;
   reception_runner?: ReceptionRunner;
   reception_context?: ReceptionContextBoundary;
+  // #823：「此刻谁在动什么」。scope 早就在 status frame 里（party status --scope 也一直能传），
+  // 只是从没被读出来过——于是频道没有承载「所有权」的地方，越界只能靠自觉。charter 说的是长期
+  // 职责，冲突发生在「此刻谁在改哪个仓库」这个粒度上，两者必须分开。
+  scope?: string[];
+  // 同一个 scope 被别人也占着。不阻止（agent 之间本来就靠自觉），只让它看得见。
+  scope_conflicts?: { scope: string; with: string[] }[];
 }
 
 // kind 已知取 kind；旧 presence 行没回填时 UUID 名判 human（网页登录会话），其余判 agent。
@@ -195,6 +208,10 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     // 探活分级（#603）：服务端只对有活连接的身份下发 listening；runner_health 独立于任务生命周期。
     ...(e.listening === "suspect" || e.listening === "deaf" ? { listening: e.listening } : {}),
     ...(e.runner_health === undefined ? {} : { runner_health: e.runner_health }),
+    // #823：scope 只在 state != offline 时有意义——已经离线的人不再占着任何东西。
+    ...(Array.isArray(e.status?.scope) && e.status.scope.length > 0 && e.state !== "offline"
+      ? { scope: e.status.scope }
+      : {}),
     ...(e.agent_session === undefined ? {} : { agent_session: e.agent_session }),
     // #817：接待模式（status.context 里一直有，只是 who 的可读输出从不显示）。原样带出，缺失省略。
     ...(e.status?.context?.reception_mode === undefined ? {} : { reception_mode: e.status.context.reception_mode }),
@@ -346,6 +363,37 @@ export function receptionNote(r: Row): string {
   return ` · 🤖 reception ${r.reception_mode}${runner}${boundary}`;
 }
 
+// #823：把「此刻谁在动什么」标出来，并在两个人声明同一个 scope 时提示。不阻止——agent 之间本来
+// 就靠自觉，而且合法的并行编辑确实存在；但「有人已经在这上面了」这件事必须看得见，否则唯一的
+// 协调手段就是双方都能正确判断对方状态，而那个前提本身不成立（见 #825）。
+export function annotateScopeConflicts(rows: Row[]): Row[] {
+  const holders = new Map<string, string[]>();
+  for (const row of rows) {
+    for (const scope of row.scope ?? []) {
+      holders.set(scope, [...(holders.get(scope) ?? []), row.name]);
+    }
+  }
+  return rows.map((row) => {
+    const conflicts = (row.scope ?? [])
+      .map((scope) => ({ scope, with: (holders.get(scope) ?? []).filter((name) => name !== row.name) }))
+      .filter((entry) => entry.with.length > 0);
+    return conflicts.length > 0 ? { ...row, scope_conflicts: conflicts } : row;
+  });
+}
+
+export function scopeNote(r: Row): string {
+  if (r.scope === undefined || r.scope.length === 0) return "";
+  const conflicted = new Set((r.scope_conflicts ?? []).map((entry) => entry.scope));
+  const rendered = r.scope
+    .map((scope) => (conflicted.has(scope) ? `${sanitizeSingleLine(scope)}⚠` : sanitizeSingleLine(scope)))
+    .join(",");
+  const who =
+    r.scope_conflicts && r.scope_conflicts.length > 0
+      ? ` (also held by ${[...new Set(r.scope_conflicts.flatMap((entry) => entry.with))].join(", ")})`
+      : "";
+  return ` · 🔒 ${rendered}${who}`;
+}
+
 export function sessionNote(r: Row): string {
   const session = r.agent_session;
   if (session === undefined) return "";
@@ -413,11 +461,12 @@ export async function run(argv: string[]): Promise<number> {
       ...(lastSeq > 0 ? { unread: unreadFromCursor(lastSeq, channel) } : {}),
     });
     const now = Date.now();
-    const rows = presence
-      .map((e) => classify(e, now))
-      .filter((r): r is Row => r !== null)
-      .map((r) => ({ ...r, read_seq: cursorOf.get(r.name) }))
-      .sort((a, b) => RANK[a.tier] - RANK[b.tier] || a.name.localeCompare(b.name));
+    const rows = annotateScopeConflicts(
+      presence
+        .map((e) => classify(e, now))
+        .filter((r): r is Row => r !== null)
+        .map((r) => ({ ...r, read_seq: cursorOf.get(r.name) })),
+    ).sort((a, b) => RANK[a.tier] - RANK[b.tier] || a.name.localeCompare(b.name));
     if (flags.json === true) {
       for (const r of rows) console.log(JSON.stringify(r));
       return 0;
@@ -447,7 +496,7 @@ export async function run(argv: string[]): Promise<number> {
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
       // #664：recent 档里真·不可达的（无活 wake 通道 + 陈旧）单独标出，别和「最近露面、或许在轮询」混淆。
       const unreach = r.unreachable === true ? " · ⚠ unreachable (mention lands in history only)" : "";
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
+      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${scopeNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
     }
     return 0;
   } catch (e) {
