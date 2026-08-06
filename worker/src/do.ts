@@ -11506,7 +11506,14 @@ export class ChannelDO extends Server<Env> {
   ): Record<string, unknown> {
     const live = liveSessions.get(name);
     const liveRows = live === undefined ? [] : rows.filter((row) => live.has(String(row.session_id)));
-    const candidates = liveRows.length > 0 ? liveRows : rows;
+    // #825：只看 live 行会把「经 REST 发来的 status 帧」整个丢掉——REST 路径的 presence 行落在
+    // LEGACY_SESSION_ID 上，它永远不在 liveSessions（那里装的是 WS 连接 id）里。于是一个既挂着
+    // serve（有活 WS）又用 REST 报状态的 agent，who 会永远停在 WS 那行的旧状态上。
+    // 实测后果：频道里已有 working 帧 152 秒了，party_who 仍报 waiting，协作方据此判断「没人接活」，
+    // 直接去改了对方仓库——错的不是那个判断，是喂给它的信息。
+    //
+    // 「优先 live 行」的本意是别让已死会话的陈旧状态盖住活着的，这个意图保留；但它不该盖住一条
+    // 更新的状态。
     const rank = (row: Record<string, unknown>): number => {
       if (Number(row.busy) === 1) return 500;
       if (row.current_task !== null && row.current_task !== undefined) return 450;
@@ -11516,6 +11523,26 @@ export class ChannelDO extends Server<Env> {
       if (row.state === "done") return 100;
       return 0;
     };
+    // 光把新的非 live 行并进候选集还不够：下面的挑选是 rank 优先，而 rank 里 working(400) 高于
+    // blocked(300)，于是「serve 正在 working 时熔断、经 REST 发 blocked」这个场景里，旧的 working
+    // 仍然会盖住新的 blocked——「serve 已经死了」照样不可见，正是 #821 要修的那件事。
+    // 所以：只要存在不比最新 live 行旧的非 live 行，就让**新鲜度先于 rank** 决定取哪条。
+    // 用 >= 而不是 >：updated_at 是毫秒，两次先后完成的写入可能落在同一毫秒里，严格大于会把后到的
+    // REST 状态排除掉。同毫秒时取 rank 高的作为稳定 tiebreak。
+    const newestLiveAt = liveRows.reduce((max, row) => Math.max(max, Number(row.updated_at)), -Infinity);
+    const fresherNonLive =
+      liveRows.length > 0
+        ? rows.filter((row) => !live!.has(String(row.session_id)) && Number(row.updated_at) >= newestLiveAt)
+        : [];
+    if (fresherNonLive.length > 0) {
+      return fresherNonLive.reduce((best, row) => {
+        const at = Number(row.updated_at);
+        const bestAt = Number(best.updated_at);
+        if (at !== bestAt) return at > bestAt ? row : best;
+        return rank(row) > rank(best) ? row : best;
+      });
+    }
+    const candidates = liveRows.length > 0 ? liveRows : rows;
     return candidates.reduce((best, row) => {
       const score = rank(row);
       const bestScore = rank(best);
