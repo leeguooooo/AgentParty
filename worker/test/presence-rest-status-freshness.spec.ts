@@ -101,6 +101,53 @@ describe("#825 party_who 必须反映最新一次状态变更", () => {
     }
   });
 
+  // rank 里 working(400) 高于 blocked(300)，所以「正在 working 时熔断、经 REST 发 blocked」这条路径
+  // 光把新行并进候选集是不够的——旧的 working 仍会盖住新的 blocked。这正是熔断场景的真实顺序，
+  // 我第一版测试用 waiting 当前置状态，恰好绕开了它。
+  it("working → blocked：更新的 REST 状态压过 rank 更高但更旧的 live 状态", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    const ws = await WsClient.open(slug, agent.token);
+    await completeCapabilityHello(ws);
+
+    try {
+      ws.send({ type: "send", kind: "status", state: "working", note: "handling seq 472", mentions: [] });
+      await ws.nextOfType("sent");
+      expect((await presenceOf(slug, agent.token, agent.name))?.state).toBe("working");
+
+      expect((await postStatus(slug, agent.token, "blocked", "circuit breaker tripped")).status).toBe(200);
+
+      const entry = await presenceOf(slug, agent.token, agent.name);
+      expect(entry?.state).toBe("blocked");
+      expect(entry?.note).toBe("circuit breaker tripped");
+    } finally {
+      ws.close();
+    }
+  });
+
+  // updated_at 是毫秒。两次先后完成的写入可能落在同一毫秒里；严格大于会把后到的 REST 状态排除，
+  // 于是同一毫秒内的状态变更随机丢失——这类 bug 极难复现，必须在契约层挡住。
+  it("同毫秒写入不丢：紧接着发出的 REST 状态仍然生效", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    const ws = await WsClient.open(slug, agent.token);
+    await completeCapabilityHello(ws);
+
+    try {
+      // 不等任何延时，紧贴着发——尽量把两次写入压进同一毫秒。
+      ws.send({ type: "send", kind: "status", state: "working", note: "ws", mentions: [] });
+      await ws.nextOfType("sent");
+      expect((await postStatus(slug, agent.token, "done", "rest right after")).status).toBe(200);
+
+      const entry = await presenceOf(slug, agent.token, agent.name);
+      // done 的 rank(100) 远低于 working(400)：只有「新鲜度优先」才能让它赢。
+      expect(entry?.state).toBe("done");
+      expect(entry?.note).toBe("rest right after");
+    } finally {
+      ws.close();
+    }
+  });
+
   it("没有活连接时行为不变：REST 状态照常反映", async () => {
     const agent = await seedToken("agent");
     const slug = await createChannel(agent.token);

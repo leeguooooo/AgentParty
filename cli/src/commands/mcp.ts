@@ -893,6 +893,11 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         if (assignee !== undefined && assignee_name !== undefined && assignee.replace(/^@/, "") !== assignee_name.replace(/^@/, "")) {
           throw new Error(`assignee and assignee_name disagree: ${assignee} vs ${assignee_name} — pass only one`);
         }
+        // 光给 assignee_kind 不给名字，normalizeAssignee 会返回 undefined——任务照建，但没人被指派，
+        // 而调用方明明表达了指派意图。这正是本 issue 要消灭的那类静默丢弃，别在修它的时候留一个同款。
+        if (assignee_kind !== undefined && assignee === undefined && assignee_name === undefined) {
+          throw new Error("assignee_kind needs an assignee: pass assignee (or assignee_name) too");
+        }
         const resolvedAssignee = normalizeAssignee(assignee ?? assignee_name, assignee_kind as TaskAssigneeKind | undefined);
         const task = await createTask(cfg.server, cfg.token, resolved, {
           title,

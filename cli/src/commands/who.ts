@@ -484,7 +484,7 @@ export async function run(argv: string[]): Promise<number> {
           typeof r.resume_at === "number"
             ? ` · resumes in ${humanAge(Math.max(0, r.resume_at - now))}`
             : " · resume manually";
-        console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${read}${duplicate}`);
+        console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${scopeNote(r)}${read}${duplicate}`);
         continue;
       }
       // #191：可唤醒行明确标出「已验证 / 未验证」——verified＝服务端确认过（webhook，或观测到被 @ 后 resume），
