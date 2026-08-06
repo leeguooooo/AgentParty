@@ -114,6 +114,9 @@ export function parseReplyToList(raw: string | undefined): { replyTo: number | n
   for (const part of parts) {
     if (!/^[1-9]\d*$/.test(part)) return "--reply-to must be a seq, or a comma-separated list of seqs (e.g. 396,398)";
     const seq = Number(part);
+    // 正则不限位数，而 Number() 会把超出安全整数范围的值静默舍入（9007199254740993 → …92）。
+    // 那样清掉的就是**另一条** delivery 的债，而且完全无声。
+    if (!Number.isSafeInteger(seq)) return `--reply-to seq is out of range: ${part}`;
     if (!seqs.includes(seq)) seqs.push(seq);
   }
   if (seqs.length > MAX_ALSO_RESOLVES + 1) return `--reply-to accepts at most ${MAX_ALSO_RESOLVES + 1} seqs`;

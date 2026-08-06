@@ -69,6 +69,13 @@ describe("party history 渲染 response_source", () => {
     expect(msgHeader(RUNNER_REPLY, 20).response_source).toMatchObject({ runner: "claude", trigger_seq: 426 });
     expect(msgHeader(msg(), 20).response_source).toBeUndefined();
   });
+
+  // 全文模式的 badge 里有 edited；headers 漏掉它，被编辑过的消息在摘要行里就和原样的没区别。
+  test("headers 一行里保留 edited / retracted 标记，与全文模式同口径", () => {
+    expect(formatMsgHeader(msg({ edited: true } as never), 20)).toContain("edited");
+    expect(formatMsgHeader(msg(), 20)).not.toContain("edited");
+    expect(formatMsgHeader(msg({ retracted: true } as never), 20)).toContain("retracted");
+  });
 });
 
 describe("party who 显示当前接待模式", () => {

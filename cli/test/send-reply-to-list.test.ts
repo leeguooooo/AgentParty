@@ -31,6 +31,14 @@ describe("parseReplyToList", () => {
     expect(String(parseReplyToList("396,abc"))).toContain("comma-separated");
   });
 
+  test("超出安全整数范围的 seq 拒收——静默舍入会去清另一条 delivery 的债", () => {
+    // 9007199254740993 经 Number() 会变成 …92，正则本身拦不住（它不限位数）。
+    expect(typeof parseReplyToList("9007199254740993")).toBe("string");
+    expect(String(parseReplyToList("9007199254740993"))).toContain("out of range");
+    // 安全范围内的大数仍然收。
+    expect(parseReplyToList("9007199254740991")).toEqual({ replyTo: 9_007_199_254_740_991, alsoResolves: [] });
+  });
+
   test("超上限拒绝：一条消息不该清空整个接待债务", () => {
     const tooMany = Array.from({ length: MAX_ALSO_RESOLVES + 2 }, (_, i) => i + 1).join(",");
     expect(typeof parseReplyToList(tooMany)).toBe("string");

@@ -8,6 +8,7 @@ import {
   LOOP_GUARD_AGENT_PARTY_N,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
+  MAX_ALSO_RESOLVES,
   MAX_WEBHOOKS_PER_CHANNEL,
   MAX_MESSAGE_AUDIT_ROWS,
   MAX_WEBHOOK_DEAD_LETTERS,
@@ -305,8 +306,6 @@ const MENTION_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$/u;
 const WORKFLOW_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const CLIENT_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 const MAX_MENTIONS = 50;
-// #818：一条回复顺带了结的其它 @ 上限；与 shared 的 MAX_ALSO_RESOLVES 同值（本文件的常量都就地声明）。
-const MAX_ALSO_RESOLVES = 20;
 const MENTIONS_JSON_LIMIT = 4096;
 const MAX_STATUS_SCOPE = 50;
 const STATUS_SCOPE_JSON_LIMIT = 4096;

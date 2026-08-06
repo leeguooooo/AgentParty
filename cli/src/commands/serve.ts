@@ -4991,8 +4991,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
   // 互相踩，而两边都以为自己在正常工作——损坏是静默的，此前只能靠 pgrep 偶然发现。
   // 不阻断（同目录并存有合法用法），但必须让它可见。
   const runnerCwd = o.runnerCwd ?? o.builtinRunner?.workdir ?? o.sdkRunner?.workdir ?? process.cwd();
-  const cwdClaim = o.allowMultiple === true ? null : claimRunnerCwd(runnerCwd, o.channel, lockDir);
-  if (cwdClaim !== null && cwdClaim.conflicts.length > 0) {
+  // 不受 --allow-multiple 影响：那个逃生舱解的是「同频道同身份的实例锁」，与「谁在用这个目录」
+  // 是两件事。而且用了 --allow-multiple 的人恰恰更可能撞上同目录并发——那时更需要这条告警。
+  const cwdClaim = claimRunnerCwd(runnerCwd, o.channel, lockDir);
+  if (cwdClaim.conflicts.length > 0) {
     const others = cwdClaim.conflicts.map((c) => `pid ${c.pid} (#${c.channel})`).join("、");
     out(
       `serve: ⚠ 同一个工作目录已被另一个 serve 使用：${runnerCwd}（${others}）。` +
@@ -5007,7 +5009,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
       const message = sanitizeBlockedError(error instanceof Error ? error.message : String(error));
       out(`serve: runner 启动预检失败，不连接频道、不领取租约：${message}`);
       lock?.release?.();
-      cwdClaim?.release();
+      cwdClaim.release();
       return EXIT_RUNNER_UNAVAILABLE;
     }
   }
@@ -5023,7 +5025,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
     });
   } catch (error) {
     lock?.release?.();
-    cwdClaim?.release();
+    cwdClaim.release();
     throw error;
   }
   const lifecycleController = new AbortController();
@@ -6000,7 +6002,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
     // 但绝不在进程退出后继续留在共享 tmpdir 里（#208 门禁 P2）。
     rmSync(contextDir, { recursive: true, force: true });
     lock?.release?.();
-    cwdClaim?.release();
+    cwdClaim.release();
     if (heartbeat) clearInterval(heartbeat);
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onTerminate);

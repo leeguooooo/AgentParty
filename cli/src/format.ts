@@ -135,6 +135,9 @@ export function formatMsgHeader(m: MsgFrame, previewChars = DEFAULT_HEADER_PREVI
     h.reply_to !== null ? `↩#${h.reply_to}` : null,
     h.attachments !== undefined ? `📎${h.attachments}` : null,
     h.retracted === true ? "retracted" : null,
+    // 全文模式的 badge 里有 edited，headers 模式漏掉它的话，被编辑过的消息在这一行摘要里
+    // 和没编辑过的长得一样——纯文本读者（包括直接读输出的 agent）就丢了这个信号。
+    h.edited === true ? "edited" : null,
     `${h.chars}ch`,
   ].filter((part): part is string => part !== null);
   return stripTerminalControls(

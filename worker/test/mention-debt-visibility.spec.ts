@@ -126,7 +126,11 @@ describe("#818 一条回复可以同时了结多条 @", () => {
     expect((await send(slug, sender.token, "x", [], { also_resolves: [0] })).status).toBe(400);
     expect((await send(slug, sender.token, "x", [], { also_resolves: ["3"] })).status).toBe(400);
     expect((await send(slug, sender.token, "x", [], { also_resolves: 3 })).status).toBe(400);
-    // 上限 20：别让一条消息把整个接待债务一次清空。
+    // 上限 20：别让一条消息把整个接待债务一次清空。恰好 20 必须收，21 必须拒——
+    // 边界写死，免得以后有人把 > 改成 >= 而没人发现。
+    expect(
+      (await send(slug, sender.token, "x", [], { also_resolves: Array.from({ length: 20 }, (_, i) => i + 1) })).status,
+    ).toBe(200);
     expect(
       (await send(slug, sender.token, "x", [], { also_resolves: Array.from({ length: 21 }, (_, i) => i + 1) })).status,
     ).toBe(400);

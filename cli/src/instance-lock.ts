@@ -10,10 +10,10 @@
 //
 // ⚠️ 这把锁只挡**同一台机器**。跨机器的重复执行（工位机 + 家里机各跑一个 serve）
 // 需要服务端租约（#99 的另一半,`do.ts` 广播发给同名所有连接）。
-import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { agentpartyHome } from "./config";
 import { sleepSyncMs } from "./sync-sleep";
 
@@ -348,8 +348,25 @@ export interface RunnerCwdClaim {
   release: () => void;
 }
 
-function runnerCwdClaimPath(cwd: string, channel: string, dir: string): string {
-  const key = createHash("sha256").update(cwd).digest("hex").slice(0, 24);
+// 同一棵工作树可以有很多种写法：相对路径、尾随斜杠、symlink。按原始字符串做 hash 的话，
+// `serve --workdir ./repo` 和 `serve --workdir /abs/repo/` 会算出两个不同的 key，于是两个
+// runner 落在同一棵树上却互相看不见——恰好是这套告警要挡的那个场景。先绝对化，目录存在时
+// 再解析真实路径（不存在就退回绝对路径，别为了规范化让 serve 起不来）。
+function canonicalCwd(cwd: string): string {
+  const absolute = resolve(cwd);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+function runnerCwdClaimKey(canonical: string): string {
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 24);
+}
+
+function runnerCwdClaimPath(canonical: string, channel: string, dir: string): string {
+  const key = runnerCwdClaimKey(canonical);
   return join(dir, RUNNER_CWD_CLAIM_DIR, `${key}-${channel.replace(/[^a-zA-Z0-9._-]/g, "_")}-${process.pid}.json`);
 }
 
@@ -360,7 +377,19 @@ function runnerCwdClaimPath(cwd: string, channel: string, dir: string): string {
 export function claimRunnerCwd(cwd: string, channel: string, dir = defaultInstanceLockDir()): RunnerCwdClaim {
   const claimDir = join(dir, RUNNER_CWD_CLAIM_DIR);
   mkdirSync(claimDir, { recursive: true });
-  const key = createHash("sha256").update(cwd).digest("hex").slice(0, 24);
+  const canonical = canonicalCwd(cwd);
+  const key = runnerCwdClaimKey(canonical);
+  const path = runnerCwdClaimPath(canonical, channel, dir);
+  // 先写后扫，不能反过来：两个 serve 同时启动时，「先扫后写」会让两边都在目录还空着的时候
+  // 扫完，各自写入，双方 conflicts 都是空——一条告警都不出，正是最该出告警的时刻。
+  // 先落自己的登记，后扫的那个至少能看见先来的。
+  try {
+    writeFileSync(path, JSON.stringify({ pid: process.pid, started_at: PROCESS_STARTED_AT, channel, cwd: canonical }), {
+      mode: 0o600,
+    });
+  } catch {
+    /* 登记失败只丢失告警能力，绝不该让 serve 起不来。 */
+  }
   const conflicts: { pid: number; channel: string }[] = [];
   let entries: string[] = [];
   try {
@@ -370,30 +399,23 @@ export function claimRunnerCwd(cwd: string, channel: string, dir = defaultInstan
   }
   for (const entry of entries) {
     if (!entry.startsWith(`${key}-`) || !entry.endsWith(".json")) continue;
-    const path = join(claimDir, entry);
+    const entryPath = join(claimDir, entry);
+    if (entryPath === path) continue; // 自己刚写的那条
     let holder: { pid?: number; channel?: string; started_at?: number } | null = null;
     try {
-      holder = JSON.parse(readFileSync(path, "utf8")) as { pid?: number; channel?: string; started_at?: number };
+      holder = JSON.parse(readFileSync(entryPath, "utf8")) as { pid?: number; channel?: string; started_at?: number };
     } catch {
       holder = null;
     }
     if (typeof holder?.pid !== "number" || holder.pid === process.pid || !sameLiveProcess(holder.pid, holder.started_at)) {
       try {
-        unlinkSync(path);
+        unlinkSync(entryPath);
       } catch {
         /* 另一个进程已经清掉了这条陈旧登记。 */
       }
       continue;
     }
     conflicts.push({ pid: holder.pid, channel: holder.channel ?? "?" });
-  }
-  const path = runnerCwdClaimPath(cwd, channel, dir);
-  try {
-    writeFileSync(path, JSON.stringify({ pid: process.pid, started_at: PROCESS_STARTED_AT, channel, cwd }), {
-      mode: 0o600,
-    });
-  } catch {
-    /* 登记失败只丢失告警能力，绝不该让 serve 起不来。 */
   }
   return {
     conflicts,
