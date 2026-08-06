@@ -70,6 +70,37 @@ describe("#825 party_who 必须反映最新一次状态变更", () => {
     }
   });
 
+  // #821：serve 熔断退出前会经 REST 发一条 blocked 通告，但那一刻它的 WS 还开着——正是上面这个
+  // bug 会把它整个丢掉的时机。于是「serve 已经死了」这件事对本人和协作方都不可见，协作方只看到
+  // 一个 waiting 的人不回话，进而可能直接接管他的活。这条 case 单独钉住。
+  it("serve 熔断的 blocked 通告不被自己那条还活着的 WS 连接盖住", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+
+    const ws = await WsClient.open(slug, agent.token);
+    await completeCapabilityHello(ws);
+    ws.send({ type: "send", kind: "status", state: "waiting", note: "standby", mentions: [], wake: { kind: "serve" } });
+    await ws.nextOfType("sent");
+
+    try {
+      const note = "serve wake circuit breaker tripped: reason=consecutive_abandons; consecutive_abandons=3/3";
+      expect(
+        (
+          await api(`/api/channels/${slug}/messages`, agent.token, {
+            method: "POST",
+            body: JSON.stringify({ kind: "status", state: "blocked", note, mentions: [], blocked_reason: note }),
+          })
+        ).status,
+      ).toBe(200);
+
+      const entry = await presenceOf(slug, agent.token, agent.name);
+      expect(entry?.state).toBe("blocked");
+      expect(entry?.status?.blocked_reason).toContain("circuit breaker tripped");
+    } finally {
+      ws.close();
+    }
+  });
+
   it("没有活连接时行为不变：REST 状态照常反映", async () => {
     const agent = await seedToken("agent");
     const slug = await createChannel(agent.token);

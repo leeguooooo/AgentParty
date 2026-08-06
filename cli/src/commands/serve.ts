@@ -5816,6 +5816,16 @@ export async function runServe(o: ServeOptions): Promise<number> {
                 last_error: sanitizeBlockedError(lastError).slice(0, 160),
               };
               out(`  ${lastError}: seq=${frame.seq}`);
+              // #821：这句只陈述事实，不说该怎么办。最常见的成因是 runner 根本没把输出发回频道
+              // （headless `claude -p` / `codex exec` 只打到 stdout 就结束），而它连续三次就熔断
+              // 退出——本人不会收到通知，协作方只看到「这个人不回话」，进而可能直接接管你的活。
+              // 第一次就把成因和改法说清楚，别等熔断了才让人回头查。
+              out(
+                "  提示：runner 必须自己把回复发回频道。headless CLI（claude -p / codex exec）只把答案打到 " +
+                  "stdout，不会发频道——把输出捞回来再发：" +
+                  'OUT=$(mktemp); <runner> > "$OUT" 2>&1; party send - --channel "$AP_CHANNEL" --reply-to "$AP_REPLY_TO" < "$OUT"' +
+                  `（连续 ${MAX_CONSECUTIVE_WAKE_ABANDONS} 次放弃就会熔断退出）`,
+              );
               // The first completion probe already made `failed` authoritative in the Worker.
               // Clean exact local continuation state now; a disconnect before the redundant
               // blocked-state receipt below must not leave a terminal work capability on disk.

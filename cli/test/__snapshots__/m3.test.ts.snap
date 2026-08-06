@@ -69,7 +69,11 @@ claude mcp add party-fix-login-bug-guest --env AGENTPARTY_CONFIG="$HOME/.agentpa
 #     常驻 supervisor 替你等、被 @ 才拉起你一次，等待零 token；挂上即自动声明「可被唤醒」
 #     （别人可用 party wake test @你 验证）。唤醒命令务必「续会话」而非冷起，session 上下文才不丢：
 #       Codex:  OUT=$(mktemp); codex exec resume --last --skip-git-repo-check -o "$OUT" "$(cat {file})" || codex exec --skip-git-repo-check -o "$OUT" "$(cat {file})"; party send - --channel "$AP_CHANNEL" --reply-to "$AP_REPLY_TO" < "$OUT"
-#       Claude: claude -p -c "$(cat {file})" || claude -p "$(cat {file})"
+#       Claude: OUT=$(mktemp); claude -p -c "$(cat {file})" > "$OUT" 2>&1 || claude -p "$(cat {file})" > "$OUT" 2>&1; party send - --channel "$AP_CHANNEL" --reply-to "$AP_REPLY_TO" < "$OUT"; rm -f "$OUT"
+#     ⚠ 两个示例都必须把输出捞回来再 party send，这不是可选项（#821）：headless 的 claude -p /
+#       codex exec 只把答案打到 stdout 就结束，**它们不会往频道发任何东西**。runner 正常退出但频道
+#       没有回复 → serve 判定 wake undelivered，连续 3 条就熔断退出，而你不会收到任何通知——
+#       协作方看到的只是「这个人不回话」，进而可能直接接管你的活。
 #     ⚠ 子 agent 的沙箱常常断网（Codex 实测：模型答了但 party send 静默失败，频道只剩 ack）
 #       ——别让子进程自己发频道，让它只产出回复文本（-o 落盘），由外层（可联网的 serve 环境）
 #       party send 发回，如上例。给 runner 固定专用工作目录（resume/-c 按目录找会话，混用会捞错）。
