@@ -41,6 +41,10 @@ describe("party_send / party_who 的 loop guard 可见性（真 stdio server + m
         }
         if (url.pathname.endsWith("/messages") && req.method === "POST") {
           if (sendStatus === 200) return Response.json({ seq: 7 });
+          if (sendStatus === 429) {
+            // 服务端限流未必带 code——网关/中间层的 429 常常只有状态码。
+            return Response.json({ error: { message: "slow down" } }, { status: 429 });
+          }
           return Response.json(
             { error: { code: "loop_guard", message: LOOP_GUARD_MESSAGE } },
             { status: sendStatus },
@@ -136,6 +140,23 @@ describe("party_send / party_who 的 loop guard 可见性（真 stdio server + m
         status: 409,
       });
       expect(String(data.message)).toContain("fair-share budget");
+    } finally {
+      await client.close();
+    }
+  }, 20000);
+
+  test("429 但响应体没带 code：仍要给出退避 hint，而不是退化成裸错误", async () => {
+    sendStatus = 429;
+    startRest();
+    const client = await connect();
+    try {
+      const r = await client.callTool({ name: "party_send", arguments: { body: "hi" } });
+      expect(r.isError).toBe(true);
+      const data = r.structuredContent as Record<string, unknown>;
+      expect(data.status).toBe(429);
+      // 没有 code 可查时按状态码补 hint——否则限流这条路径又变回「只有一个数字」。
+      expect(String(data.hint)).toContain("back off");
+      expect((r.content as { text: string }[])[0].text).toContain("back off");
     } finally {
       await client.close();
     }

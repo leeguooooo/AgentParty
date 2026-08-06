@@ -131,12 +131,21 @@ const EXIT_GUIDANCE: Record<string, string> = {
   archived: "channel is archived — no further writes are accepted.",
 };
 
+// handleRestError 认 429 也认 code=rate_limited（服务端两种都发得出来）。按 code 查不到时补一次
+// 按状态码查，否则「限流但响应体没带 code」这条路径会退化成没有 hint 的裸错误——正是本 issue
+// 要消灭的那种。与 handleRestError 的判定保持同一口径。
+function guidanceFor(e: RestError): string | undefined {
+  const byCode = e.code === null ? undefined : EXIT_GUIDANCE[e.code];
+  if (byCode !== undefined) return byCode;
+  return e.status === 429 ? EXIT_GUIDANCE.rate_limited : undefined;
+}
+
 function failFromRestError(label: string, e: unknown): CallToolResult {
   // handleRestError 同时负责把可读原因打进 stderr 并映射退出码；保留调用以维持 CLI 侧行为一致。
   const exitCode = handleRestError(e);
   if (e instanceof RestError) {
     const code = e.code ?? String(e.status);
-    const guidance = e.code === null ? undefined : EXIT_GUIDANCE[e.code];
+    const guidance = guidanceFor(e);
     return fail(
       `${label} failed with exit ${exitCode}: ${code} ${e.message}` + (guidance === undefined ? "" : `\nhint: ${guidance}`),
       {
