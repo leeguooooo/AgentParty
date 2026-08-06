@@ -11506,7 +11506,19 @@ export class ChannelDO extends Server<Env> {
   ): Record<string, unknown> {
     const live = liveSessions.get(name);
     const liveRows = live === undefined ? [] : rows.filter((row) => live.has(String(row.session_id)));
-    const candidates = liveRows.length > 0 ? liveRows : rows;
+    // #825：只看 live 行会把「经 REST 发来的 status 帧」整个丢掉——REST 路径的 presence 行落在
+    // LEGACY_SESSION_ID 上，它永远不在 liveSessions（那里装的是 WS 连接 id）里。于是一个既挂着
+    // serve（有活 WS）又用 REST 报状态的 agent，who 会永远停在 WS 那行的旧状态上。
+    // 实测后果：频道里已有 working 帧 152 秒了，party_who 仍报 waiting，协作方据此判断「没人接活」，
+    // 直接去改了对方仓库——错的不是那个判断，是喂给它的信息。
+    //
+    // 「优先 live 行」的本意是别让已死会话的陈旧状态盖住活着的，这个意图保留；但它不该盖住一条
+    // **严格更新**的状态。取并集：live 行 + 比最新 live 行还新的非 live 行。
+    const newestLiveAt = liveRows.reduce((max, row) => Math.max(max, Number(row.updated_at)), -Infinity);
+    const candidates =
+      liveRows.length > 0
+        ? [...liveRows, ...rows.filter((row) => !live!.has(String(row.session_id)) && Number(row.updated_at) > newestLiveAt)]
+        : rows;
     const rank = (row: Record<string, unknown>): number => {
       if (Number(row.busy) === 1) return 500;
       if (row.current_task !== null && row.current_task !== undefined) return 450;
