@@ -1130,9 +1130,21 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     {
       title: "Wait for one matching mention",
       description:
-        "Actively wait until the next matching message arrives, then return its structured frame. The tool call must remain in flight; MCP notifications do not wake an idle model turn.",
+        "Actively wait until the next matching message arrives, then return its structured frame. The tool call must remain in flight; MCP notifications do not wake an idle model turn. " +
+        "An un-acked wake REPLAYS and holds newer messages behind it until cleared — pass ack_replay:true to clear a replayed wake as you receive it (#826).",
       inputSchema: {
         channel: z.string().optional(),
+        // #826：未 ack 的 delivery 会一直重投并把新消息挡在后面。默认不自动 ack——那道债正是
+        // 「被唤醒但没回」的durability 保证（#198：误清 = 静默丢 @）。但纯读场景（收到的是别人的
+        // status/自动回执）不该为此空转，给一个显式开关，让调用方自己承担这次的语义。
+        ack_replay: z
+          .boolean()
+          .optional()
+          .describe(
+            "When this call returns a REPLAYED wake, clear its debt immediately instead of leaving it to replay again. " +
+              "Default false (the debt survives until you ack or reply, so a crashed turn does not lose the @). " +
+              "Set true when you are polling and would otherwise be starved by a wake that needs no reply.",
+          ),
         // #827：上限只存在于校验里，调用方得撞一次才知道。校验规则本身就是契约，没理由只在失败时才讲。
         timeout_sec: z
           .number()
@@ -1144,7 +1156,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         mentions_only: z.boolean().optional(),
       },
     },
-    async ({ channel, timeout_sec, mentions_only }) => {
+    async ({ channel, timeout_sec, mentions_only, ack_replay }) => {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
@@ -1197,14 +1209,37 @@ export function createMcpServer(defaultChannel?: string): McpServer {
             lag: Math.max(0, channelLastSeq - pending.seq),
             skipped_mention_seqs: stuck.skipped_mention_seqs ?? [],
           });
+          const held = Math.max(0, channelLastSeq - pending.seq);
+          // #826：`pending_ack: true` 对不知道机制的调用方等于没说。实测代价是每次 600s 超时、
+          // 两轮 20 分钟全花在重复接收同一条上，而那段时间频道有 7 条新消息进不来——被卡住的
+          // 那条还恰好是零信息量的自动回执。把「必须 ack 才能前进」和确切要跑的命令写进返回里。
+          const ackHint =
+            `this is replay attempt ${replay.attempts} of seq=${pending.seq}; it will keep coming back, and ` +
+            `${held > 0 ? `${held} newer message(s) stay held` : "newer messages stay held"} until you clear it. ` +
+            `Clear it with party_ack({ seq: ${pending.seq} }) — party_ack takes seq, not delivery_id — ` +
+            "or reply to it with party_send({ reply_to: " +
+            String(pending.seq) +
+            " }); replying clears it too.";
           // 唤醒返回帧＝一轮的起点：旧进程/旧版的升级提示在这里最可能被看见并转达 owner（#588）。
           // probe:false——唤醒路径零额外网络（磁盘检测 + whoami 已填充的缓存）。
           const replayUpgrade = await mcpUpgradeNotice(cfg.server, {}, { probe: false });
+          // #826：显式要求随收随清时，走与 party_ack 完全相同的原子 compare-and-clear——
+          // 它自带 serve-owned 拒清保护（#198 红线），绝不在这里另写一条清账路径。
+          let acked = false;
+          if (ack_replay === true) {
+            const outcome = ackWatchStuck(resolved, pending.seq);
+            // cleared = 本次清掉；acknowledged_prior = 已经被更晚的动作清过。两者都代表「不再欠」。
+            // serve_owned / seq_mismatch / none 一律不算清掉——保持 hint，别谎报已解决。
+            acked = outcome.outcome === "cleared" || outcome.outcome === "acknowledged_prior";
+          }
           return ok({
             type: "watch_once",
             channel: resolved,
             exit_code: 0,
             frames: [frame],
+            // 这两个字段是给「不知道 ack 机制」的调用方看的：卡住的代价（held_messages）和确切的出路（hint）。
+            ...(acked ? { acked: true } : { pending_ack_hint: ackHint }),
+            held_messages: held,
             ...(replayUpgrade !== null ? { cli_upgrade: replayUpgrade } : {}),
           });
         }
