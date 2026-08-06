@@ -1,6 +1,7 @@
 // party mcp — stdio MCP server exposing AgentParty as structured tools.
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ChannelDecisionRecord, MsgFrame, StatusState, TaskAssigneeKind, TaskState } from "@agentparty/shared";
+import { MAX_ALSO_RESOLVES } from "@agentparty/shared";
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -471,13 +472,22 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         body: z.string().optional().describe("Message body. May be empty only when attaching."),
         mentions: z.array(z.string()).optional(),
         reply_to: z.number().int().positive().nullable().optional(),
+        // #818：wake debt 按 delivery 逐条记，reply_to 只清它指的那一条。一条回复同时答掉
+        // 对方连发的几条 @ 时，其余的会原样重放——把它们列在这里一并了结。
+        also_resolves: z
+          .array(z.number().int().positive())
+          .max(MAX_ALSO_RESOLVES)
+          .optional()
+          .describe(
+            "Other @ seqs this same message settles. reply_to clears ONLY the seq it names; anything else you answered here stays owed and replays on your next wake. Find what you owe in party_who → presence[].pending_mention_seqs.",
+          ),
         attach: z
           .array(z.string())
           .optional()
           .describe("Local file paths to upload as attachments (max 25MB each). Body may be empty only when attaching."),
       },
     },
-    async ({ channel, body, mentions, reply_to, attach }) => {
+    async ({ channel, body, mentions, reply_to, also_resolves, attach }) => {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
@@ -499,6 +509,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           body: effectiveBody,
           mentions: normalizedMentions,
           reply_to: reply_to ?? null,
+          ...(also_resolves !== undefined && also_resolves.length > 0 ? { also_resolves } : {}),
           ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
         });
         advanceCursorPastOwnMessage(resolved, seq);

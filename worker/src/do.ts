@@ -305,6 +305,8 @@ const MENTION_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$/u;
 const WORKFLOW_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const CLIENT_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 const MAX_MENTIONS = 50;
+// #818：一条回复顺带了结的其它 @ 上限；与 shared 的 MAX_ALSO_RESOLVES 同值（本文件的常量都就地声明）。
+const MAX_ALSO_RESOLVES = 20;
 const MENTIONS_JSON_LIMIT = 4096;
 const MAX_STATUS_SCOPE = 50;
 const STATUS_SCOPE_JSON_LIMIT = 4096;
@@ -1225,6 +1227,21 @@ function parseIdempotencyKey(raw: unknown): string | undefined {
 // 附件引用校验（#176）已抽到 ./attachments，消息与任务（#369）共用同一实现。parseAttachments /
 // parseStoredAttachments / MAX_ATTACHMENTS 见该模块（顶部 import）。
 
+// #818：also_resolves 的校验。null = 帧非法（整条拒发），[] = 没有额外要清的。
+// 去掉与 reply_to 重复的那条（它本就会被清），保序去重，超上限直接拒——别让一条消息
+// 悄悄清空整个接待债务。
+function parseAlsoResolves(input: unknown, replyTo: number | null): number[] | null {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) return null;
+  if (input.length > MAX_ALSO_RESOLVES) return null;
+  const seen = new Set<number>();
+  for (const value of input) {
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) return null;
+    if (value !== replyTo) seen.add(value);
+  }
+  return [...seen];
+}
+
 // rest body 与 ws send 帧共用的校验（rest 侧无 type 字段）
 function parseSendFrame(input: unknown): SendFrame | null {
   if (typeof input !== "object" || input === null) return null;
@@ -1248,6 +1265,9 @@ function parseSendFrame(input: unknown): SendFrame | null {
           ? f.reply_to
           : undefined;
     if (reply_to === undefined) return null;
+    // #818：一条回复顺带了结的其它 @。只影响接待债务，不动 reply_to 这条线程锚点。
+    const alsoResolves = parseAlsoResolves(f.also_resolves, reply_to);
+    if (alsoResolves === null) return null;
     const completionArtifact = parseCompletionArtifact(f.completion_artifact, reply_to);
     if (completionArtifact === null) return null;
     const decisionRequest = parseDecisionRequest(f.decision_request);
@@ -1270,6 +1290,7 @@ function parseSendFrame(input: unknown): SendFrame | null {
       mentions,
       ...(bodyMentions.length > 0 ? { body_mentions: bodyMentions } : {}),
       reply_to,
+      ...(alsoResolves.length > 0 ? { also_resolves: alsoResolves } : {}),
       ...(completionArtifact !== undefined ? { completion_artifact: completionArtifact } : {}),
       ...(decisionRequest !== undefined ? { decision_request: decisionRequest } : {}),
       ...(attachments !== undefined ? { attachments } : {}),
@@ -8441,7 +8462,7 @@ export class ChannelDO extends Server<Env> {
       const replacedRow = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", replacesSeq).one();
       if (replacedRow) replacedUpdate = this.messageUpdate("review", identity, this.rowToFrame(replacedRow), now);
     }
-    this.linkWakeResume(identity, msg, now);
+    this.linkWakeResume(identity, msg, now, frame.kind === "message" ? frame.also_resolves : undefined);
     const workflowGuardFrame = this.applyWorkflowGuardAfterSend(identity, msg, workflowGuard, now);
     if (frame.kind === "message") {
       if (identity.kind === "agent") {
@@ -8588,7 +8609,8 @@ export class ChannelDO extends Server<Env> {
     return { ...stagedOutcome, atomicEffects };
   }
 
-  private linkWakeResume(identity: Identity, msg: MsgFrame, now: number) {
+  // alsoResolves 只在正常 send 路径传入（reviewer/decision 回复没有这个语义）；#818。
+  private linkWakeResume(identity: Identity, msg: MsgFrame, now: number, alsoResolves?: number[]) {
     const targetName = identity.name;
     if (msg.reply_to !== null) {
       this.ctx.storage.sql.exec(
@@ -8611,6 +8633,21 @@ export class ChannelDO extends Server<Env> {
       }
       // #191：回复的正是一条 @ 了自己的消息 → 服务端亲眼看到「被 @ 后 resume」，据此盖 verified_at。
       if (this.messageMentions(msg.reply_to).includes(targetName)) this.markWakeVerified(targetName, now);
+    }
+    // #818：一条回复常常同时答掉对方连发的几条 @。它们走与 reply_to 完全相同的了结路径，只是不改
+    // 线程锚点——否则这些 debt 不清、每次 watch 原样重放，agent 还得先辨认是不是重放。
+    for (const seq of alsoResolves ?? []) {
+      this.ctx.storage.sql.exec(
+        `UPDATE wake_delivery_ledger
+            SET ack_seq = COALESCE(ack_seq, ?),
+                result = CASE WHEN adapter_kind IN ('serve', 'watch') THEN 'consumed' ELSE result END
+          WHERE mention_seq = ? AND target_name = ?`,
+        msg.seq,
+        seq,
+        targetName,
+      );
+      this.completeDirectedDelivery(identity, seq, msg.seq, now);
+      if (this.messageMentions(seq).includes(targetName)) this.markWakeVerified(targetName, now);
     }
     const summarySeq = msg.status?.summary_seq ?? null;
     if (summarySeq !== null) {
@@ -11497,7 +11534,7 @@ export class ChannelDO extends Server<Env> {
     serveCounts?: Map<string, number>,
     waitingOwnerCounts?: Map<string, number>,
     listeningStreaks?: Map<string, number>,
-    unhandledMentionDebt?: Map<string, { count: number; oldestSeq: number }>,
+    unhandledMentionDebt?: Map<string, { count: number; oldestSeq: number; seqs: number[] }>,
   ): PresenceEntry {
     const count = liveCounts.get(entry.name) ?? 0;
     const live = applyLiveConnection(entry, count > 0);
@@ -11516,6 +11553,8 @@ export class ChannelDO extends Server<Env> {
             ...withWaiting,
             unhandled_mention_count: mentionDebt.count,
             oldest_unhandled_mention_seq: mentionDebt.oldestSeq,
+            // #818：欠的具体是哪几条。有它 agent 才能一次 ack 准，而不是靠 count 猜。
+            ...(mentionDebt.seqs.length > 0 ? { pending_mention_seqs: mentionDebt.seqs } : {}),
           };
     // 监听力判定（#603）：只对「当前有活连接」的身份下发——没有连接的身份是 offline/wakeable，
     // 不是 deaf。streak 1 次 = suspect，连续 ≥2 次 = deaf。缺省 = 无恙。
@@ -11564,19 +11603,39 @@ export class ChannelDO extends Server<Env> {
     return counts;
   }
 
-  private unhandledMentionDebt(): Map<string, { count: number; oldestSeq: number }> {
-    const debt = new Map<string, { count: number; oldestSeq: number }>();
+  // #818：只报 count + oldest 时，「中间欠的是哪几条」查不到。wake debt 是按 delivery 记的，
+  // 清账要逐条 ack/--reply-to，可现实里一条回复常常同时答掉 2-3 条 @——agent 没法凭 count
+  // 反推出该 ack 哪些 seq，于是已经处理过的 @ 被反复重放，还得先花时间辨认是不是重放。
+  // 缺口在查询侧，补上 seq 列表即可精确 ack。
+  private static readonly PENDING_MENTION_SEQ_CAP = 50;
+
+  private unhandledMentionDebt(): Map<string, { count: number; oldestSeq: number; seqs: number[] }> {
+    const debt = new Map<string, { count: number; oldestSeq: number; seqs: number[] }>();
     for (const row of this.ctx.storage.sql
       .exec(
-        `SELECT target_name, COUNT(*) AS n, MIN(message_seq) AS oldest_seq
+        `SELECT target_name, COUNT(*) AS n, MIN(message_seq) AS oldest_seq,
+                GROUP_CONCAT(message_seq) AS seqs
            FROM directed_deliveries
           WHERE cause IN ('mention', 'reply') AND state IN ('queued', 'claimed', 'running')
           GROUP BY target_name`,
       )
       .toArray()) {
+      // GROUP_CONCAT 不保证顺序，也不该无上限地灌进 presence 广播：排序去重后按 cap 截断，
+      // 保留最老的若干条（先清最老的才是正确的清账顺序）。count 仍是真实总数。
+      const seqs = [
+        ...new Set(
+          String(row.seqs ?? "")
+            .split(",")
+            .map((part) => Number(part))
+            .filter((seq) => Number.isInteger(seq) && seq > 0),
+        ),
+      ]
+        .sort((a, b) => a - b)
+        .slice(0, ChannelDO.PENDING_MENTION_SEQ_CAP);
       debt.set(String(row.target_name), {
         count: Number(row.n),
         oldestSeq: Number(row.oldest_seq),
+        seqs,
       });
     }
     return debt;

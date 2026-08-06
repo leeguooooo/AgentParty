@@ -1,6 +1,13 @@
 // party send — rest 一次性发消息，成功后推进游标
 import { basename } from "node:path";
-import { EXIT_UNREACHABLE, extractMentionTokens, MAX_MENTIONS, mentionMatchKey, type Attachment } from "@agentparty/shared";
+import {
+  EXIT_UNREACHABLE,
+  extractMentionTokens,
+  MAX_ALSO_RESOLVES,
+  MAX_MENTIONS,
+  mentionMatchKey,
+  type Attachment,
+} from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError, type Parsed } from "../args";
 import { advanceCursorPastOwnMessage, resolveChannel, type Config } from "../config";
 import { stripTerminalControls } from "../format";
@@ -12,7 +19,7 @@ import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
 export const sendSpec = { repeatable: ["mention", "attach"], booleans: ["debug-auth", "reach", "no-reach", "require-wakeable"] };
 const SEND_FLAGS = ["channel", "reply-to", "mention", "attach", "debug-auth", "reach", "no-reach", "require-wakeable"];
-const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--attach path]... [--reply-to seq] [--debug-auth]
+const HELP = `usage: party send <text|-> [--channel C] [--mention name]... [--attach path]... [--reply-to seq[,seq...]] [--debug-auth]
 
 Send one message to a channel. Use "-" as the body to read stdin.
 Positional text decodes \\n as a line break; use \\\\n for a literal \\n, or stdin for exact bytes.
@@ -35,7 +42,13 @@ Options:
   --channel C         send to channel C instead of the bound channel
   --mention name      mention a user or agent; repeatable
   --attach path       upload a local file and attach it; repeatable (max 25MB each)
-  --reply-to seq      attach this message as a reply to seq
+  --reply-to seq      attach this message as a reply to seq, and clear that @'s wake debt.
+                      Wake debt is tracked PER DELIVERY: --reply-to A clears ONLY A. Any
+                      other @ you answered in the same message stays owed and REPLAYS on
+                      your next wake, verbatim. When one reply settles several @s, list
+                      them all: --reply-to 396,398 (the first seq is still the thread
+                      anchor; the rest are only marked handled). See what you currently
+                      owe with: party who --json (pending_mention_seqs)
   --reach             show mention reachability even when not a TTY (agent loops)
   --no-reach          never show mention reachability (also silences the warn line,
                       UNLESS --require-wakeable is set, which forces the warn line)
@@ -87,7 +100,24 @@ export interface SendInput {
   /** 正文便利提取的 `@token`（#663）：服务端命中即路由、未命中降级为文本，绝不阻断发送。 */
   bodyMentions: string[];
   replyTo: number | null;
+  /** #818：这条回复顺带了结的其它 @ seq（`--reply-to A,B` 里 A 之后的部分）。 */
+  alsoResolves: number[];
   attachPaths: string[];
+}
+
+// #818：`--reply-to 396,398`。一条回复本来就可能同时答掉对方连发的几条 @，而 wake debt 按
+// delivery 逐条记——只能指一条时，其余的原样重放。首个 seq 仍是唯一的线程锚点。
+export function parseReplyToList(raw: string | undefined): { replyTo: number | null; alsoResolves: number[] } | string {
+  if (raw === undefined) return { replyTo: null, alsoResolves: [] };
+  const parts = raw.split(",").map((part) => part.trim());
+  const seqs: number[] = [];
+  for (const part of parts) {
+    if (!/^[1-9]\d*$/.test(part)) return "--reply-to must be a seq, or a comma-separated list of seqs (e.g. 396,398)";
+    const seq = Number(part);
+    if (!seqs.includes(seq)) seqs.push(seq);
+  }
+  if (seqs.length > MAX_ALSO_RESOLVES + 1) return `--reply-to accepts at most ${MAX_ALSO_RESOLVES + 1} seqs`;
+  return { replyTo: seqs[0], alsoResolves: seqs.slice(1) };
 }
 
 // Agent-generated shell commands commonly pass multiline replies as one quoted argument containing `\n`.
@@ -158,11 +188,12 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     return null;
   }
   const attachPaths = strArray(flags.attach) ?? [];
-  const replyTo = parsePositiveIntFlag(str(flags["reply-to"]), "reply-to");
-  if (typeof replyTo === "string") {
-    console.error(replyTo);
+  const replyToList = parseReplyToList(str(flags["reply-to"]));
+  if (typeof replyToList === "string") {
+    console.error(replyToList);
     return null;
   }
+  const { replyTo, alsoResolves } = replyToList;
   const explicit = str(flags.channel);
   // 尾部裸 `-`（未被 `--` 字面化）表示正文来自 stdin；仅在此 stdin 语境下首个 positional 才可作 channel，
   // 即 `send <slug> -`，不给普通 `send <body...>` 重新引入隐式 channel 歧义
@@ -257,6 +288,7 @@ export async function resolveSendInput(parsed: Parsed): Promise<SendInput | null
     mentions,
     bodyMentions,
     replyTo: replyTo ?? null,
+    alsoResolves,
     attachPaths,
   };
 }
@@ -294,6 +326,7 @@ export async function doSend(cfg: Config, input: SendInput): Promise<number | { 
       mentions: input.mentions,
       ...(input.bodyMentions.length > 0 ? { body_mentions: input.bodyMentions } : {}),
       reply_to: input.replyTo,
+      ...(input.alsoResolves.length > 0 ? { also_resolves: input.alsoResolves } : {}),
       ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
     });
     // #663：正文里的 @token 服务端未能路由，已按普通文本原样发出。打一条非阻断 warning（不改变发送成功），
