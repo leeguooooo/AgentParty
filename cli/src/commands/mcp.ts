@@ -587,11 +587,17 @@ export function createMcpServer(defaultChannel?: string): McpServer {
   server.registerTool(
     "party_status",
     {
-      title: "Post status",
-      description: "Post a structured AgentParty status frame.",
+      title: "Post status (WRITE — this sets your status, it does not read it)",
+      // #827：名字读起来像 getter，实际是 setter。无参调用只会撞上「state 必填」，错误信息不指路，
+      // agent 得白试一轮才知道读要用 party_who。把「这是写接口、读去哪」放进标题和描述最前面。
+      description:
+        "SET your own status in the channel (a write). To READ anyone's status — including your own — use party_who instead. " +
+        "Posts a structured AgentParty status frame.",
       inputSchema: {
         channel: z.string().optional(),
-        state: StateSchema,
+        state: StateSchema.describe(
+          "Required. The status you are SETTING (this tool is a setter). To read status, call party_who.",
+        ),
         note: z.string().optional(),
         mentions: z.array(z.string()).optional(),
         scope: z.array(z.string()).optional(),
@@ -845,38 +851,54 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     "party_task_create",
     {
       title: "Create channel task",
-      description: "Create an AgentParty channel task.",
-      inputSchema: {
-        channel: z.string().optional(),
-        title: z.string().min(1),
-        desc: z.string().optional(),
-        state: TaskStateSchema.optional(),
-        assignee_name: z.string().optional().describe("Assignee name, with or without @ prefix."),
-        assignee_kind: TaskAssigneeKindSchema.optional(),
-        priority: z.number().int().min(-100).max(100).optional(),
-        labels: z.array(z.string()).optional(),
-        parent_id: z.number().int().positive().optional(),
-        anchor_seqs: z.array(z.number().int().positive()).optional(),
-        workflow_id: z.string().optional(),
-        external_ref: z
-          .string()
-          .optional()
-          .describe(
-            "Idempotency key (e.g. gh:owner/repo#96). Creating with a ref that already exists in the channel returns the existing task instead of a duplicate — safe to rerun an issue→task sync (#141).",
-          ),
-      },
+      description:
+        "Create an AgentParty channel task. The task body goes in `desc` (NOT `body`) and the owner in `assignee` or `assignee_name`. " +
+        "Unknown fields are rejected rather than dropped (#824) — a task whose spec silently vanished is worse than a failed call.",
+      // #824：未知字段此前被 zod 静默剥掉——调用方传 body/assignee 拿到 200 和一个看起来正常的回执，
+      // 落库却是只有标题的空壳。写任务的 agent 不会回头核对，读任务的 agent 不知道原本有内容，
+      // 于是「任务系统存在的意义（不用翻聊天记录）」当场失效。strict：宁可报错也不要静默丢规格。
+      inputSchema: z
+        .object({
+          channel: z.string().optional(),
+          title: z.string().min(1),
+          desc: z.string().optional().describe("Task body / spec. This is the field that holds the content — not `body`."),
+          state: TaskStateSchema.optional(),
+          assignee: z
+            .string()
+            .optional()
+            .describe("Assignee name as a plain string, with or without @ prefix. Equivalent to assignee_name."),
+          assignee_name: z.string().optional().describe("Assignee name, with or without @ prefix."),
+          assignee_kind: TaskAssigneeKindSchema.optional(),
+          priority: z.number().int().min(-100).max(100).optional(),
+          labels: z.array(z.string()).optional(),
+          parent_id: z.number().int().positive().optional(),
+          anchor_seqs: z.array(z.number().int().positive()).optional(),
+          workflow_id: z.string().optional(),
+          external_ref: z
+            .string()
+            .optional()
+            .describe(
+              "Idempotency key (e.g. gh:owner/repo#96). Creating with a ref that already exists in the channel returns the existing task instead of a duplicate — safe to rerun an issue→task sync (#141).",
+            ),
+        })
+        .strict(),
     },
-    async ({ channel, title, desc, state, assignee_name, assignee_kind, priority, labels, parent_id, anchor_seqs, workflow_id, external_ref }) => {
+    async ({ channel, title, desc, state, assignee, assignee_name, assignee_kind, priority, labels, parent_id, anchor_seqs, workflow_id, external_ref }) => {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
         const normalizedLabels = normalizeLabels(labels);
-        const assignee = normalizeAssignee(assignee_name, assignee_kind as TaskAssigneeKind | undefined);
+        // #824：assignee（纯字符串）是调用方最自然的写法；只认 assignee_name 等于把内部结构泄露给调用方。
+        // 两个都给且不一致时报错，而不是挑一个——猜错的代价是任务派给了错的人。
+        if (assignee !== undefined && assignee_name !== undefined && assignee.replace(/^@/, "") !== assignee_name.replace(/^@/, "")) {
+          throw new Error(`assignee and assignee_name disagree: ${assignee} vs ${assignee_name} — pass only one`);
+        }
+        const resolvedAssignee = normalizeAssignee(assignee ?? assignee_name, assignee_kind as TaskAssigneeKind | undefined);
         const task = await createTask(cfg.server, cfg.token, resolved, {
           title,
           ...(desc !== undefined ? { desc } : {}),
           ...(state !== undefined ? { state: state as TaskState } : {}),
-          ...(assignee !== undefined ? { assignee } : {}),
+          ...(resolvedAssignee !== undefined ? { assignee: resolvedAssignee } : {}),
           ...(priority !== undefined ? { priority } : {}),
           ...(normalizedLabels !== undefined && normalizedLabels.length > 0 ? { labels: normalizedLabels } : {}),
           ...(parent_id !== undefined ? { parent_id } : {}),
@@ -1073,9 +1095,14 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     "party_spawn_worker",
     {
       title: "Spawn worker agent",
-      description: "Create a short-lived channel-scoped worker identity for a front agent to delegate work.",
+      // #827：这个工具只铸身份，不启动任何进程。之前描述没说清，加上 spawn 后频道零痕迹，
+      // 调用方无法区分「worker 没起来 / 起来了没干活 / 干完了没汇报」——比 worker 本身失败更麻烦。
+      description:
+        "Mint a short-lived channel-scoped worker IDENTITY (token + lineage) for a front agent to delegate work. " +
+        "It does NOT start a process — nothing runs, and nothing appears in the channel, until you launch something with the returned token. " +
+        "If you need the channel to see the worker, have the launched process check in (party_status) itself.",
       inputSchema: {
-        name: z.string().describe("Worker agent name."),
+        name: z.string().describe("REQUIRED. Worker agent name (a valid AgentParty name: [a-zA-Z0-9][a-zA-Z0-9._-]{0,63})."),
         channel: z.string().optional().describe("Channel slug for the worker scope. Defaults to the MCP server channel."),
         ttl_sec: z.number().int().positive().optional().describe("Optional worker lifetime in seconds."),
         team_id: z.string().optional().describe("Optional lineage team id for grouping the worker with the front agent."),
@@ -1106,7 +1133,14 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         "Actively wait until the next matching message arrives, then return its structured frame. The tool call must remain in flight; MCP notifications do not wake an idle model turn.",
       inputSchema: {
         channel: z.string().optional(),
-        timeout_sec: z.number().int().positive().max(600).optional(),
+        // #827：上限只存在于校验里，调用方得撞一次才知道。校验规则本身就是契约，没理由只在失败时才讲。
+        timeout_sec: z
+          .number()
+          .int()
+          .positive()
+          .max(600)
+          .optional()
+          .describe("Seconds to wait, 1–600 (max 600). Default 240."),
         mentions_only: z.boolean().optional(),
       },
     },
