@@ -5,7 +5,7 @@ import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding"
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { stripTerminalControls } from "../format";
+import { DEFAULT_HEADER_PREVIEW, msgHeader, stripTerminalControls } from "../format";
 import pkg from "../../package.json" with { type: "json" };
 import {
   ackWatchStuck,
@@ -659,29 +659,78 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     "party_history",
     {
       title: "Channel history",
-      description: "Fetch AgentParty channel messages. Defaults to the MOST RECENT --limit messages (pass since/before to page explicitly).",
+      description:
+        "Fetch AgentParty channel messages. Defaults to the MOST RECENT limit messages (pass since/before to page explicitly). " +
+        "Rebuilding context every turn? Use mode='headers' — one compact record per message (seq/sender/kind/mentions/reply_to/chars + a short preview) " +
+        "instead of full bodies, then pull the ones that matter with seq=N. Long technical channels cost an order of magnitude less this way.",
       inputSchema: {
         channel: z.string().optional(),
         since: z.number().int().min(0).optional(),
         before: z.number().int().positive().optional(),
         limit: z.number().int().positive().max(1000).optional(),
+        seq: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Return only this message, in full. The expand-one-header path; exclusive with since/before/mode."),
+        mode: z
+          .enum(["full", "headers"])
+          .optional()
+          .describe("'headers' returns compact per-message records instead of full bodies. Default 'full' (unchanged)."),
+        preview_chars: z
+          .number()
+          .int()
+          .min(0)
+          .max(2000)
+          .optional()
+          .describe(`Body preview length in headers mode (default ${DEFAULT_HEADER_PREVIEW}, 0 = metadata only).`),
+        exclude_status: z
+          .boolean()
+          .optional()
+          .describe("Drop status frames — presence churn whose notes are usually repeated."),
       },
     },
-    async ({ channel, since, before, limit }) => {
+    async ({ channel, since, before, limit, seq, mode, preview_chars, exclude_status }) => {
       // since 与 before 都未给 → 走 tail，这样才对得上工具描述里的"recent"；给了任一个就照给的来
       if (since !== undefined && before !== undefined) {
         return fail("since and before are mutually exclusive");
       }
+      if (seq !== undefined && (since !== undefined || before !== undefined)) {
+        return fail("seq is exclusive with since/before (it already selects one message)");
+      }
+      if (seq !== undefined && mode === "headers") {
+        return fail("seq returns one message in full; drop mode='headers' (that is the point of seq)");
+      }
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
-        const messages =
+        if (seq !== undefined) {
+          const found = (await fetchMessages(cfg.server, cfg.token, resolved, seq - 1, 1)).find((m) => m.seq === seq);
+          if (found === undefined) {
+            return fail(`no message ${seq} in ${resolved} (retracted, filtered, or out of range)`);
+          }
+          return ok({ type: "history", channel: resolved, mode: "full", messages: [found] });
+        }
+        const fetched =
           since !== undefined
             ? await fetchMessages(cfg.server, cfg.token, resolved, since, limit ?? 100)
             : before !== undefined
               ? await fetchMessages(cfg.server, cfg.token, resolved, 0, limit ?? 100, { before })
               : await fetchRecentMessages(cfg.server, cfg.token, resolved, limit ?? 100);
-        return ok({ type: "history", channel: resolved, messages });
+        const messages = exclude_status === true ? fetched.filter((m) => m.kind !== "status") : fetched;
+        if (mode === "headers") {
+          const previewChars = preview_chars ?? DEFAULT_HEADER_PREVIEW;
+          return ok({
+            type: "history",
+            channel: resolved,
+            mode: "headers",
+            // 明说全文怎么取，否则 headers 会被当成「history 坏了/被截断了」。
+            expand_with: "party_history { seq: <seq> }",
+            headers: messages.map((m) => msgHeader(m, previewChars)),
+          });
+        }
+        return ok({ type: "history", channel: resolved, mode: "full", messages });
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }

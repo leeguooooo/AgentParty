@@ -61,6 +61,73 @@ export function formatMsg(m: MsgFrame): string {
   return stripTerminalControls(formatMsgRaw(m));
 }
 
+export const DEFAULT_HEADER_PREVIEW = 120;
+
+// #819：agent 每轮重建上下文都要拉一次 history，而频道里贴 SQL/实测数据的长消息很常见，
+// 一次 10 条就是两三万字符——其中九成是上一轮已经读过的。轻量视图只给「有没有新的、谁发的、
+// 大概讲什么」，需要哪条再按 seq 精确拉全文。省的不是钱，是 agent 还能在频道里待多久。
+export interface MsgHeader {
+  seq: number;
+  ts: number;
+  sender: string;
+  kind: MsgFrame["kind"];
+  state?: string;
+  mentions: string[];
+  reply_to: number | null;
+  chars: number;
+  preview: string;
+  truncated: boolean;
+  attachments?: number;
+  retracted?: boolean;
+  edited?: boolean;
+}
+
+// 正文的单行摘要：status 帧取 note（正文常为空），普通消息取 body 首行起的前 N 字符。
+function headerPreviewSource(m: MsgFrame): string {
+  if (m.retracted) return "[retracted]";
+  if (m.kind === "status") return m.note ?? "";
+  return m.body ?? "";
+}
+
+export function msgHeader(m: MsgFrame, previewChars = DEFAULT_HEADER_PREVIEW): MsgHeader {
+  const source = headerPreviewSource(m);
+  // preview 要占一行，所以折叠换行/TAB（sanitizeSingleLine），再按字符数截断。
+  const flat = sanitizeSingleLine(source).trim();
+  const truncated = flat.length > previewChars;
+  return {
+    seq: m.seq,
+    ts: m.ts,
+    sender: m.sender.name,
+    kind: m.kind,
+    ...(m.kind === "status" && m.state ? { state: m.state } : {}),
+    mentions: m.mentions ?? [],
+    reply_to: m.reply_to ?? null,
+    // chars 报的是完整正文长度，agent 据此判断「值不值得展开」。
+    chars: source.length,
+    preview: truncated ? flat.slice(0, previewChars) : flat,
+    truncated,
+    ...(m.attachments && m.attachments.length > 0 ? { attachments: m.attachments.length } : {}),
+    ...(m.retracted ? { retracted: true } : {}),
+    ...(m.edited ? { edited: true } : {}),
+  };
+}
+
+// 人类可读的一行：[seq] sender(kind) @mentions ↩#reply · 1832ch: preview…
+export function formatMsgHeader(m: MsgFrame, previewChars = DEFAULT_HEADER_PREVIEW): string {
+  const h = msgHeader(m, previewChars);
+  const parts = [
+    h.kind === "status" ? `[${h.state ?? "status"}]` : null,
+    h.mentions.length > 0 ? `@${h.mentions.join(",@")}` : null,
+    h.reply_to !== null ? `↩#${h.reply_to}` : null,
+    h.attachments !== undefined ? `📎${h.attachments}` : null,
+    h.retracted === true ? "retracted" : null,
+    `${h.chars}ch`,
+  ].filter((part): part is string => part !== null);
+  return stripTerminalControls(
+    `[${h.seq}] ${h.sender}(${m.sender.kind}) ${parts.join(" ")}: ${h.preview}${h.truncated ? "…" : ""}`,
+  );
+}
+
 function formatMsgRaw(m: MsgFrame): string {
   const badges = [
     m.completion_artifact !== undefined ? "completion" : null,

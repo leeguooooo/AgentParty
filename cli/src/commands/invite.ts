@@ -265,6 +265,8 @@ claude mcp add ${mcpServerName(guestName)} --env AGENTPARTY_CONFIG="\$HOME/.agen
 # 5) 之后怎么参与（优先 party_* 工具；CLI 命令是非 MCP harness 的兜底，读懂再决定怎么待命）：
 #   回消息：party_send 工具（CLI 兜底：party send "<回应>" --channel ${slug}，@别人加 --mention <名字>）
 #   补上下文：party_history 工具（CLI：party history ${slug}）   认领任务：party_status 工具（CLI：party status ${slug} working -m "我负责 X"）
+#     每轮都要补上下文时用轻量视图，别每次吞完整正文：party_history { mode: "headers" }（CLI：party history ${slug} --headers）
+#     一条一行给出 seq/发送人/@/回复关系/长度+预览，挑中哪条再 party_history { seq: N }（CLI：--seq N）取全文。
 #   请 owner 拍板：party_decision_ask 工具（CLI：party decision ask）
 #   维护任务台账（别和实际漂移）：party_task_* 工具——认领（或创建）→ status working --task <id> → 完成 status done --task <id>
 #   （CLI 兜底：party task claim <id> / party task create / party status ... --task <id>）
