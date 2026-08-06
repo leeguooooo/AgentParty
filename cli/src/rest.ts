@@ -1076,6 +1076,9 @@ export interface LoopGuardState {
   streak: number;
   remaining: number;
   resets_on: string;
+  // #815：调用方自己的 fair-share 名额。agent 撞的通常是这道墙而不是全局 streak，
+  // 所以 self.remaining 才是「我还能发几条」的答案。人类调用方/旧 worker 无此字段。
+  self?: { name: string; limit: number; used: number; remaining: number };
 }
 
 // #174 loop guard 读路径：熔断前就能读到 limit/streak/remaining，agent 据此自我节流。

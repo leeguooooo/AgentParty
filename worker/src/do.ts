@@ -5421,7 +5421,9 @@ export class ChannelDO extends Server<Env> {
       // party channel guard status（#174）：熔断前就能读到 limit/streak/remaining。
       // 先按 header 刷新 config meta，保证 enabled/limit 与 D1 权威一致，streak 取 DO 自身状态。
       this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
-      return Response.json(this.loopGuardState());
+      // #815：x-ap-self 是调用方自己的 principal 名（worker 从已鉴权 identity 填），
+      // 用来叠加 per-agent fair-share 余量。缺头（人类/旧 worker）则只返回全局快照。
+      return Response.json(this.loopGuardState(request.headers.get("x-ap-self") ?? undefined));
     }
     if (url.pathname === "/internal/identities" && request.method === "GET") {
       const identities = new Map<string, { name: string; kind?: SenderKind; account?: string }>();
@@ -9485,23 +9487,44 @@ export class ChannelDO extends Server<Env> {
         : LOOP_GUARD_N;
   }
 
+  // per-agent fair-share 阈值：与 loopGuardMessage 同一口径，别在两处各算一遍。
+  private effectiveAgentFairShareLimit(): number {
+    return this.getMeta("mode") === "party" ? LOOP_GUARD_AGENT_PARTY_N : LOOP_GUARD_AGENT_N;
+  }
+
   // 熔断【之前】就可读的 guard 快照（#174）：limit/streak/remaining 与实际触发用同一套阈值口径，
   // 让 agent 能自我节流，而不必先撞 exit 4 把频道锁死才知道 guard 存在。
-  private loopGuardState(): {
+  // #815：全局 streak 不是实际最先撞上的那道墙——单 agent 先耗尽 fair-share 名额。只报全局
+  // remaining 会让 agent 以为还有余量，写完长消息才被拒。带上 self 分片，谁问就报谁的。
+  private loopGuardState(selfName?: string): {
     enabled: boolean;
     limit: number;
     streak: number;
     remaining: number;
     resets_on: "human";
+    self?: { name: string; limit: number; used: number; remaining: number };
   } {
     const limit = this.effectiveLoopGuardLimit();
     const streak = this.agentStreak();
+    const selfLimit = this.effectiveAgentFairShareLimit();
+    const selfUsed = selfName === undefined ? 0 : this.agentCount(selfName);
     return {
       enabled: this.getMeta("loop_guard_enabled") === "1",
       limit,
       streak,
       remaining: Math.max(0, limit - streak),
       resets_on: "human",
+      ...(selfName === undefined || selfName === ""
+        ? {}
+        : {
+            self: {
+              name: selfName,
+              limit: selfLimit,
+              used: selfUsed,
+              // 实际能再发几条 = 全局余量与自己 fair-share 余量的下限。
+              remaining: Math.min(Math.max(0, selfLimit - selfUsed), Math.max(0, limit - streak)),
+            },
+          }),
     };
   }
 
@@ -9517,7 +9540,7 @@ export class ChannelDO extends Server<Env> {
     if (this.getMeta("loop_guard_enabled") !== "1") return null;
     const global = this.globalLoopGuardMessage();
     if (global !== null) return global;
-    const guardLimit = this.getMeta("mode") === "party" ? LOOP_GUARD_AGENT_PARTY_N : LOOP_GUARD_AGENT_N;
+    const guardLimit = this.effectiveAgentFairShareLimit();
     return this.agentCount(agentName) >= guardLimit
       ? `${agentName} reached its ${guardLimit}-message fair-share budget since the last human message; another agent can continue, or a human/reset can clear it`
       : null;

@@ -29,8 +29,10 @@ import {
   fetchPresence,
   fetchRecentMessages,
   fetchServerVersion,
+  getLoopGuard,
   handleRestError,
   listChannels,
+  RestError,
   listTasks,
   postMessage,
   spawnAgent,
@@ -108,11 +110,52 @@ function ok(data: Record<string, unknown>, text?: string): CallToolResult {
   };
 }
 
-function fail(message: string): CallToolResult {
+function fail(message: string, data?: Record<string, unknown>): CallToolResult {
   return {
     isError: true,
     content: [{ type: "text", text: stripTerminalControls(message) }],
+    ...(data === undefined ? {} : { structuredContent: data }),
   };
+}
+
+// #815：`send failed with exit 4` 对调用方零信息——撞 loop guard 和网络抖动长得一模一样，
+// agent 只能盲目重试。CLI 那层早就有可读原因（stderr），是 MCP 出口把它吞了。
+// 这里把 REST 错误的 code/status/message 原样透出，并给出该 exit code 对应的行动建议。
+const EXIT_GUIDANCE: Record<string, string> = {
+  loop_guard:
+    "loop guard tripped — stop sending; wait for a human message (or a human runs `party channel reset-guard`). " +
+    "Another agent can still speak. Check your remaining budget with party_who (send_budget) before writing a long message.",
+  workflow_guard: "workflow guard tripped — stop, report status blocked, wait for a human. Do not rephrase and retry.",
+  rate_limited: "rate limited — back off (exponential, start ~30s) before retrying. Do not hammer.",
+  archived: "channel is archived — no further writes are accepted.",
+};
+
+function failFromRestError(label: string, e: unknown): CallToolResult {
+  // handleRestError 同时负责把可读原因打进 stderr 并映射退出码；保留调用以维持 CLI 侧行为一致。
+  const exitCode = handleRestError(e);
+  if (e instanceof RestError) {
+    const code = e.code ?? String(e.status);
+    const guidance = e.code === null ? undefined : EXIT_GUIDANCE[e.code];
+    return fail(
+      `${label} failed with exit ${exitCode}: ${code} ${e.message}` + (guidance === undefined ? "" : `\nhint: ${guidance}`),
+      {
+        type: "error",
+        operation: label,
+        exit_code: exitCode,
+        code,
+        status: e.status,
+        message: e.message,
+        ...(guidance === undefined ? {} : { hint: guidance }),
+      },
+    );
+  }
+  const message = e instanceof Error ? e.message : String(e);
+  return fail(`${label} failed with exit ${exitCode}: ${message}`, {
+    type: "error",
+    operation: label,
+    exit_code: exitCode,
+    message,
+  });
 }
 
 function normalizeChannel(channel: string | undefined, defaultChannel?: string): string {
@@ -472,8 +515,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
             : {}),
         });
       } catch (e) {
-        const code = handleRestError(e);
-        return fail(code === 1 && e instanceof Error ? e.message : `send failed with exit ${code}`);
+        return failFromRestError("send", e);
       }
     },
   );
@@ -563,8 +605,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         advanceCursorPastOwnMessage(resolved, seq);
         return ok({ type: "status", channel: resolved, seq, state, ...(task !== undefined ? { task } : {}) });
       } catch (e) {
-        const code = handleRestError(e);
-        return fail(code === 1 && e instanceof Error ? e.message : `status failed with exit ${code}`);
+        return failFromRestError("status", e);
       }
     },
   );
@@ -573,7 +614,8 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     "party_who",
     {
       title: "Channel presence",
-      description: "Return current presence/wakeability for a channel.",
+      description:
+        "Return current presence/wakeability for a channel, plus send_budget — how many more messages you may send before the loop guard blocks you (#815). Check it before composing a long message.",
       inputSchema: {
         channel: z.string().optional(),
       },
@@ -582,8 +624,31 @@ export function createMcpServer(defaultChannel?: string): McpServer {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
-        const presence = await fetchPresence(cfg.server, cfg.token, resolved);
-        return ok({ type: "who", channel: resolved, presence });
+        // #815：撞上 loop guard 才知道额度用完，代价是一条已经写好的长消息。presence 是 agent
+        // 每轮都会读的东西，把预算挂在这里，写长消息前顺手就能看到还剩几条。
+        // guard 读失败不该拖垮 who——presence 是主信息，预算是加分项。
+        const [presence, budget] = await Promise.all([
+          fetchPresence(cfg.server, cfg.token, resolved),
+          getLoopGuard(cfg.server, cfg.token, resolved).catch(() => null),
+        ]);
+        return ok({
+          type: "who",
+          channel: resolved,
+          presence,
+          ...(budget === null
+            ? {}
+            : {
+                send_budget: {
+                  loop_guard_enabled: budget.enabled,
+                  // 自己的 fair-share 余量才是「我还能发几条」；缺 self（人类 token/旧 worker）时回落全局。
+                  messages_remaining: budget.self ? budget.self.remaining : budget.remaining,
+                  resets_on: budget.resets_on,
+                  channel_streak: budget.streak,
+                  channel_limit: budget.limit,
+                  ...(budget.self ? { self: budget.self } : {}),
+                },
+              }),
+        });
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }

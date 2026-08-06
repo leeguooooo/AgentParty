@@ -6716,7 +6716,13 @@ app.get("/api/channels/:slug/loop-guard", async (c) => {
     c.env,
     slug,
     new Request("https://do/internal/guard", {
-      headers: { "x-partykit-room": slug, ...channelHeaders(channel, c.req.url) },
+      headers: {
+        "x-partykit-room": slug,
+        ...channelHeaders(channel, c.req.url),
+        // #815：带上调用方身份，让 DO 把 per-agent fair-share 余量一并算出来。
+        // agent 撞墙前最先耗尽的是这个名额，只报全局 streak 会误导它以为还有余量。
+        ...(c.get("identity").kind === "agent" ? { "x-ap-self": c.get("identity").name } : {}),
+      },
     }),
   );
 });

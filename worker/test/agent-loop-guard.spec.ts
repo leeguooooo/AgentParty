@@ -125,3 +125,55 @@ describe("per-agent loop guard fairness", () => {
     expect((await postMessage(slug, agent.token, "allowed now")).status).toBe(200);
   });
 });
+
+// #815：agent 撞的通常是 per-agent fair-share，不是全局 streak。guard 快照只报全局 remaining
+// 时，agent 会以为还有余量、写完长消息才被拒——那条消息就丢了。
+describe("loop guard snapshot exposes the caller's own fair-share budget", () => {
+  it("reports the agent's own remaining quota, not just the channel streak", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    await enableLoopGuard(slug, agent.token, LOOP_GUARD_N);
+    await seedLoopGuardCounts(slug, agent.name, LOOP_GUARD_AGENT_N - 3, 1);
+
+    const res = await api(`/api/channels/${slug}/loop-guard`, agent.token);
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      enabled: true,
+      limit: LOOP_GUARD_N,
+      streak: 1,
+      // 全局还很宽松，但自己只剩 3 条——这才是 agent 需要看到的数字。
+      remaining: LOOP_GUARD_N - 1,
+      self: {
+        name: agent.name,
+        limit: LOOP_GUARD_AGENT_N,
+        used: LOOP_GUARD_AGENT_N - 3,
+        remaining: 3,
+      },
+    });
+  });
+
+  it("caps the caller's remaining by the channel streak when the global guard is the tighter wall", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    await enableLoopGuard(slug, agent.token, LOOP_GUARD_N);
+    // 自己一条没发过，但频道整体只剩 2 条：能再发的是 2，不是 fair-share 的满额。
+    await seedLoopGuardCounts(slug, agent.name, 0, LOOP_GUARD_N - 2);
+
+    const res = await api(`/api/channels/${slug}/loop-guard`, agent.token);
+    await expect(res.json()).resolves.toMatchObject({
+      remaining: 2,
+      self: { used: 0, remaining: 2 },
+    });
+  });
+
+  it("omits the self block for a human caller — humans are not rate-limited by the guard", async () => {
+    const agent = await seedToken("agent");
+    const human = await seedToken("human");
+    const slug = await createChannel(agent.token);
+    await enableLoopGuard(slug, agent.token, LOOP_GUARD_N);
+
+    const body = (await (await api(`/api/channels/${slug}/loop-guard`, human.token)).json()) as Record<string, unknown>;
+    expect(body.self).toBeUndefined();
+    expect(body.enabled).toBe(true);
+  });
+});

@@ -414,6 +414,12 @@ export async function run(argv: string[]): Promise<number> {
             console.log(
               `loop guard ${slug}: ${onoff} streak=${state.streak}/${state.limit} remaining=${state.remaining} resets_on=${state.resets_on}`,
             );
+            // #815：self 是 agent 实际会先撞上的那道墙，单独打一行，别让它只看全局 remaining。
+            if (state.self) {
+              console.log(
+                `  self ${state.self.name}: used=${state.self.used}/${state.self.limit} remaining=${state.self.remaining} (fair-share; you can send this many more before the guard blocks you)`,
+              );
+            }
           }
           return 0;
         }
