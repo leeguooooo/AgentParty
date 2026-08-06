@@ -10,7 +10,7 @@
 //
 // ⚠️ 这把锁只挡**同一台机器**。跨机器的重复执行（工位机 + 家里机各跑一个 serve）
 // 需要服务端租约（#99 的另一半,`do.ts` 广播发给同名所有连接）。
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
@@ -323,6 +323,83 @@ export function acquireInstanceLock(
         // 只删自己的锁：别人接管过就不动它
         const cur = JSON.parse(readFileSync(path, "utf8")) as { id?: string };
         if (cur.id === lockId) unlinkSync(path);
+      } catch {
+        /* 已经没了 */
+      }
+    },
+  };
+}
+
+// #816：runner 工作目录的共用告警。
+//
+// 上面那把锁按 (身份, 频道) 互斥，管的是「同一个频道别被服务两次」。它挡不住另一种损坏：
+// **不同频道**（或另一个身份）的 serve 从同一个目录启动，各自的 runner 就落在同一个 working
+// tree 上。这类 runner 会改文件、`git checkout`、跑构建，甚至 commit——两个并发落在一棵树上，
+// 轻则互相覆盖未提交改动，重则一个 checkout 把另一个正在编辑的文件换掉。而且两边都以为自己
+// 在正常工作，损坏是静默的（issue #816 是靠 pgrep 偶然发现的，没有任何告警）。
+//
+// 这里不阻断——同目录跑多个 serve 有合法用法（只读脚本、显式 --workdir 隔离过的场景），硬拒
+// 会打断既有部署。只做一件事：让它可见。
+const RUNNER_CWD_CLAIM_DIR = "runner-cwd";
+
+export interface RunnerCwdClaim {
+  /** 其它活着的、声称在用同一目录跑 runner 的进程。 */
+  conflicts: { pid: number; channel: string }[];
+  release: () => void;
+}
+
+function runnerCwdClaimPath(cwd: string, channel: string, dir: string): string {
+  const key = createHash("sha256").update(cwd).digest("hex").slice(0, 24);
+  return join(dir, RUNNER_CWD_CLAIM_DIR, `${key}-${channel.replace(/[^a-zA-Z0-9._-]/g, "_")}-${process.pid}.json`);
+}
+
+/**
+ * 登记「本进程会在 cwd 里跑 runner」，并返回同目录下其它还活着的登记者。
+ * 陈旧登记（写它的进程已死）顺手清掉，否则崩溃一次就会永久假告警。
+ */
+export function claimRunnerCwd(cwd: string, channel: string, dir = defaultInstanceLockDir()): RunnerCwdClaim {
+  const claimDir = join(dir, RUNNER_CWD_CLAIM_DIR);
+  mkdirSync(claimDir, { recursive: true });
+  const key = createHash("sha256").update(cwd).digest("hex").slice(0, 24);
+  const conflicts: { pid: number; channel: string }[] = [];
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(claimDir);
+  } catch {
+    entries = [];
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(`${key}-`) || !entry.endsWith(".json")) continue;
+    const path = join(claimDir, entry);
+    let holder: { pid?: number; channel?: string; started_at?: number } | null = null;
+    try {
+      holder = JSON.parse(readFileSync(path, "utf8")) as { pid?: number; channel?: string; started_at?: number };
+    } catch {
+      holder = null;
+    }
+    if (typeof holder?.pid !== "number" || holder.pid === process.pid || !sameLiveProcess(holder.pid, holder.started_at)) {
+      try {
+        unlinkSync(path);
+      } catch {
+        /* 另一个进程已经清掉了这条陈旧登记。 */
+      }
+      continue;
+    }
+    conflicts.push({ pid: holder.pid, channel: holder.channel ?? "?" });
+  }
+  const path = runnerCwdClaimPath(cwd, channel, dir);
+  try {
+    writeFileSync(path, JSON.stringify({ pid: process.pid, started_at: PROCESS_STARTED_AT, channel, cwd }), {
+      mode: 0o600,
+    });
+  } catch {
+    /* 登记失败只丢失告警能力，绝不该让 serve 起不来。 */
+  }
+  return {
+    conflicts,
+    release: () => {
+      try {
+        unlinkSync(path);
       } catch {
         /* 已经没了 */
       }
