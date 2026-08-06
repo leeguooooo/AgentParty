@@ -21,10 +21,20 @@ export function sanitizeSingleLine(text: string): string {
   return stripTerminalControls(text).replace(/[\t\n]+/g, " ");
 }
 
+// #817：隔离 runner 代答的消息在频道里和本人发的长得一模一样——同一个 name、同一个 role、正文
+// 无标记。信息服务端本来就有（response_source），只是没渲染出来。而这类回复恰恰读起来「像有全部
+// 上下文的本人说的」：它不知道本人这一整天做了什么、哪些结论已经被推翻。多 agent 协作里，
+// 「这句话背后有多少上下文」是关键信息，不该靠协作方自己去解析 API 元数据。
+export function formatResponseSource(source: MsgFrame["response_source"]): string {
+  if (source === undefined) return "";
+  const context = source.context === "isolated_channel_session" ? "isolated" : "fresh process";
+  return ` (via ${source.kind}: ${source.runner}, ${context})`;
+}
+
 function formatSender(m: MsgFrame): string {
   const owner = m.sender.owner && m.sender.owner !== m.sender.name ? ` owner=${m.sender.owner}` : "";
   const lineage = m.sender.lineage ? ` parent=${m.sender.lineage.parent_agent} team=${m.sender.lineage.team_id}` : "";
-  return `${m.sender.name}(${m.sender.kind}${owner}${lineage})`;
+  return `${m.sender.name}(${m.sender.kind}${owner}${lineage})${formatResponseSource(m.response_source)}`;
 }
 
 function formatContext(ctx: AgentContext | undefined): string[] {
@@ -59,6 +69,81 @@ function formatAttachments(m: MsgFrame): string[] {
 // 唯一出口：任何远端字段拼进来后，整串统一剥离终端控制字符（#372）。逐行结构用的 \n/\t 保留。
 export function formatMsg(m: MsgFrame): string {
   return stripTerminalControls(formatMsgRaw(m));
+}
+
+export const DEFAULT_HEADER_PREVIEW = 120;
+
+// #819：agent 每轮重建上下文都要拉一次 history，而频道里贴 SQL/实测数据的长消息很常见，
+// 一次 10 条就是两三万字符——其中九成是上一轮已经读过的。轻量视图只给「有没有新的、谁发的、
+// 大概讲什么」，需要哪条再按 seq 精确拉全文。省的不是钱，是 agent 还能在频道里待多久。
+export interface MsgHeader {
+  seq: number;
+  ts: number;
+  sender: string;
+  kind: MsgFrame["kind"];
+  state?: string;
+  mentions: string[];
+  reply_to: number | null;
+  chars: number;
+  preview: string;
+  truncated: boolean;
+  attachments?: number;
+  retracted?: boolean;
+  edited?: boolean;
+  /** #817：这条是隔离接待 runner 代发的，不是本人在其完整上下文里说的。 */
+  response_source?: MsgFrame["response_source"];
+}
+
+// 正文的单行摘要：status 帧取 note（正文常为空），普通消息取 body 首行起的前 N 字符。
+function headerPreviewSource(m: MsgFrame): string {
+  if (m.retracted) return "[retracted]";
+  if (m.kind === "status") return m.note ?? "";
+  return m.body ?? "";
+}
+
+export function msgHeader(m: MsgFrame, previewChars = DEFAULT_HEADER_PREVIEW): MsgHeader {
+  const source = headerPreviewSource(m);
+  // preview 要占一行，所以折叠换行/TAB（sanitizeSingleLine），再按字符数截断。
+  const flat = sanitizeSingleLine(source).trim();
+  const truncated = flat.length > previewChars;
+  return {
+    seq: m.seq,
+    ts: m.ts,
+    sender: m.sender.name,
+    kind: m.kind,
+    ...(m.kind === "status" && m.state ? { state: m.state } : {}),
+    mentions: m.mentions ?? [],
+    reply_to: m.reply_to ?? null,
+    // chars 报的是完整正文长度，agent 据此判断「值不值得展开」。
+    chars: source.length,
+    preview: truncated ? flat.slice(0, previewChars) : flat,
+    truncated,
+    ...(m.attachments && m.attachments.length > 0 ? { attachments: m.attachments.length } : {}),
+    ...(m.retracted ? { retracted: true } : {}),
+    ...(m.edited ? { edited: true } : {}),
+    // 扫 header 时就得看见「这条是代答的」——否则挑出来展开全文才发现，判断已经先入为主了。
+    ...(m.response_source === undefined ? {} : { response_source: m.response_source }),
+  };
+}
+
+// 人类可读的一行：[seq] sender(kind) @mentions ↩#reply · 1832ch: preview…
+export function formatMsgHeader(m: MsgFrame, previewChars = DEFAULT_HEADER_PREVIEW): string {
+  const h = msgHeader(m, previewChars);
+  const parts = [
+    h.kind === "status" ? `[${h.state ?? "status"}]` : null,
+    h.mentions.length > 0 ? `@${h.mentions.join(",@")}` : null,
+    h.reply_to !== null ? `↩#${h.reply_to}` : null,
+    h.attachments !== undefined ? `📎${h.attachments}` : null,
+    h.retracted === true ? "retracted" : null,
+    // 全文模式的 badge 里有 edited，headers 模式漏掉它的话，被编辑过的消息在这一行摘要里
+    // 和没编辑过的长得一样——纯文本读者（包括直接读输出的 agent）就丢了这个信号。
+    h.edited === true ? "edited" : null,
+    `${h.chars}ch`,
+  ].filter((part): part is string => part !== null);
+  return stripTerminalControls(
+    `[${h.seq}] ${h.sender}(${m.sender.kind})${formatResponseSource(h.response_source)} ${parts.join(" ")}: ` +
+      `${h.preview}${h.truncated ? "…" : ""}`,
+  );
 }
 
 function formatMsgRaw(m: MsgFrame): string {

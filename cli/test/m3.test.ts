@@ -601,20 +601,34 @@ describe("party send", () => {
     writeCfg(mock.url);
     const r = await runCli(["send", "--channel", "dev", "hello", "--reply-to", "bogus"]);
     expect(r.code).toBe(1);
-    expect(r.stderr).toContain("--reply-to must be a positive integer");
+    expect(r.stderr).toContain("--reply-to must be a seq");
     expect(mock.requests.length).toBe(0);
   });
 
-  test("--reply-to 只接受正整数", async () => {
+  test("--reply-to 只接受正整数（列表形式同样逐项校验，#818）", async () => {
     mock = startRestMock();
     writeCfg(mock.url);
     const decimal = await runCli(["send", "--channel", "dev", "hello", "--reply-to", "1.5"]);
     expect(decimal.code).toBe(1);
-    expect(decimal.stderr).toContain("--reply-to must be a positive integer");
+    expect(decimal.stderr).toContain("--reply-to must be a seq");
     const negative = await runCli(["send", "--channel", "dev", "hello", "--reply-to", "-1"]);
     expect(negative.code).toBe(1);
-    expect(negative.stderr).toContain("--reply-to must be a positive integer");
+    expect(negative.stderr).toContain("--reply-to must be a seq");
+    // #818：列表里有一项非法就整条拒发——静默丢掉后半段会让 agent 以为债务已清，其实没清。
+    const partial = await runCli(["send", "--channel", "dev", "hello", "--reply-to", "396,bogus"]);
+    expect(partial.code).toBe(1);
+    expect(partial.stderr).toContain("--reply-to must be a seq");
     expect(mock.requests.length).toBe(0);
+  });
+
+  test("--reply-to 多 seq：首个是线程锚点，其余进 also_resolves（#818）", async () => {
+    mock = startRestMock();
+    writeCfg(mock.url);
+    const r = await runCli(["send", "--channel", "dev", "hello", "--reply-to", "396,398"]);
+    expect(r.code).toBe(0);
+    const post = mock.requests.find((req) => req.method === "POST" && req.path.endsWith("/messages"));
+    expect(post).toBeDefined();
+    expect(post!.body).toMatchObject({ reply_to: 396, also_resolves: [398] });
   });
 });
 

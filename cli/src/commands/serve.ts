@@ -46,7 +46,7 @@ import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../
 import { readAccount } from "../account";
 import { connect } from "../client";
 import { clearStuck, clearStuckForConfig, loadCursor, loadCursorForConfig, loadRevCursor, loadRevCursorForConfig, loadStuck, loadStuckForConfig, localAgentConfigsForChannel, readConfigWithSource, refreshConfigInPlace, resolveChannel, saveCursor, saveCursorForConfig, saveRevCursor, saveRevCursorForConfig, saveStuck, saveStuckForConfig, type StuckWake } from "../config";
-import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget, stopOwnInstance } from "../instance-lock";
+import { acquireInstanceLock, claimRunnerCwd, defaultInstanceLockDir, instanceLockTarget, stopOwnInstance } from "../instance-lock";
 import { formatMsg, stripTerminalControls } from "../format";
 import { clearHealthCache, writeHealthCache } from "../health-cache";
 import { ensureFreshAccess, resolveAuthDetailed, type ResolvedAuthDetailed } from "../oidc-cli";
@@ -1507,7 +1507,11 @@ The command can read the context JSON path from {file} or AP_CONTEXT_FILE.
 
 Options:
   --channel C          serve channel C instead of the bound channel
-  --on-mention "<cmd>" run a fresh custom process for each wake
+  --on-mention "<cmd>" run a fresh custom process for each wake, ONE AT A TIME — the next
+                       wake waits for this one to exit (serve never runs two in parallel)
+                       it runs in serve's own cwd unless you pass --workdir. If that cwd is a
+                       git worktree you also work in, your edits and the runner's collide
+                       silently: give it --workdir <dir> of its own
                        owner answers rerun it with the same AP_WORK_ID/AP_CONTINUATION_REF
                        and decision_response in AP_CONTEXT_FILE; no model session is resumed
   --runner codex|claude|codex-sdk
@@ -1516,7 +1520,10 @@ Options:
                        the owner's currently open Codex/Claude conversation
   --codex-bin PATH     Codex CLI override for --runner codex (or set AGENTPARTY_CODEX_BIN);
                        otherwise search child PATH, Homebrew, Codex.app, and ChatGPT.app
-  --workdir DIR        runner workdir (default: ~/.agentparty/runners/<principal-sha256>/<channel>)
+  --workdir DIR        runner workdir. With --runner it defaults to
+                       ~/.agentparty/runners/<principal-sha256>/<channel>; with --on-mention
+                       there is NO default — the command inherits serve's cwd unless you
+                       pass this flag (issue #816)
   --repo URL           clone into workdir/repo once, then git pull --ff-only before each wake
   --runner-timeout-seconds N
                        terminate one stuck runner after N seconds (default: ${DEFAULT_RUNNER_TIMEOUT_MS / 1000})
@@ -1526,7 +1533,11 @@ Options:
   --auto-upgrade       between wakes, if a newer party binary is on disk, re-exec it (issue #45)
   --stop               stop only THIS identity's serve on the channel (safe on multi-agent hosts;
                        resolves your own listener via the instance lock — unlike pkill -f, issue #741)
-  --replay-backlog     on attach, replay the offline backlog one wake per message
+  --replay-backlog     on attach, replay the offline backlog one wake per message —
+                       SERIALLY, same as any other wake: N backlog messages run N runs
+                       back to back, never N at once. Each run still has its real effects
+                       (commits, pushes, posted replies), so a deep backlog can produce a
+                       long tail of them; check the count serve prints before enabling.
                        (default: skip the backlog, advance the cursor, and print
                        how many were skipped — serve wakes only for messages that
                        arrive AFTER it attaches, issue #193. An undelivered wake
@@ -1542,6 +1553,12 @@ export interface ServeRunnerContext {
   self: string;
   /** 本 serve 实例私有的上下文目录（createWakeContextDir）。 */
   contextDir: string;
+  /**
+   * #816：--on-mention 自定义命令的工作目录。--workdir 此前只喂给内建 runner，对自定义命令
+   * 被静默丢弃——用户显式要求的隔离没有生效，而 help 里写的默认值也从不适用。缺省仍继承
+   * serve 的 cwd（改默认会打断所有「从仓库根目录启 serve」的既有部署）。
+   */
+  cwd?: string;
   recent: MsgFrame[];
   charter?: ChannelCharter | null;
   projectAgent?: ProjectAgentRunContext | null;
@@ -1584,6 +1601,11 @@ export interface ServeOptions {
   /** 关掉单实例保护（逃生舱）。 */
   allowMultiple?: boolean;
   builtinRunner?: BuiltinRunnerOptions;
+  /**
+   * #816：显式 --workdir 时，--on-mention 自定义命令的工作目录。此前 --workdir 只喂内建 runner，
+   * 自定义命令被静默丢弃，用户以为隔离了、实际还在 serve 的 cwd 里跑。缺省 undefined = 继承 cwd。
+   */
+  runnerCwd?: string;
   onCursor?: (cursor: number) => void;
   onRevCursor?: (revCursor: number) => void;
   /** 上次进程留下的欠账（#198）：崩溃前失败了几次，重启后接着数。 */
@@ -1681,6 +1703,8 @@ async function defaultRun(
     stdin: new TextEncoder().encode(body),
     stdout: "inherit",
     stderr: "inherit",
+    // #816：显式 --workdir 才改；缺省不传，保持「继承 serve 的 cwd」这个既有行为。
+    ...(ctx.cwd === undefined ? {} : { cwd: ctx.cwd }),
     env: {
       ...process.env,
       // Nested party commands must stay on the served channel even when the workspace is bound to
@@ -4962,6 +4986,22 @@ export async function runServe(o: ServeOptions): Promise<number> {
     );
     return EXIT_ALREADY_SERVING;
   }
+  // #816：上面那把锁按 (身份, 频道) 互斥，管不到「另一个频道的 serve 从同一个目录启动」。
+  // 那种情况下两个 runner 落在同一棵 working tree 上：改文件、git checkout、跑构建、甚至 commit
+  // 互相踩，而两边都以为自己在正常工作——损坏是静默的，此前只能靠 pgrep 偶然发现。
+  // 不阻断（同目录并存有合法用法），但必须让它可见。
+  const runnerCwd = o.runnerCwd ?? o.builtinRunner?.workdir ?? o.sdkRunner?.workdir ?? process.cwd();
+  // 不受 --allow-multiple 影响：那个逃生舱解的是「同频道同身份的实例锁」，与「谁在用这个目录」
+  // 是两件事。而且用了 --allow-multiple 的人恰恰更可能撞上同目录并发——那时更需要这条告警。
+  const cwdClaim = claimRunnerCwd(runnerCwd, o.channel, lockDir);
+  if (cwdClaim.conflicts.length > 0) {
+    const others = cwdClaim.conflicts.map((c) => `pid ${c.pid} (#${c.channel})`).join("、");
+    out(
+      `serve: ⚠ 同一个工作目录已被另一个 serve 使用：${runnerCwd}（${others}）。` +
+        ` 两个 runner 并发改同一棵 working tree 会互相覆盖未提交改动、一个 git checkout 能换掉另一个正在编辑的文件——` +
+        ` 而且两边都不会报错。用 \`--workdir <dir>\` 给本实例一个独立目录，或确认这些命令确实只读。`,
+    );
+  }
   if (o.startupCheck !== undefined) {
     try {
       await o.startupCheck(AbortSignal.timeout(RUNNER_STARTUP_CHECK_TIMEOUT_MS));
@@ -4969,6 +5009,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
       const message = sanitizeBlockedError(error instanceof Error ? error.message : String(error));
       out(`serve: runner 启动预检失败，不连接频道、不领取租约：${message}`);
       lock?.release?.();
+      cwdClaim.release();
       return EXIT_RUNNER_UNAVAILABLE;
     }
   }
@@ -4984,6 +5025,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
     });
   } catch (error) {
     lock?.release?.();
+    cwdClaim.release();
     throw error;
   }
   const lifecycleController = new AbortController();
@@ -5484,6 +5526,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
               channel: o.channel,
               self,
               contextDir,
+              ...(o.runnerCwd === undefined ? {} : { cwd: o.runnerCwd }),
               recent: recent.slice(),
               charter,
               projectAgent: o.projectAgent ?? null,
@@ -5665,6 +5708,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
                 channel: o.channel,
                 self,
                 contextDir,
+                ...(o.runnerCwd === undefined ? {} : { cwd: o.runnerCwd }),
                 recent: recent.slice(),
                 charter,
                 projectAgent: o.projectAgent ?? null,
@@ -5958,6 +6002,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
     // 但绝不在进程退出后继续留在共享 tmpdir 里（#208 门禁 P2）。
     rmSync(contextDir, { recursive: true, force: true });
     lock?.release?.();
+    cwdClaim.release();
     if (heartbeat) clearInterval(heartbeat);
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onTerminate);
@@ -6528,6 +6573,11 @@ export async function run(argv: string[], deps: ServeCommandDeps = {}): Promise<
         onStuck: (st) => (st === null ? clearStuck(channel) : saveStuck(channel, st)),
         sinceRev: loadRevCursor(channel),
         cmd: cmd ?? "",
+        // #816：--workdir 对 --on-mention 曾被静默丢弃。只有显式给了才传（缺省仍继承 serve 的 cwd，
+        // 改默认会打断所有「从仓库根目录启 serve」的既有部署）。
+        ...(harness === undefined && !useSdkRunner && runnerWorkdirPath !== null && explicitRunnerWorkdir !== undefined
+          ? { runnerCwd: runnerWorkdirPath }
+          : {}),
         mentionsOnly: flags.all !== true,
         // Internal recovery is not user-requested replay. Keep the first attach cutoff so legacy
         // messages from the restart gap still run while pre-existing history remains skipped.

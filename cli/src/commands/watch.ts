@@ -136,7 +136,12 @@ export const ONCE_CLAUDE_ADVISORY =
 export const ONCE_REARM_ADVISORY =
   "note: --once is single-shot and harness-scoped. Re-arm it every turn without --latest. " +
   "Pending wakes are tracked PER DELIVERY and each replays until cleared: `party send --reply-to A` clears only A, " +
-  "not other pending @s. For an @ you won't reply to, clear it with `party ack` (or `party ack --all`/`--through N`) " +
+  "not other pending @s. " +
+  // #818：一条回复常常同时答掉对方连发的几条 @，而只有 reply_to 那条被清——其余原样重放，收到的人
+  // 还得先辨认是不是重放。查得到欠哪几条，才谈得上一次清准。
+  "When one reply settles several, list them: `party send --reply-to 396,398`. " +
+  "See exactly which seqs you owe right now: `party who --json` → pending_mention_seqs. " +
+  "For an @ you won't reply to, clear it with `party ack` (or `party ack --all`/`--through N`) " +
   "instead of posting filler. " +
   // #708：Claude Code 会话内 watch --once / serve 都会被 turn 边界杀，无法可靠在线。真正的持久待命是
   // 「会话外」的第一方常驻——party daemon（持 WS、被 @ 就地跑 SDK、不依赖 turn 边界；桌面端可用 launchd 托管）。

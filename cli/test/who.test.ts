@@ -358,6 +358,37 @@ describe("who busy + queue depth (#103)", () => {
     expect(unhandledMentionNote({ name: "bot", kind: "agent", tier: "online", age_ms: 0 })).toBe("");
   });
 
+  // #818：debt 逐条清，所以要看见的是「欠哪几条」而不是「欠几条」。只有 count + oldest 时中间那些
+  // 查不到，已处理过的 @ 于是反复重放。
+  test("pending_mention_seqs 列全时直接报 seq 列表，替掉 oldest 那个替代品", () => {
+    const row = classify(
+      p({
+        name: "bot",
+        state: "offline",
+        wake: { kind: "serve" },
+        unhandled_mention_count: 3,
+        oldest_unhandled_mention_seq: 416,
+        pending_mention_seqs: [416, 417, 421],
+      }),
+      NOW,
+    );
+    expect(row).toMatchObject({ pending_mention_seqs: [416, 417, 421] });
+    expect(unhandledMentionNote(row!)).toBe(" · ⚠ 3 unhandled @ #416 #417 #421");
+  });
+
+  test("列表被服务端上限截断时如实说还有多少条没列出来", () => {
+    expect(
+      unhandledMentionNote({
+        name: "bot",
+        kind: "agent",
+        tier: "online",
+        age_ms: 0,
+        unhandled_mention_count: 53,
+        pending_mention_seqs: [1, 2, 3],
+      }),
+    ).toBe(" · ⚠ 53 unhandled @ #1 #2 #3 (+50 more)");
+  });
+
   test("busyNote 渲染：忙、忙+队列、空闲三态", () => {
     expect(busyNote({ name: "a", kind: "agent", tier: "online", age_ms: 0, busy: true })).toBe(" · ⏳ busy");
     expect(busyNote({ name: "a", kind: "agent", tier: "online", age_ms: 0, busy: true, queue_depth: 4 })).toBe(

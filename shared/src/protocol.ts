@@ -38,6 +38,9 @@ export const ROLE_RESPONSIBILITY_LIMIT = 500;
 // 若被铸成真实 token，其消息（含被 @）会静默永不触发 webhook。
 export const RESERVED_NAMES: readonly string[] = ["system"];
 export const MAX_MENTIONS = 50;
+// 一条回复最多顺带了结多少条其它 @（#818）。现实上限是「对方连发的几条补充」，个位数足矣；
+// 设个上界只为堵住「一条消息清空全部接待债务」这种越权用法。
+export const MAX_ALSO_RESOLVES = 20;
 
 // Keep the root export used by older CLI callers, but delegate lexical rules to
 // the rich shared lexer so worker/web/CLI agree on URL, email, npm and code spans.
@@ -556,6 +559,13 @@ export interface PresenceEntry {
   /** Oldest unresolved source message, for a direct jump from the reception UI. */
   oldest_unhandled_mention_seq?: number;
   /**
+   * Every unresolved source message seq, ascending (#818). Wake debt is tracked PER DELIVERY, so
+   * clearing it needs the exact seqs — a count plus the oldest is not enough to ack the ones in
+   * between, and un-acked @s replay verbatim. Capped at 50; unhandled_mention_count stays the true
+   * total. Absent when there is no debt.
+   */
+  pending_mention_seqs?: number[];
+  /**
    * 同名多机 serve 里，除持租者外仍挂着、处于 standby 的 serve 连接数（issue #99）。DO 从活连接里的
    * serve 租约候选权威判定：候选数 N ≥ 2 时下发 N-1（有几台在待命顶替），否则省略。用途：who / web
    * 一眼看出「这个 name 有重复 serve，但只有 1 台在真正跑 runner」——把过去只能靠 connection_count x2
@@ -881,6 +891,13 @@ export interface SendMessageFrame {
    */
   body_mentions?: string[];
   reply_to: number | null;
+  /**
+   * 这条消息顺带了结的其它 @（#818）。wake debt 按 delivery 逐条记，而现实里一条回复常常同时答掉
+   * 2-3 条 @——只能指一条 reply_to 时，其余的 debt 不清、原样重放，agent 还得先辨认「这是新消息
+   * 还是重放」。reply_to 仍是唯一的会话线程锚点（渲染/引用不变），这里只影响接待债务的了结。
+   * 空/缺省 = 与今天完全一致。上限 MAX_ALSO_RESOLVES。
+   */
+  also_resolves?: number[];
   completion_artifact?: CompletionArtifact;
   /** 人类决策请求（#284）；带上它 = 这条 message 是一个 decision_request。与 completion_artifact 互斥。 */
   decision_request?: SendDecisionRequest;
@@ -1853,6 +1870,8 @@ export interface PresenceFrame {
   unhandled_mention_count?: number;
   /** 最早一条未处理 @ 的来源消息 seq，供实时界面直接跳转。 */
   oldest_unhandled_mention_seq?: number;
+  /** 全部未处理 @ 的来源 seq（升序，封顶 50）；与 PresenceEntry 同口径（#818）。 */
+  pending_mention_seqs?: number[];
   /** 同名 serve 的待命实例数。 */
   serve_standbys?: number;
   /** 当前处理的触发消息 seq；仅活跃任务时下发。 */

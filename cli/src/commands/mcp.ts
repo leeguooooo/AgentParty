@@ -1,11 +1,12 @@
 // party mcp — stdio MCP server exposing AgentParty as structured tools.
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ChannelDecisionRecord, MsgFrame, StatusState, TaskAssigneeKind, TaskState } from "@agentparty/shared";
+import { MAX_ALSO_RESOLVES } from "@agentparty/shared";
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { stripTerminalControls } from "../format";
+import { DEFAULT_HEADER_PREVIEW, msgHeader, stripTerminalControls } from "../format";
 import pkg from "../../package.json" with { type: "json" };
 import {
   ackWatchStuck,
@@ -29,8 +30,10 @@ import {
   fetchPresence,
   fetchRecentMessages,
   fetchServerVersion,
+  getLoopGuard,
   handleRestError,
   listChannels,
+  RestError,
   listTasks,
   postMessage,
   spawnAgent,
@@ -108,11 +111,61 @@ function ok(data: Record<string, unknown>, text?: string): CallToolResult {
   };
 }
 
-function fail(message: string): CallToolResult {
+function fail(message: string, data?: Record<string, unknown>): CallToolResult {
   return {
     isError: true,
     content: [{ type: "text", text: stripTerminalControls(message) }],
+    ...(data === undefined ? {} : { structuredContent: data }),
   };
+}
+
+// #815：`send failed with exit 4` 对调用方零信息——撞 loop guard 和网络抖动长得一模一样，
+// agent 只能盲目重试。CLI 那层早就有可读原因（stderr），是 MCP 出口把它吞了。
+// 这里把 REST 错误的 code/status/message 原样透出，并给出该 exit code 对应的行动建议。
+const EXIT_GUIDANCE: Record<string, string> = {
+  loop_guard:
+    "loop guard tripped — stop sending; wait for a human message (or a human runs `party channel reset-guard`). " +
+    "Another agent can still speak. Check your remaining budget with party_who (send_budget) before writing a long message.",
+  workflow_guard: "workflow guard tripped — stop, report status blocked, wait for a human. Do not rephrase and retry.",
+  rate_limited: "rate limited — back off (exponential, start ~30s) before retrying. Do not hammer.",
+  archived: "channel is archived — no further writes are accepted.",
+};
+
+// handleRestError 认 429 也认 code=rate_limited（服务端两种都发得出来）。按 code 查不到时补一次
+// 按状态码查，否则「限流但响应体没带 code」这条路径会退化成没有 hint 的裸错误——正是本 issue
+// 要消灭的那种。与 handleRestError 的判定保持同一口径。
+function guidanceFor(e: RestError): string | undefined {
+  const byCode = e.code === null ? undefined : EXIT_GUIDANCE[e.code];
+  if (byCode !== undefined) return byCode;
+  return e.status === 429 ? EXIT_GUIDANCE.rate_limited : undefined;
+}
+
+function failFromRestError(label: string, e: unknown): CallToolResult {
+  // handleRestError 同时负责把可读原因打进 stderr 并映射退出码；保留调用以维持 CLI 侧行为一致。
+  const exitCode = handleRestError(e);
+  if (e instanceof RestError) {
+    const code = e.code ?? String(e.status);
+    const guidance = guidanceFor(e);
+    return fail(
+      `${label} failed with exit ${exitCode}: ${code} ${e.message}` + (guidance === undefined ? "" : `\nhint: ${guidance}`),
+      {
+        type: "error",
+        operation: label,
+        exit_code: exitCode,
+        code,
+        status: e.status,
+        message: e.message,
+        ...(guidance === undefined ? {} : { hint: guidance }),
+      },
+    );
+  }
+  const message = e instanceof Error ? e.message : String(e);
+  return fail(`${label} failed with exit ${exitCode}: ${message}`, {
+    type: "error",
+    operation: label,
+    exit_code: exitCode,
+    message,
+  });
 }
 
 function normalizeChannel(channel: string | undefined, defaultChannel?: string): string {
@@ -428,13 +481,22 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         body: z.string().optional().describe("Message body. May be empty only when attaching."),
         mentions: z.array(z.string()).optional(),
         reply_to: z.number().int().positive().nullable().optional(),
+        // #818：wake debt 按 delivery 逐条记，reply_to 只清它指的那一条。一条回复同时答掉
+        // 对方连发的几条 @ 时，其余的会原样重放——把它们列在这里一并了结。
+        also_resolves: z
+          .array(z.number().int().positive())
+          .max(MAX_ALSO_RESOLVES)
+          .optional()
+          .describe(
+            "Other @ seqs this same message settles. reply_to clears ONLY the seq it names; anything else you answered here stays owed and replays on your next wake. Find what you owe in party_who → presence[].pending_mention_seqs.",
+          ),
         attach: z
           .array(z.string())
           .optional()
           .describe("Local file paths to upload as attachments (max 25MB each). Body may be empty only when attaching."),
       },
     },
-    async ({ channel, body, mentions, reply_to, attach }) => {
+    async ({ channel, body, mentions, reply_to, also_resolves, attach }) => {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
@@ -456,6 +518,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           body: effectiveBody,
           mentions: normalizedMentions,
           reply_to: reply_to ?? null,
+          ...(also_resolves !== undefined && also_resolves.length > 0 ? { also_resolves } : {}),
           ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
         });
         advanceCursorPastOwnMessage(resolved, seq);
@@ -472,8 +535,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
             : {}),
         });
       } catch (e) {
-        const code = handleRestError(e);
-        return fail(code === 1 && e instanceof Error ? e.message : `send failed with exit ${code}`);
+        return failFromRestError("send", e);
       }
     },
   );
@@ -563,8 +625,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         advanceCursorPastOwnMessage(resolved, seq);
         return ok({ type: "status", channel: resolved, seq, state, ...(task !== undefined ? { task } : {}) });
       } catch (e) {
-        const code = handleRestError(e);
-        return fail(code === 1 && e instanceof Error ? e.message : `status failed with exit ${code}`);
+        return failFromRestError("status", e);
       }
     },
   );
@@ -573,7 +634,8 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     "party_who",
     {
       title: "Channel presence",
-      description: "Return current presence/wakeability for a channel.",
+      description:
+        "Return current presence/wakeability for a channel, plus send_budget — how many more messages you may send before the loop guard blocks you (#815). Check it before composing a long message.",
       inputSchema: {
         channel: z.string().optional(),
       },
@@ -582,8 +644,31 @@ export function createMcpServer(defaultChannel?: string): McpServer {
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
-        const presence = await fetchPresence(cfg.server, cfg.token, resolved);
-        return ok({ type: "who", channel: resolved, presence });
+        // #815：撞上 loop guard 才知道额度用完，代价是一条已经写好的长消息。presence 是 agent
+        // 每轮都会读的东西，把预算挂在这里，写长消息前顺手就能看到还剩几条。
+        // guard 读失败不该拖垮 who——presence 是主信息，预算是加分项。
+        const [presence, budget] = await Promise.all([
+          fetchPresence(cfg.server, cfg.token, resolved),
+          getLoopGuard(cfg.server, cfg.token, resolved).catch(() => null),
+        ]);
+        return ok({
+          type: "who",
+          channel: resolved,
+          presence,
+          ...(budget === null
+            ? {}
+            : {
+                send_budget: {
+                  loop_guard_enabled: budget.enabled,
+                  // 自己的 fair-share 余量才是「我还能发几条」；缺 self（人类 token/旧 worker）时回落全局。
+                  messages_remaining: budget.self ? budget.self.remaining : budget.remaining,
+                  resets_on: budget.resets_on,
+                  channel_streak: budget.streak,
+                  channel_limit: budget.limit,
+                  ...(budget.self ? { self: budget.self } : {}),
+                },
+              }),
+        });
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -594,29 +679,78 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     "party_history",
     {
       title: "Channel history",
-      description: "Fetch AgentParty channel messages. Defaults to the MOST RECENT --limit messages (pass since/before to page explicitly).",
+      description:
+        "Fetch AgentParty channel messages. Defaults to the MOST RECENT limit messages (pass since/before to page explicitly). " +
+        "Rebuilding context every turn? Use mode='headers' — one compact record per message (seq/sender/kind/mentions/reply_to/chars + a short preview) " +
+        "instead of full bodies, then pull the ones that matter with seq=N. Long technical channels cost an order of magnitude less this way.",
       inputSchema: {
         channel: z.string().optional(),
         since: z.number().int().min(0).optional(),
         before: z.number().int().positive().optional(),
         limit: z.number().int().positive().max(1000).optional(),
+        seq: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Return only this message, in full. The expand-one-header path; exclusive with since/before/mode."),
+        mode: z
+          .enum(["full", "headers"])
+          .optional()
+          .describe("'headers' returns compact per-message records instead of full bodies. Default 'full' (unchanged)."),
+        preview_chars: z
+          .number()
+          .int()
+          .min(0)
+          .max(2000)
+          .optional()
+          .describe(`Body preview length in headers mode (default ${DEFAULT_HEADER_PREVIEW}, 0 = metadata only).`),
+        exclude_status: z
+          .boolean()
+          .optional()
+          .describe("Drop status frames — presence churn whose notes are usually repeated."),
       },
     },
-    async ({ channel, since, before, limit }) => {
+    async ({ channel, since, before, limit, seq, mode, preview_chars, exclude_status }) => {
       // since 与 before 都未给 → 走 tail，这样才对得上工具描述里的"recent"；给了任一个就照给的来
       if (since !== undefined && before !== undefined) {
         return fail("since and before are mutually exclusive");
       }
+      if (seq !== undefined && (since !== undefined || before !== undefined)) {
+        return fail("seq is exclusive with since/before (it already selects one message)");
+      }
+      if (seq !== undefined && mode === "headers") {
+        return fail("seq returns one message in full; drop mode='headers' (that is the point of seq)");
+      }
       try {
         const cfg = await auth();
         const resolved = normalizeChannel(channel, defaultChannel);
-        const messages =
+        if (seq !== undefined) {
+          const found = (await fetchMessages(cfg.server, cfg.token, resolved, seq - 1, 1)).find((m) => m.seq === seq);
+          if (found === undefined) {
+            return fail(`no message ${seq} in ${resolved} (retracted, filtered, or out of range)`);
+          }
+          return ok({ type: "history", channel: resolved, mode: "full", messages: [found] });
+        }
+        const fetched =
           since !== undefined
             ? await fetchMessages(cfg.server, cfg.token, resolved, since, limit ?? 100)
             : before !== undefined
               ? await fetchMessages(cfg.server, cfg.token, resolved, 0, limit ?? 100, { before })
               : await fetchRecentMessages(cfg.server, cfg.token, resolved, limit ?? 100);
-        return ok({ type: "history", channel: resolved, messages });
+        const messages = exclude_status === true ? fetched.filter((m) => m.kind !== "status") : fetched;
+        if (mode === "headers") {
+          const previewChars = preview_chars ?? DEFAULT_HEADER_PREVIEW;
+          return ok({
+            type: "history",
+            channel: resolved,
+            mode: "headers",
+            // 明说全文怎么取，否则 headers 会被当成「history 坏了/被截断了」。
+            expand_with: "party_history { seq: <seq> }",
+            headers: messages.map((m) => msgHeader(m, previewChars)),
+          });
+        }
+        return ok({ type: "history", channel: resolved, mode: "full", messages });
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }

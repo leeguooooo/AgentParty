@@ -1,4 +1,4 @@
-import { LOOP_GUARD_N } from "@agentparty/shared";
+import { LOOP_GUARD_AGENT_N, LOOP_GUARD_N } from "@agentparty/shared";
 import { describe, expect, it } from "vitest";
 import { api, createChannel, postMessage, seedToken } from "./helpers";
 
@@ -29,12 +29,19 @@ describe("loop guard read path", () => {
     const agent = await seedToken("agent");
     const slug = await createChannel(agent.token);
     // 守卫默认关闭，但读取接口仍给出 normal 模式的建议阈值。
+    // #815：agent 调用方还会拿到自己那份 fair-share 快照——它才是实际最先撞上的墙。
     expect(await guardState(slug, agent.token)).toEqual({
       enabled: false,
       limit: LOOP_GUARD_N,
       streak: 0,
       remaining: LOOP_GUARD_N,
       resets_on: "human",
+      self: {
+        name: agent.name,
+        limit: LOOP_GUARD_AGENT_N,
+        used: 0,
+        remaining: LOOP_GUARD_AGENT_N,
+      },
     });
   });
 
