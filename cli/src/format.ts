@@ -21,10 +21,20 @@ export function sanitizeSingleLine(text: string): string {
   return stripTerminalControls(text).replace(/[\t\n]+/g, " ");
 }
 
+// #817：隔离 runner 代答的消息在频道里和本人发的长得一模一样——同一个 name、同一个 role、正文
+// 无标记。信息服务端本来就有（response_source），只是没渲染出来。而这类回复恰恰读起来「像有全部
+// 上下文的本人说的」：它不知道本人这一整天做了什么、哪些结论已经被推翻。多 agent 协作里，
+// 「这句话背后有多少上下文」是关键信息，不该靠协作方自己去解析 API 元数据。
+export function formatResponseSource(source: MsgFrame["response_source"]): string {
+  if (source === undefined) return "";
+  const context = source.context === "isolated_channel_session" ? "isolated" : "fresh process";
+  return ` (via ${source.kind}: ${source.runner}, ${context})`;
+}
+
 function formatSender(m: MsgFrame): string {
   const owner = m.sender.owner && m.sender.owner !== m.sender.name ? ` owner=${m.sender.owner}` : "";
   const lineage = m.sender.lineage ? ` parent=${m.sender.lineage.parent_agent} team=${m.sender.lineage.team_id}` : "";
-  return `${m.sender.name}(${m.sender.kind}${owner}${lineage})`;
+  return `${m.sender.name}(${m.sender.kind}${owner}${lineage})${formatResponseSource(m.response_source)}`;
 }
 
 function formatContext(ctx: AgentContext | undefined): string[] {
@@ -80,6 +90,8 @@ export interface MsgHeader {
   attachments?: number;
   retracted?: boolean;
   edited?: boolean;
+  /** #817：这条是隔离接待 runner 代发的，不是本人在其完整上下文里说的。 */
+  response_source?: MsgFrame["response_source"];
 }
 
 // 正文的单行摘要：status 帧取 note（正文常为空），普通消息取 body 首行起的前 N 字符。
@@ -109,6 +121,8 @@ export function msgHeader(m: MsgFrame, previewChars = DEFAULT_HEADER_PREVIEW): M
     ...(m.attachments && m.attachments.length > 0 ? { attachments: m.attachments.length } : {}),
     ...(m.retracted ? { retracted: true } : {}),
     ...(m.edited ? { edited: true } : {}),
+    // 扫 header 时就得看见「这条是代答的」——否则挑出来展开全文才发现，判断已经先入为主了。
+    ...(m.response_source === undefined ? {} : { response_source: m.response_source }),
   };
 }
 
@@ -124,7 +138,8 @@ export function formatMsgHeader(m: MsgFrame, previewChars = DEFAULT_HEADER_PREVI
     `${h.chars}ch`,
   ].filter((part): part is string => part !== null);
   return stripTerminalControls(
-    `[${h.seq}] ${h.sender}(${m.sender.kind}) ${parts.join(" ")}: ${h.preview}${h.truncated ? "…" : ""}`,
+    `[${h.seq}] ${h.sender}(${m.sender.kind})${formatResponseSource(h.response_source)} ${parts.join(" ")}: ` +
+      `${h.preview}${h.truncated ? "…" : ""}`,
   );
 }
 

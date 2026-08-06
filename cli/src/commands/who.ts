@@ -1,6 +1,6 @@
 // party who — 从终端看频道里谁在线/可唤醒/最近，便于接着 party send --mention 把人拉进来/唤醒。
 // Claude Code 原生 @ 只认本地文件/技能，塞不进远程动态列表；本命令就是那个「动态在线列表」。
-import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type RunnerHealth, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
+import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type ReceptionContextBoundary, type ReceptionMode, type ReceptionRunner, type RunnerHealth, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
@@ -37,6 +37,11 @@ The debt is tracked PER DELIVERY, so clear it per seq — one reply that answers
 three @s still leaves the other two owed. Clear them explicitly:
   party ack --seq S1 --seq S2      (or --through S to clear everything up to S)
   party send "…" --reply-to S1,S2  (a reply may settle several at once)
+A "🤖 reception model:claude isolated" note means unattended @s to that name are
+answered by a resident runner in a SEPARATE per-channel session — it does not
+inherit that person's open conversation, so it does not know what they did today
+or which of their conclusions have since been overturned. Weigh its replies
+accordingly, and read the same tag on individual messages in party history.
 Then bring one in: party send "@name …" --mention name
 A human is @-notified by their handle (their web client matches on handle, not the
 session name), so mention the "@handle" shown here — not a UUID session name.
@@ -44,7 +49,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/reception_mode/reception_runner/reception_context/account/handle/display_name/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -105,6 +110,11 @@ interface Row {
   runner_health?: RunnerHealth;
   // runner 自报、worker 持久化的模型会话句柄（#522）；不是 websocket session。
   agent_session?: PresenceEntry["agent_session"];
+  // #817：无人值守时这个身份怎么接待 @——model runner 代答，还是 custom 命令。隔离接待意味着
+  // 答话的会话不继承本人当前上下文，协作方在 @ 之前就该看见这一点。
+  reception_mode?: ReceptionMode;
+  reception_runner?: ReceptionRunner;
+  reception_context?: ReceptionContextBoundary;
 }
 
 // kind 已知取 kind；旧 presence 行没回填时 UUID 名判 human（网页登录会话），其余判 agent。
@@ -186,6 +196,14 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     ...(e.listening === "suspect" || e.listening === "deaf" ? { listening: e.listening } : {}),
     ...(e.runner_health === undefined ? {} : { runner_health: e.runner_health }),
     ...(e.agent_session === undefined ? {} : { agent_session: e.agent_session }),
+    // #817：接待模式（status.context 里一直有，只是 who 的可读输出从不显示）。原样带出，缺失省略。
+    ...(e.status?.context?.reception_mode === undefined ? {} : { reception_mode: e.status.context.reception_mode }),
+    ...(e.status?.context?.reception_runner === undefined
+      ? {}
+      : { reception_runner: e.status.context.reception_runner }),
+    ...(e.status?.context?.reception_context === undefined
+      ? {}
+      : { reception_context: e.status.context.reception_context }),
     age_ms: age,
     ...(typeof e.connection_count === "number" && e.connection_count > 1
       ? { connection_count: e.connection_count }
@@ -312,6 +330,22 @@ export function activityNote(r: Row, now: number): string {
   }
 }
 
+// #817：接待模式一直只在 API 的 status.context 里，party who 的人类可读输出从不提。结果是：
+// 频道里的其他人无从判断「@ 这个名字，答我的会是本人，还是一个不知道本人今天做了什么的隔离会话」。
+// 这个判断该在 @ 之前就做得出来，而不是事后去解析元数据。
+export function receptionNote(r: Row): string {
+  if (r.reception_mode === undefined) return "";
+  const runner = r.reception_runner === undefined ? "" : `:${r.reception_runner}`;
+  // isolated = 独立的 per-channel 会话，不继承本人当前对话；fresh process = 每次唤醒起新进程。
+  const boundary =
+    r.reception_context === "isolated_channel_session"
+      ? " isolated"
+      : r.reception_context === "fresh_process"
+        ? " fresh"
+        : "";
+  return ` · 🤖 reception ${r.reception_mode}${runner}${boundary}`;
+}
+
 export function sessionNote(r: Row): string {
   const session = r.agent_session;
   if (session === undefined) return "";
@@ -413,7 +447,7 @@ export async function run(argv: string[]): Promise<number> {
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
       // #664：recent 档里真·不可达的（无活 wake 通道 + 陈旧）单独标出，别和「最近露面、或许在轮询」混淆。
       const unreach = r.unreachable === true ? " · ⚠ unreachable (mention lands in history only)" : "";
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
+      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
     }
     return 0;
   } catch (e) {
