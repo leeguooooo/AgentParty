@@ -146,6 +146,13 @@ export function formatMsgHeader(m: MsgFrame, previewChars = DEFAULT_HEADER_PREVI
   );
 }
 
+// 「收到但未处理」的紧凑徽标：`received by alice(not_in_turn), bob(queued)`。
+// 只报是谁、什么原因——note 属于细节，留给 --json / web 展开，终端一行里不喧宾夺主。
+function formatReceipts(receipts: MsgFrame["receipts"]): string | null {
+  if (receipts === undefined || receipts.length === 0) return null;
+  return `received by ${receipts.map((receipt) => `${receipt.by.name}(${receipt.reason})`).join(", ")}`;
+}
+
 function formatMsgRaw(m: MsgFrame): string {
   const badges = [
     m.completion_artifact !== undefined ? "completion" : null,
@@ -153,6 +160,9 @@ function formatMsgRaw(m: MsgFrame): string {
     m.retracted ? "retracted" : null,
     m.supersedes !== undefined ? `supersedes #${m.supersedes}` : null,
     m.superseded_by !== undefined ? `superseded by #${m.superseded_by}` : null,
+    // 回执（#828）：进 badge 而不是正文——「已收到」是这条消息的元数据，不是频道里的一次发言。
+    // 手搓版当年正是因为长得像本人发言才误导了协作方。
+    formatReceipts(m.receipts),
   ].filter((part): part is string => part !== null);
   const suffix = badges.length > 0 ? ` {${badges.join("; ")}}` : "";
   const prefix = `[${m.seq}] ${formatSender(m)}${suffix}: `;

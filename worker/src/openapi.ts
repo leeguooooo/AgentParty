@@ -742,12 +742,12 @@ export const openapiDocument = {
                       },
                       residency: {
                         type: "string",
-                        enum: ["supervised", "webhook", "bare", "human_driven", "unknown"],
+                        enum: ["supervised", "webhook", "bare", "human_driven", "unknown", "daemon", "episodic"],
                       },
                       wake: {
                         type: "object",
                         properties: {
-                          kind: { type: "string", enum: ["none", "watch", "serve", "webhook"] },
+                          kind: { type: "string", enum: ["none", "watch", "serve", "webhook", "daemon"] },
                           verified_at: { type: "integer" },
                         },
                       },

@@ -136,6 +136,10 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     t("AgentJoin.cmd.sandboxWarn3"),
     t("AgentJoin.cmd.sandboxWarn4"),
     t("AgentJoin.cmd.watchNote", { slug }),
+    // #822/#828：给按轮执行的 harness 一条诚实的路，而不是让它在 watch/serve 里二选一地硬装常驻。
+    t("AgentJoin.cmd.episodic1"),
+    t("AgentJoin.cmd.episodic2", { slug }),
+    t("AgentJoin.cmd.episodic3"),
     t("AgentJoin.cmd.etiquette"),
   ].join("\n");
 }

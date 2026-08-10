@@ -20,7 +20,8 @@ import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
 const STATES: StatusState[] = ["working", "waiting", "blocked", "done"];
 const COLLAB_ROLES: CollaborationRole[] = ["host", "worker", "reviewer", "observer"];
-const RESIDENCIES: Residency[] = ["supervised", "webhook", "bare", "human_driven", "unknown", "daemon"];
+// 逐字镜像 shared 的 Residency 与 worker 的 RESIDENCIES；episodic = 按轮执行的 harness（#822）。
+const RESIDENCIES: Residency[] = ["supervised", "webhook", "bare", "human_driven", "unknown", "daemon", "episodic"];
 const WAKE_KINDS: WakeKind[] = ["none", "watch", "serve", "webhook", "daemon"];
 const SESSION_HARNESSES: AgentSessionInfo["harness"][] = ["codex", "claude", "codex-sdk"];
 const DECISION_KINDS: HostDecisionKind[] = ["decision", "handoff", "takeover"];
@@ -67,7 +68,8 @@ Options:
   --blocked-reason text
                    structured blocker reason for dispatcher boards
   --role role      collaboration role: host|worker|reviewer|observer
-  --residency r    wake residency: supervised|webhook|bare|human_driven|unknown
+  --residency r    wake residency: supervised|webhook|bare|human_driven|unknown|daemon|episodic
+                   (episodic = per-turn harness: reachable, but only on its next turn)
   --wake-kind k    wake layer kind: none|watch|serve|webhook
   --session-id id  report the model session id used for restart resume (#522)
   --session-harness h
