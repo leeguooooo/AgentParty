@@ -3749,6 +3749,22 @@ button.org-person-name {
   font-size: 10px;
   white-space: nowrap;
 }
+/*
+  回执徽标（#828）。刻意比 reception-source 更轻——它是「收到了」这种低强度信号，不该抢实质消息的注意力。
+  长回执名单不允许把 header 撑成横向滚动：给上界并省略，完整名单在 title 里。
+*/
+.msg-receipt {
+  display: inline-block;
+  max-width: min(220px, 40vw);
+  overflow: hidden;
+  padding: 1px 6px;
+  border: 1.4px dashed var(--t-faint);
+  background: var(--t-panel2);
+  color: var(--t-dim);
+  font-size: 10px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .msg-context {
   display: inline-block;
   max-width: min(180px, 34vw);

@@ -891,6 +891,27 @@ export async function reviewCompletion(
   })) as { message: MsgFrame; reply: MsgFrame };
 }
 
+/**
+ * 回执（#828）：告诉频道「seq N 我收到了，但我现在不在轮次里」。
+ *
+ * seq 走 URL 路径、由服务端从路由取，调用方没有能拼错的 seq 字段——手搓回执发出 `（seq ）` 那类
+ * 残缺文案在这条路径上不可能发生。返回的是**被回执的那条消息**（带上回执元数据），不是新消息：
+ * 回执不占 seq、不进正文流、不触发 delivery。
+ */
+export async function postReceipt(
+  server: string,
+  token: string,
+  slug: string,
+  seq: number,
+  body: { reason: "not_in_turn" | "queued" | "seen"; note?: string },
+): Promise<{ message: MsgFrame }> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/messages/${seq}/receipt`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify(body),
+  })) as { message: MsgFrame };
+}
+
 // 人类决策回应（#284）：人类/moderator 对某条 decision_request 点选项/审批。
 // approval 用 { action }；choice 用 { option }（下标或选项文本）。
 export async function respondDecision(

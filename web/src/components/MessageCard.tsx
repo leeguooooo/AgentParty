@@ -728,6 +728,25 @@ function MessageCardImpl({
               {t("MessageCard.receptionReply", { runner: msg.response_source.runner })}
             </span>
           )}
+          {/*
+            回执徽标（#828）。刻意留在 header 的元数据行里，**不进 .msg-body** —— 「已收到」是这条消息的
+            属性，不是频道里新增的一次发言。手搓版之所以造成事故，正是因为它长得像本人发言：三条一模一样
+            的机器人回执让协作方判断「没人接活」，进而越界改了别人的仓库。
+          */}
+          {msg.receipts !== undefined && msg.receipts.length > 0 && (
+            <span
+              className="t-mono msg-receipt"
+              title={[
+                ...msg.receipts.map((receipt) =>
+                  t(`MessageCard.receipt.reason.${receipt.reason}`, { name: receipt.by.name }) +
+                  (receipt.note === undefined || receipt.note === "" ? "" : ` — ${receipt.note}`),
+                ),
+                t("MessageCard.receipt.hint"),
+              ].join("\n")}
+            >
+              📨 {t("MessageCard.receipt", { names: msg.receipts.map((receipt) => receipt.by.name).join(", ") })}
+            </span>
+          )}
           {msg.mentions.map((m) => {
             const mentionedSender = participants?.find((participant) => participant.name === m);
             const mentionedPresence = presence?.[m];

@@ -320,7 +320,9 @@ function parseServerFrame(value: unknown): ServerFrame | null {
       return isMessageFrame(value) ? asServerFrame(value) : null;
     case "message_update":
       return isPositiveInteger(value.target_seq) &&
-        ["edit", "retract", "supersede", "review", "decision"].includes(String(value.action)) &&
+        // 必须逐字镜像 protocol.ts 的 MessageUpdateFrame["action"]（#622）：漏一个词就把该类修订
+        // 整帧静默丢掉，而不是报错——回执（#828）走的正是这条通道。
+        ["edit", "retract", "supersede", "review", "decision", "receipt"].includes(String(value.action)) &&
         isSender(value.actor) &&
         isFiniteNumber(value.ts) &&
         isMessageFrame(value.message)

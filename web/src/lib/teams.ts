@@ -69,11 +69,15 @@ interface MemberDraft {
   lastSeen: number | null;
 }
 
+// 整体上移一档只为给 episodic 腾出位置：既有档位之间的**相对**次序与改动前逐一相同，排序行为不变。
 const RESIDENCY_RANK: Record<TeamResidency, number> = {
-  webhook: 5,
+  webhook: 6,
   // daemon（#688）：内嵌 SDK 的第一方常驻活体，与 supervised 同为「服务端见其在线」的强档，同 rank。
-  daemon: 4,
-  supervised: 4,
+  daemon: 5,
+  supervised: 5,
+  // episodic（#822）：按轮执行的 harness。排在 bare 之上——它叫得醒（@ 进 ledger，下一轮被看到），
+  // 只是有延迟；bare 是压根没有唤醒层。排在 supervised 之下——服务端看不到活体。
+  episodic: 4,
   bare: 3,
   human_driven: 2,
   unknown: 1,

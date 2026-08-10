@@ -21,6 +21,7 @@ commands:
   send      <text|-> [--channel C] [--mention name]... [--reply-to seq]
   complete  <text|-> --kickoff-seq seq [--channel C] [--replies n] [--timeout] [--issue n]... [--pr n]...
   review    approve|reject <seq> [-m reason] [--channel C] [--json]
+  receipt   <seq> [--reason not_in_turn|queued|seen] [-m note]   mark received without replying (#828)
   decision  ask|respond|mode (human approval) | list|record (authoritative channel ledger)
   edit      <seq> <text|-> [--channel C] [--json]
   retract   <seq> [--channel C] [--json]
@@ -95,6 +96,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/complete")).run(rest);
     case "review":
       return (await import("./commands/review")).run(rest);
+    case "receipt":
+      return (await import("./commands/receipt")).run(rest);
     case "decision":
       return (await import("./commands/decision")).run(rest);
     case "edit":

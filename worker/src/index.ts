@@ -8050,6 +8050,52 @@ app.put("/api/channels/:slug/retention", async (c) => {
   return c.json({ message_retention_ms: messageRetention, audit_retention_ms: auditRetention });
 });
 
+// 回执（#828）：「收到了，但我现在不在轮次里」。挂在目标消息上的元数据——不占 seq、不进正文流、
+// 不触发 delivery。必须注册在 :action 泛匹配之前，否则被吞。
+app.post("/api/channels/:slug/messages/:seq/receipt", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  // 回执是写动作：只读会话不得在别人消息上挂元数据。
+  if (identity.role === "readonly") {
+    return c.json(errorBody("forbidden", "readonly sessions cannot post receipts"), 403);
+  }
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const seq = positiveInt(Number(c.req.param("seq")));
+  if (seq === null) return c.json(errorBody("bad_request", "seq must be a positive integer"), 400);
+  const assignedRole = await loadAssignedRole(c.env.DB, slug, identity);
+  return mutableFetchResponse(
+    await fetchChannelDO(
+      c.env,
+      slug,
+      new Request(`https://do/internal/messages/${seq}/receipt`, {
+        method: "POST",
+        body: await c.req.text(),
+        headers: {
+          "content-type": "application/json",
+          "x-partykit-room": slug,
+          "x-ap-name": identity.name,
+          "x-ap-kind": identity.kind,
+          "x-ap-role": identity.role,
+          ...(identity.owner ? { "x-ap-owner": identity.owner } : {}),
+          "x-ap-token-hash": identity.hash,
+          ...lineageHeaders(identity),
+          ...assignedRoleHeaders(assignedRole),
+          ...channelHeaders(channel, c.req.url),
+          ...(await writeGateHeaders(c.env.DB, identity, channel)),
+          ...(await handleHeader(c.env.DB, identity)),
+        },
+      }),
+    ),
+  );
+});
+
 app.post("/api/channels/:slug/messages/:seq/review", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);

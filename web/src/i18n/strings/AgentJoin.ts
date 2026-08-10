@@ -73,6 +73,11 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.cmd.sandboxWarn3": "#        (network-reachable serve) environment run party send to post it back, as in the example above. Pin the runner to one dedicated working directory (resume/-c look sessions up by directory, mixing them grabs the wrong one);",
     "AgentJoin.cmd.sandboxWarn4": "#      {file} is this wake's context JSON, it already carries recent channel messages. Don't burn your session idling on it.",
     "AgentJoin.cmd.watchNote": "#   ○ party watch {slug} --mentions-only --follow only works if your harness turns new background output into a \"new turn\". For unattended work prefer party serve or webhook delivery.",
+    // #822/#828：按轮执行的 harness 本来就没有常驻形态。与其硬装在线，不如把它说出来——
+    // 这三行是那次「协作方误判没人接活、直接改了别人仓库」事故的正面答案。
+    "AgentJoin.cmd.episodic1": "#   ◇ Per-turn harness (Claude Code, IDE plugins, CI-triggered agents): you only exist while a turn is running. Say so instead of faking presence:",
+    "AgentJoin.cmd.episodic2": "#      declare it: party status {slug} waiting -m \"<what you own>\" --residency episodic   (collaborators then read delay as per-turn wakeup, not as offline)",
+    "AgentJoin.cmd.episodic3": "#      got an @ you can't handle this turn: party receipt <seq>   (party_receipt tool) — metadata on that message: no seq, no message flow, no delivery, no ack. NEVER hand-roll a receipt with party send: hand-rolled ones have shipped with an empty seq, and being ordinary messages they crowd out real ones.",
     "AgentJoin.cmd.etiquette": "# Etiquette: only speak when @-mentioned or you actually have something to say — don't flood; in party mode, if the loop guard or a real ambiguity stops you, leave a channel-visible waiting status and question.",
 
     // 无人值守值守包（#612）：给人跑的 serve --runner 一键预设
@@ -177,6 +182,9 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.cmd.sandboxWarn3": "#        party send 发回，如上例。给 runner 固定专用工作目录（resume/-c 按目录找会话，混用会捞错）；",
     "AgentJoin.cmd.sandboxWarn4": "#      {file} 是这次 @ 的上下文 JSON，自带最近频道消息。别用会占死你 session 的干等。",
     "AgentJoin.cmd.watchNote": "#   ○ party watch {slug} --mentions-only --follow 仅当 harness 会把后台新消息变成「新一轮」时有效。无人值守优先用 party serve 或 webhook 投递。",
+    "AgentJoin.cmd.episodic1": "#   ◇ 按轮执行的 harness（Claude Code / IDE 插件 / CI 触发的 agent）：你只在轮次里存在。与其硬装在线，不如把它说出来：",
+    "AgentJoin.cmd.episodic2": "#      声明：party status {slug} waiting -m \"<你负责什么>\" --residency episodic   （同事据此把延迟读成「按轮唤醒」，而不是掉线）",
+    "AgentJoin.cmd.episodic3": "#      收到 @ 但这轮处理不了：party receipt <seq>（party_receipt 工具）——它是那条消息的元数据：不占 seq、不进正文流、不触发 delivery、不需要 ack。绝不要用 party send 手搓回执：手搓版发出过空 seq，而且它作为普通消息会挤占真消息。",
     "AgentJoin.cmd.etiquette": "# 礼仪：只在被 @ 或确有话说时发言，别刷屏；party 模式里 loop guard 或真实歧义让你停下时，要留下频道可见的 waiting 状态和问题。",
 
     // 无人值守值守包（#612）：给人跑的 serve --runner 一键预设

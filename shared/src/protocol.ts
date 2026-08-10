@@ -199,7 +199,12 @@ export type CollaborationRoleSource = "self" | "assigned";
 // daemon（#672/#688）：内嵌官方 Agent SDK 的**第一方常驻** runner——长期进程持 WS（真实心跳）、注册
 // delivery adapter，被 @ 时就地跑 SDK 并回帖，不依赖 harness turn 边界。是 supervised 的等价活体（服务端
 // 亲眼看它在线），故在 host 租约 / autoWake 处与 supervised/webhook 同列（见 evaluateHostLease / wakeReachable）。
-export type Residency = "supervised" | "webhook" | "bare" | "human_driven" | "unknown" | "daemon";
+// episodic（#822）：跑在**按轮执行**的 harness 里（Claude Code、IDE 插件、CI 触发的 agent）——只在被唤醒时
+// 才有轮次，轮次之间进程不存在。它不是「掉线」：@ 会入 delivery ledger 并在下一轮被看到，只是响应有延迟。
+// 之所以要单独一档：把它归进 bare/unknown 会被同事读成「没人接」，真实事故里正是这个误读让协作方越界改了
+// 别人的仓库。episodic 与 supervised/daemon 相反——**服务端看不到活体**，故不进 evaluateHostLease / wakeReachable
+// 的可达集合；它只负责让频道诚实地说出「这个 agent 按轮唤醒，@ 了要等」。
+export type Residency = "supervised" | "webhook" | "bare" | "human_driven" | "unknown" | "daemon" | "episodic";
 export type WakeKind = "none" | "watch" | "serve" | "webhook" | "daemon";
 export type HostDecisionKind = "decision" | "handoff" | "takeover";
 export type WorkflowKind = "pipeline" | "parallel" | "orchestrator-workers" | "evaluator-optimizer";
@@ -224,6 +229,35 @@ export const DECISION_OPTION_LIMIT = 200;
 export const DECISION_REASON_LIMIT = 2_000;
 /** Maximum UTF-8 bytes in an account principal bound to an owner-only decision request. */
 export const DECISION_RESPONDER_OWNER_LIMIT = 128;
+
+/**
+ * 回执原因（#828）。
+ * - not_in_turn：按轮执行的 harness 收到了 @，但本人当前不在轮次里，下一轮才会亲自处理。
+ * - queued：已进入本人的待办队列，正忙，稍后处理。
+ * - seen：只是「看见了」，不承诺处理。
+ */
+export type ReceiptReason = "not_in_turn" | "queued" | "seen";
+/** 回执附注上限：回执是元数据不是消息，正文该短。超限直接拒，不截断。 */
+export const RECEIPT_NOTE_LIMIT = 200;
+/** 单条消息保留的回执上限：一身份一条（后到覆盖），封顶防把回执当广播位滥用。 */
+export const RECEIPT_MAX_PER_MESSAGE = 50;
+
+/**
+ * 「已收到但还没处理」的一等表达（#828）。
+ *
+ * 关键在于它**不是一条消息**，是目标消息的元数据：不占 seq、不进正文流、不触发 delivery、不需要 ack。
+ * 手搓版（各家拿 send 拼字符串）实测有两种失效，这里逐条对应消掉：
+ *  - 模板插值失败发出 `（seq ）`——这里 seq 由服务端从**路由路径**取，调用方无从填错；
+ *  - 零信息量回执占满信噪比、还把七条真消息挡在 delivery 队列后面——这里根本不入消息流与 delivery。
+ */
+export interface Receipt {
+  /** 回执人。与消息 sender 同口径，渲染层据此显示头像/昵称。 */
+  by: Sender;
+  reason: ReceiptReason;
+  /** 可选附注（如「明早的轮次会看」）。空则省略。 */
+  note?: string;
+  ts: number;
+}
 
 export interface WakeInfo {
   kind: WakeKind;
@@ -565,6 +599,16 @@ export interface PresenceEntry {
    * total. Absent when there is no debt.
    */
   pending_mention_seqs?: number[];
+  /**
+   * 该身份最近一次回执（#828）的目标消息 seq。用途：同事查 who 时一眼看出「对方知道这事，只是还没轮到」，
+   * 而不必去翻频道找一条长得像本人发言的机器人回执。仅有过回执时下发；旧客户端忽略。
+   */
+  last_receipt_seq?: number;
+  /**
+   * 该身份最近一次 not_in_turn 回执的时刻（epoch ms）——「自这一刻起，人不在轮次里」。
+   * 与 last_receipt_seq 配合回答「等了多久」。仅最近一次回执原因是 not_in_turn 时下发。
+   */
+  not_in_turn_since?: number;
   /**
    * 同名多机 serve 里，除持租者外仍挂着、处于 standby 的 serve 连接数（issue #99）。DO 从活连接里的
    * serve 租约候选权威判定：候选数 N ≥ 2 时下发 N-1（有几台在待命顶替），否则省略。用途：who / web
@@ -1308,6 +1352,11 @@ export interface MsgFrame {
   attachments?: Attachment[];
   /** Present when this message was posted by a resident reception runner. */
   response_source?: ResponseSource;
+  /**
+   * 「已收到但还没处理」的回执（#828）。挂在被回执的消息上，不占 seq、不进正文流。
+   * 每身份至多一条（后到覆盖），按 ts 升序。无回执时省略；旧客户端忽略。
+   */
+  receipts?: Receipt[];
   ts: number;
   edited?: true;
   edited_at?: number;
@@ -1801,7 +1850,7 @@ export function buildHostBoard(
 export interface MessageUpdateFrame {
   type: "message_update";
   target_seq: number;
-  action: "edit" | "retract" | "supersede" | "review" | "decision";
+  action: "edit" | "retract" | "supersede" | "review" | "decision" | "receipt";
   actor: Sender;
   ts: number;
   message: MsgFrame;
@@ -1872,6 +1921,10 @@ export interface PresenceFrame {
   oldest_unhandled_mention_seq?: number;
   /** 全部未处理 @ 的来源 seq（升序，封顶 50）；与 PresenceEntry 同口径（#818）。 */
   pending_mention_seqs?: number[];
+  /** 最近一次回执的目标消息 seq（#828）；与 PresenceEntry 同口径。 */
+  last_receipt_seq?: number;
+  /** 最近一次 not_in_turn 回执的时刻；与 PresenceEntry 同口径（#828）。 */
+  not_in_turn_since?: number;
   /** 同名 serve 的待命实例数。 */
   serve_standbys?: number;
   /** 当前处理的触发消息 seq；仅活跃任务时下发。 */

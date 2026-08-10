@@ -56,7 +56,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -103,6 +103,10 @@ interface Row {
   // #818：欠的具体是哪几条 seq。debt 按 delivery 逐条清，只有 count + oldest 时中间那些无从得知，
   // 已经处理过的 @ 会被一遍遍重放。有了列表就能 party ack --seq / --reply-to 精确清账。
   pending_mention_seqs?: number[];
+  // 回执游标（#828）：「对方知道这事，只是还没轮到」。与在线/离线无关——按轮执行的 agent 回执完那一轮
+  // 就结束了，恰恰是它离线时这条信息最该被看到，否则同事只能从沉默里推断「没人接活」。
+  last_receipt_seq?: number;
+  not_in_turn_since?: number;
   // 每任务进度/心跳（#228）：正在处理哪条 wake（触发 seq）、何时开始、最近心跳。让频道区分
   // 「还在干、活到 T」与「卡死」——比裸 busy 更细。仅在有活跃任务时带出。
   current_task?: number;
@@ -196,6 +200,15 @@ export function classify(e: PresenceEntry, now: number): Row | null {
             : {}),
         }
       : {}),
+    // 回执游标（#828）：服务端仅在该身份有过回执时下发，原样带出。
+    ...(typeof e.last_receipt_seq === "number" && e.last_receipt_seq > 0
+      ? {
+          last_receipt_seq: e.last_receipt_seq,
+          ...(typeof e.not_in_turn_since === "number" && e.not_in_turn_since > 0
+            ? { not_in_turn_since: e.not_in_turn_since }
+            : {}),
+        }
+      : {}),
     // 每任务进度/心跳（#228）：服务端只在 state != offline 且有活跃任务时下发 current_task，原样带出。
     ...(typeof e.current_task === "number"
       ? {
@@ -269,6 +282,24 @@ export function busyNote(r: Row): string {
   if (r.busy !== true) return "";
   const queued = r.queue_depth !== undefined && r.queue_depth > 0 ? ` · ${r.queue_depth} queued` : "";
   return ` · ⏳ busy${queued}`;
+}
+
+/**
+ * 回执标注（#828）：「📨 receipted #N」/「📨 not in turn since 12m (#N)」。
+ *
+ * 这一行是这个 issue 的全部意义所在：真实事故里，协作方连发三条工单、看到的只有沉默和一个过期的
+ * waiting，于是合理地判断「没人接活」，直接去改了对方的仓库。回执落在 who 上之后，同一处信息面回答的
+ * 是「对方收到了第 N 条，只是还没轮到」——这比一条长得像本人发言的机器人消息有用得多，也不会被误读成
+ * 本人表态。
+ */
+export function receiptNote(r: Row, now: number): string {
+  const seq = r.last_receipt_seq;
+  if (typeof seq !== "number" || seq <= 0) return "";
+  const since = r.not_in_turn_since;
+  if (typeof since === "number" && since > 0) {
+    return ` · 📨 not in turn since ${humanAge(Math.max(0, now - since))} (#${seq})`;
+  }
+  return ` · 📨 receipted #${seq}`;
 }
 
 // waiting_owner 是挂起的 work，不占 runner，也不等于 agent 失联；与 busy/queue 分开展示。
@@ -484,7 +515,7 @@ export async function run(argv: string[]): Promise<number> {
           typeof r.resume_at === "number"
             ? ` · resumes in ${humanAge(Math.max(0, r.resume_at - now))}`
             : " · resume manually";
-        console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${scopeNote(r)}${read}${duplicate}`);
+        console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${read}${duplicate}`);
         continue;
       }
       // #191：可唤醒行明确标出「已验证 / 未验证」——verified＝服务端确认过（webhook，或观测到被 @ 后 resume），
@@ -496,7 +527,7 @@ export async function run(argv: string[]): Promise<number> {
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
       // #664：recent 档里真·不可达的（无活 wake 通道 + 陈旧）单独标出，别和「最近露面、或许在轮询」混淆。
       const unreach = r.unreachable === true ? " · ⚠ unreachable (mention lands in history only)" : "";
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${scopeNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
+      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
     }
     return 0;
   } catch (e) {

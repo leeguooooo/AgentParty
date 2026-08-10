@@ -742,12 +742,12 @@ export const openapiDocument = {
                       },
                       residency: {
                         type: "string",
-                        enum: ["supervised", "webhook", "bare", "human_driven", "unknown"],
+                        enum: ["supervised", "webhook", "bare", "human_driven", "unknown", "daemon", "episodic"],
                       },
                       wake: {
                         type: "object",
                         properties: {
-                          kind: { type: "string", enum: ["none", "watch", "serve", "webhook"] },
+                          kind: { type: "string", enum: ["none", "watch", "serve", "webhook", "daemon"] },
                           verified_at: { type: "integer" },
                         },
                       },
@@ -1461,6 +1461,48 @@ export const openapiDocument = {
           "404": { description: "channel or message not found" },
           "409": { description: "completion review is already final or not pending" },
           "410": { description: "channel archived" },
+        },
+      },
+    },
+    "/api/channels/{slug}/messages/{seq}/receipt": {
+      post: {
+        summary: "receipt a message: received, but not handled yet (#828)",
+        description:
+          "Metadata on the target message, not a message: it takes no seq, stays out of the body stream, " +
+          "triggers no delivery, and needs no ack. seq comes from the route, so a caller cannot name the wrong " +
+          "message. One receipt per identity; a later receipt overwrites the earlier one in place.",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "seq", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["reason"],
+                properties: {
+                  reason: {
+                    type: "string",
+                    enum: ["not_in_turn", "queued", "seen"],
+                    description:
+                      "not_in_turn: received, but this per-turn harness is not in a turn now; queued: in my queue, busy; seen: saw it, no commitment",
+                  },
+                  note: { type: "string", description: "optional short note; rejected when over 200 bytes" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{message}; broadcasts message_update(receipt) and refreshed presence" },
+          "400": { description: "unknown reason, self receipt, or retracted target" },
+          "403": { description: "readonly session, removed participant, or no write seat in a public_watch channel" },
+          "404": { description: "channel or message not found" },
+          "410": { description: "channel archived" },
+          "413": { description: "note exceeds the byte limit" },
         },
       },
     },

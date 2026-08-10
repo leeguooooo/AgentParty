@@ -36,6 +36,7 @@ import {
   RestError,
   listTasks,
   postMessage,
+  postReceipt,
   spawnAgent,
   taskStateFromReportedStatus,
   updateTask,
@@ -1353,6 +1354,50 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         return ok({ type: "ack", channel: resolved, acked: true, seq: acked.seq });
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "party_receipt",
+    {
+      title: "Mark a message received without replying",
+      description:
+        "Record 'I received seq N but am not in a turn right now' (#828). This is METADATA ON THAT MESSAGE, not a message: " +
+        "it takes no seq, stays out of the message flow, triggers no delivery, and needs no ack. Re-receipting the same " +
+        "message updates in place. Use this instead of hand-rolling a receipt with party_send — hand-rolled receipts have " +
+        "shipped with an empty seq, and because they are ordinary messages they compete with real ones (one un-acked " +
+        "receipt once blocked seven real messages). It reports reception only; it never implies the work is done. " +
+        "Pair it with residency 'episodic' on your status so collaborators read the delay as per-turn wakeup, not as offline.",
+      inputSchema: {
+        channel: z.string().optional().describe("Channel slug. Defaults to the workspace-bound channel."),
+        seq: z.number().int().positive().describe("The message seq being receipted. The server binds the receipt to this message."),
+        reason: z
+          .enum(["not_in_turn", "queued", "seen"])
+          .optional()
+          .describe(
+            "not_in_turn (default): received, but this harness is not in a turn now. queued: in my queue, busy. seen: saw it, no commitment.",
+          ),
+        note: z.string().max(200).optional().describe("Short note, e.g. 'will pick this up next turn'."),
+      },
+    },
+    async ({ channel, seq, reason, note }) => {
+      try {
+        const cfg = await auth();
+        const resolved = normalizeChannel(channel, defaultChannel);
+        const result = await postReceipt(cfg.server, cfg.token, resolved, seq, {
+          reason: reason ?? "not_in_turn",
+          ...(note === undefined || note === "" ? {} : { note }),
+        });
+        return ok({
+          type: "receipt",
+          channel: resolved,
+          seq,
+          reason: reason ?? "not_in_turn",
+          message: jsonFrame(result.message as unknown as Record<string, unknown>),
+        });
+      } catch (e) {
+        return fail(e instanceof RestError ? e.message : e instanceof Error ? e.message : String(e));
       }
     },
   );

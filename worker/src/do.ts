@@ -79,6 +79,10 @@ import {
   type PresenceFrame,
   type ReadCursor,
   type ResponseSource,
+  type Receipt,
+  type ReceiptReason,
+  RECEIPT_NOTE_LIMIT,
+  RECEIPT_MAX_PER_MESSAGE,
   type Residency,
   type SendHostDecision,
   type SendFrame,
@@ -292,7 +296,9 @@ export const HELLO_TIMEOUT_MS = 8_000;
 const STATUS_STATES: readonly string[] = ["working", "waiting", "blocked", "done"];
 const COLLAB_ROLES: readonly string[] = ["host", "worker", "reviewer", "observer"];
 const ROLE_SOURCES: readonly string[] = ["self", "assigned"];
-const RESIDENCIES: readonly string[] = ["supervised", "webhook", "bare", "human_driven", "unknown", "daemon"];
+// episodic（#822）：按轮执行的 harness。与 shared 的 Residency 逐字镜像——新增档位必须两处同改，
+// 否则 agent 自报的合法 residency 会被这里静默降级成 unknown。
+const RESIDENCIES: readonly string[] = ["supervised", "webhook", "bare", "human_driven", "unknown", "daemon", "episodic"];
 const WAKE_KINDS: readonly string[] = ["none", "watch", "serve", "webhook", "daemon"];
 // agent-webhook 接到 2xx 只证明通知越过 HTTP 边界，不能冒充 replied。给外部 harness
 // 留出完成模型 turn 并回频道的时间；期间同一 principal 的 serve/watch 不得重复执行。
@@ -1205,6 +1211,52 @@ function parseStoredResponseSource(input: unknown): ResponseSource | undefined {
   }
 }
 
+const RECEIPT_REASONS: readonly string[] = ["not_in_turn", "queued", "seen"];
+
+/** 身份级回执游标（#828）。按 name 存，跨会话存活——episodic agent 每轮换一个会话。 */
+interface ReceiptMark {
+  lastSeq: number;
+  notInTurnSince: number | null;
+  kind: SenderKind | null;
+  updatedAt: number;
+}
+
+function parseReceiptReason(input: unknown): ReceiptReason | null {
+  return typeof input === "string" && RECEIPT_REASONS.includes(input) ? (input as ReceiptReason) : null;
+}
+
+/**
+ * 回执列表的落库解析（#828）。整列坏掉时按「无回执」处理而不是拒绝整条消息——回执是附加元数据，
+ * 它的损坏绝不该让一条真实消息读不出来。
+ */
+function parseStoredReceipts(input: unknown): Receipt[] | undefined {
+  if (typeof input !== "string" || input === "") return undefined;
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    const receipts: Receipt[] = [];
+    for (const raw of parsed) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const r = raw as Record<string, unknown>;
+      const reason = parseReceiptReason(r.reason);
+      const by = r.by;
+      if (reason === null || typeof by !== "object" || by === null) continue;
+      const sender = by as Record<string, unknown>;
+      if (typeof sender.name !== "string" || sender.name === "") continue;
+      if (!Number.isFinite(Number(r.ts))) continue;
+      receipts.push({
+        by: { ...(sender as unknown as Sender), kind: sender.kind === "agent" ? "agent" : "human" },
+        reason,
+        ...(typeof r.note === "string" && r.note !== "" ? { note: r.note } : {}),
+        ts: Number(r.ts),
+      });
+    }
+    return receipts.length > 0 ? receipts : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // parseSendFrame 返回 null 时用它给出更具体的拒收原因：role 拼错是 agent 自报协作角色最常见的坑，
 // 单独识别并回明确文案（列出合法值），而不是笼统的 "invalid send payload"，让 agent 能自我纠正。
 function sendRejectMessage(raw: unknown): string {
@@ -1741,6 +1793,9 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE messages ADD COLUMN sender_client_version TEXT",
       // 常驻接待 runner 的结构化回复来源：区分 owner 交互会话与独立频道接待会话。
       "ALTER TABLE messages ADD COLUMN response_source_json TEXT",
+      // 回执（#828）：存 Receipt[] 的 JSON，挂在被回执的消息上。它是元数据不是消息——不占 seq、
+      // 不进正文流、不触发 delivery、不需要 ack。缺省 NULL = 无回执。
+      "ALTER TABLE messages ADD COLUMN receipts_json TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -1751,6 +1806,22 @@ export class ChannelDO extends Server<Env> {
     // 幂等去重查询走 (sender_name, idempotency_key)；NULL 键（老客户端/非幂等发送）不进有效查询路径。
     sql.exec("CREATE INDEX IF NOT EXISTS idx_messages_idempotency ON messages(sender_name, idempotency_key)");
     sql.exec("CREATE INDEX IF NOT EXISTS idx_messages_pending_decisions ON messages(decision_state, seq)");
+    // 回执游标（#828）：按**身份**而非会话记「这个 name 最近回执到哪条」。
+    // 必须独立于 presence 表——presence 主键含 session_id，而 episodic agent 的会话每轮就死一次，
+    // 把回执挂在会话上等于每轮清零，恰好丢掉「对方知道这事、只是还没轮到」这个唯一有用的信号。
+    sql.exec(`CREATE TABLE IF NOT EXISTS receipt_marks (
+      name TEXT PRIMARY KEY,
+      last_seq INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      not_in_turn_since INTEGER,
+      kind TEXT,
+      updated_at INTEGER NOT NULL
+    )`);
+    try {
+      sql.exec("ALTER TABLE receipt_marks ADD COLUMN kind TEXT");
+    } catch {
+      // 列已存在
+    }
     sql.exec(`CREATE TABLE IF NOT EXISTS presence (
       name TEXT NOT NULL,
       session_id TEXT NOT NULL,
@@ -6066,6 +6137,112 @@ export class ChannelDO extends Server<Env> {
       await this.afterSend(newFrame, undefined, true);
       await this.scheduleAuditRetention(now);
       return Response.json({ message: publicMsgFrame(newFrame), superseded: publicMsgFrame(oldFrame) });
+    }
+    // 回执（#828）：「seq N 已被 X 收到，X 当前不在轮次」。
+    //
+    // 它刻意**不是**一条消息：不 nextSeq()、不 insert 进 messages、不 afterSend、不进 webhook 队列、
+    // 不建 directed delivery。手搓版（各家用 send 拼字符串）的两种实测失效在这里逐条消掉——
+    //  - seq 只从**路由路径**取，调用方没有能填错的字段，`（seq ）` 那种残缺回执不可能再发生；
+    //  - 不占 seq / 不进正文流 / 不需要 ack，所以既不会淹没信噪比，也不可能像 #826 那样把七条真消息
+    //    挡在一条零信息量回执后面。
+    // 只 bump rev_seq：重连客户端按 rev_seq 补拉时会重收这条消息（带上回执），无需额外重放通道。
+    const receiptMatch = url.pathname.match(/^\/internal\/messages\/([1-9]\d*)\/receipt$/);
+    if (receiptMatch && request.method === "POST") {
+      this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
+      const seq = Number(receiptMatch[1]);
+      const identity: Identity = {
+        name: request.headers.get("x-ap-name") ?? "",
+        kind: request.headers.get("x-ap-kind") === "agent" ? "agent" : "human",
+        role: (request.headers.get("x-ap-role") ?? "readonly") as TokenRole,
+        owner: request.headers.get("x-ap-owner") ?? undefined,
+        handle: decodedHeaderText(request.headers, "x-ap-handle"),
+        ...profileFromHeaders(request.headers),
+        lineage: lineageFromHeaders(request.headers),
+        tokenHash: request.headers.get("x-ap-token-hash") ?? "",
+        collabRole: parseCollaborationRole(request.headers.get("x-ap-collab-role") ?? undefined) ?? undefined,
+        collabRoleSource: parseRoleSource(request.headers.get("x-ap-role-source") ?? undefined) ?? undefined,
+        canWrite: request.headers.get("x-ap-can-write") === "1",
+        clientVersion: parseClientVersion(request.headers.get("x-ap-client-version")) ?? undefined,
+      };
+      if (identity.name === "") {
+        return Response.json({ error: { code: "forbidden", message: "receipt requires an identified sender" } }, { status: 403 });
+      }
+      // 回执是写进频道持久状态的动作，参与门与 handleSend 完全同口径：被移除的人不能回执，
+      // public_watch 频道下没有写位的观众也不能——否则「只读观众」能在别人消息上挂元数据。
+      if (await this.isParticipantRemoved(identity.name, identity.owner)) {
+        return Response.json({ error: { code: "unauthorized", message: "participant was removed from this channel" } }, { status: 403 });
+      }
+      if (this.getMeta("visibility") === "public_watch" && identity.canWrite !== true) {
+        return Response.json(
+          { error: { code: "unauthorized", message: "this channel is watch-only for non-members; receipts require membership or an invite" } },
+          { status: 403 },
+        );
+      }
+      const body = (await request.json().catch(() => null)) as { reason?: unknown; note?: unknown } | null;
+      const reason = parseReceiptReason(body?.reason);
+      if (reason === null) {
+        return Response.json(
+          { error: { code: "bad_request", message: `reason must be one of: ${RECEIPT_REASONS.join(", ")}` } },
+          { status: 400 },
+        );
+      }
+      const note = typeof body?.note === "string" ? body.note.trim() : "";
+      if (byteLength(note) > RECEIPT_NOTE_LIMIT) {
+        return Response.json(
+          { error: { code: "too_large", message: `note exceeds ${RECEIPT_NOTE_LIMIT} bytes` } },
+          { status: 413 },
+        );
+      }
+      const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).toArray()[0];
+      if (!row) {
+        return Response.json({ error: { code: "not_found", message: `message seq ${seq} not found` } }, { status: 404 });
+      }
+      if (row.retracted_at !== null && row.retracted_at !== undefined) {
+        return Response.json({ error: { code: "bad_request", message: "retracted message cannot be receipted" } }, { status: 400 });
+      }
+      // 给自己的消息回执没有语义（「我收到了我自己」），只会白白制造一条元数据。
+      if (String(row.sender_name) === identity.name) {
+        return Response.json({ error: { code: "bad_request", message: "cannot receipt your own message" } }, { status: 400 });
+      }
+      const now = Date.now();
+      // 一身份一条，后到覆盖：反复回执同一条消息不会堆积，只是刷新时间/原因。
+      const existing = parseStoredReceipts(row.receipts_json) ?? [];
+      const receipts = [
+        ...existing.filter((receipt) => receipt.by.name !== identity.name),
+        { by: senderFromIdentity(identity), reason, ...(note === "" ? {} : { note }), ts: now },
+      ]
+        .sort((left, right) => left.ts - right.ts)
+        .slice(-RECEIPT_MAX_PER_MESSAGE);
+      this.ctx.storage.sql.exec(
+        "UPDATE messages SET receipts_json = ?, rev_seq = ? WHERE seq = ?",
+        JSON.stringify(receipts),
+        this.nextRevSeq(),
+        seq,
+      );
+      // 身份级回执游标：who 据此回答「对方知道这事，只是还没轮到」。not_in_turn 之外的原因清空
+      // not_in_turn_since——人已经回到轮次里了，再挂着「自某刻起不在轮次」就是过期信息。
+      this.ctx.storage.sql.exec(
+        `INSERT INTO receipt_marks (name, last_seq, reason, not_in_turn_since, kind, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+              last_seq = excluded.last_seq,
+              reason = excluded.reason,
+              not_in_turn_since = excluded.not_in_turn_since,
+              kind = excluded.kind,
+              updated_at = excluded.updated_at`,
+        identity.name,
+        seq,
+        reason,
+        reason === "not_in_turn" ? now : null,
+        identity.kind,
+        now,
+      );
+      const updated = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+      const message = this.rowToFrame(updated);
+      this.broadcastFrame(this.messageUpdate("receipt", identity, message, now));
+      // 回执改变的是「这个 name 现在是什么状态」，presence 是同事查状态的正门（#828 建议 2）。
+      this.broadcastPresenceFor(identity.name);
+      return Response.json({ message: publicMsgFrame(message) });
     }
     const reviewMatch = url.pathname.match(/^\/internal\/messages\/([1-9]\d*)\/review$/);
     if (reviewMatch && request.method === "POST") {
@@ -11433,6 +11610,7 @@ export class ChannelDO extends Server<Env> {
     const serveCounts = this.serveCandidateCounts();
     const waitingOwnerCounts = this.waitingOwnerCounts();
     const unhandledMentionDebt = this.unhandledMentionDebt();
+    const receiptMarks = this.receiptMarks();
     const liveSessions = this.livePresenceSessions();
     const rows = this.ctx.storage.sql
       .exec(`SELECT ${ChannelDO.PRESENCE_COLUMNS} FROM presence ORDER BY name`)
@@ -11445,16 +11623,21 @@ export class ChannelDO extends Server<Env> {
       grouped.set(name, group);
     }
     const listeningStreaks = this.listeningStreaks();
-    return [...grouped.entries()].map(([name, group]) =>
-      this.withLivePresence(
-        this.presenceRowToEntry(this.aggregatePresenceRow(name, group, liveSessions)),
-        liveCounts,
-        serveCounts,
-        waitingOwnerCounts,
-        listeningStreaks,
-        unhandledMentionDebt,
-      ),
-    );
+    return [...grouped.entries()]
+      .map(([name, group]) =>
+        this.withLivePresence(
+          this.presenceRowToEntry(this.aggregatePresenceRow(name, group, liveSessions)),
+          liveCounts,
+          serveCounts,
+          waitingOwnerCounts,
+          listeningStreaks,
+          unhandledMentionDebt,
+          receiptMarks,
+        ),
+      )
+      // 只回执过、从没建过 presence 行的身份补进来（#828）——否则 episodic agent 在 who 里完全不存在。
+      .concat(this.receiptOnlyEntries(receiptMarks, new Set(grouped.keys())))
+      .sort((left, right) => left.name.localeCompare(right.name));
   }
 
   private presenceFor(name: string): PresenceEntry | null {
@@ -11462,20 +11645,24 @@ export class ChannelDO extends Server<Env> {
     const serveCounts = this.serveCandidateCounts();
     const waitingOwnerCounts = this.waitingOwnerCounts();
     const unhandledMentionDebt = this.unhandledMentionDebt();
+    const receiptMarks = this.receiptMarks();
     const liveSessions = this.livePresenceSessions();
     const rows = this.ctx.storage.sql
       .exec(`SELECT ${ChannelDO.PRESENCE_COLUMNS} FROM presence WHERE name = ?`, name)
       .toArray();
-    return rows.length > 0
-      ? this.withLivePresence(
-          this.presenceRowToEntry(this.aggregatePresenceRow(name, rows, liveSessions)),
-          liveCounts,
-          serveCounts,
-          waitingOwnerCounts,
-          this.listeningStreaks(),
-          unhandledMentionDebt,
-        )
-      : null;
+    if (rows.length > 0) {
+      return this.withLivePresence(
+        this.presenceRowToEntry(this.aggregatePresenceRow(name, rows, liveSessions)),
+        liveCounts,
+        serveCounts,
+        waitingOwnerCounts,
+        this.listeningStreaks(),
+        unhandledMentionDebt,
+        receiptMarks,
+      );
+    }
+    // 没有 presence 行但回执过：合成 offline 条目，别让 episodic agent 的回执无处安放（#828）。
+    return this.receiptOnlyEntries(receiptMarks, new Set<string>()).find((entry) => entry.name === name) ?? null;
   }
 
   private broadcastPresenceFor(name: string) {
@@ -11561,6 +11748,7 @@ export class ChannelDO extends Server<Env> {
     waitingOwnerCounts?: Map<string, number>,
     listeningStreaks?: Map<string, number>,
     unhandledMentionDebt?: Map<string, { count: number; oldestSeq: number; seqs: number[] }>,
+    receiptMarks?: Map<string, ReceiptMark>,
   ): PresenceEntry {
     const count = liveCounts.get(entry.name) ?? 0;
     const live = applyLiveConnection(entry, count > 0);
@@ -11586,7 +11774,16 @@ export class ChannelDO extends Server<Env> {
     // 不是 deaf。streak 1 次 = suspect，连续 ≥2 次 = deaf。缺省 = 无恙。
     const streak = count > 0 ? (listeningStreaks?.get(entry.name) ?? 0) : 0;
     const listening: ListeningVerdict | null = streak >= 2 ? "deaf" : streak === 1 ? "suspect" : null;
-    return listening === null ? withMentionDebt : { ...withMentionDebt, listening };
+    const withListening = listening === null ? withMentionDebt : { ...withMentionDebt, listening };
+    // 回执游标（#828）：**不受 live/offline 影响**——「对方知道这事、只是还没轮到」恰恰是在对方没有活
+    // 连接时最该被看到的信号。episodic agent 回执完那一轮就结束了，若跟着 live 一起消失就白记了。
+    const mark = receiptMarks?.get(entry.name);
+    if (mark === undefined) return withListening;
+    return {
+      ...withListening,
+      last_receipt_seq: mark.lastSeq,
+      ...(mark.notInTurnSince === null ? {} : { not_in_turn_since: mark.notInTurnSince }),
+    };
   }
 
   // 监听力 streak（#603）：directed delivery 租约对活连接过期的连续次数，按身份聚合。
@@ -11634,6 +11831,54 @@ export class ChannelDO extends Server<Env> {
   // 反推出该 ack 哪些 seq，于是已经处理过的 @ 被反复重放，还得先花时间辨认是不是重放。
   // 缺口在查询侧，补上 seq 列表即可精确 ack。
   private static readonly PENDING_MENTION_SEQ_CAP = 50;
+
+  /**
+   * 身份级回执游标（#828）。独立于 presence 表读取：presence 按 (name, session_id) 存，而 episodic
+   * agent 每轮换一个会话，只有这张按 name 的表能跨轮活下来。
+   */
+  private receiptMarks(): Map<string, ReceiptMark> {
+    const marks = new Map<string, ReceiptMark>();
+    for (const row of this.ctx.storage.sql
+      .exec("SELECT name, last_seq, not_in_turn_since, kind, updated_at FROM receipt_marks")
+      .toArray()) {
+      marks.set(String(row.name), {
+        lastSeq: Number(row.last_seq),
+        notInTurnSince:
+          row.not_in_turn_since === null || row.not_in_turn_since === undefined
+            ? null
+            : Number(row.not_in_turn_since),
+        kind: row.kind === "agent" ? "agent" : row.kind === "human" ? "human" : null,
+        updatedAt: Number(row.updated_at),
+      });
+    }
+    return marks;
+  }
+
+  /**
+   * 只有回执、没有 presence 行的身份，也要出现在 who 里（#828）。
+   *
+   * 这正是 episodic agent 的常态：它醒来一轮、经 REST 回执、然后进程就没了——从不建 WS 会话，
+   * 也未必发过 status 帧，于是 presence 表里根本没有它。若因此把它整个隐去，「对方知道这事、只是
+   * 还没轮到」这条信息就恰好在最该被看到的时候消失，同事看到的仍然只有沉默——那次越界改仓库的
+   * 事故就是这么来的。合成一条 offline 条目是诚实的读法：人确实不在线，但确实收到了第 N 条。
+   */
+  private receiptOnlyEntries(marks: Map<string, ReceiptMark>, known: Set<string>): PresenceEntry[] {
+    const entries: PresenceEntry[] = [];
+    for (const [name, mark] of marks) {
+      if (known.has(name)) continue;
+      entries.push({
+        name,
+        ...(mark.kind === null ? {} : { kind: mark.kind }),
+        state: "offline",
+        note: null,
+        ts: mark.updatedAt,
+        last_seen: mark.updatedAt,
+        last_receipt_seq: mark.lastSeq,
+        ...(mark.notInTurnSince === null ? {} : { not_in_turn_since: mark.notInTurnSince }),
+      });
+    }
+    return entries;
+  }
 
   private unhandledMentionDebt(): Map<string, { count: number; oldestSeq: number; seqs: number[] }> {
     const debt = new Map<string, { count: number; oldestSeq: number; seqs: number[] }>();
@@ -11828,6 +12073,8 @@ export class ChannelDO extends Server<Env> {
       if (attachments !== undefined) frame.attachments = attachments;
       const responseSource = parseStoredResponseSource(r.response_source_json);
       if (responseSource !== undefined) frame.response_source = responseSource;
+      const receipts = parseStoredReceipts(r.receipts_json);
+      if (receipts !== undefined) frame.receipts = receipts;
     }
     if (r.edited_at !== null && r.edited_at !== undefined) {
       frame.edited = true;
