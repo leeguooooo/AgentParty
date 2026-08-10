@@ -54,7 +54,10 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
   const seqArg = positionals[0];
-  if (seqArg === undefined || !/^[1-9]\d*$/.test(seqArg)) {
+  // 正则只保证「一串数字」，不保证它落在安全整数内：20 位数字过 Number() 会变成 1e+20，
+  // 拼进 URL 就成了一个根本不存在的 seq。在这里判掉，别把垃圾丢给服务端再靠 404 兜。
+  const seq = seqArg === undefined ? Number.NaN : Number(seqArg);
+  if (seqArg === undefined || !/^[1-9]\d*$/.test(seqArg) || !Number.isSafeInteger(seq)) {
     console.error("usage: party receipt <seq> [--reason not_in_turn|queued|seen] [-m note]");
     return 1;
   }
@@ -81,14 +84,14 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
   try {
-    const result = await postReceipt(auth.server, auth.token, channel, Number(seqArg), {
+    const result = await postReceipt(auth.server, auth.token, channel, seq, {
       reason,
       ...(note === undefined || note === "" ? {} : { note }),
     });
     if (flags.json === true) {
       console.log(JSON.stringify(jsonFrame(result.message as unknown as Record<string, unknown>)));
     } else {
-      console.log(`receipt (${reason}) on #${seqArg}`);
+      console.log(`receipt (${reason}) on #${seq}`);
       console.log(formatMsg(result.message));
     }
     return 0;
