@@ -4092,8 +4092,8 @@ button.org-person-name {
 }
 .chan-toolstrip-content {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
+  flex-direction: row;
+  align-items: center;
   flex: 1 1 auto;
   min-width: 0;
   gap: 6px;
@@ -4114,7 +4114,7 @@ button.org-person-name {
 }
 .chan-tool-actions {
   flex: 0 0 auto;
-  margin-left: 0;
+  margin-left: auto;
   justify-content: flex-end;
 }
 .chan-admin-actions {

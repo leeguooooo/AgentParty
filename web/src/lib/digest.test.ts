@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { MsgFrame, SenderKind, StatusState } from "@agentparty/shared";
-import { catchupKey, compactDigestText, summarizeCatchup } from "./digest";
+import { catchupKey, compactDigestText, shouldShowCatchup, summarizeCatchup } from "./digest";
 
 function msg(input: {
   seq: number;
@@ -139,6 +139,23 @@ describe("web catchup digest", () => {
     );
     expect(digest.items.map((item) => item.seq)).toEqual([61, 62, 60]);
     expect(digest.attentionItems).toHaveLength(1);
+  });
+
+  test("shows catch-up only when something needs the viewer's attention", () => {
+    const routineOnly = summarizeCatchup(
+      [status({ seq: 63, state: "done", note: "routine update" })],
+      "me",
+      62,
+    );
+    const actionable = summarizeCatchup(
+      [msg({ seq: 64, body: "@me please decide", mentions: ["me"] })],
+      "me",
+      63,
+    );
+
+    expect(shouldShowCatchup(null)).toBe(false);
+    expect(shouldShowCatchup(routineOnly)).toBe(false);
+    expect(shouldShowCatchup(actionable)).toBe(true);
   });
 
   test("does not mislabel a plain issue or PR reference as a release", () => {

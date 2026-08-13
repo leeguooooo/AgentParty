@@ -84,7 +84,7 @@ import {
 import { mentionCandidates, parseDraftMentions, type DraftMentionStatus } from "../lib/mentions";
 import { buildReceipts, type MentionReceipt } from "../lib/wakeReceipt";
 import { completionMessages } from "../lib/completions";
-import { catchupKey, summarizeCatchup } from "../lib/digest";
+import { catchupKey, shouldShowCatchup, summarizeCatchup } from "../lib/digest";
 import { buildOrgTree, type OrgMemberInput } from "../lib/orgTree";
 import { formatDivisionSection, mergeDivisionIntoCharter, type DivisionCharterRole } from "../lib/divisionCharter";
 import { declaredAgentRoles, formatAgentRoleSummary } from "../lib/divisionSummary";
@@ -5754,7 +5754,7 @@ export function ChannelPage({
           </>
         }
       />
-      {catchupDigest !== null && catchupDigest.messages > 0 && seenSeq !== null && (
+      {shouldShowCatchup(catchupDigest) && seenSeq !== null && (
         <CatchupPanel
           digest={catchupDigest}
           seenSeq={seenSeq}

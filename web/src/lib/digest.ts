@@ -30,6 +30,13 @@ export interface CatchupDigest {
   updateCount: number;
 }
 
+// The timeline already contains routine updates. Reserve the catch-up surface for
+// items that actually need the viewer's attention so an ordinary refresh does not
+// push the conversation down with a redundant "nothing to do" card.
+export function shouldShowCatchup(digest: CatchupDigest | null): digest is CatchupDigest {
+  return digest !== null && digest.attentionCount > 0;
+}
+
 export function catchupKey(slug: string, self: string): string {
   return `ap_seen:v1:${slug}:${self}`;
 }
