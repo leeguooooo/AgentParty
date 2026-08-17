@@ -50,6 +50,62 @@ describe("cli subprocess", () => {
     const r = await runCli(["--help"]);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("party <command>");
+    expect(r.stdout).toContain("presence uplink remains launcher/serve-scoped");
+    expect(r.stdout).not.toContain("install makes any session visible");
+  });
+
+  test("compiled-distribution Cross-session verifier is reachable through bridge", async () => {
+    const help = await runCli(["bridge", "claude", "--verify", "--help"]);
+    expect(help.code).toBe(0);
+    expect(help.stdout).toContain("usage: party bridge claude --verify --channel SLUG");
+    expect(help.stdout).toContain("This makes real model calls");
+    expect(help.stdout).toContain("cross_machine_policy_on_launch=explicit_approval_required");
+    expect(help.stdout).toContain("--receiver-cwd DIR");
+    expect(help.stdout).toContain("--sender-cwd DIR");
+    expect(help.stderr).toBe("");
+
+    const invalid = await runCli(["bridge", "claude", "--verify", "--preflight-only"]);
+    expect(invalid.code).toBe(9);
+    expect(JSON.parse(invalid.stdout)).toEqual({
+      schema: "agentparty.claude-cross-session-integration-preflight.v1",
+      status: "invalid_request",
+      blockers: ["invalid_arguments"],
+      error_code: "invalid_arguments",
+      cross_machine_policy_on_launch: "explicit_approval_required",
+      model_calls_started: false,
+      delivery_verified: false,
+    });
+    expect(invalid.stderr).toBe("");
+  });
+
+  test("compiled-distribution busy Marketplace Channel verifier is reachable through party claude", async () => {
+    const help = await runCli(["claude", "--verify", "--help"]);
+    expect(help.code).toBe(0);
+    expect(help.stdout).toContain("usage: party claude --verify --channel SLUG");
+    expect(help.stdout).toContain("--preflight-only performs no model call");
+    expect(help.stdout).toContain("--live explicitly authorizes one real model session");
+    expect(help.stdout).toContain("party_channel_claim ->");
+    expect(help.stderr).toBe("");
+
+    const invalid = await runCli(["claude", "--verify", "--preflight-only"]);
+    expect(invalid.code).toBe(9);
+    expect(JSON.parse(invalid.stdout)).toEqual({
+      schema: "agentparty.claude-channel-busy-preflight.v1",
+      status: "invalid_request",
+      blockers: ["invalid_arguments"],
+      error_code: "invalid_arguments",
+      model_calls_started: false,
+      channel_writes_started: false,
+      delivery_verified: false,
+    });
+    expect(invalid.stderr).toBe("");
+  });
+
+  test("Cross-session verifier mode does not reserve the verify channel name", async () => {
+    const help = await runCli(["bridge", "claude", "verify", "--help"]);
+    expect(help.code).toBe(0);
+    expect(help.stdout.startsWith("usage: party bridge <claude|codex>")).toBe(true);
+    expect(help.stderr).toBe("");
   });
 
   test("non-json subcommands support --help without auth or config", async () => {
@@ -66,6 +122,7 @@ describe("cli subprocess", () => {
       "agent",
       "serve",
       "bridge",
+      "claude",
       "mcp",
       "lark",
       "task",

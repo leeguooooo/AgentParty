@@ -32,12 +32,20 @@ export function activityFromHookEvent(payload: Record<string, unknown>, now: num
       return snapshot("starting");
     case "UserPromptSubmit":
     case "PostToolUse":
+    case "PostToolUseFailure":
+    case "PostCompact":
+    case "ElicitationResult":
       return snapshot("working");
     case "PreToolUse":
       return snapshot("tool", true);
+    case "PermissionRequest":
+      return snapshot("waiting_permission", true);
+    case "Elicitation":
+      return snapshot("waiting_input");
     case "PreCompact":
       return snapshot("compacting");
     case "Stop":
+    case "StopFailure":
     case "SessionEnd":
       return snapshot("idle");
     case "Notification": {

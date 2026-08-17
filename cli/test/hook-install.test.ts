@@ -4,8 +4,19 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeActivityFile } from "../src/activity";
-import { mergeHookSettings, removeHookSettings, shouldPushActivity, PUSH_INTERVAL_MS, PUSH_INTERVAL_URGENT_MS } from "../src/commands/hook";
+import type { DirectedDelivery, MsgFrame } from "@agentparty/shared";
+import {
+  mergeHookSettings,
+  removeHookSettings,
+  readLastPushTs,
+  shouldBlockAgentPartyStop,
+  shouldForceActivityPush,
+  shouldPushActivity,
+  PUSH_INTERVAL_MS,
+  PUSH_INTERVAL_URGENT_MS,
+} from "../src/commands/hook";
 import { claudeHookSettingsJson } from "../src/commands/serve";
+import { DeliveryRecoveryJournal, deliveryRecoveryJournalPath } from "../src/delivery-recovery-journal";
 import { startRestMock, type RestMock } from "./rest-mock";
 
 const indexPath = join(import.meta.dir, "..", "src", "index.ts");
@@ -33,7 +44,8 @@ describe("mergeHookSettings / removeHookSettings (#615)", () => {
     expect(twice).toBe(once);
     const parsed = JSON.parse(once) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
     expect(parsed.hooks.PreToolUse![0]!.hooks[0]!.command).toContain("hook report");
-    expect(Object.keys(parsed.hooks).length).toBe(8);
+    expect(parsed.hooks.Stop![0]!.hooks[0]!.command).toContain("hook stop-guard");
+    expect(Object.keys(parsed.hooks).length).toBe(14);
   });
 
   test("preserves foreign hooks and unknown settings keys", () => {
@@ -73,6 +85,181 @@ describe("mergeHookSettings / removeHookSettings (#615)", () => {
   });
 });
 
+describe("interactive activity boundary push (#615)", () => {
+  const working = { phase: "working", ts: NOW } as const;
+  const tool = { phase: "tool", tool: "Bash", ts: NOW } as const;
+  const permission = { phase: "waiting_permission", tool: "Bash", ts: NOW } as const;
+  const input = { phase: "waiting_input", ts: NOW } as const;
+  const idle = { phase: "idle", ts: NOW } as const;
+
+  test("immediately publishes entering/leaving a wait and ending a turn", () => {
+    expect(shouldForceActivityPush(tool, permission, "PermissionRequest")).toBe(true);
+    expect(shouldForceActivityPush(permission, working, "PostToolUse")).toBe(true);
+    expect(shouldForceActivityPush(working, input, "Elicitation")).toBe(true);
+    expect(shouldForceActivityPush(input, working, "ElicitationResult")).toBe(true);
+    expect(shouldForceActivityPush(working, idle, "Stop")).toBe(true);
+  });
+
+  test("keeps repeated waits and ordinary tool churn throttled, but failures bypass it", () => {
+    expect(shouldForceActivityPush(permission, permission, "Notification")).toBe(false);
+    expect(shouldForceActivityPush(working, tool, "PreToolUse")).toBe(false);
+    expect(shouldForceActivityPush(tool, working, "PostToolUse")).toBe(false);
+    expect(shouldForceActivityPush(tool, working, "PostToolUseFailure")).toBe(true);
+    expect(shouldForceActivityPush(working, idle, "StopFailure")).toBe(true);
+  });
+});
+
+describe("AgentParty Stop guard", () => {
+  test("blocks one top-level stop only for work already issued to or accepted by Claude", () => {
+    const firstStop = { hook_event_name: "Stop", stop_hook_active: false, agent_id: null };
+    expect(shouldBlockAgentPartyStop(firstStop, [{ phase: "harness_issued" }], true)).toBe(true);
+    expect(shouldBlockAgentPartyStop(firstStop, [{ phase: "harness_accepted" }], true)).toBe(true);
+    for (const phase of ["claimed", "running_authorized", "reply_posted", "waiting_owner", "failed_pending"] as const) {
+      expect(shouldBlockAgentPartyStop(firstStop, [{ phase }], true)).toBe(false);
+    }
+  });
+
+  test("allows ordinary sessions, the continuation stop, subagent stops, and sessions without pending work", () => {
+    expect(shouldBlockAgentPartyStop(
+      { hook_event_name: "Stop", stop_hook_active: false },
+      [{ phase: "harness_accepted" }],
+      false,
+    )).toBe(false);
+    expect(shouldBlockAgentPartyStop(
+      { hook_event_name: "Stop", stop_hook_active: true },
+      [{ phase: "harness_accepted" }],
+      true,
+    )).toBe(false);
+    expect(shouldBlockAgentPartyStop(
+      { hook_event_name: "Stop", stop_hook_active: false, agent_id: "subagent" },
+      [{ phase: "harness_accepted" }],
+      true,
+    )).toBe(false);
+    expect(shouldBlockAgentPartyStop(
+      { hook_event_name: "Stop", stop_hook_active: false },
+      [],
+      true,
+    )).toBe(false);
+  });
+
+  test("emits one structured Stop decision from the private durable journal", async () => {
+    const server = "https://agentparty.example";
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "config.json"), JSON.stringify({
+      server,
+      token: "ap_stop_guard",
+      identity: {
+        name: "mini",
+        email: null,
+        kind: "agent",
+        role: "agent",
+        owner: "o",
+        channel_scope: null,
+        verified_at: NOW,
+      },
+    }));
+    const previousHome = process.env.AGENTPARTY_HOME;
+    process.env.AGENTPARTY_HOME = home;
+    try {
+      const now = Date.now();
+      const delivery: DirectedDelivery = {
+        id: "delivery-stop-guard",
+        message_seq: 41,
+        target_name: "mini",
+        cause: "mention",
+        state: "claimed",
+        attempt: 1,
+        lease_epoch: 1,
+        lease_token: "lease-token",
+        lease_until: now + 90_000,
+        work_id: "work-stop-guard",
+        continuation_ref: "continuation-stop-guard",
+        reply_seq: null,
+        last_error: null,
+        created_at: now,
+        updated_at: now,
+      };
+      const message: MsgFrame = {
+        type: "msg",
+        seq: 41,
+        sender: { name: "owner", kind: "human" },
+        kind: "message",
+        body: "@mini finish the linked reply",
+        mentions: ["mini"],
+        reply_to: null,
+        state: null,
+        note: null,
+        status: null,
+        ts: now,
+      };
+      const journal = new DeliveryRecoveryJournal(
+        deliveryRecoveryJournalPath("claude", server, "ap_stop_guard", "dev"),
+        "dev",
+        "claude",
+      );
+      journal.recordClaim(delivery, message);
+      journal.update(delivery.id, { phase: "harness_issued" });
+    } finally {
+      if (previousHome === undefined) delete process.env.AGENTPARTY_HOME;
+      else process.env.AGENTPARTY_HOME = previousHome;
+    }
+
+    const runGuard = async (stopHookActive: boolean, lifecycleOptedIn: boolean) => {
+      const proc = Bun.spawn(["bun", "run", indexPath, "hook", "stop-guard"], {
+        env: {
+          ...process.env,
+          AGENTPARTY_HOME: home,
+          AGENTPARTY_CHANNEL: "dev",
+          AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: lifecycleOptedIn ? "1" : undefined,
+          AGENTPARTY_CONFIG: undefined,
+        },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      proc.stdin.write(JSON.stringify({
+        session_id: "stop-guard-session",
+        hook_event_name: "Stop",
+        stop_hook_active: stopHookActive,
+        cwd: process.cwd(),
+      }));
+      proc.stdin.end();
+      const [code, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      return { code, stdout, stderr };
+    };
+
+    const stopActivityFile = join(home, "state", "activity", "stop-guard-session.json");
+    mkdirSync(join(home, "state", "activity"), { recursive: true });
+    const throttledMarkerTs = Date.now();
+    writeFileSync(`${stopActivityFile}.push.json`, JSON.stringify({ last_push_ts: throttledMarkerTs }));
+    await Bun.sleep(5);
+
+    const first = await runGuard(false, true);
+    expect(first.code).toBe(0);
+    expect(first.stderr).toBe("");
+    expect(JSON.parse(first.stdout)).toMatchObject({ decision: "block" });
+    expect(first.stdout).not.toContain("ap_stop_guard");
+    expect(first.stdout).not.toContain("finish the linked reply");
+    expect(JSON.parse(readFileSync(stopActivityFile, "utf8"))).toMatchObject({ phase: "working" });
+    expect(JSON.parse(readFileSync(`${stopActivityFile}.push.json`, "utf8")))
+      .toMatchObject({ last_push_ts: expect.any(Number) });
+    expect((JSON.parse(readFileSync(`${stopActivityFile}.push.json`, "utf8")) as { last_push_ts: number }).last_push_ts)
+      .toBeGreaterThan(throttledMarkerTs);
+
+    const ordinarySession = await runGuard(false, false);
+    expect(ordinarySession).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(JSON.parse(readFileSync(stopActivityFile, "utf8"))).toMatchObject({ phase: "idle" });
+
+    const continuation = await runGuard(true, true);
+    expect(continuation).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(JSON.parse(readFileSync(stopActivityFile, "utf8"))).toMatchObject({ phase: "idle" });
+  });
+});
+
 describe("shouldPushActivity (#615)", () => {
   test("15s throttle for ordinary phases, 3s for waiting_permission, always on first push", () => {
     const tool = { phase: "tool" as const, tool: "Bash", ts: NOW };
@@ -90,6 +277,20 @@ describe("shouldPushActivity (#615)", () => {
     const input = { phase: "waiting_input" as const, ts: NOW };
     expect(shouldPushActivity(input, NOW - PUSH_INTERVAL_URGENT_MS + 1, NOW)).toBe(false);
     expect(shouldPushActivity(input, NOW - PUSH_INTERVAL_URGENT_MS, NOW)).toBe(true);
+  });
+
+  test("a failed detached attempt releases only its own throttle marker", () => {
+    const activityFile = join(home, "activity-marker.json");
+    const currentAttempt = "11111111-1111-4111-8111-111111111111";
+    const olderAttempt = "22222222-2222-4222-8222-222222222222";
+    writeFileSync(`${activityFile}.push.json`, JSON.stringify({
+      last_push_ts: NOW,
+      attempt_id: currentAttempt,
+    }));
+    writeFileSync(`${activityFile}.push.failed.json`, JSON.stringify({ attempt_id: olderAttempt }));
+    expect(readLastPushTs(activityFile)).toBe(NOW);
+    writeFileSync(`${activityFile}.push.failed.json`, JSON.stringify({ attempt_id: currentAttempt }));
+    expect(readLastPushTs(activityFile)).toBeNull();
   });
 });
 
@@ -112,10 +313,14 @@ describe("party hook install end-to-end (project scope)", () => {
     const settings = JSON.parse(readFileSync(join(project, ".claude", "settings.local.json"), "utf8")) as {
       hooks: Record<string, unknown[]>;
     };
-    expect(Object.keys(settings.hooks).length).toBe(8);
+    expect(Object.keys(settings.hooks).length).toBe(14);
     const status = await runIn("status");
     expect(status.code).toBe(0);
     expect(status.stdout).toContain("installed");
+    const installAgain = await runIn("install");
+    expect(installAgain.stdout).toContain("普通 Claude session 只写本地 activity");
+    expect(installAgain.stdout).toContain("party claude");
+    expect(installAgain.stdout).not.toContain("任何在此生效范围内");
     expect((await runIn("uninstall")).code).toBe(0);
     expect((await runIn("status")).code).toBe(1);
     rmSync(project, { recursive: true, force: true });
@@ -144,9 +349,190 @@ describe("party hook push end-to-end (#615)", () => {
     return proc.exited;
   }
 
+  async function runReport(
+    sessionId: string,
+    lifecycleOptedIn: boolean,
+    hookEventName = "PreToolUse",
+  ): Promise<{
+    code: number;
+    stdout: string;
+    stderr: string;
+  }> {
+    const proc = Bun.spawn(["bun", "run", indexPath, "hook", "report"], {
+      env: {
+        ...process.env,
+        AGENTPARTY_HOME: home,
+        AGENTPARTY_CONFIG: undefined,
+        AGENTPARTY_CHANNEL: "dev",
+        AGENTPARTY_CLAUDE_CHANNEL_OPT_IN: undefined,
+        AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN: lifecycleOptedIn ? "1" : undefined,
+        AP_ACTIVITY_FILE: undefined,
+      },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    proc.stdin.write(JSON.stringify({
+      session_id: sessionId,
+      hook_event_name: hookEventName,
+      tool_name: "Bash",
+      cwd: process.cwd(),
+    }));
+    proc.stdin.end();
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    return { code, stdout, stderr };
+  }
+
+  test("ordinary plugin sessions stay local while an AgentParty-launched session publishes activity", async () => {
+    let meCalls = 0;
+    let posts = 0;
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") {
+        meCalls += 1;
+        return Response.json({
+          name: "mini",
+          email: null,
+          kind: "agent",
+          role: "agent",
+          owner: "o",
+          channel_scope: "dev",
+        });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/presence/mini/activity") {
+        posts += 1;
+        return Response.json({ ok: true, attached: true });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+
+    expect(await runReport("ordinary-plugin-session", false)).toEqual({
+      code: 0,
+      stdout: "",
+      stderr: "",
+    });
+    await Bun.sleep(250);
+    expect(meCalls).toBe(0);
+    expect(posts).toBe(0);
+    expect(JSON.parse(readFileSync(
+      join(home, "state", "activity", "ordinary-plugin-session.json"),
+      "utf8",
+    ))).toMatchObject({ phase: "tool", tool: "Bash" });
+
+    expect(await runReport("agentparty-launched-session", true)).toEqual({
+      code: 0,
+      stdout: "",
+      stderr: "",
+    });
+    const deadline = Date.now() + 2_000;
+    while (posts === 0 && Date.now() < deadline) await Bun.sleep(25);
+    expect(meCalls).toBe(1);
+    expect(posts).toBe(1);
+  });
+
+  test("publishes a permission wait immediately, throttles repeats, and immediately clears the wait", async () => {
+    const activities: Array<Record<string, unknown>> = [];
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") {
+        return Response.json({
+          name: "mini",
+          email: null,
+          kind: "agent",
+          role: "agent",
+          owner: "o",
+          channel_scope: "dev",
+        });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/presence/mini/activity") {
+        activities.push((req.body as { activity: Record<string, unknown> }).activity);
+        return Response.json({ ok: true, attached: true });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const sessionId = "permission-boundary";
+
+    expect((await runReport(sessionId, true, "PreToolUse")).code).toBe(0);
+    let deadline = Date.now() + 2_000;
+    while (activities.length < 1 && Date.now() < deadline) await Bun.sleep(25);
+
+    // Still inside the ordinary 15-second window. Entering the wait must not
+    // be hidden behind the immediately preceding PreToolUse push.
+    expect((await runReport(sessionId, true, "PermissionRequest")).code).toBe(0);
+    deadline = Date.now() + 2_000;
+    while (activities.length < 2 && Date.now() < deadline) await Bun.sleep(25);
+    expect(activities.map((activity) => activity.phase)).toEqual(["tool", "waiting_permission"]);
+
+    // The same wait notification is noise, not another state boundary.
+    expect((await runReport(sessionId, true, "PermissionRequest")).code).toBe(0);
+    await Bun.sleep(250);
+    expect(activities).toHaveLength(2);
+
+    expect((await runReport(sessionId, true, "PostToolUse")).code).toBe(0);
+    deadline = Date.now() + 2_000;
+    while (activities.length < 3 && Date.now() < deadline) await Bun.sleep(25);
+    expect(activities.at(-1)?.phase).toBe("working");
+  });
+
+  test("a failed detached publish releases the throttle so the next Hook retries immediately", async () => {
+    let posts = 0;
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") {
+        return Response.json({
+          name: "mini",
+          email: null,
+          kind: "agent",
+          role: "agent",
+          owner: "o",
+          channel_scope: "dev",
+        });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/presence/mini/activity") {
+        posts += 1;
+        return posts === 1
+          ? Response.json({ error: "temporary" }, { status: 503 })
+          : Response.json({ ok: true, attached: true });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const sessionId = "retry-after-failed-push";
+    const activityFile = join(home, "state", "activity", `${sessionId}.json`);
+
+    expect((await runReport(sessionId, true)).code).toBe(0);
+    const failureDeadline = Date.now() + 2_000;
+    while (readLastPushTs(activityFile) !== null && Date.now() < failureDeadline) {
+      await Bun.sleep(25);
+    }
+    expect(posts).toBe(1);
+    expect(readLastPushTs(activityFile)).toBeNull();
+
+    // Still inside the ordinary 15-second window. This second POST proves the
+    // failed attempt released its own optimistic throttle immediately.
+    expect((await runReport(sessionId, true)).code).toBe(0);
+    const successDeadline = Date.now() + 2_000;
+    while (posts < 2 && Date.now() < successDeadline) await Bun.sleep(25);
+    expect(posts).toBe(2);
+    expect(readLastPushTs(activityFile)).not.toBeNull();
+  });
+
   test("posts the activity to the presence activity endpoint", async () => {
     let captured: unknown = null;
     mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") {
+        return Response.json({
+          name: "mini",
+          email: null,
+          kind: "agent",
+          role: "agent",
+          owner: "o",
+          channel_scope: null,
+        });
+      }
       if (req.method === "POST" && req.path === "/api/channels/dev/presence/mini/activity") {
         captured = req.body;
         return Response.json({ ok: true, attached: true });
@@ -159,6 +545,60 @@ describe("party hook push end-to-end (#615)", () => {
 
     expect(await runPush(file)).toBe(0);
     expect(captured).toMatchObject({ activity: { phase: "waiting_permission", tool: "Bash" } });
+  });
+
+  test("uses the bearer identity instead of a stale local config name", async () => {
+    const postedPaths: string[] = [];
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") {
+        return Response.json({
+          name: "server-agent",
+          email: null,
+          kind: "agent",
+          role: "agent",
+          owner: "o",
+          channel_scope: "dev",
+        });
+      }
+      if (req.method === "POST" && req.path.endsWith("/activity")) {
+        postedPaths.push(req.path);
+        return Response.json({ ok: true, attached: true });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url); // local cached name is "mini"
+    const file = join(home, "activity.json");
+    writeActivityFile(file, { phase: "working", ts: Date.now() });
+
+    expect(await runPush(file)).toBe(0);
+    expect(postedPaths).toEqual(["/api/channels/dev/presence/server-agent/activity"]);
+  });
+
+  test("retries briefly when SessionStart arrives before Channel presence", async () => {
+    let posts = 0;
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") {
+        return Response.json({
+          name: "mini",
+          email: null,
+          kind: "agent",
+          role: "agent",
+          owner: "o",
+          channel_scope: "dev",
+        });
+      }
+      if (req.method === "POST" && req.path === "/api/channels/dev/presence/mini/activity") {
+        posts += 1;
+        return Response.json({ ok: true, attached: posts > 1 });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const file = join(home, "activity.json");
+    writeActivityFile(file, { phase: "starting", ts: Date.now() });
+
+    expect(await runPush(file)).toBe(0);
+    expect(posts).toBe(2);
   });
 
   test("stays silent (exit 0) on server failure, stale file, or missing config", async () => {

@@ -120,8 +120,16 @@ export interface WorkspaceState {
   config_path?: string;
 }
 
-export function agentpartyHome(): string {
-  return process.env.AGENTPARTY_HOME || join(homedir(), ".agentparty");
+/**
+ * Installation-scoped local state. Distinct AGENTPARTY_CONFIG files isolate
+ * identities without splitting the node namespace; only an explicit
+ * AGENTPARTY_HOME creates a separate local installation boundary.
+ */
+export function agentpartyHome(
+  env: NodeJS.ProcessEnv = process.env,
+  userHome: string = homedir(),
+): string {
+  return env.AGENTPARTY_HOME || join(userHome, ".agentparty");
 }
 
 export interface LocalAgentConfigHint {

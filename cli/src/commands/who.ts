@@ -1,10 +1,11 @@
 // party who — 从终端看频道里谁在线/可唤醒/最近，便于接着 party send --mention 把人拉进来/唤醒。
 // Claude Code 原生 @ 只认本地文件/技能，塞不进远程动态列表；本命令就是那个「动态在线列表」。
-import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type ReceptionContextBoundary, type ReceptionMode, type ReceptionRunner, type RunnerHealth, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
+import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type ReceptionContextBoundary, type ReceptionMode, type ReceptionRunner, type RunnerHealth, type RuntimePeerDiscovery, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
-import { fetchPresence, fetchReadCursors, handleRestError } from "../rest";
+import { fetchPresence, fetchReadCursors, fetchRuntimePeers, handleRestError } from "../rest";
+import { buildRuntimeTopology } from "../runtime-topology";
 import { localStatuslineBase, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { sanitizeSingleLine } from "../format";
 import { isSlug } from "../validation";
@@ -49,6 +50,15 @@ plus "(also held by X)" means someone else claimed the same thing — nothing is
 blocked, but you now know before you edit, instead of finding out from the diff.
 Channel charter describes long-term ownership; scope describes who is touching
 what at this moment. They are different questions.
+A "⚠ same worktree as X" note comes from live, server-scoped runtime topology.
+It is client-asserted: both active CLI runtimes report refs derived from the same
+local working tree. "same workspace" means separate worktrees of one repository;
+"same local installation" means they share one AgentParty node namespace. These
+refs are compared inside the Worker and never returned by presence or JSON output.
+The JSON projection keeps the exact same_local_installation relation name; it
+never upgrades that advisory signal to a physical-host-sounding same_node claim.
+The derived relation is a coordination hint only; it never authorizes, assigns,
+routes, or changes delivery state.
 Then bring one in: party send "@name …" --mention name
 A human is @-notified by their handle (their web client matches on handle, not the
 session name), so mention the "@handle" shown here — not a UUID session name.
@@ -56,7 +66,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/topology_conflicts/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -112,8 +122,8 @@ interface Row {
   current_task?: number;
   task_started_at?: number;
   heartbeat_at?: number;
-  // 模型 session 活动（#602）：hook 落盘、serve 心跳捎带的「正在干什么」——比 current_task 更细：
-  // 正在跑哪个工具 / 卡权限确认 / compact / turn 已结束。仅在有活跃任务时带出。
+  // 模型 session 活动（#602/#615）：hook 落盘或交互 lane 直报的「正在干什么」——比
+  // current_task 更细。party claude 不跑 serve，通常没有 current_task，但 activity 仍必须可见。
   activity?: AgentActivity;
   // 探活分级（#603）：listening 是服务端从 delivery 租约状态机派生的「在线但没在听」；
   // runner_health 是 serve 自报的「在线但干不动」（runner 连败）。两者正交，都缺省即无恙。
@@ -121,6 +131,11 @@ interface Row {
   runner_health?: RunnerHealth;
   // runner 自报、worker 持久化的模型会话句柄（#522）；不是 websocket session。
   agent_session?: PresenceEntry["agent_session"];
+  topology_conflicts?: Array<{
+    kind: "same_identity_worktree" | "same_worktree" | "same_workspace" | "same_local_installation";
+    with: string[];
+    runtime_count?: number;
+  }>;
   // #817：无人值守时这个身份怎么接待 @——model runner 代答，还是 custom 命令。隔离接待意味着
   // 答话的会话不继承本人当前上下文，协作方在 @ 之前就该看见这一点。
   reception_mode?: ReceptionMode;
@@ -215,9 +230,11 @@ export function classify(e: PresenceEntry, now: number): Row | null {
           current_task: e.current_task,
           ...(typeof e.task_started_at === "number" ? { task_started_at: e.task_started_at } : {}),
           ...(typeof e.heartbeat_at === "number" ? { heartbeat_at: e.heartbeat_at } : {}),
-          ...(e.activity === undefined ? {} : { activity: e.activity }),
         }
       : {}),
+    // #615 interactive lane activity is intentionally independent of a serve task heartbeat.
+    // Offline rows never describe a live model session even if a stale/legacy payload leaks through.
+    ...(e.state !== "offline" && e.activity !== undefined ? { activity: e.activity } : {}),
     // 探活分级（#603）：服务端只对有活连接的身份下发 listening；runner_health 独立于任务生命周期。
     ...(e.listening === "suspect" || e.listening === "deaf" ? { listening: e.listening } : {}),
     ...(e.runner_health === undefined ? {} : { runner_health: e.runner_health }),
@@ -412,6 +429,46 @@ export function annotateScopeConflicts(rows: Row[]): Row[] {
   });
 }
 
+/**
+ * Attach the server-derived relationships relative to this `party who` cwd.
+ * Raw refs stay inside the Worker comparison boundary.
+ */
+export function annotateTopologyConflicts(
+  rows: Row[],
+  discovery?: RuntimePeerDiscovery,
+): Row[] {
+  if (discovery === undefined) return rows;
+  const byAgent = new Map(discovery.peers.map((peer) => [peer.agent, peer]));
+  return rows.map((row) => {
+    const peer = byAgent.get(row.name);
+    if (peer === undefined) return row;
+    const conflicts: NonNullable<Row["topology_conflicts"]> = peer.relations.map((item) => ({
+      kind: peer.same_identity && item.relation === "same_worktree"
+        ? "same_identity_worktree"
+        : item.relation,
+      with: peer.same_identity ? [] : [discovery.self],
+      runtime_count: item.runtime_count,
+    }));
+    return conflicts.length === 0 ? row : { ...row, topology_conflicts: conflicts };
+  });
+}
+
+export function topologyNote(r: Row): string {
+  const conflicts = r.topology_conflicts ?? [];
+  if (conflicts.length === 0) return "";
+  return conflicts.map((conflict) => {
+    if (conflict.kind === "same_identity_worktree") {
+      return ` · ⚠ ${conflict.runtime_count ?? 1} other live runtime(s) of this identity share one worktree`;
+    }
+    const label = conflict.kind === "same_worktree"
+      ? "⚠ same worktree as"
+      : conflict.kind === "same_workspace"
+        ? "same workspace as"
+        : "same local installation as";
+    return ` · ${label} ${conflict.with.map(terminalIdentityText).join(", ")}`;
+  }).join("");
+}
+
 export function scopeNote(r: Row): string {
   if (r.scope === undefined || r.scope.length === 0) return "";
   const conflicted = new Set((r.scope_conflicts ?? []).map((entry) => entry.scope));
@@ -475,6 +532,21 @@ export async function run(argv: string[]): Promise<number> {
   }
   try {
     const presence = await fetchPresence(cfg.server, cfg.token, channel);
+    let runtimePeers: RuntimePeerDiscovery | undefined;
+    const runtimeTopology = buildRuntimeTopology(cfg.server);
+    if (runtimeTopology !== undefined) {
+      try {
+        runtimePeers = await fetchRuntimePeers(
+          cfg.server,
+          cfg.token,
+          channel,
+          runtimeTopology,
+          "topology_advisory",
+        );
+      } catch {
+        // Old Worker or optional discovery failure: who remains useful without topology hints.
+      }
+    }
     // 已读游标尽力而为：老 worker 没这个端点会抛，降级为不标注（Phase 2 · CLI）。
     // 只有逐帧流式在读的身份（网页人 / serve / watch --follow 的 agent）才有游标；webhook/watch-once
     // 不逐条读，天然没有——不标注就是诚实。
@@ -492,12 +564,12 @@ export async function run(argv: string[]): Promise<number> {
       ...(lastSeq > 0 ? { unread: unreadFromCursor(lastSeq, channel) } : {}),
     });
     const now = Date.now();
-    const rows = annotateScopeConflicts(
+    const rows = annotateTopologyConflicts(annotateScopeConflicts(
       presence
         .map((e) => classify(e, now))
         .filter((r): r is Row => r !== null)
         .map((r) => ({ ...r, read_seq: cursorOf.get(r.name) })),
-    ).sort((a, b) => RANK[a.tier] - RANK[b.tier] || a.name.localeCompare(b.name));
+    ), runtimePeers).sort((a, b) => RANK[a.tier] - RANK[b.tier] || a.name.localeCompare(b.name));
     if (flags.json === true) {
       for (const r of rows) console.log(JSON.stringify(r));
       return 0;
@@ -515,7 +587,7 @@ export async function run(argv: string[]): Promise<number> {
           typeof r.resume_at === "number"
             ? ` · resumes in ${humanAge(Math.max(0, r.resume_at - now))}`
             : " · resume manually";
-        console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${read}${duplicate}`);
+        console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${read}${duplicate}`);
         continue;
       }
       // #191：可唤醒行明确标出「已验证 / 未验证」——verified＝服务端确认过（webhook，或观测到被 @ 后 resume），
@@ -527,7 +599,7 @@ export async function run(argv: string[]): Promise<number> {
       const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
       // #664：recent 档里真·不可达的（无活 wake 通道 + 陈旧）单独标出，别和「最近露面、或许在轮询」混淆。
       const unreach = r.unreachable === true ? " · ⚠ unreachable (mention lands in history only)" : "";
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
+      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
     }
     return 0;
   } catch (e) {

@@ -119,4 +119,34 @@ describe("interactive-lane activity self-report (issue #615)", () => {
     expect(res.status).toBe(200);
     expect((await res.json()) as Record<string, unknown>).toMatchObject({ ok: true, attached: false });
   });
+
+  it("an unattached SessionStart report does not throttle the first attached retry", async () => {
+    const agent = await seedToken("agent");
+    const slug = await createChannel(agent.token);
+    const firstTs = Date.now();
+    const beforePresence = await postActivity(slug, agent.token, agent.name, {
+      phase: "starting",
+      ts: firstTs,
+    });
+    expect(beforePresence.status).toBe(200);
+    expect((await beforePresence.json()) as Record<string, unknown>).toMatchObject({
+      ok: true,
+      attached: false,
+    });
+
+    const ws = await attachPresence(slug, agent.token);
+    const retryTs = Date.now();
+    const retry = await postActivity(slug, agent.token, agent.name, {
+      phase: "starting",
+      ts: retryTs,
+    });
+    expect(retry.status).toBe(200);
+    expect((await retry.json()) as Record<string, unknown>).toMatchObject({
+      ok: true,
+      attached: true,
+    });
+    const entry = (await fetchPresence(slug, agent.token)).find((e) => e.name === agent.name);
+    expect(entry?.activity).toEqual({ phase: "starting", ts: retryTs });
+    ws.close();
+  });
 });

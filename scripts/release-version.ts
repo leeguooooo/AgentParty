@@ -9,6 +9,8 @@ export interface ReleaseVersionPaths {
   desktopPackagePath: string;
   desktopCargoPath: string;
   desktopCargoLockPath: string;
+  claudePluginManifestPath?: string;
+  codexPluginManifestPath?: string;
 }
 
 export interface ReleaseVersionFileSystem {
@@ -30,6 +32,8 @@ export const defaultReleaseVersionPaths: ReleaseVersionPaths = {
   desktopPackagePath: resolve(import.meta.dir, "../desktop/package.json"),
   desktopCargoPath: resolve(import.meta.dir, "../desktop/src-tauri/Cargo.toml"),
   desktopCargoLockPath: resolve(import.meta.dir, "../desktop/src-tauri/Cargo.lock"),
+  claudePluginManifestPath: resolve(import.meta.dir, "../plugins/agentparty/.claude-plugin/plugin.json"),
+  codexPluginManifestPath: resolve(import.meta.dir, "../plugins/agentparty/.codex-plugin/plugin.json"),
 };
 
 export function validateVersion(version: string): string {
@@ -92,13 +96,21 @@ export function readConsistentVersion(
   const desktopVersion = readPackage(paths.desktopPackagePath, fs).packageJson.version as string;
   const rustVersion = readCargoPackageVersion(paths.desktopCargoPath, fs).version;
   const rustLockVersion = readCargoLockPackageVersion(paths.desktopCargoLockPath, fs).version;
+  const pluginVersions = [paths.claudePluginManifestPath, paths.codexPluginManifestPath]
+    .filter((path): path is string => path !== undefined)
+    .map((path) => ({ path, version: readPackage(path, fs).packageJson.version as string }));
   validateVersion(cliVersion);
   validateVersion(desktopVersion);
   validateVersion(rustVersion);
   validateVersion(rustLockVersion);
-  if (cliVersion !== desktopVersion || cliVersion !== rustVersion || cliVersion !== rustLockVersion) {
+  for (const plugin of pluginVersions) validateVersion(plugin.version);
+  if (
+    cliVersion !== desktopVersion || cliVersion !== rustVersion || cliVersion !== rustLockVersion ||
+    pluginVersions.some((plugin) => plugin.version !== cliVersion)
+  ) {
+    const pluginDetails = pluginVersions.map((plugin) => `, ${plugin.path} is ${plugin.version}`).join("");
     throw new Error(
-      `Version mismatch: cli/package.json is ${cliVersion}, desktop/package.json is ${desktopVersion}, desktop/src-tauri/Cargo.toml is ${rustVersion}, desktop/src-tauri/Cargo.lock is ${rustLockVersion}`,
+      `Version mismatch: cli/package.json is ${cliVersion}, desktop/package.json is ${desktopVersion}, desktop/src-tauri/Cargo.toml is ${rustVersion}, desktop/src-tauri/Cargo.lock is ${rustLockVersion}${pluginDetails}`,
     );
   }
   return cliVersion;
@@ -205,14 +217,25 @@ export function syncVersion(
   const desktop = readPackage(paths.desktopPackagePath, fs);
   const rust = readCargoPackageVersion(paths.desktopCargoPath, fs);
   const rustLock = readCargoLockPackageVersion(paths.desktopCargoLockPath, fs);
+  const plugins = [paths.claudePluginManifestPath, paths.codexPluginManifestPath]
+    .filter((path): path is string => path !== undefined)
+    .map((path) => ({ path, ...readPackage(path, fs) }));
   cli.packageJson.version = version;
   desktop.packageJson.version = version;
+  for (const plugin of plugins) plugin.packageJson.version = version;
 
   const updates = [
     { path: paths.cliPackagePath, source: cli.source, contents: JSON.stringify(cli.packageJson, null, 2) + "\n", temporary: temporaryPath(paths.cliPackagePath), committed: false },
     { path: paths.desktopPackagePath, source: desktop.source, contents: JSON.stringify(desktop.packageJson, null, 2) + "\n", temporary: temporaryPath(paths.desktopPackagePath), committed: false },
     { path: paths.desktopCargoPath, source: rust.source, contents: rust.replace(version), temporary: temporaryPath(paths.desktopCargoPath), committed: false },
     { path: paths.desktopCargoLockPath, source: rustLock.source, contents: rustLock.replace(version), temporary: temporaryPath(paths.desktopCargoLockPath), committed: false },
+    ...plugins.map((plugin) => ({
+      path: plugin.path,
+      source: plugin.source,
+      contents: JSON.stringify(plugin.packageJson, null, 2) + "\n",
+      temporary: temporaryPath(plugin.path),
+      committed: false,
+    })),
   ];
 
   try {

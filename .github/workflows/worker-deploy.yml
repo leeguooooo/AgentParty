@@ -89,6 +89,9 @@ jobs:
           # 写路径冒烟用的一次性 token；未配置时 deploy-ci 只跑只读健康校验并跳过写冒烟。
           AGENTPARTY_SMOKE_TOKEN: ${{ secrets.AGENTPARTY_SMOKE_TOKEN }}
           AGENTPARTY_SMOKE_WRITE_TOKEN: ${{ secrets.AGENTPARTY_SMOKE_WRITE_TOKEN }}
+          # runtime-peers 需要 agent 身份；部署前验凭证，部署后用双 socket 验 live topology。频道留空时自动选。
+          AGENTPARTY_RUNTIME_SMOKE_TOKEN: ${{ secrets.AGENTPARTY_RUNTIME_SMOKE_TOKEN }}
+          AGENTPARTY_RUNTIME_SMOKE_CHANNEL: ${{ vars.AGENTPARTY_RUNTIME_SMOKE_CHANNEL }}
         run: node scripts/deploy-ci.mjs ${{ matrix.target }}
 
   # 双实例一致性：两个都部署时，确认 prod 与 xdream 对外提供同一 version+commit。

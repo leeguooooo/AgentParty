@@ -122,6 +122,8 @@ function runReleaseHarness(scenario: ReleaseHarnessScenario) {
   mkdirSync(join(directory, "cli"));
   mkdirSync(join(directory, "desktop"));
   mkdirSync(join(directory, "desktop", "src-tauri"));
+  mkdirSync(join(directory, "plugins", "agentparty", ".claude-plugin"), { recursive: true });
+  mkdirSync(join(directory, "plugins", "agentparty", ".codex-plugin"), { recursive: true });
   mkdirSync(fakeBin);
   copyFileSync(resolve(import.meta.dir, "release.sh"), join(directory, "scripts", "release.sh"));
   chmodSync(join(directory, "scripts", "release.sh"), 0o755);
@@ -130,10 +132,13 @@ function runReleaseHarness(scenario: ReleaseHarnessScenario) {
   const desktopPackage = join(directory, "desktop", "package.json");
   const originalCli = '{"name":"cli","version":"0.2.82"}\n';
   const originalDesktop = '{"name":"desktop","version":"0.2.82"}\n';
+  const originalPlugin = '{"name":"agentparty","version":"0.2.82"}\n';
   writeFileSync(cliPackage, originalCli);
   writeFileSync(desktopPackage, originalDesktop);
   writeFileSync(join(directory, "desktop", "src-tauri", "Cargo.toml"), '[package]\nname = "agentparty-desktop"\nversion = "0.2.82"\n');
   writeFileSync(join(directory, "desktop", "src-tauri", "Cargo.lock"), 'version = 4\n\n[[package]]\nname = "agentparty-desktop"\nversion = "0.2.82"\n');
+  writeFileSync(join(directory, "plugins", "agentparty", ".claude-plugin", "plugin.json"), originalPlugin);
+  writeFileSync(join(directory, "plugins", "agentparty", ".codex-plugin", "plugin.json"), originalPlugin);
 
   writeExecutable(
     join(fakeBin, "git"),
@@ -154,6 +159,8 @@ esac
   mv desktop/src-tauri/Cargo.toml.next desktop/src-tauri/Cargo.toml
   sed "s/version = \\\"0.2.82\\\"/version = \\\"$2\\\"/" desktop/src-tauri/Cargo.lock > desktop/src-tauri/Cargo.lock.next
   mv desktop/src-tauri/Cargo.lock.next desktop/src-tauri/Cargo.lock
+  printf '{"name":"agentparty","version":"%s"}\n' "$2" > plugins/agentparty/.claude-plugin/plugin.json
+  printf '{"name":"agentparty","version":"%s"}\n' "$2" > plugins/agentparty/.codex-plugin/plugin.json
   exit 0
 fi
 [[ "\${1:-} \${2:-}" == "run check" ]]
@@ -224,8 +231,11 @@ exec /bin/cp "$@"
     desktopPackage,
     desktopCargo: join(directory, "desktop", "src-tauri", "Cargo.toml"),
     desktopCargoLock: join(directory, "desktop", "src-tauri", "Cargo.lock"),
+    claudePluginManifest: join(directory, "plugins", "agentparty", ".claude-plugin", "plugin.json"),
+    codexPluginManifest: join(directory, "plugins", "agentparty", ".codex-plugin", "plugin.json"),
     originalCli,
     originalDesktop,
+    originalPlugin,
     originalCargo: '[package]\nname = "agentparty-desktop"\nversion = "0.2.82"\n',
     originalCargoLock: 'version = 4\n\n[[package]]\nname = "agentparty-desktop"\nversion = "0.2.82"\n',
   };
@@ -378,6 +388,25 @@ describe("release version source", () => {
     expect(() => runReleaseVersionCli(["0.2.84", "extra"], paths)).toThrow(
       "Usage: bun scripts/release-version.ts <version>",
     );
+  });
+
+  test("keeps both plugin manifests in the atomic release version set", () => {
+    const paths = makePackages();
+    const directory = join(paths.cliPackagePath, "..");
+    const claudePluginManifestPath = join(directory, "claude-plugin.json");
+    const codexPluginManifestPath = join(directory, "codex-plugin.json");
+    writeFileSync(claudePluginManifestPath, '{"name":"agentparty","version":"0.2.82"}\n');
+    writeFileSync(codexPluginManifestPath, '{"name":"agentparty","version":"0.2.82"}\n');
+    const pluginPaths = { ...paths, claudePluginManifestPath, codexPluginManifestPath };
+
+    expect(readConsistentVersion(pluginPaths)).toBe("0.2.82");
+    syncVersion("0.2.83", pluginPaths);
+    expect(readConsistentVersion(pluginPaths)).toBe("0.2.83");
+    expect(JSON.parse(readFileSync(claudePluginManifestPath, "utf8")).version).toBe("0.2.83");
+    expect(JSON.parse(readFileSync(codexPluginManifestPath, "utf8")).version).toBe("0.2.83");
+
+    writeFileSync(codexPluginManifestPath, '{"name":"agentparty","version":"0.2.81"}\n');
+    expect(() => readConsistentVersion(pluginPaths)).toThrow("Version mismatch");
   });
 
   test("CLI release bump rejects equal or lower precedence", () => {
@@ -618,6 +647,8 @@ watch_tag_run
     expect(readFileSync(result.desktopPackage, "utf8")).toBe(result.originalDesktop);
     expect(readFileSync(result.desktopCargo, "utf8")).toBe(result.originalCargo);
     expect(readFileSync(result.desktopCargoLock, "utf8")).toBe(result.originalCargoLock);
+    expect(readFileSync(result.claudePluginManifest, "utf8")).toBe(result.originalPlugin);
+    expect(readFileSync(result.codexPluginManifest, "utf8")).toBe(result.originalPlugin);
     expect(result.commands).not.toContain("git add");
   });
 });

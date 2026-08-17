@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { ClientFrame } from "@agentparty/shared";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deliveryFrame, welcomeDirectedFrame } from "./mock-server";
+import { CLAUDE_CROSS_SESSION_GATE_DIR_ENV, runClaudeCrossSessionHook } from "../src/claude-cross-session-gate";
+import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "../src/commands/claude-launch";
 
 const indexPath = join(import.meta.dir, "..", "src", "index.ts");
 
@@ -23,9 +25,38 @@ afterEach(() => {
 });
 
 describe("claude-channel stdio MCP adapter", () => {
+  test("stays dormant without explicit Marketplace launch opt-in", async () => {
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined && key !== "AGENTPARTY_CLAUDE_CHANNEL_OPT_IN") env[key] = value;
+    }
+    env.AGENTPARTY_HOME = home;
+    // `party bridge claude` arms lifecycle hooks but owns a separate Channel
+    // MCP. Lifecycle opt-in alone must never wake the Marketplace listener.
+    env[CLAUDE_LIFECYCLE_OPT_IN_ENV] = "1";
+    const transport = new StdioClientTransport({
+      command: "bun",
+      args: ["run", indexPath, "claude-channel", "--require-launch-opt-in"],
+      env,
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "dormant-channel-test", version: "1.0.0" });
+    await client.connect(transport);
+    try {
+      expect(client.getServerCapabilities()?.experimental).toBeUndefined();
+      expect(client.getInstructions()).toBeUndefined();
+      expect(existsSync(join(home, "instances"))).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("declares the dedicated capability, emits a channel notification, and persists a linked reply", async () => {
     const clientFrames: ClientFrame[] = [];
     const posts: unknown[] = [];
+    const runtimePeerRequests: unknown[] = [];
+    let comparisonUnavailable = false;
+    let presenceUnavailable = false;
     const directed = deliveryFrame(12, "same-session work", {
       id: "delivery-12",
       target_name: "me",
@@ -40,6 +71,49 @@ describe("claude-channel stdio MCP adapter", () => {
         if (url.pathname === "/api/channels/dev/messages" && request.method === "POST") {
           posts.push(await request.json());
           return Response.json({ seq: 99 });
+        }
+        if (url.pathname === "/api/channels/dev/runtime-peers" && request.method === "POST") {
+          runtimePeerRequests.push(await request.clone().json());
+          if (comparisonUnavailable) {
+            return Response.json(
+              { error: { code: "temporarily_unavailable", message: "upstream detail must not leak" } },
+              { status: 503 },
+            );
+          }
+          return Response.json({
+            version: 3,
+            topology_evidence: "client_asserted",
+            comparison: "server_derived",
+            caller_binding: "live_socket",
+            self: "me",
+            peers: [{
+              agent: "reviewer",
+              same_identity: false,
+              relations: [{ relation: "same_worktree", runtime_count: 1 }],
+              claude_sessions: [{
+                display_name: "apcs-review-session-a1b2c3d4e5f6",
+                relation: "same_worktree",
+                runtime_count: 1,
+                candidate_ref: "candidate_1234567890abcdef",
+              }],
+            }],
+          });
+        }
+        if (url.pathname === "/api/channels/dev/presence" && request.method === "GET") {
+          if (presenceUnavailable) {
+            return Response.json(
+              { error: { code: "temporarily_unavailable", message: "presence detail must not leak" } },
+              { status: 503 },
+            );
+          }
+          return Response.json({
+            presence: [
+              { name: "me", kind: "agent", state: "working", note: null, ts: Date.now(), live: true },
+              { name: "reviewer", kind: "agent", state: "working", note: "checking API", ts: Date.now(), live: true },
+              { name: "remote", kind: "agent", state: "working", note: null, ts: Date.now(), live: true },
+              { name: "member", kind: "human", state: "working", note: null, ts: Date.now(), live: true },
+            ],
+          });
         }
         return Response.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
       },
@@ -77,9 +151,17 @@ describe("claude-channel stdio MCP adapter", () => {
       if (value !== undefined && key !== "AGENTPARTY_CONFIG") env[key] = value;
     }
     env.AGENTPARTY_HOME = home;
+    const gateDirectory = join(home, "cross-session-gate");
+    mkdirSync(gateDirectory, { mode: 0o700 });
+    env[CLAUDE_CROSS_SESSION_GATE_DIR_ENV] = gateDirectory;
+    const sessionId = "33333333-3333-4333-8333-333333333333";
+    env.CLAUDE_CODE_SESSION_ID = sessionId;
     const transport = new StdioClientTransport({
       command: "bun",
-      args: ["run", indexPath, "claude-channel", "--channel", "dev"],
+      args: [
+        "run", indexPath, "claude-channel", "--channel", "dev",
+        "--claude-session-name", "apcs-me-session-f1e2d3c4b5a6",
+      ],
       env,
       stderr: "pipe",
     });
@@ -102,10 +184,16 @@ describe("claude-channel stdio MCP adapter", () => {
       expect(client.getInstructions()).toContain("party_channel_claim");
       expect(client.getInstructions()).toContain("party_channel_accept");
       expect(client.getInstructions()).toContain("party_channel_reply");
+      expect(client.getInstructions()).toContain("party_channel_peers");
+      expect(client.getInstructions()).toContain("party_channel_peer_check");
+      expect(client.getInstructions()).toContain("ListAgents");
+      expect(client.getInstructions()).toContain("SendMessage");
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name)).toEqual([
         "party_channel_claim",
         "party_channel_accept",
+        "party_channel_peers",
+        "party_channel_peer_check",
         "party_channel_reply",
       ]);
 
@@ -127,6 +215,168 @@ describe("claude-channel stdio MCP adapter", () => {
         },
       });
       expect(JSON.stringify(channelEvent?.params)).not.toContain("same-session work");
+
+      const unarmedPeers = await client.callTool({
+        name: "party_channel_peers",
+        arguments: {},
+      });
+      expect(JSON.stringify(unarmedPeers.content)).toContain('\\"availability\\":\\"local_gate_unarmed\\"');
+      expect(runtimePeerRequests).toHaveLength(0);
+
+      runClaudeCrossSessionHook({
+        hook_event_name: "SessionStart",
+        session_id: sessionId,
+      }, env);
+
+      const hookEnv = {
+        [CLAUDE_CROSS_SESSION_GATE_DIR_ENV]: gateDirectory,
+        CLAUDE_CODE_SESSION_ID: sessionId,
+      };
+      runClaudeCrossSessionHook({
+        hook_event_name: "PreToolUse",
+        session_id: sessionId,
+        tool_name: "mcp__agentparty-channel__party_channel_peers",
+        tool_use_id: "toolu_mcp_peers",
+        tool_input: {},
+      }, hookEnv);
+      const peers = await client.callTool({
+        name: "party_channel_peers",
+        arguments: {},
+      });
+      expect(peers.isError).not.toBe(true);
+      const peerItems = Array.isArray(peers.content)
+        ? peers.content as Array<{ type?: unknown; text?: unknown }>
+        : [];
+      const peerContent = peerItems
+        .flatMap((item) => item.type === "text" && typeof item.text === "string" ? [item.text] : [])
+        .join("\n");
+      expect(peerContent).toContain('"self":"me"');
+      expect(peerContent).toContain('"availability":"ready"');
+      expect(peerContent).toContain('"topology_evidence":"client_asserted"');
+      expect(peerContent).toContain('"enforcement":"advisory"');
+      expect(peerContent).toContain('"max_utf8_bytes":512');
+      expect(peerContent).toContain('"agent":"reviewer"');
+      expect(peerContent).toContain('"same_identity":false');
+      expect(peerContent).toContain('"coordination":{"risk":"write_collision","urgency":"immediate","action":"negotiate_single_writer"}');
+      expect(peerContent).toContain('"claude_sessions":[{"display_name":"apcs-review-session-a1b2c3d4e5f6","relation":"same_worktree","runtime_count":1,"candidate_ref":"candidate_1234567890abcdef","name_unique_among_hints":true,"pre_send_check_required":true,"coordination":{"risk":"write_collision","urgency":"immediate","action":"negotiate_single_writer"}}]');
+      // The earlier unarmed lookup must not consume the one bounded startup
+      // settling window. Once armed and identified, the first eligible peers
+      // call takes four snapshots (0/100/350/850 ms).
+      expect(runtimePeerRequests).toHaveLength(4);
+      expect(runtimePeerRequests.every((body) => (
+        typeof body === "object" && body !== null &&
+        (body as { purpose?: unknown }).purpose === "claude_cross_session"
+      ))).toBe(true);
+
+      runClaudeCrossSessionHook({
+        hook_event_name: "PostToolBatch",
+        session_id: sessionId,
+        tool_calls: [{
+          tool_name: "mcp__agentparty-channel__party_channel_peers",
+          tool_use_id: "toolu_mcp_peers",
+          tool_response: peerContent,
+        }],
+      }, hookEnv);
+      runClaudeCrossSessionHook({
+        hook_event_name: "PreToolUse",
+        session_id: sessionId,
+        tool_name: "ListAgents",
+        tool_use_id: "toolu_mcp_list",
+        tool_input: {},
+      }, hookEnv);
+      runClaudeCrossSessionHook({
+        hook_event_name: "PostToolBatch",
+        session_id: sessionId,
+        tool_calls: [{
+          tool_name: "ListAgents",
+          tool_use_id: "toolu_mcp_list",
+          tool_response: "apcs-review-session-a1b2c3d4e5f6 [ref-a]",
+        }],
+      }, hookEnv);
+
+      runClaudeCrossSessionHook({
+        hook_event_name: "PreToolUse",
+        session_id: sessionId,
+        tool_name: "mcp__agentparty-channel__party_channel_peer_check",
+        tool_use_id: "toolu_mcp_check",
+        tool_input: {
+          agent: "reviewer",
+          display_name: "apcs-review-session-a1b2c3d4e5f6",
+          candidate_ref: "candidate_1234567890abcdef",
+        },
+      }, hookEnv);
+      const confirmedPeer = await client.callTool({
+        name: "party_channel_peer_check",
+        arguments: {
+          agent: "reviewer",
+          display_name: "apcs-review-session-a1b2c3d4e5f6",
+          candidate_ref: "candidate_1234567890abcdef",
+        },
+      });
+      expect(JSON.stringify(confirmedPeer.content)).toContain('\\\"availability\\\":\\\"confirmed\\\"');
+      expect(JSON.stringify(confirmedPeer.content)).toContain('\\\"send_to\\\":\\\"apcs-review-session-a1b2c3d4e5f6 [ref-a]\\\"');
+      expect(runtimePeerRequests).toHaveLength(5);
+      expect(runtimePeerRequests[4]).toMatchObject({ purpose: "claude_cross_session" });
+
+      runClaudeCrossSessionHook({
+        hook_event_name: "PostToolBatch",
+        session_id: sessionId,
+        tool_calls: [{
+          tool_name: "mcp__agentparty-channel__party_channel_peer_check",
+          tool_use_id: "toolu_mcp_check",
+          tool_response: confirmedPeer.content,
+        }],
+      }, hookEnv);
+
+      runClaudeCrossSessionHook({
+        hook_event_name: "PreToolUse",
+        session_id: sessionId,
+        tool_name: "mcp__agentparty-channel__party_channel_peer_check",
+        tool_use_id: "toolu_mcp_stale_check",
+        tool_input: {
+          agent: "reviewer",
+          display_name: "apcs-review-session-a1b2c3d4e5f6",
+          candidate_ref: "candidate_abcdefghijklmnop",
+        },
+      }, hookEnv);
+      const stalePeer = await client.callTool({
+        name: "party_channel_peer_check",
+        arguments: {
+          agent: "reviewer",
+          display_name: "apcs-review-session-a1b2c3d4e5f6",
+          candidate_ref: "candidate_abcdefghijklmnop",
+        },
+      });
+      expect(JSON.stringify(stalePeer.content)).toContain('\\\"availability\\\":\\\"stale_or_ambiguous\\\"');
+      expect(runtimePeerRequests).toHaveLength(6);
+      expect(peerContent).toContain('"relation":"same_worktree"');
+      expect(peerContent).not.toContain('"agent":"remote"');
+      expect(peerContent).not.toContain('"agent":"member"');
+      expect(peerContent).not.toContain("node_sharednode");
+
+      comparisonUnavailable = true;
+      const unavailablePeers = await client.callTool({
+        name: "party_channel_peers",
+        arguments: {},
+      });
+      expect(unavailablePeers.isError).not.toBe(true);
+      const unavailableContent = JSON.stringify(unavailablePeers.content);
+      expect(unavailableContent).toContain('\\"availability\\":\\"comparison_unavailable\\"');
+      expect(unavailableContent).toContain('\\"peers\\":[]');
+      expect(unavailableContent).not.toContain("upstream detail must not leak");
+      expect(runtimePeerRequests).toHaveLength(7);
+
+      comparisonUnavailable = false;
+      presenceUnavailable = true;
+      const noPresencePeers = await client.callTool({
+        name: "party_channel_peers",
+        arguments: {},
+      });
+      const noPresenceContent = JSON.stringify(noPresencePeers.content);
+      expect(noPresenceContent).toContain('\\"availability\\":\\"presence_unavailable\\"');
+      expect(noPresenceContent).toContain('\\"peers\\":[]');
+      expect(noPresenceContent).not.toContain("presence detail must not leak");
+      expect(runtimePeerRequests).toHaveLength(8);
 
       const unclaimedReply = await client.callTool({
         name: "party_channel_reply",

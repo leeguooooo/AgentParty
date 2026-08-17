@@ -1,6 +1,6 @@
 // ws 客户端：帧异步迭代 + 指数退避重连 + seq 去重 + ack 驱动的游标推进
 import { parseAgentActivity, parseRunnerHealth } from "@agentparty/shared";
-import type { ClientFrame, ServerFrame } from "@agentparty/shared";
+import type { ClientFrame, RuntimeTopology, ServerFrame } from "@agentparty/shared";
 import pkg from "../package.json" with { type: "json" };
 
 class FrameQueue {
@@ -387,6 +387,8 @@ export interface ConnectOptions {
    *   "daemon" → residency=daemon（#688，内嵌 SDK 的第一方常驻 party daemon）
    */
   advertiseWakeKind?: "watch" | "daemon";
+  /** Active, server-scoped runtime coordination identity. Never used for authorization. */
+  runtimeTopology?: RuntimeTopology;
   /** 修订游标：已见过的最大 rev_seq，随 hello.since_rev 上报，服务端据此限定修订重放（issue #33） */
   sinceRev?: number;
   onRevCursor?: (revCursor: number) => void;
@@ -648,6 +650,7 @@ export function connect(
         ...(opts.directedDelivery === "v1" ? { directed_delivery: "v1" as const } : {}),
         ...(opts.deliveryRecovery === "v1" ? { delivery_recovery: "v1" as const } : {}),
         ...(opts.advertiseWakeKind !== undefined ? { wake_kind: opts.advertiseWakeKind } : {}),
+        ...(opts.runtimeTopology === undefined ? {} : { runtime_topology: opts.runtimeTopology }),
       }));
       // External status callbacks may synchronously send an actionable frame on reconnect. Publish
       // OPEN only after hello is on the wire so no callback can overtake the mandatory handshake.

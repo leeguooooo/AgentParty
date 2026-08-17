@@ -35,6 +35,7 @@ import { agentpartyHome, loadCursor, resolveChannel, saveCursor } from "../confi
 import { resolveAuthDetailed } from "../oidc-cli";
 import { postMessage } from "../rest";
 import { isSlug } from "../validation";
+import { buildRuntimeTopology } from "../runtime-topology";
 
 /** 常驻 daemon 的信号退出码，与 serve 对齐（128 + signo）。 */
 export const EXIT_SIGNAL_INT = 128 + 2;
@@ -221,6 +222,7 @@ export async function runDaemon(o: DaemonOptions): Promise<number> {
     // #688 Phase-2.1：一级 daemon 唤醒声明（不再是 watch 捷径）。服务端据此落 wake_kind='daemon'、
     // residency='daemon'（第一方常驻活体），who / PresenceBar 显式标强可唤醒档。断连由 markOffline 撤销。
     advertiseWakeKind: "daemon",
+    runtimeTopology: buildRuntimeTopology(o.server),
   });
 
   let self = "";

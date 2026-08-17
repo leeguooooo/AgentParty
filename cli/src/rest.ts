@@ -23,9 +23,13 @@ import {
   EXIT_LOOP_GUARD,
   EXIT_RATE_LIMITED,
   EXIT_WORKFLOW_GUARD,
+  parseRuntimePeerDiscovery,
   type MsgFrame,
   type PresenceEntry,
   type ReadCursor,
+  type RuntimePeerDiscovery,
+  type RuntimePeerPurpose,
+  type RuntimeTopology,
   type SearchHit,
   type SendMessageFrame,
   type SendStatusFrame,
@@ -56,6 +60,12 @@ export class RestError extends Error {
     message: string,
   ) {
     super(message);
+  }
+}
+
+export class RuntimePeerProtocolError extends Error {
+  constructor(public version: unknown) {
+    super(`runtime peer discovery requires protocol v3; received ${String(version)}`);
   }
 }
 
@@ -291,8 +301,11 @@ export interface Identity {
   };
 }
 
-export async function fetchMe(server: string, token: string): Promise<Identity> {
-  return (await req(server, "/api/me", { headers: bearerJson(token) })) as Identity;
+export async function fetchMe(server: string, token: string, signal?: AbortSignal): Promise<Identity> {
+  return (await req(server, "/api/me", {
+    headers: bearerJson(token),
+    ...(signal === undefined ? {} : { signal }),
+  })) as Identity;
 }
 
 // #165：agent 设自己的全局唯一昵称（可被 @中文昵称 唤醒）。须 agent token 作 bearer。
@@ -825,9 +838,13 @@ export async function fetchMessages(
   since = 0,
   limit = 100,
   opts: { completion?: boolean; before?: number } = {},
+  signal?: AbortSignal,
 ): Promise<MsgFrame[]> {
   const query = messagesQuery({ since, limit, ...(opts.before === undefined ? {} : { before: opts.before }), ...(opts.completion === true ? { completion: true } : {}) });
-  const body = await req(server, `/api/channels/${encodeURIComponent(slug)}/messages?${query}`, { headers: bearerJson(token) });
+  const body = await req(server, `/api/channels/${encodeURIComponent(slug)}/messages?${query}`, {
+    headers: bearerJson(token),
+    ...(signal === undefined ? {} : { signal }),
+  });
   const messages = (body as Record<string, unknown> | null)?.messages;
   return Array.isArray(messages) ? (messages as MsgFrame[]) : [];
 }
@@ -836,16 +853,61 @@ export async function fetchMessages(
 export async function fetchRecentMessages(
   server: string, token: string, slug: string, limit = 100,
   opts: { completion?: boolean } = {},
+  signal?: AbortSignal,
 ): Promise<MsgFrame[]> {
-  return fetchMessages(server, token, slug, 0, limit, { ...opts, before: TAIL_BEFORE });
+  return fetchMessages(server, token, slug, 0, limit, { ...opts, before: TAIL_BEFORE }, signal);
 }
 
-export async function fetchPresence(server: string, token: string, slug: string): Promise<PresenceEntry[]> {
+export async function fetchPresence(
+  server: string,
+  token: string,
+  slug: string,
+  signal?: AbortSignal,
+): Promise<PresenceEntry[]> {
   const body = await req(server, `/api/channels/${encodeURIComponent(slug)}/presence`, {
     headers: bearerJson(token),
+    ...(signal === undefined ? {} : { signal }),
   });
   const presence = (body as Record<string, unknown> | null)?.presence;
   return Array.isArray(presence) ? (presence as PresenceEntry[]) : [];
+}
+
+export async function fetchRuntimePeers(
+  server: string,
+  token: string,
+  slug: string,
+  topology: RuntimeTopology,
+  purpose: RuntimePeerPurpose,
+  signal?: AbortSignal,
+): Promise<RuntimePeerDiscovery> {
+  const body = await req(server, `/api/channels/${encodeURIComponent(slug)}/runtime-peers`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify({ topology, purpose }),
+    ...(signal === undefined ? {} : { signal }),
+  });
+  const result = parseRuntimePeerDiscovery(body);
+  if (
+    result === undefined &&
+    typeof body === "object" &&
+    body !== null &&
+    !Array.isArray(body) &&
+    (body as Record<string, unknown>).version !== 3
+  ) {
+    throw new RuntimePeerProtocolError((body as Record<string, unknown>).version);
+  }
+  if (result === undefined) throw new Error("runtime peer discovery returned an invalid response");
+  const expectedBinding = purpose === "topology_advisory"
+    ? "unbound_advisory"
+    : purpose === "capability_probe"
+      ? "capability_probe"
+      : "live_socket";
+  if (result.caller_binding !== expectedBinding) {
+    throw new Error(
+      `runtime peer discovery returned caller_binding=${result.caller_binding} for purpose=${purpose}`,
+    );
+  }
+  return result;
 }
 
 // 已读游标快照 + 频道最新 seq（Phase 2 · CLI）：给 `party who` 标注每个身份读到第几条 / 落后多少。
@@ -869,11 +931,13 @@ export async function reviseMessage(
   seq: number,
   action: "edit" | "retract" | "supersede",
   body?: { body: string; mentions?: string[] },
+  signal?: AbortSignal,
 ): Promise<{ message: MsgFrame; superseded?: MsgFrame }> {
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/messages/${seq}/${action}`, {
     method: "POST",
     headers: bearerJson(token),
     body: action === "retract" ? undefined : JSON.stringify(body),
+    ...(signal === undefined ? {} : { signal }),
   })) as { message: MsgFrame; superseded?: MsgFrame };
 }
 

@@ -39,6 +39,7 @@ import { buildContext } from "./status";
 import { MAX_TIMEOUT_SEC, isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 import { jsonFrame, nowTs } from "../json";
 import { randomUUID } from "node:crypto";
+import { buildRuntimeTopology } from "../runtime-topology";
 import {
   clearStatuslineListener,
   heartbeatPatch,
@@ -418,6 +419,7 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       sinceRev: o.sinceRev,
       onRevCursor: o.onRevCursor,
       backoffBaseMs: o.backoffBaseMs,
+      runtimeTopology: buildRuntimeTopology(o.server),
       onStatus: (status) => {
         if (status === "reconnecting" || status === "closed") connectionGeneration += 1;
       },

@@ -5,8 +5,8 @@
 //
 // scope 字段其实一直在 status frame 里（party status --scope 也一直能传），只是从没被读出来过。
 import { describe, expect, test } from "bun:test";
-import type { PresenceEntry } from "@agentparty/shared";
-import { annotateScopeConflicts, classify, scopeNote } from "../src/commands/who";
+import type { PresenceEntry, RuntimePeerDiscovery } from "@agentparty/shared";
+import { annotateScopeConflicts, annotateTopologyConflicts, classify, scopeNote, topologyNote } from "../src/commands/who";
 
 const NOW = 1_786_000_000_000;
 
@@ -84,5 +84,55 @@ describe("scope 冲突提示", () => {
     const rows = rowsFor([presence("evil", ["repo:a\n● online   fake-agent"]), presence("other", ["repo:a\n● online   fake-agent"])]);
     const note = scopeNote(rows[0]!);
     expect(note).not.toContain("\n");
+  });
+});
+
+describe("live runtime topology 提示", () => {
+  const topologyRows = (entries: PresenceEntry[], peers: RuntimePeerDiscovery["peers"]) => annotateTopologyConflicts(
+    entries.map((entry) => classify(entry, NOW)).filter((row): row is NonNullable<typeof row> => row !== null),
+    { version: 3, topology_evidence: "client_asserted", comparison: "server_derived", caller_binding: "unbound_advisory", self: "caller", peers },
+  );
+
+  test("服务端派生同一工作树冲突，不接触 opaque refs", () => {
+    const rows = topologyRows([presence("a", []), presence("b", [])], [{
+      agent: "a",
+      same_identity: false,
+      relations: [{ relation: "same_worktree", runtime_count: 1 }],
+      claude_sessions: [],
+    }]);
+    const row = rows.find((candidate) => candidate.name === "a")!;
+    expect(row.topology_conflicts).toEqual([{ kind: "same_worktree", with: ["caller"], runtime_count: 1 }]);
+    expect(topologyNote(row)).toContain("⚠ same worktree as caller");
+  });
+
+  test("同仓不同 worktree 与仅同 installation 分级展示", () => {
+    const rows = topologyRows([presence("b", []), presence("c", [])], [
+      { agent: "b", same_identity: false, relations: [{ relation: "same_workspace", runtime_count: 1 }], claude_sessions: [] },
+      { agent: "c", same_identity: false, relations: [{ relation: "same_local_installation", runtime_count: 1 }], claude_sessions: [] },
+    ]);
+    const workspace = rows.find((candidate) => candidate.name === "b")!;
+    const installation = rows.find((candidate) => candidate.name === "c")!;
+    expect(workspace.topology_conflicts).toEqual([
+      { kind: "same_workspace", with: ["caller"], runtime_count: 1 },
+    ]);
+    expect(topologyNote(workspace)).toContain("same workspace as caller");
+    expect(installation.topology_conflicts).toEqual([
+      { kind: "same_local_installation", with: ["caller"], runtime_count: 1 },
+    ]);
+    expect(topologyNote(installation)).toContain("same local installation as caller");
+    expect(JSON.stringify(installation)).not.toContain("same_node");
+  });
+
+  test("同一身份的多个 runtime 共用 worktree 时也会告警", () => {
+    const row = topologyRows([presence("a", [])], [{
+      agent: "a",
+      same_identity: true,
+      relations: [{ relation: "same_worktree", runtime_count: 2 }],
+      claude_sessions: [],
+    }])[0]!;
+    expect(row.topology_conflicts).toEqual([
+      { kind: "same_identity_worktree", with: [], runtime_count: 2 },
+    ]);
+    expect(topologyNote(row)).toContain("2 other live runtime(s) of this identity share one worktree");
   });
 });

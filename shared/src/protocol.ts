@@ -516,6 +516,261 @@ export interface AgentSessionInfo {
 }
 
 /**
+ * Active runtime topology advertised by a CLI WebSocket connection.
+ *
+ * Every ref is opaque and scoped to one AgentParty server. `node_ref` identifies a
+ * local AgentParty installation, not a physical host and never an authorization
+ * principal. The server validates shape and connection liveness, but cannot
+ * verify the local derivation, so `evidence` is explicitly client-asserted.
+ * Matching refs are coordination hints only: callers may warn, but must not
+ * authorize, assign, route, or advance delivery state from them.
+ */
+export interface RuntimeTopology {
+  version: 1;
+  node_ref: string;
+  runtime_ref: string;
+  workspace_ref: string;
+  worktree_ref: string;
+  peer_scope: "local_installation";
+  evidence: "client_asserted";
+  /** Optional safe display hint for a live harness session on this runtime. */
+  harness_session?: {
+    harness: "claude";
+    display_name: string;
+  };
+}
+
+export type RuntimeTopologyRelation =
+  | "same_worktree"
+  | "same_workspace"
+  | "same_local_installation";
+
+export type RuntimePeerPurpose =
+  | "topology_advisory"
+  | "capability_probe"
+  | "claude_cross_session";
+
+export type RuntimePeerCallerBinding =
+  | "unbound_advisory"
+  | "capability_probe"
+  | "live_socket";
+
+/**
+ * A server-derived comparison against currently-live, client-asserted
+ * topologies. Raw refs never leave the comparison boundary.
+ */
+export interface RuntimePeerProjection {
+  agent: string;
+  same_identity: boolean;
+  relations: Array<{
+    relation: RuntimeTopologyRelation;
+    runtime_count: number;
+  }>;
+  claude_sessions: Array<{
+    display_name: string;
+    relation: RuntimeTopologyRelation;
+    runtime_count: number;
+    /**
+     * Random handle for exactly one currently-live topology snapshot, or null
+     * when the reported session is not uniquely addressable (including
+     * duplicate sockets for one runtime). It is regenerated when that socket
+     * publishes topology again and disappears when the socket stops being
+     * comparable. Coordination only: never an authentication, authorization,
+     * or delivery handle.
+     */
+    candidate_ref: string | null;
+  }>;
+}
+
+export interface RuntimePeerDiscovery {
+  version: 3;
+  topology_evidence: "client_asserted";
+  comparison: "server_derived";
+  caller_binding: RuntimePeerCallerBinding;
+  self: string;
+  peers: RuntimePeerProjection[];
+}
+
+const RUNTIME_TOPOLOGY_RELATIONS = new Set<RuntimeTopologyRelation>([
+  "same_worktree",
+  "same_workspace",
+  "same_local_installation",
+]);
+const RUNTIME_CANDIDATE_REF_RE = /^candidate_[A-Za-z0-9_-]{16,64}$/;
+
+function parseRuntimeCount(input: unknown): number | null {
+  return typeof input === "number" && Number.isInteger(input) && input >= 1 && input <= 65_535
+    ? input
+    : null;
+}
+
+export function parseRuntimePeerDiscovery(input: unknown): RuntimePeerDiscovery | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
+  const value = input as Record<string, unknown>;
+  if (
+    value.version !== 3 ||
+    value.topology_evidence !== "client_asserted" ||
+    value.comparison !== "server_derived" ||
+    !(
+      value.caller_binding === "unbound_advisory" ||
+      value.caller_binding === "capability_probe" ||
+      value.caller_binding === "live_socket"
+    ) ||
+    typeof value.self !== "string" ||
+    !TOPOLOGY_SESSION_NAME_RE.test(value.self) ||
+    !Array.isArray(value.peers) ||
+    value.peers.length > 64
+  ) return undefined;
+  const peers: RuntimePeerProjection[] = [];
+  const peerNames = new Set<string>();
+  const candidateRefs = new Set<string>();
+  for (const item of value.peers) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return undefined;
+    const peer = item as Record<string, unknown>;
+    if (
+      typeof peer.agent !== "string" ||
+      !TOPOLOGY_SESSION_NAME_RE.test(peer.agent) ||
+      typeof peer.same_identity !== "boolean" ||
+      peer.same_identity !== (peer.agent === value.self) ||
+      peerNames.has(peer.agent) ||
+      !Array.isArray(peer.relations) ||
+      peer.relations.length < 1 ||
+      peer.relations.length > 3 ||
+      !Array.isArray(peer.claude_sessions) ||
+      peer.claude_sessions.length > 16
+    ) return undefined;
+    if (value.caller_binding !== "live_socket" && peer.claude_sessions.length !== 0) return undefined;
+    peerNames.add(peer.agent);
+    const relations: RuntimePeerProjection["relations"] = [];
+    const relationCounts = new Map<RuntimeTopologyRelation, number>();
+    for (const item of peer.relations) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) return undefined;
+      const relation = item as Record<string, unknown>;
+      const runtimeCount = parseRuntimeCount(relation.runtime_count);
+      const relationName = relation.relation as RuntimeTopologyRelation;
+      if (
+        !RUNTIME_TOPOLOGY_RELATIONS.has(relationName) ||
+        runtimeCount === null ||
+        relationCounts.has(relationName)
+      ) {
+        return undefined;
+      }
+      relationCounts.set(relationName, runtimeCount);
+      relations.push({ relation: relationName, runtime_count: runtimeCount });
+    }
+    const claudeSessions: RuntimePeerProjection["claude_sessions"] = [];
+    const sessionKeys = new Set<string>();
+    const sessionRelationCounts = new Map<RuntimeTopologyRelation, number>();
+    for (const item of peer.claude_sessions) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) return undefined;
+      const session = item as Record<string, unknown>;
+      const runtimeCount = parseRuntimeCount(session.runtime_count);
+      const relationName = session.relation as RuntimeTopologyRelation;
+      const relationCount = relationCounts.get(relationName);
+      const candidateRef = session.candidate_ref;
+      if (
+        typeof session.display_name !== "string" ||
+        !CLAUDE_SESSION_NAME_RE.test(session.display_name) ||
+        !RUNTIME_TOPOLOGY_RELATIONS.has(relationName) ||
+        runtimeCount === null ||
+        relationCount === undefined ||
+        runtimeCount > relationCount ||
+        !(
+          (typeof candidateRef === "string" &&
+            RUNTIME_CANDIDATE_REF_RE.test(candidateRef) &&
+            runtimeCount === 1 &&
+            !candidateRefs.has(candidateRef)) ||
+          candidateRef === null
+        ) ||
+        sessionKeys.has(`${session.display_name}\0${relationName}`)
+      ) return undefined;
+      const sessionKey = `${session.display_name}\0${relationName}`;
+      sessionKeys.add(sessionKey);
+      const nextSessionCount = (sessionRelationCounts.get(relationName) ?? 0) + runtimeCount;
+      if (nextSessionCount > relationCount) return undefined;
+      sessionRelationCounts.set(relationName, nextSessionCount);
+      if (typeof candidateRef === "string") candidateRefs.add(candidateRef);
+      claudeSessions.push({
+        display_name: session.display_name,
+        relation: relationName,
+        runtime_count: runtimeCount,
+        candidate_ref: candidateRef as string | null,
+      });
+    }
+    peers.push({
+      agent: peer.agent,
+      same_identity: peer.same_identity,
+      relations,
+      claude_sessions: claudeSessions,
+    });
+  }
+  if (value.caller_binding === "capability_probe" && peers.length !== 0) return undefined;
+  return {
+    version: 3,
+    topology_evidence: "client_asserted",
+    comparison: "server_derived",
+    caller_binding: value.caller_binding,
+    self: value.self,
+    peers,
+  };
+}
+
+const TOPOLOGY_REF_RE = /^(?:node|runtime|workspace|worktree)_[A-Za-z0-9_-]{8,64}$/;
+const TOPOLOGY_SESSION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const CLAUDE_SESSION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+export function parseRuntimeTopology(input: unknown): RuntimeTopology | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
+  const value = input as Record<string, unknown>;
+  if (
+    value.version !== 1 ||
+    value.peer_scope !== "local_installation" ||
+    value.evidence !== "client_asserted" ||
+    typeof value.node_ref !== "string" ||
+    typeof value.runtime_ref !== "string" ||
+    typeof value.workspace_ref !== "string" ||
+    typeof value.worktree_ref !== "string" ||
+    !TOPOLOGY_REF_RE.test(value.node_ref) ||
+    !TOPOLOGY_REF_RE.test(value.runtime_ref) ||
+    !TOPOLOGY_REF_RE.test(value.workspace_ref) ||
+    !TOPOLOGY_REF_RE.test(value.worktree_ref) ||
+    !value.node_ref.startsWith("node_") ||
+    !value.runtime_ref.startsWith("runtime_") ||
+    !value.workspace_ref.startsWith("workspace_") ||
+    !value.worktree_ref.startsWith("worktree_") ||
+    (value.harness_session !== undefined && (
+      typeof value.harness_session !== "object" ||
+      value.harness_session === null ||
+      Array.isArray(value.harness_session) ||
+      (value.harness_session as Record<string, unknown>).harness !== "claude" ||
+      typeof (value.harness_session as Record<string, unknown>).display_name !== "string" ||
+      !CLAUDE_SESSION_NAME_RE.test(
+        (value.harness_session as Record<string, unknown>).display_name as string,
+      )
+    ))
+  ) {
+    return undefined;
+  }
+  return {
+    version: 1,
+    node_ref: value.node_ref,
+    runtime_ref: value.runtime_ref,
+    workspace_ref: value.workspace_ref,
+    worktree_ref: value.worktree_ref,
+    peer_scope: "local_installation",
+    evidence: "client_asserted",
+    ...(value.harness_session === undefined
+      ? {}
+      : {
+          harness_session: {
+            harness: "claude" as const,
+            display_name: (value.harness_session as Record<string, unknown>).display_name as string,
+          },
+        }),
+  };
+}
+
+/**
  * Structured origin for a message posted by a resident reception runner.
  * This makes a runner-generated reply distinguishable from the owner's interactive agent turn.
  */
@@ -902,6 +1157,8 @@ export interface HelloFrame {
    * 其余值服务端忽略。两者断连都由 markOffline 撤销（活体死了就不该继续以 wakeable 身份吸收 @）。
    */
   wake_kind?: "watch" | "daemon";
+  /** Privacy-preserving, server-scoped coordination identity for this live runtime. */
+  runtime_topology?: RuntimeTopology;
 }
 
 /**

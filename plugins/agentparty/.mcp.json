@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agentparty": {
+      "command": "./bin/agentparty-runtime",
+      "cwd": ".",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

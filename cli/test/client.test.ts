@@ -311,9 +311,27 @@ describe("ws client", () => {
       sock.send(msgFrame(6, "edited", { edited: true, edited_at: 111, edited_by: "bob", rev_seq: 5 }));
     });
     const revs: number[] = [];
-    conn = connect(server.url, "ap_tok", "dev", 6, { sinceRev: 2, onRevCursor: (r) => revs.push(r) });
+    const runtimeTopology = {
+      version: 1 as const,
+      node_ref: "node_aaaaaaaa",
+      runtime_ref: "runtime_bbbbbbbb",
+      workspace_ref: "workspace_cccccccc",
+      worktree_ref: "worktree_dddddddd",
+      peer_scope: "local_installation" as const,
+      evidence: "client_asserted" as const,
+    };
+    conn = connect(server.url, "ap_tok", "dev", 6, {
+      sinceRev: 2,
+      runtimeTopology,
+      onRevCursor: (r) => revs.push(r),
+    });
     await collect(conn, 2, 800, false);
-    expect(hellos[0]).toMatchObject({ since: 6, since_rev: 2, client_version: pkg.version });
+    expect(hellos[0]).toMatchObject({
+      since: 6,
+      since_rev: 2,
+      client_version: pkg.version,
+      runtime_topology: runtimeTopology,
+    });
     expect(revs).toEqual([5]);
     expect(conn.revCursor).toBe(5);
   });

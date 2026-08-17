@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agentparty-channel-probe": {
+      "command": "/bin/echo",
+      "args": ["probe"]
+    }
+  }
+}

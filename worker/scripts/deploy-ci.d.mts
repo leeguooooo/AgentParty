@@ -22,3 +22,15 @@ export function buildDeployPlan(
   metadata: DeploymentMetadata,
   launcher?: string[],
 ): DeployStep[];
+
+export function buildPostDeploySmokePlan(
+  targetName: string,
+  smokeBase: string,
+  env?: Record<string, string | undefined>,
+): DeployStep[];
+
+export function buildPreDeploySmokePlan(
+  targetName: string,
+  smokeBase: string,
+  env?: Record<string, string | undefined>,
+): DeployStep[];

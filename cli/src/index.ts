@@ -29,7 +29,10 @@ commands:
   watch     [channel|--channel C] [--timeout N] [--mentions-only] [--follow] [--json]
   ack       [--channel C] [--seq N]                acknowledge a watch wake that needs no reply (#594)
   serve     [channel|--channel C] (--on-mention "<cmd>" | --runner codex|claude|codex-sdk) [--all] | --profile owner/handle
-  bridge    claude|codex [channel|--channel C] [-- <args...>] attach AgentParty to the current interactive harness session
+  bridge    claude [channel|--channel C] [--cross-session auto|off|required] [--cross-session-inbound accept|hold|refuse] [--check [--json]] | claude --verify --channel C --receiver-config PATH --sender-config PATH [--receiver-cwd DIR] [--sender-cwd DIR] [--preflight-only] | codex [channel|--channel C] [-- <args...>]
+                                                     attach AgentParty to the current interactive harness session
+  claude    [channel] [-- <claude args...>] | --verify --channel C --receiver-config PATH --sender-config PATH [--receiver-cwd DIR] (--preflight-only|--live)
+                                                     start or verify a busy Marketplace durable Channel session
   daemon    [channel|--channel C] [--timeout N]        EXPERIMENTAL (#672 spike): resident runner embedding the Claude Agent SDK; @-mention → in-process SDK session → reply
   mcp                                                structured control plane (not an idle wake provider)
   lark      notify on|off|status [--channel C]       send channel @mentions to your Lark/Feishu account
@@ -44,7 +47,8 @@ commands:
   resume    <name> [--channel C]                           resume a paused agent's reception (moderator)
   wake-budget <name> [--limit N [--window D]|--off]        cap an agent's wakes per window; over-budget @ withheld (#108)
   health    [--json] [--channel C] [--stale-after ms]      local serve WS health probe (pid alive != ws alive, #254)
-  hook      install|uninstall|status [--user] | report      Claude Code hooks: report model activity into presence; install makes any session visible without serve (#602/#615)
+  doctor    [claude-plugin [--channel C] [--json]]          version check or no-model Marketplace/Channel/listener audit
+  hook      install|uninstall|status [--user] | report      manage legacy Hook settings; presence uplink remains launcher/serve-scoped (#602/#615)
   upgrade   [--version X.Y.Z] [--check]                    download release binary, verify sha256, atomically replace party
   charter   [slug] [--json] | set [slug] -f file.md|-m text|- | template
   history   [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]
@@ -111,12 +115,23 @@ export async function main(argv: string[]): Promise<number> {
     case "serve":
       return (await import("./commands/serve")).run(rest);
     case "bridge":
+      if (rest[0] === "claude" && rest[1] === "--verify") {
+        return (await import("./commands/claude-cross-session-verify")).run(rest.slice(2));
+      }
       return (await import("./commands/bridge")).run(rest);
-    // Internal stdio subprocess spawned by `party bridge claude`. It remains
-    // hidden from top-level help so users enter through the version/capability
-    // preflight and interactive launcher.
+    case "claude":
+      if (rest[0] === "--verify") {
+        return (await import("./commands/claude-channel-verify")).run(rest.slice(1));
+      }
+      return (await import("./commands/claude-launch")).run(rest);
+    // Internal stdio subprocess spawned by the Marketplace plugin or
+    // `party bridge claude`. It remains hidden from top-level help so users
+    // enter through one of the two explicit launchers.
     case "claude-channel":
       return (await import("./commands/claude-channel")).run(rest);
+    // Hidden command hook installed only for `party bridge claude` launches.
+    case "claude-cross-session-hook":
+      return (await import("./commands/claude-cross-session-hook")).run(rest);
     case "daemon":
       return (await import("./commands/daemon")).run(rest);
     case "mcp":

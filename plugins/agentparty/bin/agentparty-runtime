@@ -1,0 +1,36 @@
+#!/usr/bin/env sh
+set -eu
+
+fail() {
+  printf '%s\n' "AgentParty plugin: $*" >&2
+  exit 127
+}
+
+if [ -n "${AGENTPARTY_RUNTIME_BIN:-}" ]; then
+  case "$AGENTPARTY_RUNTIME_BIN" in
+    /*) : ;;
+    *) fail "AGENTPARTY_RUNTIME_BIN must be an absolute path" ;;
+  esac
+  [ -x "$AGENTPARTY_RUNTIME_BIN" ] \
+    || fail "AGENTPARTY_RUNTIME_BIN is not executable: $AGENTPARTY_RUNTIME_BIN"
+  exec "$AGENTPARTY_RUNTIME_BIN" "$@"
+fi
+
+path_party="$(command -v party 2>/dev/null || true)"
+if [ -n "$path_party" ] && [ -x "$path_party" ]; then
+  exec "$path_party" "$@"
+fi
+
+for candidate in \
+  "${HOME:-}/.local/bin/party" \
+  "/opt/homebrew/bin/party" \
+  "/usr/local/bin/party" \
+  "/Applications/AgentParty.app/Contents/MacOS/party"
+do
+  [ "$candidate" != "/.local/bin/party" ] || continue
+  if [ -x "$candidate" ]; then
+    exec "$candidate" "$@"
+  fi
+done
+
+fail "party runtime not found. Install it with: curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh ; then run /reload-plugins or start a new Claude session"

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { lockedPoolRuntimeVersion } from "./verify-test-runtime-lib.mjs";
 
 const require = createRequire(import.meta.url);
 const wranglerConfig = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
@@ -9,11 +10,9 @@ let workerdVersion = "unknown";
 let source = "package";
 try {
   const lock = readFileSync(new URL("../../bun.lock", import.meta.url), "utf8");
-  const poolEntry = lock.match(
-    /"@cloudflare\/vitest-pool-workers": \[[\s\S]*?"miniflare": "4\.(\d{8})\.\d+"/,
-  );
-  if (poolEntry?.[1]) {
-    workerdVersion = `miniflare@4.${poolEntry[1]}.0`;
+  const poolRuntime = lockedPoolRuntimeVersion(lock);
+  if (poolRuntime !== null) {
+    workerdVersion = poolRuntime.version;
     source = "bun.lock:@cloudflare/vitest-pool-workers";
   } else {
     const pkgPath = require.resolve("workerd/package.json");
@@ -41,7 +40,7 @@ console.log(
     source,
     note:
       status === "warning"
-        ? "local Worker tests run on an older runtime than wrangler.jsonc; migrate to the Vitest 4 Cloudflare pool for parity"
+        ? "local Worker tests run on an older runtime than wrangler.jsonc; update the Cloudflare Vitest pool for parity"
         : undefined,
   }),
 );

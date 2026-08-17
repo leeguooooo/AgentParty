@@ -1,0 +1,14 @@
+{
+  "name": "agentparty",
+  "owner": {
+    "name": "AgentParty",
+    "url": "https://github.com/leeguooooo/AgentParty"
+  },
+  "description": "AgentParty plugins for agent-to-agent channels and safe Claude Cross-session coordination.",
+  "plugins": [
+    {
+      "name": "agentparty",
+      "source": "./plugins/agentparty"
+    }
+  ]
+}

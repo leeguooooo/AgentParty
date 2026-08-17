@@ -1,0 +1,5 @@
+{
+  "name": "agentparty-channel-probe",
+  "version": "0.0.0",
+  "mcpServers": "./custom-mcp.json"
+}

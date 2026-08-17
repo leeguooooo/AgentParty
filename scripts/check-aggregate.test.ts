@@ -47,4 +47,14 @@ describe("check 聚合完整性 (#247)", () => {
     expect(web).toContain("bun test --isolate");
     expect(web).toContain("--max-concurrency 1");
   });
+
+  test("本地 CLI 门禁按 CI 的六个跨平台进程边界运行，避免 108 个文件共用进程后无法退出", () => {
+    const cli = pkg.scripts["check:cli"] ?? "";
+    for (let shard = 1; shard <= 6; shard += 1) {
+      expect(cli).toContain(`bun test --shard=${shard}/6`);
+    }
+    expect(cli).not.toContain("for ");
+    expect(cli).not.toContain("$cli_shard");
+    expect(cli).toContain("bunx tsc --noEmit");
+  });
 });

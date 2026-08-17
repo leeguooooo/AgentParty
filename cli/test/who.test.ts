@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { PresenceEntry } from "@agentparty/shared";
 import {
+  activityNote,
   busyNote,
   classify,
   identityNote,
@@ -415,6 +416,27 @@ describe("who busy + queue depth (#103)", () => {
     // 离线 presence 服务端本就不下发这些字段；即便脏数据混进来，classify 也不该把它当成「正在处理」。
     const offline = classify(p({ name: "bot", state: "offline", wake: { kind: "serve" } }), NOW);
     expect(offline?.current_task).toBeUndefined();
+  });
+
+  test("party claude 的交互 activity 不依赖 current_task，离线残值不展示（#615）", () => {
+    const interactive = classify(
+      p({ name: "claude", live: true, activity: { phase: "tool", tool: "Bash", ts: NOW - 2_000 } }),
+      NOW,
+    );
+    expect(interactive?.current_task).toBeUndefined();
+    expect(interactive?.activity).toEqual({ phase: "tool", tool: "Bash", ts: NOW - 2_000 });
+    expect(activityNote(interactive!, NOW)).toBe(" · ⚙ Bash (2s)");
+
+    const offline = classify(
+      p({
+        name: "claude-offline",
+        state: "offline",
+        wake: { kind: "serve" },
+        activity: { phase: "working", ts: NOW - 2_000 },
+      }),
+      NOW,
+    );
+    expect(offline?.activity).toBeUndefined();
   });
 });
 

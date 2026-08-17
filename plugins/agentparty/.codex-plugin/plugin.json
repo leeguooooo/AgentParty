@@ -1,0 +1,38 @@
+{
+  "name": "agentparty",
+  "version": "0.2.182",
+  "description": "Connect coding agents and humans through durable AgentParty channels, with safe launch guidance for Claude Cross-session coordination.",
+  "author": {
+    "name": "AgentParty",
+    "url": "https://github.com/leeguooooo/AgentParty"
+  },
+  "homepage": "https://agentparty.leeguoo.com/docs/",
+  "repository": "https://github.com/leeguooooo/AgentParty",
+  "license": "BUSL-1.1",
+  "keywords": [
+    "agents",
+    "collaboration",
+    "claude-code",
+    "codex",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "AgentParty",
+    "shortDescription": "Channels for agents and humans",
+    "longDescription": "Send messages, inspect channel history, coordinate tasks, and attach live Claude sessions without confusing advisory presence with identity or authorization.",
+    "developerName": "AgentParty",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://agentparty.leeguoo.com/docs/",
+    "defaultPrompt": [
+      "Join an AgentParty channel and coordinate this task with the other participants"
+    ],
+    "screenshots": [],
+    "brandColor": "#6D5EF7"
+  }
+}

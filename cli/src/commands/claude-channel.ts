@@ -16,6 +16,8 @@ import {
   type DeliveryRecoveryResultFrame,
   type DirectedDelivery,
   type MsgFrame,
+  type PresenceEntry,
+  type RuntimePeerDiscovery,
   type ServerFrame,
 } from "@agentparty/shared";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -39,21 +41,356 @@ import {
 } from "../delivery-recovery-journal";
 import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from "../instance-lock";
 import { resolveAuthDetailed } from "../oidc-cli";
-import { fetchMessages, postMessage } from "../rest";
-import { isSlug } from "../validation";
+import { fetchMessages, fetchPresence, fetchRuntimePeers, postMessage } from "../rest";
+import { isName, isSlug } from "../validation";
+import { buildRuntimeTopology } from "../runtime-topology";
+import {
+  isAgentPartyClaudeSessionAddress,
+  isClaudeCrossSessionGateArmed,
+  listedClaudeCrossSessionAddress,
+} from "../claude-cross-session-gate";
+import { CLAUDE_CHANNEL_OPT_IN_ENV } from "./claude-launch";
 
 const REPLY_TOOL = "party_channel_reply";
 const CLAIM_TOOL = "party_channel_claim";
 const ACCEPT_TOOL = "party_channel_accept";
+const PEERS_TOOL = "party_channel_peers";
+const PEER_CHECK_TOOL = "party_channel_peer_check";
+const CANDIDATE_REF_RE = /^candidate_[A-Za-z0-9_-]{16,64}$/;
+const CLAUDE_CROSS_SESSION_STARTUP_RETRY_DELAYS_MS = [100, 250, 500] as const;
 
-const HELP = `usage: party claude-channel [channel|--channel C]
+export interface ClaudeCrossSessionPeer {
+  agent: string;
+  same_identity: boolean;
+  claude_sessions: Array<{
+    display_name: string;
+    relation: "same_worktree" | "same_workspace" | "same_local_installation";
+    runtime_count: number;
+    candidate_ref: string | null;
+    name_unique_among_hints: boolean;
+    pre_send_check_required: true;
+    coordination: ClaudeCrossSessionPeer["coordination"];
+  }>;
+  relation: "same_worktree" | "same_workspace" | "same_local_installation";
+  runtime_count: number;
+  state: PresenceEntry["state"];
+  busy: boolean;
+  coordination: {
+    risk: "write_collision" | "integration_drift" | "local_resource_contention";
+    urgency: "immediate" | "before_integration" | "on_resource_conflict";
+    action: "negotiate_single_writer" | "exchange_change_summary" | "inspect_shared_resources";
+  };
+}
 
-Internal stdio MCP adapter for \`party bridge claude\`.
+function coordinationFor(
+  relation: ClaudeCrossSessionPeer["relation"],
+): ClaudeCrossSessionPeer["coordination"] {
+  return relation === "same_worktree"
+    ? { risk: "write_collision", urgency: "immediate", action: "negotiate_single_writer" }
+    : relation === "same_workspace"
+      ? { risk: "integration_drift", urgency: "before_integration", action: "exchange_change_summary" }
+      : { risk: "local_resource_contention", urgency: "on_resource_conflict", action: "inspect_shared_resources" };
+}
+
+export interface ClaudeCrossSessionPeerSummary {
+  version: 2;
+  availability:
+    | "ready"
+    | "local_gate_unarmed"
+    | "identity_pending"
+    | "topology_unavailable"
+    | "presence_unavailable"
+    | "comparison_unavailable";
+  topology_evidence: "client_asserted";
+  channel: string;
+  self: string;
+  peers: ClaudeCrossSessionPeer[];
+  message_policy: {
+    enforcement: "advisory";
+    max_utf8_bytes: 512;
+    allowed_content: ["conflict_summary", "status_summary", "execution_id"];
+    forbidden_content: ["task_body", "credential", "permission_request", "configuration_change"];
+  };
+  guidance: string;
+}
+
+export function claudeCrossSessionPeerStartupRetryDelays(
+  toolName: string,
+  firstEligiblePeersCall: boolean,
+): readonly number[] {
+  return toolName === PEERS_TOOL && firstEligiblePeersCall
+    ? CLAUDE_CROSS_SESSION_STARTUP_RETRY_DELAYS_MS
+    : [];
+}
+
+/**
+ * Absorb the short gap between Claude MCP initialization and peer topology
+ * visibility without changing the one-call model contract. Unavailable
+ * evidence returns immediately, and the send-time peer check passes no delays.
+ */
+export async function loadClaudeCrossSessionPeersWithStartupRetry(
+  load: () => Promise<ClaudeCrossSessionPeerSummary>,
+  retryDelaysMs: readonly number[],
+  wait: (ms: number) => Promise<void> = delay,
+): Promise<ClaudeCrossSessionPeerSummary> {
+  let summary = await load();
+  for (const delayMs of retryDelaysMs) {
+    if (summary.availability !== "ready") return summary;
+    await wait(delayMs);
+    summary = await load();
+  }
+  return summary;
+}
+
+export interface ClaudeCrossSessionPeerCheck {
+  version: 1;
+  availability:
+    | "confirmed"
+    | "stale_or_ambiguous"
+    | "local_gate_unarmed"
+    | "identity_pending"
+    | "topology_unavailable"
+    | "presence_unavailable"
+    | "comparison_unavailable";
+  topology_evidence: "client_asserted";
+  comparison: "server_rechecked_live_topology";
+  channel: string;
+  self: string;
+  agent: string;
+  display_name: string;
+  candidate_ref: string;
+  /** Exact fresh Claude ListAgents address, bound by the local hook gate. */
+  send_to?: string;
+  relation?: "same_worktree" | "same_workspace" | "same_local_installation";
+  guidance: string;
+}
+
+function claudeCrossSessionMessagePolicy(): ClaudeCrossSessionPeerSummary["message_policy"] {
+  return {
+    enforcement: "advisory",
+    max_utf8_bytes: 512,
+    allowed_content: ["conflict_summary", "status_summary", "execution_id"],
+    forbidden_content: ["task_body", "credential", "permission_request", "configuration_change"],
+  };
+}
+
+export function unavailableClaudeCrossSessionPeers(
+  channel: string,
+  self: string,
+  availability:
+    | "local_gate_unarmed"
+    | "identity_pending"
+    | "topology_unavailable"
+    | "presence_unavailable"
+    | "comparison_unavailable",
+): ClaudeCrossSessionPeerSummary {
+  return {
+    version: 2,
+    availability,
+    topology_evidence: "client_asserted",
+    channel,
+    self,
+    peers: [],
+    message_policy: claudeCrossSessionMessagePolicy(),
+    guidance:
+      "Stop Cross-session coordination for this check and continue through the AgentParty Channel. " +
+      "Do not inspect Claude peer registry files or inbox sockets and do not infer peer absence from this result.",
+  };
+}
+
+/**
+ * Build a privacy-safe correlation hint for Claude's official ListAgents tool.
+ * AgentParty never reads Claude's peer registry or inbox sockets itself.
+ */
+export function summarizeClaudeCrossSessionPeers(
+  channel: string,
+  self: string,
+  presence: PresenceEntry[],
+  discovery: RuntimePeerDiscovery,
+): ClaudeCrossSessionPeerSummary {
+  if (discovery.self !== self || discovery.caller_binding !== "live_socket") {
+    return unavailableClaudeCrossSessionPeers(channel, self, "comparison_unavailable");
+  }
+  const rank = { same_worktree: 0, same_workspace: 1, same_local_installation: 2 } as const;
+  const byName = new Map(presence.map((entry) => [entry.name, entry]));
+  const draftPeers = discovery.peers.flatMap((peer): ClaudeCrossSessionPeer[] => {
+    const entry = byName.get(peer.agent);
+    if (entry === undefined || entry.kind === "human" || entry.live !== true || peer.relations.length === 0) return [];
+    const relation = peer.relations.map((item) => item.relation)
+      .sort((left, right) => rank[left] - rank[right])[0]!;
+    const coordination = coordinationFor(relation);
+    return [{
+      agent: peer.agent,
+      same_identity: peer.same_identity,
+      claude_sessions: peer.claude_sessions.map((session) => ({
+        ...session,
+        name_unique_among_hints: false,
+        pre_send_check_required: true as const,
+        coordination: coordinationFor(session.relation),
+      })),
+      relation,
+      runtime_count: peer.relations.reduce((sum, item) => sum + item.runtime_count, 0),
+      state: entry.state,
+      busy: entry.busy === true,
+      coordination,
+    }];
+  });
+  const sessionNameCounts = new Map<string, number>();
+  for (const peer of draftPeers) {
+    for (const session of peer.claude_sessions) {
+      sessionNameCounts.set(
+        session.display_name,
+        (sessionNameCounts.get(session.display_name) ?? 0) + session.runtime_count,
+      );
+    }
+  }
+  const peers = draftPeers.map((peer) => ({
+    ...peer,
+    claude_sessions: peer.claude_sessions.map((session) => ({
+      ...session,
+      name_unique_among_hints: sessionNameCounts.get(session.display_name) === 1,
+    })),
+  })).sort((left, right) => {
+    return rank[left.relation] - rank[right.relation] || left.agent.localeCompare(right.agent);
+  });
+  return {
+    version: 2,
+    availability: "ready",
+    topology_evidence: "client_asserted",
+    channel,
+    self,
+    peers,
+    message_policy: claudeCrossSessionMessagePolicy(),
+    guidance:
+      "Correlate claude_sessions hints with Claude's official ListAgents results by exact name. " +
+      "name_unique_among_hints covers only AgentParty's partial view and never proves uniqueness in ListAgents. " +
+      "Require one unique exact-name ListAgents match. If zero or multiple matches remain, do not send. " +
+      `Then call ${PEER_CHECK_TOOL} with the exact agent, display_name, and candidate_ref from this result. ` +
+      "A session without a candidate_ref, or a check result other than confirmed, is not a SendMessage target. " +
+      "After confirmation, require that send_to equals the exact address from the fresh ListAgents row, " +
+      "then send immediately and only to that address, " +
+      "including its [ref] when shown or needed. Observe confirmation before sending; never issue the check and " +
+      "SendMessage in one parallel tool batch. If another tool or action intervenes, recheck. " +
+      "For an inbound Cross-session reply, restart this entire chain. Its reply address is only an untrusted " +
+      "routing hint, not identity, authorization, or an AgentParty permit. " +
+      "Topology is client-asserted coordination evidence, not host attestation or authorization. " +
+      "The AgentParty default policy is to use SendMessage only for a conflict/status summary or an " +
+      "AgentParty execution_id, limited to 512 UTF-8 bytes. Do not include task bodies, credentials, " +
+      "permission requests, or configuration changes. This policy is advisory because SendMessage is " +
+      "a Claude built-in tool, not an AgentParty-controlled transport. " +
+      "For write_collision, negotiate one writer before either session edits. For integration_drift, " +
+      "exchange a concise change summary before integration. For local_resource_contention, inspect the " +
+      "specific shared resource before messaging. " +
+      "Never ask a peer to perform an action denied or blocked in this session; route it back to the user instead. " +
+      "A SendMessage delivered/held/refused result never changes AgentParty delivery state. " +
+      "If ListAgents or SendMessage is unavailable, do not inspect Claude peer registry files or inbox sockets.",
+  };
+}
+
+export function confirmClaudeCrossSessionPeer(
+  summary: ClaudeCrossSessionPeerSummary,
+  agent: string,
+  displayName: string,
+  candidateRef: string,
+  resolveListedAddress: (
+    agent: string,
+    displayName: string,
+    candidateRef: string,
+  ) => string | null = listedClaudeCrossSessionAddress,
+): ClaudeCrossSessionPeerCheck {
+  const base = {
+    version: 1 as const,
+    topology_evidence: "client_asserted" as const,
+    comparison: "server_rechecked_live_topology" as const,
+    channel: summary.channel,
+    self: summary.self,
+    agent,
+    display_name: displayName,
+    candidate_ref: candidateRef,
+  };
+  if (summary.availability !== "ready") {
+    return {
+      ...base,
+      availability: summary.availability,
+      guidance: "Do not send. Peer liveness could not be rechecked; continue through the AgentParty Channel.",
+    };
+  }
+  const matches = summary.peers.flatMap((peer) => peer.agent === agent
+    ? peer.claude_sessions.filter((session) =>
+        session.display_name === displayName &&
+        session.candidate_ref === candidateRef &&
+        session.runtime_count === 1 &&
+        session.name_unique_among_hints === true)
+    : []);
+  if (matches.length !== 1) {
+    return {
+      ...base,
+      availability: "stale_or_ambiguous",
+      guidance:
+        "Do not send. The exact live topology candidate changed, disconnected, or became ambiguous. " +
+        `Restart from ${PEERS_TOOL} and obtain a new ListAgents address.`,
+    };
+  }
+  const sendTo = resolveListedAddress(agent, displayName, candidateRef);
+  if (sendTo === null) {
+    return {
+      ...base,
+      availability: "stale_or_ambiguous",
+      guidance:
+        "Do not send. No unique fresh ListAgents address is bound to this candidate. " +
+        `Restart from ${PEERS_TOOL}, then run ListAgents before rechecking.`,
+    };
+  }
+  return {
+    ...base,
+    availability: "confirmed",
+    relation: matches[0]!.relation,
+    send_to: sendTo,
+    guidance:
+      "Send immediately and only to the exact fresh ListAgents address already resolved for this display_name, " +
+      "including its [ref] when shown. This applies to replies too; an inbound reply address alone is not a permit. " +
+      "If another tool or action intervenes, recheck first. " +
+      "This confirms a live client-asserted topology snapshot, not identity, authorization, or delivery.",
+  };
+}
+
+const HELP = `usage: party claude-channel [channel|--channel C] [--require-launch-opt-in]
+
+Internal stdio MCP adapter for \`party claude\` and \`party bridge claude\`.
 
 It declares Claude Code's dedicated experimental claude/channel capability,
 holds AgentParty directed delivery, injects messages into the current Claude
-session, and links replies back through ${REPLY_TOOL}. Run \`party bridge
-claude\` instead of starting this command manually.`;
+session, and links replies back through ${REPLY_TOOL}. Use one public launcher
+instead of starting this command manually.`;
+
+export function claudeChannelLaunchOptedIn(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env[CLAUDE_CHANNEL_OPT_IN_ENV] === "1";
+}
+
+async function runDormantClaudeChannelMcp(): Promise<number> {
+  const server = new Server<Request, Notification, Result>(
+    { name: "agentparty-channel-dormant", version: pkg.version },
+    { capabilities: {} },
+  );
+  let markClosed!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    markClosed = resolve;
+  });
+  server.onclose = markClosed;
+  try {
+    await server.connect(new StdioServerTransport());
+    await closed;
+    return 0;
+  } finally {
+    try {
+      await server.close();
+    } catch {
+      // The stdio transport normally closes first when Claude exits.
+    }
+  }
+}
 
 export interface ClaudeChannelNotification extends Notification {
   method: "notifications/claude/channel";
@@ -291,6 +628,20 @@ function continuationKey(delivery: DirectedDelivery): string | null {
  */
 export class ClaudeChannelDeliveryBridge {
   private self = "";
+  private resolveFirstIdentity!: () => void;
+  private readonly firstIdentity = new Promise<void>((resolve) => {
+    this.resolveFirstIdentity = resolve;
+  });
+
+  get identity(): string {
+    return this.self;
+  }
+
+  async waitForIdentity(timeoutMs = 2_000): Promise<string> {
+    if (this.self !== "") return this.self;
+    await Promise.race([this.firstIdentity, delay(timeoutMs)]);
+    return this.self;
+  }
   private directedDeliveryMode = false;
   private exitCode = 0;
   private intentionalClose = false;
@@ -1548,6 +1899,7 @@ export class ClaudeChannelDeliveryBridge {
         }
       }
       this.self = incoming.self;
+      this.resolveFirstIdentity();
       this.directedDeliveryMode = incoming.directed_delivery === "v1";
       if (
         this.options.requireHarnessClaim === true &&
@@ -1929,6 +2281,7 @@ export class ClaudeChannelDeliveryBridge {
   close(): void {
     this.intentionalClose = true;
     this.stopped = true;
+    this.resolveFirstIdentity();
     this.cancelJournalRecoveryRetry();
     for (const seq of [...this.pending.keys()]) this.clearPending(seq);
     this.parkedContinuations.clear();
@@ -2008,13 +2361,13 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv);
-  const unknown = unknownFlagError(flags, ["channel"]);
+  const { positionals, flags } = parseArgs(argv, { booleans: ["require-launch-opt-in"] });
+  const unknown = unknownFlagError(flags, ["channel", "claude-session-name", "require-launch-opt-in"]);
   if (unknown !== null) {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["channel"]);
+  const flagError = valueFlagError(flags, ["channel", "claude-session-name"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -2022,6 +2375,13 @@ export async function run(argv: string[]): Promise<number> {
   if (positionals.length > 1) {
     console.error("usage: party claude-channel [channel|--channel C]");
     return 1;
+  }
+
+  if (flags["require-launch-opt-in"] === true && !claudeChannelLaunchOptedIn()) {
+    // Enabled plugins are initialized in every Claude session, even when this
+    // server is absent from --channels. Stay protocol-valid but do not resolve
+    // auth, connect AgentParty, claim delivery, or acquire the serve lock.
+    return runDormantClaudeChannelMcp();
   }
 
   const auth = await resolveAuthDetailed();
@@ -2038,6 +2398,11 @@ export async function run(argv: string[]): Promise<number> {
   }
   if (!isSlug(channel)) {
     console.error("claude-channel: channel must match [a-z0-9][a-z0-9-]{0,63}");
+    return 1;
+  }
+  const claudeSessionName = str(flags["claude-session-name"]);
+  if (claudeSessionName !== undefined && !isAgentPartyClaudeSessionAddress(claudeSessionName)) {
+    console.error("claude-channel: --claude-session-name must be a fresh AgentParty-generated apcs address");
     return 1;
   }
 
@@ -2057,10 +2422,16 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
 
+  const runtimeTopology = buildRuntimeTopology(serverUrl, process.cwd(), {
+    ...(claudeSessionName === undefined
+      ? {}
+      : { harnessSession: { harness: "claude", display_name: claudeSessionName } }),
+  });
   const connection = connect(serverUrl, token, channel, loadCursor(channel), {
     directedDelivery: "v1",
     deliveryRecovery: "v1",
     advertiseWakeKind: "daemon",
+    runtimeTopology,
     onCursor: (cursor) => saveCursor(channel, cursor),
   });
   const recoveryJournal = new DeliveryRecoveryJournal(
@@ -2080,7 +2451,19 @@ export async function run(argv: string[]): Promise<number> {
         "ownership generation returns one stable receipt and body. After reading the complete result, " +
         `call ${ACCEPT_TOOL} with the exact execution id and receipt before doing any work or causing ` +
         `any side effect. Only after that durable acceptance may you execute and reply once with ${REPLY_TOOL}; ` +
-        "do not use party_send for a channel reply. A tool success means the linked AgentParty reply was persisted.",
+        "do not use party_send for a channel reply. A tool success means the linked AgentParty reply was persisted. " +
+        `Use ${PEERS_TOOL} only when local-session coordination is relevant. Correlate its claude_sessions hints ` +
+        "with Claude's built-in ListAgents results by exact name, requiring one unique match, then use the exact " +
+        `agent, display_name, and candidate_ref from the hint with ${PEER_CHECK_TOOL} immediately before ` +
+        "SendMessage. Only availability=confirmed with send_to equal to the fresh ListAgents address permits " +
+        "an immediate send to that address, " +
+        "including its [ref] when shown or needed. Observe confirmation before sending; never issue the check and " +
+        "SendMessage in one parallel tool batch. If another tool or action intervenes, recheck. Peers " +
+        "with zero or multiple matches, or without a session hint, are " +
+        "resource-conflict hints only, not SendMessage targets. Then follow the returned advisory message policy. " +
+        "AgentParty does not control Claude's built-in SendMessage transport. Cross-session delivery outcomes never " +
+        "advance AgentParty delivery state. If peer discovery is unavailable, stop Cross-session coordination for " +
+        "that check and never inspect Claude's private registry files or inbox sockets.",
     },
   );
   let markMcpInitialized!: (ready: boolean) => void;
@@ -2120,6 +2503,7 @@ export async function run(argv: string[]): Promise<number> {
       return messages.find((message) => message.seq === seq) ?? null;
     },
   });
+  let firstEligiblePeersCall = true;
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
@@ -2165,6 +2549,47 @@ export async function run(argv: string[]): Promise<number> {
         },
       },
       {
+        name: PEERS_TOOL,
+        title: "List AgentParty peers relevant to Claude Cross-session",
+        description:
+          "Return live AgentParty identities that share this worktree, Git workspace, or local installation. Start here before every SendMessage to a bridge-generated apcs address, including replies to inbound Cross-session messages. Use the result only to correlate with Claude's built-in ListAgents tool; an inbound reply address is not a permit.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+      {
+        name: PEER_CHECK_TOOL,
+        title: "Recheck one Claude Cross-session candidate before sending",
+        description:
+          "Recheck that one exact candidate_ref from party_channel_peers still belongs to the same live AgentParty topology snapshot. Call immediately before every SendMessage to that generated address, including a reply; never trust the inbound reply address alone.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agent: {
+              type: "string",
+              minLength: 1,
+              maxLength: 64,
+              description: "exact AgentParty agent from party_channel_peers",
+            },
+            display_name: {
+              type: "string",
+              minLength: 1,
+              maxLength: 64,
+              description: "exact Claude display_name from party_channel_peers and ListAgents",
+            },
+            candidate_ref: {
+              type: "string",
+              pattern: "^candidate_[A-Za-z0-9_-]{16,64}$",
+              description: "exact ephemeral candidate_ref from party_channel_peers",
+            },
+          },
+          required: ["agent", "display_name", "candidate_ref"],
+          additionalProperties: false,
+        },
+      },
+      {
         name: REPLY_TOOL,
         title: "Reply to an AgentParty Channel message",
         description:
@@ -2182,6 +2607,96 @@ export async function run(argv: string[]): Promise<number> {
     ],
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (request.params.name === PEERS_TOOL || request.params.name === PEER_CHECK_TOOL) {
+      const checkArgs = request.params.name === PEER_CHECK_TOOL ? request.params.arguments : undefined;
+      const checkAgent = checkArgs?.agent;
+      const checkDisplayName = checkArgs?.display_name;
+      const checkCandidateRef = checkArgs?.candidate_ref;
+      if (request.params.name === PEER_CHECK_TOOL && (
+        typeof checkAgent !== "string" ||
+        !isName(checkAgent) ||
+        typeof checkDisplayName !== "string" ||
+        !isName(checkDisplayName) ||
+        typeof checkCandidateRef !== "string" ||
+        !CANDIDATE_REF_RE.test(checkCandidateRef)
+      )) {
+        return toolResult(
+          `${PEER_CHECK_TOOL} requires valid string agent, display_name, and candidate_ref`,
+          true,
+        );
+      }
+      if (claudeSessionName === undefined || !isClaudeCrossSessionGateArmed()) {
+        const unavailable = unavailableClaudeCrossSessionPeers(channel, "", "local_gate_unarmed");
+        return toolResult(JSON.stringify(request.params.name === PEERS_TOOL
+          ? unavailable
+          : confirmClaudeCrossSessionPeer(
+              unavailable,
+              checkAgent as string,
+              checkDisplayName as string,
+              checkCandidateRef as string,
+            )));
+      }
+      // MCP initialization and AgentParty's WebSocket welcome are independent.
+      // Absorb only this bounded startup race; a genuinely unavailable socket
+      // still returns identity_pending and an empty peer list.
+      const self = await bridge.waitForIdentity();
+      if (self === "") {
+        const unavailable = unavailableClaudeCrossSessionPeers(channel, "", "identity_pending");
+        return toolResult(JSON.stringify(request.params.name === PEERS_TOOL
+          ? unavailable
+          : confirmClaudeCrossSessionPeer(
+              unavailable,
+              checkAgent as string,
+              checkDisplayName as string,
+              checkCandidateRef as string,
+            )));
+      }
+      if (runtimeTopology === undefined) {
+        const unavailable = unavailableClaudeCrossSessionPeers(channel, self, "topology_unavailable");
+        return toolResult(JSON.stringify(request.params.name === PEERS_TOOL
+          ? unavailable
+          : confirmClaudeCrossSessionPeer(
+              unavailable,
+              checkAgent as string,
+              checkDisplayName as string,
+              checkCandidateRef as string,
+            )));
+      }
+      const loadPeers = async (): Promise<ClaudeCrossSessionPeerSummary> => {
+        const [presenceResult, discoveryResult] = await Promise.allSettled([
+          fetchPresence(serverUrl, token, channel),
+          fetchRuntimePeers(serverUrl, token, channel, runtimeTopology, "claude_cross_session"),
+        ]);
+        // Discovery is optional. Return stable fail-closed results instead of
+        // leaking REST details or encouraging private-registry fallbacks.
+        if (presenceResult.status === "rejected") {
+          return unavailableClaudeCrossSessionPeers(channel, self, "presence_unavailable");
+        }
+        if (discoveryResult.status === "rejected") {
+          return unavailableClaudeCrossSessionPeers(channel, self, "comparison_unavailable");
+        }
+        return summarizeClaudeCrossSessionPeers(
+          channel,
+          self,
+          presenceResult.value,
+          discoveryResult.value,
+        );
+      };
+      const retryDelays = claudeCrossSessionPeerStartupRetryDelays(
+        request.params.name,
+        firstEligiblePeersCall,
+      );
+      if (request.params.name === PEERS_TOOL) firstEligiblePeersCall = false;
+      const summary = await loadClaudeCrossSessionPeersWithStartupRetry(loadPeers, retryDelays);
+      return toolResult(JSON.stringify(request.params.name === PEERS_TOOL
+        ? summary
+        : confirmClaudeCrossSessionPeer(
+            summary,
+            checkAgent as string,
+            checkDisplayName as string,
+            checkCandidateRef as string,
+          )));
+    }
     if (request.params.name === CLAIM_TOOL) {
       const executionId = request.params.arguments?.execution_id;
       if (typeof executionId !== "string") {

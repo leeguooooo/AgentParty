@@ -11,27 +11,32 @@ export interface DeploymentVerificationOptions {
   sleep?: (delayMs: number) => Promise<void>;
 }
 
+export type DeploymentFetch = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
+
 export function validateDeploymentMetadata(metadata: DeploymentMetadata): DeploymentMetadata;
 export function deploymentDefineArgs(metadata: DeploymentMetadata): string[];
 export function readDeploymentMetadata(
   base: string,
-  fetcher?: typeof fetch,
+  fetcher?: DeploymentFetch,
 ): Promise<DeploymentMetadata>;
 export function verifyDeploymentMetadata(
   base: string,
   expected: DeploymentMetadata,
-  fetcher?: typeof fetch,
+  fetcher?: DeploymentFetch,
   options?: DeploymentVerificationOptions,
 ): Promise<DeploymentMetadata>;
 export function verifyDeploymentIdentity(
   base: string,
   expected: Pick<DeploymentMetadata, "version" | "commit">,
-  fetcher?: typeof fetch,
+  fetcher?: DeploymentFetch,
   options?: DeploymentVerificationOptions,
 ): Promise<DeploymentMetadata>;
 export function verifyDualDeployment(
   targets: Record<string, string>,
   expected: DeploymentMetadata,
-  fetcher?: typeof fetch,
+  fetcher?: DeploymentFetch,
   options?: DeploymentVerificationOptions,
 ): Promise<Record<string, DeploymentMetadata>>;

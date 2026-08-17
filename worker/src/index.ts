@@ -15,6 +15,7 @@ import {
   MAX_CHANNEL_CREATES_PER_WINDOW,
   MEMBER_ATTACHMENT_SIZE_LIMIT,
   normalizeTier,
+  parseRuntimeTopology,
   RESERVED_NAMES,
   ROLE_RESPONSIBILITY_LIMIT,
 } from "@agentparty/shared";
@@ -6701,6 +6702,44 @@ app.get("/api/channels/:slug/presence", async (c) => {
     return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
   }
   return fetchMutableChannelDO(c.env, slug, new Request("https://do/internal/presence", { headers: { "x-partykit-room": slug } }));
+});
+
+app.post("/api/channels/:slug/runtime-peers", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as { topology?: unknown; purpose?: unknown } | null;
+  const topology = parseRuntimeTopology(body?.topology);
+  const purpose = body?.purpose;
+  if (
+    identity.kind !== "agent" ||
+    topology === undefined ||
+    !(
+      purpose === "topology_advisory" ||
+      purpose === "capability_probe" ||
+      purpose === "claude_cross_session"
+    )
+  ) {
+    return c.json(errorBody("bad_request", "a valid agent runtime topology and purpose are required"), 400);
+  }
+  return fetchMutableChannelDO(
+    c.env,
+    slug,
+    new Request("https://do/internal/runtime-peers", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-partykit-room": slug,
+        "x-ap-name": identity.name,
+        "x-ap-token-hash": identity.hash,
+      },
+      body: JSON.stringify({ topology, purpose }),
+    }),
+  );
 });
 
 app.get("/api/channels/:slug/loop-guard", async (c) => {

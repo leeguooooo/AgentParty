@@ -30,6 +30,7 @@ import {
 } from "../instance-lock";
 import { resolveAuthDetailed } from "../oidc-cli";
 import { postMessage } from "../rest";
+import { buildRuntimeTopology } from "../runtime-topology";
 
 export interface CodexBridgeRuntimeOptions {
   channel: string;
@@ -841,6 +842,7 @@ export async function runCodexSessionBridge(
         directedDelivery: "v1",
         deliveryRecovery: "v1",
         advertiseWakeKind: "daemon",
+        runtimeTopology: buildRuntimeTopology(serverUrl, options.cwd),
         onCursor: (cursor) => saveCursor(options.channel, cursor),
         onStatus: (status) => {
           if (status !== "open") delivery?.handleConnectionStatus(status);

@@ -54,7 +54,7 @@
 <body>
   <header>
     <h1>交互会话桥接：把频道消息送进当前 Claude / Codex 会话</h1>
-    <p class="meta">Issue #746 · 2026-07-24 · 本机核验 Claude Code 2.1.218 / Codex CLI 0.144.4</p>
+    <p class="meta">Issue #746 · 2026-08-17 · 本机核验 Claude Code 2.1.232 / Codex CLI 0.145.0</p>
   </header>
 
   <main>
@@ -67,7 +67,9 @@
       <p class="meta">
         上游能力依据：
         <a href="https://code.claude.com/docs/en/channels">Claude Code Channels</a>、
+        <a href="https://code.claude.com/docs/en/cross-session-messaging">Claude Cross-session messaging</a>、
         <a href="https://code.claude.com/docs/en/channels-reference">Channels reference</a>、
+        <a href="https://code.claude.com/docs/en/hooks">Claude Code Hooks reference</a>、
         <a href="https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md">Codex app-server protocol</a>。
       </p>
       <table>
@@ -76,10 +78,16 @@
         </thead>
         <tbody>
           <tr>
-            <td>Claude Code ≥ 2.1.80</td>
+            <td>Claude Channel ≥ 2.1.80</td>
             <td>专用 <code>claude/channel</code> capability</td>
             <td>启动器、Channel MCP adapter、投递租约、linked reply</td>
             <td class="good">已实现并有单测</td>
+          </tr>
+          <tr>
+            <td>Marketplace Plugin ≥ 2.1.154</td>
+            <td>Skill + MCP + Channel + Hook 完整外壳</td>
+            <td><code>defaultEnabled</code>、<code>channels</code>、严格清单校验与启动前版本拒绝</td>
+            <td class="good">最低版与当前版双 validator + 隔离安装门禁</td>
           </tr>
           <tr>
             <td>Claude Agent SDK</td>
@@ -101,6 +109,151 @@
           </tr>
         </tbody>
       </table>
+    </section>
+
+    <section aria-labelledby="marketplace-plugin">
+      <h2 id="marketplace-plugin">完整交付形态：一个运行时，两层插件外壳</h2>
+      <p>
+        Marketplace plugin 是 AgentParty 的完整安装与发现入口，但不是新的运行时。
+        <code>plugins/agentparty/</code> 同时提供 Claude 与 Codex 清单和 AgentParty Skill。Codex 外壳只装通用
+        <code>party mcp</code>；Claude 外壳再装生命周期 Hook 与 <code>party claude-channel</code> Channel 声明。
+        认证、配置、Channel 传输、daemon、拓扑比较和进程启动仍由同一个
+        <code>party</code> 二进制负责。插件版本跟随 <code>cli/package.json</code>，Skill 从仓库中的规范副本生成。
+      </p>
+      <table>
+        <thead><tr><th>层</th><th>仓库产物</th><th>负责什么</th><th>明确不负责什么</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Marketplace</td>
+            <td><code>.claude-plugin/marketplace.json</code></td>
+            <td>发现、版本更新、安装来源</td>
+            <td>不持有 token，不证明会话在线</td>
+          </tr>
+          <tr>
+            <td>双平台插件</td>
+            <td><code>.claude-plugin/plugin.json</code>、<code>.codex-plugin/plugin.json</code>、Skill、Hook 与平台 MCP 清单</td>
+            <td>把行为规则与通用工具装进两端；给 Claude 增加活动上报和 live Channel 注入</td>
+            <td>不复制 CLI，不静默下载安装二进制</td>
+          </tr>
+          <tr>
+            <td><code>party</code> 运行时</td>
+            <td>GitHub Release binary</td>
+            <td>鉴权、Channel、历史、任务、拓扑、daemon 与 bridge</td>
+            <td>不把本机 presence 当成授权</td>
+          </tr>
+          <tr>
+            <td>Claude 临时桥</td>
+            <td><code>party bridge claude</code> 每次启动生成的私有 Hook 与 <code>agentparty-channel</code> MCP</td>
+            <td>把本次 Claude 进程、SessionStart 回执、短命候选和发送 permit 绑定到同一条链</td>
+            <td>不能由已经运行的静态插件事后补上</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="flow" aria-label="Marketplace plugin 与运行时分层">
+        <span>Marketplace 安装</span>
+        <span>Skill + MCP + Claude Hook/Channel</span>
+        <span>party 运行时</span>
+        <span>持久 AgentParty Channel</span>
+      </div>
+      <aside>
+        用 <code>party claude &lt;channel&gt;</code> 新开 session 后，Channel 事件可进入仍打开的
+        主会话；关闭的进程不能被插件复活，常驻仍依赖后台 Claude 或持久终端。插件 Hook 自动把 starting、
+        当前工具、working、waiting、compacting 和 idle 写入 presence。Stop guard 只在本机 durable journal 显示
+        execution 已经 issued/accepted 且还没有 linked reply 时阻止一次；<code>stop_hook_active=true</code> 时放行，
+        不制造无限循环。被阻止的 Stop 会保持 <code>working</code>，只有真正放行的 Stop 才写 <code>idle</code>；
+        否则 activity push 的节流标记可能把错误的 idle 状态保留在频道里。
+        Claude 会给插件 MCP 工具加上 <code>mcp__plugin_&lt;plugin&gt;_&lt;server&gt;__...</code> 作用域名。
+        Cross-session 本地门只接受 bridge 拥有的 <code>mcp__agentparty-channel__...</code> 工具，二者必须分开。
+        否则，长期存在的通用 MCP 可能被误当成某次启动的会话授权。Claude 插件默认禁用，用户配置好
+        <code>party</code> 后再明确启用并新开 session。插件 Channel MCP 在普通 Claude 启动中只保持协议连接，
+        不连接 AgentParty，也不取得 durable listener 锁；<code>party claude</code> 通过一次性环境 opt-in 激活监听。
+        Channel 与 lifecycle 是两个独立 opt-in：<code>party claude</code> 同时激活两者；
+        <code>party bridge claude</code> 只激活 Marketplace lifecycle Hook，继续使用 bridge 自己的 Channel MCP。
+        普通 Claude session 两者都不激活，因此不会覆盖活跃 listener 的 activity，也不会继承另一个 session
+        的 Stop debt。
+        interactive activity push 用随机 attempt ID 绑定节流 marker；spawn、鉴权或 REST 失败只释放本次 attempt，
+        下一条 Hook 可立即重试。旧子进程迟到失败时，它的 ID 与新 marker 不同，不能撤销较新的成功上报。
+        activity 必须直接消费 Claude 的 <code>PermissionRequest</code>、<code>Elicitation</code>、
+        <code>PostToolUseFailure</code>、<code>PostCompact</code> 和 <code>StopFailure</code>，不能只解析
+        Notification 文案。进入/离开等待及 turn 结束绕过普通 15 秒节流；同一等待的重复通知仍节流。
+        <code>party who</code> 不得用 <code>current_task</code> 作为 interactive activity 的前置条件。
+        频道只公开 phase 与工具名，不上传 prompt 或工具参数；具体工作由关联 Channel seq 或显式 scope 表达。
+        bridge 在启动前单独验证 lifecycle shell；Plugin 缺失、禁用、版本不匹配、缓存 bundle 无效或 Plugin
+        状态不可读取时直接拒绝启动。<code>--check --json</code> 的 <code>lifecycle</code> 对象给出这份证据，
+        与 Channel、runtime comparison 和本地 gate 分开，且固定写明 <code>model_calls_started=false</code>。
+        启动前还会做无模型预检：Plugin 必须启用、凭据必须对应 agent、频道可访问，并且同一身份与频道没有现存
+        listener。任何一项不成立都拒绝启动，避免 Claude 已打开而 Channel 没有工作的假成功。
+        每次启动只选一个 Channel 入口：普通监听使用 <code>party claude &lt;channel&gt;</code>；需要 Cross-session 时使用
+        <code>party bridge claude</code>，不要把二者叠加到同一进程。
+        <code>party doctor claude-plugin --channel C --json</code> 不启动模型，分别报告 Plugin 安装/启用、缓存
+        bundle 与启动器、鉴权身份种类和频道访问，以及服务端是否观察到 healthy、suspect 或 deaf 的 durable listener。
+        listener 健康但没有新鲜 Hook 活动时，另报 <code>activity_not_observed</code> warning；它不把接收能力和
+        生命周期可见性合并成一个“ready”。观察到 listener 后再独立报告
+        <code>channel.topology_visibility=observed|not_observed|unavailable</code>。只有 Worker 将本次只读诊断
+        topology 与同一身份的 live runtime 做出关系比较才是 observed；后两种只是 warning，表示同
+        installation/workspace/worktree 协同提示不可用，不等于 Channel 不能接收。doctor 不创建或修复本机
+        installation secret。
+      </aside>
+      <p class="meta">
+        格式依据：
+        <a href="https://code.claude.com/docs/en/plugins">Claude Code plugins</a>、
+        <a href="https://code.claude.com/docs/en/plugins-reference">plugin reference</a>、
+        <a href="https://code.claude.com/docs/en/plugin-marketplaces">marketplace reference</a>。
+        当前仓库清单已通过 Claude Code 2.1.232 的 <code>claude plugin validate --strict</code>；这不等于已进入官方
+        Marketplace，也不等于用户安装、登录或双会话投递已经通过。
+      </p>
+      <p>
+        本地安装验收使用 <code>bun scripts/verify-agentparty-plugin-install.ts</code>。脚本为 Claude 创建临时
+        <code>CLAUDE_CONFIG_DIR</code>，依次执行 marketplace add、install、list、enable、list，再比较缓存目录与
+        <code>plugins/agentparty/</code> 的完整文件哈希。通过结果必须同时包含
+        <code>installed_disabled_by_default=true</code>、<code>enabled_after_explicit_enable=true</code>、
+        <code>cached_bundle_exact=true</code>、<code>channel_declared=true</code>、
+        <code>lifecycle_hooks_present=true</code>、<code>standard_hooks_autoload_safe=true</code>、
+        <code>claude_mcp_manifest_visible=true</code> 和 <code>model_calls_started=false</code>。脚本退出时删除临时配置。
+        这证明插件管理链路可用，不证明 Claude 已登录、MCP 已连上 AgentParty 或消息已经送达。
+        可传 <code>--claude-package-version X.Y.Z</code>，仅接受精确稳定 semver，并固定通过
+        <code>bunx @anthropic-ai/claude-code@VERSION</code> 执行，不开放任意 Claude argv。required CI 对
+        2.1.154 与 2.1.232 都执行 strict validator 以及完整 add/install/enable/cache-copy 流程。
+        实际 executable 的首个 semver 必须与请求完全一致，并输出
+        <code>claude_version_matches_request=true</code>；cache 或 wrapper 解析到别的版本时 fail closed。
+        tag 发布时，<code>worker-deploy.yml</code> 与 release workflow 虽并发触发，但 publish job 必须等待
+        与当前 tag 和 40 位 commit SHA 完全匹配的最新 Worker run。只有整条 workflow（含已鉴权
+        runtime-peers v3 双 socket live smoke）成功才允许上传 Release；未发现、失败、取消或 30 分钟未完成
+        都 fail closed，旧 SHA 的绿色部署不能替代。
+        Worker 部署身份使用精确 <code>version + commit</code>。<code>deployed_at</code> 是审计元数据，不是
+        正确性主键：同源码幂等重部署或 custom domain 传播可能暴露不同时间戳。身份匹配之后仍必须执行已鉴权
+        双 socket runtime-peers smoke，直接证明 live endpoint 提供 v3，因此不会因放宽时间戳相等而降低验收。
+      </p>
+      <aside>
+        busy durable Channel 使用独立验收入口：
+        <code>party claude --verify --channel C --receiver-config PATH --sender-config PATH --receiver-cwd DIR --preflight-only</code>。
+        预检不调用模型也不写频道；完整模式必须把该 flag 显式替换为 <code>--live</code>，表示操作者授权一个
+        真实模型以及会长期留在 Channel history/audit 的测试 source/reply。完整模式启动一个 <code>party claude</code> session，在 Bash activity 仍为 tool/Bash 时
+        持久化一条对 receiver 的 mention，再释放工具边界。通过必须同时得到
+        <code>busy_activity_observed_before_send=true</code>、<code>source_message_persisted=true</code>、
+        <code>linked_reply_persisted=true</code>、<code>claim_accept_reply_chain_observed=true</code> 和
+        <code>delivery_terminal_settled=true</code>。
+        最后一项要求同一个 Plugin-scoped MCP server 中唯一且有序的
+        <code>party_channel_claim → party_channel_accept → party_channel_reply</code>，并把 claim receipt、source seq
+        和精确 reply 正文串起来；reply tool result 还必须点名 persisted reply seq 与 source seq，且只在 Worker
+        接受权威终态后算 success。Cross-session 的 <code>SendMessage</code> marker 是另一条传输，不能替代。
+        预检同时聚合 Plugin、Claude auth/version、两侧身份、两侧频道访问、身份冲突、receiver 已有 listener，
+        以及 Worker 的 <code>directed_delivery v1 + delivery_recovery v1</code>。能力探针只打开一条有界 socket，
+        读取 welcome 后关闭，不注册 adapter、不 claim、不 ack、也不发送工作。
+        任一 blocker 都保持 <code>model_calls_started=false</code> 与 <code>channel_writes_started=false</code>。完整模式未先观察到 busy Bash activity 时不发送
+        mention，返回 <code>busy_activity_not_observed</code>；原始进程输出只进入脱敏 artifacts。
+        失败报告只有观察到唯一 Claude <code>system/init</code> 才把 <code>model_calls_started</code> 写成 true；
+        未 spawn 为 false，外层 launcher 已 spawn 但 stream 无法确认初始化时写 <code>unknown</code>。
+        live 运行在频道写入开始后失败时，会短时轮询精确 sender/body marker；暂未出现时等待 Worker 迟到提交，
+        多条匹配则 fail closed、不猜 seq。恢复唯一 source POST 后再有界重试
+        retract 并验证 <code>[retracted]</code>。Worker 在同一事务中把 active delivery tree 终结为不可复活的
+        <code>source_retracted</code>。报告输出
+        <code>source_cleanup=not_needed|retracted|not_found_or_unconfirmed|failed</code>；自动清理不能证明时保留
+        已知 source seq，含 token 的私有目录仍必须删除。
+        后两种状态还要输出 <code>cleanup_required=true</code> 和非敏感的 <code>cleanup_search_marker</code>。
+        操作者用 sender 身份执行 <code>party search &lt;marker&gt; --channel C</code>，确认唯一 source 后再
+        <code>party retract &lt;seq&gt; --channel C</code>；报告不输出 token 或配置路径。
+      </aside>
     </section>
 
     <section aria-labelledby="negative-control">
@@ -131,7 +284,7 @@
         <span>当前会话执行一次</span>
         <span>party_channel_reply 完成 delivery</span>
       </div>
-      <pre><code>party bridge claude [channel|--channel C] [-- &lt;claude args...&gt;]
+      <pre><code>party bridge claude [channel|--channel C] [--check [--json]] [-- &lt;claude args...&gt;]
 
 Claude child MCP config:
   capabilities.experimental["claude/channel"] = {}
@@ -148,7 +301,7 @@ Current-session tools:
   party_channel_reply(seq, body) → linked REST reply</code></pre>
       <h3>边界</h3>
       <ul>
-        <li>启动前检查 Claude Code 版本；低于 2.1.80 明确失败。</li>
+        <li>三条版本线分开：裸 Channel ≥ 2.1.80，完整 Marketplace Plugin ≥ 2.1.154，Cross-session ≥ 2.1.224。实际 launcher 依赖 Plugin，因此低于 2.1.154 时在模型启动前失败。</li>
         <li>组织策略拒绝 development Channels 时，由 Claude 明确报错；AgentParty 不偷偷启用 PTY 或第二个 resume 进程。</li>
         <li>adapter 与 <code>party serve</code> 共用同身份、同频道实例锁，避免两个消费者双执行。</li>
         <li>只有服务端认证会员发给当前 target 的 claimed delivery 能进入会话；自己的消息不自唤醒。</li>
@@ -299,6 +452,317 @@ IDLE ── turn/start ──▶ ACTIVE_NORMAL(turn_id)
           <tr><td>Claude SDK streaming fallback</td><td>Channel 禁用场景的独立 runner 验收</td><td class="pending">下一实现 slice</td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section aria-labelledby="cross-session-topology">
+      <h2 id="cross-session-topology">Cross-session 与运行拓扑</h2>
+      <aside>
+        Claude Cross-session 负责 Claude 会话之间的发现和短消息协同；AgentParty 的 Channel 与
+        directed-delivery 账本继续负责外部投递、领取、执行状态和 linked reply。两条链路不能互相冒充。
+      </aside>
+      <aside>
+        单身份、无模型调用的启动诊断：<code>party bridge claude &lt;channel&gt; --check --json</code>。
+        它分别报告 Claude 登录、Channel 权限、runtime comparison 和本地 gate 创建能力，不启动 Claude。
+        增量字段 <code>blockers</code> 会列出所有已独立确认的阻塞项；兼容字段 <code>status</code> 和
+        <code>reason</code> 仍只保留主阻塞项。runtime capability 探针返回 HTTP 404 时使用
+        <code>worker_upgrade_required</code>，其他失败使用 <code>runtime_comparison_unavailable</code>。
+        空数组只证明启动前提，不证明真实投递。
+        可选字段 <code>claude_api_provider</code> 保存经清理的 Claude resolved provider；
+        <code>cross_session_conflict_variables</code> 只保存冲突变量名，不包含变量值。两者都是 v1 schema
+        的增量字段。内建 Channel 探针失败时，可选字段 <code>channel_probe_phase</code> 会稳定区分
+        <code>authentication</code>、<code>identity</code>、<code>presence</code> 与
+        <code>identity_binding</code>；旧式注入探针的普通错误不会被猜测分类。消费端必须允许这些字段缺省。
+        内建端点探针失败时，<code>channel_probe_attempts</code>（identity/Presence）或
+        <code>runtime_probe_attempts</code>（runtime capability）会记录实际端点调用次数：1 表示终局错误未重试，
+        3 表示两次有界重试都已耗尽。字段缺省表示没有内建端点尝试证据，不等于尝试了 0 次。
+        内建 identity、Presence 与 runtime capability HTTP 探针只对 429/5xx 按 150/500 ms 重试，且所有
+        尝试共用原来的五秒总时限。重复的 capability probe 仍然只做比较：不返回 peer，也不发布 topology
+        或候选。其他 HTTP 错误和注入探针保持单次调用。
+        因此 <code>session_start_armed</code>、<code>peer_presence_checked</code>、
+        <code>delivery_verified</code> 必定为 <code>false</code>。<code>ready_for_launch</code> 不能替代真实
+        SessionStart、在线 peer 或 marker 投递证据。退出码遵守模式语义：<code>auto</code> 可以降级为
+        <code>channel_only</code> 并成功，<code>required</code> 对同一缺口返回失败。
+      </aside>
+      <p>
+        真实启动和 <code>--check</code> 都会用 Claude 子进程将继承的相同 cwd 与环境执行
+        <code>claude auth status</code>。明确未登录时返回 <code>claude_auth_required</code>；输出无法解析或
+        探针执行失败时返回 <code>claude_auth_unavailable</code>。真实启动在访问 Channel 和 spawn Claude
+        之前停止，避免预检与实际子进程读取不同的 <code>CLAUDE_CONFIG_DIR</code> 或 PATH。
+        全链路验收器给 <code>claude --version</code> 和 <code>claude auth status</code> 各设 10 秒截止时间，
+        同时约束进程退出和 stdout/stderr 排空。超时会终止 detached 进程组，不让 wrapper 留下 Claude 后代或卡住结构化预检结果。
+      </p>
+      <p>
+        Claude 官方不在 Bedrock、Claude Platform on AWS、Google Cloud Agent Platform 或 Microsoft Foundry
+        提供 Cross-session。bridge 从继承的 provider 变量或 <code>claude auth status</code> 识别到这些 provider
+        时返回 <code>unsupported_provider</code>。已解析的 <code>apiProvider</code> 优先，因为 Claude 已应用
+        settings precedence；只有该字段缺失才回退到继承 provider 变量。bridge 按官方语义处理会关闭 feature-flag evaluation 的环境变量：
+        <code>DISABLE_TELEMETRY</code> 与 <code>CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC</code> 只要非空就返回
+        <code>feature_flag_evaluation_disabled</code>，包括值 <code>0</code>、<code>false</code>；
+        <code>DO_NOT_TRACK</code> 与 <code>DISABLE_GROWTHBOOK</code> 只在值为 <code>1</code> 或
+        <code>true</code> 时关闭。父进程可见的 feature-flag 冲突会保守降级；settings 与远端 managed policy
+        仍可能在预检之后改变 session 的有效环境，
+        所以只有顶层 <code>SessionStart</code> arming receipt 和 Claude 当次 <code>/list-agents</code> 才是可用性证据。
+      </p>
+      <p>
+        AgentParty 的每条活跃 CLI 连接现在上报一组服务器隔离的匿名引用：
+        <code>node_ref</code> 表示同一个本地 AgentParty 安装，<code>runtime_ref</code> 表示当前进程，
+        <code>workspace_ref</code> 表示同一 Git workspace，<code>worktree_ref</code> 表示具体工作树。
+        <code>runtime_ref</code> 不是 Agent 身份：一个常驻进程可以托管多个不同 Agent。Worker 只把“同身份且
+        同 runtime_ref”当成调用者自己；不同 Agent 即使共享进程也会作为 peer 返回。
+        Worker 只在已鉴权的活 WebSocket 内存里保存这些引用；连接断开后立刻消失，不写 presence 行。
+        客户端通过鉴权的 <code>runtime-peers</code> v3 端点提交自己的引用和用途。<code>topology_advisory</code>
+        只返回关系，<code>capability_probe</code> 不返回 peer；只有 <code>claude_cross_session</code> 能返回
+        Claude display name 和候选，而且 Worker 必须先找到同 agent、同 token、同完整 topology 的唯一活
+        WebSocket。普通 presence、Web 页面和 <code>party who --json</code>
+        都拿不到原始引用。<code>party who --json</code> 只输出派生的
+        <code>same_local_installation</code>、<code>same_workspace</code>、<code>same_worktree</code>；不会把前者
+        改名成暗示物理主机证明的 <code>same_node</code>。
+      </p>
+      <table>
+        <thead><tr><th>关系</th><th>产品含义</th><th>允许的动作</th></tr></thead>
+        <tbody>
+          <tr><td>相同 <code>worktree_ref</code></td><td>两个活跃 runtime 落在同一工作树，存在并发写损坏风险</td><td><code>write_collision / immediate</code>：编辑前通过短消息协商唯一 writer</td></tr>
+          <tr><td>相同 <code>workspace_ref</code></td><td>同仓不同 worktree，可并行，但需要同步合并和基线变化</td><td><code>integration_drift / before_integration</code>：集成前交换 rebase、schema、接口变更摘要</td></tr>
+          <tr><td>仅相同 <code>node_ref</code></td><td>共享一个 AgentParty 本地安装命名空间，可能竞争设备、CPU 或本地服务</td><td><code>local_resource_contention / on_resource_conflict</code>：先确认具体共享资源，不凭同安装关系自动发消息</td></tr>
+        </tbody>
+      </table>
+      <p>
+        引用由本机随机 secret 经 HMAC 派生，按 AgentParty server 隔离。协议不发送 hostname、用户名、
+        仓库路径、Git remote、MAC 或硬件序列号。<code>node_ref</code> 不是账号、token、权限或信任证明；
+        它只说明两个活连接使用同一个本地 AgentParty 安装 secret。容器、复制的 home 目录与重装都会改变
+        这层语义，因此界面使用“same local installation”，不写“same physical machine”。
+        这些值仍由客户端上报，Worker 只能验证字段格式和连接是否存活，无法证明本地派生过程没有被伪造。
+        协议因此携带 <code>evidence: client_asserted</code>；派生结果另带
+        <code>comparison: server_derived</code>，CLI 与 MCP 都保留这两个 provenance。
+        Topology 只能触发协调提示，不得用于鉴权、自动派工、消息路由或 delivery 状态转换。
+      </p>
+      <p>
+        Claude Code 2.1.224 起提供 <code>ListAgents</code> 和 <code>SendMessage</code>。AgentParty 不读取
+        Claude 的 session 注册文件，也不直连 inbox socket；<code>party bridge claude</code> 在版本满足时
+        注入一条窄系统规则，并用当前 AgentParty identity 加随机后缀为每个 bridge 生成唯一 Claude
+        会话名；同一个安全名称同时进入 Claude 的可寻址注册和 AgentParty 的 topology hint，因此无需
+        暴露 cwd 就能精确对应。用户显式传 <code>--name</code> 时仍保留用户选择，但稳定名称可能在旧会话关闭后被另一个
+        Claude 会话复用，单次 <code>ListAgents</code> 的唯一匹配无法证明它还是原目标。因此 <code>auto</code> 会退化为仅 Channel，
+        <code>required</code> 会拒绝启动；只有 bridge 本次随机生成的名称会进入 topology hint。<code>--cross-session auto</code> 是默认值，
+        它也会在启动前用 <code>capability_probe</code> 验证已鉴权的 <code>runtime-peers</code> v3 能力；不可用时明确打印
+        <code>cross_session=channel_only</code> 与稳定原因，再保留 Channel 主链。预检通过打印
+        <code>cross_session=enabled_for_launch</code>，只表示启动条件齐备，不要求另一条 peer 已在线，也不是 Claude 注册或消息送达证据。
+        该可选网络预检最多等待 5 秒；
+        <code>off</code> 关闭 AgentParty 的 peer 提示和自动命名；<code>required</code> 在启动 Claude 前同时
+        验证版本/平台、工具策略、本地 topology 生成、频道鉴权及 <code>runtime-peers</code> 服务端比较，任一
+        不可用都拒绝启动。<code>off</code> 不会关闭 Claude 自身的内置能力；若需要硬禁用，应由 Claude 的 tool policy 控制。
+        Claude <code>--bare</code> 不创建 inbox socket，因此 <code>auto</code> 会只保留 Channel，
+        <code>required</code> 会在启动前拒绝这个组合。
+        Cross-session 只在 macOS/Linux 和 Claude Code ≥ 2.1.224 时启用。Claude <code>--safe-mode</code>
+        会关闭自定义 MCP server，因此 bridge 直接拒绝；若 <code>--tools</code> 或
+        <code>--disallowedTools</code> 明确移除 <code>ListAgents</code>/<code>SendMessage</code>，
+        <code>auto</code> 退化为仅 Channel，<code>required</code> 拒绝启动。
+        bridge 只为本次随机生成的 <code>apcs-...-&lt;12 hex&gt;</code> 地址注入一次性 command Hook 门禁；
+        顶层会话真实执行 <code>SessionStart</code> Hook 后，私有临时目录才写入当前 session 的 arming receipt；bridge
+        会在 Claude 仍运行时观察该文件并发布结构化回执。Claude 退出时仍未武装，<code>required</code> 返回非零码，
+        <code>auto</code> 输出 <code>cross_session=session_start_unarmed</code>。
+        MCP 在此之前只返回 <code>local_gate_unarmed</code> 和空候选，不请求 Worker 比较。subagent 的 Hook 带
+        <code>agent_id</code>，不能建链或消费 permit。成功的 <code>SendMessage</code> 会保留到
+        <code>PostToolBatch</code> 的短命 barrier；同批后到的 sibling tool 会在执行前被拒绝。
+        bridge 在所有探针和启动前从 Claude 全局环境删除私有 gate 路径，只通过 exec-form Hook 参数和
+        AgentParty MCP server 的专属 <code>env</code> 分别交给两个消费者；普通 Bash 子进程不会因环境继承取得
+        路径，隐藏 Hook 命令也忽略同名继承变量。这是缩小意外暴露与陈旧环境串线，不是同 UID 进程隔离。
+        显式 Claude <code>--settings</code> 可能替换该设置，因此 <code>auto</code> 退化为仅 Channel，
+        <code>required</code> 拒绝启动。组织侧 <code>allowManagedHooksOnly</code>、
+        <code>disableAllHooks</code> 或 <code>strictPluginOnlyCustomization</code> 仍可能阻止该 Hook 装载。
+        Claude 也会在 <code>ListAgents</code> 中列出 Remote Control 和 Claude Code Web 会话。AgentParty
+        只关联本机会话：bridge 在同一份启动设置中固定写入 <code>isolatePeerMachines: true</code>，跨机器发送
+        必须先经过用户明确批准。精确名称所在的 ListAgents 行若带当前的
+        <code>on another machine (Remote Control)</code>、<code>in the cloud</code> 或 Claude Code Web 标签，
+        本地 Hook 不生成 listing；模型也收到同样的启动约束。
+        启动行用 <code>cross_machine=approval_required</code> 报告这条边界，但它不是本机归属或投递证明。
+        不启动模型的 JSON 检查用
+        <code>cross_machine_policy_on_launch=explicit_approval_required</code> 报告同一项预期启动配置；
+        <code>--cross-session off</code> 返回 <code>not_applicable</code>。这个字段不证明会话已经启动、候选属于本机或消息已经送达。
+        bridge 默认沿用 Claude 自己的 inbound 判定。受控验收可把 <code>--cross-session required</code> 与
+        <code>--cross-session-inbound accept</code> 连用；bridge 把它合并进自己注入 Hook 的同一份启动设置，
+        不接受调用方再传另一份 <code>--settings</code>。组织、项目或本地的更严格
+        <code>hold</code>/<code>refuse</code> 仍可覆盖它，因此只有接收端唯一 <code>system/init</code> 之后恰好一次、
+        带同一 <code>session_id</code> 的纯文本主会话 inbound user 事件才证明送达；缺失或不同 session ID、重复 marker、
+        <code>tool_result</code>、重放 prompt、不是严格布尔值的 <code>isReplay</code>，以及 <code>agent_id</code> 或
+        <code>parent_tool_use_id</code> 非空的子 agent
+        事件都不能充当投递证明。
+      </p>
+      <div class="flow" aria-label="Cross-session 关联与消息链路">
+        <span>party_channel_peers</span>
+        <span>只返回相关 AgentParty 名称与关系</span>
+        <span>Claude ListAgents 按唯一会话名精确对应</span>
+        <span>party_channel_peer_check 复核原 candidate_ref</span>
+        <span>Claude SendMessage 发送短摘要或 execution id</span>
+        <span>接收会话独立执行</span>
+      </div>
+      <table>
+        <thead><tr><th>边界</th><th>当前实现</th><th>不能据此推断</th></tr></thead>
+        <tbody>
+          <tr><td>Peer 发现</td><td><code>runtime-peers</code> 在每次比较前重新检查所有候选连接的 token；确认撤销的连接会立即关闭并排除，D1 无法确认授权时整次比较返回 unavailable。Cross-session 请求还必须绑定同 agent、同 token、同完整 topology 的唯一活调用方 socket；旧 topology、另一枚 token 或重复调用方 socket 都返回 409。<code>party_channel_peers</code> 只返回已完成 hello、授权仍有效、未进入升级关闭或断线清理的 live agent 名称，以及每个相关 runtime 自报的 <code>claude_sessions</code>、该具体会话对应的协调动作、状态和 runtime 数量；不返回 node/workspace/worktree/runtime ref 或 cwd。唯一 runtime 的会话会带 Worker 随机生成的短命 <code>candidate_ref</code>；同一 socket 重新 hello、断线或失去协调资格都会让旧 ref 失效。身份级关系只表示最高风险，真正发送前应以目标会话自己的关系与动作判断。<code>name_unique_among_hints</code> 只描述 AgentParty 的局部视图。Claude 的 MCP <code>system/init</code> 与 AgentParty WebSocket/topology 可见性不是同一个就绪点；本会话第一次满足本地 gate、identity 和 topology 前提的 <code>party_channel_peers</code> 会在同一次工具调用内取 0/100/350/850 ms 四个 ready 快照并返回最新结果，另一个 peer 先出现也不会提前结束。错误立即返回，后续发现不等待，发送前的 <code>party_channel_peer_check</code> 始终只取一次新鲜快照</td><td>无论 hint 是否局部唯一，都必须在 <code>ListAgents</code> 中得到 exact name 的唯一匹配，并在发送前用 <code>party_channel_peer_check</code> 复核原 candidate；零个、多个、缺 ref 或非 confirmed 都不能发送。candidate ref 不是身份、授权或 AgentParty delivery handle</td></tr>
+          <tr><td>工具结果歧义</td><td>同一次 peers 结果把一个 <code>candidate_ref</code> 绑定到不同 agent 或 display name 时，本地 gate 丢弃该 ref；完全相同的 peer-check confirmed 包装会去重，两个不同的 confirmed 结果则不生成 permit</td><td>对象遍历顺序、结构化结果与文本包装的先后次序都不能替代唯一候选证明</td></tr>
+          <tr><td>工具结果资源上限</td><td>Hook 以迭代方式遍历工具结果，最多 64 层、4096 个节点和 256 KiB 嵌入 JSON；任一预算超限会让整次解析失败，包括结构化 remote-session 分类</td><td>超限前已找到的 candidate、confirmed 对象或本地地址不能作为局部证据继续使用</td></tr>
+          <tr><td>发送门禁</td><td>对 bridge 生成的 <code>apcs-...</code> 收件地址，本地 Hook 要求按 <code>party_channel_peers → ListAgents → party_channel_peer_check → SendMessage</code> 顺序完成；回复收到的 Cross-session 消息也必须重跑完整链路，入站消息携带的 reply address 只是未受信的路由 hint，不是身份、授权或 permit，只有新鲜发现和复核独立解析到同一精确地址时才能复用。只有固定 <code>mcp__agentparty-channel__...</code> peer 工具能写入候选和 permit，其他 MCP server 的同名工具会被忽略。只有精确的 Claude 内置 <code>ListAgents</code> 能生成 listing，精确的内置 <code>SendMessage</code> 能消费 permit；MCP lookalike 不能推进这两步。ListAgents 地址必须只出现一次；AgentParty 本地把方括号 ref 限为完整的 1–64 个字符，这是防御上限，不是 Claude 公布的协议长度。只要收件人中出现边界完整的 bridge 随机地址 token，前后空白、<code>@</code>、未闭合或超长 ref 等异常装饰也仍进入门禁并 fail closed，不会降格为普通 team 名。确认产生一个 30 秒、精确地址绑定、单次消费的 permit。MCP 先检查顶层 <code>SessionStart</code> arming receipt；任意插入工具、并行 PostToolBatch、地址替换、旧候选重放或超过 512 UTF-8 bytes 都会拒绝。发送后的 barrier 让同批后到 sibling 在执行前失败。顶层会话的所有精确内置 <code>SendMessage</code> 共用同一把 consume lock，并在锁内重新检查 barrier；普通 Claude team 收件人不需要 AgentParty permit，但不能用旧状态覆盖成功发送留下的 barrier。bridge 不把 gate 路径放入 Claude 全局环境，只通过 exec-form Hook 参数和 AgentParty MCP 专属 <code>env</code> 路由；隐藏 Hook 忽略继承变量。subagent 的普通收件人仍由 Claude 自己控制</td><td>这不是不可绕过的安全边界。Claude 官方说明 command Hook 无法启动、超时或非阻断退出时工具可能继续；若 sibling 的 PreToolUse 比 SendMessage 更早取得状态锁，仍可能先执行，但之后的 SendMessage 会因链条已清空而失败。同 UID 恶意进程仍不在这层隔离范围。内容类别仍是 advisory，Worker live-socket binding 与 Claude 自己的 inbound/permission 才是权威边界</td></tr>
+          <tr><td>Hook 内部异常</td><td><code>PreToolUse</code> 读取或写入私有 gate 状态时若抛错，隐藏命令固定返回 Claude 真正阻断工具调用的退出码 2，不会落到 CLI 通用的退出码 1</td><td>Hook 进程根本未启动、被 Claude 超时终止或被同 UID 进程干预时，仍不能据此宣称存在主机级安全边界</td></tr>
+          <tr><td>Hook 输入 envelope</td><td>stdin 必须是普通 JSON 对象，<code>hook_event_name</code> 只能是 <code>SessionStart</code>、<code>PreToolUse</code> 或 <code>PostToolBatch</code>；JSON 标量、数组、空对象和未知事件固定退出 2</td><td>“JSON.parse 成功”不表示这是可信 Hook 事件，也不能把未知结构当作无需处理的 no-op</td></tr>
+          <tr><td>Hook stdin 资源上限</td><td>AgentParty 以流式读取完整 stdin envelope，硬上限为 4 MiB；超限时在 JSON 解析前退出 2</td><td>没有完整 envelope 就不能安全判断是否为 <code>PreToolUse</code>，因此不能按未知或无关事件放行；这是 AgentParty 本地防御上限，不是 Claude 公布的协议限制</td></tr>
+          <tr><td>工具调用关联</td><td>每个相关 <code>PreToolUse</code> 在私有状态中记录 Claude 文档规定的 <code>tool_use_id</code> 和工具阶段；<code>PostToolBatch</code> 只有精确匹配当前 pending ID 与阶段时才能推进或清链。匹配当前调用但非单调用的 batch 只清链，不接受局部结果</td><td>旧调用迟到的结果、同 ID 的 lookalike 工具或不带 ID 的 envelope 都不能生成新 permit，也不能清除更新后的链或 send barrier</td></tr>
+          <tr><td>会话重武装</td><td>新的 <code>SessionStart</code> 会替换 armed session 并清空状态；它与会修改状态的 <code>PreToolUse</code>、<code>PostToolBatch</code> 共用 consume lock，三个入口均在持锁时重查 armed session。上一条 session 的事件即使先通过乐观检查再等待锁，也不能在重武装后读取、清空或消费新 session 的 candidates、listing、permit 或 send barrier</td><td>同一 launch 目录不表示两个 session 可共享许可；旧 session 携带的地址仍只是未受信路由 hint</td></tr>
+          <tr><td>消息内容</td><td>AgentParty 返回一条 advisory policy：默认只发冲突/状态摘要或 <code>execution_id</code>；不得让 peer 代做当前会话被拒绝或阻止的动作</td><td>Hook 只检查顺序、精确收件人和字节数，不理解语义；<code>SendMessage</code> 是 Claude 内置传输</td></tr>
+          <tr><td>投递结果</td><td>Claude 可能返回 delivered、held 或 refused；接收方仍按自己的 inbound 与 permission 设置处理</td><td>任何结果都不能推进 AgentParty delivery 状态</td></tr>
+          <tr><td>不可用降级</td><td>顶层 <code>SessionStart</code> 尚未武装、identity 未就绪、当前 runtime topology 缺失、presence 或 server-side comparison 失败时，分别返回 <code>local_gate_unarmed</code>、<code>identity_pending</code>、<code>topology_unavailable</code>、<code>presence_unavailable</code>、<code>comparison_unavailable</code> 和空 peers；不会拿同身份 sibling runtime 代替当前 Claude session。没有 <code>ListAgents</code>/<code>SendMessage</code> 时停止协调，Channel 主链继续工作</td><td>空 peers 不代表没有其他会话；不得转读 Claude 私有注册文件或 socket</td></tr>
+        </tbody>
+      </table>
+      <p>
+        任务正文仍需经 claim → accept 两阶段领取。Cross-session 只能提前提醒另一个本地会话，不能替代
+        AgentParty 的所有权、租约、执行状态或 linked reply。跨机器消息还会经过 Anthropic 服务；这一版
+        只自动关联当前 Worker 返回的同本地安装候选，不把“远端可达”混进本地资源冲突判断。
+      </p>
+      <p>
+        Claude 的新鲜 <code>ListAgents</code> 行才是发送地址来源；匹配后调用
+        <code>party_channel_peer_check</code>，原样提交首轮 hint 的 agent、display_name 和 candidate_ref。
+        只有 <code>availability=confirmed</code> 才能立即复制 ListAgents 行的精确 address 发送；出现
+        <code>[ref]</code> 时连同 ref 一起使用，避免同名 in-process agent 抢占 bare name。确认后若调用了其他工具或执行了其他动作，
+        必须重新检查。这个复核把 AgentParty 侧的换会话竞态压到发送前，但它不把 Claude 的地址绑定交给 Worker；
+        Claude 地址仍只来自 ListAgents。AgentParty 的本地
+        delivery consumer 锁仍按 <code>server + token + channel</code> 互斥：同一凭据不能靠随机 Claude 名称绕过
+        单实例保护。典型 Cross-session 协作对象是同一频道内使用不同 agent/token 的两个活会话。
+      </p>
+      <aside>
+        Claude 原生 Cross-session 传输的真实验收入口：<code>bun scripts/verify-claude-cross-session.ts</code>。脚本会启动两个一次性 Claude
+        会话，并且只有同时观察到两个不同的唯一 <code>system/init.session_id</code>、receiver socket 初始化、sender 恰好调用一次
+        <code>ListAgents</code>、从其返回值取得唯一精确地址、随后恰好调用一次 <code>SendMessage</code> 向该地址发送随机 marker，
+        且该发送产生唯一、非错误的直接 result 才会继续。receiver 不再固定 <code>sleep 20</code>；它在一次 Bash 调用中等待
+        verifier 私有目录里的 0600 信号文件，harness 只在观察到上述发送 result 后创建该文件。最终还要在 receiver 唯一
+        <code>system/init</code> 后观察到 Bash result，再观察到恰好一条同 <code>session_id</code> 的纯文本主会话 inbound user marker。
+        信号文件只协调时序；通过仍同时要求 <code>timing_barrier_intact=true</code>、发送 result、Bash result 和入站 marker。
+        缺失或相同 session ID、错误或重复 result、提前 marker、重放 prompt、不是严格布尔值的 <code>isReplay</code>，以及 <code>agent_id</code> 或
+        <code>parent_tool_use_id</code> 非空的子 agent 事件都会被排除。版本检查、进程存活
+        或 socket 路径本身都不算消息送达证明。它不证明 AgentParty 的 topology、MCP hint 或 Channel
+        已在真实 Claude 会话中联通，也没有 <code>candidate_ref</code> 或
+        <code>party_channel_peer_check</code> 这道发送前复核；这些只能由下面的 AgentParty 全链路验收证明。
+        该原生验收会产生真实模型调用；两个进程退出共用同一个 60 秒总时限，任一侧非零退出会立即终止另一侧隔离进程组。
+        receiver 初始化使用一个 15 秒 readiness 时限；初始化前进程退出会立即失败，不再等满时限。
+        两个主进程退出后还会先终止仍持有 pipe 的后代，再排空证据流。失败产物保留在临时目录，成功默认清理。
+        正式验收前可运行 <code>bun scripts/verify-claude-cross-session.ts --preflight-only</code>。这条命令只执行
+        有截止时间的 <code>claude --version</code> 与 <code>claude auth status</code>，输出
+        <code>agentparty.claude-cross-session-native-preflight.v1</code>，并在任何 <code>claude -p</code> 模型会话启动前退出。
+        输出中的 <code>model_calls_started=false</code> 与 <code>delivery_verified=false</code> 是固定边界；
+        <code>blockers</code> 会同时保留已确认未登录、认证探针不可用、不支持的 provider、feature flag 求值被禁用、
+        旧版本 Claude 和平台不支持等本机问题。<code>ready</code> 只表示本机静态前提可用，不是 Claude 注册、原生送达、
+        AgentParty topology 或 Worker 部署证明。
+        未知或重复参数仍输出同一 schema，状态为 <code>invalid_request</code>、
+        <code>error_code=invalid_arguments</code>，并在任何 Claude 探针前以退出码 9 结束。未分类错误输出
+        <code>internal_error</code> 和退出码 1；两种失败都不回显参数或底层异常文本。
+        原生完整验收的所有非 help 结果也使用 acceptance v1 schema。失败阶段只取
+        <code>request|preflight|receiver_startup|execution|evidence|internal</code>，并带稳定 <code>error_code</code>。
+        若本机前提在先前预检后变化，完整命令会嵌入一份新的 <code>preflight</code> 结果，且
+        <code>model_calls_started=false</code>。receiver 启动或执行阶段的原始诊断只保存在返回的证据目录中，
+        不进入 stdout/stderr。证据不足使用 <code>failure_phase=evidence</code>，不会伪装成进程失败；只有完整 live
+        证据才允许 <code>delivery_verified=true</code>。
+      </aside>
+      <aside>
+        AgentParty 全链路验收入口：先准备同一真实频道内两个不同 agent 的 0600 配置文件，再运行
+        <code>party bridge claude --verify --channel … --receiver-config /path/to/receiver.json --sender-config /path/to/sender.json --receiver-cwd /path/to/receiver-worktree --sender-cwd /path/to/sender-worktree --preflight-only</code>。
+        发布二进制已内置验收器，不要求源码仓库或 Bun。只有准备启动两个真实模型会话时才移除
+        <code>--preflight-only</code>。验收器通过当前这份 <code>party</code> 可执行文件启动两个
+        <code>party bridge claude --cross-session required</code>，不会混用另一份全局安装。所有预检结果，包括参数错误，
+        都固定输出 <code>model_calls_started=false</code> 和 <code>delivery_verified=false</code>。
+        嵌套的 <code>lifecycle</code> 对象复用 bridge 的 Plugin-only 检查；Plugin 缺失、禁用、版本不匹配、bundle
+        无效或状态不可读会进入 <code>blockers</code>，主状态为 <code>plugin_lifecycle_unavailable</code>、退出码 11，
+        且不会启动模型。它可以与 auth、provider、Worker 等独立问题同时出现。
+        完整 live 验收还会为 receiver 和 sender 各轮询最多 10 秒的频道 presence，要求
+        <code>receiver_lifecycle_activity_observed=true</code> 与
+        <code>sender_lifecycle_activity_observed=true</code>。activity 必须属于对应的 live daemon 身份，且时间不早于
+        该侧进程启动；历史、离线、watch/observer 或其他身份的 activity 都不能证明 Marketplace Hook 已运行。
+        全链路只在以下证据按顺序全部出现时通过：
+        两个 token 分别解析为不同 agent；顶层 <code>SessionStart</code> Hook 保持零 stdout，避免把验收标记写入模型上下文；
+        bridge 在 Claude 仍运行时观察私有 arming 文件。普通启动在武装后立即向 bridge stderr 输出结构化回执；
+        全链路验收让 bridge 在 verifier 的 0700 私有目录中以 0600 模式独占创建回执文件，且该路径在任何 Claude probe
+        或子进程启动前从环境中删除，已存在的文件不会被覆盖。每条回执的
+        随机 <code>apcs-...</code> 地址和 session ID 必须分别匹配同一进程的启动行与唯一
+        <code>system/init.session_id</code>（最终分别记为 <code>receiver_session_start_armed=true</code> 与
+        <code>sender_session_start_armed=true</code>），并要求 <code>distinct_claude_session_ids=true</code> 与
+        <code>distinct_bridge_addresses=true</code>；同一 session 或同一生成地址的两份回执不能算双会话。sender 的
+        peers、ListAgents、peer_check、SendMessage 及其结果都必须位于
+        sender 唯一 <code>system/init</code> 之后并带同一 <code>session_id</code>。恰好一次工具调用仍按完整流计数，因此外来
+        session 的事件不能补齐步骤，外来 session 的重复调用也会让验收失败。每一步必须来自 Claude stream envelope 中
+        顶层、直接且单独出现的 <code>tool_use</code> 或 <code>tool_result</code> 内容块，步骤之间不能插入无关工具；嵌套仿造对象、
+        subagent 子事件和并行批次里的 sibling result 都不能补链。live Hook 把任何非空 <code>agent_id</code> 都当作子 agent；
+        畸形 sibling 不会被过滤掉并把批次降成单调用。sender 的
+        peers、ListAgents、peer_check、SendMessage 和等待边界的 result 还必须分别是完整流中该 tool-use ID 唯一且非错误的结果；
+        外来 session 或子 agent 中同 ID 的重复 result 会让对应阶段失效；sender 调用
+        <code>party_channel_peers</code> 并收到带 candidate_ref 的唯一 hint、随后 <code>ListAgents</code> 返回同名地址、
+        <code>party_channel_peer_check</code> 对原候选返回 confirmed、其 <code>send_to</code> 等于刚才的精确 ListAgents 地址，且没有其他工具插在确认与发送之间、
+        <code>SendMessage</code> 对该地址发送随机 marker、receiver 唯一 <code>system/init</code> 后恰好一条同
+        <code>session_id</code> 的纯文本主会话 inbound user 事件观察到该 marker；随后 receiver 不能直接信任入站 reply address，
+        必须针对 sender 独立重跑 peers、ListAgents、peer_check、SendMessage 完整链，发送另一枚 reply marker，并由 sender 唯一
+        <code>system/init</code> 后同 session 的纯文本主会话入站事件观察到。每个方向还要有一条与该次发送绑定、非错误且唯一的
+        <code>SendMessage</code> result。任一方向只看到 marker、没有对应门禁链都不能通过。
+        两个 cwd 参数可省略，各自默认使用 verifier 的当前目录。传入参数后，两个 bridge 子进程分别在规范化后的目录中启动。
+        verifier 在模型调用前计算最强关系：<code>same_worktree</code>、<code>same_workspace</code> 或
+        <code>same_local_installation</code>，并用 <code>expected_topology_relation</code> 报告。两个方向的 hint、复核结果和
+        coordination action 必须与该关系一致。verifier 能证明两个进程由本机启动；topology 关系仍是
+        <code>client_asserted</code>，不是身份或授权证明。保留的失败证据会脱敏两个 cwd 路径。
+        两条 headless session 都会接收入站消息，所以 verifier 通过 bridge 给两端设置
+        <code>--cross-session-inbound accept</code>；<code>-p</code> session 无法处理默认 hold 产生的批准对话框。
+        两端不靠固定 sleep 对齐时序，而是在一次 Bash 工具调用里等待 verifier 私有目录中的 0600 信号文件；harness 只有从另一端 stream
+        观察到匹配的、顶层单调用 <code>SendMessage</code> tool result 后才独占创建文件。Claude 随后在工具边界读取已经排队的消息。
+        信号文件只协调时序，本身不算投递证据；最终还要求 <code>timing_barriers_intact=true</code>，文件预先存在或无法写入都会失败。
+        stream 还要独立证明 receiver 的等待结果早于首个 marker、sender 的等待结果早于 reply marker；信号或孤立 marker
+        不能补齐这两个有序工具边界。
+        两个 bridge 退出共用同一个 180 秒总时限；任一侧非零退出会立即终止另一侧隔离进程组，零码退出则可先于仍在完成合法往返的另一侧。
+        两个 bridge 主进程都退出后，verifier 会先终止仍持有 pipe 的后代，再排空证据流，避免把父进程退出误当成完整清理。
+        每个 sender/receiver 的 stdout 与 stderr 分别受 8 MiB 总量、1 MiB 单行和 8192 行上限约束；任一流越界会立即停止两个隔离进程组，
+        返回 <code>error_code=session_output_limit_exceeded</code>，并只报告流名、限制类型和阈值，不把越界内容写进结果。
+        <code>claude --version</code> 与 <code>claude auth status</code> 的短探针另有每流 1 MiB 上限；超时或越界都会终止其 detached 进程组。
+        receiver 的 Claude/MCP 初始化、bridge 启动地址，以及匹配该地址与唯一 <code>system/init.session_id</code> 的武装回执，
+        共用同一个 20 秒 readiness 时限；三项未齐时 receiver 提前退出，
+        verifier 会在启动 sender 前立即失败。
+        缺失/不同 session ID、重复 marker、
+        <code>tool_result</code>、重放 prompt、subagent 子事件、普通模型文本、
+        提前猜地址、错 hint、prompt echo 或单纯 socket 存在都不能通过。远程 server 必须使用 HTTPS；
+        token 不进入 argv；源配置只读，运行时副本只进入 0600 临时目录且无论成功失败都删除，保留的失败证据会移除 token 与私有配置路径。
+        同一命令追加 <code>--preflight-only</code> 时不启动模型，也不要求另一条 live topology；它只验证
+        Claude 版本/登录状态、两个配置的身份与频道访问，以及部署端 <code>runtime-peers</code> 协议，适合发布前先拆开定位环境阻塞。
+        预检和完整验收都输出
+        <code>cross_machine_policy_on_launch=explicit_approval_required</code>；它描述 verifier 启动 bridge 时会要求的策略，
+        不表示该策略已经应用，更不表示两个会话位于同一台机器。
+        预检只把该端点的 HTTP 404 或明确返回非 v3 协议版本判为 <code>worker_upgrade_required</code>；鉴权、服务故障或无法解析的畸形响应会单独标成
+        <code>runtime_peer_unavailable</code>，不会伪装成升级结论。新增的 <code>blockers</code> 数组会同时列出全部可独立判定的
+        鉴权、provider、feature flag 与 runtime 阻塞，因此 auth 探针损坏、不受支持的 provider 与旧 Worker 可以一起出现。
+        <code>claude_auth_status</code> 把确认未登录的 <code>logged_out</code> 与探针不可用的 <code>unavailable</code> 分开；只有前者应提示
+        <code>claude auth login</code>。已有的 ready/auth-required/Worker/runtime 主 <code>status</code> 与退出码保持兼容。
+        输出只公开清理后的 <code>claude_api_provider</code> 和冲突变量名，不公开变量值。receiver 与 sender 的身份、频道访问分别用
+        <code>receiver_identity</code>/<code>sender_identity</code> 和 <code>receiver_channel_access</code>/<code>sender_channel_access</code>
+        报告。token 撤销时仍输出 JSON：主状态为 <code>agentparty_unavailable</code>，每一侧分别带 blocker 与 HTTP 状态；依赖身份的检查写
+        <code>not_checked</code>，不会退化成裸 <code>FAIL</code> 或伪装成端点故障。启动参数、配置和本机条件也使用同一份 v1 JSON：无效输入返回
+        <code>invalid_request</code>/<code>error_code</code> 和退出码 9；本机依赖不可用返回 <code>environment_unavailable</code> 和退出码 10；
+        未分类异常只返回 <code>internal_error</code> 和退出码 1，不回显配置路径、token 或底层异常全文。空数组只表示静态前提已就绪，不是注册或投递证明。
+        AgentParty 完整验收的所有非 help 结果使用 v2 acceptance schema。脚本在启动任一模型前执行与
+        <code>--preflight-only</code> 相同的完整静态检查；失败时嵌入该结果，并保持
+        <code>model_calls_started=false</code>。稳定的
+        <code>failure_phase=request|preflight|receiver_startup|execution|evidence|internal</code> 与
+        <code>error_code</code> 区分参数、Worker/auth/topology 前提、bridge 启动、执行和证据不足。原始 bridge
+        输出只进入已脱敏 token 与私有路径的证据文件；完整双向门禁链是
+        <code>delivery_verified=true</code> 的唯一来源。
+        模型调用前还会读取不走缓存的 <code>/api/health</code>：预检输出 <code>worker_deployment_status</code> 及 version、
+        40 位 commit、部署时间；远程 server 缺失或畸形 metadata 时加入 <code>worker_deployment_unavailable</code>，并归为
+        <code>worker_upgrade_required</code>。通过的远程 v2 验收原样写入 <code>worker_deployment</code>，把往返证据绑定到受测 Worker 构建。
+        loopback 开发环境可标为 <code>worker_deployment_status=development_unversioned</code> 后继续，但这不是发布证明。
+        Worker 发布脚本先用 runtime smoke agent token 调用 <code>/api/me</code> 和频道列表，并检查发布机具备 WebSocket 客户端；
+        具名 agent、目标频道访问和本地客户端都确认后，才开始迁移或 deploy。这个阶段输出
+        <code>protocol_checked=false</code>。部署后，脚本临时建立两条已鉴权 WebSocket，
+        使用同一个随机 <code>node_ref</code> 和不同 workspace/worktree 引用。每端的 topology <code>hello</code> 都要经过
+        应用队列 ping/pong 顺序屏障；随后只接受 v3、<code>caller_binding=live_socket</code>，以及唯一可寻址的
+        <code>same_local_installation</code> Claude 候选。脚本等待两条连接在有限时限内完成关闭握手，输出
+        <code>sockets_closed=true</code> 后才继续写路径 smoke；
+        响应不得包含请求侧的四类原始 topology ref。这能证明线上 Worker 的 live-socket 绑定、拓扑比较和引用脱敏，
+        但没有发送 Channel 或 Claude 消息，不能算 Cross-session 投递证据。
+        <code>--capability-only</code> 只保留为较弱的空 peer 端点诊断。
+        本地发布只检查会进入 Worker bundle 或静态资源的源码范围，但同时覆盖未跟踪文件；这既防止未记录代码借用旧 commit 发布，
+        也不会让 CLI、文档等非部署改动卡住 Worker 发布。
+      </aside>
     </section>
   </main>
 

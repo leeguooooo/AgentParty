@@ -91,7 +91,8 @@ export interface Item {
   // 「还在干、活到 T」与「卡死」。null = 无活跃任务。
   currentTask: number | null;
   heartbeatAt: number | null; // 最近心跳（epoch ms）；据 now-heartbeatAt 算新鲜度
-  // 模型 session 活动（#602）：具体在干什么（工具名/等权限/压缩上下文…）。服务端只在活跃任务期间下发。
+  // 模型 session 活动（#602/#615）：具体在干什么（工具名/等权限/压缩上下文…）。
+  // serve 可随任务心跳上报；party claude 的交互 lane 没有 currentTask 也会独立直报。
   activity: NonNullable<PresenceEntry["activity"]> | null;
   // 探活分级（#603）：listening = 服务端从 delivery 租约派生的「在线但没在听」；
   // runnerHealth = serve 自报的「在线但干不动」（连败计数 + 最后错误）。

@@ -8,6 +8,8 @@ CLI_PACKAGE=""
 DESKTOP_PACKAGE=""
 DESKTOP_CARGO=""
 DESKTOP_CARGO_LOCK=""
+CLAUDE_PLUGIN_MANIFEST=""
+CODEX_PLUGIN_MANIFEST=""
 CLI_PACKAGE_BACKUP=""
 DESKTOP_PACKAGE_BACKUP=""
 CLI_PACKAGE_BUMPED=""
@@ -16,6 +18,10 @@ DESKTOP_CARGO_BACKUP=""
 DESKTOP_CARGO_LOCK_BACKUP=""
 DESKTOP_CARGO_BUMPED=""
 DESKTOP_CARGO_LOCK_BUMPED=""
+CLAUDE_PLUGIN_MANIFEST_BACKUP=""
+CODEX_PLUGIN_MANIFEST_BACKUP=""
+CLAUDE_PLUGIN_MANIFEST_BUMPED=""
+CODEX_PLUGIN_MANIFEST_BUMPED=""
 RESTORE_PENDING=0
 INDEX_PENDING=0
 BUMPED_SNAPSHOTS_COMPLETE=0
@@ -184,6 +190,8 @@ restore_package_versions() {
     git show ":$DESKTOP_PACKAGE" 2>/dev/null | cmp -s - "$DESKTOP_PACKAGE_BUMPED" || staged_changed+=("$DESKTOP_PACKAGE")
     [[ -z "$DESKTOP_CARGO" ]] || git show ":$DESKTOP_CARGO" 2>/dev/null | cmp -s - "$DESKTOP_CARGO_BUMPED" || staged_changed+=("$DESKTOP_CARGO")
     [[ -z "$DESKTOP_CARGO_LOCK" ]] || git show ":$DESKTOP_CARGO_LOCK" 2>/dev/null | cmp -s - "$DESKTOP_CARGO_LOCK_BUMPED" || staged_changed+=("$DESKTOP_CARGO_LOCK")
+    [[ -z "$CLAUDE_PLUGIN_MANIFEST" ]] || git show ":$CLAUDE_PLUGIN_MANIFEST" 2>/dev/null | cmp -s - "$CLAUDE_PLUGIN_MANIFEST_BUMPED" || staged_changed+=("$CLAUDE_PLUGIN_MANIFEST")
+    [[ -z "$CODEX_PLUGIN_MANIFEST" ]] || git show ":$CODEX_PLUGIN_MANIFEST" 2>/dev/null | cmp -s - "$CODEX_PLUGIN_MANIFEST_BUMPED" || staged_changed+=("$CODEX_PLUGIN_MANIFEST")
     if (( ${#staged_changed[@]} > 0 )); then
       echo "!! package 内容在 bump 后被修改或重新暂存，未自动恢复 index 或工作树: ${staged_changed[*]}。请手工核对。" >&2
       return 1
@@ -195,6 +203,8 @@ restore_package_versions() {
     cmp -s "$DESKTOP_PACKAGE" "$DESKTOP_PACKAGE_BUMPED" || changed+=("$DESKTOP_PACKAGE")
     [[ -z "$DESKTOP_CARGO" ]] || cmp -s "$DESKTOP_CARGO" "$DESKTOP_CARGO_BUMPED" || changed+=("$DESKTOP_CARGO")
     [[ -z "$DESKTOP_CARGO_LOCK" ]] || cmp -s "$DESKTOP_CARGO_LOCK" "$DESKTOP_CARGO_LOCK_BUMPED" || changed+=("$DESKTOP_CARGO_LOCK")
+    [[ -z "$CLAUDE_PLUGIN_MANIFEST" ]] || cmp -s "$CLAUDE_PLUGIN_MANIFEST" "$CLAUDE_PLUGIN_MANIFEST_BUMPED" || changed+=("$CLAUDE_PLUGIN_MANIFEST")
+    [[ -z "$CODEX_PLUGIN_MANIFEST" ]] || cmp -s "$CODEX_PLUGIN_MANIFEST" "$CODEX_PLUGIN_MANIFEST_BUMPED" || changed+=("$CODEX_PLUGIN_MANIFEST")
     if (( ${#changed[@]} > 0 )); then
       echo "!! package 内容在 bump 后被修改，未自动恢复 index 或工作树: ${changed[*]}。请手工核对备份文件。" >&2
       return 1
@@ -207,18 +217,22 @@ restore_package_versions() {
     local staged=("$CLI_PACKAGE" "$DESKTOP_PACKAGE")
     [[ -z "$DESKTOP_CARGO" ]] || staged+=("$DESKTOP_CARGO")
     [[ -z "$DESKTOP_CARGO_LOCK" ]] || staged+=("$DESKTOP_CARGO_LOCK")
+    [[ -z "$CLAUDE_PLUGIN_MANIFEST" ]] || staged+=("$CLAUDE_PLUGIN_MANIFEST")
+    [[ -z "$CODEX_PLUGIN_MANIFEST" ]] || staged+=("$CODEX_PLUGIN_MANIFEST")
     git restore --staged -- "${staged[@]}"
   fi
   cp "$CLI_PACKAGE_BACKUP" "$CLI_PACKAGE"
   cp "$DESKTOP_PACKAGE_BACKUP" "$DESKTOP_PACKAGE"
   [[ -z "$DESKTOP_CARGO" ]] || cp "$DESKTOP_CARGO_BACKUP" "$DESKTOP_CARGO"
   [[ -z "$DESKTOP_CARGO_LOCK" ]] || cp "$DESKTOP_CARGO_LOCK_BACKUP" "$DESKTOP_CARGO_LOCK"
-  echo "!! 已恢复 CLI 与 desktop 的发布版本文件" >&2
+  [[ -z "$CLAUDE_PLUGIN_MANIFEST" ]] || cp "$CLAUDE_PLUGIN_MANIFEST_BACKUP" "$CLAUDE_PLUGIN_MANIFEST"
+  [[ -z "$CODEX_PLUGIN_MANIFEST" ]] || cp "$CODEX_PLUGIN_MANIFEST_BACKUP" "$CODEX_PLUGIN_MANIFEST"
+  echo "!! 已恢复 CLI、desktop 与 plugin 的发布版本文件" >&2
 }
 
 remove_release_temp_files() {
   local file
-  for file in "$CLI_PACKAGE_BACKUP" "$DESKTOP_PACKAGE_BACKUP" "$DESKTOP_CARGO_BACKUP" "$DESKTOP_CARGO_LOCK_BACKUP" "$CLI_PACKAGE_BUMPED" "$DESKTOP_PACKAGE_BUMPED" "$DESKTOP_CARGO_BUMPED" "$DESKTOP_CARGO_LOCK_BUMPED"; do
+  for file in "$CLI_PACKAGE_BACKUP" "$DESKTOP_PACKAGE_BACKUP" "$DESKTOP_CARGO_BACKUP" "$DESKTOP_CARGO_LOCK_BACKUP" "$CLAUDE_PLUGIN_MANIFEST_BACKUP" "$CODEX_PLUGIN_MANIFEST_BACKUP" "$CLI_PACKAGE_BUMPED" "$DESKTOP_PACKAGE_BUMPED" "$DESKTOP_CARGO_BUMPED" "$DESKTOP_CARGO_LOCK_BUMPED" "$CLAUDE_PLUGIN_MANIFEST_BUMPED" "$CODEX_PLUGIN_MANIFEST_BUMPED"; do
     [[ -z "$file" ]] || rm -f "$file"
   done
 }
@@ -247,19 +261,27 @@ main() {
   DESKTOP_PACKAGE="desktop/package.json"
   DESKTOP_CARGO="desktop/src-tauri/Cargo.toml"
   DESKTOP_CARGO_LOCK="desktop/src-tauri/Cargo.lock"
+  CLAUDE_PLUGIN_MANIFEST="plugins/agentparty/.claude-plugin/plugin.json"
+  CODEX_PLUGIN_MANIFEST="plugins/agentparty/.codex-plugin/plugin.json"
   trap cleanup_release_version EXIT
   CLI_PACKAGE_BACKUP=$(mktemp)
   DESKTOP_PACKAGE_BACKUP=$(mktemp)
   DESKTOP_CARGO_BACKUP=$(mktemp)
   DESKTOP_CARGO_LOCK_BACKUP=$(mktemp)
+  CLAUDE_PLUGIN_MANIFEST_BACKUP=$(mktemp)
+  CODEX_PLUGIN_MANIFEST_BACKUP=$(mktemp)
   CLI_PACKAGE_BUMPED=$(mktemp)
   DESKTOP_PACKAGE_BUMPED=$(mktemp)
   DESKTOP_CARGO_BUMPED=$(mktemp)
   DESKTOP_CARGO_LOCK_BUMPED=$(mktemp)
+  CLAUDE_PLUGIN_MANIFEST_BUMPED=$(mktemp)
+  CODEX_PLUGIN_MANIFEST_BUMPED=$(mktemp)
   cp "$CLI_PACKAGE" "$CLI_PACKAGE_BACKUP"
   cp "$DESKTOP_PACKAGE" "$DESKTOP_PACKAGE_BACKUP"
   cp "$DESKTOP_CARGO" "$DESKTOP_CARGO_BACKUP"
   cp "$DESKTOP_CARGO_LOCK" "$DESKTOP_CARGO_LOCK_BACKUP"
+  cp "$CLAUDE_PLUGIN_MANIFEST" "$CLAUDE_PLUGIN_MANIFEST_BACKUP"
+  cp "$CODEX_PLUGIN_MANIFEST" "$CODEX_PLUGIN_MANIFEST_BACKUP"
 
   # 1) bump + 本地完整门禁（与 CI 同一 bun run check；先在本地挂掉比在 CI 挂便宜）
   echo "== 同步 package 版本到 $VER =="
@@ -269,6 +291,8 @@ main() {
   cp "$DESKTOP_PACKAGE" "$DESKTOP_PACKAGE_BUMPED"
   cp "$DESKTOP_CARGO" "$DESKTOP_CARGO_BUMPED"
   cp "$DESKTOP_CARGO_LOCK" "$DESKTOP_CARGO_LOCK_BUMPED"
+  cp "$CLAUDE_PLUGIN_MANIFEST" "$CLAUDE_PLUGIN_MANIFEST_BUMPED"
+  cp "$CODEX_PLUGIN_MANIFEST" "$CODEX_PLUGIN_MANIFEST_BUMPED"
   BUMPED_SNAPSHOTS_COMPLETE=1
   echo "== 本地门禁 bun run check =="
   if ! bun run check; then
@@ -281,7 +305,8 @@ main() {
   fi
 
   # 2) 提交 + tag + 推送
-  git add cli/package.json desktop/package.json desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock
+  git add cli/package.json desktop/package.json desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock \
+    plugins/agentparty/.claude-plugin/plugin.json plugins/agentparty/.codex-plugin/plugin.json
   INDEX_PENDING=1
   git commit -m "chore(release): $TAG" -m "Claude-Session: ${CLAUDE_SESSION_URL:-scripts/release.sh}"
   disable_release_cleanup

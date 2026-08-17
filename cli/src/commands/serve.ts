@@ -61,6 +61,7 @@ import {
 } from "../statusline-cache";
 import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type Identity, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
+import { buildRuntimeTopology } from "../runtime-topology";
 import { buildContext } from "./status";
 import {
   blockRunnerContinuation,
@@ -2583,16 +2584,24 @@ export function claudeHookSettingsJson(execPath: string = process.execPath): str
   // 反斜杠都盖住；双引号在 POSIX sh 与 cmd 下都成立——单引号会破 Windows）。裸 `party` 不引，
   // 保持 PATH 查找语义。路径里的 `$` 反引号属 POSIX 双引号残余风险，party 安装路径不含此类字符。
   const command = `${partyBin === "party" ? partyBin : JSON.stringify(partyBin)} hook report`;
+  const stopGuardCommand = `${partyBin === "party" ? partyBin : JSON.stringify(partyBin)} hook stop-guard`;
   const hook = [{ hooks: [{ type: "command", command, timeout: 10 }] }];
+  const stopGuardHook = [{ hooks: [{ type: "command", command: stopGuardCommand, timeout: 10 }] }];
   return JSON.stringify({
     hooks: {
       PreToolUse: hook,
       PostToolUse: hook,
+      PostToolUseFailure: hook,
+      PermissionRequest: hook,
       Notification: hook,
-      Stop: hook,
+      Stop: stopGuardHook,
+      StopFailure: hook,
       SessionStart: hook,
       SessionEnd: hook,
       PreCompact: hook,
+      PostCompact: hook,
+      Elicitation: hook,
+      ElicitationResult: hook,
       UserPromptSubmit: hook,
     },
   });
@@ -4990,7 +4999,13 @@ export async function runServe(o: ServeOptions): Promise<number> {
   // 那种情况下两个 runner 落在同一棵 working tree 上：改文件、git checkout、跑构建、甚至 commit
   // 互相踩，而两边都以为自己在正常工作——损坏是静默的，此前只能靠 pgrep 偶然发现。
   // 不阻断（同目录并存有合法用法），但必须让它可见。
-  const runnerCwd = o.runnerCwd ?? o.builtinRunner?.workdir ?? o.sdkRunner?.workdir ?? process.cwd();
+  const runnerCwd =
+    o.runnerCwd ??
+    o.builtinRunner?.cwd ??
+    (o.builtinRunner?.repo ? join(o.builtinRunner.workdir, "repo") : o.builtinRunner?.workdir) ??
+    o.sdkRunner?.cwd ??
+    o.sdkRunner?.workdir ??
+    process.cwd();
   // 不受 --allow-multiple 影响：那个逃生舱解的是「同频道同身份的实例锁」，与「谁在用这个目录」
   // 是两件事。而且用了 --allow-multiple 的人恰恰更可能撞上同目录并发——那时更需要这条告警。
   const cwdClaim = claimRunnerCwd(runnerCwd, o.channel, lockDir);
@@ -5022,6 +5037,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
       onRevCursor: o.onRevCursor,
       onStatus: onWsStatus,
       inboundIdleTimeoutMs: o.inboundIdleTimeoutMs,
+      runtimeTopology: buildRuntimeTopology(o.server, runnerCwd),
     });
   } catch (error) {
     lock?.release?.();

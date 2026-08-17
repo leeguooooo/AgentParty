@@ -33,8 +33,21 @@ describe("activityFromHookEvent", () => {
       phase: "working",
       ts: NOW,
     });
+    expect(activityFromHookEvent({ hook_event_name: "PostToolUseFailure", tool_name: "Bash" }, NOW)).toEqual({
+      phase: "working",
+      ts: NOW,
+    });
+    expect(activityFromHookEvent({ hook_event_name: "PermissionRequest", tool_name: "Bash" }, NOW)).toEqual({
+      phase: "waiting_permission",
+      tool: "Bash",
+      ts: NOW,
+    });
     expect(activityFromHookEvent({ hook_event_name: "PreCompact" }, NOW)).toEqual({ phase: "compacting", ts: NOW });
+    expect(activityFromHookEvent({ hook_event_name: "PostCompact" }, NOW)).toEqual({ phase: "working", ts: NOW });
+    expect(activityFromHookEvent({ hook_event_name: "Elicitation" }, NOW)).toEqual({ phase: "waiting_input", ts: NOW });
+    expect(activityFromHookEvent({ hook_event_name: "ElicitationResult" }, NOW)).toEqual({ phase: "working", ts: NOW });
     expect(activityFromHookEvent({ hook_event_name: "Stop" }, NOW)).toEqual({ phase: "idle", ts: NOW });
+    expect(activityFromHookEvent({ hook_event_name: "StopFailure" }, NOW)).toEqual({ phase: "idle", ts: NOW });
     expect(activityFromHookEvent({ hook_event_name: "SessionEnd" }, NOW)).toEqual({ phase: "idle", ts: NOW });
   });
 
@@ -163,15 +176,32 @@ describe("party hook report end-to-end", () => {
 });
 
 describe("claudeHookSettingsJson", () => {
-  test("wires every lifecycle hook to `party hook report`", () => {
+  test("wires lifecycle reporting and the conditional Stop guard", () => {
     const settings = JSON.parse(claudeHookSettingsJson("/usr/local/bin/party")) as {
       hooks: Record<string, Array<{ hooks: Array<{ type: string; command: string; timeout: number }> }>>;
     };
-    for (const event of ["PreToolUse", "PostToolUse", "Notification", "Stop", "SessionStart", "SessionEnd", "PreCompact", "UserPromptSubmit"]) {
+    for (const event of [
+      "PreToolUse",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "PermissionRequest",
+      "Notification",
+      "Stop",
+      "StopFailure",
+      "SessionStart",
+      "SessionEnd",
+      "PreCompact",
+      "PostCompact",
+      "Elicitation",
+      "ElicitationResult",
+      "UserPromptSubmit",
+    ]) {
       const entry = settings.hooks[event]?.[0]?.hooks[0];
       expect(entry?.type).toBe("command");
       // 绝对路径一律加引号转义（不只空白路径）——引号在 POSIX sh 与 cmd 下都成立
-      expect(entry?.command).toBe('"/usr/local/bin/party" hook report');
+      expect(entry?.command).toBe(
+        `"/usr/local/bin/party" hook ${event === "Stop" ? "stop-guard" : "report"}`,
+      );
       expect(entry?.timeout).toBe(10);
     }
   });
@@ -180,14 +210,14 @@ describe("claudeHookSettingsJson", () => {
     const settings = JSON.parse(claudeHookSettingsJson("/Applications/My Tools/party")) as {
       hooks: { Stop: Array<{ hooks: Array<{ command: string }> }> };
     };
-    expect(settings.hooks.Stop[0]!.hooks[0]!.command).toBe('"/Applications/My Tools/party" hook report');
+    expect(settings.hooks.Stop[0]!.hooks[0]!.command).toBe('"/Applications/My Tools/party" hook stop-guard');
   });
 
   test("falls back to bare `party` for non-party exec paths (bun dev)", () => {
     const settings = JSON.parse(claudeHookSettingsJson("/opt/homebrew/bin/bun")) as {
       hooks: { Stop: Array<{ hooks: Array<{ command: string }> }> };
     };
-    expect(settings.hooks.Stop[0]!.hooks[0]!.command).toBe("party hook report");
+    expect(settings.hooks.Stop[0]!.hooks[0]!.command).toBe("party hook stop-guard");
   });
 });
 

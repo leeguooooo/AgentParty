@@ -4,6 +4,10 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const workflow = readFileSync(resolve(import.meta.dir, "../.github/workflows/release.yml"), "utf8");
+const workerDeployWorkflow = readFileSync(
+  resolve(import.meta.dir, "../.github/workflows/worker-deploy.yml"),
+  "utf8",
+);
 const workflowDocument = Bun.YAML.parse(workflow) as {
   jobs: {
     release: {
@@ -36,12 +40,42 @@ const aggregateCheckJob = workflow.slice(
   workflow.indexOf("  check:\n"),
   workflow.indexOf("  build:\n"),
 );
+const cliBuildJob = workflow.slice(
+  workflow.indexOf("  build:\n"),
+  workflow.indexOf("  desktop:\n"),
+);
 
 function namedStep(job: string, name: string, nextName: string): string {
   return job.slice(job.indexOf(`      - name: ${name}`), job.indexOf(`      - name: ${nextName}`));
 }
 
 describe("desktop release workflow", () => {
+  test("waits for the exact tag/SHA Worker deploy before publishing any release", () => {
+    expect(workerDeployWorkflow).toContain('tags:\n      - "v*"');
+    expect(releaseJob).toContain("actions: read");
+    expect(releaseJob).toContain("name: wait for exact Worker deploy");
+    expect(releaseJob).toContain("timeout-minutes: 35");
+    expect(releaseJob).toContain("bun scripts/wait-worker-deploy.ts");
+    expect(releaseJob).toContain('--repository "$GITHUB_REPOSITORY"');
+    expect(releaseJob).toContain('--sha "$GITHUB_SHA"');
+    expect(releaseJob).toContain('--tag "$GITHUB_REF_NAME"');
+    expect(releaseJob.indexOf("name: wait for exact Worker deploy")).toBeLessThan(
+      releaseJob.indexOf("name: upload to release"),
+    );
+  });
+
+  test("runs Claude capability acceptance against the compiled release binary before packaging", () => {
+    expect(cliBuildJob).toContain("name: Claude capability binary acceptance");
+    expect(cliBuildJob).toContain("if: matrix.target == 'bun-linux-x64'");
+    expect(cliBuildJob).toContain(
+      "bun ../scripts/verify-cli-binary.ts --binary ./party --plugin-root ../plugins/agentparty",
+    );
+    expect(cliBuildJob.indexOf(
+      "bun ../scripts/verify-cli-binary.ts --binary ./party --plugin-root ../plugins/agentparty",
+    ))
+      .toBeLessThan(cliBuildJob.indexOf("- name: package"));
+  });
+
   test("checks desktop Rust and version consistency on macOS before full check passes", () => {
     expect(desktopCheckJob).toContain("runs-on: macos-14");
     expect(desktopCheckJob).toContain("if: needs.changes.outputs.cli_only != 'true'");

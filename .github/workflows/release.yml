@@ -39,15 +39,16 @@ jobs:
               - '!cli/**'
 
   # ── #9 pre-merge / release gate：每个 workspace 独立并行跑，墙上时间=最慢单个 ──
-  # 6 个检查区域（cli/worker/web/shared/scripts/desktop）互不依赖（worker vitest 用隔离的
+  # 7 个检查区域（cli/worker/web/shared/scripts/desktop/Claude Plugin）互不依赖（worker vitest 用隔离的
   # 空 assets 目录，不再需要 web/dist），原来一个 job 串行跑 `bun run check` 要 ~6min，
   # 拆并行后 ≈ 最慢那个 job。
   # 复用的 setup 步骤（checkout+bun+install cache+install）由 composite action 提供。
   #
-  # 快路径（#247）：纯 CLI 的 PR 只有 check-cli 真跑；worker/web/shared/scripts 靠
-  # `if: cli_only != 'true'` 跳过。fail-safe 方向不变——cli_only 只在 changes job 里
+  # 快路径（#247）：纯 CLI 的 PR 跑 check-cli 与轻量 check-plugin；worker/web/shared/scripts 靠
+  # `if: cli_only != 'true'` 跳过。Plugin 不能跳，因为 CLI 版本变化也会让 manifest 镜像漂移。
+  # fail-safe 方向不变——cli_only 只在 changes job 里
   # 按「PR + cli 变更 + 无任何非 cli 变更」判定，配错只多跑绝不漏测；tag/main push
-  # 非 PR，cli_only 恒 false，5 个 workspace 全跑。
+  # 非 PR，cli_only 恒 false，全部 workspace 与 Plugin gate 都跑。
 
   # cli 在两条路径下都要跑，所以无条件执行。bun test 原生支持 --shard：按文件切 6 片并行，
   # 墙上时间 ≈ 最重那一片而非全部串行（原 ~2m36s → ~1min）。tsc 单独一次跑，见 check-cli-types。
@@ -97,6 +98,31 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/bun-install
       - run: bun run check:${{ matrix.ws }}
+
+  # Marketplace Plugin is a released product surface, not just a directory our
+  # own tests can parse. Validate with Claude itself at both the minimum Plugin
+  # shell version and the current pinned acceptance version. This job is
+  # intentionally unconditional: a CLI-only version bump can still make the
+  # mirrored Plugin manifests stale.
+  check-plugin:
+    name: check Claude plugin (${{ matrix.claude }})
+    needs: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        claude: ["2.1.154", "2.1.232"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/bun-install
+      - name: verify Plugin mirror
+        run: bun scripts/sync-agentparty-plugin.ts --check
+      - name: Claude strict Plugin validation
+        run: bunx @anthropic-ai/claude-code@${{ matrix.claude }} plugin validate --strict plugins/agentparty
+      - name: isolated Marketplace install acceptance
+        run: bun scripts/verify-agentparty-plugin-install.ts --claude-package-version ${{ matrix.claude }}
 
   # worker 测试：43 个 spec 在单 workerd 里串行要 ~6min，是唯一长杆。
   # 用 vitest --shard 按文件切成 6 片并行——每片是独立 runner 上的全新 workerd，
@@ -237,6 +263,7 @@ jobs:
       - check-cli
       - check-cli-types
       - check-rest
+      - check-plugin
       - check-worker
       - check-worker-types
       - check-desktop
@@ -255,15 +282,16 @@ jobs:
           R_CLI: ${{ needs.check-cli.result }}
           R_CLI_TYPES: ${{ needs.check-cli-types.result }}
           R_REST: ${{ needs.check-rest.result }}
+          R_PLUGIN: ${{ needs.check-plugin.result }}
           R_WORKER: ${{ needs.check-worker.result }}
           R_WORKER_TYPES: ${{ needs.check-worker-types.result }}
           R_DESKTOP: ${{ needs.check-desktop.result }}
           R_VERSION: ${{ needs.version-contract.result }}
         run: |
           set -euo pipefail
-          echo "changes=$R_CHANGES cli=$R_CLI cli-types=$R_CLI_TYPES rest=$R_REST worker=$R_WORKER worker-types=$R_WORKER_TYPES desktop=$R_DESKTOP version=$R_VERSION"
+          echo "changes=$R_CHANGES cli=$R_CLI cli-types=$R_CLI_TYPES rest=$R_REST plugin=$R_PLUGIN worker=$R_WORKER worker-types=$R_WORKER_TYPES desktop=$R_DESKTOP version=$R_VERSION"
           fail=0
-          for r in "$R_CHANGES" "$R_CLI" "$R_CLI_TYPES" "$R_REST" "$R_WORKER" "$R_WORKER_TYPES" "$R_DESKTOP" "$R_VERSION"; do
+          for r in "$R_CHANGES" "$R_CLI" "$R_CLI_TYPES" "$R_REST" "$R_PLUGIN" "$R_WORKER" "$R_WORKER_TYPES" "$R_DESKTOP" "$R_VERSION"; do
             case "$r" in
               success|skipped) ;;
               *) echo "::error::required check job did not pass: result=$r"; fail=1 ;;
@@ -283,6 +311,7 @@ jobs:
       - check-cli
       - check-cli-types
       - check-rest
+      - check-plugin
       - check-worker
       - check-worker-types
       - version-contract
@@ -349,6 +378,13 @@ jobs:
           if [ -s /tmp/hj.out ]; then echo "FAIL: 错误路径 stdout 应为空"; cat /tmp/hj.out; exit 1; fi
           grep -q "no config" /tmp/hj.err
           echo "json contract smoke ✅"
+
+      # Claude 能力入口包含多层动态 import，Cross-session verifier 还跨出 cli/。
+      # 必须对真实 compile 产物验收，源码测试和插件目录校验不能替代这一层。
+      - name: Claude capability binary acceptance
+        if: matrix.target == 'bun-linux-x64'
+        working-directory: cli
+        run: bun ../scripts/verify-cli-binary.ts --binary ./party --plugin-root ../plugins/agentparty
 
       # 打 tar.gz + sha256（资产名与 install.sh/ps1 请求一致：party-<asset>.tar.gz）
       # sha256 文件里存 tar.gz 的名字，install 侧直接取第一段 hash 比对。
@@ -770,6 +806,7 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
+      actions: read # 等待同 tag/SHA 的 worker-deploy + runtime-peers v3 smoke 完成
       contents: write # 建/改 Release、上传 assets
     steps:
       - uses: actions/checkout@v7
@@ -777,6 +814,18 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.14"
+
+      # worker-deploy.yml 与本 workflow 由同一个 tag 并发触发。禁止在生产 Worker
+      # 尚未完成迁移、部署、runtime-peers v3 live smoke 时先公开 CLI/Plugin。
+      - name: wait for exact Worker deploy
+        timeout-minutes: 35
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          bun scripts/wait-worker-deploy.ts
+          --repository "$GITHUB_REPOSITORY"
+          --sha "$GITHUB_SHA"
+          --tag "$GITHUB_REF_NAME"
 
       - name: resolve updater key mode
         id: updater-key-mode

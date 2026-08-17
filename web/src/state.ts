@@ -398,8 +398,8 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
             current_task: frame.current_task,
             task_started_at: frame.task_started_at,
             heartbeat_at: frame.heartbeat_at,
-            // #608 的活动与探活徽章靠这三条：presence delta 每拍都下发（活动新鲜度与心跳同生共死），
-            // 漏合并则徽章只在 welcome 快照那一瞬亮起、第一拍增量就被抹掉（issue #632）。
+            // #608 的活动与探活徽章靠这三条：presence delta 会下发；serve activity 跟随心跳，
+            // interactive lane activity 可独立直报。漏合并会让徽章在增量到来时被错误抹掉（issue #632）。
             activity: frame.activity,
             runner_health: frame.runner_health,
             listening: frame.listening,

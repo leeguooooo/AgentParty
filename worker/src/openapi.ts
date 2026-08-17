@@ -640,6 +640,82 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/runtime-peers": {
+      post: {
+        summary: "compare a live agent runtime with other live channel runtimes",
+        description:
+          "The authenticated agent submits its server-scoped client-asserted topology and a purpose. " +
+          "topology_advisory returns relations only; capability_probe proves protocol availability and returns no peers; " +
+          "claude_cross_session returns Claude display names and candidate refs only after the Worker binds the request " +
+          "to exactly one live WebSocket with the same agent, token, and full topology. " +
+          "Clients must re-submit the same query immediately before SendMessage and require the exact " +
+          "candidate_ref to remain present. The candidate_ref is coordination-only, expires on disconnect " +
+          "or topology republish, becomes null when duplicate sockets make a session ambiguous, and is never " +
+          "an authentication, authorization, or delivery handle. " +
+          "Raw node/workspace/worktree/runtime refs are never returned.",
+        security: [{ bearer: [] }],
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["topology", "purpose"],
+                additionalProperties: false,
+                properties: {
+                  purpose: {
+                    type: "string",
+                    enum: ["topology_advisory", "capability_probe", "claude_cross_session"],
+                  },
+                  topology: {
+                    type: "object",
+                    required: [
+                      "version",
+                      "node_ref",
+                      "runtime_ref",
+                      "workspace_ref",
+                      "worktree_ref",
+                      "peer_scope",
+                      "evidence",
+                    ],
+                    additionalProperties: false,
+                    properties: {
+                      version: { type: "integer", enum: [1] },
+                      node_ref: { type: "string", pattern: "^node_[A-Za-z0-9_-]{8,64}$" },
+                      runtime_ref: { type: "string", pattern: "^runtime_[A-Za-z0-9_-]{8,64}$" },
+                      workspace_ref: { type: "string", pattern: "^workspace_[A-Za-z0-9_-]{8,64}$" },
+                      worktree_ref: { type: "string", pattern: "^worktree_[A-Za-z0-9_-]{8,64}$" },
+                      peer_scope: { type: "string", enum: ["local_installation"] },
+                      evidence: { type: "string", enum: ["client_asserted"] },
+                      harness_session: {
+                        type: "object",
+                        required: ["harness", "display_name"],
+                        additionalProperties: false,
+                        properties: {
+                          harness: { type: "string", enum: ["claude"] },
+                          display_name: {
+                            type: "string",
+                            pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "protocol v3 result with caller_binding and purpose-limited peer data" },
+          "400": { description: "caller is not an agent, purpose is missing, or topology is malformed" },
+          "409": { description: "claude_cross_session is not bound to exactly one live caller socket" },
+          "403": { description: "not allowed in this channel" },
+          "404": { description: "channel not found" },
+        },
+      },
+    },
     "/api/channels/{slug}/messages": {
       get: {
         summary: "message history",

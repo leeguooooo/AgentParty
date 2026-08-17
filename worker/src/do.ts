@@ -42,9 +42,15 @@ import {
   AGENT_ACTIVITY_TTL_MS,
   parseAgentActivity,
   parseRunnerHealth,
+  parseRuntimeTopology,
   type AgentActivity,
   type ListeningVerdict,
   type RunnerHealth,
+  type RuntimePeerDiscovery,
+  type RuntimePeerPurpose,
+  type RuntimePeerProjection,
+  type RuntimeTopology,
+  type RuntimeTopologyRelation,
   type AgentLineage,
   type AgentSessionInfo,
   type Attachment,
@@ -142,6 +148,14 @@ interface ConnState {
   watchClaimSeq?: number;
   // #434：本连接最近一次 hello 上报的 CLI package version，供 WS send 快照进消息 sender_client_version。
   clientVersion?: string;
+  /** Live socket topology; coordination metadata only, never an auth signal. */
+  runtimeTopology?: RuntimeTopology;
+  /**
+   * Ephemeral handle for the exact topology snapshot above. Regenerated on
+   * every valid topology hello so a disconnected or republished same-name
+   * Claude session cannot satisfy a later pre-send recheck.
+   */
+  runtimeCandidateRef?: string;
   // 只有显式声明能消费 delivery + delivery_update v1 的连接，才可领取 durable work。
   // 旧 serve 仍可观察 raw mention，但不能仅凭 serve_lease claim 被误当成 v1 executor。
   directedDeliveryV1?: boolean;
@@ -159,6 +173,20 @@ interface ConnState {
   upgradeRequired?: boolean;
   /** Set before closing a socket whose durable participant authority no longer matches D1. */
   authorizationRevoked?: boolean;
+  /** Set as soon as onClose begins so comparison reads cannot select a disconnecting peer. */
+  closing?: boolean;
+}
+
+function runtimeTopologiesEqual(left: RuntimeTopology, right: RuntimeTopology): boolean {
+  return left.version === right.version &&
+    left.node_ref === right.node_ref &&
+    left.runtime_ref === right.runtime_ref &&
+    left.workspace_ref === right.workspace_ref &&
+    left.worktree_ref === right.worktree_ref &&
+    left.peer_scope === right.peer_scope &&
+    left.evidence === right.evidence &&
+    left.harness_session?.harness === right.harness_session?.harness &&
+    left.harness_session?.display_name === right.harness_session?.display_name;
 }
 
 const LEGACY_SESSION_ID = "__legacy__";
@@ -2707,6 +2735,10 @@ export class ChannelDO extends Server<Env> {
       const nextDeliveryRecoveryV1 =
         st.deliveryRecoveryV1 === true || frame.delivery_recovery === "v1";
       const clientVersion = parseClientVersion(frame.client_version);
+      const runtimeTopology = parseRuntimeTopology(frame.runtime_topology);
+      const runtimeCandidateRef = runtimeTopology === undefined
+        ? undefined
+        : `candidate_${crypto.randomUUID().replaceAll("-", "")}`;
       const since = typeof frame.since === "number" && frame.since > 0 ? Math.floor(frame.since) : 0;
       if (clientVersion !== null) {
         this.recordClientVersion(st.name, connection.id, clientVersion, Date.now());
@@ -2728,10 +2760,16 @@ export class ChannelDO extends Server<Env> {
         directedDeliveryV1: nextDirectedDeliveryV1,
         deliveryRecoveryV1: nextDeliveryRecoveryV1,
         ...(clientVersion === null ? {} : { clientVersion }),
+        // Topology is a live snapshot, not a sticky capability. A later hello
+        // that omits or corrupts it must clear the previous assertion.
+        runtimeTopology: st.kind === "agent" ? runtimeTopology : undefined,
+        runtimeCandidateRef: st.kind === "agent" ? runtimeCandidateRef : undefined,
         helloSince: Math.max(st.helloSince ?? 0, since),
         helloPending: false,
         helloExpired: false,
       }) ?? st;
+      // Topology lives only on authenticated live connection state. It is read
+      // through the comparison endpoint and never broadcast as presence.
       const sinceRev =
         typeof frame.since_rev === "number" && frame.since_rev >= 0 ? Math.floor(frame.since_rev) : null;
       // 带 since_rev 的新客户端：修订快照只重放 rev_seq 更大的那些（issue #33）；
@@ -2981,6 +3019,10 @@ export class ChannelDO extends Server<Env> {
   }
 
   async onClose(connection: Connection<ConnState>) {
+    const initialState = connection.state;
+    if (initialState && initialState.closing !== true) {
+      connection.setState({ ...initialState, closing: true });
+    }
     // A close event is ordered after all data frames already received on this socket. Do not
     // reclaim its delivery/serve leases while one of those frames is still queued behind hello or
     // awaiting D1; otherwise a final replied update can be undone by premature disconnect cleanup.
@@ -5466,6 +5508,7 @@ export class ChannelDO extends Server<Env> {
       const projectsParticipantState =
         pathname === "/internal/summary" ||
         pathname === "/internal/presence" ||
+        pathname === "/internal/runtime-peers" ||
         pathname === "/internal/identities";
       if (
         (request.method !== "GET" || projectsParticipantState) &&
@@ -5507,6 +5550,54 @@ export class ChannelDO extends Server<Env> {
     if (url.pathname === "/internal/presence" && request.method === "GET") {
       // party who：完整 presence 快照（含 kind/wake/last_seen），供 CLI 分档展示谁在线/可唤醒
       return Response.json({ presence: this.presenceList() });
+    }
+    if (url.pathname === "/internal/runtime-peers" && request.method === "POST") {
+      const self = request.headers.get("x-ap-name");
+      const tokenHash = request.headers.get("x-ap-token-hash");
+      const body = (await request.json().catch(() => null)) as { topology?: unknown; purpose?: unknown } | null;
+      const topology = parseRuntimeTopology(body?.topology);
+      const purpose = body?.purpose;
+      if (
+        !self ||
+        !tokenHash ||
+        topology === undefined ||
+        !(
+          purpose === "topology_advisory" ||
+          purpose === "capability_probe" ||
+          purpose === "claude_cross_session"
+        )
+      ) {
+        return Response.json(
+          { error: { code: "bad_request", message: "a valid runtime topology and purpose are required" } },
+          { status: 400 },
+        );
+      }
+      // Cross-session discovery can trigger a Claude SendMessage, so a socket
+      // is not a usable peer merely because Cloudflare still considers it
+      // open. Refresh every attached token at the comparison boundary. A
+      // confirmed revocation is closed and excluded immediately; an unknown
+      // D1 result fails the whole comparison closed instead of presenting a
+      // possibly revoked session as a coordination target.
+      if (!(await this.closeInactiveConnections())) {
+        return Response.json(
+          { error: { code: "unavailable", message: "runtime peer authorization is temporarily unavailable" } },
+          { status: 503 },
+        );
+      }
+      const callerBinding = purpose === "capability_probe"
+        ? "capability_probe"
+        : purpose === "topology_advisory"
+          ? "unbound_advisory"
+          : this.hasUniqueLiveRuntimeCaller(self, tokenHash, topology)
+            ? "live_socket"
+            : null;
+      if (callerBinding === null) {
+        return Response.json(
+          { error: { code: "conflict", message: "runtime topology is not bound to one live caller socket" } },
+          { status: 409 },
+        );
+      }
+      return Response.json(this.runtimePeerDiscovery(self, topology, purpose, callerBinding));
     }
     if (url.pathname === "/internal/guard" && request.method === "GET") {
       // party channel guard status（#174）：熔断前就能读到 limit/streak/remaining。
@@ -7251,13 +7342,18 @@ export class ChannelDO extends Server<Env> {
       if (lastAccepted !== undefined && now - lastAccepted < 3_000) {
         return Response.json({ ok: true, throttled: true });
       }
-      this.activityPushAcceptedAt.set(name, now);
       const updated = this.ctx.storage.sql.exec(
         "UPDATE presence SET activity_json = ? WHERE name = ?",
         JSON.stringify(activity),
         name,
       );
-      if (updated.rowsWritten > 0) this.broadcastPresenceFor(name);
+      // A SessionStart hook can beat the Channel WebSocket welcome. Do not let
+      // that unattached write consume the rate-limit window: the detached hook
+      // helper gets a short bounded chance to attach after presence appears.
+      if (updated.rowsWritten > 0) {
+        this.activityPushAcceptedAt.set(name, now);
+        this.broadcastPresenceFor(name);
+      }
       return Response.json({ ok: true, attached: updated.rowsWritten > 0 });
     }
     // 人为暂停/恢复接待（issue #180）。授权在 worker 侧已判（moderator），do 只落状态。
@@ -9315,15 +9411,16 @@ export class ChannelDO extends Server<Env> {
   // 把所有活连接当成「已撤销」集体踢掉（#114）。
   // 现在：按 tokenHash 去重（多个连接常共享同一 token）→ 并行查 → 只有明确查到
   // 「已撤销/已过期」才踢；D1 报错返回 null（未知），保留连接。
-  private async closeInactiveConnections() {
+  private async closeInactiveConnections(): Promise<boolean> {
     const connections = [...this.getConnections<ConnState>()].filter((c) => c.state);
-    if (connections.length === 0) return;
+    if (connections.length === 0) return true;
     const hashes = [...new Set(connections.map((c) => c.state!.tokenHash))];
     const results = await Promise.all(hashes.map(async (h) => [h, await this.tokenActivity(h)] as const));
     const activity = new Map(results);
     for (const connection of connections) {
       if (activity.get(connection.state!.tokenHash) === false) this.closeRevokedConnection(connection);
     }
+    return results.every(([, active]) => active !== null);
   }
 
   // 三态：true=有效，false=确认已撤销/过期，null=查不出来（D1 抖动）。
@@ -9347,6 +9444,13 @@ export class ChannelDO extends Server<Env> {
   }
 
   private closeRevokedConnection(connection: Connection<ConnState>) {
+    const state = connection.state;
+    // Exclude the socket from coordination reads immediately, but do not mark
+    // it as participant-removal cleanup. onClose must still reclaim its
+    // delivery/serve leases for an ordinary token revocation.
+    if (state && state.closing !== true) {
+      connection.setState({ ...state, closing: true });
+    }
     this.sendFrame(connection, { type: "error", code: "unauthorized", message: "token revoked" });
     connection.close(1008, "revoked");
   }
@@ -11684,6 +11788,152 @@ export class ChannelDO extends Server<Env> {
       sessions.set(name, ids);
     }
     return sessions;
+  }
+
+  private hasUniqueLiveRuntimeCaller(
+    self: string,
+    tokenHash: string,
+    topology: RuntimeTopology,
+  ): boolean {
+    let matches = 0;
+    for (const connection of this.getConnections<ConnState>()) {
+      const state = connection.state;
+      if (
+        state?.name !== self ||
+        state.tokenHash !== tokenHash ||
+        state.helloPending !== false ||
+        state.helloExpired === true ||
+        state.authorizationRevoked === true ||
+        state.upgradeRequired === true ||
+        state.closing === true ||
+        state.runtimeTopology === undefined ||
+        !runtimeTopologiesEqual(state.runtimeTopology, topology)
+      ) continue;
+      matches += 1;
+      if (matches > 1) return false;
+    }
+    return matches === 1;
+  }
+
+  private runtimePeerDiscovery(
+    self: string,
+    own: RuntimeTopology,
+    purpose: RuntimePeerPurpose,
+    callerBinding: RuntimePeerDiscovery["caller_binding"],
+  ): RuntimePeerDiscovery {
+    const rank: Record<RuntimeTopologyRelation, number> = {
+      same_worktree: 0,
+      same_workspace: 1,
+      same_local_installation: 2,
+    };
+    const relation = (other: RuntimeTopology): RuntimeTopologyRelation | null =>
+      own.worktree_ref === other.worktree_ref
+        ? "same_worktree"
+        : own.workspace_ref === other.workspace_ref
+          ? "same_workspace"
+          : own.node_ref === other.node_ref
+            ? "same_local_installation"
+            : null;
+    const groups = new Map<string, {
+      agent: string;
+      same_identity: boolean;
+      relations: Map<RuntimeTopologyRelation, Set<string>>;
+      sessions: Map<string, {
+        display_name: string;
+        relation: RuntimeTopologyRelation;
+        runtimes: Set<string>;
+        candidates: Set<string>;
+      }>;
+    }>();
+    for (const connection of this.getConnections<ConnState>()) {
+      const state = connection.state;
+      const name = state?.name;
+      const topology = state?.runtimeTopology;
+      // `getConnections()` can retain a socket briefly while its close is in
+      // flight. Once the socket has failed the hello gate, lost participant
+      // authority, or entered an upgrade-required close, it is no longer a
+      // usable Cross-session coordination peer even if its last topology
+      // snapshot is still attached to connection state.
+      const comparable = state?.helloPending === false &&
+        state.helloExpired !== true &&
+        state.authorizationRevoked !== true &&
+        state.upgradeRequired !== true &&
+        state.closing !== true;
+      // runtime_ref identifies a local process, not an AgentParty principal. A
+      // resident process may host several differently named agents, so equal
+      // refs are "self" only when the authenticated identity also matches.
+      // Dropping every equal ref would hide exactly the same-process peer that
+      // topology discovery is meant to surface.
+      if (
+        !name ||
+        topology === undefined ||
+        !comparable ||
+        (name === self && topology.runtime_ref === own.runtime_ref)
+      ) continue;
+      const related = relation(topology);
+      if (related === null) continue;
+      const currentGroup = groups.get(name);
+      if (currentGroup === undefined && groups.size >= 64) continue;
+      const group = currentGroup ?? {
+        agent: name,
+        same_identity: name === self,
+        relations: new Map(),
+        sessions: new Map(),
+      };
+      const runtimes = group.relations.get(related) ?? new Set<string>();
+      runtimes.add(topology.runtime_ref);
+      group.relations.set(related, runtimes);
+      const displayName = topology.harness_session?.harness === "claude"
+        ? topology.harness_session.display_name
+        : null;
+      if (displayName !== null) {
+        const key = `${displayName}\0${related}`;
+        const session = group.sessions.get(key) ?? {
+          display_name: displayName,
+          relation: related,
+          runtimes: new Set<string>(),
+          candidates: new Set<string>(),
+        };
+        if (group.sessions.has(key) || group.sessions.size < 16) {
+          session.runtimes.add(topology.runtime_ref);
+          if (state.runtimeCandidateRef !== undefined) {
+            session.candidates.add(state.runtimeCandidateRef);
+          }
+          group.sessions.set(key, session);
+        }
+      }
+      groups.set(name, group);
+    }
+    const peers: RuntimePeerProjection[] = [...groups.values()].map((group) => ({
+      agent: group.agent,
+      same_identity: group.same_identity,
+      relations: [...group.relations.entries()]
+        .map(([related, runtimes]) => ({ relation: related, runtime_count: runtimes.size }))
+        .sort((left, right) => rank[left.relation] - rank[right.relation]),
+      claude_sessions: purpose !== "claude_cross_session" ? [] : [...group.sessions.values()]
+        .map((session) => ({
+          display_name: session.display_name,
+          relation: session.relation,
+          runtime_count: session.runtimes.size,
+          candidate_ref: session.runtimes.size === 1 && session.candidates.size === 1
+            ? [...session.candidates][0]!
+            : null,
+        }))
+        .sort((left, right) =>
+          left.display_name.localeCompare(right.display_name) || rank[left.relation] - rank[right.relation]),
+    })).sort((left, right) => {
+      const leftRank = Math.min(...left.relations.map((item) => rank[item.relation]));
+      const rightRank = Math.min(...right.relations.map((item) => rank[item.relation]));
+      return leftRank - rightRank || left.agent.localeCompare(right.agent);
+    });
+    return {
+      version: 3,
+      topology_evidence: "client_asserted",
+      comparison: "server_derived",
+      caller_binding: callerBinding,
+      self,
+      peers: purpose === "capability_probe" ? [] : peers,
+    };
   }
 
   private aggregatePresenceRow(
