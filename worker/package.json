@@ -23,11 +23,11 @@
   "dependencies": {
     "@agentparty/shared": "workspace:*",
     "chanfana": "^3.3.0",
-    "hono": "^4.12.33",
-    "partyserver": "^0.5.9"
+    "hono": "^4.13.2",
+    "partyserver": "^0.5.10"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.20.1",
+    "@cloudflare/vitest-pool-workers": "^0.21.3",
     "typescript": "^7.0.2",
     "vitest": "~4.1.10",
     "wrangler": "^4.22.0"
