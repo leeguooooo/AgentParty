@@ -354,6 +354,61 @@ export function confirmClaudeCrossSessionPeer(
   };
 }
 
+const WAKE_HINT_MENTION_RE = /@([A-Za-z0-9][A-Za-z0-9_-]{0,63})/g;
+
+/** Extract advisory @mention targets from a reply body. Server-side mention
+ * resolution stays authoritative; this is only used to decide whether the
+ * same-machine wake hint below is worth appending. */
+export function claudeCrossSessionWakeHintTargets(text: string): string[] {
+  const targets = new Set<string>();
+  for (const match of text.matchAll(WAKE_HINT_MENTION_RE)) {
+    const name = match[1]!;
+    if (isName(name)) targets.add(name);
+  }
+  return [...targets];
+}
+
+/**
+ * Same-machine wake hint (#836). After a channel post succeeds inside an armed
+ * bridge session, nudge the model when a mentioned peer is still listed in the
+ * local Claude Cross-session gate state. The channel stays the single source
+ * of truth: the hint only proposes a ≤512-byte channel+seq notification via
+ * the existing authorization chain, never an alternate transport. Listings
+ * carry a TTL and may be stale, so the wording never asserts liveness.
+ */
+export function claudeCrossSessionWakeHint(
+  targets: readonly string[],
+  peers: ClaudeCrossSessionPeerSummary | undefined,
+  postedSeq: number,
+  armed: () => boolean = isClaudeCrossSessionGateArmed,
+  resolveListedAddress: (
+    agent: string,
+    displayName: string,
+    candidateRef: string,
+  ) => string | null = listedClaudeCrossSessionAddress,
+): string | null {
+  if (peers === undefined || peers.availability !== "ready" || targets.length === 0 || !armed()) {
+    return null;
+  }
+  const wanted = new Set(targets);
+  const listedAgents = [...new Set(peers.peers.flatMap((peer) =>
+    wanted.has(peer.agent) && peer.claude_sessions.some((session) =>
+        session.candidate_ref !== null &&
+        resolveListedAddress(peer.agent, session.display_name, session.candidate_ref) !== null)
+      ? [peer.agent]
+      : []))];
+  if (listedAgents.length === 0) return null;
+  return (
+    `Cross-session wake hint: ${listedAgents.map((agent) => `@${agent}`).join(", ")} may be reachable ` +
+    "locally — a Claude Cross-session listing still matches this mention. Listings expire and can be " +
+    "stale, so this is not proof of a live session. If an earlier local wake would help, follow the " +
+    `full authorization chain first: ${PEERS_TOOL}, then Claude's built-in ListAgents, then ` +
+    `${PEER_CHECK_TOOL}, and only after a confirmed check send one SendMessage of at most 512 UTF-8 ` +
+    `bytes that carries only a channel+seq reference (this channel, seq=${postedSeq}) and no message ` +
+    "body. The AgentParty channel remains the single source of truth; the peer reads the message there."
+  );
+}
+
 const HELP = `usage: party claude-channel [channel|--channel C] [--require-launch-opt-in]
 
 Internal stdio MCP adapter for \`party claude\` and \`party bridge claude\`.
@@ -2217,6 +2272,11 @@ export class ClaudeChannelDeliveryBridge {
     };
   }
 
+  /** Sender of a still-pending channel message; the linked reply mentions it. */
+  pendingSender(seq: number): string | null {
+    return this.pending.get(seq)?.message.sender.name ?? null;
+  }
+
   async reply(seq: number, text: string): Promise<{ seq: number }> {
     if (!Number.isSafeInteger(seq) || seq <= 0) {
       throw new Error("seq must be a positive integer");
@@ -2504,6 +2564,9 @@ export async function run(argv: string[]): Promise<number> {
     },
   });
   let firstEligiblePeersCall = true;
+  // Last topology snapshot handed to the model. The #836 wake hint only reuses
+  // candidates the model already saw; the gate state decides if one is listed.
+  let lastReadyPeersSummary: ClaudeCrossSessionPeerSummary | undefined;
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
@@ -2688,6 +2751,7 @@ export async function run(argv: string[]): Promise<number> {
       );
       if (request.params.name === PEERS_TOOL) firstEligiblePeersCall = false;
       const summary = await loadClaudeCrossSessionPeersWithStartupRetry(loadPeers, retryDelays);
+      if (summary.availability === "ready") lastReadyPeersSummary = summary;
       return toolResult(JSON.stringify(request.params.name === PEERS_TOOL
         ? summary
         : confirmClaudeCrossSessionPeer(
@@ -2735,8 +2799,22 @@ export async function run(argv: string[]): Promise<number> {
       return toolResult(`${REPLY_TOOL} requires integer seq and string text`, true);
     }
     try {
+      // Capture the reply's directed mention target before the successful post
+      // clears the pending entry.
+      const replyTarget = bridge.pendingSender(seq);
       const posted = await bridge.reply(seq, text);
-      return toolResult(`AgentParty reply persisted as seq=${posted.seq} (reply_to=${seq}).`);
+      const hint = claudeCrossSessionWakeHint(
+        [...new Set([
+          ...(replyTarget === null ? [] : [replyTarget]),
+          ...claudeCrossSessionWakeHintTargets(text),
+        ])],
+        lastReadyPeersSummary,
+        posted.seq,
+      );
+      return toolResult(
+        `AgentParty reply persisted as seq=${posted.seq} (reply_to=${seq}).` +
+          (hint === null ? "" : `\n${hint}`),
+      );
     } catch (error) {
       return toolResult(error instanceof Error ? error.message : String(error), true);
     }

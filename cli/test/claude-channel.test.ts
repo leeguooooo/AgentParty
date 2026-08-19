@@ -24,6 +24,8 @@ import {
 import {
   ClaudeChannelDeliveryBridge,
   claudeCrossSessionPeerStartupRetryDelays,
+  claudeCrossSessionWakeHint,
+  claudeCrossSessionWakeHintTargets,
   confirmClaudeCrossSessionPeer,
   loadClaudeCrossSessionPeersWithStartupRetry,
   summarizeClaudeCrossSessionPeers,
@@ -2372,6 +2374,79 @@ describe("Claude Cross-session peer correlation", () => {
     }]));
     expect(confirmClaudeCrossSessionPeer(ambiguous, "peer", "review-session", candidateRef).availability)
       .toBe("stale_or_ambiguous");
+  });
+});
+
+describe("Claude Cross-session wake hint (#836)", () => {
+  const candidateRef = "candidate_1234567890abcdef";
+  const readySummary = () => summarizeClaudeCrossSessionPeers(
+    "dev",
+    "me",
+    [{ name: "peer", kind: "agent", state: "working", note: null, ts: 1, live: true }],
+    {
+      version: 3,
+      topology_evidence: "client_asserted",
+      comparison: "server_derived",
+      caller_binding: "live_socket",
+      self: "me",
+      peers: [{
+        agent: "peer",
+        same_identity: false,
+        relations: [{ relation: "same_worktree", runtime_count: 1 }],
+        claude_sessions: [{
+          display_name: "peer-session",
+          relation: "same_worktree",
+          runtime_count: 1,
+          candidate_ref: candidateRef,
+        }],
+      }],
+    },
+  );
+
+  test("extracts advisory @mention targets from a reply body", () => {
+    expect(claudeCrossSessionWakeHintTargets("@peer please read seq=7, cc @other-agent and @peer again"))
+      .toEqual(["peer", "other-agent"]);
+    expect(claudeCrossSessionWakeHintTargets("no mentions here")).toEqual([]);
+  });
+
+  test("appends the nudge when armed and the mentioned peer is still listed", () => {
+    const resolved: string[] = [];
+    const hint = claudeCrossSessionWakeHint(
+      ["peer"],
+      readySummary(),
+      42,
+      () => true,
+      (agent, displayName, ref) => {
+        resolved.push(`${agent}/${displayName}/${ref}`);
+        return "peer-session [ref-a]";
+      },
+    );
+    expect(resolved).toEqual([`peer/peer-session/${candidateRef}`]);
+    expect(hint).toContain("@peer may be reachable locally");
+    expect(hint).toContain("Listings expire and can be stale");
+    expect(hint).toContain("party_channel_peers");
+    expect(hint).toContain("ListAgents");
+    expect(hint).toContain("party_channel_peer_check");
+    expect(hint).toContain("SendMessage");
+    expect(hint).toContain("512 UTF-8");
+    expect(hint).toContain("seq=42");
+    expect(hint).toContain("no message body");
+    expect(hint).not.toContain("[ref-a]");
+  });
+
+  test("stays silent when armed but no gate listing matches the mention", () => {
+    expect(claudeCrossSessionWakeHint(["peer"], readySummary(), 42, () => true, () => null))
+      .toBeNull();
+    expect(claudeCrossSessionWakeHint(["stranger"], readySummary(), 42, () => true, () => {
+      throw new Error("unmentioned candidates must not be resolved");
+    })).toBeNull();
+  });
+
+  test("stays silent when the local gate is not armed", () => {
+    expect(claudeCrossSessionWakeHint(["peer"], readySummary(), 42, () => false, () => {
+      throw new Error("an unarmed gate must not resolve listings");
+    })).toBeNull();
+    expect(claudeCrossSessionWakeHint(["peer"], undefined, 42, () => true)).toBeNull();
   });
 });
 
