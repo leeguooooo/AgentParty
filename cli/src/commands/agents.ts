@@ -137,7 +137,12 @@ export function memberReach(
   if (e.paused === true) return { reach: "stale", reason: "reception paused" };
   if (live && wakeKind !== undefined && SERVE_LIKE.has(wakeKind)) {
     if (e.runner_health !== undefined && !e.runner_health.ok) {
-      return { reach: "stale", reason: `runner failing x${e.runner_health.consecutive_failures}` };
+      return {
+        reach: "stale",
+        reason: e.runner_health.consecutive_failures > 0
+          ? `runner failing x${e.runner_health.consecutive_failures}`
+          : "runner unhealthy",
+      };
     }
     if (e.listening === "deaf") {
       return { reach: "stale", reason: "deliveries expiring (connected but not consuming)" };
