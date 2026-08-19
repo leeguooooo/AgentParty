@@ -1,6 +1,6 @@
 import { AGENT_NAME_RE, mcpServerName } from "@agentparty/shared/onboarding";
 import type { DesktopAgentRunner } from "./desktopAgent";
-import { type JoinPackMode, MIN_CLI, VERSION_GE_SNIPPET } from "./joinPack";
+import { type JoinPackHarness, type JoinPackMode, MIN_CLI, VERSION_GE_SNIPPET } from "./joinPack";
 
 const RUNNERS: readonly DesktopAgentRunner[] = ["codex", "claude", "codex-sdk"];
 
@@ -16,6 +16,8 @@ export interface AgentTokenRecord {
   mode?: JoinPackMode;
   /** #749：unattended 生成时选的 runner；「复制接入包」按它重建同款。缺省（旧记录）按 codex。 */
   runner?: DesktopAgentRunner;
+  /** #845 第 4 点：interactive 生成时选的目标 harness；「复制接入包」按它重建同款。缺省（旧记录）按 other＝全量。 */
+  harness?: JoinPackHarness;
   savedAt: number;
 }
 
@@ -41,7 +43,8 @@ function isRecord(value: unknown): value is AgentTokenRecord {
     typeof rec.command === "string" &&
     typeof rec.savedAt === "number" &&
     (rec.mode === undefined || rec.mode === "interactive" || rec.mode === "unattended") &&
-    (rec.runner === undefined || RUNNERS.includes(rec.runner as DesktopAgentRunner))
+    (rec.runner === undefined || RUNNERS.includes(rec.runner as DesktopAgentRunner)) &&
+    (rec.harness === undefined || rec.harness === "claude" || rec.harness === "codex" || rec.harness === "other")
   );
 }
 

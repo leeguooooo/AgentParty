@@ -11,7 +11,7 @@ import {
   ValidationError,
 } from "../lib/api";
 import { copyText, saveAgentToken } from "../lib/agentTokenVault";
-import { buildJoinPack, DEFAULT_JOIN_RUNNER, type JoinPackMode } from "../lib/joinPack";
+import { buildJoinPack, DEFAULT_JOIN_RUNNER, type JoinPackHarness, type JoinPackMode } from "../lib/joinPack";
 import { desktopAgentAdapter, type DesktopAgentAdapter, type DesktopAgentRunner } from "../lib/desktopAgent";
 import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
 import { DesktopInstallButton } from "./DesktopInstall";
@@ -103,6 +103,9 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
   // #749：无人值守常驻用哪个 runner——曾写死 claude,用户选 codex 被静默忽略。默认 codex,
   // 与桌面「转为常驻」面板(DesktopAgentPanel)的 picker 默认一致。仅 unattended 模式用到。
   const [runner, setRunner] = useState<DesktopAgentRunner>(DEFAULT_JOIN_RUNNER);
+  // #845 第 4 点：interactive 包的目标 harness——只渲染对应分支把包砍薄。默认 "other"＝全量
+  // （兜底，不选择时行为与旧版逐字节一致）。仅 interactive 模式用到。
+  const [harness, setHarness] = useState<JoinPackHarness>("other");
   // #616 phase 4：桌面 webview 内的无人值守一键接管状态
   const [adoptState, setAdoptState] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [adoptError, setAdoptError] = useState<string | null>(null);
@@ -120,6 +123,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
     onActiveChange?.(true);
     setName(suggestName(namePrefix, slug));
     setMode("interactive");
+    setHarness("other");
     setNameErr(null);
     setPhase({ kind: "compose" });
   }, [namePrefix, onActiveChange, slug]);
@@ -179,6 +183,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         inviterName,
         charter,
         runner,
+        harness,
         t,
       });
       saveAgentToken({
@@ -189,6 +194,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         command,
         mode,
         runner,
+        harness,
         savedAt: Date.now(),
       });
       setCopied(false);
@@ -214,7 +220,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
               : t("AgentJoin.errGeneric");
       setPhase({ kind: "error", message });
     }
-  }, [accountKey, charter, inviterName, mode, name, runner, slug, token, t]);
+  }, [accountKey, charter, harness, inviterName, mode, name, runner, slug, token, t]);
 
   // 无人值守直接运行：选工作目录（不手填、不复制接入包）→ dutyAdopt 就地落成 launchd 常驻。
   const adopt = useCallback(async () => {
@@ -330,6 +336,35 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
                 </label>
               ))}
             </fieldset>
+
+            {/* #845 第 4 点：interactive 包的目标 harness 三选——只渲染对应分支。仅 interactive 显示。 */}
+            {mode === "interactive" && (
+              <fieldset className="agent-join-mode agent-join-harness">
+                <legend className="agent-join-namelabel t-mono">{t("AgentJoin.harnessLabel")}</legend>
+                {(["claude", "codex", "other"] as const).map((value) => (
+                  <label key={value} className="agent-join-mode-option">
+                    <input
+                      type="radio"
+                      name="agent-join-harness"
+                      value={value}
+                      checked={harness === value}
+                      onChange={() => setHarness(value)}
+                      disabled={phase.kind === "loading"}
+                    />
+                    <span className="t-mono">
+                      {t(
+                        value === "claude"
+                          ? "AgentJoin.harnessClaude"
+                          : value === "codex"
+                            ? "AgentJoin.harnessCodex"
+                            : "AgentJoin.harnessOther",
+                      )}
+                    </span>
+                  </label>
+                ))}
+                <p className="agent-join-hint t-mono">{t("AgentJoin.harnessHint")}</p>
+              </fieldset>
+            )}
 
             {/* #749：无人值守常驻的 runner 选择——曾写死 claude,用户选 codex 被忽略。仅 unattended 显示。 */}
             {mode === "unattended" && (

@@ -30,7 +30,7 @@ import { apiOrigin } from "../lib/base";
 import { desktopAgentAdapter, type DesktopAgentAdapter, type DesktopAgentRunner } from "../lib/desktopAgent";
 import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
 import { LocalAgentsOverview } from "./LocalAgentsOverview";
-import { buildJoinPack, type JoinPackMode } from "../lib/joinPack";
+import { buildJoinPack, type JoinPackHarness, type JoinPackMode } from "../lib/joinPack";
 import { useT } from "../i18n/useT";
 import { SectionedDialog, type SectionedDialogSection } from "./SectionedDialog";
 import "../i18n/strings/AgentTokens";
@@ -277,7 +277,8 @@ export function AgentTokens({
   // 重建走 buildFullJoinPack——与「＋ 让 agent 加入」同一份 builder，产物逐字节同构，
   // 含 charter 快照与待命/唤醒指引（只发最小包的话，新 agent 报到完就不知道怎么挂 watch/serve）。
   // #612：unattended 记录重建同款无人值守包（serve --runner claude），别把值守机脚本换成交互包。
-  function freshCommand(record: { name: string; token: string; mode?: JoinPackMode; runner?: DesktopAgentRunner }): string {
+  // #845 第 4 点：interactive 记录按生成时选的目标 harness 重建同款拆薄包；旧记录无此字段 → builder 内落 other 全量。
+  function freshCommand(record: { name: string; token: string; mode?: JoinPackMode; runner?: DesktopAgentRunner; harness?: JoinPackHarness }): string {
     return buildJoinPack(record.mode ?? "interactive", {
       slug,
       agentName: record.name,
@@ -288,6 +289,7 @@ export function AgentTokens({
       charter,
       // #749：按生成时选的 runner 重建 unattended 脚本；旧记录无此字段 → buildJoinPack 内落 codex 默认。
       runner: record.runner,
+      harness: record.harness,
       t,
     });
   }
@@ -347,6 +349,8 @@ export function AgentTokens({
       mode: findSavedAgentToken(accountKey, slug, name)?.mode,
       // #749：轮换 token 也要保留已选 runner,否则已选 claude 的 unattended 记录轮换后复制包会回退 codex。
       runner: findSavedAgentToken(accountKey, slug, name)?.runner,
+      // #845：轮换 token 也保留已选目标 harness，「复制接入包」仍是同款拆薄包。
+      harness: findSavedAgentToken(accountKey, slug, name)?.harness,
       savedAt: Date.now(),
     });
     return next.token;
