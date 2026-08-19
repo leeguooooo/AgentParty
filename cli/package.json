@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@agentparty/shared": "workspace:*",
-    "@anthropic-ai/claude-agent-sdk": "^0.3.220",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.232",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.4.3"
   },
