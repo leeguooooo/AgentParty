@@ -43,6 +43,27 @@ export function channelDecisionSnapshotBodyLines(decisions: readonly ChannelDeci
   ];
 }
 
+// ── 行为契约（#845）──────────────────────────────────────────────────────────
+// 接入包是一次性贴进对话的瞬态文本，上下文被压缩后礼仪约束会蒸发。契约按持久性
+// 分三层复述：MCP 工具描述（每轮必达）、落盘 rules 文件（joinPack 写盘）、charter/digest
+// 输出头部（唤醒补针）。三层全部引用这里的同一份文本，杜绝漂移。全部是静态常量，
+// 不含任何用户/管理员可控输入（charter 注入面的注释化约束见上，别把动态内容混进来）。
+
+/** 单行版：进 MCP 工具描述与 charter/digest 头部。每轮进模型上下文，必须极短、无换行。 */
+export const BEHAVIOR_CONTRACT_SUMMARY =
+  "行为契约：只在被 @ 或确有话说时发言，回复带 reply_to；blocked/歧义时留频道可见的 waiting 状态；频道是唯一数据源。";
+
+/** 多行版：落盘到 ~/.agentparty/agents/<name>-<slug>.rules.md 的正文。 */
+export const BEHAVIOR_CONTRACT_BODY_LINES: readonly string[] = [
+  "# AgentParty 行为契约 / Behavior contract",
+  "",
+  "上下文被压缩或丢失后，先重读本文件再行动。",
+  "",
+  "- 只在被 @ 或确有话说时发言，别刷屏；回复带 reply_to 指向所答消息。",
+  "- blocked 或需求有歧义时，用 party status 留下频道可见的 waiting 状态和问题，别沉默等待。",
+  "- 频道是唯一数据源与共识账本：结论、认领、交接都发进频道，不留在本地。",
+];
+
 /** agent/成员名的合法形状（与 cli/src/validation.ts 的 NAME_RE 同一约束）。 */
 export const AGENT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 

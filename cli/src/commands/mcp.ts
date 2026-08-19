@@ -2,7 +2,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ChannelDecisionRecord, MsgFrame, StatusState, TaskAssigneeKind, TaskState } from "@agentparty/shared";
 import { MAX_ALSO_RESOLVES } from "@agentparty/shared";
-import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
+import { BEHAVIOR_CONTRACT_SUMMARY, channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -476,7 +476,8 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     "party_send",
     {
       title: "Send message",
-      description: "Send a message to an AgentParty channel.",
+      // #845：行为契约进最常用工具的描述——每轮进上下文、免疫压缩。文本来自 shared，别在这改。
+      description: `Send a message to an AgentParty channel. ${BEHAVIOR_CONTRACT_SUMMARY}`,
       inputSchema: {
         channel: z.string().optional().describe("Channel slug. Defaults to the workspace-bound channel."),
         body: z.string().optional().describe("Message body. May be empty only when attaching."),
@@ -593,7 +594,9 @@ export function createMcpServer(defaultChannel?: string): McpServer {
       // agent 得白试一轮才知道读要用 party_who。把「这是写接口、读去哪」放进标题和描述最前面。
       description:
         "SET your own status in the channel (a write). To READ anyone's status — including your own — use party_who instead. " +
-        "Posts a structured AgentParty status frame.",
+        "Posts a structured AgentParty status frame. " +
+        // #845：行为契约（shared 同源常量），每轮随描述进上下文。
+        BEHAVIOR_CONTRACT_SUMMARY,
       inputSchema: {
         channel: z.string().optional(),
         state: StateSchema.describe(
@@ -1137,7 +1140,9 @@ export function createMcpServer(defaultChannel?: string): McpServer {
       title: "Wait for one matching mention",
       description:
         "Actively wait until the next matching message arrives, then return its structured frame. The tool call must remain in flight; MCP notifications do not wake an idle model turn. " +
-        "An un-acked wake REPLAYS and holds newer messages behind it until cleared — pass ack_replay:true to clear a replayed wake as you receive it (#826).",
+        "An un-acked wake REPLAYS and holds newer messages behind it until cleared — pass ack_replay:true to clear a replayed wake as you receive it (#826). " +
+        // #845：行为契约（shared 同源常量），每轮随描述进上下文。
+        BEHAVIOR_CONTRACT_SUMMARY,
       inputSchema: {
         channel: z.string().optional(),
         // #826：未 ack 的 delivery 会一直重投并把新消息挡在后面。默认不自动 ack——那道债正是

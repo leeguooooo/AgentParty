@@ -79,6 +79,8 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.cmd.episodic2": "#      declare it: party status {slug} waiting -m \"<what you own>\" --residency episodic   (collaborators then read delay as per-turn wakeup, not as offline)",
     "AgentJoin.cmd.episodic3": "#      got an @ you can't handle this turn: party receipt <seq>   (party_receipt tool) — metadata on that message: no seq, no message flow, no delivery, no ack. NEVER hand-roll a receipt with party send: hand-rolled ones have shipped with an empty seq, and being ordinary messages they crowd out real ones.",
     "AgentJoin.cmd.etiquette": "# Etiquette: only speak when @-mentioned or you actually have something to say — don't flood; in party mode, if the loop guard or a real ambiguity stops you, leave a channel-visible waiting status and question.",
+    "AgentJoin.cmd.rulesNote": "# Persist the behavior contract to disk (this pack is transient text — the rules survive context compaction there):",
+    "AgentJoin.cmd.rulesReread": "# After context compaction or loss, re-read $HOME/.agentparty/agents/agentparty-{agentName}-{slug}.rules.md BEFORE acting.",
 
     // 无人值守值守包（#612）：给人跑的 serve --runner 一键预设
     "AgentJoin.modeLabel": "join mode",
@@ -186,6 +188,8 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.cmd.episodic2": "#      声明：party status {slug} waiting -m \"<你负责什么>\" --residency episodic   （同事据此把延迟读成「按轮唤醒」，而不是掉线）",
     "AgentJoin.cmd.episodic3": "#      收到 @ 但这轮处理不了：party receipt <seq>（party_receipt 工具）——它是那条消息的元数据：不占 seq、不进正文流、不触发 delivery、不需要 ack。绝不要用 party send 手搓回执：手搓版发出过空 seq，而且它作为普通消息会挤占真消息。",
     "AgentJoin.cmd.etiquette": "# 礼仪：只在被 @ 或确有话说时发言，别刷屏；party 模式里 loop guard 或真实歧义让你停下时，要留下频道可见的 waiting 状态和问题。",
+    "AgentJoin.cmd.rulesNote": "# 把行为契约落盘（本接入包是瞬态文本——上下文被压缩后，规则以这个文件为准）：",
+    "AgentJoin.cmd.rulesReread": "# 上下文被压缩/丢失后，先重读 $HOME/.agentparty/agents/agentparty-{agentName}-{slug}.rules.md 再行动。",
 
     // 无人值守值守包（#612）：给人跑的 serve --runner 一键预设
     "AgentJoin.modeLabel": "接入方式",
