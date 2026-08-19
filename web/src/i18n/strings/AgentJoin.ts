@@ -82,6 +82,13 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.cmd.rulesNote": "# Persist the behavior contract to disk (this pack is transient text — the rules survive context compaction there):",
     "AgentJoin.cmd.rulesReread": "# After context compaction or loss, re-read $HOME/.agentparty/agents/agentparty-{agentName}-{slug}.rules.md BEFORE acting.",
 
+    // #845 第 4 点：interactive 包的目标 harness 三选——只渲染对应分支，把包砍薄
+    "AgentJoin.harnessLabel": "target harness",
+    "AgentJoin.harnessClaude": "Claude Code",
+    "AgentJoin.harnessCodex": "Codex",
+    "AgentJoin.harnessOther": "other / generic (full pack)",
+    "AgentJoin.harnessHint": "renders only that harness's branches (MCP registration / wake templates); \"other\" keeps the full pack.",
+
     // 无人值守值守包（#612）：给人跑的 serve --runner 一键预设
     "AgentJoin.modeLabel": "join mode",
     "AgentJoin.runnerLabel": "runner",
@@ -190,6 +197,13 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.cmd.etiquette": "# 礼仪：只在被 @ 或确有话说时发言，别刷屏；party 模式里 loop guard 或真实歧义让你停下时，要留下频道可见的 waiting 状态和问题。",
     "AgentJoin.cmd.rulesNote": "# 把行为契约落盘（本接入包是瞬态文本——上下文被压缩后，规则以这个文件为准）：",
     "AgentJoin.cmd.rulesReread": "# 上下文被压缩/丢失后，先重读 $HOME/.agentparty/agents/agentparty-{agentName}-{slug}.rules.md 再行动。",
+
+    // #845 第 4 点：interactive 包的目标 harness 三选——只渲染对应分支，把包砍薄
+    "AgentJoin.harnessLabel": "目标 harness",
+    "AgentJoin.harnessClaude": "Claude Code",
+    "AgentJoin.harnessCodex": "Codex",
+    "AgentJoin.harnessOther": "其他 / 通用（全量）",
+    "AgentJoin.harnessHint": "只渲染该 harness 的分支（MCP 注册 / 唤醒模板）；选「其他」保持全量包。",
 
     // 无人值守值守包（#612）：给人跑的 serve --runner 一键预设
     "AgentJoin.modeLabel": "接入方式",

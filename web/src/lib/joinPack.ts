@@ -43,6 +43,11 @@ function charterSnapshotLines(charter: ChannelCharter | null, t: TFunc): string[
   ];
 }
 
+// #845 第 4 点：interactive 包按目标 harness 拆分——包里同时塞所有 harness 的分支时，
+// 目标 agent 只走一条，其余全是噪音。"other" 是兜底＝现行全量输出（不选择时行为不变）。
+// 安全硬行（charter 注释化 / PATH 先于版本闸 / token 环境变量 / rules.md 落盘）三档全保留。
+export type JoinPackHarness = "claude" | "codex" | "other";
+
 export interface FullJoinPackInput {
   slug: string;
   agentName: string;
@@ -55,6 +60,9 @@ export interface FullJoinPackInput {
   /** 无人值守脚本里 `party serve --runner <?>` 的取值；缺省 codex（与桌面「转为常驻」面板默认一致，#749）。
    *  仅影响 unattended 包；interactive 包贴给 agent 自己的 harness，与 runner 无关。 */
   runner?: DesktopAgentRunner;
+  /** interactive 包的目标 harness（#845 第 4 点）：只渲染对应分支把包砍薄；缺省 "other" 全量。
+   *  仅影响 interactive 包；unattended 包给人跑，与它无关。 */
+  harness?: JoinPackHarness;
   t: TFunc;
 }
 
@@ -69,6 +77,8 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
   // 的 name 正则——渲染出的 --mention 会被 CLI 直接拒绝，新 agent 第一条报到就报错。
   // 校验不过就整体降级为不 @：报到照发，blocked 指引改教它用 party who 反查 handle。
   const inviterName = AGENT_NAME_RE.test(input.inviterName) ? input.inviterName : null;
+  // #845 第 4 点：按目标 harness 只渲染对应分支。"other" 恒全量（兜底＝旧行为逐字节不变）。
+  const harness = input.harness ?? "other";
   return [
     t("AgentJoin.cmd.header", { slug }),
     t("AgentJoin.cmd.intro1"),
@@ -114,8 +124,14 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
       : `party send "${t("AgentJoin.cmd.checkinMessage", { agentName })}" --channel ${slug} --mention ${inviterName}`,
     ``,
     t("AgentJoin.cmd.step4"),
-    `claude mcp add ${mcpServerName(agentName)} --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.json" -- party mcp --channel ${slug}`,
-    t("AgentJoin.cmd.step4codex", { mcpName: mcpServerName(agentName), agentName, slug }),
+    // claude mcp add 是 Claude Code 专属注册命令；codex 档去掉，免得 codex 机器上直接执行报错。
+    ...(harness !== "codex"
+      ? [`claude mcp add ${mcpServerName(agentName)} --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.json" -- party mcp --channel ${slug}`]
+      : []),
+    // step4codex 是 codex mcp add 指引；claude 档去掉（目标 harness 只走一条，其余是噪音）。
+    ...(harness !== "claude"
+      ? [t("AgentJoin.cmd.step4codex", { mcpName: mcpServerName(agentName), agentName, slug })]
+      : []),
     t("AgentJoin.cmd.step4fallback"),
     ``,
     t("AgentJoin.cmd.step5"),
@@ -130,15 +146,26 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
       : t("AgentJoin.cmd.blocked2", { slug, inviterName }),
     t("AgentJoin.cmd.stayReachable"),
     t("AgentJoin.cmd.mcpWakeNote"),
-    t("AgentJoin.cmd.claudeMode1"),
-    t("AgentJoin.cmd.claudeMode2", { slug }),
-    t("AgentJoin.cmd.claudeMode3"),
-    t("AgentJoin.cmd.otherMode1"),
-    t("AgentJoin.cmd.otherMode2"),
-    t("AgentJoin.cmd.otherMode3", { slug }),
-    t("AgentJoin.cmd.otherMode4"),
-    `#        Codex:  OUT=$(mktemp); codex exec resume --last --skip-git-repo-check -o "$OUT" "$(cat {file})" || codex exec --skip-git-repo-check -o "$OUT" "$(cat {file})"; party send - --channel "$AP_CHANNEL" --reply-to "$AP_REPLY_TO" < "$OUT"`,
-    `#        Claude: claude -p -c "$(cat {file})" || claude -p "$(cat {file})"`,
+    // claudeMode 三行是 Claude Code 的 watch --once 待命指引；codex 档去掉。
+    ...(harness !== "codex"
+      ? [t("AgentJoin.cmd.claudeMode1"), t("AgentJoin.cmd.claudeMode2", { slug }), t("AgentJoin.cmd.claudeMode3")]
+      : []),
+    // otherMode 四行是常驻 serve supervisor 指引（Codex 唤醒模板挂在它下面）；claude 档去掉。
+    ...(harness !== "claude"
+      ? [
+          t("AgentJoin.cmd.otherMode1"),
+          t("AgentJoin.cmd.otherMode2"),
+          t("AgentJoin.cmd.otherMode3", { slug }),
+          t("AgentJoin.cmd.otherMode4"),
+        ]
+      : []),
+    // 唤醒命令模板按 harness 各留各的：claude 档不需要 codex exec，codex 档不需要 claude -p。
+    ...(harness !== "claude"
+      ? [
+          `#        Codex:  OUT=$(mktemp); codex exec resume --last --skip-git-repo-check -o "$OUT" "$(cat {file})" || codex exec --skip-git-repo-check -o "$OUT" "$(cat {file})"; party send - --channel "$AP_CHANNEL" --reply-to "$AP_REPLY_TO" < "$OUT"`,
+        ]
+      : []),
+    ...(harness !== "codex" ? [`#        Claude: claude -p -c "$(cat {file})" || claude -p "$(cat {file})"`] : []),
     t("AgentJoin.cmd.sandboxWarn1"),
     t("AgentJoin.cmd.sandboxWarn2"),
     t("AgentJoin.cmd.sandboxWarn3"),
