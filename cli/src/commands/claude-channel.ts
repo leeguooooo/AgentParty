@@ -33,6 +33,10 @@ import { randomUUID } from "node:crypto";
 import pkg from "../../package.json" with { type: "json" };
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect, type Connection } from "../client";
+import {
+  listClaudeSessions,
+  type ClaudeSessionRegistryEntry,
+} from "../claude-session-registry";
 import { loadCursor, resolveChannel, saveCursor } from "../config";
 import {
   DeliveryRecoveryJournal,
@@ -424,7 +428,150 @@ export function claudeChannelLaunchOptedIn(
   return env[CLAUDE_CHANNEL_OPT_IN_ENV] === "1";
 }
 
-async function runDormantClaudeChannelMcp(): Promise<number> {
+// ---- 蛰伏 announce 档（issue #841 P2）----
+//
+// 已入册的交互式 Claude 会话（本机会话注册表，#841 P1）在蛰伏 MCP 里加一个
+// announce-only 档位：连 WS 只上报 runtime topology + harness_session，让
+// worker 的 peers 投影天然把它列进 claude_sessions（do.ts 零改动）。
+// 铁律：不 claim delivery（不声明 directedDelivery/deliveryRecovery/
+// advertiseWakeKind 能力）、不取 serve 锁、不持久化游标。活体检测 = 会话进程
+// 退出（注册表探活失败）或 Claude 关掉 MCP → WS 断开即从投影消失，不发明 TTL。
+
+const DORMANT_ANNOUNCE_POLL_MS = 5_000;
+const DORMANT_ANNOUNCE_LIVENESS_MS = 30_000;
+
+/** 注册表没记 display_name（当前 hook payload 拿不到）时的确定性回退名。 */
+export function dormantAnnounceDisplayName(entry: ClaudeSessionRegistryEntry): string {
+  if (entry.display_name !== null) return entry.display_name;
+  return `claude-${entry.session_id.toLowerCase().replace(/-/g, "").slice(0, 12)}`;
+}
+
+/** 选择要宣告的入册会话：同 channel 必须；优先同 cwd；同优先级取最新入册。 */
+export function selectDormantAnnounceEntry(
+  entries: readonly ClaudeSessionRegistryEntry[],
+  channel: string,
+  cwd: string,
+): ClaudeSessionRegistryEntry | null {
+  const matching = entries.filter((entry) => entry.channel === channel);
+  if (matching.length === 0) return null;
+  const pick = (candidates: readonly ClaudeSessionRegistryEntry[]) =>
+    candidates.length === 0
+      ? null
+      : candidates.reduce((a, b) => (b.registered_at >= a.registered_at ? b : a));
+  return pick(matching.filter((entry) => entry.cwd === cwd)) ?? pick(matching);
+}
+
+export interface DormantAnnounceDeps {
+  listSessions: () => ClaudeSessionRegistryEntry[];
+  resolveAuth: () => Promise<{ server?: string | null; token?: string | null }>;
+  connect: typeof connect;
+  buildTopology: typeof buildRuntimeTopology;
+  loadCursor: (channel: string) => number;
+  cwd?: string;
+  pollIntervalMs?: number;
+  livenessIntervalMs?: number;
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * announce-only 主循环：等到注册表里出现本 channel 的活会话（SessionStart hook
+ * 可能晚于 MCP 启动），随后保持一条只带 topology/harness_session 的 WS 连接。
+ * 会话死亡或 signal 中止即断开。任何失败静默退出——蛰伏进程不许打扰 Claude。
+ */
+export async function runDormantClaudeSessionAnnounce(
+  channel: string,
+  signal: AbortSignal,
+  deps: DormantAnnounceDeps,
+): Promise<void> {
+  const cwd = deps.cwd ?? process.cwd();
+  const pollMs = deps.pollIntervalMs ?? DORMANT_ANNOUNCE_POLL_MS;
+  const livenessMs = deps.livenessIntervalMs ?? DORMANT_ANNOUNCE_LIVENESS_MS;
+  if (!isSlug(channel)) return;
+  while (!signal.aborted) {
+    let entry: ClaudeSessionRegistryEntry | null = null;
+    try {
+      entry = selectDormantAnnounceEntry(deps.listSessions(), channel, cwd);
+    } catch {
+      return;
+    }
+    if (entry === null) {
+      await abortableSleep(pollMs, signal);
+      continue;
+    }
+    const auth = await deps.resolveAuth().catch(() => null);
+    if (!auth?.server || !auth.token) return;
+    // resolveAuth 是本循环里唯一的长 await：期间收到 abort 就绝不再建连。
+    if (signal.aborted) return;
+    const topology = deps.buildTopology(auth.server, entry.cwd, {
+      harnessSession: {
+        harness: "claude",
+        display_name: dormantAnnounceDisplayName(entry),
+      },
+    });
+    if (topology === undefined) return;
+    // 只声明 runtimeTopology：无 directedDelivery / deliveryRecovery /
+    // advertiseWakeKind / onCursor——服务端不会给这条连接派任何 delivery，
+    // 消费到的普通消息只本地 ack（防积压），绝不推进持久化游标。
+    const connection = deps.connect(auth.server, auth.token, channel, deps.loadCursor(channel), {
+      runtimeTopology: topology,
+    });
+    const sessionId = entry.session_id;
+    let connectionClosed = false;
+    const closeConnection = () => {
+      connectionClosed = true;
+      connection.close();
+    };
+    const liveness = setInterval(() => {
+      if (connectionClosed) return;
+      try {
+        const stillAlive = deps.listSessions().some(
+          (candidate) => candidate.session_id.toLowerCase() === sessionId.toLowerCase(),
+        );
+        if (!stillAlive) closeConnection();
+      } catch {
+        closeConnection();
+      }
+    }, livenessMs);
+    if (typeof (liveness as { unref?: () => void }).unref === "function") {
+      (liveness as unknown as { unref: () => void }).unref();
+    }
+    const onAbort = () => closeConnection();
+    signal.addEventListener("abort", onAbort, { once: true });
+    // abort 恰好落在建连之后、监听注册之前：已 abort 的 signal 不会再派发事件，
+    // 这里立即补一次 close，防止连接泄漏。
+    if (signal.aborted) closeConnection();
+    try {
+      for await (const frame of connection.frames) {
+        if (frame.type === "msg" || frame.type === "status") connection.ack(frame.seq);
+        if (frame.type === "error") return;
+      }
+    } catch {
+      return;
+    } finally {
+      clearInterval(liveness);
+      signal.removeEventListener("abort", onAbort);
+      closeConnection();
+    }
+    // 帧流结束：会话死了就回到等待档（换会话可再宣告），否则稍候重试。
+    await abortableSleep(pollMs, signal);
+  }
+}
+
+async function runDormantClaudeChannelMcp(channel: string | null): Promise<number> {
   const server = new Server<Request, Notification, Result>(
     { name: "agentparty-channel-dormant", version: pkg.version },
     { capabilities: {} },
@@ -433,17 +580,32 @@ async function runDormantClaudeChannelMcp(): Promise<number> {
   const closed = new Promise<void>((resolve) => {
     markClosed = resolve;
   });
-  server.onclose = markClosed;
+  const abort = new AbortController();
+  server.onclose = () => {
+    abort.abort();
+    markClosed();
+  };
+  const announce = channel === null
+    ? Promise.resolve()
+    : runDormantClaudeSessionAnnounce(channel, abort.signal, {
+        listSessions: listClaudeSessions,
+        resolveAuth: resolveAuthDetailed,
+        connect,
+        buildTopology: buildRuntimeTopology,
+        loadCursor,
+      }).catch(() => {});
   try {
     await server.connect(new StdioServerTransport());
     await closed;
     return 0;
   } finally {
+    abort.abort();
     try {
       await server.close();
     } catch {
       // The stdio transport normally closes first when Claude exits.
     }
+    await announce;
   }
 }
 
@@ -2439,9 +2601,11 @@ export async function run(argv: string[]): Promise<number> {
 
   if (flags["require-launch-opt-in"] === true && !claudeChannelLaunchOptedIn()) {
     // Enabled plugins are initialized in every Claude session, even when this
-    // server is absent from --channels. Stay protocol-valid but do not resolve
-    // auth, connect AgentParty, claim delivery, or acquire the serve lock.
-    return runDormantClaudeChannelMcp();
+    // server is absent from --channels. Stay protocol-valid and never claim
+    // delivery or acquire the serve lock. #841 P2: when this machine's session
+    // registry lists a live interactive session for the bound channel, keep an
+    // announce-only WS up so the peers projection can list it.
+    return runDormantClaudeChannelMcp(resolveChannel(str(flags.channel) ?? positionals[0]));
   }
 
   const auth = await resolveAuthDetailed();
