@@ -34,6 +34,7 @@ import pkg from "../../package.json" with { type: "json" };
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { connect, type Connection } from "../client";
 import {
+  claudeSessionAnnounceName,
   listClaudeSessions,
   type ClaudeSessionRegistryEntry,
 } from "../claude-session-registry";
@@ -440,10 +441,10 @@ export function claudeChannelLaunchOptedIn(
 const DORMANT_ANNOUNCE_POLL_MS = 5_000;
 const DORMANT_ANNOUNCE_LIVENESS_MS = 30_000;
 
-/** 注册表没记 display_name（当前 hook payload 拿不到）时的确定性回退名。 */
+/** 注册表没记 display_name（当前 hook payload 拿不到）时的确定性回退名。
+ * 权威定义在 claude-session-registry.claudeSessionAnnounceName（P3 唤醒代理同用）。 */
 export function dormantAnnounceDisplayName(entry: ClaudeSessionRegistryEntry): string {
-  if (entry.display_name !== null) return entry.display_name;
-  return `claude-${entry.session_id.toLowerCase().replace(/-/g, "").slice(0, 12)}`;
+  return claudeSessionAnnounceName(entry);
 }
 
 /** 选择要宣告的入册会话：同 channel 必须；优先同 cwd；同优先级取最新入册。 */

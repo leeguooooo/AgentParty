@@ -194,6 +194,15 @@ export function listClaudeSessions(
   return alive.sort((a, b) => a.registered_at - b.registered_at);
 }
 
+/**
+ * 入册会话在 party 侧的宣告名（#841 P2/P3 共用同一权威定义，防词表漂移）：
+ * 有 display_name 用 display_name，否则回退 `claude-<session_id 前 12 个 hex>`。
+ */
+export function claudeSessionAnnounceName(entry: ClaudeSessionRegistryEntry): string {
+  if (entry.display_name !== null) return entry.display_name;
+  return `claude-${entry.session_id.toLowerCase().replace(/-/g, "").slice(0, 12)}`;
+}
+
 export function claudeSessionAlive(
   sessionId: string,
   env: NodeJS.ProcessEnv = process.env,

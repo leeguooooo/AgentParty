@@ -1,0 +1,135 @@
+import { describe, expect, test } from "bun:test";
+import { Buffer } from "node:buffer";
+import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
+import { claudeSessionAnnounceName } from "../src/claude-session-registry";
+import {
+  attemptWakeProxy,
+  noWakeProxyForwarder,
+  selectWakeProxyTarget,
+  WAKE_PROXY_NOTE_MAX_BYTES,
+  wakeProxyNote,
+} from "../src/serve-wake-proxy";
+
+function entry(overrides: Partial<ClaudeSessionRegistryEntry> = {}): ClaudeSessionRegistryEntry {
+  return {
+    version: 1,
+    session_id: "11111111-1111-4111-8111-111111111111",
+    pid: process.pid,
+    display_name: null,
+    channel: "dev",
+    cwd: "/tmp/project",
+    registered_at: 1000,
+    ...overrides,
+  };
+}
+
+describe("claudeSessionAnnounceName", () => {
+  test("display_name 优先，缺省回退 claude-<12hex>", () => {
+    expect(claudeSessionAnnounceName(entry({ display_name: "my-claude" }))).toBe("my-claude");
+    expect(claudeSessionAnnounceName(entry())).toBe("claude-111111111111");
+  });
+});
+
+describe("wakeProxyNote", () => {
+  test("只带 channel+seq 指针且 ≤512B（含最长 channel）", () => {
+    const note = wakeProxyNote({ channel: "a".repeat(64), seq: Number.MAX_SAFE_INTEGER });
+    expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
+    expect(note).toContain(`#${"a".repeat(64)}`);
+    expect(note).toContain(`seq=${Number.MAX_SAFE_INTEGER}`);
+  });
+});
+
+describe("selectWakeProxyTarget", () => {
+  test("回退名命中 → 选中；serve 自己的名字不算转投目标", () => {
+    const sessions = [entry()];
+    expect(selectWakeProxyTarget(["claude-111111111111"], "me", "dev", sessions)?.session_id)
+      .toBe(sessions[0]!.session_id);
+    expect(selectWakeProxyTarget(["claude-111111111111"], "claude-111111111111", "dev", sessions))
+      .toBeNull();
+  });
+
+  test("display_name 命中；channel 不匹配的条目排除", () => {
+    const named = entry({ display_name: "pair-claude" });
+    expect(selectWakeProxyTarget(["pair-claude"], "me", "dev", [named])).toBe(named);
+    expect(selectWakeProxyTarget(["pair-claude"], "me", "other", [named])).toBeNull();
+  });
+
+  test("多候选取最新入册", () => {
+    const older = entry({ registered_at: 1 });
+    const newer = entry({
+      session_id: "22222222-2222-4222-8222-222222222222",
+      display_name: null,
+      registered_at: 2,
+    });
+    const picked = selectWakeProxyTarget(
+      ["claude-111111111111", "claude-222222222222"],
+      "me",
+      "dev",
+      [older, newer],
+    );
+    expect(picked).toBe(newer);
+  });
+
+  test("无 mentions 或全是 self → null", () => {
+    expect(selectWakeProxyTarget([], "me", "dev", [entry()])).toBeNull();
+  });
+});
+
+describe("attemptWakeProxy", () => {
+  test("默认载体（无传输）：命中目标但 forwarded=false，降级为现行为", async () => {
+    const lines: string[] = [];
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 7 }, {
+      listSessions: () => [entry()],
+      log: (line) => lines.push(line),
+    });
+    expect(result).toEqual({ forwarded: false, target: "claude-111111111111" });
+    expect(lines.some((line) => line.includes("降级为现行为"))).toBe(true);
+  });
+
+  test("死会话已被注册表剔除（列表为空）→ 无目标，回落现行为", async () => {
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 7 }, {
+      listSessions: () => [],
+    });
+    expect(result).toEqual({ forwarded: false, target: null });
+  });
+
+  test("载体成功 → forwarded=true 且拿到 ≤512B 指针", async () => {
+    let sent = "";
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 42 }, {
+      listSessions: () => [entry()],
+      forward: async (_target, ref) => {
+        sent = wakeProxyNote(ref);
+        return true;
+      },
+    });
+    expect(result.forwarded).toBe(true);
+    expect(sent).toContain("seq=42");
+    expect(Buffer.byteLength(sent, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
+  });
+
+  test("载体抛错 → 绝不上抛，降级为现行为", async () => {
+    const lines: string[] = [];
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 7 }, {
+      listSessions: () => [entry()],
+      forward: async () => {
+        throw new Error("transport boom");
+      },
+      log: (line) => lines.push(line),
+    });
+    expect(result).toEqual({ forwarded: false, target: "claude-111111111111" });
+    expect(lines.some((line) => line.includes("失败") && line.includes("不丢"))).toBe(true);
+  });
+
+  test("注册表读取抛错 → 降级为现行为", async () => {
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 7 }, {
+      listSessions: () => {
+        throw new Error("registry boom");
+      },
+    });
+    expect(result).toEqual({ forwarded: false, target: null });
+  });
+
+  test("noWakeProxyForwarder 恒 false", async () => {
+    expect(await noWakeProxyForwarder(entry(), { channel: "dev", seq: 1 })).toBe(false);
+  });
+});

@@ -61,6 +61,7 @@ import {
 } from "../statusline-cache";
 import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type Identity, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
+import { attemptWakeProxy, type WakeProxyDeps } from "../serve-wake-proxy";
 import { buildRuntimeTopology } from "../runtime-topology";
 import { buildContext } from "./status";
 import {
@@ -1649,6 +1650,8 @@ export interface ServeOptions {
   upgradeProbeIntervalMs?: number;
   out?: (line: string) => void;
   statusline?: boolean;
+  /** #841 P3 本机唤醒代理注入点（注册表/转投载体）；默认真实注册表 + 无载体骨架。 */
+  wakeProxy?: Omit<WakeProxyDeps, "log">;
   /** 每任务心跳间隔（#228）。默认 DEFAULT_TASK_HEARTBEAT_MS；测试注入更短值。 */
   heartbeatIntervalMs?: number;
   /** 时钟注入（#228）：任务开始时刻与每次心跳时刻走它，便于测试断言心跳在推进。默认 Date.now。 */
@@ -5457,6 +5460,16 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // deferredLeaseSeq 只会在 !hasLease 时设置，held=true 分支会先清空再 replay；因此持租处理
       // 与 standby 冻结区互斥。不要在这里额外跳过，否则一旦状态漂移反而会把欠账永久冻住。
       const qualifies = wouldWake && !selfPaused && hasLease;
+      // #841 P3：本机唤醒代理。@ 目标命中本机入册的 idle 交互式 Claude 会话（注册表
+      // kill(pid,0) 探活，死会话已剔除）时尝试转投一条 ≤512B 的 channel+seq 指针通知。
+      // 纯增量：转投与否都不改变下方 runner/ack 现行为（「照常继续自己的职责」），
+      // attemptWakeProxy 绝不抛错，任何失败降级为现行为——消息绝不因代理而丢失。
+      if (fresh && !fromSelf && hasLease && !selfPaused && frame.mentions.length > 0) {
+        await attemptWakeProxy(frame.mentions, self, { channel: o.channel, seq: frame.seq }, {
+          ...(o.wakeProxy ?? {}),
+          log: out,
+        });
+      }
       let stopAfterFrame = false;
       if (qualifies) {
         out(`▶ ${formatMsg(frame)}`);
