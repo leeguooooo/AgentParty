@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -160,6 +168,21 @@ describe("claude session registry", () => {
     );
     expect(registerClaudeSession(baseEntry({ session_id: sessionId(999) }), env)).toBe(true);
     expect(listClaudeSessions(env)).toHaveLength(CLAUDE_SESSION_REGISTRY_CAPACITY);
+  });
+
+  test("register lock: a concurrently held lock refuses registration; a stale lock is reclaimed", () => {
+    const lockPath = join(directory, ".register.lock");
+    // 另一进程正持锁：有界等待后拒绝（安全侧），绝不绕开容量互斥。
+    writeFileSync(lockPath, "", { mode: 0o600 });
+    expect(registerClaudeSession(baseEntry(), env)).toBe(false);
+    expect(listClaudeSessions(env)).toHaveLength(0);
+    // 持锁进程死掉留下的孤儿锁（mtime 超过陈旧阈值）：回收后正常注册。
+    const stale = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, stale, stale);
+    expect(registerClaudeSession(baseEntry(), env)).toBe(true);
+    expect(listClaudeSessions(env)).toHaveLength(1);
+    // 注册完成后锁已释放。
+    expect(readdirSync(directory)).toEqual([`${SESSION_ID}.json`]);
   });
 });
 

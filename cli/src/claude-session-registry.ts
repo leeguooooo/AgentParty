@@ -9,8 +9,10 @@
 // 目录校验与 claude-cross-session-gate.ts 的 gateDirectory 同款：拒符号链接、
 // 拒组/他人可读、拒非本 uid。AGENTPARTY_CLAUDE_SESSION_REGISTRY_DIR 可覆盖（测试用）。
 import {
+  closeSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -30,6 +32,33 @@ const CHANNEL_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ENTRY_FILE_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
 const MAX_ENTRY_BYTES = 4 * 1024;
+const REGISTER_LOCK_FILE = ".register.lock";
+const REGISTER_LOCK_WAIT_MS = 250;
+// 持锁进程死掉会留下孤儿锁；注册只有一次容量检查 + 一次原子写，10s 还没放锁必是尸体。
+const REGISTER_LOCK_STALE_MS = 10_000;
+
+/** O_EXCL 锁 + 有界等待（模式同 claude-cross-session-gate 的 waitForConsumeLock）。 */
+function waitForRegisterLock(lockPath: string): number | null {
+  const deadline = Date.now() + REGISTER_LOCK_WAIT_MS;
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  while (true) {
+    try {
+      return openSync(lockPath, "wx", 0o600);
+    } catch {
+      try {
+        if (Date.now() - lstatSync(lockPath).mtimeMs > REGISTER_LOCK_STALE_MS) {
+          rmSync(lockPath, { force: true });
+          continue;
+        }
+      } catch {
+        // 锁刚被释放：直接重试。
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return null;
+      Atomics.wait(sleeper, 0, 0, Math.min(5, remaining));
+    }
+  }
+}
 
 export interface ClaudeSessionRegistryEntry {
   version: 1;
@@ -207,17 +236,25 @@ export function registerClaudeSession(
   const directory = claudeSessionRegistryDirectory(env, true);
   if (directory === null) return false;
   const filename = `${entry.session_id.toLowerCase()}.json`;
-  // listClaudeSessions 顺带剔死行/坏行，让容量判断只数活行。
-  const alive = listClaudeSessions(env);
-  const replacingSelf = alive.some(
-    (existing) => existing.session_id.toLowerCase() === entry.session_id.toLowerCase(),
-  );
-  if (!replacingSelf && alive.length >= CLAUDE_SESSION_REGISTRY_CAPACITY) return false;
+  // 容量检查 + 写入必须互斥：并发 SessionStart hook 是多进程，两个进程同时通过
+  // 「还差一个才满」的检查会超额写入。拿不到锁按拒绝处理（hook 静默，安全侧）。
+  const lockPath = join(directory, REGISTER_LOCK_FILE);
+  const lockFd = waitForRegisterLock(lockPath);
+  if (lockFd === null) return false;
   try {
+    // listClaudeSessions 顺带剔死行/坏行，让容量判断只数活行。
+    const alive = listClaudeSessions(env);
+    const replacingSelf = alive.some(
+      (existing) => existing.session_id.toLowerCase() === entry.session_id.toLowerCase(),
+    );
+    if (!replacingSelf && alive.length >= CLAUDE_SESSION_REGISTRY_CAPACITY) return false;
     atomicWriteJson(join(directory, filename), entry, 0o600);
     return true;
   } catch {
     return false;
+  } finally {
+    closeSync(lockFd);
+    rmSync(lockPath, { force: true });
   }
 }
 

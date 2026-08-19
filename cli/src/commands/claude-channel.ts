@@ -514,6 +514,8 @@ export async function runDormantClaudeSessionAnnounce(
     }
     const auth = await deps.resolveAuth().catch(() => null);
     if (!auth?.server || !auth.token) return;
+    // resolveAuth 是本循环里唯一的长 await：期间收到 abort 就绝不再建连。
+    if (signal.aborted) return;
     const topology = deps.buildTopology(auth.server, entry.cwd, {
       harnessSession: {
         harness: "claude",
@@ -528,21 +530,30 @@ export async function runDormantClaudeSessionAnnounce(
       runtimeTopology: topology,
     });
     const sessionId = entry.session_id;
+    let connectionClosed = false;
+    const closeConnection = () => {
+      connectionClosed = true;
+      connection.close();
+    };
     const liveness = setInterval(() => {
+      if (connectionClosed) return;
       try {
         const stillAlive = deps.listSessions().some(
           (candidate) => candidate.session_id.toLowerCase() === sessionId.toLowerCase(),
         );
-        if (!stillAlive) connection.close();
+        if (!stillAlive) closeConnection();
       } catch {
-        connection.close();
+        closeConnection();
       }
     }, livenessMs);
     if (typeof (liveness as { unref?: () => void }).unref === "function") {
       (liveness as unknown as { unref: () => void }).unref();
     }
-    const onAbort = () => connection.close();
+    const onAbort = () => closeConnection();
     signal.addEventListener("abort", onAbort, { once: true });
+    // abort 恰好落在建连之后、监听注册之前：已 abort 的 signal 不会再派发事件，
+    // 这里立即补一次 close，防止连接泄漏。
+    if (signal.aborted) closeConnection();
     try {
       for await (const frame of connection.frames) {
         if (frame.type === "msg" || frame.type === "status") connection.ack(frame.seq);
@@ -553,7 +564,7 @@ export async function runDormantClaudeSessionAnnounce(
     } finally {
       clearInterval(liveness);
       signal.removeEventListener("abort", onAbort);
-      connection.close();
+      closeConnection();
     }
     // 帧流结束：会话死了就回到等待档（换会话可再宣告），否则稍候重试。
     await abortableSleep(pollMs, signal);

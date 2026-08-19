@@ -164,6 +164,18 @@ describe("runDormantClaudeSessionAnnounce (#841 P2)", () => {
     expect(connections[0]!.closed).toBe(true);
   });
 
+  test("an abort during resolveAuth never opens a connection", async () => {
+    const abort = new AbortController();
+    const { deps, connections } = makeDeps({
+      resolveAuth: async () => {
+        abort.abort();
+        return { server: "https://party.example", token: "tok" };
+      },
+    });
+    await runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    expect(connections).toHaveLength(0);
+  });
+
   test("stays fully dormant without auth", async () => {
     const { deps, connections } = makeDeps({
       resolveAuth: async () => ({ server: null, token: null }),
