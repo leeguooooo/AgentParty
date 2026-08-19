@@ -1,5 +1,6 @@
 // party digest — structured catch-up over recent history, separating mention/wake/resume.
 import type { MsgFrame, StatusState, WakeDelivery } from "@agentparty/shared";
+import { BEHAVIOR_CONTRACT_SUMMARY } from "@agentparty/shared/onboarding";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { loadCursor, resolveChannel } from "../config";
 import { jsonFrame, nowTs } from "../json";
@@ -180,6 +181,8 @@ function printHuman(input: {
   respondedMentions: RespondedMentionDigest[];
   wokenMentions: WokenMentionDigest[];
 }) {
+  // #845 唤醒补针：catch-up 头部固定一行行为契约摘要（shared 同源常量），不喧宾夺主。
+  console.log(`# ${BEHAVIOR_CONTRACT_SUMMARY}`);
   console.log(`digest ${input.channel} #${input.since + 1}..#${input.lastSeq} (${input.total} messages)`);
   console.log(`viewer: ${input.viewer ?? "unknown"}`);
   console.log("wake: delivery ledger is separate from linked fresh ack/status");

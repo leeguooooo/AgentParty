@@ -1,6 +1,6 @@
 // party charter — read/update the channel "用前必读" pointer document.
 import { readFileSync } from "node:fs";
-import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
+import { BEHAVIOR_CONTRACT_SUMMARY, channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { stripTerminalControls } from "../format";
@@ -52,6 +52,8 @@ function printCharter(slug: string, body: Awaited<ReturnType<typeof fetchChannel
     return;
   }
   const decisionLines = channelDecisionSnapshotBodyLines(body.active_decisions ?? []);
+  // #845 唤醒补针：wake 路径被拉起的 agent 第一步读 charter，头部固定带一行行为契约摘要。
+  console.log(`# ${BEHAVIOR_CONTRACT_SUMMARY}`);
   if (!body.charter && decisionLines.length === 0) {
     console.log(`# ${slug} charter not set (rev ${body.charter_rev})`);
     return;

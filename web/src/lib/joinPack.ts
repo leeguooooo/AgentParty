@@ -2,7 +2,7 @@
 // （AgentTokens）都调这一份，两个入口的产物从结构上逐字节同构，杜绝再漂移（#584 复盘）。
 // 独立成模块而不放 agentTokenVault：AgentJoin 的测试整体 mock 了 vault 模块，
 // builder 放那边会让组件测试拿到假实现。
-import { AGENT_NAME_RE, channelDecisionSnapshotBodyLines, charterSnapshotBodyLines, mcpServerName } from "@agentparty/shared/onboarding";
+import { AGENT_NAME_RE, BEHAVIOR_CONTRACT_BODY_LINES, channelDecisionSnapshotBodyLines, charterSnapshotBodyLines, mcpServerName } from "@agentparty/shared/onboarding";
 import type { ChannelCharter } from "./api";
 import type { DesktopAgentRunner } from "./desktopAgent";
 import type { TFunc } from "../i18n/useT";
@@ -96,6 +96,14 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     t("AgentJoin.cmd.turnWarn3"),
     t("AgentJoin.cmd.turnWarn4", { agentName, slug }),
     ``,
+    // #845 层 2：行为契约落盘成 rules 文件（与 AGENTPARTY_CONFIG 同目录同命名风格），
+    // 上下文被压缩/丢失后可重读。正文是 shared 的静态常量（BEHAVIOR_CONTRACT_BODY_LINES），
+    // 绝不掺 charter 等管理员可控文本（那有注释化防 RCE 的约束）；heredoc delimiter 带引号防变量展开。
+    t("AgentJoin.cmd.rulesNote"),
+    `cat > "$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.rules.md" <<'AGENTPARTY_RULES_EOF'`,
+    ...BEHAVIOR_CONTRACT_BODY_LINES,
+    `AGENTPARTY_RULES_EOF`,
+    ``,
     t("AgentJoin.cmd.step3"),
     // #676：token 走 AGENTPARTY_TOKEN 环境变量传入，不写进 argv——同机任意用户 `ps -axww` 看不到它，
     // 也不触发 party init 自身「--token 会进 argv/history」的告警（最严格可改 `--token -` 从 stdin 读）。
@@ -141,6 +149,8 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     t("AgentJoin.cmd.episodic2", { slug }),
     t("AgentJoin.cmd.episodic3"),
     t("AgentJoin.cmd.etiquette"),
+    // #845：包尾提醒——本包是瞬态文本，规则的持久拷贝在上面落盘的 rules 文件里。
+    t("AgentJoin.cmd.rulesReread", { agentName, slug }),
   ].join("\n");
 }
 
