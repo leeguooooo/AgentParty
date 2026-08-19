@@ -25,6 +25,11 @@ import {
   type DeliveryRecoveryEntry,
 } from "../delivery-recovery-journal";
 import { atomicWriteJson, atomicWriteText } from "../atomic-json";
+import {
+  isClaudeSessionRegistrySessionId,
+  registerClaudeSession,
+  unregisterClaudeSession,
+} from "../claude-session-registry";
 import { isHelpArg } from "../args";
 import { isPartyBinaryPath } from "../upgrade";
 import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "./claude-launch";
@@ -449,6 +454,54 @@ export function shouldForceActivityPush(
   );
 }
 
+/** SessionStart hook payload 里可能带的展示名字段（当前 Claude 实测都不发；拿不到记 null）。 */
+export function claudeSessionDisplayNameFromHookPayload(
+  record: Record<string, unknown>,
+): string | null {
+  for (const key of ["display_name", "session_name", "agent_name"]) {
+    const value = record[key];
+    if (typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value)) return value;
+  }
+  return null;
+}
+
+/**
+ * 本机会话注册表接线（issue #841 P1）：SessionStart 入册、SessionEnd 出册。
+ * 严守 hook 铁律：stdout 恒空、任何失败静默、不等网络。serve 托管 lane
+ * （AP_ACTIVITY_FILE 有值）不入册——那是被管理的 runner 会话，不是交互式会话。
+ * 频道解析与 maybeSpawnPush 同款：AGENTPARTY_CHANNEL ?? readState(cwd)?.channel，
+ * 无频道不入册。pid 记 process.ppid（hook 子进程的父进程即 Claude 本体）。
+ */
+export function recordClaudeSessionLifecycle(
+  record: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+  pid: number = process.ppid,
+): void {
+  try {
+    const event = record.hook_event_name;
+    if (event !== "SessionStart" && event !== "SessionEnd") return;
+    const sessionId = record.session_id;
+    if (!isClaudeSessionRegistrySessionId(sessionId)) return;
+    if (event === "SessionEnd") {
+      unregisterClaudeSession(sessionId, env);
+      return;
+    }
+    if (env.AP_ACTIVITY_FILE) return;
+    const cwd = typeof record.cwd === "string" && record.cwd.length > 0 ? record.cwd : process.cwd();
+    const channel = env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel;
+    if (!channel) return;
+    registerClaudeSession({
+      session_id: sessionId,
+      pid,
+      display_name: claudeSessionDisplayNameFromHookPayload(record),
+      channel,
+      cwd,
+    }, env);
+  } catch {
+    // hook 铁律：注册表任何失败都不配影响模型。
+  }
+}
+
 function reportHookPayload(
   record: Record<string, unknown>,
   overridePhase?: AgentActivity["phase"],
@@ -502,6 +555,7 @@ async function runHookInput(blockStop: boolean): Promise<number> {
     const payload = JSON.parse(raw) as unknown;
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return 0;
     const record = payload as Record<string, unknown>;
+    recordClaudeSessionLifecycle(record);
     if (!blockStop || record.hook_event_name !== "Stop" || record.stop_hook_active !== false) {
       reportHookPayload(record);
       return 0;
