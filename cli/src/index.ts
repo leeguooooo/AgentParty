@@ -18,6 +18,7 @@ commands:
   agent     add <name> [--channel-scope slug] | create <handle> --runner codex|claude|codex-sdk|shell [--invitable-by owner|org|anyone] | list
   spawn     <worker> --channel-scope slug [--ttl 2h] create a short-lived worker from the front agent
   init      --server URL --token T [--channel C]   write config, bind channel (create if missing)
+  up        [channel-url|slug] [--runner claude|codex|codex-sdk]   one idempotent command: token → bind → resident serve (self-heal, #837)
   send      <text|-> [--channel C] [--mention name]... [--reply-to seq]
   complete  <text|-> --kickoff-seq seq [--channel C] [--replies n] [--timeout] [--issue n]... [--pr n]...
   review    approve|reject <seq> [-m reason] [--channel C] [--json]
@@ -94,6 +95,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/spawn")).run(rest);
     case "init":
       return (await import("./commands/init")).run(rest);
+    case "up":
+      return (await import("./commands/up")).run(rest);
     case "send":
       return (await import("./commands/send")).run(rest);
     case "complete":
