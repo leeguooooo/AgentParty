@@ -43,6 +43,7 @@ commands:
   status    [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]...
   statusline [--channel C] [--refresh] [--no-network]
   who       [channel|--channel C] [--json]                who is online/wakeable/recent — pick who to --mention
+  agents    [channel|--channel C] [--json]                unified reachability view — every NAME is a direct address
   pause     <name> [--channel C] [--resume-at T|--for D]   stop waking an agent (moderator); auto-resume at T / after D
   resume    <name> [--channel C]                           resume a paused agent's reception (moderator)
   wake-budget <name> [--limit N [--window D]|--off]        cap an agent's wakes per window; over-budget @ withheld (#108)
@@ -152,6 +153,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/statusline")).run(rest);
     case "who":
       return (await import("./commands/who")).run(rest);
+    case "agents":
+      return (await import("./commands/agents")).run(rest);
     case "pause":
     case "resume":
       return (await import("./commands/pause")).run(cmd, rest);
