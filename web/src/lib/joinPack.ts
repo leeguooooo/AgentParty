@@ -136,6 +136,8 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
           t("AgentJoin.cmd.pluginNote1"),
           `claude plugin marketplace add leeguooooo/AgentParty || true`,
           `claude plugin install agentparty@agentparty || true`,
+          // 装上未必启用——doctor.ts 的 fix 提示就是 install && enable 两连，这里对齐。
+          `claude plugin enable agentparty@agentparty || true`,
           t("AgentJoin.cmd.pluginNote2"),
         ]
       : []),
