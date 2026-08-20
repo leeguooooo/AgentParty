@@ -370,12 +370,47 @@ export type InjectFailureReason =
   | "ambiguous"
   | "unavailable"
   | "probe-failed"
+  | "socket-untrusted"
   | "body-too-large"
   | "write-failed";
 
+/**
+ * 目标 socket 属主校验（#867 ②）。本模块另外三处 `lstatSync`（会话目录、`<pid>.json`、
+ * `.key`）都做了「非符号链接 + 属主匹配」，唯独**要写入的 socket 本身**从来没验过——
+ * 那份安全完全继承自 Claude 首次建 `/tmp/cc-socks` 时的 0700，本模块自己一条都没查。
+ *
+ * socket 路径可预测（`/tmp/cc-socks/<pid>.sock`，pid 空间小且可枚举，父目录在 world-writable
+ * 的 `/tmp` 下）。多用户机器上若攻击者抢在 Claude 首次运行前建好 `cc-socks`，我们会把
+ * peerToken（auth 行）+ 频道 channel/seq 指针直接写给他。校验很便宜，与另外三处对齐：
+ * 必须是真 socket、非符号链接、属本 uid。
+ *
+ * 返回 null ＝通过；返回字符串 ＝拒投理由（进 InjectResult.detail）。
+ * 注意 `lstatSync` 不跟随符号链接：指向他人 socket 的软链会同时命中 isSymbolicLink 与
+ * !isSocket 两条，任一条都足以拒投。
+ */
+export function socketOwnershipFailure(sockPath: string): string | null {
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(sockPath);
+  } catch (error) {
+    return `lstat failed: ${String(error)}`;
+  }
+  if (stat.isSymbolicLink()) return "socket path is a symlink";
+  if (!stat.isSocket()) return "path is not a socket";
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    return `socket owned by uid ${stat.uid}, expected ${process.getuid()}`;
+  }
+  return null;
+}
+
 export type InjectResult =
   /**
-   * ok:true ＝**帧已写入收件箱 socket**，不代表已进对方对话流。接收端的
+   * ok:true 的语义，写死在这里（#867 ①附带）：**字节已交给内核**。
+   * `writeFramesToSocket` 走 `socket.end(payload, cb)`，回调只在数据 flush 之后触发——
+   * 不代表对端读了、更不代表对端解析了。本模块从不读任何响应、也不订阅
+   * `peer_message_status`，所以**连 auth 行被拒都感知不到**。
+   *
+   * 也就是说 ok:true ＝**帧已写入收件箱 socket**，不代表已进对方对话流。接收端的
    * crossSessionInbound 闸门决定归宿：accept 才入队唤醒；默认 hold 会进待审队列并在
    * 5 分钟无人处理后被 drop；refuse 直接丢。接收端不回错，我们无从区分。
    * **调用方绝不可据此清频道侧的 @ 欠账/wake 记账**——真正送达以对方回话/ack 为准。
@@ -432,6 +467,11 @@ export async function injectChannelMessage(
     : resolveSessionSocketByPid(input.pid, { expectSessionId: input.sessionId, env });
   if (!resolved.ok) return { ok: false, reason: resolved.reason };
   const { session } = resolved;
+
+  // #867 ②：**连之前**先验目标 socket 的属主/类型。放在探活之前——探活也是一次
+  // connect，不该连一个不属于我们的路径。
+  const untrusted = socketOwnershipFailure(session.messagingSocketPath);
+  if (untrusted !== null) return { ok: false, reason: "socket-untrusted", detail: untrusted };
 
   const alive = await probeSocketAlive(session.messagingSocketPath);
   if (!alive) return { ok: false, reason: "probe-failed" };

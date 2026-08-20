@@ -302,13 +302,17 @@ describe("injectChannelMessage", () => {
     expect(result).toEqual({ ok: false, reason: "no-match" });
   });
 
-  test("探活失败（socket 文件不存在）→ probe-failed", async () => {
+  // #867 ②：socket 文件根本不存在这一档，现在被**更早**的属主校验以更精确的原因拒掉
+  // （socket-untrusted + lstat ENOENT 细节），不再打成含糊的 probe-failed。
+  // probe-failed 仍保留给「文件在、是自己的真 socket、但无人 listen」的陈旧残留。
+  test("socket 文件不存在 → socket-untrusted（lstat 失败），且带出可诊断 detail", async () => {
     writeSessionFile(sessionsDir, process.pid, {
       name: "stale",
       messagingSocketPath: join(sessionsDir, "gone.sock"),
     });
     const result = await injectChannelMessage({ name: "stale", body: "x", fromName: "c", env: env() });
-    expect(result).toEqual({ ok: false, reason: "probe-failed" });
+    expect(result).toMatchObject({ ok: false, reason: "socket-untrusted" });
+    expect((result as { detail?: string }).detail).toContain("lstat failed");
   });
 
   test("from-name 含引号（会破坏完整性自校验）→ 写入前置失败", async () => {

@@ -4,7 +4,7 @@
 // 用临时 sessions 目录（AGENTPARTY_CLAUDE_NATIVE_SESSIONS_DIR）+ 临时 socket，绝不碰真实
 // `~/.claude/sessions` 或 `/tmp/cc-socks/`。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import {
   nativeSessionName,
   resolveSessionSocket,
   resolveSessionSocketByPid,
+  socketOwnershipFailure,
 } from "../src/claude-inbox-inject";
 import {
   claudeSessionAnnounceName,
@@ -147,5 +148,74 @@ describe("按 pid 寻址（#857 真实寻址层）", () => {
     expect(claudeSessionAnnounceName(registryEntry({ display_name: "agentparty-d4" }))).toBe(
       "agentparty-d4",
     );
+  });
+});
+
+// #867 ②：目标 socket 写入前的属主/类型校验。模块里另外三处 lstatSync（会话目录、
+// `<pid>.json`、`.key`）都做了这件事，唯独要写入的 socket 本身以前一次都没验过——
+// 那份安全完全继承自 Claude 建 `/tmp/cc-socks` 时的 0700。这里用临时 socket 构造
+// 不符合条件的情形，绝不碰真实 `/tmp/cc-socks/`。
+describe("#867 ②：目标 socket 属主校验", () => {
+  test("正常的自有 socket 通过校验（不误伤现行路径）", () => {
+    expect(socketOwnershipFailure(sockPath)).toBeNull();
+  });
+
+  test("路径是普通文件而非 socket → 拒投 socket-untrusted，一个字节都不写", async () => {
+    const decoy = join(dir, "decoy.notasock");
+    writeFileSync(decoy, "", { mode: 0o600 });
+    expect(socketOwnershipFailure(decoy)).toBe("path is not a socket");
+
+    writeNativeSession({ messagingSocketPath: decoy });
+    const result = await injectChannelMessage({
+      pid: process.pid,
+      sessionId: SESSION_ID,
+      name: "claude-111111111111",
+      body: "AgentParty wake: #dev seq=1",
+      fromName: "leo",
+      env: env(),
+    });
+    expect(result).toEqual({ ok: false, reason: "socket-untrusted", detail: "path is not a socket" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(received.join("")).toBe("");
+  });
+
+  test("符号链接指向真 socket → 拒投，绝不顺着软链把 peerToken 写出去", async () => {
+    const link = join(dir, "link.sock");
+    symlinkSync(sockPath, link);
+    // lstat 不跟随符号链接：isSymbolicLink 命中，先于 isSocket 拒掉。
+    expect(socketOwnershipFailure(link)).toBe("socket path is a symlink");
+
+    writeNativeSession({ messagingSocketPath: link });
+    const result = await injectChannelMessage({
+      pid: process.pid,
+      sessionId: SESSION_ID,
+      name: "claude-111111111111",
+      body: "AgentParty wake: #dev seq=2",
+      fromName: "leo",
+      env: env(),
+    });
+    expect(result).toMatchObject({ ok: false, reason: "socket-untrusted" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // 软链后面就是那个真 listener——校验若失效，这里会收到帧。
+    expect(received.join("")).toBe("");
+  });
+
+  test("路径根本不存在 → lstat 失败即拒投（早于任何 connect）", () => {
+    const failure = socketOwnershipFailure(join(dir, "nope.sock"));
+    expect(failure).toContain("lstat failed");
+  });
+
+  test("socket 属于别的 uid → 拒投并报出实际 uid", () => {
+    const realGetuid = process.getuid;
+    // 本机构造不出别人的 socket（不 sudo），改用 getuid 偏移等价地翻转比较结果。
+    (process as { getuid?: () => number }).getuid = () => (realGetuid!() + 1) % 60_000;
+    try {
+      const failure = socketOwnershipFailure(sockPath);
+      expect(failure).toContain("socket owned by uid");
+      expect(failure).toContain(String(realGetuid!()));
+    } finally {
+      (process as { getuid?: () => number }).getuid = realGetuid;
+    }
+    expect(socketOwnershipFailure(sockPath)).toBeNull();
   });
 });

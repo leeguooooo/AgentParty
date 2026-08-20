@@ -20,6 +20,7 @@ import {
 import { writeConfig, writeState } from "../src/config";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 import { startRestMock } from "./rest-mock";
+import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
 
 let server: MockServer | null = null;
 
@@ -908,4 +909,91 @@ describe("serve durable directed delivery (#551)", () => {
     expect(runnerCalls).toBe(0);
     expect(lines.some((line) => line.includes("启动确认失败，未启动 runner"))).toBe(true);
   }, 10_000);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #866：唤醒代理的**接线点**回归。此前全仓库没有任何 serve*.test.ts 提到 wakeProxy——
+// #856 只测了 socketWakeProxyForwarder 这个纯函数壳，接线点一条断言都没有，结果
+// 「同一 seq 转投两次」不加修复也是全绿。这里按 seq 计数把接线钉死。
+// ─────────────────────────────────────────────────────────────────────────────
+describe("serve 唤醒代理转投去重（#866）", () => {
+  /** 本机入册的另一个 Claude 会话，宣告名 = peer-claude。 */
+  function peerSession(): ClaudeSessionRegistryEntry {
+    return {
+      version: 1,
+      session_id: "22222222-2222-4222-8222-222222222222",
+      pid: process.pid,
+      display_name: "peer-claude",
+      channel: "dev",
+      cwd: "/tmp/project",
+      registered_at: 1_000,
+    };
+  }
+
+  /**
+   * 跑一轮 directed-delivery 模式的 serve，统计唤醒代理被调用了几次、分别是哪个 seq。
+   * withDelivery=true 时服务端在普通 msg 帧之后再补发同一 seq 的权威 delivery 帧
+   * （＝ @ 到自己时的真实线上时序）。
+   */
+  async function countForwards(
+    mentions: string[],
+    withDelivery: boolean,
+  ): Promise<Array<{ target: string; seq: number }>> {
+    const forwards: Array<{ target: string; seq: number }> = [];
+    const message = msgFrame(7, "@me @peer-claude 看看这个", {
+      sender: { name: "bob", kind: "human", owner: "bob@example.com" },
+      mentions,
+    }) as unknown as MsgFrame;
+    const work = delivery(7);
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send({ ...welcomeFrame(0, "me"), directed_delivery: "v1" });
+      } else if (frame.type === "serve_lease") {
+        sock.send({ type: "serve_lease", name: "me", held: true });
+        // 1) 普通 msg 帧先到。
+        sock.send(message as unknown as ServerFrame);
+        if (withDelivery) {
+          // 2) 同一 seq 的权威 delivery 帧随后到 —— 修复前这里会触发第二次转投。
+          sock.send({ type: "delivery", delivery: work, message });
+        } else {
+          sock.send({ type: "error", code: "archived", message: "done" });
+        }
+      } else if (frame.type === "delivery_update") {
+        sock.send({
+          type: "delivery_state",
+          request_id: frame.request_id,
+          delivery: { ...work, state: frame.state, updated_at: Date.now() },
+        });
+        if (frame.state === "replied" || frame.state === "failed") {
+          sock.send({ type: "error", code: "archived", message: "done" });
+        }
+      }
+    });
+
+    await runServe(opts({
+      server: server.url,
+      runCommand: async () => {},
+      wakeProxy: {
+        listSessions: () => [peerSession()],
+        forward: async (target, ref) => {
+          forwards.push({ target: target.display_name!, seq: ref.seq });
+          return true;
+        },
+      },
+    }));
+    return forwards;
+  }
+
+  test("同时 @ 自己和本机另一会话：msg 帧 + delivery 帧同 seq，只转投一次", async () => {
+    const forwards = await countForwards(["me", "peer-claude"], true);
+    // 修复前这里是 2（同一 seq 两条，目标会话对一条消息开两个 turn，双倍模型成本）。
+    expect(forwards).toEqual([{ target: "peer-claude", seq: 7 }]);
+    // 按 seq 去重是这条断言的重点：同一 seq 绝不出现两次。
+    expect(new Set(forwards.map((f) => f.seq)).size).toBe(forwards.length);
+  });
+
+  test("对照组：只 @ 本机另一会话、不 @ 自己 → 没有 delivery 帧跟上，仍转投一次", async () => {
+    const forwards = await countForwards(["peer-claude"], false);
+    expect(forwards).toEqual([{ target: "peer-claude", seq: 7 }]);
+  });
 });
