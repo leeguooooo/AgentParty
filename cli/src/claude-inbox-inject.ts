@@ -20,6 +20,17 @@
 // 侧降级今天等价于「forwarder 返回 false → serve 照常按现行为跑自己的 runner」，见文末
 // socketWakeProxyForwarder 的 TODO。
 //
+// ─────────────── 送达语义：ok:true ≠ 已进对话流（务必看清） ───────────────
+// 本模块的成功只代表「JSONL 帧已写进目标会话的收件箱 socket」。写进去之后还要过接收端
+// 的 crossSessionInbound 权限闸：
+//   - accept → 入 Claude 输入队列，idle 会话被 onEnqueue 唤起开新 turn（这才是真送达）；
+//   - hold（**默认值**）→ 进待审队列，需人工 Deliver，**5 分钟无人处理会被 drop**；
+//   - refuse / kill-switch → 直接丢弃。
+// 而且接收端**不回错给发送方**（除非订阅 peer_message_status 回执），所以我们无法从写入
+// 结果区分这三种归宿。因此：**绝不能拿 ok:true 当「已送达」去清频道侧的 @ 欠账/wake 记账**
+// ——真正送达以对方回话/ack 为准。接入包（#844）会把 crossSessionInbound 设成 accept 来把
+// 默认的 hold 变成直投，但那是接收端本地设置，仓库/组织设置只能收紧，不能假定一定生效。
+//
 // 未文档化私有面提示：`authRequired = windows-only`、帧 schema 均为 Claude `2.1.236` 实现
 // 细节，可能随版本收紧。写入前做版本/能力嗅探（探活零字节 connect），不符即降级；不阻断投递。
 import { Buffer } from "node:buffer";
@@ -314,6 +325,12 @@ export type InjectFailureReason =
   | "write-failed";
 
 export type InjectResult =
+  /**
+   * ok:true ＝**帧已写入收件箱 socket**，不代表已进对方对话流。接收端的
+   * crossSessionInbound 闸门决定归宿：accept 才入队唤醒；默认 hold 会进待审队列并在
+   * 5 分钟无人处理后被 drop；refuse 直接丢。接收端不回错，我们无从区分。
+   * **调用方绝不可据此清频道侧的 @ 欠账/wake 记账**——真正送达以对方回话/ack 为准。
+   */
   | { ok: true; socketPath: string; usedAuth: boolean; target: string }
   | { ok: false; reason: InjectFailureReason; detail?: string };
 

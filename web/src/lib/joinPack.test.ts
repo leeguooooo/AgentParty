@@ -109,6 +109,37 @@ describe("joinPack 按 harness 拆分（#845 第 4 点）", () => {
     }
   });
 
+  // #844：claude 档补 crossSessionInbound=accept——不改则默认 hold，消息进待审队列且
+  // 5 分钟无人处理会被 drop。必须幂等、失败不阻断、写前备份、不硬依赖 jq。
+  test("claude 档：含 crossSessionInbound=accept 配置行，备份 + jq/node/python3 三级兜底 + 失败不阻断（#844）", () => {
+    const text = pack("claude");
+    expect(text).toContain(`AGENTPARTY_CC_SETTINGS="$HOME/.claude/settings.json"`);
+    expect(text).toContain("crossSessionInbound");
+    expect(text).toContain("accept");
+    // 写前备份
+    // 备份首次写入即定：重跑接入包不能把备份覆盖成已改过的版本
+    expect(text).toContain(
+      `[ -f "$AGENTPARTY_CC_SETTINGS.agentparty.bak" ] || cp "$AGENTPARTY_CC_SETTINGS" "$AGENTPARTY_CC_SETTINGS.agentparty.bak" || true`,
+    );
+    // 不硬依赖 jq：三级兜底都在
+    expect(text).toContain("command -v jq");
+    expect(text).toContain("command -v node");
+    expect(text).toContain("command -v python3");
+    // 失败不阻断：每条写入分支都带 || true
+    expect(text).toContain("|| true");
+    // 边界说明（接收端设置 / repo 只能收紧 / 默认 hold 5 分钟被 drop）必须在注释里说清
+    expect(text).toContain("--setting-sources");
+    expect(text).toContain("hold");
+  });
+
+  test("codex/other 档：不含 crossSessionInbound 配置（Claude Code 专属设置，#844）", () => {
+    for (const harness of ["codex", "other"] as const) {
+      const text = pack(harness);
+      expect(text).not.toContain("crossSessionInbound");
+      expect(text).not.toContain("AGENTPARTY_CC_SETTINGS");
+    }
+  });
+
   // #850：codex 档补装 codex 插件——与 #848 的 claude 档对等，两行命令 + || true 失败不阻断。
   const CODEX_PLUGIN_MARKETPLACE = "codex plugin marketplace add leeguooooo/AgentParty || true";
   const CODEX_PLUGIN_ADD = "codex plugin add agentparty@agentparty || true";

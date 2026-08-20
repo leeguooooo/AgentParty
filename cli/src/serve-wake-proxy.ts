@@ -104,6 +104,12 @@ export interface SocketWakeProxyForwarderOptions {
  * - 任一步失败（无匹配 socket/探活失败/写入错/版本不符）→ 返回 false，attemptWakeProxy
  *   据此降级为现行为（serve 照常跑自己的 runner，即 headless resume loop 兜底）。
  *
+ * 送达语义（#844）：返回 true 只代表「帧已写进对方收件箱」，**不代表已进对方对话流**
+ * ——接收端 crossSessionInbound 默认 hold 时消息进待审队列且 5 分钟无人处理即被 drop。
+ * 因此 serve 侧绝不能拿这个 true 去清 @ 欠账 / ack 越过该 seq：真正送达以对方回话为准。
+ * 现状已符合——serve.ts 只 await attemptWakeProxy 并**丢弃返回值**，wake/ack/stuck 记账
+ * 完全走独立的 qualifies 路径，转投与否都不改变现行为（「纯增量」）。改这里前先复核那点。
+ *
  * TODO(#844 serve 降级集成)：当前 socket 不可用时的「serve headless resume loop stdin 注入」
  * 复用的是 serve 现行为（runner 正常处理这条 @），不是独立的 stdin 注入调用。待 serve 侧
  * 暴露显式的「把下一个 user turn 喂给 resume loop」接口后，可在此 false 分支上再挂一跳，
