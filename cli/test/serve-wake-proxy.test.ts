@@ -19,11 +19,15 @@ function entry(overrides: Partial<ClaudeSessionRegistryEntry> = {}): ClaudeSessi
     pid: process.pid,
     display_name: null,
     channel: "dev",
+    server: SERVER_A,
     cwd: "/tmp/project",
     registered_at: 1000,
     ...overrides,
   };
 }
+
+const SERVER_A = "https://a.example.com";
+const SERVER_B = "https://b.example.com";
 
 describe("claudeSessionAnnounceName", () => {
   test("display_name 优先，缺省回退 claude-<12hex>", () => {
@@ -34,7 +38,7 @@ describe("claudeSessionAnnounceName", () => {
 
 describe("wakeProxyNote", () => {
   test("只带 channel+seq 指针且 ≤512B（含最长 channel）", () => {
-    const note = wakeProxyNote({ channel: "a".repeat(64), seq: Number.MAX_SAFE_INTEGER });
+    const note = wakeProxyNote({ channel: "a".repeat(64), server: SERVER_A, seq: Number.MAX_SAFE_INTEGER });
     expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
     expect(note).toContain(`#${"a".repeat(64)}`);
     expect(note).toContain(`seq=${Number.MAX_SAFE_INTEGER}`);
@@ -44,16 +48,16 @@ describe("wakeProxyNote", () => {
 describe("selectWakeProxyTarget", () => {
   test("回退名命中 → 选中；serve 自己的名字不算转投目标", () => {
     const sessions = [entry()];
-    expect(selectWakeProxyTarget(["claude-111111111111"], "me", "dev", sessions)?.session_id)
+    expect(selectWakeProxyTarget(["claude-111111111111"], "me", "dev", sessions, SERVER_A)?.session_id)
       .toBe(sessions[0]!.session_id);
-    expect(selectWakeProxyTarget(["claude-111111111111"], "claude-111111111111", "dev", sessions))
+    expect(selectWakeProxyTarget(["claude-111111111111"], "claude-111111111111", "dev", sessions, SERVER_A))
       .toBeNull();
   });
 
   test("display_name 命中；channel 不匹配的条目排除", () => {
     const named = entry({ display_name: "pair-claude" });
-    expect(selectWakeProxyTarget(["pair-claude"], "me", "dev", [named])).toBe(named);
-    expect(selectWakeProxyTarget(["pair-claude"], "me", "other", [named])).toBeNull();
+    expect(selectWakeProxyTarget(["pair-claude"], "me", "dev", [named], SERVER_A)).toBe(named);
+    expect(selectWakeProxyTarget(["pair-claude"], "me", "other", [named], SERVER_A)).toBeNull();
   });
 
   test("多候选取最新入册", () => {
@@ -68,19 +72,45 @@ describe("selectWakeProxyTarget", () => {
       "me",
       "dev",
       [older, newer],
+      SERVER_A,
     );
     expect(picked).toBe(newer);
   });
 
+  /** #865：频道 slug 跨实例不唯一（两台生产实例上都有 `agentparty`）。 */
+  test("#865：同 slug 不同 server 不命中；同 slug 同 server 才命中", () => {
+    const onA = entry({ display_name: "pair-claude", server: SERVER_A });
+    expect(selectWakeProxyTarget(["pair-claude"], "me", "dev", [onA], SERVER_A)).toBe(onA);
+    expect(selectWakeProxyTarget(["pair-claude"], "me", "dev", [onA], SERVER_B)).toBeNull();
+  });
+
+  test("#865：旧条目（无 server 字段）恒不命中；server 未知时同样不命中", () => {
+    const legacy = entry({ display_name: "pair-claude", server: undefined });
+    expect(selectWakeProxyTarget(["pair-claude"], "me", "dev", [legacy], SERVER_A)).toBeNull();
+    const known = entry({ display_name: "pair-claude", server: SERVER_A });
+    expect(selectWakeProxyTarget(["pair-claude"], "me", "dev", [known], null)).toBeNull();
+    expect(selectWakeProxyTarget(["pair-claude"], "me", "dev", [known], undefined)).toBeNull();
+  });
+
+  test("#865：server 按 origin 规范化比对（尾斜杠/大小写 host/缺协议头都等价）", () => {
+    const onA = entry({ display_name: "pair-claude", server: SERVER_A });
+    for (const variant of ["https://a.example.com/", "https://A.Example.com", "a.example.com"]) {
+      expect(selectWakeProxyTarget(["pair-claude"], "me", "dev", [onA], variant)).toBe(onA);
+    }
+    // 端口不同＝不同实例。
+    expect(selectWakeProxyTarget(["pair-claude"], "me", "dev", [onA], "https://a.example.com:8443"))
+      .toBeNull();
+  });
+
   test("无 mentions 或全是 self → null", () => {
-    expect(selectWakeProxyTarget([], "me", "dev", [entry()])).toBeNull();
+    expect(selectWakeProxyTarget([], "me", "dev", [entry()], SERVER_A)).toBeNull();
   });
 });
 
 describe("attemptWakeProxy", () => {
   test("默认载体（无传输）：命中目标但 forwarded=false，降级为现行为", async () => {
     const lines: string[] = [];
-    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 7 }, {
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", server: SERVER_A, seq: 7 }, {
       listSessions: () => [entry()],
       log: (line) => lines.push(line),
     });
@@ -91,7 +121,7 @@ describe("attemptWakeProxy", () => {
   });
 
   test("死会话已被注册表剔除（列表为空）→ 无目标，回落现行为", async () => {
-    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 7 }, {
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", server: SERVER_A, seq: 7 }, {
       listSessions: () => [],
     });
     expect(result).toMatchObject({ forwarded: false, target: null });
@@ -99,7 +129,7 @@ describe("attemptWakeProxy", () => {
 
   test("载体成功 → forwarded=true 且拿到 ≤512B 指针", async () => {
     let sent = "";
-    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 42 }, {
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", server: SERVER_A, seq: 42 }, {
       listSessions: () => [entry()],
       forward: async (_target, ref) => {
         sent = wakeProxyNote(ref);
@@ -113,7 +143,7 @@ describe("attemptWakeProxy", () => {
 
   test("载体抛错 → 绝不上抛，降级为现行为", async () => {
     const lines: string[] = [];
-    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 7 }, {
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", server: SERVER_A, seq: 7 }, {
       listSessions: () => [entry()],
       forward: async () => {
         throw new Error("transport boom");
@@ -126,7 +156,7 @@ describe("attemptWakeProxy", () => {
   });
 
   test("注册表读取抛错 → 降级为现行为", async () => {
-    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 7 }, {
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", server: SERVER_A, seq: 7 }, {
       listSessions: () => {
         throw new Error("registry boom");
       },
@@ -135,7 +165,7 @@ describe("attemptWakeProxy", () => {
   });
 
   test("noWakeProxyForwarder 恒 false（且这条才是真正的「无载体」）", async () => {
-    expect(await noWakeProxyForwarder(entry(), { channel: "dev", seq: 1 })).toMatchObject({
+    expect(await noWakeProxyForwarder(entry(), { channel: "dev", server: SERVER_A, seq: 1 })).toMatchObject({
       ok: false,
       reason: "no-carrier",
     });
@@ -162,7 +192,7 @@ describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
         verified_at: 0,
       }),
     });
-    const ok = await forward(entry({ display_name: "pair-claude" }), { channel: "pwtk", seq: 42 });
+    const ok = await forward(entry({ display_name: "pair-claude" }), { channel: "pwtk", server: SERVER_A, seq: 42 });
     expect(ok).toMatchObject({ ok: true });
     expect(seen!.name).toBe("pair-claude");
     // 寻址走 pid + sessionId（宣告名恒不等于 Claude 原生会话名，#857）。
@@ -177,7 +207,7 @@ describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
     const forward = socketWakeProxyForwarder({
       inject: async () => ({ ok: false, reason: "no-match" }),
     });
-    expect(await forward(entry(), { channel: "dev", seq: 1 })).toMatchObject({ ok: false, reason: "no-match" });
+    expect(await forward(entry(), { channel: "dev", server: SERVER_A, seq: 1 })).toMatchObject({ ok: false, reason: "no-match" });
   });
 });
 
@@ -200,10 +230,10 @@ describe("#867 ①：结构化失败原因必须一路透出到降级日志", ()
       const forward = socketWakeProxyForwarder({
         inject: async () => ({ ok: false, reason, detail }),
       });
-      expect(await forward(entry(), { channel: "dev", seq: 5 })).toEqual({ ok: false, reason, detail });
+      expect(await forward(entry(), { channel: "dev", server: SERVER_A, seq: 5 })).toEqual({ ok: false, reason, detail });
 
       const lines: string[] = [];
-      const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 5 }, {
+      const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", server: SERVER_A, seq: 5 }, {
         listSessions: () => [entry()],
         forward,
         log: (line) => lines.push(line),
@@ -222,7 +252,7 @@ describe("#867 ①：结构化失败原因必须一路透出到降级日志", ()
   test("两种不同失败打出的是两条不同的日志（以前恒同一句）", async () => {
     const lines: string[] = [];
     for (const reason of ["no-match", "probe-failed"] as const) {
-      await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 5 }, {
+      await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", server: SERVER_A, seq: 5 }, {
         listSessions: () => [entry()],
         forward: socketWakeProxyForwarder({ inject: async () => ({ ok: false, reason }) }),
         log: (line) => lines.push(line),
@@ -234,7 +264,7 @@ describe("#867 ①：结构化失败原因必须一路透出到降级日志", ()
 
   test("载体只返回裸 boolean false → 明说「未上报原因」，绝不编一个", async () => {
     const lines: string[] = [];
-    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 5 }, {
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", server: SERVER_A, seq: 5 }, {
       listSessions: () => [entry()],
       forward: async () => false,
       log: (line) => lines.push(line),
@@ -244,7 +274,7 @@ describe("#867 ①：结构化失败原因必须一路透出到降级日志", ()
   });
 
   test("成功路径不带 reason/detail", async () => {
-    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 5 }, {
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", server: SERVER_A, seq: 5 }, {
       listSessions: () => [entry()],
       forward: async () => true,
     });

@@ -37,6 +37,7 @@ import { connect, type Connection } from "../client";
 import {
   claudeSessionAnnounceName,
   listClaudeSessions,
+  sessionEntryMatchesServer,
   type ClaudeSessionRegistryEntry,
 } from "../claude-session-registry";
 import { injectChannelMessage } from "../claude-inbox-inject";
@@ -457,13 +458,22 @@ export function dormantAnnounceDisplayName(entry: ClaudeSessionRegistryEntry): s
   return claudeSessionAnnounceName(entry);
 }
 
-/** 选择要宣告的入册会话：同 channel 必须；优先同 cwd；同优先级取最新入册。 */
+/**
+ * 选择要宣告的入册会话：同 **server + channel** 必须；优先同 cwd；同优先级取最新入册。
+ *
+ * #865：频道 slug 跨实例不唯一（两台生产实例上都有 `agentparty`），只比 slug 会让本机
+ * 连着 A 实例的 announce 腿把 @ 注入到只属于 B 实例的会话——实机撞见过。旧条目（无
+ * server 字段）恒不匹配，属安全侧，由下次 SessionStart 自然升级。
+ */
 export function selectDormantAnnounceEntry(
   entries: readonly ClaudeSessionRegistryEntry[],
   channel: string,
   cwd: string,
+  server?: string | null,
 ): ClaudeSessionRegistryEntry | null {
-  const matching = entries.filter((entry) => entry.channel === channel);
+  const matching = entries.filter(
+    (entry) => entry.channel === channel && sessionEntryMatchesServer(entry, server),
+  );
   if (matching.length === 0) return null;
   const pick = (candidates: readonly ClaudeSessionRegistryEntry[]) =>
     candidates.length === 0
@@ -638,9 +648,15 @@ export async function runDormantClaudeSessionAnnounce(
   // Claude 收件箱侧的 msg_id/队列去重与人工感知兜底；重复唤醒的代价远小于叫不醒。
   const injectedSeqs = new Set<number>();
   while (!signal.aborted) {
+    // #865：先解析 auth——选目标要按 server 过滤，拿不到实例身份就一个条目都不该匹配。
+    const auth = await deps.resolveAuth().catch(() => null);
+    if (!auth?.server || !auth.token) return;
+    // resolveAuth 是本循环里唯一的长 await：期间收到 abort 就绝不再建连。
+    if (signal.aborted) return;
+    const authServer = auth.server;
     let entry: ClaudeSessionRegistryEntry | null = null;
     try {
-      entry = selectDormantAnnounceEntry(deps.listSessions(), channel, cwd);
+      entry = selectDormantAnnounceEntry(deps.listSessions(), channel, cwd, authServer);
     } catch {
       return;
     }
@@ -648,10 +664,6 @@ export async function runDormantClaudeSessionAnnounce(
       await abortableSleep(pollMs, signal);
       continue;
     }
-    const auth = await deps.resolveAuth().catch(() => null);
-    if (!auth?.server || !auth.token) return;
-    // resolveAuth 是本循环里唯一的长 await：期间收到 abort 就绝不再建连。
-    if (signal.aborted) return;
     const topology = deps.buildTopology(auth.server, entry.cwd, {
       harnessSession: {
         harness: "claude",
@@ -720,7 +732,7 @@ export async function runDormantClaudeSessionAnnounce(
           pid: entry.pid,
           sessionId: entry.session_id,
           name: hostAnnounceName,
-          body: wakeProxyNote({ channel, seq }),
+          body: wakeProxyNote({ channel, server: authServer, seq }),
           // from-name＝真实发信人的友好名 + 技术 ID（接收端面板只显示这一处，
           // 技术 ID 丢了就分不清两个同名 agent）。
           fromName: senderInjectFromName(sender, channel),

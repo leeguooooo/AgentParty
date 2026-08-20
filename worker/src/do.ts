@@ -9344,6 +9344,14 @@ export class ChannelDO extends Server<Env> {
       : frame.type === "message_update"
         ? frame.message
         : null;
+    // #878：announce-only 连接一条补拉帧都不该收。#876 把这条抑制写在了下面的
+    // 「legacy 欠账」分支里——那条分支要先命中 directed_deliveries 里 (seq, 本身份)
+    // 的行才会走到，于是真机上占绝大多数的补拉帧（无 mention、或 @ 的是别人）
+    // 全都从 row === undefined 掉了下去照发。抑制必须在任何行查询之前、对所有
+    // replay 帧无条件生效。
+    //
+    // 纯早退：不查表、不写表，欠账账本一字不改，仍等真正的消费方来领。
+    if (replay && this.isAnnounceOnlyConnection(st)) return true;
     if (
       st?.kind === "agent" &&
       // Hibernated pre-rollout states have no helloPending field. Their clientVersion proves an
@@ -9369,7 +9377,7 @@ export class ChannelDO extends Server<Env> {
         // 本分支纯读，绝不触碰 directed_deliveries 账本：欠账既不标记已投递也不清除，
         // 仍等真正的消费方（serve/watch/webhook）来领。
         if (this.isAnnounceOnlyConnection(st)) {
-          if (replay) return true;
+          // 走到这里必是 live（replay 已在函数入口无条件早退，见 #878）。
           this.sendFrame(connection, frame);
           return true;
         }

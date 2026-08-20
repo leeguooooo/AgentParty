@@ -29,6 +29,7 @@ import { Buffer } from "node:buffer";
 import {
   claudeSessionAnnounceName,
   listClaudeSessions,
+  sessionEntryMatchesServer,
   type ClaudeSessionRegistryEntry,
 } from "./claude-session-registry";
 import { injectChannelMessage } from "./claude-inbox-inject";
@@ -40,6 +41,8 @@ export const WAKE_PROXY_NOTE_MAX_BYTES = 512;
 
 export interface WakeProxyRef {
   channel: string;
+  /** serve 这条连接所连的实例 URL（#865）。频道 slug 跨实例不唯一，选目标必须同时比对它。 */
+  server: string;
   seq: number;
 }
 
@@ -61,7 +64,9 @@ export function wakeProxyNote(ref: WakeProxyRef): string {
  * 转投判定：在本频道的入册活会话里找被 @ 的目标。
  * - 宣告名（display_name 或回退 `claude-<12hex>`）必须出现在 mentions 里；
  * - 排除 serve 自己的身份（自己的 @ 走 runner，不转投）；
- * - 只认绑定同一 channel 的条目；
+ * - 只认绑定同一 **server + channel** 的条目（#865：slug 跨实例不唯一，两台生产实例上
+ *   都有 `agentparty`，只比 slug 会把 A 实例的 @ 注入到只属于 B 实例的会话——实机撞见）；
+ *   旧条目（无 server 字段）恒不匹配，下次 SessionStart 自然升级；
  * - 多个候选取最新入册（与蛰伏 announce 的选择一致）。
  * 死会话由 listClaudeSessions 的 kill(pid,0) 探活现场剔除（开放问题 C）：
  * 进程已退出的条目根本不会出现在这里，消息自然回落到现行为。
@@ -79,12 +84,14 @@ export function selectWakeProxyTarget(
   self: string,
   channel: string,
   sessions: readonly ClaudeSessionRegistryEntry[],
+  server?: string | null,
 ): ClaudeSessionRegistryEntry | null {
   const wanted = new Set(mentions.filter((name) => name !== self));
   if (wanted.size === 0) return null;
   let best: ClaudeSessionRegistryEntry | null = null;
   for (const entry of sessions) {
     if (entry.channel !== channel) continue;
+    if (!sessionEntryMatchesServer(entry, server)) continue;
     if (!wanted.has(claudeSessionAnnounceName(entry))) continue;
     if (best === null || entry.registered_at >= best.registered_at) best = entry;
   }
@@ -288,6 +295,7 @@ export async function attemptWakeProxy(
       self,
       ref.channel,
       (deps.listSessions ?? listClaudeSessions)(),
+      ref.server,
     );
   } catch {
     return { forwarded: false, target: null };

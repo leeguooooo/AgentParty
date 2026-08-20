@@ -5483,7 +5483,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // 不会有 delivery 帧跟上，仍旧在 msg 帧这里转投一次（对照组不受影响）。
       if (fresh && !fromSelf && hasLease && !selfPaused && !mentionOwnedByDelivery && frame.mentions.length > 0) {
         const wakeProxyDeps = o.wakeProxy ?? {};
-        await attemptWakeProxy(frame.mentions, self, { channel: o.channel, seq: frame.seq }, {
+        await attemptWakeProxy(frame.mentions, self, { channel: o.channel, server: o.server, seq: frame.seq }, {
           ...wakeProxyDeps,
           // #844：默认接 socket 优先载体（本机 UDS 收件箱注入，原生「Message from X」UX）；
           // 失败降级为现行为。测试注入的 forward 仍优先。
