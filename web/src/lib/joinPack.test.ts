@@ -213,3 +213,26 @@ describe("joinPack 按 harness 拆分（#845 第 4 点）", () => {
     }
   });
 });
+
+// #879：codex 会话没有 Claude 那样的默认 per-session socket 收件箱——装插件也叫不醒。接入包的
+// codex 档必须把「必须挂 bridge 或 serve 才可达」写死，否则接进来的 codex 身份只会长期 unreachable。
+describe("joinPack codex 档唤醒层说明（#879）", () => {
+  const CODEX_BRIDGE = "party bridge codex dev";
+  const CODEX_SERVE_RUNNER = "party serve dev --runner codex";
+
+  test("codex 档：明确写出 bridge / serve --runner codex 两条唤醒层，并点明装插件不解决唤醒", () => {
+    const text = pack("codex");
+    expect(text).toContain(CODEX_BRIDGE);
+    expect(text).toContain(CODEX_SERVE_RUNNER);
+    expect(text).toContain("per-session");
+    expect(text).toContain("#879");
+  });
+
+  test("claude/other 档不加这两条（各走各的唤醒层，别塞噪音）", () => {
+    for (const harness of ["claude", "other"] as const) {
+      const text = pack(harness);
+      expect(text).not.toContain(CODEX_BRIDGE);
+      expect(text).not.toContain(CODEX_SERVE_RUNNER);
+    }
+  });
+});
