@@ -145,6 +145,17 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     ...(harness !== "claude"
       ? [t("AgentJoin.cmd.step4codex", { mcpName: mcpServerName(agentName), agentName, slug })]
       : []),
+    // #850：codex 档补装 codex 插件——与 #848 的 claude 档对等；命令已真机验证（codex CLI 0.2.187）。
+    // codex 无独立 enable 步骤，装完重启 codex 生效。`|| true` 保证装不上不阻断接入主流程。
+    // other 档不加：必须与旧全量逐字节一致（joinPack.test.ts 有断言）；claude 档也不含 codex plugin 行。
+    ...(harness === "codex"
+      ? [
+          t("AgentJoin.cmd.codexPluginNote1"),
+          `codex plugin marketplace add leeguooooo/AgentParty || true`,
+          `codex plugin add agentparty@agentparty || true`,
+          t("AgentJoin.cmd.codexPluginNote2"),
+        ]
+      : []),
     t("AgentJoin.cmd.step4fallback"),
     ``,
     t("AgentJoin.cmd.step5"),

@@ -100,12 +100,29 @@ describe("joinPack 按 harness 拆分（#845 第 4 点）", () => {
     expect(text).toContain(PLUGIN_ENABLE);
   });
 
-  test("codex/other 档：不含插件命令（插件是 Claude Code 专属，#848）", () => {
+  test("codex/other 档：不含 claude 插件命令（claude 插件段是 Claude Code 专属，#848）", () => {
     for (const harness of ["codex", "other"] as const) {
       const text = pack(harness);
       expect(text).not.toContain("claude plugin marketplace add");
       expect(text).not.toContain("claude plugin install");
       expect(text).not.toContain("claude plugin enable");
+    }
+  });
+
+  // #850：codex 档补装 codex 插件——与 #848 的 claude 档对等，两行命令 + || true 失败不阻断。
+  const CODEX_PLUGIN_MARKETPLACE = "codex plugin marketplace add leeguooooo/AgentParty || true";
+  const CODEX_PLUGIN_ADD = "codex plugin add agentparty@agentparty || true";
+
+  test("codex 档：含 codex 插件命令（marketplace add + add），且带 || true 失败不阻断（#850）", () => {
+    const text = pack("codex");
+    expect(text).toContain(CODEX_PLUGIN_MARKETPLACE);
+    expect(text).toContain(CODEX_PLUGIN_ADD);
+  });
+
+  test("claude/other 档：不含 codex 插件命令（#850）", () => {
+    for (const harness of ["claude", "other"] as const) {
+      const text = pack(harness);
+      expect(text).not.toContain("codex plugin");
     }
   });
 
