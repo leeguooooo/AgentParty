@@ -1406,6 +1406,98 @@ describe("announce-only 连接不是投递消费方（issue #872）", () => {
     expect(await deliveryRows(slug)).toEqual(beforeClose);
   });
 
+  /**
+   * #878 真机口径回归。#876 的抑制写在「legacy 欠账」分支里，只有当 directed_deliveries
+   * 存在 (seq, 本身份) 的行时才走得到；而真机 announce 用 since=频道最新 seq 建连，补拉出来的
+   * 是 edited/retracted/superseded 那几条**与本身份无关**的老消息（mentions 为空或 @ 的是别人），
+   * row === undefined 直接掉下去照发。旧测试只造了一条「@ 自己」的欠账，永远撞不上这条路径。
+   *
+   * 这里按真机造型：announce 的 since = 频道最新 seq，历史里放无关消息 + @ 别人 + @ 自己，
+   * 并把它们编辑/撤回以命中 backfill 的 edited_at/retracted_at 分支。验收＝0 条 replay 帧。
+   */
+  it("#878：since=最新 seq 的 announce 一条 replay 帧都收不到（无关/他人/自己 @ 全覆盖）", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("dormant"));
+    const other = await seedToken("agent", uniq("other"));
+    const slug = await createChannel(sender.token);
+
+    const post = async (body: string, mentions: string[] = []) => {
+      const res = await api(`/api/channels/${slug}/messages`, sender.token, {
+        method: "POST",
+        body: JSON.stringify({ kind: "message", body, mentions, reply_to: null }),
+      });
+      expect(res.status).toBe(200);
+      return (await res.json()) as { seq: number };
+    };
+    const edit = async (seq: number, body: string) => {
+      const res = await api(`/api/channels/${slug}/messages/${seq}/edit`, sender.token, {
+        method: "POST",
+        body: JSON.stringify({ body }),
+      });
+      expect(res.status).toBe(200);
+    };
+
+    // 历史：无关消息（mentions 为空）、@ 别人、@ 自己（产生欠账）。
+    const plain = await post("plain history, nobody mentioned");
+    const atOther = await post(`@${other.name} for someone else`, [other.name]);
+    const owed = await sendMention(slug, sender.token, target.name, "owed while offline");
+    // 编辑让前两条带上 edited_at —— 真机上正是这类行让 since 拦不住补拉。
+    await edit(plain.seq, "plain history, edited");
+    await edit(atOther.seq, `@${other.name} edited`);
+
+    const before = await deliveryRows(slug);
+    expect(before).toMatchObject([
+      { message_seq: atOther.seq, target_name: other.name, state: "queued", attempt: 0 },
+      { message_seq: owed.seq, target_name: target.name, state: "queued", attempt: 0 },
+    ]);
+
+    // 真机造型：since = 频道当前最新 seq（#869 的 announceStartCursor）。
+    const latest = owed.seq;
+    const { ws: announce, handshake } = await openAnnounce(slug, target.token, latest);
+
+    // 验收：0 条 replay 帧、0 条 error。
+    expect(handshake.filter((frame) => frame.type === "error")).toEqual([]);
+    expect(
+      handshake.filter(
+        (frame) =>
+          (frame.type === "msg" || frame.type === "status") && frame.replay === true,
+      ),
+    ).toEqual([]);
+    expect(handshake.filter((frame) => frame.type === "message_update")).toEqual([]);
+    // 逐条点名，防止上面的过滤器口径被将来改宽后静默失效。
+    for (const seq of [plain.seq, atOther.seq, owed.seq]) {
+      expect(handshake.filter((frame) => frame.type === "msg" && frame.seq === seq)).toEqual([]);
+    }
+
+    // 欠账账本一字不改（#876 的性质保持）。
+    expect(await deliveryRows(slug)).toEqual(before);
+
+    // live 广播照收，且不带 replay 标记。
+    const live = await sendMention(slug, sender.token, target.name, "live wake");
+    for (;;) {
+      const frame = await announce.next();
+      if (frame.type === "error") {
+        throw new Error(`announce-only socket was rejected: ${JSON.stringify(frame)}`);
+      }
+      if ((frame.type === "msg" || frame.type === "status") && frame.replay === true) {
+        throw new Error(`announce-only socket received a replay frame: ${JSON.stringify(frame)}`);
+      }
+      if (frame.type === "msg" && frame.seq === live.seq) {
+        expect(frame.replay).toBeUndefined();
+        break;
+      }
+    }
+
+    expect(await deliveryRows(slug)).toMatchObject([
+      { message_seq: atOther.seq, target_name: other.name, state: "queued", attempt: 0 },
+      { message_seq: owed.seq, target_name: target.name, state: "queued", attempt: 0 },
+      { message_seq: live.seq, target_name: target.name, state: "queued", attempt: 0 },
+    ]);
+    const beforeClose = await deliveryRows(slug);
+    announce.close();
+    expect(await deliveryRows(slug)).toEqual(beforeClose);
+  });
+
   it("announce 与正常消费方并存：欠账只被 v1 serve 领走，announce 不插手", async () => {
     const sender = await seedToken("agent", uniq("sender"));
     const target = await seedToken("agent", uniq("both"));

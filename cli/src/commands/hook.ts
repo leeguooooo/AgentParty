@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { AGENT_ACTIVITY_TTL_MS, type AgentActivity } from "@agentparty/shared";
 import { activityFromHookEvent, readActivityFile, writeActivityFile } from "../activity";
-import { agentpartyHome, readState } from "../config";
+import { agentpartyHome, readConfig, readState } from "../config";
 import {
   DeliveryRecoveryJournal,
   deliveryRecoveryJournalPath,
@@ -553,6 +553,10 @@ export function recordClaudeSessionLifecycle(
         claudeSessionDisplayNameFromHookPayload(record) ??
         nativeSessionName(pid, { expectSessionId: sessionId, env }),
       channel,
+      // #865：条目必须带实例维度——频道 slug 跨实例不唯一（两台生产实例上都有
+      // `agentparty`）。取该会话绑定 config 的 server；解析不出就不写，条目随之
+      // 不可匹配（宁可这一轮叫不醒，也不跨实例误投）。
+      server: readConfig(cwd)?.server ?? null,
       cwd,
     }, env);
   } catch {
@@ -597,6 +601,8 @@ export function recordCodexSessionLifecycle(
       pid,
       display_name: claudeSessionDisplayNameFromHookPayload(record),
       channel,
+      // #865：同 claude 档——实例维度是匹配的一部分。
+      server: readConfig(cwd)?.server ?? null,
       cwd,
     }, env);
   } catch {

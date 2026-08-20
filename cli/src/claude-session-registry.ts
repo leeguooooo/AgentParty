@@ -87,6 +87,16 @@ export interface ClaudeSessionRegistryEntry {
   pid: number;
   display_name: string | null;
   channel: string;
+  /**
+   * 条目所属实例的规范化 origin（#865）。频道 slug 全局不唯一——两台生产实例上都有
+   * `agentparty`——只比 slug 会把 A 实例的 @ 注入到只属于 B 实例的会话（实机撞见）。
+   * 入册时由该会话绑定的 config 解析。
+   *
+   * 可选**只为兼容旧盘上的条目**：#865 之前写的条目没有这个字段，一律视为**不可匹配**
+   * （安全侧，见 sessionEntryMatchesServer），由下次 SessionStart 自然升级。绝不为兼容
+   * 而放宽匹配。
+   */
+  server?: string;
   cwd: string;
   registered_at: number;
   /**
@@ -94,6 +104,40 @@ export interface ClaudeSessionRegistryEntry {
    * 目录才是权威身份；这个字段只是「目录与内容不符即丢弃」的二道防线。
    */
   harness?: SessionRegistryHarness;
+}
+
+/**
+ * 规范化 server 为可比对的 origin（#865）：小写 host、显式端口保留、去 path/query/尾斜杠。
+ * 缺协议头的手写 config（"agentparty.example.com"）由 healServerUrl 补 https://。
+ * 不可解析 → null（＝不可匹配）。
+ */
+export function normalizeSessionRegistryServer(value: unknown): string | null {
+  if (typeof value !== "string" || value === "") return null;
+  // 只在**完全没有 scheme** 时补 https://。不能直接复用 healServerUrl 的
+  // 「失败就拼 https:// 再试」：那会把 `ftp://a.example.com` 变成
+  // `https://ftp://a.example.com` → origin `https://ftp`，两个毫不相干的实例塌成同一个 key。
+  const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value) ? value : `https://${value}`;
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (url.username !== "" || url.password !== "") return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 条目是否属于给定实例（#865）。任一侧解析不出 origin —— 含**旧条目没有 server 字段**
+ * —— 一律 false：宁可这一轮叫不醒（下次 SessionStart 就补上），也不跨实例误投。
+ */
+export function sessionEntryMatchesServer(
+  entry: ClaudeSessionRegistryEntry,
+  server: string | null | undefined,
+): boolean {
+  const wanted = normalizeSessionRegistryServer(server);
+  if (wanted === null) return false;
+  return normalizeSessionRegistryServer(entry.server) === wanted;
 }
 
 /** 旧条目（无 harness 字段）视为 claude。 */
@@ -120,6 +164,11 @@ function validEntry(value: unknown): value is ClaudeSessionRegistryEntry {
       (typeof value.display_name === "string" && DISPLAY_NAME_RE.test(value.display_name))) &&
     typeof value.channel === "string" &&
     CHANNEL_RE.test(value.channel) &&
+    // server 缺席合法（旧条目）；在场则必须已是规范化 origin，坏值按坏行丢弃而不是当成
+    // 「无 server」——否则一条被写坏的 server 会静默退化成旧条目的宽松语义。
+    (value.server === undefined ||
+      (typeof value.server === "string" &&
+        normalizeSessionRegistryServer(value.server) === value.server)) &&
     typeof value.cwd === "string" &&
     value.cwd !== "" &&
     isAbsolute(value.cwd) &&
@@ -289,6 +338,8 @@ export interface RegisterClaudeSessionInput {
   pid: number;
   display_name: string | null;
   channel: string;
+  /** 该会话绑定的实例 URL（#865）。解析不出 origin 的值不写入——条目随之不可匹配（安全侧）。 */
+  server?: string | null;
   cwd: string;
   registered_at?: number;
   /** 省略即 claude（保持 #841 调用点逐字不变）。 */
@@ -315,6 +366,9 @@ export function registerSession(
         ? input.display_name
         : null,
     channel: input.channel,
+    ...(normalizeSessionRegistryServer(input.server) === null
+      ? {}
+      : { server: normalizeSessionRegistryServer(input.server)! }),
     cwd: input.cwd,
     registered_at: input.registered_at ?? Date.now(),
   };

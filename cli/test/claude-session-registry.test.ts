@@ -18,6 +18,9 @@ import {
   claudeSessionRegistryDirectory,
   listClaudeSessions,
   registerClaudeSession,
+  normalizeSessionRegistryServer,
+  registerSession,
+  sessionEntryMatchesServer,
   unregisterClaudeSession,
 } from "../src/claude-session-registry";
 import {
@@ -297,5 +300,55 @@ describe("hook lifecycle wiring (#841 P1)", () => {
     expect(claudeSessionDisplayNameFromHookPayload({ session_name: "s1" })).toBe("s1");
     expect(claudeSessionDisplayNameFromHookPayload({ display_name: "bad name!" })).toBeNull();
     expect(claudeSessionDisplayNameFromHookPayload({})).toBeNull();
+  });
+});
+
+/**
+ * #865：条目的实例维度。频道 slug 全局不唯一（两台生产实例上都有 `agentparty`），
+ * 注册表少了 server 就会把 A 实例的 @ 注入到只属于 B 实例的会话。
+ */
+describe("会话注册表的 server 维度（issue #865）", () => {
+  test("normalizeSessionRegistryServer 归一化到 origin，坏值给 null", () => {
+    expect(normalizeSessionRegistryServer("https://a.example.com/")).toBe("https://a.example.com");
+    expect(normalizeSessionRegistryServer("https://A.Example.COM/api/x?y=1")).toBe("https://a.example.com");
+    // 缺协议头的手写 config 补 https://（healServerUrl 同款自愈）。
+    expect(normalizeSessionRegistryServer("a.example.com")).toBe("https://a.example.com");
+    expect(normalizeSessionRegistryServer("https://a.example.com:8443")).toBe("https://a.example.com:8443");
+    for (const bad of ["", null, undefined, 42, "not a url", "ftp://a.example.com"]) {
+      expect(normalizeSessionRegistryServer(bad)).toBeNull();
+    }
+  });
+
+  test("入册写入规范化 origin，读回后同 server 命中、异 server 不命中", () => {
+    expect(registerSession(baseEntry({ server: "https://a.example.com/" }), env)).toBe(true);
+    const [entry] = listClaudeSessions(env);
+    expect(entry!.server).toBe("https://a.example.com");
+    expect(sessionEntryMatchesServer(entry!, "https://a.example.com")).toBe(true);
+    expect(sessionEntryMatchesServer(entry!, "https://b.example.com")).toBe(false);
+  });
+
+  test("旧条目（无 server 字段）仍能读出，但恒不可匹配", () => {
+    writeFileSync(
+      join(directory, `${SESSION_ID}.json`),
+      JSON.stringify({ version: 1, ...baseEntry(), harness: "claude" }),
+      { mode: 0o600 },
+    );
+    const [entry] = listClaudeSessions(env);
+    expect(entry!.server).toBeUndefined();
+    expect(sessionEntryMatchesServer(entry!, "https://a.example.com")).toBe(false);
+  });
+
+  test("server 解析不出时不写该字段（条目随之不可匹配，安全侧）", () => {
+    expect(registerSession(baseEntry({ server: "not a url" }), env)).toBe(true);
+    expect(listClaudeSessions(env)[0]!.server).toBeUndefined();
+  });
+
+  test("盘上写着未规范化 server 的条目按坏行丢弃，绝不退化成旧条目的宽松语义", () => {
+    writeFileSync(
+      join(directory, `${SESSION_ID}.json`),
+      JSON.stringify({ version: 1, ...baseEntry({ server: "https://a.example.com/" }), harness: "claude" }),
+      { mode: 0o600 },
+    );
+    expect(listClaudeSessions(env)).toHaveLength(0);
   });
 });

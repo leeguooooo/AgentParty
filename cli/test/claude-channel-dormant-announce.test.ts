@@ -10,6 +10,9 @@ import {
   type DormantAnnounceDeps,
 } from "../src/commands/claude-channel";
 
+const SERVER = "https://party.example";
+const OTHER_SERVER = "https://other.example";
+
 function entry(overrides: Partial<ClaudeSessionRegistryEntry> = {}): ClaudeSessionRegistryEntry {
   return {
     version: 1,
@@ -17,6 +20,7 @@ function entry(overrides: Partial<ClaudeSessionRegistryEntry> = {}): ClaudeSessi
     pid: process.pid,
     display_name: null,
     channel: "dev",
+    server: SERVER,
     cwd: "/tmp/project",
     registered_at: 1_000,
     ...overrides,
@@ -128,13 +132,45 @@ describe("dormantAnnounceDisplayName", () => {
 describe("selectDormantAnnounceEntry", () => {
   test("requires the channel, prefers same cwd, then newest registration", () => {
     const other = entry({ session_id: "22222222-2222-4222-8222-222222222222", channel: "prod" });
-    expect(selectDormantAnnounceEntry([other], "dev", "/tmp/project")).toBeNull();
+    expect(selectDormantAnnounceEntry([other], "dev", "/tmp/project", SERVER)).toBeNull();
     const away = entry({ session_id: "33333333-3333-4333-8333-333333333333", cwd: "/elsewhere", registered_at: 9_000 });
     const here = entry({ registered_at: 1_000 });
-    expect(selectDormantAnnounceEntry([away, here], "dev", "/tmp/project")).toBe(here);
-    expect(selectDormantAnnounceEntry([away], "dev", "/tmp/project")).toBe(away);
+    expect(selectDormantAnnounceEntry([away, here], "dev", "/tmp/project", SERVER)).toBe(here);
+    expect(selectDormantAnnounceEntry([away], "dev", "/tmp/project", SERVER)).toBe(away);
     const newer = entry({ session_id: "44444444-4444-4444-8444-444444444444", registered_at: 5_000 });
-    expect(selectDormantAnnounceEntry([here, newer], "dev", "/tmp/project")).toBe(newer);
+    expect(selectDormantAnnounceEntry([here, newer], "dev", "/tmp/project", SERVER)).toBe(newer);
+  });
+});
+
+describe("selectDormantAnnounceEntry 的 server 维度（issue #865）", () => {
+  test("同 slug 不同 server 不命中；同 slug 同 server 才命中", () => {
+    const here = entry();
+    expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", SERVER)).toBe(here);
+    expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", OTHER_SERVER)).toBeNull();
+  });
+
+  test("旧条目（无 server 字段）恒不命中，等下次 SessionStart 升级", () => {
+    const legacy = entry({ server: undefined });
+    expect(selectDormantAnnounceEntry([legacy], "dev", "/tmp/project", SERVER)).toBeNull();
+    // 同一批里的新条目照常命中——旧条目只是被跳过，不会拖垮整批。
+    const fresh = entry({ session_id: "55555555-5555-4555-8555-555555555555", registered_at: 9_000 });
+    expect(selectDormantAnnounceEntry([legacy, fresh], "dev", "/tmp/project", SERVER)).toBe(fresh);
+  });
+
+  test("解析不出实例身份（null/undefined/坏 URL）时一个都不命中", () => {
+    const here = entry();
+    for (const server of [null, undefined, "", "not a url"]) {
+      expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", server)).toBeNull();
+    }
+  });
+
+  test("按 origin 规范化比对：尾斜杠 / host 大小写 / 缺协议头都等价，端口不同即不同实例", () => {
+    const here = entry();
+    for (const variant of ["https://party.example/", "https://Party.Example", "party.example"]) {
+      expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", variant)).toBe(here);
+    }
+    expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", "https://party.example:8443"))
+      .toBeNull();
   });
 });
 

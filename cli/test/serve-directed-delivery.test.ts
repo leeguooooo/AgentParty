@@ -918,13 +918,15 @@ describe("serve durable directed delivery (#551)", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe("serve 唤醒代理转投去重（#866）", () => {
   /** 本机入册的另一个 Claude 会话，宣告名 = peer-claude。 */
-  function peerSession(): ClaudeSessionRegistryEntry {
+  function peerSession(entryServer: string): ClaudeSessionRegistryEntry {
     return {
       version: 1,
       session_id: "22222222-2222-4222-8222-222222222222",
       pid: process.pid,
       display_name: "peer-claude",
       channel: "dev",
+      // #865：条目必须带实例维度——slug 跨实例不唯一，选目标同时比对 server。
+      server: entryServer,
       cwd: "/tmp/project",
       registered_at: 1_000,
     };
@@ -938,6 +940,8 @@ describe("serve 唤醒代理转投去重（#866）", () => {
   async function countForwards(
     mentions: string[],
     withDelivery: boolean,
+    /** 入册条目所属实例；不传＝与 serve 所连实例相同。传别的实例即模拟 #865 的跨实例场景。 */
+    entryServer?: string,
   ): Promise<Array<{ target: string; seq: number }>> {
     const forwards: Array<{ target: string; seq: number }> = [];
     const message = msgFrame(7, "@me @peer-claude 看看这个", {
@@ -970,11 +974,12 @@ describe("serve 唤醒代理转投去重（#866）", () => {
       }
     });
 
+    const sessionServer = server.url;
     await runServe(opts({
-      server: server.url,
+      server: sessionServer,
       runCommand: async () => {},
       wakeProxy: {
-        listSessions: () => [peerSession()],
+        listSessions: () => [peerSession(entryServer ?? sessionServer)],
         forward: async (target, ref) => {
           forwards.push({ target: target.display_name!, seq: ref.seq });
           return true;
@@ -995,5 +1000,45 @@ describe("serve 唤醒代理转投去重（#866）", () => {
   test("对照组：只 @ 本机另一会话、不 @ 自己 → 没有 delivery 帧跟上，仍转投一次", async () => {
     const forwards = await countForwards(["peer-claude"], false);
     expect(forwards).toEqual([{ target: "peer-claude", seq: 7 }]);
+  });
+
+  /**
+   * #865 接线点回归：同名频道跨实例。入册条目属于**另一台**实例，slug 与宣告名都对得上，
+   * 只有 server 不同 —— 必须一次都不转投（实机上这条口子把 A 实例的 @ 注进了 B 实例的会话）。
+   */
+  test("#865：入册条目属于另一实例（同 slug 同宣告名）→ 一次都不转投", async () => {
+    expect(await countForwards(["peer-claude"], false, "https://other.example.com")).toEqual([]);
+  });
+
+  /** #865：旧条目（无 server 字段）视为不可匹配，安全侧降级为不转投。 */
+  test("#865：旧条目（无 server）不转投，等下次 SessionStart 升级", async () => {
+    const forwards: Array<{ target: string; seq: number }> = [];
+    const message = msgFrame(7, "@peer-claude 看看这个", {
+      sender: { name: "bob", kind: "human", owner: "bob@example.com" },
+      mentions: ["peer-claude"],
+    }) as unknown as MsgFrame;
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send({ ...welcomeFrame(0, "me"), directed_delivery: "v1" });
+      } else if (frame.type === "serve_lease") {
+        sock.send({ type: "serve_lease", name: "me", held: true });
+        sock.send(message as unknown as ServerFrame);
+        sock.send({ type: "error", code: "archived", message: "done" });
+      }
+    });
+    const legacy = peerSession(server.url);
+    delete (legacy as { server?: string }).server;
+    await runServe(opts({
+      server: server.url,
+      runCommand: async () => {},
+      wakeProxy: {
+        listSessions: () => [legacy],
+        forward: async (target, ref) => {
+          forwards.push({ target: target.display_name!, seq: ref.seq });
+          return true;
+        },
+      },
+    }));
+    expect(forwards).toEqual([]);
   });
 });
