@@ -289,3 +289,50 @@ describe("MessageCard touch and keyboard details (#357)", () => {
     expect(pill.findByProps({ className: "msg-status-name-state" }).children.join("")).toBe("replied");
   });
 });
+
+// #853：消息头 repo ⎇ branch · worktree chip。普通消息回落到发送者 presence 的 context。
+describe("MessageCard git context chip (#853)", () => {
+  function renderWithPresence(context?: Record<string, string>): ReturnType<ReactTestRenderer["root"]["findByProps"]> {
+    const msg = {
+      type: "msg", seq: 20, sender: { name: "builder", kind: "agent", owner: "team@example.com" }, kind: "message",
+      body: "done", mentions: [], reply_to: null, state: null, note: null, status: null,
+      ts: 1_700_000_000_000,
+    } as unknown as MsgFrame;
+    const presence = context === undefined
+      ? undefined
+      : { builder: { name: "builder", kind: "agent", state: "working", note: null, ts: 1, context } };
+    act(() => {
+      renderer = create(<LocaleProvider><MessageCard
+        msg={msg} self={null} quotedMessage={null} canModerate={false} onReply={noop} onEdit={noop}
+        presence={presence as never}
+        onRetract={noop} canCreateTask={false} onCreateTask={noop} editing={false} editDraft=""
+        editSaving={false} actionError={null} busy={false} onEditDraftChange={noop} onEditCancel={noop} onEditSave={noop}
+      /></LocaleProvider>);
+    });
+    return renderer!.root;
+  }
+
+  test("renders repo \u2387 branch \u00b7 worktree beside header metadata", () => {
+    const root = renderWithPresence({
+      repo: "leeguooooo/AgentParty",
+      branch: "feat/853-x",
+      worktree_label: "agentparty:feat/853-x",
+    });
+    const chip = root.findByProps({ className: "t-mono msg-git-context" });
+    expect(textContent(chip)).toBe("leeguooooo/AgentParty \u2387 feat/853-x \u00b7 agentparty:feat/853-x");
+    expect(chip.props.title).toBe("leeguooooo/AgentParty \u2387 feat/853-x \u00b7 agentparty:feat/853-x");
+  });
+
+  test("omits worktree tail when absent, and no chip without repo/branch", () => {
+    const withRepo = renderWithPresence({ repo: "owner/repo", branch: "main" });
+    expect(textContent(withRepo.findByProps({ className: "t-mono msg-git-context" }))).toBe("owner/repo \u2387 main");
+    act(() => renderer?.unmount());
+    renderer = null;
+    const without = renderWithPresence({ worktree_label: "agentparty:main" });
+    expect(without.findAllByProps({ className: "t-mono msg-git-context" })).toHaveLength(0);
+    act(() => renderer?.unmount());
+    renderer = null;
+    const noPresence = renderWithPresence(undefined);
+    expect(noPresence.findAllByProps({ className: "t-mono msg-git-context" })).toHaveLength(0);
+  });
+});

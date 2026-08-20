@@ -3,6 +3,7 @@
 import { autoWakeReachable, evaluateHostLease, PRESENCE_TIMEOUT_MS, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import { agentHue } from "../lib/agentColor";
+import { gitContextChip } from "../lib/gitContext";
 import { fmtRel } from "../lib/time";
 import type { SocketStatus } from "../lib/ws";
 import { useT } from "../i18n/useT";
@@ -603,6 +604,8 @@ export function PresenceBar({
       it.context?.workspace_id !== undefined ? `workspace id: ${it.context.workspace_id}` : null,
       it.context?.workspace_label !== undefined ? `workspace: ${it.context.workspace_label}` : null,
       it.context?.worktree_label !== undefined ? `worktree: ${it.context.worktree_label}` : null,
+      it.context?.repo !== undefined ? `repo: ${it.context.repo}` : null,
+      it.context?.branch !== undefined ? `branch: ${it.context.branch}` : null,
       it.lineage !== null ? `parent: ${it.lineage.parent_agent}` : null,
       it.lineage !== null ? `root: ${it.lineage.root_agent}` : null,
       it.lineage !== null ? `team: ${it.lineage.team_id}` : null,
@@ -618,6 +621,7 @@ export function PresenceBar({
       it.note !== null && it.note !== "" ? `note: ${it.note}` : null,
       it.lastSeen !== null ? `last seen: ${fmtRel(it.lastSeen)}` : null,
     ].filter((part): part is string => part !== null);
+    const gitChip = gitContextChip(it.context);
     return (
       <span
         key={it.name}
@@ -716,7 +720,11 @@ export function PresenceBar({
             {t(unreachable.key)}
           </span>
         )}
-        {full && it.context?.worktree_label !== undefined && (
+        {/* #853：repo ⎇ branch · worktree 提级到常规行（不再只在深展开）；title 悬浮全文。 */}
+        {gitChip !== null && (
+          <span className="t-mono presence-context presence-git-context" title={gitChip}>{gitChip}</span>
+        )}
+        {full && gitChip === null && it.context?.worktree_label !== undefined && (
           <span className="t-mono presence-context">{it.context.worktree_label}</span>
         )}
         {full && it.context?.config_kind !== undefined && (
@@ -867,6 +875,8 @@ export function PresenceBar({
               const agentTask = taskLabel(agent, now);
               const agentUnreachable = unreachableBadge(agent, now);
               const agentUnhandledMention = unhandledMentionLabel(agent);
+              // #853：repo ⎇ branch · worktree 提级到常规行的 agent chip（不再只在深展开）。
+              const agentGitChip = gitContextChip(agent.context);
               return (
               <span
                 key={agent.name}
@@ -916,6 +926,11 @@ export function PresenceBar({
                 )}
                 {agent.clientVersion !== null && (
                   <span className="t-mono presence-client-version">cli v{agent.clientVersion}</span>
+                )}
+                {agentGitChip !== null && (
+                  <span className="t-mono presence-context presence-git-context" title={agentGitChip}>
+                    {agentGitChip}
+                  </span>
                 )}
                 {agent.connectionCount > 1 && <span className="t-mono presence-agent-duplicate">x{agent.connectionCount}</span>}
                 {roleBadge(agent, now) !== null && <span className="t-mono presence-agent-role">{roleBadge(agent, now)}</span>}

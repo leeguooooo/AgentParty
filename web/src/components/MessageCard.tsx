@@ -5,6 +5,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import type { CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
 import { isClientVersionOutdated, useMinClientVersion } from "../lib/clientVersion";
+import { gitContextChip } from "../lib/gitContext";
 import {
   formatIdentityPresentation,
   resolveAgentOwnerLabel,
@@ -70,6 +71,8 @@ interface Props {
 function contextBits(ctx: AgentContext | undefined): string[] {
   if (ctx === undefined) return [];
   return [
+    ctx.repo ? `repo:${ctx.repo}` : null,
+    ctx.branch ? `⎇ ${ctx.branch}` : null,
     ctx.worktree_label ? `wt:${ctx.worktree_label}` : null,
     ctx.workspace_label ? `ws:${ctx.workspace_label}` : null,
     ctx.config_kind ? `cfg:${ctx.config_kind}` : null,
@@ -571,6 +574,8 @@ function MessageCardImpl({
     const statusWorkflowBits = workflowBits(msg);
     const statusTitle = [
       senderTitle,
+      context?.repo ? `repo: ${context.repo}` : null,
+      context?.branch ? `branch: ${context.branch}` : null,
       context?.worktree_label ? `worktree: ${context.worktree_label}` : null,
       context?.workspace_id ? `workspace id: ${context.workspace_id}` : null,
       context?.workspace_label ? `workspace: ${context.workspace_label}` : null,
@@ -658,6 +663,8 @@ function MessageCardImpl({
           artifact.related_issues.length > 0 ? `issues ${artifact.related_issues.map((n) => `#${n}`).join(", ")}` : null,
           artifact.related_prs.length > 0 ? `PRs ${artifact.related_prs.map((n) => `#${n}`).join(", ")}` : null,
         ].filter((part): part is string => part !== null);
+  // #853：消息头 `repo ⎇ branch · worktree` chip。status 帧自带 context；普通消息回落到发送者当前 presence。
+  const gitChip = gitContextChip(msg.status?.context ?? presence?.[msg.sender.name]?.context);
   return (
     <article
       id={`msg-${msg.seq}`}
@@ -716,6 +723,11 @@ function MessageCardImpl({
                   {" "}⚠
                 </span>
               )}
+            </span>
+          )}
+          {gitChip !== null && (
+            <span className="t-mono msg-git-context" title={gitChip}>
+              {gitChip}
             </span>
           )}
           {msg.response_source !== undefined && (

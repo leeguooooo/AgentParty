@@ -370,6 +370,9 @@ describe("websocket", () => {
         workspace_id: "agentparty-deadbeef",
         workspace_label: "agentparty",
         worktree_label: "agentparty:main",
+        // #853：repo/branch 纯 advisory；非法值（白名单外字符）只丢字段不否决整个 context。
+        repo: "leeguooooo/AgentParty",
+        branch: "feat/853-repo-branch-context",
       },
       scope: ["worker/src/do.ts", "shared/src/protocol.ts"],
       blocked_reason: "waiting for schema review",
@@ -412,6 +415,8 @@ describe("websocket", () => {
           config_fingerprint: "sha256:abc123",
           workspace_label: "agentparty",
           worktree_label: "agentparty:main",
+          repo: "leeguooooo/AgentParty",
+          branch: "feat/853-repo-branch-context",
         },
         decision: {
           kind: "handoff",
@@ -468,6 +473,8 @@ describe("websocket", () => {
         workspace_id: "agentparty-deadbeef",
         workspace_label: "agentparty",
         worktree_label: "agentparty:main",
+        repo: "leeguooooo/AgentParty",
+        branch: "feat/853-repo-branch-context",
       },
     });
     expect(presence.wake).not.toHaveProperty("verified_at");

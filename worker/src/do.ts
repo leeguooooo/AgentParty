@@ -56,6 +56,8 @@ import {
   type Attachment,
   type ErrorCode,
   type AgentContext,
+  safeBranchContextLabel,
+  safeRepoContextLabel,
   type CollaborationRole,
   type CollaborationRoleSource,
   type CompletionArtifact,
@@ -1175,6 +1177,9 @@ function parseAgentContext(input: unknown): AgentContext | undefined | null {
   const workspaceId = safeContextString(raw.workspace_id, 128);
   const workspaceLabel = safeContextString(raw.workspace_label, 80);
   const worktreeLabel = safeContextString(raw.worktree_label, 120);
+  // #853：repo/branch 纯 advisory 展示。白名单校验失败只丢字段，不否决整个 context（旧字段仍有价值）。
+  const repo = safeRepoContextLabel(raw.repo);
+  const branch = safeBranchContextLabel(raw.branch);
   const receptionMode = raw.reception_mode;
   const receptionRunner = raw.reception_runner;
   const receptionContext = raw.reception_context;
@@ -1200,6 +1205,8 @@ function parseAgentContext(input: unknown): AgentContext | undefined | null {
     ...(workspaceId === undefined ? {} : { workspace_id: workspaceId }),
     ...(workspaceLabel === undefined ? {} : { workspace_label: workspaceLabel }),
     ...(worktreeLabel === undefined ? {} : { worktree_label: worktreeLabel }),
+    ...(repo === undefined ? {} : { repo }),
+    ...(branch === undefined ? {} : { branch }),
     ...(receptionMode === undefined
       ? {}
       : { reception_mode: String(receptionMode) as AgentContext["reception_mode"] }),

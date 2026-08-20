@@ -304,12 +304,37 @@ export type ReceptionMode = "model" | "custom";
 export type ReceptionRunner = "codex" | "claude" | "codex-sdk" | "custom";
 export type ReceptionContextBoundary = "isolated_channel_session" | "fresh_process";
 
+/** repo/branch 展示标签上限（#853）：纯 advisory，超长或含白名单外字符直接丢弃。 */
+export const CONTEXT_GIT_LABEL_MAX = 120;
+const CONTEXT_REPO_RE = /^[A-Za-z0-9._/:-]+$/;
+const CONTEXT_BRANCH_RE = /^[A-Za-z0-9._/@#-]+$/;
+
+/** 校验 `owner/repo`（或 `host:owner/repo`）展示标签；非法返回 undefined（静默降级，不 fail 整个 context）。 */
+export function safeRepoContextLabel(input: unknown): string | undefined {
+  if (typeof input !== "string") return undefined;
+  const trimmed = input.trim();
+  if (trimmed === "" || trimmed.length > CONTEXT_GIT_LABEL_MAX) return undefined;
+  return CONTEXT_REPO_RE.test(trimmed) ? trimmed : undefined;
+}
+
+/** 校验分支/短 SHA 展示标签；白名单额外允许 `#`/`@`（issue 号分支、fork 引用惯例）。 */
+export function safeBranchContextLabel(input: unknown): string | undefined {
+  if (typeof input !== "string") return undefined;
+  const trimmed = input.trim();
+  if (trimmed === "" || trimmed.length > CONTEXT_GIT_LABEL_MAX) return undefined;
+  return CONTEXT_BRANCH_RE.test(trimmed) ? trimmed : undefined;
+}
+
 export interface AgentContext {
   config_kind?: ConfigSourceKind;
   config_fingerprint?: string;
   workspace_id?: string;
   workspace_label?: string;
   worktree_label?: string;
+  /** GitHub 仓库标签 `owner/repo`（非 github 远端为 `host:owner/repo`）。纯展示，不进授权判定（#853）。 */
+  repo?: string;
+  /** 当前分支名；detached HEAD 时为短 SHA。纯展示（#853）。 */
+  branch?: string;
   /** How an unattended @-mention is handled by this resident agent. */
   reception_mode?: ReceptionMode;
   reception_runner?: ReceptionRunner;

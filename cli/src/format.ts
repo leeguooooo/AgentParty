@@ -40,6 +40,8 @@ function formatSender(m: MsgFrame): string {
 function formatContext(ctx: AgentContext | undefined): string[] {
   if (ctx === undefined) return [];
   return [
+    ctx.repo ? `repo=${ctx.repo}` : null,
+    ctx.branch ? `branch=${ctx.branch}` : null,
     ctx.worktree_label ? `worktree=${ctx.worktree_label}` : null,
     ctx.workspace_label ? `workspace=${ctx.workspace_label}` : null,
     ctx.config_kind ? `config=${ctx.config_kind}` : null,
