@@ -224,6 +224,58 @@ describe("party authz check command", () => {
     expect(frame.credential.id).toBe(`decision_${"a".repeat(32)}`);
   });
 
+  test("revoke withdraws EVERY active credential for the action, each on its own raw topic", async () => {
+    // 账本 topic 唯一性按原始字符串算，而动作名是归一后的：绕开 `party authz grant`、用
+    // `party decision record "authz:spend  diamonds"`（双空格）就能造出同一动作的第二条 active
+    // 凭据。只撤一条 = check 仍然放行，而 revoke 看上去成功了——最危险的形态。
+    const posts: Array<{ topic: string; summary: string; supersedes_id?: string }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/decisions") && (init?.method ?? "GET") === "GET") {
+        return new Response(
+          JSON.stringify({
+            decisions: [
+              decision("authz:spend diamonds", "up to 500", { id: `decision_${"a".repeat(32)}` }),
+              decision("authz:spend  diamonds", "sneaked in via decision record", {
+                id: `decision_${"b".repeat(32)}`,
+              }),
+            ],
+            truncated: false,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("/decisions")) {
+        const sent = JSON.parse(String(init?.body)) as { topic: string; summary: string; supersedes_id?: string };
+        posts.push(sent);
+        return new Response(JSON.stringify({ ...decision(sent.topic, sent.summary), id: `decision_${"c".repeat(32)}` }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch;
+
+    expect(await run(["revoke", "spend diamonds", "--channel", "king", "-m", "near miss"])).toBe(0);
+    expect(posts).toHaveLength(2);
+    // 每条都用自己的原始 topic 去 supersede：服务端要求 supersedes_id 是同一 topic 的 active head，
+    // 拿归一后的 topic 去撤非归一的那条会 409。
+    expect(posts[0]).toMatchObject({ topic: "authz:spend diamonds", supersedes_id: `decision_${"a".repeat(32)}` });
+    expect(posts[1]).toMatchObject({ topic: "authz:spend  diamonds", supersedes_id: `decision_${"b".repeat(32)}` });
+    expect(posts.every((p) => p.summary.startsWith("revoked:"))).toBe(true);
+
+    // 撤完之后 check 必须判否——这才是「撤销真的生效了」的验收标准。
+    const after = checkAuthz({
+      channel: "king",
+      action: "spend diamonds",
+      decisions: [
+        decision("authz:spend diamonds", "revoked: near miss"),
+        decision("authz:spend  diamonds", "revoked: near miss", { id: `decision_${"b".repeat(32)}` }),
+      ],
+    });
+    expect(after.authorized).toBe(false);
+  });
+
   test("human output leads with the verdict and lists the active grants", async () => {
     mockCharter({ charter: null, charter_rev: 0, active_decisions: [] });
     expect(await run(["check", "spend diamonds", "--channel", "king"])).toBe(AUTHZ_DENIED_EXIT);

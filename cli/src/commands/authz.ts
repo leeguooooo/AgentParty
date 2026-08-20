@@ -36,7 +36,8 @@ check   answer, from the channel decision ledger alone, whether <action> has a
 grant   (channel owner or assigned host) record the credential. It lands in the
         ledger as decision topic "authz:<action>" and is what check reads.
         Use the action "${AUTHZ_BLANKET_ACTION}" for a deliberate blanket standing authorization.
-revoke  supersede the active credential with a "${AUTHZ_REVOKED_MARKER}" one; check then denies.
+revoke  supersede EVERY active credential for the action with a "${AUTHZ_REVOKED_MARKER}" one;
+        check then denies. Partial revocation is never a success.
 list    show every active authorization credential in the channel.
 
 ${AUTHZ_PROSE_WARNING}
@@ -182,39 +183,55 @@ export async function run(argv: string[]): Promise<number> {
       console.error(sourceSeq);
       return 1;
     }
-    const supersedes = str(flags.supersedes);
-
-    let supersedesId = supersedes;
     if (sub === "revoke") {
-      // 撤销必须指名道姓地 supersede 当前 active 凭据；找不到就说明本来就没授权。
+      // 账本的 topic 唯一性是按**原始字符串**算的（channel_decision_heads 主键，NOCASE），而
+      // authzActionOfTopic 会做归一——所以绕开 `party authz grant`、用
+      // `party decision record "authz:spend  diamonds"`（双空格）能造出同一动作的第二条 active 凭据。
+      // 撤销必须把该动作下**每一条**都收回：漏掉一条，check 仍然放行，而 revoke 看上去是成功的
+      // ——一个「看着生效、实际没生效」的撤销比报错危险得多。
+      // 另外每条都必须用**它自己的原始 topic** 去 supersede：服务端要求 supersedes_id 是同一 topic
+      // 的当前 active head，拿归一后的 topic 去撤非归一的凭据会 409。
       const { decisions } = await listChannelDecisions(cfg.server, cfg.token, slug, "active");
-      const current = activeAuthzCredentials(decisions).find(
+      const targets = activeAuthzCredentials(decisions).filter(
         (c) => c.action === normalizeAuthzAction(action) && !c.revoked,
       );
-      if (current === undefined) {
+      if (targets.length === 0) {
         console.error(`#${slug} has no active credential for "${normalizeAuthzAction(action)}" to revoke`);
         return 1;
       }
-      supersedesId = current.id;
+      const summary = `${AUTHZ_REVOKED_MARKER} ${note?.trim() ?? "withdrawn"}`;
+      const revoked = [];
+      for (const target of targets) {
+        revoked.push(
+          await recordChannelDecision(cfg.server, cfg.token, slug, {
+            topic: target.topic,
+            summary,
+            supersedes_id: target.id,
+            ...(sourceSeq !== undefined ? { source_seq: sourceSeq } : {}),
+          }),
+        );
+      }
+      if (json) {
+        console.log(
+          JSON.stringify(jsonFrame({ type: "authz_revoke", channel: slug, action: normalizeAuthzAction(action), revoked })),
+        );
+      } else {
+        for (const record of revoked) console.log(`revoked ${record.topic} (${record.id})`);
+      }
+      return 0;
     }
 
-    const summary =
-      sub === "revoke"
-        ? `${AUTHZ_REVOKED_MARKER} ${note?.trim() ?? "withdrawn"}`
-        : (note as string);
     const record = await recordChannelDecision(cfg.server, cfg.token, slug, {
       topic: authzTopic(action),
-      summary,
+      summary: note as string,
       ...(sourceSeq !== undefined ? { source_seq: sourceSeq } : {}),
-      ...(supersedesId !== undefined ? { supersedes_id: supersedesId } : {}),
+      ...(str(flags.supersedes) !== undefined ? { supersedes_id: str(flags.supersedes) as string } : {}),
     });
     if (json) {
-      console.log(JSON.stringify(jsonFrame({ ...record, type: sub === "grant" ? "authz_grant" : "authz_revoke" })));
+      console.log(JSON.stringify(jsonFrame({ ...record, type: "authz_grant" })));
     } else {
       console.log(
-        sub === "grant"
-          ? `granted ${record.topic} (${record.id}) — workers can now verify with: party authz check "${normalizeAuthzAction(action)}"`
-          : `revoked ${record.topic} (${record.id})`,
+        `granted ${record.topic} (${record.id}) — workers can now verify with: party authz check "${normalizeAuthzAction(action)}"`,
       );
     }
     return 0;
