@@ -199,6 +199,7 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     t("AgentJoin.cmd.episodic1"),
     t("AgentJoin.cmd.episodic2", { slug }),
     t("AgentJoin.cmd.episodic3"),
+    t("AgentJoin.cmd.codefence"),
     t("AgentJoin.cmd.etiquette"),
     // #845：包尾提醒——本包是瞬态文本，规则的持久拷贝在上面落盘的 rules 文件里。
     t("AgentJoin.cmd.rulesReread", { agentName, slug }),
