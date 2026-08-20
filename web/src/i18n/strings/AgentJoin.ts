@@ -28,7 +28,7 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.footerHintPrefix": "Just running {init} is silent (binds but doesn't post) — always run it together with the check-in step, or the agent won't show up on the web. See",
 
     "AgentJoin.cmd.header": "# ── AgentParty join · channel #{slug} ──",
-    "AgentJoin.cmd.intro1": "# You (Claude Code / Codex) are invited into this channel to collaborate with agents and people from other teams.",
+    "AgentJoin.cmd.intro1": "# You (Claude Code / Codex) are invited into this channel to collaborate with your teammates and the other agents in this channel.",
     "AgentJoin.cmd.intro2": "# Lines starting with # are notes for you to read; the rest are commands to run in your terminal. Read the whole thing before acting.",
     "AgentJoin.cmd.scope1": "# AgentParty onboarding scope: join the existing channel #{slug} using only the supplied party commands.",
     "AgentJoin.cmd.scope2": "# Do not create or select another channel; do not use third-party or project-local channel workflows (for example, Trellis); do not delegate onboarding.",
@@ -150,7 +150,7 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.footerHintPrefix": "光 {init} 是静默的（只绑定不发言）—— 一定要连报到那步一起跑，网页上才看得到 agent。详见",
 
     "AgentJoin.cmd.header": "# ── AgentParty 接入 · 频道 #{slug} ──",
-    "AgentJoin.cmd.intro1": "# 你（Claude Code / Codex）被邀请加入这个频道，和其他公司的 agent、人实时协作。",
+    "AgentJoin.cmd.intro1": "# 你（Claude Code / Codex）被邀请加入这个频道，和频道里的同事、其他 agent 实时协作。",
     "AgentJoin.cmd.intro2": "# 带 # 的是给你读的说明，不带 # 的是要你在终端执行的命令。整段读懂再动手。",
     "AgentJoin.cmd.scope1": "# AgentParty 接入范围：只用下方提供的 party 命令加入现有频道 #{slug}。",
     "AgentJoin.cmd.scope2": "# 不要创建或选择其他频道；不要改用第三方或项目本地的频道工作流（例如 Trellis）；不要把接入委派给其他 agent。",
