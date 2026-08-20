@@ -53,6 +53,7 @@ commands:
   hook      install|uninstall|status [--user] | report      manage legacy Hook settings; presence uplink remains launcher/serve-scoped (#602/#615)
   upgrade   [--version X.Y.Z] [--check]                    download release binary, verify sha256, atomically replace party
   charter   [slug] [--json] | set [slug] -f file.md|-m text|- | template
+  authz     check "<action>" | grant "<action>" -m scope | revoke "<action>" | list   verify authorization against the decision ledger, never against a chat message (#834)
   history   [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]
   search    <query> [--channel C] [--from name] [--since seq] [--limit n] [--json]
   digest    [channel|--channel C] [--since seq|last-seen] [--json]
@@ -165,6 +166,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/wake-budget")).run(rest);
     case "charter":
       return (await import("./commands/charter")).run(rest);
+    case "authz":
+      return (await import("./commands/authz")).run(rest);
     case "history":
       return (await import("./commands/history")).run(rest);
     case "search":

@@ -51,7 +51,7 @@ import { createSignedAttachmentUrl, verifySignedAttachmentRequest } from "./atta
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
-import { canAccessChannel, isChannelModerator } from "./acl";
+import { canAccessChannel, isChannelModerator, isHumanChannelOwner } from "./acl";
 import {
   CLIENT_TOO_OLD_HEADER,
   CLIENT_VERSION_HEADER,
@@ -2106,6 +2106,8 @@ async function canConfigureChannel(db: D1Database, identity: TokenIdentity, chan
     await isChannelAccountBanned(db, channel.slug, identity.account)
   ) return false;
   if (isChannelModerator(identity, channel)) return true;
+  // #834 第 2 项：决策账本是结构化授权的容器，人类房主必须能直接往里写，否则授权只能活在消息正文里。
+  if (isHumanChannelOwner(identity, channel)) return true;
   return (await loadAssignedRole(db, channel.slug, identity)) === "host";
 }
 
@@ -2442,6 +2444,8 @@ async function removeChannelMemberAndAgents(
 async function canEditCharter(db: D1Database, identity: TokenIdentity, channel: LoadedChannel): Promise<boolean> {
   if (identity.role === "readonly") return false;
   if (!(await canAccessLoadedChannel(db, identity, channel))) return false;
+  // #834 第 2 项：人类房主是频道最高权威，不应被 moderator-only 的 scope 短路挡在自己的 charter 外面。
+  if (isHumanChannelOwner(identity, channel)) return true;
   const perms = channelPerms(channel);
   const isMember = await isChannelMember(db, channel.slug, identity.account);
   if (identity.kind === "agent") {
@@ -6581,7 +6585,10 @@ app.put("/api/channels/:slug/charter", async (c) => {
   if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
   const identity = c.get("identity");
   if (!(await canEditCharter(c.env.DB, identity, channel))) {
-    return c.json(errorBody("forbidden", "only channel moderators or hosts can edit the charter"), 403);
+    return c.json(
+      errorBody("forbidden", "only the channel owner, a moderator, or an assigned host can edit the charter"),
+      403,
+    );
   }
   if (channel.archived_at !== null) {
     return c.json(errorBody("archived", "channel is archived"), 410);
