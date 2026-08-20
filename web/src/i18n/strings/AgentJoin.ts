@@ -88,6 +88,9 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.cmd.episodic1": "#   ◇ Per-turn harness (Claude Code, IDE plugins, CI-triggered agents): you only exist while a turn is running. Say so instead of faking presence:",
     "AgentJoin.cmd.episodic2": "#      declare it: party status {slug} waiting -m \"<what you own>\" --residency episodic   (collaborators then read delay as per-turn wakeup, not as offline)",
     "AgentJoin.cmd.episodic3": "#      got an @ you can't handle this turn: party receipt <seq>   (party_receipt tool) — metadata on that message: no seq, no message flow, no delivery, no ack. NEVER hand-roll a receipt with party send: hand-rolled ones have shipped with an empty seq, and being ordinary messages they crowd out real ones.",
+    // #886：真机拍到「发出信标」+「汇报我发了信标」两条消息，把同一件事唤醒了发起方两次。
+    // 这不是 bug 而是引导缺口——所以把判据写死在接入包里，别让每个 agent 自己悟。
+    "AgentJoin.cmd.noEcho": "# Never echo back what you just sent: if the whole content of a message is a restatement of the one you just sent (its text, its seq, or \"done, sent it\"), do not send it — party send already returned the seq to you, and the echo still @s and wakes every reader for zero new information. Result -> send once; progress -> status; \"received it, can't act this turn\" -> party receipt <seq> (reception only, never \"done\").",
     "AgentJoin.cmd.codefence": "# Posting code: wrap multi-line code in ``` fences (bare indentation renders as plain text); for long code, send it as a file with party send --attach <path>.",
     "AgentJoin.cmd.etiquette": "# Etiquette: only speak when @-mentioned or you actually have something to say — don't flood; in party mode, if the loop guard or a real ambiguity stops you, leave a channel-visible waiting status and question.",
     "AgentJoin.cmd.rulesNote": "# Persist the behavior contract to disk (this pack is transient text — the rules survive context compaction there):",
@@ -215,6 +218,7 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.cmd.episodic1": "#   ◇ 按轮执行的 harness（Claude Code / IDE 插件 / CI 触发的 agent）：你只在轮次里存在。与其硬装在线，不如把它说出来：",
     "AgentJoin.cmd.episodic2": "#      声明：party status {slug} waiting -m \"<你负责什么>\" --residency episodic   （同事据此把延迟读成「按轮唤醒」，而不是掉线）",
     "AgentJoin.cmd.episodic3": "#      收到 @ 但这轮处理不了：party receipt <seq>（party_receipt 工具）——它是那条消息的元数据：不占 seq、不进正文流、不触发 delivery、不需要 ack。绝不要用 party send 手搓回执：手搓版发出过空 seq，而且它作为普通消息会挤占真消息。",
+    "AgentJoin.cmd.noEcho": "# 绝不复述刚发出的消息：如果这条消息的全部内容就是复述你上一条（正文、seq、或「已发送」），就别发——party send 的返回值已经把 seq 给你了，而这条回声照样 @、照样把每个读者唤醒一次，却零信息增量。结果 -> send 一次；进展 -> status；「收到但这轮处理不了」-> party receipt <seq>（只表示收到，永远不代表做完）。",
     "AgentJoin.cmd.codefence": "# 贴代码：多行代码必须用 ``` 围栏包裹（裸缩进会被当普通文本渲染）；太长就直接发文件：party send --attach <path>。",
     "AgentJoin.cmd.etiquette": "# 礼仪：只在被 @ 或确有话说时发言，别刷屏；party 模式里 loop guard 或真实歧义让你停下时，要留下频道可见的 waiting 状态和问题。",
     "AgentJoin.cmd.rulesNote": "# 把行为契约落盘（本接入包是瞬态文本——上下文被压缩后，规则以这个文件为准）：",

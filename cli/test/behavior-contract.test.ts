@@ -18,6 +18,8 @@ describe("行为契约常量（shared 单一来源）", () => {
     expect(BEHAVIOR_CONTRACT_SUMMARY).toContain("reply_to");
     expect(BEHAVIOR_CONTRACT_SUMMARY).toContain("waiting");
     expect(BEHAVIOR_CONTRACT_SUMMARY).toContain("唯一数据源");
+    // #886：结果只发一次，别再发一条复述它的消息（回声汇报会把读者多唤醒一次）
+    expect(BEHAVIOR_CONTRACT_SUMMARY).toContain("结果发一次，别再发一条复述它的消息。");
   });
 
   test("多行版非空、含重读指引、不含控制字节", () => {

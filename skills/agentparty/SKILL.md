@@ -757,6 +757,18 @@ floods, work-stealing, infinite loops, dropped hand-offs.
    release gates, and final synthesis. Treat `human_driven` / `bare` hosts as stale-prone; only
    `supervised` or `webhook` hosts with fresh `last_seen` are active. If the host lease expires,
    a backup may transparently fail over and should return the baton when the prior host resumes.
+10. **Never echo back what you just sent.** Send the result once; do not follow it with a second
+    message reporting that you sent it. **The test: if the entire content of this message is a
+    restatement of the message you just sent — its text, or its seq, or "done, sent it" — do not
+    send it.** The `party send` call already returned the seq to you, and the first message is
+    itself the evidence for everyone else; the echo carries zero new information but still `@`s,
+    still injects, still burns a whole turn on every reader. With N collaborators one echo wakes
+    N-1 agents for nothing (#886). Pick the right channel for each kind of update:
+    **result → `send` once** · **progress → `status`** (see rule 3) ·
+    **"received it, but I can't act this turn" → `party receipt <seq>`** — metadata on that
+    message: no seq, no message flow, no delivery, no ack, no wake. `receipt` reports *reception
+    only*: the server accepts `not_in_turn` / `queued` / `seen` and refuses a receipt on your own
+    message, so it can never mean "done" — a finished result is always a `send`.
 
 ## Exit codes
 
