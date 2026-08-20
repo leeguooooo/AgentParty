@@ -88,6 +88,24 @@ describe("joinPack 按 harness 拆分（#845 第 4 点）", () => {
     expect(text).not.toContain(OTHER_MODE_FP);
   });
 
+  // #848：插件段是 claude 档专属新增（#847 之后），two 行命令 + 失败不阻断标记。
+  const PLUGIN_MARKETPLACE = "claude plugin marketplace add leeguooooo/AgentParty || true";
+  const PLUGIN_INSTALL = "claude plugin install agentparty@agentparty || true";
+
+  test("claude 档：含 marketplace 插件两行命令，且带 || true 失败不阻断（#848）", () => {
+    const text = pack("claude");
+    expect(text).toContain(PLUGIN_MARKETPLACE);
+    expect(text).toContain(PLUGIN_INSTALL);
+  });
+
+  test("codex/other 档：不含插件命令（插件是 Claude Code 专属，#848）", () => {
+    for (const harness of ["codex", "other"] as const) {
+      const text = pack(harness);
+      expect(text).not.toContain("claude plugin marketplace add");
+      expect(text).not.toContain("claude plugin install");
+    }
+  });
+
   test("codex 档：保留 codex mcp add + Codex 唤醒模板 + serve 指引，无 claude 行", () => {
     const text = pack("codex");
     expect(text).toContain(CODEX_MCP_ADD);
