@@ -5,8 +5,13 @@
 // 通知（只带 channel+seq 指针，被唤醒会话自己回频道读正文），随后照常继续自己
 // 的职责。
 //
-// 载体调研结论（开放问题 B，2026-08 复核）：serve 进程今天**没有**可用的最小
-// 转投载体——
+// ⚠️ 载体现状（#856 起）：默认载体是**真载体** `socketWakeProxyForwarder`（serve.ts 的
+// `?? socketWakeProxyForwarder()`），走本机 UDS 收件箱注入。下面那段「今天没有可用载体」
+// 是 #841 时代的结论，保留作历史背景——但**不要**再据它写「无可用转投载体」这类日志：
+// 今天 forwarded=false 的含义是「socket 注入以某个已知原因失败了」，原因必须打出来（#867 ①）。
+//
+// 载体调研结论（开放问题 B，2026-08 复核；已被 #844/#856 推翻，存档）：serve 进程当时
+// **没有**可用的最小转投载体——
 //   - Claude 的跨会话 SendMessage 是模型专属工具：claude-cross-session-gate 只放
 //     行「armed Claude 会话内、走完 peers→ListAgents→peer_check 授权链的一次
 //     模型调用」，serve 不是 Claude 会话，伪造这条链等于绕过 gate。
@@ -159,16 +164,40 @@ export function resolveLocalIdentity(cwd?: string): CachedIdentity | null {
   }
 }
 
-/** 可注入的转投载体：true=已转投成功；false/抛错=未转投（降级为现行为）。 */
+/**
+ * 载体的结构化结果（#867 ①）：失败时带上真实原因，供降级日志打印。
+ * 载体也可以直接返回裸 boolean（老形态，测试/骨架载体在用）——此时没有原因可报，
+ * 日志会明说「载体未上报原因」，而不是编一个。
+ */
+export interface WakeProxyForwardResult {
+  ok: boolean;
+  /** 失败原因（injectChannelMessage 的 InjectFailureReason，或载体自定义）。 */
+  reason?: string;
+  /** 细节（如 write-failed 的具体错误、socket-untrusted 的判据）。 */
+  detail?: string;
+}
+
+/** 可注入的转投载体：ok=true 已转投；ok=false/抛错=未转投（降级为现行为）。 */
 export type WakeProxyForwarder = (
   target: ClaudeSessionRegistryEntry,
   ref: WakeProxyRef,
-) => Promise<boolean>;
+) => Promise<boolean | WakeProxyForwardResult>;
+
+/** 裸 boolean 与结构化结果的归一化。 */
+function normalizeForwardResult(value: boolean | WakeProxyForwardResult): WakeProxyForwardResult {
+  return typeof value === "boolean" ? { ok: value } : value;
+}
 
 /**
  * 骨架载体：无传输，恒返回 false（降级为现行为）。保留给不接 socket 面的场景/测试。
+ * 这条是**真的**「无可用转投载体」——serve 的默认载体早已不是它（见 serve.ts 的
+ * `?? socketWakeProxyForwarder()`）。
  */
-export const noWakeProxyForwarder: WakeProxyForwarder = async () => false;
+export const noWakeProxyForwarder: WakeProxyForwarder = async (): Promise<WakeProxyForwardResult> => ({
+  ok: false,
+  reason: "no-carrier",
+  detail: "noWakeProxyForwarder：本载体无传输",
+});
 
 export interface SocketWakeProxyForwarderOptions {
   /** 自己的回执 socket（`from:uds:<...>`）。serve 无回执 sock → 省略，接收端记 unknown。 */
@@ -216,7 +245,10 @@ export function socketWakeProxyForwarder(
       fromSock: options.fromSock,
       env: options.env,
     });
-    return result.ok;
+    // #867 ①：结构化失败原因**必须**透出。以前这里是 `return result.ok;`，
+    // injectChannelMessage 精心构造的 6 种 {reason, detail} 全被丢掉，
+    // 「目标会话已死 / socket 陈旧残留 / 同名多会话」在日志里长得一模一样。
+    return result.ok ? { ok: true } : { ok: false, reason: result.reason, detail: result.detail };
   };
 }
 
@@ -225,6 +257,10 @@ export interface WakeProxyAttempt {
   forwarded: boolean;
   /** 命中的目标宣告名；null = 无本机入册目标（含死会话已被剔除的情形）。 */
   target: string | null;
+  /** forwarded=false 时的真实失败原因；载体没上报则为 null（#867 ①）。 */
+  reason?: string | null;
+  /** 失败细节；无则 null。 */
+  detail?: string | null;
 }
 
 export interface WakeProxyDeps {
@@ -259,15 +295,28 @@ export async function attemptWakeProxy(
   if (target === null) return { forwarded: false, target: null };
   const name = claudeSessionAnnounceName(target);
   try {
-    const forwarded = await (deps.forward ?? noWakeProxyForwarder)(target, ref);
+    const result = normalizeForwardResult(await (deps.forward ?? noWakeProxyForwarder)(target, ref));
+    if (result.ok) {
+      log(`serve: 唤醒代理已转投 @${name}（channel=${ref.channel} seq=${ref.seq}，≤512B 指针，正文在频道）`);
+      return { forwarded: true, target: name, reason: null, detail: null };
+    }
+    // #867 ①：这行以前恒打「当前无可用转投载体」——那是 #841 时代的实话（默认载体
+    // 是 noWakeProxyForwarder），#856 把默认载体换成真载体后就变成了**反话**：真实失败
+    // 是 no-match / probe-failed / ambiguous / socket-untrusted 之一，日志却告诉运维
+    // 「没有载体」，排障面被封死。现在打真实原因。
+    const reason = result.reason ?? null;
+    const detail = result.detail ?? null;
     log(
-      forwarded
-        ? `serve: 唤醒代理已转投 @${name}（channel=${ref.channel} seq=${ref.seq}，≤512B 指针，正文在频道）`
-        : `serve: @${name} 命中本机入册的 idle Claude 会话，但当前无可用转投载体——降级为现行为（见 #841 P3）`,
+      `serve: @${name} 命中本机入册的 idle Claude 会话，但转投未成功（channel=${ref.channel} seq=${ref.seq}` +
+        ` reason=${reason ?? "unreported"}${detail === null ? "" : ` detail=${detail}`}）` +
+        "——降级为现行为，消息不丢",
     );
-    return { forwarded, target: name };
+    return { forwarded: false, target: name, reason, detail };
   } catch (error) {
-    log(`serve: 唤醒代理转投 @${name} 失败（${String(error)}）——降级为现行为，消息不丢`);
-    return { forwarded: false, target: name };
+    log(
+      `serve: 唤醒代理转投 @${name} 失败（channel=${ref.channel} seq=${ref.seq}` +
+        ` reason=threw detail=${String(error)}）——降级为现行为，消息不丢`,
+    );
+    return { forwarded: false, target: name, reason: "threw", detail: String(error) };
   }
 }

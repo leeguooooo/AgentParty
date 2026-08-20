@@ -5474,7 +5474,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // kill(pid,0) 探活，死会话已剔除）时尝试转投一条 ≤512B 的 channel+seq 指针通知。
       // 纯增量：转投与否都不改变下方 runner/ack 现行为（「照常继续自己的职责」），
       // attemptWakeProxy 绝不抛错，任何失败降级为现行为——消息绝不因代理而丢失。
-      if (fresh && !fromSelf && hasLease && !selfPaused && frame.mentions.length > 0) {
+      // #866：`!mentionOwnedByDelivery` 是**必须**的去重守卫。directed-delivery 模式下，
+      // 一条同时 @ 自己和另一个本机会话的消息会两次流经这里：先是普通 `msg` 帧
+      // （directedDelivery===null），随后是同一 seq 的权威 `delivery` 帧。没有这条守卫
+      // 就转投两次 → 目标会话对同一条消息开两个 turn，双倍模型成本。
+      // 语义与下方 passesFilter 里的同名条件一致：「这条 @ 归属于稍后到来的 delivery 帧」
+      // → 让那一帧去转投，普通 msg 帧这次跳过。只 @ 别人不 @ 自己时该值为 false，
+      // 不会有 delivery 帧跟上，仍旧在 msg 帧这里转投一次（对照组不受影响）。
+      if (fresh && !fromSelf && hasLease && !selfPaused && !mentionOwnedByDelivery && frame.mentions.length > 0) {
         const wakeProxyDeps = o.wakeProxy ?? {};
         await attemptWakeProxy(frame.mentions, self, { channel: o.channel, seq: frame.seq }, {
           ...wakeProxyDeps,

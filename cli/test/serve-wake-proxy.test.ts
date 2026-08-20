@@ -84,15 +84,17 @@ describe("attemptWakeProxy", () => {
       listSessions: () => [entry()],
       log: (line) => lines.push(line),
     });
-    expect(result).toEqual({ forwarded: false, target: "claude-111111111111" });
+    expect(result).toMatchObject({ forwarded: false, target: "claude-111111111111", reason: "no-carrier" });
     expect(lines.some((line) => line.includes("降级为现行为"))).toBe(true);
+    // #867 ①：这句 #841 时代的文案必须已经消失——今天它是反话。
+    expect(lines.some((line) => line.includes("当前无可用转投载体"))).toBe(false);
   });
 
   test("死会话已被注册表剔除（列表为空）→ 无目标，回落现行为", async () => {
     const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 7 }, {
       listSessions: () => [],
     });
-    expect(result).toEqual({ forwarded: false, target: null });
+    expect(result).toMatchObject({ forwarded: false, target: null });
   });
 
   test("载体成功 → forwarded=true 且拿到 ≤512B 指针", async () => {
@@ -118,7 +120,8 @@ describe("attemptWakeProxy", () => {
       },
       log: (line) => lines.push(line),
     });
-    expect(result).toEqual({ forwarded: false, target: "claude-111111111111" });
+    expect(result).toMatchObject({ forwarded: false, target: "claude-111111111111", reason: "threw" });
+    expect(result.detail).toContain("transport boom");
     expect(lines.some((line) => line.includes("失败") && line.includes("不丢"))).toBe(true);
   });
 
@@ -128,11 +131,14 @@ describe("attemptWakeProxy", () => {
         throw new Error("registry boom");
       },
     });
-    expect(result).toEqual({ forwarded: false, target: null });
+    expect(result).toMatchObject({ forwarded: false, target: null });
   });
 
-  test("noWakeProxyForwarder 恒 false", async () => {
-    expect(await noWakeProxyForwarder(entry(), { channel: "dev", seq: 1 })).toBe(false);
+  test("noWakeProxyForwarder 恒 false（且这条才是真正的「无载体」）", async () => {
+    expect(await noWakeProxyForwarder(entry(), { channel: "dev", seq: 1 })).toMatchObject({
+      ok: false,
+      reason: "no-carrier",
+    });
   });
 });
 
@@ -157,7 +163,7 @@ describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
       }),
     });
     const ok = await forward(entry({ display_name: "pair-claude" }), { channel: "pwtk", seq: 42 });
-    expect(ok).toBe(true);
+    expect(ok).toMatchObject({ ok: true });
     expect(seen!.name).toBe("pair-claude");
     // 寻址走 pid + sessionId（宣告名恒不等于 Claude 原生会话名，#857）。
     expect(seen!.pid).toBe(entry().pid);
@@ -171,6 +177,77 @@ describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
     const forward = socketWakeProxyForwarder({
       inject: async () => ({ ok: false, reason: "no-match" }),
     });
-    expect(await forward(entry(), { channel: "dev", seq: 1 })).toBe(false);
+    expect(await forward(entry(), { channel: "dev", seq: 1 })).toMatchObject({ ok: false, reason: "no-match" });
+  });
+});
+
+describe("#867 ①：结构化失败原因必须一路透出到降级日志", () => {
+  // injectChannelMessage 构造的全部失败原因。以前 socketWakeProxyForwarder 一句
+  // `return result.ok;` 把它们全丢了，「目标会话已死 / socket 陈旧残留 / 同名多会话」
+  // 在日志里长得一模一样，而且打的是**错误的**原因（「当前无可用转投载体」）。
+  const reasons = [
+    ["no-match", "目标会话已死或 pid 复用"],
+    ["ambiguous", "同名多会话"],
+    ["unavailable", "寻址目录不可用"],
+    ["probe-failed", "socket 陈旧残留（ECONNREFUSED）"],
+    ["socket-untrusted", "socket path is a symlink"],
+    ["body-too-large", "单行超 1MiB"],
+    ["write-failed", "Error: socket write timeout"],
+  ] as const;
+
+  for (const [reason, detail] of reasons) {
+    test(`reason=${reason} 透出到 forwarder、attempt 与日志`, async () => {
+      const forward = socketWakeProxyForwarder({
+        inject: async () => ({ ok: false, reason, detail }),
+      });
+      expect(await forward(entry(), { channel: "dev", seq: 5 })).toEqual({ ok: false, reason, detail });
+
+      const lines: string[] = [];
+      const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 5 }, {
+        listSessions: () => [entry()],
+        forward,
+        log: (line) => lines.push(line),
+      });
+      expect(result).toMatchObject({ forwarded: false, target: "claude-111111111111", reason, detail });
+      const line = lines.find((l) => l.includes("claude-111111111111"));
+      expect(line).toBeDefined();
+      expect(line!).toContain(`reason=${reason}`);
+      expect(line!).toContain(`detail=${detail}`);
+      // 过时文案已删除：日志绝不能再说「没有载体」——真载体在，只是这次失败了。
+      expect(line!).not.toContain("当前无可用转投载体");
+      expect(line!).not.toContain("#841 P3");
+    });
+  }
+
+  test("两种不同失败打出的是两条不同的日志（以前恒同一句）", async () => {
+    const lines: string[] = [];
+    for (const reason of ["no-match", "probe-failed"] as const) {
+      await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 5 }, {
+        listSessions: () => [entry()],
+        forward: socketWakeProxyForwarder({ inject: async () => ({ ok: false, reason }) }),
+        log: (line) => lines.push(line),
+      });
+    }
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).not.toBe(lines[1]);
+  });
+
+  test("载体只返回裸 boolean false → 明说「未上报原因」，绝不编一个", async () => {
+    const lines: string[] = [];
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 5 }, {
+      listSessions: () => [entry()],
+      forward: async () => false,
+      log: (line) => lines.push(line),
+    });
+    expect(result).toMatchObject({ forwarded: false, reason: null });
+    expect(lines[0]).toContain("reason=unreported");
+  });
+
+  test("成功路径不带 reason/detail", async () => {
+    const result = await attemptWakeProxy(["claude-111111111111"], "me", { channel: "dev", seq: 5 }, {
+      listSessions: () => [entry()],
+      forward: async () => true,
+    });
+    expect(result).toMatchObject({ forwarded: true, reason: null, detail: null });
   });
 });
