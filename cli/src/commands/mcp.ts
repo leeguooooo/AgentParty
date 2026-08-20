@@ -477,7 +477,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     {
       title: "Send message",
       // #845：行为契约进最常用工具的描述——每轮进上下文、免疫压缩。文本来自 shared，别在这改。
-      description: `Send a message to an AgentParty channel. ${BEHAVIOR_CONTRACT_SUMMARY}`,
+      description: `Send a message to an AgentParty channel. ${BEHAVIOR_CONTRACT_SUMMARY} 多行代码必须用 \`\`\` 围栏包裹（裸缩进会被当普通文本渲染）；代码太长就改用 attach 发文件。`,
       inputSchema: {
         channel: z.string().optional().describe("Channel slug. Defaults to the workspace-bound channel."),
         body: z.string().optional().describe("Message body. May be empty only when attaching."),
