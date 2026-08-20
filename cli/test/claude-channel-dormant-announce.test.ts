@@ -3,6 +3,7 @@ import type { ServerFrame } from "@agentparty/shared";
 import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
 import {
   dormantAnnounceDisplayName,
+  dormantAnnounceMentionHit,
   runDormantClaudeSessionAnnounce,
   selectDormantAnnounceEntry,
   type DormantAnnounceDeps,
@@ -101,6 +102,8 @@ function makeDeps(overrides: Partial<DormantAnnounceDeps> = {}): {
       ...(buildDeps?.harnessSession === undefined ? {} : { harness_session: buildDeps.harnessSession }),
     }),
     loadCursor: () => 42,
+    // 默认给一个确定的频道身份：绝不让测试去读真实 config / 打 /api/me。
+    resolveSelfName: async () => "lark-ad72b3f97491-agentparty",
     cwd: "/tmp/project",
     pollIntervalMs: 5,
     livenessIntervalMs: 5,
@@ -208,5 +211,120 @@ describe("runDormantClaudeSessionAnnounce (#841 P2)", () => {
     const abort = new AbortController();
     await runDormantClaudeSessionAnnounce("Bad_Channel!", abort.signal, deps);
     expect(connections).toHaveLength(0);
+  });
+});
+
+function msg(seq: number, mentions: string[]): ServerFrame {
+  return {
+    type: "msg",
+    seq,
+    sender: { name: "lark-ad72b3f97491-agentparty", kind: "agent", owner: "leo@example.com" },
+    kind: "text",
+    body: "hello",
+    mentions,
+    reply_to: null,
+    state: null,
+    note: null,
+    status: null,
+    ts: 1,
+  } as unknown as ServerFrame;
+}
+
+const SELF = "lark-ad72b3f97491-agentparty";
+
+describe("dormantAnnounceMentionHit", () => {
+  test("matches the channel identity case-insensitively and ignores everything else", () => {
+    expect(dormantAnnounceMentionHit([SELF.toUpperCase()], SELF)).toBe(true);
+    expect(dormantAnnounceMentionHit(["lark-ad72b3f9749e-agentparty"], SELF)).toBe(false);
+    expect(dormantAnnounceMentionHit(undefined, SELF)).toBe(false);
+    expect(dormantAnnounceMentionHit([], SELF)).toBe(false);
+    // 频道身份解析不出来 → 恒不触发（静默降级）。
+    expect(dormantAnnounceMentionHit([SELF], null)).toBe(false);
+    // 宣告名不在 mentions 命名空间里：拿它当比对键恒 false（这正是第二个阻断缺陷）。
+    expect(dormantAnnounceMentionHit(["claude-111111111111"], SELF)).toBe(false);
+  });
+});
+
+describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
+  function injectingDeps(
+    impl?: (input: { name: string; body: string; fromName: string }) => Promise<unknown>,
+  ) {
+    const calls: { name: string; body: string; fromName: string; pid?: number; sessionId?: string | null }[] = [];
+    const inject = (async (input: { name: string; body: string; fromName: string; pid?: number; sessionId?: string | null }) => {
+      calls.push({
+        name: input.name,
+        body: input.body,
+        fromName: input.fromName,
+        pid: input.pid,
+        sessionId: input.sessionId,
+      });
+      if (impl !== undefined) return await impl(input);
+      return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: input.name };
+    }) as DormantAnnounceDeps["inject"];
+    const made = makeDeps({ inject });
+    return { ...made, calls };
+  }
+
+  test("injects only when the host session is mentioned, targeting the host session", async () => {
+    const { deps, connections, calls } = injectingDeps();
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    // 别人的频道身份 → 不触发。
+    connections[0]!.push(msg(11, ["lark-ad72b3f9749e-agentparty"]));
+    await tick();
+    expect(calls).toHaveLength(0);
+    // 宿主会话的宣告名（peers 命名空间）→ 不触发；它根本不是 @ 得到的东西。
+    connections[0]!.push(msg(12, ["claude-111111111111"]));
+    await tick();
+    expect(calls).toHaveLength(0);
+    // 自己的频道身份 → 触发。
+    connections[0]!.push(msg(13, [SELF]));
+    await tick();
+    expect(calls).toHaveLength(1);
+    // 寻址走 pid + sessionId（宣告名与 Claude 原生会话名是两个命名空间，#857）。
+    expect(calls[0]!.pid).toBe(process.pid);
+    expect(calls[0]!.sessionId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(calls[0]!.name).toBe("claude-111111111111");
+    // from-name＝友好名 + 技术 ID（接收端面板只显示这一处）。
+    expect(calls[0]!.fromName).toBe("leo@example.com · agentparty (lark-ad72b3f97491-agentparty)");
+    expect(calls[0]!.body).toContain("seq=13");
+    expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(512);
+    // 注入路径不改变 P2 不变式：只本地 ack，绝不发客户端帧、绝不推进持久化游标。
+    expect(connections[0]!.acked).toEqual([11, 12, 13]);
+    expect(connections[0]!.sent).toHaveLength(0);
+    expect(connections[0]!.connectArgs.opts.onCursor).toBeUndefined();
+    abort.abort();
+    await done;
+  });
+
+  test("injects a given seq at most once even if the frame is replayed", async () => {
+    const { deps, connections, calls } = injectingDeps();
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    connections[0]!.push(msg(20, [SELF]));
+    connections[0]!.push(msg(20, [SELF]));
+    await tick();
+    expect(calls).toHaveLength(1);
+    abort.abort();
+    await done;
+  });
+
+  test("a failing inject degrades silently: acks continue and the loop survives", async () => {
+    const { deps, connections, calls } = injectingDeps(async () => {
+      throw new Error("socket gone");
+    });
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    connections[0]!.push(msg(30, [SELF]));
+    await tick();
+    connections[0]!.push(msg(31, [SELF]));
+    await tick();
+    expect(calls).toHaveLength(2);
+    expect(connections[0]!.acked).toEqual([30, 31]);
+    abort.abort();
+    await done;
   });
 });

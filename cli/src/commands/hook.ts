@@ -30,6 +30,7 @@ import {
   registerClaudeSession,
   unregisterClaudeSession,
 } from "../claude-session-registry";
+import { nativeSessionName } from "../claude-inbox-inject";
 import { isHelpArg } from "../args";
 import { isPartyBinaryPath } from "../upgrade";
 import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "./claude-launch";
@@ -493,7 +494,13 @@ export function recordClaudeSessionLifecycle(
     registerClaudeSession({
       session_id: sessionId,
       pid,
-      display_name: claudeSessionDisplayNameFromHookPayload(record),
+      // hook payload 目前不带展示名（实测），退而求其次机会性读 Claude 原生会话名
+      // （`~/.claude/sessions/<pid>.json` 的 name，如 `agentparty-d4`）：宣告名从
+      // `claude-<12hex>` 变成人能读的名字，频道 peers 列表也更可读。SessionStart 时
+      // 该文件可能还没写出来 → 读不到就保持 null，绝不重试等待（hook 铁律）。
+      display_name:
+        claudeSessionDisplayNameFromHookPayload(record) ??
+        nativeSessionName(pid, { expectSessionId: sessionId, env }),
       channel,
       cwd,
     }, env);

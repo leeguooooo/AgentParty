@@ -1,7 +1,11 @@
-// 身份区分码（#858）：同一个 owner 下同角色后缀的 agent（如 lark-ad72b3f97491-agentparty 与
-// lark-ad72b3f9749e-agentparty）渲染出的友好名完全一样，界面上分不出谁是谁。
-// 这里统一给「撞名组」里的每个技术 name 算一段最短且组内唯一的区分码，
-// web（消息头 / presence / 引用预览）与 cli 的 cross-session fromName 注入（#857）共用同一实现，防止规则漂移。
+// 身份展示规则的单一来源：web 的消息头 / presence / 引用预览，与 cli 的 cross-session
+// 注入面板（#857 的 fromName）必须显示同一个「谁是谁」。规则只放这一份，别在 web/cli
+// 各自复刻（同 onboarding.ts 的做法）。
+//
+// 两组导出互补，一起用：
+//   1. 友好名（generatedAgentRole / friendlyAgentLabel）——把技术 name 渲染成人能读的名字；
+//   2. 撞名区分码（identityDisambiguatorSource / assignIdentityDisambiguators，#858）——
+//      友好名撞车时给出组内唯一的最短技术区分码。
 
 const HASH_PREFIX = /^(?:[a-z][a-z0-9]*-)?([0-9a-f]{8,})(?:-|$)/i;
 
@@ -39,4 +43,51 @@ export function assignIdentityDisambiguators(names: readonly string[]): Map<stri
   // 哈希段完全相同（或来源无法区分）：退到完整技术 name，保证「一定能分辨」这个硬要求。
   for (const name of unique) out.set(name, name);
   return out;
+}
+
+/**
+ * 自动生成的 agent 名形如 `lark-ad72b3f97491-agentparty` / `ad72b3f97491-agentparty`：
+ * 前缀是不可读的技术 ID，尾巴才是人给的角色名。提出角色名，提不出返回 null。
+ */
+export function generatedAgentRole(value: string): string | null {
+  const match = value.match(/^(?:lark-)?[0-9a-f]{12,}-(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
+/** 不可读的账号标识（SSO subject 等），不适合直接当所属人展示名。 */
+export function isOpaqueAccount(value: string): boolean {
+  return /^(?:(?:lark|oidc|apple|github):|oidc-)/i.test(value);
+}
+
+export interface FriendlyAgentIdentity {
+  /** 技术 identity（可路由名）。 */
+  name: string;
+  owner?: string | null;
+  owner_handle?: string | null;
+  owner_display_name?: string | null;
+}
+
+/**
+ * 友好展示名，对齐 web 的 `<ownerLabel> · <label>`：
+ * - 角色名取 generatedAgentRole(name)，提不出就用原 name；
+ * - 所属人取 owner_display_name > owner_handle > owner（不可读账号忽略）；
+ * - 无可读所属人时降级为纯角色名。
+ * 例：`lark-ad72b3f97491-agentparty` + owner_display_name=leo → `leo · agentparty`。
+ *
+ * 注意：友好名会撞车（同 owner 同角色，只有哈希段不同）——需要「一定能分辨」的场合
+ * （web 列表用 assignIdentityDisambiguators；cli 注入面板 fromName 直接带完整技术 ID）。
+ */
+export function friendlyAgentLabel(identity: FriendlyAgentIdentity): string {
+  const role = generatedAgentRole(identity.name) ?? identity.name;
+  const ownerCandidates = [
+    identity.owner_display_name,
+    identity.owner_handle,
+    identity.owner,
+  ];
+  for (const candidate of ownerCandidates) {
+    const owner = typeof candidate === "string" ? candidate.trim() : "";
+    if (owner === "" || isOpaqueAccount(owner)) continue;
+    return `${owner} · ${role}`;
+  }
+  return role;
 }

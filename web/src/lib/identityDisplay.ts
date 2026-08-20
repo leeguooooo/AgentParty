@@ -1,5 +1,9 @@
 import type { MsgFrame, PresenceEntry, Sender } from "@agentparty/shared";
-import { assignIdentityDisambiguators } from "@agentparty/shared/identity";
+import {
+  assignIdentityDisambiguators,
+  generatedAgentRole,
+  isOpaqueAccount,
+} from "@agentparty/shared/identity";
 import type { ChannelIdentity } from "./api";
 import type { MentionCandidate } from "./mentions";
 
@@ -13,14 +17,8 @@ export interface IdentityDisplay {
 
 export type IdentityDisplayMap = Record<string, IdentityDisplay>;
 
-function isOpaqueAccount(value: string): boolean {
-  return /^(?:(?:lark|oidc|apple|github):|oidc-)/i.test(value);
-}
-
-function generatedAgentRole(value: string): string | null {
-  const match = value.match(/^(?:lark-)?[0-9a-f]{12,}-(.+)$/i);
-  return match?.[1]?.trim() || null;
-}
+// 角色提取/账号可读性判定的权威实现在 shared/src/identity.ts——cli 的 cross-session
+// 注入面板复用同一份，别在这里另写一份正则（会与注入面板显示的名字漂移）。
 
 export interface IdentityPresentation {
   label: string;

@@ -15,6 +15,7 @@ import {
   type DeliveryRecoverFrame,
   type DeliveryRecoveryResultFrame,
   type DirectedDelivery,
+  mentionMatchKey,
   type MsgFrame,
   type PresenceEntry,
   type RuntimePeerDiscovery,
@@ -38,7 +39,9 @@ import {
   listClaudeSessions,
   type ClaudeSessionRegistryEntry,
 } from "../claude-session-registry";
-import { loadCursor, resolveChannel, saveCursor } from "../config";
+import { injectChannelMessage } from "../claude-inbox-inject";
+import { senderInjectFromName, wakeProxyNote } from "../serve-wake-proxy";
+import { loadCursor, readConfig, resolveChannel, saveCursor } from "../config";
 import {
   DeliveryRecoveryJournal,
   deliveryRecoveryJournalPath,
@@ -46,7 +49,7 @@ import {
 } from "../delivery-recovery-journal";
 import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from "../instance-lock";
 import { resolveAuthDetailed } from "../oidc-cli";
-import { fetchMessages, fetchPresence, fetchRuntimePeers, postMessage } from "../rest";
+import { fetchMe, fetchMessages, fetchPresence, fetchRuntimePeers, postMessage } from "../rest";
 import { isName, isSlug } from "../validation";
 import { buildRuntimeTopology } from "../runtime-topology";
 import {
@@ -471,6 +474,72 @@ export interface DormantAnnounceDeps {
   cwd?: string;
   pollIntervalMs?: number;
   livenessIntervalMs?: number;
+  /** socket 注入实现（测试注入点）；默认真实 injectChannelMessage。 */
+  inject?: typeof injectChannelMessage;
+  /**
+   * 解析「我这条连接所用的频道身份」——注入的**触发条件**按它匹配（见
+   * dormantAnnounceMentionHit 的注释）。默认 resolveAnnounceChannelIdentity。
+   */
+  resolveSelfName?: (auth: { server: string; token: string }) => Promise<string | null>;
+}
+
+/**
+ * ─────────── 三个命名空间，别再混（#857 两次实测教训） ───────────
+ * 1. **匹配用频道身份**：msg 帧的 `mentions` 里只会出现频道 handle（如
+ *    `lark-ad72b3f97491-agentparty`），服务端 mention 校验也只认它。这是判「这条消息
+ *    是不是在叫我」的唯一依据。
+ * 2. **寻址用 pid**：写哪个 socket 由 registry entry 的 pid（+ session_id 防复用）决定，
+ *    对应 `~/.claude/sessions/<pid>.json`。
+ * 3. **展示用宣告名**：`claudeSessionAnnounceName(entry)`（`agentparty-21` /
+ *    `claude-<12hex>`）属于 cross-session peers 命名空间，只用于 peers 投影展示。
+ *    它既不是频道 handle（服务端 @ 它会 mention_not_found），也不是 socket 寻址键。
+ * ────────────────────────────────────────────────────────────────
+ */
+
+/** 本机频道身份：优先 config 缓存（channel_scope 匹配才认），否则问一次 /api/me。 */
+export async function resolveAnnounceChannelIdentity(
+  channel: string,
+  auth: { server: string; token: string },
+): Promise<string | null> {
+  try {
+    const cached = readConfig()?.identity;
+    if (
+      cached !== undefined &&
+      typeof cached.name === "string" &&
+      cached.name !== "" &&
+      (cached.channel_scope === null || cached.channel_scope === channel)
+    ) {
+      return cached.name;
+    }
+  } catch {
+    // 读配置失败 → 退到网络那条。
+  }
+  try {
+    const me = await fetchMe(auth.server, auth.token);
+    return typeof me.name === "string" && me.name !== "" ? me.name : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 注入去重表容量上限：只留最近 N 个 seq，防长跑进程内存无界。 */
+export const DORMANT_ANNOUNCE_SEEN_LIMIT = 512;
+
+/**
+ * msg 帧是不是在叫「我」。
+ *
+ * 比对键是**频道身份**（announce 这条 WS 连接所用的 agent handle），不是宿主会话的
+ * 宣告名——mentions 里只会出现频道 handle，宣告名根本不在这个命名空间里（实测：
+ * `--mention agentparty-21` 会被服务端直接拒成 mention_not_found）。用宣告名比对时
+ * 本函数恒 false，注入永不触发。归一化沿用 mentionMatchKey。
+ */
+export function dormantAnnounceMentionHit(
+  mentions: readonly string[] | undefined,
+  channelIdentity: string | null,
+): boolean {
+  if (mentions === undefined || channelIdentity === null || channelIdentity === "") return false;
+  const wanted = mentionMatchKey(channelIdentity);
+  return mentions.some((mention) => mentionMatchKey(mention) === wanted);
 }
 
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -502,6 +571,14 @@ export async function runDormantClaudeSessionAnnounce(
   const pollMs = deps.pollIntervalMs ?? DORMANT_ANNOUNCE_POLL_MS;
   const livenessMs = deps.livenessIntervalMs ?? DORMANT_ANNOUNCE_LIVENESS_MS;
   if (!isSlug(channel)) return;
+  const inject = deps.inject ?? injectChannelMessage;
+  // 进程内注入去重（按 seq）：WS 重连会重放未 ack 的帧，没有它同一条 @ 会反复唤醒
+  // 宿主会话。跨重连保留，故声明在 while 之外；用插入序 Set + 容量上限防内存无界。
+  //
+  // 已知重叠（#856/#857）：本机若同时跑着 serve，serve 侧的 wake proxy 也会为同一条
+  // @ 注入一次。两条路径各有自己的进程内 seen，本切片**不做跨进程去重**——最终由
+  // Claude 收件箱侧的 msg_id/队列去重与人工感知兜底；重复唤醒的代价远小于叫不醒。
+  const injectedSeqs = new Set<number>();
   while (!signal.aborted) {
     let entry: ClaudeSessionRegistryEntry | null = null;
     try {
@@ -530,7 +607,56 @@ export async function runDormantClaudeSessionAnnounce(
     const connection = deps.connect(auth.server, auth.token, channel, deps.loadCursor(channel), {
       runtimeTopology: topology,
     });
+    // 「叫我」的判据＝本机频道身份（不是宣告名，见上方三命名空间注释）。解析失败
+    // （无缓存且 /api/me 不通）→ selfName=null → 恒不注入，静默降级为改动前行为。
+    const selfName = await (deps.resolveSelfName ?? ((a) => resolveAnnounceChannelIdentity(channel, a)))({
+      server: auth.server,
+      token: auth.token,
+    }).catch(() => null);
+    if (signal.aborted) {
+      connection.close();
+      return;
+    }
     const sessionId = entry.session_id;
+    // 本轮绑定的宿主会话宣告名——**只用于展示/回退**，寻址走 pid。注入目标恒为它——announce 进程是宿主会话的子进程，
+    // 只许唤醒自己的宿主，绝不代投本机其他会话（那是 serve wake proxy 的职责）。
+    const hostAnnounceName = claudeSessionAnnounceName(entry);
+    /**
+     * 命中 @ 宿主会话 → socket 注入一条 ≤512B 的频道指针（channel+seq，正文留在频道）。
+     * 任何失败都静默降级为「只 ack」的现行为：不抛错、不中断收帧循环。
+     */
+    const maybeInject = async (
+      seq: number,
+      mentions: readonly string[] | undefined,
+      sender: MsgFrame["sender"] | undefined,
+    ) => {
+      try {
+        if (!dormantAnnounceMentionHit(mentions, selfName)) return;
+        if (injectedSeqs.has(seq)) return;
+        injectedSeqs.add(seq);
+        while (injectedSeqs.size > DORMANT_ANNOUNCE_SEEN_LIMIT) {
+          const oldest = injectedSeqs.values().next();
+          if (oldest.done === true) break;
+          injectedSeqs.delete(oldest.value);
+        }
+        await inject({
+          // 自我保护：目标恒为本轮绑定的宿主会话，不接受任何外部传入的身份。
+          // 寻址走 pid（registry 与 ~/.claude/sessions 同源）——宣告名与 Claude 原生
+          // 会话名是两个命名空间，按名字寻址恒 no-match（#857 实测）。sessionId 一并
+          // 传下去做防 pid 复用比对。
+          pid: entry.pid,
+          sessionId: entry.session_id,
+          name: hostAnnounceName,
+          body: wakeProxyNote({ channel, seq }),
+          // from-name＝真实发信人的友好名 + 技术 ID（接收端面板只显示这一处，
+          // 技术 ID 丢了就分不清两个同名 agent）。
+          fromName: senderInjectFromName(sender, channel),
+          // announce 进程没有自己的回执 socket——绝不冒用别人的 sock 当 from。
+        });
+      } catch {
+        // 静默降级：注入不可用时行为等同改动前（只 ack）。
+      }
+    };
     let connectionClosed = false;
     const closeConnection = () => {
       connectionClosed = true;
@@ -557,7 +683,12 @@ export async function runDormantClaudeSessionAnnounce(
     if (signal.aborted) closeConnection();
     try {
       for await (const frame of connection.frames) {
-        if (frame.type === "msg" || frame.type === "status") connection.ack(frame.seq);
+        if (frame.type === "msg" || frame.type === "status") {
+          connection.ack(frame.seq);
+          // 注意顺序：先 ack 再注入。ack 只是本地防积压（绝不推进持久化游标、绝不
+          // claim delivery，见上方 P2 不变式），注入失败也不该影响 ack。
+          if (frame.type === "msg") await maybeInject(frame.seq, frame.mentions, frame.sender);
+        }
         if (frame.type === "error") return;
       }
     } catch {
