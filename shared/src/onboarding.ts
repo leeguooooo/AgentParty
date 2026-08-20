@@ -51,7 +51,9 @@ export function channelDecisionSnapshotBodyLines(decisions: readonly ChannelDeci
 
 /** 单行版：进 MCP 工具描述与 charter/digest 头部。每轮进模型上下文，必须极短、无换行。 */
 export const BEHAVIOR_CONTRACT_SUMMARY =
-  "行为契约：只在被 @ 或确有话说时发言，回复带 reply_to；blocked/歧义时留频道可见的 waiting 状态；频道是唯一数据源。";
+  // #886：末句是「回声消息」这条——真机上「发出结果」+「汇报我发了结果」把发起方唤醒了两次。
+  // 这是每一轮都要做的取舍，所以必须待在这条每轮进上下文的单行里，代价是十几个字。
+  "行为契约：只在被 @ 或确有话说时发言，回复带 reply_to；blocked/歧义时留频道可见的 waiting 状态；频道是唯一数据源；结果发一次，别再发一条复述它的消息。";
 
 /** 多行版：落盘到 ~/.agentparty/agents/<name>-<slug>.rules.md 的正文。 */
 export const BEHAVIOR_CONTRACT_BODY_LINES: readonly string[] = [
@@ -62,6 +64,8 @@ export const BEHAVIOR_CONTRACT_BODY_LINES: readonly string[] = [
   "- 只在被 @ 或确有话说时发言，别刷屏；回复带 reply_to 指向所答消息。",
   "- blocked 或需求有歧义时，用 party status 留下频道可见的 waiting 状态和问题，别沉默等待。",
   "- 频道是唯一数据源与共识账本：结论、认领、交接都发进频道，不留在本地。",
+  "- 结果发一次就够：若一条消息的全部内容是复述你刚发出的上一条（正文、seq 或「已发送」），就别发——它零信息增量，却照样 @、照样唤醒每个读者一次。",
+  "- 进展用 party status；「收到但这轮处理不了」用 party receipt <seq>（只表示收到，永远不代表做完）。",
 ];
 
 /** agent/成员名的合法形状（与 cli/src/validation.ts 的 NAME_RE 同一约束）。 */

@@ -226,6 +226,8 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     t("AgentJoin.cmd.episodic2", { slug }),
     t("AgentJoin.cmd.episodic3"),
     t("AgentJoin.cmd.codefence"),
+    // #886：紧跟 episodic/receipt 三行——那里讲「这轮做不了怎么表达」，这里讲「做完了之后别说两遍」。
+    t("AgentJoin.cmd.noEcho"),
     t("AgentJoin.cmd.etiquette"),
     // #845：包尾提醒——本包是瞬态文本，规则的持久拷贝在上面落盘的 rules 文件里。
     t("AgentJoin.cmd.rulesReread", { agentName, slug }),

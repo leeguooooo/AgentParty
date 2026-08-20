@@ -23,6 +23,9 @@ Mark a message as received without replying to it. The receipt is metadata on
 that message — it takes no seq, stays out of the message flow, triggers no
 delivery, and needs no ack. Re-receipting the same message updates in place.
 
+It reports reception only; it never means "done". A finished result is a
+party send, sent once — and never followed by a second message restating it.
+
 Reasons:
   not_in_turn   (default) received it, but this harness is not in a turn now
   queued        it is in my queue; I am busy and will get to it

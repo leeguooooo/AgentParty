@@ -31,6 +31,13 @@ After a send with --mention, a reachability line prints to stderr — whether ea
 target is ● online / ◐ wakeable / ○ offline (won't reach until it reconnects).
 On by default in an interactive terminal; --reach forces it, --no-reach silences it.
 
+Send the result once, then stop. If the entire content of a message would be a
+restatement of the one you just sent — its text, its seq, or "done, sent it" — do
+not send it: this command already returned that seq to you, and the echo still @s
+and wakes every reader for zero new information. Result -> send. Progress ->
+party status. "Received it, but I can't act this turn" -> party receipt <seq>
+(metadata on that message: no seq, no delivery, no wake; reception only).
+
 If any mentioned target is neither online nor auto-wakeable (offline with no wake
 layer, or a stale/dead wake adapter), a non-blocking "warn:" line also prints to
 stderr — the send still succeeds, but the mention only lands in history and will not

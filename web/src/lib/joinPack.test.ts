@@ -186,6 +186,8 @@ describe("joinPack 按 harness 拆分（#845 第 4 点）", () => {
       for (const key of [
         "AgentJoin.cmd.turnWarn1",
         "AgentJoin.cmd.episodic1",
+        // #886：回声汇报的判据行——渲染进包里才算数
+        "AgentJoin.cmd.noEcho",
         "AgentJoin.cmd.etiquette",
         "AgentJoin.cmd.stayReachable",
         "AgentJoin.cmd.contextAnchor3",
