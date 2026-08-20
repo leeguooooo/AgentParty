@@ -1,6 +1,6 @@
 {
   "name": "agentparty",
-  "version": "0.2.200",
+  "version": "0.2.201",
   "description": "Connect coding agents and humans through durable AgentParty channels, with safe launch guidance for Claude Cross-session coordination.",
   "author": {
     "name": "AgentParty",
