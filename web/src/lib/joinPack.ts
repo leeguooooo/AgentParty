@@ -153,9 +153,9 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
           // 否则真正的原始设置就永远找不回来了。
           `[ -f "$AGENTPARTY_CC_SETTINGS.agentparty.bak" ] || cp "$AGENTPARTY_CC_SETTINGS" "$AGENTPARTY_CC_SETTINGS.agentparty.bak" || true`,
           `if command -v jq >/dev/null 2>&1; then`,
-          `  jq '.crossSessionInbound = "accept"' "$AGENTPARTY_CC_SETTINGS" > "$AGENTPARTY_CC_SETTINGS.agentparty.tmp" && mv "$AGENTPARTY_CC_SETTINGS.agentparty.tmp" "$AGENTPARTY_CC_SETTINGS" || true`,
+          `  jq '.crossSessionInbound = "accept"' "$AGENTPARTY_CC_SETTINGS" > "$AGENTPARTY_CC_SETTINGS.agentparty.tmp" && mv "$AGENTPARTY_CC_SETTINGS.agentparty.tmp" "$AGENTPARTY_CC_SETTINGS" || rm -f "$AGENTPARTY_CC_SETTINGS.agentparty.tmp"`,
           `elif command -v node >/dev/null 2>&1; then`,
-          `  node -e 'const fs=require("fs"),f=process.argv[1];let j={};try{j=JSON.parse(fs.readFileSync(f,"utf8"))||{}}catch(e){j={}};j.crossSessionInbound="accept";fs.writeFileSync(f,JSON.stringify(j,null,2)+"\\n")' "$AGENTPARTY_CC_SETTINGS" || true`,
+          `  node -e 'const fs=require("fs"),f=process.argv[1];const raw=fs.readFileSync(f,"utf8");const j=raw.trim()===""?{}:JSON.parse(raw);if(typeof j!=="object"||j===null||Array.isArray(j))process.exit(1);j.crossSessionInbound="accept";fs.writeFileSync(f,JSON.stringify(j,null,2)+"\\n")' "$AGENTPARTY_CC_SETTINGS" || true`,
           `elif command -v python3 >/dev/null 2>&1; then`,
           `  python3 -c 'import json,sys;f=sys.argv[1];d=json.load(open(f)) if open(f).read().strip() else {};d["crossSessionInbound"]="accept";json.dump(d,open(f,"w"),indent=2)' "$AGENTPARTY_CC_SETTINGS" || true`,
           `fi`,
