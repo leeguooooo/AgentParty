@@ -48,6 +48,14 @@ import { AUTHZ_PROSE_WARNING, checkAuthz, isValidAuthzAction } from "../authz";
 import { askDecision } from "./decision";
 import { uploadAttachmentPaths } from "./send";
 import { buildContext } from "./status";
+import {
+  acquireTaskLease,
+  describeDeniedLease,
+  processScopedExecutorId,
+  releaseTaskLease,
+  taskLeaseDir,
+  taskLeaseKey,
+} from "../task-lease";
 import { EXIT_ALREADY_WATCHING, runWatch } from "./watch";
 
 const HELP = `usage: party mcp
@@ -662,6 +670,32 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         const normalizedMentions = normalizeMentions(mentions);
         const taskScope = task_id === undefined ? [] : [`task:${task_id}`];
         const effectiveScope = [...(scope ?? []), ...taskScope];
+        // #834 第 3 项：MCP 是 harness 会话那条腿的认领入口。这里不落同一把闸,enforcement 就只
+        // 盖住了 CLI 那半——事故里两条腿恰好一条是 serve runner、一条是 harness。
+        const leaseKeyValue = task_id === undefined
+          ? null
+          : taskLeaseKey(authInfo.server, authInfo.token, resolved, task_id);
+        const executorId = processScopedExecutorId();
+        if (leaseKeyValue !== null && task_id !== undefined && (state === "working" || state === "waiting")) {
+          const lease = acquireTaskLease({
+            key: leaseKeyValue,
+            channel: resolved,
+            taskId: task_id,
+            executorId,
+            dir: taskLeaseDir(),
+          });
+          if (lease.state === "denied" && lease.holder !== undefined) {
+            // 拒绝 ≠ 吞任务:这里 return 之前没有发过任何帧,服务端 task 状态原封不动。
+            return fail(describeDeniedLease(lease.holder, resolved, task_id, Date.now()), {
+              type: "task_lease_held",
+              published: false,
+              task_untouched: true,
+              channel: resolved,
+              task_id,
+              holder: lease.holder,
+            });
+          }
+        }
         const { seq } = await postMessage(authInfo.server, authInfo.token, resolved, {
           kind: "status",
           state: state as StatusState,
@@ -676,6 +710,10 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           // #737:worker 报自己那端 blocked 不再拉黑父任务全局 state(见 taskStateFromReportedStatus)。
           const taskState = taskStateFromReportedStatus(state);
           if (taskState !== null) task = await updateTask(authInfo.server, authInfo.token, resolved, task_id, { state: taskState });
+        }
+        // 帧已发出后再交还,别在「已放手、状态还没落地」之间留一个谁都不持有的窗口。
+        if (leaseKeyValue !== null && (state === "done" || state === "blocked")) {
+          releaseTaskLease(leaseKeyValue, executorId, taskLeaseDir());
         }
         advanceCursorPastOwnMessage(resolved, seq);
         return ok({ type: "status", channel: resolved, seq, state, ...(task !== undefined ? { task } : {}) });
