@@ -150,6 +150,14 @@ export function processStartedAt(pid: number): number | undefined {
 }
 
 /**
+ * 「这个 pid 还是当初那个进程吗」——活着且出生时间对得上(读不到出生时间时退回 kill(0))。
+ * #893 的 auto-wake 标记复用同一套 PID 复用判定,不再自己写一份。
+ */
+export function isSameLiveProcess(pid: number, startedAt?: number): boolean {
+  return sameLiveProcess(pid, startedAt);
+}
+
+/**
  * 只停「本身份(server+token)」在某频道跑的那个 serve/watch(#741)。同机同频道多 agent 时,
  * `pkill -f "party watch <ch>"` 会误杀所有人的 listener;这条靠实例锁按身份精确定位、只 SIGTERM 自己那个。
  * 返回退出码:成功停 / 无在跑的都算 0;发信号失败算 1。

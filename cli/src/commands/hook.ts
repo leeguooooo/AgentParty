@@ -27,16 +27,40 @@ import {
 import { atomicWriteJson, atomicWriteText } from "../atomic-json";
 import {
   isClaudeSessionRegistrySessionId,
+  listCodexSessions,
   registerClaudeSession,
   registerCodexSession,
   unregisterClaudeSession,
 } from "../claude-session-registry";
+import {
+  CODEX_AUTO_WAKE_ENV,
+  CODEX_AUTO_WAKE_POLL_MS,
+  activeCodexAutoWakePid,
+  appendCodexAutoWakeLog,
+  claimCodexAutoWake,
+  createCodexAutoWakeStartupBudget,
+  codexAutoWakeAuth,
+  codexAutoWakeLogPath,
+  codexAutoWakeMarkerPath,
+  codexAutoWakeSettingPath,
+  codexAutoWakeTarget,
+  decideCodexAutoWake,
+  recordCodexAutoWakePid,
+  resolveCodexAutoWakeMode,
+  runningServePid,
+  shouldReapCodexAutoWake,
+  writeCodexAutoWakeSetting,
+  type CodexAutoWakeDecision,
+  type CodexAutoWakeStartupBudget,
+} from "../codex-auto-wake";
+import { defaultInstanceLockDir, isSameLiveProcess } from "../instance-lock";
 import { nativeSessionName } from "../claude-inbox-inject";
 import { isHelpArg } from "../args";
 import { isPartyBinaryPath } from "../upgrade";
 import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "./claude-launch";
+import type { ServeSupervisorOptions } from "./serve";
 
-const HELP = `usage: party hook <report|codex-report|stop-guard|push|install|uninstall|status>
+const HELP = `usage: party hook <report|codex-report|codex-autowake|stop-guard|push|install|uninstall|status>
 
 Claude Code hook adapter (issues #602/#615): report what the model session is
 actually doing (running a tool / waiting on permission / compacting / idle)
@@ -56,7 +80,23 @@ into channel presence, so \`party who\` and the web can see it.
   codex-report         (wired by \`install --codex\`) read one codex hook event
                        from stdin and register an interactive codex session into
                        ~/.agentparty/codex-sessions/ so party can discover it.
-                       Registry only — never presence, never network.
+                       Registry only — never presence, never network. It also
+                       starts the wake layer unless auto-wake is turned off (#893).
+  codex-autowake [status|on|off]
+                       codex has no MCP sampling and declines idle elicitation
+                       (#893), so it can only be reached by a local wake layer.
+                       ON BY DEFAULT — installing the codex hook already says "wire
+                       me into AgentParty"; asking a second time is the experience
+                       gap #893 exists to remove. Every codex SessionStart starts
+                       \`party serve <channel> --runner codex\` in the background
+                       (once per identity+channel — the serve instance lock is the
+                       authority), and reaps it once no registered codex session on
+                       that channel is alive. \`off\` disables it for good: the
+                       default does the right thing, it never takes away control.
+                       Honest boundary (#879): a mention wakes a NEW codex runner
+                       session, never the terminal session you are looking at.
+  codex-autowake --supervise --channel C
+                       internal: the supervised wake layer itself.
   report               (wired by install / party serve) read one hook event from
                        stdin, record the local activity snapshot. Under a managed
                        \`party serve\` runner the serve heartbeat uplinks it; in an
@@ -425,7 +465,11 @@ async function runInstall(argv: string[]): Promise<number> {
   console.log(
     scope === "codex"
       ? "codex 交互式会话现在会在 SessionStart 入册到 ~/.agentparty/codex-sessions/；" +
-        "codex 无会话结束事件，出册靠进程探活。唤醒仍走 party bridge codex。"
+        "codex 无会话结束事件，出册靠进程探活。\n" +
+        "已同时启用自动唤醒层（#893）：每个 codex 会话启动时自动拉起 `party serve <频道> --runner codex`，" +
+        "没人用了自动退场——不用再手挂任何东西。被 @ 唤醒的是一个**新的 codex runner 会话**，" +
+        "不是你眼前这个终端会话（#879）。\n" +
+        "如需关闭：`party hook codex-autowake off`。"
       : "普通 Claude session 只写本地 activity；频道 presence 上行仍需 party claude、" +
         "party bridge claude 或托管 serve lane。",
   );
@@ -610,14 +654,316 @@ export function recordCodexSessionLifecycle(
   }
 }
 
-/** `party hook codex-report`：读一条 codex hook 事件，只做入册。stdout 恒空。 */
+// ---- codex 零手动唤醒层（#893）----
+
+export interface CodexAutoWakeSpawnDeps {
+  home: string;
+  env: NodeJS.ProcessEnv;
+  lockDir: string;
+  readConfigAt: (cwd: string) => { server?: unknown; token?: unknown } | null;
+  channelAt: (cwd: string) => string | null;
+  /** 返回子进程 pid；起不来返回 null。 */
+  spawn: (args: string[], cwd: string, env: NodeJS.ProcessEnv) => number | null;
+  now: () => number;
+  log: (line: string) => void;
+  /** 「这个 pid 还是当初那个进程吗」——注入仅为可测。 */
+  processAlive: (pid: number, startedAt?: number) => boolean;
+  recordPid: (markerPath: string, channel: string, pid: number, now: number) => void;
+}
+
+function defaultCodexAutoWakeDeps(env: NodeJS.ProcessEnv = process.env): CodexAutoWakeSpawnDeps {
+  const home = agentpartyHome(env);
+  return {
+    home,
+    env,
+    lockDir: defaultInstanceLockDir(),
+    readConfigAt: (cwd) => readConfig(cwd),
+    channelAt: (cwd) => env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null,
+    spawn: (args, cwd, childEnv) => {
+      // 编译版二进制：execPath 即 party；dev（bun run）：execPath 是 bun，argv[1] 是入口脚本。
+      const self = isPartyBinaryPath(process.execPath) || process.argv[1] === undefined
+        ? [process.execPath]
+        : [process.execPath, process.argv[1]];
+      try {
+        const proc = Bun.spawn([...self, ...args], {
+          cwd,
+          env: childEnv,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          // 必须脱离 codex 的进程组：唤醒层要活过用户这个终端会话，直到探活判定没人要了才退场。
+          detached: process.platform !== "win32",
+        });
+        proc.unref();
+        return proc.pid ?? null;
+      } catch {
+        return null;
+      }
+    },
+    now: () => Date.now(),
+    log: (line) => appendCodexAutoWakeLog(home, line),
+    processAlive: isSameLiveProcess,
+    recordPid: (markerPath, channel, pid, now) => recordCodexAutoWakePid(markerPath, channel, pid, now),
+  };
+}
+
+/**
+ * SessionStart 时按配置决定是否把唤醒层拉起来（#893）。返回决策仅为可测；调用方不看返回值。
+ *
+ * 诚实边界（#879）：拉起的是 `party serve --runner codex`——被 @ 时起的是一个**新的
+ * codex runner 会话**，不是用户眼前这个终端会话。日志里也这么写。
+ */
+export type CodexAutoWakeOutcome =
+  | CodexAutoWakeDecision
+  | { action: "start-failed"; channel: string; detail: string };
+
+export function maybeStartCodexAutoWake(
+  record: Record<string, unknown>,
+  deps: CodexAutoWakeSpawnDeps,
+): CodexAutoWakeOutcome {
+  const cwd = typeof record.cwd === "string" && record.cwd.length > 0 ? record.cwd : process.cwd();
+  const resolution = resolveCodexAutoWakeMode(deps.env, deps.home);
+  const channel = deps.channelAt(cwd);
+  const auth = codexAutoWakeAuth(deps.readConfigAt(cwd));
+  const now = deps.now();
+  const markerPath = auth !== null && channel !== null
+    ? codexAutoWakeMarkerPath(deps.home, codexAutoWakeTarget(auth, channel))
+    : null;
+  const decision = decideCodexAutoWake({
+    mode: resolution.mode,
+    channel,
+    cwd,
+    hasAgentToken: auth !== null,
+    // 已有 serve（不管是用户手挂的还是上一次自动拉的）就绝不拉第二个：一条 @ 触发两次
+    // 完整 runner ＝ 双份回帖、git push 类副作用跑两遍。
+    serveHolderPid: auth !== null && channel !== null ? runningServePid(auth, channel, deps.lockDir) : null,
+    // 锁之外的第二层：serve 连不上服务端时会无限重连、根本走不到抢锁那步（真机实测），
+    // 只看锁的话断网时每开一个 codex 会话就多堆一个永远重试的进程。
+    startingPid: markerPath === null ? null : activeCodexAutoWakePid(markerPath, now, deps.processAlive),
+  });
+  if (decision.action === "skip") {
+    // disabled 是绝大多数机器的常态，逐次记会把日志刷成噪音；其余跳过原因都值得留痕。
+    if (decision.reason !== "disabled") deps.log(`skip(${decision.reason}): ${decision.detail}`);
+    return decision;
+  }
+  if (markerPath !== null && !claimCodexAutoWake(markerPath, decision.channel, now, deps.processAlive)) {
+    // 同一瞬间启动的另一个 codex 会话抢先了。
+    const detail = `#${decision.channel} 上另一个 codex 会话正在拉起唤醒层，本次不拉`;
+    deps.log(`skip(already-starting): ${detail}`);
+    return { action: "skip", reason: "already-starting", detail };
+  }
+  const childEnv = {
+    ...deps.env,
+    // 二道防线：这个 serve 起的 codex runner 自己也会触发 SessionStart hook，绝不许再套娃。
+    [CODEX_AUTO_WAKE_ENV]: "off",
+  };
+  const pid = deps.spawn(decision.args, decision.cwd, childEnv);
+  if (pid !== null && markerPath !== null) deps.recordPid(markerPath, decision.channel, pid, now);
+  if (pid === null) {
+    const detail =
+      `拉 \`party serve ${decision.channel} --runner codex\` 失败（spawn 没返回 pid）；` +
+      `这台机器上没有唤醒层在跑。手动兜底：party serve ${decision.channel} --runner codex`;
+    deps.log(`start-failed: ${detail}`);
+    return { action: "start-failed", channel: decision.channel, detail };
+  }
+  deps.log(
+    `started: pid=${pid} channel=#${decision.channel} cwd=${decision.cwd} —— ` +
+      `被 @ 时唤醒的是一个新的 codex runner 会话，不是你眼前这个终端会话`,
+  );
+  return decision;
+}
+
+/**
+ * 一条 codex hook 事件的全部处理：入册 +（按配置）拉起唤醒层。
+ * 入册必须先于拉起：唤醒层的回收判据就是「频道上还有没有活着的入册 codex 会话」，
+ * 本会话没入册就拉起，会在宽限期结束时被自己判成孤儿。
+ */
+export function handleCodexHookRecord(
+  record: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+  autoWakeDeps?: CodexAutoWakeSpawnDeps,
+): void {
+  recordCodexSessionLifecycle(record, env);
+  // serve 托管 lane（AP_ACTIVITY_FILE 有值）是被管理的 runner 会话，不是人开的交互式会话：
+  // 它既不入册，也绝不许再拉一层唤醒层。
+  if (record.hook_event_name !== "SessionStart" || env.AP_ACTIVITY_FILE) return;
+  try {
+    maybeStartCodexAutoWake(record, autoWakeDeps ?? defaultCodexAutoWakeDeps(env));
+  } catch {
+    // hook 铁律：拉不起来也绝不阻断 codex 启动。原因已进日志文件（stdout 恒空）。
+  }
+}
+
+/** `party hook codex-report`：读一条 codex hook 事件，入册 + 按配置拉起唤醒层。stdout 恒空。 */
 async function runCodexHookInput(): Promise<number> {
   try {
     const payload = JSON.parse(await readStdin(MAX_STDIN_BYTES)) as unknown;
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return 0;
-    recordCodexSessionLifecycle(payload as Record<string, unknown>);
+    handleCodexHookRecord(payload as Record<string, unknown>);
   } catch {
     // 坏 JSON / 写盘失败都不配阻断 codex。
+  }
+  return 0;
+}
+
+/**
+ * 给自动拉起的 serve 套上「放弃预算」（#893）。
+ *
+ * serve 自己的 supervisor 无限自愈——对**人手工挂**的 serve 是对的（人要它守着），对
+ * **自动拉起**的这层不对：token 失效、服务端搬家、频道被删这类不会自己好的故障，会在每台
+ * 装了 codex hook 的机器上留一个永远重试的后台进程。默认开启之后这条影响所有人，所以必需。
+ *
+ * 独立成函数只为可测：不真起 serve 也能验「短命失败累计到上限就当终局、跑够久就清零」。
+ */
+export function codexAutoWakeServeDeps(input: {
+  channel: string;
+  budget: CodexAutoWakeStartupBudget;
+  log: (line: string) => void;
+  now: () => number;
+  superviseServe: (opts: ServeSupervisorOptions) => Promise<number>;
+  isTerminalServeExit: (code: number) => boolean;
+}): { superviseServe: (opts: ServeSupervisorOptions) => Promise<number> } {
+  return {
+    superviseServe: (opts) => input.superviseServe({
+      ...opts,
+      runOnce: async () => {
+        const attemptStartedAt = input.now();
+        try {
+          return await opts.runOnce();
+        } finally {
+          input.budget.recordRun(input.now() - attemptStartedAt);
+        }
+      },
+      // 预算用完就把这次退出当成终局，让 serve 的 supervisor 停止自愈并返回。
+      isTerminal: (code) => {
+        if (input.budget.exhausted()) {
+          input.log(
+            `giving-up: #${input.channel} 上唤醒层连续 ${input.budget.consecutiveFailures()} 次起不来` +
+              `（最后退出码 ${code}）——退场，不再无限重试。查 \`party doctor\` / 凭据 / 网络；` +
+              `修好后新开一个 codex 会话即可重新拉起`,
+          );
+          return true;
+        }
+        return (opts.isTerminal ?? input.isTerminalServeExit)(code);
+      },
+    }),
+  };
+}
+
+/**
+ * 被监管的唤醒层本体（#893）：**同一个进程**里跑 `party serve <ch> --runner codex`，
+ * 另挂一条存活探测负责收尾。
+ *
+ * 为什么不另起一个看护进程：serve 自己已经处理 SIGTERM 优雅收口（关连接、放实例锁、
+ * 结清欠账）。给自己发 SIGTERM 就能复用那条路径，一个进程解决，不必新增第二个常驻。
+ *
+ * 去重完全交给 serve 自己的实例锁（身份+频道粒度）：hook 侧的预检是省一次 spawn 的
+ * 优化，锁才是权威。两个会话同时启动时，第二个 serve 拿不到锁，打印后以
+ * EXIT_ALREADY_SERVING 退出，绝不会出现两个唤醒层。
+ */
+export async function runCodexAutoWakeSupervise(
+  channel: string,
+  deps: {
+    env?: NodeJS.ProcessEnv;
+    liveOwners?: () => number;
+    now?: () => number;
+    terminate?: () => void;
+    log?: (line: string) => void;
+    serve?: (argv: string[]) => Promise<number>;
+    budget?: CodexAutoWakeStartupBudget;
+    pollMs?: number;
+    graceMs?: number;
+  } = {},
+): Promise<number> {
+  const env = deps.env ?? process.env;
+  const home = agentpartyHome(env);
+  const log = deps.log ?? ((line: string) => appendCodexAutoWakeLog(home, line));
+  const now = deps.now ?? (() => Date.now());
+  const liveOwners = deps.liveOwners ??
+    (() => listCodexSessions(env).filter((entry) => entry.channel === channel).length);
+  const terminate = deps.terminate ?? (() => {
+    // serve 自己监听 SIGTERM 并优雅收口；自发一刀即可复用那条路径。
+    try { process.kill(process.pid, "SIGTERM"); } catch { /* 已经在退了 */ }
+  });
+  // 放弃预算（默认开启后必需）：serve 自己的 supervisor 无限自愈——对**人手工挂**的 serve
+  // 是对的，对**自动拉起**的这层不是。token 失效 / 服务端搬家 / 频道被删这类不会自己好的故障，
+  // 会在每台装了 codex hook 的机器上留一个永远重试的后台进程。连续短命失败够多次就安静退场，
+  // 下一次 codex SessionStart 自然会再试（那时故障可能已经修好）。
+  const budget = deps.budget ?? createCodexAutoWakeStartupBudget();
+  const serve = deps.serve ?? (async (argv: string[]) => {
+    const serveModule = await import("./serve");
+    return serveModule.run(argv, codexAutoWakeServeDeps({
+      channel,
+      budget,
+      log,
+      now,
+      superviseServe: serveModule.superviseServe,
+      isTerminalServeExit: serveModule.isTerminalServeExit,
+    }));
+  });
+  const startedAt = now();
+  const timer = setInterval(() => {
+    const owners = liveOwners();
+    if (!shouldReapCodexAutoWake({ startedAt, now: now(), liveOwners: owners, graceMs: deps.graceMs })) return;
+    clearInterval(timer);
+    log(`reaping: #${channel} 上已无存活的交互式 codex 会话，唤醒层退场（下次 SessionStart 会重新拉起）`);
+    terminate();
+  }, deps.pollMs ?? CODEX_AUTO_WAKE_POLL_MS);
+  try {
+    return await serve([channel, "--runner", "codex"]);
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+function runCodexAutoWakeCommand(argv: string[]): Promise<number> | number {
+  const env = process.env;
+  const home = agentpartyHome(env);
+  if (argv[0] === "--supervise") {
+    const idx = argv.indexOf("--channel");
+    const channel = idx >= 0 ? argv[idx + 1] : undefined;
+    if (!channel) {
+      console.error("hook codex-autowake --supervise 需要 --channel <channel>");
+      return 1;
+    }
+    return runCodexAutoWakeSupervise(channel);
+  }
+  const sub = argv[0] ?? "status";
+  if (sub === "on" || sub === "off") {
+    writeCodexAutoWakeSetting(home, sub === "on" ? "serve" : "off");
+    console.log(
+      sub === "on"
+        ? "codex auto-wake: on（这也是默认值）—— 下次 codex 会话启动时会自动拉起 " +
+          "`party serve <channel> --runner codex`。\n" +
+          "注意：被 @ 时唤醒的是一个新的 codex runner 会话，**不是**你眼前这个终端会话（issue #879）。"
+        : "codex auto-wake: off —— 已显式关闭，不再自动拉起任何后台进程" +
+          "（已在跑的用 `party serve <channel> --stop` 停；想恢复默认行为：`party hook codex-autowake on`）。",
+    );
+    return 0;
+  }
+  if (sub !== "status") {
+    console.error("usage: party hook codex-autowake [status|on|off]");
+    return 1;
+  }
+  const resolution = resolveCodexAutoWakeMode(env, home);
+  console.log(
+    `mode: ${resolution.mode} (source: ${resolution.source})` +
+      (resolution.source === "default" ? " —— 默认开启，装了 codex hook 就能被唤醒，不用再拨开关" : "") +
+      (resolution.mode === "off" ? "；显式关闭中，`party hook codex-autowake on` 恢复默认行为" : ""),
+  );
+  console.log("被 @ 时唤醒的是一个新的 codex runner 会话，不是你眼前这个终端会话（#879）");
+  console.log(`setting: ${codexAutoWakeSettingPath(home)}`);
+  console.log(`log: ${codexAutoWakeLogPath(home)}`);
+  const cwd = process.cwd();
+  const channel = env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null;
+  const auth = codexAutoWakeAuth(readConfig(cwd));
+  if (channel === null) {
+    console.log("channel: (本目录没有绑定频道)");
+  } else if (auth === null) {
+    console.log(`channel: #${channel}；config 里没有 agent token，不会自动拉起`);
+  } else {
+    const pid = runningServePid(auth, channel, defaultInstanceLockDir());
+    console.log(`channel: #${channel}；serve: ${pid === null ? "未在跑" : `pid ${pid}`}`);
   }
   return 0;
 }
@@ -736,6 +1082,7 @@ export async function run(argv: string[]): Promise<number> {
   if (sub === "status") return runStatus(rest);
   if (sub === "push") return runPush(rest);
   if (sub === "codex-report") return runCodexHookInput();
+  if (sub === "codex-autowake") return runCodexAutoWakeCommand(rest);
   if (sub !== "report" && sub !== "stop-guard") {
     // 会写 stderr 的分支只剩人在终端敲错子命令。真 hook 调用恒为 `hook report`，不受影响。
     console.error(HELP);

@@ -12,7 +12,19 @@ const t: TFunc = (key, vars) => {
   return raw.replace(/\{(\w+)\}/g, (m, name: string) => (name in vars ? String(vars[name]) : m));
 };
 
-function pack(harness?: JoinPackHarness): string {
+// 中英两份文案都必须真的渲染进包——只改一份是本仓踩过的坑。
+function tFor(lang: "en" | "zh"): TFunc {
+  return (key, vars) => {
+    const raw = lookup(lang, key) ?? lookup("en", key) ?? key;
+    if (vars === undefined) return raw;
+    return raw.replace(/\{(\w+)\}/g, (m, name: string) => (name in vars ? String(vars[name]) : m));
+  };
+}
+
+const tt = (lang: "en" | "zh", key: string, vars?: Record<string, unknown>): string =>
+  tFor(lang)(key, vars as never);
+
+function pack(harness?: JoinPackHarness, lang?: "en" | "zh"): string {
   return buildFullJoinPack({
     slug: "dev",
     agentName: "bot",
@@ -21,7 +33,7 @@ function pack(harness?: JoinPackHarness): string {
     inviterName: "leo",
     charter: null,
     ...(harness === undefined ? {} : { harness }),
-    t,
+    t: lang === undefined ? t : tFor(lang),
   });
 }
 
@@ -150,6 +162,32 @@ describe("joinPack 按 harness 拆分（#845 第 4 点）", () => {
     expect(text).toContain(CODEX_PLUGIN_ADD);
   });
 
+  // #893：接入包里这三段文案是「codex 能不能被唤醒」的唯一说明。整段渲染进包才算数——
+  // 只躺在 i18n 里等于没写（#890 的教训）。断言用整句，不用到处都有的词。
+  test("codex 档：唤醒说明已改成「默认自动可达」，且保住 #879 的差异事实", () => {
+    for (const lang of ["en", "zh"] as const) {
+      const text = pack("codex", lang);
+      expect(text).toContain(tt(lang, "AgentJoin.cmd.codexWakeNote1"));
+      expect(text).toContain(tt(lang, "AgentJoin.cmd.codexWakeNote2", { slug: "dev" }));
+      expect(text).toContain(tt(lang, "AgentJoin.cmd.codexPluginNote1"));
+      // 装 hook 的命令必须真的在包里，否则上面那句「你现在是可达的」是空话。
+      expect(text).toContain("party hook install --codex || true");
+      // 推翻掉的旧结论绝不能还留在包里。
+      expect(text).not.toContain("Installing the plugin does not change that");
+      expect(text).not.toContain("装插件改变不了这一点");
+      expect(text).not.toContain("wake parity for Codex is on the way");
+      expect(text).not.toContain("被唤醒的对等能力在路上");
+    }
+  });
+
+  test("claude/other 档：不含 codex 唤醒层文案与 hook install（#893）", () => {
+    for (const harness of ["claude", "other"] as const) {
+      const text = pack(harness);
+      expect(text).not.toContain("party hook install --codex");
+      expect(text).not.toContain("codex-autowake");
+    }
+  });
+
   test("claude/other 档：不含 codex 插件命令（#850）", () => {
     for (const harness of ["claude", "other"] as const) {
       const text = pack(harness);
@@ -222,12 +260,17 @@ describe("joinPack codex 档唤醒层说明（#879）", () => {
   const CODEX_BRIDGE = "party bridge codex dev";
   const CODEX_SERVE_RUNNER = "party serve dev --runner codex";
 
-  test("codex 档：明确写出 bridge / serve --runner codex 两条唤醒层，并点明装插件不解决唤醒", () => {
+  // #893 之后结论变了（默认自动可达），但**差异事实必须保住**：codex 依然没有 per-session
+  // 收件箱，被唤醒的是新 runner 会话而不是眼前这个终端。bridge / serve 降级为可选进阶用法。
+  test("codex 档：仍写明没有 per-session 收件箱 + #879，bridge / serve 作为可选用法保留", () => {
     const text = pack("codex");
     expect(text).toContain(CODEX_BRIDGE);
     expect(text).toContain(CODEX_SERVE_RUNNER);
     expect(text).toContain("per-session");
     expect(text).toContain("#879");
+    // 「唤醒的是新 runner 会话，不是你眼前这个」这句差异不能被抹掉（中英各一份）。
+    expect(text).toContain("新的 codex runner 会话");
+    expect(pack("codex", "en")).toContain("NEW codex runner session");
   });
 
   test("claude/other 档不加这两条（各走各的唤醒层，别塞噪音）", () => {
