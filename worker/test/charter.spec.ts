@@ -91,6 +91,89 @@ describe("channel charter", () => {
     expect(await json(hostWrite)).toMatchObject({ charter: "host maintained charter", charter_rev: 1, updated_by: host.name });
   });
 
+  // #834 第 2 项：charter 权限死锁。isChannelModerator 对 channel_scope 非空的身份先于房主判定
+  // 返回 false，于是持频道内 token 的人类房主在自己频道里写不了 charter——而 charter/决策账本正是
+  // 结构化授权的唯一容器，写不进去就只剩消息正文里的散文断言（#834 第 1 项的直接成因）。
+  it("#834: the human channel owner can write the charter even on a channel-scoped token", async () => {
+    const ownerAccount = `${uniq("owner")}@example.com`;
+    const owner = await seedToken("human", uniq("owner"), { owner: ownerAccount });
+    const slug = await createChannel(owner.token);
+    const ownerScoped = await seedToken("human", uniq("owner-scoped"), { owner: ownerAccount, channelScope: slug });
+
+    const write = await api(`/api/channels/${slug}/charter`, ownerScoped.token, {
+      method: "PUT",
+      body: JSON.stringify({ charter: "# red lines\nno irreversible spend without a ledger credential" }),
+    });
+    expect(write.status).toBe(200);
+    expect(await json(write)).toMatchObject({ charter_rev: 1, updated_by: ownerScoped.name });
+
+    // 同一把钥匙也必须能往决策账本里写授权凭据，否则死锁只挪了个位置。
+    const grant = await api(`/api/channels/${slug}/decisions`, ownerScoped.token, {
+      method: "POST",
+      body: JSON.stringify({ topic: "authz:spend diamonds", summary: "up to 500, this task only" }),
+    });
+    expect(grant.status).toBe(201);
+    expect(await json(grant)).toMatchObject({ topic: "authz:spend diamonds", status: "active" });
+    // 线上返回的字段名就是 `party authz check` 判定所依赖的那几个（topic/status/summary/id/
+    // created_by）。这里逐个钉住，避免 CLI 侧只对着自己造的 mock 变绿、真机字段一改就静默失效。
+    expect(await json(await api(`/api/channels/${slug}/charter`, ownerScoped.token))).toMatchObject({
+      active_decisions: [
+        expect.objectContaining({
+          topic: "authz:spend diamonds",
+          status: "active",
+          summary: "up to 500, this task only",
+          id: expect.stringMatching(/^decision_[a-f0-9]{32}$/u),
+          created_by: ownerScoped.name,
+          created_by_kind: "human",
+        }),
+      ],
+    });
+  });
+
+  it("#834: the owner-scoped exemption does not leak to other principals", async () => {
+    const ownerAccount = `${uniq("owner")}@example.com`;
+    const otherAccount = `${uniq("other")}@example.com`;
+    const owner = await seedToken("human", uniq("owner"), { owner: ownerAccount });
+    const slug = await createChannel(owner.token);
+    const otherSlug = await createChannel(owner.token);
+
+    // ① 房主账号铸出来、但交给外部执行体用的 channel-scoped **agent** token：仍然不是房主。
+    //    这是最危险的一条——放开它等于把房主权限白送给任何被邀请的 agent。
+    const scopedAgent = await seedToken("agent", uniq("ext-agent"), { owner: ownerAccount, channelScope: slug });
+    expect((await api(`/api/channels/${slug}/charter`, scopedAgent.token, {
+      method: "PUT",
+      body: JSON.stringify({ charter: "agent edit" }),
+    })).status).toBe(403);
+    expect((await api(`/api/channels/${slug}/decisions`, scopedAgent.token, {
+      method: "POST",
+      body: JSON.stringify({ topic: "authz:spend diamonds", summary: "self-granted" }),
+    })).status).toBe(403);
+
+    // ② 别的账号的人类，哪怕 scope 命中本频道：不是房主。
+    const stranger = await seedToken("human", uniq("stranger"), { owner: otherAccount, channelScope: slug });
+    expect((await api(`/api/channels/${slug}/charter`, stranger.token, {
+      method: "PUT",
+      body: JSON.stringify({ charter: "stranger edit" }),
+    })).status).toBe(403);
+
+    // ③ 房主本人，但 scope 锁在**另一个**频道：scope 是硬上限，跨频道一律不放行。
+    const wrongScope = await seedToken("human", uniq("owner-elsewhere"), {
+      owner: ownerAccount,
+      channelScope: otherSlug,
+    });
+    expect((await api(`/api/channels/${slug}/charter`, wrongScope.token, {
+      method: "PUT",
+      body: JSON.stringify({ charter: "cross-channel edit" }),
+    })).status).toBe(403);
+
+    // ④ readonly 恒不可写，即使账号是房主。
+    const readonlyOwner = await seedToken("readonly", uniq("ro-owner"), { owner: ownerAccount, channelScope: slug });
+    expect((await api(`/api/channels/${slug}/charter`, readonlyOwner.token, {
+      method: "PUT",
+      body: JSON.stringify({ charter: "readonly owner edit" }),
+    })).status).toBe(403);
+  });
+
   it("configures charter write permissions separately for humans and agents", async () => {
     const owner = await seedToken("agent", uniq("owner"), { owner: `${uniq("owner")}@example.com` });
     const slug = await createChannel(owner.token);

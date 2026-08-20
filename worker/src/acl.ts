@@ -5,6 +5,9 @@ import type { TokenIdentity } from "./auth";
 // canAccessChannel / isChannelModerator 只依赖身份的这几个字段
 export type AclIdentity = Pick<TokenIdentity, "hash" | "name" | "role" | "email" | "account" | "channel_scope">;
 
+// isHumanChannelOwner 还要看 kind——「人类本人」与「人类账号铸出来的 agent token」在这条规则上不等价。
+export type OwnerAclIdentity = AclIdentity & Pick<TokenIdentity, "kind">;
+
 export interface ChannelAcl {
   slug: string;
   visibility: string;
@@ -63,4 +66,19 @@ export function isChannelModerator(identity: AclIdentity, channel: ChannelAcl): 
   if (identity.channel_scope != null) return false;
   if (legacyAdminAppliesTo(identity, channel)) return true;
   return identity.account != null && identity.account === channel.owner_account;
+}
+
+// #834 第 2 项（charter 权限死锁）：isChannelModerator 对 channel_scope 非空的身份**先于**房主判定
+// 直接返回 false，于是「持频道内 token 的人类房主」在自己频道里也写不了 charter / 记不了决策——
+// 而 charter 与决策账本恰恰是结构化授权的唯一容器（见 #834 第 1 项），写不进去就只能靠散文断言。
+//
+// 这条规则只放行**人类本人**、且**只在其 scope 命中的那个频道**、且**账号维度确实是房主**：
+//   - 限 kind==="human"：channel-scoped **agent** token 常被铸出来交给外部 agent 使用（其 tokens.owner
+//     仍是铸造者=房主账号），放开会把房主权限白送给外部执行体。人类 token 是本人登录态，不这么流转。
+//   - 限 scope === slug：scope 是硬上限，跨频道一律不放行，与 canAccessChannel ② 同构。
+// 有意不改 isChannelModerator 本身——踢人/归档/webhook/reset-guard 的口径保持不变。
+export function isHumanChannelOwner(identity: OwnerAclIdentity, channel: ChannelAcl): boolean {
+  const scopeCovers = identity.channel_scope == null || identity.channel_scope === channel.slug;
+  const ownsChannel = identity.account != null && identity.account === channel.owner_account;
+  return identity.kind === "human" && identity.role !== "readonly" && scopeCovers && ownsChannel;
 }
