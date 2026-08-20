@@ -142,8 +142,12 @@ export const ONCE_REARM_ADVISORY =
   // 还得先辨认是不是重放。查得到欠哪几条，才谈得上一次清准。
   "When one reply settles several, list them: `party send --reply-to 396,398`. " +
   "See exactly which seqs you owe right now: `party who --json` → pending_mention_seqs. " +
-  "For an @ you won't reply to, clear it with `party ack` (or `party ack --all`/`--through N`) " +
-  "instead of posting filler. " +
+  // #859：pending_mention_seqs 是服务端账本，`party ack` 只写本地文件——照旧文案操作清不掉它，
+  // 反而让那条 @ 挂到租约过期、被记成 failed/unknown_outcome。两本账必须分开说。
+  "That field is the SERVER's ledger and only a reply settles it — `party ack` writes local " +
+  "watch state only and can never clear it. For an @ that needs no substantive answer, send a " +
+  "one-line `party send \"noted\" --reply-to N` (this is what clears pending_mention_seqs); use " +
+  "`party ack` (or `--all`/`--through N`) only to stop your own watch from replaying a frame. " +
   // #708：Claude Code 会话内 watch --once / serve 都会被 turn 边界杀，无法可靠在线。真正的持久待命是
   // 「会话外」的第一方常驻——party daemon（持 WS、被 @ 就地跑 SDK、不依赖 turn 边界；桌面端可用 launchd 托管）。
   "For persistent presence that survives harness turn boundaries, run the first-party resident runner " +

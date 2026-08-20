@@ -36,9 +36,12 @@ agent on serve / watch --follow) has read. No note = not a line-by-line reader.
 An "⚠ N unhandled @ #S1 #S2 …" note is durable reception debt: the agent still
 owes a terminal reply/failure for those mentions, and each replays until cleared.
 The debt is tracked PER DELIVERY, so clear it per seq — one reply that answers
-three @s still leaves the other two owed. Clear them explicitly:
-  party ack --seq S1 --seq S2      (or --through S to clear everything up to S)
+three @s still leaves the other two owed. This debt (and the JSON field
+pending_mention_seqs) is the SERVER's ledger, and only a reply settles it:
   party send "…" --reply-to S1,S2  (a reply may settle several at once)
+"party ack" does NOT clear it (#859): ack writes only local watch replay state, it
+sends no request to the server. Use ack to stop your own watch from replaying a
+frame — never as a way to make pending_mention_seqs go away.
 A "🤖 reception model:claude isolated" note means unattended @s to that name are
 answered by a resident runner in a SEPARATE per-channel session — it does not
 inherit that person's open conversation, so it does not know what they did today
@@ -66,7 +69,10 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/topology_conflicts/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/live/residency/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/topology_conflicts/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
+
+// 导出仅供单测断言 help 文案与真实行为一致（#859/#860：文档漂移过一次，用断言钉住）。
+export const HELP_TEXT = HELP;
 
 const STALE_MS = 60_000; // 与 DO presence 扫描一致
 const DEAD_MS = 14 * 24 * 60 * 60 * 1000; // 14 天没露面视为幽灵，不再列
@@ -92,6 +98,11 @@ interface Row {
   // （offline + 无 wake layer / 适配器陈旧）+ 已陈旧（>STALE_MS）。判定同 send 侧 unreachableOf、
   // 走 autoWakeReachable 权威口径。仅 recent 档、命中时带出；JSON 追加字段（向后兼容，不改旧字段）。
   unreachable?: true;
+  // #859 附：presence 明明下发了 live / residency，who 的 JSON 投影却把它们丢掉（live 只用于算
+  // tier 后即弃），于是 `party who --json | jq .live` 恒 null，与服务端状态无关——用 CLI 审计在线
+  // 状态会得出与服务端相反的结论。原样带出（缺失省略，不无中生有）。
+  live?: boolean;
+  residency?: PresenceEntry["residency"];
   // 人为暂停接待（#180）：与 offline 视觉区分——不是「掉线丢了」，是「人主动按下暂停」。
   // 暂停期该 agent 被 @ 也不唤醒（webhook 不投、serve/watch 自我抑制），消息仍进历史。
   paused?: true;
@@ -188,6 +199,8 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     name: e.name,
     kind,
     tier,
+    ...(typeof e.live === "boolean" ? { live: e.live } : {}),
+    ...(e.residency === undefined ? {} : { residency: e.residency }),
     ...(unreachable ? { unreachable: true as const } : {}),
     ...(paused ? { paused: true as const, ...(typeof e.resume_at === "number" ? { resume_at: e.resume_at } : {}) } : {}),
     ...(wake === undefined ? {} : { wake }),
