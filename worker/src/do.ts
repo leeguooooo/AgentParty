@@ -163,6 +163,11 @@ interface ConnState {
   directedDeliveryV1?: boolean;
   /** Socket negotiated token-fenced delivery recovery. */
   deliveryRecoveryV1?: boolean;
+  /**
+   * #872：本 socket 曾在 hello 里声明过 wake_kind（watch/daemon），即它自称有唤醒层。
+   * announce-only 判据的否定项之一——announce 腿从不声明 wake_kind。sticky：一旦声明过就永久为真。
+   */
+  wakeKindAdvertised?: boolean;
   /** New sockets do not receive live message frames until hello establishes replay/capabilities. */
   helloPending?: boolean;
   /** Highest message cursor declared by hello on this socket; legacy once may only reserve newer raw work. */
@@ -2753,11 +2758,14 @@ export class ChannelDO extends Server<Env> {
       // #675/#688：带内唤醒声明。取代原先挂载往时间线发 waiting 状态消息（刷屏 + 推高 seq）。
       // 只 agent 连接可声明可唤醒；wake_kind 断连由 markOffline 撤销。'watch'（residency=supervised）与
       // 'daemon'（residency=daemon，内嵌 SDK 的第一方常驻）合法，其余忽略。
+      let nextWakeKindAdvertised = st.wakeKindAdvertised === true;
       if (st.kind === "agent") {
         if (frame.wake_kind === "watch") {
           this.advertiseWatchWakePresence(st.name, connection.id, Date.now());
+          nextWakeKindAdvertised = true;
         } else if (frame.wake_kind === "daemon") {
           this.advertiseDaemonWakePresence(st.name, connection.id, Date.now());
+          nextWakeKindAdvertised = true;
         }
       }
       // Finish capability identity before replay. Live broadcasts were withheld while helloPending;
@@ -2766,6 +2774,7 @@ export class ChannelDO extends Server<Env> {
         ...st,
         directedDeliveryV1: nextDirectedDeliveryV1,
         deliveryRecoveryV1: nextDeliveryRecoveryV1,
+        wakeKindAdvertised: nextWakeKindAdvertised,
         ...(clientVersion === null ? {} : { clientVersion }),
         // Topology is a live snapshot, not a sticky capability. A later hello
         // that omits or corrupts it must clear the previous assertion.
@@ -9355,6 +9364,15 @@ export class ChannelDO extends Server<Env> {
         )
         .toArray()[0];
       if (row !== undefined) {
+        // #872：announce-only 连接不是投递消费方——不要求它升级 directed_delivery，也不把欠账
+        // 帧塞给它。live 广播照发（唤醒正是它的唯一职责），补拉出来的历史欠账一律抑制。
+        // 本分支纯读，绝不触碰 directed_deliveries 账本：欠账既不标记已投递也不清除，
+        // 仍等真正的消费方（serve/watch/webhook）来领。
+        if (this.isAnnounceOnlyConnection(st)) {
+          if (replay) return true;
+          this.sendFrame(connection, frame);
+          return true;
+        }
         const isExactLiveLegacyServeHandoff =
           !replay &&
           frame.type === "msg" &&
@@ -9375,6 +9393,23 @@ export class ChannelDO extends Server<Env> {
     }
     this.sendFrame(connection, frame);
     return true;
+  }
+
+  /**
+   * #872：announce-only 连接＝只声明 runtime_topology 的宣告腿（#841 P2 不变式：不 claim delivery、
+   * 不推进游标、不认领欠账）。判据保守且全为否定项，逐条读活状态而非握手瞬间的快照，
+   * 所以同一 socket 后来升级成消费方（第二次 hello 带 directed_delivery / serve_lease claim /
+   * delivery_adapter watch register）立刻失去豁免。
+   */
+  private isAnnounceOnlyConnection(st: ConnState | null | undefined): boolean {
+    return st?.kind === "agent" &&
+      st.helloPending !== true &&
+      st.runtimeTopology !== undefined &&
+      st.directedDeliveryV1 !== true &&
+      st.deliveryRecoveryV1 !== true &&
+      st.wakeKindAdvertised !== true &&
+      st.serveCandidate !== true &&
+      st.watchCandidate !== true;
   }
 
   private closeUpgradeRequired(connection: Connection<ConnState>, detail: string) {
