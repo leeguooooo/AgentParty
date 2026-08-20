@@ -62,10 +62,13 @@ describe("#859 两本账不能混为一谈", () => {
     cap.restore();
     const help = cap.lines.join("\n");
     expect(help).toContain("pending_mention_seqs");
-    expect(help).toMatch(/LOCAL ONLY/);
+    // #875 起两本账仍然是两本，但服务端那本多了一个合法出口（--no-reply）。文案必须两者都说清，
+    // 且默认路径（不带 --no-reply）依旧明说自己碰不到服务端账本。
+    expect(help).toMatch(/TWO LEDGERS/);
     expect(help).toContain("--reply-to");
-    // 不能出现「用 ack 清 pending_mention_seqs」这类同句并列。
-    expect(help).toMatch(/does NOT clear|can never change it/);
+    expect(help).toMatch(/can never change the server ledger/);
+    expect(help).toContain("--no-reply");
+    expect(help).toContain("acknowledged_no_reply");
   });
 
   test("watch --once 的重挂提示不再把 ack 说成清 pending_mention_seqs 的手段", () => {

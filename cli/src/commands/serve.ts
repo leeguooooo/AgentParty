@@ -1360,6 +1360,18 @@ function buildWakeContext(
           cause: delivery.cause,
           attempt: delivery.attempt,
         },
+    // #881：这条触发消息已被后续消息取代。**必须降级处理**——可以当背景读，但不得当作最新
+    // 指令执行；照旧执行就是「拿旧前提行动」，和被假授权骗是同一类失效。判定依据是 seq（频道全局
+    // 单调），不是 ts。superseded/replay 正交，可同时为真。
+    superseded: frame.superseded ?? null,
+    ...(frame.superseded === undefined
+      ? {}
+      : {
+          superseded_notice:
+            `这条消息（seq ${frame.seq}）已被 seq ${frame.superseded.by_seq} 取代` +
+            `（reason=${frame.superseded.reason}）。不要把它当成最新指令执行；` +
+            `先读 seq ${frame.superseded.by_seq}（party history --channel ${channel}），按那条为准。`,
+        }),
     decision_request: frame.decision_request ?? null,
     decision_response: frame.decision_response ?? null,
     charter: boundedCharter,

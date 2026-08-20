@@ -225,6 +225,16 @@ function isReadCursor(value: unknown): boolean {
     isFiniteNumber(value.updated_at);
 }
 
+// #881 superseded 标记。必须逐字镜像 shared/src/protocol.ts 的 SupersededMark，否则服务端
+// 一上线这个字段，CLI 就把带标记的整帧判为非法而静默丢掉（#622 的教训）。
+const SUPERSEDED_REASONS = new Set(["revision", "reply_correction"]);
+
+function isSupersededMark(value: unknown): boolean {
+  return isRecord(value) &&
+    isPositiveInteger(value.by_seq) &&
+    SUPERSEDED_REASONS.has(String(value.reason));
+}
+
 function isMessageFrame(value: unknown): boolean {
   return isRecord(value) &&
     (value.type === "msg" || value.type === "status") &&
@@ -249,7 +259,9 @@ function isMessageFrame(value: unknown): boolean {
     (value.rev_seq === undefined || isPositiveInteger(value.rev_seq)) &&
     // #861 hello 补拉标记。必须逐字镜像 shared/src/protocol.ts 的 MsgFrame.replay，
     // 否则服务端一上线这个字段，CLI 就会把所有补拉帧判为非法而静默丢帧（#622 的教训）。
-    (value.replay === undefined || value.replay === true);
+    (value.replay === undefined || value.replay === true) &&
+    // #881「这条内容已过期」。与 replay 正交，可同时为真：replay=补拉的历史帧，superseded=内容已被取代。
+    (value.superseded === undefined || isSupersededMark(value.superseded));
 }
 
 function isDirectedDelivery(value: unknown): boolean {
@@ -281,7 +293,12 @@ function isPublicDirectedDelivery(value: unknown): boolean {
     isFiniteNumber(value.created_at) &&
     isFiniteNumber(value.updated_at) &&
     // #667: optional coarse "undelivered" flag on a terminal `failed`; older servers omit it.
-    (value.undelivered === undefined || typeof value.undelivered === "boolean");
+    (value.undelivered === undefined || typeof value.undelivered === "boolean") &&
+    // #875: 「已读不回」终态的审计元数据；旧 worker 省略。
+    (value.acknowledged_no_reply === undefined ||
+      (isRecord(value.acknowledged_no_reply) &&
+        typeof value.acknowledged_no_reply.by === "string" &&
+        isFiniteNumber(value.acknowledged_no_reply.at)));
 }
 
 function asServerFrame(value: Record<string, unknown>): ServerFrame {

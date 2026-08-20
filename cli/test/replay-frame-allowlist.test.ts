@@ -73,6 +73,7 @@ describe("#622 allow-list 逐字镜像守卫", () => {
     const fields = [...block.matchAll(/^\s{2}(\w+)\??:/gm)].map((m) => m[1]!);
     expect(fields).toContain("replay");
     expect(fields).toContain("rev_seq");
+    expect(fields).toContain("superseded");
 
     const validatorStart = clientSrc.indexOf("function isMessageFrame(");
     expect(validatorStart).toBeGreaterThan(-1);
@@ -85,7 +86,12 @@ describe("#622 allow-list 逐字镜像守卫", () => {
       "decision_request", "decision_resolution", "decision_response", "attachments",
       "response_source", "receipts", "revision",
     ]);
-    const missing = fields.filter((f) => !structured.has(f) && !validator.includes(`value.${f}`));
+    // 必须按标识符边界匹配，不能用 includes：`value.superseded_by` 的存在会让 `superseded`
+    // 这个字段名「看起来已镜像」，守卫就对整类前缀重叠的新字段失效（实测：删掉 superseded 的
+    // 校验后本守卫仍然全绿）。前缀重叠在这份协议里不是个例——supersedes/superseded/superseded_by、
+    // edited/edited_at/edited_by、retracted/retracted_at 都是。
+    const mirrored = (field: string) => new RegExp(`value\\.${field}(?![A-Za-z0-9_])`).test(validator);
+    const missing = fields.filter((f) => !structured.has(f) && !mirrored(f));
     expect(missing).toEqual([]);
   });
 });
