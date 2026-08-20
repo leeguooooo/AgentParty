@@ -50,6 +50,14 @@ import {
   type ClaudePluginShellInspection,
 } from "./doctor";
 import { runCodexSessionBridge, type CodexBridgeRuntimeOptions } from "./codex-bridge";
+import {
+  codexSessionsRoot,
+  formatCodexSessionLine,
+  isCodexThreadId,
+  latestCodexSession,
+  listCodexSessions,
+  type CodexSessionSummary,
+} from "../codex-sessions";
 
 const CLAUDE_CHANNEL_MIN_VERSION = [2, 1, 80] as const;
 const CLAUDE_CROSS_SESSION_MIN_VERSION = [2, 1, 224] as const;
@@ -153,7 +161,8 @@ const HELP = `usage: party bridge <claude|codex> [channel] [options] [-- <harnes
 forms:
   party bridge claude [channel|--channel C] [--cross-session auto|off|required] [--cross-session-inbound accept|hold|refuse] [--check [--json]] [-- <claude args...>]
   party bridge claude --verify --channel C --receiver-config PATH --sender-config PATH [--receiver-cwd DIR] [--sender-cwd DIR] [--preflight-only] [--keep-artifacts]
-  party bridge codex  [channel|--channel C] [--codex-bin PATH] [-- <codex args...>]
+  party bridge codex  [channel|--channel C] [--codex-bin PATH] [--resume THREAD_ID|--resume-last] [-- <codex args...>]
+  party bridge codex  --list-sessions
 
 Attach AgentParty to the same interactive harness session:
   claude  native Claude Channel input and linked reply tool
@@ -179,6 +188,17 @@ examples:
   party bridge codex dev
   party bridge codex --channel dev -- --model gpt-5.4
   party bridge codex dev --codex-bin /opt/homebrew/bin/codex
+  party bridge codex --list-sessions
+  party bridge codex dev --resume-last
+  party bridge codex dev --resume 01a01e72-8187-7d63-8e4d-9a1a9daa5451
+
+Without --resume/--resume-last the bridge opens a NEW Codex thread, so a session
+you are already watching will not receive the wake. --resume-last re-enters the
+most recent rollout under $CODEX_HOME/sessions (default ~/.codex/sessions);
+--list-sessions prints thread ids with their start time, cwd, branch, and first
+user turn. Codex allows one writer per thread, so a session still open in the
+Codex desktop app cannot be resumed until it is closed there; the resumed turn
+then runs in this terminal's Codex TUI.
 
 Tokens after -- are passed to the selected interactive CLI. The bridge never
 uses PTY input injection and never starts a second writer against a live turn.
@@ -1706,6 +1726,65 @@ async function defaultLaunch(
   return await proc.exited;
 }
 
+/**
+ * Measured on Codex CLI 0.148.0-alpha.15 against the Codex desktop app: while
+ * the GUI has a thread open it holds that thread's only writer, and
+ * `thread/resume` on it fails with `already has an active writer`. The same
+ * thread resumes normally once the owning process releases it, and the resumed
+ * turn then runs in the bridge's own Codex TUI.
+ */
+export const CODEX_RESUME_VISIBILITY_NOTICE =
+  "Codex allows one writer per thread: a session still open in the Codex desktop app " +
+  "cannot be resumed — close it there first. The resumed turn runs in this terminal's Codex TUI.";
+
+export function printCodexSessions(
+  env: NodeJS.ProcessEnv,
+  list: typeof listCodexSessions = listCodexSessions,
+): number {
+  const root = codexSessionsRoot(env);
+  const sessions = list(root, { limit: 20 });
+  if (sessions.length === 0) {
+    console.error(`no Codex sessions found under ${root}`);
+    return 1;
+  }
+  console.log(`Codex sessions under ${root} (newest first):`);
+  for (const session of sessions) console.log(formatCodexSessionLine(session));
+  console.log("");
+  console.log("Resume one with: party bridge codex <channel> --resume <thread-id>");
+  console.log(CODEX_RESUME_VISIBILITY_NOTICE);
+  return 0;
+}
+
+export type CodexResumeSelection =
+  | { ok: true; threadId: string | null; session?: CodexSessionSummary }
+  | { ok: false; error: string };
+
+/** Turn `--resume`/`--resume-last` into one concrete Codex thread id. */
+export function selectCodexResumeThread(
+  options: { resume?: string; resumeLast?: boolean; env: NodeJS.ProcessEnv },
+  latest: typeof latestCodexSession = latestCodexSession,
+): CodexResumeSelection {
+  if (options.resume !== undefined) {
+    if (!isCodexThreadId(options.resume)) {
+      return {
+        ok: false,
+        error:
+          `--resume expects a Codex thread id (the UUID in rollout-<ts>-<uuid>.jsonl), got ${
+            sanitizeSingleLine(options.resume).slice(0, 80)
+          }. List them with: party bridge codex --list-sessions`,
+      };
+    }
+    return { ok: true, threadId: options.resume.toLowerCase() };
+  }
+  if (options.resumeLast !== true) return { ok: true, threadId: null };
+  const root = codexSessionsRoot(options.env);
+  const session = latest(root, {});
+  if (session === null) {
+    return { ok: false, error: `--resume-last found no Codex sessions under ${root}` };
+  }
+  return { ok: true, threadId: session.threadId, session };
+}
+
 export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
@@ -1717,16 +1796,19 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
   const delimiter = argv.indexOf("--");
   const bridgeArgs = delimiter < 0 ? argv : argv.slice(0, delimiter);
   const harnessArgs = delimiter < 0 ? [] : argv.slice(delimiter + 1);
-  const { positionals, flags } = parseArgs(bridgeArgs, { booleans: ["check", "json"] });
+  const { positionals, flags } = parseArgs(bridgeArgs, {
+    booleans: ["check", "json", "resume-last", "list-sessions"],
+  });
   const unknown = unknownFlagError(flags, [
     "channel", "codex-bin", "cross-session", "cross-session-inbound", "check", "json",
+    "resume", "resume-last", "list-sessions",
   ]);
   if (unknown !== null) {
     console.error(`${unknown}; put harness flags after --`);
     return 1;
   }
   const flagError = valueFlagError(flags, [
-    "channel", "codex-bin", "cross-session", "cross-session-inbound",
+    "channel", "codex-bin", "cross-session", "cross-session-inbound", "resume",
   ]);
   if (flagError !== null) {
     console.error(flagError);
@@ -1744,6 +1826,30 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
   if (harness === "claude" && flags["codex-bin"] !== undefined) {
     console.error("--codex-bin is only valid with party bridge codex");
     return 1;
+  }
+  for (const codexOnly of ["resume", "resume-last", "list-sessions"] as const) {
+    if (harness === "claude" && flags[codexOnly] !== undefined) {
+      console.error(`--${codexOnly} is only valid with party bridge codex`);
+      return 1;
+    }
+  }
+  if (flags.resume !== undefined && flags["resume-last"] === true) {
+    console.error("--resume and --resume-last select different threads; pass only one");
+    return 1;
+  }
+  if (
+    flags["list-sessions"] === true &&
+    (flags.resume !== undefined || flags["resume-last"] === true)
+  ) {
+    console.error("--list-sessions only prints sessions; it cannot be combined with --resume/--resume-last");
+    return 1;
+  }
+  if (flags["list-sessions"] === true && harnessArgs.length > 0) {
+    console.error("--list-sessions does not launch Codex, so it does not accept Codex arguments after --");
+    return 1;
+  }
+  if (harness === "codex" && flags["list-sessions"] === true) {
+    return printCodexSessions(deps.env ?? process.env);
   }
   if (harness === "codex" && flags["cross-session"] !== undefined) {
     console.error("--cross-session is only valid with party bridge claude");
@@ -1808,6 +1914,15 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
       );
       return 1;
     }
+    const resumeSelection = selectCodexResumeThread({
+      ...(str(flags.resume) === undefined ? {} : { resume: str(flags.resume)! }),
+      resumeLast: flags["resume-last"] === true,
+      env: deps.env ?? process.env,
+    });
+    if (!resumeSelection.ok) {
+      console.error(`party bridge codex ${resumeSelection.error}`);
+      return 1;
+    }
     const cwd = deps.cwd ?? process.cwd();
     const launch = resolveCodexLaunch(
       str(flags["codex-bin"]) ?? deps.codexBinary,
@@ -1840,11 +1955,22 @@ export async function run(argv: string[], deps: BridgeDeps = {}): Promise<number
       );
       return 1;
     }
+    if (resumeSelection.threadId !== null) {
+      const chosen = resumeSelection.session;
+      console.error(
+        `party bridge codex: resuming Codex thread ${resumeSelection.threadId}` +
+          (chosen === undefined
+            ? ""
+            : ` (started ${chosen.startedAtLabel}, cwd ${chosen.cwd ?? "unknown"})`) +
+          `. ${CODEX_RESUME_VISIBILITY_NOTICE}`,
+      );
+    }
     return await (deps.runCodexBridge ?? ((options) => runCodexSessionBridge(options)))({
       channel,
       codexBinary: launch.codexBinary,
       codexArgsPrefix: launch.codexArgsPrefix,
       codexArgs: harnessArgs,
+      initialThreadId: resumeSelection.threadId,
       cwd: launch.cwd,
       env: launch.env,
     });
