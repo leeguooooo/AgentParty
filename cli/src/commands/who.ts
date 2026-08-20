@@ -26,6 +26,12 @@ List who is in a channel, tiered by how you can reach them:
               A "⚠ unreachable" tag flags the genuinely-dead subset: no live wake
               channel AND stale — the mention only lands in history and will wake
               no one (JSON: "unreachable":true). Prove otherwise: party wake test @name
+              Such a row also carries a "↳ fix:" hint telling you how to give that
+              identity a wake layer, branched by harness (JSON: "wake_guidance" with
+              reason/harness/harness_source/remedy). A codex session has NO per-session
+              inbox: it is wakeable only while party bridge codex / party serve
+              --runner codex holds its app-server connection — installing a plugin does
+              not make a codex session wakeable on its own.
 A "⏳ busy" tag means the target is serially handling a wake (e.g. a long run): it
 is reachable but a reply will be slow — an ask that times out means "busy", not
 "offline", so do not re-@ it. "N queued" shows how many wakes are already waiting.
@@ -69,7 +75,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/live/residency/unreachable/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/topology_conflicts/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/live/residency/unreachable/wake_guidance/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/topology_conflicts/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
 
 // 导出仅供单测断言 help 文案与真实行为一致（#859/#860：文档漂移过一次，用断言钉住）。
 export const HELP_TEXT = HELP;
@@ -158,6 +164,63 @@ interface Row {
   scope?: string[];
   // 同一个 scope 被别人也占着。不阻止（agent 之间本来就靠自觉），只让它看得见。
   scope_conflicts?: { scope: string; with: string[] }[];
+  // #879：unreachable 只说了「叫不醒」，没说「怎么修」，而修法按 harness 分叉——codex 会话没有
+  // Claude 那样的 per-session socket 收件箱，只有在某个进程持有它的 app-server 连接时才可被唤醒；
+  // Claude Code 的交互式会话装了插件本身就可被唤醒。把这条判据结构化下发，agent 也能程序化判读。
+  wake_guidance?: WakeGuidance;
+}
+
+/** #879：没有唤醒层时的可操作补救建议。harness=unknown 表示 presence 没给出可信的 harness 维度。 */
+export interface WakeGuidance {
+  reason: "no_wake_layer";
+  harness: "codex" | "claude" | "unknown";
+  /** 判据来源：agent_session.harness（runner 自报的模型会话句柄）或 reception_runner（接待配置）。 */
+  harness_source?: "agent_session" | "reception_runner";
+  /** 可直接执行的补救命令（已带上真实频道名）。 */
+  remedy: string[];
+}
+
+// harness 维度只取 presence 里真实存在的两个字段，不硬造。codex-sdk 与 codex 同族（都靠 app-server）。
+export function wakeHarnessOf(r: Row): { harness: WakeGuidance["harness"]; source?: WakeGuidance["harness_source"] } {
+  const fromSession = r.agent_session?.harness;
+  if (fromSession === "codex" || fromSession === "codex-sdk") return { harness: "codex", source: "agent_session" };
+  if (fromSession === "claude") return { harness: "claude", source: "agent_session" };
+  const fromReception = r.reception_runner;
+  if (fromReception === "codex" || fromReception === "codex-sdk") {
+    return { harness: "codex", source: "reception_runner" };
+  }
+  if (fromReception === "claude") return { harness: "claude", source: "reception_runner" };
+  return { harness: "unknown" };
+}
+
+/**
+ * #879：只对「确实没有唤醒层」的 agent 身份给补救建议——即 who 已判定 unreachable 的那批
+ * （不在线 + 无活 wake 通道 + 陈旧）。在线/wakeable/刚断线的身份不加噪音；人类不靠 bridge/serve 唤醒。
+ */
+export function wakeGuidanceOf(r: Row, channel: string): WakeGuidance | undefined {
+  if (r.unreachable !== true || r.kind !== "agent") return undefined;
+  const { harness, source } = wakeHarnessOf(r);
+  const ch = sanitizeSingleLine(channel);
+  const remedy =
+    harness === "codex"
+      ? [`party bridge codex ${ch}`, `party serve ${ch} --runner codex`]
+      : harness === "claude"
+        ? [`claude plugin install agentparty@agentparty`, `party serve ${ch} --runner claude`]
+        : [`party serve ${ch} --runner codex`, `party serve ${ch} --runner claude`];
+  return { reason: "no_wake_layer", harness, ...(source === undefined ? {} : { harness_source: source }), remedy };
+}
+
+// 终端可读版：把结构化建议渲染成一句「怎么修」。codex 档绝不说「装插件即可」——那是 Claude 专属，
+// codex 装了插件依然叫不醒（#879 已实测：codex 无默认 per-session socket 收件箱）。
+export function wakeGuidanceNote(g: WakeGuidance | undefined): string {
+  if (g === undefined) return "";
+  if (g.harness === "codex") {
+    return ` · ↳ fix: a codex session has no per-session inbox — it is wakeable only while a process holds its app-server connection: run ${g.remedy[0]} (interactive) or ${g.remedy[1]} (unattended)`;
+  }
+  if (g.harness === "claude") {
+    return ` · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run ${g.remedy[0]} and rejoin the channel, or ${g.remedy[1]} (unattended)`;
+  }
+  return ` · ↳ fix: no wake layer and harness unknown — start an unattended resident: ${g.remedy[0]} or ${g.remedy[1]}`;
 }
 
 // kind 已知取 kind；旧 presence 行没回填时 UUID 名判 human（网页登录会话），其余判 agent。
@@ -513,6 +576,55 @@ function humanAge(ms: number): string {
   return `${Math.floor(h / 24)}d`;
 }
 
+/**
+ * presence → 最终行集合（含 scope/topology 标注、已读游标、#879 唤醒层建议），与排序。
+ * 抽成纯函数是为了让「装配」这一步本身可被测试——否则 note 级单测全绿、真机却什么都不显示。
+ */
+export function buildRows(
+  presence: PresenceEntry[],
+  ctx: { now: number; channel: string; cursorOf?: Map<string, number>; runtimePeers?: RuntimePeerDiscovery },
+): Row[] {
+  const { now, channel } = ctx;
+  return annotateTopologyConflicts(
+    annotateScopeConflicts(
+      presence
+        .map((e) => classify(e, now))
+        .filter((r): r is Row => r !== null)
+        .map((r) => ({ ...r, read_seq: ctx.cursorOf?.get(r.name) }))
+        // #879：unreachable 的身份补一条「怎么修」——按 harness 分叉，JSON 也带结构化判据。
+        .map((r) => {
+          const guidance = wakeGuidanceOf(r, channel);
+          return guidance === undefined ? r : { ...r, wake_guidance: guidance };
+        }),
+    ),
+    ctx.runtimePeers,
+  ).sort((a, b) => RANK[a.tier] - RANK[b.tier] || a.name.localeCompare(b.name));
+}
+
+/** 单行终端渲染。抽出来让「哪些标注真的出现在行里」可断言（#879 之前只有 note 函数被单测覆盖）。 */
+export function renderRow(r: Row, now: number, lastSeq: number): string {
+  const read = readNote(r.read_seq, lastSeq);
+  const duplicate = r.connection_count !== undefined ? ` x${r.connection_count} sessions` : "";
+  // 暂停接待（#180）：独立的 ⏸ 行，与 offline 视觉区分。带上定时/手动恢复提示，一眼看清何时回来。
+  if (r.paused === true) {
+    const resume =
+      typeof r.resume_at === "number"
+        ? ` · resumes in ${humanAge(Math.max(0, r.resume_at - now))}`
+        : " · resume manually";
+    return `⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${read}${duplicate}`;
+  }
+  // #191：可唤醒行明确标出「已验证 / 未验证」——verified＝服务端确认过（webhook，或观测到被 @ 后 resume），
+  // unverified＝仅自报、服务端没验证过，别当它一定叫得醒。
+  const wake =
+    r.tier === "wakeable"
+      ? ` · ${r.wake_unverified === true ? "unverified" : "verified"}${r.wake ? ` (${r.wake})` : ""}`
+      : "";
+  const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
+  // #664：recent 档里真·不可达的（无活 wake 通道 + 陈旧）单独标出，别和「最近露面、或许在轮询」混淆。
+  const unreach = r.unreachable === true ? " · ⚠ unreachable (mention lands in history only)" : "";
+  return `${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${wakeGuidanceNote(r.wake_guidance)}${read}${duplicate}${age}`;
+}
+
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
@@ -577,12 +689,7 @@ export async function run(argv: string[]): Promise<number> {
       ...(lastSeq > 0 ? { unread: unreadFromCursor(lastSeq, channel) } : {}),
     });
     const now = Date.now();
-    const rows = annotateTopologyConflicts(annotateScopeConflicts(
-      presence
-        .map((e) => classify(e, now))
-        .filter((r): r is Row => r !== null)
-        .map((r) => ({ ...r, read_seq: cursorOf.get(r.name) })),
-    ), runtimePeers).sort((a, b) => RANK[a.tier] - RANK[b.tier] || a.name.localeCompare(b.name));
+    const rows = buildRows(presence, { now, channel, cursorOf, runtimePeers });
     if (flags.json === true) {
       for (const r of rows) console.log(JSON.stringify(r));
       return 0;
@@ -591,29 +698,7 @@ export async function run(argv: string[]): Promise<number> {
       console.log(`no one to mention in ${channel} yet`);
       return 0;
     }
-    for (const r of rows) {
-      const read = readNote(r.read_seq, lastSeq);
-      const duplicate = r.connection_count !== undefined ? ` x${r.connection_count} sessions` : "";
-      // 暂停接待（#180）：独立的 ⏸ 行，与 offline 视觉区分。带上定时/手动恢复提示，一眼看清何时回来。
-      if (r.paused === true) {
-        const resume =
-          typeof r.resume_at === "number"
-            ? ` · resumes in ${humanAge(Math.max(0, r.resume_at - now))}`
-            : " · resume manually";
-        console.log(`⏸ ${"paused".padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${resume}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${read}${duplicate}`);
-        continue;
-      }
-      // #191：可唤醒行明确标出「已验证 / 未验证」——verified＝服务端确认过（webhook，或观测到被 @ 后 resume），
-      // unverified＝仅自报、服务端没验证过，别当它一定叫得醒。
-      const wake =
-        r.tier === "wakeable"
-          ? ` · ${r.wake_unverified === true ? "unverified" : "verified"}${r.wake ? ` (${r.wake})` : ""}`
-          : "";
-      const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
-      // #664：recent 档里真·不可达的（无活 wake 通道 + 陈旧）单独标出，别和「最近露面、或许在轮询」混淆。
-      const unreach = r.unreachable === true ? " · ⚠ unreachable (mention lands in history only)" : "";
-      console.log(`${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${read}${duplicate}${age}`);
-    }
+    for (const r of rows) console.log(renderRow(r, now, lastSeq));
     return 0;
   } catch (e) {
     return handleRestError(e);

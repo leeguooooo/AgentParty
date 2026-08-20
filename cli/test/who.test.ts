@@ -4,13 +4,18 @@ import {
   activityNote,
   busyNote,
   classify,
+  HELP_TEXT,
   identityNote,
   livenessNote,
   sessionNote,
   taskNote,
   terminalIdentityText,
   unhandledMentionNote,
+  buildRows,
+  renderRow,
   waitingOwnerNote,
+  wakeGuidanceNote,
+  wakeGuidanceOf,
 } from "../src/commands/who";
 
 const NOW = 1_000_000_000;
@@ -464,5 +469,166 @@ describe("who liveness tiers (#603)", () => {
     expect(livenessNote(single)).toBe("");
     const healthy = classify(p({ name: "bot", live: true }), NOW)!;
     expect(livenessNote(healthy)).toBe("");
+  });
+});
+
+
+// #879：unreachable 只说了「叫不醒」，没说「怎么修」。修法按 harness 分叉——codex 会话没有默认的
+// per-session socket 收件箱（实测：app-server 的 unix:// 是 socket activation，不自建监听），
+// 所以只有 bridge / serve 持有它的 app-server 连接时才可达；Claude Code 交互式会话装了插件即可达。
+describe("who wake guidance（#879 方向 2：没有唤醒层时给可操作提示）", () => {
+  const STALE = { state: "offline" as const, wake: { kind: "none" as const }, last_seen: NOW - 88 * 60 * 60 * 1000 };
+  function row(over: Partial<PresenceEntry> & { name: string }) {
+    const r = classify(p({ ...STALE, ...over }), NOW);
+    expect(r).not.toBeNull();
+    return r as NonNullable<ReturnType<typeof classify>>;
+  }
+
+  test("codex 身份（agent_session.harness）→ 结构化建议指向 bridge/serve", () => {
+    const g = wakeGuidanceOf(
+      row({ name: "lark-agentparty-codex", agent_session: { harness: "codex", session_id: "s1", updated_at: NOW } }),
+      "pwtk",
+    );
+    expect(g).toEqual({
+      reason: "no_wake_layer",
+      harness: "codex",
+      harness_source: "agent_session",
+      remedy: ["party bridge codex pwtk", "party serve pwtk --runner codex"],
+    });
+  });
+
+  test("codex-sdk 与 reception_runner 同样判为 codex 族", () => {
+    expect(
+      wakeGuidanceOf(row({ name: "a", agent_session: { harness: "codex-sdk", session_id: "s", updated_at: NOW } }), "c")
+        ?.harness,
+    ).toBe("codex");
+    const viaReception = wakeGuidanceOf(
+      row({ name: "b", status: { context: { reception_runner: "codex" } } as PresenceEntry["status"] }),
+      "c",
+    );
+    expect(viaReception?.harness).toBe("codex");
+    expect(viaReception?.harness_source).toBe("reception_runner");
+  });
+
+  test("claude 身份 → 建议装插件 / serve --runner claude，绝不出现 codex 专属命令", () => {
+    const g = wakeGuidanceOf(
+      row({ name: "kyc-claude", agent_session: { harness: "claude", session_id: "s1", updated_at: NOW } }),
+      "pwtk",
+    );
+    expect(g).toEqual({
+      reason: "no_wake_layer",
+      harness: "claude",
+      harness_source: "agent_session",
+      remedy: ["claude plugin install agentparty@agentparty", "party serve pwtk --runner claude"],
+    });
+  });
+
+  test("harness 未知 → 不硬造，给通用的无人值守建议", () => {
+    const g = wakeGuidanceOf(row({ name: "mystery" }), "pwtk");
+    expect(g?.harness).toBe("unknown");
+    expect(g?.harness_source).toBeUndefined();
+    expect(g?.remedy).toEqual(["party serve pwtk --runner codex", "party serve pwtk --runner claude"]);
+  });
+
+  test("有唤醒层的身份不给建议（online / wakeable / 刚断线都不加噪音）", () => {
+    const session = { harness: "codex" as const, session_id: "s1", updated_at: NOW };
+    expect(
+      wakeGuidanceOf(row({ name: "on", state: "waiting", last_seen: NOW, agent_session: session }), "c"),
+    ).toBeUndefined();
+    expect(
+      wakeGuidanceOf(row({ name: "srv", wake: { kind: "serve" }, last_seen: NOW, agent_session: session }), "c"),
+    ).toBeUndefined();
+    expect(
+      wakeGuidanceOf(row({ name: "fresh", last_seen: NOW - 30_000, agent_session: session }), "c"),
+    ).toBeUndefined();
+  });
+
+  test("人类不靠 bridge/serve 唤醒，不给建议", () => {
+    const human = classify(p({ ...STALE, name: "leo", kind: "human", paused: true }), NOW);
+    expect(human?.kind).toBe("human");
+    expect(wakeGuidanceOf(human as NonNullable<typeof human>, "c")).toBeUndefined();
+  });
+
+  test("codex 提示整段文案：含 bridge/serve，且不含「装插件即可」这类 Claude 专属说法", () => {
+    const note = wakeGuidanceNote({
+      reason: "no_wake_layer",
+      harness: "codex",
+      remedy: ["party bridge codex pwtk", "party serve pwtk --runner codex"],
+    });
+    expect(note).toBe(
+      " · ↳ fix: a codex session has no per-session inbox — it is wakeable only while a process holds its app-server connection: run party bridge codex pwtk (interactive) or party serve pwtk --runner codex (unattended)",
+    );
+    expect(note).not.toContain("plugin");
+  });
+
+  test("claude 提示整段文案：不含任何 codex 专属命令", () => {
+    const note = wakeGuidanceNote({
+      reason: "no_wake_layer",
+      harness: "claude",
+      remedy: ["claude plugin install agentparty@agentparty", "party serve pwtk --runner claude"],
+    });
+    expect(note).toBe(
+      " · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run claude plugin install agentparty@agentparty and rejoin the channel, or party serve pwtk --runner claude (unattended)",
+    );
+    expect(note).not.toContain("codex");
+  });
+
+  test("没有建议时不输出任何提示（不给全员加噪音）", () => {
+    expect(wakeGuidanceNote(undefined)).toBe("");
+  });
+
+  test("help 文案钉住 codex 无 per-session 收件箱这条硬事实与 JSON 字段名", () => {
+    expect(HELP_TEXT).toContain("wake_guidance");
+    expect(HELP_TEXT).toContain("A codex session has NO per-session");
+    expect(HELP_TEXT).toContain("party bridge codex");
+  });
+});
+
+// #879 装配层：note 函数单测全绿、真机什么都不显示，是本仓反复出现的失败模式。这里断言的是
+// presence → 行 → 终端字符串这条链本身：wake_guidance 真的挂到了行上，也真的渲染进了那一行。
+describe("who 唤醒建议的装配（#879：presence → 行 → 终端一行）", () => {
+  const CH = "pwtk";
+  const stale = (over: Partial<PresenceEntry> & { name: string }): PresenceEntry =>
+    p({ state: "offline", wake: { kind: "none" }, last_seen: NOW - 88 * 60 * 60 * 1000, ...over });
+
+  test("codex unreachable 行既带结构化 wake_guidance，也把 fix 提示渲染进终端那一行", () => {
+    const rows = buildRows(
+      [stale({ name: "lark-codex", agent_session: { harness: "codex", session_id: "s", updated_at: NOW } })],
+      { now: NOW, channel: CH },
+    );
+    expect(rows[0]?.wake_guidance).toEqual({
+      reason: "no_wake_layer",
+      harness: "codex",
+      harness_source: "agent_session",
+      remedy: ["party bridge codex pwtk", "party serve pwtk --runner codex"],
+    });
+    const line = renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0);
+    expect(line).toContain("⚠ unreachable (mention lands in history only)");
+    expect(line).toContain(
+      "↳ fix: a codex session has no per-session inbox — it is wakeable only while a process holds its app-server connection: run party bridge codex pwtk (interactive) or party serve pwtk --runner codex (unattended)",
+    );
+  });
+
+  test("claude unreachable 行渲染 Claude 专属修法，且整行不含 codex 命令", () => {
+    const rows = buildRows(
+      [stale({ name: "kyc-claude", agent_session: { harness: "claude", session_id: "s", updated_at: NOW } })],
+      { now: NOW, channel: CH },
+    );
+    const line = renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0);
+    expect(line).toContain(
+      "↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run claude plugin install agentparty@agentparty and rejoin the channel, or party serve pwtk --runner claude (unattended)",
+    );
+    expect(line).not.toContain("party bridge codex");
+    expect(line).not.toContain("--runner codex");
+  });
+
+  test("可唤醒的身份行里没有任何 fix 提示（不给全频道加噪音）", () => {
+    const rows = buildRows(
+      [p({ name: "srv", state: "offline", wake: { kind: "serve" }, agent_session: { harness: "codex", session_id: "s", updated_at: NOW } })],
+      { now: NOW, channel: CH },
+    );
+    expect(rows[0]?.tier).toBe("wakeable");
+    expect(rows[0]?.wake_guidance).toBeUndefined();
+    expect(renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0)).not.toContain("↳ fix");
   });
 });

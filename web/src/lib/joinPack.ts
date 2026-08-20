@@ -191,6 +191,11 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
       : t("AgentJoin.cmd.blocked2", { slug, inviterName }),
     t("AgentJoin.cmd.stayReachable"),
     t("AgentJoin.cmd.mcpWakeNote"),
+    // #879：codex 档必须写死唤醒层这条硬事实——codex 会话没有 Claude 那样的默认 per-session socket
+    // 收件箱，装插件也叫不醒；只有 bridge / serve 持有 app-server 连接时它才可达。claude/other 档不加。
+    ...(harness === "codex"
+      ? [t("AgentJoin.cmd.codexWakeNote1"), t("AgentJoin.cmd.codexWakeNote2", { slug })]
+      : []),
     // claudeMode 三行是 Claude Code 的 watch --once 待命指引；codex 档去掉。
     ...(harness !== "codex"
       ? [t("AgentJoin.cmd.claudeMode1"), t("AgentJoin.cmd.claudeMode2", { slug }), t("AgentJoin.cmd.claudeMode3")]
