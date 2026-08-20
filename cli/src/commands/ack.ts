@@ -11,7 +11,18 @@ import { fetchRecentMessages, handleRestError } from "../rest";
 import { isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 
 const FLAGS = ["channel", "seq", "all", "through", "before"];
-const HELP = `usage: party ack [--channel C] [--seq N | --all | --through N | --before N]
+// #860①：同族命令（receipt/revise/capture/decision）的位置参数都是 seq，只有 ack 是频道 slug，
+// 而 SLUG_RE 收下纯数字串 → `party ack 1841` 曾静默读一个不存在的频道并 exit 0（用户以为债清了）。
+export const NUMERIC_POSITIONAL_ERROR =
+  "party ack takes a CHANNEL as its positional argument, not a seq — " +
+  "`party ack <seq>` would silently read a channel named after that number. " +
+  "Did you mean: party ack --seq N (or: party ack --channel C)?";
+// #860②：--seq 从来不是 repeatable（本地 watch 债本身就是单值的），旧行为是后者覆盖前者，
+// 于是 `--seq 5 --seq 7` 静默只 ack 7。宁可报错，也不静默丢一条。
+export const REPEATED_SEQ_ERROR =
+  "--seq may be given only once: party ack clears a single local watch wake debt, " +
+  "so `--seq A --seq B` would silently drop A. Use `party ack --through B` to clear everything up to B.";
+const HELP = `usage: party ack [channel|--channel C] [--seq N | --all | --through N | --before N]
 
 Acknowledge the pending watch wake debt without posting a message. Use it after
 a watch --once delivered a frame that warrants no reply (someone else's status,
@@ -26,30 +37,60 @@ messages from there.
 Only watch-sourced debt can be acked. Debt owned by party serve is never touched
 here: serve replays it durably and clearing it by hand would silently drop an @.
 
+LOCAL ONLY — this does NOT clear \`pending_mention_seqs\` (#859). There are two
+separate ledgers and this command writes only the first:
+  · LOCAL watch replay state (a file next to your config) — what \`party ack\` clears.
+    Clearing it stops YOUR watch from replaying that frame.
+  · SERVER-side @ delivery debt — what \`party who --json\` reports as
+    unhandled_mention_count / pending_mention_seqs. \`party ack\` sends no request
+    to the server and can never change it.
+To settle the server ledger you must answer the @: \`party send "…" --reply-to N\`
+(list several when one reply settles them all: \`--reply-to A,B\`). An @ you ack
+locally but never reply to stays owed server-side until its delivery lease expires,
+and is then recorded as a FAILED delivery with terminal_reason=unknown_outcome —
+so for an @ that deserves a one-liner, send the one-liner with --reply-to.
+
 Options:
   --channel C   channel to ack in (defaults to the bound channel)
   --seq N       acknowledge through exactly N; a newer pending wake is preserved
+                (single-valued: repeating --seq is an error, not a merge)
   --all         drain: advance cursor to channel head + clear all pending watch debt
   --through N   drain everything up to and including seq N (advance cursor to N)
   --before N    drain everything strictly before seq N (advance cursor to N-1)
 
 A successful later \`party send\` or status update acknowledges an earlier watch wake.
-Use \`party ack --seq N\` when no channel message is warranted.`;
+Use \`party ack --seq N\` when no channel message is warranted (and remember: that
+leaves the server-side @ debt for seq N standing — see LOCAL ONLY above).`;
 
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["all"] });
+  // #860②：把 --seq 收成数组只为「重复给了几次」可见——重复即报错，绝不静默取最后一个。
+  const { positionals, flags } = parseArgs(argv, { booleans: ["all"], repeatable: ["seq"] });
   const unknown = unknownFlagError(flags, FLAGS);
   if (unknown !== null) {
     console.error(unknown);
     return 1;
   }
+  const seqValues = Array.isArray(flags.seq) ? flags.seq : flags.seq === undefined ? [] : [flags.seq];
+  if (seqValues.length > 1) {
+    console.error(REPEATED_SEQ_ERROR);
+    return 1;
+  }
+  // 归一回单值，后续（互斥判定、parsePositiveIntFlag）保持原语义。
+  if (seqValues.length === 1) flags.seq = seqValues[0]!;
+  else delete flags.seq;
   const flagError = valueFlagError(flags, ["channel", "seq", "through", "before"]);
   if (flagError !== null) {
     console.error(flagError);
+    return 1;
+  }
+  // #860①：纯数字位置参数几乎一定是 seq 被当成频道名了——静默 no-op + exit 0 是最坏的结果。
+  const positional = positionals[0];
+  if (positional !== undefined && /^[0-9]+$/.test(positional)) {
+    console.error(NUMERIC_POSITIONAL_ERROR);
     return 1;
   }
   // --seq / --all / --through / --before 互斥：混用语义含糊，直接拒绝。
