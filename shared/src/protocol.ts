@@ -558,9 +558,17 @@ export interface RuntimeTopology {
   worktree_ref: string;
   peer_scope: "local_installation";
   evidence: "client_asserted";
-  /** Optional safe display hint for a live harness session on this runtime. */
+  /**
+   * Optional safe display hint for a live harness session on this runtime.
+   *
+   * `harness` names which interactive CLI the session belongs to (#851 P1). It is
+   * a display/kind hint only — never an addressing contract. In particular the
+   * server's `claude_sessions` projection deliberately admits `"claude"` only,
+   * because every consumer of that array resolves the hint through Claude's own
+   * ListAgents/SendMessage surface, which cannot reach a codex session.
+   */
   harness_session?: {
-    harness: "claude";
+    harness: "claude" | "codex";
     display_name: string;
   };
 }
@@ -744,6 +752,16 @@ const TOPOLOGY_REF_RE = /^(?:node|runtime|workspace|worktree)_[A-Za-z0-9_-]{8,64
 const TOPOLOGY_SESSION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const CLAUDE_SESSION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
+/** #851 P1：harness_session.harness 的权威词表。新增 harness 只改这里。 */
+export const HARNESS_SESSION_HARNESSES = ["claude", "codex"] as const;
+
+export function isHarnessSessionHarness(
+  value: unknown,
+): value is NonNullable<RuntimeTopology["harness_session"]>["harness"] {
+  return typeof value === "string" &&
+    (HARNESS_SESSION_HARNESSES as readonly string[]).includes(value);
+}
+
 export function parseRuntimeTopology(input: unknown): RuntimeTopology | undefined {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
   const value = input as Record<string, unknown>;
@@ -767,7 +785,7 @@ export function parseRuntimeTopology(input: unknown): RuntimeTopology | undefine
       typeof value.harness_session !== "object" ||
       value.harness_session === null ||
       Array.isArray(value.harness_session) ||
-      (value.harness_session as Record<string, unknown>).harness !== "claude" ||
+      !isHarnessSessionHarness((value.harness_session as Record<string, unknown>).harness) ||
       typeof (value.harness_session as Record<string, unknown>).display_name !== "string" ||
       !CLAUDE_SESSION_NAME_RE.test(
         (value.harness_session as Record<string, unknown>).display_name as string,
@@ -788,7 +806,8 @@ export function parseRuntimeTopology(input: unknown): RuntimeTopology | undefine
       ? {}
       : {
           harness_session: {
-            harness: "claude" as const,
+            harness: (value.harness_session as Record<string, unknown>)
+              .harness as NonNullable<RuntimeTopology["harness_session"]>["harness"],
             display_name: (value.harness_session as Record<string, unknown>).display_name as string,
           },
         }),
