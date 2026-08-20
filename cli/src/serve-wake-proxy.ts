@@ -26,6 +26,7 @@ import {
   listClaudeSessions,
   type ClaudeSessionRegistryEntry,
 } from "./claude-session-registry";
+import { injectChannelMessage } from "./claude-inbox-inject";
 
 /** 三不变量之一：唤醒通知只带 channel+seq 指针，且总长 ≤512 UTF-8 字节。 */
 export const WAKE_PROXY_NOTE_MAX_BYTES = 512;
@@ -82,10 +83,54 @@ export type WakeProxyForwarder = (
 ) => Promise<boolean>;
 
 /**
- * 默认载体：无传输（见文件头调研结论），恒返回 false。
- * 未来载体落地后从这里替换，判定/降级骨架与测试不变。
+ * 骨架载体：无传输，恒返回 false（降级为现行为）。保留给不接 socket 面的场景/测试。
  */
 export const noWakeProxyForwarder: WakeProxyForwarder = async () => false;
+
+export interface SocketWakeProxyForwarderOptions {
+  /** 自己的回执 socket（`from:uds:<...>`）。serve 无回执 sock → 省略，接收端记 unknown。 */
+  fromSock?: string;
+  /** 频道昵称解析（"Message from <fromName>"）；默认用 channel 名。 */
+  fromName?: (ref: WakeProxyRef) => string;
+  /** 注入实现注入点（测试用）；默认真实 injectChannelMessage。 */
+  inject?: typeof injectChannelMessage;
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * socket 优先载体（#844）：把 ≤512B 的 channel+seq 指针以 Claude 原生「Message from X」
+ * 内联 UX 注入本机目标会话的 UDS 收件箱。
+ * - 目标宣告名（display_name 或回退 claude-<12hex>）＝ Claude 原生会话 `name`，据此寻址。
+ * - 任一步失败（无匹配 socket/探活失败/写入错/版本不符）→ 返回 false，attemptWakeProxy
+ *   据此降级为现行为（serve 照常跑自己的 runner，即 headless resume loop 兜底）。
+ *
+ * 送达语义（#844）：返回 true 只代表「帧已写进对方收件箱」，**不代表已进对方对话流**
+ * ——接收端 crossSessionInbound 默认 hold 时消息进待审队列且 5 分钟无人处理即被 drop。
+ * 因此 serve 侧绝不能拿这个 true 去清 @ 欠账 / ack 越过该 seq：真正送达以对方回话为准。
+ * 现状已符合——serve.ts 只 await attemptWakeProxy 并**丢弃返回值**，wake/ack/stuck 记账
+ * 完全走独立的 qualifies 路径，转投与否都不改变现行为（「纯增量」）。改这里前先复核那点。
+ *
+ * TODO(#844 serve 降级集成)：当前 socket 不可用时的「serve headless resume loop stdin 注入」
+ * 复用的是 serve 现行为（runner 正常处理这条 @），不是独立的 stdin 注入调用。待 serve 侧
+ * 暴露显式的「把下一个 user turn 喂给 resume loop」接口后，可在此 false 分支上再挂一跳，
+ * 走 ≤512B 指针的 stdin 注入而非整轮 runner。届时本 forwarder 返回值语义不变。
+ */
+export function socketWakeProxyForwarder(
+  options: SocketWakeProxyForwarderOptions = {},
+): WakeProxyForwarder {
+  const inject = options.inject ?? injectChannelMessage;
+  const fromName = options.fromName ?? ((ref: WakeProxyRef) => ref.channel);
+  return async (target, ref) => {
+    const result = await inject({
+      name: claudeSessionAnnounceName(target),
+      body: wakeProxyNote(ref),
+      fromName: fromName(ref),
+      fromSock: options.fromSock,
+      env: options.env,
+    });
+    return result.ok;
+  };
+}
 
 export interface WakeProxyAttempt {
   /** true 仅当载体确认转投成功；此时被唤醒会话自己去频道读 seq。 */

@@ -62,7 +62,7 @@ import {
 } from "../statusline-cache";
 import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type Identity, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
-import { attemptWakeProxy, type WakeProxyDeps } from "../serve-wake-proxy";
+import { attemptWakeProxy, socketWakeProxyForwarder, type WakeProxyDeps } from "../serve-wake-proxy";
 import { buildRuntimeTopology } from "../runtime-topology";
 import { buildContext } from "./status";
 import {
@@ -5475,8 +5475,12 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // 纯增量：转投与否都不改变下方 runner/ack 现行为（「照常继续自己的职责」），
       // attemptWakeProxy 绝不抛错，任何失败降级为现行为——消息绝不因代理而丢失。
       if (fresh && !fromSelf && hasLease && !selfPaused && frame.mentions.length > 0) {
+        const wakeProxyDeps = o.wakeProxy ?? {};
         await attemptWakeProxy(frame.mentions, self, { channel: o.channel, seq: frame.seq }, {
-          ...(o.wakeProxy ?? {}),
+          ...wakeProxyDeps,
+          // #844：默认接 socket 优先载体（本机 UDS 收件箱注入，原生「Message from X」UX）；
+          // 失败降级为现行为。测试注入的 forward 仍优先。
+          forward: wakeProxyDeps.forward ?? socketWakeProxyForwarder(),
           log: out,
         });
       }

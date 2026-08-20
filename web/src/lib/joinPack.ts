@@ -139,6 +139,27 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
           // 装上未必启用——doctor.ts 的 fix 提示就是 install && enable 两连，这里对齐。
           `claude plugin enable agentparty@agentparty || true`,
           t("AgentJoin.cmd.pluginNote2"),
+          // #844：把 ~/.claude/settings.json 的 crossSessionInbound 设为 accept——频道 @ 消息
+          // 才能直接进对话流并唤醒你，不用每条手动点 Deliver。幂等（重复跑结果一致）、
+          // 失败不阻断（全 `|| true`）、写前先备份 .agentparty.bak。
+          // 不依赖 jq（未必存在）：jq → node → python3 三级兜底，都没有就跳过。
+          t("AgentJoin.cmd.inboxNote1"),
+          t("AgentJoin.cmd.inboxNote2"),
+          t("AgentJoin.cmd.inboxNote3"),
+          `AGENTPARTY_CC_SETTINGS="$HOME/.claude/settings.json"`,
+          `mkdir -p "$HOME/.claude" || true`,
+          `[ -f "$AGENTPARTY_CC_SETTINGS" ] || printf '{}\\n' > "$AGENTPARTY_CC_SETTINGS" || true`,
+          // 备份首次写入即定：重复跑接入包时不能把备份覆盖成「已改过」的版本，
+          // 否则真正的原始设置就永远找不回来了。
+          `[ -f "$AGENTPARTY_CC_SETTINGS.agentparty.bak" ] || cp "$AGENTPARTY_CC_SETTINGS" "$AGENTPARTY_CC_SETTINGS.agentparty.bak" || true`,
+          `if command -v jq >/dev/null 2>&1; then`,
+          `  jq '.crossSessionInbound = "accept"' "$AGENTPARTY_CC_SETTINGS" > "$AGENTPARTY_CC_SETTINGS.agentparty.tmp" && mv "$AGENTPARTY_CC_SETTINGS.agentparty.tmp" "$AGENTPARTY_CC_SETTINGS" || true`,
+          `elif command -v node >/dev/null 2>&1; then`,
+          `  node -e 'const fs=require("fs"),f=process.argv[1];let j={};try{j=JSON.parse(fs.readFileSync(f,"utf8"))||{}}catch(e){j={}};j.crossSessionInbound="accept";fs.writeFileSync(f,JSON.stringify(j,null,2)+"\\n")' "$AGENTPARTY_CC_SETTINGS" || true`,
+          `elif command -v python3 >/dev/null 2>&1; then`,
+          `  python3 -c 'import json,sys;f=sys.argv[1];d=json.load(open(f)) if open(f).read().strip() else {};d["crossSessionInbound"]="accept";json.dump(d,open(f,"w"),indent=2)' "$AGENTPARTY_CC_SETTINGS" || true`,
+          `fi`,
+          t("AgentJoin.cmd.inboxNote4"),
         ]
       : []),
     // step4codex 是 codex mcp add 指引；claude 档去掉（目标 harness 只走一条，其余是噪音）。
