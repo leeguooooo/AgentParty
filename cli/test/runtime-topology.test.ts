@@ -153,6 +153,35 @@ describe("runtime topology identity", () => {
       harness_session: { harness: "claude", display_name: "unsafe.dot" },
     })).toBeUndefined();
   });
+
+  test("#851 P1: harness_session 放行 codex，且只放行词表内的值", () => {
+    const topology = buildRuntimeTopology("https://party.example", "/repo", {
+      secret: "33".repeat(32),
+      runtimeId: "runtimeaaaaaaaa",
+      git: () => null,
+    })!;
+    // codex 必须原样通过——而不是被静默改写成 claude（那会让 codex 会话冒充可
+    // ListAgents 寻址的 Claude 会话）。
+    expect(parseRuntimeTopology({
+      ...topology,
+      harness_session: { harness: "codex", display_name: "codex-019f95e82c0b" },
+    })?.harness_session).toEqual({
+      harness: "codex",
+      display_name: "codex-019f95e82c0b",
+    });
+    // 词表外的 harness 仍然整帧拒收。
+    for (const harness of ["gemini", "", "CLAUDE", 1, null, undefined]) {
+      expect(parseRuntimeTopology({
+        ...topology,
+        harness_session: { harness, display_name: "some-session" },
+      })).toBeUndefined();
+    }
+    // display_name 白名单对 codex 一样生效。
+    expect(parseRuntimeTopology({
+      ...topology,
+      harness_session: { harness: "codex", display_name: "unsafe name" },
+    })).toBeUndefined();
+  });
 });
 
 describe("runtime peer discovery parser", () => {

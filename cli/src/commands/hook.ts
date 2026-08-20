@@ -28,6 +28,7 @@ import { atomicWriteJson, atomicWriteText } from "../atomic-json";
 import {
   isClaudeSessionRegistrySessionId,
   registerClaudeSession,
+  registerCodexSession,
   unregisterClaudeSession,
 } from "../claude-session-registry";
 import { nativeSessionName } from "../claude-inbox-inject";
@@ -35,7 +36,7 @@ import { isHelpArg } from "../args";
 import { isPartyBinaryPath } from "../upgrade";
 import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "./claude-launch";
 
-const HELP = `usage: party hook <report|stop-guard|push|install|uninstall|status>
+const HELP = `usage: party hook <report|codex-report|stop-guard|push|install|uninstall|status>
 
 Claude Code hook adapter (issues #602/#615): report what the model session is
 actually doing (running a tool / waiting on permission / compacting / idle)
@@ -47,8 +48,15 @@ into channel presence, so \`party who\` and the web can see it.
                        This is a legacy/manual compatibility path: ordinary
                        Claude sessions remain local-only. Presence uplink needs
                        party claude, party bridge claude, or a managed serve lane.
-  uninstall [--user]   remove exactly the entries install added
-  status [--user]      show whether the hooks are installed
+                       --codex: write the codex SessionStart hook into
+                        ~/.codex/hooks.json instead (#851). Existing content is
+                        preserved; a parse failure aborts without writing.
+  uninstall [--user|--codex]   remove exactly the entries install added
+  status [--user|--codex]      show whether the hooks are installed
+  codex-report         (wired by \`install --codex\`) read one codex hook event
+                       from stdin and register an interactive codex session into
+                       ~/.agentparty/codex-sessions/ so party can discover it.
+                       Registry only — never presence, never network.
   report               (wired by install / party serve) read one hook event from
                        stdin, record the local activity snapshot. Under a managed
                        \`party serve\` runner the serve heartbeat uplinks it; in an
@@ -263,7 +271,7 @@ async function runPush(argv: string[]): Promise<number> {
 
 // ---- hooks 安装（#615）----
 
-const HOOK_COMMAND_MARKERS = ["hook report", "hook stop-guard"] as const;
+const HOOK_COMMAND_MARKERS = ["hook report", "hook stop-guard", "hook codex-report"] as const;
 
 interface HookEntry {
   matcher?: string;
@@ -294,10 +302,31 @@ function stripOurCommands(entries: unknown[]): unknown[] {
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 }
 
-export function settingsPath(scope: "project" | "user", cwd: string = process.cwd()): string {
+export type HookScope = "project" | "user" | "codex";
+
+export function settingsPath(scope: HookScope, cwd: string = process.cwd()): string {
+  if (scope === "codex") return join(homedir(), ".codex", "hooks.json");
   return scope === "user"
     ? join(homedir(), ".claude", "settings.json")
     : join(cwd, ".claude", "settings.local.json");
+}
+
+/**
+ * codex 的 hooks 片段（#851 P2）。~/.codex/hooks.json 的顶层就是 `{ "hooks": { … } }`，
+ * 条目形状（`{ hooks: [{ type: "command", command, timeout? }] }`）与 Claude settings
+ * 的 hooks 完全同形，所以 mergeHookSettings/removeHookSettings 原样复用——包括它
+ * 「只增删自己的命令、解析失败即抛错拒写」的保护。
+ *
+ * codex 只有 SessionStart 可用于入册：其内嵌 schema 没有任何会话结束事件。
+ */
+export function codexHookSettingsJson(execPath: string = process.execPath): string {
+  const partyBin = isPartyBinaryPath(execPath) ? execPath : "party";
+  const command = `${partyBin === "party" ? partyBin : JSON.stringify(partyBin)} hook codex-report`;
+  return JSON.stringify({
+    hooks: {
+      SessionStart: [{ hooks: [{ type: "command", command, timeout: 10 }] }],
+    },
+  });
 }
 
 /**
@@ -347,11 +376,25 @@ export function removeHookSettings(source: string): string {
   return `${JSON.stringify(settings, null, 2)}\n`;
 }
 
-function hookScope(argv: string[]): "project" | "user" {
-  // 只认 `--` 终止符之前的 --user；`hook install -- --user` 保持 project 作用域。
+export function hookScope(argv: string[]): HookScope {
+  // 只认 `--` 终止符之前的旗标；`hook install -- --user` 保持 project 作用域。
   const boundary = argv.indexOf("--");
   const flags = boundary === -1 ? argv : argv.slice(0, boundary);
+  if (flags.includes("--codex")) return "codex";
   return flags.includes("--user") ? "user" : "project";
+}
+
+/**
+ * 写前备份（#864 教训：接入包曾整份覆盖用户 settings.json，销毁数据）。
+ * merge/remove 本身解析失败即抛错、调用方直接中止不写；备份是第二层保险，
+ * 让「写了但结果不对」也能人工回退。备份失败不阻断（原文件仍在，且写是原子的）。
+ */
+function backupBeforeWrite(path: string, source: string): void {
+  try {
+    atomicWriteText(`${path}.agentparty.bak`, source);
+  } catch {
+    // best effort
+  }
 }
 
 // 终端输出的动态部分（路径/异常消息）统一剥控制字符——路径可能来自不受信的 repo 目录名。
@@ -366,19 +409,25 @@ async function runInstall(argv: string[]): Promise<number> {
   const source = existsSync(path) ? readFileSync(path, "utf8") : null;
   // serve 用同一份 hooks 配置生成器（#602），装出来的行为与托管 lane 完全一致。
   const { claudeHookSettingsJson } = await import("./serve");
+  const fragment = scope === "codex" ? codexHookSettingsJson() : claudeHookSettingsJson();
   let next: string;
   try {
-    next = mergeHookSettings(source, claudeHookSettingsJson());
+    next = mergeHookSettings(source, fragment);
   } catch (e) {
+    // 解析失败即中止不写（#864）：宁可让人手工修，也绝不覆盖看不懂的用户内容。
     console.error(`无法解析 ${termText(path)}（${termText(e instanceof Error ? e.message : String(e))}）；请先手工修复该文件`);
     return 1;
   }
+  if (source !== null) backupBeforeWrite(path, source);
   // 进程死在写中途会留半截 JSON——毁掉的正是 merge 拼命保护的用户手写配置（#617 评审）。
   atomicWriteText(path, next);
   console.log(`hooks installed -> ${termText(path)}`);
   console.log(
-    "普通 Claude session 只写本地 activity；频道 presence 上行仍需 party claude、" +
-      "party bridge claude 或托管 serve lane。",
+    scope === "codex"
+      ? "codex 交互式会话现在会在 SessionStart 入册到 ~/.agentparty/codex-sessions/；" +
+        "codex 无会话结束事件，出册靠进程探活。唤醒仍走 party bridge codex。"
+      : "普通 Claude session 只写本地 activity；频道 presence 上行仍需 party claude、" +
+        "party bridge claude 或托管 serve lane。",
   );
   return 0;
 }
@@ -390,13 +439,15 @@ async function runUninstall(argv: string[]): Promise<number> {
     console.log(`nothing to remove（${termText(path)} 不存在）`);
     return 0;
   }
+  const source = readFileSync(path, "utf8");
   let next: string;
   try {
-    next = removeHookSettings(readFileSync(path, "utf8"));
+    next = removeHookSettings(source);
   } catch (e) {
     console.error(`无法解析 ${termText(path)}（${termText(e instanceof Error ? e.message : String(e))}）；请先手工修复该文件`);
     return 1;
   }
+  backupBeforeWrite(path, source);
   atomicWriteText(path, next);
   console.log(`hooks removed <- ${termText(path)}`);
   return 0;
@@ -507,6 +558,62 @@ export function recordClaudeSessionLifecycle(
   } catch {
     // hook 铁律：注册表任何失败都不配影响模型。
   }
+}
+
+/**
+ * codex 会话入册（issue #851 P2）——`party hook codex-report` 的全部职责。
+ *
+ * 为什么不复用 `hook report`：codex 的 SessionStart payload 与 Claude 的**同形**
+ * （都带 hook_event_name/session_id/cwd），单看 payload 分不出 harness。同一个入口
+ * 会把 codex 会话写进 claude 注册表，进而被 claude 专用的 PID→cc-socks UDS 寻址捡走
+ * 投递到不存在的收件箱。harness 只能由「装在谁的 hooks 里」决定，所以给 codex 一个
+ * 独立子命令，写独立目录。
+ *
+ * codex 0.145 实测 SessionStart payload（取自二进制内嵌的 session-start.command.input
+ * JSON schema，required 全在）：
+ *   { cwd, hook_event_name: "SessionStart", model, permission_mode, session_id,
+ *     source: "startup"|"resume"|"clear"|"compact", transcript_path: string|null }
+ * 没有 pid（同 Claude），所以记 process.ppid；没有任何展示名字段，display_name 恒 null，
+ * 宣告名回退 `codex-<12hex>`。codex 也没有 SessionEnd——出册靠 kill(pid,0) 探活剔除。
+ *
+ * 铁律同 report：stdout 恒空、任何失败静默 exit 0、不等网络。
+ */
+export function recordCodexSessionLifecycle(
+  record: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+  pid: number = process.ppid,
+): void {
+  try {
+    if (record.hook_event_name !== "SessionStart") return;
+    const sessionId = record.session_id;
+    if (!isClaudeSessionRegistrySessionId(sessionId)) return;
+    // serve 托管 lane 是被管理的 runner 会话，不是人开的交互式会话——同 Claude 档不入册。
+    if (env.AP_ACTIVITY_FILE) return;
+    const cwd = typeof record.cwd === "string" && record.cwd.length > 0 ? record.cwd : process.cwd();
+    const channel = env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel;
+    if (!channel) return;
+    registerCodexSession({
+      session_id: sessionId,
+      pid,
+      display_name: claudeSessionDisplayNameFromHookPayload(record),
+      channel,
+      cwd,
+    }, env);
+  } catch {
+    // hook 铁律：注册表任何失败都不配影响模型。
+  }
+}
+
+/** `party hook codex-report`：读一条 codex hook 事件，只做入册。stdout 恒空。 */
+async function runCodexHookInput(): Promise<number> {
+  try {
+    const payload = JSON.parse(await readStdin(MAX_STDIN_BYTES)) as unknown;
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return 0;
+    recordCodexSessionLifecycle(payload as Record<string, unknown>);
+  } catch {
+    // 坏 JSON / 写盘失败都不配阻断 codex。
+  }
+  return 0;
 }
 
 function reportHookPayload(
@@ -622,6 +729,7 @@ export async function run(argv: string[]): Promise<number> {
   if (sub === "uninstall") return runUninstall(rest);
   if (sub === "status") return runStatus(rest);
   if (sub === "push") return runPush(rest);
+  if (sub === "codex-report") return runCodexHookInput();
   if (sub !== "report" && sub !== "stop-guard") {
     // 会写 stderr 的分支只剩人在终端敲错子命令。真 hook 调用恒为 `hook report`，不受影响。
     console.error(HELP);

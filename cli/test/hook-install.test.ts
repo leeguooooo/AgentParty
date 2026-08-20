@@ -1,6 +1,6 @@
 // #615：hook install 的幂等合并 / 交互 lane 直报的节流与 push 端到端。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeActivityFile } from "../src/activity";
@@ -324,6 +324,97 @@ describe("party hook install end-to-end (project scope)", () => {
     expect((await runIn("uninstall")).code).toBe(0);
     expect((await runIn("status")).code).toBe(1);
     rmSync(project, { recursive: true, force: true });
+  });
+});
+
+describe("party hook install --codex (#851 P2)", () => {
+  // 本机 ~/.codex/hooks.json 的真实形状（otty / vibe-island / superset 三方共存），
+  // 结构原样保留、内容缩短。#864 事故的同类错误绝不许再犯：安装必须只增自己那条。
+  const REAL_WORLD_CODEX_HOOKS = {
+    hooks: {
+      SessionStart: [
+        { hooks: [{ type: "command", command: "SUPERSET_AGENT_ID=codex \"/Users/x/.superset/hooks/notify.sh\"" }] },
+        { _otty: true, hooks: [{ type: "command", command: "'/Applications/Otty.app/.../otty-hook.sh' idle \"$PPID\"" }] },
+      ],
+      PostToolUse: [
+        { matcher: "", hooks: [{ type: "command", command: "'/Users/x/.vibe-island/bin/vibe-island-bridge' --source codex", timeout: 5 }] },
+      ],
+    },
+  };
+
+  async function runCodex(fakeHome: string, ...args: string[]) {
+    const proc = Bun.spawn(["bun", "run", indexPath, "hook", ...args, "--codex"], {
+      cwd: fakeHome,
+      env: { ...process.env, HOME: fakeHome, AGENTPARTY_HOME: home },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    return { code, stdout, stderr };
+  }
+
+  test("装进 ~/.codex/hooks.json，既有第三方 hooks 一条不少；status/uninstall 往返", async () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "ap-codexhome-"));
+    const hooksPath = join(fakeHome, ".codex", "hooks.json");
+    mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+    const before = JSON.stringify(REAL_WORLD_CODEX_HOOKS, null, 2);
+    writeFileSync(hooksPath, before);
+
+    expect((await runCodex(fakeHome, "status")).code).toBe(1);
+    const installed = await runCodex(fakeHome, "install");
+    expect(installed.code).toBe(0);
+    expect(installed.stdout).toContain("codex-sessions");
+
+    const after = JSON.parse(readFileSync(hooksPath, "utf8")) as typeof REAL_WORLD_CODEX_HOOKS;
+    // 别人的条目逐字保留（含 _otty 私有字段、matcher、timeout）。
+    expect(after.hooks.PostToolUse).toEqual(REAL_WORLD_CODEX_HOOKS.hooks.PostToolUse);
+    expect(after.hooks.SessionStart.slice(0, 2)).toEqual(REAL_WORLD_CODEX_HOOKS.hooks.SessionStart);
+    // 只多了我们这一条。
+    expect(after.hooks.SessionStart).toHaveLength(3);
+    expect(JSON.stringify(after.hooks.SessionStart[2])).toContain("hook codex-report");
+    // 写前备份留在旁边，人工可回退（#864）。
+    expect(readFileSync(`${hooksPath}.agentparty.bak`, "utf8")).toBe(before);
+
+    // 幂等：再装一次不重复追加。
+    expect((await runCodex(fakeHome, "install")).code).toBe(0);
+    expect((JSON.parse(readFileSync(hooksPath, "utf8")) as typeof REAL_WORLD_CODEX_HOOKS)
+      .hooks.SessionStart).toHaveLength(3);
+
+    expect((await runCodex(fakeHome, "status")).code).toBe(0);
+    expect((await runCodex(fakeHome, "uninstall")).code).toBe(0);
+    // 卸载后恢复成用户原样。
+    expect(JSON.parse(readFileSync(hooksPath, "utf8"))).toEqual(REAL_WORLD_CODEX_HOOKS);
+    expect((await runCodex(fakeHome, "status")).code).toBe(1);
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  test("hooks.json 解析失败即中止不写——绝不覆盖看不懂的用户内容（#864）", async () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "ap-codexhome-bad-"));
+    const hooksPath = join(fakeHome, ".codex", "hooks.json");
+    mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+    const broken = '{ "hooks": { "SessionStart": [ }';
+    writeFileSync(hooksPath, broken);
+    const result = await runCodex(fakeHome, "install");
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("请先手工修复该文件");
+    // 原文件一个字节都没动，也没留备份（根本没走到写）。
+    expect(readFileSync(hooksPath, "utf8")).toBe(broken);
+    expect(existsSync(`${hooksPath}.agentparty.bak`)).toBe(false);
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  test("hooks 键写坏成数组时同样拒写", async () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "ap-codexhome-arr-"));
+    const hooksPath = join(fakeHome, ".codex", "hooks.json");
+    mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+    writeFileSync(hooksPath, '{"hooks": ["oops"]}');
+    expect((await runCodex(fakeHome, "install")).code).toBe(1);
+    expect(readFileSync(hooksPath, "utf8")).toBe('{"hooks": ["oops"]}');
+    rmSync(fakeHome, { recursive: true, force: true });
   });
 });
 
