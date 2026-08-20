@@ -49,7 +49,14 @@ import {
 } from "../delivery-recovery-journal";
 import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from "../instance-lock";
 import { resolveAuthDetailed } from "../oidc-cli";
-import { fetchMe, fetchMessages, fetchPresence, fetchRuntimePeers, postMessage } from "../rest";
+import {
+  fetchMe,
+  fetchMessages,
+  fetchPresence,
+  fetchRecentMessages,
+  fetchRuntimePeers,
+  postMessage,
+} from "../rest";
 import { isName, isSlug } from "../validation";
 import { buildRuntimeTopology } from "../runtime-topology";
 import {
@@ -470,7 +477,17 @@ export interface DormantAnnounceDeps {
   resolveAuth: () => Promise<{ server?: string | null; token?: string | null }>;
   connect: typeof connect;
   buildTopology: typeof buildRuntimeTopology;
-  loadCursor: (channel: string) => number;
+  /**
+   * announce 连接的**起始游标**（#869）。announce 只关心「连上之后的新消息」，
+   * 所以它必须是频道当前最新 seq，绝不能是持久化游标（新身份恒为 0 → 连上要把
+   * 整个频道历史重放完才够得着 live 帧，唤醒功能形同虚设，且失败是静默的）。
+   * 返回 null＝这一轮拿不到起点，本轮不建连（宁可不宣告，也不退回 0）。
+   * 默认 announceStartCursor。
+   */
+  resolveStartCursor?: (
+    channel: string,
+    auth: { server: string; token: string },
+  ) => Promise<number | null>;
   cwd?: string;
   pollIntervalMs?: number;
   livenessIntervalMs?: number;
@@ -520,6 +537,47 @@ export async function resolveAnnounceChannelIdentity(
   } catch {
     return null;
   }
+}
+
+/**
+ * announce 连接的起始游标（#869）：频道当前最新 seq，即「从现在起的新消息」。
+ *
+ * 为什么不是 loadCursor：announce 是 announce-only 连接，它既不推进也不消费持久化
+ * 游标；新接入身份的持久化游标恒为 0，用它建连＝要求服务端重放整个频道历史（实测
+ * 1884 条，30 秒只爬到 seq 16），live 的 @ 根本够不着。
+ *
+ * 为什么不用 Number.MAX_SAFE_INTEGER 这类「只要 live」哨兵：hello.since 在客户端
+ * 同时被当作初始 cursor，`seq <= cursor` 的帧一律丢弃——哨兵会把真正的 live 帧也丢光。
+ * 服务端 hello 协议目前也没有 live-only 语义（worker 只做 `since > 0 ? floor : 0`）。
+ *
+ * 代价是启动时一次 limit=1 的 REST 尾拉，与本就存在的身份解析同量级，不引入可感延迟。
+ * 附带好处：helloSince 落在最新 seq 上，announce 这条无 directedDelivery 的连接不会被
+ * 服务端当成 legacy delivery 消费方去认领历史欠账（P2 不变式）。
+ */
+export async function announceStartCursor(
+  channel: string,
+  auth: { server: string; token: string },
+): Promise<number | null> {
+  try {
+    const tail = await fetchRecentMessages(auth.server, auth.token, channel, 1);
+    const last = tail.at(-1);
+    // 空频道 → 0 就是正确起点（没有历史可重放）。
+    return typeof last?.seq === "number" ? last.seq : 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 服务端补拉/重放帧的判据（#869 第 2 层的判定钩子）。
+ *
+ * TODO(#861/#869 第 2 层)：#861 正在给服务端的补拉帧加 `replay` 标记（重放帧与 live 帧
+ * 目前在 wire 上逐字节相同，客户端无从分辨）。标记落地后本函数即刻生效——重连窗口内难免
+ * 收到的重放帧一律不注入，避免老身份重连时历史里的每条 @ 都触发一次唤醒。协议类型由 #861
+ * 在 shared/src/protocol.ts 里补，本切片只做结构化读取，不抢改协议文件。
+ */
+export function dormantAnnounceIsReplayFrame(frame: unknown): boolean {
+  return (frame as { replay?: unknown } | null)?.replay === true;
 }
 
 /** 注入去重表容量上限：只留最近 N 个 seq，防长跑进程内存无界。 */
@@ -601,10 +659,21 @@ export async function runDormantClaudeSessionAnnounce(
       },
     });
     if (topology === undefined) return;
+    // 起点＝频道当前最新 seq（#869）。拿不到就本轮不建连，稍候重试——绝不退回持久化
+    // 游标/0，那等于把唤醒埋进一整段历史重放里静默失效。
+    const startCursor = await (deps.resolveStartCursor ?? announceStartCursor)(channel, {
+      server: auth.server,
+      token: auth.token,
+    }).catch(() => null);
+    if (signal.aborted) return;
+    if (startCursor === null) {
+      await abortableSleep(pollMs, signal);
+      continue;
+    }
     // 只声明 runtimeTopology：无 directedDelivery / deliveryRecovery /
     // advertiseWakeKind / onCursor——服务端不会给这条连接派任何 delivery，
     // 消费到的普通消息只本地 ack（防积压），绝不推进持久化游标。
-    const connection = deps.connect(auth.server, auth.token, channel, deps.loadCursor(channel), {
+    const connection = deps.connect(auth.server, auth.token, channel, startCursor, {
       runtimeTopology: topology,
     });
     // 「叫我」的判据＝本机频道身份（不是宣告名，见上方三命名空间注释）。解析失败
@@ -629,8 +698,12 @@ export async function runDormantClaudeSessionAnnounce(
       seq: number,
       mentions: readonly string[] | undefined,
       sender: MsgFrame["sender"] | undefined,
+      frame: unknown,
     ) => {
       try {
+        // 重放帧一律不注入（#869 第 2 层；标记由 #861 在服务端补上，见
+        // dormantAnnounceIsReplayFrame）。放在最前面：重放的历史 @ 连去重表都不该占。
+        if (dormantAnnounceIsReplayFrame(frame)) return;
         if (!dormantAnnounceMentionHit(mentions, selfName)) return;
         if (injectedSeqs.has(seq)) return;
         injectedSeqs.add(seq);
@@ -687,7 +760,7 @@ export async function runDormantClaudeSessionAnnounce(
           connection.ack(frame.seq);
           // 注意顺序：先 ack 再注入。ack 只是本地防积压（绝不推进持久化游标、绝不
           // claim delivery，见上方 P2 不变式），注入失败也不该影响 ack。
-          if (frame.type === "msg") await maybeInject(frame.seq, frame.mentions, frame.sender);
+          if (frame.type === "msg") await maybeInject(frame.seq, frame.mentions, frame.sender, frame);
         }
         if (frame.type === "error") return;
       }
@@ -724,7 +797,6 @@ async function runDormantClaudeChannelMcp(channel: string | null): Promise<numbe
         resolveAuth: resolveAuthDetailed,
         connect,
         buildTopology: buildRuntimeTopology,
-        loadCursor,
       }).catch(() => {});
   try {
     await server.connect(new StdioServerTransport());

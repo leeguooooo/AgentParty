@@ -4,6 +4,7 @@ import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry"
 import {
   dormantAnnounceDisplayName,
   dormantAnnounceMentionHit,
+  dormantAnnounceIsReplayFrame,
   runDormantClaudeSessionAnnounce,
   selectDormantAnnounceEntry,
   type DormantAnnounceDeps,
@@ -101,7 +102,8 @@ function makeDeps(overrides: Partial<DormantAnnounceDeps> = {}): {
       evidence: "client_asserted",
       ...(buildDeps?.harnessSession === undefined ? {} : { harness_session: buildDeps.harnessSession }),
     }),
-    loadCursor: () => 42,
+    // #869：起点＝频道当前最新 seq（不是持久化游标、更不是 0）。
+    resolveStartCursor: async () => 1884,
     // 默认给一个确定的频道身份：绝不让测试去读真实 config / 打 /api/me。
     resolveSelfName: async () => "lark-ad72b3f97491-agentparty",
     cwd: "/tmp/project",
@@ -146,7 +148,8 @@ describe("runDormantClaudeSessionAnnounce (#841 P2)", () => {
     const { connectArgs } = connections[0]!;
     expect(connectArgs.server).toBe("https://party.example");
     expect(connectArgs.slug).toBe("dev");
-    expect(connectArgs.since).toBe(42);
+    // #869：起始游标＝频道当前最新 seq，announce 只收「连上之后」的消息。
+    expect(connectArgs.since).toBe(1884);
     const opts = connectArgs.opts;
     // announce 档不认领 delivery：不声明任何 delivery/wake 能力，也不持久化游标。
     expect(opts.directedDelivery).toBeUndefined();
@@ -232,6 +235,59 @@ function msg(seq: number, mentions: string[]): ServerFrame {
 
 const SELF = "lark-ad72b3f97491-agentparty";
 
+describe("announce 起始游标 (#869)", () => {
+  test("按频道当前最新 seq 起，绝不是 0、也不来自持久化游标", async () => {
+    const persisted = 0; // 新接入身份的持久化游标恒为 0——正是本 bug 的现场。
+    const { deps, connections } = makeDeps({ resolveStartCursor: async () => 1884 });
+    // announce 档根本不该有「读持久化游标」这条依赖。
+    expect("loadCursor" in (deps as unknown as Record<string, unknown>)).toBe(false);
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    expect(connections).toHaveLength(1);
+    const { since, opts } = {
+      since: connections[0]!.connectArgs.since,
+      opts: connections[0]!.connectArgs.opts,
+    };
+    expect(since).not.toBe(0);
+    expect(since).not.toBe(persisted);
+    expect(since).toBe(1884);
+    // 起点已是最新 seq → 历史帧（seq <= since）被客户端丢弃，live 帧立刻可达。
+    connections[0]!.push(msg(1885, [SELF]));
+    await tick();
+    expect(connections[0]!.acked).toEqual([1885]);
+    // P2 不变式不因此破坏：不推进/不持久化游标、不 claim delivery、不发任何客户端帧。
+    expect(opts.onCursor).toBeUndefined();
+    expect(opts.directedDelivery).toBeUndefined();
+    expect(opts.deliveryRecovery).toBeUndefined();
+    expect(opts.advertiseWakeKind).toBeUndefined();
+    expect(connections[0]!.sent).toHaveLength(0);
+    abort.abort();
+    await done;
+  });
+
+  test("拿不到起点就不建连，稍候重试（绝不退回 0）", async () => {
+    let cursor: number | null = null;
+    const { deps, connections } = makeDeps({ resolveStartCursor: async () => cursor });
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    expect(connections).toHaveLength(0);
+    cursor = 7;
+    await tick();
+    expect(connections).toHaveLength(1);
+    expect(connections[0]!.connectArgs.since).toBe(7);
+    abort.abort();
+    await done;
+  });
+
+  test("重放帧不注入（#869 第 2 层，标记由 #861 补）", async () => {
+    expect(dormantAnnounceIsReplayFrame({ type: "msg", seq: 1, replay: true })).toBe(true);
+    expect(dormantAnnounceIsReplayFrame({ type: "msg", seq: 1 })).toBe(false);
+    expect(dormantAnnounceIsReplayFrame(null)).toBe(false);
+  });
+});
+
 describe("dormantAnnounceMentionHit", () => {
   test("matches the channel identity case-insensitively and ignores everything else", () => {
     expect(dormantAnnounceMentionHit([SELF.toUpperCase()], SELF)).toBe(true);
@@ -294,6 +350,22 @@ describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
     expect(connections[0]!.acked).toEqual([11, 12, 13]);
     expect(connections[0]!.sent).toHaveLength(0);
     expect(connections[0]!.connectArgs.opts.onCursor).toBeUndefined();
+    abort.abort();
+    await done;
+  });
+
+  test("带 replay 标记的历史帧不注入（#869 第 2 层）", async () => {
+    const { deps, connections, calls } = injectingDeps();
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    connections[0]!.push({ ...(msg(40, [SELF]) as object), replay: true } as unknown as ServerFrame);
+    await tick();
+    expect(calls).toHaveLength(0);
+    // 同一条 seq 后续以 live 帧到达仍应注入（重放不该污染去重表）。
+    connections[0]!.push(msg(40, [SELF]));
+    await tick();
+    expect(calls).toHaveLength(1);
     abort.abort();
     await done;
   });
