@@ -60,6 +60,14 @@ export function wakeProxyNote(ref: WakeProxyRef): string {
  * - 多个候选取最新入册（与蛰伏 announce 的选择一致）。
  * 死会话由 listClaudeSessions 的 kill(pid,0) 探活现场剔除（开放问题 C）：
  * 进程已退出的条目根本不会出现在这里，消息自然回落到现行为。
+ *
+ * ⚠️ 已知局限（#857 实测记录，**本次刻意不改**）：mentions 里只会出现频道 handle，
+ * 而这里比对的是宣告名（peers 命名空间），两者恒不相等 → 本函数今天实际上永远返回
+ * null，serve 侧的唤醒代理是一条不触发的路径。改成按频道身份比对会翻转语义：本机
+ * 交互式会话与 serve 共用同一个 agent config，「@ 我」的那个 handle 恰好就是被
+ * `self` 排除掉的自己——放开它等于同一条 @ 既跑 serve runner 又注入交互式会话（双处理），
+ * 会动到 serve 的 wake/欠账记账。#857 的 announce 腿已经在正确的命名空间上覆盖了这个
+ * 场景（且不需要 serve 在跑），所以这里保持现状，是否合并两条腿留给单独切片决策。
  */
 export function selectWakeProxyTarget(
   mentions: readonly string[],
@@ -97,11 +105,7 @@ export function injectFromName(
   if (identity === null || identity === undefined || typeof identity.name !== "string" || identity.name === "") {
     return `agentparty#${channel}`;
   }
-  const friendly = friendlyAgentLabel(identity);
-  return sanitizeFromName(
-    friendly === identity.name ? identity.name : `${friendly} (${identity.name})`,
-    channel,
-  );
+  return sanitizeFromName(withTechnicalId(friendlyAgentLabel(identity), identity.name), channel);
 }
 
 /**
@@ -125,7 +129,15 @@ export function senderInjectFromName(
         owner_handle: null,
         owner_display_name: null,
       });
-  return sanitizeFromName(friendly === name ? name : `${friendly} (${name})`, channel);
+  return sanitizeFromName(withTechnicalId(friendly, name), channel);
+}
+
+/**
+ * 友好名后缀技术 ID——但友好名里**已经含有**技术 name 时不重复（真机实测踩到：
+ * 非哈希前缀的 name 提不出角色，会渲染成 `x · foo-agent (foo-agent)`）。
+ */
+function withTechnicalId(friendly: string, name: string): string {
+  return friendly.includes(name) ? friendly : `${friendly} (${name})`;
 }
 
 /**

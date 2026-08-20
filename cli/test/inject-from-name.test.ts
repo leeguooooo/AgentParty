@@ -57,6 +57,13 @@ describe("injectFromName / senderInjectFromName", () => {
     expect(b).toContain("lark-ad72b3f9749e-agentparty");
   });
 
+  test("不给友好名重复追加已经含在里面的技术 ID（真机实测踩到）", () => {
+    // 非哈希前缀的 name 提不出角色 → 友好名里已经是完整 name，不该再括号重复一次。
+    expect(injectFromName("dev", identity({ name: "leeguooooo-codex2-agentparty", owner: "leo@example.com" })))
+      .toBe("leo@example.com · leeguooooo-codex2-agentparty");
+    expect(senderInjectFromName({ name: "plain-agent", kind: "agent" }, "dev")).toBe("plain-agent");
+  });
+
   test("falls back to the channel when no identity is cached", () => {
     expect(injectFromName("dev", null)).toBe("agentparty#dev");
     expect(senderInjectFromName(undefined, "dev")).toBe("agentparty#dev");
