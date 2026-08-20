@@ -6,7 +6,7 @@
 // 在设计上就不可能被看见。这里在 fake HOME + 受控 PATH 下实际执行生成的片段。
 import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, symlinkSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, symlinkSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lookup } from "../i18n/dict";
@@ -43,6 +43,11 @@ function settingsShell(): string {
     .join("\n");
 }
 
+// shell 片段本身需要的基础命令。PATH 只暴露它们 + 被测工具，
+// 这样「无可用工具」才是真隔离：Linux CI 上 /bin 常软链到 /usr/bin（自带 python3），
+// 把 /bin 放进 PATH 会让隔离失效——本地 macOS 通过、CI 失败就是这么来的。
+const BASE_TOOLS = ["mkdir", "cp", "rm", "mv", "cat"] as const;
+
 /** 只让指定工具在 PATH 中可见，用来单独驱动 jq / node / python3 三个分支。 */
 function runWithTools(settingsContent: string | null, tools: string[]): {
   home: string;
@@ -53,25 +58,34 @@ function runWithTools(settingsContent: string | null, tools: string[]): {
   const home = mkdtempSync(join(tmpdir(), "ap-settings-"));
   const bin = join(home, "bin");
   mkdirSync(bin);
-  for (const tool of tools) {
+  for (const tool of [...BASE_TOOLS, ...tools]) {
     const real = spawnSync("sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
-    if (real !== "") symlinkSync(real, join(bin, tool));
+    if (real !== "" && !existsSync(join(bin, tool))) symlinkSync(real, join(bin, tool));
   }
   mkdirSync(join(home, ".claude"), { recursive: true });
   const settingsPath = join(home, ".claude", "settings.json");
   if (settingsContent !== null) writeFileSync(settingsPath, settingsContent);
 
-  spawnSync("sh", ["-c", settingsShell()], {
-    env: { HOME: home, PATH: `${bin}:/bin` },
+  // 必须用绝对路径起 shell：PATH 被收窄成只有 bin 之后，Node 会用同一个 PATH 去找
+  // "sh" 本身而找不到，进程根本不启动——那样「损坏输入原文不变」会变成假阳性
+  // （什么都没执行，文件当然没变）。起不来直接抛，不让测试静默失效。
+  const run = spawnSync("/bin/sh", ["-c", settingsShell()], {
+    env: { HOME: home, PATH: bin },
     encoding: "utf8",
   });
+  if (run.error !== undefined) throw run.error;
 
-  return {
-    home,
-    settingsPath,
-    after: existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : null,
-    leftovers: readdirSync(join(home, ".claude")).filter((f) => f.includes(".tmp")),
-  };
+  try {
+    return {
+      home,
+      settingsPath,
+      after: existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : null,
+      leftovers: readdirSync(join(home, ".claude")).filter((f) => f.includes(".tmp")),
+    };
+  } finally {
+    // 每个用例都建一个 fake HOME，不清理会堆成 GB 级垃圾（本机实测把盘写满过）。
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 const BROKEN = '{"model":"opus","permissions":{"allow":["Bash"]}';
