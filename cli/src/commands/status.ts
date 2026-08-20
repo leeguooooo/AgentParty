@@ -11,7 +11,17 @@ import type {
   WakeKind,
   WorkflowKind,
 } from "@agentparty/shared";
-import { safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
+import { EXIT_TASK_LEASE_HELD, safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
+import {
+  acquireTaskLease,
+  describeDeniedLease,
+  DEFAULT_TASK_LEASE_TTL_MS,
+  releaseTaskLease,
+  resolveExecutorId,
+  taskLeaseDir,
+  taskLeaseKey,
+  type TaskLeaseResult,
+} from "../task-lease";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
 import { advanceCursorPastOwnMessage, branchLabel, repoLabel, resolveChannel, workspaceId, workspaceLabel, worktreeLabel } from "../config";
 import { stripTerminalControls } from "../format";
@@ -55,6 +65,10 @@ const STATUS_FLAGS = [
   "workflow-parent-summary-seq",
   "task",
   "debug-auth",
+  "force-lease",
+  "executor-id",
+  "lease-ttl-ms",
+  "json",
 ];
 const HELP = `usage: party status [channel|--channel C] working|waiting|blocked|done [-m note] [--mention name]... [--debug-auth]
 
@@ -97,7 +111,17 @@ Options:
   --workflow-parent-summary-seq N
                    parent summary/status seq this workflow status refines
   --task N         link this status to a channel task and update its task state
-  --debug-auth     print resolved auth/config source to stderr`;
+  --force-lease    take over the task lease from another execution runtime of
+                   this identity (only when you know that runtime is gone)
+  --executor-id id override the execution-runtime identity used for the lease
+  --lease-ttl-ms N task lease duration (default: ${DEFAULT_TASK_LEASE_TTL_MS})
+  --json           print a machine-readable result (includes the lease verdict)
+  --debug-auth     print resolved auth/config source to stderr
+
+Task lease (#834): \`working\`/\`waiting --task N\` claims a single-active-executor
+lease for (identity, channel, task). A second runtime of the same identity is
+refused with exit ${EXIT_TASK_LEASE_HELD} and publishes nothing — the task stays claimable by the
+holder. \`done\`/\`blocked --task N\` releases the lease.`;
 
 export function buildContext(auth: Awaited<ReturnType<typeof resolveAuthDetailed>>): AgentContext {
   const wt = worktreeLabel();
@@ -126,7 +150,7 @@ export async function run(argv: string[]): Promise<number> {
   }
   const { positionals, flags } = parseArgs(argv, {
     aliases: { m: "note" },
-    booleans: ["debug-auth"],
+    booleans: ["debug-auth", "force-lease", "json"],
     repeatable: ["mention", "scope"],
   });
   const auth = await resolveAuthDetailed();
@@ -167,6 +191,8 @@ export async function run(argv: string[]): Promise<number> {
       "workflow-step",
       "workflow-parent-summary-seq",
       "task",
+      "executor-id",
+      "lease-ttl-ms",
     ],
     ["mention", "scope"],
   );
@@ -351,6 +377,63 @@ export async function run(argv: string[]): Promise<number> {
           ...(workflowStep !== undefined ? { step_id: workflowStep } : {}),
           ...(workflowParentSummarySeq !== undefined ? { parent_summary_seq: workflowParentSummarySeq } : {}),
         };
+  // ---- #834 第 3 项：认领时刻的单活跃执行体闸门 ----
+  //
+  // 下手点刻意选在**认领**（`status working --task N`）而不是 wake 路径：wake 时拦截太晚，
+  // 活已经开始了；只有认领这一刻的写入是「我要开始动这件事」的第一个可观测点。
+  const leaseTtl = parsePositiveIntFlag(str(flags["lease-ttl-ms"]), "lease-ttl-ms");
+  if (typeof leaseTtl === "string") {
+    console.error(leaseTtl);
+    return 1;
+  }
+  const executorId = resolveExecutorId(process.env, {
+    ...(str(flags["executor-id"]) === undefined ? {} : { executorId: str(flags["executor-id"])! }),
+    ...(sessionHarness === undefined ? {} : { sessionHarness }),
+    ...(sessionId === undefined ? {} : { sessionId }),
+  });
+  const asJson = flags.json === true;
+  const leaseNow = Date.now();
+  let lease: TaskLeaseResult | null = null;
+  const leaseKeyValue = taskId === undefined ? null : taskLeaseKey(auth.server, auth.token, channel, taskId);
+  // working/waiting = 「这件事归我，我还在上面」→ 取/续租约。
+  // done/blocked = 「我不在上面了」→ 立刻交还，别让一个卡住的执行体把任务扣满一个 TTL。
+  const claims = taskId !== undefined && (state === "working" || state === "waiting");
+  if (claims && leaseKeyValue !== null && taskId !== undefined) {
+    lease = acquireTaskLease({
+      key: leaseKeyValue,
+      channel,
+      taskId,
+      executorId,
+      dir: taskLeaseDir(),
+      now: leaseNow,
+      ...(leaseTtl === undefined ? {} : { ttlMs: leaseTtl }),
+      force: flags["force-lease"] === true,
+    });
+    if (lease.state === "denied" && lease.holder !== undefined) {
+      // 红线：拒绝 ≠ 吞任务。这里**不发帧、不改服务端 task state**，任务原样留在频道里，
+      // 持租约的那个执行体照常干；本执行体降级为只读。
+      if (asJson) {
+        console.log(JSON.stringify({
+          ok: false,
+          published: false,
+          task_untouched: true,
+          exit_code: EXIT_TASK_LEASE_HELD,
+          lease: { state: lease.state, reason: lease.reason, holder: lease.holder },
+        }));
+      }
+      console.error(describeDeniedLease(lease.holder, channel, taskId, leaseNow));
+      return EXIT_TASK_LEASE_HELD;
+    }
+    if (lease.state === "unenforced") {
+      console.error(
+        "warn: task lease not enforced — this process has no stable execution-runtime identity. " +
+          "Set AGENTPARTY_EXECUTOR_ID (or pass --executor-id) so a second runtime of this identity can be refused (#834).",
+      );
+    }
+    if (lease.state === "forced" && lease.holder?.taken_over_from !== undefined) {
+      console.error(`warn: took over the task lease from ${lease.holder.taken_over_from} (--force-lease)`);
+    }
+  }
   try {
     if (flags["debug-auth"] === true || process.env.AGENTPARTY_DEBUG_AUTH === "1") {
       try {
@@ -384,8 +467,25 @@ export async function run(argv: string[]): Promise<number> {
       const taskState = taskStateFromReportedStatus(state);
       if (taskState !== null) await updateTask(auth.server, auth.token, channel, taskId, { state: taskState });
     }
+    // 交还租约必须在**帧已发出之后**：先发帧再放手,任务才不会在「已放手、状态还没落地」之间
+    // 出现一个谁都不持有、状态也没更新的窗口。
+    if (leaseKeyValue !== null && (state === "done" || state === "blocked")) {
+      releaseTaskLease(leaseKeyValue, executorId, taskLeaseDir());
+    }
     advanceCursorPastOwnMessage(channel, seq);
-    console.log(`status seq=${seq}`);
+    if (asJson) {
+      console.log(JSON.stringify({
+        ok: true,
+        published: true,
+        seq,
+        ...(taskId === undefined ? {} : { task: taskId }),
+        ...(lease === null
+          ? {}
+          : { lease: { state: lease.state, ...(lease.reason === undefined ? {} : { reason: lease.reason }), holder: lease.holder } }),
+      }));
+    } else {
+      console.log(`status seq=${seq}`);
+    }
     return 0;
   } catch (e) {
     return handleRestError(e);

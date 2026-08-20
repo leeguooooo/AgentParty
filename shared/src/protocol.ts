@@ -179,6 +179,11 @@ export const EXIT_RATE_LIMITED = 9;
 // 也无活的 wake 通道（离线 + 无 wake layer / 适配器陈旧），@ 只落进历史、不会唤醒任何人。严格模式下
 // 用独立非零码让调用方能编程判定「派发未落地」，而不是把成功发送误当完全失败（消息确实发出去了）。
 export const EXIT_UNREACHABLE = 10;
+// 任务租约冲突（issue #834 第 3 项）：同一身份的**另一个执行体**（典型：`party serve` 拉起的
+// reception runner vs 交互式 harness 会话）已经持有这个 task 的租约。本次认领**没有发出去**——
+// 服务端 task 状态原封不动，任务不会因此丢失。拿到这个码的执行体应当降级为只读（可以看、可以
+// 汇报，别开始有副作用的活），而不是换个措辞重试。
+export const EXIT_TASK_LEASE_HELD = 11;
 
 // ---- 基础类型 ----
 

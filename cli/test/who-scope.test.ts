@@ -101,7 +101,9 @@ describe("live runtime topology 提示", () => {
       claude_sessions: [],
     }]);
     const row = rows.find((candidate) => candidate.name === "a")!;
-    expect(row.topology_conflicts).toEqual([{ kind: "same_worktree", with: ["caller"], runtime_count: 1 }]);
+    expect(row.topology_conflicts).toEqual([
+      { kind: "same_worktree", with: ["caller"], runtime_count: 1, same_identity: false, severity: "advisory" },
+    ]);
     expect(topologyNote(row)).toContain("⚠ same worktree as caller");
   });
 
@@ -113,11 +115,11 @@ describe("live runtime topology 提示", () => {
     const workspace = rows.find((candidate) => candidate.name === "b")!;
     const installation = rows.find((candidate) => candidate.name === "c")!;
     expect(workspace.topology_conflicts).toEqual([
-      { kind: "same_workspace", with: ["caller"], runtime_count: 1 },
+      { kind: "same_workspace", with: ["caller"], runtime_count: 1, same_identity: false, severity: "advisory" },
     ]);
     expect(topologyNote(workspace)).toContain("same workspace as caller");
     expect(installation.topology_conflicts).toEqual([
-      { kind: "same_local_installation", with: ["caller"], runtime_count: 1 },
+      { kind: "same_local_installation", with: ["caller"], runtime_count: 1, same_identity: false, severity: "advisory" },
     ]);
     expect(topologyNote(installation)).toContain("same local installation as caller");
     expect(JSON.stringify(installation)).not.toContain("same_node");
@@ -131,8 +133,32 @@ describe("live runtime topology 提示", () => {
       claude_sessions: [],
     }])[0]!;
     expect(row.topology_conflicts).toEqual([
-      { kind: "same_identity_worktree", with: [], runtime_count: 2 },
+      { kind: "same_identity_worktree", with: [], runtime_count: 2, same_identity: true, severity: "blocking" },
     ]);
     expect(topologyNote(row)).toContain("2 other live runtime(s) of this identity share one worktree");
+  });
+
+  // #834 第 3 项：事故当天 `party who` 打的正是 `same_local_installation, runtime_count: 1`,
+  // 与「隔壁 agent 恰好装在同一台机器上」在 JSON 里长得一模一样,读的人无从判定该不该停手。
+  test("同一身份的另一个执行体（仅同 installation）也必须判定为 blocking", () => {
+    const row = topologyRows([presence("king-claude", [])], [{
+      agent: "king-claude",
+      same_identity: true,
+      relations: [{ relation: "same_local_installation", runtime_count: 1 }],
+      claude_sessions: [],
+    }])[0]!;
+    const conflict = row.topology_conflicts![0]!;
+    expect(conflict.same_identity).toBe(true);
+    expect(conflict.severity).toBe("blocking");
+    expect(topologyNote(row)).toContain("⚠");
+    expect(topologyNote(row)).toContain("concurrent claims on one task are refused");
+    // 别人的 runtime 仍然只是 advisory——不能把「同机装了别的 agent」也升级成停手信号。
+    const other = topologyRows([presence("other", [])], [{
+      agent: "other",
+      same_identity: false,
+      relations: [{ relation: "same_local_installation", runtime_count: 1 }],
+      claude_sessions: [],
+    }])[0]!;
+    expect(other.topology_conflicts![0]!.severity).toBe("advisory");
   });
 });

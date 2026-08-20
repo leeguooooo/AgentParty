@@ -148,10 +148,16 @@ interface Row {
   runner_health?: RunnerHealth;
   // runner 自报、worker 持久化的模型会话句柄（#522）；不是 websocket session。
   agent_session?: PresenceEntry["agent_session"];
+  // #834 第 3 项：以前这里只有 kind/with/runtime_count——「同一身份跑着两个执行体」和「隔壁
+  // agent 恰好装在同一台机器上」在 JSON 里长得一模一样,读的人无从判定该不该停手。补两个字段
+  // 让它可**程序化判定**:same_identity 说明这是不是自己的另一个执行体,severity=blocking 就是
+  // 「同一身份多执行体并发」这个真会出事的形态(实测:两个实例互相强杀对方的模拟器)。
   topology_conflicts?: Array<{
     kind: "same_identity_worktree" | "same_worktree" | "same_workspace" | "same_local_installation";
     with: string[];
     runtime_count?: number;
+    same_identity?: boolean;
+    severity?: "blocking" | "advisory";
   }>;
   // #817：无人值守时这个身份怎么接待 @——model runner 代答，还是 custom 命令。隔离接待意味着
   // 答话的会话不继承本人当前上下文，协作方在 @ 之前就该看见这一点。
@@ -518,13 +524,18 @@ export function annotateTopologyConflicts(
   return rows.map((row) => {
     const peer = byAgent.get(row.name);
     if (peer === undefined) return row;
-    const conflicts: NonNullable<Row["topology_conflicts"]> = peer.relations.map((item) => ({
-      kind: peer.same_identity && item.relation === "same_worktree"
-        ? "same_identity_worktree"
-        : item.relation,
-      with: peer.same_identity ? [] : [discovery.self],
-      runtime_count: item.runtime_count,
-    }));
+    const conflicts: NonNullable<Row["topology_conflicts"]> = peer.relations.map((item) => {
+      // 同一身份 + 不止一个活着的 runtime = 单活跃执行体被破坏(#834)。runtime_count 缺省算 1,
+      // 但 same_identity 的关系本身就意味着「除了我还有一个」——所以只要 same_identity 就够严重。
+      const sameIdentity = peer.same_identity === true;
+      return {
+        kind: sameIdentity && item.relation === "same_worktree" ? "same_identity_worktree" : item.relation,
+        with: sameIdentity ? [] : [discovery.self],
+        runtime_count: item.runtime_count,
+        same_identity: sameIdentity,
+        severity: sameIdentity ? ("blocking" as const) : ("advisory" as const),
+      };
+    });
     return conflicts.length === 0 ? row : { ...row, topology_conflicts: conflicts };
   });
 }
@@ -533,8 +544,12 @@ export function topologyNote(r: Row): string {
   const conflicts = r.topology_conflicts ?? [];
   if (conflicts.length === 0) return "";
   return conflicts.map((conflict) => {
-    if (conflict.kind === "same_identity_worktree") {
-      return ` · ⚠ ${conflict.runtime_count ?? 1} other live runtime(s) of this identity share one worktree`;
+    // #834:同身份的另一个执行体。人读那行必须说清「会出事」,否则又只是打印一条中性事实——
+    // 事故当天 `party who` 打的正是一条中性的 same_local_installation。
+    if (conflict.severity === "blocking") {
+      const where = conflict.kind === "same_identity_worktree" ? " share one worktree" : ` (${conflict.kind})`;
+      return ` · ⚠ ${conflict.runtime_count ?? 1} other live runtime(s) of this identity${where}` +
+        " — concurrent claims on one task are refused";
     }
     const label = conflict.kind === "same_worktree"
       ? "⚠ same worktree as"

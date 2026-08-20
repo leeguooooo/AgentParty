@@ -252,6 +252,11 @@ export function startOidcMock(opts: MockOptions = {}): OidcMock {
       if (req.method === "POST" && /^\/api\/channels\/[^/]+\/messages$/.test(u.pathname)) {
         return Response.json({ seq: 7 });
       }
+      if (req.method === "PATCH" && /^\/api\/channels\/[^/]+\/tasks\/\d+$/.test(u.pathname)) {
+        const id = Number(u.pathname.split("/").pop());
+        const b = rec.body as { state?: string } | null;
+        return Response.json({ id, title: "t", state: b?.state ?? "in_progress" });
+      }
       return Response.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
     },
   });
