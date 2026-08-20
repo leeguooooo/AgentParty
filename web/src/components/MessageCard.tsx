@@ -4,9 +4,11 @@ import type { AgentContext, ChannelRoleAssignment, MsgFrame, PresenceEntry, Publ
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { agentHue } from "../lib/agentColor";
+import { IdentityDisambiguator } from "./IdentityDisambiguator";
 import { isClientVersionOutdated, useMinClientVersion } from "../lib/clientVersion";
 import { gitContextChip } from "../lib/gitContext";
 import {
+  disambiguatorForIdentity,
   formatIdentityPresentation,
   resolveAgentOwnerLabel,
   resolveIdentityPresentation,
@@ -426,6 +428,8 @@ function MessageCardImpl({
         : msg.sender.handle,
   });
   const senderLabel = senderPresentation.label;
+  // #858：只有跟别人撞名的身份才带技术区分码；不撞名时 disambiguator 为 undefined，显示完全不变。
+  const senderDisambiguator = senderPresentation.disambiguator ?? null;
   const senderOwnedLabel = formatIdentityPresentation(senderPresentation, (ownerName, agentName) =>
     t("MessageCard.agent.ownedLabel", { owner: ownerName, name: agentName }),
   );
@@ -509,6 +513,8 @@ function MessageCardImpl({
           display: resolveSenderLabel(quotedMessage.sender, identityDisplay),
         })
       : null;
+  const quotedSenderDisambiguator =
+    quotedMessage !== null ? disambiguatorForIdentity(quotedMessage.sender.name, identityDisplay) : null;
   const quotedPreviewText =
     quotedMessage !== null
       ? quotedMessage.retracted
@@ -625,6 +631,7 @@ function MessageCardImpl({
           style={{ cursor: "pointer" }}
         >
           <span className="msg-sender" title={senderTitle}>{senderOwnedLabel}</span>
+          <IdentityDisambiguator code={senderDisambiguator} />
           {" "}
           → {msg.state}
           {statusBits.length > 0 ? ` · ${statusBits.join(" · ")}` : ""} · {fmtTime(msg.ts)}
@@ -699,6 +706,7 @@ function MessageCardImpl({
             recentMessages={recentMessages}
             triggerClassName="msg-sender"
           />
+          <IdentityDisambiguator code={senderDisambiguator} />
           {/* 技术身份保留在悬浮卡片中；消息头用「人 · agent」直接表达归属。 */}
           {lineageLabel !== null && (
             <span className="t-mono msg-lineage" title={senderTitle}>
@@ -857,6 +865,7 @@ function MessageCardImpl({
         >
           <span className="msg-quote-icon" aria-hidden="true">↩</span>
           <span className="msg-quote-sender">{quotedSenderLabel}</span>
+          <IdentityDisambiguator code={quotedSenderDisambiguator} />
           <span className="msg-quote-text">{quotedPreviewText}</span>
         </button>
       )}

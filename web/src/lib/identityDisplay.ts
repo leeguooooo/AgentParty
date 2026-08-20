@@ -1,4 +1,5 @@
 import type { MsgFrame, PresenceEntry, Sender } from "@agentparty/shared";
+import { assignIdentityDisambiguators } from "@agentparty/shared/identity";
 import type { ChannelIdentity } from "./api";
 import type { MentionCandidate } from "./mentions";
 
@@ -6,6 +7,8 @@ export interface IdentityDisplay {
   display: string;
   kind?: "agent" | "human";
   account?: string;
+  // #858：同 owner 同角色的 agent 渲染出的显示名会完全一样；撞名时才带上这段技术区分码。
+  disambiguator?: string;
 }
 
 export type IdentityDisplayMap = Record<string, IdentityDisplay>;
@@ -25,6 +28,8 @@ export interface IdentityPresentation {
   technicalName: string;
   generated: boolean;
   kind?: "agent" | "human";
+  // 仅撞名身份有值；渲染成 `owner · role·<code>`，不撞名的身份显示保持原样。
+  disambiguator?: string;
 }
 
 export function formatIdentityPresentation(
@@ -66,6 +71,14 @@ function addIdentity(
   };
 }
 
+// 撞名区分码查询（#858）：渲染点只需要「有没有」，不必重算 presentation。
+export function disambiguatorForIdentity(
+  name: string,
+  identities: IdentityDisplayMap | undefined,
+): string | null {
+  return identities?.[name]?.disambiguator ?? null;
+}
+
 export function displayForIdentity(name: string, identities: IdentityDisplayMap | undefined): string {
   return identities?.[name]?.display ?? name;
 }
@@ -101,6 +114,7 @@ export function resolveIdentityPresentation(
     technicalName: name,
     generated,
     ...(kind === undefined ? {} : { kind }),
+    ...(identity?.disambiguator === undefined ? {} : { disambiguator: identity.disambiguator }),
   };
 }
 
@@ -183,5 +197,25 @@ export function buildIdentityDisplay(input: {
   }
   for (const identity of input.channelIdentities) addIdentity(map, identity.name, identity, true);
 
+  return withDisambiguators(map);
+}
+
+// #858：全量 map 构建完成后统一扫一遍撞名——按最终渲染出的 `ownerLabel · label` 分组，
+// 同组多于一个技术 name 就给每个成员打一段组内唯一的区分码（规则在 shared/identity，与 #857 共用）。
+function withDisambiguators(map: IdentityDisplayMap): IdentityDisplayMap {
+  const groups = new Map<string, string[]>();
+  for (const name of Object.keys(map)) {
+    const presentation = resolveIdentityPresentation(name, map);
+    const key = `${presentation.kind ?? "unknown"}\u0000${presentation.ownerLabel ?? ""}\u0000${presentation.label}`;
+    const bucket = groups.get(key);
+    if (bucket === undefined) groups.set(key, [name]);
+    else bucket.push(name);
+  }
+  for (const names of groups.values()) {
+    if (names.length < 2) continue;
+    for (const [name, disambiguator] of assignIdentityDisambiguators(names)) {
+      map[name] = { ...map[name]!, disambiguator };
+    }
+  }
   return map;
 }
