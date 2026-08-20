@@ -194,6 +194,10 @@ export function socketWakeProxyForwarder(
   const fromName = options.fromName ?? ((ref: WakeProxyRef) => injectFromName(ref.channel));
   return async (target, ref) => {
     const result = await inject({
+      // 同 #857：按 pid 寻址（registry entry.pid 与 ~/.claude/sessions/<pid>.json 同源），
+      // sessionId 防 pid 复用。宣告名只作展示/回退，绝不用来寻址。
+      pid: target.pid,
+      sessionId: target.session_id,
       name: claudeSessionAnnounceName(target),
       body: wakeProxyNote(ref),
       fromName: fromName(ref),

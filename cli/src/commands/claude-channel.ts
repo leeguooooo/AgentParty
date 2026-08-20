@@ -579,7 +579,12 @@ export async function runDormantClaudeSessionAnnounce(
           injectedSeqs.delete(oldest.value);
         }
         await inject({
-          // 自我保护：目标恒为本轮绑定的宿主会话宣告名，不接受任何外部传入的名字。
+          // 自我保护：目标恒为本轮绑定的宿主会话，不接受任何外部传入的身份。
+          // 寻址走 pid（registry 与 ~/.claude/sessions 同源）——宣告名与 Claude 原生
+          // 会话名是两个命名空间，按名字寻址恒 no-match（#857 实测）。sessionId 一并
+          // 传下去做防 pid 复用比对。
+          pid: entry.pid,
+          sessionId: entry.session_id,
           name: hostAnnounceName,
           body: wakeProxyNote({ channel, seq }),
           // from-name＝真实发信人的友好名 + 技术 ID（接收端面板只显示这一处，

@@ -138,10 +138,10 @@ describe("attemptWakeProxy", () => {
 
 describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
   test("注入成功 → true；用宣告名寻址、from-name 带友好名+技术 ID、正文≤512B 指针", async () => {
-    let seen: { name: string; body: string; fromName: string } | null = null;
+    let seen: { name: string; body: string; fromName: string; pid?: number; sessionId?: string | null } | null = null;
     const forward = socketWakeProxyForwarder({
-      inject: async ({ name, body, fromName }) => {
-        seen = { name, body, fromName };
+      inject: async ({ name, body, fromName, pid, sessionId }) => {
+        seen = { name, body, fromName, pid, sessionId };
         return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: name };
       },
       // 默认 from-name 走 injectFromName（读本机 identity）；测试固定成确定值保持隔离。
@@ -159,6 +159,9 @@ describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
     const ok = await forward(entry({ display_name: "pair-claude" }), { channel: "pwtk", seq: 42 });
     expect(ok).toBe(true);
     expect(seen!.name).toBe("pair-claude");
+    // 寻址走 pid + sessionId（宣告名恒不等于 Claude 原生会话名，#857）。
+    expect(seen!.pid).toBe(entry().pid);
+    expect(seen!.sessionId).toBe(entry().session_id);
     expect(seen!.fromName).toBe("leo · agentparty (lark-ad72b3f97491-agentparty)");
     expect(seen!.body).toContain("seq=42");
     expect(Buffer.byteLength(seen!.body, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);

@@ -14,6 +14,7 @@ import {
   CLAUDE_SESSION_REGISTRY_CAPACITY,
   CLAUDE_SESSION_REGISTRY_DIR_ENV,
   claudeSessionAlive,
+  claudeSessionAnnounceName,
   claudeSessionRegistryDirectory,
   listClaudeSessions,
   registerClaudeSession,
@@ -188,7 +189,12 @@ describe("claude session registry", () => {
 
 describe("hook lifecycle wiring (#841 P1)", () => {
   test("SessionStart registers and SessionEnd unregisters", () => {
-    const hookEnv = { ...env, AGENTPARTY_CHANNEL: "dev" };
+    // 原生会话目录指向一个空临时目录：display_name 升级路径读不到东西，保持 null。
+    const hookEnv = {
+      ...env,
+      AGENTPARTY_CHANNEL: "dev",
+      AGENTPARTY_CLAUDE_NATIVE_SESSIONS_DIR: directory,
+    };
     recordClaudeSessionLifecycle({
       hook_event_name: "SessionStart",
       session_id: SESSION_ID,
@@ -208,6 +214,45 @@ describe("hook lifecycle wiring (#841 P1)", () => {
       session_id: SESSION_ID,
     }, hookEnv, process.pid);
     expect(listClaudeSessions(env)).toHaveLength(0);
+  });
+
+  test("SessionStart 机会性把 display_name 升级成 Claude 原生会话名（读不到就保持 null）", () => {
+    const nativeDir = mkdtempSync(join(tmpdir(), "ap-native-sessions-hook-"));
+    try {
+      const hookEnv = {
+        ...env,
+        AGENTPARTY_CHANNEL: "dev",
+        AGENTPARTY_CLAUDE_NATIVE_SESSIONS_DIR: nativeDir,
+      };
+      const payload = { hook_event_name: "SessionStart", session_id: SESSION_ID, cwd: "/tmp/project" };
+      // 文件还没写出来（SessionStart 可能早于原生注册）→ null，不重试不阻塞。
+      recordClaudeSessionLifecycle(payload, hookEnv, process.pid);
+      expect(listClaudeSessions(env)[0]!.display_name).toBeNull();
+      writeFileSync(
+        join(nativeDir, `${process.pid}.json`),
+        JSON.stringify({
+          pid: process.pid,
+          sessionId: SESSION_ID,
+          name: "agentparty-d4",
+          messagingSocketPath: "/tmp/cc-socks-fake/1.sock",
+        }),
+        { mode: 0o600 },
+      );
+      recordClaudeSessionLifecycle(payload, hookEnv, process.pid);
+      const listed = listClaudeSessions(env);
+      expect(listed[0]!.display_name).toBe("agentparty-d4");
+      expect(claudeSessionAnnounceName(listed[0]!)).toBe("agentparty-d4");
+      // sessionId 对不上（pid 复用）→ 不认，保持 null。
+      recordClaudeSessionLifecycle(
+        { ...payload, session_id: sessionId(2) },
+        hookEnv,
+        process.pid,
+      );
+      const other = listClaudeSessions(env).find((e) => e.session_id === sessionId(2))!;
+      expect(other.display_name).toBeNull();
+    } finally {
+      rmSync(nativeDir, { recursive: true, force: true });
+    }
   });
 
   test("serve-managed lanes and channel-less sessions are not registered", () => {

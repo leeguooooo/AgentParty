@@ -241,9 +241,15 @@ describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
   function injectingDeps(
     impl?: (input: { name: string; body: string; fromName: string }) => Promise<unknown>,
   ) {
-    const calls: { name: string; body: string; fromName: string }[] = [];
-    const inject = (async (input: { name: string; body: string; fromName: string }) => {
-      calls.push({ name: input.name, body: input.body, fromName: input.fromName });
+    const calls: { name: string; body: string; fromName: string; pid?: number; sessionId?: string | null }[] = [];
+    const inject = (async (input: { name: string; body: string; fromName: string; pid?: number; sessionId?: string | null }) => {
+      calls.push({
+        name: input.name,
+        body: input.body,
+        fromName: input.fromName,
+        pid: input.pid,
+        sessionId: input.sessionId,
+      });
       if (impl !== undefined) return await impl(input);
       return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: input.name };
     }) as DormantAnnounceDeps["inject"];
@@ -262,6 +268,9 @@ describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
     connections[0]!.push(msg(12, ["claude-111111111111"]));
     await tick();
     expect(calls).toHaveLength(1);
+    // 寻址走 pid + sessionId（宣告名与 Claude 原生会话名是两个命名空间，#857）。
+    expect(calls[0]!.pid).toBe(process.pid);
+    expect(calls[0]!.sessionId).toBe("11111111-1111-4111-8111-111111111111");
     expect(calls[0]!.name).toBe("claude-111111111111");
     // from-name＝友好名 + 技术 ID（接收端面板只显示这一处）。
     expect(calls[0]!.fromName).toBe("leo@example.com · agentparty (lark-ad72b3f97491-agentparty)");

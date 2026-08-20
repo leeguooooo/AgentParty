@@ -187,6 +187,55 @@ export function resolveSessionSocket(
 }
 
 /**
+ * 按 pid 寻址（#857 实测修正）：registry entry 的 `pid` 与 `~/.claude/sessions/<pid>.json`
+ * 同源，直接读那一份文件取 messagingSocketPath。
+ *
+ * **为什么不能按名字寻址**：`claudeSessionAnnounceName(entry)` 是 party 侧的宣告名
+ * （hook 拿不到 display_name 时恒为 `claude-<12hex>`），而这里的 `name` 是 Claude 原生
+ * 会话名（`agentparty-d4`、`portwind-kyc-10`）。两个命名空间永不相等 → 恒 no-match。
+ *
+ * **防 pid 复用**：本机实测 `<pid>.json` 的 `sessionId` 与 registry 的 `session_id` 逐字
+ * 相等，所以传 expectSessionId 时做严格比对——比 procStart 时间戳更硬（pid 被复用后
+ * sessionId 必然不同）。拿不到/不相等一律拒投，降级即可，绝不写错会话的 socket。
+ */
+export function resolveSessionSocketByPid(
+  pid: number,
+  options: { expectSessionId?: string | null; env?: NodeJS.ProcessEnv } = {},
+): ResolveResult {
+  const env = options.env ?? process.env;
+  const dir = nativeSessionsDir(env);
+  if (dir === null) return { ok: false, reason: "unavailable" };
+  if (!Number.isInteger(pid) || pid <= 0) return { ok: false, reason: "no-match" };
+  const session = readNativeSession(dir, `${pid}.json`);
+  if (session === null) return { ok: false, reason: "no-match" };
+  if (!pidAlive(session.pid)) return { ok: false, reason: "no-match" };
+  const expected = options.expectSessionId;
+  if (typeof expected === "string" && expected !== "") {
+    // sessionId 不匹配 ＝ 这个 pid 已经是别的会话（复用/换会话）→ 绝不投。
+    if (session.sessionId === null || session.sessionId.toLowerCase() !== expected.toLowerCase()) {
+      return { ok: false, reason: "no-match" };
+    }
+  }
+  return { ok: true, session };
+}
+
+/**
+ * 机会性读取 Claude 原生会话名（`~/.claude/sessions/<pid>.json` 的 `name`，形如
+ * `agentparty-d4`）。用于 SessionStart 入册时把 registry 的 display_name 从
+ * `claude-<12hex>` 升级成人能读的名字。文件尚未生成/权限不足/sessionId 不匹配一律
+ * 返回 null——调用方保持 null 即可，绝不重试等待（hook 铁律：静默、不阻塞）。
+ */
+export function nativeSessionName(
+  pid: number,
+  options: { expectSessionId?: string | null; env?: NodeJS.ProcessEnv } = {},
+): string | null {
+  const resolved = resolveSessionSocketByPid(pid, options);
+  if (!resolved.ok) return null;
+  const name = resolved.session.name;
+  return typeof name === "string" && name !== "" ? name : null;
+}
+
+/**
  * 读 peerToken：`~/.claude/sessions/<pid>.<sha256(socket path)>.key`（native `USd`）。
  * 读不到（非 Windows optional）返回 null，写入时就不带 auth 行。
  */
@@ -335,8 +384,17 @@ export type InjectResult =
   | { ok: false; reason: InjectFailureReason; detail?: string };
 
 export interface InjectChannelMessageInput {
-  /** 目标会话在 Claude 原生注册里的 `name`（＝我方宣告名）。 */
+  /**
+   * 目标会话名。**只有在它确实是 Claude 原生会话名时才用得上**——party 侧的宣告名
+   * （`claude-<12hex>`）与原生 name 是两个命名空间，恒不相等（#857 实测）。因此调用方
+   * 只要手上有 registry entry，就应该同时传 `pid`（+ `sessionId`）走 pid 寻址；`name`
+   * 退化为纯展示/回退用途。
+   */
   name: string;
+  /** 目标会话 pid（registry entry.pid）。给了就优先按 pid 寻址——权威路径。 */
+  pid?: number;
+  /** 目标会话 id（registry entry.session_id）：pid 寻址时做防复用比对。 */
+  sessionId?: string | null;
   /** 频道指针/摘要（≤512B），会被 cross-session-message 包装。 */
   body: string;
   /** 频道昵称（"Message from <fromName>"）。 */
@@ -366,7 +424,12 @@ export async function injectChannelMessage(
   if (!FROM_MODES.has(fromMode)) {
     return { ok: false, reason: "write-failed", detail: "invalid from-mode" };
   }
-  const resolved = resolveSessionSocket(input.name, env);
+  // 寻址优先级：pid（权威，registry 与原生 sessions 目录同源）→ name（仅当调用方手上
+  // 只有一个原生会话名时的回退）。pid 命中失败**不再**回落到 name：宣告名恒不等于原生
+  // name，回落只会白跑一趟；而若某天名字恰好撞上别的会话，回落反而会投错人。
+  const resolved = input.pid === undefined
+    ? resolveSessionSocket(input.name, env)
+    : resolveSessionSocketByPid(input.pid, { expectSessionId: input.sessionId, env });
   if (!resolved.ok) return { ok: false, reason: resolved.reason };
   const { session } = resolved;
 
