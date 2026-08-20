@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { nextMentionBadgeCount, shouldMarkSeen, shouldNotify, shouldToast } from "./notify";
 const base = (over = {}) => ({ type:"msg", kind:"message", seq:5, mentions:["leo"], retracted:undefined,
-  sender:{name:"bob",kind:"agent"}, body:"hi @leo", ...over } as any);
+  sender:{name:"bob",kind:"agent"}, body:"hi @leo", ts: Date.now(), ...over } as any);
 
 test("被@ + 隐藏 + 已授权 → true", () => {
   expect(shouldNotify(base(), "leo", true, true)).toBe(true);

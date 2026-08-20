@@ -3382,7 +3382,12 @@ export function ChannelPage({
   const hasMoreRef = useRef(true); // 还有更早的历史可上翻
   const loadingOlderRef = useRef(false); // 上翻请求进行中（去抖）
   const [olderStatus, setOlderStatus] = useState<"idle" | "loading" | "error" | "end">("idle");
-  const initialCursorRef = useRef(0); // ws hello 的起始游标 = 初始页最后一条 seq
+  // ws hello 的起始游标。初始 seed = 初始页最后一条 seq，之后随每条 live/补拉帧单调前进（#861）——
+  // socket 重建（token 静默续期）时必须带着已见水位重连，绝不退回 0 让服务端全量重放。
+  const initialCursorRef = useRef(0);
+  // #861：初始页加载失败期间，本连接收到的帧一律不提醒（窗口为空 ⇒ 下界防御失效，
+  // 服务端会把全部历史 @ 当 live 帧重放）。初始页成功后复位。
+  const replayUntrustedRef = useRef(false);
   const initialHistoryRequestRef = useRef(0);
   const pendingAnchorRef = useRef<{ height: number; top: number } | null>(null); // prepend 前的滚动锚
   const oldestSeqRef = useRef(0);
@@ -3899,7 +3904,9 @@ export function ChannelPage({
   const loadInitialPage = useCallback(() => {
     const request = ++initialHistoryRequestRef.current;
     hasMoreRef.current = true;
-    initialCursorRef.current = 0;
+    // #861：**绝不**在这里把游标清 0。token 静默续期（App.tsx setToken）会让本 effect 与
+    // ws effect 在同一次 commit 里重跑，ws effect 读到清 0 的 ref 就会以 since=0 建 socket，
+    // 服务端把整段历史当 live 帧重放，10 天前的老 @ 当场弹通知。游标只单调前进。
     setOlderStatus("idle");
     setHistoryError(null);
     fetchMessagesWithRetry(token, slug, { before: Number.MAX_SAFE_INTEGER, limit: PAGE_SIZE })
@@ -3909,7 +3916,10 @@ export function ChannelPage({
         for (const m of msgs) dispatch({ type: "frame", frame: m }); // 按 seq 去重，与 ws 交叠无害
         hasMoreRef.current = msgs.length >= PAGE_SIZE;
         if (!hasMoreRef.current) setOlderStatus("end");
-        initialCursorRef.current = msgs.length > 0 ? msgs[msgs.length - 1]!.seq : 0;
+        // 单调前进：live 帧已把游标推得比这页页尾更远时（重建 socket 场景）不许回退。
+        const pageTail = msgs.length > 0 ? msgs[msgs.length - 1]!.seq : 0;
+        initialCursorRef.current = Math.max(initialCursorRef.current, pageTail);
+        replayUntrustedRef.current = false; // 历史已可信，恢复提醒
         setBootstrapped(true);
       })
       .catch((err: unknown) => {
@@ -3922,9 +3932,12 @@ export function ChannelPage({
           dispatch({ type: "fatal", reason: "forbidden" });
           return;
         }
-        // 初始页失败：退回 ws 全量重放（since=0），页面仍可用
+        // 初始页失败：退回 ws 全量重放（since=0 —— 只在游标本就是 0 时成立），页面仍可用。
+        // #861：此时 state.messages 为空 ⇒ 下界防御（floor > 0）整体失效，服务端会把频道里
+        // 所有历史 @ 当 live 帧重放。显式标记「本次降级期间的帧一律不提醒」，直到某次初始页
+        // 加载成功、历史重新可信为止。游标同样不清 0（已加载过就保住已见水位）。
         setHistoryError(tRef.current("Channel.history.loadFailed"));
-        initialCursorRef.current = 0;
+        replayUntrustedRef.current = true;
         hasMoreRef.current = false;
         setOlderStatus("end");
         setBootstrapped(true);
@@ -4021,6 +4034,10 @@ export function ChannelPage({
           // 窗口下界防御（review P1 双保险）：低于已加载窗口的旧消息/旧修订不进窗口——
           // 插进去会把上翻分页的 before 起点拽到远古 seq，中段历史被永久跳过。
           // 上翻时 REST 本来就返回当前正文，丢掉这些帧无信息损失。
+          // #861：游标随每条消息帧单调前进，socket 重建时才能带着已见水位重连（hello.since）。
+          if ((frame.type === "msg" || frame.type === "status") && frame.seq > initialCursorRef.current) {
+            initialCursorRef.current = frame.seq;
+          }
           const floor = oldestSeqRef.current;
           if (floor > 0) {
             if ((frame.type === "msg" || frame.type === "status") && frame.seq < floor) return;
@@ -4031,11 +4048,14 @@ export function ChannelPage({
           if (
             frame.type === "msg" &&
             !notifiedSeqRef.current.has(frame.seq) &&
+            !replayUntrustedRef.current &&
             shouldNotify(frame, selfHandleRef.current, document.hidden, optinRef.current, selfNameRef.current)
           ) {
             notifiedSeqRef.current.add(frame.seq);
             const title = tRef.current("Channel.notify.title", { channel: slug });
-            const body = summarizeReplyPreview(frame.body);
+            // #861：带上消息**自身**的时间。弹窗从来只打频道名+正文，用户无从发现
+            // 「通知时间 ≠ @ 时间」——这次让它一眼可见。
+            const body = `${fmtTime(frame.ts)} · ${summarizeReplyPreview(frame.body)}`;
             if (isDesktopRuntime()) {
               void sendMentionNotification({ title, body, slug, seq: frame.seq });
             } else if (typeof Notification !== "undefined" && Notification.permission === "granted") {
@@ -4047,7 +4067,7 @@ export function ChannelPage({
               };
             }
           }
-          if (frame.type === "msg") {
+          if (frame.type === "msg" && !replayUntrustedRef.current) {
             const nextBadge = nextMentionBadgeCount(
               desktopMentionBadgeRef.current,
               frame,
@@ -4064,6 +4084,7 @@ export function ChannelPage({
           if (
             frame.type === "msg" &&
             !toastedSeqRef.current.has(frame.seq) &&
+            !replayUntrustedRef.current &&
             shouldToast(frame, selfHandleRef.current, document.hidden, optinRef.current, selfNameRef.current)
           ) {
             toastedSeqRef.current.add(frame.seq);
@@ -4075,6 +4096,7 @@ export function ChannelPage({
                   sender: frame.sender, // 存原始 sender，渲染时用 resolveSenderLabel 解析，与消息卡显示保持一致
                   body: summarizeReplyPreview(frame.body),
                   fullBody: frame.body, // #280：完整正文，供 toast 悬停看全文
+                  ts: frame.ts, // #861：消息自身时间，提醒里直接打出来
                 },
               ].slice(-3),
             );

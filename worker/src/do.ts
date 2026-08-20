@@ -2817,7 +2817,11 @@ export class ChannelDO extends Server<Env> {
                 .exec(backfillQuery, since, pageCursor, HELLO_BACKFILL_PAGE_SIZE)
                 .toArray();
         for (const row of rows) {
-          if (!this.sendPublicFrame(connection, publicMsgFrame(this.rowToFrame(row)), true)) return;
+          // #861：补拉帧在 wire 上带 replay:true，与 live 广播区分开。客户端据此不把
+          // 重放的老消息当新消息弹系统通知/toast/角标。live 路径（broadcast → sendPublicFrame(_, false)）
+          // 永不打这个标记。
+          const replayFrame: MsgFrame = { ...publicMsgFrame(this.rowToFrame(row)), replay: true };
+          if (!this.sendPublicFrame(connection, replayFrame, true)) return;
         }
         if (rows.length < HELLO_BACKFILL_PAGE_SIZE) break;
         // 游标推进到本页最后一行的 seq；seq 唯一且升序，下一页严格取更大的 seq，保证前进、不重不漏。

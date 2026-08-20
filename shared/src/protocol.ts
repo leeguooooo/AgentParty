@@ -1650,6 +1650,14 @@ export interface MsgFrame {
   superseded_by?: number;
   /** 该消息最近一次修订的单调序号；客户端据此推进修订游标（hello.since_rev） */
   rev_seq?: number;
+  /**
+   * hello 补拉（历史重放）标记（#861）。服务端只在 hello.since/since_rev 补拉循环里打上，
+   * live 广播永不携带。客户端据此把「重放的老消息」与「真的新消息」区分开——否则重连时
+   * 一条 10 天前的 @ 会以 live 帧身份触发系统通知。
+   * 可选字段：旧客户端忽略即可正常工作；新客户端见 undefined 时按 live 处理（旧服务端语义）。
+   * 注意：`cli/src/client.ts` 的 isMessageFrame 校验必须逐字镜像本字段（#622 教训）。
+   */
+  replay?: true;
   revision?: {
     original_body: string | null;
   };

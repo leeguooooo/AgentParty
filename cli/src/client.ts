@@ -246,7 +246,10 @@ function isMessageFrame(value: unknown): boolean {
     (value.retracted_by === undefined || typeof value.retracted_by === "string") &&
     (value.supersedes === undefined || isPositiveInteger(value.supersedes)) &&
     (value.superseded_by === undefined || isPositiveInteger(value.superseded_by)) &&
-    (value.rev_seq === undefined || isPositiveInteger(value.rev_seq));
+    (value.rev_seq === undefined || isPositiveInteger(value.rev_seq)) &&
+    // #861 hello 补拉标记。必须逐字镜像 shared/src/protocol.ts 的 MsgFrame.replay，
+    // 否则服务端一上线这个字段，CLI 就会把所有补拉帧判为非法而静默丢帧（#622 的教训）。
+    (value.replay === undefined || value.replay === true);
 }
 
 function isDirectedDelivery(value: unknown): boolean {

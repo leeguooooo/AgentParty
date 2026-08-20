@@ -4219,6 +4219,13 @@ button.org-person-name {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* #861：提醒里打出消息自身时间，让「通知时间 ≠ @ 时间」一眼可见 */
+.mention-header-time,
+.mention-toast-time {
+  flex: none;
+  opacity: 0.75;
+  font-size: 10px;
+}
 .mention-header-count {
   flex: none;
   padding: 0 4px;
