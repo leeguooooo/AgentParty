@@ -6,6 +6,7 @@ import {
   attemptWakeProxy,
   noWakeProxyForwarder,
   selectWakeProxyTarget,
+  socketWakeProxyForwarder,
   WAKE_PROXY_NOTE_MAX_BYTES,
   wakeProxyNote,
 } from "../src/serve-wake-proxy";
@@ -131,5 +132,30 @@ describe("attemptWakeProxy", () => {
 
   test("noWakeProxyForwarder 恒 false", async () => {
     expect(await noWakeProxyForwarder(entry(), { channel: "dev", seq: 1 })).toBe(false);
+  });
+});
+
+describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
+  test("注入成功 → true；用宣告名寻址、频道昵称默认取 channel、正文≤512B 指针", async () => {
+    let seen: { name: string; body: string; fromName: string } | null = null;
+    const forward = socketWakeProxyForwarder({
+      inject: async ({ name, body, fromName }) => {
+        seen = { name, body, fromName };
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: name };
+      },
+    });
+    const ok = await forward(entry({ display_name: "pair-claude" }), { channel: "pwtk", seq: 42 });
+    expect(ok).toBe(true);
+    expect(seen!.name).toBe("pair-claude");
+    expect(seen!.fromName).toBe("pwtk");
+    expect(seen!.body).toContain("seq=42");
+    expect(Buffer.byteLength(seen!.body, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
+  });
+
+  test("注入失败（结构化 reason）→ false，触发 attemptWakeProxy 降级", async () => {
+    const forward = socketWakeProxyForwarder({
+      inject: async () => ({ ok: false, reason: "no-match" }),
+    });
+    expect(await forward(entry(), { channel: "dev", seq: 1 })).toBe(false);
   });
 });
