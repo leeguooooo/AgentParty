@@ -6,6 +6,7 @@ import {
   attemptWakeProxy,
   noWakeProxyForwarder,
   selectWakeProxyTarget,
+  injectFromName,
   socketWakeProxyForwarder,
   WAKE_PROXY_NOTE_MAX_BYTES,
   wakeProxyNote,
@@ -136,18 +137,29 @@ describe("attemptWakeProxy", () => {
 });
 
 describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
-  test("注入成功 → true；用宣告名寻址、频道昵称默认取 channel、正文≤512B 指针", async () => {
+  test("注入成功 → true；用宣告名寻址、from-name 带友好名+技术 ID、正文≤512B 指针", async () => {
     let seen: { name: string; body: string; fromName: string } | null = null;
     const forward = socketWakeProxyForwarder({
       inject: async ({ name, body, fromName }) => {
         seen = { name, body, fromName };
         return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: name };
       },
+      // 默认 from-name 走 injectFromName（读本机 identity）；测试固定成确定值保持隔离。
+      fromName: (ref) => injectFromName(ref.channel, {
+        name: "lark-ad72b3f97491-agentparty",
+        email: null,
+        kind: "agent",
+        role: "agent",
+        owner: null,
+        owner_display_name: "leo",
+        channel_scope: "pwtk",
+        verified_at: 0,
+      }),
     });
     const ok = await forward(entry({ display_name: "pair-claude" }), { channel: "pwtk", seq: 42 });
     expect(ok).toBe(true);
     expect(seen!.name).toBe("pair-claude");
-    expect(seen!.fromName).toBe("pwtk");
+    expect(seen!.fromName).toBe("leo · agentparty (lark-ad72b3f97491-agentparty)");
     expect(seen!.body).toContain("seq=42");
     expect(Buffer.byteLength(seen!.body, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
   });

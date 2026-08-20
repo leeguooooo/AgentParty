@@ -27,6 +27,8 @@ import {
   type ClaudeSessionRegistryEntry,
 } from "./claude-session-registry";
 import { injectChannelMessage } from "./claude-inbox-inject";
+import { friendlyAgentLabel } from "@agentparty/shared/identity";
+import { readConfig, type CachedIdentity } from "./config";
 
 /** 三不变量之一：唤醒通知只带 channel+seq 指针，且总长 ≤512 UTF-8 字节。 */
 export const WAKE_PROXY_NOTE_MAX_BYTES = 512;
@@ -76,6 +78,75 @@ export function selectWakeProxyTarget(
   return best;
 }
 
+/**
+ * 注入面板上的「谁发来的」。接收端把它原样显示成
+ * `from uds:<sock> (peer claims name: <fromName>)`（#844 实测面板文本），**面板不另外
+ * 显示我们的技术 identity**——所以 fromName 必须自带技术 ID，否则两个仅哈希段不同的
+ * 身份（`lark-ad72b3f97491-agentparty` / `lark-ad72b3f9749e-agentparty`）会显示成同一个
+ * `leo · agentparty`，界面上无法分辨。
+ *
+ * 形态：`<所属人> · <角色> (<技术 identity>)`——友好前半对齐 web 的 identityDisplay
+ * （规则同源于 shared/src/identity.ts），括号里给完整技术 ID 保证唯一可辨（选 A 不选
+ * 尾 5 位短码：短码仍会碰撞，而 from-name 没有长度硬限，只禁 `"` 与 `\r\n<>`）。
+ * 读不到本机 identity（未登录/旧配置）→ 回退 `agentparty#<channel>`。
+ */
+export function injectFromName(
+  channel: string,
+  identity: CachedIdentity | null | undefined = resolveLocalIdentity(),
+): string {
+  if (identity === null || identity === undefined || typeof identity.name !== "string" || identity.name === "") {
+    return `agentparty#${channel}`;
+  }
+  const friendly = friendlyAgentLabel(identity);
+  return sanitizeFromName(
+    friendly === identity.name ? identity.name : `${friendly} (${identity.name})`,
+    channel,
+  );
+}
+
+/**
+ * announce 注入（#857）用的 from-name：那条路径知道**真实发信人**（频道 msg 帧的 sender），
+ * 显示发信人比显示中转身份有用得多。规则同 injectFromName——友好名 + 括号里的技术 ID：
+ * - 人类：`<display_name || handle || owner>`（本身就可读，技术 name 同值时不重复加括号）；
+ * - agent：`<所属人> · <角色> (<技术 identity>)`。
+ * sender 缺失/不可读时回退 `agentparty#<channel>`。
+ */
+export function senderInjectFromName(
+  sender: { name?: string; kind?: string; owner?: string | null; handle?: string | null; display_name?: string | null } | null | undefined,
+  channel: string,
+): string {
+  const name = typeof sender?.name === "string" ? sender.name.trim() : "";
+  if (name === "") return `agentparty#${channel}`;
+  const friendly = sender?.kind === "human"
+    ? (sender.display_name?.trim() || sender.handle?.trim() || sender.owner?.trim() || name)
+    : friendlyAgentLabel({
+        name,
+        owner: sender?.owner ?? null,
+        owner_handle: null,
+        owner_display_name: null,
+      });
+  return sanitizeFromName(friendly === name ? name : `${friendly} (${name})`, channel);
+}
+
+/**
+ * from-name 净化：injectChannelMessage 会硬拒含 `"` / `\r\n<>` 的 from-name（会破坏接收端
+ * 的完整性自校验）。频道昵称是用户可控数据，这里把非法字符换成 `_`，别让一个昵称把整条
+ * 唤醒路径打成静默失败。
+ */
+function sanitizeFromName(value: string, channel: string): string {
+  const cleaned = value.replace(/["\r\n<>]/g, "_").trim();
+  return cleaned === "" ? `agentparty#${channel}` : cleaned;
+}
+
+/** 本机缓存身份；任何读取失败都当「没有」（注入 fromName 回退频道名）。 */
+export function resolveLocalIdentity(cwd?: string): CachedIdentity | null {
+  try {
+    return readConfig(cwd)?.identity ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** 可注入的转投载体：true=已转投成功；false/抛错=未转投（降级为现行为）。 */
 export type WakeProxyForwarder = (
   target: ClaudeSessionRegistryEntry,
@@ -119,7 +190,8 @@ export function socketWakeProxyForwarder(
   options: SocketWakeProxyForwarderOptions = {},
 ): WakeProxyForwarder {
   const inject = options.inject ?? injectChannelMessage;
-  const fromName = options.fromName ?? ((ref: WakeProxyRef) => ref.channel);
+  // 默认 from-name＝友好名 + 技术 ID（owner 2026-08-20：技术 ID 是身份本身，不能丢）。
+  const fromName = options.fromName ?? ((ref: WakeProxyRef) => injectFromName(ref.channel));
   return async (target, ref) => {
     const result = await inject({
       name: claudeSessionAnnounceName(target),

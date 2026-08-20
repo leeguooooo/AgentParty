@@ -3,6 +3,7 @@ import type { ServerFrame } from "@agentparty/shared";
 import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
 import {
   dormantAnnounceDisplayName,
+  dormantAnnounceMentionHit,
   runDormantClaudeSessionAnnounce,
   selectDormantAnnounceEntry,
   type DormantAnnounceDeps,
@@ -208,5 +209,99 @@ describe("runDormantClaudeSessionAnnounce (#841 P2)", () => {
     const abort = new AbortController();
     await runDormantClaudeSessionAnnounce("Bad_Channel!", abort.signal, deps);
     expect(connections).toHaveLength(0);
+  });
+});
+
+function msg(seq: number, mentions: string[]): ServerFrame {
+  return {
+    type: "msg",
+    seq,
+    sender: { name: "lark-ad72b3f97491-agentparty", kind: "agent", owner: "leo@example.com" },
+    kind: "text",
+    body: "hello",
+    mentions,
+    reply_to: null,
+    state: null,
+    note: null,
+    status: null,
+    ts: 1,
+  } as unknown as ServerFrame;
+}
+
+describe("dormantAnnounceMentionHit", () => {
+  test("matches the host announce name case-insensitively and ignores others", () => {
+    expect(dormantAnnounceMentionHit(["Claude-111111111111"], "claude-111111111111")).toBe(true);
+    expect(dormantAnnounceMentionHit(["someone-else"], "claude-111111111111")).toBe(false);
+    expect(dormantAnnounceMentionHit(undefined, "claude-111111111111")).toBe(false);
+    expect(dormantAnnounceMentionHit([], "claude-111111111111")).toBe(false);
+  });
+});
+
+describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
+  function injectingDeps(
+    impl?: (input: { name: string; body: string; fromName: string }) => Promise<unknown>,
+  ) {
+    const calls: { name: string; body: string; fromName: string }[] = [];
+    const inject = (async (input: { name: string; body: string; fromName: string }) => {
+      calls.push({ name: input.name, body: input.body, fromName: input.fromName });
+      if (impl !== undefined) return await impl(input);
+      return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: input.name };
+    }) as DormantAnnounceDeps["inject"];
+    const made = makeDeps({ inject });
+    return { ...made, calls };
+  }
+
+  test("injects only when the host session is mentioned, targeting the host session", async () => {
+    const { deps, connections, calls } = injectingDeps();
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    connections[0]!.push(msg(11, ["someone-else"]));
+    await tick();
+    expect(calls).toHaveLength(0);
+    connections[0]!.push(msg(12, ["claude-111111111111"]));
+    await tick();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.name).toBe("claude-111111111111");
+    // from-name＝友好名 + 技术 ID（接收端面板只显示这一处）。
+    expect(calls[0]!.fromName).toBe("leo@example.com · agentparty (lark-ad72b3f97491-agentparty)");
+    expect(calls[0]!.body).toContain("seq=12");
+    expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(512);
+    // 注入路径不改变 P2 不变式：只本地 ack，绝不发客户端帧、绝不推进持久化游标。
+    expect(connections[0]!.acked).toEqual([11, 12]);
+    expect(connections[0]!.sent).toHaveLength(0);
+    expect(connections[0]!.connectArgs.opts.onCursor).toBeUndefined();
+    abort.abort();
+    await done;
+  });
+
+  test("injects a given seq at most once even if the frame is replayed", async () => {
+    const { deps, connections, calls } = injectingDeps();
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    connections[0]!.push(msg(20, ["claude-111111111111"]));
+    connections[0]!.push(msg(20, ["claude-111111111111"]));
+    await tick();
+    expect(calls).toHaveLength(1);
+    abort.abort();
+    await done;
+  });
+
+  test("a failing inject degrades silently: acks continue and the loop survives", async () => {
+    const { deps, connections, calls } = injectingDeps(async () => {
+      throw new Error("socket gone");
+    });
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    connections[0]!.push(msg(30, ["claude-111111111111"]));
+    await tick();
+    connections[0]!.push(msg(31, ["claude-111111111111"]));
+    await tick();
+    expect(calls).toHaveLength(2);
+    expect(connections[0]!.acked).toEqual([30, 31]);
+    abort.abort();
+    await done;
   });
 });
