@@ -128,6 +128,19 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     ...(harness !== "codex"
       ? [`claude mcp add ${mcpServerName(agentName)} --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.json" -- party mcp --channel ${slug}`]
       : []),
+    // #848：claude 档补装 marketplace 插件——SessionStart/SessionEnd hook→会话注册表 + idle 可发现/被唤醒 +
+    // 跨会话协作（#841）都由插件承载，裸 MCP 拿不到。`|| true` 保证装不上不阻断接入主流程（降级=只少这些能力）。
+    // codex/other 档不加：插件是 Claude Code 专属；other 档必须与旧全量逐字节一致（joinPack.test.ts 有断言）。
+    ...(harness === "claude"
+      ? [
+          t("AgentJoin.cmd.pluginNote1"),
+          `claude plugin marketplace add leeguooooo/AgentParty || true`,
+          `claude plugin install agentparty@agentparty || true`,
+          // 装上未必启用——doctor.ts 的 fix 提示就是 install && enable 两连，这里对齐。
+          `claude plugin enable agentparty@agentparty || true`,
+          t("AgentJoin.cmd.pluginNote2"),
+        ]
+      : []),
     // step4codex 是 codex mcp add 指引；claude 档去掉（目标 harness 只走一条，其余是噪音）。
     ...(harness !== "claude"
       ? [t("AgentJoin.cmd.step4codex", { mcpName: mcpServerName(agentName), agentName, slug })]
