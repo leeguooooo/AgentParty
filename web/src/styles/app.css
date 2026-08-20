@@ -5076,6 +5076,8 @@ button.org-person-name {
   flex-wrap: wrap;
 }
 .agent-detail-alias { color: var(--t-dim); }
+/* #858 撞名区分码：等宽 + 弱化色，跟身份卡 alias 同一视觉层级。 */
+.identity-disambiguator { color: var(--t-dim); font-size: 0.85em; margin-left: 2px; }
 .agent-detail-online-badge {
   font-weight: 700;
 }

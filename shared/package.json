@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/protocol.ts",
+    "./identity": "./src/identity.ts",
     "./mentions": "./src/mentions.ts",
     "./onboarding": "./src/onboarding.ts"
   }

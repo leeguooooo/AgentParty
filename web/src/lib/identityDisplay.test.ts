@@ -191,3 +191,86 @@ describe("resolveIdentityPresentation", () => {
     ).toBe("ZHENG TONG · 小火龙");
   });
 });
+
+describe("identity disambiguation (#858)", () => {
+  const owner = "lark:on_b81feb6f84d5225a462349bb36499262";
+  const human = {
+    name: "human-session",
+    display: "leo",
+    kind: "human" as const,
+    account: owner,
+  };
+
+  function agents(...names: string[]) {
+    return buildIdentityDisplay({
+      channelIdentities: [
+        human,
+        ...names.map((name) => ({ name, display: name, kind: "agent" as const, account: owner })),
+      ],
+      mentionOptions: [],
+      messages: [],
+      participants: [],
+      presence: {},
+    });
+  }
+
+  it("gives two agents that only differ in their hash segment distinct disambiguators", () => {
+    const map = agents("lark-ad72b3f97491-agentparty", "lark-ad72b3f9749e-agentparty");
+    const a = resolveIdentityPresentation("lark-ad72b3f97491-agentparty", map);
+    const b = resolveIdentityPresentation("lark-ad72b3f9749e-agentparty", map);
+
+    expect(a.label).toBe("agentparty");
+    expect(b.label).toBe("agentparty");
+    expect(a.ownerLabel).toBe("leo");
+    expect(a.disambiguator).toBe("97491");
+    expect(b.disambiguator).toBe("9749e");
+  });
+
+  it("leaves a lone identity untouched", () => {
+    const map = agents("lark-ad72b3f97491-agentparty");
+    expect(map["lark-ad72b3f97491-agentparty"]?.disambiguator).toBeUndefined();
+    expect(
+      resolveIdentityPresentation("lark-ad72b3f97491-agentparty", map).disambiguator,
+    ).toBeUndefined();
+  });
+
+  it("does not disambiguate agents whose rendered names already differ", () => {
+    const map = agents("lark-ad72b3f97491-agentparty", "lark-ad72b3f9749e-release");
+    expect(map["lark-ad72b3f97491-agentparty"]?.disambiguator).toBeUndefined();
+    expect(map["lark-ad72b3f9749e-release"]?.disambiguator).toBeUndefined();
+  });
+
+  it("keeps every member of a three-way collision unique", () => {
+    const names = [
+      "lark-ad72b3f97491-agentparty",
+      "lark-ad72b3f9749e-agentparty",
+      "lark-ad72b3f974a0-agentparty",
+    ];
+    const map = agents(...names);
+    const codes = names.map((name) => map[name]?.disambiguator);
+    expect(codes.every((code) => typeof code === "string")).toBe(true);
+    expect(new Set(codes).size).toBe(3);
+  });
+
+  it("grows the disambiguator past 5 chars when 5 is not enough", () => {
+    const map = agents("lark-ad72b3f1aaaaa-agentparty", "lark-ad72b3f2aaaaa-agentparty");
+    expect(map["lark-ad72b3f1aaaaa-agentparty"]?.disambiguator).toBe("1aaaaa");
+    expect(map["lark-ad72b3f2aaaaa-agentparty"]?.disambiguator).toBe("2aaaaa");
+  });
+
+  it("degrades to the tail of the raw name when there is no hash segment", () => {
+    const map = buildIdentityDisplay({
+      channelIdentities: [
+        human,
+        { name: "worker-one", display: "小火龙", kind: "agent", account: owner },
+        { name: "worker-two", display: "小火龙", kind: "agent", account: owner },
+      ],
+      mentionOptions: [],
+      messages: [],
+      participants: [],
+      presence: {},
+    });
+    expect(map["worker-one"]?.disambiguator).toBe("r-one");
+    expect(map["worker-two"]?.disambiguator).toBe("r-two");
+  });
+});

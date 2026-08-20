@@ -3,6 +3,8 @@
 import { autoWakeReachable, evaluateHostLease, PRESENCE_TIMEOUT_MS, wakeableState, type ChannelRoleAssignment, type PresenceEntry, type PresenceState, type Sender } from "@agentparty/shared";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import { agentHue } from "../lib/agentColor";
+import { disambiguatorForIdentity, type IdentityDisplayMap } from "../lib/identityDisplay";
+import { IdentityDisambiguator } from "./IdentityDisambiguator";
 import { gitContextChip } from "../lib/gitContext";
 import { fmtRel } from "../lib/time";
 import type { SocketStatus } from "../lib/ws";
@@ -30,6 +32,8 @@ interface Props {
   focus?: ReactElement | null;
   // issue #272（审计重开）：点 presence roster 里的某个人/agent，打开它的单 Agent 详情弹窗。
   onOpenAgentDetail?: (name: string) => void;
+  // #858：撞名身份的技术区分码来源；缺省即不显示区分码（老调用方行为不变）。
+  identities?: IdentityDisplayMap;
 }
 
 // 暂停时长预设（#180）：值 → 相对 now 的恢复时刻（epoch ms），"indefinite" 返回 null（手动恢复）。
@@ -75,6 +79,8 @@ export interface Item {
   avatarUrl: string | null;
   avatarThumb: string | null;
   display: string;
+  // #858：同 owner 同角色 agent 撞名时才有值；不撞名恒为 null，presence 行显示不变。
+  disambiguator: string | null;
   responsibility: string | null;
   connectionCount: number;
   clientVersion: string | null;
@@ -378,6 +384,7 @@ export function PresenceBar({
   headerControls,
   focus,
   onOpenAgentDetail,
+  identities,
 }: Props) {
   const t = useT();
   const localizeWaitingOwner = (item: Item): string | null => {
@@ -427,6 +434,7 @@ export function PresenceBar({
         assigned?.display ??
         (kind === "human" ? displayName ?? handle ?? owner ?? name : handle ?? displayName ?? name),
       displayName,
+      disambiguator: disambiguatorForIdentity(name, identities),
       avatarUrl: sender?.avatar_url ?? entry?.avatar_url ?? null,
       avatarThumb: sender?.avatar_thumb ?? entry?.avatar_thumb ?? null,
       responsibility: assigned?.responsibility ?? null,
@@ -655,6 +663,7 @@ export function PresenceBar({
           className={`d-dot d-dot--${it.state}${it.paused ? " d-dot--paused" : ""}${unreachable !== null ? " d-dot--unreachable" : ""}`}
         />
         <span className="presence-name">{it.display}</span>
+        <IdentityDisambiguator code={it.disambiguator} />
         <span className={`t-mono presence-kind presence-kind--${it.kind}`}>{it.kind}</span>
         {it.paused && (
           <span
@@ -907,6 +916,7 @@ export function PresenceBar({
                   className={`d-dot d-dot--${agent.state}${agent.paused ? " d-dot--paused" : ""}${agentUnreachable !== null ? " d-dot--unreachable" : ""}`}
                 />
                 <span>{agent.display}</span>
+                <IdentityDisambiguator code={agent.disambiguator} />
                 <span className={`t-mono presence-agent-kind presence-kind--${agent.kind}`}>{agent.kind}</span>
                 {agent.paused && (
                   <span

@@ -5604,6 +5604,7 @@ export function ChannelPage({
         {messageNavigationAnnouncement}
       </span>
       <PresenceBar
+        identities={identityDisplay}
         presence={state.presence}
         participants={state.participants}
         status={state.status}
