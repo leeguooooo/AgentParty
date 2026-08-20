@@ -13,6 +13,8 @@ import { join } from "node:path";
 import {
   CODEX_AUTO_WAKE_ENV,
   CODEX_AUTO_WAKE_CLAIM_TTL_MS,
+  CODEX_AUTO_WAKE_MAX_CONSECUTIVE_FAILURES,
+  createCodexAutoWakeStartupBudget,
   CODEX_AUTO_WAKE_GRACE_MS,
   appendCodexAutoWakeLog,
   codexAutoWakeAuth,
@@ -32,6 +34,7 @@ import {
   writeCodexAutoWakeSetting,
 } from "../src/codex-auto-wake";
 import {
+  codexAutoWakeServeDeps,
   handleCodexHookRecord,
   maybeStartCodexAutoWake,
   runCodexAutoWakeSupervise,
@@ -100,10 +103,10 @@ function deps(overrides: Partial<CodexAutoWakeSpawnDeps> = {}): CodexAutoWakeSpa
 }
 
 describe("codex auto-wake 开关", () => {
-  test("真机常态：没有配置文件、没有环境变量 → off（默认不在别人机器上起后台进程）", () => {
+  test("真机常态：没有配置文件、没有环境变量 → 开（装了 hook 就能被唤醒，不用再拨开关）", () => {
     expect(existsSync(codexAutoWakeSettingPath(home))).toBe(false);
     expect(readCodexAutoWakeSetting(home)).toBeNull();
-    expect(resolveCodexAutoWakeMode({}, home)).toEqual({ mode: "off", source: "default" });
+    expect(resolveCodexAutoWakeMode({}, home)).toEqual({ mode: "serve", source: "default" });
   });
 
   test("配置文件写 on 之后解析成 serve；写 off 又回去", () => {
@@ -128,9 +131,19 @@ describe("codex auto-wake 开关", () => {
       .toEqual({ mode: "serve", source: "config" });
   });
 
-  test("损坏的配置文件读作「没设过」，不是崩溃也不是默认打开", () => {
+  test("损坏的配置文件读作「没设过」，不是崩溃——回落到默认（开）", () => {
     writeFileSync(codexAutoWakeSettingPath(home), "{ not json");
-    expect(resolveCodexAutoWakeMode({}, home)).toEqual({ mode: "off", source: "default" });
+    expect(resolveCodexAutoWakeMode({}, home)).toEqual({ mode: "serve", source: "default" });
+  });
+
+  test("显式关掉必须仍然有效：配置文件 off 与环境变量 off 都压得住默认", () => {
+    writeCodexAutoWakeSetting(home, "off");
+    expect(resolveCodexAutoWakeMode({}, home)).toEqual({ mode: "off", source: "config" });
+    expect(resolveCodexAutoWakeMode({ [CODEX_AUTO_WAKE_ENV]: "off" }, home))
+      .toEqual({ mode: "off", source: "env" });
+    // 配置文件关着，环境变量显式打开 → 开（环境变量优先）。
+    expect(resolveCodexAutoWakeMode({ [CODEX_AUTO_WAKE_ENV]: "1" }, home))
+      .toEqual({ mode: "serve", source: "env" });
   });
 });
 
@@ -233,14 +246,28 @@ describe("锁复用：serve 的实例锁就是去重的权威", () => {
 });
 
 describe("SessionStart 接线", () => {
-  test("真机常态（没开开关）：一个进程都不起，也不刷日志", () => {
+  test("真机常态（配置缺席 + 环境变量缺席）：直接就拉起来，不用用户先拨开关", () => {
+    const d = deps(); // env 为空、home 里没有配置文件——绝大多数机器的样子
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "start", channel: "dev" });
+    expect(d.calls).toHaveLength(1);
+    expect(d.calls[0]!.args).toEqual(["hook", "codex-autowake", "--supervise", "--channel", "dev"]);
+  });
+
+  test("用户显式关掉（配置文件 off）：一个进程都不起，也不刷日志", () => {
+    writeCodexAutoWakeSetting(home, "off");
     const d = deps();
     expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "skip", reason: "disabled" });
     expect(d.calls).toHaveLength(0);
     expect(d.lines).toHaveLength(0);
   });
 
-  test("开启后拉起一个，并给子进程关掉 auto-wake 防套娃", () => {
+  test("用户显式关掉（环境变量 off）：同样一个进程都不起", () => {
+    const d = deps({ env: { [CODEX_AUTO_WAKE_ENV]: "off" } });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "skip", reason: "disabled" });
+    expect(d.calls).toHaveLength(0);
+  });
+
+  test("拉起时给子进程关掉 auto-wake 防套娃", () => {
     const d = deps({ env: { [CODEX_AUTO_WAKE_ENV]: "1" } });
     expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "start", channel: "dev" });
     expect(d.calls).toHaveLength(1);
@@ -348,6 +375,99 @@ describe("SessionStart 接线", () => {
     expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "skip", reason: "no-channel" });
     expect(d.calls).toHaveLength(0);
     expect(d.lines.join("\n")).toContain("no-channel");
+  });
+});
+
+// 默认开启之后，「断网时留一个永远重试的后台进程」的影响面从「主动开开关的人」变成
+// 「所有装了 codex hook 的人」。serve 自己的 supervisor 是无限自愈的（对手工挂的 serve
+// 正确），自动拉起的这层必须有个尽头。
+describe("放弃预算：不会在别人机器上无限重试", () => {
+  test("连续短命失败到上限就用完预算", () => {
+    const budget = createCodexAutoWakeStartupBudget(3, 60_000);
+    budget.recordRun(5);
+    budget.recordRun(5);
+    expect(budget.exhausted()).toBe(false);
+    budget.recordRun(5);
+    expect(budget.exhausted()).toBe(true);
+    expect(budget.consecutiveFailures()).toBe(3);
+  });
+
+  test("真的连上并服务过一段时间 → 预算清零（一次断线重连不该被之前的失败拖累）", () => {
+    const budget = createCodexAutoWakeStartupBudget(3, 60_000);
+    budget.recordRun(5);
+    budget.recordRun(5);
+    budget.recordRun(60_000); // 跑够久＝这轮健康
+    expect(budget.consecutiveFailures()).toBe(0);
+    budget.recordRun(5);
+    expect(budget.exhausted()).toBe(false);
+  });
+
+  test("预算接进 serve 的 supervisor：短命失败累计到上限就被当成终局，停止自愈并说清原因", async () => {
+    const lines: string[] = [];
+    const budget = createCodexAutoWakeStartupBudget(3, 60_000);
+    let clock = 0;
+    const deps = codexAutoWakeServeDeps({
+      channel: "dev",
+      budget,
+      log: (line) => lines.push(line),
+      now: () => clock,
+      // 用真 superviseServe 的行为替身：不断重跑 runOnce 直到 isTerminal 说停。
+      // 真 superviseServe 的行为替身：不断重跑 runOnce 直到 isTerminal 说停。
+      // 上限 50 只为「预算失效时测试立刻红，而不是挂死」——真实 supervisor 没有这个上限。
+      superviseServe: async (opts) => {
+        for (let i = 0; i < 50; i += 1) {
+          const code = await opts.runOnce();
+          if (opts.isTerminal!(code)) return code;
+        }
+        return -1; // 永远没停下来 = 预算没起作用
+      },
+      isTerminalServeExit: () => false, // 连不上不是终局——serve 本来会永远重试
+    });
+    let attempts = 0;
+    const code = await deps.superviseServe({
+      runOnce: async () => {
+        attempts += 1;
+        clock += 5; // 每次几毫秒就失败：连不上的样子
+        return 1;
+      },
+    });
+    expect(code).toBe(1);
+    expect(attempts).toBe(3); // 用完预算就停，不是无限
+    expect(lines.join("\n")).toContain("giving-up:");
+  });
+
+  test("预算接进 supervisor：中间有一次跑够久，就不该在那之后立刻放弃", async () => {
+    const budget = createCodexAutoWakeStartupBudget(2, 60_000);
+    let clock = 0;
+    const deps = codexAutoWakeServeDeps({
+      channel: "dev",
+      budget,
+      log: () => {},
+      now: () => clock,
+      superviseServe: async (opts) => {
+        for (let i = 0; i < 50; i += 1) {
+          const code = await opts.runOnce();
+          if (opts.isTerminal!(code)) return code;
+        }
+        return -1;
+      },
+      isTerminalServeExit: () => false,
+    });
+    let attempts = 0;
+    await deps.superviseServe({
+      runOnce: async () => {
+        attempts += 1;
+        clock += attempts === 2 ? 120_000 : 5; // 第二次真的连上并服务了两分钟
+        return 1;
+      },
+    });
+    // 1 失败、2 健康（清零）、3、4 失败 → 第 4 次才用完
+    expect(attempts).toBe(4);
+  });
+
+  test("默认预算是有限的——绝不是无限自愈", () => {
+    expect(Number.isFinite(CODEX_AUTO_WAKE_MAX_CONSECUTIVE_FAILURES)).toBe(true);
+    expect(CODEX_AUTO_WAKE_MAX_CONSECUTIVE_FAILURES).toBeGreaterThan(0);
   });
 });
 

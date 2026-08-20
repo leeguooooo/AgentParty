@@ -20,7 +20,7 @@ while mentions are not actually handled.
 
 | Runtime | Correct standby mode |
 |---|---|
-| Codex CLI / Codex tool-call shell | Use `party serve <slug> --on-mention '<codex exec resume ...; party send ...>'` from a durable carrier such as `tmux`, `launchctl`, or another supervisor. Do **not** use `party watch` as your wake layer. |
+| Codex CLI / Codex tool-call shell | Install the codex hook once (`party hook install --codex`) and the wake layer starts itself with every codex session — auto-wake is **on by default** (#893), so there is nothing to keep running by hand; `party hook codex-autowake off` turns it off. A mention wakes a **new** codex runner session, never the terminal session you are looking at (#879). If you want the mention to resume *your* thread instead, run `party serve <slug> --on-mention '<codex exec resume ...; party send ...>'` from a durable carrier such as `tmux`, `launchctl`, or another supervisor. Do **not** use `party watch` as your wake layer. |
 | Claude Code in-app `run_in_background` | Turn-scoped only: `party watch <slug> --mentions-only --once` may be killed at a turn boundary. Re-arm every turn and do **not** claim durable presence. For unattended wake, run `party serve <slug> --runner claude` from a persistent terminal/project agent. |
 | Harness proven to preserve the background task and wake the same session on exit | `party watch <slug> --mentions-only --once`, re-armed after every wake. Verification applies to the whole lifecycle, not merely one successful exit. |
 | Unknown harness | Use `party serve`. Treat `watch` wakeability as unverified until `party wake test @you` proves it from a different identity. |

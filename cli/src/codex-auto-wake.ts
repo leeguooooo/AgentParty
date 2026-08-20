@@ -16,7 +16,8 @@
 // 三条硬约束：
 //   1. **语义诚实**（#879）：拉起的是 `party serve --runner codex`，被 @ 时起的是一个
 //      **全新的 runner 会话**，不是用户眼前这个终端会话。任何文案都不许暗示「你那个会话会醒」。
-//   2. **默认关闭**：在别人机器上自动拉后台进程是侵入性的。默认 off，接入时显式开启。
+//   2. **默认开启**（owner 拍板：「我们应该做到直接能用，不要让用户选择」）——多拨一个开关
+//      本身就是体验断层。但 `off` 必须仍然有效：默认替用户做对的事，不等于剥夺控制权。
 //   3. **hook 铁律**：stdout 恒空、不阻塞、失败静默 exit 0。所以「失败要响亮」只能落到
 //      日志文件（codexAutoWakeLogPath），绝不写 stdout。
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
@@ -38,6 +39,18 @@ export const CODEX_AUTO_WAKE_POLL_MS = 30_000;
  * serve 立刻打掉。
  */
 export const CODEX_AUTO_WAKE_GRACE_MS = 60_000;
+/**
+ * 「一次跑够久就算这轮健康」的门槛。serve 连不上时每次 runOnce 几毫秒就返回；真正连上并
+ * 服务过一段时间的会话不该消耗放弃预算。
+ */
+export const CODEX_AUTO_WAKE_HEALTHY_RUN_MS = 60_000;
+/**
+ * 连续失败多少次就不再自愈、自己退场（默认开启后这条尤其重要，见 decideCodexAutoWake 上方注释）。
+ * 手工挂的 serve 该无限自愈——是人主动要它守着；自动拉起的这层不是，配置坏了/服务端没了
+ * 就该安静退场，而不是在每个人机器上留一个永远重试的后台进程。
+ * 配合 serve 的指数退避（1s→30s 封顶），20 次约等于 8 分钟连不上才放弃。
+ */
+export const CODEX_AUTO_WAKE_MAX_CONSECUTIVE_FAILURES = 20;
 
 export type CodexAutoWakeMode = "off" | "serve";
 
@@ -79,10 +92,19 @@ export function writeCodexAutoWakeSetting(home: string, mode: CodexAutoWakeMode)
 }
 
 /**
- * 环境变量 > 配置文件 > 默认关闭。
- * 环境变量优先是刻意的：serve 托管 lane 会给自己的 runner 子进程设 `off`，杜绝
- * 「serve 的 codex runner 又去拉一个 serve」的递归（实例锁也挡得住，这是第二道）。
+ * **默认开启**（owner 拍板）：「我们应该做到直接能用，不要让用户选择」。
+ *
+ * Claude 侧装上插件就能被唤醒；codex 侧如果还要多拨一个开关，**这个额外步骤本身就是
+ * 体验断层**——而消除断层正是 #893 的全部目的。把 codex hook 装进去这个动作，已经表达了
+ * 「我要接入 AgentParty」的意图，不该再问一次。
+ *
+ * 但 `off` 必须仍然有效：默认替用户做对的事，不等于剥夺控制权。显式关掉就绝不再自动拉。
+ *
+ * 优先级：环境变量 > 配置文件 > 默认开启。环境变量优先是刻意的：serve 会给自己的 codex
+ * runner 子进程设 `off`，杜绝「serve 的 runner 又去拉一个 serve」的递归。
  */
+export const CODEX_AUTO_WAKE_DEFAULT_MODE: CodexAutoWakeMode = "serve";
+
 export function resolveCodexAutoWakeMode(
   env: NodeJS.ProcessEnv,
   home: string,
@@ -91,7 +113,40 @@ export function resolveCodexAutoWakeMode(
   if (fromEnv !== null) return { mode: fromEnv, source: "env" };
   const fromConfig = readCodexAutoWakeSetting(home);
   if (fromConfig !== null) return { mode: fromConfig, source: "config" };
-  return { mode: "off", source: "default" };
+  return { mode: CODEX_AUTO_WAKE_DEFAULT_MODE, source: "default" };
+}
+
+export interface CodexAutoWakeStartupBudget {
+  /** 记一次 serve 运行的时长；够久就把连续失败清零。 */
+  recordRun: (durationMs: number) => void;
+  /** 连续失败是否已经用完预算——用完就别再自愈了。 */
+  exhausted: () => boolean;
+  consecutiveFailures: () => number;
+}
+
+/**
+ * 自动拉起的唤醒层的「放弃预算」。
+ *
+ * 默认开启之后影响面变了：以前只有主动开开关的人会走这条路，现在装了 codex hook 的人都会。
+ * serve 自己的 supervisor 是**无限自愈**的（对手工挂的 serve 正确：人要它守着），但对
+ * 自动拉起的这层不对——token 失效、服务端搬家、频道被删这类不会自己好的故障，会让每台机器
+ * 上留一个永远重试的后台进程。所以给它一个有限预算：连续短命失败够多次就安静退场，
+ * 下一次 codex SessionStart 自然会再试（那时故障可能已经修好）。
+ */
+export function createCodexAutoWakeStartupBudget(
+  maxConsecutiveFailures: number = CODEX_AUTO_WAKE_MAX_CONSECUTIVE_FAILURES,
+  healthyRunMs: number = CODEX_AUTO_WAKE_HEALTHY_RUN_MS,
+): CodexAutoWakeStartupBudget {
+  let failures = 0;
+  return {
+    recordRun: (durationMs: number) => {
+      // 真的连上并服务过一段时间 → 这轮健康，之后的一次断线重连不该被前面的失败拖累。
+      if (durationMs >= healthyRunMs) failures = 0;
+      else failures += 1;
+    },
+    exhausted: () => failures >= maxConsecutiveFailures,
+    consecutiveFailures: () => failures,
+  };
 }
 
 export function appendCodexAutoWakeLog(home: string, line: string, now: number = Date.now()): void {
@@ -234,7 +289,9 @@ export function decideCodexAutoWake(input: CodexAutoWakeDecisionInput): CodexAut
     return {
       action: "skip",
       reason: "disabled",
-      detail: `codex auto-wake 未开启（\`party hook codex-autowake on\` 开启，或设 ${CODEX_AUTO_WAKE_ENV}=1）`,
+      detail:
+        `codex auto-wake 被显式关掉了（默认是开的）——恢复：\`party hook codex-autowake on\`，` +
+        `或去掉 ${CODEX_AUTO_WAKE_ENV}=off`,
     };
   }
   const channel = typeof input.channel === "string" && input.channel !== "" ? input.channel : null;

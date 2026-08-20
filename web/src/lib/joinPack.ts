@@ -175,6 +175,11 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
           `codex plugin marketplace add leeguooooo/AgentParty || true`,
           `codex plugin add agentparty@agentparty || true`,
           t("AgentJoin.cmd.codexPluginNote2"),
+          // #893：codex 的 SessionStart hook 是「入册 + 自动拉起唤醒层」的唯一入口——codex
+          // 插件不写 ~/.codex/hooks.json（harness 身份由「装在谁的 hooks 里」决定，#851），
+          // 所以接入包必须自己装这一条，否则上面那句「你现在是可达的」就是空话。
+          // 幂等：重复跑只保证自己那条在，绝不动用户已有 hooks；失败也不阻断接入。
+          `party hook install --codex || true`,
         ]
       : []),
     t("AgentJoin.cmd.step4fallback"),
