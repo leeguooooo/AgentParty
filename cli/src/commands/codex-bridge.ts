@@ -38,6 +38,11 @@ export interface CodexBridgeRuntimeOptions {
   /** Fixed argv before Codex subcommands (used by the Windows npm adapter). */
   codexArgsPrefix?: string[];
   codexArgs?: string[];
+  /**
+   * Re-enter this existing Codex thread instead of opening a new one. Supplied
+   * by `party bridge codex --resume/--resume-last`.
+   */
+  initialThreadId?: string | null;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
 }
@@ -270,6 +275,26 @@ export function buildCodexTuiResumeWithPromptArgs(
     threadId,
     ...(initial.prompt === null ? [] : [initial.prompt]),
   ];
+}
+
+/**
+ * Codex keeps one active writer per thread. Measured on Codex CLI
+ * 0.148.0-alpha.15: while the Codex desktop GUI has a thread open,
+ * `thread/resume` on it is rejected with
+ * `thread-store conflict: thread <id> already has an active writer`, and the
+ * same thread resumes normally once the owning process lets it go.
+ */
+export function isCodexActiveWriterConflict(detail: string): boolean {
+  return detail.includes("already has an active writer") ||
+    detail.includes("thread-store conflict");
+}
+
+export function codexActiveWriterConflictMessage(threadId: string): string {
+  return (
+    `codex-bridge: Codex thread ${threadId} already has an active writer, so this bridge ` +
+    "cannot attach to it. Codex allows only one writer per thread: close that thread in the " +
+    "Codex desktop app (or stop the other codex process) and run the same command again."
+  );
 }
 
 export function resolveCodexRecoveryThreadId(
@@ -756,6 +781,20 @@ export async function runCodexSessionBridge(
       log(`codex-bridge: ${error instanceof Error ? error.message : String(error)}`);
       return 1;
     }
+    const requestedThreadId = options.initialThreadId ?? null;
+    if (requestedThreadId !== null) {
+      // Outstanding recovery debt is owed by exactly one thread. Silently
+      // resuming a different one would strand that debt, so refuse instead of
+      // choosing on the operator's behalf.
+      if (initialThreadId !== null && initialThreadId !== requestedThreadId) {
+        log(
+          `codex-bridge: #${options.channel} has unfinished delivery recovery on thread ` +
+            `${initialThreadId}; refusing to resume ${requestedThreadId} instead`,
+        );
+        return 1;
+      }
+      initialThreadId = requestedThreadId;
+    }
     throwIfTerminated();
     lock = acquireInstanceLock(
       "serve",
@@ -809,9 +848,19 @@ export async function runCodexSessionBridge(
     });
     await awaitStartup(session.start());
     if (initialThreadId !== null) {
-      await awaitStartup(session.request("thread/resume", {
-        threadId: initialThreadId,
-      }));
+      try {
+        await awaitStartup(session.request("thread/resume", {
+          threadId: initialThreadId,
+        }));
+      } catch (error) {
+        if (error instanceof CodexBridgeTerminated) throw error;
+        const detail = error instanceof Error ? error.message : String(error);
+        if (isCodexActiveWriterConflict(detail)) {
+          log(codexActiveWriterConflictMessage(initialThreadId));
+          return 1;
+        }
+        throw error;
+      }
       if (session.activeThreadId !== initialThreadId) {
         throw new Error(
           `Codex app-server resumed ${session.activeThreadId ?? "no thread"} instead of ` +
