@@ -467,6 +467,39 @@ function gitOutput(cwd: string, args: string[]): string | null {
   }
 }
 
+/**
+ * 从 origin remote URL 解析仓库展示标签（#853）。
+ * github.com → `owner/repo`；其他 host → `host:owner/repo`；解析不出 → undefined（静默降级）。
+ */
+export function parseRepoLabel(url: string): string | undefined {
+  const trimmed = url.trim();
+  // ssh scp 形式：git@host:owner/repo(.git)
+  let m = /^[\w.-]+@([\w.-]+):(.+?)(?:\.git)?\/?$/.exec(trimmed);
+  // URL 形式：https://host/owner/repo(.git)、ssh://git@host/owner/repo(.git)
+  if (m === null) m = /^(?:https?|ssh|git):\/\/(?:[\w.-]+@)?([\w.-]+)(?::\d+)?\/(.+?)(?:\.git)?\/?$/.exec(trimmed);
+  if (m === null) return undefined;
+  const host = m[1].toLowerCase();
+  const path = m[2].replace(/^\/+/, "");
+  const segments = path.split("/").filter((s) => s !== "");
+  if (segments.length < 2) return undefined;
+  const ownerRepo = segments.slice(-2).join("/");
+  return host === "github.com" ? ownerRepo : `${host}:${ownerRepo}`;
+}
+
+export function repoLabel(cwd: string = process.cwd()): string | undefined {
+  const url = gitOutput(cwd, ["remote", "get-url", "origin"]);
+  if (url === null) return undefined;
+  return parseRepoLabel(url);
+}
+
+export function branchLabel(cwd: string = process.cwd()): string | undefined {
+  const branch = gitOutput(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (branch === null) return undefined;
+  if (branch !== "HEAD") return branch;
+  // detached HEAD：退回短 SHA
+  return gitOutput(cwd, ["rev-parse", "--short", "HEAD"]) ?? undefined;
+}
+
 export function worktreeLabel(cwd: string = process.cwd()): string | undefined {
   const root = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
   if (root === null) return undefined;

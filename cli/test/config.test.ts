@@ -457,3 +457,85 @@ describe("workspace state", () => {
     expect(warnings[0]).toContain("falling back");
   });
 });
+
+// #853：repo/branch 展示标签。git 集成测试建真实临时仓库；URL 解析纯函数直测。
+import { branchLabel, parseRepoLabel, repoLabel } from "../src/config";
+import { safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
+import { execSync } from "node:child_process";
+
+describe("parseRepoLabel", () => {
+  test("ssh scp form with .git", () => {
+    expect(parseRepoLabel("git@github.com:leeguooooo/AgentParty.git")).toBe("leeguooooo/AgentParty");
+  });
+  test("https form without .git", () => {
+    expect(parseRepoLabel("https://github.com/leeguooooo/AgentParty")).toBe("leeguooooo/AgentParty");
+  });
+  test("https form with .git and trailing slash", () => {
+    expect(parseRepoLabel("https://github.com/owner/repo.git/")).toBe("owner/repo");
+  });
+  test("ssh url form", () => {
+    expect(parseRepoLabel("ssh://git@github.com/owner/repo.git")).toBe("owner/repo");
+  });
+  test("non-github host keeps host prefix", () => {
+    expect(parseRepoLabel("git@gitlab.example.com:team/proj.git")).toBe("gitlab.example.com:team/proj");
+    expect(parseRepoLabel("https://gitea.internal/org/tool")).toBe("gitea.internal:org/tool");
+  });
+  test("nested group path keeps last two segments", () => {
+    expect(parseRepoLabel("https://gitlab.com/group/sub/proj.git")).toBe("gitlab.com:sub/proj");
+  });
+  test("unparseable returns undefined", () => {
+    expect(parseRepoLabel("/local/path/repo")).toBeUndefined();
+    expect(parseRepoLabel("git@host:justrepo.git")).toBeUndefined();
+    expect(parseRepoLabel("")).toBeUndefined();
+  });
+});
+
+describe("shared context label whitelist", () => {
+  test("accepts whitelisted repo/branch", () => {
+    expect(safeRepoContextLabel("leeguooooo/AgentParty")).toBe("leeguooooo/AgentParty");
+    expect(safeRepoContextLabel("gitlab.example.com:team/proj")).toBe("gitlab.example.com:team/proj");
+    expect(safeBranchContextLabel("feat/853-repo-branch#1@wip")).toBe("feat/853-repo-branch#1@wip");
+  });
+  test("rejects non-whitelist chars, oversize, and non-strings", () => {
+    expect(safeRepoContextLabel("owner/repo<script>")).toBeUndefined();
+    expect(safeRepoContextLabel("a".repeat(121))).toBeUndefined();
+    expect(safeRepoContextLabel(42)).toBeUndefined();
+    expect(safeBranchContextLabel("bad branch name")).toBeUndefined();
+    expect(safeBranchContextLabel("")).toBeUndefined();
+  });
+});
+
+describe("repoLabel/branchLabel (git integration)", () => {
+  let gitDir: string;
+  beforeEach(() => {
+    gitDir = mkdtempSync(join(tmpdir(), "ap-gitctx-"));
+    execSync("git init -q -b main", { cwd: gitDir });
+    execSync("git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init", { cwd: gitDir });
+  });
+  afterEach(() => rmSync(gitDir, { recursive: true, force: true }));
+
+  test("no origin remote → repoLabel undefined", () => {
+    expect(repoLabel(gitDir)).toBeUndefined();
+  });
+  test("github origin → owner/repo", () => {
+    execSync("git remote add origin git@github.com:owner/repo.git", { cwd: gitDir });
+    expect(repoLabel(gitDir)).toBe("owner/repo");
+  });
+  test("branchLabel returns current branch", () => {
+    expect(branchLabel(gitDir)).toBe("main");
+  });
+  test("detached HEAD → short sha", () => {
+    execSync("git checkout -q --detach HEAD", { cwd: gitDir });
+    const sha = execSync("git rev-parse --short HEAD", { cwd: gitDir, encoding: "utf8" }).trim();
+    expect(branchLabel(gitDir)).toBe(sha);
+  });
+  test("non-git dir → both undefined", () => {
+    const plain = mkdtempSync(join(tmpdir(), "ap-plain-"));
+    try {
+      expect(repoLabel(plain)).toBeUndefined();
+      expect(branchLabel(plain)).toBeUndefined();
+    } finally {
+      rmSync(plain, { recursive: true, force: true });
+    }
+  });
+});

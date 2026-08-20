@@ -11,8 +11,9 @@ import type {
   WakeKind,
   WorkflowKind,
 } from "@agentparty/shared";
+import { safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
-import { advanceCursorPastOwnMessage, resolveChannel, workspaceId, workspaceLabel, worktreeLabel } from "../config";
+import { advanceCursorPastOwnMessage, branchLabel, repoLabel, resolveChannel, workspaceId, workspaceLabel, worktreeLabel } from "../config";
 import { stripTerminalControls } from "../format";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, handleRestError, postMessage, taskStateFromReportedStatus, updateTask } from "../rest";
@@ -100,12 +101,17 @@ Options:
 
 export function buildContext(auth: Awaited<ReturnType<typeof resolveAuthDetailed>>): AgentContext {
   const wt = worktreeLabel();
+  // repo/branch 纯 advisory 展示（#853）：先过 shared 白名单，非法值静默丢弃而非污染整个 context。
+  const repo = safeRepoContextLabel(repoLabel());
+  const branch = safeBranchContextLabel(branchLabel());
   return {
     config_kind: auth.config.kind,
     ...(auth.config.token_fingerprint !== undefined ? { config_fingerprint: auth.config.token_fingerprint } : {}),
     workspace_id: workspaceId(),
     workspace_label: workspaceLabel(),
     ...(wt !== undefined ? { worktree_label: wt } : {}),
+    ...(repo !== undefined ? { repo } : {}),
+    ...(branch !== undefined ? { branch } : {}),
   };
 }
 

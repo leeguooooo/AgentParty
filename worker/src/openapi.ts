@@ -870,6 +870,8 @@ export const openapiDocument = {
                           workspace_id: { type: "string" },
                           workspace_label: { type: "string" },
                           worktree_label: { type: "string" },
+                          repo: { type: "string", example: "leeguooooo/AgentParty" },
+                          branch: { type: "string", example: "feat/853-repo-branch-context" },
                         },
                       },
                     },

@@ -2155,6 +2155,11 @@ button.org-person-name {
   color: var(--t-dim);
   background: var(--t-panel2);
 }
+/* #853：常规行的 repo ⎇ branch · worktree chip，允许比其他 context chip 略宽。 */
+.presence-git-context {
+  max-width: min(240px, 38vw);
+  font-weight: 400;
+}
 .presence-lineage {
   max-width: min(170px, 32vw);
   overflow: hidden;
@@ -3741,6 +3746,20 @@ button.org-person-name {
   font-weight: 600;
 }
 .msg-client-version-warn { color: var(--d-amber); }
+/* #853：消息头 `repo ⎇ branch · worktree` 上下文 chip。单色等宽、单行 ellipsis 截断（尾部 worktree 段先截），title 悬浮全文。 */
+.msg-git-context {
+  display: inline-block;
+  max-width: min(260px, 42vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 1px 6px;
+  border: 1.4px solid var(--t-faint);
+  border-radius: 0;
+  background: var(--t-panel2);
+  color: var(--t-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
 .msg-reception-source {
   padding: 1px 6px;
   border: 1.4px solid var(--d-blue);

@@ -901,3 +901,31 @@ describe("presence 未监听/不可唤醒可见性 (#666)", () => {
     expect(nodesWithClass(zh, "presence-unreachable").some((n) => n.children.join("") === "⚠ 未监听")).toBe(true);
   });
 });
+
+// #853：repo ⎇ branch · worktree chip 提级到常规行（非 full 也显示）。
+describe("presence git context chip (#853)", () => {
+  test("renders repo ⎇ branch · worktree in the regular row without expanding", () => {
+    const r = renderPresence({
+      ...presenceEntry(),
+      context: { repo: "leeguooooo/AgentParty", branch: "feat/853-x", worktree_label: "agentparty:feat/853-x" },
+    }, true);
+    const chips = nodesWithClass(r, "presence-git-context");
+    expect(chips).toHaveLength(1);
+    expect(chips[0]?.children.join("")).toBe("leeguooooo/AgentParty \u2387 feat/853-x \u00b7 agentparty:feat/853-x");
+    expect(chips[0]?.props.title).toBe("leeguooooo/AgentParty \u2387 feat/853-x \u00b7 agentparty:feat/853-x");
+  });
+
+  test("omits worktree tail when worktree_label is absent", () => {
+    const r = renderPresence({
+      ...presenceEntry(),
+      context: { repo: "owner/repo", branch: "main" },
+    }, true);
+    const chips = nodesWithClass(r, "presence-git-context");
+    expect(chips[0]?.children.join("")).toBe("owner/repo \u2387 main");
+  });
+
+  test("no chip when context lacks repo and branch", () => {
+    const r = renderPresence({ ...presenceEntry(), context: { worktree_label: "agentparty:main" } }, true);
+    expect(nodesWithClass(r, "presence-git-context")).toHaveLength(0);
+  });
+});

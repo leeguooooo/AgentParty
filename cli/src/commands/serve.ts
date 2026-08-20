@@ -2,6 +2,7 @@
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
 import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ResponseSource, type SendDecisionRequest, type ServerFrame } from "@agentparty/shared";
+import { safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -45,7 +46,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { readAccount } from "../account";
 import { connect } from "../client";
-import { clearStuck, clearStuckForConfig, loadCursor, loadCursorForConfig, loadRevCursor, loadRevCursorForConfig, loadStuck, loadStuckForConfig, localAgentConfigsForChannel, readConfigWithSource, refreshConfigInPlace, resolveChannel, saveCursor, saveCursorForConfig, saveRevCursor, saveRevCursorForConfig, saveStuck, saveStuckForConfig, type StuckWake } from "../config";
+import { clearStuck, clearStuckForConfig, loadCursor, loadCursorForConfig, loadRevCursor, loadRevCursorForConfig, loadStuck, loadStuckForConfig, localAgentConfigsForChannel, branchLabel, repoLabel, readConfigWithSource, refreshConfigInPlace, resolveChannel, saveCursor, saveCursorForConfig, saveRevCursor, saveRevCursorForConfig, saveStuck, saveStuckForConfig, type StuckWake } from "../config";
 import { acquireInstanceLock, claimRunnerCwd, defaultInstanceLockDir, instanceLockTarget, stopOwnInstance } from "../instance-lock";
 import { formatMsg, stripTerminalControls } from "../format";
 import { clearHealthCache, writeHealthCache } from "../health-cache";
@@ -4455,6 +4456,13 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
           : opts.runnerTimeoutMs,
         signal: channelSignal,
         advertise: async (signal) => {
+          // #853：profile 车道的 repo/branch 从频道工作副本推导（advertise 时 checkout 已就绪）。
+          const laneRepo = safeRepoContextLabel(repoLabel(prepared.channelWorkdir));
+          const laneBranch = safeBranchContextLabel(branchLabel(prepared.channelWorkdir));
+          const laneGitContext = {
+            ...(laneRepo !== undefined ? { repo: laneRepo } : {}),
+            ...(laneBranch !== undefined ? { branch: laneBranch } : {}),
+          };
           if (role === "front") {
             const note = projectAgentReadyNote(profile, channel, prepared);
             const { role_warning: roleWarning } = await post(opts.server, principal.token, channel, {
@@ -4468,6 +4476,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
               context: {
                 workspace_label: `${profile.owner_account}/${profile.handle}`,
                 worktree_label: `${principal.name}:${profile.worktree_strategy}:${profile.base_branch}`,
+                ...laneGitContext,
                 reception_mode: "model",
                 reception_runner: profile.runner === "shell" ? "custom" : profile.runner,
                 reception_context: "isolated_channel_session",
@@ -4493,6 +4502,7 @@ export async function runProfileServe(opts: ProfileServeOptions): Promise<number
             context: {
               workspace_label: `${profile.owner_account}/${profile.handle}`,
               worktree_label: `${principal.name}:${profile.worktree_strategy}:${profile.base_branch}`,
+              ...laneGitContext,
               reception_mode: "model",
               reception_runner: profile.runner === "shell" ? "custom" : profile.runner,
               reception_context: "isolated_channel_session",
