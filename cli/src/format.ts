@@ -94,6 +94,8 @@ export interface MsgHeader {
   edited?: boolean;
   /** #817：这条是隔离接待 runner 代发的，不是本人在其完整上下文里说的。 */
   response_source?: MsgFrame["response_source"];
+  /** #881：这条内容已被后续消息取代；消费方应降级，不当最新指令执行。 */
+  superseded?: MsgFrame["superseded"];
 }
 
 // 正文的单行摘要：status 帧取 note（正文常为空），普通消息取 body 首行起的前 N 字符。
@@ -123,6 +125,9 @@ export function msgHeader(m: MsgFrame, previewChars = DEFAULT_HEADER_PREVIEW): M
     ...(m.attachments && m.attachments.length > 0 ? { attachments: m.attachments.length } : {}),
     ...(m.retracted ? { retracted: true } : {}),
     ...(m.edited ? { edited: true } : {}),
+    // #881：headers 模式下也必须看得见「这条已过期」。扫 header 挑活干的 agent 若只在展开
+    // 全文时才发现，判断早就先入为主了——和 response_source 同理。
+    ...(m.superseded === undefined ? {} : { superseded: m.superseded }),
     // 扫 header 时就得看见「这条是代答的」——否则挑出来展开全文才发现，判断已经先入为主了。
     ...(m.response_source === undefined ? {} : { response_source: m.response_source }),
   };
@@ -162,6 +167,11 @@ function formatMsgRaw(m: MsgFrame): string {
     m.retracted ? "retracted" : null,
     m.supersedes !== undefined ? `supersedes #${m.supersedes}` : null,
     m.superseded_by !== undefined ? `superseded by #${m.superseded_by}` : null,
+    // #881：内容已过期的显式标记。读到它就该降级——别把这条当最新指令执行。显式 supersede 链
+    // 上面那个 badge 已经说了，不重复；这里只报 reply_correction 这类隐式判定。
+    m.superseded !== undefined && m.superseded_by === undefined
+      ? `SUPERSEDED by #${m.superseded.by_seq} (${m.superseded.reason}) — not the latest instruction`
+      : null,
     // 回执（#828）：进 badge 而不是正文——「已收到」是这条消息的元数据，不是频道里的一次发言。
     // 手搓版当年正是因为长得像本人发言才误导了协作方。
     formatReceipts(m.receipts),

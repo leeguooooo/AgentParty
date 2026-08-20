@@ -239,7 +239,10 @@ type DeliveryTerminalReason =
   | "source_retention_expired"
   | "delivery_expired"
   | "undelivered_timeout"
-  | "orphaned_waiting_owner";
+  | "orphaned_waiting_owner"
+  // #875：「看到了、明确不需要回复」。唯一一个挂在 state='replied' 上的 reason——它是结清，
+  // 不是失败。绝不能和 failed/unknown_outcome 混为一谈，否则欠账账本把「已读不回」记成投递失败。
+  | "acknowledged_no_reply";
 
 const REVIVABLE_DELIVERY_FAILURES = new Set<DeliveryTerminalReason>(["unknown_outcome"]);
 
@@ -1807,6 +1810,10 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE messages ADD COLUMN retracted_by TEXT",
       "ALTER TABLE messages ADD COLUMN supersedes INTEGER",
       "ALTER TABLE messages ADD COLUMN superseded_by INTEGER",
+      // 隐式「被取代」（#881）：同一 sender 用 --reply-to 回到本条、并再次 @ 了同一目标，
+      // 且本条对该目标的 delivery 当时仍未结清。与显式 supersede 链（superseded_by）分列存储，
+      // 因为两者判定口径不同、frame 上要报不同的 reason。
+      "ALTER TABLE messages ADD COLUMN superseded_seq INTEGER",
       // Compact exactly-once tombstone. Delivery rows may be pruned after their bounded audit
       // window, but editing the retained source must never recreate work for an old target.
       "ALTER TABLE messages ADD COLUMN delivery_targets_json TEXT NOT NULL DEFAULT '[]'",
@@ -2120,6 +2127,10 @@ export class ChannelDO extends Server<Env> {
       "ALTER TABLE directed_deliveries ADD COLUMN previous_lease_epoch INTEGER",
       "ALTER TABLE directed_deliveries ADD COLUMN previous_lease_attempt INTEGER",
       "ALTER TABLE directed_deliveries ADD COLUMN previous_lease_token TEXT",
+      // 「已读不回」终态的审计列（#875）：ack 必须查得到是谁、什么时候结清的，否则它就成了
+      // 悄悄吞一条 @ 的手段。终态本身走 state='replied' + terminal_reason='acknowledged_no_reply'。
+      "ALTER TABLE directed_deliveries ADD COLUMN acknowledged_by TEXT",
+      "ALTER TABLE directed_deliveries ADD COLUMN acknowledged_at INTEGER",
     ]) {
       try {
         sql.exec(ddl);
@@ -6257,6 +6268,86 @@ export class ChannelDO extends Server<Env> {
     //  - 不占 seq / 不进正文流 / 不需要 ack，所以既不会淹没信噪比，也不可能像 #826 那样把七条真消息
     //    挡在一条零信息量回执后面。
     // 只 bump rev_seq：重连客户端按 rev_seq 补拉时会重收这条消息（带上回执），无需额外重放通道。
+    // #875「已读不回」的真终态。今天唯一能结清一条 @ 的动作是 `send --reply-to N`，于是「看到了、
+    // 判断不需要回复」这种极常见情况没有合法出口，只能挂到租约过期被记成 failed/unknown_outcome——
+    // 把「已读不回」污染成「投递失败」，欠账账本随之失真。这里给它一个自己的终态。
+    const deliveryAckMatch = url.pathname.match(/^\/internal\/deliveries\/([^/]+)\/ack$/);
+    if (deliveryAckMatch && request.method === "POST") {
+      this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
+      const deliveryId = decodeURIComponent(deliveryAckMatch[1]!);
+      const name = request.headers.get("x-ap-name") ?? "";
+      const owner = request.headers.get("x-ap-owner") ?? undefined;
+      const tokenHash = request.headers.get("x-ap-token-hash") ?? "";
+      if (name === "") {
+        return Response.json(
+          { error: { code: "forbidden", message: "ack requires an identified sender" } },
+          { status: 403 },
+        );
+      }
+      // 调用方手上通常只有 seq（`who --json` 的 pending_mention_seqs 报的就是 seq，没有任何接口
+      // 下发 delivery id），所以纯数字 id 按「我在那条消息上的那条 @」解析。落到同一条授权路径上。
+      const row = /^[1-9]\d*$/.test(deliveryId)
+        ? this.ctx.storage.sql
+            .exec(
+              "SELECT * FROM directed_deliveries WHERE message_seq = ? AND target_name = ? LIMIT 1",
+              Number(deliveryId),
+              name,
+            )
+            .toArray()[0]
+        : this.directedDeliveryRow(deliveryId);
+      if (row === undefined) {
+        return Response.json({ error: { code: "not_found", message: "delivery not found" } }, { status: 404 });
+      }
+      // 只有被 @ 的那个身份本人能宣告「我读了、不回」。principal 按建单时的 target_owner 比对：
+      // 同名不同账号（名字被回收后由别人注册）绝不放行。
+      if (!this.identityMatchesDeliveryTarget({ name, owner, tokenHash }, row)) {
+        return Response.json(
+          { error: { code: "forbidden", message: "only the delivery target can acknowledge it" } },
+          { status: 403 },
+        );
+      }
+      const state = String(row.state);
+      // 幂等：重复 ack 同一条返回既有终态，不报错也不改写审计列。
+      if (state === "replied" && String(row.terminal_reason ?? "") === "acknowledged_no_reply") {
+        return Response.json({ ok: true, delivery: this.rowToPublicDirectedDelivery(row, true), deduped: true });
+      }
+      if (state === "replied" || state === "failed") {
+        return Response.json(
+          {
+            error: {
+              code: "conflict",
+              message: `delivery already terminal (state=${state}); ack cannot re-open or re-settle it`,
+            },
+          },
+          { status: 409 },
+        );
+      }
+      // waiting_owner 不开放：那是服务端持有的、等人类决策的工作状态，不是「一条你读了的 @」。
+      if (state !== "queued" && state !== "claimed" && state !== "running") {
+        return Response.json(
+          { error: { code: "conflict", message: `delivery in state=${state} cannot be acknowledged` } },
+          { status: 409 },
+        );
+      }
+      const now = Date.now();
+      const terminal = this.transitionDirectedDeliveryTerminal(String(row.id), "replied", now, {
+        replySeq: null,
+        terminalReason: "acknowledged_no_reply",
+        expectedStates: [state],
+        // 显式 ack 常发生在原 lease 连接之外（换了会话、从别的终端补 ack），所以不传
+        // expectedLeaseConnectionId；改由 principal 闸把关，且只放行同 principal。
+        explicitAckPrincipal: this.identityDeliveryPrincipal({ owner, tokenHash }),
+        acknowledgedBy: name,
+      });
+      if (terminal === undefined) {
+        return Response.json(
+          { error: { code: "conflict", message: "delivery changed state concurrently; re-read and retry" } },
+          { status: 409 },
+        );
+      }
+      return Response.json({ ok: true, delivery: this.rowToPublicDirectedDelivery(terminal, true) });
+    }
+
     const receiptMatch = url.pathname.match(/^\/internal\/messages\/([1-9]\d*)\/receipt$/);
     if (receiptMatch && request.method === "POST") {
       this.cacheChannelMeta(request.headers, request.headers.get("x-ap-host"));
@@ -10026,6 +10117,16 @@ export class ChannelDO extends Server<Env> {
     // #667：把「排队超时/无唤醒通道」这一粗粒度失因下发，让 UI 把它和「跑了但失败」区分成「未送达」。
     // 只在终态 failed 且 terminal_reason=undelivered_timeout 时置 true，不泄露任何 runner/session 细节。
     const undelivered = state === "failed" && String(row.terminal_reason ?? "") === "undelivered_timeout";
+    // #875：「已读不回」的真终态。频道侧无条件可见（不看 detailedState）——ack 若只有 acker 自己
+    // 看得到，它就成了悄悄吞 @ 的手段；谁在什么时候结清了这条 @，任何观察者都该查得到。
+    const acknowledgedNoReply =
+      String(row.terminal_reason ?? "") === "acknowledged_no_reply" &&
+      typeof row.acknowledged_by === "string" &&
+      row.acknowledged_by.length > 0 &&
+      row.acknowledged_at !== null &&
+      row.acknowledged_at !== undefined
+        ? { by: String(row.acknowledged_by), at: Number(row.acknowledged_at) }
+        : null;
     return {
       id: delivery.id,
       message_seq: delivery.message_seq,
@@ -10036,6 +10137,7 @@ export class ChannelDO extends Server<Env> {
       updated_at: delivery.updated_at,
       preview: preview !== undefined ? preview : this.deliveryMessagePreview(delivery.message_seq),
       ...(undelivered ? { undelivered: true } : {}),
+      ...(acknowledgedNoReply === null ? {} : { acknowledged_no_reply: acknowledgedNoReply }),
     };
   }
 
@@ -10320,6 +10422,66 @@ export class ChannelDO extends Server<Env> {
     return "mention";
   }
 
+  /**
+   * #881「这条已被后续消息取代」的显式标记。**判定口径刻意保守**：只在能证明「后一条针对的就是
+   * 前一条」时才打——同一 sender 用 `--reply-to` 回到那条消息、并再次 @ 了同一个目标，且那条对该
+   * 目标的 delivery 此刻仍未结清（queued/claimed/running/waiting_owner）。
+   *
+   * 刻意**不**采用「同 sender 同 @ 目标的任意后续消息」：「做 X」「再做 Y」是两条独立的 @，把前
+   * 一条标成过期会让 worker 降级掉一条仍然有效的指令——那比不标更危险。也刻意不看 ts：定序依据
+   * 只有 seq（频道全局单调），ts 是本地时钟，同机多 runner / 跨机漂移下比 seq 更不可信。
+   *
+   * 显式 supersede 链（superseded_by）优先，已有关系的不覆盖；已标记过的不重复标记（幂等）。
+   */
+  private markSupersededByReplyCorrection(msg: MsgFrame, targets: string[], now: number) {
+    const replyTo = msg.reply_to;
+    if (replyTo === null || replyTo === undefined) return;
+    const original = this.ctx.storage.sql
+      .exec(
+        "SELECT seq, sender_name, retracted_at, superseded_by, superseded_seq FROM messages WHERE seq = ?",
+        replyTo,
+      )
+      .toArray()[0];
+    if (original === undefined) return;
+    // 只有原发起者能给自己那条指令「改口」；别人回复同一条 @ 不构成取代关系。
+    if (String(original.sender_name) !== msg.sender.name) return;
+    if (original.retracted_at !== null && original.retracted_at !== undefined) return;
+    if (original.superseded_by !== null && original.superseded_by !== undefined) return;
+    if (original.superseded_seq !== null && original.superseded_seq !== undefined) return;
+    const placeholders = targets.map(() => "?").join(", ");
+    const stillOpen = this.ctx.storage.sql
+      .exec(
+        `SELECT 1 FROM directed_deliveries
+          WHERE message_seq = ? AND target_name IN (${placeholders})
+            AND state IN ('queued', 'claimed', 'running', 'waiting_owner')
+          LIMIT 1`,
+        replyTo,
+        ...targets,
+      )
+      .toArray()[0];
+    // 已经结清的 @ 不需要「过期」信号：它不会再被谁当成最新指令执行。
+    if (stillOpen === undefined) return;
+    const rev = this.nextRevSeq();
+    this.ctx.storage.sql.exec(
+      "UPDATE messages SET superseded_seq = ?, rev_seq = ? WHERE seq = ?",
+      msg.seq,
+      rev,
+      replyTo,
+    );
+    const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", replyTo).toArray()[0];
+    if (row === undefined) return;
+    // 复用既有的 supersede 动作词：message_update 的 action 联合是 CLI 手抄镜像的（#622），
+    // 新增一个词会让所有未升级客户端把这类修订整帧静默丢掉。语义上这就是一次 supersede。
+    this.broadcastFrame({
+      type: "message_update",
+      target_seq: replyTo,
+      action: "supersede",
+      actor: msg.sender,
+      ts: now,
+      message: this.rowToFrame(row),
+    });
+  }
+
   private ensureDirectedDeliveries(
     msg: MsgFrame,
     classifiedTargets: string[],
@@ -10335,6 +10497,7 @@ export class ChannelDO extends Server<Env> {
     const targets = [...new Set(classifiedTargets)].filter((targetName) => targetName !== msg.sender.name);
     if (targets.length === 0) return Promise.resolve();
     const now = Date.now();
+    this.markSupersededByReplyCorrection(msg, targets, now);
     for (const targetName of targets) {
       const existing = this.ctx.storage.sql
         .exec("SELECT * FROM directed_deliveries WHERE message_seq = ? AND target_name = ?", msg.seq, targetName)
@@ -11358,6 +11521,15 @@ export class ChannelDO extends Server<Env> {
       expectedStates: string[];
       expectedLeaseAdapter?: string;
       expectedLeaseConnectionId?: string;
+      /**
+       * #875「已读不回」的显式 ack 通道。一个显式 ack 很可能发生在原 lease 连接之外（会话换了、
+       * 从别的终端补 ack），拿 lease_connection_id 卡它等于让这条 @ 永远只能靠回复或超时收场。
+       * 所以这里给连接身份闸开一个**窄**口子：口子只对「principal 与建单时 target_owner 完全一致」
+       * 的调用方开放，绝不放宽成任意调用方——principal 不匹配直接拒，比连接闸更严。
+       */
+      explicitAckPrincipal?: string;
+      /** 落审计列 acknowledged_by/at 的身份名；仅显式 ack 传。 */
+      acknowledgedBy?: string;
       dispatchNext?: boolean;
     },
   ): Record<string, unknown> | undefined {
@@ -11393,6 +11565,15 @@ export class ChannelDO extends Server<Env> {
       return before;
     }
     if (!options.expectedStates.includes(beforeState)) return undefined;
+    // 显式 ack 的 principal 闸（#875）。放在连接闸之前：它替代连接身份，但只在 principal 完全相等
+    // 时放行。建单时的 target_owner 缺失（历史行）一律拒绝——宁可让这条 @ 走原来的回复/超时路径，
+    // 也不能凭一个无法归属的 principal 把别人的 @ 结清掉。
+    if (options.explicitAckPrincipal !== undefined) {
+      const principal = typeof before.target_owner === "string" && before.target_owner.length > 0
+        ? before.target_owner
+        : null;
+      if (principal === null || principal !== options.explicitAckPrincipal) return undefined;
+    }
     if (
       options.expectedLeaseAdapter !== undefined &&
       String(before.lease_adapter ?? "") !== options.expectedLeaseAdapter
@@ -11416,21 +11597,29 @@ export class ChannelDO extends Server<Env> {
     const error = terminalState === "failed"
       ? (options.error ?? "delivery failed").slice(0, DECISION_REASON_LIMIT)
       : null;
+    // replied 通常无 reason（普通回复结清）；#875 的显式 ack 是唯一携带 reason 的 replied——
+    // 「已读不回」必须在账本里留下自己的名字，否则它和一条真回复无法区分。
     const terminalReason: DeliveryTerminalReason | null = terminalState === "failed"
       ? options.terminalReason ?? "delivery_failed"
-      : null;
+      : options.terminalReason ?? null;
+    const acknowledgedBy = options.acknowledgedBy ?? null;
     this.ctx.storage.sql.exec(
       `UPDATE directed_deliveries
           SET state = ?,
               last_lease_connection_id = COALESCE(lease_connection_id, last_lease_connection_id),
               last_lease_adapter = COALESCE(lease_adapter, last_lease_adapter),
               lease_connection_id = NULL, lease_adapter = NULL, lease_until = NULL,
-              reply_seq = COALESCE(?, reply_seq), last_error = ?, terminal_reason = ?, updated_at = ?
+              reply_seq = COALESCE(?, reply_seq), last_error = ?, terminal_reason = ?,
+              acknowledged_by = COALESCE(?, acknowledged_by),
+              acknowledged_at = COALESCE(?, acknowledged_at),
+              updated_at = ?
         WHERE ${clauses.join(" AND ")}`,
       terminalState,
       replySeq,
       error,
       terminalReason,
+      acknowledgedBy,
+      acknowledgedBy === null ? null : now,
       now,
       ...whereArgs,
     );
@@ -12392,6 +12581,13 @@ export class ChannelDO extends Server<Env> {
     }
     if (r.supersedes !== null && r.supersedes !== undefined) frame.supersedes = Number(r.supersedes);
     if (r.superseded_by !== null && r.superseded_by !== undefined) frame.superseded_by = Number(r.superseded_by);
+    // #881「这条内容已过期」的显式标记。显式 supersede 链优先（发送者自己声明的替代关系最强），
+    // 其次才是 reply_correction。定序依据仍只有 seq——这里报的 by_seq 恒大于本帧 seq，不涉及 ts。
+    if (r.superseded_by !== null && r.superseded_by !== undefined) {
+      frame.superseded = { by_seq: Number(r.superseded_by), reason: "revision" };
+    } else if (r.superseded_seq !== null && r.superseded_seq !== undefined) {
+      frame.superseded = { by_seq: Number(r.superseded_seq), reason: "reply_correction" };
+    }
     if (r.rev_seq !== null && r.rev_seq !== undefined) frame.rev_seq = Number(r.rev_seq);
     if (!retracted && r.original_body !== null && r.original_body !== undefined) {
       frame.revision = { original_body: String(r.original_body) };

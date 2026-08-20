@@ -7,10 +7,15 @@
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { ackWatchStuck, drainWatchStuck, resolveChannel } from "../config";
 import { resolveAuthDetailed } from "../oidc-cli";
-import { fetchRecentMessages, handleRestError } from "../rest";
+import { ackDelivery, fetchRecentMessages, handleRestError } from "../rest";
 import { isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 
-const FLAGS = ["channel", "seq", "all", "through", "before"];
+const FLAGS = ["channel", "seq", "all", "through", "before", "no-reply"];
+// #875：只有 --seq 指得出「哪一条 @」。--all/--through/--before 是本地游标批量排空，
+// 服务端账本必须逐条结清（每条 @ 是一条独立的 durable delivery），所以不给批量 ack 服务端的口子。
+export const NO_REPLY_REQUIRES_SEQ_ERROR =
+  "--no-reply settles ONE server-side @ and needs to know which one: pass --seq N " +
+  "(see party who --json → pending_mention_seqs). It is not combinable with --all/--through/--before.";
 // #860①：同族命令（receipt/revise/capture/decision）的位置参数都是 seq，只有 ack 是频道 slug，
 // 而 SLUG_RE 收下纯数字串 → `party ack 1841` 曾静默读一个不存在的频道并 exit 0（用户以为债清了）。
 export const NUMERIC_POSITIONAL_ERROR =
@@ -37,21 +42,29 @@ messages from there.
 Only watch-sourced debt can be acked. Debt owned by party serve is never touched
 here: serve replays it durably and clearing it by hand would silently drop an @.
 
-LOCAL ONLY — this does NOT clear \`pending_mention_seqs\` (#859). There are two
-separate ledgers and this command writes only the first:
-  · LOCAL watch replay state (a file next to your config) — what \`party ack\` clears.
-    Clearing it stops YOUR watch from replaying that frame.
+TWO LEDGERS (#859/#875). By default this command writes only the first:
+  · LOCAL watch replay state (a file next to your config) — what plain \`party ack\`
+    clears. Clearing it stops YOUR watch from replaying that frame. No request is
+    sent to the server, so it can never change the server ledger.
   · SERVER-side @ delivery debt — what \`party who --json\` reports as
-    unhandled_mention_count / pending_mention_seqs. \`party ack\` sends no request
-    to the server and can never change it.
-To settle the server ledger you must answer the @: \`party send "…" --reply-to N\`
-(list several when one reply settles them all: \`--reply-to A,B\`). An @ you ack
-locally but never reply to stays owed server-side until its delivery lease expires,
-and is then recorded as a FAILED delivery with terminal_reason=unknown_outcome —
-so for an @ that deserves a one-liner, send the one-liner with --reply-to.
+    unhandled_mention_count / pending_mention_seqs. Only two things settle it:
+    answering the @ (\`party send "…" --reply-to N\`, list several with \`--reply-to A,B\`),
+    or \`party ack --seq N --no-reply\` (see below).
+
+--no-reply is the "I read it, it warrants no reply" exit (#875). It POSTs to the
+server and closes that one @ with terminal_reason=acknowledged_no_reply — a real
+settlement, explicitly NOT failed/unknown_outcome. It is auditable: the ledger
+records who acked and when, and the whole channel can see it. Use it honestly; an
+@ that deserves a one-liner deserves the one-liner (\`send --reply-to N\`).
+
+Without --no-reply, an @ you ack only locally stays owed server-side until its
+delivery lease expires, and is then recorded as a FAILED delivery with
+terminal_reason=unknown_outcome.
 
 Options:
   --channel C   channel to ack in (defaults to the bound channel)
+  --no-reply    ALSO settle the server-side @ debt for --seq N as
+                acknowledged_no_reply ("seen, no reply needed"). Requires --seq.
   --seq N       acknowledge through exactly N; a newer pending wake is preserved
                 (single-valued: repeating --seq is an error, not a merge)
   --all         drain: advance cursor to channel head + clear all pending watch debt
@@ -60,7 +73,8 @@ Options:
 
 A successful later \`party send\` or status update acknowledges an earlier watch wake.
 Use \`party ack --seq N\` when no channel message is warranted (and remember: that
-leaves the server-side @ debt for seq N standing — see LOCAL ONLY above).`;
+leaves the server-side @ debt for seq N standing unless you add --no-reply —
+see TWO LEDGERS above).`;
 
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
@@ -68,7 +82,7 @@ export async function run(argv: string[]): Promise<number> {
     return 0;
   }
   // #860②：把 --seq 收成数组只为「重复给了几次」可见——重复即报错，绝不静默取最后一个。
-  const { positionals, flags } = parseArgs(argv, { booleans: ["all"], repeatable: ["seq"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "no-reply"], repeatable: ["seq"] });
   const unknown = unknownFlagError(flags, FLAGS);
   if (unknown !== null) {
     console.error(unknown);
@@ -129,6 +143,12 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
 
+  // #875：--no-reply 结清的是**服务端**账本上的某一条 @，必须指名道姓。
+  if (flags["no-reply"] === true && seqFlag === undefined) {
+    console.error(NO_REPLY_REQUIRES_SEQ_ERROR);
+    return 1;
+  }
+
   // --all / --through / --before：批量排空（#668/#674）。
   if (flags.all === true || throughFlag !== undefined || beforeFlag !== undefined) {
     let throughSeq: number;
@@ -167,13 +187,39 @@ export async function run(argv: string[]): Promise<number> {
     return 0;
   }
 
+  // #875：先结服务端账，再动本地债。顺序不能反——本地债清掉了而服务端 POST 失败，
+  // 用户会以为两本账都平了，可那条 @ 仍在服务端欠着，最后照样被记成 unknown_outcome。
+  if (flags["no-reply"] === true) {
+    const auth = await resolveAuthDetailed();
+    if (!auth.server || !auth.token) {
+      console.error("no config, run: party login or party init --server URL --token T");
+      return 1;
+    }
+    try {
+      const result = await ackDelivery(auth.server, auth.token, channel, seqFlag as number);
+      console.log(
+        result.deduped === true
+          ? `server-side @ seq=${seqFlag} in #${channel} was already settled as acknowledged_no_reply`
+          : `settled server-side @ seq=${seqFlag} in #${channel} as acknowledged_no_reply ` +
+            "(seen, no reply needed — visible in the channel ledger)",
+      );
+    } catch (e) {
+      return handleRestError(e);
+    }
+  }
+
   // 单条 ack（默认）：校验与清除同处一个跨进程临界区（ackWatchStuck）：读后清会误吞窗口内新落的债（#599 评审）。
   const acked = ackWatchStuck(channel, seqFlag);
+  const settledServer = flags["no-reply"] === true;
   switch (acked.outcome) {
     case "none":
+      if (settledServer) return 0;
       console.log(`no pending wake debt in #${channel}`);
       return 0;
     case "serve_owned":
+      // 服务端那条 @ 已经被 --no-reply 结清了，serve 不会再重放它——此时再喊「会静默丢掉那个 @」
+      // 就是 #874 刚修掉的那类误导。本地 serve 债留给 serve 闭环自己收，照样不碰。
+      if (settledServer) return 0;
       console.error(
         `refusing to ack: pending debt at seq=${acked.seq} is owned by party serve (source=${acked.source}); ` +
           "serve replays it durably — clearing it by hand would silently drop that @",

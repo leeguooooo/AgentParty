@@ -1495,6 +1495,15 @@ export interface PublicDirectedDelivery {
    * 细节，可安全跨组织下发。旧客户端不认识该字段会忽略，仍按普通 `failed` 展示——不影响正确性。
    */
   undelivered?: boolean;
+  /**
+   * 「已读不回」的真终态（#875）。目标身份显式 ack 了这条 @——看到了、判断不需要回复——
+   * 于是它以 `replied` 结清，但 reply_seq 为 null。**不是** failed / unknown_outcome：
+   * 后者是投递失败，把「已读不回」记成失败会让欠账账本失真。
+   *
+   * 刻意可审计且频道侧可见：by 是执行 ack 的身份名，at 是服务端落库时刻——ack 不能成为
+   * 「悄悄吞掉一条 @」的手段，谁在什么时候把它结清了必须查得到。旧 worker 不下发该字段。
+   */
+  acknowledged_no_reply?: { by: string; at: number };
 }
 
 /** 只发给目标身份当前持有 serve lease 的连接；message 正文仍引用原 messages 行，不复制存储。 */
@@ -1677,9 +1686,38 @@ export interface MsgFrame {
    * 注意：`cli/src/client.ts` 的 isMessageFrame 校验必须逐字镜像本字段（#622 教训）。
    */
   replay?: true;
+  /**
+   * 「这条内容已被后续消息取代」的显式标记（#881）。与 `replay` **正交**，可同时为真：
+   * replay 说的是「这是补拉的历史帧」（传输事实），superseded 说的是「这条正文已过期」（内容事实）。
+   *
+   * 定序依据仍然**只有 seq**（频道全局单调）。刻意不按 `ts` 排序或判定新旧：ts 是发送端本地时钟，
+   * 同机多 runner / 跨机漂移下比 seq 更不可信，按它定序会引入新的错序（#881 明确否掉了这个方案）。
+   * 因此 by_seq 一定 > 本帧 seq，消费侧比较的是 seq 而不是时间。
+   *
+   * 消费侧（serve runner / watch / bridge）见到本字段应降级处理：可以读作背景，但不得当成最新指令执行。
+   * 可选字段：旧客户端忽略即可正常工作；旧服务端不下发时按「未知是否被取代」处理（即旧语义）。
+   * 注意：`cli/src/client.ts` 的 isMessageFrame 校验必须逐字镜像本字段（#622 教训）。
+   */
+  superseded?: SupersededMark;
   revision?: {
     original_body: string | null;
   };
+}
+
+/**
+ * 「被取代」的判定口径（#881）。刻意只收**可证明后一条针对的就是前一条**的两种关系，
+ * 不含「同 sender 同 @ 目标的任意后续消息」——那会把「做 X」「再做 Y」两条独立的 @ 里的
+ * 前一条误标成过期，把有效指令降级掉，比不标更危险。
+ *  - `revision`：显式 supersede 链（`supersedes` / `superseded_by`），发送者自己声明的替代关系；
+ *  - `reply_correction`：同一 sender 用 `--reply-to` 回到这条消息、且再次 @ 了同一目标，
+ *    且这条对该目标的 directed delivery 当时**仍未结清**——即「我改口了，别按上一条做」。
+ */
+export type SupersededReason = "revision" | "reply_correction";
+
+export interface SupersededMark {
+  /** 取代它的那条消息的 seq；恒大于被标记帧的 seq。定序依据是 seq，不是 ts。 */
+  by_seq: number;
+  reason: SupersededReason;
 }
 
 /** One bounded page of data attributable to an identity in a channel. */

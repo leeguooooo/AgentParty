@@ -26,6 +26,7 @@ import {
   parseRuntimePeerDiscovery,
   type MsgFrame,
   type PresenceEntry,
+  type PublicDirectedDelivery,
   type ReadCursor,
   type RuntimePeerDiscovery,
   type RuntimePeerPurpose,
@@ -974,6 +975,26 @@ export async function postReceipt(
     headers: bearerJson(token),
     body: JSON.stringify(body),
   })) as { message: MsgFrame };
+}
+
+/**
+ * 「已读不回」的服务端终态（#875）：结清一条 @ 而不发消息，记为
+ * `terminal_reason=acknowledged_no_reply`——**不是** failed / unknown_outcome。
+ *
+ * ref 传 delivery id 或那条 @ 消息的 seq（服务端把纯数字解析成「我在那条消息上的那条 @」，
+ * 因为调用方手上通常只有 `who --json` 报的 pending_mention_seqs）。
+ */
+export async function ackDelivery(
+  server: string,
+  token: string,
+  slug: string,
+  ref: string | number,
+): Promise<{ ok: true; delivery: PublicDirectedDelivery; deduped?: boolean }> {
+  return (await req(
+    server,
+    `/api/channels/${encodeURIComponent(slug)}/deliveries/${encodeURIComponent(String(ref))}/ack`,
+    { method: "POST", headers: bearerJson(token) },
+  )) as { ok: true; delivery: PublicDirectedDelivery; deduped?: boolean };
 }
 
 // 人类决策回应（#284）：人类/moderator 对某条 decision_request 点选项/审批。

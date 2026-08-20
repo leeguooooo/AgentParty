@@ -8098,6 +8098,48 @@ app.put("/api/channels/:slug/retention", async (c) => {
 
 // 回执（#828）：「收到了，但我现在不在轮次里」。挂在目标消息上的元数据——不占 seq、不进正文流、
 // 不触发 delivery。必须注册在 :action 泛匹配之前，否则被吞。
+// 「已读不回」的真终态（#875）：结清一条 @ 而不发消息。与 failed / unknown_outcome 明确区分——
+// 后者是投递失败。授权在 DO 侧按建单时的 target_owner 逐条判：只有被 @ 的那个 principal 本人能 ack。
+app.post("/api/channels/:slug/deliveries/:id/ack", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  // ack 写的是服务端持久账本，只读会话不得结清任何人的 @。
+  if (identity.role === "readonly") {
+    return c.json(errorBody("forbidden", "readonly sessions cannot acknowledge deliveries"), 403);
+  }
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  if (channel.archived_at !== null) {
+    return c.json(errorBody("archived", "channel is archived"), 410);
+  }
+  const deliveryId = c.req.param("id");
+  if (typeof deliveryId !== "string" || deliveryId.length === 0 || deliveryId.length > 128) {
+    return c.json(errorBody("bad_request", "delivery id required"), 400);
+  }
+  return mutableFetchResponse(
+    await fetchChannelDO(
+      c.env,
+      slug,
+      new Request(`https://do/internal/deliveries/${encodeURIComponent(deliveryId)}/ack`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-partykit-room": slug,
+          "x-ap-name": identity.name,
+          "x-ap-kind": identity.kind,
+          "x-ap-role": identity.role,
+          ...(identity.owner ? { "x-ap-owner": identity.owner } : {}),
+          "x-ap-token-hash": identity.hash,
+          ...channelHeaders(channel, c.req.url),
+        },
+      }),
+    ),
+  );
+});
+
 app.post("/api/channels/:slug/messages/:seq/receipt", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);
