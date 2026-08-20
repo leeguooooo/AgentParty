@@ -8,6 +8,7 @@ import {
   resolveSenderLabel,
   type IdentityDisplayMap,
 } from "../lib/identityDisplay";
+import { fmtTime } from "../lib/time";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/Channel";
 import "../i18n/strings/MessageCard";
@@ -17,6 +18,7 @@ export interface MentionToastItem {
   sender: Sender; // 原始发送者，渲染时经 resolveSenderLabel 解析显示名，保证与消息卡一致
   body: string;   // 已截断的正文预览
   fullBody?: string; // #280：完整正文，挂到 title 上供悬停看全文（缺省回退到 body）
+  ts?: number; // #861：消息**自身**的时间。提醒里必须打出来，否则「通知时间 ≠ @ 时间」无从发现
 }
 
 interface Props {
@@ -65,6 +67,7 @@ function ToastCard({
         <span className="mention-toast-title">
           <span className="ap-sprite ap-sprite--bell-on" aria-hidden="true" />
           <span>{t("Channel.toast.title", { sender: senderLabel, channel })}</span>
+          {item.ts !== undefined && <time className="t-mono mention-toast-time">{fmtTime(item.ts)}</time>}
         </span>
         <button
           type="button"
@@ -120,6 +123,7 @@ export function MentionHeaderNotice({ items, channel, identityDisplay, onJump, o
       >
         <span className="ap-sprite ap-sprite--bell-on" aria-hidden="true" />
         <span className="mention-header-title">{t("Channel.toast.title", { sender: senderLabel, channel })}</span>
+        {item.ts !== undefined && <time className="t-mono mention-header-time">{fmtTime(item.ts)}</time>}
         {items.length > 1 && <span className="t-mono mention-header-count">+{items.length - 1}</span>}
       </button>
       <button

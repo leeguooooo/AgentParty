@@ -93,7 +93,11 @@ describe("Channel loading and recovery surfaces (#344 #345 #346 #354)", () => {
     expect(channelSource).toContain("const loadInitialPage = useCallback");
     expect(channelSource).toContain("onClick={loadInitialPage}");
     expect(channelSource).toContain("hasMoreRef.current = true");
-    expect(channelSource).toContain("initialCursorRef.current = 0");
+    // #861：游标**不再**被重置成 0。这条曾断言 `initialCursorRef.current = 0`，而那正是缺陷本身——
+    // token 静默续期时 ws effect 会读到清 0 的 ref，以 since=0 建 socket，服务端把整段历史当 live
+    // 帧重放。分页 ref 的复位由 hasMoreRef/olderStatus 承担，游标只单调前进。
+    expect(channelSource).not.toMatch(/initialCursorRef\.current\s*=\s*0\s*;/);
+    expect(channelSource).toContain('setOlderStatus("idle")');
     expect(channelSource).toContain('t("Channel.history.retry")');
     expect(channelSource).toContain('tRef.current("Channel.history.loadFailed")');
   });
