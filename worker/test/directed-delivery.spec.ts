@@ -1,4 +1,9 @@
-import type { DirectedDelivery, DirectedDeliveryFrame, PublicDirectedDelivery } from "@agentparty/shared";
+import type {
+  DirectedDelivery,
+  DirectedDeliveryFrame,
+  PublicDirectedDelivery,
+  ServerFrame,
+} from "@agentparty/shared";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { type ChannelDO, DIRECTED_DELIVERY_QUEUED_TIMEOUT_MS } from "../src/do";
@@ -1313,5 +1318,214 @@ describe("排队超时收敛为终态（issue #667）", () => {
     expect((await deliveryRows(slug))[0]).toMatchObject({ id: work.delivery.id, state: "replied" });
     expect(await terminalReason(slug, work.delivery.id)).toBeNull();
     holder.close();
+  });
+});
+
+/**
+ * #872：announce-only 连接（#841 P2 的宣告腿）只声明 runtime_topology，从不 claim delivery。
+ * 服务端必须把它当**非投递消费方**：不要求 directed_delivery v1、不投欠账帧、只给 live 广播，
+ * 且该身份的 delivery 账本在整个 announce 连接生命周期内一字不改。
+ */
+describe("announce-only 连接不是投递消费方（issue #872）", () => {
+  const ANNOUNCE_TOPOLOGY = {
+    version: 1 as const,
+    node_ref: "node_announcebox",
+    runtime_ref: "runtime_announceone",
+    workspace_ref: "workspace_announce",
+    worktree_ref: "worktree_announce",
+    peer_scope: "local_installation" as const,
+    evidence: "client_asserted" as const,
+    harness_session: { harness: "claude" as const, display_name: "dormant-session" },
+  };
+
+  async function openAnnounce(slug: string, token: string, since = 0) {
+    const ws = await WsClient.open(slug, token);
+    await ws.nextOfType("welcome");
+    ws.send({
+      type: "hello",
+      since,
+      client_version: "0.2.191",
+      runtime_topology: ANNOUNCE_TOPOLOGY,
+    });
+    // 装饰过的 ping 走每连接队列，它的 pong 证明上面的 hello（含补拉）已处理完。
+    // 必须自己逐帧读到 pong 为止并把中间帧留证——nextOfType 会静默丢弃途中帧，
+    // 用它就会把「不该发的欠账帧」一起吃掉，断言随之失效。
+    ws.send({ type: "ping", barrier: "announce_hello" });
+    const handshake: ServerFrame[] = [];
+    for (;;) {
+      const frame = await ws.next();
+      if (frame.type === "pong") break;
+      handshake.push(frame);
+    }
+    return { ws, handshake };
+  }
+
+  it("有欠账的身份跑 announce：无 upgrade_required、无欠账帧、live 帧照收，账本零改动", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("dormant"));
+    const slug = await createChannel(sender.token);
+
+    // 先制造 durable 欠账：目标离线时被 @，delivery 落 queued。
+    const owed = await sendMention(slug, sender.token, target.name, "owed while offline");
+    const before = await deliveryRows(slug);
+    expect(before).toMatchObject([{ message_seq: owed.seq, state: "queued", attempt: 0 }]);
+
+    const { ws: announce, handshake } = await openAnnounce(slug, target.token);
+    // 握手 + 补拉窗口里既没有 upgrade_required，也没有那条欠账消息。
+    expect(handshake.filter((frame) => frame.type === "error")).toEqual([]);
+    expect(handshake.filter((frame) => frame.type === "msg" && frame.seq === owed.seq)).toEqual([]);
+    // 账本在 announce 建连 + 补拉之后原封不动。
+    expect(await deliveryRows(slug)).toEqual(before);
+
+    // live 广播必须照收——这正是 announce 存在的理由。补拉阶段若真发了欠账帧或 error，
+    // 它们已在缓冲里排在 live 帧之前，这个循环必然先撞上。
+    const live = await sendMention(slug, sender.token, target.name, "live wake");
+    for (;;) {
+      const frame = await announce.next();
+      if (frame.type === "error") {
+        throw new Error(`announce-only socket was rejected: ${JSON.stringify(frame)}`);
+      }
+      if (frame.type === "msg" && frame.seq === owed.seq) {
+        throw new Error("announce-only socket received a backlog debt frame");
+      }
+      if (frame.type === "msg" && frame.seq === live.seq) {
+        expect(frame.replay).toBeUndefined();
+        break;
+      }
+    }
+
+    // live @ 也只是新增一条 queued 欠账，两条都没被 announce 消费。
+    expect(await deliveryRows(slug)).toMatchObject([
+      { message_seq: owed.seq, state: "queued", attempt: 0, lease_adapter: null, lease_connection_id: null },
+      { message_seq: live.seq, state: "queued", attempt: 0, lease_adapter: null, lease_connection_id: null },
+    ]);
+    const beforeClose = await deliveryRows(slug);
+
+    announce.close();
+    // 断开也不得改动账本（没有租约可回收、没有终态可写）。
+    expect(await deliveryRows(slug)).toEqual(beforeClose);
+  });
+
+  it("announce 与正常消费方并存：欠账只被 v1 serve 领走，announce 不插手", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("both"));
+    const slug = await createChannel(sender.token);
+
+    const { ws: announce } = await openAnnounce(slug, target.token);
+    const capable = await WsClient.open(slug, target.token);
+    await capable.nextOfType("welcome");
+    expect((await claim(capable)).held).toBe(true);
+
+    const posted = await sendMention(slug, sender.token, target.name, "both legs online");
+    const delivery = await capable.nextOfType("delivery");
+    expect(delivery.delivery).toMatchObject({ message_seq: posted.seq, state: "claimed", attempt: 1 });
+    expect((await deliveryRows(slug))[0]).toMatchObject({ lease_adapter: "serve" });
+
+    // announce 收到的是 live 广播，绝不是 delivery。
+    for (;;) {
+      const frame = await announce.next();
+      if (frame.type === "delivery") throw new Error("announce-only socket was handed durable work");
+      if (frame.type === "error") throw new Error(`announce-only socket was rejected: ${JSON.stringify(frame)}`);
+      if (frame.type === "msg" && frame.seq === posted.seq) break;
+    }
+
+    announce.close();
+    capable.close();
+  });
+
+  it("回归：带 topology 但声明 directed_delivery 的 socket 仍是消费方；legacy 仍被 upgrade_required", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("consumer"));
+    const slug = await createChannel(sender.token);
+
+    // 带 topology 但同时声明 directed_delivery v1 → 不是 announce-only，照常领 durable work。
+    const consumer = await WsClient.open(slug, target.token);
+    await consumer.nextOfType("welcome");
+    consumer.send({
+      type: "hello",
+      since: 0,
+      client_version: "0.2.191",
+      directed_delivery: "v1",
+      runtime_topology: ANNOUNCE_TOPOLOGY,
+    });
+    consumer.send({ type: "serve_lease", op: "claim" });
+    expect((await consumer.nextOfType("serve_lease")).held).toBe(true);
+    const posted = await sendMention(slug, sender.token, target.name, "still a consumer");
+    expect((await consumer.nextOfType("delivery")).delivery).toMatchObject({
+      message_seq: posted.seq,
+      state: "claimed",
+    });
+    consumer.close();
+
+    // 旧 CLI（无 topology、无能力声明）行为逐字不变。
+    const legacyTarget = await seedToken("agent", uniq("legacy"));
+    const legacySlug = await createChannel(sender.token);
+    const legacy = await WsClient.open(legacySlug, legacyTarget.token);
+    await legacy.nextOfType("welcome");
+    legacy.send({ type: "hello", since: 0, client_version: "0.2.117" });
+    legacy.raw('{"type":"ping"}');
+    await legacy.nextOfType("pong");
+    const legacyPosted = await sendMention(legacySlug, sender.token, legacyTarget.name, "legacy unchanged");
+    await expectUpgradeRequiredWithoutRaw(legacy, legacyPosted.seq);
+    expect((await deliveryRows(legacySlug))[0]).toMatchObject({ state: "queued", attempt: 0 });
+  });
+
+  it("回归：claim 过 serve 的 legacy socket 即便带 topology 也不是 announce，仍被 upgrade_required", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("legacyserve"));
+    const slug = await createChannel(sender.token);
+    const capable = await WsClient.open(slug, target.token);
+    await capable.nextOfType("welcome");
+    expect((await claim(capable)).held).toBe(true);
+
+    const legacy = await WsClient.open(slug, target.token);
+    await legacy.nextOfType("welcome");
+    legacy.send({
+      type: "hello",
+      since: 0,
+      client_version: "0.2.117",
+      runtime_topology: ANNOUNCE_TOPOLOGY,
+    });
+    legacy.send({ type: "serve_lease", op: "claim" });
+    // claim 闸（v1 holder 已在）与 announce 豁免无关，必须原样拒绝带 topology 的 legacy serve。
+    await expectUpgradeRequiredWithoutRaw(legacy);
+    capable.close();
+  });
+
+  it("回归：注册了 watch 适配器的 v1-less socket 即便带 topology 也仍被 upgrade_required、raw 被抑制", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("watchtopo"));
+    const slug = await createChannel(sender.token);
+    const watcher = await WsClient.open(slug, target.token);
+    await watcher.nextOfType("welcome");
+    watcher.send({
+      type: "hello",
+      since: 0,
+      client_version: "0.2.117",
+      runtime_topology: ANNOUNCE_TOPOLOGY,
+    });
+    watcher.send({ type: "delivery_adapter", adapter: "watch", op: "register" });
+    await watcher.nextOfType("delivery_adapter");
+
+    const posted = await sendMention(slug, sender.token, target.name, "watch adapter with topology");
+    await expectUpgradeRequiredWithoutRaw(watcher, posted.seq);
+  });
+
+  it("同一 socket 后续升级成 serve 消费方即失去 announce 豁免", async () => {
+    const sender = await seedToken("agent", uniq("sender"));
+    const target = await seedToken("agent", uniq("upgrader"));
+    const slug = await createChannel(sender.token);
+    const owed = await sendMention(slug, sender.token, target.name, "owed before upgrade");
+
+    const { ws } = await openAnnounce(slug, target.token);
+    expect((await deliveryRows(slug))[0]).toMatchObject({ state: "queued", attempt: 0 });
+
+    // 二次 hello 声明能力 + claim serve：这条 socket 现在是真消费方，欠账该被派给它。
+    ws.send({ type: "hello", since: 0, client_version: "0.2.191", directed_delivery: "v1" });
+    ws.send({ type: "serve_lease", op: "claim" });
+    expect((await ws.nextOfType("serve_lease")).held).toBe(true);
+    const delivery = await ws.nextOfType("delivery");
+    expect(delivery.delivery).toMatchObject({ message_seq: owed.seq, state: "claimed" });
+    ws.close();
   });
 });
