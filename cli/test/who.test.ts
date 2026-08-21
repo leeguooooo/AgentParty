@@ -16,7 +16,12 @@ import {
   waitingOwnerNote,
   wakeGuidanceNote,
   wakeGuidanceOf,
+  wakeHarnessOf,
 } from "../src/commands/who";
+import { buildPullWakeLookup, hasCodexStopHook, locallyConfiguredNames, type PullWakeLookup } from "../src/pull-wake";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const NOW = 1_000_000_000;
 
@@ -473,10 +478,13 @@ describe("who liveness tiers (#603)", () => {
 });
 
 
-// #879：unreachable 只说了「叫不醒」，没说「怎么修」。修法按 harness 分叉——codex 会话没有默认的
-// per-session socket 收件箱（实测：app-server 的 unix:// 是 socket activation，不自建监听），
-// 所以只有 bridge / serve 持有它的 app-server 连接时才可达；Claude Code 交互式会话装了插件即可达。
-describe("who wake guidance（#879 方向 2：没有唤醒层时给可操作提示）", () => {
+// #879/#891：unreachable 只说了「叫不醒」，没说「怎么修」；#879 按 harness 分叉给建议，但它选的
+// 两个判据字段（agent_session / reception_runner）**只有活跃身份的 presence 才有**，而提示只对
+// **离线**身份显示——判据与展示场景在时间上互斥，于是真机上 10 个身份里 7 个全落 unknown 兜底。
+//
+// 本 describe 的核心不是「字段在场时分叉正确」（#879 已测过，也确实全绿），而是把 #891 的真机形态
+// **变成第一等测试样本**：离线身份**没有**这些字段。那种形态下正确行为是闭嘴，不是兜底。
+describe("who wake guidance（#879/#891：判据在场才给建议，判不出就闭嘴）", () => {
   const STALE = { state: "offline" as const, wake: { kind: "none" as const }, last_seen: NOW - 88 * 60 * 60 * 1000 };
   function row(over: Partial<PresenceEntry> & { name: string }) {
     const r = classify(p({ ...STALE, ...over }), NOW);
@@ -484,7 +492,7 @@ describe("who wake guidance（#879 方向 2：没有唤醒层时给可操作提�
     return r as NonNullable<ReturnType<typeof classify>>;
   }
 
-  test("codex 身份（agent_session.harness）→ 结构化建议指向 bridge/serve", () => {
+  test("codex 身份（agent_session.harness）→ 建议装 Stop hook / bridge，不含 serve", () => {
     const g = wakeGuidanceOf(
       row({ name: "lark-agentparty-codex", agent_session: { harness: "codex", session_id: "s1", updated_at: NOW } }),
       "pwtk",
@@ -493,7 +501,7 @@ describe("who wake guidance（#879 方向 2：没有唤醒层时给可操作提�
       reason: "no_wake_layer",
       harness: "codex",
       harness_source: "agent_session",
-      remedy: ["party bridge codex pwtk", "party serve pwtk --runner codex"],
+      remedy: ["party hook install --codex", "party bridge codex pwtk"],
     });
   });
 
@@ -510,7 +518,7 @@ describe("who wake guidance（#879 方向 2：没有唤醒层时给可操作提�
     expect(viaReception?.harness_source).toBe("reception_runner");
   });
 
-  test("claude 身份 → 建议装插件 / serve --runner claude，绝不出现 codex 专属命令", () => {
+  test("claude 身份 → 建议装插件，绝不出现 codex 专属命令", () => {
     const g = wakeGuidanceOf(
       row({ name: "kyc-claude", agent_session: { harness: "claude", session_id: "s1", updated_at: NOW } }),
       "pwtk",
@@ -519,15 +527,25 @@ describe("who wake guidance（#879 方向 2：没有唤醒层时给可操作提�
       reason: "no_wake_layer",
       harness: "claude",
       harness_source: "agent_session",
-      remedy: ["claude plugin install agentparty@agentparty", "party serve pwtk --runner claude"],
+      remedy: ["claude plugin install agentparty@agentparty"],
     });
   });
 
-  test("harness 未知 → 不硬造，给通用的无人值守建议", () => {
-    const g = wakeGuidanceOf(row({ name: "mystery" }), "pwtk");
-    expect(g?.harness).toBe("unknown");
-    expect(g?.harness_source).toBeUndefined();
-    expect(g?.remedy).toEqual(["party serve pwtk --runner codex", "party serve pwtk --runner claude"]);
+  // ★ #891 的真机形态：这正是 `party who agentparty` 上 7/10 行的样子——离线、陈旧、
+  //   agent_session 和 reception_runner 双双缺席。#879 的单测样本从没覆盖过它。
+  test("#891 真机形态（离线身份缺判据字段）→ 完全不给建议，而不是兜底并列两条命令", () => {
+    for (const name of ["claude-statebar-codex", "lark-ad72b3f9749e-agentparty-codex1", "leo-claude"]) {
+      const r = row({ name });
+      expect(r.unreachable).toBe(true);
+      expect(r.agent_session).toBeUndefined();
+      expect(r.reception_runner).toBeUndefined();
+      expect(wakeGuidanceOf(r, "agentparty")).toBeUndefined();
+    }
+  });
+
+  test("#891：名字带 -codex/-claude 后缀不构成 harness 证据，绝不据此断言", () => {
+    expect(wakeHarnessOf(row({ name: "lark-ad72b3f9749e-agentparty-codex" }))).toBeUndefined();
+    expect(wakeHarnessOf(row({ name: "leo-claude" }))).toBeUndefined();
   });
 
   test("有唤醒层的身份不给建议（online / wakeable / 刚断线都不加噪音）", () => {
@@ -538,39 +556,40 @@ describe("who wake guidance（#879 方向 2：没有唤醒层时给可操作提�
     expect(
       wakeGuidanceOf(row({ name: "srv", wake: { kind: "serve" }, last_seen: NOW, agent_session: session }), "c"),
     ).toBeUndefined();
-    expect(
-      wakeGuidanceOf(row({ name: "fresh", last_seen: NOW - 30_000, agent_session: session }), "c"),
-    ).toBeUndefined();
   });
 
-  test("人类不靠 bridge/serve 唤醒，不给建议", () => {
+  test("人类不靠 bridge/hook 唤醒，不给建议", () => {
     const human = classify(p({ ...STALE, name: "leo", kind: "human", paused: true }), NOW);
     expect(human?.kind).toBe("human");
     expect(wakeGuidanceOf(human as NonNullable<typeof human>, "c")).toBeUndefined();
   });
 
-  test("codex 提示整段文案：含 bridge/serve，且不含「装插件即可」这类 Claude 专属说法", () => {
+  test("codex 提示整段文案：指向 Stop hook / bridge，且既不含「装插件」也不含 serve", () => {
     const note = wakeGuidanceNote({
       reason: "no_wake_layer",
       harness: "codex",
-      remedy: ["party bridge codex pwtk", "party serve pwtk --runner codex"],
+      harness_source: "agent_session",
+      remedy: ["party hook install --codex", "party bridge codex pwtk"],
     });
     expect(note).toBe(
-      " · ↳ fix: a codex session has no per-session inbox — it is wakeable only while a process holds its app-server connection: run party bridge codex pwtk (interactive) or party serve pwtk --runner codex (unattended)",
+      " · ↳ fix: a codex session has no per-session inbox — give it the Stop hook so the @ surfaces in the session you are looking at: run party hook install --codex (then it picks pending @s up at the end of a turn), or party bridge codex pwtk to hold its app-server connection right now",
     );
     expect(note).not.toContain("plugin");
+    expect(note).not.toContain("party serve");
   });
 
-  test("claude 提示整段文案：不含任何 codex 专属命令", () => {
+  test("claude 提示整段文案：不含任何 codex 专属命令，也不含 serve", () => {
     const note = wakeGuidanceNote({
       reason: "no_wake_layer",
       harness: "claude",
-      remedy: ["claude plugin install agentparty@agentparty", "party serve pwtk --runner claude"],
+      harness_source: "agent_session",
+      remedy: ["claude plugin install agentparty@agentparty"],
     });
     expect(note).toBe(
-      " · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run claude plugin install agentparty@agentparty and rejoin the channel, or party serve pwtk --runner claude (unattended)",
+      " · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run claude plugin install agentparty@agentparty and rejoin the channel",
     );
     expect(note).not.toContain("codex");
+    expect(note).not.toContain("party serve");
   });
 
   test("没有建议时不输出任何提示（不给全员加噪音）", () => {
@@ -579,19 +598,147 @@ describe("who wake guidance（#879 方向 2：没有唤醒层时给可操作提�
 
   test("help 文案钉住 codex 无 per-session 收件箱这条硬事实与 JSON 字段名", () => {
     expect(HELP_TEXT).toContain("wake_guidance");
+    expect(HELP_TEXT).toContain("pull_wake");
     expect(HELP_TEXT).toContain("A codex session has NO per-session");
     expect(HELP_TEXT).toContain("party bridge codex");
+    expect(HELP_TEXT).toContain("party hook install --codex");
   });
 });
 
-// #879 装配层：note 函数单测全绿、真机什么都不显示，是本仓反复出现的失败模式。这里断言的是
-// presence → 行 → 终端字符串这条链本身：wake_guidance 真的挂到了行上，也真的渲染进了那一行。
-describe("who 唤醒建议的装配（#879：presence → 行 → 终端一行）", () => {
+// #905：拉取式唤醒通道（codex Stop hook）的可达性表达。
+describe("who pull-based reachability（#905：既不是在线，也不是不可达）", () => {
+  const CH = "agentparty";
+  const stale = (over: Partial<PresenceEntry> & { name: string }): PresenceEntry =>
+    p({ state: "offline", wake: { kind: "none" }, last_seen: NOW - 88 * 60 * 60 * 1000, ...over });
+  const lookup = (names: string[]): PullWakeLookup =>
+    buildPullWakeLookup(CH, "https://s", { hasHook: () => true, names: () => new Set(names) });
+
+  test("装了 Stop hook 的身份：不再断言 unreachable，改说「下次跑起来时会取到」", () => {
+    const rows = buildRows([stale({ name: "lark-codex1" })], {
+      now: NOW,
+      channel: CH,
+      pullWake: lookup(["lark-codex1"]),
+    });
+    const r = rows[0] as NonNullable<(typeof rows)[number]>;
+    expect(r.pull_wake).toEqual({
+      scope: "local",
+      harness: "codex",
+      evidence: ["codex_stop_hook", "local_agent_config"],
+    });
+    const line = renderRow(r, NOW, 0);
+    expect(line).toContain("⇢ deferred");
+    expect(line).toContain("picks the @ up via the Stop hook");
+    expect(line).not.toContain("⚠ no live wake layer");
+    expect(line).not.toContain("unreachable");
+    // 已经装过 hook 的身份不该再被劝装一遍。
+    expect(line).not.toContain("↳ fix");
+  });
+
+  test("措辞保留「本机视角」限定——绝不把本机观察升格成服务端可达性", () => {
+    const rows = buildRows([stale({ name: "x" })], { now: NOW, channel: CH, pullWake: lookup(["x"]) });
+    expect(renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0)).toContain("local view:");
+  });
+
+  test("本机没这个身份的 config → 不点亮，行仍走无唤醒层措辞", () => {
+    const rows = buildRows([stale({ name: "someone-else" })], {
+      now: NOW,
+      channel: CH,
+      pullWake: lookup(["not-them"]),
+    });
+    expect(rows[0]?.pull_wake).toBeUndefined();
+    expect(renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0)).toContain("⚠ no live wake layer");
+  });
+
+  test("本机没装 Stop hook → 一个身份都不点亮（连 agents 目录都不扫）", () => {
+    let scanned = false;
+    const l = buildPullWakeLookup(CH, "https://s", {
+      hasHook: () => false,
+      names: () => {
+        scanned = true;
+        return new Set(["a"]);
+      },
+    });
+    expect(l.hintFor("a")).toBeUndefined();
+    expect(scanned).toBe(false);
+  });
+
+  test("人类身份不走拉取式通道（Stop hook 是 agent 会话的东西）", () => {
+    const rows = buildRows([p({ name: "leo", kind: "human", live: true })], {
+      now: NOW,
+      channel: CH,
+      pullWake: lookup(["leo"]),
+    });
+    expect(rows[0]?.pull_wake).toBeUndefined();
+  });
+
+  // #865：本机两台生产实例都有同名频道 #agentparty。不比服务器就会把隔壁实例上的同名身份
+  // 认成「本机可拉取」——那条 @ 根本不在同一台服务器上，永远等不到人取。
+  test("locallyConfiguredNames：同频道但不同 server 的本机 config 不算数（#865）", () => {
+    const home = mkdtempSync(join(tmpdir(), "who-agents-home-"));
+    mkdirSync(join(home, "agents"), { recursive: true });
+    const put = (file: string, name: string, server: string) =>
+      writeFileSync(
+        join(home, "agents", file),
+        JSON.stringify({ server, token: "ap_x", identity: { name, kind: "agent", channel_scope: "agentparty" } }),
+      );
+    put("here.json", "codex-002", "https://agentparty.pwtk-dev.work");
+    put("there.json", "codex-002-elsewhere", "https://agentparty.leeguoo.com");
+    put("other-channel.json", "unrelated", "https://agentparty.pwtk-dev.work");
+    writeFileSync(
+      join(home, "agents", "other-channel.json"),
+      JSON.stringify({
+        server: "https://agentparty.pwtk-dev.work",
+        token: "ap_x",
+        identity: { name: "unrelated", kind: "agent", channel_scope: "pwtk" },
+      }),
+    );
+    const prev = process.env.AGENTPARTY_HOME;
+    process.env.AGENTPARTY_HOME = home;
+    try {
+      const names = locallyConfiguredNames("agentparty", "https://agentparty.pwtk-dev.work");
+      expect(names.has("codex-002")).toBe(true);
+      expect(names.has("codex-002-elsewhere")).toBe(false); // 隔壁实例
+      expect(names.has("unrelated")).toBe(false); // 隔壁频道
+    } finally {
+      if (prev === undefined) delete process.env.AGENTPARTY_HOME;
+      else process.env.AGENTPARTY_HOME = prev;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("hasCodexStopHook：只认 Stop 事件里带我们指纹的 command，坏文件一律 false", () => {
+    const dir = mkdtempSync(join(tmpdir(), "who-pullwake-"));
+    const write = (body: string) => {
+      const f = join(dir, `${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(f, body);
+      return f;
+    };
+    expect(hasCodexStopHook(write(JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: '"/x/party" hook codex-stop' }] }] },
+    })))).toBe(true);
+    // SessionStart 的 codex-report 不算——它不是唤醒通道。
+    expect(hasCodexStopHook(write(JSON.stringify({
+      hooks: { SessionStart: [{ hooks: [{ type: "command", command: "party hook codex-report" }] }] },
+    })))).toBe(false);
+    // 别人的 Stop hook 不算。
+    expect(hasCodexStopHook(write(JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: "/usr/local/bin/other-tool" }] }] },
+    })))).toBe(false);
+    expect(hasCodexStopHook(write("not json"))).toBe(false);
+    expect(hasCodexStopHook(write(JSON.stringify({ hooks: { Stop: "oops" } })))).toBe(false);
+    expect(hasCodexStopHook(join(dir, "missing.json"))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// #879/#891 装配层：note 函数单测全绿、真机什么都不显示（或反过来：真机全是兜底噪音），是本仓
+// 反复出现的失败模式。这里断言的是 presence → 行 → 终端字符串这条链本身。
+describe("who 唤醒建议的装配（presence → 行 → 终端一行）", () => {
   const CH = "pwtk";
   const stale = (over: Partial<PresenceEntry> & { name: string }): PresenceEntry =>
     p({ state: "offline", wake: { kind: "none" }, last_seen: NOW - 88 * 60 * 60 * 1000, ...over });
 
-  test("codex unreachable 行既带结构化 wake_guidance，也把 fix 提示渲染进终端那一行", () => {
+  test("codex 行既带结构化 wake_guidance，也把 fix 提示渲染进终端那一行", () => {
     const rows = buildRows(
       [stale({ name: "lark-codex", agent_session: { harness: "codex", session_id: "s", updated_at: NOW } })],
       { now: NOW, channel: CH },
@@ -600,26 +747,47 @@ describe("who 唤醒建议的装配（#879：presence → 行 → 终端一行�
       reason: "no_wake_layer",
       harness: "codex",
       harness_source: "agent_session",
-      remedy: ["party bridge codex pwtk", "party serve pwtk --runner codex"],
+      remedy: ["party hook install --codex", "party bridge codex pwtk"],
     });
     const line = renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0);
-    expect(line).toContain("⚠ unreachable (mention lands in history only)");
-    expect(line).toContain(
-      "↳ fix: a codex session has no per-session inbox — it is wakeable only while a process holds its app-server connection: run party bridge codex pwtk (interactive) or party serve pwtk --runner codex (unattended)",
-    );
+    expect(line).toContain("⚠ no live wake layer");
+    expect(line).toContain("party hook install --codex");
   });
 
-  test("claude unreachable 行渲染 Claude 专属修法，且整行不含 codex 命令", () => {
+  test("claude 行渲染 Claude 专属修法，且整行不含 codex 命令", () => {
     const rows = buildRows(
       [stale({ name: "kyc-claude", agent_session: { harness: "claude", session_id: "s", updated_at: NOW } })],
       { now: NOW, channel: CH },
     );
     const line = renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0);
     expect(line).toContain(
-      "↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run claude plugin install agentparty@agentparty and rejoin the channel, or party serve pwtk --runner claude (unattended)",
+      "↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run claude plugin install agentparty@agentparty and rejoin the channel",
     );
     expect(line).not.toContain("party bridge codex");
     expect(line).not.toContain("--runner codex");
+  });
+
+  // ★ #905 的验收线：整张表里不许再有一行叫人去挂 serve 来解决前台唤醒。
+  test("#897/#905：真机形态的整张表里，没有任何一行建议 party serve", () => {
+    const rows = buildRows(
+      [
+        stale({ name: "claude-statebar-codex", residency: "daemon" }),
+        stale({ name: "lark-ad72b3f9749e-agentparty", residency: "supervised" }),
+        stale({ name: "lark-ad72b3f9749e-agentparty-codex", residency: "episodic" }),
+        stale({ name: "leo-claude" }),
+        stale({ name: "super-admin-bug-7744", last_seen: NOW - 3 * 24 * 60 * 60 * 1000 }),
+        stale({ name: "kyc-claude", agent_session: { harness: "claude", session_id: "s", updated_at: NOW } }),
+      ],
+      { now: NOW, channel: "agentparty" },
+    );
+    const lines = rows.map((r) => renderRow(r, NOW, 0));
+    expect(lines.length).toBe(6);
+    for (const line of lines) {
+      expect(line).not.toContain("party serve");
+      expect(line).not.toContain("harness unknown");
+    }
+    // 五个没有判据的身份一条 fix 都不给；唯一有判据的那个才给。
+    expect(lines.filter((line) => line.includes("↳ fix")).length).toBe(1);
   });
 
   test("可唤醒的身份行里没有任何 fix 提示（不给全频道加噪音）", () => {
