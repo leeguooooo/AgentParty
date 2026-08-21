@@ -281,3 +281,76 @@ describe("joinPack codex 档唤醒层说明（#879）", () => {
     }
   });
 });
+
+// #898 方案 C 第 1 件：接入包不重复注册 MCP server——每条注册在每个会话里都是一个常驻进程，
+// owner 实测本机 127 个 party 进程 / 1.7GB，成因就是「每接入一个身份就 add 一个，加了没人清」。
+describe("joinPack MCP 注册幂等（#898 方案 C）", () => {
+  test("claude/other 档：mcp add 前先探，已注册就跳过而不是叠一个", () => {
+    for (const harness of ["claude", "other"] as const) {
+      const text = pack(harness);
+      // 探测与注册必须在同一行（分两行会被半途中断的接入包留下只探不加的状态）。
+      const line = text.split("\n").find((l) => l.includes("claude mcp add ")) ?? "";
+      expect(line).toContain("claude mcp get party-bot >/dev/null 2>&1");
+      expect(line).toContain("|| claude mcp add party-bot ");
+      // 跳过时给人看得见的说明，且指向清理命令。
+      expect(line).toContain("already registered");
+      expect(line).toContain("party mcp prune");
+      // 注册本体逐字未变：env 钉身份 + --channel 定默认频道。
+      expect(line).toContain(
+        `--env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-bot-dev.json" -- party mcp --channel dev`,
+      );
+      // #898 第 3 件：身份必须进 argv——process.title 在 Bun/macOS 上不写回 OS argv 区，
+      // `ps -axww` 只看得到命令行，所以没有这个标签 owner 就还是 100 行一模一样的 party。
+      expect(line).toContain("--identity party-bot");
+    }
+  });
+
+  test("不同身份仍各注册各的（幂等不等于只准有一个 server）", () => {
+    const other = buildFullJoinPack({
+      slug: "dev",
+      agentName: "bot2",
+      agentToken: "ap_tok",
+      server: "https://party.example",
+      inviterName: "leo",
+      charter: null,
+      harness: "claude",
+      t,
+    });
+    expect(other).toContain("claude mcp get party-bot2 >/dev/null 2>&1");
+    expect(other).toContain("|| claude mcp add party-bot2 ");
+    expect(other).toContain("--identity party-bot2");
+    // 不同频道、同身份：server 名是身份维度的，注册行照常渲染（跳过与否由运行时探测决定）。
+    const otherChannel = buildFullJoinPack({
+      slug: "ops",
+      agentName: "bot",
+      agentToken: "ap_tok",
+      server: "https://party.example",
+      inviterName: "leo",
+      charter: null,
+      harness: "claude",
+      t,
+    });
+    expect(otherChannel).toContain("|| claude mcp add party-bot ");
+    expect(otherChannel).toContain("-- party mcp --channel ops");
+  });
+
+  // #890 的教训：文案只躺在 i18n 里等于没写。中英两份都必须整段渲染进包。
+  test("去重说明中英两份都真的进包（不是只躺在 i18n 里）", () => {
+    for (const lang of ["en", "zh"] as const) {
+      expect(pack("claude", lang)).toContain(tt(lang, "AgentJoin.cmd.mcpDedupeNote"));
+      expect(pack("codex", lang)).toContain(tt(lang, "AgentJoin.cmd.mcpDedupeNoteCodex", { mcpName: "party-bot" }));
+      // codex 的注册指引同样带 --identity（否则 codex 机器上一样认不出进程归属）。
+      expect(pack("codex", lang)).toContain("--identity party-bot");
+    }
+  });
+
+  // 分档规则与既有的 step4/step4codex 完全一致：claude 档只留 claude 的，codex 档只留 codex 的，
+  // other 档两条都在（兜底＝全量）。
+  test("codex 档不含 claude 的探测行；claude 档不含 codex 的去重说明；other 档两者都在", () => {
+    expect(pack("codex")).not.toContain("claude mcp get ");
+    expect(pack("claude")).not.toContain("codex mcp get ");
+    const other = pack("other");
+    expect(other).toContain("claude mcp get party-bot");
+    expect(other).toContain("codex mcp get party-bot");
+  });
+});

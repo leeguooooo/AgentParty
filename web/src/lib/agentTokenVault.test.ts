@@ -55,8 +55,11 @@ describe("buildMinimalAgentCommand", () => {
     expect(checkinIndex).toBeGreaterThan(-1);
     expect(command.indexOf(mcpAddLine)).toBeGreaterThan(checkinIndex);
     expect(command).toContain(
-      '# Codex: codex mcp add party-desktop-worker --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-desktop-worker-release-room.json" -- party mcp --channel release-room',
+      '# Codex: codex mcp get party-desktop-worker >/dev/null 2>&1 || codex mcp add party-desktop-worker --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-desktop-worker-release-room.json" -- party mcp --channel release-room',
     );
+    // #898：add 前先探，已注册就跳过——每条注册在每个会话里都是一个常驻进程。
+    expect(command).toContain("claude mcp get party-desktop-worker >/dev/null 2>&1 &&");
+    expect(command).toContain("party mcp prune");
     expect(command).toContain("use the party_* tools");
     expect(command).toContain("carry your identity automatically");
     expect(command).toContain("Non-MCP harnesses: keep using the party CLI with the AGENTPARTY_CONFIG prefix");

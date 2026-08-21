@@ -21,6 +21,7 @@ import {
   saveWatchStuck,
 } from "../config";
 import { jsonFrame } from "../json";
+import { applyMcpProcessTitle, parseMcpServerArgv } from "../mcp-registry";
 import { resolveAuth, resolveAuthDetailed } from "../oidc-cli";
 import {
   createTask,
@@ -58,9 +59,21 @@ import {
 } from "../task-lease";
 import { EXIT_ALREADY_WATCHING, runWatch } from "./watch";
 
-const HELP = `usage: party mcp
+const HELP = `usage: party mcp [--channel <slug>] [--identity <label>]
+       party mcp prune [--yes] [--check-remote] [--json]
 
 Run an AgentParty stdio MCP server.
+
+Options:
+  --channel <slug>   default channel for tools that take an optional channel
+  --identity <label> cosmetic label carried in argv so 'ps -axww' shows whose
+                     server this process is (#898). It never affects which
+                     identity is used — that always comes from AGENTPARTY_CONFIG.
+
+Subcommands:
+  prune   remove Claude Code MCP registrations that point at AgentParty
+          identities which no longer exist (dry run unless --yes; never touches
+          MCP servers belonging to other tools). See 'party mcp prune --help'.
 
 Boundary:
   MCP is a structured control plane for ordinary tools/resources. In Codex
@@ -1571,22 +1584,37 @@ export async function run(argv: string[]): Promise<number> {
       return 1;
     }
     const { runManagedMcp } = await import("./mcp-managed");
+    // #898 第 3 件：managed lane 也要在 ps 里认得出是谁的（它同样每身份一个进程）。
+    applyMcpProcessTitle({
+      mode: "mcp --managed",
+      configPath: process.env.AGENTPARTY_CONFIG ?? null,
+    });
     return runManagedMcp(argv[1]);
   }
-  let defaultChannel: string | undefined;
-  if (argv.length === 2 && argv[0] === "--channel") {
-    defaultChannel = argv[1];
-    if (!isSlug(defaultChannel)) {
-      console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
-      return 1;
-    }
-  } else if (argv.length > 0) {
-    console.error("usage: party mcp [--channel C]");
+  // #898 方案 C 第 2 件：清理指向已删身份/已失效 config 的注册。默认 dry-run。
+  if (argv[0] === "prune") {
+    const { runPruneCli } = await import("./mcp-prune");
+    return runPruneCli(argv.slice(1));
+  }
+  const parsed = parseMcpServerArgv(argv);
+  if (parsed.error !== null) {
+    console.error(parsed.error);
     return 1;
   }
+  const defaultChannel = parsed.channel ?? undefined;
   // #596：stdio 模式下 stdout 是 JSON-RPC 信道。任何库/命令路径的 console.log（如 watch 的
   // 单实例冲突提示）落到 stdout 都会把客户端的解析打碎成 "JSON Parse error"。统一改道 stderr。
   console.log = (...args: unknown[]) => console.error(...args);
+  // #898 第 3 件：owner 的活动监视器里 100+ 行一模一样的 `party` 无法排查。给进程标题带上
+  // 频道与身份标签（绝不带 token / 完整路径——同机任意用户 `ps -axww` 都看得见）。
+  // 注意：真正让 `ps` 看得见的是 argv 里的 `--identity`（实测 Bun 在 macOS 上不会把
+  // process.title 写回 OS 的 argv 区，改了也只有进程内读得到）。这里仍然设一次标题：
+  // 在会写回的运行时（Node）上是白赚的可观测性，失败也不影响 server。
+  applyMcpProcessTitle({
+    channel: defaultChannel ?? null,
+    agentName: parsed.identity,
+    configPath: process.env.AGENTPARTY_CONFIG ?? null,
+  });
   const server = createMcpServer(defaultChannel);
   await server.connect(new StdioServerTransport());
   return new Promise<number>((resolve) => {

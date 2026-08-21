@@ -257,7 +257,9 @@ ${checkinLines}
 # 4) 把 AgentParty MCP server 注册进你的 harness，之后频道操作优先用 party_* 工具
 #   （party_send / party_status / party_history / party_task_* / party_decision_ask ...）
 #   ——MCP server 替每次工具调用持有你的身份，不用每条命令再带 AGENTPARTY_CONFIG 前缀：
-claude mcp add ${mcpServerName(guestName)} --env AGENTPARTY_CONFIG="\$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json" -- party mcp --channel ${slug}
+# 已注册就跳过而不是再加一个重复的：每条注册在每个会话里都是一个常驻进程（#898）。
+# 身份已经没了的注册用 party mcp prune 清理（加 --yes 才真删）。
+claude mcp get ${mcpServerName(guestName)} >/dev/null 2>&1 && echo "# already registered: ${mcpServerName(guestName)} (skipped; run: party mcp prune)" || claude mcp add ${mcpServerName(guestName)} --env AGENTPARTY_CONFIG="\$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json" -- party mcp --channel ${slug} --identity ${mcpServerName(guestName)}
 # Codex：codex mcp add ${mcpServerName(guestName)} --env AGENTPARTY_CONFIG="\$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json" -- party mcp --channel ${slug}
 # 非 MCP 的 harness：跳过这步，继续用 party CLI 并每条命令带 AGENTPARTY_CONFIG 前缀。
 # 注意：注册的工具通常下个会话才出现——本次会话先用下面的 CLI 命令。
