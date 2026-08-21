@@ -20,13 +20,26 @@ afterEach(() => {
   }
 });
 
+/**
+ * 「这个 pid 还在跑吗」。
+ *
+ * `kill(pid, 0)` 对**僵尸**返回成功——进程已经死了、只是还没被父进程收尸。本用例里
+ * host 正是测试进程的直接子进程，SIGKILL 之后到被回收之间必然有一段僵尸窗口，
+ * 光看 `kill(pid,0)` 会把「已经死了」读成「还活着」，让 `waitFor("host is gone")`
+ * 白等到超时。所以拿到信号后再用 ps 核一次状态，`Z` 一律当死。
+ */
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
+    // EPERM＝进程在、只是不归我们管（这里不会发生，保守当活着）。
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+  const res = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 });
+  const stat = (res.stdout ?? "").trim();
+  // ps 拿不到（超时/不可用/进程刚没）时不擅自判死：只有明确看到 Z 才算死。
+  if (stat === "") return res.status === 0;
+  return !stat.startsWith("Z");
 }
 
 async function waitFor(label: string, predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
