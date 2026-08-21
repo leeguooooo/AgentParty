@@ -60,6 +60,24 @@ function killIfStillOurs(pid: number, marker: string): void {
   try { process.kill(pid, "SIGKILL"); } catch { /* 刚好没了 */ }
 }
 
+/**
+ * 抹掉注释。不求语法级精确（那要上 AST），只要能挡住「注释里提到函数名就算接上了」这类假绿。
+ * `[^:]` 是为了别把 `https://` 里的双斜杠当成行注释起点。
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+}
+
+/** 在去注释的基础上再抹掉字符串字面量——查「调用」时用，免得字符串里的同名文本混进来。 */
+function stripCommentsAndStrings(source: string): string {
+  return stripComments(source)
+    .replace(/`(?:\\[\s\S]|[^\\`])*`/g, '""')
+    .replace(/'(?:\\[\s\S]|[^\\'\n])*'/g, '""')
+    .replace(/"(?:\\[\s\S]|[^\\"\n])*"/g, '""');
+}
+
 describe("#908 宿主死亡 ⇒ 子进程退场（端到端）", () => {
   test("宿主 pid 被 kill 后，挂了存活探测的子进程自行退出", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ap-orphan-e2e-"));
@@ -136,8 +154,18 @@ describe("#908 宿主死亡 ⇒ 子进程退场（端到端）", () => {
   test("claude-channel 与 mcp 都真的接上了宿主存活探测（接线守卫）", () => {
     for (const rel of ["commands/claude-channel.ts", "commands/mcp.ts"]) {
       const source = readFileSync(join(import.meta.dir, "..", "src", rel), "utf8");
-      expect({ rel, calls: /(?<![\w$])watchParentLiveness\s*\(/.test(source) }).toEqual({ rel, calls: true });
-      expect({ rel, imports: /(?<![\w$])watchParentLiveness(?![\w$])/.test(source) }).toEqual({ rel, imports: true });
+      // 注释和字符串里出现同名文本不算数——本文件上方的说明文字就提到了这个函数名。
+      // 「断言被说明文案独自满足」正是 #864 那类假绿的成因，守卫自己更不能犯。
+      const code = stripCommentsAndStrings(source);
+      expect({ rel, calls: /(?<![\w$])watchParentLiveness\s*\(/.test(code) }).toEqual({ rel, calls: true });
+      // import 的来源是字符串字面量，所以这一查只能去注释、不能去字符串。
+      const decls = stripComments(source);
+      // import 必须锚定到**真实的 import 语句**且来源正确：只查标识符出现过的话，
+      // 调用本身就能满足它，这条断言等于空转（删掉 import 换个同名本地函数也照样绿）。
+      const imported = new RegExp(
+        String.raw`import\s*\{[^}]*(?<![\w$])watchParentLiveness(?![\w$])[^}]*\}\s*from\s*["']\.\.?/[^"']*parent-liveness["']`,
+      ).test(decls);
+      expect({ rel, imported }).toEqual({ rel, imported: true });
     }
   });
 
