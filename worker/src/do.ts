@@ -350,6 +350,12 @@ const MENTION_TOKEN_RE = /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$/u;
 const WORKFLOW_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const CLIENT_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 const MAX_MENTIONS = 50;
+/**
+ * `/internal/next-mention` 一次最多核查多少条候选行（#903）。
+ * 候选已被 LIKE 预筛过，正常频道里 @ 某个身份的消息远少于这个数；封顶只是保证这条
+ * 「hook 预算内必须返回」的查询不会因为某个身份被 @ 了上万次而变慢。
+ */
+const NEXT_MENTION_SCAN_LIMIT = 200;
 const MENTIONS_JSON_LIMIT = 4096;
 const MAX_STATUS_SCOPE = 50;
 const STATUS_SCOPE_JSON_LIMIT = 4096;
@@ -6921,6 +6927,46 @@ export class ChannelDO extends Server<Env> {
     if (url.pathname === "/internal/read-cursors" && request.method === "GET") {
       // 已读游标快照 + 频道最新 seq，供 `party who` 标注每个身份读到第几条 / 落后多少（Phase 2 · CLI）。
       return Response.json({ cursors: this.readCursors(), last_seq: this.lastSeq() });
+    }
+    if (url.pathname === "/internal/next-mention" && request.method === "GET") {
+      // #903：一次「有没有还没处理的 @」的极轻量问询——只回 seq，不回正文。
+      // 存在的理由：codex Stop hook 没有 serve/watch 落下的本地欠账可读（那正是它要顶替的东西），
+      // 又只有 ~10s 预算，不能拉一页正文回来自己筛。正文仍旧去 `party history` 读，
+      // 「频道是唯一数据源」不因这个指针端点而破。
+      const since = Math.max(toInt(url.searchParams.get("since"), 0), 0);
+      const name = url.searchParams.get("name") ?? "";
+      if (name === "") return Response.json({ seq: null });
+      const key = mentionMatchKey(name);
+      // LIKE 只是预筛（SQLite 的 ASCII LIKE 不分大小写、`_`/`%` 只会放宽匹配，绝不会漏），
+      // 真正的判定在下面用 mentionMatchKey 逐行核。撤回/擦除的消息 mentions 已清空，天然被排除。
+      const like = `%${name}%`;
+      const rows = this.ctx.storage.sql
+        .exec(
+          `SELECT seq, mentions_json, delivery_targets_json
+             FROM messages
+            WHERE seq > ?
+              AND sender_name <> ?
+              AND (mentions_json LIKE ? OR delivery_targets_json LIKE ?)
+            ORDER BY seq LIMIT ?`,
+          since,
+          name,
+          like,
+          like,
+          NEXT_MENTION_SCAN_LIMIT,
+        )
+        .toArray();
+      for (const row of rows) {
+        let names: string[];
+        try {
+          names = [...parseStoredMentions(row.mentions_json), ...parseStoredTargetNames(row.delivery_targets_json)];
+        } catch {
+          continue;
+        }
+        if (names.some((value) => mentionMatchKey(value) === key)) {
+          return Response.json({ seq: Number(row.seq) });
+        }
+      }
+      return Response.json({ seq: null });
     }
     // GDPR 按身份数据出口/擦除（#421）。授权在 worker 层做（moderator 门），DO 只按 name 读/删本频道数据。
     const identityDataMatch = url.pathname.match(/^\/internal\/identity\/([^/]+)\/data$/);
