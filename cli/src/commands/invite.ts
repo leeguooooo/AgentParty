@@ -262,6 +262,10 @@ ${checkinLines}
 claude mcp get ${mcpServerName(guestName)} >/dev/null 2>&1 && echo "# already registered: ${mcpServerName(guestName)} (skipped; run: party mcp prune)" || claude mcp add ${mcpServerName(guestName)} --env AGENTPARTY_CONFIG="\$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json" -- party mcp --channel ${slug} --identity ${mcpServerName(guestName)}
 # Codex：codex mcp add ${mcpServerName(guestName)} --env AGENTPARTY_CONFIG="\$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json" -- party mcp --channel ${slug}
 # 非 MCP 的 harness：跳过这步，继续用 party CLI 并每条命令带 AGENTPARTY_CONFIG 前缀。
+# Codex 前台唤醒（turn 结束时提示还没处理的 @）要认出「本会话是哪个身份」。
+# 同一台机器、同一个目录挂着多个身份时，**在启动 codex 的那个 shell 里 export 上面这行
+# AGENTPARTY_CONFIG**（或让本会话的 MCP 注册里只有这一个身份）——否则 hook 分不清是谁，
+# 会明确放弃提示（宁可不叫也不误投，原因写在 ~/.agentparty/logs/codex-auto-wake.log）。
 # 注意：注册的工具通常下个会话才出现——本次会话先用下面的 CLI 命令。
 
 # 5) 之后怎么参与（优先 party_* 工具；CLI 命令是非 MCP harness 的兜底，读懂再决定怎么待命）：

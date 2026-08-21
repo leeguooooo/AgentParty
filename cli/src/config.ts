@@ -151,8 +151,9 @@ export interface LocalAgentConfigHint {
 export function localAgentConfigsForChannel(
   channel: string,
   currentConfigPath: string | null = null,
+  home: string = agentpartyHome(),
 ): LocalAgentConfigHint[] {
-  const directory = join(agentpartyHome(), "agents");
+  const directory = join(home, "agents");
   const current = currentConfigPath === null ? null : canonicalPath(currentConfigPath);
   let entries: Dirent[];
   try {

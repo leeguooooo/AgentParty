@@ -18,7 +18,22 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { AGENT_ACTIVITY_TTL_MS, type AgentActivity } from "@agentparty/shared";
 import { activityFromHookEvent, readActivityFile, writeActivityFile } from "../activity";
-import { agentpartyHome, loadCursor, loadStuck, readConfig, readState, type StuckWake } from "../config";
+import {
+  agentpartyHome,
+  loadCursor,
+  loadCursorForConfig,
+  loadStuck,
+  loadStuckForConfig,
+  readConfig,
+  readState,
+  type StuckWake,
+} from "../config";
+import {
+  defaultCodexHookIdentityDeps,
+  resolveCodexHookIdentity,
+  type CodexHookIdentity,
+  type CodexHookIdentityResolution,
+} from "../codex-session-identity";
 import {
   CODEX_STOP_WAKE_QUERY_TIMEOUT_MS,
   codexStopWakeGate,
@@ -717,13 +732,30 @@ export function recordCodexSessionLifecycle(
     const cwd = typeof record.cwd === "string" && record.cwd.length > 0 ? record.cwd : process.cwd();
     const channel = env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel;
     if (!channel) return;
+    // #917：身份/实例都由会话身份解析器给（env → MCP 注册 → 本机唯一），**绝不按 cwd 猜**。
+    // 解析不出就两个字段都不写——条目随之不可匹配（#906/#865 的安全侧），也让 Stop hook
+    // 的「按 session_id 回查」明确失败，而不是拿到一个猜错的身份。
+    const resolved = resolveCodexHookIdentity({
+      cwd,
+      channel,
+      sessionId,
+      deps: defaultCodexHookIdentityDeps(env, pid),
+    });
+    if (!resolved.ok) {
+      appendCodexAutoWakeLog(
+        agentpartyHome(env),
+        `codex-report: 入册时解析不出会话身份（${resolved.reason}）：${resolved.detail}`,
+      );
+    }
     registerCodexSession({
       session_id: sessionId,
       pid,
       display_name: claudeSessionDisplayNameFromHookPayload(record),
       channel,
       // #865：同 claude 档——实例维度是匹配的一部分。
-      server: readConfig(cwd)?.server ?? null,
+      server: resolved.ok ? resolved.identity.server : null,
+      // #906：显式传（含 null），绝不让注册表回落到 readConfig(cwd) 的猜测。
+      identity: resolved.ok ? resolved.identity.name : null,
       cwd,
     }, env);
   } catch {
@@ -754,7 +786,23 @@ function defaultCodexAutoWakeDeps(env: NodeJS.ProcessEnv = process.env): CodexAu
     home,
     env,
     lockDir: defaultInstanceLockDir(),
-    readConfigAt: (cwd) => readConfig(cwd),
+    // #917：后台唤醒层同样不许按 cwd 猜身份——猜错就是替另一个身份拉起 serve、
+    // 用别人的 token 接别人的 @。解析不出唯一身份就当「没有 agent token」跳过拉起。
+    readConfigAt: (cwd) => {
+      const channel = env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null;
+      const resolved = resolveCodexHookIdentity({
+        cwd,
+        channel,
+        sessionId: null,
+        deps: defaultCodexHookIdentityDeps(env),
+      });
+      if (resolved.ok) return { server: resolved.identity.server, token: resolved.identity.token };
+      appendCodexAutoWakeLog(
+        home,
+        `codex-report: 唤醒层解析不出会话身份（${resolved.reason}）：${resolved.detail}——不拉起`,
+      );
+      return null;
+    },
     channelAt: (cwd) => env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null,
     spawn: (args, cwd, childEnv) => {
       // 编译版二进制：execPath 即 party；dev（bun run）：execPath 是 bun，argv[1] 是入口脚本。
@@ -894,18 +942,61 @@ export interface CodexStopWakeDeps {
   now: () => number;
 }
 
-export function defaultCodexStopWakeDeps(env: NodeJS.ProcessEnv = process.env): CodexStopWakeDeps {
+export function defaultCodexStopWakeDeps(
+  env: NodeJS.ProcessEnv = process.env,
+  sessionId: string | null = null,
+  pid: number = process.ppid,
+): CodexStopWakeDeps {
   const home = agentpartyHome(env);
+  // #917：身份只解析一次，全部下游（查询用的 token/实例、游标作用域、seen 集合）都用它。
+  // 此前这里每处各调一次 `readConfig(cwd)`——按 cwd 猜，真机上猜到了同目录下另一个身份、
+  // 还跨了实例，于是查询恒空、唤醒静默失效（#917 现场）。解析不出就统一返回 null ＝ 放行。
+  let cached: { key: string; resolution: CodexHookIdentityResolution } | null = null;
+  let logged = false;
+  const identity = (channel: string, cwd: string): CodexHookIdentity | null => {
+    const key = `${channel} ${cwd}`;
+    if (cached === null || cached.key !== key) {
+      cached = {
+        key,
+        resolution: resolveCodexHookIdentity({
+          cwd,
+          channel,
+          sessionId,
+          deps: defaultCodexHookIdentityDeps(env, pid),
+        }),
+      };
+    }
+    if (cached.resolution.ok) return cached.resolution.identity;
+    if (!logged) {
+      logged = true;
+      appendCodexAutoWakeLog(
+        home,
+        `codex-stop: 解析不出本会话身份（${cached.resolution.reason}）：` +
+          `${cached.resolution.detail}——本次放行不注入`,
+      );
+    }
+    return null;
+  };
   const target = (channel: string, cwd: string): string | null => {
-    const auth = codexAutoWakeAuth(readConfig(cwd));
+    const resolved = identity(channel, cwd);
+    if (resolved === null) return null;
+    const auth = codexAutoWakeAuth(resolved);
     return auth === null ? null : codexAutoWakeTarget(auth, channel);
   };
   return {
     channel: (cwd) => env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null,
     enabled: () => resolveCodexAutoWakeMode(env, home).mode !== "off",
-    stuck: (channel, cwd) => loadStuck(channel, cwd),
+    // 游标/欠账必须落在**解析出来那个身份**的作用域里：拿另一个身份的游标当 since，
+    // 查询要么恒空（漏叫）要么把老 @ 翻出来。env / cwd 两档的作用域与历史逐字一致。
+    stuck: (channel, cwd) => {
+      const resolved = identity(channel, cwd);
+      return resolved !== null && resolved.configScopedState && resolved.configPath !== null
+        ? loadStuckForConfig(channel, resolved.configPath)
+        : loadStuck(channel, cwd);
+    },
     nextMention: async (channel, cwd, since) => {
-      const auth = codexAutoWakeAuth(readConfig(cwd));
+      const resolved = identity(channel, cwd);
+      const auth = resolved === null ? null : codexAutoWakeAuth(resolved);
       if (auth === null) return null;
       try {
         const { fetchNextMention } = await import("../rest");
@@ -921,7 +1012,12 @@ export function defaultCodexStopWakeDeps(env: NodeJS.ProcessEnv = process.env): 
         return null;
       }
     },
-    cursor: (channel, cwd) => loadCursor(channel, cwd),
+    cursor: (channel, cwd) => {
+      const resolved = identity(channel, cwd);
+      return resolved !== null && resolved.configScopedState && resolved.configPath !== null
+        ? loadCursorForConfig(channel, resolved.configPath)
+        : loadCursor(channel, cwd);
+    },
     seenPath: (channel, cwd) => {
       const resolved = target(channel, cwd);
       return resolved === null ? null : codexStopWakeSeenPath(home, resolved);
@@ -949,7 +1045,11 @@ export async function handleCodexStopRecord(
   env: NodeJS.ProcessEnv = process.env,
   injected?: CodexStopWakeDeps,
 ): Promise<void> {
-  const deps = injected ?? defaultCodexStopWakeDeps(env);
+  // #917：session_id 是「按会话回查身份」的钥匙，必须在建 deps 之前从 payload 里取出来。
+  const deps = injected ?? defaultCodexStopWakeDeps(
+    env,
+    typeof record.session_id === "string" ? record.session_id : null,
+  );
   // serve 托管 lane 是被管理的 runner 会话，不是用户眼前那个终端会话——前台唤醒对它没有意义，
   // 而且它自己就是 #893 那条后台通道，在这里再 block 一次等于同一条 @ 被两边各处理一次。
   if (env.AP_ACTIVITY_FILE) return;
@@ -990,7 +1090,7 @@ export async function handleCodexStopRecord(
   const seenPath = deps.seenPath(decision.pointer.channel, cwd);
   // 去不了重就绝不注入：没有落盘的 seen 集合，同一条 @ 会在每个 turn 结束时反复 block。
   if (seenPath === null) {
-    deps.log("codex-stop: 拿不到身份（config 里没有 agent token），无法去重，本次放行不注入");
+    deps.log("codex-stop: 拿不到本会话的唯一身份（见上一条解析日志），无法去重，本次放行不注入");
     return;
   }
   // 先落盘再打印。反过来的话，打印后崩一次就会对同一条 @ 反复注入。
