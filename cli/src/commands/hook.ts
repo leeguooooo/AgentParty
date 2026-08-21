@@ -18,7 +18,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { AGENT_ACTIVITY_TTL_MS, type AgentActivity } from "@agentparty/shared";
 import { activityFromHookEvent, readActivityFile, writeActivityFile } from "../activity";
-import { agentpartyHome, readConfig, readState } from "../config";
+import { agentpartyHome, loadCursor, loadStuck, readConfig, readState, type StuckWake } from "../config";
+import {
+  codexStopWakeReason,
+  codexStopWakeSeenPath,
+  decideCodexStopWake,
+  readCodexStopWakeSeen,
+  recordCodexStopWakeSeen,
+} from "../codex-stop-wake";
 import {
   DeliveryRecoveryJournal,
   deliveryRecoveryJournalPath,
@@ -60,7 +67,7 @@ import { isPartyBinaryPath } from "../upgrade";
 import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "./claude-launch";
 import type { ServeSupervisorOptions } from "./serve";
 
-const HELP = `usage: party hook <report|codex-report|codex-autowake|stop-guard|push|install|uninstall|status>
+const HELP = `usage: party hook <report|codex-report|codex-stop|codex-autowake|stop-guard|push|install|uninstall|status>
 
 Claude Code hook adapter (issues #602/#615): report what the model session is
 actually doing (running a tool / waiting on permission / compacting / idle)
@@ -82,6 +89,17 @@ into channel presence, so \`party who\` and the web can see it.
                        ~/.agentparty/codex-sessions/ so party can discover it.
                        Registry only — never presence, never network. It also
                        starts the wake layer unless auto-wake is turned off (#893).
+  codex-stop           (wired by \`install --codex\`) codex Stop hook (#899): at the
+                       end of a turn, if this identity still has an unhandled @ on
+                       its channel, block that one stop and hand the session a
+                       ≤512B channel+seq pointer, so the wake happens **in the
+                       session the user is looking at** instead of a new background
+                       runner (#893). The channel stays the only source of truth:
+                       the pointer carries no message body.
+                       Loop safety is entirely ours — codex honours repeated blocks
+                       without any cap of its own. Three gates, any one of which
+                       lets the stop through: stop_hook_active, a persisted
+                       per-seq seen set, and fail-open on every error.
   codex-autowake [status|on|off]
                        codex has no MCP sampling and declines idle elicitation
                        (#893), so it can only be reached by a local wake layer.
@@ -311,7 +329,12 @@ async function runPush(argv: string[]): Promise<number> {
 
 // ---- hooks 安装（#615）----
 
-const HOOK_COMMAND_MARKERS = ["hook report", "hook stop-guard", "hook codex-report"] as const;
+const HOOK_COMMAND_MARKERS = [
+  "hook report",
+  "hook stop-guard",
+  "hook codex-report",
+  "hook codex-stop",
+] as const;
 
 interface HookEntry {
   matcher?: string;
@@ -358,13 +381,25 @@ export function settingsPath(scope: HookScope, cwd: string = process.cwd()): str
  * 「只增删自己的命令、解析失败即抛错拒写」的保护。
  *
  * codex 只有 SessionStart 可用于入册：其内嵌 schema 没有任何会话结束事件。
+ * （#899 复核：二进制里那 10 个 hook 事件 `pre-tool-use / permission-request /
+ * post-tool-use / pre-compact / post-compact / session-start / user-prompt-submit /
+ * subagent-start / subagent-stop / stop` 确实不含 SessionEnd——#877 的结论是对的。
+ * 二进制里另有的 `SessionEnd` 字符串属于 realtime 会话 API，不是 hook 事件。）
+ *
+ * Stop 则用于前台唤醒（#899）：turn 结束时把还没处理的 @ 以 channel+seq 指针的形式
+ * block 回**用户眼前那个会话**，而不是像 #893 那样另起一个后台 runner。
  */
 export function codexHookSettingsJson(execPath: string = process.execPath): string {
   const partyBin = isPartyBinaryPath(execPath) ? execPath : "party";
-  const command = `${partyBin === "party" ? partyBin : JSON.stringify(partyBin)} hook codex-report`;
+  const bin = partyBin === "party" ? partyBin : JSON.stringify(partyBin);
   return JSON.stringify({
     hooks: {
-      SessionStart: [{ hooks: [{ type: "command", command, timeout: 10 }] }],
+      SessionStart: [{
+        hooks: [{ type: "command", command: `${bin} hook codex-report`, timeout: 10 }],
+      }],
+      Stop: [{
+        hooks: [{ type: "command", command: `${bin} hook codex-stop`, timeout: 10 }],
+      }],
     },
   });
 }
@@ -794,6 +829,111 @@ export function handleCodexHookRecord(
   }
 }
 
+/** `party hook codex-stop` 的可注入依赖——全部同步读盘，测试直接塞假值，不碰真盘也不碰网。 */
+export interface CodexStopWakeDeps {
+  /** 本 cwd 绑定的频道。 */
+  channel: (cwd: string) => string | null;
+  /** 前台唤醒是否启用（沿用 #893 的 codex-autowake 开关）。 */
+  enabled: () => boolean;
+  /** serve/watch 落在本地的欠账。 */
+  stuck: (channel: string, cwd: string) => Pick<StuckWake, "seq" | "first_wake_ts"> | null;
+  cursor: (channel: string, cwd: string) => number;
+  /** 已注入过的 seq 集合的落盘路径；拿不到身份时返回 null（→ 无法去重，必须放行）。 */
+  seenPath: (channel: string, cwd: string) => string | null;
+  readSeen: (path: string) => number[];
+  recordSeen: (path: string, seq: number) => void;
+  emit: (line: string) => void;
+  log: (line: string) => void;
+  now: () => number;
+}
+
+export function defaultCodexStopWakeDeps(env: NodeJS.ProcessEnv = process.env): CodexStopWakeDeps {
+  const home = agentpartyHome(env);
+  const target = (channel: string, cwd: string): string | null => {
+    const auth = codexAutoWakeAuth(readConfig(cwd));
+    return auth === null ? null : codexAutoWakeTarget(auth, channel);
+  };
+  return {
+    channel: (cwd) => env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null,
+    enabled: () => resolveCodexAutoWakeMode(env, home).mode !== "off",
+    stuck: (channel, cwd) => loadStuck(channel, cwd),
+    cursor: (channel, cwd) => loadCursor(channel, cwd),
+    seenPath: (channel, cwd) => {
+      const resolved = target(channel, cwd);
+      return resolved === null ? null : codexStopWakeSeenPath(home, resolved);
+    },
+    readSeen: readCodexStopWakeSeen,
+    recordSeen: recordCodexStopWakeSeen,
+    emit: (line) => console.log(line),
+    log: (line) => appendCodexAutoWakeLog(home, line),
+    now: () => Date.now(),
+  };
+}
+
+/**
+ * 一条 codex Stop 事件的全部处理（#899）。
+ *
+ * 唯一允许写 stdout 的路径就是最后那一行 block JSON——契约要求 `decision:"block"` 必须
+ * 配一个非空 `reason`，而 `reason` 同时就是注入给模型的 prompt（**没有 `prompt` 字段**，
+ * 多带一个会让 codex 整份输出作废，见 codex-stop-wake.ts 文件头）。
+ *
+ * 放行（不写任何 stdout）是所有异常路径的统一归宿：拿不到身份、读盘炸了、判定说不该叫——
+ * 一律安静让会话正常停止。宁可漏叫一次，也绝不把用户的会话卡在无限续跑里。
+ */
+export function handleCodexStopRecord(
+  record: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+  injected?: CodexStopWakeDeps,
+): void {
+  const deps = injected ?? defaultCodexStopWakeDeps(env);
+  // serve 托管 lane 是被管理的 runner 会话，不是用户眼前那个终端会话——前台唤醒对它没有意义，
+  // 而且它自己就是 #893 那条后台通道，在这里再 block 一次等于同一条 @ 被两边各处理一次。
+  if (env.AP_ACTIVITY_FILE) return;
+  if (record.hook_event_name !== "Stop") return;
+  const cwd = typeof record.cwd === "string" && record.cwd.length > 0 ? record.cwd : process.cwd();
+  const channel = deps.channel(cwd);
+  const decision = decideCodexStopWake({
+    payload: record,
+    channel,
+    enabled: deps.enabled(),
+    stuck: channel === null ? null : deps.stuck(channel, cwd),
+    cursor: channel === null ? 0 : deps.cursor(channel, cwd),
+    seen: channel === null ? [] : (() => {
+      const path = deps.seenPath(channel, cwd);
+      return path === null ? [] : deps.readSeen(path);
+    })(),
+    now: deps.now(),
+  });
+  if (!decision.wake) return;
+  const seenPath = deps.seenPath(decision.pointer.channel, cwd);
+  // 去不了重就绝不注入：没有落盘的 seen 集合，同一条 @ 会在每个 turn 结束时反复 block。
+  if (seenPath === null) {
+    deps.log("codex-stop: 拿不到身份（config 里没有 agent token），无法去重，本次放行不注入");
+    return;
+  }
+  // 先落盘再打印。反过来的话，打印后崩一次就会对同一条 @ 反复注入。
+  deps.recordSeen(seenPath, decision.pointer.seq);
+  deps.emit(JSON.stringify({
+    decision: "block",
+    reason: codexStopWakeReason(decision.pointer),
+  }));
+  deps.log(
+    `codex-stop: 在当前 codex 会话里注入了 #${decision.pointer.channel} seq ${decision.pointer.seq} 的指针`,
+  );
+}
+
+/** `party hook codex-stop`：读一条 codex Stop 事件，必要时 block 一次让会话继续跑一轮。 */
+async function runCodexStopHookInput(): Promise<number> {
+  try {
+    const payload = JSON.parse(await readStdin(MAX_STDIN_BYTES)) as unknown;
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return 0;
+    handleCodexStopRecord(payload as Record<string, unknown>);
+  } catch {
+    // hook 铁律高于唤醒：坏 JSON / 读盘失败 / 任何意外，一律安静放行让会话正常停止。
+  }
+  return 0;
+}
+
 /** `party hook codex-report`：读一条 codex hook 事件，入册 + 按配置拉起唤醒层。stdout 恒空。 */
 async function runCodexHookInput(): Promise<number> {
   try {
@@ -1082,6 +1222,7 @@ export async function run(argv: string[]): Promise<number> {
   if (sub === "status") return runStatus(rest);
   if (sub === "push") return runPush(rest);
   if (sub === "codex-report") return runCodexHookInput();
+  if (sub === "codex-stop") return runCodexStopHookInput();
   if (sub === "codex-autowake") return runCodexAutoWakeCommand(rest);
   if (sub !== "report" && sub !== "stop-guard") {
     // 会写 stderr 的分支只剩人在终端敲错子命令。真 hook 调用恒为 `hook report`，不受影响。
