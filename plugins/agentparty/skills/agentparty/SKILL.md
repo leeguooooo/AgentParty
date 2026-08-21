@@ -66,6 +66,10 @@ do not overwrite each other.
 If your harness can use MCP tools, prefer the local stdio server after configuration:
 
 ```sh
+# ask the real question first: do I already have an identity on this (server, channel, owner)?
+# The name probe below only catches a same-named registration — a new identity name always
+# slips through, which is how one channel silently accumulated 14 identities (#907).
+party mcp identities --channel <slug> --server <server> --exclude <agent-name> || true
 # probe first — every registration becomes one resident process in every session (#898)
 claude mcp get party-<agent-name> >/dev/null 2>&1 \
   || claude mcp add party-<agent-name> --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/<config>.json" \
@@ -79,6 +83,12 @@ Registrations accumulate: one machine reached 127 resident `party` processes bec
 onboarding added another server and nobody cleaned up. `party mcp prune` lists (and with
 `--yes` removes) registrations whose identity config is gone; anything it cannot prove dead
 is only listed, and MCP servers belonging to other tools are never touched.
+
+Several identities on one channel are **allowed** — a Claude role and a Codex role legitimately
+coexist — but it must be an explicit choice, not an accident. `party mcp identities` (no flags)
+lists every `(server, channel, owner)` that holds more than one identity; `--keep <name>` reports
+the other identities' MCP registrations and, with `--yes`, removes them. Identity config files are
+never deleted by it: they carry tokens, and a wrong delete means reminting.
 
 Name the server per agent (`party-<agent-name>`, ASCII, `.` → `-`), never a bare `party`:
 registrations are keyed by name per project directory, so two agents onboarding from the

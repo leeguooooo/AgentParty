@@ -1,9 +1,13 @@
 // party init — 写全局配置 + 绑定当前目录默认频道（不存在则创建）
+import { join } from "node:path";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
+import { readIdentityRecords, sameChannelIdentityWarningLines } from "../identity-dedupe";
 import {
+  agentpartyHome,
   bindWorkspaceConfigPointer,
   durableConfigPointerPath,
   explicitConfigPath,
+  globalConfigPath,
   readConfig,
   readConfigWithSource,
   readState,
@@ -120,6 +124,18 @@ export async function run(argv: string[]): Promise<number> {
       }
     } catch (e) {
       return handleRestError(e);
+    }
+    // #907：写配置前先问真正该问的那个问题——「同一台 server、同一个频道下我是不是已经有
+    // 身份了？」旧的幂等检查只认注册名，换个名字必然放行，于是同频道静默攒出十几个身份、
+    // 每个都是一个常驻 MCP 进程。server 必须参与比较：两台生产实例都有同名频道（#865）。
+    // 只提示不阻断：多身份本身合法，要的是让选择变显式。
+    for (const line of sameChannelIdentityWarningLines(
+      readIdentityRecords(join(agentpartyHome(), "agents")),
+      // globalConfigPath() 在设了 AGENTPARTY_CONFIG 时就是那份显式配置＝「我自己」，
+      // 排除掉它，否则同一份身份重跑 init 会自己报自己。
+      { server: cfg.server, channel, selfPath: globalConfigPath() },
+    )) {
+      console.error(line);
     }
     writeConfig(cfg);
     const st = readState();

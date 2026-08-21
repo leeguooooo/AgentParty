@@ -125,6 +125,15 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     ...BEHAVIOR_CONTRACT_BODY_LINES,
     `AGENTPARTY_RULES_EOF`,
     ``,
+    // #907：真正该问的问题——「同一台 server、同一个频道下我是不是已经有身份了？」。
+    // 旧的幂等检查只认 MCP 注册名，换个身份名必然放行，于是同频道静默并存多身份、每个都是
+    // 一个常驻进程。判重必须带 --server：两台生产实例都有同名频道（#865），只按频道名会混。
+    // shell 里不手写 JSON 解析——判定整段做进 CLI；`|| true` 保证提示不阻断接入（退出码 3
+    // 表示「已有身份」，是给脚本用的信号，不是错误）。
+    t("AgentJoin.cmd.channelDedupeNote1"),
+    t("AgentJoin.cmd.channelDedupeNote2"),
+    `party mcp identities --channel ${slug} --server ${server} --exclude ${agentName} || true`,
+    ``,
     t("AgentJoin.cmd.step3"),
     // #676：token 走 AGENTPARTY_TOKEN 环境变量传入，不写进 argv——同机任意用户 `ps -axww` 看不到它，
     // 也不触发 party init 自身「--token 会进 argv/history」的告警（最严格可改 `--token -` 从 stdin 读）。
@@ -297,6 +306,10 @@ export function buildUnattendedJoinPack(input: FullJoinPackInput): string {
     t("AgentJoin.ua.step2"),
     `mkdir -p "$HOME/.agentparty/agents"`,
     `export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.json"`,
+    // #907：同 (server, channel, owner) 已有身份时先说出来，让「替换 / 并存」成为显式选择。
+    t("AgentJoin.cmd.channelDedupeNote1"),
+    t("AgentJoin.cmd.channelDedupeNote2"),
+    `party mcp identities --channel ${slug} --server ${server} --exclude ${agentName} || true`,
     // #676：token 走 AGENTPARTY_TOKEN 环境变量传入，不写进 argv（同机 `ps -axww` 看不到），也不触发 CLI 自身告警。
     `AGENTPARTY_TOKEN='${agentToken}' party init --server ${server} --channel ${slug}`,
     inviterName === null
