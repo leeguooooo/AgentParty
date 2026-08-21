@@ -31,8 +31,14 @@
 //   2. 同一 seq 只注入一次，seen 集合**落盘**——Stop hook 每轮是一个全新进程，内存集合等于没有。
 //   3. 任何一步取不到信号/抛异常 → 放行。hook 铁律优先于唤醒。
 //
-// 预算（本机 hooks.json 实测 timeout=10）：本模块**全程零网络**，只做同步读盘。
-// 唯一的信号源是 serve/watch 已经落在本地的欠账（StuckWake），网络那一跳早就由它们付过了。
+// 信号来源（#903 纠正）：早先这里写死「全程零网络、唯一信号源是 serve/watch 落盘的欠账」，
+// 结果是自咬尾巴——**本 hook 存在的意义正是「用户没挂 serve/bridge」，却要靠 serve 写的欠账
+// 才知道有 @**，于是在目标场景下恒不触发。现在的分工：
+//   - 本地欠账（StuckWake）降级为**可选快路径**：有就用，省掉这次网络；
+//   - 没有就自己问一次 `GET /api/channels/:slug/next-mention?since=<cursor>`——只问 seq、
+//     不拉正文，正文仍旧由会话去 `party history` 读，「频道是唯一数据源」不破。
+// 预算（本机 hooks.json 实测 timeout=10s）：那一跳独立超时 CODEX_STOP_WAKE_QUERY_TIMEOUT_MS，
+// 绝不吃满预算；失败/超时/任何异常一律放行——fail-open 铁律高于唤醒。
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteJson } from "./atomic-json";
@@ -49,6 +55,15 @@ export const CODEX_STOP_WAKE_REASON_MAX_BYTES = 512;
  * 几天前早就在别处处理过的 @，不该在用户今天的会话里跳出来。
  */
 export const CODEX_STOP_WAKE_DEBT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * 问「有没有未处理的 @」那一跳的独立超时（#903）。
+ * codex 给整个 Stop hook 的预算是 10s；这里取 3s，剩下的 7s 留给读盘、落盘和进程启动，
+ * 网络再慢也只是这一次不叫醒（下一轮 Stop 会再问），绝不把用户的会话卡住。
+ *
+ * 为什么不是更短：真机实测热路径 ~0.25–0.6s，但 DO 冷启动那一次量到过 2.1s——
+ * 2s 级的超时会把「今天第一次被 @」这种最该叫醒的场景恰好卡掉。
+ */
+export const CODEX_STOP_WAKE_QUERY_TIMEOUT_MS = 3_000;
 
 /** 交回给会话的指针：只有 channel+seq，正文永远去频道读。 */
 export interface CodexStopWakePointer {
@@ -142,15 +157,40 @@ export type CodexStopWakeDecision =
   | { wake: false; skip: CodexStopWakeSkip }
   | { wake: true; pointer: CodexStopWakePointer };
 
-export interface CodexStopWakeInput {
+/** 便宜闸门的入参：这三样都不用花一次网络就能拿到。 */
+export interface CodexStopWakeGateInput {
   /** codex 递进来的原始 Stop payload。 */
   payload: Record<string, unknown>;
   /** 本 cwd 绑定的频道；没绑定为 null。 */
   channel: string | null;
   /** #893 的开关：显式 off 时前台这层也一起关（同一个「别自动打扰我」的意思）。 */
   enabled: boolean;
-  /** serve/watch 落在本地的欠账；没有为 null。 */
-  stuck: Pick<StuckWake, "seq" | "first_wake_ts"> | null;
+}
+
+export type CodexStopWakeGate = { ok: true } | { ok: false; skip: CodexStopWakeSkip };
+
+/**
+ * 先于任何信号获取的三道便宜闸（#903 把它单独拆出来，就是为了**先过闸再花网络**：
+ * 不是 Stop、是续跑、被关掉、没绑频道——这四种情况一次网络都不该发）。
+ */
+export function codexStopWakeGate(input: CodexStopWakeGateInput): CodexStopWakeGate {
+  const { payload } = input;
+  if (payload.hook_event_name !== "Stop") return { ok: false, skip: "not_stop" };
+  // 防循环第 1 闸。注意只认严格的 `false`：字段缺失/类型不对一律当「可能是续跑」放行，
+  // 宁可漏叫一次，也绝不冒「会话永远停不下来」的险。
+  if (payload.stop_hook_active !== false) return { ok: false, skip: "continuation" };
+  if (!input.enabled) return { ok: false, skip: "disabled" };
+  if (input.channel === null || input.channel === "") return { ok: false, skip: "no_channel" };
+  return { ok: true };
+}
+
+export interface CodexStopWakeInput extends CodexStopWakeGateInput {
+  /**
+   * 「本身份有一条还没处理的 @，seq 是它」——**信号来源不限**（#903）：
+   * 可以是 serve/watch 落在本地的欠账（快路径），也可以是本 hook 自己问服务端问来的。
+   * 早先这里写死只认本地欠账，而 Stop hook 存在的场景恰恰是「没人挂 serve」⇒ 恒不触发。
+   */
+  pending: Pick<StuckWake, "seq" | "first_wake_ts"> | null;
   /** 本频道游标：说到哪条为止已经了结了。 */
   cursor: number;
   /** 已注入过的 seq 集合。 */
@@ -165,27 +205,22 @@ export interface CodexStopWakeInput {
  * 它是唯一能保证「一个用户 turn 最多注入一次」的硬顶（实测 codex 自己不封顶）。
  */
 export function decideCodexStopWake(input: CodexStopWakeInput): CodexStopWakeDecision {
-  const { payload } = input;
-  if (payload.hook_event_name !== "Stop") return { wake: false, skip: "not_stop" };
-  // 防循环第 1 闸。注意只认严格的 `false`：字段缺失/类型不对一律当「可能是续跑」放行，
-  // 宁可漏叫一次，也绝不冒「会话永远停不下来」的险。
-  if (payload.stop_hook_active !== false) return { wake: false, skip: "continuation" };
-  if (!input.enabled) return { wake: false, skip: "disabled" };
-  if (input.channel === null || input.channel === "") return { wake: false, skip: "no_channel" };
-  const stuck = input.stuck;
-  if (stuck === null || !Number.isFinite(stuck.seq) || stuck.seq <= 0) {
+  const gate = codexStopWakeGate(input);
+  if (!gate.ok) return { wake: false, skip: gate.skip };
+  const pending = input.pending;
+  if (pending === null || !Number.isFinite(pending.seq) || pending.seq <= 0) {
     return { wake: false, skip: "no_pending" };
   }
   // 游标说「这条我已经了结了」——了结过的不再叫。
-  if (stuck.seq <= input.cursor) return { wake: false, skip: "no_pending" };
+  if (pending.seq <= input.cursor) return { wake: false, skip: "no_pending" };
   if (
-    typeof stuck.first_wake_ts === "number" &&
-    Number.isFinite(stuck.first_wake_ts) &&
-    input.now - stuck.first_wake_ts > CODEX_STOP_WAKE_DEBT_MAX_AGE_MS
+    typeof pending.first_wake_ts === "number" &&
+    Number.isFinite(pending.first_wake_ts) &&
+    input.now - pending.first_wake_ts > CODEX_STOP_WAKE_DEBT_MAX_AGE_MS
   ) {
     return { wake: false, skip: "stale_debt" };
   }
   // 防循环第 2 闸：同一条 @ 只注入一次。seen 是落盘的，跨进程有效。
-  if (hasCodexStopWakeSeen(input.seen, stuck.seq)) return { wake: false, skip: "already_woken" };
-  return { wake: true, pointer: { channel: input.channel, seq: stuck.seq } };
+  if (hasCodexStopWakeSeen(input.seen, pending.seq)) return { wake: false, skip: "already_woken" };
+  return { wake: true, pointer: { channel: input.channel as string, seq: pending.seq } };
 }

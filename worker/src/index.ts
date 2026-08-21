@@ -6983,6 +6983,31 @@ app.get("/api/channels/:slug/read-cursors", async (c) => {
   );
 });
 
+/**
+ * #903：「> since 的消息里，第一条 @ 到我的是第几条」——只回一个 seq，不回正文。
+ *
+ * 调用者恒定是**自己**：`name` 一律取 bearer 身份，不接受客户端指定，所以这个端点不会
+ * 变成「探测别人被 @ 了什么」的侧信道。正文仍旧走 /messages，本端点只交指针。
+ */
+app.get("/api/channels/:slug/next-mention", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  const since = new URL(c.req.url).searchParams.get("since") ?? "0";
+  const query = new URLSearchParams({ since, name: identity.name });
+  return fetchMutableChannelDO(
+    c.env,
+    slug,
+    new Request(`https://do/internal/next-mention?${query.toString()}`, {
+      headers: { "x-partykit-room": slug },
+    }),
+  );
+});
+
 app.get("/api/channels/:slug/squads", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);

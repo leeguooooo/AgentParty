@@ -1075,6 +1075,29 @@ export async function fetchWakeDeliveries(
   return Array.isArray(deliveries) ? (deliveries as WakeDelivery[]) : [];
 }
 
+/**
+ * 「> since 的消息里，第一条 @ 到我的是第几条」——只回 seq，不拉正文（#903）。
+ *
+ * 为 codex Stop hook 而生：它没有 serve/watch 落下的本地欠账可读（它存在的意义正是顶替
+ * 那条通道），又只有 ~10s 预算，所以需要一次尽可能便宜、可独立设超时的问询。正文仍旧
+ * 由会话自己去 `party history` 读。
+ */
+export async function fetchNextMention(
+  server: string,
+  token: string,
+  slug: string,
+  since: number,
+  signal?: AbortSignal,
+): Promise<number | null> {
+  const body = await req(
+    server,
+    `/api/channels/${encodeURIComponent(slug)}/next-mention?since=${encodeURIComponent(String(Math.max(0, Math.trunc(since))))}`,
+    { headers: bearerJson(token), ...(signal === undefined ? {} : { signal }) },
+  );
+  const seq = (body as Record<string, unknown> | null)?.seq;
+  return typeof seq === "number" && Number.isFinite(seq) && seq > 0 ? seq : null;
+}
+
 export async function createCapture(
   server: string,
   token: string,

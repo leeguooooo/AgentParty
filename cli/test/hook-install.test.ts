@@ -308,13 +308,14 @@ describe("party hook install end-to-end (project scope)", () => {
       return { code, stdout };
     };
 
-    expect((await runIn("status")).code).toBe(1); // 未装
+    // #904 之后 status 不带 scope 会两档都报；这条是 project 档的往返，显式限定作用域。
+    expect((await runIn("status", "--project")).code).toBe(1); // 未装
     expect((await runIn("install")).code).toBe(0);
     const settings = JSON.parse(readFileSync(join(project, ".claude", "settings.local.json"), "utf8")) as {
       hooks: Record<string, unknown[]>;
     };
     expect(Object.keys(settings.hooks).length).toBe(14);
-    const status = await runIn("status");
+    const status = await runIn("status", "--project");
     expect(status.code).toBe(0);
     expect(status.stdout).toContain("installed");
     const installAgain = await runIn("install");
@@ -322,7 +323,7 @@ describe("party hook install end-to-end (project scope)", () => {
     expect(installAgain.stdout).toContain("party claude");
     expect(installAgain.stdout).not.toContain("任何在此生效范围内");
     expect((await runIn("uninstall")).code).toBe(0);
-    expect((await runIn("status")).code).toBe(1);
+    expect((await runIn("status", "--project")).code).toBe(1);
     rmSync(project, { recursive: true, force: true });
   });
 });
@@ -389,6 +390,43 @@ describe("party hook install --codex (#851 P2)", () => {
     // 卸载后恢复成用户原样。
     expect(JSON.parse(readFileSync(hooksPath, "utf8"))).toEqual(REAL_WORLD_CODEX_HOOKS);
     expect((await runCodex(fakeHome, "status")).code).toBe(1);
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  // #904：装好了 codex hook，`party hook status` 却报 not installed——它只看 claude 那一档，
+  // 给出与事实相反的结论，实测中把一轮排查引向了「hook 没装」这条错路。
+  test("status 不带 scope 时两档都报，codex 档装了就必须报 installed（#904）", async () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "ap-codexstatus-"));
+    mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+    const run = async (...args: string[]) => {
+      const proc = Bun.spawn(["bun", "run", indexPath, "hook", ...args], {
+        cwd: fakeHome,
+        env: { ...process.env, HOME: fakeHome, AGENTPARTY_HOME: home },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+      return { code, stdout };
+    };
+
+    const none = await run("status");
+    expect(none.code).toBe(1);
+    // 两档都报，各自打印自己实际检查的文件路径。
+    expect(none.stdout).toContain("project scope:");
+    expect(none.stdout).toContain(join(fakeHome, ".codex", "hooks.json"));
+    expect(none.stdout).toContain("两档都没装");
+
+    expect((await run("install", "--codex")).code).toBe(0);
+    const after = await run("status");
+    expect(after.code).toBe(0);
+    // codex 那行必须是 installed，并列出实际检出的事件（SessionStart + Stop）。
+    const codexLine = after.stdout.split("\n").find((line) => line.includes("codex scope:"))!;
+    expect(codexLine).toContain("installed —");
+    expect(codexLine).not.toContain("not installed");
+    expect(codexLine).toContain("SessionStart");
+    expect(codexLine).toContain("Stop");
+    // claude 那档没装，仍然如实说没装——两档要能区分。
+    expect(after.stdout.split("\n").find((line) => line.includes("project scope:"))).toContain("not installed");
     rmSync(fakeHome, { recursive: true, force: true });
   });
 

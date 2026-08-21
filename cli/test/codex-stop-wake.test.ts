@@ -52,7 +52,7 @@ function decideInput(overrides: Partial<CodexStopWakeInput> = {}): CodexStopWake
     payload: stopPayload(),
     channel: "pwtk",
     enabled: true,
-    stuck: { seq: 42, first_wake_ts: NOW - 1_000 },
+    pending: { seq: 42, first_wake_ts: NOW - 1_000 },
     cursor: 7,
     seen: [],
     now: NOW,
@@ -69,7 +69,7 @@ describe("decideCodexStopWake", () => {
   });
 
   test("没有欠账 → 放行", () => {
-    expect(decideCodexStopWake(decideInput({ stuck: null }))).toEqual({
+    expect(decideCodexStopWake(decideInput({ pending: null }))).toEqual({
       wake: false,
       skip: "no_pending",
     });
@@ -117,7 +117,7 @@ describe("decideCodexStopWake", () => {
     expect(decideCodexStopWake(decideInput({ cursor: 41 })).wake).toBe(true);
   });
 
-  test("非 Stop 事件 → 放行", () => {
+  test("非 Stop 事件 → 放行", async () => {
     expect(
       decideCodexStopWake(decideInput({ payload: stopPayload({ hook_event_name: "SubagentStop" }) })),
     ).toEqual({ wake: false, skip: "not_stop" });
@@ -142,7 +142,7 @@ describe("decideCodexStopWake", () => {
     expect(
       decideCodexStopWake(
         decideInput({
-          stuck: { seq: 42, first_wake_ts: NOW - CODEX_STOP_WAKE_DEBT_MAX_AGE_MS - 1 },
+          pending: { seq: 42, first_wake_ts: NOW - CODEX_STOP_WAKE_DEBT_MAX_AGE_MS - 1 },
         }),
       ),
     ).toEqual({ wake: false, skip: "stale_debt" });
@@ -150,17 +150,17 @@ describe("decideCodexStopWake", () => {
     expect(
       decideCodexStopWake(
         decideInput({
-          stuck: { seq: 42, first_wake_ts: NOW - CODEX_STOP_WAKE_DEBT_MAX_AGE_MS },
+          pending: { seq: 42, first_wake_ts: NOW - CODEX_STOP_WAKE_DEBT_MAX_AGE_MS },
         }),
       ).wake,
     ).toBe(true);
     // 没有 first_wake_ts 的旧欠账不该被误判成过期。
-    expect(decideCodexStopWake(decideInput({ stuck: { seq: 42 } })).wake).toBe(true);
+    expect(decideCodexStopWake(decideInput({ pending: { seq: 42 } })).wake).toBe(true);
   });
 
   test("seq 非法 → 放行", () => {
     for (const seq of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(decideCodexStopWake(decideInput({ stuck: { seq } })).wake).toBe(false);
+      expect(decideCodexStopWake(decideInput({ pending: { seq } })).wake).toBe(false);
     }
   });
 });
@@ -258,6 +258,7 @@ describe("handleCodexStopRecord", () => {
       channel: () => "pwtk",
       enabled: () => true,
       stuck: () => ({ seq: 42, first_wake_ts: NOW - 1_000 }),
+      nextMention: async () => null,
       cursor: () => 7,
       seenPath: () => join(home, "seen.json"),
       readSeen: (path) => seenStore.get(path) ?? [],
@@ -281,8 +282,8 @@ describe("handleCodexStopRecord", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("有未处理的 @ → 恰好一行 block JSON，契约字段齐全", () => {
-    handleCodexStopRecord(stopPayload(), {}, deps());
+  test("有未处理的 @ → 恰好一行 block JSON，契约字段齐全", async () => {
+    await handleCodexStopRecord(stopPayload(), {}, deps());
     expect(emitted).toHaveLength(1);
     const output = JSON.parse(emitted[0]!) as Record<string, unknown>;
     expect(output.decision).toBe("block");
@@ -293,69 +294,167 @@ describe("handleCodexStopRecord", () => {
     expect(Object.keys(output).sort()).toEqual(["decision", "reason"]);
   });
 
-  test("没有未处理的 @ → 放行，stdout 一个字都不写", () => {
-    handleCodexStopRecord(stopPayload(), {}, deps({ stuck: () => null }));
+  test("没有未处理的 @ → 放行，stdout 一个字都不写", async () => {
+    await handleCodexStopRecord(stopPayload(), {}, deps({ stuck: () => null }));
     expect(emitted).toEqual([]);
   });
 
-  test("续跑轮（stop_hook_active 为真）→ 放行", () => {
-    handleCodexStopRecord(stopPayload({ stop_hook_active: true }), {}, deps());
+  test("续跑轮（stop_hook_active 为真）→ 放行", async () => {
+    await handleCodexStopRecord(stopPayload({ stop_hook_active: true }), {}, deps());
     expect(emitted).toEqual([]);
   });
 
-  test("同一 seq 第二次 → 放行（seen 已落盘）", () => {
+  test("同一 seq 第二次 → 放行（seen 已落盘）", async () => {
     const d = deps();
-    handleCodexStopRecord(stopPayload(), {}, d);
+    await handleCodexStopRecord(stopPayload(), {}, d);
     expect(emitted).toHaveLength(1);
-    handleCodexStopRecord(stopPayload(), {}, d);
+    await handleCodexStopRecord(stopPayload(), {}, d);
     expect(emitted).toHaveLength(1);
   });
 
-  test("先落 seen 再打印——顺序反了，中间崩一次就会反复注入", () => {
+  test("先落 seen 再打印——顺序反了，中间崩一次就会反复注入", async () => {
     const order: string[] = [];
-    handleCodexStopRecord(stopPayload(), {}, deps({
+    await handleCodexStopRecord(stopPayload(), {}, deps({
       recordSeen: () => order.push("seen"),
       emit: () => order.push("emit"),
     }));
     expect(order).toEqual(["seen", "emit"]);
   });
 
-  test("拿不到身份（去不了重）→ 放行，绝不注入", () => {
-    handleCodexStopRecord(stopPayload(), {}, deps({ seenPath: () => null }));
+  test("拿不到身份（去不了重）→ 放行，绝不注入", async () => {
+    await handleCodexStopRecord(stopPayload(), {}, deps({ seenPath: () => null }));
     expect(emitted).toEqual([]);
     expect(logged.join("\n")).toContain("去重");
   });
 
-  test("serve 托管 lane（AP_ACTIVITY_FILE）→ 放行，避免与 #893 后台通道重复处理同一条 @", () => {
-    handleCodexStopRecord(stopPayload(), { AP_ACTIVITY_FILE: "/tmp/a.json" }, deps());
+  test("serve 托管 lane（AP_ACTIVITY_FILE）→ 放行，避免与 #893 后台通道重复处理同一条 @", async () => {
+    await handleCodexStopRecord(stopPayload(), { AP_ACTIVITY_FILE: "/tmp/a.json" }, deps());
     expect(emitted).toEqual([]);
   });
 
-  test("本地信号读取抛异常 → 不吞掉异常契约由调用方兜，但绝不写出半条 stdout", () => {
-    expect(() =>
+  test("本地信号读取抛异常 → 不吞掉异常契约由调用方兜，但绝不写出半条 stdout", async () => {
+    await expect(
       handleCodexStopRecord(stopPayload(), {}, deps({
         stuck: () => {
           throw new Error("disk on fire");
         },
       })),
-    ).toThrow();
+    ).rejects.toThrow();
     expect(emitted).toEqual([]);
   });
 
-  test("非 Stop 事件 → 放行", () => {
-    handleCodexStopRecord(stopPayload({ hook_event_name: "SessionStart" }), {}, deps());
+  test("非 Stop 事件 → 放行", async () => {
+    await handleCodexStopRecord(stopPayload({ hook_event_name: "SessionStart" }), {}, deps());
     expect(emitted).toEqual([]);
   });
 
-  test("payload 里的 cwd 被用来解析频道", () => {
+  test("payload 里的 cwd 被用来解析频道", async () => {
     const seen: string[] = [];
-    handleCodexStopRecord(stopPayload({ cwd: "/tmp/elsewhere" }), {}, deps({
+    await handleCodexStopRecord(stopPayload({ cwd: "/tmp/elsewhere" }), {}, deps({
       channel: (cwd) => {
         seen.push(cwd);
         return "pwtk";
       },
     }));
     expect(seen).toEqual(["/tmp/elsewhere"]);
+  });
+
+  // ⚠️ 这一条钉住 #903 的盲区，删了等于这个 bug 没修。
+  //
+  // v0.2.203 的实现里，唯一的信号源是 serve/watch 落盘的欠账，而**全仓只有 serve 会写欠账**。
+  // 于是本 hook 在它唯一存在的场景（用户没挂 serve/bridge）里恒不触发：本地永远没有欠账，
+  // 判定永远走 no_pending。单测当时全绿，因为每条用例都自己喂了一个 stuck。
+  test("本地没有欠账（没人挂 serve）→ 仍能问出未处理的 @ 并 block", async () => {
+    const asked: Array<{ channel: string; since: number }> = [];
+    await handleCodexStopRecord(stopPayload(), {}, deps({
+      stuck: () => null,
+      cursor: () => 1899,
+      nextMention: async (channel, _cwd, since) => {
+        asked.push({ channel, since });
+        return 1910;
+      },
+    }));
+    // 问的是「> 我的游标之后的第一条 @」，不是随便问问。
+    expect(asked).toEqual([{ channel: "pwtk", since: 1899 }]);
+    expect(emitted).toHaveLength(1);
+    const output = JSON.parse(emitted[0]!) as Record<string, unknown>;
+    expect(output.decision).toBe("block");
+    expect(output.reason).toContain("1910");
+    expect(Object.keys(output).sort()).toEqual(["decision", "reason"]);
+    // 网络路径同样必须「先落盘 seen 再打印」，否则同一条 @ 每轮都会被重新问出来、反复注入。
+    expect(seenStore.get(join(home, "seen.json"))).toEqual([1910]);
+  });
+
+  test("网络问来的 seq 同样受 seen 去重约束（不会每轮反复注入）", async () => {
+    const d = deps({ stuck: () => null, cursor: () => 1899, nextMention: async () => 1910 });
+    await handleCodexStopRecord(stopPayload(), {}, d);
+    await handleCodexStopRecord(stopPayload(), {}, d);
+    expect(emitted).toHaveLength(1);
+  });
+
+  test("有本地欠账时走快路径，一次网络都不发", async () => {
+    let calls = 0;
+    await handleCodexStopRecord(stopPayload(), {}, deps({
+      nextMention: async () => {
+        calls += 1;
+        return null;
+      },
+    }));
+    expect(calls).toBe(0);
+    expect(emitted).toHaveLength(1);
+  });
+
+  test("本地欠账已被游标越过 → 不当快路径用，仍去问服务端", async () => {
+    let calls = 0;
+    await handleCodexStopRecord(stopPayload(), {}, deps({
+      stuck: () => ({ seq: 5, first_wake_ts: NOW - 1_000 }),
+      cursor: () => 7,
+      nextMention: async () => {
+        calls += 1;
+        return 9;
+      },
+    }));
+    expect(calls).toBe(1);
+    expect(emitted).toHaveLength(1);
+    expect(JSON.parse(emitted[0]!).reason).toContain("9");
+  });
+
+  test("查询超时/失败（返回 null）→ 放行，stdout 一个字都不写", async () => {
+    await handleCodexStopRecord(stopPayload(), {}, deps({ stuck: () => null, nextMention: async () => null }));
+    expect(emitted).toEqual([]);
+  });
+
+  // 便宜闸必须挡在网络前面：不是 Stop / 续跑轮 / 被关掉 / 没绑频道，一次请求都不该发。
+  test.each([
+    ["非 Stop 事件", stopPayload({ hook_event_name: "SessionStart" }), {} as Partial<CodexStopWakeDeps>],
+    ["续跑轮", stopPayload({ stop_hook_active: true }), {}],
+    ["开关关掉", stopPayload(), { enabled: () => false }],
+    ["没绑频道", stopPayload(), { channel: () => null }],
+  ])("%s → 连网络都不发", async (_label, payload, extra) => {
+    let calls = 0;
+    await handleCodexStopRecord(payload, {}, deps({
+      stuck: () => null,
+      nextMention: async () => {
+        calls += 1;
+        return 1910;
+      },
+      ...extra,
+    }));
+    expect(calls).toBe(0);
+    expect(emitted).toEqual([]);
+  });
+
+  test("serve 托管 lane（AP_ACTIVITY_FILE）→ 连网络都不发", async () => {
+    let calls = 0;
+    await handleCodexStopRecord(stopPayload(), { AP_ACTIVITY_FILE: "/tmp/a.json" }, deps({
+      stuck: () => null,
+      nextMention: async () => {
+        calls += 1;
+        return 1910;
+      },
+    }));
+    expect(calls).toBe(0);
+    expect(emitted).toEqual([]);
   });
 });
 

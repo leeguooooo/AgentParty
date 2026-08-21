@@ -20,6 +20,8 @@ import { AGENT_ACTIVITY_TTL_MS, type AgentActivity } from "@agentparty/shared";
 import { activityFromHookEvent, readActivityFile, writeActivityFile } from "../activity";
 import { agentpartyHome, loadCursor, loadStuck, readConfig, readState, type StuckWake } from "../config";
 import {
+  CODEX_STOP_WAKE_QUERY_TIMEOUT_MS,
+  codexStopWakeGate,
   codexStopWakeReason,
   codexStopWakeSeenPath,
   decideCodexStopWake,
@@ -83,7 +85,9 @@ into channel presence, so \`party who\` and the web can see it.
                         ~/.codex/hooks.json instead (#851). Existing content is
                         preserved; a parse failure aborts without writing.
   uninstall [--user|--codex]   remove exactly the entries install added
-  status [--user|--codex]      show whether the hooks are installed
+  status [--user|--codex]      show whether the hooks are installed. With no scope flag it
+                       reports BOTH the claude scope and the codex scope, each with the file
+                       it actually checked and the hook events found there (#904).
   codex-report         (wired by \`install --codex\`) read one codex hook event
                        from stdin and register an interactive codex session into
                        ~/.agentparty/codex-sessions/ so party can discover it.
@@ -532,22 +536,60 @@ async function runUninstall(argv: string[]): Promise<number> {
   return 0;
 }
 
-function runStatus(argv: string[]): number {
-  const scope = hookScope(argv);
-  const path = settingsPath(scope);
-  const source = existsSync(path) ? readFileSync(path, "utf8") : null;
-  let installed = false;
-  if (source !== null) {
-    try {
-      const hooks = (JSON.parse(source) as { hooks?: Record<string, unknown[]> }).hooks ?? {};
-      installed = Object.values(hooks).some((entries) => Array.isArray(entries) && entries.some(isOurEntry));
-    } catch {
-      console.error(`无法解析 ${termText(path)}`);
-      return 1;
-    }
+/** 一档 hooks 文件的检查结果（#904）。events 是**实际检出**的事件名，不是我们期望装的。 */
+export interface HookScopeStatus {
+  scope: HookScope;
+  path: string;
+  installed: boolean;
+  /** 装着我们条目的 hook 事件名，按文件里的顺序。 */
+  events: string[];
+  /** 文件存在但解析不了。 */
+  unreadable: boolean;
+}
+
+export function inspectHookScope(scope: HookScope, path: string, source: string | null): HookScopeStatus {
+  if (source === null) return { scope, path, installed: false, events: [], unreadable: false };
+  let hooks: Record<string, unknown>;
+  try {
+    hooks = (JSON.parse(source) as { hooks?: Record<string, unknown> }).hooks ?? {};
+  } catch {
+    return { scope, path, installed: false, events: [], unreadable: true };
   }
-  console.log(`${installed ? "installed" : "not installed"} (${termText(path)})`);
-  return installed ? 0 : 1;
+  const events = Object.keys(hooks).filter(
+    (event) => Array.isArray(hooks[event]) && (hooks[event] as unknown[]).some(isOurEntry),
+  );
+  return { scope, path, installed: events.length > 0, events, unreadable: false };
+}
+
+export function formatHookScopeStatus(status: HookScopeStatus): string {
+  const where = `${status.scope} scope: ${termText(status.path)}`;
+  if (status.unreadable) return `unreadable — ${where}`;
+  if (!status.installed) return `not installed — ${where}`;
+  return `installed — ${where} [${status.events.map(termText).join(", ")}]`;
+}
+
+/**
+ * `party hook status`（#904）。
+ *
+ * 不带 scope 参数时**两档都报**：只报 claude 那档会在「codex hook 明明装好了」时给出与事实
+ * 相反的结论——实测中它把一轮排查引向了错路。带 `--codex` / `--user` 则只报那一档。
+ */
+function runStatus(argv: string[]): number {
+  const explicit = argv.some((arg) => arg === "--codex" || arg === "--user" || arg === "--project");
+  const scopes: HookScope[] = explicit ? [hookScope(argv)] : ["project", "codex"];
+  const results = scopes.map((scope) => {
+    const path = settingsPath(scope);
+    return inspectHookScope(scope, path, existsSync(path) ? readFileSync(path, "utf8") : null);
+  });
+  for (const result of results) console.log(formatHookScopeStatus(result));
+  if (results.some((r) => r.unreadable)) return 1;
+  if (results.some((r) => r.installed)) return 0;
+  console.log(
+    scopes.length > 1
+      ? "两档都没装。claude 侧用 `party hook install`（或 --user），codex 侧用 `party hook install --codex`。"
+      : "这一档没装；另一档没查，用 `party hook status` 不带参数可两档都看。",
+  );
+  return 1;
 }
 
 const STOP_GUARD_PHASES = new Set<DeliveryRecoveryEntry["phase"]>([
@@ -829,14 +871,19 @@ export function handleCodexHookRecord(
   }
 }
 
-/** `party hook codex-stop` 的可注入依赖——全部同步读盘，测试直接塞假值，不碰真盘也不碰网。 */
+/** `party hook codex-stop` 的可注入依赖——测试直接塞假值，不碰真盘也不碰网。 */
 export interface CodexStopWakeDeps {
   /** 本 cwd 绑定的频道。 */
   channel: (cwd: string) => string | null;
   /** 前台唤醒是否启用（沿用 #893 的 codex-autowake 开关）。 */
   enabled: () => boolean;
-  /** serve/watch 落在本地的欠账。 */
+  /** serve/watch 落在本地的欠账——**可选快路径**，没有也照样能判（#903）。 */
   stuck: (channel: string, cwd: string) => Pick<StuckWake, "seq" | "first_wake_ts"> | null;
+  /**
+   * 问服务端「> since 的第一条 @ 我的消息是第几条」（#903）。只回 seq，不拉正文。
+   * 实现必须自带独立超时并吞掉一切异常：拿不到就返回 null（= 本次放行）。
+   */
+  nextMention: (channel: string, cwd: string, since: number) => Promise<number | null>;
   cursor: (channel: string, cwd: string) => number;
   /** 已注入过的 seq 集合的落盘路径；拿不到身份时返回 null（→ 无法去重，必须放行）。 */
   seenPath: (channel: string, cwd: string) => string | null;
@@ -857,6 +904,23 @@ export function defaultCodexStopWakeDeps(env: NodeJS.ProcessEnv = process.env): 
     channel: (cwd) => env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null,
     enabled: () => resolveCodexAutoWakeMode(env, home).mode !== "off",
     stuck: (channel, cwd) => loadStuck(channel, cwd),
+    nextMention: async (channel, cwd, since) => {
+      const auth = codexAutoWakeAuth(readConfig(cwd));
+      if (auth === null) return null;
+      try {
+        const { fetchNextMention } = await import("../rest");
+        return await fetchNextMention(
+          auth.server,
+          auth.token,
+          channel,
+          since,
+          AbortSignal.timeout(CODEX_STOP_WAKE_QUERY_TIMEOUT_MS),
+        );
+      } catch {
+        // 超时 / 401 / 断网 / 服务端还没这个端点（旧实例回 404）——一律当「不知道」，放行。
+        return null;
+      }
+    },
     cursor: (channel, cwd) => loadCursor(channel, cwd),
     seenPath: (channel, cwd) => {
       const resolved = target(channel, cwd);
@@ -880,11 +944,11 @@ export function defaultCodexStopWakeDeps(env: NodeJS.ProcessEnv = process.env): 
  * 放行（不写任何 stdout）是所有异常路径的统一归宿：拿不到身份、读盘炸了、判定说不该叫——
  * 一律安静让会话正常停止。宁可漏叫一次，也绝不把用户的会话卡在无限续跑里。
  */
-export function handleCodexStopRecord(
+export async function handleCodexStopRecord(
   record: Record<string, unknown>,
   env: NodeJS.ProcessEnv = process.env,
   injected?: CodexStopWakeDeps,
-): void {
+): Promise<void> {
   const deps = injected ?? defaultCodexStopWakeDeps(env);
   // serve 托管 lane 是被管理的 runner 会话，不是用户眼前那个终端会话——前台唤醒对它没有意义，
   // 而且它自己就是 #893 那条后台通道，在这里再 block 一次等于同一条 @ 被两边各处理一次。
@@ -892,14 +956,32 @@ export function handleCodexStopRecord(
   if (record.hook_event_name !== "Stop") return;
   const cwd = typeof record.cwd === "string" && record.cwd.length > 0 ? record.cwd : process.cwd();
   const channel = deps.channel(cwd);
+  // 先过便宜闸再花网络：不是 Stop / 是续跑 / 被关掉 / 没绑频道，一次请求都不发（#903）。
+  if (!codexStopWakeGate({ payload: record, channel, enabled: deps.enabled() }).ok) return;
+  const boundChannel = channel as string;
+  const cursor = deps.cursor(boundChannel, cwd);
+  // 快路径：serve/watch 恰好留了欠账就直接用，省掉这次网络。
+  const stuck = deps.stuck(boundChannel, cwd);
+  let pending: { seq: number; first_wake_ts?: number } | null =
+    stuck !== null && Number.isFinite(stuck.seq) && stuck.seq > cursor ? stuck : null;
+  if (pending === null) {
+    // 慢路径也是**主路径**：本 hook 的目标场景恰恰是「没人挂 serve」，那时本地永远没有欠账。
+    const startedAt = deps.now();
+    const seq = await deps.nextMention(boundChannel, cwd, cursor);
+    deps.log(
+      `codex-stop: next-mention 查询耗时 ${deps.now() - startedAt}ms，结果 ${seq === null ? "无/不可用" : `seq ${seq}`}`,
+    );
+    // 服务端问来的是「此刻仍未处理」，天然不可能是陈年欠账，故 first_wake_ts 取现在。
+    pending = seq === null ? null : { seq, first_wake_ts: deps.now() };
+  }
   const decision = decideCodexStopWake({
     payload: record,
-    channel,
-    enabled: deps.enabled(),
-    stuck: channel === null ? null : deps.stuck(channel, cwd),
-    cursor: channel === null ? 0 : deps.cursor(channel, cwd),
-    seen: channel === null ? [] : (() => {
-      const path = deps.seenPath(channel, cwd);
+    channel: boundChannel,
+    enabled: true,
+    pending,
+    cursor,
+    seen: (() => {
+      const path = deps.seenPath(boundChannel, cwd);
       return path === null ? [] : deps.readSeen(path);
     })(),
     now: deps.now(),
@@ -927,7 +1009,7 @@ async function runCodexStopHookInput(): Promise<number> {
   try {
     const payload = JSON.parse(await readStdin(MAX_STDIN_BYTES)) as unknown;
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return 0;
-    handleCodexStopRecord(payload as Record<string, unknown>);
+    await handleCodexStopRecord(payload as Record<string, unknown>);
   } catch {
     // hook 铁律高于唤醒：坏 JSON / 读盘失败 / 任何意外，一律安静放行让会话正常停止。
   }
