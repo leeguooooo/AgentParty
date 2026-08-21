@@ -54,7 +54,9 @@ function collectScope(out: McpRegistration[], scope: string, servers: unknown): 
 // 「这是不是我们自己的 party mcp 注册」必须由**命令本体**判定，不能由名字判定：
 // 本机同时装着 discord-use / iphone-use-mcp 等别人的 server，误删是灾难，而名字是用户可改的。
 // 反过来也不能放宽：`npx party`、`sh -c "... party mcp"` 这类间接形态一律不认（＝不碰）。
-const PARTY_COMMAND_BASENAMES = new Set(["party", "agentparty-runtime"]);
+// 导出给 orphan-scan.ts 复用（#908）：孤儿进程清理面对的是同一条硬约束，词表必须只有一份，
+// 复制一份出去就会漂移（#622 教训）。
+export const PARTY_COMMAND_BASENAMES = new Set(["party", "agentparty-runtime"]);
 
 /** 严格判定：命令 basename 必须正好是 party 可执行文件，且第一个参数正好是 `mcp`。 */
 export function isPartyMcpRegistration(reg: McpRegistration): boolean {

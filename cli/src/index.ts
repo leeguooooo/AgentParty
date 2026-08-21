@@ -50,6 +50,7 @@ commands:
   wake-budget <name> [--limit N [--window D]|--off]        cap an agent's wakes per window; over-budget @ withheld (#108)
   health    [--json] [--channel C] [--stale-after ms]      local serve WS health probe (pid alive != ws alive, #254)
   doctor    [claude-plugin [--channel C] [--json]]          version check or no-model Marketplace/Channel/listener audit
+  orphans   [--yes] [--json]                               list party children that outlived their harness session; --yes SIGTERMs them (#908)
   hook      install|uninstall|status [--user] | report      manage legacy Hook settings; presence uplink remains launcher/serve-scoped (#602/#615)
   upgrade   [--version X.Y.Z] [--check]                    download release binary, verify sha256, atomically replace party
   charter   [slug] [--json] | set [slug] -f file.md|-m text|- | template
@@ -194,6 +195,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/gdpr")).run(rest);
     case "doctor":
       return (await import("./commands/doctor")).run(rest);
+    case "orphans":
+      return (await import("./commands/orphans")).run(rest);
     case "health":
       return (await import("./commands/health")).run(rest);
     case "hook":
