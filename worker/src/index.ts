@@ -457,8 +457,18 @@ async function enrollInstanceMember(db: D1Database, account: string, addedBy: st
 }
 
 // 会员申请指引：拒绝时附在错误信息里，告诉调用方「为什么」+「怎么解锁」。
+// 只在「命中的是 free 层配额」时才附——即 hostedMembershipGating 开启且账号非会员。
 const MEMBERSHIP_UPGRADE_HINT =
   "upgrade to member for a higher quota (use the membership link in the Web or desktop header)";
+// #920：命中的是实例的技术硬上限（MAX_CHANNELS_PER_ACCOUNT / MEMBER_ATTACHMENT_SIZE_LIMIT）时，
+// 升级会员并不能解锁——自部署实例更没有可升级的对象。此时唯一可执行的下一步是找本实例运营方。
+const INSTANCE_LIMIT_HINT = "instance limit — contact the operator of this instance to raise it";
+
+// 拒绝文案按「撞到的是哪一层上限」分叉，而不是按部署形态硬编码：
+// free 层配额 → 升级引导；实例硬上限（含自部署默认形态）→ 联系运营方。
+function quotaHint(onFreeTier: boolean): string {
+  return onFreeTier ? ` (free tier limit — ${MEMBERSHIP_UPGRADE_HINT})` : ` (${INSTANCE_LIMIT_HINT})`;
+}
 const WEBHOOK_SECRET_MAX = 4096;
 const HEADER_VALUE_RE = /^[\x21-\x7e]+$/;
 // do 无条件信任的内部头清单：ws 升级转发前必须逐个剥离客户端注入值，只认 worker 权威版本
@@ -4474,7 +4484,7 @@ app.post("/api/channels", async (c) => {
     const total = Number(counts?.total ?? 0);
     const recent = Number(counts?.recent ?? 0);
     if (total >= cap) {
-      const hint = member ? "" : ` (free tier limit — ${MEMBERSHIP_UPGRADE_HINT})`;
+      const hint = quotaHint(!member);
       return c.json(
         errorBody("quota_exceeded", `account channel quota reached (max ${cap} channels per account)${hint}`),
         403,
@@ -8459,7 +8469,7 @@ app.post("/api/channels/:slug/attachments", async (c) => {
   const uploaderMembership = await loadMembership(c.env.DB, identity.account);
   const uploaderIsMember = !hostedMembershipGating(c.env) || isMember(uploaderMembership);
   const sizeLimit = uploaderIsMember ? MEMBER_ATTACHMENT_SIZE_LIMIT : resolveFreeAttachmentLimit(c.env);
-  const sizeHint = uploaderIsMember ? "" : ` (free tier limit — ${MEMBERSHIP_UPGRADE_HINT})`;
+  const sizeHint = quotaHint(!uploaderIsMember);
   // Content-Length 先挡一刀，避免把超大体读进内存
   const declaredLength = Number(c.req.header("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > sizeLimit) {

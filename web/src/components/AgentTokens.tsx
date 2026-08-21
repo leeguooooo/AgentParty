@@ -27,6 +27,7 @@ import {
   saveAgentToken,
 } from "../lib/agentTokenVault";
 import { apiOrigin } from "../lib/base";
+import { forbiddenText } from "../lib/forbidden";
 import { desktopAgentAdapter, type DesktopAgentAdapter, type DesktopAgentRunner } from "../lib/desktopAgent";
 import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
 import { LocalAgentsOverview } from "./LocalAgentsOverview";
@@ -183,7 +184,7 @@ export function AgentTokens({
     } catch (err) {
       if (seq !== agentRefreshSeqRef.current) return;
       if (err instanceof AuthError) onAuthFailed(err.message);
-      else if (err instanceof ForbiddenError) setAgentError(t("AgentTokens.errForbidden"));
+      else if (err instanceof ForbiddenError) setAgentError(forbiddenText(err, t, "AgentTokens.errForbidden"));
       else setAgentError(t("AgentTokens.errLoad"));
     }
   }, [onAuthFailed, slug, t, token]);

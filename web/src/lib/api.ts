@@ -14,7 +14,19 @@ let activeShareToken: string | null = null;
 export class AuthError extends Error {}
 // 私有频道 ACL 拒入（spec §3 访问规则矩阵）：worker 回 403 forbidden / WS 1008 forbidden。
 // 与 AuthError 区分——token 有效，只是这个频道不让进，不该回登录闸。
-export class ForbiddenError extends Error {}
+// #919：403 有很多种语义完全不同的原因（readonly token / scoped token / 配额用满 …），处置办法
+// 各不相同。此前前端只保留「403 了」这一位信息，UI 只能一句话包打天下，把用户导向不存在的问题。
+// 现在把服务端权威的 error.code / error.message 一起带上来，渲染层据此分叉。
+export class ForbiddenError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | null = null,
+    // 服务端原文。null = 服务端没给（或响应体不可解析），此时 message 是前端兜底文案。
+    readonly serverMessage: string | null = null,
+  ) {
+    super(message);
+  }
+}
 // 铸 agent token 时同名已存在（worker 409）——上层据此换名重试。
 export class ConflictError extends Error {}
 // 实例邀请制（#593）：登录有效但账号未入册（403 invite_required）。上层渲染「输入邀请码」界面，
@@ -31,6 +43,15 @@ export class LarkDirectoryApiError extends Error {
   ) {
     super(message);
   }
+}
+
+// 从 403 响应体里取出服务端的 error.code / error.message，转成带上下文的 ForbiddenError。
+// fallback 只在服务端没给 message 时才用——绝不拿本地文案盖掉服务端说清楚了的真实原因（#919）。
+async function forbiddenFrom(res: Response, fallback: string): Promise<ForbiddenError> {
+  const body = (await res.json().catch(() => null)) as { error?: { code?: string; message?: string } } | null;
+  const code = body?.error?.code ?? null;
+  const serverMessage = body?.error?.message ?? null;
+  return new ForbiddenError(serverMessage ?? fallback, code, serverMessage);
 }
 
 function fetchApi(path: string, init?: RequestInit): Promise<Response> {
@@ -471,7 +492,7 @@ export async function createChannelAgent(
     body: JSON.stringify({ name, channel_scope: slug }),
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
-  if (res.status === 403) throw new ForbiddenError("no permission to mint agents here");
+  if (res.status === 403) throw await forbiddenFrom(res, "no permission to mint agents here");
   if (res.status === 409) throw new ConflictError("agent name already exists");
   if (res.status === 400) throw new ValidationError("invalid agent name");
   if (!res.ok) throw new Error(`POST /api/agents failed (${res.status})`);
@@ -483,7 +504,7 @@ export async function listChannelAgents(token: string, slug: string): Promise<Ch
     headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
-  if (res.status === 403) throw new ForbiddenError("forbidden");
+  if (res.status === 403) throw await forbiddenFrom(res, "forbidden");
   if (!res.ok) throw new Error(`GET /api/channels/${slug}/agents failed (${res.status})`);
   const data = (await res.json()) as { agents: ChannelAgentInfo[] };
   return data.agents;
@@ -889,7 +910,7 @@ export async function createChannel(
     body: JSON.stringify({ kind: "standing", ...input }),
   });
   if (res.status === 401) throw new AuthError("invalid or revoked token");
-  if (res.status === 403) throw new ForbiddenError("no permission to create channels");
+  if (res.status === 403) throw await forbiddenFrom(res, "no permission to create channels");
   if (res.status === 409) throw new ConflictError("slug already exists");
   if (res.status === 400) throw new ValidationError("invalid channel");
   if (!res.ok) throw new Error(`POST /api/channels failed (${res.status})`);

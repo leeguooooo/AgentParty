@@ -9,6 +9,7 @@ import {
   ValidationError,
   type Visibility,
 } from "../lib/api";
+import { forbiddenText } from "../lib/forbidden";
 import { useT } from "../i18n/useT";
 import "../i18n/strings/CreateChannel";
 
@@ -63,7 +64,7 @@ export function CreateChannel({ token, onCreated }: Props) {
         e instanceof ConflictError
           ? t("CreateChannel.errConflict")
           : e instanceof ForbiddenError
-            ? t("CreateChannel.errForbidden")
+            ? forbiddenText(e, t, "CreateChannel.errForbidden")
             : e instanceof ValidationError
               ? t("CreateChannel.errValidation")
               : e instanceof AuthError
