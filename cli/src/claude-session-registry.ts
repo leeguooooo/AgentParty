@@ -25,7 +25,7 @@ import {
   rmSync,
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { agentpartyHome } from "./config";
+import { agentpartyHome, readConfig } from "./config";
 import { atomicWriteJson } from "./atomic-json";
 
 /** 注册表覆盖的 harness 维度（#851 P2）。每个值对应一个独立目录。 */
@@ -97,6 +97,19 @@ export interface ClaudeSessionRegistryEntry {
    * 而放宽匹配。
    */
   server?: string;
+  /**
+   * 该会话绑定的**频道身份**（#906）——`config.identity.name`，也就是 msg 帧 `mentions`
+   * 里会出现的那个 handle（`lark-ad72b3f97491-agentparty`）。不是 display_name、不是
+   * 宣告名（#862 三命名空间纪律：匹配用频道身份、寻址用 pid、展示用宣告名）。
+   *
+   * 为什么必须存：选注入目标此前只按 channel + server 过滤，同一 worktree 里跑着两个
+   * 绑不同身份的会话时，@ 身份 A 的消息会被注入进身份 B 的会话——内容/频道/seq 全是真的，
+   * 收信方毫无破绽（同 #865 一类的静默误投）。
+   *
+   * 可选**只为兼容旧盘上的条目**：#906 之前写的条目没有这个字段，一律视为**不可匹配**
+   * （见 sessionEntryMatchesIdentity），由下次 SessionStart 自然升级。绝不为兼容放宽匹配。
+   */
+  identity?: string;
   cwd: string;
   registered_at: number;
   /**
@@ -140,6 +153,32 @@ export function sessionEntryMatchesServer(
   return normalizeSessionRegistryServer(entry.server) === wanted;
 }
 
+/**
+ * 频道身份的可比对形态（#906）：语义与 shared 的 mentionMatchKey 逐字对齐
+ * （NFC 归一；纯 ASCII handle 才小写，其余保持原样）——两边判「是不是同一个身份」
+ * 必须用同一把尺子，否则「命中 @」与「选中会话」会在边界字符上劈叉。
+ * 非字符串/空串/超长 → null（＝不可匹配）。
+ */
+export function normalizeSessionRegistryIdentity(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.normalize("NFC");
+  if (normalized === "" || normalized.length > 128) return null;
+  return /^[A-Za-z0-9._-]+$/.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * 条目是否属于给定频道身份（#906）。任一侧解析不出身份——含**旧条目没有 identity
+ * 字段**——一律 false：宁可这一轮叫不醒（下次 SessionStart 就补上），也不同机跨身份误投。
+ */
+export function sessionEntryMatchesIdentity(
+  entry: ClaudeSessionRegistryEntry,
+  identity: string | null | undefined,
+): boolean {
+  const wanted = normalizeSessionRegistryIdentity(identity);
+  if (wanted === null) return false;
+  return normalizeSessionRegistryIdentity(entry.identity) === wanted;
+}
+
 /** 旧条目（无 harness 字段）视为 claude。 */
 export function sessionEntryHarness(entry: ClaudeSessionRegistryEntry): SessionRegistryHarness {
   return entry.harness ?? "claude";
@@ -169,6 +208,11 @@ function validEntry(value: unknown): value is ClaudeSessionRegistryEntry {
     (value.server === undefined ||
       (typeof value.server === "string" &&
         normalizeSessionRegistryServer(value.server) === value.server)) &&
+    // identity 缺席合法（#906 之前的旧条目）；在场则必须已是规范化形态，坏值按坏行
+    // 丢弃而不是当成「无 identity」——否则一条写坏的 identity 会静默退化成旧条目语义。
+    (value.identity === undefined ||
+      (typeof value.identity === "string" &&
+        normalizeSessionRegistryIdentity(value.identity) === value.identity)) &&
     typeof value.cwd === "string" &&
     value.cwd !== "" &&
     isAbsolute(value.cwd) &&
@@ -340,6 +384,12 @@ export interface RegisterClaudeSessionInput {
   channel: string;
   /** 该会话绑定的实例 URL（#865）。解析不出 origin 的值不写入——条目随之不可匹配（安全侧）。 */
   server?: string | null;
+  /**
+   * 该会话绑定的频道身份（#906）。**省略**＝让注册表自己从该会话的 config 解析
+   * （见 resolveSessionRegistryIdentity）——入册点（hook）与 config 同进程同环境，
+   * 这里读到的就是这个会话真正在用的身份。显式传 null＝不写身份（条目不可匹配）。
+   */
+  identity?: string | null;
   cwd: string;
   registered_at?: number;
   /** 省略即 claude（保持 #841 调用点逐字不变）。 */
@@ -351,11 +401,32 @@ export interface RegisterClaudeSessionInput {
  * 容量满时先剔死行；仍满则拒绝（返回 false），绝不覆盖别人的活行。
  * 容量与锁都按 harness 目录各自独立——codex 会话刷满不会挤掉 claude 会话。
  */
+/**
+ * 从该会话绑定的 config 里解析频道身份（#906）。channel_scope 与入册频道不符的缓存身份
+ * 不认（那是另一个频道的 handle），解析不出就返回 null——条目随之不可匹配，宁可漏叫。
+ */
+export function resolveSessionRegistryIdentity(cwd: string, channel: string): string | null {
+  try {
+    const identity = readConfig(cwd)?.identity;
+    if (identity === undefined || identity === null) return null;
+    if (identity.channel_scope !== null && identity.channel_scope !== undefined &&
+        identity.channel_scope !== channel) {
+      return null;
+    }
+    return normalizeSessionRegistryIdentity(identity.name);
+  } catch {
+    return null;
+  }
+}
+
 export function registerSession(
   input: RegisterClaudeSessionInput,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   const harness: SessionRegistryHarness = input.harness ?? "claude";
+  const identity = input.identity === undefined
+    ? resolveSessionRegistryIdentity(input.cwd, input.channel)
+    : normalizeSessionRegistryIdentity(input.identity);
   const entry: ClaudeSessionRegistryEntry = {
     version: 1,
     harness,
@@ -369,6 +440,7 @@ export function registerSession(
     ...(normalizeSessionRegistryServer(input.server) === null
       ? {}
       : { server: normalizeSessionRegistryServer(input.server)! }),
+    ...(identity === null ? {} : { identity }),
     cwd: input.cwd,
     registered_at: input.registered_at ?? Date.now(),
   };

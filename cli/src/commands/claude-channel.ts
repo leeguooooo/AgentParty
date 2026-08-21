@@ -37,6 +37,7 @@ import { connect, type Connection } from "../client";
 import {
   claudeSessionAnnounceName,
   listClaudeSessions,
+  sessionEntryMatchesIdentity,
   sessionEntryMatchesServer,
   type ClaudeSessionRegistryEntry,
 } from "../claude-session-registry";
@@ -459,27 +460,37 @@ export function dormantAnnounceDisplayName(entry: ClaudeSessionRegistryEntry): s
 }
 
 /**
- * 选择要宣告的入册会话：同 **server + channel** 必须；优先同 cwd；同优先级取最新入册。
+ * 选择要宣告（并被注入）的入册会话：**server + channel + 频道身份 + cwd 全等**必须，
+ * 同优先级取最新入册。任何一维对不上就返回 null——宁可漏叫，绝不误投。
  *
  * #865：频道 slug 跨实例不唯一（两台生产实例上都有 `agentparty`），只比 slug 会让本机
  * 连着 A 实例的 announce 腿把 @ 注入到只属于 B 实例的会话——实机撞见过。旧条目（无
  * server 字段）恒不匹配，属安全侧，由下次 SessionStart 自然升级。
+ *
+ * #906：**身份维必须在场**。此前只按 channel + server 过滤、优先同 cwd、再 `?? pick(matching)`
+ * 兜底成「该频道里任意一个会话」——同一个 worktree 里跑着两个绑不同身份的会话时，@ 身份 A
+ * 的消息恒落到 registered_at 更新的那个（实机撞见）。消息内容/频道/seq 全是真的，收信方
+ * 毫无破绽，被 @ 的一方一无所知。所以：
+ * - 身份不等一律不选（旧条目无 identity 字段 ⇒ 恒不匹配，下次 SessionStart 自然升级）；
+ * - 删掉跨 cwd 兜底——「频道里随便挑一个」在有身份概念之后不成立，同身份跨 worktree 的
+ *   另一个会话同样是错的宿主（announce 进程只许唤醒自己所在 cwd 的宿主会话）。
  */
 export function selectDormantAnnounceEntry(
   entries: readonly ClaudeSessionRegistryEntry[],
   channel: string,
   cwd: string,
   server?: string | null,
+  identity?: string | null,
 ): ClaudeSessionRegistryEntry | null {
   const matching = entries.filter(
-    (entry) => entry.channel === channel && sessionEntryMatchesServer(entry, server),
+    (entry) =>
+      entry.channel === channel &&
+      sessionEntryMatchesServer(entry, server) &&
+      sessionEntryMatchesIdentity(entry, identity) &&
+      entry.cwd === cwd,
   );
   if (matching.length === 0) return null;
-  const pick = (candidates: readonly ClaudeSessionRegistryEntry[]) =>
-    candidates.length === 0
-      ? null
-      : candidates.reduce((a, b) => (b.registered_at >= a.registered_at ? b : a));
-  return pick(matching.filter((entry) => entry.cwd === cwd)) ?? pick(matching);
+  return matching.reduce((a, b) => (b.registered_at >= a.registered_at ? b : a));
 }
 
 export interface DormantAnnounceDeps {
@@ -508,6 +519,12 @@ export interface DormantAnnounceDeps {
    * dormantAnnounceMentionHit 的注释）。默认 resolveAnnounceChannelIdentity。
    */
   resolveSelfName?: (auth: { server: string; token: string }) => Promise<string | null>;
+  /**
+   * 漏叫留痕（#906）：身份维一收紧，「本机没有该身份的会话」就成了常态化的可观测事件，
+   * 绝不许静默——否则排障的人只能看到「@ 了没反应」。默认写 stderr（stdout 是 MCP
+   * 的 stdio 通道，绝不能碰）。同一句连续重复只打一次，5s 轮询不刷屏。
+   */
+  log?: (line: string) => void;
 }
 
 /**
@@ -647,6 +664,18 @@ export async function runDormantClaudeSessionAnnounce(
   // @ 注入一次。两条路径各有自己的进程内 seen，本切片**不做跨进程去重**——最终由
   // Claude 收件箱侧的 msg_id/队列去重与人工感知兜底；重复唤醒的代价远小于叫不醒。
   const injectedSeqs = new Set<number>();
+  // 漏叫留痕（#906）：同一句连续重复只打一次（5s 轮询否则刷屏）。
+  const rawLog = deps.log ?? ((line: string) => console.error(line));
+  let lastLogged: string | null = null;
+  const logOnce = (line: string) => {
+    if (line === lastLogged) return;
+    lastLogged = line;
+    try {
+      rawLog(line);
+    } catch {
+      // 日志失败绝不影响 announce 主流程。
+    }
+  };
   while (!signal.aborted) {
     // #865：先解析 auth——选目标要按 server 过滤，拿不到实例身份就一个条目都不该匹配。
     const auth = await deps.resolveAuth().catch(() => null);
@@ -654,16 +683,42 @@ export async function runDormantClaudeSessionAnnounce(
     // resolveAuth 是本循环里唯一的长 await：期间收到 abort 就绝不再建连。
     if (signal.aborted) return;
     const authServer = auth.server;
+    // 「叫我」的判据＝本机频道身份（不是宣告名，见上方三命名空间注释）。#906 起它同时
+    // 是**选注入目标**的判据，所以必须先于选目标解析：解析失败（无缓存且 /api/me 不通）
+    // ⇒ 一个条目都不该匹配，本轮不建连。
+    const selfName = await (deps.resolveSelfName ?? ((a: { server: string; token: string }) =>
+      resolveAnnounceChannelIdentity(channel, a)))({
+      server: auth.server,
+      token: auth.token,
+    }).catch(() => null);
+    if (signal.aborted) return;
+    if (selfName === null || selfName === "") {
+      logOnce(
+        `claude-channel: 解析不出本机频道身份（channel=${channel} server=${authServer}），` +
+          "本轮不宣告也不注入——绝不退回「频道里随便挑一个会话」（#906）",
+      );
+      await abortableSleep(pollMs, signal);
+      continue;
+    }
     let entry: ClaudeSessionRegistryEntry | null = null;
     try {
-      entry = selectDormantAnnounceEntry(deps.listSessions(), channel, cwd, authServer);
+      entry = selectDormantAnnounceEntry(deps.listSessions(), channel, cwd, authServer, selfName);
     } catch {
       return;
     }
     if (entry === null) {
+      logOnce(
+        `claude-channel: 本机没有身份 ${selfName} 的入册会话（channel=${channel} ` +
+          `server=${authServer} cwd=${cwd}），未宣告、未注入。旧条目（无 identity 字段）` +
+          "不参与匹配，重开一次会话即自动补上（#906）",
+      );
       await abortableSleep(pollMs, signal);
       continue;
     }
+    logOnce(
+      `claude-channel: announce 绑定会话 ${entry.session_id}（身份 ${selfName} ` +
+        `channel=${channel} cwd=${cwd}）`,
+    );
     const topology = deps.buildTopology(auth.server, entry.cwd, {
       harnessSession: {
         harness: "claude",
@@ -688,12 +743,8 @@ export async function runDormantClaudeSessionAnnounce(
     const connection = deps.connect(auth.server, auth.token, channel, startCursor, {
       runtimeTopology: topology,
     });
-    // 「叫我」的判据＝本机频道身份（不是宣告名，见上方三命名空间注释）。解析失败
-    // （无缓存且 /api/me 不通）→ selfName=null → 恒不注入，静默降级为改动前行为。
-    const selfName = await (deps.resolveSelfName ?? ((a) => resolveAnnounceChannelIdentity(channel, a)))({
-      server: auth.server,
-      token: auth.token,
-    }).catch(() => null);
+    // selfName（本机频道身份）已在选目标之前解析：注入的**触发条件**与**目标选择**
+    // 现在共用同一个值，两者绝不可能分别指向不同身份（#906）。
     if (signal.aborted) {
       connection.close();
       return;

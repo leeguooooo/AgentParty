@@ -12,6 +12,9 @@ import {
 
 const SERVER = "https://party.example";
 const OTHER_SERVER = "https://other.example";
+/** 本机 announce 腿所用的频道身份（#906）；另一身份用来钉住同机跨身份误投。 */
+const SELF_IDENTITY = "lark-ad72b3f97491-agentparty";
+const OTHER_IDENTITY = "lark-ad72b3f9749e-agentparty";
 
 function entry(overrides: Partial<ClaudeSessionRegistryEntry> = {}): ClaudeSessionRegistryEntry {
   return {
@@ -21,6 +24,7 @@ function entry(overrides: Partial<ClaudeSessionRegistryEntry> = {}): ClaudeSessi
     display_name: null,
     channel: "dev",
     server: SERVER,
+    identity: SELF_IDENTITY,
     cwd: "/tmp/project",
     registered_at: 1_000,
     ...overrides,
@@ -130,46 +134,97 @@ describe("dormantAnnounceDisplayName", () => {
 });
 
 describe("selectDormantAnnounceEntry", () => {
-  test("requires the channel, prefers same cwd, then newest registration", () => {
+  test("requires the channel and the same cwd, then newest registration", () => {
     const other = entry({ session_id: "22222222-2222-4222-8222-222222222222", channel: "prod" });
-    expect(selectDormantAnnounceEntry([other], "dev", "/tmp/project", SERVER)).toBeNull();
+    expect(selectDormantAnnounceEntry([other], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBeNull();
     const away = entry({ session_id: "33333333-3333-4333-8333-333333333333", cwd: "/elsewhere", registered_at: 9_000 });
     const here = entry({ registered_at: 1_000 });
-    expect(selectDormantAnnounceEntry([away, here], "dev", "/tmp/project", SERVER)).toBe(here);
-    expect(selectDormantAnnounceEntry([away], "dev", "/tmp/project", SERVER)).toBe(away);
+    expect(selectDormantAnnounceEntry([away, here], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBe(here);
+    // #906：跨 cwd 兜底已删——同身份但在别的 worktree 的会话同样是错的宿主。
+    expect(selectDormantAnnounceEntry([away], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBeNull();
     const newer = entry({ session_id: "44444444-4444-4444-8444-444444444444", registered_at: 5_000 });
-    expect(selectDormantAnnounceEntry([here, newer], "dev", "/tmp/project", SERVER)).toBe(newer);
+    expect(selectDormantAnnounceEntry([here, newer], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBe(newer);
+  });
+});
+
+describe("selectDormantAnnounceEntry 的身份维度（issue #906）", () => {
+  // 本次故障形态的直接钉子：同 cwd、同频道、同 server，只有身份不同。
+  test("同 cwd 同频道两个不同身份：选中的必须是该身份那条，与 registered_at 新旧无关", () => {
+    const mine = entry({
+      session_id: "66666666-6666-4666-8666-666666666666",
+      identity: SELF_IDENTITY,
+      registered_at: 1_000,
+    });
+    const theirs = entry({
+      session_id: "77777777-7777-4777-8777-777777777777",
+      identity: OTHER_IDENTITY,
+      // 故意更新——旧实现「取最新入册」会选中它，那正是实机误投的那条。
+      registered_at: 9_000,
+    });
+    expect(selectDormantAnnounceEntry([mine, theirs], "dev", "/tmp/project", SERVER, SELF_IDENTITY))
+      .toBe(mine);
+    expect(selectDormantAnnounceEntry([mine, theirs], "dev", "/tmp/project", SERVER, OTHER_IDENTITY))
+      .toBe(theirs);
+    // 顺序反转也一样（防「靠数组序侥幸通过」）。
+    expect(selectDormantAnnounceEntry([theirs, mine], "dev", "/tmp/project", SERVER, SELF_IDENTITY))
+      .toBe(mine);
+  });
+
+  test("本机没有该身份的会话 ⇒ 一个都不选（绝不退回频道里随便挑一个）", () => {
+    const theirs = entry({ identity: OTHER_IDENTITY, registered_at: 9_000 });
+    expect(selectDormantAnnounceEntry([theirs], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBeNull();
+  });
+
+  test("旧条目（无 identity 字段）恒不命中，等下次 SessionStart 升级", () => {
+    const legacy = entry({ identity: undefined });
+    expect(selectDormantAnnounceEntry([legacy], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBeNull();
+    const fresh = entry({ session_id: "88888888-8888-4888-8888-888888888888", registered_at: 9_000 });
+    expect(selectDormantAnnounceEntry([legacy, fresh], "dev", "/tmp/project", SERVER, SELF_IDENTITY))
+      .toBe(fresh);
+  });
+
+  test("解析不出本机身份（null/undefined/空串）时一个都不命中", () => {
+    const here = entry();
+    for (const identity of [null, undefined, ""]) {
+      expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", SERVER, identity)).toBeNull();
+    }
+  });
+
+  test("身份比对与 mention 同一把尺子：ASCII handle 大小写等价", () => {
+    const here = entry();
+    expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", SERVER, SELF_IDENTITY.toUpperCase()))
+      .toBe(here);
   });
 });
 
 describe("selectDormantAnnounceEntry 的 server 维度（issue #865）", () => {
   test("同 slug 不同 server 不命中；同 slug 同 server 才命中", () => {
     const here = entry();
-    expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", SERVER)).toBe(here);
-    expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", OTHER_SERVER)).toBeNull();
+    expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBe(here);
+    expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", OTHER_SERVER, SELF_IDENTITY)).toBeNull();
   });
 
   test("旧条目（无 server 字段）恒不命中，等下次 SessionStart 升级", () => {
     const legacy = entry({ server: undefined });
-    expect(selectDormantAnnounceEntry([legacy], "dev", "/tmp/project", SERVER)).toBeNull();
+    expect(selectDormantAnnounceEntry([legacy], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBeNull();
     // 同一批里的新条目照常命中——旧条目只是被跳过，不会拖垮整批。
     const fresh = entry({ session_id: "55555555-5555-4555-8555-555555555555", registered_at: 9_000 });
-    expect(selectDormantAnnounceEntry([legacy, fresh], "dev", "/tmp/project", SERVER)).toBe(fresh);
+    expect(selectDormantAnnounceEntry([legacy, fresh], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBe(fresh);
   });
 
   test("解析不出实例身份（null/undefined/坏 URL）时一个都不命中", () => {
     const here = entry();
     for (const server of [null, undefined, "", "not a url"]) {
-      expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", server)).toBeNull();
+      expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", server, SELF_IDENTITY)).toBeNull();
     }
   });
 
   test("按 origin 规范化比对：尾斜杠 / host 大小写 / 缺协议头都等价，端口不同即不同实例", () => {
     const here = entry();
     for (const variant of ["https://party.example/", "https://Party.Example", "party.example"]) {
-      expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", variant)).toBe(here);
+      expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", variant, SELF_IDENTITY)).toBe(here);
     }
-    expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", "https://party.example:8443"))
+    expect(selectDormantAnnounceEntry([here], "dev", "/tmp/project", "https://party.example:8443", SELF_IDENTITY))
       .toBeNull();
   });
 });
@@ -269,7 +324,7 @@ function msg(seq: number, mentions: string[]): ServerFrame {
   } as unknown as ServerFrame;
 }
 
-const SELF = "lark-ad72b3f97491-agentparty";
+const SELF = SELF_IDENTITY;
 
 describe("announce 起始游标 (#869)", () => {
   test("按频道当前最新 seq 起，绝不是 0、也不来自持久化游标", async () => {
@@ -432,6 +487,83 @@ describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
     await tick();
     expect(calls).toHaveLength(2);
     expect(connections[0]!.acked).toEqual([30, 31]);
+    abort.abort();
+    await done;
+  });
+});
+
+describe("announce 注入的身份闸（issue #906）", () => {
+  function identityDeps(overrides: Partial<DormantAnnounceDeps> = {}) {
+    const calls: { pid?: number; sessionId?: string | null }[] = [];
+    const logs: string[] = [];
+    const inject = (async (input: { pid?: number; sessionId?: string | null; name: string }) => {
+      calls.push({ pid: input.pid, sessionId: input.sessionId });
+      return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: input.name };
+    }) as DormantAnnounceDeps["inject"];
+    const made = makeDeps({ inject, log: (line) => logs.push(line), ...overrides });
+    return { ...made, calls, logs };
+  }
+
+  // 故障形态本体：同 cwd、同频道、两个不同身份的活会话。
+  const MINE = entry({
+    session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    pid: 111,
+    identity: SELF_IDENTITY,
+    registered_at: 1_000,
+  });
+  const THEIRS = entry({
+    session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    pid: 222,
+    identity: OTHER_IDENTITY,
+    registered_at: 9_000, // 更新：旧实现恒选它 ⇒ 误投。
+  });
+
+  test("@ 我 ⇒ 只注入我这条会话，绝不落到同 cwd 的另一身份会话", async () => {
+    const { deps, connections, calls } = identityDeps({ listSessions: () => [MINE, THEIRS] });
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    expect(connections).toHaveLength(1);
+    connections[0]!.push(msg(50, [SELF]));
+    await tick();
+    expect(calls).toEqual([{ pid: 111, sessionId: MINE.session_id }]);
+    abort.abort();
+    await done;
+  });
+
+  test("本机没有该身份的会话 ⇒ 不建连、不注入任何人，且留下日志（不静默）", async () => {
+    const { deps, connections, calls, logs } = identityDeps({ listSessions: () => [THEIRS] });
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    expect(connections).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+    expect(logs.some((line) => line.includes(SELF_IDENTITY) && line.includes("未注入"))).toBe(true);
+    abort.abort();
+    await done;
+  });
+
+  test("解析不出本机身份 ⇒ 不建连、不注入，且留下日志", async () => {
+    const { deps, connections, calls, logs } = identityDeps({
+      listSessions: () => [MINE, THEIRS],
+      resolveSelfName: async () => null,
+    });
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    expect(connections).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+    expect(logs.some((line) => line.includes("解析不出本机频道身份"))).toBe(true);
+    abort.abort();
+    await done;
+  });
+
+  test("漏叫日志不刷屏：同一句连续轮询只打一次", async () => {
+    const { deps, logs } = identityDeps({ listSessions: () => [THEIRS] });
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick(40); // pollIntervalMs=5 → 至少轮了好几圈。
+    expect(logs.filter((line) => line.includes("未注入"))).toHaveLength(1);
     abort.abort();
     await done;
   });
