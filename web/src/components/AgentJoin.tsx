@@ -1,5 +1,5 @@
-// 频道页「＋ 让 agent 加入」：登录人类先给 agent 起个能认出来的名字（默认 <你>-<频道>，
-// 可改成 drawstyle-review 这类），再铸一枚 channel-scoped agent token，弹出可复制的接入脚本。
+// 频道页「＋ 让 agent 加入」：系统先生成 <人>-频道-<短 ID>- 的稳定前缀，
+// 登录人类只填用途后缀，再铸一枚 channel-scoped agent token，弹出可复制的接入脚本。
 // 明文 token 只出现这一次（spec §10）。名字有意义 = 频道里一眼分清谁的哪个项目，不再是随机后缀。
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -40,6 +40,8 @@ interface Props {
   accountKey: string;
   active?: boolean;
   onActiveChange?(open: boolean): void;
+  /** 测试注入；生产使用 Web Crypto 生成四位十六进制短 ID。 */
+  createShortId?: () => string;
 }
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -47,20 +49,27 @@ const RESERVED = new Set(["system"]);
 // 完整接入包 builder（含 MIN_CLI 版本闸、charter 快照、待命指引）在 lib/joinPack ——
 // 与 vault「复制接入包」共用同一份，两个入口的产物逐字节同构（#584 复盘）。
 
-// 从前缀清洗出一个合法的名字词根（小写、仅 [a-z0-9._-]、去首尾非字母数字）。
-function cleanBase(prefix: string): string {
-  const base = prefix
+// 每段最多 20 位，让固定前缀最长 47 位，为用途后缀至少留 17 位。
+function cleanSegment(value: string, fallback: string): string {
+  const segment = value
     .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, "")
+    .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^[^a-z0-9]+/, "")
-    .slice(0, 24);
-  return base || "agent";
+    .replace(/[^a-z0-9]+$/, "")
+    .slice(0, 20)
+    .replace(/[^a-z0-9]+$/, "");
+  return segment || fallback;
 }
 
-// 默认建议名：<你>-<频道>，直观且大概率唯一；占用了让用户自己改（不再塞随机后缀糊弄）。
-function suggestName(prefix: string, slug: string): string {
-  const name = `${cleanBase(prefix)}-${slug}`.slice(0, 64);
-  return NAME_RE.test(name) && !RESERVED.has(name) ? name : cleanBase(prefix);
+function randomShortId(): string {
+  const bytes = new Uint8Array(2);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export function buildAgentNamePrefix(owner: string, slug: string, shortId: string): string {
+  const id = /^[a-f0-9]{4}$/.test(shortId) ? shortId : "0000";
+  return `${cleanSegment(owner, "agent")}-${cleanSegment(slug, "channel")}-${id}-`;
 }
 
 type Phase =
@@ -93,10 +102,11 @@ function CommandBlock({
   );
 }
 
-export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accountKey, active, onActiveChange, dutyAdapter = desktopAgentAdapter, desktopDetect = isMacDesktop, pickDirectory = pickDirectoryDefault }: Props) {
+export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accountKey, active, onActiveChange, dutyAdapter = desktopAgentAdapter, desktopDetect = isMacDesktop, pickDirectory = pickDirectoryDefault, createShortId = randomShortId }: Props) {
   const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
-  const [name, setName] = useState("");
+  const [generatedPrefix, setGeneratedPrefix] = useState("");
+  const [nameSuffix, setNameSuffix] = useState("");
   // #612：无人值守值守预设——unattended 生成「装 CLI → init → party serve --runner <选中的>」的
   // 运维脚本（runner 见下方 state，缺省 codex），interactive 仍是贴给 agent harness 的完整接入包。
   const [mode, setMode] = useState<JoinPackMode>("interactive");
@@ -121,16 +131,18 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
 
   const open = useCallback(() => {
     onActiveChange?.(true);
-    setName(suggestName(namePrefix, slug));
+    setGeneratedPrefix(buildAgentNamePrefix(namePrefix, slug, createShortId()));
+    setNameSuffix("");
     setMode("interactive");
     setHarness("other");
     setNameErr(null);
     setPhase({ kind: "compose" });
-  }, [namePrefix, onActiveChange, slug]);
+  }, [createShortId, namePrefix, onActiveChange, slug]);
 
   const reset = useCallback(() => {
     setPhase({ kind: "idle" });
-    setName("");
+    setGeneratedPrefix("");
+    setNameSuffix("");
     setCopied(false);
     setCopyErr(false);
     setNameErr(null);
@@ -162,8 +174,9 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
   });
 
   const mint = useCallback(async () => {
-    const wanted = name.trim();
-    if (!NAME_RE.test(wanted) || RESERVED.has(wanted)) {
+    const suffix = nameSuffix.trim();
+    const wanted = `${generatedPrefix}${suffix}`;
+    if (!suffix || !NAME_RE.test(suffix) || !NAME_RE.test(wanted) || RESERVED.has(wanted)) {
       setNameErr(t("AgentJoin.nameError"));
       return;
     }
@@ -220,7 +233,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
               : t("AgentJoin.errGeneric");
       setPhase({ kind: "error", message });
     }
-  }, [accountKey, charter, harness, inviterName, mode, name, runner, slug, token, t]);
+  }, [accountKey, charter, generatedPrefix, harness, inviterName, mode, nameSuffix, runner, slug, token, t]);
 
   // 无人值守直接运行：选工作目录（不手填、不复制接入包）→ dutyAdopt 就地落成 launchd 常驻。
   const adopt = useCallback(async () => {
@@ -294,17 +307,19 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
 
             <label className="agent-join-namerow">
               <span className="agent-join-namelabel t-mono">{t("AgentJoin.nameFieldLabel")}</span>
+              <span className="agent-join-nameprefix t-mono">{generatedPrefix}</span>
               <input
                 ref={nameInputRef}
                 className="t-mono agent-join-nameinput"
-                value={name}
+                value={nameSuffix}
                 autoFocus
                 spellCheck={false}
-                onChange={(e) => setName(e.target.value)}
+                maxLength={64 - generatedPrefix.length}
+                onChange={(e) => setNameSuffix(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && phase.kind === "compose") mint();
                 }}
-                placeholder={`${slug}-review`}
+                placeholder="review"
                 disabled={phase.kind === "loading"}
               />
             </label>

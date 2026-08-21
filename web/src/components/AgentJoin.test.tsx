@@ -21,7 +21,7 @@ mock.module("../lib/api", () => ({
 // agentTokenVault 单测。#642 仍通过受控的 execCommand 返回值覆盖成功/失败。
 let copyResult = true;
 
-const { AgentJoin } = await import("./AgentJoin");
+const { AgentJoin, buildAgentNamePrefix } = await import("./AgentJoin");
 
 class TestEventTarget {
   private listeners = new Map<string, Set<(event: unknown) => void>>();
@@ -135,6 +135,7 @@ function render(
           inviterName="host"
           charter={charter}
           accountKey="acct-1"
+          createShortId={() => "7f49"}
           onActiveChange={onActiveChange}
           {...extra}
         />
@@ -144,9 +145,89 @@ function render(
   return renderer as ReactTestRenderer;
 }
 
-function open(r: ReactTestRenderer) {
+function openWithoutPurpose(r: ReactTestRenderer) {
   act(() => r.root.find((node) => node.props.className === "d-btn d-btn--primary agent-join-btn").props.onClick());
 }
+
+function open(r: ReactTestRenderer, purpose = "review") {
+  openWithoutPurpose(r);
+  act(() =>
+    r.root
+      .find((node) => node.props.className === "t-mono agent-join-nameinput")
+      .props.onChange({ target: { value: purpose } }),
+  );
+}
+
+describe("AgentJoin generated names", () => {
+  test("shows a fixed owner-channel-short-id prefix and accepts only the purpose suffix", async () => {
+    const r = render();
+    open(r, "release");
+
+    const prefix = r.root.find((node) => node.props.className === "agent-join-nameprefix t-mono");
+    const input = r.root.find((node) => node.props.className === "t-mono agent-join-nameinput");
+    expect(prefix.children).toEqual(["leo-demo-7f49-"]);
+    expect(input.props.value).toBe("release");
+    expect(input.props.maxLength).toBe(64 - "leo-demo-7f49-".length);
+
+    await act(async () => {
+      await r.root.find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick).props.onClick();
+    });
+    expect(savedAgents[0]?.name).toBe("leo-demo-7f49-release");
+  });
+
+  test("keeps the generated short ID stable across compose re-renders", () => {
+    let calls = 0;
+    const r = render(undefined, null, { createShortId: () => (++calls === 1 ? "1a2b" : "ffff") });
+    open(r);
+    expect(r.root.find((node) => node.props.className === "agent-join-nameprefix t-mono").children).toEqual([
+      "leo-demo-1a2b-",
+    ]);
+
+    act(() =>
+      r.root
+        .find((node) => node.props.name === "agent-join-mode" && node.props.value === "unattended")
+        .props.onChange(),
+    );
+    expect(r.root.find((node) => node.props.className === "agent-join-nameprefix t-mono").children).toEqual([
+      "leo-demo-1a2b-",
+    ]);
+    expect(calls).toBe(1);
+  });
+
+  test("rejects an empty or invalid purpose suffix", async () => {
+    const r = render();
+    openWithoutPurpose(r);
+    const generate = () => r.root.find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick);
+
+    await act(async () => generate().props.onClick());
+    expect(savedAgents).toHaveLength(0);
+    expect(r.root.findAll((node) => node.props.role === "alert")).toHaveLength(1);
+
+    act(() =>
+      r.root
+        .find((node) => node.props.className === "t-mono agent-join-nameinput")
+        .props.onChange({ target: { value: "bad purpose" } }),
+    );
+    await act(async () => generate().props.onClick());
+    expect(savedAgents).toHaveLength(0);
+
+    act(() =>
+      r.root
+        .find((node) => node.props.className === "t-mono agent-join-nameinput")
+        .props.onChange({ target: { value: "x".repeat(64) } }),
+    );
+    await act(async () => generate().props.onClick());
+    expect(savedAgents).toHaveLength(0);
+  });
+
+  test("bounds and sanitizes the fixed prefix so a valid suffix fits the 64 character limit", () => {
+    const prefix = buildAgentNamePrefix(" Leo Very Long Owner Name !!! ", "Channel / With / A / Very / Long / Slug", "abcd");
+    expect(prefix).toBe("leo-very-long-owner-channel-with-a-very-abcd-");
+    expect(prefix.length).toBeLessThanOrEqual(47);
+    expect(new RegExp("^[a-z0-9][a-z0-9._-]*-$").test(prefix)).toBe(true);
+    expect(buildAgentNamePrefix("leo", "demo", "not-hex")).toBe("leo-demo-0000-");
+  });
+});
 
 describe("AgentJoin dismiss behavior", () => {
   test.each([
@@ -208,17 +289,17 @@ describe("AgentJoin dismiss behavior", () => {
     await act(async () => {
       await r.root.find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick).props.onClick();
     });
-    expect(savedAgents.map(({ name, token }) => ({ name, token }))).toEqual([{ name: "leo-demo", token: "ap_created" }]);
-    expect(savedAgents[0]?.command).toContain('$HOME/.agentparty/agents/agentparty-leo-demo-demo.json');
+    expect(savedAgents.map(({ name, token }) => ({ name, token }))).toEqual([{ name: "leo-demo-7f49-review", token: "ap_created" }]);
+    expect(savedAgents[0]?.command).toContain('$HOME/.agentparty/agents/agentparty-leo-demo-7f49-review-demo.json');
     expect(savedAgents[0]?.command).not.toContain("TMPDIR");
 
     act(() => windowEvents.emit("keydown", { key: "Escape" }));
     expect(r.root.findAll((node) => node.props.role === "dialog")).toHaveLength(0);
-    expect(savedAgents.map(({ name, token }) => ({ name, token }))).toEqual([{ name: "leo-demo", token: "ap_created" }]);
+    expect(savedAgents.map(({ name, token }) => ({ name, token }))).toEqual([{ name: "leo-demo-7f49-review", token: "ap_created" }]);
 
     open(r);
     const input = r.root.find((node) => node.props.className === "t-mono agent-join-nameinput");
-    expect(input.props.value).toBe("leo-demo");
+    expect(input.props.value).toBe("review");
   });
 
   test("join command tells turn-based agents to re-anchor context and route human confirmations to the channel", async () => {
@@ -373,7 +454,7 @@ describe("AgentJoin 桌面一键接管 (#616 phase 4)", () => {
       {
         server: "https://agentparty.leeguoo.com",
         token: "ap_created",
-        name: "leo-demo",
+        name: "leo-demo-7f49-review",
         channel: "demo",
         runner: "codex", // #749：默认 codex,不再写死 claude
         workdir: "/picked/dir",

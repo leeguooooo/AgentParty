@@ -1,6 +1,7 @@
 // 应用骨架：登录闸 → 头部 + 左侧频道列表 + 右侧（首页 | 频道页）
 import { isMember } from "@agentparty/shared";
 import { membershipApplyMailto, membershipStatusOf } from "./lib/membership";
+import { agentNameOwnerLabel } from "./lib/agentNameOwner";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChannelList } from "./components/ChannelList";
 import { CreateChannel } from "./components/CreateChannel";
@@ -1422,7 +1423,7 @@ export function App() {
               canResetGuard={!isShareMode() && me?.role === "human"}
               // 可见性切换是 owner 专属：服务端算好的 can_moderate 决定渲不渲染（非 owner 不显会 403 的按钮）
               canModerate={channels?.find((c) => c.slug === slug)?.can_moderate === true}
-              agentNamePrefix={(me?.email ?? me?.name ?? slug).split("@")[0] ?? slug}
+              agentNamePrefix={agentNameOwnerLabel(me, slug)}
               accountKey={me?.email ?? me?.owner ?? me?.name ?? null}
               inviterName={me?.name ?? slug}
               selfHandle={me?.handle ?? null}

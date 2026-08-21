@@ -5737,14 +5737,24 @@ button.org-person-name {
 /* 起名步：名字输入 + 校验 */
 .agent-join-namerow { display: flex; align-items: center; gap: 10px; }
 .agent-join-namelabel { font-size: 12px; color: var(--t-dim); flex: none; }
+.agent-join-nameprefix {
+  margin-right: -10px;
+  padding: 8px 0 8px 11px;
+  color: var(--t-dim);
+  background: var(--t-panel2);
+  border: 1.6px solid var(--d-ink);
+  border-right: 0;
+  white-space: nowrap;
+}
 .agent-join-nameinput {
   flex: 1;
   min-width: 0;
   font-size: 14px;
-  padding: 8px 11px;
+  padding: 8px 11px 8px 0;
   color: var(--t-text);
   background: var(--t-panel2);
   border: 1.6px solid var(--d-ink);
+  border-left: 0;
   border-radius: 0;
 }
 .agent-join-nameinput:focus { outline: none; border-color: var(--t-accent); }
