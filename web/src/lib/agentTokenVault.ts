@@ -1,6 +1,5 @@
-import { AGENT_NAME_RE, mcpServerName } from "@agentparty/shared/onboarding";
 import type { DesktopAgentRunner } from "./desktopAgent";
-import { type JoinPackHarness, type JoinPackMode, MIN_CLI, VERSION_GE_SNIPPET } from "./joinPack";
+import type { JoinPackHarness, JoinPackMode } from "./joinPack";
 
 const RUNNERS: readonly DesktopAgentRunner[] = ["codex", "claude", "codex-sdk"];
 
@@ -106,40 +105,7 @@ export { MIN_CLI, VERSION_GE_SNIPPET } from "./joinPack";
 // MCP server 注册名规则挪到 shared 与 cli 的 party invite 共用一份（#585）；语义与来由见那边注释。
 export { mcpServerName } from "@agentparty/shared/onboarding";
 
-export function buildMinimalAgentCommand(input: {
-  server: string;
-  slug: string;
-  name: string;
-  token: string;
-  inviterName: string;
-  checkinMessage: string;
-}): string {
-  const configPath = `$HOME/.agentparty/agents/agentparty-${input.name}-${input.slug}.json`;
-  const mcpName = mcpServerName(input.name);
-  // #597：inviter 是 account id（lark:on_xxx）时 --mention 会被 CLI 拒绝，降级为不 @。
-  const checkin = AGENT_NAME_RE.test(input.inviterName)
-    ? `party send "${input.checkinMessage}" --channel ${input.slug} --mention ${input.inviterName}`
-    : `party send "${input.checkinMessage}" --channel ${input.slug}`;
-  return [
-    `# AgentParty onboarding scope: join the existing channel #${input.slug} using only the supplied party commands.`,
-    "# Do not create or select another channel; do not use third-party or project-local channel workflows (for example, Trellis); do not delegate onboarding.",
-    "# After onboarding, you are the front agent with three responsibilities: (1) stay in the main channel and communicate with its members; (2) communicate with the owner for permissions, trade-offs, and decisions; (3) dispatch work to sub-agents/workers, follow up, accept their evidence, and synthesize results.",
-    "# Code changes, multi-step investigation, browser/ops, and other long-running execution MUST go to a harness sub-agent/worker; it reports evidence/results back to you. If the harness cannot create one, report blocked instead of doing worker work yourself.",
-    "",
-    `export PATH="$HOME/.local/bin:$PATH"`,
-    VERSION_GE_SNIPPET,
-    `need=${MIN_CLI}; have="$(party --version 2>/dev/null || echo 0)"; version_ge "$have" "$need" || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
-    `export AGENTPARTY_CONFIG="${configPath}"`,
-    // #676: pass the token via AGENTPARTY_TOKEN (env), never in argv — `ps -axww` can't see it and it
-    // doesn't trip party init's own "--token leaks into argv/history" warning (strictest: `--token -` via stdin).
-    `AGENTPARTY_TOKEN='${input.token}' party init --server ${input.server} --channel ${input.slug}`,
-    checkin,
-    "# Register the AgentParty MCP server with your harness, then use the party_* tools (party_send / party_status / party_history / party_decision_ask ...) for all channel actions — they carry your identity automatically, no AGENTPARTY_CONFIG prefix needed per command:",
-    // #898: probe before adding — each registration becomes one resident process in every session,
-    // and duplicate onboarding is why one machine ended up with 127 party processes.
-    "# Already registered? The line below skips instead of adding a duplicate (every registration is one more resident process). Clean up registrations whose identity is gone with: party mcp prune",
-    `claude mcp get ${mcpName} >/dev/null 2>&1 && echo "# already registered: ${mcpName} (skipped; run: party mcp prune)" || claude mcp add ${mcpName} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug} --identity ${mcpName}`,
-    `# Codex: codex mcp get ${mcpName} >/dev/null 2>&1 || codex mcp add ${mcpName} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug} --identity ${mcpName}`,
-    "# Non-MCP harnesses: keep using the party CLI with the AGENTPARTY_CONFIG prefix on every command.",
-  ].join("\n");
-}
+// #902：这里曾有第二份手写接入包（buildMinimalAgentCommand），与 joinPack 双轨并行——
+// joinPack 的 harness 分档、marketplace 插件、`party hook install --codex`（#901 的 codex 唤醒
+// 开关）它一样都没有，拿它接入的 codex 能发能读却叫不醒。已整体删除：接入包只有 joinPack
+// 一个 builder（buildJoinPack），vault 记录的 command 字段也由它生成。别再在这里加第二份。

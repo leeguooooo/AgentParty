@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { LocaleProvider } from "../i18n/locale";
 import { MIN_CLI } from "../lib/joinPack";
+import { mcpServerName } from "@agentparty/shared/onboarding";
 
 // #584：vault 里的 command 是生成时刻的冻结文本——旧包会带着 TMPDIR 配置路径、
 // MIN_CLI 0.2.52、无 MCP 步骤继续流通。复制按钮必须现场重建，绝不发存量文本。
@@ -111,6 +112,7 @@ beforeEach(() => {
       addEventListener: windowEvents.addEventListener.bind(windowEvents),
       removeEventListener: windowEvents.removeEventListener.bind(windowEvents),
       setTimeout: globalThis.setTimeout.bind(globalThis),
+      confirm: () => true,
     },
   });
   Object.defineProperty(globalThis, "document", {
@@ -220,5 +222,97 @@ describe("AgentTokens copy join pack (#584)", () => {
     expect(pack).not.toContain("TMPDIR");
     expect(pack).not.toContain("0.2.52");
     expect(pack).not.toBe(FROZEN_LEGACY_COMMAND);
+  });
+});
+
+// #902：vault 的接入包必须与 joinPack 同口径——曾经这里手写了一份平行包，缺 harness 分档、
+// 缺 `party hook install --codex`（#901 的 codex 唤醒开关），拿它接入的 codex 能发能读却叫不醒。
+function seedRecord(rec: { name: string; harness?: string }) {
+  localStorage.setItem(
+    "ap_agent_token_vault:v1",
+    JSON.stringify([
+      {
+        account: "acct-1",
+        slug: "demo",
+        name: rec.name,
+        token: "ap_fake_token",
+        command: FROZEN_LEGACY_COMMAND,
+        ...(rec.harness === undefined ? {} : { harness: rec.harness }),
+        savedAt: 0,
+      },
+    ]),
+  );
+  agentsFixture = [{ name: rec.name, owner: "acct-1", channel_scope: "demo", created_at: 0 }];
+}
+
+async function copyPack(): Promise<string> {
+  const r = await renderOpen();
+  const button = r.root.findAll(
+    (n) => n.type === "button" && Array.isArray(n.props.children) === false && n.props.children === "copy join pack",
+  );
+  expect(button.length).toBe(1);
+  await act(async () => {
+    button[0]!.props.onClick();
+  });
+  return copiedTexts[copiedTexts.length - 1]!;
+}
+
+describe("AgentTokens copy join pack · harness 档位 (#902)", () => {
+  test("harness=codex：包里带 party hook install --codex（唤醒开关），不带 Claude 专属注册", async () => {
+    seedRecord({ name: "helper-bot", harness: "codex" });
+    const pack = await copyPack();
+    // 断言钉在真正会被执行的 shell 行上（行首即命令），不能被说明文字/注释满足。
+    expect(pack).toMatch(/^party hook install --codex \|\| true$/m);
+    // 装完要新开会话才生效（hooks.json 只在 codex 启动时读）——必须写在包里。
+    expect(pack).toContain("Codex reads hooks.json at startup");
+    // codex 侧同样保留 #900 的「先探后加」形态。
+    expect(pack).toContain(`codex mcp get ${mcpServerName("helper-bot")}`);
+    // Claude 专属注册/插件不该出现在 codex 档。
+    expect(pack).not.toMatch(/^claude mcp get /m);
+    expect(pack).not.toMatch(/^claude plugin install /m);
+  });
+
+  test("harness=claude：不带 codex hook，保留 #900 的先探后加与 #864 的 crossSessionInbound 写入", async () => {
+    seedRecord({ name: "helper-bot", harness: "claude" });
+    const pack = await copyPack();
+    expect(pack).not.toContain("party hook install --codex");
+    // #900：探测与注册同一行，缺一不可。
+    const mcpName = mcpServerName("helper-bot");
+    expect(pack).toMatch(
+      new RegExp(`^claude mcp get ${mcpName} >/dev/null 2>&1 && .* \\|\\| claude mcp add ${mcpName} `, "m"),
+    );
+    // #864：三个写入分支是真正会跑的 shell 行——中英文说明文案里也含 crossSessionInbound，
+    // 所以断言必须钉在 jq / node / python3 这三条命令行本身上，光 toContain("crossSessionInbound") 会假绿。
+    expect(pack).toMatch(/^ {2}jq '\.crossSessionInbound = "accept"'/m);
+    expect(pack).toMatch(/^ {2}node -e .*crossSessionInbound="accept"/m);
+    expect(pack).toMatch(/^ {2}python3 -c .*crossSessionInbound/m);
+  });
+
+  test("harness=other：全量兼容包——两个 harness 的分支都在", async () => {
+    seedRecord({ name: "helper-bot", harness: "other" });
+    const pack = await copyPack();
+    expect(pack).toMatch(/^claude mcp get /m);
+    expect(pack).toContain(`codex mcp get ${mcpServerName("helper-bot")}`);
+  });
+
+  test("rotate 后写回 vault 的 command 也是 joinPack 产物（旧的手写最小包会漏掉 codex 唤醒 hook）", async () => {
+    // 没有明文记录 → 面板给「rotate 并取回」，走 regenerateAndSaveToken 这条曾经手写包的路径。
+    localStorage.removeItem("ap_agent_token_vault:v1");
+    agentsFixture = [{ name: "codex-bot", owner: "acct-1", channel_scope: "demo", created_at: 0 }];
+    const r = await renderOpen();
+    const button = r.root.findAll(
+      (n) => n.type === "button" && n.props.children === "rotate and recover",
+    );
+    expect(button.length).toBe(1);
+    await act(async () => {
+      void button[0]!.props.onClick();
+    });
+    await act(async () => {});
+    const saved = JSON.parse(localStorage.getItem("ap_agent_token_vault:v1")!)[0];
+    expect(saved.name).toBe("codex-bot");
+    // 名字里带 codex → 预选 codex 档（#896 的既有推断规则），包里必须有唤醒 hook。
+    expect(saved.command).toMatch(/^party hook install --codex \|\| true$/m);
+    // 而且是完整包，不是旧的最小包（最小包没有 charter 快照与待命指引）。
+    expect(saved.command).toContain("# read the pinned rules before posting");
   });
 });

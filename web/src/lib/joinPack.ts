@@ -202,6 +202,9 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
           // 所以接入包必须自己装这一条，否则上面那句「你现在是可达的」就是空话。
           // 幂等：重复跑只保证自己那条在，绝不动用户已有 hooks；失败也不阻断接入。
           `party hook install --codex || true`,
+          // #902：hooks.json 是 codex 启动时读的——装完必须新开会话才生效，说清楚免得对方
+          // 在原会话里等唤醒等到怀疑人生（vault 复制的包过去连这一整条 hook 都没有）。
+          t("AgentJoin.cmd.codexHookNote"),
         ]
       : []),
     t("AgentJoin.cmd.step4fallback"),
