@@ -20,7 +20,6 @@ import {
 } from "../lib/api";
 import {
   type AgentTokenRecord,
-  buildMinimalAgentCommand,
   copyText,
   findSavedAgentToken,
   listSavedAgentTokens,
@@ -354,13 +353,19 @@ export function AgentTokens({
   // #530：桌面版 location.origin 是 tauri://localhost，接入包会报错；优先真实后端 apiBase，同源 web 回退 origin。
   async function regenerateAndSaveToken(name: string): Promise<string> {
     const next = await rotateChannelAgent(token, slug, name);
-    const command = buildMinimalAgentCommand({
-      server: apiOrigin(),
-      slug,
+    const prior = findSavedAgentToken(accountKey, slug, name);
+    // #902：这里曾经手写一份平行的「最小接入包」（buildMinimalAgentCommand），于是 joinPack 里
+    // 已有的东西它全都没有——最要命的是缺 `party hook install --codex`（#901 的 codex 唤醒开关），
+    // 拿它接入的 codex 能发能读却叫不醒。改成走 freshCommand＝同一份 joinPack builder，并把记录里
+    // 的 mode/runner/harness 原样传下去，以后 joinPack 更新这里自动跟上，不再有第二条轨。
+    const command = freshCommand({
       name: next.name,
       token: next.token,
-      inviterName,
-      checkinMessage: t("AgentTokens.checkinMessage", { name: next.name }),
+      mode: prior?.mode,
+      // #749：轮换 token 也要保留已选 runner,否则已选 claude 的 unattended 记录轮换后复制包会回退 codex。
+      runner: prior?.runner,
+      // #845：轮换 token 也保留已选目标 harness，「复制接入包」仍是同款拆薄包。
+      harness: prior?.harness,
     });
     saveAgentToken({
       account: accountKey,
@@ -368,11 +373,9 @@ export function AgentTokens({
       name: next.name,
       token: next.token,
       command,
-      mode: findSavedAgentToken(accountKey, slug, name)?.mode,
-      // #749：轮换 token 也要保留已选 runner,否则已选 claude 的 unattended 记录轮换后复制包会回退 codex。
-      runner: findSavedAgentToken(accountKey, slug, name)?.runner,
-      // #845：轮换 token 也保留已选目标 harness，「复制接入包」仍是同款拆薄包。
-      harness: findSavedAgentToken(accountKey, slug, name)?.harness,
+      mode: prior?.mode,
+      runner: prior?.runner,
+      harness: prior?.harness,
       savedAt: Date.now(),
     });
     return next.token;
