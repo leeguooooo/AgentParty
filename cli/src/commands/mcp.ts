@@ -61,6 +61,7 @@ import { EXIT_ALREADY_WATCHING, runWatch } from "./watch";
 
 const HELP = `usage: party mcp [--channel <slug>] [--identity <label>]
        party mcp prune [--yes] [--check-remote] [--json]
+       party mcp identities [--channel C] [--server S] [--keep NAME] [--yes] [--json]
 
 Run an AgentParty stdio MCP server.
 
@@ -74,6 +75,12 @@ Subcommands:
   prune   remove Claude Code MCP registrations that point at AgentParty
           identities which no longer exist (dry run unless --yes; never touches
           MCP servers belonging to other tools). See 'party mcp prune --help'.
+  identities
+          answer "do I already have an identity on this (server, channel, owner)?"
+          — the check the name-based idempotency test never made (#907). Also
+          lists every duplicated group on this machine, and can drop the extra
+          identities' MCP registrations (dry run unless --yes; identity config
+          files are never deleted). See 'party mcp identities --help'.
 
 Boundary:
   MCP is a structured control plane for ordinary tools/resources. In Codex
@@ -1595,6 +1602,11 @@ export async function run(argv: string[]): Promise<number> {
   if (argv[0] === "prune") {
     const { runPruneCli } = await import("./mcp-prune");
     return runPruneCli(argv.slice(1));
+  }
+  // #907：按 (server, channel, owner) 判重——「同频道已有身份」的事前检查与存量收敛。
+  if (argv[0] === "identities") {
+    const { runIdentitiesCli } = await import("./mcp-identities");
+    return runIdentitiesCli(argv.slice(1));
   }
   const parsed = parseMcpServerArgv(argv);
   if (parsed.error !== null) {

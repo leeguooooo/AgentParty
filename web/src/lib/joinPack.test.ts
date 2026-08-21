@@ -37,6 +37,58 @@ function pack(harness?: JoinPackHarness, lang?: "en" | "zh"): string {
   });
 }
 
+// #907：断言必须钉在**真正会被执行的 shell 行**上——本仓出过 toContain 被注释文案独自
+// 满足、把真实分支整段删掉照样全绿的假绿（#864）。所以这里逐字比对整行命令，并显式确认
+// 它是一条不带 # 前缀的可执行行。
+describe("接入包的同频道判重前置检查（#907）", () => {
+  // 断言钉在「可执行行」上，且要求这一行同时带上 channel 与 server（判重语义的两个必需项），
+  // 而不是逐字比对整行——换个 flag 顺序是等价实现，不该误红；但把整行删掉必须变红。
+  function executableLines(text: string): string[] {
+    return text.split("\n").filter((l) => l.trim() !== "" && !l.trimStart().startsWith("#"));
+  }
+
+  function dedupeCheckLines(text: string): string[] {
+    return executableLines(text).filter(
+      (l) =>
+        l.includes("party mcp identities")
+        && l.includes("--channel dev")
+        && l.includes("--server https://party.example"),
+    );
+  }
+
+  for (const harness of ["claude", "codex", "other"] as JoinPackHarness[]) {
+    test(`${harness} 档：判重检查是一条真的会被执行的命令行，且排在 party init 之前`, () => {
+      const text = pack(harness);
+      const exec = executableLines(text);
+      const checks = dedupeCheckLines(text);
+      expect(checks).toHaveLength(1);
+      const check = exec.indexOf(checks[0] as string);
+      const init = exec.findIndex((l) => l.includes("party init --server"));
+      expect(check).toBeGreaterThan(-1);
+      expect(init).toBeGreaterThan(check);
+      // 提示不该阻断接入：这一行必须自带 || true。
+      expect(checks[0]).toContain("|| true");
+    });
+  }
+
+  test("判重必须带 --server：两台实例都有同名频道（#865），只按频道名会混", () => {
+    const [line] = dedupeCheckLines(pack("claude"));
+    expect(line).toContain("--server https://party.example");
+    expect(line).toContain("--channel dev");
+  });
+
+  test("中英两份提示文案都真的渲染进包（只改一份是本仓踩过的坑）", () => {
+    for (const lang of ["en", "zh"] as const) {
+      const text = pack("claude", lang);
+      expect(text).toContain(tt(lang, "AgentJoin.cmd.channelDedupeNote1"));
+      expect(text).toContain(tt(lang, "AgentJoin.cmd.channelDedupeNote2"));
+      // 提示文案必须是注释行；判重命令本身必须是可执行行（注释文案不能独自满足这条）。
+      expect(dedupeCheckLines(text)).toHaveLength(1);
+      expect(tt(lang, "AgentJoin.cmd.channelDedupeNote1").startsWith("#")).toBe(true);
+    }
+  });
+});
+
 describe("joinPack 行为契约落盘（#845）", () => {
   test("含 rules 落盘 heredoc 段，delimiter 带引号防变量展开", () => {
     const text = pack();
