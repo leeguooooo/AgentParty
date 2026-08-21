@@ -18,8 +18,11 @@ import {
   claudeSessionRegistryDirectory,
   listClaudeSessions,
   registerClaudeSession,
+  normalizeSessionRegistryIdentity,
   normalizeSessionRegistryServer,
   registerSession,
+  resolveSessionRegistryIdentity,
+  sessionEntryMatchesIdentity,
   sessionEntryMatchesServer,
   unregisterClaudeSession,
 } from "../src/claude-session-registry";
@@ -350,5 +353,76 @@ describe("会话注册表的 server 维度（issue #865）", () => {
       { mode: 0o600 },
     );
     expect(listClaudeSessions(env)).toHaveLength(0);
+  });
+});
+
+describe("注册表的身份维度（issue #906）", () => {
+  const IDENTITY = "lark-ad72b3f97491-agentparty";
+
+  test("显式传入的身份落盘并可比对", () => {
+    expect(registerSession(baseEntry({ identity: IDENTITY }), env)).toBe(true);
+    const [entry] = listClaudeSessions(env);
+    expect(entry!.identity).toBe(IDENTITY);
+    expect(sessionEntryMatchesIdentity(entry!, IDENTITY)).toBe(true);
+    expect(sessionEntryMatchesIdentity(entry!, IDENTITY.toUpperCase())).toBe(true);
+    expect(sessionEntryMatchesIdentity(entry!, "lark-ad72b3f9749e-agentparty")).toBe(false);
+  });
+
+  test("旧条目（无 identity 字段）仍能读出，但恒不可匹配——宁可漏叫", () => {
+    writeFileSync(
+      join(directory, `${SESSION_ID}.json`),
+      JSON.stringify({ version: 1, ...baseEntry(), harness: "claude" }),
+      { mode: 0o600 },
+    );
+    const [entry] = listClaudeSessions(env);
+    expect(entry!.identity).toBeUndefined();
+    expect(sessionEntryMatchesIdentity(entry!, IDENTITY)).toBe(false);
+  });
+
+  test("显式 null / 解析不出的身份不写该字段（条目随之不可匹配）", () => {
+    expect(registerSession(baseEntry({ identity: null }), env)).toBe(true);
+    expect(listClaudeSessions(env)[0]!.identity).toBeUndefined();
+  });
+
+  test("盘上写着未规范化 identity 的条目按坏行丢弃，绝不退化成旧条目的宽松语义", () => {
+    writeFileSync(
+      join(directory, `${SESSION_ID}.json`),
+      JSON.stringify({ version: 1, ...baseEntry({ identity: IDENTITY.toUpperCase() }), harness: "claude" }),
+      { mode: 0o600 },
+    );
+    expect(listClaudeSessions(env)).toHaveLength(0);
+  });
+
+  test("身份归一化与 mentionMatchKey 同尺：ASCII 小写化、空/超长/非串 → null", () => {
+    expect(normalizeSessionRegistryIdentity("Lark-AD72B3F97491-Agentparty")).toBe(IDENTITY);
+    expect(normalizeSessionRegistryIdentity("张三")).toBe("张三");
+    expect(normalizeSessionRegistryIdentity("")).toBeNull();
+    expect(normalizeSessionRegistryIdentity(null)).toBeNull();
+    expect(normalizeSessionRegistryIdentity("x".repeat(129))).toBeNull();
+  });
+
+  test("省略 identity 时从该会话绑定的 config 解析；channel_scope 不符不认", () => {
+    const configPath = join(directory, "config.json");
+    const previous = process.env.AGENTPARTY_CONFIG;
+    process.env.AGENTPARTY_CONFIG = configPath;
+    try {
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          server: "https://a.example.com",
+          token: "t",
+          identity: { name: IDENTITY, channel_scope: "dev" },
+        }),
+        { mode: 0o600 },
+      );
+      expect(resolveSessionRegistryIdentity("/tmp/project", "dev")).toBe(IDENTITY);
+      // 另一个频道的缓存身份不认（那是别的频道的 handle）。
+      expect(resolveSessionRegistryIdentity("/tmp/project", "prod")).toBeNull();
+      expect(registerSession(baseEntry(), env)).toBe(true);
+      expect(listClaudeSessions(env)[0]!.identity).toBe(IDENTITY);
+    } finally {
+      if (previous === undefined) delete process.env.AGENTPARTY_CONFIG;
+      else process.env.AGENTPARTY_CONFIG = previous;
+    }
   });
 });
