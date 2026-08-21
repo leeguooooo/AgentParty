@@ -50,6 +50,7 @@ import {
   type DeliveryRecoveryEntry,
 } from "../delivery-recovery-journal";
 import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from "../instance-lock";
+import { watchParentLiveness } from "../parent-liveness";
 import { resolveAuthDetailed } from "../oidc-cli";
 import {
   fetchMe,
@@ -2865,6 +2866,12 @@ export async function run(argv: string[]): Promise<number> {
     console.error("usage: party claude-channel [channel|--channel C]");
     return 1;
   }
+
+  // #908：本命令永远是 harness 通过 stdio 拉起的子进程，不存在合法的「宿主没了还该活着」形态。
+  // 宿主 Claude 死掉后它曾被 init 收养并继续跑（实测一个孤儿跑了 21 小时），持有 WS ＝ 假在线，
+  // 且继续接该身份的 @ 并注入到别的会话去（#906 那次误投的实际来源）。全部逻辑在 parent-liveness，
+  // 这里只挂一行；两个档（蛰伏 announce / armed）共用同一道闸。
+  watchParentLiveness({ label: "party claude-channel" });
 
   if (flags["require-launch-opt-in"] === true && !claudeChannelLaunchOptedIn()) {
     // Enabled plugins are initialized in every Claude session, even when this

@@ -22,6 +22,7 @@ import {
 } from "../config";
 import { jsonFrame } from "../json";
 import { applyMcpProcessTitle, parseMcpServerArgv } from "../mcp-registry";
+import { watchParentLiveness } from "../parent-liveness";
 import { resolveAuth, resolveAuthDetailed } from "../oidc-cli";
 import {
   createTask,
@@ -1632,5 +1633,9 @@ export async function run(argv: string[]): Promise<number> {
   return new Promise<number>((resolve) => {
     process.stdin.on("close", () => resolve(0));
     process.stdin.on("end", () => resolve(0));
+    // #908 第二道闸：stdin EOF 是 harness 正常收尾时的信号，但宿主被 kill -9 / 崩溃时
+    // 那个 pipe 不一定会关（claude-channel 那边实测就没关，孤儿跑了 21 小时）。父进程
+    // 存活探测不依赖任何 fd 状态，宿主一死就收口。
+    watchParentLiveness({ label: "party mcp", terminate: () => resolve(0) });
   });
 }
