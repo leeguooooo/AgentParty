@@ -4,7 +4,7 @@ export const CreateChannelStrings: LocaleDict = {
   en: {
     "CreateChannel.slugInvalid": "slug must be lowercase letters/digits/-, starting with a letter or digit, 1–64 chars",
     "CreateChannel.errConflict": "That slug is taken — try another",
-    "CreateChannel.errForbidden": "Current token can't create channels (needs a human account login)",
+    "CreateChannel.errForbidden": "The server refused this request and gave no reason — check that this token has write access",
     "CreateChannel.errValidation": "Invalid field, please check",
     "CreateChannel.errAuth": "Session expired, please sign in again",
     "CreateChannel.errGeneric": "Couldn't create the channel, try again shortly",
@@ -30,7 +30,7 @@ export const CreateChannelStrings: LocaleDict = {
   zh: {
     "CreateChannel.slugInvalid": "slug 只能用小写字母/数字/-，字母或数字开头，1–64 位",
     "CreateChannel.errConflict": "这个 slug 已被占用，换一个",
-    "CreateChannel.errForbidden": "当前 token 没有建频道的权限（需人类账号登录）",
+    "CreateChannel.errForbidden": "服务端拒绝了这次建频道且没给原因——确认这枚 token 有写权限",
     "CreateChannel.errValidation": "字段不合法，请检查",
     "CreateChannel.errAuth": "登录已过期，请重新登录",
     "CreateChannel.errGeneric": "建频道失败，请稍后重试",

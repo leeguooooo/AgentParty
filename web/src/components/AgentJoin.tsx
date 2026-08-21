@@ -22,6 +22,7 @@ function isMacDesktop(): boolean {
   return isDesktopRuntime() && /mac/i.test(globalThis.navigator?.userAgent ?? "");
 }
 import { apiOrigin } from "../lib/base";
+import { forbiddenText } from "../lib/forbidden";
 import { useT } from "../i18n/useT";
 import { useDismissableLayer } from "./useDismissableLayer";
 import { useModalFocusTrap } from "./useModalFocusTrap";
@@ -214,7 +215,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
         err instanceof AuthError
           ? t("AgentJoin.errAuth")
           : err instanceof ForbiddenError
-            ? t("AgentJoin.errForbidden")
+            ? forbiddenText(err, t, "AgentJoin.errForbidden")
             : err instanceof ValidationError
               ? t("AgentJoin.errValidation")
               : t("AgentJoin.errGeneric");

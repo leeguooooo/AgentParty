@@ -3,6 +3,9 @@
   "name": "agentparty",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
+  // #920：会员门槛是「运营共享托管服务」才该开的东西，代码侧默认关（hostedMembershipGating
+  // 只认显式 "true"/"1"）。这一份服务的是公共实例 agentparty.leeguoo.com，故显式开启。
+  // 自部署者不该继承它——见 wrangler.xdream.jsonc。
   "vars": {
     "HOSTED_MEMBERSHIP_GATING": "true"
   },
