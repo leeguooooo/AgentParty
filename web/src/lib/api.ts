@@ -48,9 +48,12 @@ export class LarkDirectoryApiError extends Error {
 // 从 403 响应体里取出服务端的 error.code / error.message，转成带上下文的 ForbiddenError。
 // fallback 只在服务端没给 message 时才用——绝不拿本地文案盖掉服务端说清楚了的真实原因（#919）。
 async function forbiddenFrom(res: Response, fallback: string): Promise<ForbiddenError> {
-  const body = (await res.json().catch(() => null)) as { error?: { code?: string; message?: string } } | null;
-  const code = body?.error?.code ?? null;
-  const serverMessage = body?.error?.message ?? null;
+  const body = (await res.json().catch(() => null)) as { error?: { code?: unknown; message?: unknown } } | null;
+  // 运行期校验类型：畸形响应（message 是数字/对象）若原样传下去，下游按字符串处理会抛，
+  // 于是 403 什么都渲染不出来——那正是本 PR 要治的病（真实原因被吞掉）。非字符串一律当没给。
+  const raw = body?.error;
+  const code = typeof raw?.code === "string" && raw.code !== "" ? raw.code : null;
+  const serverMessage = typeof raw?.message === "string" && raw.message !== "" ? raw.message : null;
   return new ForbiddenError(serverMessage ?? fallback, code, serverMessage);
 }
 
