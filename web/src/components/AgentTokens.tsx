@@ -19,6 +19,7 @@ import {
   ValidationError,
 } from "../lib/api";
 import {
+  type AgentTokenRecord,
   buildMinimalAgentCommand,
   copyText,
   findSavedAgentToken,
@@ -30,7 +31,7 @@ import { apiOrigin } from "../lib/base";
 import { desktopAgentAdapter, type DesktopAgentAdapter, type DesktopAgentRunner } from "../lib/desktopAgent";
 import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
 import { LocalAgentsOverview } from "./LocalAgentsOverview";
-import { buildJoinPack, type JoinPackHarness, type JoinPackMode } from "../lib/joinPack";
+import { buildJoinPack, guessJoinPackHarness, type JoinPackHarness, type JoinPackMode } from "../lib/joinPack";
 import { useT } from "../i18n/useT";
 import { SectionedDialog, type SectionedDialogSection } from "./SectionedDialog";
 import "../i18n/strings/AgentTokens";
@@ -126,9 +127,12 @@ export function AgentTokens({
   const [copied, setCopied] = useState<CopyTarget | null>(null);
   const [revealed, setRevealed] = useState<Set<string>>(() => new Set());
   const isOpen = active ?? open;
+  // #895：改选 harness 会写回 vault，但 vault 是 localStorage、React 看不见它变了；
+  // 这个计数器是唯一的「vault 已变」信号，少了它面板会继续显示旧档位。
+  const [vaultRev, setVaultRev] = useState(0);
   const savedTokensByName = useMemo(
     () => new Map(listSavedAgentTokens(accountKey, slug).map((record) => [record.name, record])),
-    [accountKey, agents, slug],
+    [accountKey, agents, slug, vaultRev],
   );
   const localOnly = useMemo(() => {
     const serverNames = new Set((agents ?? []).map((agent) => agent.name));
@@ -277,7 +281,25 @@ export function AgentTokens({
   // 重建走 buildFullJoinPack——与「＋ 让 agent 加入」同一份 builder，产物逐字节同构，
   // 含 charter 快照与待命/唤醒指引（只发最小包的话，新 agent 报到完就不知道怎么挂 watch/serve）。
   // #612：unattended 记录重建同款无人值守包（serve --runner claude），别把值守机脚本换成交互包。
-  // #845 第 4 点：interactive 记录按生成时选的目标 harness 重建同款拆薄包；旧记录无此字段 → builder 内落 other 全量。
+  // #895：unattended 记录靠 runner 而不是 harness（#749/#612），harness 选择器对它无意义——
+  // 显示出来只会让人以为改了它能改脚本。这个判定同时管选择器的显隐和重建时传不传 harness。
+  function isInteractivePack(record: { mode?: JoinPackMode }): boolean {
+    return (record.mode ?? "interactive") === "interactive";
+  }
+
+  // #895：旧记录（#847 之前建的）没有 harness 字段，过去只能回落 other＝全量档。改成按名字后缀
+  // 启发式给一个【预选值】——面板会把它显示出来并允许改选，所以它是默认值而不是静默断言。
+  function packHarnessFor(record: { name: string; harness?: JoinPackHarness }): JoinPackHarness {
+    return record.harness ?? guessJoinPackHarness(record.name);
+  }
+
+  // 改选即写回 vault（走 saveAgentToken 这个唯一入口，不直接碰 storage），下次进来不用再选。
+  function changePackHarness(record: AgentTokenRecord, harness: JoinPackHarness) {
+    saveAgentToken({ ...record, harness });
+    setVaultRev((rev) => rev + 1);
+  }
+
+  // #845 第 4 点：interactive 记录按生成时选的目标 harness 重建同款拆薄包；旧记录无此字段 → 按名字启发式预选（#895）。
   function freshCommand(record: { name: string; token: string; mode?: JoinPackMode; runner?: DesktopAgentRunner; harness?: JoinPackHarness }): string {
     return buildJoinPack(record.mode ?? "interactive", {
       slug,
@@ -289,7 +311,7 @@ export function AgentTokens({
       charter,
       // #749：按生成时选的 runner 重建 unattended 脚本；旧记录无此字段 → buildJoinPack 内落 codex 默认。
       runner: record.runner,
-      harness: record.harness,
+      harness: isInteractivePack(record) ? packHarnessFor(record) : record.harness,
       t,
     });
   }
@@ -672,7 +694,34 @@ export function AgentTokens({
                       <span>{t("AgentTokens.hasPlaintext")}</span>
                     </div>
                     {tokenField(`server:${selectedAgent.name}`, selectedAgentSaved.token)}
-                    <div className="agenttokens-actions">
+                    {/* #895：接入包按哪个 harness 拆档，必须在按钮旁看得见、改得动。
+                        只对 interactive 记录显示——unattended 走 runner，与 harness 无关。 */}
+                    {isInteractivePack(selectedAgentSaved) && (
+                      <div className="agenttokens-pack-harness">
+                        <label htmlFor="agenttokens-pack-harness-select">
+                          {t("AgentTokens.packHarnessLabel")}
+                        </label>
+                        <select
+                          id="agenttokens-pack-harness-select"
+                          className="d-input"
+                          aria-label={t("AgentTokens.packHarnessLabel")}
+                          value={packHarnessFor(selectedAgentSaved)}
+                          onChange={(event) =>
+                            changePackHarness(selectedAgentSaved, event.target.value as JoinPackHarness)
+                          }
+                        >
+                          <option value="claude">{t("AgentJoin.harnessClaude")}</option>
+                          <option value="codex">{t("AgentJoin.harnessCodex")}</option>
+                          <option value="other">{t("AgentJoin.harnessOther")}</option>
+                        </select>
+                        <p className="agenttokens-pack-harness-hint t-mono">
+                          {selectedAgentSaved.harness === undefined
+                            ? t("AgentTokens.packHarnessGuessed")
+                            : t("AgentTokens.packHarnessHint")}
+                        </p>
+                      </div>
+                    )}
+                    <div className="agenttokens-actions agenttokens-pack-actions">
                       <button
                         type="button"
                         className="d-btn d-btn--primary"

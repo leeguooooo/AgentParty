@@ -48,6 +48,17 @@ function charterSnapshotLines(charter: ChannelCharter | null, t: TFunc): string[
 // 安全硬行（charter 注释化 / PATH 先于版本闸 / token 环境变量 / rules.md 落盘）三档全保留。
 export type JoinPackHarness = "claude" | "codex" | "other";
 
+// #895：#847 之前建的 vault 记录没有 harness 字段，回落 other＝全量档——而全量档会把
+// Claude 的 watch --once 指引也发给 codex 身份（#879：codex 不靠 watch 唤醒），是错的操作指引。
+// 名字后缀是唯一的现成线索（`…-codex1` / `…-claude`），拿它当【可见的预选值】：UI 必须把
+// 猜出来的档位显示出来并可改，绝不静默当事实——名字里带 codex 的身份也可能跑在别的 harness 上。
+export function guessJoinPackHarness(agentName: string): JoinPackHarness {
+  const lower = agentName.toLocaleLowerCase();
+  if (lower.includes("codex")) return "codex";
+  if (lower.includes("claude")) return "claude";
+  return "other";
+}
+
 export interface FullJoinPackInput {
   slug: string;
   agentName: string;
