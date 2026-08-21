@@ -4581,6 +4581,22 @@ button.org-person-name {
   gap: 8px;
   flex-wrap: wrap;
 }
+/* #895：接入包的 harness 档位选择器——紧挨「复制接入包」，让人一眼看到按哪档生成。 */
+.agenttokens-pack-harness {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+.agenttokens-pack-harness > label { font-size: 12px; }
+.agenttokens-pack-harness > select { min-width: 132px; }
+.agenttokens-pack-harness-hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.7;
+}
 .agenttokens-empty,
 .agentmanager-module-hint {
   margin: 0;
