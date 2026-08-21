@@ -8,6 +8,7 @@ import { fetchPresence, fetchReadCursors, fetchRuntimePeers, handleRestError } f
 import { buildRuntimeTopology } from "../runtime-topology";
 import { localStatuslineBase, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { sanitizeSingleLine } from "../format";
+import { buildPullWakeLookup, type PullWakeHint, type PullWakeLookup } from "../pull-wake";
 import { isSlug } from "../validation";
 
 const WHO_FLAGS = ["channel", "json"];
@@ -23,15 +24,27 @@ List who is in a channel, tiered by how you can reach them:
                 · wakeable unverified  self-declared serve/watch the server has NOT
                                        verified — may or may not actually wake up
   ○ recent    seen lately, no wake layer; mention delivers, wake not guaranteed.
-              A "⚠ unreachable" tag flags the genuinely-dead subset: no live wake
-              channel AND stale — the mention only lands in history and will wake
-              no one (JSON: "unreachable":true). Prove otherwise: party wake test @name
-              Such a row also carries a "↳ fix:" hint telling you how to give that
-              identity a wake layer, branched by harness (JSON: "wake_guidance" with
-              reason/harness/harness_source/remedy). A codex session has NO per-session
-              inbox: it is wakeable only while party bridge codex / party serve
-              --runner codex holds its app-server connection — installing a plugin does
-              not make a codex session wakeable on its own.
+              A "⚠ no live wake layer" tag flags the subset with no live wake channel
+              AND stale (JSON: "unreachable":true): nothing is listening right now, so
+              the @ waits as that identity's durable reception debt until it next runs.
+              Prove otherwise: party wake test @name
+  ⇢ deferred  a PULL-based wake channel — the codex Stop hook (#899/#901). The server
+              cannot see it: such a session registers no presence and comes to fetch its
+              own debt at the end of a turn. So it is neither "online" nor "unreachable";
+              the honest statement is "the user gets it next time they use it".
+              Shown only from THIS machine's point of view — this machine has the codex
+              Stop hook installed AND a local config for that identity (JSON: "pull_wake"
+              with scope:"local"/harness/evidence). Another machine's hooks are invisible
+              here, and so is whether the user will open that session again.
+              A "↳ fix:" hint appears only when the harness is actually known from
+              evidence present on THAT row (JSON: "wake_guidance" with
+              reason/harness/harness_source/remedy). When it cannot be known, who says
+              nothing: a wrong remedy is worse than none (#891). No remedy ever tells you
+              to start party serve — serve hands the @ to a background runner, which is
+              exactly the behaviour #897 rejected. A codex session has NO per-session
+              inbox: give it the Stop hook (party hook install --codex) so the @ surfaces
+              in the session you are looking at, or hold its app-server connection with
+              party bridge codex — installing a Claude plugin does nothing for codex.
 A "⏳ busy" tag means the target is serially handling a wake (e.g. a long run): it
 is reachable but a reply will be slow — an ask that times out means "busy", not
 "offline", so do not re-@ it. "N queued" shows how many wakes are already waiting.
@@ -75,7 +88,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/live/residency/unreachable/wake_guidance/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/topology_conflicts/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/live/residency/unreachable/pull_wake/wake_guidance/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/topology_conflicts/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
 
 // 导出仅供单测断言 help 文案与真实行为一致（#859/#860：文档漂移过一次，用断言钉住）。
 export const HELP_TEXT = HELP;
@@ -174,20 +187,40 @@ interface Row {
   // Claude 那样的 per-session socket 收件箱，只有在某个进程持有它的 app-server 连接时才可被唤醒；
   // Claude Code 的交互式会话装了插件本身就可被唤醒。把这条判据结构化下发，agent 也能程序化判读。
   wake_guidance?: WakeGuidance;
+  // #905：拉取式唤醒通道（codex Stop hook）的本机线索。它不是服务端事实——服务端对拉取式通道
+  // 一无所知，这正是 #905 的成因。仅在本机同时满足「装了 codex Stop hook」+「有该身份该服务器
+  // 的 config」时带出，scope 恒为 "local"，展示与 JSON 都必须保留这个「本机视角」限定。
+  pull_wake?: PullWakeHint;
 }
 
-/** #879：没有唤醒层时的可操作补救建议。harness=unknown 表示 presence 没给出可信的 harness 维度。 */
+/**
+ * #879：没有唤醒层时的可操作补救建议。
+ *
+ * #891 的教训钉在这里：harness 不再有 "unknown" 这一档。原来的三分支里，unknown 档是唯一
+ * 会在真机点亮的那一支——因为判据字段（agent_session / reception_runner）只在**活跃**身份的
+ * presence 上有，而这条提示只对**离线**身份显示，判据与展示场景在时间上互斥。于是「兜底」
+ * 变成了常态，全频道每一行都挂着同一句并列两条命令、且在 #897 之后**有害**的建议。
+ *
+ * 新规矩：判据取不到就不给建议（返回 undefined）。错误的修复建议比没有建议更糟。
+ */
 export interface WakeGuidance {
   reason: "no_wake_layer";
-  harness: "codex" | "claude" | "unknown";
-  /** 判据来源：agent_session.harness（runner 自报的模型会话句柄）或 reception_runner（接待配置）。 */
-  harness_source?: "agent_session" | "reception_runner";
+  harness: "codex" | "claude";
+  /**
+   * 判据来源。前两个来自 presence（仅活跃身份有）；local_codex_stop_hook 来自本机文件系统
+   * （#905），是唯一一个对**离线**身份仍然可得的来源——也正因为它只是本机视角，用它推出的
+   * 建议措辞里必须保留这个限定。
+   */
+  harness_source: "agent_session" | "reception_runner" | "local_codex_stop_hook";
   /** 可直接执行的补救命令（已带上真实频道名）。 */
   remedy: string[];
 }
 
-// harness 维度只取 presence 里真实存在的两个字段，不硬造。codex-sdk 与 codex 同族（都靠 app-server）。
-export function wakeHarnessOf(r: Row): { harness: WakeGuidance["harness"]; source?: WakeGuidance["harness_source"] } {
+// harness 维度只取真实存在的判据，不硬造，也不再从名字启发式猜（`*-codex` 后缀不构成证据）。
+// codex-sdk 与 codex 同族（都靠 app-server）。判不出就返回 undefined。
+export function wakeHarnessOf(
+  r: Row,
+): { harness: WakeGuidance["harness"]; source: WakeGuidance["harness_source"] } | undefined {
   const fromSession = r.agent_session?.harness;
   if (fromSession === "codex" || fromSession === "codex-sdk") return { harness: "codex", source: "agent_session" };
   if (fromSession === "claude") return { harness: "claude", source: "agent_session" };
@@ -196,24 +229,35 @@ export function wakeHarnessOf(r: Row): { harness: WakeGuidance["harness"]; sourc
     return { harness: "codex", source: "reception_runner" };
   }
   if (fromReception === "claude") return { harness: "claude", source: "reception_runner" };
-  return { harness: "unknown" };
+  // #905：本机装了 codex Stop hook 且本机持有这个身份的 config——离线也成立的唯一一条判据。
+  if (r.pull_wake !== undefined) return { harness: r.pull_wake.harness, source: "local_codex_stop_hook" };
+  return undefined;
 }
 
 /**
- * #879：只对「确实没有唤醒层」的 agent 身份给补救建议——即 who 已判定 unreachable 的那批
- * （不在线 + 无活 wake 通道 + 陈旧）。在线/wakeable/刚断线的身份不加噪音；人类不靠 bridge/serve 唤醒。
+ * 只对「确实没有唤醒层」的 agent 身份给补救建议。人类不靠 bridge/hook 唤醒。
+ *
+ * #891：不再要求 unreachable——那个条件恰恰过滤掉了判据仍在场的那批行。改成「没有 wake 层」
+ * （unreachable 或 wake=none/缺失的 recent 行），判据在场就给，不在场就闭嘴。
+ *
+ * #897/#905：补救命令里**不再出现 `party serve`**。serve 把消息交给后台新 runner，用户在
+ * 自己眼前的会话里什么也看不见——owner 原话「从头到尾没出现过我们的通讯记录」。前台唤醒的
+ * 正确答案是 codex 的 Stop hook 与 Claude 的插件。
  */
 export function wakeGuidanceOf(r: Row, channel: string): WakeGuidance | undefined {
-  if (r.unreachable !== true || r.kind !== "agent") return undefined;
-  const { harness, source } = wakeHarnessOf(r);
+  if (r.kind !== "agent") return undefined;
+  const noWakeLayer = r.unreachable === true || (r.tier === "recent" && (r.wake === undefined || r.wake === "none"));
+  if (!noWakeLayer) return undefined;
+  // 已经有本机拉取通道的身份不需要「怎么装」——它装过了。deferredNote 会另行说明它的状态。
+  if (r.pull_wake !== undefined) return undefined;
+  const found = wakeHarnessOf(r);
+  if (found === undefined) return undefined;
   const ch = sanitizeSingleLine(channel);
   const remedy =
-    harness === "codex"
-      ? [`party bridge codex ${ch}`, `party serve ${ch} --runner codex`]
-      : harness === "claude"
-        ? [`claude plugin install agentparty@agentparty`, `party serve ${ch} --runner claude`]
-        : [`party serve ${ch} --runner codex`, `party serve ${ch} --runner claude`];
-  return { reason: "no_wake_layer", harness, ...(source === undefined ? {} : { harness_source: source }), remedy };
+    found.harness === "codex"
+      ? [`party hook install --codex`, `party bridge codex ${ch}`]
+      : [`claude plugin install agentparty@agentparty`];
+  return { reason: "no_wake_layer", harness: found.harness, harness_source: found.source, remedy };
 }
 
 // 终端可读版：把结构化建议渲染成一句「怎么修」。codex 档绝不说「装插件即可」——那是 Claude 专属，
@@ -221,12 +265,25 @@ export function wakeGuidanceOf(r: Row, channel: string): WakeGuidance | undefine
 export function wakeGuidanceNote(g: WakeGuidance | undefined): string {
   if (g === undefined) return "";
   if (g.harness === "codex") {
-    return ` · ↳ fix: a codex session has no per-session inbox — it is wakeable only while a process holds its app-server connection: run ${g.remedy[0]} (interactive) or ${g.remedy[1]} (unattended)`;
+    return ` · ↳ fix: a codex session has no per-session inbox — give it the Stop hook so the @ surfaces in the session you are looking at: run ${g.remedy[0]} (then it picks pending @s up at the end of a turn), or ${g.remedy[1]} to hold its app-server connection right now`;
   }
-  if (g.harness === "claude") {
-    return ` · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run ${g.remedy[0]} and rejoin the channel, or ${g.remedy[1]} (unattended)`;
-  }
-  return ` · ↳ fix: no wake layer and harness unknown — start an unattended resident: ${g.remedy[0]} or ${g.remedy[1]}`;
+  return ` · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run ${g.remedy[0]} and rejoin the channel`;
+}
+
+/**
+ * #905：拉取式通道的可达性措辞。
+ *
+ * 这类身份既不是「在线」也不是「不可达」，而是「**用户下次用它时会收到**」——服务端看不见
+ * 它，是因为它根本不注册 presence，不是因为它死了。所以既不能标 ⚠ unreachable（结论错），
+ * 也不能标 ● online（同样错，此刻确实没人在听）。单列一档 `⇢ deferred`。
+ *
+ * 限定词一个都不能省，而且措辞必须是**条件式**的：本机装的是 codex 的全局 Stop hook，它在
+ * 「某个 codex turn 绑到这个身份」时才会去取。本机不知道用户会不会再开那个会话，也不知道这个
+ * 身份平时跑的是不是 codex——所以只说「本机上一个绑到它的 codex turn 会取走」，不说「它可达」。
+ */
+export function deferredNote(r: Row): string {
+  if (r.pull_wake === undefined) return "";
+  return ` · ⇢ deferred (local view: a codex turn under this identity on this machine picks the @ up via the Stop hook)`;
 }
 
 // kind 已知取 kind；旧 presence 行没回填时 UUID 名判 human（网页登录会话），其余判 agent。
@@ -597,7 +654,13 @@ function humanAge(ms: number): string {
  */
 export function buildRows(
   presence: PresenceEntry[],
-  ctx: { now: number; channel: string; cursorOf?: Map<string, number>; runtimePeers?: RuntimePeerDiscovery },
+  ctx: {
+    now: number;
+    channel: string;
+    cursorOf?: Map<string, number>;
+    runtimePeers?: RuntimePeerDiscovery;
+    pullWake?: PullWakeLookup;
+  },
 ): Row[] {
   const { now, channel } = ctx;
   return annotateTopologyConflicts(
@@ -606,7 +669,14 @@ export function buildRows(
         .map((e) => classify(e, now))
         .filter((r): r is Row => r !== null)
         .map((r) => ({ ...r, read_seq: ctx.cursorOf?.get(r.name) }))
-        // #879：unreachable 的身份补一条「怎么修」——按 harness 分叉，JSON 也带结构化判据。
+        // #905：拉取式唤醒线索必须在 wakeGuidanceOf 之前贴上——它既是「别再给装 hook 的建议」
+        // 的依据，也是离线身份唯一可得的 harness 判据。顺序颠倒就会对已装 hook 的身份重复劝装。
+        .map((r) => {
+          if (r.kind !== "agent") return r;
+          const hint = ctx.pullWake?.hintFor(r.name);
+          return hint === undefined ? r : { ...r, pull_wake: hint };
+        })
+        // #879/#891：没有唤醒层、且 harness 判据确实在场的身份补一条「怎么修」。判不出就不给。
         .map((r) => {
           const guidance = wakeGuidanceOf(r, channel);
           return guidance === undefined ? r : { ...r, wake_guidance: guidance };
@@ -636,7 +706,15 @@ export function renderRow(r: Row, now: number, lastSeq: number): string {
       : "";
   const age = r.tier === "online" ? "" : ` (${humanAge(r.age_ms)})`;
   // #664：recent 档里真·不可达的（无活 wake 通道 + 陈旧）单独标出，别和「最近露面、或许在轮询」混淆。
-  const unreach = r.unreachable === true ? " · ⚠ unreachable (mention lands in history only)" : "";
+  // #905：措辞改了两处。其一，装了拉取式通道（codex Stop hook）的身份走 deferredNote，不再被
+  // 断言成 unreachable——结论本来就是错的。其二，「mention lands in history only」也是过度断言：
+  // @ 是持久 directed delivery，会挂成该身份的接待欠账等它下次跑起来，不是掉进历史就没了。
+  const unreach =
+    r.pull_wake !== undefined
+      ? deferredNote(r)
+      : r.unreachable === true
+        ? " · ⚠ no live wake layer (the @ waits as this identity's reception debt until it next runs)"
+        : "";
   return `${DOT[r.tier]} ${r.tier.padEnd(8)} ${r.name}  [${r.kind}]${identityNote(r)}${busyNote(r)}${waitingOwnerNote(r)}${unhandledMentionNote(r)}${receiptNote(r, now)}${scopeNote(r)}${topologyNote(r)}${taskNote(r, now)}${activityNote(r, now)}${livenessNote(r)}${receptionNote(r)}${sessionNote(r)}${wake}${unreach}${wakeGuidanceNote(r.wake_guidance)}${read}${duplicate}${age}`;
 }
 
@@ -704,7 +782,14 @@ export async function run(argv: string[]): Promise<number> {
       ...(lastSeq > 0 ? { unread: unreadFromCursor(lastSeq, channel) } : {}),
     });
     const now = Date.now();
-    const rows = buildRows(presence, { now, channel, cursorOf, runtimePeers });
+    // #905：本机拉取式唤醒线索。纯本地读盘，扫一次目录，失败即当作「没有」（不影响其余输出）。
+    let pullWake: PullWakeLookup | undefined;
+    try {
+      pullWake = buildPullWakeLookup(channel, cfg.server);
+    } catch {
+      pullWake = undefined;
+    }
+    const rows = buildRows(presence, { now, channel, cursorOf, runtimePeers, pullWake });
     if (flags.json === true) {
       for (const r of rows) console.log(JSON.stringify(r));
       return 0;
