@@ -5,12 +5,12 @@
 // 然后断言子进程自己没了、注册条目被回收。
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerClaudeSession, listClaudeSessions, CLAUDE_SESSION_REGISTRY_DIR_ENV } from "../src/claude-session-registry";
 
-const INDEX = join(import.meta.dir, "..", "src", "index.ts");
+const PARENT_LIVENESS = join(import.meta.dir, "..", "src", "parent-liveness.ts");
 const POLL_MS = 200;
 
 const cleanup: (() => void)[] = [];
@@ -61,19 +61,32 @@ function killIfStillOurs(pid: number, marker: string): void {
 }
 
 describe("#908 宿主死亡 ⇒ 子进程退场（端到端）", () => {
-  test("宿主 pid 被 kill 后，party claude-channel 子进程自行退出", async () => {
+  test("宿主 pid 被 kill 后，挂了存活探测的子进程自行退出", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ap-orphan-e2e-"));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
     // 唯一标记必须落在**命令行**上（ps 看得到的只有 command，看不到环境变量），否则
-    // 「ps 里已经没有它了」这条断言会永远空转成真。这里借频道名当标记：它本来就要出现在 argv 里。
+    // 「ps 里已经没有它了」这条断言会永远空转成真。这里把它当探针脚本的位置参数传下去。
     const marker = `e2e-orphan-${String(process.pid)}-${String(Date.now())}`;
+    const probeScript = join(dir, "probe.ts");
+    // 子进程用**探针**而不是真的 `party claude-channel`：announce 在没有可解析身份时会立刻
+    // 正常退出（本机有 65 份配置所以它活着，CI 里一份都没有所以它秒退），拿它当被试会让
+    // 「宿主活着时子进程不该退」这条前置断言在 CI 上必然失败——那是环境差异，不是产品缺陷。
+    // 探针直接调用被测的那段逻辑，于是这条用例只依赖「真进程 + 真 kill + 真存活探测」。
+    // `claude-channel` / `mcp` 确实接上了这段逻辑，由下面那条接线守卫负责钉住。
+    writeFileSync(
+      probeScript,
+      `import { watchParentLiveness } from ${JSON.stringify(PARENT_LIVENESS)};\n` +
+      `watchParentLiveness({ label: "e2e-probe" });\n` +
+      `setInterval(() => {}, 1000);\n`,
+      "utf8",
+    );
     const hostScript = join(dir, "host.ts");
     writeFileSync(
       hostScript,
-      // 宿主：拉起 announce 子进程后就一直活着，等着被我们 kill。子进程 stdio 全部丢弃，
+      // 宿主：拉起探针子进程后就一直活着，等着被我们 kill。子进程 stdio 全部丢弃，
       // 这样「宿主死了 ⇒ 子进程退出」只可能来自父进程存活探测，不可能是 stdin EOF 的功劳。
       `import { spawn } from "node:child_process";\n` +
-      `const child = spawn(process.execPath, ["run", ${JSON.stringify(INDEX)}, "claude-channel", "--require-launch-opt-in", "--channel", ${JSON.stringify(marker)}], {\n` +
+      `const child = spawn(process.execPath, ["run", ${JSON.stringify(probeScript)}, ${JSON.stringify(marker)}], {\n` +
       `  stdio: "ignore",\n` +
       `});\n` +
       `console.log("child " + String(child.pid));\n` +
@@ -98,7 +111,7 @@ describe("#908 宿主死亡 ⇒ 子进程退场（端到端）", () => {
     const childPid = Number(/child (\d+)/.exec(hostOut)![1]);
     cleanup.push(() => killIfStillOurs(childPid, marker));
     // 必须先在 ps 里看到它（证明标记确实落在命令行上，后面那条「ps 里没有了」才有意义）。
-    await waitFor("announce child is visible in ps", () => findPids(marker).includes(childPid));
+    await waitFor("probe child is visible in ps", () => findPids(marker).includes(childPid));
 
     // 前置断言：宿主活着的时候，子进程绝不能自己退——否则这条闸门是「恒杀」，
     // 后面那条断言就毫无意义了（#884 的教训：守卫自己会假阴性）。
@@ -109,11 +122,24 @@ describe("#908 宿主死亡 ⇒ 子进程退场（端到端）", () => {
     process.kill(hostPid, "SIGKILL");
     await waitFor("host is gone", () => !alive(hostPid));
 
-    await waitFor("orphaned announce child exits by itself", () => !alive(childPid), 30_000);
+    await waitFor("orphaned child exits by itself", () => !alive(childPid), 30_000);
     expect(alive(childPid)).toBe(false);
     // ps 里也不该再有它。
     expect(findPids(marker)).toEqual([]);
   }, 60_000);
+
+  // 上面那条端到端只证明「存活探测本身管用」。它用探针当被试，所以**不会**发现
+  // 「`claude-channel` / `mcp` 根本没调用它」这种接线漏掉的情况——那正是 #908 的故障本体。
+  // 这条守卫补上那一半：两个命令必须真的调用 watchParentLiveness。
+  // 用标识符边界匹配而不是子串：#871 的守卫曾因 `superseded` 是 `superseded_by` 的子串而
+  // 假阴性，删掉真正的校验依然全绿。
+  test("claude-channel 与 mcp 都真的接上了宿主存活探测（接线守卫）", () => {
+    for (const rel of ["commands/claude-channel.ts", "commands/mcp.ts"]) {
+      const source = readFileSync(join(import.meta.dir, "..", "src", rel), "utf8");
+      expect({ rel, calls: /(?<![\w$])watchParentLiveness\s*\(/.test(source) }).toEqual({ rel, calls: true });
+      expect({ rel, imports: /(?<![\w$])watchParentLiveness(?![\w$])/.test(source) }).toEqual({ rel, imports: true });
+    }
+  });
 
   test("宿主 pid 已死的注册条目会被回收", () => {
     const dir = mkdtempSync(join(tmpdir(), "ap-orphan-reg-"));
