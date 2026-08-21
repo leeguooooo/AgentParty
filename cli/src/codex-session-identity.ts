@@ -307,10 +307,17 @@ export function looksLikePartyMcpCommand(command: string): boolean {
   const first = tokens[0];
   if (first === undefined) return false;
   const binary = first.split("/").pop() ?? first;
-  const mcpAt = tokens.indexOf("mcp");
   // dev 形态是 `bun /path/cli/src/index.ts mcp`：只要参数里出现 party 入口即可。
-  const ours = binary === "party" || tokens.some((token) => /(?:^|\/)party(?:\.js|\.ts)?$/.test(token));
-  return ours && mcpAt > 0;
+  const entryAt = tokens.findIndex((token) => /(?:^|\/)party(?:\.js|\.ts)?$/.test(token));
+  const ours = binary === "party" || entryAt >= 0;
+  if (!ours) return false;
+  // `mcp` 必须是**入口之后的第一个非 flag 参数**，不能是命令行里任意位置出现的同名 token——
+  // 否则 `party send "x" --channel mcp`、`party serve x --on-mention mcp` 会被误判成 MCP 注册
+  // 进程，进而从一个毫不相干的进程里读出 AGENTPARTY_CONFIG，把 @ 判给错的身份。
+  // 这正是 #917 要根除的那类「猜身份」，判据本身更不能松。
+  const afterEntry = tokens.slice(Math.max(entryAt, 0) + 1);
+  const sub = afterEntry.find((token) => !token.startsWith("-"));
+  return sub === "mcp";
 }
 
 /**

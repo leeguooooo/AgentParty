@@ -267,6 +267,13 @@ describe("MCP 子进程扫描", () => {
     expect(looksLikePartyMcpCommand("mcp party")).toBe(false);
     expect(looksLikePartyMcpCommand("some-other-mcp mcp")).toBe(false);
     expect(looksLikePartyMcpCommand("")).toBe(false);
+    // `mcp` 出现在参数值里不算数：这些是别的子命令，从它们身上读 AGENTPARTY_CONFIG
+    // 会把 @ 判给毫不相干的身份——正是 #917 要根除的那类猜测。
+    expect(looksLikePartyMcpCommand('party send "hi" --channel mcp')).toBe(false);
+    expect(looksLikePartyMcpCommand("party serve x --on-mention mcp")).toBe(false);
+    expect(looksLikePartyMcpCommand("party history mcp")).toBe(false);
+    // flag 挡在子命令前面仍要认得出来。
+    expect(looksLikePartyMcpCommand("party --verbose mcp --channel x")).toBe(true);
   });
 
   test("从 `ps eww` 里读出子进程注册时用的 AGENTPARTY_CONFIG（去重）", () => {
