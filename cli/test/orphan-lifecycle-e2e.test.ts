@@ -5,12 +5,12 @@
 // 然后断言子进程自己没了、注册条目被回收。
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerClaudeSession, listClaudeSessions, CLAUDE_SESSION_REGISTRY_DIR_ENV } from "../src/claude-session-registry";
 
-const INDEX = join(import.meta.dir, "..", "src", "index.ts");
+const PARENT_LIVENESS = join(import.meta.dir, "..", "src", "parent-liveness.ts");
 const POLL_MS = 200;
 
 const cleanup: (() => void)[] = [];
@@ -20,13 +20,26 @@ afterEach(() => {
   }
 });
 
+/**
+ * 「这个 pid 还在跑吗」。
+ *
+ * `kill(pid, 0)` 对**僵尸**返回成功——进程已经死了、只是还没被父进程收尸。本用例里
+ * host 正是测试进程的直接子进程，SIGKILL 之后到被回收之间必然有一段僵尸窗口，
+ * 光看 `kill(pid,0)` 会把「已经死了」读成「还活着」，让 `waitFor("host is gone")`
+ * 白等到超时。所以拿到信号后再用 ps 核一次状态，`Z` 一律当死。
+ */
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
+    // EPERM＝进程在、只是不归我们管（这里不会发生，保守当活着）。
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+  const res = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 });
+  const stat = (res.stdout ?? "").trim();
+  // ps 拿不到（超时/不可用/进程刚没）时不擅自判死：只有明确看到 Z 才算死。
+  if (stat === "") return res.status === 0;
+  return !stat.startsWith("Z");
 }
 
 async function waitFor(label: string, predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
@@ -60,20 +73,51 @@ function killIfStillOurs(pid: number, marker: string): void {
   try { process.kill(pid, "SIGKILL"); } catch { /* 刚好没了 */ }
 }
 
+/**
+ * 抹掉注释。不求语法级精确（那要上 AST），只要能挡住「注释里提到函数名就算接上了」这类假绿。
+ * `[^:]` 是为了别把 `https://` 里的双斜杠当成行注释起点。
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+}
+
+/** 在去注释的基础上再抹掉字符串字面量——查「调用」时用，免得字符串里的同名文本混进来。 */
+function stripCommentsAndStrings(source: string): string {
+  return stripComments(source)
+    .replace(/`(?:\\[\s\S]|[^\\`])*`/g, '""')
+    .replace(/'(?:\\[\s\S]|[^\\'\n])*'/g, '""')
+    .replace(/"(?:\\[\s\S]|[^\\"\n])*"/g, '""');
+}
+
 describe("#908 宿主死亡 ⇒ 子进程退场（端到端）", () => {
-  test("宿主 pid 被 kill 后，party claude-channel 子进程自行退出", async () => {
+  test("宿主 pid 被 kill 后，挂了存活探测的子进程自行退出", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ap-orphan-e2e-"));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
     // 唯一标记必须落在**命令行**上（ps 看得到的只有 command，看不到环境变量），否则
-    // 「ps 里已经没有它了」这条断言会永远空转成真。这里借频道名当标记：它本来就要出现在 argv 里。
+    // 「ps 里已经没有它了」这条断言会永远空转成真。这里把它当探针脚本的位置参数传下去。
     const marker = `e2e-orphan-${String(process.pid)}-${String(Date.now())}`;
+    const probeScript = join(dir, "probe.ts");
+    // 子进程用**探针**而不是真的 `party claude-channel`：announce 在没有可解析身份时会立刻
+    // 正常退出（本机有 65 份配置所以它活着，CI 里一份都没有所以它秒退），拿它当被试会让
+    // 「宿主活着时子进程不该退」这条前置断言在 CI 上必然失败——那是环境差异，不是产品缺陷。
+    // 探针直接调用被测的那段逻辑，于是这条用例只依赖「真进程 + 真 kill + 真存活探测」。
+    // `claude-channel` / `mcp` 确实接上了这段逻辑，由下面那条接线守卫负责钉住。
+    writeFileSync(
+      probeScript,
+      `import { watchParentLiveness } from ${JSON.stringify(PARENT_LIVENESS)};\n` +
+      `watchParentLiveness({ label: "e2e-probe" });\n` +
+      `setInterval(() => {}, 1000);\n`,
+      "utf8",
+    );
     const hostScript = join(dir, "host.ts");
     writeFileSync(
       hostScript,
-      // 宿主：拉起 announce 子进程后就一直活着，等着被我们 kill。子进程 stdio 全部丢弃，
+      // 宿主：拉起探针子进程后就一直活着，等着被我们 kill。子进程 stdio 全部丢弃，
       // 这样「宿主死了 ⇒ 子进程退出」只可能来自父进程存活探测，不可能是 stdin EOF 的功劳。
       `import { spawn } from "node:child_process";\n` +
-      `const child = spawn(process.execPath, ["run", ${JSON.stringify(INDEX)}, "claude-channel", "--require-launch-opt-in", "--channel", ${JSON.stringify(marker)}], {\n` +
+      `const child = spawn(process.execPath, ["run", ${JSON.stringify(probeScript)}, ${JSON.stringify(marker)}], {\n` +
       `  stdio: "ignore",\n` +
       `});\n` +
       `console.log("child " + String(child.pid));\n` +
@@ -98,7 +142,7 @@ describe("#908 宿主死亡 ⇒ 子进程退场（端到端）", () => {
     const childPid = Number(/child (\d+)/.exec(hostOut)![1]);
     cleanup.push(() => killIfStillOurs(childPid, marker));
     // 必须先在 ps 里看到它（证明标记确实落在命令行上，后面那条「ps 里没有了」才有意义）。
-    await waitFor("announce child is visible in ps", () => findPids(marker).includes(childPid));
+    await waitFor("probe child is visible in ps", () => findPids(marker).includes(childPid));
 
     // 前置断言：宿主活着的时候，子进程绝不能自己退——否则这条闸门是「恒杀」，
     // 后面那条断言就毫无意义了（#884 的教训：守卫自己会假阴性）。
@@ -109,11 +153,34 @@ describe("#908 宿主死亡 ⇒ 子进程退场（端到端）", () => {
     process.kill(hostPid, "SIGKILL");
     await waitFor("host is gone", () => !alive(hostPid));
 
-    await waitFor("orphaned announce child exits by itself", () => !alive(childPid), 30_000);
+    await waitFor("orphaned child exits by itself", () => !alive(childPid), 30_000);
     expect(alive(childPid)).toBe(false);
     // ps 里也不该再有它。
     expect(findPids(marker)).toEqual([]);
   }, 60_000);
+
+  // 上面那条端到端只证明「存活探测本身管用」。它用探针当被试，所以**不会**发现
+  // 「`claude-channel` / `mcp` 根本没调用它」这种接线漏掉的情况——那正是 #908 的故障本体。
+  // 这条守卫补上那一半：两个命令必须真的调用 watchParentLiveness。
+  // 用标识符边界匹配而不是子串：#871 的守卫曾因 `superseded` 是 `superseded_by` 的子串而
+  // 假阴性，删掉真正的校验依然全绿。
+  test("claude-channel 与 mcp 都真的接上了宿主存活探测（接线守卫）", () => {
+    for (const rel of ["commands/claude-channel.ts", "commands/mcp.ts"]) {
+      const source = readFileSync(join(import.meta.dir, "..", "src", rel), "utf8");
+      // 注释和字符串里出现同名文本不算数——本文件上方的说明文字就提到了这个函数名。
+      // 「断言被说明文案独自满足」正是 #864 那类假绿的成因，守卫自己更不能犯。
+      const code = stripCommentsAndStrings(source);
+      expect({ rel, calls: /(?<![\w$])watchParentLiveness\s*\(/.test(code) }).toEqual({ rel, calls: true });
+      // import 的来源是字符串字面量，所以这一查只能去注释、不能去字符串。
+      const decls = stripComments(source);
+      // import 必须锚定到**真实的 import 语句**且来源正确：只查标识符出现过的话，
+      // 调用本身就能满足它，这条断言等于空转（删掉 import 换个同名本地函数也照样绿）。
+      const imported = new RegExp(
+        String.raw`import\s*\{[^}]*(?<![\w$])watchParentLiveness(?![\w$])[^}]*\}\s*from\s*["']\.\.?/[^"']*parent-liveness["']`,
+      ).test(decls);
+      expect({ rel, imported }).toEqual({ rel, imported: true });
+    }
+  });
 
   test("宿主 pid 已死的注册条目会被回收", () => {
     const dir = mkdtempSync(join(tmpdir(), "ap-orphan-reg-"));
