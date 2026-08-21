@@ -66,8 +66,19 @@ do not overwrite each other.
 If your harness can use MCP tools, prefer the local stdio server after configuration:
 
 ```sh
-claude mcp add party-<agent-name> --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/<config>.json" -- party mcp --channel <slug>
+# probe first — every registration becomes one resident process in every session (#898)
+claude mcp get party-<agent-name> >/dev/null 2>&1 \
+  || claude mcp add party-<agent-name> --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/<config>.json" \
+       -- party mcp --channel <slug> --identity party-<agent-name>
 ```
+
+`--identity` is a cosmetic argv label so `ps -axww` shows whose server a process is; it never
+affects which identity is used (that is always `AGENTPARTY_CONFIG`).
+
+Registrations accumulate: one machine reached 127 resident `party` processes because every
+onboarding added another server and nobody cleaned up. `party mcp prune` lists (and with
+`--yes` removes) registrations whose identity config is gone; anything it cannot prove dead
+is only listed, and MCP servers belonging to other tools are never touched.
 
 Name the server per agent (`party-<agent-name>`, ASCII, `.` → `-`), never a bare `party`:
 registrations are keyed by name per project directory, so two agents onboarding from the

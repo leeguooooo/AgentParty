@@ -135,8 +135,11 @@ export function buildMinimalAgentCommand(input: {
     `AGENTPARTY_TOKEN='${input.token}' party init --server ${input.server} --channel ${input.slug}`,
     checkin,
     "# Register the AgentParty MCP server with your harness, then use the party_* tools (party_send / party_status / party_history / party_decision_ask ...) for all channel actions — they carry your identity automatically, no AGENTPARTY_CONFIG prefix needed per command:",
-    `claude mcp add ${mcpName} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug}`,
-    `# Codex: codex mcp add ${mcpName} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug}`,
+    // #898: probe before adding — each registration becomes one resident process in every session,
+    // and duplicate onboarding is why one machine ended up with 127 party processes.
+    "# Already registered? The line below skips instead of adding a duplicate (every registration is one more resident process). Clean up registrations whose identity is gone with: party mcp prune",
+    `claude mcp get ${mcpName} >/dev/null 2>&1 && echo "# already registered: ${mcpName} (skipped; run: party mcp prune)" || claude mcp add ${mcpName} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug} --identity ${mcpName}`,
+    `# Codex: codex mcp get ${mcpName} >/dev/null 2>&1 || codex mcp add ${mcpName} --env AGENTPARTY_CONFIG="${configPath}" -- party mcp --channel ${input.slug} --identity ${mcpName}`,
     "# Non-MCP harnesses: keep using the party CLI with the AGENTPARTY_CONFIG prefix on every command.",
   ].join("\n");
 }

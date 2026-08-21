@@ -125,8 +125,15 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     ``,
     t("AgentJoin.cmd.step4"),
     // claude mcp add 是 Claude Code 专属注册命令；codex 档去掉，免得 codex 机器上直接执行报错。
+    // #898：先 `claude mcp get` 探一下，已注册就跳过——每个注册在每个会话里都是一个常驻
+    // 进程（owner 实测本机 127 个 party 进程 / 1.7GB），重复接入同一身份不该再叠一个。
+    // 名字相同时原本 `claude mcp add` 也会直接报错，跳过是严格的改进；`|| true` 风格保持
+    // 「装不上不阻断主流程」。
     ...(harness !== "codex"
-      ? [`claude mcp add ${mcpServerName(agentName)} --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.json" -- party mcp --channel ${slug}`]
+      ? [
+          t("AgentJoin.cmd.mcpDedupeNote"),
+          `claude mcp get ${mcpServerName(agentName)} >/dev/null 2>&1 && echo "# already registered: ${mcpServerName(agentName)} (skipped; run: party mcp prune)" || claude mcp add ${mcpServerName(agentName)} --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.json" -- party mcp --channel ${slug} --identity ${mcpServerName(agentName)}`,
+        ]
       : []),
     // #848：claude 档补装 marketplace 插件——SessionStart/SessionEnd hook→会话注册表 + idle 可发现/被唤醒 +
     // 跨会话协作（#841）都由插件承载，裸 MCP 拿不到。`|| true` 保证装不上不阻断接入主流程（降级=只少这些能力）。
@@ -164,7 +171,11 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
       : []),
     // step4codex 是 codex mcp add 指引；claude 档去掉（目标 harness 只走一条，其余是噪音）。
     ...(harness !== "claude"
-      ? [t("AgentJoin.cmd.step4codex", { mcpName: mcpServerName(agentName), agentName, slug })]
+      ? [
+          t("AgentJoin.cmd.step4codex", { mcpName: mcpServerName(agentName), agentName, slug }),
+          // #898：codex 侧同样是「一条注册＝一个常驻进程」，指引里必须带上先探后加。
+          t("AgentJoin.cmd.mcpDedupeNoteCodex", { mcpName: mcpServerName(agentName) }),
+        ]
       : []),
     // #850：codex 档补装 codex 插件——与 #848 的 claude 档对等；命令已真机验证（codex CLI 0.2.187）。
     // codex 无独立 enable 步骤，装完重启 codex 生效。`|| true` 保证装不上不阻断接入主流程。
