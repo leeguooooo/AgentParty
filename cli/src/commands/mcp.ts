@@ -11,6 +11,7 @@ import pkg from "../../package.json" with { type: "json" };
 import {
   ackWatchStuck,
   advanceCursorPastOwnMessage,
+  drainWatchStuck,
   loadCursor,
   loadRevCursor,
   loadStuck,
@@ -25,6 +26,7 @@ import { applyMcpProcessTitle, parseMcpServerArgv } from "../mcp-registry";
 import { watchParentLiveness } from "../parent-liveness";
 import { resolveAuth, resolveAuthDetailed } from "../oidc-cli";
 import {
+  ackDelivery,
   createTask,
   fetchChannelCharter,
   fetchMe,
@@ -128,6 +130,14 @@ Tools:
 Resources:
   party://charter               charter for the bound channel (--channel or cwd binding, 用前必读)
   party://{channel}/charter     charter for any channel by slug`;
+
+// #834 第 5 项：错误信息必须落在**调用方够得到的那个操作面**上。旧的 party_ack 在 seq 不匹配时
+// 叫人去跑 `party ack --through`——一个 MCP-only 的 agent 根本敲不了 CLI。所以这里刻意不复用
+// ack.ts 的 NO_REPLY_REQUIRES_SEQ_ERROR（它写的是 --seq/--all/--through 这套 CLI 旗标），
+// 而用工具参数名重写一份；两份措辞由 mcp-ack-parity.test.ts 钉住，不许互相串入对方的旗标。
+export const MCP_NO_REPLY_REQUIRES_SEQ_ERROR =
+  "no_reply settles ONE server-side @ and needs to know which one: pass an exact seq " +
+  "(see party_who → pending_mention_seqs). It is not combinable with all/through/before.";
 
 const StateSchema = z.enum(["working", "waiting", "blocked", "done"]);
 const TaskStateSchema = z.enum(["triage", "backlog", "assigned", "in_progress", "needs_review", "done", "blocked"]);
@@ -1424,20 +1434,92 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     {
       title: "Acknowledge a watch wake that needs no reply",
       description:
-        "Clear the pending watch wake debt without posting a message (#594). Use after party_watch_once delivered a frame that warrants no reply — replying with empty acks burns the loop guard; leaving the debt makes every later watch replay the same frame. Serve-owned debt is never touched.",
+        "Clear the pending watch wake debt without posting a message (#594). Use after party_watch_once delivered a frame that warrants no reply — replying with empty acks burns the loop guard; leaving the debt makes every later watch replay the same frame. Serve-owned debt is never touched. " +
+        "TWO LEDGERS: by default this writes only the LOCAL watch replay state. The server-side @ debt that party_who reports as pending_mention_seqs is settled either by answering the @ or by passing no_reply with an exact seq.",
       inputSchema: {
         channel: z.string().optional().describe("Channel slug. Defaults to the workspace-bound channel."),
         seq: z.number().int().positive().optional().describe(
           "Acknowledge through this exact seq; a newer pending watch wake is preserved and reported.",
         ),
+        // #834 第 5 项：这些在 CLI 上早就有了，MCP 侧一直没有——而 agent 大多只有 MCP。
+        // 旧实现的 seq_mismatch 错误还直接叫调用方去跑 `party ack --through`，那是它够不到的命令。
+        through: z.number().int().positive().optional().describe(
+          "Batch drain: advance the read cursor to this seq and clear all pending watch debt up through it. Mutually exclusive with seq/all/before.",
+        ),
+        all: z.boolean().optional().describe(
+          "Batch drain everything up to the channel head — 'from now on only new messages'. Mutually exclusive with seq/through/before.",
+        ),
+        before: z.number().int().nonnegative().optional().describe(
+          "Batch drain everything strictly before this seq. Mutually exclusive with seq/through/all.",
+        ),
+        no_reply: z.boolean().optional().describe(
+          "Also settle the SERVER-side @ at `seq` as terminal_reason=acknowledged_no_reply (#875). Requires an exact seq — it names one delivery, so it is not combinable with through/all/before.",
+        ),
       },
     },
-    async ({ channel, seq }) => {
+    async ({ channel, seq, through, all, before, no_reply }) => {
       try {
         const resolved = normalizeChannel(channel, defaultChannel);
+        const selectors = [
+          all === true ? "all" : null,
+          through === undefined ? null : "through",
+          before === undefined ? null : "before",
+          seq === undefined ? null : "seq",
+        ].filter((name): name is string => name !== null);
+        if (selectors.length > 1) {
+          return fail(`mutually exclusive selectors: ${selectors.join(", ")} — pass at most one`);
+        }
+        // #875：no_reply 结清的是服务端账本上的**某一条** @，必须指名道姓；批量选择器指不出来。
+        if (no_reply === true && seq === undefined) {
+          return fail(MCP_NO_REPLY_REQUIRES_SEQ_ERROR);
+        }
+        if (all === true || through !== undefined || before !== undefined) {
+          let throughSeq: number;
+          if (all === true) {
+            const cfg = await auth();
+            const tail = await fetchRecentMessages(cfg.server, cfg.token, resolved, 1);
+            throughSeq = tail.at(-1)?.seq ?? 0;
+          } else if (through !== undefined) {
+            throughSeq = through;
+          } else {
+            throughSeq = Math.max(0, (before as number) - 1);
+          }
+          const drained = drainWatchStuck(resolved, throughSeq);
+          if (drained.outcome === "serve_owned") {
+            // serve 债绝不代清（误清 = 静默丢一条 @，#198 红线）：只推进游标，如实回报。
+            return ok({
+              type: "ack",
+              channel: resolved,
+              drained: true,
+              cursor: drained.cursor,
+              cleared_seq: null,
+              serve_owned_seq: drained.seq,
+              serve_owned_source: drained.source,
+              note: `pending debt at seq=${drained.seq} is owned by party serve (source=${drained.source}) — preserved, not cleared`,
+            });
+          }
+          return ok({
+            type: "ack",
+            channel: resolved,
+            drained: true,
+            cursor: drained.cursor,
+            cleared_seq: drained.clearedSeq,
+          });
+        }
+        // #875：先结服务端账再动本地债。顺序反了就会出现「本地平了、服务端仍欠着」，
+        // 调用方以为两本账都平了。
+        let serverSettled: { settled: true; deduped: boolean } | null = null;
+        if (no_reply === true) {
+          const cfg = await auth();
+          const result = await ackDelivery(cfg.server, cfg.token, resolved, seq as number);
+          serverSettled = { settled: true, deduped: result.deduped === true };
+        }
         // 与 CLI party ack 共用原子 compare-and-clear（#599 评审）：读后清会误吞窗口内新债。
         const acked = ackWatchStuck(resolved, seq);
-        if (acked.outcome === "none") return ok({ type: "ack", channel: resolved, acked: false, note: "no pending wake debt" });
+        const settled = serverSettled === null ? {} : { server_settled: true, server_deduped: serverSettled.deduped };
+        if (acked.outcome === "none") {
+          return ok({ type: "ack", channel: resolved, acked: false, ...settled, note: "no pending wake debt" });
+        }
         if (acked.outcome === "serve_owned") {
           return fail(
             `refusing to ack: pending debt at seq=${acked.seq} is owned by party serve (source=${acked.source}); ` +
@@ -1447,7 +1529,7 @@ export function createMcpServer(defaultChannel?: string): McpServer {
         if (acked.outcome === "seq_mismatch") {
           return fail(
             `refusing to ack seq=${seq}: older pending watch debt seq=${acked.seq} must be handled first` +
-              " (or explicitly drained with party ack --through)",
+              ` (or explicitly drained: call this tool again with through=${acked.seq})`,
           );
         }
         if (acked.outcome === "acknowledged_prior") {
@@ -1456,11 +1538,12 @@ export function createMcpServer(defaultChannel?: string): McpServer {
             channel: resolved,
             acked: true,
             seq: acked.seq,
+            ...settled,
             pending_preserved: true,
             pending_seq: acked.pendingSeq,
           });
         }
-        return ok({ type: "ack", channel: resolved, acked: true, seq: acked.seq });
+        return ok({ type: "ack", channel: resolved, acked: true, seq: acked.seq, ...settled });
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }

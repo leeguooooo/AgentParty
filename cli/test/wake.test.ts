@@ -123,7 +123,8 @@ describe("wake test falsifiability (#181)", () => {
       result: "not_auto_wakeable",
       phases: {
         mention_delivered: { ok: true, seq: 7 },
-        wake_invoked: { ok: false },
+        // #834 第 6 项：status 是自述其名的判别式，ok 是保留下来的旧三态布尔。
+        wake_invoked: { ok: false, status: "not_invoked" },
         agent_resumed: { ok: false, seq: null },
       },
     });
@@ -192,7 +193,7 @@ describe("wake test wake_pending when runner is actively processing the probe (#
       result: "wake_pending",
       phases: {
         mention_delivered: { ok: true, seq: 91 },
-        wake_invoked: { ok: true },
+        wake_invoked: { ok: true, status: "invoked" },
         agent_resumed: { ok: false, seq: null },
       },
     });
@@ -399,7 +400,9 @@ describe("wake test audits serve/watch ledger (#107)", () => {
       result: "timeout",
       phases: {
         mention_delivered: { ok: true, seq: 50 },
-        wake_invoked: { ok: null, adapter: "serve" },
+        // #834 第 6 项：ok:null 在这里的真实含义是「已广播、待确认消费」——一个成功中间态。
+        // 机器读的那半必须能与「账本无行、判不了」区分开，否则 `if (!ok)` 会把它误判成失败。
+        wake_invoked: { ok: null, status: "broadcast_pending", adapter: "serve" },
         agent_resumed: { ok: false, seq: null },
       },
     });
@@ -457,7 +460,7 @@ describe("wake test audits serve/watch ledger (#107)", () => {
       result: "healthy",
       phases: {
         mention_delivered: { ok: true, seq: 60 },
-        wake_invoked: { ok: true, adapter: "serve" },
+        wake_invoked: { ok: true, status: "invoked", adapter: "serve" },
         agent_resumed: { ok: true, seq: 61, evidence: "reply_to" },
       },
     });
@@ -520,7 +523,7 @@ describe("wake test audits serve/watch ledger (#107)", () => {
       type: "wake_test",
       result: "timeout",
       phases: {
-        wake_invoked: { ok: null, adapter: "watch" },
+        wake_invoked: { ok: null, status: "broadcast_pending", adapter: "watch" },
         agent_resumed: { ok: false, seq: null },
       },
     });

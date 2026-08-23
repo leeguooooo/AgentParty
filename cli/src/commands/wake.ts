@@ -34,6 +34,22 @@ Options:
 // 的明确信号，不该误报失败。wake_pending = 唤醒确凿、最终回复待定（介于 healthy 与 timeout 之间的成功态）。
 type WakeResult = "not_auto_wakeable" | "healthy" | "wake_pending" | "timeout" | "self_target" | "not_listening" | "runner_failing";
 type AckEvidence = "reply_to" | "status.summary_seq";
+// #834 第 6 项：`wake_invoked.ok` 是三态布尔（true/false/null），而 null 的真实含义是「已投递、
+// 尚未确认消费」——一个**成功中间态**。可人读的那半早就靠 evidence 说清了（#107），但机器读的
+// 那半没有：`if (!phases.wake_invoked.ok)` 会把一次健康的 broadcast 判成失败。
+// 补一个自述其名的判别式，`ok` 原样保留（它是 JSON 输出契约，见 test/fixtures/json-contract）。
+//   invoked           = 唤醒确凿（ok:true）
+//   not_invoked       = 确凿没唤起（ok:false）
+//   broadcast_pending = 已广播给拉客户端、等 resume 确认消费（ok:null，但**不是**失败）
+//   not_audited       = 账本没有这条的行，判不了（ok:null）
+export type WakeInvokedStatus = "invoked" | "not_invoked" | "broadcast_pending" | "not_audited";
+
+export interface WakeInvokedPhase {
+  ok: boolean | null;
+  status: WakeInvokedStatus;
+  adapter: string | null;
+  evidence: string;
+}
 
 interface WakePresence {
   state: string | null;
@@ -58,7 +74,7 @@ interface WakeTestFrame extends Record<string, unknown> {
   presence: WakePresence;
   phases: {
     mention_delivered: { ok: boolean; seq: number | null; evidence: string };
-    wake_invoked: { ok: boolean | null; adapter: string | null; evidence: string };
+    wake_invoked: WakeInvokedPhase;
     agent_resumed: { ok: boolean; seq: number | null; evidence: AckEvidence | null };
   };
   reason: string | null;
@@ -130,10 +146,11 @@ function ackFromWakeDelivery(delivery: WakeDelivery | null): { seq: number; evid
   return null;
 }
 
-function summarizeWakeDelivery(delivery: WakeDelivery | null, adapter: string | null): { ok: boolean | null; adapter: string | null; evidence: string } {
+function summarizeWakeDelivery(delivery: WakeDelivery | null, adapter: string | null): WakeInvokedPhase {
   if (delivery === null) {
     return {
       ok: null,
+      status: "not_audited",
       adapter,
       evidence: "adapter delivery is not audited by the worker yet; only linked resume is conclusive",
     };
@@ -142,6 +159,7 @@ function summarizeWakeDelivery(delivery: WakeDelivery | null, adapter: string | 
     const status = delivery.http_status === null ? "" : ` status=${delivery.http_status}`;
     return {
       ok: true,
+      status: "invoked",
       adapter,
       evidence: `webhook delivery attempt ${delivery.attempt}${status} for mention #${delivery.mention_seq}`,
     };
@@ -150,6 +168,7 @@ function summarizeWakeDelivery(delivery: WakeDelivery | null, adapter: string | 
   const error = delivery.error ? ` error=${delivery.error}` : "";
   return {
     ok: false,
+    status: "not_invoked",
     adapter,
     evidence: `webhook delivery attempt ${delivery.attempt} failed${status}${error} for mention #${delivery.mention_seq}`,
   };
@@ -160,10 +179,11 @@ function summarizeWakeDelivery(delivery: WakeDelivery | null, adapter: string | 
 //  - null delivery         → ok:null，标注「尚未审计」（沿用旧语义，仅在 ledger 缺行/端点不支持时）。
 //  - result='broadcast'    → ok:null，但给出真实审计证据（已广播、待 resume 确认消费），而不是笼统的「未审计」。
 //  - result='consumed'     → ok:true，唤醒闭环（resume 已引用这条 @）。
-function summarizeServeWatchDelivery(delivery: WakeDelivery | null, adapter: string | null): { ok: boolean | null; adapter: string | null; evidence: string } {
+function summarizeServeWatchDelivery(delivery: WakeDelivery | null, adapter: string | null): WakeInvokedPhase {
   if (delivery === null) {
     return {
       ok: null,
+      status: "not_audited",
       adapter,
       evidence: "serve/watch broadcast is not audited by the worker yet; only linked resume is conclusive",
     };
@@ -173,6 +193,7 @@ function summarizeServeWatchDelivery(delivery: WakeDelivery | null, adapter: str
     const via = delivery.ack_seq !== null ? `reply #${delivery.ack_seq}` : delivery.resume_seq !== null ? `status #${delivery.resume_seq}` : "linked resume";
     return {
       ok: true,
+      status: "invoked",
       adapter,
       evidence: `${kind} client consumed the broadcast for mention #${delivery.mention_seq} (${via})`,
     };
@@ -180,6 +201,7 @@ function summarizeServeWatchDelivery(delivery: WakeDelivery | null, adapter: str
   // result='broadcast'：服务端已把这条 @ 广播给可唤醒的拉客户端，但尚未观测到引用它的 resume。
   return {
     ok: null,
+    status: "broadcast_pending",
     adapter,
     evidence: `${kind} broadcast delivered for mention #${delivery.mention_seq}; awaiting linked resume to confirm consumption`,
   };
@@ -232,15 +254,17 @@ function printHuman(frame: WakeTestFrame) {
   // #107：ok===null 时别一律印死板的「not audited」——serve/watch 的 broadcast 行已是真实审计结果，
   // 直接摊出 evidence（broadcast 已投递/待 resume 确认），只有 ledger 真无行时 evidence 才是「未审计」。
   console.log(
+    // #834 第 6 项：人读这行改由 status 判别式驱动（与旧的 ok 三态分支等价），
+    // 让这个字段成为受力字段——写错了这里就印错，而不是悄悄躺在 JSON 里发霉。
     `wake invoked: ${
-      frame.phases.wake_invoked.ok === null
-        ? frame.phases.wake_invoked.evidence
-        : frame.phases.wake_invoked.ok
-          ? // #689：唤起确凿但最终回复未到（headless runner 数分钟）——明说 reply pending，别让读者误当彻底成功或失败。
-            frame.result === "wake_pending"
-            ? "yes (reply pending)"
-            : "yes"
-          : "no"
+      frame.phases.wake_invoked.status === "invoked"
+        ? // #689：唤起确凿但最终回复未到（headless runner 数分钟）——明说 reply pending，别让读者误当彻底成功或失败。
+          frame.result === "wake_pending"
+          ? "yes (reply pending)"
+          : "yes"
+        : frame.phases.wake_invoked.status === "not_invoked"
+          ? "no"
+          : frame.phases.wake_invoked.evidence
     }`,
   );
   console.log(
@@ -326,7 +350,7 @@ export async function run(argv: string[]): Promise<number> {
         presence: summarizePresence(null),
         phases: {
           mention_delivered: { ok: false, seq: null, evidence: "not sent because target is the caller's own identity" },
-          wake_invoked: { ok: false, adapter: null, evidence: reason },
+          wake_invoked: { ok: false, status: "not_invoked", adapter: null, evidence: reason },
           agent_resumed: { ok: false, seq: null, evidence: null },
         },
         reason,
@@ -355,7 +379,7 @@ export async function run(argv: string[]): Promise<number> {
         presence: summarizePresence(presence),
         phases: {
           mention_delivered: { ok: false, seq: null, evidence: "not sent because target is not auto-wakeable" },
-          wake_invoked: { ok: false, adapter, evidence: gate.block },
+          wake_invoked: { ok: false, status: "not_invoked", adapter, evidence: gate.block },
           agent_resumed: { ok: false, seq: null, evidence: null },
         },
         reason: gate.block,
@@ -452,11 +476,12 @@ export async function run(argv: string[]): Promise<number> {
       result === "wake_pending"
         ? {
             ok: true as const,
+            status: "invoked" as const,
             adapter,
             evidence: `target's runner is processing mention #${seq} (presence.current_task) — wake invoked; final reply pending`,
           }
         : gate.advisory !== null && wakeDelivery === null
-          ? { ok: false as const, adapter, evidence: gate.advisory }
+          ? { ok: false as const, status: "not_invoked" as const, adapter, evidence: gate.advisory }
           : adapter === "serve" || adapter === "watch"
             ? summarizeServeWatchDelivery(wakeDelivery, adapter)
             : summarizeWakeDelivery(wakeDelivery, adapter);

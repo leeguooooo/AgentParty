@@ -21,6 +21,7 @@
     },
     "wake_invoked": {
       "ok": false,
+      "status": "not_invoked",
       "adapter": "none",
       "evidence": "target is human-driven; mention is inbox only"
     },

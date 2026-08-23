@@ -2771,7 +2771,7 @@ x-request-id: agentparty-&lt;hex(SHA-256(rawBody))&gt;
 <thead><tr><th>相位</th><th>ok 判据</th><th>证据字段</th></tr></thead>
 <tbody>
 <tr><td><code>mention_delivered</code></td><td>@ 消息被频道历史接受</td><td><code>seq</code>（消息 seq）</td></tr>
-<tr><td><code>wake_invoked</code></td><td>webhook 投递账本 <code>result=ok</code>；未审计适配器为 <code>null</code>（不可结论）</td><td><code>adapter</code> + 投递证据串</td></tr>
+<tr><td><code>wake_invoked</code></td><td>webhook 投递账本 <code>result=ok</code>；未审计适配器为 <code>null</code>（不可结论）。<strong>v0.2.206 起</strong>并列一个自述其名的 <code>status</code> 判别式：<code>invoked</code> / <code>not_invoked</code> / <code>broadcast_pending</code>（已广播给 serve/watch 拉客户端、等 resume 确认消费——<strong>不是失败</strong>）/ <code>not_audited</code>（账本无行，判不了）。程序化消费 MUST 读 <code>status</code>：<code>ok</code> 的 <code>null</code> 同时表示后两者，<code>!ok</code> 会把健康的 <code>broadcast_pending</code> 误判成失败</td><td><code>adapter</code> + 投递证据串</td></tr>
 <tr><td><code>agent_resumed</code></td><td>找到 <code>reply_to</code> 或 <code>status.summary_seq</code> 链接的新消息</td><td><code>evidence ∈ {reply_to, status.summary_seq}</code></td></tr>
 </tbody>
 </table></div>
