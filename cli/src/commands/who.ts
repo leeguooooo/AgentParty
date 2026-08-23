@@ -9,7 +9,7 @@ import { fetchPresence, fetchReadCursors, fetchRuntimePeers, handleRestError } f
 import { buildRuntimeTopology } from "../runtime-topology";
 import { localStatuslineBase, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { sanitizeSingleLine } from "../format";
-import { buildPullWakeLookup, type PullWakeHint, type PullWakeLookup } from "../pull-wake";
+import { buildPullWakeLookup, pullWakeDelivers, type PullWakeHint, type PullWakeLookup } from "../pull-wake";
 import { isSlug } from "../validation";
 
 const WHO_FLAGS = ["channel", "json"];
@@ -35,8 +35,14 @@ List who is in a channel, tiered by how you can reach them:
               the honest statement is "the user gets it next time they use it".
               Shown only from THIS machine's point of view — this machine has the codex
               Stop hook installed AND a local config for that identity (JSON: "pull_wake"
-              with scope:"local"/harness/evidence). Another machine's hooks are invisible
-              here, and so is whether the user will open that session again.
+              with scope:"local"/harness/hook/evidence). Another machine's hooks are
+              invisible here, and so is whether the user will open that session again.
+  ⛔ wake blocked
+              the Stop hook IS installed but codex's hook-trust gate will not run it
+              (JSON: "pull_wake".hook is "disabled" or "needs-review"). codex skips
+              unapproved hooks SILENTLY, so the @ is not picked up at all — this is the
+              state that looks installed and is not. Fix: party wake check (on that
+              machine). Never tells you to bypass the trust gate.
               A "↳ fix:" hint appears only when the harness is actually known from
               evidence present on THAT row (JSON: "wake_guidance" with
               reason/harness/harness_source/remedy). When it cannot be known, who says
@@ -160,6 +166,9 @@ interface Row {
   // runner_health 是 serve 自报的「在线但干不动」（runner 连败）。两者正交，都缺省即无恙。
   listening?: ListeningVerdict;
   runner_health?: RunnerHealth;
+  // #926：目标那台机器在 MCP 启动时自检出的「装了但叫不醒」。与 listening/runner_health 的区别是
+  // 它**先于任何一条 @** 就存在——那两个都要等 @ 白发一次才派生得出来。
+  wake_block?: PresenceEntry["wake_block"];
   // runner 自报、worker 持久化的模型会话句柄（#522）；不是 websocket session。
   agent_session?: PresenceEntry["agent_session"];
   // #834 第 3 项：以前这里只有 kind/with/runtime_count——「同一身份跑着两个执行体」和「隔壁
@@ -284,7 +293,24 @@ export function wakeGuidanceNote(g: WakeGuidance | undefined): string {
  */
 export function deferredNote(r: Row): string {
   if (r.pull_wake === undefined) return "";
+  // #926：判据是「会不会跑」，不是「装没装」。信任闸没过时这条通道一次都不会被调用——
+  // 继续宣告 deferred 就是系统自信地讲一件错事，发送方会安心去等一个永远不来的回应。
+  if (!pullWakeDelivers(r.pull_wake)) return blockedPullWakeNote(r);
   return ` · ⇢ deferred (local view: a codex turn under this identity on this machine picks the @ up via the Stop hook)`;
+}
+
+/**
+ * #926：装了 Stop hook、但 codex 的信任闸不让它跑。
+ *
+ * 这一档必须比 unreachable 更刺眼，而不是更含糊：unreachable 至少是「没装」，用户会去装；
+ * 这一档长得像装好了，所以只能靠一句明说 + 一条能直接跑的命令把它从「看起来正常」里拽出来。
+ */
+export function blockedPullWakeNote(r: Row): string {
+  const why =
+    r.pull_wake?.hook === "disabled"
+      ? "codex marked our Stop hook enabled=false"
+      : "codex has not approved our Stop hook yet";
+  return ` · ⛔ wake blocked (${why} — codex SKIPS it silently, so the @ is NOT picked up; run 'party wake check' on that machine)`;
 }
 
 // kind 已知取 kind；旧 presence 行没回填时 UUID 名判 human（网页登录会话），其余判 agent。
@@ -378,6 +404,7 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     // 探活分级（#603）：服务端只对有活连接的身份下发 listening；runner_health 独立于任务生命周期。
     ...(e.listening === "suspect" || e.listening === "deaf" ? { listening: e.listening } : {}),
     ...(e.runner_health === undefined ? {} : { runner_health: e.runner_health }),
+    ...(e.wake_block === undefined ? {} : { wake_block: e.wake_block }),
     // #823：scope 只在 state != offline 时有意义——已经离线的人不再占着任何东西。
     ...(Array.isArray(e.status?.scope) && e.status.scope.length > 0 && e.state !== "offline"
       ? { scope: e.status.scope }
@@ -498,6 +525,11 @@ export function taskNote(r: Row, now: number): string {
 // listening（服务端从 delivery 租约派生：投喂了不吃）与 runner_health（自报：唤醒了起不来）。
 export function livenessNote(r: Row): string {
   const parts: string[] = [];
+  // #926：目标自检出的「叫不醒」排在最前——其余两条说的是「在听但吃不下」，这条说的是
+  // 「压根不会被叫起来」，是更靠前、更彻底的断点，也是唯一一条对方能自己修好的。
+  if (r.wake_block !== undefined) {
+    parts.push(`⛔ wake blocked: ${terminalIdentityText(r.wake_block.detail)} → ${terminalIdentityText(r.wake_block.fix)}`);
+  }
   if (r.listening === "deaf") parts.push("⚠ not listening (deliveries expiring)");
   else if (r.listening === "suspect") parts.push("⚠ slow to consume (1 delivery lease expired)");
   if (r.runner_health !== undefined && !r.runner_health.ok) {

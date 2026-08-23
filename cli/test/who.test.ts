@@ -19,6 +19,7 @@ import {
   wakeHarnessOf,
 } from "../src/commands/who";
 import { buildPullWakeLookup, hasCodexStopHook, locallyConfiguredNames, type PullWakeLookup } from "../src/pull-wake";
+import type { CodexStopHookStatus } from "../src/wake-diagnosis";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -610,8 +611,14 @@ describe("who pull-based reachability（#905：既不是在线，也不是不可
   const CH = "agentparty";
   const stale = (over: Partial<PresenceEntry> & { name: string }): PresenceEntry =>
     p({ state: "offline", wake: { kind: "none" }, last_seen: NOW - 88 * 60 * 60 * 1000, ...over });
-  const lookup = (names: string[]): PullWakeLookup =>
-    buildPullWakeLookup(CH, "https://s", { hasHook: () => true, names: () => new Set(names) });
+  // #926：`hookStatus` 必须显式注入。默认实现会去读**这台机器真实的** ~/.codex/config.toml，
+  // 于是单测结果会随跑测试那台机器的 hook 信任闸摇摆（owner 那台就是全 disabled）。
+  const lookup = (names: string[], hook: CodexStopHookStatus = "ok"): PullWakeLookup =>
+    buildPullWakeLookup(CH, "https://s", {
+      hasHook: () => true,
+      hookStatus: () => hook,
+      names: () => new Set(names),
+    });
 
   test("装了 Stop hook 的身份：不再断言 unreachable，改说「下次跑起来时会取到」", () => {
     const rows = buildRows([stale({ name: "lark-codex1" })], {
@@ -623,6 +630,7 @@ describe("who pull-based reachability（#905：既不是在线，也不是不可
     expect(r.pull_wake).toEqual({
       scope: "local",
       harness: "codex",
+      hook: "ok",
       evidence: ["codex_stop_hook", "local_agent_config"],
     });
     const line = renderRow(r, NOW, 0);
@@ -637,6 +645,51 @@ describe("who pull-based reachability（#905：既不是在线，也不是不可
   test("措辞保留「本机视角」限定——绝不把本机观察升格成服务端可达性", () => {
     const rows = buildRows([stale({ name: "x" })], { now: NOW, channel: CH, pullWake: lookup(["x"]) });
     expect(renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0)).toContain("local view:");
+  });
+
+  // ── #926：装了 ≠ 会跑 ──────────────────────────────────────────────────────
+  // 这里的 fixture 有意让**除信任闸以外的每一道闸都通过**：身份在 names 里、hasHook 为真、
+  // 是 agent、频道/server 都对得上。于是断言只可能被 hookStatus 那一道闸决定——
+  // 退回「只看 hooks.json 里有没有」的旧实现，这三条会全红。
+  for (const hook of ["disabled", "needs-review"] as const) {
+    test(`hook 存在但信任闸未过（${hook}）→ 绝不标 deferred，如实说「收不到」`, () => {
+      const rows = buildRows([stale({ name: "lark-codex1" })], {
+        now: NOW,
+        channel: CH,
+        pullWake: lookup(["lark-codex1"], hook),
+      });
+      const r = rows[0] as NonNullable<(typeof rows)[number]>;
+      // 线索仍然点亮（hook 确实装着），但它自带「会不会跑」的判定。
+      expect(r.pull_wake?.hook).toBe(hook);
+      const line = renderRow(r, NOW, 0);
+      expect(line).not.toContain("⇢ deferred");
+      expect(line).not.toContain("picks the @ up via the Stop hook");
+      expect(line).toContain("⛔ wake blocked");
+      // 必须给出一条能跑的命令，且绝不建议绕过信任闸（那是拿安全控制换功能）。
+      expect(line).toContain("party wake check");
+      expect(line).not.toContain("dangerously-bypass-hook-trust");
+    });
+  }
+
+  // #925 已确立的语义，别改坏：老版本 codex 没有信任闸 ⇒ ok ⇒ 照常 deferred，不喊狼来了。
+  test("信任闸判 ok（老版本 codex 无此闸）→ 仍走 deferred", () => {
+    const rows = buildRows([stale({ name: "lark-codex1" })], {
+      now: NOW,
+      channel: CH,
+      pullWake: lookup(["lark-codex1"], "ok"),
+    });
+    const line = renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0);
+    expect(line).toContain("⇢ deferred");
+    expect(line).not.toContain("⛔ wake blocked");
+  });
+
+  test("四态判定说 missing → 一个身份都不点亮（文件里有指纹也不算）", () => {
+    const rows = buildRows([stale({ name: "lark-codex1" })], {
+      now: NOW,
+      channel: CH,
+      pullWake: lookup(["lark-codex1"], "missing"),
+    });
+    expect(rows[0]?.pull_wake).toBeUndefined();
   });
 
   test("本机没这个身份的 config → 不点亮，行仍走无唤醒层措辞", () => {

@@ -592,6 +592,58 @@ describe("ws client", () => {
     expect(frames[1]).toMatchObject({ seq: 3, body: "valid" });
   });
 
+  // #926/#622：presence 里出现一个**这个 CLI 版本还不认识的** wake_block（例如服务端新增了
+  // 一种 reason），绝不能把整条 welcome 帧丢掉。isPresenceEntry 的失败是整帧级的——比服务端
+  // 更严的字段校验会让老 CLI 在服务端演进的那一天集体失明，而且没有任何报错。
+  test("an unknown-shape wake_block never drops the whole presence frame (#926)", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send({
+          type: "welcome",
+          channel: "dev",
+          self: "me",
+          last_seq: 0,
+          participants: [],
+          presence: [
+            {
+              name: "lark-codex1",
+              state: "offline",
+              note: null,
+              ts: 1,
+              // 未来版本才有的 reason + 多出来的字段：形状对，取值这个版本不认识。
+              wake_block: { reason: "some_future_reason", detail: "d", fix: "f", ts: 1, extra: true },
+            },
+          ],
+        });
+        sock.send(msgFrame(1, "still delivered"));
+      }
+    });
+    conn = connect(server.url, "ap_tok", "dev", 0, { backoffBaseMs: 20 });
+    const frames = await collect(conn, 2);
+    expect(frames.map((f) => f.type)).toEqual(["welcome", "msg"]);
+  });
+
+  test("a wake_block that is not even an object is still rejected as a malformed entry", async () => {
+    server = startMockServer((frame, sock) => {
+      if (frame.type === "hello") {
+        sock.send({
+          type: "welcome",
+          channel: "dev",
+          self: "me",
+          last_seq: 0,
+          participants: [],
+          presence: [{ name: "x", state: "offline", note: null, ts: 1, wake_block: "nope" }],
+        });
+        sock.send(welcomeFrame(0));
+        sock.send(msgFrame(1, "valid"));
+      }
+    });
+    conn = connect(server.url, "ap_tok", "dev", 0, { backoffBaseMs: 20 });
+    const frames = await collect(conn, 2);
+    expect(frames.map((f) => f.type)).toEqual(["welcome", "msg"]);
+    expect(frames[1]).toMatchObject({ body: "valid" });
+  });
+
   test("inbound watchdog retires a half-open socket and reconnects even without a close event", async () => {
     jest.useFakeTimers();
     useProbeWebSocket();

@@ -219,6 +219,16 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
           // #902：hooks.json 是 codex 启动时读的——装完必须新开会话才生效，说清楚免得对方
           // 在原会话里等唤醒等到怀疑人生（vault 复制的包过去连这一整条 hook 都没有）。
           t("AgentJoin.cmd.codexHookNote"),
+          // #910：`codex exec` 不触发任何 hook（只有交互式 TUI 会）。不写这一句，就会有人在
+          // exec 里验一遍、发现没反应，然后得出「这功能坏了」的错误结论。
+          t("AgentJoin.cmd.codexExecNoHooks"),
+          // #910/#926：接入包的最后一步从「指令」改成「验证」。
+          // 过去这里是「接下来请在 codex TUI 里 Trust 一次」——没人读，而 hook 未获批准时
+          // codex **静默跳过**，用户连自己失败了都不知道。改成当场跑一条命令，让它直接说出
+          // 「还差几步、差哪一步」。`|| true` 保证「还差一步」不把整段粘贴脚本判成失败。
+          t("AgentJoin.cmd.verifyNote1"),
+          `party wake check || true`,
+          t("AgentJoin.cmd.verifyNote2"),
         ]
       : []),
     t("AgentJoin.cmd.step4fallback"),

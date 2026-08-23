@@ -6,11 +6,20 @@ import { jsonFrame, nowTs } from "../json";
 import { resolveAuth } from "../oidc-cli";
 import { RestError, fetchMessages, fetchPresence, fetchWakeDeliveries, handleRestError, postMessage } from "../rest";
 import { MAX_TIMEOUT_SEC, isName, isSlug, parsePositiveIntFlag } from "../validation";
+import { diagnoseCodexWake } from "../wake-diagnosis";
+import { buildWakeChecklist, formatWakeChecklist } from "../wake-checklist";
 
 const WAKE_FLAGS = ["channel", "timeout", "json"];
 const DEFAULT_TIMEOUT_SEC = 30;
 const STALE_MS = 60_000; // keep serve/watch wakeability aligned with `party who` and mention receipts
 const HELP = `usage: party wake test @agent [channel|--channel C] [--timeout N] [--json]
+       party wake check [--json]
+
+check answers one question about THIS machine, with no network at all: "if someone
+@s me right now, will anything happen?" It prints how many steps are still missing
+and exactly one thing to do next. Exit code 0 only when nothing is missing.
+It never suggests bypassing codex's hook-trust gate.
+
 
 Run a wake contract test. This separates mention delivery, wake adapter delivery,
 and linked agent resume. Only a fresh reply/status linked to the test mention
@@ -282,6 +291,17 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * `party wake check`（#910/#926）。纯本地：诊断复用 #925 的 `diagnoseCodexWake`，
+ * 清单渲染在 wake-checklist.ts。退出码 = 「还有没有欠缺」，好让接入包/CI 直接判。
+ */
+function runCheck(json: boolean): number {
+  const checklist = buildWakeChecklist(diagnoseCodexWake());
+  if (json) console.log(JSON.stringify(checklist));
+  else for (const line of formatWakeChecklist(checklist)) console.log(line);
+  return checklist.remaining === 0 ? 0 : 1;
+}
+
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
@@ -289,8 +309,17 @@ export async function run(argv: string[]): Promise<number> {
   }
   const parsed = parseArgs(argv, { booleans: ["json"] });
   const [subcmd, targetArg, channelArg, ...extra] = parsed.positionals;
+  // #910/#926：接入包的最后一步。零网络、只读本地盘——它要回答的是「我这台机器还差几步」，
+  // 而不是「服务端怎么看我」。放在 test 之前分派：test 需要网络与一个目标，check 两样都不需要。
+  if (subcmd === "check") {
+    if (extra.length > 0 || targetArg !== undefined) {
+      console.error("usage: party wake check [--json]");
+      return 1;
+    }
+    return runCheck(parsed.flags.json === true);
+  }
   if (subcmd !== "test" || extra.length > 0) {
-    console.error("usage: party wake test @agent [channel|--channel C] [--timeout N] [--json]");
+    console.error("usage: party wake test @agent [channel|--channel C] [--timeout N] [--json]\n       party wake check [--json]");
     return 1;
   }
   const { flags } = parsed;

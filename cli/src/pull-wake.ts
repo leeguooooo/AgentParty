@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { localAgentConfigsForChannel } from "./config";
+import { codexStopHookStatus, type CodexStopHookStatus } from "./wake-diagnosis";
 
 /** codex Stop hook 的命令指纹。与 hook.ts 的 codexHookSettingsJson 写入的命令一致。 */
 export const CODEX_STOP_HOOK_COMMAND = "hook codex-stop";
@@ -34,8 +35,24 @@ export interface PullWakeHint {
   scope: "local";
   /** 这条拉取通道属于哪个 harness。目前只有 codex Stop hook 一种。 */
   harness: "codex";
+  /**
+   * 这条 hook 到底**会不会跑**（#926）。
+   *
+   * 这里曾经只判「hooks.json 里有没有」，于是 codex 的信任闸把它标成 `enabled=false` 时，
+   * 每一行照样宣告「一个 codex turn 会取走这条 @」——而同一屏底部的诊断正说着「会被静默跳过」。
+   * 系统自信地讲了一件错事，比什么都不显示更坏：发送方看到 deferred 就安心去等了。
+   *
+   * 判据统一走 #925 的四态 `codexStopHookStatus`（老版本 codex 没有信任闸时判 `ok`，不喊狼来了）。
+   * `missing` 不会走到这里——那时压根不产生 hint。
+   */
+  hook: Exclude<CodexStopHookStatus, "missing">;
   /** 判据清单，便于调用方解释「凭什么这么说」。 */
   evidence: ["codex_stop_hook", "local_agent_config"];
+}
+
+/** 这条拉取通道当下真的会取走 @ 吗。false ⇒ 装了但 codex 不会执行它。 */
+export function pullWakeDelivers(hint: PullWakeHint | undefined): boolean {
+  return hint !== undefined && hint.hook === "ok";
 }
 
 /** ~/.codex/hooks.json 的位置。注入 userHome 仅为单测。 */
@@ -99,15 +116,25 @@ export interface PullWakeLookup {
 export function buildPullWakeLookup(
   channel: string,
   server: string,
-  deps: { hasHook?: () => boolean; names?: (channel: string, server: string) => Set<string> } = {},
+  deps: {
+    hasHook?: () => boolean;
+    /** hook 会不会被 codex 执行（#926）。缺省走 #925 的四态判定；`missing` 视同没装。 */
+    hookStatus?: () => CodexStopHookStatus;
+    names?: (channel: string, server: string) => Set<string>;
+  } = {},
 ): PullWakeLookup {
+  // hasHook 是「文件里有没有」，hookStatus 是「会不会跑」——两件事，两道闸，缺一不可。
+  // 注入 hasHook 而不注入 hookStatus 的老调用方（单测）默认拿到 ok：与它们原先的语义一致。
   const hasHook = deps.hasHook ?? (() => hasCodexStopHook());
   if (!hasHook()) return { hintFor: () => undefined };
+  const status = (deps.hookStatus ?? (() => codexStopHookStatus()))();
+  // missing：文件里有指纹但四态判定说没有（例如 hooks.json 刚被改坏）——以「不会跑」为准，闭嘴。
+  if (status === "missing") return { hintFor: () => undefined };
   const names = (deps.names ?? locallyConfiguredNames)(channel, server);
   return {
     hintFor: (name: string) =>
       names.has(name)
-        ? { scope: "local", harness: "codex", evidence: ["codex_stop_hook", "local_agent_config"] }
+        ? { scope: "local", harness: "codex", hook: status, evidence: ["codex_stop_hook", "local_agent_config"] }
         : undefined,
   };
 }
