@@ -184,6 +184,17 @@ export function diagnoseCodexWake(
 /**
  * 渲染成给人看的几行。**失败必须一眼看出**：一行结论、一行原因、一行可执行命令，不多不少。
  */
+/**
+ * 这份诊断该不该主动说出来（#924/#926）。
+ *
+ * 判据是「会不会跑」，**不是**「装没装」：`hookInstalled` 只排除了 `missing`，
+ * 而真机上最常见的断点是信任闸没过（`disabled` / `needs-review`）——那时 hook 一次都不会
+ * 被调用，却会被 `hookInstalled` 判成正常，于是 who 继续沉默。只有 `ok` 才算通。
+ */
+export function shouldSurfaceCodexWakeDiagnosis(d: CodexWakeDiagnosis): boolean {
+  return d.identity === null || d.hook !== "ok";
+}
+
 export function formatCodexWakeDiagnosis(d: CodexWakeDiagnosis): string[] {
   const out: string[] = [];
   if (d.channel === null) {

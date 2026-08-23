@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeState, writeWorkspaceConfigOnly, type Config } from "../src/config";
 import { joinBindingsPath, writeJoinBinding } from "../src/join-binding";
-import { codexStopHookStatus, diagnoseCodexWake, formatCodexWakeDiagnosis } from "../src/wake-diagnosis";
+import { codexStopHookStatus, diagnoseCodexWake, formatCodexWakeDiagnosis, shouldSurfaceCodexWakeDiagnosis } from "../src/wake-diagnosis";
 
 const CHANNEL = "agentparty";
 const SERVER = "https://agentparty.pwtk-dev.work";
@@ -155,6 +155,12 @@ describe("codex hook 信任闸（装了 ≠ 会跑）", () => {
     mkdirSync(codexHome, { recursive: true });
     writeFileSync(join(codexHome, "hooks.json"), JSON.stringify(HOOKS_JSON));
     writeState({ channel: CHANNEL, cursor: 0 }, cwd);
+    // 身份解析得出 —— 让「该不该出声」只由 hook 状态决定。
+    const bound = writeAgent("codex-bound");
+    writeJoinBinding(joinBindingsPath(home), {
+      harness: "codex", server: SERVER, channel: CHANNEL, owner: "lark:on_owner",
+      identity: "codex-bound", config_path: bound, cwd, created_at: 1,
+    });
   });
 
   const env = () => ({ AGENTPARTY_HOME: home, CODEX_HOME: codexHome });
@@ -188,6 +194,30 @@ describe("codex hook 信任闸（装了 ≠ 会跑）", () => {
     const text = lines.join("\n");
     expect(text).toContain("静默跳过");
     expect(text).toContain("怎么修");
+  });
+
+  // #926：who 只在「会不会跑」为否时才出声。此前判据用的是 hookInstalled（只排除 missing），
+  // 于是信任闸没过的 disabled / needs-review 被当成正常 —— 而那正是 owner 那台的真实状态，
+  // 也是最常见的断点。这条钉住「装了但不会跑时必须出声」。
+  test("信任闸没过时 who 必须出声，不能因为「装了」就沉默", () => {
+    const key = trustKey();
+    for (const [state, expected] of [["false", "disabled"], ["missing", "needs-review"]] as const) {
+      if (state === "false") {
+        writeFileSync(join(codexHome, "config.toml"), `[hooks.state."${key}"]\ntrusted_hash = "sha256:deadbeef"\nenabled = false\n`);
+      } else {
+        // 信任表存在、但没有我们这条 ⇒ 还没被 review 过。
+        // （config.toml 整个为空是另一回事：那表示这个 codex 版本没有信任闸，按设计判 ok。）
+        writeFileSync(join(codexHome, "config.toml"), `[hooks.state."other.json:stop:0:0"]\ntrusted_hash = "sha256:beef"\nenabled = true\n`);
+      }
+      const d = diagnoseCodexWake(cwd, env());
+      expect({ state, hook: d.hook }).toEqual({ state, hook: expected });
+      // 身份必须是**解析得出**的：否则 `d.identity === null` 那一支单独就能让下面的断言成立，
+      // 把被测的这道闸整个遮住（#884 那类「外层检查遮住内层闸」的假绿，本条正是这么踩出来的）。
+      expect({ state, identity: d.identity }).toEqual({ state, identity: "codex-bound" });
+      // 「装了」为真，但「会跑」为假 —— 判据必须跟后者走。
+      expect({ state, installed: d.hookInstalled }).toEqual({ state, installed: true });
+      expect({ state, surfaced: shouldSurfaceCodexWakeDiagnosis(d) }).toEqual({ state, surfaced: true });
+    }
   });
 
   test("批准了 → ok", () => {
