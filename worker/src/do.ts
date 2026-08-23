@@ -358,6 +358,10 @@ const MAX_MENTIONS = 50;
  * 「hook 预算内必须返回」的查询不会因为某个身份被 @ 了上万次而变慢。
  */
 const NEXT_MENTION_SCAN_LIMIT = 200;
+/** #913：@ 倒排索引回填完成的 meta 标记。见 onStart 里建表处的说明。 */
+const MENTION_INDEX_BACKFILL_META = "mention_index_v1";
+/** 回填分页大小：单次查询恒有界，长频道也不会把整表 toArray 进内存。 */
+const MENTION_INDEX_BACKFILL_PAGE_SIZE = 1000;
 const MENTIONS_JSON_LIMIT = 4096;
 const MAX_STATUS_SCOPE = 50;
 const STATUS_SCOPE_JSON_LIMIT = 4096;
@@ -1725,6 +1729,8 @@ export class ChannelDO extends Server<Env> {
   // frame is awaiting I/O. Preserve wire order explicitly: hello must finish token validation and
   // capability setup before an immediately-following serve lease / adapter / send frame runs.
   private readonly wsMessageTails = new Map<string, Promise<void>>();
+  /** #913：上一次 `/internal/next-mention` 查询真实读到的行数。见该处理器里的说明。 */
+  nextMentionRowsRead = 0;
   private participantAuthorityRefreshedAt = 0;
   // Authorization checks make dispatch asynchronous. Serialize each target so
   // two wakeups cannot select the same queued row before either claim commits.
@@ -2460,6 +2466,49 @@ export class ChannelDO extends Server<Env> {
       // column already exists
     }
     this.migrateReadCursorSessionSchema();
+    // #913：@ 倒排索引。`/internal/next-mention` 是 codex Stop hook **每轮结束都要调**的信号源，
+    // 原实现按 `seq > since AND (mentions_json LIKE ? OR delivery_targets_json LIKE ?)` 扫 messages：
+    // LIMIT 封的是命中行数不是扫描行数，零命中时 SQLite 必须扫完 since 之后的每一行才能确定「没有」。
+    // 游标新鲜时窗口只有几条，游标陈旧时（新身份 cursor=0，正是 #870 的形态）代价与频道长度同阶。
+    // 这张表把「谁被 @ 过」翻成 (match_key, seq) 主键，零命中查询退化成一次 B 树探针，不再随频道增长。
+    //
+    // 索引只保证是**超集**：命中候选仍旧回 messages 行逐条核验（撤回/擦除/编辑掉的 @ 在那里被滤掉），
+    // 所以「删 @」的路径漏同步只会多读一行，永远不会误报；只有「加 @」的路径必须同步，那只有
+    // storeMessage 的 INSERT 与 edit 两处，两处都走 indexMessageMentions。
+    sql.exec(`CREATE TABLE IF NOT EXISTS message_mentions (
+      match_key TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      PRIMARY KEY (match_key, seq)
+    )`);
+    if (this.getMeta(MENTION_INDEX_BACKFILL_META) === null) {
+      // 一次性回填存量消息。放在 onStart 末尾——前面那些一次性迁移（legacy delivery_targets_json 补写、
+      // retract_scrub_*）会改写 mentions/targets，必须等它们定型后再建索引，否则索引会漏掉补写出来的目标。
+      // 事务内完成：中途抛异常则整体回滚、meta 不落，下次 hydrate 重来，绝不留半张索引。
+      this.ctx.storage.transactionSync(() => {
+        let after = -1;
+        for (;;) {
+          const rows = sql
+            .exec(
+              `SELECT seq, mentions_json, delivery_targets_json FROM messages
+                WHERE seq > ? ORDER BY seq LIMIT ?`,
+              after,
+              MENTION_INDEX_BACKFILL_PAGE_SIZE,
+            )
+            .toArray();
+          if (rows.length === 0) break;
+          for (const row of rows) {
+            after = Number(row.seq);
+            this.indexMessageMentions(
+              after,
+              parseStoredMentions(row.mentions_json),
+              parseStoredTargetNames(row.delivery_targets_json),
+            );
+          }
+          if (rows.length < MENTION_INDEX_BACKFILL_PAGE_SIZE) break;
+        }
+        this.setMeta(MENTION_INDEX_BACKFILL_META, "1");
+      });
+    }
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'),
     );
@@ -2468,6 +2517,40 @@ export class ChannelDO extends Server<Env> {
     // real clock guarantee rather than something that only runs if unrelated traffic wakes the DO.
     this.scheduleDirectedDeliveryRetentionAlarm();
     this.scheduleParticipantRemovalMetaRetentionAlarm();
+  }
+
+  /**
+   * #913：把一条消息的 @ 目标写进倒排索引。**只加不删**——索引是超集，读路径回 messages 逐条核验，
+   * 所以重复调用、以及「这条 @ 后来被撤回/编辑掉了」都无害。反过来说，任何**新增** @ 的写路径都
+   * 必须调它，漏一处就是漏一次唤醒。当前只有两处：storeMessage 的 INSERT 与 edit 的 UPDATE。
+   */
+  private indexMessageMentions(seq: number, ...nameLists: readonly (readonly string[])[]): void {
+    const keys = new Set<string>();
+    for (const names of nameLists) {
+      for (const name of names) keys.add(mentionMatchKey(name));
+    }
+    for (const key of keys) {
+      this.ctx.storage.sql.exec(
+        "INSERT OR IGNORE INTO message_mentions (match_key, seq) VALUES (?, ?)",
+        key,
+        seq,
+      );
+    }
+  }
+
+  /**
+   * 索引行的卫生清理：消息被撤回/擦除/裁剪后，它的索引行已无意义。删不掉也只是多读一行
+   * （核验会滤掉），所以这里是省钱不是保正确——正确性由读路径的核验保证。
+   */
+  private dropMentionIndex(seq: number): void {
+    this.ctx.storage.sql.exec("DELETE FROM message_mentions WHERE seq = ?", seq);
+  }
+
+  /** 裁剪掉一批消息之后，把索引里指向已消失消息的行一并清掉。 */
+  private dropOrphanMentionIndex(): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM message_mentions WHERE seq NOT IN (SELECT seq FROM messages)",
+    );
   }
 
   private hasCompositeSessionPrimaryKey(table: "presence" | "read_cursor"): boolean {
@@ -3253,6 +3336,7 @@ export class ChannelDO extends Server<Env> {
             `DELETE FROM messages AS m WHERE m.ts <= ?`,
             cutoff,
           );
+          this.dropOrphanMentionIndex();
         });
         await this.flushAtomicDeliveryEffects(atomicEffects);
         this.broadcastInvalidatedDecisions(invalidatedDecisionSeqs, now);
@@ -5203,6 +5287,8 @@ export class ChannelDO extends Server<Env> {
       options.workflow === undefined ? null : JSON.stringify(options.workflow),
       now,
     );
+    // #913：系统状态帧也能 @ 人（workflow/审阅提醒），同样要进 @ 倒排索引。
+    this.indexMessageMentions(seq, options.mentions ?? []);
     const frame: MsgFrame = {
       type: "status",
       seq,
@@ -5246,6 +5332,8 @@ export class ChannelDO extends Server<Env> {
       roleSource ?? null,
       now,
     );
+    // #913：审阅回复会 @ 提交人，这条 @ 必须能被 next-mention 查到。
+    this.indexMessageMentions(seq, mentions);
     const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
     const frame = this.rowToFrame(row);
     this.linkWakeResume(identity, frame, now);
@@ -5285,6 +5373,8 @@ export class ChannelDO extends Server<Env> {
       JSON.stringify(response),
       now,
     );
+    // #913：决策回应同样反指提问方并 @ 它，同样要进 @ 倒排索引。
+    this.indexMessageMentions(seq, mentions);
     const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
     const frame = this.rowToFrame(row);
     this.linkWakeResume(identity, frame, now);
@@ -6133,6 +6223,20 @@ export class ChannelDO extends Server<Env> {
             seq,
           );
           const updated = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
+          // #913：编辑可以**新增** @（删除已路由目标会在上面被拒），新增的必须进倒排索引，
+          // 否则被 @ 的人这次唤醒就查不到。取的是**刚落库的那一行**而不是入参：索引与存储读同一个
+          // 事实，不可能各说各话。
+          //
+          // 先删后建，而不是只追加：编辑是唯一会**移除** @ 的常规路径，只追加的话陈旧行会一直攒。
+          // 核验虽然会把它们滤掉、不会误报，但候选是有 LIMIT 的——同一个 key 攒够
+          // NEXT_MENTION_SCAN_LIMIT 条陈旧行，就能把它们后面一条真 @ 挤出候选窗口，变成漏唤醒。
+          // 删掉它们，索引就对每条消息都是精确的（撤回/擦除/裁剪已各自清理）。
+          this.dropMentionIndex(seq);
+          this.indexMessageMentions(
+            seq,
+            parseStoredMentions(updated.mentions_json),
+            parseStoredTargetNames(updated.delivery_targets_json),
+          );
           editState.frame = this.rowToFrame(updated);
           this.ensureDirectedDeliveries(
             editState.frame,
@@ -6194,6 +6298,8 @@ export class ChannelDO extends Server<Env> {
             this.nextRevSeq(),
             seq,
           );
+          // #913：撤回已把 mentions 清空，索引行留着只会让读路径白核验一行。顺手清掉。
+          this.dropMentionIndex(seq);
 
           // A queued/dead webhook payload is an immutable copy of the original frame. Scrubbing the
           // messages row alone would leave a retract bypass: alarm retry or moderator redeliver could
@@ -6945,24 +7051,29 @@ export class ChannelDO extends Server<Env> {
       const name = url.searchParams.get("name") ?? "";
       if (name === "") return Response.json({ seq: null });
       const key = mentionMatchKey(name);
-      // LIKE 只是预筛（SQLite 的 ASCII LIKE 不分大小写、`_`/`%` 只会放宽匹配，绝不会漏），
-      // 真正的判定在下面用 mentionMatchKey 逐行核。撤回/擦除的消息 mentions 已清空，天然被排除。
-      const like = `%${name}%`;
-      const rows = this.ctx.storage.sql
-        .exec(
-          `SELECT seq, mentions_json, delivery_targets_json
-             FROM messages
-            WHERE seq > ?
-              AND sender_name <> ?
-              AND (mentions_json LIKE ? OR delivery_targets_json LIKE ?)
-            ORDER BY seq LIMIT ?`,
-          since,
-          name,
-          like,
-          like,
-          NEXT_MENTION_SCAN_LIMIT,
-        )
-        .toArray();
+      // #913：预筛走 message_mentions 倒排索引，不再对 messages 做 `seq > since` 的全窗口 LIKE 扫描。
+      // 关键差别在**零命中**：LIKE 版必须扫完 since 之后每一行才能确定「没有」，代价与频道长度同阶
+      // （新身份 cursor=0 + 1900 条消息 = 每轮 turn 扫 1900 行）；索引版是一次 (match_key, seq) 的 B 树
+      // 探针，从没被 @ 过的身份直接读到 0 行。命中时仍旧回 messages 逐行核验——索引只保证是超集，
+      // 撤回/擦除/编辑掉的 @ 在这里被滤掉，判定口径与改动前逐字一致。LIMIT 同样封候选行数。
+      const cursor = this.ctx.storage.sql.exec(
+        `SELECT m.seq AS seq, m.mentions_json AS mentions_json, m.delivery_targets_json AS delivery_targets_json
+           FROM message_mentions AS idx
+           JOIN messages AS m ON m.seq = idx.seq
+          WHERE idx.match_key = ?
+            AND idx.seq > ?
+            AND m.sender_name <> ?
+          ORDER BY idx.seq LIMIT ?`,
+        key,
+        since,
+        name,
+        NEXT_MENTION_SCAN_LIMIT,
+      );
+      const rows = cursor.toArray();
+      // 成本护栏的观测点（#913）：这个端点唯一的存在前提是「便宜到每轮 turn 都能问一次」，
+      // 而「便宜」只能用真实读到的行数证明——响应体里看不出扫了 1900 行还是 0 行。
+      // 留在实例上供守卫测试断言：零命中查询的读行数不随频道长度增长。
+      this.nextMentionRowsRead = cursor.rowsRead;
       for (const row of rows) {
         let names: string[];
         try {
@@ -8895,6 +9006,8 @@ export class ChannelDO extends Server<Env> {
         : null,
       now,
     );
+    // #913：与 INSERT 同一事务里补 @ 倒排索引，让 next-mention 不必再全表 LIKE。
+    this.indexMessageMentions(seq, msg.mentions, deliveryTargets);
     this.ensureDirectedDeliveries(msg, deliveryTargets, deliveryTargetOwners);
     let waitingOwnerDelivery: Record<string, unknown> | undefined;
     let waitingOwnerPresence: PresenceEntry | null = null;
@@ -8996,6 +9109,7 @@ export class ChannelDO extends Server<Env> {
             )`,
         seq - RETAIN_N,
       );
+      this.dropOrphanMentionIndex();
     }
 
     const frames: ServerFrame[] = replacedUpdate === undefined ? [msg] : [msg, replacedUpdate];
@@ -9915,6 +10029,8 @@ export class ChannelDO extends Server<Env> {
         revSeq,
         seq,
       );
+        // #913：擦除同撤回，mentions 已清空，索引行一并清掉。
+        this.dropMentionIndex(seq);
       }
       audit_deleted = countOne(
         `SELECT COUNT(*) AS n FROM message_audit

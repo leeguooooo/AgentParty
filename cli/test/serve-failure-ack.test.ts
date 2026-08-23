@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT_ARCHIVED, type MsgFrame } from "@agentparty/shared";
-import { claudeJsonEnvFailure, createBuiltinRunner, createSdkRunner, EXIT_WAKE_ABANDON_CIRCUIT, isRunnerEnvFailure, profileChildServeOptions, runServe, WakeBlockedError, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
+import { claudeJsonEnvFailure, codexSkillLoadFailure, createBuiltinRunner, createBuiltinRunnerStartupCheck, createSdkRunner, EXIT_WAKE_ABANDON_CIRCUIT, isRunnerEnvFailure, profileChildServeOptions, runnerDiagnosticExcerpt, runnerEnvFailureEvidence, runServe, WakeBlockedError, type BuiltinRunnerOptions, type RunnerProcess, type ServeOptions } from "../src/commands/serve";
 import type { StuckWake } from "../src/config";
 import { msgFrame, startMockServer, welcomeFrame, type MockServer } from "./mock-server";
 
@@ -996,5 +996,237 @@ describe("profile 子 serve 继承 --replay-backlog (#206 门禁 P2)", () => {
       mentionsOnly: true,
     });
     expect(opts.skipBacklog).not.toBe(false);
+  });
+});
+
+// #892：`party serve --runner codex` 报了 preflight 通过，第一条真 @ 却因为 codex 递归发现到一份
+// 没有 YAML frontmatter 的嵌套 SKILL.md 在模型启动前退出，而 AgentParty 把这次唤醒**终局结算**掉了。
+// codex 侧的输入错不归我们管，但「假阳性 preflight」和「把一条模型从没看见的 @ 结算掉」是我们的。
+//
+// 真机取证（codex-cli 0.145.0，隔离 HOME/CODEX_HOME，嵌套 knowledge-base/SKILL.md 无 frontmatter）：
+//   codex exec  → stderr 出现 `ERROR ... failed to load skill <path>: missing YAML frontmatter delimited by ---`
+//   codex login status / codex doctor --json / codex debug prompt-input → 三者都看不见这个文件
+// 也就是说：免模型的检查覆盖不到这条路径，preflight 没有资格说 ready。
+const CODEX_SKILL_STDERR = [
+  "Reading additional input from stdin...",
+  "2026-08-23T17:21:23.637254Z ERROR codex_core::session::session: failed to load skill " +
+    "/Users/dev/ai-workspace/shared-skills/ima-skill/knowledge-base/SKILL.md: missing YAML frontmatter delimited by ---",
+  "OpenAI Codex v0.145.0",
+].join("\n");
+
+describe("codex skill/config 加载失败自成一档 (#892)", () => {
+  test("codexSkillLoadFailure 交出出问题的路径与原文理由", () => {
+    const failure = codexSkillLoadFailure(CODEX_SKILL_STDERR);
+    expect(failure).not.toBeNull();
+    expect(failure!.kind).toBe("codex_skill_load");
+    expect(failure!.path).toBe("/Users/dev/ai-workspace/shared-skills/ima-skill/knowledge-base/SKILL.md");
+    expect(failure!.reason).toBe("missing YAML frontmatter delimited by ---");
+    // 普通的模型失败不该被这一档吃掉。
+    expect(codexSkillLoadFailure("model ran, then failed")).toBeNull();
+    expect(codexSkillLoadFailure("")).toBeNull();
+  });
+
+  test("这段 stderr 不匹配任何环境指纹——正是它此前落进「模型可能跑过」那一档的原因", () => {
+    // 反过来说明这一档为什么必须新增：既有的 isRunnerEnvFailure 对它一个字都不认。
+    expect(isRunnerEnvFailure({ stderr: CODEX_SKILL_STDERR })).toBe(false);
+  });
+
+  test("诊断摘要交出**命中判定的那一行**，而不是 stderr 的开头 (#892 误诊根因)", () => {
+    // 报告里的形态：env_failure=true，可展示的诊断却是一段与所有环境指纹都不匹配的 skill 噪声。
+    // 因为摘要一直取 stderr 开头，而真因（401）排在后面——照着展示的原因去改，永远改不好。
+    const stderr = [
+      "Reading additional input from stdin...",
+      "2026-08-23T17:21:23Z ERROR codex_core::session::session: failed to load skill /tmp/x/SKILL.md: missing YAML frontmatter delimited by ---",
+      "OpenAI Codex v0.145.0",
+      "2026-08-23T17:21:25Z ERROR codex_api: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses",
+    ].join("\n");
+    expect(isRunnerEnvFailure({ stderr })).toBe(true);
+    expect(runnerEnvFailureEvidence(stderr)).toContain("401 Unauthorized");
+    const diagnostic = runnerDiagnosticExcerpt({ stdout: "", stderr }, "codex");
+    expect(diagnostic).toContain("401 Unauthorized");
+    expect(diagnostic).not.toContain("missing YAML frontmatter");
+  });
+
+  // CodeRabbit on #932：skill 加载失败**自己那一行**就可能含 `No such file or directory`
+  // （#892 报告里的全局 skills 目录挂着一个指向共享 skill 树的符号链接，断链就是这个形态），
+  // 而它恰好命中「二进制缺失」的 ENOENT 指纹。不把这行摘掉的话，新加的这一档在「文件缺失」
+  // 这个最常见形态下恒不生效——@ 照样被终局结算，还对着用户显示 credentials/binary/sandbox 的修法。
+  const CODEX_DANGLING_SYMLINK_STDERR = [
+    "Reading additional input from stdin...",
+    "2026-08-23T17:21:23.637254Z ERROR codex_core::session::session: failed to load skill " +
+      "/Users/dev/.agents/skills/shared/SKILL.md: No such file or directory (os error 2)",
+    "OpenAI Codex v0.145.0",
+  ].join("\n");
+
+  test("断链 skill 的 ENOENT 不冒充环境失败：仍落配置档，不结算、不推游标", async () => {
+    // 这一行**确实**命中 ENOENT 环境指纹——正因如此才需要先摘掉它再判环境。
+    expect(isRunnerEnvFailure({ stderr: CODEX_DANGLING_SYMLINK_STDERR })).toBe(true);
+    expect(codexSkillLoadFailure(CODEX_DANGLING_SYMLINK_STDERR)?.reason).toContain("No such file or directory");
+
+    const s = closeAfterOneMention();
+    const posts: Array<Record<string, unknown>> = [];
+    const cursors: number[] = [];
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      onCursor: (c) => cursors.push(c),
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: 1 };
+      },
+      runCommand: createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir: tempDir(),
+        runProcess: async () => ({ code: 1, stdout: "", stderr: CODEX_DANGLING_SYMLINK_STDERR }),
+        post: async () => ({ seq: 1 }),
+      }),
+    });
+
+    expect(await runServe(o)).toBe(13);
+    expect(cursors).toEqual([]);
+    const note = String(posts.find((p) => p.state === "blocked")?.note);
+    expect(note).toContain("codex_skill_load");
+    expect(note).toContain("/Users/dev/.agents/skills/shared/SKILL.md");
+    expect(note).not.toContain("retry=disabled_environment");
+  });
+
+  test("环境指纹优先：同时出现 auth 失败时仍走 #690/#748 的终局语义，不被本档改写", async () => {
+    const s = closeAfterOneMention();
+    const posts: Array<Record<string, unknown>> = [];
+    const cursors: number[] = [];
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      onCursor: (c) => cursors.push(c),
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: 1 };
+      },
+      runCommand: createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir: tempDir(),
+        runProcess: async () => ({
+          code: 1,
+          stdout: "",
+          stderr: `${CODEX_SKILL_STDERR}\nERROR: Failed to authenticate: OAuth session expired`,
+        }),
+        post: async () => ({ seq: 1 }),
+      }),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    // 终局结算：宣告放弃、推进游标——与本 PR 之前一致。
+    expect(cursors).toEqual([1]);
+    const note = String(posts.find((p) => p.state === "blocked")?.note);
+    expect(note).toContain("retry=disabled_environment");
+    expect(note).not.toContain("wake held");
+  });
+
+  test("只有 skill 加载失败时：不结算、不推游标、终局停机，通告里带路径与修法", async () => {
+    const s = closeAfterOneMention();
+    const posts: Array<Record<string, unknown>> = [];
+    const cursors: number[] = [];
+    const stucks: Array<StuckWake | null> = [];
+    let calls = 0;
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      onCursor: (c) => cursors.push(c),
+      onStuck: (st: StuckWake | null) => stucks.push(st),
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: 1 };
+      },
+      runCommand: createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir: tempDir(),
+        runProcess: async () => {
+          calls++;
+          return { code: 1, stdout: "", stderr: CODEX_SKILL_STDERR };
+        },
+        post: async () => ({ seq: 1 }),
+      }),
+    });
+
+    // 停机退出（EXIT_RUNNER_UNAVAILABLE=13），不是跑到频道 archived 才结束。
+    expect(await runServe(o)).toBe(13);
+    // 文件不会在重试间隔里自己变好——一次就够，别把预算烧在同一份诊断上。
+    expect(calls).toBe(1);
+    // 最要紧的一条：这条 @ 没有被消费。游标一步没动。
+    expect(cursors).toEqual([]);
+    // 欠账落盘且标着「重放是安全的」——人修好文件重启后，它会真的被重放而不是直接判死。
+    expect(stucks.at(-1)).toMatchObject({ seq: 1, retriable: true });
+    const note = String(posts.find((p) => p.state === "blocked")?.note);
+    expect(note).toContain("wake held");
+    expect(note).toContain("codex_skill_load");
+    expect(note).toContain("/Users/dev/ai-workspace/shared-skills/ima-skill/knowledge-base/SKILL.md");
+    expect(note).toContain("missing YAML frontmatter");
+    expect(note).toContain("model did not run");
+    expect(note).toContain("not consumed");
+    // 不能再说「放弃」——那正是把 @ 丢掉的说法。
+    expect(note).not.toContain("giving up");
+    expect(note).not.toContain("retry=disabled_environment");
+  });
+
+  test("对照组：同一夹具、同一条 @，stderr 换成普通模型失败就照旧结算并推游标", async () => {
+    // 这条是上一测试的正控。没有它，「游标没动」也可能只是因为这条 @ 压根没被唤醒过——
+    // 那样即便退回旧实现，断言照样绿。夹具唯一的变量是 stderr 里有没有那行 skill 加载失败。
+    const s = closeAfterOneMention();
+    const cursors: number[] = [];
+    const posts: Array<Record<string, unknown>> = [];
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      onCursor: (c) => cursors.push(c),
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: 1 };
+      },
+      runCommand: createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir: tempDir(),
+        runProcess: async () => ({ code: 1, stdout: "", stderr: "model ran, then failed" }),
+        post: async () => ({ seq: 1 }),
+      }),
+    });
+
+    expect(await runServe(o)).toBe(EXIT_ARCHIVED);
+    expect(cursors).toEqual([1]);
+    expect(String(posts.find((p) => p.state === "blocked")?.note)).toContain("giving up");
+  });
+
+  test("startup preflight 不再声称 ready——它只验了 auth/binary", async () => {
+    const workdir = tempDir();
+    const check = createBuiltinRunnerStartupCheck({
+      server: "http://agentparty.test",
+      token: "ap_tok",
+      channel: "dev",
+      harness: "codex",
+      workdir,
+      codexLaunch: { ok: true, codexBinary: "codex", codexArgsPrefix: [], env: {} },
+      runProcess: async () => ({ code: 0, stdout: "Logged in", stderr: "" }),
+      post: async () => ({ seq: 1 }),
+    } as unknown as BuiltinRunnerOptions);
+    await check(new AbortController().signal);
+
+    const log = readFileSync(join(workdir, "serve-runner.log"), "utf8");
+    expect(log).toContain("startup_preflight=true");
+    expect(log).toContain("verified=auth,binary");
+    expect(log).toContain("unverified=config,skills");
+    // 这条检查跑的是 `codex login status`，它对畸形 SKILL.md 完全不可见（真机验过）。
+    // 说 ready=true 就是替它下一个它下不了的结论——正是 #892 报告里被 quote 的那一行。
+    expect(log).not.toContain("ready=true");
   });
 });

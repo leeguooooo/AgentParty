@@ -8,3 +8,10 @@ declare namespace Cloudflare {
     OIDC_CLIENT_ID?: string;
   }
 }
+
+// vite 的 `?raw` 后缀导入：把文件文本在构建期嵌进来。workers 运行时读不到宿主文件系统，
+// 源码级守卫（next-mention.spec.ts 里那条「所有 INSERT 都同步了 @ 索引」）只能靠它拿到源码。
+declare module "*?raw" {
+  const content: string;
+  export default content;
+}

@@ -231,12 +231,35 @@ export class WakeBlockedError extends Error {
    * 让 owner 从 `party who` / `party wake test` 看得见），修好后由下一条 @ 或重连自愈。
    */
   readonly environment: boolean;
-  constructor(message: string, retriable = false, opts?: { environment?: boolean }) {
+  /**
+   * #892：runner 的**配置/输入**坏了——不是凭据、不是二进制、不是沙箱，而是一份 harness 在启动模型
+   * 之前就要读、且读不动的本地文件（当前只有一类：codex 递归发现到的畸形 `SKILL.md`）。
+   * 与 environment 的区别只在**处置**：认证过期那类修好之前重试都是白烧、且旧凭据可能已经换人，
+   * 所以 #690 把它判终局；这类是「用户把某个文件改回去就能跑」的确定性错误，模型一步都没起，
+   * 把这条 @ 结算掉纯属白丢。带上它的 wake 不结算、不推游标，serve 终局停机等人修（见 EXIT_RUNNER_UNAVAILABLE）。
+   */
+  readonly configuration: RunnerConfigFailure | null;
+  constructor(
+    message: string,
+    retriable = false,
+    opts?: { environment?: boolean; configuration?: RunnerConfigFailure },
+  ) {
     super(message);
     this.name = "WakeBlockedError";
     this.retriable = retriable;
     this.environment = opts?.environment ?? false;
+    this.configuration = opts?.configuration ?? null;
   }
+}
+
+/** #892：一处会在模型启动前把 runner 打死、且用户改一个文件就能修好的配置错。 */
+export interface RunnerConfigFailure {
+  /** 稳定的机器可读类别，落进日志/通告，便于以后再加别的 harness 的同类错。 */
+  kind: "codex_skill_load";
+  /** 出问题的文件绝对路径——诊断里最有用的一条信息，绝不能被摘要吃掉。 */
+  path: string;
+  /** harness 自己给的原因原文（例：missing YAML frontmatter delimited by ---）。 */
+  reason: string;
 }
 
 /** runner 占用超过硬上限；模型可能已经执行过，所以绝不能自动重跑。 */
@@ -2476,6 +2499,67 @@ export function isRunnerEnvFailure(result: Pick<RunnerProcessResult, "stderr">):
   return RUNNER_ENV_FAILURE_PATTERNS.some((re) => re.test(result.stderr));
 }
 
+/**
+ * #892：**判定成立的那一行**是什么。
+ *
+ * 存在的理由是一个真实误诊：诊断摘要一直取 stderr 的**开头**，而环境失败的指纹往往在**结尾**
+ * （codex 先吐 skill/启动噪声，401 之类的真因排在后面）。于是 #892 的报告里出现了
+ * `env_failure=true` 配一段「failed to load skill ... missing YAML frontmatter」——那段文字
+ * 与 RUNNER_ENV_FAILURE_PATTERNS 的任何一条都不匹配（`missing YAML frontmatter` 那个形态），
+ * 也就是说：**通告里展示的原因，根本不是触发判定的那一条**。报的人照着改 SKILL.md，改不好也不奇怪。
+ *
+ * 所以判定命中时，诊断必须交出命中的那一行。所有指纹都是行内模式（没有跨行的），
+ * 逐行扫与整串扫命中集合一致，不会出现「整串命中而逐行找不到」。
+ */
+export function runnerEnvFailureEvidence(stderr: string): string | null {
+  for (const line of stderr.split("\n")) {
+    const text = line.trim();
+    if (text === "") continue;
+    if (RUNNER_ENV_FAILURE_PATTERNS.some((re) => re.test(text))) return text;
+  }
+  return null;
+}
+
+// #892：codex 在**模型启动之前**递归发现并加载 skills；读不动某个 SKILL.md 时会打印这行。
+// 它既不是凭据错也不是二进制缺失，此前落进「exit-1，模型可能跑过」那一档被终局结算，@ 就此沉掉；
+// 而实情是模型一步都没起，且用户把那个文件删掉/补好就行。单独成档。
+//
+// 两种形态、两条歧路，都要挡住：
+//   - `missing YAML frontmatter delimited by ---`：RUNNER_ENV_FAILURE_PATTERNS 一条都不匹配
+//     ⇒ 旧实现判它「模型可能跑过」，挂着免责标签终局结算；
+//   - `No such file or directory`（断掉的 skill 符号链接，正是 #892 报告里的布局）：**恰好**命中
+//     ENOENT「二进制缺失」指纹 ⇒ 旧实现判它环境失败，同样终局结算，还显示错的修法。
+// 所以判环境之前必须先摘掉这几行，见 withoutSkillLoadLines。
+const CODEX_SKILL_LOAD_FAILURE_RE = /failed to load skill\s+([^\s][^\n]*?):\s*([^\n]+)/i;
+
+/** stderr 里若有 codex 的 skill 加载失败，交出出问题的路径与原文理由。 */
+export function codexSkillLoadFailure(stderr: string): RunnerConfigFailure | null {
+  const match = CODEX_SKILL_LOAD_FAILURE_RE.exec(stderr);
+  if (match === null) return null;
+  const path = match[1]!.trim();
+  const reason = match[2]!.trim();
+  if (path === "" || reason === "") return null;
+  return { kind: "codex_skill_load", path, reason };
+}
+
+/**
+ * 判别环境失败时，先把 skill 加载失败那几行摘掉（CodeRabbit on #892）。
+ *
+ * 理由是一个会真实发生的串档：#892 报告里的全局 skills 目录含一个指向共享 skill 树的**符号链接**，
+ * 断链时 codex 打的正是 `failed to load skill <path>: No such file or directory`——而
+ * `no such file or directory` 恰好是 RUNNER_ENV_FAILURE_PATTERNS 里「二进制缺失」的指纹。
+ * 不摘掉的话，这条最该落进「配置坏了、改个文件就好」那一档的错，会被判成环境失败终局结算，
+ * 并且对着用户显示 credentials/binary/sandbox 的通用修法。
+ *
+ * 只摘 skill 加载失败自己那一行：其它行里的认证/二进制错照旧优先（#690/#748 的判据不动）。
+ */
+function withoutSkillLoadLines(stderr: string): string {
+  return stderr
+    .split("\n")
+    .filter((line) => !/failed to load skill\s/i.test(line))
+    .join("\n");
+}
+
 export function runnerDiagnosticExcerpt(
   result: Pick<RunnerProcessResult, "stdout" | "stderr">,
   harness: RunnerHarness,
@@ -2493,6 +2577,14 @@ export function runnerDiagnosticExcerpt(
       // Fall through to the raw process evidence.
     }
   }
+  // #892：环境失败判定命中时，交出**命中的那一行**而不是 stderr 的开头。见 runnerEnvFailureEvidence。
+  // 同样先摘掉 skill 加载失败那几行，否则断链 skill 的「No such file or directory」会冒充环境证据，
+  // 把真正该显示的路径挤掉——判定与展示必须用同一份输入，不然又是一次「展示的原因不是触发的原因」。
+  const evidence = runnerEnvFailureEvidence(withoutSkillLoadLines(result.stderr));
+  if (evidence !== null) return sanitizeBlockedError(evidence);
+  // #892：配置类失败同理——把出问题的文件路径顶到最前，别让它被前面的启动噪声挤出摘要。
+  const config = codexSkillLoadFailure(result.stderr);
+  if (config !== null) return sanitizeBlockedError(`failed to load skill ${config.path}: ${config.reason}`);
   const raw = result.stderr.trim() || result.stdout.trim();
   return raw === "" ? "runner exited without diagnostic output" : sanitizeBlockedError(raw);
 }
@@ -2925,6 +3017,20 @@ async function runHarness(
  * These commands inspect local authentication only; they do not start a model turn.
  * The successful result is cached for this process so a transient socket reconnect
  * does not repeatedly spawn the same check.
+ *
+ * #892：**它通过不等于 runner 能跑**，日志也就不能写 `ready=true`。报告里的形态正是
+ * `startup_preflight=true ... ready=true` 之后第一条真 @ 直接崩在 codex 的 skill 加载上。
+ * 想让 preflight 覆盖那条路径需要一个「加载完配置与 skills 但不起模型」的命令；在 codex-cli
+ * 0.145.0 上逐个验过，没有：
+ *   - `codex login status`：只看凭据，畸形 SKILL.md 对它完全不可见；
+ *   - `codex doctor --json`：18 项检查（auth/config/network/sandbox/state/...），**没有 skills 这一项**，
+ *     畸形文件在场时 overallStatus 仍不报它；
+ *   - `codex debug prompt-input`：确实走 skill 发现（输出里能看到已加载的 skill 列表），但对畸形文件
+ *     只是静默跳过——exit 0、stderr 空，RUST_LOG=error/info 都不吐那行 ERROR；
+ *   - 只有 `codex exec` 会打印 `failed to load skill ...`，而它就是要起模型的那条命令。
+ * 结论：这里只能诚实地报「验了什么、没验什么」，真实的第一手证据留给第一次 wake，由
+ * codexSkillLoadFailure 那一档负责不把它结算掉。哪天 codex 提供了免模型的校验模式，
+ * 把它加进来并把 unverified 缩小即可。
  */
 export function createBuiltinRunnerStartupCheck(
   opts: BuiltinRunnerOptions,
@@ -2981,9 +3087,10 @@ export function createBuiltinRunnerStartupCheck(
       );
     }
     ready = true;
+    // #892：只写「验过什么、没验什么」。`ready=true` 是一句这条检查没有资格下的结论。
     appendRunnerLog(
       opts.workdir,
-      `${new Date((opts.now ?? Date.now)()).toISOString()} startup_preflight=true harness=${opts.harness} exit=0 ready=true`,
+      `${new Date((opts.now ?? Date.now)()).toISOString()} startup_preflight=true harness=${opts.harness} exit=0 verified=auth,binary unverified=config,skills`,
     );
   };
 }
@@ -3602,14 +3709,33 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         if (run.result.code !== 0) {
           // #690：认证过期 / 二进制缺失 / 沙箱拒权等环境性失败在模型启动前就崩，别归为「model may have run」。
           // #748：claude 的 auth/api 失败落在 stdout 的结构化 JSON（非 stderr），补一条只吃结构化字段的判定。
+          // #892：codex 的 skill 加载失败单独成档，但**排在环境失败之后**——凭据过期那类的处置
+          // （#690/#748 已确立的终局语义）不能被一条恰好同时出现的 skill 噪声改写。只有在没有任何
+          // 环境指纹命中时，skill 加载失败才是这次非零退出最好的解释。
+          // 判环境时先摘掉 skill 加载失败那几行（断掉的 skill 符号链接会打出「No such file or
+          // directory」，恰好撞上「二进制缺失」的指纹）——见 withoutSkillLoadLines。
           const envFailure =
-            isRunnerEnvFailure(run.result) ||
+            isRunnerEnvFailure({ stderr: withoutSkillLoadLines(run.result.stderr) }) ||
             (opts.harness === "claude" && claudeJsonEnvFailure(run.result.stdout));
+          const configFailure =
+            !envFailure && opts.harness === "codex" ? codexSkillLoadFailure(run.result.stderr) : null;
           const diagnostic = runnerDiagnosticExcerpt(run.result, opts.harness);
           appendRunnerLog(
             opts.workdir,
-            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}${envFailure ? " env_failure=true" : ""} diagnostic=${JSON.stringify(diagnostic)}`,
+            `${new Date(now).toISOString()} seq=${frame.seq} sid=${shortSid(oldSid)} duration_ms=${now - started} exit=${run.result.code}${envFailure ? " env_failure=true" : ""}${configFailure === null ? "" : ` config_failure=${configFailure.kind} config_path=${JSON.stringify(configFailure.path)}`} diagnostic=${JSON.stringify(diagnostic)}`,
           );
+          if (configFailure !== null) {
+            throw new WakeBlockedError(
+              `builtin codex runner blocked: exit code ${run.result.code} ` +
+                `(codex skill/config load failure: ${configFailure.path}: ${configFailure.reason} — model did not run); ` +
+                `修好或移除该文件后重启 serve；这条 @ 不会被结算。log: ${join(opts.workdir, RUNNER_LOG_FILE)}`,
+              // 模型确定没跑过 ⇒ 重跑是安全的（这正是 retriable 的定义）。立刻重试没意义——文件不会
+              // 在几毫秒里自己变好——所以调用方看到 configuration 就跳出重试循环，而不是靠 retriable=false
+              // 把它伪装成「不安全重跑」。持久化的欠账因此保留 retriable=true，人修好重启后能真的重放。
+              true,
+              { environment: true, configuration: configFailure },
+            );
+          }
           throw new WakeBlockedError(
             `builtin ${opts.harness} runner blocked: exit code ${run.result.code}` +
               `${envFailure ? ` (runner environment failure: ${diagnostic} — model did not run)` : ` (${diagnostic})`}; ` +
@@ -5670,6 +5796,9 @@ export async function runServe(o: ServeOptions): Promise<number> {
         // 不能把配置预算 maxAttempts 伪装成实际已跑次数（例如一次 SIGTERM 不能写成 3/3）。
         let attemptsUsed = attemptFloor;
         let lastFailureEnvironment = false;
+        // #892：本帧撞上的 runner 配置错（畸形 SKILL.md 之类）。非 null ⇒ 这条 @ 不结算、不推游标，
+        // serve 终局停机等人修好——把一条模型从未看到的 @ 结算掉，等于替用户丢消息。
+        let heldConfigFailure: RunnerConfigFailure | null = null;
         // 身后已缓冲的 wake 深度（#103）：内建 runner 随 working 帧上报，presence 显示「忙 + N 待处理」。
         // 本帧正在处理，故只数它 seq 之后、够格触发唤醒的缓冲帧。
         const queueDepth = pendingWakeDepth(
@@ -5990,6 +6119,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
               // 那会误导 owner 以为副作用可能已发生。说清是环境坏了、修好再 @ 即可（保守：仅明确指纹命中）。
               const envFailure = e instanceof WakeBlockedError && e.environment;
               lastFailureEnvironment = envFailure;
+              // #892：runner 配置坏了（当前只有 codex 畸形 SKILL.md 一类）。模型一步没起，
+              // 而且文件不会在重试间隔里自己变好——立刻重跑只是把同一份诊断再打一遍。
+              const configFailure = e instanceof WakeBlockedError ? e.configuration : null;
+              if (configFailure !== null) heldConfigFailure = configFailure;
               if (!retriable) {
                 lastError += envFailure
                   ? " (runner environment failure: model did not run — fix credentials/binary/sandbox, e.g. `claude login`, then re-mention)"
@@ -6013,6 +6146,10 @@ export async function runServe(o: ServeOptions): Promise<number> {
                   ...(runnerTerminationUnconfirmed ? { termination_unconfirmed: true } : {}),
                 });
               }
+              // #892：配置类失败到此为止。retriable 仍是 true（模型确实没跑，重放是安全的，
+              // 落盘的欠账也就带着 retriable=true，人修好重启后能真的重放），但重试留给「人改完文件」
+              // 那一刻，不在这里空转烧预算。
+              if (heldConfigFailure !== null) break;
               if (retriable && attempt < maxAttempts && retryDelayMs > 0) {
                 await delayWithAbort(retryDelayMs, lifecycleController.signal);
               }
@@ -6133,6 +6270,33 @@ export async function runServe(o: ServeOptions): Promise<number> {
           // 不删，理由写在这里。
           if (deliveryConfirmed && stuck !== null && stuck.seq === frame.seq) setStuck(null);
           await clearBusyIfDrained(`idle: ${self} finished wake seq=${frame.seq}, waiting for next @`);
+        } else if (heldConfigFailure !== null) {
+          // #892：runner 的配置/输入坏了，模型一步都没起。这不是「这条 @ 处理失败」，是「这台
+          // serve 现在没有执行能力」——把它当失败结算掉，等于用户改好一个文件之后还得回去求发送方
+          // 重发一遍。所以：响亮宣告 + **不结算**（不发 delivery failed）+ **不推游标**（不 ack）
+          // + 终局停机。留在服务端的那条 @ 由租约过期/重连重放交给修好后的 serve。
+          const note =
+            `wake held, runner configuration is broken: seq=${frame.seq}; ` +
+            `reason=${heldConfigFailure.kind}; path=${heldConfigFailure.path}; detail=${heldConfigFailure.reason}; ` +
+            `model did not run; this @ was not consumed — fix or remove that file and restart serve`;
+          out(`  ${note}`);
+          try {
+            await (o.post ?? postMessage)(o.server, o.token, o.channel, {
+              kind: "status",
+              state: "blocked",
+              note,
+              mentions: [],
+              blocked_reason: note,
+              // 停机退出，队列不会再被排空——强制清 busy，别留一个「永远在忙」的幽灵。
+              ...takeBusyClearIfDrained(true),
+            }, lifecycleController.signal);
+          } catch (e) {
+            out(`  配置错误通告发送失败，欠账保留、游标不动、退出: ${errText(e)}`);
+            code = EXIT_WAKE_UNANNOUNCED;
+            break;
+          }
+          code = EXIT_RUNNER_UNAVAILABLE;
+          break;
         } else {
           // 有界重放到顶：显式放弃，但必须响亮留痕——静默丢弃正是 #118 要修的东西。
           // 没有 CLI flag，所以重试预算与退避必须**在频道里可见**：把常数藏进源码是不诚实的。
