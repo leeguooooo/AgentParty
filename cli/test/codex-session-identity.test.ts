@@ -16,11 +16,17 @@ import {
 } from "../src/config";
 import { registerCodexSession } from "../src/claude-session-registry";
 import {
+  codexHookIdentityFix,
   codexMcpConfigPaths,
   defaultCodexHookIdentityDeps,
   looksLikePartyMcpCommand,
   resolveCodexHookIdentity,
 } from "../src/codex-session-identity";
+import {
+  joinBindingsPath,
+  writeJoinBinding,
+  type BindingHarness,
+} from "../src/join-binding";
 import { codexAutoWakeAuth, codexAutoWakeTarget } from "../src/codex-auto-wake";
 import { codexStopWakeSeenPath } from "../src/codex-stop-wake";
 import { defaultCodexStopWakeDeps } from "../src/commands/hook";
@@ -312,5 +318,128 @@ describe("MCP 子进程扫描", () => {
     expect(codexMcpConfigPaths(69445, dead)).toEqual([]);
     expect(codexMcpConfigPaths(1, dead)).toEqual([]);
     expect(codexMcpConfigPaths(-1, dead)).toEqual([]);
+  });
+});
+
+
+// ── #924 的钉子 ─────────────────────────────────────────────────────────────
+// 真机故障形态逐字照抄（owner 那台 v0.2.205 实测）：
+//   · codex 是 ChatGPT.app 桌面端 ⇒ 不继承 shell 环境 ⇒ 第 ① 档（env）不适用；
+//   · 入册要先解析出身份才写得进 ⇒ 第 ③ 档（session-registry）空着；
+//   · 同一个 codex 进程下挂着**三条** #agentparty 的 MCP 注册 ⇒ 第 ④ 档判歧义；
+//   · 本机该频道有 **14 个**身份 ⇒ 第 ⑤ 档（cwd 唯一）不唯一。
+// 四档全灭 ⇒ 静默不叫。加入即绑定必须把这台机器救回来，且**必须解析到最近一次加入的那个身份**。
+describe("pins #924：同 harness 同频道堆了一串历史身份，加入后仍能唯一解析出最新身份", () => {
+  const OWNER = "lark:on_owner";
+  const SERVER = SESSION_SERVER;
+
+  /** 一台「用了很久」的机器：同频道 14 个身份，其中 3 个还挂在当前 codex 进程的 MCP 注册里。 */
+  function stageWornMachine(): { paths: string[]; registered: string[] } {
+    const paths: string[] = [];
+    for (let i = 0; i < 14; i += 1) {
+      const name = `lark-ad72b3f9749e-agentparty-codex${String(i)}`;
+      paths.push(writeAgentConfig(`agentparty-${name}-agentparty.json`, agentConfig(name, SERVER, `tok-${String(i)}`)));
+    }
+    // cwd 绑着其中随便一个——按 cwd 猜必然猜错，这正是 #917/#924 要根除的。
+    writeWorkspaceConfigOnly(agentConfig("lark-ad72b3f9749e-agentparty-codex0", SERVER, "tok-0"), cwd);
+    writeState({ channel: CHANNEL, cursor: 1899 }, cwd);
+    // 该 codex 进程下**看得见**三条注册（真机就是 3 条），历史堆积。
+    const registered = [paths[0]!, paths[7]!, paths[13]!];
+    return { paths, registered };
+  }
+
+  function bind(configPath: string, identity: string, harness: BindingHarness = "codex", overrides: Record<string, unknown> = {}) {
+    return writeJoinBinding(joinBindingsPath(home), {
+      harness,
+      server: SERVER,
+      channel: CHANNEL,
+      owner: OWNER,
+      identity,
+      config_path: configPath,
+      cwd,
+      created_at: 1_700_000_000_000,
+      ...overrides,
+    } as never);
+  }
+
+  test("四档反推全灭时，加入即绑定解析出最近一次加入的身份（不是 cwd 猜的、不是最老的）", () => {
+    const { paths, registered } = stageWornMachine();
+    // 用户最近一次加入用的是第 14 个身份（codex13），且它确实在该进程的注册里。
+    bind(paths[13]!, "lark-ad72b3f9749e-agentparty-codex13");
+    const result = resolve({ mcpConfigPaths: () => registered }, null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.identity.source).toBe("join-binding");
+    expect(result.identity.name).toBe("lark-ad72b3f9749e-agentparty-codex13");
+    expect(result.identity.server).toBe(SERVER);
+    expect(result.identity.token).toBe("tok-13");
+    // 游标/欠账必须落在解析出的那个身份的作用域里，不能回落到 cwd。
+    expect(result.identity.configScopedState).toBe(true);
+    expect(result.identity.configPath).toBe(paths[13]!);
+  });
+
+  // 变异自检：删掉加入即绑定这一档，本用例必须变红——否则它钉的不是本次修复。
+  test("没有绑定时，同一台机器仍然是四档全灭（证明上面那条钉的是绑定本身）", () => {
+    const { registered } = stageWornMachine();
+    const result = resolve({ mcpConfigPaths: () => registered }, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("ambiguous");
+  });
+
+  test("后加入替换先加入：同 harness+server+channel+owner 只留最新那条", () => {
+    const { paths, registered } = stageWornMachine();
+    bind(paths[0]!, "lark-ad72b3f9749e-agentparty-codex0");
+    const replaced = bind(paths[13]!, "lark-ad72b3f9749e-agentparty-codex13");
+    // 替换掉了谁必须报得出来。
+    expect(replaced.map((r) => r.identity)).toEqual(["lark-ad72b3f9749e-agentparty-codex0"]);
+    const result = resolve({ mcpConfigPaths: () => registered }, null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.identity.name).toBe("lark-ad72b3f9749e-agentparty-codex13");
+  });
+
+  test("不同 harness 的身份不被替换、也不互相污染（claude 的绑定 codex 永远看不见）", () => {
+    const { paths, registered } = stageWornMachine();
+    bind(paths[3]!, "claude-side", "claude");
+    bind(paths[13]!, "lark-ad72b3f9749e-agentparty-codex13");
+    const result = resolve({ mcpConfigPaths: () => registered }, null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.identity.name).toBe("lark-ad72b3f9749e-agentparty-codex13");
+  });
+
+  test("佐证不匹配 ⇒ 不硬用绑定（终端 codex 与桌面 codex 各自加入过同一频道）", () => {
+    const { paths } = stageWornMachine();
+    // 绑定记的是 codex13，但**这个** codex 进程下只看得见 codex7 ⇒ 绑定不属于本实例。
+    bind(paths[13]!, "lark-ad72b3f9749e-agentparty-codex13");
+    const result = resolve({ mcpConfigPaths: () => [paths[7]!] }, null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 落到就地取证的那一档，解析出的是本进程真正挂着的那个身份——绝不误投给 codex13。
+    expect(result.identity.source).toBe("mcp-registration");
+    expect(result.identity.name).toBe("lark-ad72b3f9749e-agentparty-codex7");
+  });
+
+  test("绑定指向的 config 已经没了 ⇒ 当没有绑定，绝不当成解析成功", () => {
+    const { registered } = stageWornMachine();
+    bind(join(home, "agents", "gone.json"), "ghost");
+    const result = resolve({ mcpConfigPaths: () => registered }, null);
+    expect(result.ok).toBe(false);
+  });
+
+  test("每一种放弃都给得出一条可执行命令——静默失败没有出口", () => {
+    for (const reason of [
+      "no-channel",
+      "env-config-unusable",
+      "ambiguous-binding",
+      "registry-identity-unresolvable",
+      "ambiguous",
+      "no-identity",
+    ] as const) {
+      const fix = codexHookIdentityFix(reason, { channel: CHANNEL, server: SERVER });
+      expect(fix.trim().length).toBeGreaterThan(0);
+      expect(fix.startsWith("party ") || fix.startsWith("unset ")).toBe(true);
+    }
   });
 });

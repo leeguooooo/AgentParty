@@ -3,6 +3,7 @@
 import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type ReceptionContextBoundary, type ReceptionMode, type ReceptionRunner, type RunnerHealth, type RuntimePeerDiscovery, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
+import { diagnoseCodexWake, formatCodexWakeDiagnosis, shouldSurfaceCodexWakeDiagnosis } from "../wake-diagnosis";
 import { resolveAuth } from "../oidc-cli";
 import { fetchPresence, fetchReadCursors, fetchRuntimePeers, handleRestError } from "../rest";
 import { buildRuntimeTopology } from "../runtime-topology";
@@ -799,6 +800,20 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     }
     for (const r of rows) console.log(renderRow(r, now, lastSeq));
+    // #924：谁在场是一回事，「@ 我叫不叫得醒我」是另一回事。此前后者只在日志里留一行，
+    // 于是用户看到自己在 who 里好好地列着、却怎么都醒不过来。断了就在这里说出来。
+    try {
+      const wake = diagnoseCodexWake();
+      // 判据必须是「会不会跑」而不是「装没装」：`hookInstalled` 只排除 missing，
+      // 于是 disabled / needs-review（信任闸没过，owner 那台的真实状态）会被当成正常，
+      // who 继续沉默——正是本 PR 要终结的那种静默。只有 ok 才算通。
+      if (shouldSurfaceCodexWakeDiagnosis(wake)) {
+        console.log("");
+        for (const line of formatCodexWakeDiagnosis(wake)) console.log(line);
+      }
+    } catch {
+      // 诊断是附赠信息，绝不能把 who 本身弄挂。
+    }
     return 0;
   } catch (e) {
     return handleRestError(e);

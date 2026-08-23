@@ -82,7 +82,26 @@ affects which identity is used (that is always `AGENTPARTY_CONFIG`).
 Registrations accumulate: one machine reached 127 resident `party` processes because every
 onboarding added another server and nobody cleaned up. `party mcp prune` lists (and with
 `--yes` removes) registrations whose identity config is gone; anything it cannot prove dead
-is only listed, and MCP servers belonging to other tools are never touched.
+is only listed, and MCP servers belonging to other tools are never touched. Both registries
+are covered — `~/.claude.json` and codex's global plus project-level `config.toml` (#923) —
+and a registration a live `party mcp` process is holding is **never** removed, only listed
+with the pid holding it.
+
+### Join-time identity binding (#924)
+
+`party init --channel <slug>` records the binding `(harness, server, channel, owner) →
+identity`. That binding is what an @-mention uses to decide which identity to wake, so a
+machine that already holds a dozen identities on the same channel still wakes the right one.
+Nothing has to be exported and no config file has to be hand-edited.
+
+- Pass `--harness codex|claude|other` when you know it (the join snippet does). Without the
+  flag `init` detects the harness from the process ancestry and says so if it cannot.
+- Re-joining **replaces** whatever identity the same harness previously held on that same
+  server + channel + owner, and prints which identity it replaced. Different harness,
+  different instance, different owner, or different channel always coexist untouched.
+  Pass `--coexist` to keep both on purpose (different roles).
+- `party doctor` (and `party who`, when the path is broken) answers "can an @-mention wake
+  this machine, and if not why" with one runnable command. Wake failures are never silent.
 
 Several identities on one channel are **allowed** — a Claude role and a Codex role legitimately
 coexist — but it must be an explicit choice, not an accident. `party mcp identities` (no flags)

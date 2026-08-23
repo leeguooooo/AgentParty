@@ -37,11 +37,14 @@ import {
 import {
   CODEX_STOP_WAKE_QUERY_TIMEOUT_MS,
   codexStopWakeGate,
+  codexStopWakeQuerySince,
   codexStopWakeReason,
   codexStopWakeSeenPath,
   decideCodexStopWake,
+  liveCodexStopWakeSeen,
   readCodexStopWakeSeen,
   recordCodexStopWakeSeen,
+  type CodexStopWakeSeenEntry,
 } from "../codex-stop-wake";
 import {
   DeliveryRecoveryJournal,
@@ -386,8 +389,18 @@ function stripOurCommands(entries: unknown[]): unknown[] {
 
 export type HookScope = "project" | "user" | "codex";
 
-export function settingsPath(scope: HookScope, cwd: string = process.cwd()): string {
-  if (scope === "codex") return join(homedir(), ".codex", "hooks.json");
+export function settingsPath(
+  scope: HookScope,
+  cwd: string = process.cwd(),
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  // codex 的 hooks 跟着 CODEX_HOME 走——它就是 codex 自己判定「我的家在哪」的那个变量。
+  // 写死 homedir() 会让「用临时 CODEX_HOME 试一下」变成「悄悄改了用户真正在用的那份
+  // hooks.json」（#924 验收时真的踩到了，改回来才发现）。项目级 CODEX_HOME 同理。
+  if (scope === "codex") {
+    const codexHome = env.CODEX_HOME?.trim();
+    return join(codexHome !== undefined && codexHome !== "" ? codexHome : join(homedir(), ".codex"), "hooks.json");
+  }
   return scope === "user"
     ? join(homedir(), ".claude", "settings.json")
     : join(cwd, ".claude", "settings.local.json");
@@ -935,8 +948,8 @@ export interface CodexStopWakeDeps {
   cursor: (channel: string, cwd: string) => number;
   /** 已注入过的 seq 集合的落盘路径；拿不到身份时返回 null（→ 无法去重，必须放行）。 */
   seenPath: (channel: string, cwd: string) => string | null;
-  readSeen: (path: string) => number[];
-  recordSeen: (path: string, seq: number) => void;
+  readSeen: (path: string) => CodexStopWakeSeenEntry[];
+  recordSeen: (path: string, seq: number, now: number) => void;
   emit: (line: string) => void;
   log: (line: string) => void;
   now: () => number;
@@ -1023,7 +1036,7 @@ export function defaultCodexStopWakeDeps(
       return resolved === null ? null : codexStopWakeSeenPath(home, resolved);
     },
     readSeen: readCodexStopWakeSeen,
-    recordSeen: recordCodexStopWakeSeen,
+    recordSeen: (path, seq, at) => recordCodexStopWakeSeen(path, seq, at),
     emit: (line) => console.log(line),
     log: (line) => appendCodexAutoWakeLog(home, line),
     now: () => Date.now(),
@@ -1060,16 +1073,24 @@ export async function handleCodexStopRecord(
   if (!codexStopWakeGate({ payload: record, channel, enabled: deps.enabled() }).ok) return;
   const boundChannel = channel as string;
   const cursor = deps.cursor(boundChannel, cwd);
-  // 快路径：serve/watch 恰好留了欠账就直接用，省掉这次网络。
+  const seenPath = deps.seenPath(boundChannel, cwd);
+  const seenEntries = seenPath === null ? [] : deps.readSeen(seenPath);
+  const seen = liveCodexStopWakeSeen(seenEntries, deps.now());
+  // #922：查询的 since 抬到「游标 与 已提示过且仍在时效内的最大 seq」的较大者。
+  // 只用游标的话，被提示过却没处理的那条会永久占住队首，后面的 @ 一条都够不着（真机实测）。
+  const since = codexStopWakeQuerySince(cursor, seen);
+  // 快路径：serve/watch 恰好留了欠账就直接用，省掉这次网络。同样以 since 为底——
+  // 本地欠账若正是那条已提示过的队首，它一样会把后面的 @ 挡死。
   const stuck = deps.stuck(boundChannel, cwd);
   let pending: { seq: number; first_wake_ts?: number } | null =
-    stuck !== null && Number.isFinite(stuck.seq) && stuck.seq > cursor ? stuck : null;
+    stuck !== null && Number.isFinite(stuck.seq) && stuck.seq > since ? stuck : null;
   if (pending === null) {
     // 慢路径也是**主路径**：本 hook 的目标场景恰恰是「没人挂 serve」，那时本地永远没有欠账。
     const startedAt = deps.now();
-    const seq = await deps.nextMention(boundChannel, cwd, cursor);
+    const seq = await deps.nextMention(boundChannel, cwd, since);
     deps.log(
-      `codex-stop: next-mention 查询耗时 ${deps.now() - startedAt}ms，结果 ${seq === null ? "无/不可用" : `seq ${seq}`}`,
+      `codex-stop: next-mention 查询（since ${since}）耗时 ${deps.now() - startedAt}ms，` +
+        `结果 ${seq === null ? "无/不可用" : `seq ${seq}`}`,
     );
     // 服务端问来的是「此刻仍未处理」，天然不可能是陈年欠账，故 first_wake_ts 取现在。
     pending = seq === null ? null : { seq, first_wake_ts: deps.now() };
@@ -1080,21 +1101,17 @@ export async function handleCodexStopRecord(
     enabled: true,
     pending,
     cursor,
-    seen: (() => {
-      const path = deps.seenPath(boundChannel, cwd);
-      return path === null ? [] : deps.readSeen(path);
-    })(),
+    seen,
     now: deps.now(),
   });
   if (!decision.wake) return;
-  const seenPath = deps.seenPath(decision.pointer.channel, cwd);
   // 去不了重就绝不注入：没有落盘的 seen 集合，同一条 @ 会在每个 turn 结束时反复 block。
   if (seenPath === null) {
     deps.log("codex-stop: 拿不到本会话的唯一身份（见上一条解析日志），无法去重，本次放行不注入");
     return;
   }
   // 先落盘再打印。反过来的话，打印后崩一次就会对同一条 @ 反复注入。
-  deps.recordSeen(seenPath, decision.pointer.seq);
+  deps.recordSeen(seenPath, decision.pointer.seq, deps.now());
   deps.emit(JSON.stringify({
     decision: "block",
     reason: codexStopWakeReason(decision.pointer),

@@ -137,7 +137,12 @@ export function buildFullJoinPack(input: FullJoinPackInput): string {
     t("AgentJoin.cmd.step3"),
     // #676：token 走 AGENTPARTY_TOKEN 环境变量传入，不写进 argv——同机任意用户 `ps -axww` 看不到它，
     // 也不触发 party init 自身「--token 会进 argv/history」的告警（最严格可改 `--token -` 从 stdin 读）。
-    `AGENTPARTY_TOKEN='${agentToken}' party init --server ${server} --channel ${slug}`,
+    // #924 加入即绑定：--harness 把「谁在加入」变成**我们知道的事实**，而不是事后从进程树反推。
+    // other 档不带这个 flag——那一档正是「不知道是什么 harness」，CLI 会自己探测并在探不出时说出来。
+    `AGENTPARTY_TOKEN='${agentToken}' party init --server ${server} --channel ${slug}`
+      + (harness === "other" ? "" : ` --harness ${harness}`),
+    t("AgentJoin.cmd.bindingNote1"),
+    t("AgentJoin.cmd.bindingNote2"),
     inviterName === null ? t("AgentJoin.cmd.step3noteNoMention", { slug }) : t("AgentJoin.cmd.step3note"),
     inviterName === null
       ? `party send "${t("AgentJoin.cmd.checkinMessage", { agentName })}" --channel ${slug}`

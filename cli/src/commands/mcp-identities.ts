@@ -9,7 +9,11 @@
 //
 // 硬约束（与 #898 party mcp prune 同一套安全模式，测试里都有断言）：
 //  - **绝不删除任何身份配置文件**。身份是凭据载体，删错＝只能重铸 token。本命令的删除面
-//    仅限 Claude MCP 注册，而注册是可逆的（`claude mcp add` 一行就能加回来）。
+//    仅限 MCP 注册，而注册是可逆的（`claude mcp add` / `codex mcp add` 一行就能加回来）。
+//  - #923：注册面覆盖 **claude 与 codex 两侧**（codex 还分全局与项目级两份注册表）。
+//    此前只读 `~/.claude.json`，对 codex 桌面端的注册堆积说「没有注册可删」——看不见就治不了。
+//  - #923/#924：**绝不删正在被活进程使用的注册**。同频道多身份常常都是活的（不同 harness、
+//    不同角色、不同会话），有活的 `party mcp` 子进程在用 ⇒ 只列不删，并说明是谁在用。
 //  - 只碰命令本体为 party 且第一个参数为 `mcp` 的注册；别人的 MCP server 永远不看不碰。
 //  - 默认 dry-run，--yes 才真删。
 //  - 判不准一律列出不动。
@@ -26,10 +30,15 @@ import {
 } from "../identity-dedupe";
 import {
   isPartyMcpRegistration,
+  listLivePartyMcpProcesses,
+  liveConfigPathUsers,
   parseClaudeMcpRegistrations,
+  registrationHarness,
   type McpRegistration,
+  type RegistrationHarness,
 } from "../mcp-registry";
-import { claudeMcpRemove, type RemoveFn } from "./mcp-prune";
+import { codexRegistryScopes, readCodexMcpRegistrations } from "../codex-mcp-registry";
+import { harnessMcpRemove, registrationLabel, type RemoveFn } from "./mcp-prune";
 
 const HELP = `usage: party mcp identities [--channel C] [--server S] [--owner O] [--exclude NAME]
        party mcp identities --keep NAME --channel C [--server S] [--owner O] [--yes]
@@ -46,6 +55,7 @@ Modes:
                        registrations of the other identities in that group.
 
 Options:
+  --harness H    only touch one side's registry: claude | codex (default: both)
   --server S     server URL (defaults to the current config's server)
   --owner O      narrow by owner (default: don't narrow — better to over-report)
   --exclude N    ignore identity N (use it to exclude yourself)
@@ -54,8 +64,12 @@ Options:
   --json         machine-readable output
 
 Safety:
-  - identity config files are NEVER deleted by this command; only Claude MCP
+  - identity config files are NEVER deleted by this command; only MCP
     registrations can be removed, and only with --keep plus --yes
+  - both registries are covered: ~/.claude.json and codex's global +
+    project-level config.toml
+  - a registration that a live \`party mcp\` process is using is NEVER removed;
+    it is listed with the pid holding it
   - MCP servers that do not belong to AgentParty are never inspected or touched
   - multiple identities on one channel are ALLOWED (different roles, different
     harnesses). This command only makes the fact visible so the choice is explicit.
@@ -74,6 +88,12 @@ export interface IdentitiesOptions {
   json?: boolean;
   remove?: RemoveFn;
   log?: (line: string) => void;
+  /** 只治理某一侧的注册表（claude / codex）。缺省两侧都治理。 */
+  harness?: RegistrationHarness | null;
+  /** 注入点：测试用来钉住「活进程在用的注册绝不进删除路径」。 */
+  liveProcesses?: () => { pid: number; configPath: string | null; command: string }[];
+  /** 注入点：测试用来喂 codex 侧注册，避免碰真机 TOML。 */
+  codexRegistrations?: () => McpRegistration[];
 }
 
 function readJson(path: string): unknown | undefined {
@@ -92,9 +112,18 @@ export function registrationsForIdentity(
   return regs.filter((r) => isPartyMcpRegistration(r) && r.env.AGENTPARTY_CONFIG === record.path);
 }
 
-function partyRegistrations(home: string): McpRegistration[] {
+function partyRegistrations(home: string, opts: IdentitiesOptions): McpRegistration[] {
   const raw = readJson(join(home, ".claude.json"));
-  return parseClaudeMcpRegistrations(raw ?? null).filter(isPartyMcpRegistration);
+  const all = [
+    ...parseClaudeMcpRegistrations(raw ?? null),
+    // 注册表的作用域跟着 `home` 走：给一个临时 HOME 就能完全离线跑（测试硬要求）。
+    ...(opts.codexRegistrations
+      ?? (() => readCodexMcpRegistrations(codexRegistryScopes(process.env, process.cwd(), home))))(),
+  ];
+  const harness = opts.harness ?? null;
+  return all
+    .filter(isPartyMcpRegistration)
+    .filter((reg) => harness === null || registrationHarness(reg) === harness);
 }
 
 function describe(r: IdentityRecord): string {
@@ -129,6 +158,9 @@ export async function runMcpIdentities(opts: IdentitiesOptions = {}): Promise<nu
     return converge(records, existing, opts, log, home, server, channel);
   }
 
+  const regs = partyRegistrations(home, opts);
+  const inUse = liveConfigPathUsers((opts.liveProcesses ?? listLivePartyMcpProcesses)());
+
   if (opts.json === true) {
     log(
       JSON.stringify(
@@ -136,7 +168,17 @@ export async function runMcpIdentities(opts: IdentitiesOptions = {}): Promise<nu
           server,
           channel,
           owner: opts.owner ?? null,
-          existing: existing.map((r) => ({ name: r.name, owner: r.owner, config: r.path })),
+          existing: existing.map((r) => ({
+            name: r.name,
+            owner: r.owner,
+            config: r.path,
+            registrations: registrationsForIdentity(regs, r).map((reg) => ({
+              name: reg.name,
+              harness: registrationHarness(reg),
+              scope: reg.scope,
+            })),
+            live_pids: inUse.get(r.path) ?? [],
+          })),
         },
         null,
         2,
@@ -150,7 +192,15 @@ export async function runMcpIdentities(opts: IdentitiesOptions = {}): Promise<nu
     return 0;
   }
   log(`you already have ${String(existing.length)} identity(ies) on ${channel} @ ${server}:`);
-  for (const r of existing) log(`  ${describe(r)}`);
+  for (const r of existing) {
+    log(`  ${describe(r)}`);
+    // #923：注册属于哪一侧必须写出来——只报身份不报注册，用户根本不知道该去哪儿删。
+    for (const reg of registrationsForIdentity(regs, r)) {
+      log(`      registration ${registrationLabel(reg)}  (scope: ${reg.scope})`);
+    }
+    const pids = inUse.get(r.path) ?? [];
+    if (pids.length > 0) log(`      in use right now by pid ${pids.join(", ")} — a live session holds it`);
+  }
   log("");
   log("Multiple identities on one channel are allowed (different roles / harnesses),");
   log("but every one of them becomes a resident MCP process in every session.");
@@ -228,19 +278,26 @@ function converge(
     return 1;
   }
   const others = group.filter((r) => r.name !== keep);
-  const regs = partyRegistrations(home);
+  const regs = partyRegistrations(home, opts);
+  const inUse = liveConfigPathUsers((opts.liveProcesses ?? listLivePartyMcpProcesses)());
   const targets: { record: IdentityRecord; reg: McpRegistration }[] = [];
+  /** 有活进程在用 ⇒ 只列不删。宁可留着一条浪费内存的注册，也绝不弄坏别人正在跑的会话。 */
+  const protectedTargets: { record: IdentityRecord; reg: McpRegistration; pids: number[] }[] = [];
   const noReg: IdentityRecord[] = [];
   for (const r of others) {
     const matched = registrationsForIdentity(regs, r);
     if (matched.length === 0) noReg.push(r);
-    for (const reg of matched) targets.push({ record: r, reg });
+    const pids = inUse.get(r.path) ?? [];
+    for (const reg of matched) {
+      if (pids.length > 0) protectedTargets.push({ record: r, reg, pids });
+      else targets.push({ record: r, reg });
+    }
   }
 
   const removed: string[] = [];
   const failed: { name: string; detail: string }[] = [];
   if (opts.yes === true) {
-    const remove = opts.remove ?? claudeMcpRemove;
+    const remove = opts.remove ?? harnessMcpRemove;
     for (const t of targets) {
       // 再核一次：删除路径上只允许出现 party mcp 注册。
       if (!isPartyMcpRegistration(t.reg)) continue;
@@ -258,7 +315,19 @@ function converge(
           channel,
           keep,
           dry_run: opts.yes !== true,
-          registrations: targets.map((t) => ({ name: t.reg.name, scope: t.reg.scope, identity: t.record.name })),
+          registrations: targets.map((t) => ({
+            name: t.reg.name,
+            harness: registrationHarness(t.reg),
+            scope: t.reg.scope,
+            identity: t.record.name,
+          })),
+          in_use: protectedTargets.map((t) => ({
+            name: t.reg.name,
+            harness: registrationHarness(t.reg),
+            scope: t.reg.scope,
+            identity: t.record.name,
+            pids: t.pids,
+          })),
           identities_without_registration: noReg.map((r) => r.name),
           removed,
           failed,
@@ -276,8 +345,17 @@ function converge(
     log("no other identity is bound to that channel — nothing to converge");
     return 0;
   }
+  if (opts.harness !== undefined && opts.harness !== null) {
+    log(`(only the ${opts.harness} registry is in scope for this run)`);
+  }
   for (const t of targets) {
-    log(`  [drop registration] ${t.reg.name}  (scope: ${t.reg.scope})  identity ${t.record.name}`);
+    log(`  [drop registration] ${registrationLabel(t.reg)}  (scope: ${t.reg.scope})  identity ${t.record.name}`);
+  }
+  for (const t of protectedTargets) {
+    log(
+      `  [in use, kept]      ${registrationLabel(t.reg)}  (scope: ${t.reg.scope})  identity ${t.record.name}` +
+        ` — pid ${t.pids.join(", ")} is holding it right now, so it is NOT removed`,
+    );
   }
   for (const r of noReg) {
     log(`  [no registration]   ${r.name} — nothing to remove for it`);
@@ -294,7 +372,7 @@ function converge(
   return failed.length > 0 ? 1 : 0;
 }
 
-const VALUE_FLAGS = new Set(["--channel", "--server", "--owner", "--exclude", "--keep"]);
+const VALUE_FLAGS = new Set(["--channel", "--server", "--owner", "--exclude", "--keep", "--harness"]);
 const BOOL_FLAGS = new Set(["--all", "--yes", "--json"]);
 
 export async function runIdentitiesCli(argv: string[]): Promise<number> {
@@ -316,7 +394,13 @@ export async function runIdentitiesCli(argv: string[]): Promise<number> {
       else if (a === "--server") opts.server = v;
       else if (a === "--owner") opts.owner = v;
       else if (a === "--exclude") opts.exclude = v;
-      else opts.keep = v;
+      else if (a === "--harness") {
+        if (v !== "claude" && v !== "codex") {
+          console.error("--harness must be claude or codex");
+          return 1;
+        }
+        opts.harness = v;
+      } else opts.keep = v;
       continue;
     }
     if (BOOL_FLAGS.has(a)) {

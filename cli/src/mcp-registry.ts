@@ -4,15 +4,31 @@
 //
 // 本模块只提供纯函数（读一份 JSON → 分类），副作用（删注册）留在命令层，方便单测覆盖
 // 「绝不碰非 party 注册」这条硬约束。
+import { spawnSync } from "node:child_process";
 import { basename } from "node:path";
 
-/** Claude Code 里的一条 MCP 注册。scope 为 "user" 或项目绝对路径（local scope）。 */
+/** 一条 MCP 注册属于哪个 harness 的注册表。缺省 claude＝本模块最早只认 `~/.claude.json`。 */
+export type RegistrationHarness = "claude" | "codex";
+
+/**
+ * 一条 MCP 注册。
+ * - claude：`scope` 为 "user" 或项目绝对路径（local scope）。
+ * - codex（#923）：`scope` 为该注册表的 config.toml 绝对路径，`codexHome` 为它的 CODEX_HOME。
+ */
 export interface McpRegistration {
   scope: string;
   name: string;
   command: string;
   args: string[];
   env: Record<string, string>;
+  /** 缺省 "claude"——老调用点构造的对象不带这个字段，语义不变。 */
+  harness?: RegistrationHarness;
+  /** codex 注册专用：删除时要用它当 CODEX_HOME 才能删对那一份注册表。 */
+  codexHome?: string;
+}
+
+export function registrationHarness(reg: McpRegistration): RegistrationHarness {
+  return reg.harness ?? "claude";
 }
 
 /**
@@ -57,6 +73,30 @@ function collectScope(out: McpRegistration[], scope: string, servers: unknown): 
 // 导出给 orphan-scan.ts 复用（#908）：孤儿进程清理面对的是同一条硬约束，词表必须只有一份，
 // 复制一份出去就会漂移（#622 教训）。
 export const PARTY_COMMAND_BASENAMES = new Set(["party", "agentparty-runtime"]);
+
+/**
+ * 一行 `party mcp …` 才算数：既要是我们的二进制，也要真的是 mcp 子命令。
+ *
+ * 词表与判据只有这一份（#622 教训：复制出去必漂移）。codex 会话身份解析（#917）与
+ * 「这条注册是不是正被活进程用着」（#923/#924）都从这里取。
+ */
+export function looksLikePartyMcpCommand(command: string): boolean {
+  const tokens = command.trim().split(/\s+/);
+  const first = tokens[0];
+  if (first === undefined) return false;
+  const binary = first.split("/").pop() ?? first;
+  // dev 形态是 `bun /path/cli/src/index.ts mcp`：只要参数里出现 party 入口即可。
+  const entryAt = tokens.findIndex((token) => /(?:^|\/)party(?:\.js|\.ts)?$/.test(token));
+  const ours = binary === "party" || entryAt >= 0;
+  if (!ours) return false;
+  // `mcp` 必须是**入口之后的第一个非 flag 参数**，不能是命令行里任意位置出现的同名 token——
+  // 否则 `party send "x" --channel mcp`、`party serve x --on-mention mcp` 会被误判成 MCP 注册
+  // 进程，进而从一个毫不相干的进程里读出 AGENTPARTY_CONFIG，把 @ 判给错的身份。
+  // 这正是 #917 要根除的那类「猜身份」，判据本身更不能松。
+  const afterEntry = tokens.slice(Math.max(entryAt, 0) + 1);
+  const sub = afterEntry.find((token) => !token.startsWith("-"));
+  return sub === "mcp";
+}
 
 /** 严格判定：命令 basename 必须正好是 party 可执行文件，且第一个参数正好是 `mcp`。 */
 export function isPartyMcpRegistration(reg: McpRegistration): boolean {
@@ -255,4 +295,70 @@ export function applyMcpProcessTitle(input: McpProcessTitleInput): string {
     /* 平台不支持就算了 */
   }
   return title;
+}
+
+// ── 「这条注册正被活进程用着吗」（#923 第 2 条 / #924 硬约束）──────────────────
+// 治理命令的删除面必须先回答这个问题：一条注册背后可能有一个**正在跑的会话**在用它。
+// 删掉它不会杀死那个进程，但会让那个会话在下次启动时静默少一个身份——那是别人的会话，
+// 我们没有替他做这个决定的权力。所以：有活进程在用 ⇒ 只列不删，并说清是谁在用。
+
+/** 一个正在跑的 `party mcp` 进程，及它启动时用的身份配置。 */
+export interface LivePartyMcpProcess {
+  pid: number;
+  /** 该进程 env 里的 AGENTPARTY_CONFIG；没有则 null（身份走默认解析链，无从对应）。 */
+  configPath: string | null;
+  command: string;
+}
+
+const LIVE_PS_TIMEOUT_MS = 1_500;
+
+type SpawnLike = typeof spawnSync;
+
+/**
+ * 扫出本机所有活着的 `party mcp` 进程。
+ *
+ * `ps eww` 会连环境变量一起打印，且只对本 uid 的进程可读——正好够用。
+ * 任何失败一律返回空数组：**扫不到就等于「不知道有没有人在用」**，调用方必须把「不知道」
+ * 当成「可能有人在用」来处理（宁可少删），绝不能反过来当成「没人在用」。
+ */
+export function listLivePartyMcpProcesses(spawn: SpawnLike = spawnSync): LivePartyMcpProcess[] {
+  if (process.platform === "win32") return [];
+  let stdout: string;
+  try {
+    const result = spawn("ps", ["-axeww", "-o", "pid=,command="], {
+      encoding: "utf8",
+      timeout: LIVE_PS_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    if (result.status !== 0 || typeof result.stdout !== "string") return [];
+    stdout = result.stdout;
+  } catch {
+    return [];
+  }
+  const out: LivePartyMcpProcess[] = [];
+  for (const line of stdout.split("\n")) {
+    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (match === null) continue;
+    const command = match[2]!;
+    // `ps eww` 把 env 追加在命令行之后，所以判据只看命令部分——env 里出现 `party mcp`
+    // 字样的无关进程不该被算成我们的注册进程。
+    const envAt = command.search(/\s[A-Z_][A-Z0-9_]*=/);
+    const argv = envAt === -1 ? command : command.slice(0, envAt);
+    if (!looksLikePartyMcpCommand(argv)) continue;
+    const found = /(?:^|\s)AGENTPARTY_CONFIG=(\S+)/.exec(command);
+    out.push({ pid: Number(match[1]), configPath: found === null ? null : found[1]!, command: argv.trim() });
+  }
+  return out;
+}
+
+/** 正被活进程用着的身份配置路径 → 用它的那些 pid。 */
+export function liveConfigPathUsers(processes: readonly LivePartyMcpProcess[]): Map<string, number[]> {
+  const map = new Map<string, number[]>();
+  for (const proc of processes) {
+    if (proc.configPath === null) continue;
+    const pids = map.get(proc.configPath) ?? [];
+    pids.push(proc.pid);
+    map.set(proc.configPath, pids);
+  }
+  return map;
 }

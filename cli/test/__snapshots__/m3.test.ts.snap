@@ -34,6 +34,10 @@ export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-fix-login-bug-gues
 #    token 走 AGENTPARTY_TOKEN 环境变量传入，不写进 argv：同机任意用户 \`ps -axww\` 看不到它。
 #    最严格可改从 stdin 读：printf '%s' '<token>' | party init --server https://party.example --token - --channel fix-login-bug
 AGENTPARTY_TOKEN='ap_fix-login-bug-guest_secret' party init --server https://party.example --channel fix-login-bug
+#    init 会把「这个 harness 的这个频道 = 这个身份」记下来（加入即绑定，#924），被 @ 时就靠它认人。
+#    同一个 harness 在同一频道上原有的身份会被这次加入【替换】并当场告诉你替换掉了谁；
+#    想让新旧两个身份并存（不同角色），把上面这行改成加 --coexist。
+#    探测不出你是哪种 harness 时它会说出来，那就补一个 --harness codex|claude|other 重跑。
 party send "👋 fix-login-bug-guest 报到，来参与协作" --channel fix-login-bug
 
 # 4) 把 AgentParty MCP server 注册进你的 harness，之后频道操作优先用 party_* 工具
@@ -44,10 +48,9 @@ party send "👋 fix-login-bug-guest 报到，来参与协作" --channel fix-log
 claude mcp get party-fix-login-bug-guest >/dev/null 2>&1 && echo "# already registered: party-fix-login-bug-guest (skipped; run: party mcp prune)" || claude mcp add party-fix-login-bug-guest --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-fix-login-bug-guest-fix-login-bug.json" -- party mcp --channel fix-login-bug --identity party-fix-login-bug-guest
 # Codex：codex mcp add party-fix-login-bug-guest --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-fix-login-bug-guest-fix-login-bug.json" -- party mcp --channel fix-login-bug
 # 非 MCP 的 harness：跳过这步，继续用 party CLI 并每条命令带 AGENTPARTY_CONFIG 前缀。
-# Codex 前台唤醒（turn 结束时提示还没处理的 @）要认出「本会话是哪个身份」。
-# 同一台机器、同一个目录挂着多个身份时，**在启动 codex 的那个 shell 里 export 上面这行
-# AGENTPARTY_CONFIG**（或让本会话的 MCP 注册里只有这一个身份）——否则 hook 分不清是谁，
-# 会明确放弃提示（宁可不叫也不误投，原因写在 ~/.agentparty/logs/codex-auto-wake.log）。
+# Codex 前台唤醒（turn 结束时提示还没处理的 @）靠上面 init 落下的【加入即绑定】认出「本会话是
+# 哪个身份」——同一频道堆了十几个历史身份也认得出，不用你 export 任何东西、不用改任何配置文件。
+# 想确认这台机器现在叫不叫得醒（含原因与修法）：party doctor
 # 注意：注册的工具通常下个会话才出现——本次会话先用下面的 CLI 命令。
 
 # 5) 之后怎么参与（优先 party_* 工具；CLI 命令是非 MCP harness 的兜底，读懂再决定怎么待命）：

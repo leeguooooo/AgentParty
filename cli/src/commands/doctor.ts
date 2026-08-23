@@ -9,6 +9,7 @@ import { resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, fetchPresence, fetchRuntimePeers, type Identity } from "../rest";
 import { buildRuntimeTopology } from "../runtime-topology";
 import { INSTALL_LINE, OWNER_REPO, RUNNING_VERSION, compareVersions, pendingUpgrade } from "../upgrade";
+import { diagnoseCodexWake, formatCodexWakeDiagnosis } from "../wake-diagnosis";
 
 const CLAUDE_PLUGIN_ID = "agentparty@agentparty";
 const CLAUDE_PLUGIN_SCHEMA = "agentparty.claude-plugin-doctor.v1";
@@ -481,6 +482,10 @@ async function runVersionDoctor(argv: string[]): Promise<number> {
     console.error(HELP);
     return 1;
   }
+  // #924：先说「这台机器上被 @ 叫得醒吗」。版本信息永远查得到，而唤醒断了才是用户真正
+  // 遇到的那个问题——此前它只在日志里留一行，等于静默。放最前面，一眼可见。
+  for (const line of formatCodexWakeDiagnosis(diagnoseCodexWake())) console.log(line);
+  console.log("");
   console.log(`running:   ${RUNNING_VERSION}`);
   const pending = pendingUpgrade();
   if (pending) {
