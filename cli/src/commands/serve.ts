@@ -1275,6 +1275,28 @@ function truncateCodePointsWithNotice(
 // 也让 runner 能一次拿全 channel/seq/sender/body/reply_to/recent/protocol_reminder（评审建议）。
 // recent = 触发消息之前、serve 在线期间看到的最近频道消息（含自己/未 @ 的闲聊，正文截断），
 // 让冷起的 runner 开箱有上下文；完整脉络仍以 party history 为准。
+/**
+ * #834 第 4 项 / #881：把 `message_update("supersede")` 落到 serve 的 recent 缓冲上。
+ *
+ * recent 是**收帧当时**的快照。一条消息进缓冲之后才被后续消息取代——而 supersede 恰恰只发生在
+ * 「之后」——那份快照就永远停在没有 superseded 标记的样子上。于是下一次唤醒把它当成仍然有效的
+ * 背景喂给模型，正是 issue 里「按已被推翻的旧前提改道」的那条路径。
+ *
+ * 只认服务端广播过来的权威快照（`update.message`），不自己拼标记；找不到目标 seq（早被 RECENT_MAX
+ * 挤出去了）就什么都不做。返回是否命中，供日志与用例断言。
+ */
+export function applySupersedeToRecent(
+  recent: MsgFrame[],
+  targetSeq: number,
+  message: MsgFrame,
+): boolean {
+  if (message.superseded === undefined) return false;
+  const index = recent.findIndex((entry) => entry.seq === targetSeq);
+  if (index < 0) return false;
+  recent[index] = { ...recent[index]!, superseded: message.superseded };
+  return true;
+}
+
 function buildWakeContext(
   frame: MsgFrame,
   channel: string,
@@ -1318,6 +1340,7 @@ function buildWakeContext(
     body: string;
     attachments: ReturnType<typeof attachmentContextMetadata>[];
     ts: number;
+    superseded?: NonNullable<MsgFrame["superseded"]>;
   }> = [];
   // 最近的消息最有用：从尾部向前装预算，最后再恢复时间顺序。
   for (let i = recent.length - 1; i >= 0 && recentBudget > 0; i--) {
@@ -1336,9 +1359,16 @@ function buildWakeContext(
       body: boundedBody,
       attachments: message.attachments?.map(attachmentContextMetadata) ?? [],
       ts: message.ts,
+      // #834 第 4 项的真正落点：被「重放旧 seq」的正是 recent[]，触发帧只有一条。
+      // 触发帧早就带 superseded 了，recent[] 却一直把它丢掉——于是模型读到的背景上下文里，
+      // 一条已被推翻的旧指令与仍然有效的指令长得一模一样。这就是「拿旧前提行动」的入口。
+      ...(message.superseded === undefined ? {} : { superseded: message.superseded }),
     });
   }
   boundedRecent.reverse();
+  const recentSupersededSeqs = boundedRecent
+    .filter((entry) => entry.superseded !== undefined)
+    .map((entry) => entry.seq);
   recentBodyTruncated ||= boundedRecent.length < recent.length;
   return {
     channel,
@@ -1371,6 +1401,16 @@ function buildWakeContext(
             `这条消息（seq ${frame.seq}）已被 seq ${frame.superseded.by_seq} 取代` +
             `（reason=${frame.superseded.reason}）。不要把它当成最新指令执行；` +
             `先读 seq ${frame.superseded.by_seq}（party history --channel ${channel}），按那条为准。`,
+        }),
+    // #834 第 4 项：背景上下文里也有被取代的条目。单独一条 notice，不与触发帧那条互相遮蔽——
+    // 两者可以同时出现，也可以只出现一条。
+    ...(recentSupersededSeqs.length === 0
+      ? {}
+      : {
+          recent_superseded_seqs: recentSupersededSeqs,
+          recent_superseded_notice:
+            `下方 recent 里的 seq ${recentSupersededSeqs.join("、")} 已被后续消息取代，` +
+            `它们只是背景，不得当作仍然有效的指令或前提；每条的 superseded.by_seq 才是现行版本。`,
         }),
     decision_request: frame.decision_request ?? null,
     decision_response: frame.decision_response ?? null,
@@ -5428,6 +5468,14 @@ export async function runServe(o: ServeOptions): Promise<number> {
           lease_state: hasLease ? "held" : "standby",
         }));
         if (hasLease) reportPendingPersistedSession();
+        continue;
+      }
+      // #834 第 4 项：supersede 是**事后**才广播的修订帧，而 recent 里躺的是收帧当时的快照。
+      // 不在这里接住它，缓冲里那条旧指令就永远不带标记，下一次唤醒照旧把它当有效前提喂进模型。
+      if (frame.type === "message_update" && frame.action === "supersede") {
+        if (applySupersedeToRecent(recent, frame.target_seq, frame.message)) {
+          out(`serve: seq ${frame.target_seq} 已被 seq ${frame.message.superseded?.by_seq} 取代——后续唤醒的背景上下文会标注它`);
+        }
         continue;
       }
       if (frame.type !== "msg") continue;
