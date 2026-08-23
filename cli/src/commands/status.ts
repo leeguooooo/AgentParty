@@ -13,14 +13,16 @@ import type {
 } from "@agentparty/shared";
 import { EXIT_TASK_LEASE_HELD, safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
 import {
-  acquireTaskLease,
   describeDeniedLease,
   DEFAULT_TASK_LEASE_TTL_MS,
-  releaseTaskLease,
   taskLeaseDir,
   taskLeaseKey,
-  type TaskLeaseResult,
 } from "../task-lease";
+import {
+  acquireTaskLeaseAcrossMachines,
+  releaseTaskLeaseAcrossMachines,
+  type RemoteTaskLeaseResult,
+} from "../task-lease-remote";
 import { diagnoseTaskLeaseEnforcement, formatTaskLeaseEnforcement } from "../task-lease-diagnosis";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
 import { advanceCursorPastOwnMessage, branchLabel, repoLabel, resolveChannel, workspaceId, workspaceLabel, worktreeLabel } from "../config";
@@ -395,13 +397,17 @@ export async function run(argv: string[]): Promise<number> {
   const executorId = enforcement.executor_id;
   const asJson = flags.json === true;
   const leaseNow = Date.now();
-  let lease: TaskLeaseResult | null = null;
+  let lease: RemoteTaskLeaseResult | null = null;
   const leaseKeyValue = taskId === undefined ? null : taskLeaseKey(auth.server, auth.token, channel, taskId);
   // working/waiting = 「这件事归我，我还在上面」→ 取/续租约。
   // done/blocked = 「我不在上面了」→ 立刻交还，别让一个卡住的执行体把任务扣满一个 TTL。
   const claims = taskId !== undefined && (state === "working" || state === "waiting");
   if (claims && leaseKeyValue !== null && taskId !== undefined) {
-    lease = acquireTaskLease({
+    // #936：先本机、后服务端。服务端那半才是跨机互斥；老服务端没有这条路由时退回本机租约
+    // （**不是**放行——放行比现在更糟，现在至少同一个 HOME 内还挡得住）。
+    lease = await acquireTaskLeaseAcrossMachines({
+      server: auth.server,
+      token: auth.token,
       key: leaseKeyValue,
       channel,
       taskId,
@@ -411,7 +417,10 @@ export async function run(argv: string[]): Promise<number> {
       ...(leaseTtl === undefined ? {} : { ttlMs: leaseTtl }),
       force: flags["force-lease"] === true,
     });
-    if (lease.state === "denied" && lease.holder !== undefined) {
+    // 判据只看 state，**绝不附加 `holder !== undefined`**：holder 只是给人读的补充信息，
+    // 一个读不出 holder 的拒绝仍然是拒绝。把它写进判据，等于「服务端拒了但回执被截断」时
+    // 直接放行——正好是本 issue 要修的那件事，只不过换了个触发条件。
+    if (lease.state === "denied") {
       // 红线：拒绝 ≠ 吞任务。这里**不发帧、不改服务端 task state**，任务原样留在频道里，
       // 持租约的那个执行体照常干；本执行体降级为只读。
       if (asJson) {
@@ -420,11 +429,31 @@ export async function run(argv: string[]): Promise<number> {
           published: false,
           task_untouched: true,
           exit_code: EXIT_TASK_LEASE_HELD,
-          lease: { state: lease.state, reason: lease.reason, holder: lease.holder, enforced: true, scope: "local_home" },
+          lease: {
+            state: lease.state,
+            reason: lease.reason,
+            holder: lease.holder,
+            enforced: true,
+            scope: lease.scope,
+            ...(lease.degraded === undefined ? {} : { degraded: lease.degraded }),
+          },
         }));
       }
-      console.error(describeDeniedLease(lease.holder, channel, taskId, leaseNow));
+      console.error(
+        lease.holder === undefined
+          ? `refused: task ${taskId} on #${channel} is held by another execution runtime of this identity\n` +
+            "  this claim was NOT published: the task is untouched and the current holder keeps working on it."
+          : describeDeniedLease(lease.holder, channel, taskId, leaseNow, lease.scope),
+      );
       return EXIT_TASK_LEASE_HELD;
+    }
+    // 退回本机租约时必须**说出来**：调用方读到 scope=local_home 才知道这一刀只挡得住这个 HOME。
+    if (lease.degraded !== undefined) {
+      console.error(
+        lease.degraded === "server_unsupported"
+          ? "warn: this server has no task-lease endpoint (#936) — falling back to the local-home lease; another machine running this identity is NOT blocked"
+          : "warn: server task lease unavailable this time — falling back to the local-home lease; another machine running this identity is NOT blocked",
+      );
     }
     if (lease.state === "unenforced") {
       // #931：这里原本只有一行 warn，在刷屏的 serve 日志里等于不存在——闸看着装了，最需要它的
@@ -479,8 +508,16 @@ export async function run(argv: string[]): Promise<number> {
     }
     // 交还租约必须在**帧已发出之后**：先发帧再放手,任务才不会在「已放手、状态还没落地」之间
     // 出现一个谁都不持有、状态也没更新的窗口。
-    if (leaseKeyValue !== null && (state === "done" || state === "blocked")) {
-      releaseTaskLease(leaseKeyValue, executorId, taskLeaseDir());
+    if (leaseKeyValue !== null && taskId !== undefined && (state === "done" || state === "blocked")) {
+      await releaseTaskLeaseAcrossMachines({
+        server: auth.server,
+        token: auth.token,
+        key: leaseKeyValue,
+        channel,
+        taskId,
+        executorId,
+        dir: taskLeaseDir(),
+      });
     }
     advanceCursorPastOwnMessage(channel, seq);
     if (asJson) {
@@ -499,7 +536,8 @@ export async function run(argv: string[]): Promise<number> {
                 // #931：「这一刀有没有落下」必须能被程序读到，而不是只在 stderr 打一行。
                 // 同时带上互斥边界——跨机同身份不在射程内，别让调用方把它当全局互斥。
                 enforced: lease.state !== "unenforced",
-                scope: "local_home",
+                scope: lease.scope,
+                ...(lease.degraded === undefined ? {} : { degraded: lease.degraded }),
                 ...(lease.state === "unenforced" ? { fix: enforcement.fix, detail: enforcement.detail } : {}),
               },
             }),

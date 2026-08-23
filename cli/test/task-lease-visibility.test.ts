@@ -16,7 +16,14 @@ import {
   localExecutorEvidence,
   shouldSurfaceTaskLeaseEnforcement,
 } from "../src/task-lease-diagnosis";
-import { acquireTaskLease, taskLeaseDir, taskLeaseKey } from "../src/task-lease";
+import { acquireTaskLease, readTaskLease, taskLeaseDir, taskLeaseKey } from "../src/task-lease";
+import {
+  acquireTaskLeaseAcrossMachines,
+  releaseTaskLeaseAcrossMachines,
+  serverLeaseUnsupported,
+  type AcquireAcrossMachinesOptions,
+} from "../src/task-lease-remote";
+import { RestError } from "../src/rest";
 import { processStartedAt } from "../src/instance-lock";
 
 const NOW = 1_786_000_000_000;
@@ -72,7 +79,21 @@ describe("认不出执行体这件事必须可见（不只是 stderr 一行 warn
     expect(text).toMatch(/会怎样:.*不会被拒/);
     expect(text).toMatch(/怎么修:.*AGENTPARTY_EXECUTOR_ID/);
     // 边界那行是硬要求：「本机互斥」被读成「全局互斥」比没有闸更危险。
-    expect(text).toMatch(/边界:.*跨机缺口/);
+    // 认不出执行体时连服务端租约都送不上去（#936），所以边界仍然是「另一台机器仍挡不住」。
+    expect(text).toMatch(/边界:.*另一台机器.*仍挡不住/);
+    expect(d.scope).toBe("local_home");
+  });
+
+  test("认得出执行体时，边界那行改说服务端租约（#936），不再谎报也不再吓人", () => {
+    const d = diagnoseTaskLeaseEnforcement({ AGENTPARTY_EXECUTOR_ID: "harness:mac:1" });
+    expect(d.enforced).toBe(true);
+    expect(d.scope).toBe("server");
+    const text = formatTaskLeaseEnforcement(d).join("\n");
+    // 两侧各断一次：认得出 ⇒ 说服务端租约；不许再输出「仍挡不住」那句（否则等于没修）。
+    expect(text).toMatch(/边界:.*服务端.*租约/);
+    expect(text).not.toMatch(/另一台机器.*仍挡不住/);
+    // 老服务端会退回本机这件事必须仍然说得出来——别让人以为升级客户端就万事大吉。
+    expect(text).toMatch(/老服务端.*退回本机/);
   });
 
   test("设了但值不合法与一个都没设，给的是不同的原因（修法不同）", () => {
@@ -228,19 +249,235 @@ describe("party doctor：真有第二个执行体时报为问题，没有时不�
   });
 });
 
-describe("跨机缺口（#931 缺口 1）——尚未做服务端租约，这里钉住现状", () => {
-  // ⚠️ 这不是「期望的行为」，是**已知缺口的现状**。服务端 (identity, channel, task) 租约落地后，
-  // 这条用例必须翻红并改成「第二个被拒」——它存在的意义就是不让人误以为跨机已经拦得住。
-  test("两个 AGENTPARTY_HOME 的同一身份都能认领同一个 task（本机文件锁挡不住）", () => {
+describe("跨机互斥（#936）——服务端 (identity, channel, task) 租约", () => {
+  // 这一组的前身是 #935 里那条「钉住缺口」的用例：两个 AGENTPARTY_HOME 下的同一身份都能认领
+  // 同一个 task，注释写明「服务端租约落地后此用例必须翻红」。现在它翻红了，改成断言相反的事实。
+  //
+  // 服务端那半用一个**共享的租约台账**代表「两台机器看到的是同一台服务端」。台账逐字实现
+  // worker 那条 upsert 的判据（同 executor 续期 / 过期可接手 / force 抢占 / 否则拒），
+  // 真实服务端行为由 worker/test/task-lease.spec.ts 在真 workerd + 真 D1 上覆盖。
+  interface ServerLease {
+    executor_id: string;
+    acquired_at: number;
+    renewed_at: number;
+    expires_at: number;
+    taken_over_from?: string;
+  }
+
+  function makeServer() {
+    const ledger = new Map<string, ServerLease>();
+    const calls: { executor_id: string; force: boolean }[] = [];
+    const claim: NonNullable<AcquireAcrossMachinesOptions["claim"]> = async (_server, _token, slug, id, body) => {
+      calls.push({ executor_id: body.executor_id, force: body.force === true });
+      const key = `${slug}#${id}`;
+      const now = Date.now();
+      const existing = ledger.get(key);
+      const mine = existing !== undefined && existing.executor_id === body.executor_id;
+      const live = existing !== undefined && existing.expires_at > now;
+      if (existing !== undefined && live && !mine && body.force !== true) {
+        throw new RestError(409, "task_lease_held", "held", {
+          error: { code: "task_lease_held", message: "held" },
+          state: "denied",
+          scope: "server",
+          reason: "held_by_other",
+          holder: { ...existing, channel: slug, task_id: id },
+          task_untouched: true,
+          server_time: now,
+        });
+      }
+      const state = mine ? "renewed" : existing !== undefined && live ? "forced" : "acquired";
+      const next: ServerLease = {
+        executor_id: body.executor_id,
+        acquired_at: mine && existing !== undefined ? existing.acquired_at : now,
+        renewed_at: now,
+        expires_at: now + (body.ttl_ms ?? 600_000),
+        ...(state === "forced" && existing !== undefined ? { taken_over_from: existing.executor_id } : {}),
+      };
+      ledger.set(key, next);
+      return {
+        type: "task_lease",
+        state,
+        scope: "server",
+        holder: { ...next, channel: slug, task_id: id },
+        ttl_ms: body.ttl_ms ?? 600_000,
+        server_time: now,
+      };
+    };
+    return { claim, ledger, calls };
+  }
+
+  function machine(homeDir: string, executorId: string, srv: ReturnType<typeof makeServer>): AcquireAcrossMachinesOptions {
+    return {
+      key: taskLeaseKey(SERVER, TOKEN, "king", 9),
+      channel: "king",
+      taskId: 9,
+      executorId,
+      server: SERVER,
+      token: TOKEN,
+      dir: taskLeaseDir(homeDir),
+      claim: srv.claim,
+    };
+  }
+
+  test("两台机器（两个 AGENTPARTY_HOME）的同一身份：第二台被拒，且说得出谁持有", async () => {
     const other = mkdtempSync(join(tmpdir(), "ap-lease-other-home-"));
+    const srv = makeServer();
     try {
-      const key = taskLeaseKey(SERVER, TOKEN, "king", 9);
-      const first = acquireTaskLease({ key, channel: "king", taskId: 9, executorId: "runner:claude:a", dir: taskLeaseDir(home) });
-      const second = acquireTaskLease({ key, channel: "king", taskId: 9, executorId: "session:claude:b", dir: taskLeaseDir(other) });
+      const first = await acquireTaskLeaseAcrossMachines(machine(home, "runner:claude:a", srv));
+      const second = await acquireTaskLeaseAcrossMachines(machine(other, "session:claude:b", srv));
       expect(first.state).toBe("acquired");
-      expect(second.state).toBe("acquired"); // ← 缺口：互斥只在同一个 home 内成立
-      // 缺口不许被静默：任何一次「没落闸/落闸」的呈现都必须带上这句边界。
-      expect(formatTaskLeaseEnforcement(diagnoseTaskLeaseEnforcement({})).join("\n")).toMatch(/另一台机器.*仍挡不住/);
+      expect(first.scope).toBe("server");
+      // ← 这一行就是 #935 钉住的那个缺口，现在必须是 denied。
+      expect(second.state).toBe("denied");
+      expect(second.scope).toBe("server");
+      expect(second.holder?.executor_id).toBe("runner:claude:a");
+      // 拒绝不能吞任务：被拒方要能知道等多久（#885 红线的可执行那一半）。
+      expect(second.holder?.expires_at).toBeGreaterThan(Date.now());
+      // 被拒的一方不许在本机留下一张自己不用、却挡着别人的租约（#908 那类锁残留）。
+      expect(readTaskLease(taskLeaseKey(SERVER, TOKEN, "king", 9), taskLeaseDir(other))).toBeNull();
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  test("降级：老服务端不认这条路由 ⇒ 退回本机租约，**不放行**", async () => {
+    const other = mkdtempSync(join(tmpdir(), "ap-lease-legacy-"));
+    // 老服务端 = 路由没命中，Hono 回裸 404（没有 error.code）。
+    const legacy: NonNullable<AcquireAcrossMachinesOptions["claim"]> = async () => {
+      throw new RestError(404, null, "404 Not Found", null);
+    };
+    try {
+      const opts: AcquireAcrossMachinesOptions = { ...machine(home, "runner:claude:a", makeServer()), claim: legacy };
+      const first = await acquireTaskLeaseAcrossMachines(opts);
+      expect(first.state).toBe("acquired");
+      // 退回本机，并且**说出来**——scope 必须是 local_home，否则调用方会误读成跨机已互斥。
+      expect(first.scope).toBe("local_home");
+      expect(first.degraded).toBe("server_unsupported");
+
+      // 「退回本机」≠「放行」：同一个 HOME 内的第二个执行体照样被拒。
+      const sameHome = await acquireTaskLeaseAcrossMachines({ ...opts, executorId: "session:claude:b" });
+      expect(sameHome.state).toBe("denied");
+      expect(sameHome.scope).toBe("local_home");
+      expect(sameHome.holder?.executor_id).toBe("runner:claude:a");
+
+      // 另一个 HOME 仍挡不住——这是老服务端下**已知且被说出来**的边界，不是静默缺口。
+      const otherHome = await acquireTaskLeaseAcrossMachines({
+        ...opts,
+        dir: taskLeaseDir(other),
+        executorId: "session:claude:b",
+      });
+      expect(otherHome.state).toBe("acquired");
+      expect(otherHome.degraded).toBe("server_unsupported");
+
+      // 降级带回来的必须是**本机那次判定的真实结果**，不是一个「反正放行」的常量。
+      // 逐项翻一遍本机能给出的每一种非拒绝结论：
+      const renewed = await acquireTaskLeaseAcrossMachines(opts);
+      expect(renewed.state).toBe("renewed");
+      expect(renewed.holder?.executor_id).toBe("runner:claude:a");
+      const forced = await acquireTaskLeaseAcrossMachines({ ...opts, executorId: "session:claude:b", force: true });
+      expect(forced.state).toBe("forced");
+      expect(forced.holder?.taken_over_from).toBe("runner:claude:a");
+      // 认不出执行体时降级不许被粉饰成「拿到了」——那正是 #931 修掉的那种假象。
+      const unenforced = await acquireTaskLeaseAcrossMachines({ ...opts, executorId: null });
+      expect(unenforced.state).toBe("unenforced");
+      expect(unenforced.reason).toBe("no_executor_identity");
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  test("服务端在但这次没答上来（网络抖动/5xx）：同样退回本机，原因与老服务端分开", async () => {
+    const flaky: NonNullable<AcquireAcrossMachinesOptions["claim"]> = async () => {
+      throw new RestError(503, "unavailable", "upstream down", { error: { code: "unavailable" } });
+    };
+    const res = await acquireTaskLeaseAcrossMachines({
+      ...machine(home, "runner:claude:a", makeServer()),
+      claim: flaky,
+    });
+    expect(res.state).toBe("acquired");
+    expect(res.scope).toBe("local_home");
+    // 两档的修法完全不同：一个是升级服务端，一个是重试。塌缩成一个 boolean 就说不清了。
+    expect(res.degraded).toBe("server_unavailable");
+  });
+
+  test("真 404（频道/任务不存在，带 error.code）不算「老服务端」", async () => {
+    const missing: NonNullable<AcquireAcrossMachinesOptions["claim"]> = async () => {
+      throw new RestError(404, "not_found", "task not found", { error: { code: "not_found" } });
+    };
+    const res = await acquireTaskLeaseAcrossMachines({
+      ...machine(home, "runner:claude:a", makeServer()),
+      claim: missing,
+    });
+    expect(res.degraded).toBe("server_unavailable");
+    expect(serverLeaseUnsupported(new RestError(404, "not_found", "x", null))).toBe(false);
+    expect(serverLeaseUnsupported(new RestError(404, null, "404 Not Found", null))).toBe(true);
+  });
+
+  test("认不出执行体：不给服务端发任何请求（没有可上送的标识），并如实报 unenforced", async () => {
+    const srv = makeServer();
+    const res = await acquireTaskLeaseAcrossMachines({ ...machine(home, "x", srv), executorId: null });
+    expect(res.state).toBe("unenforced");
+    expect(res.scope).toBe("local_home");
+    expect(srv.calls).toEqual([]);
+  });
+
+  test("本机就能答「被拒」时不发网络请求（结论不会因为问服务端而改变）", async () => {
+    const srv = makeServer();
+    // 本机先由另一个执行体持租——注意这里**没有**经过服务端，模拟一个老 CLI 留下的本机租约。
+    acquireTaskLease({
+      key: taskLeaseKey(SERVER, TOKEN, "king", 9),
+      channel: "king",
+      taskId: 9,
+      executorId: "runner:legacy",
+      dir: taskLeaseDir(home),
+    });
+    const res = await acquireTaskLeaseAcrossMachines(machine(home, "session:new", srv));
+    expect(res.state).toBe("denied");
+    expect(res.scope).toBe("local_home");
+    expect(srv.calls).toEqual([]);
+  });
+
+  test("--force-lease 一路传到服务端；被抢的那个记进 taken_over_from", async () => {
+    const other = mkdtempSync(join(tmpdir(), "ap-lease-force-"));
+    const srv = makeServer();
+    try {
+      await acquireTaskLeaseAcrossMachines(machine(home, "runner:incumbent", srv));
+      const forced = await acquireTaskLeaseAcrossMachines({
+        ...machine(other, "runner:taker", srv),
+        force: true,
+      });
+      expect(forced.state).toBe("forced");
+      expect(forced.scope).toBe("server");
+      expect(forced.holder?.taken_over_from).toBe("runner:incumbent");
+      expect(srv.calls.at(-1)).toEqual({ executor_id: "runner:taker", force: true });
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  test("交还后另一台机器立刻能接手（不必等 TTL）", async () => {
+    const other = mkdtempSync(join(tmpdir(), "ap-lease-release-"));
+    const srv = makeServer();
+    const releasedFor: string[] = [];
+    try {
+      await acquireTaskLeaseAcrossMachines(machine(home, "runner:a", srv));
+      expect((await acquireTaskLeaseAcrossMachines(machine(other, "runner:b", srv))).state).toBe("denied");
+      await releaseTaskLeaseAcrossMachines({
+        server: SERVER,
+        token: TOKEN,
+        key: taskLeaseKey(SERVER, TOKEN, "king", 9),
+        channel: "king",
+        taskId: 9,
+        executorId: "runner:a",
+        dir: taskLeaseDir(home),
+        release: async (_s, _t, slug, id, executorId) => {
+          releasedFor.push(executorId);
+          srv.ledger.delete(`${slug}#${id}`);
+          return { type: "task_lease", state: "released", scope: "server", released: true };
+        },
+      });
+      expect(releasedFor).toEqual(["runner:a"]);
+      expect((await acquireTaskLeaseAcrossMachines(machine(other, "runner:b", srv))).state).toBe("acquired");
     } finally {
       rmSync(other, { recursive: true, force: true });
     }

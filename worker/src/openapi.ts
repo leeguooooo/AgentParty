@@ -1305,6 +1305,54 @@ export const openapiDocument = {
         },
       },
     },
+    "/api/channels/{slug}/tasks/{id}/lease": {
+      post: {
+        summary:
+          "claim or release the (identity, channel, task) claim lease (#936). Identity comes from the bearer token; " +
+          "executor_id only distinguishes execution runtimes OF THAT SAME identity and never widens access. " +
+          "A denial NEVER touches the task - the body names the current holder and its expiry so the caller can " +
+          "decide whether to wait or take over explicitly.",
+        security: [{ bearer: [] }],
+        parameters: [
+          { name: "slug", in: "path", required: true, schema: { type: "string" } },
+          { name: "id", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["executor_id"],
+                properties: {
+                  op: { type: "string", enum: ["claim", "release"], default: "claim" },
+                  executor_id: {
+                    type: "string",
+                    maxLength: 128,
+                    pattern: "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$",
+                    description: "client-reported execution-runtime id; scoped to the token's identity, never an authz input",
+                  },
+                  ttl_ms: {
+                    type: "integer",
+                    minimum: 1,
+                    description: "clamped server-side to at most 3600000 so a self-reported ttl can never pin a task indefinitely",
+                  },
+                  force: { type: "boolean", description: "explicitly take over a live lease (CLI --force-lease)" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{type:'task_lease',state:acquired|renewed|forced|released,scope:'server',holder,ttl_ms}" },
+          "400": { description: "invalid op / executor_id / ttl_ms" },
+          "403": { description: "readonly token or not allowed in this channel" },
+          "404": { description: "channel or task not found" },
+          "409": { description: "task_lease_held - another execution runtime of this identity holds it; task_untouched:true" },
+          "410": { description: "channel archived" },
+        },
+      },
+    },
     "/api/channels/{slug}/search": {
       get: {
         summary: "server-side retained history search",

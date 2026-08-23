@@ -21,6 +21,8 @@ export function makeJwt(payload: Record<string, unknown>): string {
 
 export interface MockOptions {
   cliClientId?: string | null; // null → 不返回 cli_client_id（模拟老 worker，回落 web client_id）
+  /** false → 没有 /tasks/:id/lease 路由（老服务端，#936 前）：回**裸 404**，与真实 Hono 未命中路由同形。 */
+  taskLease?: boolean;
   // 覆盖 /token 响应；默认按 grant_type 给确定性 token
   tokenResponse?: (params: Record<string, string>) => Record<string, unknown>;
 }
@@ -31,6 +33,17 @@ export function startOidcMock(opts: MockOptions = {}): OidcMock {
   const profiles: Record<string, unknown>[] = [];
   const invites: Record<string, unknown>[] = [];
   const wakeBudgets = new Map<string, { limit: number; window_ms: number }>();
+  // 服务端任务租约台账（#936）。按 (token, 频道, task) 分格——同一个 mock 被两个
+  // AGENTPARTY_HOME 共用时，它就代表「两台机器连的是同一台服务端」。
+  const taskLeases = new Map<string, {
+    executor_id: string;
+    channel: string;
+    task_id: number;
+    acquired_at: number;
+    renewed_at: number;
+    expires_at: number;
+    taken_over_from?: string;
+  }>();
   let retention = { message_retention_ms: null as number | null, audit_retention_ms: null as number | null };
   let base = "";
 
@@ -251,6 +264,69 @@ export function startOidcMock(opts: MockOptions = {}): OidcMock {
       }
       if (req.method === "POST" && /^\/api\/channels\/[^/]+\/messages$/.test(u.pathname)) {
         return Response.json({ seq: 7 });
+      }
+      if (req.method === "POST" && /^\/api\/channels\/[^/]+\/tasks\/\d+\/lease$/.test(u.pathname)) {
+        // 老服务端：路由压根不存在 → Hono 的默认 404 是**纯文本**，没有 error.code。
+        // 客户端正是靠这个形状把「老服务端」与「频道/任务不存在」分开的，所以这里必须逐字同形。
+        if (opts.taskLease === false) return new Response("404 Not Found", { status: 404 });
+        const parts = u.pathname.split("/");
+        const channel = parts[3]!;
+        const taskId = Number(parts[5]);
+        const b = rec.body as { op?: string; executor_id?: string; ttl_ms?: number; force?: boolean } | null;
+        const executorId = b?.executor_id;
+        if (typeof executorId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(executorId)) {
+          return Response.json({ error: { code: "bad_request", message: "executor_id" } }, { status: 400 });
+        }
+        const key = `${auth ?? ""}|${channel}|${taskId}`;
+        const now = Date.now();
+        const existing = taskLeases.get(key);
+        if (b?.op === "release") {
+          if (existing !== undefined && existing.executor_id === executorId) taskLeases.delete(key);
+          return Response.json({
+            type: "task_lease",
+            state: "released",
+            scope: "server",
+            released: existing?.executor_id === executorId,
+          });
+        }
+        const mine = existing !== undefined && existing.executor_id === executorId;
+        const live = existing !== undefined && existing.expires_at > now;
+        if (existing !== undefined && live && !mine && b?.force !== true) {
+          return Response.json(
+            {
+              error: { code: "task_lease_held", message: `held by ${existing.executor_id}` },
+              type: "task_lease",
+              state: "denied",
+              scope: "server",
+              reason: "held_by_other",
+              holder: existing,
+              task_untouched: true,
+              server_time: now,
+            },
+            { status: 409 },
+          );
+        }
+        const state = mine ? "renewed" : existing !== undefined && live ? "forced" : "acquired";
+        const ttl = Math.min(60 * 60_000, Math.max(1, b?.ttl_ms ?? 30 * 60_000));
+        const holder = {
+          executor_id: executorId,
+          channel,
+          task_id: taskId,
+          acquired_at: mine && existing !== undefined ? existing.acquired_at : now,
+          renewed_at: now,
+          expires_at: now + ttl,
+          ...(state === "forced" && existing !== undefined ? { taken_over_from: existing.executor_id } : {}),
+        };
+        taskLeases.set(key, holder);
+        return Response.json({
+          type: "task_lease",
+          state,
+          scope: "server",
+          holder,
+          ...(state === "forced" ? { reason: "taken_over" } : {}),
+          ttl_ms: ttl,
+          server_time: now,
+        });
       }
       if (req.method === "PATCH" && /^\/api\/channels\/[^/]+\/tasks\/\d+$/.test(u.pathname)) {
         const id = Number(u.pathname.split("/").pop());

@@ -3,7 +3,8 @@
 // #885 给「同一身份多执行体并发」装了一道闸（认领时刻的单活跃执行体租约）。但那道闸有两个
 // 边界，实机上都会被踩到：
 //   1. 它只在**本机文件级**成立（`taskLeaseDir()` 在 `$AGENTPARTY_HOME` 下）。跨机同身份、
-//      甚至同机不同 AGENTPARTY_HOME，都挡不住。
+//      甚至同机不同 AGENTPARTY_HOME，都挡不住。（#936 已补上服务端租约；但那半要靠**认得出
+//      执行体**才送得上去，所以第 2 条没修好时，第 1 条照样是开的。）
 //   2. 认不出执行体标识时**静默降级**成 unenforced，只往 stderr 打一行 warn；而事故里的
 //      harness 那条腿恰恰最容易落进这一档（根因见 `resolveExecutorIdentity` 的注释）。
 // 于是「闸看起来装了，最需要它的场景下却是开的，而且没人被告知」——本仓反复出现的那个形态。
@@ -11,8 +12,8 @@
 // 本模块只负责第 2 条的**可见性**：把判定结果做成可主动查询的东西（`party who` / `party doctor`
 // / `party status --json`），呈现口径照抄 #925/#926 的 wake-diagnosis：
 //   一行结论 → 为什么 → 会怎样 → 一条能直接粘贴的命令。
-// 第 1 条（跨机）不在本模块射程内，但**必须在输出里说出边界**，否则「本机互斥」会被读成
-// 「全局互斥」——那比没有闸更危险。
+// 第 1 条（跨机）的实现不在本模块射程内（见 task-lease-remote.ts），但**必须在输出里说出边界**，
+// 否则「本机互斥」会被读成「全局互斥」——那比没有闸更危险。
 //
 // 与 wake-diagnosis 同一条纪律：判定跑的是和真实行为**完全同一份**实现
 // （`resolveExecutorIdentity`），绝不写第二套「诊断专用」的解析逻辑，否则诊断说好、真跑起来坏。
@@ -26,6 +27,7 @@ import {
   type ExecutorIdSource,
   type ResolveExecutorEnv,
 } from "./task-lease";
+import type { TaskLeaseScope } from "@agentparty/shared";
 import { agentpartyHome } from "./config";
 import { instanceLockHolderPid, instanceLockTarget, defaultInstanceLockDir } from "./instance-lock";
 import { readdirSync, readFileSync } from "node:fs";
@@ -43,8 +45,15 @@ export interface TaskLeaseEnforcement {
   consequence: string;
   /** 一条能直接粘贴执行的命令；已落闸时为 null。 */
   fix: string | null;
-  /** 互斥边界。跨机（含同机不同 AGENTPARTY_HOME）不在射程内——#931 缺口 1，尚未做服务端租约。 */
-  scope: "local_home";
+  /**
+   * 这条腿够得到的最强那一层。
+   *  - `server`：认得出执行体 ⇒ 认领时会把 executor_id 上送，服务端 (identity, channel, task)
+   *    租约生效，跨机同身份也拦得住（#936）。老服务端没有这条路由时客户端会退回本机——那不是
+   *    本地诊断能预知的（本模块不发网络），认领时会明说。
+   *  - `local_home`：认不出执行体 ⇒ 既落不了本机的闸，也没有可上送的标识，跨机更无从谈起。
+   *    这两件事是**同一个根因**，所以修法也只有一条（设一个稳定的 AGENTPARTY_EXECUTOR_ID）。
+   */
+  scope: TaskLeaseScope;
   home: string;
 }
 
@@ -79,7 +88,7 @@ export function diagnoseTaskLeaseEnforcement(
       detail: `执行体标识来自 ${SOURCE_LABEL[identity.source]}`,
       consequence: "同一身份的第二个执行体认领同一个 task 会被拒（任务不动，降级只读）",
       fix: null,
-      scope: "local_home",
+      scope: "server",
       home,
     };
   }
@@ -217,8 +226,12 @@ export function formatTaskLeaseEnforcement(
       .join("；");
     out.push(`  证据: ${label}——这个身份此刻确实不止一个执行体`);
   }
+  // 边界永远说出来，但要说**当下这条腿真实的**边界，别把两种情形塌缩成一句。
   out.push(
-    `  边界: 这把闸只在本机 ${d.home} 内互斥；另一台机器（或另一个 AGENTPARTY_HOME）上的同一身份仍挡不住（#931 跨机缺口，需服务端租约）`,
+    d.scope === "server"
+      ? `  边界: 本机 ${d.home} 内互斥，认领时还会向服务端取 (identity, channel, task) 租约（#936）——跨机同身份也拦得住；` +
+        "老服务端没有这条路由时会退回本机租约，认领那一刻会明说（scope=local_home）"
+      : `  边界: 认不出执行体 ⇒ 连本机 ${d.home} 内都不落闸，也没有可上送给服务端的标识；另一台机器（或另一个 AGENTPARTY_HOME）上的同一身份仍挡不住`,
   );
   return out;
 }

@@ -415,6 +415,115 @@ export interface TaskRecord {
   completed_at: number | null;
 }
 
+// ---- 任务租约（#936）：把 #885 的本机文件锁抬到服务端 ----
+//
+// #885 在**认领时刻**装了一道「同一身份只允许一个执行体动这件事」的闸，但它只在本机文件级
+// 成立（`$AGENTPARTY_HOME/task-leases`）。同一身份在两台机器（或同机两个 AGENTPARTY_HOME）
+// 上并发认领同一个 task，两边都会成功——闸装了，最需要它的跨机场景恒是开的。
+//
+// 服务端要区分同一身份的两个执行体，手上只有 token（两条腿的 token 完全相同），所以**必须由
+// 客户端把执行体标识送上去**。这就是这里这组线上类型存在的理由，也是它天然的边界：
+//
+//   executor_id 是客户端自报的，因此它**只用来区分同一身份的不同执行体，绝不参与任何鉴权**。
+//   租约行的主键三要素（channel / task / identity）全部由服务端从 bearer token 推出，
+//   请求体里的 executor_id 只是那一行**内部**的值。换一个 executor_id 能改变的只有「我算不算
+//   当前持租的那个执行体」，永远越不出「同一 token 同一频道同一 task」这一格。
+//
+// 形状对齐 #99 的 serve_lease：同一身份多个候选里选唯一持租者、断线/超时后租约回收改选、
+// 明确告诉每个候选自己此刻持不持租。差别只在载体——serve_lease 挂在长连接上（断连即隐式释放），
+// 任务认领是一次性 HTTP 调用（写完即退），没有连接可挂，所以租约必须落库并靠 TTL 过期自愈。
+
+/** 服务端 `/api/version` 的能力清单里，「支持任务租约端点」的名字。 */
+export const TASK_LEASE_FEATURE = "task_lease";
+
+/** 租约到底在哪一层成立。`local_home` = 只挡得住同一个 AGENTPARTY_HOME；`server` = 跨机。 */
+export type TaskLeaseScope = "server" | "local_home";
+
+/** 默认租期。与 serve 的 runner 超时（30min）对齐：一个执行体最多能占这么久。 */
+export const TASK_LEASE_DEFAULT_TTL_MS = 30 * 60_000;
+/**
+ * 服务端对租期的钳制。
+ *
+ * **上限**是防死锁的关键：租期和 executor_id 一样由客户端自报，不钳死上限，一个手滑（或恶意）
+ * 的 ttl_ms 就能把一个 task 锁到天荒地老，而服务端没有任何探活手段能救它。钳住之后最坏情况
+ * 有确定上界：别人最多等这么久就能合法接手。
+ *
+ * **下限**只用来挡住 0/负数，刻意不设一个「像样的」地板：短租期只会让持租方更早放手，
+ * 伤不到任何别人；反而是给它设地板会让 `--lease-ttl-ms` 在本机与服务端两层给出不同答案。
+ */
+export const TASK_LEASE_MIN_TTL_MS = 1;
+export const TASK_LEASE_MAX_TTL_MS = 60 * 60_000;
+
+/**
+ * 执行体标识的合法字符集。**客户端与服务端必须用同一份**——两边各写一个正则，就会出现
+ * 「本机认得出、服务端 400」或反过来的静默分叉（#622 那次 allow-list 镜像漂移的同款形态）。
+ */
+export const EXECUTOR_ID_MAX_LENGTH = 128;
+export function isExecutorId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(value);
+}
+
+export interface TaskLeaseHolderInfo {
+  executor_id: string;
+  channel: string;
+  task_id: number;
+  acquired_at: number;
+  renewed_at: number;
+  expires_at: number;
+  /** 被 force 抢占时记下被抢的那个执行体，便于事后对账。 */
+  taken_over_from?: string;
+}
+
+/** 首次拿到（含接手已过期的租约） / 本执行体续期 / 显式抢占 / 被拒。 */
+export type TaskLeaseGrantState = "acquired" | "renewed" | "forced";
+export type TaskLeaseWireState = TaskLeaseGrantState | "denied";
+
+/** POST /api/channels/:slug/tasks/:id/lease 的请求体。op 与 serve_lease 的 op 同名同义。 */
+export interface TaskLeaseRequest {
+  op?: "claim" | "release";
+  /** 客户端自报的执行体标识。不合法 → 400；**不参与任何鉴权判定**。 */
+  executor_id: string;
+  ttl_ms?: number;
+  /** 显式抢占当前持租者（对应 CLI 的 --force-lease）。 */
+  force?: boolean;
+}
+
+export interface TaskLeaseGrantedResponse {
+  type: "task_lease";
+  state: TaskLeaseGrantState;
+  scope: "server";
+  holder: TaskLeaseHolderInfo;
+  /** acquired 时说明是不是接手了一张过期租约；forced 时说明是抢来的。 */
+  reason?: "expired" | "taken_over";
+  ttl_ms: number;
+  server_time: number;
+}
+
+/**
+ * 被拒的回执。红线（#885 已确立，服务端租约同样要守）：**拒绝不能吞任务**。
+ * 服务端在这条路径上不碰 channel_tasks 一个字节，并且必须把「谁持有、何时过期」摆出来，
+ * 而不是一句 403——被拒的一方要能判断该等多久、该不该 force，而不是只知道自己不被允许。
+ */
+export interface TaskLeaseDeniedResponse {
+  error: { code: "task_lease_held"; message: string };
+  type: "task_lease";
+  state: "denied";
+  scope: "server";
+  reason: "held_by_other";
+  holder: TaskLeaseHolderInfo;
+  /** 任务原样留着——这个字段是给程序读的那半句话。 */
+  task_untouched: true;
+  server_time: number;
+}
+
+export interface TaskLeaseReleasedResponse {
+  type: "task_lease";
+  state: "released";
+  scope: "server";
+  /** false = 当前租约不是本执行体的（已被合法接手），什么都没删。 */
+  released: boolean;
+}
+
 /**
  * 频道级「当前已定稿」账本（#736）。每次变更都 append 新行；supersedes_id 显式指向
  * 被替代的旧结论，服务端通过独立 head 指针投影 status / superseded_by_id。
@@ -523,6 +632,9 @@ export type ErrorCode =
 export type RestErrorCode =
   | ErrorCode
   | "conflict"
+  // 任务租约冲突（#936）：同一身份的另一个执行体持有该 task 的服务端租约。刻意与 forbidden
+  // 分开——它不是「你没权限」，而是「此刻轮不到你，等 N 秒或显式接手」，语义完全不同。
+  | "task_lease_held"
   | "unavailable"
   | "forbidden"
   | "participant_removed"
