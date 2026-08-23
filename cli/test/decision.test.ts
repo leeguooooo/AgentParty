@@ -26,6 +26,9 @@ const CONTINUATION_ENV = [
   "AP_RUNNER_SESSION_ID",
   "CODEX_THREAD_ID",
   "CLAUDE_SESSION_ID",
+  // 真实 Claude Code 会注入它（本机 2.1.239 实测）。不清掉的话，跑测试的那台机器
+  // 自己的会话 id 会泄进来，让「解析不出 session」这类用例永远走不到该走的分支（#931 同款假绿）。
+  "CLAUDE_CODE_SESSION_ID",
 ] as const;
 
 function clearContinuationEnv(): void {
@@ -323,6 +326,43 @@ describe("party decision ask", () => {
     expect(errs.join("\n")).toContain("decision ask refused before POST");
     expect(errs.join("\n")).toContain("CODEX_THREAD_ID");
     expect(mock!.requests.some((request) => request.method === "POST" && request.path.endsWith("/messages"))).toBe(false);
+  });
+
+  // #937：仓里扩散过一个错名 `CLAUDE_SESSION_ID`，而真实 Claude Code 注入的是
+  // `CLAUDE_CODE_SESSION_ID`。只读错名等于这一级恒空——#931 里同一个错名让任务租约对
+  // harness 那条腿 100% 不落闸。这条钉住「真实 harness 的形态能被解析出来」。
+  test("只设真实的 CLAUDE_CODE_SESSION_ID（harness 的实际形态）也能解析出 runner session", async () => {
+    const workdir = join(home, "runner");
+    process.env.AP_DELIVERY_ID = "local-delivery";
+    process.env.AP_WORK_ID = "local-work";
+    process.env.AP_CONTINUATION_REF = "local-ref";
+    process.env.AP_RUNNER_WORKDIR = workdir;
+    process.env.AP_RUNNER_HARNESS = "claude";
+    // 刻意**不设**旧的 CLAUDE_SESSION_ID：否则那一级单独就能满足条件，把被测的这一级遮住。
+    process.env.CLAUDE_CODE_SESSION_ID = "claude-real-session";
+
+    await decisionRun(["ask", "mismatched question"]);
+
+    expect(readRunnerContinuation(continuationPath(workdir, "local-ref"))).toMatchObject({
+      harness: "claude",
+      session_id: "claude-real-session",
+    });
+  });
+
+  // 错误信息不能把不存在的变量名教给用户——照着 export 一个 harness 从不设置的名字，
+  // 等于绕开真正的信号源。
+  test("解析不出 session 时，报的是真实存在的变量名", async () => {
+    const workdir = join(home, "runner");
+    process.env.AP_DELIVERY_ID = "local-delivery";
+    process.env.AP_WORK_ID = "local-work";
+    process.env.AP_CONTINUATION_REF = "local-ref";
+    process.env.AP_RUNNER_WORKDIR = workdir;
+    process.env.AP_RUNNER_HARNESS = "claude";
+
+    await decisionRun(["ask", "mismatched question"]);
+
+    const text = errs.join("\n");
+    expect(text).toContain("CLAUDE_CODE_SESSION_ID");
   });
 
   test("server rejects a model-session lineage mismatch before creating a decision", async () => {
