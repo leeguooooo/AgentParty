@@ -1297,6 +1297,100 @@ export function applySupersedeToRecent(
   return true;
 }
 
+/**
+ * #930：在**尚未消费**的缓冲帧里找「这条 seq 已被取代」的权威标记。
+ *
+ * serve 串行消费：一条 wake 跑几分钟，期间到达的帧全堆在 `conn.pendingFrames()` 里。于是
+ * 「@ 已排队待交」与「@ 正在跑」这两种状态下，取代它的 `message_update("supersede")` 就躺在
+ * 缓冲区里，主循环要等本轮跑完才轮到它——而这恰恰是服务端唯一会打标记的时机
+ * （`markSupersededByReplyCorrection` 要求该目标的 delivery 仍未结清）。
+ *
+ * 只认服务端下发的权威快照（`message.superseded`），绝不自己拼；`target_seq` 不匹配的一律不看，
+ * 免得一条针对别人的 supersede 污染本条。同一 seq 有多条时取**最后一条**：后到的快照更权威。
+ */
+export function findPendingSupersede(
+  pending: ServerFrame[],
+  targetSeq: number,
+): NonNullable<MsgFrame["superseded"]> | null {
+  let found: NonNullable<MsgFrame["superseded"]> | null = null;
+  for (const frame of pending) {
+    if (frame.type !== "message_update") continue;
+    if (frame.action !== "supersede") continue;
+    if (frame.target_seq !== targetSeq) continue;
+    if (frame.message.superseded === undefined) continue;
+    found = frame.message.superseded;
+  }
+  return found;
+}
+
+/**
+ * #930 路线 B：交给 runner **之前**用缓冲区里的权威标记重写触发帧。
+ *
+ * 触发帧是收帧当时的快照，标记只可能后到；不在交接点补这一下，排队等着被交出去的那条 @ 就会
+ * 带着已被推翻的前提进模型。补上之后，#881 既有的 `superseded` / `superseded_notice` 字段自然
+ * 就出现在 wake context 里——**不引入新的协议词**，语义仍是「已被 seq N 取代」而不是「不存在」：
+ * 这条 @ 照常交付、照常执行一轮，模型只是被明确告知别按旧前提行动。
+ *
+ * 帧自己已经带标记（重连补拉的历史帧、或服务端在 claim 时重读到的行）就原样返回，不覆盖。
+ */
+export function applyPendingSupersedeToTrigger(frame: MsgFrame, pending: ServerFrame[]): MsgFrame {
+  if (frame.superseded !== undefined) return frame;
+  const mark = findPendingSupersede(pending, frame.seq);
+  return mark === null ? frame : { ...frame, superseded: mark };
+}
+
+/**
+ * #930 路线 A：已经交出去、正在跑的那一轮的「你手上这条已被取代」通告文案。
+ *
+ * 刻意**不打断**：runner 可能已经产生了真实副作用（提交、推送、已发的回复），半路 abort 反而
+ * 留下不一致状态。只把事实说清楚——已取代，不是不存在。
+ */
+export function inflightSupersededNotice(
+  seq: number,
+  mark: NonNullable<MsgFrame["superseded"]>,
+): string {
+  return (
+    `superseded in flight: 你手上正在处理的 seq ${seq} 已被 seq ${mark.by_seq} 取代` +
+    `（reason=${mark.reason}）。这条不是「不存在」，是「已过期」：别再按它的前提继续，` +
+    `先读 seq ${mark.by_seq} 再决定收尾方式；已经产生的副作用照实说明，不要静默丢弃这一轮。`
+  );
+}
+
+/**
+ * 把 in-flight 通告落到 runner 的 wake-context 目录旁边（`<seq>.superseded.json`）。
+ *
+ * 触发帧的上下文文件是 `<dir>/<seq>.json`，模型被 protocol_reminder 要求先读它；同名前缀的 sidecar
+ * 是它能自己发现的最近位置。runner 未必会回头读——这是路线 A 明知的代价——所以频道里还会有一条
+ * 同文案的 status 作为兜底证据。
+ */
+export function writeSupersededSidecar(
+  dir: string,
+  seq: number,
+  channel: string,
+  self: string,
+  mark: NonNullable<MsgFrame["superseded"]>,
+  detectedAt: number,
+): string {
+  const path = join(dir, `${seq}.superseded.json`);
+  writeFileSync(
+    path,
+    JSON.stringify(
+      {
+        channel,
+        seq,
+        self,
+        superseded: mark,
+        detected_at: detectedAt,
+        notice: inflightSupersededNotice(seq, mark),
+      },
+      null,
+      2,
+    ) + "\n",
+    { mode: 0o600 },
+  );
+  return path;
+}
+
 function buildWakeContext(
   frame: MsgFrame,
   channel: string,
@@ -5603,6 +5697,18 @@ export async function runServe(o: ServeOptions): Promise<number> {
         };
         // 先把入站附件放进本 serve 实例的 0700 临时目录。runner 只拿 0600 本地文件与
         // 鉴权端点元数据，context 中绝不出现 bearer token；单个下载失败也不吞掉整次唤醒。
+        // #930 路线 B：交接点重写。这条 @ 在缓冲区里排队等着被交出去的这段时间，取代它的
+        // supersede 广播可能已经到了——主循环要等本轮跑完才轮到那一帧，所以只能在这里主动去缓冲区
+        // 取。取到就把权威标记贴到触发帧上，wake context 里 #881 那套字段随之生效。
+        // wakeFrame 与 frame 的 seq/mentions 完全一致，只多一个标记；`prepare` 与 run 必须拿到
+        // **同一个对象**（builtin runner 用帧对象身份查 prepared 缓存，换对象会重跑一次 clone/pull）。
+        const wakeFrame = applyPendingSupersedeToTrigger(frame, conn.pendingFrames());
+        if (wakeFrame !== frame) {
+          out(
+            `  seq ${frame.seq} 在交给 runner 之前已被 seq ${wakeFrame.superseded!.by_seq} 取代` +
+            `（${wakeFrame.superseded!.reason}）——上下文按「已取代」交付，不静默丢弃`,
+          );
+        }
         let wakeAttachments: WakeContextAttachment[] = [];
         let cliUpgrade: CliUpgradeNotice | null = availableUpgrade;
         let preflightFailed = false;
@@ -5646,7 +5752,7 @@ export async function runServe(o: ServeOptions): Promise<number> {
               delivery: directedDelivery,
               signal: preparationSignal,
             };
-            const preparation = run.prepare?.(frame, preflightContext);
+            const preparation = run.prepare?.(wakeFrame, preflightContext);
             if (preparation !== undefined) {
               await awaitWithAbort(preparation, preparationSignal);
             }
@@ -5807,13 +5913,54 @@ export async function runServe(o: ServeOptions): Promise<number> {
         } catch (e) {
           out(`  runner_started 审计发送失败（不影响送达）: ${errText(e)}`);
         }
-        const taskBeat: ReturnType<typeof setInterval> = setInterval(() => emitTaskBeat(true, nowFn()), heartbeatIntervalMs);
+        // #930 路线 A：已经交出去的那一轮只通知、不打断。
+        //
+        // 主循环此刻被 run() 阻塞，取代它的 supersede 广播只会堆在缓冲区里等本轮跑完——正是
+        // 「最需要别按旧前提行动」的那一刻拿不到标记。心跳定时器是 run() 期间唯一还在跑的侧信道，
+        // 顺路搭一拍：命中就往 wake-context 目录落一个 `<seq>.superseded.json`，并往频道发一条同文案
+        // 的 status（runner 未必回头读盘，频道那条是兜底证据）。
+        //
+        // 绝不 abort、绝不改 delivery/lease 状态：runner 可能已经提交/推送/回过帖，半路打断留下的是
+        // 不一致状态，比让它带着「已过期」的事实收尾更糟。交接点（路线 B）已经贴上标记的就不再重复
+        // 通告——那一轮的模型开箱就知道。
+        let inflightSupersedeNotified = wakeFrame.superseded !== undefined;
+        const checkInflightSupersede = () => {
+          if (inflightSupersedeNotified) return;
+          const mark = findPendingSupersede(conn.pendingFrames(), frame.seq);
+          if (mark === null) return;
+          inflightSupersedeNotified = true;
+          const notice = inflightSupersededNotice(frame.seq, mark);
+          const dirs = [contextDir];
+          if (o.builtinRunner !== undefined) dirs.push(builtinRunnerContextDir(o.builtinRunner.workdir));
+          for (const dir of dirs) {
+            try {
+              writeSupersededSidecar(dir, frame.seq, o.channel, self, mark, nowFn());
+            } catch (e) {
+              out(`  in-flight supersede sidecar 落盘失败（不影响通告）: ${errText(e)}`);
+            }
+          }
+          out(`  ${notice}`);
+          try {
+            void (o.post ?? postMessage)(o.server, o.token, o.channel, {
+              kind: "status",
+              state: "working",
+              note: notice,
+              mentions: [],
+            }, lifecycleController.signal).catch((e) => out(`  in-flight supersede 通告发送失败: ${errText(e)}`));
+          } catch (e) {
+            out(`  in-flight supersede 通告发送失败: ${errText(e)}`);
+          }
+        };
+        const taskBeat: ReturnType<typeof setInterval> = setInterval(() => {
+          emitTaskBeat(true, nowFn());
+          checkInflightSupersede();
+        }, heartbeatIntervalMs);
         if (typeof taskBeat.unref === "function") taskBeat.unref();
         try {
           for (let attempt = attemptFloor + 1; attempt <= maxAttempts && retriable; attempt++) {
             attemptsUsed = attempt;
             try {
-              await runWithRunnerTimeout(run, frame, {
+              await runWithRunnerTimeout(run, wakeFrame, {
                 cmd: o.cmd,
                 channel: o.channel,
                 self,
