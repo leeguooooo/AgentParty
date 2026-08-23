@@ -2442,6 +2442,24 @@ export function codexSkillLoadFailure(stderr: string): RunnerConfigFailure | nul
   return { kind: "codex_skill_load", path, reason };
 }
 
+/**
+ * 判别环境失败时，先把 skill 加载失败那几行摘掉（CodeRabbit on #892）。
+ *
+ * 理由是一个会真实发生的串档：#892 报告里的全局 skills 目录含一个指向共享 skill 树的**符号链接**，
+ * 断链时 codex 打的正是 `failed to load skill <path>: No such file or directory`——而
+ * `no such file or directory` 恰好是 RUNNER_ENV_FAILURE_PATTERNS 里「二进制缺失」的指纹。
+ * 不摘掉的话，这条最该落进「配置坏了、改个文件就好」那一档的错，会被判成环境失败终局结算，
+ * 并且对着用户显示 credentials/binary/sandbox 的通用修法。
+ *
+ * 只摘 skill 加载失败自己那一行：其它行里的认证/二进制错照旧优先（#690/#748 的判据不动）。
+ */
+function withoutSkillLoadLines(stderr: string): string {
+  return stderr
+    .split("\n")
+    .filter((line) => !/failed to load skill\s/i.test(line))
+    .join("\n");
+}
+
 export function runnerDiagnosticExcerpt(
   result: Pick<RunnerProcessResult, "stdout" | "stderr">,
   harness: RunnerHarness,
@@ -2460,7 +2478,9 @@ export function runnerDiagnosticExcerpt(
     }
   }
   // #892：环境失败判定命中时，交出**命中的那一行**而不是 stderr 的开头。见 runnerEnvFailureEvidence。
-  const evidence = runnerEnvFailureEvidence(result.stderr);
+  // 同样先摘掉 skill 加载失败那几行，否则断链 skill 的「No such file or directory」会冒充环境证据，
+  // 把真正该显示的路径挤掉——判定与展示必须用同一份输入，不然又是一次「展示的原因不是触发的原因」。
+  const evidence = runnerEnvFailureEvidence(withoutSkillLoadLines(result.stderr));
   if (evidence !== null) return sanitizeBlockedError(evidence);
   // #892：配置类失败同理——把出问题的文件路径顶到最前，别让它被前面的启动噪声挤出摘要。
   const config = codexSkillLoadFailure(result.stderr);
@@ -3589,12 +3609,14 @@ export function createBuiltinRunner(opts: BuiltinRunnerOptions): NonNullable<Ser
         if (run.result.code !== 0) {
           // #690：认证过期 / 二进制缺失 / 沙箱拒权等环境性失败在模型启动前就崩，别归为「model may have run」。
           // #748：claude 的 auth/api 失败落在 stdout 的结构化 JSON（非 stderr），补一条只吃结构化字段的判定。
-          const envFailure =
-            isRunnerEnvFailure(run.result) ||
-            (opts.harness === "claude" && claudeJsonEnvFailure(run.result.stdout));
           // #892：codex 的 skill 加载失败单独成档，但**排在环境失败之后**——凭据过期那类的处置
           // （#690/#748 已确立的终局语义）不能被一条恰好同时出现的 skill 噪声改写。只有在没有任何
           // 环境指纹命中时，skill 加载失败才是这次非零退出最好的解释。
+          // 判环境时先摘掉 skill 加载失败那几行（断掉的 skill 符号链接会打出「No such file or
+          // directory」，恰好撞上「二进制缺失」的指纹）——见 withoutSkillLoadLines。
+          const envFailure =
+            isRunnerEnvFailure({ stderr: withoutSkillLoadLines(run.result.stderr) }) ||
+            (opts.harness === "claude" && claudeJsonEnvFailure(run.result.stdout));
           const configFailure =
             !envFailure && opts.harness === "codex" ? codexSkillLoadFailure(run.result.stderr) : null;
           const diagnostic = runnerDiagnosticExcerpt(run.result, opts.harness);

@@ -6,7 +6,12 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
-import { api, createChannel, seedToken } from "./helpers";
+// 源码文本（vite ?raw）：workers 运行时读不到宿主文件系统，源码守卫只能靠构建期把文本嵌进来。
+import doSource from "../src/do.ts?raw";
+import { api, createChannel, seedToken, uniq } from "./helpers";
+
+/** 与 worker/src/do.ts 的 NEXT_MENTION_SCAN_LIMIT 对齐：一次问询最多核查多少条候选。 */
+const NEXT_MENTION_SCAN_LIMIT = 200;
 
 async function send(
   slug: string,
@@ -192,6 +197,78 @@ describe("next-mention 扫描代价 (#913)", () => {
     expect(await nextMention(slug, agent.token, 0)).toBe(mention);
   });
 
+  // 索引化把「查得到」从**全表扫描**换成**索引探针**，代价是：任何写 messages.mentions_json 的路径
+  // 漏同步，那条 @ 就从此查不到——而改动前 LIKE 全扫是找得到的，也就是说漏一处即是**漏唤醒回归**。
+  // do.ts 里有四处 `INSERT INTO messages`，靠人眼数是靠不住的（第一版就漏了三处，CodeRabbit 逮到）。
+  // 这条守卫按源码钉死：每一处 INSERT 只要写 mentions_json，其后必须紧跟 indexMessageMentions。
+  // 将来任何人新增第五处直写路径，这里会立刻红，而不是等某个 agent 神秘地叫不醒。
+  it("所有直写 messages.mentions_json 的 INSERT 都同步了 @ 索引（源码守卫）", async () => {
+    const source = doSource;
+    const inserts = [...source.matchAll(/INSERT INTO messages \(/g)];
+    // 数量本身也钉一下：新增写路径必须来这里过一遍，而不是悄悄多一处。
+    expect(inserts.length).toBe(4);
+    for (const insert of inserts) {
+      const block = source.slice(insert.index!, insert.index! + 4000);
+      if (!block.slice(0, 1200).includes("mentions_json")) continue;
+      const statementEnd = block.indexOf("\n    );");
+      const after = block.slice(statementEnd === -1 ? 0 : statementEnd, statementEnd === -1 ? 4000 : statementEnd + 600);
+      expect(after).toContain("indexMessageMentions");
+    }
+  });
+
+  // 上一条是源码守卫；这一条是行为守卫，走真实端点证明「审阅驳回 @ 原作者」这一类的 @ 查得到。
+  // 挑驳回回复是因为它最要命：作者正等着被叫醒去改，查不到就等于驳回通知石沉大海。
+  it("审阅驳回回复里的 @ 能被 next-mention 查到（非 handleSend 的写路径）", async () => {
+    const acct = `${uniq("acct")}@leeguoo.com`;
+    const owner = await seedToken("agent", uniq("owner"), { owner: acct });
+    const slug = await createChannel(owner.token);
+    const writer = await seedToken("agent", uniq("writer"), { owner: acct, channelScope: slug });
+    const reviewer = await seedToken("agent", uniq("reviewer"), {
+      owner: `${uniq("reviewer")}@example.com`,
+      channelScope: slug,
+    });
+    const gate = await api(`/api/channels/${slug}/completion-gate`, owner.token, {
+      method: "PUT",
+      body: JSON.stringify({ gate: "reviewer", policy: "sender" }),
+    });
+    expect(gate.status).toBe(200);
+
+    const kickoff = await send(slug, writer.token, "please do the work");
+    const completion = await api(`/api/channels/${slug}/messages`, writer.token, {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "message",
+        body: "final synthesis",
+        mentions: [],
+        reply_to: kickoff,
+        completion_artifact: {
+          kind: "final_synthesis",
+          kickoff_seq: kickoff,
+          replies_count: 1,
+          timeout: false,
+          related_issues: [],
+          related_prs: [],
+        },
+      }),
+    });
+    expect(completion.status).toBe(200);
+    const completionSeq = ((await completion.json()) as { seq: number }).seq;
+    // 驳回之前 writer 没有任何待处理的 @（它自己发的不算）——把闸前的状态先钉死，
+    // 免得下面的「查得到」是别的东西凑出来的。
+    expect(await nextMention(slug, writer.token, 0)).toBeNull();
+
+    const rejected = await api(`/api/channels/${slug}/messages/${completionSeq}/review`, reviewer.token, {
+      method: "POST",
+      body: JSON.stringify({ action: "reject", reason: "missing test evidence" }),
+    });
+    expect(rejected.status).toBe(200);
+    const replySeq = ((await rejected.json()) as { reply: { seq: number; mentions: string[] } }).reply;
+    expect(replySeq.mentions).toEqual([writer.name]);
+
+    // 这就是 codex Stop hook 会问的那一句：作者查得到「有人 @ 我了」。
+    expect(await nextMention(slug, writer.token, 0)).toBe(replySeq.seq);
+  });
+
   // 编辑是除 INSERT 之外唯一能**新增** @ 的路径。漏同步它 = 被新 @ 到的人这次唤醒直接查不到。
   it("编辑新增的 @ 立刻可查", async () => {
     const human = await seedToken("human");
@@ -208,4 +285,40 @@ describe("next-mention 扫描代价 (#913)", () => {
 
     expect(await nextMention(slug, agent.token, 0)).toBe(seq);
   });
+
+  // CodeRabbit on #932 推翻了本 PR 初版的安全论证：「索引是超集 + 回表核验 ⇒ 永不误报」只在**不设上限**
+  // 时成立。候选是有上限的（NEXT_MENTION_SCAN_LIMIT），而编辑是唯一会**移除** @ 的常规路径；只追加不
+  // 替换的话，被编辑掉的 @ 会在索引里留下陈旧行，攒够上限就能把排在它们后面的**真** @ 挤出候选窗口
+  // ⇒ 漏唤醒。这是本 PR 会引入的回归，不是既有缺陷。修法是编辑路径先删后建。
+  it("编辑移除 @ 后，排在陈旧行之后的真 @ 仍然查得到（候选上限不会被陈旧行吃光）", async () => {
+    const human = await seedToken("human");
+    // 被 @ 的是人类：agent 的 @ 会落成 directed delivery，而已路由的目标**不允许**被编辑掉
+    // （必须撤回/supersede）。所以能制造陈旧索引行的只有非路由 @，这里用人类目标来构造。
+    const target = await seedToken("human");
+    const slug = await createChannel(human.token);
+    const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+    const clearRate = () =>
+      runInDurableObject(stub, (_instance: ChannelDO, state) => {
+        state.storage.sql.exec("DELETE FROM rate");
+      });
+
+    // 攒满整整一个候选窗口的「曾经 @ 过、后来被编辑掉」的消息。
+    for (let i = 0; i < NEXT_MENTION_SCAN_LIMIT; i += 1) {
+      if (i > 0 && i % 20 === 0) await clearRate();
+      const seq = await send(slug, human.token, `@${target.name} 第 ${i} 条`, [target.name]);
+      const edit = await api(`/api/channels/${slug}/messages/${seq}/edit`, human.token, {
+        method: "POST",
+        body: JSON.stringify({ body: `第 ${i} 条（改口，不 @ 了）` }),
+      });
+      expect(edit.status).toBe(200);
+    }
+    await clearRate();
+    // 编辑真的把 @ 拿掉了——否则下面的「查得到」只是因为陈旧行本身还是有效命中，闸被遮住。
+    expect(await nextMention(slug, target.token, 0)).toBeNull();
+
+    const real = await send(slug, human.token, `@${target.name} 这条是真的`, [target.name]);
+    expect(await nextMention(slug, target.token, 0)).toBe(real);
+    // 200 条消息 + 200 次编辑，比默认 20s 预算慢；这是这条守卫的固有成本——想证明「陈旧行吃光候选窗口」
+    // 就必须真的把窗口填满，凑不满的夹具证明不了任何事。
+  }, 120_000);
 });

@@ -5279,6 +5279,8 @@ export class ChannelDO extends Server<Env> {
       options.workflow === undefined ? null : JSON.stringify(options.workflow),
       now,
     );
+    // #913：系统状态帧也能 @ 人（workflow/审阅提醒），同样要进 @ 倒排索引。
+    this.indexMessageMentions(seq, options.mentions ?? []);
     const frame: MsgFrame = {
       type: "status",
       seq,
@@ -5322,6 +5324,8 @@ export class ChannelDO extends Server<Env> {
       roleSource ?? null,
       now,
     );
+    // #913：审阅回复会 @ 提交人，这条 @ 必须能被 next-mention 查到。
+    this.indexMessageMentions(seq, mentions);
     const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
     const frame = this.rowToFrame(row);
     this.linkWakeResume(identity, frame, now);
@@ -5361,6 +5365,8 @@ export class ChannelDO extends Server<Env> {
       JSON.stringify(response),
       now,
     );
+    // #913：决策回应同样反指提问方并 @ 它，同样要进 @ 倒排索引。
+    this.indexMessageMentions(seq, mentions);
     const row = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
     const frame = this.rowToFrame(row);
     this.linkWakeResume(identity, frame, now);
@@ -6210,8 +6216,14 @@ export class ChannelDO extends Server<Env> {
           );
           const updated = this.ctx.storage.sql.exec("SELECT * FROM messages WHERE seq = ?", seq).one();
           // #913：编辑可以**新增** @（删除已路由目标会在上面被拒），新增的必须进倒排索引，
-          // 否则被 @ 的人这次唤醒就查不到。索引只加不删，编辑掉的非路由 @ 由读路径核验滤掉。
-          // 取的是**刚落库的那一行**而不是入参：索引与存储读同一个事实，不可能各说各话。
+          // 否则被 @ 的人这次唤醒就查不到。取的是**刚落库的那一行**而不是入参：索引与存储读同一个
+          // 事实，不可能各说各话。
+          //
+          // 先删后建，而不是只追加：编辑是唯一会**移除** @ 的常规路径，只追加的话陈旧行会一直攒。
+          // 核验虽然会把它们滤掉、不会误报，但候选是有 LIMIT 的——同一个 key 攒够
+          // NEXT_MENTION_SCAN_LIMIT 条陈旧行，就能把它们后面一条真 @ 挤出候选窗口，变成漏唤醒。
+          // 删掉它们，索引就对每条消息都是精确的（撤回/擦除/裁剪已各自清理）。
+          this.dropMentionIndex(seq);
           this.indexMessageMentions(
             seq,
             parseStoredMentions(updated.mentions_json),

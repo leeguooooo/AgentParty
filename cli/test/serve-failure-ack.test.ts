@@ -1047,6 +1047,52 @@ describe("codex skill/config 加载失败自成一档 (#892)", () => {
     expect(diagnostic).not.toContain("missing YAML frontmatter");
   });
 
+  // CodeRabbit on #932：skill 加载失败**自己那一行**就可能含 `No such file or directory`
+  // （#892 报告里的全局 skills 目录挂着一个指向共享 skill 树的符号链接，断链就是这个形态），
+  // 而它恰好命中「二进制缺失」的 ENOENT 指纹。不把这行摘掉的话，新加的这一档在「文件缺失」
+  // 这个最常见形态下恒不生效——@ 照样被终局结算，还对着用户显示 credentials/binary/sandbox 的修法。
+  const CODEX_DANGLING_SYMLINK_STDERR = [
+    "Reading additional input from stdin...",
+    "2026-08-23T17:21:23.637254Z ERROR codex_core::session::session: failed to load skill " +
+      "/Users/dev/.agents/skills/shared/SKILL.md: No such file or directory (os error 2)",
+    "OpenAI Codex v0.145.0",
+  ].join("\n");
+
+  test("断链 skill 的 ENOENT 不冒充环境失败：仍落配置档，不结算、不推游标", async () => {
+    // 这一行**确实**命中 ENOENT 环境指纹——正因如此才需要先摘掉它再判环境。
+    expect(isRunnerEnvFailure({ stderr: CODEX_DANGLING_SYMLINK_STDERR })).toBe(true);
+    expect(codexSkillLoadFailure(CODEX_DANGLING_SYMLINK_STDERR)?.reason).toContain("No such file or directory");
+
+    const s = closeAfterOneMention();
+    const posts: Array<Record<string, unknown>> = [];
+    const cursors: number[] = [];
+    const o = opts({
+      server: s.url,
+      maxWakeAttempts: 3,
+      onCursor: (c) => cursors.push(c),
+      post: async (_a, _b, _c, body) => {
+        posts.push(body as Record<string, unknown>);
+        return { seq: 1 };
+      },
+      runCommand: createBuiltinRunner({
+        server: "http://agentparty.test",
+        token: "ap_tok",
+        channel: "dev",
+        harness: "codex",
+        workdir: tempDir(),
+        runProcess: async () => ({ code: 1, stdout: "", stderr: CODEX_DANGLING_SYMLINK_STDERR }),
+        post: async () => ({ seq: 1 }),
+      }),
+    });
+
+    expect(await runServe(o)).toBe(13);
+    expect(cursors).toEqual([]);
+    const note = String(posts.find((p) => p.state === "blocked")?.note);
+    expect(note).toContain("codex_skill_load");
+    expect(note).toContain("/Users/dev/.agents/skills/shared/SKILL.md");
+    expect(note).not.toContain("retry=disabled_environment");
+  });
+
   test("环境指纹优先：同时出现 auth 失败时仍走 #690/#748 的终局语义，不被本档改写", async () => {
     const s = closeAfterOneMention();
     const posts: Array<Record<string, unknown>> = [];
