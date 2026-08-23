@@ -4,12 +4,18 @@ import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type Pres
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { diagnoseCodexWake, formatCodexWakeDiagnosis, shouldSurfaceCodexWakeDiagnosis } from "../wake-diagnosis";
+import {
+  diagnoseTaskLeaseEnforcement,
+  formatTaskLeaseEnforcement,
+  shouldSurfaceTaskLeaseEnforcement,
+  type TaskLeaseEnforcement,
+} from "../task-lease-diagnosis";
 import { resolveAuth } from "../oidc-cli";
 import { fetchPresence, fetchReadCursors, fetchRuntimePeers, handleRestError } from "../rest";
 import { buildRuntimeTopology } from "../runtime-topology";
 import { localStatuslineBase, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { sanitizeSingleLine } from "../format";
-import { buildPullWakeLookup, type PullWakeHint, type PullWakeLookup } from "../pull-wake";
+import { buildPullWakeLookup, pullWakeDelivers, type PullWakeHint, type PullWakeLookup } from "../pull-wake";
 import { isSlug } from "../validation";
 
 const WHO_FLAGS = ["channel", "json"];
@@ -35,8 +41,14 @@ List who is in a channel, tiered by how you can reach them:
               the honest statement is "the user gets it next time they use it".
               Shown only from THIS machine's point of view — this machine has the codex
               Stop hook installed AND a local config for that identity (JSON: "pull_wake"
-              with scope:"local"/harness/evidence). Another machine's hooks are invisible
-              here, and so is whether the user will open that session again.
+              with scope:"local"/harness/hook/evidence). Another machine's hooks are
+              invisible here, and so is whether the user will open that session again.
+  ⛔ wake blocked
+              the Stop hook IS installed but codex's hook-trust gate will not run it
+              (JSON: "pull_wake".hook is "disabled" or "needs-review"). codex skips
+              unapproved hooks SILENTLY, so the @ is not picked up at all — this is the
+              state that looks installed and is not. Fix: party wake check (on that
+              machine). Never tells you to bypass the trust gate.
               A "↳ fix:" hint appears only when the harness is actually known from
               evidence present on THAT row (JSON: "wake_guidance" with
               reason/harness/harness_source/remedy). When it cannot be known, who says
@@ -89,7 +101,7 @@ session name), so mention the "@handle" shown here — not a UUID session name.
 Options:
   --channel C   read channel C instead of the bound channel
   --json        emit one JSON object per line
-                (name/kind/tier/live/residency/unreachable/pull_wake/wake_guidance/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/topology_conflicts/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
+                (name/kind/tier/live/residency/unreachable/pull_wake/wake_guidance/wake/wake_unverified/busy/queue_depth/waiting_owner_count/unhandled_mention_count/oldest_unhandled_mention_seq/pending_mention_seqs/last_receipt_seq/not_in_turn_since/current_task/task_started_at/heartbeat_at/activity/listening/runner_health/agent_session/topology_conflicts/task_lease/reception_mode/reception_runner/reception_context/scope/scope_conflicts/account/handle/display_name/age_ms/read_seq)`;
 
 // 导出仅供单测断言 help 文案与真实行为一致（#859/#860：文档漂移过一次，用断言钉住）。
 export const HELP_TEXT = HELP;
@@ -101,7 +113,7 @@ const SYSTEM_HUMAN_SESSION_RE =
   /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|login-verify-.+)$/i;
 
 type Tier = "online" | "wakeable" | "recent";
-interface Row {
+export interface Row {
   name: string;
   kind: SenderKind;
   tier: Tier;
@@ -160,6 +172,9 @@ interface Row {
   // runner_health 是 serve 自报的「在线但干不动」（runner 连败）。两者正交，都缺省即无恙。
   listening?: ListeningVerdict;
   runner_health?: RunnerHealth;
+  // #926：目标那台机器在 MCP 启动时自检出的「装了但叫不醒」。与 listening/runner_health 的区别是
+  // 它**先于任何一条 @** 就存在——那两个都要等 @ 白发一次才派生得出来。
+  wake_block?: PresenceEntry["wake_block"];
   // runner 自报、worker 持久化的模型会话句柄（#522）；不是 websocket session。
   agent_session?: PresenceEntry["agent_session"];
   // #834 第 3 项：以前这里只有 kind/with/runtime_count——「同一身份跑着两个执行体」和「隔壁
@@ -173,6 +188,18 @@ interface Row {
     same_identity?: boolean;
     severity?: "blocking" | "advisory";
   }>;
+  // #931：只在 blocking 冲突（=自己这个身份还有别的执行体）的那一行上出现。判定说「并发认领会被
+  // 拒」是有前提的——那把闸只在**本机**、且**认得出执行体标识**时才落得下来。认不出时它是开的，
+  // 而此前唯一的告知是 `party status` 往 stderr 打的一行 warn（刷屏的 serve 日志里等于不存在）。
+  // 所以「这一刀有没有落下」必须和冲突本身出现在同一处，且可程序化判定。
+  task_lease?: {
+    enforced: boolean;
+    /** 互斥边界。跨机（含同机不同 AGENTPARTY_HOME）的同一身份挡不住——#931 缺口 1。 */
+    scope: "local_home";
+    executor_id?: string;
+    reason?: "no_signal" | "malformed";
+    fix?: string;
+  };
   // #817：无人值守时这个身份怎么接待 @——model runner 代答，还是 custom 命令。隔离接待意味着
   // 答话的会话不继承本人当前上下文，协作方在 @ 之前就该看见这一点。
   reception_mode?: ReceptionMode;
@@ -284,7 +311,24 @@ export function wakeGuidanceNote(g: WakeGuidance | undefined): string {
  */
 export function deferredNote(r: Row): string {
   if (r.pull_wake === undefined) return "";
+  // #926：判据是「会不会跑」，不是「装没装」。信任闸没过时这条通道一次都不会被调用——
+  // 继续宣告 deferred 就是系统自信地讲一件错事，发送方会安心去等一个永远不来的回应。
+  if (!pullWakeDelivers(r.pull_wake)) return blockedPullWakeNote(r);
   return ` · ⇢ deferred (local view: a codex turn under this identity on this machine picks the @ up via the Stop hook)`;
+}
+
+/**
+ * #926：装了 Stop hook、但 codex 的信任闸不让它跑。
+ *
+ * 这一档必须比 unreachable 更刺眼，而不是更含糊：unreachable 至少是「没装」，用户会去装；
+ * 这一档长得像装好了，所以只能靠一句明说 + 一条能直接跑的命令把它从「看起来正常」里拽出来。
+ */
+export function blockedPullWakeNote(r: Row): string {
+  const why =
+    r.pull_wake?.hook === "disabled"
+      ? "codex marked our Stop hook enabled=false"
+      : "codex has not approved our Stop hook yet";
+  return ` · ⛔ wake blocked (${why} — codex SKIPS it silently, so the @ is NOT picked up; run 'party wake check' on that machine)`;
 }
 
 // kind 已知取 kind；旧 presence 行没回填时 UUID 名判 human（网页登录会话），其余判 agent。
@@ -378,6 +422,7 @@ export function classify(e: PresenceEntry, now: number): Row | null {
     // 探活分级（#603）：服务端只对有活连接的身份下发 listening；runner_health 独立于任务生命周期。
     ...(e.listening === "suspect" || e.listening === "deaf" ? { listening: e.listening } : {}),
     ...(e.runner_health === undefined ? {} : { runner_health: e.runner_health }),
+    ...(e.wake_block === undefined ? {} : { wake_block: e.wake_block }),
     // #823：scope 只在 state != offline 时有意义——已经离线的人不再占着任何东西。
     ...(Array.isArray(e.status?.scope) && e.status.scope.length > 0 && e.state !== "offline"
       ? { scope: e.status.scope }
@@ -498,6 +543,11 @@ export function taskNote(r: Row, now: number): string {
 // listening（服务端从 delivery 租约派生：投喂了不吃）与 runner_health（自报：唤醒了起不来）。
 export function livenessNote(r: Row): string {
   const parts: string[] = [];
+  // #926：目标自检出的「叫不醒」排在最前——其余两条说的是「在听但吃不下」，这条说的是
+  // 「压根不会被叫起来」，是更靠前、更彻底的断点，也是唯一一条对方能自己修好的。
+  if (r.wake_block !== undefined) {
+    parts.push(`⛔ wake blocked: ${terminalIdentityText(r.wake_block.detail)} → ${terminalIdentityText(r.wake_block.fix)}`);
+  }
   if (r.listening === "deaf") parts.push("⚠ not listening (deliveries expiring)");
   else if (r.listening === "suspect") parts.push("⚠ slow to consume (1 delivery lease expired)");
   if (r.runner_health !== undefined && !r.runner_health.ok) {
@@ -598,6 +648,34 @@ export function annotateTopologyConflicts(
   });
 }
 
+/**
+ * 把「本机这条腿的任务租约落没落闸」贴到**有 blocking 冲突的那些行**上（#931）。
+ *
+ * 只贴 blocking 行是刻意的：blocking ⇔ same_identity ⇔ 这一行说的就是「我自己还有别的执行体」。
+ * 别的行贴上去既没有意义，也会把噪音铺满整个 who。
+ */
+/** 这一行是不是「我自己还有别的执行体」——blocking ⇔ same_identity（#885）。 */
+export function hasBlockingConflict(row: Row): boolean {
+  return (row.topology_conflicts ?? []).some((conflict) => conflict.severity === "blocking");
+}
+
+export function annotateTaskLeaseEnforcement(rows: Row[], enforcement?: TaskLeaseEnforcement): Row[] {
+  if (enforcement === undefined) return rows;
+  return rows.map((row) => {
+    if (!hasBlockingConflict(row)) return row;
+    return {
+      ...row,
+      task_lease: {
+        enforced: enforcement.enforced,
+        scope: enforcement.scope,
+        ...(enforcement.executor_id === null ? {} : { executor_id: enforcement.executor_id }),
+        ...(enforcement.reason === null ? {} : { reason: enforcement.reason }),
+        ...(enforcement.fix === null ? {} : { fix: enforcement.fix }),
+      },
+    };
+  });
+}
+
 export function topologyNote(r: Row): string {
   const conflicts = r.topology_conflicts ?? [];
   if (conflicts.length === 0) return "";
@@ -606,8 +684,12 @@ export function topologyNote(r: Row): string {
     // 事故当天 `party who` 打的正是一条中性的 same_local_installation。
     if (conflict.severity === "blocking") {
       const where = conflict.kind === "same_identity_worktree" ? " share one worktree" : ` (${conflict.kind})`;
-      return ` · ⚠ ${conflict.runtime_count ?? 1} other live runtime(s) of this identity${where}` +
-        " — concurrent claims on one task are refused";
+      // #931:「会被拒」是有前提的。本机认不出执行体标识时那把闸根本没落下,这里再说「are refused」
+      // 就是在骗人——读的人以为有东西拦着,于是放心地让两个执行体一起干。判定不确定就别断言。
+      const verdict = r.task_lease?.enforced === false
+        ? " — ⚠ concurrent claims are NOT refused here: no execution-runtime identity on this machine (party doctor)"
+        : " — concurrent claims on one task are refused";
+      return ` · ⚠ ${conflict.runtime_count ?? 1} other live runtime(s) of this identity${where}${verdict}`;
     }
     const label = conflict.kind === "same_worktree"
       ? "⚠ same worktree as"
@@ -661,10 +743,12 @@ export function buildRows(
     cursorOf?: Map<string, number>;
     runtimePeers?: RuntimePeerDiscovery;
     pullWake?: PullWakeLookup;
+    /** #931：本机这条腿的任务租约判定。缺省＝不标注（老调用方行为不变）。 */
+    taskLease?: TaskLeaseEnforcement;
   },
 ): Row[] {
   const { now, channel } = ctx;
-  return annotateTopologyConflicts(
+  return annotateTaskLeaseEnforcement(annotateTopologyConflicts(
     annotateScopeConflicts(
       presence
         .map((e) => classify(e, now))
@@ -684,7 +768,7 @@ export function buildRows(
         }),
     ),
     ctx.runtimePeers,
-  ).sort((a, b) => RANK[a.tier] - RANK[b.tier] || a.name.localeCompare(b.name));
+  ), ctx.taskLease).sort((a, b) => RANK[a.tier] - RANK[b.tier] || a.name.localeCompare(b.name));
 }
 
 /** 单行终端渲染。抽出来让「哪些标注真的出现在行里」可断言（#879 之前只有 note 函数被单测覆盖）。 */
@@ -790,7 +874,14 @@ export async function run(argv: string[]): Promise<number> {
     } catch {
       pullWake = undefined;
     }
-    const rows = buildRows(presence, { now, channel, cursorOf, runtimePeers, pullWake });
+    // #931：本机这条腿的任务租约判定。纯本地、不发网络；失败即当作「不标注」，绝不弄挂 who。
+    let taskLease: TaskLeaseEnforcement | undefined;
+    try {
+      taskLease = diagnoseTaskLeaseEnforcement();
+    } catch {
+      taskLease = undefined;
+    }
+    const rows = buildRows(presence, { now, channel, cursorOf, runtimePeers, pullWake, ...(taskLease === undefined ? {} : { taskLease }) });
     if (flags.json === true) {
       for (const r of rows) console.log(JSON.stringify(r));
       return 0;
@@ -800,6 +891,12 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     }
     for (const r of rows) console.log(renderRow(r, now, lastSeq));
+    // #931：who 里出现了「这个身份还有别的执行体」，而本机那把闸没落下——这两件事必须放在一起
+    // 说出来。此前它只在 `party status` 的 stderr 里有一行 warn，而 who 那行还在断言「会被拒」。
+    if (taskLease !== undefined && shouldSurfaceTaskLeaseEnforcement(taskLease, rows.some(hasBlockingConflict))) {
+      console.log("");
+      for (const line of formatTaskLeaseEnforcement(taskLease)) console.log(line);
+    }
     // #924：谁在场是一回事，「@ 我叫不叫得醒我」是另一回事。此前后者只在日志里留一行，
     // 于是用户看到自己在 who 里好好地列着、却怎么都醒不过来。断了就在这里说出来。
     try {

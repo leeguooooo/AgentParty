@@ -403,6 +403,9 @@ function applyFrame(state: ChannelState, frame: ServerFrame): ChannelState {
             activity: frame.activity,
             runner_health: frame.runner_health,
             listening: frame.listening,
+            // #926：同理必须合并——漏了它，任何一个增量 presence 帧都会把「叫不醒」徽章抹掉，
+            // 于是频道又回到「看起来正常」的老样子（#632 就是这么被踩出来的）。
+            wake_block: frame.wake_block,
           },
         },
       };

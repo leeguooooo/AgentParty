@@ -43,6 +43,8 @@ import {
   parseAgentActivity,
   parseRunnerHealth,
   parseRuntimeTopology,
+  parseWakeBlock,
+  WAKE_BLOCK_TTL_MS,
   type AgentActivity,
   type ListeningVerdict,
   type RunnerHealth,
@@ -1942,6 +1944,9 @@ export class ChannelDO extends Server<Env> {
       // runner 健康自报（#603）：serve runner 连败计数 + 最后错误。独立于 current_task 生命周期
       //（空闲期也要能看见「干不动」）；恢复由心跳缺省即清，离线一并清。
       "ALTER TABLE presence ADD COLUMN runner_health_json TEXT",
+      // 本机自检出的「叫不醒」（#926）：codex 的 hook 信任闸没过等本地断点。与 activity/runner_health
+      // 不同，它**离线也要下发**——「这台机器上这个身份叫不醒」恰恰是离线时最该说的那句话。
+      "ALTER TABLE presence ADD COLUMN wake_block_json TEXT",
     ]) {
       try {
         sql.exec(ddl);
@@ -2515,6 +2520,7 @@ export class ChannelDO extends Server<Env> {
         heartbeat_at INTEGER,
         activity_json TEXT,
         runner_health_json TEXT,
+        wake_block_json TEXT,
         agent_session_json TEXT,
         PRIMARY KEY (name, session_id)
       )`);
@@ -2524,14 +2530,16 @@ export class ChannelDO extends Server<Env> {
         status_decision_json, status_workflow_json, role, role_source, residency, wake_kind,
         wake_verified_at, context_json, lineage_json, kind, account, client_version, handle,
         display_name, avatar_url, avatar_thumb, paused_at, paused_resume_at, busy, queue_depth,
-        current_task, task_started_at, heartbeat_at, activity_json, runner_health_json, agent_session_json
+        current_task, task_started_at, heartbeat_at, activity_json, runner_health_json, wake_block_json,
+        agent_session_json
       ) SELECT
         name, COALESCE(NULLIF(session_id, ''), '${LEGACY_SESSION_ID}'), state, note, updated_at,
         status_scope_json, status_summary_seq, status_blocked_reason, status_context_json,
         status_decision_json, status_workflow_json, role, role_source, residency, wake_kind,
         wake_verified_at, context_json, lineage_json, kind, account, client_version, handle,
         display_name, avatar_url, avatar_thumb, paused_at, paused_resume_at, busy, queue_depth,
-        current_task, task_started_at, heartbeat_at, activity_json, runner_health_json, agent_session_json
+        current_task, task_started_at, heartbeat_at, activity_json, runner_health_json, wake_block_json,
+        agent_session_json
       FROM presence`);
       sql.exec("DROP TABLE presence");
       sql.exec("ALTER TABLE presence_session_v2 RENAME TO presence");
@@ -7513,6 +7521,57 @@ export class ChannelDO extends Server<Env> {
       }
       return Response.json({ ok: true, attached: updated.rowsWritten > 0 });
     }
+    // 本机唤醒自检直报（issue #926）：agent 在 MCP 启动时读本地盘断定「这台机器上我叫不醒」，
+    // 经 REST 自报。授权在 worker 侧已判（agent 只准自报），do 只落状态。
+    //
+    // 与 activity 直报的关键差别：**presence 无行时要建行**，不能静默吞。
+    // 「装了、看起来正常、其实叫不醒」的那批身份恰恰从没建立过 WS 连接，也就没有 presence 行；
+    // 沿用 activity 的「无行即丢」会让唯一能救人的那条信号，正好在最需要它的场景下被丢掉。
+    // 新建的行一律 state='offline'——那是事实，绝不能因为收到一条自报就把它渲染成在线。
+    const wakeBlockMatch = url.pathname.match(/^\/internal\/presence\/([^/]+)\/wake-block$/);
+    if (wakeBlockMatch && request.method === "POST") {
+      const name = decodeURIComponent(wakeBlockMatch[1] ?? "");
+      if (!name) {
+        return Response.json({ error: { code: "bad_request", message: "name required" } }, { status: 400 });
+      }
+      const body = (await request.json().catch(() => null)) as { wake_block?: unknown } | null;
+      const now = Date.now();
+      // null ＝ 显式「我这边通了」，清除既有判定。这是自愈的正路：修好后新开一次会话即触发。
+      const clearing = body?.wake_block === null;
+      const block = clearing ? undefined : parseWakeBlock(body?.wake_block);
+      if (!clearing && block === undefined) {
+        return Response.json(
+          { error: { code: "bad_request", message: "valid wake_block or null required" } },
+          { status: 400 },
+        );
+      }
+      // 未来时间戳拒收（容忍 60s 时钟抖动），口径同 activity：ts 是序列化侧 TTL 的输入，
+      // 远未来值会让一条僵判定永不过期地钉在 presence 上。
+      if (block !== undefined && block.ts - now > 60_000) {
+        return Response.json({ error: { code: "bad_request", message: "wake_block.ts is in the future" } }, { status: 400 });
+      }
+      const existing = this.ctx.storage.sql
+        .exec("SELECT 1 FROM presence WHERE name = ? LIMIT 1", name)
+        .toArray().length > 0;
+      // 清除请求对一个从没露过面的身份是空操作：别为了「清掉不存在的东西」凭空造一行 presence。
+      if (!existing && clearing) return Response.json({ ok: true, attached: false });
+      if (!existing) {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO presence (name, session_id, state, note, updated_at)
+           VALUES (?, ?, 'offline', NULL, ?)`,
+          name,
+          LEGACY_SESSION_ID,
+          now,
+        );
+      }
+      this.ctx.storage.sql.exec(
+        "UPDATE presence SET wake_block_json = ? WHERE name = ?",
+        block === undefined ? null : JSON.stringify(block),
+        name,
+      );
+      this.broadcastPresenceFor(name);
+      return Response.json({ ok: true, attached: true, cleared: clearing });
+    }
     // 人为暂停/恢复接待（issue #180）。授权在 worker 侧已判（moderator），do 只落状态。
     const pauseMatch = url.pathname.match(/^\/internal\/presence\/([^/]+)\/(pause|resume)$/);
     if (pauseMatch && request.method === "POST") {
@@ -11996,7 +12055,8 @@ export class ChannelDO extends Server<Env> {
                 state, note, updated_at, status_scope_json, status_summary_seq, status_blocked_reason,
                 status_context_json, status_decision_json, status_workflow_json, role, role_source, residency, wake_kind, wake_verified_at,
                 context_json, lineage_json, paused_at, paused_resume_at, busy, queue_depth,
-                current_task, task_started_at, heartbeat_at, activity_json, runner_health_json, agent_session_json`;
+                current_task, task_started_at, heartbeat_at, activity_json, runner_health_json, wake_block_json,
+                agent_session_json`;
 
   private presenceList(): PresenceEntry[] {
     const liveCounts = this.liveConnectionCounts();
@@ -12535,6 +12595,20 @@ export class ChannelDO extends Server<Env> {
         try {
           const health = parseRunnerHealth(JSON.parse(r.runner_health_json) as unknown);
           return health === undefined ? {} : { runner_health: health };
+        } catch {
+          return {};
+        }
+      })(),
+      // 本机自检出的「叫不醒」（#926）。**刻意不看 state**：activity/runner_health 描述「正在干活的
+      // 那个进程怎么样了」，离线时无意义；wake_block 描述「@ 它有没有用」，而拉取式唤醒的身份平时
+      // 本来就是 offline——离线时把它抹掉，等于恰好在最该说的时候闭嘴。
+      // 清除的正路是 agent 自报 null（修好后新开会话即触发）；TTL 只兜底一台再也不启动的机器。
+      ...(() => {
+        if (typeof r.wake_block_json !== "string" || r.wake_block_json === "") return {};
+        try {
+          const block = parseWakeBlock(JSON.parse(r.wake_block_json) as unknown);
+          if (block === undefined || Date.now() - block.ts > WAKE_BLOCK_TTL_MS) return {};
+          return { wake_block: block };
         } catch {
           return {};
         }

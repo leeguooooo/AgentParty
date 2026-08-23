@@ -4,8 +4,15 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ChannelDecisionRecord } from "@agentparty/shared";
-import { AUTHZ_BLANKET_ACTION, authzTopic, checkAuthz, normalizeAuthzAction } from "../src/authz";
+import { DECISION_ASK_TOPIC_PREFIX, type ChannelDecisionRecord } from "@agentparty/shared";
+import {
+  AUTHZ_BLANKET_ACTION,
+  AUTHZ_TOPIC_PREFIX,
+  DECISION_APPROVAL_LEDGER_NOTE,
+  authzTopic,
+  checkAuthz,
+  normalizeAuthzAction,
+} from "../src/authz";
 import { AUTHZ_DENIED_EXIT, run } from "../src/commands/authz";
 
 function decision(topic: string, summary: string, over: Partial<ChannelDecisionRecord> = {}): ChannelDecisionRecord {
@@ -281,5 +288,31 @@ describe("party authz check command", () => {
     expect(await run(["check", "spend diamonds", "--channel", "king"])).toBe(AUTHZ_DENIED_EXIT);
     expect(stdout[0]).toContain("NOT authorized");
     expect(stdout.join("\n")).toContain("active grants in #king: (none)");
+  });
+
+  // #929 反向用例的核验端一半：一条被 owner 批准的 decision_request 会在账本里留下 `ask:` topic
+  // 的一行（Worker 侧 decision-ledger.spec.ts 钉住它确实被写出来了）。这里钉的是：那一行落进
+  // active_decisions 之后，`party authz check` 依旧退出 3。
+  test("exits 3 for an approved decision whose prompt impersonated the authz namespace", async () => {
+    mockCharter({
+      charter: null,
+      charter_rev: 3,
+      active_decisions: [
+        decision(`${DECISION_ASK_TOPIC_PREFIX}authz:spend diamonds`, "approved by owner on decision request #12"),
+        decision(`${DECISION_ASK_TOPIC_PREFIX}AUTHZ:*`, "approved by owner on decision request #13", {
+          id: `decision_${"c".repeat(32)}`,
+        }),
+      ],
+    });
+    expect(await run(["check", "spend diamonds", "--channel", "king", "--json"])).toBe(AUTHZ_DENIED_EXIT);
+    const frame = JSON.parse(stdout.at(-1) as string);
+    expect(frame).toMatchObject({ authorized: false, credential: null, active_grants: [] });
+  });
+
+  test("the decision-ask note tells callers approval is not a credential", () => {
+    expect(DECISION_APPROVAL_LEDGER_NOTE).toContain(DECISION_ASK_TOPIC_PREFIX);
+    expect(DECISION_APPROVAL_LEDGER_NOTE).toContain(AUTHZ_TOPIC_PREFIX);
+    expect(DECISION_APPROVAL_LEDGER_NOTE).toContain("NOT an authorization credential");
+    expect(DECISION_APPROVAL_LEDGER_NOTE).toContain("party authz grant");
   });
 });

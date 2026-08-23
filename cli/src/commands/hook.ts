@@ -83,6 +83,8 @@ import {
 import { defaultInstanceLockDir, isSameLiveProcess } from "../instance-lock";
 import { nativeSessionName } from "../claude-inbox-inject";
 import { isHelpArg } from "../args";
+import { codexStopHookStatus, diagnoseCodexWake, type CodexStopHookStatus } from "../wake-diagnosis";
+import { buildWakeChecklist, formatWakeChecklist } from "../wake-checklist";
 import { isPartyBinaryPath } from "../upgrade";
 import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "./claude-launch";
 import type { ServeSupervisorOptions } from "./serve";
@@ -540,6 +542,14 @@ async function runInstall(argv: string[]): Promise<number> {
       : "普通 Claude session 只写本地 activity；频道 presence 上行仍需 party claude、" +
         "party bridge claude 或托管 serve lane。",
   );
+  // #910：装完不能只说「装好了」就收工。codex 0.145+ 对新装/改动过的 hook 默认**不信任**，
+  // 要在 TUI 里确认一次才会运行——不确认就一次都不跑，且**没有任何报错**。此前这里正是
+  // 「看起来成功、实际不生效、且无提示」的现场：用户以为装好了，然后在原会话里等唤醒等到怀疑人生。
+  // 所以最后一步不是再给一条指令（没人读），而是**当场验证并报出还差几步**。
+  if (scope === "codex") {
+    console.log("");
+    for (const line of formatWakeChecklist(buildWakeChecklist(diagnoseCodexWake()))) console.log(line);
+  }
   return 0;
 }
 
@@ -589,11 +599,23 @@ export function inspectHookScope(scope: HookScope, path: string, source: string 
   return { scope, path, installed: events.length > 0, events, unreadable: false };
 }
 
-export function formatHookScopeStatus(status: HookScopeStatus): string {
+/**
+ * #910：`installed` 之外必须有「装了但 codex 不会跑它」这一档——**这是最需要被看见的状态**，
+ * 因为它长得像装好了。判定复用 #925 的四态 `codexStopHookStatus`（老版本 codex 没有信任闸时
+ * 判 ok，绝不喊狼来了），不另写一套。
+ */
+export function formatHookScopeStatus(status: HookScopeStatus, trust?: CodexStopHookStatus): string {
   const where = `${status.scope} scope: ${termText(status.path)}`;
   if (status.unreadable) return `unreadable — ${where}`;
   if (!status.installed) return `not installed — ${where}`;
-  return `installed — ${where} [${status.events.map(termText).join(", ")}]`;
+  const events = `[${status.events.map(termText).join(", ")}]`;
+  if (trust === "disabled") {
+    return `installed but NOT TRUSTED — ${where} ${events}\n  codex 把它标成了 enabled=false，会【静默跳过】它 —— 等于没装。修：party wake check`;
+  }
+  if (trust === "needs-review") {
+    return `installed but NOT TRUSTED — ${where} ${events}\n  codex 还没批准它，未获批准的 hook 会被【静默跳过】 —— 等于没装。修：party wake check`;
+  }
+  return `installed — ${where} ${events}`;
 }
 
 /**
@@ -609,8 +631,22 @@ function runStatus(argv: string[]): number {
     const path = settingsPath(scope);
     return inspectHookScope(scope, path, existsSync(path) ? readFileSync(path, "utf8") : null);
   });
-  for (const result of results) console.log(formatHookScopeStatus(result));
+  // 信任闸只对 codex 那档有意义（Claude 侧没有这道闸）。读盘失败一律不加档，别无中生有。
+  let trust: CodexStopHookStatus | undefined;
+  try {
+    trust = codexStopHookStatus();
+  } catch {
+    trust = undefined;
+  }
+  for (const result of results) {
+    console.log(formatHookScopeStatus(result, result.scope === "codex" ? trust : undefined));
+  }
   if (results.some((r) => r.unreadable)) return 1;
+  // #910：装了但没被信任**不算装好**——它一次都不会跑。返回非零，好让脚本/接入包判得出来。
+  if (results.some((r) => r.scope === "codex" && r.installed) && (trust === "disabled" || trust === "needs-review")) {
+    console.log("codex 那档装了但没被信任，跑 `party wake check` 看还差哪一步。");
+    return 1;
+  }
   if (results.some((r) => r.installed)) return 0;
   console.log(
     scopes.length > 1

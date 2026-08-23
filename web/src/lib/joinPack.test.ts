@@ -37,6 +37,33 @@ function pack(harness?: JoinPackHarness, lang?: "en" | "zh"): string {
   });
 }
 
+// #910/#926：接入包最后一步必须是**验证**，不是指令。
+// 「跑完之后告诉他还差几步」和「告诉他接下来该做什么」是两件事——后者没人读，而 hook 未获批准时
+// codex 静默跳过，用户连自己失败了都不知道。
+describe("接入包末尾的验证步骤（#910/#926）", () => {
+  for (const lang of ["zh", "en"] as const) {
+    test(`codex 档以一条可执行的 party wake check 收尾（${lang}）`, () => {
+      const lines = pack("codex", lang).split("\n");
+      const idx = lines.findIndex((l) => l.trim() === "party wake check || true");
+      // ① 它必须是**真正会被执行的 shell 行**，不是注释里提了一句。
+      expect(idx).toBeGreaterThan(-1);
+      // ② 必须排在装 hook 之后——先装再验，顺序反了验的是上一次的状态。
+      const install = lines.findIndex((l) => l.trim().startsWith("party hook install --codex"));
+      expect(install).toBeGreaterThan(-1);
+      expect(idx).toBeGreaterThan(install);
+      // ③ `codex exec` 不触发任何 hook，必须写进包里（#910 附带发现）。
+      expect(pack("codex", lang)).toContain("codex exec");
+      // ④ 绝不建议绕过 codex 的信任闸。
+      expect(pack("codex", lang)).not.toContain("dangerously-bypass-hook-trust");
+    });
+  }
+
+  test("claude / other 档不加这一步——那是 codex 专属的闸", () => {
+    expect(pack("claude")).not.toContain("party wake check");
+    expect(pack("other")).not.toContain("party wake check");
+  });
+});
+
 // #907：断言必须钉在**真正会被执行的 shell 行**上——本仓出过 toContain 被注释文案独自
 // 满足、把真实分支整段删掉照样全绿的假绿（#864）。所以这里逐字比对整行命令，并显式确认
 // 它是一条不带 # 前缀的可执行行。

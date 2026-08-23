@@ -105,6 +105,10 @@ export interface Item {
   // runnerHealth = serve 自报的「在线但干不动」（连败计数 + 最后错误）。
   listening: NonNullable<PresenceEntry["listening"]> | null;
   runnerHealth: NonNullable<PresenceEntry["runner_health"]> | null;
+  // #926：目标那台机器在 MCP 启动时自检出的「装了但叫不醒」。与上面两条不同，它**先于任何一条
+  // @** 就存在——那两条都要等一条 @ 白发出去才派生得出来。离线也保留：拉取式唤醒的身份平时本来
+  // 就是 offline，这一条恰恰是那时最该说的话。
+  wakeBlock: NonNullable<PresenceEntry["wake_block"]> | null;
 }
 
 export interface PresenceGroup {
@@ -195,6 +199,12 @@ export const ACTIVITY_TTL_MS = 5 * 60_000;
 // runner 连败（最需要 owner 行动）> 没在听（deaf）> 消费缓慢（suspect）。
 // 单次失败 ok=true 不告警（降噪口径同 CLI）。
 export function livenessBadge(item: Item): { key: string; vars?: Record<string, string | number>; tone: "bad" | "warn"; title: string | null } | null {
+  // #926：「叫不醒」排在最前，而且是 bad。其余几档说的是「在听但吃不下」；这一档说的是
+  // 「压根不会被叫起来」——更靠前的断点，也是唯一一条对方能自己修好的。title 带上那条命令，
+  // 好让看见它的人直接把命令转给对方（需要修的那个人不会自己来看这块 UI）。
+  if (item.wakeBlock != null) {
+    return { key: "PresenceBar.wakeBlocked", tone: "bad", title: `${item.wakeBlock.detail} → ${item.wakeBlock.fix}` };
+  }
   if (item.runnerHealth !== null && item.runnerHealth.ok === false) {
     return {
       key: "PresenceBar.runnerFailing",
@@ -461,6 +471,8 @@ export function PresenceBar({
       activity: entry?.activity ?? null,
       listening: entry?.listening ?? null,
       runnerHealth: entry?.runner_health ?? null,
+      // #926：刻意放在 meta 里（而不是 connected 分支里）——离线项也必须保留这条判定。
+      wakeBlock: entry?.wake_block ?? null,
     };
     if (!connected) {
       // owner 本就仅连接中的参与者可知（见上方字段注释）；handle 依赖同一份可信度，一并置空，

@@ -54,17 +54,30 @@ export interface TaskLeaseResult {
   /** denied 时是对方的租约；acquired/renewed/forced 时是本执行体自己的租约。 */
   holder?: TaskLeaseHolder;
   /** 被抢占/被接手/无法判定的原因，供 --json 与人读输出复用。 */
-  reason?: "no_executor_identity" | "expired" | "taken_over" | "held_by_other";
+  reason?:
+    | "no_executor_identity"
+    | "expired"
+    | "taken_over"
+    | "held_by_other"
+    /** 认得出执行体，但租约目录写不下去（只读盘 / 权限）——和「认不出」是两回事，别混报。 */
+    | "lease_store_unwritable";
 }
 
 export function taskLeaseDir(home: string = agentpartyHome()): string {
   return join(home, "task-leases");
 }
 
+/**
+ * (server, token) 的不可逆摘要。**必须带 server 维度**：同一台机器上可以连着两台生产实例，
+ * 两边都有同名频道（#865），只按 token 或只按频道去分租约会让两台实例互相阻塞或互相看不见。
+ */
+export function taskLeaseIdentityPrefix(server: string, token: string): string {
+  return createHash("sha256").update(server).update("\0").update(token).digest("hex").slice(0, 24);
+}
+
 /** token 只参与不可逆摘要，不落盘；不同 server/身份互不阻塞。 */
 export function taskLeaseKey(server: string, token: string, channel: string, taskId: number): string {
-  const identity = createHash("sha256").update(server).update("\0").update(token).digest("hex").slice(0, 24);
-  return `${identity}-${channel.replace(/[^a-z0-9-]/g, "_")}-task-${taskId}`;
+  return `${taskLeaseIdentityPrefix(server, token)}-${channel.replace(/[^a-z0-9-]/g, "_")}-task-${taskId}`;
 }
 
 function leasePath(dir: string, key: string): string {
@@ -87,38 +100,113 @@ export interface ResolveExecutorEnv {
   [key: string]: string | undefined;
 }
 
+/** 执行体标识的来源。诊断要能说出「凭什么认得出/为什么认不出」，所以来源必须是结构化的。 */
+export type ExecutorIdSource =
+  /** --executor-id */
+  | "flag"
+  /** AGENTPARTY_EXECUTOR_ID */
+  | "env"
+  /** AP_RUNNER_WORKDIR（serve 内建 runner 注入） */
+  | "runner"
+  /** 调用方显式传入的 harness 会话（--agent-session 等） */
+  | "harness_session"
+  /** CLAUDE_CODE_SESSION_ID / CLAUDE_SESSION_ID */
+  | "claude_session"
+  /** CODEX_THREAD_ID */
+  | "codex_session";
+
+/** 认不出执行体时的原因码。「一个都没有」和「设了但设错了」得分开说，修法完全不同。 */
+export type ExecutorIdRefusal = "no_signal" | "malformed";
+
+export interface ExecutorIdentity {
+  /** 认得出时的稳定标识；认不出为 null。 */
+  id: string | null;
+  source: ExecutorIdSource | null;
+  refusal: ExecutorIdRefusal | null;
+  /** 在场但被判非法、因此被丢弃的来源。用来说「你设了 X，但值不合法」。 */
+  rejected: ExecutorIdSource[];
+}
+
+/** 诊断文案里要逐字列出的环境变量名。写在一处，免得实现改了、提示还在教旧变量名。 */
+export const EXECUTOR_ID_ENV_LADDER = [
+  "AGENTPARTY_EXECUTOR_ID",
+  "AP_RUNNER_WORKDIR",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_SESSION_ID",
+  "CODEX_THREAD_ID",
+] as const;
+
 /**
- * 解析「当前执行体」的稳定身份。
+ * 解析「当前执行体」的稳定身份，并**说得出**结论是怎么来的。
  *
- * 顺序刻意从最显式排到最隐式。**最后没有兜底**：识别不出来就返回 null，调用方按 unenforced
+ * 顺序刻意从最显式排到最隐式。**最后没有兜底**：识别不出来就 id=null，调用方按 unenforced
  * 处理。宁可明说「这一刀没落下」，也不要靠一个不稳定的推断（比如 ppid——Claude Code 每次
  * Bash 调用的父进程都不同，会让同一个 harness 会话把自己上一次的租约当成别人的而自锁）去
  * 制造一个看着像 enforcement 的假象。
+ *
+ * #931 的根因就在这条梯子上：真实的 Claude Code（2.1.x 实测）注入的是 **`CLAUDE_CODE_SESSION_ID`**，
+ * 而这里原本只读 `CLAUDE_SESSION_ID`——一个 Claude Code 从不设置的名字。于是事故里那条 harness
+ * 腿每一次都掉到梯子底部，恒定 unenforced：闸看着装了，最需要它的那条腿从来没被拦过。
+ * 两个名字都留着：`CLAUDE_SESSION_ID` 仍是 serve/包装脚本可能注入的形态，去掉它等于砍掉一条
+ * 已经在用的识别路径。
  */
+export function resolveExecutorIdentity(
+  env: ResolveExecutorEnv = process.env,
+  explicit?: { executorId?: string; sessionHarness?: string; sessionId?: string },
+): ExecutorIdentity {
+  const candidates: { source: ExecutorIdSource; value: string | undefined }[] = [
+    { source: "flag", value: explicit?.executorId },
+    { source: "env", value: env.AGENTPARTY_EXECUTOR_ID },
+    // serve 内建 runner 已经在给子进程注入这两个（见 serve.ts 的 AP_RUNNER_* 块）。
+    // session id 每次 resume 会换，workdir 不换——所以 workdir 才是「哪个 runner」的稳定标识。
+    {
+      source: "runner",
+      value: env.AP_RUNNER_WORKDIR === undefined || env.AP_RUNNER_WORKDIR === ""
+        ? undefined
+        : `runner:${env.AP_RUNNER_HARNESS ?? "unknown"}:${createHash("sha256").update(env.AP_RUNNER_WORKDIR).digest("hex").slice(0, 16)}`,
+    },
+    {
+      source: "harness_session",
+      value: explicit?.sessionId === undefined || explicit.sessionHarness === undefined
+        ? undefined
+        : `session:${explicit.sessionHarness}:${explicit.sessionId}`,
+    },
+    // 真实 Claude Code 注入的名字。放在旧名之前：两个都在时以真实来源为准。
+    {
+      source: "claude_session",
+      value: env.CLAUDE_CODE_SESSION_ID === undefined || env.CLAUDE_CODE_SESSION_ID === ""
+        ? undefined
+        : `session:claude:${env.CLAUDE_CODE_SESSION_ID}`,
+    },
+    {
+      source: "claude_session",
+      value: env.CLAUDE_SESSION_ID === undefined || env.CLAUDE_SESSION_ID === ""
+        ? undefined
+        : `session:claude:${env.CLAUDE_SESSION_ID}`,
+    },
+    {
+      source: "codex_session",
+      value: env.CODEX_THREAD_ID === undefined || env.CODEX_THREAD_ID === ""
+        ? undefined
+        : `session:codex:${env.CODEX_THREAD_ID}`,
+    },
+  ];
+  const rejected: ExecutorIdSource[] = [];
+  for (const candidate of candidates) {
+    if (candidate.value === undefined || candidate.value === "") continue;
+    const trimmed = candidate.value.slice(0, 128);
+    if (EXECUTOR_ID_RE.test(trimmed)) return { id: trimmed, source: candidate.source, refusal: null, rejected };
+    if (!rejected.includes(candidate.source)) rejected.push(candidate.source);
+  }
+  return { id: null, source: null, refusal: rejected.length > 0 ? "malformed" : "no_signal", rejected };
+}
+
+/** 只要结论不要来源时的薄封装。判定逻辑只有 `resolveExecutorIdentity` 一份实现。 */
 export function resolveExecutorId(
   env: ResolveExecutorEnv = process.env,
   explicit?: { executorId?: string; sessionHarness?: string; sessionId?: string },
 ): string | null {
-  const candidates: (string | undefined)[] = [
-    explicit?.executorId,
-    env.AGENTPARTY_EXECUTOR_ID,
-    // serve 内建 runner 已经在给子进程注入这两个（见 serve.ts 的 AP_RUNNER_* 块）。
-    // session id 每次 resume 会换，workdir 不换——所以 workdir 才是「哪个 runner」的稳定标识。
-    env.AP_RUNNER_WORKDIR === undefined || env.AP_RUNNER_WORKDIR === ""
-      ? undefined
-      : `runner:${env.AP_RUNNER_HARNESS ?? "unknown"}:${createHash("sha256").update(env.AP_RUNNER_WORKDIR).digest("hex").slice(0, 16)}`,
-    explicit?.sessionId === undefined || explicit.sessionHarness === undefined
-      ? undefined
-      : `session:${explicit.sessionHarness}:${explicit.sessionId}`,
-    env.CLAUDE_SESSION_ID === undefined || env.CLAUDE_SESSION_ID === "" ? undefined : `session:claude:${env.CLAUDE_SESSION_ID}`,
-    env.CODEX_THREAD_ID === undefined || env.CODEX_THREAD_ID === "" ? undefined : `session:codex:${env.CODEX_THREAD_ID}`,
-  ];
-  for (const candidate of candidates) {
-    if (candidate === undefined || candidate === "") continue;
-    const trimmed = candidate.slice(0, 128);
-    if (EXECUTOR_ID_RE.test(trimmed)) return trimmed;
-  }
-  return null;
+  return resolveExecutorIdentity(env, explicit).id;
 }
 
 /**
@@ -181,8 +269,16 @@ export function acquireTaskLease(options: AcquireTaskLeaseOptions): TaskLeaseRes
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(path, JSON.stringify(holder), { mode: 0o600 });
   } catch {
-    // 落盘失败只损失 enforcement 能力，绝不该让一次正常认领失败。
-    return { state: "unenforced", reason: "no_executor_identity" };
+    // 落盘失败只损失 enforcement 能力，绝不该让一次正常认领失败。原因必须与「认不出执行体」
+    // 分开：那一档的修法是设 AGENTPARTY_EXECUTOR_ID，这一档设了也没用（盘写不进去）。
+    return { state: "unenforced", reason: "lease_store_unwritable" };
+  }
+  // 自愈（#908 同款保守收尾）：顺手清掉早已过期的租约文件。放在写之后，免得把「接手了一张
+  // 过期租约」这个事实（reason=expired）在读到之前就抹掉。清理失败无所谓——过期租约本来就不挡人。
+  try {
+    pruneExpiredTaskLeases(dir, now);
+  } catch {
+    /* 目录不可读/并发删除：租约判定不依赖它。 */
   }
   return { state, holder, ...(reason === undefined ? {} : { reason }) };
 }

@@ -24,6 +24,7 @@ import {
 import { jsonFrame } from "../json";
 import { applyMcpProcessTitle, parseMcpServerArgv } from "../mcp-registry";
 import { watchParentLiveness } from "../parent-liveness";
+import { reportWakeSelfCheck } from "../wake-reachability";
 import { resolveAuth, resolveAuthDetailed } from "../oidc-cli";
 import {
   ackDelivery,
@@ -48,7 +49,7 @@ import {
 } from "../rest";
 import { serverVersionUpgradeNotice, upgradeNotice, type UpgradeDeps } from "../upgrade";
 import { isName, isSlug } from "../validation";
-import { AUTHZ_PROSE_WARNING, checkAuthz, isValidAuthzAction } from "../authz";
+import { AUTHZ_PROSE_WARNING, DECISION_APPROVAL_LEDGER_NOTE, checkAuthz, isValidAuthzAction } from "../authz";
 import { askDecision } from "./decision";
 import { uploadAttachmentPaths } from "./send";
 import { buildContext } from "./status";
@@ -631,7 +632,8 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     {
       title: "Ask the channel owner for a decision",
       description:
-        "Ask the channel's human owner for a decision/approval (choice or approval). Use for permissions, trade-offs, and irreversible actions. Non-blocking: post and continue; a human resolves it later.",
+        "Ask the channel's human owner for a decision/approval (choice or approval). Use for permissions, trade-offs, and irreversible actions. Non-blocking: post and continue; a human resolves it later. " +
+        DECISION_APPROVAL_LEDGER_NOTE,
       inputSchema: {
         channel: z.string().optional().describe("Channel slug. Defaults to the workspace-bound channel."),
         prompt: z.string().min(1).describe("One-line question / plan title."),
@@ -1713,6 +1715,17 @@ export async function run(argv: string[]): Promise<number> {
   });
   const server = createMcpServer(defaultChannel);
   await server.connect(new StdioServerTransport());
+  // #926：会话启动时自检一次「这台机器上这个身份叫不醒吗」，把结论挂到 presence 上。
+  // MCP 不受 codex hook 信任闸管辖（owner 那台实测：26 条 hook 全 disabled，8 个 party mcp 照跑），
+  // 所以这是唯一一条**完全不依赖用户操作**、又必然会被执行到的通道。
+  // 刻意放在 connect 之后并且不 await：stdio 已经通了，自检慢或失败都碰不到 JSON-RPC 信道。
+  // 再推迟一拍：MCP 客户端的 initialize/tools-list 往往紧跟 connect 而来，这一拍把自检让到
+  // 它们之后。unref 保证这条附赠的诊断绝不会拖住进程退出。
+  setTimeout(() => {
+    void reportWakeSelfCheck(defaultChannel).catch(() => {
+      /* 上报失败 = 少一条提示，不是故障。绝不影响 MCP 本身。 */
+    });
+  }, 250).unref?.();
   return new Promise<number>((resolve) => {
     process.stdin.on("close", () => resolve(0));
     process.stdin.on("end", () => resolve(0));

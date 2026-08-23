@@ -17,11 +17,11 @@ import {
   describeDeniedLease,
   DEFAULT_TASK_LEASE_TTL_MS,
   releaseTaskLease,
-  resolveExecutorId,
   taskLeaseDir,
   taskLeaseKey,
   type TaskLeaseResult,
 } from "../task-lease";
+import { diagnoseTaskLeaseEnforcement, formatTaskLeaseEnforcement } from "../task-lease-diagnosis";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
 import { advanceCursorPastOwnMessage, branchLabel, repoLabel, resolveChannel, workspaceId, workspaceLabel, worktreeLabel } from "../config";
 import { stripTerminalControls } from "../format";
@@ -386,11 +386,13 @@ export async function run(argv: string[]): Promise<number> {
     console.error(leaseTtl);
     return 1;
   }
-  const executorId = resolveExecutorId(process.env, {
+  const explicitExecutor = {
     ...(str(flags["executor-id"]) === undefined ? {} : { executorId: str(flags["executor-id"])! }),
     ...(sessionHarness === undefined ? {} : { sessionHarness }),
     ...(sessionId === undefined ? {} : { sessionId }),
-  });
+  };
+  const enforcement = diagnoseTaskLeaseEnforcement(process.env, { explicit: explicitExecutor });
+  const executorId = enforcement.executor_id;
   const asJson = flags.json === true;
   const leaseNow = Date.now();
   let lease: TaskLeaseResult | null = null;
@@ -418,17 +420,25 @@ export async function run(argv: string[]): Promise<number> {
           published: false,
           task_untouched: true,
           exit_code: EXIT_TASK_LEASE_HELD,
-          lease: { state: lease.state, reason: lease.reason, holder: lease.holder },
+          lease: { state: lease.state, reason: lease.reason, holder: lease.holder, enforced: true, scope: "local_home" },
         }));
       }
       console.error(describeDeniedLease(lease.holder, channel, taskId, leaseNow));
       return EXIT_TASK_LEASE_HELD;
     }
     if (lease.state === "unenforced") {
-      console.error(
-        "warn: task lease not enforced — this process has no stable execution-runtime identity. " +
-          "Set AGENTPARTY_EXECUTOR_ID (or pass --executor-id) so a second runtime of this identity can be refused (#834).",
-      );
+      // #931：这里原本只有一行 warn，在刷屏的 serve 日志里等于不存在——闸看着装了，最需要它的
+      // 那条腿从来没被拦过，而且没人被告知。改成和 wake-diagnosis 同一口径：为什么 + 会怎样 +
+      // 一条能粘贴的命令，并说清「本机互斥 ≠ 跨机互斥」。
+      console.error("warn: task lease not enforced (#834 #931)");
+      const detail = lease.reason === "lease_store_unwritable"
+        ? [
+            `  为什么: 租约目录写不进去（${taskLeaseDir()}）——认得出执行体也落不了盘`,
+            `  会怎样: ${enforcement.consequence}`,
+            "  怎么修: 检查该目录的权限/磁盘（本命令照常执行，只是这一刀没落下）",
+          ]
+        : formatTaskLeaseEnforcement(enforcement).slice(1);
+      for (const line of detail) console.error(line);
     }
     if (lease.state === "forced" && lease.holder?.taken_over_from !== undefined) {
       console.error(`warn: took over the task lease from ${lease.holder.taken_over_from} (--force-lease)`);
@@ -481,7 +491,18 @@ export async function run(argv: string[]): Promise<number> {
         ...(taskId === undefined ? {} : { task: taskId }),
         ...(lease === null
           ? {}
-          : { lease: { state: lease.state, ...(lease.reason === undefined ? {} : { reason: lease.reason }), holder: lease.holder } }),
+          : {
+              lease: {
+                state: lease.state,
+                ...(lease.reason === undefined ? {} : { reason: lease.reason }),
+                holder: lease.holder,
+                // #931：「这一刀有没有落下」必须能被程序读到，而不是只在 stderr 打一行。
+                // 同时带上互斥边界——跨机同身份不在射程内，别让调用方把它当全局互斥。
+                enforced: lease.state !== "unenforced",
+                scope: "local_home",
+                ...(lease.state === "unenforced" ? { fix: enforcement.fix, detail: enforcement.detail } : {}),
+              },
+            }),
       }));
     } else {
       console.log(`status seq=${seq}`);

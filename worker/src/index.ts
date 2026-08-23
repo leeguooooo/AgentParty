@@ -53,6 +53,11 @@ import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { canAccessChannel, isChannelModerator, isHumanChannelOwner } from "./acl";
 import {
+  decisionAskLedgerSummary,
+  decisionAskLedgerTopic,
+  writeDecisionLedgerEntry,
+} from "./decision-ledger";
+import {
   CLIENT_TOO_OLD_HEADER,
   CLIENT_VERSION_HEADER,
   MIN_CLIENT_VERSION_HEADER,
@@ -1203,6 +1208,61 @@ function parseChannelDecisionText(input: unknown, maxBytes: number, singleLine: 
   if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(value)) return null;
   if (singleLine && /[\r\n]/u.test(value)) return null;
   return value;
+}
+
+// #929：人类把一条 decision_request 拍成 resolved 之后，把这件事**额外**落进权威决策账本。
+//
+// 与 `POST /api/channels/:slug/decisions` 同表、同 head 语义、同一条 ACL（canConfigureChannel）。
+// topic 由 decisionAskLedgerTopic 生成，恒在 `ask:` 命名空间内——批准一条请求永远变不成一张
+// `authz:` 授权凭据（见 worker/src/decision-ledger.ts 文件头的安全不变量）。
+//
+// 返回 null = 这次回应不是一次「人类拍板 resolved」，本来就不该落账；其余情形一律返回结构化
+// 结果：决策消息此刻已在 DO 里提交完毕，账本写失败不能反转那个成功结果。
+async function recordResolvedDecisionInLedger(
+  env: AppEnv,
+  identity: TokenIdentity,
+  channel: LoadedChannel,
+  message: MsgFrame | undefined,
+): Promise<{ recorded: boolean; decision?: ChannelDecisionRecord; reason?: string } | null> {
+  if (message === undefined) return null;
+  const request = message.decision_request;
+  const resolution = message.decision_resolution;
+  // 无人值守自动放行（auto_resolved）没有人拍板，绝不能进账本。
+  if (request === undefined || resolution?.state !== "resolved") return null;
+  const chosenIndex = resolution.chosen_index;
+  const chosenOption = resolution.chosen_option;
+  if (typeof chosenIndex !== "number" || typeof chosenOption !== "string") return null;
+  if (!(await canConfigureChannel(env.DB, identity, channel))) {
+    return { recorded: false, reason: "forbidden" };
+  }
+  const topic = decisionAskLedgerTopic(request.prompt);
+  const summary = decisionAskLedgerSummary({
+    kind: request.kind,
+    chosenIndex,
+    chosenOption,
+    responder: identity.name,
+    seq: message.seq,
+    ...(resolution.reason === undefined ? {} : { reason: resolution.reason }),
+  });
+  let write: Awaited<ReturnType<typeof writeDecisionLedgerEntry>>;
+  try {
+    write = await writeDecisionLedgerEntry(env.DB, {
+      slug: channel.slug,
+      seq: message.seq,
+      topic,
+      summary,
+      createdBy: identity.name,
+      createdByKind: identity.kind === "agent" ? "agent" : "human",
+      createdAt: Date.now(),
+    });
+  } catch {
+    return { recorded: false, reason: "write_failed" };
+  }
+  if (!write.recorded) {
+    return { recorded: false, ...(write.reason === undefined ? {} : { reason: write.reason }) };
+  }
+  const stored = await loadChannelDecision(env.DB, channel.slug, write.id!).catch(() => null);
+  return { recorded: true, ...(stored === null ? {} : { decision: stored }) };
 }
 
 async function loadTaskRow(db: D1Database, slug: string, id: number): Promise<TaskRow | null> {
@@ -8307,7 +8367,20 @@ app.post("/api/channels/:slug/messages/:seq/decision", async (c) => {
       },
     }),
   );
-  return mutableFetchResponse(res);
+  if (!res.ok) return mutableFetchResponse(res);
+  // #929：DO 只负责 resolve 请求 + 广播 + 回复；「owner 拍过板」这件事必须同时成为账本里
+  // 可查询的一行，否则下游 worker 除了相信别人的转述之外无从核验（#834 第 1 项）。
+  // 账本写入沿用 POST /decisions 那条 ACL（canConfigureChannel，含房主豁免），不另开权限口子。
+  const decisionPayload = (await res.clone().json().catch(() => null)) as { message?: MsgFrame } | null;
+  const ledger = await recordResolvedDecisionInLedger(c.env, identity, channel, decisionPayload?.message);
+  if (ledger === null) return mutableFetchResponse(res);
+  const decisionHeaders = new Headers(res.headers);
+  decisionHeaders.delete("content-length");
+  decisionHeaders.set("content-type", "application/json");
+  return new Response(JSON.stringify({ ...(decisionPayload ?? {}), decision_ledger: ledger }), {
+    status: res.status,
+    headers: decisionHeaders,
+  });
 });
 
 app.post("/api/channels/:slug/messages/:seq/:action", async (c) => {
@@ -9293,6 +9366,43 @@ app.post("/api/channels/:slug/presence/:name/activity", async (c) => {
     new Request(`https://do/internal/presence/${encodeURIComponent(name)}/activity`, {
       method: "POST",
       body: JSON.stringify({ activity: body.activity }),
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+  return mutableFetchResponse(res);
+});
+
+// 本机唤醒自检直报（issue #926）：agent 在 MCP 启动时读本地盘断定「这台机器上我叫不醒」
+// （codex 的 hook 信任闸没过 ⇒ Stop hook 一次都不会跑），把结论挂到自己的 presence 上，
+// 好让**下一个 @ 它的人**当场看见——而不是指望需要修的那个人自己去发现。
+// 授权与 activity 直报同口径：只准 agent 自报（name 必须等于 token 身份），presence-only、不落 history。
+// body.wake_block === null ＝ 自检通过，清除既有判定（修好后新开一次会话就会走到这里）。
+app.post("/api/channels/:slug/presence/:name/wake-block", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  const name = c.req.param("name");
+  if (!name || name.length > 256) {
+    return c.json(errorBody("bad_request", "valid name required"), 400);
+  }
+  if (identity.kind !== "agent" || identity.name !== name) {
+    return c.json(errorBody("forbidden", "an agent may only report its own wake block"), 403);
+  }
+  // 与 activity 端点同款的防御纵深：scope 到别的频道的 token 不得在本频道落任何 presence 状态。
+  if (identity.channel_scope != null && identity.channel_scope !== slug) {
+    return c.json(errorBody("forbidden", "token is scoped to another channel"), 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as { wake_block?: unknown } | null;
+  if (body === null || body.wake_block === undefined) {
+    return c.json(errorBody("bad_request", "wake_block required (null to clear)"), 400);
+  }
+  const res = await fetchMutableChannelDO(
+    c.env,
+    slug,
+    new Request(`https://do/internal/presence/${encodeURIComponent(name)}/wake-block`, {
+      method: "POST",
+      body: JSON.stringify({ wake_block: body.wake_block }),
       headers: { "content-type": "application/json", "x-partykit-room": slug },
     }),
   );

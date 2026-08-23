@@ -38,6 +38,7 @@ import {
   type TaskRecord,
   type TaskState,
   type TokenRole,
+  type WakeBlock,
   type WakeDelivery,
   type WebhookFilter,
 } from "@agentparty/shared";
@@ -997,6 +998,17 @@ export async function ackDelivery(
   )) as { ok: true; delivery: PublicDirectedDelivery; deduped?: boolean };
 }
 
+/**
+ * 拍板的产物（#929）：除了 resolve 后的原消息 + decision_response 回复，服务端还会把这次拍板
+ * **额外**落进决策账本（`ask:` topic）。recorded=false 时带 reason（forbidden / already_recorded /
+ * ledger_full / conflict / archived / write_failed），决策本身仍然成立。
+ */
+export interface DecisionRespondResult {
+  message: MsgFrame;
+  reply: MsgFrame;
+  decision_ledger?: { recorded: boolean; decision?: ChannelDecisionRecord; reason?: string };
+}
+
 // 人类决策回应（#284）：人类/moderator 对某条 decision_request 点选项/审批。
 // approval 用 { action }；choice 用 { option }（下标或选项文本）。
 export async function respondDecision(
@@ -1005,12 +1017,12 @@ export async function respondDecision(
   slug: string,
   seq: number,
   body: { action?: "approve" | "reject"; option?: number | string; reason?: string },
-): Promise<{ message: MsgFrame; reply: MsgFrame }> {
+): Promise<DecisionRespondResult> {
   return (await req(server, `/api/channels/${encodeURIComponent(slug)}/messages/${seq}/decision`, {
     method: "POST",
     headers: bearerJson(token),
     body: JSON.stringify(body),
-  })) as { message: MsgFrame; reply: MsgFrame };
+  })) as DecisionRespondResult;
 }
 
 // 频道决策模式（#284）：approval（人类审批）↔ unattended（无人值守）。moderator only。
@@ -1557,6 +1569,26 @@ export async function kickParticipant(
     method: "POST",
     headers: bearerJson(token),
     body: JSON.stringify(body),
+  });
+}
+
+/**
+ * 本机唤醒自检直报（issue #926）。`block === null` ＝ 自检通过，清除既有判定。
+ *
+ * 调用方一律 fire-and-forget：这条上报**绝不允许影响它挂靠的那个进程**（MCP 的 stdio）。
+ * 失败就是没这条提示，不是故障。
+ */
+export async function reportWakeBlock(
+  server: string,
+  token: string,
+  slug: string,
+  name: string,
+  block: WakeBlock | null,
+): Promise<void> {
+  await req(server, `/api/channels/${encodeURIComponent(slug)}/presence/${encodeURIComponent(name)}/wake-block`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify({ wake_block: block }),
   });
 }
 

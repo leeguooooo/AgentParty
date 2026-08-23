@@ -10,6 +10,14 @@ import { fetchMe, fetchPresence, fetchRuntimePeers, type Identity } from "../res
 import { buildRuntimeTopology } from "../runtime-topology";
 import { INSTALL_LINE, OWNER_REPO, RUNNING_VERSION, compareVersions, pendingUpgrade } from "../upgrade";
 import { diagnoseCodexWake, formatCodexWakeDiagnosis } from "../wake-diagnosis";
+import {
+  diagnoseTaskLeaseEnforcement,
+  formatTaskLeaseEnforcement,
+  localExecutorEvidence,
+  shouldSurfaceTaskLeaseEnforcement,
+  type LocalExecutorEvidence,
+  type TaskLeaseEnforcement,
+} from "../task-lease-diagnosis";
 
 const CLAUDE_PLUGIN_ID = "agentparty@agentparty";
 const CLAUDE_PLUGIN_SCHEMA = "agentparty.claude-plugin-doctor.v1";
@@ -477,6 +485,44 @@ async function latestVersion(): Promise<string | null> {
   }
 }
 
+/**
+ * 任务租约那一段（#931）。**纯本地、不发网络**：doctor 在断网/没登录时也必须能跑。
+ *
+ * 「存在多执行体拓扑」的判据取本机可核实的证据（活着的 serve/watch 实例锁、别的执行体持着的
+ * 未过期任务租约），而不是服务端的 topology_conflicts——后者要网络与鉴权，doctor 拿不到就
+ * 只能沉默，那又回到了本 issue 要根除的静默。代价是：另一条腿在**另一台机器**上时本机看不见，
+ * 那正是 #931 的跨机缺口，输出里的「边界」那行会把它说出来。
+ */
+export async function taskLeaseDoctorLines(
+  deps: {
+    auth?: () => Promise<{ server?: string; token?: string }>;
+    channel?: () => string | null;
+    enforcement?: TaskLeaseEnforcement;
+    evidence?: LocalExecutorEvidence;
+  } = {},
+): Promise<string[]> {
+  try {
+    const enforcement = deps.enforcement ?? diagnoseTaskLeaseEnforcement();
+    let evidence = deps.evidence;
+    if (evidence === undefined) {
+      const auth = await (deps.auth ?? resolveAuthDetailed)();
+      const channel = (deps.channel ?? (() => resolveChannel(undefined)))();
+      if (!auth.server || !auth.token || channel === null || channel === undefined || channel === "") return [];
+      evidence = localExecutorEvidence({
+        server: auth.server,
+        token: auth.token,
+        channel,
+        executorId: enforcement.executor_id,
+      });
+    }
+    if (!shouldSurfaceTaskLeaseEnforcement(enforcement, evidence.present)) return [];
+    return formatTaskLeaseEnforcement(enforcement, { evidence });
+  } catch {
+    // 诊断是附赠信息，绝不能把 doctor 本身弄挂。
+    return [];
+  }
+}
+
 async function runVersionDoctor(argv: string[]): Promise<number> {
   if (argv.length > 0) {
     console.error(HELP);
@@ -485,6 +531,9 @@ async function runVersionDoctor(argv: string[]): Promise<number> {
   // #924：先说「这台机器上被 @ 叫得醒吗」。版本信息永远查得到，而唤醒断了才是用户真正
   // 遇到的那个问题——此前它只在日志里留一行，等于静默。放最前面，一眼可见。
   for (const line of formatCodexWakeDiagnosis(diagnoseCodexWake())) console.log(line);
+  // #931：同理，「同一身份的第二个执行体会不会被拦住」也曾只在 stderr 有一行 warn。
+  // 只在**真有第二个执行体**时报（无冲突不报，避免每次 doctor 都多一条无关噪音）。
+  for (const line of await taskLeaseDoctorLines()) console.log(line);
   console.log("");
   console.log(`running:   ${RUNNING_VERSION}`);
   const pending = pendingUpgrade();
