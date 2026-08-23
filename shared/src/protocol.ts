@@ -438,6 +438,24 @@ export const CHANNEL_DECISION_TOPIC_LIMIT = 200;
 export const CHANNEL_DECISION_SUMMARY_LIMIT = 2_000;
 export const CHANNEL_DECISION_ACTIVE_MAX = 100;
 
+/**
+ * 授权凭据在决策账本里的 topic 命名空间（#834 第 1 项 / #880）。
+ *
+ * 放在 shared 而不是 cli/src/authz.ts，是因为**签发端**（Worker）和**核验端**（CLI/MCP）必须锚在
+ * 同一个字面量上：Worker 侧自动落账的 topic 必须证明自己不在这个命名空间里（#929），CLI 侧
+ * `party authz check` 又只认这个命名空间。两边各写一份就会漂移成一个静默的授权提权口子。
+ */
+export const AUTHZ_TOPIC_PREFIX = "authz:";
+
+/**
+ * 人类拍板一条 decision_request 后自动落账的 topic 命名空间（#929）。
+ *
+ * 与 AUTHZ_TOPIC_PREFIX 放在一起，是为了让「两个命名空间互不相交」这条安全不变量在同一屏内可读、
+ * 并且可以被一条静态用例钉死：签发端（Worker）拼的就是这个前缀，核验端（`party authz check`）认的
+ * 是另一个，前者永远进不了后者。
+ */
+export const DECISION_ASK_TOPIC_PREFIX = "ask:";
+
 export interface TaskSummary {
   type: "task_summary";
   channel: string;

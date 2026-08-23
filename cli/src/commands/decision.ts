@@ -3,6 +3,7 @@
 //   respond 人类/moderator 在频道内对某条 decision_request 拍板
 //   mode    切频道决策模式：approval（人类审批）↔ unattended（无人值守，自动放行）
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError } from "../args";
+import { DECISION_APPROVAL_LEDGER_NOTE } from "../authz";
 import { advanceCursorPastOwnMessage, resolveChannel } from "../config";
 import { formatMsg, sanitizeSingleLine, stripTerminalControls } from "../format";
 import { jsonFrame } from "../json";
@@ -364,14 +365,15 @@ async function runAsk(argv: string[]): Promise<number> {
     }
     if (continuation !== null && result.state === "waiting_owner") {
       if (flags.json === true) {
-        console.log(JSON.stringify({ seq, state: "waiting_owner", decision_request: publicRequest, decision_resolution: immediate }));
+        console.log(JSON.stringify({ seq, state: "waiting_owner", decision_request: publicRequest, decision_resolution: immediate, ledger_note: DECISION_APPROVAL_LEDGER_NOTE }));
       } else {
         console.log(`WAITING_OWNER decision #${seq} work=${terminalText(continuation.workId)}`);
       }
       return 0;
     }
     if (flags.wait !== true) {
-      if (flags.json === true) console.log(JSON.stringify({ seq }));
+      // #929：告诉调用方「批准之后账本里能查到什么、查不到什么」，别让人以为点了批准就等于拿到授权。
+      if (flags.json === true) console.log(JSON.stringify({ seq, ledger_note: DECISION_APPROVAL_LEDGER_NOTE }));
       else console.log(`decision #${seq} posted — waiting for a human (party decision respond ${seq} ...)`);
       return 0;
     }
@@ -456,6 +458,13 @@ async function runRespond(argv: string[]): Promise<number> {
     } else {
       const res = result.message.decision_resolution;
       console.log(`decision #${seqArg} → ${terminalText(res?.chosen_option ?? "?")}`);
+      // #929：拍板同时会落一条决策账本记录，把它显式说出来（没落成也说清原因，别静默）。
+      const ledger = result.decision_ledger;
+      if (ledger?.recorded === true && ledger.decision !== undefined) {
+        console.log(`ledger: ${ledger.decision.id} topic=${terminalText(ledger.decision.topic)}`);
+      } else if (ledger !== undefined && ledger.recorded === false) {
+        console.log(`ledger: not recorded (${terminalText(ledger.reason ?? "unknown")})`);
+      }
       console.log(formatMsg(result.reply));
     }
     return 0;

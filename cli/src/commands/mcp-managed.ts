@@ -18,6 +18,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { DECISION_APPROVAL_LEDGER_NOTE } from "../authz";
 import { readFileSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
@@ -261,7 +262,8 @@ export function createManagedMcpServer(stateDir: string): McpServer {
       {
         title: "Ask the channel owner for a decision",
         description:
-          "Ask the human owner to approve or choose. Non-blocking: after this returns pending, END your turn — the owner's answer wakes you later with full context. Do not poll.",
+          "Ask the human owner to approve or choose. Non-blocking: after this returns pending, END your turn — the owner's answer wakes you later with full context. Do not poll. " +
+          DECISION_APPROVAL_LEDGER_NOTE,
         inputSchema: {
           prompt: z.string().min(1).max(DECISION_PROMPT_LIMIT),
           options: z.array(z.string().min(1).max(DECISION_OPTION_LIMIT)).max(DECISION_OPTIONS_MAX).nullable().optional(),

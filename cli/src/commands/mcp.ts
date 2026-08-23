@@ -49,7 +49,7 @@ import {
 } from "../rest";
 import { serverVersionUpgradeNotice, upgradeNotice, type UpgradeDeps } from "../upgrade";
 import { isName, isSlug } from "../validation";
-import { AUTHZ_PROSE_WARNING, checkAuthz, isValidAuthzAction } from "../authz";
+import { AUTHZ_PROSE_WARNING, DECISION_APPROVAL_LEDGER_NOTE, checkAuthz, isValidAuthzAction } from "../authz";
 import { askDecision } from "./decision";
 import { uploadAttachmentPaths } from "./send";
 import { buildContext } from "./status";
@@ -632,7 +632,8 @@ export function createMcpServer(defaultChannel?: string): McpServer {
     {
       title: "Ask the channel owner for a decision",
       description:
-        "Ask the channel's human owner for a decision/approval (choice or approval). Use for permissions, trade-offs, and irreversible actions. Non-blocking: post and continue; a human resolves it later.",
+        "Ask the channel's human owner for a decision/approval (choice or approval). Use for permissions, trade-offs, and irreversible actions. Non-blocking: post and continue; a human resolves it later. " +
+        DECISION_APPROVAL_LEDGER_NOTE,
       inputSchema: {
         channel: z.string().optional().describe("Channel slug. Defaults to the workspace-bound channel."),
         prompt: z.string().min(1).describe("One-line question / plan title."),

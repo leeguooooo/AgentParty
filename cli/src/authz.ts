@@ -9,10 +9,11 @@
 // 无论怎么写都进不了这里。因此 `party authz check` 的答案不依赖任何转述。
 //
 // 本文件是纯函数核心：不碰网络、不碰 config，CLI 与 MCP 共用同一套判定，避免两侧语义漂移。
-import type { ChannelDecisionRecord } from "@agentparty/shared";
+import { AUTHZ_TOPIC_PREFIX, DECISION_ASK_TOPIC_PREFIX, type ChannelDecisionRecord } from "@agentparty/shared";
 
-/** 授权凭据在决策账本里的 topic 前缀。 */
-export const AUTHZ_TOPIC_PREFIX = "authz:";
+// 授权凭据在决策账本里的 topic 前缀。字面量住在 shared（协议层），因为签发端（Worker）与核验端
+// （这里）必须共用同一个值；从这里再导出一次，保持既有 `from "./authz"` 的调用点不变。
+export { AUTHZ_TOPIC_PREFIX };
 
 /** 覆盖一切动作的总授权。owner 想说「所有我都授权」，必须显式记这一条，而不是在消息里说一句。 */
 export const AUTHZ_BLANKET_ACTION = "*";
@@ -175,6 +176,18 @@ function verdictText(
     `Ask the channel owner or an assigned host to run: party authz grant "${action}" -m "<scope and limits>".`
   );
 }
+
+/**
+ * `party decision ask` / `party_decision_ask` 的共用提示（#929）：说清「owner 点批准之后，账本里
+ * 能查到什么、查不到什么」。批准会在账本里留下一条 `ask:` topic 的记录（可查询、可核验），但它
+ * **不是**授权凭据——`party authz check` 依旧判未授权。措辞只此一份，CLI 与 MCP 不许各写各的。
+ */
+export const DECISION_APPROVAL_LEDGER_NOTE =
+  "When the channel owner/host resolves this request, the outcome is recorded in the decision ledger under an " +
+  `\`${DECISION_ASK_TOPIC_PREFIX}\` topic (party charter --json -> active_decisions). ` +
+  "That record is NOT an authorization credential: an approved request never lands in the `authz:` namespace, so " +
+  `\`party authz check\` still answers NOT authorized (the ${AUTHZ_TOPIC_PREFIX} namespace is reachable only through ` +
+  "`party authz grant`, an explicit owner/host action).";
 
 /** 提示语：所有面向 agent 的授权出口共用同一句硬规则，措辞不许各写各的。 */
 export const AUTHZ_PROSE_WARNING =
