@@ -10,17 +10,26 @@
 // 因此这里的铁律是：**宁可不叫，也绝不猜。** 解析不出唯一身份就返回 refusal，
 // 调用方放行并把原因写进日志。判定始终带上 server 维度（#865）。
 //
+// #924 之后这里多了一档，而且是**唯一不靠反推的一档**：`join-binding`。加入频道的那一刻
+// （`party init`）我们确切知道身份，那时就把 (harness, server, channel, owner) → identity
+// 落了盘（见 join-binding.ts）。下面其余各档降级为兜底——它们只在没有绑定（老机器、手搓接入）
+// 时才轮得到。真机上四档同时全灭的那台机器（#924 现场），靠的就是这一档。
+//
 // 解析优先级（越靠前越硬）：
 //   1. `env`              —— 会话进程自己带着 `AGENTPARTY_CONFIG`（hook 是 codex 的子进程，
 //                            天然继承）。这是唯一「会话自己说了算」的信号，最硬。
-//   2. `session-registry` —— 按 `session_id` 回查本机 codex 会话注册表条目里记下的
+//   2. `join-binding`     —— 加入时落盘的绑定（#924）。同 harness 同频道有多条时，用「该 codex
+//                            进程下看得见哪些身份」做**佐证**收窄：绑定给答案，进程给旁证。
+//                            佐证与绑定完全对不上 ⇒ 这些绑定不属于本 harness 实例（终端 codex
+//                            与桌面 codex 各自加入过同一频道就是这样），不硬用，继续往下走。
+//   3. `session-registry` —— 按 `session_id` 回查本机 codex 会话注册表条目里记下的
 //                            identity + server（#906 在 claude 侧同款），再映射回本地 config。
-//   3. `mcp-registration` —— 该 codex 进程下挂着的 agentparty MCP 子进程的 `AGENTPARTY_CONFIG`。
+//   4. `mcp-registration` —— 该 codex 进程下挂着的 agentparty MCP 子进程的 `AGENTPARTY_CONFIG`。
 //                            接入包正是把身份写进 MCP 注册的 env（`codex mcp add --env …`），
 //                            所以这条能把「照接入包装好、但没在 shell 里 export」的常见形态救回来。
 //                            该进程下有两个以上不同身份 ⇒ 歧义 ⇒ 放弃（owner 的 ChatGPT.app
 //                            app-server 就是这样多路复用的，真机实测）。
-//   4. `cwd-unique`       —— 退到 cwd 绑定的 config，但**只在本机该频道不存在第二个身份时**
+//   5. `cwd-unique`       —— 退到 cwd 绑定的 config，但**只在本机该频道不存在第二个身份时**
 //                            才算数。单身份机器（绝大多数）行为逐字不变；多身份机器一律放弃。
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -39,9 +48,20 @@ import {
   type ClaudeSessionRegistryEntry,
 } from "./claude-session-registry";
 import { healServerUrl } from "./validation";
+// 判据只有一份：`party mcp` 进程的识别词表与 MCP 注册治理共用（复制一份出去必漂移，#622 教训）。
+import { looksLikePartyMcpCommand } from "./mcp-registry";
+import {
+  findJoinBindings,
+  joinBindingsPath,
+  readJoinBindings,
+  type JoinBinding,
+} from "./join-binding";
+
+export { looksLikePartyMcpCommand };
 
 export type CodexHookIdentitySource =
   | "env"
+  | "join-binding"
   | "session-registry"
   | "mcp-registration"
   | "cwd-unique";
@@ -66,6 +86,7 @@ export interface CodexHookIdentity {
 export type CodexHookIdentityRefusal =
   | "no-channel"
   | "env-config-unusable"
+  | "ambiguous-binding"
   | "registry-identity-unresolvable"
   | "ambiguous"
   | "no-identity";
@@ -84,6 +105,8 @@ export interface CodexHookIdentityDeps {
   codexSessions: () => ClaudeSessionRegistryEntry[];
   /** 给定 codex 进程下可见的 agentparty MCP 注册所用的 config 路径（已去重）。 */
   mcpConfigPaths: (pid: number) => string[];
+  /** #924：加入时落盘的 (harness, server, channel, owner) → identity 绑定。 */
+  joinBindings: () => JoinBinding[];
   /** codex 本体的 pid——hook 是它的子进程，故取 `process.ppid`。 */
   pid: number;
 }
@@ -114,6 +137,7 @@ export function defaultCodexHookIdentityDeps(
     candidates: (channel) => localAgentConfigsForChannel(channel, null, agentpartyHome(env)),
     codexSessions: () => listCodexSessions(env),
     mcpConfigPaths: (target) => codexMcpConfigPaths(target),
+    joinBindings: () => readJoinBindings(joinBindingsPath(agentpartyHome(env))),
     pid,
   };
 }
@@ -178,7 +202,70 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
     };
   }
 
-  // ② session_id → 注册表条目（identity + server 都是 SessionStart 时按本表同一套规则记的）。
+  // 该 codex 进程下**看得见**哪些绑定本频道的身份。既是第 ④ 档的信号本体，也是第 ② 档
+  // 绑定的佐证。最多算一次（一次 `ps`），后面各档共用。
+  type UsableAt = { path: string; server: string; token: string; name: string | null };
+  let mcpEvidence: Map<string, UsableAt> | null = null;
+  const evidence = (): Map<string, UsableAt> => {
+    if (mcpEvidence !== null) return mcpEvidence;
+    const found = new Map<string, UsableAt>();
+    for (const path of deps.mcpConfigPaths(deps.pid)) {
+      const usable = usableConfig(deps.readConfigFile(path), channel);
+      if (usable === null) continue;
+      const key = identityKey(usable.server, usable.name);
+      if (!found.has(key)) found.set(key, { path, ...usable });
+    }
+    mcpEvidence = found;
+    return found;
+  };
+
+  // ② 加入即绑定（#924）——唯一不靠反推的一档。
+  const bindings = findJoinBindings(deps.joinBindings(), { harness: "codex", channel });
+  if (bindings.length > 0) {
+    // 绑定指向的 config 已经不可用（被删、没 token、改绑了别的频道）＝这条绑定过期了，跳过它。
+    // 绝不把一条过期绑定当成「解析成功」，也绝不因为它存在就放弃后面的兜底。
+    let alive = bindings
+      .map((binding) => ({ binding, usable: usableConfig(deps.readConfigFile(binding.config_path), channel) }))
+      .filter((row): row is { binding: JoinBinding; usable: NonNullable<ReturnType<typeof usableConfig>> } =>
+        row.usable !== null);
+    const seen = evidence();
+    if (alive.length > 0 && seen.size > 0) {
+      // 佐证：这个 codex 进程下明明看得见本频道的身份，那么本会话的绑定必须在其中。
+      // 一条都对不上 ⇒ 这些绑定属于**另一个 harness 实例**（终端 codex vs 桌面 codex 各自
+      // 加入过同一频道）。此时不硬用绑定，落到后面就地取证的档去——那才是本实例的真相。
+      alive = alive.filter((row) => seen.has(identityKey(row.usable.server, row.usable.name)));
+    }
+    if (alive.length > 1 && cwd !== "") {
+      // 同 harness 同频道仍并存多条（不同实例 / 不同 owner，是刻意的并存）：用「在哪加入的」
+      // 精确收窄一次。收窄不到唯一就放弃——绝不按「最近一次加入」瞎选。
+      const byCwd = alive.filter((row) => row.binding.cwd === cwd);
+      if (byCwd.length === 1) alive = byCwd;
+    }
+    if (alive.length === 1) {
+      const only = alive[0]!;
+      return {
+        ok: true,
+        identity: {
+          source: "join-binding",
+          configPath: only.binding.config_path,
+          ...only.usable,
+          configScopedState: true,
+        },
+      };
+    }
+    if (alive.length > 1) {
+      return {
+        ok: false,
+        reason: "ambiguous-binding",
+        detail:
+          `本机在 #${channel} 上给 codex 记了 ${alive.length} 条加入绑定` +
+          `（${alive.map((row) => `${row.usable.name ?? "?"}@${row.usable.server}`).join(", ")}）` +
+          `——它们分属不同实例/不同 owner，分不清本会话是哪一个，放弃`,
+      };
+    }
+  }
+
+  // ③ session_id → 注册表条目（identity + server 都是 SessionStart 时按本表同一套规则记的）。
   if (sessionId !== null && sessionId !== "") {
     const wanted = sessionId.toLowerCase();
     const entry = deps.codexSessions().find((row) => row.session_id.toLowerCase() === wanted) ?? null;
@@ -217,16 +304,9 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
     }
   }
 
-  // ③ 该 codex 进程下挂着的 agentparty MCP 注册——接入包写进 env 的那份身份。
-  const mcpPaths = deps.mcpConfigPaths(deps.pid);
-  if (mcpPaths.length > 0) {
-    const found = new Map<string, { path: string; server: string; token: string; name: string | null }>();
-    for (const path of mcpPaths) {
-      const usable = usableConfig(deps.readConfigFile(path), channel);
-      if (usable === null) continue;
-      const key = identityKey(usable.server, usable.name);
-      if (!found.has(key)) found.set(key, { path, ...usable });
-    }
+  // ④ 该 codex 进程下挂着的 agentparty MCP 注册——接入包写进 env 的那份身份。
+  {
+    const found = evidence();
     if (found.size === 1) {
       const only = [...found.values()][0]!;
       return {
@@ -248,12 +328,12 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
         detail:
           `codex 进程 ${deps.pid} 下同时挂着 ${found.size} 个绑 #${channel} 的身份` +
           `（${[...found.values()].map((row) => `${row.name ?? "?"}@${row.server}`).join(", ")}）` +
-          `——分不清本会话是哪一个，放弃。给这个会话显式设 AGENTPARTY_CONFIG 即可解决`,
+          `——分不清本会话是哪一个，放弃。重新跑一遍接入包即可（加入即绑定会记下本次身份）`,
       };
     }
   }
 
-  // ④ cwd 绑定的 config——只有本机该频道不存在第二个身份时才算数。
+  // ⑤ cwd 绑定的 config——只有本机该频道不存在第二个身份时才算数。
   const cwdUsable = usableConfig(deps.readCwdConfig(cwd), channel);
   const distinct = distinctCandidateKeys(deps.candidates(channel));
   if (cwdUsable !== null) {
@@ -271,7 +351,7 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
       detail:
         `本机绑 #${channel} 的身份有 ${distinct.has(key) ? distinct.size : distinct.size + 1} 个，` +
         `cwd(${cwd}) 只能猜出其中一个（${cwdUsable.name ?? "?"}@${cwdUsable.server}）——按 cwd 猜必然误投，放弃。` +
-        `给这个会话显式设 AGENTPARTY_CONFIG，或让接入包把身份写进该会话的 MCP 注册 env`,
+        `重新跑一遍该身份的接入包即可（加入即绑定会把「这个 harness 的这个频道 = 这个身份」记下来）`,
     };
   }
   return {
@@ -279,6 +359,36 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
     reason: "no-identity",
     detail: `#${channel} 上解析不出本会话的身份（cwd=${cwd}），本次放弃`,
   };
+}
+
+/**
+ * 把一次「解析不出唯一身份」翻译成**一条用户能直接粘贴执行的命令**（#924 第 4 条）。
+ *
+ * 静默失败的终结点在这里：日志里多写一行没人看，`party doctor` / `party who` 要能一眼
+ * 看出「这台机器上这个身份叫不醒，因为 X，跑这条命令能修」。所有出口都必须给出命令，
+ * 没有「无可奉告」这一档——真的没辙时也要指向重跑接入包，那是永远有效的那条路。
+ */
+export function codexHookIdentityFix(
+  reason: CodexHookIdentityRefusal,
+  ctx: { channel: string | null; server?: string | null },
+): string {
+  const channel = ctx.channel === null || ctx.channel === "" ? "<频道>" : ctx.channel;
+  const server = ctx.server === undefined || ctx.server === null || ctx.server === ""
+    ? null
+    : ctx.server;
+  const serverFlag = server === null ? "" : ` --server ${server}`;
+  switch (reason) {
+    case "no-channel":
+      return `party init --channel ${channel}    # 先把这个目录绑到频道上`;
+    case "env-config-unusable":
+      return `unset AGENTPARTY_CONFIG            # 这个会话指着一份用不了的身份配置，去掉它或改指对的那份`;
+    case "ambiguous-binding":
+    case "ambiguous":
+    case "registry-identity-unresolvable":
+    case "no-identity":
+      // 重跑接入包 = 重新 `party init`，加入即绑定会把本次身份记下来，覆盖历史堆积。
+      return `party mcp identities --channel ${channel}${serverFlag}    # 看清这台机器上这个频道有哪些身份，再重跑目标身份的接入包（加入即绑定会记下它）`;
+  }
 }
 
 /** 一次 `ps` 调用的上限，绝不吃满 hook 预算。 */
@@ -299,25 +409,6 @@ function psLines(args: string[], spawn: SpawnLike): string[] {
   } catch {
     return [];
   }
-}
-
-/** 一行 `party mcp …` 才算数：既要是我们的二进制，也要真的是 mcp 子命令。 */
-export function looksLikePartyMcpCommand(command: string): boolean {
-  const tokens = command.trim().split(/\s+/);
-  const first = tokens[0];
-  if (first === undefined) return false;
-  const binary = first.split("/").pop() ?? first;
-  // dev 形态是 `bun /path/cli/src/index.ts mcp`：只要参数里出现 party 入口即可。
-  const entryAt = tokens.findIndex((token) => /(?:^|\/)party(?:\.js|\.ts)?$/.test(token));
-  const ours = binary === "party" || entryAt >= 0;
-  if (!ours) return false;
-  // `mcp` 必须是**入口之后的第一个非 flag 参数**，不能是命令行里任意位置出现的同名 token——
-  // 否则 `party send "x" --channel mcp`、`party serve x --on-mention mcp` 会被误判成 MCP 注册
-  // 进程，进而从一个毫不相干的进程里读出 AGENTPARTY_CONFIG，把 @ 判给错的身份。
-  // 这正是 #917 要根除的那类「猜身份」，判据本身更不能松。
-  const afterEntry = tokens.slice(Math.max(entryAt, 0) + 1);
-  const sub = afterEntry.find((token) => !token.startsWith("-"));
-  return sub === "mcp";
 }
 
 /**

@@ -406,3 +406,23 @@ describe("joinPack MCP 注册幂等（#898 方案 C）", () => {
     expect(other).toContain("codex mcp get party-bot");
   });
 });
+
+
+// #924：接入包必须把「谁在加入」当作**事实**传下去，而不是让 CLI 事后从进程树反推。
+describe("joinPack 加入即绑定（#924）", () => {
+  test("codex / claude 档带 --harness；other 档不带（那一档正是「不知道」）", () => {
+    expect(pack("codex")).toContain("party init --server https://party.example --channel dev --harness codex");
+    expect(pack("claude")).toContain("party init --server https://party.example --channel dev --harness claude");
+    expect(pack("other")).toContain("party init --server https://party.example --channel dev\n");
+    expect(pack("other")).not.toContain("--harness");
+  });
+
+  test("三档都解释了替换语义与 party doctor——静默替换和静默放弃一样坏", () => {
+    for (const harness of ["claude", "codex", "other"] as const) {
+      const text = pack(harness);
+      expect(text).toContain(t("AgentJoin.cmd.bindingNote1"));
+      expect(text).toContain(t("AgentJoin.cmd.bindingNote2"));
+      expect(text).toContain("party doctor");
+    }
+  });
+});

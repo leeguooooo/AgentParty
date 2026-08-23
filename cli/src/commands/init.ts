@@ -15,13 +15,20 @@ import {
   writeState,
 } from "../config";
 import { stripTerminalControls } from "../format";
+import {
+  detectHarnessFromAncestry,
+  isBindingHarness,
+  joinBindingsPath,
+  writeJoinBinding,
+  type BindingHarness,
+} from "../join-binding";
 import { RestError, createChannel, fetchChannelCharter, fetchMe, handleRestError, listChannels } from "../rest";
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
 import { isSlug, normalizeServerUrl } from "../validation";
 
-const INIT_FLAGS = ["server", "token", "channel"];
-const HELP = `usage: party init --server URL --token T [--channel C]
+const INIT_FLAGS = ["server", "token", "channel", "harness"];
+const HELP = `usage: party init --server URL --token T [--channel C] [--harness codex|claude|other]
 
 Write local config and optionally bind this working directory to a default channel.
 
@@ -29,7 +36,12 @@ Options:
   --server URL    AgentParty server URL
   --token T       agent/human/readonly token（会进 argv：ps 与 shell history 可见）
   --token -       从 stdin 读 token（推荐；也可用 AGENTPARTY_TOKEN 环境变量）
-  --channel C     bind the current working directory to channel C`;
+  --channel C     bind the current working directory to channel C
+  --harness H     which harness is joining (codex | claude | other). Defaults to
+                  auto-detection from the process ancestry. Recorded as part of the
+                  join-time identity binding so @-mentions can wake THIS harness (#924).
+  --coexist       keep any identity this harness already had on this channel instead of
+                  replacing it (default is replace — re-joining means "use this one now")`;
 
 /**
  * token 输入通道（#111）。
@@ -75,13 +87,13 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv);
-  const unknown = unknownFlagError(flags, INIT_FLAGS);
+  const { positionals, flags } = parseArgs(argv, { booleans: ["coexist"] });
+  const unknown = unknownFlagError(flags, [...INIT_FLAGS, "coexist"]);
   if (unknown !== null) {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["server", "token", "channel"]);
+  const flagError = valueFlagError(flags, ["server", "token", "channel", "harness"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -104,6 +116,18 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
   const cfg = { server: normalizedServer, token };
+
+  // #924：这次加入是哪个 harness 在跑。显式 --harness 永远优先；没给就从进程祖先链探测
+  // （party init 是 harness 的后代进程，这是**事实**不是猜测）；探测不到就 null＝不写绑定。
+  const harnessFlag = str(flags.harness);
+  if (harnessFlag !== undefined && !isBindingHarness(harnessFlag)) {
+    console.error("--harness must be one of: codex, claude, other");
+    return 1;
+  }
+  const harness: BindingHarness | null = harnessFlag !== undefined
+    ? harnessFlag
+    : detectHarnessFromAncestry(process.ppid);
+  const coexist = flags.coexist === true;
 
   const channel = str(flags.channel) ?? positionals[0];
   if (channel) {
@@ -174,6 +198,60 @@ export async function run(argv: string[]): Promise<number> {
       server: cfg.server,
       identity: statuslineIdentity(me),
     });
+    // #924 加入即绑定：**这一刻**我们确切知道 (harness, server, channel, owner) → identity。
+    // 记下来，hook 就不必再从 cwd / 进程树 / 环境变量里反推（反推不出就静默不叫，正是根因）。
+    // harness 未知时不写：一条不知道属于谁的绑定，对唤醒毫无用处，只会给后续判定添歧义。
+    if (channel && harness !== null && me.name) {
+      try {
+        const replaced = writeJoinBinding(
+          joinBindingsPath(agentpartyHome()),
+          {
+            harness,
+            server: cfg.server,
+            channel,
+            owner: me.owner ?? null,
+            identity: me.name,
+            config_path: globalConfigPath(),
+            cwd: process.cwd(),
+            created_at: Date.now(),
+          },
+          { replace: !coexist },
+        );
+        console.log(
+          `bound identity ${me.name} to this ${harness} harness on ${channel} @ ${cfg.server}` +
+            ` — @-mentions in #${channel} will now wake THIS harness as ${me.name}`,
+        );
+        // 替换掉了谁必须说出来。静默替换和静默放弃一样坏——用户得知道刚才顶掉了哪个身份。
+        for (const old of replaced) {
+          console.log(
+            `  replaced: ${old.identity} (this same ${harness} harness held it on ${channel} @ ${old.server}` +
+              `; its identity config and token are untouched — re-run its join snippet to switch back,` +
+              ` or use --coexist next time to keep both)`,
+          );
+        }
+        if (replaced.length > 0) {
+          // 绑定换掉了，但那些身份的 MCP 注册还在——每条注册在每个会话里都是一个常驻进程。
+          // 收敛是**显式**的一步：治理命令绝不删正在被活进程使用的注册（#923），所以不能替
+          // 用户在这里悄悄跑掉它。
+          console.log(
+            `  their MCP registrations are still there (one resident process each). To retire them:\n` +
+              `    party mcp identities --keep ${me.name} --channel ${channel} --server ${cfg.server}` +
+              `${harness === "other" ? "" : ` --harness ${harness}`}\n` +
+              `  (dry run; add --yes to drop them. Registrations a live session is using are never removed.)`,
+          );
+        }
+      } catch (e) {
+        // 绑定写不下去只是退回 #917 的反推兜底，绝不能把接入流程打断。
+        console.error(
+          `warning: could not record the join-time identity binding: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    } else if (channel && harness === null) {
+      console.error(
+        "warning: could not tell which harness is joining, so no join-time identity binding was recorded." +
+          " Re-run with --harness codex|claude|other so @-mentions can wake this session (#924).",
+      );
+    }
     const who = me.email ?? me.name;
     const owner = me.owner ? ` owner=${me.owner}` : "";
     const scope = me.channel_scope ? ` scope=${me.channel_scope}` : "";

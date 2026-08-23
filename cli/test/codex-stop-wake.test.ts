@@ -12,11 +12,14 @@ import { join } from "node:path";
 import {
   CODEX_STOP_WAKE_DEBT_MAX_AGE_MS,
   CODEX_STOP_WAKE_REASON_MAX_BYTES,
+  CODEX_STOP_WAKE_SEEN_TTL_MS,
   appendCodexStopWakeSeen,
+  codexStopWakeQuerySince,
   codexStopWakeReason,
   codexStopWakeSeenPath,
   decideCodexStopWake,
   hasCodexStopWakeSeen,
+  liveCodexStopWakeSeen,
   readCodexStopWakeSeen,
   recordCodexStopWakeSeen,
   type CodexStopWakeInput,
@@ -202,13 +205,13 @@ describe("seen 集合落盘", () => {
   test("写入后跨进程可读（Stop hook 每轮都是新进程，内存集合等于没有）", () => {
     const path = codexStopWakeSeenPath(home, "srv|pwtk");
     expect(readCodexStopWakeSeen(path)).toEqual([]);
-    recordCodexStopWakeSeen(path, 42);
-    expect(readCodexStopWakeSeen(path)).toEqual([42]);
-    recordCodexStopWakeSeen(path, 43);
-    expect(readCodexStopWakeSeen(path)).toEqual([42, 43]);
-    // 重复写同一条不该让集合增长。
-    recordCodexStopWakeSeen(path, 43);
-    expect(readCodexStopWakeSeen(path)).toEqual([42, 43]);
+    recordCodexStopWakeSeen(path, 42, 1_000);
+    expect(readCodexStopWakeSeen(path)).toEqual([{ seq: 42, ts: 1_000 }]);
+    recordCodexStopWakeSeen(path, 43, 2_000);
+    expect(readCodexStopWakeSeen(path)).toEqual([{ seq: 42, ts: 1_000 }, { seq: 43, ts: 2_000 }]);
+    // 重复写同一条不该让集合增长，但时间戳要刷新（时效按「最后一次提示」算）。
+    recordCodexStopWakeSeen(path, 43, 3_000);
+    expect(readCodexStopWakeSeen(path)).toEqual([{ seq: 42, ts: 1_000 }, { seq: 43, ts: 3_000 }]);
   });
 
   // 身份串里含 `/` 和 `..`，转义后必须仍是 home 下的**单个文件名**，不能变成路径。
@@ -223,20 +226,22 @@ describe("seen 集合落盘", () => {
   });
 
   test("有界：超容量丢最旧的，保留最新的", () => {
-    expect(appendCodexStopWakeSeen([1, 2, 3], 4, 3)).toEqual([2, 3, 4]);
-    expect(appendCodexStopWakeSeen([1, 2, 3], 3, 3)).toEqual([1, 2, 3]);
-    expect(appendCodexStopWakeSeen([], 1, 3)).toEqual([1]);
+    const at = (seq: number, ts = 0) => ({ seq, ts });
+    expect(appendCodexStopWakeSeen([at(1), at(2), at(3)], 4, 9, 3)).toEqual([at(2), at(3), at(4, 9)]);
+    expect(appendCodexStopWakeSeen([at(1), at(2), at(3)], 3, 9, 3)).toEqual([at(1), at(2), at(3, 9)]);
+    expect(appendCodexStopWakeSeen([], 1, 9, 3)).toEqual([at(1, 9)]);
   });
 
   test("文件坏了/不存在 → 当空集，绝不抛", () => {
     const path = join(home, "codex-stop-wake", "broken.json");
     expect(readCodexStopWakeSeen(path)).toEqual([]);
-    recordCodexStopWakeSeen(path, 1);
+    recordCodexStopWakeSeen(path, 1, 1_000);
     require("node:fs").writeFileSync(path, "{ not json");
     expect(readCodexStopWakeSeen(path)).toEqual([]);
     for (const bad of ["[]", "null", '{"seqs":"x"}', '{"seqs":[null,"a",-1,0,5]}']) {
       require("node:fs").writeFileSync(path, bad);
-      expect(readCodexStopWakeSeen(path)).toEqual(bad.includes("5") ? [5] : []);
+      // v1 的裸 seq 没有时间戳 ⇒ ts=0 ⇒ 立即过期（#922 升级自愈）。
+      expect(readCodexStopWakeSeen(path)).toEqual(bad.includes("5") ? [{ seq: 5, ts: 0 }] : []);
     }
   });
 
@@ -251,7 +256,7 @@ describe("handleCodexStopRecord", () => {
   let home: string;
   let emitted: string[];
   let logged: string[];
-  let seenStore: Map<string, number[]>;
+  let seenStore: Map<string, { seq: number; ts: number }[]>;
 
   function deps(overrides: Partial<CodexStopWakeDeps> = {}): CodexStopWakeDeps {
     return {
@@ -262,8 +267,8 @@ describe("handleCodexStopRecord", () => {
       cursor: () => 7,
       seenPath: () => join(home, "seen.json"),
       readSeen: (path) => seenStore.get(path) ?? [],
-      recordSeen: (path, seq) => {
-        seenStore.set(path, [...(seenStore.get(path) ?? []), seq]);
+      recordSeen: (path, seq, at) => {
+        seenStore.set(path, [...(seenStore.get(path) ?? []), { seq, ts: at }]);
       },
       emit: (line) => emitted.push(line),
       log: (line) => logged.push(line),
@@ -382,7 +387,7 @@ describe("handleCodexStopRecord", () => {
     expect(output.reason).toContain("1910");
     expect(Object.keys(output).sort()).toEqual(["decision", "reason"]);
     // 网络路径同样必须「先落盘 seen 再打印」，否则同一条 @ 每轮都会被重新问出来、反复注入。
-    expect(seenStore.get(join(home, "seen.json"))).toEqual([1910]);
+    expect(seenStore.get(join(home, "seen.json"))).toEqual([{ seq: 1910, ts: NOW }]);
   });
 
   test("网络问来的 seq 同样受 seen 去重约束（不会每轮反复注入）", async () => {
@@ -546,5 +551,129 @@ describe("party hook codex-stop 端到端（子进程）", () => {
       expect(result.code).toBe(0);
       expect(result.stdout).toBe("");
     }
+  });
+});
+
+
+// ── #922 的钉子 ─────────────────────────────────────────────────────────────
+// 真机故障形态逐字照抄（owner 的 codex1，v0.2.205 实测）：
+//   游标 1899、seen=[1902]、频道里还有 1910 / 1923 两条 @。
+//   next-mention?since=1899 恒返回 1902 → seen 命中 → 跳过 → 游标永不前进 →
+//   **后续所有 @ 永远够不着**，且完全静默。
+// 修法：查询的 since 抬到 max(游标, 活着的 seen 里最大的 seq)，并给 seen 加时效。
+describe("pins #922：去重集合不许把后续所有 @ 永久饿死", () => {
+  let home: string;
+  let emitted: string[];
+  let logged: string[];
+  let asked: number[];
+  let seenStore: Map<string, { seq: number; ts: number }[]>;
+
+  const SEEN = "seen.json";
+  /** 频道里真实存在的 @：1902（已注入过但没处理）、1910、1923。 */
+  const CHANNEL_MENTIONS = [1902, 1910, 1923];
+
+  function starvedDeps(overrides: Partial<CodexStopWakeDeps> = {}): CodexStopWakeDeps {
+    return {
+      channel: () => "pwtk",
+      enabled: () => true,
+      stuck: () => null,
+      cursor: () => 1899,
+      // 服务端语义逐字模拟：返回「> since 的最早一条未处理的 @」。
+      nextMention: async (_channel, _cwd, since) => {
+        asked.push(since);
+        return CHANNEL_MENTIONS.find((seq) => seq > since) ?? null;
+      },
+      seenPath: () => join(home, SEEN),
+      readSeen: (path) => seenStore.get(path) ?? [],
+      recordSeen: (path, seq, at) => {
+        seenStore.set(path, [...(seenStore.get(path) ?? []), { seq, ts: at }]);
+      },
+      emit: (line) => emitted.push(line),
+      log: (line) => logged.push(line),
+      now: () => NOW,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "ap-922-"));
+    emitted = [];
+    logged = [];
+    asked = [];
+    seenStore = new Map();
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("队首已注入过而未处理时，后面的 @ 仍然叫得醒（1910 而不是永远的 1902）", async () => {
+    seenStore.set(join(home, SEEN), [{ seq: 1902, ts: NOW - 1_000 }]);
+    await handleCodexStopRecord(stopPayload(), {}, starvedDeps());
+    // since 必须抬过被卡住的队首，否则查询恒返回 1902。
+    expect(asked).toEqual([1902]);
+    expect(emitted).toHaveLength(1);
+    expect(JSON.parse(emitted[0]!).reason).toContain("1910");
+  });
+
+  test("连续几轮能一路走到 1923，不会停在队首", async () => {
+    const d = starvedDeps();
+    seenStore.set(join(home, SEEN), [{ seq: 1902, ts: NOW - 1_000 }]);
+    await handleCodexStopRecord(stopPayload(), {}, d);
+    await handleCodexStopRecord(stopPayload(), {}, d);
+    await handleCodexStopRecord(stopPayload(), {}, d);
+    const seqs = emitted.map((line) => JSON.parse(line).reason as string);
+    expect(seqs[0]).toContain("1910");
+    expect(seqs[1]).toContain("1923");
+    // 频道里没有更新的 @ 了 ⇒ 第三轮安静放行，绝不空转 block。
+    expect(emitted).toHaveLength(2);
+  });
+
+  test("本地欠账路径同样以 since 为底——否则快路径会把同一条队首挡回来", async () => {
+    seenStore.set(join(home, SEEN), [{ seq: 1902, ts: NOW - 1_000 }]);
+    await handleCodexStopRecord(stopPayload(), {}, starvedDeps({
+      stuck: () => ({ seq: 1902, first_wake_ts: NOW - 1_000 }),
+    }));
+    expect(emitted).toHaveLength(1);
+    expect(JSON.parse(emitted[0]!).reason).toContain("1910");
+  });
+
+  test("过了时效的 seen 不再挡路（同一条 @ 允许再提示一次，seen 不是「永不再提」）", async () => {
+    seenStore.set(join(home, SEEN), [{ seq: 1902, ts: NOW - CODEX_STOP_WAKE_SEEN_TTL_MS - 1 }]);
+    await handleCodexStopRecord(stopPayload(), {}, starvedDeps());
+    expect(asked).toEqual([1899]);
+    expect(JSON.parse(emitted[0]!).reason).toContain("1902");
+  });
+
+  test("时效内的 seen 仍然挡住同一条（防的是同一轮之外刷屏，不是防循环本身）", async () => {
+    seenStore.set(join(home, SEEN), [{ seq: 1923, ts: NOW - 1 }]);
+    await handleCodexStopRecord(stopPayload(), {}, starvedDeps({ nextMention: async () => 1923 }));
+    expect(emitted).toEqual([]);
+  });
+
+  test("#899 铁律一条未松：续跑轮恒放行，哪怕队首已经绕过去了", async () => {
+    seenStore.set(join(home, SEEN), [{ seq: 1902, ts: NOW - 1_000 }]);
+    await handleCodexStopRecord(stopPayload({ stop_hook_active: true }), {}, starvedDeps());
+    expect(emitted).toEqual([]);
+    // stop_hook_active 只认严格的 false：缺字段 / 类型不对一律当续跑。
+    await handleCodexStopRecord(stopPayload({ stop_hook_active: "false" }), {}, starvedDeps());
+    await handleCodexStopRecord(stopPayload({ stop_hook_active: undefined }), {}, starvedDeps());
+    expect(emitted).toEqual([]);
+  });
+
+  test("升级自愈：v1 的裸 seq 文件（无时间戳）不再把人卡死", () => {
+    const path = codexStopWakeSeenPath(home, "srv|codex1");
+    require("node:fs").mkdirSync(join(home, "codex-stop-wake"), { recursive: true });
+    require("node:fs").writeFileSync(path, JSON.stringify({ version: 1, seqs: [1902] }));
+    const entries = readCodexStopWakeSeen(path);
+    expect(entries).toEqual([{ seq: 1902, ts: 0 }]);
+    // ts=0 ⇒ 立即过期 ⇒ 不挡路、也不抬 since，被卡住的那条会被重新提示一次。
+    expect(liveCodexStopWakeSeen(entries, NOW)).toEqual([]);
+    expect(codexStopWakeQuerySince(1899, liveCodexStopWakeSeen(entries, NOW))).toBe(1899);
+  });
+
+  test("codexStopWakeQuerySince：取游标与活着的 seen 最大值的较大者", () => {
+    expect(codexStopWakeQuerySince(1899, [])).toBe(1899);
+    expect(codexStopWakeQuerySince(1899, [1902, 1900])).toBe(1902);
+    expect(codexStopWakeQuerySince(2000, [1902])).toBe(2000);
   });
 });

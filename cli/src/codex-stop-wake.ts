@@ -48,6 +48,21 @@ import type { StuckWake } from "./config";
 export const CODEX_STOP_WAKE_SEEN_DIR = "codex-stop-wake";
 /** 每个身份+频道最多记住多少个已注入过的 seq。有界，绝不无限长。 */
 export const CODEX_STOP_WAKE_SEEN_CAPACITY = 64;
+/**
+ * seen 条目的时效（#922）。
+ *
+ * 为什么必须有它：`next-mention` 返回的永远是「游标之后**最早**一条未处理的 @」，而注入
+ * ≠ 处理——游标不会因为注入而前进。于是一旦某条 @ 被注入过却没被处理，它就永久占住队首：
+ * 查询恒返回它 → seen 命中 → 跳过 → 后续所有 @ **永远够不着**。真机实测（owner 的
+ * codex1）：游标 1899、seen=[1902]，频道里 1910/1923 一条都叫不醒，且**完全静默**。
+ *
+ * 修法两条，缺一不可：
+ *   ① 查询的 `since` 抬到 `max(游标, 活着的 seen 里最大的 seq)`——直接绕过已提示过的队首；
+ *   ② seen 的职责从「永不再提」弱化为「短期内不重复打扰」——过了时效可以再提一次。
+ * 防循环并不依赖 seen 的永久性：`stop_hook_active` 已经把每个用户 turn 硬顶在 1 次注入
+ * （#899 铁律，一条未松），seen 只是「同一个 turn 之外别刷屏」。
+ */
+export const CODEX_STOP_WAKE_SEEN_TTL_MS = 30 * 60 * 1000;
 /** 注入正文的硬上限——和 #841 的唤醒通知同一预算。 */
 export const CODEX_STOP_WAKE_REASON_MAX_BYTES = 512;
 /**
@@ -75,19 +90,65 @@ export function codexStopWakeSeenPath(home: string, target: string): string {
   return join(home, CODEX_STOP_WAKE_SEEN_DIR, `${target.replace(/[^a-zA-Z0-9._-]/g, "_")}.json`);
 }
 
-/** 读已注入过的 seq 集合。文件坏了/不存在都当空集——读不到只会多注入一次，不会卡死会话。 */
-export function readCodexStopWakeSeen(path: string): number[] {
+/** 一条「我在什么时候提示过这个 seq」。时间戳是 #922 让 seen 可过期的前提。 */
+export interface CodexStopWakeSeenEntry {
+  seq: number;
+  ts: number;
+}
+
+/**
+ * 读已注入过的 seq 集合。文件坏了/不存在都当空集——读不到只会多注入一次，不会卡死会话。
+ *
+ * 兼容 v1（`{version:1, seqs:[…]}`，没有时间戳）：一律按 ts=0 读入 ＝ 立即过期。
+ * 这正是升级后**自愈**那条永久饿死的路径：被卡住的队首会被再提示一次，此后走 v2 的时效逻辑。
+ */
+export function readCodexStopWakeSeen(path: string): CodexStopWakeSeenEntry[] {
   try {
     const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
     if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+    const entries = value.entries;
+    if (Array.isArray(entries)) {
+      const out: CodexStopWakeSeenEntry[] = [];
+      for (const row of entries) {
+        if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+        const seq = (row as Record<string, unknown>).seq;
+        const ts = (row as Record<string, unknown>).ts;
+        if (typeof seq !== "number" || !Number.isFinite(seq) || seq <= 0) continue;
+        out.push({ seq, ts: typeof ts === "number" && Number.isFinite(ts) ? ts : 0 });
+      }
+      return out;
+    }
     const seqs = value.seqs;
     if (!Array.isArray(seqs)) return [];
-    return seqs.filter((seq): seq is number =>
-      typeof seq === "number" && Number.isFinite(seq) && seq > 0
-    );
+    return seqs
+      .filter((seq): seq is number => typeof seq === "number" && Number.isFinite(seq) && seq > 0)
+      .map((seq) => ({ seq, ts: 0 }));
   } catch {
     return [];
   }
+}
+
+/** 时效内还算数的那些 seq。过期的不再挡路（#922：seen 是「短期内别重复打扰」，不是「永不再提」）。 */
+export function liveCodexStopWakeSeen(
+  entries: readonly CodexStopWakeSeenEntry[],
+  now: number,
+  ttlMs: number = CODEX_STOP_WAKE_SEEN_TTL_MS,
+): number[] {
+  return entries.filter((entry) => now - entry.ts < ttlMs).map((entry) => entry.seq);
+}
+
+/**
+ * 查询 `next-mention` 该用的 `since`（#922 的核心修复）。
+ *
+ * 取 `max(游标, 活着的 seen 里最大的 seq)`：已经提示过的队首直接被跳过，后面那些 @ 才够得着。
+ * 绝不会漏消息——seq 单调递增，比「提示过的最大 seq」还小的必然已经提示过或已被游标了结。
+ */
+export function codexStopWakeQuerySince(cursor: number, liveSeen: readonly number[]): number {
+  let since = cursor;
+  for (const seq of liveSeen) {
+    if (seq > since) since = seq;
+  }
+  return since;
 }
 
 export function hasCodexStopWakeSeen(seen: readonly number[], seq: number): boolean {
@@ -96,11 +157,12 @@ export function hasCodexStopWakeSeen(seen: readonly number[], seq: number): bool
 
 /** 追加一个已注入的 seq 并截断到容量上限（保留最新的 N 个）。纯函数，便于单测。 */
 export function appendCodexStopWakeSeen(
-  seen: readonly number[],
+  entries: readonly CodexStopWakeSeenEntry[],
   seq: number,
+  now: number,
   capacity: number = CODEX_STOP_WAKE_SEEN_CAPACITY,
-): number[] {
-  const next = seen.includes(seq) ? [...seen] : [...seen, seq];
+): CodexStopWakeSeenEntry[] {
+  const next = [...entries.filter((entry) => entry.seq !== seq), { seq, ts: now }];
   return next.length <= capacity ? next : next.slice(next.length - capacity);
 }
 
@@ -111,11 +173,12 @@ export function appendCodexStopWakeSeen(
 export function recordCodexStopWakeSeen(
   path: string,
   seq: number,
+  now: number = Date.now(),
   capacity: number = CODEX_STOP_WAKE_SEEN_CAPACITY,
 ): void {
   atomicWriteJson(path, {
-    version: 1,
-    seqs: appendCodexStopWakeSeen(readCodexStopWakeSeen(path), seq, capacity),
+    version: 2,
+    entries: appendCodexStopWakeSeen(readCodexStopWakeSeen(path), seq, now, capacity),
   });
 }
 
