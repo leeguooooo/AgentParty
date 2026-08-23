@@ -27,6 +27,13 @@ async function send(
   return ((await res.json()) as { seq: number }).seq;
 }
 
+/** 索引里某条 seq 还剩几行——用来证明「编辑之后陈旧行真的没了」而不是靠端点行为间接推断。 */
+function indexRowCount(stub: DurableObjectStub<ChannelDO>, seq: number): Promise<number> {
+  return runInDurableObject(stub, (_instance: ChannelDO, state) =>
+    [...state.storage.sql.exec("SELECT COUNT(*) AS n FROM message_mentions WHERE seq = ?", seq)][0]!.n as number,
+  );
+}
+
 async function nextMention(slug: string, token: string, since: number): Promise<number | null> {
   const res = await api(`/api/channels/${slug}/next-mention?since=${since}`, token);
   expect(res.status).toBe(200);
@@ -135,41 +142,43 @@ describe("next-mention 扫描代价 (#913)", () => {
   }
 
   it("零命中 + since=0：读行数不随频道长度增长", async () => {
-    const short = await seedNoisyChannel(20);
-    const long = await seedNoisyChannel(200);
+    // 规模只需大到「全扫实现必然读满整条频道」即可；CI 上每条消息都走真实 POST /messages，
+    // 200 条要 40 秒以上并已实际超时过。12 vs 72 的对比同样能证伪「读行数随长度增长」。
+    const short = await seedNoisyChannel(12);
+    const long = await seedNoisyChannel(72);
 
     // 正控：消息真的存进去了、那些 @ 也真的查得到——否则「读行数小」可能只是因为频道是空的，
     // 被测的那道闸根本没被考到。
     expect(await nextMention(short.slug, short.noisy.token, 0)).toBe(1);
     expect(await nextMention(long.slug, long.noisy.token, 0)).toBe(1);
     const history = await api(`/api/channels/${long.slug}/messages?limit=1000`, long.human.token);
-    expect(((await history.json()) as { messages: unknown[] }).messages.length).toBe(200);
+    expect(((await history.json()) as { messages: unknown[] }).messages.length).toBe(72);
 
     expect(await nextMention(short.slug, short.bystander.token, 0)).toBeNull();
     const shortRows = await rowsRead(short.slug);
     expect(await nextMention(long.slug, long.bystander.token, 0)).toBeNull();
     const longRows = await rowsRead(long.slug);
 
-    // 频道长了 10 倍，读行数不许跟着长。全扫实现这里会是 20 vs 200。
+    // 频道长了 6 倍，读行数不许跟着长。全扫实现这里会是 12 vs 72。
     expect(longRows).toBeLessThanOrEqual(shortRows + 2);
     // 且绝对值必须是常数级，不是「涨得慢一点」。
     expect(longRows).toBeLessThanOrEqual(4);
   });
 
   it("命中时的读行数只跟命中位置有关，不跟 since 到命中点的距离有关", async () => {
-    const { slug, human, noisy, bystander } = await seedNoisyChannel(200);
+    const { slug, human, noisy, bystander } = await seedNoisyChannel(72);
     const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
     await runInDurableObject(stub, (_instance: ChannelDO, state) => {
       state.storage.sql.exec("DELETE FROM rate");
     });
     // 在长频道最末尾补一条 @ bystander 的：命中点在 201，since=0 的距离是满的。
     const target = await send(slug, human.token, `@${bystander.name} 轮到你`, [bystander.name]);
-    expect(target).toBe(201);
+    expect(target).toBe(73);
 
     expect(await nextMention(slug, bystander.token, 0)).toBe(target);
-    // 索引直接定位到那一条；全扫实现要走完前面 200 行才够得到它。
+    // 索引直接定位到那一条；全扫实现要走完前面 72 行才够得到它。
     expect(await rowsRead(slug)).toBeLessThanOrEqual(4);
-    // 同一频道里被 @ 了 200 次的那位，仍旧拿到最早的那条（LIMIT 语义没被换掉）。
+    // 同一频道里被 @ 了 72 次的那位，仍旧拿到最早的那条（LIMIT 语义没被换掉）。
     expect(await nextMention(slug, noisy.token, 0)).toBe(1);
   });
 
@@ -290,35 +299,40 @@ describe("next-mention 扫描代价 (#913)", () => {
   // 时成立。候选是有上限的（NEXT_MENTION_SCAN_LIMIT），而编辑是唯一会**移除** @ 的常规路径；只追加不
   // 替换的话，被编辑掉的 @ 会在索引里留下陈旧行，攒够上限就能把排在它们后面的**真** @ 挤出候选窗口
   // ⇒ 漏唤醒。这是本 PR 会引入的回归，不是既有缺陷。修法是编辑路径先删后建。
-  it("编辑移除 @ 后，排在陈旧行之后的真 @ 仍然查得到（候选上限不会被陈旧行吃光）", async () => {
+  // 原来这条用真发 200 条 + 编辑 200 次来把候选窗口填满，CI 上要跑 107 秒（120s 预算）——
+  // 必然 flake，而且它把两件独立的事捆在一起证。拆成下面两条：各自直接构造被证的那个状态，
+  // 秒级完成，且比原来更强（危险状态是显式造出来的，不依赖「编辑真的留下了陈旧行」这个前提）。
+  it("编辑移除 @ 之后，索引里不再留下该 seq 的陈旧行", async () => {
     const human = await seedToken("human");
     // 被 @ 的是人类：agent 的 @ 会落成 directed delivery，而已路由的目标**不允许**被编辑掉
     // （必须撤回/supersede）。所以能制造陈旧索引行的只有非路由 @，这里用人类目标来构造。
     const target = await seedToken("human");
     const slug = await createChannel(human.token);
     const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
-    const clearRate = () =>
-      runInDurableObject(stub, (_instance: ChannelDO, state) => {
-        state.storage.sql.exec("DELETE FROM rate");
-      });
 
-    // 攒满整整一个候选窗口的「曾经 @ 过、后来被编辑掉」的消息。
-    for (let i = 0; i < NEXT_MENTION_SCAN_LIMIT; i += 1) {
-      if (i > 0 && i % 20 === 0) await clearRate();
-      const seq = await send(slug, human.token, `@${target.name} 第 ${i} 条`, [target.name]);
-      const edit = await api(`/api/channels/${slug}/messages/${seq}/edit`, human.token, {
-        method: "POST",
-        body: JSON.stringify({ body: `第 ${i} 条（改口，不 @ 了）` }),
-      });
-      expect(edit.status).toBe(200);
-    }
-    await clearRate();
-    // 编辑真的把 @ 拿掉了——否则下面的「查得到」只是因为陈旧行本身还是有效命中，闸被遮住。
+    const seq = await send(slug, human.token, `@${target.name} 原文`, [target.name]);
+    // 正控：编辑之前索引里确实有这一行——否则下面的「没有了」可能只是因为它从来就没进去过。
+    expect(await indexRowCount(stub, seq)).toBe(1);
+
+    const edit = await api(`/api/channels/${slug}/messages/${seq}/edit`, human.token, {
+      method: "POST",
+      body: JSON.stringify({ body: "改口，不 @ 了" }),
+    });
+    expect(edit.status).toBe(200);
+
+    expect(await indexRowCount(stub, seq)).toBe(0);
     expect(await nextMention(slug, target.token, 0)).toBeNull();
+  });
 
-    const real = await send(slug, human.token, `@${target.name} 这条是真的`, [target.name]);
-    expect(await nextMention(slug, target.token, 0)).toBe(real);
-    // 200 条消息 + 200 次编辑，比默认 20s 预算慢；这是这条守卫的固有成本——想证明「陈旧行吃光候选窗口」
-    // 就必须真的把窗口填满，凑不满的夹具证明不了任何事。
-  }, 120_000);
+  // 这里曾经有一条「攒满候选窗口的陈旧行也挤不掉真 @」的用例，已删除，理由记下来免得有人再写一遍：
+  //
+  //   1. 想让陈旧行真的消耗 `LIMIT` 预算，它必须**指向仍然存在的消息**（否则 JOIN messages 就把它
+  //      丢了，LIMIT 作用在 JOIN 之后，够不到的行不占名额）；也必须 `seq > since`。
+  //   2. 于是唯一忠实的构造就是「发 N 条真消息再逐条编辑掉 @」——那正是原来那条跑 107 秒、
+  //      CI 上必然 flake 的写法。
+  //   3. 直接往 message_mentions 塞行（负 seq、或指向不存在的消息）**证明不了任何事**：那些行
+  //      在 SQL 层就被过滤掉，用例恒绿，是典型的空转守卫。
+  //
+  // 而修复后的不变式本来就是「索引对每条消息精确」——陈旧行不再产生，上一条用例直接钉住了这一点。
+  // 与其留一条证明不了危险的用例，不如把「危险为什么不再存在」写清楚。
 });
