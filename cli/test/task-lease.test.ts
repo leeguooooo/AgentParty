@@ -15,6 +15,7 @@ import {
   readTaskLease,
   releaseTaskLease,
   resolveExecutorId,
+  resolveExecutorIdentity,
   taskLeaseKey,
 } from "../src/task-lease";
 
@@ -117,10 +118,31 @@ describe("绝不把任务永久锁死", () => {
 
   test("过期租约会被清理，目录不会无限增长", () => {
     const d = dir();
-    claim(d, "runner:claude:aaa", 7);
+    writeFileSync(
+      join(d, `${taskLeaseKey("https://s", "tok", "king", 7)}.json`),
+      JSON.stringify({ executor_id: "runner:claude:aaa", channel: "king", task_id: 7, acquired_at: NOW, renewed_at: NOW, expires_at: NOW + TTL }),
+    );
     claim(d, "runner:claude:bbb", 8, NOW + TTL * 5);
-    expect(pruneExpiredTaskLeases(d, NOW + TTL + 1)).toBe(1);
+    expect(pruneExpiredTaskLeases(d, NOW + TTL + 1)).toBe(0); // 认领时已自愈清掉
     expect(readdirSync(d).length).toBe(1);
+  });
+
+  // #931/#908：残留租约不能靠「下次有人想起来跑一次 prune」——那次调用全仓根本不存在（本模块
+  // 之外零调用点）。认领这一刀顺手自愈，才是唯一每次都会跑到的地方。
+  test("认领时顺手清掉过期租约（自愈不依赖任何外部调用）", () => {
+    const d = dir();
+    const stale = join(d, `${taskLeaseKey("https://s", "tok", "king", 7)}.json`);
+    writeFileSync(stale, JSON.stringify({ executor_id: "runner:claude:dead", channel: "king", task_id: 7, acquired_at: NOW, renewed_at: NOW, expires_at: NOW + 1 }));
+    claim(d, "runner:claude:bbb", 8, NOW + TTL * 5);
+    expect(readdirSync(d)).toEqual([`${taskLeaseKey("https://s", "tok", "king", 8)}.json`]);
+    // 但**没过期**的别人家租约绝不能被顺手清掉——那会把 enforcement 直接清成 0。
+    const live = join(d, `${taskLeaseKey("https://s", "tok", "king", 9)}.json`);
+    writeFileSync(live, JSON.stringify({ executor_id: "runner:claude:live", channel: "king", task_id: 9, acquired_at: NOW, renewed_at: NOW, expires_at: NOW + TTL * 100 }));
+    claim(d, "runner:claude:bbb", 8, NOW + TTL * 6);
+    expect(readdirSync(d).sort()).toEqual([
+      `${taskLeaseKey("https://s", "tok", "king", 8)}.json`,
+      `${taskLeaseKey("https://s", "tok", "king", 9)}.json`,
+    ].sort());
   });
 });
 
@@ -157,6 +179,43 @@ describe("执行体身份识别", () => {
   test("非法的执行体 id 不被采信", () => {
     expect(resolveExecutorId({ AGENTPARTY_EXECUTOR_ID: "bad id with spaces" })).toBeNull();
     expect(resolveExecutorId({ AGENTPARTY_EXECUTOR_ID: "../../escape" })).toBeNull();
+  });
+
+  // #931 根因：真实 Claude Code（实测 2.1.239）注入的是 CLAUDE_CODE_SESSION_ID，而梯子上写的是
+  // 一个它从不设置的名字 CLAUDE_SESSION_ID。于是事故里那条 harness 腿**每一次**都掉到梯子底部、
+  // 恒定 unenforced——闸装了，最需要它的那条腿从来没被拦过。
+  test("Claude Code 真实注入的 CLAUDE_CODE_SESSION_ID 能识别出 harness 那条腿", () => {
+    const harness = resolveExecutorIdentity({ CLAUDE_CODE_SESSION_ID: "f54570ae-db1b-4939-af3f-86cf8e5845d4" });
+    expect(harness.id).toBe("session:claude:f54570ae-db1b-4939-af3f-86cf8e5845d4");
+    expect(harness.source).toBe("claude_session");
+    // 与 serve runner 那条腿必须是**不同**的执行体，否则闸落下来也拦不住事故里的那个形状。
+    const runner = resolveExecutorIdentity({
+      AP_RUNNER_WORKDIR: "/home/u/.agentparty/runners/king",
+      AP_RUNNER_HARNESS: "claude",
+      CLAUDE_CODE_SESSION_ID: "f54570ae-db1b-4939-af3f-86cf8e5845d4",
+    });
+    expect(runner.source).toBe("runner");
+    expect(runner.id).not.toBe(harness.id);
+  });
+
+  test("认不出时说得出为什么：一个都没设 vs 设了但值不合法", () => {
+    const none = resolveExecutorIdentity({});
+    expect(none.id).toBeNull();
+    expect(none.refusal).toBe("no_signal");
+    expect(none.rejected).toEqual([]);
+    const bad = resolveExecutorIdentity({ AGENTPARTY_EXECUTOR_ID: "bad id with spaces" });
+    expect(bad.id).toBeNull();
+    expect(bad.refusal).toBe("malformed");
+    expect(bad.rejected).toEqual(["env"]);
+  });
+
+  test("非法值不会挡住梯子上后面那个合法的来源", () => {
+    const resolved = resolveExecutorIdentity({
+      AGENTPARTY_EXECUTOR_ID: "bad id with spaces",
+      CLAUDE_CODE_SESSION_ID: "sess-42",
+    });
+    expect(resolved.id).toBe("session:claude:sess-42");
+    expect(resolved.rejected).toEqual(["env"]);
   });
 });
 
