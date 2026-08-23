@@ -102,9 +102,12 @@ function runnerSessionFromEnv(
 ): string | null {
   const explicit = nonEmpty(env.AP_RUNNER_SESSION_ID);
   if (explicit !== null) return explicit;
-  return harness === "claude"
-    ? nonEmpty(env.CLAUDE_SESSION_ID)
-    : nonEmpty(env.CODEX_THREAD_ID);
+  if (harness !== "claude") return nonEmpty(env.CODEX_THREAD_ID);
+  // 真实 Claude Code 注入的是 CLAUDE_CODE_SESSION_ID（本机 2.1.239 实测）；
+  // `CLAUDE_SESSION_ID` 是仓里扩散开的一个错名，harness 里**从不存在**——只读它就等于这一级恒空
+  // （#931 里同一个错名让任务租约对 harness 那条腿 100% 不落闸）。旧名保留：serve 与包装脚本
+  // 仍可能注入它，去掉会缩小兼容面。
+  return nonEmpty(env.CLAUDE_CODE_SESSION_ID) ?? nonEmpty(env.CLAUDE_SESSION_ID);
 }
 
 /**
@@ -149,7 +152,8 @@ export function prepareDecisionContinuation(
   }
   const sessionId = runnerSessionFromEnv(harnessRaw, env);
   if (sessionId === null) {
-    const expected = harnessRaw === "claude" ? "CLAUDE_SESSION_ID" : "CODEX_THREAD_ID";
+    // 别再把错名教给用户：claude 档要报真实存在的那个变量名。
+    const expected = harnessRaw === "claude" ? "CLAUDE_CODE_SESSION_ID" : "CODEX_THREAD_ID";
     throw new Error(
       `runner continuation has no live session id; expected AP_RUNNER_SESSION_ID or ${expected}`,
     );
