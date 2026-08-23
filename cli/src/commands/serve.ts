@@ -2411,8 +2411,8 @@ export function isRunnerEnvFailure(result: Pick<RunnerProcessResult, "stderr">):
  * 存在的理由是一个真实误诊：诊断摘要一直取 stderr 的**开头**，而环境失败的指纹往往在**结尾**
  * （codex 先吐 skill/启动噪声，401 之类的真因排在后面）。于是 #892 的报告里出现了
  * `env_failure=true` 配一段「failed to load skill ... missing YAML frontmatter」——那段文字
- * 与 RUNNER_ENV_FAILURE_PATTERNS 的任何一条都不匹配，也就是说：**通告里展示的原因，根本不是
- * 触发判定的那一条**。报的人照着改 SKILL.md，改不好也不奇怪。
+ * 与 RUNNER_ENV_FAILURE_PATTERNS 的任何一条都不匹配（`missing YAML frontmatter` 那个形态），
+ * 也就是说：**通告里展示的原因，根本不是触发判定的那一条**。报的人照着改 SKILL.md，改不好也不奇怪。
  *
  * 所以判定命中时，诊断必须交出命中的那一行。所有指纹都是行内模式（没有跨行的），
  * 逐行扫与整串扫命中集合一致，不会出现「整串命中而逐行找不到」。
@@ -2426,10 +2426,16 @@ export function runnerEnvFailureEvidence(stderr: string): string | null {
   return null;
 }
 
-// #892：codex 在**模型启动之前**递归发现并加载 skills；碰到一份没有 YAML frontmatter 的
-// 嵌套 SKILL.md 会打印这行。它既不是凭据错也不是二进制缺失——RUNNER_ENV_FAILURE_PATTERNS
-// 一条都不匹配——所以在此之前它落进「exit-1，模型可能跑过」那一档，被终局结算，@ 就此沉掉。
-// 而实情是模型一步都没起，且用户把那个文件删掉/补上 frontmatter 就好。单独成档。
+// #892：codex 在**模型启动之前**递归发现并加载 skills；读不动某个 SKILL.md 时会打印这行。
+// 它既不是凭据错也不是二进制缺失，此前落进「exit-1，模型可能跑过」那一档被终局结算，@ 就此沉掉；
+// 而实情是模型一步都没起，且用户把那个文件删掉/补好就行。单独成档。
+//
+// 两种形态、两条歧路，都要挡住：
+//   - `missing YAML frontmatter delimited by ---`：RUNNER_ENV_FAILURE_PATTERNS 一条都不匹配
+//     ⇒ 旧实现判它「模型可能跑过」，挂着免责标签终局结算；
+//   - `No such file or directory`（断掉的 skill 符号链接，正是 #892 报告里的布局）：**恰好**命中
+//     ENOENT「二进制缺失」指纹 ⇒ 旧实现判它环境失败，同样终局结算，还显示错的修法。
+// 所以判环境之前必须先摘掉这几行，见 withoutSkillLoadLines。
 const CODEX_SKILL_LOAD_FAILURE_RE = /failed to load skill\s+([^\s][^\n]*?):\s*([^\n]+)/i;
 
 /** stderr 里若有 codex 的 skill 加载失败，交出出问题的路径与原文理由。 */
