@@ -35,6 +35,8 @@ import {
   type SendMessageFrame,
   type SendStatusFrame,
   type TaskAssigneeKind,
+  type TaskLeaseGrantedResponse,
+  type TaskLeaseReleasedResponse,
   type TaskRecord,
   type TaskState,
   type TokenRole,
@@ -60,6 +62,12 @@ export class RestError extends Error {
     public status: number,
     public code: string | null,
     message: string,
+    /**
+     * 已解析的响应体（非 JSON 响应为 null）。结构化错误常带 message 之外的可执行信息——
+     * 任务租约冲突要告诉被拒方「谁持有、何时过期」（#936），把它塌缩成一句 message
+     * 就只剩「你不被允许」，调用方既不知道等多久也不知道该不该 force。
+     */
+    public body: unknown = null,
   ) {
     super(message);
   }
@@ -209,7 +217,7 @@ function extractError(status: number, body: unknown, raw: string): RestError {
     else if (typeof b.error === "string") message = b.error;
   }
   if (!code && status === 401) code = "unauthorized";
-  return new RestError(status, code, message);
+  return new RestError(status, code, message, body);
 }
 
 // 所有 REST 调用的默认超时（#116）。没有它，一次 TCP 半开就让 serve 永久挂在 await 上：
@@ -752,6 +760,39 @@ export async function updateTask(
     headers: bearerJson(token),
     body: JSON.stringify(body),
   })) as TaskRecord;
+}
+
+/**
+ * 服务端任务租约（#936）。老服务端没有这条路由，`req` 会抛 404——调用方**必须**据此退回本机
+ * 租约，而不是当成「没人持租」直接放行（放行比现在更糟：现在至少本机还挡得住）。
+ * 判据见 `cli/src/task-lease-remote.ts` 的 `serverLeaseUnsupported`。
+ */
+export async function claimServerTaskLease(
+  server: string,
+  token: string,
+  slug: string,
+  id: number,
+  body: { executor_id: string; ttl_ms?: number; force?: boolean },
+): Promise<TaskLeaseGrantedResponse> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/tasks/${id}/lease`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify({ op: "claim", ...body }),
+  })) as TaskLeaseGrantedResponse;
+}
+
+export async function releaseServerTaskLease(
+  server: string,
+  token: string,
+  slug: string,
+  id: number,
+  executorId: string,
+): Promise<TaskLeaseReleasedResponse> {
+  return (await req(server, `/api/channels/${encodeURIComponent(slug)}/tasks/${id}/lease`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify({ op: "release", executor_id: executorId }),
+  })) as TaskLeaseReleasedResponse;
 }
 
 export async function listSquads(server: string, token: string, slug: string): Promise<ChannelSquad[]> {

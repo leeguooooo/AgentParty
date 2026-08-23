@@ -77,6 +77,9 @@ describe("version endpoint and advisory guardrail (issue #137)", () => {
       deployed_at: null,
       min_client_version: DEFAULT_MIN_CLIENT_VERSION,
       min_client_enforced: false,
+      // 能力清单（#936）：协议新增的端点在这里显式声明，客户端/诊断据此说清「这台服务端的
+      // 任务租约是跨机的还是只到本机」。toEqual 是刻意的——加字段必须来这里改一次。
+      features: ["task_lease"],
     });
   });
 

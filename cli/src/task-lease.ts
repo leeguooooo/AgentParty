@@ -19,12 +19,15 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { isExecutorId, TASK_LEASE_DEFAULT_TTL_MS, type TaskLeaseScope } from "@agentparty/shared";
 import { agentpartyHome } from "./config";
 
 /** 默认租期。与 serve 的 DEFAULT_RUNNER_TIMEOUT_MS（30min）对齐：一个 runner 最多能占这么久。 */
-export const DEFAULT_TASK_LEASE_TTL_MS = 30 * 60_000;
+export const DEFAULT_TASK_LEASE_TTL_MS = TASK_LEASE_DEFAULT_TTL_MS;
 
-const EXECUTOR_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
+// 字符集判据只有 shared 一份实现（#936）：本机租约与服务端租约用同一个 executor_id，两边各写
+// 一个正则就会出现「本机认得出、服务端 400」的静默分叉（#622 那次 allow-list 镜像漂移同款）。
+const EXECUTOR_ID_RE = { test: (value: string): boolean => isExecutorId(value) };
 
 export interface TaskLeaseHolder {
   executor_id: string;
@@ -331,11 +334,20 @@ export function pruneExpiredTaskLeases(dir: string = taskLeaseDir(), now: number
 }
 
 /** 人读的拒绝说明。刻意把「任务没丢」和「怎么合法接手」写在同一句里。 */
-export function describeDeniedLease(holder: TaskLeaseHolder, channel: string, taskId: number, now: number): string {
+export function describeDeniedLease(
+  holder: TaskLeaseHolder,
+  channel: string,
+  taskId: number,
+  now: number,
+  /** 这一刀落在哪一层。被拒方要能分清「另一台机器上的执行体」和「本机另一条腿」——两者的
+   *  排查动作完全不同（#936）。 */
+  scope: TaskLeaseScope = "local_home",
+): string {
   const remainingS = Math.max(0, Math.ceil((holder.expires_at - now) / 1000));
   return [
     `refused: task ${taskId} on #${channel} is already held by another execution runtime of this identity`,
-    `  holder=${holder.executor_id} expires_in=${remainingS}s`,
+    `  holder=${holder.executor_id} expires_in=${remainingS}s scope=${scope}` +
+      (scope === "server" ? " (server lease: the holder may be on another machine)" : " (this machine only)"),
     "  this claim was NOT published: the task is untouched and the current holder keeps working on it.",
     "  read-only is still available (party task list / party history); do not start side-effecting work.",
     "  if you are certain the holder is gone, take over explicitly: party status working --task " +

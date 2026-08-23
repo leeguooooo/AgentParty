@@ -8,7 +8,9 @@ import {
   DEFAULT_MEMBERSHIP,
   FREE_ATTACHMENT_SIZE_LIMIT,
   FREE_CHANNEL_CAP,
+  isExecutorId,
   isMember,
+  EXECUTOR_ID_MAX_LENGTH,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
   MAX_CHANNELS_PER_ACCOUNT,
@@ -18,6 +20,10 @@ import {
   parseRuntimeTopology,
   RESERVED_NAMES,
   ROLE_RESPONSIBILITY_LIMIT,
+  TASK_LEASE_DEFAULT_TTL_MS,
+  TASK_LEASE_FEATURE,
+  TASK_LEASE_MAX_TTL_MS,
+  TASK_LEASE_MIN_TTL_MS,
 } from "@agentparty/shared";
 import type {
   AgentLineage,
@@ -39,6 +45,11 @@ import type {
   ParticipantRemovedFrame,
   RestErrorCode,
   TaskAssigneeKind,
+  TaskLeaseDeniedResponse,
+  TaskLeaseGrantState,
+  TaskLeaseGrantedResponse,
+  TaskLeaseHolderInfo,
+  TaskLeaseReleasedResponse,
   TaskRecord,
   TaskSummary,
   StatusState,
@@ -2891,6 +2902,10 @@ app.get("/api/version", (c) => {
     ...DEPLOYMENT_METADATA,
     min_client_version: resolveMinClientVersion(c.env.MIN_CLIENT_VERSION),
     min_client_enforced: isEnforced(c.env.MIN_CLIENT_ENFORCE),
+    // 能力清单（#936）：协议新增的端点在这里显式声明，诊断/doctor 据此说清「这台服务端的
+    // 任务租约是跨机的还是只到本机」。认领热路径不查它（多一次 RTT、多一个失败面），走的是
+    // 「未命中路由的 404 没有 error.code」这个形状判定——两条信号指向同一个结论。
+    features: [TASK_LEASE_FEATURE],
   });
 });
 
@@ -7571,6 +7586,203 @@ app.patch("/api/channels/:slug/tasks/:id", async (c) => {
   const row = await loadTaskRow(c.env.DB, slug, id);
   await insertSystemStatus(c.env, slug, `task #${id} ${state}`, statusStateForTask(state)).catch(() => false);
   return c.json(taskRowToRecord(row!));
+});
+
+// ---- 任务租约（#936）：把 #885 的本机文件锁抬到服务端 ----
+//
+// 为什么是一个**独立端点**而不是给 PATCH /tasks/:id 加一个 executor_id 字段：
+//   1. 老客户端不送字段也必须照常改任务状态（不能因为不送字段就被拒）。独立端点天然满足——
+//      老客户端只是从不调用它，PATCH 路径一个字节都没变。
+//   2. 认领这一刻要「先判定、再动任何东西」。塞进 PATCH 里就成了「先改再判」，被拒时任务
+//      已经被动过了——正好违反 #885 立下的红线：拒绝不能吞任务。
+//
+// 与 #99 serve_lease 的对齐点：同一身份的多个候选里选唯一持租者；持租者消失后租约回收改选；
+// 每个候选都被明确告知自己此刻持不持租、以及谁在持。差别只在载体：serve_lease 挂在长连接上
+// （断连即隐式释放，presence 扫描兜底），任务认领是一次性 HTTP（写完即退），没有连接可挂，
+// 所以这里靠 TTL 过期自愈，并把上限钉死（见 clampTaskLeaseTtl）。
+
+function taskLeasePrincipal(identity: TokenIdentity): string {
+  // 与 do.ts identityDeliveryPrincipal 同一份判据：token 被撤销后同名复用给另一个 owner 时，
+  // 新 owner 不该继承旧 owner 的租约，也不该被旧 owner 的残留租约压住。
+  return typeof identity.owner === "string" && identity.owner.length > 0
+    ? identity.owner
+    : `token-sha256:${identity.hash}`;
+}
+
+// 租期钳制是**防死锁的关键一环**：executor_id 由客户端自报，租期也一样。不钳死上限，一个
+// 手滑（或恶意）的 ttl_ms 就能把一个 task 锁到天荒地老，而服务端没有任何探活手段能救它。
+// 钳住之后最坏情况有确定上界：别人最多等 TASK_LEASE_MAX_TTL_MS 就能合法接手。
+function clampTaskLeaseTtl(raw: unknown): number | null {
+  if (raw === undefined || raw === null) return TASK_LEASE_DEFAULT_TTL_MS;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || !Number.isInteger(raw) || raw <= 0) return null;
+  return Math.min(TASK_LEASE_MAX_TTL_MS, Math.max(TASK_LEASE_MIN_TTL_MS, raw));
+}
+
+interface TaskLeaseRow {
+  executor_id: string;
+  channel_slug: string;
+  task_id: number;
+  acquired_at: number;
+  renewed_at: number;
+  expires_at: number;
+  taken_over_from: string | null;
+}
+
+function taskLeaseHolder(row: TaskLeaseRow): TaskLeaseHolderInfo {
+  return {
+    executor_id: row.executor_id,
+    channel: row.channel_slug,
+    task_id: row.task_id,
+    acquired_at: row.acquired_at,
+    renewed_at: row.renewed_at,
+    expires_at: row.expires_at,
+    ...(row.taken_over_from === null ? {} : { taken_over_from: row.taken_over_from }),
+  };
+}
+
+app.post("/api/channels/:slug/tasks/:id/lease", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  // 鉴权全部在租约逻辑**之前**跑完，且只看 bearer token。请求体里的 executor_id 到这里还没被
+  // 读过一眼——它永远不可能让一个够不着这个频道的调用方够着它。
+  if (!(await canAccessLoadedChannel(c.env.DB, identity, channel))) {
+    return c.json(errorBody("forbidden", "not allowed in this channel"), 403);
+  }
+  if (identity.role === "readonly") {
+    return c.json(errorBody("forbidden", "readonly token cannot claim tasks"), 403);
+  }
+  if (channel.archived_at !== null) return c.json(errorBody("archived", "channel is archived"), 410);
+  const id = positiveInt(Number(c.req.param("id")));
+  if (id === null) return c.json(errorBody("bad_request", "id must be a positive integer"), 400);
+  if (!(await loadTaskRow(c.env.DB, slug, id))) return c.json(errorBody("not_found", "task not found"), 404);
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) return c.json(errorBody("bad_request", "json body required"), 400);
+  const op = body.op === undefined ? "claim" : body.op;
+  if (op !== "claim" && op !== "release") {
+    return c.json(errorBody("bad_request", "op must be claim|release"), 400);
+  }
+  // 客户端与服务端共用 shared 的 isExecutorId，两边各写一个正则就会静默分叉（#622 同款）。
+  if (!isExecutorId(body.executor_id)) {
+    return c.json(
+      errorBody("bad_request", `executor_id must match [A-Za-z0-9][A-Za-z0-9._:@-]{0,${EXECUTOR_ID_MAX_LENGTH - 1}}`),
+      400,
+    );
+  }
+  const executorId = body.executor_id;
+  const principal = taskLeasePrincipal(identity);
+  const now = Date.now();
+
+  if (op === "release") {
+    // 只删自己的那张。别人已经在过期后合法接手时绝不动它，否则一个迟到的 `status done` 会
+    // 把新执行体的租约抹掉。
+    const released = await c.env.DB.prepare(
+      `DELETE FROM channel_task_leases
+        WHERE channel_slug = ? AND task_id = ? AND identity_name = ? AND identity_principal = ?
+          AND executor_id = ?`,
+    )
+      .bind(slug, id, identity.name, principal, executorId)
+      .run();
+    const releasedBody: TaskLeaseReleasedResponse = {
+      type: "task_lease",
+      state: "released",
+      scope: "server",
+      // false = 当前租约不是本执行体的（已被合法接手 / 早已过期清掉），什么都没删。
+      released: (released.meta?.changes ?? 0) > 0,
+    };
+    return c.json(releasedBody);
+  }
+
+  const ttlMs = clampTaskLeaseTtl(body.ttl_ms);
+  if (ttlMs === null) return c.json(errorBody("bad_request", "ttl_ms must be a positive integer"), 400);
+  const force = body.force === true;
+  const expiresAt = now + ttlMs;
+
+  // 判定与写入必须是**同一条语句**。先 SELECT 再 INSERT 会让两个执行体各自读到「没人持租」
+  // 然后双双写入——那正是本 issue 要修的那个形状，只不过挪到了服务端。upsert 的 WHERE 让
+  // SQLite 在同一次写里裁决：条件不满足则一行都不改，RETURNING 空即「被拒」。
+  const upsert = await c.env.DB.prepare(
+    `INSERT INTO channel_task_leases
+       (channel_slug, task_id, identity_name, identity_principal, executor_id,
+        acquired_at, renewed_at, expires_at, taken_over_from)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, NULL)
+     ON CONFLICT(channel_slug, task_id, identity_name, identity_principal) DO UPDATE SET
+       executor_id = excluded.executor_id,
+       acquired_at = CASE WHEN channel_task_leases.executor_id = excluded.executor_id
+                          THEN channel_task_leases.acquired_at ELSE excluded.acquired_at END,
+       renewed_at = excluded.renewed_at,
+       expires_at = excluded.expires_at,
+       taken_over_from = CASE
+         WHEN channel_task_leases.executor_id = excluded.executor_id THEN NULL
+         WHEN channel_task_leases.expires_at > excluded.renewed_at THEN channel_task_leases.executor_id
+         ELSE NULL END
+     WHERE channel_task_leases.executor_id = excluded.executor_id
+        OR channel_task_leases.expires_at <= excluded.renewed_at
+        OR ?8 = 1
+     RETURNING *`,
+  )
+    .bind(slug, id, identity.name, principal, executorId, now, expiresAt, force ? 1 : 0)
+    .all<TaskLeaseRow>();
+  const granted = (upsert.results ?? [])[0];
+
+  if (granted === undefined) {
+    // 被拒。红线：**这条路径一个字节都不碰 channel_tasks**，任务原样留在频道里，持租的执行体
+    // 照常干。回执必须说出「谁持有、何时过期」——一句 403 会让被拒方既不知道等多久，也不知道
+    // 该不该 force，只能改个措辞重试，那和吞掉任务没有区别。
+    const current = await c.env.DB.prepare(
+      `SELECT * FROM channel_task_leases
+        WHERE channel_slug = ? AND task_id = ? AND identity_name = ? AND identity_principal = ?`,
+    )
+      .bind(slug, id, identity.name, principal)
+      .first<TaskLeaseRow>();
+    if (current === null) {
+      // 只可能是两条并发请求之间对方刚好释放了。让调用方立刻重试一次，而不是把它误报成冲突。
+      return c.json(errorBody("conflict", "task lease changed concurrently; retry"), 409);
+    }
+    const holder = taskLeaseHolder(current);
+    const denied: TaskLeaseDeniedResponse = {
+      error: {
+        code: "task_lease_held",
+        message:
+          `task ${id} on #${slug} is held by another execution runtime of this identity ` +
+          `(holder=${holder.executor_id}, expires_in=${Math.max(0, Math.ceil((holder.expires_at - now) / 1000))}s); ` +
+          "the task was not touched",
+      },
+      type: "task_lease",
+      state: "denied",
+      scope: "server",
+      reason: "held_by_other",
+      holder,
+      task_untouched: true,
+      server_time: now,
+    };
+    return c.json(denied, 409);
+  }
+
+  // 自愈（#908 同款保守收尾）：顺手清掉本频道里早已过期的租约行。刚写的这张没过期，扫不到它。
+  // 服务端**不做任何存活推断**——它看不见对端进程，猜「那个执行体大概死了」只会把一个还活着的
+  // 执行体踢掉。唯一的回收依据是租期真的走完，拿不准一律当持租者还活着（parent-liveness 同款）。
+  await c.env.DB.prepare(
+    "DELETE FROM channel_task_leases WHERE channel_slug = ? AND expires_at <= ?",
+  )
+    .bind(slug, now)
+    .run()
+    .catch(() => undefined);
+
+  const holder = taskLeaseHolder(granted);
+  const state: TaskLeaseGrantState =
+    holder.taken_over_from !== undefined ? "forced" : holder.acquired_at === now ? "acquired" : "renewed";
+  const ok: TaskLeaseGrantedResponse = {
+    type: "task_lease",
+    state,
+    scope: "server",
+    holder,
+    ...(state === "forced" ? { reason: "taken_over" as const } : {}),
+    ttl_ms: ttlMs,
+    server_time: now,
+  };
+  return c.json(ok);
 });
 
 app.get("/api/channels/:slug/captures", async (c) => {

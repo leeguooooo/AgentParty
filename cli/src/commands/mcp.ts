@@ -54,13 +54,12 @@ import { askDecision } from "./decision";
 import { uploadAttachmentPaths } from "./send";
 import { buildContext } from "./status";
 import {
-  acquireTaskLease,
   describeDeniedLease,
   processScopedExecutorId,
-  releaseTaskLease,
   taskLeaseDir,
   taskLeaseKey,
 } from "../task-lease";
+import { acquireTaskLeaseAcrossMachines, releaseTaskLeaseAcrossMachines } from "../task-lease-remote";
 import { EXIT_ALREADY_WATCHING, runWatch } from "./watch";
 
 const HELP = `usage: party mcp [--channel <slug>] [--identity <label>]
@@ -710,22 +709,32 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           : taskLeaseKey(authInfo.server, authInfo.token, resolved, task_id);
         const executorId = processScopedExecutorId();
         if (leaseKeyValue !== null && task_id !== undefined && (state === "working" || state === "waiting")) {
-          const lease = acquireTaskLease({
+          // #936:跨机那半也走同一条判定。MCP 恰好是 harness 那条腿的认领入口——事故里两条腿
+          // 一条是 serve runner、一条是人在 harness 里手敲,只给 CLI 装闸等于只盖住一半。
+          const lease = await acquireTaskLeaseAcrossMachines({
+            server: authInfo.server,
+            token: authInfo.token,
             key: leaseKeyValue,
             channel: resolved,
             taskId: task_id,
             executorId,
             dir: taskLeaseDir(),
           });
-          if (lease.state === "denied" && lease.holder !== undefined) {
+          // 判据只看 state:holder 只是补充信息,读不出 holder 的拒绝仍然是拒绝。
+          if (lease.state === "denied") {
             // 拒绝 ≠ 吞任务:这里 return 之前没有发过任何帧,服务端 task 状态原封不动。
-            return fail(describeDeniedLease(lease.holder, resolved, task_id, Date.now()), {
+            const message = lease.holder === undefined
+              ? `refused: task ${task_id} on #${resolved} is held by another execution runtime of this identity; ` +
+                "this claim was NOT published and the task is untouched"
+              : describeDeniedLease(lease.holder, resolved, task_id, Date.now(), lease.scope);
+            return fail(message, {
               type: "task_lease_held",
               published: false,
               task_untouched: true,
               channel: resolved,
               task_id,
-              holder: lease.holder,
+              scope: lease.scope,
+              ...(lease.holder === undefined ? {} : { holder: lease.holder }),
             });
           }
         }
@@ -745,8 +754,16 @@ export function createMcpServer(defaultChannel?: string): McpServer {
           if (taskState !== null) task = await updateTask(authInfo.server, authInfo.token, resolved, task_id, { state: taskState });
         }
         // 帧已发出后再交还,别在「已放手、状态还没落地」之间留一个谁都不持有的窗口。
-        if (leaseKeyValue !== null && (state === "done" || state === "blocked")) {
-          releaseTaskLease(leaseKeyValue, executorId, taskLeaseDir());
+        if (leaseKeyValue !== null && task_id !== undefined && (state === "done" || state === "blocked")) {
+          await releaseTaskLeaseAcrossMachines({
+            server: authInfo.server,
+            token: authInfo.token,
+            key: leaseKeyValue,
+            channel: resolved,
+            taskId: task_id,
+            executorId,
+            dir: taskLeaseDir(),
+          });
         }
         advanceCursorPastOwnMessage(resolved, seq);
         return ok({ type: "status", channel: resolved, seq, state, ...(task !== undefined ? { task } : {}) });

@@ -1,6 +1,6 @@
 // party who — 从终端看频道里谁在线/可唤醒/最近，便于接着 party send --mention 把人拉进来/唤醒。
 // Claude Code 原生 @ 只认本地文件/技能，塞不进远程动态列表；本命令就是那个「动态在线列表」。
-import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type ReceptionContextBoundary, type ReceptionMode, type ReceptionRunner, type RunnerHealth, type RuntimePeerDiscovery, type SenderKind, type WakeKind, wakeableState } from "@agentparty/shared";
+import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type PresenceEntry, type ReceptionContextBoundary, type ReceptionMode, type ReceptionRunner, type RunnerHealth, type RuntimePeerDiscovery, type SenderKind, type TaskLeaseScope, type WakeKind, wakeableState } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { diagnoseCodexWake, formatCodexWakeDiagnosis, shouldSurfaceCodexWakeDiagnosis } from "../wake-diagnosis";
@@ -194,8 +194,9 @@ export interface Row {
   // 所以「这一刀有没有落下」必须和冲突本身出现在同一处，且可程序化判定。
   task_lease?: {
     enforced: boolean;
-    /** 互斥边界。跨机（含同机不同 AGENTPARTY_HOME）的同一身份挡不住——#931 缺口 1。 */
-    scope: "local_home";
+    /** 这条腿够得到的最强那一层（#936）：`server` = 认领时会取服务端租约，跨机同身份也拦得住；
+     *  `local_home` = 认不出执行体，连本机都不落闸。语义见 TaskLeaseEnforcement.scope。 */
+    scope: TaskLeaseScope;
     executor_id?: string;
     reason?: "no_signal" | "malformed";
     fix?: string;
