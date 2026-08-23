@@ -43,6 +43,7 @@ function item(over: Partial<Item> = {}): Item {
     activity: null,
     listening: null,
     runnerHealth: null,
+    wakeBlock: null,
     ...over,
   };
 }
@@ -50,6 +51,33 @@ function item(over: Partial<Item> = {}): Item {
 // #608：探活分级 + 模型活动 chip（消费 #602/#603 字段），口径对齐 cli/src/commands/who.ts。
 describe("livenessBadge / activityBadge (#608)", () => {
   const NOW = 10_000_000;
+
+  // ── #926：「叫不醒」压过其余所有探活档 ─────────────────────────────────────
+  // fixture 有意让 runnerHealth / listening **同时**处于最刺眼的状态：如果优先级写反了，
+  // 或者 wakeBlock 那一支被整段删掉，这条断言会拿到 runnerFailing 而不是 wakeBlocked。
+  test("wakeBlock 压过 runner 连败与 deaf —— 它是更靠前的断点（#926）", () => {
+    const badge = livenessBadge(
+      item({
+        wakeBlock: {
+          reason: "codex_hook_disabled",
+          detail: "codex 把 Stop hook 标成了 enabled=false",
+          fix: "party wake check",
+          ts: NOW,
+        },
+        runnerHealth: { ok: false, consecutive_failures: 9, last_error: "boom" },
+        listening: "deaf",
+      }),
+    );
+    expect(badge!.key).toBe("PresenceBar.wakeBlocked");
+    expect(badge!.tone).toBe("bad");
+    // 看见它的人多半不是那台机器的主人——title 必须带上能原样转发的那条命令。
+    expect(badge!.title).toContain("party wake check");
+  });
+
+  test("没有 wakeBlock 时不凭空造这一档（#926）", () => {
+    expect(livenessBadge(item({ listening: "suspect" }))!.key).toBe("PresenceBar.listeningSuspect");
+    expect(livenessBadge(item({}))).toBeNull();
+  });
 
   test("runner 连败优先级最高，title 带 last_error", () => {
     const badge = livenessBadge(

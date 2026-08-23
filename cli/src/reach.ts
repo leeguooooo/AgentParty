@@ -1,7 +1,7 @@
 // party send 后即时反馈：一个 @ 目标现在能不能收到。是网页发送前状态条的终端版——不用开网页，
 // 发完就知道会不会白发。与 who 的 classify 不同：这里对「找不到/离线/幽灵」一律回 offline（要提醒
 // 「重连前收不到」），不返回 null；档位判定与网页 mentions.ts 保持一致（online / wakeable / offline）。
-import { autoWakeReachable, type PresenceEntry, type WakeKind } from "@agentparty/shared";
+import { autoWakeReachable, WAKE_BLOCK_TTL_MS, type PresenceEntry, type WakeBlock, type WakeKind } from "@agentparty/shared";
 
 // 档位窗口与 `party who` 的 classify 保持一致，避免 who 说「可唤醒」而 send --reach 说「离线」自相矛盾：
 // online 需当前连着且新鲜(<STALE_MS)；wakeable 按 wakeReachable 统一口径（#47）：serve/watch 需
@@ -20,6 +20,21 @@ export interface Reachability {
   busy?: true;
   // 忙时排在身后、尚未处理的 wake 数（#103）；>0 才带出。
   queueDepth?: number;
+  // #926：目标那台机器自检出的「装了但叫不醒」。它压过 online/wakeable 的一切档位——
+  // 唤醒层跑不起来时，presence 再新鲜也只是「进程活着」，不是「@ 得到回应」。
+  block?: WakeBlock;
+}
+
+/**
+ * #926：目标自报的「叫不醒」是否仍然算数。
+ *
+ * 只做新鲜度兜底（与服务端 TTL 同一常量），不做任何二次判断——判定权在目标那台机器上，
+ * 这里再去猜一次只会产生第二套会漂移的口径。
+ */
+export function activeWakeBlock(e: PresenceEntry | undefined, now: number): WakeBlock | undefined {
+  const block = e?.wake_block;
+  if (block === undefined) return undefined;
+  return now - block.ts > WAKE_BLOCK_TTL_MS ? undefined : block;
 }
 
 // busy/queue_depth 只在目标「可达」（online/wakeable）时有意义——offline 谈不上忙。
@@ -35,6 +50,11 @@ export function reachOf(name: string, presence: PresenceEntry[], now: number): R
   const seen = e.last_seen ?? e.ts ?? 0;
   const age = now - seen;
   const wake = e.wake?.kind;
+  // #926：目标那台机器已经自检出「唤醒层跑不起来」。这一档必须**先于** online/wakeable 判定——
+  // 它的整个存在理由就是那批「presence 看着好好的、其实一条 @ 也接不到」的身份；
+  // 放到后面就等于永远走不到。
+  const block = activeWakeBlock(e, now);
+  if (block !== undefined) return { name, reach: "offline", ...(wake ? { wake } : {}), block };
   // online：与 web mentions 一致以「当前有活 WS 连接」为准（#97 的 live，DO 从 getConnections 权威判定）；
   // 无 live 信号（旧 worker 响应）时回退到旧的新鲜度启发式，不回归。
   if (e.state !== "offline" && (e.live === true || age < STALE_MS))
@@ -53,6 +73,9 @@ function busyNote(r: Reachability): string {
 }
 
 export function formatReach(r: Reachability): string {
+  // #926：叫不醒是独立一档，绝不能渲染成含糊的 offline——「重连就好了」是错的结论，
+  // 那台机器上的 hook 就算重连一万次也不会被 codex 执行。
+  if (r.block !== undefined) return `@${r.name} ⛔ wake blocked — ${r.block.detail}`;
   if (r.reach === "online") return `@${r.name} ${DOT.online} online${busyNote(r)}`;
   if (r.reach === "wakeable") return `@${r.name} ${DOT.wakeable} wakeable${r.wake ? `(${r.wake})` : ""}${busyNote(r)}`;
   return `@${r.name} ${DOT.offline} offline — reconnect to reach`;
@@ -75,8 +98,12 @@ export interface Unreachable {
   // 声明的 wake 类型（用于文案区分「压根没 wake 通道」与「适配器陈旧」）；缺省即无。
   wake?: WakeKind;
   // no_wake：wake=none/缺失，压根没有唤醒路径；stale_adapter：声明了 serve/watch 但心跳陈旧（supervisor 大概率已死）；
-  // paused：owner 主动暂停接待（#180），被 @ 也不唤醒——有唤醒通道也无用。
-  reason: "no_wake" | "stale_adapter" | "paused";
+  // paused：owner 主动暂停接待（#180），被 @ 也不唤醒——有唤醒通道也无用；
+  // wake_blocked：目标那台机器自检出唤醒层跑不起来（#926，如 codex hook 信任闸没过）——
+  // 这一档长得最像正常，所以必须单列并且带上对方要跑的那条命令。
+  reason: "no_wake" | "stale_adapter" | "paused" | "wake_blocked";
+  /** reason=wake_blocked 时目标的自检结论（含人话与一条可执行命令）。 */
+  block?: WakeBlock;
 }
 
 // 返回该 @ 目标的不可达详情，或 null（在线 / 可自动唤醒 / 刚断线未过 STALE / 不在 presence / 人类）。
@@ -88,6 +115,21 @@ export function unreachableOf(name: string, presence: PresenceEntry[], now: numb
   if (e.kind === "human") return null;
   const seen = e.last_seen ?? e.ts ?? 0;
   const age = now - seen;
+  // #926：自检出的「叫不醒」压过下面每一道闸，**尤其压过 online**。
+  // 本 issue 要消灭的就是「装完了、看起来正常、其实叫不醒、而且没人被告知」——那批身份
+  // presence 往往是新鲜的（MCP 在跑、消息发得出去），先判 online 就会当场 return null，
+  // 于是发送方永远看不到唯一有用的那句话。顺序即语义，别调。
+  const block = activeWakeBlock(e, now);
+  if (block !== undefined) {
+    const wake = e.wake?.kind;
+    return {
+      name,
+      ageMs: seen > 0 ? age : null,
+      ...(wake !== undefined ? { wake } : {}),
+      reason: "wake_blocked",
+      block,
+    };
+  }
   // online：与 reachOf/who 一致——当前有活 WS 连接（live）或新鲜即视为在线，@ 直达，不告警。
   if (e.state !== "offline" && (e.live === true || age < STALE_MS)) return null;
   // #664：paused（#180）优先于任何 wake 通道判定——owner 主动暂停接待，被 @ 也不唤醒，
@@ -121,6 +163,15 @@ function ageText(ageMs: number | null): string {
 // stderr 上打的一行非阻断 warning。示意：
 //   warn: kyc-claude has no live wake channel (last_seen 88h ago) — mention delivered to history only; run 'party wake test @kyc-claude' to verify
 export function formatUnreachable(u: Unreachable): string {
+  // #926：叫不醒这一档自带对方的自检结论与一条能原样转给他跑的命令。措辞刻意不写「你去查」——
+  // 发送方多半不是那台机器的主人，能替对方做的只有「把这句话和这条命令递过去」。
+  if (u.reason === "wake_blocked" && u.block !== undefined) {
+    return (
+      `warn: @${u.name} 装了 AgentParty 但【叫不醒】—— ${u.block.detail}` +
+      ` 这条 @ 只会挂成它的接待欠账，等它那边修好才会被取走。` +
+      ` 请把这条命令发给它那台机器：${u.block.fix}`
+    );
+  }
   const what =
     u.reason === "paused"
       ? `${u.name} is paused, 被 @ 也不唤醒`

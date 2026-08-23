@@ -57,6 +57,17 @@ function codexHomeDir(env: NodeJS.ProcessEnv, userHome: string): string {
   return codexHome !== undefined && codexHome !== "" ? codexHome : join(userHome, ".codex");
 }
 
+/**
+ * 我们那条 Stop hook 所在的 hooks.json 路径（跟着 CODEX_HOME 走，与 `party hook install --codex`
+ * 的 settingsPath 同一口径）。给自检清单显示「在哪」用——说了「装了」就得说得出装在哪。
+ */
+export function codexHooksJsonPath(
+  env: NodeJS.ProcessEnv = process.env,
+  userHome: string = homedir(),
+): string {
+  return join(codexHomeDir(env, userHome), "hooks.json");
+}
+
 /** 我们那条 stop hook 在 hooks.json 里的位置，转成信任表的键。找不到返回 null。 */
 export function codexStopHookTrustKey(hooksPath: string, hooksJson: unknown): string | null {
   if (hooksJson === null || typeof hooksJson !== "object" || Array.isArray(hooksJson)) return null;

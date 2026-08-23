@@ -9299,6 +9299,43 @@ app.post("/api/channels/:slug/presence/:name/activity", async (c) => {
   return mutableFetchResponse(res);
 });
 
+// 本机唤醒自检直报（issue #926）：agent 在 MCP 启动时读本地盘断定「这台机器上我叫不醒」
+// （codex 的 hook 信任闸没过 ⇒ Stop hook 一次都不会跑），把结论挂到自己的 presence 上，
+// 好让**下一个 @ 它的人**当场看见——而不是指望需要修的那个人自己去发现。
+// 授权与 activity 直报同口径：只准 agent 自报（name 必须等于 token 身份），presence-only、不落 history。
+// body.wake_block === null ＝ 自检通过，清除既有判定（修好后新开一次会话就会走到这里）。
+app.post("/api/channels/:slug/presence/:name/wake-block", async (c) => {
+  const slug = c.req.param("slug");
+  const channel = await loadChannel(c.env.DB, slug);
+  if (!channel) return c.json(errorBody("not_found", "channel not found"), 404);
+  const identity = c.get("identity");
+  const name = c.req.param("name");
+  if (!name || name.length > 256) {
+    return c.json(errorBody("bad_request", "valid name required"), 400);
+  }
+  if (identity.kind !== "agent" || identity.name !== name) {
+    return c.json(errorBody("forbidden", "an agent may only report its own wake block"), 403);
+  }
+  // 与 activity 端点同款的防御纵深：scope 到别的频道的 token 不得在本频道落任何 presence 状态。
+  if (identity.channel_scope != null && identity.channel_scope !== slug) {
+    return c.json(errorBody("forbidden", "token is scoped to another channel"), 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as { wake_block?: unknown } | null;
+  if (body === null || body.wake_block === undefined) {
+    return c.json(errorBody("bad_request", "wake_block required (null to clear)"), 400);
+  }
+  const res = await fetchMutableChannelDO(
+    c.env,
+    slug,
+    new Request(`https://do/internal/presence/${encodeURIComponent(name)}/wake-block`, {
+      method: "POST",
+      body: JSON.stringify({ wake_block: body.wake_block }),
+      headers: { "content-type": "application/json", "x-partykit-room": slug },
+    }),
+  );
+  return mutableFetchResponse(res);
+});
+
 app.post("/api/channels/:slug/presence/:name/pause", async (c) => {
   const slug = c.req.param("slug");
   const channel = await loadChannel(c.env.DB, slug);

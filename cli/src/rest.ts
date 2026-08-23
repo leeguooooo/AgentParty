@@ -38,6 +38,7 @@ import {
   type TaskRecord,
   type TaskState,
   type TokenRole,
+  type WakeBlock,
   type WakeDelivery,
   type WebhookFilter,
 } from "@agentparty/shared";
@@ -1557,6 +1558,26 @@ export async function kickParticipant(
     method: "POST",
     headers: bearerJson(token),
     body: JSON.stringify(body),
+  });
+}
+
+/**
+ * 本机唤醒自检直报（issue #926）。`block === null` ＝ 自检通过，清除既有判定。
+ *
+ * 调用方一律 fire-and-forget：这条上报**绝不允许影响它挂靠的那个进程**（MCP 的 stdio）。
+ * 失败就是没这条提示，不是故障。
+ */
+export async function reportWakeBlock(
+  server: string,
+  token: string,
+  slug: string,
+  name: string,
+  block: WakeBlock | null,
+): Promise<void> {
+  await req(server, `/api/channels/${encodeURIComponent(slug)}/presence/${encodeURIComponent(name)}/wake-block`, {
+    method: "POST",
+    headers: bearerJson(token),
+    body: JSON.stringify({ wake_block: block }),
   });
 }
 

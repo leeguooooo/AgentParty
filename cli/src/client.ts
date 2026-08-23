@@ -214,6 +214,12 @@ function isPresenceEntry(value: unknown): boolean {
     (value.activity === undefined || parseAgentActivity(value.activity) !== undefined) &&
     (value.runner_health === undefined || parseRunnerHealth(value.runner_health) !== undefined) &&
     (value.listening === undefined || value.listening === "suspect" || value.listening === "deaf") &&
+    // #926 + #622 的教训：这里**刻意只做形状检查，不做 reason 白名单**。
+    // isPresenceEntry 的失败会把**整条 welcome/presence 帧**丢掉（见 parseServerFrame），
+    // 所以任何比服务端更严的字段校验都是一颗定时炸弹：服务端哪天新增一个 WakeBlockReason，
+    // 老 CLI 就会静默丢掉整张 presence——把「叫不醒」这条信号连同其余一切一起抹掉，
+    // 恰恰是本 PR 要消灭的那种静默失败。真正的取值校验留给使用点（reach/who 各自 parse）。
+    (value.wake_block === undefined || isRecord(value.wake_block)) &&
     (value.connection_count === undefined || isPositiveInteger(value.connection_count));
 }
 

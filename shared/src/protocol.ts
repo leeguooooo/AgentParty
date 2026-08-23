@@ -953,6 +953,77 @@ export interface PresenceEntry {
   listening?: ListeningVerdict;
   /** Agent 自报并由频道持久化的模型会话句柄；供重启后精确 resume（issue #522）。 */
   agent_session?: AgentSessionInfo;
+  /**
+   * 本机自检出的「装了、看起来正常、其实叫不醒」（issue #926）。
+   *
+   * 与 listening/runner_health 的区别是**谁在什么时候知道**：那两个要等 @ 投出去、租约过期或
+   * runner 连败才派生得出来——也就是说第一条 @ 必然白发。wake_block 由 agent 自己那台机器在
+   * **MCP 启动时**读本地盘就能断定（codex 的 hook 信任闸没过 ⇒ Stop hook 一次都不会跑），
+   * 早于任何一条 @。它不参与在线/租约判定，只回答「@ 它有没有用」。
+   *
+   * 仅在自检判定「叫不醒」时下发；agent 自报 null 即清除（修好后新开会话就会清）。旧客户端忽略。
+   */
+  wake_block?: WakeBlock;
+}
+
+/**
+ * 「叫不醒」的原因码（issue #926）。每一条都必须对应一个**本机可自检、且用户能自己修**的断点——
+ * 报一个用户无从下手的原因，和不报一样坏。
+ *
+ * codex 的 hook 信任闸（0.145+）：每条 hook 要在 `~/.codex/config.toml` 的 `[hooks.state."…"]`
+ * 里被显式信任才会执行，未获批准的一律**静默跳过**。三档一一对应 CLI 的 CodexStopHookStatus。
+ */
+export const WAKE_BLOCK_REASONS = [
+  "codex_hook_missing", // hooks.json 里根本没有我们的 Stop hook
+  "codex_hook_needs_review", // 装了，但信任表里没有它 —— 等一次 TUI 审批
+  "codex_hook_disabled", // 装了，且被显式标成 enabled=false —— codex 会静默跳过
+] as const;
+export type WakeBlockReason = (typeof WAKE_BLOCK_REASONS)[number];
+
+export interface WakeBlock {
+  reason: WakeBlockReason;
+  /**
+   * 一条**给发送方看**的人话：为什么这个身份叫不醒、对方要做什么。发送方大概率不是那台机器的
+   * 主人，所以文案里必须包含「让 TA 跑什么」，而不是「你去哪里查」。
+   */
+  detail: string;
+  /** 一条可以原样转给对方执行的命令。 */
+  fix: string;
+  /** 自检发生的时刻（epoch ms）；消费方据 now-ts 判新鲜度。 */
+  ts: number;
+}
+
+/**
+ * 陈旧判定（issue #926）：超过这个岁数的自检结论不再展示。
+ *
+ * 清除的**正路**是 agent 自己上报 null（修好后新开一次会话即触发），TTL 只是兜底——
+ * 一台机器彻底不再启动 MCP 时，别让一条永不更新的「叫不醒」在频道里挂到天荒地老。
+ * 取 7 天：比任何合理的「今天修一下」都长，短于 14 天的幽灵线。
+ */
+export const WAKE_BLOCK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * 校验一条 wake_block 自报。脏值返回 undefined（调用方各自决定丢字段还是拒收）。
+ *
+ * detail/fix 会被直接拼进终端输出与网页，与 activity.tool / runner_health.last_error 同口径
+ * 剥 ESC/C0/C1 并截断——它们来自远端 agent 自报，不给转义序列注入留门。
+ */
+export function parseWakeBlock(input: unknown): WakeBlock | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
+  const value = input as Record<string, unknown>;
+  if (!(WAKE_BLOCK_REASONS as readonly string[]).includes(value.reason as string)) return undefined;
+  if (typeof value.ts !== "number" || !Number.isSafeInteger(value.ts) || value.ts < 0) return undefined;
+  const clean = (raw: unknown, max: number): string =>
+    typeof raw === "string"
+      ? // eslint-disable-next-line no-control-regex
+        raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim().slice(0, max)
+      : "";
+  const detail = clean(value.detail, 240);
+  const fix = clean(value.fix, 240);
+  // detail/fix 合起来才是这条自报的全部信息量：detail 说「为什么叫不醒」，fix 说「让 TA 跑什么」。
+  // 缺任何一半，消费方就只能吐一句无从下手的空警报——那和不报一样坏，直接判脏值。
+  if (detail === "" || fix === "") return undefined;
+  return { reason: value.reason as WakeBlockReason, detail, fix, ts: value.ts };
 }
 
 // 模型 session 活动阶段（issue #602）。busy/current_task 只说「在忙哪条」，activity 说「具体在干什么」：
@@ -2304,6 +2375,11 @@ export interface PresenceFrame {
    * presence delta 帧照常捎带，前端据此渲染探活徽章（#608）。旧客户端忽略。
    */
   listening?: ListeningVerdict;
+  /**
+   * 本机自检出的「装了但叫不醒」（issue #926）。presence delta 帧必须照常捎带——
+   * 漏了它，任何一个增量帧都会把频道里那枚「叫不醒」徽章抹掉，于是又回到「看起来正常」。
+   */
+  wake_block?: WakeBlock;
 }
 
 /**
