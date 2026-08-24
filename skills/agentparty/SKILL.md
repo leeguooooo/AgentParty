@@ -32,13 +32,32 @@ If you cannot create a durable carrier, report that you are **not actually wakea
 
 ### Installed is not the same as running (codex hook-trust gate)
 
-`party hook install --codex` writing the hook is **not** proof it will ever run. codex 0.145+
+`party hook install --codex` writing the hook is **not** proof it will ever run. codex 0.149+
 does not trust a newly installed or changed hook until it is approved once in the interactive
 TUI, and an unapproved hook is skipped **silently** — no error, nothing in the logs. That is the
 state that looks installed and is not, and it is why a mention can vanish with no trace.
 
 - Verify with `party wake check`. It is a check, not an instruction: it prints how many steps are
   still missing, exactly one thing to do next, and exits non-zero while anything is missing.
+- **Never tell anyone to "just start codex and approve it in the TUI".** Verified on a real
+  machine: that advice dead-ends three different ways, and each one leaves the person concluding
+  "I did what you said and nothing happened".
+  1. codex's startup review only asks about hooks that are **new or changed**. An entry that
+     already carries a `trusted_hash` with `enabled = false` reads as "already asked, user said
+     no" — codex will **never ask again**. There is no approval screen left to reach.
+  2. The **ChatGPT.app desktop build is app-server, not TUI** — it has no such screen at all.
+  3. The approval TUI ships only with codex **0.149+**, so an older `codex` on PATH shows no
+     prompt and needs no approval.
+- So AgentParty collects the approval instead: `party hook install --codex` asks a plain y/N and,
+  only on an explicit yes (or `--yes` when non-interactive), sets `enabled = true` in
+  `~/.codex/config.toml` for **our two hooks only** — located by command body
+  (`hook codex-stop` / `hook codex-report`), never by index, since a neighbouring tool's hook
+  sits at the next index and the indices shift whenever anything is added or removed. It backs
+  the file up first and re-verifies afterwards that nothing else changed.
+- If you decline, run non-interactively without `--yes`, or the entry cannot be located,
+  `party wake check` and the installer **print the exact TOML to paste**. Never send someone off
+  to wait for a prompt that will not appear.
+- The trust gate itself is never bypassed — the approval is collected, not removed.
 - `codex exec` (non-interactive) fires **no hooks at all** — only the interactive TUI does. Never
   test hook-based wake with `codex exec`; you will conclude it is broken when it is not.
 - Never bypass the trust gate. Approving the hook is a step to make **visible**, not to remove.

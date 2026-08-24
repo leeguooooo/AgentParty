@@ -1100,8 +1100,9 @@ export interface PresenceEntry {
  * 「叫不醒」的原因码（issue #926）。每一条都必须对应一个**本机可自检、且用户能自己修**的断点——
  * 报一个用户无从下手的原因，和不报一样坏。
  *
- * codex 的 hook 信任闸（0.145+）：每条 hook 要在 `~/.codex/config.toml` 的 `[hooks.state."…"]`
- * 里被显式信任才会执行，未获批准的一律**静默跳过**。三档一一对应 CLI 的 CodexStopHookStatus。
+ * codex 的 hook 信任闸（**0.149+**，见 cli/src/codex-trust-gate.ts 里的实测依据）：每条 hook 要在
+ * `~/.codex/config.toml` 的 `[hooks.state."…"]` 里被显式信任才会执行，未获批准的一律**静默跳过**。
+ * 三档一一对应 CLI 的 CodexStopHookStatus。
  */
 export const WAKE_BLOCK_REASONS = [
   "codex_hook_missing", // hooks.json 里根本没有我们的 Stop hook

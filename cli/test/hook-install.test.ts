@@ -25,6 +25,13 @@ const NOW = 1_700_000_000_000;
 let home: string;
 let mock: RestMock | null = null;
 
+/**
+ * 这几条会真的 spawn 外部 codex 二进制来读版本（#942）——本机 PATH 上那个 cmux shim 是个
+ * 包装脚本，一次 `--version` 就要 2.6 秒，再叠上 bun 冷启动，5 秒的默认预算不够。
+ * 结果的正确性与这个数无关，它只是给「确实很慢的外部进程」留出余量。
+ */
+const SLOW_SUBPROCESS_TIMEOUT_MS = 30_000;
+
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "ap-hook615-"));
 });
@@ -391,6 +398,148 @@ describe("party hook install --codex (#851 P2)", () => {
     expect(JSON.parse(readFileSync(hooksPath, "utf8"))).toEqual(REAL_WORLD_CODEX_HOOKS);
     expect((await runCodex(fakeHome, "status")).code).toBe(1);
     rmSync(fakeHome, { recursive: true, force: true });
+    // 收尾清单现在会去读一次外部 codex 的版本（#942），这条也要多给点预算。
+  }, SLOW_SUBPROCESS_TIMEOUT_MS);
+
+  // #942：codex 的信任键是**位置式**的（`<hooks.json>:<event>:<组下标>:<条下标>`）。
+  // 「先删后追加」会把我们的条目换到另一个下标 —— 它顶着邻居的信任行跑，邻居顶着我们的。
+  // 真机实测过一次：重装之后 Stop hook 从 2:0 挪到 3:0，直接继承了 vibe-island 那行的信任状态。
+  test("重装不许挪动我们条目的下标（信任键是位置式的）", async () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "ap-codexpos-"));
+    mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+    const hooksPath = join(fakeHome, ".codex", "hooks.json");
+    writeFileSync(hooksPath, JSON.stringify(REAL_WORLD_CODEX_HOOKS, null, 2));
+    expect((await runCodex(fakeHome, "install")).code).toBe(0);
+
+    const read = () =>
+      (JSON.parse(readFileSync(hooksPath, "utf8")) as {
+        hooks: Record<string, { hooks?: { command?: string }[] }[]>;
+      }).hooks.SessionStart.map((g) => g.hooks?.[0]?.command ?? "");
+    const first = read();
+    const ourIndex = first.findIndex((c) => c.includes("hook codex-report"));
+    expect(ourIndex).toBeGreaterThanOrEqual(0);
+
+    // 命令本体变了（换了一个 party 路径）也必须原地替换，不许挪位——恰恰是这种情况才会重装。
+    const moved = JSON.parse(readFileSync(hooksPath, "utf8")) as {
+      hooks: Record<string, { hooks?: { command?: string }[] }[]>;
+    };
+    moved.hooks.SessionStart[ourIndex]!.hooks![0]!.command = "/some/other/path/party hook codex-report";
+    writeFileSync(hooksPath, JSON.stringify(moved, null, 2));
+
+    expect((await runCodex(fakeHome, "install")).code).toBe(0);
+    const second = read();
+    expect(second.findIndex((c) => c.includes("hook codex-report"))).toBe(ourIndex);
+    // 邻居们的相对顺序一个都没变。
+    expect(second.filter((c) => !c.includes("hook codex-report")))
+      .toEqual(first.filter((c) => !c.includes("hook codex-report")));
+    rmSync(fakeHome, { recursive: true, force: true });
+  }, SLOW_SUBPROCESS_TIMEOUT_MS);
+
+  // #942 第二轮：codex 那边**没有批准入口**了（启动 review 只对「新的或改动过的」hook 发问，
+  // 带 trusted_hash 且 enabled=false 的它再也不会问；桌面版连界面都没有）。所以批准由我们收集。
+  // 这一组用真进程 + 临时 CODEX_HOME 跑完整条路，fixture 照抄 owner 那台的四方共存形状。
+  describe("信任开关：只翻我们自己那两条，且必须有确认（#942）", () => {
+    /** 装完之后按**现状**算键——install 会把我们那条重新追加，下标会变，写死下标必然出事。 */
+    function seedTrustTable(fakeHome: string, enabled: boolean): string {
+      const hooksPath = join(fakeHome, ".codex", "hooks.json");
+      const parsed = JSON.parse(readFileSync(hooksPath, "utf8")) as {
+        hooks: Record<string, { hooks?: { command?: string }[] }[]>;
+      };
+      const lines = ["# 用户自己的配置", 'model = "x"   # 行内注释必须原样保留', "", "[hooks.state]"];
+      const keys: string[] = [];
+      for (const [event, groups] of Object.entries(parsed.hooks)) {
+        const snake = event.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+        groups.forEach((group, g) => {
+          (group.hooks ?? []).forEach((_entry, h) => {
+            const key = `${hooksPath}:${snake}:${String(g)}:${String(h)}`;
+            keys.push(key);
+            lines.push("", `[hooks.state."${key}"]`, `trusted_hash = "sha256:${String(keys.length)}"`,
+              `enabled = ${String(enabled)}`);
+          });
+        });
+      }
+      lines.push("");
+      const configPath = join(fakeHome, ".codex", "config.toml");
+      writeFileSync(configPath, lines.join("\n"));
+      return configPath;
+    }
+
+    function trustRows(configPath: string): Record<string, { enabled?: boolean }> {
+      const parsed = Bun.TOML.parse(readFileSync(configPath, "utf8")) as {
+        hooks?: { state?: Record<string, { enabled?: boolean }> };
+      };
+      return parsed.hooks?.state ?? {};
+    }
+
+    async function prepared(): Promise<{ fakeHome: string; configPath: string }> {
+      const fakeHome = mkdtempSync(join(tmpdir(), "ap-codextrust-"));
+      mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+      // 先放上三方 hooks，再装我们的——这样下标分布与真机一致（别人在前，我们被追加在后）。
+      writeFileSync(join(fakeHome, ".codex", "hooks.json"), JSON.stringify(REAL_WORLD_CODEX_HOOKS, null, 2));
+      expect((await runCodex(fakeHome, "install")).code).toBe(0);
+      const configPath = seedTrustTable(fakeHome, false);
+      return { fakeHome, configPath };
+    }
+
+    test("--yes ⇒ 只把我们那两条翻成 true，别人的一条不动，文件其余部分逐字节保留", async () => {
+      const { fakeHome, configPath } = await prepared();
+      const before = readFileSync(configPath, "utf8");
+      const r = await runCodex(fakeHome, "install", "--yes");
+      expect(r.code).toBe(0);
+
+      const rows = trustRows(configPath);
+      const ours = Object.keys(rows).filter((k) => k.includes(":stop:") || k.includes(":session_start:"));
+      expect(ours.length).toBeGreaterThan(0);
+      const enabled = Object.entries(rows).filter(([, v]) => v.enabled === true).map(([k]) => k);
+      // 恰好两条：codex-stop 与 codex-report。别人的三方 hook 一条都不许被翻。
+      expect(enabled.length).toBe(2);
+      const hooksJson = readFileSync(join(fakeHome, ".codex", "hooks.json"), "utf8");
+      expect(hooksJson).toContain("hook codex-stop");
+      for (const key of enabled) {
+        const idx = key.split(":").slice(-2).join(":");
+        expect(["stop", "session_start"].some((e) => key.includes(`:${e}:`))).toBe(true);
+        expect(idx).toMatch(/^\d+:\d+$/);
+      }
+      // 改动只有那两行；注释与顺序原样。
+      const after = readFileSync(configPath, "utf8");
+      const diff = after.split("\n").map((l, i) => (l === before.split("\n")[i] ? null : i)).filter((i) => i !== null);
+      expect(diff.length).toBe(2);
+      expect(after).toContain('model = "x"   # 行内注释必须原样保留');
+      // 可回滚：原文件留在旁边。
+      expect(readFileSync(`${configPath}.agentparty.bak`, "utf8")).toBe(before);
+      rmSync(fakeHome, { recursive: true, force: true });
+    }, SLOW_SUBPROCESS_TIMEOUT_MS);
+
+    // 单闸对照：**只去掉 --yes** 这一个变量。非 TTY 下沉默绝不等于同意。
+    test("不给 --yes 且非交互 ⇒ 一个字都不写，并把要粘的 TOML 原样打出来", async () => {
+      const { fakeHome, configPath } = await prepared();
+      const before = readFileSync(configPath, "utf8");
+      const r = await runCodex(fakeHome, "install");
+      expect(r.code).toBe(0);
+      expect(readFileSync(configPath, "utf8")).toBe(before);
+      expect(Object.values(trustRows(configPath)).every((v) => v.enabled === false)).toBe(true);
+      // 底线交付：没写就必须给得出「粘这个」。
+      expect(r.stdout).toContain("enabled = true");
+      expect(r.stdout).toContain("trusted_hash");
+      expect(r.stdout).toContain("--yes");
+      // 绝不把绕过闸的旗标摆到用户面前。
+      expect(r.stdout).not.toContain("dangerously-bypass");
+      rmSync(fakeHome, { recursive: true, force: true });
+    }, SLOW_SUBPROCESS_TIMEOUT_MS);
+
+    test("已经全是 true ⇒ 什么都不问、什么都不写", async () => {
+      const fakeHome = mkdtempSync(join(tmpdir(), "ap-codextrust-ok-"));
+      mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+      writeFileSync(join(fakeHome, ".codex", "hooks.json"), JSON.stringify(REAL_WORLD_CODEX_HOOKS, null, 2));
+      expect((await runCodex(fakeHome, "install")).code).toBe(0);
+      const configPath = seedTrustTable(fakeHome, true);
+      const before = readFileSync(configPath, "utf8");
+      const r = await runCodex(fakeHome, "install", "--yes");
+      expect(r.code).toBe(0);
+      expect(readFileSync(configPath, "utf8")).toBe(before);
+      expect(r.stdout).not.toContain("已写入");
+      rmSync(fakeHome, { recursive: true, force: true });
+    }, SLOW_SUBPROCESS_TIMEOUT_MS);
   });
 
   // #904：装好了 codex hook，`party hook status` 却报 not installed——它只看 claude 那一档，
@@ -428,7 +577,8 @@ describe("party hook install --codex (#851 P2)", () => {
     // claude 那档没装，仍然如实说没装——两档要能区分。
     expect(after.stdout.split("\n").find((line) => line.includes("project scope:"))).toContain("not installed");
     rmSync(fakeHome, { recursive: true, force: true });
-  });
+    // install --codex 的收尾清单现在会去读一次外部 codex 的版本（#942），预算要放宽。
+  }, SLOW_SUBPROCESS_TIMEOUT_MS);
 
   test("hooks.json 解析失败即中止不写——绝不覆盖看不懂的用户内容（#864）", async () => {
     const fakeHome = mkdtempSync(join(tmpdir(), "ap-codexhome-bad-"));

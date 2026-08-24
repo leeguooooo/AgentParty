@@ -20,6 +20,7 @@ import {
   type CodexHookIdentitySource,
 } from "./codex-session-identity";
 import { findJoinBindings, joinBindingsPath, readJoinBindings, type JoinBinding } from "./join-binding";
+import { buildCodexTrustRemedy, type CodexTrustRemedy } from "./codex-hook-trust";
 
 export interface CodexWakeDiagnosis {
   channel: string | null;
@@ -130,6 +131,46 @@ export function codexStopHookStatus(
   return "ok";
 }
 
+/** `~/.codex/config.toml`（跟着 CODEX_HOME 走，与 hooks.json 同一口径）。 */
+export function codexConfigTomlPath(
+  env: NodeJS.ProcessEnv = process.env,
+  userHome: string = homedir(),
+): string {
+  return join(codexHomeDir(env, userHome), "config.toml");
+}
+
+/**
+ * 读出「我们那两条现在什么状况、能不能就地修」（#942 第二轮）。
+ *
+ * 刻意**不复用** `codexStopHookStatus`：那个函数回答的是「会不会跑」，且带着 #925 的老版本
+ * 兼容语义（没有信任闸时判 ok）；这里回答的是「怎么修」，要的是每一条的 key 与 trusted_hash。
+ * 两者判据不同，硬合成一个只会让某一边悄悄变味。
+ *
+ * 只读、不写、不发网。任何一步读不出来都退化成「没有可就地修的条目」，绝不抛。
+ */
+export function readCodexTrustRemedy(
+  env: NodeJS.ProcessEnv = process.env,
+  userHome: string = homedir(),
+): CodexTrustRemedy {
+  const hooksPath = codexHooksJsonPath(env, userHome);
+  const configPath = codexConfigTomlPath(env, userHome);
+  let hooksJson: unknown = null;
+  let detail = "";
+  try {
+    hooksJson = JSON.parse(readFileSync(hooksPath, "utf8")) as unknown;
+  } catch {
+    detail = `读不出 ${hooksPath}`;
+  }
+  let config: unknown = null;
+  try {
+    config = Bun.TOML.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    // 读不出 config.toml：老版本 codex 根本没有信任闸（#925 同款判据），不喊狼来了。
+    detail = detail === "" ? `读不出 ${configPath}` : detail;
+  }
+  return buildCodexTrustRemedy({ hooksPath, configPath, hooksJson, config, detail });
+}
+
 /** 兼容旧判定：只回答「装没装」。 */
 export function codexStopHookInstalled(
   env: NodeJS.ProcessEnv = process.env,
@@ -223,10 +264,14 @@ export function formatCodexWakeDiagnosis(d: CodexWakeDiagnosis): string[] {
     out.push("  怎么修: party hook install --codex   然后【新开一个 codex 会话】才生效");
   } else if (d.hook === "disabled") {
     out.push("  另外: hook 装了，但 codex 的信任闸把它标成了 enabled=false —— codex 会【静默跳过】它");
-    out.push("  怎么修: 新开一个 codex 会话，在启动时的 hooks review 里把 AgentParty 的 stop hook 重新启用");
+    // #942：这里**不再**复述「新开一个 codex 会话就会弹 hooks review」。那句话对 ChatGPT.app
+    // 桌面版是假的（它不走 TUI 启动路径），对 0.149 以前的 codex 也是假的（那时还没有这道闸）。
+    // 要给绝对路径就得先探测本机，而探测要 spawn 进程——doctor/who 这类热路径不该背这个成本。
+    // 所以统一指向 `party wake check`：那里探测过，说得出该跑哪个二进制。
+    out.push("  怎么修: party wake check   （它会说出该在【哪个 codex 二进制】里批准——直接跑 `codex` 未必是对的）");
   } else if (d.hook === "needs-review") {
     out.push("  另外: hook 装了但还没被 codex 信任 —— 未获批准的 hook 会被【静默跳过】");
-    out.push("  怎么修: 新开一个 codex 会话，在启动时的 hooks review 里批准 AgentParty 的 stop hook");
+    out.push("  怎么修: party wake check   （它会说出该在【哪个 codex 二进制】里批准——直接跑 `codex` 未必是对的）");
   }
   if (d.bindings.length === 0 && d.identity === null) {
     out.push("  提示: 本机还没有为 codex 记下任何加入绑定——重跑一遍该身份的接入包即可（加入即绑定，#924）");

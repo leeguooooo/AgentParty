@@ -83,8 +83,13 @@ import {
 import { defaultInstanceLockDir, isSameLiveProcess } from "../instance-lock";
 import { nativeSessionName } from "../claude-inbox-inject";
 import { isHelpArg } from "../args";
-import { codexStopHookStatus, diagnoseCodexWake, type CodexStopHookStatus } from "../wake-diagnosis";
+import { codexStopHookStatus, diagnoseCodexWake, readCodexTrustRemedy, type CodexStopHookStatus } from "../wake-diagnosis";
 import { buildWakeChecklist, formatWakeChecklist } from "../wake-checklist";
+import {
+  enableCodexHookTrust,
+  type CodexHookTarget,
+  type CodexTrustRemedy,
+} from "../codex-hook-trust";
 import { isPartyBinaryPath } from "../upgrade";
 import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "./claude-launch";
 import type { ServeSupervisorOptions } from "./serve";
@@ -104,6 +109,15 @@ into channel presence, so \`party who\` and the web can see it.
                        --codex: write the codex SessionStart hook into
                         ~/.codex/hooks.json instead (#851). Existing content is
                         preserved; a parse failure aborts without writing.
+                        Afterwards it offers to flip codex's trust switch for
+                        OUR two hooks only (\`enabled = true\` in
+                        ~/.codex/config.toml) and asks y/N first, because codex
+                        itself no longer asks once an entry carries a
+                        trusted_hash (#942). --yes approves non-interactively;
+                        without it a non-TTY run never writes and prints the
+                        exact TOML to paste instead. The trust gate itself is
+                        never bypassed - we collect your approval, we do not
+                        remove the control.
   uninstall [--user|--codex]   remove exactly the entries install added
   status [--user|--codex]      show whether the hooks are installed. With no scope flag it
                        reports BOTH the claude scope and the codex scope, each with the file
@@ -459,8 +473,15 @@ export function mergeHookSettings(source: string | null, hookSettingsJson: strin
     if (current !== undefined && !Array.isArray(current)) {
       throw new Error(`settings.hooks.${event} is not an array`);
     }
-    const kept = stripOurCommands((current ?? []) as unknown[]);
-    hooks[event] = [...kept, ...entries];
+    // #942：**位置必须稳定**。codex 的 hook 信任键是位置式的
+    // （`<hooks.json>:<event>:<组下标>:<条下标>`），所以「先删后追加」等于把我们的条目换到
+    // 另一个下标上——它会顶着邻居的信任行跑，邻居也顶着我们的。真机实测过一次：重装之后
+    // 我们的 Stop hook 从 2:0 挪到 3:0，直接继承了 vibe-island 那一行的信任状态。
+    // 已经存在就**原地替换**，只有全新安装才追加到末尾。
+    const currentArr = (current ?? []) as unknown[];
+    const at = currentArr.findIndex(isOurEntry);
+    const kept = stripOurCommands(currentArr);
+    hooks[event] = at < 0 ? [...kept, ...entries] : [...kept.slice(0, at), ...entries, ...kept.slice(at)];
   }
   settings.hooks = hooks;
   return `${JSON.stringify(settings, null, 2)}\n`;
@@ -542,15 +563,116 @@ async function runInstall(argv: string[]): Promise<number> {
       : "普通 Claude session 只写本地 activity；频道 presence 上行仍需 party claude、" +
         "party bridge claude 或托管 serve lane。",
   );
-  // #910：装完不能只说「装好了」就收工。codex 0.145+ 对新装/改动过的 hook 默认**不信任**，
+  // #910：装完不能只说「装好了」就收工。codex 0.149+ 对新装/改动过的 hook 默认**不信任**，
   // 要在 TUI 里确认一次才会运行——不确认就一次都不跑，且**没有任何报错**。此前这里正是
   // 「看起来成功、实际不生效、且无提示」的现场：用户以为装好了，然后在原会话里等唤醒等到怀疑人生。
   // 所以最后一步不是再给一条指令（没人读），而是**当场验证并报出还差几步**。
+  // #942：这份清单给出的修法现在会**探测本机**——它说得出该在哪个 codex 二进制里批准。
+  // 别再往这里塞「直接跑 codex」：桌面版没有那个界面，PATH 上的旧版也没有那道闸。
   if (scope === "codex") {
+    // #942 第二轮：光报出「还差批准」没用——codex 那边**已经没有批准入口了**（启动 review 只对
+    // 「新的或改动过的」hook 发问，带 trusted_hash 且 enabled=false 的它再也不会问；桌面版连
+    // 界面都没有）。所以这一步由我们收集用户的确认：问一句，敲 y 才写。
+    await offerCodexHookTrust(argv);
     console.log("");
     for (const line of formatWakeChecklist(buildWakeChecklist(diagnoseCodexWake()))) console.log(line);
   }
   return 0;
+}
+
+/** `hook install --codex --yes`：非交互场景下**显式**表示批准。没有它就必须当面回答。 */
+export function hasYesFlag(argv: string[]): boolean {
+  const boundary = argv.indexOf("--");
+  return (boundary === -1 ? argv : argv.slice(0, boundary)).includes("--yes");
+}
+
+/**
+ * 问一句 y/N。
+ * 非 TTY（脚本、接入包粘贴执行、CI）一律返回 null ——**沉默绝不等于同意**，
+ * 那种场景只有显式 `--yes` 才算数。
+ */
+export async function promptYesNo(question: string): Promise<boolean | null> {
+  if (process.stdin.isTTY !== true) return null;
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await new Promise<string>((resolve) => {
+      rl.question(question, resolve);
+    });
+    return /^y(es)?$/i.test(answer.trim());
+  } catch {
+    return null;
+  } finally {
+    rl.close();
+  }
+}
+
+/** 一行「我们打算改哪一条」。给人看的，写前写后各打一遍。 */
+function describeTarget(t: CodexHookTarget): string {
+  return `  ${termText(t.key)}   ${t.label}`;
+}
+
+/**
+ * 装完之后就地把**我们自己那两条**的信任开关翻上去——前提是用户当面说了 y（或显式 --yes）。
+ *
+ * 边界见 codex-hook-trust.ts 顶部：只按命令本体定位、只翻已有 trusted_hash 的行、
+ * 写前备份、写后逐字段核对，绝不碰 `--dangerously-bypass-hook-trust`。
+ * 任何一步不确定 ⇒ 不写，并把用户要粘的 TOML 原样打出来（那是本切片的底线交付）。
+ */
+async function offerCodexHookTrust(argv: string[]): Promise<void> {
+  let remedy: CodexTrustRemedy;
+  try {
+    remedy = readCodexTrustRemedy();
+  } catch {
+    return;
+  }
+  if (remedy.enableable.length === 0) return; // 没什么可翻的（已启用 / 还没进信任表 / 读不出）
+  console.log("");
+  console.log("codex 把下面这些 hook 标成了 enabled = false —— 它们一次都不会跑，@ 你不会有任何反应：");
+  for (const t of remedy.enableable) console.log(describeTarget(t));
+  console.log(
+    "codex 的启动 review 只对「新的或改动过的」hook 发问，这几条它认为「已经问过」，" +
+      "所以【不会再问你】；桌面版更是没有那个界面。要启用只能由我们把你的确认写进 config.toml。",
+  );
+
+  const approved = hasYesFlag(argv) ? true : await promptYesNo("要启用 AgentParty 的这些 hook 吗？(y/N) ");
+  if (approved !== true) {
+    console.log(
+      approved === null
+        ? "非交互环境，没有你的当面确认——不写。（确定要启用就加 --yes 重跑一次。）"
+        : "好，不动它。",
+    );
+    for (const line of remedy.snippet) console.log(line);
+    return;
+  }
+
+  let source: string;
+  try {
+    source = readFileSync(remedy.configPath, "utf8");
+  } catch (e) {
+    console.log(`读不出 ${termText(remedy.configPath)}（${termText(e instanceof Error ? e.message : String(e))}）——不写。`);
+    for (const line of remedy.snippet) console.log(line);
+    return;
+  }
+  const result = enableCodexHookTrust(
+    source,
+    remedy.enableable.map((t) => t.key),
+    (text) => Bun.TOML.parse(text),
+  );
+  if (!result.ok) {
+    console.log(`没有写：${termText(result.detail)}（${result.reason}）。config.toml 一个字都没动。`);
+    for (const line of remedy.snippet) console.log(line);
+    return;
+  }
+  backupBeforeWrite(remedy.configPath, source);
+  atomicWriteText(remedy.configPath, result.text);
+  console.log(`已写入 ${termText(remedy.configPath)}（原文件备份在 ${termText(remedy.configPath)}.agentparty.bak，可整份回退）：`);
+  for (const change of result.changes) {
+    console.log(`  ${termText(change.key)}`);
+    console.log(`    改前: ${change.before === null ? "（没有 enabled 这一行）" : termText(change.before.trim())}`);
+    console.log(`    改后: ${termText(change.after.trim())}`);
+  }
+  console.log("其余内容逐字段核对过，没有任何别的改动。若你用的是桌面版 codex，重启它之后生效。");
 }
 
 async function runUninstall(argv: string[]): Promise<number> {
