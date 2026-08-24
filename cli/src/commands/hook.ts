@@ -542,10 +542,12 @@ async function runInstall(argv: string[]): Promise<number> {
       : "普通 Claude session 只写本地 activity；频道 presence 上行仍需 party claude、" +
         "party bridge claude 或托管 serve lane。",
   );
-  // #910：装完不能只说「装好了」就收工。codex 0.145+ 对新装/改动过的 hook 默认**不信任**，
+  // #910：装完不能只说「装好了」就收工。codex 0.149+ 对新装/改动过的 hook 默认**不信任**，
   // 要在 TUI 里确认一次才会运行——不确认就一次都不跑，且**没有任何报错**。此前这里正是
   // 「看起来成功、实际不生效、且无提示」的现场：用户以为装好了，然后在原会话里等唤醒等到怀疑人生。
   // 所以最后一步不是再给一条指令（没人读），而是**当场验证并报出还差几步**。
+  // #942：这份清单给出的修法现在会**探测本机**——它说得出该在哪个 codex 二进制里批准。
+  // 别再往这里塞「直接跑 codex」：桌面版没有那个界面，PATH 上的旧版也没有那道闸。
   if (scope === "codex") {
     console.log("");
     for (const line of formatWakeChecklist(buildWakeChecklist(diagnoseCodexWake()))) console.log(line);

@@ -223,10 +223,14 @@ export function formatCodexWakeDiagnosis(d: CodexWakeDiagnosis): string[] {
     out.push("  怎么修: party hook install --codex   然后【新开一个 codex 会话】才生效");
   } else if (d.hook === "disabled") {
     out.push("  另外: hook 装了，但 codex 的信任闸把它标成了 enabled=false —— codex 会【静默跳过】它");
-    out.push("  怎么修: 新开一个 codex 会话，在启动时的 hooks review 里把 AgentParty 的 stop hook 重新启用");
+    // #942：这里**不再**复述「新开一个 codex 会话就会弹 hooks review」。那句话对 ChatGPT.app
+    // 桌面版是假的（它不走 TUI 启动路径），对 0.149 以前的 codex 也是假的（那时还没有这道闸）。
+    // 要给绝对路径就得先探测本机，而探测要 spawn 进程——doctor/who 这类热路径不该背这个成本。
+    // 所以统一指向 `party wake check`：那里探测过，说得出该跑哪个二进制。
+    out.push("  怎么修: party wake check   （它会说出该在【哪个 codex 二进制】里批准——直接跑 `codex` 未必是对的）");
   } else if (d.hook === "needs-review") {
     out.push("  另外: hook 装了但还没被 codex 信任 —— 未获批准的 hook 会被【静默跳过】");
-    out.push("  怎么修: 新开一个 codex 会话，在启动时的 hooks review 里批准 AgentParty 的 stop hook");
+    out.push("  怎么修: party wake check   （它会说出该在【哪个 codex 二进制】里批准——直接跑 `codex` 未必是对的）");
   }
   if (d.bindings.length === 0 && d.identity === null) {
     out.push("  提示: 本机还没有为 codex 记下任何加入绑定——重跑一遍该身份的接入包即可（加入即绑定，#924）");

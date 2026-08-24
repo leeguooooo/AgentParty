@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decideWakeSelfCheck, isLocalCodexIdentity, wakeBlockForCodexHook } from "../src/wake-reachability";
 import { buildWakeChecklist, formatWakeChecklist, CODEX_EXEC_NO_HOOKS_NOTE } from "../src/wake-checklist";
+import type { CodexBinary, CodexTrustGateProbe } from "../src/codex-trust-gate";
 import type { JoinBinding } from "../src/join-binding";
 import type { CodexWakeDiagnosis } from "../src/wake-diagnosis";
 
@@ -102,6 +103,26 @@ function diagnosis(over: Partial<CodexWakeDiagnosis> = {}): CodexWakeDiagnosis {
   };
 }
 
+const DESKTOP_BIN = "/Applications/ChatGPT.app/Contents/Resources/codex";
+const SHIM_BIN = "/var/folders/f1/xx/T/cmux-cli-shims/84883385/codex";
+
+function bin(over: Partial<CodexBinary> & { path: string }): CodexBinary {
+  return { origin: "path", app: null, version: null, gate: null, probed: true, ...over };
+}
+
+/** 终端形态：PATH 上那个自己就带闸——文案维持 #910 的老样子。 */
+const TERMINAL_PROBE: CodexTrustGateProbe = (() => {
+  const onPath = bin({ path: "/opt/homebrew/bin/codex", version: "codex-cli 0.149.0", gate: true });
+  return { onPath, candidates: [onPath], gated: [onPath], desktop: null };
+})();
+
+/** owner 那台机器（#942）：桌面版带闸、PATH 上是 0.145 的 shim。 */
+const DESKTOP_PROBE: CodexTrustGateProbe = (() => {
+  const desktop = bin({ path: DESKTOP_BIN, origin: "running", app: "ChatGPT", version: "codex-cli 0.149.0-alpha.4.1", gate: true });
+  const onPath = bin({ path: SHIM_BIN, version: "codex-cli 0.145.0", gate: false });
+  return { onPath, candidates: [desktop, onPath], gated: [desktop], desktop };
+})();
+
 describe("#910 接入包最后一步：验证，不是指令", () => {
   const home = (() => {
     const dir = mkdtempSync(join(tmpdir(), "wake-check-codex-"));
@@ -122,7 +143,7 @@ describe("#910 接入包最后一步：验证，不是指令", () => {
   // fixture 让前三步**全部通过**，于是 remaining/next 只可能由信任闸那一步决定。
   for (const hook of ["disabled", "needs-review"] as const) {
     test(`只差信任闸（hook=${hook}）→ 明确说还差 1 步，并只给这一件事`, () => {
-      const c = buildWakeChecklist(diagnosis({ hook }), env);
+      const c = buildWakeChecklist(diagnosis({ hook }), env, () => TERMINAL_PROBE);
       expect(c.remaining).toBe(1);
       expect(c.steps.filter((s) => !s.ok).map((s) => s.id)).toEqual(["hook_trusted"]);
       const text = formatWakeChecklist(c).join("\n");
@@ -130,7 +151,7 @@ describe("#910 接入包最后一步：验证，不是指令", () => {
       expect(text).toContain("Hooks need review");
       // #910 附带发现：codex exec 不触发任何 hook。不写这句，人会在 exec 里验一遍得出错误结论。
       expect(text).toContain("codex exec");
-      expect(c.next!.note).toBe(CODEX_EXEC_NO_HOOKS_NOTE);
+      expect(c.next!.notes).toContain(CODEX_EXEC_NO_HOOKS_NOTE);
       // 绝不建议绕过安全闸。
       expect(text).not.toContain("dangerously-bypass-hook-trust");
       // 这类失败没有任何报错——不明说就没人知道自己坏了。
@@ -150,11 +171,51 @@ describe("#910 接入包最后一步：验证，不是指令", () => {
       env,
     );
     expect(c.next!.do).toBe("party mcp identities");
-    expect(c.next!.note).toBe("两个身份");
+    expect(c.next!.notes).toEqual(["两个身份"]);
   });
 
   test("没绑频道时先解决频道——后面每一步都建立在它之上", () => {
     const c = buildWakeChecklist(diagnosis({ channel: null, identity: null, source: null, server: null }), env);
     expect(c.next!.do).toContain("party init --channel");
+  });
+
+  // ── #942：修法本身错了 ────────────────────────────────────────────────────
+  // 前三步在这里**全部通过**，hook 也固定为 needs-review，于是 next 只可能由信任闸那一步决定；
+  // 两个 fixture 之间唯一的差别是「哪个二进制带闸」，所以只有那道判定能决定输出。
+
+  test("#942 桌面版形态：next 是【那个二进制的绝对路径】，不是「直接跑 codex」", () => {
+    const c = buildWakeChecklist(diagnosis({ hook: "needs-review" }), env, () => DESKTOP_PROBE);
+    expect(c.next!.do).toContain(DESKTOP_BIN);
+    expect(c.next!.do).not.toContain("直接跑 `codex`");
+    const text = formatWakeChecklist(c).join("\n");
+    expect(text).toContain(DESKTOP_BIN);
+    expect(text).toContain("重启");
+  });
+
+  test("#942 PATH 上版本过低时必须明说（否则用户以为自己照做了）", () => {
+    const c = buildWakeChecklist(diagnosis({ hook: "disabled" }), env, () => DESKTOP_PROBE);
+    const text = formatWakeChecklist(c).join("\n");
+    expect(text).toContain("codex-cli 0.145.0");
+    expect(text).toContain(SHIM_BIN);
+    expect(text).toContain("没有 hook 信任闸");
+  });
+
+  test("#942 对照：PATH 上那个自己带闸 ⇒ 维持终端形态的老文案，也不拿版本吓唬人", () => {
+    const c = buildWakeChecklist(diagnosis({ hook: "needs-review" }), env, () => TERMINAL_PROBE);
+    const text = formatWakeChecklist(c).join("\n");
+    expect(c.next!.do).toContain("直接跑 `codex`");
+    expect(text).not.toContain("没有 hook 信任闸");
+    expect(text).not.toContain(DESKTOP_BIN);
+  });
+
+  test("#942 探测抛异常也要给出建议，且绝不让自检本身挂掉（fail-open）", () => {
+    const c = buildWakeChecklist(diagnosis({ hook: "needs-review" }), env, () => {
+      throw new Error("probe exploded");
+    });
+    expect(c.remaining).toBe(1);
+    const text = formatWakeChecklist(c).join("\n");
+    expect(text).toContain("没探测到任何 codex 二进制");
+    expect(text).toContain("codex exec");
+    expect(text).not.toContain("dangerously-bypass-hook-trust");
   });
 });

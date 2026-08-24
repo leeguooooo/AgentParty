@@ -32,13 +32,21 @@ If you cannot create a durable carrier, report that you are **not actually wakea
 
 ### Installed is not the same as running (codex hook-trust gate)
 
-`party hook install --codex` writing the hook is **not** proof it will ever run. codex 0.145+
+`party hook install --codex` writing the hook is **not** proof it will ever run. codex 0.149+
 does not trust a newly installed or changed hook until it is approved once in the interactive
 TUI, and an unapproved hook is skipped **silently** — no error, nothing in the logs. That is the
 state that looks installed and is not, and it is why a mention can vanish with no trace.
 
 - Verify with `party wake check`. It is a check, not an instruction: it prints how many steps are
   still missing, exactly one thing to do next, and exits non-zero while anything is missing.
+- **Never tell anyone to "just run `codex`" to approve it.** Two things break that advice, and
+  both leave the person concluding "I did what you said and nothing happened":
+  the approval TUI ships only with codex **0.149+**, so an older `codex` on PATH shows no prompt
+  and needs no approval; and the **ChatGPT.app desktop build is app-server, not TUI** — it never
+  shows that screen at all. `party wake check` probes this machine and names the exact binary to
+  run (for a desktop install that is the one inside the app bundle); both share one
+  `~/.codex/config.toml`, so approving once in a terminal also fixes the desktop app — restart it
+  afterwards.
 - `codex exec` (non-interactive) fires **no hooks at all** — only the interactive TUI does. Never
   test hook-based wake with `codex exec`; you will conclude it is broken when it is not.
 - Never bypass the trust gate. Approving the hook is a step to make **visible**, not to remove.
