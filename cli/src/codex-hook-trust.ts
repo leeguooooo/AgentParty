@@ -114,8 +114,8 @@ function trustStateOf(table: Record<string, unknown> | null, key: string): {
  * `"/opt/x/party"\u00A0hook codex-stop` 判成 binary=/opt/x/party + args=[hook, codex-stop]
  * ⇒ 自动批准；shell 实际执行的却是 `/opt/x/party\u00A0hook`——另一个可执行文件。
  */
-const SHELL_SEP = /[ \t\n]/;
-const SHELL_SEPS = /[ \t\n]+/;
+const SHELL_SEP = /[ \t]/;
+const SHELL_SEPS = /[ \t]+/;
 /** 只吃 shell 分隔符的 trim；不能用 String.trim()（它同样会吃掉 NBSP 之类）。 */
 function shellTrim(text: string): string {
   return text.replace(/^[ \t\n]+/, "").replace(/[ \t\n]+$/, "");
@@ -169,6 +169,15 @@ function commandArgs(command: string): string[] {
 export function classifyOwnHookCommand(
   command: string,
 ): (typeof CODEX_OWN_HOOK_COMMANDS)[number] | undefined {
+  // 换行/回车在 shell 里是**命令分隔符**，不是参数分隔符。把它当空白会漏掉这种形态：
+  //
+  //     "/opt/x/party"
+  //     hook codex-stop
+  //
+  // 实际执行的是**两条命令**——`party`（无参数）和 `hook codex-stop`（一个叫 hook 的程序），
+  // 而按空白切会解析成 binary=party + args=[hook, codex-stop]，三项判据全过 ⇒ 自动批准。
+  // 我们自己装的命令一律是单行；含换行即判不可解析、不认。
+  if (/[\n\r]/.test(shellTrim(command))) return undefined;
   const binary = commandBinary(command);
   if (binary === null) return undefined;
   const base = binary.split("/").pop() ?? binary;
