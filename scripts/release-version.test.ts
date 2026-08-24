@@ -700,6 +700,10 @@ describe("release main 推送落地", () => {
     expect(result.commands).not.toContain("git reset");
     expect(result.stderr).toContain("拿不准远端到底落没落地");
     expect(result.stderr).toContain("git ls-remote origin refs/heads/main");
+    // 未知态下三条路都要写清楚：已落地只差 tag、没落地先补推、不想继续就回滚重跑。
+    expect(result.stderr).toContain("只差 tag");
+    expect(result.stderr).toContain("先补推");
+    expect(result.stderr).toContain("不想继续这一版");
     expect(result.commands).not.toContain("git tag v0.2.83");
     expect(result.commands).not.toContain("gh run list");
   });

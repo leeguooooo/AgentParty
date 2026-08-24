@@ -310,9 +310,13 @@ settle_unlanded_release() {
       abort_unpushed_release "$base_sha" "$release_sha" "$version"
       ;;
     *)
-      echo "   拿不准远端到底落没落地，不自动回滚。" >&2
-      echo "   恢复前先确认远端： git ls-remote origin refs/heads/main" >&2
-      print_release_manual_recovery "$base_sha" "$release_sha" "$version"
+      # 未知态下操作者最容易懵：既不知道该补推还是该补 tag，也不知道能不能重跑。
+      # 所以这里不给「二选一」，而是先给确认命令，再按确认结果分三条路写清楚。
+      echo "   拿不准远端到底落没落地，不自动回滚。本地仍停在 ${release_sha}（版本文件已是 ${version}）。" >&2
+      echo "   先确认远端： git ls-remote origin refs/heads/main" >&2
+      echo "     远端已含 ${release_sha} → 只差 tag： git tag v${version} ${release_sha} && git push origin v${version}" >&2
+      echo "     远端还没有 → 先补推： git push origin ${release_sha}:refs/heads/main，落地后再按上一条补 tag" >&2
+      echo "     不想继续这一版 → git reset --keep ${base_sha:-<发布前的 SHA>} && scripts/release.sh ${version}" >&2
       ;;
   esac
 }
