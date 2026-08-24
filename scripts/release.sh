@@ -270,12 +270,87 @@ abort_unpushed_release() {
   else
     echo "   自动回滚未成功。" >&2
   fi
+  print_release_manual_recovery "$base_sha" "$release_sha" "$version"
+  return 0
+}
+
+print_release_manual_recovery() {
+  local base_sha="$1" release_sha="$2" version="$3"
   echo "   本地仍停在 ${release_sha}（版本文件已是 ${version}）。" >&2
   echo "   二选一：" >&2
   echo "     1) 手工补推： git push origin ${release_sha}:refs/heads/main" >&2
   echo "        然后手工补 tag： git tag v${version} ${release_sha} && git push origin v${version}" >&2
-  echo "     2) 丢弃这条提交后重跑： git reset --hard ${base_sha:-<发布前的 SHA>} && scripts/release.sh ${version}" >&2
-  return 0
+  echo "     2) 丢弃这条提交后重跑： git reset --keep ${base_sha:-<发布前的 SHA>} && scripts/release.sh ${version}" >&2
+}
+
+# 远端 main 现在指向哪。拿不到就回空——空字符串代表「未知」，不代表「没落地」。
+remote_main_sha() {
+  local line
+  line=$(git ls-remote origin refs/heads/main 2>/dev/null) || return 0
+  printf '%s' "${line%%[[:space:]]*}"
+}
+
+# push 失败、或推送后的核实 fetch 失败之后的收尾。
+#
+# 关键：`git push` 返回非 0 **不等于**远端没落地——服务端完全可能已经更新了 ref，
+# 只是客户端在拿到响应之前断了。fetch 失败同理，只说明「没能核实」。在落地与否未知
+# 的时候回滚本地提交，会让本地与可能已经落地的远端劈叉，而操作者以为什么都没发生。
+#
+# 所以先用 ls-remote 把「未知」尽量变成「已知」：确认已落地就别回滚（只差补 tag），
+# 确认没落地才允许回滚，仍然拿不准就一个字节都不改。
+settle_unlanded_release() {
+  local base_sha="$1" release_sha="$2" version="$3"
+  case "$(release_landing_state "$base_sha" "$release_sha")" in
+    landed)
+      echo "   远端 origin/main 的历史里已经有 ${release_sha}（推送其实生效了），不回滚。" >&2
+      echo "   只需补 tag： git tag v${version} ${release_sha} && git push origin v${version}" >&2
+      ;;
+    missing)
+      echo "   已向远端确认这条提交确实没落地。" >&2
+      abort_unpushed_release "$base_sha" "$release_sha" "$version"
+      ;;
+    *)
+      # 未知态下操作者最容易懵：既不知道该补推还是该补 tag，也不知道能不能重跑。
+      # 所以这里不给「二选一」，而是先给确认命令，再按确认结果分三条路写清楚。
+      echo "   拿不准远端到底落没落地，不自动回滚。本地仍停在 ${release_sha}（版本文件已是 ${version}）。" >&2
+      echo "   先确认远端： git ls-remote origin refs/heads/main" >&2
+      echo "     远端已含 ${release_sha} → 只差 tag： git tag v${version} ${release_sha} && git push origin v${version}" >&2
+      echo "     远端还没有 → 先补推： git push origin ${release_sha}:refs/heads/main，落地后再按上一条补 tag" >&2
+      echo "     不想继续这一版 → git reset --keep ${base_sha:-<发布前的 SHA>} && scripts/release.sh ${version}" >&2
+      ;;
+  esac
+}
+
+# 这条发布提交到底进没进 origin/main：landed / missing / unknown。
+#
+# 只比远端 tip 是不够的。别人完全可能在我们推上去之后紧接着又推一笔，此时 tip 不是
+# 我们的提交，但我们的提交确实已经在 main 的历史里。把这种情况判成「没落地」去回滚，
+# 等于把已经发布出去的提交从本地抹掉；重跑还会为同一个版本号造出第二条 bump 提交，
+# tag 最终指向的东西和 main 里的那条对不上。
+#
+# 所以：tip 正好是它 ⇒ landed；tip 还停在发布前的基线 ⇒ 确实 missing；tip 是第三个
+# 值 ⇒ 必须把远端历史取下来做祖先判定才能分清，取不下来就老实说 unknown。
+release_landing_state() {
+  local base_sha="$1" release_sha="$2"
+  local tip
+  tip=$(remote_main_sha)
+  if [[ -n "$tip" && "$tip" == "$release_sha" ]]; then
+    printf 'landed'
+    return 0
+  fi
+  if [[ -n "$tip" && -n "$base_sha" && "$tip" == "$base_sha" ]]; then
+    printf 'missing'
+    return 0
+  fi
+  if git fetch origin main --quiet 2>/dev/null; then
+    if git merge-base --is-ancestor "$release_sha" FETCH_HEAD 2>/dev/null; then
+      printf 'landed'
+    else
+      printf 'missing'
+    fi
+    return 0
+  fi
+  printf 'unknown'
 }
 
 cleanup_release_version() {
@@ -371,24 +446,23 @@ main() {
   # main 引用（还停在 bump 之前），git 会打印 "Everything up-to-date" 当作成功，
   # 于是 tag 上去了、版本提交没进 main，线上 /api/version 与 tag 对不上。
   if ! git push origin "HEAD:refs/heads/main"; then
+    # 注意：push 非 0 不代表远端没落地，交给 settle 去向远端确认。
     echo "!! 推送 origin/main 失败（网络或权限）。tag 未推。" >&2
-    abort_unpushed_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
+    settle_unlanded_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
     return 1
   fi
   # 推完必须核实远端确实指向这条提交——上面那条静默失败就是这么漏过去的。
   if ! git fetch origin main --quiet; then
-    # 这里 push 已经返回成功、只是 fetch 挂了：远端到底落没落地是**未知**的。
-    # 未知状态下自动回滚是错的——万一已经落地，本地一回滚就与远端劈叉，而操作者
-    # 还以为什么都没发生。所以这条分支只报状态、给两条命令，一个字节都不改。
-    echo "!! 推送后 fetch origin main 失败，无法核实是否落地。tag 未推，本地不做任何回滚。" >&2
-    echo "   先确认远端： git ls-remote origin refs/heads/main" >&2
-    echo "   已是 ${RELEASE_SHA} → 只需补 tag： git tag v${VER} ${RELEASE_SHA} && git push origin v${VER}" >&2
-    echo "   还不是 → 丢弃本地这条提交后重跑： git reset --keep ${BASE_SHA} && scripts/release.sh ${VER}" >&2
+    echo "!! 推送后 fetch origin main 失败，无法用本地引用核实。tag 未推。" >&2
+    settle_unlanded_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
     return 1
   fi
-  [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_SHA" ]] || {
-    echo "!! origin/main 未指向 ${RELEASE_SHA}，版本提交没进 main。tag 未推。" >&2
+  # 用祖先判定而不是 tip 相等：别人在我们之后又推一笔时 tip 会不是我们的提交，
+  # 但发布提交确实已经在 main 的历史里，那种情况直接继续打 tag 就对了。
+  git merge-base --is-ancestor "$RELEASE_SHA" FETCH_HEAD || {
+    echo "!! origin/main 的历史里没有 ${RELEASE_SHA}，版本提交没进 main。tag 未推。" >&2
     echo "   origin/main = $(git rev-parse FETCH_HEAD)" >&2
+    # 这条分支是**已经核实过**远端没落地，可以直接走带状态门的回滚。
     abort_unpushed_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
     return 1
   }

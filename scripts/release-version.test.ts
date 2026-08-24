@@ -105,7 +105,7 @@ function runGit(directory: string, args: string[]) {
   execFileSync("git", args, { cwd: directory, stdio: "pipe" });
 }
 
-type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed" | "push-failed-dirty" | "push-failed-head-moved" | "fetch-failed-after-push";
+type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed" | "push-failed-dirty" | "push-failed-head-moved" | "fetch-failed-after-push" | "push-failed-but-landed" | "push-failed-advanced" | "push-landed-not-tip";
 
 function writeExecutable(path: string, body: string) {
   writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${body}`);
@@ -143,10 +143,25 @@ function runReleaseHarness(scenario: ReleaseHarnessScenario) {
   writeExecutable(
     join(fakeBin, "git"),
     `printf 'git %s\\n' "$*" >> "$MOCK_COMMAND_LOG"
+pushed() { grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; }
+committed() { grep -q '^git commit' "$MOCK_COMMAND_LOG"; }
 case "\${1:-}" in
+  ls-remote)
+    # push / 核实 fetch 失败后，脚本靠这条把「未知」尽量变成「已知」。
+    case "$MOCK_SCENARIO" in
+      fetch-failed-after-push) echo "simulated ls-remote outage" >&2; exit 1 ;;
+      push-failed-but-landed) printf '%s\\trefs/heads/main\\n' "$MOCK_RELEASE_SHA" ;;
+      push-failed-advanced)   printf '%s\\trefs/heads/main\\n' "$MOCK_OTHER_SHA" ;;
+      *)                      printf '%s\\trefs/heads/main\\n' "$MOCK_BASE_SHA" ;;
+    esac
+    exit 0 ;;
+  merge-base)
+    # --is-ancestor：发布提交在不在远端历史里。
+    [[ "$MOCK_SCENARIO" != "push-not-landed" ]]
+    exit $? ;;
   fetch)
     # 预检那次 fetch 必须成功；只有推送之后的核实 fetch 才挂。
-    if [[ "$MOCK_SCENARIO" == "fetch-failed-after-push" ]] && grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; then
+    if [[ "$MOCK_SCENARIO" == "fetch-failed-after-push" ]] && pushed; then
       echo "simulated fetch outage" >&2
       exit 1
     fi
@@ -154,7 +169,7 @@ case "\${1:-}" in
   status)
     # 入口的干净树校验必须放行；只有推送失败后的那次复查才报脏，用来验证
     # 「状态变了就不自动回滚」。
-    if [[ "$MOCK_SCENARIO" == "push-failed-dirty" ]] && grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; then
+    if [[ "$MOCK_SCENARIO" == "push-failed-dirty" ]] && pushed; then
       printf ' M cli/src/somebody-elses-wip.ts\\n'
     fi
     exit 0 ;;
@@ -165,22 +180,26 @@ case "\${1:-}" in
     fi
     exit 0 ;;
   rev-parse)
-    # 发布基线与推送核实都读 SHA；只有 tag 名要报「不存在」，否则脚本会以为
-    # tag 已发过。push-not-landed 场景下推完之后让 origin/main 停在别处，用来
-    # 验证「静默空推」确实会被拦住。
+    # tag 名要报「不存在」，否则脚本会以为这一版已经发过。
     case "\${2:-}" in
       HEAD)
-        if [[ "$MOCK_SCENARIO" == "push-failed-head-moved" ]] && grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; then
+        # 发布提交打出来之前 HEAD 是基线，之后是发布提交——mock 必须分得清这两者，
+        # 否则「回滚到基线」「HEAD 有没有被别人推进过」这些判断全测不出来。
+        if [[ "$MOCK_SCENARIO" == "push-failed-head-moved" ]] && pushed; then
           printf '%s\\n' "$MOCK_OTHER_SHA"
+        elif committed; then
+          printf '%s\\n' "$MOCK_RELEASE_SHA"
         else
-          printf '%s\\n' "$MOCK_HEAD_SHA"
+          printf '%s\\n' "$MOCK_BASE_SHA"
         fi
         exit 0 ;;
       FETCH_HEAD)
-        if [[ "$MOCK_SCENARIO" == "push-not-landed" ]] && grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; then
+        if ! pushed; then
+          printf '%s\\n' "$MOCK_BASE_SHA"
+        elif [[ "$MOCK_SCENARIO" == "push-not-landed" || "$MOCK_SCENARIO" == "push-landed-not-tip" ]]; then
           printf '%s\\n' "$MOCK_OTHER_SHA"
         else
-          printf '%s\\n' "$MOCK_HEAD_SHA"
+          printf '%s\\n' "$MOCK_RELEASE_SHA"
         fi
         exit 0 ;;
       *) exit 1 ;;
@@ -251,8 +270,9 @@ exec /bin/cp "$@"
       MOCK_COMMAND_LOG: commandLog,
       MOCK_COPY_COUNT: copyCount,
       MOCK_SCENARIO: scenario,
-      MOCK_HEAD_SHA: "1111111111111111111111111111111111111111",
+      MOCK_BASE_SHA: "1111111111111111111111111111111111111111",
       MOCK_OTHER_SHA: "2222222222222222222222222222222222222222",
+      MOCK_RELEASE_SHA: "3333333333333333333333333333333333333333",
       RELEASE_GH_RETRY_DELAY: "0",
       RELEASE_GH_RETRY_ATTEMPTS: "2",
       RELEASE_RUN_LOOKUP_ATTEMPTS: "2",
@@ -647,6 +667,7 @@ describe("release main 推送落地", () => {
     expect(result.commands).not.toContain("git push origin v0.2.83");
     // 不回滚的话「重跑」根本走不通：基线校验会挡下 HEAD ≠ origin/main，
     // 就算手工对齐，版本文件已经是新版号、bump 无 diff，commit 会空提交失败。
+    expect(result.stderr).toContain("确实没落地");
     expect(result.commands).toContain("git reset --keep 1111111111111111111111111111111111111111");
     expect(result.stderr).toContain("可直接重跑");
   });
@@ -670,17 +691,53 @@ describe("release main 推送落地", () => {
     expect(result.stderr).toContain("不自动回滚");
   });
 
-  // push 成功、只是 fetch 挂了：远端到底落没落地是未知的。未知状态下回滚会让本地
-  // 与已经落地的远端劈叉，所以这条分支必须一个字节都不改。
-  test("推送后 fetch 失败时不回滚，只给出确认远端的命令", () => {
+  // push 成功、只是 fetch 挂了，连 ls-remote 也拿不到：落地与否未知。未知状态下
+  // 回滚会让本地与可能已经落地的远端劈叉，所以必须一个字节都不改。
+  test("远端状态拿不到时不回滚", () => {
     const result = runReleaseHarness("fetch-failed-after-push");
 
     expect(result.exitCode).not.toBe(0);
     expect(result.commands).not.toContain("git reset");
-    expect(result.stderr).toContain("本地不做任何回滚");
+    expect(result.stderr).toContain("拿不准远端到底落没落地");
     expect(result.stderr).toContain("git ls-remote origin refs/heads/main");
+    // 未知态下三条路都要写清楚：已落地只差 tag、没落地先补推、不想继续就回滚重跑。
+    expect(result.stderr).toContain("只差 tag");
+    expect(result.stderr).toContain("先补推");
+    expect(result.stderr).toContain("不想继续这一版");
     expect(result.commands).not.toContain("git tag v0.2.83");
     expect(result.commands).not.toContain("gh run list");
+  });
+
+  // git push 返回非 0 不等于远端没落地：服务端可能已经更新了 ref，只是客户端在
+  // 拿到响应前断了。这种情况下回滚会把已经发布出去的提交从本地抹掉。
+  test("推送报错但远端其实已落地时不回滚，只提示补 tag", () => {
+    const result = runReleaseHarness("push-failed-but-landed");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).not.toContain("git reset");
+    expect(result.stderr).toContain("推送其实生效了");
+    expect(result.stderr).toContain("只需补 tag");
+    expect(result.commands).not.toContain("git tag v0.2.83");
+  });
+
+  // 只比远端 tip 是不够的：别人在我们推上去之后紧接着又推一笔，tip 就不是我们的
+  // 提交了，但它确实已经在 main 的历史里。判成「没落地」去回滚，等于把已经发布出去
+  // 的提交从本地抹掉。
+  test("推送报错、tip 已被别人推进但发布提交在历史里时不回滚", () => {
+    const result = runReleaseHarness("push-failed-advanced");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).not.toContain("git reset");
+    expect(result.stderr).toContain("推送其实生效了");
+  });
+
+  test("推送成功、tip 已被别人推进但发布提交在历史里时照常打 tag", () => {
+    const result = runReleaseHarness("push-landed-not-tip");
+
+    expect(result.commands).not.toContain("git reset");
+    expect(result.commands).toContain("git tag v0.2.83");
+    expect(result.commands).toContain("git push origin v0.2.83");
+    expect(result.stderr).not.toContain("没进 main");
   });
 
   test("origin/main 没指向发布提交时停住，且不留悬空 tag", () => {
