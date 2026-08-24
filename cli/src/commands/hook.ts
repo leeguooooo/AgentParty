@@ -89,6 +89,7 @@ import {
   enableCodexHookTrust,
   type CodexHookTarget,
   type CodexTrustRemedy,
+  codexOwnHookCommand,
 } from "../codex-hook-trust";
 import { isPartyBinaryPath } from "../upgrade";
 import { CLAUDE_LIFECYCLE_OPT_IN_ENV } from "./claude-launch";
@@ -438,15 +439,15 @@ export function settingsPath(
  * block 回**用户眼前那个会话**，而不是像 #893 那样另起一个后台 runner。
  */
 export function codexHookSettingsJson(execPath: string = process.execPath): string {
-  const partyBin = isPartyBinaryPath(execPath) ? execPath : "party";
-  const bin = partyBin === "party" ? partyBin : JSON.stringify(partyBin);
+  // 命令串由 codexOwnHookCommand 单点生成——归属判定（codex-hook-trust）拿的是**同一个**
+  // 函数的输出来做相等比较。两边各写一份就会漂移，而漂移的后果是「装了却认不出是自己的」。
   return JSON.stringify({
     hooks: {
       SessionStart: [{
-        hooks: [{ type: "command", command: `${bin} hook codex-report`, timeout: 10 }],
+        hooks: [{ type: "command", command: codexOwnHookCommand("codex-report", execPath), timeout: 10 }],
       }],
       Stop: [{
-        hooks: [{ type: "command", command: `${bin} hook codex-stop`, timeout: 10 }],
+        hooks: [{ type: "command", command: codexOwnHookCommand("codex-stop", execPath), timeout: 10 }],
       }],
     },
   });
