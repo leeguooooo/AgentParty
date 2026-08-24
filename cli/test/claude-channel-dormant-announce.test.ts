@@ -20,7 +20,7 @@ function entry(overrides: Partial<ClaudeSessionRegistryEntry> = {}): ClaudeSessi
   return {
     version: 1,
     session_id: "11111111-1111-4111-8111-111111111111",
-    pid: process.pid,
+    pid: process.ppid,
     display_name: null,
     channel: "dev",
     server: SERVER,
@@ -115,8 +115,10 @@ function makeDeps(overrides: Partial<DormantAnnounceDeps> = {}): {
     // 默认给一个确定的频道身份：绝不让测试去读真实 config / 打 /api/me。
     resolveSelfName: async () => "lark-ad72b3f97491-agentparty",
     cwd: "/tmp/project",
+    hostPid: process.ppid,
     pollIntervalMs: 5,
     livenessIntervalMs: 5,
+    injectRetryDelayMs: 1,
     ...overrides,
   };
   return { deps, connections };
@@ -144,6 +146,23 @@ describe("selectDormantAnnounceEntry", () => {
     expect(selectDormantAnnounceEntry([away], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBeNull();
     const newer = entry({ session_id: "44444444-4444-4444-8444-444444444444", registered_at: 5_000 });
     expect(selectDormantAnnounceEntry([here, newer], "dev", "/tmp/project", SERVER, SELF_IDENTITY)).toBe(newer);
+  });
+
+  test("same cwd and identity still bind to this MCP's parent Claude pid", () => {
+    const mine = entry({ registered_at: 1_000 });
+    const newerSibling = entry({
+      session_id: "99999999-9999-4999-8999-999999999999",
+      pid: process.ppid + 1,
+      registered_at: 9_000,
+    });
+    expect(selectDormantAnnounceEntry(
+      [mine, newerSibling],
+      "dev",
+      "/tmp/project",
+      SERVER,
+      SELF_IDENTITY,
+      process.ppid,
+    )).toBe(mine);
   });
 });
 
@@ -300,6 +319,24 @@ describe("runDormantClaudeSessionAnnounce (#841 P2)", () => {
     await done;
   });
 
+  test("reconnects after a retryable channel error instead of killing announce", async () => {
+    const { deps, connections } = makeDeps();
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    expect(connections).toHaveLength(1);
+    connections[0]!.push({
+      type: "error",
+      code: "unavailable",
+      message: "temporary outage",
+    } as ServerFrame);
+    await tick(30);
+    expect(connections).toHaveLength(2);
+    expect(connections[0]!.closed).toBe(true);
+    abort.abort();
+    await done;
+  });
+
   test("rejects an invalid channel slug without connecting", async () => {
     const { deps, connections } = makeDeps();
     const abort = new AbortController();
@@ -430,7 +467,7 @@ describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
     await tick();
     expect(calls).toHaveLength(1);
     // 寻址走 pid + sessionId（宣告名与 Claude 原生会话名是两个命名空间，#857）。
-    expect(calls[0]!.pid).toBe(process.pid);
+    expect(calls[0]!.pid).toBe(process.ppid);
     expect(calls[0]!.sessionId).toBe("11111111-1111-4111-8111-111111111111");
     expect(calls[0]!.name).toBe("claude-111111111111");
     // from-name＝友好名 + 技术 ID（接收端面板只显示这一处）。
@@ -485,8 +522,31 @@ describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
     await tick();
     connections[0]!.push(msg(31, [SELF]));
     await tick();
-    expect(calls).toHaveLength(2);
+    // 每条都做 3 次有界重试，但不阻断后续帧。
+    expect(calls).toHaveLength(6);
     expect(connections[0]!.acked).toEqual([30, 31]);
+    abort.abort();
+    await done;
+  });
+
+  test("records dedupe only after inject succeeds", async () => {
+    let attempt = 0;
+    const { deps, connections, calls } = injectingDeps(async (input) => {
+      attempt += 1;
+      return attempt === 1
+        ? { ok: false, reason: "probe-failed" }
+        : { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: input.name };
+    });
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    connections[0]!.push(msg(32, [SELF]));
+    await tick();
+    expect(calls).toHaveLength(2);
+    // 成功后才进 seen：同 seq 再来不会重复写 socket。
+    connections[0]!.push(msg(32, [SELF]));
+    await tick();
+    expect(calls).toHaveLength(2);
     abort.abort();
     await done;
   });
@@ -500,7 +560,7 @@ describe("announce 注入的身份闸（issue #906）", () => {
       calls.push({ pid: input.pid, sessionId: input.sessionId });
       return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: input.name };
     }) as DormantAnnounceDeps["inject"];
-    const made = makeDeps({ inject, log: (line) => logs.push(line), ...overrides });
+    const made = makeDeps({ hostPid: 111, inject, log: (line) => logs.push(line), ...overrides });
     return { ...made, calls, logs };
   }
 

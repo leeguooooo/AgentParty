@@ -7,6 +7,7 @@ import {
   openSync,
   readFileSync,
   rmSync,
+  utimesSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -183,6 +184,100 @@ describe("hidden Claude Cross-session hook command", () => {
       expect(result.stdout).toContain("state is busy");
     } finally {
       if (lockFd !== null) closeSync(lockFd);
+      rmSync(gate, { recursive: true, force: true });
+    }
+  });
+
+  test("reclaims a consume lock abandoned by a crashed Hook process", async () => {
+    const gate = mkdtempSync(join(tmpdir(), "agentparty-hook-stale-lock-test-"));
+    chmodSync(gate, 0o700);
+    const sessionId = "67676767-6767-4767-8767-676767676767";
+    const hookArgs = ["--gate-directory", gate];
+    try {
+      expect((await runHook(JSON.stringify({
+        hook_event_name: "SessionStart",
+        session_id: sessionId,
+      }), process.env, hookArgs)).code).toBe(0);
+      const lockPath = join(gate, "consume.lock");
+      closeSync(openSync(lockPath, "wx", 0o600));
+      utimesSync(lockPath, new Date(0), new Date(0));
+
+      const result = await runHook(JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: sessionId,
+        tool_name: "SendMessage",
+        tool_input: { to: "researcher", message: "status" },
+      }), process.env, hookArgs);
+
+      expect(result).toEqual({ code: 0, stdout: "", stderr: "" });
+      expect(await Bun.file(lockPath).exists()).toBe(false);
+    } finally {
+      rmSync(gate, { recursive: true, force: true });
+    }
+  });
+
+  test("a stale consume lock is not reclaimed while another Hook is already reclaiming it", async () => {
+    const gate = mkdtempSync(join(tmpdir(), "agentparty-hook-reclaim-race-test-"));
+    chmodSync(gate, 0o700);
+    const sessionId = "68686868-6868-4868-8868-686868686868";
+    const hookArgs = ["--gate-directory", gate];
+    let reclaimFd: number | null = null;
+    try {
+      expect((await runHook(JSON.stringify({
+        hook_event_name: "SessionStart",
+        session_id: sessionId,
+      }), process.env, hookArgs)).code).toBe(0);
+      const lockPath = join(gate, "consume.lock");
+      closeSync(openSync(lockPath, "wx", 0o600));
+      utimesSync(lockPath, new Date(0), new Date(0));
+      // 另一个 Hook 已经拿着回收锁，正处在 lstat→rm→open 之间。此时本进程必须
+      // 完全不碰 consume.lock：直接删会把对方回收后新建的锁删掉，两边一起进临界区。
+      reclaimFd = openSync(`${lockPath}.reclaim`, "wx", 0o600);
+
+      const result = await runHook(JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: sessionId,
+        tool_name: "SendMessage",
+        tool_input: { to: "researcher", message: "status" },
+      }), process.env, hookArgs);
+
+      expect(result.code).toBe(2);
+      expect(result.stdout).toContain("state is busy");
+      expect(await Bun.file(lockPath).exists()).toBe(true);
+    } finally {
+      if (reclaimFd !== null) closeSync(reclaimFd);
+      rmSync(gate, { recursive: true, force: true });
+    }
+  });
+
+  test("a reclaim lock abandoned by a crashed Hook does not wedge stale-lock recovery", async () => {
+    const gate = mkdtempSync(join(tmpdir(), "agentparty-hook-reclaim-stale-test-"));
+    chmodSync(gate, 0o700);
+    const sessionId = "69696969-6969-4969-8969-696969696969";
+    const hookArgs = ["--gate-directory", gate];
+    try {
+      expect((await runHook(JSON.stringify({
+        hook_event_name: "SessionStart",
+        session_id: sessionId,
+      }), process.env, hookArgs)).code).toBe(0);
+      const lockPath = join(gate, "consume.lock");
+      const reclaimPath = `${lockPath}.reclaim`;
+      for (const path of [lockPath, reclaimPath]) {
+        closeSync(openSync(path, "wx", 0o600));
+        utimesSync(path, new Date(0), new Date(0));
+      }
+
+      const result = await runHook(JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: sessionId,
+        tool_name: "SendMessage",
+        tool_input: { to: "researcher", message: "status" },
+      }), process.env, hookArgs);
+
+      expect(result).toEqual({ code: 0, stdout: "", stderr: "" });
+      expect(await Bun.file(lockPath).exists()).toBe(false);
+      expect(await Bun.file(reclaimPath).exists()).toBe(false);
+    } finally {
       rmSync(gate, { recursive: true, force: true });
     }
   });
