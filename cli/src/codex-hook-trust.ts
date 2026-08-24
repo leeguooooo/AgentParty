@@ -145,7 +145,10 @@ export function classifyOwnHookCommand(
  * 绝对路径（JSON 引号包起来），否则回落裸 `party`。**不要在这里放宽**：接受比我们
  * 写得出的更多，正是本模块要消灭的形状。
  */
-export function codexOwnHookCommand(sub: string, execPath: string = process.execPath): string {
+export function codexOwnHookCommand(
+  sub: CodexOwnHookKind,
+  execPath: string = process.execPath,
+): string {
   const bin = isPartyBinaryPath(execPath) ? JSON.stringify(execPath) : "party";
   return `${bin} hook ${sub}`;
 }
