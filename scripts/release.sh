@@ -333,7 +333,7 @@ main() {
   # 推完必须核实远端确实指向这条提交——上面那条静默失败就是这么漏过去的。
   git fetch origin main --quiet || { echo "!! 推送后 fetch origin main 失败，无法核实" >&2; return 1; }
   [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_SHA" ]] || {
-    echo "!! origin/main 未指向 $RELEASE_SHA，版本提交没进 main。tag 未推，排查后重跑。" >&2
+    echo "!! origin/main 未指向 ${RELEASE_SHA}，版本提交没进 main。tag 未推，排查后重跑。" >&2
     echo "   origin/main = $(git rev-parse FETCH_HEAD)" >&2
     return 1
   }

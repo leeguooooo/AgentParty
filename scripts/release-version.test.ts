@@ -105,7 +105,7 @@ function runGit(directory: string, args: string[]) {
   execFileSync("git", args, { cwd: directory, stdio: "pipe" });
 }
 
-type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure";
+type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed";
 
 function writeExecutable(path: string, body: string) {
   writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${body}`);
@@ -145,7 +145,21 @@ function runReleaseHarness(scenario: ReleaseHarnessScenario) {
     `printf 'git %s\\n' "$*" >> "$MOCK_COMMAND_LOG"
 case "\${1:-}" in
   status) exit 0 ;;
-  rev-parse) exit 1 ;;
+  rev-parse)
+    # 发布基线与推送核实都读 SHA；只有 tag 名要报「不存在」，否则脚本会以为
+    # tag 已发过。push-not-landed 场景下推完之后让 origin/main 停在别处，用来
+    # 验证「静默空推」确实会被拦住。
+    case "\${2:-}" in
+      HEAD) printf '%s\\n' "$MOCK_HEAD_SHA"; exit 0 ;;
+      FETCH_HEAD)
+        if [[ "$MOCK_SCENARIO" == "push-not-landed" ]] && grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; then
+          printf '%s\\n' "$MOCK_OTHER_SHA"
+        else
+          printf '%s\\n' "$MOCK_HEAD_SHA"
+        fi
+        exit 0 ;;
+      *) exit 1 ;;
+    esac ;;
   *) exit 0 ;;
 esac
 `,
@@ -212,6 +226,8 @@ exec /bin/cp "$@"
       MOCK_COMMAND_LOG: commandLog,
       MOCK_COPY_COUNT: copyCount,
       MOCK_SCENARIO: scenario,
+      MOCK_HEAD_SHA: "1111111111111111111111111111111111111111",
+      MOCK_OTHER_SHA: "2222222222222222222222222222222222222222",
       RELEASE_GH_RETRY_DELAY: "0",
       RELEASE_GH_RETRY_ATTEMPTS: "2",
       RELEASE_RUN_LOOKUP_ATTEMPTS: "2",
@@ -590,6 +606,22 @@ cleanup_release_version
     expect(execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: directory }).toString()).toBe("");
     expect(readFileSync(cliPackagePath, "utf8")).toBe(expectedCli);
     expect(readFileSync(desktopPackagePath, "utf8")).toBe(expectedDesktop);
+  });
+});
+
+describe("release main 推送落地", () => {
+  // detached HEAD 下 `git push origin main` 推的是本地 main 引用，git 打印
+  // "Everything up-to-date" 并以 0 退出——tag 上去了、版本提交没进 main。
+  // 这条用例模拟推送没落地，脚本必须当场停住，而不是继续打 tag。
+  test("origin/main 没指向发布提交时停住，且不留悬空 tag", () => {
+    const result = runReleaseHarness("push-not-landed");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).toContain("git push origin HEAD:refs/heads/main");
+    expect(result.stderr).toContain("版本提交没进 main");
+    expect(result.commands).not.toContain("git tag v0.2.83");
+    expect(result.commands).not.toContain("git push origin v0.2.83");
+    expect(result.commands).not.toContain("gh run list");
   });
 });
 
