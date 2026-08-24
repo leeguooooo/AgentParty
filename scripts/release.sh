@@ -257,6 +257,20 @@ main() {
   # 0) 前置检查
   [[ -z "$(git status --porcelain)" ]] || { echo "工作树不干净，先提交或 stash:"; git status --short; return 1; }
   git rev-parse "$TAG" >/dev/null 2>&1 && { echo "tag $TAG 已存在"; return 1; }
+  # 发版必须正好从当前 origin/main 切出。主仓工作树常年是脏的，实际发版多在临时
+  # worktree 里跑，而 worktree 通常是 detached HEAD——那里本地 `main` 引用停在旧
+  # 位置，后面按分支名推送会静默推空。这里先把基线钉死。
+  git fetch origin main --quiet || { echo "fetch origin main 失败"; return 1; }
+  local BASE_SHA REMOTE_MAIN_SHA
+  BASE_SHA=$(git rev-parse HEAD)
+  REMOTE_MAIN_SHA=$(git rev-parse FETCH_HEAD)
+  [[ "$BASE_SHA" == "$REMOTE_MAIN_SHA" ]] || {
+    echo "HEAD 与 origin/main 不一致，拒绝发版：" >&2
+    echo "  HEAD        = $BASE_SHA" >&2
+    echo "  origin/main = $REMOTE_MAIN_SHA" >&2
+    echo "先把发布基线对齐到 origin/main（worktree 请用 git worktree add --detach <path> origin/main）" >&2
+    return 1
+  }
   CLI_PACKAGE="cli/package.json"
   DESKTOP_PACKAGE="desktop/package.json"
   DESKTOP_CARGO="desktop/src-tauri/Cargo.toml"
@@ -310,8 +324,21 @@ main() {
   INDEX_PENDING=1
   git commit -m "chore(release): $TAG" -m "Claude-Session: ${CLAUDE_SESSION_URL:-scripts/release.sh}"
   disable_release_cleanup
+  local RELEASE_SHA
+  RELEASE_SHA=$(git rev-parse HEAD)
+  # 必须按 HEAD 推，不能写 `git push origin main`：detached HEAD 下后者推的是本地
+  # main 引用（还停在 bump 之前），git 会打印 "Everything up-to-date" 当作成功，
+  # 于是 tag 上去了、版本提交没进 main，线上 /api/version 与 tag 对不上。
+  git push origin "HEAD:refs/heads/main"
+  # 推完必须核实远端确实指向这条提交——上面那条静默失败就是这么漏过去的。
+  git fetch origin main --quiet || { echo "!! 推送后 fetch origin main 失败，无法核实" >&2; return 1; }
+  [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_SHA" ]] || {
+    echo "!! origin/main 未指向 $RELEASE_SHA，版本提交没进 main。tag 未推，排查后重跑。" >&2
+    echo "   origin/main = $(git rev-parse FETCH_HEAD)" >&2
+    return 1
+  }
+  # tag 放在 main 落地之后：main 没推成就绝不留下一个指向本地提交的 tag。
   git tag "$TAG"
-  git push origin main
   git push origin "$TAG"
 
   # 3) 轮询 tag 的 CI；任何失败都保留 tag，交由操作者诊断。
