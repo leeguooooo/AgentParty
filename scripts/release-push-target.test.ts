@@ -18,10 +18,13 @@ describe("release.sh 推送目标", () => {
     expect(releaseScript).toContain('git push origin "HEAD:refs/heads/main"');
   });
 
-  test("推完核实 origin/main 真的指向这条发布提交", () => {
+  test("推完核实发布提交真的进了 origin/main 的历史", () => {
     const verify = releaseScript.slice(releaseScript.indexOf('git push origin "HEAD:refs/heads/main"'));
     expect(verify).toContain("git fetch origin main --quiet");
-    expect(verify).toMatch(/\[\[ "\$\(git rev-parse FETCH_HEAD\)" == "\$RELEASE_SHA" \]\]/);
+    // 必须是祖先判定而不是 tip 相等：别人紧接着又推一笔时 tip 不是我们的提交，
+    // 但发布提交确实已经在 main 的历史里，判成「没落地」会误回滚。
+    expect(verify).toContain('git merge-base --is-ancestor "$RELEASE_SHA" FETCH_HEAD');
+    expect(verify).not.toMatch(/\$\(git rev-parse FETCH_HEAD\)" == "\$RELEASE_SHA/);
   });
 
   test("tag 在 main 落地之后才打——main 没推成就不留悬空 tag", () => {

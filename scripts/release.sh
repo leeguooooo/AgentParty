@@ -300,21 +300,53 @@ remote_main_sha() {
 # 确认没落地才允许回滚，仍然拿不准就一个字节都不改。
 settle_unlanded_release() {
   local base_sha="$1" release_sha="$2" version="$3"
-  local remote
-  remote=$(remote_main_sha)
-  if [[ -n "$remote" && "$remote" == "$release_sha" ]]; then
-    echo "   远端 origin/main 其实已经是 ${release_sha}（推送已生效，只是客户端没拿到响应），不回滚。" >&2
-    echo "   只需补 tag： git tag v${version} ${release_sha} && git push origin v${version}" >&2
+  case "$(release_landing_state "$base_sha" "$release_sha")" in
+    landed)
+      echo "   远端 origin/main 的历史里已经有 ${release_sha}（推送其实生效了），不回滚。" >&2
+      echo "   只需补 tag： git tag v${version} ${release_sha} && git push origin v${version}" >&2
+      ;;
+    missing)
+      echo "   已向远端确认这条提交确实没落地。" >&2
+      abort_unpushed_release "$base_sha" "$release_sha" "$version"
+      ;;
+    *)
+      echo "   拿不准远端到底落没落地，不自动回滚。" >&2
+      echo "   恢复前先确认远端： git ls-remote origin refs/heads/main" >&2
+      print_release_manual_recovery "$base_sha" "$release_sha" "$version"
+      ;;
+  esac
+}
+
+# 这条发布提交到底进没进 origin/main：landed / missing / unknown。
+#
+# 只比远端 tip 是不够的。别人完全可能在我们推上去之后紧接着又推一笔，此时 tip 不是
+# 我们的提交，但我们的提交确实已经在 main 的历史里。把这种情况判成「没落地」去回滚，
+# 等于把已经发布出去的提交从本地抹掉；重跑还会为同一个版本号造出第二条 bump 提交，
+# tag 最终指向的东西和 main 里的那条对不上。
+#
+# 所以：tip 正好是它 ⇒ landed；tip 还停在发布前的基线 ⇒ 确实 missing；tip 是第三个
+# 值 ⇒ 必须把远端历史取下来做祖先判定才能分清，取不下来就老实说 unknown。
+release_landing_state() {
+  local base_sha="$1" release_sha="$2"
+  local tip
+  tip=$(remote_main_sha)
+  if [[ -n "$tip" && "$tip" == "$release_sha" ]]; then
+    printf 'landed'
     return 0
   fi
-  if [[ -z "$remote" ]]; then
-    echo "   git ls-remote 也拿不到远端状态，落地与否未知，不自动回滚。" >&2
-    echo "   恢复前先确认远端： git ls-remote origin refs/heads/main" >&2
-    print_release_manual_recovery "$base_sha" "$release_sha" "$version"
+  if [[ -n "$tip" && -n "$base_sha" && "$tip" == "$base_sha" ]]; then
+    printf 'missing'
     return 0
   fi
-  echo "   已向远端确认 origin/main = ${remote}，这条提交确实没落地。" >&2
-  abort_unpushed_release "$base_sha" "$release_sha" "$version"
+  if git fetch origin main --quiet 2>/dev/null; then
+    if git merge-base --is-ancestor "$release_sha" FETCH_HEAD 2>/dev/null; then
+      printf 'landed'
+    else
+      printf 'missing'
+    fi
+    return 0
+  fi
+  printf 'unknown'
 }
 
 cleanup_release_version() {
@@ -421,8 +453,10 @@ main() {
     settle_unlanded_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
     return 1
   fi
-  [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_SHA" ]] || {
-    echo "!! origin/main 未指向 ${RELEASE_SHA}，版本提交没进 main。tag 未推。" >&2
+  # 用祖先判定而不是 tip 相等：别人在我们之后又推一笔时 tip 会不是我们的提交，
+  # 但发布提交确实已经在 main 的历史里，那种情况直接继续打 tag 就对了。
+  git merge-base --is-ancestor "$RELEASE_SHA" FETCH_HEAD || {
+    echo "!! origin/main 的历史里没有 ${RELEASE_SHA}，版本提交没进 main。tag 未推。" >&2
     echo "   origin/main = $(git rev-parse FETCH_HEAD)" >&2
     # 这条分支是**已经核实过**远端没落地，可以直接走带状态门的回滚。
     abort_unpushed_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
