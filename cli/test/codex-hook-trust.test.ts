@@ -151,6 +151,20 @@ describe("定位：只认我们自己那两条，按命令本体", () => {
     }
   });
 
+  // 第三轮审查逮到的：引号闭合后没校验 token 边界。`"/opt/x/party"hook codex-stop` 会被
+  // 解析成 binary=/opt/x/party + args=[hook, codex-stop]，三项判据全过 ⇒ 自动批准；
+  // 而 shell 实际执行的是 `/opt/x/partyhook`——另一个可执行文件。引号不是 token 边界。
+  test("粘连：闭合引号后紧跟字符 ⇒ 不认（真正执行的是别的二进制）", () => {
+    for (const glued of [
+      '"/opt/x/party"hook codex-stop',
+      "'/opt/x/party'hook codex-stop",
+      '"/Users/leo/.local/bin/party"-evil hook codex-stop',
+    ]) {
+      const found = findCodexOwnHooks(HOOKS, hooksJson(glued), config());
+      expect({ glued, kinds: found.map((t) => t.kind) }).toEqual({ glued, kinds: ["codex-report"] });
+    }
+  });
+
   test("正身：带绝对路径与引号的 party 本体仍然认得出", () => {
     for (const real of [
       '"/Users/leo/.local/bin/party" hook codex-stop',

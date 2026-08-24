@@ -113,7 +113,13 @@ function commandBinary(command: string): string | null {
   const quote = trimmed[0];
   if (quote === '"' || quote === "'") {
     const end = trimmed.indexOf(quote, 1);
-    return end === -1 ? null : trimmed.slice(1, end);
+    if (end === -1) return null;
+    // 闭合引号后**必须**是空白或结尾。少了这一条，`"/opt/x/party"hook codex-stop` 会被解析成
+    // binary=/opt/x/party + args=[hook, codex-stop]，三项判据全过 ⇒ 自动批准；而 shell 实际
+    // 执行的是 `/opt/x/partyhook`——另一个可执行文件。引号只是引号，不是 token 边界。
+    const after = trimmed[end + 1];
+    if (after !== undefined && !/\s/.test(after)) return null;
+    return trimmed.slice(1, end);
   }
   const space = trimmed.search(/\s/);
   return space === -1 ? trimmed : trimmed.slice(0, space);
