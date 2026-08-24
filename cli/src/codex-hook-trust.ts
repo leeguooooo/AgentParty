@@ -37,8 +37,8 @@ import { sanitizeSingleLine } from "./format";
 
 /** 我们自己装的两条 codex hook，按**命令本体**认，绝不按下标。 */
 export const CODEX_OWN_HOOK_COMMANDS = [
-  { kind: "codex-stop", needle: "hook codex-stop", label: "前台唤醒（被 @ 时把消息取走）" },
-  { kind: "codex-report", needle: "hook codex-report", label: "会话入册（让别人看得见你在线）" },
+  { kind: "codex-stop", sub: "codex-stop", label: "前台唤醒（被 @ 时把消息取走）" },
+  { kind: "codex-report", sub: "codex-report", label: "会话入册（让别人看得见你在线）" },
 ] as const;
 
 export type CodexOwnHookKind = (typeof CODEX_OWN_HOOK_COMMANDS)[number]["kind"];
@@ -106,6 +106,57 @@ function trustStateOf(table: Record<string, unknown> | null, key: string): {
  * 只按命令本体匹配；同一条命令在同一事件下出现多次时全部列出（去重交给调用方，
  * 反正每一条都是我们的）。
  */
+/** 命令行首个 token（去掉包裹的引号），用来判定可执行文件本体。 */
+function commandBinary(command: string): string | null {
+  const trimmed = command.trim();
+  if (trimmed === "") return null;
+  const quote = trimmed[0];
+  if (quote === '"' || quote === "'") {
+    const end = trimmed.indexOf(quote, 1);
+    return end === -1 ? null : trimmed.slice(1, end);
+  }
+  const space = trimmed.search(/\s/);
+  return space === -1 ? trimmed : trimmed.slice(0, space);
+}
+
+/** 首个 token 之后的参数（粗切，够判 `hook <sub>` 这两段即可）。 */
+function commandArgs(command: string): string[] {
+  const trimmed = command.trim();
+  const quote = trimmed[0];
+  let rest: string;
+  if (quote === '"' || quote === "'") {
+    const end = trimmed.indexOf(quote, 1);
+    rest = end === -1 ? "" : trimmed.slice(end + 1);
+  } else {
+    const space = trimmed.search(/\s/);
+    rest = space === -1 ? "" : trimmed.slice(space);
+  }
+  return rest.trim().split(/\s+/).filter((t) => t !== "");
+}
+
+/**
+ * 这条 hook 是不是**我们自己装的**。
+ *
+ * 判据必须是**命令本体**，不能是子串：`command.includes("hook codex-stop")` 会把任何一条
+ * 命令行里恰好含这段文本的第三方 hook 认成我们的，而本模块的后果是**自动把它标成 enabled**
+ * —— 等于替用户批准了一条别人的 hook。（同一份 hooks.json 里就住着 superset / Otty /
+ * vibe-island 的条目；#918 也正是为同一类子串判据收紧过 `looksLikePartyMcpCommand`。）
+ *
+ * 因此要求三件事同时成立：可执行文件 basename 是 party、第一个参数是 `hook`、第二个是
+ * 我们的子命令。判不准一律不认（返回 null），漏认只是少批准一条，误认是安全事故。
+ */
+export function classifyOwnHookCommand(
+  command: string,
+): (typeof CODEX_OWN_HOOK_COMMANDS)[number] | undefined {
+  const binary = commandBinary(command);
+  if (binary === null) return undefined;
+  const base = binary.split("/").pop() ?? binary;
+  if (base.replace(/\.(exe|cmd|bat)$/i, "") !== "party") return undefined;
+  const args = commandArgs(command);
+  if (args[0] !== "hook") return undefined;
+  return CODEX_OWN_HOOK_COMMANDS.find((c) => c.sub === args[1]);
+}
+
 export function findCodexOwnHooks(
   hooksPath: string,
   hooksJson: unknown,
@@ -123,7 +174,7 @@ export function findCodexOwnHooks(
       for (let h = 0; h < entries.length; h += 1) {
         const command = asObject(entries[h])?.command;
         if (typeof command !== "string") continue;
-        const own = CODEX_OWN_HOOK_COMMANDS.find((c) => command.includes(c.needle));
+        const own = classifyOwnHookCommand(command);
         if (own === undefined) continue;
         const key = `${hooksPath}:${trustEventName(event)}:${String(g)}:${String(h)}`;
         out.push({

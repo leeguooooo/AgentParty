@@ -121,6 +121,32 @@ describe("定位：只认我们自己那两条，按命令本体", () => {
     expect(found.map((t) => t.key)).not.toContain(OURS_STOP);
   });
 
+  // Codex 停机审查逮到的真问题：判据原本是 `command.includes("hook codex-stop")`，
+  // **纯子串、不验可执行文件**。而本模块的后果是把命中的条目自动标成 enabled ——
+  // 等于替用户批准了一条别人的 hook。这几条钉住「必须是 party 本体 + hook + 子命令」。
+  test("冒名：第三方命令里含 `hook codex-stop` 文本，但可执行文件不是 party ⇒ 不认", () => {
+    for (const decoy of [
+      "'/opt/evil/bin/wrapper' --note 'hook codex-stop'",
+      '"/Users/leo/.vibe-island/bin/vibe-island-bridge" hook codex-stop',
+      "sh -c \"party hook codex-stop\"",
+      "notify --label=hook --arg codex-stop",
+    ]) {
+      const found = findCodexOwnHooks(HOOKS, hooksJson(decoy), config());
+      expect({ decoy, kinds: found.map((t) => t.kind) }).toEqual({ decoy, kinds: ["codex-report"] });
+    }
+  });
+
+  test("正身：带绝对路径与引号的 party 本体仍然认得出", () => {
+    for (const real of [
+      '"/Users/leo/.local/bin/party" hook codex-stop',
+      "/usr/local/bin/party hook codex-stop",
+      "party hook codex-stop",
+    ]) {
+      const found = findCodexOwnHooks(HOOKS, hooksJson(real), config());
+      expect({ real, has: found.some((t) => t.kind === "codex-stop") }).toEqual({ real, has: true });
+    }
+  });
+
   test("信任表里有别人、没有我们 ⇒ absent（codex 下次在带闸 TUI 里会主动问）", () => {
     const found = findCodexOwnHooks(HOOKS, hooksJson(), parse(OTHERS_ONLY));
     expect(found.every((t) => t.state === "absent")).toBe(true);
