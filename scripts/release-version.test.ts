@@ -105,7 +105,7 @@ function runGit(directory: string, args: string[]) {
   execFileSync("git", args, { cwd: directory, stdio: "pipe" });
 }
 
-type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed";
+type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed";
 
 function writeExecutable(path: string, body: string) {
   writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${body}`);
@@ -145,6 +145,12 @@ function runReleaseHarness(scenario: ReleaseHarnessScenario) {
     `printf 'git %s\\n' "$*" >> "$MOCK_COMMAND_LOG"
 case "\${1:-}" in
   status) exit 0 ;;
+  push)
+    if [[ "$MOCK_SCENARIO" == "push-failed" && "$*" == *"refs/heads/main"* ]]; then
+      echo "simulated push rejection" >&2
+      exit 1
+    fi
+    exit 0 ;;
   rev-parse)
     # 发布基线与推送核实都读 SHA；只有 tag 名要报「不存在」，否则脚本会以为
     # tag 已发过。push-not-landed 场景下推完之后让 origin/main 停在别处，用来
@@ -613,6 +619,15 @@ describe("release main 推送落地", () => {
   // detached HEAD 下 `git push origin main` 推的是本地 main 引用，git 打印
   // "Everything up-to-date" 并以 0 退出——tag 上去了、版本提交没进 main。
   // 这条用例模拟推送没落地，脚本必须当场停住，而不是继续打 tag。
+  test("推送 origin/main 失败时停住，不留悬空 tag", () => {
+    const result = runReleaseHarness("push-failed");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("推送 origin/main 失败");
+    expect(result.commands).not.toContain("git tag v0.2.83");
+    expect(result.commands).not.toContain("git push origin v0.2.83");
+  });
+
   test("origin/main 没指向发布提交时停住，且不留悬空 tag", () => {
     const result = runReleaseHarness("push-not-landed");
 

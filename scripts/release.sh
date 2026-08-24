@@ -329,7 +329,10 @@ main() {
   # 必须按 HEAD 推，不能写 `git push origin main`：detached HEAD 下后者推的是本地
   # main 引用（还停在 bump 之前），git 会打印 "Everything up-to-date" 当作成功，
   # 于是 tag 上去了、版本提交没进 main，线上 /api/version 与 tag 对不上。
-  git push origin "HEAD:refs/heads/main"
+  if ! git push origin "HEAD:refs/heads/main"; then
+    echo "!! 推送 origin/main 失败（网络或权限），tag 未推，排查后重跑。" >&2
+    return 1
+  fi
   # 推完必须核实远端确实指向这条提交——上面那条静默失败就是这么漏过去的。
   git fetch origin main --quiet || { echo "!! 推送后 fetch origin main 失败，无法核实" >&2; return 1; }
   [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_SHA" ]] || {
