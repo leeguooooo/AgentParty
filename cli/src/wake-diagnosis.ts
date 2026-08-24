@@ -20,6 +20,7 @@ import {
   type CodexHookIdentitySource,
 } from "./codex-session-identity";
 import { findJoinBindings, joinBindingsPath, readJoinBindings, type JoinBinding } from "./join-binding";
+import { buildCodexTrustRemedy, type CodexTrustRemedy } from "./codex-hook-trust";
 
 export interface CodexWakeDiagnosis {
   channel: string | null;
@@ -128,6 +129,46 @@ export function codexStopHookStatus(
     return "disabled";
   }
   return "ok";
+}
+
+/** `~/.codex/config.toml`（跟着 CODEX_HOME 走，与 hooks.json 同一口径）。 */
+export function codexConfigTomlPath(
+  env: NodeJS.ProcessEnv = process.env,
+  userHome: string = homedir(),
+): string {
+  return join(codexHomeDir(env, userHome), "config.toml");
+}
+
+/**
+ * 读出「我们那两条现在什么状况、能不能就地修」（#942 第二轮）。
+ *
+ * 刻意**不复用** `codexStopHookStatus`：那个函数回答的是「会不会跑」，且带着 #925 的老版本
+ * 兼容语义（没有信任闸时判 ok）；这里回答的是「怎么修」，要的是每一条的 key 与 trusted_hash。
+ * 两者判据不同，硬合成一个只会让某一边悄悄变味。
+ *
+ * 只读、不写、不发网。任何一步读不出来都退化成「没有可就地修的条目」，绝不抛。
+ */
+export function readCodexTrustRemedy(
+  env: NodeJS.ProcessEnv = process.env,
+  userHome: string = homedir(),
+): CodexTrustRemedy {
+  const hooksPath = codexHooksJsonPath(env, userHome);
+  const configPath = codexConfigTomlPath(env, userHome);
+  let hooksJson: unknown = null;
+  let detail = "";
+  try {
+    hooksJson = JSON.parse(readFileSync(hooksPath, "utf8")) as unknown;
+  } catch {
+    detail = `读不出 ${hooksPath}`;
+  }
+  let config: unknown = null;
+  try {
+    config = Bun.TOML.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    // 读不出 config.toml：老版本 codex 根本没有信任闸（#925 同款判据），不喊狼来了。
+    detail = detail === "" ? `读不出 ${configPath}` : detail;
+  }
+  return buildCodexTrustRemedy({ hooksPath, configPath, hooksJson, config, detail });
 }
 
 /** 兼容旧判定：只回答「装没装」。 */

@@ -20,7 +20,8 @@ import {
   probeCodexTrustGate,
   type CodexTrustGateProbe,
 } from "./codex-trust-gate";
-import { codexHooksJsonPath, type CodexWakeDiagnosis } from "./wake-diagnosis";
+import type { CodexTrustRemedy } from "./codex-hook-trust";
+import { codexHooksJsonPath, readCodexTrustRemedy, type CodexWakeDiagnosis } from "./wake-diagnosis";
 
 export interface WakeCheckStep {
   /** 稳定的机读 id（--json 消费方按它判，不按文案）。 */
@@ -66,6 +67,11 @@ export function buildWakeChecklist(
    * `codex --version`，别的三步一次进程都不起——自检不该给自己加一个新的失败源/延迟源。
    */
   probeTrustGate: () => CodexTrustGateProbe = () => probeCodexTrustGate(),
+  /**
+   * 「我们那两条在 config.toml 里是什么状况」（#942 第二轮）。同样惰性——只读本地两个文件，
+   * 但没卡在信任闸上时一次都不读。
+   */
+  readTrustRemedy: () => CodexTrustRemedy | null = () => readCodexTrustRemedy(env),
 ): WakeChecklist {
   const hooksPath = codexHooksJsonPath(env);
   const steps: WakeCheckStep[] = [
@@ -101,7 +107,7 @@ export function buildWakeChecklist(
     channel: d.channel,
     steps,
     remaining: steps.filter((s) => !s.ok).length,
-    next: failed === undefined ? null : nextActionFor(failed.id, d, probeTrustGate),
+    next: failed === undefined ? null : nextActionFor(failed.id, d, probeTrustGate, readTrustRemedy),
   };
 }
 
@@ -109,6 +115,7 @@ function nextActionFor(
   id: WakeCheckStep["id"],
   d: CodexWakeDiagnosis,
   probeTrustGate: () => CodexTrustGateProbe,
+  readTrustRemedy: () => CodexTrustRemedy | null,
 ): WakeChecklist["next"] {
   switch (id) {
     case "channel_bound":
@@ -131,9 +138,9 @@ function nextActionFor(
       // fail-open：探测抛了就退回一条不撒谎的通用说法，绝不让自检本身挂掉。
       let guidance: { do: string; notes: string[] };
       try {
-        guidance = codexTrustApprovalGuidance(probeTrustGate());
+        guidance = codexTrustApprovalGuidance(probeTrustGate(), readTrustRemedy());
       } catch {
-        guidance = codexTrustApprovalGuidance({ onPath: null, candidates: [], gated: [], desktop: null });
+        guidance = codexTrustApprovalGuidance({ onPath: null, candidates: [], gated: [], desktop: null }, null);
       }
       return { do: guidance.do, notes: [...guidance.notes, CODEX_EXEC_NO_HOOKS_NOTE], verify: VERIFY };
     }

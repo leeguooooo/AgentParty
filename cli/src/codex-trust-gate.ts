@@ -19,10 +19,13 @@
 //     探测不到就**如实说找不到并给出判据**，不猜一个路径让人去试（猜错＝再来一轮「照做了还是不行」）。
 //   - 全路径 fail-open：任何一步探测失败都不能让 `party wake check` 挂掉或给出更糟的建议。
 import { spawnSync } from "node:child_process";
-import { readdirSync, realpathSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
 import { sanitizeSingleLine } from "./format";
+import { agentpartyHome } from "./config";
+import { atomicWriteText } from "./atomic-json";
+import type { CodexTrustRemedy } from "./codex-hook-trust";
 
 /**
  * 信任闸最早出现在 codex **0.149**。
@@ -106,6 +109,8 @@ export interface CodexTrustGateProbe {
 
 export interface CodexBinaryProbeDeps {
   isExecutable(path: string): boolean;
+  /** 文件指纹（大小 + mtime），用于缓存失效判定。取不到返回 null。 */
+  fingerprint(path: string): string | null;
   listDir(path: string): string[];
   /** `ps -axo args=` 的每一行；拿不到返回空数组。 */
   processCommandLines(): string[];
@@ -147,6 +152,14 @@ export function defaultCodexBinaryProbeDeps(
         return false;
       }
     },
+    fingerprint(path) {
+      try {
+        const st = statSync(path);
+        return `${String(st.size)}:${String(Math.trunc(st.mtimeMs))}`;
+      } catch {
+        return null;
+      }
+    },
     listDir(path) {
       try {
         return readdirSync(path);
@@ -169,7 +182,9 @@ export function defaultCodexBinaryProbeDeps(
         // 参数走数组、不过 shell，路径不会被当命令拼接；输出上限防一个坏二进制把我们撑爆。
         const r = spawnSync(path, ["--version"], {
           encoding: "utf8",
-          timeout: 5000,
+          // 真机上那个 cmux shim 一次就要 2.6 秒（它是包装脚本）；机器忙的时候 5 秒会误判成
+          // 「读不出版本」，把一条本该确定的警告降级成「说不准」。留足余量。
+          timeout: 8000,
           maxBuffer: 64 * 1024,
           windowsHide: true,
         });
@@ -310,6 +325,50 @@ export function firstCodexOnPath(deps: CodexBinaryProbeDeps): string | null {
 
 const EMPTY_PROBE: CodexTrustGateProbe = { onPath: null, candidates: [], gated: [], desktop: null };
 
+/** 版本探测结果的缓存活期。codex 升级会改二进制的大小/mtime，指纹一变就自动失效。 */
+const VERSION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+interface VersionCacheFile {
+  /** 候选集合的指纹；任何一个二进制被换掉都会变。 */
+  key: string;
+  savedAt: number;
+  /** 路径 → `--version` 原文（探过但读不出记 null）。 */
+  versions: Record<string, string | null>;
+}
+
+function versionCachePath(env: NodeJS.ProcessEnv): string {
+  return join(agentpartyHome(env), "codex-trust-gate.json");
+}
+
+/**
+ * 「哪个 codex 带信任闸」这件事一天之内不会变，但**问一次很贵**：真机上 PATH 里那个 cmux shim
+ * 一次 `--version` 就要 2.6 秒。而 `wake check` / `hook install --codex` 会被反复调用
+ * （接入包里、排查时、测试里），每次重付一遍既慢又没意义。
+ *
+ * 所以按「候选二进制的路径 + 大小 + mtime」做键缓存版本号：换了 codex、升级了 codex，
+ * 指纹立刻变、缓存立刻失效。读写全 fail-open——缓存坏掉最多是慢一点，绝不影响结论。
+ */
+function readVersionCache(env: NodeJS.ProcessEnv, key: string): Record<string, string | null> | null {
+  try {
+    const raw = JSON.parse(readFileSync(versionCachePath(env), "utf8")) as VersionCacheFile;
+    if (raw.key !== key) return null;
+    if (!Number.isFinite(raw.savedAt) || Date.now() - raw.savedAt > VERSION_CACHE_TTL_MS) return null;
+    if (raw.versions === null || typeof raw.versions !== "object") return null;
+    return raw.versions;
+  } catch {
+    return null;
+  }
+}
+
+function writeVersionCache(env: NodeJS.ProcessEnv, key: string, versions: Record<string, string | null>): void {
+  try {
+    const file: VersionCacheFile = { key, savedAt: Date.now(), versions };
+    atomicWriteText(versionCachePath(env), `${JSON.stringify(file)}\n`);
+  } catch {
+    // best effort：缓存写不进去只是下次再慢一遍，不是错误
+  }
+}
+
 /** 没被探过的候选怎么描述——绝不说成「版本读不出」（那是另一回事）。 */
 function versionLabel(b: CodexBinary): string {
   if (b.version !== null) return b.version;
@@ -323,9 +382,13 @@ function versionLabel(b: CodexBinary): string {
  */
 export function probeCodexTrustGate(
   deps: CodexBinaryProbeDeps = defaultCodexBinaryProbeDeps(),
+  env: NodeJS.ProcessEnv = process.env,
 ): CodexTrustGateProbe {
   try {
     const found = discoverCodexBinaries(deps);
+    const cacheKey = found.map((b) => `${b.path}#${deps.fingerprint(b.path) ?? "?"}`).join("|");
+    const cached = found.length === 0 ? null : readVersionCache(env, cacheKey);
+    const fresh: Record<string, string | null> = {};
     const pathReal = firstCodexOnPath(deps);
     // PATH 上那个可能已经在发现阶段被按 realpath 去重掉了（`~/.bun/bin/codex` 常是个软链）。
     // 所以这里也按 realpath 认人，别因为字面路径不同就把它当成「没探过」。
@@ -349,24 +412,30 @@ export function probeCodexTrustGate(
       // wantOnPath 同时豁免「够用就收工」和探测次数上限——理由同 mustKeep。
       const wantOnPath = !onPathProbed && i === onPathIndex;
       if (!wantOnPath && ((gatedFound && onPathProbed) || probes >= MAX_VERSION_PROBES)) return b;
-      probes += 1;
       // 单个二进制探崩了只该丢掉它自己的版本，不该把整份探测拖垮——PATH 上那个 shim 是外部脚本，
       // 我们对它一无所知。外层还有一道兜底，这里是**降级**而不是重复保险。
       let version: string | null;
-      try {
-        // `--version` 是**外部二进制的 stdout**，最终会被原样印进终端。剥掉 ANSI / 控制字符，
-        // 否则一行版本号就能伪造出别的输出行（#652 同款）。这里是唯一收口，别挪到 deps 里去。
-        const raw = deps.versionOf(b.path);
-        const clean = raw === null ? "" : sanitizeSingleLine(raw).trim();
-        version = clean === "" ? null : clean;
-      } catch {
-        version = null;
+      if (cached !== null && Object.prototype.hasOwnProperty.call(cached, b.path)) {
+        version = cached[b.path] ?? null;
+      } else {
+        probes += 1;
+        try {
+          // `--version` 是**外部二进制的 stdout**，最终会被原样印进终端。剥掉 ANSI / 控制字符，
+          // 否则一行版本号就能伪造出别的输出行（#652 同款）。这里是唯一收口，别挪到 deps 里去。
+          const raw = deps.versionOf(b.path);
+          const clean = raw === null ? "" : sanitizeSingleLine(raw).trim();
+          version = clean === "" ? null : clean;
+        } catch {
+          version = null;
+        }
       }
+      fresh[b.path] = version;
       const gate = codexVersionHasTrustGate(parseCodexVersion(version));
       if (gate === true) gatedFound = true;
       if (i === onPathIndex) onPathProbed = true;
       return { ...b, version, gate, probed: true };
     });
+    if (found.length > 0 && Object.keys(fresh).length > 0) writeVersionCache(env, cacheKey, fresh);
     const resolved = onPathIndex < 0 ? undefined : candidates[onPathIndex];
     const onPath: CodexBinary | null =
       pathReal === null
@@ -413,70 +482,111 @@ function describe(b: CodexBinary): string {
 }
 
 /**
- * 一份探测 → 一条**用户照做就能成功**的修法。
+ * 一份探测 + 一份 config.toml 现状 → 一条**用户照做就能成功**的修法。
  *
- * 分叉的依据是「哪个二进制带闸」，不是「用户自称用桌面版还是终端」——用户答不上来这个问题，
- * 而二进制我们探得到。三种结局，各自都不留「无可奉告」的出口：
- *   A. PATH 上那个就带闸 ⇒ 维持原来的说法（直接跑 `codex`），这是终端形态的正路；
- *   B. PATH 上那个不带闸 / 说不准，但别处有带闸的 ⇒ 给**那个二进制的绝对路径**；
- *   C. 一个带闸的都没找到 ⇒ 如实说找不到 + 给判据 + 列出探到了什么。**绝不猜一个路径让人去试。**
+ * 分叉的第一依据是**这几条 hook 在信任表里的状态**，不是「用哪个二进制」——因为
+ * 真机验证已经证伪了「去 TUI 里批准」这条路：codex 的启动 review 只对「新的或改动过的」
+ * hook 发问，带着 trusted_hash 且 enabled=false 的条目它**再也不会问**（#942 第二轮）。
+ *
+ *   A. 能就地翻（行在、有 hash、当前 false）⇒ **主路径**：`party hook install --codex`
+ *      当场问一句，由我们把用户的确认写进 config.toml。
+ *   B. 条目还没进过信任表 ⇒ codex 下次在**带闸的** TUI 里启动时确实会问；这一档才轮到
+ *      形态探测出场，告诉用户该起哪个二进制。
+ *   C. 其余 ⇒ **兜底**：把要粘的那几段 TOML 原样打出来。绝不让人去等一个不会出现的提示，
+ *      也绝不猜一个路径让他去试。
+ *
+ * 形态探测（桌面版 / PATH 版本）在每一档都还在用，但用途从「给批准入口」变成了
+ * 「把话说准」：桌面版不会弹窗、PATH 上那个没有闸——这两句不说，用户就会以为自己照做了。
  */
-export function codexTrustApprovalGuidance(probe: CodexTrustGateProbe): CodexTrustApprovalGuidance {
+export function codexTrustApprovalGuidance(
+  probe: CodexTrustGateProbe,
+  remedy: CodexTrustRemedy | null = null,
+): CodexTrustApprovalGuidance {
   const notes: string[] = [];
   const onPath = probe.onPath;
   const pathGate = onPath?.gate ?? null;
 
-  // 桌面版永远不会自己弹出那个界面——这是本 issue 的第一处错，任何一档都必须说。
+  // 桌面版永远不会自己弹出那个界面——形态探测保留下来就是为了把这句说准。
   const desktopNote = (app: string | null): string =>
-    `${app === null ? "桌面版 codex" : `${sanitizeSingleLine(app)}（桌面版）`}是 app-server 形态，不走 TUI 启动路径，【永远不会】自己弹出 "Hooks need review"；` +
-    "它和终端里的 codex 共用同一份 ~/.codex/config.toml，所以在终端批准一次就对它生效——批准完把它重启一下。";
+    `${app === null ? "桌面版 codex" : `${sanitizeSingleLine(app)}（桌面版）`}是 app-server 形态，不走 TUI 启动路径，【永远不会】自己弹出 "Hooks need review"。`;
 
-  // A：PATH 上就带闸 —— 终端形态的正路，文案保持不变。
-  if (pathGate === true) {
-    if (probe.desktop !== null && probe.desktop.path !== onPath?.path) notes.push(desktopNote(probe.desktop.app));
+  // 版本错配：不明说，用户会以为自己照做了。任何一档都要说（owner 的 PATH 上就是 0.145）。
+  const pushVersionNote = (): void => {
+    if (pathGate === false && onPath !== null) {
+      notes.push(
+        `⚠ 你 PATH 上的 codex 是 ${onPath.version ?? "未知版本"}（${displayPath(onPath.path)}），这个版本【没有 hook 信任闸】——` +
+          `用它开会话既不会提示、也批准不了。${CODEX_TRUST_GATE_EVIDENCE}`,
+      );
+    } else if (pathGate === null && onPath !== null) {
+      notes.push(
+        `⚠ 读不出 PATH 上 codex 的版本（${displayPath(onPath.path)}），无法判断它有没有信任闸——请自己核对一下（\`${shellQuote(onPath.path)} --version\`）。${CODEX_TRUST_GATE_EVIDENCE}`,
+      );
+    }
+  };
+
+  // ── A：能就地翻 ⇒ 主路径。由我们收集你的确认，因为 codex 那边已经没有入口了。 ──
+  if (remedy !== null && remedy.enableable.length > 0) {
+    notes.push(
+      "为什么不是「去 codex 里批准」：codex 的启动 review【只对「新的或改动过的」hook 发问】。" +
+        "你这几条带着 trusted_hash 且 enabled = false —— 在它看来「已经问过、你选了不启用」，" +
+        "所以【再也不会问】（桌面版更是连这个界面都没有）。这一步只能由我们把你的确认写进 config.toml。",
+    );
+    if (probe.desktop !== null) notes.push(desktopNote(probe.desktop.app));
+    pushVersionNote();
+    // #926 的死线：绝不**提**那个绕过闸的旗标——把它的名字摆在用户面前，就等于在建议他用。
+    notes.push("我们只动自己装的那两条（按命令本体定位，不按下标），写前备份、写后逐字段核对，其余内容一个字不动；这道安全闸本身不会被绕过。");
+    notes.push(...remedy.snippet);
     return {
       do:
-        "新开一个 codex 交互式会话（直接跑 `codex`）；启动时它会提示 \"Hooks need review\"，" +
-        "在那里把 AgentParty 的 stop hook 选为启用。",
+        "party hook install --codex   —— 它会当场问你一句「要启用 AgentParty 的 stop hook 吗？」，" +
+        "敲 y 即可（非交互场景加 --yes）。批准完，若你用的是桌面版，把它重启一下。",
       notes,
     };
   }
 
-  // 版本错配比「跑哪个二进制」更要命：不明说，用户会以为自己照做了。所以它排在最前面。
-  if (pathGate === false && onPath !== null) {
-    notes.push(
-      `⚠ 你 PATH 上的 codex 是 ${onPath.version ?? "未知版本"}（${displayPath(onPath.path)}），这个版本【没有 hook 信任闸】——` +
-        `用它开会话既不会提示、也批准不了；照着「直接跑 codex」做一遍会什么都不发生。${CODEX_TRUST_GATE_EVIDENCE}`,
-    );
-  } else if (onPath !== null) {
-    notes.push(
-      `⚠ 读不出 PATH 上 codex 的版本（${displayPath(onPath.path)}），无法判断它有没有信任闸——请自己核对一下（\`${shellQuote(onPath.path)} --version\`）。${CODEX_TRUST_GATE_EVIDENCE}`,
-    );
+  // ── B：条目还没进过信任表 ⇒ codex 下次在带闸的 TUI 里启动时**会**主动问。 ──
+  // 这一档「等它弹窗」是真的有效，所以形态探测仍然用得上：告诉用户该起哪个二进制。
+  const gated = probe.gated[0];
+  if (remedy !== null && remedy.absent.length > 0 && remedy.enableable.length === 0) {
+    pushVersionNote();
+    if (probe.desktop !== null) notes.push(desktopNote(probe.desktop.app));
+    if (remedy !== null) notes.push(...remedy.snippet);
+    if (pathGate === true) {
+      return {
+        do: "新开一个 codex 交互式会话（直接跑 `codex`）；这几条对它还是「新的」，启动时它会提示 \"Hooks need review\"，在那里把 AgentParty 的 hook 选为启用。",
+        notes,
+      };
+    }
+    if (gated !== undefined) {
+      return {
+        do:
+          `在终端里跑一次【这个】二进制（不是 PATH 上的 \`codex\`）：${shellQuote(gated.path)}` +
+          `  —— 它是 ${gated.version ?? "带信任闸的版本"}，这几条对它还是「新的」，启动时会提示 "Hooks need review"，在那里选为启用。`,
+        notes,
+      };
+    }
   }
 
-  // B：别处有确知带闸的 —— 给绝对路径。
-  const target = probe.gated[0];
-  if (target !== undefined) {
-    if (target.app !== null) notes.push(desktopNote(target.app));
-    else if (probe.desktop !== null) notes.push(desktopNote(probe.desktop.app));
-    return {
-      do:
-        `在终端里跑一次【这个】二进制（不是 PATH 上的 \`codex\`）：${shellQuote(target.path)}` +
-        `  —— 它是 ${target.version ?? "带信任闸的版本"}，启动时会提示 "Hooks need review"，在那里把 AgentParty 的 stop hook 选为启用，然后退出。`,
-      notes,
-    };
-  }
-
-  // C：一个都没找到。不猜路径——猜错就是再来一轮「照做了还是不行」。
+  // ── C：定位不到 / 读不出 ⇒ 兜底。**必须给得出「粘这个」**，绝不让人去等一个不会出现的提示。 ──
+  pushVersionNote();
   if (probe.desktop !== null) notes.push(desktopNote(probe.desktop.app));
-  notes.push(
-    probe.candidates.length === 0
-      ? `这台机器上没探测到任何 codex 二进制（找过：正在跑的进程、/Applications 等目录下的 .app、PATH）。${CODEX_TRUST_GATE_EVIDENCE}`
-      : `这台机器上没找到【确知带信任闸】的 codex 二进制。已探测到：${probe.candidates.map(describe).join("；")}。${CODEX_TRUST_GATE_EVIDENCE}`,
-  );
-  notes.push("我们不猜一个路径让你去试——猜错只会让你再得出一次「照做了还是不行」。");
+  if (remedy === null || remedy.targets.length === 0) {
+    notes.push(
+      remedy === null
+        ? "读不出 codex 的 hooks.json / config.toml，无法算出该改哪几段。"
+        : `${sanitizeSingleLine(remedy.hooksPath)} 里没找到我们自己的 hook 条目（按命令本体 \`hook codex-stop\` / \`hook codex-report\` 找的）。`,
+    );
+    notes.push(
+      probe.candidates.length === 0
+        ? `这台机器上也没探测到任何 codex 二进制（找过：正在跑的进程、/Applications 等目录下的 .app、PATH）。${CODEX_TRUST_GATE_EVIDENCE}`
+        : `已探测到的 codex：${probe.candidates.map(describe).join("；")}。${CODEX_TRUST_GATE_EVIDENCE}`,
+    );
+    notes.push("我们不猜——猜错只会让你再得出一次「照做了还是不行」。");
+    return { do: "party hook install --codex   然后再跑一次 party wake check（它会算出该改哪几段）。", notes };
+  }
+  notes.push(...remedy.snippet);
   return {
-    do: "先确认你实际在用的是哪个 codex（`codex --version` 要 ≥ 0.149），用【那一个】在终端开一次交互式会话，在 \"Hooks need review\" 里把 AgentParty 的 stop hook 选为启用。",
+    do: `按下面这几段手动改 ${displayPath(remedy.configPath)}——我们这次没法替你写（${remedy.detail === "" ? "定位不到可就地翻的条目" : sanitizeSingleLine(remedy.detail)}）。`,
     notes,
   };
 }

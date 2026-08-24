@@ -20,6 +20,7 @@ import {
   shellQuote,
   type CodexBinaryProbeDeps,
 } from "../src/codex-trust-gate";
+import type { CodexHookTarget, CodexTrustRemedy } from "../src/codex-hook-trust";
 
 const DESKTOP = "/Applications/ChatGPT.app/Contents/Resources/codex";
 const SHIM = "/var/folders/f1/xx/T/cmux-cli-shims/84883385/codex";
@@ -44,6 +45,7 @@ function fakeDeps(world: FakeWorld): CodexBinaryProbeDeps {
   const probes = world.probes ?? [];
   return {
     isExecutable: (p) => Object.prototype.hasOwnProperty.call(world.bins, p),
+    fingerprint: (p) => (Object.prototype.hasOwnProperty.call(world.bins, p) ? "1:1" : null),
     listDir: (p) => world.dirs?.[p] ?? [],
     processCommandLines: () => world.ps ?? [],
     versionOf: (p) => {
@@ -58,6 +60,12 @@ function fakeDeps(world: FakeWorld): CodexBinaryProbeDeps {
 }
 
 /** owner 那台机器：桌面版带闸、PATH 上是旧版。整个 issue 就是为这个形态开的。 */
+/**
+ * 单元测试一律不吃磁盘缓存：指向一个不存在的目录，读会失败、写也会失败（都是 fail-open），
+ * 于是每次都真的走一遍探测逻辑——否则缓存会把被测的那道闸整个遮住。
+ */
+const NO_CACHE_ENV = { AGENTPARTY_HOME: "/nonexistent-agentparty-home-for-tests" } as NodeJS.ProcessEnv;
+
 function ownerWorld(over: Partial<FakeWorld> = {}): FakeWorld {
   return {
     bins: { [DESKTOP]: GATED, [SHIM]: UNGATED },
@@ -137,7 +145,7 @@ describe("发现：探测本机，不硬编码 ChatGPT.app", () => {
 
 describe("探测：PATH 上那个是谁、谁带闸", () => {
   test("onPath 是 PATH 上第一个 codex —— 用户敲 `codex` 实际跑到的那个", () => {
-    const p = probeCodexTrustGate(fakeDeps(ownerWorld()));
+    const p = probeCodexTrustGate(fakeDeps(ownerWorld()), NO_CACHE_ENV);
     expect(p.onPath?.path).toBe(SHIM);
     expect(p.onPath?.version).toBe(UNGATED);
     expect(p.onPath?.gate).toBe(false);
@@ -153,7 +161,7 @@ describe("探测：PATH 上那个是谁、谁带闸", () => {
       bins: { [DESKTOP]: GATED, [SHIM]: UNGATED, "/opt/homebrew/bin/codex": UNGATED },
       pathDirs: ["/var/folders/f1/xx/T/cmux-cli-shims/84883385", "/opt/homebrew/bin"],
     });
-    const p = probeCodexTrustGate(fakeDeps(world));
+    const p = probeCodexTrustGate(fakeDeps(world), NO_CACHE_ENV);
     expect(probes).toEqual([DESKTOP, SHIM]);
     // 没探过的绝不谎称「版本读不出」。
     const skipped = p.candidates.find((c) => c.path === "/opt/homebrew/bin/codex");
@@ -167,7 +175,7 @@ describe("探测：PATH 上那个是谁、谁带闸", () => {
       bins: { [DESKTOP]: UNGATED, [SHIM]: UNGATED, "/opt/homebrew/bin/codex": UNGATED },
       pathDirs: ["/var/folders/f1/xx/T/cmux-cli-shims/84883385", "/opt/homebrew/bin"],
     });
-    const p = probeCodexTrustGate(fakeDeps(world));
+    const p = probeCodexTrustGate(fakeDeps(world), NO_CACHE_ENV);
     expect(probes.length).toBe(3);
     expect(p.gated).toEqual([]);
   });
@@ -187,6 +195,7 @@ describe("探测：PATH 上那个是谁、谁带闸", () => {
     }
     const p = probeCodexTrustGate(
       fakeDeps({ probes, bins, dirs: { "/Applications": apps }, pathDirs: ["/var/folders/f1/xx/T/cmux-cli-shims/84883385"] }),
+      NO_CACHE_ENV,
     );
     expect(p.candidates.map((c) => c.path)).toContain(SHIM);
     expect(probes).toContain(SHIM);
@@ -201,6 +210,7 @@ describe("探测：PATH 上那个是谁、谁带闸", () => {
     const evil = "\u001b[2Kcodex-cli 0.145.0\u0007";
     const p = probeCodexTrustGate(
       fakeDeps({ bins: { [SHIM]: evil }, pathDirs: ["/var/folders/f1/xx/T/cmux-cli-shims/84883385"] }),
+      NO_CACHE_ENV,
     );
     expect(p.onPath?.version).toBe("codex-cli 0.145.0");
     const g = codexTrustApprovalGuidance(p);
@@ -220,9 +230,9 @@ describe("探测：PATH 上那个是谁、谁带闸", () => {
         throw new Error("readdir exploded");
       },
     };
-    expect(() => probeCodexTrustGate(boom)).not.toThrow();
+    expect(() => probeCodexTrustGate(boom, NO_CACHE_ENV)).not.toThrow();
     // 进程表和目录都炸了，PATH 那条路还在——降级不等于失明。
-    expect(probeCodexTrustGate(boom).onPath?.path).toBe(SHIM);
+    expect(probeCodexTrustGate(boom, NO_CACHE_ENV).onPath?.path).toBe(SHIM);
   });
 
   test("单个二进制 --version 崩了，只丢它自己的版本，其余照常", () => {
@@ -234,7 +244,7 @@ describe("探测：PATH 上那个是谁、谁带闸", () => {
         return deps.versionOf(p);
       },
     };
-    const probe = probeCodexTrustGate(partial);
+    const probe = probeCodexTrustGate(partial, NO_CACHE_ENV);
     expect(probe.gated.map((g) => g.path)).toEqual([DESKTOP]);
     // 崩了的那个是「说不准」，不是「旧版」——下游据此不会去断言「用它批准不了」。
     expect(probe.onPath?.version).toBeNull();
@@ -250,91 +260,125 @@ describe("探测：PATH 上那个是谁、谁带闸", () => {
         throw new Error("PATH exploded");
       },
     });
-    expect(() => probeCodexTrustGate(hostile)).not.toThrow();
-    expect(probeCodexTrustGate(hostile)).toEqual({ onPath: null, candidates: [], gated: [], desktop: null });
+    expect(() => probeCodexTrustGate(hostile, NO_CACHE_ENV)).not.toThrow();
+    expect(probeCodexTrustGate(hostile, NO_CACHE_ENV)).toEqual({ onPath: null, candidates: [], gated: [], desktop: null });
     // 退化后给出的仍是一条不撒谎的建议。
-    const g = codexTrustApprovalGuidance(probeCodexTrustGate(hostile));
+    const g = codexTrustApprovalGuidance(probeCodexTrustGate(hostile, NO_CACHE_ENV));
     expect([g.do, ...g.notes].join("\n")).toContain("没探测到任何 codex 二进制");
   });
 });
 
 describe("修法：用户照做就能成功", () => {
-  const guidance = (world: FakeWorld) => codexTrustApprovalGuidance(probeCodexTrustGate(fakeDeps(world)));
+  // #942 第二轮：修法的第一依据是**这几条 hook 在信任表里的状态**，不是「用哪个二进制」——
+  // 真机验证已经证伪了「去 TUI 里批准」：codex 只对「新的或改动过的」hook 发问，
+  // 带 trusted_hash 且 enabled=false 的它再也不会问。所以每个 fixture 都必须带上 remedy。
+  const HOOKS = "/tmp/codexhome/hooks.json";
+  const CONFIG = "/tmp/codexhome/config.toml";
+
+  function target(kind: "codex-stop" | "codex-report", state: "disabled" | "absent"): CodexHookTarget {
+    const event = kind === "codex-stop" ? "Stop" : "SessionStart";
+    return {
+      kind,
+      label: kind === "codex-stop" ? "前台唤醒" : "会话入册",
+      event,
+      group: 2,
+      index: 0,
+      key: `${HOOKS}:${kind === "codex-stop" ? "stop" : "session_start"}:2:0`,
+      command: `party hook ${kind}`,
+      state,
+      trustedHash: state === "disabled" ? "sha256:ours" : null,
+    };
+  }
+
+  function remedyOf(state: "disabled" | "absent" | "none"): CodexTrustRemedy {
+    const targets = state === "none" ? [] : [target("codex-stop", state), target("codex-report", state)];
+    return {
+      hooksPath: HOOKS,
+      configPath: CONFIG,
+      targets,
+      enableable: targets.filter((t) => t.state === "disabled"),
+      absent: targets.filter((t) => t.state === "absent"),
+      snippet: targets.length === 0 ? [] : [`SNIPPET ${targets.map((t) => t.key).join(" ")}`],
+      detail: "",
+    };
+  }
+
+  const guidance = (world: FakeWorld, remedy: CodexTrustRemedy | null) =>
+    codexTrustApprovalGuidance(probeCodexTrustGate(fakeDeps(world), NO_CACHE_ENV), remedy);
   const all = (g: { do: string; notes: string[] }) => [g.do, ...g.notes].join("\n");
 
-  // ── 本 issue 的验收场景，逐字照抄 owner 的机器 ──────────────────────────────
-  test("桌面版形态：给的是【那个二进制的绝对路径】，不是「直接跑 codex」", () => {
-    const g = guidance(ownerWorld());
-    expect(g.do).toContain(DESKTOP);
-    // 这正是 owner 照着做、什么也没发生的那句话。它绝不能再出现在「现在只做这一件事」里。
+  // ── owner 那台机器的真实死角：条目带着 hash 且 enabled=false，codex 再也不会问 ──
+  test("能就地翻 ⇒ 主路径是 party hook install --codex，而不是去 codex 里等提示", () => {
+    const g = guidance(ownerWorld(), remedyOf("disabled"));
+    expect(g.do).toContain("party hook install --codex");
+    expect(g.do).toContain("--yes");
+    // 这句是第一轮给错的药，绝不能再出现在「现在只做这一件事」里。
     expect(g.do).not.toContain("直接跑 `codex`");
+    expect(g.do).not.toContain(DESKTOP);
   });
 
-  test("桌面版形态：明说它不会自己弹 review，批准后要重启", () => {
-    const text = all(guidance(ownerWorld()));
+  test("必须说清为什么不能靠 codex 弹窗（否则用户会以为我们绕过了什么）", () => {
+    const text = all(guidance(ownerWorld(), remedyOf("disabled")));
+    expect(text).toContain("只对「新的或改动过的」hook 发问");
+    expect(text).toContain("再也不会问");
+    expect(text).toContain("只动自己装的那两条");
+  });
+
+  test("桌面版形态：明说它不会自己弹 review", () => {
+    const text = all(guidance(ownerWorld(), remedyOf("disabled")));
     expect(text).toContain("ChatGPT（桌面版）");
     expect(text).toContain("永远不会");
-    expect(text).toContain("重启");
-    expect(text).toContain("~/.codex/config.toml");
   });
 
-  test("PATH 上版本过低：把版本号和路径都摆出来，明说批准不了", () => {
-    const text = all(guidance(ownerWorld()));
+  test("PATH 上版本过低：把版本号和路径都摆出来，明说批准不了（这条保留）", () => {
+    const text = all(guidance(ownerWorld(), remedyOf("disabled")));
     expect(text).toContain(UNGATED);
     expect(text).toContain(SHIM);
     expect(text).toContain("没有 hook 信任闸");
-    // 判据必须带上，否则用户没法自己复核这个 0.149 是怎么来的。
     expect(text).toContain("startup_hooks_review.rs");
   });
 
-  // ── 单闸对照：只改「桌面二进制的版本」一个字段，结论必须翻面 ────────────────
-  // 如果哪天把版本判定删掉、无脑指向桌面二进制，这条会红：桌面版也是 0.145 时它同样没有闸，
-  // 指过去照样批不了，只能如实说「找不到」。
-  test("对照：桌面二进制也是旧版时，绝不把它当答案", () => {
-    const g = guidance(ownerWorld({ bins: { [DESKTOP]: UNGATED, [SHIM]: UNGATED } }));
-    expect(g.do).not.toContain(DESKTOP);
-    expect(all(g)).toContain("没找到");
+  test("每一档都给得出兜底的「粘这个」——这是底线交付", () => {
+    for (const state of ["disabled", "absent"] as const) {
+      expect(all(guidance(ownerWorld(), remedyOf(state)))).toContain("SNIPPET");
+    }
   });
 
-  // 同上，反向：只把 PATH 上那个换成带闸版本，就该退回终端形态的老文案。
-  test("对照：PATH 上那个本身带闸 ⇒ 维持「直接跑 codex」（终端形态的正路）", () => {
-    const g = guidance(
-      ownerWorld({ bins: { [DESKTOP]: GATED, [SHIM]: GATED } }),
-    );
+  // ── 单闸对照：**只改条目状态**这一个变量，别的一个字不动，结论必须翻面 ──
+  // 条目还没进过信任表 ⇒ codex 下次在带闸的 TUI 里确实会问，这一档才轮到形态探测出场。
+  test("对照：条目还没进信任表 ⇒ 给带闸二进制的绝对路径（那条路这时是有效的）", () => {
+    const g = guidance(ownerWorld(), remedyOf("absent"));
+    expect(g.do).toContain(DESKTOP);
+    expect(g.do).not.toContain("party hook install --codex");
+  });
+
+  test("对照：还没进信任表 + PATH 上那个自己带闸 ⇒ 直接跑 codex 就行", () => {
+    const g = guidance(ownerWorld({ bins: { [DESKTOP]: GATED, [SHIM]: GATED } }), remedyOf("absent"));
     expect(g.do).toContain("直接跑 `codex`");
-    expect(g.do).not.toContain(DESKTOP);
-    // 版本没错配，就别拿版本吓唬人。
     expect(all(g)).not.toContain("没有 hook 信任闸");
-    // 但桌面版还开着，「批准后重启它」这句仍然要说。
-    expect(all(g)).toContain("重启");
   });
 
-  test("一个带闸的都找不到：如实说找不到 + 给判据 + 列出探到了什么，不猜路径", () => {
-    const g = guidance({
-      bins: { [SHIM]: UNGATED },
-      pathDirs: ["/var/folders/f1/xx/T/cmux-cli-shims/84883385"],
-    });
-    const text = all(g);
-    expect(text).toContain("没找到");
-    expect(text).toContain(SHIM);
-    expect(text).toContain("startup_hooks_review.rs");
-    expect(text).toContain("不猜");
-    // 绝不凭空给一个 /Applications/... 让用户去试。
-    expect(text).not.toContain("/Applications/");
+  test("对照：hooks.json 里根本没有我们的条目 ⇒ 先装，别乱指路", () => {
+    const g = guidance(ownerWorld(), remedyOf("none"));
+    expect(g.do).toContain("party hook install --codex");
+    expect(all(g)).toContain("没找到我们自己的 hook 条目");
+    expect(all(g)).toContain("不猜");
   });
 
-  test("这台机器上一个 codex 都没有：说「没探测到」，不说「读不出版本」", () => {
-    const text = all(guidance({ bins: {} }));
+  test("读不出 hooks.json / config.toml ⇒ 如实说，不猜路径", () => {
+    const text = all(guidance({ bins: {} }, null));
+    expect(text).toContain("读不出 codex 的 hooks.json / config.toml");
     expect(text).toContain("没探测到任何 codex 二进制");
+    expect(text).toContain("不猜");
   });
 
-  // 保守：说不准就别断言。这是 issue 里点名的要求。
+  // 保守：说不准就别断言。
   test("版本读不出时不断言「用它批准不了」，只请用户自己核对", () => {
     const text = all(
-      guidance({
-        bins: { [SHIM]: null },
-        pathDirs: ["/var/folders/f1/xx/T/cmux-cli-shims/84883385"],
-      }),
+      guidance(
+        { bins: { [SHIM]: null }, pathDirs: ["/var/folders/f1/xx/T/cmux-cli-shims/84883385"] },
+        remedyOf("disabled"),
+      ),
     );
     expect(text).toContain("读不出 PATH 上 codex 的版本");
     expect(text).toContain("--version");
@@ -342,15 +386,15 @@ describe("修法：用户照做就能成功", () => {
     expect(text).not.toContain("批准不了");
   });
 
-  // #926 划的死线，每一档都不许越。
-  for (const [name, world] of [
-    ["桌面版形态", ownerWorld()],
-    ["终端形态", ownerWorld({ bins: { [DESKTOP]: GATED, [SHIM]: GATED } })],
-    ["找不到带闸的", { bins: { [SHIM]: UNGATED }, pathDirs: ["/var/folders/f1/xx/T/cmux-cli-shims/84883385"] }],
-    ["什么都没探到", { bins: {} }],
-  ] as [string, FakeWorld][]) {
+  // #926 划的死线，每一档都不许越。我们是**收集**用户的批准，不是**取消**这道闸。
+  for (const [name, world, remedy] of [
+    ["能就地翻", ownerWorld(), remedyOf("disabled")],
+    ["还没进信任表", ownerWorld(), remedyOf("absent")],
+    ["终端形态", ownerWorld({ bins: { [DESKTOP]: GATED, [SHIM]: GATED } }), remedyOf("absent")],
+    ["什么都没探到", { bins: {} } as FakeWorld, null],
+  ] as [string, FakeWorld, CodexTrustRemedy | null][]) {
     test(`${name}：绝不提 --dangerously-bypass-hook-trust`, () => {
-      expect(all(guidance(world))).not.toContain("dangerously-bypass-hook-trust");
+      expect(all(guidance(world, remedy))).not.toContain("dangerously-bypass-hook-trust");
     });
   }
 

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { decideWakeSelfCheck, isLocalCodexIdentity, wakeBlockForCodexHook } from "../src/wake-reachability";
 import { buildWakeChecklist, formatWakeChecklist, CODEX_EXEC_NO_HOOKS_NOTE } from "../src/wake-checklist";
 import type { CodexBinary, CodexTrustGateProbe } from "../src/codex-trust-gate";
+import type { CodexHookTarget, CodexTrustRemedy } from "../src/codex-hook-trust";
 import type { JoinBinding } from "../src/join-binding";
 import type { CodexWakeDiagnosis } from "../src/wake-diagnosis";
 
@@ -116,6 +117,37 @@ const TERMINAL_PROBE: CodexTrustGateProbe = (() => {
   return { onPath, candidates: [onPath], gated: [onPath], desktop: null };
 })();
 
+const FAKE_HOOKS = "/tmp/codexhome/hooks.json";
+const OURS_STOP_KEY = `${FAKE_HOOKS}:stop:2:0`;
+
+function trustTarget(state: "disabled" | "absent"): CodexHookTarget {
+  return {
+    kind: "codex-stop",
+    label: "前台唤醒",
+    event: "Stop",
+    group: 2,
+    index: 0,
+    key: OURS_STOP_KEY,
+    command: "party hook codex-stop",
+    state,
+    trustedHash: state === "disabled" ? "sha256:ours" : null,
+  };
+}
+
+/** 我们那条带着 hash 且 enabled=false —— codex 再也不会问，只能由我们写（#942 第二轮）。 */
+function remedy(state: "disabled" | "absent"): CodexTrustRemedy {
+  const targets = [trustTarget(state)];
+  return {
+    hooksPath: FAKE_HOOKS,
+    configPath: "/tmp/codexhome/config.toml",
+    targets,
+    enableable: targets.filter((t) => t.state === "disabled"),
+    absent: targets.filter((t) => t.state === "absent"),
+    snippet: ["PASTE-THIS"],
+    detail: "",
+  };
+}
+
 /** owner 那台机器（#942）：桌面版带闸、PATH 上是 0.145 的 shim。 */
 const DESKTOP_PROBE: CodexTrustGateProbe = (() => {
   const desktop = bin({ path: DESKTOP_BIN, origin: "running", app: "ChatGPT", version: "codex-cli 0.149.0-alpha.4.1", gate: true });
@@ -143,12 +175,19 @@ describe("#910 接入包最后一步：验证，不是指令", () => {
   // fixture 让前三步**全部通过**，于是 remaining/next 只可能由信任闸那一步决定。
   for (const hook of ["disabled", "needs-review"] as const) {
     test(`只差信任闸（hook=${hook}）→ 明确说还差 1 步，并只给这一件事`, () => {
-      const c = buildWakeChecklist(diagnosis({ hook }), env, () => TERMINAL_PROBE);
+      // remedy 跟着 hook 状态走，别造出「诊断说 disabled、信任表说没这条」的矛盾组合。
+      const c = buildWakeChecklist(
+        diagnosis({ hook }),
+        env,
+        () => TERMINAL_PROBE,
+        () => remedy(hook === "disabled" ? "disabled" : "absent"),
+      );
       expect(c.remaining).toBe(1);
       expect(c.steps.filter((s) => !s.ok).map((s) => s.id)).toEqual(["hook_trusted"]);
       const text = formatWakeChecklist(c).join("\n");
       expect(text).toContain("还差 1 步");
-      expect(text).toContain("Hooks need review");
+      // 底线交付（#942 第二轮）：无论走到哪一档，用户都必须拿到「粘这个」。
+      expect(text).toContain("PASTE-THIS");
       // #910 附带发现：codex exec 不触发任何 hook。不写这句，人会在 exec 里验一遍得出错误结论。
       expect(text).toContain("codex exec");
       expect(c.next!.notes).toContain(CODEX_EXEC_NO_HOOKS_NOTE);
@@ -183,25 +222,35 @@ describe("#910 接入包最后一步：验证，不是指令", () => {
   // 前三步在这里**全部通过**，hook 也固定为 needs-review，于是 next 只可能由信任闸那一步决定；
   // 两个 fixture 之间唯一的差别是「哪个二进制带闸」，所以只有那道判定能决定输出。
 
-  test("#942 桌面版形态：next 是【那个二进制的绝对路径】，不是「直接跑 codex」", () => {
-    const c = buildWakeChecklist(diagnosis({ hook: "needs-review" }), env, () => DESKTOP_PROBE);
-    expect(c.next!.do).toContain(DESKTOP_BIN);
+  // 两个 fixture 之间**只差 remedy 那一个变量**（探测结果都固定成 DESKTOP_PROBE），
+  // 所以只有「条目在信任表里是什么状态」这道判定能决定输出。
+  test("#942 带 hash 且 enabled=false ⇒ next 是 party hook install --codex（codex 那边已经没有入口了）", () => {
+    const c = buildWakeChecklist(diagnosis({ hook: "disabled" }), env, () => DESKTOP_PROBE, () => remedy("disabled"));
+    expect(c.next!.do).toContain("party hook install --codex");
     expect(c.next!.do).not.toContain("直接跑 `codex`");
+    expect(c.next!.do).not.toContain(DESKTOP_BIN);
     const text = formatWakeChecklist(c).join("\n");
-    expect(text).toContain(DESKTOP_BIN);
-    expect(text).toContain("重启");
+    expect(text).toContain("再也不会问");
+    // 底线交付：兜底的「粘这个」在任何一档都要给得出。
+    expect(text).toContain("PASTE-THIS");
+  });
+
+  test("#942 对照：条目还没进信任表 ⇒ 才轮到「去带闸的那个二进制里批准」", () => {
+    const c = buildWakeChecklist(diagnosis({ hook: "needs-review" }), env, () => DESKTOP_PROBE, () => remedy("absent"));
+    expect(c.next!.do).toContain(DESKTOP_BIN);
+    expect(c.next!.do).not.toContain("party hook install --codex");
   });
 
   test("#942 PATH 上版本过低时必须明说（否则用户以为自己照做了）", () => {
-    const c = buildWakeChecklist(diagnosis({ hook: "disabled" }), env, () => DESKTOP_PROBE);
+    const c = buildWakeChecklist(diagnosis({ hook: "disabled" }), env, () => DESKTOP_PROBE, () => remedy("disabled"));
     const text = formatWakeChecklist(c).join("\n");
     expect(text).toContain("codex-cli 0.145.0");
     expect(text).toContain(SHIM_BIN);
     expect(text).toContain("没有 hook 信任闸");
   });
 
-  test("#942 对照：PATH 上那个自己带闸 ⇒ 维持终端形态的老文案，也不拿版本吓唬人", () => {
-    const c = buildWakeChecklist(diagnosis({ hook: "needs-review" }), env, () => TERMINAL_PROBE);
+  test("#942 对照：PATH 上那个自己带闸 + 条目还没进表 ⇒ 直接跑 codex，也不拿版本吓唬人", () => {
+    const c = buildWakeChecklist(diagnosis({ hook: "needs-review" }), env, () => TERMINAL_PROBE, () => remedy("absent"));
     const text = formatWakeChecklist(c).join("\n");
     expect(c.next!.do).toContain("直接跑 `codex`");
     expect(text).not.toContain("没有 hook 信任闸");
@@ -209,13 +258,26 @@ describe("#910 接入包最后一步：验证，不是指令", () => {
   });
 
   test("#942 探测抛异常也要给出建议，且绝不让自检本身挂掉（fail-open）", () => {
-    const c = buildWakeChecklist(diagnosis({ hook: "needs-review" }), env, () => {
-      throw new Error("probe exploded");
-    });
+    const c = buildWakeChecklist(
+      diagnosis({ hook: "needs-review" }),
+      env,
+      () => {
+        throw new Error("probe exploded");
+      },
+      () => remedy("disabled"),
+    );
     expect(c.remaining).toBe(1);
     const text = formatWakeChecklist(c).join("\n");
     expect(text).toContain("没探测到任何 codex 二进制");
     expect(text).toContain("codex exec");
     expect(text).not.toContain("dangerously-bypass-hook-trust");
+  });
+
+  test("#942 读 config.toml 抛异常同样不能炸", () => {
+    const c = buildWakeChecklist(diagnosis({ hook: "disabled" }), env, () => TERMINAL_PROBE, () => {
+      throw new Error("remedy exploded");
+    });
+    expect(c.remaining).toBe(1);
+    expect(formatWakeChecklist(c).join("\n")).toContain("codex exec");
   });
 });
