@@ -1,7 +1,9 @@
-// #845 层 2：接入包把行为契约落盘成 rules 文件——heredoc 全静态、delimiter 带引号防变量展开，
-// 包尾带「上下文丢失后先重读」指引。契约正文与 cli 层同源（shared 常量），此处只验落盘段形状。
+// #944：接入包从 108 行粘贴稿压成「一小段行为约定（3 行注释）+ 两行命令」（install + party join）。
+// 那 108 行里逐条手工执行的机械步骤（写 config/rules、判重、绑定、注册 MCP、装+批准 hook、报到、
+// 自检）全部收进 `party join` 这一条命令。web（AgentJoin/vault）与 cli（party invite）同源共用
+// shared/onboarding 的 builder，别再各写一份（#585）。
 import { describe, expect, test } from "bun:test";
-import { BEHAVIOR_CONTRACT_BODY_LINES } from "@agentparty/shared/onboarding";
+import { buildInteractiveJoinPack } from "@agentparty/shared/onboarding";
 import { lookup } from "../i18n/dict";
 import type { TFunc } from "../i18n/useT";
 import { buildFullJoinPack, type JoinPackHarness } from "./joinPack";
@@ -12,444 +14,125 @@ const t: TFunc = (key, vars) => {
   return raw.replace(/\{(\w+)\}/g, (m, name: string) => (name in vars ? String(vars[name]) : m));
 };
 
-// 中英两份文案都必须真的渲染进包——只改一份是本仓踩过的坑。
-function tFor(lang: "en" | "zh"): TFunc {
-  return (key, vars) => {
-    const raw = lookup(lang, key) ?? lookup("en", key) ?? key;
-    if (vars === undefined) return raw;
-    return raw.replace(/\{(\w+)\}/g, (m, name: string) => (name in vars ? String(vars[name]) : m));
-  };
-}
-
-const tt = (lang: "en" | "zh", key: string, vars?: Record<string, unknown>): string =>
-  tFor(lang)(key, vars as never);
-
-function pack(harness?: JoinPackHarness, lang?: "en" | "zh"): string {
+function pack(harness?: JoinPackHarness, inviterName = "leo"): string {
   return buildFullJoinPack({
     slug: "dev",
     agentName: "bot",
     agentToken: "ap_tok",
     server: "https://party.example",
-    inviterName: "leo",
+    inviterName,
     charter: null,
     ...(harness === undefined ? {} : { harness }),
-    t: lang === undefined ? t : tFor(lang),
+    t,
   });
 }
 
-// #910/#926：接入包最后一步必须是**验证**，不是指令。
-// 「跑完之后告诉他还差几步」和「告诉他接下来该做什么」是两件事——后者没人读，而 hook 未获批准时
-// codex 静默跳过，用户连自己失败了都不知道。
-describe("接入包末尾的验证步骤（#910/#926）", () => {
-  for (const lang of ["zh", "en"] as const) {
-    test(`codex 档以一条可执行的 party wake check 收尾（${lang}）`, () => {
-      const lines = pack("codex", lang).split("\n");
-      const idx = lines.findIndex((l) => l.trim() === "party wake check || true");
-      // ① 它必须是**真正会被执行的 shell 行**，不是注释里提了一句。
-      expect(idx).toBeGreaterThan(-1);
-      // ② 必须排在装 hook 之后——先装再验，顺序反了验的是上一次的状态。
-      const install = lines.findIndex((l) => l.trim().startsWith("party hook install --codex"));
-      expect(install).toBeGreaterThan(-1);
-      expect(idx).toBeGreaterThan(install);
-      // ③ `codex exec` 不触发任何 hook，必须写进包里（#910 附带发现）。
-      expect(pack("codex", lang)).toContain("codex exec");
-      // ④ 绝不建议绕过 codex 的信任闸。
-      expect(pack("codex", lang)).not.toContain("dangerously-bypass-hook-trust");
-    });
-  }
+function executableLines(text: string): string[] {
+  return text.split("\n").filter((l) => l.trim() !== "" && !l.trimStart().startsWith("#"));
+}
 
-  test("claude / other 档不加这一步——那是 codex 专属的闸", () => {
-    expect(pack("claude")).not.toContain("party wake check");
-    expect(pack("other")).not.toContain("party wake check");
-  });
-});
-
-// #907：断言必须钉在**真正会被执行的 shell 行**上——本仓出过 toContain 被注释文案独自
-// 满足、把真实分支整段删掉照样全绿的假绿（#864）。所以这里逐字比对整行命令，并显式确认
-// 它是一条不带 # 前缀的可执行行。
-describe("接入包的同频道判重前置检查（#907）", () => {
-  // 断言钉在「可执行行」上，且要求这一行同时带上 channel 与 server（判重语义的两个必需项），
-  // 而不是逐字比对整行——换个 flag 顺序是等价实现，不该误红；但把整行删掉必须变红。
-  function executableLines(text: string): string[] {
-    return text.split("\n").filter((l) => l.trim() !== "" && !l.trimStart().startsWith("#"));
-  }
-
-  function dedupeCheckLines(text: string): string[] {
-    return executableLines(text).filter(
-      (l) =>
-        l.includes("party mcp identities")
-        && l.includes("--channel dev")
-        && l.includes("--server https://party.example"),
+describe("接入包 = 一段行为约定 + 两行命令（#944）", () => {
+  test("整包只有两条可执行命令：install（缺失才装）+ party join", () => {
+    const exec = executableLines(pack("claude"));
+    expect(exec).toHaveLength(2);
+    expect(exec[0]).toBe(
+      "command -v party >/dev/null || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh",
     );
-  }
-
-  for (const harness of ["claude", "codex", "other"] as JoinPackHarness[]) {
-    test(`${harness} 档：判重检查是一条真的会被执行的命令行，且排在 party init 之前`, () => {
-      const text = pack(harness);
-      const exec = executableLines(text);
-      const checks = dedupeCheckLines(text);
-      expect(checks).toHaveLength(1);
-      const check = exec.indexOf(checks[0] as string);
-      const init = exec.findIndex((l) => l.includes("party init --server"));
-      expect(check).toBeGreaterThan(-1);
-      expect(init).toBeGreaterThan(check);
-      // 提示不该阻断接入：这一行必须自带 || true。
-      expect(checks[0]).toContain("|| true");
-    });
-  }
-
-  test("判重必须带 --server：两台实例都有同名频道（#865），只按频道名会混", () => {
-    const [line] = dedupeCheckLines(pack("claude"));
-    expect(line).toContain("--server https://party.example");
-    expect(line).toContain("--channel dev");
+    expect(exec[1]!.startsWith("AGENTPARTY_TOKEN='ap_tok' party join ")).toBe(true);
   });
 
-  test("中英两份提示文案都真的渲染进包（只改一份是本仓踩过的坑）", () => {
-    for (const lang of ["en", "zh"] as const) {
-      const text = pack("claude", lang);
-      expect(text).toContain(tt(lang, "AgentJoin.cmd.channelDedupeNote1"));
-      expect(text).toContain(tt(lang, "AgentJoin.cmd.channelDedupeNote2"));
-      // 提示文案必须是注释行；判重命令本身必须是可执行行（注释文案不能独自满足这条）。
-      expect(dedupeCheckLines(text)).toHaveLength(1);
-      expect(tt(lang, "AgentJoin.cmd.channelDedupeNote1").startsWith("#")).toBe(true);
-    }
-  });
-});
-
-describe("joinPack 行为契约落盘（#845）", () => {
-  test("含 rules 落盘 heredoc 段，delimiter 带引号防变量展开", () => {
-    const text = pack();
-    expect(text).toContain(
-      `cat > "$HOME/.agentparty/agents/agentparty-bot-dev.rules.md" <<'AGENTPARTY_RULES_EOF'`,
-    );
-    // heredoc 完整闭合，正文逐行在包内
-    const lines = text.split("\n");
-    const open = lines.findIndex((l) => l.includes("<<'AGENTPARTY_RULES_EOF'"));
-    const close = lines.indexOf("AGENTPARTY_RULES_EOF", open + 1);
-    expect(open).toBeGreaterThan(-1);
-    expect(close).toBeGreaterThan(open);
-    expect(lines.slice(open + 1, close)).toEqual([...BEHAVIOR_CONTRACT_BODY_LINES]);
-  });
-
-  test("heredoc 正文全静态：不含 token/charter 等动态输入", () => {
-    const text = pack();
-    const lines = text.split("\n");
-    const open = lines.findIndex((l) => l.includes("<<'AGENTPARTY_RULES_EOF'"));
-    const close = lines.indexOf("AGENTPARTY_RULES_EOF", open + 1);
-    const body = lines.slice(open + 1, close).join("\n");
-    expect(body).not.toContain("ap_tok");
-    expect(body).not.toContain("$");
-  });
-
-  test("包尾带「上下文丢失后先重读 rules 文件」指引", () => {
-    const text = pack();
-    const tail = text.split("\n").at(-1) ?? "";
-    expect(tail.startsWith("#")).toBe(true);
-    expect(tail).toContain("agentparty-bot-dev.rules.md");
-  });
-});
-
-// #845 第 4 点：interactive 包按目标 harness 拆分——目标 agent 只走一条分支，其余是噪音。
-describe("joinPack 按 harness 拆分（#845 第 4 点）", () => {
-  // claude mcp add 命令行 / claudeMode 指引 / claude -p 唤醒模板的指纹
-  const CLAUDE_MCP_ADD = "claude mcp add ";
-  const CLAUDE_WAKE = `claude -p -c "$(cat {file})"`;
-  const CLAUDE_MODE_FP = "watch --once";
-  // codex mcp add 指引 / codex exec 唤醒模板 / serve supervisor（otherMode）的指纹
-  const CODEX_MCP_ADD = "codex mcp add ";
-  const CODEX_WAKE = "codex exec resume --last";
-  const OTHER_MODE_FP = "party serve dev --on-mention";
-
-  test("other 档（含缺省不传）与旧全量逐字节一致", () => {
-    expect(pack("other")).toBe(pack());
-    const full = pack("other");
-    for (const fp of [CLAUDE_MCP_ADD, CLAUDE_WAKE, CLAUDE_MODE_FP, CODEX_MCP_ADD, CODEX_WAKE, OTHER_MODE_FP]) {
-      expect(full).toContain(fp);
+  test("token 走 AGENTPARTY_TOKEN 前缀，绝不进 argv（#676）——没有 --token", () => {
+    for (const h of ["claude", "codex", "other"] as JoinPackHarness[]) {
+      const text = pack(h);
+      expect(text).toContain("AGENTPARTY_TOKEN='ap_tok' party join");
+      expect(text).not.toContain("--token");
     }
   });
 
-  test("claude 档：保留 claude mcp add + claudeMode + Claude 唤醒模板，无 codex 行", () => {
-    const text = pack("claude");
-    expect(text).toContain(CLAUDE_MCP_ADD);
-    expect(text).toContain(CLAUDE_MODE_FP);
-    expect(text).toContain(CLAUDE_WAKE);
-    expect(text).not.toContain(CODEX_MCP_ADD);
-    expect(text).not.toContain(CODEX_WAKE);
-    // otherMode 四行（serve supervisor 指引）也去掉
-    expect(text).not.toContain(OTHER_MODE_FP);
-  });
-
-  // #848：插件段是 claude 档专属新增（#847 之后），two 行命令 + 失败不阻断标记。
-  const PLUGIN_MARKETPLACE = "claude plugin marketplace add leeguooooo/AgentParty || true";
-  const PLUGIN_INSTALL = "claude plugin install agentparty@agentparty || true";
-  const PLUGIN_ENABLE = "claude plugin enable agentparty@agentparty || true";
-
-  test("claude 档：含 marketplace 插件命令（add/install/enable），且带 || true 失败不阻断（#848）", () => {
-    const text = pack("claude");
-    expect(text).toContain(PLUGIN_MARKETPLACE);
-    expect(text).toContain(PLUGIN_INSTALL);
-    expect(text).toContain(PLUGIN_ENABLE);
-  });
-
-  test("codex/other 档：不含 claude 插件命令（claude 插件段是 Claude Code 专属，#848）", () => {
-    for (const harness of ["codex", "other"] as const) {
-      const text = pack(harness);
-      expect(text).not.toContain("claude plugin marketplace add");
-      expect(text).not.toContain("claude plugin install");
-      expect(text).not.toContain("claude plugin enable");
-    }
-  });
-
-  // #844：claude 档补 crossSessionInbound=accept——不改则默认 hold，消息进待审队列且
-  // 5 分钟无人处理会被 drop。必须幂等、失败不阻断、写前备份、不硬依赖 jq。
-  test("claude 档：含 crossSessionInbound=accept 配置行，备份 + jq/node/python3 三级兜底 + 失败不阻断（#844）", () => {
-    const text = pack("claude");
-    expect(text).toContain(`AGENTPARTY_CC_SETTINGS="$HOME/.claude/settings.json"`);
-    expect(text).toContain("crossSessionInbound");
-    expect(text).toContain("accept");
-    // 写前备份
-    // 备份首次写入即定：重跑接入包不能把备份覆盖成已改过的版本
-    expect(text).toContain(
-      `[ -f "$AGENTPARTY_CC_SETTINGS.agentparty.bak" ] || cp "$AGENTPARTY_CC_SETTINGS" "$AGENTPARTY_CC_SETTINGS.agentparty.bak" || true`,
-    );
-    // 不硬依赖 jq：三级兜底都在
-    expect(text).toContain("command -v jq");
-    expect(text).toContain("command -v node");
-    expect(text).toContain("command -v python3");
-    // 失败不阻断：每条写入分支都带 || true
-    expect(text).toContain("|| true");
-    // 边界说明（接收端设置 / repo 只能收紧 / 默认 hold 5 分钟被 drop）必须在注释里说清
-    expect(text).toContain("--setting-sources");
-    expect(text).toContain("hold");
-  });
-
-  test("codex/other 档：不含 crossSessionInbound 配置（Claude Code 专属设置，#844）", () => {
-    for (const harness of ["codex", "other"] as const) {
-      const text = pack(harness);
-      expect(text).not.toContain("crossSessionInbound");
-      expect(text).not.toContain("AGENTPARTY_CC_SETTINGS");
-    }
-  });
-
-  // #850：codex 档补装 codex 插件——与 #848 的 claude 档对等，两行命令 + || true 失败不阻断。
-  const CODEX_PLUGIN_MARKETPLACE = "codex plugin marketplace add leeguooooo/AgentParty || true";
-  const CODEX_PLUGIN_ADD = "codex plugin add agentparty@agentparty || true";
-
-  test("codex 档：含 codex 插件命令（marketplace add + add），且带 || true 失败不阻断（#850）", () => {
+  test("108 行里逐条手工执行的机械步骤全部收进 party join——粘贴稿里不再出现它们", () => {
     const text = pack("codex");
-    expect(text).toContain(CODEX_PLUGIN_MARKETPLACE);
-    expect(text).toContain(CODEX_PLUGIN_ADD);
-  });
-
-  // #893：接入包里这三段文案是「codex 能不能被唤醒」的唯一说明。整段渲染进包才算数——
-  // 只躺在 i18n 里等于没写（#890 的教训）。断言用整句，不用到处都有的词。
-  test("codex 档：唤醒说明已改成「默认自动可达」，且保住 #879 的差异事实", () => {
-    for (const lang of ["en", "zh"] as const) {
-      const text = pack("codex", lang);
-      expect(text).toContain(tt(lang, "AgentJoin.cmd.codexWakeNote1"));
-      expect(text).toContain(tt(lang, "AgentJoin.cmd.codexWakeNote2", { slug: "dev" }));
-      expect(text).toContain(tt(lang, "AgentJoin.cmd.codexPluginNote1"));
-      // 装 hook 的命令必须真的在包里，否则上面那句「你现在是可达的」是空话。
-      expect(text).toContain("party hook install --codex || true");
-      // 推翻掉的旧结论绝不能还留在包里。
-      expect(text).not.toContain("Installing the plugin does not change that");
-      expect(text).not.toContain("装插件改变不了这一点");
-      expect(text).not.toContain("wake parity for Codex is on the way");
-      expect(text).not.toContain("被唤醒的对等能力在路上");
+    for (const gone of [
+      "party init --server",
+      "claude mcp add",
+      "codex mcp add",
+      "party hook install",
+      "export AGENTPARTY_CONFIG",
+      "AGENTPARTY_RULES_EOF", // rules 落盘 heredoc 移进 party join
+      "party mcp identities", // 判重移进 party join（init 内做）
+      "party wake check", // 自检移进 party join
+      "party serve",
+      "party watch",
+    ]) {
+      expect(text).not.toContain(gone);
     }
   });
 
-  test("claude/other 档：不含 codex 唤醒层文案与 hook install（#893）", () => {
-    for (const harness of ["claude", "other"] as const) {
-      const text = pack(harness);
-      expect(text).not.toContain("party hook install --codex");
-      expect(text).not.toContain("codex-autowake");
-    }
+  test("行为约定砍到三行——每行都对应一类真实会做错的事，且都是注释（不带 # 的只有两条命令）", () => {
+    const text = pack("claude");
+    const commentLines = text.split("\n").filter((l) => l.trimStart().startsWith("#"));
+    expect(commentLines).toHaveLength(3);
+    // 1) 别跑偏去自建频道 / 用第三方频道流程（Trellis）。
+    expect(text).toContain("别另建频道");
+    expect(text).toContain("Trellis");
+    // 2) 指针不含正文、频道是唯一数据源。
+    expect(text).toContain("只含 channel+seq 的指针");
+    expect(text).toContain("频道是唯一数据源");
+    // 3) 改动交给子 agent。
+    expect(text).toContain("交给子 agent");
   });
 
-  test("claude/other 档：不含 codex 插件命令（#850）", () => {
-    for (const harness of ["claude", "other"] as const) {
-      const text = pack(harness);
-      expect(text).not.toContain("codex plugin");
-    }
-  });
-
-  test("codex 档：保留 codex mcp add + Codex 唤醒模板 + serve 指引，无 claude 行", () => {
-    const text = pack("codex");
-    expect(text).toContain(CODEX_MCP_ADD);
-    expect(text).toContain(CODEX_WAKE);
-    expect(text).toContain(OTHER_MODE_FP);
-    expect(text).not.toContain(CLAUDE_MCP_ADD);
-    expect(text).not.toContain(CLAUDE_WAKE);
-    expect(text).not.toContain(CLAUDE_MODE_FP);
-  });
-
-  test("安全硬行三档全在：PATH 先于版本闸 / token 环境变量 / rules.md 落盘 / turnWarn / episodic / 礼仪", () => {
-    for (const harness of ["claude", "codex", "other"] as const) {
-      const text = pack(harness);
-      const lines = text.split("\n");
-      // PATH 行必须先于版本闸行（版本闸被绕过的坑见 joinPack 注释）
-      const pathIdx = lines.findIndex((l) => l.startsWith(`export PATH=`));
-      const gateIdx = lines.findIndex((l) => l.startsWith("need="));
-      expect(pathIdx).toBeGreaterThan(-1);
-      expect(gateIdx).toBeGreaterThan(pathIdx);
-      // token 走环境变量不进 argv（#676）
-      expect(text).toContain("AGENTPARTY_TOKEN='ap_tok' party init");
-      // rules.md 落盘段完整（#845 层 2）
-      expect(text).toContain("<<'AGENTPARTY_RULES_EOF'");
-      expect(lines.indexOf("AGENTPARTY_RULES_EOF")).toBeGreaterThan(-1);
-      // harness 无关的行为约束行都在
-      expect(text).toContain("AGENTPARTY_CONFIG");
-      for (const key of [
-        "AgentJoin.cmd.turnWarn1",
-        "AgentJoin.cmd.episodic1",
-        // #886：回声汇报的判据行——渲染进包里才算数
-        "AgentJoin.cmd.noEcho",
-        "AgentJoin.cmd.etiquette",
-        "AgentJoin.cmd.stayReachable",
-        "AgentJoin.cmd.contextAnchor3",
-        "AgentJoin.cmd.sandboxWarn1",
-      ]) {
-        expect(text).toContain(t(key, { slug: "dev", agentName: "bot" }));
-      }
-    }
-  });
-
-  test("charter 快照注释化在三档全保留（管理员可控文本绝不落成可执行行）", () => {
-    for (const harness of ["claude", "codex", "other"] as const) {
-      const text = buildFullJoinPack({
-        slug: "dev",
-        agentName: "bot",
-        agentToken: "ap_tok",
-        server: "https://party.example",
-        inviterName: "leo",
-        charter: { charter: "rm -rf /\nsecond line", charter_rev: 1, updated_at: null, updated_by: null, active_decisions: [] },
-        harness,
-        t,
-      });
-      expect(text).toContain("# rm -rf /");
-      expect(text).not.toMatch(/^rm -rf \//m);
-    }
-  });
-});
-
-// #879：codex 会话没有 Claude 那样的默认 per-session socket 收件箱——装插件也叫不醒。接入包的
-// codex 档必须把「必须挂 bridge 或 serve 才可达」写死，否则接进来的 codex 身份只会长期 unreachable。
-describe("joinPack codex 档唤醒层说明（#879）", () => {
-  const CODEX_BRIDGE = "party bridge codex dev";
-  const CODEX_SERVE_RUNNER = "party serve dev --runner codex";
-
-  // #893 之后结论变了（默认自动可达），但**差异事实必须保住**：codex 依然没有 per-session
-  // 收件箱，被唤醒的是新 runner 会话而不是眼前这个终端。bridge / serve 降级为可选进阶用法。
-  test("codex 档：仍写明没有 per-session 收件箱 + #879，bridge / serve 作为可选用法保留", () => {
-    const text = pack("codex");
-    expect(text).toContain(CODEX_BRIDGE);
-    expect(text).toContain(CODEX_SERVE_RUNNER);
-    expect(text).toContain("per-session");
-    expect(text).toContain("#879");
-    // 「唤醒的是新 runner 会话，不是你眼前这个」这句差异不能被抹掉（中英各一份）。
-    expect(text).toContain("新的 codex runner 会话");
-    expect(pack("codex", "en")).toContain("NEW codex runner session");
-  });
-
-  test("claude/other 档不加这两条（各走各的唤醒层，别塞噪音）", () => {
-    for (const harness of ["claude", "other"] as const) {
-      const text = pack(harness);
-      expect(text).not.toContain(CODEX_BRIDGE);
-      expect(text).not.toContain(CODEX_SERVE_RUNNER);
-    }
-  });
-});
-
-// #898 方案 C 第 1 件：接入包不重复注册 MCP server——每条注册在每个会话里都是一个常驻进程，
-// owner 实测本机 127 个 party 进程 / 1.7GB，成因就是「每接入一个身份就 add 一个，加了没人清」。
-describe("joinPack MCP 注册幂等（#898 方案 C）", () => {
-  test("claude/other 档：mcp add 前先探，已注册就跳过而不是叠一个", () => {
-    for (const harness of ["claude", "other"] as const) {
-      const text = pack(harness);
-      // 探测与注册必须在同一行（分两行会被半途中断的接入包留下只探不加的状态）。
-      const line = text.split("\n").find((l) => l.includes("claude mcp add ")) ?? "";
-      expect(line).toContain("claude mcp get party-bot >/dev/null 2>&1");
-      expect(line).toContain("|| claude mcp add party-bot ");
-      // 跳过时给人看得见的说明，且指向清理命令。
-      expect(line).toContain("already registered");
-      expect(line).toContain("party mcp prune");
-      // 注册本体逐字未变：env 钉身份 + --channel 定默认频道。
-      expect(line).toContain(
-        `--env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-bot-dev.json" -- party mcp --channel dev`,
-      );
-      // #898 第 3 件：身份必须进 argv——process.title 在 Bun/macOS 上不写回 OS argv 区，
-      // `ps -axww` 只看得到命令行，所以没有这个标签 owner 就还是 100 行一模一样的 party。
-      expect(line).toContain("--identity party-bot");
-    }
-  });
-
-  test("不同身份仍各注册各的（幂等不等于只准有一个 server）", () => {
-    const other = buildFullJoinPack({
+  test("charter 不再快照进包（改由 party join 加入时拉取，也消掉了逐字注入接入方终端的 RCE 面）", () => {
+    const text = buildFullJoinPack({
       slug: "dev",
-      agentName: "bot2",
-      agentToken: "ap_tok",
-      server: "https://party.example",
-      inviterName: "leo",
-      charter: null,
-      harness: "claude",
-      t,
-    });
-    expect(other).toContain("claude mcp get party-bot2 >/dev/null 2>&1");
-    expect(other).toContain("|| claude mcp add party-bot2 ");
-    expect(other).toContain("--identity party-bot2");
-    // 不同频道、同身份：server 名是身份维度的，注册行照常渲染（跳过与否由运行时探测决定）。
-    const otherChannel = buildFullJoinPack({
-      slug: "ops",
       agentName: "bot",
       agentToken: "ap_tok",
       server: "https://party.example",
       inviterName: "leo",
-      charter: null,
+      charter: { charter: "rm -rf /\nsecond line", charter_rev: 1, updated_at: null, updated_by: null, active_decisions: [] },
       harness: "claude",
       t,
     });
-    expect(otherChannel).toContain("|| claude mcp add party-bot ");
-    expect(otherChannel).toContain("-- party mcp --channel ops");
-  });
-
-  // #890 的教训：文案只躺在 i18n 里等于没写。中英两份都必须整段渲染进包。
-  test("去重说明中英两份都真的进包（不是只躺在 i18n 里）", () => {
-    for (const lang of ["en", "zh"] as const) {
-      expect(pack("claude", lang)).toContain(tt(lang, "AgentJoin.cmd.mcpDedupeNote"));
-      expect(pack("codex", lang)).toContain(tt(lang, "AgentJoin.cmd.mcpDedupeNoteCodex", { mcpName: "party-bot" }));
-      // codex 的注册指引同样带 --identity（否则 codex 机器上一样认不出进程归属）。
-      expect(pack("codex", lang)).toContain("--identity party-bot");
-    }
-  });
-
-  // 分档规则与既有的 step4/step4codex 完全一致：claude 档只留 claude 的，codex 档只留 codex 的，
-  // other 档两条都在（兜底＝全量）。
-  test("codex 档不含 claude 的探测行；claude 档不含 codex 的去重说明；other 档两者都在", () => {
-    expect(pack("codex")).not.toContain("claude mcp get ");
-    expect(pack("claude")).not.toContain("codex mcp get ");
-    const other = pack("other");
-    expect(other).toContain("claude mcp get party-bot");
-    expect(other).toContain("codex mcp get party-bot");
+    expect(text).not.toContain("rm -rf /");
+    expect(text).not.toContain("CHANNEL CHARTER");
   });
 });
 
-
-// #924：接入包必须把「谁在加入」当作**事实**传下去，而不是让 CLI 事后从进程树反推。
-describe("joinPack 加入即绑定（#924）", () => {
-  test("codex / claude 档带 --harness；other 档不带（那一档正是「不知道」）", () => {
-    expect(pack("codex")).toContain("party init --server https://party.example --channel dev --harness codex");
-    expect(pack("claude")).toContain("party init --server https://party.example --channel dev --harness claude");
-    expect(pack("other")).toContain("party init --server https://party.example --channel dev\n");
+describe("joinPack harness 分档保留（#845 第 4 点，映射到 party join --harness）", () => {
+  test("已知 harness → 带 --harness；other/缺省不带（那一档正是「不知道」，交给 party join 探测）", () => {
+    expect(pack("codex")).toContain(
+      "party join --server https://party.example --channel dev --as bot --harness codex",
+    );
+    expect(pack("claude")).toContain(
+      "party join --server https://party.example --channel dev --as bot --harness claude",
+    );
+    // other 与缺省都不带 --harness。
     expect(pack("other")).not.toContain("--harness");
+    expect(pack(undefined)).not.toContain("--harness");
+    // other 与缺省逐字节一致（缺省＝other）。
+    expect(pack("other")).toBe(pack(undefined));
   });
+});
 
-  test("三档都解释了替换语义与 party doctor——静默替换和静默放弃一样坏", () => {
-    for (const harness of ["claude", "codex", "other"] as const) {
-      const text = pack(harness);
-      expect(text).toContain(t("AgentJoin.cmd.bindingNote1"));
-      expect(text).toContain(t("AgentJoin.cmd.bindingNote2"));
-      expect(text).toContain("party doctor");
-    }
+describe("joinPack 报到 @ 邀请人（#597 name 校验保留）", () => {
+  test("合法 inviter → --mention；不合法（account id 之类）→ 静默不 @", () => {
+    expect(pack("claude", "leo")).toContain("--mention leo");
+    // account id（含冒号）不满足 name 正则——不 @，别让 party join 的报到报错。
+    const noMention = pack("claude", "lark:on_abc");
+    expect(noMention).not.toContain("--mention");
+  });
+});
+
+describe("web 与 cli 同源：buildFullJoinPack 逐字节等于 shared 的 buildInteractiveJoinPack（#585）", () => {
+  test("同一入参两处产物逐字节一致", () => {
+    const fromWeb = pack("claude", "leo");
+    const fromShared = buildInteractiveJoinPack({
+      slug: "dev",
+      server: "https://party.example",
+      token: "ap_tok",
+      agentName: "bot",
+      harness: "claude",
+      inviterName: "leo",
+    });
+    expect(fromWeb).toBe(fromShared);
   });
 });

@@ -2,7 +2,7 @@
 // （AgentTokens）都调这一份，两个入口的产物从结构上逐字节同构，杜绝再漂移（#584 复盘）。
 // 独立成模块而不放 agentTokenVault：AgentJoin 的测试整体 mock 了 vault 模块，
 // builder 放那边会让组件测试拿到假实现。
-import { AGENT_NAME_RE, BEHAVIOR_CONTRACT_BODY_LINES, channelDecisionSnapshotBodyLines, charterSnapshotBodyLines, mcpServerName } from "@agentparty/shared/onboarding";
+import { AGENT_NAME_RE, buildInteractiveJoinPack, channelDecisionSnapshotBodyLines, charterSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import type { ChannelCharter } from "./api";
 import type { DesktopAgentRunner } from "./desktopAgent";
 import type { TFunc } from "../i18n/useT";
@@ -81,211 +81,23 @@ export interface FullJoinPackInput {
 // 不再写死 claude——#749：AgentJoin 曾无条件 --runner claude，用户选 codex 被静默忽略。
 export const DEFAULT_JOIN_RUNNER: DesktopAgentRunner = "codex";
 
-// 完整接入脚本：init 只写配置不发消息，必须带「报到发言」，否则网页上看不到 agent。
+// #944：完整接入包从 108 行粘贴稿压成「一小段行为约定 + 两行命令」（install + `party join`）。
+// 从前那 108 行里逐条手工执行的机械步骤（写 config/rules、判重#907、加入即绑定#924、注册 MCP#898、
+// 装+批准 codex hook#901/#942/#943、报到#597、收尾自检#926）全部收进 `party join` 这一条命令，
+// 跑完自己打印「全部就绪 / 还差第 N 步」。builder 与 cli（party invite）同源（shared/onboarding），
+// 别再在 web/cli 各写一份（#585）。charter 不再快照进包——`party join` 里的 init 会在加入时拉取并
+// 终端安全地打印最新公告（比粘贴时的快照更新鲜，也消掉了 charter 注入面）。
 export function buildFullJoinPack(input: FullJoinPackInput): string {
-  const { slug, agentName, agentToken, server, charter, t } = input;
-  // #597：邀请人的「频道身份」可能是 account id（lark:on_xxx / github:xxx），不满足 mention
-  // 的 name 正则——渲染出的 --mention 会被 CLI 直接拒绝，新 agent 第一条报到就报错。
-  // 校验不过就整体降级为不 @：报到照发，blocked 指引改教它用 party who 反查 handle。
-  const inviterName = AGENT_NAME_RE.test(input.inviterName) ? input.inviterName : null;
-  // #845 第 4 点：按目标 harness 只渲染对应分支。"other" 恒全量（兜底＝旧行为逐字节不变）。
-  const harness = input.harness ?? "other";
-  return [
-    t("AgentJoin.cmd.header", { slug }),
-    t("AgentJoin.cmd.intro1"),
-    t("AgentJoin.cmd.intro2"),
-    ``,
-    t("AgentJoin.cmd.scope1", { slug }),
-    t("AgentJoin.cmd.scope2"),
-    ``,
-    ...charterSnapshotLines(charter, t),
-    t("AgentJoin.cmd.step1"),
-    // PATH 必须先于版本检查：install.sh 装到 ~/.local/bin，若检查时查的是系统 PATH 里
-    // 另一个够新的 party、后续命令却用回 ~/.local/bin 的旧版，版本闸就被绕过了。
-    `export PATH="\$HOME/.local/bin:\$PATH"`,
-    VERSION_GE_SNIPPET,
-    `need=${MIN_CLI}; have="$(party --version 2>/dev/null || echo 0)"; version_ge "$have" "$need" || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh`,
-    t("AgentJoin.cmd.pathNote1"),
-    t("AgentJoin.cmd.pathNote2"),
-    `command -v party >/dev/null || alias party="\$HOME/.local/bin/party"`,
-    ``,
-    t("AgentJoin.cmd.step2"),
-    `mkdir -p "$HOME/.agentparty/agents"`,
-    `export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.json"`,
-    t("AgentJoin.cmd.turnWarn1"),
-    t("AgentJoin.cmd.turnWarn2"),
-    t("AgentJoin.cmd.turnWarn3"),
-    t("AgentJoin.cmd.turnWarn4", { agentName, slug }),
-    ``,
-    // #845 层 2：行为契约落盘成 rules 文件（与 AGENTPARTY_CONFIG 同目录同命名风格），
-    // 上下文被压缩/丢失后可重读。正文是 shared 的静态常量（BEHAVIOR_CONTRACT_BODY_LINES），
-    // 绝不掺 charter 等管理员可控文本（那有注释化防 RCE 的约束）；heredoc delimiter 带引号防变量展开。
-    t("AgentJoin.cmd.rulesNote"),
-    `cat > "$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.rules.md" <<'AGENTPARTY_RULES_EOF'`,
-    ...BEHAVIOR_CONTRACT_BODY_LINES,
-    `AGENTPARTY_RULES_EOF`,
-    ``,
-    // #907：真正该问的问题——「同一台 server、同一个频道下我是不是已经有身份了？」。
-    // 旧的幂等检查只认 MCP 注册名，换个身份名必然放行，于是同频道静默并存多身份、每个都是
-    // 一个常驻进程。判重必须带 --server：两台生产实例都有同名频道（#865），只按频道名会混。
-    // shell 里不手写 JSON 解析——判定整段做进 CLI；`|| true` 保证提示不阻断接入（退出码 3
-    // 表示「已有身份」，是给脚本用的信号，不是错误）。
-    t("AgentJoin.cmd.channelDedupeNote1"),
-    t("AgentJoin.cmd.channelDedupeNote2"),
-    `party mcp identities --channel ${slug} --server ${server} --exclude ${agentName} || true`,
-    ``,
-    t("AgentJoin.cmd.step3"),
-    // #676：token 走 AGENTPARTY_TOKEN 环境变量传入，不写进 argv——同机任意用户 `ps -axww` 看不到它，
-    // 也不触发 party init 自身「--token 会进 argv/history」的告警（最严格可改 `--token -` 从 stdin 读）。
-    // #924 加入即绑定：--harness 把「谁在加入」变成**我们知道的事实**，而不是事后从进程树反推。
-    // other 档不带这个 flag——那一档正是「不知道是什么 harness」，CLI 会自己探测并在探不出时说出来。
-    `AGENTPARTY_TOKEN='${agentToken}' party init --server ${server} --channel ${slug}`
-      + (harness === "other" ? "" : ` --harness ${harness}`),
-    t("AgentJoin.cmd.bindingNote1"),
-    t("AgentJoin.cmd.bindingNote2"),
-    inviterName === null ? t("AgentJoin.cmd.step3noteNoMention", { slug }) : t("AgentJoin.cmd.step3note"),
-    inviterName === null
-      ? `party send "${t("AgentJoin.cmd.checkinMessage", { agentName })}" --channel ${slug}`
-      : `party send "${t("AgentJoin.cmd.checkinMessage", { agentName })}" --channel ${slug} --mention ${inviterName}`,
-    ``,
-    t("AgentJoin.cmd.step4"),
-    // claude mcp add 是 Claude Code 专属注册命令；codex 档去掉，免得 codex 机器上直接执行报错。
-    // #898：先 `claude mcp get` 探一下，已注册就跳过——每个注册在每个会话里都是一个常驻
-    // 进程（owner 实测本机 127 个 party 进程 / 1.7GB），重复接入同一身份不该再叠一个。
-    // 名字相同时原本 `claude mcp add` 也会直接报错，跳过是严格的改进；`|| true` 风格保持
-    // 「装不上不阻断主流程」。
-    ...(harness !== "codex"
-      ? [
-          t("AgentJoin.cmd.mcpDedupeNote"),
-          `claude mcp get ${mcpServerName(agentName)} >/dev/null 2>&1 && echo "# already registered: ${mcpServerName(agentName)} (skipped; run: party mcp prune)" || claude mcp add ${mcpServerName(agentName)} --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${agentName}-${slug}.json" -- party mcp --channel ${slug} --identity ${mcpServerName(agentName)}`,
-        ]
-      : []),
-    // #848：claude 档补装 marketplace 插件——SessionStart/SessionEnd hook→会话注册表 + idle 可发现/被唤醒 +
-    // 跨会话协作（#841）都由插件承载，裸 MCP 拿不到。`|| true` 保证装不上不阻断接入主流程（降级=只少这些能力）。
-    // codex/other 档不加：插件是 Claude Code 专属；other 档必须与旧全量逐字节一致（joinPack.test.ts 有断言）。
-    ...(harness === "claude"
-      ? [
-          t("AgentJoin.cmd.pluginNote1"),
-          `claude plugin marketplace add leeguooooo/AgentParty || true`,
-          `claude plugin install agentparty@agentparty || true`,
-          // 装上未必启用——doctor.ts 的 fix 提示就是 install && enable 两连，这里对齐。
-          `claude plugin enable agentparty@agentparty || true`,
-          t("AgentJoin.cmd.pluginNote2"),
-          // #844：把 ~/.claude/settings.json 的 crossSessionInbound 设为 accept——频道 @ 消息
-          // 才能直接进对话流并唤醒你，不用每条手动点 Deliver。幂等（重复跑结果一致）、
-          // 失败不阻断（全 `|| true`）、写前先备份 .agentparty.bak。
-          // 不依赖 jq（未必存在）：jq → node → python3 三级兜底，都没有就跳过。
-          t("AgentJoin.cmd.inboxNote1"),
-          t("AgentJoin.cmd.inboxNote2"),
-          t("AgentJoin.cmd.inboxNote3"),
-          `AGENTPARTY_CC_SETTINGS="$HOME/.claude/settings.json"`,
-          `mkdir -p "$HOME/.claude" || true`,
-          `[ -f "$AGENTPARTY_CC_SETTINGS" ] || printf '{}\\n' > "$AGENTPARTY_CC_SETTINGS" || true`,
-          // 备份首次写入即定：重复跑接入包时不能把备份覆盖成「已改过」的版本，
-          // 否则真正的原始设置就永远找不回来了。
-          `[ -f "$AGENTPARTY_CC_SETTINGS.agentparty.bak" ] || cp "$AGENTPARTY_CC_SETTINGS" "$AGENTPARTY_CC_SETTINGS.agentparty.bak" || true`,
-          `if command -v jq >/dev/null 2>&1; then`,
-          `  jq '.crossSessionInbound = "accept"' "$AGENTPARTY_CC_SETTINGS" > "$AGENTPARTY_CC_SETTINGS.agentparty.tmp" && mv "$AGENTPARTY_CC_SETTINGS.agentparty.tmp" "$AGENTPARTY_CC_SETTINGS" || rm -f "$AGENTPARTY_CC_SETTINGS.agentparty.tmp"`,
-          `elif command -v node >/dev/null 2>&1; then`,
-          `  node -e 'const fs=require("fs"),f=process.argv[1];const raw=fs.readFileSync(f,"utf8");const j=raw.trim()===""?{}:JSON.parse(raw);if(typeof j!=="object"||j===null||Array.isArray(j))process.exit(1);j.crossSessionInbound="accept";fs.writeFileSync(f,JSON.stringify(j,null,2)+"\\n")' "$AGENTPARTY_CC_SETTINGS" || true`,
-          `elif command -v python3 >/dev/null 2>&1; then`,
-          `  python3 -c 'import json,sys;f=sys.argv[1];d=json.load(open(f)) if open(f).read().strip() else {};d["crossSessionInbound"]="accept";json.dump(d,open(f,"w"),indent=2)' "$AGENTPARTY_CC_SETTINGS" || true`,
-          `fi`,
-          t("AgentJoin.cmd.inboxNote4"),
-        ]
-      : []),
-    // step4codex 是 codex mcp add 指引；claude 档去掉（目标 harness 只走一条，其余是噪音）。
-    ...(harness !== "claude"
-      ? [
-          t("AgentJoin.cmd.step4codex", { mcpName: mcpServerName(agentName), agentName, slug }),
-          // #898：codex 侧同样是「一条注册＝一个常驻进程」，指引里必须带上先探后加。
-          t("AgentJoin.cmd.mcpDedupeNoteCodex", { mcpName: mcpServerName(agentName) }),
-        ]
-      : []),
-    // #850：codex 档补装 codex 插件——与 #848 的 claude 档对等；命令已真机验证（codex CLI 0.2.187）。
-    // codex 无独立 enable 步骤，装完重启 codex 生效。`|| true` 保证装不上不阻断接入主流程。
-    // other 档不加：必须与旧全量逐字节一致（joinPack.test.ts 有断言）；claude 档也不含 codex plugin 行。
-    ...(harness === "codex"
-      ? [
-          t("AgentJoin.cmd.codexPluginNote1"),
-          `codex plugin marketplace add leeguooooo/AgentParty || true`,
-          `codex plugin add agentparty@agentparty || true`,
-          t("AgentJoin.cmd.codexPluginNote2"),
-          // #893：codex 的 SessionStart hook 是「入册 + 自动拉起唤醒层」的唯一入口——codex
-          // 插件不写 ~/.codex/hooks.json（harness 身份由「装在谁的 hooks 里」决定，#851），
-          // 所以接入包必须自己装这一条，否则上面那句「你现在是可达的」就是空话。
-          // 幂等：重复跑只保证自己那条在，绝不动用户已有 hooks；失败也不阻断接入。
-          `party hook install --codex || true`,
-          // #902：hooks.json 是 codex 启动时读的——装完必须新开会话才生效，说清楚免得对方
-          // 在原会话里等唤醒等到怀疑人生（vault 复制的包过去连这一整条 hook 都没有）。
-          t("AgentJoin.cmd.codexHookNote"),
-          // #910：`codex exec` 不触发任何 hook（只有交互式 TUI 会）。不写这一句，就会有人在
-          // exec 里验一遍、发现没反应，然后得出「这功能坏了」的错误结论。
-          t("AgentJoin.cmd.codexExecNoHooks"),
-          // #910/#926：接入包的最后一步从「指令」改成「验证」。
-          // 过去这里是「接下来请在 codex TUI 里 Trust 一次」——没人读，而 hook 未获批准时
-          // codex **静默跳过**，用户连自己失败了都不知道。改成当场跑一条命令，让它直接说出
-          // 「还差几步、差哪一步」。`|| true` 保证「还差一步」不把整段粘贴脚本判成失败。
-          t("AgentJoin.cmd.verifyNote1"),
-          `party wake check || true`,
-          t("AgentJoin.cmd.verifyNote2"),
-        ]
-      : []),
-    t("AgentJoin.cmd.step4fallback"),
-    ``,
-    t("AgentJoin.cmd.step5"),
-    t("AgentJoin.cmd.step5reply", { slug }),
-    t("AgentJoin.cmd.step5more", { slug }),
-    t("AgentJoin.cmd.contextAnchor1", { slug }),
-    t("AgentJoin.cmd.contextAnchor2", { agentName, slug }),
-    t("AgentJoin.cmd.contextAnchor3"),
-    t("AgentJoin.cmd.blocked1", { slug }),
-    inviterName === null
-      ? t("AgentJoin.cmd.blocked2NoMention", { slug })
-      : t("AgentJoin.cmd.blocked2", { slug, inviterName }),
-    t("AgentJoin.cmd.stayReachable"),
-    t("AgentJoin.cmd.mcpWakeNote"),
-    // #879：codex 档必须写死唤醒层这条硬事实——codex 会话没有 Claude 那样的默认 per-session socket
-    // 收件箱，装插件也叫不醒；只有 bridge / serve 持有 app-server 连接时它才可达。claude/other 档不加。
-    ...(harness === "codex"
-      ? [t("AgentJoin.cmd.codexWakeNote1"), t("AgentJoin.cmd.codexWakeNote2", { slug })]
-      : []),
-    // claudeMode 三行是 Claude Code 的 watch --once 待命指引；codex 档去掉。
-    ...(harness !== "codex"
-      ? [t("AgentJoin.cmd.claudeMode1"), t("AgentJoin.cmd.claudeMode2", { slug }), t("AgentJoin.cmd.claudeMode3")]
-      : []),
-    // otherMode 四行是常驻 serve supervisor 指引（Codex 唤醒模板挂在它下面）；claude 档去掉。
-    ...(harness !== "claude"
-      ? [
-          t("AgentJoin.cmd.otherMode1"),
-          t("AgentJoin.cmd.otherMode2"),
-          t("AgentJoin.cmd.otherMode3", { slug }),
-          t("AgentJoin.cmd.otherMode4"),
-        ]
-      : []),
-    // 唤醒命令模板按 harness 各留各的：claude 档不需要 codex exec，codex 档不需要 claude -p。
-    ...(harness !== "claude"
-      ? [
-          `#        Codex:  OUT=$(mktemp); codex exec resume --last --skip-git-repo-check -o "$OUT" "$(cat {file})" || codex exec --skip-git-repo-check -o "$OUT" "$(cat {file})"; party send - --channel "$AP_CHANNEL" --reply-to "$AP_REPLY_TO" < "$OUT"`,
-        ]
-      : []),
-    ...(harness !== "codex" ? [`#        Claude: claude -p -c "$(cat {file})" || claude -p "$(cat {file})"`] : []),
-    t("AgentJoin.cmd.sandboxWarn1"),
-    t("AgentJoin.cmd.sandboxWarn2"),
-    t("AgentJoin.cmd.sandboxWarn3"),
-    t("AgentJoin.cmd.sandboxWarn4"),
-    t("AgentJoin.cmd.watchNote", { slug }),
-    // #822/#828：给按轮执行的 harness 一条诚实的路，而不是让它在 watch/serve 里二选一地硬装常驻。
-    t("AgentJoin.cmd.episodic1"),
-    t("AgentJoin.cmd.episodic2", { slug }),
-    t("AgentJoin.cmd.episodic3"),
-    t("AgentJoin.cmd.codefence"),
-    // #886：紧跟 episodic/receipt 三行——那里讲「这轮做不了怎么表达」，这里讲「做完了之后别说两遍」。
-    t("AgentJoin.cmd.noEcho"),
-    t("AgentJoin.cmd.etiquette"),
-    // #845：包尾提醒——本包是瞬态文本，规则的持久拷贝在上面落盘的 rules 文件里。
-    t("AgentJoin.cmd.rulesReread", { agentName, slug }),
-  ].join("\n");
+  return buildInteractiveJoinPack({
+    slug: input.slug,
+    server: input.server,
+    token: input.agentToken,
+    agentName: input.agentName,
+    // #845 第 4 点保留 harness 分档：已知就带进 `party join --harness`，让目标机少探一步；
+    // "other"/缺省不带，交给 `party join` 在对方机器上探测（#924）。校验不过的 inviter 见 shared。
+    harness: input.harness ?? "other",
+    inviterName: AGENT_NAME_RE.test(input.inviterName) ? input.inviterName : null,
+  });
 }
 
 // 无人值守值守包（#612 公司大群）：serve --runner <codex|claude|codex-sdk> 的一键预设（#749：runner 可选,

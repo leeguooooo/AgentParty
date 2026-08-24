@@ -32,13 +32,12 @@ const { AgentTokens } = await import("./AgentTokens");
 
 const VAULT_KEY = "ap_agent_token_vault:v1";
 
-// harness 分档的指纹行：每条都是接入包里真实的可执行命令/指引整行，不是随处可见的词，
-// 这样删掉 builder 里对应分支或改错档位时断言必然变红（弱变异挡不住的那种）。
-const CLAUDE_ONLY_MCP = "claude mcp add party-";
-const CLAUDE_ONLY_WATCH = "party watch demo --mentions-only --once";
-const CLAUDE_ONLY_PLUGIN = "claude plugin marketplace add leeguooooo/AgentParty || true";
-const CODEX_ONLY_PLUGIN = "codex plugin marketplace add leeguooooo/AgentParty || true";
-const CODEX_ONLY_HOOK = "party hook install --codex || true";
+// #944：接入包压成两行命令后，harness 分档只体现在 `party join --harness <h>` 这一个 flag 上
+// （从前那些 claude mcp add / party watch / hook install / plugin 整段全部收进 `party join`）。
+// 指纹就是这个 flag：codex 档带 `--harness codex`、claude 档带 `--harness claude`、other 档不带。
+// 断言钉在整个 flag 片段上（不是随处可见的词），改错档位或删掉分档逻辑时必然变红。
+const CODEX_MARK = "--harness codex";
+const CLAUDE_MARK = "--harness claude";
 
 function vaultSeed(records: Array<Record<string, unknown>>): string {
   return JSON.stringify(
@@ -213,14 +212,11 @@ describe("AgentTokens join-pack harness picker (#895)", () => {
         .findAll((n) => n.type === "button")[0]!.props.children,
     ).toBe("copy join pack");
     const pack = await copyPack(r);
-    expect(pack).toContain(CODEX_ONLY_PLUGIN);
-    expect(pack).toContain(CODEX_ONLY_HOOK);
-    expect(pack).not.toContain(CLAUDE_ONLY_MCP);
-    expect(pack).not.toContain(CLAUDE_ONLY_WATCH);
-    expect(pack).not.toContain(CLAUDE_ONLY_PLUGIN);
+    expect(pack).toContain(CODEX_MARK);
+    expect(pack).not.toContain(CLAUDE_MARK);
   });
 
-  test("a legacy record without harness pre-selects codex from the agent name and drops the Claude-only wake guidance", async () => {
+  test("a legacy record without harness pre-selects codex from the agent name and generates the codex pack", async () => {
     // owner 实拍的那个身份：lark-…-codex1，过去只能拿到含 watch --once 的全量档。
     seedOne({}, "lark-ad72b3f9749e-agentparty-codex1");
     const r = await renderOpen();
@@ -228,9 +224,8 @@ describe("AgentTokens join-pack harness picker (#895)", () => {
     const select = harnessSelects(r)[0]!;
     expect(select.props.value).toBe("codex");
     const pack = await copyPack(r);
-    expect(pack).toContain(CODEX_ONLY_HOOK);
-    expect(pack).not.toContain(CLAUDE_ONLY_WATCH);
-    expect(pack).not.toContain(CLAUDE_ONLY_MCP);
+    expect(pack).toContain(CODEX_MARK);
+    expect(pack).not.toContain(CLAUDE_MARK);
   });
 
   test("a legacy record named *-claude* pre-selects claude", async () => {
@@ -239,24 +234,20 @@ describe("AgentTokens join-pack harness picker (#895)", () => {
 
     expect(harnessSelects(r)[0]!.props.value).toBe("claude");
     const pack = await copyPack(r);
-    expect(pack).toContain(CLAUDE_ONLY_PLUGIN);
-    expect(pack).toContain(CLAUDE_ONLY_WATCH);
-    expect(pack).not.toContain(CODEX_ONLY_PLUGIN);
-    expect(pack).not.toContain(CODEX_ONLY_HOOK);
+    expect(pack).toContain(CLAUDE_MARK);
+    expect(pack).not.toContain(CODEX_MARK);
   });
 
-  test("a legacy record whose name says nothing keeps the full pack", async () => {
+  test("a legacy record whose name says nothing produces the pack with no --harness", async () => {
     seedOne({}, "helper-bot");
     const r = await renderOpen();
 
     expect(harnessSelects(r)[0]!.props.value).toBe("other");
     const pack = await copyPack(r);
-    // 全量档＝两种 harness 的指引都在（这正是 #895 抱怨的产物，对「其它」harness 才是对的）。
-    expect(pack).toContain(CLAUDE_ONLY_MCP);
-    expect(pack).toContain(CLAUDE_ONLY_WATCH);
-    // other 档必须与旧全量逐字节一致：两家的插件安装行都不属于它。
-    expect(pack).not.toContain(CLAUDE_ONLY_PLUGIN);
-    expect(pack).not.toContain(CODEX_ONLY_PLUGIN);
+    // other 档＝还不知道是哪个 harness，`party join` 会在对方机器上自己探测——所以不带 --harness。
+    expect(pack).not.toContain("--harness");
+    // 但它仍是那条 party join 命令（不是空包）。
+    expect(pack).toContain("party join --server");
   });
 
   test("changing the picker changes the copied pack and is written back to the vault", async () => {
@@ -264,7 +255,7 @@ describe("AgentTokens join-pack harness picker (#895)", () => {
     const r = await renderOpen();
 
     const before = await copyPack(r);
-    expect(before).toContain(CLAUDE_ONLY_WATCH);
+    expect(before).not.toContain("--harness");
 
     await act(async () => {
       harnessSelects(r)[0]!.props.onChange({ target: { value: "codex" } });
@@ -273,10 +264,8 @@ describe("AgentTokens join-pack harness picker (#895)", () => {
     // 产物真的换档了。
     expect(harnessSelects(r)[0]!.props.value).toBe("codex");
     const after = await copyPack(r);
-    expect(after).toContain(CODEX_ONLY_HOOK);
-    expect(after).toContain(CODEX_ONLY_PLUGIN);
-    expect(after).not.toContain(CLAUDE_ONLY_WATCH);
-    expect(after).not.toContain(CLAUDE_ONLY_MCP);
+    expect(after).toContain(CODEX_MARK);
+    expect(after).not.toContain(CLAUDE_MARK);
 
     // 写回 vault：下次进来不用再选（且走 saveAgentToken，token/mode 等字段原样保留）。
     const stored = JSON.parse(localStorage.getItem(VAULT_KEY)!) as Array<Record<string, unknown>>;
@@ -298,8 +287,8 @@ describe("AgentTokens join-pack harness picker (#895)", () => {
     const again = await renderOpen();
     expect(harnessSelects(again)[0]!.props.value).toBe("codex");
     const pack = await copyPack(again);
-    expect(pack).toContain(CODEX_ONLY_HOOK);
-    expect(pack).not.toContain(CLAUDE_ONLY_WATCH);
+    expect(pack).toContain(CODEX_MARK);
+    expect(pack).not.toContain(CLAUDE_MARK);
   });
 
   test("unattended records show no harness picker and keep their serve script", async () => {
@@ -310,7 +299,7 @@ describe("AgentTokens join-pack harness picker (#895)", () => {
     expect(harnessSelects(r).length).toBe(0);
     const pack = await copyPack(r);
     expect(pack).toContain("party serve --channel demo --runner claude");
-    expect(pack).not.toContain(CODEX_ONLY_HOOK);
-    expect(pack).not.toContain(CLAUDE_ONLY_WATCH);
+    // unattended 是给人跑的 serve 预设，不是贴给 agent 的 party join——不带 --harness。
+    expect(pack).not.toContain("--harness");
   });
 });

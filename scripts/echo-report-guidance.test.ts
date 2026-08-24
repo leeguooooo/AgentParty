@@ -55,15 +55,17 @@ describe("#886 回声汇报的引导层", () => {
     expect(BEHAVIOR_CONTRACT_SUMMARY.length).toBeLessThan(120);
   });
 
-  test("接入包礼仪段中英双语都写出判据（i18n 注释文案不能独自满足断言）", () => {
-    const strings = read("web/src/i18n/strings/AgentJoin.ts");
-    expect(strings).toContain(
-      '"AgentJoin.cmd.noEcho": "# Never echo back what you just sent: if the whole content of a message is a restatement of the one you just sent (its text, its seq, or \\"done, sent it\\"), do not send it',
-    );
-    expect(strings).toContain(
-      '"AgentJoin.cmd.noEcho": "# 绝不复述刚发出的消息：如果这条消息的全部内容就是复述你上一条（正文、seq、或「已发送」），就别发',
-    );
-    // joinPack 必须真的把它拼进包里——只在 i18n 里躺着等于没有
-    expect(read("web/src/lib/joinPack.ts")).toContain('t("AgentJoin.cmd.noEcho"),');
+  // #944 之后接入包不再逐条粘贴行为约定（108 行 → 一段说明 + 两行命令），这条规则改由
+  // `party join` **落盘**到 rules.md 交付。守的东西没变——「加入的 agent 最终确实拿到这条
+  // 规则」——只是断言从「包文本里有这段字」挪到「投递机制真的会写出它」。
+  // 断言仍钉在会被执行的代码上：i18n 注释或说明文案独自满足不了它（#864 的教训）。
+  test("party join 把完整契约落盘成 rules.md，这条规则随之交付", () => {
+    const join = read("cli/src/commands/join.ts");
+    // 真的写盘，且写的是 shared 那份常量（不是就地抄一段会漂移的副本）
+    expect(join).toContain("BEHAVIOR_CONTRACT_BODY_LINES");
+    expect(join).toContain('atomicWriteText(rulesPath, `${BEHAVIOR_CONTRACT_BODY_LINES.join("\\n")}');
+    expect(join).toContain(".rules.md");
+    // 上面那条 body 断言已经保证 BODY_LINES 里含本规则；这里再确认交付链没断：
+    // join 写的就是同一份常量，所以规则必然随之落盘。
   });
 });

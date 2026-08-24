@@ -105,46 +105,34 @@ describe("party invite", () => {
     // 建频道用刚铸的 guest token
     expect(chanReq.headers.authorization).toBe("Bearer ap_fix-login-bug-guest_secret");
 
-    // 接入包内容可整段粘贴
-    // #676：token 走 AGENTPARTY_TOKEN 环境变量传入，不写进 argv——可拷贝命令里不得再出现明文 `--token ap`
+    // #944：接入包从 108 行压成「一段行为约定 + 两行命令」（install + party join）。
+    // 两行命令：装 CLI（缺失才装）＋ party join。token 走 AGENTPARTY_TOKEN 前缀，绝不进 argv（#676）。
     expect(r.stdout).toContain(
-      `AGENTPARTY_TOKEN='ap_fix-login-bug-guest_secret' party init --server ${mock.url} --channel fix-login-bug`,
+      "command -v party >/dev/null || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh",
+    );
+    expect(r.stdout).toContain(
+      `AGENTPARTY_TOKEN='ap_fix-login-bug-guest_secret' party join --server ${mock.url} --channel fix-login-bug --as fix-login-bug-guest`,
     );
     expect(r.stdout).not.toContain("--token ap_fix-login-bug-guest_secret");
-    const scopeGuardIndex = r.stdout.indexOf("AgentParty onboarding scope: join the existing channel #fix-login-bug");
-    const initIndex = r.stdout.indexOf("party init --server");
-    expect(scopeGuardIndex).toBeGreaterThan(-1);
-    expect(scopeGuardIndex).toBeLessThan(initIndex);
-    expect(r.stdout).toContain("only the supplied party commands");
-    expect(r.stdout).toContain("Do not create or select another channel");
-    expect(r.stdout).toContain("third-party or project-local channel workflows (for example, Trellis)");
-    expect(r.stdout).toContain("do not delegate onboarding");
-    // 自包含简报要内联教会 agent 待命模型，核心是保住 agent 自己会话的上下文：
-    // Claude Code 走后台 watch --once（同会话唤醒），其它 harness 走 serve + 续会话 runner
-    expect(r.stdout).toContain("party watch fix-login-bug --mentions-only --once");
-    expect(r.stdout).toContain("party serve fix-login-bug --runner claude --replay-backlog");
-    expect(r.stdout).toContain('$HOME/.agentparty/agents/agentparty-fix-login-bug-guest-fix-login-bug.json');
-    expect(r.stdout).toContain("TMPDIR 清理会抹掉身份和 cursor");
-    expect(r.stdout).not.toContain("${TMPDIR");
-    // #585：CLI 邀请包与 web 接入包同一套 MCP-first 世界观——注册名按 agent 唯一（shared mcpServerName），
-    // 附 Codex 行 + 非 MCP 兜底 + 「MCP 通知叫不醒 harness」提醒。
-    expect(r.stdout).toContain(
-      'claude mcp add party-fix-login-bug-guest --env AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-fix-login-bug-guest-fix-login-bug.json" -- party mcp --channel fix-login-bug',
-    );
-    expect(r.stdout).toContain("# Codex：codex mcp add party-fix-login-bug-guest --env");
-    expect(r.stdout).toContain("非 MCP 的 harness：跳过这步");
-    expect(r.stdout).toContain("party_decision_ask");
-    expect(r.stdout).toContain("MCP 通知叫不醒空闲的 harness");
-    expect(r.stdout).toContain("party serve fix-login-bug --on-mention");
-    expect(r.stdout).toContain("Codex CLI / Codex tool-call shell：不要用 watch 当 wake 层");
-    expect(r.stdout).toContain("watch --follow：只适合 tail/debug");
-    expect(r.stdout).toContain("tmux / launchctl / 真实 supervisor");
-    expect(r.stdout).toContain("codex exec resume --last --skip-git-repo-check");
-    expect(r.stdout).toContain("claude -p -c");
-    expect(r.stdout).toContain("零 token");
-    expect(r.stdout).toContain("party wake test @你");
+    // 那 108 行里逐条手工执行的机械步骤全部收进 party join——粘贴稿里不再出现它们。
+    expect(r.stdout).not.toContain("party init --server");
+    expect(r.stdout).not.toContain("claude mcp add");
+    expect(r.stdout).not.toContain("party hook install");
+    expect(r.stdout).not.toContain("export AGENTPARTY_CONFIG");
+    expect(r.stdout).not.toContain("party serve");
+    // 行为约定压到三行：折进第一行的作用域守卫（别另建频道 / 别用 Trellis）必须排在 party join 之前。
+    const scopeIndex = r.stdout.indexOf("别另建频道");
+    const joinIndex = r.stdout.indexOf("party join --server");
+    expect(scopeIndex).toBeGreaterThan(-1);
+    expect(scopeIndex).toBeLessThan(joinIndex);
+    expect(r.stdout).toContain("Trellis");
+    // 真正影响 AI 行为的三行都在：唯一数据源 / 指针不含正文 / 改动交给子 agent。
+    expect(r.stdout).toContain("频道是唯一数据源");
+    expect(r.stdout).toContain("只含 channel+seq 的指针");
+    expect(r.stdout).toContain("交给子 agent");
+    // 网页只读围观链接仍在。
     expect(r.stdout).toContain(`${mock.url}/c/fix-login-bug?t=ap_fix-login-bug-share_secret`);
-    // 输出快照（归一化随机端口）
+    // 输出快照（归一化随机端口）——一眼看出从 108 行变成了几行。
     expect(r.stdout.replaceAll(mock.url, "https://party.example")).toMatchSnapshot();
   });
 
@@ -160,7 +148,9 @@ describe("party invite", () => {
     });
   });
 
-  test("scope guard precedes moderator-controlled charter text and party init", async () => {
+  // #944：charter 不再快照进参与模式的粘贴稿——`party join` 里的 init 会在加入时拉取并终端安全地
+  // 打印最新公告（比粘贴时的快照更新鲜，也消掉了 charter 逐字注入接入方终端的 RCE 面）。
+  test("参与模式粘贴稿不再内联管理员可控的 charter（改由 party join 加入时拉取）", async () => {
     mock = startRestMock((req) => {
       if (req.method === "GET" && req.path === "/api/channels/guarded-room/charter") {
         return Response.json({ charter: "MODERATOR CONTROLLED CHARTER", charter_rev: 1 });
@@ -170,21 +160,23 @@ describe("party invite", () => {
     const r = await runCli(["invite", "Guarded Room", "--server", mock.url], { ADMIN_SECRET: "s" });
 
     expect(r.code).toBe(0);
-    const guardIndex = r.stdout.indexOf("AgentParty onboarding scope: join the existing channel #guarded-room");
+    // 管理员可控文本绝不出现在粘贴稿里（连注释化的快照都不放了）。
+    expect(r.stdout).not.toContain("MODERATOR CONTROLLED CHARTER");
+    // 作用域守卫（别另建频道）仍排在 party join 之前。
+    const guardIndex = r.stdout.indexOf("别另建频道");
     expect(guardIndex).toBeGreaterThan(-1);
-    expect(guardIndex).toBeLessThan(r.stdout.indexOf("MODERATOR CONTROLLED CHARTER"));
-    expect(guardIndex).toBeLessThan(r.stdout.indexOf("party init "));
+    expect(guardIndex).toBeLessThan(r.stdout.indexOf("party join "));
   });
 
-  test("--checkin-mention 会在报到行 @ 邀请人", async () => {
+  test("--checkin-mention 会把邀请人传给 party join --mention（报到时 @ 他）", async () => {
     mock = startRestMock();
     const r = await runCli(["invite", "Fix Login Bug", "--checkin-mention", "leo", "--server", mock.url], {
       ADMIN_SECRET: "s3cret",
     });
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("# @ 邀请人让他知道你来了");
+    // 报到 @ 现在收进 party join：跑起来时它自己发报到并 @ 邀请人。
     expect(r.stdout).toContain(
-      'party send "👋 fix-login-bug-guest 报到，来参与协作" --channel fix-login-bug --mention leo',
+      `AGENTPARTY_TOKEN='ap_fix-login-bug-guest_secret' party join --server ${mock.url} --channel fix-login-bug --as fix-login-bug-guest --mention leo`,
     );
   });
 
@@ -220,7 +212,9 @@ describe("party invite", () => {
       visibility: "private",
     });
     expect(r.stdout).toContain("(temp · party)");
-    expect(r.stdout).toContain(`AGENTPARTY_TOKEN='ap_bob_secret' party init --server ${mock.url} --channel hotfix`);
+    expect(r.stdout).toContain(
+      `AGENTPARTY_TOKEN='ap_bob_secret' party join --server ${mock.url} --channel hotfix --as bob`,
+    );
     expect(r.stdout).not.toContain("--token ap_bob_secret");
   });
 

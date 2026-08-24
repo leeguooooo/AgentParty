@@ -149,33 +149,30 @@ function open(r: ReactTestRenderer) {
 }
 
 describe("AgentJoin dismiss behavior", () => {
-  test.each([
-    ["en", "AgentParty onboarding scope: join the existing channel #demo"],
-    ["zh", "AgentParty 接入范围：只用下方提供的 party 命令加入现有频道 #demo"],
-  ] as const)(
-    "puts the %s scope guard before moderator charter text and party init",
-    async (locale: "en" | "zh", guard: string) => {
-      localStorage.setItem("ap_locale", locale);
-      const r = render(undefined, {
-        charter: "MODERATOR CONTROLLED CHARTER",
-        charter_rev: 1,
-        updated_at: 1,
-        updated_by: "moderator",
-      });
-      open(r);
-      await act(async () => {
-        await r.root
-          .find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick)
-          .props.onClick();
-      });
+  // #944：作用域守卫从整段英文说明压成行为约定第一行（别另建频道 / 别用 Trellis），排在 party join 之前；
+  // charter 不再快照进包（改由 party join 加入时拉取），所以管理员可控文本绝不出现在粘贴稿里。
+  test("scope-guard contract line precedes the party join command; moderator charter is not baked into the pack", async () => {
+    const r = render(undefined, {
+      charter: "MODERATOR CONTROLLED CHARTER",
+      charter_rev: 1,
+      updated_at: 1,
+      updated_by: "moderator",
+    });
+    open(r);
+    await act(async () => {
+      await r.root
+        .find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick)
+        .props.onClick();
+    });
 
-      const command = savedAgents[0]!.command;
-      expect(command).toContain(guard);
-      expect(command).toContain("Trellis");
-      expect(command.indexOf(guard)).toBeLessThan(command.indexOf("MODERATOR CONTROLLED CHARTER"));
-      expect(command.indexOf(guard)).toBeLessThan(command.indexOf("party init "));
-    },
-  );
+    const command = savedAgents[0]!.command;
+    expect(command).toContain("别另建频道");
+    expect(command).toContain("Trellis");
+    // 管理员可控文本绝不进粘贴稿（连注释化快照都不放了）。
+    expect(command).not.toContain("MODERATOR CONTROLLED CHARTER");
+    // 作用域守卫排在 party join 命令之前。
+    expect(command.indexOf("别另建频道")).toBeLessThan(command.indexOf("party join "));
+  });
 
   test("Escape closes the compose dialog, reports controlled state, and removes its listener", () => {
     const changes: boolean[] = [];
@@ -209,8 +206,10 @@ describe("AgentJoin dismiss behavior", () => {
       await r.root.find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick).props.onClick();
     });
     expect(savedAgents.map(({ name, token }) => ({ name, token }))).toEqual([{ name: "leo-demo", token: "ap_created" }]);
-    expect(savedAgents[0]?.command).toContain('$HOME/.agentparty/agents/agentparty-leo-demo-demo.json');
-    expect(savedAgents[0]?.command).not.toContain("TMPDIR");
+    // #944：保存的命令就是新的两行接入包——token 走 AGENTPARTY_TOKEN 前缀，绝不进 argv（无 --token）。
+    expect(savedAgents[0]?.command).toContain("party join --server");
+    expect(savedAgents[0]?.command).toContain("AGENTPARTY_TOKEN='ap_created' party join");
+    expect(savedAgents[0]?.command).not.toContain("--token");
 
     act(() => windowEvents.emit("keydown", { key: "Escape" }));
     expect(r.root.findAll((node) => node.props.role === "dialog")).toHaveLength(0);
@@ -221,8 +220,9 @@ describe("AgentJoin dismiss behavior", () => {
     expect(input.props.value).toBe("leo-demo");
   });
 
-  test("join command tells turn-based agents to re-anchor context and route human confirmations to the channel", async () => {
-    localStorage.setItem("ap_locale", "en");
+  // #944：那些逐轮待命/确认路由的长篇指引全部收进 `party join`（跑起来它自己做 + 落成 rules 文件）。
+  // 粘贴稿里只留三行真正影响 AI 行为的约定——删掉哪一行 AI 就会做错事。
+  test("join pack keeps only the 3 behavior-contract lines that change what the agent does", async () => {
     const r = render();
     open(r);
     await act(async () => {
@@ -230,11 +230,16 @@ describe("AgentJoin dismiss behavior", () => {
     });
 
     const command = savedAgents[0]!.command;
-    expect(command).toContain("every new turn: first re-anchor yourself");
-    expect(command).toContain("party status demo waiting -m \"need human: <question>\"");
-    expect(command).toContain("party send \"need human confirmation: <question/options>\" --channel demo --mention host");
-    expect(command).toContain("watch --once is only a current-turn standby");
-    expect(command).toContain("prefer party serve or webhook delivery");
+    // 1) 别跑偏去自建频道 / 用第三方频道流程。
+    expect(command).toContain("别另建频道");
+    // 2) 指针不含正文、频道是唯一数据源。
+    expect(command).toContain("只含 channel+seq 的指针");
+    expect(command).toContain("频道是唯一数据源");
+    // 3) 改动交给子 agent。
+    expect(command).toContain("交给子 agent");
+    // 长篇待命/确认路由指引已从粘贴稿移除（收进 party join）。
+    expect(command).not.toContain("re-anchor");
+    expect(command).not.toContain("watch --once");
   });
 });
 
@@ -307,14 +312,16 @@ describe("AgentJoin 无人值守值守预设 (#612)", () => {
     expect(command).not.toMatch(/^MODERATOR CONTROLLED CHARTER$/m);
   });
 
-  test("默认仍是交互接入：不动选择器时产物与原完整包同款", async () => {
+  test("默认仍是交互接入：不动选择器时产物是两行 party join 接入包（#944）", async () => {
     const r = render();
     open(r);
     await generate(r);
     const saved = savedAgents[0]! as { command: string; mode?: string };
     expect(saved.mode).toBe("interactive");
-    expect(saved.command).toContain("claude mcp add");
+    // 交互接入＝两行命令（install + party join），不是 unattended 的 serve 运维脚本。
+    expect(saved.command).toContain("party join --server");
     expect(saved.command).not.toContain("--runner claude");
+    expect(saved.command).not.toContain("party serve");
   });
 });
 
@@ -484,11 +491,11 @@ describe("AgentJoin 桌面一键接管 (#616 phase 4)", () => {
 });
 
 describe("AgentJoin 接入包 server 域名 (#530)", () => {
-  // 桌面版(Tauri)里 location.origin 是 tauri://localhost，接入包若用它拼 `party init --server`
+  // 桌面版(Tauri)里 location.origin 是 tauri://localhost，接入包若用它拼 `party join --server`
   // 会让 agent 报错/连不上。修复要求：apiBase() 非空(桌面注入了真后端)时用 apiBase()，
   // 只有同源 web(apiBase 为空)才回退 location.origin。
   // 本用例里 location.origin = https://party.test，代表「不该被用到的伪源」。
-  test("apiBase() 非空时，party init --server 用注入的真实后端而非 location.origin", async () => {
+  test("apiBase() 非空时，party join --server 用注入的真实后端而非 location.origin", async () => {
     setApiBase("https://agentparty.leeguoo.com");
     const r = render();
     open(r);
@@ -498,9 +505,9 @@ describe("AgentJoin 接入包 server 域名 (#530)", () => {
 
     const command = savedAgents[0]!.command;
     // 关键断言：--server 用的是 apiBase() 的真后端
-    expect(command).toContain("party init --server https://agentparty.leeguoo.com ");
+    expect(command).toContain("party join --server https://agentparty.leeguoo.com ");
     // 绝不能回退到 location.origin(桌面端的伪源，此处以 https://party.test 代表)
-    expect(command).not.toContain("party init --server https://party.test");
+    expect(command).not.toContain("party join --server https://party.test");
   });
 });
 
