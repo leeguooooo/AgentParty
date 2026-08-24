@@ -106,9 +106,24 @@ function trustStateOf(table: Record<string, unknown> | null, key: string): {
  * 只按命令本体匹配；同一条命令在同一事件下出现多次时全部列出（去重交给调用方，
  * 反正每一条都是我们的）。
  */
+/**
+ * shell 的 token 分隔符**只有**空格 / Tab / 换行（默认 IFS）。
+ *
+ * 不能用 JS 的 `\s`：它还匹配 NBSP(\u00A0)、全角空格(\u3000)、\u2028 等，而这些在 shell 里
+ * 是**普通字符**、属于 token 的一部分。用 `\s` 判边界会把
+ * `"/opt/x/party"\u00A0hook codex-stop` 判成 binary=/opt/x/party + args=[hook, codex-stop]
+ * ⇒ 自动批准；shell 实际执行的却是 `/opt/x/party\u00A0hook`——另一个可执行文件。
+ */
+const SHELL_SEP = /[ \t\n]/;
+const SHELL_SEPS = /[ \t\n]+/;
+/** 只吃 shell 分隔符的 trim；不能用 String.trim()（它同样会吃掉 NBSP 之类）。 */
+function shellTrim(text: string): string {
+  return text.replace(/^[ \t\n]+/, "").replace(/[ \t\n]+$/, "");
+}
+
 /** 命令行首个 token（去掉包裹的引号），用来判定可执行文件本体。 */
 function commandBinary(command: string): string | null {
-  const trimmed = command.trim();
+  const trimmed = shellTrim(command);
   if (trimmed === "") return null;
   const quote = trimmed[0];
   if (quote === '"' || quote === "'") {
@@ -118,26 +133,26 @@ function commandBinary(command: string): string | null {
     // binary=/opt/x/party + args=[hook, codex-stop]，三项判据全过 ⇒ 自动批准；而 shell 实际
     // 执行的是 `/opt/x/partyhook`——另一个可执行文件。引号只是引号，不是 token 边界。
     const after = trimmed[end + 1];
-    if (after !== undefined && !/\s/.test(after)) return null;
+    if (after !== undefined && !SHELL_SEP.test(after)) return null;
     return trimmed.slice(1, end);
   }
-  const space = trimmed.search(/\s/);
+  const space = trimmed.search(SHELL_SEP);
   return space === -1 ? trimmed : trimmed.slice(0, space);
 }
 
 /** 首个 token 之后的参数（粗切，够判 `hook <sub>` 这两段即可）。 */
 function commandArgs(command: string): string[] {
-  const trimmed = command.trim();
+  const trimmed = shellTrim(command);
   const quote = trimmed[0];
   let rest: string;
   if (quote === '"' || quote === "'") {
     const end = trimmed.indexOf(quote, 1);
     rest = end === -1 ? "" : trimmed.slice(end + 1);
   } else {
-    const space = trimmed.search(/\s/);
+    const space = trimmed.search(SHELL_SEP);
     rest = space === -1 ? "" : trimmed.slice(space);
   }
-  return rest.trim().split(/\s+/).filter((t) => t !== "");
+  return shellTrim(rest).split(SHELL_SEPS).filter((t) => t !== "");
 }
 
 /**

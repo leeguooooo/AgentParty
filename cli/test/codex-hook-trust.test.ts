@@ -165,6 +165,28 @@ describe("定位：只认我们自己那两条，按命令本体", () => {
     }
   });
 
+  // 第四轮审查逮到的：判边界用了 JS 的 `\s`，它还匹配 NBSP / 全角空格 / \u2028，
+  // 而这些在 shell 里是**普通字符**、属于 token 的一部分。于是
+  // `"/opt/x/party"\u00A0hook codex-stop` 会被判成 binary=/opt/x/party + args=[hook, codex-stop]
+  // ⇒ 自动批准；shell 实际执行的却是 `/opt/x/party\u00A0hook`。
+  test("伪分隔符：NBSP / 全角空格 / 行分隔符不是 shell 边界 ⇒ 不认", () => {
+    for (const sep of ["\u00A0", "\u3000", "\u2028", "\u000B", "\u000C"]) {
+      const glued = `"/Users/leo/.local/bin/party"${sep}hook codex-stop`;
+      const found = findCodexOwnHooks(HOOKS, hooksJson(glued), config());
+      expect({ sep: escape(sep), kinds: found.map((t) => t.kind) })
+        .toEqual({ sep: escape(sep), kinds: ["codex-report"] });
+    }
+  });
+
+  test("真分隔符：空格 / Tab / 换行仍然认得出", () => {
+    for (const sep of [" ", "\t", "\n"]) {
+      const real = `"/Users/leo/.local/bin/party"${sep}hook${sep}codex-stop`;
+      const found = findCodexOwnHooks(HOOKS, hooksJson(real), config());
+      expect({ sep: escape(sep), has: found.some((t) => t.kind === "codex-stop") })
+        .toEqual({ sep: escape(sep), has: true });
+    }
+  });
+
   test("正身：带绝对路径与引号的 party 本体仍然认得出", () => {
     for (const real of [
       '"/Users/leo/.local/bin/party" hook codex-stop',
