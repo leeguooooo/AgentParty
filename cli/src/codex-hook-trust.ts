@@ -34,6 +34,7 @@
 //     与前者完全独立。但插件那份的 Stop 挂的是 `hook stop-guard`，**不是** `hook codex-stop`——
 //     codex 的前台唤醒钩子只存在于 `~/.codex/hooks.json`，所以本模块只看这一处是对的。
 import { sanitizeSingleLine } from "./format";
+import { isPartyBinaryPath } from "./upgrade";
 
 /** 我们自己装的两条 codex hook，按**命令本体**认，绝不按下标。 */
 export const CODEX_OWN_HOOK_COMMANDS = [
@@ -106,28 +107,11 @@ function trustStateOf(table: Record<string, unknown> | null, key: string): {
  * 只按命令本体匹配；同一条命令在同一事件下出现多次时全部列出（去重交给调用方，
  * 反正每一条都是我们的）。
  */
-/**
- * shell 的 token 分隔符**只有**空格 / Tab / 换行（默认 IFS）。
- *
- * 不能用 JS 的 `\s`：它还匹配 NBSP(\u00A0)、全角空格(\u3000)、\u2028 等，而这些在 shell 里
- * 是**普通字符**、属于 token 的一部分。用 `\s` 判边界会把
- * `"/opt/x/party"\u00A0hook codex-stop` 判成 binary=/opt/x/party + args=[hook, codex-stop]
- * ⇒ 自动批准；shell 实际执行的却是 `/opt/x/party\u00A0hook`——另一个可执行文件。
- */
 
 
 
-/**
- * 这条 hook 是不是**我们自己装的**。
- *
- * 判据必须是**命令本体**，不能是子串：`command.includes("hook codex-stop")` 会把任何一条
- * 命令行里恰好含这段文本的第三方 hook 认成我们的，而本模块的后果是**自动把它标成 enabled**
- * —— 等于替用户批准了一条别人的 hook。（同一份 hooks.json 里就住着 superset / Otty /
- * vibe-island 的条目；#918 也正是为同一类子串判据收紧过 `looksLikePartyMcpCommand`。）
- *
- * 因此要求三件事同时成立：可执行文件 basename 是 party、第一个参数是 `hook`、第二个是
- * 我们的子命令。判不准一律不认（返回 null），漏认只是少批准一条，误认是安全事故。
- */
+
+
 /**
  * 这条 hook 是不是**我们自己装的**。
  *
@@ -150,23 +134,20 @@ export function classifyOwnHookCommand(
   command: string,
   execPath: string = process.execPath,
 ): (typeof CODEX_OWN_HOOK_COMMANDS)[number] | undefined {
-  return CODEX_OWN_HOOK_COMMANDS.find((c) =>
-    expectedHookCommands(c.sub, execPath).includes(command),
-  );
+  return CODEX_OWN_HOOK_COMMANDS.find((c) => codexOwnHookCommand(c.sub, execPath) === command);
 }
 
 /**
- * 安装器对某个子命令会写出的全部合法形态。
+ * 安装器**会写出**的那条命令。`codexHookSettingsJson` 直接用它拼 hooks.json，
+ * 归属判定也直接拿它比对 —— 一处定义、两处使用，不是各写一份再指望它们不漂移。
  *
- * 与 `codexHookSettingsJson` 同源：`${bin} hook codex-<sub>`，其中 bin 要么是裸 `party`
- * （不是 party 二进制在跑时的回落），要么是 JSON 引号包起来的绝对路径。这里把两种都列出来，
- * 并额外容忍"当前 execPath 与安装时不同"（用户升级过、或换了安装位置）——那种情况下
- * 命令里是**安装当时**的路径，我们认不出来，只能走兜底，这是可接受的。
+ * bin 的选法与安装器同一条判据（`isPartyBinaryPath`）：是 party 二进制在跑就写它的
+ * 绝对路径（JSON 引号包起来），否则回落裸 `party`。**不要在这里放宽**：接受比我们
+ * 写得出的更多，正是本模块要消灭的形状。
  */
-function expectedHookCommands(sub: string, execPath: string): string[] {
-  const out = [`party hook ${sub}`];
-  if (execPath !== "") out.push(`${JSON.stringify(execPath)} hook ${sub}`);
-  return out;
+export function codexOwnHookCommand(sub: string, execPath: string = process.execPath): string {
+  const bin = isPartyBinaryPath(execPath) ? JSON.stringify(execPath) : "party";
+  return `${bin} hook ${sub}`;
 }
 
 export function findCodexOwnHooks(

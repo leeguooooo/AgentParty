@@ -209,11 +209,21 @@ describe("定位：只认我们自己那两条，按命令本体", () => {
 
   // 认得出的只有**安装器会写出的**两种形态（见 codexHookSettingsJson）：裸 `party`，
   // 或 JSON 引号包起来的安装路径。其余写法一律不认——判据是相等比较，不是解析。
-  test("正身：只认安装器会写出的那两种形态", () => {
-    for (const real of [`${JSON.stringify(INSTALLED)} hook codex-stop`, "party hook codex-stop"]) {
-      const found = findCodexOwnHooks(HOOKS, hooksJson(real), config(), INSTALLED);
-      expect({ real, has: found.some((t) => t.kind === "codex-stop") }).toEqual({ real, has: true });
-    }
+  // 安装器对**给定的 execPath** 只会写出一种形态（bin 由 isPartyBinaryPath 决定：
+  // 是 party 二进制就写引号绝对路径，否则裸 party）。所以"认得出"的候选恰好一条，
+  // 不是一组——候选集越小，绕过面越小。
+  test("正身：认安装器对这个 execPath 会写出的那一条", () => {
+    const real = `${JSON.stringify(INSTALLED)} hook codex-stop`;
+    const found = findCodexOwnHooks(HOOKS, hooksJson(real), config(), INSTALLED);
+    expect(found.some((t) => t.kind === "codex-stop")).toBe(true);
+  });
+
+  // 同一条命令换个 execPath 就不认了——这不是缺陷，是「候选由安装器推导」的直接后果：
+  // 非 party 二进制在跑时安装器写的是裸 `party`，那时引号绝对路径这条反而是外来形态。
+  test("换个 execPath ⇒ 同一条命令不再是「我们写的那串」", () => {
+    const real = `${JSON.stringify(INSTALLED)} hook codex-stop`;
+    const found = findCodexOwnHooks(HOOKS, hooksJson(real), config(), "/opt/homebrew/bin/bun");
+    expect(found.map((t) => t.kind)).toEqual([]);
   });
 
   // 同样是 party 本体、参数也对，但**不是我们写的那串**（裸绝对路径、没加引号）⇒ 不认。
