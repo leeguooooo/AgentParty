@@ -321,6 +321,42 @@ settle_unlanded_release() {
   esac
 }
 
+# 远端那个 tag 现在指向哪。拿不到就回空。
+remote_tag_sha() {
+  local line
+  line=$(git ls-remote origin "refs/tags/$1" 2>/dev/null) || return 0
+  printf '%s' "${line%%[[:space:]]*}"
+}
+
+# tag 没能推上去时的收尾。
+#
+# 此刻 main 已经落地，处境和「版本提交没进 main」正好相反：绝不能回滚，缺的只是一个
+# tag。这个中间态是真实可达的——分支保护会限制 ref creation，只有带 bypass 权限的
+# 凭据能建 tag，CI runner 或别人的凭据推到这里就会失败。
+#
+# 也不要建议重跑 release.sh：重跑先被「tag 已存在」挡下；就算删掉本地 tag，版本文件
+# 已经是新版号，bump 无 diff，commit 会因为没有暂存内容失败。唯一正确的恢复方式是把
+# tag 单独补上去。
+settle_unpushed_tag() {
+  local tag="$1" release_sha="$2" version="$3"
+  local remote_tag
+  remote_tag=$(remote_tag_sha "$tag")
+  if [[ -n "$remote_tag" && "$remote_tag" == "$release_sha" ]]; then
+    echo "   远端其实已经有 ${tag} 且指向 ${release_sha}（推送已生效，只是客户端没拿到响应）。" >&2
+    echo "   发布流程实际已经完成，直接去看 CI： gh run list --workflow=release.yml --branch ${tag}" >&2
+    return 0
+  fi
+  if [[ -n "$remote_tag" ]]; then
+    echo "   ⚠ 远端已存在 ${tag}，却指向 ${remote_tag}，与本次发布提交对不上。" >&2
+    echo "   先查清那个 tag 是谁建的，不要贸然覆盖。" >&2
+    return 0
+  fi
+  echo "   重试： git push origin ${tag}" >&2
+  echo "   若是凭据没有创建 tag 的权限（分支保护限制 ref creation），换有权限的凭据再推。" >&2
+  echo "   不要重跑 scripts/release.sh：会被「tag ${tag} 已存在」挡下，删掉本地 tag 也只会卡在" >&2
+  echo "   「版本文件已是 ${version}、bump 无 diff、commit 空提交」上。缺的只是这一个 tag。" >&2
+}
+
 # 这条发布提交到底进没进 origin/main：landed / missing / unknown。
 #
 # 只比远端 tip 是不够的。别人完全可能在我们推上去之后紧接着又推一笔，此时 tip 不是
@@ -468,7 +504,12 @@ main() {
   }
   # tag 放在 main 落地之后：main 没推成就绝不留下一个指向本地提交的 tag。
   git tag "$TAG"
-  git push origin "$TAG"
+  if ! git push origin "$TAG"; then
+    echo "!! tag $TAG 推送失败。版本提交已经在 main（${RELEASE_SHA}），缺的只是这个 tag。" >&2
+    echo "   **不要回滚**——回滚会把已经发布出去的提交从本地抹掉。" >&2
+    settle_unpushed_tag "$TAG" "$RELEASE_SHA" "$VER"
+    return 1
+  fi
 
   # 3) 轮询 tag 的 CI；任何失败都保留 tag，交由操作者诊断。
   if watch_tag_run; then
