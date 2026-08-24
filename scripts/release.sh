@@ -244,16 +244,33 @@ remove_release_temp_files() {
 # 基线对齐，release-version.ts 也已无 diff 可 bump，`git commit` 会因为没有暂存内容
 # 失败。也就是说不回滚的话，「重跑」这条路根本走不通。
 #
-# 所以默认把本地那条发布提交回滚掉——它完全是脚本自己刚打的，工作树在入口处已经
-# 校验过干净——让「重跑」重新成为一条真的能走的路。回滚失败就把手工命令原样给出。
+# 所以默认把本地那条发布提交回滚掉，让「重跑」重新成为一条真的能走的路。
+#
+# 但回滚是破坏性动作，而这套脚本从入口校验到这里要跑好几分钟（完整门禁 + 推送），
+# 期间仓库可能已经不是脚本以为的样子了——本仓常有多个 agent 会话共用同一棵工作树，
+# 别人随时可能在里面改文件甚至提交。所以回滚前必须重新确认状态，而不是照着几分钟
+# 前的假设动手：HEAD 必须仍然正好是脚本自己打的那条提交，工作树必须仍然干净。
+# 任何一条对不上就一步都不碰，只打印手工恢复命令。
+#
+# 即便两项都满足，也走 `git reset --keep` 而不是 `--hard`：前者在发现会覆盖本地
+# 修改时会自己拒绝执行，等于多一道 git 自己把关的保险。
 abort_unpushed_release() {
   local base_sha="$1" release_sha="$2" version="$3"
-  if [[ -n "$base_sha" ]] && git reset --hard "$base_sha" >/dev/null 2>&1; then
-    echo "   已回滚本地发布提交 ${release_sha}，工作树复位到 ${base_sha}。" >&2
+  local head_now tree_state
+  head_now=$(git rev-parse HEAD 2>/dev/null || true)
+  tree_state=$(git status --porcelain 2>/dev/null || echo "?")
+  if [[ -n "$base_sha" && "$head_now" == "$release_sha" && -z "$tree_state" ]] &&
+    git reset --keep "$base_sha" >/dev/null 2>&1; then
+    echo "   已回滚本地发布提交 ${release_sha}，工作树复位到 ${base_sha}（git reflog 可找回）。" >&2
     echo "   修好后可直接重跑： scripts/release.sh ${version}" >&2
     return 0
   fi
-  echo "   自动回滚失败，本地仍停在 ${release_sha}（版本文件已是 ${version}）。" >&2
+  if [[ "$head_now" != "$release_sha" || -n "$tree_state" ]]; then
+    echo "   仓库状态已变（HEAD=${head_now:-未知}，工作树${tree_state:+不干净}${tree_state:-干净}），不自动回滚。" >&2
+  else
+    echo "   自动回滚未成功。" >&2
+  fi
+  echo "   本地仍停在 ${release_sha}（版本文件已是 ${version}）。" >&2
   echo "   二选一：" >&2
   echo "     1) 手工补推： git push origin ${release_sha}:refs/heads/main" >&2
   echo "        然后手工补 tag： git tag v${version} ${release_sha} && git push origin v${version}" >&2
@@ -360,9 +377,13 @@ main() {
   fi
   # 推完必须核实远端确实指向这条提交——上面那条静默失败就是这么漏过去的。
   if ! git fetch origin main --quiet; then
-    echo "!! 推送后 fetch origin main 失败，无法核实是否落地。tag 未推。" >&2
-    echo "   先自行确认 origin/main 是否已是 ${RELEASE_SHA}：已是则只需补打 tag，未是则按下面回滚。" >&2
-    abort_unpushed_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
+    # 这里 push 已经返回成功、只是 fetch 挂了：远端到底落没落地是**未知**的。
+    # 未知状态下自动回滚是错的——万一已经落地，本地一回滚就与远端劈叉，而操作者
+    # 还以为什么都没发生。所以这条分支只报状态、给两条命令，一个字节都不改。
+    echo "!! 推送后 fetch origin main 失败，无法核实是否落地。tag 未推，本地不做任何回滚。" >&2
+    echo "   先确认远端： git ls-remote origin refs/heads/main" >&2
+    echo "   已是 ${RELEASE_SHA} → 只需补 tag： git tag v${VER} ${RELEASE_SHA} && git push origin v${VER}" >&2
+    echo "   还不是 → 丢弃本地这条提交后重跑： git reset --keep ${BASE_SHA} && scripts/release.sh ${VER}" >&2
     return 1
   fi
   [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_SHA" ]] || {

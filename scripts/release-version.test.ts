@@ -105,7 +105,7 @@ function runGit(directory: string, args: string[]) {
   execFileSync("git", args, { cwd: directory, stdio: "pipe" });
 }
 
-type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed";
+type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed" | "push-failed-dirty" | "push-failed-head-moved" | "fetch-failed-after-push";
 
 function writeExecutable(path: string, body: string) {
   writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${body}`);
@@ -144,9 +144,22 @@ function runReleaseHarness(scenario: ReleaseHarnessScenario) {
     join(fakeBin, "git"),
     `printf 'git %s\\n' "$*" >> "$MOCK_COMMAND_LOG"
 case "\${1:-}" in
-  status) exit 0 ;;
+  fetch)
+    # 预检那次 fetch 必须成功；只有推送之后的核实 fetch 才挂。
+    if [[ "$MOCK_SCENARIO" == "fetch-failed-after-push" ]] && grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; then
+      echo "simulated fetch outage" >&2
+      exit 1
+    fi
+    exit 0 ;;
+  status)
+    # 入口的干净树校验必须放行；只有推送失败后的那次复查才报脏，用来验证
+    # 「状态变了就不自动回滚」。
+    if [[ "$MOCK_SCENARIO" == "push-failed-dirty" ]] && grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; then
+      printf ' M cli/src/somebody-elses-wip.ts\\n'
+    fi
+    exit 0 ;;
   push)
-    if [[ "$MOCK_SCENARIO" == "push-failed" && "$*" == *"refs/heads/main"* ]]; then
+    if [[ "$MOCK_SCENARIO" == push-failed* && "$*" == *"refs/heads/main"* ]]; then
       echo "simulated push rejection" >&2
       exit 1
     fi
@@ -156,7 +169,13 @@ case "\${1:-}" in
     # tag 已发过。push-not-landed 场景下推完之后让 origin/main 停在别处，用来
     # 验证「静默空推」确实会被拦住。
     case "\${2:-}" in
-      HEAD) printf '%s\\n' "$MOCK_HEAD_SHA"; exit 0 ;;
+      HEAD)
+        if [[ "$MOCK_SCENARIO" == "push-failed-head-moved" ]] && grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; then
+          printf '%s\\n' "$MOCK_OTHER_SHA"
+        else
+          printf '%s\\n' "$MOCK_HEAD_SHA"
+        fi
+        exit 0 ;;
       FETCH_HEAD)
         if [[ "$MOCK_SCENARIO" == "push-not-landed" ]] && grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; then
           printf '%s\\n' "$MOCK_OTHER_SHA"
@@ -628,8 +647,40 @@ describe("release main 推送落地", () => {
     expect(result.commands).not.toContain("git push origin v0.2.83");
     // 不回滚的话「重跑」根本走不通：基线校验会挡下 HEAD ≠ origin/main，
     // 就算手工对齐，版本文件已经是新版号、bump 无 diff，commit 会空提交失败。
-    expect(result.commands).toContain("git reset --hard 1111111111111111111111111111111111111111");
+    expect(result.commands).toContain("git reset --keep 1111111111111111111111111111111111111111");
     expect(result.stderr).toContain("可直接重跑");
+  });
+
+  // 脚本从入口校验跑到这里要好几分钟，而本仓常有多个 agent 会话共用同一棵工作树。
+  // 期间别人动过文件的话，照着几分钟前的假设 reset 就会吃掉别人的改动。
+  test("推送失败后工作树已被别人改脏时，一步都不碰", () => {
+    const result = runReleaseHarness("push-failed-dirty");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).not.toContain("git reset");
+    expect(result.stderr).toContain("不自动回滚");
+    expect(result.stderr).toContain("git push origin");
+  });
+
+  test("推送失败后 HEAD 已经被别人推进过时，一步都不碰", () => {
+    const result = runReleaseHarness("push-failed-head-moved");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).not.toContain("git reset");
+    expect(result.stderr).toContain("不自动回滚");
+  });
+
+  // push 成功、只是 fetch 挂了：远端到底落没落地是未知的。未知状态下回滚会让本地
+  // 与已经落地的远端劈叉，所以这条分支必须一个字节都不改。
+  test("推送后 fetch 失败时不回滚，只给出确认远端的命令", () => {
+    const result = runReleaseHarness("fetch-failed-after-push");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).not.toContain("git reset");
+    expect(result.stderr).toContain("本地不做任何回滚");
+    expect(result.stderr).toContain("git ls-remote origin refs/heads/main");
+    expect(result.commands).not.toContain("git tag v0.2.83");
+    expect(result.commands).not.toContain("gh run list");
   });
 
   test("origin/main 没指向发布提交时停住，且不留悬空 tag", () => {
@@ -638,7 +689,7 @@ describe("release main 推送落地", () => {
     expect(result.exitCode).not.toBe(0);
     expect(result.commands).toContain("git push origin HEAD:refs/heads/main");
     expect(result.stderr).toContain("版本提交没进 main");
-    expect(result.commands).toContain("git reset --hard 1111111111111111111111111111111111111111");
+    expect(result.commands).toContain("git reset --keep 1111111111111111111111111111111111111111");
     expect(result.commands).not.toContain("git tag v0.2.83");
     expect(result.commands).not.toContain("git push origin v0.2.83");
     expect(result.commands).not.toContain("gh run list");
