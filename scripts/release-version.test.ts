@@ -105,7 +105,7 @@ function runGit(directory: string, args: string[]) {
   execFileSync("git", args, { cwd: directory, stdio: "pipe" });
 }
 
-type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed" | "push-failed-dirty" | "push-failed-head-moved" | "fetch-failed-after-push";
+type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed" | "push-failed-dirty" | "push-failed-head-moved" | "fetch-failed-after-push" | "push-failed-but-landed";
 
 function writeExecutable(path: string, body: string) {
   writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${body}`);
@@ -144,6 +144,18 @@ function runReleaseHarness(scenario: ReleaseHarnessScenario) {
     join(fakeBin, "git"),
     `printf 'git %s\\n' "$*" >> "$MOCK_COMMAND_LOG"
 case "\${1:-}" in
+  ls-remote)
+    # push/fetch 失败后脚本靠这条把「未知」变成「已知」。
+    if [[ "$MOCK_SCENARIO" == "fetch-failed-after-push" ]]; then
+      echo "simulated ls-remote outage" >&2
+      exit 1
+    fi
+    if [[ "$MOCK_SCENARIO" == "push-failed-but-landed" ]]; then
+      printf '%s\\trefs/heads/main\\n' "$MOCK_HEAD_SHA"
+    else
+      printf '%s\\trefs/heads/main\\n' "$MOCK_OTHER_SHA"
+    fi
+    exit 0 ;;
   fetch)
     # 预检那次 fetch 必须成功；只有推送之后的核实 fetch 才挂。
     if [[ "$MOCK_SCENARIO" == "fetch-failed-after-push" ]] && grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; then
@@ -647,6 +659,7 @@ describe("release main 推送落地", () => {
     expect(result.commands).not.toContain("git push origin v0.2.83");
     // 不回滚的话「重跑」根本走不通：基线校验会挡下 HEAD ≠ origin/main，
     // 就算手工对齐，版本文件已经是新版号、bump 无 diff，commit 会空提交失败。
+    expect(result.stderr).toContain("确实没落地");
     expect(result.commands).toContain("git reset --keep 1111111111111111111111111111111111111111");
     expect(result.stderr).toContain("可直接重跑");
   });
@@ -670,17 +683,29 @@ describe("release main 推送落地", () => {
     expect(result.stderr).toContain("不自动回滚");
   });
 
-  // push 成功、只是 fetch 挂了：远端到底落没落地是未知的。未知状态下回滚会让本地
-  // 与已经落地的远端劈叉，所以这条分支必须一个字节都不改。
-  test("推送后 fetch 失败时不回滚，只给出确认远端的命令", () => {
+  // push 成功、只是 fetch 挂了，连 ls-remote 也拿不到：落地与否未知。未知状态下
+  // 回滚会让本地与可能已经落地的远端劈叉，所以必须一个字节都不改。
+  test("远端状态拿不到时不回滚", () => {
     const result = runReleaseHarness("fetch-failed-after-push");
 
     expect(result.exitCode).not.toBe(0);
     expect(result.commands).not.toContain("git reset");
-    expect(result.stderr).toContain("本地不做任何回滚");
+    expect(result.stderr).toContain("落地与否未知");
     expect(result.stderr).toContain("git ls-remote origin refs/heads/main");
     expect(result.commands).not.toContain("git tag v0.2.83");
     expect(result.commands).not.toContain("gh run list");
+  });
+
+  // git push 返回非 0 不等于远端没落地：服务端可能已经更新了 ref，只是客户端在
+  // 拿到响应前断了。这种情况下回滚会把已经发布出去的提交从本地抹掉。
+  test("推送报错但远端其实已落地时不回滚，只提示补 tag", () => {
+    const result = runReleaseHarness("push-failed-but-landed");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).not.toContain("git reset");
+    expect(result.stderr).toContain("推送已生效");
+    expect(result.stderr).toContain("只需补 tag");
+    expect(result.commands).not.toContain("git tag v0.2.83");
   });
 
   test("origin/main 没指向发布提交时停住，且不留悬空 tag", () => {
