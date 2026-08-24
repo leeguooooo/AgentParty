@@ -105,7 +105,7 @@ function runGit(directory: string, args: string[]) {
   execFileSync("git", args, { cwd: directory, stdio: "pipe" });
 }
 
-type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed" | "push-failed-dirty" | "push-failed-head-moved" | "fetch-failed-after-push" | "push-failed-but-landed" | "push-failed-advanced" | "push-landed-not-tip";
+type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed" | "push-failed-dirty" | "push-failed-head-moved" | "fetch-failed-after-push" | "push-failed-but-landed" | "push-failed-advanced" | "push-landed-not-tip" | "tag-push-failed" | "tag-push-failed-but-created" | "tag-push-failed-lookup-down";
 
 function writeExecutable(path: string, body: string) {
   writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${body}`);
@@ -147,6 +147,17 @@ pushed() { grep -q 'refs/heads/main' "$MOCK_COMMAND_LOG"; }
 committed() { grep -q '^git commit' "$MOCK_COMMAND_LOG"; }
 case "\${1:-}" in
   ls-remote)
+    if [[ "$*" == *"refs/tags/"* ]]; then
+      # tag 推送失败后用来分辨「其实已经建上了」和「真没建上」。
+      if [[ "$MOCK_SCENARIO" == "tag-push-failed-lookup-down" ]]; then
+        echo "simulated ls-remote outage" >&2
+        exit 1
+      fi
+      if [[ "$MOCK_SCENARIO" == "tag-push-failed-but-created" ]]; then
+        printf '%s\\trefs/tags/v0.2.83\\n' "$MOCK_RELEASE_SHA"
+      fi
+      exit 0
+    fi
     # push / 核实 fetch 失败后，脚本靠这条把「未知」尽量变成「已知」。
     case "$MOCK_SCENARIO" in
       fetch-failed-after-push) echo "simulated ls-remote outage" >&2; exit 1 ;;
@@ -176,6 +187,10 @@ case "\${1:-}" in
   push)
     if [[ "$MOCK_SCENARIO" == push-failed* && "$*" == *"refs/heads/main"* ]]; then
       echo "simulated push rejection" >&2
+      exit 1
+    fi
+    if [[ "$MOCK_SCENARIO" == tag-push-failed* && "$*" == *"v0.2.83"* ]]; then
+      echo "remote: - Cannot create ref due to creations being restricted." >&2
       exit 1
     fi
     exit 0 ;;
@@ -738,6 +753,43 @@ describe("release main 推送落地", () => {
     expect(result.commands).toContain("git tag v0.2.83");
     expect(result.commands).toContain("git push origin v0.2.83");
     expect(result.stderr).not.toContain("没进 main");
+  });
+
+  // 分支保护会限制 ref creation，只有带 bypass 权限的凭据能建 tag。CI runner 或
+  // 别人的凭据推到这里就会失败，落在「main 已落地、tag 未创建」这个中间态——它和
+  // 「版本提交没进 main」正好相反，绝不能回滚。
+  test("tag 推送失败时不回滚，并说清只差补 tag", () => {
+    const result = runReleaseHarness("tag-push-failed");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).not.toContain("git reset");
+    expect(result.stderr).toContain("版本提交已经在 main");
+    expect(result.stderr).toContain("不要回滚");
+    expect(result.stderr).toContain("git push origin v0.2.83");
+    // 重跑是死路：会被「tag 已存在」挡下，删掉本地 tag 又会卡在 bump 无 diff。
+    expect(result.stderr).toContain("不要重跑");
+    expect(result.commands).not.toContain("gh run list");
+  });
+
+  test("tag 其实已经建上时说明发布已完成，而不是让人重推", () => {
+    const result = runReleaseHarness("tag-push-failed-but-created");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).not.toContain("git reset");
+    expect(result.stderr).toContain("发布流程实际已经完成");
+    expect(result.stderr).not.toContain("不要重跑");
+  });
+
+  // 「远端没有这个 tag」和「没问出来」是两回事。把后者当前者，就会用肯定语气说一件
+  // 没核实过的事——这条线上正是在治这个。
+  test("连远端 tag 状态都问不到时，不冒充「确实没有」", () => {
+    const result = runReleaseHarness("tag-push-failed-lookup-down");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).not.toContain("git reset");
+    expect(result.stderr).toContain("也没问出来");
+    expect(result.stderr).toContain("git ls-remote origin refs/tags/v0.2.83");
+    expect(result.stderr).toContain("不要回滚");
   });
 
   test("origin/main 没指向发布提交时停住，且不留悬空 tag", () => {
