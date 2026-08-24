@@ -321,10 +321,13 @@ settle_unlanded_release() {
   esac
 }
 
-# 远端那个 tag 现在指向哪。拿不到就回空。
+# 远端那个 tag 现在指向哪。
+# 退出码 0 = 问到了（stdout 为空表示远端确实没有这个 tag）；非 0 = 没问成，状态未知。
+# 「远端没有」和「没问出来」必须分开——把后者当成前者，就会用肯定语气说一件没核实过
+# 的事，这条线上正是在治这个。
 remote_tag_sha() {
   local line
-  line=$(git ls-remote origin "refs/tags/$1" 2>/dev/null) || return 0
+  line=$(git ls-remote origin "refs/tags/$1" 2>/dev/null) || return 1
   printf '%s' "${line%%[[:space:]]*}"
 }
 
@@ -339,8 +342,14 @@ remote_tag_sha() {
 # tag 单独补上去。
 settle_unpushed_tag() {
   local tag="$1" release_sha="$2" version="$3"
-  local remote_tag
-  remote_tag=$(remote_tag_sha "$tag")
+  local remote_tag lookup_ok=1
+  remote_tag=$(remote_tag_sha "$tag") || lookup_ok=0
+  if [[ "$lookup_ok" == "0" ]]; then
+    echo "   连远端 tag 状态也没问出来（git ls-remote 失败），先确认： git ls-remote origin refs/tags/${tag}" >&2
+    echo "   远端已有且指向 ${release_sha} ⇒ 发布其实已完成；没有 ⇒ 重推： git push origin ${tag}" >&2
+    echo "   无论哪种都不要回滚，也不要重跑 scripts/release.sh。" >&2
+    return 0
+  fi
   if [[ -n "$remote_tag" && "$remote_tag" == "$release_sha" ]]; then
     echo "   远端其实已经有 ${tag} 且指向 ${release_sha}（推送已生效，只是客户端没拿到响应）。" >&2
     echo "   发布流程实际已经完成，直接去看 CI： gh run list --workflow=release.yml --branch ${tag}" >&2

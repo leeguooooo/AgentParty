@@ -105,7 +105,7 @@ function runGit(directory: string, args: string[]) {
   execFileSync("git", args, { cwd: directory, stdio: "pipe" });
 }
 
-type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed" | "push-failed-dirty" | "push-failed-head-moved" | "fetch-failed-after-push" | "push-failed-but-landed" | "push-failed-advanced" | "push-landed-not-tip" | "tag-push-failed" | "tag-push-failed-but-created";
+type ReleaseHarnessScenario = "view-error" | "ci-failure" | "snapshot-copy-failure" | "push-not-landed" | "push-failed" | "push-failed-dirty" | "push-failed-head-moved" | "fetch-failed-after-push" | "push-failed-but-landed" | "push-failed-advanced" | "push-landed-not-tip" | "tag-push-failed" | "tag-push-failed-but-created" | "tag-push-failed-lookup-down";
 
 function writeExecutable(path: string, body: string) {
   writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${body}`);
@@ -149,6 +149,10 @@ case "\${1:-}" in
   ls-remote)
     if [[ "$*" == *"refs/tags/"* ]]; then
       # tag 推送失败后用来分辨「其实已经建上了」和「真没建上」。
+      if [[ "$MOCK_SCENARIO" == "tag-push-failed-lookup-down" ]]; then
+        echo "simulated ls-remote outage" >&2
+        exit 1
+      fi
       if [[ "$MOCK_SCENARIO" == "tag-push-failed-but-created" ]]; then
         printf '%s\\trefs/tags/v0.2.83\\n' "$MOCK_RELEASE_SHA"
       fi
@@ -774,6 +778,18 @@ describe("release main 推送落地", () => {
     expect(result.commands).not.toContain("git reset");
     expect(result.stderr).toContain("发布流程实际已经完成");
     expect(result.stderr).not.toContain("不要重跑");
+  });
+
+  // 「远端没有这个 tag」和「没问出来」是两回事。把后者当前者，就会用肯定语气说一件
+  // 没核实过的事——这条线上正是在治这个。
+  test("连远端 tag 状态都问不到时，不冒充「确实没有」", () => {
+    const result = runReleaseHarness("tag-push-failed-lookup-down");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.commands).not.toContain("git reset");
+    expect(result.stderr).toContain("也没问出来");
+    expect(result.stderr).toContain("git ls-remote origin refs/tags/v0.2.83");
+    expect(result.stderr).toContain("不要回滚");
   });
 
   test("origin/main 没指向发布提交时停住，且不留悬空 tag", () => {
