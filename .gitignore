@@ -12,3 +12,7 @@ assets/generated/
 .superpowers/
 /cli/.probe-results/
 /mcp-notification-probe.jsonl
+# agent 工具在仓库根下留的运行时状态（codex 的 sqlite/缓存有几十 MB，
+# 一次 `git add -A` 就会连 installation_id 一起提进来）。
+/.codex/
+/continuations/
