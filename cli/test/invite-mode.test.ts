@@ -82,28 +82,31 @@ describe("party invite --mode", () => {
     expect(r.stdout.toLowerCase()).toContain("watch");
   });
 
-  test("participate mode (explicit) anchors to an agent token with full participation", async () => {
+  test("participate mode (explicit) anchors to an agent token with a party join line", async () => {
     const server = startRest();
     const r = await runInvite(["Part Room", "--slug", "partroom", "--mode", "participate", "--server", server]);
     expect(r.code).toBe(0);
     expect(minted.some((m) => m.role === "agent")).toBe(true);
-    expect(r.stdout).toMatch(/AGENTPARTY_TOKEN='ap_agenttok\d*' party init --server .* --channel partroom/);
+    // #944：接入包压成一行 party join（108 行里的机械步骤全收进它），token 走环境变量前缀不进 argv（#676）。
+    expect(r.stdout).toMatch(/AGENTPARTY_TOKEN='ap_agenttok\d*' party join --server .* --channel partroom --as partroom-guest/);
     expect(r.stdout).not.toContain("--token ap_agenttok");
-    const participateGuardIndex = r.stdout.indexOf("AgentParty onboarding scope: join the existing channel #partroom");
-    expect(participateGuardIndex).toBeGreaterThan(-1);
-    expect(participateGuardIndex).toBeLessThan(r.stdout.indexOf("party init "));
+    expect(r.stdout).not.toContain("party init --server");
+    // 作用域守卫（别另建频道）折进行为约定，仍排在 party join 之前。
+    const guardIndex = r.stdout.indexOf("别另建频道");
+    expect(guardIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeLessThan(r.stdout.indexOf("party join "));
     expect(r.stdout).toContain("参与");
-    // participate keeps the check-in send line
-    expect(r.stdout).toMatch(/party send .*报到/);
+    // 报到收进 party join——粘贴稿里不再单独出现 party send 报到行。
+    expect(r.stdout).not.toMatch(/party send .*报到/);
   });
 
   test("default mode is participate", async () => {
     const server = startRest();
     const r = await runInvite(["Def Room", "--slug", "defroom", "--server", server]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toMatch(/AGENTPARTY_TOKEN='ap_agenttok\d*' party init --server .* --channel defroom/);
+    expect(r.stdout).toMatch(/AGENTPARTY_TOKEN='ap_agenttok\d*' party join --server .* --channel defroom --as defroom-guest/);
     expect(r.stdout).not.toContain("--token ap_agenttok");
-    expect(r.stdout).toMatch(/party send .*报到/);
+    expect(r.stdout).not.toContain("party init --server");
   });
 
   test("rejects an invalid --mode", async () => {

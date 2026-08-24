@@ -728,8 +728,11 @@ ADMIN_SECRET=... party invite "ZEGO IM 联调" --slug zego-im --party --guest-na
 ```
 
 `party invite` creates or reuses the channel, mints one channel-scoped guest token, and prints
-a copy-paste pack containing `party init`, `party watch`, and `party serve` commands. Send that
-pack to the teammate; do not ask them to open `/c/<slug>`.
+a copy-paste pack that is a short behavior contract plus **two commands**: install the CLI (only
+if missing) and one `party join`. `party join` does the whole join in one shot — write config +
+rules, dedupe same-channel identities, bind identity, register the MCP server (probe-then-add),
+install and approve the codex wake hook, check in, and print one final verdict ("全部就绪" or
+"还差第 N 步: <one command>"). Send that pack to the teammate; do not ask them to open `/c/<slug>`.
 
 Self-service path when you are already logged in as a channel moderator:
 

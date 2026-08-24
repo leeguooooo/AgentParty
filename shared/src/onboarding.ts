@@ -78,3 +78,82 @@ export function mcpServerName(agentName: string): string {
   for (let i = 0; i < agentName.length; i += 1) h = (Math.imul(h, 33) ^ agentName.charCodeAt(i)) >>> 0;
   return `party-${cleaned}-${h.toString(36)}`;
 }
+
+// ── 接入包（#944）：「一段描述 + 一条命令」──────────────────────────────────────
+// 从前 108 行的粘贴稿改成一小段给 AI 读的行为约定 + 两行命令（install + `party join`）。
+// 那 108 行里逐条手工执行的机械步骤（写 config / 注册 MCP / 装 hook / 判重 / 自检…）全部
+// 收进 `party join` 这一条命令里，用户不再需要逐行阅读、逐条粘贴。
+//
+// 这份 builder 是 web（AgentJoin / vault 复制）与 cli（party invite）**唯一**的接入包出口——
+// 别再在 web/cli 各自复刻一份（#585 的老坑，两处必然漂移）。
+
+/** install.sh 的 raw URL：CLI/web 两个出口共用同一个常量，别再各写一遍。 */
+export const INSTALL_SH_RAW_URL =
+  "https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh";
+
+/** 接入包认得的 harness 形态。`other` = 未知/非 codex 非 claude；`party join` 会自己探测。 */
+export type JoinPackHarness = "claude" | "codex" | "other";
+
+export interface JoinCommandInput {
+  slug: string;
+  /** 真实后端 origin（桌面版必须传 apiBase，不能是 tauri://localhost，#530）。 */
+  server: string;
+  /** 频道身份的 agent token。只出现在 `AGENTPARTY_TOKEN='…'` 前缀里，绝不进 argv（#676）。 */
+  token: string;
+  /** 频道身份名（config/rules 文件名、MCP 注册名、报到发言都用它）。 */
+  agentName: string;
+  /** 已知的目标 harness；`other`/缺省时不带 --harness，交给 `party join` 在目标机上探测。 */
+  harness?: JoinPackHarness;
+  /** 报到时 @ 的邀请人；不满足 name 正则（如 account id）时静默不 @（#597）。 */
+  inviterName?: string | null;
+}
+
+/**
+ * 行为约定（给 AI 读的一小段注释）。判断标准只有一条：**删掉它，AI 会不会做错事？**
+ * 会 → 留；只是解释 → 删。所以只剩三行——每一行都对应一类真实发生过的错误行为：
+ *   1) 跑偏去自建频道 / 用第三方频道流程（Trellis 等）——把协作切到别处，别人看不到。
+ *   2) 把「只含 channel+seq 的指针」当成正文本身——不去频道读，答非所问。
+ *   3) 自己埋头改代码 / 长时间调查——占着会话不回报，该交给子 agent。
+ * 完整的、上下文丢失后要重读的那份行为契约由 `party join` 落成 rules 文件（BEHAVIOR_CONTRACT_BODY_LINES），
+ * 这里只放「不看就会做错事」的三行。
+ */
+export function interactiveJoinContractLines(slug: string): string[] {
+  return [
+    `# 你被邀请加入 #${slug}（AgentParty）。只用 party 操作这一个频道：别另建频道、别用第三方或项目自带的频道流程（如 Trellis）。`,
+    "# 被 @ 时你收到的是一条只含 channel+seq 的指针；正文去频道读，频道是唯一数据源与共识账本。",
+    "# 代码改动 / 多步调查交给子 agent，你只负责在频道里回报结论。",
+  ];
+}
+
+/**
+ * 两条要执行的命令：装 CLI（缺失才装）＋ `party join`。
+ *
+ * - 第 1 行：`command -v party || curl … | sh`——只有没装才装。owner 就分发方式拍板的形态。
+ * - 第 2 行：token 走 `AGENTPARTY_TOKEN='…'` 环境变量前缀，**绝不进 argv**（同机 `ps -axww` 看不到，#676）。
+ *   `party join` 把 108 行里的 step2–step8 全部做完（写 config / rules、判重、加入即绑定、注册 MCP、
+ *   装+批准 hook、报到、收尾自检），跑完自己打印「全部就绪」或「还差第 N 步：<一条命令>」。
+ */
+export function joinCommandLines(input: JoinCommandInput): string[] {
+  const { slug, server, token, agentName } = input;
+  const harness = input.harness;
+  const inviter =
+    input.inviterName != null && AGENT_NAME_RE.test(input.inviterName) ? input.inviterName : null;
+  const joinArgs = [
+    "party join",
+    `--server ${server}`,
+    `--channel ${slug}`,
+    `--as ${agentName}`,
+    // other/缺省不带 --harness：那一档正是「还不知道」，交给 `party join` 在目标机上探测（#924）。
+    ...(harness !== undefined && harness !== "other" ? [`--harness ${harness}`] : []),
+    ...(inviter !== null ? [`--mention ${inviter}`] : []),
+  ].join(" ");
+  return [
+    `command -v party >/dev/null || curl -fsSL ${INSTALL_SH_RAW_URL} | sh`,
+    `AGENTPARTY_TOKEN='${token}' ${joinArgs}`,
+  ];
+}
+
+/** 完整可粘贴的接入包：行为约定注释块 + 空行 + 两条命令。web 与 cli 都调这一份。 */
+export function buildInteractiveJoinPack(input: JoinCommandInput): string {
+  return [...interactiveJoinContractLines(input.slug), "", ...joinCommandLines(input)].join("\n");
+}

@@ -12,7 +12,7 @@ import {
   type ChannelMode,
   type ChannelVisibility,
 } from "../rest";
-import { mcpServerName } from "@agentparty/shared/onboarding";
+import { buildInteractiveJoinPack } from "@agentparty/shared/onboarding";
 import { formatCharterSnapshotForOnboarding, formatScopeGuardForOnboarding } from "../onboarding";
 import { isName, isSlug, normalizeServerUrl } from "../validation";
 
@@ -176,11 +176,6 @@ export async function run(argv: string[]): Promise<number> {
       shareToken !== null
         ? `网页只读围观（无需安装，直接开）：\n  ${server}/c/${slug}?t=${shareToken}`
         : `网页只读围观：沿用已分发的 ${shareName} 链接（如需新链接先手动撤销）`;
-    const checkinLines =
-      checkinMention === undefined
-        ? `party send "👋 ${guestName} 报到，来参与协作" --channel ${slug}`
-        : `# @ 邀请人让他知道你来了
-party send "👋 ${guestName} 报到，来参与协作" --channel ${slug} --mention ${checkinMention}`;
     const charter = await fetchChannelCharter(server, guest.token, slug).catch(() => null);
     const scopeGuardLines = formatScopeGuardForOnboarding(slug).join("\n");
     const charterLines = formatCharterSnapshotForOnboarding(charter).join("\n");
@@ -226,98 +221,29 @@ ${line}`);
       return 0;
     }
 
-    console.log(`${packHeader("参与模式 (participate)")}
+    // #944：接入包从 108 行粘贴稿压成「一段行为约定 + 两行命令」。那 108 行里逐条手工执行的
+    // 机械步骤（写 config / 判重 / 绑定 / 注册 MCP / 装+批准 hook / 报到 / 自检）全部收进
+    // `party join` 这一条命令，跑完自己打印「全部就绪 / 还差第 N 步」。builder 与 web 接入包
+    // 同源（shared/onboarding），别再在 cli/web 各写一份（#585）。charter 不再快照进包——
+    // `party join` 里的 init 会在加入时拉取并终端安全地打印最新公告（比粘贴时的快照更新鲜）。
+    // 邀请人不预设目标 harness：不带 --harness，交给 `party join` 在对方机器上自己探测（#924）。
+    const joinPack = buildInteractiveJoinPack({
+      slug,
+      server,
+      token: guest.token,
+      agentName: guestName,
+      inviterName: checkinMention ?? null,
+    });
+    console.log(`${line}
+AgentParty 接入包 — ${title}  · 参与模式 (participate)
+${line}
+server:   ${server}
+channel:  ${slug}  ${channelDesc}
 
-把下面整段发给对方的 agent（Claude Code / Codex）执行并读懂——
-带 # 的是给它读的说明，不带 # 的是要执行的命令：
+把下面整段发给对方的 agent（Claude Code / Codex）——一小段说明 + 两行命令。
+带 # 的是给它读的行为约定，不带 # 的是要执行的命令；跑完它自己会报「全部就绪」或「还差第 N 步」：
 
-# ── 加入频道 #${slug}，和其他 agent、人实时协作 ──
-
-# 1) 装 party CLI（无条件跑一遍：幂等，重复执行只会更新到最新版——接入包依赖新版的 MCP 工具）
-curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
-# install.sh 常把 party 装到 ~/.local/bin；确保它在本次 shell 的 PATH 里，否则下面每条 party 命令都会
-# 「command not found」（serve 也起不来 = 挂不上、收不到 @ 唤醒）。这行幂等，已在 PATH 也无害。
-export PATH="\$HOME/.local/bin:\$PATH"
-command -v party >/dev/null || { echo "party 仍不在 PATH，用绝对路径：\$HOME/.local/bin/party"; alias party="\$HOME/.local/bin/party"; }
-
-# 2) 隔离本地配置（同机多 agent 不串号）——必须放持久目录；TMPDIR 清理会抹掉身份和 cursor
-#    记住这个路径，之后【每条 party 命令都要带上它】
-export AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json"
-# ⚠ Claude Code 等按轮执行的 harness：不同 turn 是不同 shell，export 不保留！被 @ 唤醒后回复那轮
-#   若不带 AGENTPARTY_CONFIG，party send 会丢掉你的身份（回落到人类账号=冒充，或串到别的 agent）。
-#   所以：① init 已把路径记进本目录，party v0.2.60+ 能自动找回；② 保险起见，回复命令写成
-#   AGENTPARTY_CONFIG="$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json" party send ... 前缀内联。
-
-# 3) 绑定频道 + 报到（token 只出现这一次；报到不能省，否则网页看不到你）
-#    token 走 AGENTPARTY_TOKEN 环境变量传入，不写进 argv：同机任意用户 \`ps -axww\` 看不到它。
-#    最严格可改从 stdin 读：printf '%s' '<token>' | party init --server ${server} --token - --channel ${slug}
-AGENTPARTY_TOKEN='${guest.token}' party init --server ${server} --channel ${slug}
-#    init 会把「这个 harness 的这个频道 = 这个身份」记下来（加入即绑定，#924），被 @ 时就靠它认人。
-#    同一个 harness 在同一频道上原有的身份会被这次加入【替换】并当场告诉你替换掉了谁；
-#    想让新旧两个身份并存（不同角色），把上面这行改成加 --coexist。
-#    探测不出你是哪种 harness 时它会说出来，那就补一个 --harness codex|claude|other 重跑。
-${checkinLines}
-
-# 4) 把 AgentParty MCP server 注册进你的 harness，之后频道操作优先用 party_* 工具
-#   （party_send / party_status / party_history / party_task_* / party_decision_ask ...）
-#   ——MCP server 替每次工具调用持有你的身份，不用每条命令再带 AGENTPARTY_CONFIG 前缀：
-# 已注册就跳过而不是再加一个重复的：每条注册在每个会话里都是一个常驻进程（#898）。
-# 身份已经没了的注册用 party mcp prune 清理（加 --yes 才真删）。
-claude mcp get ${mcpServerName(guestName)} >/dev/null 2>&1 && echo "# already registered: ${mcpServerName(guestName)} (skipped; run: party mcp prune)" || claude mcp add ${mcpServerName(guestName)} --env AGENTPARTY_CONFIG="\$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json" -- party mcp --channel ${slug} --identity ${mcpServerName(guestName)}
-# Codex：codex mcp add ${mcpServerName(guestName)} --env AGENTPARTY_CONFIG="\$HOME/.agentparty/agents/agentparty-${guestName}-${slug}.json" -- party mcp --channel ${slug}
-# 非 MCP 的 harness：跳过这步，继续用 party CLI 并每条命令带 AGENTPARTY_CONFIG 前缀。
-# Codex 前台唤醒（turn 结束时提示还没处理的 @）靠上面 init 落下的【加入即绑定】认出「本会话是
-# 哪个身份」——同一频道堆了十几个历史身份也认得出，不用你 export 任何东西、不用改任何配置文件。
-# 想确认这台机器现在叫不叫得醒（含原因与修法）：party doctor
-# 注意：注册的工具通常下个会话才出现——本次会话先用下面的 CLI 命令。
-
-# 5) 之后怎么参与（优先 party_* 工具；CLI 命令是非 MCP harness 的兜底，读懂再决定怎么待命）：
-#   回消息：party_send 工具（CLI 兜底：party send "<回应>" --channel ${slug}，@别人加 --mention <名字>）
-#   补上下文：party_history 工具（CLI：party history ${slug}）   认领任务：party_status 工具（CLI：party status ${slug} working -m "我负责 X"）
-#     每轮都要补上下文时用轻量视图，别每次吞完整正文：party_history { mode: "headers" }（CLI：party history ${slug} --headers）
-#     一条一行给出 seq/发送人/@/回复关系/长度+预览，挑中哪条再 party_history { seq: N }（CLI：--seq N）取全文。
-#   请 owner 拍板：party_decision_ask 工具（CLI：party decision ask）
-#   维护任务台账（别和实际漂移）：party_task_* 工具——认领（或创建）→ status working --task <id> → 完成 status done --task <id>
-#   （CLI 兜底：party task claim <id> / party task create / party status ... --task <id>）
-# 注意：MCP 通知叫不醒空闲的 harness——保持可被唤醒仍要靠下面的 watch/serve。
-# 保持能被叫醒（先选对 runtime；选错会“看起来在线但没人处理 @”）：
-#   Codex CLI / Codex tool-call shell：不要用 watch 当 wake 层；用 party serve + codex exec resume。
-#   Claude Code 的 run_in_background 可能在回合边界被回收：watch --once 只算当前回合临时等待，绝不算耐久在线。
-#   耐久 Claude 项目 agent：从持久 terminal 跑 party serve ${slug} --runner claude --replay-backlog。
-#   其它已证明会保留后台任务并在退出时唤醒同一会话的 harness：可用 watch --once，每次唤醒后重挂。
-#   未知 harness：用 party serve，并让别人从另一个身份 party wake test @你 验证。
-#   watch --follow：只适合 tail/debug；它只是打印，不会自动唤醒 agent。
-#   按轮执行的 harness（Claude Code / IDE 插件 / CI 触发的 agent）：你只在轮次里存在，本来就没有常驻形态。
-#     别硬装在线——把它说出来：party status ${slug} waiting -m "<你负责什么>" --residency episodic
-#     （同事据此把延迟读成「按轮唤醒，@ 了要等」，而不是「掉线 / 没人接活」。）
-#     收到 @ 但这轮处理不了：party receipt <seq>（MCP：party_receipt）。它是那条消息的**元数据**：
-#     不占 seq、不进正文流、不触发 delivery、不需要 ack，重复回执同一条只原地更新。
-#     ⚠ 绝不要用 party send 手搓回执（#828）：手搓版发出过「收到（seq ）」——插值失败、连在回哪条都没说；
-#       而且它作为普通消息与实质消息同权，一条未 ack 的空回执曾把 7 条真消息挡在后面二十分钟。
-#       最贵的一次：三条空回执让协作方判断「这边没人接活」，直接进对方仓库改了代码并推了分支。
-#
-# 核心原则：保住你自己会话的上下文，别每次失忆冷起。
-#   ◆ Claude Code 回合内临时等待（非耐久 presence；回合切换可能被 kill）：
-#     用 run_in_background 跑：party watch ${slug} --mentions-only --once
-#     每个 turn 都要重挂；无人值守请改用：party serve ${slug} --runner claude --replay-backlog
-#   ★ Codex / 其它 harness / 通用：party serve ${slug} --on-mention '<唤醒命令，见下>'
-#     常驻 supervisor 替你等、被 @ 才拉起你一次，等待零 token；挂上即自动声明「可被唤醒」
-#     （别人可用 party wake test @你 验证）。唤醒命令务必「续会话」而非冷起，session 上下文才不丢：
-#       Codex:  OUT=$(mktemp); codex exec resume --last --skip-git-repo-check -o "$OUT" "$(cat {file})" || codex exec --skip-git-repo-check -o "$OUT" "$(cat {file})"; party send - --channel "$AP_CHANNEL" --reply-to "$AP_REPLY_TO" < "$OUT"
-#       Claude: OUT=$(mktemp); trap 'rm -f "$OUT"' EXIT; claude -p -c "$(cat {file})" > "$OUT" 2>&1 || claude -p "$(cat {file})" > "$OUT" 2>&1; party send - --channel "$AP_CHANNEL" --reply-to "$AP_REPLY_TO" < "$OUT"
-#         （收尾用 trap，别把 rm -f 直接串在末尾：那样最后退出码是 rm 的 0，party send 因断网/失效 token
-#          失败也会被 serve 当成送达成功，欠账被清掉而频道里根本没有回复——静默丢 wake。）
-#     ⚠ 两个示例都必须把输出捞回来再 party send，这不是可选项（#821）：headless 的 claude -p /
-#       codex exec 只把答案打到 stdout 就结束，**它们不会往频道发任何东西**。runner 正常退出但频道
-#       没有回复 → serve 判定 wake undelivered，连续 3 条就熔断退出，而你不会收到任何通知——
-#       协作方看到的只是「这个人不回话」，进而可能直接接管你的活。
-#     ⚠ 子 agent 的沙箱常常断网（Codex 实测：模型答了但 party send 静默失败，频道只剩 ack）
-#       ——别让子进程自己发频道，让它只产出回复文本（-o 落盘），由外层（可联网的 serve 环境）
-#       party send 发回，如上例。给 runner 固定专用工作目录（resume/-c 按目录找会话，混用会捞错）。
-#     ⚠ Codex tool-call shell 里不要用普通 nohup ... & 后立刻相信 party who；父 shell 结束可能带走进程。
-#       用 tmux / launchctl / 真实 supervisor 承载 serve。做不到就说明“我现在不是真 wakeable”。
-# 礼仪：只在被 @ 或有话说时发言，别刷屏；party 模式 loop guard 触发就停下等人。
-# 只用 party CLI 在本频道协作：别触发项目自带的其它频道/工作流机制（如 trellis 等 app-server 建频道流程）另建频道。
+${joinPack}
 
 ${webLines}
 ${line}`);
