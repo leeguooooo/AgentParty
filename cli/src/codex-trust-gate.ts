@@ -22,6 +22,7 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
+import { sanitizeSingleLine } from "./format";
 
 /**
  * 信任闸最早出现在 codex **0.149**。
@@ -165,9 +166,17 @@ export function defaultCodexBinaryProbeDeps(
     },
     versionOf(path) {
       try {
-        const r = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 5000 });
+        // 参数走数组、不过 shell，路径不会被当命令拼接；输出上限防一个坏二进制把我们撑爆。
+        const r = spawnSync(path, ["--version"], {
+          encoding: "utf8",
+          timeout: 5000,
+          maxBuffer: 64 * 1024,
+          windowsHide: true,
+        });
         const text = typeof r.stdout === "string" ? r.stdout.trim() : "";
         if (text === "") return null;
+        // 只负责取第一行原文；ANSI / 控制字符的清理统一在 probeCodexTrustGate 里做——
+        // 那是所有 deps 实现的**唯一**收口，放在这里会让替换掉 deps 的调用方绕过它。
         return text.split("\n")[0]!.trim();
       } catch {
         return null;
@@ -232,8 +241,11 @@ function appRoots(deps: CodexBinaryProbeDeps): string[] {
 export function discoverCodexBinaries(deps: CodexBinaryProbeDeps): CodexBinary[] {
   const out: CodexBinary[] = [];
   const seen = new Set<string>();
+  // PATH 上第一个 codex 永远要进名单：「你敲 `codex` 跑到的是没有信任闸的旧版」是本 issue
+  // 更要命的那一半，绝不能因为这台机器 .app 装得多、把它挤出上限而说不出来。
+  const mustKeep = firstCodexOnPath(deps);
   const push = (path: string, origin: CodexBinaryOrigin): void => {
-    if (out.length >= MAX_CANDIDATES) return;
+    if (out.length >= MAX_CANDIDATES && path !== mustKeep) return;
     if (!isAbsolute(path)) return;
     let key: string;
     try {
@@ -334,14 +346,19 @@ export function probeCodexTrustGate(
     let onPathProbed = onPathIndex < 0;
     let probes = 0;
     const candidates = found.map((b, i) => {
+      // wantOnPath 同时豁免「够用就收工」和探测次数上限——理由同 mustKeep。
       const wantOnPath = !onPathProbed && i === onPathIndex;
-      if ((gatedFound && onPathProbed && !wantOnPath) || probes >= MAX_VERSION_PROBES) return b;
+      if (!wantOnPath && ((gatedFound && onPathProbed) || probes >= MAX_VERSION_PROBES)) return b;
       probes += 1;
       // 单个二进制探崩了只该丢掉它自己的版本，不该把整份探测拖垮——PATH 上那个 shim 是外部脚本，
       // 我们对它一无所知。外层还有一道兜底，这里是**降级**而不是重复保险。
       let version: string | null;
       try {
-        version = deps.versionOf(b.path);
+        // `--version` 是**外部二进制的 stdout**，最终会被原样印进终端。剥掉 ANSI / 控制字符，
+        // 否则一行版本号就能伪造出别的输出行（#652 同款）。这里是唯一收口，别挪到 deps 里去。
+        const raw = deps.versionOf(b.path);
+        const clean = raw === null ? "" : sanitizeSingleLine(raw).trim();
+        version = clean === "" ? null : clean;
       } catch {
         version = null;
       }
@@ -377,13 +394,22 @@ export interface CodexTrustApprovalGuidance {
   notes: string[];
 }
 
+/**
+ * 路径进终端前的清理。路径片段来自 `ps` 输出、PATH 环境变量与 readdir——都不是我们写的。
+ * 执行时用的仍是原始路径，只有**印给人看**的那一份走这里。
+ */
+export function displayPath(path: string): string {
+  return sanitizeSingleLine(path);
+}
+
 /** 路径里有空格就加引号，否则用户粘进 shell 会跑成两条命令。 */
 export function shellQuote(path: string): string {
-  return /^[A-Za-z0-9_.\-/]+$/.test(path) ? path : `'${path.replaceAll("'", "'\\''")}'`;
+  const safe = displayPath(path);
+  return /^[A-Za-z0-9_.\-/]+$/.test(safe) ? safe : `'${safe.replaceAll("'", "'\\''")}'`;
 }
 
 function describe(b: CodexBinary): string {
-  return `${b.path}（${versionLabel(b)}）`;
+  return `${displayPath(b.path)}（${versionLabel(b)}）`;
 }
 
 /**
@@ -402,7 +428,7 @@ export function codexTrustApprovalGuidance(probe: CodexTrustGateProbe): CodexTru
 
   // 桌面版永远不会自己弹出那个界面——这是本 issue 的第一处错，任何一档都必须说。
   const desktopNote = (app: string | null): string =>
-    `${app === null ? "桌面版 codex" : `${app}（桌面版）`}是 app-server 形态，不走 TUI 启动路径，【永远不会】自己弹出 "Hooks need review"；` +
+    `${app === null ? "桌面版 codex" : `${sanitizeSingleLine(app)}（桌面版）`}是 app-server 形态，不走 TUI 启动路径，【永远不会】自己弹出 "Hooks need review"；` +
     "它和终端里的 codex 共用同一份 ~/.codex/config.toml，所以在终端批准一次就对它生效——批准完把它重启一下。";
 
   // A：PATH 上就带闸 —— 终端形态的正路，文案保持不变。
@@ -419,12 +445,12 @@ export function codexTrustApprovalGuidance(probe: CodexTrustGateProbe): CodexTru
   // 版本错配比「跑哪个二进制」更要命：不明说，用户会以为自己照做了。所以它排在最前面。
   if (pathGate === false && onPath !== null) {
     notes.push(
-      `⚠ 你 PATH 上的 codex 是 ${onPath.version ?? "未知版本"}（${onPath.path}），这个版本【没有 hook 信任闸】——` +
+      `⚠ 你 PATH 上的 codex 是 ${onPath.version ?? "未知版本"}（${displayPath(onPath.path)}），这个版本【没有 hook 信任闸】——` +
         `用它开会话既不会提示、也批准不了；照着「直接跑 codex」做一遍会什么都不发生。${CODEX_TRUST_GATE_EVIDENCE}`,
     );
   } else if (onPath !== null) {
     notes.push(
-      `⚠ 读不出 PATH 上 codex 的版本（${onPath.path}），无法判断它有没有信任闸——请自己核对一下（\`${shellQuote(onPath.path)} --version\`）。${CODEX_TRUST_GATE_EVIDENCE}`,
+      `⚠ 读不出 PATH 上 codex 的版本（${displayPath(onPath.path)}），无法判断它有没有信任闸——请自己核对一下（\`${shellQuote(onPath.path)} --version\`）。${CODEX_TRUST_GATE_EVIDENCE}`,
     );
   }
 

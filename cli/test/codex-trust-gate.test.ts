@@ -172,6 +172,43 @@ describe("探测：PATH 上那个是谁、谁带闸", () => {
     expect(p.gated).toEqual([]);
   });
 
+  // CodeRabbit#943：装了一堆内置 codex 的 .app 时，PATH 上那个会被上限挤出名单——
+  // 而「你敲 codex 跑到的是旧版」恰恰是本 issue 更要命的那一半，绝不能被挤掉。
+  // fixture 只有一个变量：前面塞了多少个 .app 候选。
+  test("候选多到超上限时，PATH 上那个仍在名单里、仍被探测", () => {
+    const probes: string[] = [];
+    const bins: Record<string, string | null> = { [SHIM]: UNGATED };
+    const apps: string[] = [];
+    // 20 个都不带闸：确保不会因为「找到带闸的就收工」而提前轮到 SHIM——
+    // 只有「PATH 那个必须留、必须探」这条豁免能让它出现。
+    for (let i = 0; i < 20; i += 1) {
+      apps.push(`App${i}.app`);
+      bins[`/Applications/App${i}.app/Contents/Resources/codex`] = UNGATED;
+    }
+    const p = probeCodexTrustGate(
+      fakeDeps({ probes, bins, dirs: { "/Applications": apps }, pathDirs: ["/var/folders/f1/xx/T/cmux-cli-shims/84883385"] }),
+    );
+    expect(p.candidates.map((c) => c.path)).toContain(SHIM);
+    expect(probes).toContain(SHIM);
+    expect(p.onPath?.version).toBe(UNGATED);
+    expect(p.onPath?.gate).toBe(false);
+    const text = [codexTrustApprovalGuidance(p).do, ...codexTrustApprovalGuidance(p).notes].join("\n");
+    expect(text).toContain("没有 hook 信任闸");
+  });
+
+  // CodeRabbit#943：版本号是**外部二进制的 stdout**，会被原样印进终端。
+  test("外部二进制吐出的 ANSI / 控制字符不会进到输出里", () => {
+    const evil = "\u001b[2Kcodex-cli 0.145.0\u0007";
+    const p = probeCodexTrustGate(
+      fakeDeps({ bins: { [SHIM]: evil }, pathDirs: ["/var/folders/f1/xx/T/cmux-cli-shims/84883385"] }),
+    );
+    expect(p.onPath?.version).toBe("codex-cli 0.145.0");
+    const g = codexTrustApprovalGuidance(p);
+    const text = [g.do, ...g.notes].join("\n");
+    expect(text).not.toContain("\u001b");
+    expect(text).not.toContain("\u0007");
+  });
+
   test("探测抛异常也不能炸——诊断路径 fail-open", () => {
     const deps = fakeDeps(ownerWorld());
     const boom: CodexBinaryProbeDeps = {
