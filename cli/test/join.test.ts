@@ -246,6 +246,53 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(out).toContain("other");
   });
 
+  // 下面三条覆盖 SpawnBehavior 的三个分支。它们不是补覆盖率——这三条正是本切片声称
+  // 「失败要能看见」的路径：桩写了却没人用，那个声称就没被验证过（CodeRabbit 逮到）。
+
+  test("目标机器没装 claude CLI：注册这一步 warn 而不是崩，且不影响「就绪」结论", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, { noBinary: true }, logs));
+    const out = logs.join("\n");
+
+    // MCP 注册是 best-effort：装不上不该把整段接入判成失败——config / 绑定 / 报到都成了。
+    expect(code).toBe(0);
+    expect(out).toContain("全部就绪");
+    // 但必须**看得见**：这一步的结果不能被静默吞掉。
+    expect(out).toMatch(/mcp[\s\S]{0,80}(未|没|失败|跳过|not|skip)/i);
+    // 配置与报到仍然落地（best-effort 步骤不该拖垮 gate 步骤）。
+    expect(existsSync(configPath())).toBe(true);
+  });
+
+  test("重复接入：mcp get 命中已注册 ⇒ 跳过 add，不再叠一个常驻进程（#898）", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, { mcpAlreadyRegistered: true }, logs));
+
+    expect(code).toBe(0);
+    // 探到了（get 跑过），但**没有** add——每个注册在每个会话里都是一个常驻进程。
+    expect(record.some((r) => r[0] === "claude" && r[2] === "get")).toBe(true);
+    expect(record.some((r) => r[0] === "claude" && r[2] === "add")).toBe(false);
+    expect(logs.join("\n")).toMatch(/(已注册|already)/i);
+  });
+
+  test("MCP 注册失败：如实报出来，不冒充成功", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, { failMcpAdd: true }, logs));
+    const out = logs.join("\n");
+
+    // 确实尝试过 add（不是压根没跑）。
+    expect(record.some((r) => r[0] === "claude" && r[2] === "add")).toBe(true);
+    // 失败必须出现在输出里——静默吞掉正是本切片要根除的形态。
+    expect(out).toMatch(/(失败|failed|warn)/i);
+    // 仍是 best-effort：不因它把整段接入判死。
+    expect(code).toBe(0);
+  });
+
   test("token 只从 AGENTPARTY_TOKEN 读、只经环境变量往下游传，绝不进任何 argv/日志", async () => {
     mock = startRestMock();
     const record: string[][] = [];
