@@ -461,8 +461,8 @@ export function dormantAnnounceDisplayName(entry: ClaudeSessionRegistryEntry): s
 }
 
 /**
- * 选择要宣告（并被注入）的入册会话：**server + channel + 频道身份 + cwd 全等**必须，
- * 同优先级取最新入册。任何一维对不上就返回 null——宁可漏叫，绝不误投。
+ * 选择要宣告（并被注入）的入册会话：**host pid + server + channel + 频道身份 + cwd
+ * 全等**必须。任何一维对不上就返回 null——宁可漏叫，绝不误投。
  *
  * #865：频道 slug 跨实例不唯一（两台生产实例上都有 `agentparty`），只比 slug 会让本机
  * 连着 A 实例的 announce 腿把 @ 注入到只属于 B 实例的会话——实机撞见过。旧条目（无
@@ -474,7 +474,10 @@ export function dormantAnnounceDisplayName(entry: ClaudeSessionRegistryEntry): s
  * 毫无破绽，被 @ 的一方一无所知。所以：
  * - 身份不等一律不选（旧条目无 identity 字段 ⇒ 恒不匹配，下次 SessionStart 自然升级）；
  * - 删掉跨 cwd 兜底——「频道里随便挑一个」在有身份概念之后不成立，同身份跨 worktree 的
- *   另一个会话同样是错的宿主（announce 进程只许唤醒自己所在 cwd 的宿主会话）。
+ *   另一个会话同样是错的宿主。
+ * - cwd/identity 仍不足以标识会话：同一仓库同一身份同时开两个 Claude 时，每个蛰伏 MCP
+ *   都是各自 Claude 的直接子进程。因此必须用 process.ppid 精确命中自己的注册项，不能取
+ *   registered_at 最新的兄弟会话。
  */
 export function selectDormantAnnounceEntry(
   entries: readonly ClaudeSessionRegistryEntry[],
@@ -482,15 +485,20 @@ export function selectDormantAnnounceEntry(
   cwd: string,
   server?: string | null,
   identity?: string | null,
+  hostPid: number = process.ppid,
 ): ClaudeSessionRegistryEntry | null {
+  if (!Number.isInteger(hostPid) || hostPid <= 0) return null;
   const matching = entries.filter(
     (entry) =>
+      entry.pid === hostPid &&
       entry.channel === channel &&
       sessionEntryMatchesServer(entry, server) &&
       sessionEntryMatchesIdentity(entry, identity) &&
       entry.cwd === cwd,
   );
   if (matching.length === 0) return null;
+  // /clear / resume 可能让同一 Claude pid 短暂保留多个 session_id；只在已经精确
+  // 命中宿主 pid 之后才用时间选该进程最新的一条。
   return matching.reduce((a, b) => (b.registered_at >= a.registered_at ? b : a));
 }
 
@@ -511,8 +519,12 @@ export interface DormantAnnounceDeps {
     auth: { server: string; token: string },
   ) => Promise<number | null>;
   cwd?: string;
+  /** 当前 dormant MCP 的宿主 Claude pid；生产默认 process.ppid，测试可覆盖。 */
+  hostPid?: number;
   pollIntervalMs?: number;
   livenessIntervalMs?: number;
+  /** socket 注入失败后的有界重试间隔；生产默认 250ms。 */
+  injectRetryDelayMs?: number;
   /** socket 注入实现（测试注入点）；默认真实 injectChannelMessage。 */
   inject?: typeof injectChannelMessage;
   /**
@@ -646,7 +658,8 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
 /**
  * announce-only 主循环：等到注册表里出现本 channel 的活会话（SessionStart hook
  * 可能晚于 MCP 启动），随后保持一条只带 topology/harness_session 的 WS 连接。
- * 会话死亡或 signal 中止即断开。任何失败静默退出——蛰伏进程不许打扰 Claude。
+ * 会话死亡或 signal 中止即断开。瞬时网络/服务端故障按 poll 间隔重连；失败只写本地
+ * 诊断，绝不把噪音写进 Claude 的 MCP stdout。
  */
 export async function runDormantClaudeSessionAnnounce(
   channel: string,
@@ -654,8 +667,10 @@ export async function runDormantClaudeSessionAnnounce(
   deps: DormantAnnounceDeps,
 ): Promise<void> {
   const cwd = deps.cwd ?? process.cwd();
+  const hostPid = deps.hostPid ?? process.ppid;
   const pollMs = deps.pollIntervalMs ?? DORMANT_ANNOUNCE_POLL_MS;
   const livenessMs = deps.livenessIntervalMs ?? DORMANT_ANNOUNCE_LIVENESS_MS;
+  const injectRetryDelayMs = Math.max(0, deps.injectRetryDelayMs ?? 250);
   if (!isSlug(channel)) return;
   const inject = deps.inject ?? injectChannelMessage;
   // 进程内注入去重（按 seq）：WS 重连会重放未 ack 的帧，没有它同一条 @ 会反复唤醒
@@ -703,14 +718,22 @@ export async function runDormantClaudeSessionAnnounce(
     }
     let entry: ClaudeSessionRegistryEntry | null = null;
     try {
-      entry = selectDormantAnnounceEntry(deps.listSessions(), channel, cwd, authServer, selfName);
+      entry = selectDormantAnnounceEntry(
+        deps.listSessions(),
+        channel,
+        cwd,
+        authServer,
+        selfName,
+        hostPid,
+      );
     } catch {
       return;
     }
     if (entry === null) {
       logOnce(
         `claude-channel: 本机没有身份 ${selfName} 的入册会话（channel=${channel} ` +
-          `server=${authServer} cwd=${cwd}），未宣告、未注入。旧条目（无 identity 字段）` +
+        `server=${authServer} cwd=${cwd} host_pid=${hostPid}），未宣告、未注入。` +
+          `旧条目（无 identity 字段）` +
           "不参与匹配，重开一次会话即自动补上（#906）",
       );
       await abortableSleep(pollMs, signal);
@@ -770,26 +793,45 @@ export async function runDormantClaudeSessionAnnounce(
         if (dormantAnnounceIsReplayFrame(frame)) return;
         if (!dormantAnnounceMentionHit(mentions, selfName)) return;
         if (injectedSeqs.has(seq)) return;
-        injectedSeqs.add(seq);
-        while (injectedSeqs.size > DORMANT_ANNOUNCE_SEEN_LIMIT) {
-          const oldest = injectedSeqs.values().next();
-          if (oldest.done === true) break;
-          injectedSeqs.delete(oldest.value);
+        for (let attempt = 1; attempt <= 3 && !signal.aborted; attempt += 1) {
+          let result: Awaited<ReturnType<typeof inject>> | null = null;
+          try {
+            result = await inject({
+              // 自我保护：目标恒为本轮绑定的宿主会话，不接受任何外部传入的身份。
+              // 寻址走 pid（registry 与 ~/.claude/sessions 同源）——宣告名与 Claude 原生
+              // 会话名是两个命名空间，按名字寻址恒 no-match（#857 实测）。sessionId 一并
+              // 传下去做防 pid 复用比对。
+              pid: entry.pid,
+              sessionId: entry.session_id,
+              name: hostAnnounceName,
+              body: wakeProxyNote({ channel, server: authServer, seq }),
+              // from-name＝真实发信人的友好名 + 技术 ID（接收端面板只显示这一处，
+              // 技术 ID 丢了就分不清两个同名 agent）。
+              fromName: senderInjectFromName(sender, channel),
+              // announce 进程没有自己的回执 socket——绝不冒用别人的 sock 当 from。
+            });
+          } catch {
+            // 与结构化 ok:false 统一走有界重试。
+          }
+          if (result?.ok === true) {
+            // 只有字节真正写进 socket 后才去重。失败前就记 seen 会让临时故障
+            // 把这条 @ 永久变成「已注入」的假成功。
+            injectedSeqs.add(seq);
+            while (injectedSeqs.size > DORMANT_ANNOUNCE_SEEN_LIMIT) {
+              const oldest = injectedSeqs.values().next();
+              if (oldest.done === true) break;
+              injectedSeqs.delete(oldest.value);
+            }
+            return;
+          }
+          if (attempt < 3) await abortableSleep(injectRetryDelayMs, signal);
         }
-        await inject({
-          // 自我保护：目标恒为本轮绑定的宿主会话，不接受任何外部传入的身份。
-          // 寻址走 pid（registry 与 ~/.claude/sessions 同源）——宣告名与 Claude 原生
-          // 会话名是两个命名空间，按名字寻址恒 no-match（#857 实测）。sessionId 一并
-          // 传下去做防 pid 复用比对。
-          pid: entry.pid,
-          sessionId: entry.session_id,
-          name: hostAnnounceName,
-          body: wakeProxyNote({ channel, server: authServer, seq }),
-          // from-name＝真实发信人的友好名 + 技术 ID（接收端面板只显示这一处，
-          // 技术 ID 丢了就分不清两个同名 agent）。
-          fromName: senderInjectFromName(sender, channel),
-          // announce 进程没有自己的回执 socket——绝不冒用别人的 sock 当 from。
-        });
+        if (!signal.aborted) {
+          logOnce(
+            `claude-channel: socket 注入连续 3 次未成功（channel=${channel} seq=${seq} ` +
+              `session=${entry.session_id}），未记入去重表`,
+          );
+        }
       } catch {
         // 静默降级：注入不可用时行为等同改动前（只 ack）。
       }
@@ -826,10 +868,21 @@ export async function runDormantClaudeSessionAnnounce(
           // claim delivery，见上方 P2 不变式），注入失败也不该影响 ack。
           if (frame.type === "msg") await maybeInject(frame.seq, frame.mentions, frame.sender, frame);
         }
-        if (frame.type === "error") return;
+        if (frame.type === "error") {
+          // 只有明确的瞬时服务端故障才重连。鉴权/归档/协议错误重试也不会自愈，
+          // 保持原有终止语义，避免每 5s 空转。
+          if (frame.code !== "unavailable" && frame.code !== "rate_limited") return;
+          logOnce(
+            `claude-channel: announce 收到可重试错误 ${frame.code}（channel=${channel}），` +
+              `将在 ${pollMs}ms 后重连`,
+          );
+          break;
+        }
       }
     } catch {
-      return;
+      if (!signal.aborted) {
+        logOnce(`claude-channel: announce 帧流异常（channel=${channel}），将在 ${pollMs}ms 后重连`);
+      }
     } finally {
       clearInterval(liveness);
       signal.removeEventListener("abort", onAbort);

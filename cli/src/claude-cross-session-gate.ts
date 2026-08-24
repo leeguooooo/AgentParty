@@ -20,6 +20,9 @@ const STATE_FILE = "state.json";
 const ARM_FILE = "armed.json";
 const CONSUME_LOCK_FILE = "consume.lock";
 const CONSUME_LOCK_WAIT_MS = 250;
+// Hook 临界区全是同步小文件操作，正常持锁远小于 10s。进程若在 finally 前崩溃，
+// O_EXCL 锁文件会留在每次 launch 的私有目录里；不回收就会让整个 bridge 永久 fail-closed。
+const CONSUME_LOCK_STALE_MS = 10_000;
 const MAX_CANDIDATES = 64;
 const MAX_TOOL_RESULT_DEPTH = 64;
 const MAX_TOOL_RESULT_NODES = 4_096;
@@ -548,10 +551,62 @@ function waitForConsumeLock(lockPath: string): number | null {
     try {
       return openSync(lockPath, "wx", 0o600);
     } catch {
+      if (reclaimStaleConsumeLock(lockPath)) continue;
       const remaining = deadline - Date.now();
       if (remaining <= 0) return null;
       Atomics.wait(sleeper, 0, 0, Math.min(5, remaining));
     }
+  }
+}
+
+// 回收崩溃 Hook 留下的陈旧锁。lstat→rm→open 三步不是原子的：两个 Hook 同时判定
+// 同一把锁过期时，后手的 rm 会删掉先手刚建好的新锁，两边一起进临界区——恰好毁掉
+// 这把锁存在的意义。所以先用一把回收锁把回收动作串起来，拿到回收锁之后再重新
+// lstat，确认这一刻锁仍然是过期的（而不是别人刚建的新锁），才真正删。
+// 返回 true 表示调用方应立刻重试 O_EXCL。
+function reclaimStaleConsumeLock(lockPath: string): boolean {
+  const reclaimPath = `${lockPath}.reclaim`;
+  let reclaimFd: number;
+  try {
+    reclaimFd = openSync(reclaimPath, "wx", 0o600);
+  } catch {
+    // 别的 Hook 正在回收，等它删完再竞争。回收锁只跨几个同步 syscall，正常持锁
+    // 时间远小于阈值；只有在回收过程中崩溃才会残留，按同样的过期阈值兜底清掉。
+    dropStaleLockFile(reclaimPath);
+    return false;
+  }
+  try {
+    const stat = lstatSync(lockPath);
+    if (
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      Date.now() - stat.mtimeMs <= CONSUME_LOCK_STALE_MS
+    ) {
+      return false;
+    }
+    rmSync(lockPath, { force: true });
+    return true;
+  } catch {
+    // 锁刚被别的 Hook 正常释放：直接重试 O_EXCL。
+    return true;
+  } finally {
+    closeSync(reclaimFd);
+    rmSync(reclaimPath, { force: true });
+  }
+}
+
+function dropStaleLockFile(path: string): void {
+  try {
+    const stat = lstatSync(path);
+    if (
+      stat.isFile() &&
+      !stat.isSymbolicLink() &&
+      Date.now() - stat.mtimeMs > CONSUME_LOCK_STALE_MS
+    ) {
+      rmSync(path, { force: true });
+    }
+  } catch {
+    // 已经没了，正常。
   }
 }
 
