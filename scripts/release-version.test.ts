@@ -626,6 +626,10 @@ describe("release main 推送落地", () => {
     expect(result.stderr).toContain("推送 origin/main 失败");
     expect(result.commands).not.toContain("git tag v0.2.83");
     expect(result.commands).not.toContain("git push origin v0.2.83");
+    // 不回滚的话「重跑」根本走不通：基线校验会挡下 HEAD ≠ origin/main，
+    // 就算手工对齐，版本文件已经是新版号、bump 无 diff，commit 会空提交失败。
+    expect(result.commands).toContain("git reset --hard 1111111111111111111111111111111111111111");
+    expect(result.stderr).toContain("可直接重跑");
   });
 
   test("origin/main 没指向发布提交时停住，且不留悬空 tag", () => {
@@ -634,6 +638,7 @@ describe("release main 推送落地", () => {
     expect(result.exitCode).not.toBe(0);
     expect(result.commands).toContain("git push origin HEAD:refs/heads/main");
     expect(result.stderr).toContain("版本提交没进 main");
+    expect(result.commands).toContain("git reset --hard 1111111111111111111111111111111111111111");
     expect(result.commands).not.toContain("git tag v0.2.83");
     expect(result.commands).not.toContain("git push origin v0.2.83");
     expect(result.commands).not.toContain("gh run list");

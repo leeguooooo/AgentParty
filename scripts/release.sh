@@ -237,6 +237,30 @@ remove_release_temp_files() {
   done
 }
 
+# 版本提交已经打在本地、但没能进 origin/main 时的收尾。
+#
+# 这里**不能**只说一句「排查后重跑」：此刻本地多了一条 bump 提交，而版本文件已经
+# 是新版号。直接重跑会先被发布前的基线校验挡下（HEAD ≠ origin/main）；就算手工把
+# 基线对齐，release-version.ts 也已无 diff 可 bump，`git commit` 会因为没有暂存内容
+# 失败。也就是说不回滚的话，「重跑」这条路根本走不通。
+#
+# 所以默认把本地那条发布提交回滚掉——它完全是脚本自己刚打的，工作树在入口处已经
+# 校验过干净——让「重跑」重新成为一条真的能走的路。回滚失败就把手工命令原样给出。
+abort_unpushed_release() {
+  local base_sha="$1" release_sha="$2" version="$3"
+  if [[ -n "$base_sha" ]] && git reset --hard "$base_sha" >/dev/null 2>&1; then
+    echo "   已回滚本地发布提交 ${release_sha}，工作树复位到 ${base_sha}。" >&2
+    echo "   修好后可直接重跑： scripts/release.sh ${version}" >&2
+    return 0
+  fi
+  echo "   自动回滚失败，本地仍停在 ${release_sha}（版本文件已是 ${version}）。" >&2
+  echo "   二选一：" >&2
+  echo "     1) 手工补推： git push origin ${release_sha}:refs/heads/main" >&2
+  echo "        然后手工补 tag： git tag v${version} ${release_sha} && git push origin v${version}" >&2
+  echo "     2) 丢弃这条提交后重跑： git reset --hard ${base_sha:-<发布前的 SHA>} && scripts/release.sh ${version}" >&2
+  return 0
+}
+
 cleanup_release_version() {
   local exit_status=$?
   trap - EXIT
@@ -330,14 +354,21 @@ main() {
   # main 引用（还停在 bump 之前），git 会打印 "Everything up-to-date" 当作成功，
   # 于是 tag 上去了、版本提交没进 main，线上 /api/version 与 tag 对不上。
   if ! git push origin "HEAD:refs/heads/main"; then
-    echo "!! 推送 origin/main 失败（网络或权限），tag 未推，排查后重跑。" >&2
+    echo "!! 推送 origin/main 失败（网络或权限）。tag 未推。" >&2
+    abort_unpushed_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
     return 1
   fi
   # 推完必须核实远端确实指向这条提交——上面那条静默失败就是这么漏过去的。
-  git fetch origin main --quiet || { echo "!! 推送后 fetch origin main 失败，无法核实" >&2; return 1; }
+  if ! git fetch origin main --quiet; then
+    echo "!! 推送后 fetch origin main 失败，无法核实是否落地。tag 未推。" >&2
+    echo "   先自行确认 origin/main 是否已是 ${RELEASE_SHA}：已是则只需补打 tag，未是则按下面回滚。" >&2
+    abort_unpushed_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
+    return 1
+  fi
   [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_SHA" ]] || {
-    echo "!! origin/main 未指向 ${RELEASE_SHA}，版本提交没进 main。tag 未推，排查后重跑。" >&2
+    echo "!! origin/main 未指向 ${RELEASE_SHA}，版本提交没进 main。tag 未推。" >&2
     echo "   origin/main = $(git rev-parse FETCH_HEAD)" >&2
+    abort_unpushed_release "$BASE_SHA" "$RELEASE_SHA" "$VER"
     return 1
   }
   # tag 放在 main 落地之后：main 没推成就绝不留下一个指向本地提交的 tag。

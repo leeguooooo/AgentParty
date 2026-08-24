@@ -31,6 +31,17 @@ describe("release.sh 推送目标", () => {
     expect(tagAt).toBeGreaterThan(pushMainAt);
   });
 
+  // 版本提交已在本地、没进 main 时，本地状态已经不可重跑（基线校验挡下 +
+  // bump 无 diff 导致空提交）。所以恢复指引不能是一句「排查后重跑」。
+  test("推送没落地时不给出「排查后重跑」这种走不通的指引", () => {
+    const code = releaseScript
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    expect(code).not.toContain("排查后重跑");
+    expect(code).toContain("abort_unpushed_release");
+  });
+
   test("发版前把基线钉在 origin/main 上", () => {
     const preflight = releaseScript.slice(0, releaseScript.indexOf("同步 package 版本到"));
     expect(preflight).toContain("git fetch origin main --quiet");
