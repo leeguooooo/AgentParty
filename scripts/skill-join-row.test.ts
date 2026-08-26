@@ -11,7 +11,7 @@ const SKILL = readFileSync("skills/agentparty/SKILL.md", "utf8");
  * 技能却把 agent 引向另一条路——**而 agent 扫的是这张表，不是散文**。
  *
  * 这里钉的不是「文里出现过 party join」（散文早就写了，事故照样发生），而是
- * **Intent 表里那一行本身**给的是哪条命令。
+ * **Intent 表里那一行的命令单元格**给出的是哪条命令。
  */
 function joinRow(): string {
   const row = SKILL.split("\n").find((l) => l.startsWith("| Join a channel"));
@@ -19,25 +19,59 @@ function joinRow(): string {
   return row;
 }
 
+/**
+ * 只取命令单元格里的**代码片段**（反引号内），不看散文。
+ *
+ * 整行扫描会把行内那句「别拿 `party init` 手搓」也算成「还在教 init」——我第一版就是这么
+ * 自己红了自己的。判「教的是哪条命令」必须只看代码，判「有没有讲清代价」才看散文。
+ */
+function joinCommands(): string[] {
+  const cells = joinRow().split("|");
+  // 0 是行首空串，1 是 Intent，其余合起来是命令单元格（命令里含 `\|` 转义会被拆开）。
+  const cell = cells.slice(2).join("|");
+  return [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+}
+
+/**
+ * 命令单元格里真正的 party **调用**。
+ *
+ * 行内那句「别拿 `party init` 手搓」也是反引号片段，但它是**散文里的提及**、不是给 agent
+ * 照抄的命令。区分靠「带不带参数」：可照抄的加入命令必然带 `--server/--channel/...`，
+ * 光杆的 `party init` 是在指代它、不是在教它。
+ */
+function partyInvocations(): string[] {
+  return joinCommands().filter((c) => /(^|\s)party\s+[a-z-]+\s+-/.test(c));
+}
+
 describe("SKILL.md 的加入频道指引", () => {
-  it("Intent 表的 join 行给的是 party join，不是手搓 party init", () => {
-    const row = joinRow();
-    expect({
-      用了join: row.includes("party join"),
-      // 只抓「拿 init 当加入命令」的用法；散文里提一句「别用 init」不算数
-      还在教init: /party init\s+--/.test(row),
-    }).toEqual({ 用了join: true, 还在教init: false });
+  it("命令单元格里唯一的 party 调用是 party join", () => {
+    const subs = partyInvocations().map((c) => {
+      const m = c.match(/(?:^|\s)party\s+([a-z-]+)/);
+      return m ? m[1] : c;
+    });
+    expect({ 调用: subs }).toEqual({ 调用: ["join"] });
   });
 
-  it("token 只经 AGENTPARTY_TOKEN 环境变量，不落 argv（#676）", () => {
-    const row = joinRow();
+  it("token 由 AGENTPARTY_TOKEN 环境变量前缀传入，不进 argv（#676）", () => {
+    const cmd = partyInvocations()[0] ?? "";
     expect({
-      有环境变量: row.includes("AGENTPARTY_TOKEN"),
-      token进了argv: /--token\b/.test(row),
-    }).toEqual({ 有环境变量: true, token进了argv: false });
+      环境变量前缀: /^AGENTPARTY_TOKEN=\S+\s+party\s+join\b/.test(cmd),
+      // #676：--token/-t 会把 token 写进 argv，同机 `ps -axww` 可读，还落 shell history。
+      token进argv: /(^|\s)(--token|-t)(\s|=|$)/.test(cmd),
+    }).toEqual({ 环境变量前缀: true, token进argv: false });
   });
 
-  it("说明了为什么不能拿 init 拼——半截 join 是静默失败，不是报错", () => {
-    expect(joinRow()).toContain("silently");
+  it("join 命令带齐了必需参数，不是半截", () => {
+    const cmd = partyInvocations()[0] ?? "";
+    const missing = ["--server", "--channel", "--as"].filter((f) => !cmd.includes(f));
+    expect({ 缺的参数: missing }).toEqual({ 缺的参数: [] });
+  });
+
+  it("说明里点明了「半截 join」和「静默失败」两件事", () => {
+    const prose = joinRow().replace(/`[^`]+`/g, "");
+    expect({
+      提了半截: /hand-roll|partial join/i.test(prose),
+      提了静默: /silent/i.test(prose),
+    }).toEqual({ 提了半截: true, 提了静默: true });
   });
 });
