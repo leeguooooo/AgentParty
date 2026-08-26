@@ -35,9 +35,21 @@ export function locateClaudeBinary(env: NodeJS.ProcessEnv = process.env): string
   // 优先 versions 目录下最新的那个：`which claude` 常指向一个 shim/软链，strings 抠不到东西。
   const versions = join(env.HOME ?? homedir(), ".local", "share", "claude", "versions");
   try {
-    const entries = readdirSync(versions).sort();
+    // 按**语义序**挑最新，不能用字典序：`2.1.9` 字典序排在 `2.1.246` 之后，会挑到旧版本，
+    // 于是守卫拿一个过时二进制的格式去核对——比不核还糟（它会给出肯定但过时的结论）。
+    const entries = readdirSync(versions)
+      .map((name) => ({ name, parts: name.split(".").map((n) => Number.parseInt(n, 10)) }))
+      .filter((e) => e.parts.every((n) => Number.isFinite(n)) && e.parts.length > 0)
+      .sort((a, b) => {
+        const len = Math.max(a.parts.length, b.parts.length);
+        for (let i = 0; i < len; i += 1) {
+          const d = (a.parts[i] ?? 0) - (b.parts[i] ?? 0);
+          if (d !== 0) return d;
+        }
+        return 0;
+      });
     for (let i = entries.length - 1; i >= 0; i -= 1) {
-      const p = join(versions, entries[i]!);
+      const p = join(versions, entries[i]!.name);
       if (existsSync(p)) return p;
     }
   } catch {
@@ -80,8 +92,15 @@ export function readClaudeNativeCrossSessionFormat(
   // 而「这串字符集」和「这个取值列表」本身是稳定的。
   const charset = lines.find((l) => /^[A-Za-z0-9%:_/.\\-]+$/.test(l) && l.includes("A-Za-z0-9%")) ?? null;
 
-  const modesLine = lines.find((l) => l.includes('"bypass","prompting"'));
-  const modes = modesLine === undefined ? null : ["bypass", "prompting"];
+  // 真的把取值抠出来，不要"确认含某串之后返回硬编码列表"——那样原生新增一个 mode
+  // （例如变成 ["bypass","prompting","silent"]）时，我们仍然报告旧列表，守卫就瞎了。
+  const modesLine = lines.find((l) => /\[\s*"bypass"\s*,\s*"prompting"[^\]]*\]/.test(l));
+  const modesRaw = modesLine === undefined
+    ? null
+    : /\[\s*("bypass"\s*,\s*"prompting"[^\]]*)\]/.exec(modesLine)?.[1] ?? null;
+  const modes = modesRaw === null
+    ? null
+    : modesRaw.split(",").map((v) => v.trim().replace(/^"|"$/g, "")).filter((v) => v !== "");
 
   return { strictSource: strict, fromCharset: charset, fromModes: modes, binaryPath };
 }

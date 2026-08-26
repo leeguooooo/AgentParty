@@ -20,6 +20,11 @@ import { wrapCrossSessionMessage } from "../src/claude-inbox-inject";
 // **惰性**取，不在模块加载时扫二进制：`strings -a` 要跑 1 秒并把 58MB 字符串读进内存，
 // 放在顶层会卡在同目录所有 spec 之前，把重 subprocess 的用例挤过 5 秒超时线（实测把
 // worktree / cli 那几条挤红了，而它们跟本改动毫无关系）。
+// skipIf 的条件只做**廉价**判断（二进制在不在），扫描本身仍然惰性——
+// 不能在用例体里 `return` 来"跳过"：bun 不把 return 当 skip，它算 **pass**，
+// 于是没装 claude 的机器上这条守卫会显示为通过。那正是「绿灯代替验证」。
+const NO_CLAUDE = locateClaudeBinary() === null;
+
 let cached: { fmt: ReturnType<typeof readClaudeNativeCrossSessionFormat>; native: RegExp | null } | undefined;
 function nativeFormat() {
   if (cached === undefined) {
@@ -31,9 +36,12 @@ function nativeFormat() {
 }
 
 describe("原生 cross-session 格式漂移守卫（#953）", () => {
-  test("原生严格正则认我们 wrap 出来的消息（无 claude 则跳过）", () => {
+  test.skipIf(NO_CLAUDE)("原生严格正则认我们 wrap 出来的消息", () => {
     const { fmt, native } = nativeFormat();
-    if (native === null || fmt === null) return;
+    // 抠不出正则 ⇒ 显式失败，不是静默通过：这时我们对"原生认不认"一无所知，
+    // 而一条"不知道"被记成 pass，就是拿沉默冒充确认。
+    expect({ gotRegex: native !== null, binary: fmt?.binaryPath ?? null })
+      .toEqual({ gotRegex: true, binary: fmt?.binaryPath ?? null });
     const samples = [
       wrapCrossSessionMessage({
         from: "uds:/tmp/cc-socks/1.sock",
@@ -67,9 +75,29 @@ describe("原生 cross-session 格式漂移守卫（#953）", () => {
     }
   });
 
-  test("从二进制读到的字符集与取值集，与我们的常量一致（无 claude 则跳过）", () => {
+  // 只断言"原生认我们的输出"证明不了还原后的正则**保留了顺序约束**——一条被我还原坏、
+  // 变得过分宽松的正则同样会让上面那条全绿。这条从反面钉住：顺序错了必须被拒。
+  test.skipIf(NO_CLAUDE)("还原后的正则确实保留顺序约束：属性换序必须被拒", () => {
+    const { native } = nativeFormat();
+    if (native === null) throw new Error("抠不出原生正则");
+    const swapped = [
+      // from-name / from-mode 互换
+      '<cross-session-message from="uds:/a.sock" from-mode="bypass" from-name="n">\nx\n</cross-session-message>',
+      // from-session / hop-chain 互换
+      '<cross-session-message from="uds:/a.sock" hop-chain="a,b" from-session="s" from-name="n">\nx\n</cross-session-message>',
+      // from 挪到最后
+      '<cross-session-message from-name="n" from="uds:/a.sock">\nx\n</cross-session-message>',
+    ];
+    for (const s of swapped) {
+      expect({ head: s.split("\n")[0], accepted: native.test(s) })
+        .toEqual({ head: s.split("\n")[0], accepted: false });
+    }
+  });
+
+  test.skipIf(NO_CLAUDE)("从二进制读到的字符集与取值集，与我们的常量一致", () => {
     const { fmt } = nativeFormat();
-    if (fmt === null) return;
+    expect(fmt).not.toBe(null);
+    if (fmt === null) throw new Error("unreachable");
     // 这两个也是逆向来的，一起盯住。
     expect(fmt.fromCharset?.replace(/\\\\/g, "\\")).toBe("A-Za-z0-9%:_/.\\-");
     expect(fmt.fromModes).toEqual(["bypass", "prompting"]);
