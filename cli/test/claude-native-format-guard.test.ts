@@ -42,6 +42,7 @@ describe("原生 cross-session 格式漂移守卫（#953）", () => {
     // 而一条"不知道"被记成 pass，就是拿沉默冒充确认。
     expect({ gotRegex: native !== null, binary: fmt?.binaryPath ?? null })
       .toEqual({ gotRegex: true, binary: fmt?.binaryPath ?? null });
+    if (native === null || fmt === null) throw new Error("unreachable: 上面那条断言已保证非 null");
     const samples = [
       wrapCrossSessionMessage({
         from: "uds:/tmp/cc-socks/1.sock",
