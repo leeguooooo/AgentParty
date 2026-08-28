@@ -197,7 +197,13 @@ The Marketplace plugin packages this skill with two thin platform shells. Codex 
 generic `party mcp` entry. Claude also receives lifecycle hooks plus a declared
 `agentparty-channel` server backed by `party claude-channel`. Start a fresh Claude session with
 `party claude <channel>` to let durable channel events enter the open
-main session without waiting for the model to poll. The plugin still requires the `party` release
+main session without waiting for the model to poll. Extra Claude flags go after `--`
+(`party claude <channel> -- --model sonnet`); to stop retyping them, set machine-local defaults once
+with `party claude --default-args -- <claude args...>` (stored in
+`$AGENTPARTY_HOME/claude-default-args.json`, prepended before explicit `--` args, printed with
+their source at every launch; `--default-args --` clears, `--show-default-args` inspects). Nothing
+is defaulted unless you wrote it there — `--dangerously-skip-permissions` in particular is only ever
+a default you opted into yourself. The plugin still requires the `party` release
 binary: it is the install/discovery and lifecycle shell, not a second implementation of auth,
 config, transport, topology, or process supervision. Claude installs it disabled because enabling
 it opens an external service connection; configure `party` before enabling it.
