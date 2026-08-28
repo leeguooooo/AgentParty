@@ -147,7 +147,8 @@ describe("party history 参数解析（#151）", () => {
       }],
     })) as unknown as typeof fetch;
 
-    expect(await run(["dev"])).toBe(0);
+    // #962 起纯文本默认带时间戳；这条测的是附件元数据，用 --no-ts 关掉前缀断言原样。
+    expect(await run(["dev", "--no-ts"])).toBe(0);
     expect(stdout).toEqual([
       "[9] alice(human): [attachment: image.png · image/png · 99 bytes · auth GET /api/channels/dev/attachments/uuid/image.png]",
     ]);
