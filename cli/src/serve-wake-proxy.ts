@@ -44,6 +44,11 @@ export interface WakeProxyRef {
   /** serve 这条连接所连的实例 URL（#865）。频道 slug 跨实例不唯一，选目标必须同时比对它。 */
   server: string;
   seq: number;
+  /**
+   * 同身份存活 runtime 数（#963）。>1 时被唤醒的会话得知道自己是 N 个之一——先看频道里有没有
+   * 兄弟已回，再决定要不要开口。省略/≤1 不写进通知。
+   */
+  siblings?: number;
 }
 
 /**
@@ -51,8 +56,12 @@ export interface WakeProxyRef {
  * 超出 512B 属于程序错误（channel ≤64 字符 + seq 数字，正常永远不会触发）。
  */
 export function wakeProxyNote(ref: WakeProxyRef): string {
+  const siblings = typeof ref.siblings === "number" && Number.isInteger(ref.siblings) && ref.siblings > 1
+    ? ` siblings=${ref.siblings}: ${ref.siblings} live runtimes share your identity; ` +
+      "check whether a sibling already replied before you speak."
+    : "";
   const note =
-    `AgentParty wake: you were mentioned in #${ref.channel} at seq=${ref.seq}. ` +
+    `AgentParty wake: you were mentioned in #${ref.channel} at seq=${ref.seq}.${siblings} ` +
     "Read the channel (party history) for the message body; the channel is the single source of truth.";
   if (Buffer.byteLength(note, "utf8") > WAKE_PROXY_NOTE_MAX_BYTES) {
     throw new Error("wake proxy note exceeds 512 bytes");

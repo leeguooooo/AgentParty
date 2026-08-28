@@ -4297,3 +4297,65 @@ describe("Claude Channel directed-delivery ledger", () => {
     expect(posts).toBe(1);
   });
 });
+
+describe("唤醒通知带 siblings=N（issue #963）", () => {
+  async function notifyThroughRunningAck(countSiblings: ((self: string) => number) | undefined) {
+    const stream = streamingConnection();
+    const notifications: ChannelNotification[] = [];
+    const bridge = new ClaudeChannelDeliveryBridge({
+      channel: "dev",
+      connection: stream.connection,
+      notify: async (notification) => {
+        notifications.push(notification);
+      },
+      postReply: async () => ({ seq: 1 }),
+      deliveryAckTimeoutMs: 1_000,
+      out: () => {},
+      ...(countSiblings === undefined ? {} : { countSiblings }),
+    });
+    const run = bridge.run();
+    stream.push(welcomeDirectedFrame(0, "me") as ServerFrame);
+    const incoming = deliveryFrame(6, "ping", {
+      id: "delivery-siblings",
+      target_name: "me",
+      sender: { name: "alice", kind: "human" },
+    });
+    stream.push(incoming as ServerFrame);
+    await waitFor(
+      () => stream.sent.some((frame) => frame.type === "delivery_update"),
+      "running update was not sent",
+    );
+    const running = stream.sent.find((frame) => frame.type === "delivery_update") as
+      Extract<ClientFrame, { type: "delivery_update" }> & { request_id: string };
+    stream.push({
+      type: "delivery_state",
+      request_id: running.request_id,
+      delivery: { ...incoming.delivery, state: "running" },
+    } as ServerFrame);
+    await waitFor(() => notifications.length === 1, "running ACK did not release notification");
+    bridge.close();
+    await expect(run).resolves.toBe(0);
+    return notifications[0]!;
+  }
+
+  test("同身份 3 个存活 runtime ⇒ meta.siblings=3，正文先提醒看兄弟有没有已回", async () => {
+    const seen: string[] = [];
+    const notification = await notifyThroughRunningAck((self) => {
+      seen.push(self);
+      return 3;
+    });
+    expect(seen).toEqual(["me"]);
+    expect(notification.meta.siblings).toBe("3");
+    expect(notification.content).toContain("siblings=3");
+    expect(notification.content).toContain("check whether a sibling already replied");
+  });
+
+  test("只有自己一个 ⇒ meta.siblings=1 但正文不加提醒；没有提供者 ⇒ 不写", async () => {
+    const single = await notifyThroughRunningAck(() => 1);
+    expect(single.meta.siblings).toBe("1");
+    expect(single.content).not.toContain("siblings=");
+    const none = await notifyThroughRunningAck(undefined);
+    expect(none.meta.siblings).toBeUndefined();
+    expect(none.content).not.toContain("siblings=");
+  });
+});
