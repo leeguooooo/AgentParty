@@ -808,6 +808,9 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     const text = String(safety[0]!.children.join(""));
     expect(/公开|public/i.test(text)).toBe(true);
     expect(/argv|ps|history/i.test(text)).toBe(true);
+    // 必须排在可复制命令**之前**：无人值守是一段长脚本，警告放后面会被推出视野。
+    const json = JSON.stringify(s.r.toJSON());
+    expect(json.indexOf("agent-join-tokensafety")).toBeLessThan(json.indexOf('"data-cmd":"join"'));
   });
 
   test("recover 不带 token ⇒ 不渲染那条安全警告（没有明文可泄露）", () => {
