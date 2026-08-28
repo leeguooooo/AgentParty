@@ -5,6 +5,7 @@ import { LocaleProvider } from "../i18n/locale";
 import { clearApiBase, setApiBase } from "../lib/base";
 // 版本闸跟随刚发布的 CLI（joinPack 从 cli/package.json 派生），断言引用常量而非写死数字，杜绝再漂移。
 import { MIN_CLI_UNATTENDED } from "../lib/joinPack";
+import type { MsgFrame, PresenceEntry } from "@agentparty/shared";
 
 const savedAgents: Array<{ name: string; token: string; command: string }> = [];
 const VAULT_KEY = "ap_agent_token_vault:v1";
@@ -15,6 +16,10 @@ mock.module("../lib/api", () => ({
   ForbiddenError: class ForbiddenError extends Error {},
   ValidationError: class ValidationError extends Error {},
   createChannelAgent: mock(async (_slug: string, name: string) => ({ name, token: "ap_created" })),
+  // #1005 stepper 用到的两个：轮询后备（测试都直接注入 presence/messages，所以恒空）与换 token。
+  rotateChannelAgent: mock(async (_token: string, _slug: string, name: string) => ({ name, token: "ap_rotated" })),
+  fetchChannelPresence: mock(async () => []),
+  fetchMessages: mock(async () => []),
 }));
 
 // 用真实 vault 覆盖持久化和复制路径，避免 mock.module 污染同一 Bun 进程里的
@@ -526,7 +531,10 @@ describe("AgentJoin 复制反馈 (#642)", () => {
     open(r);
     await generate(r);
     await act(async () => {
-      await r.root.find((node) => node.props.className === "d-btn agent-join-copy").props.onClick();
+      // #1005：stepper 里每步各有一个复制按钮（① 装 CLI / ② 接入命令），按 data-cmd 精确取带 token 的那条。
+      await r.root
+        .find((node) => node.props.className === "d-btn agent-join-copy" && node.props["data-cmd"] === "join")
+        .props.onClick();
     });
     expect(r.root.findAll((node) => node.props.className === "banner banner--red agent-join-copyerr")).toHaveLength(1);
   });
@@ -538,12 +546,233 @@ describe("AgentJoin 复制反馈 (#642)", () => {
     open(r);
     await generate(r);
     await act(async () => {
-      await r.root.find((node) => node.props.className === "d-btn agent-join-copy").props.onClick();
+      // #1005：stepper 里每步各有一个复制按钮（① 装 CLI / ② 接入命令），按 data-cmd 精确取带 token 的那条。
+      await r.root
+        .find((node) => node.props.className === "d-btn agent-join-copy" && node.props["data-cmd"] === "join")
+        .props.onClick();
     });
     expect(r.root.findAll((node) => node.props.className === "banner banner--red agent-join-copyerr")).toHaveLength(0);
     // #654 复审：不止「没有错误横幅」，还要确认按钮切到「已复制」文案——
     // 这样删掉 setCopied(ok) 会让本条挂掉（否则仅靠错误横幅缺席，删了也照样绿）。
-    const copyBtn = r.root.find((node) => node.props.className === "d-btn agent-join-copy");
+    const copyBtn = r.root.find(
+      (node) => node.props.className === "d-btn agent-join-copy" && node.props["data-cmd"] === "join",
+    );
     expect(String(copyBtn.children[0] ?? "")).toBe("copied ✓");
+  });
+});
+
+// #1005：弹窗从「复制一整段」改成四步引导。这一组钉的是**每步只在服务端真的发生了才打勾**——
+// 判据全部来自注入的 presence / 历史（与 party who 同源），不是本地猜。
+describe("AgentJoin 分步引导 (#1005)", () => {
+  const NOW = 1_800_000_000_000;
+
+  function stepper(extra: Partial<React.ComponentProps<typeof AgentJoin>> = {}) {
+    const props = { presence: [] as PresenceEntry[], messages: [] as MsgFrame[], now: () => NOW, ...extra };
+    const r = render(undefined, null, props);
+    open(r);
+    return {
+      r,
+      async generate() {
+        await act(async () => {
+          await r.root.find((node) => node.props.className === "d-btn d-btn--primary" && node.props.onClick).props.onClick();
+        });
+      },
+      rerender(next: Partial<React.ComponentProps<typeof AgentJoin>>) {
+        act(() => {
+          r.update(
+            <LocaleProvider>
+              <AgentJoin
+                slug="demo"
+                token="owner-token"
+                namePrefix="leo"
+                inviterName="host"
+                charter={null}
+                accountKey="acct-1"
+                active
+                {...props}
+                {...next}
+              />
+            </LocaleProvider>,
+          );
+        });
+      },
+    };
+  }
+
+  /** 从 ② 的命令里读出这次铸出来的身份名（`--as <name>`）。 */
+  function agentName(r: ReactTestRenderer): string {
+    const cmd = String(r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children);
+    return /--as (\S+)/.exec(cmd)?.[1] ?? "";
+  }
+
+  function statusOf(r: ReactTestRenderer, step: number): string {
+    return String(r.root.find((n) => n.props["data-step"] === step).props["data-status"]);
+  }
+
+  function presenceOf(name: string, over: Record<string, unknown> = {}): PresenceEntry {
+    return {
+      name,
+      kind: "agent",
+      state: "online",
+      note: null,
+      ts: NOW,
+      last_seen: NOW,
+      live: true,
+      wake: { kind: "serve" },
+      ...over,
+    } as unknown as PresenceEntry;
+  }
+
+  function msgOf(over: Record<string, unknown>): MsgFrame {
+    return {
+      type: "msg",
+      channel: "demo",
+      kind: "message",
+      sender: { name: "someone", kind: "agent" },
+      body: "hi",
+      mentions: [],
+      reply_to: null,
+      ts: NOW,
+      ...over,
+    } as unknown as MsgFrame;
+  }
+
+  test("刚生成命令：①② 在做，③④ 等前面（没报到就不许打勾）", async () => {
+    const s = stepper();
+    await s.generate();
+    expect([statusOf(s.r, 1), statusOf(s.r, 2), statusOf(s.r, 3), statusOf(s.r, 4)]).toEqual([
+      "active",
+      "active",
+      "pending",
+      "pending",
+    ]);
+  });
+
+  test("频道里出现它的报到消息 ⇒ ②（连同①）打勾并展开③", async () => {
+    const s = stepper();
+    await s.generate();
+    const name = agentName(s.r);
+    s.rerender({ messages: [msgOf({ seq: 88, sender: { name, kind: "agent" } })] });
+    expect([statusOf(s.r, 1), statusOf(s.r, 2), statusOf(s.r, 3)]).toEqual(["done", "done", "active"]);
+    // 摘要要带真实 seq，不是「命令复制过了」。
+    const done = s.r.root.findAll((n) => n.props.className === "agent-join-step-status agent-join-step-status--done t-mono");
+    expect(done.some((n) => String(n.children.join("")).includes("88"))).toBe(true);
+  });
+
+  test("presence 显示 live + 有唤醒层 ⇒ ③ 打勾并展开④；只有蛰伏档（wake=none）时 ③ 仍在做", async () => {
+    const s = stepper();
+    await s.generate();
+    const name = agentName(s.r);
+    const checkedIn = [msgOf({ seq: 88, sender: { name, kind: "agent" } })];
+    // 裸 claude 蛰伏档：在线但没有唤醒层——绝不能打勾（#979 那条虚报就是这么来的）。
+    s.rerender({ messages: checkedIn, presence: [presenceOf(name, { wake: { kind: "none" } })] });
+    expect([statusOf(s.r, 3), statusOf(s.r, 4)]).toEqual(["active", "pending"]);
+    s.rerender({ messages: checkedIn, presence: [presenceOf(name)] });
+    expect([statusOf(s.r, 3), statusOf(s.r, 4)]).toEqual(["done", "active"]);
+  });
+
+  test("④ 从这里发测试 @ 后收到回帖 ⇒ 四步全勾并显示完成句", async () => {
+    const sent: Array<{ body: string; mention: string }> = [];
+    const s = stepper({ sendMessage: (body: string, mention: string) => (sent.push({ body, mention }), true) });
+    await s.generate();
+    const name = agentName(s.r);
+    const base = [msgOf({ seq: 88, sender: { name, kind: "agent" } })];
+    s.rerender({ messages: base, presence: [presenceOf(name)] });
+    await act(async () => {
+      await s.r.root.find((n) => n.props.className === "d-btn d-btn--primary agent-join-probe-btn").props.onClick();
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.mention).toBe(name);
+    const probeSeq = 101;
+    s.rerender({
+      messages: [
+        ...base,
+        msgOf({ seq: probeSeq, sender: { name: "leo", kind: "human" }, body: sent[0]!.body }),
+        msgOf({ seq: 102, sender: { name, kind: "agent" }, reply_to: probeSeq, ts: NOW + 2000 }),
+      ],
+      presence: [presenceOf(name)],
+    });
+    expect([statusOf(s.r, 3), statusOf(s.r, 4)]).toEqual(["done", "done"]);
+    expect(s.r.root.findAll((n) => n.props.className === "banner banner--green agent-join-complete")).toHaveLength(1);
+  });
+
+  test("④ 超时按 presence 分层定位：投出去了但没人在听 ⇒ 说「没人在听」并指回第 3 步", async () => {
+    // 组件的 now 由 tickMs 定时器推进；测试把 tick 调到 1ms，rerender 换掉 nowFn 后真等一格。
+    const sent: string[] = [];
+    const s = stepper({
+      sendMessage: (body: string) => (sent.push(body), true),
+      verifyTimeoutMs: 1_000,
+      tickMs: 1,
+      now: () => NOW,
+    });
+    await s.generate();
+    const name = agentName(s.r);
+    const base = [msgOf({ seq: 88, sender: { name, kind: "agent" } })];
+    s.rerender({ messages: base, presence: [presenceOf(name)] });
+    await act(async () => {
+      await s.r.root.find((n) => n.props.className === "d-btn d-btn--primary agent-join-probe-btn").props.onClick();
+    });
+    // 探针进了历史（服务端接受）、但该身份 deaf，且时钟越过超时窗口。
+    s.rerender({
+      // 探针正文按当前语言渲染，别写死——用 sendMessage 真的收到的那条，才判得出「已投递」。
+      messages: [...base, msgOf({ seq: 101, sender: { name: "leo", kind: "human" }, body: sent[0]! })],
+      presence: [presenceOf(name, { listening: "deaf" })],
+      now: () => NOW + 5_000,
+      tickMs: 1,
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    const texts = s.r.root
+      .findAll((n) => typeof n.props.className === "string" && /agent-join-step-(wait|status)/.test(String(n.props.className)))
+      .map((n) => String(n.children.join("")));
+    expect(texts.some((line) => line.includes("没人在听") || line.includes("nothing is listening"))).toBe(true);
+  });
+
+  test("关掉再打开：② 不再显示明文 token，给「生成新 token」入口；点了就换成新命令", async () => {
+    const s = stepper();
+    await s.generate();
+    const before = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
+    );
+    expect(before).toContain("ap_created");
+    // 关掉弹窗（token 只出现一次），再从「继续接入」回到 stepper。
+    act(() => s.r.root.find((n) => n.props.className === "agent-join-close t-mono").props.onClick());
+    act(() => s.r.root.find((n) => n.props.className === "d-btn agent-join-resume").props.onClick());
+    // token 只出现一次：回到 stepper 时 ② 换成「重新生成」面板，整棵树里不再有明文 token。
+    expect(s.r.root.findAll((n) => n.props.className === "agent-join-regen")).toHaveLength(1);
+    expect(JSON.stringify(s.r.toJSON())).not.toContain("ap_created");
+    await act(async () => {
+      await s.r.root.find((n) => n.props.className === "d-btn agent-join-regen-btn").props.onClick();
+    });
+    const rotated = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
+    );
+    expect(rotated).toContain("ap_rotated");
+  });
+
+  test("标题两种句式都完整：接入是「让 X 加入」，重连是「把 X 重新接上」", async () => {
+    const s = stepper();
+    await s.generate();
+    const title = s.r.root.find((n) => n.props.className === "d-title agent-join-title");
+    const text = title.children.map((c) => (typeof c === "string" ? c : String((c as { children?: unknown[] }).children?.[0] ?? ""))).join("");
+    expect(text).toContain("add");
+    expect(text).toContain("guided setup");
+    const r2 = render(undefined, null, { recoverName: "aaa", presence: [], messages: [], now: () => NOW });
+    const t2 = r2.root.find((n) => n.props.className === "d-title agent-join-title");
+    const text2 = t2.children.map((c) => (typeof c === "string" ? c : String((c as { children?: unknown[] }).children?.[0] ?? ""))).join("");
+    expect(text2).toContain("reconnect");
+    expect(text2).toContain("guided setup");
+  });
+
+  test("恢复入口：recoverName 直接进 stepper，② 给的是 party recover，不铸新身份", () => {
+    // recover 是挂载即进 stepper（成员详情点「重新接上」），不走「＋ 让 agent 加入」那条铸造路径。
+    const r = render(undefined, null, { recoverName: "aaa", presence: [], messages: [], now: () => NOW });
+    const cmd = String(
+      r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
+    );
+    expect(cmd).toContain("party recover demo");
+    expect(cmd).not.toContain("party join");
+    expect(cmd).not.toContain("AGENTPARTY_TOKEN");
   });
 });
