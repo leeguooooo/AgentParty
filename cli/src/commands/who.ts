@@ -4,6 +4,7 @@ import { autoWakeReachable, type AgentActivity, type ListeningVerdict, type Pres
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { resolveChannel } from "../config";
 import { diagnoseCodexWake, formatCodexWakeDiagnosis, shouldSurfaceCodexWakeDiagnosis } from "../wake-diagnosis";
+import { claudeDormantToSurface, diagnoseClaudeDormantSessions, formatClaudeDormantDiagnosis } from "../claude-armed-listener";
 import {
   diagnoseTaskLeaseEnforcement,
   formatTaskLeaseEnforcement,
@@ -929,6 +930,18 @@ export async function run(argv: string[]): Promise<number> {
       }
     } catch {
       // 诊断是附赠信息，绝不能把 who 本身弄挂。
+    }
+    // #979：某个身份「不在线」，而本机明明有它的 claude 会话在这个频道入册——那些全是普通 `claude`
+    // 起的蛰伏档（#615 local-only），没有一个会接 @。此前 who 只显示「不在线」，没告诉人为什么；
+    // 这里把原因和两条命令说出来。纯本地读盘（注册表 + agents/ config + serve 锁），失败即闭嘴。
+    try {
+      const dormant = claudeDormantToSurface(diagnoseClaudeDormantSessions(channel, cfg.server), rows);
+      if (dormant.length > 0) {
+        console.log("");
+        for (const d of dormant) for (const line of formatClaudeDormantDiagnosis(d)) console.log(line);
+      }
+    } catch {
+      // 同上：附赠信息。
     }
     return 0;
   } catch (e) {
