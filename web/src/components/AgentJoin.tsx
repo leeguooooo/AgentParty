@@ -845,7 +845,11 @@ export function AgentJoin({
                     - 排在命令块**之前**——无人值守是一段长脚本，放在后面会被推出视野，等于没警告
                     （codex stop-time review on fc1aa5c / 2518fbe）。recover 不带 token，不渲染。 */}
                 {session.token !== null && (
-                  <div className="banner banner--yellow agent-join-tokenbanner" role="note" aria-label={t("AgentJoin.step2.tokenBannerLabel")}>
+                  // role="status"＝隐式 aria-live="polite" 的 live region：这条 banner 是点「生成」后
+                  // 动态出现的，只有 live region 才会被读屏播报。role="note" 不是 live region——
+                  // 上一轮换成它等于把原有的播报能力删了（codex stop-time review on 28d5fc8）。
+                  // 也不加 aria-label：部分读屏会用 label 顶掉正文，安全提示的正文必须被念出来。
+                  <div className="banner banner--yellow agent-join-tokenbanner" role="status">
                     <p className="agent-join-tokensafety">{t("AgentJoin.step2.tokenSafety")}</p>
                     <p className="agent-join-warn">{t("AgentJoin.tokenWarn")}</p>
                   </div>

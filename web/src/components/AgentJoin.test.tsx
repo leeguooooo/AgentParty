@@ -814,8 +814,11 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     // 而且要看得见、听得见：黄底 banner + 有 role/label 让读屏播报，不是 12px 暗色小字。
     const banner = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-tokenbanner"));
     expect(String(banner.props.className)).toContain("banner--yellow");
-    expect(banner.props.role).toBe("note");
-    expect(typeof banner.props["aria-label"]).toBe("string");
+    // 这条 banner 是点「生成」后才出现的，必须是 **live region** 才会被读屏播报：
+    // status（polite）/ alert（assertive）才算，role="note" 不是——那一版等于把播报能力删了。
+    expect(["status", "alert"]).toContain(banner.props.role);
+    // 不许用 aria-label 顶掉正文：安全提示的字句本身要被念出来。
+    expect(banner.props["aria-label"]).toBeUndefined();
     // 「只出现这一次」并进同一条 banner，不再单独挂在命令之后。
     expect(banner.findAll((n) => String(n.props.className ?? "").includes("agent-join-warn"))).toHaveLength(1);
     expect(json.indexOf("agent-join-warn")).toBeLessThan(json.indexOf('"data-cmd":"join"'));
