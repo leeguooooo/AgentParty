@@ -225,6 +225,41 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(verdict).toContain("能不能叫醒");
   });
 
+  // owner 真机截图（CLI 0.2.221 / 本机插件 0.2.222）：同屏出现「插件未完全装上（手动 plugin update）」
+  // 与「本机插件比 CLI 新：升 CLI，不是降插件」——前者是假的，修法方向还正好相反。
+  // 「装没装上」（读得出版本就是装上了）与「版本对不对」是两件事，不许混成一句。
+  test("插件比 CLI 新 ⇒ 不说「未完全装上」，只说版本不一致并给升 CLI 的修法", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const newer = "99.9.9"; // 恒比 RUNNING_VERSION 新
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      deps(record, { installedPluginVersion: newer, noisyPluginSubcommands: true }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).not.toBe(0); // 版本不一致是 blocker，停在版本这一步
+    expect(out).not.toContain("未完全装上");
+    expect(out).toContain(newer);
+    // 修法必须是升 CLI，不是降插件。
+    expect(out).toContain("party upgrade");
+    expect(out).not.toContain(`claude plugin update ${PLUGIN}，然后重开会话`);
+  });
+
+  test("真的没装插件且子命令失败 ⇒ 仍说「未完全装上」，修法是 install", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      // 没装 + install 真失败（返回非 0 且没装上）
+      deps(record, { installedPluginVersion: null, failPluginInstall: true }, logs),
+    );
+    const out = logs.join("\n");
+    expect(out).toContain("未完全装上");
+    expect(out).toContain(`claude plugin install ${PLUGIN}`);
+  });
+
   test("子命令返回非 0 且最终版本仍不对 ⇒ 照实报未装好，不能被「按最终事实判」放过", async () => {
     mock = startRestMock();
     const record: string[][] = [];
@@ -235,7 +270,10 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     );
     const out = logs.join("\n");
     expect(code).not.toBe(0);
-    expect(out).toMatch(/未完全装上|版本不一致/);
+    // 版本仍不对 ⇒ 壳检查报 blocker 并给 update 修法（「未完全装上」只留给真没装上的情况）。
+    expect(out).toContain("plugin_version_mismatch");
+    expect(out).toContain(`claude plugin update ${PLUGIN}`);
+    expect(out).not.toContain("未完全装上");
     expect(logs.find((l) => l.startsWith("✅"))).toBeUndefined();
   });
 

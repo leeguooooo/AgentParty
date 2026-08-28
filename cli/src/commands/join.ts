@@ -373,13 +373,14 @@ function installClaudePlugin(deps: JoinDeps): ClaudePluginInstallOutcome {
   // 成败按**最终事实**判，不按子命令退出码：`marketplace add` 在已加过时、`plugin install` 在
   // 已装时都可能返回非 0，而随后的 update 把版本对齐了——真机实测（owner 截图 0.2.217→0.2.220）
   // 就是这样：第 0 步打了 ✓「已更新到 0.2.220」，同一屏又印「插件未完全装上」，两句不可能同时为真。
-  // 装好的版本等于 CLI 版本 = 这一步真的成了，中途那些非 0 是噪声（同一形状栽过太多次：#957/#961/#979）。
-  const healthy = after !== null && after !== undefined && after === RUNNING_VERSION;
-  if (anyFail && !healthy) {
-    // 修法要对症：已装旧版就是 update（install 原地踏步），没装才是 install。
-    const fix = after === null || after === undefined
-      ? `claude plugin install ${CLAUDE_PLUGIN}`
-      : CLAUDE_PLUGIN_UPDATE_COMMAND;
+  // 「装没装上」与「版本对不对」是两件事，别混成一句：
+  //   读得出版本 ⇒ 就是装上了（中途那些非 0 是噪声：marketplace 已加过、plugin install 已装过都会非 0）；
+  //   版本不对由下面那个分支说，它会给对症修法（插件比 CLI 新 ⇒ `party upgrade` 升 CLI，不是降插件）。
+  // owner 截图（CLI 0.2.221 / 插件 0.2.222）里两句同时出现：「未完全装上（手动 plugin update）」
+  // 与「本机插件比 CLI 新：升 CLI，不是降插件」——前者既是假的、修法方向还正好相反。
+  const installed = after !== null && after !== undefined;
+  if (anyFail && !installed) {
+    const fix = `claude plugin install ${CLAUDE_PLUGIN}`;
     return {
       level: "warn",
       msg: `claude 插件未完全装上（best-effort；手动 ${fix}，然后重开会话）`,
@@ -687,7 +688,12 @@ export function versionStep(rerun: string = RERUN): Step<JoinCtx> {
       if (harness !== "claude") return { ok: true, summary: cli };
       const install = installClaudePlugin(deps);
       ctx.claudePluginRestart = install.restartNeeded ? "changed" : false;
-      const detail: string[] = install.level === "ok" || install.level === "skip" ? [] : [outcomeLine("装 claude 插件", install)];
+      // 壳检查（下面）不 ready 时会把版本关系与修法讲清楚；install 那条 warn 若说的是同一件事
+      // （版本不一致），再印一遍只是噪声——owner 截图里就是同屏两句讲一件事。
+      const detail: string[] =
+        install.level === "ok" || install.level === "skip" || install.msg.includes("版本不一致")
+          ? []
+          : [outcomeLine("装 claude 插件", install)];
       // 判据是 doctor 的插件壳检查（与 bridge claude --check 同一份）：版本不一致时 SessionStart 根本没布上。
       const shell = deps.claudePluginShell();
       if (shell.status !== "ready") {
