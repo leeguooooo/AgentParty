@@ -814,14 +814,35 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     // 而且要看得见、听得见：黄底 banner + 有 role/label 让读屏播报，不是 12px 暗色小字。
     const banner = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-tokenbanner"));
     expect(String(banner.props.className)).toContain("banner--yellow");
-    // 这条 banner 是点「生成」后才出现的，必须是 **live region** 才会被读屏播报：
-    // status（polite）/ alert（assertive）才算，role="note" 不是——那一版等于把播报能力删了。
-    expect(["status", "alert"]).toContain(banner.props.role);
-    // 不许用 aria-label 顶掉正文：安全提示的字句本身要被念出来。
-    expect(banner.props["aria-label"]).toBeUndefined();
+    // 播报走**常驻**的 live region：区域必须比内容先存在，整块一起挂载读屏多半不念。
+    const live = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+    expect(["status", "alert"]).toContain(live.props.role);
+    expect(String(live.children.join(""))).toContain(text.slice(0, 12));
     // 「只出现这一次」并进同一条 banner，不再单独挂在命令之后。
     expect(banner.findAll((n) => String(n.props.className ?? "").includes("agent-join-warn"))).toHaveLength(1);
     expect(json.indexOf("agent-join-warn")).toBeLessThan(json.indexOf('"data-cmd":"join"'));
+  });
+
+  // live region 的可靠性判据：弹窗还没开、token 还没铸出来时它就得在 DOM 里；
+  // 内容随后由 effect 填入，才算「已存在区域的内容变化」（codex review 第七轮）。
+  test("读屏播报区常驻：弹窗没开时已在 DOM 且为空，铸出 token 后才填上安全提示", async () => {
+    const s = stepper();
+    // stepper() 已经点开了弹窗，但还没生成 token。
+    const before = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+    expect(["status", "alert"]).toContain(before.props.role);
+    expect(String(before.children.join(""))).toBe("");
+    await s.generate();
+    const after = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+    expect(String(after.children.join("")).length).toBeGreaterThan(0);
+  });
+
+  test("播报区在弹窗之外——弹窗本身也是动态挂载的，区域必须比它更早存在", () => {
+    const r = render(undefined, null, { presence: [], messages: [], now: () => NOW });
+    // 没有点开「＋ 让 agent 加入」，弹窗未渲染。
+    expect(r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-overlay"))).toHaveLength(0);
+    const live = r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+    expect(live).toHaveLength(1);
+    expect(["status", "alert"]).toContain(live[0]!.props.role);
   });
 
   test("recover 不带 token ⇒ 不渲染那条安全警告（没有明文可泄露）", () => {

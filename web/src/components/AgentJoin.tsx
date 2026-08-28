@@ -268,6 +268,13 @@ export function AgentJoin({
   // 关掉未完成的引导后可「继续接入」：只留形态与开始时刻，明文 token 一律不留。
   const [lastSession, setLastSession] = useState<StepperSession | null>(null);
   // 每个身份的引导开始时刻：关掉再打开（含 recover 重开）沿用同一基线，报到证据不会因重开而丢。
+  /**
+   * 常驻的读屏播报区（#1005 codex review 第七轮）。live region 必须**先存在于 DOM**，
+   * 之后内容变化才会被播报；整块（区域 + 文字）一起挂载时大多数读屏根本不念——
+   * 上一版把 role="status" 挂在那条随 token 一起出现的 banner 上，正是这个毛病。
+   * 所以把区域放在常驻的 .agent-join 根节点里（页面在它就在），token 出现后由 effect 填文字。
+   */
+  const [liveNote, setLiveNote] = useState("");
   const startedAtRef = useRef(new Map<string, number>());
   /** 每个身份的服务端量基线：关掉再打开、或从「继续接入」回来都沿用同一张，别把中途的活动算没发生。 */
   const baselineRef = useRef(new Map<string, JoinBaseline>());
@@ -347,6 +354,12 @@ export function AgentJoin({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recoverName, slug]);
+
+  // 文字在 effect 里填：区域先挂载、内容后变化，才是读屏认的「live region 更新」。
+  const tokenPresent = phase.kind === "stepper" && phase.session.token !== null;
+  useEffect(() => {
+    setLiveNote(tokenPresent ? `${t("AgentJoin.step2.tokenSafety")} ${t("AgentJoin.tokenWarn")}` : "");
+  }, [t, tokenPresent]);
 
   const dialogOpen = phase.kind === "compose" || phase.kind === "loading" || phase.kind === "stepper";
   const composeOpen = phase.kind === "compose" || phase.kind === "loading";
@@ -628,6 +641,9 @@ export function AgentJoin({
 
   return (
     <div className="agent-join">
+      {/* 常驻读屏播报区：内容由上面的 effect 在 token 出现时填入。放在这里而不是弹窗里——
+          弹窗本身也是动态挂载的，区域必须比内容先存在。 */}
+      <p className="agent-join-sr-only" role="status">{liveNote}</p>
       <button
         type="button"
         className="d-btn d-btn--primary agent-join-btn"
@@ -845,11 +861,9 @@ export function AgentJoin({
                     - 排在命令块**之前**——无人值守是一段长脚本，放在后面会被推出视野，等于没警告
                     （codex stop-time review on fc1aa5c / 2518fbe）。recover 不带 token，不渲染。 */}
                 {session.token !== null && (
-                  // role="status"＝隐式 aria-live="polite" 的 live region：这条 banner 是点「生成」后
-                  // 动态出现的，只有 live region 才会被读屏播报。role="note" 不是 live region——
-                  // 上一轮换成它等于把原有的播报能力删了（codex stop-time review on 28d5fc8）。
-                  // 也不加 aria-label：部分读屏会用 label 顶掉正文，安全提示的正文必须被念出来。
-                  <div className="banner banner--yellow agent-join-tokenbanner" role="status">
+                  // 可见告警：给看得见的人。**播报交给常驻的 live region**（见 liveNote）——
+                  // 这块 banner 是随 token 一起挂载的，把 role="status" 挂在它身上并不可靠。
+                  <div className="banner banner--yellow agent-join-tokenbanner">
                     <p className="agent-join-tokensafety">{t("AgentJoin.step2.tokenSafety")}</p>
                     <p className="agent-join-warn">{t("AgentJoin.tokenWarn")}</p>
                   </div>

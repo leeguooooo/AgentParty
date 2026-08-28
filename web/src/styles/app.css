@@ -5826,6 +5826,19 @@ button.org-person-name {
 .agent-join-copyerr { margin: 0; }
 /* token 安全提醒：安全信息不做成暗色小字（读起来是悄悄话、读屏也不播报），
    与「只出现这一次」并成一条黄底 banner，排在可复制命令之前（#1005 codex review 连抓两轮）。 */
+/* 常驻读屏播报区：视觉隐藏但留在无障碍树里（live region 必须先存在，内容后变才播报）。 */
+.agent-join-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 .agent-join-tokenbanner { display: flex; flex-direction: column; gap: 6px; }
 .agent-join-tokenbanner > p { margin: 0; }
 .agent-join-tokensafety { font-weight: 700; }
