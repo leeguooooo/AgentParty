@@ -78,8 +78,10 @@ export const AgentJoinStrings: LocaleDict = {
     // #1005 接入引导 stepper：四步卡片 + 每步按服务端真实状态打 ✓。
     "AgentJoin.stepper.title": "add {name} — guided setup",
     "AgentJoin.stepper.titleRecover": "reconnect {name} — guided setup",
-    "AgentJoin.stepper.titleRecoverPrefix": "reconnect",
+    "AgentJoin.stepper.titlePrefix": "add",
     "AgentJoin.stepper.titleSuffix": "— guided setup",
+    "AgentJoin.stepper.titleRecoverPrefix": "reconnect",
+    "AgentJoin.stepper.titleRecoverSuffix": "— guided setup",
     "AgentJoin.stepper.lead": "Four steps. Each one waits for the real thing to happen in the channel, so a ✓ means it actually works — not that a command was copied.",
     "AgentJoin.stepper.leadRecover": "This agent joined before but isn't reachable right now. Same four steps; step 2 only reconnects it — no new identity.",
     "AgentJoin.stepper.complete": "Done: @{name} now wakes a live session in this channel.",
@@ -201,8 +203,10 @@ export const AgentJoinStrings: LocaleDict = {
     // #1005 接入引导 stepper：四步卡片 + 每步按服务端真实状态打 ✓。
     "AgentJoin.stepper.title": "让 {name} 加入 —— 分步引导",
     "AgentJoin.stepper.titleRecover": "把 {name} 重新接上 —— 分步引导",
+    "AgentJoin.stepper.titlePrefix": "让",
+    "AgentJoin.stepper.titleSuffix": "加入 —— 分步引导",
     "AgentJoin.stepper.titleRecoverPrefix": "把",
-    "AgentJoin.stepper.titleSuffix": "重新接上",
+    "AgentJoin.stepper.titleRecoverSuffix": "重新接上 —— 分步引导",
     "AgentJoin.stepper.lead": "一共四步。每步都等频道里真的发生了才打 ✓ —— 打勾代表真的能用，不是「命令复制过了」。",
     "AgentJoin.stepper.leadRecover": "这个 agent 之前加入过，现在叫不动了。还是这四步，第 2 步只是重新接上，不会换身份。",
     "AgentJoin.stepper.complete": "接入完成：现在 @{name}，就能唤醒它那个会话。",

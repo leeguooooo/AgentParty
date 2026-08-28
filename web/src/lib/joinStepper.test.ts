@@ -62,6 +62,11 @@ describe("② 报到证据（#1005）", () => {
     expect(ev).toEqual({ seq: null, ts: NOW });
   });
 
+  test("陈旧的非 offline 行（away，last_seen 很旧）⇒ 不算——recover 时它会假装重连成功", () => {
+    const stale = presence({ state: "away", live: false, last_seen: NOW - 600_000, ts: NOW - 600_000 });
+    expect(checkinEvidence([], [stale as PresenceEntry], NAME, NOW - 1000)).toBeNull();
+  });
+
   test("presence 里只有引导开始之前的离线旧行 ⇒ 不算", () => {
     const stale = presence({ state: "offline", live: false, last_seen: NOW - 60_000, ts: NOW - 60_000 });
     expect(checkinEvidence([], [stale], NAME, NOW - 1000)).toBeNull();

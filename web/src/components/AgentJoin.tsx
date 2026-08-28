@@ -761,15 +761,12 @@ export function AgentJoin({
           <div className="d-card agent-join-card agent-join-card--stepper">
             <header className="agent-join-card-head">
               <h2 className="d-title agent-join-title">
-                {session.recover ? (
-                  <>
-                    {t("AgentJoin.stepper.titleRecoverPrefix")} <span className="d-hl">{session.name}</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="d-hl">{session.name}</span> {t("AgentJoin.stepper.titleSuffix")}
-                  </>
-                )}
+                {/* 中英句式不同，两边都走「前缀 + 名字 + 后缀」，避免某个语言只剩半句（coderabbit on #1006）。 */}
+                <>
+                  {t(session.recover ? "AgentJoin.stepper.titleRecoverPrefix" : "AgentJoin.stepper.titlePrefix")}{" "}
+                  <span className="d-hl">{session.name}</span>{" "}
+                  {t(session.recover ? "AgentJoin.stepper.titleRecoverSuffix" : "AgentJoin.stepper.titleSuffix")}
+                </>
               </h2>
               <button type="button" className="agent-join-close t-mono" onClick={close} aria-label={t("AgentJoin.close")}>
                 ✕

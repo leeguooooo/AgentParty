@@ -729,6 +729,42 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     expect(texts.some((line) => line.includes("没人在听") || line.includes("nothing is listening"))).toBe(true);
   });
 
+  test("关掉再打开：② 不再显示明文 token，给「生成新 token」入口；点了就换成新命令", async () => {
+    const s = stepper();
+    await s.generate();
+    const before = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
+    );
+    expect(before).toContain("ap_created");
+    // 关掉弹窗（token 只出现一次），再从「继续接入」回到 stepper。
+    act(() => s.r.root.find((n) => n.props.className === "agent-join-close t-mono").props.onClick());
+    act(() => s.r.root.find((n) => n.props.className === "d-btn agent-join-resume").props.onClick());
+    // token 只出现一次：回到 stepper 时 ② 换成「重新生成」面板，整棵树里不再有明文 token。
+    expect(s.r.root.findAll((n) => n.props.className === "agent-join-regen")).toHaveLength(1);
+    expect(JSON.stringify(s.r.toJSON())).not.toContain("ap_created");
+    await act(async () => {
+      await s.r.root.find((n) => n.props.className === "d-btn agent-join-regen-btn").props.onClick();
+    });
+    const rotated = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
+    );
+    expect(rotated).toContain("ap_rotated");
+  });
+
+  test("标题两种句式都完整：接入是「让 X 加入」，重连是「把 X 重新接上」", async () => {
+    const s = stepper();
+    await s.generate();
+    const title = s.r.root.find((n) => n.props.className === "d-title agent-join-title");
+    const text = title.children.map((c) => (typeof c === "string" ? c : String((c as { children?: unknown[] }).children?.[0] ?? ""))).join("");
+    expect(text).toContain("add");
+    expect(text).toContain("guided setup");
+    const r2 = render(undefined, null, { recoverName: "aaa", presence: [], messages: [], now: () => NOW });
+    const t2 = r2.root.find((n) => n.props.className === "d-title agent-join-title");
+    const text2 = t2.children.map((c) => (typeof c === "string" ? c : String((c as { children?: unknown[] }).children?.[0] ?? ""))).join("");
+    expect(text2).toContain("reconnect");
+    expect(text2).toContain("guided setup");
+  });
+
   test("恢复入口：recoverName 直接进 stepper，② 给的是 party recover，不铸新身份", () => {
     // recover 是挂载即进 stepper（成员详情点「重新接上」），不走「＋ 让 agent 加入」那条铸造路径。
     const r = render(undefined, null, { recoverName: "aaa", presence: [], messages: [], now: () => NOW });

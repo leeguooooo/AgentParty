@@ -40,7 +40,9 @@ export function checkinEvidence(
   const entry = presenceOf(presence, name);
   if (entry === null) return null;
   const seen = presenceLastSeen(entry);
-  if (entry.state !== "offline" || entry.live === true) return { seq: null, ts: seen ?? sinceTs };
+  // live=true 是服务端当场判定的活连接，免检；其余在线态（away/busy 之类的陈旧行）必须晚于引导开始，
+  // 否则 recover 形态下一条很旧的 away 行会让 ② 立刻打勾、让人以为重连成功了（coderabbit on #1006）。
+  if (entry.live === true) return { seq: null, ts: seen ?? sinceTs };
   if (seen !== null && seen >= sinceTs) return { seq: null, ts: seen };
   return null;
 }
