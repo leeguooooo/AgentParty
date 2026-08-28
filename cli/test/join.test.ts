@@ -133,6 +133,40 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(verdict).toContain("当前这个会话还挂着旧插件");
   });
 
+  // owner 真机截图（0.2.220）：第 0 步打了 ✓「插件 0.2.217 → 已更新到 0.2.220」，同一屏又印
+  // 「claude 插件未完全装上（手动 update，然后重开会话）」——两句不可能同时为真。
+  // 根因：成败按 marketplace add / plugin install / enable 的**退出码**判，而它们在「已加过 /
+  // 已装过」时本来就返回非 0；真实判据是最终装好的版本等于 CLI 版本。
+  test("子命令返回非 0 但 update 把版本对齐了 ⇒ 第 0 步只报更新成功，不再自相矛盾地印「未完全装上」", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      deps(record, { installedPluginVersion: "0.2.217", noisyPluginSubcommands: true }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).toBe(0);
+    expect(stepLine(logs, 0)).toContain(`claude 插件 0.2.217 → 已更新到 ${RUNNING_VERSION}`);
+    expect(out).not.toContain("未完全装上");
+    // 「需重开会话」照旧要说——当前会话还挂着旧插件。
+    expect(out).toContain("重开");
+  });
+
+  test("子命令返回非 0 且最终版本仍不对 ⇒ 照实报未装好，不能被「按最终事实判」放过", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      deps(record, { installedPluginVersion: "0.2.203", noisyPluginSubcommands: true, failPluginUpdate: true }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/未完全装上|版本不一致/);
+    expect(logs.find((l) => l.startsWith("✅"))).toBeUndefined();
+  });
+
   test("#961：update 没成、插件仍是旧版 ⇒ 第 0 步报 plugin_version_mismatch 并停在那、不印 ✅，修法是 update 不是 install", async () => {
     mock = startRestMock();
     const record: string[][] = [];

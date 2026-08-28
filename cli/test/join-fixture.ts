@@ -29,6 +29,11 @@ export interface SpawnBehavior {
    */
   installedPluginVersion?: string | null;
   failPluginUpdate?: boolean; // plugin update 返回非 0
+  /**
+   * `marketplace add` / `plugin install` / `plugin enable` 返回非 0（真机常见：已加过 marketplace、
+   * 已装过插件时就会这样），但 update 照样把版本对齐——用来钉「按最终事实判成败，不按退出码」。
+   */
+  noisyPluginSubcommands?: boolean;
 }
 interface PluginState {
   installed: string | null;
@@ -54,7 +59,10 @@ export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: Pl
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "install") {
       // 真机行为：已装就只回 "already installed"，版本原地不动。
       if (state.installed === null) state.installed = RUNNING_VERSION;
-      return { ...base, status: 0 };
+      return { ...base, status: behavior.noisyPluginSubcommands ? 1 : 0 };
+    }
+    if (cmd === "claude" && args[0] === "plugin" && (args[1] === "marketplace" || args[1] === "enable")) {
+      return { ...base, status: behavior.noisyPluginSubcommands ? 1 : 0 };
     }
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "update") {
       if (behavior.failPluginUpdate) return { ...base, status: 1 };

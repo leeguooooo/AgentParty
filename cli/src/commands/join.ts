@@ -365,12 +365,16 @@ function installClaudePlugin(deps: JoinDeps): ClaudePluginInstallOutcome {
     if (r.error !== undefined || r.status !== 0) anyFail = true;
   }
   const sync = syncClaudePluginToCli(deps.spawn, RUNNING_VERSION);
-  if (sync.kind === "update_failed") anyFail = true;
   const updated = sync.kind === "updated";
   const after = sync.after;
   // 装上了（之前没有）或换了版本 ⇒ 当前会话还挂着旧的，必须重开。
   const restartNeeded = before !== after && after !== undefined;
-  if (anyFail) {
+  // 成败按**最终事实**判，不按子命令退出码：`marketplace add` 在已加过时、`plugin install` 在
+  // 已装时都可能返回非 0，而随后的 update 把版本对齐了——真机实测（owner 截图 0.2.217→0.2.220）
+  // 就是这样：第 0 步打了 ✓「已更新到 0.2.220」，同一屏又印「插件未完全装上」，两句不可能同时为真。
+  // 装好的版本等于 CLI 版本 = 这一步真的成了，中途那些非 0 是噪声（同一形状栽过太多次：#957/#961/#979）。
+  const healthy = after !== null && after !== undefined && after === RUNNING_VERSION;
+  if (anyFail && !healthy) {
     // 修法要对症：已装旧版就是 update（install 原地踏步），没装才是 install。
     const fix = after === null || after === undefined
       ? `claude plugin install ${CLAUDE_PLUGIN}`
