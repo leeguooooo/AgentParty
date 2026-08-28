@@ -217,7 +217,8 @@ export interface JoinDeps {
    * 第 2 步（claude 档）：有 TTY 且未 --yes 时问用户选接收方式。返回 null ＝ 没法问（无 TTY），
    * 按 harness 默认走并把所选印出来。--yes 时 runJoin 根本不调它。缺省 readline 一问。
    */
-  chooseReceiveMode: (channel: string) => Promise<ReceiveMode | null>;
+  /** null＝无 TTY（按默认走）；"cancelled"＝用户 Ctrl+C / 关闭了输入（必须停，不许替人选）。 */
+  chooseReceiveMode: (channel: string) => Promise<ReceiveMode | null | "cancelled">;
   /** 第 3 步（claude 档）：本机 `party claude` 的默认启动参数（#978），只用来把最终命令印全。 */
   claudeDefaultArgs: () => ClaudeDefaultArgsResolution;
   /** 第 4 步：真发一条 @ 的往返验证。缺省 roundTripWakeVerifier（#990 的 verifyWakeRoundTrip）。 */
@@ -737,6 +738,15 @@ function receiveModeStep(): Step<JoinCtx> {
       const { deps, opts, harness, slug } = ctx;
       if (harness === "claude") {
         const chosen = opts.yes ? null : await deps.chooseReceiveMode(slug);
+        if (chosen === "cancelled") {
+          // 用户在选择时 Ctrl+C / 关了输入：这是「不要继续」，不是「无 TTY 按默认」。停在本步，
+          // 修法就是重跑（想不交互就带 --yes）。
+          return {
+            ok: false,
+            summary: "已取消（Ctrl+C / 输入已关闭），没有替你选接收方式",
+            fix: { do: "party join … --yes", notes: ["--yes 不交互，按 claude 档默认选交互式会话；想常驻先起 party serve 再重跑"] },
+          };
+        }
         ctx.receiveMode = chosen ?? "interactive";
         const summary = ctx.receiveMode === "interactive"
           ? `你选：交互式 Claude 会话（可选：常驻 ${claudeServeCommand(slug)}）`
@@ -938,12 +948,16 @@ export async function runJoin(opts: JoinOptions, deps: JoinDeps): Promise<number
  * 第 2 步的那一问（有 TTY 才问）。非 TTY 返回 null——沉默不等于选择，按默认走并印出所选。
  * 只用 node:readline，不引新依赖。
  */
-async function promptReceiveMode(slug: string): Promise<ReceiveMode | null> {
+async function promptReceiveMode(slug: string): Promise<ReceiveMode | null | "cancelled"> {
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) return null;
   const { createInterface } = await import("node:readline");
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await new Promise<string>((resolve) => {
+    // Ctrl+C 在 readline 里是 rl 的 "SIGINT" 事件、Ctrl+D 是 "close"：两者都不会 resolve question，
+    // 不接就永远挂在这一步。接住并明确返回 cancelled——不能把「用户要停」当成「无 TTY 按默认」。
+    const answer = await new Promise<string | "cancelled">((resolve) => {
+      rl.once("SIGINT", () => resolve("cancelled"));
+      rl.once("close", () => resolve("cancelled"));
       rl.question(
         `         1) 交互式 Claude 会话（${claudeArmCommand(slug)}）\n` +
           `         2) 常驻 ${claudeServeCommand(slug)}\n` +
@@ -951,9 +965,10 @@ async function promptReceiveMode(slug: string): Promise<ReceiveMode | null> {
         resolve,
       );
     });
+    if (answer === "cancelled") return "cancelled";
     return answer.trim() === "2" ? "serve" : "interactive";
   } catch {
-    return null;
+    return "cancelled";
   } finally {
     rl.close();
   }

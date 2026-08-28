@@ -168,6 +168,27 @@ describe("party join 引导 —— 每一步失败都停在该步、只印一条
     expect(mock.requests.some((r) => r.method === "POST" && /\/messages$/.test(r.path))).toBe(false);
   });
 
+  // pr_agent on #998：TTY 下 Ctrl+C / 关闭输入不能被当成「无 TTY 按默认」继续往下跑——那是用户要停。
+  test("第 2 步 接收方式：用户取消（Ctrl+C / 输入关闭）⇒ 停在第 2 步，不替人选，第 3 步不跑", async () => {
+    mock = startRestMock(() => undefined);
+    const logs: string[] = [];
+    const d = joinDeps(tmp, [], {}, logs);
+    let probed = 0;
+    d.chooseReceiveMode = async () => "cancelled";
+    const origProbe = d.claudeArmedListener;
+    d.claudeArmedListener = () => {
+      probed += 1;
+      return origProbe();
+    };
+    const code = await runJoin(opts(), d);
+    expectStoppedAt(code, logs, 2);
+    expect({ probed, cancelled: stepLine(logs, 2)?.includes("已取消") ?? false, fix: fixLine(logs) ?? "" }).toEqual({
+      probed: 0,
+      cancelled: true,
+      fix: expect.stringContaining("--yes"),
+    });
+  });
+
   test("第 1 步 身份：报到 500 ⇒ 停在第 1 步，修法是 party send", async () => {
     mock = startRestMock((req) => {
       if (req.method === "POST" && /^\/api\/channels\/[^/]+\/messages$/.test(req.path)) {
@@ -450,3 +471,4 @@ describe("party join 引导 —— 幂等（#988）", () => {
     expect(logs2.find((l) => l.startsWith("✅"))).toContain("pid 5150");
   });
 });
+
