@@ -253,10 +253,16 @@ export function collapseRuns<T>(items: readonly T[], key: (item: T) => string): 
   return runs;
 }
 
-// 折叠判定用的键：完整渲染去掉 `[seq] ` 前缀。headers 模式的预览会截断，两条不同的长正文可能
-// 前 120 字符一样，所以判定一律走全文渲染，别拿预览行比。
+// 折叠判定用的键：完整渲染去掉 `[seq] ` 前缀，再并上 mentions / reply_to。headers 模式的预览会
+// 截断，两条不同的长正文可能前 120 字符一样，所以判定一律走全文渲染，别拿预览行比。
+// formatMsg 不渲染 mentions / reply_to，但 --headers 会显示它们：同正文回不同 seq、或 @ 不同的人，
+// 是不同的帧，折进一段会把首帧的 ↩#/@ 冒充成整段的。
 export function historyCollapseKey(m: MsgFrame): string {
-  return stripSeqPrefix(formatMsg(m), m.seq);
+  return JSON.stringify({
+    rendered: stripSeqPrefix(formatMsg(m), m.seq),
+    mentions: m.mentions ?? [],
+    reply_to: m.reply_to ?? null,
+  });
 }
 
 export function stripSeqPrefix(line: string, seq: number): string {

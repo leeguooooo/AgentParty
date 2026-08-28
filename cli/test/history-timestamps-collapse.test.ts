@@ -57,7 +57,13 @@ function status(seq: number, ts: number, over: Partial<MsgFrame> = {}): MsgFrame
   } as unknown as MsgFrame;
 }
 
-function message(seq: number, ts: number, body: string, sender: { name: string; kind: string } = { name: "alice", kind: "human" }): MsgFrame {
+function message(
+  seq: number,
+  ts: number,
+  body: string,
+  sender: { name: string; kind: string } = { name: "alice", kind: "human" },
+  over: Partial<MsgFrame> = {},
+): MsgFrame {
   return {
     type: "msg",
     channel: "ludo",
@@ -68,6 +74,7 @@ function message(seq: number, ts: number, body: string, sender: { name: string; 
     body,
     mentions: [],
     reply_to: null,
+    ...over,
   } as unknown as MsgFrame;
 }
 
@@ -251,6 +258,21 @@ describe("party history 连续相同帧折叠（#962）", () => {
     ]);
     expect(await run(["ludo", "--no-ts"])).toBe(0);
     expect(stdout).toEqual(["[1] alice(human): ok", "[2] bob(agent): ok", "[3] alice(human): ok"]);
+  });
+
+  test("正文相同但 reply_to / mentions 不同 → 不折叠（--headers 会显示它们，折了就冒充）", async () => {
+    serve([
+      message(1, todayAt(9, 0, 0), "收到"),
+      message(2, todayAt(9, 0, 1), "收到", undefined, { reply_to: 1 }),
+      message(3, todayAt(9, 0, 2), "收到", undefined, { reply_to: 1 }),
+      message(4, todayAt(9, 0, 3), "收到", undefined, { reply_to: 1, mentions: ["bob"] }),
+    ]);
+    expect(await run(["ludo", "--no-ts", "--headers"])).toBe(0);
+    expect(stdout).toEqual([
+      "[1] alice(human) 2ch: 收到",
+      "[2–3] ×2 alice(human) ↩#1 2ch: 收到",
+      "[4] alice(human) @bob ↩#1 2ch: 收到",
+    ]);
   });
 
   test("只有两条也折叠（×2），单条不加 ×1", async () => {
