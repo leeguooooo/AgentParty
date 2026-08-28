@@ -104,6 +104,27 @@ describe("原生 cross-session 格式漂移守卫（#953）", () => {
     expect(fmt.fromModes).toEqual(["bypass", "prompting"]);
   });
 
+  // #969：压缩产物的变量名随构建变化（f/m/n/r/y → vj/ea/t/r/ZP），第一版按变量名替换在
+  // 2.1.247+ 上全部落空，守卫在装了 claude 的机器上恒红。这条用当前二进制里那行的**真实形态**、
+  // 再把变量名全换成别的，钉住「按角色还原，不认变量名」。恒跑，不依赖本机有没有 claude。
+  test("还原不认变量名：占位符换名后仍还原出同一条严格正则（#969）", () => {
+    const line = (tag: string, cs: string, sess: string, hop: string, modes: string) =>
+      'tM=new RegExp(`^<${' + tag + '}(?: from="([${' + cs + '}]+)")?(?: from-session="(${' + sess + '})")?' +
+      '(?: hop-chain="(${' + hop + '})")?(?: from-name="([^"<>\\\\n\\\\r]+)")?(?: from-mode="(${' + modes +
+      '.join("|")})")?>\\\\n([\\\\s\\\\S]*)\\\\n</${' + tag + '}>$`)';
+    const build = (strictSource: string) =>
+      buildNativeStrictRegex({ strictSource, fromCharset: "A-Za-z0-9%:_/.\\\\-", fromModes: ["bypass", "prompting"], binaryPath: "x" });
+    const variants = [line("f", "m", "n", "r", "y"), line("vj", "ea", "t", "r", "ZP"), line("$a1", "_b", "c_", "d$", "E9")];
+    const sources = variants.map((v) => build(v)?.source ?? null);
+    expect(sources.map((x) => x !== null)).toEqual([true, true, true]);
+    expect(new Set(sources).size).toBe(1);
+    const native = build(variants[1]!)!;
+    const ok = wrapCrossSessionMessage({ from: "uds:/tmp/cc-socks/3.sock", fromSession: "abc", hopChain: "a,b", fromName: "n", fromMode: "bypass", body: "l1\nl2" });
+    expect({ accepted: native.test(ok) }).toEqual({ accepted: true });
+    const swapped = '<cross-session-message from="uds:/a.sock" from-mode="bypass" from-name="n">\nx\n</cross-session-message>';
+    expect({ accepted: native.test(swapped) }).toEqual({ accepted: false });
+  });
+
   test("抠不出来时 skip 而不是红（无 claude 的 CI 上不许常红）", () => {
     // 这条恒跑：它断言的是"降级路径存在且是 skip"，不依赖本机有没有 claude。
     expect(locateClaudeBinary({ AGENTPARTY_CLAUDE_BINARY: "/nonexistent/claude", HOME: "/nonexistent" })).toBe(null);
