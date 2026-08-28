@@ -42,6 +42,16 @@ import {
   type ClaudeSessionRegistryEntry,
 } from "../claude-session-registry";
 import { injectChannelMessage } from "../claude-inbox-inject";
+import {
+  claimMentionWake,
+  claudeChannelSiblingDormancy,
+  CLAUDE_CHANNEL_FORCE_ARM_ENV,
+  countIdentityRuntimes,
+  releaseMentionWake,
+  selfAuthoredMention,
+  type MentionWakeClaimResult,
+  type MentionWakeRef,
+} from "../mention-wake-claim";
 import { senderInjectFromName, wakeProxyNote } from "../serve-wake-proxy";
 import { loadCursor, readConfig, resolveChannel, saveCursor } from "../config";
 import {
@@ -49,7 +59,12 @@ import {
   deliveryRecoveryJournalPath,
   type DeliveryRecoveryEntry,
 } from "../delivery-recovery-journal";
-import { acquireInstanceLock, defaultInstanceLockDir, instanceLockTarget } from "../instance-lock";
+import {
+  acquireInstanceLock,
+  defaultInstanceLockDir,
+  instanceLockHolderPid,
+  instanceLockTarget,
+} from "../instance-lock";
 import { watchParentLiveness } from "../parent-liveness";
 import { resolveAuthDetailed } from "../oidc-cli";
 import {
@@ -538,6 +553,22 @@ export interface DormantAnnounceDeps {
    * 的 stdio 通道，绝不能碰）。同一句连续重复只打一次，5s 轮询不刷屏。
    */
   log?: (line: string) => void;
+  /**
+   * 同身份多 runtime 的一次性唤醒认领（#963）：同机所有 announce 腿对同一条 (server, identity,
+   * channel, seq) 只许一个抢到并注入，其余只 ack 当已读。默认走 ~/.agentparty/wake-claims 的
+   * O_EXCL 文件；测试可换目录（wakeClaimDir）或整个替换（claimWake）。
+   */
+  claimWake?: (ref: MentionWakeRef) => MentionWakeClaimResult;
+  releaseWake?: (claim: Extract<MentionWakeClaimResult, { state: "acquired" }>) => boolean;
+  wakeClaimDir?: string;
+  /** 本 announce 腿的 runtime 标识（认领文件里记它）；生产默认进程级随机 id。 */
+  runtimeId?: string;
+  /**
+   * 本机是否已有该 (server, token, channel) 的 live bridge / `party serve` 持锁（#963）。有 ⇒ 这条
+   * @ 由它经 directed delivery 权威处理，蛰伏腿一律不注入（否则同一条 @ 既走 delivery 又被注入一次）。
+   * 返回持锁 pid 或 null。默认读 serve 锁；测试必须注入（别去读真实 ~/.agentparty）。
+   */
+  liveBridgeHolder?: (auth: { server: string; token: string }, channel: string) => number | null;
 }
 
 /**
@@ -673,6 +704,19 @@ export async function runDormantClaudeSessionAnnounce(
   const injectRetryDelayMs = Math.max(0, deps.injectRetryDelayMs ?? 250);
   if (!isSlug(channel)) return;
   const inject = deps.inject ?? injectChannelMessage;
+  const claimWake = deps.claimWake ?? ((ref: MentionWakeRef) =>
+    claimMentionWake(ref, {
+      ...(deps.wakeClaimDir === undefined ? {} : { dir: deps.wakeClaimDir }),
+      ...(deps.runtimeId === undefined ? {} : { runtimeId: deps.runtimeId }),
+    }));
+  const releaseWake = deps.releaseWake ?? releaseMentionWake;
+  const liveBridgeHolder = deps.liveBridgeHolder ?? ((auth: { server: string; token: string }, slug: string) => {
+    try {
+      return instanceLockHolderPid("serve", instanceLockTarget(auth.server, auth.token, slug), defaultInstanceLockDir());
+    } catch {
+      return null;
+    }
+  });
   // 进程内注入去重（按 seq）：WS 重连会重放未 ack 的帧，没有它同一条 @ 会反复唤醒
   // 宿主会话。跨重连保留，故声明在 while 之外；用插入序 Set + 容量上限防内存无界。
   //
@@ -699,6 +743,7 @@ export async function runDormantClaudeSessionAnnounce(
     // resolveAuth 是本循环里唯一的长 await：期间收到 abort 就绝不再建连。
     if (signal.aborted) return;
     const authServer = auth.server;
+    const authToken = auth.token;
     // 「叫我」的判据＝本机频道身份（不是宣告名，见上方三命名空间注释）。#906 起它同时
     // 是**选注入目标**的判据，所以必须先于选目标解析：解析失败（无缓存且 /api/me 不通）
     // ⇒ 一个条目都不该匹配，本轮不建连。
@@ -792,7 +837,43 @@ export async function runDormantClaudeSessionAnnounce(
         // dormantAnnounceIsReplayFrame）。放在最前面：重放的历史 @ 连去重表都不该占。
         if (dormantAnnounceIsReplayFrame(frame)) return;
         if (!dormantAnnounceMentionHit(mentions, selfName)) return;
+        // #963：发信人就是我这个身份——那是对话里提到自己（「@leo-server 这次醒了」），不是召唤。
+        // 尤其带 reply_to 的回帖。同身份 13 个 runtime 各醒一次就是这么来的第二、三轮。
+        if (selfAuthoredMention(sender?.name, selfName)) return;
         if (injectedSeqs.has(seq)) return;
+        // #963：本机已有 live bridge / serve 持锁 ⇒ 这条 @ 由它经 directed delivery 权威处理（服务端
+        // 只让一个 adapter 认领），蛰伏腿不再叠加一次注入。锁没人持才轮到蛰伏腿之间抢认领。
+        const holder = liveBridgeHolder({ server: authServer, token: authToken }, channel);
+        if (holder !== null) {
+          injectedSeqs.add(seq);
+          logOnce(
+            `claude-channel: 本机 pid ${holder} 正以同身份持有 #${channel} 的 delivery 连接，` +
+              "蛰伏会话不重复注入 @（#963）",
+          );
+          return;
+        }
+        // #963：同身份多 runtime 只许一个唤醒模型。谁先认领 (server, identity, channel, seq) 谁注入；
+        // 没抢到的这条腿把消息当已读（上面已本地 ack），不触发宿主会话的模型回合。
+        const claim = claimWake({ server: authServer, identity: selfName, channel, seq });
+        if (claim.state === "denied") {
+          injectedSeqs.add(seq);
+          logOnce(
+            `claude-channel: seq=${seq} 的唤醒已由同身份的另一个 runtime 认领` +
+              `（${claim.holder?.runtime_id ?? "unknown"}），本会话只当已读（#963）`,
+          );
+          return;
+        }
+        if (claim.state === "unenforced") {
+          logOnce(
+            `claude-channel: 唤醒认领存储不可写（${claim.path}），本会话照常注入——同身份多 runtime ` +
+              "时可能重复唤醒（#963）",
+          );
+        }
+        const siblings = countIdentityRuntimes(deps.listSessions(), {
+          channel,
+          server: authServer,
+          identity: selfName,
+        });
         for (let attempt = 1; attempt <= 3 && !signal.aborted; attempt += 1) {
           let result: Awaited<ReturnType<typeof inject>> | null = null;
           try {
@@ -804,7 +885,7 @@ export async function runDormantClaudeSessionAnnounce(
               pid: entry.pid,
               sessionId: entry.session_id,
               name: hostAnnounceName,
-              body: wakeProxyNote({ channel, server: authServer, seq }),
+              body: wakeProxyNote({ channel, server: authServer, seq, siblings }),
               // from-name＝真实发信人的友好名 + 技术 ID（接收端面板只显示这一处，
               // 技术 ID 丢了就分不清两个同名 agent）。
               fromName: senderInjectFromName(sender, channel),
@@ -826,6 +907,8 @@ export async function runDormantClaudeSessionAnnounce(
           }
           if (attempt < 3) await abortableSleep(injectRetryDelayMs, signal);
         }
+        // 注入没成：把认领让出来，重连/重放时同身份的别的 runtime 才有机会接手（#963）。
+        if (claim.state === "acquired") releaseWake(claim);
         if (!signal.aborted) {
           logOnce(
             `claude-channel: socket 注入连续 3 次未成功（channel=${channel} seq=${seq} ` +
@@ -1029,6 +1112,11 @@ export interface ClaudeChannelDeliveryBridgeOptions {
   confirmDeliveryUpdate?: (
     update: DeliveryUpdateFrame,
   ) => Promise<AuthoritativeDeliveryState | void>;
+  /**
+   * 同身份存活 runtime 数（#963）：唤醒通知带 `siblings=N`，让被叫醒的会话知道自己是 N 个之一。
+   * 省略＝不写（不臆造 1）。
+   */
+  countSiblings?: (self: string) => number;
 }
 
 class DeliveryUpdateRejectedError extends Error {}
@@ -1064,9 +1152,15 @@ function notificationFor(
   message: MsgFrame,
   delivery: DirectedDelivery | null,
   continuation: ParkedClaudeContinuation | null = null,
+  siblings: number | null = null,
 ): ChannelNotification {
   const sender = message.sender.name;
   const decision = message.decision_response;
+  // #963：N>1 时先看频道里有没有兄弟已回，再决定要不要开口。
+  const siblingsNote = siblings !== null && siblings > 1
+    ? `siblings=${siblings}: ${siblings} live runtimes share your identity; ` +
+      "check whether a sibling already replied before you speak.\n\n"
+    : "";
   const continuationContext = continuation === null
     ? ""
     : (
@@ -1082,6 +1176,7 @@ function notificationFor(
   return {
     content:
       continuationContext +
+      siblingsNote +
       `AgentParty message in #${channel} from @${sender} (seq=${message.seq}):\n\n` +
       `${message.body}\n\n` +
       `Respond to this exact message by calling ${REPLY_TOOL} with seq=${message.seq} and your reply text. ` +
@@ -1093,6 +1188,7 @@ function notificationFor(
       sender,
       sender_kind: message.sender.kind,
       ...(message.sender.owner === undefined ? {} : { sender_owner: message.sender.owner }),
+      ...(siblings === null ? {} : { siblings: String(siblings) }),
       ...(delivery === null
         ? {}
         : {
@@ -1179,6 +1275,18 @@ export class ClaudeChannelDeliveryBridge {
     if (this.self !== "") return this.self;
     await Promise.race([this.firstIdentity, delay(timeoutMs)]);
     return this.self;
+  }
+
+  /** #963：同身份存活 runtime 数；没有提供者或提供者抛错 → null（不写，不臆造）。 */
+  private siblingCount(): number | null {
+    const count = this.options.countSiblings;
+    if (count === undefined || this.self === "") return null;
+    try {
+      const value = count(this.self);
+      return Number.isInteger(value) && value >= 0 ? value : null;
+    } catch {
+      return null;
+    }
   }
   private directedDeliveryMode = false;
   private exitCode = 0;
@@ -2368,7 +2476,7 @@ export class ClaudeChannelDeliveryBridge {
         await this.notifyHarnessClaim(pending);
       } else {
         await this.options.notify(
-          notificationFor(this.options.channel, message, delivery, ownerAnswerBinding),
+          notificationFor(this.options.channel, message, delivery, ownerAnswerBinding, this.siblingCount()),
         );
       }
       if (delivery !== null && this.options.requireHarnessClaim !== true) {
@@ -2687,6 +2795,7 @@ export class ClaudeChannelDeliveryBridge {
           pending.message,
           pending.delivery,
           continuation,
+          this.siblingCount(),
         ).content,
     };
   }
@@ -2957,6 +3066,28 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
 
+  // #963 建议 3：插件拉起的会话若在同 cwd 已有同身份的存活兄弟，默认蛰伏（announce + 认领制
+  // 单唤醒），不去抢 live bridge——抢到＝同一条 @ 两个 runtime 各处理一遍，抢不到＝MCP 直接退出
+  // 连 announce 都没有。显式 AGENTPARTY_CLAUDE_CHANNEL_FORCE_ARM=1 才让这条新会话接管。
+  if (flags["require-launch-opt-in"] === true) {
+    const selfName = await resolveAnnounceChannelIdentity(channel, { server: serverUrl, token }).catch(() => null);
+    const decision = claudeChannelSiblingDormancy(listClaudeSessions(), {
+      channel,
+      cwd: process.cwd(),
+      server: serverUrl,
+      identity: selfName,
+      hostPid: process.ppid,
+    });
+    if (decision.dormant) {
+      console.error(
+        `claude-channel: 同 cwd 已有身份 ${selfName} 的 ${decision.siblingPids.length} 个存活会话` +
+          `（pid ${decision.siblingPids.join(",")}），本会话转蛰伏：只宣告在线、按认领制接 @；` +
+          `要让本会话接管 live bridge 请设 ${CLAUDE_CHANNEL_FORCE_ARM_ENV}=1（#963）`,
+      );
+      return runDormantClaudeChannelMcp(channel);
+    }
+  }
+
   // Reuse the serve lock namespace: `party serve` and a live-session channel
   // adapter are two delivery consumers for the same identity/channel and must
   // never execute the same work concurrently.
@@ -3026,6 +3157,8 @@ export async function run(argv: string[]): Promise<number> {
     connection,
     recoveryJournal,
     requireHarnessClaim: true,
+    // #963：唤醒通知带 siblings=N（同身份存活 runtime 数，本机注册表视角）。
+    countSiblings: (self) => countIdentityRuntimes(listClaudeSessions(), { channel, server: serverUrl, identity: self }),
     notify: async (notification) => {
       if (!await mcpInitialized) throw new Error("Claude closed the MCP channel before initialization");
       await server.notification({

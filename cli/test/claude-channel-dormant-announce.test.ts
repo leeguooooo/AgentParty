@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ServerFrame } from "@agentparty/shared";
 import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
 import {
@@ -119,6 +122,10 @@ function makeDeps(overrides: Partial<DormantAnnounceDeps> = {}): {
     pollIntervalMs: 5,
     livenessIntervalMs: 5,
     injectRetryDelayMs: 1,
+    // #963：唤醒认领走真实的 O_EXCL 文件，但目录必须是每个测试自己的临时目录——绝不碰 ~/.agentparty。
+    wakeClaimDir: mkdtempSync(join(tmpdir(), "announce-wake-claims-")),
+    // #963：默认「本机没有 live bridge / serve 持锁」——绝不去读真实的 serve 锁目录。
+    liveBridgeHolder: () => null,
     ...overrides,
   };
   return { deps, connections };
@@ -345,15 +352,20 @@ describe("runDormantClaudeSessionAnnounce (#841 P2)", () => {
   });
 });
 
-function msg(seq: number, mentions: string[]): ServerFrame {
+/** 默认发信人是人类 leo——不是本机身份：发信人＝被 @ 身份的帧属于「自 @」，#963 起不再唤醒。 */
+function msg(
+  seq: number,
+  mentions: string[],
+  overrides: { sender?: { name: string; kind: string; owner?: string }; reply_to?: number | null } = {},
+): ServerFrame {
   return {
     type: "msg",
     seq,
-    sender: { name: "lark-ad72b3f97491-agentparty", kind: "agent", owner: "leo@example.com" },
+    sender: overrides.sender ?? { name: "leo", kind: "human", owner: "leo@example.com" },
     kind: "text",
     body: "hello",
     mentions,
-    reply_to: null,
+    reply_to: overrides.reply_to ?? null,
     state: null,
     note: null,
     status: null,
@@ -471,7 +483,7 @@ describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
     expect(calls[0]!.sessionId).toBe("11111111-1111-4111-8111-111111111111");
     expect(calls[0]!.name).toBe("claude-111111111111");
     // from-name＝友好名 + 技术 ID（接收端面板只显示这一处）。
-    expect(calls[0]!.fromName).toBe("leo@example.com · agentparty (lark-ad72b3f97491-agentparty)");
+    expect(calls[0]!.fromName).toBe("leo@example.com");
     expect(calls[0]!.body).toContain("seq=13");
     expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(512);
     // 注入路径不改变 P2 不变式：只本地 ack，绝不发客户端帧、绝不推进持久化游标。
@@ -624,6 +636,211 @@ describe("announce 注入的身份闸（issue #906）", () => {
     const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
     await tick(40); // pollIntervalMs=5 → 至少轮了好几圈。
     expect(logs.filter((line) => line.includes("未注入"))).toHaveLength(1);
+    abort.abort();
+    await done;
+  });
+});
+
+// ─────────── #963：一条 @ 唤醒了同 cwd 全部 13 个 Claude 会话 ───────────
+describe("同身份多 runtime 的 @ 唤醒（issue #963）", () => {
+  /** 同一台机器上 N 条 announce 腿：各自的连接、各自的 runtimeId，共用一个认领目录与一份注册表。 */
+  function siblingRuntimes(count: number) {
+    const wakeClaimDir = mkdtempSync(join(tmpdir(), "announce-siblings-"));
+    // 注册表里同身份三个存活会话：一个是本宿主（ppid），另外两个是同 cwd 的兄弟。
+    const registry = [
+      entry(),
+      entry({ session_id: "22222222-2222-4222-8222-222222222222", pid: 424242 }),
+      entry({ session_id: "33333333-3333-4333-8333-333333333333", pid: 434343 }),
+    ];
+    const calls: { runtime: string; body: string }[] = [];
+    const runtimes = Array.from({ length: count }, (_, index) => {
+      const runtime = `runtime-${index}`;
+      const inject = (async (input: { body: string }) => {
+        calls.push({ runtime, body: input.body });
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x" };
+      }) as DormantAnnounceDeps["inject"];
+      const { deps, connections } = makeDeps({
+        inject,
+        wakeClaimDir,
+        runtimeId: runtime,
+        listSessions: () => registry,
+      });
+      return { runtime, deps, connections };
+    });
+    return { runtimes, calls, wakeClaimDir };
+  }
+
+  test("同身份 3 个 runtime 收到同一条 @：只有 1 个注入唤醒，另 2 个只 ack 当已读", async () => {
+    const { runtimes, calls } = siblingRuntimes(3);
+    const abort = new AbortController();
+    const done = runtimes.map((runtime) => runDormantClaudeSessionAnnounce("dev", abort.signal, runtime.deps));
+    await tick();
+    for (const runtime of runtimes) expect(runtime.connections).toHaveLength(1);
+    // 事故现场：owner 从飞书发 `@leo-server ping`，三条腿同时收到同一帧。
+    for (const runtime of runtimes) runtime.connections[0]!.push(msg(37, [SELF]));
+    await tick(40);
+    expect(calls).toHaveLength(1);
+    // 三条腿都已读（本地 ack），没抢到的也不留欠账。
+    for (const runtime of runtimes) expect(runtime.connections[0]!.acked).toEqual([37]);
+    // 重放同一帧（WS 重连）也不会让没抢到的腿补一次唤醒。
+    for (const runtime of runtimes) runtime.connections[0]!.push(msg(37, [SELF]));
+    await tick(40);
+    expect(calls).toHaveLength(1);
+    // 下一条 @ 仍照常唤醒——且仍只唤醒一次。
+    for (const runtime of runtimes) runtime.connections[0]!.push(msg(38, [SELF]));
+    await tick(40);
+    expect(calls).toHaveLength(2);
+    abort.abort();
+    await Promise.all(done);
+  });
+
+  test("发信人就是被 @ 的身份（带 reply_to 的回帖）：任何 runtime 都不唤醒", async () => {
+    const { runtimes, calls } = siblingRuntimes(3);
+    const abort = new AbortController();
+    const done = runtimes.map((runtime) => runDormantClaudeSessionAnnounce("dev", abort.signal, runtime.deps));
+    await tick();
+    // 事故第二轮：seq 42 的会话在回帖里写了「@leo-server」，服务端如实解析成 mentions=[leo-server]。
+    const selfReply = msg(46, [SELF], {
+      sender: { name: SELF, kind: "agent", owner: "leo@example.com" },
+      reply_to: 42,
+    });
+    for (const runtime of runtimes) runtime.connections[0]!.push(selfReply);
+    await tick(40);
+    expect(calls).toHaveLength(0);
+    // 大小写变体同样算自 @（与 mention 命中同一把尺子）。
+    for (const runtime of runtimes) {
+      runtime.connections[0]!.push(msg(47, [SELF], { sender: { name: SELF.toUpperCase(), kind: "agent" } }));
+    }
+    await tick(40);
+    expect(calls).toHaveLength(0);
+    for (const runtime of runtimes) expect(runtime.connections[0]!.acked).toEqual([46, 47]);
+    // 对照：别人发的 @ 照常唤醒（自 @ 过滤没有把正常召唤一起挡掉）。
+    for (const runtime of runtimes) runtime.connections[0]!.push(msg(48, [SELF]));
+    await tick(40);
+    expect(calls).toHaveLength(1);
+    abort.abort();
+    await Promise.all(done);
+  });
+
+  test("唤醒帧带 siblings=N（同身份存活 runtime 数）", async () => {
+    const { runtimes, calls } = siblingRuntimes(1);
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, runtimes[0]!.deps);
+    await tick();
+    runtimes[0]!.connections[0]!.push(msg(37, [SELF]));
+    await tick(40);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toContain("seq=37");
+    expect(calls[0]!.body).toContain("siblings=3");
+    expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(512);
+    abort.abort();
+    await done;
+  });
+
+  test("只有自己一个 runtime 时唤醒帧不写 siblings", async () => {
+    const { deps, connections, calls } = (() => {
+      const calls: { body: string }[] = [];
+      const inject = (async (input: { body: string }) => {
+        calls.push({ body: input.body });
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x" };
+      }) as DormantAnnounceDeps["inject"];
+      return { ...makeDeps({ inject }), calls };
+    })();
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    connections[0]!.push(msg(37, [SELF]));
+    await tick(40);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).not.toContain("siblings=");
+    abort.abort();
+    await done;
+  });
+
+  test("抢到认领却注入失败 ⇒ 让出认领，重放时兄弟能接手", async () => {
+    const wakeClaimDir = mkdtempSync(join(tmpdir(), "announce-release-"));
+    const calls: string[] = [];
+    const broken = makeDeps({
+      wakeClaimDir,
+      runtimeId: "broken",
+      inject: (async () => {
+        calls.push("broken");
+        throw new Error("socket gone");
+      }) as DormantAnnounceDeps["inject"],
+    });
+    const healthy = makeDeps({
+      wakeClaimDir,
+      runtimeId: "healthy",
+      inject: (async () => {
+        calls.push("healthy");
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x" };
+      }) as DormantAnnounceDeps["inject"],
+    });
+    const abort = new AbortController();
+    const doneBroken = runDormantClaudeSessionAnnounce("dev", abort.signal, broken.deps);
+    await tick();
+    // 坏腿先抢到，三次注入都失败 ⇒ 释放认领。
+    broken.connections[0]!.push(msg(60, [SELF]));
+    await tick(40);
+    expect(calls).toEqual(["broken", "broken", "broken"]);
+    const doneHealthy = runDormantClaudeSessionAnnounce("dev", abort.signal, healthy.deps);
+    await tick();
+    healthy.connections[0]!.push(msg(60, [SELF]));
+    await tick(40);
+    expect(calls.at(-1)).toBe("healthy");
+    abort.abort();
+    await Promise.all([doneBroken, doneHealthy]);
+  });
+
+  test("本机已有 live bridge / serve 持锁 ⇒ 蛰伏腿不注入（@ 由 directed delivery 权威处理一次）", async () => {
+    const logs: string[] = [];
+    const { runtimes, calls } = siblingRuntimes(2);
+    const seen: { server: string; token: string; channel: string }[] = [];
+    let holderPid: number | null = 4242;
+    for (const runtime of runtimes) {
+      runtime.deps.liveBridgeHolder = (auth, channel) => {
+        seen.push({ ...auth, channel });
+        return holderPid;
+      };
+      runtime.deps.log = (line) => logs.push(line);
+    }
+    const abort = new AbortController();
+    const done = runtimes.map((runtime) => runDormantClaudeSessionAnnounce("dev", abort.signal, runtime.deps));
+    await tick();
+    for (const runtime of runtimes) runtime.connections[0]!.push(msg(90, [SELF]));
+    await tick(40);
+    expect(calls).toHaveLength(0);
+    for (const runtime of runtimes) expect(runtime.connections[0]!.acked).toEqual([90]);
+    // 锁的判据是 (server, token, channel) 三元组——与 live bridge 取锁时完全同一把。
+    expect(seen[0]).toEqual({ server: SERVER, token: "tok", channel: "dev" });
+    expect(logs.some((line) => line.includes("pid 4242") && line.includes("不重复注入"))).toBe(true);
+    // 锁一放开（live bridge 退出），蛰伏腿立刻恢复认领制唤醒（每条 @ 都现查锁，不缓存）。
+    holderPid = null;
+    for (const runtime of runtimes) runtime.connections[0]!.push(msg(91, [SELF]));
+    await tick(40);
+    expect(calls).toHaveLength(1);
+    abort.abort();
+    await Promise.all(done);
+  });
+
+  test("认领存储不可写 ⇒ 照常注入（宁可重复唤醒也不叫不醒），并留日志", async () => {
+    const logs: string[] = [];
+    const calls: string[] = [];
+    const { deps, connections } = makeDeps({
+      claimWake: () => ({ state: "unenforced", reason: "claim_store_unwritable", path: "/nope" }),
+      log: (line) => logs.push(line),
+      inject: (async () => {
+        calls.push("inject");
+        return { ok: true, socketPath: "/tmp/x.sock", usedAuth: false, target: "x" };
+      }) as DormantAnnounceDeps["inject"],
+    });
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    connections[0]!.push(msg(70, [SELF]));
+    await tick(40);
+    expect(calls).toEqual(["inject"]);
+    expect(logs.some((line) => line.includes("唤醒认领存储不可写"))).toBe(true);
     abort.abort();
     await done;
   });

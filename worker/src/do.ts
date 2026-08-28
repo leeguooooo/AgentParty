@@ -4666,7 +4666,8 @@ export class ChannelDO extends Server<Env> {
       case "all":
         return true;
       case "mentions":
-        return msg.mentions.includes(hookName);
+        // #963：自 @ 不投 webhook——那是对话里提到自己，不是召唤。
+        return msg.mentions.includes(hookName) && !this.isSelfMention(msg.sender.name, hookName);
       case "status":
         return msg.kind === "status";
       case "needs-human":
@@ -4952,6 +4953,14 @@ export class ChannelDO extends Server<Env> {
     );
   }
 
+  // #963：发信人 @ 自己的身份不是召唤，是对话里提到自己（「@leo-server 这次醒了」，尤其带 reply_to
+  // 的回帖）。mentions 数组原样落库/广播（正文里的 @ 仍要高亮、仍要进 history），但服务端**不为它生成
+  // 任何唤醒语义**：不建 directed delivery、不落 serve/watch 的 broadcast ledger、不投 mentions 过滤的
+  // webhook。同身份 13 个 runtime 各醒一次的第二、三轮就是自 @ 触发的。
+  private isSelfMention(senderName: string, target: string): boolean {
+    return mentionMatchKey(senderName) === mentionMatchKey(target);
+  }
+
   // #107：某 name 当前登记的 wake 层（presence.wake_kind）。无 presence / 未登记 = null。
   private wakeKindFor(name: string): WakeKind | null {
     return this.presenceFor(name)?.wake?.kind ?? null;
@@ -4970,6 +4979,8 @@ export class ChannelDO extends Server<Env> {
     for (const name of msg.mentions) {
       if (seen.has(name)) continue;
       seen.add(name);
+      // #963：自 @ 不是唤醒，别落一行「已广播唤醒」的假账。
+      if (this.isSelfMention(msg.sender.name, name)) continue;
       const kind = this.wakeKindFor(name);
       if (kind !== "serve" && kind !== "watch") continue;
       // #180：被人为暂停接待的目标，webhook 一律不投；serve/watch 同理不落"已广播唤醒"行，
@@ -5077,7 +5088,9 @@ export class ChannelDO extends Server<Env> {
     for (const row of this.ctx.storage.sql.exec("SELECT name FROM webhooks").toArray()) {
       reachable.add(mentionMatchKey(String(row.name)));
     }
-    const candidates = mentions.filter((mention) => !reachable.has(mentionMatchKey(mention)));
+    const candidates = mentions.filter(
+      (mention) => !reachable.has(mentionMatchKey(mention)) && !this.isSelfMention(msg.sender.name, mention),
+    );
     if (candidates.length === 0) return;
     const placeholders = candidates.map(() => "?").join(", ");
     let excluded: Set<string>;
@@ -8531,7 +8544,10 @@ export class ChannelDO extends Server<Env> {
     }
     return {
       frame,
+      // #963：发信人自己不入 deliveryTargets——自 @ 不建 directed delivery，否则每个同身份 runtime
+      // 都会把这条「提到自己」的回帖当成一次新召唤。mentions 数组保持原样（正文高亮/历史不受影响）。
       deliveryTargets: candidateDeliveryTargets.filter((target) =>
+        !this.isSelfMention(senderName, target) &&
         Object.prototype.hasOwnProperty.call(ownerLookup, target) &&
         (expectedAutoOwners.get(mentionMatchKey(target)) === undefined || !invalidAutoKeys.has(mentionMatchKey(target)))
       ),
@@ -10540,7 +10556,10 @@ export class ChannelDO extends Server<Env> {
   }
 
   private async agentMentionTargets(msg: MsgFrame): Promise<string[]> {
-    const candidates = [...new Set(msg.mentions.filter((name) => name !== "system"))];
+    // #963：自 @ 不是唤醒目标（与 routeMentionsForDelivery 同一口径）。
+    const candidates = [...new Set(
+      msg.mentions.filter((name) => name !== "system" && !this.isSelfMention(msg.sender.name, name)),
+    )];
     if (candidates.length === 0) return [];
     const authoritative = new Map<string, { name: string; role: string; active: boolean; removed: boolean }>();
     const removed = new Set<string>();
