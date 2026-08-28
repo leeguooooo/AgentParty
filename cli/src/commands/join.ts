@@ -646,7 +646,13 @@ export interface JoinCtx {
   rulesPath: string;
   mcpName: string;
   /** 第 0 步：插件刚装 / 刚更新，当前会话还挂着旧的——「要重开」是 ✅ 句的一部分。 */
-  claudePluginRestart: boolean;
+  /**
+   * 结论要不要提「重开会话」，以及**凭什么**：
+   * - "changed"：这一趟真的装上/换了版本 ⇒ 当前会话确定还挂着旧插件；
+   * - "unknown"：版本读不出来，无从判断 ⇒ 只能说「说不清，保险起见重开」，不许说成确定事实；
+   * - false：不用提。
+   */
+  claudePluginRestart: false | "changed" | "unknown";
   /** 第 1 步：服务端确认的身份（config.identity.name）。 */
   identity: string | null;
   /** 第 2 步：claude 档所选接收方式。 */
@@ -680,7 +686,7 @@ export function versionStep(rerun: string = RERUN): Step<JoinCtx> {
       }
       if (harness !== "claude") return { ok: true, summary: cli };
       const install = installClaudePlugin(deps);
-      ctx.claudePluginRestart = install.restartNeeded;
+      ctx.claudePluginRestart = install.restartNeeded ? "changed" : false;
       const detail: string[] = install.level === "ok" || install.level === "skip" ? [] : [outcomeLine("装 claude 插件", install)];
       // 判据是 doctor 的插件壳检查（与 bridge claude --check 同一份）：版本不一致时 SessionStart 根本没布上。
       const shell = deps.claudePluginShell();
@@ -710,7 +716,8 @@ export function versionStep(rerun: string = RERUN): Step<JoinCtx> {
       // 多重开一次只是麻烦，漏掉重开则唤醒层没布上（codex stop-time review on 274de76）。
       const beforeUnknown = install.before === undefined;
       // 装上/换版/说不清 都意味着当前会话可能还挂着旧插件，必须提示重开。
-      if (changed || install.before === null || beforeUnknown) ctx.claudePluginRestart = true;
+      if (changed || install.before === null) ctx.claudePluginRestart = "changed";
+      else if (beforeUnknown) ctx.claudePluginRestart = "unknown";
       const plugin = changed
         ? `claude 插件 ${install.before} → 已更新到 ${v}（需重开会话）`
         : install.before === null
@@ -1040,8 +1047,13 @@ export function completionLine(ctx: JoinCtx, done: string = "接入完成"): str
     // #961：插件刚装/刚更新，当前这个会话还挂着旧的——「要重开」是结论的一部分，不能埋在补充行里。
     // #979：重开也得用 party claude 起，普通 claude 起的会话是蛰伏档。
     return (
-      `✅ ${done}，差一次重开：claude 插件已是 ${RUNNING_VERSION}，【用 ${claudeArmCommand(slug)} 新开一个 Claude 会话】后 @ ${identity} 就能唤醒它；` +
-      `当前这个会话还挂着旧插件，不会被唤醒。`
+      ctx.claudePluginRestart === "changed"
+        ? `✅ ${done}，差一次重开：claude 插件已是 ${RUNNING_VERSION}，【用 ${claudeArmCommand(slug)} 新开一个 Claude 会话】后 @ ${identity} 就能唤醒它；` +
+          `当前这个会话还挂着旧插件，不会被唤醒。`
+        // 版本读不出来 ⇒ 不知道这个会话挂的是新是旧。结论只能照实说，不许把不确定写成确定
+        // （codex stop-time review on 2e7f6b2）。
+        : `✅ ${done}，但插件版本读不出来：无法确认当前这个会话挂的是不是旧插件。保险起见【用 ` +
+          `${claudeArmCommand(slug)} 新开一个 Claude 会话】，那个会话被 @ ${identity} 时一定能唤醒。`
     );
   }
   if (ctx.listener !== null) {
@@ -1078,7 +1090,7 @@ export async function runJoin(opts: JoinOptions, deps: JoinDeps): Promise<number
     configPath,
     rulesPath,
     mcpName: mcpServerName(agentName),
-    claudePluginRestart: false,
+    claudePluginRestart: false as false | "changed" | "unknown",
     identity: null,
     receiveMode: "interactive",
     interactive: false,

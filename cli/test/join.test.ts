@@ -172,6 +172,8 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     const verdict = logs.find((l) => l.startsWith("✅"));
     expect(verdict).toBeDefined();
     expect(verdict).toContain("重开");
+    // 这一档是**确定**换过版本，结论就该说确定话。
+    expect(verdict).toContain("当前这个会话还挂着旧插件");
   });
 
   // codex stop-time review on b88a58c：update 之后那一次重读失败（plugin list 偶发读不出）时，
@@ -209,7 +211,10 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(stepLine(logs, 0)).not.toContain("版本与 CLI 一致");
     expect(stepLine(logs, 0)).toContain("读不出来");
     const verdict = logs.find((l) => l.startsWith("✅"));
-    expect(verdict).toContain("重开");
+    // 结论也不许把「说不清」写成确定事实（codex review 第五轮）：不能出现「当前这个会话还挂着旧插件」。
+    expect(verdict).toContain("读不出来");
+    expect(verdict).toContain("保险起见");
+    expect(verdict).not.toContain("当前这个会话还挂着旧插件");
   });
 
   test("子命令返回非 0 且最终版本仍不对 ⇒ 照实报未装好，不能被「按最终事实判」放过", async () => {
