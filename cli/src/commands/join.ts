@@ -431,7 +431,7 @@ function setClaudeInboxAccept(deps: JoinDeps): StepOutcome {
  * claude 插件壳每种 blocker 对应的那一条修法（#961）。**版本不一致的修法是 update，不是 install**——
  * install 对已装的只回 already installed。插件比 CLI 还新时反过来升 CLI。
  */
-function claudePluginRemedy(shell: ClaudePluginShellInspection): { do: string; notes: string[] } {
+function claudePluginRemedy(shell: ClaudePluginShellInspection, rerun: string = RERUN): { do: string; notes: string[] } {
   const restart = "做完【重开一个 Claude 会话】才生效——当前会话还挂着旧插件";
   switch (shell.status) {
     case "ready":
@@ -462,11 +462,11 @@ function claudePluginRemedy(shell: ClaudePluginShellInspection): { do: string; n
         notes: ["本机插件包与这个版本的 CLI 对不上（缺 launcher / hooks 接线）", restart],
       };
     case "claude_unavailable":
-      return { do: "把 claude 放到 PATH 上（或先装 Claude Code），然后重跑 party join", notes: [] };
+      return { do: `把 claude 放到 PATH 上（或先装 Claude Code），然后重跑 ${rerun}`, notes: [] };
     case "claude_version_unsupported":
-      return { do: `把 Claude Code 升到 >= ${CLAUDE_PLUGIN_MIN_VERSION.join(".")}，然后重跑 party join`, notes: [] };
+      return { do: `把 Claude Code 升到 >= ${CLAUDE_PLUGIN_MIN_VERSION.join(".")}，然后重跑 ${rerun}`, notes: [] };
     case "plugin_state_unavailable":
-      return { do: "claude plugin list --json   看它为什么读不出插件状态，修好后重跑 party join", notes: [] };
+      return { do: `claude plugin list --json   看它为什么读不出插件状态，修好后重跑 ${rerun}`, notes: [] };
   }
 }
 
@@ -587,8 +587,11 @@ function symbol(level: StepLevel): string {
 // 步骤之间靠 ctx 传状态（第 0 步的「要重开」、第 1 步解析出的身份、第 2 步选的接收方式、
 // 第 3 步探到的进程）。best-effort 的小动作（MCP 注册、装插件、inbox accept）不决定过/不过，
 // 只作为该步的补充行印出来——失败要能看见，但不该把整段接入判死。
+//
+// 第 0 / 3 / 4 步的工厂与 JoinCtx 一并导出：`party recover <chan>`（#991）复用同一份实现
+// （版本对齐 → 重起武装会话 → 验证），只把第 1 步换成「找回绑定」——不复制。
 
-interface JoinCtx {
+export interface JoinCtx {
   opts: JoinOptions;
   deps: JoinDeps;
   harness: JoinPackHarness;
@@ -612,8 +615,11 @@ function outcomeLine(name: string, outcome: StepOutcome): string {
   return `${symbol(outcome.level)} ${name}: ${outcome.msg}`;
 }
 
-/** 第 0 步 版本：CLI 版本；claude 档还要插件装到位、已启用、与 CLI 同版（#961/#985）。 */
-function versionStep(): Step<JoinCtx> {
+/**
+ * 第 0 步 版本：CLI 版本；claude 档还要插件装到位、已启用、与 CLI 同版（#961/#985）。
+ * rerun 只进修法文案里的「然后重跑 …」（recover 传自己的那条）。
+ */
+export function versionStep(rerun: string = RERUN): Step<JoinCtx> {
   return {
     id: "version",
     title: "版本",
@@ -630,7 +636,7 @@ function versionStep(): Step<JoinCtx> {
       // 判据是 doctor 的插件壳检查（与 bridge claude --check 同一份）：版本不一致时 SessionStart 根本没布上。
       const shell = deps.claudePluginShell();
       if (shell.status !== "ready") {
-        const remedy = claudePluginRemedy(shell);
+        const remedy = claudePluginRemedy(shell, rerun);
         const versions = shell.plugin.version === undefined ? "" : `（本机插件 ${shell.plugin.version}，CLI ${RUNNING_VERSION}）`;
         return {
           ok: false,
@@ -784,7 +790,7 @@ function receiveModeStep(): Step<JoinCtx> {
  *    这一步不替人起会话（那是 #989）；探不到就停在这，修法就是那条命令。
  *  - codex（#957）：主动拉起唤醒层再探活，判据是进程真的在。
  */
-function wakeableSessionStep(): Step<JoinCtx> {
+export function wakeableSessionStep(): Step<JoinCtx> {
   return {
     id: "wakeable_session",
     title: "起一个可唤醒的会话",
@@ -862,7 +868,7 @@ function wakeableSessionStep(): Step<JoinCtx> {
 }
 
 /** 第 4 步 真发一条 @ 验证：以本身份发一条 `[wake-verify]` @ 自己、等回执（#990）；可注入（测试用桩）。 */
-function verifyStep(): Step<JoinCtx> {
+export function verifyStep(): Step<JoinCtx> {
   return {
     id: "verify",
     title: "真发一条 @ 验证",
@@ -877,22 +883,25 @@ function verifyStep(): Step<JoinCtx> {
   };
 }
 
-/** ✅ 句：写明谁会被唤醒（pid / 起法），别让人以为是眼前这个普通会话（#979 修法 3）。 */
-function completionLine(ctx: JoinCtx): string {
+/**
+ * ✅ 句：写明谁会被唤醒（pid / 起法），别让人以为是眼前这个普通会话（#979 修法 3）。
+ * done 是「接入完成」/「恢复完成」那个词（recover 复用）。
+ */
+export function completionLine(ctx: JoinCtx, done: string = "接入完成"): string {
   const { harness, slug } = ctx;
   const identity = ctx.identity ?? ctx.agentName;
   if (harness === "claude" && ctx.claudePluginRestart) {
     // #961：插件刚装/刚更新，当前这个会话还挂着旧的——「要重开」是结论的一部分，不能埋在补充行里。
     // #979：重开也得用 party claude 起，普通 claude 起的会话是蛰伏档。
     return (
-      `✅ 接入完成，差一次重开：claude 插件已是 ${RUNNING_VERSION}，【用 ${claudeArmCommand(slug)} 新开一个 Claude 会话】后 @ ${identity} 就能唤醒它；` +
+      `✅ ${done}，差一次重开：claude 插件已是 ${RUNNING_VERSION}，【用 ${claudeArmCommand(slug)} 新开一个 Claude 会话】后 @ ${identity} 就能唤醒它；` +
       `当前这个会话还挂着旧插件，不会被唤醒。`
     );
   }
   if (ctx.listener !== null) {
-    return `✅ 接入完成：现在 @ ${identity}，这台机器上${ctx.listener.description}就能被唤醒来协作。`;
+    return `✅ ${done}：现在 @ ${identity}，这台机器上${ctx.listener.description}就能被唤醒来协作。`;
   }
-  return `✅ 接入完成：${identity} 已绑到 #${slug}（harness 是 ${harness}，没有唤醒层）；收消息用 party watch ${slug} 或常驻 party serve ${slug}。`;
+  return `✅ ${done}：${identity} 已绑到 #${slug}（harness 是 ${harness}，没有唤醒层）；收消息用 party watch ${slug} 或常驻 party serve ${slug}。`;
 }
 
 // ── orchestrator ────────────────────────────────────────────────────────────
@@ -1034,7 +1043,15 @@ export async function run(argv: string[]): Promise<number> {
     return 1;
   }
 
-  const deps: JoinDeps = {
+  return runJoin(
+    { server, channel: slug, agentName, harnessFlag, mention, yes: flags.yes === true, coexist: flags.coexist === true, token },
+    defaultJoinDeps(slug),
+  );
+}
+
+/** 真机注入点（`party join` 与 `party recover` 共用）：真 spawn / init / hook / send，探活走真锁、真注册表。 */
+export function defaultJoinDeps(slug: string): JoinDeps {
+  return {
     spawn: spawnSync,
     initRun: (a) => import("./init").then((m) => m.run(a)),
     hookRun: (a) => import("./hook").then((m) => m.run(a)),
@@ -1070,8 +1087,4 @@ export async function run(argv: string[]): Promise<number> {
     claudeDefaultArgs: () => resolveClaudeDefaultArgs(process.env, agentpartyHome()),
     verifyWake: roundTripWakeVerifier(),
   };
-  return runJoin(
-    { server, channel: slug, agentName, harnessFlag, mention, yes: flags.yes === true, coexist: flags.coexist === true, token },
-    deps,
-  );
 }
