@@ -212,6 +212,20 @@ jobs:
             --output "dist/$VERSIONED_MANIFEST"
           cp "dist/$VERSIONED_MANIFEST" dist/desktop-ui.json
 
+      # GitHub caps a Release at 1000 assets; every publication appends four versioned files,
+      # so prune before uploading or the upload itself is what hits the ceiling (#974).
+      - name: prune desktop-ui release assets
+        if: steps.publication.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_UI_KEEP_VERSIONS: "60"
+        run: |
+          set -euo pipefail
+          bun scripts/desktop-ui-prune-assets.ts \
+            --repo "$GITHUB_REPOSITORY" \
+            --keep "$DESKTOP_UI_KEEP_VERSIONS" \
+            --incoming "$UI_VERSION"
+
       - name: publish fixed desktop-ui release channel
         if: steps.publication.outputs.publish == 'true'
         uses: softprops/action-gh-release@v3

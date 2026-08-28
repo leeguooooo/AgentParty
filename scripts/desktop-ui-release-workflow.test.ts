@@ -101,6 +101,7 @@ describe("desktop UI release workflow", () => {
       "generate Desktop UI manifest",
       "sign Desktop UI manifest",
       "finalize signed Desktop UI manifest envelope",
+      "prune desktop-ui release assets",
       "publish fixed desktop-ui release channel",
     ]) {
       const start = workflow.indexOf(`- name: ${step}`);
@@ -122,6 +123,46 @@ describe("desktop UI release workflow", () => {
     expect(workflow).toContain('bunx tauri signer sign "../dist/desktop-ui-manifest-payload.json"');
     expect(workflow).toContain("--payload dist/desktop-ui-manifest-payload.json");
     expect(workflow).toContain("--signature dist/desktop-ui-manifest-payload.json.sig");
+  });
+
+  test("prunes old versioned assets below the GitHub 1000-asset ceiling before uploading (#974)", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    const parsed = Bun.YAML.parse(workflow) as {
+      jobs: Record<string, {
+        steps: { name?: string; if?: string; env?: Record<string, string>; run?: string; uses?: string }[];
+      }>;
+    };
+    const steps = parsed.jobs["build-sign-publish"].steps;
+    const names = steps.map((step) => step.name);
+    const pruneIndex = names.indexOf("prune desktop-ui release assets");
+    const publishIndex = names.indexOf("publish fixed desktop-ui release channel");
+    const finalizeIndex = names.indexOf("finalize signed Desktop UI manifest envelope");
+    expect(pruneIndex).toBeGreaterThan(-1);
+    expect(publishIndex).toBeGreaterThan(-1);
+    // Pruning must run after the manifest is final and strictly before the upload;
+    // otherwise the upload itself is what trips "file_count limited to 1000 assets".
+    expect(pruneIndex).toBeGreaterThan(finalizeIndex);
+    expect(pruneIndex).toBe(publishIndex - 1);
+    expect(steps[publishIndex].uses).toStartWith("softprops/action-gh-release@");
+
+    const prune = steps[pruneIndex];
+    expect(prune.if).toBe("steps.publication.outputs.publish == 'true'");
+    expect(prune.if).toBe(steps[publishIndex].if);
+    expect(prune.env?.GH_TOKEN).toBe("${{ github.token }}");
+    expect(prune.env?.DESKTOP_UI_KEEP_VERSIONS).toBe("60");
+    expect(prune.run).toContain("set -euo pipefail");
+    expect(prune.run).toContain("bun scripts/desktop-ui-prune-assets.ts");
+    expect(prune.run).toContain('--repo "$GITHUB_REPOSITORY"');
+    expect(prune.run).toContain('--keep "$DESKTOP_UI_KEEP_VERSIONS"');
+    expect(prune.run).toContain('--incoming "$UI_VERSION"');
+    expect(prune.run).not.toContain("--dry-run");
+
+    // The current manifest is protected by the script itself, never by workflow arguments.
+    const script = readFileSync(resolve(import.meta.dir, "desktop-ui-prune-assets.ts"), "utf8");
+    expect(script).toContain('export const CURRENT_MANIFEST = "desktop-ui.json"');
+    expect(script).toContain("export const DEFAULT_KEEP = 60");
+    expect(script).toContain("if (name === CURRENT_MANIFEST) return null;");
+    expect(script).toContain("/repos/${repo}/releases/assets/${asset.id}");
   });
 
   test("publishes versioned assets plus the stable manifest without touching the normal release", () => {
