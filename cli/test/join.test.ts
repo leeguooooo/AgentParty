@@ -193,6 +193,25 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(verdict).toContain("重开");
   });
 
+  // codex stop-time review on 274de76：连**进场那次**版本读都失败时，before 未知、changedByShell 也
+  // 失效 ⇒ 又回到「版本与 CLI 一致」的假绿并丢掉重开。说不清就得说说不清，重开按保守一侧保留。
+  test("进场版本读不出来 ⇒ 不许说「版本与 CLI 一致」，并保留重开提示", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      // 3 = 进场读 + 它的重试 + sync 内部那次读，全部读不出；第 4 次（权威壳探测）能读到。
+      deps(record, { installedPluginVersion: RUNNING_VERSION, pluginListFailsAtStart: 3 }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).toBe(0);
+    expect(stepLine(logs, 0)).not.toContain("版本与 CLI 一致");
+    expect(stepLine(logs, 0)).toContain("读不出来");
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toContain("重开");
+  });
+
   test("子命令返回非 0 且最终版本仍不对 ⇒ 照实报未装好，不能被「按最终事实判」放过", async () => {
     mock = startRestMock();
     const record: string[][] = [];

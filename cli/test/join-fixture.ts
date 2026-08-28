@@ -45,6 +45,8 @@ export interface SpawnBehavior {
    * 不能挂在单次重读上——读失败时上层必须用权威壳探测兜底，否则又是「版本与 CLI 一致」的假绿。
    */
   pluginListFailsAfterUpdate?: number;
+  /** 一开始的头 N 次 `plugin list` 读不出来：连「之前是什么版本」都不知道。 */
+  pluginListFailsAtStart?: number;
 }
 interface PluginState {
   installed: string | null;
@@ -52,6 +54,9 @@ interface PluginState {
   listFailuresLeft?: number;
 }
 export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: PluginState): JoinDeps["spawn"] {
+  if (behavior.pluginListFailsAtStart !== undefined && state.listFailuresLeft === undefined) {
+    state.listFailuresLeft = behavior.pluginListFailsAtStart;
+  }
   return ((cmd: string, args: readonly string[]) => {
     record.push([cmd, ...args]);
     const base = { pid: 0, output: [], stdout: "", stderr: "", signal: null } as Record<string, unknown>;

@@ -358,7 +358,8 @@ function installClaudePlugin(deps: JoinDeps): ClaudePluginInstallOutcome {
       updated: false,
     };
   }
-  const before = installedClaudePluginVersion(deps.spawn);
+  // 进场读同样重试一次：单次读失败会让「之前是什么版本」永远未知，下游只能猜（见第 0 步）。
+  const before = installedClaudePluginVersion(deps.spawn) ?? installedClaudePluginVersion(deps.spawn);
   let anyFail = first.status !== 0;
   for (const args of [["plugin", "install", CLAUDE_PLUGIN], ["plugin", "enable", CLAUDE_PLUGIN]]) {
     const r = deps.spawn("claude", args, { encoding: "utf8", timeout: 60_000 });
@@ -405,7 +406,10 @@ function installClaudePlugin(deps: JoinDeps): ClaudePluginInstallOutcome {
     ? `claude 插件已从 ${before} 更新到 ${after}（需重开 Claude 会话才生效）`
     : before === null
       ? `claude 插件已安装（${after}；需重开 Claude 会话才生效）`
-      : `claude 插件已是 ${after ?? RUNNING_VERSION}（跳过）`;
+      : before === undefined
+        // 进场版本读不出来 ⇒ 不知道这一趟有没有换版本。别说成「跳过」，那是拿沉默冒充确认。
+        ? `claude 插件 ${after ?? RUNNING_VERSION}（装之前的版本读不出来，无法确认是否换过）`
+        : `claude 插件已是 ${after ?? RUNNING_VERSION}（跳过）`;
   return { level: "ok", msg, restartNeeded, before, after, updated };
 }
 
@@ -701,13 +705,19 @@ export function versionStep(rerun: string = RERUN): Step<JoinCtx> {
         shell.plugin.version !== undefined &&
         shell.plugin.version !== install.before;
       const changed = install.updated || changedByShell;
-      // 装上/换版都意味着当前会话仍挂着旧插件，必须重开——重开标志同样按事实修正。
-      if (changed || install.before === null) ctx.claudePluginRestart = true;
+      // 进场那次版本读也可能失败：这时「换没换」根本无从判断（before 未知，changedByShell 也失效）。
+      // 不许因此说成「版本与 CLI 一致」——那是拿沉默冒充确认；重开提示按保守一侧保留：
+      // 多重开一次只是麻烦，漏掉重开则唤醒层没布上（codex stop-time review on 274de76）。
+      const beforeUnknown = install.before === undefined;
+      // 装上/换版/说不清 都意味着当前会话可能还挂着旧插件，必须提示重开。
+      if (changed || install.before === null || beforeUnknown) ctx.claudePluginRestart = true;
       const plugin = changed
         ? `claude 插件 ${install.before} → 已更新到 ${v}（需重开会话）`
         : install.before === null
           ? `claude 插件已安装 ${v}（需重开会话）`
-          : `claude 插件 ${v} 版本与 CLI 一致`;
+          : beforeUnknown
+            ? `claude 插件 ${v}（装之前的版本读不出来，无法确认是否换过——若这次装过/更新过需重开会话）`
+            : `claude 插件 ${v} 版本与 CLI 一致`;
       return { ok: true, summary: `${cli} · ${plugin}`, detail };
     },
   };
