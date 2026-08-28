@@ -977,6 +977,7 @@ export interface CodexAutoWakeSpawnDeps {
 export function defaultCodexAutoWakeDeps(
   env: NodeJS.ProcessEnv = process.env,
   pid: number = process.ppid,
+  sessionId: string | null = null,
 ): CodexAutoWakeSpawnDeps {
   const home = agentpartyHome(env);
   return {
@@ -1005,7 +1006,8 @@ export function defaultCodexAutoWakeDeps(
       return { refused: resolved.reason, detail: resolved.detail };
     },
     channelAt: (cwd) => env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null,
-    sessionKind: () => probeCodexSessionKind(pid),
+    // #976：先读本会话的 rollout 头（originator / subagent 派生），读不到再看进程形态。
+    sessionKind: () => probeCodexSessionKind({ hookParentPid: pid, sessionId, env }),
     spawn: (args, cwd, childEnv) => {
       // 编译版二进制：execPath 即 party；dev（bun run）：execPath 是 bun，argv[1] 是入口脚本。
       const self = isPartyBinaryPath(process.execPath) || process.argv[1] === undefined
@@ -1056,7 +1058,8 @@ export function maybeStartCodexAutoWake(
   const sessionKind = resolution.mode === "serve" && channel !== null && deps.sessionKind !== undefined
     ? deps.sessionKind()
     : null;
-  const lookup = sessionKind?.kind === "non-interactive" ? null : deps.readConfigAt(cwd);
+  // #976：unknown 同样不拉起（决策层记 skip(session-kind-unknown)），身份也不必解析。
+  const lookup = sessionKind !== null && sessionKind.kind !== "interactive" ? null : deps.readConfigAt(cwd);
   const refused = lookup !== null && "refused" in lookup ? lookup : null;
   const auth = lookup === null || refused !== null ? null : codexAutoWakeAuth(lookup as { server?: unknown; token?: unknown });
   const now = deps.now();
@@ -1082,15 +1085,17 @@ export function maybeStartCodexAutoWake(
     // #959 退避：同 (身份, 频道) 的唤醒层刚被短命回收过，这一轮不拉。
     flapping: markerPath === null ? null : recentCodexAutoWakeFlap(markerPath, now),
   });
+  // #976：每条决策日志都带探测结论——事后要能从日志分辨「判成了 interactive 还是 unknown」。
+  const kindTag = codexSessionKindLogTag(sessionKind);
   if (decision.action === "skip") {
     // disabled 是绝大多数机器的常态，逐次记会把日志刷成噪音；其余跳过原因都值得留痕。
-    if (decision.reason !== "disabled") deps.log(`skip(${decision.reason}): ${decision.detail}`);
+    if (decision.reason !== "disabled") deps.log(`skip(${decision.reason}): ${decision.detail} ${kindTag}`);
     return decision;
   }
   if (markerPath !== null && !claimCodexAutoWake(markerPath, decision.channel, now, deps.processAlive)) {
     // 同一瞬间启动的另一个 codex 会话抢先了。
     const detail = `#${decision.channel} 上另一个 codex 会话正在拉起唤醒层，本次不拉`;
-    deps.log(`skip(already-starting): ${detail}`);
+    deps.log(`skip(already-starting): ${detail} ${kindTag}`);
     return { action: "skip", reason: "already-starting", detail };
   }
   const childEnv = {
@@ -1106,14 +1111,23 @@ export function maybeStartCodexAutoWake(
     const detail =
       `拉 \`party serve ${decision.channel} --runner codex\` 失败（spawn 没返回 pid）；` +
       `这台机器上没有唤醒层在跑。手动兜底：party serve ${decision.channel} --runner codex`;
-    deps.log(`start-failed: ${detail}`);
+    deps.log(`start-failed: ${detail} ${kindTag}`);
     return { action: "start-failed", channel: decision.channel, detail };
   }
   deps.log(
     `started: pid=${pid} channel=#${decision.channel} cwd=${decision.cwd} —— ` +
-      `被 @ 时唤醒的是一个新的 codex runner 会话，不是你眼前这个终端会话`,
+      `被 @ 时唤醒的是一个新的 codex runner 会话，不是你眼前这个终端会话 ${kindTag}`,
   );
   return decision;
+}
+
+/**
+ * 决策日志尾部的形态标签（#976）：`kind=<interactive|non-interactive|unknown> detail=<探测依据>`。
+ * 没探测（开关关着 / 没绑频道 / join 路径没给探测器）写 `kind=not-probed`，绝不假装探过。
+ */
+export function codexSessionKindLogTag(probe: CodexSessionKindProbe | null): string {
+  if (probe === null) return "kind=not-probed";
+  return `kind=${probe.kind} detail=${probe.detail.replace(/\s+/g, " ")}`;
 }
 
 /**
@@ -1131,7 +1145,9 @@ export function handleCodexHookRecord(
   // 它既不入册，也绝不许再拉一层唤醒层。
   if (record.hook_event_name !== "SessionStart" || env.AP_ACTIVITY_FILE) return;
   try {
-    maybeStartCodexAutoWake(record, autoWakeDeps ?? defaultCodexAutoWakeDeps(env));
+    // #976：session_id 是定位本会话 rollout 头的钥匙，随 deps 一起交给形态探测。
+    const sessionId = typeof record.session_id === "string" ? record.session_id : null;
+    maybeStartCodexAutoWake(record, autoWakeDeps ?? defaultCodexAutoWakeDeps(env, process.ppid, sessionId));
   } catch {
     // hook 铁律：拉不起来也绝不阻断 codex 启动。原因已进日志文件（stdout 恒空）。
   }

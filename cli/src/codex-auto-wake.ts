@@ -318,6 +318,7 @@ export type CodexAutoWakeSkipReason =
   | "disabled"
   | "no-channel"
   | "non-interactive"
+  | "session-kind-unknown"
   | "harness-mismatch"
   | "no-codex-binding"
   | "no-agent-token"
@@ -344,7 +345,9 @@ export interface CodexAutoWakeDecisionInput {
   startingPid?: number | null;
   /**
    * 触发这次 SessionStart 的 codex 是不是人在用的会话（#959）。一次性 / 嵌入式 codex 压根不该
-   * 拉唤醒层：它 60 秒后必被回收，留下的只有一条零信息的 waiting 帧。缺省 / unknown = 按交互式处理。
+   * 拉唤醒层：它 60 秒后必被回收，留下的只有一条零信息的 waiting 帧。缺省（null / undefined，没探测）
+   * = 按交互式处理；unknown（探测过但没结论）= 不拉（#976：一次性 codex 高频的机器上「不知道就拉」
+   * 错在更贵的一侧——拉起→发帧→60 秒回收；交互式会话的下一次 SessionStart 会再来）。
    */
   sessionKind?: CodexSessionKindLike | null;
   /**
@@ -392,6 +395,15 @@ export function decideCodexAutoWake(input: CodexAutoWakeDecisionInput): CodexAut
       detail:
         `${input.sessionKind.detail}——一次性 codex 不拉唤醒层` +
         `（拉了也会在 60 秒后被回收，只给 #${channel} 留一条零信息的 waiting 帧）`,
+    };
+  }
+  if (input.sessionKind?.kind === "unknown") {
+    return {
+      action: "skip",
+      reason: "session-kind-unknown",
+      detail:
+        `${input.sessionKind.detail}——判不出这个 codex 是不是人在用的会话，不拉唤醒层` +
+        `（拉错了就是 #959 那种「拉起→发帧→60 秒回收」的刷屏；交互式会话下一次 SessionStart 会再来）`,
     };
   }
   if (input.identityRefusal !== null && input.identityRefusal !== undefined) {
