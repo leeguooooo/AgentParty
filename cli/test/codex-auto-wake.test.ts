@@ -735,6 +735,29 @@ describe("pins #960：codex hook 不认领绑给 claude 的身份", () => {
     expect(log).not.toContain("no-agent-token");
   });
 
+  test("#971 piggo 现场：同 cwd 一旧一新两个 claude 绑定、零个 codex 绑定 ⇒ 一条 skip(no-codex-binding)，没有 ambiguous 长文", () => {
+    // 旧身份：老版本记的绑定没有 owner，自成一组、不被新绑定替换；config 按设计保留。
+    const oldPath = joinAs("leo-server", "tok-old", "claude", false);
+    writeJoinBinding(joinBindingsPath(home), {
+      harness: "claude", server: SERVER, channel: CHANNEL, owner: null, identity: "leo-server", config_path: oldPath, cwd, created_at: 1,
+    });
+    joinAs("server", "tok-new", "claude");
+    const d = realDeps();
+    const outcome = maybeStartCodexAutoWake(sessionStart({ cwd }), d);
+    expect(outcome).toMatchObject({ action: "skip", reason: "no-codex-binding" });
+    expect(d.calls).toHaveLength(0);
+    const skips = d.lines.filter((line) => line.startsWith("skip("));
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toContain("skip(no-codex-binding)");
+    const log = d.lines.join("\n");
+    expect(log).not.toContain("ambiguous");
+    expect(log).not.toContain("只能猜出其中一个");
+    expect(log).not.toContain("重新跑一遍");
+    expect(log).not.toContain("no-agent-token");
+    // 唤醒层自己的「解析不出会话身份」那行也不该再出现——预期状态只留决策层这一条痕。
+    expect(log).not.toContain("解析不出会话身份");
+  });
+
   test("同一个身份也用 codex 接入包加入过 ⇒ codex 可以认领，照拉", () => {
     joinAs("leo-server", "tok-shared", "claude");
     joinAs("leo-server", "tok-shared", "codex");

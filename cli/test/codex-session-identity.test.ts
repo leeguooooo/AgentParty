@@ -434,6 +434,7 @@ describe("pins #924：同 harness 同频道堆了一串历史身份，加入后�
       "env-config-unusable",
       "ambiguous-binding",
       "harness-mismatch",
+      "no-codex-binding",
       "registry-identity-unresolvable",
       "ambiguous",
       "no-identity",
@@ -532,5 +533,153 @@ describe("pins #960：反推各档解析出的身份若绑给了别的 harness �
     expect(fix).toMatch(/^AGENTPARTY_TOKEN=\S+ party join\b/);
     expect(fix).toContain("--harness codex");
     expect(fix).not.toMatch(/(^|\s)party init\b/);
+  });
+});
+
+// #971：候选集必须**先按 harness 过滤**再谈唯一/歧义。piggo 真机：#ludo 上堆着一旧一新两个 claude
+// 绑定（leo-server 已移出频道、token 已撤但 config 按设计保留；server 是新的 `--harness claude`），
+// 零个 codex 绑定。此前 cwd 档把两个都算进候选 ⇒ 「ambiguous……放弃」每个 codex SessionStart 刷一遍，
+// 修法还叫人「重跑 codex 接入包」——与这台机「codex 不接 #ludo」的意图正相反。
+describe("pins #971：claude 绑定不是 codex 的候选——过滤后再判唯一/歧义", () => {
+  const SERVER = SESSION_SERVER;
+  const OLD = "leo-server";
+  const NEW = "server";
+
+  function bindTo(harness: BindingHarness, configPath: string, identity: string, owner: string | null = "leo") {
+    writeJoinBinding(joinBindingsPath(home), {
+      harness, server: SERVER, channel: CHANNEL, owner, identity, config_path: configPath, cwd, created_at: 1_700_000_000_000,
+    }, { replace: false });
+  }
+
+  test("(a) piggo 现场：同 cwd 两个 claude 绑定 + 0 个 codex 绑定 ⇒ no-codex-binding，绝不是 ambiguous", () => {
+    const oldPath = writeAgentConfig("agentparty-leo-server.json", agentConfig(OLD, SERVER, "tok-old"));
+    const newPath = writeAgentConfig("agentparty-server.json", agentConfig(NEW, SERVER, "tok-new"));
+    bindTo("claude", oldPath, OLD, null);
+    bindTo("claude", newPath, NEW);
+    writeWorkspaceConfigOnly(agentConfig(NEW, SERVER, "tok-new"), cwd);
+    const result = resolve({}, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("no-codex-binding");
+    expect(result.detail).not.toContain("ambiguous");
+    expect(result.detail).not.toContain("只能猜出其中一个");
+    expect(result.detail).not.toContain("重新跑一遍");
+    expect(result.detail).toContain(OLD);
+    expect(result.detail).toContain(NEW);
+    expect(result.detail).toContain("可选");
+  });
+
+  test("(a′) 老绑定已被替换、只剩 config 残留：cwd 指向 claude 的身份 ⇒ 仍拒绝，且绝不改猜那份残留 config", () => {
+    // 同 owner 的 claude 绑定会被后加入的替换（join-binding 的默认语义），于是 leo-server 只剩 config、没有绑定。
+    writeAgentConfig("agentparty-leo-server.json", agentConfig(OLD, SERVER, "tok-revoked"));
+    const newPath = writeAgentConfig("agentparty-server.json", agentConfig(NEW, SERVER, "tok-new"));
+    bindTo("claude", newPath, NEW);
+    writeWorkspaceConfigOnly(agentConfig(NEW, SERVER, "tok-new"), cwd);
+    const result = resolve({}, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // cwd 指的那个是 claude 的——这是 mismatch；残留的 leo-server 不是 cwd 指的，绝不认领它。
+    expect(result.reason).toBe("harness-mismatch");
+    expect(result.detail).not.toContain("ambiguous");
+    expect(result.detail).toContain(NEW);
+  });
+
+  test("(b) 一 claude 一 codex：认领 codex 那个，哪怕 claude 的更新、且绑在 cwd 上", () => {
+    const codexPath = writeAgentConfig("agentparty-leo-codex.json", agentConfig("leo-codex", SERVER, "tok-codex"));
+    const claudePath = writeAgentConfig("agentparty-server.json", agentConfig(NEW, SERVER, "tok-new"));
+    bindTo("codex", codexPath, "leo-codex");
+    bindTo("claude", claudePath, NEW);
+    writeWorkspaceConfigOnly(agentConfig(NEW, SERVER, "tok-new"), cwd);
+    const result = resolve({}, null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.identity.name).toBe("leo-codex");
+    expect(result.identity.token).toBe("tok-codex");
+    expect(result.identity.source).toBe("join-binding");
+  });
+
+  test("(b′) MCP 注册档：进程下挂着 claude 的与没人认领的两个身份 ⇒ 过滤掉 claude 的，认领剩下那一个", () => {
+    const claudePath = writeAgentConfig("agentparty-server.json", agentConfig(NEW, SERVER, "tok-new"));
+    const freePath = writeAgentConfig("agentparty-free.json", agentConfig("free", SERVER, "tok-free"));
+    bindTo("claude", claudePath, NEW);
+    const result = resolve({ mcpConfigPaths: () => [claudePath, freePath] }, null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.identity.name).toBe("free");
+    expect(result.identity.source).toBe("mcp-registration");
+  });
+
+  test("(c) 两个 codex 绑定 ⇒ 才是 ambiguous（-binding），不因为旁边还有 claude 绑定而变味", () => {
+    const one = writeAgentConfig("agentparty-codex-one.json", agentConfig("codex-one", SERVER, "tok-1"));
+    const two = writeAgentConfig("agentparty-codex-two.json", agentConfig("codex-two", SERVER, "tok-2"));
+    const claudePath = writeAgentConfig("agentparty-server.json", agentConfig(NEW, SERVER, "tok-new"));
+    bindTo("codex", one, "codex-one", "alice");
+    bindTo("codex", two, "codex-two", "bob");
+    bindTo("claude", claudePath, NEW);
+    // 两条 codex 绑定都不是在本 cwd 加入的：cwd 收窄不出唯一。
+    const result = resolveCodexHookIdentity({ cwd: join(cwd, "elsewhere"), channel: CHANNEL, sessionId: null, deps: deps() });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("ambiguous-binding");
+    expect(result.detail).toContain("codex-one");
+    expect(result.detail).toContain("codex-two");
+    expect(result.detail).not.toContain(NEW);
+  });
+
+  test("(c′) cwd 档：没有绑定的老配置照旧是候选——两份没人认领的 + 一份 claude 的 ⇒ 歧义只在前两者之间", () => {
+    writeAgentConfig("agentparty-old-a.json", agentConfig("old-a", SERVER, "tok-a"));
+    writeAgentConfig("agentparty-old-b.json", agentConfig("old-b", SERVER, "tok-b"));
+    const claudePath = writeAgentConfig("agentparty-server.json", agentConfig(NEW, SERVER, "tok-new"));
+    bindTo("claude", claudePath, NEW);
+    writeWorkspaceConfigOnly(agentConfig("old-a", SERVER, "tok-a"), cwd);
+    const result = resolve({}, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("ambiguous");
+    expect(result.detail).toContain("身份有 2 个");
+  });
+
+  test("cwd 档：claude 的身份旁边只剩一份没人认领的老配置、且 cwd 指向它 ⇒ 过滤后唯一，正常认领（行为与单身份机器一致）", () => {
+    writeAgentConfig("agentparty-old-a.json", agentConfig("old-a", SERVER, "tok-a"));
+    const claudePath = writeAgentConfig("agentparty-server.json", agentConfig(NEW, SERVER, "tok-new"));
+    bindTo("claude", claudePath, NEW);
+    writeWorkspaceConfigOnly(agentConfig("old-a", SERVER, "tok-a"), cwd);
+    const result = resolve({}, null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.identity.name).toBe("old-a");
+    expect(result.identity.source).toBe("cwd-unique");
+  });
+
+  test("cwd 没绑 config、本机该频道的身份全是 claude 的 ⇒ no-codex-binding（不是含糊的 no-identity）", () => {
+    const oldPath = writeAgentConfig("agentparty-leo-server.json", agentConfig(OLD, SERVER, "tok-old"));
+    bindTo("claude", oldPath, OLD);
+    const result = resolve({}, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("no-codex-binding");
+  });
+
+  test("现有 harness-mismatch 路径原样保留：单身份机器、cwd 指向 claude 的身份 ⇒ 仍是 harness-mismatch", () => {
+    const path = writeAgentConfig("agentparty-leo-server.json", agentConfig(OLD, SERVER, "tok"));
+    writeWorkspaceConfigOnly(agentConfig(OLD, SERVER, "tok"), cwd);
+    bindTo("claude", path, OLD);
+    const result = resolve({}, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("harness-mismatch");
+  });
+
+  test("(d) no-codex-binding 的修法：party join --harness codex（不是 party init，#955），且明说是可选的", () => {
+    const fix = codexHookIdentityFix("no-codex-binding", { channel: CHANNEL, server: SERVER });
+    expect(fix).toMatch(/^AGENTPARTY_TOKEN='<T>' party join\b/);
+    expect(fix).toContain(`--channel ${CHANNEL}`);
+    expect(fix).toContain(`--server ${SERVER}`);
+    expect(fix).toContain("--harness codex");
+    expect(fix).toContain("--yes");
+    expect(fix).not.toMatch(/(^|\s)party init\b/);
+    expect(fix).toContain("可选");
+    expect(fix).toContain("claude");
+    expect(fix).not.toContain("重跑");
   });
 });

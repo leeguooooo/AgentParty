@@ -922,7 +922,9 @@ export function recordCodexSessionLifecycle(
       sessionId,
       deps: defaultCodexHookIdentityDeps(env, pid),
     });
-    if (!resolved.ok) {
+    // #971：候选全是别的 harness 的＝这台机就没打算让 codex 接本频道，是预期状态：不刷日志
+    // （唤醒层决策会以一条 skip(no-codex-binding) 留痕，够定位）。其余解析失败照旧记。
+    if (!resolved.ok && resolved.reason !== "no-codex-binding") {
       appendCodexAutoWakeLog(
         agentpartyHome(env),
         `codex-report: 入册时解析不出会话身份（${resolved.reason}）：${resolved.detail}`,
@@ -992,8 +994,9 @@ export function defaultCodexAutoWakeDeps(
         deps: defaultCodexHookIdentityDeps(env, pid),
       });
       if (resolved.ok) return { server: resolved.identity.server, token: resolved.identity.token };
-      // #960：绑给别的 harness 的身份由决策层以 skip(harness-mismatch) 留痕，这里不重复记。
-      if (resolved.reason !== "harness-mismatch") {
+      // #960/#971：绑给别的 harness 的身份由决策层以 skip(harness-mismatch) / skip(no-codex-binding)
+      // 留痕，这里不重复记。
+      if (resolved.reason !== "harness-mismatch" && resolved.reason !== "no-codex-binding") {
         appendCodexAutoWakeLog(
           home,
           `codex-report: 唤醒层解析不出会话身份（${resolved.reason}）：${resolved.detail}——不拉起`,
@@ -1066,7 +1069,9 @@ export function maybeStartCodexAutoWake(
     cwd,
     now,
     sessionKind,
-    harnessMismatch: refused?.refused === "harness-mismatch" ? refused.detail : null,
+    identityRefusal: refused !== null && (refused.refused === "harness-mismatch" || refused.refused === "no-codex-binding")
+      ? { reason: refused.refused, detail: refused.detail }
+      : null,
     hasAgentToken: auth !== null,
     // 已有 serve（不管是用户手挂的还是上一次自动拉的）就绝不拉第二个：一条 @ 触发两次
     // 完整 runner ＝ 双份回帖、git push 类副作用跑两遍。
@@ -1181,7 +1186,8 @@ export function defaultCodexStopWakeDeps(
       };
     }
     if (cached.resolution.ok) return cached.resolution.identity;
-    if (!logged) {
+    // #971：本目录的身份全是别的 harness 的＝codex 不接本频道是预期状态，每个 Stop 都记一行只是噪音。
+    if (!logged && cached.resolution.reason !== "no-codex-binding") {
       logged = true;
       appendCodexAutoWakeLog(
         home,

@@ -273,7 +273,8 @@ export function formatCodexWakeDiagnosis(d: CodexWakeDiagnosis): string[] {
     out.push("  另外: hook 装了但还没被 codex 信任 —— 未获批准的 hook 会被【静默跳过】");
     out.push("  怎么修: party wake check   （它会说出该在【哪个 codex 二进制】里批准——直接跑 `codex` 未必是对的）");
   }
-  if (d.bindings.length === 0 && d.identity === null) {
+  // #971：no-codex-binding 是「这台机没打算让 codex 接」，fix 里已说明可选；再劝「重跑接入包」就是反向引导。
+  if (d.bindings.length === 0 && d.identity === null && d.reason !== "no-codex-binding") {
     out.push("  提示: 本机还没有为 codex 记下任何加入绑定——重跑一遍该身份的接入包即可（加入即绑定，#924）");
   }
   return out;
