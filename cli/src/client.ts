@@ -137,6 +137,7 @@ const ERROR_CODES = new Set([
   "too_large",
   "loop_guard",
   "workflow_guard",
+  "wake_verify_rate_limited",
   "archived",
   "quota_exceeded",
   "channel_full",

@@ -5,7 +5,7 @@
 // 同时它是探针不是对话：不计入 loop guard 的 streak / fair-share（反复跑接入引导不该吃光频道名额），
 // 但频道已熔断时照样拒——那时 @ 本来就到不了它，验证失败是真话。
 import { env, runInDurableObject } from "cloudflare:test";
-import { LOOP_GUARD_AGENT_N, LOOP_GUARD_N, WAKE_VERIFY_PREFIX, isWakeVerifyFrame } from "@agentparty/shared";
+import { LOOP_GUARD_AGENT_N, LOOP_GUARD_N, WAKE_VERIFY_MIN_INTERVAL_MS, WAKE_VERIFY_PREFIX, isWakeVerifyFrame } from "@agentparty/shared";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { ChannelDO } from "../src/do";
 import { fetchMock } from "./fetch-mock";
@@ -69,6 +69,23 @@ async function seedGuardCounters(slug: string, agentName: string, count: number,
       `agent_count:${agentName}`,
       String(count),
       String(streak),
+    );
+  });
+}
+
+// #997：把该发送者最近一条被接受的验证帧时间戳拨到窗口之外（模拟 30s 过去，不碰 Date.now）。
+async function expireVerifyWindow(slug: string, agentName: string) {
+  const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
+  await runInDurableObject(stub, async (_instance: ChannelDO, state) => {
+    // 先确认这一行存在：不存在时 UPDATE 影响 0 行会静默"成功"，把测试自己的 bug 伪装成限频没过期。
+    const raw = state.storage.sql
+      .exec("SELECT value FROM meta WHERE key = ?", `wake_verify_at:${agentName}`)
+      .toArray()[0]?.value ?? null;
+    expect(raw).not.toBeNull();
+    state.storage.sql.exec(
+      "UPDATE meta SET value = CAST(CAST(value AS INTEGER) - ? AS TEXT) WHERE key = ?",
+      WAKE_VERIFY_MIN_INTERVAL_MS,
+      `wake_verify_at:${agentName}`,
     );
   });
 }
@@ -149,6 +166,9 @@ describe("验证帧不计 loop guard（issue #990）", () => {
     await seedGuardCounters(slug, agent.name, LOOP_GUARD_AGENT_N - 1);
 
     for (let i = 0; i < 3; i += 1) {
+      // #997：验证帧按发送者 30s 一条限频（见 wake-verify-rate-limit.spec.ts）；这里把上一条的窗口拨到过期，
+      // 让三条都被接受，专门看 guard 计数。
+      if (i > 0) await expireVerifyWindow(slug, agent.name);
       const res = await send(slug, agent.token, `${WAKE_VERIFY_PREFIX} @${agent.name} ping ${i}`, [agent.name]);
       expect(res.status).toBe(200);
     }

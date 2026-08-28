@@ -19,6 +19,7 @@ import { deliveryRecoveryJournalPath } from "../delivery-recovery-journal";
 import { readHealthCache } from "../health-cache";
 import { mentionWakeClaimDir, mentionWakeClaimKey } from "../mention-wake-claim";
 import { runWakeProbe, type WakeProbeOptions, type WakeTestFrame } from "../commands/wake";
+import { RestError } from "../rest";
 
 export type WakeVerifyLayer = "server_delivery" | "local_listener" | "model_reply";
 export type WakeVerifyHarness = "claude" | "codex" | "other";
@@ -169,10 +170,12 @@ export function classifyWakeVerify(
     return { ok: true, detail: `@${identity} ping → ${fmtSec(elapsedMs)} 收到回执 ✓（${via} #${resumed.seq}）` };
   }
   if (frame.result === "wake_pending") {
+    // #997：wake_pending 理论上必带 seq（探针已发出），但判层是纯函数、输入来自网络帧——seq 为 null 时不拼 "#null"。
+    const pendingSeq = frame.phases.mention_delivered.seq;
     return {
       ok: true,
       detail:
-        `@${identity} ping → ${fmtSec(elapsedMs)} 收到回执 ✓（runner 已接手 #${frame.phases.mention_delivered.seq}，` +
+        `@${identity} ping → ${fmtSec(elapsedMs)} 收到回执 ✓（runner 已接手${pendingSeq === null ? "" : ` #${pendingSeq}`}，` +
         "回帖待定——headless runner 处理一条要数分钟）",
     };
   }
@@ -232,6 +235,15 @@ export function classifyWakeVerify(
   };
 }
 
+/** 限频错误体里的 retry_after_ms → 整秒（向上取整，至少 1s）；体不合形状为 null。 */
+export function wakeVerifyRetryAfterSec(body: unknown): number | null {
+  if (typeof body !== "object" || body === null) return null;
+  const err = (body as { error?: unknown }).error;
+  if (typeof err !== "object" || err === null) return null;
+  const ms = (err as { retry_after_ms?: unknown }).retry_after_ms;
+  return typeof ms === "number" && Number.isFinite(ms) ? Math.max(1, Math.ceil(ms / 1000)) : null;
+}
+
 export const defaultVerifyWakeDeps: VerifyWakeDeps = {
   probe: runWakeProbe,
   localEvidence: readWakeLocalEvidence,
@@ -261,9 +273,24 @@ export async function verifyWakeRoundTrip(
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    const elapsedMs = deps.now() - startedAt;
+    // #997：服务端按发送者限频验证帧（同一身份 30s 一条）——不是三层里的任何一层，也不是熔断；说清等多久。
+    if (e instanceof RestError && e.code === "wake_verify_rate_limited") {
+      const waitSec = wakeVerifyRetryAfterSec(e.body);
+      return {
+        ok: false,
+        elapsedMs,
+        detail: `✗ 验证帧被服务端限频：同一身份 30s 内只能发一条${waitSec === null ? "" : `，${waitSec}s 后可再发`}`,
+        // 修法必须是能直接跑的命令：没拿到重试时间就只给验证命令本身，别拼一个不存在的「稍等片刻」进 shell。
+        fix: waitSec === null ? `party wake verify ${opts.channel}` : `sleep ${waitSec} && party wake verify ${opts.channel}`,
+        seq: null,
+        probe: null,
+        local: null,
+      };
+    }
     return {
       ok: false,
-      elapsedMs: deps.now() - startedAt,
+      elapsedMs,
       detail: `✗ 验证帧没发出去：${message}`,
       fix: /loop.guard/i.test(message) ? `party channel reset-guard ${opts.channel}   （频道已熔断，@ 现在到不了任何 agent）` : "party doctor",
       seq: null,

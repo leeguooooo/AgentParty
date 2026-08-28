@@ -16,9 +16,12 @@ import {
   readWakeLocalEvidence,
   verifyWakeBody,
   verifyWakeRoundTrip,
+  wakeVerifyRetryAfterSec,
   type VerifyWakeDeps,
   type WakeLocalEvidence,
 } from "../src/onboarding/verify-wake";
+import { resolveVerifyIdentity } from "../src/commands/wake";
+import { RestError } from "../src/rest";
 import { serveWakeAlreadyAdvertised, serveWakeNote } from "../src/commands/serve";
 import type { WakeTestFrame } from "../src/commands/wake";
 import type { ResolvedAuthDetailed } from "../src/oidc-cli";
@@ -110,6 +113,116 @@ describe("往返成功 ⇒ 第 4 步过（#990）", () => {
     expect(r.ok).toBe(true);
     expect(r.detail).toContain("收到回执 ✓");
     expect(r.detail).toContain("runner 已接手 #42");
+  });
+
+  test("wake_pending 但 seq 为 null（#997 防御）：仍算过，文案不拼 #null / #undefined", () => {
+    const v = classify(
+      frame({
+        result: "wake_pending",
+        phases: {
+          mention_delivered: { ok: true, seq: null, evidence: "accepted" },
+          wake_invoked: { ok: true, status: "invoked", adapter: "serve", evidence: "processing" },
+        },
+      }),
+      noLocal,
+    );
+    expect(v.ok).toBe(true);
+    expect(v.detail).toContain("runner 已接手，");
+    expect(v.detail).not.toMatch(/#(null|undefined)/);
+  });
+});
+
+describe("服务端限频（#997）", () => {
+  test("wake_verify_rate_limited：不是三层里的任何一层，说清等多久，修法带 sleep N", async () => {
+    const e = new RestError(429, "wake_verify_rate_limited", "already sent a wake-verify frame", {
+      error: { code: "wake_verify_rate_limited", message: "x", retry_after_ms: 12_400, retry_at: 1 },
+    });
+    const r = await verifyWakeRoundTrip({ server: SERVER, token: TOKEN, channel: CHANNEL, identity: ME }, deps(e));
+    expect(r.ok).toBe(false);
+    expect(r.layer).toBeUndefined();
+    expect(r.seq).toBeNull();
+    expect(r.detail).toBe("✗ 验证帧被服务端限频：同一身份 30s 内只能发一条，13s 后可再发");
+    expect(r.fix).toBe(`sleep 13 && party wake verify ${CHANNEL}`);
+  });
+
+  test("错误体缺 retry_after_ms：不编秒数", async () => {
+    const e = new RestError(429, "wake_verify_rate_limited", "limited", { error: { code: "wake_verify_rate_limited" } });
+    const r = await verifyWakeRoundTrip({ server: SERVER, token: TOKEN, channel: CHANNEL, identity: ME }, deps(e));
+    expect(r.ok).toBe(false);
+    expect(r.detail).toBe("✗ 验证帧被服务端限频：同一身份 30s 内只能发一条");
+    // 没有 retry_after 时修法只能是可执行的验证命令本身（coderabbit on #999：`稍等片刻 && …` 进 shell 会先炸）。
+    expect(r.fix).toBe(`party wake verify ${CHANNEL}`);
+  });
+
+  test("wakeVerifyRetryAfterSec：向上取整、至少 1s、形状不对为 null", () => {
+    expect(wakeVerifyRetryAfterSec({ error: { retry_after_ms: 12_400 } })).toBe(13);
+    expect(wakeVerifyRetryAfterSec({ error: { retry_after_ms: 200 } })).toBe(1);
+    expect(wakeVerifyRetryAfterSec({ error: { retry_after_ms: "soon" } })).toBeNull();
+    expect(wakeVerifyRetryAfterSec({ error: {} })).toBeNull();
+    expect(wakeVerifyRetryAfterSec(null)).toBeNull();
+    expect(wakeVerifyRetryAfterSec("nope")).toBeNull();
+  });
+});
+
+describe("身份以 /api/me 为准，config 只是缓存（#997）", () => {
+  const cfg = { server: SERVER, token: TOKEN };
+  function idDeps(cached: string | null, me: string | Error) {
+    const warned: string[] = [];
+    return {
+      warned,
+      deps: {
+        cached: () => cached,
+        fetchMe: async () => {
+          if (me instanceof Error) throw me;
+          return { name: me };
+        },
+        warn: (line: string) => warned.push(line),
+      },
+    };
+  }
+
+  test("缓存与权威不一致：取权威身份，打印一条提示", async () => {
+    const { deps: d, warned } = idDeps("stale-me", ME);
+    await expect(resolveVerifyIdentity(cfg, d)).resolves.toEqual({ identity: ME, source: "server" });
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain("stale-me");
+    expect(warned[0]).toContain(ME);
+    expect(warned[0]).toContain("以服务端为准");
+  });
+
+  // coderabbit on #999（CWE-150）：/api/me 的 name 与网络错误消息来自远端，写 stderr 前必须剥终端控制字符；
+  // 但返回给验证帧用的身份值保持原样（那是要精确匹配的原值，不是显示用）。
+  test("远端身份名 / 错误消息含终端控制字符：提示行剥掉，返回值不动", async () => {
+    const evil = "me\u001b]0;pwned\u0007\u001b[31m";
+    const { deps: d, warned } = idDeps("stale-me", evil);
+    await expect(resolveVerifyIdentity(cfg, d)).resolves.toEqual({ identity: evil, source: "server" });
+    expect(warned).toHaveLength(1);
+    expect({ hasEsc: warned[0]!.includes("\u001b"), hasBel: warned[0]!.includes("\u0007") }).toEqual({ hasEsc: false, hasBel: false });
+    const err = idDeps("cached-me", new Error("boom\u001b[2J\u001b]52;c;evil\u0007"));
+    await expect(resolveVerifyIdentity(cfg, err.deps)).resolves.toEqual({ identity: "cached-me", source: "cache" });
+    expect(err.warned[0]!.includes("\u001b")).toBe(false);
+  });
+
+  test("缓存一致 / 无缓存：取权威身份，不提示", async () => {
+    const same = idDeps(ME, ME);
+    await expect(resolveVerifyIdentity(cfg, same.deps)).resolves.toEqual({ identity: ME, source: "server" });
+    expect(same.warned).toEqual([]);
+    const none = idDeps(null, ME);
+    await expect(resolveVerifyIdentity(cfg, none.deps)).resolves.toEqual({ identity: ME, source: "server" });
+    expect(none.warned).toEqual([]);
+    const empty = idDeps("", ME);
+    await expect(resolveVerifyIdentity(cfg, empty.deps)).resolves.toEqual({ identity: ME, source: "server" });
+    expect(empty.warned).toEqual([]);
+  });
+
+  test("/api/me 不可达：有缓存才退回缓存并警告；没缓存就把错误抛出去", async () => {
+    const fallback = idDeps("cached-me", new Error("fetch failed"));
+    await expect(resolveVerifyIdentity(cfg, fallback.deps)).resolves.toEqual({ identity: "cached-me", source: "cache" });
+    expect(fallback.warned).toHaveLength(1);
+    expect(fallback.warned[0]).toContain("fetch failed");
+    expect(fallback.warned[0]).toContain("cached-me");
+    const dead = idDeps(null, new Error("fetch failed"));
+    await expect(resolveVerifyIdentity(cfg, dead.deps)).rejects.toThrow("fetch failed");
   });
 });
 
@@ -311,15 +424,17 @@ describe("party wake verify（#990）", () => {
     return { code, stdout, stderr };
   }
 
-  function writeCfg(server: string) {
+  function writeCfg(server: string, cachedName: string = ME) {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "config.json"), JSON.stringify({
       server,
       token: TOKEN,
-      identity: { name: ME, email: null, kind: "agent", role: "agent", owner: null, channel_scope: null, verified_at: 0 },
+      identity: { name: cachedName, email: null, kind: "agent", role: "agent", owner: null, channel_scope: null, verified_at: 0 },
     }));
   }
 
+  // #997：身份以 /api/me 为准。
+  const me = () => Response.json({ name: ME, email: null, kind: "agent", role: "agent", owner: null, channel_scope: null, verified_at: 0 });
   const presence = () => Response.json({
     presence: [{ name: ME, state: "waiting", note: null, ts: Date.now(), last_seen: Date.now(), residency: "supervised", wake: { kind: "serve" } }],
   });
@@ -327,6 +442,7 @@ describe("party wake verify（#990）", () => {
 
   test("往返成功：以本身份发验证帧（[wake-verify] + 只 @ 自己），收到回帖 ⇒ exit 0，印第 4 步那一行", async () => {
     mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") return me();
       if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/presence`) return presence();
       if (req.method === "POST" && req.path === `/api/channels/${CHANNEL}/messages`) return Response.json({ seq: 5 });
       if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/wake-deliveries`) {
@@ -352,6 +468,7 @@ describe("party wake verify（#990）", () => {
 
   test("超时：服务端已广播、这台机器没有武装监听 ⇒ exit 2，✗ 行说清 local_listener 与修法；--json 带 layer", async () => {
     mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") return me();
       if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/presence`) return presence();
       if (req.method === "POST" && req.path === `/api/channels/${CHANNEL}/messages`) return Response.json({ seq: 7 });
       if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/wake-deliveries`) {
@@ -369,13 +486,14 @@ describe("party wake verify（#990）", () => {
     const json = await runCli(["wake", "verify", CHANNEL, "--timeout", "1", "--json"]);
     expect(json.code).toBe(2);
     const out = JSON.parse(json.stdout.trim());
-    expect(out).toMatchObject({ type: "wake_verify", channel: CHANNEL, identity: ME, ok: false, layer: "local_listener", seq: 7 });
+    expect(out).toMatchObject({ type: "wake_verify", channel: CHANNEL, identity: ME, identity_source: "server", ok: false, layer: "local_listener", seq: 7 });
     expect(out.probe.type).toBe("wake_test");
     expect(out.local.listener.live).toBeNull();
   });
 
   test("超时：服务端账本没有这条 @ 的行 ⇒ server_delivery（与本机层文案不同）", async () => {
     mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") return me();
       if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/presence`) return presence();
       if (req.method === "POST" && req.path === `/api/channels/${CHANNEL}/messages`) return Response.json({ seq: 8 });
       if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/wake-deliveries`) return Response.json({ deliveries: [] });
@@ -388,6 +506,72 @@ describe("party wake verify（#990）", () => {
     const out = JSON.parse(r.stdout.trim());
     expect(out.layer).toBe("server_delivery");
     expect(out.detail).toContain("服务端未投递");
+  });
+
+  test("config 缓存的是旧身份：验证帧仍 @ /api/me 的权威身份，stderr 提示不一致（#997）", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") return me();
+      if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/presence`) return presence();
+      if (req.method === "POST" && req.path === `/api/channels/${CHANNEL}/messages`) return Response.json({ seq: 9 });
+      if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/wake-deliveries`) {
+        return Response.json({ deliveries: [{ mention_seq: 9, target_name: ME, webhook_name: "", adapter_kind: "serve", attempt: 1, result: "broadcast", http_status: null, error: null, attempted_at: 1, ack_seq: null, resume_seq: null }] });
+      }
+      if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/messages`) {
+        return Response.json({ messages: [{ type: "message", seq: 10, sender: { name: ME, kind: "agent" }, kind: "message", body: "pong", mentions: [], reply_to: 9, ts: 1 }] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url, "stale-me");
+    const r = await runCli(["wake", "verify", CHANNEL, "--timeout", "2", "--json"]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("stale-me");
+    expect(r.stderr).toContain("以服务端为准");
+    const posts = reqsOf(mock, "POST", `/api/channels/${CHANNEL}/messages`);
+    expect(posts).toHaveLength(1);
+    expect((posts[0]!.body as { mentions: string[] }).mentions).toEqual([ME]);
+    expect((posts[0]!.body as { body: string }).body).toContain(`@${ME} ping`);
+    const out = JSON.parse(r.stdout.trim());
+    expect(out).toMatchObject({ type: "wake_verify", identity: ME, identity_source: "server", ok: true });
+  });
+
+  test("/api/me 不可达：退回 config 缓存身份继续验证，stderr 警告（#997）", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") return Response.json({ error: { code: "unavailable", message: "directory down" } }, { status: 503 });
+      if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/presence`) return presence();
+      if (req.method === "POST" && req.path === `/api/channels/${CHANNEL}/messages`) return Response.json({ seq: 11 });
+      if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/wake-deliveries`) {
+        return Response.json({ deliveries: [{ mention_seq: 11, target_name: ME, webhook_name: "", adapter_kind: "serve", attempt: 1, result: "broadcast", http_status: null, error: null, attempted_at: 1, ack_seq: null, resume_seq: null }] });
+      }
+      if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/messages`) {
+        return Response.json({ messages: [{ type: "message", seq: 12, sender: { name: ME, kind: "agent" }, kind: "message", body: "pong", mentions: [], reply_to: 11, ts: 1 }] });
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["wake", "verify", CHANNEL, "--timeout", "2", "--json"]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("/api/me 不可达");
+    const out = JSON.parse(r.stdout.trim());
+    expect(out).toMatchObject({ identity: ME, identity_source: "cache", ok: true });
+  });
+
+  test("服务端限频：exit 2，说清等多久与修法（#997）", async () => {
+    mock = startRestMock((req) => {
+      if (req.method === "GET" && req.path === "/api/me") return me();
+      if (req.method === "GET" && req.path === `/api/channels/${CHANNEL}/presence`) return presence();
+      if (req.method === "POST" && req.path === `/api/channels/${CHANNEL}/messages`) {
+        return Response.json(
+          { error: { code: "wake_verify_rate_limited", message: "limited", retry_after_ms: 21_500, retry_at: Date.now() + 21_500 } },
+          { status: 429 },
+        );
+      }
+      return undefined;
+    });
+    writeCfg(mock.url);
+    const r = await runCli(["wake", "verify", CHANNEL, "--timeout", "2"]);
+    expect(r.code).toBe(2);
+    expect(r.stdout).toContain("第 4 步  真发一条 @ 验证 · ✗ 验证帧被服务端限频：同一身份 30s 内只能发一条，22s 后可再发");
+    expect(r.stdout).toContain(`→ 修法：sleep 22 && party wake verify ${CHANNEL}`);
   });
 
   test("用法错误：verify 不收目标位置参数", async () => {
