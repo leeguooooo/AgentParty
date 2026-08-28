@@ -172,8 +172,10 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     const verdict = logs.find((l) => l.startsWith("✅"));
     expect(verdict).toBeDefined();
     expect(verdict).toContain("重开");
-    // 这一档是**确定**换过版本，结论就该说确定话。
+    // 这一档是**确定**换过版本，结论就该说确定话——但同样不许承诺新会话「就能唤醒」。
     expect(verdict).toContain("当前这个会话还挂着旧插件");
+    expect(verdict).not.toMatch(/一定能|就能唤醒/);
+    expect(verdict).toContain("party wake verify");
   });
 
   // codex stop-time review on b88a58c：update 之后那一次重读失败（plugin list 偶发读不出）时，
@@ -215,6 +217,9 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(verdict).toContain("读不出来");
     expect(verdict).toContain("保险起见");
     expect(verdict).not.toContain("当前这个会话还挂着旧插件");
+    // 也不许对「新会话一定能被唤醒」打包票（第六轮）：那个会话还没起、没验证过，只能指向真验证。
+    expect(verdict).not.toMatch(/一定能|就能唤醒/);
+    expect(verdict).toContain("party wake verify");
   });
 
   test("子命令返回非 0 且最终版本仍不对 ⇒ 照实报未装好，不能被「按最终事实判」放过", async () => {

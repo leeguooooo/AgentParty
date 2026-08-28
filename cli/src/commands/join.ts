@@ -1047,13 +1047,15 @@ export function completionLine(ctx: JoinCtx, done: string = "接入完成"): str
     // #961：插件刚装/刚更新，当前这个会话还挂着旧的——「要重开」是结论的一部分，不能埋在补充行里。
     // #979：重开也得用 party claude 起，普通 claude 起的会话是蛰伏档。
     return (
+      // 两档都**不许对「新会话能被唤醒」打包票**：那个会话还没起、更没验证过，唯一能证明它的是
+      // 第 4 步真发一条 @（codex stop-time review on b75a9e1）。所以结论只说已知事实 + 下一步怎么验。
       ctx.claudePluginRestart === "changed"
-        ? `✅ ${done}，差一次重开：claude 插件已是 ${RUNNING_VERSION}，【用 ${claudeArmCommand(slug)} 新开一个 Claude 会话】后 @ ${identity} 就能唤醒它；` +
-          `当前这个会话还挂着旧插件，不会被唤醒。`
+        ? `✅ ${done}，差一次重开：claude 插件已是 ${RUNNING_VERSION}，当前这个会话还挂着旧插件、收不到 @。` +
+          `【用 ${claudeArmCommand(slug)} 新开一个 Claude 会话】，起好后在那个会话里跑 \`party wake verify ${slug}\` 验证 @ ${identity} 真能叫醒它。`
         // 版本读不出来 ⇒ 不知道这个会话挂的是新是旧。结论只能照实说，不许把不确定写成确定
         // （codex stop-time review on 2e7f6b2）。
         : `✅ ${done}，但插件版本读不出来：无法确认当前这个会话挂的是不是旧插件。保险起见【用 ` +
-          `${claudeArmCommand(slug)} 新开一个 Claude 会话】，那个会话被 @ ${identity} 时一定能唤醒。`
+          `${claudeArmCommand(slug)} 新开一个 Claude 会话】，起好后在那个会话里跑 \`party wake verify ${slug}\` 验证 @ ${identity} 能不能叫醒它。`
     );
   }
   if (ctx.listener !== null) {
