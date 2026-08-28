@@ -237,7 +237,11 @@ export async function runRecover(opts: RecoverOptions, deps: RecoverDeps): Promi
     claudePluginRestart: false,
     identity: null,
     receiveMode: "interactive",
+    // #989：recover 没有第 2 步「问到了人」，第 3 步按非交互走（印命令 + 探活 + 停），与 join --yes 一致；
+    // 不问「另开终端 / 在这个终端起」，也就不会把「起会话」记成待办。
+    interactive: false,
     listener: null,
+    launchAfterJoin: false,
   };
   // 第 2 步是 join 的第 0 步，第 3/4 步是 join 的第 3/4 步——同一份实现，只换 rerun 文案。
   const steps: Step<RecoverCtx>[] = [recoverIdentityStep(rerun), versionStep(rerun), ...harnessGatedWakeSteps()];
