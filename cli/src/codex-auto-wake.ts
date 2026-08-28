@@ -51,6 +51,18 @@ export const CODEX_AUTO_WAKE_HEALTHY_RUN_MS = 60_000;
  * 配合 serve 的指数退避（1s→30s 封顶），20 次约等于 8 分钟连不上才放弃。
  */
 export const CODEX_AUTO_WAKE_MAX_CONSECUTIVE_FAILURES = 20;
+/**
+ * 退避窗口（#959）：同 (身份, 频道) 的唤醒层刚被回收过，这段时间内 SessionStart 不再拉起。
+ * 一次性 codex 一个接一个来时，没有这条就是「拉起 → 发帧 → 60 秒回收 → 再拉起」的死循环。
+ */
+export const CODEX_AUTO_WAKE_FLAP_WINDOW_MS = 10 * 60_000;
+/**
+ * 「短命」的定义：拉起后不到这么久就被回收 ＝ 没有人真的用过它。只对短命回收退避——
+ * 一个人开着交互式 codex 干了半小时再关掉、两分钟后重新打开，唤醒层理应立刻回来。
+ */
+export const CODEX_AUTO_WAKE_FLAP_SHORT_LIFE_MS = 5 * 60_000;
+/** 拉起时把标记文件路径交给唤醒层子进程：回收时它据此把「刚被回收」写回标记，供退避判定。 */
+export const CODEX_AUTO_WAKE_MARKER_ENV = "AGENTPARTY_CODEX_AUTO_WAKE_MARKER";
 
 export type CodexAutoWakeMode = "off" | "serve";
 
@@ -182,6 +194,16 @@ export interface CodexAutoWakeMarker {
   started_at: number | null;
   claimed_at: number;
   channel: string;
+  /** 上一次唤醒层被回收的时刻（#959 退避判定）；没回收过 / 老标记为 null。 */
+  reaped_at?: number | null;
+  /** 上一次唤醒层从拉起到被回收活了多久；与 reaped_at 成对。 */
+  lived_ms?: number | null;
+}
+
+/** 退避判定的证据（#959）：刚被回收、且是短命的那种。 */
+export interface CodexAutoWakeFlap {
+  reaped_at: number;
+  lived_ms: number;
 }
 
 export function codexAutoWakeMarkerPath(home: string, target: string): string {
@@ -200,10 +222,51 @@ export function readCodexAutoWakeMarker(path: string): CodexAutoWakeMarker | nul
         : null,
       claimed_at: value.claimed_at,
       channel: typeof value.channel === "string" ? value.channel : "",
+      reaped_at: typeof value.reaped_at === "number" && Number.isFinite(value.reaped_at) ? value.reaped_at : null,
+      lived_ms: typeof value.lived_ms === "number" && Number.isFinite(value.lived_ms) ? value.lived_ms : null,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * 唤醒层退场时把「刚被回收」写回标记（#959）。只补两个字段，pid / claimed_at 原样保留——
+ * 标记的存活判定仍然由 pid 决定，回收记录只服务退避。写失败静默：退避是兜底，不是新的单点。
+ */
+export function recordCodexAutoWakeReap(path: string, now: number, livedMs: number): void {
+  try {
+    const marker = readCodexAutoWakeMarker(path);
+    atomicWriteJson(path, {
+      pid: marker?.pid ?? null,
+      started_at: marker?.started_at ?? null,
+      claimed_at: marker?.claimed_at ?? now,
+      channel: marker?.channel ?? "",
+      reaped_at: now,
+      lived_ms: Math.max(0, Math.floor(livedMs)),
+    });
+  } catch {
+    // 退避写不进去，下次 SessionStart 顶多多拉一次——比让回收路径炸掉好。
+  }
+}
+
+/**
+ * 「同 (身份, 频道) 刚被回收过、而且是短命的」→ 返回证据，调用方据此 skip(flapping)；否则 null。
+ * 两个条件缺一不可：只看「刚回收过」会误伤关掉重开的交互式用户；只看「短命」则没有时间边界。
+ */
+export function recentCodexAutoWakeFlap(
+  path: string,
+  now: number,
+  opts: { windowMs?: number; shortLifeMs?: number } = {},
+): CodexAutoWakeFlap | null {
+  const marker = readCodexAutoWakeMarker(path);
+  if (marker === null || marker.reaped_at === null || marker.reaped_at === undefined) return null;
+  if (marker.lived_ms === null || marker.lived_ms === undefined) return null;
+  const windowMs = opts.windowMs ?? CODEX_AUTO_WAKE_FLAP_WINDOW_MS;
+  const shortLifeMs = opts.shortLifeMs ?? CODEX_AUTO_WAKE_FLAP_SHORT_LIFE_MS;
+  if (marker.reaped_at > now || now - marker.reaped_at >= windowMs) return null;
+  if (marker.lived_ms > shortLifeMs) return null;
+  return { reaped_at: marker.reaped_at, lived_ms: marker.lived_ms };
 }
 
 /**
@@ -254,9 +317,12 @@ export function claimCodexAutoWake(
 export type CodexAutoWakeSkipReason =
   | "disabled"
   | "no-channel"
+  | "non-interactive"
+  | "harness-mismatch"
   | "no-agent-token"
   | "already-serving"
-  | "already-starting";
+  | "already-starting"
+  | "flapping";
 
 export type CodexAutoWakeDecision =
   | { action: "skip"; reason: CodexAutoWakeSkipReason; detail: string }
@@ -275,6 +341,23 @@ export interface CodexAutoWakeDecisionInput {
    * 里无限重试、走不到抢锁那步，只靠 serveHolderPid 会让断网时每开一个会话堆一个进程。
    */
   startingPid?: number | null;
+  /**
+   * 触发这次 SessionStart 的 codex 是不是人在用的会话（#959）。一次性 / 嵌入式 codex 压根不该
+   * 拉唤醒层：它 60 秒后必被回收，留下的只有一条零信息的 waiting 帧。缺省 / unknown = 按交互式处理。
+   */
+  sessionKind?: CodexSessionKindLike | null;
+  /** 身份解析被「绑给别的 harness」拒掉时的说明（#960）；null = 没这回事。 */
+  harnessMismatch?: string | null;
+  /** 同 (身份, 频道) 刚被回收过的证据（#959 退避）；null = 没有。 */
+  flapping?: CodexAutoWakeFlap | null;
+  /** 决策时刻；只用于把退避说明里的「多久前」算出来。缺省 Date.now()。 */
+  now?: number;
+}
+
+/** 与 codex-session-kind.ts 的探测结果同形；这里只依赖形状，不引入 ps。 */
+export interface CodexSessionKindLike {
+  kind: "interactive" | "non-interactive" | "unknown";
+  detail: string;
 }
 
 /**
@@ -298,6 +381,18 @@ export function decideCodexAutoWake(input: CodexAutoWakeDecisionInput): CodexAut
   if (channel === null) {
     return { action: "skip", reason: "no-channel", detail: `本会话 cwd 没有绑定频道：${input.cwd}` };
   }
+  if (input.sessionKind?.kind === "non-interactive") {
+    return {
+      action: "skip",
+      reason: "non-interactive",
+      detail:
+        `${input.sessionKind.detail}——一次性 codex 不拉唤醒层` +
+        `（拉了也会在 60 秒后被回收，只给 #${channel} 留一条零信息的 waiting 帧）`,
+    };
+  }
+  if (typeof input.harnessMismatch === "string" && input.harnessMismatch !== "") {
+    return { action: "skip", reason: "harness-mismatch", detail: input.harnessMismatch };
+  }
   if (!input.hasAgentToken) {
     return {
       action: "skip",
@@ -320,6 +415,16 @@ export function decideCodexAutoWake(input: CodexAutoWakeDecisionInput): CodexAut
         `#${channel} 上已有本身份拉起的唤醒层（` +
         `${input.startingPid > 0 ? `pid ${input.startingPid}` : "另一个会话正在拉起中"}）——它可能还在连服务端。` +
         `不再拉第二个（断网时 serve 会无限重连、拿不到实例锁，只看锁会越堆越多）`,
+    };
+  }
+  if (input.flapping !== null && input.flapping !== undefined) {
+    const ago = Math.max(0, Math.round(((input.now ?? Date.now()) - input.flapping.reaped_at) / 1000));
+    return {
+      action: "skip",
+      reason: "flapping",
+      detail:
+        `#${channel} 上本身份的唤醒层 ${ago}s 前刚被回收（只活了 ${Math.round(input.flapping.lived_ms / 1000)}s）` +
+        `——${Math.round(CODEX_AUTO_WAKE_FLAP_WINDOW_MS / 60_000)} 分钟内不再拉起，免得「拉起→发帧→回收」循环刷屏`,
     };
   }
   return {

@@ -13,6 +13,12 @@ import { join } from "node:path";
 import {
   CODEX_AUTO_WAKE_ENV,
   CODEX_AUTO_WAKE_CLAIM_TTL_MS,
+  CODEX_AUTO_WAKE_FLAP_SHORT_LIFE_MS,
+  CODEX_AUTO_WAKE_FLAP_WINDOW_MS,
+  CODEX_AUTO_WAKE_MARKER_ENV,
+  readCodexAutoWakeMarker,
+  recentCodexAutoWakeFlap,
+  recordCodexAutoWakeReap,
   CODEX_AUTO_WAKE_MAX_CONSECUTIVE_FAILURES,
   createCodexAutoWakeStartupBudget,
   CODEX_AUTO_WAKE_GRACE_MS,
@@ -35,12 +41,15 @@ import {
 } from "../src/codex-auto-wake";
 import {
   codexAutoWakeServeDeps,
+  defaultCodexAutoWakeDeps,
   handleCodexHookRecord,
   maybeStartCodexAutoWake,
   runCodexAutoWakeSupervise,
   type CodexAutoWakeSpawnDeps,
 } from "../src/commands/hook";
 import { currentProcessStartedAt, instanceLockTarget } from "../src/instance-lock";
+import { writeJoinBinding, joinBindingsPath, type BindingHarness } from "../src/join-binding";
+import { writeState, writeWorkspaceConfigOnly, type Config } from "../src/config";
 
 const CODEX_SESSION_ID = "019f95e8-2c0b-7903-8779-cd102c5ecd4c";
 
@@ -526,5 +535,231 @@ describe("生命周期：codex 没有 SessionEnd，靠 pid 探活收尾", () => 
     resolveServe(0);
     await run;
     expect(terminated).toBe(1);
+  });
+});
+
+// ---- #959 / #960：一次性 codex 反复拉起、codex 抢走 claude 绑定的身份 ----
+
+describe("pins #959：一次性 codex 不拉唤醒层（启动前判定，不是 60 秒后再回收）", () => {
+  test("事故场景：别的 Claude 委托的一次性 codex ⇒ skip(non-interactive)，一个进程都不起、身份都不去解析", () => {
+    let identityLookups = 0;
+    const d = deps({
+      sessionKind: () => ({ kind: "non-interactive", detail: "这个 codex 是被另一个 claude 会话委托拉起的" }),
+      readConfigAt: () => { identityLookups += 1; return { server: "https://party.example.com", token: "agent-token" }; },
+    });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "skip", reason: "non-interactive" });
+    expect(d.calls).toHaveLength(0);
+    expect(identityLookups).toBe(0);
+    expect(d.lines.join("\n")).toContain("skip(non-interactive)");
+    expect(d.lines.join("\n")).toContain("委托拉起");
+  });
+
+  test("探测不出形态（unknown）⇒ 沿用既有行为，照拉", () => {
+    const d = deps({ sessionKind: () => ({ kind: "unknown", detail: "ps 挂了" }) });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "start", channel: "dev" });
+    expect(d.calls).toHaveLength(1);
+  });
+
+  test("交互式 codex ⇒ 照拉（人在终端里等着被 @）", () => {
+    const d = deps({ sessionKind: () => ({ kind: "interactive", detail: "codex TUI" }) });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "start" });
+    expect(d.calls).toHaveLength(1);
+  });
+
+  test("显式关掉时连形态都不探测（disabled 仍是第一道门，不刷日志）", () => {
+    writeCodexAutoWakeSetting(home, "off");
+    let probed = 0;
+    const d = deps({ sessionKind: () => { probed += 1; return { kind: "non-interactive", detail: "x" }; } });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "skip", reason: "disabled" });
+    expect(probed).toBe(0);
+    expect(d.lines).toHaveLength(0);
+  });
+
+  test("真实接线：默认 deps 的 sessionKind 就是进程形态探测（不是恒 interactive 的桩）", () => {
+    const real = defaultCodexAutoWakeDeps({ AGENTPARTY_HOME: home }, 1);
+    expect(typeof real.sessionKind).toBe("function");
+    // pid 1 不合法 ⇒ unknown：探测器真的被接上了，且失败时不误判。
+    expect(real.sessionKind!().kind).toBe("unknown");
+  });
+});
+
+describe("pins #959：退避——刚被短命回收过的 (身份, 频道) 不再拉起", () => {
+  const auth = codexAutoWakeAuth({ server: "https://party.example.com", token: "agent-token" })!;
+  const marker = () => codexAutoWakeMarkerPath(home, codexAutoWakeTarget(auth, "dev"));
+
+  test("事故场景：唤醒层 60 秒前刚被回收（只活了 61 秒）⇒ skip(flapping)，不拉", () => {
+    mkdirSync(join(home, "codex-auto-wake"), { recursive: true });
+    writeCodexAutoWakeMarker(marker(), { pid: 999_999, started_at: null, claimed_at: 0, channel: "dev" });
+    recordCodexAutoWakeReap(marker(), 1_000 - 60_000, 61_000);
+    const d = deps({ processAlive: () => false });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "skip", reason: "flapping" });
+    expect(d.calls).toHaveLength(0);
+    expect(d.lines.join("\n")).toContain("skip(flapping)");
+  });
+
+  test("回收已经是很久以前的事 ⇒ 窗口过了，照拉", () => {
+    mkdirSync(join(home, "codex-auto-wake"), { recursive: true });
+    writeCodexAutoWakeMarker(marker(), { pid: 999_999, started_at: null, claimed_at: 0, channel: "dev" });
+    recordCodexAutoWakeReap(marker(), 1_000 - CODEX_AUTO_WAKE_FLAP_WINDOW_MS - 1, 61_000);
+    const d = deps({ processAlive: () => false });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "start" });
+  });
+
+  test("上一层活得够久（人真的用过它）再被回收 ⇒ 不算 flapping，关掉重开立刻能回来", () => {
+    mkdirSync(join(home, "codex-auto-wake"), { recursive: true });
+    writeCodexAutoWakeMarker(marker(), { pid: 999_999, started_at: null, claimed_at: 0, channel: "dev" });
+    recordCodexAutoWakeReap(marker(), 1_000 - 30_000, CODEX_AUTO_WAKE_FLAP_SHORT_LIFE_MS + 1);
+    const d = deps({ processAlive: () => false });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "start" });
+  });
+
+  test("拉起时把标记路径交给子进程，回收时它才写得回来", () => {
+    const d = deps({ env: { [CODEX_AUTO_WAKE_ENV]: "1" } });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "start" });
+    expect(d.calls[0]!.env[CODEX_AUTO_WAKE_MARKER_ENV]).toBe(marker());
+  });
+
+  test("回收记录保留 pid/claimed_at，只补 reaped_at/lived_ms；老标记没有这两个字段 ⇒ 不算 flapping", () => {
+    mkdirSync(join(home, "codex-auto-wake"), { recursive: true });
+    writeCodexAutoWakeMarker(marker(), { pid: 4242, started_at: 77, claimed_at: 5, channel: "dev" });
+    expect(recentCodexAutoWakeFlap(marker(), 1_000)).toBeNull();
+    recordCodexAutoWakeReap(marker(), 900, 61_000);
+    expect(readCodexAutoWakeMarker(marker())).toMatchObject({ pid: 4242, started_at: 77, claimed_at: 5, reaped_at: 900, lived_ms: 61_000 });
+    expect(recentCodexAutoWakeFlap(marker(), 1_000)).toEqual({ reaped_at: 900, lived_ms: 61_000 });
+  });
+
+  test("端到端：supervise 回收 → 标记落下退避证据 → 下一个 SessionStart 不再拉起（死循环就断在这）", async () => {
+    let terminated = 0;
+    let resolveServe: (code: number) => void = () => {};
+    const served = new Promise<number>((resolve) => { resolveServe = resolve; });
+    let clock = 10_000;
+    const run = runCodexAutoWakeSupervise("dev", {
+      env: {},
+      pollMs: 1,
+      graceMs: 0,
+      now: () => clock,
+      liveOwners: () => 0,
+      log: () => {},
+      markerPath: marker(),
+      terminate: () => { terminated += 1; resolveServe(0); },
+      serve: () => served,
+    });
+    clock = 10_000 + 61_000;
+    expect(await run).toBe(0);
+    expect(terminated).toBe(1);
+    expect(readCodexAutoWakeMarker(marker())).toMatchObject({ reaped_at: 71_000, lived_ms: 61_000 });
+    // 下一个一次性 codex 紧接着来了（20 秒后）——修复前这里会再拉一层。
+    const d = deps({ now: () => 71_000 + 20_000, processAlive: () => false });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "skip", reason: "flapping" });
+    expect(d.calls).toHaveLength(0);
+  });
+
+  test("supervise 没拿到标记路径（老拉起方）⇒ 回收照常，只是不留退避证据", async () => {
+    let resolveServe: (code: number) => void = () => {};
+    const served = new Promise<number>((resolve) => { resolveServe = resolve; });
+    const run = runCodexAutoWakeSupervise("dev", {
+      env: {},
+      pollMs: 1,
+      graceMs: 0,
+      liveOwners: () => 0,
+      log: () => {},
+      markerPath: null,
+      terminate: () => resolveServe(0),
+      serve: () => served,
+    });
+    expect(await run).toBe(0);
+    expect(existsSync(marker())).toBe(false);
+  });
+});
+
+describe("pins #960：codex hook 不认领绑给 claude 的身份", () => {
+  const SERVER = "https://party.example.com";
+  const CHANNEL = "ludo";
+  let cwd: string;
+  let savedConfigEnv: string | undefined;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "agentparty-autowake-cwd-"));
+    savedConfigEnv = process.env.AGENTPARTY_CONFIG;
+    delete process.env.AGENTPARTY_CONFIG;
+  });
+  afterEach(() => {
+    if (savedConfigEnv === undefined) delete process.env.AGENTPARTY_CONFIG;
+    else process.env.AGENTPARTY_CONFIG = savedConfigEnv;
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  function agentConfig(name: string, token: string): Config {
+    return {
+      server: SERVER,
+      token,
+      identity: { name, email: null, kind: "agent", role: "member", owner: "leo", channel_scope: CHANNEL, verified_at: 1 },
+    };
+  }
+  /** 照真机：身份 config 落在 ~/.agentparty/agents/，cwd 绑着它，join-bindings 记着是谁加入的。 */
+  function joinAs(name: string, token: string, harness: BindingHarness, bindToCwd = true): string {
+    const agents = join(home, "agents");
+    mkdirSync(agents, { recursive: true, mode: 0o700 });
+    const path = join(agents, `agentparty-${name}-${CHANNEL}.json`);
+    writeFileSync(path, JSON.stringify(agentConfig(name, token)), { mode: 0o600 });
+    if (bindToCwd) {
+      writeWorkspaceConfigOnly(agentConfig(name, token), cwd);
+      writeState({ channel: CHANNEL, cursor: 0 }, cwd);
+    }
+    writeJoinBinding(joinBindingsPath(home), {
+      harness, server: SERVER, channel: CHANNEL, owner: "leo", identity: name, config_path: path, cwd, created_at: Date.now(),
+    });
+    return path;
+  }
+  /** 真实的身份解析接线（defaultCodexAutoWakeDeps.readConfigAt），其余照旧打桩。 */
+  function realDeps(): ReturnType<typeof deps> {
+    const real = defaultCodexAutoWakeDeps({ AGENTPARTY_HOME: home }, 1);
+    return deps({
+      readConfigAt: real.readConfigAt,
+      channelAt: real.channelAt,
+      sessionKind: () => ({ kind: "interactive", detail: "codex TUI" }),
+    });
+  }
+
+  test("事故场景：`party join --harness claude --as leo-server` 之后，同 cwd 的 codex ⇒ skip(harness-mismatch)", () => {
+    joinAs("leo-server", "tok-claude", "claude");
+    const d = realDeps();
+    const outcome = maybeStartCodexAutoWake(sessionStart({ cwd }), d);
+    expect(outcome).toMatchObject({ action: "skip", reason: "harness-mismatch" });
+    expect(d.calls).toHaveLength(0);
+    const log = d.lines.join("\n");
+    expect(log).toContain("skip(harness-mismatch)");
+    expect(log).toContain("leo-server");
+    expect(log).toContain("--harness claude");
+    // 不是「没有 agent token」那种含糊的跳过——原因以自己的名字出现。
+    expect(log).not.toContain("no-agent-token");
+  });
+
+  test("同一个身份也用 codex 接入包加入过 ⇒ codex 可以认领，照拉", () => {
+    joinAs("leo-server", "tok-shared", "claude");
+    joinAs("leo-server", "tok-shared", "codex");
+    const d = realDeps();
+    expect(maybeStartCodexAutoWake(sessionStart({ cwd }), d)).toMatchObject({ action: "start", channel: CHANNEL });
+    expect(d.calls).toHaveLength(1);
+  });
+
+  test("同 cwd 同时有 claude 与 codex 两条绑定（各自的身份）⇒ 各走各的：codex 拉的是 codex 那个身份，不是最新的一条", () => {
+    joinAs("leo-codex", "tok-codex", "codex");
+    // claude 的身份**后**加入且绑在 cwd 上——「最新一条赢」会选中它，那正是要根除的。
+    joinAs("leo-server", "tok-claude", "claude");
+    const d = realDeps();
+    expect(maybeStartCodexAutoWake(sessionStart({ cwd }), d)).toMatchObject({ action: "start", channel: CHANNEL });
+    const codexAuth = codexAutoWakeAuth({ server: SERVER, token: "tok-codex" })!;
+    expect(d.calls[0]!.env[CODEX_AUTO_WAKE_MARKER_ENV]).toBe(codexAutoWakeMarkerPath(home, codexAutoWakeTarget(codexAuth, CHANNEL)));
+  });
+
+  test("没有任何绑定的老机器：单身份 cwd 照旧可用（行为不变）", () => {
+    const agents = join(home, "agents");
+    mkdirSync(agents, { recursive: true, mode: 0o700 });
+    writeFileSync(join(agents, "agentparty-solo-ludo.json"), JSON.stringify(agentConfig("solo", "tok-solo")), { mode: 0o600 });
+    writeWorkspaceConfigOnly(agentConfig("solo", "tok-solo"), cwd);
+    writeState({ channel: CHANNEL, cursor: 0 }, cwd);
+    const d = realDeps();
+    expect(maybeStartCodexAutoWake(sessionStart({ cwd }), d)).toMatchObject({ action: "start", channel: CHANNEL });
   });
 });

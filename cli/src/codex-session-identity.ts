@@ -87,6 +87,7 @@ export type CodexHookIdentityRefusal =
   | "no-channel"
   | "env-config-unusable"
   | "ambiguous-binding"
+  | "harness-mismatch"
   | "registry-identity-unresolvable"
   | "ambiguous"
   | "no-identity";
@@ -265,6 +266,34 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
     }
   }
 
+  // ②′ 反推各档的共同闸（#960）：**codex hook 绝不认领绑给别的 harness 的身份。**
+  // 真机现场：owner 用 `party join --harness claude` 把 leo-server 绑给 claude，绑定文件如实记了
+  // `harness: claude`；随后同一 cwd 里每个（别的 Claude 会话委托的）codex 都从 cwd 档反推出这个
+  // 身份，替它拉起 codex 唤醒层——用户明确绑给 claude 的接收路径被 codex 抢走，`party who` 多出
+  // 一个「同身份第二 runtime」。harness 只能由「装在谁的 hooks 里」决定（见 hook.ts），所以后面
+  // 三档反推出来的身份若在绑定文件里明确属于另一个 harness、且没有同身份的 codex 绑定，就拒绝。
+  // 同 cwd 同时绑了 claude 与 codex（各自的身份）时上面第 ② 档已经各走各的，这里不会误伤。
+  const foreign = deps.joinBindings().filter((row) => row.harness !== "codex" && row.channel === channel);
+  const codexBound = deps.joinBindings().filter((row) => row.harness === "codex" && row.channel === channel);
+  const boundElsewhere = (
+    identity: { server: string; name: string | null; configPath: string | null },
+  ): JoinBinding | null => {
+    if (foreign.length === 0) return null;
+    const key = identityKey(identity.server, identity.name);
+    const matches = (row: JoinBinding): boolean =>
+      (identity.configPath !== null && row.config_path === identity.configPath) ||
+      (identity.name !== null && identityKey(row.server, row.identity) === key);
+    if (codexBound.some(matches)) return null;
+    return foreign.find(matches) ?? null;
+  };
+  const harnessMismatch = (owner: JoinBinding, identity: { server: string; name: string | null }): CodexHookIdentityResolution => ({
+    ok: false,
+    reason: "harness-mismatch",
+    detail:
+      `#${channel} 上的身份 ${identity.name ?? "?"}@${identity.server} 是用 --harness ${owner.harness} 加入的` +
+      `（join-bindings 如实记着），codex hook 不认领它——要让 codex 也接这个身份，用 codex 的接入包重新加入`,
+  });
+
   // ③ session_id → 注册表条目（identity + server 都是 SessionStart 时按本表同一套规则记的）。
   if (sessionId !== null && sessionId !== "") {
     const wanted = sessionId.toLowerCase();
@@ -281,6 +310,8 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
         if (matches.length === 1) {
           const usable = usableConfig(deps.readConfigFile(matches[0]!.path), channel);
           if (usable !== null) {
+            const owner = boundElsewhere({ ...usable, configPath: matches[0]!.path });
+            if (owner !== null) return harnessMismatch(owner, usable);
             return {
               ok: true,
               identity: {
@@ -309,6 +340,8 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
     const found = evidence();
     if (found.size === 1) {
       const only = [...found.values()][0]!;
+      const owner = boundElsewhere({ server: only.server, name: only.name, configPath: only.path });
+      if (owner !== null) return harnessMismatch(owner, only);
       return {
         ok: true,
         identity: {
@@ -340,6 +373,8 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
     const key = identityKey(cwdUsable.server, cwdUsable.name);
     const others = [...distinct.keys()].filter((candidate) => candidate !== key);
     if (others.length === 0) {
+      const owner = boundElsewhere({ ...cwdUsable, configPath: null });
+      if (owner !== null) return harnessMismatch(owner, cwdUsable);
       return {
         ok: true,
         identity: { source: "cwd-unique", configPath: null, ...cwdUsable, configScopedState: false },
@@ -382,6 +417,9 @@ export function codexHookIdentityFix(
       return `party init --channel ${channel}    # 先把这个目录绑到频道上`;
     case "env-config-unusable":
       return `unset AGENTPARTY_CONFIG            # 这个会话指着一份用不了的身份配置，去掉它或改指对的那份`;
+    case "harness-mismatch":
+      // 身份是绑给别的 harness 的：codex 不抢。想让 codex 也接它，就用 codex 的接入包再加入一次。
+      return `party init --channel ${channel}${serverFlag} --harness codex    # 这个身份是用别的 harness 加入的，codex 不认领；要让 codex 接它，用 codex 的接入包重新加入`;
     case "ambiguous-binding":
     case "ambiguous":
     case "registry-identity-unresolvable":

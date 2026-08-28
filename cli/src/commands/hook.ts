@@ -32,6 +32,7 @@ import {
   defaultCodexHookIdentityDeps,
   resolveCodexHookIdentity,
   type CodexHookIdentity,
+  type CodexHookIdentityRefusal,
   type CodexHookIdentityResolution,
 } from "../codex-session-identity";
 import {
@@ -63,6 +64,7 @@ import {
 } from "../claude-session-registry";
 import {
   CODEX_AUTO_WAKE_ENV,
+  CODEX_AUTO_WAKE_MARKER_ENV,
   CODEX_AUTO_WAKE_POLL_MS,
   activeCodexAutoWakePid,
   appendCodexAutoWakeLog,
@@ -74,7 +76,9 @@ import {
   codexAutoWakeSettingPath,
   codexAutoWakeTarget,
   decideCodexAutoWake,
+  recentCodexAutoWakeFlap,
   recordCodexAutoWakePid,
+  recordCodexAutoWakeReap,
   resolveCodexAutoWakeMode,
   runningServePid,
   shouldReapCodexAutoWake,
@@ -82,6 +86,7 @@ import {
   type CodexAutoWakeDecision,
   type CodexAutoWakeStartupBudget,
 } from "../codex-auto-wake";
+import { probeCodexSessionKind, type CodexSessionKindProbe } from "../codex-session-kind";
 import { defaultInstanceLockDir, isSameLiveProcess } from "../instance-lock";
 import { nativeSessionName } from "../claude-inbox-inject";
 import { isHelpArg } from "../args";
@@ -941,12 +946,23 @@ export function recordCodexSessionLifecycle(
 
 // ---- codex 零手动唤醒层（#893）----
 
+/**
+ * 唤醒层的身份查询结果：一份可用的 config、或「解析器明确拒绝了」（带原因，#960 的
+ * harness-mismatch 要在日志里以自己的名字出现，不能混进 no-agent-token）、或什么都没有。
+ */
+export type CodexAutoWakeIdentityLookup =
+  | { server?: unknown; token?: unknown }
+  | { refused: CodexHookIdentityRefusal; detail: string }
+  | null;
+
 export interface CodexAutoWakeSpawnDeps {
   home: string;
   env: NodeJS.ProcessEnv;
   lockDir: string;
-  readConfigAt: (cwd: string) => { server?: unknown; token?: unknown } | null;
+  readConfigAt: (cwd: string) => CodexAutoWakeIdentityLookup;
   channelAt: (cwd: string) => string | null;
+  /** 触发本次 SessionStart 的 codex 是不是人在用的会话（#959）；缺省按交互式处理。 */
+  sessionKind?: () => CodexSessionKindProbe;
   /** 返回子进程 pid；起不来返回 null。 */
   spawn: (args: string[], cwd: string, env: NodeJS.ProcessEnv) => number | null;
   now: () => number;
@@ -956,7 +972,10 @@ export interface CodexAutoWakeSpawnDeps {
   recordPid: (markerPath: string, channel: string, pid: number, now: number) => void;
 }
 
-export function defaultCodexAutoWakeDeps(env: NodeJS.ProcessEnv = process.env): CodexAutoWakeSpawnDeps {
+export function defaultCodexAutoWakeDeps(
+  env: NodeJS.ProcessEnv = process.env,
+  pid: number = process.ppid,
+): CodexAutoWakeSpawnDeps {
   const home = agentpartyHome(env);
   return {
     home,
@@ -970,16 +989,20 @@ export function defaultCodexAutoWakeDeps(env: NodeJS.ProcessEnv = process.env): 
         cwd,
         channel,
         sessionId: null,
-        deps: defaultCodexHookIdentityDeps(env),
+        deps: defaultCodexHookIdentityDeps(env, pid),
       });
       if (resolved.ok) return { server: resolved.identity.server, token: resolved.identity.token };
-      appendCodexAutoWakeLog(
-        home,
-        `codex-report: 唤醒层解析不出会话身份（${resolved.reason}）：${resolved.detail}——不拉起`,
-      );
-      return null;
+      // #960：绑给别的 harness 的身份由决策层以 skip(harness-mismatch) 留痕，这里不重复记。
+      if (resolved.reason !== "harness-mismatch") {
+        appendCodexAutoWakeLog(
+          home,
+          `codex-report: 唤醒层解析不出会话身份（${resolved.reason}）：${resolved.detail}——不拉起`,
+        );
+      }
+      return { refused: resolved.reason, detail: resolved.detail };
     },
     channelAt: (cwd) => env.AGENTPARTY_CHANNEL ?? readState(cwd)?.channel ?? null,
+    sessionKind: () => probeCodexSessionKind(pid),
     spawn: (args, cwd, childEnv) => {
       // 编译版二进制：execPath 即 party；dev（bun run）：execPath 是 bun，argv[1] 是入口脚本。
       const self = isPartyBinaryPath(process.execPath) || process.argv[1] === undefined
@@ -1025,7 +1048,14 @@ export function maybeStartCodexAutoWake(
   const cwd = typeof record.cwd === "string" && record.cwd.length > 0 ? record.cwd : process.cwd();
   const resolution = resolveCodexAutoWakeMode(deps.env, deps.home);
   const channel = deps.channelAt(cwd);
-  const auth = codexAutoWakeAuth(deps.readConfigAt(cwd));
+  // #959：先判「这是不是人在用的 codex」，再去解析身份。一次性 codex 连身份都不必解析——
+  // 省一次 ps + 一次绑定文件读取，也不给日志添「解析不出身份」的噪音。
+  const sessionKind = resolution.mode === "serve" && channel !== null && deps.sessionKind !== undefined
+    ? deps.sessionKind()
+    : null;
+  const lookup = sessionKind?.kind === "non-interactive" ? null : deps.readConfigAt(cwd);
+  const refused = lookup !== null && "refused" in lookup ? lookup : null;
+  const auth = lookup === null || refused !== null ? null : codexAutoWakeAuth(lookup as { server?: unknown; token?: unknown });
   const now = deps.now();
   const markerPath = auth !== null && channel !== null
     ? codexAutoWakeMarkerPath(deps.home, codexAutoWakeTarget(auth, channel))
@@ -1034,6 +1064,9 @@ export function maybeStartCodexAutoWake(
     mode: resolution.mode,
     channel,
     cwd,
+    now,
+    sessionKind,
+    harnessMismatch: refused?.refused === "harness-mismatch" ? refused.detail : null,
     hasAgentToken: auth !== null,
     // 已有 serve（不管是用户手挂的还是上一次自动拉的）就绝不拉第二个：一条 @ 触发两次
     // 完整 runner ＝ 双份回帖、git push 类副作用跑两遍。
@@ -1041,6 +1074,8 @@ export function maybeStartCodexAutoWake(
     // 锁之外的第二层：serve 连不上服务端时会无限重连、根本走不到抢锁那步（真机实测），
     // 只看锁的话断网时每开一个 codex 会话就多堆一个永远重试的进程。
     startingPid: markerPath === null ? null : activeCodexAutoWakePid(markerPath, now, deps.processAlive),
+    // #959 退避：同 (身份, 频道) 的唤醒层刚被短命回收过，这一轮不拉。
+    flapping: markerPath === null ? null : recentCodexAutoWakeFlap(markerPath, now),
   });
   if (decision.action === "skip") {
     // disabled 是绝大多数机器的常态，逐次记会把日志刷成噪音；其余跳过原因都值得留痕。
@@ -1057,6 +1092,8 @@ export function maybeStartCodexAutoWake(
     ...deps.env,
     // 二道防线：这个 serve 起的 codex runner 自己也会触发 SessionStart hook，绝不许再套娃。
     [CODEX_AUTO_WAKE_ENV]: "off",
+    // #959：唤醒层退场时要把「刚被回收」写回同一份标记，供下一次 SessionStart 退避。
+    ...(markerPath === null ? {} : { [CODEX_AUTO_WAKE_MARKER_ENV]: markerPath }),
   };
   const pid = deps.spawn(decision.args, decision.cwd, childEnv);
   if (pid !== null && markerPath !== null) deps.recordPid(markerPath, decision.channel, pid, now);
@@ -1392,10 +1429,13 @@ export async function runCodexAutoWakeSupervise(
     budget?: CodexAutoWakeStartupBudget;
     pollMs?: number;
     graceMs?: number;
+    /** #959：回收时把「刚被回收」写回的标记文件；缺省从拉起方传的环境变量里取，没有就不记。 */
+    markerPath?: string | null;
   } = {},
 ): Promise<number> {
   const env = deps.env ?? process.env;
   const home = agentpartyHome(env);
+  const markerPath = deps.markerPath === undefined ? env[CODEX_AUTO_WAKE_MARKER_ENV] ?? null : deps.markerPath;
   const log = deps.log ?? ((line: string) => appendCodexAutoWakeLog(home, line));
   const now = deps.now ?? (() => Date.now());
   const liveOwners = deps.liveOwners ??
@@ -1425,7 +1465,10 @@ export async function runCodexAutoWakeSupervise(
     const owners = liveOwners();
     if (!shouldReapCodexAutoWake({ startedAt, now: now(), liveOwners: owners, graceMs: deps.graceMs })) return;
     clearInterval(timer);
-    log(`reaping: #${channel} 上已无存活的交互式 codex 会话，唤醒层退场（下次 SessionStart 会重新拉起）`);
+    const reapedAt = now();
+    // #959：先落退避证据再退场——下一个 SessionStart 看到「刚被短命回收」就不会再拉起。
+    if (markerPath !== null && markerPath !== "") recordCodexAutoWakeReap(markerPath, reapedAt, reapedAt - startedAt);
+    log(`reaping: #${channel} 上已无存活的交互式 codex 会话，唤醒层退场（下次交互式 SessionStart 会重新拉起）`);
     terminate();
   }, deps.pollMs ?? CODEX_AUTO_WAKE_POLL_MS);
   try {

@@ -433,6 +433,7 @@ describe("pins #924：同 harness 同频道堆了一串历史身份，加入后�
       "no-channel",
       "env-config-unusable",
       "ambiguous-binding",
+      "harness-mismatch",
       "registry-identity-unresolvable",
       "ambiguous",
       "no-identity",
@@ -441,5 +442,93 @@ describe("pins #924：同 harness 同频道堆了一串历史身份，加入后�
       expect(fix.trim().length).toBeGreaterThan(0);
       expect(fix.startsWith("party ") || fix.startsWith("unset ")).toBe(true);
     }
+  });
+});
+
+// #960：codex hook 绝不认领绑给别的 harness 的身份。真机现场：`party join --harness claude --as leo-server`
+// 之后，同 cwd 的每个 codex 都从 cwd 档反推出 leo-server，替它拉起 codex 唤醒层——用户明确绑给 claude
+// 的接收路径被 codex 抢走。绑定文件里明明写着 harness: claude。
+describe("pins #960：反推各档解析出的身份若绑给了别的 harness ⇒ harness-mismatch", () => {
+  const SERVER = SESSION_SERVER;
+  const NAME = "leo-server";
+
+  function bindTo(harness: BindingHarness, configPath: string, identity = NAME) {
+    writeJoinBinding(joinBindingsPath(home), {
+      harness, server: SERVER, channel: CHANNEL, owner: "leo", identity, config_path: configPath, cwd, created_at: 1_700_000_000_000,
+    });
+  }
+
+  test("cwd 档（单身份机器）：身份是 claude 加入的 ⇒ 拒绝，理由点名 --harness claude", () => {
+    const path = writeAgentConfig("agentparty-leo-server.json", agentConfig(NAME, SERVER, "tok"));
+    writeWorkspaceConfigOnly(agentConfig(NAME, SERVER, "tok"), cwd);
+    bindTo("claude", path);
+    const result = resolve({}, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("harness-mismatch");
+    expect(result.detail).toContain("--harness claude");
+    expect(result.detail).toContain(NAME);
+  });
+
+  test("MCP 注册档：该 codex 进程下挂着的唯一身份是 claude 加入的 ⇒ 同样拒绝", () => {
+    const path = writeAgentConfig("agentparty-leo-server.json", agentConfig(NAME, SERVER, "tok"));
+    bindTo("claude", path);
+    const result = resolve({ mcpConfigPaths: () => [path] }, null);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("harness-mismatch");
+  });
+
+  test("注册表档：条目记的身份是 claude 加入的 ⇒ 同样拒绝", () => {
+    const path = writeAgentConfig("agentparty-leo-server.json", agentConfig(NAME, SERVER, "tok"));
+    bindTo("claude", path);
+    registerCodexSession({
+      session_id: SESSION_ID, pid: process.pid, display_name: null, channel: CHANNEL, server: SERVER, identity: NAME, cwd,
+    }, process.env);
+    const result = resolve({}, SESSION_ID);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("harness-mismatch");
+  });
+
+  test("同一身份也用 codex 加入过 ⇒ 不是 mismatch：走加入即绑定那一档正常解析", () => {
+    const path = writeAgentConfig("agentparty-leo-server.json", agentConfig(NAME, SERVER, "tok"));
+    writeWorkspaceConfigOnly(agentConfig(NAME, SERVER, "tok"), cwd);
+    bindTo("claude", path);
+    bindTo("codex", path);
+    const result = resolve({}, null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.identity.name).toBe(NAME);
+    expect(result.identity.source).toBe("join-binding");
+  });
+
+  test("claude 绑的是另一个身份、cwd 绑的这个没人认领 ⇒ 与 claude 绑定无关，cwd 档照旧", () => {
+    const claudePath = writeAgentConfig("agentparty-claude-side.json", agentConfig("claude-side", SERVER, "tok-c", null));
+    bindTo("claude", claudePath, "claude-side");
+    writeWorkspaceConfigOnly(agentConfig(NAME, SERVER, "tok"), cwd);
+    writeAgentConfig("agentparty-leo-server.json", agentConfig(NAME, SERVER, "tok"));
+    const result = resolve({}, null);
+    // claude 绑的是别的身份（且不在本频道的候选索引里）：cwd 档解析出的这个身份没被任何 harness 认领，照旧可用。
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.identity.source).toBe("cwd-unique");
+    expect(result.identity.name).toBe(NAME);
+  });
+
+  test("会话自己带的 AGENTPARTY_CONFIG 仍然最硬：显式指向 claude 加入的身份也认（会话说了算）", () => {
+    const path = writeAgentConfig("agentparty-leo-server.json", agentConfig(NAME, SERVER, "tok"));
+    bindTo("claude", path);
+    process.env.AGENTPARTY_CONFIG = path;
+    const result = resolve({}, null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.identity.source).toBe("env");
+  });
+
+  test("harness-mismatch 的修复命令指向 codex 的接入包（--harness codex）", () => {
+    const fix = codexHookIdentityFix("harness-mismatch", { channel: CHANNEL, server: SERVER });
+    expect(fix).toContain("party init");
+    expect(fix).toContain("--harness codex");
   });
 });
