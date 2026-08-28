@@ -209,3 +209,63 @@ function formatMsgRaw(m: MsgFrame): string {
   const rest = lines.slice(1).map((l) => "    " + l);
   return [prefix + (lines[0] ?? ""), ...rest].join("\n");
 }
+
+// #962：history 纯文本每行带短时间戳。排刷屏时「什么时候发的」和「谁发的」同等重要，之前只能
+// --json 再手工换算 ts。本地时区 HH:MM:SS；跨天（与上一条不同日，或与今天不同日）补日期，
+// 同一天连续几条只报时分秒，读起来不喧宾夺主。
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+function localDateKey(d: Date): string {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+export function formatHistoryTs(ts: number, prevTs: number | undefined, nowTs: number): string {
+  const d = new Date(ts);
+  const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  const day = localDateKey(d);
+  const sameAsPrev = prevTs !== undefined && localDateKey(new Date(prevTs)) === day;
+  const sameAsToday = localDateKey(new Date(nowTs)) === day;
+  return sameAsPrev && sameAsToday ? time : `${day} ${time}`;
+}
+
+// #962：连续多条「同一 sender、正文完全相同」的帧折叠成一段，刷屏时一眼看出同一条重复了多少次。
+// 相等判定用完整渲染（去掉 [seq] 前缀）——sender/kind/正文/note/badge 任一不同都断开，
+// 中间夹一条别的帧也断开。只在纯文本里折叠；--json 是给工具消费的，一条都不能少。
+export interface HistoryRun<T> {
+  items: T[];
+}
+
+export function collapseRuns<T>(items: readonly T[], key: (item: T) => string): HistoryRun<T>[] {
+  const runs: HistoryRun<T>[] = [];
+  let lastKey: string | undefined;
+  for (const item of items) {
+    const k = key(item);
+    const current = runs[runs.length - 1];
+    if (current !== undefined && lastKey === k) {
+      current.items.push(item);
+    } else {
+      runs.push({ items: [item] });
+      lastKey = k;
+    }
+  }
+  return runs;
+}
+
+// 折叠判定用的键：完整渲染去掉 `[seq] ` 前缀，再并上 mentions / reply_to。headers 模式的预览会
+// 截断，两条不同的长正文可能前 120 字符一样，所以判定一律走全文渲染，别拿预览行比。
+// formatMsg 不渲染 mentions / reply_to，但 --headers 会显示它们：同正文回不同 seq、或 @ 不同的人，
+// 是不同的帧，折进一段会把首帧的 ↩#/@ 冒充成整段的。
+export function historyCollapseKey(m: MsgFrame): string {
+  return JSON.stringify({
+    rendered: stripSeqPrefix(formatMsg(m), m.seq),
+    mentions: m.mentions ?? [],
+    reply_to: m.reply_to ?? null,
+  });
+}
+
+export function stripSeqPrefix(line: string, seq: number): string {
+  const prefix = `[${seq}] `;
+  return line.startsWith(prefix) ? line.slice(prefix.length) : line;
+}

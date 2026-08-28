@@ -3,7 +3,17 @@ import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../
 import { resolveChannel } from "../config";
 import { resolveAuth } from "../oidc-cli";
 import { fetchMessages, fetchRecentMessages, handleRestError } from "../rest";
-import { DEFAULT_HEADER_PREVIEW, formatMsg, formatMsgHeader, msgHeader } from "../format";
+import {
+  DEFAULT_HEADER_PREVIEW,
+  collapseRuns,
+  formatHistoryTs,
+  formatMsg,
+  formatMsgHeader,
+  historyCollapseKey,
+  msgHeader,
+  stripSeqPrefix,
+} from "../format";
+import type { MsgFrame } from "@agentparty/shared";
 import { isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 import { jsonFrame } from "../json";
 
@@ -18,11 +28,17 @@ const HISTORY_FLAGS = [
   "preview",
   "seq",
   "exclude-status",
+  "no-ts",
+  "no-collapse",
 ];
 const HELP = `usage: party history [channel|--channel C] [--since seq | --before seq | --seq N] [--limit n]
-                    [--headers [--preview n]] [--exclude-status] [--json] [--completion]
+                    [--headers [--preview n]] [--exclude-status] [--no-ts] [--no-collapse]
+                    [--json] [--completion]
 
 Fetch channel messages over REST. By default returns the MOST RECENT --limit messages.
+Plain-text lines start with a local-time HH:MM:SS stamp (a date is added when the day changes or
+is not today). Consecutive frames from the same sender with identical content are folded into one
+line like "[3–15] ×13 sender: …" so a flood reads as "one note, repeated 13 times".
 
 Options:
   --channel C        read channel C instead of the bound channel
@@ -35,6 +51,9 @@ Options:
                      that matter with --seq N.
   --preview n        preview characters per message in --headers mode (default ${DEFAULT_HEADER_PREVIEW}, 0 = none)
   --exclude-status   drop status frames (presence churn, usually repeated notes)
+  --no-ts            drop the per-line timestamp (plain text only; --json always carries raw ts)
+  --no-collapse      print every frame on its own line instead of folding identical runs
+                     (plain text only; --json never folds)
   --json             emit structured NDJSON frames (in --headers mode: one header object per line)
   --completion       only return final synthesis completion artifacts`;
 
@@ -43,7 +62,9 @@ export async function run(argv: string[]): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  const { positionals, flags } = parseArgs(argv, { booleans: ["json", "headers", "exclude-status"] });
+  const { positionals, flags } = parseArgs(argv, {
+    booleans: ["json", "headers", "exclude-status", "no-ts", "no-collapse"],
+  });
   const cfg = await resolveAuth();
   if (!cfg) {
     console.error("no config, run: party login or party init --server URL --token T");
@@ -114,6 +135,10 @@ export async function run(argv: string[]): Promise<number> {
     console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
     return 1;
   }
+  // #962：纯文本每行的时间戳前缀。now 取一次，整页输出的「今天」口径一致。
+  const now = Date.now();
+  const stamp = (ts: number, prevTs: number | undefined): string =>
+    flags["no-ts"] === true ? "" : `${formatHistoryTs(ts, prevTs, now)} `;
   try {
     const resolvedLimit = limit ?? 100;
     const opts = { completion: flags.completion === true };
@@ -133,19 +158,44 @@ export async function run(argv: string[]): Promise<number> {
         console.error(`no message ${seqOnly} in ${channel} (retracted, filtered, or out of range)`);
         return 1;
       }
-      console.log(flags.json === true ? JSON.stringify(jsonFrame(hit as unknown as Record<string, unknown>)) : formatMsg(hit));
+      console.log(
+        flags.json === true
+          ? JSON.stringify(jsonFrame(hit as unknown as Record<string, unknown>))
+          : `${stamp(hit.ts, undefined)}${formatMsg(hit)}`,
+      );
       return 0;
     }
     // #819：status 帧的 note 常常是重复的同一句，混在 history 里逐条读没有信息量。
     const messages = flags["exclude-status"] === true ? fetched.filter((m) => m.kind !== "status") : fetched;
-    // --json：每条一行 NDJSON（原始 msg 帧 + schema），供 supervisor/工具消费，免 scrape 人类格式
-    for (const m of messages) {
-      if (flags.headers === true) {
-        const previewChars = preview ?? DEFAULT_HEADER_PREVIEW;
-        console.log(flags.json === true ? JSON.stringify(msgHeader(m, previewChars)) : formatMsgHeader(m, previewChars));
-        continue;
+    const previewChars = preview ?? DEFAULT_HEADER_PREVIEW;
+    // --json：每条一行 NDJSON（原始 msg 帧 + schema），供 supervisor/工具消费，免 scrape 人类格式。
+    // 不折叠、不加时间戳前缀——帧里本来就带原始 ts。
+    if (flags.json === true) {
+      for (const m of messages) {
+        console.log(
+          flags.headers === true
+            ? JSON.stringify(msgHeader(m, previewChars))
+            : JSON.stringify(jsonFrame(m as unknown as Record<string, unknown>)),
+        );
       }
-      console.log(flags.json === true ? JSON.stringify(jsonFrame(m as unknown as Record<string, unknown>)) : formatMsg(m));
+      return 0;
+    }
+    // 纯文本（#962）：每行带时间戳；连续「同 sender、内容完全相同」的帧折叠成 `[a–b] ×n`。
+    const render = (m: MsgFrame): string => (flags.headers === true ? formatMsgHeader(m, previewChars) : formatMsg(m));
+    const runs =
+      flags["no-collapse"] === true ? messages.map((m) => ({ items: [m] })) : collapseRuns(messages, historyCollapseKey);
+    let prevTs: number | undefined;
+    for (const run of runs) {
+      const first = run.items[0]!;
+      const last = run.items[run.items.length - 1]!;
+      if (run.items.length === 1) {
+        console.log(`${stamp(first.ts, prevTs)}${render(first)}`);
+      } else {
+        // 折叠行给首尾两个时间戳：「这 13 条隔多久来一条」正是这个 issue 要回答的问题。
+        const span = flags["no-ts"] === true ? "" : `${formatHistoryTs(first.ts, prevTs, now)}–${formatHistoryTs(last.ts, first.ts, now)} `;
+        console.log(`${span}[${first.seq}–${last.seq}] ×${run.items.length} ${stripSeqPrefix(render(first), first.seq)}`);
+      }
+      prevTs = last.ts;
     }
     return 0;
   } catch (e) {

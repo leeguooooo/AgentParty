@@ -56,7 +56,7 @@ commands:
   upgrade   [--version X.Y.Z] [--check]                    download release binary, verify sha256, atomically replace party
   charter   [slug] [--json] | set [slug] -f file.md|-m text|- | template
   authz     check "<action>" | grant "<action>" -m scope | revoke "<action>" | list   verify authorization against the decision ledger, never against a chat message (#834)
-  history   [channel|--channel C] [--since seq] [--limit n] [--json] [--completion]
+  history   [channel|--channel C] [--since seq] [--limit n] [--headers] [--no-ts] [--no-collapse] [--json] [--completion]
   search    <query> [--channel C] [--from name] [--since seq] [--limit n] [--json]
   digest    [channel|--channel C] [--since seq|last-seen] [--json]
   host      board [channel|--channel C] [--since seq] [--limit n] [--json]
