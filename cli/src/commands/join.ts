@@ -16,8 +16,10 @@
 //  - **幂等**：重复跑不叠加副作用（判重、先探后加、绑定替换本身都幂等，join 只负责正确编排）。
 //  - **「前置条件齐了」≠「唤醒真的会发生」（#957/#961）**：收尾那句 ✅ 承诺的是「@ 一下就叫得醒」，
 //    所以它的判据必须是唤醒层本身——claude 档是插件装到位且版本与 CLI 一致（doctor 的 shell 检查，
-//    版本不一致时 SessionStart 根本没布上）；codex 档是唤醒层**进程真的在**（join 收尾主动拉起，
-//    再探活）。任一没成就不印 ✅，照实说本会话此刻能被怎么叫到。
+//    版本不一致时 SessionStart 根本没布上）**且本机有会接 @ 的武装监听进程**（#979：普通 `claude`
+//    起的会话按 #615 是 local-only 蛰伏档，只有 `party claude` / `bridge claude` / `party serve
+//    --runner claude` 会抢 serve 锁接 @——判据是锁的活持有者，不是开关）；codex 档是唤醒层
+//    **进程真的在**（join 收尾主动拉起，再探活）。任一没成就不印 ✅，照实说本会话此刻能被怎么叫到。
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -45,6 +47,15 @@ import {
 } from "../codex-auto-wake";
 import { defaultInstanceLockDir, isSameLiveProcess } from "../instance-lock";
 import { listCodexSessions, registerCodexSession } from "../claude-session-registry";
+import {
+  claudeArmCommand,
+  claudeNoArmedListenerLines,
+  claudeServeCommand,
+  describeClaudeArmedListener,
+  describeDormantClaudeSessions,
+  probeClaudeArmedListener,
+  type ClaudeArmedListenerProbe,
+} from "../claude-armed-listener";
 import { findHarnessAncestor } from "../join-binding";
 import {
   CLAUDE_PLUGIN_MIN_VERSION,
@@ -53,6 +64,9 @@ import {
   type ClaudePluginShellInspection,
 } from "./doctor";
 import type { CodexAutoWakeOutcome } from "./hook";
+
+// 与 probeCodexWakeLayer 并排导出：两档的「唤醒层进程探活」都从这里拿（#957 / #979）。
+export { probeClaudeArmedListener };
 
 const JOIN_FLAGS = ["server", "channel", "as", "harness", "mention"];
 const HELP = `usage: AGENTPARTY_TOKEN='<token>' party join --server URL --channel SLUG --as NAME [--harness codex|claude|other] [--mention name] [--yes] [--coexist]
@@ -133,6 +147,12 @@ export interface JoinDeps {
    * 不 shell 出去再解析文本。缺省实现会 spawn 真机 claude，测试换成桩。
    */
   claudePluginShell: () => ClaudePluginShellInspection;
+  /**
+   * claude 档收尾自检（#979）：本机有没有会接 @ 的武装监听——`party claude` / `bridge claude` 起的
+   * claude-channel（非 --require-launch-opt-in 蛰伏档）或 `party serve --runner claude`，三者都持
+   * 同一把 serve 锁。缺省＝probeClaudeArmedListener（锁持有者探活 + ps 认起法 + 注册表数蛰伏档）。
+   */
+  claudeArmedListener: () => ClaudeArmedListenerProbe;
   /**
    * codex 档收尾（#957）：主动拉起唤醒层。缺省＝hook.ts 的 maybeStartCodexAutoWake（与 SessionStart
    * 同一条路径，同一套去重/标记），join 只是多给它一次机会——它此刻已有身份和 token，不必等下次会话。
@@ -502,6 +522,7 @@ function buildJoinGate(
   checkinOk: boolean,
   deps: JoinDeps,
   codexWake: CodexWakeLayerState | null,
+  claudeListener: ClaudeArmedListenerProbe | null,
 ): { steps: GateStep[]; remaining: number; next: { do: string; notes: string[] } | null } {
   const cfg = readConfig();
   const identity = cfg?.identity?.name ?? null;
@@ -577,6 +598,23 @@ function buildJoinGate(
           (codexWake.adoptionNote === null ? "" : `    ⚠ ${codexWake.adoptionNote}`),
       remedy: `新开一个 codex 会话（SessionStart 会重新拉起唤醒层），或手动：party serve ${slug} --runner codex`,
       notes: [why],
+    });
+  }
+  // claude 档（#979）：插件装到位 ≠ 有人接 @。普通 `claude` 起的会话是蛰伏档（#615 local-only），
+  // 只有 `party claude` / `bridge claude` 起的会话或 `party serve --runner claude` 会抢 serve 锁接 @。
+  // 判据是锁的活持有者（进程事实），不是 opt-in 开关。放在最后，同 codex 档的 wake_layer_live。
+  if (harness === "claude" && claudeListener !== null) {
+    const live = claudeListener.live;
+    steps.push({
+      id: "armed_listener_live",
+      ok: live !== null,
+      label: "本机有会接 @ 的 Claude 武装监听（普通 claude 会话是蛰伏档，不接频道消息）",
+      evidence: live === null ? "" : describeClaudeArmedListener(live, slug),
+      remedy: claudeArmCommand(slug),
+      notes: [
+        describeDormantClaudeSessions(claudeListener.sessions, slug),
+        `或常驻：${claudeServeCommand(slug)}`,
+      ],
     });
   }
   const failed = steps.find((s) => !s.ok);
@@ -691,8 +729,19 @@ export async function runJoin(opts: JoinOptions, deps: JoinDeps): Promise<number
   let codexWake: CodexWakeLayerState | null = null;
   if (harness === "codex") codexWake = await bringUpCodexWakeLayer(deps, slug, record);
 
+  // 6c) claude 档（#979）：本机有没有会接 @ 的武装监听。探活失败按「没有」算——不会因此把 join 弄挂，
+  //     但也绝不因探不到就假定有。
+  let claudeListener: ClaudeArmedListenerProbe | null = null;
+  if (harness === "claude") {
+    try {
+      claudeListener = deps.claudeArmedListener();
+    } catch {
+      claudeListener = { live: null, sessions: 0 };
+    }
+  }
+
   // 7) 收尾自检（#926）：这是包的末尾，用户看到的就这一句结论。从本地盘真实状态重判，不信步骤返回码。
-  const gate = buildJoinGate(harness, slug, checkinOk, deps, codexWake);
+  const gate = buildJoinGate(harness, slug, checkinOk, deps, codexWake, claudeListener);
   deps.log("");
   deps.log(`接入自检 · #${slug}`);
   for (const s of gate.steps) {
@@ -702,9 +751,17 @@ export async function runJoin(opts: JoinOptions, deps: JoinDeps): Promise<number
   if (gate.remaining === 0) {
     if (harness === "claude" && claudePluginRestart) {
       // #961：插件刚装/刚更新，当前这个会话还挂着旧的——「要重开」是结论的一部分，不能埋在 warn 里。
+      // #979：重开也得用 party claude 起，普通 claude 起的会话是蛰伏档。
       deps.log(
-        `✅ 全部就绪，差一次重开：claude 插件已是 ${RUNNING_VERSION}，【新开一个 Claude 会话】后 @ ${agentName} 就能唤醒它；` +
+        `✅ 全部就绪，差一次重开：claude 插件已是 ${RUNNING_VERSION}，【用 ${claudeArmCommand(slug)} 新开一个 Claude 会话】后 @ ${agentName} 就能唤醒它；` +
           `当前这个会话还挂着旧插件，不会被唤醒。`,
+      );
+      return 0;
+    }
+    if (harness === "claude" && claudeListener?.live) {
+      // #979 修法 3：✅ 句写明「就能被唤醒」指的是谁（pid / 起法），别让人以为是眼前这个普通会话。
+      deps.log(
+        `✅ 全部就绪：现在 @ ${agentName}，这台机器上${describeClaudeArmedListener(claudeListener.live, slug)}就能被唤醒来协作。`,
       );
       return 0;
     }
@@ -712,6 +769,15 @@ export async function runJoin(opts: JoinOptions, deps: JoinDeps): Promise<number
     return 0;
   }
   const failed = gate.steps.find((s) => !s.ok);
+  if (failed?.id === "armed_listener_live") {
+    // #979：前置条件全齐、唯独本机没有会接 @ 的 Claude 会话。此刻的真实能力是「谁也叫不醒」——
+    // 照实说，把两条命令原样印出来，绝不说「就能被唤醒」。
+    const identity = readConfig()?.identity?.name ?? agentName;
+    for (const line of claudeNoArmedListenerLines(identity, slug, claudeListener?.sessions ?? 0)) deps.log(line);
+    deps.log("");
+    deps.log("在这一步完成之前：@ 你可能不会有任何反应，而且不会有任何报错——别人只会以为你在忙。");
+    return 1;
+  }
   if (failed?.id === "wake_layer_live") {
     // #957：前置条件全齐、唯独唤醒层没起来。此刻的真实能力是 Stop hook 兜底——照实说，绝不说「就能被唤醒」。
     deps.log(`⚠ 接入完成，但唤醒层没起来：${gate.next?.notes[0] ?? "原因不明"}`);
@@ -804,6 +870,8 @@ export async function run(argv: string[]): Promise<number> {
     home: process.env.HOME ?? homedir(),
     codexWakeChecklist: () => buildWakeChecklist(diagnoseCodexWake()),
     claudePluginShell: () => inspectClaudePluginShell(),
+    claudeArmedListener: () =>
+      probeClaudeArmedListener({ lockDir: defaultInstanceLockDir(), config: readConfig(), channel: slug }),
     startCodexWakeLayer: async () => {
       const hook = await import("./hook");
       // 与 SessionStart 完全同一条路径（同一套开关 / 去重 / 标记 / 日志），只是由 join 触发。

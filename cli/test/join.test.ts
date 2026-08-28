@@ -9,7 +9,9 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BEHAVIOR_CONTRACT_BODY_LINES } from "@agentparty/shared/onboarding";
-import { probeCodexWakeLayer, runJoin, type JoinDeps, type JoinOptions } from "../src/commands/join";
+import { probeClaudeArmedListener, probeCodexWakeLayer, runJoin, type JoinDeps, type JoinOptions } from "../src/commands/join";
+import { classifyListenerCommand } from "../src/claude-armed-listener";
+import { healServerUrl } from "../src/validation";
 import { run as initRun } from "../src/commands/init";
 import { run as hookRun } from "../src/commands/hook";
 import { run as sendRun } from "../src/commands/send";
@@ -19,7 +21,7 @@ import { diagnoseCodexWake } from "../src/wake-diagnosis";
 import { RUNNING_VERSION } from "../src/upgrade";
 import { codexAutoWakeAuth, codexAutoWakeMarkerPath, codexAutoWakeTarget, writeCodexAutoWakeMarker } from "../src/codex-auto-wake";
 import { currentProcessStartedAt, instanceLockTarget } from "../src/instance-lock";
-import { listCodexSessions, registerCodexSession } from "../src/claude-session-registry";
+import { listCodexSessions, registerClaudeSession, registerCodexSession } from "../src/claude-session-registry";
 import { startRestMock, type RestMock } from "./rest-mock";
 
 const PLUGIN = "agentparty@agentparty";
@@ -136,6 +138,8 @@ function deps(record: string[][], behavior: SpawnBehavior, logs: string[]): Join
         },
         inspectBundle: () => ({ valid: true, launcherExecutable: true }),
       }),
+    // claude 武装监听（#979）：默认假装本机有 party claude 起的会话在接 @（happy path）；蛰伏档用例逐个覆盖。
+    claudeArmedListener: () => ({ live: { pid: 5150, launch: "claude-channel" }, sessions: 1 }),
     // codex 唤醒层（#957）：默认假装拉起成功且进程在（happy path）；失败用例逐个覆盖。
     startCodexWakeLayer: async () => ({ action: "start", channel: "dev", cwd: process.cwd(), args: [] }),
     codexWakeLayerLive: async () => ({ pid: 4242, source: "serve-lock" }),
@@ -216,6 +220,12 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(record.some((r) => r[0] === "claude" && r[1] === "plugin" && r[2] === "update")).toBe(false);
     expect(out).toContain("版本与 CLI 一致");
     expect(out).not.toContain("重开");
+
+    // #979：✅ 句写明「就能被唤醒」指的是谁——本机那个 party claude 起的武装监听（pid），不是眼前这个会话。
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toContain("pid 5150");
+    expect(verdict).toContain("party claude-channel");
+    expect(out).toContain("✓ 本机有会接 @ 的 Claude 武装监听");
   });
 
   // ★ #961 事故场景：本机插件 0.2.203、CLI 0.2.212。旧 join 只 install（回 already installed，不升级）
@@ -589,5 +599,261 @@ describe("probeCodexWakeLayer —— 唤醒层进程探活（#957）", () => {
     const c = clock();
     writeCodexAutoWakeMarker(marker, { pid: null, started_at: null, claimed_at: 2_000, channel: "dev" });
     expect(await probeCodexWakeLayer({ home, lockDir, config, channel: "dev", alive: () => true, ...c })).toBeNull();
+  });
+});
+
+// ★ #979 事故场景：piggo 机上 14 个 `party claude-channel --require-launch-opt-in` 全是蛰伏档（普通 claude
+//   起的，#615 local-only），插件装好、版本一致、报到成功——旧 join 照印「✅ 就能被唤醒」，@ 了 5 分钟 0 pong。
+//   判据必须是「本机有没有会接 @ 的进程」：serve 锁的活持有者，不是插件状态、不是 opt-in 开关。
+describe("party join claude 档 —— 武装监听闸（#979）", () => {
+  /** 用真锁目录跑真探活（不注入 lockHolder），只把 ps 换成桩；注册表走 AGENTPARTY_HOME 下的真目录。 */
+  function realProbe(lockDir: string, commandOf: (pid: number) => string | null): JoinDeps["claudeArmedListener"] {
+    return () => {
+      // 与生产同一来源：AGENTPARTY_CONFIG 已由 runJoin 指向 join 刚写的 config。
+      const raw = JSON.parse(readFileSync(configPath(), "utf8")) as { server: string; token: string; identity?: { name: string } };
+      return probeClaudeArmedListener({ lockDir, config: raw, channel: "dev", commandOf });
+    };
+  }
+  /** 预置一个普通 claude 会话（SessionStart 入册的形态）：pid 是本进程，所以「活着」。 */
+  function registerDormantSession(sessionId: string, server: string): void {
+    expect(registerClaudeSession({
+      session_id: sessionId,
+      pid: process.pid,
+      display_name: null,
+      channel: "dev",
+      identity: "agent", // mock /api/me 的身份
+      server,
+      cwd: process.cwd(),
+    })).toBe(true);
+  }
+  function lockFileFor(lockDir: string, server: string, token: string): string {
+    return join(lockDir, `serve-${instanceLockTarget(healServerUrl(server)!, token, "dev")}.lock`);
+  }
+
+  test("只有蛰伏档 claude-channel 进程 ⇒ 不印 ✅、不说「就能被唤醒」，两条命令原样印出，并说清本机 N 个会话全是蛰伏档", async () => {
+    mock = startRestMock();
+    const lockDir = mkdtempSync(join(tmpdir(), "party-join-claude-locks-"));
+    registerDormantSession("019f95e8-2c0b-7903-8779-cd102c5ecd4d", mock.url);
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    // 真探活：锁目录是空的（蛰伏档从不抢 serve 锁）；ps 桩不该被问到（没有持有者）。
+    d.claudeArmedListener = realProbe(lockDir, () => "party claude-channel --require-launch-opt-in");
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), d);
+    const out = logs.join("\n");
+    rmSync(lockDir, { recursive: true, force: true });
+
+    // 隔离：config / 身份 / 插件（同版）/ 报到全成，唯独没有武装监听——事故当天就是这个形态。
+    expect(existsSync(configPath())).toBe(true);
+    expect(out).toContain("版本与 CLI 一致");
+    expect(code).toBe(1);
+    expect(out).not.toContain("就能被唤醒");
+    expect(out).not.toContain("全部就绪");
+    expect(out).not.toContain("✅");
+    // 自检那一格是 ✗。
+    expect(out).toContain("✗ 本机有会接 @ 的 Claude 武装监听");
+    // 降级文案：身份已绑、为什么叫不醒、两条命令**原样**印出。
+    expect(out).toContain("已绑定身份 agent，但这台机现在没有会接 @ 的 Claude 会话");
+    expect(out).toContain("local-only");
+    expect(out).toContain("party claude dev");
+    expect(out).toContain("party serve dev --runner claude");
+    // 本机那个普通 claude 会话被数出来了，且说明它是蛰伏档。
+    expect(out).toContain("1 个 claude 会话全是蛰伏档");
+    // 这类失败没有报错——必须明说。
+    expect(out).toContain("别人只会以为你在忙");
+  });
+
+  test("有 party claude 起的武装进程（持 serve 锁的 claude-channel）⇒ ✅ 且指出 pid 与起法", async () => {
+    mock = startRestMock();
+    const lockDir = mkdtempSync(join(tmpdir(), "party-join-claude-locks-"));
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    const asked: number[] = [];
+    d.claudeArmedListener = () => {
+      // 锁由「本进程」持有（pid + 出生时间都对得上）——这就是 party claude 起的 claude-channel 的形态。
+      const raw = JSON.parse(readFileSync(configPath(), "utf8")) as { server: string; token: string };
+      writeFileSync(lockFileFor(lockDir, raw.server, raw.token), JSON.stringify({ pid: process.pid, id: "t", started_at: currentProcessStartedAt() }));
+      return realProbe(lockDir, (pid) => {
+        asked.push(pid);
+        return "party claude-channel --channel dev";
+      })();
+    };
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), d);
+    const out = logs.join("\n");
+    rmSync(lockDir, { recursive: true, force: true });
+
+    expect(code).toBe(0);
+    expect(asked).toEqual([process.pid]);
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toBeDefined();
+    expect(verdict).toContain("就能被唤醒");
+    expect(verdict).toContain(`pid ${process.pid}`);
+    expect(verdict).toContain("party claude-channel");
+    expect(out).toContain("✓ 本机有会接 @ 的 Claude 武装监听");
+    expect(out).toContain(`由 party claude / party bridge claude 起的 Claude 会话（武装监听 party claude-channel，pid ${process.pid}）`);
+    expect(out).not.toContain("蛰伏档（普通 claude 起的，不接频道消息）");
+  });
+
+  test("有 serve 锁（party serve --runner claude 常驻）⇒ ✅ 且写明是 serve", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    d.claudeArmedListener = () => ({ live: { pid: 777, launch: "serve" }, sessions: 0 });
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), d);
+    expect(code).toBe(0);
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toContain("party serve dev --runner claude（pid 777）");
+    expect(verdict).toContain("就能被唤醒");
+  });
+
+  test("锁持有者认不出起法 ⇒ 仍算武装监听（进程事实优先），只是描述退回「持锁进程 pid」", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    d.claudeArmedListener = () => ({ live: { pid: 888, launch: "unknown" }, sessions: 2 });
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), d);
+    expect(code).toBe(0);
+    expect(logs.find((l) => l.startsWith("✅"))).toContain("持有 #dev 监听锁的进程（pid 888）");
+  });
+
+  test("探活本身抛异常 ⇒ 按「没有武装监听」处理（绝不因探不到就假定有），结论是降级文案", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    d.claudeArmedListener = () => {
+      throw new Error("ps exploded");
+    };
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), d);
+    const out = logs.join("\n");
+    expect(code).toBe(1);
+    expect(out).not.toContain("✅");
+    expect(out).toContain("party claude dev");
+  });
+
+  test("插件旧版且 update 失败 + 无武装监听 ⇒ 第一条修法仍是 plugin update（监听闸放最后，前面没过它的修法没意义）", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, { installedPluginVersion: "0.2.203", failPluginUpdate: true }, logs);
+    d.claudeArmedListener = () => ({ live: null, sessions: 0 });
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), d);
+    const out = logs.join("\n");
+    expect(code).toBe(1);
+    expect(nextActionLine(logs)).toBe(`claude plugin update ${PLUGIN}`);
+    // 监听那一格照样 ✗ 列出来，只是不做第一条修法。
+    expect(out).toContain("✗ 本机有会接 @ 的 Claude 武装监听");
+  });
+
+  test("#961 重开文案（#979 修订）：重开要用 party claude 起，不是裸 claude", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, { installedPluginVersion: "0.2.203" }, logs));
+    expect(code).toBe(0);
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toContain("用 party claude dev 新开一个 Claude 会话");
+  });
+
+  test("codex 档不受影响：不查 claude 武装监听、不印 claude 的降级文案", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    let asked = false;
+    d.claudeArmedListener = () => {
+      asked = true;
+      return { live: null, sessions: 0 };
+    };
+    const code = await runJoin(baseOpts({ harnessFlag: "codex" }), d);
+    expect(code).toBe(0);
+    expect(asked).toBe(false);
+    expect(logs.join("\n")).not.toContain("武装监听");
+  });
+});
+
+// #979 的判据本身：armed_listener_live 来自 serve 锁的**活持有者**（pid + 出生时间），不是插件状态、
+// 不是 AGENTPARTY_CLAUDE_CHANNEL_OPT_IN 开关。蛰伏档从不抢锁，所以「只有蛰伏档」⇒ 锁目录为空 ⇒ null。
+describe("probeClaudeArmedListener —— 武装监听探活（#979）", () => {
+  const config = { server: "https://party.example.com", token: "agent-token", identity: { name: "server" } };
+  const target = () => instanceLockTarget(config.server, config.token, "dev");
+  let lockDir: string;
+  beforeEach(() => {
+    lockDir = mkdtempSync(join(tmpdir(), "party-join-claude-locks-"));
+  });
+  afterEach(() => {
+    rmSync(lockDir, { recursive: true, force: true });
+  });
+  const dormantEntry = (id: string, identity = "server") => ({
+    version: 1 as const,
+    session_id: id,
+    pid: process.pid,
+    display_name: null,
+    channel: "dev",
+    server: "https://party.example.com",
+    identity,
+    cwd: process.cwd(),
+    registered_at: 1,
+    harness: "claude" as const,
+  });
+
+  test("没有锁（只有蛰伏档入册）→ live=null，蛰伏会话按 (channel, server, identity) 数出来", () => {
+    const sessions = () => [
+      dormantEntry("019f95e8-2c0b-7903-8779-cd102c5ecd41"),
+      dormantEntry("019f95e8-2c0b-7903-8779-cd102c5ecd42"),
+      dormantEntry("019f95e8-2c0b-7903-8779-cd102c5ecd43", "someone-else"), // 别的身份不算
+      { ...dormantEntry("019f95e8-2c0b-7903-8779-cd102c5ecd44"), channel: "other" }, // 别的频道不算
+    ];
+    const asked: number[] = [];
+    const r = probeClaudeArmedListener({ lockDir, config, channel: "dev", sessions, commandOf: (pid) => (asked.push(pid), null) });
+    expect(r).toEqual({ live: null, sessions: 2 });
+    expect(asked).toEqual([]); // 没有持有者就不问 ps
+  });
+
+  test("serve 锁被活进程持有 → live=pid，起法由命令行认出（claude-channel）", () => {
+    writeFileSync(join(lockDir, `serve-${target()}.lock`), JSON.stringify({ pid: process.pid, id: "t", started_at: currentProcessStartedAt() }));
+    const r = probeClaudeArmedListener({
+      lockDir,
+      config,
+      channel: "dev",
+      sessions: () => [dormantEntry("019f95e8-2c0b-7903-8779-cd102c5ecd41")],
+      commandOf: (pid) => (pid === process.pid ? "party claude-channel --channel dev" : null),
+    });
+    expect(r).toEqual({ live: { pid: process.pid, launch: "claude-channel" }, sessions: 1 });
+  });
+
+  test("serve 锁被活进程持有、命令行是 serve → launch=serve", () => {
+    writeFileSync(join(lockDir, `serve-${target()}.lock`), JSON.stringify({ pid: process.pid, id: "t", started_at: currentProcessStartedAt() }));
+    const r = probeClaudeArmedListener({ lockDir, config, channel: "dev", sessions: () => [], commandOf: () => "party serve dev --runner claude" });
+    expect(r.live).toEqual({ pid: process.pid, launch: "serve" });
+  });
+
+  test("锁文件在、持有者进程已死 → null：锁文件不是进程", () => {
+    // 出生时间对不上 ⇒ instanceLockHolderPid 判「不是原持有者」（PID 复用防线），等价于死了。
+    writeFileSync(join(lockDir, `serve-${target()}.lock`), JSON.stringify({ pid: process.pid, id: "t", started_at: currentProcessStartedAt() - 3_600_000 }));
+    const r = probeClaudeArmedListener({ lockDir, config, channel: "dev", sessions: () => [], commandOf: () => "party claude-channel" });
+    expect(r.live).toBeNull();
+  });
+
+  test("config 没有 token（人类账号 / 没绑）→ null，不去碰锁", () => {
+    writeFileSync(join(lockDir, `serve-${target()}.lock`), JSON.stringify({ pid: process.pid, id: "t", started_at: currentProcessStartedAt() }));
+    const r = probeClaudeArmedListener({ lockDir, config: { server: config.server }, channel: "dev", sessions: () => [] });
+    expect(r.live).toBeNull();
+  });
+
+  test("锁属于另一个身份/实例（token 不同）→ 不算本身份的监听", () => {
+    writeFileSync(join(lockDir, `serve-${instanceLockTarget(config.server, "other-token", "dev")}.lock`), JSON.stringify({ pid: process.pid, id: "t", started_at: currentProcessStartedAt() }));
+    const r = probeClaudeArmedListener({ lockDir, config, channel: "dev", sessions: () => [], commandOf: () => "party claude-channel" });
+    expect(r.live).toBeNull();
+  });
+
+  test("classifyListenerCommand：只认 claude-channel / serve 两个子命令名，其余 unknown", () => {
+    expect(classifyListenerCommand("/usr/local/bin/party claude-channel --channel dev")).toBe("claude-channel");
+    expect(classifyListenerCommand("bun /x/cli/src/index.ts serve dev --runner claude")).toBe("serve");
+    expect(classifyListenerCommand("node something-else")).toBe("unknown");
+    expect(classifyListenerCommand(null)).toBe("unknown");
   });
 });

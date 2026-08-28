@@ -916,3 +916,102 @@ describe("who deferred 行的队列深度（#958）", () => {
     expect(line).not.toContain("queued ≈");
   });
 });
+
+// ── #979：身份「不在线」时说清为什么——本机只有普通 claude 起的蛰伏档，没有会接 @ 的武装监听 ──
+import { afterEach, beforeEach } from "bun:test";
+import { claudeDormantToSurface, diagnoseClaudeDormantSessions, formatClaudeDormantDiagnosis } from "../src/claude-armed-listener";
+import { registerClaudeSession } from "../src/claude-session-registry";
+import { currentProcessStartedAt, instanceLockTarget } from "../src/instance-lock";
+
+describe("who claude 蛰伏档说明（#979）", () => {
+  const SERVER = "https://party.example.com";
+  let home: string;
+  let lockDir: string;
+  let savedHome: string | undefined;
+  beforeEach(() => {
+    savedHome = process.env.AGENTPARTY_HOME;
+    home = mkdtempSync(join(tmpdir(), "party-who-979-home-"));
+    lockDir = mkdtempSync(join(tmpdir(), "party-who-979-locks-"));
+    process.env.AGENTPARTY_HOME = home;
+    mkdirSync(join(home, "agents"), { recursive: true });
+  });
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.AGENTPARTY_HOME;
+    else process.env.AGENTPARTY_HOME = savedHome;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  });
+  /** 本机为某身份绑到 #ludo 的 config（party join 写的那种）。 */
+  function writeAgentConfig(name: string, token: string): void {
+    writeFileSync(
+      join(home, "agents", `agentparty-${name}-ludo.json`),
+      JSON.stringify({ server: SERVER, token, identity: { name, channel_scope: "ludo" } }),
+    );
+  }
+  /** 普通 claude 会话 SessionStart 入册的形态：pid 是本进程（活着），身份/实例都对上。 */
+  function registerDormant(id: string, identity: string): void {
+    expect(registerClaudeSession({
+      session_id: id,
+      pid: process.pid,
+      display_name: null,
+      channel: "ludo",
+      identity,
+      server: SERVER,
+      cwd: process.cwd(),
+    })).toBe(true);
+  }
+
+  test("只有蛰伏档 ⇒ 列出该身份并数出会话数；渲染含「不在线」原因、local-only、两条命令原样", () => {
+    writeAgentConfig("server", "tok-server");
+    registerDormant("019f95e8-2c0b-7903-8779-cd102c5ecd51", "server");
+    registerDormant("019f95e8-2c0b-7903-8779-cd102c5ecd52", "server");
+    const diags = diagnoseClaudeDormantSessions("ludo", SERVER, { lockDir });
+    expect(diags).toEqual([{ channel: "ludo", identity: "server", sessions: 2 }]);
+    const lines = formatClaudeDormantDiagnosis(diags[0]!);
+    expect(lines[0]).toContain("#ludo 上 server 不在线");
+    expect(lines[0]).toContain("2 个 claude 会话全是蛰伏档");
+    expect(lines[0]).toContain("local-only");
+    expect(lines[1]).toContain("party claude ludo");
+    expect(lines[1]).toContain("party serve ludo --runner claude");
+  });
+
+  test("该身份的 serve 锁有活持有者（party claude / serve 在跑）⇒ 不列：它不是「只有蛰伏档」", () => {
+    writeAgentConfig("server", "tok-server");
+    registerDormant("019f95e8-2c0b-7903-8779-cd102c5ecd51", "server");
+    writeFileSync(
+      join(lockDir, `serve-${instanceLockTarget(SERVER, "tok-server", "ludo")}.lock`),
+      JSON.stringify({ pid: process.pid, id: "t", started_at: currentProcessStartedAt() }),
+    );
+    expect(diagnoseClaudeDormantSessions("ludo", SERVER, { lockDir })).toEqual([]);
+  });
+
+  test("注册表里没有该身份的活会话 ⇒ 不列（没会话谈不上蛰伏）；别的实例的会话也不算（#865）", () => {
+    writeAgentConfig("server", "tok-server");
+    expect(diagnoseClaudeDormantSessions("ludo", SERVER, { lockDir })).toEqual([]);
+    expect(registerClaudeSession({
+      session_id: "019f95e8-2c0b-7903-8779-cd102c5ecd53",
+      pid: process.pid,
+      display_name: null,
+      channel: "ludo",
+      identity: "server",
+      server: "https://other.example.com",
+      cwd: process.cwd(),
+    })).toBe(true);
+    expect(diagnoseClaudeDormantSessions("ludo", SERVER, { lockDir })).toEqual([]);
+  });
+
+  test("身份在 who 里已 online / wakeable ⇒ 不再解释；recent 或压根没那一行 ⇒ 说出来", () => {
+    const diags = [
+      { channel: "ludo", identity: "server", sessions: 1 },
+      { channel: "ludo", identity: "Alpha", sessions: 1 },
+      { channel: "ludo", identity: "ghost", sessions: 3 },
+    ];
+    const rows = [
+      { name: "server", tier: "online" },
+      { name: "alpha", tier: "wakeable" }, // 身份比对与 mentionMatchKey 同尺子：ASCII 不分大小写
+      { name: "ghost", tier: "recent" },
+    ];
+    expect(claudeDormantToSurface(diags, rows).map((d) => d.identity)).toEqual(["ghost"]);
+    expect(claudeDormantToSurface(diags, []).map((d) => d.identity)).toEqual(["server", "Alpha", "ghost"]);
+  });
+});
