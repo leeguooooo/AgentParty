@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   CLAUDE_CHANNEL_OPT_IN_ENV,
   CLAUDE_CHANNEL_PLUGIN,
@@ -11,12 +14,16 @@ import {
 describe("party claude launcher", () => {
   test("arms exactly one Marketplace Channel launch and forwards Claude args", async () => {
     const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    // 隔离本机偏好：这台机可能配过 `party claude --default-args`（#978），不能影响这里的精确断言。
+    const home = mkdtempSync(join(tmpdir(), "agentparty-claude-launch-"));
     const deps: ClaudeLaunchDependencies = {
       preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
       launch(args, env) {
         calls.push({ args, env });
         return { status: 7 };
       },
+      home,
+      env: {},
     };
 
     expect(await run(["dev", "--", "--model", "sonnet"], deps)).toBe(7);

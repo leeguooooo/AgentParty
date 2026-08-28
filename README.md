@@ -59,6 +59,8 @@ the plugin, then use the AgentParty launcher for a fresh Claude session with liv
 
 ```sh
 party claude <channel>
+# extra Claude flags go after --; set machine-local defaults once so you stop retyping them:
+party claude --default-args -- --dangerously-skip-permissions   # opt-in, printed at every launch
 ```
 
 The Claude shell bundles the Skill, generic MCP tools, a durable channel MCP, and lifecycle hooks
