@@ -319,6 +319,7 @@ export type CodexAutoWakeSkipReason =
   | "no-channel"
   | "non-interactive"
   | "harness-mismatch"
+  | "no-codex-binding"
   | "no-agent-token"
   | "already-serving"
   | "already-starting"
@@ -346,8 +347,11 @@ export interface CodexAutoWakeDecisionInput {
    * 拉唤醒层：它 60 秒后必被回收，留下的只有一条零信息的 waiting 帧。缺省 / unknown = 按交互式处理。
    */
   sessionKind?: CodexSessionKindLike | null;
-  /** 身份解析被「绑给别的 harness」拒掉时的说明（#960）；null = 没这回事。 */
-  harnessMismatch?: string | null;
+  /**
+   * 身份解析被「绑给别的 harness」拒掉（#960 harness-mismatch）或候选按 harness 过滤后一个不剩
+   * （#971 no-codex-binding）时的原因；null = 没这回事。两者都以自己的名字进日志，绝不混进 no-agent-token。
+   */
+  identityRefusal?: { reason: "harness-mismatch" | "no-codex-binding"; detail: string } | null;
   /** 同 (身份, 频道) 刚被回收过的证据（#959 退避）；null = 没有。 */
   flapping?: CodexAutoWakeFlap | null;
   /** 决策时刻；只用于把退避说明里的「多久前」算出来。缺省 Date.now()。 */
@@ -390,8 +394,8 @@ export function decideCodexAutoWake(input: CodexAutoWakeDecisionInput): CodexAut
         `（拉了也会在 60 秒后被回收，只给 #${channel} 留一条零信息的 waiting 帧）`,
     };
   }
-  if (typeof input.harnessMismatch === "string" && input.harnessMismatch !== "") {
-    return { action: "skip", reason: "harness-mismatch", detail: input.harnessMismatch };
+  if (input.identityRefusal !== null && input.identityRefusal !== undefined) {
+    return { action: "skip", reason: input.identityRefusal.reason, detail: input.identityRefusal.detail };
   }
   if (!input.hasAgentToken) {
     return {

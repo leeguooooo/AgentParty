@@ -31,6 +31,10 @@
 //                            app-server 就是这样多路复用的，真机实测）。
 //   5. `cwd-unique`       —— 退到 cwd 绑定的 config，但**只在本机该频道不存在第二个身份时**
 //                            才算数。单身份机器（绝大多数）行为逐字不变；多身份机器一律放弃。
+//
+// 反推各档（③④⑤）的候选集都**先按 harness 过滤**（#960/#971）：绑定文件里明确写着属于别的 harness
+// （且没有同身份 codex 绑定）的身份不是 codex 的候选——过滤后 0 个 ⇒ `no-codex-binding`（这台机
+// 就没打算让 codex 接本频道，安静退出）；恰 1 个 ⇒ 认领；≥2 个才是歧义。没有绑定记录的老配置保留。
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
@@ -88,6 +92,7 @@ export type CodexHookIdentityRefusal =
   | "env-config-unusable"
   | "ambiguous-binding"
   | "harness-mismatch"
+  | "no-codex-binding"
   | "registry-identity-unresolvable"
   | "ambiguous"
   | "no-identity";
@@ -293,6 +298,15 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
       `#${channel} 上的身份 ${identity.name ?? "?"}@${identity.server} 是用 --harness ${owner.harness} 加入的` +
       `（join-bindings 如实记着），codex hook 不认领它——要让 codex 也接这个身份，用 codex 的接入包重新加入`,
   });
+  // #971：候选按 harness 过滤后一个都不剩＝这台机就没打算让 codex 接本频道。这是预期状态，
+  // 不是故障：安静退出，绝不写成 ambiguous 那段引人重跑 codex 接入包的长文。
+  const noCodexBinding = (what: string): CodexHookIdentityResolution => ({
+    ok: false,
+    reason: "no-codex-binding",
+    detail: `${what}，codex 不接 #${channel}（要让 codex 也接是可选的，用 codex 的接入包 join 一次即可）`,
+  });
+  const describe = (rows: readonly { name: string | null; server: string }[]): string =>
+    rows.map((row) => `${row.name ?? "?"}@${row.server}`).join(", ");
 
   // ③ session_id → 注册表条目（identity + server 都是 SessionStart 时按本表同一套规则记的）。
   if (sessionId !== null && sessionId !== "") {
@@ -355,26 +369,73 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
       };
     }
     if (found.size > 1) {
+      // #971：歧义只在 **codex 可认领的** 候选之间算。绑给别的 harness 的身份先剔掉。
+      const rows = [...found.values()].filter((row) =>
+        boundElsewhere({ server: row.server, name: row.name, configPath: row.path }) === null);
+      if (rows.length === 1) {
+        const only = rows[0]!;
+        return {
+          ok: true,
+          identity: {
+            source: "mcp-registration",
+            configPath: only.path,
+            server: only.server,
+            token: only.token,
+            name: only.name,
+            configScopedState: true,
+          },
+        };
+      }
+      if (rows.length === 0) {
+        return noCodexBinding(
+          `codex 进程 ${deps.pid} 下挂着的 ${found.size} 个绑 #${channel} 的身份` +
+            `（${describe([...found.values()])}）全是用别的 harness 加入的`,
+        );
+      }
       return {
         ok: false,
         reason: "ambiguous",
         detail:
-          `codex 进程 ${deps.pid} 下同时挂着 ${found.size} 个绑 #${channel} 的身份` +
-          `（${[...found.values()].map((row) => `${row.name ?? "?"}@${row.server}`).join(", ")}）` +
+          `codex 进程 ${deps.pid} 下同时挂着 ${rows.length} 个绑 #${channel} 的身份` +
+          `（${describe(rows)}）` +
           `——分不清本会话是哪一个，放弃。重新跑一遍接入包即可（加入即绑定会记下本次身份）`,
       };
     }
   }
 
-  // ⑤ cwd 绑定的 config——只有本机该频道不存在第二个身份时才算数。
+  // ⑤ cwd 绑定的 config——只有本机该频道不存在第二个 **codex 可认领的** 身份时才算数。
+  //
+  // #971：候选集先按 harness 过滤，再谈唯一/歧义。绑定文件里明确写着 `harness: claude`（且没有
+  // 同身份 codex 绑定）的身份根本不是 codex 的候选——piggo 现场同 cwd 堆着一旧一新两个 claude
+  // 绑定、零个 codex 绑定，此前这里把两个都算进候选、判成 ambiguous，每个 codex SessionStart 都
+  // 刷一遍长文，修法还引人「重跑 codex 接入包」，与这台机「codex 不接 #C」的意图正相反。
+  // 没有绑定记录的老配置照旧留在候选里（它们没被任何 harness 认领）。
   const cwdUsable = usableConfig(deps.readCwdConfig(cwd), channel);
   const distinct = distinctCandidateKeys(deps.candidates(channel));
+  const claimedByOtherHarness = (hint: LocalAgentConfigHint): boolean => {
+    const healed = healServerUrl(hint.server);
+    return healed !== null && boundElsewhere({ server: healed, name: hint.name, configPath: hint.path }) !== null;
+  };
+  const eligible = new Map([...distinct].filter(([, hint]) => !claimedByOtherHarness(hint)));
+  const foreignNames = [...distinct.values()]
+    .filter((hint) => claimedByOtherHarness(hint))
+    .map((hint) => hint.name ?? "?");
   if (cwdUsable !== null) {
     const key = identityKey(cwdUsable.server, cwdUsable.name);
-    const others = [...distinct.keys()].filter((candidate) => candidate !== key);
+    const others = [...eligible.keys()].filter((candidate) => candidate !== key);
+    const cwdOwner = boundElsewhere({ ...cwdUsable, configPath: null });
+    if (cwdOwner !== null) {
+      // cwd 指向的身份是别的 harness 的。本机该频道就它一个身份 ⇒ harness-mismatch（#960 原样）；
+      // 连同它在内绑该频道的身份全是别的 harness 的、且不止一个 ⇒ no-codex-binding（#971 现场）；
+      // 还剩没人认领的老配置 ⇒ 那也不是 cwd 指的这个，绝不改猜它——仍按 mismatch 拒。
+      const foreignCount = foreignNames.length + (distinct.has(key) ? 0 : 1);
+      if (others.length === 0 && foreignCount > 1) {
+        const names = distinct.has(key) ? foreignNames : [cwdUsable.name ?? "?", ...foreignNames];
+        return noCodexBinding(`本目录绑 #${channel} 的 ${names.length} 个身份（${names.join(", ")}）全是用别的 harness 加入的`);
+      }
+      return harnessMismatch(cwdOwner, cwdUsable);
+    }
     if (others.length === 0) {
-      const owner = boundElsewhere({ ...cwdUsable, configPath: null });
-      if (owner !== null) return harnessMismatch(owner, cwdUsable);
       return {
         ok: true,
         identity: { source: "cwd-unique", configPath: null, ...cwdUsable, configScopedState: false },
@@ -384,10 +445,13 @@ export function resolveCodexHookIdentity(input: CodexHookIdentityInput): CodexHo
       ok: false,
       reason: "ambiguous",
       detail:
-        `本机绑 #${channel} 的身份有 ${distinct.has(key) ? distinct.size : distinct.size + 1} 个，` +
+        `本机绑 #${channel} 的身份有 ${eligible.has(key) ? eligible.size : eligible.size + 1} 个，` +
         `cwd(${cwd}) 只能猜出其中一个（${cwdUsable.name ?? "?"}@${cwdUsable.server}）——按 cwd 猜必然误投，放弃。` +
         `重新跑一遍该身份的接入包即可（加入即绑定会把「这个 harness 的这个频道 = 这个身份」记下来）`,
     };
+  }
+  if (distinct.size > 0 && eligible.size === 0) {
+    return noCodexBinding(`本机绑 #${channel} 的 ${distinct.size} 个身份（${foreignNames.join(", ")}）全是用别的 harness 加入的`);
   }
   return {
     ok: false,
@@ -421,6 +485,10 @@ export function codexHookIdentityFix(
       // 身份是绑给别的 harness 的：codex 不抢。想让 codex 也接它，就用 codex 的接入包（party invite）
       // 再 join 一次——别拿 party init 手搓，半截 join 看着正常、被 @ 时静默不醒（#955）。
       return `AGENTPARTY_TOKEN='<T>' party join --channel ${channel}${serverFlag} --as <name> --harness codex --yes    # 这个身份是用别的 harness 加入的，codex 不认领；要让 codex 接它，用 codex 的接入包重新 join`;
+    case "no-codex-binding":
+      // #971：本目录绑该频道的身份全是别的 harness（claude）的，codex 不接是这台机的**预期状态**，
+      // 不是故障。命令只是「想让 codex 也接」时的可选路径——同样走接入包 join，不是 party init（#955）。
+      return `AGENTPARTY_TOKEN='<T>' party join --channel ${channel}${serverFlag} --as <name> --harness codex --yes    # 可选：本目录绑 #${channel} 的身份都是 claude 加入的，codex 不接是预期行为；只有想让 codex 也接这个频道时才用 codex 的接入包 join 一次`;
     case "ambiguous-binding":
     case "ambiguous":
     case "registry-identity-unresolvable":
