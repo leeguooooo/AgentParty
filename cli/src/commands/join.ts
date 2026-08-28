@@ -39,6 +39,14 @@ import { buildWakeChecklist, type WakeChecklist } from "../wake-checklist";
 import { diagnoseCodexWake } from "../wake-diagnosis";
 import { RUNNING_VERSION, compareVersions } from "../upgrade";
 import {
+  CLAUDE_PLUGIN as SHARED_CLAUDE_PLUGIN,
+  CLAUDE_PLUGIN_MARKETPLACE,
+  CLAUDE_PLUGIN_UPDATE_COMMAND,
+  claudePluginMismatchFix,
+  installedClaudePluginVersion,
+  syncClaudePluginToCli,
+} from "../claude-plugin-sync";
+import {
   activeCodexAutoWakePid,
   codexAutoWakeAuth,
   codexAutoWakeMarkerPath,
@@ -60,7 +68,6 @@ import { findHarnessAncestor } from "../join-binding";
 import {
   CLAUDE_PLUGIN_MIN_VERSION,
   inspectClaudePluginShell,
-  parseClaudePluginList,
   type ClaudePluginShellInspection,
 } from "./doctor";
 import type { CodexAutoWakeOutcome } from "./hook";
@@ -228,27 +235,16 @@ function registerCodexMcp(deps: JoinDeps, name: string, configPath: string, slug
   return { level: "ok", msg: `MCP 已注册：${name}` };
 }
 
-const CLAUDE_PLUGIN = "agentparty@agentparty";
-const MARKETPLACE = "leeguooooo/AgentParty";
-
-/**
- * 本机已装的 agentparty 插件版本。`undefined`＝读不出（claude 不可用 / 输出解析不了）；`null`＝没装。
- * 走的是 doctor 同一个解析器（parseClaudePluginList），判据不另写一份。
- */
-function installedClaudePluginVersion(deps: JoinDeps): string | null | undefined {
-  const r = deps.spawn("claude", ["plugin", "list", "--json"], { encoding: "utf8", timeout: 30_000 });
-  if (r.error !== undefined || r.status !== 0 || typeof r.stdout !== "string") return undefined;
-  const list = parseClaudePluginList(r.stdout);
-  if (list === null) return undefined;
-  return list.find((p) => p.id === CLAUDE_PLUGIN)?.version ?? null;
-}
+const CLAUDE_PLUGIN = SHARED_CLAUDE_PLUGIN;
+const MARKETPLACE = CLAUDE_PLUGIN_MARKETPLACE;
 
 /**
  * 装 claude 插件（marketplace）——best-effort：装不上不阻断，只提示；能不能唤醒由收尾自检判。
  *
  * #961：`claude plugin install` 对已装的只回一句 "already installed"（exit 0），**永远不会升级**。
  * 于是本机插件停在旧版、CLI 已经是新版，doctor 判 plugin_version_mismatch，SessionStart 唤醒根本
- * 没布上。所以 install 之后读一次已装版本，≠ 当前 CLI 就跟一步 `plugin update`。
+ * 没布上。所以 install 之后交给 syncClaudePluginToCli（与 `party upgrade` 共用，#985）：读已装版本，
+ * ≠ 当前 CLI 就跟一步 `plugin update`，再读一次核实。
  *
  * 装了 / 更新了都要**重开 Claude 会话**才生效（当前会话还挂着旧插件）——这句必须进结论，
  * 不能埋在 warn 里，所以用 restartNeeded 带出去。
@@ -258,26 +254,23 @@ function installClaudePlugin(deps: JoinDeps): StepOutcome & { restartNeeded: boo
   if (first.error !== undefined) {
     return { level: "skip", msg: "claude 二进制不可用，跳过插件安装（不影响 CLI 协作）", restartNeeded: false };
   }
-  const before = installedClaudePluginVersion(deps);
+  const before = installedClaudePluginVersion(deps.spawn);
   let anyFail = first.status !== 0;
   for (const args of [["plugin", "install", CLAUDE_PLUGIN], ["plugin", "enable", CLAUDE_PLUGIN]]) {
     const r = deps.spawn("claude", args, { encoding: "utf8", timeout: 60_000 });
     if (r.error !== undefined || r.status !== 0) anyFail = true;
   }
-  let updated = false;
-  if (before !== undefined && before !== null && before !== RUNNING_VERSION) {
-    const r = deps.spawn("claude", ["plugin", "update", CLAUDE_PLUGIN], { encoding: "utf8", timeout: 60_000 });
-    if (r.error !== undefined || r.status !== 0) anyFail = true;
-    else updated = true;
-  }
-  const after = installedClaudePluginVersion(deps);
+  const sync = syncClaudePluginToCli(deps.spawn, RUNNING_VERSION);
+  if (sync.kind === "update_failed") anyFail = true;
+  const updated = sync.kind === "updated";
+  const after = sync.after;
   // 装上了（之前没有）或换了版本 ⇒ 当前会话还挂着旧的，必须重开。
   const restartNeeded = before !== after && after !== undefined;
   if (anyFail) {
     // 修法要对症：已装旧版就是 update（install 原地踏步），没装才是 install。
     const fix = after === null || after === undefined
       ? `claude plugin install ${CLAUDE_PLUGIN}`
-      : `claude plugin update ${CLAUDE_PLUGIN}`;
+      : CLAUDE_PLUGIN_UPDATE_COMMAND;
     return {
       level: "warn",
       msg: `claude 插件未完全装上（best-effort，不阻断；手动 ${fix}，然后重开会话）——能不能被唤醒见下方自检`,
@@ -286,7 +279,7 @@ function installClaudePlugin(deps: JoinDeps): StepOutcome & { restartNeeded: boo
     };
   }
   if (after !== undefined && after !== null && after !== RUNNING_VERSION) {
-    const fix = compareVersions(after, RUNNING_VERSION) > 0 ? "party upgrade" : `claude plugin update ${CLAUDE_PLUGIN}`;
+    const fix = claudePluginMismatchFix(after, RUNNING_VERSION);
     return {
       level: "warn",
       msg: `claude 插件是 ${after}，CLI 是 ${RUNNING_VERSION}，版本不一致时 SessionStart 唤醒不会布上——手动 ${fix}`,
