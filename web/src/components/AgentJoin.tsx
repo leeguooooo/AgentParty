@@ -83,6 +83,11 @@ interface Props {
   sendMessage?: (body: string, mention: string) => boolean;
   /** 「恢复/重连」入口（#1005）：非 null 时直接打开 recover 形态的 stepper（② = party recover <chan>）。 */
   recoverName?: string | null;
+  /**
+   * #1009：「接入凭证」面板的引导入口。非 null 时直接打开 stepper，形态由这份 session 决定——
+   * 比 recoverName 更完整（带 ② 的那条命令与 harness/mode/runner），既能走 recover 也能走带 token 的接入。
+   */
+  guideSession?: JoinGuideSession | null;
   /** 轮询/计时参数（测试注入）。 */
   pollIntervalMs?: number;
   tickMs?: number;
@@ -90,6 +95,19 @@ interface Props {
   liveNoteDelayMs?: number;
   verifyTimeoutMs?: number;
   now?: () => number;
+}
+
+/** #1009：外部（AgentTokens 面板）交过来的一次引导会话——足以直接渲染 stepper 的最小信息。 */
+export interface JoinGuideSession {
+  name: string;
+  /** 第 ② 步的那条命令；recover 形态为 `party recover <chan>`（不含 token）。 */
+  command: string;
+  mode: JoinPackMode;
+  harness: JoinPackHarness;
+  runner: DesktopAgentRunner;
+  recover: boolean;
+  /** 明文 token：命令里带 token 时一并交过来，只为渲染那条安全警告；recover 形态为 null。 */
+  token?: string | null;
 }
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -234,6 +252,7 @@ export function AgentJoin({
   messages: messagesProp,
   sendMessage,
   recoverName = null,
+  guideSession = null,
   pollIntervalMs = 2500,
   tickMs = 1000,
   liveNoteDelayMs = 150,
@@ -357,6 +376,36 @@ export function AgentJoin({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recoverName, slug]);
+
+  // #1009：「接入凭证」面板的「接入引导 / 重新接上」——同一个 stepper，命令与形态由面板给的 session 决定。
+  useEffect(() => {
+    if (guideSession === null) return;
+    if (
+      phase.kind === "stepper" &&
+      phase.session.name === guideSession.name &&
+      phase.session.command === guideSession.command &&
+      phase.session.recover === guideSession.recover
+    ) {
+      return;
+    }
+    const sinceTs = startedAtRef.current.get(guideSession.name) ?? nowFn();
+    // 已存在的身份（面板里选中的都是），只认「比打开这一刻更新」的活动（strict）。
+    const baseline =
+      baselineRef.current.get(guideSession.name) ?? joinBaseline(messages, presence, guideSession.name, true);
+    openStepper({
+      name: guideSession.name,
+      baseline,
+      mode: guideSession.mode,
+      harness: guideSession.harness,
+      runner: guideSession.runner,
+      recover: guideSession.recover,
+      // 明文 token 只在这一次引导里存在（关掉即丢）；有它才渲染 ② 的安全警告。
+      token: guideSession.recover ? null : (guideSession.token ?? null),
+      command: guideSession.command,
+      sinceTs,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guideSession, slug]);
 
   // 文字在 effect 里填，且晚一拍：区域先以空内容落地，之后内容变化才是读屏认的 live region 更新
   // （区域与文字同一批插入时，多数读屏不念）。延迟可注入，测试不必真等。
