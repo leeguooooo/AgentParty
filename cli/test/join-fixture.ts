@@ -102,9 +102,12 @@ export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: Pl
     }
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "update") {
       if (behavior.failPluginUpdate) return { ...base, status: 1 };
-      // 真机行为：update 只会把插件带到 marketplace 上的版本，**不会降级**。本机插件比 CLI 新
-      // （CLI 还没升）时跑 update 等于没动，这一档正是 owner 截图那种 0.2.222 插件 / 0.2.221 CLI。
-      const newer = state.installed !== null && compareSemverLoose(state.installed, RUNNING_VERSION) > 0;
+      // 真机行为二则（桩不能比真机宽容，否则会掩盖真缺陷）：
+      //  1) 没装过时 `plugin update` 直接失败，**不会顺手装上**（那是 install 的活）；
+      //  2) update 只把插件带到 marketplace 上的版本，**不会降级**——本机插件比 CLI 新
+      //     （CLI 还没升）时跑它等于没动，正是 owner 截图那种 0.2.222 插件 / 0.2.221 CLI。
+      if (state.installed === null) return { ...base, status: 1 };
+      const newer = compareSemverLoose(state.installed, RUNNING_VERSION) > 0;
       if (!newer) state.installed = RUNNING_VERSION;
       if (behavior.pluginListFailsAfterUpdate !== undefined) state.listFailuresLeft = behavior.pluginListFailsAfterUpdate;
       return { ...base, status: behavior.pluginUpdateNoisyButWorks ? 1 : 0 };
