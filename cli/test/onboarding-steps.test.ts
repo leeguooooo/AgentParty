@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { formatStep, runSteps, type Step, type StepResult } from "../src/onboarding/steps";
 import { roundTripWakeVerifier, runJoin } from "../src/commands/join";
 import type { VerifyWakeDeps } from "../src/onboarding/verify-wake";
+import type { ClaudeArmedListenerProbe } from "../src/claude-armed-listener";
 import type { WakeTestFrame } from "../src/commands/wake";
 import { RUNNING_VERSION } from "../src/upgrade";
 import { startRestMock, type RestMock } from "./rest-mock";
@@ -356,6 +357,188 @@ describe("party join 引导 —— --yes 无 TTY 全流程（#988）", () => {
     expect(code).toBe(0);
     expect(stepLine(logs, 2)).toContain("你选：交互式 Claude 会话");
     expect(logs.join("\n")).toContain("无 TTY：不交互，按 claude 档默认选了交互式会话");
+  });
+});
+
+// ── 第 3 步 claude 档探不到武装监听时的起法（#989）───────────────────────────────
+//
+// 变异自检（写这份测试时做过）：把 waitForClaudeArmedListener 的轮询循环删掉（只探一次）⇒ 「第 2 次轮询变 live」
+// 那条红（停在第 3 步而不是继续到第 4 步）；把 runJoin 里「launchAfterJoin 就不跑第 4 步」删掉 ⇒ 「选 2」那条红。
+describe("party join 引导 —— 第 3 步 claude 档：探不到武装监听时怎么起（#989）", () => {
+  /** 有 TTY 的 claude 档：第 2 步真的问到了人（选交互式），第 3 步一开始探不到武装监听。 */
+  function interactiveDeps(logs: string[], probes: ClaudeArmedListenerProbe[]) {
+    const d = joinDeps(tmp, [], {}, logs);
+    d.chooseReceiveMode = async () => "interactive";
+    const record = { probeCalls: 0, sleeps: [] as number[], asked: [] as string[][], launched: [] as string[][], verified: false };
+    d.claudeArmedListener = () => {
+      const next = probes[Math.min(record.probeCalls, probes.length - 1)]!;
+      record.probeCalls++;
+      return next;
+    };
+    const sleep = d.sleep;
+    d.sleep = async (ms) => {
+      record.sleeps.push(ms);
+      await sleep(ms);
+    };
+    d.chooseLaunchMode = async (channel, command) => {
+      record.asked.push([channel, command]);
+      return "self";
+    };
+    d.launchClaudeSession = async (channel, firstPrompt) => {
+      record.launched.push([channel, firstPrompt]);
+      logs.push("<launch>");
+      return 0;
+    };
+    d.verifyWake = ({ identity }) => {
+      record.verified = true;
+      return { ok: true, summary: STUB_WAKE_VERIFY_SUMMARY(identity) };
+    };
+    return { d, record };
+  }
+  const dormant: ClaudeArmedListenerProbe = { live: null, sessions: 1 };
+  const armed: ClaudeArmedListenerProbe = { live: { pid: 6161, launch: "claude-channel" }, sessions: 1 };
+
+  test("选 1（自己另开终端跑）：探活在第 2 次轮询变 live ⇒ 印「等待武装监听…」、每 3s 探一次、第 3 步 ✓ 带 pid，继续到第 4 步并 ✅", async () => {
+    mock = startRestMock();
+    const logs: string[] = [];
+    // 第 1 次：本步探；第 2、3 次：轮询——第 2 次轮询才有。
+    const { d, record } = interactiveDeps(logs, [dormant, dormant, armed]);
+    const code = await runJoin(opts({ yes: false }), d);
+    const out = logs.join("\n");
+    expect(code).toBe(0);
+    expect(record.asked).toEqual([["dev", "party claude dev"]]);
+    expect(record.sleeps).toEqual([3_000, 3_000]);
+    expect(record.probeCalls).toBe(3);
+    expect(out).toContain("等待武装监听…（在另一个终端跑：party claude dev；最多等 90s，每 3s 探一次）");
+    expect(stepLine(logs, 3)).toContain("武装监听 party claude-channel，pid 6161）在接 @ ✓");
+    expect(out).toContain("等了 6s，武装监听到位");
+    expect(record.verified).toBe(true);
+    expect(stepLine(logs, 4)).toContain(STUB_WAKE_VERIFY_SUMMARY("agent"));
+    expect(fixCount(logs)).toBe(0);
+    expect(logs.find((l) => l.startsWith("✅"))).toContain("pid 6161");
+    expect(record.launched).toEqual([]);
+  });
+
+  test("选 1 但 90s 内一直没武装 ⇒ 轮询到超时（30 次）后停在第 3 步，摘要说清等了 90s，修法还是 party claude dev，第 4 步不跑", async () => {
+    mock = startRestMock();
+    const logs: string[] = [];
+    const { d, record } = interactiveDeps(logs, [dormant]);
+    const code = await runJoin(opts({ yes: false }), d);
+    expectStoppedAt(code, logs, 3);
+    expect(record.sleeps.length).toBe(30);
+    expect(record.sleeps.every((ms) => ms === 3_000)).toBe(true);
+    expect(stepLine(logs, 3)).toContain("等了 90s 仍本机没有会接 @ 的 Claude 会话——本机在 #dev 入册的 1 个 claude 会话全是蛰伏档");
+    expect(fixLine(logs)).toBe("party claude dev");
+    expect(record.verified).toBe(false);
+    expect(record.launched).toEqual([]);
+  });
+
+  test("选 2（现在就在这个终端起）：第 3 步记成待办 ✓、第 4 步不在 join 里跑、结论含 party wake verify dev、印完才调起会话桩，退出码跟会话", async () => {
+    mock = startRestMock();
+    const logs: string[] = [];
+    const { d, record } = interactiveDeps(logs, [dormant]);
+    d.chooseLaunchMode = async (channel, command) => {
+      record.asked.push([channel, command]);
+      return "here";
+    };
+    d.launchClaudeSession = async (channel, firstPrompt) => {
+      record.launched.push([channel, firstPrompt]);
+      logs.push("<launch>");
+      return 7;
+    };
+    const code = await runJoin(opts({ yes: false }), d);
+    const out = logs.join("\n");
+    expect(code).toBe(7);
+    expect(record.asked).toEqual([["dev", "party claude dev"]]);
+    // 不等、不轮询：起会话是前台交互，join 不能同步等它。
+    expect(record.sleeps).toEqual([]);
+    expect(stepLine(logs, 3)).toBe("第 3 步  起一个可唤醒的会话 · 本机还没有会接 @ 的 Claude 会话——join 结束后在本终端起 party claude dev ✓");
+    expect(out).toContain("第 4 步（真发一条 @ 验证）改在新会话里跑：party wake verify dev");
+    // 第 4 步没跑：没有那一行、注入的验证桩没被调。
+    expect(stepLine(logs, 4)).toBeUndefined();
+    expect(record.verified).toBe(false);
+    // 结论：不是 ✅（还没验证），说清在哪完成、跑哪条。
+    expect(out).not.toContain("✅");
+    const verdictAt = logs.findIndex((l) => l.startsWith("接入将在你起的会话里完成验证"));
+    expect(verdictAt).toBeGreaterThan(-1);
+    expect(logs[verdictAt]).toContain("party claude dev");
+    expect(logs[verdictAt]).toContain("Loading development channels");
+    expect(logs[verdictAt + 1]).toContain("party wake verify dev");
+    // 起会话桩被调了一次，在结论之后；首轮提示让新会话自己跑第 4 步。
+    expect(record.launched.length).toBe(1);
+    expect(record.launched[0]![0]).toBe("dev");
+    expect(record.launched[0]![1]).toContain("party wake verify dev");
+    expect(logs.indexOf("<launch>")).toBeGreaterThan(verdictAt + 1);
+    expect(fixCount(logs)).toBe(0);
+    expect(out).not.toContain("接入停在");
+  });
+
+  test("--yes：不问怎么起、不等、不起 ⇒ 印命令 + 停在第 3 步（现状）", async () => {
+    mock = startRestMock();
+    const logs: string[] = [];
+    const { d, record } = interactiveDeps(logs, [dormant, armed]);
+    const code = await runJoin(opts({ yes: true }), d);
+    expectStoppedAt(code, logs, 3);
+    expect(record.asked).toEqual([]);
+    expect(record.sleeps).toEqual([]);
+    expect(record.probeCalls).toBe(1);
+    expect(record.launched).toEqual([]);
+    expect(fixLine(logs)).toBe("party claude dev");
+    expect(logs.join("\n")).not.toContain("等待武装监听");
+  });
+
+  test("无 TTY（第 2 步没问到人）且未 --yes：同样不问、不等 ⇒ 停在第 3 步", async () => {
+    mock = startRestMock();
+    const logs: string[] = [];
+    const { d, record } = interactiveDeps(logs, [dormant, armed]);
+    d.chooseReceiveMode = async () => null; // 无 TTY
+    const code = await runJoin(opts({ yes: false }), d);
+    expectStoppedAt(code, logs, 3);
+    expect(record.asked).toEqual([]);
+    expect(record.sleeps).toEqual([]);
+    expect(record.launched).toEqual([]);
+  });
+
+  test("第 3 步那一问被取消（Ctrl+C）⇒ 停在第 3 步、不替人起、不等", async () => {
+    mock = startRestMock();
+    const logs: string[] = [];
+    const { d, record } = interactiveDeps(logs, [dormant, armed]);
+    d.chooseLaunchMode = async () => "cancelled";
+    const code = await runJoin(opts({ yes: false }), d);
+    expectStoppedAt(code, logs, 3);
+    expect(stepLine(logs, 3)).toContain("已取消");
+    expect(record.sleeps).toEqual([]);
+    expect(record.launched).toEqual([]);
+    expect(fixLine(logs)).toBe("party claude dev");
+  });
+
+  test("第 2 步选了常驻：第 3 步不问起法（serve 是常驻进程，没有「在这个终端起」），有 TTY 直接等 party serve 武装", async () => {
+    mock = startRestMock();
+    const logs: string[] = [];
+    const { d, record } = interactiveDeps(logs, [dormant, { live: { pid: 777, launch: "serve" }, sessions: 0 }]);
+    d.chooseReceiveMode = async () => "serve";
+    const code = await runJoin(opts({ yes: false }), d);
+    expect(code).toBe(0);
+    expect(record.asked).toEqual([]);
+    expect(record.sleeps).toEqual([3_000]);
+    expect(logs.join("\n")).toContain("等待武装监听…（在另一个终端跑：party serve dev --runner claude；");
+    expect(stepLine(logs, 3)).toContain("pid 777");
+    expect(record.launched).toEqual([]);
+  });
+
+  test("第 3 步的命令说明：dev-channels 确认框会弹一次；配了默认参数就说会带上，没配就说只带这些", async () => {
+    mock = startRestMock();
+    const logs: string[] = [];
+    const d = joinDeps(tmp, [], {}, logs);
+    d.claudeDefaultArgs = () => ({ args: ["--dangerously-skip-permissions"], source: "config", origin: "/x/claude-default-args.json" });
+    expect(await runJoin(opts({ yes: true }), d)).toBe(0);
+    const out = logs.join("\n");
+    expect(out).toContain("启动时 Claude 会弹一次「Loading development channels」确认框，选「I am using this for local development」；上面的本机默认参数会一并带上。");
+    expect(out).toContain("默认参数：--dangerously-skip-permissions（来自 /x/claude-default-args.json）");
+
+    const logs2: string[] = [];
+    expect(await runJoin(opts({ yes: true }), joinDeps(tmp, [], {}, logs2))).toBe(0);
+    expect(logs2.join("\n")).toContain("确认框，选「I am using this for local development」；本机没配默认参数，只带上面这些。");
   });
 });
 

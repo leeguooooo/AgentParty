@@ -101,6 +101,7 @@ export function joinDeps(tmp: string, record: string[][], behavior: SpawnBehavio
     installed: behavior.installedPluginVersion === undefined ? RUNNING_VERSION : behavior.installedPluginVersion,
   };
   const spawn = fakeSpawn(record, behavior, state);
+  const clock = { t: 1_000_000 };
   return {
     spawn,
     initRun,
@@ -142,6 +143,16 @@ export function joinDeps(tmp: string, record: string[][], behavior: SpawnBehavio
     chooseReceiveMode: async () => null,
     // 第 3 步（#988）：本机没配 party claude 默认参数；有默认参数的用例逐个覆盖。
     claudeDefaultArgs: () => ({ args: [], source: "none", origin: join(tmp, ".agentparty", "claude-default-args.json") }),
+    // 第 3 步（#989）：默认「没法问」（无 TTY）；起会话的桩绝不该在默认用例里被调到（调到就是 join 想接管终端了）。
+    chooseLaunchMode: async () => null,
+    launchClaudeSession: async (channel) => {
+      throw new Error(`launchClaudeSession(${channel}) 不该被调到：这个用例没选「在这个终端起」`);
+    },
+    // 假时钟：sleep 只拨表不真等，now 读表——第 3 步的 90s 等待在测试里是瞬时的。
+    sleep: async (ms) => {
+      clock.t += ms;
+    },
+    now: () => clock.t,
     // 第 4 步（#988）：往返验证桩——真实的 roundTripWakeVerifier（#990）要发真帧、等 30s，单测不跑它；
     // 适配层（往返结果 → 一步）在 onboarding-steps.test.ts 里单独用假 probe 测。
     verifyWake: ({ identity }) => ({ ok: true, summary: STUB_WAKE_VERIFY_SUMMARY(identity) }),

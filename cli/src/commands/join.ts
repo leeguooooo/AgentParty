@@ -69,7 +69,7 @@ import {
 } from "../claude-armed-listener";
 import { resolveClaudeDefaultArgs, type ClaudeDefaultArgsResolution } from "../claude-default-args";
 import { claudeLaunchPlan } from "./claude-launch";
-import { runSteps, type Step, type StepResult } from "../onboarding/steps";
+import { STEP_INDENT, runSteps, type Step, type StepResult } from "../onboarding/steps";
 import { verifyWakeRoundTrip, type VerifyWakeDeps } from "../onboarding/verify-wake";
 import { findHarnessAncestor } from "../join-binding";
 import {
@@ -94,8 +94,13 @@ One command that does the whole join as guided steps (#987/#988):
   第 2 步 接收方式  claude: interactive session vs resident serve (asked on a TTY; the
                     default is taken and printed with --yes / no TTY); codex: install +
                     approve the Stop hook (#901/#942/#943)
-  第 3 步 起一个可唤醒的会话  claude: print the exact \`party claude\` launch and probe for
-                    an armed listener (#979); codex: bring up the wake layer, probe it (#957)
+  第 3 步 起一个可唤醒的会话  claude: print the exact \`party claude\` launch (dev-channels +
+                    machine defaults) and probe for an armed listener (#979); when none and a
+                    TTY is present, ask: [1] you run it in another terminal (join polls every
+                    3s, up to 90s) or [2] launch it in this terminal after join prints its
+                    verdict (join hands the terminal over; 第 4 步 then runs inside the new
+                    session via \`party wake verify\`) (#989); codex: bring up the wake layer,
+                    probe it (#957)
   第 4 步 真发一条 @ 验证     send one \`[wake-verify]\` @ to yourself and wait for the
                     receipt; on timeout say which layer failed (#990, party wake verify)
 Each step runs one check; the first failing step prints exactly one fix command and
@@ -129,6 +134,11 @@ interface StepOutcome {
 
 /** 第 2 步 claude 档的接收方式：交互式会话（party claude）或常驻（party serve --runner claude）。 */
 export type ReceiveMode = "interactive" | "serve";
+/** 第 3 步 claude 档探不到武装监听时的起法（#989）：自己另开终端跑（join 等）/ join 结束后在本终端接管起。 */
+export type LaunchMode = "self" | "here";
+/** 第 3 步等武装监听的上限与轮询间隔（#989）：人另开终端跑 party claude，这边最多等 90s、每 3s 探一次。 */
+export const ARMED_LISTENER_WAIT_MS = 90_000;
+export const ARMED_LISTENER_POLL_MS = 3_000;
 
 /** 第 4 步的输入：第 3 步探活到的那个会被唤醒的进程（#990 的真实往返验证按它判「谁收到了」）。 */
 export interface WakeVerifyInput {
@@ -221,6 +231,21 @@ export interface JoinDeps {
   chooseReceiveMode: (channel: string) => Promise<ReceiveMode | null | "cancelled">;
   /** 第 3 步（claude 档）：本机 `party claude` 的默认启动参数（#978），只用来把最终命令印全。 */
   claudeDefaultArgs: () => ClaudeDefaultArgsResolution;
+  /**
+   * 第 3 步（claude 档，#989）：探不到武装监听时问一句怎么起——"self"＝自己在另一个终端跑那条命令
+   * （join 在这边等它武装）；"here"＝join 结束后在本终端接管起会话。null＝无 TTY（按现状：印命令 + 停）；
+   * "cancelled"＝用户 Ctrl+C / 关了输入（必须停）。--yes 时 runJoin 根本不调它。缺省 readline 一问。
+   */
+  chooseLaunchMode: (channel: string, command: string) => Promise<LaunchMode | null | "cancelled">;
+  /**
+   * 第 3 步选了 "here" 后，由 runJoin 在所有输出打印完之后调用：接管终端起 `party claude <chan>`
+   * （claude-launch 的 run，stdio inherit，会话退出才返回），返回值就是 join 的退出码。firstPrompt 是
+   * 新会话的首轮提示（让它自己跑 party wake verify 补上第 4 步）。缺省＝真起；测试注入桩。
+   */
+  launchClaudeSession: (channel: string, firstPrompt: string) => Promise<number>;
+  /** 第 3 步等武装监听的轮询时钟（#989）。测试注入假时钟，别真等 90s。 */
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
   /** 第 4 步：真发一条 @ 的往返验证。缺省 roundTripWakeVerifier（#990 的 verifyWakeRoundTrip）。 */
   verifyWake: WakeVerifier;
 }
@@ -606,8 +631,12 @@ export interface JoinCtx {
   identity: string | null;
   /** 第 2 步：claude 档所选接收方式。 */
   receiveMode: ReceiveMode;
+  /** 第 2 步真的问到了人（有 TTY 且未 --yes）——第 3 步据此决定能不能再问一句 / 等人另开终端（#989）。 */
+  interactive: boolean;
   /** 第 3 步：探活到的那个会被唤醒的进程。 */
   listener: { pid: number; description: string } | null;
+  /** 第 3 步（#989）：选了「现在就在这个终端起」——第 4 步不在 join 里跑，输出打印完后接管终端起会话。 */
+  launchAfterJoin: boolean;
 }
 
 /** best-effort 小动作的一行：`✓ 注册 claude MCP: …`，作为步骤的补充行。 */
@@ -754,6 +783,7 @@ function receiveModeStep(): Step<JoinCtx> {
           };
         }
         ctx.receiveMode = chosen ?? "interactive";
+        ctx.interactive = chosen !== null;
         const summary = ctx.receiveMode === "interactive"
           ? `你选：交互式 Claude 会话（可选：常驻 ${claudeServeCommand(slug)}）`
           : `你选：常驻 ${claudeServeCommand(slug)}（可选：交互式 ${claudeArmCommand(slug)}）`;
@@ -783,11 +813,127 @@ function receiveModeStep(): Step<JoinCtx> {
   };
 }
 
+/** 探活失败按「没有」算——绝不因探不到就假定有。 */
+function probeClaudeArmedListenerSafe(deps: JoinDeps): ClaudeArmedListenerProbe {
+  try {
+    return deps.claudeArmedListener();
+  } catch {
+    return { live: null, sessions: 0 };
+  }
+}
+
+/**
+ * 第 3 步选「自己另开终端跑」后的等待（#989）：每 ARMED_LISTENER_POLL_MS 探一次武装监听，最多
+ * ARMED_LISTENER_WAIT_MS；人那边跑完 party claude、会话抢到 serve 锁，这边就自动继续。时钟走注入
+ * 的 sleep/now（测试假时钟）。initial 是本步刚探过的那次（没有），先睡再探、不重复立刻探一遍。
+ * 返回最后一次探活结果与实际等了多久。
+ */
+async function waitForClaudeArmedListener(
+  deps: JoinDeps,
+  initial: ClaudeArmedListenerProbe,
+): Promise<{ probe: ClaudeArmedListenerProbe; elapsedMs: number }> {
+  const start = deps.now();
+  const deadline = start + ARMED_LISTENER_WAIT_MS;
+  let probe = initial;
+  while (probe.live === null && deps.now() < deadline) {
+    await deps.sleep(ARMED_LISTENER_POLL_MS);
+    probe = probeClaudeArmedListenerSafe(deps);
+  }
+  return { probe, elapsedMs: deps.now() - start };
+}
+
+/** 新会话的首轮提示：让会话自己补上第 4 步（选「在这个终端起」时 join 不等前台会话，验证挪进会话里）。 */
+export function wakeVerifyFirstPrompt(slug: string): string {
+  return `接入引导第 4 步：请运行 \`party wake verify ${slug}\`，验证 @ 真能唤醒这个会话，并把结果原样汇报。`;
+}
+
+/**
+ * 第 3 步 claude 档（#979 / #989）。
+ *  - 先印按第 2 步所选拼好的那条命令（party claude 展开成 claudeLaunchPlan 的最终 argv：#984 dev-channels +
+ *    #978 本机默认参数），并说明启动会弹一次 dev-channels 确认框；check 是本机有没有会接 @ 的武装监听——
+ *    serve 锁的活持有者，不是插件状态、不是开关。
+ *  - 探不到时：--yes / 无 TTY 保持「印命令 + 停」；有 TTY 则问一句怎么起——
+ *      1) 自己在另一个终端跑：join 在这边每 3s 探一次、最多等 90s，武装了就自动继续到第 4 步，超时停在本步；
+ *      2) 现在就在这个终端起：`party claude` 是前台交互会话（spawnSync stdio inherit），不能在 join 里同步
+ *         拉起再等它——所以只记成待办，本步算过、第 4 步不在 join 里跑；runJoin 印完结论后接管终端起会话，
+ *         验证交给新会话（首轮提示 + 结论里的 party wake verify <chan>）。
+ *    常驻档（serve）没有「在这个终端起」一说（它本身就是常驻进程），有 TTY 时直接按 1) 等。
+ */
+async function claudeWakeableSession(ctx: JoinCtx): Promise<StepResult> {
+  const { deps, opts, slug } = ctx;
+  const identity = ctx.identity ?? ctx.agentName;
+  const serve = ctx.receiveMode === "serve";
+  const command = serve ? claudeServeCommand(slug) : claudeArmCommand(slug);
+  const detail: string[] = [];
+  if (serve) {
+    detail.push(`运行：${command}`);
+  } else {
+    const defaults = deps.claudeDefaultArgs();
+    const plan = claudeLaunchPlan(slug, [], {}, defaults.args);
+    const defaultsNote = defaults.args.length === 0 ? "无本机默认参数" : `默认参数：${defaults.args.join(" ")}（来自 ${defaults.origin}）`;
+    detail.push(`运行：${command}        （已自动带 dev-channels；${defaultsNote}）`);
+    detail.push(`展开：AGENTPARTY_CHANNEL=${slug} claude ${plan.args.join(" ")}`);
+    detail.push(
+      "启动时 Claude 会弹一次「Loading development channels」确认框，选「I am using this for local development」；" +
+        (defaults.args.length === 0 ? "本机没配默认参数，只带上面这些。" : "上面的本机默认参数会一并带上。"),
+    );
+  }
+  const armed = (live: NonNullable<ClaudeArmedListenerProbe["live"]>): StepResult => {
+    const description = describeClaudeArmedListener(live, slug);
+    ctx.listener = { pid: live.pid, description };
+    return { ok: true, summary: `${description}在接 @`, detail };
+  };
+  const notArmed = (summary: string): StepResult => ({
+    ok: false,
+    summary,
+    detail,
+    fix: {
+      do: command,
+      notes: [
+        `⚠ 已绑定身份 ${identity}，但这台机现在没有会接 @ 的 Claude 会话。`,
+        `普通 \`claude\` 起的会话不接频道消息（local-only）；要能被 @ 唤醒，用 ${claudeArmCommand(slug)} 起一个会话（或 ${claudeServeCommand(slug)} 常驻）。`,
+      ],
+    },
+  });
+
+  const first = probeClaudeArmedListenerSafe(deps);
+  if (first.live !== null) return armed(first.live);
+  const dormant = (sessions: number) => `本机没有会接 @ 的 Claude 会话——${describeDormantClaudeSessions(sessions, slug)}`;
+  // 非交互（--yes / 无 TTY）：保持现状——印命令 + 停，修法就是那条命令。
+  if (opts.yes || !ctx.interactive) return notArmed(dormant(first.sessions));
+
+  let mode: LaunchMode = "self";
+  if (!serve) {
+    const chosen = await deps.chooseLaunchMode(slug, command);
+    if (chosen === "cancelled") {
+      return { ok: false, summary: "已取消（Ctrl+C / 输入已关闭），没有替你起会话", detail, fix: { do: command } };
+    }
+    if (chosen === null) return notArmed(dormant(first.sessions));
+    mode = chosen;
+  }
+  if (mode === "here") {
+    ctx.launchAfterJoin = true;
+    return {
+      ok: true,
+      summary: `本机还没有会接 @ 的 Claude 会话——join 结束后在本终端起 ${command}`,
+      detail: [...detail, `第 4 步（真发一条 @ 验证）改在新会话里跑：party wake verify ${slug}`],
+    };
+  }
+  // 自己另开终端跑：这边等它武装。
+  deps.log(`${STEP_INDENT}等待武装监听…（在另一个终端跑：${command}；最多等 ${ARMED_LISTENER_WAIT_MS / 1000}s，每 ${ARMED_LISTENER_POLL_MS / 1000}s 探一次）`);
+  const waited = await waitForClaudeArmedListener(deps, first);
+  const seconds = Math.round(waited.elapsedMs / 1000);
+  if (waited.probe.live !== null) {
+    detail.push(`等了 ${seconds}s，武装监听到位`);
+    return armed(waited.probe.live);
+  }
+  return notArmed(`等了 ${seconds}s 仍${dormant(waited.probe.sessions)}`);
+}
+
 /**
  * 第 3 步 起一个可唤醒的会话。
- *  - claude（#979）：印出按第 2 步所选拼好的那条命令（party claude 展开成 claudeLaunchPlan 的最终 argv +
- *    本机默认参数 #978），check 是本机有没有会接 @ 的武装监听——serve 锁的活持有者，不是插件状态、不是开关。
- *    这一步不替人起会话（那是 #989）；探不到就停在这，修法就是那条命令。
+ *  - claude（#979 / #989）：见 claudeWakeableSession——印命令、探活；探不到时有 TTY 可选「另开终端跑（等）」
+ *    或「在这个终端起（join 结束后接管）」，非交互保持印命令 + 停。
  *  - codex（#957）：主动拉起唤醒层再探活，判据是进程真的在。
  */
 export function wakeableSessionStep(): Step<JoinCtx> {
@@ -796,46 +942,7 @@ export function wakeableSessionStep(): Step<JoinCtx> {
     title: "起一个可唤醒的会话",
     async run(ctx) {
       const { deps, harness, slug } = ctx;
-      const identity = ctx.identity ?? ctx.agentName;
-      if (harness === "claude") {
-        const detail: string[] = [];
-        let command: string;
-        if (ctx.receiveMode === "serve") {
-          command = claudeServeCommand(slug);
-          detail.push(`运行：${command}`);
-        } else {
-          command = claudeArmCommand(slug);
-          const defaults = deps.claudeDefaultArgs();
-          const plan = claudeLaunchPlan(slug, [], {}, defaults.args);
-          const defaultsNote = defaults.args.length === 0 ? "无本机默认参数" : `默认参数：${defaults.args.join(" ")}（来自 ${defaults.origin}）`;
-          detail.push(`运行：${command}        （已自动带 dev-channels；${defaultsNote}）`);
-          detail.push(`展开：AGENTPARTY_CHANNEL=${slug} claude ${plan.args.join(" ")}`);
-        }
-        // 探活失败按「没有」算——绝不因探不到就假定有。
-        let probe: ClaudeArmedListenerProbe;
-        try {
-          probe = deps.claudeArmedListener();
-        } catch {
-          probe = { live: null, sessions: 0 };
-        }
-        if (probe.live === null) {
-          return {
-            ok: false,
-            summary: `本机没有会接 @ 的 Claude 会话——${describeDormantClaudeSessions(probe.sessions, slug)}`,
-            detail,
-            fix: {
-              do: command,
-              notes: [
-                `⚠ 已绑定身份 ${identity}，但这台机现在没有会接 @ 的 Claude 会话。`,
-                `普通 \`claude\` 起的会话不接频道消息（local-only）；要能被 @ 唤醒，用 ${claudeArmCommand(slug)} 起一个会话（或 ${claudeServeCommand(slug)} 常驻）。`,
-              ],
-            },
-          };
-        }
-        const description = describeClaudeArmedListener(probe.live, slug);
-        ctx.listener = { pid: probe.live.pid, description };
-        return { ok: true, summary: `${description}在接 @`, detail };
-      }
+      if (harness === "claude") return claudeWakeableSession(ctx);
       if (harness === "codex") {
         const detail: string[] = [];
         const wake = await bringUpCodexWakeLayer(deps, slug, (name, outcome) => detail.push(outcomeLine(name, outcome)));
@@ -935,22 +1042,44 @@ export async function runJoin(opts: JoinOptions, deps: JoinDeps): Promise<number
     claudePluginRestart: false,
     identity: null,
     receiveMode: "interactive",
+    interactive: false,
     listener: null,
+    launchAfterJoin: false,
   };
   // other 档没有唤醒层：第 3、4 步无物可查，只跑到第 2 步（接收方式＝CLI）。
   const steps: Step<JoinCtx>[] = harness === "other"
     ? [versionStep(), identityStep(harnessKnown), receiveModeStep()]
-    : [versionStep(), identityStep(harnessKnown), receiveModeStep(), wakeableSessionStep(), verifyStep()];
-  const outcome = await runSteps({ steps, ctx, log: deps.log, rerun: RERUN });
-  deps.log("");
-  if (outcome.ok) {
-    deps.log(completionLine(ctx));
-    return 0;
+    : [versionStep(), identityStep(harnessKnown), receiveModeStep(), wakeableSessionStep()];
+  let outcome = await runSteps({ steps, ctx, log: deps.log, rerun: RERUN });
+  // 第 4 步单独一轮：第 3 步选了「在这个终端起」时它不在 join 里跑（验证挪进新会话，#989），其余照旧接着跑。
+  if (outcome.ok && harness !== "other" && !ctx.launchAfterJoin) {
+    outcome = await runSteps({ steps: [verifyStep()], ctx, log: deps.log, rerun: RERUN, firstIndex: 4 });
   }
-  deps.log(`接入停在第 ${outcome.stoppedAt.index} 步（${outcome.stoppedAt.title}）——做完上面那一条，重跑同一条 ${RERUN}。`);
-  // 这句是整段引导存在的理由：这类失败**没有任何报错**，不明说就没人知道自己坏了。
-  deps.log("在这一步完成之前：@ 你可能不会有任何反应，而且不会有任何报错——别人只会以为你在忙。");
-  return 1;
+  deps.log("");
+  if (!outcome.ok) {
+    deps.log(`接入停在第 ${outcome.stoppedAt.index} 步（${outcome.stoppedAt.title}）——做完上面那一条，重跑同一条 ${RERUN}。`);
+    // 这句是整段引导存在的理由：这类失败**没有任何报错**，不明说就没人知道自己坏了。
+    deps.log("在这一步完成之前：@ 你可能不会有任何反应，而且不会有任何报错——别人只会以为你在忙。");
+    return 1;
+  }
+  if (ctx.launchAfterJoin) {
+    for (const line of launchHandoverLines(ctx)) deps.log(line);
+    // 接管终端：party claude 是前台交互会话，会话退出后 join 才退出，退出码跟会话的。
+    return deps.launchClaudeSession(slug, wakeVerifyFirstPrompt(slug));
+  }
+  deps.log(completionLine(ctx));
+  return 0;
+}
+
+/** 第 3 步选了「在这个终端起」时的结论（#989）：不印 ✅——验证还没做，说清它在哪里完成、怎么做。 */
+function launchHandoverLines(ctx: JoinCtx): string[] {
+  const { slug } = ctx;
+  const identity = ctx.identity ?? ctx.agentName;
+  return [
+    `接入将在你起的会话里完成验证：现在接管本终端起 ${claudeArmCommand(slug)}` +
+      "（Claude 会弹一次「Loading development channels」确认框，选「I am using this for local development」；本机默认参数会一并带上）。",
+    `进到会话后跑：party wake verify ${slug}   ——以 ${identity} 真发一条 @ 自己验证往返（第 4 步）；新会话的首轮提示已带上这条。`,
+  ];
 }
 
 /**
@@ -958,24 +1087,42 @@ export async function runJoin(opts: JoinOptions, deps: JoinDeps): Promise<number
  * 只用 node:readline，不引新依赖。
  */
 async function promptReceiveMode(slug: string): Promise<ReceiveMode | null | "cancelled"> {
+  const answer = await askOnTty(
+    `${STEP_INDENT}1) 交互式 Claude 会话（${claudeArmCommand(slug)}）\n` +
+      `${STEP_INDENT}2) 常驻 ${claudeServeCommand(slug)}\n` +
+      `${STEP_INDENT}选 [1/2]（回车＝1）：`,
+  );
+  if (answer === null || answer === "cancelled") return answer;
+  return answer.trim() === "2" ? "serve" : "interactive";
+}
+
+/** 第 3 步的那一问（#989，有 TTY 才问）：探不到武装监听时，自己另开终端跑（这边等）还是 join 结束后在本终端起。 */
+async function promptLaunchMode(slug: string, command: string): Promise<LaunchMode | null | "cancelled"> {
+  const answer = await askOnTty(
+    `${STEP_INDENT}本机没有会接 @ 的 Claude 会话。怎么起？\n` +
+      `${STEP_INDENT}1) 我自己在另一个终端跑：${command}（join 在这边等它武装，最多 ${ARMED_LISTENER_WAIT_MS / 1000}s）\n` +
+      `${STEP_INDENT}2) 现在就在这个终端起（join 结束后接管终端；第 4 步验证改在新会话里跑 party wake verify ${slug}）\n` +
+      `${STEP_INDENT}选 [1/2]（回车＝1）：`,
+  );
+  if (answer === null || answer === "cancelled") return answer;
+  return answer.trim() === "2" ? "here" : "self";
+}
+
+/**
+ * 在 TTY 上问一句。非 TTY 返回 null——沉默不等于选择，由调用方按默认走并印出所选。只用 node:readline，不引新依赖。
+ * Ctrl+C 在 readline 里是 rl 的 "SIGINT" 事件、Ctrl+D 是 "close"：两者都不会 resolve question，不接就永远挂在
+ * 这一步。接住并明确返回 cancelled——不能把「用户要停」当成「无 TTY 按默认」。
+ */
+async function askOnTty(question: string): Promise<string | null | "cancelled"> {
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) return null;
   const { createInterface } = await import("node:readline");
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    // Ctrl+C 在 readline 里是 rl 的 "SIGINT" 事件、Ctrl+D 是 "close"：两者都不会 resolve question，
-    // 不接就永远挂在这一步。接住并明确返回 cancelled——不能把「用户要停」当成「无 TTY 按默认」。
-    const answer = await new Promise<string | "cancelled">((resolve) => {
+    return await new Promise<string | "cancelled">((resolve) => {
       rl.once("SIGINT", () => resolve("cancelled"));
       rl.once("close", () => resolve("cancelled"));
-      rl.question(
-        `         1) 交互式 Claude 会话（${claudeArmCommand(slug)}）\n` +
-          `         2) 常驻 ${claudeServeCommand(slug)}\n` +
-          "         选 [1/2]（回车＝1）：",
-        resolve,
-      );
+      rl.question(question, resolve);
     });
-    if (answer === "cancelled") return "cancelled";
-    return answer.trim() === "2" ? "serve" : "interactive";
   } catch {
     return "cancelled";
   } finally {
@@ -1085,6 +1232,11 @@ export function defaultJoinDeps(slug: string): JoinDeps {
     },
     chooseReceiveMode: promptReceiveMode,
     claudeDefaultArgs: () => resolveClaudeDefaultArgs(process.env, agentpartyHome()),
+    chooseLaunchMode: promptLaunchMode,
+    // 与手跑 `party claude <chan> -- "<首轮提示>"` 完全同一条路径（preflight + dev-channels + 默认参数 + stdio inherit）。
+    launchClaudeSession: (channel, firstPrompt) => import("./claude-launch").then((m) => m.run([channel, "--", firstPrompt])),
+    sleep: (ms) => Bun.sleep(ms),
+    now: () => Date.now(),
     verifyWake: roundTripWakeVerifier(),
   };
 }
