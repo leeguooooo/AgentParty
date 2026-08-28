@@ -13,6 +13,7 @@ import {
   readState,
   writeConfig,
   writeState,
+  type Config,
 } from "../config";
 import { stripTerminalControls } from "../format";
 import {
@@ -26,8 +27,9 @@ import { RestError, createChannel, fetchChannelCharter, fetchMe, handleRestError
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { statuslineIdentity, writeStatuslineCache } from "../statusline-cache";
 import { isSlug, normalizeServerUrl } from "../validation";
+import { isWakeLang, normalizeWakeLang } from "../wake-note-i18n";
 
-const INIT_FLAGS = ["server", "token", "channel", "harness"];
+const INIT_FLAGS = ["server", "token", "channel", "harness", "lang"];
 const HELP = `usage: party init --server URL --token T [--channel C] [--harness codex|claude|other]
 
 Write local config and optionally bind this working directory to a default channel.
@@ -41,7 +43,9 @@ Options:
                   auto-detection from the process ancestry. Recorded as part of the
                   join-time identity binding so @-mentions can wake THIS harness (#924).
   --coexist       keep any identity this harness already had on this channel instead of
-                  replacing it (default is replace — re-joining means "use this one now")`;
+                  replacing it (default is replace — re-joining means "use this one now")
+  --lang zh|en    language of wake notes injected into this agent's session (#1003).
+                  Omit to auto-detect from the agent's own recent channel messages`;
 
 /**
  * token 输入通道（#111）。
@@ -93,7 +97,7 @@ export async function run(argv: string[]): Promise<number> {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["server", "token", "channel", "harness"]);
+  const flagError = valueFlagError(flags, ["server", "token", "channel", "harness", "lang"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -115,7 +119,14 @@ export async function run(argv: string[]): Promise<number> {
     console.error("--server must be an http(s) URL without credentials");
     return 1;
   }
-  const cfg = { server: normalizedServer, token };
+  // #1003：唤醒文案语言的显式覆盖。给了就写；没给保留原值；从没设过就不写这个字段（＝自动判定）。
+  const langFlag = str(flags.lang);
+  const lang = langFlag === undefined ? (isWakeLang(prev?.lang) ? prev.lang : undefined) : normalizeWakeLang(langFlag);
+  if (langFlag !== undefined && lang === null) {
+    console.error("--lang must be one of: zh, en");
+    return 1;
+  }
+  const cfg: Config = { server: normalizedServer, token, ...(lang === undefined || lang === null ? {} : { lang }) };
 
   // #924：这次加入是哪个 harness 在跑。显式 --harness 永远优先；没给就从进程祖先链探测
   // （party init 是 harness 的后代进程，这是**事实**不是猜测）；探测不到就 null＝不写绑定。

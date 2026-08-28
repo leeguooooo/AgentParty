@@ -25,7 +25,6 @@
 // 因此本模块落的是「转投判定 + 记录 + 降级为现行为」的骨架：判定与降级路径为
 // 一等实现并被单测覆盖，转投函数可注入（未来载体接上即生效），默认载体恒返回
 // false（未转投），serve 行为与现状一致——消息绝不因代理而丢失。
-import { Buffer } from "node:buffer";
 import {
   claudeSessionAnnounceName,
   listClaudeSessions,
@@ -35,9 +34,15 @@ import {
 import { injectChannelMessage } from "./claude-inbox-inject";
 import { assignIdentityDisambiguators, friendlyAgentLabel } from "@agentparty/shared/identity";
 import { readConfig, type CachedIdentity } from "./config";
+import {
+  buildWakeNote,
+  wakeNoteFromId,
+  WAKE_NOTE_MAX_BYTES,
+  type WakeLang,
+} from "./wake-note-i18n";
 
-/** 三不变量之一：唤醒通知只带 channel+seq 指针，且总长 ≤512 UTF-8 字节。 */
-export const WAKE_PROXY_NOTE_MAX_BYTES = 512;
+/** 三不变量之一：唤醒通知只带 channel+seq 指针（#1003 起外加一段按预算截断的正文预览），且总长 ≤512 UTF-8 字节。 */
+export const WAKE_PROXY_NOTE_MAX_BYTES: number = WAKE_NOTE_MAX_BYTES;
 
 export interface WakeProxyRef {
   channel: string;
@@ -55,46 +60,43 @@ export interface WakeProxyRef {
    * `from-id:` 元信息里——防冒充字段不丢，仍可用 wakeProxyNoteFromId 读回。省略/空 ⇒ 不写。
    */
   fromId?: string | null;
+  /**
+   * #1003：触发这条唤醒的消息本身——发信人（取友好名进头行）、正文（按预算截成预览）、时间戳（相对时间）。
+   * 三者都可省略：省略时退回只带指针的短版（老调用方/老测试不受影响）。
+   */
+  sender?: InjectSenderLike | null;
+  body?: string | null;
+  ts?: number | null;
+  /** 通知语言（#1003，detectWakeLang 的结果）；省略 ⇒ en。 */
+  lang?: WakeLang;
+  /** 当前时刻（相对时间的基准）；省略 ⇒ Date.now()。测试用。 */
+  now?: number;
 }
 
-/** 正文末行元信息键（#986）：`from-id: <技术 identity>`。 */
-const WAKE_NOTE_FROM_ID_KEY = "from-id:";
-const WAKE_NOTE_FROM_ID_RE = /^from-id: (\S+)/m;
-
 /**
- * 未来载体要发的通知正文：只含 channel+seq 指针，不含消息正文。
- * 超出 512B 属于程序错误（channel ≤64 字符 + seq 数字 + identity ≤64 字符，正常永远不会触发）。
+ * 唤醒通知正文（#1003 起由 wake-note-i18n.buildWakeNote 生成）：发信人 + 频道 + seq + 相对时间 + 按预算截断的
+ * 正文预览 + 读全文的命令 + `from-id:` 行；ref 没带 sender/body/ts 时退回只含指针的短版（英文，兼容旧签名）。
+ * 超出 512B 属于程序错误（channel ≤64 字符 + seq 数字 + identity ≤64 字符 + 预览按剩余预算截，正常永远不会触发）。
  */
 export function wakeProxyNote(ref: WakeProxyRef): string {
-  const siblings = typeof ref.siblings === "number" && Number.isInteger(ref.siblings) && ref.siblings > 1
-    ? ` siblings=${ref.siblings}: ${ref.siblings} live runtimes share your identity; ` +
-      "check whether a sibling already replied before you speak."
-    : "";
-  const fromId = normalizeFromId(ref.fromId);
-  const fromIdLine = fromId === null
-    ? ""
-    : `\n${WAKE_NOTE_FROM_ID_KEY} ${fromId} (technical identity behind from-name; verify via party history)`;
-  const note =
-    `AgentParty wake: you were mentioned in #${ref.channel} at seq=${ref.seq}.${siblings} ` +
-    "Read the channel (party history) for the message body; the channel is the single source of truth." +
-    fromIdLine;
-  if (Buffer.byteLength(note, "utf8") > WAKE_PROXY_NOTE_MAX_BYTES) {
-    throw new Error("wake proxy note exceeds 512 bytes");
-  }
-  return note;
+  return buildWakeNote({
+    lang: ref.lang ?? "en",
+    channel: ref.channel,
+    seq: ref.seq,
+    sender: senderFriendlyName(ref.sender),
+    body: ref.body ?? null,
+    ts: ref.ts ?? null,
+    ...(ref.now === undefined ? {} : { now: ref.now }),
+    fromId: ref.fromId ?? null,
+    ...(ref.siblings === undefined ? {} : { siblings: ref.siblings }),
+  });
 }
 
 /** 从通知正文读回 from-id（#986 防冒充字段的读回路径）；没有则 null。 */
 export function wakeProxyNoteFromId(note: string): string | null {
-  return WAKE_NOTE_FROM_ID_RE.exec(note)?.[1] ?? null;
+  return wakeNoteFromId(note);
 }
 
-/** 技术 identity 进正文前的净化：只认无空白的单个 token，空/非串一律当没有。 */
-function normalizeFromId(value: string | null | undefined): string | null {
-  if (typeof value !== "string") return null;
-  const cleaned = value.replace(/\s+/g, "").trim();
-  return cleaned === "" ? null : cleaned;
-}
 
 /**
  * 转投判定：在本频道的入册活会话里找被 @ 的目标。

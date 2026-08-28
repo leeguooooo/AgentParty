@@ -1017,3 +1017,23 @@ describe("codex-stop 先走 rollout 头判定（#982）", () => {
     });
   });
 });
+
+describe("codexStopWakeReason 语言（#1003）", () => {
+  test("缺省 zh（历史行为）；lang=en 给英文，两者都保住指针与命令、≤512B", () => {
+    const zh = codexStopWakeReason({ channel: "pwtk", seq: 42 });
+    const en = codexStopWakeReason({ channel: "pwtk", seq: 42 }, "en");
+    expect(zh).toContain("频道 #pwtk 有一条 @ 你的消息还没处理（seq 42）");
+    expect(en).toContain("#pwtk has one unhandled @-mention for you (seq 42)");
+    expect(en).not.toMatch(/[\u4e00-\u9fff]/);
+    for (const reason of [zh, en]) {
+      expect(reason.startsWith("[AgentParty]")).toBe(true);
+      expect(reason).toContain("party history pwtk --since 41");
+      expect(reason).toContain("party send");
+      expect(Buffer.byteLength(reason, "utf8")).toBeLessThanOrEqual(CODEX_STOP_WAKE_REASON_MAX_BYTES);
+    }
+    const backlog = codexStopWakeReason({ channel: "pwtk", seq: 42, backlog: { remaining: 2, exact: true } }, "en");
+    expect(backlog).toContain("this is 1/3 (seq 42), 2 more are queued");
+    expect(backlog).toContain("party ack --drain --channel pwtk");
+    expect(Buffer.byteLength(backlog, "utf8")).toBeLessThanOrEqual(CODEX_STOP_WAKE_REASON_MAX_BYTES);
+  });
+});

@@ -63,6 +63,21 @@ import {
 import { downloadAttachment, ensureProjectAgentChannelRuntime, fetchChannelCharter, fetchMe, fetchMessages, fetchRecentMessages, fetchServerVersion, listProjectAgentInvites, mintProjectAgentRuntimeToken, postMessage, RestError, uploadAttachment, type ChannelCharter, type ChannelProjectAgentInvite, type Identity, type ProjectAgentChannelRuntime, type ProjectAgentProfile } from "../rest";
 import { isName, isSlug } from "../validation";
 import { attemptWakeProxy, socketWakeProxyForwarder, type WakeProxyDeps } from "../serve-wake-proxy";
+import { detectWakeLang } from "../wake-note-i18n";
+
+/** #1003：config `lang` 显式覆盖（唤醒代理通知的语言）。每条 @ 帧都会问一次，按 60s 记忆，读失败当没有。 */
+let serveLangOverrideMemo: { at: number; value: string | null } | null = null;
+function serveLangOverride(now: number = Date.now()): string | null {
+  if (serveLangOverrideMemo !== null && now - serveLangOverrideMemo.at < 60_000) return serveLangOverrideMemo.value;
+  let value: string | null = null;
+  try {
+    value = readConfigWithSource().config?.lang ?? null;
+  } catch {
+    value = null;
+  }
+  serveLangOverrideMemo = { at: now, value };
+  return value;
+}
 import { buildRuntimeTopology } from "../runtime-topology";
 import { buildContext } from "./status";
 import {
@@ -5818,7 +5833,16 @@ export async function runServe(o: ServeOptions): Promise<number> {
       // 不会有 delivery 帧跟上，仍旧在 msg 帧这里转投一次（对照组不受影响）。
       if (fresh && !fromSelf && hasLease && !selfPaused && !mentionOwnedByDelivery && frame.mentions.length > 0) {
         const wakeProxyDeps = o.wakeProxy ?? {};
-        await attemptWakeProxy(frame.mentions, self, { channel: o.channel, server: o.server, seq: frame.seq }, {
+        // #1003：带上触发帧的发信人/正文/时间；语言按 config 覆盖 > 触发消息 > LANG（serve 看不到目标会话的历史）。
+        await attemptWakeProxy(frame.mentions, self, {
+          channel: o.channel,
+          server: o.server,
+          seq: frame.seq,
+          sender: frame.sender,
+          body: frame.body,
+          ts: frame.ts,
+          lang: detectWakeLang({ override: serveLangOverride(), triggerBody: frame.body, env: process.env }),
+        }, {
           ...wakeProxyDeps,
           // #844：默认接 socket 优先载体（本机 UDS 收件箱注入，原生「Message from X」UX）；
           // 失败降级为现行为。测试注入的 forward 仍优先。

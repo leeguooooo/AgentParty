@@ -196,3 +196,45 @@ describe("channel loading is one shape on both Claude launch paths (#984)", () =
     expect(launch.args.filter((arg) => arg === CLAUDE_DEV_CHANNELS_FLAG)).toHaveLength(1);
   });
 });
+
+describe("party claude --lang（#1003）", () => {
+  function launchDeps(stored: string[], storeOk = true): ClaudeLaunchDependencies & { calls: string[][] } {
+    const calls: string[][] = [];
+    return {
+      calls,
+      preflight: async () => ({ blockers: ["listener_not_observed"], listener: "not_observed" }),
+      launch(args) {
+        calls.push(args);
+        return { status: 0 };
+      },
+      home: mkdtempSync(join(tmpdir(), "agentparty-claude-launch-lang-")),
+      env: {},
+      storeLang: (lang) => {
+        stored.push(lang);
+        return storeOk;
+      },
+    };
+  }
+
+  test("--lang zh 写进 config 后照常启动；--lang=en 内联形式同样认；--lang 不进 claude 参数", async () => {
+    const stored: string[] = [];
+    const deps = launchDeps(stored);
+    expect(await run(["dev", "--lang", "zh", "--", "--model", "sonnet"], deps)).toBe(0);
+    expect(await run(["--lang=en", "dev"], deps)).toBe(0);
+    expect(stored).toEqual(["zh", "en"]);
+    expect(deps.calls).toHaveLength(2);
+    for (const args of deps.calls) expect(args.some((arg) => arg.includes("--lang"))).toBe(false);
+    expect(deps.calls[0]).toEqual([...CHANNEL_LOAD, "--model", "sonnet"]);
+  });
+
+  test("非法值 / 缺值 / 没有 config 可写 ⇒ 退出 1、不启动", async () => {
+    const stored: string[] = [];
+    const bad = launchDeps(stored);
+    expect(await run(["dev", "--lang", "fr"], bad)).toBe(1);
+    expect(await run(["dev", "--lang"], bad)).toBe(1);
+    expect(bad.calls).toHaveLength(0);
+    const noConfig = launchDeps(stored, false);
+    expect(await run(["dev", "--lang", "zh"], noConfig)).toBe(1);
+    expect(noConfig.calls).toHaveLength(0);
+  });
+});

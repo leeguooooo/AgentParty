@@ -20,6 +20,7 @@ import { readHealthCache } from "../health-cache";
 import { mentionWakeClaimDir, mentionWakeClaimKey } from "../mention-wake-claim";
 import { runWakeProbe, type WakeProbeOptions, type WakeTestFrame } from "../commands/wake";
 import { RestError } from "../rest";
+import { t, type WakeLang } from "../wake-note-i18n";
 
 export type WakeVerifyLayer = "server_delivery" | "local_listener" | "model_reply";
 export type WakeVerifyHarness = "claude" | "codex" | "other";
@@ -36,6 +37,8 @@ export interface VerifyWakeRoundTripOptions {
   timeoutMs?: number;
   /** 修法命令按 harness 给：claude 档给 `party claude <chan>`，其余给 `party wake check`。 */
   harness?: WakeVerifyHarness;
+  /** 验证帧正文的语言（#1003，同唤醒注入一套规则）；缺省 zh（历史行为）。 */
+  lang?: WakeLang;
 }
 
 /** 本机监听留下的痕迹——每一项都是「收到了这条 seq」的直接证据，任何一项为真即本机已收到。 */
@@ -73,9 +76,12 @@ export interface VerifyWakeDeps {
   now: () => number;
 }
 
-/** 验证帧正文：前缀是判据（isWakeVerifyFrame），其余是给被唤醒的模型看的一句话。 */
-export function verifyWakeBody(identity: string): string {
-  return `${WAKE_VERIFY_PREFIX} @${identity} ping · 接入引导第 4 步的唤醒验证——收到请用 party send "pong" --reply-to <这条的 seq> 回一句`;
+/**
+ * 验证帧正文：前缀是判据（isWakeVerifyFrame，服务端与本机监听都按它放行自 @）——**不本地化**；
+ * 其余是给被唤醒的模型看的一句话，按接收方语言取（#1003）。
+ */
+export function verifyWakeBody(identity: string, lang: WakeLang = "zh"): string {
+  return `${WAKE_VERIFY_PREFIX} ${t(lang, "verify.body", { identity })}`;
 }
 
 function readJson(path: string): unknown {
@@ -269,7 +275,7 @@ export async function verifyWakeRoundTrip(
       channel: opts.channel,
       target: opts.identity,
       timeoutSec: Math.max(1, Math.ceil(timeoutMs / 1000)),
-      body: verifyWakeBody(opts.identity),
+      body: verifyWakeBody(opts.identity, opts.lang ?? "zh"),
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

@@ -9,7 +9,8 @@ import {
   resolveClaudeDefaultArgs,
   writeClaudeDefaultArgs,
 } from "../claude-default-args";
-import { agentpartyHome } from "../config";
+import { agentpartyHome, readConfig, refreshConfigInPlace } from "../config";
+import { normalizeWakeLang } from "../wake-note-i18n";
 import { isSlug } from "../validation";
 import {
   claudePluginDoctorFixLines,
@@ -56,7 +57,7 @@ export const CLAUDE_LIFECYCLE_OPT_IN_ENV = "AGENTPARTY_CLAUDE_LIFECYCLE_OPT_IN";
 
 const USAGE = "usage: party claude [channel] [-- <claude args...>] | --default-args -- [<claude args...>] | --show-default-args";
 
-const HELP = `usage: party claude [channel] [-- <claude args...>]
+const HELP = `usage: party claude [channel] [--lang zh|en] [-- <claude args...>]
        party claude --default-args -- <claude args...>   # 设为本机默认启动参数（配一次）
        party claude --default-args --                    # 清空本机默认
        party claude --show-default-args                  # 查看本机默认及其来源
@@ -72,6 +73,10 @@ personal account), so Claude shows one "Loading development channels" confirmati
 at startup; pick "I am using this for local development". Do not add
 --channels ${CLAUDE_CHANNEL_PLUGIN} yourself: that entry shadows the development
 one and the channel is refused again.
+
+--lang zh|en stores the language of the wake notes injected into this session in the
+agent config (#1003) and then launches as usual; omit it to auto-detect from the agent's
+own recent channel messages (fallback: the mentioning message, then LANG, then en).
 
 Default launch args are opt-in per machine and never hard-coded: only what you
 wrote with --default-args (file: $AGENTPARTY_HOME/claude-default-args.json;
@@ -94,6 +99,16 @@ export interface ClaudeLaunchDependencies {
   /** 本机偏好根（默认 `agentpartyHome(env)`）；测试用临时目录注入。 */
   home?: string;
   env?: NodeJS.ProcessEnv;
+  /** #1003：把 `--lang` 写进当前 agent config（就地刷新，不双写）；返回 false＝没有 config 可写。测试注入。 */
+  storeLang?: (lang: "zh" | "en") => boolean;
+}
+
+/** #1003 真实写法：读取时命中哪个 config 就只刷新它（refreshConfigInPlace），绝不新建、不双写。 */
+function storeWakeLang(lang: "zh" | "en"): boolean {
+  const cfg = readConfig();
+  if (cfg === null) return false;
+  refreshConfigInPlace({ ...cfg, lang });
+  return true;
 }
 
 const defaultDependencies: ClaudeLaunchDependencies = {
@@ -210,8 +225,22 @@ export async function run(
   const env = deps.env ?? process.env;
   const home = deps.home ?? agentpartyHome(env);
   const separator = argv.indexOf("--");
-  const ownArgs = separator === -1 ? argv : argv.slice(0, separator);
+  const rawOwnArgs = separator === -1 ? argv : argv.slice(0, separator);
   const claudeArgs = separator === -1 ? [] : argv.slice(separator + 1);
+  // #1003：`--lang zh|en` 先从自有参数里摘出来（写进 config 后照常启动），其余参数的校验不变。
+  const langIndex = rawOwnArgs.findIndex((arg) => arg === "--lang" || arg.startsWith("--lang="));
+  let langFlag: string | undefined;
+  let ownArgs = rawOwnArgs;
+  if (langIndex !== -1) {
+    const arg = rawOwnArgs[langIndex]!;
+    const inline = arg.startsWith("--lang=") ? arg.slice("--lang=".length) : undefined;
+    langFlag = inline ?? rawOwnArgs[langIndex + 1];
+    if (langFlag === undefined || langFlag.startsWith("-")) {
+      console.error("--lang needs a value: zh or en");
+      return 1;
+    }
+    ownArgs = rawOwnArgs.filter((_, index) => index !== langIndex && (inline !== undefined || index !== langIndex + 1));
+  }
   if (ownArgs.length === 1 && ownArgs[0] === "--default-args") {
     if (separator === -1) {
       console.error("party claude --default-args 需要 `--`：`--default-args -- <claude args...>` 设置，`--default-args --` 清空");
@@ -230,6 +259,19 @@ export async function run(
   if (channel !== undefined && !isSlug(channel)) {
     console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
     return 1;
+  }
+  if (langFlag !== undefined) {
+    const lang = normalizeWakeLang(langFlag);
+    if (lang === null) {
+      console.error("--lang must be one of: zh, en");
+      return 1;
+    }
+    const written = deps.storeLang === undefined ? storeWakeLang(lang) : deps.storeLang(lang);
+    if (!written) {
+      console.error("--lang: no agent config to store it in; run party join / party init first");
+      return 1;
+    }
+    console.log(`唤醒文案语言已写入 config：lang=${lang}`);
   }
   let readiness: Awaited<ReturnType<ClaudeLaunchDependencies["preflight"]>>;
   try {

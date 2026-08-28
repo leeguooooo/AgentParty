@@ -25,6 +25,11 @@ export interface Config {
   server: string;
   token: string;
   identity?: CachedIdentity;
+  /**
+   * 唤醒注入文案的语言（#1003）：显式覆盖，优先级高于按接收者历史/触发消息/LANG 的自动判定。
+   * 由 `party join --lang` / `party claude --lang` / `party init --lang` 写入；缺省不写＝自动判定。
+   */
+  lang?: "zh" | "en";
 }
 
 export interface CachedIdentity {

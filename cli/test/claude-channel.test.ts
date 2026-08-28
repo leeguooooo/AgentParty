@@ -4359,3 +4359,39 @@ describe("唤醒通知带 siblings=N（issue #963）", () => {
     expect(none.content).not.toContain("siblings=");
   });
 });
+
+describe("Claude Cross-session wake hint 语言（#1003）", () => {
+  test("lang=zh 给中文提示，仍保住工具名 / seq / 512 字节 / 不带正文等锚点；缺省 en", () => {
+    const candidateRef = "candidate_1234567890abcdef";
+    const summary = summarizeClaudeCrossSessionPeers(
+      "dev",
+      "me",
+      [{ name: "peer", kind: "agent", state: "working", note: null, ts: 1, live: true }],
+      {
+        version: 3,
+        topology_evidence: "client_asserted",
+        comparison: "server_derived",
+        caller_binding: "live_socket",
+        self: "me",
+        peers: [{
+          agent: "peer",
+          same_identity: false,
+          relations: [{ relation: "same_worktree", runtime_count: 1 }],
+          claude_sessions: [{ display_name: "peer-session", relation: "same_worktree", runtime_count: 1, candidate_ref: candidateRef }],
+        }],
+      },
+    );
+    const zh = claudeCrossSessionWakeHint(["peer"], summary, 42, () => true, () => "peer-session [ref-a]", "zh");
+    expect(zh).toContain("Cross-session 唤醒提示：@peer 可能就在本机");
+    expect(zh).toContain("party_channel_peers");
+    expect(zh).toContain("ListAgents");
+    expect(zh).toContain("party_channel_peer_check");
+    expect(zh).toContain("SendMessage");
+    expect(zh).toContain("512 UTF-8");
+    expect(zh).toContain("seq=42");
+    expect(zh).toContain("不带正文");
+    expect(zh).not.toContain("[ref-a]");
+    const en = claudeCrossSessionWakeHint(["peer"], summary, 42, () => true, () => "peer-session [ref-a]");
+    expect(en).toContain("@peer may be reachable locally");
+  });
+});

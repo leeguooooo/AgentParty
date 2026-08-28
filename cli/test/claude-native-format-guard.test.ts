@@ -16,6 +16,7 @@ import {
   readClaudeNativeCrossSessionFormat,
 } from "../src/claude-native-format";
 import { wrapCrossSessionMessage } from "../src/claude-inbox-inject";
+import { buildWakeNote } from "../src/wake-note-i18n";
 
 // **惰性**取，不在模块加载时扫二进制：`strings -a` 要跑 1 秒并把 58MB 字符串读进内存，
 // 放在顶层会卡在同目录所有 spec 之前，把重 subprocess 的用例挤过 5 秒超时线（实测把
@@ -73,6 +74,22 @@ describe("原生 cross-session 格式漂移守卫（#953）", () => {
         fromName: "郭立 lee · agentparty·9749e",
         fromMode: "prompting",
         body: "AgentParty wake: you were mentioned in #pwtk at seq=42.\nfrom-id: lark-ad72b3f9749e (technical identity behind from-name; verify via party history)",
+      }),
+      // #1003：真实的中文唤醒正文（全角括号、「」引号、多行、from-id 末行）必须过原生 body 段 [\s\S]*。
+      wrapCrossSessionMessage({
+        from: "uds:/tmp/cc-socks/5.sock",
+        fromName: "leo",
+        fromMode: "prompting",
+        body: buildWakeNote({
+          lang: "zh",
+          channel: "pwtk",
+          seq: 42,
+          sender: "leo",
+          ts: Date.now() - 120_000,
+          body: "我们的展示信息是不是有点太少了，语言应该根据 ai 使用的语言或者其他的方式，自动改成对应的语言",
+          fromId: "lark-ad72b3f9749e",
+          siblings: 3,
+        }),
       }),
     ];
     for (const s of samples) {

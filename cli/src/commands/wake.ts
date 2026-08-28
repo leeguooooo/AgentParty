@@ -556,7 +556,14 @@ async function runVerify(channelPositional: string | undefined, flags: ReturnTyp
     const bound = bindings.find((b) => b.channel === channel && b.identity === identity && b.harness !== "other");
     const harness = bound?.harness ?? "other";
     const timeoutMs = timeout === undefined ? DEFAULT_WAKE_VERIFY_TIMEOUT_MS : timeout * 1000;
-    const result = await verifyWakeRoundTrip({ server: cfg.server, token: cfg.token, channel, identity, timeoutMs, harness });
+    // #1003：验证帧正文语言与唤醒注入同一套规则（config 覆盖 > 本身份最近消息 > LANG > en）。
+    const { resolveWakeLang } = await import("../wake-note-i18n");
+    const lang = await resolveWakeLang({
+      override: readConfig()?.lang ?? null,
+      source: { server: cfg.server, token: cfg.token, channel, identity },
+      env: process.env,
+    });
+    const result = await verifyWakeRoundTrip({ server: cfg.server, token: cfg.token, channel, identity, timeoutMs, harness, lang });
     if (flags.json === true) {
       console.log(JSON.stringify(jsonFrame({
         type: "wake_verify",

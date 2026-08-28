@@ -43,6 +43,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteJson } from "./atomic-json";
 import type { StuckWake } from "./config";
+import { t, type WakeLang } from "./wake-note-i18n";
 
 /** seen 集合的落盘目录，与 #893 的 marker 目录并列。 */
 export const CODEX_STOP_WAKE_SEEN_DIR = "codex-stop-wake";
@@ -211,7 +212,9 @@ function clampUtf8(text: string, maxBytes: number): string {
  *   - 用户一眼看出是 AgentParty 在唤醒他，而不是模型自己不肯停；
  *   - 模型知道正文要去频道读，不许照着这条提示编内容。
  */
-export function codexStopWakeReason(pointer: CodexStopWakePointer): string {
+export function codexStopWakeReason(pointer: CodexStopWakePointer, lang: WakeLang = "zh"): string {
+  // #1003：文案从 wake-note-i18n 取，语言由调用方按接收 agent 的语言判定（hook.ts 走 resolveWakeLang）。
+  // 缺省 zh 是这条文案的历史行为（它一直是中文的），别让老调用方悄悄变成英文。
   const backlog = pointer.backlog;
   if (backlog !== undefined && backlog.remaining > 0) {
     // #958：积压时说清「第 1/N 条、还剩几条」，并把一次排空的命令直接给出来。每轮只推进一条是
@@ -220,18 +223,18 @@ export function codexStopWakeReason(pointer: CodexStopWakePointer): string {
     const remaining = `${backlog.remaining}${backlog.exact ? "" : "+"}`;
     const total = `${backlog.remaining + 1}${backlog.exact ? "" : "+"}`;
     return clampUtf8(
-      `[AgentParty] 频道 #${pointer.channel} 有 ${total} 条 @ 你的消息还没处理，这是第 1/${total} 条（seq ${pointer.seq}），` +
-        `还有 ${remaining} 条排在后面，每轮只会送一条。` +
-        `一次读完全部并推进游标：\`${codexStopWakeDrainCommand(pointer.channel)}\`。` +
-        `读到正文后按内容处理，用 \`party send\` 回到该频道。频道是唯一数据源，不要凭本提示猜测内容。`,
+      t(lang, "codex.stop.backlog", {
+        channel: pointer.channel,
+        seq: pointer.seq,
+        total,
+        remaining,
+        drain: codexStopWakeDrainCommand(pointer.channel),
+      }),
       CODEX_STOP_WAKE_REASON_MAX_BYTES,
     );
   }
   return clampUtf8(
-    `[AgentParty] 频道 #${pointer.channel} 有一条 @ 你的消息还没处理（seq ${pointer.seq}）。` +
-      `请先执行 \`party history ${pointer.channel} --since ${Math.max(0, pointer.seq - 1)}\` 读到正文，` +
-      `再按正文内容处理并用 \`party send\` 回到该频道。` +
-      `频道是唯一数据源：这条提示只给了指针，不要凭它猜测消息内容。处理完正常结束本轮即可。`,
+    t(lang, "codex.stop.single", { channel: pointer.channel, seq: pointer.seq, since: Math.max(0, pointer.seq - 1) }),
     CODEX_STOP_WAKE_REASON_MAX_BYTES,
   );
 }

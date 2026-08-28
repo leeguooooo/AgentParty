@@ -758,3 +758,23 @@ describe("probeClaudeArmedListener —— 武装监听探活（#979）", () => {
     expect(classifyListenerCommand(null)).toBe("unknown");
   });
 });
+
+describe("party join --lang（#1003）", () => {
+  test("--lang zh 经 party init 写进 config；不给则 config 里没有 lang 字段（自动判定）", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    expect(await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, {}, logs))).toBe(0);
+    const plain = JSON.parse(readFileSync(configPath(), "utf8")) as { lang?: unknown };
+    expect("lang" in plain).toBe(false);
+
+    expect(await runJoin(baseOpts({ harnessFlag: "claude", lang: "zh" }), deps(record, {}, logs))).toBe(0);
+    const withLang = JSON.parse(readFileSync(configPath(), "utf8")) as { lang?: unknown; identity?: { name: string } };
+    expect(withLang.lang).toBe("zh");
+    expect(withLang.identity?.name).toBe("agent");
+
+    // 再跑一次不带 --lang：已设的值保留（init 只在显式给了 --lang 时改它）。
+    expect(await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, {}, logs))).toBe(0);
+    expect((JSON.parse(readFileSync(configPath(), "utf8")) as { lang?: unknown }).lang).toBe("zh");
+  });
+});

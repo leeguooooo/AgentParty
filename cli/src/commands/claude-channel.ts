@@ -54,6 +54,13 @@ import {
   type MentionWakeRef,
 } from "../mention-wake-claim";
 import { senderInjectFromName, wakeProxyNote, type InjectSenderLike } from "../serve-wake-proxy";
+import {
+  detectWakeLang,
+  receiverRecentBodies,
+  t,
+  type FetchReceiverBodies,
+  type WakeLang,
+} from "../wake-note-i18n";
 import { loadCursor, readConfig, resolveChannel, saveCursor } from "../config";
 import {
   DeliveryRecoveryJournal,
@@ -390,6 +397,15 @@ export function confirmClaudeCrossSessionPeer(
 
 const WAKE_HINT_MENTION_RE = /@([A-Za-z0-9][A-Za-z0-9_-]{0,63})/g;
 
+/** #1003：config `lang` 显式覆盖（唤醒文案语言）；读不到/读失败一律当没有（交给自动判定）。 */
+function configLangOverride(cwd?: string): string | null {
+  try {
+    return readConfig(cwd)?.lang ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Extract advisory @mention targets from a reply body. Server-side mention
  * resolution stays authoritative; this is only used to decide whether the
  * same-machine wake hint below is worth appending. */
@@ -420,6 +436,8 @@ export function claudeCrossSessionWakeHint(
     displayName: string,
     candidateRef: string,
   ) => string | null = listedClaudeCrossSessionAddress,
+  /** 提示语言（#1003）：调用方按本会话刚发的正文判定；缺省 en（历史行为）。 */
+  lang: WakeLang = "en",
 ): string | null {
   if (peers === undefined || peers.availability !== "ready" || targets.length === 0 || !armed()) {
     return null;
@@ -432,15 +450,12 @@ export function claudeCrossSessionWakeHint(
       ? [peer.agent]
       : []))];
   if (listedAgents.length === 0) return null;
-  return (
-    `Cross-session wake hint: ${listedAgents.map((agent) => `@${agent}`).join(", ")} may be reachable ` +
-    "locally — a Claude Cross-session listing still matches this mention. Listings expire and can be " +
-    "stale, so this is not proof of a live session. If an earlier local wake would help, follow the " +
-    `full authorization chain first: ${PEERS_TOOL}, then Claude's built-in ListAgents, then ` +
-    `${PEER_CHECK_TOOL}, and only after a confirmed check send one SendMessage of at most 512 UTF-8 ` +
-    `bytes that carries only a channel+seq reference (this channel, seq=${postedSeq}) and no message ` +
-    "body. The AgentParty channel remains the single source of truth; the peer reads the message there."
-  );
+  return t(lang, "hint.cross_session", {
+    targets: listedAgents.map((agent) => `@${agent}`).join(", "),
+    peersTool: PEERS_TOOL,
+    peerCheckTool: PEER_CHECK_TOOL,
+    seq: postedSeq,
+  });
 }
 
 const HELP = `usage: party claude-channel [channel|--channel C] [--require-launch-opt-in]
@@ -570,6 +585,18 @@ export interface DormantAnnounceDeps {
    * 返回持锁 pid 或 null。默认读 serve 锁；测试必须注入（别去读真实 ~/.agentparty）。
    */
   liveBridgeHolder?: (auth: { server: string; token: string }, channel: string) => number | null;
+  /**
+   * #1003：接收者（本机身份）在本频道最近发的消息正文——唤醒注入文案按它判语言。结果按
+   * (server, channel, identity) 在进程内缓存（wake-note-i18n.receiverRecentBodies），不会每次注入都拉历史。
+   * 默认走 REST（fetchRecentMessages 过滤本身份）；测试必须注入（别打真网络）。
+   */
+  fetchReceiverBodies?: FetchReceiverBodies;
+  /** #1003：config `lang` 显式覆盖（优先级最高）；默认读本 cwd 的 config；测试注入。 */
+  langOverride?: () => string | null | undefined;
+  /** 当前时刻（相对时间的基准）；默认 Date.now()。测试注入。 */
+  now?: () => number;
+  /** 接收会话的环境（语言判定的 LANG/LC_ALL 兜底）；默认 process.env。测试注入。 */
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -724,6 +751,8 @@ export async function runDormantClaudeSessionAnnounce(
       ...(deps.runtimeId === undefined ? {} : { runtimeId: deps.runtimeId }),
     }));
   const releaseWake = deps.releaseWake ?? releaseMentionWake;
+  const now = deps.now ?? (() => Date.now());
+  const langOverride = deps.langOverride ?? (() => configLangOverride(cwd));
   const liveBridgeHolder = deps.liveBridgeHolder ?? ((auth: { server: string; token: string }, slug: string) => {
     try {
       return instanceLockHolderPid("serve", instanceLockTarget(auth.server, auth.token, slug), defaultInstanceLockDir());
@@ -913,6 +942,18 @@ export async function runDormantClaudeSessionAnnounce(
           server: authServer,
           identity: selfName,
         });
+        // #1003：注入语言＝接收者（本身份）自己的语言：config 覆盖 > 本身份在频道里最近的消息 > 触发消息 > LANG > en。
+        // 历史按 (server, channel, identity) 进程内缓存，拉不到当没有历史（不抛、不阻断注入）。
+        const bodies = await receiverRecentBodies(
+          { server: authServer, token: authToken, channel, identity: selfName },
+          { ...(deps.fetchReceiverBodies === undefined ? {} : { fetch: deps.fetchReceiverBodies }), now: now() },
+        );
+        const lang = detectWakeLang({
+          override: langOverride(),
+          receiverRecentBodies: bodies,
+          triggerBody: typeof (frame as { body?: unknown } | null)?.body === "string" ? (frame as { body: string }).body : null,
+          env: deps.env ?? process.env,
+        });
         for (let attempt = 1; attempt <= 3 && !signal.aborted; attempt += 1) {
           let result: Awaited<ReturnType<typeof inject>> | null = null;
           try {
@@ -925,7 +966,19 @@ export async function runDormantClaudeSessionAnnounce(
               sessionId: entry.session_id,
               name: hostAnnounceName,
               // #986：技术 identity 进正文末行 `from-id:`（防冒充字段不丢，可读回）。
-              body: wakeProxyNote({ channel, server: authServer, seq, siblings, fromId: sender?.name ?? null }),
+              // #1003：带上发信人/正文/时间——头行写友好名与相对时间，正文按剩余预算截成预览，整条仍 ≤512B。
+              body: wakeProxyNote({
+                channel,
+                server: authServer,
+                seq,
+                siblings,
+                fromId: sender?.name ?? null,
+                sender,
+                body: typeof (frame as { body?: unknown } | null)?.body === "string" ? (frame as { body: string }).body : null,
+                ts: typeof (frame as { ts?: unknown } | null)?.ts === "number" ? (frame as { ts: number }).ts : null,
+                lang,
+                now: now(),
+              }),
               // from-name＝真实发信人的**友好名**（`leo`）；只有频道里另有同友好名、不同技术 name 的
               // 成员时才带短消歧后缀（`leo·9749e`），别再把整段 hash 拼进主名（#986）。
               fromName: senderInjectFromName(sender, channel, [...knownSenders.values()]),
@@ -3481,6 +3534,7 @@ export async function run(argv: string[]): Promise<number> {
       // clears the pending entry.
       const replyTarget = bridge.pendingSender(seq);
       const posted = await bridge.reply(seq, text);
+      // #1003：提示语言按本会话自己刚写的这条回复判——那正是「接收 agent 使用的语言」，且不用拉历史。
       const hint = claudeCrossSessionWakeHint(
         [...new Set([
           ...(replyTarget === null ? [] : [replyTarget]),
@@ -3488,6 +3542,9 @@ export async function run(argv: string[]): Promise<number> {
         ])],
         lastReadyPeersSummary,
         posted.seq,
+        undefined,
+        undefined,
+        detectWakeLang({ override: configLangOverride(), receiverRecentBodies: [text], env: process.env }),
       );
       return toolResult(
         `AgentParty reply persisted as seq=${posted.seq} (reply_to=${seq}).` +

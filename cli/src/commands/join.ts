@@ -71,6 +71,7 @@ import { resolveClaudeDefaultArgs, type ClaudeDefaultArgsResolution } from "../c
 import { claudeLaunchPlan } from "./claude-launch";
 import { STEP_INDENT, runSteps, type Step, type StepResult } from "../onboarding/steps";
 import { verifyWakeRoundTrip, type VerifyWakeDeps } from "../onboarding/verify-wake";
+import { normalizeWakeLang, resolveWakeLang, type WakeLang } from "../wake-note-i18n";
 import { findHarnessAncestor } from "../join-binding";
 import {
   CLAUDE_PLUGIN_MIN_VERSION,
@@ -82,10 +83,10 @@ import type { CodexAutoWakeOutcome } from "./hook";
 // 与 probeCodexWakeLayer 并排导出：两档的「唤醒层进程探活」都从这里拿（#957 / #979）。
 export { probeClaudeArmedListener };
 
-const JOIN_FLAGS = ["server", "channel", "as", "harness", "mention"];
+const JOIN_FLAGS = ["server", "channel", "as", "harness", "mention", "lang"];
 /** 每一步「做完重跑」的那条命令——引导幂等，修好了就再跑同一条。 */
 const RERUN = "party join";
-const HELP = `usage: AGENTPARTY_TOKEN='<token>' party join --server URL --channel SLUG --as NAME [--harness codex|claude|other] [--mention name] [--yes] [--coexist]
+const HELP = `usage: AGENTPARTY_TOKEN='<token>' party join --server URL --channel SLUG --as NAME [--harness codex|claude|other] [--mention name] [--lang zh|en] [--yes] [--coexist]
 
 One command that does the whole join as guided steps (#987/#988):
   第 0 步 版本      CLI version; claude plugin installed + aligned to the CLI (#961/#985)
@@ -121,7 +122,10 @@ Options:
                  prints it); also approves the codex hook trust flip (passed to
                  \`party hook install --codex --yes\`); never bypasses the gate
   --coexist      keep any identity this harness already had on this channel (passed to
-                 \`party init --coexist\`); default is replace`;
+                 \`party init --coexist\`); default is replace
+  --lang zh|en   language of the wake notes injected into this agent's session (stored in
+                 config, passed to \`party init --lang\`). Omit to auto-detect from the
+                 agent's own recent channel messages (#1003)`;
 
 // 每一步的结果。level 决定它在自检里怎么呈现；gate=true 的步骤决定「就绪 / 还差」。
 type StepLevel = "ok" | "skip" | "warn" | "fail";
@@ -163,8 +167,14 @@ export function roundTripWakeVerifier(verifyDeps?: VerifyWakeDeps): WakeVerifier
     if (cfg === null || typeof cfg.server !== "string" || typeof cfg.token !== "string" || cfg.token === "") {
       return { ok: false, summary: "config 里没有 server/token，发不了验证帧", fix: { do: RERUN } };
     }
+    // #1003：验证帧正文语言与唤醒注入同一套规则（config 覆盖 > 本身份最近消息 > LANG > en）。
+    const lang = await resolveWakeLang({
+      override: cfg.lang,
+      source: { server: cfg.server, token: cfg.token, channel: input.channel, identity: input.identity },
+      env: process.env,
+    });
     const r = await verifyWakeRoundTrip(
-      { server: cfg.server, token: cfg.token, channel: input.channel, identity: input.identity, harness: input.harness },
+      { server: cfg.server, token: cfg.token, channel: input.channel, identity: input.identity, harness: input.harness, lang },
       verifyDeps,
     );
     const summary = r.detail.replace(/^✗\s*/, "").replace(/\s*✓/g, "");
@@ -260,6 +270,8 @@ export interface JoinOptions {
   yes: boolean;
   coexist: boolean;
   token: string;
+  /** #1003：唤醒文案语言的显式覆盖（`--lang zh|en`），交给 party init 写进 config；缺省 null＝自动判定。 */
+  lang?: WakeLang | null;
 }
 
 function configFileName(agentName: string, slug: string): string {
@@ -706,6 +718,7 @@ function identityStep(harnessKnown: boolean): Step<JoinCtx> {
       const initArgs = ["--server", opts.server, "--channel", slug];
       if (harnessKnown) initArgs.push("--harness", harness);
       if (opts.coexist) initArgs.push("--coexist");
+      if (opts.lang !== undefined && opts.lang !== null) initArgs.push("--lang", opts.lang);
       const initCode = await deps.initRun(initArgs);
       if (initCode !== 0) {
         return {
@@ -1180,6 +1193,14 @@ export async function run(argv: string[]): Promise<number> {
     console.error(`note: --mention ${mentionRaw} 不是合法 name，报到不 @（用 party who 反查 handle）`);
   }
 
+  // #1003：唤醒文案语言的显式覆盖，原样交给 party init 写进 config；缺省不传＝自动判定。
+  const langRaw = str(flags.lang);
+  const lang = langRaw === undefined ? null : normalizeWakeLang(langRaw);
+  if (langRaw !== undefined && lang === null) {
+    console.error("--lang must be one of: zh, en");
+    return 1;
+  }
+
   // token 只从环境变量读（#676）——绝不接受 --token，那会把凭据落进 argv/ps/history。
   const token = process.env.AGENTPARTY_TOKEN?.trim();
   if (token === undefined || token === "") {
@@ -1191,7 +1212,7 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   return runJoin(
-    { server, channel: slug, agentName, harnessFlag, mention, yes: flags.yes === true, coexist: flags.coexist === true, token },
+    { server, channel: slug, agentName, harnessFlag, mention, yes: flags.yes === true, coexist: flags.coexist === true, token, lang },
     defaultJoinDeps(slug),
   );
 }
