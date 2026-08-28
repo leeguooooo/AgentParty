@@ -4485,9 +4485,16 @@ export function ChannelPage({
     setMemberDetailRoute(null);
     setActiveAdminSurface(open ? surface : null);
     if (!open || surface !== "agentTokens") setAgentManagerTarget(null);
-    // 引导会话只属于当前打开的 stepper：关掉 / 切走都要丢掉，否则下次打开会自己弹回上一次的引导。
-    if (!open || surface !== "agentJoin") setJoinGuideSession(null);
+    // 引导会话的清理不放在这里：还有别的路径会直接 setActiveAdminSurface(null)（openTeamMember 等），
+    // 只在这一处清会漏（pr_agent on #1010）。改由下面那个 effect 按「当前面板是不是 agentJoin」兜住全部路径。
   }, []);
+
+  // 引导会话只属于当前打开的 stepper：面板一旦不是 agentJoin（关掉、切到别的面板、被成员详情顶掉…）
+  // 就丢掉，否则下次点「＋ 让 agent 加入」会自己弹回上一次那个身份的引导。openJoinGuide 与
+  // setActiveAdminSurface("agentJoin") 在同一批提交，effect 看到的已是 agentJoin，不会误清。
+  useEffect(() => {
+    if (activeAdminSurface !== "agentJoin") setJoinGuideSession(null);
+  }, [activeAdminSurface]);
 
   // 「接入凭证」面板 → 四步引导：先记下 session，再把面板切到 agentJoin（两个面板不打架）。
   const openJoinGuide = useCallback((session: JoinGuideSession) => {

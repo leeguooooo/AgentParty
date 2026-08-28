@@ -13,5 +13,9 @@ test("AgentTokens 的 onGuide 接到 AgentJoin 的 guideSession，并把面板�
   expect(source).toContain("const openJoinGuide = useCallback((session: JoinGuideSession) => {");
   expect(source).toContain("setJoinGuideSession(session);");
   expect(source).toContain('setActiveAdminSurface("agentJoin");');
-  expect(source).toContain('if (!open || surface !== "agentJoin") setJoinGuideSession(null);');
+  // 清理必须覆盖**所有**离开 agentJoin 的路径（含直接 setActiveAdminSurface(null) 的那些），
+  // 所以判据是那个 effect，而不是只在 setAdminSurface 里清一次（pr_agent on #1010）。
+  expect(source).toContain('if (activeAdminSurface !== "agentJoin") setJoinGuideSession(null);');
+  expect(source).toContain("}, [activeAdminSurface]);");
+  expect(source).not.toContain('if (!open || surface !== "agentJoin") setJoinGuideSession(null);');
 });
