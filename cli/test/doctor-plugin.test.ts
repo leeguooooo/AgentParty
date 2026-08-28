@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { PresenceEntry } from "@agentparty/shared";
 import type { Identity } from "../src/rest";
 import {
+  claudePluginDoctorFixLines,
   inspectClaudePluginBundle,
   inspectClaudePluginReadiness,
   inspectClaudePluginShell,
@@ -164,6 +165,34 @@ describe("party doctor claude-plugin", () => {
     expect(inspectClaudePluginShell(dependencies({
       claudeVersion: () => "2.1.80 (Claude Code)",
     })).blockers).toEqual(["claude_version_unsupported"]);
+  });
+
+  // #961: `plugin install` on an installed plugin only says "already installed" and never upgrades,
+  // so the version-mismatch fix must be `plugin update` (or `party upgrade` when the plugin is newer).
+  test("version mismatch fix line says plugin update, never plugin install", () => {
+    const stale = claudePluginDoctorFixLines({
+      blockers: ["plugin_version_mismatch"],
+      plugin: { installed: true, enabled: true, version: "0.2.203", bundle_valid: true, launcher_executable: true },
+      runtime_version: "0.2.212",
+    });
+    expect(stale).toHaveLength(1);
+    expect(stale[0]).toContain("claude plugin update agentparty@agentparty");
+    expect(stale[0]).toContain("0.2.203");
+    expect(stale[0]).toContain("restart Claude Code");
+    expect(stale[0]).not.toContain("fix: claude plugin install");
+    const newer = claudePluginDoctorFixLines({
+      blockers: ["plugin_version_mismatch"],
+      plugin: { installed: true, enabled: true, version: "0.2.300", bundle_valid: true, launcher_executable: true },
+      runtime_version: "0.2.212",
+    });
+    expect(newer[0]).toContain("party upgrade");
+    // Missing plugin is still an install.
+    const missing = claudePluginDoctorFixLines({
+      blockers: ["plugin_missing"],
+      plugin: { installed: false, enabled: false, bundle_valid: false, launcher_executable: false },
+      runtime_version: "0.2.212",
+    });
+    expect(missing[0]).toContain("claude plugin install agentparty@agentparty");
   });
 
   test("reports ready only when plugin, auth, channel, and a healthy durable listener are observed", async () => {

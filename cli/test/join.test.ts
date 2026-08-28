@@ -9,21 +9,39 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BEHAVIOR_CONTRACT_BODY_LINES } from "@agentparty/shared/onboarding";
-import { runJoin, type JoinDeps, type JoinOptions } from "../src/commands/join";
+import { probeCodexWakeLayer, runJoin, type JoinDeps, type JoinOptions } from "../src/commands/join";
 import { run as initRun } from "../src/commands/init";
 import { run as hookRun } from "../src/commands/hook";
 import { run as sendRun } from "../src/commands/send";
+import { inspectClaudePluginShell, parseClaudePluginList } from "../src/commands/doctor";
 import { buildWakeChecklist } from "../src/wake-checklist";
 import { diagnoseCodexWake } from "../src/wake-diagnosis";
+import { RUNNING_VERSION } from "../src/upgrade";
+import { codexAutoWakeAuth, codexAutoWakeMarkerPath, codexAutoWakeTarget, writeCodexAutoWakeMarker } from "../src/codex-auto-wake";
+import { currentProcessStartedAt, instanceLockTarget } from "../src/instance-lock";
+import { listCodexSessions, registerCodexSession } from "../src/claude-session-registry";
 import { startRestMock, type RestMock } from "./rest-mock";
 
-// 只读 .error / .status 的最小 spawnSync 桩。record 记下每次调用，便于断言 MCP 注册确实发生。
+const PLUGIN = "agentparty@agentparty";
+
+// 只读 .error / .status（插件相关再读 .stdout）的最小 spawnSync 桩。record 记下每次调用，便于断言
+// MCP 注册 / 插件 update 确实发生。
 interface SpawnBehavior {
   noBinary?: boolean; // 二进制不存在（ENOENT）
   mcpAlreadyRegistered?: boolean; // mcp get 返回 0（已注册）
   failMcpAdd?: boolean; // mcp add 返回非 0
+  /**
+   * 本机已装的 claude 插件版本（#961）：省略＝与 CLI 同版；null＝没装；"0.2.203" 这类＝旧版。
+   * 桩是**有状态**的，照真机行为走：`plugin install` 对已装的只回 already installed（**不升级**），
+   * 只有 `plugin update` 才把版本换成当前 CLI 的。
+   */
+  installedPluginVersion?: string | null;
+  failPluginUpdate?: boolean; // plugin update 返回非 0
 }
-function fakeSpawn(record: string[][], behavior: SpawnBehavior = {}) {
+interface PluginState {
+  installed: string | null;
+}
+function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: PluginState) {
   return ((cmd: string, args: readonly string[]) => {
     record.push([cmd, ...args]);
     const base = { pid: 0, output: [], stdout: "", stderr: "", signal: null } as Record<string, unknown>;
@@ -33,6 +51,23 @@ function fakeSpawn(record: string[][], behavior: SpawnBehavior = {}) {
     }
     if (args[0] === "mcp" && args[1] === "add") {
       return { ...base, status: behavior.failMcpAdd ? 1 : 0 };
+    }
+    if (cmd === "claude" && args[0] === "--version") return { ...base, status: 0, stdout: "2.1.200 (Claude Code)\n" };
+    if (cmd === "claude" && args[0] === "plugin" && args[1] === "list") {
+      const rows = state.installed === null
+        ? []
+        : [{ id: PLUGIN, version: state.installed, enabled: true, installPath: "/nowhere/agentparty" }];
+      return { ...base, status: 0, stdout: `${JSON.stringify(rows)}\n` };
+    }
+    if (cmd === "claude" && args[0] === "plugin" && args[1] === "install") {
+      // 真机行为：已装就只回 "already installed"，版本原地不动。
+      if (state.installed === null) state.installed = RUNNING_VERSION;
+      return { ...base, status: 0 };
+    }
+    if (cmd === "claude" && args[0] === "plugin" && args[1] === "update") {
+      if (behavior.failPluginUpdate) return { ...base, status: 1 };
+      state.installed = RUNNING_VERSION;
+      return { ...base, status: 0 };
     }
     return { ...base, status: 0 };
   }) as unknown as JoinDeps["spawn"];
@@ -66,8 +101,12 @@ afterEach(() => {
 });
 
 function deps(record: string[][], behavior: SpawnBehavior, logs: string[]): JoinDeps {
+  const state: PluginState = {
+    installed: behavior.installedPluginVersion === undefined ? RUNNING_VERSION : behavior.installedPluginVersion,
+  };
+  const spawn = fakeSpawn(record, behavior, state);
   return {
-    spawn: fakeSpawn(record, behavior),
+    spawn,
     initRun,
     hookRun,
     sendRun,
@@ -83,7 +122,30 @@ function deps(record: string[][], behavior: SpawnBehavior, logs: string[]): Join
         () => ({ onPath: null, candidates: [], gated: [], desktop: null }),
         () => null,
       ),
+    // claude 插件壳检查（#961）：走**真的** inspectClaudePluginShell（版本比对逻辑不另写一份），
+    // 只把 claude 二进制换成上面那个有状态桩、把读盘的包检查换成恒 valid。
+    claudePluginShell: () =>
+      inspectClaudePluginShell({
+        claudeVersion: () => {
+          const r = spawn("claude", ["--version"], { encoding: "utf8" });
+          return r.error === undefined && r.status === 0 ? String(r.stdout).trim() : null;
+        },
+        claudePlugins: () => {
+          const r = spawn("claude", ["plugin", "list", "--json"], { encoding: "utf8" });
+          return r.error === undefined && r.status === 0 ? parseClaudePluginList(String(r.stdout)) : null;
+        },
+        inspectBundle: () => ({ valid: true, launcherExecutable: true }),
+      }),
+    // codex 唤醒层（#957）：默认假装拉起成功且进程在（happy path）；失败用例逐个覆盖。
+    startCodexWakeLayer: async () => ({ action: "start", channel: "dev", cwd: process.cwd(), args: [] }),
+    codexWakeLayerLive: async () => ({ pid: 4242, source: "serve-lock" }),
+    codexAncestorPid: () => null,
   };
+}
+/** 「现在只做这一件事：」后面那一行——自检给出的唯一修法。 */
+function nextActionLine(logs: string[]): string | undefined {
+  const i = logs.findIndex((l) => l.includes("现在只做这一件事"));
+  return i === -1 ? undefined : logs[i + 1]?.trim();
 }
 function baseOpts(over: Partial<JoinOptions>): JoinOptions {
   return {
@@ -149,6 +211,68 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     // claude 档附带：crossSessionInbound=accept 写进 ~/.claude/settings.json（#844）。
     const settings = JSON.parse(readFileSync(join(tmp, ".claude", "settings.json"), "utf8")) as { crossSessionInbound: string };
     expect(settings.crossSessionInbound).toBe("accept");
+
+    // 插件已是当前版本：不跑 update，自检里插件那一步 ✓，结论不要求重开会话。
+    expect(record.some((r) => r[0] === "claude" && r[1] === "plugin" && r[2] === "update")).toBe(false);
+    expect(out).toContain("版本与 CLI 一致");
+    expect(out).not.toContain("重开");
+  });
+
+  // ★ #961 事故场景：本机插件 0.2.203、CLI 0.2.212。旧 join 只 install（回 already installed，不升级）
+  //   就印 ✅，而 doctor 判 plugin_version_mismatch、SessionStart 唤醒根本没布上。
+  test("#961：已装旧版插件时 join 会跑 plugin update，结论明说「要重开会话」而不是埋在 warn 里", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, { installedPluginVersion: "0.2.203" }, logs));
+    const out = logs.join("\n");
+
+    // install 之后跟了 update（install 对已装的原地踏步）。
+    const install = record.findIndex((r) => r[0] === "claude" && r[1] === "plugin" && r[2] === "install");
+    const update = record.findIndex((r) => r[0] === "claude" && r[1] === "plugin" && r[2] === "update" && r[3] === PLUGIN);
+    expect(install).toBeGreaterThan(-1);
+    expect(update).toBeGreaterThan(install);
+    // 更新到位 → 就绪，但**当前会话还挂着旧插件**——「重开」是结论句的一部分。
+    expect(code).toBe(0);
+    expect(out).toContain(`已从 0.2.203 更新到 ${RUNNING_VERSION}`);
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toBeDefined();
+    expect(verdict).toContain("重开");
+    expect(verdict).toContain("当前这个会话还挂着旧插件");
+  });
+
+  test("#961：update 没成、插件仍是旧版 ⇒ 自检报 plugin_version_mismatch、不印 ✅，修法是 update 不是 install", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      deps(record, { installedPluginVersion: "0.2.203", failPluginUpdate: true }, logs),
+    );
+    const out = logs.join("\n");
+
+    // 隔离：config / 身份 / 报到全成，唯独插件版本落后——这正是事故当天的形态。
+    expect(existsSync(configPath())).toBe(true);
+    expect(code).toBe(1);
+    expect(out).not.toContain("全部就绪");
+    expect(out).toContain("plugin_version_mismatch");
+    expect(out).toContain(`本机插件 0.2.203，CLI ${RUNNING_VERSION}`);
+    // 唯一那条修法必须是 update：照旧教 install 等于原地踏步。
+    expect(nextActionLine(logs)).toBe(`claude plugin update ${PLUGIN}`);
+    // 做完要重开会话——写在修法旁边，不是埋在 warn 里。
+    expect(out).toContain("重开一个 Claude 会话");
+  });
+
+  test("#961：没装过插件 → install 装上（不跑 update），结论同样明说要重开会话", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, { installedPluginVersion: null }, logs));
+    expect(code).toBe(0);
+    expect(record.some((r) => r[0] === "claude" && r[2] === "install")).toBe(true);
+    expect(record.some((r) => r[0] === "claude" && r[2] === "update")).toBe(false);
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toContain("重开");
   });
 
   test("失败可见：报到被服务端 500 打回时，自检如实报「还差」并给出可执行下一步，不是静默成功", async () => {
@@ -192,9 +316,111 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(record.some((r) => r[0] === "codex" && r[1] === "mcp" && r[2] === "add")).toBe(true);
     expect(record.some((r) => r[0] === "claude")).toBe(false);
 
-    // 无 config.toml（老版本 codex / 无信任闸）→ hook 判 ok → 自检「全部就绪」。
+    // 无 config.toml（老版本 codex / 无信任闸）→ hook 判 ok；唤醒层进程在（pid 4242）→ 自检「全部就绪」。
     expect(code).toBe(0);
     expect(out).toContain("全部就绪");
+    expect(out).toContain("唤醒层进程在跑");
+    expect(out).toContain("pid 4242");
+  });
+
+  // ★ #957 事故场景：四项静态前置条件全绿、唤醒层进程根本不在，旧 join 照印「就能被唤醒」，
+  //   owner @ 了 25 分钟纹丝不动。
+  test("#957：唤醒层拉不起来 ⇒ 结论是降级文案（Stop hook 兜底 / 新开会话），绝不说「就能被唤醒」", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    d.startCodexWakeLayer = async () => ({
+      action: "start-failed",
+      channel: "dev",
+      detail: "拉 `party serve dev --runner codex` 失败（spawn 没返回 pid）",
+    });
+    d.codexWakeLayerLive = async () => null;
+    const code = await runJoin(baseOpts({ harnessFlag: "codex" }), d);
+    const out = logs.join("\n");
+
+    // 隔离：config / 身份 / hook / 报到全成，唯独唤醒层进程不在。
+    expect(existsSync(configPath())).toBe(true);
+    expect(code).toBe(1);
+    expect(out).not.toContain("就能被唤醒");
+    expect(out).not.toContain("全部就绪");
+    // 自检里那一格是 ✗，且带原因。
+    expect(out).toContain("✗ 唤醒层进程在跑");
+    expect(out).toContain("spawn 没返回 pid");
+    // 降级文案：照实说此刻能被怎么叫到。
+    expect(out).toContain("本会话只能在你下次发言、回合结束时收到 @");
+    expect(out).toContain("新开一个 codex 会话");
+    expect(out).toContain("party serve dev --runner codex");
+  });
+
+  test("#957：用户显式关了 auto-wake（skip: disabled）同样不印 ✅，原因照实带出来", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    d.startCodexWakeLayer = async () => ({ action: "skip", reason: "disabled", detail: "codex auto-wake 被显式关掉了（默认是开的）" });
+    d.codexWakeLayerLive = async () => null;
+    const code = await runJoin(baseOpts({ harnessFlag: "codex" }), d);
+    const out = logs.join("\n");
+    expect(code).toBe(1);
+    expect(out).not.toContain("就能被唤醒");
+    expect(out).toContain("被显式关掉了");
+    expect(out).toContain("本会话只能在你下次发言、回合结束时收到 @");
+  });
+
+  test("#957：已有唤醒层在跑（skip: already-serving）且探活得到 pid ⇒ 就绪，不再拉第二个", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    d.startCodexWakeLayer = async () => ({ action: "skip", reason: "already-serving", detail: "#dev 上本身份已有 serve 在跑（pid 777）" });
+    d.codexWakeLayerLive = async () => ({ pid: 777, source: "serve-lock" });
+    const code = await runJoin(baseOpts({ harnessFlag: "codex" }), d);
+    const out = logs.join("\n");
+    expect(code).toBe(0);
+    expect(out).toContain("已有唤醒层在跑");
+    expect(out).toContain("pid 777");
+    expect(out).toContain("全部就绪");
+  });
+
+  test("#957：跑 join 的 codex 会话在注册表里挂到本频道（否则唤醒层宽限期一过就判无人使用退场）", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    // 预置：本会话 SessionStart 时绑的是别的频道、身份没解析出来——事故当天注册表里就是这样。
+    const sessionId = "019f95e8-2c0b-7903-8779-cd102c5ecd4c";
+    expect(registerCodexSession({
+      session_id: sessionId,
+      pid: process.pid,
+      display_name: null,
+      channel: "elsewhere",
+      identity: null,
+      server: null,
+      cwd: process.cwd(),
+    })).toBe(true);
+    const d = deps(record, {}, logs);
+    d.codexAncestorPid = () => process.pid;
+    const code = await runJoin(baseOpts({ harnessFlag: "codex" }), d);
+    expect(code).toBe(0);
+    const entry = listCodexSessions().find((e) => e.session_id === sessionId);
+    expect(entry).toBeDefined();
+    expect(entry!.channel).toBe("dev");
+    expect(entry!.identity).toBe("agent"); // mock /api/me 的身份
+    expect(entry!.server).toBe(new URL(mock.url).origin);
+    // 挂上了就不该再有「没入册」的警告。
+    expect(logs.join("\n")).not.toContain("没入册");
+  });
+
+  test("#957：找不到本会话的注册表条目时不伪造，如实提示唤醒层会提前退场", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const d = deps(record, {}, logs);
+    d.codexAncestorPid = () => process.pid; // 有 codex 进程，但注册表里没它
+    const code = await runJoin(baseOpts({ harnessFlag: "codex" }), d);
+    expect(code).toBe(0);
+    expect(logs.join("\n")).toContain("没入册");
+    expect(listCodexSessions().length).toBe(0);
   });
 
   test("失败可见（owner 场景）：codex hook 已装但信任闸 disabled、非交互不批准时，自检报「还差」hook 那一步", async () => {
@@ -249,20 +475,23 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
   // 下面三条覆盖 SpawnBehavior 的三个分支。它们不是补覆盖率——这三条正是本切片声称
   // 「失败要能看见」的路径：桩写了却没人用，那个声称就没被验证过（CodeRabbit 逮到）。
 
-  test("目标机器没装 claude CLI：注册这一步 warn 而不是崩，且不影响「就绪」结论", async () => {
+  test("目标机器没装 claude CLI：注册/装插件 warn 而不是崩，配置照样落地；但唤醒层核实不了就不印 ✅", async () => {
     mock = startRestMock();
     const record: string[][] = [];
     const logs: string[] = [];
     const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, { noBinary: true }, logs));
     const out = logs.join("\n");
 
-    // MCP 注册是 best-effort：装不上不该把整段接入判成失败——config / 绑定 / 报到都成了。
-    expect(code).toBe(0);
-    expect(out).toContain("全部就绪");
-    // 但必须**看得见**：这一步的结果不能被静默吞掉。
+    // MCP 注册 / 装插件是 best-effort：不崩、不静默——这一步的结果必须**看得见**。
     expect(out).toMatch(/mcp[\s\S]{0,80}(未|没|失败|跳过|not|skip)/i);
-    // 配置与报到仍然落地（best-effort 步骤不该拖垮 gate 步骤）。
+    // 配置与报到仍然落地（best-effort 步骤不该拖垮前面的步骤）。
     expect(existsSync(configPath())).toBe(true);
+    // #961：claude 档的唤醒层就是插件；claude 都不在 PATH 上，插件装没装、版本对不对一概核实不了——
+    // 这时说「就能被唤醒」是拿前置条件顶替判据。自检如实报 claude_unavailable，给一条修法。
+    expect(code).toBe(1);
+    expect(out).not.toContain("全部就绪");
+    expect(out).toContain("claude_unavailable");
+    expect(nextActionLine(logs)).toContain("PATH");
   });
 
   test("重复接入：mcp get 命中已注册 ⇒ 跳过 add，不再叠一个常驻进程（#898）", async () => {
@@ -303,5 +532,62 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(logs.some((l) => l.includes("ap_secret_xyz"))).toBe(false);
     // 但它确实经环境变量到了 init 手里——config 里落了这个 token。
     expect((JSON.parse(readFileSync(configPath(), "utf8")) as { token: string }).token).toBe("ap_secret_xyz");
+  });
+});
+
+// #957 的判据本身：wake_layer_live 来自**进程探活**（serve 实例锁 / 启动标记里的 pid 是否还活着），
+// 不是 auto-wake 开关是不是 default-on。开关默认就是开的——按开关判永远是绿的，那正是事故。
+describe("probeCodexWakeLayer —— 唤醒层进程探活（#957）", () => {
+  const config = { server: "https://party.example.com", token: "agent-token" };
+  const auth = () => codexAutoWakeAuth(config)!;
+  let home: string;
+  let lockDir: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "party-join-wake-home-"));
+    lockDir = mkdtempSync(join(tmpdir(), "party-join-wake-locks-"));
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  });
+  /** 假时钟：每问一次前进 1s，waitMs=2s ⇒ 两轮就到期，sleep 不真睡。 */
+  function clock() {
+    let t = 1_000;
+    return { now: () => (t += 1_000), sleep: async () => {}, waitMs: 2_000 };
+  }
+
+  test("什么都没有（开关默认开着也一样）→ null：没有进程就是没有唤醒层", async () => {
+    expect(await probeCodexWakeLayer({ home, lockDir, config, channel: "dev", ...clock() })).toBeNull();
+  });
+
+  test("config 没有 agent token → null（人类账号会话没有唤醒层可言）", async () => {
+    expect(await probeCodexWakeLayer({ home, lockDir, config: { server: config.server }, channel: "dev", ...clock() })).toBeNull();
+  });
+
+  test("serve 已持实例锁（进程活着）→ pid 来自锁，source=serve-lock", async () => {
+    const target = instanceLockTarget(auth().server, auth().token, "dev");
+    writeFileSync(join(lockDir, `serve-${target}.lock`), JSON.stringify({ pid: process.pid, id: "t", started_at: currentProcessStartedAt() }));
+    expect(await probeCodexWakeLayer({ home, lockDir, config, channel: "dev", ...clock() })).toEqual({ pid: process.pid, source: "serve-lock" });
+  });
+
+  test("只有启动标记、进程活着 → 等到期后按标记算在（刚拉起、还在连服务端）", async () => {
+    const marker = codexAutoWakeMarkerPath(home, codexAutoWakeTarget(auth(), "dev"));
+    writeCodexAutoWakeMarker(marker, { pid: 31337, started_at: null, claimed_at: 0, channel: "dev" });
+    const alive = (pid: number) => pid === 31337;
+    expect(await probeCodexWakeLayer({ home, lockDir, config, channel: "dev", alive, ...clock() })).toEqual({ pid: 31337, source: "starting-marker" });
+  });
+
+  test("启动标记里的进程已经死了 → null：spawn 成功过不算数，此刻不在就是不在", async () => {
+    const marker = codexAutoWakeMarkerPath(home, codexAutoWakeTarget(auth(), "dev"));
+    writeCodexAutoWakeMarker(marker, { pid: 31337, started_at: null, claimed_at: 0, channel: "dev" });
+    const alive = () => false;
+    expect(await probeCodexWakeLayer({ home, lockDir, config, channel: "dev", alive, ...clock() })).toBeNull();
+  });
+
+  test("标记只占了位、还没回填 pid → 等到期仍没进程就 null（占位不是进程）", async () => {
+    const marker = codexAutoWakeMarkerPath(home, codexAutoWakeTarget(auth(), "dev"));
+    const c = clock();
+    writeCodexAutoWakeMarker(marker, { pid: null, started_at: null, claimed_at: 2_000, channel: "dev" });
+    expect(await probeCodexWakeLayer({ home, lockDir, config, channel: "dev", alive: () => true, ...c })).toBeNull();
   });
 });

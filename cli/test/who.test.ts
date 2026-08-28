@@ -528,7 +528,7 @@ describe("who wake guidance（#879/#891：判据在场才给建议，判不出�
       reason: "no_wake_layer",
       harness: "claude",
       harness_source: "agent_session",
-      remedy: ["claude plugin install agentparty@agentparty"],
+      remedy: ["claude plugin install agentparty@agentparty", "claude plugin update agentparty@agentparty"],
     });
   });
 
@@ -584,10 +584,11 @@ describe("who wake guidance（#879/#891：判据在场才给建议，判不出�
       reason: "no_wake_layer",
       harness: "claude",
       harness_source: "agent_session",
-      remedy: ["claude plugin install agentparty@agentparty"],
+      remedy: ["claude plugin install agentparty@agentparty", "claude plugin update agentparty@agentparty"],
     });
+    // #961：install 对已装的只回 already installed、不升级——修法必须带上 update，且说明要重开。
     expect(note).toBe(
-      " · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run claude plugin install agentparty@agentparty and rejoin the channel",
+      " · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed and matches the party CLI version — run claude plugin install agentparty@agentparty, then claude plugin update agentparty@agentparty (install never upgrades an already-installed plugin), restart Claude Code and rejoin the channel",
     );
     expect(note).not.toContain("codex");
     expect(note).not.toContain("party serve");
@@ -814,7 +815,7 @@ describe("who 唤醒建议的装配（presence → 行 → 终端一行）", () 
     );
     const line = renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0);
     expect(line).toContain(
-      "↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run claude plugin install agentparty@agentparty and rejoin the channel",
+      "↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed and matches the party CLI version — run claude plugin install agentparty@agentparty, then claude plugin update agentparty@agentparty (install never upgrades an already-installed plugin), restart Claude Code and rejoin the channel",
     );
     expect(line).not.toContain("party bridge codex");
     expect(line).not.toContain("--runner codex");

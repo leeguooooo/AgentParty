@@ -253,6 +253,17 @@ export function detectHarnessFromAncestry(
   startPid: number,
   spawn: SpawnLike = spawnSync,
 ): BindingHarness | null {
+  return findHarnessAncestor(startPid, spawn)?.harness ?? null;
+}
+
+/**
+ * 同上，但连那个 harness 进程的 pid 一起给（#957：join 要拿它去注册表里认领「跑 join 的这个
+ * codex 会话」）。找不到返回 null，绝不猜。
+ */
+export function findHarnessAncestor(
+  startPid: number,
+  spawn: SpawnLike = spawnSync,
+): { harness: BindingHarness; pid: number } | null {
   if (!Number.isInteger(startPid) || startPid <= 1) return null;
   if (process.platform === "win32") return null;
   const table = readProcessTable(spawn);
@@ -262,7 +273,7 @@ export function detectHarnessFromAncestry(
     const row = table.get(pid);
     if (row === undefined) return null;
     const harness = harnessFromCommand(row.args);
-    if (harness !== null) return harness;
+    if (harness !== null) return { harness, pid };
     if (row.ppid <= 1 || row.ppid === pid) return null;
     pid = row.ppid;
   }

@@ -452,23 +452,50 @@ async function runClaudePluginDoctor(
     console.log(`  topology: ${report.channel.topology_visibility}`);
     if (report.blockers.length > 0) console.log(`  blockers: ${report.blockers.join(", ")}`);
     if (report.warnings.length > 0) console.log(`  warnings: ${report.warnings.join(", ")}`);
-    if (report.blockers.includes("plugin_missing")) {
-      console.log("  fix: claude plugin install agentparty@agentparty && claude plugin enable agentparty@agentparty");
-    } else if (report.blockers.includes("plugin_disabled")) {
-      console.log("  fix: claude plugin enable agentparty@agentparty");
-    }
-    if (report.blockers.includes("claude_version_unsupported")) {
-      console.log(`  fix: update Claude Code to >= ${CLAUDE_PLUGIN_MIN_VERSION.join(".")}`);
-    }
-    if (report.blockers.includes("channel_unbound")) console.log("  fix: party init --channel <channel>");
-    if (report.blockers.includes("identity_not_agent")) {
-      console.log("  fix: bind an agent token with party init --token <agent-token> --channel <channel>");
-    }
-    if (report.blockers.includes("listener_not_observed")) {
-      console.log("  fix: start a fresh channel session with party claude <channel>");
-    }
+    for (const line of claudePluginDoctorFixLines(report)) console.log(line);
   }
   return report.status === "ready" ? 0 : 1;
+}
+
+/**
+ * Per-blocker fix lines. Pure so the wording is testable.
+ *
+ * `plugin_version_mismatch` must point at `plugin update` (#961): `claude plugin install` on an
+ * already-installed plugin only prints "already installed" and never upgrades, so telling the
+ * user to install again leaves them exactly where they are.
+ */
+export function claudePluginDoctorFixLines(
+  report: Pick<ClaudePluginDoctorReport, "blockers" | "plugin" | "runtime_version">,
+): string[] {
+  const lines: string[] = [];
+  if (report.blockers.includes("plugin_missing")) {
+    lines.push("  fix: claude plugin install agentparty@agentparty && claude plugin enable agentparty@agentparty");
+  } else if (report.blockers.includes("plugin_disabled")) {
+    lines.push("  fix: claude plugin enable agentparty@agentparty");
+  }
+  if (report.blockers.includes("plugin_version_mismatch")) {
+    const installed = report.plugin.version ?? "?";
+    const pluginNewer = report.plugin.version !== undefined &&
+      compareVersions(report.plugin.version, report.runtime_version) > 0;
+    lines.push(
+      pluginNewer
+        ? `  fix: party upgrade (installed plugin ${installed} is newer than runtime ${report.runtime_version}; upgrade the CLI, do not downgrade the plugin)`
+        : `  fix: claude plugin update agentparty@agentparty (installed ${installed}, runtime ${report.runtime_version}; \`plugin install\` only reports "already installed" and never upgrades), then restart Claude Code`,
+    );
+  } else if (report.blockers.includes("plugin_bundle_invalid")) {
+    lines.push("  fix: claude plugin update agentparty@agentparty, then restart Claude Code");
+  }
+  if (report.blockers.includes("claude_version_unsupported")) {
+    lines.push(`  fix: update Claude Code to >= ${CLAUDE_PLUGIN_MIN_VERSION.join(".")}`);
+  }
+  if (report.blockers.includes("channel_unbound")) lines.push("  fix: party init --channel <channel>");
+  if (report.blockers.includes("identity_not_agent")) {
+    lines.push("  fix: bind an agent token with party init --token <agent-token> --channel <channel>");
+  }
+  if (report.blockers.includes("listener_not_observed")) {
+    lines.push("  fix: start a fresh channel session with party claude <channel>");
+  }
+  return lines;
 }
 
 // Latest release: follow the releases/latest redirect, matching install.sh.

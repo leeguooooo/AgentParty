@@ -952,7 +952,7 @@ export interface CodexAutoWakeSpawnDeps {
   recordPid: (markerPath: string, channel: string, pid: number, now: number) => void;
 }
 
-function defaultCodexAutoWakeDeps(env: NodeJS.ProcessEnv = process.env): CodexAutoWakeSpawnDeps {
+export function defaultCodexAutoWakeDeps(env: NodeJS.ProcessEnv = process.env): CodexAutoWakeSpawnDeps {
   const home = agentpartyHome(env);
   return {
     home,
