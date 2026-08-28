@@ -61,6 +61,8 @@ export const BEHAVIOR_CONTRACT_BODY_LINES: readonly string[] = [
   "",
   "上下文被压缩或丢失后，先重读本文件再行动。",
   "",
+  "- 只用 party 操作被邀请加入的这一个频道：别另建频道、别用第三方或项目自带的频道流程（如 Trellis）。",
+  "- 被 @ 时收到的是一条只含 channel+seq 的指针；正文去频道读。代码改动 / 多步调查交给子 agent，你只在频道里回报结论。",
   "- 只在被 @ 或确有话说时发言，别刷屏；回复带 reply_to 指向所答消息。",
   "- blocked 或需求有歧义时，用 party status 留下频道可见的 waiting 状态和问题，别沉默等待。",
   "- 频道是唯一数据源与共识账本：结论、认领、交接都发进频道，不留在本地。",
@@ -79,10 +81,13 @@ export function mcpServerName(agentName: string): string {
   return `party-${cleaned}-${h.toString(36)}`;
 }
 
-// ── 接入包（#944）：「一段描述 + 一条命令」──────────────────────────────────────
-// 从前 108 行的粘贴稿改成一小段给 AI 读的行为约定 + 两行命令（install + `party join`）。
-// 那 108 行里逐条手工执行的机械步骤（写 config / 注册 MCP / 装 hook / 判重 / 自检…）全部
-// 收进 `party join` 这一条命令里，用户不再需要逐行阅读、逐条粘贴。
+// ── 接入包（#944 → #992）：「一句话 + 一条命令」──────────────────────────────
+// #944 把 108 行粘贴稿压成「三行行为约定 + 两行命令」；#992（epic #987）再压一层：
+// 接入的机械步骤已经全部收进 `party join`，而 `party join` 自己就是分步引导（每一步 check →
+// 过/不过 → 不过给一条修法并停在那一步），所以粘贴稿里不需要再有任何「教它怎么做」的提示词。
+// 只剩：一句话说清「跑这条命令会被引导」+ 一行 token 安全提示 + 一条 `party join … --yes`。
+// 行为约定不再进粘贴稿——完整契约由 `party join` 落成 rules 文件（BEHAVIOR_CONTRACT_BODY_LINES），
+// 频道公告由它在加入时拉取打印。
 //
 // 这份 builder 是 web（AgentJoin / vault 复制）与 cli（party invite）**唯一**的接入包出口——
 // 别再在 web/cli 各自复刻一份（#585 的老坑，两处必然漂移）。
@@ -109,31 +114,34 @@ export interface JoinCommandInput {
 }
 
 /**
- * 行为约定（给 AI 读的一小段注释）。判断标准只有一条：**删掉它，AI 会不会做错事？**
- * 会 → 留；只是解释 → 删。所以只剩三行——每一行都对应一类真实发生过的错误行为：
- *   1) 跑偏去自建频道 / 用第三方频道流程（Trellis 等）——把协作切到别处，别人看不到。
- *   2) 把「只含 channel+seq 的指针」当成正文本身——不去频道读，答非所问。
- *   3) 自己埋头改代码 / 长时间调查——占着会话不回报，该交给子 agent。
- * 完整的、上下文丢失后要重读的那份行为契约由 `party join` 落成 rules 文件（BEHAVIOR_CONTRACT_BODY_LINES），
- * 这里只放「不看就会做错事」的三行。
+ * 那「一句话」。要说清的只有一件事：**跑这条命令，它会分步引导你接入；每一步不通会停下来告诉你怎么修**。
+ * 顺带把「没装 party」这个引导本身兜不住的第 -1 步（命令都不存在，引导跑不起来）用半句话补上——
+ * 它是唯一一个 `party join` 自己无法报出来的失败。带 `#` 前缀：整段贴进 shell 也不会把这句当命令跑。
  */
-export function interactiveJoinContractLines(slug: string): string[] {
-  return [
-    `# 你被邀请加入 #${slug}（AgentParty）。只用 party 操作这一个频道：别另建频道、别用第三方或项目自带的频道流程（如 Trellis）。`,
-    "# 被 @ 时你收到的是一条只含 channel+seq 的指针；正文去频道读，频道是唯一数据源与共识账本。",
-    "# 代码改动 / 多步调查交给子 agent，你只负责在频道里回报结论。",
-  ];
+export function joinPackGuideLine(slug: string): string {
+  return (
+    `# 你被邀请加入 #${slug}（AgentParty）。在你自己的 harness（Claude Code / Codex）里跑下面这一条命令：` +
+    `它会分步引导你接入，每一步不通都会停下来、告诉你怎么修，修完重跑即可。` +
+    `没有 party 命令就先装：curl -fsSL ${INSTALL_SH_RAW_URL} | sh`
+  );
 }
 
 /**
- * 两条要执行的命令：装 CLI（缺失才装）＋ `party join`。
- *
- * - 第 1 行：`command -v party || curl … | sh`——只有没装才装。owner 就分发方式拍板的形态。
- * - 第 2 行：token 走 `AGENTPARTY_TOKEN='…'` 环境变量前缀，**绝不进 argv**（同机 `ps -axww` 看不到，#676）。
- *   `party join` 把 108 行里的 step2–step8 全部做完（写 config / rules、判重、加入即绑定、注册 MCP、
- *   装+批准 hook、报到、收尾自检），跑完自己打印「全部就绪」或「还差第 N 步：<一条命令>」。
+ * 一行安全提示（#676）：token 只走环境变量前缀。改成命令行参数会进 argv——同机 `ps -axww`
+ * 可读、还落 shell history；整段接入包本身就是凭据，别贴到公开的地方。
  */
-export function joinCommandLines(input: JoinCommandInput): string[] {
+export const JOIN_PACK_TOKEN_SAFETY_LINE =
+  "# token 只经 AGENTPARTY_TOKEN 环境变量传给命令：别改成命令行参数传（会进 argv / ps / shell history）；也别把这段贴到公开的地方。";
+
+/**
+ * 那「一条命令」：`AGENTPARTY_TOKEN='…' party join --server … --channel … --as … [--harness h] [--mention x] --yes`。
+ *
+ * - token 走 `AGENTPARTY_TOKEN='…'` 环境变量前缀，**绝不进 argv**（#676）。
+ * - `--yes`：无 TTY 也能跑——引导逐步打印而不是交互问；codex hook 的信任闸走 `party hook install --codex --yes`
+ *   那条非交互直批（只翻我们自己那两条，绝不 bypass-hook-trust，#943）。
+ * - 不再有单独的 install 行：装 CLI 折进 joinPackGuideLine 那半句，粘贴稿只剩这一条可执行命令（#992）。
+ */
+export function joinCommandLine(input: JoinCommandInput): string {
   const { slug, server, token, agentName } = input;
   const harness = input.harness;
   const inviter =
@@ -146,14 +154,12 @@ export function joinCommandLines(input: JoinCommandInput): string[] {
     // other/缺省不带 --harness：那一档正是「还不知道」，交给 `party join` 在目标机上探测（#924）。
     ...(harness !== undefined && harness !== "other" ? [`--harness ${harness}`] : []),
     ...(inviter !== null ? [`--mention ${inviter}`] : []),
+    "--yes",
   ].join(" ");
-  return [
-    `command -v party >/dev/null || curl -fsSL ${INSTALL_SH_RAW_URL} | sh`,
-    `AGENTPARTY_TOKEN='${token}' ${joinArgs}`,
-  ];
+  return `AGENTPARTY_TOKEN='${token}' ${joinArgs}`;
 }
 
-/** 完整可粘贴的接入包：行为约定注释块 + 空行 + 两条命令。web 与 cli 都调这一份。 */
+/** 完整可粘贴的接入包：一句话 + 一行安全提示 + 一条命令。web 与 cli 都调这一份。 */
 export function buildInteractiveJoinPack(input: JoinCommandInput): string {
-  return [...interactiveJoinContractLines(input.slug), "", ...joinCommandLines(input)].join("\n");
+  return [joinPackGuideLine(input.slug), JOIN_PACK_TOKEN_SAFETY_LINE, joinCommandLine(input)].join("\n");
 }

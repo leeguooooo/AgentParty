@@ -81,12 +81,12 @@ export interface FullJoinPackInput {
 // 不再写死 claude——#749：AgentJoin 曾无条件 --runner claude，用户选 codex 被静默忽略。
 export const DEFAULT_JOIN_RUNNER: DesktopAgentRunner = "codex";
 
-// #944：完整接入包从 108 行粘贴稿压成「一小段行为约定 + 两行命令」（install + `party join`）。
-// 从前那 108 行里逐条手工执行的机械步骤（写 config/rules、判重#907、加入即绑定#924、注册 MCP#898、
-// 装+批准 codex hook#901/#942/#943、报到#597、收尾自检#926）全部收进 `party join` 这一条命令，
-// 跑完自己打印「全部就绪 / 还差第 N 步」。builder 与 cli（party invite）同源（shared/onboarding），
-// 别再在 web/cli 各写一份（#585）。charter 不再快照进包——`party join` 里的 init 会在加入时拉取并
-// 终端安全地打印最新公告（比粘贴时的快照更新鲜，也消掉了 charter 注入面）。
+// #944 把 108 行粘贴稿压成「三行约定 + 两行命令」；#992（epic #987）再压成「一句话 + 一条命令」：
+// 机械步骤（写 config/rules、判重#907、绑定#924、注册 MCP#898、装+批准 codex hook#901/#942/#943、
+// 报到#597、自检#926）早已全收进 `party join`，而 `party join` 本身就是分步引导（每步 check →
+// 过/不过 → 不过给一条修法并停在那一步），粘贴稿里不再需要任何提示词。builder 与 cli（party invite）
+// 同源（shared/onboarding），别再在 web/cli 各写一份（#585）。charter 不再快照进包——`party join`
+// 加入时拉取并终端安全地打印最新公告（比粘贴时的快照更新鲜，也消掉了 charter 注入面）。
 export function buildFullJoinPack(input: FullJoinPackInput): string {
   return buildInteractiveJoinPack({
     slug: input.slug,

@@ -7,15 +7,11 @@ AgentParty 接入包 — Fix Login Bug  · 参与模式 (participate)
 server:   https://party.example
 channel:  fix-login-bug  (standing)
 
-把下面整段发给对方的 agent（Claude Code / Codex）——一小段说明 + 两行命令。
-带 # 的是给它读的行为约定，不带 # 的是要执行的命令；跑完它自己会报「全部就绪」或「还差第 N 步」：
+把下面这段发给对方的 agent（Claude Code / Codex）——一句话 + 一条命令，命令会分步引导它接入：
 
-# 你被邀请加入 #fix-login-bug（AgentParty）。只用 party 操作这一个频道：别另建频道、别用第三方或项目自带的频道流程（如 Trellis）。
-# 被 @ 时你收到的是一条只含 channel+seq 的指针；正文去频道读，频道是唯一数据源与共识账本。
-# 代码改动 / 多步调查交给子 agent，你只负责在频道里回报结论。
-
-command -v party >/dev/null || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
-AGENTPARTY_TOKEN='ap_fix-login-bug-guest_secret' party join --server https://party.example --channel fix-login-bug --as fix-login-bug-guest
+# 你被邀请加入 #fix-login-bug（AgentParty）。在你自己的 harness（Claude Code / Codex）里跑下面这一条命令：它会分步引导你接入，每一步不通都会停下来、告诉你怎么修，修完重跑即可。没有 party 命令就先装：curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh
+# token 只经 AGENTPARTY_TOKEN 环境变量传给命令：别改成命令行参数传（会进 argv / ps / shell history）；也别把这段贴到公开的地方。
+AGENTPARTY_TOKEN='ap_fix-login-bug-guest_secret' party join --server https://party.example --channel fix-login-bug --as fix-login-bug-guest --yes
 
 网页只读围观（无需安装，直接开）：
   https://party.example/c/fix-login-bug?t=ap_fix-login-bug-share_secret

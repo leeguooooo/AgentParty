@@ -105,13 +105,10 @@ describe("party invite", () => {
     // 建频道用刚铸的 guest token
     expect(chanReq.headers.authorization).toBe("Bearer ap_fix-login-bug-guest_secret");
 
-    // #944：接入包从 108 行压成「一段行为约定 + 两行命令」（install + party join）。
-    // 两行命令：装 CLI（缺失才装）＋ party join。token 走 AGENTPARTY_TOKEN 前缀，绝不进 argv（#676）。
+    // #944 压成「三行约定 + 两行命令」，#992 再压成「一句话 + 一条命令」：粘贴稿里唯一可执行的
+    // 一行是 party join … --yes（进入分步引导）。token 走 AGENTPARTY_TOKEN 前缀，绝不进 argv（#676）。
     expect(r.stdout).toContain(
-      "command -v party >/dev/null || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh",
-    );
-    expect(r.stdout).toContain(
-      `AGENTPARTY_TOKEN='ap_fix-login-bug-guest_secret' party join --server ${mock.url} --channel fix-login-bug --as fix-login-bug-guest`,
+      `AGENTPARTY_TOKEN='ap_fix-login-bug-guest_secret' party join --server ${mock.url} --channel fix-login-bug --as fix-login-bug-guest --yes`,
     );
     expect(r.stdout).not.toContain("--token ap_fix-login-bug-guest_secret");
     // 那 108 行里逐条手工执行的机械步骤全部收进 party join——粘贴稿里不再出现它们。
@@ -120,16 +117,15 @@ describe("party invite", () => {
     expect(r.stdout).not.toContain("party hook install");
     expect(r.stdout).not.toContain("export AGENTPARTY_CONFIG");
     expect(r.stdout).not.toContain("party serve");
-    // 行为约定压到三行：折进第一行的作用域守卫（别另建频道 / 别用 Trellis）必须排在 party join 之前。
-    const scopeIndex = r.stdout.indexOf("别另建频道");
+    // #992：install 不再是独立的可执行行（折进那一句话里当兜底），整段提示词（三行行为约定）也没了。
+    expect(r.stdout).not.toMatch(/^command -v party/m);
+    expect(r.stdout).not.toContain("Trellis");
+    // 那一句话说清了「分步引导 / 不通停下来告诉你怎么修」，且排在 party join 之前。
+    const guideIndex = r.stdout.indexOf("分步引导");
     const joinIndex = r.stdout.indexOf("party join --server");
-    expect(scopeIndex).toBeGreaterThan(-1);
-    expect(scopeIndex).toBeLessThan(joinIndex);
-    expect(r.stdout).toContain("Trellis");
-    // 真正影响 AI 行为的三行都在：唯一数据源 / 指针不含正文 / 改动交给子 agent。
-    expect(r.stdout).toContain("频道是唯一数据源");
-    expect(r.stdout).toContain("只含 channel+seq 的指针");
-    expect(r.stdout).toContain("交给子 agent");
+    expect(guideIndex).toBeGreaterThan(-1);
+    expect(guideIndex).toBeLessThan(joinIndex);
+    expect(r.stdout).toContain("告诉你怎么修");
     // 网页只读围观链接仍在。
     expect(r.stdout).toContain(`${mock.url}/c/fix-login-bug?t=ap_fix-login-bug-share_secret`);
     // 输出快照（归一化随机端口）——一眼看出从 108 行变成了几行。
@@ -162,10 +158,10 @@ describe("party invite", () => {
     expect(r.code).toBe(0);
     // 管理员可控文本绝不出现在粘贴稿里（连注释化的快照都不放了）。
     expect(r.stdout).not.toContain("MODERATOR CONTROLLED CHARTER");
-    // 作用域守卫（别另建频道）仍排在 party join 之前。
-    const guardIndex = r.stdout.indexOf("别另建频道");
-    expect(guardIndex).toBeGreaterThan(-1);
-    expect(guardIndex).toBeLessThan(r.stdout.indexOf("party join "));
+    // #992：那一句话（分步引导）仍排在 party join 之前。
+    const guideIndex = r.stdout.indexOf("分步引导");
+    expect(guideIndex).toBeGreaterThan(-1);
+    expect(guideIndex).toBeLessThan(r.stdout.indexOf("party join "));
   });
 
   test("--checkin-mention 会把邀请人传给 party join --mention（报到时 @ 他）", async () => {
@@ -176,7 +172,7 @@ describe("party invite", () => {
     expect(r.code).toBe(0);
     // 报到 @ 现在收进 party join：跑起来时它自己发报到并 @ 邀请人。
     expect(r.stdout).toContain(
-      `AGENTPARTY_TOKEN='ap_fix-login-bug-guest_secret' party join --server ${mock.url} --channel fix-login-bug --as fix-login-bug-guest --mention leo`,
+      `AGENTPARTY_TOKEN='ap_fix-login-bug-guest_secret' party join --server ${mock.url} --channel fix-login-bug --as fix-login-bug-guest --mention leo --yes`,
     );
   });
 
@@ -213,7 +209,7 @@ describe("party invite", () => {
     });
     expect(r.stdout).toContain("(temp · party)");
     expect(r.stdout).toContain(
-      `AGENTPARTY_TOKEN='ap_bob_secret' party join --server ${mock.url} --channel hotfix --as bob`,
+      `AGENTPARTY_TOKEN='ap_bob_secret' party join --server ${mock.url} --channel hotfix --as bob --yes`,
     );
     expect(r.stdout).not.toContain("--token ap_bob_secret");
   });

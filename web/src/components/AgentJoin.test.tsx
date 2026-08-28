@@ -149,9 +149,9 @@ function open(r: ReactTestRenderer) {
 }
 
 describe("AgentJoin dismiss behavior", () => {
-  // #944：作用域守卫从整段英文说明压成行为约定第一行（别另建频道 / 别用 Trellis），排在 party join 之前；
+  // #992：粘贴稿只剩「一句话（分步引导）+ 一条命令」，那句话排在 party join 之前；
   // charter 不再快照进包（改由 party join 加入时拉取），所以管理员可控文本绝不出现在粘贴稿里。
-  test("scope-guard contract line precedes the party join command; moderator charter is not baked into the pack", async () => {
+  test("guide sentence precedes the party join command; moderator charter is not baked into the pack", async () => {
     const r = render(undefined, {
       charter: "MODERATOR CONTROLLED CHARTER",
       charter_rev: 1,
@@ -166,12 +166,12 @@ describe("AgentJoin dismiss behavior", () => {
     });
 
     const command = savedAgents[0]!.command;
-    expect(command).toContain("别另建频道");
-    expect(command).toContain("Trellis");
+    expect(command).toContain("分步引导");
+    expect(command).toContain("告诉你怎么修");
     // 管理员可控文本绝不进粘贴稿（连注释化快照都不放了）。
     expect(command).not.toContain("MODERATOR CONTROLLED CHARTER");
-    // 作用域守卫排在 party join 命令之前。
-    expect(command.indexOf("别另建频道")).toBeLessThan(command.indexOf("party join "));
+    // 那一句话排在 party join 命令之前。
+    expect(command.indexOf("分步引导")).toBeLessThan(command.indexOf("party join "));
   });
 
   test("Escape closes the compose dialog, reports controlled state, and removes its listener", () => {
@@ -220,9 +220,9 @@ describe("AgentJoin dismiss behavior", () => {
     expect(input.props.value).toBe("leo-demo");
   });
 
-  // #944：那些逐轮待命/确认路由的长篇指引全部收进 `party join`（跑起来它自己做 + 落成 rules 文件）。
-  // 粘贴稿里只留三行真正影响 AI 行为的约定——删掉哪一行 AI 就会做错事。
-  test("join pack keeps only the 3 behavior-contract lines that change what the agent does", async () => {
+  // #992：粘贴稿 = 一句话 + 一条命令。行为约定不再进粘贴稿（`party join` 落成 rules 文件），
+  // 逐轮待命/确认路由的长篇指引更早就收进了 `party join`（#944）。
+  test("join pack is one guide sentence plus exactly one party join command — no prompt block", async () => {
     const r = render();
     open(r);
     await act(async () => {
@@ -230,16 +230,17 @@ describe("AgentJoin dismiss behavior", () => {
     });
 
     const command = savedAgents[0]!.command;
-    // 1) 别跑偏去自建频道 / 用第三方频道流程。
-    expect(command).toContain("别另建频道");
-    // 2) 指针不含正文、频道是唯一数据源。
-    expect(command).toContain("只含 channel+seq 的指针");
-    expect(command).toContain("频道是唯一数据源");
-    // 3) 改动交给子 agent。
-    expect(command).toContain("交给子 agent");
-    // 长篇待命/确认路由指引已从粘贴稿移除（收进 party join）。
+    const lines = command.split("\n").filter((l) => l.trim() !== "");
+    expect(lines.length).toBeLessThanOrEqual(3);
+    const executable = lines.filter((l) => !l.startsWith("#"));
+    expect(executable).toHaveLength(1);
+    expect(executable[0]).toMatch(/^AGENTPARTY_TOKEN='ap_created' party join --server \S+ --channel \S+ --as \S+( --mention \S+)? --yes$/);
+    // 三行行为约定 / 长篇待命指引都不在粘贴稿里了。
+    expect(command).not.toContain("Trellis");
+    expect(command).not.toContain("交给子 agent");
     expect(command).not.toContain("re-anchor");
     expect(command).not.toContain("watch --once");
+    expect(command).not.toContain("party init");
   });
 });
 
@@ -312,14 +313,15 @@ describe("AgentJoin 无人值守值守预设 (#612)", () => {
     expect(command).not.toMatch(/^MODERATOR CONTROLLED CHARTER$/m);
   });
 
-  test("默认仍是交互接入：不动选择器时产物是两行 party join 接入包（#944）", async () => {
+  test("默认仍是交互接入：不动选择器时产物是「一句话 + 一条 party join」接入包（#992）", async () => {
     const r = render();
     open(r);
     await generate(r);
     const saved = savedAgents[0]! as { command: string; mode?: string };
     expect(saved.mode).toBe("interactive");
-    // 交互接入＝两行命令（install + party join），不是 unattended 的 serve 运维脚本。
+    // 交互接入＝一条 party join … --yes（进入分步引导），不是 unattended 的 serve 运维脚本。
     expect(saved.command).toContain("party join --server");
+    expect(saved.command).toMatch(/ --yes$/);
     expect(saved.command).not.toContain("--runner claude");
     expect(saved.command).not.toContain("party serve");
   });
