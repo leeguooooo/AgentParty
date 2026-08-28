@@ -282,10 +282,12 @@ export function wakeGuidanceOf(r: Row, channel: string): WakeGuidance | undefine
   const found = wakeHarnessOf(r);
   if (found === undefined) return undefined;
   const ch = sanitizeSingleLine(channel);
+  // #961：claude 档给两条——install 对已装的只回 already installed、**永远不会升级**，而版本落后于
+  // CLI 时插件的 SessionStart 唤醒根本没布上。所以 install 之后必须跟一步 update。
   const remedy =
     found.harness === "codex"
       ? [`party hook install --codex`, `party bridge codex ${ch}`]
-      : [`claude plugin install agentparty@agentparty`];
+      : [`claude plugin install agentparty@agentparty`, `claude plugin update agentparty@agentparty`];
   return { reason: "no_wake_layer", harness: found.harness, harness_source: found.source, remedy };
 }
 
@@ -296,7 +298,8 @@ export function wakeGuidanceNote(g: WakeGuidance | undefined): string {
   if (g.harness === "codex") {
     return ` · ↳ fix: a codex session has no per-session inbox — give it the Stop hook so the @ surfaces in the session you are looking at: run ${g.remedy[0]} (then it picks pending @s up at the end of a turn), or ${g.remedy[1]} to hold its app-server connection right now`;
   }
-  return ` · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed — run ${g.remedy[0]} and rejoin the channel`;
+  // 已装旧版时第一条只会回 already installed（不升级），所以第二条 update 不是可选项。
+  return ` · ↳ fix: an interactive Claude Code session is wakeable once the agentparty plugin is installed and matches the party CLI version — run ${g.remedy[0]}, then ${g.remedy[1] ?? "claude plugin update agentparty@agentparty"} (install never upgrades an already-installed plugin), restart Claude Code and rejoin the channel`;
 }
 
 /**
