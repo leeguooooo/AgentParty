@@ -19,6 +19,7 @@ commands:
   spawn     <worker> --channel-scope slug [--ttl 2h] create a short-lived worker from the front agent
   init      --server URL --token T [--channel C]   write config, bind channel (create if missing)
   join      --server URL --channel SLUG --as NAME [--harness H] [--yes]   AGENTPARTY_TOKEN=… one command: config+rules, dedupe, bind, register MCP, install+approve codex hook, check in, self-check (#944)
+  recover   <channel> [--harness H] [--yes]          recover/reconnect an identity this dir already joined: find the binding, verify the token, align versions, re-arm the session, verify (#991)
   up        [channel-url|slug] [--runner claude|codex|codex-sdk]   one idempotent command: token → bind → resident serve (self-heal, #837)
   send      <text|-> [--channel C] [--mention name]... [--reply-to seq]
   complete  <text|-> --kickoff-seq seq [--channel C] [--replies n] [--timeout] [--issue n]... [--pr n]...
@@ -101,6 +102,8 @@ export async function main(argv: string[]): Promise<number> {
       return (await import("./commands/init")).run(rest);
     case "join":
       return (await import("./commands/join")).run(rest);
+    case "recover":
+      return (await import("./commands/recover")).run(rest);
     case "up":
       return (await import("./commands/up")).run(rest);
     case "send":
