@@ -811,6 +811,14 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     // 必须排在可复制命令**之前**：无人值守是一段长脚本，警告放后面会被推出视野。
     const json = JSON.stringify(s.r.toJSON());
     expect(json.indexOf("agent-join-tokensafety")).toBeLessThan(json.indexOf('"data-cmd":"join"'));
+    // 而且要看得见、听得见：黄底 banner + 有 role/label 让读屏播报，不是 12px 暗色小字。
+    const banner = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-tokenbanner"));
+    expect(String(banner.props.className)).toContain("banner--yellow");
+    expect(banner.props.role).toBe("note");
+    expect(typeof banner.props["aria-label"]).toBe("string");
+    // 「只出现这一次」并进同一条 banner，不再单独挂在命令之后。
+    expect(banner.findAll((n) => String(n.props.className ?? "").includes("agent-join-warn"))).toHaveLength(1);
+    expect(json.indexOf("agent-join-warn")).toBeLessThan(json.indexOf('"data-cmd":"join"'));
   });
 
   test("recover 不带 token ⇒ 不渲染那条安全警告（没有明文可泄露）", () => {

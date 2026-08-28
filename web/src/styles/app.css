@@ -5824,6 +5824,11 @@ button.org-person-name {
 .agent-join-regen-btn { font-size: 13px; }
 .agent-join-resume { font-size: 12.5px; }
 .agent-join-copyerr { margin: 0; }
+/* token 安全提醒：安全信息不做成暗色小字（读起来是悄悄话、读屏也不播报），
+   与「只出现这一次」并成一条黄底 banner，排在可复制命令之前（#1005 codex review 连抓两轮）。 */
+.agent-join-tokenbanner { display: flex; flex-direction: column; gap: 6px; }
+.agent-join-tokenbanner > p { margin: 0; }
+.agent-join-tokensafety { font-weight: 700; }
 .agent-join-harness,
 .agent-join-runner { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--t-dim); }
 .agent-join-runner-select { font-size: 12px; padding: 3px 6px; }

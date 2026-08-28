@@ -845,7 +845,10 @@ export function AgentJoin({
                     - 排在命令块**之前**——无人值守是一段长脚本，放在后面会被推出视野，等于没警告
                     （codex stop-time review on fc1aa5c / 2518fbe）。recover 不带 token，不渲染。 */}
                 {session.token !== null && (
-                  <p className="agent-join-hint agent-join-tokensafety">{t("AgentJoin.step2.tokenSafety")}</p>
+                  <div className="banner banner--yellow agent-join-tokenbanner" role="note" aria-label={t("AgentJoin.step2.tokenBannerLabel")}>
+                    <p className="agent-join-tokensafety">{t("AgentJoin.step2.tokenSafety")}</p>
+                    <p className="agent-join-warn">{t("AgentJoin.tokenWarn")}</p>
+                  </div>
                 )}
                 {session.recover ? (
                   <>
@@ -947,11 +950,6 @@ export function AgentJoin({
                 {copyErr && (
                   <p className="banner banner--red agent-join-copyerr" role="alert">
                     {t("AgentJoin.errCopy")}
-                  </p>
-                )}
-                {session.token !== null && (
-                  <p className="banner banner--yellow agent-join-warn" role="status">
-                    {t("AgentJoin.tokenWarn")}
                   </p>
                 )}
               </StepCard>
