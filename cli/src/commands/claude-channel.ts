@@ -15,6 +15,7 @@ import {
   type DeliveryRecoverFrame,
   type DeliveryRecoveryResultFrame,
   type DirectedDelivery,
+  isWakeVerifyFrame,
   mentionMatchKey,
   type MsgFrame,
   type PresenceEntry,
@@ -651,6 +652,19 @@ export function dormantAnnounceIsReplayFrame(frame: unknown): boolean {
   return (frame as { replay?: unknown } | null)?.replay === true;
 }
 
+/** #990：这条 msg 帧是不是接入验证帧（自 @ 的唯一放行例外）。字段缺/型别不对一律 false。 */
+export function dormantAnnounceIsWakeVerifyFrame(frame: unknown): boolean {
+  const f = frame as Partial<Pick<MsgFrame, "kind" | "body" | "mentions" | "sender">> | null;
+  if (f === null || typeof f !== "object") return false;
+  if (typeof f.sender?.name !== "string" || (f.kind !== "message" && f.kind !== "status")) return false;
+  return isWakeVerifyFrame({
+    kind: f.kind,
+    body: typeof f.body === "string" ? f.body : null,
+    mentions: Array.isArray(f.mentions) ? f.mentions.filter((m): m is string => typeof m === "string") : null,
+    sender: { name: f.sender.name },
+  });
+}
+
 /** 注入去重表容量上限：只留最近 N 个 seq，防长跑进程内存无界。 */
 export const DORMANT_ANNOUNCE_SEEN_LIMIT = 512;
 
@@ -839,7 +853,8 @@ export async function runDormantClaudeSessionAnnounce(
         if (!dormantAnnounceMentionHit(mentions, selfName)) return;
         // #963：发信人就是我这个身份——那是对话里提到自己（「@leo-server 这次醒了」），不是召唤。
         // 尤其带 reply_to 的回帖。同身份 13 个 runtime 各醒一次就是这么来的第二、三轮。
-        if (selfAuthoredMention(sender?.name, selfName)) return;
+        // #990：接入验证帧（`[wake-verify]` + 只 @ 自己）是唯一例外——它就是自己对自己的显式召唤。
+        if (selfAuthoredMention(sender?.name, selfName) && !dormantAnnounceIsWakeVerifyFrame(frame)) return;
         if (injectedSeqs.has(seq)) return;
         // #963：本机已有 live bridge / serve 持锁 ⇒ 这条 @ 由它经 directed delivery 权威处理（服务端
         // 只让一个 adapter 认领），蛰伏腿不再叠加一次注入。锁没人持才轮到蛰伏腿之间抢认领。
@@ -2604,10 +2619,12 @@ export class ClaudeChannelDeliveryBridge {
       // Server-side membership and target routing are the trust boundary. The
       // adapter additionally fails closed on a mismatched target/state and
       // never lets the current session wake itself.
+      // #990：接入验证帧（只 @ 自己）是唯一放行的自发 delivery——服务端为它建了 directed delivery，
+      // 这里若还按 #963 丢掉，验证只会卡在 claimed 直到租约过期。
       if (
         delivery.target_name !== this.self ||
         delivery.state !== "claimed" ||
-        message.sender.name === this.self ||
+        (message.sender.name === this.self && !isWakeVerifyFrame(message)) ||
         this.settledDeliveryIds.has(delivery.id)
       ) {
         return;
@@ -2625,7 +2642,7 @@ export class ClaudeChannelDeliveryBridge {
     if (
       !fresh ||
       !mentioned ||
-      message.sender.name === this.self ||
+      (message.sender.name === this.self && !isWakeVerifyFrame(message)) ||
       this.seenPlainSeqs.has(message.seq)
     ) {
       if (fresh) this.options.connection.ack(message.seq);
