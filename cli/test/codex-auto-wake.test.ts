@@ -554,16 +554,48 @@ describe("pins #959：一次性 codex 不拉唤醒层（启动前判定，不是
     expect(d.lines.join("\n")).toContain("委托拉起");
   });
 
-  test("探测不出形态（unknown）⇒ 沿用既有行为，照拉", () => {
-    const d = deps({ sessionKind: () => ({ kind: "unknown", detail: "ps 挂了" }) });
-    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "start", channel: "dev" });
-    expect(d.calls).toHaveLength(1);
+  test("#976：探测不出形态（unknown）⇒ 不拉，记 skip(session-kind-unknown)，身份也不去解析", () => {
+    let identityLookups = 0;
+    const d = deps({
+      sessionKind: () => ({ kind: "unknown", detail: "进程表里找不到 hook 的父进程 50439" }),
+      readConfigAt: () => { identityLookups += 1; return { server: "https://party.example.com", token: "agent-token" }; },
+    });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "skip", reason: "session-kind-unknown" });
+    expect(d.calls).toHaveLength(0);
+    expect(identityLookups).toBe(0);
+    const log = d.lines.join("\n");
+    expect(log).toContain("skip(session-kind-unknown)");
+    expect(log).toContain("kind=unknown detail=进程表里找不到 hook 的父进程 50439");
   });
 
-  test("交互式 codex ⇒ 照拉（人在终端里等着被 @）", () => {
-    const d = deps({ sessionKind: () => ({ kind: "interactive", detail: "codex TUI" }) });
+  test("#976：纯决策层——unknown 在身份拒绝 / 无 token 之前就拦下", () => {
+    expect(decideCodexAutoWake({
+      mode: "serve", channel: "dev", cwd: "/tmp/p", serveHolderPid: null, hasAgentToken: true,
+      sessionKind: { kind: "unknown", detail: "ps 挂了" },
+      identityRefusal: { reason: "harness-mismatch", detail: "x" },
+    })).toMatchObject({ action: "skip", reason: "session-kind-unknown" });
+  });
+
+  test("交互式 codex ⇒ 照拉（人在终端里等着被 @）；started 行带 kind/detail", () => {
+    const d = deps({ sessionKind: () => ({ kind: "interactive", detail: "codex TUI（pid 7）" }) });
     expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "start" });
     expect(d.calls).toHaveLength(1);
+    const started = d.lines.find((line) => line.startsWith("started:"))!;
+    expect(started).toContain("kind=interactive detail=codex TUI（pid 7）");
+  });
+
+  test("#976：每条决策日志都带探测结论——skip(non-interactive) 也写 kind=/detail=", () => {
+    const d = deps({ sessionKind: () => ({ kind: "non-interactive", detail: "rollout 头：originator=Claude Code source=vscode——被 Claude 委托的 codex，跑完即走" }) });
+    maybeStartCodexAutoWake(sessionStart(), d);
+    expect(d.lines[0]).toMatch(/^skip\(non-interactive\): .* kind=non-interactive detail=rollout 头：originator=Claude Code/);
+  });
+
+  test("#976：没探测（没绑频道时探测器根本不跑）⇒ 日志写 kind=not-probed，不假装探过", () => {
+    let probed = 0;
+    const d = deps({ channelAt: () => null, sessionKind: () => { probed += 1; return { kind: "interactive", detail: "x" }; } });
+    expect(maybeStartCodexAutoWake(sessionStart(), d)).toMatchObject({ action: "skip", reason: "no-channel" });
+    expect(probed).toBe(0);
+    expect(d.lines[0]).toContain("kind=not-probed");
   });
 
   test("显式关掉时连形态都不探测（disabled 仍是第一道门，不刷日志）", () => {
@@ -580,6 +612,21 @@ describe("pins #959：一次性 codex 不拉唤醒层（启动前判定，不是
     expect(typeof real.sessionKind).toBe("function");
     // pid 1 不合法 ⇒ unknown：探测器真的被接上了，且失败时不误判。
     expect(real.sessionKind!().kind).toBe("unknown");
+  });
+
+  test("#976 真实接线：session_id 定位到的 rollout 头说 originator=Claude Code ⇒ 非交互式，连 pid 1 那条 unknown 都不走", () => {
+    const codexHome = join(home, "codex-home");
+    const day = join(codexHome, "sessions", "2026", "08", "28");
+    mkdirSync(day, { recursive: true });
+    const sid = "01a046e8-89f6-7ba2-a792-4d0342522e7f";
+    writeFileSync(join(day, `rollout-2026-08-28T14-47-19-${sid}.jsonl`), `${JSON.stringify({
+      timestamp: "2026-08-28T05:47:19.944Z", type: "session_meta",
+      payload: { session_id: sid, id: sid, cwd: "/tmp/project", originator: "Claude Code", cli_version: "0.149.1", source: "vscode", base_instructions: "<omitted>" },
+    })}\n`);
+    const real = defaultCodexAutoWakeDeps({ AGENTPARTY_HOME: home, CODEX_HOME: codexHome }, 1, sid);
+    const probe = real.sessionKind!();
+    expect(probe.kind).toBe("non-interactive");
+    expect(probe.detail).toContain("rollout");
   });
 });
 
