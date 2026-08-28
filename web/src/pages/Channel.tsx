@@ -5,7 +5,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { buildHostBoard, type Attachment, type ChannelSquad, type CollaborationRole, type MsgFrame, type ParticipantRemovedFrame, type PresenceEntry, type PublicDirectedDelivery, type ReadCursor, type SearchHit, type Sender, type TaskAssigneeKind, type TaskRecord, type TaskState, type TaskSummary, type WakeDelivery } from "@agentparty/shared";
 import { AgentDetailPanel } from "../components/AgentDetailModal";
 import { TeamTabs } from "../components/TeamTabs";
-import { AgentJoin } from "../components/AgentJoin";
+import { AgentJoin, type JoinGuideSession } from "../components/AgentJoin";
 import { AgentTokens } from "../components/AgentTokens";
 import { VisibilityToggle } from "../components/VisibilityToggle";
 import { JoinLink } from "../components/JoinLink";
@@ -3264,6 +3264,8 @@ export function ChannelPage({
   const [seenCharterRev, setSeenCharterRev] = useState(() => readSeenCharterRev(slug));
   const [activePanel, setActivePanel] = useState<ChannelPanel | null>(null);
   const [activeAdminSurface, setActiveAdminSurface] = useState<AdminSurface | null>(null);
+  // #1009：「接入凭证」面板点「接入引导 / 重新接上」交过来的一次引导会话——转给 AgentJoin 打开四步 stepper。
+  const [joinGuideSession, setJoinGuideSession] = useState<JoinGuideSession | null>(null);
   const [agentManagerTarget, setAgentManagerTarget] = useState<string | null>(null);
   const [localLoopGuardEnabled, setLocalLoopGuardEnabled] = useState(loopGuardEnabled);
   const [localLoopGuardLimit, setLocalLoopGuardLimit] = useState(loopGuardLimit === null ? "" : String(loopGuardLimit));
@@ -4483,6 +4485,17 @@ export function ChannelPage({
     setMemberDetailRoute(null);
     setActiveAdminSurface(open ? surface : null);
     if (!open || surface !== "agentTokens") setAgentManagerTarget(null);
+    // 引导会话只属于当前打开的 stepper：关掉 / 切走都要丢掉，否则下次打开会自己弹回上一次的引导。
+    if (!open || surface !== "agentJoin") setJoinGuideSession(null);
+  }, []);
+
+  // 「接入凭证」面板 → 四步引导：先记下 session，再把面板切到 agentJoin（两个面板不打架）。
+  const openJoinGuide = useCallback((session: JoinGuideSession) => {
+    setActivePanel(null);
+    setMemberDetailRoute(null);
+    setAgentManagerTarget(null);
+    setJoinGuideSession(session);
+    setActiveAdminSurface("agentJoin");
   }, []);
 
   const openTeamMember = useCallback((name: string) => {
@@ -5747,6 +5760,7 @@ export function ChannelPage({
                     accountKey={accountKey}
                     active={activeAdminSurface === "agentJoin"}
                     onActiveChange={(open) => setAdminSurface("agentJoin", open)}
+                    guideSession={joinGuideSession}
                   />
                   <AgentTokens
                     slug={slug}
@@ -5758,6 +5772,8 @@ export function ChannelPage({
                     active={activeAdminSurface === "agentTokens"}
                     onActiveChange={(open) => setAdminSurface("agentTokens", open)}
                     focusAgentName={agentManagerTarget}
+                    onGuide={openJoinGuide}
+                    onlineNames={memberOnlineNames}
                   />
                 </div>
               )}

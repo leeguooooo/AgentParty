@@ -31,7 +31,14 @@ import { forbiddenText } from "../lib/forbidden";
 import { desktopAgentAdapter, type DesktopAgentAdapter, type DesktopAgentRunner } from "../lib/desktopAgent";
 import { isDesktopRuntime, pickDirectory as pickDirectoryDefault } from "../lib/desktopRuntime";
 import { LocalAgentsOverview } from "./LocalAgentsOverview";
-import { buildJoinPack, guessJoinPackHarness, type JoinPackHarness, type JoinPackMode } from "../lib/joinPack";
+import {
+  buildJoinPack,
+  buildStepperCommand,
+  guessJoinPackHarness,
+  type JoinPackHarness,
+  type JoinPackMode,
+} from "../lib/joinPack";
+import type { JoinGuideSession } from "./AgentJoin";
 import { useT } from "../i18n/useT";
 import { SectionedDialog, type SectionedDialogSection } from "./SectionedDialog";
 import "../i18n/strings/AgentTokens";
@@ -47,6 +54,16 @@ interface Props {
   active?: boolean;
   onActiveChange?(open: boolean): void;
   focusAgentName?: string | null;
+  /**
+   * #1009：点「接入引导 / 重新接上」时把一次引导会话交给频道页，由它转给 AgentJoin 的四步 stepper。
+   * 不传则退回旧行为（主按钮仍是「复制接入包」）。
+   */
+  onGuide?(session: JoinGuideSession): void;
+  /**
+   * 在线名单（频道页的 presence 快照）。ChannelAgentInfo 本身没有在线字段，所以离线判定靠这份；
+   * 不传＝无从判断，一律按在线处理（不会误显「重新接上」）。
+   */
+  onlineNames?: ReadonlySet<string>;
   // 转为常驻（launchd）注入点——测试用；默认走真实桌面适配器 / 目录选择器 / mac 桌面探测。
   dutyAdapter?: Pick<DesktopAgentAdapter, "dutyAdopt">;
   pickDirectory?: (title?: string) => Promise<string | null>;
@@ -88,6 +105,8 @@ export function AgentTokens({
   active,
   onActiveChange,
   focusAgentName = null,
+  onGuide,
+  onlineNames,
   dutyAdapter = desktopAgentAdapter,
   pickDirectory = pickDirectoryDefault,
   canMakeResident = isDesktopRuntime() && /mac/i.test(globalThis.navigator?.userAgent ?? ""),
@@ -316,6 +335,42 @@ export function AgentTokens({
     });
   }
 
+  // #1009：第 ② 步只展示**一条**命令（install 已经是第 ① 步）——与「＋ 让 agent 加入」同一个 builder。
+  function stepperCommandFor(record: { name: string; token: string; mode?: JoinPackMode; runner?: DesktopAgentRunner; harness?: JoinPackHarness }): string {
+    return buildStepperCommand(record.mode ?? "interactive", {
+      slug,
+      agentName: record.name,
+      agentToken: record.token,
+      server: apiOrigin(),
+      inviterName,
+      charter,
+      runner: record.runner,
+      harness: isInteractivePack(record) ? packHarnessFor(record) : record.harness,
+      t,
+    });
+  }
+
+  // 离线＝频道页给了在线名单、而这个身份不在里面。没给名单就当在线（宁可不显示「重新接上」，也不误报）。
+  function isOffline(name: string): boolean {
+    return onlineNames !== undefined && !onlineNames.has(name);
+  }
+
+  // 有明文凭证时的主行动：在线 → 带 token 的接入引导；离线 → recover 形态（② = party recover <chan>，不含 token）。
+  function guideFromSaved(record: AgentTokenRecord, opts?: { forceJoin?: boolean }) {
+    if (!onGuide) return;
+    // 刚重铸出新 token 的那次必须走接入形态：recover 不带 token，就白重铸了。
+    const recover = opts?.forceJoin === true ? false : isOffline(record.name);
+    onGuide({
+      name: record.name,
+      command: recover ? `party recover ${slug}` : stepperCommandFor(record),
+      mode: record.mode ?? "interactive",
+      harness: packHarnessFor(record),
+      runner: record.runner ?? "codex",
+      recover,
+      token: recover ? null : record.token,
+    });
+  }
+
   async function copy(name: string, kind: "token" | "command", text: string) {
     const ok = await copyText(text);
     if (!ok) {
@@ -390,6 +445,9 @@ export function AgentTokens({
     try {
       await regenerateAndSaveToken(name);
       await refreshAgents();
+      // #1009：重铸完直接进四步引导，② 就是含新 token 的那条命令——不再「生成完就没下文」。
+      const saved = findSavedAgentToken(accountKey, slug, name);
+      if (saved) guideFromSaved(saved, { forceJoin: true });
     } catch (err) {
       if (err instanceof AuthError) onAuthFailed(err.message);
       else if (err instanceof ForbiddenError) setAgentError(t("AgentTokens.errRotateForbidden"));
@@ -726,9 +784,20 @@ export function AgentTokens({
                       </div>
                     )}
                     <div className="agenttokens-actions agenttokens-pack-actions">
+                      {/* #1009：主行动＝打开同一个四步引导（复制降级为次要动作）。
+                          没接 onGuide（旧调用方 / 单测）时退回原来的「复制接入包」为主。 */}
+                      {onGuide && (
+                        <button
+                          type="button"
+                          className="d-btn d-btn--primary agenttokens-guide"
+                          onClick={() => guideFromSaved(selectedAgentSaved)}
+                        >
+                          {isOffline(selectedAgent.name) ? t("AgentTokens.guideReconnect") : t("AgentTokens.guide")}
+                        </button>
+                      )}
                       <button
                         type="button"
-                        className="d-btn d-btn--primary"
+                        className={onGuide ? "d-btn" : "d-btn d-btn--primary"}
                         onClick={() => copy(selectedAgent.name, "command", freshCommand(selectedAgentSaved))}
                       >
                         {copied === `${selectedAgent.name}:command`
@@ -745,6 +814,11 @@ export function AgentTokens({
                           : t("AgentTokens.copyToken")}
                       </button>
                     </div>
+                    {onGuide && (
+                      <p className="agenttokens-pack-harness-hint t-mono">
+                        {isOffline(selectedAgent.name) ? t("AgentTokens.guideOfflineHint") : t("AgentTokens.guideHint")}
+                      </p>
+                    )}
                   </section>
                 ) : (
                   <section className="agentmanager-detail-section agentmanager-callout">

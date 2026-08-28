@@ -886,4 +886,52 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     expect(cmd).not.toContain("party join");
     expect(cmd).not.toContain("AGENTPARTY_TOKEN");
   });
+
+  // #1009：「接入凭证」面板的「接入引导 / 重新接上」经频道页转过来的一次会话——同一个 stepper。
+  function joinCmd(r: ReactTestRenderer): string {
+    return String(
+      r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
+    );
+  }
+
+  test("guideSession 打开：② 就是面板给的那条命令（含 token），并渲染 token 安全警告", () => {
+    const r = render(undefined, null, {
+      guideSession: {
+        name: "helper-bot",
+        command: "AGENTPARTY_TOKEN='ap_x' party join --server https://party.example --channel demo --as helper-bot --yes",
+        mode: "interactive",
+        harness: "codex",
+        runner: "codex",
+        recover: false,
+        token: "ap_x",
+      },
+      presence: [],
+      messages: [],
+      now: () => NOW,
+    });
+    expect(joinCmd(r)).toBe(
+      "AGENTPARTY_TOKEN='ap_x' party join --server https://party.example --channel demo --as helper-bot --yes",
+    );
+    expect(r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-tokensafety"))).toHaveLength(1);
+  });
+
+  test("guideSession 的 recover 形态：② 是 party recover，不含 token、不渲染安全警告", () => {
+    const r = render(undefined, null, {
+      guideSession: {
+        name: "helper-bot",
+        command: "party recover demo",
+        mode: "interactive",
+        harness: "codex",
+        runner: "codex",
+        recover: true,
+        token: null,
+      },
+      presence: [],
+      messages: [],
+      now: () => NOW,
+    });
+    expect(joinCmd(r)).toBe("party recover demo");
+    expect(joinCmd(r)).not.toContain("AGENTPARTY_TOKEN");
+    expect(r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-tokensafety"))).toHaveLength(0);
+  });
 });
