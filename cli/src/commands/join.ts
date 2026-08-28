@@ -691,7 +691,19 @@ export function versionStep(rerun: string = RERUN): Step<JoinCtx> {
         };
       }
       const v = shell.plugin.version ?? RUNNING_VERSION;
-      const plugin = install.updated
+      // 「这一趟到底换没换版本」不能只信 install.updated：那是 sync 自己那一次重读的结论，
+      // 读失败（plugin list 偶发读不出）就退化成「没更新过」，而这里的壳探测又读到了新版本
+      // ⇒ 打出「版本与 CLI 一致」的假绿、且丢掉重开提示（codex stop-time review on b88a58c）。
+      // 壳探测是第 0 步本来就要做的**权威读**，拿它跟进场时的 before 比，才是这一趟的事实。
+      const changedByShell =
+        install.before !== undefined &&
+        install.before !== null &&
+        shell.plugin.version !== undefined &&
+        shell.plugin.version !== install.before;
+      const changed = install.updated || changedByShell;
+      // 装上/换版都意味着当前会话仍挂着旧插件，必须重开——重开标志同样按事实修正。
+      if (changed || install.before === null) ctx.claudePluginRestart = true;
+      const plugin = changed
         ? `claude 插件 ${install.before} → 已更新到 ${v}（需重开会话）`
         : install.before === null
           ? `claude 插件已安装 ${v}（需重开会话）`

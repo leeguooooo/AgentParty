@@ -174,6 +174,25 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(verdict).toContain("重开");
   });
 
+  // codex stop-time review on b88a58c：update 之后那一次重读失败（plugin list 偶发读不出）时，
+  // sync 退化成「没更新过」，而第 0 步的壳探测又读到新版本 ⇒ 再次「版本与 CLI 一致」假绿 + 丢重开。
+  test("update 后重读失败但壳探测读到新版本 ⇒ 仍按事实算「已更新」并提示重开", async () => {
+    mock = startRestMock();
+    const record: string[][] = [];
+    const logs: string[] = [];
+    const code = await runJoin(
+      baseOpts({ harnessFlag: "claude" }),
+      // 2 = 让 sync 的重读与它的重试都读不出来，只剩后面的权威壳探测能读到。
+      deps(record, { installedPluginVersion: "0.2.217", pluginListFailsAfterUpdate: 2 }, logs),
+    );
+    const out = logs.join("\n");
+    expect(code).toBe(0);
+    expect(stepLine(logs, 0)).toContain(`claude 插件 0.2.217 → 已更新到 ${RUNNING_VERSION}`);
+    expect(stepLine(logs, 0)).not.toContain("版本与 CLI 一致");
+    const verdict = logs.find((l) => l.startsWith("✅"));
+    expect(verdict).toContain("重开");
+  });
+
   test("子命令返回非 0 且最终版本仍不对 ⇒ 照实报未装好，不能被「按最终事实判」放过", async () => {
     mock = startRestMock();
     const record: string[][] = [];

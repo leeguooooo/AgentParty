@@ -99,7 +99,9 @@ export function syncClaudePluginToCli(spawn: PluginSpawn, cliVersion: string): C
   // → 结论丢掉「差一次重开」，而第 0 步另一次探测又读到新版本、打出「版本与 CLI 一致」的假绿。
   // 所以：不管退出码，更新之后一律重新读一次，按真实版本分类。
   const ranOk = runClaudePluginUpdate(spawn);
-  const after = installedClaudePluginVersion(spawn);
+  // 重读失败（plugin list 偶发读不出）就再试一次：单次读的结果不该决定「换没换版本」这个事实。
+  // 上层（join 第 0 步）还会拿权威壳探测再兜一次底。
+  const after = installedClaudePluginVersion(spawn) ?? installedClaudePluginVersion(spawn);
   if (after === cliVersion) return { kind: "updated", before, after };
   if (!ranOk) {
     return {

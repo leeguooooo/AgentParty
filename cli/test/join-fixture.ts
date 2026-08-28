@@ -40,9 +40,16 @@ export interface SpawnBehavior {
    * 又打出「版本与 CLI 一致」的假绿。
    */
   pluginUpdateNoisyButWorks?: boolean;
+  /**
+   * update 之后的头 N 次 `plugin list` 读不出来（真机偶发）。用来钉「换没换版本」这个事实
+   * 不能挂在单次重读上——读失败时上层必须用权威壳探测兜底，否则又是「版本与 CLI 一致」的假绿。
+   */
+  pluginListFailsAfterUpdate?: number;
 }
 interface PluginState {
   installed: string | null;
+  /** 还要让多少次 `plugin list` 读失败（pluginListFailsAfterUpdate 用）。 */
+  listFailuresLeft?: number;
 }
 export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: PluginState): JoinDeps["spawn"] {
   return ((cmd: string, args: readonly string[]) => {
@@ -57,6 +64,10 @@ export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: Pl
     }
     if (cmd === "claude" && args[0] === "--version") return { ...base, status: 0, stdout: "2.1.200 (Claude Code)\n" };
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "list") {
+      if ((state.listFailuresLeft ?? 0) > 0) {
+        state.listFailuresLeft = (state.listFailuresLeft ?? 0) - 1;
+        return { ...base, status: 1 };
+      }
       const rows = state.installed === null
         ? []
         : [{ id: PLUGIN, version: state.installed, enabled: true, installPath: "/nowhere/agentparty" }];
@@ -73,6 +84,7 @@ export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: Pl
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "update") {
       if (behavior.failPluginUpdate) return { ...base, status: 1 };
       state.installed = RUNNING_VERSION;
+      if (behavior.pluginListFailsAfterUpdate !== undefined) state.listFailuresLeft = behavior.pluginListFailsAfterUpdate;
       return { ...base, status: behavior.pluginUpdateNoisyButWorks ? 1 : 0 };
     }
     return { ...base, status: 0 };
