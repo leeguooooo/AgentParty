@@ -23,6 +23,7 @@ import {
 import { copyText, saveAgentToken } from "../lib/agentTokenVault";
 import {
   buildJoinPack,
+  buildStepperCommand,
   DEFAULT_JOIN_RUNNER,
   guessJoinPackHarness,
   type JoinPackHarness,
@@ -85,6 +86,8 @@ interface Props {
   /** 轮询/计时参数（测试注入）。 */
   pollIntervalMs?: number;
   tickMs?: number;
+  /** 播报区填字的延迟（ms）：让空的 live region 先落地，再变内容。测试注入 0。 */
+  liveNoteDelayMs?: number;
   verifyTimeoutMs?: number;
   now?: () => number;
 }
@@ -233,6 +236,7 @@ export function AgentJoin({
   recoverName = null,
   pollIntervalMs = 2500,
   tickMs = 1000,
+  liveNoteDelayMs = 150,
   verifyTimeoutMs = 30_000,
   now: nowFn = Date.now,
 }: Props) {
@@ -267,6 +271,13 @@ export function AgentJoin({
   // 关掉未完成的引导后可「继续接入」：只留形态与开始时刻，明文 token 一律不留。
   const [lastSession, setLastSession] = useState<StepperSession | null>(null);
   // 每个身份的引导开始时刻：关掉再打开（含 recover 重开）沿用同一基线，报到证据不会因重开而丢。
+  /**
+   * 常驻的读屏播报区（#1005 codex review 第七轮）。live region 必须**先存在于 DOM**，
+   * 之后内容变化才会被播报；整块（区域 + 文字）一起挂载时大多数读屏根本不念——
+   * 上一版把 role="status" 挂在那条随 token 一起出现的 banner 上，正是这个毛病。
+   * 所以把区域放在常驻的 .agent-join 根节点里（页面在它就在），token 出现后由 effect 填文字。
+   */
+  const [liveNote, setLiveNote] = useState("");
   const startedAtRef = useRef(new Map<string, number>());
   /** 每个身份的服务端量基线：关掉再打开、或从「继续接入」回来都沿用同一张，别把中途的活动算没发生。 */
   const baselineRef = useRef(new Map<string, JoinBaseline>());
@@ -347,6 +358,21 @@ export function AgentJoin({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recoverName, slug]);
 
+  // 文字在 effect 里填，且晚一拍：区域先以空内容落地，之后内容变化才是读屏认的 live region 更新
+  // （区域与文字同一批插入时，多数读屏不念）。延迟可注入，测试不必真等。
+  const tokenPresent = phase.kind === "stepper" && phase.session.token !== null;
+  useEffect(() => {
+    if (!tokenPresent) {
+      setLiveNote("");
+      return;
+    }
+    const timer = setTimeout(
+      () => setLiveNote(`${t("AgentJoin.step2.tokenSafety")} ${t("AgentJoin.tokenWarn")}`),
+      liveNoteDelayMs,
+    );
+    return () => clearTimeout(timer);
+  }, [liveNoteDelayMs, t, tokenPresent]);
+
   const dialogOpen = phase.kind === "compose" || phase.kind === "loading" || phase.kind === "stepper";
   const composeOpen = phase.kind === "compose" || phase.kind === "loading";
   const stepperOpen = phase.kind === "stepper";
@@ -410,7 +436,7 @@ export function AgentJoin({
       // http://tauri.localhost / dev 的 127.0.0.1:5173，agent 拿去 `party init --server` 会因非 http(s)
       // 报错或连不上。优先用打包注入的 apiBase(VITE_API_BASE=真后端)，仅同源 web 部署(apiBase 为空)回退 location.origin。
       const server = apiOrigin();
-      const command = buildJoinPack(mode, {
+      const packInput = {
         slug,
         agentName: agent.name,
         agentToken: agent.token,
@@ -420,7 +446,11 @@ export function AgentJoin({
         runner,
         harness,
         t,
-      });
+      };
+      // 存进 vault 的是**完整接入包**（「频道身份」面板要把它发给别人的机器，含 install 兜底）；
+      // 引导里第 ② 步只展示那一条命令——install 已经是第 ① 步（#1005 owner 实测：同一条命令出现两遍）。
+      const command = buildJoinPack(mode, packInput);
+      const stepCommand = buildStepperCommand(mode, packInput);
       const sinceTs = nowFn();
       saveAgentToken({
         account: accountKey,
@@ -442,7 +472,7 @@ export function AgentJoin({
         runner,
         recover: false,
         token: agent.token,
-        command,
+        command: stepCommand,
         sinceTs,
         baseline: joinBaseline(messages, presence, agent.name, false),
       });
@@ -472,7 +502,7 @@ export function AgentJoin({
     setRotateState("busy");
     try {
       const agent = await rotateChannelAgent(token, slug, session.name);
-      const command = buildJoinPack(session.mode, {
+      const packInput = {
         slug,
         agentName: agent.name,
         agentToken: agent.token,
@@ -482,7 +512,8 @@ export function AgentJoin({
         runner: session.runner,
         harness: session.harness,
         t,
-      });
+      };
+      const command = buildJoinPack(session.mode, packInput);
       saveAgentToken({
         account: accountKey,
         slug,
@@ -497,7 +528,10 @@ export function AgentJoin({
       setRotateState("idle");
       setCopiedKey(null);
       setCopyErr(false);
-      setPhase({ kind: "stepper", session: { ...session, token: agent.token, command } });
+      setPhase({
+        kind: "stepper",
+        session: { ...session, token: agent.token, command: buildStepperCommand(session.mode, packInput) },
+      });
     } catch {
       setRotateState("error");
     }
@@ -779,6 +813,12 @@ export function AgentJoin({
           tabIndex={-1}
         >
           <div className="agent-join-scrim" onClick={close} />
+          {/* 读屏播报区必须在 dialog **子树内**：overlay 是 aria-modal="true"，VoiceOver 会把
+              无障碍树限制在弹窗内，挂在弹窗外面的 live region 完全不播报
+              （codex stop-time review on 99f85e4）。
+              同时它随弹窗挂载时是**空**的，文字由 effect 稍后填入——区域先存在、内容后变化，
+              才是读屏认的 live region 更新。 */}
+          <p className="agent-join-sr-only" role="status">{liveNote}</p>
           <div className="d-card agent-join-card agent-join-card--stepper">
             <header className="agent-join-card-head">
               <h2 className="d-title agent-join-title">
@@ -799,14 +839,22 @@ export function AgentJoin({
             <ol className="agent-join-steps">
               {/* ① 装 party：网页看不见目标机，报到（②）即证明装了——② 过了一起打 ✓。 */}
               <StepCard id={1} status={statuses[1]} title={t("AgentJoin.step1.title")} summary={null} t={t}>
-                <p className="agent-join-hint">{t("AgentJoin.step1.hint")}</p>
-                <CommandBlock
-                  id="install"
-                  command={INSTALL_COMMAND}
-                  copied={copiedKey === "install"}
-                  onCopy={() => void copy("install", INSTALL_COMMAND)}
-                  t={t}
-                />
+                {/* 无人值守脚本自带「版本闸 + 缺了才装」，② 里已经有一次；这里再给一条就是同一个弹窗
+                    出现两遍安装命令（codex stop-time review on 3d65e20），所以这一档只说明、不给命令。 */}
+                {unattended ? (
+                  <p className="agent-join-hint">{t("AgentJoin.step1.hintUnattended")}</p>
+                ) : (
+                  <>
+                    <p className="agent-join-hint">{t("AgentJoin.step1.hint")}</p>
+                    <CommandBlock
+                      id="install"
+                      command={INSTALL_COMMAND}
+                      copied={copiedKey === "install"}
+                      onCopy={() => void copy("install", INSTALL_COMMAND)}
+                      t={t}
+                    />
+                  </>
+                )}
               </StepCard>
 
               {/* ② 跑接入命令：interactive = party join（含 token，只出现一次）；unattended = serve 脚本；recover = party recover。 */}
@@ -823,6 +871,18 @@ export function AgentJoin({
                 summary={step2Summary}
                 t={t}
               >
+                {/* 明文 token 的安全警告：
+                    - 与分支解耦——interactive 与 unattended 的命令里都带 token，只挂一支会漏；
+                    - 排在命令块**之前**——无人值守是一段长脚本，放在后面会被推出视野，等于没警告
+                    （codex stop-time review on fc1aa5c / 2518fbe）。recover 不带 token，不渲染。 */}
+                {session.token !== null && (
+                  // 可见告警：给看得见的人。**播报交给常驻的 live region**（见 liveNote）——
+                  // 这块 banner 是随 token 一起挂载的，把 role="status" 挂在它身上并不可靠。
+                  <div className="banner banner--yellow agent-join-tokenbanner">
+                    <p className="agent-join-tokensafety">{t("AgentJoin.step2.tokenSafety")}</p>
+                    <p className="agent-join-warn">{t("AgentJoin.tokenWarn")}</p>
+                  </div>
+                )}
                 {session.recover ? (
                   <>
                     <p className="agent-join-hint">{t("AgentJoin.step2.recoverHint")}</p>
@@ -910,7 +970,7 @@ export function AgentJoin({
                 ) : (
                   // interactive：复制接入命令，贴进 agent 自己的 harness。
                   <>
-                    <p className="agent-join-hint">{t("AgentJoin.doneLead")}</p>
+                    <p className="agent-join-hint">{t("AgentJoin.step2.runHint")}</p>
                     <CommandBlock
                       id="join"
                       command={session.command}
@@ -923,11 +983,6 @@ export function AgentJoin({
                 {copyErr && (
                   <p className="banner banner--red agent-join-copyerr" role="alert">
                     {t("AgentJoin.errCopy")}
-                  </p>
-                )}
-                {session.token !== null && (
-                  <p className="banner banner--yellow agent-join-warn" role="status">
-                    {t("AgentJoin.tokenWarn")}
                   </p>
                 )}
               </StepCard>

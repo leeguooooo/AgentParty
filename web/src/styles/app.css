@@ -5767,6 +5767,90 @@ button.org-person-name {
 .agent-join-namewarn { margin: 0; }
 .agent-join-actions { display: flex; justify-content: flex-end; }
 
+/* 接入分步引导（#1005）。四步卡片：done 折叠成一行摘要，active 展开当前该做的那条命令，
+   pending 只留标题 + 「等上一步完成」。序号用 ①②③④/✓ 自己画，所以 ol 不要浏览器默认编号。 */
+.agent-join-card--stepper { width: min(680px, 94vw); }
+.agent-join-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.agent-join-step {
+  border: 1.6px solid var(--d-ink);
+  background: var(--t-panel);
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.agent-join-step--active { box-shadow: 3px 3px 0 var(--d-shadow); }
+.agent-join-step--pending { opacity: 0.55; border-style: dashed; }
+.agent-join-step--done { background: var(--t-panel2); }
+.agent-join-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+.agent-join-step-mark {
+  flex: none;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.agent-join-step-mark--done { color: var(--d-green, #1f7a3d); }
+.agent-join-step-mark--active { color: var(--t-accent); }
+.agent-join-step-mark--pending { color: var(--t-dim); }
+.agent-join-step-title { font-size: 14px; font-weight: 700; }
+/* 「等上一步完成」「等它报到…」这类状态句：与标题拉开距离，别糊成一句话。 */
+.agent-join-step-status {
+  margin-left: auto;
+  padding-left: 10px;
+  font-size: 12px;
+  color: var(--t-dim);
+  text-align: right;
+}
+.agent-join-step-status--done { color: var(--d-green, #1f7a3d); }
+.agent-join-step-body { display: flex; flex-direction: column; gap: 8px; }
+.agent-join-step-wait { margin: 0; font-size: 12px; color: var(--t-dim); }
+.agent-join-probe { display: flex; flex-direction: column; gap: 6px; }
+.agent-join-probe-btn { align-self: flex-start; font-size: 13px; }
+.agent-join-senderr { margin: 0; }
+.agent-join-complete { margin: 0; }
+.agent-join-regen { display: flex; flex-direction: column; gap: 7px; align-items: flex-start; }
+.agent-join-regen-btn { font-size: 13px; }
+.agent-join-resume { font-size: 12.5px; }
+.agent-join-copyerr { margin: 0; }
+/* token 安全提醒：安全信息不做成暗色小字（读起来是悄悄话、读屏也不播报），
+   与「只出现这一次」并成一条黄底 banner，排在可复制命令之前（#1005 codex review 连抓两轮）。 */
+/* 常驻读屏播报区：视觉隐藏但留在无障碍树里（live region 必须先存在，内容后变才播报）。 */
+.agent-join-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.agent-join-tokenbanner { display: flex; flex-direction: column; gap: 6px; }
+.agent-join-tokenbanner > p { margin: 0; }
+.agent-join-tokensafety { font-weight: 700; }
+.agent-join-harness,
+.agent-join-runner { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--t-dim); }
+.agent-join-runner-select { font-size: 12px; padding: 3px 6px; }
+.agent-join-adopt-btn { font-size: 13px; }
+
+@media (max-width: 520px) {
+  .agent-join-step-status { margin-left: 0; padding-left: 0; text-align: left; flex-basis: 100%; }
+}
+
 @media (max-width: 760px) {
   .agent-join-cmd { flex-direction: column; align-items: stretch; }
   .agent-join-copy { align-self: flex-end; }

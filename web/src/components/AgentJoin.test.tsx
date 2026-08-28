@@ -567,7 +567,7 @@ describe("AgentJoin 分步引导 (#1005)", () => {
   const NOW = 1_800_000_000_000;
 
   function stepper(extra: Partial<React.ComponentProps<typeof AgentJoin>> = {}) {
-    const props = { presence: [] as PresenceEntry[], messages: [] as MsgFrame[], now: () => NOW, ...extra };
+    const props = { presence: [] as PresenceEntry[], messages: [] as MsgFrame[], now: () => NOW, liveNoteDelayMs: 0, ...extra };
     const r = render(undefined, null, props);
     open(r);
     return {
@@ -749,6 +749,117 @@ describe("AgentJoin 分步引导 (#1005)", () => {
       s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
     );
     expect(rotated).toContain("ap_rotated");
+  });
+
+  // owner 实测（#1005 上线后）：① 已经单列「装 party」，② 的粘贴稿里又带一句
+  // 「没有 party 命令就先装 curl … | sh」——同一条命令在同一个弹窗里出现两遍。
+  test("② 只给那一条 party join，不再重复 ① 的安装命令、也不夹引导句", async () => {
+    const s = stepper();
+    await s.generate();
+    const join = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
+    );
+    expect(join.split("\n")).toHaveLength(1);
+    expect(join.startsWith("AGENTPARTY_TOKEN=")).toBe(true);
+    expect(join).toContain("party join");
+    expect(join).not.toContain("install.sh");
+    expect(join).not.toContain("#");
+    // ① 那条才是安装命令，两者不重复。
+    const install = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "install").props.children[0].props.children,
+    );
+    expect(install).toContain("install.sh");
+  });
+
+  // codex stop-time review on 3d65e20：无人值守脚本自带「版本闸 + 缺了才装」，① 再给一条
+  // curl 就是同一个弹窗两条安装命令；另外 ② 带着明文 token，必须显眼地警告别贴到公开地方。
+  test("无人值守：① 不再给安装命令（脚本自带），弹窗里安装命令只出现在 ② 那一段", async () => {
+    const s = stepper();
+    act(() => {
+      const radios = s.r.root.findAll((n) => n.props.type === "radio" && typeof n.props.onChange === "function");
+      const unattended = radios.find((n) => String(n.props.value) === "unattended");
+      unattended?.props.onChange({ target: { value: "unattended" } });
+    });
+    await s.generate();
+    expect(s.r.root.findAll((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "install")).toHaveLength(0);
+    const join = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
+    );
+    // 值守脚本自带版本闸/安装，那是它自己的一部分，不算重复。
+    expect(join).toContain("party serve");
+  });
+
+  // 安全行移出复制内容后不能丢；而且 interactive 与 unattended 的命令**都**带明文 token，
+  // 警告只挂在其中一支就是漏（codex stop-time review 连着抓了两轮）。
+  test.each([
+    ["interactive", false],
+    ["unattended", true],
+  ] as const)("② 带明文 token 的两种模式都要警告别贴到公开地方（%s）", async (_label: string, useUnattended: boolean) => {
+    const s = stepper();
+    if (useUnattended) {
+      act(() => {
+        const radios = s.r.root.findAll((n) => n.props.type === "radio" && typeof n.props.onChange === "function");
+        radios.find((n) => String(n.props.value) === "unattended")?.props.onChange({ target: { value: "unattended" } });
+      });
+    }
+    await s.generate();
+    const safety = s.r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-tokensafety"));
+    expect(safety).toHaveLength(1);
+    const text = String(safety[0]!.children.join(""));
+    expect(/公开|public/i.test(text)).toBe(true);
+    expect(/argv|ps|history/i.test(text)).toBe(true);
+    // 必须排在可复制命令**之前**：无人值守是一段长脚本，警告放后面会被推出视野。
+    const json = JSON.stringify(s.r.toJSON());
+    expect(json.indexOf("agent-join-tokensafety")).toBeLessThan(json.indexOf('"data-cmd":"join"'));
+    // 而且要看得见、听得见：黄底 banner + 有 role/label 让读屏播报，不是 12px 暗色小字。
+    const banner = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-tokenbanner"));
+    expect(String(banner.props.className)).toContain("banner--yellow");
+    // 播报走 live region：区域先空着落地，文字晚一拍填入（stepper() 注入 0 延迟，等一个 tick 即可）。
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    const live = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+    expect(["status", "alert"]).toContain(live.props.role);
+    expect(String(live.children.join(""))).toContain(text.slice(0, 12));
+    // 「只出现这一次」并进同一条 banner，不再单独挂在命令之后。
+    expect(banner.findAll((n) => String(n.props.className ?? "").includes("agent-join-warn"))).toHaveLength(1);
+    expect(json.indexOf("agent-join-warn")).toBeLessThan(json.indexOf('"data-cmd":"join"'));
+  });
+
+  // live region 的可靠性判据：弹窗还没开、token 还没铸出来时它就得在 DOM 里；
+  // 内容随后由 effect 填入，才算「已存在区域的内容变化」（codex review 第七轮）。
+  test("播报区先以空内容落地、文字晚一拍才填——区域与文字同批插入读屏不念", async () => {
+    // 延迟设成一个够长的值：generate 之后立刻看，区域已在、但还没有文字。
+    const s = stepper({ liveNoteDelayMs: 10_000 });
+    await s.generate();
+    const atMount = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+    expect(["status", "alert"]).toContain(atMount.props.role);
+    expect(String(atMount.children.join(""))).toBe("");
+    // 换成 0 延迟重挂一次，确认文字确实会填进去。
+    const fast = stepper({ liveNoteDelayMs: 0 });
+    await fast.generate();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    const filled = fast.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+    expect(String(filled.children.join("")).length).toBeGreaterThan(0);
+  });
+
+  // overlay 是 aria-modal="true"：VoiceOver 只念弹窗子树里的东西，挂在弹窗外的 live region
+  // 完全不播报（codex review 第八轮）。所以播报区必须是 dialog 的后代。
+  test("播报区在 dialog 子树内（aria-modal 下弹窗外的 live region 不会被念）", async () => {
+    const s = stepper();
+    await s.generate();
+    const overlay = s.r.root.find((n) => String(n.props.className ?? "") === "agent-join-overlay");
+    expect(overlay.props["aria-modal"]).toBe("true");
+    const live = overlay.findAll((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+    expect(live).toHaveLength(1);
+    expect(["status", "alert"]).toContain(live[0]!.props.role);
+  });
+
+  test("recover 不带 token ⇒ 不渲染那条安全警告（没有明文可泄露）", () => {
+    const r = render(undefined, null, { recoverName: "aaa", presence: [], messages: [], now: () => NOW });
+    expect(r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-tokensafety"))).toHaveLength(0);
   });
 
   test("标题两种句式都完整：接入是「让 X 加入」，重连是「把 X 重新接上」", async () => {
