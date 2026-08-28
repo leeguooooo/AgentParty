@@ -8,6 +8,7 @@ import {
   LOOP_GUARD_AGENT_PARTY_N,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
+  isWakeVerifyFrame,
   MAX_ALSO_RESOLVES,
   MAX_WEBHOOKS_PER_CHANNEL,
   MAX_MESSAGE_AUDIT_ROWS,
@@ -83,6 +84,7 @@ import {
   type IdentityEraseSummary,
   type IdentityExportData,
   type MsgFrame,
+  type MessageKind,
   type MessageUpdateFrame,
   type ParticipantRemovedFrame,
   type PresenceEntry,
@@ -4667,7 +4669,7 @@ export class ChannelDO extends Server<Env> {
         return true;
       case "mentions":
         // #963：自 @ 不投 webhook——那是对话里提到自己，不是召唤。
-        return msg.mentions.includes(hookName) && !this.isSelfMention(msg.sender.name, hookName);
+        return msg.mentions.includes(hookName) && !this.isSelfMention(msg.sender.name, hookName, msg);
       case "status":
         return msg.kind === "status";
       case "needs-human":
@@ -4957,8 +4959,18 @@ export class ChannelDO extends Server<Env> {
   // 的回帖）。mentions 数组原样落库/广播（正文里的 @ 仍要高亮、仍要进 history），但服务端**不为它生成
   // 任何唤醒语义**：不建 directed delivery、不落 serve/watch 的 broadcast ledger、不投 mentions 过滤的
   // webhook。同身份 13 个 runtime 各醒一次的第二、三轮就是自 @ 触发的。
-  private isSelfMention(senderName: string, target: string): boolean {
-    return mentionMatchKey(senderName) === mentionMatchKey(target);
+  //
+  // #990：唯一例外是接入验证帧（isWakeVerifyFrame：`[wake-verify]` 前缀 + mentions 只含自己）——它的存在理由
+  // 就是让本身份走一遍真实唤醒链，所以传了 frame 且判定为验证帧时，自 @ **就是**召唤。不传 frame 的调用点
+  // 保持 #963 原判（保守：宁可不唤醒）。
+  private isSelfMention(
+    senderName: string,
+    target: string,
+    frame?: { kind: MessageKind; body?: string | null; mentions?: readonly string[] | null },
+  ): boolean {
+    if (mentionMatchKey(senderName) !== mentionMatchKey(target)) return false;
+    if (frame !== undefined && isWakeVerifyFrame({ ...frame, sender: { name: senderName } })) return false;
+    return true;
   }
 
   // #107：某 name 当前登记的 wake 层（presence.wake_kind）。无 presence / 未登记 = null。
@@ -4979,8 +4991,8 @@ export class ChannelDO extends Server<Env> {
     for (const name of msg.mentions) {
       if (seen.has(name)) continue;
       seen.add(name);
-      // #963：自 @ 不是唤醒，别落一行「已广播唤醒」的假账。
-      if (this.isSelfMention(msg.sender.name, name)) continue;
+      // #963：自 @ 不是唤醒，别落一行「已广播唤醒」的假账（#990 验证帧除外）。
+      if (this.isSelfMention(msg.sender.name, name, msg)) continue;
       const kind = this.wakeKindFor(name);
       if (kind !== "serve" && kind !== "watch") continue;
       // #180：被人为暂停接待的目标，webhook 一律不投；serve/watch 同理不落"已广播唤醒"行，
@@ -8551,7 +8563,7 @@ export class ChannelDO extends Server<Env> {
       // #963：发信人自己不入 deliveryTargets——自 @ 不建 directed delivery，否则每个同身份 runtime
       // 都会把这条「提到自己」的回帖当成一次新召唤。mentions 数组保持原样（正文高亮/历史不受影响）。
       deliveryTargets: candidateDeliveryTargets.filter((target) =>
-        !this.isSelfMention(senderName, target) &&
+        !this.isSelfMention(senderName, target, frame) &&
         Object.prototype.hasOwnProperty.call(ownerLookup, target) &&
         (expectedAutoOwners.get(mentionMatchKey(target)) === undefined || !invalidAutoKeys.has(mentionMatchKey(target)))
       ),
@@ -8754,6 +8766,10 @@ export class ChannelDO extends Server<Env> {
     // status 是 presence/协调状态，不是对话消息：agent 已触发 fair-share guard 后仍必须能声明
     // blocked/waiting，让频道知道它为什么停下。它也不消耗/重置消息 streak（#466）。
     const loopGuard = identity.kind === "agent" && frame.kind === "message" ? this.loopGuardMessage(identity.name) : null;
+    // #990：接入验证帧是探针不是对话——照样过 guard 的闸（频道熔断时 @ 本来就到不了它，拒掉是真话），
+    // 但**不计入** streak / fair-share：一台机器反复跑接入引导不该把频道的名额吃光（#959 同一类教训）。
+    const verifyProbe =
+      frame.kind === "message" && isWakeVerifyFrame({ ...frame, sender: { name: identity.name } });
     if (loopGuard !== null) {
       this.alertLoopGuard(loopGuard);
       return {
@@ -9087,8 +9103,10 @@ export class ChannelDO extends Server<Env> {
     const workflowGuardFrame = this.applyWorkflowGuardAfterSend(identity, msg, workflowGuard, now);
     if (frame.kind === "message") {
       if (identity.kind === "agent") {
-        this.setMeta("agent_streak", String(this.agentStreak() + 1));
-        this.setMeta(this.agentCountKey(identity.name), String(this.agentCount(identity.name) + 1));
+        if (!verifyProbe) {
+          this.setMeta("agent_streak", String(this.agentStreak() + 1));
+          this.setMeta(this.agentCountKey(identity.name), String(this.agentCount(identity.name) + 1));
+        }
       } else {
         this.clearLoopGuardState();
         this.clearWorkflowGuards();
@@ -10560,9 +10578,9 @@ export class ChannelDO extends Server<Env> {
   }
 
   private async agentMentionTargets(msg: MsgFrame): Promise<string[]> {
-    // #963：自 @ 不是唤醒目标（与 routeMentionsForDelivery 同一口径）。
+    // #963：自 @ 不是唤醒目标（与 routeMentionsForDelivery 同一口径，#990 验证帧同样例外）。
     const candidates = [...new Set(
-      msg.mentions.filter((name) => name !== "system" && !this.isSelfMention(msg.sender.name, name)),
+      msg.mentions.filter((name) => name !== "system" && !this.isSelfMention(msg.sender.name, name, msg)),
     )];
     if (candidates.length === 0) return [];
     const authoritative = new Map<string, { name: string; role: string; active: boolean; removed: boolean }>();
@@ -10734,11 +10752,12 @@ export class ChannelDO extends Server<Env> {
   ): Promise<void> {
     // Status/presence frames are coordination metadata, not agent work. Self-mentions likewise must
     // never claim a queue slot the CLI intentionally refuses to run, or one poison row blocks every
-    // later work item for that target until lease expiry.
+    // later work item for that target until lease expiry. #990: the onboarding verify frame is the one
+    // self-mention the CLI listeners deliberately DO run, so it keeps its queue slot (isSelfMention).
     if (msg.kind !== "message") return Promise.resolve();
     // Pause delays dispatch; it must not erase the durable wake debt. The queued row is created even
     // while the target is paused and resumePresence() restarts adapter selection later.
-    const targets = [...new Set(classifiedTargets)].filter((targetName) => targetName !== msg.sender.name);
+    const targets = [...new Set(classifiedTargets)].filter((targetName) => !this.isSelfMention(msg.sender.name, targetName, msg));
     if (targets.length === 0) return Promise.resolve();
     const now = Date.now();
     this.markSupersededByReplyCorrection(msg, targets, now);

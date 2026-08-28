@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ServerFrame } from "@agentparty/shared";
+import { WAKE_VERIFY_PREFIX, type ServerFrame } from "@agentparty/shared";
 import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
 import {
   dormantAnnounceDisplayName,
@@ -716,6 +716,33 @@ describe("同身份多 runtime 的 @ 唤醒（issue #963）", () => {
     for (const runtime of runtimes) expect(runtime.connections[0]!.acked).toEqual([46, 47]);
     // 对照：别人发的 @ 照常唤醒（自 @ 过滤没有把正常召唤一起挡掉）。
     for (const runtime of runtimes) runtime.connections[0]!.push(msg(48, [SELF]));
+    await tick(40);
+    expect(calls).toHaveLength(1);
+    abort.abort();
+    await Promise.all(done);
+  });
+
+  test("#990：自发的验证帧（[wake-verify] + 只 @ 自己）是自 @ 的唯一例外——照常唤醒，且仍只唤醒一次", async () => {
+    const { runtimes, calls } = siblingRuntimes(3);
+    const abort = new AbortController();
+    const done = runtimes.map((runtime) => runDormantClaudeSessionAnnounce("dev", abort.signal, runtime.deps));
+    await tick();
+    const verify = {
+      ...(msg(60, [SELF], { sender: { name: SELF, kind: "agent", owner: "leo@example.com" } }) as unknown as Record<string, unknown>),
+      // 本文件的 msg() 夹具写的 kind 是 "text"（线上帧恒为 "message"）；验证帧判据认的是真实 wire 值。
+      kind: "message",
+      body: `${WAKE_VERIFY_PREFIX} @${SELF} ping · 接入引导第 4 步`,
+    } as unknown as ServerFrame;
+    for (const runtime of runtimes) runtime.connections[0]!.push(verify);
+    await tick(40);
+    expect(calls).toHaveLength(1);
+    // 对照：前缀对了但还 @ 了别人 ⇒ 不是验证帧，仍按自 @ 忽略。
+    const notVerify = {
+      ...(msg(61, [SELF, "peer"], { sender: { name: SELF, kind: "agent" } }) as unknown as Record<string, unknown>),
+      kind: "message",
+      body: `${WAKE_VERIFY_PREFIX} @peer 看 @${SELF}`,
+    } as unknown as ServerFrame;
+    for (const runtime of runtimes) runtime.connections[0]!.push(notVerify);
     await tick(40);
     expect(calls).toHaveLength(1);
     abort.abort();

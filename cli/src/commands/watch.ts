@@ -5,6 +5,7 @@ import {
   EXIT_LOOP_GUARD,
   EXIT_STREAM_ENDED,
   EXIT_TIMEOUT,
+  isWakeVerifyFrame,
   type DirectedDelivery,
   type MsgFrame,
 } from "@agentparty/shared";
@@ -707,7 +708,8 @@ export async function runWatch(o: WatchOptions): Promise<number> {
       const msg = frame.type === "message_update" ? frame.message : frame;
       if (msg.type !== "msg" && msg.type !== "status") continue;
       lastSeq = Math.max(lastSeq, msg.seq);
-      const fromSelf = msg.sender.name === self;
+      // #990：接入验证帧（`[wake-verify]` + 只 @ 自己）是自己对自己的显式召唤，唯一放行的自发消息。
+      const fromSelf = msg.sender.name === self && !isWakeVerifyFrame(msg);
       const qualifies = !fromSelf && (!o.mentionsOnly || msg.mentions.includes(self));
       // fresh = 游标之上的新消息。重放的历史修订快照（seq 早已消费过）会穿透去重进来
       // ——它们可以照常打印（展示编辑是 feature），但绝不能算「唤醒」（曾把 --once 假唤醒）

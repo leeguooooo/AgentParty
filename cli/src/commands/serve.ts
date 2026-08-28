@@ -1,7 +1,7 @@
 // party serve — 常驻监听频道，每条 @你 的消息触发一次本地命令，把「跑完就停的 session agent」
 // 用外部 supervisor 唤醒（wake GOAL 的 session 型那半；有入站 URL 的 runtime 走 webhook）。
 // 复用 client.connect 的自动重连帧流，真正常驻；命令串行执行（一条处理完再下一条，不并发抢跑）。
-import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ResponseSource, type SendDecisionRequest, type ServerFrame } from "@agentparty/shared";
+import { BODY_LIMIT, DECISION_OPTION_LIMIT, DECISION_OPTIONS_MAX, DECISION_PROMPT_LIMIT, EXIT_ARCHIVED, EXIT_AUTH, EXIT_STREAM_ENDED, EXIT_UPGRADED, isWakeVerifyFrame, type AgentSessionInfo, type Attachment, type DeliveryUpdateFrame, type DirectedDelivery, type MsgFrame, type PublicDirectedDelivery, type ResponseSource, type SendDecisionRequest, type ServerFrame } from "@agentparty/shared";
 import { safeBranchContextLabel, safeRepoContextLabel } from "@agentparty/shared";
 import { channelDecisionSnapshotBodyLines } from "@agentparty/shared/onboarding";
 import { createHash, randomUUID } from "node:crypto";
@@ -5760,7 +5760,8 @@ export async function runServe(o: ServeOptions): Promise<number> {
         out(`serve: ignored invalid delivery ${directedDelivery.id} for target=${directedDelivery.target_name} state=${directedDelivery.state}`);
         continue;
       }
-      const fromSelf = frame.sender.name === self;
+      // #990：接入验证帧（`[wake-verify]` + 只 @ 自己）是自己对自己的显式召唤，唯一放行的自发消息。
+      const fromSelf = frame.sender.name === self && !isWakeVerifyFrame(frame);
       // fresh = 游标之上的新消息。历史修订快照会穿透去重被重放（seq 早已消费过），
       // 它们不是新唤醒——不 fresh 就绝不触发 runner（否则旧 @ 被编辑一次，每次重连都重跑一遍）
       // delivery 是独立 work cursor：即使普通 read cursor 已越过 message_seq，也必须执行。

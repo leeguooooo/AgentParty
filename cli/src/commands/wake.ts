@@ -1,10 +1,11 @@
 // party wake test — prove mention/wake/resume as separate phases.
 import { autoWakeReachable, EXIT_TIMEOUT, type MsgFrame, type PresenceEntry, type WakeDelivery, type WakeKind } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
-import { readConfig, resolveChannel } from "../config";
+import { agentpartyHome, readConfig, resolveChannel } from "../config";
+import { joinBindingsPath, readJoinBindings } from "../join-binding";
 import { jsonFrame, nowTs } from "../json";
 import { resolveAuth } from "../oidc-cli";
-import { RestError, fetchMessages, fetchPresence, fetchWakeDeliveries, handleRestError, postMessage } from "../rest";
+import { RestError, fetchMe, fetchMessages, fetchPresence, fetchWakeDeliveries, handleRestError, postMessage } from "../rest";
 import { MAX_TIMEOUT_SEC, isName, isSlug, parsePositiveIntFlag } from "../validation";
 import { diagnoseCodexWake } from "../wake-diagnosis";
 import { buildWakeChecklist, formatWakeChecklist } from "../wake-checklist";
@@ -14,6 +15,14 @@ const DEFAULT_TIMEOUT_SEC = 30;
 const STALE_MS = 60_000; // keep serve/watch wakeability aligned with `party who` and mention receipts
 const HELP = `usage: party wake test @agent [channel|--channel C] [--timeout N] [--json]
        party wake check [--json]
+       party wake verify [channel|--channel C] [--timeout N] [--json]
+
+verify is onboarding step 4 (#990): it sends ONE verify frame as YOUR OWN identity
+(\`[wake-verify] @you ping\`, the only self-mention the server and the local listeners
+treat as a real summons), waits for the reply, and on timeout names the layer that
+did not deliver — server_delivery / local_listener / model_reply — with one fix.
+The frame is never counted against the loop guard. Exit code 0 only on a real
+round trip.
 
 check answers one question about THIS machine, with no network at all: "if someone
 @s me right now, will anything happen?" It prints how many steps are still missing
@@ -73,7 +82,7 @@ interface WakePresence {
   current_task?: PresenceEntry["current_task"];
 }
 
-interface WakeTestFrame extends Record<string, unknown> {
+export interface WakeTestFrame extends Record<string, unknown> {
   type: "wake_test";
   channel: string;
   target: string;
@@ -231,9 +240,10 @@ async function fetchLatestLedgerDelivery(
   target: string,
   mentionSeq: number,
   kinds: readonly WakeKind[],
+  fetcher: typeof fetchWakeDeliveries = fetchWakeDeliveries,
 ): Promise<WakeDelivery | null> {
   try {
-    const deliveries = await fetchWakeDeliveries(server, token, channel, { since: mentionSeq, target, limit: 20 });
+    const deliveries = await fetcher(server, token, channel, { since: mentionSeq, target, limit: 20 });
     return deliveries
       .filter((d) => d.mention_seq === mentionSeq && kinds.includes(d.adapter_kind))
       .at(-1) ?? null;
@@ -241,6 +251,178 @@ async function fetchLatestLedgerDelivery(
     if (e instanceof RestError && (e.status === 404 || e.status === 501)) return null;
     throw e;
   }
+}
+
+/**
+ * wake test 的往返本体（#990 抽出来供接入引导第 4 步复用）：读 presence 过闸 → 发探针 → 轮询
+ * ledger / 回帖 → 按 presence 探活分级定论。只返回结构化的 wake_test 帧，不打印、不定退出码。
+ * 网络与时钟全部可注入（deps），缺省是真实 REST。
+ */
+export interface WakeProbeDeps {
+  fetchPresence: typeof fetchPresence;
+  postMessage: typeof postMessage;
+  fetchMessages: typeof fetchMessages;
+  fetchWakeDeliveries: typeof fetchWakeDeliveries;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+}
+
+export interface WakeProbeOptions {
+  server: string;
+  token: string;
+  channel: string;
+  target: string;
+  timeoutSec: number;
+  /** 探针正文；缺省是 wake test 那句。验证帧（#990）用它带上 WAKE_VERIFY_PREFIX。 */
+  body?: string;
+  deps?: Partial<WakeProbeDeps>;
+}
+
+export async function runWakeProbe(opts: WakeProbeOptions): Promise<WakeTestFrame> {
+  const { server, token, channel, target, timeoutSec } = opts;
+  const deps: WakeProbeDeps = {
+    fetchPresence,
+    postMessage,
+    fetchMessages,
+    fetchWakeDeliveries,
+    sleep,
+    now: () => Date.now(),
+    ...opts.deps,
+  };
+  const presenceList = await deps.fetchPresence(server, token, channel);
+  const presence = presenceList.find((p) => p.name === target) ?? null;
+  const generatedAt = nowTs();
+  const gate = wakeProbeGate(presence, generatedAt);
+  const adapter = presence?.wake?.kind ?? null;
+  if (gate.block !== null) {
+    return {
+      type: "wake_test",
+      channel,
+      target,
+      result: "not_auto_wakeable",
+      generated_at: generatedAt,
+      timeout_sec: timeoutSec,
+      presence: summarizePresence(presence),
+      phases: {
+        mention_delivered: { ok: false, seq: null, evidence: "not sent because target is not auto-wakeable" },
+        wake_invoked: { ok: false, status: "not_invoked", adapter, evidence: gate.block },
+        agent_resumed: { ok: false, seq: null, evidence: null },
+      },
+      reason: gate.block,
+    };
+  }
+
+  const { seq } = await deps.postMessage(server, token, channel, {
+    kind: "message",
+    body: opts.body ?? `@${target} wake test: please reply to this message or post a status linked with summary_seq`,
+    mentions: [target],
+    reply_to: null,
+  });
+  const deadline = deps.now() + timeoutSec * 1000;
+  const ledgerKinds = ledgerKindsFor(adapter);
+  let ack: { seq: number; evidence: AckEvidence } | null = null;
+  let wakeDelivery: WakeDelivery | null = null;
+  do {
+    if (ledgerKinds !== null) {
+      wakeDelivery = await fetchLatestLedgerDelivery(server, token, channel, target, seq, ledgerKinds, deps.fetchWakeDeliveries);
+      ack = ackFromWakeDelivery(wakeDelivery);
+      if (ack !== null) break;
+    }
+    ack = findLinkedAck(await deps.fetchMessages(server, token, channel, seq, 100), target, seq);
+    if (ack !== null) break;
+    await deps.sleep(Math.min(1000, Math.max(100, deadline - deps.now())));
+  } while (deps.now() < deadline);
+  if (ledgerKinds !== null && wakeDelivery === null) {
+    wakeDelivery = await fetchLatestLedgerDelivery(server, token, channel, target, seq, ledgerKinds, deps.fetchWakeDeliveries);
+  }
+
+  // serve/watch are local supervisors reading the channel stream; they filter out the
+  // sender's own messages to avoid self-trigger loops. So a self-test (mentioning your own
+  // agent) always times out even when the supervisor is healthy — spell that out so the next
+  // person doesn't burn a debugging session on it (as happened with serve+bare self-tests).
+  const selfTestProne = adapter === "serve" || adapter === "watch";
+  const timeoutReason = selfTestProne
+    ? "timed out waiting for linked reply_to/status.summary_seq (serve/watch ignore the sender's own messages — if @" +
+      target +
+      " is your own identity, retry from a different one)"
+    : "timed out waiting for linked reply_to/status.summary_seq";
+  // #181: 探针已投递，按观测定论。收到 ack → healthy（哪怕它没声明任何 wake 适配器，
+  // 只要它真的答复了就是可达的）。没 ack 时，若 heartbeat 视角本就负面（没声明适配器），
+  // 结论仍是 not_auto_wakeable 但标注「探针已投递、未答复、未确认」——把 heartbeat 判定
+  // 和投递判定摊开，而不是当初那句不可证伪的 mention: not sent。
+  let result: WakeResult = ack !== null ? "healthy" : gate.advisory !== null ? "not_auto_wakeable" : "timeout";
+  let frameReason =
+    ack !== null
+      ? null
+      : gate.advisory !== null
+        ? `${gate.advisory} (unconfirmed — probe delivered #${seq}, no reply within ${timeoutSec}s)`
+        : timeoutReason;
+  // 探活分级（#603/#689）：没收到最终回复不再一锅端。重取一次 presence——若服务端/自报已给出证据，
+  // 细分为可处置的结论。优先级（先真、再故障、后不消费）：
+  //   ① current_task==本探针 seq → runner 已唤起、正在处理这条 @：wake_pending（唤醒确凿，reply pending）。
+  //      #689：headless runner 跑一条要数分钟，30s 内没有最终回复是正常的，绝不能误报「no wake adapter」/失败。
+  //      这条对「没声明适配器」(advisory) 与「timeout」两条路径都适用——current_task 是活体执行的直接证据，
+  //      不依赖 presence 是否同步了 wake 适配器声明。
+  //   ② runner_health 报连败 → runner_failing（修 runner 环境，优先于不消费——「唤醒了起不来」更接近根因）。
+  //   ③ listening=deaf/suspect → not_listening（重启 supervisor）。
+  let finalPresence = presence;
+  if (ack === null) {
+    try {
+      finalPresence = (await deps.fetchPresence(server, token, channel)).find((p) => p.name === target) ?? presence;
+    } catch {
+      /* 刷新失败就用探针前的快照定级 */
+    }
+    if (finalPresence?.current_task === seq) {
+      result = "wake_pending";
+      frameReason =
+        `probe delivered #${seq}; target's runner is actively processing it (presence.current_task=#${seq}) — ` +
+        "wake invoked, final reply pending (a headless builtin runner may take minutes to reply)";
+    } else if (result === "timeout") {
+      const health = finalPresence?.runner_health;
+      if (health !== undefined && !health.ok) {
+        result = "runner_failing";
+        frameReason =
+          `probe delivered #${seq} but the target's runner keeps failing (x${health.consecutive_failures}` +
+          `${health.last_error !== undefined ? `: ${health.last_error}` : ""}) — fix the runner environment ` +
+          "(binary/credentials/sandbox) instead of re-mentioning";
+      } else if (finalPresence?.listening === "deaf" || finalPresence?.listening === "suspect") {
+        result = "not_listening";
+        frameReason =
+          `probe delivered #${seq} but the target's live connection is not consuming deliveries ` +
+          `(listening=${finalPresence.listening}) — restart its serve/watch supervisor instead of re-mentioning`;
+      }
+    }
+  }
+  // #689：runner 正在处理本探针（current_task 命中）是唤醒确凿的最强证据——盖过「没声明适配器」的负面 heartbeat
+  // 视角与 ledger 未审计。此时 wake_invoked 直接判 yes、reply pending。
+  const wakeInvoked =
+    result === "wake_pending"
+      ? {
+          ok: true as const,
+          status: "invoked" as const,
+          adapter,
+          evidence: `target's runner is processing mention #${seq} (presence.current_task) — wake invoked; final reply pending`,
+        }
+      : gate.advisory !== null && wakeDelivery === null
+        ? { ok: false as const, status: "not_invoked" as const, adapter, evidence: gate.advisory }
+        : adapter === "serve" || adapter === "watch"
+          ? summarizeServeWatchDelivery(wakeDelivery, adapter)
+          : summarizeWakeDelivery(wakeDelivery, adapter);
+  return {
+    type: "wake_test",
+    channel,
+    target,
+    result,
+    generated_at: nowTs(),
+    timeout_sec: timeoutSec,
+    presence: summarizePresence(finalPresence),
+    phases: {
+      mention_delivered: { ok: true, seq, evidence: "message accepted by channel history" },
+      wake_invoked: wakeInvoked,
+      agent_resumed: { ok: ack !== null, seq: ack?.seq ?? null, evidence: ack?.evidence ?? null },
+    },
+    reason: frameReason,
+  };
 }
 
 function printHuman(frame: WakeTestFrame) {
@@ -302,6 +484,73 @@ function runCheck(json: boolean): number {
   return checklist.remaining === 0 ? 0 : 1;
 }
 
+/**
+ * `party wake verify`（#990）：接入引导第 4 步，以本身份真发一条 @ 验证往返。
+ * 身份取本地缓存的 config.identity，没有就问 /api/me；harness 从加入绑定里认（修法命令按档给）。
+ */
+async function runVerify(channelPositional: string | undefined, flags: ReturnType<typeof parseArgs>["flags"]): Promise<number> {
+  const unknown = unknownFlagError(flags, WAKE_FLAGS);
+  if (unknown !== null) {
+    console.error(unknown);
+    return 1;
+  }
+  const flagError = valueFlagError(flags, ["channel", "timeout"]);
+  if (flagError !== null) {
+    console.error(flagError);
+    return 1;
+  }
+  const channel = resolveChannel(str(flags.channel) ?? channelPositional);
+  if (!channel) {
+    console.error("no channel, pass one or bind with: party init --channel C");
+    return 1;
+  }
+  if (!isSlug(channel)) {
+    console.error("channel must match [a-z0-9][a-z0-9-]{0,63}");
+    return 1;
+  }
+  const timeout = parsePositiveIntFlag(str(flags.timeout), "timeout", MAX_TIMEOUT_SEC);
+  if (typeof timeout === "string") {
+    console.error(timeout);
+    return 1;
+  }
+  const cfg = await resolveAuth();
+  if (!cfg) {
+    console.error("no config, run: party login or party init --server URL --token T");
+    return 1;
+  }
+  const { verifyWakeRoundTrip, formatWakeVerifyStep, DEFAULT_WAKE_VERIFY_TIMEOUT_MS } = await import("../onboarding/verify-wake");
+  try {
+    let identity = readConfig()?.identity?.name ?? null;
+    if (identity === null || identity === "") identity = (await fetchMe(cfg.server, cfg.token)).name;
+    const bindings = readJoinBindings(joinBindingsPath(agentpartyHome()));
+    const bound = bindings.find((b) => b.channel === channel && b.identity === identity && b.harness !== "other");
+    const harness = bound?.harness ?? "other";
+    const timeoutMs = timeout === undefined ? DEFAULT_WAKE_VERIFY_TIMEOUT_MS : timeout * 1000;
+    const result = await verifyWakeRoundTrip({ server: cfg.server, token: cfg.token, channel, identity, timeoutMs, harness });
+    if (flags.json === true) {
+      console.log(JSON.stringify(jsonFrame({
+        type: "wake_verify",
+        channel,
+        identity,
+        harness,
+        ok: result.ok,
+        elapsed_ms: result.elapsedMs,
+        layer: result.layer ?? null,
+        detail: result.detail,
+        fix: result.fix ?? null,
+        seq: result.seq,
+        probe: result.probe,
+        local: result.local,
+      })));
+    } else {
+      for (const line of formatWakeVerifyStep(result)) console.log(line);
+    }
+    return result.ok ? 0 : EXIT_TIMEOUT;
+  } catch (e) {
+    return handleRestError(e);
+  }
+}
+
 export async function run(argv: string[]): Promise<number> {
   if (isHelpArg(argv, { allowHelpPositional: true })) {
     console.log(HELP);
@@ -318,8 +567,18 @@ export async function run(argv: string[]): Promise<number> {
     }
     return runCheck(parsed.flags.json === true);
   }
+  if (subcmd === "verify") {
+    if (extra.length > 0 || channelArg !== undefined) {
+      console.error("usage: party wake verify [channel|--channel C] [--timeout N] [--json]");
+      return 1;
+    }
+    return runVerify(targetArg, parsed.flags);
+  }
   if (subcmd !== "test" || extra.length > 0) {
-    console.error("usage: party wake test @agent [channel|--channel C] [--timeout N] [--json]\n       party wake check [--json]");
+    console.error(
+      "usage: party wake test @agent [channel|--channel C] [--timeout N] [--json]\n" +
+        "       party wake check [--json]\n       party wake verify [channel|--channel C] [--timeout N] [--json]",
+    );
     return 1;
   }
   const { flags } = parsed;
@@ -392,147 +651,11 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   try {
-    const presenceList = await fetchPresence(cfg.server, cfg.token, channel);
-    const presence = presenceList.find((p) => p.name === target) ?? null;
-    const generatedAt = nowTs();
-    const gate = wakeProbeGate(presence, generatedAt);
-    const adapter = presence?.wake?.kind ?? null;
-    if (gate.block !== null) {
-      const frame: WakeTestFrame = {
-        type: "wake_test",
-        channel,
-        target,
-        result: "not_auto_wakeable",
-        generated_at: generatedAt,
-        timeout_sec: timeoutSec,
-        presence: summarizePresence(presence),
-        phases: {
-          mention_delivered: { ok: false, seq: null, evidence: "not sent because target is not auto-wakeable" },
-          wake_invoked: { ok: false, status: "not_invoked", adapter, evidence: gate.block },
-          agent_resumed: { ok: false, seq: null, evidence: null },
-        },
-        reason: gate.block,
-      };
-      if (flags.json === true) console.log(JSON.stringify(jsonFrame(frame)));
-      else printHuman(frame);
-      return EXIT_TIMEOUT;
-    }
-
-    const { seq } = await postMessage(cfg.server, cfg.token, channel, {
-      kind: "message",
-      body: `@${target} wake test: please reply to this message or post a status linked with summary_seq`,
-      mentions: [target],
-      reply_to: null,
-    });
-    const deadline = Date.now() + timeoutSec * 1000;
-    const ledgerKinds = ledgerKindsFor(adapter);
-    let ack: { seq: number; evidence: AckEvidence } | null = null;
-    let wakeDelivery: WakeDelivery | null = null;
-    do {
-      if (ledgerKinds !== null) {
-        wakeDelivery = await fetchLatestLedgerDelivery(cfg.server, cfg.token, channel, target, seq, ledgerKinds);
-        ack = ackFromWakeDelivery(wakeDelivery);
-        if (ack !== null) break;
-      }
-      ack = findLinkedAck(await fetchMessages(cfg.server, cfg.token, channel, seq, 100), target, seq);
-      if (ack !== null) break;
-      await sleep(Math.min(1000, Math.max(100, deadline - Date.now())));
-    } while (Date.now() < deadline);
-    if (ledgerKinds !== null && wakeDelivery === null) {
-      wakeDelivery = await fetchLatestLedgerDelivery(cfg.server, cfg.token, channel, target, seq, ledgerKinds);
-    }
-
-    // serve/watch are local supervisors reading the channel stream; they filter out the
-    // sender's own messages to avoid self-trigger loops. So a self-test (mentioning your own
-    // agent) always times out even when the supervisor is healthy — spell that out so the next
-    // person doesn't burn a debugging session on it (as happened with serve+bare self-tests).
-    const selfTestProne = adapter === "serve" || adapter === "watch";
-    const timeoutReason = selfTestProne
-      ? "timed out waiting for linked reply_to/status.summary_seq (serve/watch ignore the sender's own messages — if @" +
-        target +
-        " is your own identity, retry from a different one)"
-      : "timed out waiting for linked reply_to/status.summary_seq";
-    // #181: 探针已投递，按观测定论。收到 ack → healthy（哪怕它没声明任何 wake 适配器，
-    // 只要它真的答复了就是可达的）。没 ack 时，若 heartbeat 视角本就负面（没声明适配器），
-    // 结论仍是 not_auto_wakeable 但标注「探针已投递、未答复、未确认」——把 heartbeat 判定
-    // 和投递判定摊开，而不是当初那句不可证伪的 mention: not sent。
-    let result: WakeResult = ack !== null ? "healthy" : gate.advisory !== null ? "not_auto_wakeable" : "timeout";
-    let frameReason =
-      ack !== null
-        ? null
-        : gate.advisory !== null
-          ? `${gate.advisory} (unconfirmed — probe delivered #${seq}, no reply within ${timeoutSec}s)`
-          : timeoutReason;
-    // 探活分级（#603/#689）：没收到最终回复不再一锅端。重取一次 presence——若服务端/自报已给出证据，
-    // 细分为可处置的结论。优先级（先真、再故障、后不消费）：
-    //   ① current_task==本探针 seq → runner 已唤起、正在处理这条 @：wake_pending（唤醒确凿，reply pending）。
-    //      #689：headless runner 跑一条要数分钟，30s 内没有最终回复是正常的，绝不能误报「no wake adapter」/失败。
-    //      这条对「没声明适配器」(advisory) 与「timeout」两条路径都适用——current_task 是活体执行的直接证据，
-    //      不依赖 presence 是否同步了 wake 适配器声明。
-    //   ② runner_health 报连败 → runner_failing（修 runner 环境，优先于不消费——「唤醒了起不来」更接近根因）。
-    //   ③ listening=deaf/suspect → not_listening（重启 supervisor）。
-    let finalPresence = presence;
-    if (ack === null) {
-      try {
-        finalPresence = (await fetchPresence(cfg.server, cfg.token, channel)).find((p) => p.name === target) ?? presence;
-      } catch {
-        /* 刷新失败就用探针前的快照定级 */
-      }
-      if (finalPresence?.current_task === seq) {
-        result = "wake_pending";
-        frameReason =
-          `probe delivered #${seq}; target's runner is actively processing it (presence.current_task=#${seq}) — ` +
-          "wake invoked, final reply pending (a headless builtin runner may take minutes to reply)";
-      } else if (result === "timeout") {
-        const health = finalPresence?.runner_health;
-        if (health !== undefined && !health.ok) {
-          result = "runner_failing";
-          frameReason =
-            `probe delivered #${seq} but the target's runner keeps failing (x${health.consecutive_failures}` +
-            `${health.last_error !== undefined ? `: ${health.last_error}` : ""}) — fix the runner environment ` +
-            "(binary/credentials/sandbox) instead of re-mentioning";
-        } else if (finalPresence?.listening === "deaf" || finalPresence?.listening === "suspect") {
-          result = "not_listening";
-          frameReason =
-            `probe delivered #${seq} but the target's live connection is not consuming deliveries ` +
-            `(listening=${finalPresence.listening}) — restart its serve/watch supervisor instead of re-mentioning`;
-        }
-      }
-    }
-    // #689：runner 正在处理本探针（current_task 命中）是唤醒确凿的最强证据——盖过「没声明适配器」的负面 heartbeat
-    // 视角与 ledger 未审计。此时 wake_invoked 直接判 yes、reply pending。
-    const wakeInvoked =
-      result === "wake_pending"
-        ? {
-            ok: true as const,
-            status: "invoked" as const,
-            adapter,
-            evidence: `target's runner is processing mention #${seq} (presence.current_task) — wake invoked; final reply pending`,
-          }
-        : gate.advisory !== null && wakeDelivery === null
-          ? { ok: false as const, status: "not_invoked" as const, adapter, evidence: gate.advisory }
-          : adapter === "serve" || adapter === "watch"
-            ? summarizeServeWatchDelivery(wakeDelivery, adapter)
-            : summarizeWakeDelivery(wakeDelivery, adapter);
-    const frame: WakeTestFrame = {
-      type: "wake_test",
-      channel,
-      target,
-      result,
-      generated_at: nowTs(),
-      timeout_sec: timeoutSec,
-      presence: summarizePresence(finalPresence),
-      phases: {
-        mention_delivered: { ok: true, seq, evidence: "message accepted by channel history" },
-        wake_invoked: wakeInvoked,
-        agent_resumed: { ok: ack !== null, seq: ack?.seq ?? null, evidence: ack?.evidence ?? null },
-      },
-      reason: frameReason,
-    };
+    const frame = await runWakeProbe({ server: cfg.server, token: cfg.token, channel, target, timeoutSec });
     if (flags.json === true) console.log(JSON.stringify(jsonFrame(frame)));
     else printHuman(frame);
     // #689：wake_pending（唤醒确凿、reply pending）与 healthy 同为成功——不再退 EXIT_TIMEOUT 误报失败。
-    return ack !== null || result === "wake_pending" ? 0 : EXIT_TIMEOUT;
+    return frame.phases.agent_resumed.ok || frame.result === "wake_pending" ? 0 : EXIT_TIMEOUT;
   } catch (e) {
     return handleRestError(e);
   }

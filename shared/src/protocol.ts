@@ -415,6 +415,34 @@ export interface TaskRecord {
   completed_at: number | null;
 }
 
+// ---- 接入验证帧（#990）----
+/**
+ * 接入引导第 4 步「真发一条 @ 验证」的帧标记。
+ *
+ * 验证帧 = 本身份对**自己**的显式召唤：kind=message、正文以 WAKE_VERIFY_PREFIX 开头、mentions 只含发信人自己。
+ * #963 把「自 @」统一判成「对话里提到自己」而不是召唤（服务端不建 delivery、不落 broadcast ledger、监听不唤醒）；
+ * 验证帧是唯一例外——它存在的理由就是让本身份不借别人的手走一遍真实唤醒链（服务端投递 → 本机监听 → 模型回帖）。
+ * 判据三样缺一不可，所以一条普通回帖里顺口提到自己永远不会被误当成验证帧。
+ * 服务端不把它计入 loop guard 的 streak / fair-share（它是探针、不是对话），但频道已熔断时照样拒——
+ * 那时 @ 本来就到不了你，验证失败是真话。
+ */
+export const WAKE_VERIFY_PREFIX = "[wake-verify]";
+
+export function isWakeVerifyFrame(frame: {
+  kind: MessageKind;
+  body?: string | null;
+  mentions?: readonly string[] | null;
+  sender: { name: string };
+}): boolean {
+  if (frame.kind !== "message") return false;
+  if (typeof frame.body !== "string" || !frame.body.startsWith(WAKE_VERIFY_PREFIX)) return false;
+  const mentions = frame.mentions ?? [];
+  if (mentions.length === 0) return false;
+  const self = mentionKey(frame.sender.name);
+  if (self === "") return false;
+  return mentions.every((name) => mentionKey(name) === self);
+}
+
 // ---- 任务租约（#936）：把 #885 的本机文件锁抬到服务端 ----
 //
 // #885 在**认领时刻**装了一道「同一身份只允许一个执行体动这件事」的闸，但它只在本机文件级
