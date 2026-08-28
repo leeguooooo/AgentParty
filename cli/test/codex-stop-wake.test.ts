@@ -14,6 +14,7 @@ import {
   CODEX_STOP_WAKE_REASON_MAX_BYTES,
   CODEX_STOP_WAKE_SEEN_TTL_MS,
   appendCodexStopWakeSeen,
+  codexStopWakeDrainCommand,
   codexStopWakeQuerySince,
   codexStopWakeReason,
   codexStopWakeSeenPath,
@@ -26,13 +27,20 @@ import {
 } from "../src/codex-stop-wake";
 import {
   codexHookSettingsJson,
+  codexStopWakeBacklog,
   handleCodexStopRecord,
   mergeHookSettings,
   removeHookSettings,
   type CodexStopWakeDeps,
 } from "../src/commands/hook";
+import type { NextMention } from "../src/rest";
 
 const NOW = 1_700_000_000_000;
+
+/** 老服务端的 next-mention 回答形状：只有队首 seq，不报队列深度（#958 之前的契约）。 */
+function legacy(seq: number): NextMention {
+  return { seq, seqs: null, truncated: false };
+}
 
 /** 真机 Stop payload（字段与顺序原样保留）。 */
 function stopPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -376,7 +384,7 @@ describe("handleCodexStopRecord", () => {
       cursor: () => 1899,
       nextMention: async (channel, _cwd, since) => {
         asked.push({ channel, since });
-        return 1910;
+        return legacy(1910);
       },
     }));
     // 问的是「> 我的游标之后的第一条 @」，不是随便问问。
@@ -391,7 +399,7 @@ describe("handleCodexStopRecord", () => {
   });
 
   test("网络问来的 seq 同样受 seen 去重约束（不会每轮反复注入）", async () => {
-    const d = deps({ stuck: () => null, cursor: () => 1899, nextMention: async () => 1910 });
+    const d = deps({ stuck: () => null, cursor: () => 1899, nextMention: async () => legacy(1910) });
     await handleCodexStopRecord(stopPayload(), {}, d);
     await handleCodexStopRecord(stopPayload(), {}, d);
     expect(emitted).toHaveLength(1);
@@ -416,7 +424,7 @@ describe("handleCodexStopRecord", () => {
       cursor: () => 7,
       nextMention: async () => {
         calls += 1;
-        return 9;
+        return legacy(9);
       },
     }));
     expect(calls).toBe(1);
@@ -441,7 +449,7 @@ describe("handleCodexStopRecord", () => {
       stuck: () => null,
       nextMention: async () => {
         calls += 1;
-        return 1910;
+        return legacy(1910);
       },
       ...extra,
     }));
@@ -455,7 +463,7 @@ describe("handleCodexStopRecord", () => {
       stuck: () => null,
       nextMention: async () => {
         calls += 1;
-        return 1910;
+        return legacy(1910);
       },
     }));
     expect(calls).toBe(0);
@@ -581,7 +589,8 @@ describe("pins #922：去重集合不许把后续所有 @ 永久饿死", () => {
       // 服务端语义逐字模拟：返回「> since 的最早一条未处理的 @」。
       nextMention: async (_channel, _cwd, since) => {
         asked.push(since);
-        return CHANNEL_MENTIONS.find((seq) => seq > since) ?? null;
+        const seqs = CHANNEL_MENTIONS.filter((seq) => seq > since);
+        return seqs.length === 0 ? null : { seq: seqs[0]!, seqs, truncated: false };
       },
       seenPath: () => join(home, SEEN),
       readSeen: (path) => seenStore.get(path) ?? [],
@@ -646,7 +655,7 @@ describe("pins #922：去重集合不许把后续所有 @ 永久饿死", () => {
 
   test("时效内的 seen 仍然挡住同一条（防的是同一轮之外刷屏，不是防循环本身）", async () => {
     seenStore.set(join(home, SEEN), [{ seq: 1923, ts: NOW - 1 }]);
-    await handleCodexStopRecord(stopPayload(), {}, starvedDeps({ nextMention: async () => 1923 }));
+    await handleCodexStopRecord(stopPayload(), {}, starvedDeps({ nextMention: async () => legacy(1923) }));
     expect(emitted).toEqual([]);
   });
 
@@ -675,5 +684,157 @@ describe("pins #922：去重集合不许把后续所有 @ 永久饿死", () => {
     expect(codexStopWakeQuerySince(1899, [])).toBe(1899);
     expect(codexStopWakeQuerySince(1899, [1902, 1900])).toBe(1902);
     expect(codexStopWakeQuerySince(2000, [1902])).toBe(2000);
+  });
+});
+
+// ── #958：积压可见性 ─────────────────────────────────────────────────────────
+// 事故现场（owner 真机，2026-08-26）：游标 1910，频道里 1923…1935 共 9 条 @ 这个身份；每个 Stop
+// 只推进一条最老的，刚发的 1935 要等 8 个回合，且提示里一个字不提「你在排队」。逐条推进是对的，
+// 缺的是深度 + 一条一次排空的命令。下面每一条断言都对应那个现场。
+describe("codex Stop hook 积压可见性（#958）", () => {
+  const CHANNEL_MENTIONS = [1923, 1924, 1925, 1926, 1927, 1928, 1929, 1930, 1935];
+
+  test("codexStopWakeBacklog：新服务端按 seqs 算深度，老服务端（seqs=null）恒 undefined", () => {
+    expect(codexStopWakeBacklog(null)).toBeUndefined();
+    expect(codexStopWakeBacklog({ seq: 1923, seqs: null, truncated: false })).toBeUndefined();
+    expect(codexStopWakeBacklog({ seq: 1923, seqs: CHANNEL_MENTIONS, truncated: false })).toEqual({
+      remaining: 8,
+      exact: true,
+    });
+    expect(codexStopWakeBacklog({ seq: 1923, seqs: [1923], truncated: false })).toEqual({ remaining: 0, exact: true });
+    expect(codexStopWakeBacklog({ seq: 1923, seqs: CHANNEL_MENTIONS, truncated: true })).toEqual({
+      remaining: 8,
+      exact: false,
+    });
+  });
+
+  test("提示说出「第 1/9 条、还有 8 条」并给出排空命令", () => {
+    const reason = codexStopWakeReason({ channel: "pwtk", seq: 1923, backlog: { remaining: 8, exact: true } });
+    expect(reason).toContain("第 1/9 条");
+    expect(reason).toContain("还有 8 条");
+    expect(reason).toContain("seq 1923");
+    expect(reason).toContain(codexStopWakeDrainCommand("pwtk"));
+    expect(reason).toContain("party ack --drain --channel pwtk");
+    // 依旧只给指针：「频道是唯一数据源」的告诫不能丢。
+    expect(reason).toContain("频道是唯一数据源");
+  });
+
+  test("深度是下限时（服务端窗口打满）用 N+ 表达，不假装精确", () => {
+    const reason = codexStopWakeReason({ channel: "pwtk", seq: 1923, backlog: { remaining: 199, exact: false } });
+    expect(reason).toContain("第 1/200+ 条");
+    expect(reason).toContain("还有 199+ 条");
+  });
+
+  test("没有积压（remaining=0）或不知道深度（老服务端）→ 原来的单条提示，不编造「1/1」", () => {
+    for (const pointer of [
+      { channel: "pwtk", seq: 1923 },
+      { channel: "pwtk", seq: 1923, backlog: { remaining: 0, exact: true } },
+    ]) {
+      const reason = codexStopWakeReason(pointer);
+      expect(reason).not.toContain("1/");
+      expect(reason).not.toContain("ack --drain");
+      expect(reason).toContain("party history pwtk --since 1922");
+    }
+  });
+
+  test("带积压的提示守住 ≤512B，且最长合法频道名下排空命令仍完整保留（不能被截掉）", () => {
+    for (const channel of ["a", "pwtk", "x".repeat(64)]) {
+      const reason = codexStopWakeReason({ channel, seq: 999_999, backlog: { remaining: 199, exact: false } });
+      expect(Buffer.byteLength(reason, "utf8")).toBeLessThanOrEqual(CODEX_STOP_WAKE_REASON_MAX_BYTES);
+      expect(reason).toContain(`party ack --drain --channel ${channel}`);
+    }
+    // 超长（非法）频道名只保证不炸、不超预算、不为空。
+    const reason = codexStopWakeReason({ channel: "频道".repeat(100), seq: 1, backlog: { remaining: 8, exact: true } });
+    expect(Buffer.byteLength(reason, "utf8")).toBeLessThanOrEqual(CODEX_STOP_WAKE_REASON_MAX_BYTES);
+    expect(reason.length).toBeGreaterThan(0);
+  });
+
+  test("decide 把 pending 上的 backlog 原样带到 pointer；没有就不带", () => {
+    const withDepth = decideCodexStopWake(decideInput({
+      cursor: 1910,
+      pending: { seq: 1923, first_wake_ts: NOW, backlog: { remaining: 8, exact: true } },
+    }));
+    expect(withDepth).toEqual({ wake: true, pointer: { channel: "pwtk", seq: 1923, backlog: { remaining: 8, exact: true } } });
+    const without = decideCodexStopWake(decideInput({ cursor: 1910, pending: { seq: 1923, first_wake_ts: NOW } }));
+    expect(without).toEqual({ wake: true, pointer: { channel: "pwtk", seq: 1923 } });
+  });
+
+  describe("handleCodexStopRecord 事故复现", () => {
+    let home: string;
+    let emitted: string[];
+    let logged: string[];
+    let seenStore: Map<string, { seq: number; ts: number }[]>;
+    beforeEach(() => {
+      home = mkdtempSync(join(tmpdir(), "ap-958-"));
+      emitted = [];
+      logged = [];
+      seenStore = new Map();
+    });
+    afterEach(() => {
+      rmSync(home, { recursive: true, force: true });
+    });
+    // 没人挂 serve（stuck=null）、游标 1910、服务端按契约回「> since 全部 @ 我的」。
+    const deps = (overrides: Partial<CodexStopWakeDeps> = {}): CodexStopWakeDeps => ({
+      channel: () => "pwtk",
+      enabled: () => true,
+      stuck: () => null,
+      cursor: () => 1910,
+      nextMention: async (_channel, _cwd, since) => {
+        const seqs = CHANNEL_MENTIONS.filter((seq) => seq > since);
+        return seqs.length === 0 ? null : { seq: seqs[0]!, seqs, truncated: false };
+      },
+      seenPath: () => join(home, "seen.json"),
+      readSeen: (path) => seenStore.get(path) ?? [],
+      recordSeen: (path, seq, at) => {
+        seenStore.set(path, [...(seenStore.get(path) ?? []), { seq, ts: at }]);
+      },
+      emit: (line) => emitted.push(line),
+      log: (line) => logged.push(line),
+      now: () => NOW,
+      ...overrides,
+    });
+
+    test("积压 9 条：注入的仍是最老的 1923，但提示带「第 1/9 条 · 还有 8 条」和排空命令", async () => {
+      await handleCodexStopRecord(stopPayload(), {}, deps());
+      expect(emitted).toHaveLength(1);
+      const output = JSON.parse(emitted[0]!) as { decision: string; reason: string };
+      expect(output.decision).toBe("block");
+      // 逐条推进不许改：还是最老那条，不是最新的 1935。
+      expect(output.reason).toContain("seq 1923");
+      expect(output.reason).not.toContain("1935");
+      expect(output.reason).toContain("第 1/9 条");
+      expect(output.reason).toContain("还有 8 条");
+      expect(output.reason).toContain("party ack --drain --channel pwtk");
+      expect(Object.keys(output).sort()).toEqual(["decision", "reason"]);
+      // 日志也要看得出深度——排障时靠它区分「只送一条」和「队列太深」。
+      expect(logged.join("\n")).toContain("之后还排着 8 条");
+      expect(logged.join("\n")).toContain("第 1/9 条");
+    });
+
+    test("下一轮（1923 已在 seen 里）：提示变成第 1/8 条——深度随游标/seen 前进而收缩", async () => {
+      seenStore.set(join(home, "seen.json"), [{ seq: 1923, ts: NOW - 1 }]);
+      await handleCodexStopRecord(stopPayload(), {}, deps());
+      const output = JSON.parse(emitted[0]!) as { reason: string };
+      expect(output.reason).toContain("seq 1924");
+      expect(output.reason).toContain("第 1/8 条");
+      expect(output.reason).toContain("还有 7 条");
+    });
+
+    test("老服务端只回队首（seqs=null）：照常注入，但不编造深度", async () => {
+      await handleCodexStopRecord(stopPayload(), {}, deps({ nextMention: async () => legacy(1923) }));
+      const output = JSON.parse(emitted[0]!) as { reason: string };
+      expect(output.reason).toContain("seq 1923");
+      expect(output.reason).not.toContain("1/");
+      expect(output.reason).not.toContain("ack --drain");
+      expect(logged.join("\n")).not.toContain("之后还排着");
+    });
+
+    test("只剩最后一条（remaining=0）：不说「1/1」，走单条提示", async () => {
+      await handleCodexStopRecord(stopPayload(), {}, deps({ cursor: () => 1930 }));
+      const output = JSON.parse(emitted[0]!) as { reason: string };
+      expect(output.reason).toContain("seq 1935");
+      expect(output.reason).not.toContain("1/1");
+      expect(output.reason).toContain("party history pwtk --since 1934");
+    });
   });
 });

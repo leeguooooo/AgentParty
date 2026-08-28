@@ -84,6 +84,20 @@ export const CODEX_STOP_WAKE_QUERY_TIMEOUT_MS = 3_000;
 export interface CodexStopWakePointer {
   channel: string;
   seq: number;
+  /**
+   * 积压深度（#958）：这条 seq 之后还排着几条 @ 我的消息。缺省＝不知道（老服务端 / 走的是本地
+   * 欠账快路径），此时提示里**不许**假装只有一条——只是不说深度。`exact=false` 表示是下限
+   * （服务端扫描窗口被打满）。
+   */
+  backlog?: { remaining: number; exact: boolean };
+}
+
+/**
+ * 一次把积压的 @ 全部读完并推进游标的命令（#958）。注入提示、`party who`/`party send` 的
+ * deferred 行都指向同一条，让用户别拿回合数去换。
+ */
+export function codexStopWakeDrainCommand(channel: string): string {
+  return `party ack --drain --channel ${channel}`;
 }
 
 export function codexStopWakeSeenPath(home: string, target: string): string {
@@ -198,6 +212,21 @@ function clampUtf8(text: string, maxBytes: number): string {
  *   - 模型知道正文要去频道读，不许照着这条提示编内容。
  */
 export function codexStopWakeReason(pointer: CodexStopWakePointer): string {
+  const backlog = pointer.backlog;
+  if (backlog !== undefined && backlog.remaining > 0) {
+    // #958：积压时说清「第 1/N 条、还剩几条」，并把一次排空的命令直接给出来。每轮只推进一条是
+    // 对的（不漏消息），但用户必须知道自己在排队、以及怎么不用拿回合数去换。排空命令本身会把
+    // 全部正文打出来并推进游标，所以这里不再另给 `party history` 的单条读法（也省下 512B 预算）。
+    const remaining = `${backlog.remaining}${backlog.exact ? "" : "+"}`;
+    const total = `${backlog.remaining + 1}${backlog.exact ? "" : "+"}`;
+    return clampUtf8(
+      `[AgentParty] 频道 #${pointer.channel} 有 ${total} 条 @ 你的消息还没处理，这是第 1/${total} 条（seq ${pointer.seq}），` +
+        `还有 ${remaining} 条排在后面，每轮只会送一条。` +
+        `一次读完全部并推进游标：\`${codexStopWakeDrainCommand(pointer.channel)}\`。` +
+        `读到正文后按内容处理，用 \`party send\` 回到该频道。频道是唯一数据源，不要凭本提示猜测内容。`,
+      CODEX_STOP_WAKE_REASON_MAX_BYTES,
+    );
+  }
   return clampUtf8(
     `[AgentParty] 频道 #${pointer.channel} 有一条 @ 你的消息还没处理（seq ${pointer.seq}）。` +
       `请先执行 \`party history ${pointer.channel} --since ${Math.max(0, pointer.seq - 1)}\` 读到正文，` +
@@ -253,7 +282,7 @@ export interface CodexStopWakeInput extends CodexStopWakeGateInput {
    * 可以是 serve/watch 落在本地的欠账（快路径），也可以是本 hook 自己问服务端问来的。
    * 早先这里写死只认本地欠账，而 Stop hook 存在的场景恰恰是「没人挂 serve」⇒ 恒不触发。
    */
-  pending: Pick<StuckWake, "seq" | "first_wake_ts"> | null;
+  pending: (Pick<StuckWake, "seq" | "first_wake_ts"> & { backlog?: CodexStopWakePointer["backlog"] }) | null;
   /** 本频道游标：说到哪条为止已经了结了。 */
   cursor: number;
   /** 已注入过的 seq 集合。 */
@@ -285,5 +314,12 @@ export function decideCodexStopWake(input: CodexStopWakeInput): CodexStopWakeDec
   }
   // 防循环第 2 闸：同一条 @ 只注入一次。seen 是落盘的，跨进程有效。
   if (hasCodexStopWakeSeen(input.seen, pending.seq)) return { wake: false, skip: "already_woken" };
-  return { wake: true, pointer: { channel: input.channel as string, seq: pending.seq } };
+  return {
+    wake: true,
+    pointer: {
+      channel: input.channel as string,
+      seq: pending.seq,
+      ...(pending.backlog === undefined ? {} : { backlog: pending.backlog }),
+    },
+  };
 }

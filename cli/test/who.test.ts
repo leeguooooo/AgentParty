@@ -17,6 +17,7 @@ import {
   wakeGuidanceNote,
   wakeGuidanceOf,
   wakeHarnessOf,
+  deferredQueueNote,
 } from "../src/commands/who";
 import { buildPullWakeLookup, hasCodexStopHook, locallyConfiguredNames, type PullWakeLookup } from "../src/pull-wake";
 import type { CodexStopHookStatus } from "../src/wake-diagnosis";
@@ -851,5 +852,66 @@ describe("who 唤醒建议的装配（presence → 行 → 终端一行）", () 
     expect(rows[0]?.tier).toBe("wakeable");
     expect(rows[0]?.wake_guidance).toBeUndefined();
     expect(renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0)).not.toContain("↳ fix");
+  });
+});
+
+
+// #958：deferred 行必须带队列深度——Stop hook 每轮只送一条，积压 9 条时发送方那条要等 8 轮，
+// 不说深度就和「坏了」无法区分。条数取服务端账本的 unhandled_mention_count（近似，见 deferredQueueNote）。
+describe("who deferred 行的队列深度（#958）", () => {
+  const CH = "agentparty";
+  const stale = (over: Partial<PresenceEntry> & { name: string }): PresenceEntry =>
+    p({ state: "offline", wake: { kind: "none" }, last_seen: NOW - 88 * 60 * 60 * 1000, ...over });
+  const lookup = (names: string[]): PullWakeLookup =>
+    buildPullWakeLookup(CH, "https://s", { hasHook: () => true, hookStatus: () => "ok", names: () => new Set(names) });
+  const render = (entry: PresenceEntry): string => {
+    const rows = buildRows([entry], { now: NOW, channel: CH, pullWake: lookup([entry.name]) });
+    return renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0, CH);
+  };
+
+  test("积压 9 条：deferred 行说「9 unhandled @ queued ≈ 9 turns」并给出该频道的排空命令", () => {
+    const line = render(stale({
+      name: "lark-codex1",
+      unhandled_mention_count: 9,
+      pending_mention_seqs: [1923, 1924, 1925, 1926, 1927, 1928, 1929, 1930, 1935],
+    }));
+    expect(line).toContain("⇢ deferred");
+    expect(line).toContain("one per turn");
+    expect(line).toContain("9 unhandled @ queued ≈ 9 turns");
+    expect(line).toContain(`party ack --drain --channel ${CH}`);
+  });
+
+  test("只欠一条：单数措辞「1 turn」", () => {
+    expect(deferredQueueNote({ unhandled_mention_count: 1 } as Parameters<typeof deferredQueueNote>[0], CH))
+      .toContain("1 unhandled @ queued ≈ 1 turn —");
+  });
+
+  test("没有欠账：deferred 行不编造队列，也不给排空命令", () => {
+    const line = render(stale({ name: "lark-codex1" }));
+    expect(line).toContain("⇢ deferred");
+    expect(line).not.toContain("queued");
+    expect(line).not.toContain("ack --drain");
+  });
+
+  test("没传频道时排空命令退化成不带 --channel（仍可在绑定目录下直接跑）", () => {
+    expect(deferredQueueNote({ unhandled_mention_count: 3 } as Parameters<typeof deferredQueueNote>[0]))
+      .toContain("party ack --drain");
+    expect(deferredQueueNote({ unhandled_mention_count: 3 } as Parameters<typeof deferredQueueNote>[0]))
+      .not.toContain("--channel");
+  });
+
+  test("信任闸没过的身份走 wake blocked，不出现队列文案（先修 hook 再谈排队）", () => {
+    const rows = buildRows([stale({ name: "lark-codex1", unhandled_mention_count: 9 })], {
+      now: NOW,
+      channel: CH,
+      pullWake: buildPullWakeLookup(CH, "https://s", {
+        hasHook: () => true,
+        hookStatus: () => "disabled",
+        names: () => new Set(["lark-codex1"]),
+      }),
+    });
+    const line = renderRow(rows[0] as NonNullable<(typeof rows)[number]>, NOW, 0, CH);
+    expect(line).toContain("⛔ wake blocked");
+    expect(line).not.toContain("queued ≈");
   });
 });

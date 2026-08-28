@@ -56,11 +56,43 @@ describe("next-mention (#903)", () => {
     expect(await nextMention(slug, agent.token, mention)).toBe(second);
     expect(await nextMention(slug, agent.token, second)).toBeNull();
 
-    // 只回指针：响应体里除了 seq 什么都没有，正文一个字都不出现。
+    // 只回指针：响应体里只有 seq / seqs / truncated 三个指针字段，正文一个字都不出现。
     const res = await api(`/api/channels/${slug}/next-mention?since=0`, agent.token);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(Object.keys(body)).toEqual(["seq"]);
+    expect(Object.keys(body).sort()).toEqual(["seq", "seqs", "truncated"]);
     expect(JSON.stringify(body)).not.toContain("看一下");
+    expect(JSON.stringify(body)).not.toContain("还有这个");
+  });
+
+  // #958：codex Stop hook 每轮只推进一条；积压 9 条时它必须能说出「这是第 1/9 条」并给出排空命令，
+  // 所以端点除了队首 seq 还要回窗口内全部命中的 seq（升序、不含正文）。退回「命中即返回」的旧实现，
+  // seqs 会只剩一条，这里立刻红。
+  it("seqs 回 since 之后全部 @ 我的 seq（升序），seq 恒等于 seqs[0]，越过后为空", async () => {
+    const human = await seedToken("human");
+    const agent = await seedToken("agent");
+    const bystander = await seedToken("agent");
+    const slug = await createChannel(human.token);
+
+    const mine: number[] = [];
+    for (let i = 0; i < 9; i += 1) {
+      mine.push(await send(slug, human.token, `@${agent.name} 第 ${i} 条`, [agent.name]));
+      // 夹一条 @ 别人的：证明列表按身份过滤，而不是「since 之后所有带 @ 的消息」。
+      await send(slug, human.token, `@${bystander.name} 无关`, [bystander.name]);
+    }
+
+    const res = await api(`/api/channels/${slug}/next-mention?since=0`, agent.token);
+    const body = (await res.json()) as { seq: number | null; seqs: number[]; truncated: boolean };
+    expect(body.seqs).toEqual(mine);
+    expect(body.seq).toBe(mine[0]!);
+    expect(body.truncated).toBe(false);
+
+    // since 落在队列中间：只剩后面那几条。
+    const mid = await api(`/api/channels/${slug}/next-mention?since=${mine[3]}`, agent.token);
+    expect(((await mid.json()) as { seqs: number[] }).seqs).toEqual(mine.slice(4));
+
+    // 全部越过：空列表 + seq null。
+    const done = await api(`/api/channels/${slug}/next-mention?since=${mine[8]}`, agent.token);
+    expect(await done.json()).toEqual({ seq: null, seqs: [], truncated: false });
   });
 
   it("没被 @ 的身份恒得到 null（别人的 @ 不会被误报成自己的）", async () => {

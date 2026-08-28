@@ -44,8 +44,10 @@ import {
   liveCodexStopWakeSeen,
   readCodexStopWakeSeen,
   recordCodexStopWakeSeen,
+  type CodexStopWakePointer,
   type CodexStopWakeSeenEntry,
 } from "../codex-stop-wake";
+import type { NextMention } from "../rest";
 import {
   DeliveryRecoveryJournal,
   deliveryRecoveryJournalPath,
@@ -134,7 +136,9 @@ into channel presence, so \`party who\` and the web can see it.
                        ≤512B channel+seq pointer, so the wake happens **in the
                        session the user is looking at** instead of a new background
                        runner (#893). The channel stays the only source of truth:
-                       the pointer carries no message body.
+                       the pointer carries no message body. One @ per turn, oldest
+                       first; with a backlog the pointer says "第 1/N 条" and names
+                       \`party ack --drain\` to read them all at once (#958).
                        Loop safety is entirely ours — codex honours repeated blocks
                        without any cap of its own. Three gates, any one of which
                        lets the stop through: stop_hook_active, a persisted
@@ -1101,9 +1105,10 @@ export interface CodexStopWakeDeps {
   stuck: (channel: string, cwd: string) => Pick<StuckWake, "seq" | "first_wake_ts"> | null;
   /**
    * 问服务端「> since 的第一条 @ 我的消息是第几条」（#903）。只回 seq，不拉正文。
+   * #958 起同时带回 since 之后全部 @ 我的 seq（`seqs`，老服务端为 null），用来说出积压深度。
    * 实现必须自带独立超时并吞掉一切异常：拿不到就返回 null（= 本次放行）。
    */
-  nextMention: (channel: string, cwd: string, since: number) => Promise<number | null>;
+  nextMention: (channel: string, cwd: string, since: number) => Promise<NextMention | null>;
   cursor: (channel: string, cwd: string) => number;
   /** 已注入过的 seq 集合的落盘路径；拿不到身份时返回 null（→ 无法去重，必须放行）。 */
   seenPath: (channel: string, cwd: string) => string | null;
@@ -1246,13 +1251,18 @@ export async function handleCodexStopRecord(
   if (pending === null) {
     // 慢路径也是**主路径**：本 hook 的目标场景恰恰是「没人挂 serve」，那时本地永远没有欠账。
     const startedAt = deps.now();
-    const seq = await deps.nextMention(boundChannel, cwd, since);
+    const next = await deps.nextMention(boundChannel, cwd, since);
+    // #958：积压深度＝队首之后还有几条。老服务端不报列表 ⇒ 不知道 ⇒ 提示里不说深度（绝不假装只有一条）。
+    const backlog = codexStopWakeBacklog(next);
     deps.log(
       `codex-stop: next-mention 查询（since ${since}）耗时 ${deps.now() - startedAt}ms，` +
-        `结果 ${seq === null ? "无/不可用" : `seq ${seq}`}`,
+        `结果 ${next === null ? "无/不可用" : `seq ${next.seq}`}` +
+        (backlog === undefined ? "" : `，之后还排着 ${backlog.remaining}${backlog.exact ? "" : "+"} 条`),
     );
     // 服务端问来的是「此刻仍未处理」，天然不可能是陈年欠账，故 first_wake_ts 取现在。
-    pending = seq === null ? null : { seq, first_wake_ts: deps.now() };
+    pending = next === null
+      ? null
+      : { seq: next.seq, first_wake_ts: deps.now(), ...(backlog === undefined ? {} : { backlog }) };
   }
   const decision = decideCodexStopWake({
     payload: record,
@@ -1275,9 +1285,20 @@ export async function handleCodexStopRecord(
     decision: "block",
     reason: codexStopWakeReason(decision.pointer),
   }));
+  const depth = decision.pointer.backlog;
   deps.log(
-    `codex-stop: 在当前 codex 会话里注入了 #${decision.pointer.channel} seq ${decision.pointer.seq} 的指针`,
+    `codex-stop: 在当前 codex 会话里注入了 #${decision.pointer.channel} seq ${decision.pointer.seq} 的指针` +
+      (depth === undefined ? "" : `（第 1/${depth.remaining + 1}${depth.exact ? "" : "+"} 条，提示里已给出排空命令）`),
   );
+}
+
+/**
+ * 从 next-mention 的回答里算积压深度（#958）：`seqs` 是 since 之后全部 @ 我的 seq，队首之外的就是
+ * 还排着的。老服务端没有 `seqs` ⇒ undefined ⇒ 提示里不提深度。纯函数，便于单测。
+ */
+export function codexStopWakeBacklog(next: NextMention | null): CodexStopWakePointer["backlog"] | undefined {
+  if (next === null || next.seqs === null) return undefined;
+  return { remaining: Math.max(0, next.seqs.length - 1), exact: !next.truncated };
 }
 
 /** `party hook codex-stop`：读一条 codex Stop 事件，必要时 block 一次让会话继续跑一轮。 */

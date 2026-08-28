@@ -7,13 +7,15 @@ import {
   MAX_MENTIONS,
   mentionMatchKey,
   type Attachment,
+  type PresenceEntry,
 } from "@agentparty/shared";
 import { isHelpArg, parseArgs, str, strArray, unknownFlagError, valueFlagError, type Parsed } from "../args";
 import { advanceCursorPastOwnMessage, resolveChannel, type Config } from "../config";
 import { stripTerminalControls } from "../format";
 import { formatAuthDebugLine, resolveAuthDetailed } from "../oidc-cli";
 import { fetchMe, fetchPresence, handleRestError, postMessage, RestError, uploadAttachment } from "../rest";
-import { formatReachLine, formatUnreachable, reachOf, unreachableOf } from "../reach";
+import { buildPullWakeLookup, type PullWakeLookup } from "../pull-wake";
+import { deferredOf, formatDeferred, formatReachLine, formatUnreachable, reachOf, unreachableOf } from "../reach";
 import { localStatuslineBase, statuslinePreview, unreadFromCursor, writeStatuslineCache } from "../statusline-cache";
 import { isName, isSlug, parsePositiveIntFlag } from "../validation";
 
@@ -392,7 +394,7 @@ export async function run(argv: string[]): Promise<number> {
   if (typeof result === "number") return result;
   const attachNote = input.attachPaths.length > 0 ? ` (+${input.attachPaths.length} attachment${input.attachPaths.length > 1 ? "s" : ""})` : "";
   console.log(`sent seq=${result.seq}${attachNote}`);
-  const { unreachable } = await showReach(auth.server, auth.token, parsed, input);
+  const { unreachable } = await showReach(auth.server, auth.token, parsed, input, result.seq);
   // #664：--require-wakeable 严格模式——目标不可唤醒时，消息照发（seq 已打），但用独立非零码退出，
   // 让调用方能编程判定「派发未落地」。非严格模式永远返回 0（warning 只提示、不阻断）。
   if (parsed.flags["require-wakeable"] === true && unreachable.length > 0) return EXIT_UNREACHABLE;
@@ -411,6 +413,7 @@ async function showReach(
   token: string,
   parsed: Parsed,
   input: SendInput,
+  sentSeq: number,
 ): Promise<{ unreachable: string[] }> {
   if (input.mentions.length === 0) return { unreachable: [] };
   const requireWakeable = parsed.flags["require-wakeable"] === true;
@@ -426,16 +429,48 @@ async function showReach(
     /* 锦上添花：presence 拉取失败不报错，消息已发成功 */
     return { unreachable: [] };
   }
-  const now = Date.now();
-  if (wantLine) console.error(formatReachLine(input.mentions.map((m) => reachOf(m, presence, now))));
+  const report = reachReport({
+    mentions: input.mentions,
+    presence,
+    now: Date.now(),
+    channel: input.channel,
+    sentSeq,
+    wantLine,
+    wantWarn,
+    // #958：与 who 同一套本机线索——目标装了 codex Stop hook 时，warn 行改成「在排队、排多深」。
+    pullWake: buildPullWakeLookup(input.channel, server),
+  });
+  for (const line of report.lines) console.error(line);
+  return { unreachable: report.unreachable };
+}
+
+/**
+ * 发送后可达性反馈的纯计算部分（抽出来让 deferred 行可以不起子进程就断言）。
+ * 返回的 unreachable 名单仍含 deferred 目标：它此刻确实叫不醒（要等对方下一个 turn），
+ * --require-wakeable 的语义不因文案变化而松动。
+ */
+export function reachReport(input: {
+  mentions: string[];
+  presence: PresenceEntry[];
+  now: number;
+  channel: string;
+  sentSeq: number;
+  wantLine: boolean;
+  wantWarn: boolean;
+  pullWake?: PullWakeLookup;
+}): { lines: string[]; unreachable: string[] } {
+  const { mentions, presence, now } = input;
+  const lines: string[] = [];
+  if (input.wantLine) lines.push(formatReachLine(mentions.map((m) => reachOf(m, presence, now))));
   const unreachable: string[] = [];
-  if (wantWarn) {
-    for (const mention of input.mentions) {
+  if (input.wantWarn) {
+    for (const mention of mentions) {
       const u = unreachableOf(mention, presence, now);
       if (u === null) continue;
-      console.error(formatUnreachable(u));
+      const deferred = deferredOf(u, presence, input.pullWake?.hintFor(u.name), input.channel, input.sentSeq);
+      lines.push(deferred === null ? formatUnreachable(u) : formatDeferred(deferred));
       unreachable.push(u.name);
     }
   }
-  return { unreachable };
+  return { lines, unreachable };
 }
