@@ -428,6 +428,14 @@ export interface TaskRecord {
  */
 export const WAKE_VERIFY_PREFIX = "[wake-verify]";
 
+/**
+ * 验证帧的服务端限频窗口（#997）：同一 (channel, sender) 在这个窗口内最多放行一条验证帧。
+ * 验证帧绕过自 @ 过滤、又不计 loop guard，等于一条不受熔断约束的写入通道（刷历史 / directed delivery /
+ * ledger）——限频是它唯一的闸，独立于 loop guard，熔断中照样拒。超出返回 `wake_verify_rate_limited`，
+ * 并带 retry_after_ms / retry_at 告诉调用方下次可发的时间。
+ */
+export const WAKE_VERIFY_MIN_INTERVAL_MS = 30_000;
+
 export function isWakeVerifyFrame(frame: {
   kind: MessageKind;
   body?: string | null;
@@ -652,6 +660,8 @@ export type ErrorCode =
   | "too_large"
   | "loop_guard"
   | "workflow_guard"
+  // #997：接入验证帧被按发送者限频（WAKE_VERIFY_MIN_INTERVAL_MS）；错误体带 retry_after_ms / retry_at。
+  | "wake_verify_rate_limited"
   | "archived"
   | "quota_exceeded"
   | "channel_full"
@@ -2559,6 +2569,9 @@ export interface ErrorFrame {
   type: "error";
   code: ErrorCode;
   message: string;
+  /** #997：限频类错误（wake_verify_rate_limited）附带的下次可发时间——距现在的毫秒数与绝对时间戳。 */
+  retry_after_ms?: number;
+  retry_at?: number;
 }
 
 export interface PongFrame {

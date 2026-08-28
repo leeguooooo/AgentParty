@@ -21,8 +21,10 @@ verify is onboarding step 4 (#990): it sends ONE verify frame as YOUR OWN identi
 (\`[wake-verify] @you ping\`, the only self-mention the server and the local listeners
 treat as a real summons), waits for the reply, and on timeout names the layer that
 did not deliver — server_delivery / local_listener / model_reply — with one fix.
-The frame is never counted against the loop guard. Exit code 0 only on a real
-round trip.
+The frame is never counted against the loop guard, but the server accepts at most
+one verify frame per sender per 30s (wake_verify_rate_limited says when to retry).
+Your identity comes from /api/me; the cached config identity is only a fallback.
+Exit code 0 only on a real round trip.
 
 check answers one question about THIS machine, with no network at all: "if someone
 @s me right now, will anything happen?" It prints how many steps are still missing
@@ -486,8 +488,35 @@ function runCheck(json: boolean): number {
 
 /**
  * `party wake verify`（#990）：接入引导第 4 步，以本身份真发一条 @ 验证往返。
- * 身份取本地缓存的 config.identity，没有就问 /api/me；harness 从加入绑定里认（修法命令按档给）。
+ * 身份以 /api/me 的权威答复为准（#997）：本地 config.identity 只是缓存——config 里是旧身份时验证帧会
+ * @ 错人、harness 回退 other、修法命令不准。缓存与权威不一致时打印提示；/api/me 不可达才退回缓存。
+ * harness 从加入绑定里认（修法命令按档给）。
  */
+export async function resolveVerifyIdentity(
+  cfg: { server: string; token: string },
+  deps: { cached: () => string | null; fetchMe: (server: string, token: string) => Promise<{ name: string }>; warn: (line: string) => void } = {
+    cached: () => readConfig()?.identity?.name ?? null,
+    fetchMe: async (server, token) => fetchMe(server, token),
+    warn: (line) => console.error(line),
+  },
+): Promise<{ identity: string; source: "server" | "cache" }> {
+  const cachedRaw = deps.cached();
+  const cached = cachedRaw === null || cachedRaw === "" ? null : cachedRaw;
+  let identity: string;
+  try {
+    identity = (await deps.fetchMe(cfg.server, cfg.token)).name;
+  } catch (e) {
+    if (cached === null) throw e;
+    const message = e instanceof Error ? e.message : String(e);
+    deps.warn(`warn: /api/me 不可达（${message}），暂以本地缓存身份 ${cached} 验证；结果可能不准`);
+    return { identity: cached, source: "cache" };
+  }
+  if (cached !== null && cached !== identity) {
+    deps.warn(`note: 本地 config 缓存的身份 ${cached} 与服务端登记的 ${identity} 不一致，以服务端为准（party whoami 可刷新缓存）`);
+  }
+  return { identity, source: "server" };
+}
+
 async function runVerify(channelPositional: string | undefined, flags: ReturnType<typeof parseArgs>["flags"]): Promise<number> {
   const unknown = unknownFlagError(flags, WAKE_FLAGS);
   if (unknown !== null) {
@@ -520,8 +549,7 @@ async function runVerify(channelPositional: string | undefined, flags: ReturnTyp
   }
   const { verifyWakeRoundTrip, formatWakeVerifyStep, DEFAULT_WAKE_VERIFY_TIMEOUT_MS } = await import("../onboarding/verify-wake");
   try {
-    let identity = readConfig()?.identity?.name ?? null;
-    if (identity === null || identity === "") identity = (await fetchMe(cfg.server, cfg.token)).name;
+    const { identity, source: identitySource } = await resolveVerifyIdentity(cfg);
     const bindings = readJoinBindings(joinBindingsPath(agentpartyHome()));
     const bound = bindings.find((b) => b.channel === channel && b.identity === identity && b.harness !== "other");
     const harness = bound?.harness ?? "other";
@@ -532,6 +560,7 @@ async function runVerify(channelPositional: string | undefined, flags: ReturnTyp
         type: "wake_verify",
         channel,
         identity,
+        identity_source: identitySource,
         harness,
         ok: result.ok,
         elapsed_ms: result.elapsedMs,

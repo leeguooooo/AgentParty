@@ -8,6 +8,7 @@ import {
   LOOP_GUARD_AGENT_PARTY_N,
   LOOP_GUARD_N,
   LOOP_GUARD_PARTY_N,
+  WAKE_VERIFY_MIN_INTERVAL_MS,
   isWakeVerifyFrame,
   MAX_ALSO_RESOLVES,
   MAX_WEBHOOKS_PER_CHANNEL,
@@ -275,8 +276,30 @@ type SendSuccessOutcome =
 
 type SendOutcome =
   | SendSuccessOutcome
-  | { ok: false; code: ErrorCode; message: string };
+  | {
+      ok: false;
+      code: ErrorCode;
+      message: string;
+      /** #997：限频类拒绝附带的下次可发时间（距现在毫秒 / 绝对时间戳），REST 与 WS 错误体原样带出。 */
+      retryAfterMs?: number;
+      retryAt?: number;
+    };
 type SendErrorOutcome = Extract<SendOutcome, { ok: false }>;
+
+/** 拒发结果 → 客户端错误体（REST `error` 对象 / WS error 帧字段），限频类带 retry_after_ms / retry_at。 */
+function sendErrorBody(out: SendErrorOutcome): {
+  code: ErrorCode;
+  message: string;
+  retry_after_ms?: number;
+  retry_at?: number;
+} {
+  return {
+    code: out.code,
+    message: out.message,
+    ...(out.retryAfterMs === undefined ? {} : { retry_after_ms: out.retryAfterMs }),
+    ...(out.retryAt === undefined ? {} : { retry_at: out.retryAt }),
+  };
+}
 
 interface ResolvedMentionFrame {
   frame: SendFrame;
@@ -314,6 +337,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   too_large: 413,
   loop_guard: 409,
   workflow_guard: 409,
+  wake_verify_rate_limited: 429,
   archived: 410,
   quota_exceeded: 403,
   channel_full: 429,
@@ -3104,7 +3128,7 @@ export class ChannelDO extends Server<Env> {
         { countRate: false, sessionId: connection.id },
       );
       if (!out.ok) {
-        this.sendFrame(connection, { type: "error", code: out.code, message: out.message });
+        this.sendFrame(connection, { type: "error", ...sendErrorBody(out) });
         return;
       }
       // 幂等去重命中（#98）：只回 sent（原 seq），不重复广播/唤醒。ws 发送目前不带 key，故常态为 false。
@@ -4963,13 +4987,23 @@ export class ChannelDO extends Server<Env> {
   // #990：唯一例外是接入验证帧（isWakeVerifyFrame：`[wake-verify]` 前缀 + mentions 只含自己）——它的存在理由
   // 就是让本身份走一遍真实唤醒链，所以传了 frame 且判定为验证帧时，自 @ **就是**召唤。不传 frame 的调用点
   // 保持 #963 原判（保守：宁可不唤醒）。
+  //
+  // #997：验证帧只对**已登记的 agent 身份**成立——帧带 sender.kind 时，非 agent（人类 / 只读）发的
+  // `[wake-verify]` 自 @ 仍按普通自 @ 处理；发送时的 owner 绑定核对在 routeMentionsForDelivery（有 D1 目录）。
   private isSelfMention(
     senderName: string,
     target: string,
-    frame?: { kind: MessageKind; body?: string | null; mentions?: readonly string[] | null },
+    frame?: {
+      kind: MessageKind;
+      body?: string | null;
+      mentions?: readonly string[] | null;
+      sender?: { kind?: SenderKind };
+    },
   ): boolean {
     if (mentionMatchKey(senderName) !== mentionMatchKey(target)) return false;
-    if (frame !== undefined && isWakeVerifyFrame({ ...frame, sender: { name: senderName } })) return false;
+    if (frame === undefined) return true;
+    if (frame.sender?.kind !== undefined && frame.sender.kind !== "agent") return true;
+    if (isWakeVerifyFrame({ ...frame, sender: { name: senderName } })) return false;
     return true;
   }
 
@@ -6130,6 +6164,7 @@ export class ChannelDO extends Server<Env> {
               reply_to: row.reply_to === null || row.reply_to === undefined ? null : Number(row.reply_to),
             },
             identity.name,
+            { kind: identity.kind, principal: this.identityDeliveryPrincipal(identity) },
           );
           if ("ok" in routed) {
             return Response.json(
@@ -6378,7 +6413,7 @@ export class ChannelDO extends Server<Env> {
         { countRate: true },
       );
       if (!out.ok) {
-        return Response.json({ error: { code: out.code, message: out.message } }, { status: ERROR_STATUS[out.code] });
+        return Response.json({ error: sendErrorBody(out) }, { status: ERROR_STATUS[out.code] });
       }
       // 同一次超越是一个修订事件：新旧两行共用一个 rev_seq
       const supersedeRev = this.nextRevSeq();
@@ -7202,10 +7237,7 @@ export class ChannelDO extends Server<Env> {
         ...(expectedDecisionResponderOwner === undefined ? {} : { expectedDecisionResponderOwner }),
       });
       if (!out.ok) {
-        return Response.json(
-          { error: { code: out.code, message: out.message } },
-          { status: ERROR_STATUS[out.code] },
-        );
+        return Response.json({ error: sendErrorBody(out) }, { status: ERROR_STATUS[out.code] });
       }
       // 幂等去重命中（#98）：首发时已广播/唤醒过，重发只回原 seq，绝不重复副作用
       if (!out.deduped) {
@@ -8506,6 +8538,12 @@ export class ChannelDO extends Server<Env> {
   private async routeMentionsForDelivery(
     frame: SendFrame,
     senderName: string,
+    /**
+     * #997：发送者的登记身份（kind + 创建时 principal）。验证帧把自己列为投递目标的唯一条件是：
+     * 发送者是 agent，且 D1 目录里该名字当前登记的 principal 就是发送者自己——名字被别的账号占用 /
+     * 登记不上时，验证帧退化为普通自 @（不建 delivery、不免 loop guard）。不传 = 不放行任何自 @。
+     */
+    senderBinding?: { kind: SenderKind; principal: string },
   ): Promise<RoutedMentionFrame | SendErrorOutcome> {
     const mentionResolution = await this.resolveMentions(frame);
     if ("ok" in mentionResolution) return mentionResolution;
@@ -8558,13 +8596,18 @@ export class ChannelDO extends Server<Env> {
         (frame.mentions ?? []).filter((target) => !invalidAutoKeys.has(mentionMatchKey(target))),
       );
     }
+    const senderKey = mentionMatchKey(senderName);
+    const senderFrame = senderBinding === undefined ? frame : { ...frame, sender: { kind: senderBinding.kind } };
     return {
       frame,
       // #963：发信人自己不入 deliveryTargets——自 @ 不建 directed delivery，否则每个同身份 runtime
       // 都会把这条「提到自己」的回帖当成一次新召唤。mentions 数组保持原样（正文高亮/历史不受影响）。
+      // #997：验证帧（唯一放行的自 @）还要求目录登记的 principal 与发送者一致，见 senderBinding。
       deliveryTargets: candidateDeliveryTargets.filter((target) =>
-        !this.isSelfMention(senderName, target, frame) &&
+        !this.isSelfMention(senderName, target, senderFrame) &&
         Object.prototype.hasOwnProperty.call(ownerLookup, target) &&
+        (mentionMatchKey(target) !== senderKey ||
+          (senderBinding !== undefined && ownerLookup[target] === senderBinding.principal)) &&
         (expectedAutoOwners.get(mentionMatchKey(target)) === undefined || !invalidAutoKeys.has(mentionMatchKey(target)))
       ),
       deliveryTargetOwners: ownerLookup,
@@ -8747,7 +8790,10 @@ export class ChannelDO extends Server<Env> {
     if (byteLength(payload) > BODY_LIMIT) {
       return { ok: false, code: "too_large", message: `body exceeds ${BODY_LIMIT} bytes` };
     }
-    const mentionRouting = await this.routeMentionsForDelivery(frame, identity.name);
+    const mentionRouting = await this.routeMentionsForDelivery(frame, identity.name, {
+      kind: identity.kind,
+      principal: this.identityDeliveryPrincipal(identity),
+    });
     if ("ok" in mentionRouting) return mentionRouting;
     frame = mentionRouting.frame;
     const { deliveryTargets, deliveryTargetOwners } = mentionRouting;
@@ -8768,8 +8814,20 @@ export class ChannelDO extends Server<Env> {
     const loopGuard = identity.kind === "agent" && frame.kind === "message" ? this.loopGuardMessage(identity.name) : null;
     // #990：接入验证帧是探针不是对话——照样过 guard 的闸（频道熔断时 @ 本来就到不了它，拒掉是真话），
     // 但**不计入** streak / fair-share：一台机器反复跑接入引导不该把频道的名额吃光（#959 同一类教训）。
+    // #997：「验证帧」的完整判据 = 帧形状（isWakeVerifyFrame）+ 发送者是已登记 agent + mentions 绑定到
+    // 发送者自己的登记身份（routeMentionsForDelivery 已用 D1 目录核过 principal，核不过就不会把自己列入
+    // deliveryTargets）。三者缺一，就按普通自 @ 处理：不免 guard、不限频、不建 delivery。
     const verifyProbe =
-      frame.kind === "message" && isWakeVerifyFrame({ ...frame, sender: { name: identity.name } });
+      frame.kind === "message" &&
+      identity.kind === "agent" &&
+      isWakeVerifyFrame({ ...frame, sender: { name: identity.name } }) &&
+      deliveryTargets.some((target) => mentionMatchKey(target) === mentionMatchKey(identity.name));
+    // #997：验证帧按 (channel, sender) 限频——它绕过自 @ 过滤又不计 loop guard，这是它唯一的闸。
+    // 放在 loop guard 之前、独立判定：熔断中也照拒，且不因熔断而放过刷帧。
+    if (verifyProbe) {
+      const limited = this.wakeVerifyRateLimit(identity.name, Date.now());
+      if (limited !== null) return limited;
+    }
     if (loopGuard !== null) {
       this.alertLoopGuard(loopGuard);
       return {
@@ -9103,7 +9161,10 @@ export class ChannelDO extends Server<Env> {
     const workflowGuardFrame = this.applyWorkflowGuardAfterSend(identity, msg, workflowGuard, now);
     if (frame.kind === "message") {
       if (identity.kind === "agent") {
-        if (!verifyProbe) {
+        if (verifyProbe) {
+          // #997：限频窗口从这条被接受的验证帧起算（被拒的不占窗口——熔断解除后立刻重跑验证不该再等 30s）。
+          this.setMeta(this.wakeVerifyAtKey(identity.name), String(now));
+        } else {
           this.setMeta("agent_streak", String(this.agentStreak() + 1));
           this.setMeta(this.agentCountKey(identity.name), String(this.agentCount(identity.name) + 1));
         }
@@ -10196,6 +10257,34 @@ export class ChannelDO extends Server<Env> {
 
   private agentCountKey(name: string): string {
     return `agent_count:${name}`;
+  }
+
+  // #997：验证帧限频状态——与 streak / fair-share 同一形态，落 DO 的 meta 表（key 按发送者分片），
+  // 值是最近一条**被接受**的验证帧的时间戳。不随 clearLoopGuardState 清：限频独立于 loop guard，
+  // 人类发言 / reset-guard 都不该把它归零。
+  private wakeVerifyAtKey(name: string): string {
+    return `wake_verify_at:${name}`;
+  }
+
+  private wakeVerifyRateLimit(name: string, now: number): SendErrorOutcome | null {
+    const raw = this.getMeta(this.wakeVerifyAtKey(name));
+    if (raw === null) return null;
+    const last = Number(raw);
+    if (!Number.isFinite(last)) return null;
+    const retryAt = last + WAKE_VERIFY_MIN_INTERVAL_MS;
+    const retryAfterMs = retryAt - now;
+    if (retryAfterMs <= 0) return null;
+    const windowSec = Math.round(WAKE_VERIFY_MIN_INTERVAL_MS / 1000);
+    const waitSec = Math.max(1, Math.ceil(retryAfterMs / 1000));
+    return {
+      ok: false,
+      code: "wake_verify_rate_limited",
+      message:
+        `${name} already sent a wake-verify frame in this channel within the last ${windowSec}s ` +
+        `(limit: 1 per ${windowSec}s per sender); retry in ${waitSec}s, at ${new Date(retryAt).toISOString()}`,
+      retryAfterMs,
+      retryAt,
+    };
   }
 
   // 熔断实际生效的阈值：显式配置优先，否则回落 normal/party 默认（便于手工修复旧 DO meta）。
