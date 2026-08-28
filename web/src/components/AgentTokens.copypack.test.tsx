@@ -198,9 +198,11 @@ describe("AgentTokens copy join pack (#584/#944)", () => {
 
     expect(copiedTexts.length).toBe(1);
     const pack = copiedTexts[0]!;
-    // #944：现场重建成新的两行形态（install + party join），原 token 走 AGENTPARTY_TOKEN 前缀不进 argv（#676）。
-    expect(pack).toContain("command -v party >/dev/null || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh");
+    // #992：现场重建成「一句话 + 一条命令」形态，原 token 走 AGENTPARTY_TOKEN 前缀不进 argv（#676）。
+    expect(pack).toContain("分步引导");
+    expect(pack).not.toMatch(/^command -v party/m);
     expect(pack).toContain("AGENTPARTY_TOKEN='ap_old_token' party join --server https://party.example --channel demo --as legacy-bot");
+    expect(pack).toMatch(/ --yes$/);
     expect(pack).not.toContain("--token ap_old_token");
     // 108 行里逐条手工执行的机械步骤全部收进 party join——粘贴稿里不再出现它们。
     expect(pack).not.toContain("party init --server");
@@ -278,7 +280,7 @@ describe("AgentTokens copy join pack · harness 档位 (#902/#944)", () => {
     expect(pack).not.toContain("--harness");
   });
 
-  test("rotate 后写回 vault 的 command 也是新的两行 party join 产物（名字带 codex → 预选 codex 档）", async () => {
+  test("rotate 后写回 vault 的 command 也是新的「一句话 + 一条 party join」产物（名字带 codex → 预选 codex 档）", async () => {
     // 没有明文记录 → 面板给「rotate 并取回」，走 regenerateAndSaveToken 这条曾经手写包的路径。
     localStorage.removeItem("ap_agent_token_vault:v1");
     agentsFixture = [{ name: "codex-bot", owner: "acct-1", channel_scope: "demo", created_at: 0 }];
@@ -295,8 +297,9 @@ describe("AgentTokens copy join pack · harness 档位 (#902/#944)", () => {
     expect(saved.name).toBe("codex-bot");
     // 名字里带 codex → 预选 codex 档（#896 的既有推断规则）→ party join 带 --harness codex。
     expect(saved.command).toContain("party join --server https://party.example --channel demo --as codex-bot --harness codex");
-    // 而且是新的两行形态，不是旧的冻结/最小包。
-    expect(saved.command).toContain("command -v party >/dev/null || curl -fsSL");
+    // 而且是新的「一句话 + 一条命令」形态，不是旧的冻结/最小包。
+    expect(saved.command).toContain("分步引导");
+    expect(saved.command).toMatch(/ --yes$/);
     expect(saved.command).not.toContain("party init --server");
   });
 });

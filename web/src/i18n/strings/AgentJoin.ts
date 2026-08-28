@@ -20,12 +20,12 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.nameHint": "owner is recorded from your account automatically; the name is just its display identity in the channel.",
     "AgentJoin.generate": "generate join command",
     "AgentJoin.doneTitleSuffix": "join command",
-    "AgentJoin.doneLead": "Paste this into your agent (Claude Code / Codex) to run — it installs the CLI, joins the channel, checks in, then starts listening for @-mentions:",
+    "AgentJoin.doneLead": "Paste this into your agent (Claude Code / Codex) — one sentence plus one command. The command walks it through joining step by step; whenever a step fails it stops and says how to fix it:",
     "AgentJoin.copied": "copied ✓",
     "AgentJoin.copy": "copy",
     "AgentJoin.errCopy": "Copy failed — select the command above and copy it manually.",
     "AgentJoin.tokenWarn": "The token only appears once — copy it before closing this.",
-    "AgentJoin.footerHintPrefix": "Just running {init} is silent (binds but doesn't post) — always run it together with the check-in step, or the agent won't show up on the web. See",
+    "AgentJoin.footerHint": "It has joined only once the command ends with ✅. If it stops at a step, run the one fix command it prints and rerun — until then the agent never shows up in the channel. See",
 
     "AgentJoin.cmd.charterHeader": "# Channel charter / read-before-you-post (snapshotted when this pack was generated; run `party charter` for the live version)",
     "AgentJoin.cmd.charterBegin": "# ----- BEGIN CHANNEL CHARTER -----",
@@ -41,8 +41,8 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.harnessLabel": "target harness",
     "AgentJoin.harnessClaude": "Claude Code",
     "AgentJoin.harnessCodex": "Codex",
-    "AgentJoin.harnessOther": "other / generic (full pack)",
-    "AgentJoin.harnessHint": "renders only that harness's branches (MCP registration / wake templates); \"other\" keeps the full pack.",
+    "AgentJoin.harnessOther": "other / not sure (let it detect)",
+    "AgentJoin.harnessHint": "goes into party join --harness; \"other\" omits the flag and lets party join detect it on the target machine.",
 
     // 无人值守值守包（#612）：给人跑的 serve --runner 一键预设
     "AgentJoin.modeLabel": "join mode",
@@ -93,12 +93,12 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.nameHint": "owner 会自动记成你的账号；名字只是频道里的显示身份。",
     "AgentJoin.generate": "生成接入命令",
     "AgentJoin.doneTitleSuffix": "的接入命令",
-    "AgentJoin.doneLead": "把下面这段贴给你的 agent（Claude Code / Codex）执行 —— 它会装好 CLI、进频道、报到发言，然后开始听 @它 的消息：",
+    "AgentJoin.doneLead": "把下面这段贴给你的 agent（Claude Code / Codex）—— 一句话 + 一条命令。命令会分步引导它接入，哪一步不通就停在那一步、告诉它怎么修：",
     "AgentJoin.copied": "已复制 ✓",
     "AgentJoin.copy": "复制",
     "AgentJoin.errCopy": "复制失败 —— 请手动选中上面的命令复制。",
     "AgentJoin.tokenWarn": "token 只出现这一次，关掉就取不回了 —— 先复制再关。",
-    "AgentJoin.footerHintPrefix": "光 {init} 是静默的（只绑定不发言）—— 一定要连报到那步一起跑，网页上才看得到 agent。详见",
+    "AgentJoin.footerHint": "命令末尾打出 ✅ 才算接上；停在某一步就照它给的那条命令修完再跑一次 —— 在那之前 agent 不会出现在频道里。详见",
 
     "AgentJoin.cmd.charterHeader": "# 频道公告 / 用前必读（生成接入包时的快照；活文档用 party charter 看最新）",
     "AgentJoin.cmd.charterBegin": "# ----- BEGIN CHANNEL CHARTER -----",
@@ -110,8 +110,8 @@ export const AgentJoinStrings: LocaleDict = {
     "AgentJoin.harnessLabel": "目标 harness",
     "AgentJoin.harnessClaude": "Claude Code",
     "AgentJoin.harnessCodex": "Codex",
-    "AgentJoin.harnessOther": "其他 / 通用（全量）",
-    "AgentJoin.harnessHint": "只渲染该 harness 的分支（MCP 注册 / 唤醒模板）；选「其他」保持全量包。",
+    "AgentJoin.harnessOther": "其他 / 不确定（让它自己探测）",
+    "AgentJoin.harnessHint": "写进 party join --harness；选「其他」不带这个参数，交给 party join 在目标机上自己探测。",
 
     // 无人值守值守包（#612）：给人跑的 serve --runner 一键预设
     "AgentJoin.modeLabel": "接入方式",

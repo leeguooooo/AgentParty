@@ -1,9 +1,9 @@
-// #944：接入包从 108 行粘贴稿压成「一小段行为约定（3 行注释）+ 两行命令」（install + party join）。
-// 那 108 行里逐条手工执行的机械步骤（写 config/rules、判重、绑定、注册 MCP、装+批准 hook、报到、
-// 自检）全部收进 `party join` 这一条命令。web（AgentJoin/vault）与 cli（party invite）同源共用
-// shared/onboarding 的 builder，别再各写一份（#585）。
+// #944 把 108 行粘贴稿压成「三行行为约定 + 两行命令」；#992（epic #987）再压成「一句话 + 一条命令」：
+// 机械步骤早已全收进 `party join`，而 `party join` 本身就是分步引导（每步 check → 过/不过 →
+// 不过给一条修法并停在那一步），粘贴稿里不再需要任何提示词。web（AgentJoin/vault）与 cli
+// （party invite）同源共用 shared/onboarding 的 builder，别再各写一份（#585）。
 import { describe, expect, test } from "bun:test";
-import { buildInteractiveJoinPack } from "@agentparty/shared/onboarding";
+import { buildInteractiveJoinPack, INSTALL_SH_RAW_URL } from "@agentparty/shared/onboarding";
 import { lookup } from "../i18n/dict";
 import type { TFunc } from "../i18n/useT";
 import { buildFullJoinPack, type JoinPackHarness } from "./joinPack";
@@ -27,18 +27,42 @@ function pack(harness?: JoinPackHarness, inviterName = "leo"): string {
   });
 }
 
-function executableLines(text: string): string[] {
-  return text.split("\n").filter((l) => l.trim() !== "" && !l.trimStart().startsWith("#"));
+function nonBlankLines(text: string): string[] {
+  return text.split("\n").filter((l) => l.trim() !== "");
 }
 
-describe("接入包 = 一段行为约定 + 两行命令（#944）", () => {
-  test("整包只有两条可执行命令：install（缺失才装）+ party join", () => {
-    const exec = executableLines(pack("claude"));
-    expect(exec).toHaveLength(2);
+function executableLines(text: string): string[] {
+  return nonBlankLines(text).filter((l) => !l.trimStart().startsWith("#"));
+}
+
+describe("接入包 = 一句话 + 一条命令（#992）", () => {
+  test("整包至多 3 行，唯一可执行的一行是 party join … --yes（进入分步引导）", () => {
+    const text = pack("claude");
+    expect(nonBlankLines(text).length).toBeLessThanOrEqual(3);
+    const exec = executableLines(text);
+    expect(exec).toHaveLength(1);
     expect(exec[0]).toBe(
-      "command -v party >/dev/null || curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh",
+      "AGENTPARTY_TOKEN='ap_tok' party join --server https://party.example --channel dev --as bot --harness claude --mention leo --yes",
     );
-    expect(exec[1]!.startsWith("AGENTPARTY_TOKEN='ap_tok' party join ")).toBe(true);
+    // 含且仅含一条 party join。
+    expect(text.match(/party join /g)).toHaveLength(1);
+  });
+
+  test("那一句话说清「分步引导 / 每步不通停下来告诉你怎么修」，install 兜底折进这句话而不是独立命令行", () => {
+    const [guide] = nonBlankLines(pack("codex"));
+    expect(guide).toMatch(/^# 你被邀请加入 #dev/);
+    expect(guide).toContain("分步引导");
+    expect(guide).toContain("停下来");
+    expect(guide).toContain("告诉你怎么修");
+    expect(guide).toContain(`curl -fsSL ${INSTALL_SH_RAW_URL} | sh`);
+    expect(pack("codex")).not.toMatch(/^command -v party/m);
+  });
+
+  test("一行安全提示：token 别改成 --token 进 argv、别贴到公开的地方（#676）", () => {
+    const [, safety] = nonBlankLines(pack("codex"));
+    expect(safety).toMatch(/^# token/);
+    expect(safety).toContain("别改成命令行参数传");
+    expect(safety).toContain("别把这段贴到公开的地方");
   });
 
   test("token 走 AGENTPARTY_TOKEN 前缀，绝不进 argv（#676）——没有 --token", () => {
@@ -49,36 +73,26 @@ describe("接入包 = 一段行为约定 + 两行命令（#944）", () => {
     }
   });
 
-  test("108 行里逐条手工执行的机械步骤全部收进 party join——粘贴稿里不再出现它们", () => {
+  test("整段提示词没了：三行行为约定、108 行里的机械步骤，都不再出现在粘贴稿里", () => {
     const text = pack("codex");
     for (const gone of [
-      "party init --server",
+      "Trellis",
+      "别另建频道",
+      "只含 channel+seq 的指针",
+      "交给子 agent",
+      "party init",
       "claude mcp add",
       "codex mcp add",
       "party hook install",
       "export AGENTPARTY_CONFIG",
-      "AGENTPARTY_RULES_EOF", // rules 落盘 heredoc 移进 party join
-      "party mcp identities", // 判重移进 party join（init 内做）
-      "party wake check", // 自检移进 party join
+      "AGENTPARTY_RULES_EOF",
+      "party mcp identities",
+      "party wake check",
       "party serve",
       "party watch",
     ]) {
       expect(text).not.toContain(gone);
     }
-  });
-
-  test("行为约定砍到三行——每行都对应一类真实会做错的事，且都是注释（不带 # 的只有两条命令）", () => {
-    const text = pack("claude");
-    const commentLines = text.split("\n").filter((l) => l.trimStart().startsWith("#"));
-    expect(commentLines).toHaveLength(3);
-    // 1) 别跑偏去自建频道 / 用第三方频道流程（Trellis）。
-    expect(text).toContain("别另建频道");
-    expect(text).toContain("Trellis");
-    // 2) 指针不含正文、频道是唯一数据源。
-    expect(text).toContain("只含 channel+seq 的指针");
-    expect(text).toContain("频道是唯一数据源");
-    // 3) 改动交给子 agent。
-    expect(text).toContain("交给子 agent");
   });
 
   test("charter 不再快照进包（改由 party join 加入时拉取，也消掉了逐字注入接入方终端的 RCE 面）", () => {

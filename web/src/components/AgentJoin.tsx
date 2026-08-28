@@ -483,7 +483,7 @@ export function AgentJoin({ slug, token, namePrefix, inviterName, charter, accou
               {t("AgentJoin.tokenWarn")}
             </p>
             <p className="agent-join-hint t-mono">
-              {t("AgentJoin.footerHintPrefix", { init: "party init" })} <a href="/docs">/docs</a>
+              {t("AgentJoin.footerHint")} <a href="/docs">/docs</a>
             </p>
           </div>
         </div>

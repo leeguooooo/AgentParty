@@ -62,6 +62,62 @@ async function runInvite(args: string[]): Promise<{ code: number; stdout: string
   return { code, stdout, stderr };
 }
 
+/** 粘贴稿正文：介绍行之后、网页围观链接之前的非空行。 */
+function packBodyLines(stdout: string): string[] {
+  const lines = stdout.split("\n");
+  const start = lines.findIndex((l) => l.includes("一句话 + 一条命令"));
+  const end = lines.findIndex((l) => l.startsWith("网页只读围观"));
+  if (start < 0 || end < 0 || end <= start) throw new Error(`pack body not found in:\n${stdout}`);
+  return lines.slice(start + 1, end).filter((l) => l.trim() !== "");
+}
+
+// #992（epic #987）：接入包 = 一句话 + 一条命令。机械步骤早已全收进 `party join`，而 `party join`
+// 自己就是分步引导（每步 check → 过/不过 → 不过给一条修法并停在那一步），粘贴稿里不再需要任何提示词。
+// 2026-08-28 owner 一条链全踩了的教训：粘贴包每一步都兜不住——那就别再让粘贴包承担「教它怎么做」。
+describe("party invite 接入包 = 一句话 + 一条命令（#992）", () => {
+  test("正文至多 3 行：一句约定 + 一行 token 安全提示 + 唯一一条可执行命令 party join … --yes", async () => {
+    const server = startRest();
+    const r = await runInvite(["One Cmd", "--slug", "onecmd", "--server", server]);
+    expect(r.code).toBe(0);
+    const body = packBodyLines(r.stdout);
+    expect(body.length).toBeLessThanOrEqual(3);
+    const executable = body.filter((l) => !l.startsWith("#"));
+    // 含且仅含一条 party join；它就是全部可执行内容。
+    expect(executable).toHaveLength(1);
+    expect(executable[0]).toMatch(/^AGENTPARTY_TOKEN='ap_agenttok\d*' party join --server \S+ --channel onecmd --as onecmd-guest --yes$/);
+    expect(r.stdout.match(/party join /g)).toHaveLength(1);
+    // 不再有 install 独立行、不再有 party init、不再有整段行为约定提示词。
+    expect(r.stdout).not.toMatch(/^command -v party/m);
+    expect(r.stdout).not.toContain("party init");
+    expect(r.stdout).not.toContain("Trellis");
+    expect(r.stdout).not.toContain("交给子 agent");
+  });
+
+  test("那一句话说清：跑这条命令会被分步引导，每一步不通停下来告诉你怎么修；没装 party 的兜底也在这句里", async () => {
+    const server = startRest();
+    const r = await runInvite(["One Cmd", "--slug", "onecmd", "--server", server]);
+    const [guide, safety] = packBodyLines(r.stdout);
+    expect(guide).toMatch(/^# 你被邀请加入 #onecmd/);
+    expect(guide).toContain("分步引导");
+    expect(guide).toContain("停下来");
+    expect(guide).toContain("告诉你怎么修");
+    expect(guide).toContain("curl -fsSL https://raw.githubusercontent.com/leeguooooo/agentparty/main/install.sh | sh");
+    // 安全提示一行：token 别进 argv、别贴公开的地方。
+    expect(safety).toMatch(/^# token/);
+    expect(safety).toContain("别改成命令行参数传");
+    expect(safety).toContain("别把这段贴到公开的地方");
+  });
+
+  test("token 只走 AGENTPARTY_TOKEN 环境变量前缀（#676）：输出里除了那个前缀，token 明文不再出现第二次", async () => {
+    const server = startRest();
+    const r = await runInvite(["One Cmd", "--slug", "onecmd", "--server", server]);
+    const tokens = [...r.stdout.matchAll(/ap_agenttok\d+/g)].map((m) => m[0]);
+    expect(tokens).toHaveLength(1);
+    expect(r.stdout).toContain(`AGENTPARTY_TOKEN='${tokens[0]}' party join`);
+    expect(r.stdout).not.toContain(`--token ${tokens[0]}`);
+  });
+});
+
 describe("party invite --mode", () => {
   test("watch mode anchors the join pack to a readonly token and disables sending", async () => {
     const server = startRest();
@@ -88,13 +144,13 @@ describe("party invite --mode", () => {
     expect(r.code).toBe(0);
     expect(minted.some((m) => m.role === "agent")).toBe(true);
     // #944：接入包压成一行 party join（108 行里的机械步骤全收进它），token 走环境变量前缀不进 argv（#676）。
-    expect(r.stdout).toMatch(/AGENTPARTY_TOKEN='ap_agenttok\d*' party join --server .* --channel partroom --as partroom-guest/);
+    expect(r.stdout).toMatch(/AGENTPARTY_TOKEN='ap_agenttok\d*' party join --server .* --channel partroom --as partroom-guest --yes$/m);
     expect(r.stdout).not.toContain("--token ap_agenttok");
     expect(r.stdout).not.toContain("party init --server");
-    // 作用域守卫（别另建频道）折进行为约定，仍排在 party join 之前。
-    const guardIndex = r.stdout.indexOf("别另建频道");
-    expect(guardIndex).toBeGreaterThan(-1);
-    expect(guardIndex).toBeLessThan(r.stdout.indexOf("party join "));
+    // #992：那一句话（分步引导）排在 party join 之前。
+    const guideIndex = r.stdout.indexOf("分步引导");
+    expect(guideIndex).toBeGreaterThan(-1);
+    expect(guideIndex).toBeLessThan(r.stdout.indexOf("party join "));
     expect(r.stdout).toContain("参与");
     // 报到收进 party join——粘贴稿里不再单独出现 party send 报到行。
     expect(r.stdout).not.toMatch(/party send .*报到/);
@@ -107,6 +163,18 @@ describe("party invite --mode", () => {
     expect(r.stdout).toMatch(/AGENTPARTY_TOKEN='ap_agenttok\d*' party join --server .* --channel defroom --as defroom-guest/);
     expect(r.stdout).not.toContain("--token ap_agenttok");
     expect(r.stdout).not.toContain("party init --server");
+  });
+
+  test("--harness codex 写进 party join --harness；非法值拒绝（占位符 codex|claude 贴进 shell 会变成管道）", async () => {
+    const server = startRest();
+    const r = await runInvite(["Harness Room", "--slug", "hroom", "--harness", "codex", "--server", server]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toMatch(
+      /^AGENTPARTY_TOKEN='ap_agenttok\d*' party join --server \S+ --channel hroom --as hroom-guest --harness codex --yes$/m,
+    );
+    const bad = await runInvite(["Harness Room", "--slug", "hroom2", "--harness", "codex|claude", "--server", server]);
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toContain("--harness must be one of");
   });
 
   test("rejects an invalid --mode", async () => {

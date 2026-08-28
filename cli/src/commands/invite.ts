@@ -12,12 +12,12 @@ import {
   type ChannelMode,
   type ChannelVisibility,
 } from "../rest";
-import { buildInteractiveJoinPack } from "@agentparty/shared/onboarding";
+import { buildInteractiveJoinPack, type JoinPackHarness } from "@agentparty/shared/onboarding";
 import { formatCharterSnapshotForOnboarding, formatScopeGuardForOnboarding } from "../onboarding";
 import { isName, isSlug, normalizeServerUrl } from "../validation";
 
 const USAGE =
-  'usage: party invite "<title>" [--mode watch|participate] [--slug s] [--temp] [--party] [--public] [--guest-name bob] [--checkin-mention name] [--owner label]';
+  'usage: party invite "<title>" [--mode watch|participate] [--slug s] [--temp] [--party] [--public] [--guest-name bob] [--harness codex|claude] [--checkin-mention name] [--owner label]';
 const HELP = `${USAGE}
 
 Create a channel, mint a scoped guest token, and print a copy-paste join pack.
@@ -32,9 +32,12 @@ Options:
   --party            create a party-mode channel
   --public           create a public channel
   --guest-name bob   guest agent token name
+  --harness h        target harness of the invitee (codex | claude); omit to let
+                     \`party join\` detect it on the invitee's machine
   --checkin-mention  mention this name in the check-in line
   --owner label      printable owner label`;
-const INVITE_FLAGS = ["server", "mode", "slug", "guest-name", "checkin-mention", "owner", "temp", "party", "public"];
+const INVITE_FLAGS = ["server", "mode", "slug", "guest-name", "harness", "checkin-mention", "owner", "temp", "party", "public"];
+const INVITE_HARNESSES: readonly JoinPackHarness[] = ["codex", "claude", "other"];
 const INVITE_MODES = ["participate", "watch"] as const;
 type InviteMode = (typeof INVITE_MODES)[number];
 const OWNER_MAX = 128;
@@ -58,7 +61,7 @@ export async function run(argv: string[]): Promise<number> {
     console.error(unknown);
     return 1;
   }
-  const flagError = valueFlagError(flags, ["server", "mode", "slug", "guest-name", "checkin-mention", "owner"]);
+  const flagError = valueFlagError(flags, ["server", "mode", "slug", "guest-name", "harness", "checkin-mention", "owner"]);
   if (flagError !== null) {
     console.error(flagError);
     return 1;
@@ -68,6 +71,15 @@ export async function run(argv: string[]): Promise<number> {
     console.error(`--mode must be one of: ${INVITE_MODES.join(", ")}`);
     return 1;
   }
+  // #992：邀请人知道对方跑的是哪个 harness 就写进 `party join --harness`；不知道就不带，
+  // 交给 `party join` 在对方机器上探测（#924）。`codex|claude` 这种占位符绝不能原样进粘贴稿——
+  // 贴进 shell 会被当成管道（`… --harness codex | claude --yes` 真会把 claude 拉起来）。
+  const harnessRaw = str(flags.harness);
+  if (harnessRaw !== undefined && !INVITE_HARNESSES.includes(harnessRaw as JoinPackHarness)) {
+    console.error(`--harness must be one of: ${INVITE_HARNESSES.join(", ")}`);
+    return 1;
+  }
+  const harness = harnessRaw as JoinPackHarness | undefined;
   const title = positionals.join(" ");
   if (!title) {
     console.error(USAGE);
@@ -221,17 +233,17 @@ ${line}`);
       return 0;
     }
 
-    // #944：接入包从 108 行粘贴稿压成「一段行为约定 + 两行命令」。那 108 行里逐条手工执行的
-    // 机械步骤（写 config / 判重 / 绑定 / 注册 MCP / 装+批准 hook / 报到 / 自检）全部收进
-    // `party join` 这一条命令，跑完自己打印「全部就绪 / 还差第 N 步」。builder 与 web 接入包
-    // 同源（shared/onboarding），别再在 cli/web 各写一份（#585）。charter 不再快照进包——
-    // `party join` 里的 init 会在加入时拉取并终端安全地打印最新公告（比粘贴时的快照更新鲜）。
-    // 邀请人不预设目标 harness：不带 --harness，交给 `party join` 在对方机器上自己探测（#924）。
+    // #944 把 108 行粘贴稿压成「三行约定 + 两行命令」；#992（epic #987）再压成「一句话 + 一条命令」：
+    // 机械步骤早已全收进 `party join`，而 `party join` 本身就是分步引导（每步 check → 过/不过 →
+    // 不过给一条修法并停在那一步），粘贴稿里不再需要任何提示词。行为契约由 `party join` 落成
+    // rules 文件、频道公告由它加入时拉取打印。builder 与 web 接入包同源（shared/onboarding），
+    // 别再在 cli/web 各写一份（#585）。
     const joinPack = buildInteractiveJoinPack({
       slug,
       server,
       token: guest.token,
       agentName: guestName,
+      ...(harness === undefined ? {} : { harness }),
       inviterName: checkinMention ?? null,
     });
     console.log(`${line}
@@ -240,8 +252,7 @@ ${line}
 server:   ${server}
 channel:  ${slug}  ${channelDesc}
 
-把下面整段发给对方的 agent（Claude Code / Codex）——一小段说明 + 两行命令。
-带 # 的是给它读的行为约定，不带 # 的是要执行的命令；跑完它自己会报「全部就绪」或「还差第 N 步」：
+把下面这段发给对方的 agent（Claude Code / Codex）——一句话 + 一条命令，命令会分步引导它接入：
 
 ${joinPack}
 
