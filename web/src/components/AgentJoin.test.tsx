@@ -771,6 +771,36 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     expect(install).toContain("install.sh");
   });
 
+  // codex stop-time review on 3d65e20：无人值守脚本自带「版本闸 + 缺了才装」，① 再给一条
+  // curl 就是同一个弹窗两条安装命令；另外 ② 带着明文 token，必须显眼地警告别贴到公开地方。
+  test("无人值守：① 不再给安装命令（脚本自带），弹窗里安装命令只出现在 ② 那一段", async () => {
+    const s = stepper();
+    act(() => {
+      const radios = s.r.root.findAll((n) => n.props.type === "radio" && typeof n.props.onChange === "function");
+      const unattended = radios.find((n) => String(n.props.value) === "unattended");
+      unattended?.props.onChange({ target: { value: "unattended" } });
+    });
+    await s.generate();
+    expect(s.r.root.findAll((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "install")).toHaveLength(0);
+    const join = String(
+      s.r.root.find((n) => n.props.className === "agent-join-cmd" && n.props["data-cmd"] === "join").props.children[0].props.children,
+    );
+    // 值守脚本自带版本闸/安装，那是它自己的一部分，不算重复。
+    expect(join).toContain("party serve");
+  });
+
+  test("② 的说明必须警告明文 token 别贴到公开地方（安全行移出复制内容后不能丢）", async () => {
+    const s = stepper();
+    await s.generate();
+    const hints = s.r.root
+      .findAll((n) => n.props.className === "agent-join-hint")
+      .map((n) => String(n.children.join("")));
+    const runHint = hints.find((h) => h.includes("AGENTPARTY_TOKEN") || h.includes("token"));
+    expect(runHint).toBeDefined();
+    expect(/公开|public/i.test(runHint ?? "")).toBe(true);
+    expect(/argv|ps|history/i.test(runHint ?? "")).toBe(true);
+  });
+
   test("标题两种句式都完整：接入是「让 X 加入」，重连是「把 X 重新接上」", async () => {
     const s = stepper();
     await s.generate();

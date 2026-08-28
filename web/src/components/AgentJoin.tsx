@@ -808,14 +808,22 @@ export function AgentJoin({
             <ol className="agent-join-steps">
               {/* ① 装 party：网页看不见目标机，报到（②）即证明装了——② 过了一起打 ✓。 */}
               <StepCard id={1} status={statuses[1]} title={t("AgentJoin.step1.title")} summary={null} t={t}>
-                <p className="agent-join-hint">{t("AgentJoin.step1.hint")}</p>
-                <CommandBlock
-                  id="install"
-                  command={INSTALL_COMMAND}
-                  copied={copiedKey === "install"}
-                  onCopy={() => void copy("install", INSTALL_COMMAND)}
-                  t={t}
-                />
+                {/* 无人值守脚本自带「版本闸 + 缺了才装」，② 里已经有一次；这里再给一条就是同一个弹窗
+                    出现两遍安装命令（codex stop-time review on 3d65e20），所以这一档只说明、不给命令。 */}
+                {unattended ? (
+                  <p className="agent-join-hint">{t("AgentJoin.step1.hintUnattended")}</p>
+                ) : (
+                  <>
+                    <p className="agent-join-hint">{t("AgentJoin.step1.hint")}</p>
+                    <CommandBlock
+                      id="install"
+                      command={INSTALL_COMMAND}
+                      copied={copiedKey === "install"}
+                      onCopy={() => void copy("install", INSTALL_COMMAND)}
+                      t={t}
+                    />
+                  </>
+                )}
               </StepCard>
 
               {/* ② 跑接入命令：interactive = party join（含 token，只出现一次）；unattended = serve 脚本；recover = party recover。 */}
