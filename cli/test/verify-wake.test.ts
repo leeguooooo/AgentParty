@@ -581,3 +581,22 @@ describe("party wake verify（#990）", () => {
     expect(r.stderr).toContain("usage: party wake verify");
   });
 });
+
+describe("验证帧语言（#1003）", () => {
+  test("[wake-verify] 前缀绝不本地化；正文按 lang 取，缺省 zh；往返按 opts.lang 发", async () => {
+    const zh = verifyWakeBody(ME);
+    const en = verifyWakeBody(ME, "en");
+    expect(zh.startsWith(WAKE_VERIFY_PREFIX)).toBe(true);
+    expect(en.startsWith(WAKE_VERIFY_PREFIX)).toBe(true);
+    expect(zh).toContain("接入引导第 4 步");
+    expect(en).toContain("onboarding step 4");
+    expect(en).not.toMatch(/[\u4e00-\u9fff]/);
+    for (const body of [zh, en]) {
+      expect(body).toContain(`@${ME} ping`);
+      expect(isWakeVerifyFrame({ kind: "message", body, mentions: [ME], sender: { name: ME } })).toBe(true);
+    }
+    const d = deps(frame({ result: "healthy", phases: { agent_resumed: { ok: true, seq: 43, evidence: "reply_to" } } }));
+    await verifyWakeRoundTrip({ server: SERVER, token: TOKEN, channel: CHANNEL, identity: ME, timeoutMs: 2_500, lang: "en" }, d);
+    expect((d.probed[0] as { body?: string }).body).toBe(en);
+  });
+});

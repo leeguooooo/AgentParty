@@ -298,3 +298,60 @@ describe("#867 ①：结构化失败原因必须一路透出到降级日志", ()
     expect(result).toMatchObject({ forwarded: true, reason: null, detail: null });
   });
 });
+
+describe("wakeProxyNote 内容与语言（#1003）", () => {
+  const NOW = Date.parse("2026-08-28T10:02:00Z");
+  const ZH_BODY = "我们的展示信息是不是有点太少了，语言应该根据 ai 使用的语言或者其他的方式，自动改成对应的语言";
+
+  test("带 sender/body/ts/lang=zh ⇒ 发信人友好名 + 频道 + seq + 相对时间 + 预览 + 读全文命令 + from-id", () => {
+    const note = wakeProxyNote({
+      channel: "pwtk",
+      server: "https://party.example",
+      seq: 42,
+      sender: { name: "lark-ad72b3f9749e", kind: "human", display_name: "leo" },
+      body: ZH_BODY,
+      ts: NOW - 2 * 60_000,
+      now: NOW,
+      lang: "zh",
+      fromId: "lark-ad72b3f9749e",
+    });
+    expect(note).toBe(
+      "AgentParty 唤醒：leo 在 #pwtk 提到了你（seq 42，2 分钟前）\n" +
+        `「${ZH_BODY}」\n` +
+        "以上是预览，正文以频道为准：party history pwtk --seq 42\n" +
+        "from-id: lark-ad72b3f9749e",
+    );
+    expect(wakeProxyNoteFromId(note)).toBe("lark-ad72b3f9749e");
+  });
+
+  test("老签名（只有 channel/seq/fromId）⇒ 英文短版，仍只带指针、from-id 可读回", () => {
+    const note = wakeProxyNote({ channel: "pwtk", server: "https://party.example", seq: 42, fromId: "lark-ad72b3f9749e" });
+    expect(note).toBe(
+      "AgentParty wake: you were mentioned in #pwtk (seq=42)\n" +
+        "Read the channel for the message body (party history pwtk --seq 42); the channel is the single source of truth.\n" +
+        "from-id: lark-ad72b3f9749e",
+    );
+    expect(wakeProxyNoteFromId(note)).toBe("lark-ad72b3f9749e");
+  });
+
+  test("长正文（中/英）都被截到 ≤512B、末尾 …、from-id 不丢", () => {
+    for (const [lang, body] of [["zh", "很长的中文正文。".repeat(80)], ["en", "long english body ".repeat(60)]] as const) {
+      const note = wakeProxyNote({
+        channel: "a".repeat(64),
+        server: "https://party.example",
+        seq: Number.MAX_SAFE_INTEGER,
+        sender: { name: "lark-ad72b3f9749e", kind: "human", display_name: "leo" },
+        body,
+        ts: NOW - 60_000,
+        now: NOW,
+        lang,
+        siblings: 3,
+        fromId: "b".repeat(64),
+      });
+      expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
+      expect(note).toContain("…");
+      expect(note).toContain("siblings=3");
+      expect(wakeProxyNoteFromId(note)).toBe("b".repeat(64));
+    }
+  });
+});

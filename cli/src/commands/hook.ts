@@ -49,6 +49,7 @@ import {
   type CodexStopWakePointer,
   type CodexStopWakeSeenEntry,
 } from "../codex-stop-wake";
+import type { WakeLang } from "../wake-note-i18n";
 import type { NextMention } from "../rest";
 import {
   DeliveryRecoveryJournal,
@@ -1183,6 +1184,11 @@ export interface CodexStopWakeDeps {
   emit: (line: string) => void;
   log: (line: string) => void;
   now: () => number;
+  /**
+   * 注入提示的语言（#1003）：config `lang` 覆盖 > 本身份在频道最近的消息 > LANG > en。只在真要 block 时才调
+   * （放行路径一次网络都不多发）；实现必须自带超时并吞掉异常。缺省（老调用方/测试）⇒ zh，即这条文案的历史行为。
+   */
+  wakeLang?: (channel: string, cwd: string) => Promise<WakeLang>;
 }
 
 export function defaultCodexStopWakeDeps(
@@ -1273,6 +1279,28 @@ export function defaultCodexStopWakeDeps(
     emit: (line) => console.log(line),
     log: (line) => appendCodexAutoWakeLog(home, line),
     now: () => Date.now(),
+    wakeLang: async (channel, cwd) => {
+      const resolved = identity(channel, cwd);
+      const auth = resolved === null ? null : codexAutoWakeAuth(resolved);
+      // config `lang` 覆盖：读**解析出来那个身份**的 config（#917 教训：按 cwd 猜会猜到别的身份）；没路径才退回 cwd 档。
+      let override: unknown = null;
+      try {
+        override = resolved?.configPath !== null && resolved?.configPath !== undefined
+          ? (JSON.parse(readFileSync(resolved.configPath, "utf8")) as { lang?: unknown }).lang ?? null
+          : readConfig(cwd)?.lang ?? null;
+      } catch {
+        override = null;
+      }
+      const { resolveWakeLang } = await import("../wake-note-i18n");
+      // 历史那一跳与 next-mention 同一预算（独立 3s 超时）；拉不到就按 LANG/en，绝不卡住 Stop hook。
+      const name = resolved?.name ?? null;
+      return resolveWakeLang({
+        override,
+        source: auth === null || name === null ? null : { server: auth.server, token: auth.token, channel, identity: name },
+        env,
+        signal: AbortSignal.timeout(CODEX_STOP_WAKE_QUERY_TIMEOUT_MS),
+      });
+    },
   };
 }
 
@@ -1357,11 +1385,20 @@ export async function handleCodexStopRecord(
     deps.log("codex-stop: 拿不到本会话的唯一身份（见上一条解析日志），无法去重，本次放行不注入");
     return;
   }
+  // #1003：只有确定要 block 才去判语言（可能多一跳历史查询）；任何异常都退到 zh（历史行为），不影响注入。
+  let lang: WakeLang = "zh";
+  if (deps.wakeLang !== undefined) {
+    try {
+      lang = await deps.wakeLang(boundChannel, cwd);
+    } catch {
+      lang = "zh";
+    }
+  }
   // 先落盘再打印。反过来的话，打印后崩一次就会对同一条 @ 反复注入。
   deps.recordSeen(seenPath, decision.pointer.seq, deps.now());
   deps.emit(JSON.stringify({
     decision: "block",
-    reason: codexStopWakeReason(decision.pointer),
+    reason: codexStopWakeReason(decision.pointer, lang),
   }));
   const depth = decision.pointer.backlog;
   deps.log(

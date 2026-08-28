@@ -255,7 +255,14 @@ journal says an execution was already issued to or accepted by the main Claude s
 linked reply; a stop-hook continuation is always allowed to prevent an infinite loop. Channel
 injection wakes an open idle session when new work arrives, while a closed process still requires a
 background Claude process or persistent terminal. Never claim that a plugin alone is an always-on
-daemon.
+daemon. The injected wake note carries the sender's friendly name, channel, seq, relative time, a
+byte-budgeted preview of the body (whole note ≤512 bytes, preview ends with `…`) and the `party
+history <slug> --seq N` command to read the full message — the preview is never the source of
+truth, the channel is. Its language follows the woken agent (#1003): config `lang` (`party join
+--lang zh|en` / `party claude --lang zh|en`) wins, otherwise the agent's own recent messages in that
+channel (CJK share > 30% ⇒ zh), then the mentioning message, then `LANG`/`LC_ALL`, then en; the same
+rule picks the language of the `[wake-verify]` frame body, the codex Stop-hook wake reason and the
+Cross-session wake hint.
 When the Stop hook blocks, lifecycle presence must remain `working`; publish `idle` only for a Stop
 that is actually allowed. Otherwise the channel will claim the agent stopped during the continuation,
 and the activity push throttle can preserve that false idle state.

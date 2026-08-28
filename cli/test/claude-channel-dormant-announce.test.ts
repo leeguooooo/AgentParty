@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { WAKE_VERIFY_PREFIX, type ServerFrame } from "@agentparty/shared";
 import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
 import { wakeProxyNoteFromId } from "../src/serve-wake-proxy";
+import { resetWakeLangCache } from "../src/wake-note-i18n";
 import {
   dormantAnnounceDisplayName,
   dormantAnnounceMentionHit,
@@ -127,6 +128,10 @@ function makeDeps(overrides: Partial<DormantAnnounceDeps> = {}): {
     wakeClaimDir: mkdtempSync(join(tmpdir(), "announce-wake-claims-")),
     // #963：默认「本机没有 live bridge / serve 持锁」——绝不去读真实的 serve 锁目录。
     liveBridgeHolder: () => null,
+    // #1003：默认「接收者没有历史、config 没有 lang 覆盖」——绝不打真网络 / 读真实 config。
+    fetchReceiverBodies: async () => [],
+    langOverride: () => null,
+    env: {},
     ...overrides,
   };
   return { deps, connections };
@@ -913,5 +918,103 @@ describe("同身份多 runtime 的 @ 唤醒（issue #963）", () => {
     expect(logs.some((line) => line.includes("唤醒认领存储不可写"))).toBe(true);
     abort.abort();
     await done;
+  });
+});
+
+describe("注入正文的内容与语言（#1003）", () => {
+  const NOW = Date.parse("2026-08-28T10:02:00Z");
+  const ZH_BODY = "我们的展示信息是不是有点太少了，语言应该根据 ai 使用的语言或者其他的方式，自动改成对应的语言";
+  const LEO = { name: "lark-ad72b3f9749e", kind: "human", display_name: "leo", owner: "leo@example.com" };
+  function frameWith(seq: number, body: string, ts: number): ServerFrame {
+    return { ...(msg(seq, [SELF], { sender: LEO }) as unknown as Record<string, unknown>), body, ts } as unknown as ServerFrame;
+  }
+  function setup(overrides: Partial<DormantAnnounceDeps> = {}) {
+    resetWakeLangCache();
+    const calls: { body: string; fromName: string }[] = [];
+    const inject = (async (input: { body: string; fromName: string }) => {
+      calls.push({ body: input.body, fromName: input.fromName });
+      return { ok: true };
+    }) as unknown as DormantAnnounceDeps["inject"];
+    const made = makeDeps({ inject, now: () => NOW, ...overrides });
+    return { ...made, calls };
+  }
+  async function runOne(deps: DormantAnnounceDeps, connections: FakeConnection[], frames: ServerFrame[]) {
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    for (const frame of frames) {
+      connections[0]!.push(frame);
+      await tick();
+    }
+    abort.abort();
+    await done;
+  }
+
+  test("接收者最近消息是中文 ⇒ 注入中文：发信人 / 频道 / seq / 相对时间 / 预览 / 读全文命令 / from-id（issue 样例）", async () => {
+    const { deps, connections, calls } = setup({ fetchReceiverBodies: async () => ["收到，我看看", "已经修好了，PR 在路上"] });
+    await runOne(deps, connections, [frameWith(42, ZH_BODY, NOW - 2 * 60_000)]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toBe(
+      "AgentParty 唤醒：leo 在 #dev 提到了你（seq 42，2 分钟前）\n" +
+        `「${ZH_BODY}」\n` +
+        "以上是预览，正文以频道为准：party history dev --seq 42\n" +
+        "from-id: lark-ad72b3f9749e",
+    );
+    expect(calls[0]!.fromName).toBe("leo");
+    expect(wakeProxyNoteFromId(calls[0]!.body)).toBe("lark-ad72b3f9749e");
+    expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(512);
+  });
+
+  test("没有历史但触发消息是中文 ⇒ zh；接收者历史与触发消息都英文 ⇒ en", async () => {
+    const zh = setup({ fetchReceiverBodies: async () => [] });
+    await runOne(zh.deps, zh.connections, [frameWith(43, ZH_BODY, NOW - 60_000)]);
+    expect(zh.calls[0]!.body.startsWith("AgentParty 唤醒：leo 在 #dev 提到了你（seq 43，1 分钟前）")).toBe(true);
+
+    const en = setup({ fetchReceiverBodies: async () => ["on it", "merged"] });
+    await runOne(en.deps, en.connections, [frameWith(44, "please review the failing job", NOW - 3 * 3_600_000)]);
+    expect(en.calls[0]!.body).toBe(
+      "AgentParty wake: leo mentioned you in #dev (seq=44, 3 h ago)\n" +
+        "“please review the failing job”\n" +
+        "Preview only; the channel is the single source of truth: party history dev --seq 44\n" +
+        "from-id: lark-ad72b3f9749e",
+    );
+  });
+
+  test("config lang 覆盖优先：历史与触发消息全中文也注入英文", async () => {
+    const { deps, connections, calls } = setup({ fetchReceiverBodies: async () => ["全中文历史"], langOverride: () => "en" });
+    await runOne(deps, connections, [frameWith(45, ZH_BODY, NOW - 60_000)]);
+    expect(calls[0]!.body.startsWith("AgentParty wake: leo mentioned you in #dev (seq=45, 1 min ago)")).toBe(true);
+  });
+
+  test("历史与触发消息都没有字母信号 ⇒ LANG=zh_CN.UTF-8 兜底成中文", async () => {
+    const { deps, connections, calls } = setup({ fetchReceiverBodies: async () => [], env: { LANG: "zh_CN.UTF-8" } });
+    await runOne(deps, connections, [frameWith(46, `@${SELF} 👀 42`, NOW - 60_000)]);
+    expect(calls[0]!.body.startsWith("AgentParty 唤醒：leo 在 #dev 提到了你（seq 46，1 分钟前）")).toBe(true);
+  });
+
+  test("中文长正文 ⇒ 预览被截到预算内、整条 ≤512B、末尾 …、from-id 行不丢", async () => {
+    const { deps, connections, calls } = setup({ fetchReceiverBodies: async () => ["中文历史"] });
+    await runOne(deps, connections, [frameWith(47, "这是一段很长的中文正文，用来把预算撑爆。".repeat(40), NOW - 60_000)]);
+    const body = calls[0]!.body;
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(512);
+    expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(508);
+    expect(body.split("\n")[1]!.endsWith("…」")).toBe(true);
+    expect(body.split("\n").at(-1)).toBe("from-id: lark-ad72b3f9749e");
+    expect(wakeProxyNoteFromId(body)).toBe("lark-ad72b3f9749e");
+  });
+
+  test("接收者历史按 (server, channel, identity) 缓存：两次注入只拉一次历史", async () => {
+    let fetches = 0;
+    const { deps, connections, calls } = setup({
+      fetchReceiverBodies: async (source) => {
+        fetches += 1;
+        expect(source).toEqual({ server: SERVER, token: "tok", channel: "dev", identity: SELF });
+        return ["中文历史"];
+      },
+    });
+    await runOne(deps, connections, [frameWith(48, "first", NOW - 60_000), frameWith(49, "second", NOW - 30_000)]);
+    expect(calls).toHaveLength(2);
+    expect(fetches).toBe(1);
+    expect(calls.every((call) => call.body.startsWith("AgentParty 唤醒："))).toBe(true);
   });
 });
