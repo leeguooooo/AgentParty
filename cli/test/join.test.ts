@@ -1,8 +1,12 @@
-// party join 端到端（issue #944）——把 108 行接入包收进一条命令，跑完自检报「就绪 / 还差哪一步」。
+// party join 端到端（issue #944）——把 108 行接入包收进一条命令，跑完引导报「接入完成 / 停在第 N 步」。
 //
 // 反假绿纪律（本仓反复踩的坑）：每个失败用例都确保**只有被测的那道闸**决定结果，其余步骤全绿，
-// 免得「另一个分支单独满足条件遮住闸」。收尾自检从**本地盘真实状态**重判，不信步骤返回码——
-// 所以 checkin 真失败（服务端 500）、codex hook 真处于 disabled 时，自检必须如实报「还差」。
+// 免得「另一个分支单独满足条件遮住闸」。每步从**本地盘真实状态**重判，不信步骤返回码——
+// 所以 checkin 真失败（服务端 500）、codex hook 真处于 disabled 时，引导必须如实停在那一步。
+//
+// #988 起 join 是分步引导（第 0～4 步，onboarding/steps.ts）：不过就停在该步、恰一条修法。
+// 输出形态相应变了（`第 N 步  标题 · 摘要 ✓/✗`、`修法（…）：` + 一行命令、`✅ 接入完成`），
+// 断言按新形态等价改写；判据（哪一步过/不过、修法是哪条、退出码）一条没放宽。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
@@ -12,157 +16,32 @@ import { BEHAVIOR_CONTRACT_BODY_LINES } from "@agentparty/shared/onboarding";
 import { probeClaudeArmedListener, probeCodexWakeLayer, runJoin, type JoinDeps, type JoinOptions } from "../src/commands/join";
 import { classifyListenerCommand } from "../src/claude-armed-listener";
 import { healServerUrl } from "../src/validation";
-import { run as initRun } from "../src/commands/init";
-import { run as hookRun } from "../src/commands/hook";
-import { run as sendRun } from "../src/commands/send";
-import { inspectClaudePluginShell, parseClaudePluginList } from "../src/commands/doctor";
-import { buildWakeChecklist } from "../src/wake-checklist";
-import { diagnoseCodexWake } from "../src/wake-diagnosis";
 import { RUNNING_VERSION } from "../src/upgrade";
 import { codexAutoWakeAuth, codexAutoWakeMarkerPath, codexAutoWakeTarget, writeCodexAutoWakeMarker } from "../src/codex-auto-wake";
 import { currentProcessStartedAt, instanceLockTarget } from "../src/instance-lock";
 import { listCodexSessions, registerClaudeSession, registerCodexSession } from "../src/claude-session-registry";
 import { startRestMock, type RestMock } from "./rest-mock";
-
-const PLUGIN = "agentparty@agentparty";
-
-// 只读 .error / .status（插件相关再读 .stdout）的最小 spawnSync 桩。record 记下每次调用，便于断言
-// MCP 注册 / 插件 update 确实发生。
-interface SpawnBehavior {
-  noBinary?: boolean; // 二进制不存在（ENOENT）
-  mcpAlreadyRegistered?: boolean; // mcp get 返回 0（已注册）
-  failMcpAdd?: boolean; // mcp add 返回非 0
-  /**
-   * 本机已装的 claude 插件版本（#961）：省略＝与 CLI 同版；null＝没装；"0.2.203" 这类＝旧版。
-   * 桩是**有状态**的，照真机行为走：`plugin install` 对已装的只回 already installed（**不升级**），
-   * 只有 `plugin update` 才把版本换成当前 CLI 的。
-   */
-  installedPluginVersion?: string | null;
-  failPluginUpdate?: boolean; // plugin update 返回非 0
-}
-interface PluginState {
-  installed: string | null;
-}
-function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: PluginState) {
-  return ((cmd: string, args: readonly string[]) => {
-    record.push([cmd, ...args]);
-    const base = { pid: 0, output: [], stdout: "", stderr: "", signal: null } as Record<string, unknown>;
-    if (behavior.noBinary) return { ...base, status: null, error: new Error("spawn ENOENT") };
-    if (args[0] === "mcp" && args[1] === "get") {
-      return { ...base, status: behavior.mcpAlreadyRegistered ? 0 : 1 };
-    }
-    if (args[0] === "mcp" && args[1] === "add") {
-      return { ...base, status: behavior.failMcpAdd ? 1 : 0 };
-    }
-    if (cmd === "claude" && args[0] === "--version") return { ...base, status: 0, stdout: "2.1.200 (Claude Code)\n" };
-    if (cmd === "claude" && args[0] === "plugin" && args[1] === "list") {
-      const rows = state.installed === null
-        ? []
-        : [{ id: PLUGIN, version: state.installed, enabled: true, installPath: "/nowhere/agentparty" }];
-      return { ...base, status: 0, stdout: `${JSON.stringify(rows)}\n` };
-    }
-    if (cmd === "claude" && args[0] === "plugin" && args[1] === "install") {
-      // 真机行为：已装就只回 "already installed"，版本原地不动。
-      if (state.installed === null) state.installed = RUNNING_VERSION;
-      return { ...base, status: 0 };
-    }
-    if (cmd === "claude" && args[0] === "plugin" && args[1] === "update") {
-      if (behavior.failPluginUpdate) return { ...base, status: 1 };
-      state.installed = RUNNING_VERSION;
-      return { ...base, status: 0 };
-    }
-    return { ...base, status: 0 };
-  }) as unknown as JoinDeps["spawn"];
-}
+import { PLUGIN, baseJoinOpts, fixLine, joinDeps, joinEnv, stepLine, type SpawnBehavior } from "./join-fixture";
 
 let tmp: string;
 let mock: RestMock;
-const savedEnv: Record<string, string | undefined> = {};
-const ENV_KEYS = ["AGENTPARTY_HOME", "AGENTPARTY_CONFIG", "AGENTPARTY_TOKEN", "CODEX_HOME", "HOME"];
+const env = joinEnv();
 
 beforeEach(() => {
-  for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
-  tmp = mkdtempSync(join(tmpdir(), "party-join-"));
-  process.env.HOME = tmp;
-  process.env.AGENTPARTY_HOME = join(tmp, ".agentparty");
-  process.env.CODEX_HOME = join(tmp, ".codex");
-  delete process.env.AGENTPARTY_CONFIG;
-  delete process.env.AGENTPARTY_TOKEN;
+  tmp = env.setup();
 });
 afterEach(() => {
   mock?.stop();
-  for (const k of ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k];
-    else process.env[k] = savedEnv[k];
-  }
-  try {
-    rmSync(tmp, { recursive: true, force: true });
-  } catch {
-    /* best-effort */
-  }
+  env.teardown();
 });
 
 function deps(record: string[][], behavior: SpawnBehavior, logs: string[]): JoinDeps {
-  const state: PluginState = {
-    installed: behavior.installedPluginVersion === undefined ? RUNNING_VERSION : behavior.installedPluginVersion,
-  };
-  const spawn = fakeSpawn(record, behavior, state);
-  return {
-    spawn,
-    initRun,
-    hookRun,
-    sendRun,
-    log: (l) => logs.push(l),
-    errlog: (l) => logs.push(l),
-    home: tmp,
-    // hook 步骤的 ok/fail 仍由 diagnoseCodexWake 读**真实盘状态**决定；只把「哪个 codex 带信任闸」
-    // 的探测换成快桩，免得默认实现 spawn 真机上的 codex 二进制（慢且不确定）。
-    codexWakeChecklist: () =>
-      buildWakeChecklist(
-        diagnoseCodexWake(),
-        process.env,
-        () => ({ onPath: null, candidates: [], gated: [], desktop: null }),
-        () => null,
-      ),
-    // claude 插件壳检查（#961）：走**真的** inspectClaudePluginShell（版本比对逻辑不另写一份），
-    // 只把 claude 二进制换成上面那个有状态桩、把读盘的包检查换成恒 valid。
-    claudePluginShell: () =>
-      inspectClaudePluginShell({
-        claudeVersion: () => {
-          const r = spawn("claude", ["--version"], { encoding: "utf8" });
-          return r.error === undefined && r.status === 0 ? String(r.stdout).trim() : null;
-        },
-        claudePlugins: () => {
-          const r = spawn("claude", ["plugin", "list", "--json"], { encoding: "utf8" });
-          return r.error === undefined && r.status === 0 ? parseClaudePluginList(String(r.stdout)) : null;
-        },
-        inspectBundle: () => ({ valid: true, launcherExecutable: true }),
-      }),
-    // claude 武装监听（#979）：默认假装本机有 party claude 起的会话在接 @（happy path）；蛰伏档用例逐个覆盖。
-    claudeArmedListener: () => ({ live: { pid: 5150, launch: "claude-channel" }, sessions: 1 }),
-    // codex 唤醒层（#957）：默认假装拉起成功且进程在（happy path）；失败用例逐个覆盖。
-    startCodexWakeLayer: async () => ({ action: "start", channel: "dev", cwd: process.cwd(), args: [] }),
-    codexWakeLayerLive: async () => ({ pid: 4242, source: "serve-lock" }),
-    codexAncestorPid: () => null,
-  };
+  return joinDeps(tmp, record, behavior, logs);
 }
-/** 「现在只做这一件事：」后面那一行——自检给出的唯一修法。 */
-function nextActionLine(logs: string[]): string | undefined {
-  const i = logs.findIndex((l) => l.includes("现在只做这一件事"));
-  return i === -1 ? undefined : logs[i + 1]?.trim();
-}
+/** 引导停下时给出的唯一修法命令（「修法（…）：」下面那一行）。 */
+const nextActionLine = fixLine;
 function baseOpts(over: Partial<JoinOptions>): JoinOptions {
-  return {
-    server: mock.url,
-    channel: "dev",
-    agentName: "bot",
-    harnessFlag: "claude",
-    mention: "leo",
-    yes: false,
-    coexist: false,
-    token: "ap_bot_secret",
-    ...over,
-  };
+  return baseJoinOpts(mock.url, over);
 }
 
 const configPath = () => join(tmp, ".agentparty", "agents", "agentparty-bot-dev.json");
@@ -170,17 +49,17 @@ const rulesPath = () => join(tmp, ".agentparty", "agents", "agentparty-bot-dev.r
 const bindingsPath = () => join(tmp, ".agentparty", "join-bindings.json");
 
 describe("party join —— 一条命令跑完整段接入（#944）", () => {
-  test("claude 档 happy path：config / rules / 绑定 / MCP 注册 / 报到全部落地，自检报「全部就绪」", async () => {
+  test("claude 档 happy path：config / rules / 绑定 / MCP 注册 / 报到全部落地，引导报「✅ 接入完成」", async () => {
     mock = startRestMock();
     const record: string[][] = [];
     const logs: string[] = [];
     const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, {}, logs));
     const out = logs.join("\n");
 
-    // 返回 0 且自检结论是「全部就绪」——用户看到的最后一句。
+    // 返回 0 且结论是「✅ 接入完成」——用户看到的最后一句；没有任何一步停下。
     expect(code).toBe(0);
-    expect(out).toContain("全部就绪");
-    expect(out).not.toContain("还差");
+    expect(out).toContain("✅ 接入完成");
+    expect(out).not.toContain("接入停在");
 
     // 1) config 落地：token（来自 AGENTPARTY_TOKEN，绝不进 argv）+ 服务端确认的身份都写进去了。
     expect(existsSync(configPath())).toBe(true);
@@ -225,7 +104,10 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     const verdict = logs.find((l) => l.startsWith("✅"));
     expect(verdict).toContain("pid 5150");
     expect(verdict).toContain("party claude-channel");
-    expect(out).toContain("✓ 本机有会接 @ 的 Claude 武装监听");
+    // 第 3 步那一行 ✓，且摘要指向那个武装监听。
+    const step3 = stepLine(logs, 3);
+    expect(step3).toContain("武装监听 party claude-channel，pid 5150）在接 @");
+    expect(step3?.endsWith("✓")).toBe(true);
   });
 
   // ★ #961 事故场景：本机插件 0.2.203、CLI 0.2.212。旧 join 只 install（回 already installed，不升级）
@@ -244,14 +126,14 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(update).toBeGreaterThan(install);
     // 更新到位 → 就绪，但**当前会话还挂着旧插件**——「重开」是结论句的一部分。
     expect(code).toBe(0);
-    expect(out).toContain(`已从 0.2.203 更新到 ${RUNNING_VERSION}`);
+    expect(stepLine(logs, 0)).toContain(`claude 插件 0.2.203 → 已更新到 ${RUNNING_VERSION}`);
     const verdict = logs.find((l) => l.startsWith("✅"));
     expect(verdict).toBeDefined();
     expect(verdict).toContain("重开");
     expect(verdict).toContain("当前这个会话还挂着旧插件");
   });
 
-  test("#961：update 没成、插件仍是旧版 ⇒ 自检报 plugin_version_mismatch、不印 ✅，修法是 update 不是 install", async () => {
+  test("#961：update 没成、插件仍是旧版 ⇒ 第 0 步报 plugin_version_mismatch 并停在那、不印 ✅，修法是 update 不是 install", async () => {
     mock = startRestMock();
     const record: string[][] = [];
     const logs: string[] = [];
@@ -261,10 +143,11 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     );
     const out = logs.join("\n");
 
-    // 隔离：config / 身份 / 报到全成，唯独插件版本落后——这正是事故当天的形态。
-    expect(existsSync(configPath())).toBe(true);
+    // #988：版本是第 0 步，不过就停在这——身份那步（写 config）根本不跑；修好重跑同一条 join 即可。
+    expect(existsSync(configPath())).toBe(false);
+    expect(stepLine(logs, 1)).toBeUndefined();
     expect(code).toBe(1);
-    expect(out).not.toContain("全部就绪");
+    expect(out).not.toContain("✅");
     expect(out).toContain("plugin_version_mismatch");
     expect(out).toContain(`本机插件 0.2.203，CLI ${RUNNING_VERSION}`);
     // 唯一那条修法必须是 update：照旧教 install 等于原地踏步。
@@ -285,7 +168,7 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(verdict).toContain("重开");
   });
 
-  test("失败可见：报到被服务端 500 打回时，自检如实报「还差」并给出可执行下一步，不是静默成功", async () => {
+  test("失败可见：报到被服务端 500 打回时，引导如实停在第 1 步并给出可执行下一步，不是静默成功", async () => {
     // 只让 POST 消息（＝报到）失败，其余端点全 200——隔离「报到闸」，别让别的分支遮住它。
     mock = startRestMock((req) => {
       if (req.method === "POST" && /^\/api\/channels\/[^/]+\/messages$/.test(req.path)) {
@@ -298,19 +181,20 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, {}, logs));
     const out = logs.join("\n");
 
-    // config / 身份都成功（隔离），唯独报到失败 → 自检必须报「还差」，不能是「全部就绪」。
+    // config / 身份都成功（隔离），唯独报到失败 → 引导必须停在第 1 步，不能是「接入完成」。
     expect(existsSync(configPath())).toBe(true);
     expect(code).toBe(1);
-    expect(out).not.toContain("全部就绪");
-    expect(out).toContain("还差");
+    expect(out).not.toContain("✅");
+    expect(out).toContain("接入停在第 1 步");
+    expect(stepLine(logs, 2)).toBeUndefined();
     // 如实报出是哪一步、给一条可执行的下一步（#926 口径）。
-    expect(out).toContain("报到");
-    expect(out).toContain("party send");
+    expect(stepLine(logs, 1)).toContain("报到失败");
+    expect(nextActionLine(logs)).toContain("party send");
     // 这类失败没有报错——自检必须明说，否则没人知道自己坏了。
     expect(out).toContain("别人只会以为你在忙");
   });
 
-  test("codex 档 happy path：装 hook + codex mcp add，空 CODEX_HOME（无信任闸）下自检「全部就绪」", async () => {
+  test("codex 档 happy path：装 hook + codex mcp add，空 CODEX_HOME（无信任闸）下引导「✅ 接入完成」", async () => {
     mock = startRestMock();
     const record: string[][] = [];
     const logs: string[] = [];
@@ -326,11 +210,11 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(record.some((r) => r[0] === "codex" && r[1] === "mcp" && r[2] === "add")).toBe(true);
     expect(record.some((r) => r[0] === "claude")).toBe(false);
 
-    // 无 config.toml（老版本 codex / 无信任闸）→ hook 判 ok；唤醒层进程在（pid 4242）→ 自检「全部就绪」。
+    // 无 config.toml（老版本 codex / 无信任闸）→ hook 判 ok；唤醒层进程在（pid 4242）→ 「✅ 接入完成」。
     expect(code).toBe(0);
-    expect(out).toContain("全部就绪");
-    expect(out).toContain("唤醒层进程在跑");
-    expect(out).toContain("pid 4242");
+    expect(out).toContain("✅ 接入完成");
+    expect(stepLine(logs, 3)).toContain("唤醒层进程在跑 pid 4242");
+    expect(logs.find((l) => l.startsWith("✅"))).toContain("pid 4242");
   });
 
   // ★ #957 事故场景：四项静态前置条件全绿、唤醒层进程根本不在，旧 join 照印「就能被唤醒」，
@@ -353,10 +237,13 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(existsSync(configPath())).toBe(true);
     expect(code).toBe(1);
     expect(out).not.toContain("就能被唤醒");
-    expect(out).not.toContain("全部就绪");
-    // 自检里那一格是 ✗，且带原因。
-    expect(out).toContain("✗ 唤醒层进程在跑");
-    expect(out).toContain("spawn 没返回 pid");
+    expect(out).not.toContain("✅");
+    // 第 3 步那一行是 ✗，且带原因；停在这，第 4 步不跑。
+    const step3 = stepLine(logs, 3);
+    expect(step3).toContain("唤醒层没起来");
+    expect(step3).toContain("spawn 没返回 pid");
+    expect(step3?.endsWith("✗")).toBe(true);
+    expect(stepLine(logs, 4)).toBeUndefined();
     // 降级文案：照实说此刻能被怎么叫到。
     expect(out).toContain("本会话只能在你下次发言、回合结束时收到 @");
     expect(out).toContain("新开一个 codex 会话");
@@ -390,7 +277,7 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(code).toBe(0);
     expect(out).toContain("已有唤醒层在跑");
     expect(out).toContain("pid 777");
-    expect(out).toContain("全部就绪");
+    expect(out).toContain("✅ 接入完成");
   });
 
   test("#957：跑 join 的 codex 会话在注册表里挂到本频道（否则唤醒层宽限期一过就判无人使用退场）", async () => {
@@ -433,7 +320,7 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     expect(listCodexSessions().length).toBe(0);
   });
 
-  test("失败可见（owner 场景）：codex hook 已装但信任闸 disabled、非交互不批准时，自检报「还差」hook 那一步", async () => {
+  test("失败可见（owner 场景）：codex hook 已装但信任闸 disabled、非交互不批准时，引导停在第 2 步（hook）", async () => {
     mock = startRestMock();
     const codexHome = join(tmp, ".codex");
     mkdirSync(codexHome, { recursive: true });
@@ -459,10 +346,11 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
     // 隔离：config/身份/报到都成功，唯独 hook 信任那道闸不过。
     expect(existsSync(configPath())).toBe(true);
     expect(code).toBe(1);
-    expect(out).not.toContain("全部就绪");
-    expect(out).toContain("还差");
-    // 自检明确点出是 hook 那一步（#926 措辞：未获批准的 hook 会被静默跳过）。
-    expect(out).toContain("hook");
+    expect(out).not.toContain("✅");
+    expect(out).toContain("接入停在第 2 步");
+    // 第 2 步那一行明确点出是 hook（#926 措辞：未获批准的 hook 会被静默跳过）；唤醒层那步不跑。
+    expect(stepLine(logs, 2)).toContain("hook");
+    expect(stepLine(logs, 3)).toBeUndefined();
     // 红线：绝不建议绕过信任闸。
     expect(out).not.toContain("dangerously-bypass-hook-trust");
   });
@@ -485,23 +373,23 @@ describe("party join —— 一条命令跑完整段接入（#944）", () => {
   // 下面三条覆盖 SpawnBehavior 的三个分支。它们不是补覆盖率——这三条正是本切片声称
   // 「失败要能看见」的路径：桩写了却没人用，那个声称就没被验证过（CodeRabbit 逮到）。
 
-  test("目标机器没装 claude CLI：注册/装插件 warn 而不是崩，配置照样落地；但唤醒层核实不了就不印 ✅", async () => {
+  test("目标机器没装 claude CLI：第 0 步如实报 claude_unavailable 并停在那，不崩、不印 ✅", async () => {
     mock = startRestMock();
     const record: string[][] = [];
     const logs: string[] = [];
     const code = await runJoin(baseOpts({ harnessFlag: "claude" }), deps(record, { noBinary: true }, logs));
     const out = logs.join("\n");
 
-    // MCP 注册 / 装插件是 best-effort：不崩、不静默——这一步的结果必须**看得见**。
-    expect(out).toMatch(/mcp[\s\S]{0,80}(未|没|失败|跳过|not|skip)/i);
-    // 配置与报到仍然落地（best-effort 步骤不该拖垮前面的步骤）。
-    expect(existsSync(configPath())).toBe(true);
     // #961：claude 档的唤醒层就是插件；claude 都不在 PATH 上，插件装没装、版本对不对一概核实不了——
-    // 这时说「就能被唤醒」是拿前置条件顶替判据。自检如实报 claude_unavailable，给一条修法。
+    // 这时说「就能被唤醒」是拿前置条件顶替判据。第 0 步如实报 claude_unavailable，给一条修法。
+    // #988：版本是第 0 步，停在这——身份那步（写 config / MCP 注册）不跑；装好 claude 重跑同一条 join。
     expect(code).toBe(1);
-    expect(out).not.toContain("全部就绪");
-    expect(out).toContain("claude_unavailable");
+    expect(out).not.toContain("✅");
+    expect(stepLine(logs, 0)).toContain("claude_unavailable");
+    expect(stepLine(logs, 0)?.endsWith("✗")).toBe(true);
     expect(nextActionLine(logs)).toContain("PATH");
+    expect(stepLine(logs, 1)).toBeUndefined();
+    expect(existsSync(configPath())).toBe(false);
   });
 
   test("重复接入：mcp get 命中已注册 ⇒ 跳过 add，不再叠一个常驻进程（#898）", async () => {
@@ -648,10 +536,15 @@ describe("party join claude 档 —— 武装监听闸（#979）", () => {
     expect(out).toContain("版本与 CLI 一致");
     expect(code).toBe(1);
     expect(out).not.toContain("就能被唤醒");
-    expect(out).not.toContain("全部就绪");
+    expect(out).not.toContain("接入完成");
     expect(out).not.toContain("✅");
-    // 自检那一格是 ✗。
-    expect(out).toContain("✗ 本机有会接 @ 的 Claude 武装监听");
+    // 第 3 步那一行是 ✗，停在这（第 4 步不跑）。
+    const step3 = stepLine(logs, 3);
+    expect(step3).toContain("本机没有会接 @ 的 Claude 会话");
+    expect(step3?.endsWith("✗")).toBe(true);
+    expect(stepLine(logs, 4)).toBeUndefined();
+    // 唯一那条修法就是 party claude dev。
+    expect(nextActionLine(logs)).toBe("party claude dev");
     // 降级文案：身份已绑、为什么叫不醒、两条命令**原样**印出。
     expect(out).toContain("已绑定身份 agent，但这台机现在没有会接 @ 的 Claude 会话");
     expect(out).toContain("local-only");
@@ -690,7 +583,9 @@ describe("party join claude 档 —— 武装监听闸（#979）", () => {
     expect(verdict).toContain("就能被唤醒");
     expect(verdict).toContain(`pid ${process.pid}`);
     expect(verdict).toContain("party claude-channel");
-    expect(out).toContain("✓ 本机有会接 @ 的 Claude 武装监听");
+    const step3 = stepLine(logs, 3);
+    expect(step3).toContain(`pid ${process.pid}）在接 @`);
+    expect(step3?.endsWith("✓")).toBe(true);
     expect(out).toContain(`由 party claude / party bridge claude 起的 Claude 会话（武装监听 party claude-channel，pid ${process.pid}）`);
     expect(out).not.toContain("蛰伏档（普通 claude 起的，不接频道消息）");
   });
@@ -734,18 +629,24 @@ describe("party join claude 档 —— 武装监听闸（#979）", () => {
     expect(out).toContain("party claude dev");
   });
 
-  test("插件旧版且 update 失败 + 无武装监听 ⇒ 第一条修法仍是 plugin update（监听闸放最后，前面没过它的修法没意义）", async () => {
+  test("插件旧版且 update 失败 + 无武装监听 ⇒ 唯一修法是 plugin update（版本是第 0 步，停在那；监听那步根本不跑）", async () => {
     mock = startRestMock();
     const record: string[][] = [];
     const logs: string[] = [];
     const d = deps(record, { installedPluginVersion: "0.2.203", failPluginUpdate: true }, logs);
-    d.claudeArmedListener = () => ({ live: null, sessions: 0 });
+    let listenerAsked = false;
+    d.claudeArmedListener = () => {
+      listenerAsked = true;
+      return { live: null, sessions: 0 };
+    };
     const code = await runJoin(baseOpts({ harnessFlag: "claude" }), d);
     const out = logs.join("\n");
     expect(code).toBe(1);
     expect(nextActionLine(logs)).toBe(`claude plugin update ${PLUGIN}`);
-    // 监听那一格照样 ✗ 列出来，只是不做第一条修法。
-    expect(out).toContain("✗ 本机有会接 @ 的 Claude 武装监听");
+    // 停在第 0 步：监听那步不跑、不探活、不给第二条修法（前面没过它的修法没意义）。
+    expect(listenerAsked).toBe(false);
+    expect(stepLine(logs, 3)).toBeUndefined();
+    expect(out).not.toContain("party claude dev");
   });
 
   test("#961 重开文案（#979 修订）：重开要用 party claude 起，不是裸 claude", async () => {
