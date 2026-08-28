@@ -108,10 +108,18 @@ export function readClaudeNativeCrossSessionFormat(
 /**
  * 把抠到的严格正则还原成可执行的 RegExp。
  *
- * 二进制里那段是**模板字符串**（`${f}` `${m}` `${n}` …），要把占位符替回真值才能用。
+ * 二进制里那段是**模板字符串**（`${vj}` `${ea}` `${t}` …），要把占位符替回真值才能用。
  * 任何一处还原不出就返回 null —— 宁可 skip，也不要拿一条半成品正则去判「原生不认」，
  * 那会变成一条骗人的红灯。
+ *
+ * #969：占位符**按角色**替，不按变量名。压缩产物里的变量名随构建变化（2.1.24x 之前是
+ * `f/m/n/r/y`，之后成了 `vj/ea/t/r/ZP`），第一版按名替换在 2.1.247+ 上全部落空、守卫恒红——
+ * 而属性顺序与框架一字未变。角色由占位符**所处的位置**决定：`^<${X}` / `</${X}>` 是标签名，
+ * `[${X}]` 是 from 的字符集，`from-mode="(${X.join("|")})"` 是取值集，其余 `="(${X})"` 是
+ * from-session / hop-chain 的内部格式（我们不复现，宽松占位）。
  */
+const TEMPLATE_IDENT = String.raw`\$\{[A-Za-z_$][\w$]*\}`;
+
 export function buildNativeStrictRegex(fmt: ClaudeNativeCrossSessionFormat): RegExp | null {
   const start = fmt.strictSource.indexOf("^<");
   if (start === -1) return null;
@@ -120,18 +128,21 @@ export function buildNativeStrictRegex(fmt: ClaudeNativeCrossSessionFormat): Reg
   let src = fmt.strictSource.slice(start, end + 1);
   if (fmt.fromCharset === null || fmt.fromModes === null) return null;
   src = src
-    .replace(/\$\{f\}/g, "cross-session-message")
-    .replace(/\$\{m\}/g, fmt.fromCharset.replace(/\\\\/g, "\\"))
+    .replace(new RegExp(String.raw`^\^<${TEMPLATE_IDENT}`), "^<cross-session-message")
+    .replace(new RegExp(String.raw`</${TEMPLATE_IDENT}>`, "g"), "</cross-session-message>")
+    .replace(new RegExp(String.raw`\[${TEMPLATE_IDENT}\]`, "g"), `[${fmt.fromCharset}]`)
+    .replace(
+      new RegExp(String.raw`from-mode="\(\$\{[A-Za-z_$][\w$]*\.join\("\|"\)\}\)"`, "g"),
+      `from-mode="(${fmt.fromModes.join("|")})"`,
+    )
     // from-session / hop-chain 的取值形状我们不复现，用宽松占位——本守卫要抓的是
     // **属性顺序与框架**变没变，不是去复刻它们各自的内部格式。
-    .replace(/\$\{n\}/g, "[^\"]*")
-    .replace(/\$\{r\}/g, "[^\"]*")
-    .replace(/\$\{y\.join\("\|"\)\}/g, fmt.fromModes.join("|"));
+    .replace(new RegExp(String.raw`="\(${TEMPLATE_IDENT}\)"`, "g"), '="([^"]*)"');
   if (src.includes("${")) return null;
   try {
     // 二进制里那段是**源码文本**：正则里的 `\s` 在源码里写作 `\\s`。逐个还原会漏
     // （第一版只还原了 \n / \r，漏了 \s / \S，导致 body 段匹配不上、守卫误报"原生不认"）。
-    // 统一把双反斜杠折成单反斜杠。
+    // 统一把双反斜杠折成单反斜杠（抠到的 charset 同样是源码文本，一并折）。
     return new RegExp(src.replace(/\\\\/g, "\\"));
   } catch {
     return null;
