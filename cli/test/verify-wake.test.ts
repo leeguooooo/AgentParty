@@ -150,7 +150,8 @@ describe("服务端限频（#997）", () => {
     const r = await verifyWakeRoundTrip({ server: SERVER, token: TOKEN, channel: CHANNEL, identity: ME }, deps(e));
     expect(r.ok).toBe(false);
     expect(r.detail).toBe("✗ 验证帧被服务端限频：同一身份 30s 内只能发一条");
-    expect(r.fix).toBe(`稍等片刻 && party wake verify ${CHANNEL}`);
+    // 没有 retry_after 时修法只能是可执行的验证命令本身（coderabbit on #999：`稍等片刻 && …` 进 shell 会先炸）。
+    expect(r.fix).toBe(`party wake verify ${CHANNEL}`);
   });
 
   test("wakeVerifyRetryAfterSec：向上取整、至少 1s、形状不对为 null", () => {
@@ -187,6 +188,19 @@ describe("身份以 /api/me 为准，config 只是缓存（#997）", () => {
     expect(warned[0]).toContain("stale-me");
     expect(warned[0]).toContain(ME);
     expect(warned[0]).toContain("以服务端为准");
+  });
+
+  // coderabbit on #999（CWE-150）：/api/me 的 name 与网络错误消息来自远端，写 stderr 前必须剥终端控制字符；
+  // 但返回给验证帧用的身份值保持原样（那是要精确匹配的原值，不是显示用）。
+  test("远端身份名 / 错误消息含终端控制字符：提示行剥掉，返回值不动", async () => {
+    const evil = "me\u001b]0;pwned\u0007\u001b[31m";
+    const { deps: d, warned } = idDeps("stale-me", evil);
+    await expect(resolveVerifyIdentity(cfg, d)).resolves.toEqual({ identity: evil, source: "server" });
+    expect(warned).toHaveLength(1);
+    expect({ hasEsc: warned[0]!.includes("\u001b"), hasBel: warned[0]!.includes("\u0007") }).toEqual({ hasEsc: false, hasBel: false });
+    const err = idDeps("cached-me", new Error("boom\u001b[2J\u001b]52;c;evil\u0007"));
+    await expect(resolveVerifyIdentity(cfg, err.deps)).resolves.toEqual({ identity: "cached-me", source: "cache" });
+    expect(err.warned[0]!.includes("\u001b")).toBe(false);
   });
 
   test("缓存一致 / 无缓存：取权威身份，不提示", async () => {

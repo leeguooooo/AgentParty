@@ -281,7 +281,8 @@ export async function verifyWakeRoundTrip(
         ok: false,
         elapsedMs,
         detail: `✗ 验证帧被服务端限频：同一身份 30s 内只能发一条${waitSec === null ? "" : `，${waitSec}s 后可再发`}`,
-        fix: `${waitSec === null ? "稍等片刻" : `sleep ${waitSec}`} && party wake verify ${opts.channel}`,
+        // 修法必须是能直接跑的命令：没拿到重试时间就只给验证命令本身，别拼一个不存在的「稍等片刻」进 shell。
+        fix: waitSec === null ? `party wake verify ${opts.channel}` : `sleep ${waitSec} && party wake verify ${opts.channel}`,
         seq: null,
         probe: null,
         local: null,

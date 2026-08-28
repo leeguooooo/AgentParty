@@ -77,6 +77,11 @@ async function seedGuardCounters(slug: string, agentName: string, count: number,
 async function expireVerifyWindow(slug: string, agentName: string) {
   const stub = env.CHANNELS.get(env.CHANNELS.idFromName(slug));
   await runInDurableObject(stub, async (_instance: ChannelDO, state) => {
+    // 先确认这一行存在：不存在时 UPDATE 影响 0 行会静默"成功"，把测试自己的 bug 伪装成限频没过期。
+    const raw = state.storage.sql
+      .exec("SELECT value FROM meta WHERE key = ?", `wake_verify_at:${agentName}`)
+      .toArray()[0]?.value ?? null;
+    expect(raw).not.toBeNull();
     state.storage.sql.exec(
       "UPDATE meta SET value = CAST(CAST(value AS INTEGER) - ? AS TEXT) WHERE key = ?",
       WAKE_VERIFY_MIN_INTERVAL_MS,

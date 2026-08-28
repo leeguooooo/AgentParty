@@ -1,5 +1,6 @@
 // party wake test — prove mention/wake/resume as separate phases.
 import { autoWakeReachable, EXIT_TIMEOUT, type MsgFrame, type PresenceEntry, type WakeDelivery, type WakeKind } from "@agentparty/shared";
+import { stripTerminalControls } from "../format";
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
 import { agentpartyHome, readConfig, resolveChannel } from "../config";
 import { joinBindingsPath, readJoinBindings } from "../join-binding";
@@ -508,11 +509,12 @@ export async function resolveVerifyIdentity(
   } catch (e) {
     if (cached === null) throw e;
     const message = e instanceof Error ? e.message : String(e);
-    deps.warn(`warn: /api/me 不可达（${message}），暂以本地缓存身份 ${cached} 验证；结果可能不准`);
+    // 错误消息与身份名来自网络/远端，写终端前剥控制字符（CWE-150）；返回值仍是原始身份，验证帧要用原值。
+    deps.warn(stripTerminalControls(`warn: /api/me 不可达（${message}），暂以本地缓存身份 ${cached} 验证；结果可能不准`));
     return { identity: cached, source: "cache" };
   }
   if (cached !== null && cached !== identity) {
-    deps.warn(`note: 本地 config 缓存的身份 ${cached} 与服务端登记的 ${identity} 不一致，以服务端为准（party whoami 可刷新缓存）`);
+    deps.warn(stripTerminalControls(`note: 本地 config 缓存的身份 ${cached} 与服务端登记的 ${identity} 不一致，以服务端为准（party whoami 可刷新缓存）`));
   }
   return { identity, source: "server" };
 }
