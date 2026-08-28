@@ -5,17 +5,25 @@
 // #668/#674：深积压场景下逐条 `ack --seq N` 是 O(n) 空转。加 --all / --through / --before：
 // 一条命令把游标推到（head / 指定 seq）并清掉这之前的全部 pending watch 债，「从现在起只看新的」。
 import { isHelpArg, parseArgs, str, unknownFlagError, valueFlagError } from "../args";
-import { ackWatchStuck, drainWatchStuck, resolveChannel } from "../config";
+import { ackWatchStuck, drainWatchStuck, loadCursor, resolveChannel } from "../config";
+import { formatMsg } from "../format";
+import {
+  collectPendingMentionSeqs,
+  formatDrainHeader,
+  formatDrainMissing,
+  formatDrainSummary,
+  pickMessage,
+} from "../mention-drain";
 import { resolveAuthDetailed } from "../oidc-cli";
-import { ackDelivery, fetchRecentMessages, handleRestError } from "../rest";
+import { ackDelivery, fetchMessages, fetchNextMention, fetchRecentMessages, handleRestError } from "../rest";
 import { isSlug, parseNonNegativeIntFlag, parsePositiveIntFlag } from "../validation";
 
-const FLAGS = ["channel", "seq", "all", "through", "before", "no-reply"];
+const FLAGS = ["channel", "seq", "all", "through", "before", "no-reply", "drain"];
 // #875：只有 --seq 指得出「哪一条 @」。--all/--through/--before 是本地游标批量排空，
 // 服务端账本必须逐条结清（每条 @ 是一条独立的 durable delivery），所以不给批量 ack 服务端的口子。
 export const NO_REPLY_REQUIRES_SEQ_ERROR =
   "--no-reply settles ONE server-side @ and needs to know which one: pass --seq N " +
-  "(see party who --json → pending_mention_seqs). It is not combinable with --all/--through/--before.";
+  "(see party who --json → pending_mention_seqs). It is not combinable with --all/--through/--before/--drain.";
 // #860①：同族命令（receipt/revise/capture/decision）的位置参数都是 seq，只有 ack 是频道 slug，
 // 而 SLUG_RE 收下纯数字串 → `party ack 1841` 曾静默读一个不存在的频道并 exit 0（用户以为债清了）。
 export const NUMERIC_POSITIONAL_ERROR =
@@ -27,7 +35,7 @@ export const NUMERIC_POSITIONAL_ERROR =
 export const REPEATED_SEQ_ERROR =
   "--seq may be given only once: party ack clears a single local watch wake debt, " +
   "so `--seq A --seq B` would silently drop A. Use `party ack --through B` to clear everything up to B.";
-const HELP = `usage: party ack [channel|--channel C] [--seq N | --all | --through N | --before N]
+const HELP = `usage: party ack [channel|--channel C] [--seq N | --all | --through N | --before N | --drain]
 
 Acknowledge the pending watch wake debt without posting a message. Use it after
 a watch --once delivered a frame that warrants no reply (someone else's status,
@@ -38,6 +46,14 @@ For a deep backlog, --all / --through / --before drain in one command instead of
 acking one seq per re-mount (#668/#674): they advance the read cursor and clear
 all pending watch wake debt up through the target, so watch only wakes on NEW
 messages from there.
+
+--drain is the READ-EVERYTHING exit for a deep @ backlog (#958): the codex Stop
+hook hands a session ONE pending @ per turn (oldest first — nothing is skipped),
+so with 9 queued the newest surfaces 8 turns later. \`party ack --drain\` lists
+every @ still addressed to you after your cursor, full bodies, oldest first, then
+advances the cursor to the last one listed so later turns stop replaying them.
+It does NOT settle the server-side @ ledger — answer them with \`party send
+--reply-to N\` as usual.
 
 Only watch-sourced debt can be acked. Debt owned by party serve is never touched
 here: serve replays it durably and clearing it by hand would silently drop an @.
@@ -70,6 +86,8 @@ Options:
   --all         drain: advance cursor to channel head + clear all pending watch debt
   --through N   drain everything up to and including seq N (advance cursor to N)
   --before N    drain everything strictly before seq N (advance cursor to N-1)
+  --drain       list every pending @ addressed to you after the cursor (bodies
+                included, oldest first) and advance the cursor past them (#958)
 
 A successful later \`party send\` or status update acknowledges an earlier watch wake.
 Use \`party ack --seq N\` when no channel message is warranted (and remember: that
@@ -82,7 +100,7 @@ export async function run(argv: string[]): Promise<number> {
     return 0;
   }
   // #860②：把 --seq 收成数组只为「重复给了几次」可见——重复即报错，绝不静默取最后一个。
-  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "no-reply"], repeatable: ["seq"] });
+  const { positionals, flags } = parseArgs(argv, { booleans: ["all", "no-reply", "drain"], repeatable: ["seq"] });
   const unknown = unknownFlagError(flags, FLAGS);
   if (unknown !== null) {
     console.error(unknown);
@@ -110,6 +128,7 @@ export async function run(argv: string[]): Promise<number> {
   // --seq / --all / --through / --before 互斥：混用语义含糊，直接拒绝。
   const drainSelectors = [
     flags.all === true ? "--all" : null,
+    flags.drain === true ? "--drain" : null,
     flags.through !== undefined ? "--through" : null,
     flags.before !== undefined ? "--before" : null,
     flags.seq !== undefined ? "--seq" : null,
@@ -148,6 +167,9 @@ export async function run(argv: string[]): Promise<number> {
     console.error(NO_REPLY_REQUIRES_SEQ_ERROR);
     return 1;
   }
+
+  // --drain：把游标之后全部 @ 我的消息读出来、推进游标（#958）。
+  if (flags.drain === true) return drainMentions(channel);
 
   // --all / --through / --before：批量排空（#668/#674）。
   if (flags.all === true || throughFlag !== undefined || beforeFlag !== undefined) {
@@ -240,5 +262,48 @@ export async function run(argv: string[]): Promise<number> {
     case "cleared":
       console.log(`acked watch wake seq=${acked.seq} in #${channel}`);
       return 0;
+  }
+}
+
+/**
+ * `party ack --drain`（#958）：列出游标之后全部 @ 我的消息（正文照打、最老在前），再把游标推到
+ * 最后一条。正文逐条从 /messages 拉；列表来自 next-mention（服务端按 bearer 身份过滤）。
+ * 顺序：先列完再推游标——列到一半炸了，游标一步都不动，下次重跑不会漏。
+ */
+async function drainMentions(channel: string): Promise<number> {
+  const auth = await resolveAuthDetailed();
+  if (!auth.server || !auth.token) {
+    console.error("no config, run: party login or party init --server URL --token T");
+    return 1;
+  }
+  const { server, token } = auth;
+  const cursor = loadCursor(channel);
+  try {
+    const pending = await collectPendingMentionSeqs(
+      { nextMention: (since) => fetchNextMention(server, token, channel, since) },
+      cursor,
+    );
+    if (pending.seqs.length === 0) {
+      console.log(`no pending @ for you in #${channel} after seq=${cursor}`);
+      return 0;
+    }
+    console.log(formatDrainHeader(channel, cursor, pending));
+    for (const seq of pending.seqs) {
+      const frame = pickMessage(await fetchMessages(server, token, channel, seq - 1, 1), seq);
+      console.log(frame === null ? formatDrainMissing(channel, seq) : formatMsg(frame));
+    }
+    const last = pending.seqs[pending.seqs.length - 1]!;
+    const drained = drainWatchStuck(channel, last);
+    if (drained.outcome === "serve_owned") {
+      console.log(
+        `advanced cursor to seq=${drained.cursor} in #${channel}, but pending debt at seq=${drained.seq} is ` +
+          `owned by party serve (source=${drained.source}) — preserved, not cleared (serve replays it durably).`,
+      );
+      return 0;
+    }
+    console.log(formatDrainSummary(channel, pending, drained.cursor));
+    return 0;
+  } catch (e) {
+    return handleRestError(e);
   }
 }

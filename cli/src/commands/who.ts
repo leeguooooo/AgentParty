@@ -310,12 +310,27 @@ export function wakeGuidanceNote(g: WakeGuidance | undefined): string {
  * 「某个 codex turn 绑到这个身份」时才会去取。本机不知道用户会不会再开那个会话，也不知道这个
  * 身份平时跑的是不是 codex——所以只说「本机上一个绑到它的 codex turn 会取走」，不说「它可达」。
  */
-export function deferredNote(r: Row): string {
+export function deferredNote(r: Row, channel?: string): string {
   if (r.pull_wake === undefined) return "";
   // #926：判据是「会不会跑」，不是「装没装」。信任闸没过时这条通道一次都不会被调用——
   // 继续宣告 deferred 就是系统自信地讲一件错事，发送方会安心去等一个永远不来的回应。
   if (!pullWakeDelivers(r.pull_wake)) return blockedPullWakeNote(r);
-  return ` · ⇢ deferred (local view: a codex turn under this identity on this machine picks the @ up via the Stop hook)`;
+  return ` · ⇢ deferred (local view: a codex turn under this identity on this machine picks the @ up via the Stop hook, one per turn${deferredQueueNote(r, channel)})`;
+}
+
+/**
+ * #958：deferred 身份的队列深度。Stop hook 每轮只送一条最老的 @，积压 N 条时刚发的那条要等
+ * N-1 轮——发送方看不到这一点，就只能把「杳无音信」理解成「坏了」。
+ *
+ * 条数取服务端 presence 账本的 unhandled_mention_count（directed delivery 的接待欠账）。它与
+ * hook 那侧「游标之后的 @」是两本账：欠账按回复/ack 逐条结清，游标按 turn 推进，通常一致但
+ * 不保证逐条相等——所以这里说的是「≈ N turns」，不说精确到哪一轮。没有欠账就一个字不加。
+ */
+export function deferredQueueNote(r: Row, channel?: string): string {
+  const count = r.unhandled_mention_count;
+  if (typeof count !== "number" || count <= 0) return "";
+  const drain = channel === undefined ? "party ack --drain" : `party ack --drain --channel ${channel}`;
+  return `; ${count} unhandled @ queued ≈ ${count} turn${count === 1 ? "" : "s"} — drain in one go there: ${drain}`;
 }
 
 /**
@@ -773,7 +788,7 @@ export function buildRows(
 }
 
 /** 单行终端渲染。抽出来让「哪些标注真的出现在行里」可断言（#879 之前只有 note 函数被单测覆盖）。 */
-export function renderRow(r: Row, now: number, lastSeq: number): string {
+export function renderRow(r: Row, now: number, lastSeq: number, channel?: string): string {
   const read = readNote(r.read_seq, lastSeq);
   const duplicate = r.connection_count !== undefined ? ` x${r.connection_count} sessions` : "";
   // 暂停接待（#180）：独立的 ⏸ 行，与 offline 视觉区分。带上定时/手动恢复提示，一眼看清何时回来。
@@ -797,7 +812,7 @@ export function renderRow(r: Row, now: number, lastSeq: number): string {
   // @ 是持久 directed delivery，会挂成该身份的接待欠账等它下次跑起来，不是掉进历史就没了。
   const unreach =
     r.pull_wake !== undefined
-      ? deferredNote(r)
+      ? deferredNote(r, channel)
       : r.unreachable === true
         ? " · ⚠ no live wake layer (the @ waits as this identity's reception debt until it next runs)"
         : "";
@@ -891,7 +906,7 @@ export async function run(argv: string[]): Promise<number> {
       console.log(`no one to mention in ${channel} yet`);
       return 0;
     }
-    for (const r of rows) console.log(renderRow(r, now, lastSeq));
+    for (const r of rows) console.log(renderRow(r, now, lastSeq, channel));
     // #931：who 里出现了「这个身份还有别的执行体」，而本机那把闸没落下——这两件事必须放在一起
     // 说出来。此前它只在 `party status` 的 stderr 里有一行 warn，而 who 那行还在断言「会被拒」。
     if (taskLease !== undefined && shouldSurfaceTaskLeaseEnforcement(taskLease, rows.some(hasBlockingConflict))) {

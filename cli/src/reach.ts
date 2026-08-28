@@ -2,6 +2,8 @@
 // 发完就知道会不会白发。与 who 的 classify 不同：这里对「找不到/离线/幽灵」一律回 offline（要提醒
 // 「重连前收不到」），不返回 null；档位判定与网页 mentions.ts 保持一致（online / wakeable / offline）。
 import { autoWakeReachable, WAKE_BLOCK_TTL_MS, type PresenceEntry, type WakeBlock, type WakeKind } from "@agentparty/shared";
+import { codexStopWakeDrainCommand } from "./codex-stop-wake";
+import { pullWakeDelivers, type PullWakeHint } from "./pull-wake";
 
 // 档位窗口与 `party who` 的 classify 保持一致，避免 who 说「可唤醒」而 send --reach 说「离线」自相矛盾：
 // online 需当前连着且新鲜(<STALE_MS)；wakeable 按 wakeReachable 统一口径（#47）：serve/watch 需
@@ -190,4 +192,60 @@ export function busyTimeoutHint(mentions: string[], presence: PresenceEntry[], n
   if (busy.length === 0) return null;
   const parts = busy.map((r) => `@${r.name} 忙碌中${r.queueDepth !== undefined ? `, ${r.queueDepth} 排队` : ""}`);
   return `TIMEOUT — ${parts.join("; ")}; 稍后再试, 勿重复 @（对方在忙, 不是失联）`;
+}
+
+/**
+ * #958：@ 到了一个「拉取式唤醒」的身份（本机装着 codex Stop hook、也有它的 config，见 #905）。
+ * 它既不是不可达也不是在线：那台机器上下一个绑到它的 codex turn 结束时会取走**一条**最老的 @。
+ * 发送方必须知道两件事——自己这条在排队、队列有多深——否则「杳无音信」和「坏了」无法区分。
+ */
+export interface DeferredTarget {
+  name: string;
+  channel: string;
+  /**
+   * 服务端 presence 账本上该身份的未处理 @ 条数（unhandled_mention_count）。它是 directed
+   * delivery 的接待欠账，与 hook 那侧「游标之后的 @」是两本账，通常一致但不保证逐条相等——
+   * 文案只说「≈ N turns」。
+   */
+  queued: number;
+  /** 刚发的这条在 pending_mention_seqs 里的位置（1-based）；账本没列出它就 null。 */
+  position: number | null;
+}
+
+/**
+ * 只把 #664 那两档「没有活唤醒层」的不可达改判成 deferred：paused / wake_blocked 是更强的结论，
+ * 拉取通道再健康也压不过它们（暂停接待就是不接、信任闸没过就是不跑）。
+ */
+export function deferredOf(
+  u: Unreachable,
+  presence: PresenceEntry[],
+  hint: PullWakeHint | undefined,
+  channel: string,
+  sentSeq: number,
+): DeferredTarget | null {
+  if (u.reason !== "no_wake" && u.reason !== "stale_adapter") return null;
+  if (!pullWakeDelivers(hint)) return null;
+  const e = presence.find((p) => p.name === u.name);
+  const count = typeof e?.unhandled_mention_count === "number" && e.unhandled_mention_count > 0
+    ? e.unhandled_mention_count
+    : 0;
+  const seqs = Array.isArray(e?.pending_mention_seqs) ? e.pending_mention_seqs : [];
+  const index = seqs.indexOf(sentSeq);
+  return { name: u.name, channel, queued: count, position: index === -1 ? null : index + 1 };
+}
+
+// stderr 上的一行：说清「在排队」+「排多深」+「怎么一次清掉」。措辞保留「本机视角」限定（#905）。
+export function formatDeferred(d: DeferredTarget): string {
+  const turns = (n: number) => `${n} turn${n === 1 ? "" : "s"}`;
+  const queue =
+    d.queued === 0
+      ? "nothing else queued ahead of yours — it surfaces at the end of that session's next turn"
+      : d.position !== null
+        ? `${d.queued} unhandled @ queued, yours is #${d.position} in line ≈ ${turns(d.position)}`
+        : `${d.queued} unhandled @ queued ahead of yours ≈ ${turns(d.queued + 1)}`;
+  return (
+    `note: @${d.name} ⇢ deferred — no live wake layer, but a codex turn under this identity on this machine ` +
+    `picks its @s up via the Stop hook, ONE per turn (local view); ${queue} — ` +
+    `drain in one go there: ${codexStopWakeDrainCommand(d.channel)}`
+  );
 }

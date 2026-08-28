@@ -1135,20 +1135,43 @@ export async function fetchWakeDeliveries(
  * 那条通道），又只有 ~10s 预算，所以需要一次尽可能便宜、可独立设超时的问询。正文仍旧
  * 由会话自己去 `party history` 读。
  */
+/**
+ * `next-mention` 的回答（#958 起不止一个 seq）。
+ *
+ * `seqs` 是 since 之后**全部** @ 我的 seq（升序，队首恒为 `seq`），供调用方说出「这是第 1/N 条」
+ * 和一次排空；老服务端只回 `seq`，此时 `seqs` 为 null＝「不知道队列多深」，调用方不许把它当 1。
+ * `truncated` 为真时列表只是下限（服务端扫描窗口被打满）。
+ */
+export interface NextMention {
+  seq: number;
+  seqs: number[] | null;
+  truncated: boolean;
+}
+
 export async function fetchNextMention(
   server: string,
   token: string,
   slug: string,
   since: number,
   signal?: AbortSignal,
-): Promise<number | null> {
-  const body = await req(
+): Promise<NextMention | null> {
+  const body = (await req(
     server,
     `/api/channels/${encodeURIComponent(slug)}/next-mention?since=${encodeURIComponent(String(Math.max(0, Math.trunc(since))))}`,
     { headers: bearerJson(token), ...(signal === undefined ? {} : { signal }) },
-  );
-  const seq = (body as Record<string, unknown> | null)?.seq;
-  return typeof seq === "number" && Number.isFinite(seq) && seq > 0 ? seq : null;
+  )) as Record<string, unknown> | null;
+  const seq = body?.seq;
+  if (typeof seq !== "number" || !Number.isFinite(seq) || seq <= 0) return null;
+  const raw = body?.seqs;
+  const seqs = Array.isArray(raw)
+    ? raw.filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0)
+    : null;
+  // 服务端契约是 seqs[0] === seq；列表里没有队首就当它不可信（老服务端 / 形状不对），退回「不知道」。
+  return {
+    seq,
+    seqs: seqs !== null && seqs[0] === seq ? seqs : null,
+    truncated: body?.truncated === true,
+  };
 }
 
 export async function createCapture(

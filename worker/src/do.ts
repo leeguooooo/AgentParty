@@ -7049,7 +7049,7 @@ export class ChannelDO extends Server<Env> {
       // 「频道是唯一数据源」不因这个指针端点而破。
       const since = Math.max(toInt(url.searchParams.get("since"), 0), 0);
       const name = url.searchParams.get("name") ?? "";
-      if (name === "") return Response.json({ seq: null });
+      if (name === "") return Response.json({ seq: null, seqs: [], truncated: false });
       const key = mentionMatchKey(name);
       // #913：预筛走 message_mentions 倒排索引，不再对 messages 做 `seq > since` 的全窗口 LIKE 扫描。
       // 关键差别在**零命中**：LIKE 版必须扫完 since 之后每一行才能确定「没有」，代价与频道长度同阶
@@ -7074,6 +7074,12 @@ export class ChannelDO extends Server<Env> {
       // 而「便宜」只能用真实读到的行数证明——响应体里看不出扫了 1900 行还是 0 行。
       // 留在实例上供守卫测试断言：零命中查询的读行数不随频道长度增长。
       this.nextMentionRowsRead = cursor.rowsRead;
+      // #958：除了队首那一条，把窗口内**全部**命中的 seq 也回给调用方（仍旧只有指针、没有正文）。
+      // codex Stop hook 每轮只推进一条，积压 9 条时新消息要等 8 轮才浮出来——调用方必须能说出
+      // 「这是第 1/9 条」并给出一次排空的命令，而这两件事都要先知道队列有多深。读行数不变
+      // （同一条 LIMIT 查询），只是不再在第一个命中处提前返回。`truncated` 说明候选行打满了
+      // 扫描窗口，列表只是下限。
+      const seqs: number[] = [];
       for (const row of rows) {
         let names: string[];
         try {
@@ -7081,11 +7087,9 @@ export class ChannelDO extends Server<Env> {
         } catch {
           continue;
         }
-        if (names.some((value) => mentionMatchKey(value) === key)) {
-          return Response.json({ seq: Number(row.seq) });
-        }
+        if (names.some((value) => mentionMatchKey(value) === key)) seqs.push(Number(row.seq));
       }
-      return Response.json({ seq: null });
+      return Response.json({ seq: seqs[0] ?? null, seqs, truncated: rows.length >= NEXT_MENTION_SCAN_LIMIT });
     }
     // GDPR 按身份数据出口/擦除（#421）。授权在 worker 层做（moderator 门），DO 只按 name 读/删本频道数据。
     const identityDataMatch = url.pathname.match(/^\/internal\/identity\/([^/]+)\/data$/);
