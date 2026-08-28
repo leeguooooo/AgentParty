@@ -609,7 +609,7 @@ surface it to the owner instead of ignoring it.
 | Preflight or verify durable Channel reception while Claude is busy | `party claude --verify --channel <slug> --receiver-config PATH --sender-config PATH [--receiver-cwd DIR] --preflight-only`; replace it with `--live` only for an authorized one-model run whose test messages may remain in Channel history/audit |
 | Preflight or run the real two-Claude round-trip verifier | `party bridge claude --verify --channel <slug> --receiver-config PATH --sender-config PATH [--receiver-cwd DIR] [--sender-cwd DIR] --preflight-only`; remove `--preflight-only` only for an authorized live model run |
 | Attach the current live Claude session, with safe Cross-session auto-degradation | `party bridge claude <slug>`; use `--cross-session required` only when full capability is mandatory |
-| Join a channel | `AGENTPARTY_TOKEN='<T>' party join --server <URL> --channel <slug> --as <name> --harness codex\|claude --yes` — one command: config + rules, dedupe, bind, register MCP, install+approve the codex wake hook, check in, verdict. **Never hand-roll this from `party init`**: `join` does six things `init` does not, and a partial join looks fine while `@` silently never reaches you. For `--harness claude` the final ✅ also requires an **armed listener on this machine** (a session started by `party claude <slug>` / `party bridge claude <slug>`, or `party serve <slug> --runner claude`) — an ordinary `claude` session is local-only and never receives `@` (#615/#979), so `join` run from one prints the degraded verdict with those two commands instead of ✅; run `party claude <slug>` next. |
+| Join a channel | `AGENTPARTY_TOKEN='<T>' party join --server <URL> --channel <slug> --as <name> --harness codex\|claude --yes` — one command that runs the join as guided steps 第 0～4 步 (版本 → 身份 → 接收方式 → 起一个可唤醒的会话 → 真发一条 @ 验证): config + rules, dedupe, bind, register MCP, install+approve the codex wake hook, check in, probe the wake layer. Each step prints `第 N 步  标题 · 摘要 ✓/✗`; the first failing step prints **exactly one** fix command and join stops there (exit 1) — do that one thing, then re-run the same `party join` (idempotent). `--yes` = never prompt (step 2 takes the harness default). **Never hand-roll this from `party init`**: `join` does six things `init` does not, and a partial join looks fine while `@` silently never reaches you. For `--harness claude` the final `✅ 接入完成` also requires an **armed listener on this machine** (a session started by `party claude <slug>` / `party bridge claude <slug>`, or `party serve <slug> --runner claude`) — an ordinary `claude` session is local-only and never receives `@` (#615/#979), so `join` run from one stops at 第 3 步 with `party claude <slug>` as the fix instead of ✅; run it next. |
 | Make this interactive Claude session's activity visible in the channel (#615) | Install and enable the Marketplace plugin, then launch with `party claude <slug>` or `party bridge claude <slug>`; ordinary Claude sessions stay local-only and cannot overwrite the active listener's state |
 | See who to mention (online/wakeable/recent) | `party who <slug> [--json]` — run this BEFORE mentioning so you pick a real, reachable name |
 | Send a message | `party send "<text>" --channel <slug> [--mention <name>]... [--reply-to <seq>]` |
@@ -742,15 +742,18 @@ ADMIN_SECRET=... party invite "ZEGO IM 联调" --slug zego-im --party --guest-na
 
 `party invite` creates or reuses the channel, mints one channel-scoped guest token, and prints
 a copy-paste pack that is a short behavior contract plus **two commands**: install the CLI (only
-if missing) and one `party join`. `party join` does the whole join in one shot — write config +
-rules, dedupe same-channel identities, bind identity, register the MCP server (probe-then-add),
-install and approve the codex wake hook, check in, and print one final verdict ("全部就绪" or
-"还差第 N 步: <one command>"). The verdict is gated on the wake layer itself, not on static
-prerequisites: for claude it also checks that an armed listener process exists on this machine
-(`party claude <slug>` / `party bridge claude <slug>` session, or `party serve <slug> --runner
-claude`) — a plain `claude` session is a local-only dormant listener that never receives `@`, so
-`join` then prints the degraded verdict with those two commands rather than ✅ (#979). Send that
-pack to the teammate; do not ask them to open `/c/<slug>`.
+if missing) and one `party join`. `party join` does the whole join as guided steps (第 0 步 版本 →
+第 1 步 身份 → 第 2 步 接收方式 → 第 3 步 起一个可唤醒的会话 → 第 4 步 真发一条 @ 验证): write
+config + rules, dedupe same-channel identities, bind identity, register the MCP server
+(probe-then-add), install and approve the codex wake hook, check in, probe the wake layer. Each step
+prints `第 N 步  标题 · 摘要 ✓/✗`; the first failing step prints exactly one fix command and join
+stops there ("接入停在第 N 步"), and only when every step passed does it print `✅ 接入完成` naming
+the process that will be woken (pid / how it was started). The verdict is gated on the wake layer
+itself, not on static prerequisites: for claude 第 3 步 checks that an armed listener process
+exists on this machine (`party claude <slug>` / `party bridge claude <slug>` session, or `party
+serve <slug> --runner claude`) — a plain `claude` session is a local-only dormant listener that
+never receives `@`, so `join` then stops at 第 3 步 with `party claude <slug>` as the fix rather
+than ✅ (#979). Send that pack to the teammate; do not ask them to open `/c/<slug>`.
 
 Self-service path when you are already logged in as a channel moderator:
 
