@@ -34,6 +34,8 @@ export interface SpawnBehavior {
    * 已装过插件时就会这样），但 update 照样把版本对齐——用来钉「按最终事实判成败，不按退出码」。
    */
   noisyPluginSubcommands?: boolean;
+  /** `plugin install` 真的失败：返回非 0 **且没装上**（区别于 noisy 那种「已装过所以非 0」）。 */
+  failPluginInstall?: boolean;
   /**
    * `plugin update` 退出非 0 **但版本其实已经换好**（真机常见）。用来钉「按装好的版本判，
    * 不按退出码」——否则上层会以为没更新过，结论丢掉「差一次重开」，而另一处探测读到新版本
@@ -48,6 +50,17 @@ export interface SpawnBehavior {
   /** 一开始的头 N 次 `plugin list` 读不出来：连「之前是什么版本」都不知道。 */
   pluginListFailsAtStart?: number;
 }
+/** 只比数字段，够桩用（"0.2.222" vs "0.2.221"）。 */
+function compareSemverLoose(a: string, b: string): number {
+  const pa = a.split(".").map((x) => Number.parseInt(x, 10) || 0);
+  const pb = b.split(".").map((x) => Number.parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
 interface PluginState {
   installed: string | null;
   /** 还要让多少次 `plugin list` 读失败（pluginListFailsAfterUpdate 用）。 */
@@ -79,6 +92,7 @@ export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: Pl
       return { ...base, status: 0, stdout: `${JSON.stringify(rows)}\n` };
     }
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "install") {
+      if (behavior.failPluginInstall) return { ...base, status: 1 }; // 真失败：没装上
       // 真机行为：已装就只回 "already installed"，版本原地不动。
       if (state.installed === null) state.installed = RUNNING_VERSION;
       return { ...base, status: behavior.noisyPluginSubcommands ? 1 : 0 };
@@ -88,7 +102,13 @@ export function fakeSpawn(record: string[][], behavior: SpawnBehavior, state: Pl
     }
     if (cmd === "claude" && args[0] === "plugin" && args[1] === "update") {
       if (behavior.failPluginUpdate) return { ...base, status: 1 };
-      state.installed = RUNNING_VERSION;
+      // 真机行为二则（桩不能比真机宽容，否则会掩盖真缺陷）：
+      //  1) 没装过时 `plugin update` 直接失败，**不会顺手装上**（那是 install 的活）；
+      //  2) update 只把插件带到 marketplace 上的版本，**不会降级**——本机插件比 CLI 新
+      //     （CLI 还没升）时跑它等于没动，正是 owner 截图那种 0.2.222 插件 / 0.2.221 CLI。
+      if (state.installed === null) return { ...base, status: 1 };
+      const newer = compareSemverLoose(state.installed, RUNNING_VERSION) > 0;
+      if (!newer) state.installed = RUNNING_VERSION;
       if (behavior.pluginListFailsAfterUpdate !== undefined) state.listFailuresLeft = behavior.pluginListFailsAfterUpdate;
       return { ...base, status: behavior.pluginUpdateNoisyButWorks ? 1 : 0 };
     }
