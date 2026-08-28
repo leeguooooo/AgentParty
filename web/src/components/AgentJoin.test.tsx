@@ -567,7 +567,7 @@ describe("AgentJoin 分步引导 (#1005)", () => {
   const NOW = 1_800_000_000_000;
 
   function stepper(extra: Partial<React.ComponentProps<typeof AgentJoin>> = {}) {
-    const props = { presence: [] as PresenceEntry[], messages: [] as MsgFrame[], now: () => NOW, ...extra };
+    const props = { presence: [] as PresenceEntry[], messages: [] as MsgFrame[], now: () => NOW, liveNoteDelayMs: 0, ...extra };
     const r = render(undefined, null, props);
     open(r);
     return {
@@ -814,7 +814,10 @@ describe("AgentJoin 分步引导 (#1005)", () => {
     // 而且要看得见、听得见：黄底 banner + 有 role/label 让读屏播报，不是 12px 暗色小字。
     const banner = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-tokenbanner"));
     expect(String(banner.props.className)).toContain("banner--yellow");
-    // 播报走**常驻**的 live region：区域必须比内容先存在，整块一起挂载读屏多半不念。
+    // 播报走 live region：区域先空着落地，文字晚一拍填入（stepper() 注入 0 延迟，等一个 tick 即可）。
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+    });
     const live = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
     expect(["status", "alert"]).toContain(live.props.role);
     expect(String(live.children.join(""))).toContain(text.slice(0, 12));
@@ -825,22 +828,31 @@ describe("AgentJoin 分步引导 (#1005)", () => {
 
   // live region 的可靠性判据：弹窗还没开、token 还没铸出来时它就得在 DOM 里；
   // 内容随后由 effect 填入，才算「已存在区域的内容变化」（codex review 第七轮）。
-  test("读屏播报区常驻：弹窗没开时已在 DOM 且为空，铸出 token 后才填上安全提示", async () => {
-    const s = stepper();
-    // stepper() 已经点开了弹窗，但还没生成 token。
-    const before = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
-    expect(["status", "alert"]).toContain(before.props.role);
-    expect(String(before.children.join(""))).toBe("");
+  test("播报区先以空内容落地、文字晚一拍才填——区域与文字同批插入读屏不念", async () => {
+    // 延迟设成一个够长的值：generate 之后立刻看，区域已在、但还没有文字。
+    const s = stepper({ liveNoteDelayMs: 10_000 });
     await s.generate();
-    const after = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
-    expect(String(after.children.join("")).length).toBeGreaterThan(0);
+    const atMount = s.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+    expect(["status", "alert"]).toContain(atMount.props.role);
+    expect(String(atMount.children.join(""))).toBe("");
+    // 换成 0 延迟重挂一次，确认文字确实会填进去。
+    const fast = stepper({ liveNoteDelayMs: 0 });
+    await fast.generate();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    const filled = fast.r.root.find((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+    expect(String(filled.children.join("")).length).toBeGreaterThan(0);
   });
 
-  test("播报区在弹窗之外——弹窗本身也是动态挂载的，区域必须比它更早存在", () => {
-    const r = render(undefined, null, { presence: [], messages: [], now: () => NOW });
-    // 没有点开「＋ 让 agent 加入」，弹窗未渲染。
-    expect(r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-overlay"))).toHaveLength(0);
-    const live = r.root.findAll((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
+  // overlay 是 aria-modal="true"：VoiceOver 只念弹窗子树里的东西，挂在弹窗外的 live region
+  // 完全不播报（codex review 第八轮）。所以播报区必须是 dialog 的后代。
+  test("播报区在 dialog 子树内（aria-modal 下弹窗外的 live region 不会被念）", async () => {
+    const s = stepper();
+    await s.generate();
+    const overlay = s.r.root.find((n) => String(n.props.className ?? "") === "agent-join-overlay");
+    expect(overlay.props["aria-modal"]).toBe("true");
+    const live = overlay.findAll((n) => String(n.props.className ?? "").includes("agent-join-sr-only"));
     expect(live).toHaveLength(1);
     expect(["status", "alert"]).toContain(live[0]!.props.role);
   });

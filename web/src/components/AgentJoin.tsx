@@ -86,6 +86,8 @@ interface Props {
   /** 轮询/计时参数（测试注入）。 */
   pollIntervalMs?: number;
   tickMs?: number;
+  /** 播报区填字的延迟（ms）：让空的 live region 先落地，再变内容。测试注入 0。 */
+  liveNoteDelayMs?: number;
   verifyTimeoutMs?: number;
   now?: () => number;
 }
@@ -234,6 +236,7 @@ export function AgentJoin({
   recoverName = null,
   pollIntervalMs = 2500,
   tickMs = 1000,
+  liveNoteDelayMs = 150,
   verifyTimeoutMs = 30_000,
   now: nowFn = Date.now,
 }: Props) {
@@ -355,11 +358,20 @@ export function AgentJoin({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recoverName, slug]);
 
-  // 文字在 effect 里填：区域先挂载、内容后变化，才是读屏认的「live region 更新」。
+  // 文字在 effect 里填，且晚一拍：区域先以空内容落地，之后内容变化才是读屏认的 live region 更新
+  // （区域与文字同一批插入时，多数读屏不念）。延迟可注入，测试不必真等。
   const tokenPresent = phase.kind === "stepper" && phase.session.token !== null;
   useEffect(() => {
-    setLiveNote(tokenPresent ? `${t("AgentJoin.step2.tokenSafety")} ${t("AgentJoin.tokenWarn")}` : "");
-  }, [t, tokenPresent]);
+    if (!tokenPresent) {
+      setLiveNote("");
+      return;
+    }
+    const timer = setTimeout(
+      () => setLiveNote(`${t("AgentJoin.step2.tokenSafety")} ${t("AgentJoin.tokenWarn")}`),
+      liveNoteDelayMs,
+    );
+    return () => clearTimeout(timer);
+  }, [liveNoteDelayMs, t, tokenPresent]);
 
   const dialogOpen = phase.kind === "compose" || phase.kind === "loading" || phase.kind === "stepper";
   const composeOpen = phase.kind === "compose" || phase.kind === "loading";
@@ -641,9 +653,6 @@ export function AgentJoin({
 
   return (
     <div className="agent-join">
-      {/* 常驻读屏播报区：内容由上面的 effect 在 token 出现时填入。放在这里而不是弹窗里——
-          弹窗本身也是动态挂载的，区域必须比内容先存在。 */}
-      <p className="agent-join-sr-only" role="status">{liveNote}</p>
       <button
         type="button"
         className="d-btn d-btn--primary agent-join-btn"
@@ -804,6 +813,12 @@ export function AgentJoin({
           tabIndex={-1}
         >
           <div className="agent-join-scrim" onClick={close} />
+          {/* 读屏播报区必须在 dialog **子树内**：overlay 是 aria-modal="true"，VoiceOver 会把
+              无障碍树限制在弹窗内，挂在弹窗外面的 live region 完全不播报
+              （codex stop-time review on 99f85e4）。
+              同时它随弹窗挂载时是**空**的，文字由 effect 稍后填入——区域先存在、内容后变化，
+              才是读屏认的 live region 更新。 */}
+          <p className="agent-join-sr-only" role="status">{liveNote}</p>
           <div className="d-card agent-join-card agent-join-card--stepper">
             <header className="agent-join-card-head">
               <h2 className="d-title agent-join-title">
