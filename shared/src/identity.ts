@@ -75,7 +75,8 @@ export interface FriendlyAgentIdentity {
  * 例：`lark-ad72b3f97491-agentparty` + owner_display_name=leo → `leo · agentparty`。
  *
  * 注意：友好名会撞车（同 owner 同角色，只有哈希段不同）——需要「一定能分辨」的场合
- * （web 列表用 assignIdentityDisambiguators；cli 注入面板 fromName 直接带完整技术 ID）。
+ * 用 assignIdentityDisambiguators（web 列表与 cli 注入面板 fromName 同用；#986 起 cli 也只在
+ * 撞名时加短码，技术 ID 走正文 `from-id:`）。
  */
 export function friendlyAgentLabel(identity: FriendlyAgentIdentity): string {
   const role = generatedAgentRole(identity.name) ?? identity.name;

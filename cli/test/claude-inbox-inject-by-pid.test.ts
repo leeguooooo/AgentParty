@@ -102,7 +102,7 @@ describe("按 pid 寻址（#857 真实寻址层）", () => {
       sessionId: entry.session_id,
       name: claudeSessionAnnounceName(entry),
       body: "AgentParty wake: #dev seq=42",
-      fromName: "leo · agentparty (lark-ad72b3f97491-agentparty)",
+      fromName: "leo · agentparty",
       env: env(),
     });
     expect(result).toMatchObject({ ok: true, socketPath: sockPath });
@@ -116,7 +116,7 @@ describe("按 pid 寻址（#857 真实寻址层）", () => {
     };
     expect(frame.type).toBe("user");
     expect(frame.message.content).toContain("AgentParty wake: #dev seq=42");
-    expect(frame.message.content).toContain('from-name="leo · agentparty (lark-ad72b3f97491-agentparty)"');
+    expect(frame.message.content).toContain('from-name="leo · agentparty"');
   });
 
   test("sessionId 不匹配（pid 被复用/换了会话）→ 拒投，绝不写错会话", () => {

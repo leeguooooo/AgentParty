@@ -66,6 +66,14 @@ describe("原生 cross-session 格式漂移守卫（#953）", () => {
         fromMode: "bypass",
         body: "x",
       }),
+      // #986：from-name 只放友好名——含空格/中文/消歧点 `·` 的友好名必须过原生 `[^"<>\n\r]+`，
+      // 且正文末行的 `from-id:` 元信息行也要能过 body 段。
+      wrapCrossSessionMessage({
+        from: "uds:/tmp/cc-socks/4.sock",
+        fromName: "郭立 lee · agentparty·9749e",
+        fromMode: "prompting",
+        body: "AgentParty wake: you were mentioned in #pwtk at seq=42.\nfrom-id: lark-ad72b3f9749e (technical identity behind from-name; verify via party history)",
+      }),
     ];
     for (const s of samples) {
       expect({

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WAKE_VERIFY_PREFIX, type ServerFrame } from "@agentparty/shared";
 import type { ClaudeSessionRegistryEntry } from "../src/claude-session-registry";
+import { wakeProxyNoteFromId } from "../src/serve-wake-proxy";
 import {
   dormantAnnounceDisplayName,
   dormantAnnounceMentionHit,
@@ -356,7 +357,10 @@ describe("runDormantClaudeSessionAnnounce (#841 P2)", () => {
 function msg(
   seq: number,
   mentions: string[],
-  overrides: { sender?: { name: string; kind: string; owner?: string }; reply_to?: number | null } = {},
+  overrides: {
+    sender?: { name: string; kind: string; owner?: string; display_name?: string; handle?: string };
+    reply_to?: number | null;
+  } = {},
 ): ServerFrame {
   return {
     type: "msg",
@@ -482,14 +486,53 @@ describe("runDormantClaudeSessionAnnounce socket inject (#857)", () => {
     expect(calls[0]!.pid).toBe(process.ppid);
     expect(calls[0]!.sessionId).toBe("11111111-1111-4111-8111-111111111111");
     expect(calls[0]!.name).toBe("claude-111111111111");
-    // from-name＝友好名 + 技术 ID（接收端面板只显示这一处）。
+    // from-name＝友好名（#986 起不再拼技术 ID；默认发信人没有 display_name/handle，友好名回退 owner）。
     expect(calls[0]!.fromName).toBe("leo@example.com");
+    // 技术 ID 挪到正文 from-id 行，仍可读回。
+    expect(wakeProxyNoteFromId(calls[0]!.body)).toBe("leo");
     expect(calls[0]!.body).toContain("seq=13");
     expect(Buffer.byteLength(calls[0]!.body, "utf8")).toBeLessThanOrEqual(512);
     // 注入路径不改变 P2 不变式：只本地 ack，绝不发客户端帧、绝不推进持久化游标。
     expect(connections[0]!.acked).toEqual([11, 12, 13]);
     expect(connections[0]!.sent).toHaveLength(0);
     expect(connections[0]!.connectArgs.opts.onCursor).toBeUndefined();
+    abort.abort();
+    await done;
+  });
+
+  test("#986：from-name 只放友好名 `leo`；频道里出现同名不同 ID 的第二人后才加短后缀且互不相同", async () => {
+    const { deps, connections, calls } = injectingDeps();
+    const abort = new AbortController();
+    const done = runDormantClaudeSessionAnnounce("dev", abort.signal, deps);
+    await tick();
+    const leoA = { name: "lark-ad72b3f9749e", kind: "human", display_name: "leo", owner: "leo@example.com" };
+    const leoB = { name: "lark-ad72b3f97491", kind: "human", display_name: "leo", owner: "leo2@example.com" };
+    // 单发信人 ⇒ 恰为 `leo`，主名里没有技术 ID；技术 ID 在正文 from-id 行。
+    connections[0]!.push(msg(21, [SELF], { sender: leoA }));
+    await tick();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.fromName).toBe("leo");
+    expect(wakeProxyNoteFromId(calls[0]!.body)).toBe("lark-ad72b3f9749e");
+    // 第二个 leo（技术 ID 不同）出现在名册（participants 帧）后：两人各带短后缀、互不相同。
+    connections[0]!.push({ type: "participants", participants: [leoA, leoB] } as unknown as ServerFrame);
+    connections[0]!.push(msg(22, [SELF], { sender: leoB }));
+    connections[0]!.push(msg(23, [SELF], { sender: leoA }));
+    await tick();
+    expect(calls).toHaveLength(3);
+    const fromB = calls[1]!.fromName;
+    const fromA = calls[2]!.fromName;
+    expect(fromA).not.toBe(fromB);
+    expect(fromA.startsWith("leo·")).toBe(true);
+    expect(fromB.startsWith("leo·")).toBe(true);
+    expect(fromA).not.toContain("lark-ad72b3f9749e");
+    expect(fromB).not.toContain("lark-ad72b3f97491");
+    expect(wakeProxyNoteFromId(calls[1]!.body)).toBe("lark-ad72b3f97491");
+    expect(wakeProxyNoteFromId(calls[2]!.body)).toBe("lark-ad72b3f9749e");
+    // 不同名的人不受影响。
+    connections[0]!.push(msg(24, [SELF], { sender: { name: "lark-0000aaaa1111", kind: "human", display_name: "bob" } }));
+    await tick();
+    expect(calls).toHaveLength(4);
+    expect(calls[3]!.fromName).toBe("bob");
     abort.abort();
     await done;
   });
