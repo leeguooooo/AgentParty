@@ -42,6 +42,7 @@ import { isName, isSlug } from "../validation";
 import {
   CLAUDE_CHANNEL_OPT_IN_ENV,
   CLAUDE_LIFECYCLE_OPT_IN_ENV,
+  claudeChannelLoadArgs,
 } from "./claude-launch";
 import {
   defaultClaudePluginDoctorDependencies,
@@ -887,8 +888,8 @@ export function buildClaudeBridgeLaunch(options: {
     args: [
       "--mcp-config",
       JSON.stringify(mcpConfig),
-      "--dangerously-load-development-channels",
-      `server:${CHANNEL_SERVER_NAME}`,
+      // 与 `party claude` 同一个函数拼频道加载参数（#984）：两条入口不许再漂移。
+      ...claudeChannelLoadArgs(`server:${CHANNEL_SERVER_NAME}`),
       ...(crossSessionReady
         ? [
             "--append-system-prompt",

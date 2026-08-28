@@ -13,13 +13,14 @@ import {
   writeClaudeDefaultArgs,
 } from "../src/claude-default-args";
 import {
-  CLAUDE_CHANNEL_PLUGIN,
   claudeLaunchPlan,
   run,
   type ClaudeLaunchDependencies,
 } from "../src/commands/claude-launch";
 
 const SKIP = "--dangerously-skip-permissions";
+// #984：频道按 development channel 加载（字面量，故意不引用 claudeChannelLoadArgs——去掉 flag 必须红）。
+const CHANNEL_LOAD = ["--dangerously-load-development-channels", "plugin:agentparty@agentparty"];
 
 let home: string;
 let logs: string[];
@@ -141,17 +142,16 @@ describe("party claude launch with defaults", () => {
   test("no config ⇒ args unchanged and no defaults line printed", async () => {
     const { deps, calls } = launcher();
     expect(await run(["dev", "--", "--model", "sonnet"], deps)).toBe(0);
-    expect(calls[0]!.args).toEqual(["--channels", CLAUDE_CHANNEL_PLUGIN, "--model", "sonnet"]);
+    expect(calls[0]!.args).toEqual([...CHANNEL_LOAD, "--model", "sonnet"]);
     expect(logs.some((line) => line.includes("默认参数"))).toBe(false);
   });
 
-  test("configured defaults go after --channels <plugin> and before explicit -- args", async () => {
+  test("configured defaults go after the channel-load args and before explicit -- args", async () => {
     writeClaudeDefaultArgs(home, [SKIP]);
     const { deps, calls } = launcher();
     expect(await run(["dev", "--", "--model", "sonnet"], deps)).toBe(0);
     expect(calls[0]!.args).toEqual([
-      "--channels",
-      CLAUDE_CHANNEL_PLUGIN,
+      ...CHANNEL_LOAD,
       SKIP,
       "--model",
       "sonnet",
@@ -163,7 +163,7 @@ describe("party claude launch with defaults", () => {
     writeClaudeDefaultArgs(home, [SKIP]);
     const { deps, calls } = launcher();
     expect(await run(["ludo"], deps)).toBe(0);
-    expect(calls[0]!.args).toEqual(["--channels", CLAUDE_CHANNEL_PLUGIN, SKIP]);
+    expect(calls[0]!.args).toEqual([...CHANNEL_LOAD, SKIP]);
   });
 
   test("explicit arg duplicating a default is not inserted twice", async () => {
@@ -171,8 +171,7 @@ describe("party claude launch with defaults", () => {
     const { deps, calls } = launcher();
     expect(await run(["dev", "--", SKIP, "--model", "sonnet"], deps)).toBe(0);
     expect(calls[0]!.args).toEqual([
-      "--channels",
-      CLAUDE_CHANNEL_PLUGIN,
+      ...CHANNEL_LOAD,
       SKIP,
       "--model",
       "sonnet",
@@ -192,7 +191,7 @@ describe("party claude launch with defaults", () => {
   test("env fallback applies when no file exists and is reported as the env source", async () => {
     const { deps, calls } = launcher({ [CLAUDE_DEFAULT_ARGS_ENV]: "--model haiku" });
     await run(["dev"], deps);
-    expect(calls[0]!.args).toEqual(["--channels", CLAUDE_CHANNEL_PLUGIN, "--model", "haiku"]);
+    expect(calls[0]!.args).toEqual([...CHANNEL_LOAD, "--model", "haiku"]);
     expect(logs.find((entry) => entry.startsWith("默认参数："))).toBe(
       `默认参数：--model haiku（来自 环境变量 ${CLAUDE_DEFAULT_ARGS_ENV}）`,
     );
@@ -200,12 +199,11 @@ describe("party claude launch with defaults", () => {
 
   test("claudeLaunchPlan without defaults keeps the original shape", () => {
     expect(claudeLaunchPlan("dev", ["--model", "sonnet"], {}).args).toEqual([
-      "--channels",
-      CLAUDE_CHANNEL_PLUGIN,
+      ...CHANNEL_LOAD,
       "--model",
       "sonnet",
     ]);
-    expect(claudeLaunchPlan(undefined, [], {}, [SKIP]).args).toEqual(["--channels", CLAUDE_CHANNEL_PLUGIN, SKIP]);
+    expect(claudeLaunchPlan(undefined, [], {}, [SKIP]).args).toEqual([...CHANNEL_LOAD, SKIP]);
   });
 });
 
@@ -230,7 +228,7 @@ describe("party claude --default-args / --show-default-args", () => {
 
     logs = [];
     expect(await run(["dev", "--", "--model", "sonnet"], deps)).toBe(0);
-    expect(calls[0]!.args).toEqual(["--channels", CLAUDE_CHANNEL_PLUGIN, "--model", "sonnet"]);
+    expect(calls[0]!.args).toEqual([...CHANNEL_LOAD, "--model", "sonnet"]);
     expect(logs.some((line) => line.includes("默认参数"))).toBe(false);
   });
 

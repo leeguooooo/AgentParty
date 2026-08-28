@@ -197,7 +197,12 @@ The Marketplace plugin packages this skill with two thin platform shells. Codex 
 generic `party mcp` entry. Claude also receives lifecycle hooks plus a declared
 `agentparty-channel` server backed by `party claude-channel`. Start a fresh Claude session with
 `party claude <channel>` to let durable channel events enter the open
-main session without waiting for the model to poll. Extra Claude flags go after `--`
+main session without waiting for the model to poll. It loads the plugin channel with
+`--dangerously-load-development-channels plugin:agentparty@agentparty` (Claude's
+`allowedChannelPlugins` allowlist is managed-only and cannot be edited on a personal account), so
+Claude shows one "Loading development channels" confirmation at startup; pick "I am using this for
+local development". Never add `--channels plugin:agentparty@agentparty` yourself: that entry shadows
+the development one and the channel is refused again. Extra Claude flags go after `--`
 (`party claude <channel> -- --model sonnet`); to stop retyping them, set machine-local defaults once
 with `party claude --default-args -- <claude args...>` (stored in
 `$AGENTPARTY_HOME/claude-default-args.json`, prepended before explicit `--` args, printed with

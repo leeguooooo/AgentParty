@@ -492,8 +492,17 @@ export function claudePluginDoctorFixLines(
   if (report.blockers.includes("identity_not_agent")) {
     lines.push("  fix: bind an agent token with party init --token <agent-token> --channel <channel>");
   }
+  if (report.blockers.includes("plugin_state_unavailable")) {
+    lines.push(
+      "  fix: `claude plugin list --json` did not answer within 10s (Claude slow, self-updating, or logged out); retry, then check `claude plugin list`",
+    );
+  }
   if (report.blockers.includes("listener_not_observed")) {
-    lines.push("  fix: start a fresh channel session with party claude <channel>");
+    // #984：doctor 看不到 Claude 的频道 allowlist（它是 Anthropic 远端下发的 ledger，个人账号改不了），
+    // 所以直接把「怎么加载、会弹什么」写进结论，而不是让人撞上 "not on the approved channels allowlist" 再回来。
+    lines.push(
+      "  fix: start a fresh channel session with party claude <channel> (it loads the plugin channel with --dangerously-load-development-channels because the allowedChannelPlugins allowlist is managed-only; Claude shows one \"Loading development channels\" confirmation at startup)",
+    );
   }
   return lines;
 }
