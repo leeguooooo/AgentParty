@@ -33,7 +33,7 @@ import {
   type ClaudeSessionRegistryEntry,
 } from "./claude-session-registry";
 import { injectChannelMessage } from "./claude-inbox-inject";
-import { friendlyAgentLabel } from "@agentparty/shared/identity";
+import { assignIdentityDisambiguators, friendlyAgentLabel } from "@agentparty/shared/identity";
 import { readConfig, type CachedIdentity } from "./config";
 
 /** 三不变量之一：唤醒通知只带 channel+seq 指针，且总长 ≤512 UTF-8 字节。 */
@@ -49,24 +49,51 @@ export interface WakeProxyRef {
    * 兄弟已回，再决定要不要开口。省略/≤1 不写进通知。
    */
   siblings?: number;
+  /**
+   * from-name 背后的技术 identity（#986）。from-name 只放友好名（`leo`），技术 ID 不再拼进主名
+   * （拼进去会被 Claude 的 @handle 化压成 `@leo-lark-ad72b3f9749e`），而是落到正文末行的
+   * `from-id:` 元信息里——防冒充字段不丢，仍可用 wakeProxyNoteFromId 读回。省略/空 ⇒ 不写。
+   */
+  fromId?: string | null;
 }
+
+/** 正文末行元信息键（#986）：`from-id: <技术 identity>`。 */
+const WAKE_NOTE_FROM_ID_KEY = "from-id:";
+const WAKE_NOTE_FROM_ID_RE = /^from-id: (\S+)/m;
 
 /**
  * 未来载体要发的通知正文：只含 channel+seq 指针，不含消息正文。
- * 超出 512B 属于程序错误（channel ≤64 字符 + seq 数字，正常永远不会触发）。
+ * 超出 512B 属于程序错误（channel ≤64 字符 + seq 数字 + identity ≤64 字符，正常永远不会触发）。
  */
 export function wakeProxyNote(ref: WakeProxyRef): string {
   const siblings = typeof ref.siblings === "number" && Number.isInteger(ref.siblings) && ref.siblings > 1
     ? ` siblings=${ref.siblings}: ${ref.siblings} live runtimes share your identity; ` +
       "check whether a sibling already replied before you speak."
     : "";
+  const fromId = normalizeFromId(ref.fromId);
+  const fromIdLine = fromId === null
+    ? ""
+    : `\n${WAKE_NOTE_FROM_ID_KEY} ${fromId} (technical identity behind from-name; verify via party history)`;
   const note =
     `AgentParty wake: you were mentioned in #${ref.channel} at seq=${ref.seq}.${siblings} ` +
-    "Read the channel (party history) for the message body; the channel is the single source of truth.";
+    "Read the channel (party history) for the message body; the channel is the single source of truth." +
+    fromIdLine;
   if (Buffer.byteLength(note, "utf8") > WAKE_PROXY_NOTE_MAX_BYTES) {
     throw new Error("wake proxy note exceeds 512 bytes");
   }
   return note;
+}
+
+/** 从通知正文读回 from-id（#986 防冒充字段的读回路径）；没有则 null。 */
+export function wakeProxyNoteFromId(note: string): string | null {
+  return WAKE_NOTE_FROM_ID_RE.exec(note)?.[1] ?? null;
+}
+
+/** 技术 identity 进正文前的净化：只认无空白的单个 token，空/非串一律当没有。 */
+function normalizeFromId(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value.replace(/\s+/g, "").trim();
+  return cleaned === "" ? null : cleaned;
 }
 
 /**
@@ -108,15 +135,13 @@ export function selectWakeProxyTarget(
 }
 
 /**
- * 注入面板上的「谁发来的」。接收端把它原样显示成
- * `from uds:<sock> (peer claims name: <fromName>)`（#844 实测面板文本），**面板不另外
- * 显示我们的技术 identity**——所以 fromName 必须自带技术 ID，否则两个仅哈希段不同的
- * 身份（`lark-ad72b3f97491-agentparty` / `lark-ad72b3f9749e-agentparty`）会显示成同一个
- * `leo · agentparty`，界面上无法分辨。
+ * 注入面板上的「谁发来的」——serve 转投路径用本机 identity（中转身份）。
  *
- * 形态：`<所属人> · <角色> (<技术 identity>)`——友好前半对齐 web 的 identityDisplay
- * （规则同源于 shared/src/identity.ts），括号里给完整技术 ID 保证唯一可辨（选 A 不选
- * 尾 5 位短码：短码仍会碰撞，而 from-name 没有长度硬限，只禁 `"` 与 `\r\n<>`）。
+ * #986 起 from-name **只放友好名**（对齐 web 的 identityDisplay，规则同源于 shared/src/identity.ts）：
+ * 接收端把它显示成 `from uds:<sock> (peer claims name: <fromName>)`，并会把它 @handle 化——
+ * 以前把完整技术 ID 拼进主名，结果是 `@leo-lark-ad72b3f9749e` 这种一段 hash（owner：「很难看」）。
+ * 技术 identity 没有丢：它走 WakeProxyRef.fromId 落到正文末行 `from-id:`（防冒充字段仍可读回）。
+ * 同名消歧见 senderInjectFromName——serve 路径看不到频道成员集合，不做后缀。
  * 读不到本机 identity（未登录/旧配置）→ 回退 `agentparty#<channel>`。
  */
 export function injectFromName(
@@ -126,39 +151,74 @@ export function injectFromName(
   if (identity === null || identity === undefined || typeof identity.name !== "string" || identity.name === "") {
     return `agentparty#${channel}`;
   }
-  return sanitizeFromName(withTechnicalId(friendlyAgentLabel(identity), identity.name), channel);
+  return sanitizeFromName(friendlyAgentLabel(identity), channel);
+}
+
+/** 注入 from-name 用得到的发信人字段（msg 帧 sender / participants / presence 都能凑出）。 */
+export interface InjectSenderLike {
+  name?: string;
+  kind?: string;
+  owner?: string | null;
+  handle?: string | null;
+  display_name?: string | null;
+}
+
+/**
+ * 发信人的友好名（不带技术 ID）：
+ * - 人类：`<display_name || handle || owner || name>`；
+ * - agent：`<所属人> · <角色>`（friendlyAgentLabel，同 web）。
+ * sender 缺失/name 空 ⇒ null。
+ */
+export function senderFriendlyName(sender: InjectSenderLike | null | undefined): string | null {
+  const name = typeof sender?.name === "string" ? sender.name.trim() : "";
+  if (name === "") return null;
+  if (sender?.kind === "human") {
+    return sender.display_name?.trim() || sender.handle?.trim() || sender.owner?.trim() || name;
+  }
+  return friendlyAgentLabel({
+    name,
+    owner: sender?.owner ?? null,
+    owner_handle: null,
+    owner_display_name: null,
+  });
 }
 
 /**
  * announce 注入（#857）用的 from-name：那条路径知道**真实发信人**（频道 msg 帧的 sender），
- * 显示发信人比显示中转身份有用得多。规则同 injectFromName——友好名 + 括号里的技术 ID：
- * - 人类：`<display_name || handle || owner>`（本身就可读，技术 name 同值时不重复加括号）；
- * - agent：`<所属人> · <角色> (<技术 identity>)`。
+ * 显示发信人比显示中转身份有用得多。
+ *
+ * #986：主名只放友好名（`leo`）。技术 identity 走 WakeProxyRef.fromId 进正文 `from-id:`。
+ * 防冒充仍成立、且只在需要时才露出：`peers`（频道里能看到的成员集合——participants /
+ * presence / 已见过的 msg sender）里存在**友好名相同、技术 name 不同**的另一个发信人时，
+ * 才在主名后加组内唯一的短消歧码（`leo·9749e`，规则与 web #858 共用
+ * assignIdentityDisambiguators：哈希段末 5 位起步，仍撞就加长）；否则一个字都不加。
  * sender 缺失/不可读时回退 `agentparty#<channel>`。
  */
 export function senderInjectFromName(
-  sender: { name?: string; kind?: string; owner?: string | null; handle?: string | null; display_name?: string | null } | null | undefined,
+  sender: InjectSenderLike | null | undefined,
   channel: string,
+  peers: readonly InjectSenderLike[] = [],
 ): string {
   const name = typeof sender?.name === "string" ? sender.name.trim() : "";
-  if (name === "") return `agentparty#${channel}`;
-  const friendly = sender?.kind === "human"
-    ? (sender.display_name?.trim() || sender.handle?.trim() || sender.owner?.trim() || name)
-    : friendlyAgentLabel({
-        name,
-        owner: sender?.owner ?? null,
-        owner_handle: null,
-        owner_display_name: null,
-      });
-  return sanitizeFromName(withTechnicalId(friendly, name), channel);
+  const friendly = senderFriendlyName(sender);
+  if (name === "" || friendly === null) return `agentparty#${channel}`;
+  return sanitizeFromName(withDisambiguator(friendly, name, peers), channel);
 }
 
 /**
- * 友好名后缀技术 ID——但友好名里**已经含有**技术 name 时不重复（真机实测踩到：
- * 非哈希前缀的 name 提不出角色，会渲染成 `x · foo-agent (foo-agent)`）。
+ * 同名消歧：peers 里凡是友好名与本发信人相同、技术 name 不同的，一起组成撞名组；
+ * 组内 ≥2 个技术 name 才给本发信人打 `·<短码>` 后缀。单人组恒原样返回。
  */
-function withTechnicalId(friendly: string, name: string): string {
-  return friendly.includes(name) ? friendly : `${friendly} (${name})`;
+function withDisambiguator(friendly: string, name: string, peers: readonly InjectSenderLike[]): string {
+  const group = new Set<string>([name]);
+  for (const peer of peers) {
+    const peerName = typeof peer?.name === "string" ? peer.name.trim() : "";
+    if (peerName === "" || peerName === name) continue;
+    if (senderFriendlyName(peer) === friendly) group.add(peerName);
+  }
+  if (group.size < 2) return friendly;
+  const code = assignIdentityDisambiguators([...group]).get(name) ?? name;
+  return `${friendly}·${code}`;
 }
 
 /**
@@ -218,8 +278,13 @@ export const noWakeProxyForwarder: WakeProxyForwarder = async (): Promise<WakePr
 export interface SocketWakeProxyForwarderOptions {
   /** 自己的回执 socket（`from:uds:<...>`）。serve 无回执 sock → 省略，接收端记 unknown。 */
   fromSock?: string;
-  /** 频道昵称解析（"Message from <fromName>"）；默认用 channel 名。 */
+  /** 频道昵称解析（"Message from <fromName>"）；默认本机 identity 的友好名（injectFromName）。 */
   fromName?: (ref: WakeProxyRef) => string;
+  /**
+   * from-name 背后的技术 identity（#986），进正文末行 `from-id:`；默认本机 identity 的 name。
+   * 返回 null ⇒ 不写该行。
+   */
+  fromId?: (ref: WakeProxyRef) => string | null;
   /** 注入实现注入点（测试用）；默认真实 injectChannelMessage。 */
   inject?: typeof injectChannelMessage;
   env?: NodeJS.ProcessEnv;
@@ -247,17 +312,21 @@ export function socketWakeProxyForwarder(
   options: SocketWakeProxyForwarderOptions = {},
 ): WakeProxyForwarder {
   const inject = options.inject ?? injectChannelMessage;
-  // 默认 from-name＝友好名 + 技术 ID（owner 2026-08-20：技术 ID 是身份本身，不能丢）。
-  const fromName = options.fromName ?? ((ref: WakeProxyRef) => injectFromName(ref.channel));
+  // 默认 from-name＝本机 identity 的友好名；技术 ID（owner 2026-08-20：是身份本身，不能丢）
+  // 不再拼进主名，而是进正文 `from-id:`（#986）。两者默认都读本机 identity，只读一次。
+  const needsIdentity = options.fromName === undefined || options.fromId === undefined;
   return async (target, ref) => {
+    const identity = needsIdentity ? resolveLocalIdentity() : null;
+    const fromName = options.fromName === undefined ? injectFromName(ref.channel, identity) : options.fromName(ref);
+    const fromId = options.fromId === undefined ? (identity?.name ?? null) : options.fromId(ref);
     const result = await inject({
       // 同 #857：按 pid 寻址（registry entry.pid 与 ~/.claude/sessions/<pid>.json 同源），
       // sessionId 防 pid 复用。宣告名只作展示/回退，绝不用来寻址。
       pid: target.pid,
       sessionId: target.session_id,
       name: claudeSessionAnnounceName(target),
-      body: wakeProxyNote(ref),
-      fromName: fromName(ref),
+      body: wakeProxyNote({ ...ref, fromId }),
+      fromName,
       fromSock: options.fromSock,
       env: options.env,
     });

@@ -10,6 +10,7 @@ import {
   socketWakeProxyForwarder,
   WAKE_PROXY_NOTE_MAX_BYTES,
   wakeProxyNote,
+  wakeProxyNoteFromId,
 } from "../src/serve-wake-proxy";
 
 function entry(overrides: Partial<ClaudeSessionRegistryEntry> = {}): ClaudeSessionRegistryEntry {
@@ -42,6 +43,19 @@ describe("wakeProxyNote", () => {
     expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
     expect(note).toContain(`#${"a".repeat(64)}`);
     expect(note).toContain(`seq=${Number.MAX_SAFE_INTEGER}`);
+  });
+
+  test("最长 channel + 最长 identity + siblings 齐上仍 ≤512B，且 from-id 可读回（#986）", () => {
+    const note = wakeProxyNote({
+      channel: "a".repeat(64),
+      server: SERVER_A,
+      seq: Number.MAX_SAFE_INTEGER,
+      siblings: 99,
+      fromId: "b".repeat(64),
+    });
+    expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
+    expect(wakeProxyNoteFromId(note)).toBe("b".repeat(64));
+    expect(note).toContain("siblings=99");
   });
 });
 
@@ -173,7 +187,7 @@ describe("attemptWakeProxy", () => {
 });
 
 describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
-  test("注入成功 → true；用宣告名寻址、from-name 带友好名+技术 ID、正文≤512B 指针", async () => {
+  test("注入成功 → true；用宣告名寻址、from-name 只带友好名、技术 ID 在正文 from-id、正文≤512B 指针", async () => {
     let seen: { name: string; body: string; fromName: string; pid?: number; sessionId?: string | null } | null = null;
     const forward = socketWakeProxyForwarder({
       inject: async ({ name, body, fromName, pid, sessionId }) => {
@@ -191,6 +205,7 @@ describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
         channel_scope: "pwtk",
         verified_at: 0,
       }),
+      fromId: () => "lark-ad72b3f97491-agentparty",
     });
     const ok = await forward(entry({ display_name: "pair-claude" }), { channel: "pwtk", server: SERVER_A, seq: 42 });
     expect(ok).toMatchObject({ ok: true });
@@ -198,7 +213,9 @@ describe("socketWakeProxyForwarder（#844 socket 优先载体）", () => {
     // 寻址走 pid + sessionId（宣告名恒不等于 Claude 原生会话名，#857）。
     expect(seen!.pid).toBe(entry().pid);
     expect(seen!.sessionId).toBe(entry().session_id);
-    expect(seen!.fromName).toBe("leo · agentparty (lark-ad72b3f97491-agentparty)");
+    // #986：主名只放友好名；技术 ID 挪到正文 from-id 行，仍可读回。
+    expect(seen!.fromName).toBe("leo · agentparty");
+    expect(wakeProxyNoteFromId(seen!.body)).toBe("lark-ad72b3f97491-agentparty");
     expect(seen!.body).toContain("seq=42");
     expect(Buffer.byteLength(seen!.body, "utf8")).toBeLessThanOrEqual(WAKE_PROXY_NOTE_MAX_BYTES);
   });

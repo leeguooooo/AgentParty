@@ -53,7 +53,7 @@ import {
   type MentionWakeClaimResult,
   type MentionWakeRef,
 } from "../mention-wake-claim";
-import { senderInjectFromName, wakeProxyNote } from "../serve-wake-proxy";
+import { senderInjectFromName, wakeProxyNote, type InjectSenderLike } from "../serve-wake-proxy";
 import { loadCursor, readConfig, resolveChannel, saveCursor } from "../config";
 import {
   DeliveryRecoveryJournal,
@@ -738,6 +738,28 @@ export async function runDormantClaudeSessionAnnounce(
   // @ 注入一次。两条路径各有自己的进程内 seen，本切片**不做跨进程去重**——最终由
   // Claude 收件箱侧的 msg_id/队列去重与人工感知兜底；重复唤醒的代价远小于叫不醒。
   const injectedSeqs = new Set<number>();
+  // #986：频道里「能看到的成员」名册，供 from-name 同名消歧用——只有存在友好名相同、技术 name
+  // 不同的另一个成员时才给主名加短后缀。来源：participants 帧（入连名册）、presence 帧、
+  // 已见过的 msg sender；跨重连累计，按技术 name 去重，超过上限淘汰最早的。
+  const knownSenders = new Map<string, InjectSenderLike>();
+  const rememberSender = (sender: InjectSenderLike | null | undefined) => {
+    const name = typeof sender?.name === "string" ? sender.name.trim() : "";
+    if (name === "") return;
+    // 新值覆盖旧值（display_name/handle 可能后来才补上），保持插入序以便淘汰最早的。
+    knownSenders.delete(name);
+    knownSenders.set(name, {
+      name,
+      kind: sender?.kind,
+      owner: sender?.owner ?? null,
+      handle: sender?.handle ?? null,
+      display_name: sender?.display_name ?? null,
+    });
+    while (knownSenders.size > DORMANT_ANNOUNCE_SEEN_LIMIT) {
+      const oldest = knownSenders.keys().next();
+      if (oldest.done === true) break;
+      knownSenders.delete(oldest.value);
+    }
+  };
   // 漏叫留痕（#906）：同一句连续重复只打一次（5s 轮询否则刷屏）。
   const rawLog = deps.log ?? ((line: string) => console.error(line));
   let lastLogged: string | null = null;
@@ -849,6 +871,8 @@ export async function runDormantClaudeSessionAnnounce(
       try {
         // 重放帧一律不注入（#869 第 2 层；标记由 #861 在服务端补上，见
         // dormantAnnounceIsReplayFrame）。放在最前面：重放的历史 @ 连去重表都不该占。
+        // #986：发信人先进名册（哪怕是重放帧、哪怕这条不 @ 我）——后面同名的另一个人出现时才分得开。
+        rememberSender(sender);
         if (dormantAnnounceIsReplayFrame(frame)) return;
         if (!dormantAnnounceMentionHit(mentions, selfName)) return;
         // #963：发信人就是我这个身份——那是对话里提到自己（「@leo-server 这次醒了」），不是召唤。
@@ -900,10 +924,11 @@ export async function runDormantClaudeSessionAnnounce(
               pid: entry.pid,
               sessionId: entry.session_id,
               name: hostAnnounceName,
-              body: wakeProxyNote({ channel, server: authServer, seq, siblings }),
-              // from-name＝真实发信人的友好名 + 技术 ID（接收端面板只显示这一处，
-              // 技术 ID 丢了就分不清两个同名 agent）。
-              fromName: senderInjectFromName(sender, channel),
+              // #986：技术 identity 进正文末行 `from-id:`（防冒充字段不丢，可读回）。
+              body: wakeProxyNote({ channel, server: authServer, seq, siblings, fromId: sender?.name ?? null }),
+              // from-name＝真实发信人的**友好名**（`leo`）；只有频道里另有同友好名、不同技术 name 的
+              // 成员时才带短消歧后缀（`leo·9749e`），别再把整段 hash 拼进主名（#986）。
+              fromName: senderInjectFromName(sender, channel, [...knownSenders.values()]),
               // announce 进程没有自己的回执 socket——绝不冒用别人的 sock 当 from。
             });
           } catch {
@@ -960,6 +985,18 @@ export async function runDormantClaudeSessionAnnounce(
     if (signal.aborted) closeConnection();
     try {
       for await (const frame of connection.frames) {
+        // #986：维护频道成员名册（from-name 同名消歧的判定范围）。这些帧不 ack、不注入。
+        if (frame.type === "participants") {
+          for (const participant of frame.participants) rememberSender(participant);
+        } else if (frame.type === "presence") {
+          rememberSender({
+            name: frame.name,
+            kind: frame.kind,
+            owner: frame.account ?? null,
+            handle: frame.handle ?? null,
+            display_name: frame.display_name ?? null,
+          });
+        }
         if (frame.type === "msg" || frame.type === "status") {
           connection.ack(frame.seq);
           // 注意顺序：先 ack 再注入。ack 只是本地防积压（绝不推进持久化游标、绝不
