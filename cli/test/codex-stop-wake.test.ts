@@ -6,7 +6,7 @@
 //   session_id / stop_hook_active / transcript_path / turn_id
 // 注意没有 agent_id / agent_type / prompt——反推版把 SubagentStop 的字段混了进来。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,11 +28,14 @@ import {
 import {
   codexHookSettingsJson,
   codexStopWakeBacklog,
+  defaultCodexStopWakeDeps,
   handleCodexStopRecord,
   mergeHookSettings,
   removeHookSettings,
   type CodexStopWakeDeps,
 } from "../src/commands/hook";
+import { codexAutoWakeLogPath } from "../src/codex-auto-wake";
+import { resetCodexRolloutMetaCache, type CodexSessionKindProbe } from "../src/codex-session-kind";
 import type { NextMention } from "../src/rest";
 
 const NOW = 1_700_000_000_000;
@@ -835,6 +838,182 @@ describe("codex Stop hook 积压可见性（#958）", () => {
       expect(output.reason).toContain("seq 1935");
       expect(output.reason).not.toContain("1/1");
       expect(output.reason).toContain("party history pwtk --since 1934");
+    });
+  });
+});
+
+
+// ── #982 的钉子 ─────────────────────────────────────────────────────────────
+// piggo 机 2026-08-28 06:42Z：同一批被 Claude 委托的一次性 codex，SessionStart 已按 #976 记成
+// `skip(non-interactive) … rollout 头：originator=Claude Code source=vscode`，它们的 Stop hook
+// 却仍每回合走身份解析、打 `harness-mismatch` 长行。修法：Stop 路径在解析身份之前跑同一道探测。
+describe("codex-stop 先走 rollout 头判定（#982）", () => {
+  const DIRECT_ID = "01a046e8-89f6-7ba2-a792-4d0342522e7f";
+  const ROLLOUT_DETAIL = "rollout 头：originator=Claude Code source=vscode";
+  let home: string;
+  let emitted: string[];
+  let logged: string[];
+
+  /** 身份解析的每一个下游入口都装成地雷：non-interactive 短路后一个都不许碰。 */
+  function deps(overrides: Partial<CodexStopWakeDeps> = {}): CodexStopWakeDeps {
+    const mine = (name: string) => () => { throw new Error(`${name} must not run for a non-interactive codex`); };
+    return {
+      channel: () => "pwtk",
+      enabled: () => true,
+      stuck: mine("stuck"),
+      nextMention: async () => { throw new Error("nextMention must not run for a non-interactive codex"); },
+      cursor: mine("cursor"),
+      seenPath: mine("seenPath"),
+      readSeen: () => [],
+      recordSeen: () => {},
+      emit: (line) => emitted.push(line),
+      log: (line) => logged.push(line),
+      now: () => NOW,
+      ...overrides,
+    };
+  }
+
+  /** interactive / unknown 时要走的**原路径**：与 handleCodexStopRecord 主用例同一份假值。 */
+  function interactivePath(kind: CodexSessionKindProbe | (() => never)): CodexStopWakeDeps {
+    const seenStore = new Map<string, { seq: number; ts: number }[]>();
+    return deps({
+      sessionKind: typeof kind === "function" ? kind : () => kind,
+      stuck: () => ({ seq: 42, first_wake_ts: NOW - 1_000 }),
+      cursor: () => 7,
+      seenPath: () => join(home, "seen.json"),
+      readSeen: (path) => seenStore.get(path) ?? [],
+      recordSeen: (path, seq, at) => {
+        seenStore.set(path, [...(seenStore.get(path) ?? []), { seq, ts: at }]);
+      },
+    });
+  }
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "ap-982-"));
+    emitted = [];
+    logged = [];
+    resetCodexRolloutMetaCache();
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+    resetCodexRolloutMetaCache();
+  });
+
+  test("rollout 头 originator=Claude Code ⇒ 不注入、日志恰一行 non-interactive、身份解析一步不走", async () => {
+    await handleCodexStopRecord(stopPayload(), {}, deps({
+      sessionKind: () => ({ kind: "non-interactive", detail: ROLLOUT_DETAIL }),
+    }));
+    expect(emitted).toEqual([]);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toBe(`codex-stop: skip(non-interactive) kind=non-interactive detail=${ROLLOUT_DETAIL}`);
+    expect(logged[0]).not.toContain("harness-mismatch");
+    expect(logged[0]).not.toContain("解析不出");
+  });
+
+  test("便宜闸在探测之前：没绑频道 / 被关掉 / 续跑中，探测一次都不跑", async () => {
+    const probe = () => { throw new Error("sessionKind must not run before the cheap gate"); };
+    await handleCodexStopRecord(stopPayload(), {}, deps({ sessionKind: probe, channel: () => null }));
+    await handleCodexStopRecord(stopPayload(), {}, deps({ sessionKind: probe, enabled: () => false }));
+    await handleCodexStopRecord(stopPayload({ stop_hook_active: true }), {}, deps({ sessionKind: probe }));
+    expect(emitted).toEqual([]);
+    expect(logged).toEqual([]);
+  });
+
+  test("interactive（无 rollout 结论、ps 判交互式）⇒ 原路径不变：照常注入，日志不多一行", async () => {
+    await handleCodexStopRecord(stopPayload(), {}, interactivePath({
+      kind: "interactive",
+      detail: "父进程 codex（tty 上）；rollout 头 originator=codex_cli_rs source=cli 无结论，按进程形态判",
+    }));
+    expect(emitted).toHaveLength(1);
+    expect(JSON.parse(emitted[0]!)).toMatchObject({ decision: "block" });
+    expect(logged.some((line) => line.includes("non-interactive"))).toBe(false);
+  });
+
+  test("unknown（探测没结论）⇒ 原路径不变：Stop 不拉唤醒层，unknown 在这里不做保守侧", async () => {
+    await handleCodexStopRecord(stopPayload(), {}, interactivePath({ kind: "unknown", detail: "父进程 pid 不合法" }));
+    expect(emitted).toHaveLength(1);
+    expect(JSON.parse(emitted[0]!)).toMatchObject({ decision: "block" });
+    expect(logged.some((line) => line.includes("non-interactive"))).toBe(false);
+  });
+
+  test("探测抛异常 ⇒ 当没结论，原路径不变（绝不因为探测坏了漏叫）", async () => {
+    await handleCodexStopRecord(stopPayload(), {}, interactivePath(() => { throw new Error("ps exploded"); }));
+    expect(emitted).toHaveLength(1);
+    expect(JSON.parse(emitted[0]!)).toMatchObject({ decision: "block" });
+  });
+
+  test("没注入 sessionKind（老调用方）⇒ 原路径不变", async () => {
+    const d = interactivePath({ kind: "interactive", detail: "" });
+    delete d.sessionKind;
+    await handleCodexStopRecord(stopPayload(), {}, d);
+    expect(emitted).toHaveLength(1);
+  });
+
+  describe("真实接线：defaultCodexStopWakeDeps 从 $CODEX_HOME 的 rollout 头判出 non-interactive", () => {
+    let codexHome: string;
+    let env: NodeJS.ProcessEnv;
+
+    /** piggo 机 codex 0.149.1 实抓的直接会话头（base_instructions 换成占位）。 */
+    function writeRolloutHead(uuid: string): void {
+      const day = join(codexHome, "sessions", "2026", "08", "28");
+      mkdirSync(day, { recursive: true });
+      writeFileSync(join(day, `rollout-2026-08-28T14-47-19-${uuid}.jsonl`), `${JSON.stringify({
+        timestamp: "2026-08-28T05:47:19.944Z",
+        type: "session_meta",
+        payload: {
+          session_id: uuid, id: uuid, timestamp: "2026-08-28T05:47:19.944Z", cwd: "/Users/leo/tk.com/piggo",
+          originator: "Claude Code", cli_version: "0.149.1", source: "vscode", model_provider: "openai",
+          base_instructions: "<long text that must never reach the log>",
+        },
+      })}\n`);
+    }
+
+    beforeEach(() => {
+      codexHome = mkdtempSync(join(tmpdir(), "codex-home-982-"));
+      // 不继承 process.env：AP_ACTIVITY_FILE / AGENTPARTY_CONFIG 之类会改走向。
+      env = {
+        PATH: process.env.PATH,
+        AGENTPARTY_HOME: home,
+        AGENTPARTY_CHANNEL: "pwtk",
+        AGENTPARTY_CODEX_AUTO_WAKE: "serve",
+        CODEX_HOME: codexHome,
+      };
+    });
+    afterEach(() => {
+      rmSync(codexHome, { recursive: true, force: true });
+    });
+
+    function logLines(): string[] {
+      const path = codexAutoWakeLogPath(home);
+      return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter((line) => line.length > 0) : [];
+    }
+
+    test("sessionKind 接的是 #976 的探测：按 Stop 载荷的 session_id 命中 rollout 头", () => {
+      writeRolloutHead(DIRECT_ID);
+      const wake = defaultCodexStopWakeDeps(env, DIRECT_ID, 4242);
+      const probe = wake.sessionKind!();
+      expect(probe.kind).toBe("non-interactive");
+      expect(probe.detail).toContain("rollout");
+      expect(probe.detail).toContain("originator=Claude Code");
+      expect(probe.detail).not.toContain("long text");
+    });
+
+    test("端到端：一次性 codex 的 Stop ⇒ stdout 空、日志恰一行 skip(non-interactive)，无 harness-mismatch / 解析不出", async () => {
+      writeRolloutHead(DIRECT_ID);
+      const wake = defaultCodexStopWakeDeps(env, DIRECT_ID, 4242);
+      const printed: string[] = [];
+      await handleCodexStopRecord(
+        stopPayload({ session_id: DIRECT_ID, cwd: home }),
+        env,
+        { ...wake, emit: (line) => printed.push(line) },
+      );
+      expect(printed).toEqual([]);
+      const lines = logLines();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("codex-stop: skip(non-interactive) kind=non-interactive detail=rollout 头：originator=Claude Code source=vscode");
+      expect(lines[0]).not.toContain("harness-mismatch");
+      expect(lines[0]).not.toContain("解析不出");
+      expect(lines[0]).not.toContain("long text");
     });
   });
 });
