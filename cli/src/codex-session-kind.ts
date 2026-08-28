@@ -95,9 +95,11 @@ function executableIndex(tokens: readonly string[]): number {
   while (i < tokens.length) {
     const base = basename(tokens[i]!);
     if (INTERPRETERS.has(base)) {
+      const isEnv = base === "env";
       i += 1;
-      // 解释器自己的选项（`node --no-warnings x.js`、`env -S …`）。
-      while (i < tokens.length && tokens[i]!.startsWith("-")) i += 1;
+      // 解释器自己的选项（`node --no-warnings x.js`、`env -S …`）；`env` 后面还可能跟
+      // `KEY=VALUE` 赋值（`env RUST_LOG=info codex exec …`），它们不是要跑的程序。
+      while (i < tokens.length && (tokens[i]!.startsWith("-") || (isEnv && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)))) i += 1;
       continue;
     }
     if (SHELLS.has(base)) {

@@ -8,16 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  classifyCodexRolloutMeta,
-  classifyCodexSession,
-  codexSubcommand,
-  harnessAncestor,
-  parseCodexRolloutMeta,
-  probeCodexSessionKind,
-  readCodexRolloutMeta,
-  resetCodexRolloutMetaCache,
-} from "../src/codex-session-kind";
+import { classifyCodexRolloutMeta, classifyCodexSession, codexSubcommand, harnessAncestor, parseCodexRolloutMeta, probeCodexSessionKind, readCodexRolloutMeta, resetCodexRolloutMetaCache } from "../src/codex-session-kind";
 import type { ProcessRow } from "../src/join-binding";
 
 function table(rows: Array<[pid: number, ppid: number, args: string]>): Map<number, ProcessRow> {
@@ -398,5 +389,23 @@ describe("#976：按 session_id 定位 rollout 并作为首要信号", () => {
 
   test("旧签名 probeCodexSessionKind(pid, spawn) 仍可用", () => {
     expect(probeCodexSessionKind(1230, psStub(desktopChain)).kind).toBe("interactive");
+  });
+});
+
+// coderabbit on #977：`env` 后面的 `KEY=VALUE` 赋值不是程序名，跳过它们再找真正在跑的可执行文件；
+// 否则 `env RUST_LOG=info codex exec x` 会把 `RUST_LOG=info` 当程序、把 `codex` 当子命令，
+// 一次性 codex 落回 interactive，#959 的拉起→发帧→回收又回来。
+describe("包裹层解析：env 的 KEY=VALUE 赋值（#976）", () => {
+  test("env 赋值之后的 codex 仍被识别，子命令取到 exec", () => {
+    const line = "env RUST_LOG=info CODEX_HOME=/tmp/x codex exec --json do-it";
+    expect({ harness: harnessAncestor(line), sub: codexSubcommand(line) }).toEqual({ harness: "codex", sub: "exec" });
+  });
+  test("env -S 与赋值混用同样跳过", () => {
+    const line = "/usr/bin/env -S FOO=1 node /opt/homebrew/bin/codex app-server";
+    expect({ harness: harnessAncestor(line), sub: codexSubcommand(line) }).toEqual({ harness: "codex", sub: "app-server" });
+  });
+  test("非 env 解释器后的 KEY=VALUE 不被当作赋值吞掉", () => {
+    // node 没有 env 的赋值语义：`node A=B` 的 A=B 就是脚本参数位，不能跳过。
+    expect(harnessAncestor("node A=B codex exec")).toBe(null);
   });
 });

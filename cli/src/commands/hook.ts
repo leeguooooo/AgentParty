@@ -13,6 +13,7 @@
 //   2. 任何失败都静默 exit 0——exit 2 会 block 模型的工具调用，坏 JSON/写盘失败都不配阻断模型；
 //   3. 本体不等网络——上行要么归 serve 心跳，要么交给 detached 子进程。
 import { existsSync, readFileSync } from "node:fs";
+import { stripTerminalControls } from "../format";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1127,7 +1128,9 @@ export function maybeStartCodexAutoWake(
  */
 export function codexSessionKindLogTag(probe: CodexSessionKindProbe | null): string {
   if (probe === null) return "kind=not-probed";
-  return `kind=${probe.kind} detail=${probe.detail.replace(/\s+/g, " ")}`;
+  // detail 里有 rollout 头的 originator/source（外部文件内容），写日志前剥掉终端控制字符，
+  // 免得 cat/tail 日志时被改写终端输出（CWE-117）。
+  return `kind=${probe.kind} detail=${stripTerminalControls(probe.detail).replace(/\s+/g, " ")}`;
 }
 
 /**
