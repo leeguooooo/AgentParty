@@ -513,6 +513,19 @@ export async function listChannelAgents(token: string, slug: string): Promise<Ch
   return data.agents;
 }
 
+// #1005 接入引导弹窗的轮询后备：频道页本来就有 WS presence 流（优先直接传进弹窗），
+// 只有拿不到 WS 数据时才 2–3s 拉一次这条——与 CLI `party who` 同一数据源（/presence）。
+export async function fetchChannelPresence(token: string, slug: string): Promise<PresenceEntry[]> {
+  const res = await fetchApi(`/api/channels/${encodeURIComponent(slug)}/presence`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new AuthError("invalid or revoked token");
+  if (res.status === 403) throw await forbiddenFrom(res, "forbidden");
+  if (!res.ok) throw new Error(`GET /api/channels/${slug}/presence failed (${res.status})`);
+  const data = (await res.json()) as { presence?: PresenceEntry[] };
+  return Array.isArray(data.presence) ? data.presence : [];
+}
+
 export async function setChannelAgentNickname(
   token: string,
   slug: string,
